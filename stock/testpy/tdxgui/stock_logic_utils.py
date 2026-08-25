@@ -589,25 +589,99 @@ def safe_prev_signal_array(df: Optional[pd.DataFrame]) -> np.ndarray:
             continue
         safe_vals.append(0)
     return np.array(safe_vals)
-def toast_message(master, text, duration=1500):
-    """短暂提示信息（浮层，不阻塞）"""
-    toast = tk.Toplevel(master)
-    toast.overrideredirect(True)
-    toast.attributes("-topmost", True)
-    label = tk.Label(toast, text=text, bg="black", fg="white", padx=10, pady=1)
-    label.pack()
-    try:
-        master.update_idletasks()
-        master_x = master.winfo_rootx()
-        master_y = master.winfo_rooty()
-        master_w = master.winfo_width()
-    except Exception:
-        master_x, master_y, master_w = 100, 100, 400
-    toast.update_idletasks()
-    toast_w = toast.winfo_width()
-    toast_h = toast.winfo_height()
-    toast.geometry(f"{toast_w}x{toast_h}+{master_x + (master_w-toast_w)//2}+{master_y + 50}")
-    toast.after(duration, toast.destroy)
+def toast_message(master=None, text="", duration=1800, bg="#222222", fg="#ffffff"):
+    """
+    短暂提示信息（浮层，不阻塞，线程安全，支持高 DPI 字体与自适应居中定位）
+    """
+    def _do_show():
+        nonlocal master
+        # 1. 尝试解析有效的 master
+        root_win = None
+        if master is not None and isinstance(master, (tk.Tk, tk.Toplevel, tk.Widget)):
+            try:
+                root_win = master.winfo_toplevel() if isinstance(master, tk.Widget) else master
+            except Exception:
+                root_win = None
+
+        # 2. 创建 Toplevel 浮层
+        try:
+            toast = tk.Toplevel(root_win) if root_win else tk.Toplevel()
+        except Exception:
+            return
+
+        toast.overrideredirect(True)
+        toast.attributes("-topmost", True)
+        toast.config(bg=bg)
+
+        # 3. 文本标签（采用清晰的微软雅黑中文字体与舒适边距）
+        label = tk.Label(
+            toast, text=text, bg=bg, fg=fg, 
+            font=("Microsoft YaHei", 10, "bold"), 
+            padx=16, pady=7, relief="ridge", bd=1
+        )
+        label.pack()
+
+        # 4. 健壮的坐标定位计算
+        toast.update_idletasks()
+        toast_w = toast.winfo_reqwidth()
+        toast_h = toast.winfo_reqheight()
+
+        pos_x, pos_y = 0, 0
+        positioned = False
+
+        if root_win is not None:
+            try:
+                root_win.update_idletasks()
+                rw = root_win.winfo_width()
+                rh = root_win.winfo_height()
+                rx = root_win.winfo_rootx()
+                ry = root_win.winfo_rooty()
+
+                # 只有当 root_win 尺寸合理且不是初始化阶段的 (0,0) 占位时才使用相对坐标
+                if rw > 50 and rh > 50 and (rx != 0 or ry != 0 or root_win.winfo_ismapped()):
+                    pos_x = rx + (rw - toast_w) // 2
+                    pos_y = ry + 40
+                    positioned = True
+            except Exception:
+                positioned = False
+
+        # Fallback: 如果无法从 master 获取精确位置，使用主屏幕居中
+        if not positioned:
+            try:
+                sw = toast.winfo_screenwidth()
+                sh = toast.winfo_screenheight()
+                pos_x = (sw - toast_w) // 2
+                pos_y = max(50, sh // 4)
+            except Exception:
+                pos_x, pos_y = 400, 200
+
+        toast.geometry(f"{toast_w}x{toast_h}+{max(0, pos_x)}+{max(0, pos_y)}")
+
+        # 5. 自动淡出并安全销毁
+        def _safe_destroy():
+            try:
+                if toast.winfo_exists():
+                    toast.destroy()
+            except Exception:
+                pass
+
+        toast.after(duration, _safe_destroy)
+
+    # 线程安全：非主线程通过主窗口 after 调度
+    if threading.current_thread() == threading.main_thread():
+        _do_show()
+    else:
+        if master is not None:
+            try:
+                master.after(0, _do_show)
+                return
+            except Exception:
+                pass
+        # 尝试全局 Tk 调度
+        try:
+            tk._default_root.after(0, _do_show)
+        except Exception:
+            pass
 
 class RealtimeSignalManager:
     state_df: pd.DataFrame

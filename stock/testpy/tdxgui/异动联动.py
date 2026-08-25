@@ -503,6 +503,8 @@ code_file_name= os.path.join(BASE_DIR, "code_ths_other.json")
 MONITOR_LIST_FILE =  os.path.join(BASE_DIR, "monitor_list.json")
 CONFIG_FILE =  os.path.join(BASE_DIR, "window_config.json")
 ALERTS_FILE =  os.path.join(BASE_DIR, "alerts.json")
+CUSTOM_FOCUS_FILE = os.path.join(BASE_DIR, "custom_focus_stocks.json")
+custom_focus_stocks = set()  # 专属关注的股票代码集合 (6位字符串)
 ARCHIVE_DIR = os.path.join(BASE_DIR, "archives")
 DARACSV_DIR = os.path.join(BASE_DIR, "datacsv")
 SEARCH_HISTORY_FILE: str = os.path.join(BASE_DIR, "query_history.json")
@@ -2110,19 +2112,31 @@ def populate_treeview(data=None):
         status_var.set("无数据")
         tree.insert("", "end", values=("无数据", "", "", "", ""))
 
-def check_string_type(s: str) -> str:
-    if not s:  # 空字符串
+def check_string_type(s: str) -> bool:
+    """检查输入是否为文本/关键词查询（非空且非纯数字）"""
+    if not s or not str(s).strip():
         return False
-    if re.fullmatch(r"[A-Za-z]+", s):
-        return True
-    elif all('\u4e00' <= ch <= '\u9fff' for ch in s):
-        # return "only chinese"
-        return True
-    elif any('\u4e00' <= ch <= '\u9fff' for ch in s) and re.search(r"[A-Za-z]", s):
-        # return "mixed"
-        return True
-    else:
-        return False
+    return not str(s).strip().isdigit()
+
+def parse_search_keywords(query: str):
+    """
+    解析多关键词查询表达式，支持 '商业航天|军工信息化', '商业航天 or 军工信息化', '商业航天|', 逗号分隔等
+    返回: (keywords_list, regex_pattern)
+    """
+    if not query or not str(query).strip():
+        return [], ""
+    raw = str(query).strip()
+    # 统一替换 ' or ', ' OR ', ',', '，' 为 '|'
+    q = re.sub(r'\s+(?:or|OR)\s+', '|', raw)
+    q = re.sub(r'[,，/]+', '|', q)
+    # 按 | 分割，并过滤掉空段
+    keywords = [k.strip() for k in q.split('|') if k.strip()]
+    if not keywords:
+        return [], ""
+    # 转义正则特殊字符，构造安全 pattern
+    escaped = [re.escape(k) for k in keywords]
+    pattern = "|".join(escaped)
+    return keywords, pattern
 
 def contains_chinese(s: str) -> bool:
     return any('\u4e00' <= ch <= '\u9fff' for ch in s)
@@ -2230,36 +2244,28 @@ search_after_id = None
 def search_by_code(event=None,onclick=False):
     """按代码搜索"""
     global last_searched_code,today_tdx_df,search_after_id
-    code = code_entry.get().strip()
-    selected_type = type_var.get()
+    code = code_entry.get().strip() if 'code_entry' in globals() and code_entry else ""
+    selected_type = type_var.get() if 'type_var' in globals() and type_var else ""
     if search_after_id == code:
         return
     else:
         search_after_id = code
 
+    data = pd.DataFrame()  # 🚀 [初始化] 确保任何异常或未命中分支不会触发 UnboundLocalError
+
     if code.isdigit():  # 输入是数字
         if len(code) == 6:
             data = _get_stock_changes(stock_code=code)
         else:
-            # 其他长度也可以模糊匹配
+            # 其他长度模糊匹配前缀
             df = _get_stock_changes()
-            data = df[df["代码"].str.match(rf"^({code})")]
+            if df is not None and not df.empty and '代码' in df.columns:
+                data = df[df["代码"].astype(str).str.match(rf"^({code})")]
 
-    # elif last_searched_code:  # If no code is entered, use the last searched code
-    #     search_by_type() 
     else:
-        # 非数字，模糊匹配名称
+        # 非纯数字：支持单/多关键词、OR、板块概念与名称联合模糊匹配
         if check_string_type(code):
-            # df = _get_stock_changes()
-            # if today_tdx_df is not None and not today_tdx_df.empty and 'category' in today_tdx_df.columns:
-            #     code_list = today_tdx_df.query(f'category.str.contains("{code}")').index.tolist()
-            #     # data = df.loc[df[code_col].isin(code_list)]
-            #     if len(code_list) > 0:
-            #         data = loc_df_by_code_list(df,code_list)
-            #     else:
-            #         data = df[df["名称"].str.contains(code, case=False, na=False)]
-            # else:
-            #     data = df[df["名称"].str.contains(code, case=False, na=False)]
+            keywords, regex_pat = parse_search_keywords(code)
 
             # 保存历史记录并更新下拉列表
             if code and code.strip():
@@ -2269,25 +2275,43 @@ def search_by_code(event=None,onclick=False):
                 code_entry['values'] = all_keywords
 
             df = _get_stock_changes()
-            data = pd.DataFrame()  # 默认空
-            _today_tdx_df_tm = _get_tdx_data_df()
-            if (
-                _today_tdx_df_tm is not None
-                and not _today_tdx_df_tm.empty
-                and 'category' in _today_tdx_df_tm.columns
-            ):
-                # ① 从 category 中筛代码（向量化，安全）
-                # code_list = today_tdx_df.query(f'category.str.contains("{code}")').index.tolist()
-                mask = _today_tdx_df_tm['category'].str.contains(code, na=False)
-                code_list = _today_tdx_df_tm.loc[mask].index.tolist()
-                if code_list:
-                    # ② 用代码精确过滤（最快、最准）
-                    data = df.loc[df['代码'].isin(code_list)]
-                    save_keyword_to_config(code)
+            if df is not None and not df.empty:
+                _today_tdx_df_tm = _get_tdx_data_df()
+                matched_codes = set()
 
-            # ③ 兜底：category 不可用 / 未命中 → 用名称模糊匹配
-            if data.empty:
-                data = df.loc[df['名称'].str.contains(code, case=False, na=False)]
+                if regex_pat:
+                    # ① 从 category (通达信概念/板块) 中匹配代码
+                    if (
+                        _today_tdx_df_tm is not None
+                        and not _today_tdx_df_tm.empty
+                        and 'category' in _today_tdx_df_tm.columns
+                    ):
+                        try:
+                            cat_mask = _today_tdx_df_tm['category'].astype(str).str.contains(regex_pat, case=False, na=False, regex=True)
+                            matched_codes.update(_today_tdx_df_tm.loc[cat_mask].index.astype(str).str.zfill(6).tolist())
+                        except Exception as e:
+                            logger.error(f"category 正则匹配异常: {e}")
+
+                    # ② 从当前异动数据中的 '板块' 字段匹配
+                    if '板块' in df.columns:
+                        try:
+                            bk_mask = df['板块'].astype(str).str.contains(regex_pat, case=False, na=False, regex=True)
+                            matched_codes.update(df.loc[bk_mask, '代码'].astype(str).str.zfill(6).tolist())
+                        except Exception:
+                            pass
+
+                    # ③ 从当前异动数据中的 '名称' 字段匹配
+                    if '名称' in df.columns:
+                        try:
+                            name_mask = df['名称'].astype(str).str.contains(regex_pat, case=False, na=False, regex=True)
+                            matched_codes.update(df.loc[name_mask, '代码'].astype(str).str.zfill(6).tolist())
+                        except Exception:
+                            pass
+
+                if matched_codes:
+                    data = df[df['代码'].astype(str).str.zfill(6).isin(matched_codes)]
+                else:
+                    data = pd.DataFrame()
 
 
     logger.info(f"将记录的代码: {code} onclick:{onclick}")
@@ -6450,7 +6474,13 @@ def show_context_menu(event):
         stock_code, stock_name = values[1], values[2]  # 代码、名称
         stock_info = values[1:]
 
+        code_6 = str(stock_code).strip().zfill(6)
+        is_focused = code_6 in custom_focus_stocks
+        focus_label = "❌ 取消专属关注" if is_focused else "⭐ 添加专属关注"
+
         context_menu = tk.Menu(root, tearoff=0)
+        context_menu.add_command(label=focus_label, command=lambda c=code_6, n=stock_name: toggle_custom_focus_stock(c, n))
+        context_menu.add_separator()
         context_menu.add_command(label="添加到代码查询", command=lambda: add_to_code_query(stock_code))
         context_menu.add_command(label="添加到监控", command=add_selected_stock)
         context_menu.add_command(label="打开报警中心", command=open_alert_center)
@@ -6462,6 +6492,7 @@ def show_context_menu(event):
             command=lambda: open_alert_editor(stock_code,new=False, stock_info=stock_info,parent_win=parent_win,
                 x_root=event.x_root,
                 y_root=event.y_root))
+        context_menu.add_command(label="⚡ 批量生成异动报警规则", command=batch_sync_alert_rules_from_market)
         context_menu.add_command(label="添加异常Code", command=add_code_to_file_tree)
 
 
@@ -8185,6 +8216,7 @@ def load_alerts():
             data[code] = item
 
     alerts_rules = data
+    load_custom_focus_stocks()
 
 
 
@@ -8195,6 +8227,106 @@ def save_alerts():
             json.dump(alerts_rules, f, indent=2, ensure_ascii=False)
     except Exception as e:
         logger.info(f"❌ 保存报警规则失败: {e}")
+
+
+# ----------------------------------------------------
+# 🌟 专属关注管理与持久化 (Custom Focus Stocks)
+# ----------------------------------------------------
+def load_custom_focus_stocks():
+    """加载专属关注股票列表并与报警规则同步"""
+    global custom_focus_stocks
+    custom_focus_stocks = set()
+    if os.path.exists(CUSTOM_FOCUS_FILE):
+        try:
+            with open(CUSTOM_FOCUS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, list):
+                    custom_focus_stocks = set(str(c).strip().zfill(6) for c in data)
+        except Exception as e:
+            logger.error(f"加载专属关注列表失败: {e}")
+
+    # 同时扫描 alerts_rules 中的 meta.is_custom 标记
+    if 'alerts_rules' in globals() and isinstance(alerts_rules, dict):
+        for c, item in alerts_rules.items():
+            if isinstance(item, dict) and item.get("meta", {}).get("is_custom"):
+                custom_focus_stocks.add(str(c).strip().zfill(6))
+
+
+def save_custom_focus_stocks():
+    """持久化保存专属关注股票列表"""
+    global custom_focus_stocks
+    try:
+        with open(CUSTOM_FOCUS_FILE, "w", encoding="utf-8") as f:
+            json.dump(sorted(list(custom_focus_stocks)), f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        logger.error(f"保存专属关注列表失败: {e}")
+
+
+def toggle_custom_focus_stock(stock_code, stock_name=""):
+    """切换股票的专属关注状态并自动持久化"""
+    global custom_focus_stocks, alerts_rules, default_deltas, alerts_history
+    code = str(stock_code).strip().zfill(6)
+    if not code or code == "000000":
+        return
+
+    if code in custom_focus_stocks:
+        custom_focus_stocks.remove(code)
+        if code in alerts_rules and isinstance(alerts_rules[code], dict):
+            alerts_rules[code].setdefault("meta", {})["is_custom"] = False
+            save_alerts()
+        save_custom_focus_stocks()
+        toast_message(root, f"已取消专属关注: {code} {stock_name}")
+    else:
+        custom_focus_stocks.add(code)
+        if code in alerts_rules and isinstance(alerts_rules[code], dict):
+            alerts_rules[code].setdefault("meta", {})["is_custom"] = True
+            save_alerts()
+        else:
+            # 尚无规则时，为其创建一条默认监控规则并标记专属
+            try:
+                ensure_alert_rules(code, 0.0, 0.0, 0, alerts_rules, alerts_history, default_deltas, new=False)
+                if code in alerts_rules and isinstance(alerts_rules[code], dict):
+                    alerts_rules[code].setdefault("meta", {})["is_custom"] = True
+                    save_alerts()
+            except Exception as e:
+                logger.error(f"为专属关注股票创建规则失败: {e}")
+        save_custom_focus_stocks()
+        toast_message(root, f"⭐ 已添加专属关注: {code} {stock_name}")
+
+    # 立即刷新报警中心（若打开着）
+    if 'alert_window' in globals() and alert_window and alert_window.winfo_exists():
+        refresh_alert_center()
+
+
+def batch_sync_alert_rules_from_market():
+    """从当前异动/行情列表中一键批量生成并同步所有股票的报警规则"""
+    global alerts_rules, default_deltas, alerts_history, realdatadf
+    df = _get_stock_changes()
+    if df is None or df.empty:
+        df = realdatadf
+    if df is None or df.empty:
+        toast_message(root, "当前暂无异动数据可同步")
+        return
+
+    added_count = 0
+    for _, row in df.iterrows():
+        code = str(row.get('代码', '')).strip().zfill(6)
+        if not code or code == '000000':
+            continue
+        if code not in alerts_rules:
+            try:
+                price = float(row.get('价格', 0.0))
+                pct = float(row.get('涨幅', 0.0))
+                vol = float(row.get('量', 0.0))
+                ensure_alert_rules(code, price, pct, vol, alerts_rules, alerts_history, default_deltas, new=False)
+                added_count += 1
+            except Exception:
+                pass
+
+    save_alerts()
+    toast_message(root, f"✅ 已批量生成/同步 {len(alerts_rules)} 只股票报警规则 (新增 {added_count} 只)")
+    if 'alert_window' in globals() and alert_window and alert_window.winfo_exists():
+        refresh_alert_center()
 # ------------------------
 # 报警添加/刷新
 # ------------------------
@@ -9159,6 +9291,53 @@ def open_alert_center(is_auto=True):
     tk.Checkbutton(top_frame, text="联动代码", variable=link_code_var, 
                    command=on_link_code_changed, font=('Microsoft YaHei', 9)).pack(side="right", padx=5)
 
+    # --- 🚀 [一目了然] 分类统计按键集成栏 (0 遮挡、纯按键分类展示) ---
+    btn_bar = tk.Frame(aw_win, bg="#f0f0f0", padx=4, pady=2)
+    btn_bar.pack(fill="x", padx=4, pady=(0, 2))
+
+    alert_filter_var = tk.StringVar(value="all")
+    aw_win.alert_filter_var = alert_filter_var
+
+    def set_alert_filter(mode):
+        alert_filter_var.set(mode)
+        refresh_alert_center()
+
+    btn_active = tk.Button(
+        btn_bar, text="🔴 报警中 (0)", font=('Microsoft YaHei', 9, 'bold'),
+        bg="#ffebee", fg="#b71c1c", activebackground="#ffcdd2", activeforeground="#b71c1c",
+        relief="raised", bd=1, padx=8, pady=1, cursor="hand2",
+        command=lambda: set_alert_filter("active")
+    )
+    btn_active.pack(side="left", padx=2)
+    aw_win.btn_filter_active = btn_active
+
+    btn_recent = tk.Button(
+        btn_bar, text="🟠 近5分钟 (0)", font=('Microsoft YaHei', 9),
+        bg="#fff8e1", fg="#e65100", activebackground="#ffe0b2", activeforeground="#e65100",
+        relief="raised", bd=1, padx=8, pady=1, cursor="hand2",
+        command=lambda: set_alert_filter("recent")
+    )
+    btn_recent.pack(side="left", padx=2)
+    aw_win.btn_filter_recent = btn_recent
+
+    btn_custom = tk.Button(
+        btn_bar, text="⭐ 专属监控 (0)", font=('Microsoft YaHei', 9),
+        bg="#e1f5fe", fg="#0277bd", activebackground="#b3e5fc", activeforeground="#0277bd",
+        relief="raised", bd=1, padx=8, pady=1, cursor="hand2",
+        command=lambda: set_alert_filter("custom")
+    )
+    btn_custom.pack(side="left", padx=2)
+    aw_win.btn_filter_custom = btn_custom
+
+    btn_all = tk.Button(
+        btn_bar, text="📋 全部 (0)", font=('Microsoft YaHei', 9),
+        bg="#ffffff", fg="#333333", activebackground="#e0e0e0", activeforeground="#000000",
+        relief="raised", bd=1, padx=8, pady=1, cursor="hand2",
+        command=lambda: set_alert_filter("all")
+    )
+    btn_all.pack(side="left", padx=2)
+    aw_win.btn_filter_all = btn_all
+
     # 报警列表
     frame = ttk.Frame(aw_win)
     frame.pack(expand=True, fill="both")
@@ -9294,13 +9473,20 @@ def open_alert_center(is_auto=True):
             highlight_window(win)
 
 
-    # 右键菜单 → 编辑 / 新增 / 删除规则
+    # 右键菜单 → 专属关注 / 编辑 / 新增 / 删除规则
     def show_menu(event):
         sel = alert_tree.selection()
         if not sel: return
         vals = alert_tree.item(sel[0], "values")
-        code = vals[1]
+        code = str(vals[1]).strip().zfill(6)
+        name_val = str(vals[2]).replace("⭐ ", "").strip() if len(vals) > 2 else ""
+
+        is_focused = code in custom_focus_stocks
+        focus_label = "❌ 取消专属关注" if is_focused else "⭐ 添加专属关注"
+
         menu = tk.Menu(aw_win, tearoff=0)
+        menu.add_command(label=focus_label, command=lambda c=code, n=name_val: toggle_custom_focus_stock(c, n))
+        menu.add_separator()
         menu.add_command(label="编辑规则", command=lambda: open_alert_editor(code, parent_win=aw_win, x_root=event.x_root, y_root=event.y_root))
         menu.add_command(label="新增规则", command=lambda: open_alert_editor(code, new=True, parent_win=aw_win, x_root=event.x_root, y_root=event.y_root))
         menu.add_command(label="删除规则", command=lambda: delete_alert_rule(alert_tree, code))
@@ -9959,24 +10145,56 @@ def check_alert(stock_code, price, change, volume, name=None):
         if not rule.get('enabled', True):
             continue
 
-        field = rule['field']
-        val = val_map.get(field)
-        if val is None:
+        field = rule.get('field', '')
+        raw_val = val_map.get(field)
+        if raw_val is None:
             continue  # 数据缺失就跳过
+
+        # 🚀 [类型安全] 将 raw_val 安全转换为标量 float (防御 ndarray / Series / str)
+        try:
+            if hasattr(raw_val, 'values'):
+                raw_val = raw_val.values
+            if isinstance(raw_val, np.ndarray):
+                if raw_val.size == 0:
+                    continue
+                raw_val = raw_val.item(0)
+            val = float(raw_val)
+            if np.isnan(val):
+                continue
+        except (ValueError, TypeError):
+            continue
+
+        # 🚀 [类型安全] 将 rule['value'] 转换为 float
+        try:
+            target_val = float(rule.get('value', float('nan')))
+            if np.isnan(target_val):
+                continue
+        except (ValueError, TypeError):
+            continue
+
+        # 🚀 [类型安全] 将 delta 转换为 float
+        try:
+            delta_threshold = float(rule.get('delta', 0.0))
+        except (ValueError, TypeError):
+            delta_threshold = 0.0
 
         # 计算变化量 delta
         last_val_key = (stock_code, field)
-        last_val = last_alert_times.get(last_val_key, {}).get('last_val', None)
-        delta_threshold = rule.get('delta', 0)
+        last_val_entry = last_alert_times.get(last_val_key, {}).get('last_val', None)
 
         # 如果有上一次的值，检查变化量
-        if last_val is not None:
-            if abs(val - last_val) < delta_threshold:
-                continue  # 未达到变化量阈值，不触发
+        if last_val_entry is not None:
+            try:
+                last_val_f = float(last_val_entry)
+                if abs(val - last_val_f) < delta_threshold:
+                    continue  # 未达到变化量阈值，不触发
+            except (ValueError, TypeError):
+                pass
 
         # 计算触发状态
-        triggered = (rule['op'] == '>=' and val >= rule['value']) or (rule['op'] == '<=' and val <= rule['value'])
-        status_text = f"{field} {rule['op']} {rule['value']}"
+        op = rule.get('op', '>=')
+        triggered = (op == '>=' and val >= target_val) or (op == '<=' and val <= target_val)
+        status_text = f"{field} {op} {target_val}"
 
         key = (stock_code, field, rule['op'], rule['value'])
         now = datetime.now()
@@ -10011,13 +10229,14 @@ def check_alert(stock_code, price, change, volume, name=None):
             last_alert_times[key] = {'time': now, 'last_val': val}
             last_alert_times[last_val_key] = {'time': now, 'last_val': val}
 
+            calc_delta = abs(val - last_val_f) if last_val_entry is not None else 0.0
             alert_entry = {
                 'time': now.strftime('%H:%M:%S'),
                 'stock_code': stock_code,
                 'name': name,
                 'field': field,
                 'value': val,
-                'delta': abs(val - last_val) if last_val is not None else 0,
+                'delta': calc_delta,
                 'status': status_text,
                 'rule': rule
             }
@@ -10055,16 +10274,17 @@ def refresh_alert_center():
         if vals and len(vals) > 1:
             prev_focused_code = vals[1]
 
-    # 清空并设置 tag
+    # 清空并设置现代分级 tag 配色（彻底告别全屏大黄底）
     alert_tree.delete(*alert_tree.get_children())
-    alert_tree.tag_configure("strong_up", background="#FFE4E1", foreground="red")      # 强势拉升，淡粉色背景，红字
-    alert_tree.tag_configure("strong_down", background="#E0EEE0", foreground="green")  # 破位下杀，淡绿色背景，绿字
-    alert_tree.tag_configure("triggered", background="yellow", foreground="red")
-    alert_tree.tag_configure("not_triggered", background="white", foreground="black")
+    alert_tree.tag_configure("active_alert", background="#FFEBEE", foreground="#C62828")   # 🔴 正在实时报警，浅粉红底深红字
+    alert_tree.tag_configure("recent_alert", background="#FFF8E1", foreground="#E65100")   # 🟠 近5分钟刚触发，浅米黄底深橙字
+    alert_tree.tag_configure("history_alert", background="#FFFFFF", foreground="#212121")  # ⚪ 历史记录/监控中，白底深灰字
+    alert_tree.tag_configure("disabled_alert", background="#F5F5F5", foreground="#9E9E9E") # ⏸️ 已关闭，浅灰底灰字
+    alert_tree.tag_configure("strong_up", background="#E8F5E9", foreground="#2E7D32")      # 强势拉升，浅清新绿
+    alert_tree.tag_configure("strong_down", background="#ECEFF1", foreground="#455A64")    # 破位下杀，浅青灰
 
-    # 取最近若干条记录（按时间倒序），按股票分组，保留每个股票的最近记录序列
+    # 取最近若干条记录（按时间倒序），按股票分组
     recent = alerts_history[-500:]
-    
     grouped = {}
     for alert in reversed(recent):
         code = alert.get("stock_code", "")
@@ -10072,116 +10292,134 @@ def refresh_alert_center():
             continue
         grouped.setdefault(code, []).append(alert)
 
-    # ---- 结合全局数据强弱计算优先级排序得分 (KISS/SOLID) ----
-    # 评分公式 = 报警次数 * 5.0 + 实时偏离度 dff * 2.0 + Rank强度 * 0.05
-    def calc_priority_score(item):
-        code, alerts_list = item
-        dff_val = 0.0
-        rank_val = 0.0
-        if 'GLOBAL_TOP_ALL' in globals() and GLOBAL_TOP_ALL is not None and not GLOBAL_TOP_ALL.empty:
-            idx_match = code
-            if idx_match not in GLOBAL_TOP_ALL.index:
-                try:
-                    idx_match = int(code)
-                except ValueError:
-                    pass
-            if idx_match in GLOBAL_TOP_ALL.index:
-                row = GLOBAL_TOP_ALL.loc[idx_match]
-                if isinstance(row, pd.Series):
-                    dff_val = float(row.get('dff', 0.0))
-                    rank_val = float(row.get('Rank', row.get('rank', 0.0)))
-                elif isinstance(row, pd.DataFrame) and not row.empty:
-                    dff_val = float(row.iloc[0].get('dff', 0.0))
-                    rank_val = float(row.iloc[0].get('Rank', row.iloc[0].get('rank', 0.0)))
-        return (len(alerts_list) * 5.0) + (dff_val * 2.0) + (rank_val * 0.05)
+    # 确保所有在 alerts_rules 中有规则的股票也能被呈现
+    for r_code in alerts_rules.keys():
+        if r_code not in grouped:
+            grouped[r_code] = []
 
-    sorted_items = sorted(grouped.items(), key=calc_priority_score, reverse=True)
+    now_dt = datetime.now()
+    active_stocks_info = []
+    recent_stocks_count = 0
+    custom_stocks_count = 0
+    total_monitored_count = 0
 
-    for code, alerts in sorted_items:
-        # 股票名称（优先用 sina_data_df）和实时涨幅
-        pct_val = 0.0
-        if sina_data_df is not None and not sina_data_df.empty:
-            name = sina_data_df.get("name", pd.Series(dtype=object)).get(code, "未知")
-            try:
-                pct_val = float(sina_data_df.get("percent", pd.Series(dtype=float)).get(code, 0.0))
-            except Exception:
-                pass
-        else:
-            name = monitor_windows.get(code, {}).get("stock_info", ["", "未知"])[1]
+    processed_rows = []
 
-        # 取该股的规则列表（可能为空）
-        # rule_list = alerts_rules.get(code, [])
-        rule_list = alerts_rules.get(code, {}).get("rules", [])
+    for code, alerts in grouped.items():
+        # 获取规则列表与元数据
+        rule_entry = alerts_rules.get(code, {})
+        rule_list = rule_entry.get("rules", []) if isinstance(rule_entry, dict) else (rule_entry if isinstance(rule_entry, list) else [])
         if not rule_list:
             continue
 
-        # --- 提取每个字段的最近现值（只保留第一次出现，即最近一次） ---
-        latest_values = {}
-        for alert in alerts:
-            f = alert.get("field", "")
-            if f and f not in latest_values:
-                latest_values[f] = alert.get("value", "")
+        total_monitored_count += 1
+        meta = rule_entry.get("meta", {}) if isinstance(rule_entry, dict) else {}
+        is_custom = bool((code in custom_focus_stocks) or meta.get("is_custom", False))
+        if is_custom:
+            custom_stocks_count += 1
 
-        # --- 构造“规则”列（阈值/操作，三合一） ---
+        # 股票名称与实时行情
+        raw_name = "未知"
+        cur_price = None
+        cur_pct = None
+        cur_vol = None
+        if sina_data_df is not None and not sina_data_df.empty:
+            raw_name = sina_data_df.get("name", pd.Series(dtype=object)).get(code, "未知")
+            try:
+                cur_price = float(sina_data_df.get("price", pd.Series(dtype=float)).get(code, float("nan")))
+            except Exception: pass
+            try:
+                cur_pct = float(sina_data_df.get("percent", pd.Series(dtype=float)).get(code, float("nan")))
+            except Exception: pass
+            try:
+                cur_vol = float(sina_data_df.get("turnover", pd.Series(dtype=float)).get(code, float("nan")))
+            except Exception: pass
+        else:
+            raw_name = monitor_windows.get(code, {}).get("stock_info", ["", "未知"])[1]
+
+        # 专属特定股票展示 ⭐ 前缀
+        disp_name = f"⭐ {raw_name}" if is_custom else raw_name
+
+        # 计算时间差
+        time_txt = alerts[0].get("time", "") if alerts else ""
+        elapsed_sec = 999999
+        if time_txt:
+            try:
+                t_parts = [int(p) for p in time_txt.split(":")]
+                alert_dt = now_dt.replace(hour=t_parts[0], minute=t_parts[1], second=t_parts[2], microsecond=0)
+                diff = (now_dt - alert_dt).total_seconds()
+                elapsed_sec = diff if diff >= 0 else diff + 86400
+            except Exception:
+                elapsed_sec = 999999
+
+        # 构造规则描述与实时满足度判定
         conds = []
+        val_parts = []
+        active_fields = []
+        is_now_satisfy = False
+
+        val_map = {"价格": cur_price, "涨幅": cur_pct, "量": cur_vol}
+
         for rule in rule_list:
             field = rule.get("field", "")
             if field in ("价格", "涨幅", "量"):
                 op = rule.get("op", "")
-                value = rule.get("value", "")
-                conds.append(f"{field}{op}{value}")
+                val = rule.get("value", "")
+                conds.append(f"{field}{op}{val}")
+
+                # 检查最新实时行情是否仍满足报警阈值
+                rule_enabled = rule.get("enabled", False)
+                if rule_enabled:
+                    rt_val = val_map.get(field)
+                    try:
+                        target_f = float(val)
+                        if rt_val is not None and not np.isnan(rt_val):
+                            if (op == ">=" and rt_val >= target_f) or (op == "<=" and rt_val <= target_f):
+                                is_now_satisfy = True
+                                active_fields.append(f"{field}:{rt_val:.1f}")
+                    except Exception:
+                        pass
+
         rule_str = ", ".join(conds) if conds else "无规则"
 
-        val_parts = []
-        triggered = False
-        for rule in rule_list:
-            field = rule.get("field", "")
-            if field not in ("价格", "涨幅", "量"):
-                continue
+        # 提取最近触发值显示
+        for alert in alerts:
+            f = alert.get("field", "")
+            v = alert.get("value", "")
+            if f and f not in [vp.split(":")[0] for vp in val_parts]:
+                try:
+                    val_parts.append(f"{f}:{float(v):.1f}")
+                except Exception:
+                    val_parts.append(f"{f}:{v}")
+        val_str = ", ".join(val_parts) if val_parts else ("实时:" + ", ".join(active_fields) if active_fields else "-")
 
-            # 获取该字段最新值
-            cur = None
-            for alert in alerts:
-                if alert.get("field") == field:
-                    cur = alert.get("value")
-                    break
-            if cur is None:
-                continue
+        # 状态判定 (4 级状态阶梯)
+        is_enabled = any(rule.get("enabled", False) for rule in rule_list)
+        is_all_enabled = all(rule.get("enabled", False) for rule in rule_list)
+        
+        is_active = is_enabled and (is_now_satisfy or elapsed_sec <= 90)
+        is_recent = is_enabled and not is_active and (elapsed_sec <= 300)
 
-            try:
-                curf = float(cur)
-                cur_s = f"{curf:.1f}"
-            except Exception:
-                cur_s = str(cur)
-                curf = None
+        if is_active:
+            active_stocks_info.append(raw_name)
+        if is_recent or is_active:
+            recent_stocks_count += 1
 
-            # 判定是否触发
-            rule_enabled = rule.get("enabled", False)
-            try:
-                if rule_enabled and curf is not None:
-                    rv = float(rule.get("value", float("nan")))
-                    op = rule.get("op", "")
-                    is_triggered = (
-                        (op == ">=" and curf >= rv) or
-                        (op == "<=" and curf <= rv)
-                    )
-                    if is_triggered:
-                        triggered = True
-                        val_parts.append(f"{field}{cur_s}")  # 只显示触发的值
-            except Exception:
-                continue
-
-        val_str = ", ".join(val_parts) if val_parts else ""
-
-        # --- 启用状态（开 / 部分开 / 关） ---
-        enabled_state = (
-            "开" if all(rule.get("enabled", False) for rule in rule_list)
-            else "部分开" if any(rule.get("enabled", False) for rule in rule_list)
-            else "关"
-        )
-
-        # 使用该股票最近一条记录的时间作为时间列（若没有可为空）
-        time_txt = alerts[0].get("time", "")
+        if not is_enabled:
+            status_text = "⏸️ 已关闭"
+            tag = "disabled_alert"
+        elif is_active:
+            status_text = "🔴 报警中" + (f"({active_fields[0]})" if active_fields else "")
+            tag = "active_alert"
+        elif is_recent:
+            status_text = "🟠 刚触发"
+            tag = "recent_alert"
+        elif len(alerts) > 0:
+            status_text = f"⚪ 监控中({len(alerts)}次)"
+            tag = "history_alert"
+        else:
+            status_text = "⚪ 监控中"
+            tag = "history_alert"
 
         # --- 获取全局强度数据 ---
         dff_val = 0.0
@@ -10190,10 +10428,8 @@ def refresh_alert_center():
         if 'GLOBAL_TOP_ALL' in globals() and GLOBAL_TOP_ALL is not None and not GLOBAL_TOP_ALL.empty:
             idx_match = code
             if idx_match not in GLOBAL_TOP_ALL.index:
-                try:
-                    idx_match = int(code)
-                except ValueError:
-                    pass
+                try: idx_match = int(code)
+                except ValueError: pass
             if idx_match in GLOBAL_TOP_ALL.index:
                 row = GLOBAL_TOP_ALL.loc[idx_match]
                 if isinstance(row, pd.Series):
@@ -10204,51 +10440,100 @@ def refresh_alert_center():
                     dff_val = float(row.iloc[0].get('dff', 0.0))
                     dff2_val = float(row.iloc[0].get('dff2', 0.0))
                     rank_val = float(row.iloc[0].get('Rank', row.iloc[0].get('rank', 0.0)))
-        
-        # dff/dff2 带正负号和百分比显示，Rank 显示名次整数
+
         dff_str = f"{dff_val:+.1f}%" if dff_val != 0 else "0.0%"
         dff2_str = f"{dff2_val:+.1f}%" if dff2_val != 0 else "0.0%"
         rank_str = str(int(rank_val))
 
-        # 插入新列：时间, 代码, 名称, 次数, 规则(阈值), 触发值, dff, dff2, Rank, 状态
         alert_count = len(alerts)
         vals = (
             time_txt,       # 时间
             code,           # 代码
-            name,           # 名称
+            disp_name,      # 名称 (含 ⭐ 标识)
             alert_count,    # 次数
             rule_str,       # 规则(阈值)
             val_str,        # 触发值
             dff_str,        # dff
             dff2_str,       # dff2
             rank_str,       # Rank
-            enabled_state   # 状态
+            status_text     # 状态 (带清晰彩色图标)
         )
-        
-        # 分配加强标识度的 Tag
-        if triggered:
-            tag = "triggered"
-        elif dff_val >= 3.0:
-            tag = "strong_up"
-        elif dff_val <= -3.0:
-            tag = "strong_down"
-        else:
-            tag = "not_triggered"
-            
-        alert_tree.insert("", "end", iid=code, values=vals, tags=(tag,))
 
-    # 如果有之前的排序，则应用排序
+        # 智能优先级排序得分 (正在报警 > 刚触发 > 专属特定 > 频次 > dff强度)
+        priority_score = (
+            (2000.0 if is_active else 0.0) +
+            (500.0 if is_recent else 0.0) +
+            (100.0 if is_custom else 0.0) +
+            (alert_count * 5.0) +
+            (dff_val * 2.0) +
+            (rank_val * 0.05)
+        )
+
+        processed_rows.append({
+            "code": code,
+            "vals": vals,
+            "tag": tag,
+            "is_active": is_active,
+            "is_recent": is_recent,
+            "is_custom": is_custom,
+            "score": priority_score
+        })
+
+    # --- 🚀 [一目了然] 动态更新各分类按钮上的实时统计数值与选中高亮 ---
+    filter_mode = getattr(alert_window, "alert_filter_var", tk.StringVar(value="all")).get()
+    active_cnt = len(active_stocks_info)
+    total_cnt = total_monitored_count
+
+    if hasattr(alert_window, "btn_filter_active") and alert_window.btn_filter_active.winfo_exists():
+        alert_window.btn_filter_active.config(
+            text=f"🔴 报警中 ({active_cnt})",
+            relief="sunken" if filter_mode == "active" else "raised",
+            bd=2 if filter_mode == "active" else 1
+        )
+    if hasattr(alert_window, "btn_filter_recent") and alert_window.btn_filter_recent.winfo_exists():
+        alert_window.btn_filter_recent.config(
+            text=f"🟠 近5分钟 ({recent_stocks_count})",
+            relief="sunken" if filter_mode == "recent" else "raised",
+            bd=2 if filter_mode == "recent" else 1
+        )
+    if hasattr(alert_window, "btn_filter_custom") and alert_window.btn_filter_custom.winfo_exists():
+        alert_window.btn_filter_custom.config(
+            text=f"⭐ 专属监控 ({custom_stocks_count})",
+            relief="sunken" if filter_mode == "custom" else "raised",
+            bd=2 if filter_mode == "custom" else 1
+        )
+    if hasattr(alert_window, "btn_filter_all") and alert_window.btn_filter_all.winfo_exists():
+        alert_window.btn_filter_all.config(
+            text=f"📋 全部 ({total_cnt})",
+            relief="sunken" if filter_mode == "all" else "raised",
+            bd=2 if filter_mode == "all" else 1
+        )
+
+    # 按智能优先级排序
+    processed_rows.sort(key=lambda r: r["score"], reverse=True)
+
+    for item in processed_rows:
+        # 筛选判定
+        if filter_mode == "active" and not item["is_active"]:
+            continue
+        if filter_mode == "recent" and not (item["is_active"] or item["is_recent"]):
+            continue
+        if filter_mode == "custom" and not item["is_custom"]:
+            continue
+
+        alert_tree.insert("", "end", iid=item["code"], values=item["vals"], tags=(item["tag"],))
+
+    # 如果有表头手动排序，则应用表头排序
     if alert_sort_column is not None:
         try:
             alert_treeview_sort_column(alert_sort_column, alert_sort_reverse)
         except Exception as e:
             logger.error(f"恢复排序失败: {e}")
 
-    # 恢复选中的行，以及焦点行
+    # 恢复选中的行与焦点行
     restored = False
     children = alert_tree.get_children()
     if prev_selected_code and prev_selected_code in children:
-        # [AL-LINK] 恢复选中时，先设置抑制标志以防止重复触发联动事件
         alert_tree._suppress_linkage = True
         alert_tree.selection_set(prev_selected_code)
         alert_tree.focus(prev_selected_code)
@@ -10257,15 +10542,12 @@ def refresh_alert_center():
         alert_tree.focus(prev_focused_code)
         restored = True
 
-    # 如果未能成功恢复选择/焦点，则默认选中第一行（原有逻辑）
     if not restored and children:
-        # [AL-LINK] 只有开启了“自动联动”开关，才在数据刷新时自动执行选中（可能触发联动）
         if alert_link_var and alert_link_var.get():
             first_item = children[0]
             alert_tree.selection_set(first_item)
             alert_tree.focus(first_item)
         else:
-            # 开关关闭时，仅聚焦不选中（不触发联动）
             first_item = children[0]
             alert_tree.focus(first_item)
 
@@ -11733,6 +12015,69 @@ if __name__ == "__main__":
         history_file=SEARCH_HISTORY_FILE
     )
     refresh_combo_list() # 初始化列表
+
+    # [🚀 修复] 彻底解决高分屏与打包环境下 Combobox 第一次展开超级小、位置跑偏的问题
+    try:
+        root.tk.eval(r'''
+        proc ttk::combobox::PlacePopdown {cb popdown} {
+            update idletasks
+            set x [winfo rootx $cb]
+            set y [winfo rooty $cb]
+            set w [winfo width $cb]
+            set h [winfo height $cb]
+
+            # 坐标防丢（若首次获取到异常的负数或0，尝试从顶级窗口换算）
+            if {$x <= 0 && [winfo ismapped [winfo toplevel $cb]]} {
+                set x [expr {[winfo rootx [winfo toplevel $cb]] + [winfo x $cb]}]
+            }
+
+            set reqw [winfo reqwidth $popdown]
+            if {$w < $reqw} {
+                set optw $reqw
+            } else {
+                set optw $w
+            }
+
+            set sw [winfo screenwidth $cb]
+            set sh [winfo screenheight $cb]
+
+            if {$optw > [expr {$sw - 40}]} {
+                set optw [expr {$sw - 40}]
+            }
+            if {[expr {$x + $optw}] > $sw} {
+                set x [expr {$sw - $optw - 10}]
+            }
+            if {$x < 10} { set x 10 }
+
+            set postheight [winfo reqheight $popdown]
+            # 关键：对首次渲染可能出现的未初始化极小高度（<60px）进行硬保底（防止第一次点击缩成一条细缝）
+            if {$postheight < 60} {
+                set postheight 200
+            }
+
+            if {[expr {$y + $h + $postheight}] > $sh} {
+                set posty [expr {$y - $postheight}]
+            } else {
+                set posty [expr {$y + $h}]
+            }
+
+            wm geometry $popdown "${optw}x${postheight}+${x}+${posty}"
+        }
+        ''')
+    except Exception as e:
+        logger.warning(f"Combobox PlacePopdown hook 注入异常: {e}")
+
+    # 静默预热 history_combo，确保初次点击前已完成物理测量
+    def _prewarm_history_combo():
+        try:
+            history_combo.tk.call('ttk::combobox::PopdownWindow', history_combo._w)
+            popdown_w = history_combo._w + '.popdown'
+            history_combo.tk.call('wm', 'withdraw', popdown_w)
+            history_combo.tk.call('update', 'idletasks')
+        except Exception:
+            pass
+
+    root.after(300, _prewarm_history_combo)
     
     # [NEW] 默认使用最近一次策略（由持久化 load_linkage_config 处理）
 
