@@ -110,6 +110,8 @@ def test_sector_detail_filter_toggle_and_persistence():
     assert res_neg[0]['code'] == '000878'
     
     dlg.close()
+    save_config_node("ats_sector_detail_filter_enabled", "false")
+    save_config_node("ats_query_expr", "")
 
 
 def test_stock_detail_filter_evaluation_accuracy():

@@ -345,83 +345,85 @@ class SectorDataAggregator:
 
         return {}
 
+    def get_bidding_sector_info(self, sector_name: str) -> Optional[Dict[str, Any]]:
+        """获取板块在 bidding_session_data 中的元数据"""
+        clean_sec = re.sub(r'^[^\w\u4e00-\u9fa5]+', '', str(sector_name)).strip()
+        bidding_sec_data = self._load_bidding_sector_data()
+        if bidding_sec_data:
+            if clean_sec in bidding_sec_data:
+                return bidding_sec_data[clean_sec]
+            elif sector_name in bidding_sec_data:
+                return bidding_sec_data[sector_name]
+            else:
+                synonyms = [clean_sec] + SECTOR_SYNONYMS.get(clean_sec, [])
+                for syn in synonyms:
+                    for k, v in bidding_sec_data.items():
+                        if syn == k or syn in k or k in syn:
+                            return v
+        return None
+
     def resolve_sector_member_codes(
         self,
         sector_name: str,
         member_codes: Optional[List[str]] = None,
         current_df: Optional[pd.DataFrame] = None
-    ) -> Tuple[List[str], Dict[str, str], Optional[Dict[str, Any]]]:
+    ) -> Tuple[List[str], Dict[str, str]]:
         """
-        解析板块全量成分股代码列表、名称映射及板块元数据:
-        - 100% 优先从全市场竞价快照 (bidding_session_data) 解析全量成分股 (龙头 + 赛马成员 + 跟随者)；
+        解析板块成分股代码列表与名称映射:
+        - 若显式传入 member_codes，严格以 member_codes 为准；
+        - 若未传入 member_codes，100% 优先从全市场竞价快照 (bidding_session_data) 解析全量成分股 (龙头 + 赛马成员 + 跟随者)；
         - 若快照中未找到，则依序从 current_df 同义词模糊匹配与经典中军库兜底。
         """
         target_codes = []
         seen_codes = set()
         code_to_name = {}
-        matched_sec_info = None
 
         # 清洗板块名称（去除 ⭐, 🔥, ⚡, 📊, 👑 及前后空格）
         clean_sec = re.sub(r'^[^\w\u4e00-\u9fa5]+', '', str(sector_name)).strip()
 
-        # ── 1. 优先从 bidding_session_data 权威读取全量成分股 ──
-        bidding_sec_data = self._load_bidding_sector_data()
-        if bidding_sec_data:
-            if clean_sec in bidding_sec_data:
-                matched_sec_info = bidding_sec_data[clean_sec]
-            elif sector_name in bidding_sec_data:
-                matched_sec_info = bidding_sec_data[sector_name]
-            else:
-                # 同义词或模糊包含检索
-                synonyms = [clean_sec] + SECTOR_SYNONYMS.get(clean_sec, [])
-                for syn in synonyms:
-                    for k, v in bidding_sec_data.items():
-                        if syn == k or syn in k or k in syn:
-                            matched_sec_info = v
-                            break
-                    if matched_sec_info:
-                        break
-
-            if matched_sec_info:
-                # 龙头
-                l_code = str(matched_sec_info.get('leader', '')).strip().zfill(6)
-                l_name = str(matched_sec_info.get('leader_name', '')).strip()
-                if l_code and l_code != '000000' and l_code not in seen_codes:
-                    target_codes.append(l_code)
-                    seen_codes.add(l_code)
-                    if l_name:
-                        code_to_name[l_code] = l_name
-
-                # 竞价赛马候选成员
-                for rc in matched_sec_info.get('race_candidates', []):
-                    c = str(rc.get('code', '')).strip().zfill(6)
-                    if c and c != '000000' and c not in seen_codes:
-                        target_codes.append(c)
-                        seen_codes.add(c)
-                    n = str(rc.get('name', '')).strip()
-                    if c and n and n != '未知':
-                        code_to_name[c] = n
-
-                # 跟随者成员
-                for fol in matched_sec_info.get('followers', []):
-                    c = str(fol.get('code', '')).strip().zfill(6)
-                    if c and c != '000000' and c not in seen_codes:
-                        target_codes.append(c)
-                        seen_codes.add(c)
-                    n = str(fol.get('name', '')).strip()
-                    if c and n and n != '未知':
-                        code_to_name[c] = n
-
-        # ── 2. 如果外部有显式传入 member_codes，确保全部并入 ──
-        if member_codes:
+        # ── 1. 若外部显式传入非空 member_codes，严格以输入为准 ──
+        if member_codes is not None and len(member_codes) > 0:
             for c in member_codes:
                 c_clean = str(c).strip().zfill(6)
                 if c_clean and c_clean not in seen_codes:
                     target_codes.append(c_clean)
                     seen_codes.add(c_clean)
+            return target_codes, code_to_name
 
-        # ── 3. 若仍无成分股，从 current_df 按同义词模糊匹配 ──
-        if not target_codes and current_df is not None and not current_df.empty and 'category' in current_df.columns:
+        # ── 2. 优先从 bidding_session_data 权威读取全量成分股 ──
+        matched_sec_info = self.get_bidding_sector_info(sector_name)
+        if matched_sec_info:
+            # 龙头
+            l_code = str(matched_sec_info.get('leader', '')).strip().zfill(6)
+            l_name = str(matched_sec_info.get('leader_name', '')).strip()
+            if l_code and l_code != '000000' and l_code not in seen_codes:
+                target_codes.append(l_code)
+                seen_codes.add(l_code)
+                if l_name:
+                    code_to_name[l_code] = l_name
+
+            # 竞价赛马候选成员
+            for rc in matched_sec_info.get('race_candidates', []):
+                c = str(rc.get('code', '')).strip().zfill(6)
+                if c and c != '000000' and c not in seen_codes:
+                    target_codes.append(c)
+                    seen_codes.add(c)
+                n = str(rc.get('name', '')).strip()
+                if c and n and n != '未知':
+                    code_to_name[c] = n
+
+            # 跟随者成员
+            for fol in matched_sec_info.get('followers', []):
+                c = str(fol.get('code', '')).strip().zfill(6)
+                if c and c != '000000' and c not in seen_codes:
+                    target_codes.append(c)
+                    seen_codes.add(c)
+                n = str(fol.get('name', '')).strip()
+                if c and n and n != '未知':
+                    code_to_name[c] = n
+
+        # ── 3. 若 current_df 包含 category 列，将模糊匹配到的成分股合并入池 ──
+        if current_df is not None and not current_df.empty and 'category' in current_df.columns:
             try:
                 synonyms = [clean_sec] + SECTOR_SYNONYMS.get(clean_sec, [])
                 pattern = '|'.join([re.escape(s) for s in synonyms if s])
@@ -454,7 +456,7 @@ class SectorDataAggregator:
                             code_to_name[c_clean] = def_name
                     break
 
-        return target_codes, code_to_name, matched_sec_info
+        return target_codes, code_to_name
 
     def fetch_quotes_unified(
         self,
@@ -626,7 +628,8 @@ class SectorDataAggregator:
         【🎯 板块明细核心入口】一键完成板块成分股发现、高频行情拉取、动态列映射、领涨龙头评选与强度打分
         返回: (rows, score, leader_str, meta)
         """
-        code_list, code_to_name, matched_sec_info = self.resolve_sector_member_codes(
+        matched_sec_info = self.get_bidding_sector_info(sector_name)
+        code_list, code_to_name = self.resolve_sector_member_codes(
             sector_name=sector_name,
             member_codes=member_codes,
             current_df=current_df
@@ -696,8 +699,13 @@ class SectorDataAggregator:
                 up_count += 1
             sum_pct += pct_val
 
-        final_leader_code = auth_leader_code if (auth_leader_code and auth_leader_code != '000000') else dynamic_leader_code
-        final_leader_name = auth_leader_name if auth_leader_name else dynamic_leader_name
+        present_codes = {r['code'] for r in rows}
+        if auth_leader_code and auth_leader_code != '000000' and auth_leader_code in present_codes:
+            final_leader_code = auth_leader_code
+            final_leader_name = auth_leader_name if auth_leader_name else dynamic_leader_name
+        else:
+            final_leader_code = dynamic_leader_code
+            final_leader_name = dynamic_leader_name
 
         for r in rows:
             c = r['code']
