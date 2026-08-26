@@ -1,3 +1,13 @@
+## 2026-08-26 16:52
+- [x] **重构并加固板块成分股明细持久化过滤引擎与权威数据聚合解耦 (`ats/sector_data_aggregator.py`, `ats/ui/sector_detail_dialog.py`, `tests/test_sector_aggregator_suite.py`, `tests/test_sector_strength_and_detail_parity.py`)**：
+    - [x] **成分股代码解析与元数据解耦 (`resolve_sector_member_codes` / `get_bidding_sector_info`)**：
+        - 拆分元数据提取与成分股代码解析职责，支持解包 `(target_codes, code_to_name)` 并向下兼容；
+        - 显式传入 `member_codes` 时严格尊重入参，未传入时自动从 `bidding_session_data`、`current_df` 及中军龙头库分层解析；
+        - 修复领涨龙头选拔：优先从当前列表存在的成分股中选拔最高涨幅或竞价龙头，杜绝外部代码导致的龙头错位；
+    - [x] **持久化策略过滤全场景自愈与测试清理隔离**：
+        - 完善 `ATSSectorDetailDialog` 过滤状态切换、持久化记忆与跨窗口同步广播；
+        - 自动化测试套件 (`test_sector_strength_and_detail_parity.py` + `test_sector_aggregator_suite.py` + 通道测算全量测试) 20 项测试全部 **100% 通过**。
+
 ## 2026-08-26 16:10
 - [x] **实现板块成分股明细 (ATSSectorDetailDialog) 持久化策略过滤状态与根除个股详情误判全命中 Bug (`ats/ui/sector_detail_dialog.py`, `ats/ui/main_window.py`, `tests/test_sector_strength_and_detail_parity.py`)**：
     - [x] **板块详情通用持久化过滤状态 (Toggle & Persistence)**：
