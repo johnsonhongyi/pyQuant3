@@ -1,3 +1,25 @@
+## 2026-08-26 17:18
+- [x] **根除带量化变量名中文注释误伤与多行反转策略执行报错 (`query_engine_util.py`, `ats/ui/main_window.py`, `tests/test_query_multiline_comment_adaptation.py`)**：
+    - [x] **修复中文注释中提及变量名（如 `# 4. SWL 短波重心与 SWS 慢波...`）被误截入代码的漏洞**：
+        - 增强 `_strip_comment_chunk` 正则，强制要求代码起点必须带有运算符（`>=`, `<=`, `==`, `!=`, `>`, `<`, `*`, `/`, `+`, `-` 等）或逻辑连接词，杜绝纯中文句式中提及 `SWL`/`MACD`/`DIF` 等单词被误认作变量；
+    - [x] **重排预处理流水线顺序**：
+        - 先执行注释智能剥离与脱敏，再执行 `{OR: ...}` / `{AND: ...}` 语法自适应展开，确保括号平衡度 100% 严密；
+    - [x] **ATS MainWindow 原始多行脚本提取解耦落地**：
+        - 彻底消除 mock 与真实环境下的取值歧义；
+    - [x] **全套自动化测试 100% 通过** (25 项测试全绿)。
+
+## 2026-08-26 17:08
+- [x] **实现 Query 引擎全场景（多行模式与单行混杂 # 注释）智能脱敏自适应与 ATS 历史公式多行解耦 (`query_engine_util.py`, `ats/ui/main_window.py`, `tests/test_query_multiline_comment_adaptation.py`)**：
+    - [x] **Query 引擎混杂注释智能剥离与自愈 (`_preprocess_query`)**：
+        - 彻底根治了带 `#` 注释的单行/压扁公式因以 `#` 开头导致整行被判定为纯注释而返回空串、进而引发全市场 100% 盲目命中（`[Hit: 5635]`）的致命缺陷；
+        - 自动保护字符串常量（如 `category.str.contains('半导体')`）；
+        - 递归过滤注释性说明括号（如 `(拒绝空头排列)`、`(A: ... OR B: ...)`）；
+        - 精准识别 `#` 注释后的量化代码起点，完美提取出纯净的量化表达式；
+    - [x] **ATS 主窗口多行历史查询提取解耦 (`_get_real_query`)**：
+        - `_get_real_query()` 优先根据下拉框当前选中项回溯匹配 `search_histories` 原始对象，严格返回保留 `\n` 和多行格式的原始脚本，消除单行压缩带来的歧义；
+    - [x] **全套自动化测试 100% 通过**：
+        - 新增 `test_query_multiline_comment_adaptation.py`，全套 24 项测试 **100% 全部通过**。
+
 ## 2026-08-26 16:52
 - [x] **重构并加固板块成分股明细持久化过滤引擎与权威数据聚合解耦 (`ats/sector_data_aggregator.py`, `ats/ui/sector_detail_dialog.py`, `tests/test_sector_aggregator_suite.py`, `tests/test_sector_strength_and_detail_parity.py`)**：
     - [x] **成分股代码解析与元数据解耦 (`resolve_sector_member_codes` / `get_bidding_sector_info`)**：
