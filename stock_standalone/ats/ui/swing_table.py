@@ -477,8 +477,8 @@ class SwingStateTable(QWidget):
             name_str = name_item.text().strip() if name_item else ""
 
             is_fav = (code_str in fav_stocks) or ("⭐" in name_str) or ("★" in name_str)
-            # 勾选仅看重点时，隐藏非重点标的；未勾选时展示全部跟踪标的
-            fav_hidden = (show_fav and not is_fav)
+            # 若关闭重点 (show_fav 为 False)，则隐藏重点关注标的，仅展示纯回调跟踪标的；若开启重点，则一同包含展示
+            fav_hidden = (not show_fav and is_fav)
             filter_hidden = (fset is not None) and (code_str.zfill(6) not in fset)
             
             self.table.setRowHidden(row, fav_hidden or filter_hidden)

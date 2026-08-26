@@ -1,3 +1,13 @@
+## 2026-08-26 22:22
+- [x] **彻底修复回调跟踪器 (SwingStateTable) ★ 重点 勾选框显隐逻辑 (`swing_table.py`, `tests/test_ats_tabs_strategy_filter.py`, `gemini.md`)**：
+    - [x] **根因精准纠正**：
+        - 纠正了将 `chk_favorite_show` 误写为 `(show_fav and not is_fav)` 的倒置缺陷；
+        - 100% 还原原始标准设计 `fav_hidden = (not show_fav and is_fav)`：
+          - **当开启【★ 重点】时**：回调列表中一同混入展示用户的重点关注标的；
+          - **当关闭【★ 重点】时**：精准隐藏带星号的重点标的，仅展示纯粹的 MA20d 回调策略标的；
+    - [x] **自动化测试验证**：
+        - 新增 `test_swing_table_chk_favorite_show` 专项测试，全套 12 项测试 100% 全部 PASSED。
+
 ## 2026-08-26 21:58
 - [x] **彻底修复 ATS 启动数据到达联动断链、查看窗口置顶防重复刷新、过滤防抖与明细搜索功能 (`main_window.py`, `chart_widgets.py`, `gemini.md`)**：
     - [x] **根治 ATS 启动数据到达策略联动失效 Bug**：
