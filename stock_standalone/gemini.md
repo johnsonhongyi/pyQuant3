@@ -1,3 +1,14 @@
+## 2026-08-26 16:10
+- [x] **实现板块成分股明细 (ATSSectorDetailDialog) 持久化策略过滤状态与根除个股详情误判全命中 Bug (`ats/ui/sector_detail_dialog.py`, `ats/ui/main_window.py`, `tests/test_sector_strength_and_detail_parity.py`)**：
+    - [x] **板块详情通用持久化过滤状态 (Toggle & Persistence)**：
+        - 在板块明细顶部工具栏增加 `🎯 策略过滤 (开/关)` 开关按钮，位于强度得分右侧；
+        - 开关状态基于 `load_config_node("ats_sector_detail_filter_enabled")` 全局原子持久化，打开后全系统所有板块详情窗口通用自适应记忆；
+        - 开启状态下自动提取主窗口活跃的策略公式（`query_expr`），自动过滤成分股并动态刷新 `成员数: X/Y (已过滤) | 过滤: 公式`；点击关闭后自动恢复展示全量成分股；
+    - [x] **根除个股详情与主窗口全员误判命中缺陷**：
+        - 纠正了 `StockDetailDialog` 此前将“股票存在于全市场 current_df 中”错误直接断定为 `✅ 命中` 的逻辑漏洞；
+        - 重构 `StockDetailDialog.update_filter_status` 与 `ATSMainWindow.apply_filter`，优先使用全市场向量化预计算命中集合 `filtered_codes_set` 进行 0ms 匹配，单股弹窗精准按公式（`percent > 5.0` 等）客观评估并准确呈现 `✅ 命中` 或 `❌ 未命中`；
+    - [x] **自动化测试用例 `test_sector_strength_and_detail_parity.py` 4 项专项测试 100% 验证通过**。
+
 ## 2026-08-26 15:48
 - [x] **优化主窗口顶部工具栏与公式过滤查看区域小窗口紧凑自适应排版 (`ats/ui/main_window.py`)**：
     - [x] **精简状态栏与功能按钮横向空间**：将原本占据 400px+ 的冗长状态文案压缩为紧凑图标标签（`🔌IPC`, `🗄️DB`, `⏸️`），导航按钮与联动复选框内边距精简化；
