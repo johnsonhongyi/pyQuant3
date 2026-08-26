@@ -179,3 +179,94 @@ def test_new_stock_panel_sorting_flow(qapp, monkeypatch):
     d_last_date = panel.table.item(last_idx, 3).text()
     assert d_last_code == "688808"  # 2026-04-24 最早
     assert d_last_date == "2026-04-24"
+
+
+def test_today_event_highlight_and_priority(qapp, monkeypatch):
+    """测试今日申购与今日上市的绝对全局最高优先级(梯队0)、重点关注(梯队1)、普通标的(梯队2)"""
+    import datetime
+    today_str = datetime.datetime.now().strftime("%Y-%m-%d")
+
+    # Mock GlobalFavoriteManager 重点关注列表
+    monkeypatch.setattr("global_favorites.GlobalFavoriteManager.get_favorite_stocks", lambda self: ["688808"])
+    
+    mock_df = pd.DataFrame([
+        {
+            "code": "301699", "name": "洛轴股份", "status": "待上市",
+            "listing_date": "-", "apply_date": today_str,
+            "issue_price": 15.88, "price": 15.88, "pct": 0.00,
+            "turnover": 0.00, "float_mv_yi": 0.0, "total_mv_yi": 95.28,
+            "amount_yi": 0.00, "dff": 0.00, "rank": 1, "dff2": 0.00,
+            "dff3": 0.00, "rs": -0.19, "resonance": "同步整理", "has_strategy": False
+        },
+        {
+            "code": "688835", "name": "高凯技术", "status": "首日(N)",
+            "listing_date": today_str, "apply_date": "2026-08-14",
+            "issue_price": 61.36, "price": 272.86, "pct": 16.11,
+            "turnover": 22.89, "float_mv_yi": 51.25, "total_mv_yi": 272.73,
+            "amount_yi": 11.27, "dff": 0.00, "rank": 2830, "dff2": 0.00,
+            "dff3": 0.00, "rs": 15.85, "resonance": "逆市抗跌", "has_strategy": False
+        },
+        {
+            "code": "688808", "name": "联讯仪器", "status": "已上市",
+            "listing_date": "2026-04-24", "apply_date": "2026-04-14",
+            "issue_price": 81.88, "price": 2209.00, "pct": 0.00,
+            "turnover": 0.48, "float_mv_yi": 426.25, "total_mv_yi": 2267.91,
+            "amount_yi": 2.03, "dff": -1.80, "rank": 3306, "dff2": 0.20,
+            "dff3": 172.60, "rs": -0.26, "resonance": "同步整理", "has_strategy": False
+        },
+        {
+            "code": "920059", "name": "双英集团", "status": "前5日(C)",
+            "listing_date": "2026-08-19", "apply_date": "2026-08-10",
+            "issue_price": 11.13, "price": 14.76, "pct": -1.93,
+            "turnover": 5.07, "float_mv_yi": 4.77, "total_mv_yi": 22.45,
+            "amount_yi": 0.24, "dff": -2.60, "rank": 2777, "dff2": 0.00,
+            "dff3": 0.00, "rs": -2.19, "resonance": "同步走弱", "has_strategy": False
+        }
+    ])
+
+    panel = NewStockPanel()
+    panel.df_data = mock_df
+    panel._render_table()
+
+    assert panel.table.rowCount() == 4
+
+    # 1. 默认渲染顺序:
+    # 梯队0: 高凯技术(今日上市), 洛轴股份(今日申购)
+    # 梯队1: 联讯仪器(⭐ 重点关注)
+    # 梯队2: 双英集团(普通)
+    assert panel.table.item(0, 0).pin_rank == 0
+    assert panel.table.item(1, 0).pin_rank == 0
+    assert panel.table.item(2, 0).pin_rank == 1
+    assert panel.table.item(3, 0).pin_rank == 999
+
+    # 2. 点击表头进行任何列排序（例如按现价升序）
+    panel.sort_col = 6
+    panel.sort_order = Qt.SortOrder.AscendingOrder
+    panel.table.sortItems(6, Qt.SortOrder.AscendingOrder)
+
+    # 验证升序模式下梯队绝对次序依然是: 梯队0 -> 梯队1 -> 梯队2
+    # 梯队0内部: 洛轴股份 (15.88) < 高凯技术 (272.86)
+    # 梯队1: 联讯仪器 (2209.00)
+    # 梯队2: 双英集团 (14.76)
+    res_codes = [panel.table.item(r, 0).text() for r in range(4)]
+    assert res_codes[0] == "301699"  # 今日申购 (梯队0，价格较低)
+    assert res_codes[1] == "688835"  # 今日上市 (梯队0，价格较高)
+    assert res_codes[2] == "688808"  # 重点关注 (梯队1，即便价格高达2209也在梯队2之前)
+    assert res_codes[3] == "920059"  # 普通项 (梯队2，即便价格只有14.76也排在最下方)
+
+    # 3. 点击按现价降序排序
+    panel.sort_col = 6
+    panel.sort_order = Qt.SortOrder.DescendingOrder
+    panel.table.sortItems(6, Qt.SortOrder.DescendingOrder)
+
+    # 验证降序模式下梯队绝对次序依然是: 梯队0 -> 梯队1 -> 梯队2
+    # 梯队0内部: 高凯技术 (272.86) > 洛轴股份 (15.88)
+    # 梯队1: 联讯仪器 (2209.00)
+    # 梯队2: 双英集团 (14.76)
+    res_desc_codes = [panel.table.item(r, 0).text() for r in range(4)]
+    assert res_desc_codes[0] == "688835"  # 今日上市 (梯队0，价格较高)
+    assert res_desc_codes[1] == "301699"  # 今日申购 (梯队0，价格较低)
+    assert res_desc_codes[2] == "688808"  # 重点关注 (梯队1)
+    assert res_desc_codes[3] == "920059"  # 普通项 (梯队2)
+
+
