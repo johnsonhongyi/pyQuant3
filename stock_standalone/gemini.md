@@ -1,3 +1,48 @@
+## 2026-08-27 01:10
+- [x] **彻底修复【起点雷达】数据对齐其他 Tab 策略指标与多级排序缺陷 (`ats/limit_up_engine.py`, `ats/opening_bubble_engine.py`, `ats/ui/daily_limit_up_dialog.py`, `trading_kernel/tests/test_opening_bubble_engine.py`, `gemini.md`)**：
+    - [x] **全维度数据与策略指标对齐**：
+        - 纠正了原 `get_opening_bubble_records` 仅在几十只涨停标的 `zt_map` 中查找导致全市场其余 4900+ 标的策略指标丢失的根本缺陷；
+        - 直接打通全量策略 `current_df` 索引映射 `df_row_map`，100% 完整提取 **真实换手率 (`turnover_rate`)**、**Rank 排名**、**DFF / DFF2 / DFF3**、**大盘偏离 (`rs_val`)**、**共振状态 (`resonance`: 大盘共振/逆市抗跌/同步整理/同步走弱)**、**所属板块 (`category`)** 与 **动态自定义列 (`extra_cols`)**；
+        - 严格界定连板与封单：只有在当日涨停库 `live_map` 中的真实封板标的才标记 `is_limit_up` 并展示连板数与封单额，未封板异动标的连板数与封单额严格显示为 `--`，彻底杜绝普通 ST 股票被误标为 1板/2板 的严重错误；
+    - [x] **根治排序引擎中自选股强制置顶 Bug**：
+        - 移除 `_apply_multi_level_sort` 中 `fav_flag` 强行置顶逻辑，恢复纯粹严谨的量化指标级联排序，按用户选定的排序列（如 `↓ 涨幅%`）从高到低真实排序；
+    - [x] **自动化测试全量回归**：
+        - 扩充 `test_opening_bubble_engine.py` 测试套件，全套 7 项测试与看板测试 **100% 全部 PASSED**。
+
+## 2026-08-27 01:05
+- [x] **回归连板天梯与每日涨停看板原始持久化配置架构设计 (`ats/ui/daily_limit_up_dialog.py`, `trading_kernel/tests/test_opening_bubble_engine.py`, `gemini.md`)**：
+    - [x] **根因定位与纠正**：
+        - 彻底纠正了此前试图为每个模式（TODAY、3D、5D、10D、LADDER 等）分配独立持久化 key 导致的向后兼容性断裂与空配置覆写问题；
+        - **坚守原始经典极简设计 (KISS / DRY)**：
+          - **BUBBLE（起点雷达）独立持久化**：使用专属配置 `ats_daily_limit_up_table_bubble` 和 `ats_daily_limit_up_sort_bubble`，物理隔离其独特的形态、DFF、Rank 列显示与排序；
+          - **其余所有模式（TODAY、3D、5D、10D、连板天梯 LADDER、盘中上车雷达 RADAR、历史回溯 HISTORY）**：统一且完全向后兼容地继续复用原始核心配置 key `ats_daily_limit_up_table` 与 `ats_daily_limit_up_sort`，确保天梯与主看板历史配置 100% 稳定读取且永不丢失；
+    - [x] **测试全量回归**：
+        - 更新 `test_opening_bubble_engine.py` 中的 Case 5 断言，全套 7 项测试全部通过（100% PASSED）。
+
+## 2026-08-27 00:16
+- [x] **彻底修复龙头突击榜与热力图板块按强度得分排序未自动到顶部缺陷 (`ats/hot_sector_engine.py`, `ats/ui/heatmap_widget.py`, `tests/test_sector_strength_and_detail_parity.py`, `gemini.md`)**：
+    - [x] **根因精准纠正**：
+        - 彻底纠正了此前在 `sort_sectors` 中因使用 `prim = 0 if is_highlight else 1` 强行将低分重点关注板块（0.8分、12.0分）压在最前，导致真实高分板块（金属铜 68.3分、金属锌 62.2分）无法排到顶部的严重缺陷；
+        - **纯粹量化指标排序**：
+          - `0`（默认：按强度得分降序）：纯粹按真实强度得分 `float(x[1])` 降序，全市场强度最高的板块（金属铜 68.3）100% 自动排在最顶部第 1 位；
+          - `1`（按涨跌幅降序）：按板块涨跌幅排序；
+          - `2`（按活跃成员数降序）：按活跃成分股数量排序；
+          - `3`（⭐ 重点关注置顶）：保留专属的重点关注置顶模式；
+        - 无论哪种排序，重点关注板块均保持醒目的金边和星星 `★` 标识，且排序后网格视图自动平滑重置滚动条至最顶部（`verticalScrollBar().setValue(0)`）；
+    - [x] **自动化测试全量验证**：
+        - 扩展 `tests/test_sector_strength_and_detail_parity.py`，全套 6 项测试 **100% 全部 PASSED**。
+
+
+
+## 2026-08-27 00:05
+- [x] **彻底修复 ATS 行业板块热力图右键【设为重点关注】与【取消重点关注】失效缺陷 (`ats/ui/heatmap_widget.py`, `tests/test_sector_strength_and_detail_parity.py`, `gemini.md`)**：
+    - [x] **根因精准纠正**：
+        - 修复了 `SectorHeatmapWidget._toggle_favorite_sector` 中仅实例化 `GlobalFavoriteManager` 但未调用 `add_favorite_sector`/`remove_favorite_sector` 导致数据未增删且未落盘持久化的严重缺陷；
+        - 补充补齐 `self.sort_sectors(self.sort_combo.currentIndex())` 原地重新排序与网格刷新调用，点击右键菜单后卡片金色高亮边框、`⭐` 标记与重点板块置顶瞬时平滑响应；
+    - [x] **自动化测试全量验证**：
+        - 扩展 `tests/test_sector_strength_and_detail_parity.py`，新增 `test_sector_heatmap_favorite_toggle` 专项测试；
+        - 全套 5 项板块与详情测试 **100% 全部 PASSED**。
+
 ## 2026-08-26 22:22
 - [x] **彻底修复回调跟踪器 (SwingStateTable) ★ 重点 勾选框显隐逻辑 (`swing_table.py`, `tests/test_ats_tabs_strategy_filter.py`, `gemini.md`)**：
     - [x] **根因精准纠正**：

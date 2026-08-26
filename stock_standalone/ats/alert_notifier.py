@@ -319,9 +319,12 @@ class InAppToastWidget(QFrame if HAS_PYQT else object):
 
             logger.info(f"🎯 [TOAST_CLICK] 点击特异 Toast 通知，尝试自动定位联动股票: {self.code}")
 
-            # 1. 尝试使用 MultiPeriodDialog 定位
+            # 1. 尝试使用 DailyLimitUpDialog / MultiPeriodDialog 定位，并传入 reason 供状态栏显示
             if hasattr(parent, 'locate_stock_in_table'):
-                parent.locate_stock_in_table(self.code, auto_popup=True)
+                try:
+                    parent.locate_stock_in_table(self.code, auto_popup=True, reason=getattr(self, 'message_text', ''))
+                except TypeError:
+                    parent.locate_stock_in_table(self.code, auto_popup=True)  # 兼容旧版无 reason 参数
 
             # 2. 尝试使用 ATS MainWindow 定位
             if hasattr(parent, 'locate_stock_in_tree'):
