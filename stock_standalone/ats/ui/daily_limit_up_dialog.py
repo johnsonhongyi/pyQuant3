@@ -2065,8 +2065,9 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         self.snap_timer.stop()
         if hasattr(self, '_header_save_timer'):
             self._header_save_timer.stop()
-        # 显式持久化保存最新手动/自动调整的表格列宽
+        # 显式持久化保存最新手动/自动调整的表格列宽与 header 状态
         self._save_current_column_widths()
+        self._save_current_header_state()
 
         # 关闭前确保当日最新涨停分析数据即时原子落盘并完成 Gzip 压缩打包（仅限实际交易日）
         is_trade_day = cct.get_trade_date_status() if hasattr(cct, "get_trade_date_status") else True
@@ -2096,6 +2097,7 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         if hasattr(self, '_header_save_timer'):
             self._header_save_timer.stop()
         self._save_current_column_widths()
+        self._save_current_header_state()
 
         is_trade_day = cct.get_trade_date_status() if hasattr(cct, "get_trade_date_status") else True
         if is_trade_day and getattr(self, "current_mode", "") == "TODAY" and hasattr(self, "current_records") and self.current_records:

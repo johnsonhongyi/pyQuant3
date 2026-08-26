@@ -210,29 +210,58 @@ class OpeningBubbleEngine:
             except Exception:
                 pass
 
-        df_records = df.to_dict('index')
-        updated_count = 0
+        import numpy as np
+        if 'code' in df.columns:
+            codes = df['code'].values
+        else:
+            codes = df.index.values
+        closes = df[close_col].values if close_col in df.columns else None
+        if closes is None:
+            return 0
+        opens = df[open_col].values if open_col in df.columns else closes
+        pcts = df[pct_col].values if pct_col in df.columns else np.zeros(len(df))
+        vrs = df[vr_col].values if vr_col in df.columns else np.ones(len(df))
+        amts = df[amt_col].values if amt_col in df.columns else np.zeros(len(df))
+        vwaps = df['vwap'].values if 'vwap' in df.columns else None
+        pre_closes = df['pre_close'].values if 'pre_close' in df.columns else None
+        names = df['name'].values if 'name' in df.columns else None
+        open_pct_vals = df['open_pct'].values if 'open_pct' in df.columns else None
+        highs = df['high'].values if 'high' in df.columns else None
+        lows = df['low'].values if 'low' in df.columns else None
+        turnovers = df[turn_col].values if (turn_col and turn_col in df.columns) else None
 
-        for code_raw, row in df_records.items():
+        updated_count = 0
+        num_rows = len(codes)
+
+        for i in range(num_rows):
+            code_raw = codes[i]
             code_str = str(code_raw).strip()
             if not code_str or code_str.startswith(('sh000001', 'sz399001', 'sz399006', '999999')):
                 continue
 
-            c_clean = ''.join(c for c in code_str if c.isdigit()).zfill(6)
+            if len(code_str) == 6 and code_str.isdigit():
+                c_clean = code_str
+            else:
+                c_clean = ''.join(c for c in code_str if c.isdigit()).zfill(6)
             if not c_clean:
                 continue
 
-            curr_p = _safe_float(row.get(close_col, 0.0))
+            raw_p = closes[i]
+            curr_p = float(raw_p) if isinstance(raw_p, (int, float)) else _safe_float(raw_p)
             if curr_p <= 0.0:
                 continue
 
-            pct = _safe_float(row.get(pct_col, 0.0))
-            name = str(row.get('name', '')).strip() or c_clean
-            open_p = _safe_float(row.get(open_col, curr_p))
+            raw_pct = pcts[i]
+            pct = float(raw_pct) if isinstance(raw_pct, (int, float)) else _safe_float(raw_pct)
+            name = str(names[i]).strip() if names is not None else c_clean
+            if not name:
+                name = c_clean
+
+            open_p = _safe_float(opens[i]) if opens is not None else curr_p
             if open_p <= 0.0:
                 open_p = curr_p
 
-            pre_close = _safe_float(row.get('pre_close', 0.0))
+            pre_close = _safe_float(pre_closes[i]) if pre_closes is not None else 0.0
             if pre_close <= 0.0:
                 if (1.0 + pct / 100.0) != 0:
                     pre_close = curr_p / (1.0 + pct / 100.0)
@@ -240,25 +269,24 @@ class OpeningBubbleEngine:
                     pre_close = curr_p
 
             # 计算开盘涨幅 open_pct
-            open_pct = _safe_float(row.get('open_pct', 0.0))
+            open_pct = _safe_float(open_pct_vals[i]) if open_pct_vals is not None else 0.0
             if open_pct == 0.0 and pre_close > 0:
                 open_pct = (open_p - pre_close) / pre_close * 100.0
 
             # 均价 VWAP
-            vwap = _safe_float(row.get('vwap', 0.0))
+            vwap = _safe_float(vwaps[i]) if vwaps is not None else 0.0
             if vwap <= 0.0:
-                # 用 (open + close + high + low)/4 或 close 估算
-                high_p = _safe_float(row.get('high', curr_p))
-                low_p = _safe_float(row.get('low', curr_p))
+                high_p = _safe_float(highs[i]) if highs is not None else curr_p
+                low_p = _safe_float(lows[i]) if lows is not None else curr_p
                 vwap = (open_p + curr_p + high_p + low_p) / 4.0 if (high_p > 0 and low_p > 0) else curr_p
 
-            vol_ratio = _safe_float(row.get(vr_col, 1.0))
-            amount = _safe_float(row.get(amt_col, 0.0))
+            vol_ratio = _safe_float(vrs[i]) if vrs is not None else 1.0
+            amount = _safe_float(amts[i]) if amts is not None else 0.0
             # 金额单位统一为亿元
             amt_yi = amount if amount < 10000 else (amount / 100000000.0 if amount > 1000000 else amount / 10000.0)
-            
+
             # 安全获取换手率并防御越界
-            turnover_pct = _safe_float(row.get(turn_col, 0.0)) if turn_col else 0.0
+            turnover_pct = _safe_float(turnovers[i]) if turnovers is not None else 0.0
             if turnover_pct > 100.0:
                 turnover_pct = 0.0
 

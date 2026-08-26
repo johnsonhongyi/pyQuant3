@@ -46,7 +46,7 @@ class SectorHeatmapWidget(QWidget):
         header.addWidget(self.btn_hot_leaders)
 
         self.sort_combo = QComboBox()
-        self.sort_combo.addItems(["按强度得分降序", "按涨跌幅降序", "按活跃成员数降序", "⭐ 重点关注置顶"])
+        self.sort_combo.addItems(["按强度得分降序", "按涨跌幅降序", "按活跃成员数降序"])
         self.sort_combo.currentIndexChanged.connect(self.sort_sectors)
         header.addWidget(self.sort_combo)
 
@@ -560,32 +560,21 @@ class SectorHeatmapWidget(QWidget):
         fav_sectors = fav_mgr.get_favorite_sectors()
         
         def get_sort_key(x):
-            try:
-                score = float(x[1])
-            except Exception:
-                score = 0.0
-
+            sec_name = x[0]
+            clean_sec = re.sub(r'^[^\w\u4e00-\u9fa5]+', '', str(sec_name)).strip()
+            # 仅当板块本身在重点关注板块列表时置顶 (prim = 0)
+            is_highlight = (sec_name in fav_sectors) or (clean_sec in fav_sectors)
+            
+            prim = 0 if is_highlight else 1
+            
             if index == 0:
-                # 纯粹按真实量化强度得分降序：高分板块（如 金属铜 68.3）自动绝对置顶在第 1 项
-                return -score
+                sec_val = -float(x[1])
             elif index == 1:
-                # 纯粹按板块平均涨跌幅降序
-                return -safe_float_pct(x[2])
-            elif index == 2:
-                # 纯粹按活跃成员数降序
-                try:
-                    return -int(x[3])
-                except Exception:
-                    return 0
-            elif index == 3:
-                # ⭐ 重点关注置顶模式 (重点关注排在最前，组内按得分降序)
-                sec_name = x[0]
-                clean_sec = re.sub(r'^[^\w\u4e00-\u9fa5]+', '', str(sec_name)).strip()
-                is_highlight = (sec_name in fav_sectors) or (clean_sec in fav_sectors)
-                prim = 0 if is_highlight else 1
-                return (prim, -score)
+                sec_val = -safe_float_pct(x[2])
             else:
-                return -score
+                sec_val = -int(x[3])
+                
+            return (prim, sec_val)
 
         self.sectors.sort(key=get_sort_key)
         self.render_grid()
