@@ -70,12 +70,34 @@ def test_sector_detail_aggregator_authoritative_parity():
             assert 'pct' in first_row
 
 
+@pytest.fixture(autouse=True)
+def isolate_config():
+    """测试前后安全备份与还原 window_config.json，绝不污染用户真实环境"""
+    from sys_utils import get_app_root, get_conf_path
+    import json
+    cfg_path = get_conf_path("window_config.json", get_app_root())
+    backup_data = None
+    if os.path.exists(cfg_path):
+        try:
+            with open(cfg_path, 'r', encoding='utf-8') as f:
+                backup_data = json.load(f)
+        except Exception:
+            pass
+    yield
+    if backup_data is not None:
+        try:
+            with open(cfg_path, 'w', encoding='utf-8') as f:
+                json.dump(backup_data, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
+
 def test_sector_detail_filter_toggle_and_persistence():
     from ats.ui.sector_detail_dialog import ATSSectorDetailDialog
-    from ats.ui.styles import save_config_node, load_config_node
+    from ats.ui.styles import save_config_node, load_config_node, parse_bool_config
     
     # 1. 模拟初始状态保存为 True
-    save_config_node("ats_sector_detail_filter_enabled", "true")
+    save_config_node("ats_sector_detail_filter_enabled", True)
     dlg = ATSSectorDetailDialog("金属铜")
     assert dlg.filter_enabled is True
     assert "开" in dlg.btn_toggle_filter.text()
@@ -84,13 +106,13 @@ def test_sector_detail_filter_toggle_and_persistence():
     dlg.toggle_filter_state()
     assert dlg.filter_enabled is False
     assert "关" in dlg.btn_toggle_filter.text()
-    assert load_config_node("ats_sector_detail_filter_enabled") == "false"
+    assert parse_bool_config(load_config_node("ats_sector_detail_filter_enabled")) is False
     
     # 3. 再次切换
     dlg.toggle_filter_state()
     assert dlg.filter_enabled is True
     assert "开" in dlg.btn_toggle_filter.text()
-    assert load_config_node("ats_sector_detail_filter_enabled") == "true"
+    assert parse_bool_config(load_config_node("ats_sector_detail_filter_enabled")) is True
     
     # 4. 测试过滤逻辑
     mock_rows = [

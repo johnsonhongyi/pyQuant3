@@ -10,9 +10,11 @@ from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QColor
 import os
 import json
-from ats.ui.styles import COLOR_UP, COLOR_DOWN, COLOR_INFO, COLOR_WARN, COLOR_ACCENT, setup_header_persistence, auto_fit_columns_once, NumericTableWidgetItem, load_config_node, save_config_node
+from ats.ui.styles import COLOR_UP, COLOR_DOWN, COLOR_INFO, COLOR_WARN, COLOR_ACCENT, setup_header_persistence, auto_fit_columns_once, NumericTableWidgetItem, load_config_node, save_config_node, parse_bool_config
 from ats.ui.base_table import BaseATSTableWidget
 from ats.ui.favorite_panel import get_ats_extra_cols, get_ats_table_headers
+
+PERSIST_KEY_SWING_FILTER = "ats_swing_tab_filter_enabled"
 
 class SwingStateTable(QWidget):
     stock_clicked = pyqtSignal(str, str) # code, name (for linkage)
@@ -24,17 +26,17 @@ class SwingStateTable(QWidget):
         self._is_mock_active = False
         self.extra_cols = get_ats_extra_cols()
         
-        # 🎯 策略过滤持久化开关 (所有 Tab 与明细通用)
-        saved_filter = load_config_node("ats_tab_filter_enabled", "false")
-        self.filter_enabled = (str(saved_filter).strip().lower() == "true")
+        # 🎯 策略过滤持久化开关 (专属独立持久化，默认关闭)
+        saved_filter = load_config_node(PERSIST_KEY_SWING_FILTER, load_config_node("ats_tab_filter_enabled", False))
+        self.filter_enabled = parse_bool_config(saved_filter, default=False)
         
         self._init_ui()
         self.load_mock_data()
 
     def toggle_filter_state(self):
-        """切换策略公式过滤状态并全局持久化"""
+        """切换策略公式过滤状态并专属独立持久化"""
         self.filter_enabled = not self.filter_enabled
-        save_config_node("ats_tab_filter_enabled", "true" if self.filter_enabled else "false")
+        save_config_node(PERSIST_KEY_SWING_FILTER, bool(self.filter_enabled))
         self._update_filter_button_ui()
         self._apply_favorite_filter()
 

@@ -12,12 +12,15 @@ ATS Favorite Panel ("⭐ 重点关注" 专属 Tab 页面)
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QFont
+import os
+import json
 import datetime
 import time
 
 from ats.ui.base_table import BaseATSTableWidget
-from ats.ui.styles import COLOR_UP, COLOR_DOWN, COLOR_INFO, setup_header_persistence, NumericTableWidgetItem, load_config_node, save_config_node
+from ats.ui.styles import COLOR_UP, COLOR_DOWN, COLOR_INFO, setup_header_persistence, NumericTableWidgetItem, load_config_node, save_config_node, parse_bool_config
 
+PERSIST_KEY_FAV_FILTER = "ats_fav_tab_filter_enabled"
 
 
 def get_ats_extra_cols():
@@ -44,20 +47,14 @@ def get_ats_extra_cols():
 
 
 def get_ats_table_headers(extra_cols=None):
-    """组合 ATS 表格列名：前15列基础列 + 动态自定义列 + 最后一列推荐理由"""
+    """获取与 SwingStateTable 100% 严格对齐的标准表头"""
     if extra_cols is None:
         extra_cols = get_ats_extra_cols()
-    try:
-        from JohnsonUtil import commonTips as cct
-        col_map = getattr(cct, 'vis_column_map', {}) or {}
-    except Exception:
-        col_map = {}
-        
     base_pre = [
-        "股票代码", "股票名称", "当前价格", "波段状态", "MA20 偏离度", "连板数", "推荐仓位", 
+        "股票代码", "股票名称", "当前价", "波段状态", "MA20 偏离", "连板数", "推荐仓位",
         "首次发现", "优先级", "DFF", "Rank", "DFF2", "DFF3", "大盘偏离", "大盘共振"
     ]
-    extra_headers = [col_map.get(c, c) for c in extra_cols]
+    extra_headers = [c.upper() for c in extra_cols]
     return base_pre + extra_headers + ["推荐理由"]
 
 
@@ -71,9 +68,9 @@ class FavoritePanel(QWidget):
         super().__init__(parent)
         self.extra_cols = get_ats_extra_cols()
         
-        # 🎯 策略过滤持久化开关 (所有 Tab 与明细通用)
-        saved_filter = load_config_node("ats_tab_filter_enabled", "false")
-        self.filter_enabled = (str(saved_filter).strip().lower() == "true")
+        # 🎯 策略过滤持久化开关 (专属独立持久化，默认关闭)
+        saved_filter = load_config_node(PERSIST_KEY_FAV_FILTER, load_config_node("ats_tab_filter_enabled", False))
+        self.filter_enabled = parse_bool_config(saved_filter, default=False)
         
         self._init_ui()
 
@@ -161,9 +158,9 @@ class FavoritePanel(QWidget):
             pass
 
     def toggle_filter_state(self):
-        """切换策略公式过滤状态并全局持久化"""
+        """切换策略公式过滤状态并专属独立持久化"""
         self.filter_enabled = not self.filter_enabled
-        save_config_node("ats_tab_filter_enabled", "true" if self.filter_enabled else "false")
+        save_config_node(PERSIST_KEY_FAV_FILTER, bool(self.filter_enabled))
         self._update_filter_button_ui()
         self._apply_row_visibility()
 
