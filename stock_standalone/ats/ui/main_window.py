@@ -1962,13 +1962,17 @@ class ATSMainWindow(QMainWindow):
             return
         try:
             with CONFIG_FILE_LOCK:
+                cur_real_q = self._get_real_query() if hasattr(self, '_get_real_query') else ""
+                last_q_to_save = cur_real_q if cur_real_q else getattr(self, "last_query", "")
+                self.last_query = last_q_to_save
+                
                 data = {
                     "history1": self.search_histories.get("history1", []),
                     "history2": self.search_histories.get("history2", []),
                     "history3": self.search_histories.get("history3", []),
                     "history4": self.search_histories.get("history4", []),
                     "history5": self.search_histories.get("history5", []),
-                    "last_query": getattr(self, "last_query", ""),
+                    "last_query": last_q_to_save,
                     "last_group": self.history_selector.currentText() if hasattr(self, 'history_selector') else "history5"
                 }
                 os.makedirs(os.path.dirname(os.path.abspath(filepath)), exist_ok=True)
@@ -2429,35 +2433,37 @@ class ATSMainWindow(QMainWindow):
         self.query_combo.clear()
         self.query_combo.addItems(formatted_list)
         
-        restored = False
+        restored_idx = -1
         last_q = getattr(self, "last_query", "")
-        if last_q:
-            for display_text in formatted_list:
-                real_q = ""
-                if "  |  " in display_text:
-                    real_q = display_text.split("  |  ")[-1].strip()
-                else:
-                    real_q = display_text.strip()
-                if real_q == last_q:
-                    self.query_combo.setCurrentText(display_text)
-                    restored = True
-                    break
-            if not restored:
-                self.query_combo.setEditText(last_q)
-                restored = True
+        if last_q and h_list:
+            last_q_clean = " ".join(str(last_q).split()).strip()
+            for idx, item in enumerate(h_list):
+                item_q = item.get("query", "").strip() if isinstance(item, dict) else str(item).strip()
+                item_q_clean = " ".join(item_q.split()).strip()
+                item_disp = self._format_history_item_local(item)
+                item_disp_clean = " ".join(item_disp.split()).strip()
                 
-        if not restored:
-            if formatted_list:
-                self.query_combo.setCurrentIndex(0)
-            else:
-                self.query_combo.setCurrentText("")
+                if (item_q == last_q or 
+                    item_q_clean == last_q_clean or 
+                    item_disp == last_q or 
+                    item_disp_clean == last_q_clean or
+                    (item_q_clean and item_q_clean in last_q_clean)):
+                    restored_idx = idx
+                    break
+                
+        if restored_idx >= 0:
+            self.query_combo.setCurrentIndex(restored_idx)
+        elif formatted_list:
+            self.query_combo.setCurrentIndex(0)
+        else:
+            self.query_combo.setCurrentText("")
                 
         self.query_combo.blockSignals(False)
         if self.query_combo.lineEdit():
             from PyQt6.QtCore import QTimer
             QTimer.singleShot(50, lambda: self.query_combo.lineEdit().setCursorPosition(0))
         
-        # 默认应用并加载最前面的（最新一条）历史过滤公式
+        # 默认应用并加载当前历史过滤公式
         self.apply_filter()
 
     def _format_history_item_local(self, item):
@@ -2472,34 +2478,55 @@ class ATSMainWindow(QMainWindow):
             parts.append(note)
         if hit != "" and hit is not None: 
             parts.append(f"[Hit: {hit}]")
-        parts.append(q)
+        if q:
+            parts.append(q)
         return "  |  ".join(parts)
 
     def _get_real_query(self):
         text = self.query_combo.currentText().strip()
         if not text:
             return ""
+        text_clean = " ".join(text.split()).strip()
+        
         # 1. 优先从当前活跃历史组中匹配原始完整记录 (保留 \n 和多行排版)
         group = self.history_selector.currentText() if hasattr(self, 'history_selector') else "history5"
         h_list = self.search_histories.get(group, []) if hasattr(self, 'search_histories') else []
         for item in h_list:
             if isinstance(item, dict):
+                orig_q = item.get("query", "").strip()
                 disp = self._format_history_item_local(item)
-                if disp == text or item.get("query", "").strip() == text:
-                    return item.get("query", "").strip()
+                disp_clean = " ".join(disp.split()).strip()
+                orig_q_clean = " ".join(orig_q.split()).strip()
+                if (text == disp or text_clean == disp_clean or 
+                    text == orig_q or text_clean == orig_q_clean or
+                    (orig_q_clean and orig_q_clean in text_clean)):
+                    return orig_q
+                    
         # 2. 检查其他历史组
         if hasattr(self, 'search_histories'):
             for g, items in self.search_histories.items():
                 if g == group: continue
                 for item in items:
                     if isinstance(item, dict):
+                        orig_q = item.get("query", "").strip()
                         disp = self._format_history_item_local(item)
-                        if disp == text or item.get("query", "").strip() == text:
-                            return item.get("query", "").strip()
-        # 3. 兜底剥离前缀标签与 Hit
-        if "  |  " in text:
-            return text.split("  |  ")[-1].strip()
-        return text
+                        disp_clean = " ".join(disp.split()).strip()
+                        orig_q_clean = " ".join(orig_q.split()).strip()
+                        if (text == disp or text_clean == disp_clean or 
+                            text == orig_q or text_clean == orig_q_clean or
+                            (orig_q_clean and orig_q_clean in text_clean)):
+                            return orig_q
+                            
+        # 3. 兜底剥离前缀标题与 [Hit: xxx] 标签
+        import re
+        cleaned = text
+        cleaned = re.sub(r'^\s*【[^】]*】\s*(?:\||\s)*', '', cleaned)
+        cleaned = re.sub(r'^\s*\[Hit:\s*\d+\]\s*(?:\||\s)*', '', cleaned)
+        if "  |  " in cleaned:
+            cleaned = cleaned.split("  |  ")[-1].strip()
+        elif " | " in cleaned:
+            cleaned = cleaned.split(" | ")[-1].strip()
+        return cleaned.strip()
 
     def calculate_history_hits_ui(self):
         test_df = self.get_test_df_for_hits()
@@ -2537,11 +2564,18 @@ class ATSMainWindow(QMainWindow):
         
         if raw_q:
             matched_display = None
+            matched_idx = -1
+            raw_q_clean = " ".join(raw_q.split()).strip()
             for idx, item in enumerate(target):
-                if item.get("query") == raw_q:
+                item_q = item.get("query", "").strip()
+                item_q_clean = " ".join(item_q.split()).strip()
+                if item_q == raw_q or item_q_clean == raw_q_clean:
+                    matched_idx = idx
                     matched_display = self._format_history_item_local(item)
                     break
-            if matched_display:
+            if matched_idx >= 0:
+                self.query_combo.setCurrentIndex(matched_idx)
+            elif matched_display:
                 self.query_combo.setCurrentText(matched_display)
             else:
                 self.query_combo.setCurrentText(current_val)
@@ -2582,6 +2616,7 @@ class ATSMainWindow(QMainWindow):
     def apply_filter(self):
         query = self._get_real_query()
         self.query_expr = query
+        self.last_query = query
         
         # 1. 计算当前过滤条件在全市场 current_df 中的匹配集合
         self.filtered_codes_set = set()
@@ -2623,8 +2658,11 @@ class ATSMainWindow(QMainWindow):
                 
                 # 同步回写保存
                 self._save_search_history_data()
-                
                 self._on_history_group_changed()
+            else:
+                self._save_search_history_data()
+        else:
+            self._save_search_history_data()
                 
         # 2. 广播更新主界面三大 Tab 看板 (重点关注, 回调跟踪器, 新股次新股)
         if hasattr(self, 'favorite_panel') and hasattr(self.favorite_panel, '_apply_row_visibility'):
@@ -2653,9 +2691,11 @@ class ATSMainWindow(QMainWindow):
     def clear_filter(self):
         self.query_combo.setCurrentText("")
         self.query_expr = ""
+        self.last_query = ""
         self.filtered_codes_set = set()
         from ats.ui.styles import save_config_node
         save_config_node("ats_query_expr", "")
+        self._save_search_history_data()
         
         # 广播清空过滤状态至三大 Tab 看板
         if hasattr(self, 'favorite_panel') and hasattr(self.favorite_panel, '_apply_row_visibility'):

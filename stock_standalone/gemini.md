@@ -1,3 +1,14 @@
+## 2026-08-26 21:35
+- [x] **彻底修复 History 策略选择后未正确持久化与多行带标题/注释策略 Hit 命中测试与展示格式 (`main_window.py`, `tests/test_history_persistence_and_multiline_hit.py`, `gemini.md`)**：
+    - [x] **History 选中状态持久化断链根因定位与修复**：
+        - 纠正了 `apply_filter`、`query_combo` 切换与 `clear_filter` 时未同步更新 `self.last_query` 的漏洞；
+        - 修复了 `_on_history_group_changed` 恢复 `last_query` 时单行与多行格式 `\n` 不匹配导致静默回退到第一项的缺陷；
+        - 在 `_save_search_history_data` 中强制双向绑定 `_get_real_query()`，确保重启或切换分组后 100% 恢复最后选中的策略；
+    - [x] **多行复杂策略（如双模态蓄势起爆策略）Hit 命中测试与展示增强**：
+        - 优化 `_format_history_item_local` 与 `_get_real_query`，支持前缀标题 `【...】`、`[Hit: xxx]` 标签与原始量化公式在多模态下的互逆精准提取；
+        - 优化 `calculate_history_hits_ui` 在批测完成后根据原始 query 稳健恢复选中项与光标；
+    - [x] **全套自动化测试 16 项 100% 全部通过**。
+
 ## 2026-08-26 21:08
 - [x] **彻底根治所有面板策略过滤选项持久化覆盖与重启回弹 Bug (`favorite_panel.py`, `swing_table.py`, `new_stock_panel.py`, `sector_detail_dialog.py`, `styles.py`, `main_window.py`, `tests/test_ats_tabs_strategy_filter.py`)**：
     - [x] **根因全面排查与定位**：
