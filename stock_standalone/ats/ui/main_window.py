@@ -2467,6 +2467,26 @@ class ATSMainWindow(QMainWindow):
 
     def _get_real_query(self):
         text = self.query_combo.currentText().strip()
+        if not text:
+            return ""
+        # 1. 优先从当前活跃历史组中匹配原始完整记录 (保留 \n 和多行排版)
+        group = self.history_selector.currentText() if hasattr(self, 'history_selector') else "history5"
+        h_list = self.search_histories.get(group, []) if hasattr(self, 'search_histories') else []
+        for item in h_list:
+            if isinstance(item, dict):
+                disp = self._format_history_item_local(item)
+                if disp == text or item.get("query", "").strip() == text:
+                    return item.get("query", "").strip()
+        # 2. 检查其他历史组
+        if hasattr(self, 'search_histories'):
+            for g, items in self.search_histories.items():
+                if g == group: continue
+                for item in items:
+                    if isinstance(item, dict):
+                        disp = self._format_history_item_local(item)
+                        if disp == text or item.get("query", "").strip() == text:
+                            return item.get("query", "").strip()
+        # 3. 兜底剥离前缀标签与 Hit
         if "  |  " in text:
             return text.split("  |  ")[-1].strip()
         return text

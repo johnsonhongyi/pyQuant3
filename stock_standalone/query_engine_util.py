@@ -513,44 +513,85 @@ class PandasQueryEngine:
         return ctx
 
     def _preprocess_query(self, query_str: str) -> str:
-        """精准预处理：解构隐式字符串连接的同时，保护函数内部合法的引号，并自动展开自适应重复语法"""
+        """精准预处理：智能脱敏多行/单行混杂的 # 注释，保护函数内部合法的引号，解构隐式字符串连接，并自动展开自适应重复语法"""
         raw_input = query_str.strip()
         if not raw_input: return ""
 
-        # Step 0: 自动展开自适应重复与区间语法 (例如: lastp{1-5}d > ma60{1-5}d)
-        if '{' in raw_input and '}' in raw_input:
-            raw_input = self._expand_special_syntax(raw_input)
+        # Step 1: 逐段与逐行智能脱敏 (深度支持多行脚本及被压扁为单行时混入的 # 注释)
+        def _clean_segment(s_raw: str) -> str:
+            s = s_raw.strip()
+            if not s:
+                return ''
+                
+            # 1. 物理移除行首赋值: var = (注意排除双等号 ==)
+            s = re.sub(r'^\s*[a-zA-Z_]\w*\s*=(?!=)\s*', '', s)
 
-        # Step 1: 逐行扫描与智能脱敏 (增强支持多行变单行时混入的 # 注释)
+            # 2. 保护单双引号内的字符串常量（如 '芯片', "PCB"）
+            quotes_map = {}
+            def _quote_repl(m):
+                key = f'__QUOTE_{len(quotes_map)}__'
+                quotes_map[key] = m.group(0)
+                return key
+                
+            s_protected = re.sub(r'(?:\'[^\']*\'|\"[^\"]*\")', _quote_repl, s)
+            
+            # 3. 移除包含中文或说明性内容的括号 (如 (拒绝空头排列), (A: abs 振幅剧烈试盘 OR B: 极度缩量小步垫高成本))
+            while True:
+                s_new = re.sub(r'\([^\(\)]*[\u4e00-\u9fa5][^\(\)]*\)', ' ', s_protected)
+                if s_new == s_protected:
+                    break
+                s_protected = s_new
+                
+            # 4. 剥离 # 开头的注释：跳过注释中文说明，精准提取随后的代码起点
+            def _strip_comment_chunk(match):
+                chunk = match.group(0)
+                # 严格代码起点特征 (必须为操作符、逻辑占位符或带有操作符的变量，杜绝中文句子中提及变量名误判):
+                code_start_pattern = r'(?<![\w\u4e00-\u9fa5])(?:\b(?:and|or|not)\b\s+(?:\(*\s*\{\s*(?:or|and)\s*:|\(*\s*[a-zA-Z_]\w*|\(*\s*[\d\.\-])|\(*\s*\{\s*(?:or|and)\s*:|\(*\s*[a-zA-Z_]\w*\s*(?:>=|<=|==|!=|>|<|\*|\/|\+|\-|\.|\bin\b|\bis\b))'
+                m = re.search(code_start_pattern, chunk[1:], flags=re.IGNORECASE)
+                if m:
+                    code_cand = chunk[1 + m.start():].strip()
+                    # 若提取内容仍然以中文字符结尾或主要是中文，说明纯为描述文字，直接丢弃
+                    if not re.search(r'[\u4e00-\u9fa5]$', code_cand):
+                        return ' ' + code_cand
+                return ' '
+                
+            s_cleaned = re.sub(r'#[^#]*', _strip_comment_chunk, s_protected)
+            
+            # 5. 还原被保护的引号字符串
+            for k, v in quotes_map.items():
+                s_cleaned = s_cleaned.replace(k, v)
+                
+            return s_cleaned.strip()
+
         processed_lines = []
         for line in raw_input.splitlines():
-            # 1. 物理移除行首赋值: var = (注意排除双等号 ==)
-            line_no_assign = re.sub(r'^\s*[a-zA-Z_]\w*\s*=(?!=)\s*', '', line)
-            
-            # 2. 剥离注释：整行以 # 开头直接忽略，行内包含 # 则剥离 # 之后的内容
-            if line_no_assign.strip().startswith('#'):
+            cleaned_line = _clean_segment(line)
+            if not cleaned_line:
                 continue
-            code = line_no_assign.split('#')[0].rstrip()
-            if not code.strip(): continue
-            
-            # 3. [KEY FIX] 精准识别 Implicit Concatenation 特征
-            if re.match(r'^\s*[\(\s]*(["\']).*\1[\)\s]*$', code):
-                quotes = re.findall(r'(["\'])(.*?)\1', code)
+                
+            # 精准识别 Implicit Concatenation 特征
+            if re.match(r'^\s*[\(\s]*(["\']).*\1[\)\s]*$', cleaned_line):
+                quotes = re.findall(r'(["\'])(.*?)\1', cleaned_line)
                 if quotes:
                     inner_merged = "".join([q[1] for q in quotes])
-                    shell = re.sub(r'(["\']).*?\1', ' {} ', code)
+                    shell = re.sub(r'(["\']).*?\1', ' {} ', cleaned_line)
                     reconstructed = shell.format(inner_merged)
                     processed_lines.append(reconstructed)
                 else:
-                    processed_lines.append(code)
+                    processed_lines.append(cleaned_line)
             else:
-                processed_lines.append(code)
+                processed_lines.append(cleaned_line)
         
         # Step 2: 空间转换与备注过滤
         res = " ".join(processed_lines).replace('df_all', 'df').strip()
         res = re.sub(r'^\s*\(([\u4e00-\u9fa5\-]+)\)\s*(?=\()', '', res) 
         res = re.sub(r'^\s*[\u4e00-\u9fa5\-]+\s*(?=\()', '', res)
+
+        # Step 3: 自动展开自适应重复与区间语法 (例如: lastp{1-5}d > ma60{1-5}d 与 {OR: ...})
+        if '{' in res and '}' in res:
+            res = self._expand_special_syntax(res)
         
+        # Step 4: 规范化 .str.contains 字符串搜索
         if '.str.contains(' in res:
             def _contains_repl(match):
                 quote = match.group(1)
