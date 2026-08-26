@@ -373,6 +373,11 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         self.combo_tier_filter = QComboBox()
         self.combo_tier_filter.addItems([
             "全部梯队", 
+            "🌅 开盘起点与跃迁",
+            "🚀 低开高走反包",
+            "💎 高开放量锁筹",
+            "⚡ 步步高升跃迁",
+            "🌊 平开急速点火",
             "💎 冰点反身性龙",
             "💎 地量地价起爆",
             "💎 冰点反身潜伏",
@@ -386,6 +391,7 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
             "⭐ 20cm强势首板",
             "🔥 强势主升首板", 
             "⚡ 大阳冲板未封",
+            "⚠️ 高开低走预警",
             "💥 曾涨停炸板"
         ])
         self.combo_tier_filter.setMinimumWidth(135)
@@ -447,6 +453,13 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         self.btn_mode_today.setStyleSheet(self._get_btn_style(active=True))
         self.btn_mode_today.clicked.connect(lambda: self._switch_mode("TODAY"))
         ctrl_layout.addWidget(self.btn_mode_today)
+
+        self.btn_mode_bubble = QPushButton("🌅 起点雷达")
+        self.btn_mode_bubble.setToolTip("全网开盘起点与极速冒泡阶梯跃迁挖掘雷达 (低开高走反包 / 高开放量锁筹 / 0-2-4-6% 步步高升)")
+        self.btn_mode_bubble.setCheckable(True)
+        self.btn_mode_bubble.setStyleSheet(self._get_btn_style(active=False))
+        self.btn_mode_bubble.clicked.connect(lambda: self._switch_mode("BUBBLE"))
+        ctrl_layout.addWidget(self.btn_mode_bubble)
 
         self.btn_mode_radar = QPushButton("🎯 盘中上车雷达")
         self.btn_mode_radar.setToolTip("盘中动态潜伏与梯度上车雷达 (VWAP均价回踩低吸 / 半路点火确认 / 临界抢跑)")
@@ -597,6 +610,13 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         header.customContextMenuRequested.connect(self._show_header_context_menu)
         header.sectionResized.connect(self._on_header_section_resized)
 
+        # 模式独立列宽防抖保存定时器
+        self._is_restoring_header = False
+        self._header_save_timer = QTimer(self)
+        self._header_save_timer.setSingleShot(True)
+        self._header_save_timer.setInterval(400)
+        self._header_save_timer.timeout.connect(self._save_current_header_state)
+
         setup_header_persistence(self.table, "ats_daily_limit_up_table", self)
         main_layout.addWidget(self.table)
 
@@ -605,9 +625,58 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         self.lbl_status.setStyleSheet("color: #8e8e93; font-size: 8.5pt;")
         main_layout.addWidget(self.lbl_status)
 
+    def _get_current_header_config_key(self, mode: Optional[str] = None) -> str:
+        """获取当前模式对应的专属持久化配置 key"""
+        target_mode = mode or getattr(self, "current_mode", "TODAY")
+        if target_mode == "BUBBLE":
+            return "ats_daily_limit_up_table_bubble"
+        return "ats_daily_limit_up_table"
+
+    def _save_current_header_state(self):
+        """保存当前模式的列宽状态至专属配置 key"""
+        if getattr(self, '_is_populating', False) or getattr(self, '_is_restoring_header', False):
+            return
+        key = self._get_current_header_config_key()
+        header = self.table.horizontalHeader()
+        if header:
+            try:
+                state_hex = header.saveState().toHex().data().decode("utf-8")
+                save_config_node(key, state_hex)
+                logger.debug(f"[DailyLimitUpDialog] Saved header state for key: {key}")
+            except Exception as e:
+                logger.debug(f"Save header failed for {key}: {e}")
+
+    def _restore_header_state_for_mode(self, mode: str):
+        """
+        根据当前模式恢复列宽状态：
+        新 Tab (BUBBLE) 默认读取自身配置；若尚无专属配置，则回退读取默认持久化配置；
+        用户在当前 Tab 调整列宽后，自动保存至专属配置 key。
+        """
+        self._is_restoring_header = True
+        key = self._get_current_header_config_key(mode)
+        header = self.table.horizontalHeader()
+        if header:
+            try:
+                state_hex = load_config_node(key)
+                # 默认使用其他的持久化 (如果 BUBBLE 模式尚无独立保存配置，回退使用主表格持久化)
+                if not state_hex and mode == "BUBBLE":
+                    state_hex = load_config_node("ats_daily_limit_up_table")
+                if state_hex and isinstance(state_hex, str):
+                    header.blockSignals(True)
+                    header.restoreState(QByteArray.fromHex(state_hex.encode("utf-8")))
+                    header.blockSignals(False)
+            except Exception as e:
+                logger.debug(f"Restore header failed for {key}: {e}")
+            finally:
+                header.blockSignals(True)
+                for col in range(self.table.columnCount()):
+                    header.setSectionResizeMode(col, QHeaderView.ResizeMode.Interactive)
+                header.blockSignals(False)
+                self._is_restoring_header = False
+
     def _on_header_section_resized(self, logicalIndex: int, oldSize: int, newSize: int):
-        """当用户手动拖拽调整表格列宽时，触发防抖持久化保存"""
-        if getattr(self, '_is_populating', False):
+        """当用户手动拖拽调整表格列宽时，触发防抖持久化保存到当前模式专属 key"""
+        if getattr(self, '_is_populating', False) or getattr(self, '_is_restoring_header', False):
             return
         if hasattr(self, '_header_save_timer'):
             self._header_save_timer.start()
@@ -656,6 +725,8 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
     def _switch_mode(self, mode: str):
         self.current_mode = mode
         self.btn_mode_today.setChecked(mode == "TODAY")
+        if hasattr(self, "btn_mode_bubble"):
+            self.btn_mode_bubble.setChecked(mode == "BUBBLE")
         self.btn_mode_radar.setChecked(mode == "RADAR")
         self.btn_mode_3d.setChecked(mode == "3D")
         self.btn_mode_5d.setChecked(mode == "5D")
@@ -663,6 +734,8 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         self.btn_mode_ladder.setChecked(mode == "LADDER")
 
         self.btn_mode_today.setStyleSheet(self._get_btn_style(mode == "TODAY"))
+        if hasattr(self, "btn_mode_bubble"):
+            self.btn_mode_bubble.setStyleSheet(self._get_btn_style(mode == "BUBBLE"))
         self.btn_mode_radar.setStyleSheet(self._get_btn_style(mode == "RADAR"))
         self.btn_mode_3d.setStyleSheet(self._get_btn_style(mode == "3D"))
         self.btn_mode_5d.setStyleSheet(self._get_btn_style(mode == "5D"))
@@ -683,7 +756,10 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
             date_str = self.combo_history_date.currentText()
             self.selected_history_date = date_str
             self.current_mode = "HISTORY"
-            for btn in (self.btn_mode_today, self.btn_mode_radar, self.btn_mode_3d, self.btn_mode_5d, self.btn_mode_10d, self.btn_mode_ladder):
+            btns = [self.btn_mode_today, self.btn_mode_radar, self.btn_mode_3d, self.btn_mode_5d, self.btn_mode_10d, self.btn_mode_ladder]
+            if hasattr(self, "btn_mode_bubble"):
+                btns.append(self.btn_mode_bubble)
+            for btn in btns:
                 btn.setChecked(False)
                 btn.setStyleSheet(self._get_btn_style(False))
             self._refresh_data_for_mode()
@@ -764,6 +840,9 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
                         ).start()
             else:
                 self.current_records = self.engine.get_records_by_date(effective_trade_date)
+        elif self.current_mode == "BUBBLE":
+            # 🌅 开盘起点与极速阶梯跃迁挖掘雷达
+            self.current_records = self.engine.get_opening_bubble_records(current_df=df)
         elif self.current_mode == "RADAR":
             # 🎯 盘中上车雷达视图
             self.current_records = self.engine.get_intraday_radar_records(current_df=df)
@@ -820,10 +899,30 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
                 if kw not in c and kw not in n and kw not in cat:
                     continue
 
-            # 2. 梯队分类过滤
+            # 2. 梯队与开盘形态过滤
             if tier_filter != "全部梯队":
                 tag = str(r.get("tier_tag", ""))
-                if tier_filter not in tag:
+                p_tag = str(r.get("pattern_tag", ""))
+                p_desc = str(r.get("pattern_desc", ""))
+                p_type = str(r.get("pattern_type", ""))
+
+                matched = False
+                if tier_filter in tag or tier_filter in p_tag or tier_filter in p_desc:
+                    matched = True
+                elif tier_filter == "🌅 开盘起点与跃迁" and (r.get("is_bubble_hit", False) or "跃迁" in p_tag or "低开" in p_tag or "高开" in p_tag):
+                    matched = True
+                elif "低开高走" in tier_filter and ("低开高走" in tag or "低开高走" in p_tag or p_type == "LOW_OPEN_HIGH_CLIMB"):
+                    matched = True
+                elif "高开放量" in tier_filter and ("高开" in tag or "高开" in p_tag or p_type == "HIGH_OPEN_CONSOLIDATION"):
+                    matched = True
+                elif "步步高升" in tier_filter and ("步步高升" in tag or "步步高升" in p_tag or p_type == "STEP_BUBBLE_UP"):
+                    matched = True
+                elif "平开" in tier_filter and ("平开" in tag or "平开" in p_tag or p_type == "FLAT_OPEN_SPARK"):
+                    matched = True
+                elif "高开低走" in tier_filter and ("高开低走" in tag or "高开低走" in p_tag or p_type == "HIGH_OPEN_DROP"):
+                    matched = True
+
+                if not matched:
                     continue
 
             # 3. ⏱️ 盘中时间片生命周期过滤 (全天全时段时跳过过滤)
