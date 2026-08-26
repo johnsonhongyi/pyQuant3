@@ -263,6 +263,7 @@ class SBCChartCanvas(QWidget):
         # ⚡ 快捷键 R 自适应周期策略测算结果与标的代码
         self.code = ""
         self.strategy_eval_result = None
+        self.auto_eval_enabled: bool = True
 
         self.setMinimumSize(320, 180)
         self.setStyleSheet("background-color: #0c0d14;")
@@ -1098,141 +1099,94 @@ class SBCChartCanvas(QWidget):
                     painter.setPen(QPen(fg_color))
                     painter.drawText(tag_x + 5, tag_y + th_k - 4, lbl_text)
 
-        # 🌟 快捷键 R 自适应策略测算浮动 HUD (分时图自适应折行)
+        # 🌟 快捷键 R 自适应策略测算浮动 HUD (精简高对比度轻量卡片，靠左下放置不遮挡右侧K线与价格轴)
         if getattr(self, 'strategy_eval_result', None):
-            res_strat = self.strategy_eval_result
-            is_matched = res_strat.get("is_matched", False)
-            strat_period = str(res_strat.get("period", self.period_mode)).upper()
-            if is_matched:
-                score_v = res_strat.get("score", 0)
-                entry_p = float(res_strat.get("entry_price", 0.0))
-                stop_p = float(res_strat.get("stop_loss", 0.0))
-                tgt_p1 = float(res_strat.get("target_price_1", 0.0))
-                ch_cn = str(res_strat.get("channel_type_cn", "通道"))
-                pat_name = str(res_strat.get("pattern_name", ""))
-                pat_str = f"·{pat_name}" if pat_name else ""
-                hud_text = f"🎯 [R键测算·{strat_period}·{ch_cn}{pat_str}] 得分:{score_v}分 | 介入:{entry_p:.2f} | 止损:{stop_p:.2f} | 目标:{tgt_p1:.2f}"
-                self._draw_adaptive_hud_box(painter, margin_left, margin_top, chart_w, chart_h, hud_text, is_matched=True)
-            else:
-                fail_reason = str(res_strat.get("reason", "未触发反转突破信号"))
-                ch_cn = str(res_strat.get("channel_type_cn", "通道"))
-                hud_text = f"⚠️ [R键测算·{strat_period}·{ch_cn}] {fail_reason}"
-                self._draw_adaptive_hud_box(painter, margin_left, margin_top, chart_w, chart_h, hud_text, is_matched=False)
+            self._draw_compact_strategy_hud(painter, margin_left, margin_top, chart_w, chart_h, self.strategy_eval_result)
 
-    def _draw_adaptive_hud_box(
+    def _draw_compact_strategy_hud(
         self,
         painter: QPainter,
         margin_left: int,
         margin_top: int,
         chart_w: int,
         main_h: int,
-        hud_text: str,
-        is_matched: bool = True
+        res_strat: dict
     ):
         """
-        绘制自适应折行 HUD 胶囊卡片：
-        根据当前 chart_w 视图宽度智能换行，绝不横向溢出，支持多行排版、半透明毛玻璃与高对比度边框
+        绘制极致通透、位置靠左下、重点信息醒目高对比度的策略测算轻量 HUD
+        - 彻底省略冗长模式文本（第一行）；
+        - 位置调低至左下角，彻底避开右侧最新K线、分时底部与价格刻度；
+        - 背景 80 超轻通透毛玻璃，清晰看透背后所有指标；
+        - 关键信息分段高对比度高亮 (得分:金黄, 介入:翡翠绿, 止损:珊瑚红, 目标:青蓝光)
         """
-        if not hud_text:
+        if not res_strat:
             return
 
-        font = QFont("Microsoft YaHei", 8, QFont.Weight.Bold if is_matched else QFont.Weight.Normal)
+        is_matched = res_strat.get("is_matched", False)
+        if not is_matched:
+            fail_reason = str(res_strat.get("reason", "未触发反转突破信号"))
+            hud_text = f"⚠️ 测算提示: {fail_reason}"
+            font = QFont("Microsoft YaHei", 8, QFont.Weight.Normal)
+            painter.setFont(font)
+            fm = painter.fontMetrics()
+            tw = fm.horizontalAdvance(hud_text) + 16
+            th = fm.height() + 6
+            x = int(margin_left + 8)
+            y = int(margin_top + main_h - th - 3)
+            painter.setPen(QPen(QColor("#475569"), 1.0))
+            painter.setBrush(QBrush(QColor(15, 23, 42, 85)))
+            painter.drawRoundedRect(x, y, tw, th, 3, 3)
+            painter.setPen(QPen(QColor("#94A3B8")))
+            painter.drawText(x + 8, y + th - 4, hud_text)
+            return
+
+        score_v = res_strat.get("score", 0)
+        entry_p = float(res_strat.get("entry_price", 0.0))
+        stop_p = float(res_strat.get("stop_loss", 0.0))
+        tgt_p1 = float(res_strat.get("target_price_1", 0.0))
+
+        # 构建高对比度分段信息: (文本, 颜色)
+        segments = [
+            ("🎯", QColor("#FFD700")),
+            (f"得分:{score_v}分", QColor("#FFD700")),
+            ("|", QColor("#4B5563")),
+            (f"介入:{entry_p:.2f}", QColor("#00FF88")),
+            ("|", QColor("#4B5563")),
+            (f"止损:{stop_p:.2f}", QColor("#FF5555")),
+            ("|", QColor("#4B5563")),
+            (f"目标:{tgt_p1:.2f}", QColor("#00E5FF")),
+        ]
+
+        font = QFont("Microsoft YaHei", 8, QFont.Weight.Bold)
         painter.setFont(font)
         fm = painter.fontMetrics()
 
-        # 动态计算最大允许宽度 (为左右留出边距，最大不超过 chart_w 的 85% 且不超过 480px)
-        max_box_w = max(180, min(int(chart_w * 0.85), 480))
-        max_text_w = max(140, max_box_w - 20)
+        # 计算总宽度
+        total_w = sum(fm.horizontalAdvance(text) + 5 for text, _ in segments) + 10
+        total_h = fm.height() + 6
 
-        # 智能分行：优先按 ' | ' 与 '] ' 语义断句
-        lines = []
-        if fm.horizontalAdvance(hud_text) <= max_text_w:
-            lines = [hud_text]
-        else:
-            # 语义切分 tokens
-            raw_segments = hud_text.split(" | ")
-            tokens = []
-            for s_idx, seg in enumerate(raw_segments):
-                if s_idx == 0 and "] " in seg:
-                    p1, p2 = seg.split("] ", 1)
-                    tokens.append(p1 + "]")
-                    tokens.append(p2)
-                else:
-                    tokens.append(seg)
+        # 💡 位置调低：贴在主图左下侧 (margin_left + 8)，完全避开右侧走势与刻度
+        hud_x = int(margin_left + 8)
+        hud_y = int(margin_top + main_h - total_h - 3)
 
-            cur_line = ""
-            for tok in tokens:
-                if not cur_line:
-                    if fm.horizontalAdvance(tok) > max_text_w:
-                        # 字符级强制切分
-                        sub_cur = ""
-                        for ch in tok:
-                            if fm.horizontalAdvance(sub_cur + ch) <= max_text_w:
-                                sub_cur += ch
-                            else:
-                                if sub_cur:
-                                    lines.append(sub_cur)
-                                sub_cur = ch
-                        if sub_cur:
-                            cur_line = sub_cur
-                    else:
-                        cur_line = tok
-                else:
-                    sep = " | " if (not cur_line.endswith("]") and not tok.startswith("[")) else " "
-                    cand_line = cur_line + sep + tok
-                    if fm.horizontalAdvance(cand_line) <= max_text_w:
-                        cur_line = cand_line
-                    else:
-                        lines.append(cur_line)
-                        if fm.horizontalAdvance(tok) > max_text_w:
-                            sub_cur = ""
-                            for ch in tok:
-                                if fm.horizontalAdvance(sub_cur + ch) <= max_text_w:
-                                    sub_cur += ch
-                                else:
-                                    if sub_cur:
-                                        lines.append(sub_cur)
-                                    sub_cur = ch
-                            cur_line = sub_cur
-                        else:
-                            cur_line = tok
-            if cur_line:
-                lines.append(cur_line)
+        # 超轻通透背景 (仅 85 透明度，通透看清后面所有均线走势)
+        painter.setPen(QPen(QColor("#00FF88"), 1.0))
+        painter.setBrush(QBrush(QColor(8, 16, 24, 85)))
+        painter.drawRoundedRect(hud_x, hud_y, total_w, total_h, 3, 3)
 
-        if not lines:
-            lines = [hud_text]
+        # 分段彩色高亮绘制
+        curr_x = hud_x + 6
+        draw_y = hud_y + total_h - 5
+        for text, col in segments:
+            painter.setPen(QPen(col))
+            painter.drawText(curr_x, draw_y, text)
+            curr_x += fm.horizontalAdvance(text) + 5
 
-        line_h = fm.height() + 3
-        actual_max_w = max(fm.horizontalAdvance(ln) for ln in lines)
-        box_w = min(max_box_w, actual_max_w + 18)
-        box_h = len(lines) * line_h + 10
-
-        hud_x = int(margin_left + chart_w - box_w - 6)
-        hud_y = int(margin_top + main_h - box_h - 6)
-
-        # 边界越界保护
-        hud_x = max(int(margin_left + 6), hud_x)
-        hud_y = max(int(margin_top + 6), hud_y)
-
-        # 半透明毛玻璃背景
-        if is_matched:
-            border_col = QColor("#38BDF8")
-            bg_col = QColor(14, 42, 58, 225)
-            text_col = QColor("#38BDF8")
-        else:
-            border_col = QColor("#94A3B8")
-            bg_col = QColor(20, 24, 34, 220)
-            text_col = QColor("#CBD5E1")
-
-        painter.setPen(QPen(border_col, 1.2))
-        painter.setBrush(QBrush(bg_col))
-        painter.drawRoundedRect(hud_x, hud_y, box_w, box_h, 4, 4)
-
-        # 逐行绘制
-        painter.setPen(QPen(text_col))
-        for r_idx, ln_str in enumerate(lines):
-            draw_y = hud_y + 6 + (r_idx + 1) * line_h - 4
-            painter.drawText(hud_x + 9, int(draw_y), ln_str)
+    def _draw_adaptive_hud_box(self, painter, margin_left, margin_top, chart_w, main_h, hud_text, is_matched=True):
+        """兼容老接口调用，直接路由至紧凑高对比度 HUD"""
+        res_strat = getattr(self, 'strategy_eval_result', None)
+        if res_strat:
+            self._draw_compact_strategy_hud(painter, margin_left, margin_top, chart_w, main_h, res_strat)
 
     def _paint_kline(self, painter: QPainter, margin_left: int, margin_top: int, chart_w: int, chart_h: int):
         df_view, start_i, end_i = self._get_visible_slice()
@@ -1916,7 +1870,7 @@ class SBCChartCanvas(QWidget):
             painter.drawText(margin_left + 6, margin_top + 31, supp_info)
 
         # 11. 🌟 快捷键 R 自适应策略测算信号点与基准线绘制
-        if getattr(self, 'strategy_eval_result', None):
+        if getattr(self, 'auto_eval_enabled', True) and getattr(self, 'strategy_eval_result', None):
             res_strat = self.strategy_eval_result
             is_matched = res_strat.get("is_matched", False)
             strat_period = str(res_strat.get("period", self.period_mode)).upper()
@@ -1936,11 +1890,31 @@ class SBCChartCanvas(QWidget):
                 x_brk = k_to_x(brk_idx_local)
                 y_entry = k_to_y(entry_p) if (entry_p > 0 and min_p <= entry_p <= max_p) else k_to_y(closes[brk_idx_local])
 
-                # 11.1 高亮垂直介入指引虚线
-                painter.setPen(QPen(QColor(255, 0, 128, 200), 1.5, Qt.PenStyle.DashLine))
-                painter.drawLine(int(x_brk), int(margin_top + main_h), int(x_brk), int(margin_top))
+                # 11.1 遍历绘制与通达信 100% 完全对齐的【明亮绿色垂直细虚线】与【| 逆势先锋】标记
+                pioneer_list = res_strat.get("pioneer_sig_indices", [])
+                if not pioneer_list and brk_raw >= 0:
+                    pioneer_list = [brk_raw]
 
-                # 11.2 介入信号胶囊卡片
+                for p_idx_raw in pioneer_list:
+                    if p_idx_raw < 0:
+                        continue
+                    p_idx_local = p_idx_raw - start_i
+                    if 0 <= p_idx_local < n:
+                        x_p = k_to_x(p_idx_local)
+                        # 通达信同款贯穿上下的绿色细虚线
+                        painter.setPen(QPen(QColor("#00FF66"), 1.2, Qt.PenStyle.DashLine))
+                        painter.drawLine(int(x_p), int(margin_top + main_h), int(x_p), int(margin_top))
+
+                        # 通达信同款顶部【| 逆势先锋】绿色粗体文字
+                        painter.setFont(QFont("Microsoft YaHei", 8, QFont.Weight.Bold))
+                        painter.setPen(QPen(QColor("#00FF66")))
+                        painter.drawText(int(x_p + 3), int(margin_top + 14), "| 逆势先锋")
+
+                        # 通达信同款 K 棒底部【★逆势先锋】红绿指示
+                        y_k_low = k_to_y(lows[p_idx_local])
+                        painter.drawText(int(x_p - 24), int(min(margin_top + main_h - 4, y_k_low + 16)), "★逆势先锋")
+
+                # 11.2 介入信号胶囊卡片 (锚定在核心突破 K 棒)
                 entry_tag = f"🚀 介入点:{entry_p:.2f} ({score_v}分)"
                 painter.setFont(QFont("Microsoft YaHei", 8, QFont.Weight.Bold))
                 fm_e = painter.fontMetrics()
@@ -1949,8 +1923,8 @@ class SBCChartCanvas(QWidget):
                 tag_x_e = int(max(margin_left, min(margin_left + chart_w - tw_e, x_brk - tw_e / 2)))
                 tag_y_e = int(max(margin_top, min(margin_top + main_h - th_e, y_entry - th_e - 6)))
 
-                painter.setPen(QPen(QColor("#FF007F"), 1.2))
-                painter.setBrush(QBrush(QColor("#35001C")))
+                painter.setPen(QPen(QColor("#00FF66"), 1.2))
+                painter.setBrush(QBrush(QColor("#063018")))
                 painter.drawRoundedRect(tag_x_e, tag_y_e, tw_e, th_e, 3, 3)
                 painter.setPen(QPen(QColor("#FFFFFF")))
                 painter.drawText(tag_x_e + 6, tag_y_e + th_e - 5, entry_tag)
@@ -1973,18 +1947,11 @@ class SBCChartCanvas(QWidget):
                     painter.setPen(QPen(QColor("#10B981")))
                     painter.drawText(int(margin_left + chart_w - 95), int(y_tgt1 - 3), f"💎目标1:{tgt_p1:.2f}")
 
-                # 11.5 K线主图右下角 HUD 浮动诊断条 (自动根据视图宽度自适应折行)
-                ch_cn = str(res_strat.get("channel_type_cn", "通道"))
-                pat_name = str(res_strat.get("pattern_name", ""))
-                pat_str = f"·{pat_name}" if pat_name else ""
-                hud_text = f"🎯 [R键测算·{strat_period}·{ch_cn}{pat_str}] 得分:{score_v}分 | 介入:{entry_p:.2f} | 止损:{stop_p:.2f} | 目标:{tgt_p1:.2f}"
-                self._draw_adaptive_hud_box(painter, margin_left, margin_top, chart_w, main_h, hud_text, is_matched=True)
+                # 11.5 K线主图左下侧极简高对比度轻量 HUD (彻底省略冗长模式行，位置调低靠左避开K线与坐标)
+                self._draw_compact_strategy_hud(painter, margin_left, margin_top, chart_w, main_h, res_strat)
             else:
-                # 未命中时的浮动提示条 (自动根据视图宽度自适应折行)
-                fail_reason = str(res_strat.get("reason", "未触发反转突破信号"))
-                ch_cn = str(res_strat.get("channel_type_cn", "通道"))
-                hud_text = f"⚠️ [R键测算·{strat_period}·{ch_cn}] {fail_reason}"
-                self._draw_adaptive_hud_box(painter, margin_left, margin_top, chart_w, main_h, hud_text, is_matched=False)
+                # 未命中时的浮动提示条 (位置调低靠左)
+                self._draw_compact_strategy_hud(painter, margin_left, margin_top, chart_w, main_h, res_strat)
 
 
 VALID_SBC_PERIODS = ["1m", "2d", "3d", "5d", "5m", "15m", "30m", "60m", "day", "week", "month"]
@@ -1996,6 +1963,7 @@ class SBCIntradayChartDialog(QWidget):
     """
     _global_sbc_size: Optional[tuple] = None
     _global_sbc_geo: Optional[dict] = None
+    _global_auto_eval: bool = True  # 💡 全局维护自动测算状态开关
 
     def __init__(self, parent=None, code: str = "688826", engine: Optional[IntradayStrategyEngine] = None, initial_period_mode: Optional[str] = None):
         # 💡 保存主工作台引用用于边缘磁吸对齐，但向 Qt 构造函数传递 None
@@ -2006,6 +1974,7 @@ class SBCIntradayChartDialog(QWidget):
         self.code = str(code).zfill(6)
         self.engine = engine if engine else IntradayStrategyEngine.get_instance()
         self._initial_period_mode = initial_period_mode
+        self.auto_eval_enabled: bool = SBCIntradayChartDialog._global_auto_eval
 
         # 设置为彻底独立的顶层 Window (非模态，不置顶，不妨碍用户与其他窗口重叠与切换)
         self.setWindowFlags(
@@ -2116,10 +2085,9 @@ class SBCIntradayChartDialog(QWidget):
                 pass
         btn_linkage.clicked.connect(_on_send_linkage)
 
-        self.btn_eval_r = QPushButton("⚡ 测算 (R)")
-        self.btn_eval_r.setStyleSheet("background-color: #0e2a38; color: #38bdf8; font-weight: bold; border: 1px solid #0284c7; border-radius: 3px; padding: 2px 6px; font-size: 8.5pt;")
-        self.btn_eval_r.setToolTip("快捷键: R 键，自适应当前视图周期运行策略测算并在图上标记买卖介入点、止损与目标位")
-        self.btn_eval_r.clicked.connect(self._on_eval_r_clicked)
+        self.btn_eval_r = QPushButton("⚡ 测算 (开)")
+        self.btn_eval_r.clicked.connect(lambda: self._on_eval_r_clicked(toggle=True))
+        self._update_eval_btn_style()
 
         tb_layout.addStretch()
         tb_layout.addWidget(self.btn_eval_r)
@@ -2330,6 +2298,7 @@ class SBCIntradayChartDialog(QWidget):
             settings.setValue("sbc_window_size", {"width": geo_dict["width"], "height": geo_dict["height"]})
             settings.setValue(f"sbc_period_{self.code}", cur_period)
             settings.setValue("sbc_period_latest", cur_period)
+            settings.setValue("sbc_auto_eval_enabled", bool(getattr(self, "auto_eval_enabled", True)))
 
             # 2. 原子写入 JSON 配置文件
             cfg_path = _get_sbc_layout_cfg_path()
@@ -2343,6 +2312,7 @@ class SBCIntradayChartDialog(QWidget):
 
             data["sbc_window_geometry"] = geo_dict
             data["sbc_window_size"] = {"width": geo_dict["width"], "height": geo_dict["height"]}
+            data["sbc_auto_eval_enabled"] = bool(getattr(self, "auto_eval_enabled", True))
             if "sbc_geometries" not in data:
                 data["sbc_geometries"] = {}
             data["sbc_geometries"]["latest"] = geo_dict
@@ -2379,18 +2349,20 @@ class SBCIntradayChartDialog(QWidget):
             logger.debug(f"保存 SBC 窗口布局与周期异常: {e}")
 
     def _restore_sbc_geometry(self):
-        """【💾 物理恢复】从内存/JSON/QSettings 还原 SBC 全局统一窗口尺寸、坐标与看盘周期 (含越界与2/3屏幕规格保护)"""
+        """【💾 物理恢复】从内存/JSON/QSettings 还原 SBC 全局统一窗口尺寸、坐标、看盘周期与自动测算状态 (含越界与2/3屏幕规格保护)"""
         try:
             target_w, target_h = 680, 420
             x, y = 100, 100
             has_exact_pos = False
             restored_period = None
+            restored_auto_eval = None
 
-            # 0. 优先从类内存变量读取最新尺寸
+            # 0. 优先从类内存变量读取最新尺寸与测算状态
             if SBCIntradayChartDialog._global_sbc_size:
                 gw, gh = SBCIntradayChartDialog._global_sbc_size
                 if gw < 1000 and gh < 650:
                     target_w, target_h = gw, gh
+            restored_auto_eval = SBCIntradayChartDialog._global_auto_eval
 
             # 1. 优先读取 JSON 配置文件
             cfg_path = _get_sbc_layout_cfg_path()
@@ -2399,6 +2371,9 @@ class SBCIntradayChartDialog(QWidget):
                     with open(cfg_path, "r", encoding="utf-8") as f:
                         data = json.load(f)
                     
+                    if "sbc_auto_eval_enabled" in data:
+                        restored_auto_eval = bool(data["sbc_auto_eval_enabled"])
+
                     if "sbc_window_size" in data and isinstance(data["sbc_window_size"], dict):
                         sz = data["sbc_window_size"]
                         sw = int(sz.get("width", target_w))
@@ -2434,6 +2409,10 @@ class SBCIntradayChartDialog(QWidget):
             if target_w == 680 and target_h == 420:
                 try:
                     settings = QSettings("pyQuant3", "IntradayWorkbench")
+                    if restored_auto_eval is None:
+                        val_s = settings.value("sbc_auto_eval_enabled")
+                        if val_s is not None:
+                            restored_auto_eval = str(val_s).lower() in ("true", "1")
                     sz = settings.value("sbc_window_size")
                     if isinstance(sz, dict):
                         target_w = int(sz.get("width", target_w))
@@ -2450,6 +2429,11 @@ class SBCIntradayChartDialog(QWidget):
                         restored_period = settings.value(f"sbc_period_{self.code}") or settings.value("sbc_period_latest")
                 except Exception:
                     pass
+
+            if restored_auto_eval is not None:
+                self.auto_eval_enabled = bool(restored_auto_eval)
+                SBCIntradayChartDialog._global_auto_eval = self.auto_eval_enabled
+                self._update_eval_btn_style()
 
             # 3. 周期模式应用 (构造指定 > 历史恢复 > 默认 '1m')
             target_period = getattr(self, "_initial_period_mode", None) or restored_period or "1m"
@@ -2558,20 +2542,51 @@ class SBCIntradayChartDialog(QWidget):
         if hasattr(self, 'lbl_info') and self.lbl_info:
             self.lbl_info.setText(f"🔗 [F快捷联动] 已触发行情联动: {code} {name}")
 
-    def _on_eval_r_clicked(self):
-        """⚡ 快捷键 R / 按钮触发当前周期自适应策略测算与图上标记"""
+    def _update_eval_btn_style(self):
+        """更新测算按钮样式与高亮状态反馈"""
+        if not hasattr(self, 'btn_eval_r') or not self.btn_eval_r:
+            return
+        if getattr(self, 'auto_eval_enabled', True):
+            self.btn_eval_r.setText("⚡ 测算 (开)")
+            self.btn_eval_r.setStyleSheet(
+                "background-color: #064e3b; color: #34d399; font-weight: bold; "
+                "border: 1px solid #059669; border-radius: 3px; padding: 2px 6px; font-size: 8.5pt;"
+            )
+            self.btn_eval_r.setToolTip("快捷键: R 键 (当前: 自动测算【已开启】)。数据刷新、切换周期、切股时全自动持续测算！点击或按 R 切换关闭")
+        else:
+            self.btn_eval_r.setText("⚡ 测算 (关)")
+            self.btn_eval_r.setStyleSheet(
+                "background-color: #1e1e28; color: #888899; font-weight: normal; "
+                "border: 1px solid #333344; border-radius: 3px; padding: 2px 6px; font-size: 8.5pt;"
+            )
+            self.btn_eval_r.setToolTip("快捷键: R 键 (当前: 自动测算【已关闭】)。点击或按 R 开启全自动测算与标记")
+
+    def _on_eval_r_clicked(self, toggle: bool = True):
+        """⚡ 快捷键 R / 按钮切换自动测算状态并触发测算"""
+        if toggle:
+            self.auto_eval_enabled = not getattr(self, 'auto_eval_enabled', True)
+            SBCIntradayChartDialog._global_auto_eval = self.auto_eval_enabled
+            self._update_eval_btn_style()
+            self._save_sbc_geometry()
+
         if hasattr(self, 'canvas') and self.canvas:
             self.canvas.code = self.code
-            self.canvas.run_adaptive_strategy_eval()
-            res = getattr(self.canvas, 'strategy_eval_result', None)
-            if res and res.get("is_matched", False):
-                self.lbl_info.setText(
-                    f"🎉 [{res.get('period', '').upper()}] 策略测算命中: 得分={res.get('score')}分 | "
-                    f"介入价={res.get('entry_price', 0.0):.2f}元 | 止损={res.get('stop_loss', 0.0):.2f}元 | "
-                    f"目标1={res.get('target_price_1', 0.0):.2f}元"
-                )
-            elif res:
-                self.lbl_info.setText(f"⚠️ [{res.get('period', '').upper()}] 策略测算: {res.get('reason', '当前周期未触发反转突破')}")
+            self.canvas.auto_eval_enabled = bool(self.auto_eval_enabled)
+            if self.auto_eval_enabled:
+                self.canvas.run_adaptive_strategy_eval()
+                res = getattr(self.canvas, 'strategy_eval_result', None)
+                if res and res.get("is_matched", False):
+                    self.lbl_info.setText(
+                        f"🎉 [{res.get('period', '').upper()}] 自动测算开启: 得分={res.get('score')}分 | "
+                        f"介入价={res.get('entry_price', 0.0):.2f}元 | 止损={res.get('stop_loss', 0.0):.2f}元 | "
+                        f"目标1={res.get('target_price_1', 0.0):.2f}元"
+                    )
+                elif res:
+                    self.lbl_info.setText(f"⚠️ [{res.get('period', '').upper()}] 自动测算: {res.get('reason', '当前周期未触发反转突破')}")
+            else:
+                self.canvas.strategy_eval_result = None
+                self.canvas.update()
+                self.lbl_info.setText("💡 [测算已关闭] 已清除图上测算介入标记。按 R 键可重新开启自动测算。")
 
     def showEvent(self, event):
         """SBC 窗口打开展示事件：默认将焦点赋予当前显示的周期按钮上，便于键盘/鼠标快速操作"""
@@ -2958,6 +2973,8 @@ class SBCIntradayChartDialog(QWidget):
                 self.canvas.set_data(df_multi, op, vw, hi, lo, t_min, t_max, sigs, period_mode=mode)
                 self.lbl_title.setText(f"📊 {self.code} {resolve_stock_name(self.code)} | [{mode.upper()}多日分时] 今:{op:.2f} 现:{cl_last:.2f}")
                 self.lbl_title.setToolTip(f"【{self.code} {resolve_stock_name(self.code)}】[{mode.upper()}多日分时] 今开={op:.2f}元, 现价={cl_last:.2f}元, VWAP={vw:.2f}元, 最高={hi:.2f}元, 最低={lo:.2f}元 | 买卖信号数: {len(sigs)} 步")
+                if getattr(self, 'auto_eval_enabled', True):
+                    self._on_eval_r_clicked(toggle=False)
             return
 
         if mode in ["5m", "15m", "30m", "60m", "day", "week", "month"]:
@@ -2975,6 +2992,8 @@ class SBCIntradayChartDialog(QWidget):
                 self.canvas.set_kline_data(df_kline, open_p=op, vwap_p=vw, high_p=hi, low_p=lo, sell_min=t_min, sell_max=t_max, signals=sigs, period_mode=mode)
                 self.lbl_title.setText(f"📊 {self.code} {resolve_stock_name(self.code)} | [{mode.upper()}GG通道] 今:{op:.2f} 现:{cl_last:.2f}")
                 self.lbl_title.setToolTip(f"【{self.code} {resolve_stock_name(self.code)}】[{mode.upper()}K线通道] 今开={op:.2f}元, 现价={cl_last:.2f}元, VWAP={vw:.2f}元, 最高={hi:.2f}元, 最低={lo:.2f}元 | 买卖信号数: {len(sigs)} 步")
+                if getattr(self, 'auto_eval_enabled', True):
+                    self._on_eval_r_clicked(toggle=False)
             return
 
         # 默认为 1日分时 (1m)
@@ -3034,6 +3053,9 @@ class SBCIntradayChartDialog(QWidget):
             f"[{now_str}] ✅ 结论: 行情摄入 {k_count} 条，分时基准图与信号 Tag 渲染正常。"
         )
         self.txt_log.setPlainText(log_msg)
+
+        if getattr(self, 'auto_eval_enabled', True):
+            self._on_eval_r_clicked(toggle=False)
 
 
 def open_sbc_chart_dialog(parent_win: Optional[QWidget] = None, code: str = "688826", period_mode: Optional[str] = None, *args, **kwargs) -> Optional[SBCIntradayChartDialog]:
@@ -3394,90 +3416,140 @@ def rearrange_all_sbc_windows(parent_win=None):
             screen_map[dlg_screen] = []
         screen_map[dlg_screen].append(dlg)
 
-    # 4. 对每个屏幕分别独立执行网格平铺排布
-    margin_x = 10
-    margin_y = 10
-
+    # 4. 对每个屏幕分别独立执行：现有尺寸优先重排，超出屏幕边界时才自适应缩放 (<=2个按2列，>2个按最多3列)
     for target_screen, dlgs_on_screen in screen_map.items():
         if not target_screen or not dlgs_on_screen:
             continue
         sg = target_screen.availableGeometry()
+        count = len(dlgs_on_screen)
 
-        # 4.1 寻找同屏上未最大化窗口的参考标准尺寸 (Reference Normal Size)
-        ref_w, ref_h = 680, 420
-        # 优先读取同屏未处于最大化/最小化的正常窗口尺寸
-        normal_dlgs = [d for d in dlgs_on_screen if not d.isMaximized() and not d.isMinimized() and not d.isFullScreen()]
-        if normal_dlgs:
-            # 取第一个正常窗口的尺寸，且限制在合法紧凑范围内
-            first_norm = normal_dlgs[0]
-            nw, nh = first_norm.width(), first_norm.height()
-            if 320 <= nw <= int(sg.width() * 0.5) and 180 <= nh <= int(sg.height() * 0.6):
-                ref_w, ref_h = nw, nh
-        elif getattr(SBCIntradayChartDialog, "_global_sbc_size", None):
-            gw, gh = SBCIntradayChartDialog._global_sbc_size
-            if 320 <= gw <= int(sg.width() * 0.5) and 180 <= gh <= int(sg.height() * 0.6):
-                ref_w, ref_h = gw, gh
-
-        curr_x = sg.left() + 20
-        curr_y = sg.top() + 20
-        row_max_h = 0
-
-        for idx_d, dlg in enumerate(dlgs_on_screen):
-            was_maximized = dlg.isMaximized() or dlg.isFullScreen()
-
-            # [FIX] 确保彻底退出最大化/全屏/最小化状态
+        # 4.1 确保所有窗口退出最大化/全屏/最小化
+        for dlg in dlgs_on_screen:
             if dlg.isMaximized() or dlg.isMinimized() or dlg.isFullScreen():
                 dlg.showNormal()
 
-            # [FIX] 提取并恢复窗口原本的未最大化尺寸：
-            # 如果窗口原本被最大化，或者当前尺寸过大（如之前误存的 2/3 巨型尺寸），统一恢复为同屏其他正常窗口尺寸 ref_w, ref_h 或其 _unmaximized_size
-            unmax_size = getattr(dlg, "_unmaximized_size", None)
-            if unmax_size and isinstance(unmax_size, (tuple, list)) and len(unmax_size) == 2:
-                uw, uh = unmax_size
-                if 320 <= uw <= int(sg.width() * 0.5) and 180 <= uh <= int(sg.height() * 0.6):
-                    w, h = uw, uh
-                else:
-                    w, h = ref_w, ref_h
-            elif not was_maximized and 320 <= dlg.width() <= int(sg.width() * 0.5) and 180 <= dlg.height() <= int(sg.height() * 0.6):
-                w, h = dlg.width(), dlg.height()
+        # 4.2 提取每个窗口的当前/历史期望尺寸
+        dlg_sizes = []
+        for dlg in dlgs_on_screen:
+            unmax = getattr(dlg, "_unmaximized_size", None)
+            if unmax and isinstance(unmax, (tuple, list)) and len(unmax) == 2:
+                w, h = int(unmax[0]), int(unmax[1])
             else:
-                w, h = ref_w, ref_h
+                w, h = dlg.width(), dlg.height()
+            w = max(320, min(w, sg.width()))
+            h = max(200, min(h, sg.height()))
+            dlg_sizes.append((w, h))
 
-            # 显式 resize 恢复规范尺寸
-            dlg.resize(w, h)
-            dlg._unmaximized_size = (w, h)
+        # 4.3 模拟【旧版保持原尺寸平铺排布】：检测是否会超出屏幕边界
+        margin_x = 10
+        margin_y = 10
+        pad_x = 20
+        pad_y = 20
 
-            if curr_x + w > sg.right() and curr_x > sg.left() + 20:
-                curr_x = sg.left() + 20
-                curr_y += row_max_h + margin_y
+        sim_x = sg.left() + pad_x
+        sim_y = sg.top() + pad_y
+        row_max_h = 0
+        is_overflow = False
+        legacy_positions = []
+
+        for idx, (w, h) in enumerate(dlg_sizes):
+            if sim_x + w > sg.right() and sim_x > sg.left() + pad_x:
+                sim_x = sg.left() + pad_x
+                sim_y += row_max_h + margin_y
                 row_max_h = 0
 
-            # 防越界超出屏幕底部：若无法容纳完整新行，采用微错位平铺，避免所有窗口重叠在同一坐标
-            if curr_y + h > sg.bottom() and curr_y > sg.top() + 20:
-                curr_y = sg.top() + 20 + (idx_d * 25) % max(1, sg.height() - h if sg.height() > h else 50)
-                curr_x = sg.left() + 20 + (idx_d * 25) % max(1, sg.width() - w if sg.width() > w else 50)
+            if (sim_x + w > sg.right()) or (sim_y + h > sg.bottom()):
+                is_overflow = True
+                break
 
-            # 💡 重排时彻底重置磁吸状态，保持正常完全可见的浮动窗口布局，绝不自动触发边缘收缩
-            if hasattr(dlg, "snap_timer"):
-                dlg.snap_timer.stop()
-            dlg.anchor_edge = None
-            dlg.normal_geometry = None
-            dlg.is_hidden_state = False
-            dlg._is_dragging = False
-            dlg._is_user_dragging = False
-            dlg.setWindowOpacity(1.0)
-            dlg._is_programmatic_move = True
-            try:
-                dlg.move(curr_x, curr_y)
-                if hasattr(dlg, "_save_sbc_geometry"):
-                    dlg._save_sbc_geometry()
-                dlg.raise_()
-                dlg.activateWindow()
-            finally:
-                dlg._is_programmatic_move = False
-
-            curr_x += w + margin_x
+            legacy_positions.append((sim_x, sim_y, w, h))
+            sim_x += w + margin_x
             row_max_h = max(row_max_h, h)
+
+        # 4.4 根据是否溢出选择排布策略：
+        if not is_overflow and len(legacy_positions) == count:
+            # 策略 A：【未超出屏幕 -> 保持旧逻辑与现有尺寸不变】
+            logger.info(f"🪟 [SBC窗口重排] 现有尺寸容纳正常，采用旧版原尺寸平铺 (共 {count} 个窗口)")
+            for idx, dlg in enumerate(dlgs_on_screen):
+                pos_x, pos_y, w, h = legacy_positions[idx]
+                dlg.resize(w, h)
+                dlg._unmaximized_size = (w, h)
+
+                if hasattr(dlg, "snap_timer"):
+                    dlg.snap_timer.stop()
+                dlg.anchor_edge = None
+                dlg.normal_geometry = None
+                dlg.is_hidden_state = False
+                dlg._is_dragging = False
+                dlg._is_user_dragging = False
+                dlg.setWindowOpacity(1.0)
+                dlg._is_programmatic_move = True
+                try:
+                    dlg.move(pos_x, pos_y)
+                    if hasattr(dlg, "_save_sbc_geometry"):
+                        dlg._save_sbc_geometry()
+                    dlg.raise_()
+                    dlg.activateWindow()
+                finally:
+                    dlg._is_programmatic_move = False
+        else:
+            # 策略 B：【现有尺寸超出屏幕 -> 启动自适应缩放 (<=2个按2列自适应，>2个按最多3列自适应)】
+            logger.info(f"🪟 [SBC窗口重排] 现有尺寸超出屏幕边界，启动智能自适应网格缩放 (共 {count} 个窗口)")
+            if count <= 2:
+                cols = 2
+            else:
+                cols = 3
+            rows = math.ceil(count / cols)
+
+            margin_x = 8
+            margin_y = 8
+            pad_left = 12
+            pad_top = 12
+            pad_right = 12
+            pad_bottom = 12
+
+            avail_w = max(400, sg.width() - pad_left - pad_right)
+            avail_h = max(300, sg.height() - pad_top - pad_bottom)
+
+            target_w = int((avail_w - (cols - 1) * margin_x) / cols)
+            target_w = max(320, min(target_w, avail_w))
+
+            raw_target_h = int((avail_h - (rows - 1) * margin_y) / rows)
+            if rows == 1:
+                target_h = min(raw_target_h, int(target_w * 0.62), int(avail_h * 0.60))
+            else:
+                target_h = raw_target_h
+            target_h = max(200, min(target_h, avail_h))
+
+            for idx_d, dlg in enumerate(dlgs_on_screen):
+                r = idx_d // cols
+                c = idx_d % cols
+
+                pos_x = sg.left() + pad_left + c * (target_w + margin_x)
+                pos_y = sg.top() + pad_top + r * (target_h + margin_y)
+
+                dlg.resize(target_w, target_h)
+                dlg._unmaximized_size = (target_w, target_h)
+
+                if hasattr(dlg, "snap_timer"):
+                    dlg.snap_timer.stop()
+                dlg.anchor_edge = None
+                dlg.normal_geometry = None
+                dlg.is_hidden_state = False
+                dlg._is_dragging = False
+                dlg._is_user_dragging = False
+                dlg.setWindowOpacity(1.0)
+                dlg._is_programmatic_move = True
+                try:
+                    dlg.move(pos_x, pos_y)
+                    if hasattr(dlg, "_save_sbc_geometry"):
+                        dlg._save_sbc_geometry()
+                    dlg.raise_()
+                    dlg.activateWindow()
+                finally:
+                    dlg._is_programmatic_move = False
+
+            SBCIntradayChartDialog._global_sbc_size = (target_w, target_h)
 
     # 5. 持久化最新窗口坐标
     try:
@@ -3485,7 +3557,7 @@ def rearrange_all_sbc_windows(parent_win=None):
     except Exception as e:
         logger.debug(f"重排后持久化坐标异常: {e}")
 
-    logger.info(f"🪟 [SBC多屏窗口重排] 已成功在 {len(screen_map)} 个屏幕上将 {len(active_dialogs)} 个 SBC 窗口基于各自屏幕平铺重排！")
+    logger.info(f"🪟 [SBC自适应窗口重排] 已成功在 {len(screen_map)} 个屏幕上将 {len(active_dialogs)} 个 SBC 窗口自适应平铺排布！")
 
 
 import copy
