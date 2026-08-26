@@ -26,6 +26,7 @@ from tk_gui_modules.gui_config import WINDOW_CONFIG_FILE
 from tk_gui_modules.qt_table_utils import NumericTableWidgetItem
 from logger_utils import LoggerFactory
 from JohnsonUtil import commonTips as cct
+from ats.opening_bubble_engine import get_opening_bubble_engine
 
 logger = LoggerFactory.getLogger(__name__)
 _CONFIG_FILE_LOCK = threading.RLock()
@@ -1082,6 +1083,8 @@ class DistributionDetailsDialog(QDialog, WindowMixin):
             if self.table.rowCount() != len(df_filtered):
                 self.table.setRowCount(len(df_filtered))
 
+            bubble_engine = get_opening_bubble_engine()
+
             for i, (code, row) in enumerate(df_filtered.iterrows()):
                 name = str(row.get('name', '--'))
                 pct = safe_float(row.get('percent', 0.0))
@@ -1096,7 +1099,25 @@ class DistributionDetailsDialog(QDialog, WindowMixin):
                 if is_fav:
                     if not name.startswith("⭐"):
                         name = f"⭐ {name}"
+
+                # 获取开盘与阶梯跃迁特征
+                b_prof = bubble_engine.get_stock_profile(code)
+                p_tag = b_prof.get("pattern_tag", "")
+                p_desc = b_prof.get("pattern_desc", "")
+                traj_str = b_prof.get("trajectory_str", "-")
+                open_pct = b_prof.get("open_pct", 0.0)
+                alpha_score = b_prof.get("alpha_score", 50.0)
                 
+                tip_text = (
+                    f"🎯 【{code} {name}】开盘起点与跃迁画像\n"
+                    f"────────────────────────\n"
+                    f"🌅 开盘涨幅: {open_pct:+.2f}%\n"
+                    f"⚡ 梯级跃迁轨迹: {traj_str}\n"
+                    f"💎 形态特征: {p_tag} ({p_desc})\n"
+                    f"🔥 差异化评分: {alpha_score:.0f} 分\n"
+                    f"📊 实时量比: {ratio:.2f} | 现价: {price:.2f} 元"
+                )
+
                 # 0: 代码
                 c_item = QTableWidgetItem(code)
                 if is_fav:
@@ -1104,13 +1125,31 @@ class DistributionDetailsDialog(QDialog, WindowMixin):
                 else:
                     c_item.setForeground(QBrush(QColor("#00ff00" if code.startswith(('60', '00')) else "#00bfff")))
                 c_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                c_item.setToolTip(tip_text)
                 self.table.setItem(i, 0, c_item)
                 
                 # 1: 名称
-                n_item = QTableWidgetItem(name)
+                display_name = name
+                if "低开高走" in p_tag:
+                    display_name = f"🚀 {name}"
+                elif "高开蓄势" in p_tag:
+                    display_name = f"💎 {name}"
+                elif "步步高升" in p_tag:
+                    display_name = f"⚡ {name}"
+                elif "高开低走" in p_tag:
+                    display_name = f"⚠️ {name}"
+
+                n_item = QTableWidgetItem(display_name)
                 n_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 if is_fav:
                     n_item.setForeground(QBrush(QColor("#00FF88")))
+                elif "低开高走" in p_tag:
+                    n_item.setForeground(QBrush(QColor("#00ffff")))
+                elif "高开蓄势" in p_tag:
+                    n_item.setForeground(QBrush(QColor("#ffd700")))
+                elif "步步高升" in p_tag:
+                    n_item.setForeground(QBrush(QColor("#ff55ff")))
+                n_item.setToolTip(tip_text)
                 self.table.setItem(i, 1, n_item)
                 
                 # 2: 涨幅%
@@ -1119,6 +1158,7 @@ class DistributionDetailsDialog(QDialog, WindowMixin):
                 ch_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 if pct > 0: ch_item.setForeground(QBrush(QColor("#ff4444")))
                 elif pct < 0: ch_item.setForeground(QBrush(QColor("#44ff44")))
+                ch_item.setToolTip(tip_text)
                 self.table.setItem(i, 2, ch_item)
                 
                 # 3: 现价
@@ -1126,6 +1166,7 @@ class DistributionDetailsDialog(QDialog, WindowMixin):
                 p_item.setText(f"{price:.2f}")
                 p_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 p_item.setForeground(QBrush(QColor("#ffffff")))
+                p_item.setToolTip(tip_text)
                 self.table.setItem(i, 3, p_item)
                 
                 # 4: 量比
@@ -1133,6 +1174,7 @@ class DistributionDetailsDialog(QDialog, WindowMixin):
                 r_item.setText(f"{ratio:.2f}")
                 r_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 r_item.setForeground(QBrush(QColor("#ffff00")))
+                r_item.setToolTip(tip_text)
                 self.table.setItem(i, 4, r_item)
                 
                 # 5: DFF
@@ -1193,11 +1235,12 @@ class DistributionDetailsDialog(QDialog, WindowMixin):
             self._apply_search_filter()
 
     def _apply_search_filter(self):
-        """根据搜索框文本毫秒级动态过滤表格行 (支持代码/名称/板块联合匹配)"""
+        """根据搜索框文本毫秒级动态过滤表格行 (支持代码/名称/板块/开盘形态联合匹配)"""
         keyword = self.search_edit.text().strip().lower() if hasattr(self, 'search_edit') else ""
         total_rows = self.table.rowCount()
         visible_cnt = 0
         self.table.setSortingEnabled(False)
+        bubble_engine = get_opening_bubble_engine()
         for r in range(total_rows):
             c_item = self.table.item(r, 0)
             n_item = self.table.item(r, 1)
@@ -1211,7 +1254,10 @@ class DistributionDetailsDialog(QDialog, WindowMixin):
                 self.table.setRowHidden(r, False)
                 visible_cnt += 1
             else:
-                matched = (keyword in code) or (keyword in name) or (keyword in sector)
+                b_prof = bubble_engine.get_stock_profile(code)
+                p_tag = str(b_prof.get("pattern_tag", "")).lower()
+                p_desc = str(b_prof.get("pattern_desc", "")).lower()
+                matched = (keyword in code) or (keyword in name) or (keyword in sector) or (keyword in p_tag) or (keyword in p_desc)
                 self.table.setRowHidden(r, not matched)
                 if matched:
                     visible_cnt += 1

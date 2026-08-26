@@ -39,6 +39,7 @@ from typing import Dict, List, Tuple, Optional, Any, Set
 from sys_utils import get_app_root, get_conf_path
 from JohnsonUtil import commonTips as cct
 from logger_utils import LoggerFactory
+from ats.opening_bubble_engine import get_opening_bubble_engine, OpeningBubbleEngine
 
 logger = LoggerFactory.getLogger("LimitUpEngine")
 
@@ -436,6 +437,12 @@ class LimitUpEngine:
         records = []
         target_codes_for_l2 = []
 
+        # 0. 同步全网表微秒级快照
+        try:
+            get_opening_bubble_engine().update_market_snapshot(current_df)
+        except Exception:
+            pass
+
         # 获取大盘参考涨幅
         sh_pct = 0.0
         for idx_code in ('sh000001', '000001'):
@@ -776,7 +783,23 @@ class LimitUpEngine:
                 entry_advice = f"分时窄幅震荡，等待放量突破或回踩均线信号 ({time_tip})"
 
             r["entry_stage"] = entry_stage
-            r["entry_advice"] = entry_advice
+            
+            # 注入 OpeningBubbleEngine 的开盘起点与跃迁画像
+            try:
+                b_prof = get_opening_bubble_engine().get_stock_profile(r["code"])
+                r["open_pct"] = b_prof.get("open_pct", 0.0)
+                r["pattern_type"] = b_prof.get("pattern_type", "NORMAL")
+                r["pattern_tag"] = b_prof.get("pattern_tag", r.get("tier_tag", "横盘整理"))
+                r["trajectory_str"] = b_prof.get("trajectory_str", "-")
+                r["tier_jumps"] = b_prof.get("tier_jumps", 0)
+                r["bubble_alpha_score"] = b_prof.get("alpha_score", 50.0)
+            except Exception:
+                r["open_pct"] = 0.0
+                r["pattern_type"] = "NORMAL"
+                r["pattern_tag"] = r.get("tier_tag", "横盘整理")
+                r["trajectory_str"] = "-"
+                r["tier_jumps"] = 0
+                r["bubble_alpha_score"] = 50.0
 
             # ── 💡 核心量化打分：结合时序生命周期乘数 ──
             if is_limit_up:
@@ -962,6 +985,75 @@ class LimitUpEngine:
         ), reverse=True)
 
         return radar_list
+
+    def get_opening_bubble_records(
+        self,
+        current_df: Optional[pd.DataFrame] = None,
+        pattern_filter: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        【🌅 盘中开盘起点与极速阶梯跃迁挖掘雷达】
+        结合全网状态表、开盘形态分类、冒泡跃迁连续度、多日连板天梯与 DFF 特征，
+        捕获: 🚀 低开高走反包 / 💎 高开放量锁筹 / ⚡ 步步高升跃迁 / 🌊 平开脉冲
+        """
+        engine = get_opening_bubble_engine()
+        raw_bubble_list = engine.get_bubble_radar_records(current_df=current_df, pattern_filter=pattern_filter, min_score=60.0)
+        if not raw_bubble_list:
+            return []
+
+        # 获取已有涨停/天梯特征字典 (按 code 快速合并)
+        all_zt_recs = self.scan_limit_up_records_from_df(current_df)
+        zt_map = {r["code"]: r for r in all_zt_recs} if all_zt_recs else {}
+
+        # 构造并丰富全量看板记录
+        merged_records = []
+        for b in raw_bubble_list:
+            c = b["code"]
+            zt_r = zt_map.get(c, {})
+
+            # 继承已有字段或生成默认值
+            rec = {
+                "code": c,
+                "name": b.get("name", zt_r.get("name", c)),
+                "price": b.get("price", zt_r.get("price", 0.0)),
+                "pct": b.get("pct", zt_r.get("pct", 0.0)),
+                "open_pct": b.get("open_pct", zt_r.get("open_pct", 0.0)),
+                "consecutive_boards": zt_r.get("consecutive_boards", self._calc_consecutive_boards(c, False)),
+                "tier_tag": b.get("tier_tag", zt_r.get("tier_tag", "⚡ 步步高升")),
+                "pattern_desc": f"{b.get('tier_tag', '')}·{b.get('pattern_desc', '')}",
+                "pattern_type": b.get("pattern_type", "NORMAL"),
+                "trajectory_str": b.get("trajectory_str", "-"),
+                "tier_jumps": b.get("tier_jumps", 0),
+                "seal_amount_wan": zt_r.get("seal_amount_wan", 0.0),
+                "seal_to_circ_ratio": zt_r.get("seal_to_circ_ratio", 0.0),
+                "seal_to_vol_ratio": zt_r.get("seal_to_vol_ratio", 0.0),
+                "turnover_rate": (b.get("turnover_pct") if (b.get("turnover_pct") and b.get("turnover_pct", 0) <= 100) else (zt_r.get("turnover_rate", 0.0) if zt_r.get("turnover_rate", 0.0) <= 100 else 0.0)),
+                "vol_ratio": b.get("vol_ratio", zt_r.get("vol_ratio", 1.0)),
+                "amount_yi": b.get("amount_yi", zt_r.get("amount_yi", 0.0)),
+                "dff": zt_r.get("dff", 0.0),
+                "rank": zt_r.get("rank", 999),
+                "dff2": zt_r.get("dff2", 0.0),
+                "dff3": zt_r.get("dff3", 0.0),
+                "rs_val": zt_r.get("rs_val", 0.0),
+                "resonance": zt_r.get("resonance", "同步整理"),
+                "category": zt_r.get("category", ""),
+                "extra_cols": zt_r.get("extra_cols", {}),
+                "momentum_score": b.get("momentum_score", 65.0),
+                "is_limit_up": zt_r.get("is_limit_up", False),
+                "is_broken": zt_r.get("is_broken", False),
+                "is_bubble_hit": True
+            }
+            merged_records.append(rec)
+
+        # 排序：综合评分降序 > 阶梯跃迁次数降序 > 量比降序 > 涨幅降序
+        merged_records.sort(key=lambda x: (
+            x.get("momentum_score", 0.0),
+            x.get("tier_jumps", 0),
+            x.get("vol_ratio", 1.0),
+            x.get("pct", 0.0)
+        ), reverse=True)
+
+        return merged_records
 
     def _calc_consecutive_boards(self, code: str, is_today_zt: bool) -> int:
         """从历史归档记录中回溯推算该个股的当前连板天数"""
