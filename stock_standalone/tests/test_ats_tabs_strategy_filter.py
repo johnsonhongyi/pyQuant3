@@ -132,6 +132,34 @@ def test_swing_table_strategy_filter(qapp):
     assert load_config_node("ats_swing_tab_filter_enabled") is False
 
 
+def test_swing_table_chk_favorite_show(qapp):
+    """测试 📉 回调跟踪器 面板的 ★ 重点 勾选框显隐行为：开启包含重点，关闭隐藏重点"""
+    from global_favorites import GlobalFavoriteManager
+    fav_mgr = GlobalFavoriteManager()
+    
+    table = SwingStateTable()
+    table.filter_enabled = False
+    
+    mock_rows = [
+        ("600001", "⭐ 邯郸钢铁", "10.0", "持股中", "+1.2%", "0", "10%", "早盘", "85.0", "1.0", "10", "1.0", "1.0", "+0.5%", "共振", "理由1"),
+        ("600002", "齐鲁石化", "20.0", "持股中", "+2.5%", "0", "10%", "早盘", "80.0", "1.0", "20", "1.0", "1.0", "+0.5%", "共振", "理由2"),
+    ]
+    table.update_data_list(mock_rows)
+    assert table.table.rowCount() == 2
+    
+    # 1. 开启【★ 重点】(Checked=True): 重点股 600001 与非重点股 600002 均正常显示
+    table.chk_favorite_show.setChecked(True)
+    table._apply_favorite_filter()
+    assert table.table.isRowHidden(0) is False  # 重点股可见
+    assert table.table.isRowHidden(1) is False  # 普通回调股可见
+    
+    # 2. 关闭【★ 重点】(Checked=False): 隐藏重点关注股 600001，仅保留展示纯回调策略股 600002
+    table.chk_favorite_show.setChecked(False)
+    table._apply_favorite_filter()
+    assert table.table.isRowHidden(0) is True   # 重点股被隐藏
+    assert table.table.isRowHidden(1) is False  # 普通回调股依然可见
+
+
 def test_new_stock_panel_strategy_filter(qapp):
     """测试 🆕 新股次新股 面板的 🎯 策略过滤 按钮与过滤执行"""
     save_config_node("ats_new_stock_tab_filter_enabled", False)
