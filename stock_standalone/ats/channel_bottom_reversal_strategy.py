@@ -242,13 +242,23 @@ def evaluate_ascending_channel_strategy(
             res_default["reason"] = f"未处于回踩支撑位 (偏离:{dist_to_supp*100:+.1f}%) 亦未突破局部高点 ({curr_close:.2f} < {local_high:.2f})"
             return res_default
 
-    # 3. 价格与目标位量化
-    entry_price = curr_close
+    # 寻找首发启动/突破 K 棒 (First Breakout Bar)
+    first_break_idx = None
+    if is_breakout:
+        for bar_i in range(recent_start, n):
+            if (closes[bar_i] >= local_high * 0.99) or (highs[bar_i] >= local_high * 1.002):
+                first_break_idx = bar_i
+                break
+    if first_break_idx is None:
+        first_break_idx = n - 1
+
+    # 3. 价格与目标位量化 (锁定在启动红K线)
+    entry_price = float(closes[first_break_idx])
     stop_loss = round(max(supp_p * 0.985, min_recent_low * 0.988), 2)
     if stop_loss >= entry_price:
         stop_loss = round(entry_price * 0.965, 2)
 
-    box_amp = max(curr_close - stop_loss, curr_close * 0.05)
+    box_amp = max(entry_price - stop_loss, entry_price * 0.05)
     target_1 = round(entry_price + box_amp * 1.2, 2)
     target_2 = round(entry_price + box_amp * 2.0, 2)
 
@@ -286,8 +296,8 @@ def evaluate_ascending_channel_strategy(
         "lowest_low": round(anchor_low, 2),
         "base_high": round(local_high, 2),
         "volume_shrink_pct": round(shrink_pct, 1),
-        "breakout_bar_idx": n - 1,
-        "reason": f"上涨通道({effective_slope:+.1f}°) 触发【{pattern_name}】| 支撑:{supp_p:.2f} | 前高:{local_high:.2f} | 低点抬高无破位"
+        "breakout_bar_idx": first_break_idx,
+        "reason": f"上涨通道({effective_slope:+.1f}°) 触发【{pattern_name}】| 介入:{entry_price:.2f} | 支撑:{supp_p:.2f} | 前高:{local_high:.2f}"
     }
     return res_matched
 
@@ -447,20 +457,45 @@ def evaluate_channel_bottom_reversal(
         res_default["reason"] = f"最近 {recent_breakout_bars} 根 K 线未有效突破底部整理高点 ({np.max(recent_highs):.2f} <= {base_high:.2f})"
         return res_default
 
-    curr_close = float(closes[-1])
-    entry_price = curr_close
+    # 寻找首发启动/逆势先锋突破 K 棒 (First Breakout Bar)
+    # 避免滞后到最后一根大阳线，精准定位到前一根首次放量收红启动的 K 线
+    first_break_idx = None
+    for bar_i in range(recent_start, n):
+        b_c = closes[bar_i]
+        b_o = opens[bar_i]
+        b_h = highs[bar_i]
+        b_v = vols[bar_i]
+        
+        # 条件1: 首根收盘或最高突破底部整理高点
+        cond_break_high = (b_c >= base_high * 0.99) or (b_h >= base_high * 1.002)
+        # 条件2: 首根放量收红大阳线(逆势先锋启动)
+        cond_pioneer_red = (b_c > b_o) and (b_v >= base_vol_mean * 1.20) and (b_c >= base_high * 0.98)
+        
+        if cond_break_high or cond_pioneer_red:
+            first_break_idx = bar_i
+            break
+
+    if first_break_idx is None:
+        first_break_idx = n - 1
+
+    # 介入点与标记位置精准锁定在首发启动红K线
+    entry_price = float(closes[first_break_idx])
     stop_loss = round(lowest_low * 0.985, 2)
 
-    box_height = max(base_high - lowest_low, curr_close * 0.03)
+    box_height = max(base_high - lowest_low, entry_price * 0.03)
     target_1 = round(max(base_high + box_height, entry_price * 1.05), 2)
     target_2 = round(max(target_1 * 1.08, entry_price * 1.12), 2)
 
-    score = 60.0
+    score = 65.0
     score += min(20.0, max(0.0, (1.0 - vol_ratio) * 40.0))
     if recent_vols[-1] > base_vol_mean * 1.3:
         score += 10.0
     lift_pct = (min_recent_low - lowest_low) / max(1e-4, lowest_low) * 100.0
     score += min(10.0, max(0.0, lift_pct * 3.0))
+
+    pattern_name = "通道底部反转·逆势先锋突破" if first_break_idx < (n - 1) else "通道底部缩量右侧突破"
+    if pattern_name == "通道底部反转·逆势先锋突破":
+        score += 5.0
 
     score = min(99.0, max(60.0, round(score, 1)))
 
@@ -468,7 +503,7 @@ def evaluate_channel_bottom_reversal(
         "is_matched": True,
         "channel_type": "descending",
         "channel_type_cn": "下降通道反转",
-        "pattern_name": "通道底部缩量右侧突破",
+        "pattern_name": pattern_name,
         "score": score,
         "entry_price": round(entry_price, 2),
         "stop_loss": stop_loss,
@@ -478,10 +513,87 @@ def evaluate_channel_bottom_reversal(
         "lowest_low": round(lowest_low, 2),
         "base_high": round(base_high, 2),
         "volume_shrink_pct": round(shrink_pct, 1),
-        "breakout_bar_idx": n - 1,
-        "reason": f"下降通道({slope_deg:+.1f}°)探底{lowest_low:.2f}后缩量{shrink_pct:.1f}%企稳，突破{base_high:.2f}且无新低"
+        "breakout_bar_idx": first_break_idx,
+        "reason": f"下降通道({slope_deg:+.1f}°)探底{lowest_low:.2f}后缩量{shrink_pct:.1f}%企稳，【逆势先锋】在{entry_price:.2f}首发突破{base_high:.2f}"
     }
     return res_matched
+
+
+def detect_pioneer_signal_tdx_exact(df: pd.DataFrame) -> Tuple[bool, int, float, Dict[str, Any]]:
+    """
+    【100% 严格对齐通达信 GGG1 主图公式逆势先锋算法】
+    NX_MAX:=MAX(MAX(MA(C,5),MA(C,10)),MA(C,20));
+    NX_MIN:=MIN(MIN(MA(C,5),MA(C,10)),MA(C,20));
+    NX_SIG:=FILTER((NX_MAX-NX_MIN)/C<=0.05 AND LLV(L,5)>=LLV(L,20)*0.985 AND V>=MA(V,5)*1.3 AND C>=REF(HHV(H,10),1)*0.985 AND C>NX_MAX AND (C-REF(C,1))/REF(C,1)>=0.028, 5);
+    """
+    if df is None or len(df) < 15:
+        return False, -1, 0.0, {}
+
+    closes = df['close'].values.astype(np.float64) if 'close' in df.columns else df['trade'].values.astype(np.float64)
+    highs = df['high'].values.astype(np.float64) if 'high' in df.columns else closes
+    lows = df['low'].values.astype(np.float64) if 'low' in df.columns else closes
+    vols = df['vol'].values.astype(np.float64) if 'vol' in df.columns else (
+        df['volume'].values.astype(np.float64) if 'volume' in df.columns else np.ones(len(df), dtype=np.float64)
+    )
+    n = len(closes)
+    if n < 15:
+        return False, -1, 0.0, {}
+
+    c_s = pd.Series(closes)
+    h_s = pd.Series(highs)
+    l_s = pd.Series(lows)
+    v_s = pd.Series(vols)
+
+    ma5 = c_s.rolling(5, min_periods=1).mean().values
+    ma10 = c_s.rolling(10, min_periods=1).mean().values
+    ma20 = c_s.rolling(20, min_periods=1).mean().values
+    v_ma5 = v_s.rolling(5, min_periods=1).mean().values
+
+    nx_max = np.maximum(np.maximum(ma5, ma10), ma20)
+    nx_min = np.minimum(np.minimum(ma5, ma10), ma20)
+
+    llv5 = l_s.rolling(5, min_periods=1).min().values
+    llv20 = l_s.rolling(20, min_periods=1).min().values
+    hhv10 = h_s.rolling(10, min_periods=1).max().values
+    ref_hhv10 = np.roll(hhv10, 1)
+    ref_hhv10[0] = hhv10[0]
+
+    ref_c = np.roll(closes, 1)
+    ref_c[0] = closes[0]
+
+    cond_squeeze = (nx_max - nx_min) / np.maximum(closes, 1e-4) <= 0.05
+    cond_higher_low = llv5 >= llv20 * 0.985
+    cond_vol = vols >= v_ma5 * 1.30
+    cond_brk = (closes >= ref_hhv10 * 0.985) & (closes > nx_max)
+    cond_pct = (closes - ref_c) / np.maximum(ref_c, 1e-4) >= 0.028
+
+    raw_sig = cond_squeeze & cond_higher_low & cond_vol & cond_brk & cond_pct
+
+    sig_filtered = np.zeros(n, dtype=bool)
+    last_sig = -999
+    for i in range(n):
+        if raw_sig[i] and (i - last_sig > 5):
+            sig_filtered[i] = True
+            last_sig = i
+
+    sig_indices = np.where(sig_filtered)[0]
+    if len(sig_indices) == 0:
+        return False, -1, 0.0, {}
+
+    # 取最近一次触发的逆势先锋信号
+    target_idx = int(sig_indices[-1])
+    target_price = float(closes[target_idx])
+    lowest_low = float(llv20[target_idx])
+    base_high = float(ref_hhv10[target_idx])
+
+    debug_meta = {
+        "sig_indices": sig_indices.tolist(),
+        "target_idx": target_idx,
+        "target_price": target_price,
+        "lowest_low": lowest_low,
+        "base_high": base_high,
+    }
+    return True, target_idx, target_price, debug_meta
 
 
 def evaluate_channel_strategy(
@@ -499,6 +611,38 @@ def evaluate_channel_strategy(
             "pattern_name": "数据不足",
             "score": 0.0,
             "reason": "K线数据过短，无法测算"
+        }
+
+    # ⭐ [TOP PRIORITY] 优先使用与通达信 100% 完全对齐的【逆势先锋】精准识别
+    is_pioneer, p_idx, p_entry, p_meta = detect_pioneer_signal_tdx_exact(df)
+    if is_pioneer:
+        lowest_low = p_meta.get("lowest_low", p_entry * 0.95)
+        base_high = p_meta.get("base_high", p_entry)
+        stop_loss = round(lowest_low * 0.985, 2)
+        box_h = max(base_high - lowest_low, p_entry * 0.05)
+        t1 = round(p_entry + box_h * 1.2, 2)
+        t2 = round(p_entry + box_h * 2.0, 2)
+        sig_indices = p_meta.get("sig_indices", [p_idx])
+        
+        # 计算该启动点对应的通道斜率
+        cls_info = classify_channel_type(df)
+        return {
+            "is_matched": True,
+            "channel_type": cls_info.get("channel_type", "descending"),
+            "channel_type_cn": "下降通道反转" if cls_info.get("channel_type") != "ascending" else "上涨通道顺势",
+            "pattern_name": "通道底部反转·逆势先锋突破",
+            "score": 99.0,
+            "entry_price": round(p_entry, 2),
+            "stop_loss": stop_loss,
+            "target_price_1": t1,
+            "target_price_2": t2,
+            "channel_slope_deg": cls_info.get("slope_deg", 0.0),
+            "lowest_low": round(lowest_low, 2),
+            "base_high": round(base_high, 2),
+            "volume_shrink_pct": 0.0,
+            "breakout_bar_idx": p_idx,
+            "pioneer_sig_indices": sig_indices,
+            "reason": f"【对齐TDX逆势先锋】在{p_entry:.2f}首发大阳穿线放量起爆，支撑:{lowest_low:.2f}，目标:{t1:.2f}"
         }
 
     # 1. 测算通道类型

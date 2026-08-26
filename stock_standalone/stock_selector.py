@@ -1019,6 +1019,77 @@ class StockSelector:
         self.set_candidates_cache(cache_key, df_res.copy() if not df_res.empty else df_res)
         return df_res
 
+    def select_early_stabilization_pioneer(self, df: Optional[pd.DataFrame] = None, top_n: int = 15) -> pd.DataFrame:
+        """
+        逆势企稳先锋选股器 (Early Stabilization Pioneer)
+        
+        从全市场/自选池中筛选满足以下特征的标的:
+        1. 阶段底不破底 / 底抬高 (Higher Lows)
+        2. 均线密集收敛粘合 (MA5/10/20 振幅挤压)
+        3. 动量先行 / 异动放量启动
+        """
+        if df is None:
+            df = self.load_data()
+        if df is None or df.empty:
+            return pd.DataFrame()
+
+        df = self.calculate_indicators(df)
+        try:
+            # 基础流动性与非停牌过滤
+            vol = pd.to_numeric(df.get('volume', df.get('vol', 0)), errors='coerce').fillna(0)
+            cur_p = pd.to_numeric(df.get('close', df.get('trade', 0)), errors='coerce').fillna(0)
+            valid_mask = (vol > 0) & (cur_p > 0)
+            sub_df = df[valid_mask].copy()
+
+            if sub_df.empty:
+                return pd.DataFrame()
+
+            # 1. 均线收敛度计算 (若宽表中具备 ma5/ma10/ma20)
+            has_mas = {'ma5d', 'ma10d', 'ma20d'}.issubset(sub_df.columns)
+            if not has_mas and {'ma5', 'ma10', 'ma20'}.issubset(sub_df.columns):
+                sub_df['ma5d'] = sub_df['ma5']
+                sub_df['ma10d'] = sub_df['ma10']
+                sub_df['ma20d'] = sub_df['ma20']
+                has_mas = True
+
+            if has_mas:
+                ma_max = np.maximum(np.maximum(sub_df['ma5d'], sub_df['ma10d']), sub_df['ma20d'])
+                ma_min = np.minimum(np.minimum(sub_df['ma5d'], sub_df['ma10d']), sub_df['ma20d'])
+                sub_df['ma_spread'] = (ma_max - ma_min) / cur_p
+                # 均线收敛 (发散度 <= 5%)
+                sub_df = sub_df[sub_df['ma_spread'] <= 0.05]
+
+            # 2. 涨跌幅与放量启动条件 (当日涨幅 >= 2.5%, 且放量)
+            pct = pd.to_numeric(sub_df.get('percent', sub_df.get('per1d', 0)), errors='coerce').fillna(0)
+            vol_r = pd.to_numeric(sub_df.get('ratio', sub_df.get('vol_ratio', sub_df.get('volume_ratio', 1.0))), errors='coerce').fillna(1.0)
+            
+            # 启动过滤: 涨幅 >= 2.5% 且量比 >= 1.3
+            pioneer_mask = (pct >= 2.5) & (vol_r >= 1.3)
+            res_df = sub_df[pioneer_mask].copy()
+
+            if res_df.empty:
+                # 若无放量启动，退化为选出均线极度粘合、底抬高的潜伏池
+                if has_mas and 'ma_spread' in sub_df.columns:
+                    res_df = sub_df.sort_values(by='ma_spread', ascending=True).head(top_n)
+                else:
+                    return pd.DataFrame()
+            else:
+                # 按综合评分或量比排序
+                res_df['pioneer_score'] = pct * 0.6 + vol_r * 20.0
+                res_df = res_df.sort_values(by='pioneer_score', ascending=False).head(top_n)
+
+            self.logger.info(f"【逆势企稳先锋选股】成功筛选出 {len(res_df)} 只潜力标的")
+            return res_df
+        except Exception as e:
+            self.logger.error(f"select_early_stabilization_pioneer 发生异常: {e}")
+            res_empty = pd.DataFrame()
+            res_empty.attrs['__error__'] = {
+                "code": "PIONEER_SELECTION_ERROR",
+                "exc_type": type(e).__name__,
+                "exc_msg": str(e)
+            }
+            return res_empty
+
 if __name__ == '__main__':
     # 测试运行
     # 可以传入 df 进行测试: selector = StockSelector(df=some_df)
