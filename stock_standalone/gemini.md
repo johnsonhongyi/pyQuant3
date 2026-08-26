@@ -1,3 +1,20 @@
+## 2026-08-26 21:08
+- [x] **彻底根治所有面板策略过滤选项持久化覆盖与重启回弹 Bug (`favorite_panel.py`, `swing_table.py`, `new_stock_panel.py`, `sector_detail_dialog.py`, `styles.py`, `main_window.py`, `tests/test_ats_tabs_strategy_filter.py`)**：
+    - [x] **根因全面排查与定位**：
+        1. **三大 Tab 共享同一 Key 导致撕裂覆盖**：原先重点关注、回调跟踪器、新股次新股共用 `ats_tab_filter_enabled`，一个面板关闭后写入 false，但其他面板内存仍为 True，切换 Tab 或触发操作时反向将 True 写回；
+        2. **单测直接污染物理配置文件**：单测未沙箱隔离，每次执行单测直接把物理 `window_config.json` 改写为 `"true"`，导致用户重启后被动变成打开；
+        3. **`_on_top_tab_changed` 暴力篡改面板状态**：切换 Tab 时强行读配置覆盖面板当前的过滤状态。
+    - [x] **全维度架构解耦与加固落地**：
+        1. **面板专属独立持久化 Key**：
+            - ⭐ 重点关注：`ats_fav_tab_filter_enabled` (默认 `False`)
+            - 📉 回调跟踪器：`ats_swing_tab_filter_enabled` (默认 `False`)
+            - 🆕 新股次新股：`ats_new_stock_tab_filter_enabled` (默认 `False`)
+            - 🏢 板块成分股明细：`ats_sector_detail_filter_enabled` (默认 `False`)
+        2. **增加类型安全解析器 `parse_bool_config`**：统一以原生布尔值 `True`/`False` 存储与解析，消除字符串大小写歧义；
+        3. **简化 `_on_top_tab_changed`**：各面板严格自主维护自身状态，Tab 切换不再越权篡改；
+        4. **测试套件沙箱化隔离**：单测执行前后自动备份并恢复真实 `window_config.json`，彻底杜绝测试污染用户环境；
+    - [x] **全套自动化测试套件 14 项 100% 全部通过**。
+
 ## 2026-08-26 21:00
 - [x] **完成全系统代码审核与 IPC 数据保活健壮性加固 (`ats/ipc_bridge.py`, `ats/ui/main_window.py`, `stock_logic_utils.py`, `gemini.md`)**：
     - [x] **全维度代码审核与完备性确认**：

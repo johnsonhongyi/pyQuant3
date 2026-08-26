@@ -20,7 +20,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
 from PyQt6.QtGui import QColor, QFont, QKeySequence, QShortcut
 
-from ats.ui.styles import NumericTableWidgetItem, setup_header_persistence, apply_dark_theme, CONFIG_FILE_LOCK, ColorPreservingItemDelegate, load_config_node, save_config_node
+from ats.ui.styles import NumericTableWidgetItem, setup_header_persistence, apply_dark_theme, CONFIG_FILE_LOCK, ColorPreservingItemDelegate, load_config_node, save_config_node, parse_bool_config
 from sys_utils import get_app_root, get_conf_path
 from JohnsonUtil import commonTips as cct
 from logger_utils import LoggerFactory
@@ -80,9 +80,9 @@ class ATSSectorDetailDialog(QDialog):
         self._worker = None
         self._is_rendering = False
         
-        # 🎯 持久化过滤状态 (所有板块详情通用)
-        saved_filter = load_config_node("ats_sector_detail_filter_enabled", "false")
-        self.filter_enabled = (str(saved_filter).strip().lower() == "true")
+        # 🎯 持久化过滤状态 (所有板块详情通用，默认关闭)
+        saved_filter = load_config_node("ats_sector_detail_filter_enabled", False)
+        self.filter_enabled = parse_bool_config(saved_filter, default=False)
         self._all_raw_rows = []
         self._last_score = 0.0
         self._last_leader_str = "--"
@@ -337,7 +337,7 @@ class ATSSectorDetailDialog(QDialog):
     def toggle_filter_state(self):
         """切换策略公式过滤状态并全局持久化"""
         self.filter_enabled = not self.filter_enabled
-        save_config_node("ats_sector_detail_filter_enabled", "true" if self.filter_enabled else "false")
+        save_config_node("ats_sector_detail_filter_enabled", bool(self.filter_enabled))
         self._update_filter_button_ui()
         self._apply_filter_and_render()
 

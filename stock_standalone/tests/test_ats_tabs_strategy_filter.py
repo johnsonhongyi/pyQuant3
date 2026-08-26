@@ -29,9 +29,31 @@ def qapp():
     return app
 
 
+@pytest.fixture(autouse=True)
+def isolate_config():
+    """测试前后安全备份与还原 window_config.json，绝不污染用户真实环境"""
+    from sys_utils import get_app_root, get_conf_path
+    import json
+    cfg_path = get_conf_path("window_config.json", get_app_root())
+    backup_data = None
+    if os.path.exists(cfg_path):
+        try:
+            with open(cfg_path, 'r', encoding='utf-8') as f:
+                backup_data = json.load(f)
+        except Exception:
+            pass
+    yield
+    if backup_data is not None:
+        try:
+            with open(cfg_path, 'w', encoding='utf-8') as f:
+                json.dump(backup_data, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
+
 def test_favorite_panel_strategy_filter(qapp):
     """测试 ⭐ 重点关注 面板的 🎯 策略过滤 按钮与联动过滤"""
-    save_config_node("ats_tab_filter_enabled", "false")
+    save_config_node("ats_fav_tab_filter_enabled", False)
     panel = FavoritePanel()
     
     # 初始状态
@@ -53,7 +75,7 @@ def test_favorite_panel_strategy_filter(qapp):
     panel.toggle_filter_state()
     assert panel.filter_enabled is True
     assert "开" in panel.btn_toggle_filter.text()
-    assert load_config_node("ats_tab_filter_enabled") == "true"
+    assert load_config_node("ats_fav_tab_filter_enabled") is True
     
     # 模拟主窗口只有 600001 命中策略
     mock_mw = MagicMock()
@@ -71,11 +93,12 @@ def test_favorite_panel_strategy_filter(qapp):
     assert panel.table.isRowHidden(0) is False
     assert panel.table.isRowHidden(1) is False
     assert "过滤后" not in panel.count_label.text()
+    assert load_config_node("ats_fav_tab_filter_enabled") is False
 
 
 def test_swing_table_strategy_filter(qapp):
     """测试 📉 回调跟踪器 面板的 🎯 策略过滤 按钮与联动过滤"""
-    save_config_node("ats_tab_filter_enabled", "true")
+    save_config_node("ats_swing_tab_filter_enabled", True)
     table = SwingStateTable()
     assert table.filter_enabled is True
     assert "开" in table.btn_toggle_filter.text()
@@ -103,10 +126,15 @@ def test_swing_table_strategy_filter(qapp):
         if r != row_600519:
             assert table.table.isRowHidden(r) is True
 
+    # 关闭过滤
+    table.toggle_filter_state()
+    assert table.filter_enabled is False
+    assert load_config_node("ats_swing_tab_filter_enabled") is False
+
 
 def test_new_stock_panel_strategy_filter(qapp):
     """测试 🆕 新股次新股 面板的 🎯 策略过滤 按钮与过滤执行"""
-    save_config_node("ats_tab_filter_enabled", "false")
+    save_config_node("ats_new_stock_tab_filter_enabled", False)
     mock_mw = MagicMock()
     mock_mw.filtered_codes_set = {"920093"}
     
@@ -138,6 +166,7 @@ def test_new_stock_panel_strategy_filter(qapp):
     assert "开" in panel.btn_toggle_filter.text()
     assert panel.table.rowCount() == 1
     assert panel.table.item(0, 0).text() == "920093"
+    assert load_config_node("ats_new_stock_tab_filter_enabled") is True
 
 
 def test_favorite_panel_initial_load(qapp):

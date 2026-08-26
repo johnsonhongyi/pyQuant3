@@ -2828,18 +2828,11 @@ class ATSMainWindow(QMainWindow):
                 print(f"[Linkage] External linkage failed: {e}")
 
     def _on_top_tab_changed(self, index: int):
-        """主看板顶部 Tab 切换事件：极速 0ms 补齐渲染与同步对应 Tab 页面数据及策略过滤状态"""
+        """主看板顶部 Tab 切换事件：极速 0ms 补齐渲染与同步对应 Tab 页面数据"""
         try:
-            from ats.ui.styles import load_config_node
-            saved_filter = load_config_node("ats_tab_filter_enabled", "false")
-            filter_is_on = (str(saved_filter).strip().lower() == "true")
-
             if index == 0:
                 # 切换到 ⭐ 重点关注 (基础重点)
                 if hasattr(self, 'favorite_panel'):
-                    if hasattr(self.favorite_panel, 'filter_enabled') and self.favorite_panel.filter_enabled != filter_is_on:
-                        self.favorite_panel.filter_enabled = filter_is_on
-                        self.favorite_panel._update_filter_button_ui()
                     if hasattr(self, '_pending_fav_rows') and self._pending_fav_rows:
                         self.favorite_panel.update_favorite_rows(self._pending_fav_rows)
                     elif hasattr(self.favorite_panel, '_apply_row_visibility'):
@@ -2847,9 +2840,6 @@ class ATSMainWindow(QMainWindow):
             elif index == 1:
                 # 切换到 📉 大级别 MA20d 回调跟踪器
                 if hasattr(self, 'swing_table'):
-                    if hasattr(self.swing_table, 'filter_enabled') and self.swing_table.filter_enabled != filter_is_on:
-                        self.swing_table.filter_enabled = filter_is_on
-                        self.swing_table._update_filter_button_ui()
                     if hasattr(self, '_pending_swing_rows') and self._pending_swing_rows:
                         self.swing_table.update_data_list(self._pending_swing_rows)
                     elif hasattr(self.swing_table, '_apply_favorite_filter'):
@@ -2857,9 +2847,6 @@ class ATSMainWindow(QMainWindow):
             elif index == 2:
                 # 切换到 🆕 新股次新股 (IPO & 阶梯)
                 if hasattr(self, 'new_stock_panel'):
-                    if hasattr(self.new_stock_panel, 'filter_enabled') and self.new_stock_panel.filter_enabled != filter_is_on:
-                        self.new_stock_panel.filter_enabled = filter_is_on
-                        self.new_stock_panel._update_filter_button_ui()
                     if hasattr(self.new_stock_panel, '_apply_filter'):
                         self.new_stock_panel._apply_filter()
         except Exception as e:

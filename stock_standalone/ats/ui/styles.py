@@ -685,6 +685,22 @@ def setup_header_persistence(table_or_tree, config_key, default_widths=None, max
     table_or_tree._persistence_callbacks[config_key] = on_section_resized
 
 
+def parse_bool_config(val, default: bool = False) -> bool:
+    """稳健解析各类配置值为布尔值 (支持 bool, str, int 等)"""
+    if val is None:
+        return default
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, (int, float)):
+        return bool(val)
+    val_str = str(val).strip().lower()
+    if val_str in ("true", "1", "yes", "on"):
+        return True
+    if val_str in ("false", "0", "no", "off", ""):
+        return False
+    return default
+
+
 def load_config_node(key: str, default=None):
     """线程安全从 window_config.json 读取指定 key 的持久化数据，具备 Windows 文件并发重试退避"""
     import os
