@@ -1,3 +1,16 @@
+## 2026-08-26 21:58
+- [x] **彻底修复 ATS 启动数据到达联动断链、查看窗口置顶防重复刷新、过滤防抖与明细搜索功能 (`main_window.py`, `chart_widgets.py`, `gemini.md`)**：
+    - [x] **根治 ATS 启动数据到达策略联动失效 Bug**：
+        - 明确了启动阶段 cold-start 时 `self.current_df` 为 `None` 导致 `apply_filter` 计算出空集合，而 IPC 行情到达后未自动重新计算的联动断链根因；
+        - 在 `main_window.py` 中抽象 `_recompute_filtered_codes_set()`，并在 `_handle_realtime_data` 收到数据更新时自动触发重算，使所有面板的策略过滤与实时行情 100% 自动同步；
+    - [x] **过滤操作防抖与脏检查**：
+        - 为 `apply_filter` 添加 300ms 快速点击防抖与公式一致性脏检查，杜绝短时间内反复点击引发庞大计算导致 UI 卡顿；
+    - [x] **查看窗口置顶激活与防重复全量刷新**：
+        - 在 `view_filtered_stocks_dialog` 中拦截已打开窗口的重复调用，当窗口存在时直接置顶激活（`raise_()` / `activateWindow()`），彻底禁止重复全量刷新导致界面卡顿；
+    - [x] **明细窗口搜索框与新股次新股完全同构 (`DistributionDetailsDialog`)**：
+        - 在明细窗口顶部增加紧凑暗黑搜索框 `self.search_edit` (`🔍 搜代码/名...`)，支持代码、名称、所属板块的毫秒级纯前端行动态快速过滤与匹配计数；
+    - [x] **全套自动化测试 16 项 100% 全部通过**。
+
 ## 2026-08-26 21:35
 - [x] **彻底修复 History 策略选择后未正确持久化与多行带标题/注释策略 Hit 命中测试与展示格式 (`main_window.py`, `tests/test_history_persistence_and_multiline_hit.py`, `gemini.md`)**：
     - [x] **History 选中状态持久化断链根因定位与修复**：
