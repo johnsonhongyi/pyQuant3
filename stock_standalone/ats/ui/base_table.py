@@ -144,6 +144,12 @@ class BaseATSTableWidget(QTableWidget):
             max_widths=max_widths
         )
 
+    def sortItems(self, column: int, order: Qt.SortOrder = Qt.SortOrder.AscendingOrder):
+        """【排序同步守卫】：执行排序前必须同步设置表头 Indicator，保证全局 Item 正确感知升降序"""
+        if self.horizontalHeader() is not None:
+            self.horizontalHeader().setSortIndicator(column, order)
+        super().sortItems(column, order)
+
     def get_selected_stock_pairs(self) -> list:
         """
         获取当前表格中用户选中的所有标的 [(code, name), ...]

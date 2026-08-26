@@ -177,6 +177,8 @@ COLOR_WARN = "#ff9900"     # Warning (Orange)
 COLOR_INFO = "#aad4ff"     # Light Blue / Cyan
 
 
+import math
+import re
 import threading
 from typing import Any, Optional, Union, List, Dict
 CONFIG_FILE_LOCK = threading.RLock()
@@ -211,105 +213,134 @@ class ColorPreservingItemDelegate(QStyledItemDelegate):
 
 class NumericTableWidgetItem(QTableWidgetItem):
     """
-    增强型支持数值与文本混合排序的表格项：
+    量化金融终端增强型支持数值、日期与文本混合排序的表格项：
     1. 自动感知表头排序方向 (AscendingOrder / DescendingOrder)；
-    2. 无论升序还是降序，有数据的单元格永远优先展示（升序从小到大，降序从大到小），无数据占位符 ('--', '', NaN, None) 永远沉底在表格最下方；
-    3. 支持 UserRole 高精度浮点值、千分位、百分比、正负号、括号后缀等混合文本的鲁棒解析。
+    2. 支持重点关注 (is_pinned=True) 置顶特权：无论升序降序，置顶行永远稳居表格最前，且置顶区内部与非置顶区内部均严格按所选列排序；
+    3. 无论升序还是降序，有数据的单元格永远优先展示，无数据占位符 ('--', '', NaN, None) 永远沉底在区域最下方；
+    4. 优先基于 UserRole 高精度浮点值与原始类型比较 (O(1))，支持千分位、百分比、正负号等混合文本解析；
+    5. 智能区分日期 (YYYY-MM-DD) 与分类文本 (如 '前5日(C)')，杜绝正则误提取数字。
     """
-    def __init__(self, value: Any = None):
-        self._raw_value = value
-        if value is None:
-            super().__init__("--")
-        elif isinstance(value, (int, float)):
-            super().__init__(str(value))
+    def __init__(self, value: Any = None, is_pinned: bool = False, raw_val: Any = None):
+        self.is_pinned = is_pinned
+        self._raw_value = raw_val if raw_val is not None else value
+        
+        display_str = "--" if value is None else str(value)
+        super().__init__(display_str)
+        
+        if raw_val is not None:
+            self.setData(Qt.ItemDataRole.UserRole, raw_val)
+        elif isinstance(value, (int, float)) and not (isinstance(value, float) and (math.isnan(value) or math.isinf(value))):
+            self.setData(Qt.ItemDataRole.UserRole, value)
+            self._raw_value = value
         else:
-            super().__init__(str(value))
-            try:
-                text = str(value).replace(',', '').replace('%', '').replace('+', '').replace('￥', '').replace('$', '').strip()
-                if '(' in text:
-                    text = text.split('(')[0].strip()
-                if text and text not in ("-", "--", "---", "null", "None", "nan", "N/A", "未分类", "暂无"):
-                    self._raw_value = float(text)
-            except (ValueError, TypeError):
-                self._raw_value = value
+            self._reparse_raw_value(display_str)
+
+    def setText(self, atext: str):
+        super().setText(atext)
+        # 文本变更时重新解析并更新，杜绝复用 Item 时的历史脏数据残留
+        self._reparse_raw_value(atext)
+
+    def set_raw_value(self, raw_val: Any):
+        """显式绑定真实数值/原始数据"""
+        self._raw_value = raw_val
+        if raw_val is not None and not (isinstance(raw_val, float) and (math.isnan(raw_val) or math.isinf(raw_val))):
+            self.setData(Qt.ItemDataRole.UserRole, raw_val)
+        else:
+            self.setData(Qt.ItemDataRole.UserRole, None)
+
+    def _reparse_raw_value(self, text_val: str):
+        t = str(text_val).strip()
+        t_clean = t.replace('⭐', '').replace('★', '').replace('🐉', '').replace('🔥', '').replace('⚡', '').replace('❄️', '').replace('💎', '').replace('👑', '').strip()
+        if not t_clean or t_clean in ("-", "--", "---", "null", "None", "nan", "NaN", "N/A", "未分类", "暂无") or t_clean.lower() in ("nan", "none", "null", "n/a"):
+            self._raw_value = None
+            self.setData(Qt.ItemDataRole.UserRole, None)
+            return
+
+        # 检查是否为日期格式 (YYYY-MM-DD 或 YYYY/MM/DD)
+        if len(t_clean) == 10 and (t_clean[4] in ('-', '/') and t_clean[7] in ('-', '/')):
+            self._raw_value = t_clean
+            self.setData(Qt.ItemDataRole.UserRole, t_clean)
+            return
+
+        # 尝试提取纯数值 (支持百分比、千分位、正负号)
+        clean_num_str = t_clean.replace(',', '').replace('%', '').replace('+', '').replace('￥', '').replace('$', '').strip()
+        if '(' in clean_num_str and not any(k in t_clean for k in ("前5日", "首日", "次新", "待上市", "N", "C")):
+            clean_num_str = clean_num_str.split('(')[0].strip()
+
+        try:
+            val = float(clean_num_str)
+            if not (math.isnan(val) or math.isinf(val)) and abs(val) < 99999900:
+                self._raw_value = val
+                self.setData(Qt.ItemDataRole.UserRole, val)
+                return
+        except (ValueError, TypeError):
+            pass
+
+        self._raw_value = t_clean
+        self.setData(Qt.ItemDataRole.UserRole, t_clean)
 
     def _is_empty(self) -> bool:
         """判定当前单元格是否为无数据/缺失值占位符"""
-        import math
-        from PyQt6.QtCore import Qt
-        u = self.data(Qt.ItemDataRole.UserRole)
-        if u is not None:
-            try:
-                f = float(u)
-                if not (math.isnan(f) or math.isinf(f)):
-                    if abs(f) >= 99999900:  # 兼容历史极值占位符
-                        return True
-                    return False
-            except (ValueError, TypeError):
-                pass
-        if hasattr(self, '_raw_value') and isinstance(self._raw_value, (int, float)):
-            if not (math.isnan(self._raw_value) or math.isinf(self._raw_value)):
-                if abs(self._raw_value) >= 99999900:
-                    return True
-                return False
         t = self.text().strip()
-        if not t or t in ("-", "--", "---", "null", "None", "N/A", "未分类", "暂无") or t.lower() in ("nan", "none", "null"):
+        t_clean = t.replace('⭐', '').replace('★', '').replace('🐉', '').replace('🔥', '').replace('⚡', '').replace('❄️', '').replace('💎', '').replace('👑', '').strip()
+        if not t_clean or t_clean in ("-", "--", "---", "null", "None", "N/A", "未分类", "暂无", "nan", "NaN") or t_clean.lower() in ("nan", "none", "null", "n/a"):
             return True
+
+        u = self.data(Qt.ItemDataRole.UserRole)
+        if u is not None and isinstance(u, (int, float)):
+            if math.isnan(u) or math.isinf(u) or abs(u) >= 99999900:
+                return True
+            return False
+
+        if hasattr(self, '_raw_value') and isinstance(self._raw_value, (int, float)):
+            if math.isnan(self._raw_value) or math.isinf(self._raw_value) or abs(self._raw_value) >= 99999900:
+                return True
+            return False
+
         return False
 
-    def _get_numeric_value(self, item=None):
-        """提取单元格的真实数值，若为纯文本或空值则返回 None"""
-        import math, re
-        from PyQt6.QtCore import Qt
-        target = item if item is not None else self
-        if hasattr(target, '_is_empty') and target._is_empty():
+    def _get_sort_val(self, target=None):
+        """提取用于精准比较的数值或规范化文本"""
+        item = target if target is not None else self
+        if hasattr(item, '_is_empty') and item._is_empty():
             return None
 
         # 1. 优先使用 UserRole
-        u = target.data(Qt.ItemDataRole.UserRole)
+        u = item.data(Qt.ItemDataRole.UserRole)
         if u is not None:
-            try:
-                f = float(u)
-                if not (math.isnan(f) or math.isinf(f)):
-                    if abs(f) >= 99999900:
-                        return None
-                    return f
-            except (ValueError, TypeError):
-                pass
+            if isinstance(u, (int, float)):
+                if not (math.isnan(u) or math.isinf(u)) and abs(u) < 99999900:
+                    return float(u)
+                return None
+            return u
 
         # 2. 检查 _raw_value
-        if hasattr(target, '_raw_value') and isinstance(target._raw_value, (int, float)):
-            if not (math.isnan(target._raw_value) or math.isinf(target._raw_value)):
-                if abs(target._raw_value) >= 99999900:
-                    return None
-                return float(target._raw_value)
+        if hasattr(item, '_raw_value') and item._raw_value is not None:
+            rv = item._raw_value
+            if isinstance(rv, (int, float)):
+                if not (math.isnan(rv) or math.isinf(rv)) and abs(rv) < 99999900:
+                    return float(rv)
+                return None
+            return rv
 
         # 3. 解析文本
-        t = target.text().strip()
-        if not t or t in ("-", "--", "---", "null", "None", "N/A", "未分类", "暂无") or t.lower() in ("nan", "none", "null"):
+        t = item.text().strip()
+        if not t or t in ("-", "--", "---", "null", "None", "N/A", "未分类", "暂无") or t.lower() in ("nan", "none", "null", "n/a"):
             return None
 
-        clean_t = t.replace(',', '').replace('%', '').replace('+', '').replace('￥', '').replace('$', '').replace('板', '').replace('分', '').strip()
-        if '(' in clean_t:
-            clean_t = clean_t.split('(')[0].strip()
-        num_re = r'[-+]?\d*\.?\d+'
-        m = re.search(num_re, clean_t)
-        if m:
-            try:
-                v = float(m.group())
-                if not (math.isnan(v) or math.isinf(v)):
-                    if abs(v) >= 99999900:
-                        return None
-                    return v
-            except Exception:
-                pass
-        return None
+        clean_t = t.replace(',', '').replace('%', '').replace('+', '').replace('￥', '').replace('$', '').strip()
+        try:
+            f = float(clean_t)
+            if not (math.isnan(f) or math.isinf(f)) and abs(f) < 99999900:
+                return f
+        except Exception:
+            pass
+
+        return t
 
     def __lt__(self, other):
         if not isinstance(other, QTableWidgetItem):
             return super().__lt__(other)
-
-        from PyQt6.QtCore import Qt
 
         # 检查所属表格的表头排序方向
         is_descending = False
@@ -319,44 +350,66 @@ class NumericTableWidgetItem(QTableWidgetItem):
             if header is not None and hasattr(header, 'sortIndicatorOrder'):
                 is_descending = (header.sortIndicatorOrder() == Qt.SortOrder.DescendingOrder)
 
+        pinned_self = getattr(self, 'is_pinned', False)
+        pinned_other = getattr(other, 'is_pinned', False)
+
+        # 1. 置顶优先级控制 (置顶项永远排在非置顶项前面)
+        if pinned_self != pinned_other:
+            if is_descending:
+                # 降序模式下：置顶项判定为“更大” => pinned < unpinned 为 False
+                return not pinned_self
+            else:
+                # 升序模式下：置顶项判定为“更小” => pinned < unpinned 为 True
+                return pinned_self
+
+        # 2. 空值/缺失值沉底控制 (空值永远沉底在各自区域的最下方)
         empty_self = self._is_empty() if hasattr(self, '_is_empty') else (not self.text().strip() or self.text().strip() in ("-", "--", "---", "null", "None", "N/A"))
         empty_other = other._is_empty() if hasattr(other, '_is_empty') else (not other.text().strip() or other.text().strip() in ("-", "--", "---", "null", "None", "N/A"))
 
-        # 核心规则：有数据的单元格永远优先于无数据单元格（无数据永远沉底在最下方）
         if empty_self != empty_other:
             if is_descending:
-                # 降序模式 (高到低)：有数据项必须大于无数据项 => self < other 返回 False (即 self 在 other 前面)
+                # 降序模式下：空值判定为“更小” => empty < non_empty 为 True (沉底)
                 return empty_self
             else:
-                # 升序模式 (低到高)：有数据项必须小于无数据项 => self < other 返回 True (即 self 在 other 前面)
+                # 升序模式下：空值判定为“更大” => empty < non_empty 为 False (沉底)
                 return not empty_self
 
-        # 两者都无数据：保持文本字典序
+        # 两者都是空值：保持文本字典序
         if empty_self and empty_other:
             return self.text() < other.text()
 
-        # 两者都有数据：优先进行高精度数值比较
-        v1 = self._get_numeric_value()
-        v2 = other._get_numeric_value() if hasattr(other, '_get_numeric_value') else self._get_numeric_value(other)
+        # 3. 提取排序值进行比较
+        v1 = self._get_sort_val(self)
+        v2 = self._get_sort_val(other) if hasattr(other, '_get_sort_val') else self._get_sort_val(other)
 
         if v1 is not None and v2 is not None:
-            if v1 != v2:
-                return v1 < v2
-            return self.text() < other.text()
+            # 类型一致比较 (数值 vs 数值, 字符串 vs 字符串)
+            if type(v1) == type(v2):
+                if v1 != v2:
+                    return v1 < v2
+                return self.text() < other.text()
+            elif isinstance(v1, (int, float)) and isinstance(v2, (int, float)):
+                if v1 != v2:
+                    return v1 < v2
+                return self.text() < other.text()
+            else:
+                # 混合类型：转为字符串比较
+                s1 = str(v1)
+                s2 = str(v2)
+                if s1 != s2:
+                    return s1 < s2
+                return self.text() < other.text()
 
-        # 其中之一或两者为非数值文本：按字符串字典序比较
         return self.text() < other.text()
 
 
 class PinnedNumericTableWidgetItem(NumericTableWidgetItem):
     """
-    带优先置顶 (Pinned) 感知与内部排序保护的 QTableWidgetItem。
-    使得包含此 Item 的表格在开启 setSortingEnabled(True) 且 Header 触发排序时，
-    置顶行 (is_pinned=True) 绝对永远排序停留在表格的最顶端 (Row 0, Row 1...)。
+    带优先置顶 (Pinned) 感知与 pin_rank 次序保护的 QTableWidgetItem。
+    完全继承统一的 NumericTableWidgetItem 高性能排序引擎。
     """
-    def __init__(self, text, is_pinned=False, pin_rank=999, header_view=None):
-        super().__init__(text)
-        self.is_pinned = is_pinned
+    def __init__(self, text: Any, is_pinned: bool = False, pin_rank: int = 999, header_view=None, raw_val: Any = None):
+        super().__init__(value=text, is_pinned=is_pinned, raw_val=raw_val)
         self.pin_rank = pin_rank
         self.header_view = header_view
 
@@ -364,32 +417,28 @@ class PinnedNumericTableWidgetItem(NumericTableWidgetItem):
         if not isinstance(other, QTableWidgetItem):
             return super().__lt__(other)
 
-        other_pinned = getattr(other, 'is_pinned', False)
-        other_rank = getattr(other, 'pin_rank', 999)
+        pinned_self = getattr(self, 'is_pinned', False)
+        pinned_other = getattr(other, 'is_pinned', False)
 
-        # 检查所属 Header 的当前排序方向 (AscendingOrder 或 DescendingOrder)
-        is_descending = False
-        if self.header_view and hasattr(self.header_view, 'sortIndicatorOrder'):
-            from PyQt6.QtCore import Qt
-            is_descending = (self.header_view.sortIndicatorOrder() == Qt.SortOrder.DescendingOrder)
+        # 两个都是置顶行且指定了不同的 pin_rank 时，按 pin_rank 排序
+        if pinned_self and pinned_other:
+            r1 = getattr(self, 'pin_rank', 999)
+            r2 = getattr(other, 'pin_rank', 999)
+            if r1 != r2:
+                is_descending = False
+                t = self.tableWidget() or (other.tableWidget() if isinstance(other, QTableWidgetItem) else None)
+                if t is not None:
+                    header = t.horizontalHeader()
+                    if header is not None and hasattr(header, 'sortIndicatorOrder'):
+                        is_descending = (header.sortIndicatorOrder() == Qt.SortOrder.DescendingOrder)
+                elif self.header_view and hasattr(self.header_view, 'sortIndicatorOrder'):
+                    is_descending = (self.header_view.sortIndicatorOrder() == Qt.SortOrder.DescendingOrder)
 
-        # 1. 一个置顶，一个普通
-        if self.is_pinned != other_pinned:
-            if is_descending:
-                # 在降序模式下 (0号位最大)：置顶行必须 "大于" 普通行 (self > other => self < other 返回 False)
-                return not self.is_pinned
-            else:
-                # 在升序模式下 (0号位最小)：置顶行必须 "小于" 普通行 (self < other => self < other 返回 True)
-                return self.is_pinned
+                if is_descending:
+                    return r1 > r2
+                else:
+                    return r1 < r2
 
-        # 2. 两个都是置顶行：按照 pin_rank (0 > 1 > 2...)
-        if self.is_pinned and other_pinned:
-            if is_descending:
-                return self.pin_rank > other_rank
-            else:
-                return self.pin_rank < other_rank
-
-        # 3. 两个都是普通行：调用 NumericTableWidgetItem 的标准数值/文本比较
         return super().__lt__(other)
 
 
