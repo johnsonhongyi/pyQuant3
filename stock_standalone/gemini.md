@@ -1,3 +1,49 @@
+## 2026-08-26 21:00
+- [x] **完成全系统代码审核与 IPC 数据保活健壮性加固 (`ats/ipc_bridge.py`, `ats/ui/main_window.py`, `stock_logic_utils.py`, `gemini.md`)**：
+    - [x] **全维度代码审核与完备性确认**：
+        - 确认今日板块对齐、紧凑布局、多行公式与注释脱敏、三大 Tab 策略联动等 6 大提交及暂存改动 100% 完备且必要；
+        - 明确 `stock_logic_utils.py` 中 `test_code_against_queries` 为底层类型安全防御重构（作用于历史公式批测与个股详情命中判定），主看盘路径直接走 `query_engine.execute`；
+    - [x] **彻底根治“时常没有更新 IPC 数据”痛点**：
+        - **冷启动/盘后 IPC 自动补发**：将 `on_heartbeat` 中无数据冷启动 `REQ_FULL_SYNC` 请求提至交易时段判断之前，彻底解决盘后/午休启动 ATS 因 `not is_work` 阻断重发而白屏无行情的问题；
+        - **提升 IPC 传输健壮性**：`IPCBridge._handle_client` 接收超时由 2.0s 放宽至 5.0s，并强化异常日志输出，防止大包（全市场 5000+ 标的）传输超时被静默吞掉；
+    - [x] **全套自动化测试套件 14 项 100% 全部通过**。
+
+## 2026-08-26 18:28
+- [x] **修复 ATS 异步数据更新链路 (LedgerUpdateWorker) 重点关注与 MA20 回调行情丢失与过滤逻辑 (`ats/ui/main_window.py`, `ats/ui/swing_table.py`, `tests/test_ats_tabs_strategy_filter.py`)**：
+    - [x] **根除 `refresh_realtime_ui` 重点自选池空集合缺陷**：将原 `signal_ledger.get_favorite_stocks_set()` 替换为与 `GlobalFavoriteManager().get_favorite_stocks()` 深度融合合并，确保全量 63 只自选标的 100% 纳入异步计算管线；
+    - [x] **打通 `LedgerUpdateWorker` 重点自选双向代码匹配与实时行情注入**：支持 6 位标准化代码与带前缀代码双向匹配，`fav_rows` 100% 完整继承实时价格、涨跌幅、偏离度、DFF 等全套量化特征；
+    - [x] **纠正 `SwingStateTable._apply_favorite_filter` 反向隐藏 Bug**：未勾选 `⭐ 重点` 时完整显示全部跟踪标的，勾选后精准仅筛选重点标的，彻底杜绝未勾选导致表格全员隐藏为空的现象；
+    - [x] **全套自动化测试 30 项 100% 全部 PASSED**。
+
+## 2026-08-26 18:20
+- [x] **修复 `FavoritePanel._apply_row_visibility` 语法缩进与主窗口父对象解析穿透 (`ats/ui/favorite_panel.py`, `ats/ui/swing_table.py`, `ats/ui/new_stock_panel.py`, `tests/test_ats_tabs_strategy_filter.py`)**：
+    - [x] **根除 `IndentationError: unexpected indent` 启动报错**：补齐 `_apply_row_visibility` 中因代码替换错位的 `for row in range(total_cnt):` 循环头与缩进；
+    - [x] **统一稳健的 `_get_parent_mw()` 解析架构**：在三大 Tab 面板中统一实现穿透式 `_get_parent_mw()`，确保在冷启动、多层嵌套、独立运行及单测 mock 场景下均 100% 稳健解析主窗口命中集合；
+    - [x] **全量回归测试 29 项 100% 全部 PASSED**。
+
+## 2026-08-26 17:45
+- [x] **修复 ⭐ 重点关注 (FavoritePanel) 启动无数据展示并完善默认不开启过滤、手动开启自动持久化机制 (`favorite_panel.py`, `main_window.py`, `tests/test_ats_tabs_strategy_filter.py`)**：
+    - [x] **冷启动基础重点清单自动装载 (`load_initial_favorites`)**：在 `FavoritePanel` 初始化时，自动从 `GlobalFavoriteManager` 获取全局 63 只自选股票（`fav_stocks`）与加入日期、股票名称及基础列，秒级呈现基础关注清单，彻底消除启动后“共 0 只标的 / 空表格”现象；
+    - [x] **默认过滤关闭与手动持久化规范**：
+        - 首次使用默认策略过滤为 `关` (`filter_enabled = False`)，完整展示全部标的；
+        - 手动点击 `🎯 策略过滤` 后自动切换为 `开` 并原子持久化至 `window_config.json` (`ats_tab_filter_enabled`)；
+    - [x] **清理重复的 `_save_search_history_data` 定义并强化测试覆盖**；
+    - [x] **单元测试验证 100% 通过** (`test_ats_tabs_strategy_filter.py` 4 项专项测试全绿)。
+
+## 2026-08-26 17:40
+- [x] **在 ATS 主界面三大核心 Tab 栏工具栏添加与板块明细同款的“🎯 策略过滤”切换按钮与全自动策略联动过滤 (`favorite_panel.py`, `swing_table.py`, `new_stock_panel.py`, `main_window.py`, `tests/test_ats_tabs_strategy_filter.py`)**：
+    - [x] **三大 Tab 工具栏红框位置精准集成**：
+        1. **⭐ 重点关注 (`FavoritePanel`)**：在 `过滤重点代码/名称...` 搜索框左侧添加 `🎯 策略过滤 (开/关)` 按钮；开启时按当前公式过滤重点自选池，动态呈现 `共 N 只标的 (过滤后 M 只)`；
+        2. **📉 大级别 MA20d 回调跟踪器 (`SwingStateTable`)**：在 `⭐ 重点` 复选框左侧添加 `🎯 策略过滤 (开/关)` 按钮；开启时自动将非命中策略股票隐藏；
+        3. **🆕 新股次新股 (`NewStockPanel`)**：在 `📈 SBC 走势` 按钮右侧添加 `🎯 策略过滤 (开/关)` 按钮；开启时自动结合分类筛选、搜索框与策略公式进行交集精准过滤；
+    - [x] **统一视觉渲染与状态持久化 (`load_config_node` / `save_config_node`)**：
+        - 开启状态高亮呈现为绿色激活状态 `🎯 策略过滤 (开)`（`#1a3322` 背景，`#00ff88` 亮绿边框与文字），关闭状态呈现为 `🎯 策略过滤 (关)`（`#222228` 暗灰边框）；
+        - 全局原子持久化记忆 (`ats_tab_filter_enabled`)，多 Tab 与重开窗口自适应记忆恢复；
+    - [x] **主窗口双向广播与多模态策略命中数持久化落盘**：
+        - `ATSMainWindow.apply_filter` 与 `clear_filter` 实时广播刷新三大 Tab 看板；
+        - `_load_search_history_data` 与 `_save_search_history_data` 完整保留并持久化 `hit` 属性，解决历史下拉框多模态项无命中数问题；
+    - [x] **自动化测试用例 `test_ats_tabs_strategy_filter.py` 100% 验证通过** (全量 28 项跨模块联合测试全绿)。
+
 ## 2026-08-26 17:18
 - [x] **根除带量化变量名中文注释误伤与多行反转策略执行报错 (`query_engine_util.py`, `ats/ui/main_window.py`, `tests/test_query_multiline_comment_adaptation.py`)**：
     - [x] **修复中文注释中提及变量名（如 `# 4. SWL 短波重心与 SWS 慢波...`）被误截入代码的漏洞**：

@@ -153,8 +153,77 @@ class NewStockPanel(QWidget):
         self.sort_order = Qt.SortOrder.DescendingOrder
         self._load_sort_state()
 
+        # 🎯 策略过滤持久化开关 (所有 Tab 与明细通用)
+        saved_filter = load_config_node("ats_tab_filter_enabled", "false")
+        self.filter_enabled = (str(saved_filter).strip().lower() == "true")
+
         self._init_ui()
         self._start_system_lifecycle()
+
+    def toggle_filter_state(self):
+        """切换策略公式过滤状态并全局持久化"""
+        self.filter_enabled = not self.filter_enabled
+        save_config_node("ats_tab_filter_enabled", "true" if self.filter_enabled else "false")
+        self._update_filter_button_ui()
+        self._apply_filter()
+
+    def _update_filter_button_ui(self):
+        """更新策略过滤按钮的高亮与状态文案"""
+        if getattr(self, 'filter_enabled', False):
+            self.btn_toggle_filter.setText("🎯 策略过滤 (开)")
+            self.btn_toggle_filter.setStyleSheet("""
+                QPushButton {
+                    background-color: #1a3322;
+                    color: #00ff88;
+                    font-weight: bold;
+                    border: 1.5px solid #00ff88;
+                    border-radius: 3px;
+                    padding: 2px 8px;
+                    font-size: 8.5pt;
+                }
+                QPushButton:hover {
+                    background-color: #00ff88;
+                    color: #000000;
+                }
+            """)
+            self.btn_toggle_filter.setToolTip("当前状态：【已开启】根据主窗口策略公式过滤当前列表 (点击可关闭)")
+        else:
+            self.btn_toggle_filter.setText("🎯 策略过滤 (关)")
+            self.btn_toggle_filter.setStyleSheet("""
+                QPushButton {
+                    background-color: #222228;
+                    color: #888888;
+                    font-weight: bold;
+                    border: 1px solid #44444f;
+                    border-radius: 3px;
+                    padding: 2px 8px;
+                    font-size: 8.5pt;
+                }
+                QPushButton:hover {
+                    background-color: #33333d;
+                    color: #ffffff;
+                    border-color: #777788;
+                }
+            """)
+            self.btn_toggle_filter.setToolTip("当前状态：【已关闭】展示全部标的 (点击开启根据策略公式过滤)")
+
+    def _get_parent_mw(self):
+        """稳健获取持有 filtered_codes_set 的主窗口实例"""
+        mw = getattr(self, 'main_window', None)
+        if mw and hasattr(mw, 'filtered_codes_set'):
+            return mw
+        p = getattr(self, 'parent', lambda: None)()
+        if p and hasattr(p, 'filtered_codes_set'):
+            return p
+        if hasattr(self, 'window'):
+            w = self.window()
+            if w and w is not self and hasattr(w, 'filtered_codes_set'):
+                return w
+        from PyQt6.QtWidgets import QApplication
+        for tw in QApplication.topLevelWidgets():
+            if hasattr(tw, 'filtered_codes_set'):
+                return tw
+        return None
 
     def _load_sort_state(self):
         """从配置文件加载恢复最后的排序设置"""
@@ -206,9 +275,9 @@ class NewStockPanel(QWidget):
                 background-color: #38bdf8; 
                 color: #000000; 
             }
-            QPushButton:pressed {
-                background-color: #0369a1;
-                color: #ffffff;
+            QPushButton:pressed { 
+                background-color: #0369a1; 
+                color: #ffffff; 
             }
         """)
         self.btn_refresh.clicked.connect(lambda: self.load_data(force_refresh=True, is_manual_btn=True))
@@ -271,6 +340,12 @@ class NewStockPanel(QWidget):
         """)
         self.btn_open_sbc.clicked.connect(self._on_open_sbc_clicked)
         top_bar.addWidget(self.btn_open_sbc)
+
+        # 🎯 策略过滤持久化开关按钮
+        self.btn_toggle_filter = QPushButton()
+        self._update_filter_button_ui()
+        self.btn_toggle_filter.clicked.connect(self.toggle_filter_state)
+        top_bar.addWidget(self.btn_toggle_filter)
 
         top_bar.addStretch()
 
@@ -755,6 +830,13 @@ class NewStockPanel(QWidget):
                 df_filtered["name"].astype(str).str.lower().str.contains(search_txt)
             )
             df_filtered = df_filtered[mask]
+
+        # 🎯 策略公式过滤
+        if getattr(self, 'filter_enabled', False):
+            parent_mw = self._get_parent_mw()
+            fset = getattr(parent_mw, 'filtered_codes_set', None) if parent_mw else None
+            if fset is not None and not df_filtered.empty:
+                df_filtered = df_filtered[df_filtered["code"].astype(str).str.strip().str.zfill(6).isin(fset)]
 
         if df_filtered.empty:
             self.table.setRowCount(0)

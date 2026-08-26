@@ -10,7 +10,7 @@ from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QColor
 import os
 import json
-from ats.ui.styles import COLOR_UP, COLOR_DOWN, COLOR_WARN, COLOR_INFO, COLOR_ACCENT, auto_fit_columns_once, NumericTableWidgetItem
+from ats.ui.styles import COLOR_UP, COLOR_DOWN, COLOR_INFO, COLOR_WARN, COLOR_ACCENT, setup_header_persistence, auto_fit_columns_once, NumericTableWidgetItem, load_config_node, save_config_node
 from ats.ui.base_table import BaseATSTableWidget
 from ats.ui.favorite_panel import get_ats_extra_cols, get_ats_table_headers
 
@@ -23,7 +23,60 @@ class SwingStateTable(QWidget):
         super().__init__(parent)
         self._is_mock_active = False
         self.extra_cols = get_ats_extra_cols()
+        
+        # 🎯 策略过滤持久化开关 (所有 Tab 与明细通用)
+        saved_filter = load_config_node("ats_tab_filter_enabled", "false")
+        self.filter_enabled = (str(saved_filter).strip().lower() == "true")
+        
         self._init_ui()
+        self.load_mock_data()
+
+    def toggle_filter_state(self):
+        """切换策略公式过滤状态并全局持久化"""
+        self.filter_enabled = not self.filter_enabled
+        save_config_node("ats_tab_filter_enabled", "true" if self.filter_enabled else "false")
+        self._update_filter_button_ui()
+        self._apply_favorite_filter()
+
+    def _update_filter_button_ui(self):
+        """更新策略过滤按钮的高亮与状态文案"""
+        if getattr(self, 'filter_enabled', False):
+            self.btn_toggle_filter.setText("🎯 策略过滤 (开)")
+            self.btn_toggle_filter.setStyleSheet("""
+                QPushButton {
+                    background-color: #1a3322;
+                    color: #00ff88;
+                    font-weight: bold;
+                    border: 1.5px solid #00ff88;
+                    border-radius: 3px;
+                    padding: 2px 8px;
+                    font-size: 8.5pt;
+                }
+                QPushButton:hover {
+                    background-color: #00ff88;
+                    color: #000000;
+                }
+            """)
+            self.btn_toggle_filter.setToolTip("当前状态：【已开启】根据主窗口策略公式过滤当前列表 (点击可关闭)")
+        else:
+            self.btn_toggle_filter.setText("🎯 策略过滤 (关)")
+            self.btn_toggle_filter.setStyleSheet("""
+                QPushButton {
+                    background-color: #222228;
+                    color: #888888;
+                    font-weight: bold;
+                    border: 1px solid #44444f;
+                    border-radius: 3px;
+                    padding: 2px 8px;
+                    font-size: 8.5pt;
+                }
+                QPushButton:hover {
+                    background-color: #33333d;
+                    color: #ffffff;
+                    border-color: #777788;
+                }
+            """)
+            self.btn_toggle_filter.setToolTip("当前状态：【已关闭】展示全部标的 (点击开启根据策略公式过滤)")
 
     def _init_ui(self):
         layout = QVBoxLayout(self)
@@ -36,6 +89,13 @@ class SwingStateTable(QWidget):
         title.setStyleSheet("font-weight: bold; color: #aad4ff; font-size: 12pt;")
         header.addWidget(title)
         header.addStretch()
+
+        # 🎯 策略过滤持久化开关按钮
+        self.btn_toggle_filter = QPushButton()
+        self._update_filter_button_ui()
+        self.btn_toggle_filter.clicked.connect(self.toggle_filter_state)
+        header.addWidget(self.btn_toggle_filter)
+        header.addSpacing(6)
         
         from PyQt6.QtWidgets import QCheckBox
         self.chk_favorite_show = QCheckBox("⭐ 重点")
@@ -375,6 +435,24 @@ class SwingStateTable(QWidget):
         self._save_show_favorite_config(is_checked)
         self._apply_favorite_filter()
 
+    def _get_parent_mw(self):
+        """稳健获取持有 filtered_codes_set 的主窗口实例"""
+        mw = getattr(self, 'main_window', None)
+        if mw and hasattr(mw, 'filtered_codes_set'):
+            return mw
+        p = getattr(self, 'parent', lambda: None)()
+        if p and hasattr(p, 'filtered_codes_set'):
+            return p
+        if hasattr(self, 'window'):
+            w = self.window()
+            if w and w is not self and hasattr(w, 'filtered_codes_set'):
+                return w
+        from PyQt6.QtWidgets import QApplication
+        for tw in QApplication.topLevelWidgets():
+            if hasattr(tw, 'filtered_codes_set'):
+                return tw
+        return None
+
     def _apply_favorite_filter(self):
         show_fav = getattr(self, 'chk_favorite_show', None) and self.chk_favorite_show.isChecked()
         try:
@@ -383,6 +461,13 @@ class SwingStateTable(QWidget):
         except Exception:
             fav_stocks = set()
 
+        parent_mw = self._get_parent_mw()
+        fset = None
+        if getattr(self, 'filter_enabled', False) and parent_mw is not None:
+            fset = getattr(parent_mw, 'filtered_codes_set', None)
+            if fset is None:
+                fset = set()
+
         for row in range(self.table.rowCount()):
             code_item = self.table.item(row, 0)
             name_item = self.table.item(row, 1)
@@ -390,11 +475,11 @@ class SwingStateTable(QWidget):
             name_str = name_item.text().strip() if name_item else ""
 
             is_fav = (code_str in fav_stocks) or ("⭐" in name_str) or ("★" in name_str)
-            # 如果关闭重点关注 (show_fav 为 False)，则隐藏重点关注的股票，仅显示纯实时策略个股
-            if not show_fav and is_fav:
-                self.table.setRowHidden(row, True)
-            else:
-                self.table.setRowHidden(row, False)
+            # 勾选仅看重点时，隐藏非重点标的；未勾选时展示全部跟踪标的
+            fav_hidden = (show_fav and not is_fav)
+            filter_hidden = (fset is not None) and (code_str.zfill(6) not in fset)
+            
+            self.table.setRowHidden(row, fav_hidden or filter_hidden)
 
     def _get_bold_font(self):
         font = self.table.font()

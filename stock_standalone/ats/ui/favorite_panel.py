@@ -16,7 +16,7 @@ import datetime
 import time
 
 from ats.ui.base_table import BaseATSTableWidget
-from ats.ui.styles import COLOR_UP, COLOR_DOWN, COLOR_INFO, setup_header_persistence, NumericTableWidgetItem
+from ats.ui.styles import COLOR_UP, COLOR_DOWN, COLOR_INFO, setup_header_persistence, NumericTableWidgetItem, load_config_node, save_config_node
 
 
 
@@ -58,8 +58,7 @@ def get_ats_table_headers(extra_cols=None):
         "首次发现", "优先级", "DFF", "Rank", "DFF2", "DFF3", "大盘偏离", "大盘共振"
     ]
     extra_headers = [col_map.get(c, c) for c in extra_cols]
-    base_post = ["推荐理由"]
-    return base_pre + extra_headers + base_post
+    return base_pre + extra_headers + ["推荐理由"]
 
 
 class FavoritePanel(QWidget):
@@ -71,6 +70,11 @@ class FavoritePanel(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.extra_cols = get_ats_extra_cols()
+        
+        # 🎯 策略过滤持久化开关 (所有 Tab 与明细通用)
+        saved_filter = load_config_node("ats_tab_filter_enabled", "false")
+        self.filter_enabled = (str(saved_filter).strip().lower() == "true")
+        
         self._init_ui()
 
     def _init_ui(self):
@@ -88,6 +92,12 @@ class FavoritePanel(QWidget):
         self.count_label.setStyleSheet("color: #888888; font-size: 9pt;")
         header.addWidget(self.count_label)
         header.addStretch()
+
+        # 🎯 策略过滤持久化开关按钮
+        self.btn_toggle_filter = QPushButton()
+        self._update_filter_button_ui()
+        self.btn_toggle_filter.clicked.connect(self.toggle_filter_state)
+        header.addWidget(self.btn_toggle_filter)
 
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("过滤重点代码/名称...")
@@ -114,6 +124,139 @@ class FavoritePanel(QWidget):
         self.table.itemDoubleClicked.connect(self._on_double_clicked)
         layout.addWidget(self.table)
 
+        # 启动时若无推送，立即加载基础重点关注股票清单
+        self.load_initial_favorites()
+
+    def load_initial_favorites(self):
+        """冷启动/无 IPC 推送时：从 GlobalFavoriteManager 加载重点关注基础列表"""
+        try:
+            from global_favorites import GlobalFavoriteManager
+            from sys_utils import resolve_stock_name
+            import time
+            fav_mgr = GlobalFavoriteManager()
+            fav_stocks = fav_mgr.get_favorite_stocks()
+            if not fav_stocks:
+                return
+            
+            rows = []
+            extra_cols = getattr(self, 'extra_cols', [])
+            extra_fallback = ['--'] * len(extra_cols)
+            
+            for code in sorted(fav_stocks):
+                code_clean = str(code).strip().zfill(6)
+                name = resolve_stock_name(code_clean) or "重点标的"
+                fav_date = fav_mgr.get_favorite_stock_date(code_clean) or time.strftime("%Y-%m-%d")
+                
+                row = (
+                    code_clean, name, "0.00", "重点关注", "+0.0%", "0", "观察",
+                    fav_date, "200.0", "0.0", "0", "0.0", "0.0", "0.0", "普通",
+                    *extra_fallback,
+                    "基础重点关注标的"
+                )
+                rows.append(row)
+                
+            if rows:
+                self.update_favorite_rows(rows)
+        except Exception as e:
+            pass
+
+    def toggle_filter_state(self):
+        """切换策略公式过滤状态并全局持久化"""
+        self.filter_enabled = not self.filter_enabled
+        save_config_node("ats_tab_filter_enabled", "true" if self.filter_enabled else "false")
+        self._update_filter_button_ui()
+        self._apply_row_visibility()
+
+    def _update_filter_button_ui(self):
+        """更新策略过滤按钮的高亮与状态文案"""
+        if getattr(self, 'filter_enabled', False):
+            self.btn_toggle_filter.setText("🎯 策略过滤 (开)")
+            self.btn_toggle_filter.setStyleSheet("""
+                QPushButton {
+                    background-color: #1a3322;
+                    color: #00ff88;
+                    font-weight: bold;
+                    border: 1.5px solid #00ff88;
+                    border-radius: 3px;
+                    padding: 2px 8px;
+                    font-size: 8.5pt;
+                }
+                QPushButton:hover {
+                    background-color: #00ff88;
+                    color: #000000;
+                }
+            """)
+            self.btn_toggle_filter.setToolTip("当前状态：【已开启】根据主窗口策略公式过滤当前列表 (点击可关闭)")
+        else:
+            self.btn_toggle_filter.setText("🎯 策略过滤 (关)")
+            self.btn_toggle_filter.setStyleSheet("""
+                QPushButton {
+                    background-color: #222228;
+                    color: #888888;
+                    font-weight: bold;
+                    border: 1px solid #44444f;
+                    border-radius: 3px;
+                    padding: 2px 8px;
+                    font-size: 8.5pt;
+                }
+                QPushButton:hover {
+                    background-color: #33333d;
+                    color: #ffffff;
+                    border-color: #777788;
+                }
+            """)
+            self.btn_toggle_filter.setToolTip("当前状态：【已关闭】展示全部标的 (点击开启根据策略公式过滤)")
+
+    def _get_parent_mw(self):
+        """稳健获取持有 filtered_codes_set 的主窗口实例"""
+        mw = getattr(self, 'main_window', None)
+        if mw and hasattr(mw, 'filtered_codes_set'):
+            return mw
+        p = getattr(self, 'parent', lambda: None)()
+        if p and hasattr(p, 'filtered_codes_set'):
+            return p
+        if hasattr(self, 'window'):
+            w = self.window()
+            if w and w is not self and hasattr(w, 'filtered_codes_set'):
+                return w
+        from PyQt6.QtWidgets import QApplication
+        for tw in QApplication.topLevelWidgets():
+            if hasattr(tw, 'filtered_codes_set'):
+                return tw
+        return None
+
+    def _apply_row_visibility(self):
+        """根据搜索框文本与主窗口策略过滤条件联合控制行显示"""
+        text = self.search_input.text().strip().lower()
+        parent_mw = self._get_parent_mw()
+        
+        fset = None
+        if getattr(self, 'filter_enabled', False) and parent_mw is not None:
+            fset = getattr(parent_mw, 'filtered_codes_set', None)
+            if fset is None:
+                fset = set()
+        
+        visible_cnt = 0
+        total_cnt = self.table.rowCount()
+        for row in range(total_cnt):
+            code_item = self.table.item(row, 0)
+            name_item = self.table.item(row, 1)
+            code_str = code_item.text().strip() if code_item else ""
+            name_str = name_item.text().lower() if name_item else ""
+            
+            match_search = (not text) or (text in code_str.lower()) or (text in name_str)
+            match_filter = (fset is None) or (code_str.zfill(6) in fset)
+            
+            visible = match_search and match_filter
+            self.table.setRowHidden(row, not visible)
+            if visible:
+                visible_cnt += 1
+                
+        if getattr(self, 'filter_enabled', False) and fset is not None:
+            self.count_label.setText(f"共 {total_cnt} 只标的 (过滤后 {visible_cnt} 只)")
+        else:
+            self.count_label.setText(f"共 {total_cnt} 只标的")
+
     def _on_double_clicked(self, item):
         if not item:
             return
@@ -126,14 +269,7 @@ class FavoritePanel(QWidget):
             self.stock_selected.emit(code, name, {})
 
     def _on_search_changed(self, text):
-        text = text.strip().lower()
-        for row in range(self.table.rowCount()):
-            code_item = self.table.item(row, 0)
-            name_item = self.table.item(row, 1)
-            code_str = code_item.text().lower() if code_item else ""
-            name_str = name_item.text().lower() if name_item else ""
-            match = (not text) or (text in code_str) or (text in name_str)
-            self.table.setRowHidden(row, not match)
+        self._apply_row_visibility()
 
     def update_favorite_rows(self, rows):
         """更新重点关注看板表格 (双缓冲平滑覆盖，杜绝更新前清空导致的闪烁/清0)
@@ -273,3 +409,5 @@ class FavoritePanel(QWidget):
         self.table.setSortingEnabled(True)
         if sort_col >= 0:
             self.table.sortItems(sort_col, sort_order)
+            
+        self._apply_row_visibility()
