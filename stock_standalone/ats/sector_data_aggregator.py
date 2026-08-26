@@ -292,42 +292,142 @@ class SectorDataAggregator:
 
         return current_df, get_name_fn
 
+    def _load_bidding_sector_data(self) -> Dict[str, Any]:
+        """[SSOT] 权威加载最新的 bidding_session_data / 快照文件 (含 mtime 缓存)"""
+        import glob
+        import gzip
+        import re
+        import zlib
+
+        base = get_app_root()
+        path = None
+        try:
+            ram_path = cct.get_ramdisk_path("bidding_session_data.json.gz")
+            if ram_path and os.path.exists(ram_path):
+                path = ram_path
+        except Exception:
+            pass
+
+        if not path:
+            try:
+                fallback_path = os.path.abspath(os.path.join(base, "snapshots", "bidding_session_data.json.gz"))
+                if os.path.exists(fallback_path):
+                    path = fallback_path
+                else:
+                    snap_pattern = os.path.join(base, "snapshots", "bidding_*.json.gz")
+                    snap_files = [f for f in glob.glob(snap_pattern) if re.search(r'bidding_\d{8}\.json\.gz$', f)]
+                    if snap_files:
+                        path = sorted(snap_files)[-1]
+            except Exception:
+                pass
+
+        if not path or not os.path.exists(path):
+            return {}
+
+        mtime = os.path.getmtime(path)
+        if (getattr(self, '_cached_bidding_path', None) == path and
+            getattr(self, '_cached_bidding_mtime', None) == mtime and
+            hasattr(self, '_cached_bidding_data')):
+            return self._cached_bidding_data
+
+        try:
+            with open(path, 'rb') as f:
+                raw = f.read()
+            if raw:
+                json_str = zlib.decompress(raw).decode('utf-8')
+                data = json.loads(json_str)
+                self._cached_bidding_data = data.get('sector_data', {})
+                self._cached_bidding_path = path
+                self._cached_bidding_mtime = mtime
+                return self._cached_bidding_data
+        except Exception as e:
+            logger.debug(f"SectorDataAggregator _load_bidding_sector_data error: {e}")
+
+        return {}
+
     def resolve_sector_member_codes(
         self,
         sector_name: str,
         member_codes: Optional[List[str]] = None,
         current_df: Optional[pd.DataFrame] = None
-    ) -> Tuple[List[str], Dict[str, str]]:
+    ) -> Tuple[List[str], Dict[str, str], Optional[Dict[str, Any]]]:
         """
-        解析板块成分股代码列表与名称映射:
-        - 若显式传入 member_codes 则严格以此为准；
-        - 若未传入 member_codes，则启动三级自动发现与兜底：
-          1. current_df 关键词同义词模糊向量匹配
-          2. 经典行业中军龙头储备库 (FAMOUS_SECTOR_LEADERS)
-          3. RAMDisk 竞价会话快照 (bidding_session_data)
+        解析板块全量成分股代码列表、名称映射及板块元数据:
+        - 100% 优先从全市场竞价快照 (bidding_session_data) 解析全量成分股 (龙头 + 赛马成员 + 跟随者)；
+        - 若快照中未找到，则依序从 current_df 同义词模糊匹配与经典中军库兜底。
         """
         target_codes = []
         seen_codes = set()
         code_to_name = {}
+        matched_sec_info = None
 
-        # 1. 优先使用外部显式传入的 member_codes (严格尊重外部指定的成分股范围)
+        # 清洗板块名称（去除 ⭐, 🔥, ⚡, 📊, 👑 及前后空格）
+        clean_sec = re.sub(r'^[^\w\u4e00-\u9fa5]+', '', str(sector_name)).strip()
+
+        # ── 1. 优先从 bidding_session_data 权威读取全量成分股 ──
+        bidding_sec_data = self._load_bidding_sector_data()
+        if bidding_sec_data:
+            if clean_sec in bidding_sec_data:
+                matched_sec_info = bidding_sec_data[clean_sec]
+            elif sector_name in bidding_sec_data:
+                matched_sec_info = bidding_sec_data[sector_name]
+            else:
+                # 同义词或模糊包含检索
+                synonyms = [clean_sec] + SECTOR_SYNONYMS.get(clean_sec, [])
+                for syn in synonyms:
+                    for k, v in bidding_sec_data.items():
+                        if syn == k or syn in k or k in syn:
+                            matched_sec_info = v
+                            break
+                    if matched_sec_info:
+                        break
+
+            if matched_sec_info:
+                # 龙头
+                l_code = str(matched_sec_info.get('leader', '')).strip().zfill(6)
+                l_name = str(matched_sec_info.get('leader_name', '')).strip()
+                if l_code and l_code != '000000' and l_code not in seen_codes:
+                    target_codes.append(l_code)
+                    seen_codes.add(l_code)
+                    if l_name:
+                        code_to_name[l_code] = l_name
+
+                # 竞价赛马候选成员
+                for rc in matched_sec_info.get('race_candidates', []):
+                    c = str(rc.get('code', '')).strip().zfill(6)
+                    if c and c != '000000' and c not in seen_codes:
+                        target_codes.append(c)
+                        seen_codes.add(c)
+                    n = str(rc.get('name', '')).strip()
+                    if c and n and n != '未知':
+                        code_to_name[c] = n
+
+                # 跟随者成员
+                for fol in matched_sec_info.get('followers', []):
+                    c = str(fol.get('code', '')).strip().zfill(6)
+                    if c and c != '000000' and c not in seen_codes:
+                        target_codes.append(c)
+                        seen_codes.add(c)
+                    n = str(fol.get('name', '')).strip()
+                    if c and n and n != '未知':
+                        code_to_name[c] = n
+
+        # ── 2. 如果外部有显式传入 member_codes，确保全部并入 ──
         if member_codes:
             for c in member_codes:
                 c_clean = str(c).strip().zfill(6)
                 if c_clean and c_clean not in seen_codes:
                     target_codes.append(c_clean)
                     seen_codes.add(c_clean)
-            return target_codes, code_to_name
 
-        # 2. 如果未传入 member_codes，从 current_df 按同义词模糊匹配
-        if current_df is not None and not current_df.empty and 'category' in current_df.columns:
+        # ── 3. 若仍无成分股，从 current_df 按同义词模糊匹配 ──
+        if not target_codes and current_df is not None and not current_df.empty and 'category' in current_df.columns:
             try:
-                synonyms = [sector_name] + SECTOR_SYNONYMS.get(sector_name, [])
+                synonyms = [clean_sec] + SECTOR_SYNONYMS.get(clean_sec, [])
                 pattern = '|'.join([re.escape(s) for s in synonyms if s])
                 matched_series = current_df['category'].astype(str).str.contains(pattern, case=False, na=False)
                 df_matched = current_df[matched_series]
                 if not df_matched.empty:
-                    # 兼容 index 为 RangeIndex 或 code 为列
                     use_col = 'code' in df_matched.columns
                     for idx, row_item in df_matched.iloc[:60].iterrows():
                         raw_c = row_item['code'] if use_col else idx
@@ -341,10 +441,10 @@ class SectorDataAggregator:
             except Exception as ex:
                 logger.debug(f"current_df 板块匹配异常: {ex}")
 
-        # 3. 若成分股仍不足，从著名经典中军龙头库 FAMOUS_SECTOR_LEADERS 补齐
+        # ── 4. 若成分股仍不足，从著名经典中军龙头库 FAMOUS_SECTOR_LEADERS 补齐 ──
         if len(target_codes) < 6:
             for key, st_list in FAMOUS_SECTOR_LEADERS.items():
-                if key == sector_name or key in sector_name or sector_name in key:
+                if key == clean_sec or key in clean_sec or clean_sec in key:
                     for c_code, def_name in st_list:
                         c_clean = str(c_code).strip().zfill(6)
                         if c_clean not in seen_codes:
@@ -354,28 +454,7 @@ class SectorDataAggregator:
                             code_to_name[c_clean] = def_name
                     break
 
-        # 4. 若仍不足，从 bidding_session_data 尝试补齐
-        if len(target_codes) < 6:
-            try:
-                ram_path = cct.get_ramdisk_path("bidding_session_data.json.gz")
-                if ram_path and os.path.exists(ram_path):
-                    with open(ram_path, 'rb') as f:
-                        data = json.loads(zlib.decompress(f.read()).decode('utf-8'))
-                        sec_data = data.get('sector_data', {}).get(sector_name, {})
-                        if sec_data:
-                            l_c = str(sec_data.get('leader', '')).strip().zfill(6)
-                            if l_c and l_c not in seen_codes:
-                                target_codes.append(l_c)
-                                seen_codes.add(l_c)
-                            for fol in sec_data.get('followers', []):
-                                f_c = str(fol.get('code', '')).strip().zfill(6)
-                                if f_c and f_c not in seen_codes:
-                                    target_codes.append(f_c)
-                                    seen_codes.add(f_c)
-            except Exception:
-                pass
-
-        return target_codes, code_to_name
+        return target_codes, code_to_name, matched_sec_info
 
     def fetch_quotes_unified(
         self,
@@ -547,7 +626,7 @@ class SectorDataAggregator:
         【🎯 板块明细核心入口】一键完成板块成分股发现、高频行情拉取、动态列映射、领涨龙头评选与强度打分
         返回: (rows, score, leader_str, meta)
         """
-        code_list, code_to_name = self.resolve_sector_member_codes(
+        code_list, code_to_name, matched_sec_info = self.resolve_sector_member_codes(
             sector_name=sector_name,
             member_codes=member_codes,
             current_df=current_df
@@ -565,9 +644,44 @@ class SectorDataAggregator:
             get_name_fn=get_name_fn
         )
 
-        # 动态评选 👑 领涨龙头
-        leader_code = ""
-        leader_name = ""
+        # ── 1. 从 bidding_session_data 提取权威龙头与角色映射 ──
+        authoritative_score = 0.0
+        auth_leader_code = ""
+        auth_leader_name = ""
+        auth_leader_pct = 0.0
+        race_roles = {}
+        race_scores = {}
+        race_hints = {}
+
+        if matched_sec_info:
+            authoritative_score = float(matched_sec_info.get('score', 0.0))
+            auth_leader_code = str(matched_sec_info.get('leader', '')).strip().zfill(6)
+            auth_leader_name = str(matched_sec_info.get('leader_name', '')).strip()
+            auth_leader_pct = float(matched_sec_info.get('leader_pct', 0.0))
+
+            for rc in matched_sec_info.get('race_candidates', []):
+                c = str(rc.get('code', '')).strip().zfill(6)
+                if c:
+                    if rc.get('role'):
+                        race_roles[c] = str(rc.get('role'))
+                    if rc.get('score') is not None:
+                        race_scores[c] = float(rc.get('score', 0.0))
+                    if rc.get('hint') or rc.get('pattern_hint'):
+                        race_hints[c] = str(rc.get('hint', rc.get('pattern_hint')))
+
+            for fol in matched_sec_info.get('followers', []):
+                c = str(fol.get('code', '')).strip().zfill(6)
+                if c:
+                    if fol.get('role') and c not in race_roles:
+                        race_roles[c] = str(fol.get('role'))
+                    if fol.get('score') is not None and c not in race_scores:
+                        race_scores[c] = float(fol.get('score', 0.0))
+                    if (fol.get('hint') or fol.get('pattern_hint')) and c not in race_hints:
+                        race_hints[c] = str(fol.get('hint', fol.get('pattern_hint')))
+
+        # ── 2. 计算动态涨幅与龙头标的 ──
+        dynamic_leader_code = ""
+        dynamic_leader_name = ""
         max_pct = -999.0
         sum_pct = 0.0
         up_count = 0
@@ -576,37 +690,65 @@ class SectorDataAggregator:
             pct_val = _safe_float(r.get('pct', 0.0))
             if pct_val > max_pct:
                 max_pct = pct_val
-                leader_code = r['code']
-                leader_name = r['name']
+                dynamic_leader_code = r['code']
+                dynamic_leader_name = r['name']
             if pct_val > 0.001:
                 up_count += 1
             sum_pct += pct_val
 
-        for r in rows:
-            if r['code'] == leader_code:
-                r['type'] = '👑 领涨龙头'
-                r['score'] = max(98.0, _safe_float(r.get('score', 75.0)))
-                r['pattern'] = '板块领涨核心先锋'
+        final_leader_code = auth_leader_code if (auth_leader_code and auth_leader_code != '000000') else dynamic_leader_code
+        final_leader_name = auth_leader_name if auth_leader_name else dynamic_leader_name
 
-        # 严格按得分降序、涨幅降序排列，确保领涨龙头与核心先锋股位居首位
-        rows.sort(key=lambda x: (x.get('score', 0.0), x.get('pct', 0.0)), reverse=True)
+        for r in rows:
+            c = r['code']
+            if c == final_leader_code:
+                r['type'] = '👑 领涨龙头'
+                r['score'] = max(98.0, race_scores.get(c, _safe_float(r.get('score', 75.0))))
+                r['pattern'] = race_hints.get(c, '板块领涨核心龙头')
+                if not final_leader_name or final_leader_name == '个股' or final_leader_name == c:
+                    final_leader_name = r['name']
+            elif c in race_roles:
+                r['type'] = race_roles[c]
+                if c in race_scores:
+                    r['score'] = race_scores[c]
+                if c in race_hints and race_hints[c]:
+                    r['pattern'] = race_hints[c]
+
+        # ── 3. 排序：龙头置顶，其余按得分/涨幅降序排列 ──
+        def _get_sort_tuple(item):
+            is_lead = 1 if item.get('code') == final_leader_code else 0
+            is_champ = 1 if '👑' in str(item.get('type', '')) else 0
+            is_pioneer = 1 if '🚀' in str(item.get('type', '')) else 0
+            sc = _safe_float(item.get('score', 0.0))
+            pct = _safe_float(item.get('pct', 0.0))
+            return (is_lead, is_champ, is_pioneer, sc, pct)
+
+        rows.sort(key=_get_sort_tuple, reverse=True)
 
         avg_pct = sum_pct / len(rows) if rows else 0.0
         if math.isnan(avg_pct) or math.isinf(avg_pct):
             avg_pct = 0.0
-        calc_score = min(100.0, max(0.0, 50.0 + avg_pct * 8.0 + (up_count / max(1, len(rows))) * 30.0))
-        if math.isnan(calc_score) or math.isinf(calc_score):
-            calc_score = 50.0
 
-        if max_pct <= -900.0:
-            max_pct = 0.0
-        leader_str = f"{leader_name} ({leader_code}) [{max_pct:+.2f}%]" if leader_code else "--"
+        if authoritative_score > 0:
+            final_score = authoritative_score
+        else:
+            final_score = min(100.0, max(0.0, 50.0 + avg_pct * 8.0 + (up_count / max(1, len(rows))) * 30.0))
+            if math.isnan(final_score) or math.isinf(final_score):
+                final_score = 50.0
+
+        # 获取龙头最新涨幅
+        lead_row = next((r for r in rows if r['code'] == final_leader_code), None)
+        lead_pct_display = lead_row['pct'] if lead_row else (auth_leader_pct if auth_leader_pct != 0.0 else max_pct)
+        if lead_pct_display <= -900.0:
+            lead_pct_display = 0.0
+            
+        leader_str = f"{final_leader_name} ({final_leader_code}) [{lead_pct_display:+.2f}%]" if final_leader_code else "--"
 
         meta = {
-            'status': '✅ 实时在线更新 (TDX API直连 + 新浪50ms兜底)',
+            'status': '✅ 实时在线更新 (TDX API直连 + 快照对齐)',
             'count': len(rows),
             'up_count': up_count,
             'avg_pct': round(avg_pct, 2)
         }
 
-        return rows, round(calc_score, 1), leader_str, meta
+        return rows, round(final_score, 1), leader_str, meta

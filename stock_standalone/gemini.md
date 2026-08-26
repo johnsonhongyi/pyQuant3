@@ -1,3 +1,49 @@
+## 2026-08-26 15:40
+- [x] **修复行业板块全员误标星号缺陷，完善右键设为/取消重点关注板块及即时自适应刷新 (`ats/ui/heatmap_widget.py`, `tests/test_sector_strength_and_detail_parity.py`)**：
+    - [x] **根因排查与纠偏**：排查发现热力图此前在判定板块高亮与置顶时，检查了 `has_fav_stock = any(c in fav_stocks for c in sec_codes)`；由于用户自选股票库有数十只标的，且大板块成分股达数百只，导致几乎所有常见板块均被误判为重点关注并被强行带上 `⭐` 与金边置顶；
+    - [x] **重点关注板块权威解耦**：将板块置顶与高亮严格限定为“用户显式设为重点关注的板块（`name in fav_sectors`）”，其余板块严格按真实市场强度得分与涨跌幅客观排序；
+    - [x] **右键菜单功能增强与即时刷新**：
+        - 智能识别当前板块是否为重点关注：若已关注显示 `❌ 取消重点关注板块 [板块名]`，未关注显示 `⭐ 设为重点关注板块 [板块名]`；
+        - 新增 `🔍 打开【板块名】成分股明细`、`📋 复制板块名称` 与 `🗑️ 清空所有重点关注板块` 快捷操作；
+        - 点击操作后调用 `fav_mgr` 并立即原地触发 `self.sort_sectors()`，卡片星号即时变化、高亮与排序瞬间平滑就绪，无需手动重开窗口；
+    - [x] **自动化测试用例 `test_sector_favorite_toggle_and_context_menu` 100% 验证通过**。
+
+## 2026-08-26 15:25
+- [x] **彻底修复 ATS 行业板块强度、涨跌幅、成员数及成分股明细与 TK 竞价板块完全不一致缺陷 (`ats/ui/heatmap_widget.py`, `ats/sector_data_aggregator.py`, `tests/test_sector_strength_and_detail_parity.py`)**：
+    - [x] **根因排查与定位**：
+        1. `SectorHeatmapWidget.load_live_sectors` 错误优先读取了仅含几十只个股的 V反潜伏池（`v_reversal_pool.json`），导致板块仅能统计到 2~4 只个股，强度得分被扭曲为 V反阶段权重和，全市场活跃板块（PCB概念、金属铜、人形机器人等）被跳过且涨跌幅严重失真；
+        2. `SectorDataAggregator.resolve_sector_member_codes` 在收到只有 2 只股票的代码列表时直接短路返回，且未能优先读取全市场快照，导致打开板块详情时仅展示 2 只孤立股票且得分/龙头未对齐。
+    - [x] **全链路权威 SSOT 对齐与重构**：
+        1. **热力图看板优先 SSOT 接入 (`load_live_sectors`)**：将 `bidding_session_data.json.gz`（及最新 `bidding_*.json.gz` 快照）确立为全市场板块强度、涨跌幅（`avg_pct_diff`/`avg_pct`）、全量成员数与龙头标的单一真实数据源；
+        2. **板块明细全量成分股注入 (`SectorDataAggregator`)**：从全市场快照中精准提取该板块全部成分股（龙头 + 赛马成员 + 跟随者，如 PCB概念 172 只、人形机器人 366 只、金属铜 86 只），统一复用权威板块强度得分与 👑 龙头/🚀 先锋角色，100% 对齐 TK 竞价板块监控；
+    - [x] **自动化测试用例 `test_sector_strength_and_detail_parity.py` 100% 验证通过**。
+
+## 2026-08-26 13:58
+- [x] **深度融合【成交量+MACD+支撑位+均线系统】的 9 日大开大合·连续缩量·底抬高多级 Query 策略落地 (`query_engine_util.py`, `stock_logic_utils.py`)**：
+    - [x] **全维度量化指标映射**：
+        - **成交量量能结构**：9日异动放量峰值 + 随后地量洗盘 `(lastv1d <= lastv2d * 1.05 and lastv1d <= last6vol * 1.15)` + 当日放量点火 `ratio >= 1.35`；
+        - **MACD 动量共振**：零轴上方快慢线金叉/红柱放大 `(dff >= 0 or SWL >= SWS)`；
+        - **多级支撑位守护**：MA20 生命线与前期异动实体 50% 支撑位 `min(lastl1d, low) >= ma20d * 0.985`；
+        - **均线多头与穿线突破**：MA5/MA10/MA20 收敛后一阳穿多线 `close > ma5d and close > ma10d and close > ma20d`；
+    - [x] **输出 4 级进阶实战多因子 Query 策略**：
+        - 梯队 1：【九日大开大合·地量洗盘·均线支撑蓄势池】（全维潜伏与筛选）；
+        - 梯队 2：【九日缩量底抬高·均线一阳穿多线·MACD量能共振起爆】（首发买点 ⭐）；
+        - 梯队 3：【九日涨停极度地量洗盘·回踩MA10支撑·龙头反包二波】（妖股主升）；
+        - 梯队 4：【多均线多头排列·MACD零轴二次发散·黄金通道强力版】（趋势共振）。
+
+## 2026-08-26 13:56
+- [x] **最近 9 日大开大合资金异动·连续缩量洗盘·低点升高多级 Query 策略体系落地 (`query_engine_util.py`, `stock_logic_utils.py`)**：
+    - [x] **盘感特征量化解构**：
+        - 9 日内曾有大阳线/大振幅（资金大开大合介入）：`{OR: per{1-9}d >= 5.0}` 或 `{OR: (lasth{1-9}d - lastl{1-9}d)/lastl{1-9}d >= 0.08}`；
+        - 近 2~3 日连续缩量洗盘（浮筹洗净/主力锁仓）：`lastv1d <= lastv2d * 1.05 or lastv2d <= lastv3d * 1.05`；
+        - 阶段低点逐级抬高（Higher Lows/托底吸筹）：`lastl1d >= lastl2d * 0.988 and lastl2d >= lastl3d * 0.988`；
+        - 均线支撑与日内点火放量：`close >= ma10d and percent >= 2.5 and ratio >= 1.3`；
+    - [x] **输出 4 级进阶实战 Query 策略脚本**：
+        - 梯队 1：【九日异动·缩量底抬高·蓄势潜伏池】（盘后与盘中筛选基准池）；
+        - 梯队 2：【九日异动·缩量底抬高·极速放量起爆】（首发买点与盘中突破）；
+        - 梯队 3：【九日大开大合·涨停极度洗盘·反包主升】（龙头接力模式）；
+        - 梯队 4：【九日异动缩量蓄势·多空趋势共振强力版】（综合战法）。
+
 ## 2026-08-26 13:50
 - [x] **SBC 测算 HUD 提示窗极致精简与位置下移/重点信息高对比度重构 (`ats/ui/intraday_strategy_dialog.py`)**：
     - [x] **彻底省略冗长第一行模式文本**：
