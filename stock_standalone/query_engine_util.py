@@ -527,10 +527,10 @@ class PandasQueryEngine:
             # 1. 物理移除行首赋值: var = (注意排除双等号 ==)
             line_no_assign = re.sub(r'^\s*[a-zA-Z_]\w*\s*=(?!=)\s*', '', line)
             
-            # 2. 剥离行内注释：如果包含多个 # 或者单行内有注释紧跟关键字，智能剔除
-            # 先处理单行内包含 # 后面跟随中文与常见标点的情况
-            clean_line = re.sub(r'#\s*[\d\.\s\u4e00-\u9fa5A-Za-z0-9_：:、()（）\-\+——]+?(?=\s+(?:and|or|close|open|high|low|vol|SWL|SWS|ma\d|percent|last|amount|support)\b|\s*$)', ' ', line_no_assign)
-            code = clean_line.split('#')[0].rstrip()
+            # 2. 剥离注释：整行以 # 开头直接忽略，行内包含 # 则剥离 # 之后的内容
+            if line_no_assign.strip().startswith('#'):
+                continue
+            code = line_no_assign.split('#')[0].rstrip()
             if not code.strip(): continue
             
             # 3. [KEY FIX] 精准识别 Implicit Concatenation 特征
@@ -612,13 +612,14 @@ class PandasQueryEngine:
                 res = pd.eval(exec_expr, engine='python', local_dict=local_scope)
                 return self._wrap_result(df, res)
         except Exception as e:
-            self.last_error = f"Query [{query_str}] parsing error: {e}"
             try:
                 # 完善 Fallback: 自动使用 _to_bit_logical_expr 安全转换 and/or 为 &/|
                 vec_expr = self._to_bit_logical_expr(cleaned_expr)
                 res_series = eval(vec_expr, globals(), context)
+                self.last_error = ""
                 return self._wrap_result(df, res_series)
             except Exception as ex_fb:
+                self.last_error = f"Query [{query_str}] parsing error: {ex_fb}"
                 self.logger.warning(f"[QueryEngine] Fallback 回退执行告警: {ex_fb} | 触发Query原句: '{query_str}'")
                 return df
 
