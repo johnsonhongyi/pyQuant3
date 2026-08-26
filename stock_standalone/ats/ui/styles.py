@@ -220,8 +220,9 @@ class NumericTableWidgetItem(QTableWidgetItem):
     4. 优先基于 UserRole 高精度浮点值与原始类型比较 (O(1))，支持千分位、百分比、正负号等混合文本解析；
     5. 智能区分日期 (YYYY-MM-DD) 与分类文本 (如 '前5日(C)')，杜绝正则误提取数字。
     """
-    def __init__(self, value: Any = None, is_pinned: bool = False, raw_val: Any = None):
-        self.is_pinned = is_pinned
+    def __init__(self, value: Any = None, is_pinned: bool = False, raw_val: Any = None, pin_rank: int = 999):
+        self.is_pinned = is_pinned or (pin_rank < 999)
+        self.pin_rank = pin_rank if pin_rank < 999 else (0 if is_pinned else 999)
         self._raw_value = raw_val if raw_val is not None else value
         
         display_str = "--" if value is None else str(value)
@@ -247,6 +248,11 @@ class NumericTableWidgetItem(QTableWidgetItem):
             self.setData(Qt.ItemDataRole.UserRole, raw_val)
         else:
             self.setData(Qt.ItemDataRole.UserRole, None)
+
+    def set_pin_status(self, is_pinned: bool, pin_rank: int = 999):
+        """设置置顶状态与梯队"""
+        self.is_pinned = is_pinned or (pin_rank < 999)
+        self.pin_rank = pin_rank if pin_rank < 999 else (0 if is_pinned else 999)
 
     def _reparse_raw_value(self, text_val: str):
         t = str(text_val).strip()
@@ -353,14 +359,17 @@ class NumericTableWidgetItem(QTableWidgetItem):
         pinned_self = getattr(self, 'is_pinned', False)
         pinned_other = getattr(other, 'is_pinned', False)
 
-        # 1. 置顶优先级控制 (置顶项永远排在非置顶项前面)
-        if pinned_self != pinned_other:
+        # 1. 置顶梯队 pin_rank 控制 (小 rank 永远排在前面，0: 今日事件 > 1: 重点关注 > 999: 普通项)
+        r1 = getattr(self, 'pin_rank', (0 if getattr(self, 'is_pinned', False) else 999))
+        r2 = getattr(other, 'pin_rank', (0 if getattr(other, 'is_pinned', False) else 999))
+
+        if r1 != r2:
             if is_descending:
-                # 降序模式下：置顶项判定为“更大” => pinned < unpinned 为 False
-                return not pinned_self
+                # 降序模式下：排在前面的项判定为“更大” => self < other 为 (r1 > r2)
+                return r1 > r2
             else:
-                # 升序模式下：置顶项判定为“更小” => pinned < unpinned 为 True
-                return pinned_self
+                # 升序模式下：排在前面的项判定为“更小” => self < other 为 (r1 < r2)
+                return r1 < r2
 
         # 2. 空值/缺失值沉底控制 (空值永远沉底在各自区域的最下方)
         empty_self = self._is_empty() if hasattr(self, '_is_empty') else (not self.text().strip() or self.text().strip() in ("-", "--", "---", "null", "None", "N/A"))
@@ -406,40 +415,11 @@ class NumericTableWidgetItem(QTableWidgetItem):
 class PinnedNumericTableWidgetItem(NumericTableWidgetItem):
     """
     带优先置顶 (Pinned) 感知与 pin_rank 次序保护的 QTableWidgetItem。
-    完全继承统一的 NumericTableWidgetItem 高性能排序引擎。
+    完全继承统一的 NumericTableWidgetItem 高性能多梯队排序引擎。
     """
     def __init__(self, text: Any, is_pinned: bool = False, pin_rank: int = 999, header_view=None, raw_val: Any = None):
-        super().__init__(value=text, is_pinned=is_pinned, raw_val=raw_val)
-        self.pin_rank = pin_rank
+        super().__init__(value=text, is_pinned=is_pinned, raw_val=raw_val, pin_rank=pin_rank)
         self.header_view = header_view
-
-    def __lt__(self, other):
-        if not isinstance(other, QTableWidgetItem):
-            return super().__lt__(other)
-
-        pinned_self = getattr(self, 'is_pinned', False)
-        pinned_other = getattr(other, 'is_pinned', False)
-
-        # 两个都是置顶行且指定了不同的 pin_rank 时，按 pin_rank 排序
-        if pinned_self and pinned_other:
-            r1 = getattr(self, 'pin_rank', 999)
-            r2 = getattr(other, 'pin_rank', 999)
-            if r1 != r2:
-                is_descending = False
-                t = self.tableWidget() or (other.tableWidget() if isinstance(other, QTableWidgetItem) else None)
-                if t is not None:
-                    header = t.horizontalHeader()
-                    if header is not None and hasattr(header, 'sortIndicatorOrder'):
-                        is_descending = (header.sortIndicatorOrder() == Qt.SortOrder.DescendingOrder)
-                elif self.header_view and hasattr(self.header_view, 'sortIndicatorOrder'):
-                    is_descending = (self.header_view.sortIndicatorOrder() == Qt.SortOrder.DescendingOrder)
-
-                if is_descending:
-                    return r1 > r2
-                else:
-                    return r1 < r2
-
-        return super().__lt__(other)
 
 
 from PyQt6.QtCore import QObject, QEvent
