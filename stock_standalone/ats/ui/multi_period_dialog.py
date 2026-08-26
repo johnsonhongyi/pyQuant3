@@ -3721,12 +3721,21 @@ class MultiPeriodDialog(QDialog, WindowMixin):
             self.lbl_status.setText(f"⚠️ 当前表格结果中未包含标的 [{target_code}]")
 
         # 仅在用户手动点击 Toast 提醒卡片时 (auto_popup=True) 打开【详情窗口】，绝对不联动诊断窗口
-        if auto_popup and found:
-            try:
-                if hasattr(self, "_show_stock_category_dialog"):
-                    self._show_stock_category_dialog(target_code, name_val)
-            except Exception:
-                pass
+        if auto_popup:
+            if hasattr(self, 'isMinimized') and self.isMinimized():
+                self.showNormal()
+            if hasattr(self, 'isHidden') and self.isHidden():
+                self.show()
+            self.show()
+            self.raise_()
+            self.activateWindow()
+
+            if found:
+                try:
+                    if hasattr(self, "_show_stock_category_dialog"):
+                        self._show_stock_category_dialog(target_code, name_val)
+                except Exception:
+                    pass
 
     def moveEvent(self, event):
         # NO disk write on move — position saved once on closeEvent

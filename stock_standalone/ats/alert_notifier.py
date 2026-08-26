@@ -28,6 +28,10 @@ ALERT_CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..
 _ALERT_CONFIG_LOCK = threading.Lock()
 _has_loaded_screen_config = False
 
+# 全局内存开关缓存
+_GLOBAL_VOICE_ENABLED = True
+_GLOBAL_TOAST_ENABLED = True
+
 def get_screen_dpi_scale(screen: Optional[Any] = None) -> float:
     """获取指定显示器的真实 DPI 缩放比例 (以标准 96 DPI 为基准 1.0)"""
     if not HAS_PYQT:
@@ -45,8 +49,8 @@ def get_screen_dpi_scale(screen: Optional[Any] = None) -> float:
 
 
 def load_toast_screen_config():
-    """从本地配置文件安全加载 Toast 显示器与坐标配置，并执行多屏幕物理级自修复与自愈校验"""
-    global _has_loaded_screen_config
+    """从本地配置文件安全加载 Toast 显示器、坐标配置与语音/弹窗全局开关，并执行多屏幕物理级自修复与自愈校验"""
+    global _has_loaded_screen_config, _GLOBAL_VOICE_ENABLED, _GLOBAL_TOAST_ENABLED
     _has_loaded_screen_config = True
     if not HAS_PYQT:
         return
@@ -61,6 +65,8 @@ def load_toast_screen_config():
                     pos_data = data.get("custom_pos", None)
                     if isinstance(pos_data, (list, tuple)) and len(pos_data) == 2:
                         custom_pos = (int(pos_data[0]), int(pos_data[1]))
+                    _GLOBAL_VOICE_ENABLED = bool(data.get("voice_enabled", True))
+                    _GLOBAL_TOAST_ENABLED = bool(data.get("toast_enabled", True))
     except Exception as e:
         logger.debug(f"Load toast config exception: {e}")
 
@@ -94,21 +100,136 @@ def load_toast_screen_config():
     InAppToastWidget._custom_pos = custom_pos
 
 
-def save_toast_screen_config(target_screen_index: Optional[int] = None, custom_pos: Optional[Tuple[int, int]] = None):
-    """原子写盘持久化保存 Toast 显示器偏好与自定义拖拽坐标到 JSON 文件"""
+def save_toast_screen_config(target_screen_index: Optional[int] = None, custom_pos: Optional[Tuple[int, int]] = None,
+                            voice_enabled: Optional[bool] = None, toast_enabled: Optional[bool] = None):
+    """原子写盘持久化保存 Toast 显示器偏好、自定义拖拽坐标与全局语音/弹窗开关到 JSON 文件"""
+    global _GLOBAL_VOICE_ENABLED, _GLOBAL_TOAST_ENABLED
     try:
         os.makedirs(os.path.dirname(ALERT_CONFIG_FILE), exist_ok=True)
-        data = {
-            "target_screen_index": target_screen_index,
-            "custom_pos": list(custom_pos) if custom_pos else None,
-            "updated_at": time.strftime("%Y-%m-%d %H:%M:%S")
-        }
+        # 先读取已有配置保持合并
+        existing = {}
+        if os.path.exists(ALERT_CONFIG_FILE):
+            try:
+                with _ALERT_CONFIG_LOCK:
+                    with open(ALERT_CONFIG_FILE, "r", encoding="utf-8") as f:
+                        existing = json.load(f)
+            except Exception:
+                existing = {}
+
+        if target_screen_index is not None or "target_screen_index" not in existing:
+            existing["target_screen_index"] = target_screen_index
+        if custom_pos is not None or "custom_pos" not in existing:
+            existing["custom_pos"] = list(custom_pos) if custom_pos else None
+
+        if voice_enabled is not None:
+            existing["voice_enabled"] = bool(voice_enabled)
+            _GLOBAL_VOICE_ENABLED = bool(voice_enabled)
+        elif "voice_enabled" not in existing:
+            existing["voice_enabled"] = _GLOBAL_VOICE_ENABLED
+
+        if toast_enabled is not None:
+            existing["toast_enabled"] = bool(toast_enabled)
+            _GLOBAL_TOAST_ENABLED = bool(toast_enabled)
+        elif "toast_enabled" not in existing:
+            existing["toast_enabled"] = _GLOBAL_TOAST_ENABLED
+
+        existing["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+
         with _ALERT_CONFIG_LOCK:
             with open(ALERT_CONFIG_FILE, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2, ensure_ascii=False)
-        logger.info(f"💾 [TOAST_CONFIG] 通知屏幕配置已原子持久化落盘: 显示器索引={target_screen_index}, 自定义坐标={custom_pos}")
+                json.dump(existing, f, indent=2, ensure_ascii=False)
+        logger.info(f"💾 [TOAST_CONFIG] 通知屏幕与开关配置已原子持久化落盘: 显示器索引={existing.get('target_screen_index')}, 语音={existing.get('voice_enabled')}, 弹窗={existing.get('toast_enabled')}")
     except Exception as e:
         logger.warning(f"Save toast config failed: {e}")
+
+
+def activate_and_locate_target_window(parent: Optional[Any], code: str = "", reason: str = ""):
+    """物理级唤醒、还原、展开并置顶目标通知窗口，并在其中高亮定位股票标的并触发联动"""
+    if not HAS_PYQT:
+        return
+    
+    app = QApplication.instance()
+    target_p = parent
+
+    # 1. 如果没有 parent 或已被 C++ 销毁，尝试在活跃顶层窗口中寻找
+    if target_p is not None:
+        try:
+            from PyQt6.sip import isdeleted
+            if isdeleted(target_p):
+                target_p = None
+        except Exception:
+            pass
+
+    if target_p is None and app:
+        active_w = app.activeWindow()
+        if active_w and getattr(active_w, '__class__', None).__name__ != "InAppToastWidget":
+            target_p = active_w
+        else:
+            for w in app.topLevelWidgets():
+                if w.isVisible() and getattr(w, '__class__', None).__name__ in ("DailyLimitUpDialog", "HotSectorLeaderboard", "MultiPeriodDialog", "ATSMainWindow"):
+                    target_p = w
+                    break
+
+    # 2. 物理级唤醒与置顶展示
+    if target_p is not None:
+        try:
+            # 最小化还原
+            if hasattr(target_p, 'isMinimized') and target_p.isMinimized():
+                target_p.showNormal()
+            
+            # 隐藏恢复
+            if hasattr(target_p, 'isHidden') and target_p.isHidden():
+                target_p.show()
+            elif hasattr(target_p, 'isVisible') and not target_p.isVisible():
+                target_p.show()
+
+            # 边缘磁吸收起 (Magnetic Snap Auto Hide) 展开
+            if getattr(target_p, 'is_hidden_state', False):
+                if hasattr(target_p, '_expand_window'):
+                    target_p._expand_window()
+                elif hasattr(target_p, '_expand_from_snap'):
+                    target_p._expand_from_snap()
+                else:
+                    target_p.showNormal()
+
+            target_p.show()
+            target_p.raise_()
+            target_p.activateWindow()
+        except Exception as e_w:
+            logger.debug(f"Activate target window error: {e_w}")
+
+    # 3. 股票联动与定位
+    if code:
+        code_str = str(code).strip().zfill(6)
+        p_name = getattr(target_p, '__class__', None).__name__ if target_p else "None"
+        logger.info(f"🎯 [TOAST_LINK] 直达唤醒来源窗口 [{p_name}] 并高亮定位标的: {code_str}")
+
+        if target_p is not None:
+            # 优先 locate_stock_in_table (DailyLimitUpDialog, HotSectorLeaderboard, MultiPeriodDialog)
+            if hasattr(target_p, 'locate_stock_in_table'):
+                try:
+                    target_p.locate_stock_in_table(code_str, auto_popup=True, reason=reason)
+                except TypeError:
+                    try:
+                        target_p.locate_stock_in_table(code_str, auto_popup=True)
+                    except Exception as e_loc:
+                        logger.warning(f"locate_stock_in_table error: {e_loc}")
+                except Exception as e_loc:
+                    logger.warning(f"locate_stock_in_table error: {e_loc}")
+
+            # ATS 主窗口使用 locate_stock_in_tree
+            elif hasattr(target_p, 'locate_stock_in_tree'):
+                try:
+                    target_p.locate_stock_in_tree(code_str, auto_popup=True)
+                except Exception as e_loc:
+                    logger.warning(f"locate_stock_in_tree error: {e_loc}")
+
+            # 兜底广播联动
+            elif hasattr(target_p, 'link_stock'):
+                try:
+                    target_p.link_stock(code_str)
+                except Exception:
+                    pass
 
 
 class InAppToastWidget(QFrame if HAS_PYQT else object):
@@ -307,37 +428,23 @@ class InAppToastWidget(QFrame if HAS_PYQT else object):
                 self._press_pos = None
                 return
             
-            # 纯单击触发股票联动定位
+            # 纯单击触发直达唤醒并定位来源窗口与股票
             self._is_dragging = False
             self._drag_pos = None
             self._press_pos = None
 
             parent = getattr(self, 'target_parent', None) or self.parent()
-            if not self.code or not parent:
-                self.close()
-                return
-
-            logger.info(f"🎯 [TOAST_CLICK] 点击特异 Toast 通知，尝试自动定位联动股票: {self.code}")
-
-            # 1. 尝试使用 DailyLimitUpDialog / MultiPeriodDialog 定位，并传入 reason 供状态栏显示
-            if hasattr(parent, 'locate_stock_in_table'):
-                try:
-                    parent.locate_stock_in_table(self.code, auto_popup=True, reason=getattr(self, 'message_text', ''))
-                except TypeError:
-                    parent.locate_stock_in_table(self.code, auto_popup=True)  # 兼容旧版无 reason 参数
-
-            # 2. 尝试使用 ATS MainWindow 定位
-            if hasattr(parent, 'locate_stock_in_tree'):
-                parent.locate_stock_in_tree(self.code, auto_popup=True)
-
+            activate_and_locate_target_window(parent, self.code, getattr(self, 'message_text', ''))
             self.close()
         super().mouseReleaseEvent(event)
 
 
 class AlertNotifier(QObject if HAS_PYQT else object):
-    """黄金特异信号桌面弹窗与语音通知器 (支持串行轮播队列)"""
+    """黄金特异信号桌面弹窗与语音通知器 (支持跨线程安全投递、串行轮播队列与全局开关)"""
     
     _instance = None
+    if HAS_PYQT:
+        sig_notify_request = pyqtSignal(dict)
     
     @classmethod
     def get_instance(cls) -> 'AlertNotifier':
@@ -371,7 +478,51 @@ class AlertNotifier(QObject if HAS_PYQT else object):
         self._is_busy = False
         self._current_toast = None
         load_toast_screen_config()
+        
+        # 跨线程安全投递绑定
+        if HAS_PYQT:
+            try:
+                self.sig_notify_request.connect(self._enqueue_notification_item)
+            except Exception as e_sig:
+                logger.debug(f"Signal connect error: {e_sig}")
+
         self._init_tray()
+
+    def is_voice_enabled(self) -> bool:
+        """获取当前全局语音播报开关状态"""
+        global _GLOBAL_VOICE_ENABLED
+        return _GLOBAL_VOICE_ENABLED
+
+    def set_voice_enabled(self, enabled: bool):
+        """设置并原子持久化全局语音播报开关"""
+        global _GLOBAL_VOICE_ENABLED
+        _GLOBAL_VOICE_ENABLED = bool(enabled)
+        save_toast_screen_config(voice_enabled=bool(enabled))
+        logger.info(f"🔊 [ALERT_NOTIFIER] 全局语音播报已{'开启' if enabled else '关闭并静音'}")
+
+    def is_toast_enabled(self) -> bool:
+        """获取当前全局桌面弹窗开关状态"""
+        global _GLOBAL_TOAST_ENABLED
+        return _GLOBAL_TOAST_ENABLED
+
+    def set_toast_enabled(self, enabled: bool):
+        """设置并原子持久化全局桌面弹窗开关"""
+        global _GLOBAL_TOAST_ENABLED
+        _GLOBAL_TOAST_ENABLED = bool(enabled)
+        save_toast_screen_config(toast_enabled=bool(enabled))
+        logger.info(f"💬 [ALERT_NOTIFIER] 全局桌面弹窗通知已{'开启' if enabled else '关闭'}")
+
+    def clear_queue(self):
+        """立即一键静音并清空所有排队积压的通知与当前弹窗"""
+        self._notify_queue.clear()
+        if self._current_toast:
+            try:
+                self._current_toast.close()
+            except Exception:
+                pass
+            self._current_toast = None
+        self._is_busy = False
+        logger.info("🛑 [ALERT_NOTIFIER] 已一键清空全部待播报通知队列与当前弹窗")
 
     def shutdown(self):
         """关闭并销毁系统托盘图标与浮动 Toast 弹窗，确保主进程退出"""
@@ -434,7 +585,7 @@ class AlertNotifier(QObject if HAS_PYQT else object):
             logger.warning(f"Failed to initialize QSystemTrayIcon: {e}")
 
     def _init_tray_context_menu(self):
-        """构建托盘图标右键菜单 (支持多显示器切换、位置复位、测试通知等)"""
+        """构建托盘图标右键菜单 (支持语音开关、弹窗开关、一键静音、多显示器切换、位置复位、测试通知等)"""
         if not HAS_PYQT or not self.tray_icon:
             return
         
@@ -468,27 +619,53 @@ class AlertNotifier(QObject if HAS_PYQT else object):
             }
         """)
 
-        # 1. 显示器设置子菜单
-        self.menu_displays = self.tray_menu.addMenu("🖥️ 预警通知显示器设置")
-        self.tray_menu.aboutToShow.connect(self._refresh_displays_menu)
+        # 1. 语音播报总开关 (勾选状态与持久化同步)
+        self.act_voice_toggle = self.tray_menu.addAction("🔊 开启语音播报")
+        self.act_voice_toggle.setCheckable(True)
+        self.act_voice_toggle.setChecked(self.is_voice_enabled())
+        self.act_voice_toggle.triggered.connect(lambda checked: self.set_voice_enabled(checked))
 
-        # 2. 重置弹窗位置
+        # 2. 桌面弹窗总开关 (勾选状态与持久化同步)
+        self.act_toast_toggle = self.tray_menu.addAction("💬 开启桌面弹窗通知")
+        self.act_toast_toggle.setCheckable(True)
+        self.act_toast_toggle.setChecked(self.is_toast_enabled())
+        self.act_toast_toggle.triggered.connect(lambda checked: self.set_toast_enabled(checked))
+
+        # 3. 立即静音并清空队列
+        act_clear_queue = self.tray_menu.addAction("🛑 立即静音并清空播报队列")
+        act_clear_queue.triggered.connect(self.clear_queue)
+
+        self.tray_menu.addSeparator()
+
+        # 4. 显示器设置子菜单
+        self.menu_displays = self.tray_menu.addMenu("🖥️ 预警通知显示器设置")
+        self.tray_menu.aboutToShow.connect(self._refresh_tray_menu_state)
+
+        # 5. 重置弹窗位置
         act_reset_pos = self.tray_menu.addAction("🎯 重置通知位置 (默认右下角)")
         act_reset_pos.triggered.connect(self._reset_toast_position)
 
         self.tray_menu.addSeparator()
 
-        # 3. 发送测试预警通知
+        # 6. 发送测试预警通知
         act_test_notify = self.tray_menu.addAction("📢 发送测试特异预警通知")
         act_test_notify.triggered.connect(self._send_test_notification)
 
         self.tray_menu.addSeparator()
 
-        # 4. 退出程序
+        # 7. 退出程序
         act_quit = self.tray_menu.addAction("🚪 退出系统")
         act_quit.triggered.connect(self._on_tray_quit_clicked)
 
         self.tray_icon.setContextMenu(self.tray_menu)
+
+    def _refresh_tray_menu_state(self):
+        """托盘菜单即将弹出时，动态刷新勾选状态与显示器列表"""
+        if hasattr(self, 'act_voice_toggle'):
+            self.act_voice_toggle.setChecked(self.is_voice_enabled())
+        if hasattr(self, 'act_toast_toggle'):
+            self.act_toast_toggle.setChecked(self.is_toast_enabled())
+        self._refresh_displays_menu()
 
     def _refresh_displays_menu(self):
         """动态枚举当前所有屏幕并更新勾选状态"""
@@ -554,7 +731,8 @@ class AlertNotifier(QObject if HAS_PYQT else object):
             code="688356", 
             name="键凯科技", 
             reason="【实盘演示】空间高度龙，站稳VWAP均线，买盘压强88%，黄金定龙点火", 
-            score=94.0
+            score=94.0,
+            is_force=True
         )
 
     def _on_tray_quit_clicked(self):
@@ -564,25 +742,12 @@ class AlertNotifier(QObject if HAS_PYQT else object):
             app.quit()
 
     def _on_tray_message_clicked(self):
-        """点击 Windows 系统托盘 Toast 消息弹窗，自动定位高亮与弹出详情小窗口"""
+        """点击 Windows 系统托盘 Toast 消息弹窗，自动直达唤醒来源窗口并高亮联动标的"""
         if not self._last_notified_code:
             return
         code = self._last_notified_code
-        logger.info(f"🎯 [TRAY_CLICK] 用户点击 Windows 托盘 Toast 弹窗，自动联动定位股票: {code}")
-
-        if HAS_PYQT:
-            try:
-                target_p = self._last_parent if self._last_parent else QApplication.activeWindow()
-                if target_p:
-                    # 1. 在 MultiPeriodDialog 表格中定位高亮并自动打开【详情窗口】
-                    if hasattr(target_p, 'locate_stock_in_table'):
-                        target_p.locate_stock_in_table(code, auto_popup=True)
-
-                    # 2. 在 ATS MainWindow 左侧树中定位高亮并自动弹出详情小窗口
-                    if hasattr(target_p, 'locate_stock_in_tree'):
-                        target_p.locate_stock_in_tree(code, auto_popup=True)
-            except Exception as e_clk:
-                logger.warning(f"Tray click response failed: {e_clk}")
+        logger.info(f"🎯 [TRAY_CLICK] 用户点击 Windows 托盘 Toast 弹窗，直达唤醒并定位股票: {code}")
+        activate_and_locate_target_window(self._last_parent, code, "")
 
     def notify(self, title, message, code="", score=90.0, level="GOLD", parent=None):
         """通用通知方法别名，无缝兼容多周期等系统调用"""
@@ -591,7 +756,7 @@ class AlertNotifier(QObject if HAS_PYQT else object):
         return self.notify_special_signal(code=code, name=name, reason=reason, score=score, parent=parent)
 
     def notify_special_signal(self, code, name, reason, score=90.0, win_rate="85.0%", parent=None, is_force=False):
-        """推送信信号弹窗与语音
+        """推送信信号弹窗与语音 (具备跨线程投递、全自动限频与去重保护)
         
         Args:
             code: 股票代码
@@ -599,15 +764,16 @@ class AlertNotifier(QObject if HAS_PYQT else object):
             reason: 买卖逻辑理由 (如: 自动通道Fib50企稳|2D/3D阶梯抬升|板块大哥带队)
             score: 特异打分
             win_rate: 历史有效胜率
-            parent: 主界面句柄 (传入后开启应用内右上角高亮 Toast 提示)
+            parent: 主界面句柄 (传入后开启应用内高亮 Toast 提示并支持点击直达唤醒)
             is_force: 是否强制弹窗/测试 (跳过限频和去重)
         """
         now = time.time()
         code_str = str(code).strip().zfill(6)
         reason_str = str(reason).strip()
-        is_priority_signal = is_force or ("通达信" in reason_str) or ("精选" in reason_str) or ("重点关注" in reason_str) or ("实盘演示" in reason_str) or (score >= 88.0)
+        # 真正的高优先级信号豁免 (通达信实盘信号/实盘演示/强制测试/评分>=95.0)
+        is_priority_signal = is_force or ("通达信" in reason_str) or ("实盘演示" in reason_str) or (score >= 95.0)
 
-        # 0. 特异打分门槛过滤：小于 78.0 分且非重点/精选的微弱异动静默过滤
+        # 0. 特异打分门槛过滤：小于 78.0 分且非强制/通达信信号的微弱异动静默过滤
         if score < 78.0 and not is_priority_signal:
             return
 
@@ -622,15 +788,15 @@ class AlertNotifier(QObject if HAS_PYQT else object):
             except Exception as e_check:
                 logger.warning(f"[AlertNotifier] Deduplication check failed: {e_check}")
 
-        # 仅对普通微弱信号进行时间抽样拦截；重点/精选/实盘信号免除全局丢弃，保证 100% 依次弹窗+语音轮播
+        # 限频保护：非强制/通达信实盘信号执行严格的 10 秒全局限频与 300 秒(5分钟)单股冷却
         if not is_priority_signal and not is_force:
-            # 1. 普通信号全局限频：15 秒内最多推送 1 条
+            # 1. 普通信号全局限频：10 秒内最多推送 1 条
             if (now - self._last_global_ts) < 10.0:
                 return
 
-            # 2. 普通信号单股限频：同一股票 15 分钟 (900s) 内不重复推送
+            # 2. 普通信号单股限频：同一股票 5 分钟 (300s) 内不重复推送
             last_ts = self._last_alert_ts.get(code_str, 0.0)
-            if (now - last_ts) < 900.0:
+            if (now - last_ts) < 300.0:
                 return
 
         # 标记为今日已播报提醒 (去重写入 SignalLedger)
@@ -652,6 +818,19 @@ class AlertNotifier(QObject if HAS_PYQT else object):
             'parent': parent,
             'ts': now
         }
+
+        # 跨线程安全检测：如果在 Qt 子工作线程中，安全投递至主事件循环处理
+        if HAS_PYQT and QApplication.instance():
+            app = QApplication.instance()
+            from PyQt6.QtCore import QThread
+            if QThread.currentThread() != app.thread():
+                self.sig_notify_request.emit(item)
+                return
+
+        self._enqueue_notification_item(item)
+
+    def _enqueue_notification_item(self, item: dict):
+        """在 Qt 主线程中安全压入通知队列并启动串行轮播处理"""
         self._notify_queue.append(item)
         self._process_queue()
 
@@ -681,9 +860,9 @@ class AlertNotifier(QObject if HAS_PYQT else object):
 
         logger.info(f"📢 [ALERT_NOTIFY] 串行轮播弹出信号 [{name} | {code_str}]: {reason}")
 
-        # 1. 弹出右下角 Toast 卡片 (完全还原原始样式与固定位置)
+        # 1. 弹出右下角 Toast 卡片 (受 is_toast_enabled 控制)
         toast_success = False
-        if HAS_PYQT and QApplication.instance():
+        if self.is_toast_enabled() and HAS_PYQT and QApplication.instance():
             try:
                 target_p = parent if parent else QApplication.activeWindow()
                 self._current_toast = InAppToastWidget(title, message, code=code_str, parent=target_p)
@@ -692,7 +871,7 @@ class AlertNotifier(QObject if HAS_PYQT else object):
                 logger.warning(f"InAppToastWidget failed: {e_toast}")
 
         # 2. 仅在无 GUI 界面极特殊环境下 Fallback 到系统托盘消息
-        if not toast_success and self.tray_icon and HAS_PYQT:
+        if self.is_toast_enabled() and not toast_success and self.tray_icon and HAS_PYQT:
             try:
                 if not self.tray_icon.isVisible():
                     self.tray_icon.show()
@@ -706,9 +885,12 @@ class AlertNotifier(QObject if HAS_PYQT else object):
             except Exception as e:
                 logger.warning(f"ShowMessage failed: {e}")
 
-        # 3. 触发语音播报
+        # 3. 触发语音播报 (受 is_voice_enabled 控制)
         voice_text = f"特异买点 {name}，{reason}"
-        self._speak_text(voice_text)
+        if self.is_voice_enabled():
+            self._speak_text(voice_text)
+        else:
+            logger.debug(f"🔇 [ALERT_NOTIFY] 全局语音已关闭，跳过发声: {voice_text}")
 
         # 4. 根据语音与内容自适应展示时长 (最小 4.5s，随文本长度平滑顺延)
         display_sec = max(4.5, min(8.5, len(voice_text) * 0.32 + 1.2))
@@ -739,10 +921,12 @@ class AlertNotifier(QObject if HAS_PYQT else object):
 
     def _speak_text(self, text: str):
         """标准 safe 子线程语音播报：基于 AlertManager / SAPI.SpVoice，绝对不与 Tk/Qt/Vis 冲突"""
-        if not text:
+        if not text or not self.is_voice_enabled():
             return
 
         def _worker():
+            if not self.is_voice_enabled():
+                return
             # 1. 优先使用项目标准的 alert_manager (无缝集成队列与全系统配置)
             try:
                 from alert_manager import get_alert_manager
@@ -770,3 +954,4 @@ class AlertNotifier(QObject if HAS_PYQT else object):
         import threading
         t = threading.Thread(target=_worker, name="ATSSafeVoiceThread", daemon=True)
         t.start()
+
