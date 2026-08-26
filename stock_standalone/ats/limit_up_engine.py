@@ -1005,18 +1005,43 @@ class LimitUpEngine:
         all_zt_recs = self.scan_limit_up_records_from_df(current_df)
         zt_map = {r["code"]: r for r in all_zt_recs} if all_zt_recs else {}
 
+        # 提取策略 DataFrame 映射，确保非涨停冒泡标的亦能 100% 完整继承 DFF/Rank/板块等全维特征
+        df_map = {}
+        if current_df is not None and not current_df.empty:
+            for idx_val, row in current_df.iterrows():
+                code_raw = row.get('code', idx_val) if hasattr(row, 'get') else idx_val
+                c_clean = ''.join(c for c in str(code_raw) if c.isdigit()).zfill(6)
+                if c_clean:
+                    df_map[c_clean] = row
+
         # 构造并丰富全量看板记录
         merged_records = []
         for b in raw_bubble_list:
             c = b["code"]
             zt_r = zt_map.get(c, {})
+            df_r = df_map.get(c)
+
+            pct = b.get("pct", zt_r.get("pct", 0.0))
+            dff = zt_r.get("dff", _safe_float(df_r.get('dff', 0.0)) if df_r is not None else 0.0)
+            dff2 = zt_r.get("dff2", _safe_float(df_r.get('DFF2', df_r.get('dff2', 0.0))) if df_r is not None else 0.0)
+            dff3 = zt_r.get("dff3", _safe_float(df_r.get('DFF3', df_r.get('dff3', 0.0))) if df_r is not None else 0.0)
+            rank_val = zt_r.get("rank", _safe_int(df_r.get('Rank', df_r.get('rank', 999)), 999) if df_r is not None else 999)
+            category = zt_r.get("category", str(df_r.get('category', df_r.get('industry', df_r.get('hy', '')))).strip() if df_r is not None else "")
+            
+            rs_val = zt_r.get("rs_val", round(pct, 2))
+            resonance = zt_r.get("resonance", "同步整理")
+            if resonance == "同步整理" and df_r is not None:
+                if pct > 3.0 and dff > 2.0:
+                    resonance = "大盘共振"
+                elif pct > 1.5:
+                    resonance = "逆市抗跌"
 
             # 继承已有字段或生成默认值
             rec = {
                 "code": c,
                 "name": b.get("name", zt_r.get("name", c)),
                 "price": b.get("price", zt_r.get("price", 0.0)),
-                "pct": b.get("pct", zt_r.get("pct", 0.0)),
+                "pct": pct,
                 "open_pct": b.get("open_pct", zt_r.get("open_pct", 0.0)),
                 "consecutive_boards": zt_r.get("consecutive_boards", self._calc_consecutive_boards(c, False)),
                 "tier_tag": b.get("tier_tag", zt_r.get("tier_tag", "⚡ 步步高升")),
@@ -1030,13 +1055,13 @@ class LimitUpEngine:
                 "turnover_rate": (b.get("turnover_pct") if (b.get("turnover_pct") and b.get("turnover_pct", 0) <= 100) else (zt_r.get("turnover_rate", 0.0) if zt_r.get("turnover_rate", 0.0) <= 100 else 0.0)),
                 "vol_ratio": b.get("vol_ratio", zt_r.get("vol_ratio", 1.0)),
                 "amount_yi": b.get("amount_yi", zt_r.get("amount_yi", 0.0)),
-                "dff": zt_r.get("dff", 0.0),
-                "rank": zt_r.get("rank", 999),
-                "dff2": zt_r.get("dff2", 0.0),
-                "dff3": zt_r.get("dff3", 0.0),
-                "rs_val": zt_r.get("rs_val", 0.0),
-                "resonance": zt_r.get("resonance", "同步整理"),
-                "category": zt_r.get("category", ""),
+                "dff": dff,
+                "rank": rank_val,
+                "dff2": dff2,
+                "dff3": dff3,
+                "rs_val": rs_val,
+                "resonance": resonance,
+                "category": category,
                 "extra_cols": zt_r.get("extra_cols", {}),
                 "momentum_score": b.get("momentum_score", 65.0),
                 "is_limit_up": zt_r.get("is_limit_up", False),

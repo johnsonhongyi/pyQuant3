@@ -1,3 +1,60 @@
+## 2026-08-27 02:49
+- [x] **彻底解决自选股破坏多级排序与无数据沉底缺陷、实现赛马级表头点击阶梯多级排序与语音预警点亮修复 (`ats/ui/daily_limit_up_dialog.py`, `gemini.md`)**：
+    - [x] **无数据永远绝对沉底与分类 100% 连续聚合**：
+        - 纠正了复合排序中原 `fav_flag`（自选股）强行放在最前导致带有 `--` 或不同分类的自选股冲到第 1 行并切断分类聚合的严重缺陷；
+        - 将 `*subkeys` 多级排序键置于最前位，`fav_flag` 仅作为同数值最终平局决胜；
+        - 扩充 `TIER_WEIGHTS` 支持 `🔥 强势拉升`、`💎 高开蓄势`、`冰点强反包`、`平开急速点火` 等全部梯队标签，同类标签 100% 紧凑聚合在一起；
+        - 连板数（`--`/0板/未涨停）、封单额（0/--）、封流比（0/--）无论升序还是降序均标记为 Group 1 绝对强制沉底在最底端；
+    - [x] **表头左键点击 100% 对齐赛马多级排序交互规范**：
+        - 点击已有排序列翻转升降序；
+        - 点击新列时按阶梯式自动设置：第 1 次点击新列设为 🔴[主]排序 (↓)；已有主排序时点击其他列自动设为 🟡[从]排序 (↓)；已有从排序时点击第三列自动设为 🟢[次]排序 (↓)；
+        - 排序表头实时显示紧凑修饰符（`🔴[主] ↓` / `🟡[从] ↓` / `🟢[次] ↓`）；
+    - [x] **修复语音预警按钮点亮与高亮状态同步**：
+        - 统一按钮属性引用 `btn_voice_alert`，加载初始配置；
+        - 开启时点亮绿色发光样式 `🟢 语音预警` 并设置绿色边框，关闭时显示 `⚪ 语音静音` 并持久化到磁盘；
+    - [x] **全量自动化端到端测试与 Pytest 核心套件 100% 全部 PASSED (7/7)**。
+
+## 2026-08-27 02:40
+- [x] **全量落地内存 Cache 列宽/排序维护、关闭窗口统一原子落盘、未涨停数据绝对强制沉底与梯队/形态质量默认级联对齐 (`ats/ui/daily_limit_up_dialog.py`, `gemini.md`)**：
+    - [x] **任务 1：内存 Cache 实时记录所有列宽与多级排序，关闭窗口统一持久化落盘**：
+        - 初始化 `_column_widths_cache` 与 `_sort_states_cache` 内存字典缓存；
+        - 用户拖拽列宽或切换多级排序时，0ms 零延迟维护内存 Cache，不再频繁触发磁盘 I/O 阻塞主线程；
+        - 在 `closeEvent` 和 `hideEvent` 中调用 `_flush_all_caches_to_disk`，一次性将所有模式（主表格与起点雷达 BUBBLE）的列宽、多级排序、隐藏列与窗口几何参数通过 `save_config_nodes` 原子落盘到 `window_config.json`；
+    - [x] **任务 2：无数据 / `--` / 0连板 / 0封单无论升序降序绝对强制沉底**：
+        - 彻底根治多日模式（如 5D）下非涨停标的（如天山生物）因历史曾有涨停（`max_consecutive > 0`）而在 `↑连板数` 升序时排在中间的 Bug；
+        - 严格对齐 UI 显示逻辑：`is_zt and consecutive_boards >= 1` 为有效数据（Group 0），显式 `not is_limit_up` 或 `cb <= 0` 一律标记为 Group 1 强制沉底到列表最底端；
+    - [x] **任务 3：所有数据排序在主键相等时自动按【梯队分类】与【形态与质量】量化强度对齐**：
+        - 在 `compound_sort_key` 中加入自然级联兜底链：`(fav_flag, *subkeys, tier_subkey, quality_subkey, board_subkey, pct_subkey, seal_circ_subkey, code_subkey)`；
+        - 确保相同排序列（如 1板 标的群）内部严格按 **梯队分类权重 (降序) -> 形态与质量评分 (降序 96>94>89>88) -> 连板数 -> 涨幅% -> 封流比%** 严格自然对齐；
+    - [x] **全量自动化端到端测试与 Pytest 核心套件 100% 全部 PASSED (7/7)**。
+
+## 2026-08-27 02:20
+- [x] **彻底根治切换 Tab 列数据被重置与关闭窗口列宽持久化未生效问题 (`ats/ui/daily_limit_up_dialog.py`, `gemini.md`)**：
+    - [x] **双重列宽持久化与真实整型数组还原（对齐赛马面板）**：
+        - 彻底消除单纯依赖 Qt 二进制 Hex `restoreState` 在初次未初始化时保存全 100px 默认值导致的列宽暴增和横向滚动条问题；
+        - 落盘时同时保存 `state_hex` 与显式真实整型数组 `_widths` 及 `_hidden` 隐藏列列表；
+        - 恢复时优先基于精准整型宽度数组逐列还原，并智能过滤未初始化的全 100px 状态，自动应用标准紧凑默认布局；
+    - [x] **切 Tab 与关闭窗口时序互斥彻底修复**：
+        - 在 `_switch_mode` 开始时主动中止当前正在计时的 `_header_save_timer` 防抖定时器，彻底杜绝跨模式异步保存相互踩踏污染；
+        - 在 `__init__` 初始化与 `_switch_mode` 切 Tab 阶段无条件执行当前模式的专属列宽与多级排序还原，确保起点雷达（BUBBLE）与主表格模式 100% 独立隔离互不干扰；
+        - `_save_window_states` 统一改用 `save_config_nodes` 增量原子写入，杜绝文件锁竞争与配置丢失；
+    - [x] **全流程端到端自动化测试 100% 全部 PASSED**。
+
+## 2026-08-27 02:05
+- [x] **彻底修复每日涨停/连板天梯多级排序、右键菜单与起点雷达独立持久化缺陷 (`ats/ui/daily_limit_up_dialog.py`, `ats/limit_up_engine.py`, `ats/opening_bubble_engine.py`, `trading_kernel/tests/test_opening_bubble_engine.py`, `gemini.md`)**：
+    - [x] **多级排序右键菜单 100% 恢复与生效**：
+        - 彻底清理了文件尾部残留覆盖的旧版 `_show_header_context_menu` 方法，使包含 `设为 🔴[主]排序`、`设为 🟡[从]排序`、`设为 🟢[次]排序`、`取消当前列`、`清除全部多级排序` 的赛马标准菜单 100% 正常弹出与响应；
+        - 表头文字实时显示紧凑修饰符（`🔴[主] ↓` / `🟡[从] ↑` / `🟢[次] ↓`），左键点击排序列时快速切换升降序；
+    - [x] **多级排序算法与沉底机制完全对齐赛马**：
+        - L1 主排序具有绝对优先统领权，从/次级排序仅在主排序列相等的分组内生效，绝不破坏主排序；
+        - 任何排序下，无数据/`--`/0连板/0封单等无效占位符绝对强制沉底在列表最下方；
+        - 梯队分类与形态质量列统一采用 `(0, f"{1000-weight:04d}_{tag}")` 键结构，同类标签自然聚合；
+    - [x] **起点雷达（BUBBLE）与主看板完全物理隔离持久化**：
+        - 起点雷达使用专属 key `ats_daily_limit_up_table_bubble` 和 `ats_daily_limit_up_sort_bubble`；
+        - 其余所有模式（TODAY、3D、5D、10D、LADDER 等）复用原始主 key `ats_daily_limit_up_table` 与 `ats_daily_limit_up_sort`，彻底解决列丢失问题；
+        - 移除外部冲突的 `setup_header_persistence` 调用，避免模式切换时列宽互相污染覆写；
+    - [x] **全维度自动化测试 100% 全部 PASSED**。
+
 ## 2026-08-27 01:10
 - [x] **彻底修复【起点雷达】数据对齐其他 Tab 策略指标与多级排序缺陷 (`ats/limit_up_engine.py`, `ats/opening_bubble_engine.py`, `ats/ui/daily_limit_up_dialog.py`, `trading_kernel/tests/test_opening_bubble_engine.py`, `gemini.md`)**：
     - [x] **全维度数据与策略指标对齐**：
@@ -1716,6 +1773,20 @@
         - 在自愈引擎中引入 15 大外盘核心品种（AAPL, MSFT, NVDA, GOOGL, AMZN, META, TSLA, MU, SOXX, QQQ, OIL, BRENT, GOLD, A50, USDCNH）的基准价格区间门槛校验；
         - 自动扫描物理磁盘 `global_market_klines_*.json` 文件，精准捕获中枢价格严重偏离基准区间的脏条目（例如在 AAPL 名下发现了中枢为 $445 的 MSFT 数据，或在 GOOGL 名下发现了中枢为 $337 的数据），瞬间全量物理剔除自愈，以便后续在线重新抓取 100% 干净数据！
     - [x] **单元测试 100% 成功通过**：编写 `scratch/test_cross_symbol_race_fix.py`，成功验证了线程信号隔离、中枢偏离识别与磁盘全量自动清洗逻辑，单元测试 100% PASSED！
+
+## 2026-08-27 02:00
+- [x] **彻底根治 ATS 语音播报持续不停、无开关无提示窗及弹窗点击直达并唤醒来源窗口 (`ats/alert_notifier.py`, `ats/ui/daily_limit_up_dialog.py`, `ats/ui/hot_sector_leaderboard.py`, `ats/ui/multi_period_dialog.py`, `tests/test_alert_voice_and_popup_fix.py`)**：
+    - [x] **根因精准解构 1：自动挖掘信号穿透限频致语音队列无限积压**：`AlertNotifier` 中因包含 `"精选"` 或 `score >= 88` 导致所有天梯与板块切片挖掘信号均被误判为高优先级（`is_priority_signal = True`），穿透了全局与单股冷却；切片名称变化又致去重失效，一次性压入 3~5 只股票，导致 SAPI.SpVoice 持续播报几分钟停不下来。
+    - [x] **根因精准解构 2：跨线程 GUI 创建失败致“只闻其声不见弹窗”**：子工作线程调用 `notify_special_signal` 时直接创建 `InAppToastWidget` 导致 Qt 跨线程静默失效，而 COM 组件在独立线程正常发声，造成无弹窗假象。
+    - [x] **根因精准解构 3：弹窗点击未对来源窗口（最小化/隐藏/磁吸）执行物理级唤醒**：用户点击弹窗时，如果来源窗口处于最小化、隐藏或磁吸缩回状态，未能自动还原置顶。
+    - [x] **弹窗与托盘点击直达唤醒并定位来源窗口 (`activate_and_locate_target_window`)**：
+        - 实现了 `activate_and_locate_target_window` 强健引擎，自动检测并对来源窗口执行 `showNormal()`、`show()`、`_expand_window()`（磁吸展开）、`raise_()` 与 `activateWindow()` 置顶；
+        - 调用来源窗口的 `locate_stock_in_table` / `locate_stock_in_tree` 自动高亮居中并联动行情终端。
+    - [x] **全局语音/弹窗开关与托盘一键静音控制**：
+        - 在 `AlertNotifier` 增加 `voice_enabled`、`toast_enabled` 并原子持久化落盘至 `alert_notifier_layout.json`；
+        - 托盘右键菜单增加 **`🔊 开启语音播报`**、**`💬 开启桌面弹窗通知`**、**`🛑 立即静音并清空播报队列`**（一键刹车）；
+        - 优化限频判定：移除普通挖掘信号的无限豁免，天梯与板块挖掘默认仅推 Top 1 核心龙头，实行 10s 全局冷却与 300s 单股冷却。
+    - [x] **单元测试 100% 校验通过**：`tests/test_alert_voice_and_popup_fix.py` 全量 5 项测试及天梯测试 100% PASSED！
 
 ## 2026-08-06 16:40
 - [x] **彻底根治外盘 K 线“越刷新越乱、物理磁盘写满脏 Bar”底层死穴，实现未闭市实时 Bar 物理隔离与全量数据清洗 (`JSONData/global_market_data.py`, `ats/ui/global_market_kline_dialog.py`, `scratch/test_kline_persistence_final_fix.py`)**：

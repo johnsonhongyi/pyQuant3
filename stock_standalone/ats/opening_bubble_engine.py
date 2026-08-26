@@ -285,10 +285,18 @@ class OpeningBubbleEngine:
             # 金额单位统一为亿元
             amt_yi = amount if amount < 10000 else (amount / 100000000.0 if amount > 1000000 else amount / 10000.0)
 
-            # 安全获取换手率并防御越界
+            # 安全获取换手率并防御越界 (支持多列名自动兜底)
             turnover_pct = _safe_float(turnovers[i]) if turnovers is not None else 0.0
-            if turnover_pct > 100.0:
-                turnover_pct = 0.0
+            if turnover_pct <= 0.0 or turnover_pct > 100.0:
+                for alt_col in ('turnover', 'turnover_rate', 'turnoverratio', 'hsl', 'turnover_ratio', 'turnoverrate'):
+                    if alt_col in df.columns:
+                        alt_v = _safe_float(df[alt_col].values[i])
+                        if 0.0 < alt_v <= 100.0:
+                            turnover_pct = alt_v
+                            break
+                else:
+                    if turnover_pct > 100.0:
+                        turnover_pct = 0.0
 
             # 获取或初始化状态
             st = self._states.get(c_clean)

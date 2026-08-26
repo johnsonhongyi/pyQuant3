@@ -1089,6 +1089,14 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
                 name_item = self.table.item(row, 1)
                 n = name_item.text().strip() if name_item else c
                 self._broadcast_link_stock(c, n)
+                if auto_popup:
+                    if hasattr(self, 'isMinimized') and self.isMinimized():
+                        self.showNormal()
+                    if hasattr(self, 'isHidden') and self.isHidden():
+                        self.show()
+                    self.show()
+                    self.raise_()
+                    self.activateWindow()
                 break
 
     def _broadcast_link_stock(self, code: str, name: str):
@@ -1106,7 +1114,7 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
             pass
 
     def _check_and_notify_sector_highlights(self, filtered_records: List[Dict[str, Any]]):
-        """【板块龙头与特异异动自动挖掘通知】精选 Top 3~5 只核心标的进行轮播播报"""
+        """【板块龙头与特异异动自动挖掘通知】精选 Top 1 核心龙头标的进行播报"""
         if not getattr(self, "is_voice_alert_enabled", True):
             return
         if not filtered_records:
@@ -1114,14 +1122,14 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
         try:
             from ats.alert_notifier import AlertNotifier
             notifier = AlertNotifier.get_instance()
-            # 筛选得分最高的 3~5 只核心领涨龙头与先锋突破标的
+            # 筛选得分最高的 1 只核心领涨龙头与先锋突破标的
             candidates = []
             for r in filtered_records:
                 score = float(r.get("alpha_score", 0.0))
                 tag = r.get("buy_tag", "")
                 if score >= 80.0 or tag in ("LEADER", "SURGE", "BREAKOUT", "PULLBACK") or r.get("sector") == "重点关注":
                     candidates.append(r)
-                if len(candidates) >= 5: # 精选 3~5 个
+                if len(candidates) >= 1:  # 精选最强 Top 1 核心标的，避免队列堆积
                     break
 
             for idx, top_cand in enumerate(candidates, 1):
@@ -1130,7 +1138,7 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
                 score = float(top_cand.get("alpha_score", 88.0))
                 buy_type = str(top_cand.get("buy_type", ""))
                 sec = str(top_cand.get("sector", ""))
-                reason = f"【{sec}精选#{idx}】{buy_type} | {top_cand.get('reason', '')}"
+                reason = f"{buy_type} | {top_cand.get('reason', '')}"
                 notifier.notify_special_signal(code=c, name=n, reason=reason, score=score, parent=self)
         except Exception as e:
             logger.debug(f"_check_and_notify_sector_highlights error: {e}")

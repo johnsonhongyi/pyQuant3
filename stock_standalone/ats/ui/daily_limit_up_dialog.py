@@ -31,7 +31,7 @@ from PyQt6.QtWidgets import (
     QPushButton, QFrame, QMenu, QApplication, QComboBox, QLineEdit, 
     QFileDialog, QMessageBox
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QRect, QPropertyAnimation, QEasingCurve, QParallelAnimationGroup
+from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QRect, QPropertyAnimation, QEasingCurve, QParallelAnimationGroup, QPoint, QByteArray
 from PyQt6.QtGui import QBrush, QColor, QFont, QAction
 import pandas as pd
 
@@ -41,7 +41,7 @@ from tk_gui_modules.qt_table_utils import NumericTableWidgetItem
 from logger_utils import LoggerFactory
 from ats.ui.styles import (
     COLOR_UP, COLOR_DOWN, COLOR_INFO, COLOR_ACCENT, COLOR_WARN, 
-    auto_fit_columns_once, setup_header_persistence, save_config_node, load_config_node,
+    auto_fit_columns_once, setup_header_persistence, save_config_node, save_config_nodes, load_config_node,
     apply_dark_theme, ColorPreservingItemDelegate
 )
 from ats.ui.favorite_panel import get_ats_extra_cols
@@ -50,6 +50,95 @@ from JohnsonUtil import commonTips as cct
 
 logger = LoggerFactory.getLogger(__name__)
 _CONFIG_FILE_LOCK = threading.RLock()
+
+# 梯队权威排序权重映射（数值越大强度越高）
+# 同一个梯队标签内用二级字符串排序，确保同类聚合 (same-category grouping)
+TIER_WEIGHTS: dict = {
+    # ── 最强梯队：空间高度龙 ──
+    "空间高度龙": 100, "👑 空间高度龙": 100, "【👑 空间高度龙】": 100,
+    # ── 强势连板 ──
+    "连板接力": 90, "连板梯队": 90, "🚀 连板接力梯队": 90, "【🚀 连板接力梯队】": 90,
+    "强势连板": 90, "涨停接力": 90,
+    # ── 首板强势 ──
+    "首板": 80, "换手首板": 80, "强势换手首板": 80, "🔥 强势换手首板": 80, "【🔥 强势换手首板】": 80,
+    "强势首板": 80, "爆量首板": 80, "高换手首板": 80,
+    # ── 强势拉升 / 脉冲 ──
+    "强势拉升": 75, "🔥 强势拉升": 75, "拉升": 75, "强势冲高": 75,
+    # ── 强势反包 ──
+    "强势反包": 70, "反包板": 70, "💥 强势反包": 70, "【💥 强势反包】": 70,
+    "冰点强反包": 70, "反包涨停": 70, "缩量反包": 70, "强反包": 70,
+    # ── 弱转强 ──
+    "弱转强": 65, "⚡ 弱转强抢筹": 65, "【⚡ 弱转强抢筹】": 65,
+    "弱转强抢筹": 65, "弱转强爆量": 65,
+    # ── 稳健中军 ──
+    "稳健中军": 60, "🛡️ 稳健中军": 60, "【🛡️ 稳健中军】": 60, "中军": 60,
+    # ── 低开高走系列 ──
+    "低开高走": 50, "低开放量": 50, "低开急拉": 50,
+    "低开强拉": 48, "低开缩量": 45, "低开": 45,
+    # ── 平开系列 ──
+    "平开脉冲": 40, "平开急速点火": 42, "平开高走": 40, "平开放量": 40,
+    "平开急拉": 38, "平开强拉": 38, "平开缩量": 35, "平开": 35,
+    "平开震荡": 32, "点火": 40,
+    # ── 步步高升 ──
+    "步步高升": 36, "阶梯上攻": 36, "逐步抬升": 36,
+    # ── 高开系列 ──
+    "高开蓄势": 30, "💎 高开蓄势": 30, "高开放量": 30, "高开冲板": 30,
+    "高开回踩": 28, "高开缩量": 25, "高开震荡": 22, "高开": 25,
+    # ── 冲板未封 ──
+    "大阳冲板未封": 20, "冲板未封": 20, "⚡ 大阳冲板未封": 20, "【⚡ 大阳冲板未封】": 20,
+    "大阳线": 18, "放量冲板": 18,
+    # ── 冰点反身 ──
+    "冰点反身": 15, "极弱反弹": 12, "反身性": 15,
+    # ── 炸板 ──
+    "炸板未回封": 8, "炸板": 8, "💔 炸板未回封": 8, "【💔 炸板未回封】": 8,
+    "炸板回封": 5,
+    # ── 弱势 ──
+    "高开低走": 4, "高开后低走": 4,
+    "震荡整理": 3, "横盘整理": 3,
+}
+
+# 梯队权重查找（子串匹配，返回最高权重）
+def _get_tier_weight(tag: str) -> int:
+    """查找梯队标签对应的强度权重，支持精确匹配优先、子串模糊匹配兜底"""
+    if not tag or tag in ("--", "-", "None"):
+        return 0
+    # 精确匹配
+    if tag in TIER_WEIGHTS:
+        return TIER_WEIGHTS[tag]
+    # 子串匹配：取命中的最高权重
+    best = 0
+    for k, w in TIER_WEIGHTS.items():
+        if k in tag and w > best:
+            best = w
+    return best
+
+
+class SortKeyStr:
+    """支持元组多级排序中字符串自定义升降序比较的键包装类"""
+    __slots__ = ('s', 'is_desc')
+    def __init__(self, s: str, is_desc: bool):
+        self.s = str(s or "")
+        self.is_desc = is_desc
+    def __lt__(self, other):
+        if isinstance(other, SortKeyStr):
+            return self.s > other.s if self.is_desc else self.s < other.s
+        return NotImplemented
+    def __le__(self, other):
+        if isinstance(other, SortKeyStr):
+            return self.s >= other.s if self.is_desc else self.s <= other.s
+        return NotImplemented
+    def __gt__(self, other):
+        if isinstance(other, SortKeyStr):
+            return self.s < other.s if self.is_desc else self.s > other.s
+        return NotImplemented
+    def __ge__(self, other):
+        if isinstance(other, SortKeyStr):
+            return self.s <= other.s if self.is_desc else self.s >= other.s
+        return NotImplemented
+    def __eq__(self, other):
+        if isinstance(other, SortKeyStr):
+            return self.s == other.s
+        return NotImplemented
 
 
 def _safe_float(val: Any, default: float = 0.0) -> float:
@@ -127,6 +216,26 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         # 极窄模式下保留的精选核心列索引：代码(0), 名称(1), 现价(2), 涨幅%(3), 连板数(4), 梯队(5), 形态与质量(6), 封单额(7), 封流比(8), 换手(10), DFF(13), Rank(14)
         self._narrow_cols_to_keep = {0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 13, 14}
 
+        # 重点关注管理器与多级排序状态 (对齐赛马面板)
+        try:
+            from global_favorites import GlobalFavoriteManager
+            self.fav_manager = GlobalFavoriteManager()
+        except Exception:
+            self.fav_manager = None
+
+        self.sort_level1_col: Optional[int] = None
+        self.sort_level1_asc: bool = False
+        self.sort_level2_col: Optional[int] = None
+        self.sort_level2_asc: bool = False
+        self.sort_level3_col: Optional[int] = None
+        self.sort_level3_asc: bool = False
+        self._sort_col: Optional[int] = 3
+        self._sort_order: Qt.SortOrder = Qt.SortOrder.DescendingOrder
+
+        # 内存列宽与多级排序字典 Cache (零 I/O 延迟，窗口关闭时统一原子落盘)
+        self._column_widths_cache: Dict[str, List[int]] = {}
+        self._sort_states_cache: Dict[str, Dict[str, Any]] = {}
+
         # 空间龙头当前标的
         self.current_top_leader_code: str = ""
         self.current_top_leader_name: str = ""
@@ -139,12 +248,6 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         self._linkage_timer.setInterval(60)
         self._linkage_timer.setSingleShot(True)
         self._linkage_timer.timeout.connect(self._fire_linkage_debounced)
-
-        # 手动列宽调整防抖持久化定时器
-        self._header_save_timer = QTimer(self)
-        self._header_save_timer.setInterval(300)
-        self._header_save_timer.setSingleShot(True)
-        self._header_save_timer.timeout.connect(self._save_current_column_widths)
 
         # 实时数据推送节流定时器 (1500ms 智能合并，杜绝无谓重复计算与主线程卡顿)
         self._pending_df: Optional[pd.DataFrame] = None
@@ -194,8 +297,8 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         else:
             self._load_saved_geometry()
 
-        # 3. 首次加载与主动扫描
-        self._refresh_data_for_mode()
+        # 3. 首次加载与恢复模式完整状态
+        self._switch_mode(self.current_mode)
         if self.is_narrow_mode:
             self._apply_narrow_mode_layout()
 
@@ -227,51 +330,77 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
             pass
         return False
 
+    def _flush_all_caches_to_disk(self, is_open: Optional[bool] = None):
+        """【统一持久化】将内存 Cache 中的所有模式列宽、多级排序状态与窗口布局一次性安全原子落盘至 window_config.json"""
+        try:
+            current_mode = getattr(self, "current_mode", "TODAY")
+            curr_header_key = self._get_current_header_config_key(current_mode)
+            curr_sort_key = self._get_current_sort_config_key(current_mode)
+
+            if hasattr(self, "table") and self.table:
+                col_count = self.table.columnCount()
+                curr_w = [self.table.columnWidth(i) for i in range(col_count)]
+                if sum(curr_w) >= 100 and (self.isVisible() or curr_header_key not in self._column_widths_cache):
+                    self._column_widths_cache[curr_header_key] = curr_w
+
+            nodes_to_save = {}
+
+            # 1. 统一落盘所有模式的列宽
+            for k, w_list in self._column_widths_cache.items():
+                if w_list and len(w_list) > 0 and sum(w_list) >= 100:
+                    nodes_to_save[f"{k}_widths"] = w_list
+
+            # 2. 统一落盘所有模式的多级排序状态
+            for sk, s_dict in self._sort_states_cache.items():
+                if s_dict:
+                    nodes_to_save[sk] = s_dict
+
+            # 3. 当前模式排序状态
+            nodes_to_save[curr_sort_key] = {
+                'sortby_col': self._sort_col,
+                'sortby_col_ascend': (self._sort_order == Qt.SortOrder.AscendingOrder),
+                'sort_level1_col': self.sort_level1_col,
+                'sort_level1_asc': self.sort_level1_asc,
+                'sort_level2_col': self.sort_level2_col,
+                'sort_level2_asc': self.sort_level2_asc,
+                'sort_level3_col': self.sort_level3_col,
+                'sort_level3_asc': self.sort_level3_asc,
+            }
+
+            # 4. 窗口几何布局与置顶配置
+            geom = self.normal_geometry if (self.is_hidden_state and self.normal_geometry) else self.geometry()
+            node = load_config_node("daily_limit_up_dialog") or {}
+            node.update({
+                "x": geom.x(),
+                "y": geom.y(),
+                "width": geom.width(),
+                "height": geom.height(),
+                "anchor_edge": None if self.stays_on_top else self.anchor_edge,
+                "is_hidden": False if self.stays_on_top else self.is_hidden_state,
+                "stays_on_top": self.stays_on_top,
+                "current_mode": current_mode,
+                "is_narrow_mode": self.is_narrow_mode,
+                "last_wide_width": self._last_wide_width
+            })
+            if hasattr(self, 'table') and self.table:
+                node["column_widths"] = [self.table.columnWidth(i) for i in range(self.table.columnCount())]
+            if is_open is not None:
+                node["is_open"] = is_open
+
+            nodes_to_save["daily_limit_up_dialog"] = node
+
+            # 统一原子写入 window_config.json
+            save_config_nodes(nodes_to_save)
+            logger.debug(f"[DailyLimitUpDialog] Unified flush {len(nodes_to_save)} config nodes to disk successfully.")
+        except Exception as e:
+            logger.debug(f"Unified flush failed: {e}")
+
     def _save_current_column_widths(self):
         """持久化保存当前所有可见/隐藏列的精确列宽"""
-        try:
-            if hasattr(self, 'table') and self.table:
-                col_count = self.table.columnCount()
-                widths = [self.table.columnWidth(i) for i in range(col_count)]
-                save_config_node("ats_daily_limit_up_table_header", widths)
-        except Exception as e:
-            logger.debug(f"保存每日涨停看板列宽异常: {e}")
+        self._flush_all_caches_to_disk()
 
     def _save_window_states(self, is_open: Optional[bool] = None):
-        try:
-            with _CONFIG_FILE_LOCK:
-                config_data = {}
-                if os.path.exists(WINDOW_CONFIG_FILE):
-                    try:
-                        with open(WINDOW_CONFIG_FILE, "r", encoding="utf-8") as f:
-                            config_data = json.load(f)
-                    except Exception:
-                        config_data = {}
-
-                geom = self.normal_geometry if (self.is_hidden_state and self.normal_geometry) else self.geometry()
-                node = config_data.get("daily_limit_up_dialog", {})
-                node.update({
-                    "x": geom.x(),
-                    "y": geom.y(),
-                    "width": geom.width(),
-                    "height": geom.height(),
-                    "anchor_edge": None if self.stays_on_top else self.anchor_edge,
-                    "is_hidden": False if self.stays_on_top else self.is_hidden_state,
-                    "stays_on_top": self.stays_on_top,
-                    "current_mode": self.current_mode,
-                    "is_narrow_mode": self.is_narrow_mode,
-                    "last_wide_width": self._last_wide_width
-                })
-                if hasattr(self, 'table') and self.table:
-                    node["column_widths"] = [self.table.columnWidth(i) for i in range(self.table.columnCount())]
-                if is_open is not None:
-                    node["is_open"] = is_open
-
-                config_data["daily_limit_up_dialog"] = node
-                with open(WINDOW_CONFIG_FILE, "w", encoding="utf-8") as f:
-                    json.dump(config_data, f, ensure_ascii=False, indent=2)
-        except Exception as e:
-            logger.debug(f"保存每日涨停看板窗口配置异常: {e}")
+        self._flush_all_caches_to_disk(is_open=is_open)
 
     def _apply_restore_state(self, state: Dict[str, Any]):
         try:
@@ -280,244 +409,236 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
             w = state.get("width", 1280)
             h = state.get("height", 720)
             self._last_wide_width = state.get("last_wide_width", 1280)
-            self.is_narrow_mode = state.get("is_narrow_mode", False)
-            if hasattr(self, 'btn_narrow_mode'):
-                self.btn_narrow_mode.setChecked(self.is_narrow_mode)
-
             if x is not None and y is not None:
                 self.setGeometry(x, y, w, h)
-                self.normal_geometry = QRect(x, y, w, h)
-
-            if self.stays_on_top or state.get("stays_on_top", False):
-                self.anchor_edge = None
-                self.is_hidden_state = False
-                self.setWindowOpacity(1.0)
-            else:
-                self.anchor_edge = state.get("anchor_edge")
-                self.is_hidden_state = state.get("is_hidden", False)
-            if state.get("current_mode"):
-                self.current_mode = state["current_mode"]
+            self.anchor_edge = state.get("anchor_edge")
+            self.is_hidden_state = state.get("is_hidden", False)
+            self.stays_on_top = state.get("stays_on_top", False)
+            self.current_mode = state.get("current_mode", "TODAY")
+            self.is_narrow_mode = state.get("is_narrow_mode", False)
+            if self.chk_ontop:
+                self.chk_ontop.setChecked(self.stays_on_top)
+            if hasattr(self, "btn_narrow_mode"):
+                self.btn_narrow_mode.setChecked(self.is_narrow_mode)
         except Exception as e:
-            logger.debug(f"应用每日涨停看板恢复状态异常: {e}")
+            logger.debug(f"恢复每日涨停看板状态异常: {e}")
 
     def _load_saved_geometry(self):
         try:
-            if os.path.exists(WINDOW_CONFIG_FILE):
-                with _CONFIG_FILE_LOCK:
-                    with open(WINDOW_CONFIG_FILE, "r", encoding="utf-8") as f:
-                        data = json.load(f)
-                        st = data.get("daily_limit_up_dialog", {})
-                        if st:
-                            self._apply_restore_state(st)
-        except Exception:
-            pass
+            data = load_config_node("daily_limit_up_dialog") or {}
+            if data:
+                self._apply_restore_state(data)
+        except Exception as e:
+            logger.debug(f"加载每日涨停看板窗口几何配置异常: {e}")
 
     def _init_ui(self):
         main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(8, 8, 8, 8)
+        main_layout.setContentsMargins(10, 10, 10, 10)
         main_layout.setSpacing(6)
 
-        # ── 1. 顶部市场核心涨停概览 KPI 卡片 ──
-        self.kpi_frame = QFrame()
-        self.kpi_frame.setStyleSheet("""
-            QFrame {
-                background-color: #16181f;
-                border: 1px solid #282a36;
-                border-radius: 6px;
-                padding: 4px;
-            }
-        """)
-        self.kpi_layout = QHBoxLayout(self.kpi_frame)
-        self.kpi_layout.setContentsMargins(8, 4, 8, 4)
-        self.kpi_layout.setSpacing(12)
+        # ── 1. 顶部 KPI 卡片摘要栏 (情绪与防猎状态) ──
+        kpi_layout = QHBoxLayout()
+        kpi_layout.setSpacing(8)
 
-        self.lbl_kpi_zt = QLabel("🔴 今日涨停: <b>0</b> 家")
-        self.lbl_kpi_zt.setStyleSheet("color: #ff4444; font-size: 10pt;")
-        self.kpi_layout.addWidget(self.lbl_kpi_zt)
+        self.lbl_kpi_zt = QLabel("🔴 涨停: 0 家")
+        self.lbl_kpi_zt.setStyleSheet("background-color: #241414; color: #ff4444; border: 1px solid #552222; border-radius: 4px; padding: 4px 8px; font-weight: bold;")
+        kpi_layout.addWidget(self.lbl_kpi_zt)
 
-        self.lbl_kpi_ladder = QLabel("👑 连板天梯: <b>0</b> 家 (最高 <b>0</b> 板)")
-        self.lbl_kpi_ladder.setStyleSheet("color: #ffd700; font-size: 10pt;")
-        self.kpi_layout.addWidget(self.lbl_kpi_ladder)
+        self.lbl_kpi_ladder = QLabel("👑 连板: 0 家")
+        self.lbl_kpi_ladder.setStyleSheet("background-color: #242014; color: #ffd700; border: 1px solid #554422; border-radius: 4px; padding: 4px 8px; font-weight: bold;")
+        kpi_layout.addWidget(self.lbl_kpi_ladder)
 
-        self.lbl_kpi_broken = QLabel("💥 炸板: <b>0</b> 家 (封板率 <b>0.0%</b>)")
-        self.lbl_kpi_broken.setStyleSheet("color: #ff9900; font-size: 10pt;")
-        self.kpi_layout.addWidget(self.lbl_kpi_broken)
+        self.lbl_kpi_broken = QLabel("💥 炸板: 0 家")
+        self.lbl_kpi_broken.setStyleSheet("background-color: #241a14; color: #ff9900; border: 1px solid #553322; border-radius: 4px; padding: 4px 8px; font-weight: bold;")
+        kpi_layout.addWidget(self.lbl_kpi_broken)
 
-        self.lbl_kpi_seal = QLabel("💰 平均封流比: <b>0.0%</b> | 封单总额: <b>0.0</b> 亿")
-        self.lbl_kpi_seal.setStyleSheet("color: #00ffaa; font-size: 10pt;")
-        self.kpi_layout.addWidget(self.lbl_kpi_seal)
+        self.lbl_kpi_seal = QLabel("💰 封单比: 0.00%")
+        self.lbl_kpi_seal.setStyleSheet("background-color: #14241e; color: #00ff88; border: 1px solid #225533; border-radius: 4px; padding: 4px 8px; font-weight: bold;")
+        kpi_layout.addWidget(self.lbl_kpi_seal)
 
-        self.kpi_layout.addSpacing(10)
-
-        # ⏱️ 盘中时间片生命周期直选 (支持根据实盘时间自动切换 / 手动点选锁定)
+        # 模式与时间片切换栏
         self.combo_time_slice = QComboBox()
         self.combo_time_slice.addItems([
             "⚡ 自动实盘跟随",
             "⏱️ 全天全时段",
-            "👑 09:30~10:00 黄金定龙",
-            "💎 10:00~11:30 分歧低吸",
-            "🚀 13:00~14:00 午后助攻",
-            "⚠️ 14:00~14:45 尾盘诱多",
-            "🔒 14:45~15:00 尾盘定盘"
+            "🌅 集合竞价 (09:15-09:25)",
+            "🚀 早盘进攻 (09:30-10:00)",
+            "☕ 盘中定型 (10:00-11:30)",
+            "🎯 午盘接力 (13:00-14:30)",
+            "🏁 尾盘回封 (14:30-15:00)"
         ])
-        self.combo_time_slice.setMinimumWidth(185)
         self.combo_time_slice.setStyleSheet("""
-            QComboBox { background-color: #241e12; color: #ffd700; border: 1px solid #ffaa00; border-radius: 4px; padding: 2px 8px; font-weight: bold; font-size: 9.5pt; min-width: 180px; }
-            QComboBox::drop-down { width: 20px; }
-            QComboBox QAbstractItemView { background-color: #1e1e24; color: #ffd700; selection-background-color: #3d3014; }
+            QComboBox {
+                background-color: #1a1a24;
+                color: #ffd700;
+                border: 1px solid #ffaa00;
+                border-radius: 4px;
+                padding: 3px 8px;
+                font-weight: bold;
+            }
+            QComboBox::drop-down { border: none; }
+            QComboBox QAbstractItemView {
+                background-color: #121218;
+                color: #e2e2e5;
+                selection-background-color: #ffaa00;
+                selection-color: #000000;
+            }
         """)
         self.combo_time_slice.currentTextChanged.connect(self._apply_filter)
-        self.kpi_layout.addWidget(self.combo_time_slice)
+        kpi_layout.addWidget(self.combo_time_slice)
 
-        # 梯队分类过滤 (放置在第一行宽敞区域，完整显示无截断)
         self.combo_tier_filter = QComboBox()
-        self.combo_tier_filter.addItems([
-            "全部梯队", 
-            "🌅 开盘起点与跃迁",
-            "🚀 低开高走反包",
-            "💎 高开放量锁筹",
-            "⚡ 步步高升跃迁",
-            "🌊 平开急速点火",
-            "💎 冰点反身性龙",
-            "💎 地量地价起爆",
-            "💎 冰点反身潜伏",
-            "🟢 黄金潜伏区",
-            "🟡 半路点火区",
-            "🔴 封板临界区",
-            "👑 空间高度龙", 
-            "🚀 连板接力", 
-            "💎 统治级大封单",
-            "🎯 支撑阳包阴反转", 
-            "⭐ 20cm强势首板",
-            "🔥 强势主升首板", 
-            "⚡ 大阳冲板未封",
-            "⚠️ 高开低走预警",
-            "💥 曾涨停炸板"
-        ])
-        self.combo_tier_filter.setMinimumWidth(135)
+        self.combo_tier_filter.addItems(["全部梯队", "👑 空间高度龙", "🚀 连板梯队", "🔥 首板", "💥 强势反包", "⚡ 弱转强", "🛡️ 稳健中军", "大阳冲板未封", "💔 炸板未回封", "高开低走/震荡"])
         self.combo_tier_filter.setStyleSheet("""
-            QComboBox { background-color: #12241e; color: #00ffaa; border: 1px solid #00aa77; border-radius: 4px; padding: 2px 8px; font-weight: bold; font-size: 9.5pt; min-width: 130px; }
-            QComboBox::drop-down { width: 20px; }
-            QComboBox QAbstractItemView { background-color: #1e1e24; color: #00ffaa; selection-background-color: #143d2c; }
+            QComboBox {
+                background-color: #12241a;
+                color: #00ff88;
+                border: 1px solid #00aa55;
+                border-radius: 4px;
+                padding: 3px 8px;
+                font-weight: bold;
+            }
+            QComboBox::drop-down { border: none; }
+            QComboBox QAbstractItemView {
+                background-color: #121814;
+                color: #e2e2e5;
+                selection-background-color: #00ff88;
+                selection-color: #000000;
+            }
         """)
-        self.combo_tier_filter.currentTextChanged.connect(self._apply_filter)
-        self.kpi_layout.addWidget(self.combo_tier_filter)
-
-        self.kpi_layout.addStretch()
+        self.combo_tier_filter.currentIndexChanged.connect(self._apply_filter)
+        kpi_layout.addWidget(self.combo_tier_filter)
 
         self.btn_top_leader = QPushButton("🏆 空间龙头: --")
-        self.btn_top_leader.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_top_leader.setToolTip("点击立即联动切股并在表格中高亮定位当前最高板空间龙头")
         self.btn_top_leader.setStyleSheet("""
             QPushButton {
-                background-color: #2b1430;
-                color: #ff77ff;
+                background-color: #2b1424;
+                color: #ff55ff;
                 font-weight: bold;
-                font-size: 10pt;
-                border: 1px solid #d946ef;
+                border: 1px solid #882255;
                 border-radius: 4px;
-                padding: 3px 10px;
+                padding: 4px 8px;
             }
             QPushButton:hover {
-                background-color: #d946ef;
+                background-color: #441a38;
                 color: #ffffff;
-                border-color: #f0abfc;
-            }
-            QPushButton:pressed {
-                background-color: #a21caf;
             }
         """)
         self.btn_top_leader.clicked.connect(self._on_top_leader_clicked)
-        self.kpi_layout.addWidget(self.btn_top_leader)
-
-        # 🔔 语音与弹窗预警开关 (圆形绿点指示灯)
+        kpi_layout.addWidget(self.btn_top_leader)
         self.is_voice_alert_enabled = self._load_voice_alert_enabled()
         self.btn_voice_alert = QPushButton("🟢 语音预警" if self.is_voice_alert_enabled else "⚪ 语音静音")
-        self.btn_voice_alert.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_voice_alert.setToolTip("开启/关闭 时间片重点标的挖掘与大盘退潮雪崩 语音播报与右下角弹窗通知")
+        self.btn_voice_alert.setCheckable(True)
+        self.btn_voice_alert.setChecked(self.is_voice_alert_enabled)
         self._update_voice_btn_style()
         self.btn_voice_alert.clicked.connect(self._toggle_voice_alert)
-        self.kpi_layout.addWidget(self.btn_voice_alert)
+        kpi_layout.addWidget(self.btn_voice_alert)
 
-        main_layout.addWidget(self.kpi_frame)
+        main_layout.addLayout(kpi_layout)
 
-        # ── 2. 控制栏 (周期切换、历史回溯、搜索与操作按钮) ──
+        # ── 2. 模式切换工具栏 (今日涨停 / 起点雷达 / 盘中上车雷达 / 3日 / 5日 / 10日 / 连板天梯 / 历史回溯) ──
         ctrl_layout = QHBoxLayout()
-        ctrl_layout.setContentsMargins(0, 2, 0, 2)
         ctrl_layout.setSpacing(6)
 
-        # 模式切换按钮组
         self.btn_mode_today = QPushButton("🔥 今日涨停")
         self.btn_mode_today.setCheckable(True)
         self.btn_mode_today.setChecked(True)
-        self.btn_mode_today.setStyleSheet(self._get_btn_style(active=True))
+        self.btn_mode_today.setStyleSheet(self._get_btn_style(True))
         self.btn_mode_today.clicked.connect(lambda: self._switch_mode("TODAY"))
         ctrl_layout.addWidget(self.btn_mode_today)
 
-        self.btn_mode_bubble = QPushButton("🌅 起点雷达")
-        self.btn_mode_bubble.setToolTip("全网开盘起点与极速冒泡阶梯跃迁挖掘雷达 (低开高走反包 / 高开放量锁筹 / 0-2-4-6% 步步高升)")
+        self.btn_mode_bubble = QPushButton("🎯 起点雷达")
         self.btn_mode_bubble.setCheckable(True)
-        self.btn_mode_bubble.setStyleSheet(self._get_btn_style(active=False))
+        self.btn_mode_bubble.setStyleSheet(self._get_btn_style(False))
+        self.btn_mode_bubble.setToolTip("盘中异动起点雷达：基于异动评分梯队分类，捕获启动脉冲与反身性龙头")
         self.btn_mode_bubble.clicked.connect(lambda: self._switch_mode("BUBBLE"))
         ctrl_layout.addWidget(self.btn_mode_bubble)
 
-        self.btn_mode_radar = QPushButton("🎯 盘中上车雷达")
-        self.btn_mode_radar.setToolTip("盘中动态潜伏与梯度上车雷达 (VWAP均价回踩低吸 / 半路点火确认 / 临界抢跑)")
+        self.btn_mode_radar = QPushButton("盘中上车雷达")
         self.btn_mode_radar.setCheckable(True)
-        self.btn_mode_radar.setStyleSheet(self._get_btn_style(active=False))
+        self.btn_mode_radar.setStyleSheet(self._get_btn_style(False))
         self.btn_mode_radar.clicked.connect(lambda: self._switch_mode("RADAR"))
         ctrl_layout.addWidget(self.btn_mode_radar)
 
-        self.btn_mode_3d = QPushButton("🚀 3日强势")
+        self.btn_mode_3d = QPushButton("📌 3日强势")
         self.btn_mode_3d.setCheckable(True)
-        self.btn_mode_3d.setStyleSheet(self._get_btn_style(active=False))
+        self.btn_mode_3d.setStyleSheet(self._get_btn_style(False))
         self.btn_mode_3d.clicked.connect(lambda: self._switch_mode("3D"))
         ctrl_layout.addWidget(self.btn_mode_3d)
 
         self.btn_mode_5d = QPushButton("⚡ 5日强势")
         self.btn_mode_5d.setCheckable(True)
-        self.btn_mode_5d.setStyleSheet(self._get_btn_style(active=False))
+        self.btn_mode_5d.setStyleSheet(self._get_btn_style(False))
         self.btn_mode_5d.clicked.connect(lambda: self._switch_mode("5D"))
         ctrl_layout.addWidget(self.btn_mode_5d)
 
         self.btn_mode_10d = QPushButton("👑 10日强势")
         self.btn_mode_10d.setCheckable(True)
-        self.btn_mode_10d.setStyleSheet(self._get_btn_style(active=False))
+        self.btn_mode_10d.setStyleSheet(self._get_btn_style(False))
         self.btn_mode_10d.clicked.connect(lambda: self._switch_mode("10D"))
         ctrl_layout.addWidget(self.btn_mode_10d)
 
-        self.btn_mode_ladder = QPushButton("🪜 连板天梯")
+        self.btn_mode_ladder = QPushButton("👑 连板天梯")
         self.btn_mode_ladder.setCheckable(True)
-        self.btn_mode_ladder.setStyleSheet(self._get_btn_style(active=False))
+        self.btn_mode_ladder.setStyleSheet(self._get_btn_style(False))
         self.btn_mode_ladder.clicked.connect(lambda: self._switch_mode("LADDER"))
         ctrl_layout.addWidget(self.btn_mode_ladder)
 
-        # 历史日期回溯选择框
-        lbl_date = QLabel(" 📅 历史回溯:")
-        lbl_date.setStyleSheet("color: #8e8e93; font-size: 9pt;")
-        ctrl_layout.addWidget(lbl_date)
+        # 历史回溯下拉框
+        lbl_hist = QLabel("📅 历史回溯:")
+        lbl_hist.setStyleSheet("color: #a0a0b0; font-size: 9pt;")
+        ctrl_layout.addWidget(lbl_hist)
 
         self.combo_history_date = QComboBox()
-        self.combo_history_date.setMinimumWidth(110)
+        self.combo_history_date.addItem("实时今日")
         self.combo_history_date.setStyleSheet("""
-            QComboBox { background-color: #1e1e24; color: #ffffff; border: 1px solid #33333f; border-radius: 4px; padding: 2px 6px; }
-            QComboBox::drop-down { width: 18px; }
+            QComboBox {
+                background-color: #1a1a24;
+                color: #c0c0d0;
+                border: 1px solid #333344;
+                border-radius: 4px;
+                padding: 2px 6px;
+            }
+            QComboBox::drop-down { border: none; }
+            QComboBox QAbstractItemView {
+                background-color: #121218;
+                color: #e2e2e5;
+                selection-background-color: #3b1818;
+                selection-color: #ff5555;
+            }
         """)
         self._populate_history_dates()
         self.combo_history_date.currentIndexChanged.connect(self._on_history_date_selected)
         ctrl_layout.addWidget(self.combo_history_date)
 
-        # 搜索过滤框
-        self.search_edit = QLineEdit()
-        self.search_edit.setPlaceholderText("🔍 搜索代码/名称/板块...")
-        self.search_edit.setClearButtonEnabled(True)
-        self.search_edit.setStyleSheet("""
-            QLineEdit { background-color: #1e1e24; color: #ffffff; border: 1px solid #33333f; border-radius: 4px; padding: 2px 6px; min-width: 160px; }
-        """)
-        self.search_edit.textChanged.connect(self._apply_filter)
-        ctrl_layout.addWidget(self.search_edit)
-
         ctrl_layout.addStretch()
+
+        # 快速搜索过滤
+        self.edit_search = QLineEdit()
+        self.edit_search.setPlaceholderText("🔍 搜索代码/名称/板块...")
+        self.edit_search.setStyleSheet("""
+            QLineEdit {
+                background-color: #18181f;
+                color: #e2e2e5;
+                border: 1px solid #33333f;
+                border-radius: 4px;
+                padding: 3px 8px;
+                min-width: 130px;
+            }
+        """)
+        self.edit_search.textChanged.connect(self._apply_filter)
+        ctrl_layout.addWidget(self.edit_search)
+
+        # 自选股过滤按钮
+        self.btn_fav_filter = QPushButton("⭐ 自选股")
+        self.btn_fav_filter.setCheckable(True)
+        self.btn_fav_filter.setStyleSheet("""
+            QPushButton { background-color: #1e1e24; color: #ffd700; border: 1px solid #33333f; border-radius: 4px; padding: 3px 8px; font-weight: bold; }
+            QPushButton:checked { background-color: #4a3b10; color: #ffeb3b; border: 1px solid #ffd700; }
+            QPushButton:hover { background-color: #2e2e36; }
+        """)
+        self.btn_fav_filter.clicked.connect(self._apply_filter)
+        ctrl_layout.addWidget(self.btn_fav_filter)
 
         # 📐 自适应与 📱 极窄模式快捷按钮
         self.btn_autofit = QPushButton("📐 自适应")
@@ -569,6 +690,7 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
 
         # ── 3. 主数据表格 ──
         headers, self.extra_cols = get_limit_up_table_headers()
+        self._base_headers = list(headers)
         self.table = QTableWidget()
         self.table.setItemDelegate(ColorPreservingItemDelegate(self.table))
         self.table.setColumnCount(len(headers))
@@ -579,7 +701,7 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         self.table.setAlternatingRowColors(True)
         self.table.verticalHeader().setVisible(False)
         self.table.setShowGrid(False)
-        self.table.setSortingEnabled(True)
+        self.table.setSortingEnabled(False)  # 由多级排序引擎精确接管排序
         self.table.setStyleSheet("""
             QTableWidget {
                 background-color: #121214;
@@ -608,16 +730,13 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         header = self.table.horizontalHeader()
         header.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         header.customContextMenuRequested.connect(self._show_header_context_menu)
+        header.sectionClicked.connect(self._on_header_section_clicked)
         header.sectionResized.connect(self._on_header_section_resized)
 
-        # 模式独立列宽防抖保存定时器
         self._is_restoring_header = False
-        self._header_save_timer = QTimer(self)
-        self._header_save_timer.setSingleShot(True)
-        self._header_save_timer.setInterval(400)
-        self._header_save_timer.timeout.connect(self._save_current_header_state)
 
-        setup_header_persistence(self.table, "ats_daily_limit_up_table", self)
+        self._restore_sort_states_for_mode(self.current_mode)
+        self._restore_header_state_for_mode(self.current_mode)
         main_layout.addWidget(self.table)
 
         # ── 4. 底部状态栏 ──
@@ -626,60 +745,314 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         main_layout.addWidget(self.lbl_status)
 
     def _get_current_header_config_key(self, mode: Optional[str] = None) -> str:
-        """获取当前模式对应的专属持久化配置 key"""
+        """获取当前模式对应的列宽持久化 key（起点雷达 BUBBLE 单独持久化，其余模式共用原始主 key）"""
         target_mode = mode or getattr(self, "current_mode", "TODAY")
         if target_mode == "BUBBLE":
             return "ats_daily_limit_up_table_bubble"
         return "ats_daily_limit_up_table"
 
-    def _save_current_header_state(self):
-        """保存当前模式的列宽状态至专属配置 key"""
+    def _get_current_sort_config_key(self, mode: Optional[str] = None) -> str:
+        """获取当前模式对应的排序持久化 key（起点雷达 BUBBLE 单独持久化，其余模式共用原始主 key）"""
+        target_mode = mode or getattr(self, "current_mode", "TODAY")
+        if target_mode == "BUBBLE":
+            return "ats_daily_limit_up_sort_bubble"
+        return "ats_daily_limit_up_sort"
+
+    def _apply_default_column_widths(self):
+        """应用各列默认标准紧凑列宽，确保所有 21 列在标准 1280~1440 屏幕下完全清晰可见无需横向滚动条"""
+        default_widths = {
+            0: 62, 1: 72, 2: 60, 3: 65, 4: 56, 5: 85,
+            6: 78, 7: 68, 8: 65, 9: 60, 10: 58, 11: 72,
+            12: 58, 13: 48, 14: 52, 15: 52, 16: 68, 17: 72
+        }
+        col_count = self.table.columnCount()
+        self.table.horizontalHeader().blockSignals(True)
+        for col in range(col_count):
+            if col == col_count - 1:
+                w = 80  # 所属板块默认 80px
+            elif col == col_count - 2:
+                w = 85  # 形态与质量默认 85px
+            else:
+                w = default_widths.get(col, 65)
+            self.table.setColumnWidth(col, w)
+        self.table.horizontalHeader().blockSignals(False)
+
+    def _save_current_header_state(self, mode: Optional[str] = None):
+        """保存当前模式的列宽状态至内存 Cache"""
         if getattr(self, '_is_populating', False) or getattr(self, '_is_restoring_header', False):
             return
-        key = self._get_current_header_config_key()
+        key = self._get_current_header_config_key(mode)
         header = self.table.horizontalHeader()
-        if header:
+        if header and hasattr(self, 'table') and self.table:
             try:
-                state_hex = header.saveState().toHex().data().decode("utf-8")
-                save_config_node(key, state_hex)
-                logger.debug(f"[DailyLimitUpDialog] Saved header state for key: {key}")
+                col_count = self.table.columnCount()
+                widths = [self.table.columnWidth(i) for i in range(col_count)]
+                if sum(widths) >= 100 and (self.isVisible() or key not in self._column_widths_cache):
+                    self._column_widths_cache[key] = widths
             except Exception as e:
-                logger.debug(f"Save header failed for {key}: {e}")
+                logger.debug(f"Save header cache failed for {key}: {e}")
 
     def _restore_header_state_for_mode(self, mode: str):
-        """
-        根据当前模式恢复列宽状态：
-        新 Tab (BUBBLE) 默认读取自身配置；若尚无专属配置，则回退读取默认持久化配置；
-        用户在当前 Tab 调整列宽后，自动保存至专属配置 key。
-        """
+        """根据当前模式恢复列宽状态 (优先读内存 Cache，其次读磁盘配置，兜底默认紧凑布局)"""
         self._is_restoring_header = True
         key = self._get_current_header_config_key(mode)
         header = self.table.horizontalHeader()
-        if header:
-            try:
-                state_hex = load_config_node(key)
-                # 默认使用其他的持久化 (如果 BUBBLE 模式尚无独立保存配置，回退使用主表格持久化)
-                if not state_hex and mode == "BUBBLE":
-                    state_hex = load_config_node("ats_daily_limit_up_table")
-                if state_hex and isinstance(state_hex, str):
-                    header.blockSignals(True)
-                    header.restoreState(QByteArray.fromHex(state_hex.encode("utf-8")))
-                    header.blockSignals(False)
-            except Exception as e:
-                logger.debug(f"Restore header failed for {key}: {e}")
-            finally:
+        if not header:
+            self._is_restoring_header = False
+            return
+
+        try:
+            # 1. 优先读取内存 Cache
+            widths = self._column_widths_cache.get(key)
+            if not widths:
+                widths = load_config_node(f"{key}_widths")
+                if not widths and mode == "BUBBLE":
+                    widths = load_config_node("ats_daily_limit_up_table_widths")
+
+            hidden_cols = load_config_node(f"{key}_hidden")
+
+            restored = False
+            # 2. 优先使用真实整数宽度列表进行 100% 确定性精确还原 (对齐赛马面板)
+            if widths and isinstance(widths, list) and len(widths) > 0 and not all(w == 100 for w in widths):
                 header.blockSignals(True)
-                for col in range(self.table.columnCount()):
-                    header.setSectionResizeMode(col, QHeaderView.ResizeMode.Interactive)
+                for i, w in enumerate(widths):
+                    if i < self.table.columnCount() and isinstance(w, (int, float)) and w > 10:
+                        self.table.setColumnWidth(i, int(w))
                 header.blockSignals(False)
-                self._is_restoring_header = False
+                self._column_widths_cache[key] = [int(w) for w in widths]
+                restored = True
+
+            # 3. 恢复隐藏列状态
+            if hidden_cols is not None and isinstance(hidden_cols, list):
+                for i in range(self.table.columnCount()):
+                    self.table.setColumnHidden(i, i in hidden_cols)
+
+            if not restored:
+                self._apply_default_column_widths()
+                self._column_widths_cache[key] = [self.table.columnWidth(i) for i in range(self.table.columnCount())]
+
+        except Exception as e:
+            logger.debug(f"Restore header failed for {key}: {e}")
+            self._apply_default_column_widths()
+        finally:
+            header.blockSignals(True)
+            for col in range(self.table.columnCount()):
+                header.setSectionResizeMode(col, QHeaderView.ResizeMode.Interactive)
+            header.blockSignals(False)
+            self._is_restoring_header = False
 
     def _on_header_section_resized(self, logicalIndex: int, oldSize: int, newSize: int):
-        """当用户手动拖拽调整表格列宽时，触发防抖持久化保存到当前模式专属 key"""
+        """当用户手动拖拽调整表格列宽时，立即同步更新内存 Cache，零延迟无 I/O 阻塞"""
         if getattr(self, '_is_populating', False) or getattr(self, '_is_restoring_header', False):
             return
-        if hasattr(self, '_header_save_timer'):
-            self._header_save_timer.start()
+        if not self.isVisible() or oldSize <= 0 or newSize <= 0 or oldSize == newSize:
+            return
+        key = self._get_current_header_config_key(getattr(self, "current_mode", "TODAY"))
+        widths = list(self._column_widths_cache.get(key) or [])
+        col_count = self.table.columnCount() if (hasattr(self, 'table') and self.table) else len(widths)
+        if len(widths) < col_count:
+            widths = [self.table.columnWidth(i) for i in range(col_count)]
+        if 0 <= logicalIndex < len(widths):
+            widths[logicalIndex] = int(newSize)
+            self._column_widths_cache[key] = widths
+
+    def _save_sort_states(self, mode: Optional[str] = None):
+        """保存当前模式的多级排序状态至内存 Cache"""
+        key = self._get_current_sort_config_key(mode)
+        sort_dict = {
+            'sortby_col': self._sort_col,
+            'sortby_col_ascend': (self._sort_order == Qt.SortOrder.AscendingOrder),
+            'sort_level1_col': self.sort_level1_col,
+            'sort_level1_asc': self.sort_level1_asc,
+            'sort_level2_col': self.sort_level2_col,
+            'sort_level2_asc': self.sort_level2_asc,
+            'sort_level3_col': self.sort_level3_col,
+            'sort_level3_asc': self.sort_level3_asc,
+        }
+        self._sort_states_cache[key] = sort_dict
+
+    def _restore_sort_states_for_mode(self, mode: str):
+        """加载当前模式的多级排序设置 (优先从内存 Cache 读取)"""
+        key = self._get_current_sort_config_key(mode)
+        try:
+            sort_dict = self._sort_states_cache.get(key)
+            if not sort_dict:
+                sort_dict = load_config_node(key)
+
+            if isinstance(sort_dict, dict) and sort_dict:
+                self.sort_level1_col = sort_dict.get('sort_level1_col', None)
+                self.sort_level1_asc = sort_dict.get('sort_level1_asc', False)
+                self.sort_level2_col = sort_dict.get('sort_level2_col', None)
+                self.sort_level2_asc = sort_dict.get('sort_level2_asc', False)
+                self.sort_level3_col = sort_dict.get('sort_level3_col', None)
+                self.sort_level3_asc = sort_dict.get('sort_level3_asc', False)
+                self._sort_col = sort_dict.get('sortby_col', 3)
+                self._sort_order = Qt.SortOrder.AscendingOrder if sort_dict.get('sortby_col_ascend', False) else Qt.SortOrder.DescendingOrder
+                self._sort_states_cache[key] = dict(sort_dict)
+                self._update_header_labels()
+                return
+        except Exception as e:
+            logger.warning(f"Failed to restore sort states for mode {mode}: {e}")
+
+        # 默认初始状态：无 L1/L2/L3 多级排序，默认按涨幅%降序
+        self.sort_level1_col = None
+        self.sort_level1_asc = False
+        self.sort_level2_col = None
+        self.sort_level2_asc = False
+        self.sort_level3_col = None
+        self.sort_level3_asc = False
+        self._sort_col = 3
+        self._sort_order = Qt.SortOrder.DescendingOrder
+        self._update_header_labels()
+
+    def _show_header_context_menu(self, pos: QPoint):
+        """表头右键菜单：支持 🔴[主]排序、🟡[从]排序、🟢[次]排序、取消当前列与清除全部多级排序"""
+        header = self.table.horizontalHeader()
+        logical_index = header.logicalIndexAt(pos)
+        if logical_index < 0:
+            logical_index = max(0, min(header.count() - 1, int(pos.x() / max(1, header.defaultSectionSize()))))
+
+        col_name = self._base_headers[logical_index] if (hasattr(self, "_base_headers") and logical_index < len(self._base_headers)) else f"第{logical_index+1}列"
+
+        menu = QMenu(self)
+        menu.setStyleSheet("""
+            QMenu { background-color: #1A1A1E; color: #FFF; border: 1px solid #333; }
+            QMenu::item:selected { background-color: #004488; }
+        """)
+
+        action_l1 = menu.addAction(f"设为 🔴[主]排序 ({col_name})")
+        action_l2 = menu.addAction(f"设为 🟡[从]排序 ({col_name})")
+        action_l3 = menu.addAction(f"设为 🟢[次]排序 ({col_name})")
+
+        menu.addSeparator()
+        action_clear_col = menu.addAction(f"取消当前列多级排序 ({col_name})")
+        action_clear_all = menu.addAction("清除全部多级排序")
+
+        menu.addSeparator()
+        action_autofit = menu.addAction("📐 一键自适应列宽")
+        action_reset = menu.addAction("🔄 恢复默认列宽")
+        action_narrow = menu.addAction("📱 极窄模式 (Narrow Mode)")
+        action_narrow.setCheckable(True)
+        action_narrow.setChecked(self.is_narrow_mode)
+
+        # 列显隐子菜单
+        col_menu = menu.addMenu("👁️ 显示/隐藏各列...")
+        col_menu.setStyleSheet(menu.styleSheet())
+        col_actions = []
+        for i in range(self.table.columnCount()):
+            hdr_text = self._base_headers[i] if (hasattr(self, "_base_headers") and i < len(self._base_headers)) else (self.table.horizontalHeaderItem(i).text() if self.table.horizontalHeaderItem(i) else f"第{i+1}列")
+            act = col_menu.addAction(hdr_text)
+            act.setCheckable(True)
+            act.setChecked(not self.table.isColumnHidden(i))
+            col_actions.append((act, i))
+
+        global_pos = header.mapToGlobal(pos)
+        selected_action = menu.exec(global_pos)
+        if not selected_action:
+            return
+
+        if selected_action == action_l1:
+            self.sort_level1_col = logical_index
+            self.sort_level1_asc = False  # 默认降序
+        elif selected_action == action_l2:
+            self.sort_level2_col = logical_index
+            self.sort_level2_asc = False
+        elif selected_action == action_l3:
+            self.sort_level3_col = logical_index
+            self.sort_level3_asc = False
+        elif selected_action == action_clear_col:
+            if self.sort_level1_col == logical_index: self.sort_level1_col = None
+            if self.sort_level2_col == logical_index: self.sort_level2_col = None
+            if self.sort_level3_col == logical_index: self.sort_level3_col = None
+        elif selected_action == action_clear_all:
+            self.sort_level1_col = None
+            self.sort_level2_col = None
+            self.sort_level3_col = None
+            self._sort_col = 3
+            self._sort_order = Qt.SortOrder.DescendingOrder
+        elif selected_action == action_autofit:
+            self.auto_fit_columns()
+            return
+        elif selected_action == action_reset:
+            self.reset_default_columns()
+            return
+        elif selected_action == action_narrow:
+            self.toggle_narrow_mode()
+            return
+        else:
+            for act, col_idx in col_actions:
+                if selected_action == act:
+                    self.table.setColumnHidden(col_idx, not act.isChecked())
+                    self._save_current_header_state()
+                    break
+            return
+
+        self._update_header_labels()
+        self._save_sort_states()
+        self._apply_filter()
+
+    def _on_header_section_clicked(self, logical_index: int):
+        """表头左键点击（100% 对齐赛马多级排序交互规范）：点击已有排序列翻转升降序，点击新列自动依次设为 主 -> 从 -> 次 排序"""
+        if logical_index == getattr(self, "sort_level1_col", None):
+            self.sort_level1_asc = not self.sort_level1_asc
+        elif logical_index == getattr(self, "sort_level2_col", None):
+            self.sort_level2_asc = not self.sort_level2_asc
+        elif logical_index == getattr(self, "sort_level3_col", None):
+            self.sort_level3_asc = not self.sort_level3_asc
+        else:
+            # 点击新列：阶梯式设为 主 -> 从 -> 次
+            if getattr(self, "sort_level1_col", None) is None:
+                self.sort_level1_col = logical_index
+                self.sort_level1_asc = False  # 默认降序
+            elif getattr(self, "sort_level2_col", None) is None:
+                self.sort_level2_col = logical_index
+                self.sort_level2_asc = False  # 默认降序
+            elif getattr(self, "sort_level3_col", None) is None:
+                self.sort_level3_col = logical_index
+                self.sort_level3_asc = False  # 默认降序
+            else:
+                # 三级已满，替换第三级
+                self.sort_level3_col = logical_index
+                self.sort_level3_asc = False
+
+        self._sort_col = self.sort_level1_col
+        self._sort_order = Qt.SortOrder.AscendingOrder if getattr(self, "sort_level1_asc", False) else Qt.SortOrder.DescendingOrder
+
+        self._update_header_labels()
+        self._save_sort_states()
+        self._apply_filter()
+
+    def _update_header_labels(self):
+        """更新表头文字上的 🔴[主]、🟡[从]、🟢[次] 及方向修饰符 (对齐赛马面板)"""
+        if not hasattr(self, "_base_headers") or not self._base_headers:
+            headers, _ = get_limit_up_table_headers(getattr(self, "extra_cols", None))
+            self._base_headers = list(headers)
+
+        for col in range(self.table.columnCount()):
+            if col < len(self._base_headers):
+                base_name = self._base_headers[col]
+            else:
+                base_name = self.table.horizontalHeaderItem(col).text() if self.table.horizontalHeaderItem(col) else f"第{col+1}列"
+
+            label = base_name
+            if getattr(self, "sort_level1_col", None) == col:
+                arrow = "↑" if getattr(self, "sort_level1_asc", False) else "↓"
+                label = f"🔴[主] {arrow} {base_name}"
+            elif getattr(self, "sort_level2_col", None) == col:
+                arrow = "↑" if getattr(self, "sort_level2_asc", False) else "↓"
+                label = f"🟡[从] {arrow} {base_name}"
+            elif getattr(self, "sort_level3_col", None) == col:
+                arrow = "↑" if getattr(self, "sort_level3_asc", False) else "↓"
+                label = f"🟢[次] {arrow} {base_name}"
+            elif getattr(self, "_sort_col", None) == col and getattr(self, "sort_level1_col", None) is None:
+                arrow = "↑" if getattr(self, "_sort_order", Qt.SortOrder.DescendingOrder) == Qt.SortOrder.AscendingOrder else "↓"
+                label = f"{arrow} {base_name}"
+
+            item = self.table.horizontalHeaderItem(col)
+            if item:
+                item.setText(label)
+            else:
+                self.table.setHorizontalHeaderItem(col, QTableWidgetItem(label))
 
     def _get_btn_style(self, active: bool) -> str:
         if active:
@@ -723,6 +1096,15 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         self.combo_history_date.blockSignals(False)
 
     def _switch_mode(self, mode: str):
+        # 1. 先保存旧模式的排序和列宽状态至内存 Cache
+        old_mode = getattr(self, "current_mode", "TODAY")
+        if old_mode != mode:
+            try:
+                self._save_sort_states(old_mode)
+                self._save_current_header_state(old_mode)
+            except Exception:
+                pass
+
         self.current_mode = mode
         self.btn_mode_today.setChecked(mode == "TODAY")
         if hasattr(self, "btn_mode_bubble"):
@@ -746,6 +1128,13 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
             self.combo_history_date.blockSignals(True)
             self.combo_history_date.setCurrentIndex(0)
             self.combo_history_date.blockSignals(False)
+
+        # 2. 恢复新模式的排序状态与列宽
+        try:
+            self._restore_sort_states_for_mode(mode)
+            self._restore_header_state_for_mode(mode)
+        except Exception:
+            pass
 
         self._refresh_data_for_mode()
 
@@ -866,6 +1255,272 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         # 应用时间片与梯队过滤并填充表格
         self._apply_filter()
 
+    def _make_column_subkey(self, r: Dict[str, Any], col_idx: int, is_descending: bool) -> tuple:
+        """
+        为单列生成 (group_flag, sort_value) 排序子键。
+        - group_flag: 0 表示有效数据，1 表示无数据/--/0连板/0封单等无效数据
+        - 任何排序下 group_flag=1 的项绝对强制沉底在最下方，绝不污染正常排序！
+        - 分类列（梯队分类、形态与质量）生成带权重前缀的组合键，确保同类聚合且类型一致
+        """
+        # 0. 代码
+        if col_idx == 0:
+            c = str(r.get("code", "")).strip()
+            if c:
+                return (0, SortKeyStr(c, is_descending))
+            return (1, SortKeyStr("", is_descending))
+
+        # 1. 名称
+        elif col_idx == 1:
+            n = str(r.get("name", "")).strip()
+            if n and n not in ("--", "-", "None"):
+                return (0, SortKeyStr(n, is_descending))
+            return (1, SortKeyStr("", is_descending))
+
+        # 2. 现价
+        elif col_idx == 2:
+            p = _safe_float(r.get("price", 0.0))
+            if p > 0.0:
+                return (0, -p if is_descending else p)
+            return (1, 0.0)
+
+        # 3. 涨幅% (允许正负，有数值即为有效数据)
+        elif col_idx == 3:
+            pct = _safe_float(r.get("pct", 0.0))
+            return (0, -pct if is_descending else pct)
+
+        # 4. 连板数 (必须真实涨停且连板数 >= 1，0/无连板/未涨停/-- 绝对强制沉底)
+        elif col_idx == 4:
+            is_zt = r.get("is_limit_up")
+            cb = _safe_int(r.get("consecutive_boards", r.get("max_consecutive", 0)))
+            if is_zt is None:
+                is_zt = (cb >= 1)
+            if is_zt and cb >= 1:
+                return (0, -float(cb) if is_descending else float(cb))
+            return (1, 0.0)
+
+        # 5. 梯队分类
+        # 排序键 = (group, "权重前缀_标签原文") → 同类标签生成完全相同的 key，自然聚合在一起
+        elif col_idx == 5:
+            tag = str(r.get("tier_tag", "")).strip()
+            if tag and tag not in ("--", "-", "None"):
+                w = _get_tier_weight(tag)
+                if w == 0:
+                    w = 1
+                if is_descending:
+                    sort_str = f"{1000 - w:04d}_{tag}"
+                else:
+                    sort_str = f"{w:04d}_{tag}"
+                return (0, sort_str)
+            return (1, "")
+
+        # 6. 形态与质量 (按质量评分与形态聚合)
+        elif col_idx == 6:
+            score = _safe_float(r.get("momentum_score", r.get("seal_quality_score", 0.0)))
+            desc  = str(r.get("pattern_desc", "")).strip()
+            if score <= 0.0 and desc:
+                import re
+                m = re.search(r'\((\d+)\s*分?\)', desc)
+                if m:
+                    try:
+                        score = float(m.group(1))
+                    except Exception:
+                        pass
+            if score > 0.0 or (desc and desc not in ("--", "-", "None")):
+                s = int(round(score))
+                if is_descending:
+                    sort_str = f"{1000 - s:04d}_{desc}"
+                else:
+                    sort_str = f"{s:04d}_{desc}"
+                return (0, sort_str)
+            return (1, "")
+
+        # 7. 封单额(万) (必须 > 0 才是有效封单，0/-- 沉底)
+        elif col_idx == 7:
+            amt = _safe_float(r.get("seal_amount_wan", 0.0))
+            if amt > 0.0:
+                return (0, -amt if is_descending else amt)
+            return (1, 0.0)
+
+        # 8. 封流比% (必须 > 0 才是有效数据，0/-- 沉底)
+        elif col_idx == 8:
+            sc = _safe_float(r.get("seal_to_circ_ratio", 0.0))
+            if sc > 0.0:
+                return (0, -sc if is_descending else sc)
+            return (1, 0.0)
+
+        # 9. 封成比% (必须 > 0 才是有效数据，0/-- 沉底)
+        elif col_idx == 9:
+            sv = _safe_float(r.get("seal_to_vol_ratio", 0.0))
+            if sv > 0.0:
+                return (0, -sv if is_descending else sv)
+            return (1, 0.0)
+
+        # 10. 换手% (必须 0 < turnover <= 100)
+        elif col_idx == 10:
+            t = _safe_float(r.get("turnover_rate", r.get("turnover", 0.0)))
+            if 0.0 < t <= 100.0:
+                return (0, -t if is_descending else t)
+            return (1, 0.0)
+
+        # 11. 量比 (必须 > 0)
+        elif col_idx == 11:
+            vr = _safe_float(r.get("vol_ratio", 0.0))
+            if vr > 0.0:
+                return (0, -vr if is_descending else vr)
+            return (1, 0.0)
+
+        # 12. 成交额(亿) (必须 > 0)
+        elif col_idx == 12:
+            a_yi = _safe_float(r.get("amount_yi", 0.0))
+            if a_yi > 0.0:
+                return (0, -a_yi if is_descending else a_yi)
+            return (1, 0.0)
+
+        # 13. DFF
+        elif col_idx == 13:
+            v = r.get("dff", None)
+            if v is not None and str(v).strip() not in ("", "-", "--", "None", "nan"):
+                f_v = _safe_float(v, 0.0)
+                return (0, -f_v if is_descending else f_v)
+            return (1, 0.0)
+
+        # 14. Rank 列 (1 <= rank <= 500 为有效，越小越强)
+        elif col_idx == 14:
+            rk = _safe_int(r.get("rank", 999))
+            if 0 < rk < 999:
+                return (0, float(rk) if is_descending else -float(rk))
+            return (1, 999.0)
+
+        # 15. DFF2
+        elif col_idx == 15:
+            v = r.get("dff2", None)
+            if v is not None and str(v).strip() not in ("", "-", "--", "None", "nan"):
+                f_v = _safe_float(v, 0.0)
+                return (0, -f_v if is_descending else f_v)
+            return (1, 0.0)
+
+        # 16. DFF3
+        elif col_idx == 16:
+            v = r.get("dff3", None)
+            if v is not None and str(v).strip() not in ("", "-", "--", "None", "nan"):
+                f_v = _safe_float(v, 0.0)
+                return (0, -f_v if is_descending else f_v)
+            return (1, 0.0)
+
+        # 17. 大盘偏离 (rs_val / topR)
+        elif col_idx == 17:
+            v = r.get("rs_val", r.get("topR", None))
+            if v is not None and str(v).strip() not in ("", "-", "--", "None", "nan"):
+                f_v = _safe_float(v, 0.0)
+                return (0, -f_v if is_descending else f_v)
+            return (1, 0.0)
+
+        # 18. 市场共振
+        elif col_idx == 18:
+            res = str(r.get("resonance", "")).strip()
+            if res and res not in ("--", "-", "None"):
+                return (0, SortKeyStr(res, is_descending))
+            return (1, SortKeyStr("", is_descending))
+
+        # 19. ch_bc2
+        elif col_idx == 19:
+            v = r.get("ch_bc2", None)
+            if v is not None and str(v).strip() not in ("", "-", "--", "None", "nan"):
+                f_v = _safe_float(v, 0.0)
+                return (0, -f_v if is_descending else f_v)
+            return (1, 0.0)
+
+        # 扩展列或末尾所属板块
+        else:
+            extra_idx = col_idx - 20
+            if hasattr(self, "extra_cols") and 0 <= extra_idx < len(self.extra_cols):
+                ec_name = self.extra_cols[extra_idx]
+                extras = r.get("extra_cols", {})
+                raw_e = extras.get(ec_name, None)
+                if raw_e is not None and str(raw_e).strip() not in ("", "-", "--", "None", "nan"):
+                    f_e = _safe_float(raw_e, 0.0)
+                    return (0, -f_e if is_descending else f_e)
+                return (1, 0.0)
+            cat = str(r.get("category", "")).strip()
+            if cat and cat not in ("--", "-", "None"):
+                return (0, SortKeyStr(cat, is_descending))
+            return (1, SortKeyStr("", is_descending))
+
+    def _apply_multi_level_sort(self, records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        【主 -> 从 -> 次 严格复合元组级联排序引擎】
+        100% 对齐赛马面板的排序铁律：
+        1. 重点关注/自选标的 (⭐) 永远第一优先级绝对置顶；
+        2. 🔴[主]排序 绝对主导整个列表，从/次级排序仅在主排序列相等的分组内生效，绝不可能打乱主排序！
+        3. 🟡[从]排序 仅在主排序相等时生效；
+        4. 🟢[次]排序 仅在从排序相等时生效；
+        5. 任何无数据/占位符/--/0封单/0连板的标的，在任何排序下均强制沉底在列表最下方！
+        """
+        if not records:
+            return records
+
+        fav_stocks = self.fav_manager.get_favorite_stocks() if hasattr(self, 'fav_manager') and self.fav_manager else set()
+
+        # 收集生效的层级配置：[(col_idx, is_descending)]
+        levels = []
+        bound_cols = set()
+
+        # 1. 🔴[主]排序 Level 1
+        if self.sort_level1_col is not None:
+            is_desc = not self.sort_level1_asc
+            levels.append((self.sort_level1_col, is_desc))
+            bound_cols.add(self.sort_level1_col)
+
+        # 2. 🟡[从]排序 Level 2
+        if self.sort_level2_col is not None:
+            is_desc = not self.sort_level2_asc
+            levels.append((self.sort_level2_col, is_desc))
+            bound_cols.add(self.sort_level2_col)
+
+        # 3. 🟢[次]排序 Level 3
+        if self.sort_level3_col is not None:
+            is_desc = not self.sort_level3_asc
+            levels.append((self.sort_level3_col, is_desc))
+            bound_cols.add(self.sort_level3_col)
+
+        # 4. 临时单列后缀排序 (若未在 L1~L3 中绑定)
+        if self._sort_col is not None and self._sort_col not in bound_cols:
+            is_desc = (self._sort_order == Qt.SortOrder.DescendingOrder)
+            levels.append((self._sort_col, is_desc))
+
+        if not levels and not fav_stocks:
+            return records
+
+        def compound_sort_key(r: Dict[str, Any]) -> tuple:
+            code = str(r.get("code", "")).zfill(6)
+            fav_flag = 0 if code in fav_stocks else 1
+
+            subkeys = []
+            for col_idx, is_desc in levels:
+                subkeys.append(self._make_column_subkey(r, col_idx, is_desc))
+
+            # 默认级联兜底（保证相同主排序列内部按量化梯队与质量强度严格对齐，绝不混乱）
+            # 1. 梯队分类权重 (降序)
+            tier_subkey = self._make_column_subkey(r, 5, True)
+            # 2. 形态与质量评分 (降序)
+            quality_subkey = self._make_column_subkey(r, 6, True)
+            # 3. 连板数 (降序)
+            board_subkey = self._make_column_subkey(r, 4, True)
+            # 4. 涨幅% (降序)
+            pct_subkey = self._make_column_subkey(r, 3, True)
+            # 5. 封流比% (降序)
+            seal_circ_subkey = self._make_column_subkey(r, 8, True)
+            # 7. 自选股标记 (仅作为同数值平局决胜)
+            fav_subkey = (fav_flag,)
+            # 8. 代码 (升序)
+            code_subkey = (0, code)
+
+            return (*subkeys, tier_subkey, quality_subkey, board_subkey, pct_subkey, seal_circ_subkey, fav_subkey, code_subkey)
+
+        data_copy = list(records)
+        data_copy.sort(key=compound_sort_key)
+        return data_copy
+
     def _apply_filter(self):
         """【三维精准分拣】联合时间片生命周期、梯队分类与搜索文本进行实时原位过滤"""
         if not hasattr(self, "current_records") or not self.current_records:
@@ -958,8 +1613,10 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
 
             filtered.append(r)
 
-        # 针对具体时间片，按动能评分降序 > 连板高度 > 封流比 精准排序，确保 Top 3~5 核心标的排在最前
-        if "全天全时段" not in time_slice:
+        # 4. 多级排序引擎：主 -> 从 -> 次 级联复合排序（无数据标的永远强制沉底）
+        if getattr(self, "sort_level1_col", None) is not None or getattr(self, "sort_level2_col", None) is not None or getattr(self, "sort_level3_col", None) is not None or getattr(self, "_sort_col", None) is not None:
+            filtered = self._apply_multi_level_sort(filtered)
+        elif "全天全时段" not in time_slice:
             filtered.sort(key=lambda x: (
                 _safe_float(x.get("momentum_score", 0.0)),
                 _safe_int(x.get("consecutive_boards", 1)),
@@ -1048,8 +1705,8 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
                 }
             """)
 
-    def locate_stock_in_table(self, code: str, auto_popup: bool = False):
-        """【全端联动定位】在表格中高亮并居中滚动到指定股票代码"""
+    def locate_stock_in_table(self, code: str, auto_popup: bool = False, reason: str = ""):
+        """【全端联动定位】在表格中高亮并居中滚动到指定股票代码，同时在状态栏显示信号来源"""
         if not code or not hasattr(self, 'table'):
             return
         c = str(code).strip().zfill(6)
@@ -1058,16 +1715,32 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
             if code_item and code_item.text().strip().zfill(6) == c:
                 self.table.selectRow(row)
                 self.table.scrollToItem(code_item, QAbstractItemView.ScrollHint.PositionAtCenter)
-                self.lbl_status.setText(f"🎯 已自动定位信号标的: {c} ({time.strftime('%H:%M:%S')})")
                 name_item = self.table.item(row, 1)
                 n = name_item.text().strip() if name_item else c
+                if reason:
+                    self.lbl_status.setText(f"🎯 点击弹窗来源: 【{n}({c})】 {reason} ({time.strftime('%H:%M:%S')})")
+                else:
+                    self.lbl_status.setText(f"🎯 已自动定位信号标的: {n}({c}) ({time.strftime('%H:%M:%S')})")
                 self._broadcast_link_stock(c, n)
+                if auto_popup:
+                    if hasattr(self, 'isMinimized') and self.isMinimized():
+                        self.showNormal()
+                    if hasattr(self, 'isHidden') and self.isHidden():
+                        self.show()
+                    self.show()
+                    self.raise_()
+                    self.activateWindow()
                 break
 
     def _check_and_notify_slice_highlights(self, filtered_records: List[Dict[str, Any]], time_slice: str):
-        """【时间片重点标的与异动自动挖掘通知：每个时间切片精选 3-5 个核心标的】"""
+        """【时间片重点标的异动通知：每个时间切片仅在首次进入时精选 Top 1 核心龙头触发，60分钟内同一标的不重复】"""
         if not getattr(self, "is_voice_alert_enabled", True):
             return
+
+        last_slice = getattr(self, "_last_notified_time_slice", None)
+        if time_slice == last_slice:
+            return
+        self._last_notified_time_slice = time_slice
 
         try:
             from ats.alert_notifier import AlertNotifier
@@ -1078,13 +1751,20 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         if not filtered_records:
             return
 
-        # 筛选当前时间片内评分 >= 85.0 分、未炸板、按综合动能排序精选的前 3~5 个核心标的
+        if not hasattr(self, "_notify_slice_cd"):
+            self._notify_slice_cd: Dict[str, float] = {}
+        now_ts = time.time()
+        CD_SECS = 3600.0
+
         candidates = []
         for r in filtered_records:
             score = _safe_float(r.get("momentum_score", 0.0))
-            if score >= 85.0 and not r.get("is_broken", False):
-                candidates.append(r)
-            if len(candidates) >= 5: # 精选 3~5 个
+            if score >= 88.0 and not r.get("is_broken", False):
+                c = str(r.get("code", "")).zfill(6)
+                last_cd = self._notify_slice_cd.get(c, 0.0)
+                if (now_ts - last_cd) >= CD_SECS:
+                    candidates.append(r)
+            if len(candidates) >= 1:  # 精选最强 Top 1 核心龙头，杜绝队列排队积压
                 break
 
         for idx, top_cand in enumerate(candidates, 1):
@@ -1093,9 +1773,10 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
             score = _safe_float(top_cand.get("momentum_score", 88.0))
             tier = str(top_cand.get("tier_tag", ""))
             desc = str(top_cand.get("pattern_desc", ""))
-            advice = str(top_cand.get("entry_advice", ""))
-            
-            reason = f"【{time_slice}精选#{idx}】{tier} | {desc} | {advice}"
+            pct_txt = f"{_safe_float(top_cand.get('pct', 0.0)):+.1f}%"
+
+            reason = f"{tier} | {desc} | 涨幅{pct_txt}"
+            self._notify_slice_cd[c] = now_ts
             notifier.notify_special_signal(code=c, name=n, reason=reason, score=score, parent=self)
 
     def _update_kpi_display(self, s: Dict[str, Any]):
@@ -1451,7 +2132,7 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
             self.table.horizontalScrollBar().setValue(saved_h)
 
         finally:
-            self.table.setSortingEnabled(True)
+            self.table.setSortingEnabled(False)  # 永远禁用 Qt 内置排序，由多级排序引擎完全接管
             self._is_populating = False
             self.table.blockSignals(False)
             self.table.setUpdatesEnabled(True)
@@ -1763,47 +2444,7 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         elif action == act_export:
             self._export_to_csv()
 
-    def _show_header_context_menu(self, pos):
-        """表头右键菜单（支持自适应列宽、极窄模式与各列自定义勾选显隐）"""
-        menu = QMenu(self)
-        menu.setStyleSheet("""
-            QMenu { background-color: #1e1e24; color: #e2e2e5; border: 1px solid #33333f; padding: 4px; }
-            QMenu::item:selected { background-color: #2a3b4c; color: #ffffff; }
-        """)
 
-        act_autofit = menu.addAction("📐 一键自适应列宽")
-        act_reset_cols = menu.addAction("🔄 恢复默认列宽")
-        act_narrow = menu.addAction("📱 极窄模式 (Narrow Mode)")
-        act_narrow.setCheckable(True)
-        act_narrow.setChecked(self.is_narrow_mode)
-        menu.addSeparator()
-
-        # 列显隐子菜单
-        col_menu = menu.addMenu("👁️ 显示/隐藏各列...")
-        col_menu.setStyleSheet(menu.styleSheet())
-        col_actions = []
-        for i in range(self.table.columnCount()):
-            hdr_text = self.table.horizontalHeaderItem(i).text() if self.table.horizontalHeaderItem(i) else f"第{i+1}列"
-            act = col_menu.addAction(hdr_text)
-            act.setCheckable(True)
-            act.setChecked(not self.table.isColumnHidden(i))
-            col_actions.append((act, i))
-
-        action = menu.exec(self.table.horizontalHeader().viewport().mapToGlobal(pos))
-        if not action:
-            return
-
-        if action == act_autofit:
-            self.auto_fit_columns()
-        elif action == act_reset_cols:
-            self.reset_default_columns()
-        elif action == act_narrow:
-            self.toggle_narrow_mode()
-        else:
-            for act, col_idx in col_actions:
-                if action == act:
-                    self.table.setColumnHidden(col_idx, not act.isChecked())
-                    break
 
     def _export_to_csv(self):
         if not self.current_records:
@@ -2063,11 +2704,6 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
     def closeEvent(self, event):
         self.hover_timer.stop()
         self.snap_timer.stop()
-        if hasattr(self, '_header_save_timer'):
-            self._header_save_timer.stop()
-        # 显式持久化保存最新手动/自动调整的表格列宽与 header 状态
-        self._save_current_column_widths()
-        self._save_current_header_state()
 
         # 关闭前确保当日最新涨停分析数据即时原子落盘并完成 Gzip 压缩打包（仅限实际交易日）
         is_trade_day = cct.get_trade_date_status() if hasattr(cct, "get_trade_date_status") else True
@@ -2087,18 +2723,12 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
             if not main_app.isVisible() or getattr(main_app, '_is_closing', False) or getattr(main_app, '_is_exiting', False):
                 is_app_exiting = True
                 
-        if is_app_exiting or getattr(self, 'is_hidden_state', False):
-            self._save_window_states(is_open=True)
-        else:
-            self._save_window_states(is_open=False)
+        is_open = True if (is_app_exiting or getattr(self, 'is_hidden_state', False)) else False
+        # 统一一次性原子落盘所有模式的列宽、多级排序与窗口几何状态
+        self._flush_all_caches_to_disk(is_open=is_open)
         event.accept()
 
     def hideEvent(self, event):
-        if hasattr(self, '_header_save_timer'):
-            self._header_save_timer.stop()
-        self._save_current_column_widths()
-        self._save_current_header_state()
-
         is_trade_day = cct.get_trade_date_status() if hasattr(cct, "get_trade_date_status") else True
         if is_trade_day and getattr(self, "current_mode", "") == "TODAY" and hasattr(self, "current_records") and self.current_records:
             today_str = time.strftime("%Y-%m-%d")
@@ -2116,10 +2746,8 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
             if not main_app.isVisible() or getattr(main_app, '_is_closing', False) or getattr(main_app, '_is_exiting', False):
                 is_app_exiting = True
                 
-        if is_app_exiting or getattr(self, 'is_hidden_state', False):
-            self._save_window_states(is_open=True)
-        else:
-            self._save_window_states(is_open=False)
+        is_open = True if (is_app_exiting or getattr(self, 'is_hidden_state', False)) else False
+        self._flush_all_caches_to_disk(is_open=is_open)
         super().hideEvent(event)
 
     def showEvent(self, event):
