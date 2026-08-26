@@ -117,7 +117,7 @@ class SectorHeatmapWidget(QWidget):
     def load_live_sectors(self, force=False):
         import time
         now = time.time()
-        if not force and hasattr(self, '_last_load_time') and now - self._last_load_time < 10.0:
+        if not force and hasattr(self, '_last_load_time') and now - self._last_load_time < 3.0:
             return
         self._last_load_time = now
         
@@ -126,7 +126,90 @@ class SectorHeatmapWidget(QWidget):
         import re
         import zlib
         
-        # 1. 优先尝试从 ramdisk 获取最实时的 v_reversal_pool.json
+        base = get_app_root()
+
+        # ── 1. 【权威数据源 (SSOT)】优先从 RAMDisk 或快照读取 bidding_session_data.json.gz ──
+        path = None
+        try:
+            ram_path = cct.get_ramdisk_path("bidding_session_data.json.gz")
+            if ram_path and os.path.exists(ram_path):
+                path = ram_path
+        except Exception:
+            pass
+            
+        if not path:
+            try:
+                fallback_path = os.path.abspath(os.path.join(base, "snapshots", "bidding_session_data.json.gz"))
+                if os.path.exists(fallback_path):
+                    path = fallback_path
+                else:
+                    # 尝试寻找最新日期的 bidding_YYYYMMDD.json.gz
+                    snap_pattern = os.path.join(base, "snapshots", "bidding_*.json.gz")
+                    snap_files = [f for f in glob.glob(snap_pattern) if re.search(r'bidding_\d{8}\.json\.gz$', f)]
+                    if snap_files:
+                        path = sorted(snap_files)[-1]
+            except Exception:
+                pass
+                
+        if path and os.path.exists(path):
+            session_mtime = os.path.getmtime(path)
+            if (getattr(self, '_last_session_path', None) != path or 
+                getattr(self, '_last_session_mtime', None) != session_mtime or 
+                not hasattr(self, '_cached_session_sectors') or force):
+                try:
+                    with open(path, 'rb') as f:
+                        raw_data = f.read()
+                    if raw_data:
+                        json_str = zlib.decompress(raw_data).decode('utf-8')
+                        data = json.loads(json_str)
+                        sector_data = data.get('sector_data', {})
+                        self._cached_session_sectors = []
+                        self.sector_to_codes = {}
+                        if sector_data:
+                            for sec_name, info in sector_data.items():
+                                clean_sec = str(sec_name).strip()
+                                score = float(info.get('score', 0.0))
+                                avg_pct = info.get('avg_pct_diff')
+                                if avg_pct is None or (avg_pct == 0.0 and info.get('avg_pct') is not None):
+                                    avg_pct = info.get('avg_pct', 0.0)
+                                avg_pct = float(avg_pct)
+                                change_pct_str = f"{avg_pct:+.2f}%"
+
+                                leader_code = str(info.get('leader', '')).strip().zfill(6) if info.get('leader') else ''
+                                leader_name = str(info.get('leader_name', '')).strip()
+
+                                # 汇聚该板块的所有全量成分股（龙头 + 竞价赛马成员 + 跟随者）
+                                codes_set = set()
+                                if leader_code and leader_code != '000000':
+                                    codes_set.add(leader_code)
+
+                                for rc in info.get('race_candidates', []):
+                                    c = str(rc.get('code', '')).strip().zfill(6)
+                                    if c and c != '000000':
+                                        codes_set.add(c)
+
+                                for fol in info.get('followers', []):
+                                    c = str(fol.get('code', '')).strip().zfill(6)
+                                    if c and c != '000000':
+                                        codes_set.add(c)
+
+                                count = len(codes_set) if codes_set else int(info.get('count', 0) or 0)
+                                self.sector_to_codes[clean_sec] = list(codes_set)
+                                self._cached_session_sectors.append(
+                                    (clean_sec, round(score, 1), change_pct_str, count, leader_code, leader_name)
+                                )
+
+                        self._last_session_path = path
+                        self._last_session_mtime = session_mtime
+                except Exception as e:
+                    print(f"[SectorHeatmapWidget] Error loading bidding_session_data: {e}")
+            
+            if hasattr(self, '_cached_session_sectors') and self._cached_session_sectors:
+                self.sectors = list(self._cached_session_sectors)
+                self.sort_sectors(self.sort_combo.currentIndex())
+                return
+
+        # ── 2. 【备用兜底通道】仅在无 bidding_session_data 时尝试从 v_reversal_pool 读取 ──
         ram_path = None
         try:
             ram_path = cct.get_ramdisk_path("v_reversal_pool.json")
@@ -137,8 +220,6 @@ class SectorHeatmapWidget(QWidget):
         if ram_path and os.path.exists(ram_path):
             latest_reversal_path = ram_path
         else:
-            # 2. 如果 ramdisk 不存在，尝试获取 logs/ 下最新的备份 json/gz 文件
-            base = get_app_root()
             logs_dir = os.path.join(base, "logs")
             normal_path = os.path.join(logs_dir, "v_reversal_pool.json")
             if os.path.exists(normal_path):
@@ -323,64 +404,7 @@ class SectorHeatmapWidget(QWidget):
                 self.sort_sectors(self.sort_combo.currentIndex())
                 return
 
-        # 2. Fallback to bidding_session_data.json.gz (legacy logic with modification time cache)
-        path = None
-        try:
-            ram_path = cct.get_ramdisk_path("bidding_session_data.json.gz")
-            if ram_path and os.path.exists(ram_path):
-                path = ram_path
-        except Exception:
-            pass
-            
-        if not path:
-            try:
-                fallback_path = os.path.abspath(os.path.join(base, "snapshots", "bidding_session_data.json.gz"))
-                if os.path.exists(fallback_path):
-                    path = fallback_path
-            except Exception:
-                pass
-                
-        if path and os.path.exists(path):
-            session_mtime = os.path.getmtime(path)
-            if (getattr(self, '_last_session_path', None) != path or 
-                getattr(self, '_last_session_mtime', None) != session_mtime or 
-                not hasattr(self, '_cached_session_sectors')):
-                try:
-                    with open(path, 'rb') as f:
-                        raw_data = f.read()
-                    if raw_data:
-                        json_str = zlib.decompress(raw_data).decode('utf-8')
-                        data = json.loads(json_str)
-                        sector_data = data.get('sector_data', {})
-                        self._cached_session_sectors = []
-                        self.sector_to_codes = {}
-                        if sector_data:
-                            for sec_name, info in sector_data.items():
-                                self.sector_to_codes[sec_name] = []
-                                score = info.get('score', 0.0)
-                                avg_pct = info.get('avg_pct') or info.get('avg_pct_diff') or 0.0
-                                count = info.get('count') or len(info.get('followers', []))
-                                change_pct_str = f"{avg_pct:+.2f}%"
-                                leader_code = info.get('leader', '')
-                                leader_name = info.get('leader_name', '')
-                                self._cached_session_sectors.append((sec_name, round(score, 1), change_pct_str, count, leader_code, leader_name))
-                                if leader_code:
-                                    self.sector_to_codes[sec_name].append(str(leader_code).strip())
-                                for fol in info.get('followers', []):
-                                    f_code = fol.get('code')
-                                    if f_code:
-                                        self.sector_to_codes[sec_name].append(str(f_code).strip())
-                        self._last_session_path = path
-                        self._last_session_mtime = session_mtime
-                except Exception as e:
-                    print(f"[SectorHeatmapWidget] Error loading legacy bidding_session_data: {e}")
-            
-            if hasattr(self, '_cached_session_sectors') and self._cached_session_sectors:
-                self.sectors = self._cached_session_sectors
-                self.sort_sectors(self.sort_combo.currentIndex())
-                return
-
-        # 3. Fallback to mock sectors if all else fails
+        # ── 3. 终极兜底 ──
         if not hasattr(self, 'sector_to_codes'):
             self.sector_to_codes = {}
         if not hasattr(self, 'sectors') or not self.sectors:
@@ -427,25 +451,24 @@ class SectorHeatmapWidget(QWidget):
         cols = max(2, min(5, (w - 20) // (card_target_w + 6)))
         self._current_cols = cols
 
+        import re
         for idx, item in enumerate(self.sectors):
             name, score, pct, count = item[:4]
             row = idx // cols
             col = idx % cols
 
+            clean_name = re.sub(r'^[^\w\u4e00-\u9fa5]+', '', str(name)).strip()
+            # 仅当用户明确将该板块加入重点关注板块时才高亮与置顶
+            is_highlight = (name in fav_sectors) or (clean_name in fav_sectors)
+
             # Card Widget - 允许自适应拉伸与按网格折叠
             card = QPushButton()
             card.setMinimumSize(65, 72)
             card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-            
-            # Check if this sector or any stock inside is favorite
-            is_fav_sec = name in fav_sectors
-            sec_codes = getattr(self, 'sector_to_codes', {}).get(name, [])
-            has_fav_stock = any(c in fav_stocks for c in sec_codes)
-            is_highlight = is_fav_sec or has_fav_stock
 
             if is_highlight:
-                bg_style = "background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #1A2A1A, stop:1 #111E11);"
-                border_style = "border: 1.5px solid rgba(255, 215, 0, 0.8);"
+                bg_style = "background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #2a2205, stop:1 #1a1600);"
+                border_style = "border: 1.5px solid rgba(255, 215, 0, 0.9);"
                 display_name = f"⭐ {name}"
             else:
                 bg, border = self.get_color_for_score(pct)
@@ -509,19 +532,17 @@ class SectorHeatmapWidget(QWidget):
             except:
                 return 0.0
 
+        import re
         from global_favorites import GlobalFavoriteManager
         fav_mgr = GlobalFavoriteManager()
-        fav_stocks = fav_mgr.get_favorite_stocks()
         fav_sectors = fav_mgr.get_favorite_sectors()
         
         def get_sort_key(x):
             sec_name = x[0]
-            is_fav_sec = sec_name in fav_sectors
-            sec_codes = getattr(self, 'sector_to_codes', {}).get(sec_name, [])
-            has_fav_stock = any(c in fav_stocks for c in sec_codes)
-            is_highlight = is_fav_sec or has_fav_stock
+            clean_sec = re.sub(r'^[^\w\u4e00-\u9fa5]+', '', str(sec_name)).strip()
+            # 仅当板块本身在重点关注板块列表时置顶 (prim = 0)
+            is_highlight = (sec_name in fav_sectors) or (clean_sec in fav_sectors)
             
-            # Primary key: 0 if highlighted, 1 if not
             prim = 0 if is_highlight else 1
             
             if index == 0:
@@ -537,12 +558,15 @@ class SectorHeatmapWidget(QWidget):
         self.render_grid()
 
     def _show_sector_context_menu(self, pos, sector_name):
-        from PyQt6.QtWidgets import QMenu
+        from PyQt6.QtWidgets import QMenu, QApplication
         from PyQt6.QtGui import QAction
         from global_favorites import GlobalFavoriteManager
+        import re
         
+        clean_sec = re.sub(r'^[^\w\u4e00-\u9fa5]+', '', str(sector_name)).strip()
         fav_mgr = GlobalFavoriteManager()
-        is_fav = sector_name in fav_mgr.get_favorite_sectors()
+        fav_sectors = fav_mgr.get_favorite_sectors()
+        is_fav = (sector_name in fav_sectors) or (clean_sec in fav_sectors)
         
         menu = QMenu(self)
         menu.setStyleSheet("""
@@ -560,15 +584,59 @@ class SectorHeatmapWidget(QWidget):
                 background-color: #2c2c35;
                 color: #ffffff;
             }
+            QMenu::separator {
+                height: 1px;
+                background-color: #2e2e36;
+                margin: 4px 8px;
+            }
         """)
         
         if is_fav:
-            fav_action = QAction(f"❌ 取消重点关注板块 {sector_name}", self)
+            fav_action = QAction(f"❌ 取消重点关注板块 {clean_sec}", self)
+            fav_action.triggered.connect(lambda: self._toggle_favorite_sector(clean_sec))
+            menu.addAction(fav_action)
         else:
-            fav_action = QAction(f"⭐ 设为重点关注板块 {sector_name}", self)
-        
-        fav_action.triggered.connect(lambda: self._toggle_favorite_sector(sector_name))
-        menu.addAction(fav_action)
+            fav_action = QAction(f"⭐ 设为重点关注板块 {clean_sec}", self)
+            fav_action.triggered.connect(lambda: self._toggle_favorite_sector(clean_sec))
+            menu.addAction(fav_action)
+            
+        menu.addSeparator()
+
+        # 查看成分股明细
+        detail_action = QAction(f"🔍 打开【{clean_sec}】成分股明细", self)
+        def _open_detail():
+            codes = (
+                getattr(self, 'sector_to_codes', {}).get(sector_name, []) or 
+                getattr(self, 'sector_to_codes', {}).get(clean_sec, [])
+            )
+            self.sector_selected.emit(clean_sec)
+            self.sector_selected_with_codes.emit(clean_sec, list(codes))
+            main_win = self.window()
+            p = self.parent()
+            while p:
+                if hasattr(p, "on_sector_clicked"):
+                    main_win = p
+                    break
+                p = p.parent()
+            if hasattr(main_win, "on_sector_clicked"):
+                main_win.on_sector_clicked(clean_sec, member_codes=list(codes))
+        detail_action.triggered.connect(_open_detail)
+        menu.addAction(detail_action)
+
+        # 复制板块名称
+        copy_action = QAction("📋 复制板块名称", self)
+        copy_action.triggered.connect(lambda: QApplication.clipboard().setText(clean_sec))
+        menu.addAction(copy_action)
+
+        if fav_sectors:
+            menu.addSeparator()
+            clear_action = QAction(f"🗑️ 清空所有重点关注板块 ({len(fav_sectors)}个)", self)
+            def _clear_all_favs():
+                for s in list(fav_sectors):
+                    fav_mgr.remove_favorite_sector(s)
+                self.sort_sectors(self.sort_combo.currentIndex())
+            clear_action.triggered.connect(_clear_all_favs)
+            menu.addAction(clear_action)
         
         sender_card = self.sender()
         if sender_card:
@@ -580,8 +648,19 @@ class SectorHeatmapWidget(QWidget):
 
     def _toggle_favorite_sector(self, sector_name):
         try:
+            import re
+            clean_sec = re.sub(r'^[^\w\u4e00-\u9fa5]+', '', str(sector_name)).strip()
             from global_favorites import GlobalFavoriteManager
             fav_mgr = GlobalFavoriteManager()
-            fav_mgr.toggle_favorite_sector(sector_name)
+            fav_sectors = fav_mgr.get_favorite_sectors()
+            
+            if clean_sec in fav_sectors or sector_name in fav_sectors:
+                fav_mgr.remove_favorite_sector(clean_sec)
+                fav_mgr.remove_favorite_sector(sector_name)
+            else:
+                fav_mgr.add_favorite_sector(clean_sec)
+
+            # 立即原地触发重新排序与网格刷新
+            self.sort_sectors(self.sort_combo.currentIndex())
         except Exception as e:
             print(f"[SectorHeatmap] Toggle favorite sector error: {e}")
