@@ -24,7 +24,7 @@ os.environ["QT_AUTO_SCREEN_SCALE_FACTOR"] = "1"
 os.environ["QT_ENABLE_HIGHDPI_SCALING"] = "1"
 os.environ["QT_SCALE_FACTOR_ROUNDING_POLICY"] = "PassThrough"
 
-from PyQt6.QtWidgets import QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QSplitter, QTabWidget, QLabel, QToolBar, QPushButton, QStatusBar, QDialog, QTableWidget, QTableWidgetItem, QHeaderView, QGroupBox, QGridLayout, QCheckBox, QComboBox, QAbstractItemView
+from PyQt6.QtWidgets import QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QSplitter, QTabWidget, QLabel, QToolBar, QPushButton, QStatusBar, QDialog, QTableWidget, QTableWidgetItem, QHeaderView, QGroupBox, QGridLayout, QCheckBox, QComboBox, QAbstractItemView, QSizePolicy
 from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal, QPropertyAnimation, QEasingCurve, QParallelAnimationGroup, QRect, QSettings
 from PyQt6.QtGui import QAction, QIcon, QColor, QBrush
 
@@ -1999,152 +1999,160 @@ class ATSMainWindow(QMainWindow):
         toolbar = QToolBar("Main Controls")
         self.addToolBar(toolbar)
         toolbar.setMovable(False)
+        toolbar.setStyleSheet("""
+            QToolBar { spacing: 2px; padding: 1px 2px; }
+            QToolBar::separator { width: 1px; background-color: #383842; margin: 2px 2px; }
+        """)
         
-        self.btn_toggle_rotation = QPushButton("▶ 24x7")
+        self.btn_toggle_rotation = QPushButton("▶24x7")
         self.btn_toggle_rotation.setToolTip("启动/停止 24x7 自动过滤、信号评估与大级别历史回测轮转引擎")
-        self.btn_toggle_rotation.setStyleSheet("QPushButton { background-color: #1a3a1a; color: #00ff88; font-weight: bold; border: 1px solid #00ff88; border-radius: 3px; padding: 2px 8px; font-size: 9pt; } QPushButton:hover { background-color: #00ff88; color: #000; }")
+        self.btn_toggle_rotation.setStyleSheet("QPushButton { background-color: #1a3a1a; color: #00ff88; font-weight: bold; border: 1px solid #00ff88; border-radius: 3px; padding: 1px 5px; font-size: 8.5pt; } QPushButton:hover { background-color: #00ff88; color: #000; }")
         self.btn_toggle_rotation.clicked.connect(self.toggle_rotation)
         toolbar.addWidget(self.btn_toggle_rotation)
         
         self.btn_multi_period = QPushButton("多周期🎯")
-        self.btn_multi_period.setStyleSheet("QPushButton { background-color: #2b1f3c; color: #e0b0ff; font-weight: bold; border: 1px solid #c8a2c8; border-radius: 3px; padding: 2px 6px; } QPushButton:hover { background-color: #3d2f54; border-color: #e0b0ff; }")
+        self.btn_multi_period.setStyleSheet("QPushButton { background-color: #2b1f3c; color: #e0b0ff; font-weight: bold; border: 1px solid #c8a2c8; border-radius: 3px; padding: 1px 4px; font-size: 8.5pt; } QPushButton:hover { background-color: #3d2f54; border-color: #e0b0ff; }")
         self.btn_multi_period.clicked.connect(self.open_multi_period_tester)
         toolbar.addWidget(self.btn_multi_period)
 
-        self.btn_global_market = QPushButton("外盘看板🌐")
-        self.btn_global_market.setStyleSheet("QPushButton { background-color: #1e3a5f; color: #00e5ff; font-weight: bold; border: 1px solid #00e5ff; border-radius: 3px; padding: 2px 6px; } QPushButton:hover { background-color: #00e5ff; color: #000; }")
+        self.btn_global_market = QPushButton("外盘🌐")
+        self.btn_global_market.setStyleSheet("QPushButton { background-color: #1e3a5f; color: #00e5ff; font-weight: bold; border: 1px solid #00e5ff; border-radius: 3px; padding: 1px 4px; font-size: 8.5pt; } QPushButton:hover { background-color: #00e5ff; color: #000; }")
         self.btn_global_market.clicked.connect(self.open_global_market_dialog)
         toolbar.addWidget(self.btn_global_market)
 
-        self.btn_intraday_strategy = QPushButton("阶梯盯盘⚡")
+        self.btn_intraday_strategy = QPushButton("阶梯⚡")
         self.btn_intraday_strategy.setToolTip("打开分时阶梯策略独立盯盘窗口、7节点动态评分与实盘策略系统 (完全独立非模态运行)")
-        self.btn_intraday_strategy.setStyleSheet("QPushButton { background-color: #381e1e; color: #ffaa44; font-weight: bold; border: 1px solid #ffaa44; border-radius: 3px; padding: 2px 8px; font-size: 9pt; } QPushButton:hover { background-color: #ffaa44; color: #000; }")
+        self.btn_intraday_strategy.setStyleSheet("QPushButton { background-color: #381e1e; color: #ffaa44; font-weight: bold; border: 1px solid #ffaa44; border-radius: 3px; padding: 1px 4px; font-size: 8.5pt; } QPushButton:hover { background-color: #ffaa44; color: #000; }")
         self.btn_intraday_strategy.clicked.connect(self.open_intraday_strategy_dialog)
         toolbar.addWidget(self.btn_intraday_strategy)
 
-        self.btn_limit_up_ladder = QPushButton("涨停天梯🔥")
+        self.btn_limit_up_ladder = QPushButton("天梯🔥")
         self.btn_limit_up_ladder.setToolTip("打开每日涨停个股分析、封单比/量能比统计、多日强势股聚合与天梯看板 (完全独立非模态运行)")
-        self.btn_limit_up_ladder.setStyleSheet("QPushButton { background-color: #3d1414; color: #ff5555; font-weight: bold; border: 1px solid #ff4444; border-radius: 3px; padding: 2px 8px; font-size: 9pt; } QPushButton:hover { background-color: #ff4444; color: #000; }")
+        self.btn_limit_up_ladder.setStyleSheet("QPushButton { background-color: #3d1414; color: #ff5555; font-weight: bold; border: 1px solid #ff4444; border-radius: 3px; padding: 1px 4px; font-size: 8.5pt; } QPushButton:hover { background-color: #ff4444; color: #000; }")
         self.btn_limit_up_ladder.clicked.connect(self.open_daily_limit_up_analyzer)
         toolbar.addWidget(self.btn_limit_up_ladder)
         
         toolbar.addSeparator()
 
         # 🔄 后台自动刷新开关 (默认 False，被动等待 TK 自动推送 IPC)
-        self.chk_auto_refresh = QCheckBox("自动刷新🔄")
+        self.chk_auto_refresh = QCheckBox("自动🔄")
         self.chk_auto_refresh.setToolTip("开启/关闭后台自动刷新轮询 (默认关闭，被动等待主进程 TK 自动推送 IPC 数据；勾选后开启主动轮询)")
         self.chk_auto_refresh.setChecked(self.is_auto_refresh_enabled)
-        self.chk_auto_refresh.setStyleSheet("QCheckBox { color: #ffaa44; font-weight: bold; font-size: 9pt; padding: 1px 4px; } QCheckBox::indicator { width: 13px; height: 13px; }")
+        self.chk_auto_refresh.setStyleSheet("QCheckBox { color: #ffaa44; font-weight: bold; font-size: 8.5pt; padding: 0px 2px; } QCheckBox::indicator { width: 11px; height: 11px; }")
         self.chk_auto_refresh.toggled.connect(self._on_auto_refresh_toggled)
         toolbar.addWidget(self.chk_auto_refresh)
         
         toolbar.addSeparator()
         
-        self.lbl_ipc_status = QLabel("  IPC 通道: 🔌 已连接  |  ")
-        self.lbl_ipc_status.setStyleSheet("color: #00ff88; font-weight: bold;")
+        self.lbl_ipc_status = QLabel("🔌IPC")
+        self.lbl_ipc_status.setToolTip("IPC 通道: 🔌 已连接 (实时行情数据流已就绪)")
+        self.lbl_ipc_status.setStyleSheet("color: #00ff88; font-weight: bold; font-size: 8.5pt; padding: 0 1px;")
         toolbar.addWidget(self.lbl_ipc_status)
         
-        self.lbl_db_status = QLabel("数据库: 🗄️ 已加载  |  ")
-        self.lbl_db_status.setStyleSheet("color: #aad4ff;")
+        self.lbl_db_status = QLabel("🗄️DB")
+        self.lbl_db_status.setToolTip("数据库: 🗄️ 已加载 (本地历史数据池)")
+        self.lbl_db_status.setStyleSheet("color: #aad4ff; font-weight: bold; font-size: 8.5pt; padding: 0 1px;")
         toolbar.addWidget(self.lbl_db_status)
 
-        self.lbl_rotator_status = QLabel("旋转引擎: ⏸️ 已暂停")
-        self.lbl_rotator_status.setStyleSheet("color: #ff9900;")
+        self.lbl_rotator_status = QLabel("⏸️")
+        self.lbl_rotator_status.setToolTip("旋转引擎: ⏸️ 已暂停 (点击 '▶ 24x7' 启动轮转)")
+        self.lbl_rotator_status.setStyleSheet("color: #ff9900; font-weight: bold; font-size: 8.5pt; padding: 0 1px;")
         toolbar.addWidget(self.lbl_rotator_status)
         
         toolbar.addSeparator()
         
         btn_font_dec = QPushButton("A-")
         btn_font_dec.setToolTip("减小字号 (Font Size Down)")
-        btn_font_dec.setStyleSheet("min-width: 24px; max-width: 28px; background-color: #2e2e36; color: #e2e2e5; font-weight: bold; border: 1px solid #44444f;")
+        btn_font_dec.setStyleSheet("min-width: 18px; max-width: 22px; background-color: #2e2e36; color: #e2e2e5; font-weight: bold; border: 1px solid #44444f; font-size: 8pt; padding: 0px;")
         btn_font_dec.clicked.connect(self.decrease_font_size)
         toolbar.addWidget(btn_font_dec)
         
-        self.lbl_font_size = QLabel(f" {self.current_font_size} pt ")
-        self.lbl_font_size.setStyleSheet("color: #aad4ff; font-weight: bold;")
+        self.lbl_font_size = QLabel(f"{self.current_font_size}pt")
+        self.lbl_font_size.setStyleSheet("color: #aad4ff; font-weight: bold; font-size: 8.5pt; padding: 0 1px;")
         toolbar.addWidget(self.lbl_font_size)
         
         btn_font_inc = QPushButton("A+")
         btn_font_inc.setToolTip("增大字号 (Font Size Up)")
-        btn_font_inc.setStyleSheet("min-width: 24px; max-width: 28px; background-color: #2e2e36; color: #e2e2e5; font-weight: bold; border: 1px solid #44444f;")
+        btn_font_inc.setStyleSheet("min-width: 18px; max-width: 22px; background-color: #2e2e36; color: #e2e2e5; font-weight: bold; border: 1px solid #44444f; font-size: 8pt; padding: 0px;")
         btn_font_inc.clicked.connect(self.increase_font_size)
         toolbar.addWidget(btn_font_inc)
 
         toolbar.addSeparator()
         
-        lbl_link = QLabel(" 联动:")
-        lbl_link.setStyleSheet("color: #aad4ff; font-weight: bold;")
+        lbl_link = QLabel("🔗")
+        lbl_link.setToolTip("多端行情联动控制开关 (勾选后主窗切换联动对应行情软件)")
+        lbl_link.setStyleSheet("color: #aad4ff; font-weight: bold; font-size: 8.5pt;")
         toolbar.addWidget(lbl_link)
         
         self.cb_tdx = QCheckBox("TDX")
         self.cb_tdx.setChecked(True)
-        self.cb_tdx.setStyleSheet("QCheckBox { color: #00ff88; font-weight: bold; margin-left: 4px; }")
+        self.cb_tdx.setStyleSheet("QCheckBox { color: #00ff88; font-weight: bold; font-size: 8.5pt; margin-left: 1px; margin-right: 1px; } QCheckBox::indicator { width: 11px; height: 11px; }")
         self.cb_tdx.toggled.connect(lambda state: self._save_layout_state())
         toolbar.addWidget(self.cb_tdx)
         
         self.cb_ths = QCheckBox("THS")
         self.cb_ths.setChecked(True)
-        self.cb_ths.setStyleSheet("QCheckBox { color: #00ff88; font-weight: bold; margin-left: 4px; }")
+        self.cb_ths.setStyleSheet("QCheckBox { color: #00ff88; font-weight: bold; font-size: 8.5pt; margin-left: 1px; margin-right: 1px; } QCheckBox::indicator { width: 11px; height: 11px; }")
         self.cb_ths.toggled.connect(lambda state: self._save_layout_state())
         toolbar.addWidget(self.cb_ths)
         
         self.cb_vis = QCheckBox("VIS")
         self.cb_vis.setChecked(True)
-        self.cb_vis.setStyleSheet("QCheckBox { color: #00ff88; font-weight: bold; margin-left: 4px; }")
+        self.cb_vis.setStyleSheet("QCheckBox { color: #00ff88; font-weight: bold; font-size: 8.5pt; margin-left: 1px; margin-right: 1px; } QCheckBox::indicator { width: 11px; height: 11px; }")
         self.cb_vis.toggled.connect(lambda state: self._save_layout_state())
         toolbar.addWidget(self.cb_vis)
         
         self.cb_ladder = QCheckBox("天梯")
         self.cb_ladder.setToolTip("开启【连板天梯 / 涨停采集工具】上下键/选行与通达信无缝联动 (0% CPU 后台守护)")
         self.cb_ladder.setChecked(True)
-        self.cb_ladder.setStyleSheet("QCheckBox { color: #ffaa44; font-weight: bold; margin-left: 4px; }")
+        self.cb_ladder.setStyleSheet("QCheckBox { color: #ffaa44; font-weight: bold; font-size: 8.5pt; margin-left: 1px; margin-right: 1px; } QCheckBox::indicator { width: 11px; height: 11px; }")
         self.cb_ladder.toggled.connect(self._on_ladder_link_toggled)
         toolbar.addWidget(self.cb_ladder)
         
         toolbar.addSeparator()
         
-        lbl_his_grp = QLabel("")
-        lbl_his_grp.setStyleSheet("color: #aad4ff; font-weight: bold;")
-        toolbar.addWidget(lbl_his_grp)
-        
         self.history_selector = QComboBox()
         self.history_selector.addItems(["history1", "history2", "history3", "history4", "history5"])
         self.history_selector.setCurrentText(getattr(self, "last_group", "history5"))
-        self.history_selector.setStyleSheet("QComboBox { background-color: #2e2e36; color: #ffffff; border: 1px solid #44444f; border-radius: 3px; min-width: 60px; max-width: 65px; }")
+        self.history_selector.setStyleSheet("QComboBox { background-color: #2e2e36; color: #ffffff; border: 1px solid #44444f; border-radius: 3px; min-width: 56px; max-width: 62px; font-size: 8.5pt; padding: 1px 1px; }")
         self.history_selector.currentTextChanged.connect(self._on_history_group_changed)
         toolbar.addWidget(self.history_selector)
                 
-        lbl_filter = QLabel(" 过滤:")
-        lbl_filter.setStyleSheet("color: #aad4ff; font-weight: bold;")
+        lbl_filter = QLabel("🔍")
+        lbl_filter.setToolTip("公式过滤引擎 (输入 Query 表达式过滤当前监控列表)")
+        lbl_filter.setStyleSheet("color: #aad4ff; font-weight: bold; font-size: 9pt; padding: 0 1px;")
         toolbar.addWidget(lbl_filter)
         
         self.query_combo = QComboBox()
         self.query_combo.setEditable(True)
-        self.query_combo.setStyleSheet("QComboBox { background-color: #2e2e36; color: #ffffff; border: 1px solid #44444f; border-radius: 3px; min-width: 120px; max-width: 150px; }")
+        self.query_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.query_combo.setStyleSheet("QComboBox { background-color: #2e2e36; color: #ffffff; border: 1px solid #44444f; border-radius: 3px; min-width: 75px; max-width: 260px; font-size: 8.5pt; padding: 1px 2px; } QComboBox:focus { border: 1px solid #00ffcc; }")
         self.query_combo.view().setMinimumWidth(450) # 展开下拉菜单时，宽度自适应为最少 450px，防止长公式截断
         self.query_combo.lineEdit().returnPressed.connect(self.apply_filter)
         self.query_combo.currentIndexChanged.connect(self.apply_filter)
         toolbar.addWidget(self.query_combo)
         
         self.btn_filter = QPushButton("过滤")
-        self.btn_filter.setStyleSheet("QPushButton { background-color: #2e2e36; color: #ffffff; border: 1px solid #44444f; border-radius: 3px; padding: 2px 4px; min-width: 30px; } QPushButton:hover { background-color: #3e3e4a; border-color: #aad4ff; }")
+        self.btn_filter.setToolTip("执行当前公式过滤 (Enter 亦可触发)")
+        self.btn_filter.setStyleSheet("QPushButton { background-color: #2e2e36; color: #ffffff; border: 1px solid #44444f; border-radius: 3px; padding: 1px 4px; min-width: 26px; font-size: 8.5pt; } QPushButton:hover { background-color: #3e3e4a; border-color: #aad4ff; }")
         self.btn_filter.clicked.connect(self.apply_filter)
         toolbar.addWidget(self.btn_filter)
         
         self.btn_clear = QPushButton("清空")
-        self.btn_clear.setStyleSheet("QPushButton { background-color: #2e2e36; color: #ffffff; border: 1px solid #44444f; border-radius: 3px; padding: 2px 4px; min-width: 30px; } QPushButton:hover { background-color: #3e3e4a; border-color: #ff4444; }")
+        self.btn_clear.setToolTip("清空过滤条件，恢复展示当前组全部个股")
+        self.btn_clear.setStyleSheet("QPushButton { background-color: #2e2e36; color: #ffffff; border: 1px solid #44444f; border-radius: 3px; padding: 1px 4px; min-width: 26px; font-size: 8.5pt; } QPushButton:hover { background-color: #3e3e4a; border-color: #ff4444; }")
         self.btn_clear.clicked.connect(self.clear_filter)
         toolbar.addWidget(self.btn_clear)
 
         self.btn_hit = QPushButton("Hit")
         self.btn_hit.setToolTip("计算当前组所有历史公式的命中数")
-        self.btn_hit.setStyleSheet("QPushButton { background-color: #fff9c4; color: #000000; font-weight: bold; border: 1px solid #ffeb3b; border-radius: 3px; padding: 2px 4px; min-width: 25px; } QPushButton:hover { background-color: #fdd835; }")
+        self.btn_hit.setStyleSheet("QPushButton { background-color: #fff9c4; color: #000000; font-weight: bold; border: 1px solid #ffeb3b; border-radius: 3px; padding: 1px 3px; min-width: 20px; font-size: 8.5pt; } QPushButton:hover { background-color: #fdd835; }")
         self.btn_hit.clicked.connect(self.calculate_history_hits_ui)
         toolbar.addWidget(self.btn_hit)
         
         self.btn_view_filtered = QPushButton("查看")
         self.btn_view_filtered.setToolTip("查看当前过滤条件命中的个股明细")
-        self.btn_view_filtered.setStyleSheet("QPushButton { background-color: #2e2e36; color: #00ffcc; font-weight: bold; border: 1px solid #00ffcc; border-radius: 3px; padding: 2px 4px; min-width: 30px; } QPushButton:hover { background-color: #00ffcc; color: #000000; }")
+        self.btn_view_filtered.setStyleSheet("QPushButton { background-color: #1a3333; color: #00ffcc; font-weight: bold; border: 1px solid #00ffcc; border-radius: 3px; padding: 1px 4px; min-width: 26px; font-size: 8.5pt; } QPushButton:hover { background-color: #00ffcc; color: #000000; }")
         self.btn_view_filtered.clicked.connect(self.view_filtered_stocks_dialog)
         toolbar.addWidget(self.btn_view_filtered)
         

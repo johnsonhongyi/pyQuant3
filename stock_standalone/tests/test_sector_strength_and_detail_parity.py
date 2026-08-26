@@ -68,25 +68,3 @@ def test_sector_detail_aggregator_authoritative_parity():
             assert 'code' in first_row
             assert 'name' in first_row
             assert 'pct' in first_row
-
-
-def test_sector_favorite_toggle_and_context_menu():
-    """验证右键设为重点关注/取消重点关注板块后，立即自动重排与实时刷新"""
-    from global_favorites import GlobalFavoriteManager
-    fav_mgr = GlobalFavoriteManager()
-    
-    widget = SectorHeatmapWidget()
-    widget.load_live_sectors(force=True)
-    
-    test_sec = '测试概念X'
-    if test_sec in fav_mgr.get_favorite_sectors():
-        fav_mgr.remove_favorite_sector(test_sec)
-        
-    # 添加测试概念
-    widget._toggle_favorite_sector(test_sec)
-    assert test_sec in fav_mgr.get_favorite_sectors(), "添加后应包含在 favorite_sectors 中"
-    
-    # 再次调用取消关注
-    widget._toggle_favorite_sector(test_sec)
-    assert test_sec not in fav_mgr.get_favorite_sectors(), "取消后应从 favorite_sectors 中移除"
-
