@@ -46,18 +46,19 @@ class SectorHeatmapWidget(QWidget):
         header.addWidget(self.btn_hot_leaders)
 
         self.sort_combo = QComboBox()
-        self.sort_combo.addItems(["按强度得分降序", "按涨跌幅降序", "按活跃成员数降序"])
+        self.sort_combo.addItems(["按强度得分降序", "按涨跌幅降序", "按活跃成员数降序", "⭐ 重点关注置顶"])
         self.sort_combo.currentIndexChanged.connect(self.sort_sectors)
         header.addWidget(self.sort_combo)
+
         
         layout.addLayout(header)
 
         # Scroll Area for Heatmap Grid
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        scroll.setMinimumWidth(120)
-        scroll.setStyleSheet("background-color: #121214; border: 1px solid #2e2e36;")
+        self.scroll = QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.scroll.setMinimumWidth(120)
+        self.scroll.setStyleSheet("background-color: #121214; border: 1px solid #2e2e36;")
         self.setMinimumWidth(120)
         
         self.grid_container = QWidget()
@@ -66,8 +67,9 @@ class SectorHeatmapWidget(QWidget):
         self.grid_layout.setSpacing(6)
         self.grid_layout.setContentsMargins(5, 5, 5, 5)
         
-        scroll.setWidget(self.grid_container)
-        layout.addWidget(scroll)
+        self.scroll.setWidget(self.grid_container)
+        layout.addWidget(self.scroll)
+
 
     def _on_hot_leaders_clicked(self):
         self.hot_leaders_clicked.emit()
@@ -84,7 +86,28 @@ class SectorHeatmapWidget(QWidget):
     def get_top_sectors(self, top_n: int = 3) -> list:
         if not hasattr(self, 'sectors') or not self.sectors:
             return []
-        return [str(item[0]).strip() for item in self.sectors[:top_n] if item]
+        import re
+        def _get_clean_score(item):
+            try:
+                if len(item) > 1:
+                    return float(item[1])
+            except (ValueError, TypeError):
+                pass
+            return -9999.0
+
+        sorted_by_strength = sorted(self.sectors, key=_get_clean_score, reverse=True)
+        top_secs = []
+        for item in sorted_by_strength:
+            if item:
+                raw_name = str(item[0]).strip()
+                clean_sec = re.sub(r'^[^\w\u4e00-\u9fa5]+', '', raw_name).strip()
+                sec_name = clean_sec if clean_sec else raw_name
+                if sec_name and sec_name not in top_secs:
+                    top_secs.append(sec_name)
+                if len(top_secs) >= top_n:
+                    break
+        return top_secs
+
 
 
     def resizeEvent(self, event):
@@ -524,7 +547,7 @@ class SectorHeatmapWidget(QWidget):
             card.clicked.connect(_on_card_clicked)
             self.grid_layout.addWidget(card, row, col)
 
-    def sort_sectors(self, index):
+    def sort_sectors(self, index=0):
         def safe_float_pct(val_str):
             try:
                 return float(str(val_str).replace("%", "").replace("+", ""))
@@ -537,24 +560,39 @@ class SectorHeatmapWidget(QWidget):
         fav_sectors = fav_mgr.get_favorite_sectors()
         
         def get_sort_key(x):
-            sec_name = x[0]
-            clean_sec = re.sub(r'^[^\w\u4e00-\u9fa5]+', '', str(sec_name)).strip()
-            # 仅当板块本身在重点关注板块列表时置顶 (prim = 0)
-            is_highlight = (sec_name in fav_sectors) or (clean_sec in fav_sectors)
-            
-            prim = 0 if is_highlight else 1
-            
+            try:
+                score = float(x[1])
+            except Exception:
+                score = 0.0
+
             if index == 0:
-                sec_val = -float(x[1])
+                # 纯粹按真实量化强度得分降序：高分板块（如 金属铜 68.3）自动绝对置顶在第 1 项
+                return -score
             elif index == 1:
-                sec_val = -safe_float_pct(x[2])
+                # 纯粹按板块平均涨跌幅降序
+                return -safe_float_pct(x[2])
+            elif index == 2:
+                # 纯粹按活跃成员数降序
+                try:
+                    return -int(x[3])
+                except Exception:
+                    return 0
+            elif index == 3:
+                # ⭐ 重点关注置顶模式 (重点关注排在最前，组内按得分降序)
+                sec_name = x[0]
+                clean_sec = re.sub(r'^[^\w\u4e00-\u9fa5]+', '', str(sec_name)).strip()
+                is_highlight = (sec_name in fav_sectors) or (clean_sec in fav_sectors)
+                prim = 0 if is_highlight else 1
+                return (prim, -score)
             else:
-                sec_val = -int(x[3])
-                
-            return (prim, sec_val)
+                return -score
 
         self.sectors.sort(key=get_sort_key)
         self.render_grid()
+        if hasattr(self, 'scroll') and self.scroll and self.scroll.verticalScrollBar():
+            self.scroll.verticalScrollBar().setValue(0)
+
+
 
     def _show_sector_context_menu(self, pos, sector_name):
         from PyQt6.QtWidgets import QMenu, QApplication
@@ -651,5 +689,16 @@ class SectorHeatmapWidget(QWidget):
             clean_sec = re.sub(r'^[^\w\u4e00-\u9fa5]+', '', str(sector_name)).strip()
             from global_favorites import GlobalFavoriteManager
             fav_mgr = GlobalFavoriteManager()
+            fav_sectors = fav_mgr.get_favorite_sectors()
+            
+            if clean_sec in fav_sectors or sector_name in fav_sectors:
+                fav_mgr.remove_favorite_sector(clean_sec)
+                fav_mgr.remove_favorite_sector(sector_name)
+            else:
+                fav_mgr.add_favorite_sector(clean_sec)
+
+            # 立即原地触发重新排序与网格刷新
+            self.sort_sectors(self.sort_combo.currentIndex())
         except Exception as e:
             print(f"[SectorHeatmap] Toggle favorite sector error: {e}")
+

@@ -56,24 +56,43 @@ class HotSectorEngine:
         top_n: int = 3
     ) -> List[str]:
         """
-        从板块热力图数据中提取排名前 top_n 的强势板块名称
+        从板块热力图数据中提取排名前 top_n 的真实强势板块名称。
+        基于真实量化强度得分 (score) 严格降序排序，不受用户重点关注置顶视觉排序的干扰。
         """
         if not sectors_list:
             return []
 
+        import re
+        def _get_clean_score(item):
+            try:
+                if len(item) > 1:
+                    return float(item[1])
+            except (ValueError, TypeError):
+                pass
+            return -9999.0
+
+        # 基于真实强度得分 (item[1]) 降序排序，提取真实的 Top N 强势板块
+        sorted_by_strength = sorted(sectors_list, key=_get_clean_score, reverse=True)
+
         top_secs = []
-        for item in sectors_list[:top_n]:
-            sec_name = str(item[0]).strip()
-            if sec_name:
+        for item in sorted_by_strength:
+            raw_name = str(item[0]).strip()
+            clean_sec = re.sub(r'^[^\w\u4e00-\u9fa5]+', '', raw_name).strip()
+            sec_name = clean_sec if clean_sec else raw_name
+            if sec_name and sec_name not in top_secs:
                 top_secs.append(sec_name)
+            if len(top_secs) >= top_n:
+                break
 
         if sector_to_codes_map:
             self.sector_to_codes = sector_to_codes_map
             self.code_to_sector = {}
             for sec, codes in sector_to_codes_map.items():
+                clean_sec_key = re.sub(r'^[^\w\u4e00-\u9fa5]+', '', str(sec)).strip()
+                target_sec_name = clean_sec_key or str(sec).strip()
                 for c in codes:
                     c_clean = str(c).strip().zfill(6)
-                    self.code_to_sector[c_clean] = sec
+                    self.code_to_sector[c_clean] = target_sec_name
 
         return top_secs
 
