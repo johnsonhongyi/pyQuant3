@@ -1393,89 +1393,75 @@ class StockDetailDialog(QDialog):
         self.lbl_filter_expr.setText(disp_expr)
         self.lbl_filter_expr.setStyleSheet("color: #e2e2e5; font-style: normal;")
         
-        # 🚀【极速 O(1) 6位清洗容错匹配】如果该股票原本就在主窗口当前结果集中，0 毫秒确认命中
+        # 🚀【极速 O(1) 6位清洗容错匹配】如果主窗口当前过滤集合已有预计算结果，0 毫秒确认命中
         c_clean = str(self.code).strip().zfill(6)
-        is_hit = False
         
-        if parent_mw:
-            if hasattr(parent_mw, "filtered_codes_set") and parent_mw.filtered_codes_set:
+        if parent_mw and hasattr(parent_mw, "filtered_codes_set") and parent_mw.filtered_codes_set is not None and len(parent_mw.filtered_codes_set) > 0:
+            if getattr(parent_mw, "query_expr", "") == query_expr:
                 if any(str(x).strip().zfill(6) == c_clean for x in parent_mw.filtered_codes_set):
-                    is_hit = True
-            
-            if not is_hit:
-                for attr in ("current_df", "df_realtime"):
-                    if hasattr(parent_mw, attr):
-                        df = getattr(parent_mw, attr)
-                        if df is not None and not df.empty:
-                            if c_clean in df.index:
-                                is_hit = True
-                                break
-                            elif 'code' in df.columns:
-                                # 向量化极速检查
-                                if (df['code'].astype(str).str.strip().str.zfill(6) == c_clean).any():
-                                    is_hit = True
-                                    break
-                            elif (df.index.astype(str).str.strip().str.zfill(6) == c_clean).any():
-                                is_hit = True
-                                break
-
-        if is_hit:
-            self.lbl_filter_result.setText("✅ 命中")
-            self.lbl_filter_result.setStyleSheet("color: #00ff88; font-weight: bold;")
-            return
+                    self.lbl_filter_result.setText("✅ 命中")
+                    self.lbl_filter_result.setStyleSheet("color: #00ff88; font-weight: bold;")
+                    return
+                else:
+                    self.lbl_filter_result.setText("❌ 未命中")
+                    self.lbl_filter_result.setStyleSheet("color: #ff4444; font-weight: bold;")
+                    return
 
         import pandas as pd
-        if self.df_row is None:
-            self.lbl_filter_result.setText("⏳ 等待数据...")
-            self.lbl_filter_result.setStyleSheet("color: #ff9900; font-weight: bold;")
-            return
-            
-        row_dict = self.df_row.to_dict() if hasattr(self.df_row, 'to_dict') else dict(self.df_row)
-        row_dict['code'] = self.code
-        row_dict['name'] = self.name
-        
-        mapping = {
-            '价格': 'close', '最新价': 'close', '现价': 'close', 
-            '涨幅': 'pct', 
-            '量': 'volume', '成交量': 'volume',
-            '成交额': 'turnover',
-            '最高': 'high', '最低': 'low', '开盘': 'open',
-            '板块': 'category', '异动类型': 'category', 'hy': 'category'
-        }
-        for cn, en in mapping.items():
-            if cn in row_dict and en not in row_dict:
-                row_dict[en] = row_dict[cn]
-                
-        if 'close' in row_dict:
-            for col in ['open', 'high', 'low']:
-                if col not in row_dict or row_dict[col] is None or row_dict[col] == '':
-                    row_dict[col] = row_dict['close']
-                    
-        df_code = pd.DataFrame([row_dict])
-        df_code.set_index('code', inplace=True, drop=False)
-        
-        # 🚀【真正 threading.Thread 子线程后台计算】彻底从 UI 主线程事件循环中隔离
-        def _bg_eval_worker():
-            from stock_logic_utils import test_code_against_queries
-            try:
-                res = test_code_against_queries(df_code, [{"query": query_expr}])
-                hit = res[0].get("hit", 0) if res else 0
-                def _update_ui():
-                    if hit > 0:
-                        self.lbl_filter_result.setText("✅ 命中")
-                        self.lbl_filter_result.setStyleSheet("color: #00ff88; font-weight: bold;")
-                    else:
-                        self.lbl_filter_result.setText("❌ 未命中")
-                        self.lbl_filter_result.setStyleSheet("color: #ff4444; font-weight: bold;")
-                QTimer.singleShot(0, _update_ui)
-            except Exception as e:
-                def _update_err():
-                    self.lbl_filter_result.setText("⚠️ 评估出错")
-                    self.lbl_filter_result.setStyleSheet("color: #ff9900; font-weight: bold;")
-                QTimer.singleShot(0, _update_err)
+        df_code = None
+        if parent_mw and hasattr(parent_mw, "current_df") and parent_mw.current_df is not None and not parent_mw.current_df.empty:
+            df_cur = parent_mw.current_df
+            if 'code' in df_cur.columns:
+                sub = df_cur[df_cur['code'].astype(str).str.strip().str.zfill(6) == c_clean]
+                if not sub.empty:
+                    df_code = sub.copy()
+            elif (df_cur.index.astype(str).str.strip().str.zfill(6) == c_clean).any():
+                sub = df_cur[df_cur.index.astype(str).str.strip().str.zfill(6) == c_clean]
+                if not sub.empty:
+                    df_code = sub.copy()
 
-        import threading
-        threading.Thread(target=_bg_eval_worker, daemon=True).start()
+        if df_code is None or df_code.empty:
+            if self.df_row is None:
+                self.lbl_filter_result.setText("⏳ 等待数据...")
+                self.lbl_filter_result.setStyleSheet("color: #ff9900; font-weight: bold;")
+                return
+            row_dict = self.df_row.to_dict() if hasattr(self.df_row, 'to_dict') else dict(self.df_row)
+            row_dict['code'] = self.code
+            row_dict['name'] = self.name
+            
+            mapping = {
+                '价格': 'close', '最新价': 'close', '现价': 'close', 
+                '涨幅': 'pct', 
+                '量': 'volume', '成交量': 'volume',
+                '成交额': 'turnover',
+                '最高': 'high', '最低': 'low', '开盘': 'open',
+                '板块': 'category', '异动类型': 'category', 'hy': 'category'
+            }
+            for cn, en in mapping.items():
+                if cn in row_dict and en not in row_dict:
+                    row_dict[en] = row_dict[cn]
+                    
+            if 'close' in row_dict:
+                for col in ['open', 'high', 'low']:
+                    if col not in row_dict or row_dict[col] is None or row_dict[col] == '':
+                        row_dict[col] = row_dict['close']
+                        
+            df_code = pd.DataFrame([row_dict])
+            df_code.set_index('code', inplace=True, drop=False)
+        
+        from stock_logic_utils import test_code_against_queries
+        try:
+            res = test_code_against_queries(df_code, [{"query": query_expr}])
+            hit = res[0].get("hit", 0) if res else 0
+            if hit > 0:
+                self.lbl_filter_result.setText("✅ 命中")
+                self.lbl_filter_result.setStyleSheet("color: #00ff88; font-weight: bold;")
+            else:
+                self.lbl_filter_result.setText("❌ 未命中")
+                self.lbl_filter_result.setStyleSheet("color: #ff4444; font-weight: bold;")
+        except Exception as e:
+            self.lbl_filter_result.setText("⚠️ 评估出错")
+            self.lbl_filter_result.setStyleSheet("color: #ff9900; font-weight: bold;")
 
     def start_slide_animation(self, target_rect, target_opacity, duration=250, is_snap_feedback=False):
         """
@@ -2566,6 +2552,26 @@ class ATSMainWindow(QMainWindow):
         query = self._get_real_query()
         self.query_expr = query
         
+        # 1. 计算当前过滤条件在全市场 current_df 中的匹配集合
+        self.filtered_codes_set = set()
+        if query and self.current_df is not None and not self.current_df.empty:
+            test_df = self.get_test_df_for_hits()
+            if not test_df.empty:
+                from stock_logic_utils import query_engine
+                import pandas as pd
+                try:
+                    df_res = query_engine.execute(test_df, query)
+                    if isinstance(df_res, pd.DataFrame) and not df_res.empty:
+                        if 'code' in df_res.columns:
+                            self.filtered_codes_set = {str(c).strip().zfill(6) for c in df_res['code']}
+                        else:
+                            self.filtered_codes_set = {str(c).strip().zfill(6) for c in df_res.index}
+                except Exception as ex:
+                    logger.debug(f"apply_filter query_engine error: {ex}")
+                    
+        from ats.ui.styles import save_config_node
+        save_config_node("ats_query_expr", query)
+
         if query:
             group = self.history_selector.currentText()
             h_list = self.search_histories.get(group, [])
@@ -2589,8 +2595,11 @@ class ATSMainWindow(QMainWindow):
                 
                 self._on_history_group_changed()
                 
+        # 2. 广播更新所有相关可见窗口 (板块成分股明细、个股详情、分布图表)
         for widget in QApplication.topLevelWidgets():
-            if isinstance(widget, StockDetailDialog) and widget.isVisible():
+            if hasattr(widget, 'on_global_filter_changed') and widget.isVisible():
+                widget.on_global_filter_changed(self.query_expr)
+            elif isinstance(widget, StockDetailDialog) and widget.isVisible():
                 widget.update_filter_status(self.query_expr)
                 
         # 广播更新过滤后的个股明细窗口
@@ -2605,8 +2614,14 @@ class ATSMainWindow(QMainWindow):
     def clear_filter(self):
         self.query_combo.setCurrentText("")
         self.query_expr = ""
+        self.filtered_codes_set = set()
+        from ats.ui.styles import save_config_node
+        save_config_node("ats_query_expr", "")
+        
         for widget in QApplication.topLevelWidgets():
-            if isinstance(widget, StockDetailDialog) and widget.isVisible():
+            if hasattr(widget, 'on_global_filter_changed') and widget.isVisible():
+                widget.on_global_filter_changed("")
+            elif isinstance(widget, StockDetailDialog) and widget.isVisible():
                 widget.update_filter_status("")
                 
         # 广播清空过滤明细窗口

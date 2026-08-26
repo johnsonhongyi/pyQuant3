@@ -20,7 +20,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
 from PyQt6.QtGui import QColor, QFont, QKeySequence, QShortcut
 
-from ats.ui.styles import NumericTableWidgetItem, setup_header_persistence, apply_dark_theme, CONFIG_FILE_LOCK, ColorPreservingItemDelegate
+from ats.ui.styles import NumericTableWidgetItem, setup_header_persistence, apply_dark_theme, CONFIG_FILE_LOCK, ColorPreservingItemDelegate, load_config_node, save_config_node
 from sys_utils import get_app_root, get_conf_path
 from JohnsonUtil import commonTips as cct
 from logger_utils import LoggerFactory
@@ -67,7 +67,7 @@ class SectorDetailWorker(QThread):
 class ATSSectorDetailDialog(QDialog):
     """
     ATS 强势板块成分股明细与高频量化实时弹窗
-    具备：新浪直连 50ms 真实股价 + TDX 秒级盘口 + 自动定时轮询 + 手动 F5 强制刷新
+    具备：新浪直连 50ms 真实股价 + TDX 秒级盘口 + 自动定时轮询 + 手动 F5 强制刷新 + 🎯 持久化策略公式过滤
     """
     def __init__(self, sector_name, linkage_cb=None, double_click_cb=None, member_codes=None, parent=None):
         super().__init__(None) # [🚀 独立顶层解耦] 传入 None 剥离 Win32 HWND Owner 从属关系
@@ -79,6 +79,14 @@ class ATSSectorDetailDialog(QDialog):
         self.extra_cols = get_sector_extra_cols()
         self._worker = None
         self._is_rendering = False
+        
+        # 🎯 持久化过滤状态 (所有板块详情通用)
+        saved_filter = load_config_node("ats_sector_detail_filter_enabled", "false")
+        self.filter_enabled = (str(saved_filter).strip().lower() == "true")
+        self._all_raw_rows = []
+        self._last_score = 0.0
+        self._last_leader_str = "--"
+        self._last_meta = {}
         
         self.setWindowTitle(f"🔥 {sector_name} 板块明细 (实时高频行情)")
         self.resize(780, 520)
@@ -143,6 +151,12 @@ class ATSSectorDetailDialog(QDialog):
         self.score_lbl = QLabel("强度得分: --")
         self.score_lbl.setStyleSheet("font-size: 12pt; font-weight: bold; color: #ff9900; margin-left: 10px;")
         top_row.addWidget(self.score_lbl)
+
+        # 🎯 策略过滤持久化开关按钮 (所有板块详情通用)
+        self.btn_toggle_filter = QPushButton()
+        self._update_filter_button_ui()
+        self.btn_toggle_filter.clicked.connect(self.toggle_filter_state)
+        top_row.addWidget(self.btn_toggle_filter)
 
         top_row.addStretch()
 
@@ -320,6 +334,149 @@ class ATSSectorDetailDialog(QDialog):
         self._worker.finished_signal.connect(self._on_worker_finished)
         self._worker.start()
 
+    def toggle_filter_state(self):
+        """切换策略公式过滤状态并全局持久化"""
+        self.filter_enabled = not self.filter_enabled
+        save_config_node("ats_sector_detail_filter_enabled", "true" if self.filter_enabled else "false")
+        self._update_filter_button_ui()
+        self._apply_filter_and_render()
+
+    def _update_filter_button_ui(self):
+        """更新策略过滤按钮的高亮与状态文案"""
+        if getattr(self, 'filter_enabled', False):
+            self.btn_toggle_filter.setText("🎯 策略过滤 (开)")
+            self.btn_toggle_filter.setStyleSheet("""
+                QPushButton {
+                    background-color: #1a3322;
+                    color: #00ff88;
+                    font-weight: bold;
+                    border: 1.5px solid #00ff88;
+                    border-radius: 4px;
+                    padding: 2px 8px;
+                    font-size: 8.5pt;
+                }
+                QPushButton:hover {
+                    background-color: #00ff88;
+                    color: #000000;
+                }
+            """)
+            self.btn_toggle_filter.setToolTip("当前状态：【已开启】自动根据主窗口策略公式过滤当前板块成分股 (点击可关闭)")
+        else:
+            self.btn_toggle_filter.setText("🎯 策略过滤 (关)")
+            self.btn_toggle_filter.setStyleSheet("""
+                QPushButton {
+                    background-color: #222228;
+                    color: #888888;
+                    font-weight: bold;
+                    border: 1px solid #44444f;
+                    border-radius: 4px;
+                    padding: 2px 8px;
+                    font-size: 8.5pt;
+                }
+                QPushButton:hover {
+                    background-color: #33333d;
+                    color: #ffffff;
+                    border-color: #777788;
+                }
+            """)
+            self.btn_toggle_filter.setToolTip("当前状态：【已关闭】展示板块全部成分股 (点击开启根据策略公式过滤)")
+
+    def _get_active_query_expr(self) -> str:
+        """获取当前活跃的策略公式"""
+        parent_mw = self._get_parent_mw()
+        if parent_mw and hasattr(parent_mw, 'query_expr') and parent_mw.query_expr:
+            return str(parent_mw.query_expr).strip()
+        for w in QApplication.topLevelWidgets():
+            if hasattr(w, 'query_expr') and w.query_expr:
+                return str(w.query_expr).strip()
+        saved_q = load_config_node("ats_query_expr", "")
+        return str(saved_q).strip() if saved_q else ""
+
+    def _filter_rows_by_query(self, rows: list, query_expr: str) -> list:
+        """根据当前策略表达式过滤板块成分股"""
+        if not rows or not query_expr:
+            return rows
+        try:
+            import pandas as pd
+            from stock_logic_utils import query_engine
+            
+            # 1. 优先使用主窗口已预计算的全量过滤代码集合 (0ms 极速命中匹配)
+            parent_mw = self._get_parent_mw()
+            if parent_mw and hasattr(parent_mw, 'filtered_codes_set') and parent_mw.filtered_codes_set:
+                if getattr(parent_mw, 'query_expr', '') == query_expr:
+                    fset = parent_mw.filtered_codes_set
+                    return [r for r in rows if str(r.get('code', '')).strip().zfill(6) in fset]
+
+            # 2. 否则从当前数据底座动态切片执行 query_engine.execute
+            current_df = getattr(self, '_cached_df', None)
+            if current_df is None and parent_mw and hasattr(parent_mw, 'current_df'):
+                current_df = parent_mw.current_df
+
+            row_codes = [str(r.get('code', '')).strip().zfill(6) for r in rows]
+            
+            if current_df is not None and not current_df.empty:
+                sub_df = None
+                if 'code' in current_df.columns:
+                    c_ser = current_df['code'].astype(str).str.strip().str.zfill(6)
+                    sub_df = current_df[c_ser.isin(row_codes)].copy()
+                else:
+                    idx_ser = current_df.index.astype(str).str.strip().str.zfill(6)
+                    sub_df = current_df[idx_ser.isin(row_codes)].copy()
+                    
+                if sub_df is not None and not sub_df.empty:
+                    res = query_engine.execute(sub_df, query_expr)
+                    if isinstance(res, pd.DataFrame) and not res.empty:
+                        if 'code' in res.columns:
+                            hit_codes = set(res['code'].astype(str).str.strip().str.zfill(6))
+                        else:
+                            hit_codes = set(res.index.astype(str).str.strip().str.zfill(6))
+                        return [r for r in rows if str(r.get('code', '')).strip().zfill(6) in hit_codes]
+                    else:
+                        return []
+
+            # 3. 备用兜底: 将 rows 本身转为临时 DataFrame 评估
+            df_rows = pd.DataFrame(rows)
+            if 'code' in df_rows.columns:
+                df_rows['code'] = df_rows['code'].astype(str).str.strip().str.zfill(6)
+                df_rows.set_index('code', inplace=True, drop=False)
+            if 'pct' in df_rows.columns and 'percent' not in df_rows.columns:
+                df_rows['percent'] = df_rows['pct']
+            res = query_engine.execute(df_rows, query_expr)
+            if isinstance(res, pd.DataFrame) and not res.empty:
+                hit_codes = set(res.index.astype(str).str.strip().str.zfill(6))
+                return [r for r in rows if str(r.get('code', '')).strip().zfill(6) in hit_codes]
+            return []
+        except Exception as e:
+            logger.debug(f"ATSSectorDetailDialog _filter_rows_by_query error: {e}")
+            return rows
+
+    def _apply_filter_and_render(self):
+        """执行过滤判定并渲染表格"""
+        if not hasattr(self, '_all_raw_rows') or not self._all_raw_rows:
+            return
+
+        rows = self._all_raw_rows
+        score = getattr(self, '_last_score', 0.0)
+        leader_str = getattr(self, '_last_leader_str', '--')
+        query_expr = self._get_active_query_expr()
+
+        if getattr(self, 'filter_enabled', False) and query_expr:
+            filtered_rows = self._filter_rows_by_query(rows, query_expr)
+            q_disp = query_expr if len(query_expr) <= 25 else query_expr[:22] + "..."
+            self.stats_lbl.setText(
+                f"成员数: {len(filtered_rows)}/{len(rows)} (已过滤) | 领涨标的: {leader_str} | 过滤: {q_disp}"
+            )
+            self.setWindowTitle(f"🔥 {self.sector_name} 板块明细 (过滤中 {len(filtered_rows)}/{len(rows)}只)")
+            self._render_rows(filtered_rows)
+        else:
+            self.stats_lbl.setText(f"成员数: {len(rows)} | 领涨标的: {leader_str}")
+            self.setWindowTitle(f"🔥 {self.sector_name} 板块明细 (实时高频 {len(rows)}只)")
+            self._render_rows(rows)
+
+    def on_global_filter_changed(self, query_expr: str = ""):
+        """主窗口过滤公式变更/清空时自动触发"""
+        self._apply_filter_and_render()
+
     def _on_worker_finished(self, rows: list, score: float, leader_str: str, meta: dict):
         self.btn_refresh.setEnabled(True)
         self.btn_refresh.setText("🔄 强制刷新数据")
@@ -331,7 +488,11 @@ class ATSSectorDetailDialog(QDialog):
             self.title_lbl.setText(f"板块名称: {self.sector_name}")
 
         self.score_lbl.setText(f"强度得分: {score:.1f}")
-        self.stats_lbl.setText(f"成员数: {len(rows)} | 领涨标的: {leader_str}")
+
+        self._all_raw_rows = rows
+        self._last_score = score
+        self._last_leader_str = leader_str
+        self._last_meta = meta
 
         st_text = meta.get('status', '✅ 实时数据已同步')
         self.lbl_status.setText(f"📡 状态: {st_text}")
@@ -340,8 +501,7 @@ class ATSSectorDetailDialog(QDialog):
         else:
             self.lbl_status.setStyleSheet("color: #00ff88; font-size: 8.5pt; margin-right: 6px;")
 
-        self.setWindowTitle(f"🔥 {self.sector_name} 板块明细 (实时高频 {len(rows)}只)")
-        self._render_rows(rows)
+        self._apply_filter_and_render()
 
     def _render_rows(self, rows):
         self._is_rendering = True
