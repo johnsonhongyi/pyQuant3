@@ -458,7 +458,6 @@ class SectorHeatmapWidget(QWidget):
             col = idx % cols
 
             clean_name = re.sub(r'^[^\w\u4e00-\u9fa5]+', '', str(name)).strip()
-            # 仅当用户明确将该板块加入重点关注板块时才高亮与置顶
             is_highlight = (name in fav_sectors) or (clean_name in fav_sectors)
 
             # Card Widget - 允许自适应拉伸与按网格折叠
@@ -652,15 +651,5 @@ class SectorHeatmapWidget(QWidget):
             clean_sec = re.sub(r'^[^\w\u4e00-\u9fa5]+', '', str(sector_name)).strip()
             from global_favorites import GlobalFavoriteManager
             fav_mgr = GlobalFavoriteManager()
-            fav_sectors = fav_mgr.get_favorite_sectors()
-            
-            if clean_sec in fav_sectors or sector_name in fav_sectors:
-                fav_mgr.remove_favorite_sector(clean_sec)
-                fav_mgr.remove_favorite_sector(sector_name)
-            else:
-                fav_mgr.add_favorite_sector(clean_sec)
-
-            # 立即原地触发重新排序与网格刷新
-            self.sort_sectors(self.sort_combo.currentIndex())
         except Exception as e:
             print(f"[SectorHeatmap] Toggle favorite sector error: {e}")
