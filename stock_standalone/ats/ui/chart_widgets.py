@@ -13,7 +13,7 @@ import threading
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QLabel, QHBoxLayout, QDialog, QTableWidget, 
     QTableWidgetItem, QHeaderView, QAbstractItemView, QCheckBox, 
-    QPushButton, QFrame, QMenu, QApplication
+    QPushButton, QFrame, QMenu, QApplication, QLineEdit
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QByteArray, QPropertyAnimation, QEasingCurve, QParallelAnimationGroup, QRect
 from PyQt6.QtGui import QBrush, QColor
@@ -129,6 +129,29 @@ class DistributionDetailsDialog(QDialog, WindowMixin):
         
         header_lay.addStretch()
         
+        # 搜索框 (与新股次新股搜索风格保持高度一致)
+        self.search_edit = QLineEdit()
+        self.search_edit.setPlaceholderText("🔍 搜代码/名...")
+        self.search_edit.setStyleSheet("""
+            QLineEdit {
+                background-color: #0f172a;
+                color: #f8fafc;
+                border: 1px solid #334155;
+                border-radius: 3px;
+                padding: 1px 4px;
+                font-size: 8.5pt;
+                max-width: 95px;
+                min-width: 80px;
+                height: 18px;
+            }
+            QLineEdit:focus {
+                border: 1px solid #00ffcc;
+            }
+        """)
+        self.search_edit.textChanged.connect(self._apply_search_filter)
+        header_lay.addWidget(self.search_edit)
+        header_lay.addSpacing(6)
+        
         # Stays on top checkbox
         self.chk_on_top = QCheckBox("置顶")
         self.chk_on_top.setStyleSheet("""
@@ -138,11 +161,11 @@ class DistributionDetailsDialog(QDialog, WindowMixin):
         self.chk_on_top.setChecked(self.stays_on_top)
         self.chk_on_top.stateChanged.connect(self._on_stays_on_top_toggled)
         header_lay.addWidget(self.chk_on_top)
-        header_lay.addSpacing(10)
+        header_lay.addSpacing(8)
         
         # DNA Audit button
         self.btn_dna_audit = QPushButton("🧬 DNA审计")
-        self.btn_dna_audit.setFixedWidth(85)
+        self.btn_dna_audit.setFixedWidth(80)
         self.btn_dna_audit.setStyleSheet("""
             QPushButton { background: #333; color: #fff; border: 1px solid #555; border-radius: 3px; font-size: 8pt; font-weight: bold; height: 20px; }
             QPushButton:hover { background: #444; border-color: #00ff88; }
@@ -1167,6 +1190,32 @@ class DistributionDetailsDialog(QDialog, WindowMixin):
         finally:
             self.table.setSortingEnabled(True)
             self._is_updating = False
+            self._apply_search_filter()
+
+    def _apply_search_filter(self):
+        """根据搜索框文本毫秒级动态过滤表格行 (支持代码/名称/板块联合匹配)"""
+        keyword = self.search_edit.text().strip().lower() if hasattr(self, 'search_edit') else ""
+        total_rows = self.table.rowCount()
+        visible_cnt = 0
+        self.table.setSortingEnabled(False)
+        for r in range(total_rows):
+            c_item = self.table.item(r, 0)
+            n_item = self.table.item(r, 1)
+            sec_item = self.table.item(r, self.table.columnCount() - 1)
+            
+            code = c_item.text().strip().lower() if c_item else ""
+            name = n_item.text().strip().lower() if n_item else ""
+            sector = sec_item.text().strip().lower() if sec_item else ""
+            
+            if not keyword:
+                self.table.setRowHidden(r, False)
+                visible_cnt += 1
+            else:
+                matched = (keyword in code) or (keyword in name) or (keyword in sector)
+                self.table.setRowHidden(r, not matched)
+                if matched:
+                    visible_cnt += 1
+        self.table.setSortingEnabled(True)
 
 
 class DistributionBarChart(QWidget):

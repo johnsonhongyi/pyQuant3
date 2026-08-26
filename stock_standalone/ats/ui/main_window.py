@@ -2613,12 +2613,9 @@ class ATSMainWindow(QMainWindow):
             return test_df
         return pd.DataFrame()
 
-    def apply_filter(self):
-        query = self._get_real_query()
-        self.query_expr = query
-        self.last_query = query
-        
-        # 1. 计算当前过滤条件在全市场 current_df 中的匹配集合
+    def _recompute_filtered_codes_set(self):
+        """根据当前策略公式 query_expr 和最新的全市场行情 current_df 动态计算匹配的股票代码集合"""
+        query = getattr(self, 'query_expr', '')
         self.filtered_codes_set = set()
         if query and self.current_df is not None and not self.current_df.empty:
             test_df = self.get_test_df_for_hits()
@@ -2633,7 +2630,26 @@ class ATSMainWindow(QMainWindow):
                         else:
                             self.filtered_codes_set = {str(c).strip().zfill(6) for c in df_res.index}
                 except Exception as ex:
-                    logger.debug(f"apply_filter query_engine error: {ex}")
+                    logger.debug(f"_recompute_filtered_codes_set query_engine error: {ex}")
+
+    def apply_filter(self, force=False):
+        import time
+        now = time.time()
+        query = self._get_real_query()
+        
+        # ⚡ 防抖与脏检查：若公式完全一致且距上次点击不足 300ms，直接跳过避免密集重算导致卡顿
+        last_t = getattr(self, '_last_apply_filter_t', 0.0)
+        last_q = getattr(self, '_last_applied_query', None)
+        if not force and last_q == query and (now - last_t < 0.30):
+            return
+            
+        self._last_apply_filter_t = now
+        self._last_applied_query = query
+        self.query_expr = query
+        self.last_query = query
+        
+        # 1. 动态重新计算匹配集合
+        self._recompute_filtered_codes_set()
                     
         from ats.ui.styles import save_config_node
         save_config_node("ats_query_expr", query)
@@ -2723,6 +2739,22 @@ class ATSMainWindow(QMainWindow):
         self.query_expr = query
         
         if hasattr(self, 'dist_chart'):
+            # 1. 若窗口已存在且打开，则直接激活置顶，绝不重复刷新引起卡顿
+            from PyQt6.sip import isdeleted
+            for d in getattr(self.dist_chart, '_active_dialogs', []):
+                try:
+                    if d and not isdeleted(d) and getattr(d, 'bucket_idx', None) == 999:
+                        if hasattr(d, 'show_normal_position'):
+                            d.show_normal_position()
+                        else:
+                            d.show()
+                            d.raise_()
+                            d.activateWindow()
+                        return
+                except Exception:
+                    pass
+                    
+            # 2. 首次打开或重新开启
             config = {}
             try:
                 import os
@@ -2737,7 +2769,7 @@ class ATSMainWindow(QMainWindow):
                 
             self.dist_chart.open_details_dialog(999, restore_state=config, cold_start=True)
             
-            # 刷新最新数据
+            # 仅在首次拉起窗口时同步数据
             df_to_update = self.current_df if self.current_df is not None else self.dist_chart.current_df
             self.dist_chart.update_data([], stats_dict=None, df_all=df_to_update)
 
@@ -3729,6 +3761,10 @@ class ATSMainWindow(QMainWindow):
         if self.current_df is not None and not self.current_df.empty:
             self.lbl_ipc_status.setText("  IPC 通道: 🔌 实时接入中  |  ")
             self.lbl_ipc_status.setStyleSheet("color: #00ff88; font-weight: bold;")
+            
+            # 🛡️ 实时行情数据就绪，自动重新计算策略过滤命中集合 (根除启动时无数据导致空集合的联动 Bug)
+            if getattr(self, 'query_expr', ''):
+                self._recompute_filtered_codes_set()
             
             # 绘制 A 股涨跌幅度直方图
             if 'percent' in self.current_df.columns:
