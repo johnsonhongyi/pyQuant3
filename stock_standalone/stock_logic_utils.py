@@ -760,21 +760,34 @@ def check_code(
     return report
 def test_code_against_queries(df_code: pd.DataFrame, queries: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """
-    测试单只股票（或小型数据集）是否符合多个查询条件。
-    重构：使用新的 PandasQueryEngine 执行，替代旧的复杂正则剥离逻辑。
+    测试单只股票（或小型数据集/全市场）是否符合多个查询条件。
+    使用 PandasQueryEngine 执行，保证同义词映射与多行/单行公式精准命中统计。
     """
     if not isinstance(df_code, pd.DataFrame) or df_code.empty:
         return []
     results: list[dict[str, Any]] = []
     for q in queries:
-        expr: Any = q.get("query", "")
-        if not isinstance(expr, str) or not expr:
+        if isinstance(q, dict):
+            expr = q.get("query", "")
+            note = q.get("note", "")
+            starred = q.get("starred", 0)
+        else:
+            expr = str(q)
+            note = ""
+            starred = 0
+            
+        if not isinstance(expr, str) or not expr.strip():
+            results.append({
+                "query": expr,
+                "note": note,
+                "starred": starred,
+                "hit": 0
+            })
             continue
+            
         hit_count: int = 0
         try:
-            # 使用 PandasQueryEngine 执行引擎，它会自动处理 columns 注入、同义词映射与 eval/exec 降级
             res = query_engine.execute(df_code, expr)
-            # 统计命中结果
             if isinstance(res, pd.DataFrame):
                 hit_count = len(res)
             elif isinstance(res, (pd.Series, np.ndarray, list)):
@@ -782,15 +795,15 @@ def test_code_against_queries(df_code: pd.DataFrame, queries: list[dict[str, Any
             elif isinstance(res, (bool, np.bool_)):
                 hit_count = 1 if res else 0
             else:
-                # 兜底：如果是数值/非空对象，视为命中
                 hit_count = 1 if res else 0
         except Exception as e:
             logger.debug(f"test_code_against_queries failed for query [{expr}]: {e}")
             hit_count = 0
+            
         results.append({
             "query": expr,
-            "note": q.get("note", ""),
-            "starred": q.get("starred", 0),
+            "note": note,
+            "starred": starred,
             "hit": hit_count
         })
     return results

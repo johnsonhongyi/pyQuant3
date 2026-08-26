@@ -385,8 +385,9 @@ class LedgerUpdateWorker(QThread):
                 if resonance in ('逆市抗跌', '大盘共振'):
                     alpha_signals.append((code, name, pct_val, sh_pct, rs_val, resonance))
 
-            # fav_rows
-            fav_rows = [r for r in swing_rows if str(r[0]).strip() in self._fav_stocks]
+            # fav_rows (支持原始代码与6位标准化数字代码双向匹配)
+            fav_clean_set = {(''.join(c for c in str(s) if c.isdigit()).zfill(6) if any(c.isdigit() for c in str(s)) else str(s).strip()) for s in self._fav_stocks}
+            fav_rows = [r for r in swing_rows if (str(r[0]).strip() in self._fav_stocks or ''.join(c for c in str(r[0]) if c.isdigit()).zfill(6) in fav_clean_set)]
 
             # ── 阶段 C: 构造状态栏统计文本 ────────────────────────────────────────
             env_label = ''
@@ -1901,6 +1902,7 @@ class ATSMainWindow(QMainWindow):
                     data = json.load(f)
                 
                 def _normalize_record(r):
+                    hit = ""
                     if isinstance(r, dict):
                         q = r.get("query", "")
                         try:
@@ -1911,6 +1913,7 @@ class ATSMainWindow(QMainWindow):
                             pass
                         note = r.get("note", "")
                         starred = r.get("starred", 0)
+                        hit = r.get("hit", "")
                     elif isinstance(r, str):
                         q = r
                         note = ""
@@ -1926,7 +1929,10 @@ class ATSMainWindow(QMainWindow):
                         starred = 1 if starred else 0
                     elif not isinstance(starred, int):
                         starred = 0
-                    return {"query": q, "starred": starred, "note": note}
+                    res_dict = {"query": q, "starred": starred, "note": note}
+                    if hit != "" and hit is not None:
+                        res_dict["hit"] = hit
+                    return res_dict
                 
                 h1 = [_normalize_record(r) for r in data.get("history1", [])]
                 h2 = [_normalize_record(r) for r in data.get("history2", [])]
@@ -1946,6 +1952,31 @@ class ATSMainWindow(QMainWindow):
             "history5": h5
         }
 
+    def _save_search_history_data(self):
+        """将当前 search_histories 包含 query, note, starred, hit 原子落盘保存至 search_history.json"""
+        import os
+        import json
+        from ats.ui.styles import CONFIG_FILE_LOCK
+        filepath = self._get_search_history_filepath()
+        if not filepath:
+            return
+        try:
+            with CONFIG_FILE_LOCK:
+                data = {
+                    "history1": self.search_histories.get("history1", []),
+                    "history2": self.search_histories.get("history2", []),
+                    "history3": self.search_histories.get("history3", []),
+                    "history4": self.search_histories.get("history4", []),
+                    "history5": self.search_histories.get("history5", []),
+                    "last_query": getattr(self, "last_query", ""),
+                    "last_group": self.history_selector.currentText() if hasattr(self, 'history_selector') else "history5"
+                }
+                os.makedirs(os.path.dirname(os.path.abspath(filepath)), exist_ok=True)
+                with open(filepath, "w", encoding="utf-8") as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"[ATSMainWindow] Save search history failed: {e}")
+
         # 逐级异步 UI 刷新定时器 (Staggered Async Tier Timers for zero UI freezing)
         self._async_tier2_timer = QTimer(self)
         self._async_tier2_timer.setSingleShot(True)
@@ -1958,28 +1989,6 @@ class ATSMainWindow(QMainWindow):
         self._pending_swing_rows = []
         self._pending_fav_rows = []
         self._pending_sh_pct = 0.0
-
-    def _save_search_history_data(self):
-        filepath = self._get_search_history_filepath()
-        try:
-            import json
-            import os
-            os.makedirs(os.path.dirname(filepath), exist_ok=True)
-            
-            data = {
-                "history1": self.search_histories.get("history1", []),
-                "history2": self.search_histories.get("history2", []),
-                "history3": self.search_histories.get("history3", []),
-                "history4": self.search_histories.get("history4", []),
-                "history5": self.search_histories.get("history5", []),
-                "last_query": getattr(self, "query_expr", ""),
-                "last_group": self.history_selector.currentText() if hasattr(self, "history_selector") else "history5"
-            }
-            with open(filepath, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-        except Exception as e:
-            print(f"[ATSMainWindow] Direct history save failed: {e}")
-
 
     def _init_toolbar(self):
         toolbar = QToolBar("Main Controls")
@@ -2181,6 +2190,7 @@ class ATSMainWindow(QMainWindow):
         self.new_stock_panel.stock_selected.connect(self.link_stock)
         self.new_stock_panel.stock_double_clicked.connect(self.on_stock_clicked)
         self.top_tabs.addTab(self.new_stock_panel, "🆕 新股次新股 (IPO & 阶梯)")
+        self.top_tabs.currentChanged.connect(self._on_top_tab_changed)
         
         # 顶部主看板 Tab 右上角添加【🔥 涨停天梯】、【🎯 60f通道测算】与【🪟 SBC 重排】组合入口
         top_corner_container = QWidget()
@@ -2543,7 +2553,8 @@ class ATSMainWindow(QMainWindow):
         if self.query_combo.lineEdit():
             from PyQt6.QtCore import QTimer
             QTimer.singleShot(50, lambda: self.query_combo.lineEdit().setCursorPosition(0))
-                    
+            
+        self._save_search_history_data()
         toast_messageQT(self, f"✅ 策略命中统计完成 (n={len(target)})")
 
     def get_test_df_for_hits(self):
@@ -2615,7 +2626,15 @@ class ATSMainWindow(QMainWindow):
                 
                 self._on_history_group_changed()
                 
-        # 2. 广播更新所有相关可见窗口 (板块成分股明细、个股详情、分布图表)
+        # 2. 广播更新主界面三大 Tab 看板 (重点关注, 回调跟踪器, 新股次新股)
+        if hasattr(self, 'favorite_panel') and hasattr(self.favorite_panel, '_apply_row_visibility'):
+            self.favorite_panel._apply_row_visibility()
+        if hasattr(self, 'swing_table') and hasattr(self.swing_table, '_apply_favorite_filter'):
+            self.swing_table._apply_favorite_filter()
+        if hasattr(self, 'new_stock_panel') and hasattr(self.new_stock_panel, '_apply_filter'):
+            self.new_stock_panel._apply_filter()
+
+        # 3. 广播更新所有相关可见独立窗口 (板块成分股明细、个股详情、分布图表)
         for widget in QApplication.topLevelWidgets():
             if hasattr(widget, 'on_global_filter_changed') and widget.isVisible():
                 widget.on_global_filter_changed(self.query_expr)
@@ -2638,6 +2657,14 @@ class ATSMainWindow(QMainWindow):
         from ats.ui.styles import save_config_node
         save_config_node("ats_query_expr", "")
         
+        # 广播清空过滤状态至三大 Tab 看板
+        if hasattr(self, 'favorite_panel') and hasattr(self.favorite_panel, '_apply_row_visibility'):
+            self.favorite_panel._apply_row_visibility()
+        if hasattr(self, 'swing_table') and hasattr(self.swing_table, '_apply_favorite_filter'):
+            self.swing_table._apply_favorite_filter()
+        if hasattr(self, 'new_stock_panel') and hasattr(self.new_stock_panel, '_apply_filter'):
+            self.new_stock_panel._apply_filter()
+        
         for widget in QApplication.topLevelWidgets():
             if hasattr(widget, 'on_global_filter_changed') and widget.isVisible():
                 widget.on_global_filter_changed("")
@@ -2648,6 +2675,8 @@ class ATSMainWindow(QMainWindow):
         if hasattr(self, 'dist_chart'):
             df_to_update = self.current_df if self.current_df is not None else self.dist_chart.current_df
             self.dist_chart.update_data([], stats_dict=None, df_all=df_to_update)
+            
+        toast_messageQT(self, "✨ 策略过滤已清空")
 
     def view_filtered_stocks_dialog(self):
         query = self._get_real_query()
@@ -2799,20 +2828,40 @@ class ATSMainWindow(QMainWindow):
                 print(f"[Linkage] External linkage failed: {e}")
 
     def _on_top_tab_changed(self, index: int):
-        """主看板顶部 Tab 切换事件：极速 0ms 补齐渲染对应 Tab 页面数据"""
+        """主看板顶部 Tab 切换事件：极速 0ms 补齐渲染与同步对应 Tab 页面数据及策略过滤状态"""
         try:
+            from ats.ui.styles import load_config_node
+            saved_filter = load_config_node("ats_tab_filter_enabled", "false")
+            filter_is_on = (str(saved_filter).strip().lower() == "true")
+
             if index == 0:
                 # 切换到 ⭐ 重点关注 (基础重点)
-                if hasattr(self, 'favorite_panel') and hasattr(self, '_pending_fav_rows') and self._pending_fav_rows:
-                    self.favorite_panel.update_favorite_rows(self._pending_fav_rows)
+                if hasattr(self, 'favorite_panel'):
+                    if hasattr(self.favorite_panel, 'filter_enabled') and self.favorite_panel.filter_enabled != filter_is_on:
+                        self.favorite_panel.filter_enabled = filter_is_on
+                        self.favorite_panel._update_filter_button_ui()
+                    if hasattr(self, '_pending_fav_rows') and self._pending_fav_rows:
+                        self.favorite_panel.update_favorite_rows(self._pending_fav_rows)
+                    elif hasattr(self.favorite_panel, '_apply_row_visibility'):
+                        self.favorite_panel._apply_row_visibility()
             elif index == 1:
                 # 切换到 📉 大级别 MA20d 回调跟踪器
-                if hasattr(self, 'swing_table') and hasattr(self, '_pending_swing_rows') and self._pending_swing_rows:
-                    self.swing_table.update_data_list(self._pending_swing_rows)
+                if hasattr(self, 'swing_table'):
+                    if hasattr(self.swing_table, 'filter_enabled') and self.swing_table.filter_enabled != filter_is_on:
+                        self.swing_table.filter_enabled = filter_is_on
+                        self.swing_table._update_filter_button_ui()
+                    if hasattr(self, '_pending_swing_rows') and self._pending_swing_rows:
+                        self.swing_table.update_data_list(self._pending_swing_rows)
+                    elif hasattr(self.swing_table, '_apply_favorite_filter'):
+                        self.swing_table._apply_favorite_filter()
             elif index == 2:
                 # 切换到 🆕 新股次新股 (IPO & 阶梯)
-                if hasattr(self, 'new_stock_panel') and hasattr(self.new_stock_panel, 'refresh_favorites_display'):
-                    self.new_stock_panel.refresh_favorites_display()
+                if hasattr(self, 'new_stock_panel'):
+                    if hasattr(self.new_stock_panel, 'filter_enabled') and self.new_stock_panel.filter_enabled != filter_is_on:
+                        self.new_stock_panel.filter_enabled = filter_is_on
+                        self.new_stock_panel._update_filter_button_ui()
+                    if hasattr(self.new_stock_panel, '_apply_filter'):
+                        self.new_stock_panel._apply_filter()
         except Exception as e:
             logger.debug(f"[ATSMainWindow] _on_top_tab_changed error: {e}")
 
@@ -3017,55 +3066,51 @@ class ATSMainWindow(QMainWindow):
             return
 
         import time
-        self._next_auto_refresh_time = time.time() + 60.0
+        now = time.time()
+        self._next_auto_refresh_time = now + 60.0
         if hasattr(self, '_refresh_statusbar_time_display'):
             self._refresh_statusbar_time_display()
 
-        # 1. Periodically load and update DB data
+        # 1. 🛡️【冷启动/盘后 IPC 健壮同步】：若当前尚未收到全量行情快照，不受交易时间限制，定时重试请求全量同步
+        if not hasattr(self, "current_df") or self.current_df is None or self.current_df.empty:
+            if now - getattr(self, "_last_pipe_sync_t", 0) > 15:
+                self._last_pipe_sync_t = now
+                try:
+                    from data_utils import send_code_via_pipe, PIPE_NAME_TK
+                    import logging
+                    local_logger = logging.getLogger("ATS")
+                    send_code_via_pipe({"cmd": "REQ_FULL_SYNC", "port": 26670}, logger=local_logger, pipe_name=PIPE_NAME_TK)
+                except Exception as e:
+                    print(f"[ATSMainWindow] Cold-start REQ_FULL_SYNC failed: {e}")
+
+        # 2. 交易时段检查：非交易时段不执行高频 DB 轮询与热力图重刷
         try:
             is_work = cct.get_work_time()
         except Exception:
             is_work = False
         if not is_work:
-            # print("is not work time")
             return
 
+        # 3. 交易时段：定期加载 DB 数据与日志
         self.load_db_data()
         
-
-        # 2. Periodically load trace logs
         if hasattr(self, 'kernel_trace_panel'):
             self.kernel_trace_panel.load_trace_logs()
             
-        # 3. Periodically load sector heatmap
         if hasattr(self, 'heatmap_widget'):
             self.heatmap_widget.load_live_sectors()
 
-        # 4. Periodically request full sync if data is empty (cold start) or if we haven't received pushed data for > 10 minutes during trading hours
-        import time
-        now = time.time()
-        should_sync = False
-        if not hasattr(self, "current_df") or self.current_df is None or self.current_df.empty:
-            # 即使冷启动数据为空，也限制至少 15 秒请求一次，防止数据传输中高频重发导致堵塞
-            if now - getattr(self, "_last_pipe_sync_t", 0) > 15:
-                should_sync = True
-        else:
-            # 只有在交易时间段，且超过 10 分钟（600秒）没有收到更新时才手动请求一次，防止高频请求导致 TK 后台持续发送
-
-            
-            if is_work and (now - getattr(self, "_last_recv_t", 0) > 600):
-                if now - getattr(self, "_last_pipe_sync_t", 0) > 60:
-                    should_sync = True
-            
-        if should_sync:
-            self._last_pipe_sync_t = now
-            try:
-                from data_utils import send_code_via_pipe, PIPE_NAME_TK
-                import logging
-                local_logger = logging.getLogger("ATS")
-                send_code_via_pipe({"cmd": "REQ_FULL_SYNC", "port": 26670}, logger=local_logger, pipe_name=PIPE_NAME_TK)
-            except Exception as e:
-                print(f"[ATSMainWindow] Failed to send REQ_FULL_SYNC: {e}")
+        # 4. 交易时段 IPC 保活：若超过 10 分钟未收到任何推送，主动重试拉取全量同步
+        if now - getattr(self, "_last_recv_t", 0) > 600:
+            if now - getattr(self, "_last_pipe_sync_t", 0) > 60:
+                self._last_pipe_sync_t = now
+                try:
+                    from data_utils import send_code_via_pipe, PIPE_NAME_TK
+                    import logging
+                    local_logger = logging.getLogger("ATS")
+                    send_code_via_pipe({"cmd": "REQ_FULL_SYNC", "port": 26670}, logger=local_logger, pipe_name=PIPE_NAME_TK)
+                except Exception as e:
+                    print(f"[ATSMainWindow] Keep-alive REQ_FULL_SYNC failed: {e}")
 
     def _update_name_cache_from_df(self, df):
         if df is not None and not df.empty and 'name' in df.columns:
@@ -4011,7 +4056,13 @@ class ATSMainWindow(QMainWindow):
         has_df = self.current_df is not None and not self.current_df.empty
 
         # ── 快速任务：检查缺少行情/历史数据的标的，异步补齐 ──────────────────────
-        fav_stocks = self.signal_ledger.get_favorite_stocks_set()
+        try:
+            from global_favorites import GlobalFavoriteManager
+            fav_stocks = set(GlobalFavoriteManager().get_favorite_stocks())
+        except Exception:
+            fav_stocks = set()
+        if hasattr(self, 'signal_ledger') and hasattr(self.signal_ledger, 'get_favorite_stocks_set'):
+            fav_stocks = fav_stocks | self.signal_ledger.get_favorite_stocks_set()
 
         pool_codes = (list(self.universe_manager.radar_pool.keys()) +
                       list(self.universe_manager.watch_pool.keys()) +

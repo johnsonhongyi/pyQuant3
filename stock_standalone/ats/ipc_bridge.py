@@ -77,7 +77,7 @@ class IPCBridge:
 
     def _handle_client(self, conn, data_callback, signal_callback):
         try:
-            conn.settimeout(2.0)
+            conn.settimeout(5.0)
             prefix = conn.recv(4)
             if not prefix:
                 return
@@ -135,7 +135,7 @@ class IPCBridge:
                                 except Exception as sig_err:
                                     print(f"[IPCBridge] Error in batched signal callback: {sig_err}")
         except Exception as e:
-            pass
+            print(f"[IPCBridge] _handle_client exception: {e}")
         finally:
             try:
                 conn.close()
