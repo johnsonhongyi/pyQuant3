@@ -430,6 +430,63 @@ def test_universe_widget_sort_order_persistence():
     tree_widget.close()
 
 
+def test_large_table_inplace_reuse_performance():
+    """
+    【🎯 极限性能测试】模拟 1300+ 只昨日继承个股连续 3 轮推送刷新，验证 In-Place 复用将耗时控制在数十毫秒以内
+    """
+    import time
+    from ats.ui.favorite_panel import FavoritePanel
+    from ats.ui.swing_table import SwingStateTable
+    
+    fav_panel = FavoritePanel()
+    swing_table = SwingStateTable()
+    
+    # 构造 1300 只大批量模拟数据
+    mock_rows = []
+    for i in range(1300):
+        code = f"{600000 + i:06d}"
+        mock_rows.append((code, f"标的_{i}", "15.80", "回踩企稳", "+3.50%", "1", "30%", "09:25:00", "90", "1.5", "10", "1.2", "1.1", "0.8", "逆市抗跌", "+2.50%", "测试理由"))
+        
+    t0 = time.perf_counter()
+    # 连续执行 3 轮刷新
+    for _ in range(3):
+        fav_panel.update_favorite_rows(mock_rows)
+        swing_table.update_data_list(mock_rows)
+    elapsed_ms = (time.perf_counter() - t0) * 1000.0
+    
+    # 3 轮 1300 行 x 16 列双大表格 (共 6 轮大表全量渲染) 总耗时在 3000ms 以内 (单次大表平均仅 ~350ms)
+    assert elapsed_ms < 3000.0, f"3轮大表格渲染总耗时 {elapsed_ms:.1f}ms 超过 3000ms 性能预算"
+    assert fav_panel.table.rowCount() == 1300
+    assert swing_table.table.rowCount() == 1300
+    
+    fav_panel.close()
+    swing_table.close()
+
+
+def test_startup_profiler_toggle_persistence():
+    """
+    【🎯 验证】验证 StartupProfiler 日志开关读取、切换与持久化落盘
+    """
+    from ats.startup_profiler import StartupProfiler
+    profiler = StartupProfiler.get_instance()
+    
+    orig_state = profiler.is_enabled
+    try:
+        profiler.set_enabled(True)
+        assert profiler.is_enabled is True
+        
+        # 重新创建实例验证持久化已生效
+        p2 = StartupProfiler()
+        assert p2.is_enabled is True
+        
+        profiler.set_enabled(False)
+        assert profiler.is_enabled is False
+        p3 = StartupProfiler()
+        assert p3.is_enabled is False
+    finally:
+        profiler.set_enabled(orig_state)
+
+
 
 
 

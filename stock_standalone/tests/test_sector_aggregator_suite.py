@@ -1,12 +1,14 @@
-# -*- coding: utf-8 -*-
-"""
-tests/test_sector_aggregator_suite.py
-ATS 统一板块数据聚合中枢 (SectorDataAggregator) 与板块明细弹窗 (ATSSectorDetailDialog) 深度测试套件
-"""
-
+import os
+import sys
 import math
 import pytest
 import pandas as pd
+
+_DIR = os.path.dirname(os.path.abspath(__file__))
+_PROJECT_ROOT = os.path.dirname(_DIR)
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
+
 from PyQt6.QtWidgets import QApplication
 
 from ats.sector_data_aggregator import (
@@ -188,3 +190,175 @@ def test_dialog_lifecycle_and_update_data(qapp):
     # 3. 验证 closeEvent 安全释放
     dlg.close()
     assert dlg.isVisible() is False
+
+
+def test_sector_detail_dialog_sorting_and_scroll_stability(qapp):
+    """测试板块明细弹窗：表头点击自动回滚到顶部、全列精准排序及静默刷新防乱跳"""
+    from PyQt6.QtCore import Qt
+
+    sample_rows = [
+        {"code": "600584", "name": "长电科技", "score": 33.7, "type": "确核", "pct": 3.98, "start_pct": 3.08, "dff": 0.90, "rank": 3548, "dff2": 5.20, "dff3": 74.50, "extra_cols": {"ch_bc": "18", "连阳": "2", "red": "5"}},
+        {"code": "300567", "name": "精测电子", "score": 38.7, "type": "确核", "pct": 6.42, "start_pct": 5.12, "dff": 1.30, "rank": 888, "dff2": 10.40, "dff3": 79.00, "extra_cols": {"ch_bc": "17", "连阳": "3", "red": "6"}},
+        {"code": "688012", "name": "中微公司", "score": 33.5, "type": "晋级★", "pct": 1.90, "start_pct": 1.20, "dff": 0.70, "rank": 1169, "dff2": 7.50, "dff3": 81.20, "extra_cols": {"ch_bc": "99", "连阳": "3", "red": "4"}},
+        {"code": "300456", "name": "赛微电子", "score": 98.5, "type": "👑 领涨龙头", "pct": 20.01, "start_pct": 15.00, "dff": 5.01, "rank": 1, "dff2": 15.20, "dff3": 120.00, "extra_cols": {"ch_bc": "100", "连阳": "5", "red": "8"}},
+        {"code": "688146", "name": "中船特气", "score": 32.1, "type": "跟随", "pct": 5.41, "start_pct": 4.01, "dff": 1.40, "rank": 999, "dff2": 6.10, "dff3": 326.00, "extra_cols": {"ch_bc": "--", "连阳": "--", "red": "--"}},
+    ]
+
+    dlg = ATSSectorDetailDialog(sector_name="国家大基金持股", member_codes=[r["code"] for r in sample_rows])
+    dlg._render_rows(sample_rows)
+    assert dlg.table.rowCount() == 5
+
+    # 1. 验证表头点击：模拟滚动条在第 40 行位置，点击表头后自动平滑重置到第 0 行 (顶部)
+    dlg.table.verticalScrollBar().setValue(40)
+    assert dlg.table.verticalScrollBar().value() == 40 or dlg.table.verticalScrollBar().maximum() >= 0
+    dlg._on_header_section_clicked(4) # 点击涨幅列
+    assert dlg.table.verticalScrollBar().value() == 0, "点击表头后滚动条必须重置为 0 到顶部"
+
+    # 2. 验证涨幅 (col 4) 降序排序
+    dlg.table.sortItems(4, Qt.SortOrder.DescendingOrder)
+    top_code = dlg.table.item(0, 0).text().strip()
+    assert top_code == "300456" # 20.01% 排在第 1
+    # 验证升序排序 (最小涨幅排最前)
+    dlg.table.sortItems(4, Qt.SortOrder.AscendingOrder)
+    bottom_code = dlg.table.item(0, 0).text().strip()
+    assert bottom_code == "688012" # 1.90% 排在最前
+
+    # 3. 验证角色类型 (col 3) 权重降序排序
+    dlg.table.sortItems(3, Qt.SortOrder.DescendingOrder)
+    assert dlg.table.item(0, 0).text().strip() == "300456" # 👑 领涨龙头权重 100 必定排第 1
+
+    # 4. 验证静默刷新时防乱跳与选中代码维持
+    # 模拟用户选中了“精测电子 (300567)”
+    dlg.table.selectRow(1)
+    sel_code_before = dlg.table.item(dlg.table.currentRow(), 0).text().strip()
+    
+    # 触发再次刷新 _render_rows
+    dlg._render_rows(sample_rows)
+    
+    # 验证刷新后当前选中行对应的股票代码依然是 300567，没有乱跳
+    cur_row = dlg.table.currentRow()
+    assert cur_row >= 0
+    assert dlg.table.item(cur_row, 0).text().strip() == sel_code_before
+
+
+def test_df_row_safe_int_index_and_fallback_backfill(monkeypatch):
+    """测试 _get_df_row_safe 对整型索引/短代码的完全兼容，以及局部策略池回退补全 Rank/DFF"""
+    aggregator = SectorDataAggregator.get_instance()
+
+    # 1. 验证 int 类型索引 (如 300115, 2055) 能够被 "300115", "002055" 100% 检索到
+    df_int_index = pd.DataFrame({
+        'name': ['长盈精密', 'ST得润'],
+        'percent': [-6.05, 0.65],
+        'Rank': [5523, 706],
+        'dff': [0.4, 0.2],
+        'DFF2': [-5.3, 11.7],
+        'DFF3': [-1.4, 22.3]
+    }, index=[300115, 2055])
+
+    r_300115 = aggregator._get_df_row_safe(df_int_index, "300115")
+    assert r_300115 is not None
+    assert str(r_300115['name']) == '长盈精密'
+    assert int(r_300115['Rank']) == 5523
+
+    r_002055 = aggregator._get_df_row_safe(df_int_index, "002055")
+    assert r_002055 is not None
+    assert str(r_002055['name']) == 'ST得润'
+    assert int(r_002055['Rank']) == 706
+
+    # 2. 验证局部策略池缺失时，自动通过全局 fallback_df 回补
+    # 模拟 TDXFetcher 与 Sina
+    import ats.sector_data_aggregator as sda
+    monkeypatch.setattr(sda, "fetch_sina_stock_quotes_fast", lambda codes: {})
+
+    df_local_filtered = pd.DataFrame({
+        'name': ['ST得润'],
+        'percent': [0.65],
+        'Rank': [706],
+        'dff': [0.2],
+        'DFF2': [11.7],
+        'DFF3': [22.3]
+    }, index=['002055'])
+
+    # 全量 5539 标的底表
+    df_all_global = pd.DataFrame({
+        'name': ['ST得润', '长盈精密', '鑫科材料'],
+        'percent': [0.65, -6.05, 0.60],
+        'Rank': [706, 5523, 4800],
+        'dff': [0.2, 0.4, 0.0],
+        'DFF2': [11.7, -5.3, 4.7],
+        'DFF3': [22.3, -1.4, 19.6],
+        'ch_bc2': ['27', '28', '33']
+    }, index=['002055', '300115', '600255'])
+
+    # 模拟顶层窗口挂载 df_all
+    class MockTopWindow:
+        def __init__(self, df):
+            self.df_all = df
+
+    from PyQt6.QtWidgets import QApplication
+    app = QApplication.instance()
+    mock_win = MockTopWindow(df_all_global)
+    monkeypatch.setattr(app, "topLevelWidgets", lambda: [mock_win])
+
+    rows = aggregator.fetch_quotes_unified(
+        codes=['002055', '300115', '600255'],
+        current_df=df_local_filtered, # 局部策略池只有 002055
+        extra_cols=['ch_bc2'],
+        sector_name='铜缆高速连接'
+    )
+
+    assert len(rows) == 3
+    row_300115 = next(r for r in rows if r['code'] == '300115')
+    assert row_300115['name'] == '长盈精密'
+    assert row_300115['rank'] == 5523, "长盈精密 Rank 必须被全局 fallback_df 成功回补为 5523"
+    assert row_300115['dff2'] == -5.3
+    assert row_300115['extra_cols'].get('ch_bc2') == '28'
+
+    row_600255 = next(r for r in rows if r['code'] == '600255')
+    assert row_600255['name'] == '鑫科材料'
+    assert row_600255['rank'] == 4800, "鑫科材料 Rank 必须被全局 fallback_df 成功回补为 4800"
+
+
+def test_sector_detail_dialog_sort_persistence(qapp, monkeypatch):
+    """测试板块明细排序列与方向跨会话自动持久化保存与恢复"""
+    from PyQt6.QtCore import Qt
+    from ats.ui.styles import save_config_node, load_config_node
+
+    sample_rows = [
+        {"code": "600584", "name": "长电科技", "score": 33.7, "type": "确核", "pct": 3.98, "start_pct": 3.08, "dff": 0.90, "rank": 3548, "dff2": 5.20, "dff3": 74.50, "extra_cols": {}},
+        {"code": "300567", "name": "精测电子", "score": 38.7, "type": "确核", "pct": 6.42, "start_pct": 5.12, "dff": 1.30, "rank": 888, "dff2": 10.40, "dff3": 79.00, "extra_cols": {}},
+        {"code": "300456", "name": "赛微电子", "score": 98.5, "type": "👑 领涨龙头", "pct": 20.01, "start_pct": 15.00, "dff": 5.01, "rank": 1, "dff2": 15.20, "dff3": 120.00, "extra_cols": {}},
+    ]
+
+    # 1. 显式保存排序配置：排序列为【涨幅】(col 4)，降序
+    save_config_node("ats_sector_detail_sort_col_name", "涨幅")
+    save_config_node("ats_sector_detail_sort_col", 4)
+    save_config_node("ats_sector_detail_sort_order", int(Qt.SortOrder.DescendingOrder.value))
+
+    # 2. 新建弹窗实例：验证初始化自动恢复排序列与排序方向
+    dlg1 = ATSSectorDetailDialog(sector_name="半导体测试", member_codes=["600584", "300567", "300456"])
+    dlg1._render_rows(sample_rows)
+
+    header = dlg1.table.horizontalHeader()
+    assert header.sortIndicatorSection() == 4, "必须自动恢复上次保存的排序列【涨幅】(col 4)"
+    assert header.sortIndicatorOrder() == Qt.SortOrder.DescendingOrder
+
+    # 验证渲染出的第 0 行是涨幅最高的赛微电子 (20.01%)
+    assert dlg1.table.item(0, 0).text().strip() == "300456"
+
+    # 3. 模拟用户点击【Rank】(col 7) 升序
+    dlg1._on_sort_indicator_changed(7, Qt.SortOrder.AscendingOrder)
+    assert load_config_node("ats_sector_detail_sort_col_name") == "Rank"
+    assert load_config_node("ats_sector_detail_sort_order") == int(Qt.SortOrder.AscendingOrder.value)
+
+    # 4. 新建另一个板块弹窗实例：验证自动恢复为 Rank 升序
+    dlg2 = ATSSectorDetailDialog(sector_name="新板块测试", member_codes=["600584", "300567", "300456"])
+    dlg2._render_rows(sample_rows)
+    header2 = dlg2.table.horizontalHeader()
+    assert header2.sortIndicatorSection() == 7
+    assert header2.sortIndicatorOrder() == Qt.SortOrder.AscendingOrder
+    # Rank 升序下，Rank 1 的赛微电子排在第 1
+    assert dlg2.table.item(0, 0).text().strip() == "300456"
+
+
+

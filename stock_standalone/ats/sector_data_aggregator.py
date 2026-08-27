@@ -221,11 +221,11 @@ class SectorDataAggregator:
             return cls._instance
 
     def _get_df_row_safe(self, df: Optional[pd.DataFrame], code_str: str) -> Optional[Any]:
-        """从 DataFrame 中安全、多格式兼容地检索对应股票行 (支持 6 位纯数字/原字符串/带前缀/列匹配)"""
+        """从 DataFrame 中安全、多格式兼容地检索对应股票行 (支持 6 位纯数字/原字符串/整型索引/带前缀/列匹配)"""
         if df is None or df.empty:
             return None
         c_clean = str(code_str).strip().zfill(6)
-        # 尝试 1: 直接 6 位纯数字
+        # 尝试 1: 直接 6 位纯数字字符串
         if c_clean in df.index:
             r = df.loc[c_clean]
             return r.iloc[0] if isinstance(r, pd.DataFrame) else r
@@ -233,13 +233,26 @@ class SectorDataAggregator:
         if code_str in df.index:
             r = df.loc[code_str]
             return r.iloc[0] if isinstance(r, pd.DataFrame) else r
-        # 尝试 3: 带市场前缀
+        # 尝试 3: 整型索引匹配 (如 300115 或 2055)
+        try:
+            c_int = int(c_clean)
+            if c_int in df.index:
+                r = df.loc[c_int]
+                return r.iloc[0] if isinstance(r, pd.DataFrame) else r
+            # 也尝试去掉前导 0 的字符串 (如 '2055')
+            c_stripped = str(c_int)
+            if c_stripped in df.index:
+                r = df.loc[c_stripped]
+                return r.iloc[0] if isinstance(r, pd.DataFrame) else r
+        except Exception:
+            pass
+        # 尝试 4: 带市场前缀 (sh600000, sz000001, etc.)
         for pfx in ('sh', 'sz', 'bj', 'SH', 'SZ', 'BJ'):
             cand = f"{pfx}{c_clean}"
             if cand in df.index:
                 r = df.loc[cand]
                 return r.iloc[0] if isinstance(r, pd.DataFrame) else r
-        # 尝试 4: 存在 'code' 字段列
+        # 尝试 5: 存在 'code' 字段列
         if 'code' in df.columns:
             try:
                 matched = df[df['code'].astype(str).str.strip().str.zfill(6) == c_clean]
@@ -516,12 +529,12 @@ class SectorDataAggregator:
                 for c in clean_codes:
                     r_row = self._get_df_row_safe(current_df, c)
                     if r_row is not None:
-                        n_map[c] = str(r_row.get('name', c))
+                        n_map[c] = str(r_row.get('name', r_row.get('名称', c)))
                         mp_cache[c] = {
-                            'dff': _safe_float(r_row.get('dff')),
+                            'dff': _safe_float(r_row.get('dff', r_row.get('DFF'))),
                             'dff2': _safe_float(r_row.get('DFF2', r_row.get('dff2'))),
                             'dff3': _safe_float(r_row.get('DFF3', r_row.get('dff3'))),
-                            'rank': _safe_int(r_row.get('Rank', r_row.get('rank', 999)), 999)
+                            'rank': _safe_int(r_row.get('Rank', r_row.get('rank', r_row.get('排名', r_row.get('topR', 999)))), 999)
                         }
             alpha_quotes = fetcher.fetch_multi_stock_alpha_quotes(clean_codes, sec_map, mp_cache, n_map)
             for aq in alpha_quotes:
@@ -536,6 +549,24 @@ class SectorDataAggregator:
         missing_codes = [c for c in clean_codes if c not in tdx_quote_map or tdx_quote_map[c].get('price', 0) <= 0]
         if missing_codes:
             sina_quotes_map = fetch_sina_stock_quotes_fast(missing_codes)
+
+        # 2.5 探测全量快照底表 (当 current_df 仅为局部策略过滤池时用于回补 Rank、DFF2、DFF3 等指标)
+        fallback_df = None
+        if current_df is None or len(current_df) < 1500:
+            try:
+                from PyQt6.QtWidgets import QApplication
+                app = QApplication.instance()
+                if app:
+                    for top_w in app.topLevelWidgets():
+                        for attr in ('df_all', '_last_flat_df', 'flat_df', 'last_result_df', 'current_df', 'top_now'):
+                            cand = getattr(top_w, attr, None)
+                            if cand is not None and isinstance(cand, pd.DataFrame) and len(cand) > len(current_df if current_df is not None else []):
+                                fallback_df = cand
+                                break
+                        if fallback_df is not None:
+                            break
+            except Exception:
+                pass
 
         # 3. 组装行数据
         rows = []
@@ -554,17 +585,36 @@ class SectorDataAggregator:
             pattern_hint = "行业核心中军"
             type_str = "跟涨"
 
-            # ── 💡 动态列与策略自定义列：100% 全部使用 df 获取 ──
+            # ── 💡 动态列与策略自定义列：优先从 current_df 获取，缺失时自动从 fallback_df 回补 ──
             row = self._get_df_row_safe(current_df, code_str)
             if row is not None:
-                name_df = str(row.get('name', '')).strip()
+                name_df = str(row.get('name', row.get('名称', ''))).strip()
                 if name_df and name_df != "未知":
                     name = name_df
-                pct_val = _safe_float(row.get('percent', row.get('pct', 0.0)))
-                dff_val = _safe_float(row.get('dff', 0.0))
-                rank_val = _safe_int(row.get('Rank', row.get('rank', 0)))
+                pct_val = _safe_float(row.get('percent', row.get('pct', row.get('涨幅', 0.0))))
+                dff_val = _safe_float(row.get('dff', row.get('DFF', 0.0)))
+                rank_val = _safe_int(row.get('Rank', row.get('rank', row.get('排名', row.get('topR', 0)))))
                 dff2_val = _safe_float(row.get('DFF2', row.get('dff2', 0.0)))
                 dff3_val = _safe_float(row.get('DFF3', row.get('dff3', 0.0)))
+
+            # 🛡️【二级回补兜底】：如果当前策略池缺少该股票或 rank/dff 缺失，从全量快照池 fallback_df 补齐
+            if fallback_df is not None and (row is None or rank_val == 0 or dff2_val == 0.0):
+                row_fb = self._get_df_row_safe(fallback_df, code_str)
+                if row_fb is not None:
+                    if not name or name == "个股" or name == code_str:
+                        name_fb = str(row_fb.get('name', row_fb.get('名称', ''))).strip()
+                        if name_fb and name_fb != "未知":
+                            name = name_fb
+                    if pct_val == 0.0:
+                        pct_val = _safe_float(row_fb.get('percent', row_fb.get('pct', row_fb.get('涨幅', 0.0))))
+                    if dff_val == 0.0:
+                        dff_val = _safe_float(row_fb.get('dff', row_fb.get('DFF', 0.0)))
+                    if rank_val == 0:
+                        rank_val = _safe_int(row_fb.get('Rank', row_fb.get('rank', row_fb.get('排名', row_fb.get('topR', 0)))))
+                    if dff2_val == 0.0:
+                        dff2_val = _safe_float(row_fb.get('DFF2', row_fb.get('dff2', 0.0)))
+                    if dff3_val == 0.0:
+                        dff3_val = _safe_float(row_fb.get('DFF3', row_fb.get('dff3', 0.0)))
 
             # ── 💡 基础数据：优先使用 TDX API 权威实时行情驱动 ──
             tq = tdx_quote_map.get(code_str)
@@ -588,7 +638,7 @@ class SectorDataAggregator:
                 vol_r = _safe_float(aq.get("vol_ratio", 1.0), 1.0)
                 pattern_hint = f"{aq.get('buy_tag', '')} | VWAP偏离{vwap_dev:+.1f}% | 量比{vol_r:.1f}"
 
-            # ── 💡 动态自定义列：从 df 严格映射提取 ──
+            # ── 💡 动态自定义列：从 df 严格映射提取 (优先 current_df，缺失从 fallback_df 补齐) ──
             extra_dict = {}
             for ec in extra_cols:
                 val_raw = None
@@ -597,6 +647,13 @@ class SectorDataAggregator:
                         if k in row:
                             val_raw = row[k]
                             break
+                if val_raw is None and fallback_df is not None:
+                    row_fb = self._get_df_row_safe(fallback_df, code_str)
+                    if row_fb is not None:
+                        for k in (ec, ec.lower(), ec.upper()):
+                            if k in row_fb:
+                                val_raw = row_fb[k]
+                                break
                 extra_dict[ec] = cct.format_col_value(ec, val_raw)
 
             rows.append({
