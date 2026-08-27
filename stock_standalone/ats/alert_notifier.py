@@ -72,27 +72,28 @@ def load_toast_screen_config():
 
     # ── 物理级多屏幕自修复 (Self-Healing Fallback) ──
     try:
-        screens = QApplication.screens()
-        # 1. 屏幕索引失效自修复 (如拔掉副屏后)
-        if target_screen_index is not None:
-            if not (0 <= target_screen_index < len(screens)):
-                logger.warning(f"⚠️ [ALERT_SCREEN_HEAL] 检测到保存的显示器索引 [{target_screen_index}] 已失效(当前仅有 {len(screens)} 块物理屏幕)，自动自愈复位至主屏幕!")
-                target_screen_index = None
-                save_toast_screen_config(target_screen_index=None, custom_pos=None)
+        screens = QApplication.screens() if HAS_PYQT and QApplication.instance() else []
+        if screens:
+            # 1. 屏幕索引失效自修复 (如拔掉副屏后)
+            if target_screen_index is not None:
+                if not (0 <= target_screen_index < len(screens)):
+                    logger.warning(f"⚠️ [ALERT_SCREEN_HEAL] 检测到保存的显示器索引 [{target_screen_index}] 已失效(当前仅有 {len(screens)} 块物理屏幕)，自动自愈复位至主屏幕!")
+                    target_screen_index = None
+                    save_toast_screen_config(target_screen_index=None, custom_pos=None)
 
-        # 2. 坐标越界与盲区自修复 (如副屏断开或分辨率缩小变异)
-        if custom_pos is not None:
-            pt = QPoint(custom_pos[0], custom_pos[1])
-            is_valid_point = False
-            for scr in screens:
-                # 检查点是否在任何一个物理屏幕的可视几何区域内 (给予 30px 外围容错)
-                if scr.geometry().adjusted(-30, -30, 30, 30).contains(pt):
-                    is_valid_point = True
-                    break
-            if not is_valid_point:
-                logger.warning(f"⚠️ [ALERT_SCREEN_HEAL] 检测到持久化坐标 {custom_pos} 落在无效/已断开的屏幕盲区中，自动自愈复位到当前屏幕可视区域!")
-                custom_pos = None
-                save_toast_screen_config(target_screen_index=target_screen_index, custom_pos=None)
+            # 2. 坐标越界与盲区自修复 (如副屏断开或分辨率缩小变异)
+            if custom_pos is not None:
+                pt = QPoint(custom_pos[0], custom_pos[1])
+                is_valid_point = False
+                for scr in screens:
+                    # 检查点是否在任何一个物理屏幕的可视几何区域内 (给予 30px 外围容错)
+                    if scr.geometry().adjusted(-30, -30, 30, 30).contains(pt):
+                        is_valid_point = True
+                        break
+                if not is_valid_point:
+                    logger.warning(f"⚠️ [ALERT_SCREEN_HEAL] 检测到持久化坐标 {custom_pos} 落在无效/已断开的屏幕盲区中，自动自愈复位到当前屏幕可视区域!")
+                    custom_pos = None
+                    save_toast_screen_config(target_screen_index=target_screen_index, custom_pos=None)
     except Exception as e_heal:
         logger.debug(f"Toast screen self-healing check error: {e_heal}")
 
@@ -100,7 +101,9 @@ def load_toast_screen_config():
     InAppToastWidget._custom_pos = custom_pos
 
 
-def save_toast_screen_config(target_screen_index: Optional[int] = None, custom_pos: Optional[Tuple[int, int]] = None,
+_UNSET_VAL = object()
+
+def save_toast_screen_config(target_screen_index: Any = _UNSET_VAL, custom_pos: Any = _UNSET_VAL,
                             voice_enabled: Optional[bool] = None, toast_enabled: Optional[bool] = None):
     """原子写盘持久化保存 Toast 显示器偏好、自定义拖拽坐标与全局语音/弹窗开关到 JSON 文件"""
     global _GLOBAL_VOICE_ENABLED, _GLOBAL_TOAST_ENABLED
@@ -116,10 +119,15 @@ def save_toast_screen_config(target_screen_index: Optional[int] = None, custom_p
             except Exception:
                 existing = {}
 
-        if target_screen_index is not None or "target_screen_index" not in existing:
+        if target_screen_index is not _UNSET_VAL:
             existing["target_screen_index"] = target_screen_index
-        if custom_pos is not None or "custom_pos" not in existing:
+        elif "target_screen_index" not in existing:
+            existing["target_screen_index"] = None
+
+        if custom_pos is not _UNSET_VAL:
             existing["custom_pos"] = list(custom_pos) if custom_pos else None
+        elif "custom_pos" not in existing:
+            existing["custom_pos"] = None
 
         if voice_enabled is not None:
             existing["voice_enabled"] = bool(voice_enabled)

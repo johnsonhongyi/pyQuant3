@@ -21,6 +21,11 @@ from ats.alert_notifier import (
 
 class TestAlertNotifierScreenPersistence(unittest.TestCase):
 
+    @classmethod
+    def setUpClass(cls):
+        from PyQt6.QtWidgets import QApplication
+        cls.app = QApplication.instance() or QApplication(sys.argv)
+
     def test_save_and_load_config(self):
         # 1. 测试正常保存与读取
         save_toast_screen_config(target_screen_index=0, custom_pos=(500, 300))
@@ -41,6 +46,12 @@ class TestAlertNotifierScreenPersistence(unittest.TestCase):
         load_toast_screen_config()
         # 应当自愈重置为 None
         self.assertIsNone(InAppToastWidget._custom_pos)
+
+    @classmethod
+    def tearDownClass(cls):
+        # 测试套件执行完毕后，强制复原为默认干净配置，避免残留 (99999, 99999) 测试坐标
+        save_toast_screen_config(target_screen_index=0, custom_pos=None)
+        load_toast_screen_config()
 
     def test_dpi_scale_calc(self):
         scale = get_screen_dpi_scale(None)
