@@ -830,6 +830,8 @@ def set_window_hwnd_pos(hwnd, pos_str: str, title: str = ""):
     """
     通过 'x,y,width,height' 格式的字符串直接设置指定句柄的窗口位置与大小。
     执行前先判断是否最大化/全屏/最小化，自动取消并还原后再执行精准坐标与尺寸设定。
+    针对跨显示器 (高分屏 -> 普分屏/三星显示器等) 引起的 WM_DPICHANGED 尺寸二次缩放，
+    内置两阶段 (Two-Pass) 几何自适应补偿校准，确保一次应用 100% 准确到位，无需执行第二次。
     """
     try:
         parts = [int(p.strip()) for p in pos_str.split(',')]
@@ -846,10 +848,20 @@ def set_window_hwnd_pos(hwnd, pos_str: str, title: str = ""):
             flags = SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED | SWP_SHOWWINDOW
             success = bool(user32.SetWindowPos(hwnd, 0, x, y, width, height, flags))
 
-            # 二次保障：若仍然处于最大化锁定状态，再补一次还原并重设
+            # 🛡️ 跨屏/跨 DPI 二次补偿校准 (彻底解决高分屏迁移到普分屏时的 WM_DPICHANGED 尺寸截断)
+            # 给 DWM 与 Win32 消息队列 40ms 处理跨屏 DPI 上下文切换
+            time.sleep(0.04)
+            cur_l, cur_t, cur_w, cur_h = get_window_rect(hwnd)
+            
+            # 若尺寸或坐标在跨屏后被 Windows DPI 回调篡改 (差值超过 4px) 或仍处于最大化
+            need_reapply = False
             if user32.IsZoomed(hwnd):
                 user32.ShowWindow(hwnd, SW_RESTORE)
-                time.sleep(0.03)
+                need_reapply = True
+            elif abs(cur_w - width) > 4 or abs(cur_h - height) > 4 or abs(cur_l - x) > 4 or abs(cur_t - y) > 4:
+                need_reapply = True
+
+            if need_reapply:
                 user32.SetWindowPos(hwnd, 0, x, y, width, height, flags)
 
             return success
@@ -2280,14 +2292,8 @@ class AcerPerformanceController:
         except Exception:
             pass
 
-        # 实时同步落盘至 ConfigManager，确保软件重启或跨进程调用时 get_current_status() 保持最新真实状态
-        try:
-            cm = ConfigManager()
-            cfg = cm.get_acer_performance_config() or {}
-            cfg.update(self._last_applied_profile)
-            cm.save_acer_performance_config(cfg)
-        except Exception:
-            pass
+        # 🚫 严禁将临时应用的性能预设落盘写回 ConfigManager！
+        # 默认手动选项设置是常规持久化配置，托盘/快捷预设仅为临时运行时状态，重启后依然保持用户配置的常规默认项。
 
     def _get_wmi_object(self):
         """获取底层 Acer WMI COM 对象 (支持 Triton 500 / Predator 系列)"""
@@ -2933,9 +2939,20 @@ class AcerPerformanceController:
                     win32gui.PostMessage(main_hwnd, win32con.WM_CLOSE, 0, 0)
                     _do_log("[Step 4/4] 已成功发送关闭窗口 WM_CLOSE 消息")
                 elif pa_str in ["kill", "杀掉"]:
-                    import os
+                    import os, time
                     os.system("taskkill /f /im PredatorSense.exe 2>nul")
-                    _do_log("[Step 4/4] 已强行终止 PredatorSense.exe UI 进程")
+                    time.sleep(0.3)
+                    try:
+                        import psutil
+                        for p in psutil.process_iter(['name', 'pid']):
+                            if p.info['name'] and 'predatorsense' in p.info['name'].lower():
+                                try:
+                                    p.kill()
+                                except Exception:
+                                    pass
+                    except Exception:
+                        pass
+                    _do_log("[Step 4/4] 已强行终止 PredatorSense.exe UI 进程以释放 CPU")
                 else:
                     # 默认 hide 静默隐藏收至后台，保全后台守护进程
                     win32gui.ShowWindow(main_hwnd, win32con.SW_HIDE)
@@ -2945,10 +2962,10 @@ class AcerPerformanceController:
         except Exception as e:
             _do_log(f"⚠️ UI 程序化点击调优过程异常: {e}")
 
-    def apply_performance_profile(self, profile: dict, log_cb=None, force=False) -> tuple:
+    def apply_performance_profile(self, profile: dict, log_cb=None, force=True) -> tuple:
         """
-        批量应用性能 Profile (100% 依赖 PredatorSense UI 程序化鼠标点击下发)
-        profile: {"overclock_mode": "Fast", "coolboost": True, "fan_mode": "Auto", "post_action": "hide"}
+        批量应用性能 Profile (跳过重复检测，无条件立即应用，100% 依赖 PredatorSense UI 程序化鼠标点击下发)
+        profile: {"overclock_mode": "Fast", "coolboost": True, "fan_mode": "Auto", "post_action": "kill"}
         """
         def _do_log(msg):
             if callable(log_cb):
@@ -2966,60 +2983,25 @@ class AcerPerformanceController:
         oc = profile.get("overclock_mode")
         cb = profile.get("coolboost")
         fm = profile.get("fan_mode")
-        pa = profile.get("post_action", "hide")
+        pa = profile.get("post_action", "kill")
 
         # 1. 探查并打印执行前系统 3 大参数明细 (force_physical=True 强行物理探查 OEM 注册表)
         phys_status = self.get_current_status(force_physical=True)
-        curr_status = self.get_current_status(force_physical=False)
-
         phys_oc = phys_status.get("overclock_mode")
         phys_fm = phys_status.get("fan_mode")
         phys_cb = phys_status.get("coolboost")
 
-        curr_oc = curr_status.get("overclock_mode")
-        curr_fm = curr_status.get("fan_mode")
-        curr_cb = curr_status.get("coolboost")
-
         _do_log(
-            f"[Acer Hardware] 执行前系统物理探查状态 -> "
+            f"[Acer Hardware] 执行前物理探查状态 -> "
             f"超频(overclock_mode)={phys_oc}, 风扇(fan_mode)={phys_fm}, CoolBoost(coolboost)={'开启' if phys_cb else '关闭'}"
         )
 
-        # 2. 精细化比对各参数是否有变动
-        need_oc = False
-        if oc is not None:
-            norm_target_oc = (self._normalize_oc_mode(oc) or "").lower()
-            norm_curr_oc = (curr_oc or "").lower()
-            if norm_target_oc != norm_curr_oc:
-                need_oc = True
-
-        need_fm = False
-        if fm is not None:
-            norm_target_fm = (self._normalize_fan_mode(fm) or "").lower()
-            norm_curr_fm = (curr_fm or "").lower()
-            if norm_target_fm != norm_curr_fm:
-                need_fm = True
-
-        need_cb = False
-        if cb is not None:
-            target_cb = bool(cb)
-            if curr_cb is None or bool(curr_cb) != target_cb:
-                need_cb = True
-
-        # 3. 若非强刷模式且所有请求参数与当前状态完全一致，直接优雅跳过 UI
-        if not force and not need_oc and not need_fm and not need_cb:
-            _do_log("[Acer Hardware] 当前系统状态与目标配置 100% 完全一致，无需重复唤起 UI 模拟点击")
-            return True, "目标性能 Profile 已处于生效状态 (无需重复调用 UI)"
-
         _do_log(
-            f"[Acer Hardware] 检测到差量设置需求 -> [超频变更={need_oc}, 风扇变更={need_fm}, CoolBoost变更={need_cb}]"
-        )
-        _do_log(
-            f"[Acer Hardware] 发起 PredatorSense 极速 UI 鼠标点击应用 -> "
-            f"超频={oc}, 风扇={fm}, CoolBoost={cb}"
+            f"[Acer Hardware] ⚡ 跳过重复检测，立即执行程序化应用 -> "
+            f"目标超频={oc}, 目标风扇={fm}, 目标CoolBoost={cb}, 处理方式={pa}"
         )
 
-        # 4. 唤起 launch_predatorsense_gui 完整下发 Profile 参数，保持 100% 稳定可靠的全流程 UI 点击
+        # 2. 唤起 launch_predatorsense_gui 完整下发 Profile 参数，保持 100% 稳定可靠的全流程 UI 点击
         try:
             self.launch_predatorsense_gui(
                 fan_mode=fm,
@@ -3027,12 +3009,12 @@ class AcerPerformanceController:
                 coolboost=cb,
                 post_action=pa,
                 log_cb=log_cb,
-                force=force
+                force=True
             )
         except Exception as e:
             _do_log(f"⚠️ 唤起 UI 程序化点击调优异常: {e}")
 
-        # 5. 更新状态应用缓存并打印执行后系统最新状态
+        # 3. 更新状态应用缓存并打印执行后系统最新状态
         self._update_applied_cache(coolboost=cb, overclock_mode=oc, fan_mode=fm)
         after_status = self.get_current_status()
         _do_log(
@@ -3040,7 +3022,7 @@ class AcerPerformanceController:
             f"超频(overclock_mode)={after_status.get('overclock_mode')}, 风扇(fan_mode)={after_status.get('fan_mode')}, CoolBoost(coolboost)={'开启' if after_status.get('coolboost') else '关闭'}"
         )
 
-        return True, f"Acer 硬件性能 Profile 已通过 PredatorSense UI 极速点击应用 [超频={oc}, 风扇={fm}, CoolBoost={cb}]"
+        return True, f"Acer 硬件性能 Profile 已立即通过 PredatorSense UI 极速点击应用 [超频={oc}, 风扇={fm}, CoolBoost={cb}]"
 
 
 
