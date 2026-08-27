@@ -1435,12 +1435,12 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
                 return (0, -f_v if is_descending else f_v)
             return (1, 0.0)
 
-        # 14. Rank 列 (1 <= rank <= 500 为有效，越小越强)
+        # 14. Rank 列 (1 <= rank <= 9999 为有效全市场排名，越小越强)
         elif col_idx == 14:
-            rk = _safe_int(r.get("rank", 999))
-            if 0 < rk < 999:
+            rk = _safe_int(r.get("rank", r.get("Rank", 0)), 0)
+            if rk > 0:
                 return (0, float(rk) if is_descending else -float(rk))
-            return (1, 999.0)
+            return (1, 99999.0)
 
         # 15. DFF2
         elif col_idx == 15:
@@ -1989,10 +1989,10 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
                 vol_ratio = _safe_float(r.get("vol_ratio", 1.0))
                 amt_yi = _safe_float(r.get("amount_yi", 0.0))
 
-                dff = _safe_float(r.get("dff", 0.0))
-                rank_val = _safe_int(r.get("rank", 999))
-                dff2 = _safe_float(r.get("dff2", 0.0))
-                dff3 = _safe_float(r.get("dff3", 0.0))
+                dff = _safe_float(r.get("dff", r.get("DFF", 0.0)))
+                rank_val = _safe_int(r.get("rank", r.get("Rank", r.get("排名", 0))), 0)
+                dff2 = _safe_float(r.get("dff2", r.get("DFF2", 0.0)))
+                dff3 = _safe_float(r.get("dff3", r.get("DFF3", 0.0)))
                 rs_val = _safe_float(r.get("rs_val", 0.0))
                 resonance = str(r.get("resonance", "同步整理"))
                 category = str(r.get("category", "--"))
@@ -2149,9 +2149,9 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
                 self._set_table_item(row_idx, col, f"{dff:+.2f}", user_data=dff, fg=dff_fg,
                                      align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter); col += 1
 
-                # 14. Rank
-                rank_txt = str(rank_val) if rank_val < 999 else "--"
-                rank_data = rank_val if rank_val < 999 else None
+                # 14. Rank (全市场 1~9999 排名精准展示，0 或缺失显示 --)
+                rank_txt = str(rank_val) if rank_val > 0 else "--"
+                rank_data = rank_val if rank_val > 0 else None
                 self._set_table_item(row_idx, col, rank_txt, user_data=rank_data, fg=QColor("#e2e2e5"),
                                      align=Qt.AlignmentFlag.AlignCenter); col += 1
 

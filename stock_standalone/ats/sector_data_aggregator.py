@@ -534,7 +534,7 @@ class SectorDataAggregator:
                             'dff': _safe_float(r_row.get('dff', r_row.get('DFF'))),
                             'dff2': _safe_float(r_row.get('DFF2', r_row.get('dff2'))),
                             'dff3': _safe_float(r_row.get('DFF3', r_row.get('dff3'))),
-                            'rank': _safe_int(r_row.get('Rank', r_row.get('rank', r_row.get('排名', r_row.get('topR', 999)))), 999)
+                            'rank': _safe_int(r_row.get('Rank', r_row.get('rank', r_row.get('排名', r_row.get('topR', 0)))), 0)
                         }
             alpha_quotes = fetcher.fetch_multi_stock_alpha_quotes(clean_codes, sec_map, mp_cache, n_map)
             for aq in alpha_quotes:

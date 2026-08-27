@@ -13,6 +13,7 @@ ats/ui/hot_sector_leaderboard.py — Top 3 强势板块龙头突击跟单看板 
 import os
 import json
 import time
+import math
 import threading
 from typing import Optional, List, Dict, Any
 
@@ -40,6 +41,32 @@ from JohnsonUtil import commonTips as cct
 
 logger = LoggerFactory.getLogger(__name__)
 _CONFIG_FILE_LOCK = threading.RLock()
+
+
+def _safe_float(val: Any, default: float = 0.0) -> float:
+    """健壮的浮点数安全转换函数"""
+    if val is None or val == "" or val == "-" or val == "--" or val == "null" or val == "None":
+        return default
+    try:
+        f = float(val)
+        if math.isnan(f) or math.isinf(f):
+            return default
+        return f
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_int(val: Any, default: int = 0) -> int:
+    """健壮的整数安全转换函数"""
+    if val is None or val == "" or val == "-" or val == "--" or val == "null" or val == "None":
+        return default
+    try:
+        f = float(val)
+        if math.isnan(f) or math.isinf(f):
+            return default
+        return int(f)
+    except (TypeError, ValueError):
+        return default
 
 
 def get_leaderboard_headers(extra_cols=None):
@@ -1158,10 +1185,10 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
         intent = r.get("order_intent", "⚖️ 均衡博弈")
         slope = r["slope_score"]
         vwap_dev = r["vwap_dev_pct"]
-        dff = r.get("dff", 0.0)
-        rank_val = r.get("rank", 999)
-        dff2 = r.get("dff2", 0.0)
-        dff3 = r.get("dff3", 0.0)
+        dff = r.get("dff", r.get("DFF", 0.0))
+        rank_val = r.get("rank", r.get("Rank", r.get("排名", 0)))
+        dff2 = r.get("dff2", r.get("DFF2", 0.0))
+        dff3 = r.get("dff3", r.get("DFF3", 0.0))
         extra_vals = r.get("extra_vals", {})
         buy_zone = r["buy_zone"]
         stop_loss = r["stop_loss"]
@@ -1302,11 +1329,12 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
         it_dff.setForeground(QBrush(QColor(COLOR_UP if dff > 0 else COLOR_DOWN)))
         self.table.setItem(row_idx, 12, it_dff)
 
-        # 13: Rank (强度排位)
-        rank_str = str(rank_val) if rank_val != 999 else "--"
+        # 13: Rank (强度排位，支持全市场 1~9999 真实排位)
+        rank_int = _safe_int(rank_val, 0)
+        rank_str = str(rank_int) if rank_int > 0 else "--"
         it_rank = NumericTableWidgetItem(rank_str)
         it_rank.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-        it_rank.setForeground(QBrush(QColor("#FFD700" if rank_val < 500 else "#e2e2e5")))
+        it_rank.setForeground(QBrush(QColor("#FFD700" if (0 < rank_int < 500) else "#e2e2e5")))
         self.table.setItem(row_idx, 13, it_rank)
 
         # 14: DFF2 (2日加速)

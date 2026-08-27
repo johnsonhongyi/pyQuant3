@@ -1,3 +1,15 @@
+## 2026-08-27 13:40
+- [x] **彻底根治 ATS 各大榜单窗口（板块明细、连板天梯/每日涨停、赛道热榜等）Rank >= 999 股票被误判为无效值显示 `--` 的重大逻辑缺陷 (`ats/ui/sector_detail_dialog.py`, `ats/ui/daily_limit_up_dialog.py`, `ats/ui/hot_sector_leaderboard.py`, `ats/limit_up_engine.py`, `ats/sector_data_aggregator.py`, `tests/test_sector_aggregator_suite.py`, `gemini.md`)**：
+    - [x] **根因真相破案**：
+        1. 早期代码中误将全市场股票总数假定为小规模，在提取与渲染时硬编码了 `if rank_val < 999` 或 `if 0 < rank_val < 999`，并给缺失值赋予了 `default=999`；
+        2. 全市场 5539 标的中，排名在 1000~5539 之间的股票（占全市场 80% 以上，如长盈精密 5523、立讯精密 2800、晶丰明源 1250、麦仓新能 3800 等）在各个窗口中被硬生生误判为无效数据直接展示为 `"--"`；
+    - [x] **全链路修复落地**：
+        1. `ats/ui/sector_detail_dialog.py`：改为 `rank_val = _safe_int(r.get('rank', r.get('Rank', 0)), 0)`，当 `rank_val > 0` 时真实展示 1~9999 全量排名，仅 0/缺失才展示 `"--"` 并沉底；
+        2. `ats/ui/daily_limit_up_dialog.py`：修复 1440-1443 行排序比较与 2153 行单元格渲染，支持 1~9999 全量排名；
+        3. `ats/limit_up_engine.py` & `ats/ui/hot_sector_leaderboard.py`：消除 `default=999`，支持大写 `Rank`/小写 `rank`/中文 `排名` 全别名容错；
+    - [x] **自动化测试断言全量通过 (22/22 全部 PASSED)**：
+        - 新增 `test_rank_beyond_999_display_in_all_windows` 单元测试，断言 Rank > 999（长电科技 3548、长盈精密 5523、晶丰明源 1250、麦仓新能 3800）在板块明细与每日涨停天梯看板中 100% 完整展示数值且杜绝 `--`。
+
 ## 2026-08-27 13:28
 - [x] **实现板块明细 (ATSSectorDetailDialog) 自动持久化最后的排序列及方向 (`ats/ui/sector_detail_dialog.py`, `tests/test_sector_aggregator_suite.py`, `gemini.md`)**：
     - [x] **自动捕获与物理原子持久化**：
