@@ -89,6 +89,9 @@ class HotSectorEngine:
             raw_name = str(item[0]).strip()
             clean_sec = re.sub(r'^[^\w\u4e00-\u9fa5]+', '', raw_name).strip()
             sec_name = clean_sec if clean_sec else raw_name
+            # 🛡️ 自动过滤虚拟系统聚合池 (如 "实时报警" / "🔔 实时报警")，保留真实题材概念赛道 (竞价挖掘)
+            if any(ex in sec_name for ex in ("实时报警", "系统报警", "异动汇总")):
+                continue
             if sec_name and sec_name not in top_secs:
                 top_secs.append(sec_name)
             if len(top_secs) >= top_n:
