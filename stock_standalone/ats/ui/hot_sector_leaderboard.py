@@ -834,10 +834,15 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
             if hasattr(main_app, "current_df"):
                 current_df = main_app.current_df
 
-            # 尝试从热力图组件提取 Top 3 板块
+            # 尝试从热力图组件提取 Top 3 板块 (联动跟随热力图当前选择的排序维度)
             if hasattr(main_app, "heatmap_widget") and main_app.heatmap_widget:
                 hw = main_app.heatmap_widget
-                if hasattr(hw, "sectors") and hw.sectors:
+                if hasattr(hw, "get_top_sectors"):
+                    top_sectors = hw.get_top_sectors(top_n=3)
+                    sec_to_codes = getattr(hw, "sector_to_codes", {})
+                    sort_idx = hw.sort_combo.currentIndex() if hasattr(hw, 'sort_combo') else 0
+                    self.engine.extract_top_sectors_from_heatmap(getattr(hw, "sectors", []), sec_to_codes, top_n=3, sort_mode=sort_idx)
+                elif hasattr(hw, "sectors") and hw.sectors:
                     sec_to_codes = getattr(hw, "sector_to_codes", {})
                     top_sectors = self.engine.extract_top_sectors_from_heatmap(hw.sectors, sec_to_codes, top_n=3)
 

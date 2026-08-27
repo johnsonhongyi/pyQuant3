@@ -1,3 +1,14 @@
+## 2026-08-27 13:56
+- [x] **实现行业板块排序调整与龙头突击跟单榜毫秒级联动跟随 (`stock_standalone/ats/ui/heatmap_widget.py`, `stock_standalone/ats/hot_sector_engine.py`, `stock_standalone/ats/ui/hot_sector_leaderboard.py`, `stock_standalone/tests/test_sector_strength_and_detail_parity.py`)**：
+    - [x] **排查定位排序未联动根本原因**：
+        1. 原 `get_top_sectors` 与 `extract_top_sectors_from_heatmap` 硬编码仅按 `score` (强度得分) 提取 Top 3 板块，未读取热力图当前的下拉框排序维度；
+        2. 当用户在行业板块下拉框切换为“按涨跌幅降序”或“按活跃成员数降序”时，热力图内部未向龙头突击榜发送联动通知，突击榜依然停留在默认的得分 Top 3。
+    - [x] **实施多维度动态联动与即时推送**：
+        1. 重构 `get_top_sectors` 与 `extract_top_sectors_from_heatmap`：支持 `sort_mode` 动态参数（0: 强度得分降序, 1: 涨跌幅降序, 2: 活跃成员数降序），自适应提取当前所选维度的真实 Top 3 强势板块；
+        2. 在 `SectorHeatmapWidget` 中新增 `sort_changed = pyqtSignal(int)` 信号；
+        3. 在 `sort_sectors` 中增加主动刷新联动：一旦用户调整排序下拉框，龙头突击榜顶部 Tab 瞬间联动更新（如 `No.1 生物疫苗`、`No.2 京津冀一体化`、`No.3 猪肉`），下方股票列表毫秒级重新拉取并呈现对应板块的领涨龙头与先锋突破标的；
+    - [x] **全量 20 项自动化测试 100% 全部 PASSED**。
+
 ## 2026-08-27 13:22
 - [x] **彻底根治板块强度数据刷新后“瞬间又被改回早盘旧数据”顽疾 (`stock_standalone/ats/ui/heatmap_widget.py`, `stock_standalone/ats/ui/main_window.py`)**：
     - [x] **精准锁定数据反向篡改的调用源头**：
