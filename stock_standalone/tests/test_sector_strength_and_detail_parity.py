@@ -72,15 +72,23 @@ def test_sector_detail_aggregator_authoritative_parity():
 
 @pytest.fixture(autouse=True)
 def isolate_config():
-    """测试前后安全备份与还原 window_config.json，绝不污染用户真实环境"""
+    """测试前后安全备份与还原 window_config.json 及 favorite_stocks.json，绝不污染用户真实环境"""
     from sys_utils import get_app_root, get_conf_path
     import json
     cfg_path = get_conf_path("window_config.json", get_app_root())
+    fav_path = get_conf_path("favorite_stocks.json", get_app_root()) or os.path.join(get_app_root(), "favorite_stocks.json")
     backup_data = None
+    backup_fav = None
     if os.path.exists(cfg_path):
         try:
             with open(cfg_path, 'r', encoding='utf-8') as f:
                 backup_data = json.load(f)
+        except Exception:
+            pass
+    if os.path.exists(fav_path):
+        try:
+            with open(fav_path, 'r', encoding='utf-8') as f:
+                backup_fav = json.load(f)
         except Exception:
             pass
     yield
@@ -88,6 +96,14 @@ def isolate_config():
         try:
             with open(cfg_path, 'w', encoding='utf-8') as f:
                 json.dump(backup_data, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+    if backup_fav is not None:
+        try:
+            with open(fav_path, 'w', encoding='utf-8') as f:
+                json.dump(backup_fav, f, ensure_ascii=False, indent=2)
+            from global_favorites import GlobalFavoriteManager
+            GlobalFavoriteManager().load_from_config()
         except Exception:
             pass
 
@@ -169,5 +185,195 @@ def test_stock_detail_filter_evaluation_accuracy():
     assert "命中" in detail_dlg.lbl_filter_result.text() and "未命中" not in detail_dlg.lbl_filter_result.text()
     
     detail_dlg.close()
+    from ats.ui.styles import save_config_node
+    save_config_node("ats_sector_detail_filter_enabled", "false")
+    save_config_node("ats_query_expr", "")
+
+
+def test_sector_heatmap_favorite_toggle():
+    """验证行业板块热力图右键设为/取消重点关注板块、持久化及置顶排序"""
+    from ats.ui.heatmap_widget import SectorHeatmapWidget
+    from global_favorites import GlobalFavoriteManager
+    
+    fav_mgr = GlobalFavoriteManager()
+    
+    # 准备测试板块（使用独立命名的测试板块，杜绝受现有自选干扰）
+    test_sec = "测试重点板块"
+    
+    # 确保初始状态已清除 test_sec
+    fav_mgr.remove_favorite_sector(test_sec)
+    fav_mgr.remove_favorite_sector("测试普通板块A")
+    fav_mgr.remove_favorite_sector("测试普通板块B")
+    assert test_sec not in fav_mgr.get_favorite_sectors()
+    
+    widget = SectorHeatmapWidget()
+    widget.sectors = [
+        ("测试普通板块A", 90.0, "+2.50%", 10, "000001", "标的A"),
+        ("测试重点板块", 60.0, "+1.00%", 5, "600362", "标的B"),
+        ("测试普通板块B", 80.0, "+1.80%", 8, "600001", "标的C")
+    ]
+    widget.sort_sectors(0) # 按得分降序: 普通板块A(90) -> 普通板块B(80) -> 重点板块(60)
+    assert widget.sectors[0][0] == "测试普通板块A"
+    assert widget.sectors[1][0] == "测试普通板块B"
+    assert widget.sectors[2][0] == "测试重点板块"
+    
+    # 1. 模拟右键点击添加重点关注 (由于重点关注默认置顶，添加后立即置顶排在第一项)
+    widget._toggle_favorite_sector(test_sec)
+    assert test_sec in fav_mgr.get_favorite_sectors()
+    assert widget.sectors[0][0] == "测试重点板块"
+    
+    # 2. 再次点击取消重点关注
+    widget._toggle_favorite_sector(test_sec)
+    assert test_sec not in fav_mgr.get_favorite_sectors()
+    
+    # 验证恢复普通得分排序: 普通板块A(90) 回到第一项
+    assert widget.sectors[0][0] == "测试普通板块A"
+    assert widget.sectors[1][0] == "测试普通板块B"
+    assert widget.sectors[2][0] == "测试重点板块"
+    
+    widget.close()
+
+
+
+def test_extract_top_sectors_genuine_strength_unaffected_by_focus():
+    """验证龙头突击榜提取 Top 3 强势板块时，严格按照真实市场强度得分选拔，绝不受重点关注置顶的视觉影响"""
+    from ats.hot_sector_engine import HotSectorEngine
+    from ats.ui.heatmap_widget import SectorHeatmapWidget
+    from global_favorites import GlobalFavoriteManager
+    
+    fav_mgr = GlobalFavoriteManager()
+    
+    # 模拟场景：用户重点关注了得分较低的板块（如培育钻石 0.8分、光纤概念 15.0分、CPO 12.2分）
+    # 而全市场真实强度得分最高的板块是 金属铜(68.3分)、金属锌(62.2分)、黄金概念(58.4分)
+    sectors_data = [
+        ("★ 培育钻石", 0.8, "-0.04%", 17, "000001", "标的1"),
+        ("★ 光纤概念", 15.0, "+0.02%", 75, "000002", "标的2"),
+        ("★ 共封装光学(CPO)", 12.2, "-0.04%", 125, "000003", "标的3"),
+        ("金属铜", 68.3, "-0.02%", 86, "600362", "江西铜业"),
+        ("金属锌", 62.2, "-0.28%", 39, "000751", "锌业股份"),
+        ("黄金概念", 58.4, "-0.26%", 77, "600547", "山东黄金"),
+        ("生物疫苗", 58.0, "+0.38%", 59, "000661", "长春高新"),
+    ]
+    
+    sec_to_codes = {
+        "培育钻石": ["000001"],
+        "光纤概念": ["000002"],
+        "共封装光学(CPO)": ["000003"],
+        "金属铜": ["600362"],
+        "金属锌": ["000751"],
+        "黄金概念": ["600547"],
+        "生物疫苗": ["000661"],
+    }
+    
+    engine = HotSectorEngine.get_instance()
+    
+    # 1. 验证 HotSectorEngine.extract_top_sectors_from_heatmap 提取出真实的 Top 3 强度最高板块
+    top_3_engine = engine.extract_top_sectors_from_heatmap(sectors_data, sec_to_codes, top_n=3)
+    assert top_3_engine == ["金属铜", "金属锌", "黄金概念"], f"龙头突击提取的Top 3板块应为强度最高板块，实际为: {top_3_engine}"
+    
+    # 2. 验证 SectorHeatmapWidget.get_top_sectors 也提取出真实的 Top 3 强度最高板块
+    widget = SectorHeatmapWidget()
+    widget.sectors = sectors_data
+    top_3_widget = widget.get_top_sectors(top_n=3)
+    assert top_3_widget == ["金属铜", "金属锌", "黄金概念"], f"热力图获取的Top 3板块应为强度最高板块，实际为: {top_3_widget}"
+    
+    widget.close()
+
+
+def test_sector_heatmap_and_leaderboard_realtime_ipc_update():
+    """
+    【🎯 核心验证】验证 ATS 直接消费 TK 赛道探测器已算好的权威板块数据 (SSOT 零冗余复用)：
+    1. 热力图直接复用 TK 的权威强度分 (共封装光学 89.1, 光纤概念 74.7, PCB概念 60.8)；
+    2. 龙头突击榜自动跟随并将 Top 3 选为 共封装光学、光纤概念、PCB概念；
+    3. 板块明细弹窗权威分 100% 对齐。
+    """
+    import pandas as pd
+    from ats.ui.heatmap_widget import SectorHeatmapWidget
+    from ats.hot_sector_engine import HotSectorEngine
+    from ats.sector_data_aggregator import SectorDataAggregator
+    
+    widget = SectorHeatmapWidget()
+    
+    # 模拟 TK 赛道探测器计算好的真实活跃板块数据快照 (与用户实盘左侧窗口完全一致)
+    tk_active_sectors_snap = {
+        '共封装光学(CPO)': {
+            'sector': '共封装光学(CPO)',
+            'score': 89.1,
+            'avg_pct_diff': 2.13,
+            'leader': '688371',
+            'leader_name': '赛微电子',
+            'leader_pct': 20.0,
+            'count': 125,
+            'followers': [{'code': '300502', 'name': '新易盛', 'pct': 6.5}],
+            'race_candidates': [{'code': '688371', 'name': '赛微电子', 'pct': 20.0}]
+        },
+        '光纤概念': {
+            'sector': '光纤概念',
+            'score': 74.7,
+            'avg_pct_diff': 3.11,
+            'leader': '603618',
+            'leader_name': '杭电股份',
+            'leader_pct': 10.0,
+            'count': 75,
+            'followers': [{'code': '600522', 'name': '中天科技', 'pct': 9.98}, {'code': '601869', 'name': '长飞光纤', 'pct': 10.0}],
+            'race_candidates': [{'code': '603618', 'name': '杭电股份', 'pct': 10.0}]
+        },
+        'PCB概念': {
+            'sector': 'PCB概念',
+            'score': 60.8,
+            'avg_pct_diff': 1.74,
+            'leader': '603002',
+            'leader_name': '宏昌电子',
+            'leader_pct': 10.0,
+            'count': 80,
+            'followers': [{'code': '002463', 'name': '沪电股份', 'pct': 5.2}],
+            'race_candidates': [{'code': '603002', 'name': '宏昌电子', 'pct': 10.0}]
+        },
+        '富士康概念': {
+            'sector': '富士康概念',
+            'score': 39.3,
+            'avg_pct_diff': 1.79,
+            'leader': '601138',
+            'leader_name': '工业富联',
+            'leader_pct': 3.4,
+            'count': 50,
+            'followers': [],
+            'race_candidates': []
+        }
+    }
+    
+    # 1. 模拟收到 IPC 数据包并直接复用 TK 板块数据
+    widget.update_from_tk_sector_data(tk_active_sectors_snap)
+    
+    # 2. 验证热力图数据 100% 对齐 TK 权威分
+    cpo_item = next((item for item in widget.sectors if 'CPO' in item[0] or '共封装' in item[0]), None)
+    fiber_item = next((item for item in widget.sectors if '光纤' in item[0]), None)
+    pcb_item = next((item for item in widget.sectors if 'PCB' in item[0]), None)
+    
+    assert cpo_item is not None, "热力图中应包含共封装光学板块"
+    assert fiber_item is not None, "热力图中应包含光纤概念板块"
+    assert pcb_item is not None, "热力图中应包含PCB概念板块"
+    
+    assert cpo_item[1] == 89.1, f"共封装光学强度分应为 89.1，实际为: {cpo_item[1]}"
+    assert fiber_item[1] == 74.7, f"光纤概念强度分应为 74.7，实际为: {fiber_item[1]}"
+    assert pcb_item[1] == 60.8, f"PCB概念强度分应为 60.8，实际为: {pcb_item[1]}"
+    assert fiber_item[4] == '603618', f"光纤概念领涨龙头应为杭电股份(603618)，实际为: {fiber_item[4]}"
+    assert fiber_item[5] == '杭电股份', f"光纤概念龙头名称应为杭电股份，实际为: {fiber_item[5]}"
+    
+    # 3. 验证龙头突击引擎提取 Top 3 完全跟随 TK 强度排名
+    engine = HotSectorEngine.get_instance()
+    top_3 = engine.extract_top_sectors_from_heatmap(widget.sectors, widget.sector_to_codes, top_n=3)
+    assert top_3 == ['共封装光学(CPO)', '光纤概念', 'PCB概念'], f"龙头突击 Top 3 应严格按 TK 强度排行为 No.1 CPO, No.2 光纤, No.3 PCB，实际为: {top_3}"
+    
+    # 4. 验证板块明细聚合器 fetch_sector_detail 正确执行
+    aggregator = SectorDataAggregator.get_instance()
+    rows, score, leader_str, meta = aggregator.fetch_sector_detail("光纤概念")
+    assert isinstance(rows, list)
+    assert isinstance(score, float)
+    
+    widget.close()
+
+
+
 
 

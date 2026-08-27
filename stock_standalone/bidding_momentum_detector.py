@@ -1698,6 +1698,17 @@ class BiddingMomentumDetector:
             (dirty_codes if (dirty_codes and not force_ref) else None, True)
         )
 
+    def get_active_sectors_snapshot(self) -> Dict[str, Any]:
+        """[SSOT] 安全获取当前最新的全量板块强度与龙头数据快照 (锁内快速拷贝，杜绝外部计算与算力浪费)"""
+        with self._lock:
+            def _clean_data(obj):
+                if isinstance(obj, dict):
+                    return {k: _clean_data(v) for k, v in obj.items() if not k.endswith('klines')}
+                elif isinstance(obj, list):
+                    return [_clean_data(item) for item in obj]
+                return obj
+            return {name: _clean_data(info) for name, info in self.active_sectors.items()}
+
     def search_by_index(self, query: str) -> List[dict]:
         """[NEW] 利用内存索引实现极限性能搜索 (O(1) ~ O(m))"""
         q = query.strip().lower()
