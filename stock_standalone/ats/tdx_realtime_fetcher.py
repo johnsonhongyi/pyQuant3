@@ -1393,22 +1393,37 @@ class TDXRealtimeFetcher:
             has_base = (dff2 > 0.0 or dff3 > 0.0)
 
             # ── 💡 统一多模块智能阿尔法分拣决策 ──
-            if (pct >= 9.5 and ("涨停" in order_intent or bid_p >= 75.0)) or (is_sec_leader and pct >= 5.0 and vwap_dev >= 0.0):
+            if (pct >= 9.5 and ("涨停" in order_intent or bid_p >= 75.0)) or (is_sec_leader and pct >= 4.5 and vwap_dev >= 0.0):
                 # 👑 领涨龙头：封死涨停或板块绝对领涨第一名
                 buy_type = "👑 领涨龙头"
                 buy_tag = "LEADER"
                 buy_zone = f"{vwap:.2f} ~ {price:.2f}"
                 stop_loss = round(vwap * 0.985, 2)
-                reason = f"板块领涨灵魂标的 (板块第一), 站稳VWAP(+{vwap_dev:.1f}%), 主力强势统治"
+                reason = f"板块领涨龙头 (买盘压强{bid_p:.0f}%), 站稳均线(+{vwap_dev:.1f}%), {order_intent}"
                 type_priority = 100
 
-            elif pct >= 7.0 and (bid_p >= 70.0 or "扫买" in order_intent or "托底" in order_intent):
-                # ⚡ 扫盘冲板：大阳拉升，主力主动扫买，冲击涨停临界点 (如三元基因)
+            elif "扫买" in order_intent and vwap_dev >= -0.2 and pct >= 1.5:
+                # 🔥 主动扫买点火抢筹：主力大单主动吃进外盘，盘中起涨先手黄金点 (盘中不等涨停即可第一时间发现并报警！)
+                if pct >= 6.5:
+                    buy_type = "⚡ 扫盘冲板"
+                    buy_tag = "SURGE"
+                    type_priority = 96
+                    reason = f"主力主动扫买冲击涨停 (买盘压强{bid_p:.0f}%), 站稳均线(+{vwap_dev:.1f}%), 极速抢跑点"
+                else:
+                    buy_type = "🔥 主动扫买"
+                    buy_tag = "SURGE"
+                    type_priority = 92
+                    reason = f"主力外盘主动大单扫买 (量比{vol_r:.1f}), 买盘压强{bid_p:.0f}%, 均线支撑(+{vwap_dev:.1f}%), 盘中起涨先手点"
+                buy_zone = f"{vwap:.2f} ~ {price:.2f}"
+                stop_loss = round(vwap * 0.985, 2)
+
+            elif pct >= 7.0 and (bid_p >= 70.0 or "托底" in order_intent):
+                # ⚡ 扫盘冲板：大阳拉升，冲击涨停临界点
                 buy_type = "⚡ 扫盘冲板"
                 buy_tag = "SURGE"
                 buy_zone = f"{price:.2f} ~ {round(price * 1.01, 2)}"
                 stop_loss = round(vwap * 0.985, 2)
-                reason = f"主力主动扫买冲击涨停 (买盘压强{bid_p:.0f}%), 站稳均线(+{vwap_dev:.1f}%), 临界抢跑点"
+                reason = f"大阳拉升冲击涨停 (买盘压强{bid_p:.0f}%), 站稳均线(+{vwap_dev:.1f}%), 临界抢跑点"
                 type_priority = 95
 
             elif (3.0 <= pct <= 7.0) and (vwap_dev >= 0.2) and (vol_r >= 1.1 or bid_p >= 60.0 or dff2 >= 8.0):
@@ -1472,14 +1487,15 @@ class TDXRealtimeFetcher:
                 reason = "⭐[重点关注] " + reason
 
             # 综合 Alpha 进攻得分 (0 ~ 100)
-            alpha_score = (
-                type_priority * 0.35 +
-                min(30.0, max(0.0, pct * 2.5)) +
-                min(15.0, slope * 0.15) +
-                min(10.0, bid_p * 0.1) +
-                (10.0 if has_base else 0.0) +
-                (6.0 if is_focus else 0.0)
-            )
+            # 基础分为买点类型权重 (占比 60%)，动量与盘口扫买加成 (占比 40%)
+            base_score = type_priority * 0.55
+            momentum_bonus = min(18.0, max(0.0, pct * 2.0))
+            intent_bonus = 10.0 if ("扫买" in order_intent or "封板" in order_intent) else (5.0 if "托底" in order_intent else 0.0)
+            slope_bonus = min(10.0, slope * 0.10)
+            base_bonus = 7.0 if has_base else 0.0
+            focus_bonus = 6.0 if is_focus else 0.0
+
+            alpha_score = base_score + momentum_bonus + intent_bonus + slope_bonus + base_bonus + focus_bonus
             alpha_score = round(min(100.0, max(0.0, alpha_score)), 1)
 
             it["buy_type"] = buy_type
