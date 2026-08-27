@@ -32,22 +32,34 @@ from PyQt6.QtWidgets import QApplication
 from PyQt6.QtCore import Qt
 from ats.ui.main_window import ATSMainWindow
 from sys_utils import ensure_backend_tk_running
+from ats.startup_profiler import StartupProfiler, mark_checkpoint
 
 def main():
-    # 自动检查并后台静默拉起主 Tk 行情进程 (P0)
+    profiler = StartupProfiler.get_instance()
+    mark_checkpoint("00. Python Runtime & Environment Setup")
+
+    # 自动探测并拉起后台静默 Tk 进程 (P0)
     try:
         ensure_backend_tk_running()
     except Exception as e:
         print(f"[ATS Launcher] Failed to ensure backend running: {e}")
+    mark_checkpoint("01. Backend TK Process Check & Launch")
 
     if hasattr(Qt, 'HighDpiScaleFactorRoundingPolicy'):
         QApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
 
     app = QApplication(sys.argv)
     app.setApplicationName("ATS Autonomous Trading Terminal")
+    mark_checkpoint("02. QApplication Bootstrap")
     
     window = ATSMainWindow()
+    mark_checkpoint("03. ATSMainWindow Instantiation")
+    
     window.show()
+    mark_checkpoint("04. ATSMainWindow show()")
+    
+    # 打印启动全链路耗时看板
+    profiler.print_summary()
     
     exit_code = app.exec()
     os._exit(exit_code)

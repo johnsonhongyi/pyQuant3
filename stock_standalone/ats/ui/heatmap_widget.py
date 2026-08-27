@@ -25,7 +25,8 @@ class SectorHeatmapWidget(QWidget):
         super().__init__(parent)
         self._current_cols = 4
         self._init_ui()
-        self.load_live_sectors()
+        from PyQt6.QtCore import QTimer
+        QTimer.singleShot(100, self.load_live_sectors)
 
     def _init_ui(self):
         layout = QVBoxLayout(self)
@@ -605,7 +606,7 @@ class SectorHeatmapWidget(QWidget):
                 widget.setParent(None)
 
         import re
-        for idx, item in enumerate(self.sectors):
+        for idx, item in enumerate(self.sectors[:60]):
             name, score, pct, count = item[:4]
             row = idx // cols
             col = idx % cols

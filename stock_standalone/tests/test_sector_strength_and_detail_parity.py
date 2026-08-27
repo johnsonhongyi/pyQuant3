@@ -374,6 +374,62 @@ def test_sector_heatmap_and_leaderboard_realtime_ipc_update():
     widget.close()
 
 
+def test_universe_widget_sort_order_persistence():
+    """
+    【🎯 核心验证】验证左侧策略股票池 (UniverseTreeWidget) 在高频数据刷新 update_pools 时：
+    1. 100% 保持用户点击选择的排序列 (如按涨跌幅降序)；
+    2. 绝不重置为默认插入顺序，无需用户每次手动重复点击。
+    """
+    from PyQt6.QtCore import Qt
+    from ats.ui.universe_widget import UniverseTreeWidget
+    
+    tree_widget = UniverseTreeWidget()
+    
+    # 模拟初始三级池数据 (未排序状态)
+    radar_1 = [
+        ("600001", "标的A", "10.00", "+1.20%", "竞价", "描述1"),
+        ("600002", "标的B", "20.00", "+9.98%", "竞价", "描述2"),
+        ("600003", "标的C", "30.00", "-2.50%", "竞价", "描述3"),
+    ]
+    watch_1 = [
+        ("300502", "新易盛", "110.00", "+6.50%", "观察", "描述4"),
+        ("603618", "杭电股份", "6.80", "+10.00%", "观察", "描述5"),
+    ]
+    trade_1 = []
+    
+    # 1. 首次填充数据
+    tree_widget.update_pools(radar_1, watch_1, trade_1)
+    
+    # 2. 模拟用户手动点击第 3 列 (涨幅列) 进行降序排序
+    tree_widget.tree.sortByColumn(3, Qt.SortOrder.DescendingOrder)
+    assert tree_widget.tree.sortColumn() == 3
+    assert tree_widget.tree.header().sortIndicatorOrder() == Qt.SortOrder.DescendingOrder
+    
+    # 验证排序后第 0 个子项应为涨幅最高者 (标的B +9.98%)
+    assert tree_widget.radar_root.child(0).text(0) == "600002"
+    assert tree_widget.radar_root.child(1).text(0) == "600001"
+    assert tree_widget.radar_root.child(2).text(0) == "600003"
+    
+    # 3. 模拟下一轮行情数据到达，触发 update_pools 刷新
+    radar_2 = [
+        ("600001", "标的A", "10.10", "+2.20%", "竞价", "描述1"),
+        ("600002", "标的B", "19.80", "+8.80%", "竞价", "描述2"),
+        ("600003", "标的C", "31.00", "+10.02%", "竞价", "描述3-大涨"),
+    ]
+    tree_widget.update_pools(radar_2, watch_1, trade_1)
+    
+    # 4. 【核心断言】排序列与排序顺序必须 100% 保持，且自动按新涨幅重新降序排列
+    assert tree_widget.tree.sortColumn() == 3, "刷新后排序列必须依然保持为第 3 列 (涨幅)"
+    assert tree_widget.tree.header().sortIndicatorOrder() == Qt.SortOrder.DescendingOrder
+    
+    # 此时标的C (+10.02%) 应自动跃升为第 0 个子项，标的B (+8.80%) 为第 1，标的A (+2.20%) 为第 2
+    assert tree_widget.radar_root.child(0).text(0) == "600003"
+    assert tree_widget.radar_root.child(1).text(0) == "600002"
+    assert tree_widget.radar_root.child(2).text(0) == "600001"
+    
+    tree_widget.close()
+
+
 
 
 

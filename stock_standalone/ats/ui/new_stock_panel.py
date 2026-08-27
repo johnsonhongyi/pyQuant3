@@ -462,7 +462,8 @@ class NewStockPanel(QWidget):
         except Exception as e:
             logger.debug(f"冷启动恢复本地新股持久化数据异常: {e}")
 
-        self.load_data(force_refresh=False)
+        # 延时 150ms 启动后台增量拉取，首帧 0 阻塞
+        QTimer.singleShot(150, lambda: self.load_data(force_refresh=False))
 
         self.auto_refresh_timer = QTimer(self)
         self.auto_refresh_timer.setInterval(3000)

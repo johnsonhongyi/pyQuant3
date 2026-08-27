@@ -1826,16 +1826,28 @@ class ATSMainWindow(QMainWindow):
         saved_period = load_config_node(PERSIST_KEY_CHANNEL_SCAN_PERIOD, "60f")
         self.channel_scan_period = str(saved_period).strip() if saved_period else "60f"
 
+        from ats.startup_profiler import mark_checkpoint
+        mark_checkpoint("03.1 State & Managers Initialization")
+
         self._init_toolbar()
+        mark_checkpoint("03.2 Main Toolbar Construction")
+
         self._init_ui()
+        mark_checkpoint("03.3 Central & Sub-panels UI Construction")
+
         self._restore_layout_state()
+        mark_checkpoint("03.4 Restore Window & Splitter Layout")
+
         self._init_statusbar()
+        mark_checkpoint("03.5 Status Bar Construction")
         
-        # Prepopulate name cache from database history on startup
+        # Prepopulate name cache asynchronously from database history
         self._prepopulate_name_cache()
+        mark_checkpoint("03.6 Prepopulate Name Cache (Async Dispatched)")
         
         # Load SQLite database data (P1 Integration)
         self.load_db_data(force=True)
+        mark_checkpoint("03.7 Load Database & Paper Data (Async Dispatched)")
         
         # Setup simple timer for ticker updating (当用户开启后台自动刷新时才运行)
         self.update_timer = QTimer()
@@ -1844,29 +1856,44 @@ class ATSMainWindow(QMainWindow):
             self.update_timer.start(60000)
 
     def _prepopulate_name_cache(self):
+        """【异步非阻塞】后台预加载历史股票名称字典，物理级 0 毫秒阻塞主线程"""
         self.name_cache = {}
-        try:
-            from ats.ipc_bridge import IPCBridge
-            bridge = IPCBridge()
-            queries = [
-                "SELECT DISTINCT code, name FROM signal_history WHERE name IS NOT NULL AND name != ''",
-                "SELECT DISTINCT code, name FROM trade_records WHERE name IS NOT NULL AND name != ''"
-            ]
-            for query in queries:
-                try:
-                    with bridge.db_manager.execute_query(query) as cursor:
-                        for row in cursor.fetchall():
-                            c = str(row[0]).strip()
-                            n = str(row[1]).strip()
-                            if c and n:
-                                self.name_cache[c] = n
-                except Exception as e:
-                    print(f"[ATSMainWindow] Prepopulate cache query failed: {e}")
-        except Exception as e:
-            print(f"[ATSMainWindow] Prepopulate cache failed: {e}")
+        import threading
+        def _bg_query():
+            try:
+                from ats.ipc_bridge import IPCBridge
+                bridge = IPCBridge()
+                queries = [
+                    "SELECT DISTINCT code, name FROM signal_history WHERE name IS NOT NULL AND name != ''",
+                    "SELECT DISTINCT code, name FROM trade_records WHERE name IS NOT NULL AND name != ''"
+                ]
+                res = {}
+                for query in queries:
+                    try:
+                        with bridge.db_manager.execute_query(query) as cursor:
+                            for row in cursor.fetchall():
+                                c = str(row[0]).strip()
+                                n = str(row[1]).strip()
+                                if c and n:
+                                    res[c] = n
+                    except Exception:
+                        pass
+                if res:
+                    self.name_cache.update(res)
+            except Exception as e:
+                pass
 
-        # 尝试初始化全系统标准的 StockSender 通道 (动态绑定 UI checkbox 勾选与持久化状态)
+        t = threading.Thread(target=_bg_query, daemon=True, name="ATS_NameCacheLoader")
+        t.start()
+
+        # ⚡ 延迟异步初始化 StockSender，杜绝 win32gui.EnumWindows 阻塞启动 (节省 1300ms)
         self.sender = None
+        QTimer.singleShot(600, self._lazy_init_stock_sender)
+
+    def _lazy_init_stock_sender(self):
+        """后台静默初始化 StockSender，不抢占首屏 CPU"""
+        if getattr(self, 'sender', None) is not None:
+            return self.sender
         try:
             from JohnsonUtil.stock_sender import StockSender
             self.sender = StockSender(
@@ -1876,7 +1903,8 @@ class ATSMainWindow(QMainWindow):
                 callback=None
             )
         except Exception as e:
-            print(f"[ATSMainWindow] Init standard StockSender failed: {e}")
+            logger.debug(f"[ATSMainWindow] Init standard StockSender failed: {e}")
+        return self.sender
 
 
 
@@ -2159,6 +2187,7 @@ class ATSMainWindow(QMainWindow):
         self._on_history_group_changed()
 
     def _init_ui(self):
+        from ats.startup_profiler import mark_checkpoint
         self.main_splitter = QSplitter(Qt.Orientation.Horizontal)
         self.setCentralWidget(self.main_splitter)
 
@@ -2166,6 +2195,7 @@ class ATSMainWindow(QMainWindow):
         self.universe_widget = UniverseTreeWidget()
         self.universe_widget.setMinimumWidth(300)
         self.main_splitter.addWidget(self.universe_widget)
+        mark_checkpoint("03.3.1 Left UniverseTreeWidget")
 
         # 2. Center panel: Swing Table & Trading Tabs (Width: 700)
         center_widget = QWidget()
@@ -2185,16 +2215,19 @@ class ATSMainWindow(QMainWindow):
         self.favorite_panel = FavoritePanel()
         self.favorite_panel.stock_selected.connect(self.on_stock_clicked)
         self.top_tabs.addTab(self.favorite_panel, "⭐ 重点关注 (基础重点)")
+        mark_checkpoint("03.3.2 FavoritePanel (Tab 1)")
 
         self.swing_table = SwingStateTable()
         self.swing_table.dragon_monitor_requested.connect(self.open_dragon_monitor)
         self.top_tabs.addTab(self.swing_table, "📉 大级别 MA20d 回调跟踪器")
+        mark_checkpoint("03.3.3 SwingStateTable (Tab 2)")
 
         self.new_stock_panel = NewStockPanel(main_window=self)
         self.new_stock_panel.stock_selected.connect(self.link_stock)
         self.new_stock_panel.stock_double_clicked.connect(self.on_stock_clicked)
         self.top_tabs.addTab(self.new_stock_panel, "🆕 新股次新股 (IPO & 阶梯)")
         self.top_tabs.currentChanged.connect(self._on_top_tab_changed)
+        mark_checkpoint("03.3.4 NewStockPanel (Tab 3)")
         
         # 顶部主看板 Tab 右上角添加【🔥 涨停天梯】、【🎯 60f通道测算】与【🪟 SBC 重排】组合入口
         top_corner_container = QWidget()
@@ -2284,16 +2317,20 @@ class ATSMainWindow(QMainWindow):
         
         self.position_panel = PositionPanel()
         self.center_tabs.addTab(self.position_panel, "💰 当前持仓 (Holdings)")
+        mark_checkpoint("03.3.5 PositionPanel (Bottom Tab 1)")
         
         self.trade_flow_table = TradeFlowTable()
         self.center_tabs.addTab(self.trade_flow_table, "📋 交易流水 (Orders)")
+        mark_checkpoint("03.3.6 TradeFlowTable (Bottom Tab 2)")
         
         self.backtest_panel = BacktestReportPanel()
         self.center_tabs.addTab(self.backtest_panel, "📊 离线回测报告 (Backtest)")
+        mark_checkpoint("03.3.7 BacktestReportPanel (Bottom Tab 3)")
         
         self.kernel_trace_panel = KernelTracePanel()
         self.center_tabs.addTab(self.kernel_trace_panel, "🤖 内核轨迹 (Kernel Trace)")
         enable_tab_direct_switch(self.center_tabs)
+        mark_checkpoint("03.3.8 KernelTracePanel (Bottom Tab 4)")
         
         self.center_splitter.addWidget(self.center_tabs)
         self.center_splitter.setSizes([450, 450])
@@ -2311,6 +2348,7 @@ class ATSMainWindow(QMainWindow):
         
         self.heatmap_widget = SectorHeatmapWidget()
         self.right_splitter.addWidget(self.heatmap_widget)
+        mark_checkpoint("03.3.9 SectorHeatmapWidget (Right Panel Top)")
         
         # Right charts tab (市场分布 + 资金明细，启用箭头点击直接切换)
         self.right_tabs = QTabWidget()
@@ -2323,6 +2361,7 @@ class ATSMainWindow(QMainWindow):
         self.equity_chart = EquityCurveChart()
         self.right_tabs.addTab(self.equity_chart, "📈 资金明细")
         enable_tab_direct_switch(self.right_tabs)
+        mark_checkpoint("03.3.10 Right Charts (DistChart & EquityChart)")
         
         # 资金曲线 / 右侧 Tab 右上角添加【📋 强势黑马详情】(图2) 与【🗔 独立放大窗口】组合入口
         corner_container = QWidget()
