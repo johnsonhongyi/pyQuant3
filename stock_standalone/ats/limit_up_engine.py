@@ -501,11 +501,11 @@ class LimitUpEngine:
 
             target_codes_for_l2.append(c_clean)
 
-            # 提取 ATS 核心策略指标
-            dff = _safe_float(row.get('dff', 0.0))
+            # 提取 ATS 核心策略指标 (支持全量大写/小写/中文别名)
+            dff = _safe_float(row.get('dff', row.get('DFF', 0.0)))
             dff2 = _safe_float(row.get('DFF2', row.get('dff2', 0.0)))
             dff3 = _safe_float(row.get('DFF3', row.get('dff3', 0.0)))
-            rank_val = _safe_int(row.get('Rank', row.get('rank', 999)), 999)
+            rank_val = _safe_int(row.get('Rank', row.get('rank', row.get('排名', row.get('topR', 0)))), 0)
             perc3d = _safe_float(row.get('perc3d', 0.0))
 
             rs_val = round(pct - sh_pct, 2)

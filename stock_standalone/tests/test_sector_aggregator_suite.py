@@ -361,4 +361,63 @@ def test_sector_detail_dialog_sort_persistence(qapp, monkeypatch):
     assert dlg2.table.item(0, 0).text().strip() == "300456"
 
 
+def test_rank_beyond_999_display_in_all_windows(qapp):
+    """测试 Rank > 999 (如 1250, 3548, 5523) 在板块明细和天梯看板中 100% 完整显示数值，杜绝被误当成 --"""
+    # 1. 验证板块明细 (ATSSectorDetailDialog) 对长电科技 (Rank 3548) 的真实渲染
+    sample_rows = [
+        {"code": "600584", "name": "长电科技", "score": 33.7, "type": "确核", "pct": 3.98, "start_pct": 3.08, "dff": 0.90, "rank": 3548, "dff2": 5.20, "dff3": 74.50, "extra_cols": {}},
+        {"code": "300115", "name": "长盈精密", "score": 20.1, "type": "跟随", "pct": -6.05, "start_pct": -5.0, "dff": 0.40, "rank": 5523, "dff2": -5.30, "dff3": -1.40, "extra_cols": {}},
+        {"code": "000001", "name": "平安银行", "score": 10.0, "type": "跟随", "pct": 0.10, "start_pct": 0.0, "dff": 0.0, "rank": 0, "dff2": 0.0, "dff3": 0.0, "extra_cols": {}}
+    ]
+
+    dlg = ATSSectorDetailDialog(sector_name="测试板块", member_codes=["600584", "300115", "000001"])
+    dlg._render_rows(sample_rows)
+
+    # 找到 600584 行
+    row_600584 = -1
+    row_300115 = -1
+    row_000001 = -1
+    for r in range(dlg.table.rowCount()):
+        c = dlg.table.item(r, 0).text().strip()
+        if c == "600584":
+            row_600584 = r
+        elif c == "300115":
+            row_300115 = r
+        elif c == "000001":
+            row_000001 = r
+
+    assert dlg.table.item(row_600584, 7).text().strip() == "3548", "长电科技 Rank 3548 必须精准显示为 3548，严禁显示为 --"
+    assert dlg.table.item(row_300115, 7).text().strip() == "5523", "长盈精密 Rank 5523 必须精准显示为 5523，严禁显示为 --"
+    assert dlg.table.item(row_000001, 7).text().strip() == "--", "无效 Rank 0 显示为 --"
+
+    # 2. 验证天梯引擎 (LimitUpEngine) 对大写 Rank 与 rank > 999 的无损提取
+    from ats.limit_up_engine import LimitUpEngine
+    engine = LimitUpEngine.get_instance()
+    df_test = pd.DataFrame({
+        'name': ['晶丰明源', '麦仓新能'],
+        'price': [130.05, 117.64],
+        'percent': [11.25, 9.74],
+        'Rank': [1250, 3800],
+        'dff': [3.5, -0.8],
+        'DFF2': [15.4, 13.9],
+        'DFF3': [35.0, 57.6]
+    }, index=['688368', '688813'])
+
+    records = engine.scan_limit_up_records_from_df(df_test, fetch_l2_quotes=False)
+    assert len(records) == 2
+    r_688368 = next(r for r in records if r['code'] == '688368')
+    assert r_688368['rank'] == 1250, "晶丰明源的 Rank 必须被提取为 1250 而非 999"
+    r_688813 = next(r for r in records if r['code'] == '688813')
+    assert r_688813['rank'] == 3800, "麦仓新能的 Rank 必须被提取为 3800 而非 999"
+
+    # 3. 验证每日涨停看板 (DailyLimitUpDialog) 的表格渲染
+    from ats.ui.daily_limit_up_dialog import DailyLimitUpDialog
+    dlg_zt = DailyLimitUpDialog()
+    dlg_zt._populate_table_rows(records)
+
+    # 检查 Rank 列 (col 14)
+    assert dlg_zt.table.item(0, 14).text().strip() in ("1250", "3800"), "天梯看板 Rank 列必须正确显示 1250/3800 而非 --"
+
+
+
 

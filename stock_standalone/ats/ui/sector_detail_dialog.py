@@ -704,9 +704,9 @@ class ATSSectorDetailDialog(QDialog):
                     dff_item.setForeground(QColor("#33cc5a"))
                 self.table.setItem(row_idx, 6, dff_item)
                 
-                # 7. Rank (有效 Rank 1~999 精准排序，无效/0/999 作为 None 强制沉底)
-                rank_val = _safe_int(r.get('rank', 999))
-                if 0 < rank_val < 999:
+                # 7. Rank (全市场 1~9999 排名精准排序，0/缺失作为 None 强制沉底)
+                rank_val = _safe_int(r.get('rank', r.get('Rank', r.get('排名', 0))), 0)
+                if rank_val > 0:
                     rank_item = NumericTableWidgetItem(str(rank_val), raw_val=float(rank_val))
                 else:
                     rank_item = NumericTableWidgetItem("--", raw_val=None)
