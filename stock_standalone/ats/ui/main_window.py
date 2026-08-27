@@ -4293,7 +4293,7 @@ class ATSMainWindow(QMainWindow):
             self._async_tier3_timer.start(30)
 
     def _async_refresh_tier2(self):
-        """Tier 2 (10ms 延迟): 异步渲染未在激活态的副 Tab 看板与左侧三级池视图"""
+        """Tier 2 (10ms 延迟): 异步渲染未在激活态的副 Tab 看板"""
         if getattr(self, '_is_closing', False):
             return
         active_tab_idx = self.top_tabs.currentIndex() if hasattr(self, 'top_tabs') else 0
@@ -4306,26 +4306,14 @@ class ATSMainWindow(QMainWindow):
             if hasattr(self, 'favorite_panel') and self._pending_fav_rows:
                 self.favorite_panel.update_favorite_rows(self._pending_fav_rows)
 
-        # 刷新左侧 UniverseTreeWidget
-        radar_list, watch_list, trade_list = self.universe_manager.get_pools()
-        self.universe_widget.update_pools(radar_list, watch_list, trade_list)
-
     def _async_refresh_tier3(self):
-        """Tier 3 (30ms 延迟): 异步加载右侧板块热力图与独立的辅助监控弹窗"""
+        """Tier 3 (30ms 延迟): 异步加载右侧板块热力图与独立的辅助监控弹窗 (带防抖保护，杜绝主线程卡顿)"""
         if getattr(self, '_is_closing', False):
             return
         if hasattr(self, 'heatmap_widget'):
-            self.heatmap_widget.load_live_sectors(force=True, current_df=self.current_df)
+            self.heatmap_widget.load_live_sectors(force=False, current_df=self.current_df)
 
         from PyQt6.sip import isdeleted
-        
-        # 🚀 同步广播刷新龙头突击跟单榜 (HotSectorLeaderboardDialog)
-        if hasattr(self, 'hot_sector_dialog') and self.hot_sector_dialog is not None and not isdeleted(self.hot_sector_dialog):
-            if self.hot_sector_dialog.isVisible() or getattr(self.hot_sector_dialog, 'is_hidden_state', False):
-                try:
-                    self.hot_sector_dialog._force_refresh_data()
-                except Exception as e:
-                    print(f"[ATSMainWindow] Error refreshing hot sector dialog: {e}")
 
         sh_pct = getattr(self, '_pending_sh_pct', 0.0)
         if self.dragon_monitor_dialog and not isdeleted(self.dragon_monitor_dialog) and self.dragon_monitor_dialog.isVisible():
