@@ -52,6 +52,17 @@ class SectorHeatmapWidget(QWidget):
 
         self.sort_combo = QComboBox()
         self.sort_combo.addItems(["按强度得分降序", "按涨跌幅降序", "按活跃成员数降序"])
+        
+        # 💾 自动加载持久化保存的排序规则 (0: 强度得分, 1: 涨跌幅, 2: 活跃成员数)
+        from ats.ui.styles import load_config_node, save_config_node
+        saved_sort_idx = load_config_node("ats_heatmap_sort_index", 0)
+        try:
+            saved_sort_idx = int(saved_sort_idx)
+            if 0 <= saved_sort_idx < self.sort_combo.count():
+                self.sort_combo.setCurrentIndex(saved_sort_idx)
+        except Exception:
+            pass
+
         self.sort_combo.currentIndexChanged.connect(self.sort_sectors)
         header.addWidget(self.sort_combo)
 
@@ -126,6 +137,9 @@ class SectorHeatmapWidget(QWidget):
                 raw_name = str(item[0]).strip()
                 clean_sec = re.sub(r'^[^\w\u4e00-\u9fa5]+', '', raw_name).strip()
                 sec_name = clean_sec if clean_sec else raw_name
+                # 🛡️ 自动过滤虚拟系统聚合池 (如 "实时报警" / "🔔 实时报警")，保留真实题材概念赛道 (竞价挖掘)
+                if any(ex in sec_name for ex in ("实时报警", "系统报警", "异动汇总")):
+                    continue
                 if sec_name and sec_name not in top_secs:
                     top_secs.append(sec_name)
                 if len(top_secs) >= top_n:
@@ -656,6 +670,14 @@ class SectorHeatmapWidget(QWidget):
 
         # 🚀 [联动跟随龙头突击跟单榜] 发出排序变化信号并主动触发龙头突击榜刷新
         self.sort_changed.emit(index)
+        
+        # 💾 [自动持久化] 保存当前所选的排序模式至 window_config.json
+        from ats.ui.styles import save_config_node
+        try:
+            save_config_node("ats_heatmap_sort_index", index)
+        except Exception:
+            pass
+
         main_win = self.window()
         p = self.parent()
         while p:

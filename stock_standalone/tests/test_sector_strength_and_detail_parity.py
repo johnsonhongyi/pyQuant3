@@ -277,22 +277,30 @@ def test_extract_top_sectors_genuine_strength_unaffected_by_focus():
     top_3_cnt = engine.extract_top_sectors_from_heatmap(sectors_data, sec_to_codes, top_n=3, sort_mode=2)
     assert top_3_cnt == ["共封装光学(CPO)", "金属铜", "黄金概念"], f"活跃成员数Top 3应为成员最多板块，实际为: {top_3_cnt}"
     
-    # 2. 验证 SectorHeatmapWidget.get_top_sectors 随下拉框切换联动返回对应维度的 Top 3
+    # 2. 验证 SectorHeatmapWidget.get_top_sectors 随下拉框切换联动返回对应维度的 Top 3，并自动过滤虚拟系统板块 (如 实时报警)
+    sectors_with_alarm = list(sectors_data) + [
+        ("🔔 实时报警", 1.2, "+0.12%", 3634, "000000", ""),
+        ("机器人概念", 28.8, "+0.19%", 1102, "000001", "机器人龙头"),
+    ]
     widget = SectorHeatmapWidget()
-    widget.sectors = sectors_data
+    widget.sectors = sectors_with_alarm
 
     # 默认模式 0: 按强度得分降序
     widget.sort_combo.setCurrentIndex(0)
     assert widget.get_top_sectors(top_n=3) == ["金属铜", "金属锌", "黄金概念"]
 
-    # 切换模式 1: 按涨跌幅降序 -> 联动返回涨幅前三
+    # 切换模式 1: 按涨跌幅降序 -> 联动返回涨幅前三 (生物疫苗 +0.38%, 机器人概念 +0.19%, 光纤概念 +0.02%)
     widget.sort_combo.setCurrentIndex(1)
-    assert widget.get_top_sectors(top_n=3) == ["生物疫苗", "光纤概念", "金属铜"]
+    assert widget.get_top_sectors(top_n=3) == ["生物疫苗", "机器人概念", "光纤概念"]
 
-    # 切换模式 2: 按活跃成员数降序 -> 联动返回成员前三
+    # 切换模式 2: 按活跃成员数降序 -> 自动过滤 "🔔 实时报警" (3634)，提取真实题材: 机器人概念(1102), 共封装光学(125), 金属铜(86)
     widget.sort_combo.setCurrentIndex(2)
-    assert widget.get_top_sectors(top_n=3) == ["共封装光学(CPO)", "金属铜", "黄金概念"]
+    assert widget.get_top_sectors(top_n=3) == ["机器人概念", "共封装光学(CPO)", "金属铜"]
     
+    # 3. 验证排序维度持久化自动保存
+    from ats.ui.styles import load_config_node
+    assert load_config_node("ats_heatmap_sort_index", 0) == 2
+
     widget.close()
 
 

@@ -1,3 +1,14 @@
+## 2026-08-27 14:36
+- [x] **实现活跃成员排序竞价挖掘中龙头突击自动过滤【实时报警】虚拟聚合池 & 排序维度自动持久化 (`stock_standalone/ats/ui/heatmap_widget.py`, `stock_standalone/ats/hot_sector_engine.py`, `stock_standalone/tests/test_sector_strength_and_detail_parity.py`)**：
+    - [x] **龙头突击自动过滤虚拟系统聚合池 (竞价题材挖掘)**：
+        1. 在 `get_top_sectors` 与 `extract_top_sectors_from_heatmap` 中增加系统池过滤白名单（`实时报警`、`系统报警`、`异动汇总` 等）；
+        2. 当用户按“活跃成员数降序”排序时，自动剔除包含 3600+ 异动股的虚拟“实时报警”池，精准提取排在前面的真实产业/题材概念板块（如 `机器人概念`、`人工智能`、`华为概念`、`芯片概念` 等）；
+        3. 龙头突击榜顶部 Tab 与下方标的无缝锁定真实题材龙头与突破标的。
+    - [x] **排序下拉框维度自动持久化记忆**：
+        1. 在 `_init_ui` 中通过 `load_config_node("ats_heatmap_sort_index", 0)` 自动恢复用户上次选定的排序模式（0: 强度得分, 1: 涨跌幅, 2: 活跃成员数）；
+        2. 当用户在 `sort_combo` 切换排序时，自动原子写入 `window_config.json`，下次启动无缝恢复。
+    - [x] **全量 20 项自动化测试 100% 全部 PASSED**。
+
 ## 2026-08-27 13:56
 - [x] **实现行业板块排序调整与龙头突击跟单榜毫秒级联动跟随 (`stock_standalone/ats/ui/heatmap_widget.py`, `stock_standalone/ats/hot_sector_engine.py`, `stock_standalone/ats/ui/hot_sector_leaderboard.py`, `stock_standalone/tests/test_sector_strength_and_detail_parity.py`)**：
     - [x] **排查定位排序未联动根本原因**：
