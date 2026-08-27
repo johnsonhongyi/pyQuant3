@@ -53,26 +53,36 @@ class HotSectorEngine:
         self,
         sectors_list: List[Tuple[Any, ...]],
         sector_to_codes_map: Optional[Dict[str, List[str]]] = None,
-        top_n: int = 3
+        top_n: int = 3,
+        sort_mode: int = 0
     ) -> List[str]:
         """
         从板块热力图数据中提取排名前 top_n 的真实强势板块名称。
-        基于真实量化强度得分 (score) 严格降序排序，不受用户重点关注置顶视觉排序的干扰。
+        支持联动跟随热力图当前的排序规则 (0: 强度得分降序, 1: 涨跌幅降序, 2: 活跃成员数降序)
         """
         if not sectors_list:
             return []
 
         import re
-        def _get_clean_score(item):
+        def safe_float_pct(val_str):
             try:
-                if len(item) > 1:
-                    return float(item[1])
-            except (ValueError, TypeError):
-                pass
-            return -9999.0
+                return float(str(val_str).replace("%", "").replace("+", ""))
+            except Exception:
+                return -9999.0
 
-        # 基于真实强度得分 (item[1]) 降序排序，提取真实的 Top N 强势板块
-        sorted_by_strength = sorted(sectors_list, key=_get_clean_score, reverse=True)
+        def _get_sort_val(item):
+            try:
+                if sort_mode == 1:
+                    return safe_float_pct(item[2]) if len(item) > 2 else -9999.0
+                elif sort_mode == 2:
+                    return int(item[3]) if len(item) > 3 else -9999
+                else:
+                    return float(item[1]) if len(item) > 1 else -9999.0
+            except Exception:
+                return -9999.0
+
+        # 基于指定排序规则降序排序，提取真实的 Top N 强势板块
+        sorted_by_strength = sorted(sectors_list, key=_get_sort_val, reverse=True)
 
         top_secs = []
         for item in sorted_by_strength:

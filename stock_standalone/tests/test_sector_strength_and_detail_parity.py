@@ -267,15 +267,31 @@ def test_extract_top_sectors_genuine_strength_unaffected_by_focus():
     
     engine = HotSectorEngine.get_instance()
     
-    # 1. 验证 HotSectorEngine.extract_top_sectors_from_heatmap 提取出真实的 Top 3 强度最高板块
-    top_3_engine = engine.extract_top_sectors_from_heatmap(sectors_data, sec_to_codes, top_n=3)
-    assert top_3_engine == ["金属铜", "金属锌", "黄金概念"], f"龙头突击提取的Top 3板块应为强度最高板块，实际为: {top_3_engine}"
+    # 1. 验证 HotSectorEngine.extract_top_sectors_from_heatmap 在不同排序模式下的提取
+    top_3_score = engine.extract_top_sectors_from_heatmap(sectors_data, sec_to_codes, top_n=3, sort_mode=0)
+    assert top_3_score == ["金属铜", "金属锌", "黄金概念"], f"强度得分Top 3应为强度最高板块，实际为: {top_3_score}"
+
+    top_3_pct = engine.extract_top_sectors_from_heatmap(sectors_data, sec_to_codes, top_n=3, sort_mode=1)
+    assert top_3_pct == ["生物疫苗", "光纤概念", "金属铜"], f"涨跌幅Top 3应为涨幅最高板块，实际为: {top_3_pct}"
+
+    top_3_cnt = engine.extract_top_sectors_from_heatmap(sectors_data, sec_to_codes, top_n=3, sort_mode=2)
+    assert top_3_cnt == ["共封装光学(CPO)", "金属铜", "黄金概念"], f"活跃成员数Top 3应为成员最多板块，实际为: {top_3_cnt}"
     
-    # 2. 验证 SectorHeatmapWidget.get_top_sectors 也提取出真实的 Top 3 强度最高板块
+    # 2. 验证 SectorHeatmapWidget.get_top_sectors 随下拉框切换联动返回对应维度的 Top 3
     widget = SectorHeatmapWidget()
     widget.sectors = sectors_data
-    top_3_widget = widget.get_top_sectors(top_n=3)
-    assert top_3_widget == ["金属铜", "金属锌", "黄金概念"], f"热力图获取的Top 3板块应为强度最高板块，实际为: {top_3_widget}"
+
+    # 默认模式 0: 按强度得分降序
+    widget.sort_combo.setCurrentIndex(0)
+    assert widget.get_top_sectors(top_n=3) == ["金属铜", "金属锌", "黄金概念"]
+
+    # 切换模式 1: 按涨跌幅降序 -> 联动返回涨幅前三
+    widget.sort_combo.setCurrentIndex(1)
+    assert widget.get_top_sectors(top_n=3) == ["生物疫苗", "光纤概念", "金属铜"]
+
+    # 切换模式 2: 按活跃成员数降序 -> 联动返回成员前三
+    widget.sort_combo.setCurrentIndex(2)
+    assert widget.get_top_sectors(top_n=3) == ["共封装光学(CPO)", "金属铜", "黄金概念"]
     
     widget.close()
 

@@ -20,6 +20,7 @@ class SectorHeatmapWidget(QWidget):
     sector_selected = pyqtSignal(str) # sector name
     sector_selected_with_codes = pyqtSignal(str, list) # sector name, member codes list
     hot_leaders_clicked = pyqtSignal() # 龙头突击榜点击
+    sort_changed = pyqtSignal(int) # 排序维度切换 (0: 强度得分, 1: 涨跌幅, 2: 活跃成员数)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -91,20 +92,36 @@ class SectorHeatmapWidget(QWidget):
             main_win.open_hot_sector_leaderboard()
 
     def get_top_sectors(self, top_n: int = 3) -> list:
+        """
+        根据当前所选的排序维度 (0: 强度得分降序, 1: 涨跌幅降序, 2: 活跃成员数降序)
+        提取排名前 top_n 的真实强势板块名称 (联动龙头突击跟单榜)
+        """
         if not hasattr(self, 'sectors') or not self.sectors:
             return []
         import re
-        def _get_clean_score(item):
-            try:
-                if len(item) > 1:
-                    return float(item[1])
-            except (ValueError, TypeError):
-                pass
-            return -9999.0
+        current_sort_idx = self.sort_combo.currentIndex() if hasattr(self, 'sort_combo') else 0
 
-        sorted_by_strength = sorted(self.sectors, key=_get_clean_score, reverse=True)
+        def safe_float_pct(val_str):
+            try:
+                return float(str(val_str).replace("%", "").replace("+", ""))
+            except Exception:
+                return -9999.0
+
+        def _get_metric_val(item):
+            # item: (name, score, pct_str, count, leader_code, leader_name)
+            try:
+                if current_sort_idx == 0:
+                    return float(item[1]) if len(item) > 1 else -9999.0
+                elif current_sort_idx == 1:
+                    return safe_float_pct(item[2]) if len(item) > 2 else -9999.0
+                else:
+                    return int(item[3]) if len(item) > 3 else -9999
+            except Exception:
+                return -9999.0
+
+        sorted_by_metric = sorted(self.sectors, key=_get_metric_val, reverse=True)
         top_secs = []
-        for item in sorted_by_strength:
+        for item in sorted_by_metric:
             if item:
                 raw_name = str(item[0]).strip()
                 clean_sec = re.sub(r'^[^\w\u4e00-\u9fa5]+', '', raw_name).strip()
@@ -636,6 +653,21 @@ class SectorHeatmapWidget(QWidget):
         self.render_grid()
         if hasattr(self, 'scroll') and self.scroll and self.scroll.verticalScrollBar():
             self.scroll.verticalScrollBar().setValue(0)
+
+        # 🚀 [联动跟随龙头突击跟单榜] 发出排序变化信号并主动触发龙头突击榜刷新
+        self.sort_changed.emit(index)
+        main_win = self.window()
+        p = self.parent()
+        while p:
+            if hasattr(p, "hot_sector_dialog"):
+                main_win = p
+                break
+            p = p.parent()
+        if hasattr(main_win, "hot_sector_dialog") and main_win.hot_sector_dialog:
+            from PyQt6.sip import isdeleted
+            if not isdeleted(main_win.hot_sector_dialog) and main_win.hot_sector_dialog.isVisible():
+                if hasattr(main_win.hot_sector_dialog, "_force_refresh_data"):
+                    main_win.hot_sector_dialog._force_refresh_data()
 
 
 
