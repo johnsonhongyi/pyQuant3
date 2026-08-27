@@ -34,6 +34,14 @@ from .core import (
     send_file_to_recycle_bin
 )
 
+from .sync_engine import (
+    RamDiskSyncConfig,
+    RamDiskSyncEngine,
+    RamDiskSyncWorker,
+    detect_default_ramdisk_dir,
+    detect_default_backup_dir
+)
+
 from .ui import (
     WindowPosManagerUI,
     main as run_ui
@@ -67,6 +75,11 @@ __all__ = [
     'AcerPerformanceController',
     'get_system_uptime',
     'is_system_cold_boot',
+    'RamDiskSyncConfig',
+    'RamDiskSyncEngine',
+    'RamDiskSyncWorker',
+    'detect_default_ramdisk_dir',
+    'detect_default_backup_dir',
     'WindowPosManagerUI',
     'run_ui'
 ]

@@ -1,3 +1,26 @@
+## 2026-08-27 21:30
+- [x] **实现 RamDisk 实时数据自动同步与安全备份守护引擎（`webTools/window_manager/sync_engine.py`, `webTools/window_manager/ui.py`, `webTools/manage_window_layout.py`, `stock/webTools/manage_window_layout.py`, `tests/test_ramdisk_sync_engine.py`, `gemini.md`）**：
+    - [x] **业务痛点根治**：
+        - 针对电脑死机、蓝屏或意外断电导致 RamDisk（内存盘 `G:` / `R:` / `D:\Ramdisk`）中高频实时数据（`.h5`, `.json`, `.pkl` 等）丢失的问题，设计并实现了一套轻量、安全、0 冗余 I/O 的自动同步与备份守护引擎。
+    - [x] **多选文件精准同步与核心同步引擎 (`sync_engine.py`)**：
+        1. **浏览多选指定文件模式 (Specific Files Mode)**：支持按需挑选指定关键量化文件（如 `sina_MultiIndex_data.h5`、`tdx_last_df.h5`、`market_alerts_history.json` 等），拒绝盲目全目录同步；
+        2. **启动初检与基线初始化 (`check_and_sync_startup_baseline`)**：程序启动（守护 Worker 启动）时，**不受交易日与交易时段限制**，自动执行一次完整性核验与初次底包同步；若非交易时段启动且目标备份位置缺失或不一致，自动补齐底包；
+        3. **变动指纹精准比对 (Change Detection)**：基于 `(mtime, size)` 指纹进行精准扫描，仅当选定文件新增或被修改更新时才触发同步落地，数据无变化时 0 磁盘 I/O 消耗；
+        4. **交易日与交易时段灵活约束**：常规周期巡检支持配置仅在交易日及指定交易时段（默认 `09:15-11:35`, `13:00-15:10`）执行同步，亦支持全天候模式；
+        5. **Windows 文件锁友好与原子安全替换 (Safe Atomic Swap)**：采用只读共享模式打开，防范实盘写入时文件锁报错；先写入临时文件校验后再通过 `os.replace` 原子替换并同步 `mtime`，彻底杜绝中途死机损坏备份文件；
+        6. **后台守护线程 (`RamDiskSyncWorker`)**：启动时自动初检建底包，支持定时休眠轮询与事件唤醒，支持 PyQt6 信号与标准回调双模式；
+        7. **详细日志开关与自动持久化 (`log_enabled`)**：默认关闭（保持静默不刷屏，仅同步变动/错误时提示）；开启时即时自动持久化保存，并在主窗口控制台输出每次巡检明细与耗时，便于测试与调试。
+    - [x] **UI 可视化多选配置与托盘联动 (`ui.py`)**：
+        1. **`RamDiskSyncDialog` 对话框升级**：
+           - 提供「➕ 浏览文件夹多选文件(Ctrl/Shift)...」按钮，调用 `QFileDialog.getOpenFileNames` 支持批量多选；
+           - 提供「🔍 快速添加源目录量化文件」一键探测勾选关键文件；
+           - 提供带有勾选框、文件大小（如 125.4 MB）与就绪状态展示的待同步文件列表，支持多选项移除与清空；
+           - 提供启用开关、源目录/目标备份路径浏览与自动探测、巡检间隔秒数、交易时段自定义区间、备份模式（镜像覆盖/日期归档）、详细日志复选框（即时自动持久化）、立即执行同步测试与实时诊断日志；
+        2. **主窗口与托盘集成**：在主界面操作栏增加「💾 RamDisk同步」按钮；系统托盘右键菜单增加「💾 立即备份 RamDisk 数据」与「⚙️ RamDisk 自动同步设置...」快捷项；在程序启动时自动挂载守护线程，退出时安全释放。
+    - [x] **全场景 CLI 支持与测试套件 100% 通过**：
+        1. 入口脚本支持 `--sync-now`、`--sync-force`、`--sync-daemon`、`--sync-status` 命令行调用；
+        2. 新增 `test_ramdisk_sync_engine.py` 专项测试套件（7/7 全部 PASSED），覆盖日志开关自动持久化、启动初检不受时段限制建底包、多选特定文件同步、配置持久化、交易时段过滤、变动指纹比对、原子写入与日期归档，全量回归测试无缺陷。
+
 ## 2026-08-27 18:10
 - [x] **根治窗口布局管理器 (`manage_window_layout.py`) 意外重复弹出、退出失效、PredatorSense 20% 高占用与跨显示器 (高分屏 -> 三星普分屏) 尺寸截断需执行两次才正常问题 (`webTools/window_manager/core.py`, `webTools/window_manager/ui.py`, `stock/webTools/ths-tdx-web.py`, `gemini.md`)**：
     - [x] **四大根因精准破案与定位**：

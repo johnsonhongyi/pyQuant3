@@ -18,12 +18,13 @@ from PyQt6.QtWidgets import (
     QLabel, QComboBox, QPushButton, QTableWidget, QTableWidgetItem, 
     QHeaderView, QMessageBox, QInputDialog, QDialog, QListWidget,
     QListWidgetItem, QTextEdit, QGroupBox, QLineEdit, QMenu, QSystemTrayIcon,
-    QSizePolicy, QTabWidget, QCheckBox
+    QSizePolicy, QTabWidget, QCheckBox, QRadioButton, QButtonGroup, QAbstractItemView
 )
 from PyQt6.QtGui import QAction, QIcon, QColor, QBrush, QPen, QFont, QPainter, QLinearGradient
 
-# 导入核心模块
+# 导入核心模块与同步引擎
 from . import core
+from . import sync_engine
 
 import sys
 # 动态将工作空间根目录及当前目录加入路径，保证 tk_gui_modules 等模块可以被顺利导入
@@ -1636,7 +1637,647 @@ class RouteConfigDialog(QDialog):
             QMessageBox.information(self, "检测成功", msg)
         else:
             QMessageBox.warning(self, "检测失败", msg)
+
+
+class RamDiskSyncDialog(QDialog):
+    """
+    RamDisk 实时数据自动同步与备份配置对话框
+    支持：
+    1. 浏览文件夹并多选关键数据文件（QFileDialog.getOpenFileNames 批量多选）
+    2. 源目录自动探测与切换
+    3. 仅同步列表多选文件 (specific_files) vs 全目录通配符扫描 (all_directory)
+    4. 待同步列表的添加、删除、清空、一键勾选
+    5. 备份路径、同步间隔、交易时段、原子安全替换设置
+    6. 即时同步测试与诊断日志输出
+    """
+    def __init__(self, sync_config, sync_engine, sync_worker=None, parent=None):
+        super().__init__(parent)
+        self.sync_config = sync_config
+        self.sync_engine = sync_engine
+        self.sync_worker = sync_worker
+        self.setWindowTitle("💾 RamDisk 实时数据自动同步与多选备份设置")
+        self.resize(660, 750)
+        self.init_ui()
+
+    def init_ui(self):
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #1e1e24;
+                color: #e0e0e0;
+                font-family: 'Segoe UI', 'Microsoft YaHei';
+            }
+            QGroupBox {
+                border: 1px solid #3a3a42;
+                border-radius: 6px;
+                margin-top: 8px;
+                font-weight: bold;
+                color: #38bdf8;
+                background-color: #16161b;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 5px 0 5px;
+            }
+            QLabel {
+                color: #e0e0e0;
+                font-size: 12px;
+            }
+            QLineEdit, QSpinBox, QComboBox {
+                background-color: #121215;
+                border: 1px solid #3a3a42;
+                border-radius: 4px;
+                color: #ffffff;
+                padding: 5px;
+                font-size: 12px;
+            }
+            QPushButton {
+                background-color: #2e2e38;
+                border: 1px solid #4a4a56;
+                border-radius: 4px;
+                color: #ffffff;
+                padding: 5px 12px;
+                font-size: 12px;
+            }
+            QPushButton:hover {
+                background-color: #3e3e4a;
+                border-color: #0ea5e9;
+            }
+            QCheckBox, QRadioButton {
+                color: #ffffff;
+                font-size: 12px;
+            }
+            QListWidget {
+                background-color: #121215;
+                border: 1px solid #3a3a42;
+                border-radius: 4px;
+                color: #f3f4f6;
+                font-size: 12px;
+            }
+            QListWidget::item {
+                padding: 4px 6px;
+                border-bottom: 1px solid #23232b;
+            }
+            QListWidget::item:hover {
+                background-color: #262630;
+            }
+            QListWidget::item:selected {
+                background-color: #0369a1;
+                color: #ffffff;
+            }
+            QTextEdit {
+                background-color: #0f0f12;
+                border: 1px solid #25252b;
+                border-radius: 4px;
+                color: #34d399;
+                font-family: 'Consolas', 'Courier New', monospace;
+                font-size: 11px;
+            }
+        """)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(14, 10, 14, 10)
+        layout.setSpacing(8)
+
+        # 1. 基础开关与路径 GroupBox
+        gb_basic = QGroupBox("📁 路径设置与自动同步开关")
+        basic_layout = QVBoxLayout(gb_basic)
+        basic_layout.setSpacing(6)
+
+        self.chk_enabled = QCheckBox("启用 RamDisk 实时数据自动同步与备份")
+        self.chk_enabled.setChecked(self.sync_config.enabled)
+        self.chk_enabled.setStyleSheet("font-weight: bold; color: #10b981; font-size: 13px;")
+        basic_layout.addWidget(self.chk_enabled)
+
+        # 源目录
+        row_src = QHBoxLayout()
+        lbl_src = QLabel("源目录(Ramdisk):")
+        lbl_src.setFixedWidth(110)
+        self.txt_src = QLineEdit(self.sync_config.source_dir)
+        self.txt_src.textChanged.connect(self._on_source_dir_changed)
+        btn_browse_src = QPushButton("📂 浏览目录...")
+        btn_browse_src.clicked.connect(self._browse_source)
+        btn_detect_src = QPushButton("⚡ 自动探测")
+        btn_detect_src.setToolTip("自动探测系统中挂载的 RamDisk 盘符或内存盘目录")
+        btn_detect_src.clicked.connect(self._auto_detect_source)
+        row_src.addWidget(lbl_src)
+        row_src.addWidget(self.txt_src, stretch=1)
+        row_src.addWidget(btn_browse_src)
+        row_src.addWidget(btn_detect_src)
+        basic_layout.addLayout(row_src)
+
+        # 目标备份目录
+        row_tgt = QHBoxLayout()
+        lbl_tgt = QLabel("目标备份位置:")
+        lbl_tgt.setFixedWidth(110)
+        self.txt_tgt = QLineEdit(self.sync_config.target_dir)
+        btn_browse_tgt = QPushButton("📂 浏览目录...")
+        btn_browse_tgt.clicked.connect(self._browse_target)
+        btn_open_tgt = QPushButton("📂 打开目录")
+        btn_open_tgt.setToolTip("在资源管理器中直接打开目标备份目录")
+        btn_open_tgt.clicked.connect(self._open_target_dir)
+        row_tgt.addWidget(lbl_tgt)
+        row_tgt.addWidget(self.txt_tgt, stretch=1)
+        row_tgt.addWidget(btn_browse_tgt)
+        row_tgt.addWidget(btn_open_tgt)
+        basic_layout.addLayout(row_tgt)
+
+        layout.addWidget(gb_basic)
+
+        # 2. 同步模式与多选文件管理 GroupBox
+        gb_files = QGroupBox("📄 同步文件多选管理 (按需挑选，拒绝全部盲目同步)")
+        files_layout = QVBoxLayout(gb_files)
+        files_layout.setSpacing(6)
+
+        # 模式切换单选按钮
+        mode_box = QHBoxLayout()
+        self.rb_specific = QRadioButton("🔘 【推荐】浏览多选指定文件 (仅同步下方列表中的文件)")
+        self.rb_all = QRadioButton("🔘 同步源目录下全部匹配文件")
+        self.rb_specific.setChecked(self.sync_config.sync_scope == "specific_files")
+        self.rb_all.setChecked(self.sync_config.sync_scope != "specific_files")
+        self.rb_specific.toggled.connect(self._on_sync_scope_toggled)
+        mode_box.addWidget(self.rb_specific)
+        mode_box.addWidget(self.rb_all)
+        mode_box.addStretch()
+        files_layout.addLayout(mode_box)
+
+        # 多选文件操作工具栏
+        self.files_toolbar = QHBoxLayout()
+        self.btn_add_files = QPushButton("➕ 浏览文件夹多选文件(Ctrl/Shift)...")
+        self.btn_add_files.setStyleSheet("background-color: #0284c7; color: white; font-weight: bold;")
+        self.btn_add_files.setToolTip("打开文件浏览窗口，按住 Ctrl 或 Shift 键可多选多个需要同步的关键文件")
+        self.btn_add_files.clicked.connect(self._browse_and_add_files)
+
+        self.btn_scan_add = QPushButton("🔍 快速添加源目录量化文件")
+        self.btn_scan_add.setToolTip("自动扫描源目录下的 .h5/.json/.pkl/.csv 文件并加入待同步列表")
+        self.btn_scan_add.clicked.connect(self._scan_and_add_source_files)
+
+        self.btn_remove_file = QPushButton("❌ 移除选中")
+        self.btn_remove_file.clicked.connect(self._remove_selected_files)
+
+        self.btn_clear_files = QPushButton("🧹 清空列表")
+        self.btn_clear_files.clicked.connect(self._clear_files_list)
+
+        self.files_toolbar.addWidget(self.btn_add_files)
+        self.files_toolbar.addWidget(self.btn_scan_add)
+        self.files_toolbar.addWidget(self.btn_remove_file)
+        self.files_toolbar.addWidget(self.btn_clear_files)
+        self.files_toolbar.addStretch()
+        files_layout.addLayout(self.files_toolbar)
+
+        # 待同步文件列表展示
+        self.list_files = QListWidget()
+        self.list_files.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.list_files.setFixedHeight(130)
+        files_layout.addWidget(self.list_files)
+
+        self.lbl_files_summary = QLabel("暂未添加任何文件")
+        self.lbl_files_summary.setStyleSheet("color: #94a3b8; font-size: 11px;")
+        files_layout.addWidget(self.lbl_files_summary)
+
+        # 通配符输入（当切到全量模式时生效）
+        self.row_pat = QHBoxLayout()
+        lbl_pat = QLabel("全目录通配符:")
+        lbl_pat.setFixedWidth(110)
+        self.txt_patterns = QLineEdit(", ".join(self.sync_config.file_patterns))
+        self.txt_patterns.setPlaceholderText("*.h5, *.json, *.pkl, *.csv, *.txt, *.db")
+        self.row_pat.addWidget(lbl_pat)
+        self.row_pat.addWidget(self.txt_patterns, stretch=1)
+        files_layout.addLayout(self.row_pat)
+
+        layout.addWidget(gb_files)
+
+        # 3. 调度与时段规则 GroupBox
+        gb_schedule = QGroupBox("⏰ 调度周期与交易时段约束")
+        sched_layout = QVBoxLayout(gb_schedule)
+        sched_layout.setSpacing(6)
+
+        row_int = QHBoxLayout()
+        lbl_int = QLabel("同步巡检间隔:")
+        lbl_int.setFixedWidth(110)
+        self.spn_interval = QtWidgets.QSpinBox()
+        self.spn_interval.setRange(5, 3600)
+        self.spn_interval.setSingleStep(5)
+        self.spn_interval.setValue(self.sync_config.sync_interval_sec)
+        self.spn_interval.setSuffix(" 秒")
+        self.spn_interval.setFixedWidth(100)
+        lbl_int_tip = QLabel("（仅当选定文件 mtime/大小变动时才会真正触发写入备份）")
+        lbl_int_tip.setStyleSheet("color: #94a3b8; font-size: 11px;")
+        row_int.addWidget(lbl_int)
+        row_int.addWidget(self.spn_interval)
+        row_int.addWidget(lbl_int_tip, stretch=1)
+        sched_layout.addLayout(row_int)
+
+        row_checks = QHBoxLayout()
+        self.chk_workdays = QCheckBox("仅在工作日/交易日执行")
+        self.chk_workdays.setChecked(self.sync_config.only_workdays)
+        self.chk_trading_hours = QCheckBox("仅在指定交易时段执行")
+        self.chk_trading_hours.setChecked(self.sync_config.only_trading_hours)
+        row_checks.addWidget(self.chk_workdays)
+        row_checks.addWidget(self.chk_trading_hours)
+        row_checks.addStretch()
+        sched_layout.addLayout(row_checks)
+
+        # 交易时段输入
+        row_th = QHBoxLayout()
+        lbl_th = QLabel("交易时段区间:")
+        lbl_th.setFixedWidth(110)
+        th_str = ", ".join([f"{slot[0]}-{slot[1]}" for slot in self.sync_config.trading_hours if len(slot) == 2])
+        self.txt_trading_hours = QLineEdit(th_str)
+        self.txt_trading_hours.setPlaceholderText("09:15-11:35, 13:00-15:10")
+        row_th.addWidget(lbl_th)
+        row_th.addWidget(self.txt_trading_hours, stretch=1)
+        sched_layout.addLayout(row_th)
+
+        layout.addWidget(gb_schedule)
+
+        # 4. 备份模式与安全机制
+        gb_safe = QGroupBox("🛡️ 备份模式与安全机制")
+        safe_layout = QHBoxLayout(gb_safe)
+        safe_layout.setSpacing(8)
+
+        lbl_mode = QLabel("存储模式:")
+        self.cb_backup_mode = QComboBox()
+        self.cb_backup_mode.addItem("镜像覆盖 (保持最新快照)", "mirror")
+        self.cb_backup_mode.addItem("每日日期归档 (按年月日创建子文件夹)", "date_folder")
+        if self.sync_config.backup_mode == "date_folder":
+            self.cb_backup_mode.setCurrentIndex(1)
+        else:
+            self.cb_backup_mode.setCurrentIndex(0)
+        safe_layout.addWidget(lbl_mode)
+        safe_layout.addWidget(self.cb_backup_mode)
+
+        self.chk_atomic = QCheckBox("原子安全替换 (先写临时文件后原子替换)")
+        self.chk_atomic.setChecked(self.sync_config.atomic_swap)
+        safe_layout.addWidget(self.chk_atomic)
+
+        self.chk_log_enabled = QCheckBox("开启详细同步日志 (调试模式 · 自动持久化并在主控制台记录每次巡检)")
+        self.chk_log_enabled.setChecked(getattr(self.sync_config, "log_enabled", False))
+        self.chk_log_enabled.toggled.connect(self._on_log_enabled_toggled)
+        safe_layout.addWidget(self.chk_log_enabled)
+
+        safe_layout.addStretch()
+
+        layout.addWidget(gb_safe)
+
+        # 5. 同步测试与实时日志
+        gb_log = QGroupBox("📋 同步测试与诊断日志")
+        log_layout = QVBoxLayout(gb_log)
+        log_layout.setSpacing(6)
+
+        btn_row = QHBoxLayout()
+        self.btn_sync_test = QPushButton("⚡ 立即执行同步测试 (增量)")
+        self.btn_sync_test.setStyleSheet("background-color: #0ea5e9; font-weight: bold;")
+        self.btn_sync_test.clicked.connect(lambda: self._execute_test_sync(force=False))
+        
+        self.btn_force_test = QPushButton("🚀 强制全量同步")
+        self.btn_force_test.setStyleSheet("background-color: #ea580c; font-weight: bold;")
+        self.btn_force_test.clicked.connect(lambda: self._execute_test_sync(force=True))
+        
+        btn_row.addWidget(self.btn_sync_test)
+        btn_row.addWidget(self.btn_force_test)
+        btn_row.addStretch()
+        log_layout.addLayout(btn_row)
+
+        self.txt_log = QTextEdit()
+        self.txt_log.setReadOnly(True)
+        self.txt_log.setFixedHeight(75)
+        self.txt_log.setPlaceholderText("点击【立即执行同步测试】可在此查看扫描文件、指纹比对与同步详情...")
+        log_layout.addWidget(self.txt_log)
+
+        layout.addWidget(gb_log)
+
+        # 6. 底部保存与取消按钮
+        bottom_box = QHBoxLayout()
+        bottom_box.addStretch()
+        
+        self.btn_save = QPushButton("💾 保存并应用配置")
+        self.btn_save.setStyleSheet("background-color: #10b981; font-weight: bold; padding: 6px 16px;")
+        self.btn_save.clicked.connect(self._save_and_apply)
+        
+        self.btn_cancel = QPushButton("❌ 取消")
+        self.btn_cancel.clicked.connect(self.reject)
+        
+        bottom_box.addWidget(self.btn_save)
+        bottom_box.addWidget(self.btn_cancel)
+        layout.addLayout(bottom_box)
+
+        # 初始化待同步文件列表数据
+        self._populate_files_list(self.sync_config.specific_files)
+        self._update_ui_state()
+
+    def _on_sync_scope_toggled(self):
+        self._update_ui_state()
+
+    def _update_ui_state(self):
+        is_specific = self.rb_specific.isChecked()
+        self.list_files.setEnabled(is_specific)
+        self.btn_add_files.setEnabled(is_specific)
+        self.btn_scan_add.setEnabled(is_specific)
+        self.btn_remove_file.setEnabled(is_specific)
+        self.btn_clear_files.setEnabled(is_specific)
+        self.txt_patterns.setEnabled(not is_specific)
+
+    def _populate_files_list(self, files_list: list):
+        self.list_files.clear()
+        src_root = self.txt_src.text().strip() if hasattr(self, 'txt_src') else self.sync_config.source_dir
+        
+        total_size = 0
+        valid_count = 0
+
+        for f_p in files_list:
+            if not f_p:
+                continue
+            abs_p = f_p if os.path.isabs(f_p) else os.path.join(src_root, f_p)
+            exists = os.path.exists(abs_p) and os.path.isfile(abs_p)
             
+            size_str = "文件不存在"
+            if exists:
+                try:
+                    sz = os.path.getsize(abs_p)
+                    total_size += sz
+                    valid_count += 1
+                    if sz > 1024 * 1024 * 1024:
+                        size_str = f"{sz / (1024*1024*1024):.2f} GB"
+                    elif sz > 1024 * 1024:
+                        size_str = f"{sz / (1024*1024):.1f} MB"
+                    elif sz > 1024:
+                        size_str = f"{sz / 1024:.1f} KB"
+                    else:
+                        size_str = f"{sz} B"
+                except Exception:
+                    size_str = "就绪"
+
+            rel_p = f_p
+            if src_root and exists and abs_p.startswith(src_root):
+                try:
+                    rel_p = os.path.relpath(abs_p, src_root)
+                except Exception:
+                    rel_p = os.path.basename(abs_p)
+
+            item = QListWidgetItem(f"📄 {rel_p}  ({size_str})")
+            item.setData(QtCore.Qt.ItemDataRole.UserRole, rel_p)
+            item.setFlags(item.flags() | QtCore.Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(QtCore.Qt.CheckState.Checked)
+            self.list_files.addItem(item)
+
+        size_mb = total_size / (1024 * 1024)
+        self.lbl_files_summary.setText(f"📋 共添加 {self.list_files.count()} 个文件 (其中 {valid_count} 个就绪，合计 {size_mb:.2f} MB)")
+
+    def _get_current_files_list(self) -> list:
+        res = []
+        for i in range(self.list_files.count()):
+            item = self.list_files.item(i)
+            if item.checkState() == QtCore.Qt.CheckState.Checked:
+                p = item.data(QtCore.Qt.ItemDataRole.UserRole)
+                if p:
+                    res.append(p)
+        return res
+
+    def _browse_and_add_files(self):
+        """打开文件浏览器，支持按住 Ctrl/Shift 键多选文件加入列表"""
+        start_dir = self.txt_src.text().strip()
+        if not start_dir or not os.path.exists(start_dir):
+            start_dir = self.sync_config.source_dir
+        if not os.path.exists(start_dir):
+            start_dir = ""
+
+        files, _ = QtWidgets.QFileDialog.getOpenFileNames(
+            self,
+            "浏览文件夹并多选需要同步的 RamDisk 文件 (按住 Ctrl 或 Shift 可多选)",
+            start_dir,
+            "量化数据与关键文件 (*.h5 *.hdf5 *.db *.json *.pkl *.csv *.txt *.parquet);;所有文件 (*.*)"
+        )
+        if not files:
+            return
+
+        current_list = self._get_current_files_list()
+        src_root = self.txt_src.text().strip()
+
+        # 如果源目录为空，自动以选定文件的所在目录作为源目录
+        if (not src_root or not os.path.exists(src_root)) and files:
+            src_root = os.path.dirname(files[0])
+            self.txt_src.setText(src_root)
+
+        added_count = 0
+        for f in files:
+            try:
+                rel_p = os.path.relpath(f, src_root) if src_root and f.startswith(src_root) else os.path.basename(f)
+            except Exception:
+                rel_p = os.path.basename(f)
+            
+            if rel_p not in current_list:
+                current_list.append(rel_p)
+                added_count += 1
+
+        self._populate_files_list(current_list)
+        self.txt_log.append(f"➕ [多选添加] 成功添加 {added_count} 个文件至同步列表。")
+
+    def _scan_and_add_source_files(self):
+        """自动快速扫描当前源目录中的关键文件"""
+        src_root = self.txt_src.text().strip()
+        if not src_root or not os.path.exists(src_root):
+            QMessageBox.warning(self, "扫描失败", f"源目录不存在或无效:\n{src_root}")
+            return
+
+        patterns = ["*.h5", "*.json", "*.pkl", "*.csv", "*.txt", "*.db", "*.parquet"]
+        found = []
+        try:
+            for root, dirs, files in os.walk(src_root):
+                dirs[:] = [d for d in dirs if not d.startswith("$") and d.lower() not in ["temp", "tmp", ".git"]]
+                for f in files:
+                    if f.startswith("~$") or f.endswith(".tmp") or f.endswith(".lock"):
+                        continue
+                    if any(fnmatch.fnmatch(f, pat) for pat in patterns):
+                        abs_p = os.path.join(root, f)
+                        rel_p = os.path.relpath(abs_p, src_root)
+                        found.append(rel_p)
+        except Exception as e:
+            QMessageBox.warning(self, "扫描异常", f"扫描源目录异常:\n{e}")
+            return
+
+        if not found:
+            QMessageBox.information(self, "扫描结果", f"在源目录【{src_root}】中未发现符合规则的量化数据文件。")
+            return
+
+        current_list = self._get_current_files_list()
+        added_count = 0
+        for f in found:
+            if f not in current_list:
+                current_list.append(f)
+                added_count += 1
+
+        self._populate_files_list(current_list)
+        self.txt_log.append(f"🔍 [扫描添加] 扫描到 {len(found)} 个量化文件，已新增 {added_count} 个文件至同步列表。")
+
+    def _remove_selected_files(self):
+        selected_items = self.list_files.selectedItems()
+        if not selected_items:
+            return
+        for item in selected_items:
+            row = self.list_files.row(item)
+            self.list_files.takeItem(row)
+        self._populate_files_list(self._get_current_files_list())
+
+    def _clear_files_list(self):
+        self.list_files.clear()
+        self.lbl_files_summary.setText("暂未添加任何文件")
+
+    def _on_source_dir_changed(self, text):
+        pass
+
+    def _browse_source(self):
+        dir_p = QtWidgets.QFileDialog.getExistingDirectory(self, "选择 RamDisk 源目录", self.txt_src.text().strip())
+        if dir_p:
+            self.txt_src.setText(os.path.abspath(dir_p))
+            # 刷新列表中的大小与存在性
+            self._populate_files_list(self._get_current_files_list())
+
+    def _auto_detect_source(self):
+        from .sync_engine import detect_default_ramdisk_dir
+        detected = detect_default_ramdisk_dir()
+        self.txt_src.setText(detected)
+        self.txt_log.append(f"⚡ [探测] 系统检测到的推荐 RamDisk 目录: {detected}")
+        self._populate_files_list(self._get_current_files_list())
+
+    def _browse_target(self):
+        dir_p = QtWidgets.QFileDialog.getExistingDirectory(self, "选择目标备份目录", self.txt_tgt.text().strip())
+        if dir_p:
+            self.txt_tgt.setText(os.path.abspath(dir_p))
+
+    def _open_target_dir(self):
+        tgt_p = self.txt_tgt.text().strip()
+        if not tgt_p:
+            tgt_p = self.sync_config.target_dir
+        if not os.path.exists(tgt_p):
+            try:
+                os.makedirs(tgt_p, exist_ok=True)
+            except Exception as e:
+                QMessageBox.warning(self, "打开失败", f"无法创建目标目录:\n{e}")
+                return
+        try:
+            os.startfile(tgt_p)
+        except Exception as e:
+            QMessageBox.warning(self, "打开失败", f"无法打开目录:\n{e}")
+
+    def _parse_trading_hours(self) -> list:
+        raw = self.txt_trading_hours.text().strip()
+        slots = []
+        if raw:
+            parts = [p.strip() for p in raw.replace("，", ",").split(",") if p.strip()]
+            for p in parts:
+                if "-" in p:
+                    s, e = p.split("-", 1)
+                    s, e = s.strip(), e.strip()
+                    if s and e:
+                        slots.append([s, e])
+        if not slots:
+            slots = [["09:15", "11:35"], ["13:00", "15:10"]]
+        return slots
+
+    def _parse_patterns(self) -> list:
+        raw = self.txt_patterns.text().strip()
+        pats = []
+        if raw:
+            pats = [p.strip() for p in raw.replace("，", ",").replace(";", ",").split(",") if p.strip()]
+        if not pats:
+            pats = ["*.h5", "*.json", "*.pkl", "*.csv", "*.txt", "*.db", "*.parquet"]
+        return pats
+
+    def _execute_test_sync(self, force: bool = False):
+        """执行测试同步"""
+        src = self.txt_src.text().strip()
+        tgt = self.txt_tgt.text().strip()
+        
+        if not os.path.exists(src):
+            self.txt_log.append(f"❌ [错误] 源目录不存在: {src}")
+            return
+
+        self.sync_engine.config.enabled = True
+        self.sync_engine.config.source_dir = src
+        self.sync_engine.config.target_dir = tgt
+        self.sync_engine.config.sync_scope = "specific_files" if self.rb_specific.isChecked() else "all_directory"
+        self.sync_engine.config.specific_files = self._get_current_files_list()
+        self.sync_engine.config.file_patterns = self._parse_patterns()
+        self.sync_engine.config.backup_mode = self.cb_backup_mode.currentData() or "mirror"
+        self.sync_engine.config.atomic_swap = self.chk_atomic.isChecked()
+
+        scope_desc = f"多选指定 {len(self.sync_engine.config.specific_files)} 个文件" if self.sync_engine.config.sync_scope == "specific_files" else "全目录通配符扫描"
+        self.txt_log.append(f"🚀 开始测试 ({'强制全量' if force else '智能增量'} · 模式: {scope_desc})...")
+        res = self.sync_engine.sync_once(force=force, ignore_time_filter=True)
+        
+        status_tag = "✅" if res.get("status") == "ok" else "⚠️"
+        self.txt_log.append(f"{status_tag} {res.get('message')}")
+        if res.get("synced_files"):
+            for f in res["synced_files"]:
+                self.txt_log.append(f"   -> 写入: {f}")
+        if res.get("failed_files"):
+            for f, err in res["failed_files"]:
+                self.txt_log.append(f"   ❌ 失败: {f} ({err})")
+
+    def _on_log_enabled_toggled(self, checked: bool):
+        """复选框状态改变时，即时自动持久化保存日志开关状态"""
+        self.sync_config.log_enabled = checked
+        self.sync_engine.config.log_enabled = checked
+        self.sync_config.save()
+        state_str = "已开启 (将在主窗口控制台输出每次巡检明细)" if checked else "已关闭 (保持静默，仅同步变动/错误时提示)"
+        self.txt_log.append(f"ℹ️ [日志开关] 详细同步日志状态{state_str}，已自动持久化保存。")
+
+    def _save_and_apply(self):
+        src = self.txt_src.text().strip()
+        tgt = self.txt_tgt.text().strip()
+
+        if not src:
+            QMessageBox.warning(self, "参数错误", "请输入或选择 RamDisk 源目录！")
+            return
+        if not tgt:
+            QMessageBox.warning(self, "参数错误", "请输入或选择目标备份目录！")
+            return
+
+        self.sync_config.enabled = self.chk_enabled.isChecked()
+        self.sync_config.source_dir = src
+        self.sync_config.target_dir = tgt
+        self.sync_config.sync_scope = "specific_files" if self.rb_specific.isChecked() else "all_directory"
+        self.sync_config.specific_files = self._get_current_files_list()
+        self.sync_config.sync_interval_sec = self.spn_interval.value()
+        self.sync_config.only_workdays = self.chk_workdays.isChecked()
+        self.sync_config.only_trading_hours = self.chk_trading_hours.isChecked()
+        self.sync_config.trading_hours = self._parse_trading_hours()
+        self.sync_config.file_patterns = self._parse_patterns()
+        self.sync_config.backup_mode = self.cb_backup_mode.currentData() or "mirror"
+        self.sync_config.atomic_swap = self.chk_atomic.isChecked()
+        self.sync_config.log_enabled = self.chk_log_enabled.isChecked()
+
+        success = self.sync_config.save()
+        if success:
+            self.sync_engine.config = self.sync_config
+            if self.sync_worker:
+                if self.sync_config.enabled:
+                    if hasattr(self.sync_worker, "isRunning") and not self.sync_worker.isRunning():
+                        self.sync_worker.start()
+                    else:
+                        self.sync_worker.trigger_sync_now(force=False)
+                else:
+                    self.sync_worker.stop()
+            
+            scope_info = f"多选指定 {len(self.sync_config.specific_files)} 个文件" if self.sync_config.sync_scope == "specific_files" else "全目录通配符扫描"
+            QMessageBox.information(
+                self, 
+                "保存成功", 
+                f"RamDisk 自动同步配置已成功保存并生效！\n\n"
+                f"• 状态: {'开启' if self.sync_config.enabled else '停用'}\n"
+                f"• 同步范围: {scope_info}\n"
+                f"• 巡检间隔: 每 {self.sync_config.sync_interval_sec} 秒\n"
+                f"• 源目录: {self.sync_config.source_dir}\n"
+                f"• 备份目录: {self.sync_config.target_dir}\n"
+                f"• 仅交易时段: {'是' if self.sync_config.only_trading_hours else '否'}\n"
+                f"• 详细日志: {'已开启' if self.sync_config.log_enabled else '已关闭'}"
+            )
+            self.accept()
+        else:
+            QMessageBox.critical(self, "错误", "配置文件写盘失败，请检查文件写权限！")
+
+
 class TopologyCanvasWidget(QWidget):
     """
     多显示器物理拓扑可视化绘制画布
@@ -2078,6 +2719,18 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
         except Exception as e:
             logger.error(f"启动自动应用 Acer 性能模式初始化异常: {e}")
 
+        # 初始化 RamDisk 实时数据自动同步与备份守护引擎
+        try:
+            self.ramdisk_sync_config = sync_engine.RamDiskSyncConfig()
+            self.ramdisk_sync_engine = sync_engine.RamDiskSyncEngine(self.ramdisk_sync_config)
+            self.ramdisk_sync_worker = sync_engine.RamDiskSyncWorker(self.ramdisk_sync_engine, self)
+            self.ramdisk_sync_worker.sync_completed.connect(self._on_ramdisk_sync_completed)
+            self.ramdisk_sync_worker.status_updated.connect(self._on_ramdisk_sync_status_updated)
+            if self.ramdisk_sync_config.enabled:
+                self.ramdisk_sync_worker.start()
+                self.log(f"💾 [RamDisk Sync] 自动同步守护已启动 (每 {self.ramdisk_sync_config.sync_interval_sec} 秒巡检)")
+        except Exception as e:
+            self.log(f"⚠️ [RamDisk Sync] 初始化同步守护异常: {e}")
             
         # 允许驻留后台
         QApplication.instance().setQuitOnLastWindowClosed(False)
@@ -2195,6 +2848,17 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
         except Exception as e:
             logger.error(f"托盘图标 Acer 快捷菜单初始化异常: {e}")
 
+        # 💾 RamDisk 实时数据自动同步与备份快捷菜单
+        try:
+            self.tray_menu.addSeparator()
+            sync_now_action = self.tray_menu.addAction("💾 立即备份 RamDisk 数据")
+            sync_now_action.triggered.connect(self._trigger_ramdisk_sync_from_tray)
+            
+            sync_cfg_action = self.tray_menu.addAction("⚙️ RamDisk 自动同步设置...")
+            sync_cfg_action.triggered.connect(self.open_ramdisk_sync_settings)
+        except Exception as e:
+            logger.error(f"托盘图标 RamDisk 快捷菜单初始化异常: {e}")
+
         self.tray_menu.addSeparator()
         quit_action = self.tray_menu.addAction("❌ 完全退出")
         quit_action.triggered.connect(self.force_quit)
@@ -2287,6 +2951,9 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
                 self._hotkey_thread.stop()
                 self._hotkey_thread = None
                 self._hotkey_hook = None
+            # 停止 RamDisk 同步守护线程
+            if hasattr(self, 'ramdisk_sync_worker') and self.ramdisk_sync_worker:
+                self.ramdisk_sync_worker.stop()
         except Exception:
             pass
         try:
@@ -2320,6 +2987,8 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
                     self._hotkey_thread.stop()
                     self._hotkey_thread = None
                     self._hotkey_hook = None
+                if hasattr(self, 'ramdisk_sync_worker') and self.ramdisk_sync_worker:
+                    self.ramdisk_sync_worker.stop()
             except:
                 pass
             event.accept()
@@ -3092,6 +3761,11 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
         self.btn_route_settings.clicked.connect(self.open_route_settings)
         bottom_bar.addWidget(self.btn_route_settings)
         
+        self.btn_ramdisk_sync = QPushButton("💾 RamDisk同步")
+        self.btn_ramdisk_sync.setToolTip("配置 RamDisk 实时数据自动同步与备份规则，防止死机数据丢失")
+        self.btn_ramdisk_sync.clicked.connect(self.open_ramdisk_sync_settings)
+        bottom_bar.addWidget(self.btn_ramdisk_sync)
+        
         self.btn_save_config = QPushButton("💾 保存配置")
         self.btn_save_config.setObjectName("btnSave")
         self.btn_save_config.clicked.connect(self.save_all_config)
@@ -3226,6 +3900,61 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
             self.log("🎯 静态路由配置保存成功！")
             success, msg = core.check_and_add_route(self.config_manager)
             self.log(f"[Route Settings] {msg}")
+
+    def open_ramdisk_sync_settings(self):
+        """打开 RamDisk 实时数据自动同步与备份配置对话框"""
+        if not hasattr(self, 'ramdisk_sync_config') or not self.ramdisk_sync_config:
+            self.ramdisk_sync_config = sync_engine.RamDiskSyncConfig()
+        if not hasattr(self, 'ramdisk_sync_engine') or not self.ramdisk_sync_engine:
+            self.ramdisk_sync_engine = sync_engine.RamDiskSyncEngine(self.ramdisk_sync_config)
+        if not hasattr(self, 'ramdisk_sync_worker'):
+            self.ramdisk_sync_worker = None
+
+        dialog = RamDiskSyncDialog(self.ramdisk_sync_config, self.ramdisk_sync_engine, self.ramdisk_sync_worker, self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.log("💾 RamDisk 自动同步与备份配置已更新保存！")
+
+    def _trigger_ramdisk_sync_from_tray(self):
+        """从托盘右键一键手动触发立即同步备份"""
+        if not hasattr(self, 'ramdisk_sync_worker') or not self.ramdisk_sync_worker:
+            if not hasattr(self, 'ramdisk_sync_config'):
+                self.ramdisk_sync_config = sync_engine.RamDiskSyncConfig()
+            if not hasattr(self, 'ramdisk_sync_engine'):
+                self.ramdisk_sync_engine = sync_engine.RamDiskSyncEngine(self.ramdisk_sync_config)
+            self.ramdisk_sync_worker = sync_engine.RamDiskSyncWorker(self.ramdisk_sync_engine, self)
+
+        self.log("🚀 [托盘快捷] 正在立即执行 RamDisk 增量同步备份...")
+        res = self.ramdisk_sync_worker.trigger_sync_now(force=False)
+        msg = res.get("message", "执行完毕")
+        self.log(f"💾 [托盘同步结果] {msg}")
+        if hasattr(self, "tray_icon") and self.tray_icon and self.tray_icon.isVisible():
+            self.tray_icon.showMessage(
+                "RamDisk 同步备份",
+                msg,
+                QtWidgets.QSystemTrayIcon.MessageIcon.Information if res.get("status") == "ok" else QtWidgets.QSystemTrayIcon.MessageIcon.Warning,
+                3000
+            )
+
+    def _on_ramdisk_sync_completed(self, res: dict):
+        """后台 Worker 每次同步巡检完成后的信号槽回调"""
+        status = res.get("status", "ok")
+        msg = res.get("message", "")
+        synced = res.get("synced_files", [])
+        
+        if synced:
+            self.log(f"💾 [RamDisk Sync] {msg}")
+        elif status == "error":
+            self.log(f"⚠️ [RamDisk Sync] {msg}")
+        elif getattr(self.ramdisk_sync_config, "log_enabled", False):
+            # 开启日志开关时，输出巡检明细（如耗时、无变动跳过）
+            self.log(f"ℹ️ [RamDisk Sync] {msg}")
+
+    def _on_ramdisk_sync_status_updated(self, text: str):
+        """后台 Worker 状态更新回调"""
+        # 默认模式下仅输出关键事件（启动初检/守护启停/异常），开启日志开关时输出全部状态
+        is_key_event = any(k in text for k in ["启动初检", "启动", "停止", "异常", "错误", "失败"])
+        if getattr(self.ramdisk_sync_config, "log_enabled", False) or is_key_event:
+            self.log(f"ℹ️ [RamDisk Sync] {text}")
 
     def refresh_topology_configs_combo(self, select_filepath=None):
         """刷新运行目录下的显示器拓扑配置文件下拉框"""
