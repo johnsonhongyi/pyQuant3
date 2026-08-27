@@ -11,6 +11,8 @@ from PyQt6.QtGui import QColor, QFont
 import os
 import json
 import zlib
+from typing import Dict, Any, List, Optional
+import pandas as pd
 from sys_utils import get_app_root
 from JohnsonUtil import commonTips as cct
 
@@ -137,10 +139,56 @@ class SectorHeatmapWidget(QWidget):
         ]
         self.sort_sectors(self.sort_combo.currentIndex())
 
-    def load_live_sectors(self, force=False):
+    def update_from_tk_sector_data(self, sector_data: Dict[str, Any]):
+        """
+        [SSOT 极限性能复用] 直接消费 TK 计算好的权威板块强度与龙头数据
+        彻底消除前端自创加权公式，彻底对齐左侧赛马监控窗口 (89.1, 74.7, 60.8...)
+        """
+        if not sector_data:
+            return
+        sectors_list = []
+        self.sector_to_codes = {}
+        for sec_name, info in sector_data.items():
+            clean_sec = str(sec_name).strip()
+            score = float(info.get('score', 0.0) or 0.0)
+            avg_pct = info.get('avg_pct_diff')
+            if avg_pct is None or (avg_pct == 0.0 and info.get('avg_pct') is not None):
+                avg_pct = info.get('avg_pct', 0.0)
+            avg_pct = float(avg_pct or 0.0)
+            change_pct_str = f"{avg_pct:+.2f}%"
+
+            leader_code = str(info.get('leader', '')).strip().zfill(6) if info.get('leader') else ''
+            leader_name = str(info.get('leader_name', '')).strip()
+
+            codes_set = set()
+            if leader_code and leader_code != '000000':
+                codes_set.add(leader_code)
+
+            for rc in info.get('race_candidates', []):
+                c = str(rc.get('code', '')).strip().zfill(6)
+                if c and c != '000000':
+                    codes_set.add(c)
+
+            for fol in info.get('followers', []):
+                c = str(fol.get('code', '')).strip().zfill(6)
+                if c and c != '000000':
+                    codes_set.add(c)
+
+            count = len(codes_set) if codes_set else int(info.get('count', 0) or 0)
+            self.sector_to_codes[clean_sec] = list(codes_set)
+            sectors_list.append(
+                (clean_sec, round(score, 1), change_pct_str, count, leader_code, leader_name)
+            )
+
+        if sectors_list:
+            self.sectors = sectors_list
+            self._cached_session_sectors = list(sectors_list)
+            self.sort_sectors(self.sort_combo.currentIndex())
+
+    def load_live_sectors(self, force=False, current_df=None):
         import time
         now = time.time()
-        if not force and hasattr(self, '_last_load_time') and now - self._last_load_time < 3.0:
+        if not force and hasattr(self, '_last_load_time') and now - self._last_load_time < 2.0:
             return
         self._last_load_time = now
         
@@ -150,6 +198,18 @@ class SectorHeatmapWidget(QWidget):
         import zlib
         
         base = get_app_root()
+
+        # ── 0. 智能解析主窗口正在轮询的最新策略 DataFrame (current_df) ──
+        if current_df is None or (isinstance(current_df, pd.DataFrame) and current_df.empty):
+            main_win = self.window()
+            p = self.parent()
+            while p:
+                if hasattr(p, 'current_df') and getattr(p, 'current_df') is not None and not getattr(p, 'current_df').empty:
+                    current_df = p.current_df
+                    break
+                p = p.parent()
+            if (current_df is None or (isinstance(current_df, pd.DataFrame) and current_df.empty)) and hasattr(main_win, 'current_df'):
+                current_df = getattr(main_win, 'current_df', None)
 
         # ── 1. 【权威数据源 (SSOT)】优先从 RAMDisk 或快照读取 bidding_session_data.json.gz ──
         path = None
@@ -178,59 +238,124 @@ class SectorHeatmapWidget(QWidget):
             session_mtime = os.path.getmtime(path)
             if (getattr(self, '_last_session_path', None) != path or 
                 getattr(self, '_last_session_mtime', None) != session_mtime or 
-                not hasattr(self, '_cached_session_sectors') or force):
+                not hasattr(self, '_cached_raw_sector_data') or force):
                 try:
                     with open(path, 'rb') as f:
                         raw_data = f.read()
                     if raw_data:
                         json_str = zlib.decompress(raw_data).decode('utf-8')
                         data = json.loads(json_str)
-                        sector_data = data.get('sector_data', {})
-                        self._cached_session_sectors = []
-                        self.sector_to_codes = {}
-                        if sector_data:
-                            for sec_name, info in sector_data.items():
-                                clean_sec = str(sec_name).strip()
-                                score = float(info.get('score', 0.0))
-                                avg_pct = info.get('avg_pct_diff')
-                                if avg_pct is None or (avg_pct == 0.0 and info.get('avg_pct') is not None):
-                                    avg_pct = info.get('avg_pct', 0.0)
-                                avg_pct = float(avg_pct)
-                                change_pct_str = f"{avg_pct:+.2f}%"
-
-                                leader_code = str(info.get('leader', '')).strip().zfill(6) if info.get('leader') else ''
-                                leader_name = str(info.get('leader_name', '')).strip()
-
-                                # 汇聚该板块的所有全量成分股（龙头 + 竞价赛马成员 + 跟随者）
-                                codes_set = set()
-                                if leader_code and leader_code != '000000':
-                                    codes_set.add(leader_code)
-
-                                for rc in info.get('race_candidates', []):
-                                    c = str(rc.get('code', '')).strip().zfill(6)
-                                    if c and c != '000000':
-                                        codes_set.add(c)
-
-                                for fol in info.get('followers', []):
-                                    c = str(fol.get('code', '')).strip().zfill(6)
-                                    if c and c != '000000':
-                                        codes_set.add(c)
-
-                                count = len(codes_set) if codes_set else int(info.get('count', 0) or 0)
-                                self.sector_to_codes[clean_sec] = list(codes_set)
-                                self._cached_session_sectors.append(
-                                    (clean_sec, round(score, 1), change_pct_str, count, leader_code, leader_name)
-                                )
-
+                        self._cached_raw_sector_data = data.get('sector_data', {})
                         self._last_session_path = path
                         self._last_session_mtime = session_mtime
                 except Exception as e:
                     print(f"[SectorHeatmapWidget] Error loading bidding_session_data: {e}")
             
-            if hasattr(self, '_cached_session_sectors') and self._cached_session_sectors:
-                self.sectors = list(self._cached_session_sectors)
-                self.sort_sectors(self.sort_combo.currentIndex())
-                return
+            raw_sector_data = getattr(self, '_cached_raw_sector_data', {})
+            if raw_sector_data:
+                has_valid_live_df = (current_df is not None and isinstance(current_df, pd.DataFrame) and not current_df.empty)
+                
+                # 如果没有实时 current_df，直接应用快照原始权威数据
+                if not has_valid_live_df:
+                    self.update_from_tk_sector_data(raw_sector_data)
+                    return
+                
+                # ── 🛡️ [兼容老版打包 EXE 模式] 若收到盘中实时行情 current_df，动态校准各板块实时指标 ──
+                sectors_list = []
+                self.sector_to_codes = {}
+                
+                for sec_name, info in raw_sector_data.items():
+                    clean_sec = str(sec_name).strip()
+                    leader_code = str(info.get('leader', '')).strip().zfill(6) if info.get('leader') else ''
+                    leader_name = str(info.get('leader_name', '')).strip()
+
+                    codes_set = set()
+                    if leader_code and leader_code != '000000':
+                        codes_set.add(leader_code)
+
+                    for rc in info.get('race_candidates', []):
+                        c = str(rc.get('code', '')).strip().zfill(6)
+                        if c and c != '000000':
+                            codes_set.add(c)
+
+                    for fol in info.get('followers', []):
+                        c = str(fol.get('code', '')).strip().zfill(6)
+                        if c and c != '000000':
+                            codes_set.add(c)
+
+                    count = len(codes_set) if codes_set else int(info.get('count', 0) or 0)
+                    self.sector_to_codes[clean_sec] = list(codes_set)
+
+                    pct_list = []
+                    dyn_leader_code = leader_code
+                    dyn_leader_name = leader_name
+                    dyn_max_pct = -999.0
+                    limit_up_cnt = 0
+                    up_cnt = 0
+
+                    for c in codes_set:
+                        r = None
+                        if c in current_df.index:
+                            r = current_df.loc[c]
+                        else:
+                            c_num = "".join(filter(str.isdigit, c))
+                            if c_num in current_df.index:
+                                r = current_df.loc[c_num]
+
+                        if r is not None:
+                            if isinstance(r, pd.DataFrame):
+                                r = r.iloc[0]
+                            try:
+                                p_val = float(r.get('percent', r.get('pct', 0.0)) or 0.0)
+                            except Exception:
+                                p_val = 0.0
+                            pct_list.append(p_val)
+                            if p_val > dyn_max_pct:
+                                dyn_max_pct = p_val
+                                dyn_leader_code = c
+                                dyn_name = str(r.get('name', '')).strip()
+                                if dyn_name and dyn_name != '未知':
+                                    dyn_leader_name = dyn_name
+                            if p_val >= 9.5:
+                                limit_up_cnt += 1
+                            if p_val > 0.001:
+                                up_cnt += 1
+
+                    if pct_list:
+                        live_avg_pct = sum(pct_list) / len(pct_list)
+                        up_ratio = up_cnt / len(pct_list)
+                        
+                        # 拟合 TK 赛马探测器板块强度公式 (龙头权重 + 平均涨幅 + 上涨共振)
+                        calc_score = 50.0 + live_avg_pct * 8.0
+                        if dyn_max_pct >= 19.5:
+                            calc_score += 25.0
+                        elif dyn_max_pct >= 9.5:
+                            calc_score += 18.0
+                        elif dyn_max_pct > 0:
+                            calc_score += min(12.0, dyn_max_pct * 1.2)
+                        calc_score += up_ratio * 10.0
+                        calc_score += min(10.0, limit_up_cnt * 3.0)
+                        live_score = round(min(98.5, max(5.0, calc_score)), 1)
+                        
+                        change_pct_str = f"{live_avg_pct:+.2f}%"
+                        sectors_list.append(
+                            (clean_sec, live_score, change_pct_str, len(codes_set), dyn_leader_code, dyn_leader_name)
+                        )
+                    else:
+                        score = float(info.get('score', 0.0) or 0.0)
+                        avg_pct = info.get('avg_pct_diff')
+                        if avg_pct is None or (avg_pct == 0.0 and info.get('avg_pct') is not None):
+                            avg_pct = info.get('avg_pct', 0.0)
+                        change_pct_str = f"{float(avg_pct or 0.0):+.2f}%"
+                        sectors_list.append(
+                            (clean_sec, round(score, 1), change_pct_str, count, leader_code, leader_name)
+                        )
+
+                if sectors_list:
+                    self.sectors = sectors_list
+                    self._cached_session_sectors = list(sectors_list)
+                    self.sort_sectors(self.sort_combo.currentIndex())
+                    return
 
         # ── 2. 【备用兜底通道】仅在无 bidding_session_data 时尝试从 v_reversal_pool 读取 ──
         ram_path = None

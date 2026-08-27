@@ -737,12 +737,16 @@ class SectorDataAggregator:
         if math.isnan(avg_pct) or math.isinf(avg_pct):
             avg_pct = 0.0
 
+        limit_up_cnt = sum(1 for r in rows if _safe_float(r.get('pct', 0.0)) >= 9.5)
         if authoritative_score > 0:
             final_score = authoritative_score
+        elif rows:
+            live_score = min(100.0, max(0.0, 50.0 + avg_pct * 8.0 + (up_count / max(1, len(rows))) * 30.0 + min(15.0, limit_up_cnt * 5.0)))
+            if math.isnan(live_score) or math.isinf(live_score):
+                live_score = 50.0
+            final_score = live_score
         else:
-            final_score = min(100.0, max(0.0, 50.0 + avg_pct * 8.0 + (up_count / max(1, len(rows))) * 30.0))
-            if math.isnan(final_score) or math.isinf(final_score):
-                final_score = 50.0
+            final_score = 50.0
 
         # 获取龙头最新涨幅
         lead_row = next((r for r in rows if r['code'] == final_leader_code), None)

@@ -8908,6 +8908,14 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         f'df_ui: {msg_type} rows={len(df_ui)} ver={self.sync_version} mem={mem/1024:.1f} KB'
                     )
 
+                    # 🛡️ [SSOT 极限复用] 提取 TK 赛道探测器已计算好的权威板块强度与龙头数据快照
+                    sector_data_snap = {}
+                    if hasattr(self, 'racing_detector') and self.racing_detector:
+                        try:
+                            sector_data_snap = self.racing_detector.get_active_sectors_snapshot()
+                        except Exception:
+                            pass
+
                     # --- 🎁 封装版本化协议包 ---
                     if msg_type == 'UPDATE_DF_ALL':
                         self.sync_version = 0
@@ -8920,7 +8928,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         'type': msg_type,
                         'data': payload_to_send,
                         'ver': self.sync_version,
-                        'resample': cur_resample
+                        'resample': cur_resample,
+                        'sector_data': sector_data_snap
                     }
 
                     # --- 🎁 封装 26670/26671 专用的日线协议包 ---
@@ -8928,7 +8937,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         'type': msg_type_daily,
                         'data': payload_daily_to_send,
                         'ver': sync_version_daily,
-                        'resample': 'd'
+                        'resample': 'd',
+                        'sector_data': sector_data_snap
                     }
 
                     # ======================================================

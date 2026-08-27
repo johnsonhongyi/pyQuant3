@@ -3157,7 +3157,7 @@ class ATSMainWindow(QMainWindow):
             self.kernel_trace_panel.load_trace_logs()
             
         if hasattr(self, 'heatmap_widget'):
-            self.heatmap_widget.load_live_sectors()
+            self.heatmap_widget.load_live_sectors(current_df=self.current_df)
 
         # 4. 交易时段 IPC 保活：若超过 10 分钟未收到任何推送，主动重试拉取全量同步
         if now - getattr(self, "_last_recv_t", 0) > 600:
@@ -3659,13 +3659,15 @@ class ATSMainWindow(QMainWindow):
     def _handle_realtime_data(self, data_pkg):
         import pandas as pd
         
-        # 1. 识别协议格式与提取 DataFrame
+        # 1. 识别协议格式与提取 DataFrame 及板块强度数据 (SSOT 架构)
         msg_type = 'UPDATE_DF_ALL'
         df_payload = None
+        sector_data = None
         
         if isinstance(data_pkg, dict):
             msg_type = data_pkg.get('type', 'UPDATE_DF_ALL')
             df_payload = data_pkg.get('data')
+            sector_data = data_pkg.get('sector_data')
             if df_payload is None:
                 # 兼容历史数据结构
                 df_payload = data_pkg.get('full_snapshot')
@@ -3673,7 +3675,16 @@ class ATSMainWindow(QMainWindow):
             df_payload = data_pkg
         elif isinstance(data_pkg, tuple) and len(data_pkg) > 0:
             df_payload = data_pkg[0]
+            if len(data_pkg) > 1 and isinstance(data_pkg[1], dict):
+                sector_data = data_pkg[1].get('sector_data')
             
+        # 🛡️ [SSOT 极限性能复用] 若 IPC 数据包包含 TK 赛道探测器的权威板块数据，直接更新热力图，杜绝重复计算
+        if sector_data and hasattr(self, 'heatmap_widget') and self.heatmap_widget:
+            try:
+                self.heatmap_widget.update_from_tk_sector_data(sector_data)
+            except Exception as e_sec:
+                logger.debug(f"[ATS_Realtime] Update heatmap from TK sector_data failed: {e_sec}")
+
         if df_payload is None or not isinstance(df_payload, pd.DataFrame) or df_payload.empty:
             return
 
@@ -4304,9 +4315,18 @@ class ATSMainWindow(QMainWindow):
         if getattr(self, '_is_closing', False):
             return
         if hasattr(self, 'heatmap_widget'):
-            self.heatmap_widget.load_live_sectors()
+            self.heatmap_widget.load_live_sectors(force=True, current_df=self.current_df)
 
         from PyQt6.sip import isdeleted
+        
+        # 🚀 同步广播刷新龙头突击跟单榜 (HotSectorLeaderboardDialog)
+        if hasattr(self, 'hot_sector_dialog') and self.hot_sector_dialog is not None and not isdeleted(self.hot_sector_dialog):
+            if self.hot_sector_dialog.isVisible() or getattr(self.hot_sector_dialog, 'is_hidden_state', False):
+                try:
+                    self.hot_sector_dialog._force_refresh_data()
+                except Exception as e:
+                    print(f"[ATSMainWindow] Error refreshing hot sector dialog: {e}")
+
         sh_pct = getattr(self, '_pending_sh_pct', 0.0)
         if self.dragon_monitor_dialog and not isdeleted(self.dragon_monitor_dialog) and self.dragon_monitor_dialog.isVisible():
             try:
@@ -5791,7 +5811,7 @@ class ATSMainWindow(QMainWindow):
                 
             # 5. 刷新右侧板块热力图
             if hasattr(self, 'heatmap_widget'):
-                self.heatmap_widget.load_live_sectors()
+                self.heatmap_widget.load_live_sectors(current_df=self.current_df)
                 
             # 6. 刷新打开的个股分布明细等独立弹窗
             if hasattr(self, 'dist_chart') and hasattr(self.dist_chart, '_active_dialogs'):
