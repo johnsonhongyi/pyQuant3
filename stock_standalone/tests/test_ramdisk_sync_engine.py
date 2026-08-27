@@ -345,3 +345,30 @@ def test_startup_baseline_check_bypasses_trading_hours(temp_dirs):
     assert init_res2["status"] == "ok"
     assert len(init_res2["synced_files"]) == 0
     assert "目标备份位置数据完整且与源目录一致" in init_res2["message"]
+
+
+def test_verbose_log_and_worker_wake_event(temp_dirs):
+    """测试详细日志模式下的非交易时段消息结构与 Worker 主动唤醒标志"""
+    cfg = RamDiskSyncConfig(config_path=temp_dirs["cfg"])
+    cfg.source_dir = temp_dirs["src"]
+    cfg.target_dir = temp_dirs["tgt"]
+    cfg.only_workdays = True
+    cfg.only_trading_hours = True
+    cfg.trading_hours = [["09:15", "11:35"], ["13:00", "15:10"]]
+    cfg.log_enabled = True
+
+    engine = RamDiskSyncEngine(cfg)
+    worker = RamDiskSyncWorker(engine)
+
+    # 1. 模拟非交易时间执行常规同步
+    night_time = datetime.datetime(2026, 8, 27, 22, 1, 0)
+    res = engine.sync_once(force=False, ignore_time_filter=False)
+    assert res["status"] == "skipped"
+    assert "巡检待命跳过" in res["message"]
+    assert "09:15-11:35" in res["message"]
+
+    # 2. 测试 trigger_sync_now 设置唤醒标志
+    worker._trigger_event = False
+    worker.trigger_sync_now(force=False)
+    assert worker._trigger_event is True
+
