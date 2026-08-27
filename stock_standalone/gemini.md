@@ -1,3 +1,18 @@
+## 2026-08-27 22:20
+- [x] **优化 RamDisk 启动初检日志去重与唤醒状态呈现（`webTools/window_manager/sync_engine.py`, `gemini.md`）**：
+    - [x] **消除启动初检重复派发**：在 `RamDiskSyncWorker.run` 中移除了初检结果的多余 `emit_status` 调用，由 `sync_completed` 统一结构化汇报，彻底消除启动时重复输出两条初检日志的问题；
+    - [x] **单实例唤醒与显示器推荐机制自洽**：对单实例唤醒、手动刷新屏幕拓扑时触发的 `系统智能推荐的分辨率配置为: xxx` 进行了流转说明与验证，全部测试 8/8 PASSED。
+
+## 2026-08-27 22:15
+- [x] **修复 RamDisk 详细同步日志在主管理器控制台中即时显示与可解释性增强（`webTools/window_manager/sync_engine.py`, `webTools/window_manager/ui.py`, `tests/test_ramdisk_sync_engine.py`, `gemini.md`）**：
+    - [x] **根因定位与修复**：
+        1. **开关切换主界面即时联动**：在 `RamDiskSyncDialog._on_log_enabled_toggled` 中不仅持久化保存，同时实时通知主窗口控制台输出 `ℹ️ [RamDisk Sync] 详细同步日志状态已开启/已关闭`，解决在对话框勾选后主控制台无即时反馈的盲区；
+        2. **同步测试双向日志呈现**：在 `RamDiskSyncDialog._execute_test_sync` 中，将测试开始与执行结果（写入/失败/未变动）同步推送到主管理器控制台 `self.parent().log(...)`；
+        3. **非交易时段与常规巡检结构化日志增强**：在 `sync_once` 中，针对非交易时段跳过，丰富输出了 `巡检待命跳过: 非交易时段 (HH:MM) (交易时段: 09:15-11:35, 13:00-15:10)`，清晰说明当前待命状态与配置区间；
+        4. **Worker 立即唤醒与重置倒计时**：在 `trigger_sync_now` 中增加 `_trigger_event = True` 唤醒标志，使休眠中的后台 Worker 能够即时感知并继续精准调度；
+        5. **主管理器控制台自动滚动**：在 `WindowManagerUI.log` 中添加垂直滚动条置底逻辑，确保最新日志始终可见；
+        6. **测试验证**：`test_ramdisk_sync_engine.py` 扩展新增 `test_verbose_log_and_worker_wake_event` 测试（8/8 全部 PASSED），全量回归测试无缺陷。
+
 ## 2026-08-27 21:30
 - [x] **实现 RamDisk 实时数据自动同步与安全备份守护引擎（`webTools/window_manager/sync_engine.py`, `webTools/window_manager/ui.py`, `webTools/manage_window_layout.py`, `stock/webTools/manage_window_layout.py`, `tests/test_ramdisk_sync_engine.py`, `gemini.md`）**：
     - [x] **业务痛点根治**：

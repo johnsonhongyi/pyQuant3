@@ -461,7 +461,8 @@ class RamDiskSyncEngine:
             in_trading, reason = self.is_in_trading_time(now_dt)
             if not in_trading:
                 result["status"] = "skipped"
-                result["message"] = f"已跳过: {reason}"
+                th_desc = ", ".join([f"{s[0]}-{s[1]}" for s in self.config.trading_hours]) if self.config.trading_hours else "未配置"
+                result["message"] = f"巡检待命跳过: {reason} (交易时段: {th_desc})"
                 self._last_sync_result = result
                 return result
 
@@ -593,9 +594,6 @@ class RamDiskSyncWorker(QThread if HAS_PYQT6 else object):
         try:
             init_res = self.engine.check_and_sync_startup_baseline()
             self._emit_result(init_res)
-            msg = init_res.get("message", "")
-            if msg:
-                self._emit_status(f"ℹ️ [启动初检] {msg}")
         except Exception as e:
             self._emit_status(f"启动初检异常: {e}")
 
@@ -626,6 +624,7 @@ class RamDiskSyncWorker(QThread if HAS_PYQT6 else object):
 
     def trigger_sync_now(self, force: bool = False):
         """外部主动触发一次立即同步（无需等待间隔倒计时）"""
+        self._trigger_event = True
         try:
             res = self.engine.sync_once(force=force, ignore_time_filter=True)
             self._emit_result(res)

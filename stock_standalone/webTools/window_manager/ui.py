@@ -2203,11 +2203,19 @@ class RamDiskSyncDialog(QDialog):
         self.sync_engine.config.atomic_swap = self.chk_atomic.isChecked()
 
         scope_desc = f"多选指定 {len(self.sync_engine.config.specific_files)} 个文件" if self.sync_engine.config.sync_scope == "specific_files" else "全目录通配符扫描"
-        self.txt_log.append(f"🚀 开始测试 ({'强制全量' if force else '智能增量'} · 模式: {scope_desc})...")
+        start_msg = f"🚀 开始测试 ({'强制全量' if force else '智能增量'} · 模式: {scope_desc})..."
+        self.txt_log.append(start_msg)
+        if self.parent() and hasattr(self.parent(), "log"):
+            self.parent().log(f"🚀 [RamDisk Sync] {start_msg}")
+            
         res = self.sync_engine.sync_once(force=force, ignore_time_filter=True)
         
         status_tag = "✅" if res.get("status") == "ok" else "⚠️"
-        self.txt_log.append(f"{status_tag} {res.get('message')}")
+        res_msg = f"{status_tag} {res.get('message')}"
+        self.txt_log.append(res_msg)
+        if self.parent() and hasattr(self.parent(), "log"):
+            self.parent().log(f"💾 [RamDisk Sync] {res_msg}")
+
         if res.get("synced_files"):
             for f in res["synced_files"]:
                 self.txt_log.append(f"   -> 写入: {f}")
@@ -2222,6 +2230,8 @@ class RamDiskSyncDialog(QDialog):
         self.sync_config.save()
         state_str = "已开启 (将在主窗口控制台输出每次巡检明细)" if checked else "已关闭 (保持静默，仅同步变动/错误时提示)"
         self.txt_log.append(f"ℹ️ [日志开关] 详细同步日志状态{state_str}，已自动持久化保存。")
+        if self.parent() and hasattr(self.parent(), "log"):
+            self.parent().log(f"ℹ️ [RamDisk Sync] 详细同步日志状态{state_str}")
 
     def _save_and_apply(self):
         src = self.txt_src.text().strip()
@@ -3832,6 +3842,12 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
         """输出一条日志"""
         self.log_output.append(f"[{QtCore.QTime.currentTime().toString('hh:mm:ss')}] {text}")
         try:
+            scrollbar = self.log_output.verticalScrollBar()
+            if scrollbar:
+                scrollbar.setValue(scrollbar.maximum())
+        except Exception:
+            pass
+        try:
             logger.info(text)
         except Exception:
             pass
@@ -3912,7 +3928,8 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
 
         dialog = RamDiskSyncDialog(self.ramdisk_sync_config, self.ramdisk_sync_engine, self.ramdisk_sync_worker, self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
-            self.log("💾 RamDisk 自动同步与备份配置已更新保存！")
+            log_status_desc = "详细日志: 已开启" if getattr(self.ramdisk_sync_config, "log_enabled", False) else "详细日志: 已关闭"
+            self.log(f"💾 RamDisk 自动同步与备份配置已更新保存！({log_status_desc} · 每 {self.ramdisk_sync_config.sync_interval_sec} 秒巡检)")
 
     def _trigger_ramdisk_sync_from_tray(self):
         """从托盘右键一键手动触发立即同步备份"""
