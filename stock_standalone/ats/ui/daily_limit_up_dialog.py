@@ -992,31 +992,43 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         self._apply_filter()
 
     def _on_header_section_clicked(self, logical_index: int):
-        """表头左键点击（100% 对齐赛马多级排序交互规范）：点击已有排序列翻转升降序，点击新列自动依次设为 主 -> 从 -> 次 排序"""
-        if logical_index == getattr(self, "sort_level1_col", None):
-            self.sort_level1_asc = not self.sort_level1_asc
-        elif logical_index == getattr(self, "sort_level2_col", None):
-            self.sort_level2_asc = not self.sort_level2_asc
-        elif logical_index == getattr(self, "sort_level3_col", None):
-            self.sort_level3_asc = not self.sort_level3_asc
-        else:
-            # 点击新列：阶梯式设为 主 -> 从 -> 次
-            if getattr(self, "sort_level1_col", None) is None:
-                self.sort_level1_col = logical_index
-                self.sort_level1_asc = False  # 默认降序
-            elif getattr(self, "sort_level2_col", None) is None:
-                self.sort_level2_col = logical_index
-                self.sort_level2_asc = False  # 默认降序
-            elif getattr(self, "sort_level3_col", None) is None:
-                self.sort_level3_col = logical_index
-                self.sort_level3_asc = False  # 默认降序
+        """表头左键点击：
+        1. 若未设置主排序（sort_level1_col is None）：纯单列全局排序，不自动设置主排序；
+        2. 若已设置主排序：
+           - 点击主/从/次排序列，翻转对应升降序；
+           - 点击其他列，作为动态从/次排序切换。
+        """
+        # 情况 1：未设置主排序 -> 纯单列全局排序 (不自动设置 sort_level1_col)
+        if getattr(self, "sort_level1_col", None) is None:
+            if getattr(self, "_sort_col", None) == logical_index:
+                # 相同列翻转升降序
+                if self._sort_order == Qt.SortOrder.DescendingOrder:
+                    self._sort_order = Qt.SortOrder.AscendingOrder
+                else:
+                    self._sort_order = Qt.SortOrder.DescendingOrder
             else:
-                # 三级已满，替换第三级
-                self.sort_level3_col = logical_index
-                self.sort_level3_asc = False
+                # 新列默认降序
+                self._sort_col = logical_index
+                self._sort_order = Qt.SortOrder.DescendingOrder
 
-        self._sort_col = self.sort_level1_col
-        self._sort_order = Qt.SortOrder.AscendingOrder if getattr(self, "sort_level1_asc", False) else Qt.SortOrder.DescendingOrder
+        # 情况 2：已显式设置主排序
+        else:
+            if logical_index == getattr(self, "sort_level1_col", None):
+                self.sort_level1_asc = not self.sort_level1_asc
+            elif logical_index == getattr(self, "sort_level2_col", None):
+                self.sort_level2_asc = not self.sort_level2_asc
+            elif logical_index == getattr(self, "sort_level3_col", None):
+                self.sort_level3_asc = not self.sort_level3_asc
+            else:
+                # 点击其他未绑定列：作为动态从/次排序
+                if getattr(self, "_sort_col", None) == logical_index:
+                    if self._sort_order == Qt.SortOrder.DescendingOrder:
+                        self._sort_order = Qt.SortOrder.AscendingOrder
+                    else:
+                        self._sort_order = Qt.SortOrder.DescendingOrder
+                else:
+                    self._sort_col = logical_index
+                    self._sort_order = Qt.SortOrder.DescendingOrder
 
         self._update_header_labels()
         self._save_sort_states()
@@ -1027,6 +1039,14 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         if not hasattr(self, "_base_headers") or not self._base_headers:
             headers, _ = get_limit_up_table_headers(getattr(self, "extra_cols", None))
             self._base_headers = list(headers)
+
+        bound_cols = set()
+        if getattr(self, "sort_level1_col", None) is not None:
+            bound_cols.add(self.sort_level1_col)
+        if getattr(self, "sort_level2_col", None) is not None:
+            bound_cols.add(self.sort_level2_col)
+        if getattr(self, "sort_level3_col", None) is not None:
+            bound_cols.add(self.sort_level3_col)
 
         for col in range(self.table.columnCount()):
             if col < len(self._base_headers):
@@ -1044,7 +1064,18 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
             elif getattr(self, "sort_level3_col", None) == col:
                 arrow = "↑" if getattr(self, "sort_level3_asc", False) else "↓"
                 label = f"🟢[次] {arrow} {base_name}"
-            elif getattr(self, "_sort_col", None) == col and getattr(self, "sort_level1_col", None) is None:
+            elif getattr(self, "sort_level1_col", None) is not None and col not in bound_cols and getattr(self, "_sort_col", None) == col:
+                # 当已有主排序时，点击其他未绑定列，动态显示为 从/次 排序
+                arrow = "↑" if getattr(self, "_sort_order", Qt.SortOrder.DescendingOrder) == Qt.SortOrder.AscendingOrder else "↓"
+                bound_cnt = len(bound_cols)
+                if bound_cnt == 1:
+                    label = f"🟡[从] {arrow} {base_name}"
+                elif bound_cnt == 2:
+                    label = f"🟢[次] {arrow} {base_name}"
+                else:
+                    label = f"{arrow} {base_name}"
+            elif getattr(self, "sort_level1_col", None) is None and getattr(self, "_sort_col", None) == col:
+                # 未设置主排序时，仅普通单列排序，绝不带 [主]！
                 arrow = "↑" if getattr(self, "_sort_order", Qt.SortOrder.DescendingOrder) == Qt.SortOrder.AscendingOrder else "↓"
                 label = f"{arrow} {base_name}"
 
@@ -1260,7 +1291,6 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         为单列生成 (group_flag, sort_value) 排序子键。
         - group_flag: 0 表示有效数据，1 表示无数据/--/0连板/0封单等无效数据
         - 任何排序下 group_flag=1 的项绝对强制沉底在最下方，绝不污染正常排序！
-        - 分类列（梯队分类、形态与质量）生成带权重前缀的组合键，确保同类聚合且类型一致
         """
         # 0. 代码
         if col_idx == 0:
@@ -1285,38 +1315,58 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
 
         # 3. 涨幅% (允许正负，有数值即为有效数据)
         elif col_idx == 3:
-            pct = _safe_float(r.get("pct", 0.0))
-            return (0, -pct if is_descending else pct)
-
-        # 4. 连板数 (必须真实涨停且连板数 >= 1，0/无连板/未涨停/-- 绝对强制沉底)
-        elif col_idx == 4:
-            is_zt = r.get("is_limit_up")
-            cb = _safe_int(r.get("consecutive_boards", r.get("max_consecutive", 0)))
-            if is_zt is None:
-                is_zt = (cb >= 1)
-            if is_zt and cb >= 1:
-                return (0, -float(cb) if is_descending else float(cb))
+            raw_pct = r.get("pct", None)
+            if raw_pct is not None and str(raw_pct).strip() not in ("", "-", "--", "None", "nan"):
+                pct = _safe_float(raw_pct, 0.0)
+                return (0, -pct if is_descending else pct)
             return (1, 0.0)
 
-        # 5. 梯队分类
-        # 排序键 = (group, "权重前缀_标签原文") → 同类标签生成完全相同的 key，自然聚合在一起
+        # 4. 连板数
+        elif col_idx == 4:
+            cb = _safe_int(r.get("consecutive_boards", r.get("max_consecutive", 0)))
+            is_zt = r.get("is_limit_up")
+            if is_zt is None:
+                is_zt = (cb >= 1)
+            if cb >= 1:
+                # 提取梯队与动能辅助权重，确保同板数内部自然对齐
+                tag = str(r.get("tier_tag", "")).strip()
+                tier_w = _get_tier_weight(tag)
+                score = _safe_float(r.get("momentum_score", r.get("seal_quality_score", 0.0)))
+                pct = _safe_float(r.get("pct", 0.0))
+                if is_descending:
+                    return (0, -float(cb), -tier_w, -score, -pct)
+                else:
+                    return (0, float(cb), -tier_w, -score, -pct)
+            return (1, 0.0, 0, 0.0, 0.0)
+
+        # 5. 梯队分类 (核心修复：必须按 梯队基础权重 + 连板数 + 质量评分 复合数值排序，杜绝 2板 排在 3板 前面)
         elif col_idx == 5:
             tag = str(r.get("tier_tag", "")).strip()
             if tag and tag not in ("--", "-", "None"):
-                w = _get_tier_weight(tag)
-                if w == 0:
-                    w = 1
+                tier_w = _get_tier_weight(tag)
+                if tier_w == 0:
+                    tier_w = 1
+                # 提取板数：优先从 record 获取，若为 0 则尝试从 tag 正则提取 (例如 "连板接力 (3板)" -> 3)
+                cb = _safe_int(r.get("consecutive_boards", r.get("max_consecutive", 0)))
+                if cb <= 0:
+                    import re
+                    m = re.search(r'(\d+)\s*板', tag)
+                    if m:
+                        try:
+                            cb = int(m.group(1))
+                        except Exception:
+                            cb = 0
+                score = _safe_float(r.get("momentum_score", r.get("seal_quality_score", 0.0)))
                 if is_descending:
-                    sort_str = f"{1000 - w:04d}_{tag}"
+                    return (0, -tier_w, -cb, -score, SortKeyStr(tag, True))
                 else:
-                    sort_str = f"{w:04d}_{tag}"
-                return (0, sort_str)
-            return (1, "")
+                    return (0, tier_w, cb, score, SortKeyStr(tag, False))
+            return (1, 0, 0, 0.0, SortKeyStr("", is_descending))
 
-        # 6. 形态与质量 (按质量评分与形态聚合)
+        # 6. 形态与质量 (按质量评分、连板数、梯队与形态聚合)
         elif col_idx == 6:
             score = _safe_float(r.get("momentum_score", r.get("seal_quality_score", 0.0)))
-            desc  = str(r.get("pattern_desc", "")).strip()
+            desc = str(r.get("pattern_desc", "")).strip()
             if score <= 0.0 and desc:
                 import re
                 m = re.search(r'\((\d+)\s*分?\)', desc)
@@ -1326,13 +1376,14 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
                     except Exception:
                         pass
             if score > 0.0 or (desc and desc not in ("--", "-", "None")):
-                s = int(round(score))
+                cb = _safe_int(r.get("consecutive_boards", r.get("max_consecutive", 0)))
+                tag = str(r.get("tier_tag", "")).strip()
+                tier_w = _get_tier_weight(tag)
                 if is_descending:
-                    sort_str = f"{1000 - s:04d}_{desc}"
+                    return (0, -score, -cb, -tier_w, SortKeyStr(desc, True))
                 else:
-                    sort_str = f"{s:04d}_{desc}"
-                return (0, sort_str)
-            return (1, "")
+                    return (0, score, cb, tier_w, SortKeyStr(desc, False))
+            return (1, 0.0, 0, 0, SortKeyStr("", is_descending))
 
         # 7. 封单额(万) (必须 > 0 才是有效封单，0/-- 沉底)
         elif col_idx == 7:
@@ -1419,8 +1470,13 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         elif col_idx == 18:
             res = str(r.get("resonance", "")).strip()
             if res and res not in ("--", "-", "None"):
-                return (0, SortKeyStr(res, is_descending))
-            return (1, SortKeyStr("", is_descending))
+                res_map = {"大盘共振": 3, "逆市抗跌": 2, "同步整理": 1, "同步走弱": 0}
+                res_w = res_map.get(res, 1)
+                if is_descending:
+                    return (0, -res_w, SortKeyStr(res, True))
+                else:
+                    return (0, res_w, SortKeyStr(res, False))
+            return (1, 0, SortKeyStr("", is_descending))
 
         # 19. ch_bc2
         elif col_idx == 19:
@@ -1438,8 +1494,12 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
                 extras = r.get("extra_cols", {})
                 raw_e = extras.get(ec_name, None)
                 if raw_e is not None and str(raw_e).strip() not in ("", "-", "--", "None", "nan"):
-                    f_e = _safe_float(raw_e, 0.0)
-                    return (0, -f_e if is_descending else f_e)
+                    try:
+                        f_e = float(raw_e)
+                        return (0, -f_e if is_descending else f_e)
+                    except (ValueError, TypeError):
+                        s_e = str(raw_e).strip()
+                        return (0, SortKeyStr(s_e, is_descending))
                 return (1, 0.0)
             cat = str(r.get("category", "")).strip()
             if cat and cat not in ("--", "-", "None"):
@@ -1499,7 +1559,7 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
             for col_idx, is_desc in levels:
                 subkeys.append(self._make_column_subkey(r, col_idx, is_desc))
 
-            # 默认级联兜底（保证相同主排序列内部按量化梯队与质量强度严格对齐，绝不混乱）
+            # 默认级联兜底（保证相同排序列内部按量化梯队与质量强度严格对齐，绝不混乱）
             # 1. 梯队分类权重 (降序)
             tier_subkey = self._make_column_subkey(r, 5, True)
             # 2. 形态与质量评分 (降序)
