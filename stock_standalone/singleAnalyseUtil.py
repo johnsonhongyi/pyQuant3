@@ -35,7 +35,6 @@ width, height = 108, 15
 # =========================================================================
 # 内存与资源极限优化单例及缓存区 (Memory & Resource Optimization Cache)
 # =========================================================================
-_GLOBAL_SINA = None
 _GLOBAL_LASTP_CACHE = None
 _GLOBAL_LASTP_DATE = None
 _LOOP_TRIM_COUNTER = 0
@@ -51,25 +50,17 @@ def trim_memory():
             pass
 
 
-def get_sina_instance(force_new=False):
-    """Sina 行情单例复用，杜绝高频循环中重复创建与解析 JSON"""
-    global _GLOBAL_SINA
-    if _GLOBAL_SINA is None or force_new:
-        _GLOBAL_SINA = sina_data.Sina(readonly=True)
-        _ = _GLOBAL_SINA.all
-    return _GLOBAL_SINA
-
-
-def get_cached_lastp_df(codelist=None):
-    """日线历史基准指标日内内存级缓存 (Daily TTL Cache)，精简宽表为核心列"""
+def get_cached_lastp_df():
+    """日线历史基准指标日内内存级缓存 (Daily TTL Cache)，全量无过滤加载"""
     global _GLOBAL_LASTP_CACHE, _GLOBAL_LASTP_DATE
     cur_today = cct.get_today()
-    if _GLOBAL_LASTP_CACHE is None or _GLOBAL_LASTP_DATE != cur_today:
+    if _GLOBAL_LASTP_CACHE is None or _GLOBAL_LASTP_DATE != cur_today or len(_GLOBAL_LASTP_CACHE) < 1000:
         try:
             from JSONData import tdx_hdf5_api as h5a
             h5_fname = 'tdx_last_df'
             h5_table = 'low_d_' + str(ct.PowerCountdl) + '_y_all'
-            h5 = h5a.load_hdf_db(h5_fname, table=h5_table, code_l=codelist, timelimit=False)
+            # 必须全量加载 (code_l=None)，杜绝因部分代码加载导致缓存不全
+            h5 = h5a.load_hdf_db(h5_fname, table=h5_table, code_l=None, timelimit=False)
             if h5 is not None and not h5.empty:
                 keep_cols = [c for c in ['hmax', 'lmin', 'max5', 'min5', 'llow'] if c in h5.columns]
                 _GLOBAL_LASTP_CACHE = h5[keep_cols] if keep_cols else h5
@@ -406,53 +397,67 @@ def get_hot_countNew(changepercent, rzrq, fibl=None, fibc=10):
     ffall['zlr'] = 0
     ffall['zzb'] = 0
 
-    # 复用进程级 Sina 单例
-    sina = get_sina_instance()
+    # 统一获取全市场最新行情快照，杜绝分市场多次请求与单例累积
+    sina = sina_data.Sina(readonly=True)
+    df_all = sina.all
+    if df_all is None or df_all.empty:
+        log.warning("sina.all returned empty DataFrame")
+        return pd.DataFrame()
 
-    dfs_list = []
+    df_all = df_all.dropna(how='all')
+    df_all = df_all[df_all.close > 0]
+    if 'percent' not in df_all.columns:
+        df_all['percent'] = list(map(lambda x, y: round(
+            (x - y) / y * 100, 1), df_all.close.values, df_all.llastp.values))
+
+    # 判断是否为盘中活跃撮合且具备挂单量
+    is_trade_active = cct.get_work_time() and ('b1_v' in df_all.columns and (df_all['b1_v'] > 0).any())
 
     for market in indexKeys:
-        df = sina.market(market)
+        if market == 'sh':
+            df = df_all[df_all.index.str.startswith(('60', '688'))]
+        elif market == 'sz':
+            df = df_all[df_all.index.str.startswith('00')]
+        elif market == 'cyb':
+            df = df_all[df_all.index.str.startswith('30')]
+        else:
+            df = df_all
+
         if df is None or df.empty:
             continue
-        df = df.dropna(how='all')
-        df = df[df.close > 0]
-        if 'percent' not in df.columns:
-            df['percent'] = list(map(lambda x, y: round(
-                (x - y) / y * 100, 1), df.close.values, df.llastp.values))
 
         if 'percent' in df.columns.values:
-            cyb = df[df.index.str.startswith('30')]
-            kcb = df[df.index.str.startswith('68')]
             top = df[df['percent'] > changepercent]
-            st = df[df.name.str.contains('ST')]
+            crash = df[df['percent'] < -changepercent]
+            st = df[df.name.str.contains('ST')] if 'name' in df.columns else df.iloc[0:0]
 
             # 按市场规则独立计算涨跌停：创业板(30)/科创板(68) ±20%，主板/ST ±10%
             if market == 'cyb':
-                topTen = df.query('b1_v > a1_v and b1_v > 0 and percent > 19')
-                crashTen = df.query('b1_v < a1_v and a1_v > 0 and percent < -19')
+                if is_trade_active:
+                    topTen = df.query('b1_v > a1_v and b1_v > 0 and percent > 19')
+                    crashTen = df.query('b1_v < a1_v and a1_v > 0 and percent < -19')
+                else:
+                    topTen = df[df['percent'] >= 19.8]
+                    crashTen = df[df['percent'] <= -19.8]
+                topTen_st = df.iloc[0:0]
+                crashTen_st = df.iloc[0:0]
             else:
                 kcb_mask = df.index.str.startswith('68')
                 normal_mask = ~kcb_mask
-                # 科创板涨停
-                topTen_kcb = df[kcb_mask].query('b1_v > a1_v and b1_v > 0 and percent > 19') if kcb_mask.any() else df.iloc[0:0]
-                # 普通主板涨停
-                topTen_normal = df[normal_mask].query('b1_v > a1_v and b1_v > 0 and percent > 9') if normal_mask.any() else df.iloc[0:0]
+                if is_trade_active:
+                    topTen_kcb = df[kcb_mask].query('b1_v > a1_v and b1_v > 0 and percent > 19') if kcb_mask.any() else df.iloc[0:0]
+                    topTen_normal = df[normal_mask].query('b1_v > a1_v and b1_v > 0 and percent > 9') if normal_mask.any() else df.iloc[0:0]
+                    crashTen_kcb = df[kcb_mask].query('b1_v < a1_v and a1_v > 0 and percent < -19') if kcb_mask.any() else df.iloc[0:0]
+                    crashTen_normal = df[normal_mask].query('b1_v < a1_v and a1_v > 0 and percent < -9') if normal_mask.any() else df.iloc[0:0]
+                else:
+                    topTen_kcb = df[kcb_mask][df[kcb_mask]['percent'] >= 19.8] if kcb_mask.any() else df.iloc[0:0]
+                    topTen_normal = df[normal_mask][df[normal_mask]['percent'] >= 9.8] if normal_mask.any() else df.iloc[0:0]
+                    crashTen_kcb = df[kcb_mask][df[kcb_mask]['percent'] <= -19.8] if kcb_mask.any() else df.iloc[0:0]
+                    crashTen_normal = df[normal_mask][df[normal_mask]['percent'] <= -9.8] if normal_mask.any() else df.iloc[0:0]
                 topTen = pd.concat([topTen_kcb, topTen_normal])
-                # 科创板跌停
-                crashTen_kcb = df[kcb_mask].query('b1_v < a1_v and a1_v > 0 and percent < -19') if kcb_mask.any() else df.iloc[0:0]
-                # 普通主板跌停
-                crashTen_normal = df[normal_mask].query('b1_v < a1_v and a1_v > 0 and percent < -9') if normal_mask.any() else df.iloc[0:0]
                 crashTen = pd.concat([crashTen_kcb, crashTen_normal])
-
-            # ST股新规：涨跌停改为±10%（与主板一致）
-            if market == 'cyb':
-                topTen_st = st.query('b1_v > a1_v and b1_v > 0 and percent > 9') if len(st) > 0 else df.iloc[0:0]
-                crashTen_st = st.query('b1_v < a1_v and a1_v > 0 and percent < -9') if len(st) > 0 else df.iloc[0:0]
-            else:
                 topTen_st = df.iloc[0:0]
                 crashTen_st = df.iloc[0:0]
-            crash = df[df['percent'] < -changepercent]
         else:
             log.info("market No Percent:%s" % df[:1])
             top = '0'
@@ -496,17 +501,10 @@ def get_hot_countNew(changepercent, rzrq, fibl=None, fibc=10):
                 print(("%s %s%% %s%s" % (f_print(7, ff['close']), f_print(4, _percent, 31), f_print(1, '!' if ff['open'] > ff[
                     'lastp'] else '?'), f_print(2, '!!' if ff['close'] > ff['lastp'] else '??', 32))))
 
-        dfs_list.append(df)
-
-    # 汇总全市场 DataFrame（使用 index 保持 code，单次拼接去除重复，避免 reset_index/set_index 冗余对象）
-    if dfs_list:
-        allTop = pd.concat(dfs_list)
-        allTop = allTop[~allTop.index.duplicated(keep='first')]
-    else:
-        allTop = pd.DataFrame()
+    allTop = df_all
 
     # 读取日内缓存的历史指标基准，避免每秒从 HDF5 重复反序列化大表
-    cached_lastp = get_cached_lastp_df(codelist=allTop.index.tolist() if not allTop.empty else None)
+    cached_lastp = get_cached_lastp_df()
     df = tdd.get_single_df_lastp_to_df(allTop, lastpTDX_DF=cached_lastp, resample='d')
 
     count = len(df.index)
@@ -735,6 +733,7 @@ if __name__ == '__main__':
     percentDuration = 0.1
     cct.get_terminal_Position(position=sys.argv[0])
     cct.GlobalValues().setkey('dfcfw_Except', False)
+    cct.GlobalValues().setkey('suspended_codes', [])
     dfcfw_Except_time = 0
     blkname = '061.blk'
     block_path = tdd.get_tdx_dir_blocknew() + blkname
@@ -770,10 +769,10 @@ if __name__ == '__main__':
                 cct.GlobalValues().setkey('top_max', None)
                 cct.GlobalValues().setkey('top_min', None)
                 cct.GlobalValues().setkey('dfcfw_Except', False)
+                cct.GlobalValues().setkey('suspended_codes', [])
                 dfcfw_Except_time = 0
                 _GLOBAL_LASTP_CACHE = None
                 _GLOBAL_LASTP_DATE = None
-                get_sina_instance(force_new=True)
                 status = False
                 num_input = ''
                 ave = None
@@ -959,12 +958,13 @@ if __name__ == '__main__':
                 ave = None
                 code = ''
             elif st.lower() == 'c' or st.lower() == 'C':
-                log.info("Manually re-fetching rzrq data...")
+                log.info("Manually re-fetching rzrq data and resetting cache...")
                 rzrq = ffu.get_dfcfw_rzrq_SHSZ()
                 last_rzrq_fetch_time = time.time()
                 rzrq_date = cct.get_today()
-                get_sina_instance(force_new=True)
+                cct.GlobalValues().setkey('suspended_codes', [])
                 _GLOBAL_LASTP_CACHE = None
+                _GLOBAL_LASTP_DATE = None
                 trim_memory()
             elif st.startswith('w') or st.lower() == 'w':
                 print("Manual trigger write dm to file...")
