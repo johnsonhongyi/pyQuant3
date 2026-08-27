@@ -261,6 +261,12 @@ class IPCSyncManager:
                                 if val_type == 'self':
                                     new_cols[base_col] = df_diff[col]
                         df_diff = pd.DataFrame(new_cols, index=df_diff.index)
+                    
+                    # 🛡️【新列自动合入】：确保 diff 中新增加的特征列同步合入 self.current_df
+                    for col in df_diff.columns:
+                        if col not in self.current_df.columns:
+                            self.current_df[col] = df_diff[col]
+
                     common_idx = self.current_df.index.intersection(df_diff.index)
                     if len(common_idx) > 0:
                         for col in df_diff.columns:
@@ -273,10 +279,11 @@ class IPCSyncManager:
                                         self.current_df.loc[valid_indices, col] = df_diff.loc[valid_indices, col]
                                 except Exception:
                                     pass
-                    # 合并新增的个股
+                    # 合并新增的个股并触发全量拉取
                     new_idx = df_diff.index.difference(self.current_df.index)
                     if len(new_idx) > 0:
                         self.current_df = pd.concat([self.current_df, df_diff.loc[new_idx]])
+                        self.request_full_sync(force=False)
                 except Exception as merge_err:
                     self.log_error(f"合并增量数据失败，降级为全量覆盖: {merge_err}")
                     self.current_df = df_payload

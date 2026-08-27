@@ -2135,6 +2135,14 @@ class ATSMainWindow(QMainWindow):
         self.cb_ladder.setStyleSheet("QCheckBox { color: #ffaa44; font-weight: bold; font-size: 8.5pt; margin-left: 1px; margin-right: 1px; } QCheckBox::indicator { width: 11px; height: 11px; }")
         self.cb_ladder.toggled.connect(self._on_ladder_link_toggled)
         toolbar.addWidget(self.cb_ladder)
+
+        self.cb_profiler = QCheckBox("Log")
+        self.cb_profiler.setToolTip("开启/关闭启动与运行时微秒级性能卡点检测日志 (自动落盘持久化)")
+        from ats.startup_profiler import StartupProfiler
+        self.cb_profiler.setChecked(StartupProfiler.get_instance().is_enabled)
+        self.cb_profiler.setStyleSheet("QCheckBox { color: #38bdf8; font-size: 8.5pt; margin-left: 1px; margin-right: 1px; } QCheckBox::indicator { width: 11px; height: 11px; }")
+        self.cb_profiler.toggled.connect(lambda state: StartupProfiler.get_instance().set_enabled(state))
+        toolbar.addWidget(self.cb_profiler)
         
         toolbar.addSeparator()
         
@@ -3727,15 +3735,14 @@ class ATSMainWindow(QMainWindow):
         if df_payload is None or not isinstance(df_payload, pd.DataFrame) or df_payload.empty:
             return
 
-        # 2. 将提取出的 DataFrame 强制转换为以 code 字符串作为 index (如果后台没有预先处理)
-        if not (df_payload.index.name == 'code' and df_payload.index.dtype == object):
-            df_payload = df_payload.copy()
-            if 'code' in df_payload.columns:
-                df_payload['code'] = df_payload['code'].astype(str).str.strip()
-                df_payload.set_index('code', inplace=True)
-            else:
-                df_payload.index = df_payload.index.astype(str).str.strip()
-                df_payload.index.name = 'code'
+        # 2. 将提取出的 DataFrame 强制转换为以 6 位纯数字 code 字符串作为 index
+        df_payload = df_payload.copy()
+        if 'code' in df_payload.columns:
+            df_payload['code'] = df_payload['code'].astype(str).str.strip().str.zfill(6)
+            df_payload.set_index('code', inplace=True)
+        else:
+            df_payload.index = df_payload.index.astype(str).str.strip().str.zfill(6)
+            df_payload.index.name = 'code'
 
         # 3. 处理全量/增量更新
         if msg_type == 'UPDATE_DF_DIFF' and hasattr(self, 'current_df') and self.current_df is not None and not self.current_df.empty:
@@ -3750,7 +3757,13 @@ class ATSMainWindow(QMainWindow):
                             if val_type == 'self':
                                 new_cols[base_col] = df_diff[col]
                     df_diff = pd.DataFrame(new_cols, index=df_diff.index)
-                # 取两边股票代码的交集
+                
+                # 🛡️【新列自动合入】：确保 diff 中新增加的特征列同步合入 self.current_df
+                for col in df_diff.columns:
+                    if col not in self.current_df.columns:
+                        self.current_df[col] = df_diff[col]
+
+                # 取两边股票代码的交集更新有效非空数据
                 common_idx = self.current_df.index.intersection(df_diff.index)
                 if len(common_idx) > 0:
                     for col in df_diff.columns:
@@ -3763,10 +3776,13 @@ class ATSMainWindow(QMainWindow):
                                     self.current_df.loc[valid_indices, col] = df_diff.loc[valid_indices, col]
                             except Exception:
                                 pass
-                # 取 diff 中新出现的股票追加进来
+
+                # 🛡️【关键防残缺回补保护】：如果 diff 中出现了 self.current_df 中不存在的新股票，追加并触发一次安全全量同步
                 new_idx = df_diff.index.difference(self.current_df.index)
                 if len(new_idx) > 0:
                     self.current_df = pd.concat([self.current_df, df_diff.loc[new_idx]])
+                    if hasattr(self, 'ipc_manager') and hasattr(self.ipc_manager, 'request_full_sync'):
+                        self.ipc_manager.request_full_sync(force=False)
             except Exception as e:
                 print(f"[ATS_Realtime] Apply diff error: {e}")
         else:
@@ -3877,48 +3893,60 @@ class ATSMainWindow(QMainWindow):
             print(f"[ATSMainWindow] Read window_config.json error: {e}")
             config_data = {}
 
-        # 1. 恢复加载加速龙头追踪器
-        try:
-            dragon_cfg = config_data.get("dragon_leader_monitor_dialog", {})
-            if dragon_cfg.get("is_open", False):
-                logger.info("[ATSMainWindow] IPC数据就绪，自动加载打开持久化的加速龙头监控窗口...")
-                self.open_dragon_monitor(restore_state=dragon_cfg, cold_start=True)
-        except Exception as e:
-            logger.warning(f"[ATSMainWindow] Error auto-restoring dragon monitor: {e}")
+        from PyQt6.QtCore import QTimer
+        # 1. 恢复加载加速龙头追踪器 (错峰延时 200ms)
+        def _restore_dragon():
+            try:
+                dragon_cfg = config_data.get("dragon_leader_monitor_dialog", {})
+                if dragon_cfg.get("is_open", False):
+                    logger.info("[ATSMainWindow] IPC数据就绪，自动加载打开持久化的加速龙头监控窗口...")
+                    self.open_dragon_monitor(restore_state=dragon_cfg, cold_start=True)
+            except Exception as e:
+                logger.warning(f"[ATSMainWindow] Error auto-restoring dragon monitor: {e}")
 
-        # 1.1 恢复加载 Top 3 强势板块龙头突击跟单榜
-        try:
-            hot_cfg = config_data.get("hot_sector_leaderboard_dialog", {})
-            if hot_cfg.get("is_open", False):
-                logger.info("[ATSMainWindow] IPC数据就绪，自动加载打开持久化的龙头突击跟单榜...")
-                self.open_hot_sector_leaderboard(restore_state=hot_cfg, cold_start=True)
-        except Exception as e:
-            logger.warning(f"[ATSMainWindow] Error auto-restoring hot sector leaderboard: {e}")
+        # 1.1 恢复加载 Top 3 强势板块龙头突击跟单榜 (错峰延时 400ms)
+        def _restore_hot():
+            try:
+                hot_cfg = config_data.get("hot_sector_leaderboard_dialog", {})
+                if hot_cfg.get("is_open", False):
+                    logger.info("[ATSMainWindow] IPC数据就绪，自动加载打开持久化的龙头突击跟单榜...")
+                    self.open_hot_sector_leaderboard(restore_state=hot_cfg, cold_start=True)
+            except Exception as e:
+                logger.warning(f"[ATSMainWindow] Error auto-restoring hot sector leaderboard: {e}")
 
-        # 1.2 恢复加载每日涨停与强势股天梯看板
-        try:
-            zt_cfg = config_data.get("daily_limit_up_dialog", {})
-            if zt_cfg.get("is_open", False):
-                logger.info("[ATSMainWindow] IPC数据就绪，自动加载打开持久化的每日涨停看板...")
-                self.open_daily_limit_up_analyzer(restore_state=zt_cfg, cold_start=True)
-        except Exception as e:
-            logger.warning(f"[ATSMainWindow] Error auto-restoring daily limit-up dialog: {e}")
+        # 1.2 恢复加载每日涨停与强势股天梯看板 (错峰延时 600ms)
+        def _restore_zt():
+            try:
+                zt_cfg = config_data.get("daily_limit_up_dialog", {})
+                if zt_cfg.get("is_open", False):
+                    logger.info("[ATSMainWindow] IPC数据就绪，自动加载打开持久化的每日涨停看板...")
+                    self.open_daily_limit_up_analyzer(restore_state=zt_cfg, cold_start=True)
+            except Exception as e:
+                logger.warning(f"[ATSMainWindow] Error auto-restoring daily limit-up dialog: {e}")
 
-        # 2. 恢复加载涨跌分布个股明细面板
-        try:
-            if hasattr(self, 'dist_chart') and hasattr(self.dist_chart, '_restore_details_dialog_if_saved'):
-                logger.info("[ATSMainWindow] IPC数据就绪，自动加载打开持久化的涨跌分布个股明细面板...")
-                self.dist_chart._restore_details_dialog_if_saved(cold_start=False)
-        except Exception as e:
-            logger.warning(f"[ATSMainWindow] Error auto-restoring distribution detail dialogs: {e}")
+        # 2. 恢复加载涨跌分布个股明细面板 (错峰延时 800ms)
+        def _restore_dist():
+            try:
+                if hasattr(self, 'dist_chart') and hasattr(self.dist_chart, '_restore_details_dialog_if_saved'):
+                    logger.info("[ATSMainWindow] IPC数据就绪，自动加载打开持久化的涨跌分布个股明细面板...")
+                    self.dist_chart._restore_details_dialog_if_saved(cold_start=False)
+            except Exception as e:
+                logger.warning(f"[ATSMainWindow] Error auto-restoring distribution detail dialogs: {e}")
 
-        # 3. 恢复加载持久化打开的 SBC 独立分时走势图窗口
-        try:
-            from ats.ui.intraday_strategy_dialog import restore_all_open_sbc_windows
-            logger.info("[ATSMainWindow] IPC数据就绪，自动加载打开持久化的 SBC 独立分时窗口...")
-            restore_all_open_sbc_windows(self)
-        except Exception as e:
-            logger.warning(f"[ATSMainWindow] Error auto-restoring SBC chart dialogs: {e}")
+        # 3. 恢复加载持久化打开的 SBC 独立分时走势图窗口 (错峰延时 1000ms)
+        def _restore_sbc():
+            try:
+                from ats.ui.intraday_strategy_dialog import restore_all_open_sbc_windows
+                logger.info("[ATSMainWindow] IPC数据就绪，自动加载打开持久化的 SBC 独立分时窗口...")
+                restore_all_open_sbc_windows(self)
+            except Exception as e:
+                logger.warning(f"[ATSMainWindow] Error auto-restoring SBC chart dialogs: {e}")
+
+        QTimer.singleShot(200, _restore_dragon)
+        QTimer.singleShot(400, _restore_hot)
+        QTimer.singleShot(600, _restore_zt)
+        QTimer.singleShot(800, _restore_dist)
+        QTimer.singleShot(1000, _restore_sbc)
 
     def _trigger_realtime_ui_update(self):
         """防抖异步触发 UI 渲染 (30ms 汇聚高频 IPC 广播包, 防范主线程卡顿)"""
@@ -4151,11 +4179,23 @@ class ATSMainWindow(QMainWindow):
                 cost_ms = (_time.time() - t0) * 1000.0
                 logger.debug(f"[ATSHistory] Batch history loaded: {len(loaded_codes)}/{len(codes_to_load)} in {cost_ms:.1f}ms")
 
-                QTimer.singleShot(0, self.refresh_realtime_ui)
+                # ⚡ [防抖节流] 绝不为每一批历史数据立即触发全量 refresh_realtime_ui，聚合 1000ms 触发一次，根除连续卡顿
+                QTimer.singleShot(0, self._request_debounced_history_refresh)
             finally:
                 self.hdf5_history_lock.release()
                 
         threading.Thread(target=worker, daemon=True).start()
+
+    def _request_debounced_history_refresh(self):
+        """聚合多批次历史数据加载完成后的 UI 刷新请求 (1000ms 节流防抖，杜绝连续多次卡顿)"""
+        if getattr(self, '_is_closing', False):
+            return
+        if not hasattr(self, '_history_refresh_debounce_timer'):
+            from PyQt6.QtCore import QTimer
+            self._history_refresh_debounce_timer = QTimer(self)
+            self._history_refresh_debounce_timer.setSingleShot(True)
+            self._history_refresh_debounce_timer.timeout.connect(self.refresh_realtime_ui)
+        self._history_refresh_debounce_timer.start(1000)
 
     def refresh_realtime_ui(self):
         """
@@ -4349,7 +4389,7 @@ class ATSMainWindow(QMainWindow):
         """Tier 3 (30ms 延迟): 异步加载右侧板块热力图与独立的辅助监控弹窗 (带防抖保护，杜绝主线程卡顿)"""
         if getattr(self, '_is_closing', False):
             return
-        if hasattr(self, 'heatmap_widget'):
+        if hasattr(self, 'heatmap_widget') and not getattr(self.heatmap_widget, '_has_live_ipc_data', False):
             self.heatmap_widget.load_live_sectors(force=False, current_df=self.current_df)
 
         from PyQt6.sip import isdeleted

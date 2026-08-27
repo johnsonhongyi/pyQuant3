@@ -1,3 +1,38 @@
+## 2026-08-27 13:28
+- [x] **实现板块明细 (ATSSectorDetailDialog) 自动持久化最后的排序列及方向 (`ats/ui/sector_detail_dialog.py`, `tests/test_sector_aggregator_suite.py`, `gemini.md`)**：
+    - [x] **自动捕获与物理原子持久化**：
+        - 连接 `table.horizontalHeader().sortIndicatorChanged` 信号，在用户点击排序列或翻转排序方向时，自动将列名 `ats_sector_detail_sort_col_name`、列索引 `ats_sector_detail_sort_col` 与排序方向 `ats_sector_detail_sort_order` 安全保存至 `window_config.json`；
+        - 在 `closeEvent` 中再次确认保存当前排序列与方向；
+    - [x] **跨会话与跨板块自适应智能恢复**：
+        - 在 `_init_ui`、`_render_rows`（动态扩展列调整后）中自动调用 `_restore_saved_sorting`；
+        - 优先通过 `col_name` 进行标题文本匹配（确保用户自定义增删动态列时 100% 精确映射到正确的列），并以 `sort_col` 作为备用索引；
+        - 在渲染数据完成后自动按持久化设定的排序列与方向执行 `sortItems`，保证任何时候打开任意板块均呈现一致的排序偏好；
+    - [x] **测试套件全量通过 (21/21 全部 PASSED)**：
+        - 新增 `test_sector_detail_dialog_sort_persistence` 单元测试，覆盖显式保存排序配置恢复断言、UI 点击事件触发持久化断言、跨弹窗实例自动恢复 Rank/涨幅等排序偏好断言。
+
+## 2026-08-27 13:20
+- [x] **彻底根治 TK 全量 5539 标的数据回补至 ATS 时部分股票丢失/缺失（如 Rank、DFF2、DFF3、ch_bc2 等显示 `--`）缺陷 (`ats/sector_data_aggregator.py`, `ats/ui/main_window.py`, `ipc_sync_manager.py`, `tests/test_sector_aggregator_suite.py`, `gemini.md`)**：
+    - [x] **根因排查与四大修复**：
+        1. **整型索引匹配漏洞**：TK 端 DataFrame 索引有时为 `int`（如 `300115`, `2055`），而 ATS 用 6 位字符串 `"300115"` 或 `"002055"` 检索时因类型不匹配直接丢失数据。在 `_get_df_row_safe` 中加固 `int(c_clean)`、无前缀及去前导零全量类型对齐；
+        2. **局部策略池与全局全量快照底表脱节**：当 ATS 开启策略过滤时，`current_df` 只有局部子集（几百只股票），未命中当前策略的成分股查不到数据。在 `SectorDataAggregator.fetch_quotes_unified` 中引入 `fallback_df` 二级全局快照回退补全机制，当 `current_df` 缺少某标的或 Rank/DFF 缺失时，自动从 `df_all` 全量快照池补齐，5539 只标的 100% 全覆盖；
+        3. **增量更新（`UPDATE_DF_DIFF`）残缺行合并与新列丢弃漏洞**：修复 `main_window.py` 与 `ipc_sync_manager.py`，确保增量包中新出现的列自动扩展入 `self.current_df`，且当检测到新股票加入时自动触发 `request_full_sync` 补齐所有 50+ 个特征字段；
+        4. **DataFrame 索引严格规范化**：全链路统一通过 `.astype(str).str.strip().str.zfill(6)` 确保代码对齐。
+    - [x] **测试套件全量通过 (20/20 全部 PASSED)**：
+        - 新增 `test_df_row_safe_int_index_and_fallback_backfill` 单元测试，验证整型索引精准检索、局部策略过滤下自动通过全局底表 100% 回补 Rank（如长盈精密 5523、鑫科材料 4800）、DFF2 及动态列。
+
+## 2026-08-27 13:05
+- [x] **彻底修复板块明细 (ATSSectorDetailDialog) 排序缺陷、点击排序自动平滑回滚到最顶部、消除静默刷新视口与选中行疯狂乱跳硬伤 (`ats/ui/sector_detail_dialog.py`, `tests/test_sector_aggregator_suite.py`, `gemini.md`)**：
+    - [x] **根治点击排序与静默刷新视口疯狂乱跳 Bug**：
+        - 根因分析：刷新时原代码在重新启用 `setSortingEnabled(True)` 排序后，错误使用原始未排序 `rows` 的索引 `r_i` 去调用 `selectRow(r_i)`，导致 Qt 选中完全错误的行并触发 `scrollToItem` 强行拉到底部或随机位置疯狂乱跳；
+        - 修复方案：在 `_render_rows` 刷新前保存视口滚动条像素值 `saved_v` 与选中的股票代码 `curr_sel_code`；在填充完成并按当前排序列 `sortItems` 重新排序后，在真实排序后的单元格中精确查找 `curr_sel_code` 恢复选中行；最后恢复滚动条 `verticalScrollBar().setValue(saved_v)`，静默刷新 100% 稳如磐石；
+        - 点击排序自动回滚到顶部：连接 `header_view.sectionClicked` 并在 `_on_header_section_clicked` 中执行 `self.table.verticalScrollBar().setValue(0)`，用户点击任意表头排序时立即平滑滚至最顶部，第一时间展示排在最前列的核心标的；
+    - [x] **全列高精度数值与角色权重排序修复**：
+        - 现价、得分、涨幅%、起点%、DFF、DFF2、DFF3 全部传入 `raw_val` 纯浮点数，杜绝文本解析精度损失；
+        - 角色类型 (👑 领涨龙头 > 🚀 先锋 > 确核 > 晋级 > 跟随) 绑定梯队权重 `_get_type_sort_weight`，实现科学的角色梯队排序；
+        - Rank 列有效值 (1~999) 正确解析，0 或 999 标记为 `None` 强制沉底；动态扩展列（如 `ch_bc`, `连阳`, `red` 等）自动提取数值作为 `raw_val`，占位符（`--`）无论升序降序绝对沉底；
+    - [x] **测试套件全量通过 (19/19 全部 PASSED)**：
+        - 新增 `test_sector_detail_dialog_sorting_and_scroll_stability` 专项测试，覆盖表头点击滚动条归零断言、涨幅升降序断言、角色类型权重排序断言与静默刷新选中代码维持断言。
+
 ## 2026-08-27 12:35
 - [x] **彻底修复天梯看板无主排序点击自动设主排序、根治梯队分类【连板接力(2板)】排在【连板接力(3板)】前面等全列排序缺陷 (`ats/ui/daily_limit_up_dialog.py`, `trading_kernel/tests/test_opening_bubble_engine.py`, `gemini.md`)**：
     - [x] **修复表头点击交互逻辑：无主排序时不自动设为主排序**：

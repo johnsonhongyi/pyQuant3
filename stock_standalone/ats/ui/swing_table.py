@@ -7,14 +7,30 @@ Lifecycle stages: 回踩中 (Pulling back), 回踩企稳 (Pullback stabilized), 
 
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHeaderView, QLabel, QHBoxLayout, QPushButton
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QColor
+from PyQt6.QtGui import QColor, QFont
 import os
 import json
 from ats.ui.styles import COLOR_UP, COLOR_DOWN, COLOR_INFO, COLOR_WARN, COLOR_ACCENT, setup_header_persistence, auto_fit_columns_once, NumericTableWidgetItem, load_config_node, save_config_node, parse_bool_config
 from ats.ui.base_table import BaseATSTableWidget
 from ats.ui.favorite_panel import get_ats_extra_cols, get_ats_table_headers
 
+FONT_BOLD = QFont("Microsoft YaHei", -1, QFont.Weight.Bold)
+COLOR_GREEN = QColor("#00FF88")
+COLOR_GOLD = QColor("#FFD700")
+COLOR_CORAL = QColor("#FF7F50")
+COLOR_RED = QColor("#FF3333")
+COLOR_BRIGHT_RED = QColor("#FF4444")
+COLOR_GRAY = QColor("#e2e2e5")
+COLOR_FAV_BG = QColor("#1A2A1A")
+COLOR_DEFAULT_BG = QColor("#121214")
+COLOR_UP_Q = QColor(COLOR_UP)
+COLOR_DOWN_Q = QColor(COLOR_DOWN)
+COLOR_WARN_Q = QColor(COLOR_WARN)
+COLOR_INFO_Q = QColor(COLOR_INFO)
+COLOR_ACCENT_Q = QColor(COLOR_ACCENT)
+
 PERSIST_KEY_SWING_FILTER = "ats_swing_tab_filter_enabled"
+
 
 class SwingStateTable(QWidget):
     stock_clicked = pyqtSignal(str, str) # code, name (for linkage)
@@ -38,6 +54,7 @@ class SwingStateTable(QWidget):
         self.filter_enabled = not self.filter_enabled
         save_config_node(PERSIST_KEY_SWING_FILTER, bool(self.filter_enabled))
         self._update_filter_button_ui()
+        self.table.setUpdatesEnabled(True)
         self._apply_favorite_filter()
 
     def _update_filter_button_ui(self):
@@ -182,90 +199,90 @@ class SwingStateTable(QWidget):
                 item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 
                 if is_fav:
-                    item.setBackground(QColor("#1A2A1A"))
+                    item.setBackground(COLOR_FAV_BG)
                 
                 # Dynamic cell styling based on state/pct
                 if col_idx in (0, 1): # Code and Name
                     if is_fav:
-                        item.setForeground(QColor("#00FF88"))
+                        item.setForeground(COLOR_GREEN)
                     else:
-                        item.setForeground(QColor("#e2e2e5"))
+                        item.setForeground(COLOR_GRAY)
                 elif col_idx == 3: # State column
                     if text == "回踩中":
-                        item.setForeground(QColor(COLOR_WARN))
+                        item.setForeground(COLOR_WARN_Q)
                     elif text == "回踩企稳":
-                        item.setForeground(QColor(COLOR_INFO))
-                        item.setFont(self._get_bold_font())
+                        item.setForeground(COLOR_INFO_Q)
+                        item.setFont(FONT_BOLD)
                     elif text == "持股中":
-                        item.setForeground(QColor(COLOR_ACCENT))
-                        item.setFont(self._get_bold_font())
+                        item.setForeground(COLOR_ACCENT_Q)
+                        item.setFont(FONT_BOLD)
                     elif text == "已平仓":
-                        item.setForeground(QColor(COLOR_DOWN))
+                        item.setForeground(COLOR_DOWN_Q)
                 elif col_idx == 4: # MA20 deviation
                     if str(text).startswith("+"):
-                        item.setForeground(QColor(COLOR_UP))
+                        item.setForeground(COLOR_UP_Q)
                     else:
-                        item.setForeground(QColor(COLOR_DOWN))
+                        item.setForeground(COLOR_DOWN_Q)
                 elif col_idx == 6: # Position
                     if text != "0%":
-                        item.setForeground(QColor(COLOR_ACCENT))
-                        item.setFont(self._get_bold_font())
+                        item.setForeground(COLOR_ACCENT_Q)
+                        item.setFont(FONT_BOLD)
                 elif col_idx == 7: # 首次发现 (时段时间)
                     strategy_str = str(text)
                     if '🔔' in strategy_str or '竞价' in strategy_str:
-                        item.setForeground(QColor("#FF4444"))
-                        item.setFont(self._get_bold_font())
+                        item.setForeground(COLOR_BRIGHT_RED)
+                        item.setFont(FONT_BOLD)
                     elif '🥇' in strategy_str or '黄金' in strategy_str:
-                        item.setForeground(QColor("#FFD700"))
-                        item.setFont(self._get_bold_font())
+                        item.setForeground(COLOR_GOLD)
+                        item.setFont(FONT_BOLD)
                 elif col_idx == 8: # 优先级评分
-                    item.setForeground(QColor(COLOR_ACCENT))
-                    item.setFont(self._get_bold_font())
+                    item.setForeground(COLOR_ACCENT_Q)
+                    item.setFont(FONT_BOLD)
                 elif col_idx in (9, 11, 12): # DFF, DFF2, DFF3
                     try:
                         val = float(text)
                         if val > 0:
-                            item.setForeground(QColor(COLOR_UP))
+                            item.setForeground(COLOR_UP_Q)
                         elif val < 0:
-                            item.setForeground(QColor(COLOR_DOWN))
+                            item.setForeground(COLOR_DOWN_Q)
                         else:
-                            item.setForeground(QColor("#e2e2e5"))
+                            item.setForeground(COLOR_GRAY)
                     except ValueError:
-                        item.setForeground(QColor("#e2e2e5"))
+                        item.setForeground(COLOR_GRAY)
                 elif col_idx == 13: # 大盘偏离
                     try:
                         clean_text = text.replace("%", "").replace("+", "")
                         val = float(clean_text)
                         if val > 0:
-                            item.setForeground(QColor(COLOR_UP))
+                            item.setForeground(COLOR_UP_Q)
                             if val > 2.0:
-                                item.setFont(self._get_bold_font())
+                                item.setFont(FONT_BOLD)
                         elif val < 0:
-                            item.setForeground(QColor(COLOR_DOWN))
+                            item.setForeground(COLOR_DOWN_Q)
                         else:
-                            item.setForeground(QColor("#e2e2e5"))
+                            item.setForeground(COLOR_GRAY)
                     except ValueError:
-                        item.setForeground(QColor("#e2e2e5"))
+                        item.setForeground(COLOR_GRAY)
                 elif col_idx == 14: # 大盘共振
                     if text == "逆市抗跌":
-                        item.setForeground(QColor("#FF7F50"))
-                        item.setFont(self._get_bold_font())
+                        item.setForeground(COLOR_CORAL)
+                        item.setFont(FONT_BOLD)
                     elif text == "大盘共振":
-                        item.setForeground(QColor("#FF3333"))
-                        item.setFont(self._get_bold_font())
+                        item.setForeground(COLOR_RED)
+                        item.setFont(FONT_BOLD)
                     elif text == "同步走弱":
-                        item.setForeground(QColor(COLOR_DOWN))
+                        item.setForeground(COLOR_DOWN_Q)
                     else:
-                        item.setForeground(QColor("#e2e2e5"))
+                        item.setForeground(COLOR_GRAY)
                 elif 15 <= col_idx < 15 + num_extra:  # 动态自定义列
                     if str(text).startswith("+"):
-                        item.setForeground(QColor(COLOR_UP))
+                        item.setForeground(COLOR_UP_Q)
                     elif str(text).startswith("-"):
-                        item.setForeground(QColor(COLOR_DOWN))
+                        item.setForeground(COLOR_DOWN_Q)
                     else:
-                        item.setForeground(QColor("#e2e2e5"))
+                        item.setForeground(COLOR_GRAY)
                 else:
-                    item.setForeground(QColor("#e2e2e5"))
+                    item.setForeground(COLOR_GRAY)
                 
                 self.table.setItem(row_idx, col_idx, item)
         auto_fit_columns_once(self.table, "ats_swing_table_state_v2", max_widths={self.table.columnCount() - 1: 350})
@@ -284,6 +301,7 @@ class SwingStateTable(QWidget):
                 self.table.setHorizontalHeaderLabels(headers)
 
         self._is_mock_active = False
+        self.table.setUpdatesEnabled(False)
         self.table.setSortingEnabled(False)
         
         if not data_list:
@@ -312,98 +330,108 @@ class SwingStateTable(QWidget):
                     if not str(text).startswith("⭐"):
                         text = f"⭐ {text}"
                         
-                item = NumericTableWidgetItem(str(text))
+                # ⚡ [In-Place 复用] 优先复用已有 NumericTableWidgetItem，杜绝 20000+ 对象重复内存分配与 GC 卡顿
+                item = self.table.item(row_idx, col_idx)
+                if item is None:
+                    item = NumericTableWidgetItem(str(text))
+                    self.table.setItem(row_idx, col_idx, item)
+                else:
+                    item.setText(str(text))
+                    item.setData(Qt.ItemDataRole.UserRole, str(text))
+
                 item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 
                 if is_fav:
-                    item.setBackground(QColor("#1A2A1A"))
+                    item.setBackground(COLOR_FAV_BG)
+                else:
+                    item.setBackground(COLOR_DEFAULT_BG)
                 
                 # Dynamic cell styling based on state/pct, preserving it for favorite stocks too
                 if col_idx in (0, 1): # Code and Name
                     if is_fav:
-                        item.setForeground(QColor("#00FF88"))
+                        item.setForeground(COLOR_GREEN)
                     else:
-                        item.setForeground(QColor("#e2e2e5"))
+                        item.setForeground(COLOR_GRAY)
                 elif col_idx == 3: # State column
                     if text == "回踩中":
-                        item.setForeground(QColor(COLOR_WARN))
+                        item.setForeground(COLOR_WARN_Q)
                     elif text == "回踩企稳":
-                        item.setForeground(QColor(COLOR_INFO))
-                        item.setFont(self._get_bold_font())
+                        item.setForeground(COLOR_INFO_Q)
+                        item.setFont(FONT_BOLD)
                     elif text == "持股中":
-                        item.setForeground(QColor(COLOR_ACCENT))
-                        item.setFont(self._get_bold_font())
+                        item.setForeground(COLOR_ACCENT_Q)
+                        item.setFont(FONT_BOLD)
                     elif text == "已平仓":
-                        item.setForeground(QColor(COLOR_DOWN))
+                        item.setForeground(COLOR_DOWN_Q)
                 elif col_idx == 4: # MA20 deviation
                     if str(text).startswith("+"):
-                        item.setForeground(QColor(COLOR_UP))
+                        item.setForeground(COLOR_UP_Q)
                     elif str(text).startswith("-"):
-                        item.setForeground(QColor(COLOR_DOWN))
+                        item.setForeground(COLOR_DOWN_Q)
                 elif col_idx == 6: # Position
                     if str(text) != "0%":
-                        item.setForeground(QColor(COLOR_ACCENT))
-                        item.setFont(self._get_bold_font())
+                        item.setForeground(COLOR_ACCENT_Q)
+                        item.setFont(FONT_BOLD)
                 elif col_idx == 7: # 首次发现
                     strategy_str = str(text)
                     if '🔔' in strategy_str or '竞价' in strategy_str:
-                        item.setForeground(QColor("#FF4444"))
-                        item.setFont(self._get_bold_font())
+                        item.setForeground(COLOR_BRIGHT_RED)
+                        item.setFont(FONT_BOLD)
                     elif '🥇' in strategy_str or '黄金' in strategy_str:
-                        item.setForeground(QColor("#FFD700"))
-                        item.setFont(self._get_bold_font())
+                        item.setForeground(COLOR_GOLD)
+                        item.setFont(FONT_BOLD)
                 elif col_idx == 8: # 优先级评分
-                    item.setForeground(QColor(COLOR_ACCENT))
-                    item.setFont(self._get_bold_font())
+                    item.setForeground(COLOR_ACCENT_Q)
+                    item.setFont(FONT_BOLD)
                 elif col_idx in (9, 11, 12): # DFF, DFF2, DFF3
                     try:
                         val = float(text)
                         if val > 0:
-                            item.setForeground(QColor(COLOR_UP))
+                            item.setForeground(COLOR_UP_Q)
                         elif val < 0:
-                            item.setForeground(QColor(COLOR_DOWN))
+                            item.setForeground(COLOR_DOWN_Q)
                         else:
-                            item.setForeground(QColor("#e2e2e5"))
+                            item.setForeground(COLOR_GRAY)
                     except ValueError:
-                        item.setForeground(QColor("#e2e2e5"))
+                        item.setForeground(COLOR_GRAY)
                 elif col_idx == 13: # 大盘偏离 (Relative Strength)
                     try:
                         clean_text = text.replace("%", "").replace("+", "")
                         val = float(clean_text)
                         if val > 0:
-                            item.setForeground(QColor(COLOR_UP))
+                            item.setForeground(COLOR_UP_Q)
                             if val > 2.0:
-                                item.setFont(self._get_bold_font())
+                                item.setFont(FONT_BOLD)
                         elif val < 0:
-                            item.setForeground(QColor(COLOR_DOWN))
+                            item.setForeground(COLOR_DOWN_Q)
                         else:
-                            item.setForeground(QColor("#e2e2e5"))
+                            item.setForeground(COLOR_GRAY)
                     except ValueError:
-                        item.setForeground(QColor("#e2e2e5"))
+                        item.setForeground(COLOR_GRAY)
                 elif col_idx == 14: # 大盘共振 (Resonance)
                     if text == "逆市抗跌":
-                        item.setForeground(QColor("#FF7F50"))
-                        item.setFont(self._get_bold_font())
+                        item.setForeground(COLOR_CORAL)
+                        item.setFont(FONT_BOLD)
                     elif text == "大盘共振":
-                        item.setForeground(QColor("#FF3333"))
-                        item.setFont(self._get_bold_font())
+                        item.setForeground(COLOR_RED)
+                        item.setFont(FONT_BOLD)
                     elif text == "同步走弱":
-                        item.setForeground(QColor(COLOR_DOWN))
+                        item.setForeground(COLOR_DOWN_Q)
                     else:
-                        item.setForeground(QColor("#e2e2e5"))
+                        item.setForeground(COLOR_GRAY)
                 elif 15 <= col_idx < 15 + num_extra:  # 动态自定义列
                     if str(text).startswith("+"):
-                        item.setForeground(QColor(COLOR_UP))
+                        item.setForeground(COLOR_UP_Q)
                     elif str(text).startswith("-"):
-                        item.setForeground(QColor(COLOR_DOWN))
+                        item.setForeground(COLOR_DOWN_Q)
                     else:
-                        item.setForeground(QColor("#e2e2e5"))
+                        item.setForeground(COLOR_GRAY)
                 else:
-                    item.setForeground(QColor("#e2e2e5"))
+                    item.setForeground(COLOR_GRAY)
                 
-                self.table.setItem(row_idx, col_idx, item)
         auto_fit_columns_once(self.table, "ats_swing_table_state_v2", max_widths={self.table.columnCount() - 1: 350})
         self.table.setSortingEnabled(True)
+        self.table.setUpdatesEnabled(True)
         self._apply_favorite_filter()
 
     def _load_show_favorite_config(self):
@@ -435,6 +463,7 @@ class SwingStateTable(QWidget):
     def _on_favorite_checkbox_changed(self, state):
         is_checked = (state == 2 or state is True or state == Qt.CheckState.Checked.value)
         self._save_show_favorite_config(is_checked)
+        self.table.setUpdatesEnabled(True)
         self._apply_favorite_filter()
 
     def _get_parent_mw(self):
@@ -541,15 +570,16 @@ class SwingStateTable(QWidget):
                     it = self.table.item(row, col)
                     if it:
                         it.setBackground(QColor("#1A2A1A"))
-                code_item.setForeground(QColor("#00FF88"))
-                name_item.setForeground(QColor("#00FF88"))
+                code_item.setForeground(COLOR_GREEN)
+                name_item.setForeground(COLOR_GREEN)
             else:
                 for col in range(self.table.columnCount()):
                     it = self.table.item(row, col)
                     if it:
                         it.setData(Qt.ItemDataRole.BackgroundRole, None)
-                code_item.setForeground(QColor("#e2e2e5"))
-                name_item.setForeground(QColor("#e2e2e5"))
+                code_item.setForeground(COLOR_GRAY)
+                name_item.setForeground(COLOR_GRAY)
 
+        self.table.setUpdatesEnabled(True)
         self._apply_favorite_filter()
 

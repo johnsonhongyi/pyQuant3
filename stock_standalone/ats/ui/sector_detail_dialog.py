@@ -9,6 +9,7 @@ import json
 import zlib
 import re
 import time
+import math
 import datetime
 import urllib.request
 from typing import List, Dict, Tuple, Optional, Any
@@ -35,6 +36,41 @@ from ats.sector_data_aggregator import (
     FAMOUS_SECTOR_LEADERS,
     SECTOR_SYNONYMS
 )
+
+
+def _safe_float(val: Any, default: float = 0.0) -> float:
+    if val is None:
+        return default
+    try:
+        f = float(val)
+        return default if (math.isnan(f) or math.isinf(f)) else f
+    except (ValueError, TypeError):
+        return default
+
+
+def _safe_int(val: Any, default: int = 0) -> int:
+    if val is None:
+        return default
+    try:
+        return int(float(val))
+    except (ValueError, TypeError):
+        return default
+
+
+def _get_type_sort_weight(type_str: str) -> float:
+    """计算板块成分股类型角色的排序权重 (👑 龙头 > 🚀 先锋 > 确核 > 晋级 > 跟随)"""
+    s = str(type_str or "")
+    if "👑" in s or "龙头" in s:
+        return 100.0
+    if "🚀" in s or "先锋" in s:
+        return 90.0
+    if "确核" in s:
+        return 80.0
+    if "晋级" in s:
+        return 70.0
+    if "跟随" in s:
+        return 50.0
+    return 10.0
 
 
 class SectorDetailWorker(QThread):
@@ -197,6 +233,9 @@ class ATSSectorDetailDialog(QDialog):
         
         default_widths = [60, 75, 48, 65, 68, 68, 58, 45, 58, 58] + [55] * len(self.extra_cols) + [100]
         setup_header_persistence(self.table, "ats_sector_detail_table_v2", default_widths=default_widths)
+        header_view.sectionClicked.connect(self._on_header_section_clicked)
+        header_view.sortIndicatorChanged.connect(self._on_sort_indicator_changed)
+        self._restore_saved_sorting()
         
         self.table.itemClicked.connect(self.on_item_clicked)
         self.table.itemDoubleClicked.connect(self.on_item_double_clicked)
@@ -329,7 +368,7 @@ class ATSSectorDetailDialog(QDialog):
             current_df=current_df,
             extra_cols=self.extra_cols,
             get_name_fn=get_name_fn,
-            parent=self
+            parent=None
         )
         self._worker.finished_signal.connect(self._on_worker_finished)
         self._worker.start()
@@ -503,14 +542,62 @@ class ATSSectorDetailDialog(QDialog):
 
         self._apply_filter_and_render()
 
+    def _on_header_section_clicked(self, logical_index: int):
+        """用户主动点击表头某一列排序时，自动将表格滚动条平滑重置到最顶部，杜绝视口乱跳"""
+        try:
+            self.table.verticalScrollBar().setValue(0)
+        except Exception:
+            pass
+
+    def _on_sort_indicator_changed(self, logical_index: int, order: Qt.SortOrder):
+        """自动持久化用户最后点击选择的排序列与排序方向至 window_config.json"""
+        if getattr(self, '_is_rendering', False) or getattr(self, '_is_restoring_sort', False):
+            return
+        try:
+            header_item = self.table.horizontalHeaderItem(logical_index)
+            col_name = header_item.text().strip() if header_item else ""
+            save_config_node("ats_sector_detail_sort_col_name", col_name)
+            save_config_node("ats_sector_detail_sort_col", int(logical_index))
+            save_config_node("ats_sector_detail_sort_order", int(order.value))
+        except Exception as e:
+            logger.debug(f"保存板块明细排序列异常: {e}")
+
+    def _restore_saved_sorting(self):
+        """恢复跨会话保存的排序列及方向 (优先列名匹配，兼容动态列增删)"""
+        self._is_restoring_sort = True
+        try:
+            saved_col_name = load_config_node("ats_sector_detail_sort_col_name")
+            saved_col = load_config_node("ats_sector_detail_sort_col")
+            saved_order = load_config_node("ats_sector_detail_sort_order")
+
+            target_col = -1
+            if saved_col_name:
+                for c in range(self.table.columnCount()):
+                    it = self.table.horizontalHeaderItem(c)
+                    if it and it.text().strip() == saved_col_name:
+                        target_col = c
+                        break
+            if target_col == -1 and saved_col is not None:
+                if 0 <= int(saved_col) < self.table.columnCount():
+                    target_col = int(saved_col)
+
+            if target_col != -1:
+                order = Qt.SortOrder(int(saved_order)) if saved_order is not None else Qt.SortOrder.DescendingOrder
+                self.table.horizontalHeader().setSortIndicator(target_col, order)
+        except Exception as e:
+            logger.debug(f"恢复板块明细排序列异常: {e}")
+        finally:
+            self._is_restoring_sort = False
+
     def _render_rows(self, rows):
         self._is_rendering = True
         self.table.blockSignals(True)
         try:
-            # 记录刷新前用户选中的股票代码，避免刷新导致选中状态跳脱
+            # 1. 记录刷新前用户选中的股票代码与当前滚动条位置
+            saved_v = self.table.verticalScrollBar().value()
             curr_sel_code = None
             curr_row = self.table.currentRow()
-            if curr_row >= 0 and curr_row < self.table.rowCount():
+            if 0 <= curr_row < self.table.rowCount():
                 item0 = self.table.item(curr_row, 0)
                 if item0:
                     curr_sel_code = item0.text().strip()
@@ -524,6 +611,26 @@ class ATSSectorDetailDialog(QDialog):
                     self.table.setHorizontalHeaderLabels(headers)
                     default_widths = [60, 75, 48, 65, 68, 68, 58, 45, 58, 58] + [55] * len(self.extra_cols) + [100]
                     setup_header_persistence(self.table, "ats_sector_detail_table_v2", default_widths=default_widths)
+                    self._restore_saved_sorting()
+
+            # 2. 捕获当前表头的排序列与排序方向 (若未设则尝试从持久化恢复)
+            header = self.table.horizontalHeader()
+            sort_col = header.sortIndicatorSection() if header else -1
+            sort_order = header.sortIndicatorOrder() if header else Qt.SortOrder.DescendingOrder
+            if sort_col == -1 or sort_col >= self.table.columnCount():
+                saved_col_name = load_config_node("ats_sector_detail_sort_col_name")
+                saved_col = load_config_node("ats_sector_detail_sort_col")
+                saved_order = load_config_node("ats_sector_detail_sort_order")
+                if saved_col_name:
+                    for c in range(self.table.columnCount()):
+                        it = self.table.horizontalHeaderItem(c)
+                        if it and it.text().strip() == saved_col_name:
+                            sort_col = c
+                            break
+                if sort_col == -1 and saved_col is not None and 0 <= int(saved_col) < self.table.columnCount():
+                    sort_col = int(saved_col)
+                if saved_order is not None:
+                    sort_order = Qt.SortOrder(int(saved_order))
 
             self.table.setSortingEnabled(False)
             self.table.setRowCount(len(rows))
@@ -531,31 +638,43 @@ class ATSSectorDetailDialog(QDialog):
             
             for row_idx, r in enumerate(rows):
                 # 0. Code
-                code_item = QTableWidgetItem(str(r['code']))
+                code_str = str(r.get('code', '')).strip().zfill(6)
+                code_item = QTableWidgetItem(code_str)
+                code_item.setData(Qt.ItemDataRole.UserRole, code_str)
                 code_item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
                 self.table.setItem(row_idx, 0, code_item)
                 
                 # 1. Name
-                name_item = QTableWidgetItem(str(r['name']))
+                name_str = str(r.get('name', code_str))
+                name_item = QTableWidgetItem(name_str)
                 name_item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
                 self.table.setItem(row_idx, 1, name_item)
                 
                 # 2. Score
-                score_item = NumericTableWidgetItem(f"{r['score']:.1f}")
+                score_val = _safe_float(r.get('score', 0.0))
+                score_item = NumericTableWidgetItem(f"{score_val:.1f}", raw_val=score_val)
                 score_item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
                 self.table.setItem(row_idx, 2, score_item)
                 
-                # 3. Type
-                type_item = QTableWidgetItem(str(r['type']))
+                # 3. Type (绑定角色权重支持高精度升降序与梯队聚合)
+                type_str = str(r.get('type', '跟随'))
+                type_w = _get_type_sort_weight(type_str)
+                type_item = NumericTableWidgetItem(type_str, raw_val=type_w)
                 type_item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-                if '👑' in r['type']:
+                if '👑' in type_str:
                     type_item.setForeground(QColor("#ffcc00")) # gold
+                elif '🚀' in type_str:
+                    type_item.setForeground(QColor("#ff5555")) # red
+                elif '确核' in type_str:
+                    type_item.setForeground(QColor("#00e5ff")) # cyan
+                elif '晋级' in type_str:
+                    type_item.setForeground(QColor("#ffd700"))
                 self.table.setItem(row_idx, 3, type_item)
                 
                 # 4. Pct
-                pct_val = r['pct']
+                pct_val = _safe_float(r.get('pct', 0.0))
                 pct_str = f"{pct_val:+.2f}%"
-                pct_item = NumericTableWidgetItem(pct_str)
+                pct_item = NumericTableWidgetItem(pct_str, raw_val=pct_val)
                 pct_item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
                 if pct_val > 0.001:
                     pct_item.setForeground(QColor("#ff4444"))
@@ -564,9 +683,9 @@ class ATSSectorDetailDialog(QDialog):
                 self.table.setItem(row_idx, 4, pct_item)
                 
                 # 5. Start Pct
-                start_val = r['start_pct']
+                start_val = _safe_float(r.get('start_pct', 0.0))
                 start_str = f"{start_val:+.2f}%"
-                start_item = NumericTableWidgetItem(start_str)
+                start_item = NumericTableWidgetItem(start_str, raw_val=start_val)
                 start_item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
                 if start_val > 0.001:
                     start_item.setForeground(QColor("#ff4444"))
@@ -575,9 +694,9 @@ class ATSSectorDetailDialog(QDialog):
                 self.table.setItem(row_idx, 5, start_item)
                 
                 # 6. DFF
-                dff_val = r['dff']
+                dff_val = _safe_float(r.get('dff', 0.0))
                 dff_str = f"{dff_val:+.2f}%"
-                dff_item = NumericTableWidgetItem(dff_str)
+                dff_item = NumericTableWidgetItem(dff_str, raw_val=dff_val)
                 dff_item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
                 if dff_val > 0.001:
                     dff_item.setForeground(QColor("#ff4444"))
@@ -585,14 +704,18 @@ class ATSSectorDetailDialog(QDialog):
                     dff_item.setForeground(QColor("#33cc5a"))
                 self.table.setItem(row_idx, 6, dff_item)
                 
-                # 7. Rank
-                rank_item = NumericTableWidgetItem(str(r['rank']))
+                # 7. Rank (有效 Rank 1~999 精准排序，无效/0/999 作为 None 强制沉底)
+                rank_val = _safe_int(r.get('rank', 999))
+                if 0 < rank_val < 999:
+                    rank_item = NumericTableWidgetItem(str(rank_val), raw_val=float(rank_val))
+                else:
+                    rank_item = NumericTableWidgetItem("--", raw_val=None)
                 rank_item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
                 self.table.setItem(row_idx, 7, rank_item)
                 
                 # 8. DFF2
-                dff2_val = r['dff2']
-                dff2_item = NumericTableWidgetItem(f"{dff2_val:+.2f}%")
+                dff2_val = _safe_float(r.get('dff2', 0.0))
+                dff2_item = NumericTableWidgetItem(f"{dff2_val:+.2f}%", raw_val=dff2_val)
                 dff2_item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
                 if dff2_val > 0.001:
                     dff2_item.setForeground(QColor("#ff4444"))
@@ -601,8 +724,8 @@ class ATSSectorDetailDialog(QDialog):
                 self.table.setItem(row_idx, 8, dff2_item)
                 
                 # 9. DFF3
-                dff3_val = r['dff3']
-                dff3_item = NumericTableWidgetItem(f"{dff3_val:+.2f}%")
+                dff3_val = _safe_float(r.get('dff3', 0.0))
+                dff3_item = NumericTableWidgetItem(f"{dff3_val:+.2f}%", raw_val=dff3_val)
                 dff3_item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
                 if dff3_val > 0.001:
                     dff3_item.setForeground(QColor("#ff4444"))
@@ -614,8 +737,16 @@ class ATSSectorDetailDialog(QDialog):
                 extra_data = r.get('extra_cols', {})
                 for ei, ec in enumerate(self.extra_cols):
                     c_idx = 10 + ei
-                    e_val = extra_data.get(ec, '--')
-                    e_item = NumericTableWidgetItem(str(e_val))
+                    e_val = extra_data.get(ec, r.get(ec, '--'))
+                    if e_val is None or str(e_val).strip() in ('', '-', '--', 'None', 'nan', 'null', 'N/A'):
+                        e_item = NumericTableWidgetItem('--', raw_val=None)
+                    else:
+                        s_eval = str(e_val).strip()
+                        try:
+                            clean_f = float(s_eval.replace(',', '').replace('%', '').replace('+', '').strip())
+                            e_item = NumericTableWidgetItem(s_eval, raw_val=clean_f)
+                        except Exception:
+                            e_item = NumericTableWidgetItem(s_eval, raw_val=s_eval)
                     e_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                     if str(e_val).startswith('+'):
                         e_item.setForeground(QColor("#ff4444"))
@@ -627,20 +758,33 @@ class ATSSectorDetailDialog(QDialog):
 
                 # Pattern (Last Column)
                 pat_col_idx = 10 + num_extra
-                pat_item = QTableWidgetItem(str(r['pattern'] or '--'))
+                pat_item = QTableWidgetItem(str(r.get('pattern', '--') or '--'))
                 pat_item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
                 self.table.setItem(row_idx, pat_col_idx, pat_item)
-                
+
+            # 3. 重新按用户已设排序列排序
+            if 0 <= sort_col < self.table.columnCount():
+                self.table.sortItems(sort_col, sort_order)
+
             self.table.setSortingEnabled(True)
 
-            # 恢复刷新前用户选中的股票行
+            # 4. 在排好序的真实表格中精准恢复选中行 (杜绝使用原始未排序索引造成跳到错误行)
             if curr_sel_code:
-                for r_i in range(len(rows)):
-                    if str(rows[r_i].get('code', '')) == curr_sel_code:
-                        self.table.selectRow(r_i)
+                found_r = -1
+                for r_i in range(self.table.rowCount()):
+                    it = self.table.item(r_i, 0)
+                    if it and it.text().strip() == curr_sel_code:
+                        found_r = r_i
                         break
+                if found_r >= 0:
+                    self.table.selectRow(found_r)
+                else:
+                    self.table.clearSelection()
             else:
                 self.table.clearSelection()
+
+            # 5. 恢复视口滚动条位置 (防止 Qt 自动滚动造成乱跳)
+            self.table.verticalScrollBar().setValue(saved_v)
         finally:
             self.table.blockSignals(False)
             self._is_rendering = False
@@ -852,6 +996,21 @@ class ATSSectorDetailDialog(QDialog):
 
     def closeEvent(self, event):
         self._save_geometry()
+        # 🛡️ 自动持久化当前排序列及方向
+        try:
+            header = self.table.horizontalHeader()
+            if header:
+                sort_col = header.sortIndicatorSection()
+                sort_order = header.sortIndicatorOrder()
+                if 0 <= sort_col < self.table.columnCount():
+                    it = self.table.horizontalHeaderItem(sort_col)
+                    col_name = it.text().strip() if it else ""
+                    save_config_node("ats_sector_detail_sort_col_name", col_name)
+                    save_config_node("ats_sector_detail_sort_col", int(sort_col))
+                    save_config_node("ats_sector_detail_sort_order", int(sort_order.value))
+        except Exception:
+            pass
+
         if hasattr(self, '_auto_timer') and self._auto_timer:
             self._auto_timer.stop()
         if hasattr(self, '_worker') and self._worker and self._worker.isRunning():

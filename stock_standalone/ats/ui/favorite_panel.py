@@ -22,6 +22,18 @@ from ats.ui.styles import COLOR_UP, COLOR_DOWN, COLOR_INFO, setup_header_persist
 
 PERSIST_KEY_FAV_FILTER = "ats_fav_tab_filter_enabled"
 
+FONT_BOLD = QFont("Microsoft YaHei", -1, QFont.Weight.Bold)
+COLOR_GREEN = QColor("#00FF88")
+COLOR_GOLD = QColor("#FFD700")
+COLOR_CYAN = QColor("#00E5FF")
+COLOR_RED = QColor("#FF4444")
+COLOR_GRAY = QColor("#E2E2E5")
+COLOR_FAV_BG = QColor("#1F2D1F")
+COLOR_DEFAULT_BG = QColor("#121214")
+COLOR_UP_Q = QColor(COLOR_UP)
+COLOR_DOWN_Q = QColor(COLOR_DOWN)
+
+
 
 def get_ats_extra_cols():
     """获取 ats_col 排除已有固定列后的自定义追加列"""
@@ -233,8 +245,16 @@ class FavoritePanel(QWidget):
             if fset is None:
                 fset = set()
         
-        visible_cnt = 0
         total_cnt = self.table.rowCount()
+        # ⚡ [极致性能快速路径] 若无搜索过滤且未启用策略过滤，直接恢复全部可见，0ms 物理跳过无谓重绘
+        if not text and fset is None:
+            for row in range(total_cnt):
+                if self.table.isRowHidden(row):
+                    self.table.setRowHidden(row, False)
+            self.count_label.setText(f"共 {total_cnt} 只标的")
+            return
+
+        visible_cnt = 0
         for row in range(total_cnt):
             code_item = self.table.item(row, 0)
             name_item = self.table.item(row, 1)
@@ -245,7 +265,8 @@ class FavoritePanel(QWidget):
             match_filter = (fset is None) or (code_str.zfill(6) in fset)
             
             visible = match_search and match_filter
-            self.table.setRowHidden(row, not visible)
+            if self.table.isRowHidden(row) != (not visible):
+                self.table.setRowHidden(row, not visible)
             if visible:
                 visible_cnt += 1
                 
@@ -269,142 +290,147 @@ class FavoritePanel(QWidget):
         self._apply_row_visibility()
 
     def update_favorite_rows(self, rows):
-        """更新重点关注看板表格 (双缓冲平滑覆盖，杜绝更新前清空导致的闪烁/清0)
-        
-        Args:
-            rows: list of tuples (code, name, price, state, deviation, limit_ups, position,
-                                  first_seen, priority, dff, rank, dff2, dff3, rs, resonance, *extra_vals, reason)
-        """
+        """更新重点关注看板表格 (双缓冲平滑覆盖，杜绝更新前清空导致的闪烁/清0)"""
         if rows is None:
             return
 
-        current_extra = get_ats_extra_cols()
-        if not hasattr(self, 'extra_cols') or self.extra_cols != current_extra:
-            self.extra_cols = current_extra
-            headers = get_ats_table_headers(self.extra_cols)
-            if self.table.columnCount() != len(headers):
-                self.table.setColumnCount(len(headers))
-                self.table.setHorizontalHeaderLabels(headers)
+        self.table.setUpdatesEnabled(False)
+        try:
+            current_extra = get_ats_extra_cols()
+            if not hasattr(self, 'extra_cols') or self.extra_cols != current_extra:
+                self.extra_cols = current_extra
+                headers = get_ats_table_headers(self.extra_cols)
+                if self.table.columnCount() != len(headers):
+                    self.table.setColumnCount(len(headers))
+                    self.table.setHorizontalHeaderLabels(headers)
 
-        header = self.table.horizontalHeader()
-        sort_col = header.sortIndicatorSection() if (header and header.isSortIndicatorShown()) else -1
-        sort_order = header.sortIndicatorOrder() if header else Qt.SortOrder.AscendingOrder
+            header = self.table.horizontalHeader()
+            sort_col = header.sortIndicatorSection() if (header and header.isSortIndicatorShown()) else -1
+            sort_order = header.sortIndicatorOrder() if header else Qt.SortOrder.AscendingOrder
 
-        self.table.setSortingEnabled(False)
-        self.count_label.setText(f"共 {len(rows)} 只重点标的")
+            self.table.setSortingEnabled(False)
+            self.count_label.setText(f"共 {len(rows)} 只重点标的")
 
-        if not rows:
-            if self.table.rowCount() > 0:
-                self.table.setRowCount(0)
-            return
+            if not rows:
+                if self.table.rowCount() > 0:
+                    self.table.setRowCount(0)
+                return
 
-        def _parse_num_val(row_item, col_idx):
-            if col_idx >= len(row_item):
+            def _parse_num_val(row_item, col_idx):
+                if col_idx >= len(row_item):
+                    return 0.0
+                val_str = str(row_item[col_idx]).strip()
+                import re
+                clean_str = val_str.replace(',', '').replace('%', '').replace('￥', '').replace('$', '')
+                m = re.search(r'[-+]?\d*\.?\d+', clean_str)
+                if m:
+                    try:
+                        return float(m.group())
+                    except ValueError:
+                        pass
                 return 0.0
-            val_str = str(row_item[col_idx]).strip()
-            import re
-            clean_str = val_str.replace(',', '').replace('%', '').replace('￥', '').replace('$', '')
-            m = re.search(r'[-+]?\d*\.?\d+', clean_str)
-            if m:
-                try:
-                    return float(m.group())
-                except ValueError:
-                    pass
-            return 0.0
 
-        sorted_rows = sorted(rows, key=lambda x: (-_parse_num_val(x, 8), _parse_num_val(x, 4), str(x[0]).strip()))
+            sorted_rows = sorted(rows, key=lambda x: (-_parse_num_val(x, 8), _parse_num_val(x, 4), str(x[0]).strip()))
 
-        if self.table.rowCount() != len(sorted_rows):
-            self.table.setRowCount(len(sorted_rows))
+            if self.table.rowCount() != len(sorted_rows):
+                self.table.setRowCount(len(sorted_rows))
 
-        num_extra = len(self.extra_cols)
-        total_cols = 16 + num_extra
-        reason_col_idx = total_cols - 1
+            num_extra = len(self.extra_cols)
+            total_cols = 16 + num_extra
+            reason_col_idx = total_cols - 1
 
-        for row_idx, row_data in enumerate(sorted_rows):
-            code = str(row_data[0])
-            name = str(row_data[1])
-            price = str(row_data[2])
-            state = str(row_data[3])
-            dev_str = str(row_data[4])
-            limit_ups = str(row_data[5])
-            position = str(row_data[6])
-            first_seen = str(row_data[7])
-            priority = str(row_data[8])
-            dff = str(row_data[9])
-            rank = str(row_data[10])
-            dff2 = str(row_data[11])
-            dff3 = str(row_data[12])
-            rs_val = str(row_data[13])
-            resonance = str(row_data[14])
-            
-            # 动态列提取
-            extra_vals = []
-            if len(row_data) > 16:
-                # 传入了动态列数据: 结构为 15基础 + N动态 + 1理由
-                extra_vals = [str(row_data[15 + i]) for i in range(num_extra) if 15 + i < len(row_data) - 1]
-            while len(extra_vals) < num_extra:
-                extra_vals.append("--")
+            for row_idx, row_data in enumerate(sorted_rows):
+                code_str = str(row_data[0])
+                name = str(row_data[1])
+                price = str(row_data[2])
+                state = str(row_data[3])
+                dev_str = str(row_data[4])
+                limit_ups = str(row_data[5])
+                position = str(row_data[6])
+                first_seen = str(row_data[7])
+                priority = str(row_data[8])
+                dff = str(row_data[9])
+                rank = str(row_data[10])
+                dff2 = str(row_data[11])
+                dff3 = str(row_data[12])
+                rs_val = str(row_data[13])
+                resonance = str(row_data[14])
                 
-            reason = str(row_data[-1]) if len(row_data) > 15 else "重点关注追踪"
+                # 动态列提取
+                extra_vals = []
+                if len(row_data) > 16:
+                    extra_vals = [str(row_data[15 + i]) for i in range(num_extra) if 15 + i < len(row_data) - 1]
+                while len(extra_vals) < num_extra:
+                    extra_vals.append("--")
+                    
+                reason = str(row_data[-1]) if len(row_data) > 15 else "重点关注追踪"
 
-            display_name = f"⭐ {name}"
-            col_values = [
-                code, display_name, price, state, dev_str, limit_ups, position,
-                first_seen, priority, dff, rank, dff2, dff3, rs_val, resonance,
-                *extra_vals, reason
-            ]
+                display_name = f"⭐ {name}"
+                col_values = [
+                    code_str, display_name, price, state, dev_str, limit_ups, position,
+                    first_seen, priority, dff, rank, dff2, dff3, rs_val, resonance,
+                    *extra_vals, reason
+                ]
 
-            for col_idx, val in enumerate(col_values):
-                if col_idx >= self.table.columnCount():
-                    break
-                item = NumericTableWidgetItem(val)
-                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter if col_idx not in (1, reason_col_idx) else (Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter))
-
-                # Highlight entire row for favorite
-                item.setBackground(QColor("#1F2D1F"))
-
-                # Standard color coding
-                if col_idx == 0:
-                    item.setForeground(QColor("#00FF88"))
-                    item.setFont(QFont("Microsoft YaHei", -1, QFont.Weight.Bold))
-                elif col_idx == 1:
-                    item.setForeground(QColor("#FFD700"))
-                    item.setFont(QFont("Microsoft YaHei", -1, QFont.Weight.Bold))
-                elif col_idx == 3:  # 波段状态
-                    if "企稳" in state or "买入" in state:
-                        item.setForeground(QColor("#00FF88"))
-                        item.setFont(QFont("Microsoft YaHei", -1, QFont.Weight.Bold))
-                    elif "持股" in state:
-                        item.setForeground(QColor("#00E5FF"))
-                    elif "破位" in state or "弱" in state:
-                        item.setForeground(QColor("#FF4444"))
+                for col_idx, val in enumerate(col_values):
+                    if col_idx >= self.table.columnCount():
+                        break
+                    
+                    # ⚡ [In-Place 复用] 优先复用已有 NumericTableWidgetItem，杜绝 20000+ 对象重复内存分配与 GC 卡顿
+                    item = self.table.item(row_idx, col_idx)
+                    if item is None:
+                        item = NumericTableWidgetItem(str(val))
+                        self.table.setItem(row_idx, col_idx, item)
                     else:
-                        item.setForeground(QColor("#E2E2E5"))
-                elif col_idx == 4:  # MA20 偏离
-                    if dev_str.startswith("+"):
-                        item.setForeground(QColor(COLOR_UP))
-                    elif dev_str.startswith("-"):
-                        item.setForeground(QColor(COLOR_DOWN))
-                elif col_idx == 8:  # 优先级
-                    item.setForeground(QColor("#00FF88"))
-                    item.setFont(QFont("Microsoft YaHei", -1, QFont.Weight.Bold))
-                elif col_idx == 14:  # 逆势共振
-                    if "逆市" in resonance or "共振" in resonance:
-                        item.setForeground(QColor("#FFD700"))
-                        item.setFont(QFont("Microsoft YaHei", -1, QFont.Weight.Bold))
-                elif 15 <= col_idx < 15 + num_extra:  # 动态自定义列
-                    if str(val).startswith("+"):
-                        item.setForeground(QColor(COLOR_UP))
-                    elif str(val).startswith("-"):
-                        item.setForeground(QColor(COLOR_DOWN))
-                    else:
-                        item.setForeground(QColor("#E2E2E5"))
+                        item.setText(str(val))
+                        item.setData(Qt.ItemDataRole.UserRole, val)
 
-                self.table.setItem(row_idx, col_idx, item)
+                    item.setTextAlignment(Qt.AlignmentFlag.AlignCenter if col_idx not in (1, reason_col_idx) else (Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter))
 
-        self.table.setSortingEnabled(True)
-        if sort_col >= 0:
-            self.table.sortItems(sort_col, sort_order)
+                    # Highlight entire row for favorite
+                    item.setBackground(COLOR_FAV_BG)
+
+                    # Standard color coding
+                    if col_idx == 0:
+                        item.setForeground(COLOR_GREEN)
+                        item.setFont(FONT_BOLD)
+                    elif col_idx == 1:
+                        item.setForeground(COLOR_GOLD)
+                        item.setFont(FONT_BOLD)
+                    elif col_idx == 3:  # 波段状态
+                        if "企稳" in state or "买入" in state:
+                            item.setForeground(COLOR_GREEN)
+                            item.setFont(FONT_BOLD)
+                        elif "持股" in state:
+                            item.setForeground(COLOR_CYAN)
+                        elif "破位" in state or "弱" in state:
+                            item.setForeground(COLOR_RED)
+                        else:
+                            item.setForeground(COLOR_GRAY)
+                    elif col_idx == 4:  # MA20 偏离
+                        if dev_str.startswith("+"):
+                            item.setForeground(COLOR_UP_Q)
+                        elif dev_str.startswith("-"):
+                            item.setForeground(COLOR_DOWN_Q)
+                    elif col_idx == 8:  # 优先级
+                        item.setForeground(COLOR_GREEN)
+                        item.setFont(FONT_BOLD)
+                    elif col_idx == 14:  # 逆势共振
+                        if "逆市" in resonance or "共振" in resonance:
+                            item.setForeground(COLOR_GOLD)
+                            item.setFont(FONT_BOLD)
+                    elif 15 <= col_idx < 15 + num_extra:  # 动态自定义列
+                        if str(val).startswith("+"):
+                            item.setForeground(COLOR_UP_Q)
+                        elif str(val).startswith("-"):
+                            item.setForeground(COLOR_DOWN_Q)
+                        else:
+                            item.setForeground(COLOR_GRAY)
+
+            self.table.setSortingEnabled(True)
+            if sort_col >= 0:
+                self.table.sortItems(sort_col, sort_order)
+        finally:
+            self.table.setUpdatesEnabled(True)
             
         self._apply_row_visibility()
