@@ -4,6 +4,8 @@ import time
 import pytest
 import numpy as np
 import pandas as pd
+from PyQt6.QtWidgets import QApplication
+from PyQt6.QtCore import Qt
 
 _DIR = os.path.dirname(os.path.abspath(__file__))
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(_DIR))
@@ -14,6 +16,7 @@ from ats.opening_bubble_engine import (
     OpeningBubbleEngine, get_opening_bubble_engine, get_pct_tier, get_vol_tier
 )
 from ats.limit_up_engine import LimitUpEngine
+from ats.ui.daily_limit_up_dialog import DailyLimitUpDialog
 
 
 def test_pct_tier_classification():
@@ -190,7 +193,6 @@ def test_high_concurrency_performance():
         t_total += (time.time() - t_start)
 
     avg_per_round_ms = (t_total / 10.0) * 1000.0
-
     print(f"\n[OpeningBubbleEngine] 5000 stocks update benchmark: 10 rounds took {t_total:.3f}s, avg per round {avg_per_round_ms:.2f}ms")
     # 单轮 5000 只股票应在 400ms 以内完成（给 CI 和系统负载波动留出合理余量）
     assert avg_per_round_ms < 400.0
@@ -227,10 +229,6 @@ def test_turnover_rate_safety_filtering():
 
 def test_daily_limit_up_multi_level_sorting():
     """测试天梯多级排序算法：L1 主排序 -> L2 从排序 -> L3 次排序"""
-    from ats.ui.daily_limit_up_dialog import DailyLimitUpDialog
-    from PyQt6.QtWidgets import QApplication
-    import sys
-    
     app = QApplication.instance() or QApplication(sys.argv)
     
     records = [
@@ -337,5 +335,74 @@ def test_daily_limit_up_multi_level_sorting():
     assert sort_key_bubble == "ats_daily_limit_up_sort_bubble"
     assert sort_key_10d    == "ats_daily_limit_up_sort"
 
+    # Case 6: 【用户截图真实场景修复验证】梯队分类列排序：4板 -> 3板 -> 2板 -> 1板 -> 点火区 (3板 必须 100% 排在 2板 前面)
+    user_screenshot_records = [
+        {"code": "002942", "name": "新农股份", "price": 19.01, "pct": 10.01, "consecutive_boards": 2, "tier_tag": "🚀 连板接力 (2板)", "momentum_score": 96.0, "is_limit_up": True},
+        {"code": "000017", "name": "深中华A",  "price": 10.41, "pct": 10.04, "consecutive_boards": 4, "tier_tag": "👑 空间高度龙 (4板)", "momentum_score": 99.0, "is_limit_up": True},
+        {"code": "002742", "name": "冀衡药业", "price": 5.67,  "pct": 10.10, "consecutive_boards": 3, "tier_tag": "🚀 连板接力 (3板)", "momentum_score": 99.0, "is_limit_up": True},
+        {"code": "301591", "name": "肯特股份", "price": 50.40, "pct": 20.00, "consecutive_boards": 1, "tier_tag": "⭐ 20cm强势首板",   "momentum_score": 94.0, "is_limit_up": True},
+        {"code": "603818", "name": "曲美家居", "price": 4.06,  "pct": 7.12,  "consecutive_boards": 0, "tier_tag": "🟡 半路点火区",       "momentum_score": 70.0, "is_limit_up": False},
+    ]
 
+    # 单列按梯队分类 (col 5) 降序排序
+    dlg.sort_level1_col = None
+    dlg.sort_level2_col = None
+    dlg.sort_level3_col = None
+    dlg._sort_col = 5
+    dlg._sort_order = Qt.SortOrder.DescendingOrder
 
+    res_tier = dlg._apply_multi_level_sort(user_screenshot_records)
+    tier_codes = [r["code"] for r in res_tier]
+    # 验证排序顺序：4板(000017) -> 3板(002742) -> 2板(002942) -> 1板(301591) -> 点火区(603818)
+    assert tier_codes[0] == "000017", f"4板空间高度龙必须排第1，实际: {tier_codes[0]}"
+    assert tier_codes[1] == "002742", f"3板连板接力必须排第2 (在2板前面)，实际: {tier_codes[1]}"
+    assert tier_codes[2] == "002942", f"2板连板接力必须排第3，实际: {tier_codes[2]}"
+    assert tier_codes[3] == "301591", f"1板首板必须排第4，实际: {tier_codes[3]}"
+    assert tier_codes[4] == "603818", f"半路点火区必须排最后，实际: {tier_codes[4]}"
+
+    # Case 7: 【交互规范验证 1】未设置主排序时，点击表头不自动设置主排序 (不带 🔴[主])
+    dlg.sort_level1_col = None
+    dlg.sort_level2_col = None
+    dlg.sort_level3_col = None
+    dlg._sort_col = 3
+    dlg._sort_order = Qt.SortOrder.DescendingOrder
+
+    # 点击梯队分类 (col 5)
+    dlg._on_header_section_clicked(5)
+    assert dlg.sort_level1_col is None, "未设主排序时点击表头，sort_level1_col 必须保持 None"
+    assert dlg._sort_col == 5
+    assert dlg._sort_order == Qt.SortOrder.DescendingOrder
+    assert "🔴[主]" not in dlg.table.horizontalHeaderItem(5).text()
+    assert "↓" in dlg.table.horizontalHeaderItem(5).text()
+
+    # 再次点击梯队分类 (col 5) 翻转为升序
+    dlg._on_header_section_clicked(5)
+    assert dlg.sort_level1_col is None
+    assert dlg._sort_col == 5
+    assert dlg._sort_order == Qt.SortOrder.AscendingOrder
+    assert "↑" in dlg.table.horizontalHeaderItem(5).text()
+    assert "🔴[主]" not in dlg.table.horizontalHeaderItem(5).text()
+
+    # Case 8: 【交互规范验证 2】已显式设置主排序时，点击其他列作为从排序动态生效
+    dlg.sort_level1_col = 4 # 连板数设为主排序
+    dlg.sort_level1_asc = False
+    dlg.sort_level2_col = None
+    dlg.sort_level3_col = None
+    dlg._sort_col = None
+
+    # 点击封流比% (col 8) 作为动态从排序
+    dlg._on_header_section_clicked(8)
+    assert dlg.sort_level1_col == 4
+    assert dlg._sort_col == 8
+    assert "🔴[主]" in dlg.table.horizontalHeaderItem(4).text()
+    assert "🟡[从]" in dlg.table.horizontalHeaderItem(8).text()
+
+    # 验证复合排序执行：主排序列 (连板数) 绝对优先，从排序列 (封流比) 在主排序相等时生效
+    mixed_multi = [
+        {"code": "000001", "consecutive_boards": 2, "seal_to_circ_ratio": 3.0, "is_limit_up": True},
+        {"code": "000002", "consecutive_boards": 2, "seal_to_circ_ratio": 8.0, "is_limit_up": True},
+        {"code": "000003", "consecutive_boards": 3, "seal_to_circ_ratio": 1.0, "is_limit_up": True},
+    ]
+    res_multi = dlg._apply_multi_level_sort(mixed_multi)
+    # 3板(000003)排第1；2板中封流比大的(000002: 8.0%)排在(000001: 3.0%)前面
+    assert [r["code"] for r in res_multi] == ["000003", "000002", "000001"]
