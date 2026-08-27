@@ -1,3 +1,33 @@
+## 2026-08-27 18:10
+- [x] **根治窗口布局管理器 (`manage_window_layout.py`) 意外重复弹出、退出失效、PredatorSense 20% 高占用与跨显示器 (高分屏 -> 三星普分屏) 尺寸截断需执行两次才正常问题 (`webTools/window_manager/core.py`, `webTools/window_manager/ui.py`, `stock/webTools/ths-tdx-web.py`, `gemini.md`)**：
+    - [x] **四大根因精准破案与定位**：
+        1. **PredatorSense 20% 高占用与退出失效根因**：宏碁性能调优在完成参数下发后，若配置为 `kill`，当检测到硬件参数未发生变动时（`not need_oc and not need_fm and not need_cb`），旧逻辑直接提前 `return True` 退出了，跳过了后置查杀动作；同时托盘快捷菜单硬编码了 `"post_action": "hide"`，导致重型 UWP/WPF 控制中心一直常驻后台全速轮询硬件传感器，持续占满 20.7% CPU；
+        2. **外部脚本无限循环重复拉起**：`stock/webTools/ths-tdx-web.py` 中写了 `if not find_window_by_title_safe('findSetWindowPos'):`，因旧版标题不存在，脚本每次主循环都会盲目通过 `os.system` 重复拉起 `manage_window_layout`；
+        3. **假关闭与单实例置顶唤醒联动**：点击主窗口右上角 ❌ 时默认仅 `self.hide()` 缩入托盘；一旦有外部程序触发单实例检测，`check_and_activate_existing_instance` 就会强行 `ShowWindow(SW_RESTORE)` 将托盘中的窗口重新弹到最前台；
+        4. **跨屏/跨 DPI 迁移 WM_DPICHANGED 尺寸截断 Bug (高分屏 -> 三星屏需执行两次)**：当窗口从高分屏迁移到三星普分屏时，Windows DWM 在接收到 `SetWindowPos` 跨越屏幕边界瞬间会向窗口派发 `WM_DPICHANGED`，DWM 自动等比缩小了窗口尺寸，导致窗口变成半截；只有第二次点击时窗口已在目标屏幕，不再触发 DPI 缩放回调才恢复正常。
+    - [x] **全局通用逻辑对齐与彻底修复**：
+        1. **跨屏两阶段 (Two-Pass) 几何自适应补偿校准**：在 `set_window_hwnd_pos` 中引入跨屏 DPI 自适应补偿，在第 1 阶段移动跨屏并等待 DWM 派发 `WM_DPICHANGED` 完成后（40ms），自动进行第 2 阶段尺寸核验与二次补偿校准，一次应用 100% 精准到位，彻底告别“需要点两次”；
+        2. **强化 PredatorSense 后置查杀与跳过重复检测**：移除了冗余拦截，只要下发调优即无条件执行极速应用与后置处理（Kill/Close/Hide）；托盘快捷菜单中的 `post_action` 统一读取全局配置文件，保证设置全局通用；
+        3. **彻底解耦常规默认配置与临时预设**：移除了 `_update_applied_cache` 中的写盘落盘逻辑，仅在内存和注册表维持运行时状态。用户在配置对话框中手动设置保存的为全局常规默认配置，托盘/快捷应用均为临时运行时调优，重启后 100% 保持用户配置的常规默认项；
+        4. **加固 `force_quit()` 完全退出**：在托盘点击【❌ 完全退出】时，主动停止拓扑定时器、关闭 IPC 管道、隐藏托盘图标、停止热键线程，并调用 `os._exit(0)` 保证进程 100% 从内存销毁；
+        5. **修复外部脚本窗口探测**：将 `ths-tdx-web.py` 中的窗口存在性检测升级为兼容 `窗口坐标分类管理器`、`桌面窗口坐标布局` 与 `manage_window_layout` 进程，彻底杜绝死循环重复拉起。
+
+## 2026-08-27 15:00
+- [x] **系统蓝屏（BSOD）根因全方位深度排查与彻底解决建议 (`gemini.md`)**：
+    - [x] **BugCheck 核心错误特征破案**：
+        1. **错误代码**：`0x00000116 (VIDEO_TDR_FAILURE)`；
+        2. **参数诊断**：`Arg1=0xffffce0605de7050`, `Arg2=0xfffff8075476a350 (nvlddmkm.sys)`, `Arg3=0xffffffffc000009a (STATUS_INSUFFICIENT_RESOURCES)`, `Arg4=0x00000004`；
+        3. **历史同类复发记录**：2026/08/27 14:39、2026/08/05 20:25、2026/07/23 11:05 均因完全相同的 `0x116` + `0xC000009A` 崩溃重启。
+    - [x] **诱发机制与深层根因定位**：
+        1. **TDR 超时重置机制失败**：Windows 探测到 GPU 在渲染/计算指令上超过 8 秒未响应（`TdrDelay=8`），尝试通过 `nvlddmkm.sys` 重置显卡驱动；在重置过程中由于 `STATUS_INSUFFICIENT_RESOURCES (0xC000009A)` 显存/句柄/图形表面资源分配失败，导致驱动重置崩溃直接升级为内核蓝屏；
+        2. **多显卡与第三方虚拟显示驱动冲突**：系统同时存在 `RTX 2070 Max-Q` 独显、`Intel UHD 630` 核显与 `OrayIddDriver (向日葵虚拟显卡驱动)`，向日葵远程桌面拦截 D3D 交换链与显卡 P-State 动态降频/升频冲突；
+        3. **PyQt 高频重绘对 DWM/GPU 的高负载**：量化交易监控多窗口高频 1s 轮询，默认开启 GPU/ANGLE 硬件加速长期占用 Direct3D 表面与显存。
+    - [x] **系统级与应用级四步根治方案**：
+        1. **解耦 PyQt 与 NVIDIA 独显（量化软件强制 CPU 软件渲染）**：设置 `QT_OPENGL=software` 或在 NVIDIA 控制面板将 `python.exe` 绑定至“集成图形”或软件模式，100% 杜绝量化客户端诱发显卡 TDR；
+        2. **NVIDIA 显卡电源管理模式优化**：控制面板中设置独显为“最高性能优先 (Prefer maximum performance)”，杜绝低频 P-State 唤醒延迟引发的超时；
+        3. **排查/更新向日葵虚拟显卡驱动 `OrayIddDriver`**：更新向日葵或禁用不必要的虚拟屏幕驱动；
+        4. **清理/重装稳定版 NVIDIA 显卡驱动**：使用 DDU 彻底清理历史驱动残留后安装 NVIDIA WHQL 稳定版驱动。
+
 ## 2026-08-27 14:18
 - [x] **彻底修复 singleAnalyseUtil 长时间运行数据全部丢失 (AL: 1, topT: 0) 的严重 Bug (`singleAnalyseUtil.py`, `gemini.md`)**：
     - [x] **根因排查与定位**：

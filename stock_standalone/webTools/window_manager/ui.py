@@ -1452,7 +1452,7 @@ class RouteConfigDialog(QDialog):
             "fan_mode": selected_fan,
             "post_action": selected_post
         }
-        success, msg = self.acer_controller.apply_performance_profile(profile)
+        success, msg = self.acer_controller.apply_performance_profile(profile, force=True)
         if success:
             QMessageBox.information(self, "应用成功", f"Acer 性能模式配置已生效：\n{msg}")
         else:
@@ -2168,21 +2168,28 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
                 
                 acer_sub_menu = self.tray_menu.addMenu("🚀 Acer 性能极速切换")
                 
+                # 统一获取用户全局保存的 post_action 处理方式 (hide/close/kill)
+                def _get_global_post_action():
+                    try:
+                        return self.config_manager.get_acer_performance_config().get("post_action", "kill")
+                    except Exception:
+                        return "kill"
+
                 act_turbo = acer_sub_menu.addAction("🔥 狂暴模式 (Extreme + 最大风扇)")
                 act_turbo.triggered.connect(lambda: self.apply_acer_performance_async(
-                    {"overclock_mode": "Extreme", "coolboost": True, "fan_mode": "Max", "post_action": "hide"},
+                    {"overclock_mode": "Extreme", "coolboost": True, "fan_mode": "Max", "post_action": _get_global_post_action()},
                     custom_msg_prefix="托盘一键切【狂暴模式】"
                 ))
 
                 act_fast = acer_sub_menu.addAction("⚡ 快速模式 (Fast + 自动风扇)")
                 act_fast.triggered.connect(lambda: self.apply_acer_performance_async(
-                    {"overclock_mode": "Fast", "coolboost": True, "fan_mode": "Auto", "post_action": "hide"},
+                    {"overclock_mode": "Fast", "coolboost": True, "fan_mode": "Auto", "post_action": _get_global_post_action()},
                     custom_msg_prefix="托盘一键切【快速模式】"
                 ))
 
                 act_normal = acer_sub_menu.addAction("🍃 默认模式 (Normal + 自动风扇)")
                 act_normal.triggered.connect(lambda: self.apply_acer_performance_async(
-                    {"overclock_mode": "Default", "coolboost": False, "fan_mode": "Auto", "post_action": "hide"},
+                    {"overclock_mode": "Default", "coolboost": False, "fan_mode": "Auto", "post_action": _get_global_post_action()},
                     custom_msg_prefix="托盘一键切【默认模式】"
                 ))
         except Exception as e:
@@ -2256,6 +2263,7 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
         self.apply_current_layout(show_tray_message=show_tray_message)
         
     def force_quit(self):
+        """彻底安全退出管理器，释放所有资源并完全终止进程"""
         try:
             if hasattr(self, "_window_save_debounce"):
                 self._window_save_debounce.clear()
@@ -2263,13 +2271,30 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
         except Exception as e:
             print(f"[WARN] Failed to save position on force_quit: {e}")
         try:
+            # 停止拓扑检测定时器
+            if hasattr(self, '_topology_timer') and self._topology_timer:
+                self._topology_timer.stop()
+            if hasattr(self, '_topology_debounce_timer') and self._topology_debounce_timer:
+                self._topology_debounce_timer.stop()
+            # 关闭 IPC 本地服务
+            if hasattr(self, 'single_instance_server') and self.single_instance_server:
+                self.single_instance_server.close()
+            # 隐藏托盘图标
+            if hasattr(self, 'tray_icon') and self.tray_icon:
+                self.tray_icon.hide()
+            # 停止全局热键线程
             if getattr(self, '_hotkey_thread', None):
                 self._hotkey_thread.stop()
                 self._hotkey_thread = None
                 self._hotkey_hook = None
-        except:
+        except Exception:
             pass
-        QApplication.instance().quit()
+        try:
+            QApplication.instance().quit()
+        except Exception:
+            pass
+        import os
+        os._exit(0)
         
     def on_tray_activated(self, reason):
         try:
