@@ -579,25 +579,30 @@ class SectorHeatmapWidget(QWidget):
             
         return bg, border
 
-    def render_grid(self):
-        # Clear layout first
-        for i in reversed(range(self.grid_layout.count())): 
-            widget = self.grid_layout.itemAt(i).widget()
-            if widget:
-                widget.setParent(None)
+    def render_grid(self, force=False):
+        if not hasattr(self, 'sectors') or not self.sectors:
+            return
 
         from global_favorites import GlobalFavoriteManager
         fav_mgr = GlobalFavoriteManager()
-        fav_stocks = fav_mgr.get_favorite_stocks()
         fav_sectors = fav_mgr.get_favorite_sectors()
-
-        if not hasattr(self, 'sectors') or not self.sectors:
-            return
 
         w = self.width() if self.width() > 20 else 360
         card_target_w = 92
         cols = max(2, min(5, (w - 20) // (card_target_w + 6)))
         self._current_cols = cols
+
+        # ⚡ [PERF 脏检查] 若 sectors 数据和列数均未变动，直接跳过物理重建
+        grid_fingerprint = (cols, tuple((item[0], item[1], item[2]) for item in self.sectors[:30]), tuple(fav_sectors))
+        if not force and getattr(self, '_last_rendered_fingerprint', None) == grid_fingerprint:
+            return
+        self._last_rendered_fingerprint = grid_fingerprint
+
+        # Clear layout first
+        for i in reversed(range(self.grid_layout.count())): 
+            widget = self.grid_layout.itemAt(i).widget()
+            if widget:
+                widget.setParent(None)
 
         import re
         for idx, item in enumerate(self.sectors):

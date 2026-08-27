@@ -376,6 +376,14 @@ class UniverseTreeWidget(QWidget):
 
     def update_pools(self, radar_list, watch_list, trade_list):
         self._is_mock_active = False
+        
+        # 🛡️ [排序状态记忆] 记录用户当前点击选择的排序列与排序方向 (如用户点击了涨跌幅列降序排序)
+        sort_col = self.tree.sortColumn()
+        sort_order = self.tree.header().sortIndicatorOrder() if self.tree.header() else Qt.SortOrder.DescendingOrder
+        if sort_col < 0:
+            sort_col = 3  # 默认按涨跌幅列排序
+            sort_order = Qt.SortOrder.DescendingOrder
+
         self.tree.setSortingEnabled(False)
         self.tree.clear()
 
@@ -524,7 +532,11 @@ class UniverseTreeWidget(QWidget):
         if not getattr(self, '_has_restored_widths_once', False):
             self._has_restored_widths_once = True
             self.restore_header_state()
+            
+        # 🛡️ [排序状态恢复] 显式重新应用排序列与顺序，确保数据更新后排序 100% 保持不被重置
         self.tree.setSortingEnabled(True)
+        if sort_col >= 0:
+            self.tree.sortByColumn(sort_col, sort_order)
 
     def _on_item_clicked(self, item, column):
         code = item.data(0, Qt.ItemDataRole.UserRole)
