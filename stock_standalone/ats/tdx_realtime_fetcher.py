@@ -264,7 +264,24 @@ class TDXRealtimeFetcher:
         if c_clean in self._finance_shares_cache and self._finance_shares_cache[c_clean] > 0:
             return self._finance_shares_cache[c_clean]
 
-        # 1. 尝试从本地阶梯规格获取
+        # 1. 尝试从 NewStockFetcher 权威 IPO 日历/缓存中获取新股流通股本
+        try:
+            from ats.new_stock_fetcher import NewStockFetcher
+            ns_fetcher = NewStockFetcher.get_instance()
+            if hasattr(ns_fetcher, "_cached_ipo_dict") and c_clean in ns_fetcher._cached_ipo_dict:
+                ipo_info = ns_fetcher._cached_ipo_dict[c_clean]
+                online_num = float(ipo_info.get("online_issue_num", 0.0) or 0.0)
+                issue_num = float(ipo_info.get("issue_num", 0.0) or 0.0)
+                if online_num > 0:
+                    self._finance_shares_cache[c_clean] = online_num
+                    return online_num
+                elif issue_num > 0:
+                    self._finance_shares_cache[c_clean] = issue_num
+                    return issue_num
+        except Exception:
+            pass
+
+        # 2. 尝试从本地阶梯规格获取
         try:
             from ats.intraday_strategy_engine import IntradayStrategyEngine
             spec = IntradayStrategyEngine.get_instance().get_stock_ladder_spec(c_clean)
@@ -275,7 +292,7 @@ class TDXRealtimeFetcher:
         except Exception:
             pass
 
-        # 2. 尝试从 TDX 财务数据接口拉取 (单次拉取永久有效)
+        # 3. 尝试从 TDX 财务数据接口拉取 (单次拉取永久有效)
         with self._conn_lock:
             try:
                 if not self._is_connected:
@@ -293,6 +310,25 @@ class TDXRealtimeFetcher:
                             return shares
             except Exception:
                 pass
+
+        # 4. 尝试从本地股票基础数据表获取
+        try:
+            import JohnsonUtil.commonTips as cct
+            df_basics = cct.get_tushare_stock_basics()
+            if df_basics is not None and not df_basics.empty:
+                if c_clean in df_basics.index:
+                    row = df_basics.loc[c_clean]
+                    # totals 为万股
+                    outstanding = float(row.get("outstanding", 0.0) or 0.0)
+                    totals = float(row.get("totals", 0.0) or 0.0)
+                    if outstanding > 0:
+                        self._finance_shares_cache[c_clean] = outstanding * 10000.0
+                        return self._finance_shares_cache[c_clean]
+                    elif totals > 0:
+                        self._finance_shares_cache[c_clean] = totals * 10000.0
+                        return self._finance_shares_cache[c_clean]
+        except Exception:
+            pass
 
         return 150000000.0
 
@@ -666,26 +702,7 @@ class TDXRealtimeFetcher:
             self._unlisted_or_dormant_codes.discard(c_clean)
         self.add_log(f"🧹 已强力清除标的 [{c_clean}] 的 TDX 内存 K 线与快照缓存！", level="INFO")
 
-    def get_circulation_shares(self, code: str) -> float:
-        """
-        获取股票流通股本 (单位：股)。优先从 IntradayStrategyEngine 的 stock_spec 中获取，
-        回退使用 15 亿元 / 昨收估算流通股本，保底 1000 万股。
-        """
-        c_clean = str(code).strip().zfill(6)
-        try:
-            from ats.intraday_strategy_engine import IntradayStrategyEngine
-            spec = IntradayStrategyEngine.get_instance().get_stock_ladder_spec(c_clean)
-            sh_wan = float(spec.get("float_shares_wan", 0.0))
-            if sh_wan > 0:
-                return sh_wan * 10000.0
 
-            mv_yi = float(spec.get("float_mv_yi", 15.0))
-            issue_p = float(spec.get("issue_price", 10.0))
-            if mv_yi > 0 and issue_p > 0:
-                return (mv_yi * 1e8) / issue_p
-        except Exception:
-            pass
-        return 10000000.0 # 默认保底 1000 万股
 
     def fetch_stock_snapshot(
         self,
