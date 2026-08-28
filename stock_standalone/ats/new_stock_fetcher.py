@@ -381,7 +381,7 @@ class NewStockFetcher:
                 quotes = tdx_fetcher.get_security_quotes_safe(chunk, force=force)
                 if quotes:
                     for q in quotes:
-                        c_clean = str(q.get("code", "")).strip().zfill(6)
+                        # ⚡ 提取价格与盘口数据 (全面支持 09:15~09:25 集合竞价试撮合阶段)
                         p = safe_float(q.get("price", 0.0))
                         last_c = safe_float(q.get("last_close", 0.0))
                         amt = safe_float(q.get("amount", 0.0))
@@ -389,18 +389,27 @@ class NewStockFetcher:
                         op_p = safe_float(q.get("open", 0.0))
                         hi_p = safe_float(q.get("high", 0.0))
                         lo_p = safe_float(q.get("low", 0.0))
+                        bid1_p = safe_float(q.get("bid1", 0.0))
+                        ask1_p = safe_float(q.get("ask1", 0.0))
+                        bid1_v = safe_float(q.get("bid_vol1", 0.0))
+                        ask1_v = safe_float(q.get("ask_vol1", 0.0))
 
-                        if c_clean and (p > 0 or last_c > 0):
+                        # ⚡ 集合竞价 (09:15~09:25) 及连续交易有效参考价与委托量推导
+                        effective_p = p if p > 0 else (bid1_p if bid1_p > 0 else (ask1_p if ask1_p > 0 else (op_p if op_p > 0 else 0.0)))
+                        effective_vol = vol if vol > 0 else (bid1_v if bid1_v > 0 else ask1_v)
+                        effective_amt = amt if amt > 0 else (round(effective_p * effective_vol * 100.0, 2) if (effective_p > 0 and effective_vol > 0) else 0.0)
+
+                        if c_clean and (effective_p > 0 or last_c > 0):
                             if c_clean not in quote_map:
                                 quote_map[c_clean] = {}
-                            if p > 0:
-                                quote_map[c_clean]["price"] = p
+                            if effective_p > 0:
+                                quote_map[c_clean]["price"] = effective_p
                             if last_c > 0:
                                 quote_map[c_clean]["last_close"] = last_c
-                            if p > 0 and last_c > 0:
-                                quote_map[c_clean]["pct"] = round((p - last_c) / last_c * 100.0, 2)
-                            if amt > 0:
-                                quote_map[c_clean]["amount"] = amt
+                            if effective_p > 0 and last_c > 0:
+                                quote_map[c_clean]["pct"] = round((effective_p - last_c) / last_c * 100.0, 2)
+                            if effective_amt > 0:
+                                quote_map[c_clean]["amount"] = effective_amt
                             if op_p > 0:
                                 quote_map[c_clean]["open"] = op_p
                             if hi_p > 0:
@@ -408,17 +417,17 @@ class NewStockFetcher:
                             if lo_p > 0:
                                 quote_map[c_clean]["low"] = lo_p
 
-                            # 💡 权威推算流通市值、总市值与换手率
+                            # 💡 权威推算流通市值、总市值与换手率 (支持集合竞价)
                             lt_shares, zg_shares = shares_dict.get(c_clean, (0.0, 0.0))
-                            if p > 0:
+                            if effective_p > 0:
                                 if lt_shares > 0:
-                                    fmv = round(p * lt_shares / 1e8, 2)
+                                    fmv = round(effective_p * lt_shares / 1e8, 2)
                                     quote_map[c_clean]["float_mv_yi"] = fmv
-                                    if vol > 0:
-                                        to_rate = round((vol * 100.0) / lt_shares * 100.0, 2)
+                                    if effective_vol > 0:
+                                        to_rate = round((effective_vol * 100.0) / lt_shares * 100.0, 2)
                                         quote_map[c_clean]["turnover"] = to_rate
                                 if zg_shares > 0:
-                                    tmv = round(p * zg_shares / 1e8, 2)
+                                    tmv = round(effective_p * zg_shares / 1e8, 2)
                                     quote_map[c_clean]["total_mv_yi"] = tmv
         except Exception as e:
             logger.debug(f"TDX 权威补齐行情异常: {e}")
@@ -461,11 +470,15 @@ class NewStockFetcher:
                                     p_to = safe_float(vals[38])
                                     p_fmv = safe_float(vals[44])
                                     p_tmv = safe_float(vals[45])
+                                    p_bid1 = safe_float(vals[9]) if len(vals) > 9 else 0.0
+                                    p_ask1 = safe_float(vals[19]) if len(vals) > 19 else 0.0
+
+                                    eff_p_tx = p_now if p_now > 0 else (p_bid1 if p_bid1 > 0 else (p_ask1 if p_ask1 > 0 else p_open))
 
                                     if c_raw not in quote_map:
                                         quote_map[c_raw] = {}
-                                    if "price" not in quote_map[c_raw] and p_now > 0:
-                                        quote_map[c_raw]["price"] = p_now
+                                    if "price" not in quote_map[c_raw] and eff_p_tx > 0:
+                                        quote_map[c_raw]["price"] = eff_p_tx
                                     if "last_close" not in quote_map[c_raw] and p_close > 0:
                                         quote_map[c_raw]["last_close"] = p_close
                                     if "pct" not in quote_map[c_raw]:

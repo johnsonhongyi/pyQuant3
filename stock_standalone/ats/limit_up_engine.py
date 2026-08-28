@@ -471,22 +471,33 @@ class LimitUpEngine:
                 except Exception:
                     name = c_clean
 
-            price = _safe_float(row.get('trade', row.get('close', row.get('price', 0.0))))
-            last_close = _safe_float(row.get('last_close', row.get('prev_close', price)))
+            price_raw = _safe_float(row.get('trade', row.get('close', row.get('price', 0.0))))
+            b1_p = _safe_float(row.get('buy', row.get('bid1', row.get('buy1', row.get('b1_p', row.get('b1', 0.0))))))
+            a1_p = _safe_float(row.get('sell', row.get('ask1', row.get('sell1', row.get('a1_p', row.get('a1', 0.0))))))
+            open_p_raw = _safe_float(row.get('open', 0.0))
+            last_close = _safe_float(row.get('last_close', row.get('prev_close', 0.0)))
+
+            # ⚡ 统一有效价格：连续撮合优先 price_raw；09:15~09:25 集合竞价期依次回退买一价、开盘试撮合价、卖一价
+            price = price_raw if price_raw > 0 else (b1_p if b1_p > 0 else (open_p_raw if open_p_raw > 0 else (a1_p if a1_p > 0 else 0.0)))
+            if last_close <= 0:
+                last_close = price
+
             pct = _safe_float(row.get('percent', row.get('pct', 0.0)))
-            if last_close > 0 and pct == 0.0 and price > 0:
+            if last_close > 0 and (pct == 0.0 or price_raw <= 0) and price > 0:
                 pct = round((price - last_close) / last_close * 100.0, 2)
 
             high_p = _safe_float(row.get('high', price))
             low_p = _safe_float(row.get('low', price))
-            open_p = _safe_float(row.get('open', price))
-            vol = _safe_float(row.get('volume', row.get('vol', 0.0)))
+            open_p = open_p_raw if open_p_raw > 0 else price
+            vol = _safe_float(row.get('volume', row.get('vol', row.get('b1_v', row.get('bid_vol1', 0.0)))))
             amount = _safe_float(row.get('amount', row.get('turnover', 0.0)))
+            if amount <= 0 and price > 0 and vol > 0:
+                amount = price * vol * 100.0
 
             threshold = get_limit_up_ratio_threshold(c_clean, name)
             theoretical_zt_price = calc_theoretical_limit_up_price(c_clean, last_close, name)
 
-            # 判定是否涨停或炸板
+            # 判定是否涨停或炸板 (支持集合竞价一字试撮合)
             is_at_limit_price = (price >= theoretical_zt_price - 0.01) if (theoretical_zt_price > 0 and price > 0) else False
             is_pct_limit = (pct >= threshold)
             is_limit_up = is_pct_limit or is_at_limit_price
@@ -589,7 +600,12 @@ class LimitUpEngine:
                     circ_shares = shares_info[0] if (shares_info and shares_info[0] > 0) else 150000000.0
 
                     if q:
-                        price_now = _safe_float(q.get("price", r["price"]))
+                        p_tdx = _safe_float(q.get("price", 0.0))
+                        bid1_p = _safe_float(q.get("bid1", 0.0))
+                        ask1_p = _safe_float(q.get("ask1", 0.0))
+                        open_tdx = _safe_float(q.get("open", 0.0))
+                        
+                        price_now = p_tdx if p_tdx > 0 else (bid1_p if bid1_p > 0 else (open_tdx if open_tdx > 0 else (ask1_p if ask1_p > 0 else r["price"])))
                         last_c = _safe_float(q.get("last_close", r["last_close"]))
                         if price_now > 0:
                             r["price"] = price_now
@@ -624,7 +640,9 @@ class LimitUpEngine:
                         if circ_shares > 0 and vol_now > 0:
                             r["turnover_rate"] = round((vol_now * 100.0 / circ_shares) * 100.0, 2)
 
-                        # 封板状态二次核实 (若为涨停但卖一有挂单则判定为烂板/炸板)
+                        # 封板状态核实 (支持集合竞价涨停状态判定)
+                        if price_now >= r["theoretical_zt_price"] - 0.01 or r["pct"] >= r["threshold"]:
+                            r["is_limit_up"] = True
                         if r["is_limit_up"] and ask_sum > 0 and bid1_v < ask_sum * 0.1:
                             r["is_limit_up"] = False
                             r["is_broken"] = True
