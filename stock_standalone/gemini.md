@@ -1,3 +1,18 @@
+## 2026-08-28 21:05
+- [x] **根治待上市新股未自动检测导致数据错乱误卖 & 策略库/标的库自动清洗不存在的垃圾标的策略 (`ats/intraday_strategy_engine.py`, `ats/new_stock_strategy_generator.py`, `ats/ui/intraday_strategy_dialog.py`, `tests/test_intraday_strategy_engine.py`)**：
+    - [x] **根治待上市新股（如 603448 天博智能）未上市状态检测与脏数据误卖防御**：
+        - **新增 `IntradayStrategyEngine.is_stock_unlisted(code)` 权威检测**：融合权威 IPO 日历状态（`待上市` / `发行中` / `待发行` / `listing_date > 今日`）与 TDX 日 K 线零记录硬核核验，精准区分【待上市】与【已上市老股票】；
+        - **路由保护与发行价锚定**：待上市新股在 `auto_select_strategy` 中精准匹配专属上市估价策略，彻底阻断老股票日常策略误配；
+        - **行情清洗与误卖拦截**：在待上市状态下，强力过滤 TDX 撮合测试产生的 0.01元/1.08元脏数据，基准开盘价严格锚定真实发行价（如 62.65元）；在 `scan_and_evaluate_intraday_timeline` 与 `evaluate_tick` 中全面禁止生成实盘卖出信号，彻底杜绝 10:00 误卖；
+        - **UI 呈现升级**：顶部状态卡与 SBC 走势卡片明确显示 `【待上市新股】尚未挂牌交易 (发行价: 62.65元 | 估价模式)`，指引区呈现估价推演引导；
+    - [x] **实现策略库与下拉框中不存在的无效垃圾标的策略全自动清理**：
+        - **代码合法性门禁 (`is_valid_stock_code`)**：严格验证 A 股/科创/北交所 6 位合法代码，拦截并排除 `000000`、`000123` 等虚构占位测试代码；
+        - **引擎自愈清洗 (`IntradayStrategyEngine.clean_invalid_strategies`)**：在 `load_config()` 时自动扫描策略库，自动剔除包含 `000000`, `000123`, `标的_000000`, `个股_000123` 的垃圾策略，并自动完成磁盘 JSON（`intraday_newstock_strategies.json`）的物理同步清洗落盘；
+        - **UI 下拉框清洗**：在 `_populate_strategy_combo` 与 `_populate_code_combo` 中增加代码合法性过滤，确保界面下拉框绝对不再出现任何不存在的虚构标的；
+    - [x] **自动化测试 100% 验证通过**：
+        - 新增 `test_unlisted_stock_auto_detection_and_no_sell_signals` 与 `test_clean_invalid_placeholder_strategies` 专项单元测试；
+        - `pytest tests/test_tdx_adaptive_config.py tests/test_intraday_strategy_engine.py tests/test_signal_ledger.py` 全量 31 项测试 **100% PASSED**！
+
 ## 2026-08-28 20:45
 - [x] **彻底修复分时阶梯策略卖出执行后持仓比例显示“100%僵尸持仓”交易逻辑 Bug (`ats/intraday_strategy_engine.py`, `ats/ui/intraday_strategy_dialog.py`, `tests/test_intraday_strategy_engine.py`)**：
     - [x] **根因排查定位**：

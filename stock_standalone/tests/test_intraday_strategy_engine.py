@@ -451,4 +451,67 @@ def test_remaining_position_ratio_deduction_and_sync(engine):
     assert abs((1.0 - total_sold) - rem_ratio) < 0.001
 
 
+def test_unlisted_stock_auto_detection_and_no_sell_signals(engine):
+    """测试未上市新股自动检测机制及禁止误触发实盘卖出信号"""
+    code = "603448"
+    engine.reset_state(code)
+
+    # 1. 模拟未上市新股的 IPO 日历信息 (待上市状态)
+    from ats.new_stock_fetcher import NewStockFetcher
+    fetcher = NewStockFetcher.get_instance()
+    if not hasattr(fetcher, '_cached_ipo_dict'):
+        fetcher._cached_ipo_dict = {}
+    fetcher._cached_ipo_dict[code] = {
+        "code": code,
+        "name": "天博智能",
+        "status": "待上市",
+        "issue_price": 62.65,
+        "listing_date": "2026-09-01"
+    }
+
+    # 2. 验证 is_stock_unlisted 准确判定为 True
+    if hasattr(engine, '_unlisted_cache'):
+        engine._unlisted_cache.pop(code, None)
+    assert engine.is_stock_unlisted(code) is True
+
+    # 3. 验证 auto_select_strategy 优先匹配该新股专属上市策略而非日常老股票策略
+    strat = engine.auto_select_strategy(0.0, code=code)
+    assert strat is not None
+    assert "603448" in strat.get("id", "") or "天博" in strat.get("name", "")
+
+    # 4. 模拟输入撮合测试脏数据 (如 0.01元/1.08元)，验证 scan_and_evaluate_intraday_timeline 绝对不生成任何卖出信号
+    df_dirty = pd.DataFrame([
+        {"close": 1.08, "high": 1.08, "low": 0.01, "open": 0.01, "vwap": 0.68, "amount": 30000.0, "turnover": 0.1},
+        {"close": 1.08, "high": 1.08, "low": 1.08, "open": 0.01, "vwap": 0.68, "amount": 30000.0, "turnover": 0.1},
+    ], index=["09:30", "10:00"])
+
+    signals = engine.scan_and_evaluate_intraday_timeline(code, df_dirty)
+    assert len(signals) == 0  # 待上市新股严禁生成实盘卖出信号
+
+
+def test_clean_invalid_placeholder_strategies(engine):
+    """测试自动清洗 000000 / 000123 垃圾占位策略"""
+    # 注入虚构测试策略
+    engine.strategies.append({
+        "id": "strategy_标的_000000_000000",
+        "name": "标的_000000 (000000) 上市专属盯盘与分时阶梯策略",
+        "target_codes": ["000000"]
+    })
+    engine.strategies.append({
+        "id": "strategy_标的_000123_000123",
+        "name": "标的_000123 (000123) 上市专属盯盘与分时阶梯策略",
+        "target_codes": ["000123"]
+    })
+
+    # 执行清理
+    removed = engine.clean_invalid_strategies()
+    assert removed >= 2
+
+    # 验证列表中已完全清除无效代码
+    remaining_ids = [st.get("id", "") for st in engine.strategies]
+    assert not any("000000" in sid for sid in remaining_ids)
+    assert not any("000123" in sid for sid in remaining_ids)
+
+
+
 

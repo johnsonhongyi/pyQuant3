@@ -72,18 +72,40 @@ def test_intraday_strategy_realtime_unpacking():
 
 
 def test_all_codes_eval_dialog_structure():
-    """测试 AllCodesStrategyEvalDialog 类结构、持久化机制与组件存在性"""
+    """测试 AllCodesStrategyEvalDialog 类结构、持久化机制、排序算法与组件存在性"""
     from PyQt6.QtWidgets import QApplication
-    from ats.ui.intraday_strategy_dialog import AllCodesStrategyEvalDialog
+    from ats.ui.intraday_strategy_dialog import AllCodesStrategyEvalDialog, NumericTableWidgetItem
 
     app = QApplication.instance()
     if app is None:
         app = QApplication([])
 
-    # 验证类及方法存在
+    # 1. 验证类及方法存在
     assert hasattr(AllCodesStrategyEvalDialog, "_restore_geometry")
     assert hasattr(AllCodesStrategyEvalDialog, "_save_geometry")
     assert hasattr(AllCodesStrategyEvalDialog, "run_evaluation")
+    assert hasattr(AllCodesStrategyEvalDialog, "_apply_sort_and_render")
+    assert hasattr(AllCodesStrategyEvalDialog, "_switch_view_mode")
+    assert hasattr(AllCodesStrategyEvalDialog, "_render_table")
+    assert hasattr(AllCodesStrategyEvalDialog, "_render_cards")
     assert hasattr(AllCodesStrategyEvalDialog, "_create_card_widget")
     assert hasattr(AllCodesStrategyEvalDialog, "_on_search_text_changed")
     assert hasattr(AllCodesStrategyEvalDialog, "_copy_full_report")
+
+    # 2. 验证表头包含 ⭐ 综合评分 独立列
+    assert "⭐ 综合评分" in AllCodesStrategyEvalDialog.TABLE_HEADERS
+    # 3. 验证 NumericTableWidgetItem 精确数值比对
+    it1 = NumericTableWidgetItem("⭐ 3.92分", sort_val=3.92)
+    it2 = NumericTableWidgetItem("⭐ 7.65分", sort_val=7.65)
+    it3 = NumericTableWidgetItem("⭐ 10.00分", sort_val=10.00)
+    assert it1 < it2 < it3
+    assert not (it3 < it1)
+
+    # 5. 验证 ATS 标准联动与键盘上下键导航方法
+    assert hasattr(AllCodesStrategyEvalDialog, "_broadcast_link_stock")
+    assert hasattr(AllCodesStrategyEvalDialog, "_on_table_current_cell_changed")
+    assert hasattr(AllCodesStrategyEvalDialog, "_on_table_item_clicked")
+    assert hasattr(AllCodesStrategyEvalDialog, "_fire_linkage_debounced")
+    assert hasattr(AllCodesStrategyEvalDialog, "keyPressEvent")
+    assert hasattr(AllCodesStrategyEvalDialog, "_navigate_cards")
+

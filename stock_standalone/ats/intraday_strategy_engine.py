@@ -24,6 +24,23 @@ from signal_types import SignalPoint, SignalType, SignalSource
 logger = logging.getLogger("IntradayStrategyEngine")
 
 
+def is_valid_stock_code(code: str) -> bool:
+    """严格检验股票代码是否为合法 A 股/科创板/创业板/北交所代码 (排除 000000, 000123 等测试垃圾)"""
+    if not code:
+        return False
+    c_str = "".join(filter(str.isdigit, str(code))).zfill(6)
+    if len(c_str) != 6:
+        return False
+    if c_str in ("000000", "000123", "000002", "123456", "999999"):
+        return False
+    valid_prefixes = (
+        "600", "601", "603", "605", "688", "689",
+        "000", "001", "002", "003", "300", "301",
+        "920", "83", "87", "43", "88"
+    )
+    return any(c_str.startswith(p) for p in valid_prefixes)
+
+
 def resolve_stock_name(code: str) -> str:
     """根据股票代码解析标的名称（包含内置专属新股标的与保底格式）"""
     c_clean = "".join(filter(str.isdigit, str(code))).zfill(6) if code else ""
@@ -348,7 +365,7 @@ class IntradayStrategyEngine:
                 return False
 
     def load_config(self) -> bool:
-        """从 JSON 加载策略配置"""
+        """从 JSON 加载策略配置并自动清洗无效垃圾策略"""
         if not os.path.exists(self.config_path):
             alt_path = os.path.join(get_app_root(), "config", "intraday_newstock_strategies.json")
             if os.path.exists(alt_path):
@@ -360,11 +377,62 @@ class IntradayStrategyEngine:
             with open(self.config_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
             self.strategies = data.get("strategies", [])
-            logger.info(f"✅ 成功加载 {len(self.strategies)} 套分时交易策略配置")
+            # 🧹 启动即时自动清洗不存在的垃圾/占位策略 (如 000000, 000123)
+            self.clean_invalid_strategies()
+            logger.info(f"✅ 成功加载并就绪 {len(self.strategies)} 套有效分时交易策略配置")
             return True
         except Exception as e:
             logger.error(f"❌ 加载分时策略配置失败: {e}")
             return False
+
+    def clean_invalid_strategies(self) -> int:
+        """
+        【🧹 自动清洗】清理策略库中不存在的垃圾/占位标的策略（如 000000, 000123 等虚构占位代码）
+        物理同步清理 config/intraday_newstock_strategies.json 磁盘文件
+        返回清理掉的垃圾策略数量
+        """
+        invalid_patterns = {"000000", "000123", "标的_000000", "标的_000123", "个股_000123"}
+        valid_strategies = []
+        removed_count = 0
+
+        with self._lock:
+            for st in self.strategies:
+                st_id = str(st.get("id", ""))
+                st_name = str(st.get("name", ""))
+                target_codes = [str(c).strip().zfill(6) for c in st.get("target_codes", [])]
+
+                # 检查是否命中无效占位特征
+                is_invalid = False
+                if any(p in st_id for p in invalid_patterns) or any(p in st_name for p in invalid_patterns):
+                    is_invalid = True
+                elif target_codes and not any(is_valid_stock_code(c) for c in target_codes):
+                    is_invalid = True
+
+                if is_invalid:
+                    removed_count += 1
+                    logger.info(f"🧹 [IntradayStrategyEngine] 自动清洗并剔除垃圾无效策略: [{st_id}] {st_name}")
+                else:
+                    valid_strategies.append(st)
+
+            if removed_count > 0:
+                self.strategies = valid_strategies
+                # 同步物理写盘更新
+                try:
+                    conf_path = self.config_path
+                    if os.path.exists(conf_path):
+                        with open(conf_path, "r", encoding="utf-8") as f:
+                            data = json.load(f)
+                        data["strategies"] = valid_strategies
+                        data["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        tmp_path = conf_path + ".tmp"
+                        with open(tmp_path, "w", encoding="utf-8") as f:
+                            json.dump(data, f, ensure_ascii=False, indent=2)
+                        os.replace(tmp_path, conf_path)
+                        logger.info(f"💾 [IntradayStrategyEngine] 垃圾策略清理完毕，已同步物理落盘 (剔除 {removed_count} 套无效策略)")
+                except Exception as e_save:
+                    logger.error(f"❌ 垃圾策略清理写盘异常: {e_save}")
+
+        return removed_count
 
     def save_config(self, data: Dict[str, Any]) -> bool:
         """保存自定制策略配置"""
@@ -794,22 +862,99 @@ class IntradayStrategyEngine:
         self._first_listing_day_cache[c_clean] = (res_first_day, now_ts)
         return res_first_day
 
+    def is_stock_unlisted(self, code: str) -> bool:
+        """
+        【100% 数据驱动】权威检测标的是否处于【尚未上市/待挂牌】状态：
+        1. 权威新股上市表 (NewStockFetcher):
+           - status in ('待上市', '发行中', '待发行', '已发行待上市', '申购中') -> 100% 待上市 (True);
+           - listing_date 存在且 > 今日 (today_str) -> 100% 待上市 (True);
+           - listing_date in ('-', '待定', 'None', '') 且有 issue_price，且 TDX 无任何真实日 K 线 -> 100% 待上市 (True);
+        2. TDX 真实日 K 与行情检验:
+           - 若日 K 线数量为 0 (无任何历史及今日日 K 线)，且昨日无成交，且今日 amount <= 0 或 open <= 0.05，且非今日上市首日 -> 若存在 issue_price 或策略配置，判定为待上市 (True);
+        3. 否则判定为已上市 (False)。
+        """
+        c_clean = "".join(filter(str.isdigit, str(code))).zfill(6) if code else ""
+        if not c_clean or not is_valid_stock_code(c_clean):
+            return False
+
+        if not hasattr(self, "_unlisted_cache"):
+            self._unlisted_cache = {}
+
+        now_ts = time.time()
+        cached = self._unlisted_cache.get(c_clean)
+        if cached and (now_ts - cached[1] < 30.0):
+            return cached[0]
+
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        res_unlisted = None
+
+        # 1. 权威新股上市表检验
+        try:
+            from ats.new_stock_fetcher import NewStockFetcher
+            ipo_fetcher = NewStockFetcher.get_instance()
+            ipo_dict = getattr(ipo_fetcher, '_cached_ipo_dict', {})
+            if c_clean in ipo_dict:
+                ipo_info = ipo_dict[c_clean]
+                ipo_status = str(ipo_info.get("status", "")).strip()
+                ipo_list_date = str(ipo_info.get("listing_date", "")).strip()[:10]
+
+                if ipo_status in ("待上市", "发行中", "待发行", "已发行待上市", "申购中"):
+                    res_unlisted = True
+                elif ipo_list_date and len(ipo_list_date) == 10 and ipo_list_date > today_str:
+                    res_unlisted = True
+                elif ipo_status in ("首日(N)", "前5日(C)", "次新", "已上市"):
+                    res_unlisted = False
+                elif ipo_list_date and len(ipo_list_date) == 10 and ipo_list_date <= today_str:
+                    res_unlisted = False
+        except Exception:
+            pass
+
+        # 2. TDX 真实日 K 与行情检验
+        if res_unlisted is None:
+            try:
+                from ats.tdx_realtime_fetcher import TDXRealtimeFetcher
+                fetcher = TDXRealtimeFetcher.get_instance()
+                df_daily = fetcher.fetch_kline_bars(c_clean, category="day", count=5)
+                if df_daily is not None and not df_daily.empty:
+                    res_unlisted = False  # 已经产生过日 K 线，必已上市
+                else:
+                    # 无日 K 线：若有发行价配置且无成交，判定为待上市
+                    spec = self.get_stock_ladder_spec(c_clean)
+                    issue_p = float(spec.get("issue_price", 0.0) or 0.0)
+                    if issue_p > 0 and not self.is_stock_first_listing_day(c_clean):
+                        res_unlisted = True
+            except Exception:
+                pass
+
+        if res_unlisted is None:
+            res_unlisted = False
+
+        self._unlisted_cache[c_clean] = (res_unlisted, now_ts)
+        return res_unlisted
+
     def auto_select_strategy(self, open_price: float, code: Optional[str] = None, is_b_conditions_met: bool = True) -> Dict[str, Any]:
         """
         根据股票代码 code 或开盘价与条件自动选择对应策略：
-        - 非首日上市的新股与全部常规日常个股：100% 自动匹配通用日常策略 (strategy_c_daily_surge_ladder)
-        - 仅在上市首日当天：自动匹配该标的专属首日阶梯策略（若无专属策略则自动生成或回退新股通用首日策略）
+        - 待上市新股：优先匹配专属上市估价策略 (保留发行价与阶梯估价)
+        - 上市首日当天：自动匹配该标的专属首日阶梯策略
+        - 非首日已上市新股与全部常规日常个股：100% 自动匹配通用日常策略 (strategy_c_daily_surge_ladder)
         """
         if code:
             c_clean = "".join(filter(str.isdigit, str(code))).zfill(6)
+            if not is_valid_stock_code(c_clean):
+                daily_strat = self.get_strategy_by_id("strategy_c_daily_surge_ladder")
+                return daily_strat if daily_strat else (self.strategies[0] if self.strategies else {})
 
-            # 🛡️ 核心业务法则：非首日上市的新股与常规个股，100% 自动匹配日常通用策略！
-            if not self.is_stock_first_listing_day(c_clean):
+            is_unlisted = self.is_stock_unlisted(c_clean)
+            is_first_day = self.is_stock_first_listing_day(c_clean)
+
+            # 🛡️ 核心业务法则：仅在非待上市且非首日上市（即常规老股票/次新股）时，匹配日常通用策略！
+            if not is_unlisted and not is_first_day:
                 daily_strat = self.get_strategy_by_id("strategy_c_daily_surge_ladder")
                 if daily_strat:
                     return daily_strat
 
-            # 🆕 仅在上市首日当天：优先匹配专属首日策略
+            # 🆕 待上市或首日上市：优先匹配专属上市/首日策略
             for st in self.strategies:
                 target_codes = st.get("target_codes", [])
                 target_code = st.get("target_code", "")
@@ -1152,6 +1297,16 @@ class IntradayStrategyEngine:
             return []
 
         state = self._get_stock_state(code, 0.0)
+
+        # 🛡️ 待上市新股安全防护：尚未正式上市交易，不触发实盘卖出反演
+        if self.is_stock_unlisted(code):
+            state["signals"] = []
+            state["triggered_rules"] = set()
+            state["remaining_ratio"] = 1.0
+            state["remaining_position_ratio"] = 1.0
+            state["execution_logs"] = []
+            return []
+
         strategy = state.get("current_strategy") or self.auto_select_strategy(0.0, code=code)
         if not strategy:
             return []
@@ -2005,6 +2160,10 @@ class IntradayStrategyEngine:
             return []
 
         c_clean = str(code).zfill(6)
+        # 🛡️ 待上市新股安全防护：尚未正式挂牌交易，不触发任何实盘卖出信号
+        if self.is_stock_unlisted(c_clean):
+            return []
+
         state = self._get_stock_state(c_clean, open_price)
         
         # 1. 动态选择策略
