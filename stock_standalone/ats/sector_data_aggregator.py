@@ -507,17 +507,30 @@ class SectorDataAggregator:
                 for q in tdx_quotes:
                     c_clean = str(q.get("code", "")).strip().zfill(6)
                     p = _safe_float(q.get("price"))
+                    bid1_p = _safe_float(q.get("bid1"))
+                    ask1_p = _safe_float(q.get("ask1"))
+                    open_p = _safe_float(q.get("open"))
                     last_c = _safe_float(q.get("last_close"))
-                    if c_clean and (p > 0 or last_c > 0):
-                        pct = round((p - last_c) / last_c * 100.0, 2) if last_c > 0 else 0.0
+                    
+                    # ⚡ 09:15~09:25 集合竞价有效参考价多级回退
+                    effective_p = p if p > 0 else (bid1_p if bid1_p > 0 else (ask1_p if ask1_p > 0 else open_p))
+                    vol = _safe_float(q.get("vol"))
+                    bid1_v = _safe_float(q.get("bid_vol1"))
+                    effective_vol = vol if vol > 0 else bid1_v
+                    amt = _safe_float(q.get("amount"))
+                    if amt <= 0 and effective_p > 0 and effective_vol > 0:
+                        amt = effective_p * effective_vol * 100.0
+
+                    if c_clean and (effective_p > 0 or last_c > 0):
+                        pct = round((effective_p - last_c) / last_c * 100.0, 2) if (last_c > 0 and effective_p > 0) else 0.0
                         tdx_quote_map[c_clean] = {
-                            'price': p,
+                            'price': effective_p,
                             'prev_close': last_c,
-                            'open': _safe_float(q.get("open")),
-                            'high': _safe_float(q.get("high")),
-                            'low': _safe_float(q.get("low")),
-                            'amount': _safe_float(q.get("amount")),
-                            'vol': _safe_float(q.get("vol")),
+                            'open': open_p if open_p > 0 else effective_p,
+                            'high': _safe_float(q.get("high")) if _safe_float(q.get("high")) > 0 else effective_p,
+                            'low': _safe_float(q.get("low")) if _safe_float(q.get("low")) > 0 else effective_p,
+                            'amount': amt,
+                            'vol': effective_vol,
                             'pct': pct
                         }
 

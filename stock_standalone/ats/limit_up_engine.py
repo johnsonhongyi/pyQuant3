@@ -727,7 +727,19 @@ class LimitUpEngine:
             # ── 💡 交易时钟生命周期 (Time Window Alpha) ──
             # 区分：09:30~10:00黄金定龙期 / 10:00~11:30分歧低吸期 / 13:00~14:00午后助攻期 / 14:00~14:45尾盘诱多高危期
             curr_hhmm = time.strftime("%H:%M")
-            if "09:30" <= curr_hhmm < "10:00":
+            if "09:15" <= curr_hhmm < "09:20":
+                time_phase = "⏱️ 竞价试撮合期"
+                time_multiplier = 1.05
+                time_tip = "09:15~09:20试撮合可撤单，观察虚挂测盘与封单撤销"
+            elif "09:20" <= curr_hhmm <= "09:25":
+                time_phase = "👑 竞价定龙竞速期"
+                time_multiplier = 1.15
+                time_tip = "09:20~09:25不可撤单黄金定龙，锁定真金白银一字顶格与高开抢筹"
+            elif "09:25" < curr_hhmm < "09:30":
+                time_phase = "🔒 竞价定盘静默期"
+                time_multiplier = 1.10
+                time_tip = "09:25集合竞价已定盘，锁定开盘价与竞价量能梯队"
+            elif "09:30" <= curr_hhmm < "10:00":
                 time_phase = "👑 黄金定龙期"
                 time_multiplier = 1.10
                 time_tip = "09:30~10:00早盘黄金定龙点火，溢价最高，最佳先锋抢跑时机"
@@ -853,6 +865,16 @@ class LimitUpEngine:
                 elif consecutive >= 2:
                     r["tier_tag"] = f"🚀 连板接力 ({consecutive}板)"
                     desc_tag = f"🚀 连板加速({momentum_score:.0f}分)"
+                elif "09:15" <= curr_hhmm <= "09:25":
+                    if seal_amt_wan >= 2000 or seal_to_circ >= 3.0:
+                        r["tier_tag"] = "👑 竞价一字顶格"
+                        desc_tag = f"👑 竞价一字({momentum_score:.0f}分)"
+                    else:
+                        r["tier_tag"] = "🔥 竞价高开冲板"
+                        desc_tag = f"🔥 竞价冲板({momentum_score:.0f}分)"
+                elif "09:25" < curr_hhmm < "09:30":
+                    r["tier_tag"] = "🔒 竞价一字定盘"
+                    desc_tag = f"🔒 定盘一字({momentum_score:.0f}分)"
                 elif is_reflexivity_leader:
                     r["tier_tag"] = "💎 冰点反身性龙"
                     desc_tag = f"💎 反身性龙头({momentum_score:.0f}分)"
@@ -904,7 +926,13 @@ class LimitUpEngine:
                 ch_score = ch_score * time_multiplier
                 momentum_score = round(min(88.0, max(45.0, ch_score)), 0)
 
-                if "尾盘诱多" in entry_stage:
+                if "09:20" <= curr_hhmm <= "09:25" and pct >= 7.0 and bid_p >= 75.0:
+                    r["tier_tag"] = "🚀 竞价极速抢筹"
+                    desc_tag = f"🚀 竞价抢筹({momentum_score:.0f}分)"
+                elif "09:20" <= curr_hhmm <= "09:25" and pct >= 3.0 and (dff2 >= 5.0 or pct_yesterday <= 0.0) and bid_p >= 65.0:
+                    r["tier_tag"] = "🔥 弱转强超预期"
+                    desc_tag = f"🔥 弱转强({momentum_score:.0f}分)"
+                elif "尾盘诱多" in entry_stage:
                     r["tier_tag"] = "⚠️ 尾盘诱多脉冲"
                     desc_tag = f"⚠️ 尾盘偷袭({momentum_score:.0f}分)"
                 elif is_reflexivity_leader:
