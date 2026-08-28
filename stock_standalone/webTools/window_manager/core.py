@@ -1813,41 +1813,90 @@ def bring_window_to_top_by_title(title: str) -> bool:
 
 def check_and_add_route(config_manager) -> tuple:
     """
-    检查并自动添加静态路由配置。
-    返回 (success: bool, message: str)
+    根据用户配置动态自适应检测与维护静态路由。
+    完全根据配置参数 (destination, mask, gateway) 动态计算，不含任何硬编码 IP：
+    1. 提取配置，若未启用或目标/网关为空，直接安全返回；
+    2. 动态自适应检测：遍历当前所有活动网卡，若本机已有 IP 处于配置的目标子网内，直接判定为物理直连，跳过添加；
+    3. 动态路由表比对：逐行解析系统路由表，若目标网段已在链路上 (On-link) 或已有指向配置网关的路由，判定为已生效并跳过；
+    4. 动态网关可达性核验：若网关不在当前任何网卡的直连子网内，安全拦截并提示网关不可达，绝不盲目提权；
+    5. 跨网段且路由缺失时，按需执行持久化添加 (route -p add) 并验证结果。
+    返回: (success: bool, message: str)
     """
-    routing_cfg = config_manager.config_data.get("routing_config")
-    if not routing_cfg:
-        # 默认值初始化
-        routing_cfg = {
-            "enabled": True,
-            "destination": "192.168.50.0",
-            "mask": "255.255.255.0",
-            "gateway": "192.168.1.2"
-        }
-        config_manager.config_data["routing_config"] = routing_cfg
-        config_manager.save()
+    routing_cfg = config_manager.config_data.get("routing_config", {})
+    if not routing_cfg or not isinstance(routing_cfg, dict):
+        return True, "未配置静态路由规则。"
 
-    if not routing_cfg.get("enabled", True):
-        return True, "自动路由功能未启用。"
+    if not routing_cfg.get("enabled", False):
+        return True, "静态路由自动维护功能未启用。"
 
-    dest = routing_cfg.get("destination", "192.168.50.0")
-    mask = routing_cfg.get("mask", "255.255.255.0")
-    gw = routing_cfg.get("gateway", "192.168.1.2")
+    dest = str(routing_cfg.get("destination", "")).strip()
+    mask = str(routing_cfg.get("mask", "255.255.255.0")).strip() or "255.255.255.0"
+    gw = str(routing_cfg.get("gateway", "")).strip()
 
+    if not dest or not gw:
+        return True, "静态路由目标网段或默认网关未完整配置，跳过检测。"
+
+    import ipaddress
+    import socket
     import subprocess
+
+    # 解析目标网络对象
     try:
-        # 在 Windows 上，检测是否存在该网段的路由
+        target_net = ipaddress.IPv4Network(f"{dest}/{mask}", strict=False)
+    except Exception as e:
+        return False, f"配置的目标网段格式无效 ({dest}/{mask}): {e}"
+
+    try:
+        gw_addr = ipaddress.IPv4Address(gw)
+    except Exception as e:
+        return False, f"配置的默认网关格式无效 ({gw}): {e}"
+
+    # 1. 动态自适应网卡直连探测：检测本机是否已有网卡直连目标子网
+    gw_in_local_subnet = False
+    try:
+        for if_name, snics in psutil.net_if_addrs().items():
+            for snic in snics:
+                if snic.family == socket.AF_INET:
+                    ip_str = snic.address
+                    if not ip_str or ip_str.startswith("127.") or ip_str.startswith("169.254."):
+                        continue
+                    try:
+                        cur_ip = ipaddress.IPv4Address(ip_str)
+                        # A. 本机已直连目标子网
+                        if cur_ip in target_net:
+                            return True, f"本机网卡 [{if_name}] IP ({ip_str}) 已处于目标网段 ({dest}/{mask})，物理直连直通，无需配置网关路由。"
+                        
+                        # B. 检查网关是否与本机某网卡在同一网段（用于后续可达性判断）
+                        if snic.netmask:
+                            local_net = ipaddress.IPv4Network(f"{ip_str}/{snic.netmask}", strict=False)
+                            if gw_addr in local_net:
+                                gw_in_local_subnet = True
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+
+    try:
+        # 2. 动态路由表比对：检测系统活动路由表中是否已有该目标的直连链路或对应网关
         check_cmd = "route print -4"
         res = subprocess.run(check_cmd, shell=True, capture_output=True, text=True, errors='ignore')
         
-        # 精确正则匹配网络目标和网关，以防误判
-        pattern = rf"\b{re.escape(dest)}\b"
-        if re.search(pattern, res.stdout):
-            if gw in res.stdout:
-                return True, f"到 {dest} via {gw} 的静态路由已存在，无需添加。"
-                
-        # 路由不存在或网关不同，尝试添加。首先检测当前是否已具有管理员权限
+        # 逐行解析路由表
+        for line in res.stdout.splitlines():
+            parts = line.strip().split()
+            if len(parts) >= 4:
+                net_target, net_mask, net_gw = parts[0], parts[1], parts[2]
+                if net_target == str(target_net.network_address) and (net_mask == str(target_net.netmask) or not mask):
+                    if "在链路上" in net_gw or "on-link" in net_gw.lower():
+                        return True, f"目标网段 {dest} 在系统路由表中已处于物理直连链路 (On-link)，无需配置网关路由。"
+                    if net_gw == gw:
+                        return True, f"到 {dest} via {gw} 的静态路由已存在，无需重复添加。"
+
+        # 3. 网关可达性核验：若网关与本机所有网卡均不在同一局域网，且路由表中无此网关路径，避免盲目提权
+        if not gw_in_local_subnet and (gw not in res.stdout):
+            return False, f"配置的网关 ({gw}) 与本机当前所有活动物理网卡均不在同一子网，且不可达，已拦截无效添加以避免弹窗。"
+
+        # 4. 路由缺失且网关可达：尝试动态添加持久化静态路由 (带 -p 永久路由参数)
         is_admin = False
         try:
             is_admin = ctypes.windll.shell32.IsUserAnAdmin() != 0
@@ -1855,17 +1904,17 @@ def check_and_add_route(config_manager) -> tuple:
             pass
 
         if is_admin:
-            add_cmd = f"route add {dest} mask {mask} {gw}"
+            add_cmd = f"route -p add {dest} mask {mask} {gw}"
             add_res = subprocess.run(add_cmd, shell=True, capture_output=True, text=True, encoding='gbk', errors='ignore')
             if add_res.returncode == 0:
-                return True, f"已成功自动添加静态路由: {dest} mask {mask} {gw}"
+                return True, f"已成功自动添加持久化静态路由: {dest} mask {mask} {gw}"
             else:
                 err_msg = add_res.stderr.strip() or add_res.stdout.strip()
                 return False, f"添加路由失败 (返回码 {add_res.returncode}): {err_msg}"
         else:
             # 没有管理员权限，通过 ShellExecuteW "runas" 弹出 UAC 请求提权运行
             try:
-                params = f"/c route add {dest} mask {mask} {gw}"
+                params = f"/c route -p add {dest} mask {mask} {gw}"
                 # SW_HIDE = 0 隐藏弹出的黑窗口
                 ret = ctypes.windll.shell32.ShellExecuteW(
                     None,
@@ -1875,13 +1924,11 @@ def check_and_add_route(config_manager) -> tuple:
                     None,
                     0
                 )
-                # ShellExecuteW 成功返回值大于 32
                 if ret > 32:
-                    # 稍微等待 0.5s 让系统完成路由表写入，然后重新用 route print 检测
                     time.sleep(0.5)
                     check_cmd = "route print -4"
                     res = subprocess.run(check_cmd, shell=True, capture_output=True, text=True, errors='ignore')
-                    if re.search(pattern, res.stdout) and gw in res.stdout:
+                    if re.search(rf"\b{re.escape(dest)}\b", res.stdout) and gw in res.stdout:
                         return True, f"已通过管理员权限自动添加静态路由: {dest} mask {mask} {gw}"
                     else:
                         return False, f"管理员权限请求已批准，但路由添加未生效，请检查网关或网卡是否正常。"

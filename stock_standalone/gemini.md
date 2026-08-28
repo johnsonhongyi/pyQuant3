@@ -1,3 +1,21 @@
+## 2026-08-28 23:14
+- [x] **重构静态路由检测引擎为纯动态自适应配置驱动，彻底消除硬编码与盲目弹窗 (`webTools/window_manager/core.py`, `webTools/window_manager/ui.py`, `tests/test_route_detection.py`, `gemini.md`)**：
+    - [x] **彻底消除硬编码默认网段**：移除了任何在未配置时写入或回退到硬编码 IP 的死代码，改为纯动态提取用户界面或配置文件的 `destination`, `mask`, `gateway` 动态参数；
+    - [x] **动态自适应网卡直连子网探测**：使用 `ipaddress.IPv4Network` 动态计算目标子网，遍历所有活动物理/虚拟网卡 IP。无论用户配置哪个网段，只要本机已有网卡属于该子网，自适应识别为直连直通并跳过；
+    - [x] **动态路由表链路精准匹配**：逐行精确匹配系统路由表目标、掩码及 `On-link (在链路上)` 或配置网关；
+    - [x] **网关可达性动态前置防御**：若配置的网关与本机所有活动网卡均不在同一网段且不可达，主动拦截并输出告警，彻底阻断无效的 UAC 提权和 `cmd.exe` 弹窗；
+    - [x] **测试套件 100% 通过**：`pytest tests/test_route_detection.py tests/test_autostart_registry.py tests/test_packaged_path_isolation.py -v` 全量 13 项测试 **100% PASSED**！
+
+## 2026-08-28 23:11
+- [x] **根治窗口管理器 (`manage_window_layout.py`) 启动时误弹 `cmd.exe` 路由提权窗口与智能直连网段识别 (`webTools/window_manager/core.py`, `tests/test_route_detection.py`, `gemini.md`)**：
+    - [x] **根因排查**：原 `check_and_add_route()` 仅机械判断 `route print -4` 中是否含有配置的静态网关字符串（如 `192.168.1.2`）。当本机已处于目标子网直连状态（如本机 IP 为 `192.168.50.184`）或系统重启后临时路由失效时，因匹配不到网关字符串，触发了 `ShellExecuteW("runas", "cmd.exe", "route add ...")`，导致程序启动时弹出 `cmd.exe` 并向系统申请管理员提权；
+    - [x] **智能直连网段与 On-link 识别**：
+        - 优先遍历 `psutil.net_if_addrs()` 本机所有活动网卡 IPv4，使用 `ipaddress.IPv4Network` 检测本机是否已直接处于目标子网；若直连则直接返回成功并跳过，0 耗时 0 弹窗；
+        - 正则解析系统路由表，精确识别 `在链路上` / `On-link` 直连链路以及已有网关路由；
+        - 路由添加命令追加 `-p` 永久路由参数，确保必须跨网段时写入一次即可永久生效，彻底消除开机重复提权；
+    - [x] **单元测试全量验证通过**：
+        - 编写 `tests/test_route_detection.py`，测试在直连网段与禁用状态下的路由检测逻辑，2 项测试 **100% PASSED**！
+
 ## 2026-08-28 21:38
 - [x] **修复 `update_data` 中 `UnboundLocalError: local variable 'signals' referenced before assignment` 变量定义域 Bug (`ats/ui/intraday_strategy_dialog.py`, `tests/test_intraday_strategy_engine.py`)**：
     - [x] **根因排查**：在 `IntradayIntegratedPanel.update_data` 进行待上市纯净状态清洗重构时，`signals` 与 `logs` 仅在 `if is_unlisted:` 内定义，导致 `is_unlisted=False` 时执行 `elif signals:` 触发未绑定局部变量异常；
