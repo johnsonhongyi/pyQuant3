@@ -1,3 +1,13 @@
+## 2026-08-28 10:45
+- [x] **实现 09:15~09:25 早盘集合竞价期数据精准跟踪与天梯一字/涨停捕获 (`stock_standalone/ats/new_stock_fetcher.py`, `stock_standalone/ats/limit_up_engine.py`, `stock_standalone/tests/test_new_stock_module.py`)**：
+    - [x] **排查定位竞价期无数据根本原因**：
+        1. 在 09:15~09:25 集合竞价期间，连续撮合尚未开始，TDX API 与基础行情 DataFrame 中的 `price`/`trade`/`close` 通常为 0.0 或昨收价，`pct` 为 0.0；
+        2. 原逻辑直接使用 `if price > 0:` 或 `if not is_limit_up and pct < 7.0: continue`，没有从买一申报价 `bid1`/`buy`、卖一申报价 `ask1`/`sell` 或开盘试撮合价 `open` 提取竞价有效价格，导致竞价期数据全部判定为 0 或被天梯直接过滤丢弃。
+    - [x] **多级回退与集合竞价权威赋能**：
+        1. **新股次新股模块 (`NewStockFetcher`)**：引入 `effective_p` 与 `effective_vol` 多级回退机制（依次取连续撮合价 -> 买一申报价 -> 卖一申报价 -> 试开盘价），在 09:15 竞价一开启即可毫秒级呈现试撮合现价、涨跌幅、委托量、换手率与流通/总市值；
+        2. **天梯与涨停追踪模块 (`LimitUpEngine`)**：在候选标的扫描与 TDX L2 盘口补齐中全面支持竞价试撮合涨停与高开捕获，实时计算封单金额 `seal_amount_wan`、封流比 `seal_to_circ_ratio` 与买盘压强 `bid_pressure`，09:15~09:25 集合竞价一字板、高开板无缝锁定；
+    - [x] **自动化测试 100% PASSED**：新增 `test_07_call_auction_bidding_tracking` 专项测试，全量 20 项测试全部通过。
+
 ## 2026-08-27 14:36
 - [x] **实现活跃成员排序竞价挖掘中龙头突击自动过滤【实时报警】虚拟聚合池 & 排序维度自动持久化 (`stock_standalone/ats/ui/heatmap_widget.py`, `stock_standalone/ats/hot_sector_engine.py`, `stock_standalone/tests/test_sector_strength_and_detail_parity.py`)**：
     - [x] **龙头突击自动过滤虚拟系统聚合池 (竞价题材挖掘)**：

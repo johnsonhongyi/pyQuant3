@@ -245,6 +245,76 @@ class TestNewStockModule(unittest.TestCase):
         self.assertEqual(df_enriched.loc[2, "pct"], 0.0)
         print("[Test 6] 涨跌幅精确计算规则 (首日 vs 已上市次新 vs 平盘) 测试成功")
 
+    def test_07_call_auction_bidding_tracking(self):
+        """测试 09:15~09:25 集合竞价期间 (price=0 但有 bid1/ask1/open) 的数据捕获与天梯追踪能力"""
+        from ats.limit_up_engine import LimitUpEngine
+
+        # 1. 模拟 09:15~09:25 集合竞价时段的原始 DataFrame (此时 price/trade=0, percent=0, 但 buy/bid1 申报了涨停价)
+        df_bidding = pd.DataFrame([
+            {
+                "code": "600001",
+                "name": "竞价龙头A",
+                "trade": 0.0,
+                "close": 0.0,
+                "price": 0.0,
+                "percent": 0.0,
+                "last_close": 10.0,
+                "buy": 11.0,        # 买一申报涨停价 11.0 (+10.0%)
+                "b1_v": 50000.0,     # 买一封单 50000 手
+                "vol": 0.0,
+                "amount": 0.0,
+                "dff": 3.5,
+                "Rank": 12,
+                "category": "芯片概念"
+            },
+            {
+                "code": "300002",
+                "name": "竞价创业板B",
+                "trade": 0.0,
+                "close": 0.0,
+                "price": 0.0,
+                "percent": 0.0,
+                "last_close": 20.0,
+                "buy": 24.0,        # 创业板申报涨停价 24.0 (+20.0%)
+                "b1_v": 30000.0,     # 买一封单 30000 手
+                "vol": 0.0,
+                "amount": 0.0,
+                "dff": 4.2,
+                "Rank": 5,
+                "category": "机器人"
+            },
+            {
+                "code": "600003",
+                "name": "普通震荡股C",
+                "trade": 0.0,
+                "close": 0.0,
+                "price": 0.0,
+                "percent": 0.0,
+                "last_close": 15.0,
+                "buy": 15.1,        # 仅微涨 +0.67%
+                "b1_v": 200.0,
+                "vol": 0.0,
+                "amount": 0.0,
+            }
+        ])
+
+        engine = LimitUpEngine.get_instance()
+        records = engine.scan_limit_up_records_from_df(df_bidding, fetch_l2_quotes=False)
+
+        # 断言竞价一字/涨停标的在 09:15~09:25 被精准捕获
+        self.assertEqual(len(records), 2, "应成功捕获2只集合竞价涨停标的")
+        rec_a = next(r for r in records if r["code"] == "600001")
+        self.assertEqual(rec_a["price"], 11.0, "竞价价格应回退为 buy1 11.0")
+        self.assertEqual(rec_a["pct"], 10.0, "竞价涨跌幅应正确算为 +10.0%")
+        self.assertTrue(rec_a["is_limit_up"], "应被判定为涨停")
+
+        rec_b = next(r for r in records if r["code"] == "300002")
+        self.assertEqual(rec_b["price"], 24.0, "创业板竞价价格应为 24.0")
+        self.assertEqual(rec_b["pct"], 20.0, "创业板涨跌幅应正确算为 +20.0%")
+        self.assertTrue(rec_b["is_limit_up"], "应被判定为涨停")
+
+        print("\n[Test 7] 09:15~09:25 集合竞价期数据捕获与天梯追踪能力验证成功！")
+
 
 if __name__ == "__main__":
     unittest.main()
