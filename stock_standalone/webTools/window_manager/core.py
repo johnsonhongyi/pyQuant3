@@ -2263,6 +2263,30 @@ class AcerPerformanceController:
         self._checked_support = False
         self._is_supported = False
         self._last_applied_profile = None
+        self._sanitize_turbo_button_registry()
+
+    @staticmethod
+    def _sanitize_turbo_button_registry():
+        """
+        🛡️ 硬件状态防御与自愈：检查并复位注册表中残留的 Turbo_Button_status 触发信号。
+        避免 Acer PSAgent / PSAdminAgent 硬件服务误将残留的 1 判定为实体按键长按，
+        从而在后台死循环疯狂调起 PredatorSense.exe 界面。
+        """
+        if sys.platform != "win32":
+            return
+        try:
+            import winreg
+            reg_path = r"SOFTWARE\OEM\PredatorSense"
+            key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, reg_path, 0, winreg.KEY_READ | winreg.KEY_SET_VALUE)
+            try:
+                val, _ = winreg.QueryValueEx(key, "Turbo_Button_status")
+                if val != 0:
+                    winreg.SetValueEx(key, "Turbo_Button_status", 0, winreg.REG_DWORD, 0)
+            except Exception:
+                pass
+            winreg.CloseKey(key)
+        except Exception:
+            pass
 
     @staticmethod
     def _normalize_oc_mode(mode):
@@ -2315,29 +2339,11 @@ class AcerPerformanceController:
                 self._last_applied_profile["fan_mode"] = norm_fm
                 _GLOBAL_LAST_APPLIED_PROFILE["fan_mode"] = norm_fm
 
-        # 实时同步更新 Windows OEM 注册表, 确保下一次物理探查 (force_physical=True) 100% 精准匹配
-        try:
-            import winreg
-            reg_path = r"SOFTWARE\OEM\PredatorSense"
-            key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, reg_path, 0, winreg.KEY_SET_VALUE | winreg.KEY_READ)
-            if overclock_mode is not None:
-                norm_oc = self._normalize_oc_mode(overclock_mode)
-                oc_code_map = {"Default": 0, "Fast": 1, "Extreme": 2}
-                if norm_oc in oc_code_map:
-                    oc_val = oc_code_map[norm_oc]
-                    winreg.SetValueEx(key, "GPU_Overclock_Level", 0, winreg.REG_DWORD, oc_val)
-                    tb_val = 1 if oc_val >= 2 else 0
-                    winreg.SetValueEx(key, "Turbo_Button_status", 0, winreg.REG_DWORD, tb_val)
-            if fan_mode is not None:
-                norm_fm = self._normalize_fan_mode(fan_mode)
-                fan_code_map = {"Auto": 0, "Max": 1, "Custom": 2}
-                if norm_fm in fan_code_map:
-                    winreg.SetValueEx(key, "Fan_Control", 0, winreg.REG_DWORD, fan_code_map[norm_fm])
-            if coolboost is not None:
-                winreg.SetValueEx(key, "CoolBoost_Status", 0, winreg.REG_DWORD, 1 if coolboost else 0)
-            winreg.CloseKey(key)
-        except Exception:
-            pass
+        # 🚫 严禁写入 Turbo_Button_status 等按键事件触发键！
+        # Turbo_Button_status 是 Acer 物理 Turbo 按键的触发信号，写入 1 会导致后台常驻的 PSAgent / PSAdminAgent
+        # 误判为按键被持续按下，从而在后台死循环疯狂调起 PredatorSense.exe 界面！
+        # 仅将应用状态保存在 Python 内存缓存 (_GLOBAL_LAST_APPLIED_PROFILE) 即可。
+        pass
 
         # 🚫 严禁将临时应用的性能预设落盘写回 ConfigManager！
         # 默认手动选项设置是常规持久化配置，托盘/快捷预设仅为临时运行时状态，重启后依然保持用户配置的常规默认项。
@@ -2581,23 +2587,10 @@ class AcerPerformanceController:
             success = False
             err_msg = ""
             
-            # 1. 尝试直接修改 Acer OEM 注册表 Turbo_Button_status 触发键
-            try:
-                import winreg
-                reg_path = r"SOFTWARE\OEM\PredatorSense"
-                key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, reg_path, 0, winreg.KEY_SET_VALUE | winreg.KEY_READ)
-                # 1 = Extreme/Turbo 狂暴超频, 0 = Normal
-                reg_val = 1 if mode_code >= 1 else 0
-                winreg.SetValueEx(key, "Turbo_Button_status", 0, winreg.REG_DWORD, reg_val)
-                winreg.CloseKey(key)
-                success = True
-            except Exception:
-                pass
-
             import win32com.client
             wmi = win32com.client.GetObject("winmgmts:\\\\.\\root\\wmi")
             
-            # 2. 尝试 Triton 500 专用的 SetGamingProfile
+            # 1. 尝试 Triton 500 专用的 SetGamingProfile
             try:
                 objs = wmi.ExecQuery("SELECT * FROM AcerGamingFunction")
                 if objs and objs.Count > 0:
@@ -2986,20 +2979,33 @@ class AcerPerformanceController:
                     win32gui.PostMessage(main_hwnd, win32con.WM_CLOSE, 0, 0)
                     _do_log("[Step 4/4] 已成功发送关闭窗口 WM_CLOSE 消息")
                 elif pa_str in ["kill", "杀掉"]:
-                    import os, time
-                    os.system("taskkill /f /im PredatorSense.exe 2>nul")
-                    time.sleep(0.3)
+                    import psutil
+                    killed_count = 0
                     try:
-                        import psutil
                         for p in psutil.process_iter(['name', 'pid']):
-                            if p.info['name'] and 'predatorsense' in p.info['name'].lower():
-                                try:
+                            try:
+                                if (p.info['name'] or '').lower() == 'predatorsense.exe':
                                     p.kill()
-                                except Exception:
-                                    pass
+                                    killed_count += 1
+                            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                                pass
                     except Exception:
                         pass
-                    _do_log("[Step 4/4] 已强行终止 PredatorSense.exe UI 进程以释放 CPU")
+
+                    # 仅当 psutil 内存查杀未命中时（例如权限受限或多用户隔离），才通过静默 subprocess 兜底查杀
+                    if killed_count == 0:
+                        try:
+                            import subprocess
+                            subprocess.run(
+                                ["taskkill", "/f", "/im", "PredatorSense.exe"],
+                                creationflags=subprocess.CREATE_NO_WINDOW,
+                                capture_output=True,
+                                text=True
+                            )
+                        except Exception:
+                            pass
+
+                    _do_log("[Step 4/4] 已静默彻底终止 PredatorSense.exe UI 进程以释放 CPU")
                 else:
                     # 默认 hide 静默隐藏收至后台，保全后台守护进程
                     win32gui.ShowWindow(main_hwnd, win32con.SW_HIDE)

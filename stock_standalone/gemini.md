@@ -1,3 +1,28 @@
+## 2026-08-28 23:30
+- [x] **彻底根治 Acer `PSAgent` 后台服务死循环疯狂拉起 `PredatorSense.exe` 界面的底层真实元凶 (`webTools/window_manager/core.py`, `gemini.md`)**：
+    - [x] **根本原因深度解构**：
+        - 宏碁系统服务 `PSAgent.exe` / `PSAdminAgent.exe` 负责监听键盘物理 Turbo 按键的注册表状态位 `HKLM\SOFTWARE\OEM\PredatorSense\Turbo_Button_status`；
+        - 旧代码在 `_update_applied_cache` 与 `set_overclock_mode` 中直接将 `Turbo_Button_status` 强制写入为 `1`，且之后从未复位清零；
+        - `PSAgent` 检测到该触发位为 `1`，误判为物理 Turbo 键被持续按下，于是在后台不断通过 `PSLauncher.exe` 强行唤出 `PredatorSense.exe` 前台界面；
+        - 即使设置了 `kill` 或关闭了管理器，由于 Windows 注册表中的 `Turbo_Button_status == 1` 残留未除，`PSAgent` 作为系统常驻服务依然会无限死循环拉起 `PredatorSense.exe`；
+    - [x] **彻底防御与清洗修复**：
+        - **移除所有写入**：彻底移除了 `_update_applied_cache` 与 `set_overclock_mode` 中对 `Turbo_Button_status` 的篡改写入；
+        - **增加主动清洗自愈机制**：在 `AcerPerformanceController` 初始化时执行 `_sanitize_turbo_button_registry()`，将注册表中历史残留的 `Turbo_Button_status` 自动清洗复位为 `0`；
+    - [x] **测试通过**：全量 13 项自动化测试 **100% PASSED**！
+
+## 2026-08-28 23:27
+- [x] **优化 `PredatorSense` 前台进程终止逻辑，增加 `killed_count == 0` 条件跳过重复查杀 (`webTools/window_manager/core.py`, `gemini.md`)**：
+    - [x] **消除冗余外部调用**：原逻辑在 `psutil` 成功终止目标进程后仍无条件调用 `taskkill`；优化为：若 `psutil` 命中并成功 `kill`（`killed_count > 0`），直接跳过子进程 `taskkill`，仅在未命中（如极端权限隔离）时才作为兜底执行；
+    - [x] **测试通过**：全量 13 项自动化测试 **100% PASSED**！
+
+## 2026-08-28 23:25
+- [x] **根治 Acer 性能调优在 `kill` 终止前台进程时误弹 `cmd.exe` 黑窗口问题 (`webTools/window_manager/core.py`, `gemini.md`)**：
+    - [x] **根因排查**：原代码在 `pa_str in ["kill", "杀掉"]` 分支中调用了 `os.system("taskkill /f /im PredatorSense.exe 2>nul")`。在 Windows GUI 环境下，`os.system()` 会强行启动一个系统的 `cmd.exe` 宿主黑窗口来执行命令，导致用户界面瞬间闪现并弹出控制台黑框；
+    - [x] **纯内存 API + 静默子进程改造**：
+        - 优先使用 `psutil.process_iter()` 遍历并直接调用 `p.kill()` 纯内存句柄秒杀 `predatorsense.exe` 进程，0 弹窗 0 闪烁；
+        - 兜底使用 `subprocess.run(..., creationflags=subprocess.CREATE_NO_WINDOW)` 静默执行 `taskkill`，彻底剥离 `os.system`；
+    - [x] **测试通过**：全量 13 项自动化测试 **100% PASSED**！
+
 ## 2026-08-28 23:14
 - [x] **重构静态路由检测引擎为纯动态自适应配置驱动，彻底消除硬编码与盲目弹窗 (`webTools/window_manager/core.py`, `webTools/window_manager/ui.py`, `tests/test_route_detection.py`, `gemini.md`)**：
     - [x] **彻底消除硬编码默认网段**：移除了任何在未配置时写入或回退到硬编码 IP 的死代码，改为纯动态提取用户界面或配置文件的 `destination`, `mask`, `gateway` 动态参数；
