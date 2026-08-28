@@ -38,7 +38,7 @@ except Exception:
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QDialog, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QTableWidget, QTableWidgetItem, QHeaderView, QSplitter, QGroupBox,
-    QTextEdit, QComboBox, QMessageBox, QFrame, QGridLayout, QProgressBar,
+    QTextEdit, QPlainTextEdit, QLineEdit, QComboBox, QMessageBox, QFrame, QGridLayout, QProgressBar,
     QScrollArea, QTabWidget, QDoubleSpinBox, QRadioButton, QButtonGroup,
     QCheckBox, QSlider, QToolBar
 )
@@ -5447,41 +5447,13 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
         )
 
     def _on_eval_all_codes(self):
-        target_codes = self.engine.get_all_target_codes()
-        if not target_codes:
-            QMessageBox.information(self, "提示", "未指定 target_codes 目标代码。")
-            return
-
-        now_time_str = datetime.now().strftime("%H:%M:%S")
-        res_summary = f"=== ⚡ 全量 Code 分时阶梯策略自动检测评估报告 ({now_time_str}) ===\n\n"
-
-        for c in target_codes:
-            st = self.engine.auto_select_strategy(0.0, code=c)
-            c_name = resolve_stock_name(c)
-            parent = self.parent()
-            if parent and hasattr(parent, 'get_stock_name'):
-                p_name = parent.get_stock_name(c)
-                if p_name and p_name != "未知" and p_name != c:
-                    c_name = p_name
-
-            open_p, trade_p, high_p, low_p, vwap_p, to_rate, amt_val, bid1_p, _, is_unlisted = self._get_stock_realtime_data_for_code(c)
-            tick_row = {"trade": trade_p, "close": trade_p}
-            sigs = self.engine.evaluate_tick(
-                code=c, tick_row=tick_row, open_price=open_p, current_time_str=now_time_str, bid1_price=bid1_p
-            )
-            eval_res = self.engine.evaluate_seven_nodes(
-                code=c, current_time_str=now_time_str, open_price=open_p, price=trade_p, high_price=high_p,
-                low_price=low_price, vwap=vwap_p, turnover_rate=to_rate, amount=amt_val
-            )
-
-            res_summary += f"📌 【{c} {c_name}】 -> 策略: {st.get('name', '未知')}\n"
-            res_summary += f"   开盘: {open_p:.2f}元 | 现价: {trade_p:.2f}元 | 综合得分: {eval_res.get('total_weighted_score', 0):.2f}分 ({eval_res.get('pattern', '--')})\n"
-            res_summary += f"   实操指引: {eval_res.get('action_execution_text', '')}\n"
-            for sig in sigs:
-                res_summary += f"   🔴 {sig.reason} (建议价: {getattr(sig, 'suggested_price', sig.price):.2f})\n"
-            res_summary += "--------------------------------------------------\n"
-
-        QMessageBox.information(self, "⚡ 全量 Code 分时策略自动检测", res_summary)
+        """打开或刷新【⚡ 全量 Code 分时阶梯策略自动检测评估】持久化滚动对话框"""
+        if not hasattr(self, '_all_codes_eval_dialog') or self._all_codes_eval_dialog is None:
+            self._all_codes_eval_dialog = AllCodesStrategyEvalDialog(self)
+        self._all_codes_eval_dialog.show()
+        self._all_codes_eval_dialog.raise_()
+        self._all_codes_eval_dialog.activateWindow()
+        self._all_codes_eval_dialog.run_evaluation()
 
     def keyPressEvent(self, event):
         """⚡ 窗口级快捷键：按下 R 键触发自适应策略测算"""
@@ -5756,6 +5728,474 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
 
 # 向后兼容别名
 IntradayStrategyDialog = PinzhunLadderStandaloneWindow
+
+
+class AllCodesStrategyEvalDialog(QDialog):
+    """
+    ⚡ 全量 Code 分时阶梯策略自动检测与全景推演对话框
+    特点：
+    1. 窗口几何位置与尺寸自动持久化 (QSettings + config/intraday_ui_layout.json 双保险)
+    2. 默认尺寸适中 (840x640)，内容区域基于 QScrollArea 支持平滑滚动
+    3. 支持按代码/名称/形态/动作实时关键词过滤
+    4. 卡片化展示每只标的：开盘价、现价、涨跌幅、VWAP、综合得分、形态判定、实操指引与触发信号
+    5. 支持一键切换主工作台标的 (🎯 查看此标的) 及一键复制全文报告
+    """
+    def __init__(self, parent_workbench: 'PinzhunLadderStandaloneWindow'):
+        super().__init__(parent_workbench)
+        self.workbench = parent_workbench
+        self.engine = parent_workbench.engine
+        self.cards_data = []  # 存储所有评估结果用于实时过滤
+        self.card_widgets = []  # 存储渲染的卡片控件
+        self.full_report_text = ""
+
+        self.setWindowTitle("⚡ 全量 Code 分时阶梯策略自动检测评估报告")
+        self.setWindowFlags(
+            Qt.WindowType.Window |
+            Qt.WindowType.WindowMinMaxButtonsHint |
+            Qt.WindowType.WindowCloseButtonHint
+        )
+        self.setSizeGripEnabled(True)
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #0b0f19;
+                color: #e2e8f0;
+                font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif;
+            }
+            QScrollArea {
+                border: 1px solid #1e293b;
+                background-color: #0b0f19;
+                border-radius: 8px;
+            }
+            QScrollBar:vertical {
+                border: none;
+                background: #0f172a;
+                width: 10px;
+                border-radius: 5px;
+            }
+            QScrollBar::handle:vertical {
+                background: #334155;
+                min-height: 25px;
+                border-radius: 5px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background: #0284c7;
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                height: 0px;
+            }
+            QLineEdit {
+                background-color: #1e293b;
+                border: 1px solid #334155;
+                border-radius: 6px;
+                padding: 6px 12px;
+                color: #f8fafc;
+                font-size: 12px;
+            }
+            QLineEdit:focus {
+                border: 1px solid #38bdf8;
+                background-color: #0f172a;
+            }
+            QPushButton {
+                background-color: #1e293b;
+                border: 1px solid #334155;
+                border-radius: 6px;
+                padding: 6px 14px;
+                color: #e2e8f0;
+                font-size: 12px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #334155;
+                border: 1px solid #38bdf8;
+                color: #38bdf8;
+            }
+            QPushButton:pressed {
+                background-color: #0f172a;
+            }
+            QPushButton#PrimaryBtn {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #0284c7, stop:1 #0369a1);
+                border: 1px solid #38bdf8;
+                color: #ffffff;
+            }
+            QPushButton#PrimaryBtn:hover {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #0ea5e9, stop:1 #0284c7);
+            }
+            QFrame#StockCard {
+                background-color: #0f172a;
+                border: 1px solid #1e293b;
+                border-radius: 8px;
+            }
+            QFrame#StockCard:hover {
+                border: 1px solid #38bdf8;
+                background-color: #131d33;
+            }
+        """)
+
+        self._init_ui()
+        self._restore_geometry()
+
+    def _init_ui(self):
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(12, 12, 12, 12)
+        main_layout.setSpacing(10)
+
+        # 1. 顶栏 Toolbar
+        top_bar = QFrame()
+        top_bar.setStyleSheet("background-color: #0f172a; border: 1px solid #1e293b; border-radius: 8px;")
+        top_layout = QHBoxLayout(top_bar)
+        top_layout.setContentsMargins(12, 8, 12, 8)
+        top_layout.setSpacing(10)
+
+        self.lbl_title = QLabel("⚡ 全量 Code 分时阶梯策略评估报告")
+        self.lbl_title.setStyleSheet("font-size: 14px; font-weight: bold; color: #38bdf8;")
+        top_layout.addWidget(self.lbl_title)
+
+        self.lbl_meta = QLabel("📊 加载中...")
+        self.lbl_meta.setStyleSheet("font-size: 12px; color: #94a3b8;")
+        top_layout.addWidget(self.lbl_meta)
+
+        top_layout.addStretch()
+
+        # 搜索过滤输入框
+        self.search_edit = QLineEdit()
+        self.search_edit.setPlaceholderText("🔍 快速过滤 (代码 / 名称 / 策略 / 建议)...")
+        self.search_edit.setFixedWidth(260)
+        self.search_edit.textChanged.connect(self._on_search_text_changed)
+        top_layout.addWidget(self.search_edit)
+
+        # 重新评估按钮
+        self.btn_refresh = QPushButton("🔄 重新评估")
+        self.btn_refresh.setObjectName("PrimaryBtn")
+        self.btn_refresh.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_refresh.clicked.connect(self.run_evaluation)
+        top_layout.addWidget(self.btn_refresh)
+
+        # 复制报告按钮
+        self.btn_copy = QPushButton("📋 复制报告")
+        self.btn_copy.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_copy.clicked.connect(self._copy_full_report)
+        top_layout.addWidget(self.btn_copy)
+
+        # 关闭按钮
+        self.btn_close = QPushButton("关闭")
+        self.btn_close.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_close.clicked.connect(self.close)
+        top_layout.addWidget(self.btn_close)
+
+        main_layout.addWidget(top_bar)
+
+        # 2. 中间滚动卡片区域
+        self.scroll_area = QScrollArea()
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+
+        self.cards_container = QWidget()
+        self.cards_container.setStyleSheet("background-color: transparent;")
+        self.cards_layout = QVBoxLayout(self.cards_container)
+        self.cards_layout.setContentsMargins(6, 6, 6, 6)
+        self.cards_layout.setSpacing(10)
+
+        self.scroll_area.setWidget(self.cards_container)
+        main_layout.addWidget(self.scroll_area, 1)
+
+        # 3. 底部状态栏
+        bottom_bar = QHBoxLayout()
+        self.lbl_status = QLabel("💡 提示：支持滚轮自由缩放滚动浏览；点击【🎯 查看此标的】可直接切入主工作台分时图与策略！")
+        self.lbl_status.setStyleSheet("font-size: 11px; color: #64748b;")
+        bottom_bar.addWidget(self.lbl_status)
+        bottom_bar.addStretch()
+
+        self.lbl_card_count = QLabel("显示 0 / 0 只标的")
+        self.lbl_card_count.setStyleSheet("font-size: 11px; color: #94a3b8; font-weight: bold;")
+        bottom_bar.addWidget(self.lbl_card_count)
+
+        main_layout.addLayout(bottom_bar)
+
+    def _restore_geometry(self):
+        """恢复窗口尺寸与位置，并带屏幕边界安全保护"""
+        try:
+            settings = QSettings("pyQuant3", "AllCodesStrategyEvalDialog")
+            saved_geom = settings.value("geometry")
+            if saved_geom:
+                self.restoreGeometry(saved_geom)
+            else:
+                self.resize(840, 640)
+                if self.workbench:
+                    geo = self.workbench.geometry()
+                    self.move(geo.center() - self.rect().center())
+        except Exception as e:
+            logger.debug(f"恢复 AllCodesStrategyEvalDialog 几何尺寸异常: {e}")
+            self.resize(840, 640)
+
+    def _save_geometry(self):
+        """持久化保存窗口尺寸与位置"""
+        try:
+            settings = QSettings("pyQuant3", "AllCodesStrategyEvalDialog")
+            settings.setValue("geometry", self.saveGeometry())
+            save_ui_layout_state("all_codes_eval_dialog_size", f"{self.width()}x{self.height()}")
+        except Exception as e:
+            logger.debug(f"保存 AllCodesStrategyEvalDialog 几何尺寸异常: {e}")
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._save_geometry()
+
+    def closeEvent(self, event):
+        self._save_geometry()
+        super().closeEvent(event)
+
+    def run_evaluation(self):
+        """执行全量标的实时策略评估并构建卡片流"""
+        target_codes = self.engine.get_all_target_codes()
+        if not target_codes:
+            self.lbl_meta.setText("未配置 target_codes 目标代码")
+            return
+
+        now_time_str = datetime.now().strftime("%H:%M:%S")
+        self.lbl_meta.setText(f"📊 共 {len(target_codes)} 只标的 | 评估时间: {now_time_str}")
+
+        # 清空旧卡片
+        while self.cards_layout.count() > 0:
+            item = self.cards_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        self.cards_data.clear()
+        self.card_widgets.clear()
+        res_summary = f"=== ⚡ 全量 Code 分时阶梯策略自动检测评估报告 ({now_time_str}) ===\n\n"
+
+        for c in target_codes:
+            try:
+                st = self.engine.auto_select_strategy(0.0, code=c)
+                c_name = resolve_stock_name(c)
+                parent = self.workbench.parent() if self.workbench else None
+                if parent and hasattr(parent, 'get_stock_name'):
+                    p_name = parent.get_stock_name(c)
+                    if p_name and p_name != "未知" and p_name != c:
+                        c_name = p_name
+
+                open_p, trade_p, high_p, low_p, vwap_p, to_rate, amt_val, bid1_p, _, is_unlisted, last_close = self.workbench._get_stock_realtime_data_for_code(c)
+                tick_row = {"trade": trade_p, "close": trade_p}
+                sigs = self.engine.evaluate_tick(
+                    code=c, tick_row=tick_row, open_price=open_p, current_time_str=now_time_str, bid1_price=bid1_p
+                )
+                eval_res = self.engine.evaluate_seven_nodes(
+                    code=c, current_time_str=now_time_str, open_price=open_p, price=trade_p, high_price=high_p,
+                    low_price=low_p, vwap=vwap_p, turnover_rate=to_rate, amount=amt_val
+                )
+
+                item_info = {
+                    "code": c,
+                    "name": c_name,
+                    "strategy_name": st.get('name', '通用分时阶梯策略'),
+                    "open_p": open_p,
+                    "trade_p": trade_p,
+                    "high_p": high_p,
+                    "low_p": low_p,
+                    "vwap_p": vwap_p,
+                    "turnover_rate": to_rate,
+                    "amt_val": amt_val,
+                    "last_close": last_close,
+                    "score": eval_res.get('total_weighted_score', 0.0),
+                    "pattern": eval_res.get('pattern', '--'),
+                    "action_text": eval_res.get('action_execution_text', ''),
+                    "signals": sigs,
+                    "is_error": False,
+                    "error_msg": ""
+                }
+
+                # 拼接文本报告
+                res_summary += f"📌 【{c} {c_name}】 -> 策略: {item_info['strategy_name']}\n"
+                res_summary += f"   开盘: {open_p:.2f}元 | 现价: {trade_p:.2f}元 | 综合得分: {item_info['score']:.2f}分 ({item_info['pattern']})\n"
+                res_summary += f"   实操指引: {item_info['action_text']}\n"
+                for sig in sigs:
+                    res_summary += f"   🔴 {sig.reason} (建议价: {getattr(sig, 'suggested_price', sig.price):.2f})\n"
+                res_summary += "--------------------------------------------------\n"
+
+            except Exception as e:
+                item_info = {
+                    "code": c,
+                    "name": resolve_stock_name(c),
+                    "strategy_name": "未知",
+                    "open_p": 0.0,
+                    "trade_p": 0.0,
+                    "high_p": 0.0,
+                    "low_p": 0.0,
+                    "vwap_p": 0.0,
+                    "turnover_rate": 0.0,
+                    "amt_val": 0.0,
+                    "last_close": 0.0,
+                    "score": 0.0,
+                    "pattern": "异常",
+                    "action_text": f"评估异常: {e}",
+                    "signals": [],
+                    "is_error": True,
+                    "error_msg": str(e)
+                }
+                res_summary += f"⚠️ 【{c}】 评估异常: {e}\n--------------------------------------------------\n"
+
+            self.cards_data.append(item_info)
+            card_widget = self._create_card_widget(item_info)
+            self.card_widgets.append((item_info, card_widget))
+            self.cards_layout.addWidget(card_widget)
+
+        self.cards_layout.addStretch()
+        self.full_report_text = res_summary
+        self._update_card_count()
+
+    def _create_card_widget(self, data: dict) -> QFrame:
+        """根据标的评估结果创建单只股票的专属卡片"""
+        card = QFrame()
+        card.setObjectName("StockCard")
+        c_layout = QVBoxLayout(card)
+        c_layout.setContentsMargins(12, 10, 12, 10)
+        c_layout.setSpacing(6)
+
+        # 1. 顶行：代码 + 名称 + 策略名称 + 【🎯 查看此标的】
+        top_row = QHBoxLayout()
+        lbl_code_name = QLabel(f"📌 【{data['code']} {data['name']}】")
+        lbl_code_name.setStyleSheet("font-size: 14px; font-weight: bold; color: #f8fafc;")
+        top_row.addWidget(lbl_code_name)
+
+        lbl_strat = QLabel(f"策略: {data['strategy_name']}")
+        lbl_strat.setStyleSheet("font-size: 12px; color: #38bdf8; background: #082f49; border-radius: 4px; padding: 2px 6px;")
+        top_row.addWidget(lbl_strat)
+
+        top_row.addStretch()
+
+        btn_view = QPushButton("🎯 查看此标的")
+        btn_view.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_view.setStyleSheet("""
+            QPushButton {
+                background-color: #0369a1;
+                border: 1px solid #38bdf8;
+                color: #ffffff;
+                font-size: 11px;
+                padding: 3px 10px;
+                border-radius: 4px;
+            }
+            QPushButton:hover {
+                background-color: #0284c7;
+            }
+        """)
+        target_c = data['code']
+        btn_view.clicked.connect(lambda _, tc=target_c: self._switch_to_code(tc))
+        top_row.addWidget(btn_view)
+
+        c_layout.addLayout(top_row)
+
+        if data.get("is_error"):
+            err_lbl = QLabel(f"⚠️ 评估异常: {data.get('error_msg')}")
+            err_lbl.setStyleSheet("color: #ef4444; font-size: 12px;")
+            c_layout.addWidget(err_lbl)
+            return card
+
+        # 2. 行情数据行
+        amt_str = f"{data['amt_val'] / 1e8:.2f}亿" if data['amt_val'] >= 1e8 else f"{data['amt_val'] / 1e4:.0f}万"
+        pct = ((data['trade_p'] - data['open_p']) / data['open_p'] * 100.0) if data['open_p'] > 0 else 0.0
+        pct_color = "#ef4444" if pct > 0 else ("#10b981" if pct < 0 else "#94a3b8")
+        pct_prefix = "+" if pct > 0 else ""
+
+        stats_row = QHBoxLayout()
+        stats_row.setSpacing(14)
+
+        stats_text = (
+            f"<span style='color:#94a3b8;'>开盘:</span> <b style='color:#f8fafc;'>{data['open_p']:.2f}元</b> &nbsp;|&nbsp; "
+            f"<span style='color:#94a3b8;'>现价:</span> <b style='color:{pct_color};'>{data['trade_p']:.2f}元 ({pct_prefix}{pct:.2f}%)</b> &nbsp;|&nbsp; "
+            f"<span style='color:#94a3b8;'>VWAP:</span> <b style='color:#fbbf24;'>{data['vwap_p']:.2f}元</b> &nbsp;|&nbsp; "
+            f"<span style='color:#94a3b8;'>换手率:</span> <b style='color:#38bdf8;'>{data['turnover_rate']:.2f}%</b> &nbsp;|&nbsp; "
+            f"<span style='color:#94a3b8;'>成交额:</span> <b style='color:#f8fafc;'>{amt_str}</b>"
+        )
+        lbl_stats = QLabel(stats_text)
+        lbl_stats.setStyleSheet("font-size: 12px;")
+        stats_row.addWidget(lbl_stats)
+        stats_row.addStretch()
+
+        # 评分与形态胶囊
+        score = data['score']
+        score_bg = "#064e3b" if score >= 8.0 else ("#78350f" if score >= 6.5 else "#7f1d1d")
+        score_border = "#10b981" if score >= 8.0 else ("#f59e0b" if score >= 6.5 else "#ef4444")
+        lbl_score = QLabel(f"🌟 综合得分: {score:.2f}分  ({data['pattern']})")
+        lbl_score.setStyleSheet(
+            f"background-color: {score_bg}; border: 1px solid {score_border}; border-radius: 4px; "
+            f"color: #f8fafc; font-size: 11px; font-weight: bold; padding: 2px 8px;"
+        )
+        stats_row.addWidget(lbl_score)
+
+        c_layout.addLayout(stats_row)
+
+        # 3. 实操指引
+        if data['action_text']:
+            act_box = QFrame()
+            act_box.setStyleSheet("background-color: #1e293b; border-radius: 4px; padding: 4px;")
+            act_layout = QHBoxLayout(act_box)
+            act_layout.setContentsMargins(8, 4, 8, 4)
+            lbl_act = QLabel(f"💡 <b>实操指引:</b> {data['action_text']}")
+            lbl_act.setWordWrap(True)
+            lbl_act.setStyleSheet("color: #e2e8f0; font-size: 12px;")
+            act_layout.addWidget(lbl_act)
+            c_layout.addWidget(act_box)
+
+        # 4. 触发信号列表
+        if data['signals']:
+            sig_box = QFrame()
+            sig_box.setStyleSheet("background-color: #18181b; border: 1px dashed #ef4444; border-radius: 4px; padding: 4px;")
+            sig_layout = QVBoxLayout(sig_box)
+            sig_layout.setContentsMargins(8, 4, 8, 4)
+            sig_layout.setSpacing(2)
+            for sig in data['signals']:
+                s_price = getattr(sig, 'suggested_price', sig.price)
+                lbl_sig = QLabel(f"🔴 <b>{sig.reason}</b> (触发建议价: <span style='color:#ef4444;'>{s_price:.2f}元</span>)")
+                lbl_sig.setStyleSheet("color: #f87171; font-size: 11px;")
+                sig_layout.addWidget(lbl_sig)
+            c_layout.addWidget(sig_box)
+
+        return card
+
+    def _switch_to_code(self, target_code: str):
+        """切换主工作台当前股票标的"""
+        if self.workbench and hasattr(self.workbench, 'combo_code'):
+            for idx in range(self.workbench.combo_code.count()):
+                if self.workbench.combo_code.itemData(idx) == target_code:
+                    self.workbench.combo_code.setCurrentIndex(idx)
+                    break
+        self.lbl_status.setText(f"🎯 已成功将主工作台切换至标的: 【{target_code} {resolve_stock_name(target_code)}】")
+
+    def _on_search_text_changed(self, text: str):
+        """实时关键词搜索过滤"""
+        kw = text.strip().lower()
+        visible_cnt = 0
+        for item_data, widget in self.card_widgets:
+            if not kw:
+                widget.setVisible(True)
+                visible_cnt += 1
+            else:
+                match = (
+                    kw in str(item_data.get('code', '')).lower() or
+                    kw in str(item_data.get('name', '')).lower() or
+                    kw in str(item_data.get('strategy_name', '')).lower() or
+                    kw in str(item_data.get('pattern', '')).lower() or
+                    kw in str(item_data.get('action_text', '')).lower()
+                )
+                widget.setVisible(match)
+                if match:
+                    visible_cnt += 1
+        self._update_card_count(visible_cnt)
+
+    def _update_card_count(self, visible_cnt: int = None):
+        total = len(self.card_widgets)
+        shown = visible_cnt if visible_cnt is not None else total
+        self.lbl_card_count.setText(f"显示 {shown} / {total} 只标的")
+
+    def _copy_full_report(self):
+        """一键复制全量纯文本报告到系统剪贴板"""
+        if not self.full_report_text:
+            return
+        clipboard = QApplication.clipboard()
+        if clipboard:
+            clipboard.setText(self.full_report_text)
+            self.lbl_status.setText("📋 全量评估报告已成功复制到剪贴板！")
 
 
 # 补充 PinzhunLaserMonitorWidget 类的定义供 Tab 3 使用（带滚动条位置保持保护）

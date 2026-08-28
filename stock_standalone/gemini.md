@@ -1,3 +1,27 @@
+## 2026-08-28 20:15
+- [x] **实现分时阶梯策略全量检测窗口尺寸持久化、平滑滚动流式卡片视图与标的穿透联动 (`ats/ui/intraday_strategy_dialog.py`, `tests/test_tdx_adaptive_config.py`)**：
+    - [x] **窗口几何尺寸与位置双保险持久化落盘 (`AllCodesStrategyEvalDialog`)**：彻底替换原有超长超出屏幕的 `QMessageBox`，重构为独立的 `AllCodesStrategyEvalDialog` 科技暗夜风格窗口。集成 `QSettings("pyQuant3", "AllCodesStrategyEvalDialog")` 与 `config/intraday_ui_layout.json` 双保险落盘，记忆用户拉伸的窗口宽高与屏幕坐标（默认 840x640），并自带多显示器越界安全保护；
+    - [x] **`QScrollArea` 平滑滚动流式卡片视图**：卡片化独立呈现每只标的代码、名称、所属策略、开盘价、现价（颜色自适应涨跌幅）、VWAP、换手率、成交额、综合评分胶囊（分级色彩）、实操指引框与触发卖点/防守信号列表；
+    - [x] **毫秒级关键词实时过滤与穿透联动**：
+        - 顶栏配备实时搜索过滤框（支持代码、股票名、策略名、形态类型、操作指引实时匹配）；
+        - 每张卡片配备【🎯 查看此标的】按钮，一键将主工作台分时图与策略无缝切换到目标标的；
+        - 提供【🔄 重新评估】与【📋 复制报告】等快捷动作；
+    - [x] **自动化测试 100% 验证通过**：
+        - `pytest tests/test_tdx_adaptive_config.py tests/test_intraday_strategy_engine.py tests/test_signal_ledger.py` 全量 28 项测试 **100% PASSED**！
+
+## 2026-08-28 20:10
+- [x] **修复分时阶梯策略全量检测解包异常 & 重构通达信 TDX 配置文件与服务器池跨设备动态自适应探查 (`JohnsonUtil/commonTips.py`, `ats/tdx_realtime_fetcher.py`, `ats/ui/intraday_strategy_dialog.py`, `tests/test_tdx_adaptive_config.py`)**：
+    - [x] **根治全量检测解包崩溃 (`ValueError: too many values to unpack (expected 10)`)**：
+        - 在 `IntradayStrategyDialog._on_eval_all_codes` 中完整解包 11 元组 (`open_p, trade_p, high_p, low_p, vwap_p, to_rate, amt_val, bid1_p, _, is_unlisted, last_close`)，补齐 `last_close`；
+        - 修复第 5474 行 `evaluate_seven_nodes` 误传未定义变量 `low_price=low_price` 为 `low_price=low_p`；
+        - 为全量评估循环增设单标的 `try...except` 防御降级，确保单股数据异常不中断全量检测流程；
+    - [x] **彻底消除 TDX 配置文件静态硬编码与跨设备自适应动态发现**：
+        - **`JohnsonUtil/commonTips.py`**：新增 `get_all_valid_tdx_dirs()` 与 `get_tdx_config_paths()`，基于 `global.ini` 的 `[path]` 配置节，结合当前操作系统平台（Windows/Mac/Linux）与设备环境，动态探测所有真实存在的 TDX 根目录及 `connect.cfg`、`connect-ShowTab.cfg`、`embconnect.cfg` 等配置文件；扩展 `win7rootList` 覆盖全部配置路径；
+        - **`ats/tdx_realtime_fetcher.py`**：彻底移除静态写死的 `LOCAL_TDX_CONFIG_PATHS` 常量数组，重构 `get_local_tdx_config_paths()` 与 `get_all_tdx_hosts()` 直连 `cct.get_tdx_config_paths()`，自动过滤无效路径，动态解析所有有效配置文件的 `[HQHOST]` 主机并与 Fallback 节点去重合并；
+    - [x] **自动化测试全量 100% 验证通过**：
+        - 新增 `tests/test_tdx_adaptive_config.py` 覆盖路径自适应、服务器提取及 11 元组解包验证；
+        - 运行 `pytest tests/test_tdx_adaptive_config.py tests/test_intraday_strategy_engine.py tests/test_signal_ledger.py`，全量 28 项单元测试 **100% PASSED**！
+
 ## 2026-08-28 15:45
 - [x] **彻底修复新股自动策略生成、删除重建后首日开盘价与发行基准价异常 & 根治全市场截面表误入分时产生的海量毛刺脏数据日志 (`stock_standalone/ats/new_stock_strategy_generator.py`, `stock_standalone/ats/intraday_strategy_engine.py`, `stock_standalone/ats/ui/intraday_strategy_dialog.py`, `stock_standalone/tests/test_new_stock_module.py`)**：
     - [x] **新股权威发行价 SSOT 统一与彻底消除写死 20.0 / 100.0 兜底**：
