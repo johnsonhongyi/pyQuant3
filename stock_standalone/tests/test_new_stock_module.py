@@ -315,6 +315,73 @@ class TestNewStockModule(unittest.TestCase):
 
         print("\n[Test 7] 09:15~09:25 集合竞价期数据捕获与天梯追踪能力验证成功！")
 
+    def test_08_bidding_intent_and_speed_decision(self):
+        """测试 TDXRealtimeFetcher 与 LimitUpEngine 集合竞价意图识别与高开竞速决策"""
+        from ats.tdx_realtime_fetcher import TDXRealtimeFetcher
+        fetcher = TDXRealtimeFetcher.get_instance()
+
+        # 模拟 09:20~09:25 不可撤单阶段的多维标的
+        clean_codes = ["600001", "300002", "000003", "600004"]
+        sector_map = {"600001": "芯片", "300002": "芯片", "000003": "机器人", "600004": "光伏"}
+        mp_cache = {
+            "600001": {"dff": 4.0, "dff2": 10.0, "dff3": 15.0, "rank": 1},
+            "300002": {"dff": 2.0, "dff2": 6.0, "dff3": 8.0, "rank": 10},
+            "000003": {"dff": 3.0, "dff2": 8.0, "dff3": 12.0, "rank": 5},
+            "600004": {"dff": -1.0, "dff2": 0.0, "dff3": 0.0, "rank": 50},
+        }
+        name_map = {
+            "600001": "一字顶格龙",
+            "300002": "高开抢筹锋",
+            "000003": "弱转强先锋",
+            "600004": "诱多假高开",
+        }
+
+        # 模拟 TDX quotes (竞价阶段 price=0, bid1 申报溢价)
+        # 我们 mock get_security_quotes_safe
+        original_get_quotes = fetcher.get_security_quotes_safe
+        try:
+            fetcher.get_security_quotes_safe = lambda codes, force=False: [
+                {
+                    "code": "600001", "price": 0.0, "last_close": 10.0, "bid1": 11.0, "ask1": 0.0,
+                    "bid_vol1": 50000, "bid_vol2": 10000, "ask_vol1": 0, "open": 11.0, "vol": 0, "amount": 0
+                },
+                {
+                    "code": "300002", "price": 0.0, "last_close": 20.0, "bid1": 21.2, "ask1": 21.3,
+                    "bid_vol1": 15000, "bid_vol2": 8000, "ask_vol1": 2000, "open": 21.2, "vol": 0, "amount": 0
+                },
+                {
+                    "code": "000003", "price": 0.0, "last_close": 15.0, "bid1": 15.6, "ask1": 15.7,
+                    "bid_vol1": 8000, "bid_vol2": 5000, "ask_vol1": 1500, "open": 15.6, "vol": 0, "amount": 0
+                },
+                {
+                    "code": "600004", "price": 0.0, "last_close": 30.0, "bid1": 31.0, "ask1": 31.1,
+                    "bid_vol1": 500, "bid_vol2": 200, "ask_vol1": 15000, "open": 31.0, "vol": 0, "amount": 0
+                }
+            ]
+
+            alpha_quotes = fetcher.fetch_multi_stock_alpha_quotes(clean_codes, sector_map, mp_cache, name_map)
+            self.assertEqual(len(alpha_quotes), 4)
+
+            # 验证 600001 一字顶格意图
+            q1 = next(q for q in alpha_quotes if q["code"] == "600001")
+            self.assertEqual(q1["price"], 11.0)
+            self.assertEqual(q1["pct"], 10.0)
+            self.assertTrue("一字" in q1["order_intent"] or "封" in q1["order_intent"])
+
+            # 验证 300002 高开抢筹意图 (+6.0%, 买盘压强 > 75%)
+            q2 = next(q for q in alpha_quotes if q["code"] == "300002")
+            self.assertEqual(q2["price"], 21.2)
+            self.assertEqual(q2["pct"], 6.0)
+            self.assertTrue(q2["bid_pressure"] >= 75.0)
+
+            # 验证 600004 诱多抢跑意图 (买盘压强 <= 40%)
+            q4 = next(q for q in alpha_quotes if q["code"] == "600004")
+            self.assertTrue(q4["bid_pressure"] < 40.0)
+
+            print("[Test 8] TDXRealtimeFetcher 集合竞价意图与高开竞速决策验证成功！")
+        finally:
+            fetcher.get_security_quotes_safe = original_get_quotes
+
 
 if __name__ == "__main__":
     unittest.main()

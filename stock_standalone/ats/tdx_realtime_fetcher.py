@@ -1215,13 +1215,17 @@ class TDXRealtimeFetcher:
             if not code_str:
                 continue
 
-            price = float(q.get("price", 0.0))
-            open_p = float(q.get("open", price))
-            high_p = float(q.get("high", price))
-            low_p = float(q.get("low", price))
+            price_raw = float(q.get("price", 0.0) or 0.0)
+            bid1_p = float(q.get("bid1", 0.0) or 0.0)
+            ask1_p = float(q.get("ask1", 0.0) or 0.0)
+            open_p_raw = float(q.get("open", 0.0) or 0.0)
+            price = price_raw if price_raw > 0 else (bid1_p if bid1_p > 0 else (open_p_raw if open_p_raw > 0 else ask1_p))
+            open_p = open_p_raw if open_p_raw > 0 else price
+            high_p = float(q.get("high", price) or price)
+            low_p = float(q.get("low", price) or price)
             if low_p <= 1.0 or (price > 5.0 and low_p < price * 0.1):
                 low_p = price if price > 0 else (open_p if open_p > 0 else 10.0)
-            last_close = float(q.get("last_close", price))
+            last_close = float(q.get("last_close", price) or price)
             vol = float(q.get("vol", 0.0))       # 手
             amount = float(q.get("amount", 0.0)) # 元
             cur_vol = float(q.get("cur_vol", 0.0))
@@ -1264,25 +1268,85 @@ class TDXRealtimeFetcher:
             bid_pressure = round((bid_vol_sum / total_depth) * 100.0, 1) if total_depth > 0 else 50.0
             taker_buy_ratio = round((b_vol / (b_vol + s_vol)) * 100.0, 1) if (b_vol + s_vol > 0) else 50.0
 
-            # 盘口主力行为分析
-            if pct >= 9.8 and (ask_vol_sum == 0 or bid_pressure > 85.0):
-                order_intent = "🔒 封板抢筹"
-                intent_score = 95
-            elif taker_buy_ratio >= 58.0 or (price >= high_p - 0.02 and bid_pressure >= 55.0):
-                order_intent = "🔥 主动扫买"
-                intent_score = 85
-            elif taker_buy_ratio <= 42.0 and bid_pressure <= 45.0:
-                order_intent = "⚠️ 主动砸盘"
-                intent_score = 30
-            elif bid_pressure >= 65.0:
-                order_intent = "🛡️ 大单托底"
-                intent_score = 75
-            elif bid_pressure <= 35.0:
-                order_intent = "🧱 大单压盘"
-                intent_score = 40
+            # 盘口主力行为与集合竞价意图深度分析
+            now_hhmm = time.strftime("%H:%M")
+            is_bidding_0915_0920 = ("09:15" <= now_hhmm < "09:20")
+            is_bidding_0920_0925 = ("09:20" <= now_hhmm <= "09:25")
+            is_bidding_0925_0930 = ("09:25" < now_hhmm < "09:30")
+            is_bidding_session = is_bidding_0915_0920 or is_bidding_0920_0925 or is_bidding_0925_0930
+
+            if is_bidding_session:
+                if is_bidding_0915_0920:
+                    # ── A. 09:15~09:20 试撮合可撤单阶段 ──
+                    if pct >= 9.5 and bid_pressure >= 80.0:
+                        order_intent = "👑 竞价试盘一字"
+                        intent_score = 90
+                    elif pct >= 3.5 and bid_pressure >= 70.0:
+                        order_intent = "⚡ 试撮合抢筹"
+                        intent_score = 80
+                    elif pct >= 3.0 and bid_pressure <= 40.0:
+                        order_intent = "⚠️ 虚挂测盘"
+                        intent_score = 35
+                    elif pct <= -3.0:
+                        order_intent = "🧱 竞价低开试盘"
+                        intent_score = 30
+                    else:
+                        order_intent = "⏱️ 竞价试撮合"
+                        intent_score = 50
+                elif is_bidding_0920_0925:
+                    # ── B. 09:20~09:25 不可撤单真实申报阶段 (黄金定龙与高开竞速) ──
+                    if pct >= 9.5 and (ask_vol_sum == 0 or bid_pressure >= 80.0):
+                        order_intent = "👑 竞价一字顶格"
+                        intent_score = 98
+                    elif (3.0 <= pct < 9.5) and bid_pressure >= 75.0:
+                        order_intent = "🚀 竞价高开抢筹"
+                        intent_score = 92
+                    elif (pct >= 3.0) and (perc3d <= 1.0 or dff2 >= 5.0) and bid_pressure >= 65.0:
+                        order_intent = "🔥 弱转强超预期"
+                        intent_score = 90
+                    elif pct >= 3.0 and bid_pressure <= 40.0:
+                        order_intent = "⚠️ 竞价诱多抢跑"
+                        intent_score = 30
+                    elif pct <= -3.0 and bid_pressure <= 35.0:
+                        order_intent = "🧱 竞价大幅低开"
+                        intent_score = 25
+                    else:
+                        order_intent = "⚖️ 竞价真实博弈"
+                        intent_score = 50
+                else:
+                    # ── C. 09:25~09:30 定盘静默阶段 ──
+                    if pct >= 9.5:
+                        order_intent = "🔒 竞价一字定盘"
+                        intent_score = 95
+                    elif pct >= 3.0 and bid_pressure >= 70.0:
+                        order_intent = "🔒 定盘高开抢筹"
+                        intent_score = 88
+                    elif pct >= 3.0 and bid_pressure <= 40.0:
+                        order_intent = "⚠️ 定盘诱多压制"
+                        intent_score = 35
+                    else:
+                        order_intent = "🔒 竞价定盘锁定"
+                        intent_score = 50
             else:
-                order_intent = "⚖️ 均衡博弈"
-                intent_score = 50
+                # ── D. 连续撮合交易时段 (09:30~15:00) ──
+                if pct >= 9.8 and (ask_vol_sum == 0 or bid_pressure > 85.0):
+                    order_intent = "🔒 封板抢筹"
+                    intent_score = 95
+                elif taker_buy_ratio >= 58.0 or (price >= high_p - 0.02 and bid_pressure >= 55.0):
+                    order_intent = "🔥 主动扫买"
+                    intent_score = 85
+                elif taker_buy_ratio <= 42.0 and bid_pressure <= 45.0:
+                    order_intent = "⚠️ 主动砸盘"
+                    intent_score = 30
+                elif bid_pressure >= 65.0:
+                    order_intent = "🛡️ 大单托底"
+                    intent_score = 75
+                elif bid_pressure <= 35.0:
+                    order_intent = "🧱 大单压盘"
+                    intent_score = 40
+                else:
+                    order_intent = "⚖️ 均衡博弈"
+                    intent_score = 50
 
             # 3. 换手率计算 (100% 对齐通达信流通盘换手，自动过滤成交额异常大数)
             mp_info = multi_period_cache.get(code_str, {})
@@ -1392,8 +1456,52 @@ class TDXRealtimeFetcher:
             # 是否多日多头底座扎实 (2D/3D 加速)
             has_base = (dff2 > 0.0 or dff3 > 0.0)
 
-            # ── 💡 统一多模块智能阿尔法分拣决策 ──
-            if (pct >= 9.5 and ("涨停" in order_intent or bid_p >= 75.0)) or (is_sec_leader and pct >= 4.5 and vwap_dev >= 0.0):
+            # ── 💡 统一多模块智能阿尔法分拣决策 (集合竞价高开竞速与盘中连续撮合买点) ──
+            if is_bidding_session:
+                if "一字" in order_intent or (pct >= 9.5 and bid_p >= 75.0):
+                    buy_type = "👑 竞价一字"
+                    buy_tag = "BID_LIMIT"
+                    buy_zone = f"{price:.2f}"
+                    stop_loss = round(price * 0.95, 2)
+                    reason = f"集合竞价一字顶格封板 (买盘压强{bid_p:.0f}%), {order_intent}"
+                    type_priority = 100
+                elif "高开抢筹" in order_intent:
+                    buy_type = "🚀 竞价高开"
+                    buy_tag = "BID_SURGE"
+                    buy_zone = f"{round(price * 0.99, 2)} ~ {price:.2f}"
+                    stop_loss = round(price * 0.97, 2)
+                    reason = f"不可撤单阶段真金白银高开竞速抢筹 (+{pct:.1f}%, 买盘压强{bid_p:.0f}%), 极速先手点"
+                    type_priority = 96
+                elif "弱转强" in order_intent:
+                    buy_type = "🔥 弱转强"
+                    buy_tag = "BID_REVERSAL"
+                    buy_zone = f"{round(price * 0.99, 2)} ~ {price:.2f}"
+                    stop_loss = round(price * 0.97, 2)
+                    reason = f"竞价大幅弱转强超预期 (+{pct:.1f}%, 多头底座DFF2={dff2:.1f}), 黄金反转抢手"
+                    type_priority = 94
+                elif "诱多" in order_intent:
+                    buy_type = "⚠️ 诱多抢跑"
+                    buy_tag = "TRAP"
+                    buy_zone = "--"
+                    stop_loss = round(price * 0.95, 2)
+                    reason = f"竞价虚假高开但买盘压强极弱({bid_p:.0f}%), 卖盘重压防砸"
+                    type_priority = 10
+                elif pct >= 4.5 and is_sec_leader:
+                    buy_type = "👑 竞价领涨"
+                    buy_tag = "LEADER"
+                    buy_zone = f"{price:.2f}"
+                    stop_loss = round(price * 0.97, 2)
+                    reason = f"板块竞价领涨第一名 (+{pct:.1f}%, 买盘压强{bid_p:.0f}%)"
+                    type_priority = 92
+                else:
+                    buy_type = "⏱️ 竞价观望"
+                    buy_tag = "WATCH"
+                    buy_zone = "--"
+                    stop_loss = round(price * 0.95, 2)
+                    reason = f"竞价阶段常规博弈 (+{pct:.1f}%, 买盘压强{bid_p:.0f}%)"
+                    type_priority = 50
+
+            elif (pct >= 9.5 and ("涨停" in order_intent or bid_p >= 75.0)) or (is_sec_leader and pct >= 4.5 and vwap_dev >= 0.0):
                 # 👑 领涨龙头：封死涨停或板块绝对领涨第一名
                 buy_type = "👑 领涨龙头"
                 buy_tag = "LEADER"
