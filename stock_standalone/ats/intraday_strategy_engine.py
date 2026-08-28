@@ -1302,7 +1302,8 @@ class IntradayStrategyEngine:
 
         state["signals"] = signals
         state["triggered_rules"] = triggered_rule_ids
-        state["remaining_position_ratio"] = rem_ratio
+        state["remaining_ratio"] = max(0.0, float(rem_ratio))
+        state["remaining_position_ratio"] = max(0.0, float(rem_ratio))
         state["execution_logs"] = execution_logs
         return signals
 
@@ -2058,7 +2059,8 @@ class IntradayStrategyEngine:
                 state["triggered_rules"].add("rule_halt_30_global")
                 actual_sell = min(state["remaining_ratio"], 0.30)
                 if actual_sell > 0.001:
-                    state["remaining_ratio"] -= actual_sell
+                    state["remaining_ratio"] = max(0.0, state["remaining_ratio"] - actual_sell)
+                    state["remaining_position_ratio"] = state["remaining_ratio"]
                     sugg_p = round(open_price * 1.28, 2)
                     sig_pt = SignalPoint(
                         code=c_clean,
@@ -2203,6 +2205,7 @@ class IntradayStrategyEngine:
                 if actual_sell_ratio <= 0.001:
                     continue
                 state["remaining_ratio"] = max(0.0, state["remaining_ratio"] - actual_sell_ratio)
+                state["remaining_position_ratio"] = state["remaining_ratio"]
 
                 sig_msg = f"[{rule.get('name')}] {trigger_reason} | 卖出{actual_sell_ratio*100:.0f}% 建议挂单:{suggested_limit_price:.2f}"
                 log_entry = f"{clean_time} {sig_msg}"

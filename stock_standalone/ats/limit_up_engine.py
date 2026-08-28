@@ -949,7 +949,12 @@ class LimitUpEngine:
                 ch_score = ch_score * time_multiplier
                 momentum_score = round(min(88.0, max(45.0, ch_score)), 0)
 
-                is_first_day = ("N" in str(r.get("name", ""))) or (code_str.startswith("920") and pct > 30.0) or ("首日" in str(r.get("status", "")))
+                is_first_day = False
+                try:
+                    from ats.intraday_strategy_engine import IntradayStrategyEngine
+                    is_first_day = bool(IntradayStrategyEngine.get_instance().is_stock_first_listing_day(code_str))
+                except Exception:
+                    is_first_day = ("首日" in str(r.get("status", ""))) or (str(r.get("name", "")).startswith("N") and str(r.get("status", "")) in ("", "首日", "今日上市"))
                 if "09:15" <= curr_hhmm <= "09:30" and is_first_day and (seal_amt_wan >= 800.0 or bid_p >= 75.0):
                     r["tier_tag"] = "💎 新股首日真金抢筹"
                     desc_tag = f"💎 首日抢筹({momentum_score:.0f}分)"

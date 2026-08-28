@@ -414,3 +414,41 @@ def test_818_scenario_intraday_full_day_backtest(engine):
     assert final_d["pattern"] == "D/E型·弱势或衰竭"
 
 
+def test_remaining_position_ratio_deduction_and_sync(engine):
+    """测试多笔卖出后剩余持仓比例精准扣减至 0% 以及状态同步"""
+    code = "920288"
+    engine.reset_state(code)
+    open_price = 25.18
+
+    # 模拟分时行情：冲高至 27.85 (+10.6%)，然后跌破 VWAP
+    times = ["09:30", "09:34", "09:41", "10:31", "11:30"]
+    rows = [
+        {"close": 25.18, "high": 25.18, "low": 25.18, "open": 25.18, "vwap": 25.18, "amount": 1000000.0, "turnover": 5.0},
+        {"close": 27.85, "high": 27.85, "low": 25.18, "open": 25.18, "vwap": 26.50, "amount": 5000000.0, "turnover": 15.0},
+        {"close": 26.25, "high": 27.85, "low": 26.00, "open": 25.18, "vwap": 26.80, "amount": 8000000.0, "turnover": 25.0},
+        {"close": 25.88, "high": 27.85, "low": 25.50, "open": 25.18, "vwap": 26.70, "amount": 12000000.0, "turnover": 35.0},
+        {"close": 25.50, "high": 27.85, "low": 25.00, "open": 25.18, "vwap": 26.50, "amount": 15000000.0, "turnover": 45.0},
+    ]
+    df_mock = pd.DataFrame(rows, index=times)
+
+    strat = engine.get_strategy_by_id("strategy_a_new_stock_batch_sell")
+    if not strat:
+        strat = engine.strategies[0]
+
+    signals = engine.scan_and_evaluate_intraday_timeline(code, df_mock)
+    assert len(signals) >= 1
+
+    state = engine._get_stock_state(code, open_price)
+    rem_ratio = state.get("remaining_ratio", 1.0)
+    rem_pos_ratio = state.get("remaining_position_ratio", 1.0)
+
+    # 验证 remaining_ratio 和 remaining_position_ratio 严格扣减且一致
+    assert rem_ratio <= 0.60
+    assert rem_pos_ratio == rem_ratio
+
+    # 校验所有卖出比例累加和
+    total_sold = sum(getattr(s, "sell_ratio", 0.0) for s in signals)
+    assert abs((1.0 - total_sold) - rem_ratio) < 0.001
+
+
+
