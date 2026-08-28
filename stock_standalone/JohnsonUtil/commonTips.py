@@ -993,6 +993,7 @@ win10dxzq: Optional[str] = CFG.get_path("win10dxzq")
 win7rootAsus: Optional[str] = CFG.get_path("win7rootasus")
 win7rootXunji: Optional[str] = CFG.get_path("win7rootxunji")
 win7rootList: List[Optional[str]] = [win10Triton, win10Lixin, win7rootAsus, win7rootXunji, win10Lengend]
+# win7rootList: List[Optional[str]] = [win10Triton, win10pazq, win10dxzq, win10Lixin, win7rootAsus, win7rootXunji, win10Lengend]
 macroot: Optional[str] = CFG.get_path("macroot")
 macroot_vm: Optional[str] = CFG.get_path("macroot_vm")
 xproot: Optional[str] = CFG.get_path("xproot")
@@ -2311,6 +2312,101 @@ def get_tdx_dir():
         if is_main_process():
             log.error("basedir not exists")
     return basedir
+
+
+def get_all_valid_tdx_dirs() -> List[str]:
+    """
+    自适应获取当前操作系统及设备环境下，所有真实存在的通达信根目录列表（当前活动目录优先）
+    1. 动态自适应探测 global.ini [path] 下定义的所有 TDX 目录
+    2. 优先保留当前活动设备主 TDX 目录 (get_tdx_dir())
+    3. 支持探测常见根目录并去重，杜绝硬编码
+    """
+    valid_dirs: List[str] = []
+    seen = set()
+
+    # 1. 优先获取当前设备主 TDX 目录
+    try:
+        main_dir = get_tdx_dir()
+        if main_dir and os.path.exists(main_dir) and os.path.isdir(main_dir):
+            norm_main = os.path.normpath(main_dir)
+            seen.add(norm_main.lower() if os.name == 'nt' else norm_main)
+            valid_dirs.append(norm_main)
+    except Exception:
+        pass
+
+    # 2. 从 CFG.paths 中动态抽取所有候选路径
+    try:
+        paths_dict = getattr(CFG, 'paths', {}) if 'CFG' in globals() else {}
+        candidate_paths = list(win7rootList) if 'win7rootList' in globals() else []
+        for k, v in paths_dict.items():
+            if isinstance(v, str) and v.strip():
+                candidate_paths.append(v.strip())
+
+        for p in candidate_paths:
+            if not p or not isinstance(p, str):
+                continue
+            clean_p = p.replace('/', path_sep).replace('\\', path_sep).strip()
+            if os.path.exists(clean_p) and os.path.isdir(clean_p):
+                norm_p = os.path.normpath(clean_p)
+                cmp_key = norm_p.lower() if os.name == 'nt' else norm_p
+                if cmp_key not in seen:
+                    seen.add(cmp_key)
+                    valid_dirs.append(norm_p)
+    except Exception:
+        pass
+
+    return valid_dirs
+
+
+def get_tdx_config_paths() -> List[str]:
+    """
+    自适应动态获取当前系统及配置文件 (global.ini) 中所有有效的通达信连接配置文件 (connect.cfg等) 绝对路径列表
+    1. 动态自适应探测 global.ini [path] 下定义的所有 TDX 根目录
+    2. 优先探测当前活动设备主 TDX 目录 (get_tdx_dir())
+    3. 支持探测常见配置文件命名: connect.cfg, connect-ShowTab.cfg, embconnect.cfg, T0002/connect.cfg 等
+    4. 自动过滤不存在的路径并保持顺序去重，杜绝硬编码
+    """
+    config_files: List[str] = []
+    seen = set()
+
+    cfg_subnames = [
+        "connect.cfg",
+        "connect-ShowTab.cfg",
+        "embconnect.cfg",
+        os.path.join("T0002", "connect.cfg"),
+        os.path.join("T0002", "connect-ShowTab.cfg"),
+    ]
+
+    all_dirs = get_all_valid_tdx_dirs()
+    for base_d in all_dirs:
+        for sub in cfg_subnames:
+            try:
+                full_p = os.path.join(base_d, sub)
+                if os.path.isfile(full_p):
+                    norm_p = os.path.normpath(full_p)
+                    cmp_key = norm_p.lower() if os.name == 'nt' else norm_p
+                    if cmp_key not in seen:
+                        seen.add(cmp_key)
+                        config_files.append(norm_p)
+            except Exception:
+                pass
+
+    # 5. 如果 global.ini 中有直接指向 .cfg 文件的路径 (如 tdx_connect_cfg 或包含 .cfg 的 path 项)，也一并兼容
+    try:
+        paths_dict = getattr(CFG, 'paths', {}) if 'CFG' in globals() else {}
+        for k, v in paths_dict.items():
+            if isinstance(v, str) and (v.endswith(".cfg") or v.endswith(".ini")):
+                clean_v = v.replace('/', path_sep).replace('\\', path_sep).strip()
+                if os.path.isfile(clean_v):
+                    norm_p = os.path.normpath(clean_v)
+                    cmp_key = norm_p.lower() if os.name == 'nt' else norm_p
+                    if cmp_key not in seen:
+                        seen.add(cmp_key)
+                        config_files.append(norm_p)
+    except Exception:
+        pass
+
+    return config_files
 
 
 def get_sys_platform() -> str:

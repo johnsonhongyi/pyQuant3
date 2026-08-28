@@ -57,21 +57,42 @@ FALLBACK_TDX_HOSTS = [
     ("中信证券北京", "115.238.56.198", 7709)
 ]
 
-LOCAL_TDX_CONFIG_PATHS = [
-    r"D:\MacTools\WinTools\new_tdx2\connect.cfg",
-    r"D:\MacTools\WinTools\new_tdx2\connect-ShowTab.cfg",
-    r"D:\MacTools\WinTools\new_tdx\connect.cfg",
-    r"D:\MacTools\WinTool\zd_cczq\connect.cfg",
-    r"D:\JohnsonProgram\联动精灵\connect.cfg",
-    r"D:\MacTools\WinTools\tc_pazq\connect.cfg",
-    r"D:\MacTools\WinTools\zd_dxzq\connect.cfg"
-]
+def get_local_tdx_config_paths() -> List[str]:
+    """
+    动态自适应获取当前系统及 global.ini 中配置的所有有效通达信配置文件 (connect.cfg 等)
+    彻底告别静态硬编码，支持跨设备与多环境自适应发现
+    """
+    try:
+        if hasattr(cct, "get_tdx_config_paths"):
+            paths = cct.get_tdx_config_paths()
+            if paths:
+                return paths
+    except Exception as e:
+        logger.error(f"cct.get_tdx_config_paths 探测异常: {e}")
+
+    # 兜底：如果 cct 异常，自适应从 cct.get_tdx_dir() 动态探测
+    fallback_paths = []
+    try:
+        main_dir = cct.get_tdx_dir() if hasattr(cct, "get_tdx_dir") else ""
+        if main_dir and os.path.exists(main_dir):
+            for sub in ["connect.cfg", "connect-ShowTab.cfg", "embconnect.cfg", os.path.join("T0002", "connect.cfg")]:
+                p = os.path.join(main_dir, sub)
+                if os.path.isfile(p):
+                    fallback_paths.append(os.path.normpath(p))
+    except Exception:
+        pass
+
+    return fallback_paths
+
+
+# 兼容性别名：动态获取本地有效配置路径
+LOCAL_TDX_CONFIG_PATHS = get_local_tdx_config_paths()
 
 
 def extract_hosts_from_tdx_cfg(cfg_path: str) -> List[Tuple[str, str, int]]:
     """从通达信 connect.cfg 配置文件中解析 [HQHOST] 服务器列表"""
     hosts = []
-    if not os.path.exists(cfg_path):
+    if not cfg_path or not os.path.exists(cfg_path):
         return hosts
     try:
         with open(cfg_path, "r", encoding="gbk", errors="ignore") as f:
@@ -102,22 +123,27 @@ def extract_hosts_from_tdx_cfg(cfg_path: str) -> List[Tuple[str, str, int]]:
 
 
 def get_all_tdx_hosts() -> List[Tuple[str, str, int]]:
-    """获取所有可用 TDX 服务器（本地预设优先，Fallback 兜底，去重）"""
+    """获取所有可用 TDX 服务器（动态探测本地预设优先，Fallback 兜底，去重）"""
     all_hosts = []
     seen = set()
 
-    for path in LOCAL_TDX_CONFIG_PATHS:
+    cfg_paths = get_local_tdx_config_paths()
+    for path in cfg_paths:
         parsed = extract_hosts_from_tdx_cfg(path)
         for name, ip, port in parsed:
             if (ip, port) not in seen:
                 seen.add((ip, port))
                 all_hosts.append((name, ip, port))
 
+    local_count = len(all_hosts)
     for name, ip, port in FALLBACK_TDX_HOSTS:
         if (ip, port) not in seen:
             seen.add((ip, port))
             all_hosts.append((name, ip, port))
 
+    logger.info(
+        f"⚡ [TDX自适应] 探测到 {len(cfg_paths)} 个有效配置文件，提取 {local_count} 个本地 HQHOST 节点 (总池: {len(all_hosts)} 个)"
+    )
     return all_hosts
 
 
