@@ -40,7 +40,7 @@ from PyQt6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QHeaderView, QSplitter, QGroupBox,
     QTextEdit, QPlainTextEdit, QLineEdit, QComboBox, QMessageBox, QFrame, QGridLayout, QProgressBar,
     QScrollArea, QTabWidget, QDoubleSpinBox, QRadioButton, QButtonGroup,
-    QCheckBox, QSlider, QToolBar
+    QCheckBox, QSlider, QToolBar, QStackedWidget
 )
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QSettings, QParallelAnimationGroup, QPropertyAnimation, QEasingCurve, QRect, QEvent, QPoint, QPointF
 from PyQt6.QtGui import QColor, QFont, QBrush, QIcon, QPainter, QPen, QPainterPath, QCursor, QPolygon, QPolygonF
@@ -169,7 +169,25 @@ def _format_tooltip_text(val) -> Optional[str]:
     return str(val)
 
 
-def _set_or_update_table_item(
+class NumericTableWidgetItem(QTableWidgetItem):
+    """支持精确数值比较与自定义排序权重的 QTableWidgetItem"""
+    def __init__(self, text: str = "", sort_val: Optional[float] = None):
+        super().__init__(str(text))
+        self.sort_val = float(sort_val) if sort_val is not None else None
+
+    def __lt__(self, other):
+        if self.sort_val is not None and isinstance(other, NumericTableWidgetItem) and other.sort_val is not None:
+            return self.sort_val < other.sort_val
+        if self.sort_val is not None and other is not None:
+            try:
+                raw = str(other.text()).replace("%", "").replace("元", "").replace("分", "").replace("万", "").replace("亿", "").replace("+", "").strip()
+                return self.sort_val < float(raw)
+            except Exception:
+                pass
+        return super().__lt__(other)
+
+
+def _safe_set_cell_item(
     table: QTableWidget,
     row: int,
     col: int,
@@ -178,20 +196,26 @@ def _set_or_update_table_item(
     bg_color=None,
     align=None,
     font=None,
-    tooltip=None
+    tooltip=None,
+    sort_val: Optional[float] = None
 ) -> QTableWidgetItem:
     """
     安全设置或更新 QTableWidget 单元格 Item。
     若 Item 已经存在，则只调用 setText / setForeground 等属性更新，
     绝不重复调用 setItem()，彻底避免 'cannot insert an item that is already owned' 警告。
-    支持自动格式化 list / tuple 类型的 text 与 tooltip。
+    支持自动格式化 list / tuple 类型的 text 与 tooltip，并支持精确数值排序 sort_val。
     """
     str_text = _format_cell_text(text)
     str_tooltip = _format_tooltip_text(tooltip)
 
     item = table.item(row, col)
-    if item is None:
-        item = QTableWidgetItem(str_text)
+    need_create = item is None or (sort_val is not None and not isinstance(item, NumericTableWidgetItem))
+    
+    if need_create:
+        if sort_val is not None:
+            item = NumericTableWidgetItem(str_text, sort_val)
+        else:
+            item = QTableWidgetItem(str_text)
         if fg_color is not None:
             item.setForeground(fg_color if isinstance(fg_color, (QColor, QBrush)) else QColor(fg_color))
         if bg_color is not None:
@@ -205,6 +229,8 @@ def _set_or_update_table_item(
         table.setItem(row, col, item)
     else:
         item.setText(str_text)
+        if sort_val is not None and isinstance(item, NumericTableWidgetItem):
+            item.sort_val = float(sort_val)
         if fg_color is not None:
             item.setForeground(fg_color if isinstance(fg_color, (QColor, QBrush)) else QColor(fg_color))
         if bg_color is not None:
@@ -216,6 +242,10 @@ def _set_or_update_table_item(
         if str_tooltip is not None:
             item.setToolTip(str_tooltip)
     return item
+
+
+# 别名兼容
+_set_or_update_table_item = _safe_set_cell_item
 
 
 class SBCChartCanvas(QWidget):
@@ -4328,27 +4358,37 @@ class IntegratedTradingStrategyPanel(QWidget):
 
         # 2. 顶部状态卡
         tier_name, _, _ = self.engine.get_open_price_tier(open_price, code=c_clean)
-        unlisted_str = " (待上市估价)" if is_unlisted or open_price <= 0 else ""
         
-        if is_daily_strategy:
-            open_gain_str = f" (今开幅: {((open_price-last_close)/last_close*100):+.2f}%)" if (last_close and last_close > 0 and open_price > 0) else ""
-            self.lbl_open_info.setText(f"开盘基准: {open_price:.2f}元{open_gain_str} | 现价: {price:.2f}元 | VWAP: {vwap:.2f}元")
+        if is_unlisted:
+            issue_p = float(strategy.get("stock_spec", {}).get("issue_price", open_price) or open_price)
+            self.lbl_open_info.setText(f"💡 【待上市新股】发行基准: {issue_p:.2f}元 (尚未挂牌) | 估价档位: {tier_name} | 估价现价: {price:.2f}元")
+            self.lbl_strat_name.setText(f"当前策略: {strategy.get('name', '专属上市阶梯策略')}")
+            self.lbl_score_badge.setText(
+                f"🏆 综合评级: <font color='#00ff88'>{tot_score:.2f}分</font> (形态: <font color='#ffd700'>【待上市估价】</font>) | 发行价: {issue_p:.2f}元"
+            )
+            self.lbl_position_status.setText(
+                f"📦 标的状态: <font color='#38bdf8'><b>待上市挂牌</b></font> | 估价推演就绪"
+            )
+            self.lbl_diagnosis.setText(f"⏱️ [{current_time_str}] 【待上市新股】尚未正式挂牌上市交易，已为您自动载入发行基准价 ({issue_p:.2f}元)。")
+            self.lbl_action.setText("【待上市估价推演】当前标的处于待上市阶段，系统已配置发行价与阶梯估价模型。您可开启顶部【💡 开启手动估价】自由推演 7 节点买卖点。")
         else:
-            self.lbl_open_info.setText(f"开盘基准: {open_price:.2f}元{unlisted_str} | 所属档位: {tier_name} | 现价: {price:.2f}元 | VWAP: {vwap:.2f}元")
+            if is_daily_strategy:
+                open_gain_str = f" (今开幅: {((open_price-last_close)/last_close*100):+.2f}%)" if (last_close and last_close > 0 and open_price > 0) else ""
+                self.lbl_open_info.setText(f"开盘基准: {open_price:.2f}元{open_gain_str} | 现价: {price:.2f}元 | VWAP: {vwap:.2f}元")
+            else:
+                self.lbl_open_info.setText(f"开盘基准: {open_price:.2f}元 | 所属档位: {tier_name} | 现价: {price:.2f}元 | VWAP: {vwap:.2f}元")
 
-        self.lbl_strat_name.setText(f"当前策略: {strategy.get('name', '默认策略')}")
-        self.lbl_score_badge.setText(
-            f"🏆 综合评级: <font color='#00ff88'>{tot_score:.2f}分</font> (形态: <font color='#ffd700'>【{pattern}】</font>) | 资金强度: {intensity_val:.2f}x"
-        )
-        pos_color_top = "#00ff88" if rem_ratio > 0.3 else ("#ffd700" if rem_ratio > 0.001 else "#ff5555")
-        pos_suffix_top = " (已清仓)" if rem_ratio <= 0.001 else ""
-        self.lbl_position_status.setText(
-            f"📦 持仓状态: 剩余 <font color='{pos_color_top}'><b>{rem_ratio*100:.0f}%</b>{pos_suffix_top}</font> | 已触发: {len(signals)} 步买卖"
-        )
-
-        # 3. 实操指引
-        self.lbl_diagnosis.setText(f"⏱️ [{current_time_str}] {eval_res.get('current_status_diagnosis', '')}")
-        self.lbl_action.setText(eval_res.get("action_execution_text", ""))
+            self.lbl_strat_name.setText(f"当前策略: {strategy.get('name', '默认策略')}")
+            self.lbl_score_badge.setText(
+                f"🏆 综合评级: <font color='#00ff88'>{tot_score:.2f}分</font> (形态: <font color='#ffd700'>【{pattern}】</font>) | 资金强度: {intensity_val:.2f}x"
+            )
+            pos_color_top = "#00ff88" if rem_ratio > 0.3 else ("#ffd700" if rem_ratio > 0.001 else "#ff5555")
+            pos_suffix_top = " (已清仓)" if rem_ratio <= 0.001 else ""
+            self.lbl_position_status.setText(
+                f"📦 持仓状态: 剩余 <font color='{pos_color_top}'><b>{rem_ratio*100:.0f}%</b>{pos_suffix_top}</font> | 已触发: {len(signals)} 步买卖"
+            )
+            self.lbl_diagnosis.setText(f"⏱️ [{current_time_str}] {eval_res.get('current_status_diagnosis', '')}")
+            self.lbl_action.setText(eval_res.get("action_execution_text", ""))
 
         # 4. 时间轴策略阶段高亮（带滚动条位置锁定）
         sb_phase = self.phase_scroll.verticalScrollBar()
@@ -4508,7 +4548,11 @@ class IntegratedTradingStrategyPanel(QWidget):
         # 🛡️ 识别新股首日保护模式 (100% 由策略引擎权威判定，绝不因盘前缺少昨日数据而误判)
         is_first_listing_day = bool(self.engine.is_stock_first_listing_day(code))
 
-        if is_first_listing_day:
+        if is_unlisted:
+            # 💡 【待上市新股展示模式】：尚未上市挂牌，以发行价与阶梯推演为主
+            op_line_str = f"【开盘基准】: 发行基准价: <font color='{gold}'><b>{issue_p:.2f} 元</b></font> <font color='{cyan}'>(尚未上市挂牌·估价模式)</font><br/>"
+            hl_line_str = f"【挂牌状态】: <font color='#ffd700'><b>待上市阶段</b></font> (发行价: <font color='{gold}'><b>{issue_p:.2f}元</b></font> | 估价推演就绪)<br/>"
+        elif is_first_listing_day:
             # 🛡️ 【新股首日保护模式】：无昨日数据，以真实发行价 issue_p 与今日开盘价 open_price 为锚
             base_ref_p = issue_p if issue_p > 0 else (open_price if open_price > 0 else price)
 
@@ -5187,9 +5231,16 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
         self.combo_strategy.blockSignals(True)
         self.combo_strategy.clear()
 
+        from ats.intraday_strategy_engine import is_valid_stock_code
         for st in self.engine.strategies:
             st_id = st.get("id", "")
             st_name = st.get("name", st_id)
+            target_codes = st.get("target_codes", [])
+            # 过滤垃圾无效占位策略
+            if any(p in st_id for p in ("000000", "000123")) or any(p in st_name for p in ("000000", "000123", "标的_000000", "标的_000123")):
+                continue
+            if target_codes and not any(is_valid_stock_code(str(c)) for c in target_codes):
+                continue
             self.combo_strategy.addItem(f"📋 {st_name}", st_id)
 
         target_id = self.selected_strategy_id
@@ -5207,8 +5258,9 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
 
     def switch_to_code(self, code: str, name: Optional[str] = None):
         """外部（如主窗口）动态切换当前监控标的"""
+        from ats.intraday_strategy_engine import is_valid_stock_code
         c_clean = "".join(filter(str.isdigit, str(code))).zfill(6) if code else ""
-        if not c_clean or c_clean == "000000":
+        if not c_clean or not is_valid_stock_code(c_clean):
             return
         self.code = c_clean
         if not hasattr(self, '_known_codes'):
@@ -5250,12 +5302,12 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
         self.combo_code.blockSignals(True)
         self.combo_code.clear()
 
-        # 聚合所有可用、历史传入与策略配置的代码，杜绝任何代码丢失
+        from ats.intraday_strategy_engine import is_valid_stock_code
         strat_codes = []
-        if self.code and self.code not in strat_codes and self.code != "000000":
+        if self.code and is_valid_stock_code(self.code) and self.code not in strat_codes:
             strat_codes.append(self.code)
         for kc in getattr(self, '_known_codes', []):
-            if kc and kc not in strat_codes and kc != "000000":
+            if kc and is_valid_stock_code(kc) and kc not in strat_codes:
                 strat_codes.append(kc)
 
         # 获取当前选定策略所绑定的目标标的代码
@@ -5263,15 +5315,15 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
         if curr_strat and curr_strat.get("target_codes"):
             for tc in curr_strat.get("target_codes", []):
                 c_clean = "".join(filter(str.isdigit, str(tc))).zfill(6)
-                if c_clean and c_clean not in strat_codes and c_clean != "000000":
+                if c_clean and is_valid_stock_code(c_clean) and c_clean not in strat_codes:
                     strat_codes.append(c_clean)
 
         for c in self.engine.get_all_target_codes():
-            if c and c not in strat_codes and c != "000000":
+            if c and is_valid_stock_code(c) and c not in strat_codes:
                 strat_codes.append(c)
 
         if not strat_codes:
-            strat_codes = [self.code] if self.code and self.code != "000000" else ["688826"]
+            strat_codes = ["688826"]
 
         for c in strat_codes:
             c_name = resolve_stock_name(c)
@@ -5494,7 +5546,11 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
         spec = self.engine.get_stock_ladder_spec(c_clean)
         float_mv_yi = float(spec.get("float_mv_yi", 15.0))
 
-        # 1. 只有当用户显式勾选了【✍️ 开启手动估价/异常推演 (默认关闭)】复选框时，才由手动 SpinBox 驱动；否则 100% 走 TDX 秒级直连！
+        # 0. 权威检测该标的是否为尚未挂牌交易的【待上市新股】
+        is_unlisted = self.engine.is_stock_unlisted(c_clean)
+        issue_p = float(spec.get("issue_price", 0.0) or 0.0)
+
+        # 1. 只有当用户显式勾选了【✍️ 开启手动估价/异常推演 (默认关闭)】复选框时，才由手动 SpinBox 驱动
         if hasattr(self, "chk_manual_eval") and self.chk_manual_eval.isChecked() and getattr(self, "selected_data_source", "") == "MANUAL_EVAL":
             op = self.spin_eval_open.value()
             tp = self.spin_eval_price.value()
@@ -5505,9 +5561,36 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
             amt = float(to_rate / 100.0 * float_mv_yi * 1e8)
             b1 = tp
             lc = op
-            return op, tp, hp, lp, vw, to_rate, amt, b1, resolved_name, False, lc
+            return op, tp, hp, lp, vw, to_rate, amt, b1, resolved_name, is_unlisted, lc
 
-        # 2. 优先从 TDX 极速秒级直连获取
+        # 2. 🛡️ 待上市新股权威保护：若标的尚未挂牌交易，自动以发行价估价阶梯呈现，坚决过滤撮合测试脏数据 (如 0.01元/1.08元)
+        if is_unlisted:
+            op_base = issue_p if issue_p > 0 else 60.0
+            op = op_base
+            tp = op_base
+            hp = op_base
+            lp = op_base
+            vw = op_base
+            to_rate = 0.0
+            amt = 0.0
+            b1 = op_base
+            lc = op_base
+            if hasattr(self, 'lbl_tdx_status'):
+                self.lbl_tdx_status.setText("💡 待上市新股 (估价模型)")
+                self.lbl_tdx_status.show()
+            if hasattr(self, 'spin_eval_open') and not getattr(self.chk_manual_eval, "isChecked", lambda: False)():
+                self.spin_eval_open.blockSignals(True)
+                self.spin_eval_price.blockSignals(True)
+                self.spin_eval_turnover.blockSignals(True)
+                self.spin_eval_open.setValue(op)
+                self.spin_eval_price.setValue(round(op * 1.10, 2))
+                self.spin_eval_turnover.setValue(60.0)
+                self.spin_eval_open.blockSignals(False)
+                self.spin_eval_price.blockSignals(False)
+                self.spin_eval_turnover.blockSignals(False)
+            return op, tp, hp, lp, vw, to_rate, amt, b1, resolved_name, True, lc
+
+        # 3. 优先从 TDX 极速秒级直连获取
         if getattr(self, "selected_data_source", "TDX_REALTIME") == "TDX_REALTIME":
             try:
                 tdx_snap = self.tdx_fetcher.fetch_stock_snapshot(c_clean)
@@ -5543,7 +5626,7 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
             except Exception as e:
                 logger.debug(f"TDX 获取 {c_clean} 异常: {e}")
 
-        # 3. 若 TDX 秒级快照未能获取，从 1 分钟 K 线历史或 ATS 推送 df 解析
+        # 4. 若 TDX 秒级快照未能获取，从 1 分钟 K 线历史或 ATS 推送 df 解析
         curr_df = self._latest_df
         if curr_df is None and parent is not None and hasattr(parent, 'current_df') and parent.current_df is not None:
             curr_df = parent.current_df
@@ -5565,12 +5648,10 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
         amount_val = snap["amount"]
         bid1_price = snap["bid1_price"]
         last_close = snap.get("last_close", open_price)
-        is_unlisted = False
 
-        # 4. 若行情与 K线 历史均尚未产生（如周日或未上市），且用户显式勾选了手动估价，才由界面估价 SpinBox 驱动
+        # 5. 若行情与 K线 历史均尚未产生，且用户显式勾选了手动估价，由界面估价 SpinBox 驱动
         if open_price <= 0 and trade_price <= 0:
             if hasattr(self, "chk_manual_eval") and self.chk_manual_eval.isChecked():
-                is_unlisted = True
                 open_price = self.spin_eval_open.value()
                 trade_price = self.spin_eval_price.value()
                 turnover_rate = self.spin_eval_turnover.value()
@@ -5747,21 +5828,40 @@ IntradayStrategyDialog = PinzhunLadderStandaloneWindow
 
 class AllCodesStrategyEvalDialog(QDialog):
     """
-    ⚡ 全量 Code 分时阶梯策略自动检测与全景推演对话框
-    特点：
-    1. 窗口几何位置与尺寸自动持久化 (QSettings + config/intraday_ui_layout.json 双保险)
-    2. 默认尺寸适中 (840x640)，内容区域基于 QScrollArea 支持平滑滚动
-    3. 支持按代码/名称/形态/动作实时关键词过滤
-    4. 卡片化展示每只标的：开盘价、现价、涨跌幅、VWAP、综合得分、形态判定、实操指引与触发信号
-    5. 支持一键切换主工作台标的 (🎯 查看此标的) 及一键复制全文报告
+    全量 Code 分时阶梯策略自动检测评估报告窗口
+    1. 采用科技暗夜风格，支持全屏与任意拉伸，并持久化保存窗口几何尺寸 (QSettings + config/intraday_ui_layout.json)
+    2. 支持 【全内容表格模式】 与 【流式卡片模式】 双视图无缝切换
+    3. 全内容表格包含 14 列：序号、代码、名称、⭐综合评分、形态分类、所属策略、现价、涨跌幅、开盘价、VWAP、换手率、成交额、实操指引与触发卖点、操作
+    4. 评分列及行情列全部采用数值比较器 (NumericTableWidgetItem)，支持用户直接点击表头按分数/涨跌幅自由升降序排序
+    5. 顶栏提供快速排序选择下拉框（综合评分高到低、涨跌幅、换手率、成交额等），卡片流与表格全自动响应排序
+    6. 实时关键词过滤（代码/名称/策略/形态/动作）
+    7. 支持双击行或点击【🎯 查看此标的】直接穿透切换主工作台当前标的
     """
+    TABLE_HEADERS = [
+        "#", "代码", "名称", "⭐ 综合评分", "形态分类", "所属策略",
+        "现价(元)", "涨跌幅", "开盘基准", "VWAP", "换手率", "成交额",
+        "实操指引 & 触发信号", "操作"
+    ]
+
     def __init__(self, parent_workbench: 'PinzhunLadderStandaloneWindow'):
         super().__init__(parent_workbench)
         self.workbench = parent_workbench
         self.engine = parent_workbench.engine
-        self.cards_data = []  # 存储所有评估结果用于实时过滤
-        self.card_widgets = []  # 存储渲染的卡片控件
+        self.cards_data = []  # 存储所有评估结果数据字典
+        self.card_widgets = []  # 存储渲染的卡片控件 (item_data, widget)
         self.full_report_text = ""
+        self.current_sort_key = "score_desc"  # 默认按综合评分降序
+        self.current_view_mode = "table"  # 默认全内容表格视图
+        
+        # 联动与防抖状态
+        self._pending_linkage_row = -1
+        self._last_linked_code = None
+        self._last_linked_time = 0
+        self._linkage_timer = QTimer(self)
+        self._linkage_timer.setSingleShot(True)
+        self._linkage_timer.setInterval(60)  # 60ms 平滑防抖 (防键盘快速连按风暴)
+        self._linkage_timer.timeout.connect(self._fire_linkage_debounced)
+        self.selected_card_index = -1
 
         self.setWindowTitle("⚡ 全量 Code 分时阶梯策略自动检测评估报告")
         self.setWindowFlags(
@@ -5810,11 +5910,30 @@ class AllCodesStrategyEvalDialog(QDialog):
                 border: 1px solid #38bdf8;
                 background-color: #0f172a;
             }
+            QComboBox {
+                background-color: #1e293b;
+                border: 1px solid #334155;
+                border-radius: 6px;
+                padding: 4px 10px;
+                color: #38bdf8;
+                font-size: 12px;
+                font-weight: bold;
+            }
+            QComboBox:hover {
+                border: 1px solid #38bdf8;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #0f172a;
+                border: 1px solid #334155;
+                selection-background-color: #0284c7;
+                color: #f8fafc;
+                font-size: 12px;
+            }
             QPushButton {
                 background-color: #1e293b;
                 border: 1px solid #334155;
                 border-radius: 6px;
-                padding: 6px 14px;
+                padding: 6px 12px;
                 color: #e2e8f0;
                 font-size: 12px;
                 font-weight: bold;
@@ -5835,6 +5954,11 @@ class AllCodesStrategyEvalDialog(QDialog):
             QPushButton#PrimaryBtn:hover {
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #0ea5e9, stop:1 #0284c7);
             }
+            QPushButton#ActiveViewBtn {
+                background-color: #0369a1;
+                border: 1px solid #38bdf8;
+                color: #ffffff;
+            }
             QFrame#StockCard {
                 background-color: #0f172a;
                 border: 1px solid #1e293b;
@@ -5843,6 +5967,28 @@ class AllCodesStrategyEvalDialog(QDialog):
             QFrame#StockCard:hover {
                 border: 1px solid #38bdf8;
                 background-color: #131d33;
+            }
+            QTableWidget {
+                background-color: #0f172a;
+                gridline-color: #1e293b;
+                color: #e2e8f0;
+                font-size: 12px;
+                border: 1px solid #1e293b;
+                border-radius: 6px;
+                selection-background-color: #1e3a8a;
+                selection-color: #ffffff;
+            }
+            QHeaderView::section {
+                background-color: #1e293b;
+                color: #38bdf8;
+                font-weight: bold;
+                font-size: 12px;
+                padding: 6px 4px;
+                border: 1px solid #0f172a;
+            }
+            QHeaderView::section:hover {
+                background-color: #334155;
+                color: #ffd700;
             }
         """)
 
@@ -5858,10 +6004,10 @@ class AllCodesStrategyEvalDialog(QDialog):
         top_bar = QFrame()
         top_bar.setStyleSheet("background-color: #0f172a; border: 1px solid #1e293b; border-radius: 8px;")
         top_layout = QHBoxLayout(top_bar)
-        top_layout.setContentsMargins(12, 8, 12, 8)
-        top_layout.setSpacing(10)
+        top_layout.setContentsMargins(10, 8, 10, 8)
+        top_layout.setSpacing(8)
 
-        self.lbl_title = QLabel("⚡ 全量 Code 分时阶梯策略评估报告")
+        self.lbl_title = QLabel("⚡ 全量策略评估")
         self.lbl_title.setStyleSheet("font-size: 14px; font-weight: bold; color: #38bdf8;")
         top_layout.addWidget(self.lbl_title)
 
@@ -5869,12 +6015,48 @@ class AllCodesStrategyEvalDialog(QDialog):
         self.lbl_meta.setStyleSheet("font-size: 12px; color: #94a3b8;")
         top_layout.addWidget(self.lbl_meta)
 
+        top_layout.addSpacing(6)
+
+        # 视图切换按钮组
+        lbl_v = QLabel("视图:")
+        lbl_v.setStyleSheet("font-size: 12px; color: #94a3b8;")
+        top_layout.addWidget(lbl_v)
+
+        self.btn_view_table = QPushButton("📊 全内容表格")
+        self.btn_view_table.setObjectName("ActiveViewBtn")
+        self.btn_view_table.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_view_table.clicked.connect(lambda: self._switch_view_mode("table"))
+        top_layout.addWidget(self.btn_view_table)
+
+        self.btn_view_cards = QPushButton("🗂️ 流式卡片")
+        self.btn_view_cards.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_view_cards.clicked.connect(lambda: self._switch_view_mode("cards"))
+        top_layout.addWidget(self.btn_view_cards)
+
+        top_layout.addSpacing(6)
+
+        # 排序选择下拉框
+        lbl_s = QLabel("排序:")
+        lbl_s.setStyleSheet("font-size: 12px; color: #94a3b8;")
+        top_layout.addWidget(lbl_s)
+
+        self.combo_sort = QComboBox()
+        self.combo_sort.addItem("⭐ 综合评分 ⬇️ (高到低)", "score_desc")
+        self.combo_sort.addItem("⭐ 综合评分 ⬆️ (低到高)", "score_asc")
+        self.combo_sort.addItem("📈 涨跌幅 ⬇️ (从强到弱)", "pct_desc")
+        self.combo_sort.addItem("📉 涨跌幅 ⬆️ (从弱到强)", "pct_asc")
+        self.combo_sort.addItem("🔄 换手率 ⬇️ (从大到小)", "turnover_desc")
+        self.combo_sort.addItem("💰 成交额 ⬇️ (从大到小)", "amount_desc")
+        self.combo_sort.addItem("🔢 标的代码 ⬆️ (默认)", "code_asc")
+        self.combo_sort.currentIndexChanged.connect(self._on_sort_combo_changed)
+        top_layout.addWidget(self.combo_sort)
+
         top_layout.addStretch()
 
         # 搜索过滤输入框
         self.search_edit = QLineEdit()
-        self.search_edit.setPlaceholderText("🔍 快速过滤 (代码 / 名称 / 策略 / 建议)...")
-        self.search_edit.setFixedWidth(260)
+        self.search_edit.setPlaceholderText("🔍 快速过滤 (代码 / 名称 / 策略 / 形态 / 建议)...")
+        self.search_edit.setFixedWidth(220)
         self.search_edit.textChanged.connect(self._on_search_text_changed)
         top_layout.addWidget(self.search_edit)
 
@@ -5899,7 +6081,54 @@ class AllCodesStrategyEvalDialog(QDialog):
 
         main_layout.addWidget(top_bar)
 
-        # 2. 中间滚动卡片区域
+        # 2. 中间多视图堆栈容器 (QStackedWidget)
+        self.stacked_widget = QStackedWidget()
+
+        # Page 0: 全内容专业表格视图 (直接点击各列表头即可数值排序)
+        self.table_all = QTableWidget()
+        self.table_all.setColumnCount(len(self.TABLE_HEADERS))
+        self.table_all.setHorizontalHeaderLabels(self.TABLE_HEADERS)
+        self.table_all.setAlternatingRowColors(True)
+        self.table_all.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.table_all.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.table_all.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        self.table_all.setShowGrid(True)
+        self.table_all.setSortingEnabled(True)
+
+        h_header = self.table_all.horizontalHeader()
+        h_header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        h_header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        h_header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        h_header.setSectionResizeMode(3, QHeaderView.ResizeMode.Interactive)  # ⭐ 综合评分
+        h_header.setSectionResizeMode(4, QHeaderView.ResizeMode.Interactive)
+        h_header.setSectionResizeMode(5, QHeaderView.ResizeMode.Interactive)
+        h_header.setSectionResizeMode(6, QHeaderView.ResizeMode.Interactive)
+        h_header.setSectionResizeMode(7, QHeaderView.ResizeMode.Interactive)
+        h_header.setSectionResizeMode(8, QHeaderView.ResizeMode.Interactive)
+        h_header.setSectionResizeMode(9, QHeaderView.ResizeMode.Interactive)
+        h_header.setSectionResizeMode(10, QHeaderView.ResizeMode.Interactive)
+        h_header.setSectionResizeMode(11, QHeaderView.ResizeMode.Interactive)
+        h_header.setSectionResizeMode(12, QHeaderView.ResizeMode.Stretch)     # 实操指引
+        h_header.setSectionResizeMode(13, QHeaderView.ResizeMode.ResizeToContents)
+
+        self.table_all.setColumnWidth(3, 110)  # ⭐ 综合评分
+        self.table_all.setColumnWidth(4, 115)  # 形态分类
+        self.table_all.setColumnWidth(5, 140)  # 所属策略
+        self.table_all.setColumnWidth(6, 85)   # 现价
+        self.table_all.setColumnWidth(7, 95)   # 涨跌幅
+        self.table_all.setColumnWidth(8, 85)   # 开盘
+        self.table_all.setColumnWidth(9, 85)   # VWAP
+        self.table_all.setColumnWidth(10, 85)  # 换手率
+        self.table_all.setColumnWidth(11, 95)  # 成交额
+
+        bind_table_column_persistence(self.table_all, "all_codes_eval_table_cols")
+        self.table_all.cellDoubleClicked.connect(self._on_table_cell_double_clicked)
+        # 绑定点击与键盘上下键联动 TDX
+        self.table_all.currentCellChanged.connect(self._on_table_current_cell_changed)
+        self.table_all.itemClicked.connect(self._on_table_item_clicked)
+        self.stacked_widget.addWidget(self.table_all)
+
+        # Page 1: 流式卡片视图
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(True)
         self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -5912,11 +6141,13 @@ class AllCodesStrategyEvalDialog(QDialog):
         self.cards_layout.setSpacing(10)
 
         self.scroll_area.setWidget(self.cards_container)
-        main_layout.addWidget(self.scroll_area, 1)
+        self.stacked_widget.addWidget(self.scroll_area)
+
+        main_layout.addWidget(self.stacked_widget, 1)
 
         # 3. 底部状态栏
         bottom_bar = QHBoxLayout()
-        self.lbl_status = QLabel("💡 提示：支持滚轮自由缩放滚动浏览；点击【🎯 查看此标的】可直接切入主工作台分时图与策略！")
+        self.lbl_status = QLabel("💡 提示：支持鼠标点击或键盘 ↑ / ↓ 键实时联动通达信 (TDX)；点击【⭐ 综合评分】表头可一键排序！")
         self.lbl_status.setStyleSheet("font-size: 11px; color: #64748b;")
         bottom_bar.addWidget(self.lbl_status)
         bottom_bar.addStretch()
@@ -5927,6 +6158,31 @@ class AllCodesStrategyEvalDialog(QDialog):
 
         main_layout.addLayout(bottom_bar)
 
+    def _switch_view_mode(self, mode: str):
+        """切换表格视图与卡片视图"""
+        self.current_view_mode = mode
+        if mode == "table":
+            self.stacked_widget.setCurrentIndex(0)
+            self.btn_view_table.setObjectName("ActiveViewBtn")
+            self.btn_view_cards.setObjectName("")
+            self.lbl_status.setText("💡 提示：表格各列支持直接点击表头按分数/涨幅精确数值排序；点击或按 ↑ / ↓ 键即时联动 TDX！")
+        else:
+            self.stacked_widget.setCurrentIndex(1)
+            self.btn_view_table.setObjectName("")
+            self.btn_view_cards.setObjectName("ActiveViewBtn")
+            self.lbl_status.setText("💡 提示：流式卡片模式下点击卡片或按 ↑ / ↓ 键实时联动 TDX；点击【综合得分】快速切换排序！")
+
+        self.btn_view_table.setStyle(self.btn_view_table.style())
+        self.btn_view_cards.setStyle(self.btn_view_cards.style())
+        self._apply_search_filter()
+
+    def _on_sort_combo_changed(self, index: int):
+        """响应排序下拉框切换"""
+        sort_key = self.combo_sort.currentData()
+        if sort_key:
+            self.current_sort_key = sort_key
+            self._apply_sort_and_render()
+
     def _restore_geometry(self):
         """恢复窗口尺寸与位置，并带屏幕边界安全保护"""
         try:
@@ -5935,19 +6191,24 @@ class AllCodesStrategyEvalDialog(QDialog):
             if saved_geom:
                 self.restoreGeometry(saved_geom)
             else:
-                self.resize(840, 640)
+                self.resize(1000, 680)
                 if self.workbench:
                     geo = self.workbench.geometry()
                     self.move(geo.center() - self.rect().center())
+            
+            saved_mode = settings.value("view_mode", "table")
+            if saved_mode in ["table", "cards"]:
+                self._switch_view_mode(saved_mode)
         except Exception as e:
             logger.debug(f"恢复 AllCodesStrategyEvalDialog 几何尺寸异常: {e}")
-            self.resize(840, 640)
+            self.resize(1000, 680)
 
     def _save_geometry(self):
         """持久化保存窗口尺寸与位置"""
         try:
             settings = QSettings("pyQuant3", "AllCodesStrategyEvalDialog")
             settings.setValue("geometry", self.saveGeometry())
+            settings.setValue("view_mode", self.current_view_mode)
             save_ui_layout_state("all_codes_eval_dialog_size", f"{self.width()}x{self.height()}")
         except Exception as e:
             logger.debug(f"保存 AllCodesStrategyEvalDialog 几何尺寸异常: {e}")
@@ -5961,26 +6222,21 @@ class AllCodesStrategyEvalDialog(QDialog):
         super().closeEvent(event)
 
     def run_evaluation(self):
-        """执行全量标的实时策略评估并构建卡片流"""
+        """执行全量标的实时策略评估并构建双视图数据"""
         target_codes = self.engine.get_all_target_codes()
-        if not target_codes:
-            self.lbl_meta.setText("未配置 target_codes 目标代码")
+        # 过滤非法代码占位
+        valid_codes = [c for c in target_codes if c and c not in ["000000", "000123"]]
+        if not valid_codes:
+            self.lbl_meta.setText("未配置有效的 target_codes 目标代码")
             return
 
         now_time_str = datetime.now().strftime("%H:%M:%S")
-        self.lbl_meta.setText(f"📊 共 {len(target_codes)} 只标的 | 评估时间: {now_time_str}")
-
-        # 清空旧卡片
-        while self.cards_layout.count() > 0:
-            item = self.cards_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
+        self.lbl_meta.setText(f"📊 共 {len(valid_codes)} 只标的 | 评估时间: {now_time_str}")
 
         self.cards_data.clear()
-        self.card_widgets.clear()
         res_summary = f"=== ⚡ 全量 Code 分时阶梯策略自动检测评估报告 ({now_time_str}) ===\n\n"
 
-        for c in target_codes:
+        for c in valid_codes:
             try:
                 st = self.engine.auto_select_strategy(0.0, code=c)
                 c_name = resolve_stock_name(c)
@@ -6000,6 +6256,11 @@ class AllCodesStrategyEvalDialog(QDialog):
                     low_price=low_p, vwap=vwap_p, turnover_rate=to_rate, amount=amt_val
                 )
 
+                score_val = float(eval_res.get('total_weighted_score', 0.0))
+                # 涨跌幅计算（基于开盘或昨收）
+                ref_base = last_close if (last_close and last_close > 0) else open_p
+                pct_val = ((trade_p - ref_base) / ref_base * 100.0) if ref_base > 0 else 0.0
+
                 item_info = {
                     "code": c,
                     "name": c_name,
@@ -6012,17 +6273,19 @@ class AllCodesStrategyEvalDialog(QDialog):
                     "turnover_rate": to_rate,
                     "amt_val": amt_val,
                     "last_close": last_close,
-                    "score": eval_res.get('total_weighted_score', 0.0),
+                    "pct": pct_val,
+                    "score": score_val,
                     "pattern": eval_res.get('pattern', '--'),
                     "action_text": eval_res.get('action_execution_text', ''),
                     "signals": sigs,
+                    "is_unlisted": is_unlisted,
                     "is_error": False,
                     "error_msg": ""
                 }
 
                 # 拼接文本报告
                 res_summary += f"📌 【{c} {c_name}】 -> 策略: {item_info['strategy_name']}\n"
-                res_summary += f"   开盘: {open_p:.2f}元 | 现价: {trade_p:.2f}元 | 综合得分: {item_info['score']:.2f}分 ({item_info['pattern']})\n"
+                res_summary += f"   开盘: {open_p:.2f}元 | 现价: {trade_p:.2f}元 ({pct_val:+.2f}%) | 综合得分: {score_val:.2f}分 ({item_info['pattern']})\n"
                 res_summary += f"   实操指引: {item_info['action_text']}\n"
                 for sig in sigs:
                     res_summary += f"   🔴 {sig.reason} (建议价: {getattr(sig, 'suggested_price', sig.price):.2f})\n"
@@ -6041,33 +6304,189 @@ class AllCodesStrategyEvalDialog(QDialog):
                     "turnover_rate": 0.0,
                     "amt_val": 0.0,
                     "last_close": 0.0,
+                    "pct": 0.0,
                     "score": 0.0,
                     "pattern": "异常",
                     "action_text": f"评估异常: {e}",
                     "signals": [],
+                    "is_unlisted": False,
                     "is_error": True,
                     "error_msg": str(e)
                 }
                 res_summary += f"⚠️ 【{c}】 评估异常: {e}\n--------------------------------------------------\n"
 
             self.cards_data.append(item_info)
-            card_widget = self._create_card_widget(item_info)
-            self.card_widgets.append((item_info, card_widget))
+
+        self.full_report_text = res_summary
+        self._apply_sort_and_render()
+
+    def _apply_sort_and_render(self):
+        """根据当前选中的排序规则对数据排序并同步渲染表格与卡片"""
+        if not self.cards_data:
+            return
+
+        # 排序逻辑
+        key_mode = self.current_sort_key
+        if key_mode == "score_desc":
+            self.cards_data.sort(key=lambda x: (x.get('is_error', False), -float(x.get('score', 0.0))))
+        elif key_mode == "score_asc":
+            self.cards_data.sort(key=lambda x: (x.get('is_error', False), float(x.get('score', 0.0))))
+        elif key_mode == "pct_desc":
+            self.cards_data.sort(key=lambda x: (x.get('is_error', False), -float(x.get('pct', 0.0))))
+        elif key_mode == "pct_asc":
+            self.cards_data.sort(key=lambda x: (x.get('is_error', False), float(x.get('pct', 0.0))))
+        elif key_mode == "turnover_desc":
+            self.cards_data.sort(key=lambda x: (x.get('is_error', False), -float(x.get('turnover_rate', 0.0))))
+        elif key_mode == "amount_desc":
+            self.cards_data.sort(key=lambda x: (x.get('is_error', False), -float(x.get('amt_val', 0.0))))
+        elif key_mode == "code_asc":
+            self.cards_data.sort(key=lambda x: str(x.get('code', '')))
+
+        self._render_table()
+        self._render_cards()
+        self._apply_search_filter()
+
+    def _render_table(self):
+        """渲染全内容表格视图"""
+        self.table_all.setSortingEnabled(False)
+        self.table_all.setRowCount(len(self.cards_data))
+
+        red_color = QColor("#ef4444")
+        green_color = QColor("#10b981")
+        gray_color = QColor("#94a3b8")
+        gold_color = QColor("#ffd700")
+        cyan_color = QColor("#38bdf8")
+
+        for row, data in enumerate(self.cards_data):
+            c = data['code']
+            c_name = data['name']
+            score = data['score']
+            pct = data['pct']
+
+            # 0. 序号
+            _safe_set_cell_item(self.table_all, row, 0, str(row + 1), fg_color=gray_color, align=Qt.AlignmentFlag.AlignCenter, sort_val=row + 1)
+
+            # 1. 代码
+            _safe_set_cell_item(self.table_all, row, 1, c, fg_color=cyan_color, align=Qt.AlignmentFlag.AlignCenter, font=QFont("Consolas", 9, QFont.Weight.Bold))
+
+            # 2. 名称
+            _safe_set_cell_item(self.table_all, row, 2, c_name, fg_color="#f8fafc", align=Qt.AlignmentFlag.AlignCenter, font=QFont("Microsoft YaHei", 9, QFont.Weight.Bold))
+
+            # 3. ⭐ 综合评分 (分级色彩胶囊独立列)
+            score_fg = "#ffffff"
+            if score >= 8.0:
+                score_bg = QColor("#064e3b")  # 绿色
+                score_fg = QColor("#34d399")
+            elif score >= 6.5:
+                score_bg = QColor("#78350f")  # 橙色
+                score_fg = QColor("#fbbf24")
+            else:
+                score_bg = QColor("#7f1d1d")  # 红色
+                score_fg = QColor("#f87171")
+
+            score_str = f"⭐ {score:.2f}分" if not data.get("is_error") else "⚠️ 异常"
+            _safe_set_cell_item(
+                self.table_all, row, 3, score_str,
+                fg_color=score_fg, bg_color=score_bg,
+                align=Qt.AlignmentFlag.AlignCenter,
+                font=QFont("Consolas", 10, QFont.Weight.Bold),
+                sort_val=score,
+                tooltip=f"综合加权评分: {score:.2f}分\n点击此列表头可直接按分数由高到低/由低到高排序"
+            )
+
+            # 4. 形态分类
+            _safe_set_cell_item(self.table_all, row, 4, data['pattern'], fg_color=gold_color, align=Qt.AlignmentFlag.AlignCenter)
+
+            # 5. 所属策略
+            _safe_set_cell_item(self.table_all, row, 5, data['strategy_name'], fg_color="#38bdf8", align=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, tooltip=data['strategy_name'])
+
+            # 6. 现价
+            p_fg = red_color if pct > 0 else (green_color if pct < 0 else gray_color)
+            _safe_set_cell_item(self.table_all, row, 6, f"{data['trade_p']:.2f}", fg_color=p_fg, align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, sort_val=data['trade_p'])
+
+            # 7. 涨跌幅
+            pct_str = f"{pct:+.2f}%" if not data.get("is_error") else "--"
+            _safe_set_cell_item(self.table_all, row, 7, pct_str, fg_color=p_fg, align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, font=QFont("Consolas", 9, QFont.Weight.Bold), sort_val=pct)
+
+            # 8. 开盘价
+            _safe_set_cell_item(self.table_all, row, 8, f"{data['open_p']:.2f}", fg_color="#e2e8f0", align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, sort_val=data['open_p'])
+
+            # 9. VWAP
+            _safe_set_cell_item(self.table_all, row, 9, f"{data['vwap_p']:.2f}", fg_color="#fbbf24", align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, sort_val=data['vwap_p'])
+
+            # 10. 换手率
+            to_str = f"{data['turnover_rate']:.2f}%" if not data.get("is_error") else "--"
+            _safe_set_cell_item(self.table_all, row, 10, to_str, fg_color=cyan_color, align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, sort_val=data['turnover_rate'])
+
+            # 11. 成交额
+            amt_val = data['amt_val']
+            amt_str = f"{amt_val / 1e8:.2f}亿" if amt_val >= 1e8 else f"{amt_val / 1e4:.0f}万"
+            _safe_set_cell_item(self.table_all, row, 11, amt_str, fg_color="#f8fafc", align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, sort_val=amt_val)
+
+            # 12. 实操指引与触发卖点
+            full_guide = data['action_text']
+            if data['signals']:
+                sig_texts = [f"🔴 {s.reason}(建议价:{getattr(s, 'suggested_price', s.price):.2f})" for s in data['signals']]
+                full_guide += " | 触发信号: " + "；".join(sig_texts)
+            _safe_set_cell_item(self.table_all, row, 12, full_guide, fg_color="#e2e8f0", align=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, tooltip=full_guide)
+
+            # 13. 操作按钮 (🎯 查看此标的)
+            btn_cell = QPushButton("🎯 查看")
+            btn_cell.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn_cell.setStyleSheet("""
+                QPushButton {
+                    background-color: #0369a1;
+                    border: 1px solid #38bdf8;
+                    color: #ffffff;
+                    font-size: 11px;
+                    padding: 2px 6px;
+                    border-radius: 4px;
+                }
+                QPushButton:hover {
+                    background-color: #0284c7;
+                }
+            """)
+            target_c = c
+            target_n = c_name
+            btn_cell.clicked.connect(lambda _, tc=target_c, tn=target_n: self._broadcast_link_stock(tc, tn))
+            self.table_all.setCellWidget(row, 13, btn_cell)
+
+        self.table_all.setSortingEnabled(True)
+
+    def _render_cards(self):
+        """渲染流式卡片视图"""
+        # 清空旧卡片
+        while self.cards_layout.count() > 0:
+            item = self.cards_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        self.card_widgets.clear()
+        for idx, data in enumerate(self.cards_data):
+            card_widget = self._create_card_widget(data)
+            self.card_widgets.append((data, card_widget))
             self.cards_layout.addWidget(card_widget)
 
         self.cards_layout.addStretch()
-        self.full_report_text = res_summary
-        self._update_card_count()
 
     def _create_card_widget(self, data: dict) -> QFrame:
         """根据标的评估结果创建单只股票的专属卡片"""
         card = QFrame()
         card.setObjectName("StockCard")
+        card.setCursor(Qt.CursorShape.PointingHandCursor)
         c_layout = QVBoxLayout(card)
         c_layout.setContentsMargins(12, 10, 12, 10)
         c_layout.setSpacing(6)
 
-        # 1. 顶行：代码 + 名称 + 策略名称 + 【🎯 查看此标的】
+        target_c = data['code']
+        target_n = data['name']
+
+        # 点击整张卡片任意区域自动联动 TDX
+        def _on_card_clicked(event):
+            self._broadcast_link_stock(target_c, target_n)
+        card.mousePressEvent = _on_card_clicked
+
+        # 1. 顶行：代码 + 名称 + 策略名称 + 状态 + 【🎯 查看此标的】
         top_row = QHBoxLayout()
         lbl_code_name = QLabel(f"📌 【{data['code']} {data['name']}】")
         lbl_code_name.setStyleSheet("font-size: 14px; font-weight: bold; color: #f8fafc;")
@@ -6076,6 +6495,11 @@ class AllCodesStrategyEvalDialog(QDialog):
         lbl_strat = QLabel(f"策略: {data['strategy_name']}")
         lbl_strat.setStyleSheet("font-size: 12px; color: #38bdf8; background: #082f49; border-radius: 4px; padding: 2px 6px;")
         top_row.addWidget(lbl_strat)
+
+        if data.get("is_unlisted"):
+            lbl_un = QLabel("💡 待上市")
+            lbl_un.setStyleSheet("font-size: 11px; color: #ffd700; background: #422006; border: 1px solid #ca8a04; border-radius: 4px; padding: 1px 5px;")
+            top_row.addWidget(lbl_un)
 
         top_row.addStretch()
 
@@ -6094,8 +6518,7 @@ class AllCodesStrategyEvalDialog(QDialog):
                 background-color: #0284c7;
             }
         """)
-        target_c = data['code']
-        btn_view.clicked.connect(lambda _, tc=target_c: self._switch_to_code(tc))
+        btn_view.clicked.connect(lambda _, tc=target_c, tn=target_n: self._broadcast_link_stock(tc, tn))
         top_row.addWidget(btn_view)
 
         c_layout.addLayout(top_row)
@@ -6108,7 +6531,7 @@ class AllCodesStrategyEvalDialog(QDialog):
 
         # 2. 行情数据行
         amt_str = f"{data['amt_val'] / 1e8:.2f}亿" if data['amt_val'] >= 1e8 else f"{data['amt_val'] / 1e4:.0f}万"
-        pct = ((data['trade_p'] - data['open_p']) / data['open_p'] * 100.0) if data['open_p'] > 0 else 0.0
+        pct = data['pct']
         pct_color = "#ef4444" if pct > 0 else ("#10b981" if pct < 0 else "#94a3b8")
         pct_prefix = "+" if pct > 0 else ""
 
@@ -6127,16 +6550,31 @@ class AllCodesStrategyEvalDialog(QDialog):
         stats_row.addWidget(lbl_stats)
         stats_row.addStretch()
 
-        # 评分与形态胶囊
+        # 评分与形态胶囊 (点击可快速切换评分升/降序)
         score = data['score']
         score_bg = "#064e3b" if score >= 8.0 else ("#78350f" if score >= 6.5 else "#7f1d1d")
         score_border = "#10b981" if score >= 8.0 else ("#f59e0b" if score >= 6.5 else "#ef4444")
-        lbl_score = QLabel(f"🌟 综合得分: {score:.2f}分  ({data['pattern']})")
-        lbl_score.setStyleSheet(
-            f"background-color: {score_bg}; border: 1px solid {score_border}; border-radius: 4px; "
-            f"color: #f8fafc; font-size: 11px; font-weight: bold; padding: 2px 8px;"
-        )
-        stats_row.addWidget(lbl_score)
+        
+        btn_score = QPushButton(f"🌟 综合得分: {score:.2f}分  ({data['pattern']})")
+        btn_score.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_score.setToolTip("💡 点击快速按综合评分由高到低/由低到高重排")
+        btn_score.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {score_bg};
+                border: 1px solid {score_border};
+                border-radius: 4px;
+                color: #f8fafc;
+                font-size: 11px;
+                font-weight: bold;
+                padding: 3px 8px;
+            }}
+            QPushButton:hover {{
+                border: 1px solid #ffffff;
+                background-color: #0284c7;
+            }}
+        """)
+        btn_score.clicked.connect(self._toggle_score_sort)
+        stats_row.addWidget(btn_score)
 
         c_layout.addLayout(stats_row)
 
@@ -6168,40 +6606,217 @@ class AllCodesStrategyEvalDialog(QDialog):
 
         return card
 
-    def _switch_to_code(self, target_code: str):
-        """切换主工作台当前股票标的"""
+    def _toggle_score_sort(self):
+        """点击评分徽章快速在评分降序与升序之间切换"""
+        if self.current_sort_key == "score_desc":
+            new_key = "score_asc"
+        else:
+            new_key = "score_desc"
+        
+        # 联动下拉框
+        idx = self.combo_sort.findData(new_key)
+        if idx >= 0:
+            self.combo_sort.setCurrentIndex(idx)
+        else:
+            self.current_sort_key = new_key
+            self._apply_sort_and_render()
+
+    def _on_table_cell_double_clicked(self, row: int, col: int):
+        """双击表格行直接切入主工作台"""
+        code_item = self.table_all.item(row, 1)
+        name_item = self.table_all.item(row, 2)
+        if code_item:
+            target_code = code_item.text().strip()
+            target_name = name_item.text().strip() if name_item else resolve_stock_name(target_code)
+            if target_code:
+                self._broadcast_link_stock(target_code, target_name)
+        
+        # 若双击指引列，同时弹出完整文本悬浮窗
+        if col == 12:
+            handle_table_cell_double_click(self.table_all, row, col, self)
+
+    def _on_table_current_cell_changed(self, currentRow: int, currentColumn: int, previousRow: int, previousColumn: int):
+        """键盘上下键导航与鼠标行选择统一防抖联动入口"""
+        if currentRow < 0 or currentRow >= self.table_all.rowCount():
+            return
+        if currentRow == self._pending_linkage_row:
+            return
+        self._pending_linkage_row = currentRow
+        self._linkage_timer.start()
+
+    def _on_table_item_clicked(self, item):
+        """鼠标单击单元格立即触发 TDX 联动"""
+        if not item or item.row() < 0:
+            return
+        self._pending_linkage_row = item.row()
+        self._fire_linkage_debounced()
+
+    def _fire_linkage_debounced(self):
+        """防抖定时器到期后执行真实 TDX 与工作台联动"""
+        row = self._pending_linkage_row
+        if row < 0 or row >= self.table_all.rowCount():
+            return
+        code_item = self.table_all.item(row, 1)
+        name_item = self.table_all.item(row, 2)
+        if code_item:
+            c = code_item.text().strip()
+            n = name_item.text().strip() if name_item else resolve_stock_name(c)
+            if c and c != "N/A":
+                self._broadcast_link_stock(c, n)
+
+    def _broadcast_link_stock(self, code: str, name: str = None):
+        """
+        ⚡ [ATS 现成联动标准实现] 毫秒级直连通达信 (TDX)、同花顺与 ATS 主窗口
+        1. 过滤与提取 6 位标准股票代码
+        2. 调用 ATSMainWindow.link_stock 向全局可视化服务器与终端广播
+        3. 调用 linkage_service.get_link_manager().push() 物理直连通达信
+        4. 联动独立工作台切代码
+        5. 底部状态栏反馈
+        """
+        if not code:
+            return
+        code_clean = str(code).strip()
+        c_digits = "".join(x for x in code_clean if x.isdigit()).zfill(6) if any(x.isdigit() for x in code_clean) else code_clean
+        st_name = str(name) if name and name != "未知" else resolve_stock_name(c_digits)
+
+        now = time.time()
+        if self._last_linked_code == c_digits and (now - self._last_linked_time) < 0.15:
+            return
+        self._last_linked_code = c_digits
+        self._last_linked_time = now
+
+        # 1. 优先通过 ATS 全局主窗口广播 (覆盖 TCP 26668 可视化与外部终端)
+        try:
+            from ats.ui.main_window import ATSMainWindow
+            app = QApplication.instance()
+            if hasattr(app, 'main_window') and isinstance(app.main_window, ATSMainWindow):
+                app.main_window.link_stock(c_digits, st_name)
+        except Exception as e_app:
+            logger.debug(f"[ATS Linkage] main_window.link_stock 异常: {e_app}")
+
+        # 2. 遍历全局顶级窗口联动具有 link_stock 的工作台
+        try:
+            for w in QApplication.topLevelWidgets():
+                if w is not self and hasattr(w, "link_stock") and callable(getattr(w, "link_stock")):
+                    try:
+                        w.link_stock(c_digits, st_name)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+        # 3. 物理直连通达信 (TDX) / 同花顺 (LinkManager)
+        try:
+            from linkage_service import get_link_manager
+            get_link_manager().push(c_digits, flags={'tdx': True, 'ths': True, 'dfcf': False}, auto=False)
+        except Exception as e_tdx:
+            logger.debug(f"[TDX Linkage] 物理推送异常: {e_tdx}")
+
+        # 4. 同步切换当前独立分时工作台标的与走势图
         if self.workbench and hasattr(self.workbench, 'combo_code'):
             for idx in range(self.workbench.combo_code.count()):
-                if self.workbench.combo_code.itemData(idx) == target_code:
-                    self.workbench.combo_code.setCurrentIndex(idx)
+                if self.workbench.combo_code.itemData(idx) == c_digits:
+                    if self.workbench.combo_code.currentIndex() != idx:
+                        self.workbench.combo_code.setCurrentIndex(idx)
                     break
-        self.lbl_status.setText(f"🎯 已成功将主工作台切换至标的: 【{target_code} {resolve_stock_name(target_code)}】")
+
+        # 5. 底部状态栏反馈
+        self.lbl_status.setText(f"🔗 【TDX 联动成功】已同步切换通达信行情与分时工作台: 【{c_digits} {st_name}】")
+
+    def _switch_to_code(self, target_code: str):
+        """兼容接口：切换并联动标的"""
+        self._broadcast_link_stock(target_code, resolve_stock_name(target_code))
+
+    def keyPressEvent(self, event):
+        """键盘上下键事件处理：支持卡片视图下的键盘上下键切换联动"""
+        if self.current_view_mode == "cards" and self.card_widgets:
+            if event.key() in (Qt.Key.Key_Up, Qt.Key.Key_Left):
+                self._navigate_cards(-1)
+                event.accept()
+                return
+            elif event.key() in (Qt.Key.Key_Down, Qt.Key.Key_Right):
+                self._navigate_cards(1)
+                event.accept()
+                return
+        super().keyPressEvent(event)
+
+    def _navigate_cards(self, delta: int):
+        """在卡片流中按上下键移动选中项并触发联动"""
+        visible_cards = [(idx, data, w) for idx, (data, w) in enumerate(self.card_widgets) if w.isVisible()]
+        if not visible_cards:
+            return
+        if self.selected_card_index < 0:
+            new_idx = 0
+        else:
+            cur_pos = 0
+            for i, (idx, _, _) in enumerate(visible_cards):
+                if idx == self.selected_card_index:
+                    cur_pos = i
+                    break
+            new_pos = max(0, min(len(visible_cards) - 1, cur_pos + delta))
+            new_idx = visible_cards[new_pos][0]
+
+        self.selected_card_index = new_idx
+        # 高亮与联动
+        for idx, (data, w) in enumerate(self.card_widgets):
+            if idx == new_idx:
+                w.setStyleSheet("QFrame#StockCard { background-color: #1e3a8a; border: 2px solid #38bdf8; border-radius: 8px; }")
+                self.scroll_area.ensureWidgetVisible(w)
+                self._broadcast_link_stock(data['code'], data['name'])
+            else:
+                w.setStyleSheet("")
 
     def _on_search_text_changed(self, text: str):
         """实时关键词搜索过滤"""
-        kw = text.strip().lower()
+        self._apply_search_filter()
+
+    def _apply_search_filter(self):
+        """应用搜索过滤到当前激活的视图"""
+        kw = self.search_edit.text().strip().lower()
         visible_cnt = 0
-        for item_data, widget in self.card_widgets:
-            if not kw:
-                widget.setVisible(True)
-                visible_cnt += 1
-            else:
-                match = (
-                    kw in str(item_data.get('code', '')).lower() or
-                    kw in str(item_data.get('name', '')).lower() or
-                    kw in str(item_data.get('strategy_name', '')).lower() or
-                    kw in str(item_data.get('pattern', '')).lower() or
-                    kw in str(item_data.get('action_text', '')).lower()
-                )
-                widget.setVisible(match)
-                if match:
+
+        if self.current_view_mode == "table":
+            # 表格过滤
+            for row in range(self.table_all.rowCount()):
+                if not kw:
+                    self.table_all.setRowHidden(row, False)
                     visible_cnt += 1
+                else:
+                    row_text = ""
+                    for c in [1, 2, 4, 5, 12]:  # 搜索代码、名称、形态、策略、指引
+                        it = self.table_all.item(row, c)
+                        if it:
+                            row_text += it.text().lower() + " "
+                    match = kw in row_text
+                    self.table_all.setRowHidden(row, not match)
+                    if match:
+                        visible_cnt += 1
+        else:
+            # 卡片过滤
+            for item_data, widget in self.card_widgets:
+                if not kw:
+                    widget.setVisible(True)
+                    visible_cnt += 1
+                else:
+                    match = (
+                        kw in str(item_data.get('code', '')).lower() or
+                        kw in str(item_data.get('name', '')).lower() or
+                        kw in str(item_data.get('strategy_name', '')).lower() or
+                        kw in str(item_data.get('pattern', '')).lower() or
+                        kw in str(item_data.get('action_text', '')).lower() or
+                        kw in str(f"{item_data.get('score', 0.0):.2f}")
+                    )
+                    widget.setVisible(match)
+                    if match:
+                        visible_cnt += 1
+
         self._update_card_count(visible_cnt)
 
     def _update_card_count(self, visible_cnt: int = None):
-        total = len(self.card_widgets)
+        total = len(self.cards_data)
         shown = visible_cnt if visible_cnt is not None else total
-        self.lbl_card_count.setText(f"显示 {shown} / {total} 只标的")
+        mode_str = "全内容表格" if self.current_view_mode == "table" else "流式卡片"
+        self.lbl_card_count.setText(f"显示 {shown} / {total} 只标的 | 视图: {mode_str}")
 
     def _copy_full_report(self):
         """一键复制全量纯文本报告到系统剪贴板"""

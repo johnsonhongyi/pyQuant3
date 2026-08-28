@@ -50,6 +50,11 @@ class NewStockStrategyGenerator:
         根据新股基本面与行情字典生成标准统一格式的分时阶梯策略字典 (schema_version: v1.0-unified)
         """
         code = str(stock_info.get("code", "")).strip().zfill(6)
+        from ats.intraday_strategy_engine import is_valid_stock_code
+        if not is_valid_stock_code(code):
+            logger.warning(f"⚠️ [NewStockStrategyGenerator] 拦截无效虚构标的代码策略生成: {code}")
+            return {}
+
         name = str(stock_info.get("name", f"标的_{code}")).strip()
         # 权威获取/补齐新股基本面与真实发行价
         ipo_info = {}
@@ -352,9 +357,10 @@ class NewStockStrategyGenerator:
         """
         try:
             strat_id = strategy_dict.get("id")
-            target_codes = [str(c).strip().zfill(6) for c in strategy_dict.get("target_codes", [])]
+            from ats.intraday_strategy_engine import is_valid_stock_code
+            target_codes = [str(c).strip().zfill(6) for c in strategy_dict.get("target_codes", []) if is_valid_stock_code(str(c).strip())]
             if not strat_id or not target_codes:
-                logger.error("❌ 策略字典缺少 id 或 target_codes")
+                logger.warning(f"⚠️ [NewStockStrategyGenerator] 拦截无效策略写入: id={strat_id}, target_codes={target_codes}")
                 return False
 
             conf_path = self.config_path
