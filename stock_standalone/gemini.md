@@ -1,3 +1,12 @@
+## 2026-08-28 11:38
+- [x] **实现早盘集合竞价策略能力与关键信号向新股次新股模块全面同步 (`stock_standalone/ats/new_stock_fetcher.py`, `stock_standalone/ats/ui/new_stock_panel.py`, `stock_standalone/tests/test_new_stock_module.py`)**：
+    - [x] **新股与次新股竞价信号同源判定**：
+        - `NewStockFetcher` 直连提取通达信 L2 盘口，结合首日估值健康度与次新股突破平台，实时输出 `bidding_tag`（`💎 首日真金抢筹`、`💎 竞价爆量突破`、`👑 竞价一字顶格`、`🚀 竞价极速抢筹`、`⚠️ 竞价缩量诱多`）与 `bidding_advice`（买点建议）；
+    - [x] **新股看板核心列与底部推演卡片无缝呈现**：
+        - 表头第 3 列新增 **`"竞价信号"`** 核心列，高亮呈现真金白银竞价意图；
+        - 底部推演抽屉卡片新增 **`⚡ 早盘竞价`** 决策栏，实时展示竞价量能与 09:25 黄金上车买点；
+    - [x] **全量 23 项跨模块自动化测试 100% 全部 PASSED**。
+
 ## 2026-08-28 11:30
 - [x] **实现基于 `max(lasth1d, lasth2d, lasth3d)` 的 2D/3D/5D 平台高点突破感知与首日新股发行价保护机制 (`stock_standalone/ats/tdx_realtime_fetcher.py`, `stock_standalone/ats/limit_up_engine.py`, `stock_standalone/tests/test_new_stock_module.py`)**：
     - [x] **多维多日阻力高点精准提取**：

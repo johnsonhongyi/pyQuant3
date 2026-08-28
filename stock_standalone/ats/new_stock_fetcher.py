@@ -381,6 +381,10 @@ class NewStockFetcher:
                 quotes = tdx_fetcher.get_security_quotes_safe(chunk, force=force)
                 if quotes:
                     for q in quotes:
+                        c_clean = str(q.get("code", "")).strip().zfill(6)
+                        if not c_clean:
+                            continue
+
                         # ⚡ 提取价格与盘口数据 (全面支持 09:15~09:25 集合竞价试撮合阶段)
                         p = safe_float(q.get("price", 0.0))
                         last_c = safe_float(q.get("last_close", 0.0))
@@ -399,6 +403,19 @@ class NewStockFetcher:
                         effective_vol = vol if vol > 0 else (bid1_v if bid1_v > 0 else ask1_v)
                         effective_amt = amt if amt > 0 else (round(effective_p * effective_vol * 100.0, 2) if (effective_p > 0 and effective_vol > 0) else 0.0)
 
+                        bid_vol_sum = 0.0
+                        ask_vol_sum = 0.0
+                        for d_i in range(1, 6):
+                            bid_vol_sum += safe_float(q.get(f"bid_vol{d_i}", 0.0))
+                            ask_vol_sum += safe_float(q.get(f"ask_vol{d_i}", 0.0))
+                        total_d = bid_vol_sum + ask_vol_sum
+                        bid_p = round((bid_vol_sum / total_d) * 100.0, 1) if total_d > 0 else 50.0
+
+                        # 竞价单量与金额 (万元)
+                        b_vol = vol if vol > 0 else (bid1_v if bid1_v > 0 else ask1_v)
+                        b_amt = b_vol * 100.0 * effective_p if (b_vol > 0 and effective_p > 0) else 0.0
+                        b_amt_wan = round(b_amt / 10000.0, 1)
+
                         if c_clean and (effective_p > 0 or last_c > 0):
                             if c_clean not in quote_map:
                                 quote_map[c_clean] = {}
@@ -416,6 +433,10 @@ class NewStockFetcher:
                                 quote_map[c_clean]["high"] = hi_p
                             if lo_p > 0:
                                 quote_map[c_clean]["low"] = lo_p
+
+                            quote_map[c_clean]["bid_pressure"] = bid_p
+                            quote_map[c_clean]["bidding_amt_wan"] = b_amt_wan
+                            quote_map[c_clean]["bidding_vol"] = b_vol
 
                             # 💡 权威推算流通市值、总市值与换手率 (支持集合竞价)
                             lt_shares, zg_shares = shares_dict.get(c_clean, (0.0, 0.0))
@@ -553,6 +574,40 @@ class NewStockFetcher:
             tmv = safe_float(q.get("total_mv_yi", 0.0))
             if tmv > 0:
                 df.at[idx, "total_mv_yi"] = tmv
+
+            # 💡 集合竞价策略信号判定与关键信息同步
+            b_amt_wan = safe_float(q.get("bidding_amt_wan", 0.0))
+            bid_p = safe_float(q.get("bid_pressure", 50.0))
+            pct_curr = safe_float(df.at[idx, "pct"]) if "pct" in df.columns else 0.0
+
+            # 首日估值健康度
+            is_healthy_ipo = True
+            if is_first_day and issue_p > 0 and p > 0:
+                ipo_pct = round((p - issue_p) / issue_p * 100.0, 1)
+                is_healthy_ipo = (ipo_pct <= 220.0)
+
+            if is_first_day and (b_amt_wan >= 500.0 or b_amt_wan >= 80.0) and is_healthy_ipo:
+                bidding_tag = "💎 首日真金抢筹"
+                bidding_advice = "09:25黄金上车点 (防开盘极速脉冲)"
+            elif pct_curr >= 9.5 and (bid_p >= 75.0 or b_amt_wan >= 2000.0):
+                bidding_tag = "👑 竞价一字顶格"
+                bidding_advice = "集合竞价一字顶格，主力顶格锁仓"
+            elif (pct_curr >= 4.0) and (b_amt_wan >= 1500.0 or bid_p >= 75.0):
+                bidding_tag = "💎 竞价爆量突破"
+                bidding_advice = "竞价大单爆量跳空突破，极速主升先锋"
+            elif (pct_curr >= 3.0) and (b_amt_wan >= 500.0 or bid_p >= 65.0):
+                bidding_tag = "🚀 竞价极速抢筹"
+                bidding_advice = "不可撤单高开抢筹，先手观察点"
+            elif pct_curr >= 3.0 and (b_amt_wan < 100.0 or bid_p <= 40.0):
+                bidding_tag = "⚠️ 竞价缩量诱多"
+                bidding_advice = "缩量假高开，卖盘压制防砸"
+            else:
+                bidding_tag = "⏱️ 常规博弈" if (p > 0 and b_amt_wan > 0) else "--"
+                bidding_advice = "常规博弈观望"
+
+            df.at[idx, "bidding_tag"] = bidding_tag
+            df.at[idx, "bidding_advice"] = bidding_advice
+            df.at[idx, "bidding_amt_wan"] = b_amt_wan
 
         return df
 
