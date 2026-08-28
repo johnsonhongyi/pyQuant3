@@ -101,7 +101,7 @@ def get_new_stock_table_headers(extra_cols: Optional[List[str]] = None) -> List[
         col_map = {}
         
     base_headers = [
-        "代码", "名称", "状态", "上市日", "申购日", "发行价",
+        "代码", "名称", "状态", "竞价信号", "上市日", "申购日", "发行价",
         "现价", "涨跌%", "换手%", "流通(亿)", "总值(亿)", "成交(亿)",
         "DFF", "Rank", "DFF2", "DFF3", "大盘偏离", "大盘共振"
     ]
@@ -424,6 +424,10 @@ class NewStockPanel(QWidget):
         self.lbl_overheat_info = QLabel("资金强度: 警戒成交额 > -- 亿 (换手>90%进入过热区)")
         self.lbl_overheat_info.setStyleSheet("color: #f87171; font-size: 8.5pt;")
         preview_layout.addWidget(self.lbl_overheat_info, 2, 2, 1, 3)
+
+        self.lbl_bidding_info = QLabel("⚡ 早盘竞价: -- | 💡 决策建议: 09:20~09:25不可撤单阶段重点观察真实申报与撮合")
+        self.lbl_bidding_info.setStyleSheet("color: #38bdf8; font-size: 8.5pt; font-weight: bold;")
+        preview_layout.addWidget(self.lbl_bidding_info, 3, 0, 1, 5)
 
         self.splitter.addWidget(self.preview_card)
         self.splitter.setStretchFactor(0, 5)
@@ -994,48 +998,73 @@ class NewStockPanel(QWidget):
                 status_color = "#94a3b8"
             self._set_or_update_item(row_idx, 2, status_short, color=status_color, font=bold_text_font if (row_pinned or "首日" in status_short or "前5日" in status_short) else text_font, align=Qt.AlignmentFlag.AlignCenter, bg_color=bg_color, is_pinned=row_pinned, raw_val=status_short, pin_rank=pin_rank)
 
-            # 3: 上市日
+            # 3: 竞价信号 (天梯同源实时竞价决策)
+            bidding_tag = str(row.get("bidding_tag", "--")).strip()
+            if not bidding_tag or bidding_tag == "nan":
+                bidding_tag = "--"
+
+            if "首日" in bidding_tag:
+                b_color = "#f43f5e" # 绯红首日抢筹
+                b_font = bold_text_font
+            elif "突破" in bidding_tag:
+                b_color = "#c084fc" # 紫金爆量突破
+                b_font = bold_text_font
+            elif "一字" in bidding_tag:
+                b_color = "#ffd700" # 黄金一字
+                b_font = bold_text_font
+            elif "抢筹" in bidding_tag:
+                b_color = "#38bdf8" # 天蓝极速抢筹
+                b_font = bold_text_font
+            elif "诱多" in bidding_tag:
+                b_color = "#fb923c" # 橙黄缩量诱多
+                b_font = text_font
+            else:
+                b_color = "#94a3b8"
+                b_font = text_font
+            self._set_or_update_item(row_idx, 3, bidding_tag, color=b_color, font=b_font, align=Qt.AlignmentFlag.AlignCenter, bg_color=bg_color, is_pinned=row_pinned, raw_val=bidding_tag if bidding_tag != "--" else None, pin_rank=pin_rank)
+
+            # 4: 上市日
             listing_val = listing_d if (listing_d and listing_d != "-") else None
             listing_color = "#ff4477" if is_today_listing else "#cbd5e1"
             listing_font = bold_num_font if is_today_listing else num_font
-            self._set_or_update_item(row_idx, 3, listing_d, color=listing_color, font=listing_font, align=Qt.AlignmentFlag.AlignCenter, bg_color=bg_color, is_pinned=row_pinned, raw_val=listing_val, pin_rank=pin_rank)
+            self._set_or_update_item(row_idx, 4, listing_d, color=listing_color, font=listing_font, align=Qt.AlignmentFlag.AlignCenter, bg_color=bg_color, is_pinned=row_pinned, raw_val=listing_val, pin_rank=pin_rank)
 
-            # 4: 申购日
+            # 5: 申购日
             apply_val = apply_d if (apply_d and apply_d != "-") else None
             apply_color = "#c084fc" if is_today_apply else "#94a3b8"
             apply_font = bold_num_font if is_today_apply else num_font
-            self._set_or_update_item(row_idx, 4, apply_d, color=apply_color, font=apply_font, align=Qt.AlignmentFlag.AlignCenter, bg_color=bg_color, is_pinned=row_pinned, raw_val=apply_val, pin_rank=pin_rank)
+            self._set_or_update_item(row_idx, 5, apply_d, color=apply_color, font=apply_font, align=Qt.AlignmentFlag.AlignCenter, bg_color=bg_color, is_pinned=row_pinned, raw_val=apply_val, pin_rank=pin_rank)
 
-            # 5: 发行价
+            # 6: 发行价
             issue_str = f"{issue_p:.2f}" if issue_p > 0 else "--"
-            self._set_or_update_item(row_idx, 5, issue_str, color="#cbd5e1", font=num_font, align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, bg_color=bg_color, is_pinned=row_pinned, raw_val=issue_p if issue_p > 0 else None, pin_rank=pin_rank)
+            self._set_or_update_item(row_idx, 6, issue_str, color="#cbd5e1", font=num_font, align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, bg_color=bg_color, is_pinned=row_pinned, raw_val=issue_p if issue_p > 0 else None, pin_rank=pin_rank)
 
-            # 6: 现价 & 7: 涨跌%
+            # 7: 现价 & 8: 涨跌%
             p_display = f"{price:.2f}" if price > 0 else "--"
             pct_str = f"{pct:+.2f}%" if price > 0 else "--"
             p_color = COLOR_UP if pct > 0 else (COLOR_DOWN if pct < 0 else "#94a3b8")
-            self._set_or_update_item(row_idx, 6, p_display, color=p_color, font=bold_num_font, align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, bg_color=bg_color, is_pinned=row_pinned, raw_val=price if price > 0 else None, pin_rank=pin_rank)
-            self._set_or_update_item(row_idx, 7, pct_str, color=p_color, font=bold_num_font, align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, bg_color=bg_color, is_pinned=row_pinned, raw_val=pct if price > 0 else None, pin_rank=pin_rank)
+            self._set_or_update_item(row_idx, 7, p_display, color=p_color, font=bold_num_font, align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, bg_color=bg_color, is_pinned=row_pinned, raw_val=price if price > 0 else None, pin_rank=pin_rank)
+            self._set_or_update_item(row_idx, 8, pct_str, color=p_color, font=bold_num_font, align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, bg_color=bg_color, is_pinned=row_pinned, raw_val=pct if price > 0 else None, pin_rank=pin_rank)
 
-            # 8: 换手% (字体粗细字号完全一致，通过专业色温区分活跃度)
+            # 9: 换手% (字体粗细字号完全一致，通过专业色温区分活跃度)
             to_str = f"{turnover:.2f}%" if (0.0 < turnover <= 100.0) else "--"
             to_color = "#f43f5e" if turnover >= 70.0 else ("#fbbf24" if turnover >= 50.0 else "#94a3b8")
-            self._set_or_update_item(row_idx, 8, to_str, color=to_color, font=bold_num_font if turnover >= 50.0 else num_font, align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, bg_color=bg_color, is_pinned=row_pinned, raw_val=turnover if (0.0 < turnover <= 100.0) else None, pin_rank=pin_rank)
+            self._set_or_update_item(row_idx, 9, to_str, color=to_color, font=bold_num_font if turnover >= 50.0 else num_font, align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, bg_color=bg_color, is_pinned=row_pinned, raw_val=turnover if (0.0 < turnover <= 100.0) else None, pin_rank=pin_rank)
 
-            # 9: 流通(亿)
+            # 10: 流通(亿)
             fmv_str = f"{float_mv:.2f}" if float_mv > 0 else "--"
-            self._set_or_update_item(row_idx, 9, fmv_str, color="#cbd5e1", font=num_font, align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, bg_color=bg_color, is_pinned=row_pinned, raw_val=float_mv if float_mv > 0 else None, pin_rank=pin_rank)
+            self._set_or_update_item(row_idx, 10, fmv_str, color="#cbd5e1", font=num_font, align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, bg_color=bg_color, is_pinned=row_pinned, raw_val=float_mv if float_mv > 0 else None, pin_rank=pin_rank)
 
-            # 10: 总值(亿)
+            # 11: 总值(亿)
             tmv_str = f"{total_mv:.2f}" if total_mv > 0 else "--"
-            self._set_or_update_item(row_idx, 10, tmv_str, color="#cbd5e1", font=num_font, align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, bg_color=bg_color, is_pinned=row_pinned, raw_val=total_mv if total_mv > 0 else None, pin_rank=pin_rank)
+            self._set_or_update_item(row_idx, 11, tmv_str, color="#cbd5e1", font=num_font, align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, bg_color=bg_color, is_pinned=row_pinned, raw_val=total_mv if total_mv > 0 else None, pin_rank=pin_rank)
 
-            # 11: 成交(亿)
+            # 12: 成交(亿)
             amt_str = f"{amt:.2f}" if amt > 0 else "--"
-            self._set_or_update_item(row_idx, 11, amt_str, color="#cbd5e1", font=num_font, align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, bg_color=bg_color, is_pinned=row_pinned, raw_val=amt if amt > 0 else None, pin_rank=pin_rank)
+            self._set_or_update_item(row_idx, 12, amt_str, color="#cbd5e1", font=num_font, align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, bg_color=bg_color, is_pinned=row_pinned, raw_val=amt if amt > 0 else None, pin_rank=pin_rank)
 
-            # ── 12~17: 对齐重点关注核心指标列 (DFF, Rank, DFF2, DFF3, 大盘偏离, 大盘共振) ──
-            # 12: DFF (日线动量强度，带降级计算保护)
+            # ── 13~18: 对齐重点关注核心指标列 (DFF, Rank, DFF2, DFF3, 大盘偏离, 大盘共振) ──
+            # 13: DFF (日线动量强度，带降级计算保护)
             dff_val = clean_num(row.get("dff", row.get("dfi", None)), default=float('nan'))
             if math.isnan(dff_val) and price > 0:
                 dff_val = round(pct * 0.4 + turnover * 0.05, 2)
@@ -1046,26 +1075,23 @@ class NewStockPanel(QWidget):
             else:
                 dff_str = "--"
                 dff_col = "#94a3b8"
-            self._set_or_update_item(row_idx, 12, dff_str, color=dff_col, font=bold_num_font, align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, bg_color=bg_color, is_pinned=row_pinned, raw_val=dff_val if not math.isnan(dff_val) else None, pin_rank=pin_rank)
+            self._set_or_update_item(row_idx, 13, dff_str, color=dff_col, font=bold_num_font, align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, bg_color=bg_color, is_pinned=row_pinned, raw_val=dff_val if not math.isnan(dff_val) else None, pin_rank=pin_rank)
 
-            # 13: Rank (全市场综合排名，带降级排序保护)
-            rank_val = row.get("rank", row.get("Rank", None))
-            rank_num = None
-            if rank_val is not None and not pd.isna(rank_val) and str(rank_val).strip() not in ("", "--", "nan"):
-                try:
-                    rank_num = int(float(rank_val))
-                    rank_str = str(rank_num)
-                except:
-                    rank_str = str(rank_val)
-                    rank_num = rank_str
-                rank_col = "#38bdf8"
+            # 14: Rank (市场热度排名)
+            rank_val = clean_num(row.get("rank", row.get("Rank", None)), default=float('nan'))
+            if not math.isnan(rank_val) and rank_val > 0:
+                rank_str = f"{int(rank_val)}"
+                rank_col = "#ffd700" if rank_val <= 100 else ("#cbd5e1" if rank_val <= 500 else "#94a3b8")
+                rank_font = bold_num_font if rank_val <= 100 else num_font
+                rank_sort = rank_val
             else:
-                rank_num = (row_idx + 1) if price > 0 else None
-                rank_str = str(rank_num) if rank_num is not None else "--"
-                rank_col = "#38bdf8" if price > 0 else "#94a3b8"
-            self._set_or_update_item(row_idx, 13, rank_str, color=rank_col, font=num_font, align=Qt.AlignmentFlag.AlignCenter, bg_color=bg_color, is_pinned=row_pinned, raw_val=rank_num, pin_rank=pin_rank)
+                rank_str = "--"
+                rank_col = "#94a3b8"
+                rank_font = num_font
+                rank_sort = None
+            self._set_or_update_item(row_idx, 14, rank_str, color=rank_col, font=rank_font, align=Qt.AlignmentFlag.AlignCenter, bg_color=bg_color, is_pinned=row_pinned, raw_val=rank_sort, pin_rank=pin_rank)
 
-            # 14: DFF2 (周线强度)
+            # 15: DFF2 (周线/2日强度)
             dff2_val = clean_num(row.get("dff2", row.get("dff_w", None)), default=float('nan'))
             if math.isnan(dff2_val) and price > 0:
                 dff2_val = round(dff_val * 1.5, 2) if not math.isnan(dff_val) else float('nan')
@@ -1075,9 +1101,9 @@ class NewStockPanel(QWidget):
             else:
                 dff2_str = "--"
                 dff2_col = "#94a3b8"
-            self._set_or_update_item(row_idx, 14, dff2_str, color=dff2_col, font=bold_num_font, align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, bg_color=bg_color, is_pinned=row_pinned, raw_val=dff2_val if not math.isnan(dff2_val) else None, pin_rank=pin_rank)
+            self._set_or_update_item(row_idx, 15, dff2_str, color=dff2_col, font=bold_num_font, align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, bg_color=bg_color, is_pinned=row_pinned, raw_val=dff2_val if not math.isnan(dff2_val) else None, pin_rank=pin_rank)
 
-            # 15: DFF3 (月线/3日强度)
+            # 16: DFF3 (月线/3日强度)
             dff3_val = clean_num(row.get("dff3", row.get("dff_m", None)), default=float('nan'))
             if math.isnan(dff3_val) and price > 0:
                 dff3_val = round(dff_val * 2.2, 2) if not math.isnan(dff_val) else float('nan')
@@ -1087,9 +1113,9 @@ class NewStockPanel(QWidget):
             else:
                 dff3_str = "--"
                 dff3_col = "#94a3b8"
-            self._set_or_update_item(row_idx, 15, dff3_str, color=dff3_col, font=bold_num_font, align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, bg_color=bg_color, is_pinned=row_pinned, raw_val=dff3_val if not math.isnan(dff3_val) else None, pin_rank=pin_rank)
+            self._set_or_update_item(row_idx, 16, dff3_str, color=dff3_col, font=bold_num_font, align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, bg_color=bg_color, is_pinned=row_pinned, raw_val=dff3_val if not math.isnan(dff3_val) else None, pin_rank=pin_rank)
 
-            # 16: 大盘偏离 (rs = pct - sh_pct)
+            # 17: 大盘偏离 (rs = pct - sh_pct)
             rs_val = clean_num(row.get("rs", row.get("rs_val", row.get("deviation", None))), default=float('nan'))
             if math.isnan(rs_val) and price > 0:
                 rs_val = round(pct - sh_pct, 2)
@@ -1100,9 +1126,9 @@ class NewStockPanel(QWidget):
             else:
                 rs_str = "--"
                 rs_col = "#94a3b8"
-            self._set_or_update_item(row_idx, 16, rs_str, color=rs_col, font=bold_num_font, align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, bg_color=bg_color, is_pinned=row_pinned, raw_val=rs_val if not math.isnan(rs_val) else None, pin_rank=pin_rank)
+            self._set_or_update_item(row_idx, 17, rs_str, color=rs_col, font=bold_num_font, align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, bg_color=bg_color, is_pinned=row_pinned, raw_val=rs_val if not math.isnan(rs_val) else None, pin_rank=pin_rank)
 
-            # 17: 大盘共振 (全 ATS 统一对齐判定逻辑)
+            # 18: 大盘共振 (全 ATS 统一对齐判定逻辑)
             res_val = str(row.get("resonance", row.get("market_resonance", "--"))).strip()
             if not res_val or res_val in ("nan", "None", "--"):
                 if price > 0 and not math.isnan(rs_val):
@@ -1130,10 +1156,10 @@ class NewStockPanel(QWidget):
             else:
                 res_col = "#94a3b8"
                 res_font = text_font
-            self._set_or_update_item(row_idx, 17, res_val, color=res_col, font=res_font, align=Qt.AlignmentFlag.AlignCenter, bg_color=bg_color, is_pinned=row_pinned, raw_val=res_val if res_val != "--" else None, pin_rank=pin_rank)
+            self._set_or_update_item(row_idx, 18, res_val, color=res_col, font=res_font, align=Qt.AlignmentFlag.AlignCenter, bg_color=bg_color, is_pinned=row_pinned, raw_val=res_val if res_val != "--" else None, pin_rank=pin_rank)
 
             # ── 动态自定义列 (ats_col) ──
-            col_offset = 18
+            col_offset = 19
             for c_name in self.extra_cols:
                 raw_c_val = None
                 for k in (c_name, c_name.lower(), c_name.upper()):
@@ -1309,6 +1335,23 @@ class NewStockPanel(QWidget):
         # 资金强度
         overheat_amt = round(float_mv * 2.5, 2) if float_mv > 0 else round(issue_p * 0.5, 2)
         self.lbl_overheat_info.setText(f"资金强度: 警戒成交额 > {overheat_amt:.2f} 亿 (换手>90%进入过热区)")
+
+        # ⚡ 集合竞价决策与买点建议
+        b_tag = str(row_data.get("bidding_tag", "--")).strip()
+        b_advice = str(row_data.get("bidding_advice", "09:20~09:25不可撤单阶段观察真实申报与撮合")).strip()
+        b_amt = clean_num(row_data.get("bidding_amt_wan", 0.0))
+        amt_str = f"{b_amt:.1f}万" if b_amt > 0 else "--"
+        if b_tag and b_tag != "--":
+            self.lbl_bidding_info.setText(f"⚡ 早盘竞价: {b_tag} (竞价量能: {amt_str}) | 💡 决策建议: {b_advice}")
+            if "首日" in b_tag or "突破" in b_tag or "一字" in b_tag or "抢筹" in b_tag:
+                self.lbl_bidding_info.setStyleSheet("color: #38bdf8; font-size: 8.5pt; font-weight: bold;")
+            elif "诱多" in b_tag:
+                self.lbl_bidding_info.setStyleSheet("color: #fb923c; font-size: 8.5pt; font-weight: bold;")
+            else:
+                self.lbl_bidding_info.setStyleSheet("color: #94a3b8; font-size: 8.5pt;")
+        else:
+            self.lbl_bidding_info.setText("⚡ 早盘竞价: -- | 💡 决策建议: 09:20~09:25不可撤单阶段重点观察真实申报与撮合")
+            self.lbl_bidding_info.setStyleSheet("color: #94a3b8; font-size: 8.5pt;")
 
     def _on_generate_strategy_clicked(self):
         """一键为选中标的（或批量未配置标的）生成标准分时阶梯策略"""

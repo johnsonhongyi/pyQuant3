@@ -130,53 +130,53 @@ def test_new_stock_panel_sorting_flow(qapp, monkeypatch):
     panel.df_data = mock_df
     panel._render_table()
 
-    # 1. 测试按“涨跌%”列 (col=7) 降序排序
-    panel.sort_col = 7
+    # 1. 测试按“涨跌%”列 (col=8) 降序排序
+    panel.sort_col = 8
     panel.sort_order = Qt.SortOrder.DescendingOrder
-    panel.table.sortItems(7, Qt.SortOrder.DescendingOrder)
+    panel.table.sortItems(8, Qt.SortOrder.DescendingOrder)
 
     # 检查第0行涨跌幅最大为 高凯技术 (+16.11%)
     first_code = panel.table.item(0, 0).text()
-    first_pct = panel.table.item(0, 7).text()
+    first_pct = panel.table.item(0, 8).text()
     assert first_code == "688835"
     assert "+16.11%" in first_pct
 
     # 检查最后一行涨跌幅最小为 长进光子 (-5.27%)
     last_idx = panel.table.rowCount() - 1
     last_code = panel.table.item(last_idx, 0).text()
-    last_pct = panel.table.item(last_idx, 7).text()
+    last_pct = panel.table.item(last_idx, 8).text()
     assert last_code == "688635"
     assert "-5.27%" in last_pct
 
-    # 2. 测试按“现价”列 (col=6) 升序排序
-    panel.sort_col = 6
+    # 2. 测试按“现价”列 (col=7) 升序排序
+    panel.sort_col = 7
     panel.sort_order = Qt.SortOrder.AscendingOrder
-    panel.table.sortItems(6, Qt.SortOrder.AscendingOrder)
+    panel.table.sortItems(7, Qt.SortOrder.AscendingOrder)
 
     # 检查第0行价格最低为 双英集团 (14.76)
     p_first_code = panel.table.item(0, 0).text()
-    p_first_val = panel.table.item(0, 6).text()
+    p_first_val = panel.table.item(0, 7).text()
     assert p_first_code == "920059"
     assert "14.76" in p_first_val
 
     # 检查最后一行价格最高为 联讯仪器 (2209.00)
     p_last_code = panel.table.item(last_idx, 0).text()
-    p_last_val = panel.table.item(last_idx, 6).text()
+    p_last_val = panel.table.item(last_idx, 7).text()
     assert p_last_code == "688808"
     assert "2209.00" in p_last_val
 
-    # 3. 测试按“上市日”列 (col=3) 降序排序
-    panel.sort_col = 3
+    # 3. 测试按“上市日”列 (col=4) 降序排序
+    panel.sort_col = 4
     panel.sort_order = Qt.SortOrder.DescendingOrder
-    panel.table.sortItems(3, Qt.SortOrder.DescendingOrder)
+    panel.table.sortItems(4, Qt.SortOrder.DescendingOrder)
 
     d_first_code = panel.table.item(0, 0).text()
-    d_first_date = panel.table.item(0, 3).text()
+    d_first_date = panel.table.item(0, 4).text()
     assert d_first_code == "688835"  # 2026-08-25 最新
     assert d_first_date == "2026-08-25"
 
     d_last_code = panel.table.item(last_idx, 0).text()
-    d_last_date = panel.table.item(last_idx, 3).text()
+    d_last_date = panel.table.item(last_idx, 4).text()
     assert d_last_code == "688808"  # 2026-04-24 最早
     assert d_last_date == "2026-04-24"
 

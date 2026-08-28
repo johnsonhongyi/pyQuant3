@@ -452,6 +452,80 @@ class TestNewStockModule(unittest.TestCase):
         finally:
             fetcher.get_security_quotes_safe = original_get_quotes
 
+    def test_10_new_stock_bidding_signal_sync_and_card_rendering(self):
+        """测试新股次新股模块全面同步天梯集合竞价关键信号与卡片联动"""
+        from ats.new_stock_fetcher import NewStockFetcher
+        from ats.ui.new_stock_panel import NewStockPanel, get_new_stock_table_headers
+        from unittest.mock import patch
+
+        # 1. 验证表头包含“竞价信号”列
+        headers = get_new_stock_table_headers()
+        self.assertIn("竞价信号", headers)
+        self.assertEqual(headers.index("竞价信号"), 3)
+
+        fetcher = NewStockFetcher()
+        mock_df = pd.DataFrame([
+            {
+                "code": "920288", "name": "N华大", "status": "首日(N)",
+                "listing_date": "2026-08-28", "apply_date": "2026-08-18",
+                "issue_price": 12.57, "price": 25.18, "pct": 100.32,
+                "turnover": 3.85, "float_mv_yi": 3.25, "total_mv_yi": 13.00,
+                "amount_yi": 0.1253, "has_strategy": False
+            },
+            {
+                "code": "301666", "name": "大普微", "status": "前5日(C)",
+                "listing_date": "2026-08-25", "apply_date": "2026-08-15",
+                "issue_price": 40.0, "price": 469.20, "pct": 20.0,
+                "turnover": 15.2, "float_mv_yi": 65.0, "total_mv_yi": 260.0,
+                "amount_yi": 6.30, "has_strategy": False
+            }
+        ])
+
+        # 模拟盘口数据
+        quotes_mock = [
+            {
+                "code": "920288", "price": 25.18, "last_close": 12.57, "open": 25.18,
+                "bid1": 25.18, "ask1": 25.20, "bid_vol1": 4976, "bid_vol2": 2000,
+                "ask_vol1": 500, "vol": 4976, "amount": 12529568.0
+            },
+            {
+                "code": "301666", "price": 469.20, "last_close": 391.0, "open": 469.20,
+                "bid1": 469.20, "ask1": 0.0, "bid_vol1": 13423, "bid_vol2": 5000,
+                "ask_vol1": 0, "vol": 13423, "amount": 629807160.0
+            }
+        ]
+
+        with patch("ats.tdx_realtime_fetcher.TDXRealtimeFetcher.get_security_quotes_safe", return_value=quotes_mock):
+            res_df = fetcher.enrich_with_tdx_realtime(mock_df, force=True)
+            self.assertIn("bidding_tag", res_df.columns)
+            self.assertIn("bidding_advice", res_df.columns)
+            self.assertIn("bidding_amt_wan", res_df.columns)
+
+            # N华大应精准打上 💎 首日真金抢筹 与 09:25黄金上车点
+            row_hd = res_df[res_df["code"] == "920288"].iloc[0]
+            self.assertEqual(row_hd["bidding_tag"], "💎 首日真金抢筹")
+            self.assertTrue("09:25黄金上车点" in row_hd["bidding_advice"])
+            self.assertTrue(row_hd["bidding_amt_wan"] >= 1000.0)
+
+            # 大普微应精准打上 👑 竞价一字顶格 或 💎 竞价爆量突破
+            row_dpw = res_df[res_df["code"] == "301666"].iloc[0]
+            self.assertIn(row_dpw["bidding_tag"], ["👑 竞价一字顶格", "💎 竞价爆量突破"])
+            self.assertTrue(row_dpw["bidding_amt_wan"] >= 60000.0)
+
+        # 2. 验证 UI 界面渲染与推演卡片联动
+        panel = NewStockPanel()
+        panel.df_data = res_df
+        panel._render_table()
+
+        # 检查第 3 列（竞价信号）呈现
+        bidding_cell_txt = panel.table.item(0, 3).text()
+        self.assertTrue("💎" in bidding_cell_txt or "👑" in bidding_cell_txt)
+
+        # 检查选中 N华大 时底部 preview_card 的竞价信息更新
+        panel._update_preview_card(row_hd.to_dict())
+        self.assertTrue("首日真金抢筹" in panel.lbl_bidding_info.text())
+        self.assertTrue("09:25黄金上车点" in panel.lbl_bidding_info.text())
+
 
 if __name__ == "__main__":
     unittest.main()
