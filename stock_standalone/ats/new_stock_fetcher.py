@@ -252,13 +252,12 @@ class NewStockFetcher:
         - 计算完成后自动原子落盘保存至 config/new_stock_data_cache.json。
         """
         now = time.time()
-        # ⚡ [0 毫秒冷启动即显] 非强制刷新时，优先返回内存缓存或磁盘持久化数据，绝不阻塞主线程发起网络请求
-        if not force_refresh:
-            if self._cached_stocks_df is not None and not self._cached_stocks_df.empty:
-                return self._cached_stocks_df
+        # ⚡ [0 毫秒冷启动即显与高频实时刷新] 非强制刷新时，在 TTL 有效期内直接复用内存缓存；超过 TTL 时自动拉取最新行情
+        if not force_refresh and self._cached_stocks_df is not None and not self._cached_stocks_df.empty and (now - self._last_fetch_time < self._cache_ttl_seconds):
+            return self._cached_stocks_df
+
+        if self._cached_stocks_df is None or self._cached_stocks_df.empty:
             self._load_persisted_data()
-            if self._cached_stocks_df is not None and not self._cached_stocks_df.empty:
-                return self._cached_stocks_df
 
         ipo_dict = self.fetch_ipo_calendar(page_size=100, force=force_refresh)
 
