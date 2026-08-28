@@ -520,7 +520,10 @@ class NewStockFetcher:
             c = str(row["code"]).zfill(6)
             st = str(row.get("status", ""))
             nm = str(row.get("name", ""))
-            is_first_day = ("首日" in st) or ("N" in st) or ("N" in nm) or ("首日" in nm) or c.startswith("920")
+            today_s = datetime.date.today().strftime("%Y-%m-%d")
+            list_d = str(row.get("listing_date", "")).strip()[:10]
+            # 严格首日判定：状态为首日/今日上市，或上市日为今日，或名称以 N 开头且无早于今日的历史上市日；严禁按 920 盲目全量判定！
+            is_first_day = ("首日" in st) or (st == "今日上市") or (list_d == today_s) or (nm.startswith("N") and list_d in ("", today_s, "-"))
             issue_p = safe_float(row.get("issue_price", 0.0))
 
             # 优先从本轮获取字典中取

@@ -1311,7 +1311,18 @@ class TDXRealtimeFetcher:
             # 多日特征与多日突破判断 (支持 lasth1d / lasth2d / lasth3d / high4 / max5，新股保护 issue_price 发行价)
             mp_info = multi_period_cache.get(code_str, {})
             name_curr = name_map.get(code_str, q.get("name", code_str))
-            is_first_day = ("N" in str(name_curr)) or (code_str.startswith("920") and pct > 30.0) or ("首日" in str(mp_info.get("status", "")))
+            # 权威判断是否为首日新股（对接 IntradayStrategyEngine 权威 SSOT，杜绝按 920 或模糊 N 误判）
+            is_first_day = False
+            try:
+                from ats.intraday_strategy_engine import IntradayStrategyEngine
+                is_first_day = bool(IntradayStrategyEngine.get_instance().is_stock_first_listing_day(code_str))
+            except Exception:
+                pass
+            if not is_first_day:
+                mp_st = str(mp_info.get("status", "")).strip()
+                nm_str = str(name_curr).strip()
+                if ("首日" in mp_st) or (mp_st == "今日上市") or (nm_str.startswith("N") and mp_st in ("", "首日", "今日上市", "首日(N)", "首日上市")):
+                    is_first_day = True
             issue_p = float(mp_info.get("issue_price", 0.0) or q.get("issue_price", 0.0) or 0.0)
 
             lasth1d = float(mp_info.get("lasth1d", mp_info.get("last_high", 0.0)) or 0.0)

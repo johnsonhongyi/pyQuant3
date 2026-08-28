@@ -1,3 +1,30 @@
+## 2026-08-28 20:45
+- [x] **彻底修复分时阶梯策略卖出执行后持仓比例显示“100%僵尸持仓”交易逻辑 Bug (`ats/intraday_strategy_engine.py`, `ats/ui/intraday_strategy_dialog.py`, `tests/test_intraday_strategy_engine.py`)**：
+    - [x] **根因排查定位**：
+        - `IntradayStrategyEngine.scan_and_evaluate_intraday_timeline` 在分时反演与实盘计算中扣减完 `rem_ratio` 后，将结果写入了错位键名 `state["remaining_position_ratio"] = rem_ratio`，而未同步更新核心字典键 `state["remaining_ratio"]`；
+        - UI 及外部模块均使用 `state.get("remaining_ratio", 1.0)` 读取持仓比例，导致分批卖出哪怕已经触发完毕（如 40% + 30% + 30% = 100% 卖完），界面仍然显示 `剩余持仓比例 100%`；
+    - [x] **状态机键名统一与持仓扣减双保险加固**：
+        - `IntradayStrategyEngine` 全链路（`scan_and_evaluate_intraday_timeline`、`evaluate_tick`）严格双向同步 `state["remaining_ratio"]` 与 `state["remaining_position_ratio"]`；
+        - `IntradayStrategyDialog` 引入卖出信号总比例自适应一致性校验（`rem_ratio = max(0.0, min(rem_ratio, 1.0 - total_sold))`），彻底杜绝状态脱节；
+        - 界面顶栏状态卡及 SBC 走势卡片增加持仓色彩自适应与清仓高亮（0% 时自动呈现为 `0% (已全部清仓/分批止盈完毕)`）；
+    - [x] **自动化测试 100% 验证通过**：
+        - 新增 `test_remaining_position_ratio_deduction_and_sync` 单元测试；
+        - `pytest tests/test_tdx_adaptive_config.py tests/test_intraday_strategy_engine.py tests/test_signal_ledger.py` 全量 29 项测试 **100% PASSED**！
+
+## 2026-08-28 20:33
+- [x] **彻底根治集合竞价信号全量标的被误判为“首日真金抢筹”重大逻辑 Bug (`ats/new_stock_fetcher.py`, `ats/tdx_realtime_fetcher.py`, `ats/limit_up_engine.py`, `tests/test_new_stock_module.py`)**：
+    - [x] **根因排查锁定**：
+        - `NewStockFetcher.enrich_with_tdx_realtime` 中首日判定错误包含 `or c.startswith("920")`，北交所所有历史上市的股票（如 920078 族兴新材、920072 科莱瑞迪、920012 创达新材、920028 新恒泰等）均以 920 开头，导致只要竞价存在单量就被全员盲目打上【💎 首日真金抢筹】；
+        - `TDXRealtimeFetcher` 及 `LimitUpEngine` 中存在 `(code_str.startswith("920") and pct > 30.0)` 及模糊 `"N" in name` 判定，容易引发串扰；
+    - [x] **建立权威 SSOT 严格首日过滤机制**：
+        - 彻底剔除 `c.startswith("920")` 粗暴逻辑；
+        - 首日新股判定严格收敛至：`status == "今日上市"` / `"首日(N)"` / `listing_date == 今日 (today_str)` 或 `IntradayStrategyEngine.is_stock_first_listing_day()` 权威日历与单根日 K 硬核核验；
+        - 历史已上市与次新股票在非首日状态下，根据真实竞价意图与涨跌幅正常分流至【⏱️ 常规博弈】、【💎 竞价爆量突破】、【👑 竞价一字顶格】等；
+    - [x] **自动化测试 100% 验证通过**：
+        - 补充 `tests/test_new_stock_module.py` 中 920 已上市标的竞价信号非首日断言；
+        - `python tests/test_new_stock_module.py` 11 项用例 **100% 全部通过**；
+        - `pytest tests/test_tdx_adaptive_config.py tests/test_intraday_strategy_engine.py tests/test_signal_ledger.py` 全量 28 项测试 **100% PASSED**！
+
 ## 2026-08-28 20:15
 - [x] **实现分时阶梯策略全量检测窗口尺寸持久化、平滑滚动流式卡片视图与标的穿透联动 (`ats/ui/intraday_strategy_dialog.py`, `tests/test_tdx_adaptive_config.py`)**：
     - [x] **窗口几何尺寸与位置双保险持久化落盘 (`AllCodesStrategyEvalDialog`)**：彻底替换原有超长超出屏幕的 `QMessageBox`，重构为独立的 `AllCodesStrategyEvalDialog` 科技暗夜风格窗口。集成 `QSettings("pyQuant3", "AllCodesStrategyEvalDialog")` 与 `config/intraday_ui_layout.json` 双保险落盘，记忆用户拉伸的窗口宽高与屏幕坐标（默认 840x640），并自带多显示器越界安全保护；

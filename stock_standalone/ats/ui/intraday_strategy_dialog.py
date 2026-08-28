@@ -4311,9 +4311,20 @@ class IntegratedTradingStrategyPanel(QWidget):
         pattern = eval_res.get("pattern", "--")
         intensity_val = eval_res.get("intensity_ratio", 0.0)
         state = self.engine._get_stock_state(c_clean, open_price)
-        rem_ratio = state.get("remaining_ratio", 1.0)
+        rem_ratio = float(state.get("remaining_ratio", state.get("remaining_position_ratio", 1.0)))
         signals = state.get("signals", [])
         logs = state.get("execution_logs", [])
+
+        # 🛡️ 持仓扣减一致性核验与双保险
+        if signals:
+            tot_sold = sum(
+                float(getattr(s, "sell_ratio", 0.0) or (s.debug_info.get("sell_ratio", 0.0) if hasattr(s, "debug_info") and isinstance(s.debug_info, dict) else 0.0))
+                for s in signals
+            )
+            if tot_sold > 0:
+                rem_ratio = max(0.0, min(rem_ratio, 1.0 - tot_sold))
+                state["remaining_ratio"] = rem_ratio
+                state["remaining_position_ratio"] = rem_ratio
 
         # 2. 顶部状态卡
         tier_name, _, _ = self.engine.get_open_price_tier(open_price, code=c_clean)
@@ -4329,8 +4340,10 @@ class IntegratedTradingStrategyPanel(QWidget):
         self.lbl_score_badge.setText(
             f"🏆 综合评级: <font color='#00ff88'>{tot_score:.2f}分</font> (形态: <font color='#ffd700'>【{pattern}】</font>) | 资金强度: {intensity_val:.2f}x"
         )
+        pos_color_top = "#00ff88" if rem_ratio > 0.3 else ("#ffd700" if rem_ratio > 0.001 else "#ff5555")
+        pos_suffix_top = " (已清仓)" if rem_ratio <= 0.001 else ""
         self.lbl_position_status.setText(
-            f"📦 持仓状态: 剩余 <font color='#00ff88'>{rem_ratio*100:.0f}%</font> | 已触发: {len(signals)} 步买卖"
+            f"📦 持仓状态: 剩余 <font color='{pos_color_top}'><b>{rem_ratio*100:.0f}%</b>{pos_suffix_top}</font> | 已触发: {len(signals)} 步买卖"
         )
 
         # 3. 实操指引
@@ -4557,6 +4570,8 @@ class IntegratedTradingStrategyPanel(QWidget):
             else:
                 hl_line_str = f"【实时成交】: <font color='{col_price}'><b>{price:.2f} 元</b></font>(最高: <font color='{col_high}'><b>{max_p:.2f}元</b></font> / 最低: <font color='{col_low}'><b>{min_p:.2f}元</b></font>)<br/>"
 
+        col_pos_sbc = green if rem_ratio > 0.3 else (gold if rem_ratio > 0.001 else "#ff5555")
+        pos_suffix_sbc = " (已分批止盈/清仓完毕)" if rem_ratio <= 0.001 else ""
         if is_daily_strategy:
             sbc_html = (
                 f"<div style='font-family: Consolas, Microsoft YaHei; font-size: 9.5pt; line-height: 1.5; color: #e0e0e0;'>"
@@ -4567,7 +4582,7 @@ class IntegratedTradingStrategyPanel(QWidget):
                 f"【冲高卖出目标 (+3%~+5%)】: <font color='{red}'><b>{open_price*1.03:.2f} ~ {open_price*1.05:.2f} 元</b></font> (冲高分批止盈 30%)<br/>"
                 f"【破分时均线止损/减仓】: <font color='{red}'><b>{vwap:.2f} 元</b></font> (跌破分时均价线 VWAP 触发减仓)<br/>"
                 f"【移动止盈清仓 (-3%~-5%)】: <font color='{red}'><b>{max_p*0.96:.2f} 元</b></font> (日内高点回撤触发)<br/>"
-                f"【当前持仓管理】: 剩余持仓比例 <font color='{green}'><b>{rem_ratio*100:.0f}%</b></font><br/>"
+                f"【当前持仓管理】: 剩余持仓比例 <font color='{col_pos_sbc}'><b>{rem_ratio*100:.0f}%</b>{pos_suffix_sbc}</font><br/>"
                 f"</div>"
             )
         else:
@@ -4580,7 +4595,7 @@ class IntegratedTradingStrategyPanel(QWidget):
                 f"【冲高卖出目标 (+10%)】: <font color='{red}'><b>{open_price*1.10:.2f} 元</b></font> (价格笼子限价卖出 50%)<br/>"
                 f"【临停触发目标 (+30%)】: <font color='{red}'><b>{open_price*1.30:.2f} 元</b></font> (复牌前挂单 1.28x=<font color='{red}'><b>{open_price*1.28:.2f}</b></font> 卖出 30%)<br/>"
                 f"【移动止盈清仓 (-10%)】: <font color='{red}'><b>{max_p*0.90:.2f} 元</b></font> (高点回撤 10% 触发)<br/>"
-                f"【当前持仓管理】: 剩余持仓比例 <font color='{green}'><b>{rem_ratio*100:.0f}%</b></font><br/>"
+                f"【当前持仓管理】: 剩余持仓比例 <font color='{col_pos_sbc}'><b>{rem_ratio*100:.0f}%</b>{pos_suffix_sbc}</font><br/>"
                 f"</div>"
             )
 

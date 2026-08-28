@@ -21,6 +21,13 @@ from ats.intraday_strategy_engine import IntradayStrategyEngine
 
 class TestNewStockModule(unittest.TestCase):
 
+    @classmethod
+    def setUpClass(cls):
+        from PyQt6.QtWidgets import QApplication
+        cls.app = QApplication.instance()
+        if cls.app is None:
+            cls.app = QApplication([])
+
     def test_01_fetch_ipo_and_spot(self):
         """测试新股日历与实时行情抓取"""
         fetcher = NewStockFetcher.get_instance()
@@ -478,6 +485,13 @@ class TestNewStockModule(unittest.TestCase):
                 "issue_price": 40.0, "price": 469.20, "pct": 20.0,
                 "turnover": 15.2, "float_mv_yi": 65.0, "total_mv_yi": 260.0,
                 "amount_yi": 6.30, "has_strategy": False
+            },
+            {
+                "code": "920078", "name": "族兴新材", "status": "已上市",
+                "listing_date": "2026-03-18", "apply_date": "2026-03-09",
+                "issue_price": 6.98, "price": 20.40, "pct": -1.59,
+                "turnover": 6.17, "float_mv_yi": 15.0, "total_mv_yi": 30.0,
+                "amount_yi": 0.50, "has_strategy": False
             }
         ])
 
@@ -492,28 +506,38 @@ class TestNewStockModule(unittest.TestCase):
                 "code": "301666", "price": 469.20, "last_close": 391.0, "open": 469.20,
                 "bid1": 469.20, "ask1": 0.0, "bid_vol1": 13423, "bid_vol2": 5000,
                 "ask_vol1": 0, "vol": 13423, "amount": 629807160.0
+            },
+            {
+                "code": "920078", "price": 20.40, "last_close": 20.73, "open": 20.40,
+                "bid1": 20.40, "ask1": 20.45, "bid_vol1": 100, "bid_vol2": 50,
+                "ask_vol1": 120, "vol": 100, "amount": 204000.0
             }
         ]
 
         from ats.tdx_realtime_fetcher import TDXRealtimeFetcher
         tdx_inst = TDXRealtimeFetcher.get_instance()
         with patch.object(tdx_inst, "get_security_quotes_safe", return_value=quotes_mock), \
-             patch.object(tdx_inst, "get_batch_finance_shares", return_value={"920288": (5000000.0, 20000000.0), "301666": (10000000.0, 40000000.0)}):
+             patch.object(tdx_inst, "get_batch_finance_shares", return_value={"920288": (5000000.0, 20000000.0), "301666": (10000000.0, 40000000.0), "920078": (10000000.0, 20000000.0)}):
             res_df = fetcher.enrich_with_tdx_realtime(mock_df, force=True)
             self.assertIn("bidding_tag", res_df.columns)
             self.assertIn("bidding_advice", res_df.columns)
             self.assertIn("bidding_amt_wan", res_df.columns)
 
-            # N华大应精准打上 💎 首日真金抢筹 与 09:25黄金上车点
+            # 1. N华大应精准打上 💎 首日真金抢筹 与 09:25黄金上车点
             row_hd = res_df[res_df["code"] == "920288"].iloc[0]
             self.assertEqual(row_hd["bidding_tag"], "💎 首日真金抢筹")
             self.assertTrue("09:25黄金上车点" in row_hd["bidding_advice"])
             self.assertTrue(row_hd["bidding_amt_wan"] >= 1000.0)
 
-            # 大普微应精准打上 👑 竞价一字顶格 或 💎 竞价爆量突破
+            # 2. 大普微应精准打上 👑 竞价一字顶格 或 💎 竞价爆量突破
             row_dpw = res_df[res_df["code"] == "301666"].iloc[0]
             self.assertIn(row_dpw["bidding_tag"], ["👑 竞价一字顶格", "💎 竞价爆量突破"])
             self.assertTrue(row_dpw["bidding_amt_wan"] >= 60000.0)
+
+            # 3. 族兴新材 (920078 北交所已上市标的) 绝不能误判为首日抢筹，应为常规博弈
+            row_zx = res_df[res_df["code"] == "920078"].iloc[0]
+            self.assertNotEqual(row_zx["bidding_tag"], "💎 首日真金抢筹")
+            self.assertEqual(row_zx["bidding_tag"], "⏱️ 常规博弈")
 
         # 2. 验证 UI 界面渲染与推演卡片联动
         panel = NewStockPanel()
@@ -594,7 +618,7 @@ class TestNewStockModule(unittest.TestCase):
             {"code": "920288", "open": 13.64, "close": 13.64, "high": 13.64, "low": 13.64},
         ], index=["00089", "30130", "68879", "920288"])
         success = engine.hydrate_from_intraday_df("920288", multi_stock_df, open_price=13.64)
-        self.assertTrue(success)
+        self.assertFalse(success, "多股票截面表应被安全拦截并返回 False，不注入分时 K 线")
 
 
 if __name__ == "__main__":
