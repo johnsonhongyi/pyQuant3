@@ -51,18 +51,33 @@ class NewStockStrategyGenerator:
         """
         code = str(stock_info.get("code", "")).strip().zfill(6)
         name = str(stock_info.get("name", f"标的_{code}")).strip()
+        # 权威获取/补齐新股基本面与真实发行价
+        ipo_info = {}
+        try:
+            from ats.new_stock_fetcher import NewStockFetcher
+            ipo_dict = NewStockFetcher.get_instance().fetch_ipo_calendar()
+            if code in ipo_dict:
+                ipo_info = ipo_dict[code]
+        except Exception:
+            pass
+
+        if not name or name.startswith("标的_"):
+            name = ipo_info.get("name") or name
         # 清理名称中的 N/C 前缀以获取纯净简称
         clean_name = name.lstrip("NC").strip() if len(name) > 1 else name
 
         issue_price = float(stock_info.get("issue_price", 0.0) or 0.0)
-        curr_price = float(stock_info.get("price", 0.0) or 0.0)
+        if issue_price <= 0 and ipo_info:
+            issue_price = float(ipo_info.get("issue_price", 0.0) or 0.0)
+
+        curr_price = float(stock_info.get("price", 0.0) or stock_info.get("open_price", 0.0) or 0.0)
         
-        # 发行价保底兜底逻辑
+        # 发行价终极保底兜底逻辑 (仅在全网与本地 IPO 日历均未收录该股票时)
         if issue_price <= 0:
             if curr_price > 0:
                 issue_price = round(curr_price / 2.0, 2)  # 若无发行价，假定当前涨幅翻倍估算
             else:
-                issue_price = 20.0  # 默认基准保底价
+                issue_price = 10.0  # 默认基准保底价
 
         # 估算流通盘与总市值
         float_mv_yi = float(stock_info.get("float_mv_yi", 0.0) or 0.0)
@@ -79,8 +94,8 @@ class NewStockStrategyGenerator:
         sign_shares = self._get_sign_shares(code)
         lottery_amount_per_sign = round(issue_price * sign_shares, 2)
 
-        listing_date = str(stock_info.get("listing_date", "") or "").split(" ")[0].strip()
-        apply_date = str(stock_info.get("apply_date", "") or "").split(" ")[0].strip()
+        listing_date = str(stock_info.get("listing_date", "") or ipo_info.get("listing_date", "") or "").split(" ")[0].strip()
+        apply_date = str(stock_info.get("apply_date", "") or ipo_info.get("apply_date", "") or "").split(" ")[0].strip()
         if not listing_date or listing_date in ("-", "None", ""):
             listing_date = datetime.datetime.now().strftime("%Y-%m-%d")
 

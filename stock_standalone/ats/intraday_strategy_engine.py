@@ -394,21 +394,88 @@ class IntradayStrategyEngine:
                 if (c_clean in tc_list or (t_single and c_clean == t_single)) and "stock_spec" in st:
                     return st["stock_spec"]
 
-        # 保底标准规格
-        issue_p = 100.0
+        # 1. 尝试从 NewStockFetcher 权威 IPO 日历中获取真实新股基础信息
+        ipo_info = {}
+        try:
+            from ats.new_stock_fetcher import NewStockFetcher
+            ipo_dict = NewStockFetcher.get_instance().fetch_ipo_calendar()
+            if c_clean in ipo_dict:
+                ipo_info = ipo_dict[c_clean]
+        except Exception:
+            pass
+
+        stock_name = ipo_info.get("name") or resolve_stock_name(c_clean) or (f"标的_{c_clean}" if c_clean else "新股标的")
+        real_issue_p = float(ipo_info.get("issue_price", 0.0) or 0.0)
+        listing_d = str(ipo_info.get("listing_date", "") or "").split(" ")[0].strip()
+        apply_d = str(ipo_info.get("apply_date", "") or "").split(" ")[0].strip()
+
+        # 若权威 IPO 日历中有真实发行价，动态构建真实新股规格
+        if real_issue_p > 0:
+            float_shares_w = 2000.0
+            float_mv = round(real_issue_p * float_shares_w * 10000 / 1e8, 2)
+            ladder_gains = [100.0, 200.0, 300.0, 400.0, 500.0]
+            price_ladder = [
+                {
+                    "name": f"+{int(g)}%",
+                    "gain_pct": g,
+                    "price": round(real_issue_p * (1.0 + g / 100.0), 2),
+                    "meaning": "翻倍稳健基准" if g == 100.0 else ("强势基准" if g == 200.0 else "高频溢价")
+                }
+                for g in ladder_gains
+            ]
+            return {
+                "code": c_clean,
+                "name": stock_name,
+                "issue_price": real_issue_p,
+                "listing_date": listing_d or datetime.now().strftime("%Y-%m-%d"),
+                "subscription_date": apply_d or "-",
+                "float_shares_wan": float_shares_w,
+                "float_mv_yi": float_mv,
+                "lottery_rate": "0.02500%",
+                "price_ladder": price_ladder,
+                "turnover_ladder": [
+                    {"level": "弱换手", "range": "<40%", "min": 0.0, "max": 40.0, "meaning": "关注度不足"},
+                    {"level": "标准换手", "range": "50-70%", "min": 50.0, "max": 70.0, "meaning": "健康"},
+                    {"level": "高换手", "range": "70-90%", "min": 70.0, "max": 90.0, "meaning": "充分交换"},
+                    {"level": "极高换手", "range": ">90%", "min": 90.0, "max": 999.0, "meaning": "过热/分歧"}
+                ],
+                "intensity_benchmark": {
+                    "metric": f"成交额/流通市值({float_mv:.1f}亿)",
+                    "threshold": 2.5,
+                    "meaning": "资金强度极高"
+                }
+            }
+
+        # 2. 尝试从 TDX 实时/昨日快照获取昨收价作为常规股票基准价
+        ref_p = 0.0
+        try:
+            from ats.tdx_realtime_fetcher import TDXRealtimeFetcher
+            fetcher = TDXRealtimeFetcher.get_instance()
+            y_ohlc = fetcher.get_yesterday_ohlc(c_clean)
+            if y_ohlc and float(y_ohlc.get("close", 0.0)) > 0:
+                ref_p = float(y_ohlc.get("close", 0.0))
+            if ref_p <= 0:
+                snap = fetcher.fetch_stock_snapshot(c_clean)
+                ref_p = float(snap.get("last_close", snap.get("price", 0.0)))
+        except Exception:
+            pass
+
+        base_ref = ref_p if ref_p > 0 else 10.0
         return {
             "code": c_clean or "000000",
-            "name": resolve_stock_name(c_clean) if c_clean else "新股标的",
-            "issue_price": issue_p,
+            "name": stock_name,
+            "issue_price": base_ref,
+            "reference_price": base_ref,
+            "listing_date": listing_d or "",
             "float_shares_wan": 1000.0,
             "float_mv_yi": 15.0,
             "lottery_rate": "0.02000%",
             "price_ladder": [
-                {"name": "+100%", "gain_pct": 100.0, "price": round(issue_p * 2.0, 2), "meaning": "翻倍"},
-                {"name": "+200%", "gain_pct": 200.0, "price": round(issue_p * 3.0, 2), "meaning": "强势基准"},
-                {"name": "+300%", "gain_pct": 300.0, "price": round(issue_p * 4.0, 2), "meaning": "高频发区间"},
-                {"name": "+400%", "gain_pct": 400.0, "price": round(issue_p * 5.0, 2), "meaning": "强势上限"},
-                {"name": "+500%", "gain_pct": 500.0, "price": round(issue_p * 6.0, 2), "meaning": "极端行情"}
+                {"name": "+100%", "gain_pct": 100.0, "price": round(base_ref * 2.0, 2), "meaning": "翻倍"},
+                {"name": "+200%", "gain_pct": 200.0, "price": round(base_ref * 3.0, 2), "meaning": "强势基准"},
+                {"name": "+300%", "gain_pct": 300.0, "price": round(base_ref * 4.0, 2), "meaning": "高频发区间"},
+                {"name": "+400%", "gain_pct": 400.0, "price": round(base_ref * 5.0, 2), "meaning": "强势上限"},
+                {"name": "+500%", "gain_pct": 500.0, "price": round(base_ref * 6.0, 2), "meaning": "极端行情"}
             ],
             "turnover_ladder": [
                 {"level": "弱换手", "range": "<40%", "min": 0.0, "max": 40.0, "meaning": "关注度不足"},
@@ -720,11 +787,9 @@ class IntradayStrategyEngine:
                 if rec_date and rec_date < today_str:
                     res_first_day = False
 
-        # 6. 【最终安全兜底】：若未在上市表中收录但发行价存在且无历史日 K
+        # 6. 【最终安全兜底】：未在 IPO 表中且无确凿首日证据的标的，一律判定为常规非首日股票
         if res_first_day is None:
-            spec = self.get_stock_ladder_spec(c_clean)
-            list_date = str(spec.get("listing_date", "")).strip()[:10]
-            res_first_day = bool(spec.get("issue_price", 0.0) > 0 and (not list_date or list_date >= today_str))
+            res_first_day = False
 
         self._first_listing_day_cache[c_clean] = (res_first_day, now_ts)
         return res_first_day
@@ -756,17 +821,24 @@ class IntradayStrategyEngine:
                 if c_clean in st_id and st_id != "strategy_c_daily_surge_ladder":
                     return st
 
-            # 🚀 首日新股若尚无专属策略，尝试自动生成专属策略并热重载
+            # 🚀 首日新股若尚无专属策略，尝试自动从权威 IPO 日历读取真实发行价生成专属策略并热重载
             try:
                 from ats.new_stock_strategy_generator import NewStockStrategyGenerator
+                from ats.new_stock_fetcher import NewStockFetcher
                 generator = NewStockStrategyGenerator.get_instance()
-                stock_name = resolve_stock_name(c_clean)
-                gen_strat = generator.generate_strategy({
+                ipo_dict = NewStockFetcher.get_instance().fetch_ipo_calendar()
+                ipo_info = ipo_dict.get(c_clean, {})
+                stock_name = ipo_info.get("name") or resolve_stock_name(c_clean)
+                real_issue_p = float(ipo_info.get("issue_price", 0.0) or 0.0)
+                gen_payload = {
                     "code": c_clean,
                     "name": stock_name,
                     "price": open_price,
-                    "listing_date": datetime.now().strftime("%Y-%m-%d")
-                })
+                    "issue_price": real_issue_p,
+                    "listing_date": ipo_info.get("listing_date") or datetime.now().strftime("%Y-%m-%d"),
+                    "apply_date": ipo_info.get("apply_date") or ""
+                }
+                gen_strat = generator.generate_strategy(gen_payload)
                 if gen_strat:
                     generator.save_or_update_strategy(gen_strat)
                     self.load_config()
@@ -937,6 +1009,23 @@ class IntradayStrategyEngine:
             return False
 
         c_clean = str(code).zfill(6)
+
+        # 🛡️ 结构合法性校验：严格防范全市场截面 DataFrame (包含多股或 index 为股票代码) 被误传入
+        if "code" in df_intraday.columns:
+            unique_codes = df_intraday["code"].dropna().unique()
+            if len(unique_codes) > 1:
+                # 过滤出单只目标标的数据
+                df_single = df_intraday[df_intraday["code"].astype(str).str.strip().str.zfill(6) == c_clean]
+                if df_single.empty:
+                    return False
+                df_intraday = df_single
+
+        # 校验 index 是否为纯股票代码（如 00089, 30130 等），若是截面表且无法提供分时时间序列，直接拒绝
+        if not df_intraday.empty:
+            sample_idx_str = str(df_intraday.index[0]).strip()
+            if sample_idx_str.isdigit() and len(sample_idx_str) in (5, 6) and (sample_idx_str < "0915" or sample_idx_str > "1505"):
+                return False
+
         state = self._get_stock_state(c_clean, open_price if open_price else 0.0)
         time_snapshots = state.setdefault("time_snapshots", {})
         node_locked_params = state.setdefault("node_locked_params", {})
@@ -1370,8 +1459,21 @@ class IntradayStrategyEngine:
                 node_locked_params["node_7"] = v_1500
                 node_locked_params["node_7_close_structure"] = v_1500
 
-        issue_p = float(spec.get("issue_price", 186.88))
-        float_mv_yi = float(spec.get("float_mv_yi", 14.24)) # 亿元
+        issue_p = float(spec.get("issue_price", 0.0) or 0.0)
+        if issue_p <= 0:
+            try:
+                from ats.new_stock_fetcher import NewStockFetcher
+                ipo_dict = NewStockFetcher.get_instance().fetch_ipo_calendar()
+                if c_clean in ipo_dict:
+                    issue_p = float(ipo_dict[c_clean].get("issue_price", 0.0) or 0.0)
+            except Exception:
+                pass
+        if issue_p <= 0:
+            issue_p = last_close if (last_close and last_close > 0) else (open_price if open_price > 0 else (price if price > 0 else 10.0))
+
+        float_mv_yi = float(spec.get("float_mv_yi", 0.0) or 0.0)
+        if float_mv_yi <= 0:
+            float_mv_yi = 15.0
         amount_yi = (amount / 1e8) if amount > 1e5 else (amount if amount > 0 else 0.0) # 转换为亿元
         intensity_ratio = (amount_yi / float_mv_yi) if (float_mv_yi > 0 and amount_yi > 0) else 1.0
 

@@ -529,6 +529,73 @@ class TestNewStockModule(unittest.TestCase):
         self.assertTrue("首日真金抢筹" in panel.lbl_bidding_info.text())
         self.assertTrue("09:25黄金上车点" in panel.lbl_bidding_info.text())
 
+    def test_12_new_stock_strategy_issue_price_and_first_day_accuracy(self):
+        """测试新股分时阶梯策略生成器、发行价基准、老股不误判及截面表防毛刺"""
+        from ats.new_stock_strategy_generator import NewStockStrategyGenerator
+        from ats.intraday_strategy_engine import IntradayStrategyEngine
+
+        generator = NewStockStrategyGenerator.get_instance()
+        engine = IntradayStrategyEngine.get_instance()
+        engine.load_config()
+
+        # 1. 验证新股自动生成策略时能 100% 获取权威真实发行价 (920288 -> 12.57)
+        strat = generator.generate_strategy({
+            "code": "920288",
+            "name": "N华大",
+            "open_price": 13.64,
+            "price": 13.64
+        })
+        self.assertIsNotNone(strat)
+        spec = strat.get("stock_spec", {})
+        issue_p = spec.get("issue_price")
+        self.assertAlmostEqual(issue_p, 12.57, delta=0.01)
+
+        # 验证 5 大阶梯价格
+        price_ladder = spec.get("price_ladder", [])
+        self.assertEqual(len(price_ladder), 5)
+        self.assertAlmostEqual(price_ladder[0]["price"], 25.14, delta=0.05) # +100%
+        self.assertAlmostEqual(price_ladder[1]["price"], 37.71, delta=0.05) # +200%
+
+        # 2. 验证 get_stock_ladder_spec 动态获取真实发行价
+        fallback_spec = engine.get_stock_ladder_spec("920288")
+        self.assertAlmostEqual(fallback_spec.get("issue_price"), 12.57, delta=0.01)
+
+        # 3. 验证常规老股票 (920081 欧伦电气) 绝不误判为首日新股
+        is_first_day = engine.is_stock_first_listing_day("920081")
+        self.assertFalse(is_first_day)
+        auto_strat = engine.auto_select_strategy(45.31, code="920081")
+        self.assertEqual(auto_strat.get("id"), "strategy_c_daily_surge_ladder")
+
+        # 4. 验证 7 节点打分开盘 13.64 较发行价 12.57 计算出正确的 +8.5% 涨幅
+        eval_res = engine.evaluate_seven_nodes(
+            code="920288",
+            current_time_str="09:30",
+            open_price=13.64,
+            price=13.64,
+            high_price=13.64,
+            low_price=13.64,
+            vwap=13.64,
+            turnover_rate=15.0,
+            amount=12530000.0,
+            last_close=12.57
+        )
+        nodes = eval_res.get("node_results", [])
+        self.assertTrue(len(nodes) >= 1)
+        node_1 = nodes[0]
+        obs_val = node_1.get("observed_val", "")
+        self.assertTrue("开盘:13.64元" in obs_val)
+        self.assertTrue("较发行价" in obs_val or "较昨收" in obs_val)
+
+        # 5. 验证多股截面表传入 hydrate_from_intraday_df 时自动安全过滤
+        multi_stock_df = pd.DataFrame([
+            {"code": "00089", "open": 24.50, "close": 24.87, "high": 24.97, "low": 24.30},
+            {"code": "30130", "open": 55.00, "close": 56.66, "high": 60.47, "low": 54.80},
+            {"code": "68879", "open": 110.00, "close": 112.82, "high": 124.02, "low": 109.00},
+            {"code": "920288", "open": 13.64, "close": 13.64, "high": 13.64, "low": 13.64},
+        ], index=["00089", "30130", "68879", "920288"])
+        success = engine.hydrate_from_intraday_df("920288", multi_stock_df, open_price=13.64)
+        self.assertTrue(success)
+
 
 if __name__ == "__main__":
     unittest.main()

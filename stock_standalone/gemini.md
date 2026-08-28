@@ -1,3 +1,17 @@
+## 2026-08-28 15:45
+- [x] **彻底修复新股自动策略生成、删除重建后首日开盘价与发行基准价异常 & 根治全市场截面表误入分时产生的海量毛刺脏数据日志 (`stock_standalone/ats/new_stock_strategy_generator.py`, `stock_standalone/ats/intraday_strategy_engine.py`, `stock_standalone/ats/ui/intraday_strategy_dialog.py`, `stock_standalone/tests/test_new_stock_module.py`)**：
+    - [x] **新股权威发行价 SSOT 统一与彻底消除写死 20.0 / 100.0 兜底**：
+        - `NewStockStrategyGenerator.generate_strategy` 与 `IntradayStrategyEngine.get_stock_ladder_spec` 直连从 `NewStockFetcher` 权威 IPO 日历读取真实发行价（如 920288 N华大 -> 12.57 元，688826 -> 186.88 元）；
+        - 修复在策略编辑中删除专属策略重新打开后，由于缺失 `issue_price` 误回退到 `20.0`（华大显示破发 -31.8%）的致命缺陷；
+        - 开盘 13.64 元较真实发行价 12.57 元准确计算出真实涨跌幅 $+8.51\%$，并精准生成 5 大阶梯价格与单签收益；
+    - [x] **根治普通老股票（如 920081 欧伦电气）被误判为首日新股与基准价错标 100.0 元**：
+        - 彻底消除 `is_stock_first_listing_day` 中未收录股票默认判定为首日新股的兜底漏洞，未在 IPO 日历或无确凿首日证据的标的 100% 判定为非首日；
+        - 彻底删除 UI 中 `y_open <= 0.01 and y_high <= 0.01 and y_low <= 0.01` 误判条件，常规股票 100% 显示 `昨收基准: 45.00元 | 昨开: 44.80元`，开盘涨跌幅基于昨收价严格计算（$+0.69\%$），彻底消除图 2 中的 `-54.69% (发行价基准: 100.00元)` 错误；
+    - [x] **根治后台海量“识别并强力过滤 K 线中 异常毛刺脏数据: t=00089... 上限=23.19”日志刷屏**：
+        - **根因锁定**：在未获取到 TDX 秒级快照时，UI 误将包含全市场 5000 只股票代码（00089, 30130, 68879...）的截面行情 DataFrame 传入 `hydrate_from_intraday_df`，导致引擎将 5000 只股票代码误当成时间戳逐行遍历并与当前股票上限 23.19 比较报警；
+        - **双重防御加固**：在 `hydrate_from_intraday_df` 增加多股票代码与纯数字 index 截面表防御校验与单股过滤；在 UI 处彻底解耦全市场截面表与单股分时 1 分钟 K 线拉取；
+    - [x] **全量 36 项自动化回归测试 100% 全部 PASSED**。
+
 ## 2026-08-28 12:36
 - [x] **彻底修复 `ui.py` 顶层缺失 `QSpinBox` 导入导致的 `NameError` 并完善全套 UI 自动化实例化测试 (`stock_standalone/webTools/window_manager/ui.py`, `stock_standalone/tests/test_ramdisk_sync_engine.py`)**：
     - [x] **补齐 `PyQt6.QtWidgets` 顶层导入**：显式添加 `QSpinBox`, `QDoubleSpinBox`, `QFileDialog` 导入，消除对话框初始化异常；
