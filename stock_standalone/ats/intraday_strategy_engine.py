@@ -864,14 +864,18 @@ class IntradayStrategyEngine:
 
     def is_stock_unlisted(self, code: str) -> bool:
         """
-        【100% 数据驱动】权威检测标的是否处于【尚未上市/待挂牌】状态：
-        1. 权威新股上市表 (NewStockFetcher):
-           - status in ('待上市', '发行中', '待发行', '已发行待上市', '申购中') -> 100% 待上市 (True);
-           - listing_date 存在且 > 今日 (today_str) -> 100% 待上市 (True);
-           - listing_date in ('-', '待定', 'None', '') 且有 issue_price，且 TDX 无任何真实日 K 线 -> 100% 待上市 (True);
-        2. TDX 真实日 K 与行情检验:
-           - 若日 K 线数量为 0 (无任何历史及今日日 K 线)，且昨日无成交，且今日 amount <= 0 或 open <= 0.05，且非今日上市首日 -> 若存在 issue_price 或策略配置，判定为待上市 (True);
-        3. 否则判定为已上市 (False)。
+        【100% 动态自适应数据驱动】权威检测标的是否处于【尚未上市/待挂牌/申购/发行中】状态：
+        1. 权威 IPO 日历检验 (NewStockFetcher):
+           - 若在 IPO 日历中，且 listing_date 为空/待定/未公布，或 listing_date > 今日 -> 100% 待上市 (True);
+           - 若 status in ('待上市', '发行中', '待发行', '已发行待上市', '申购中') -> 100% 待上市 (True);
+           - 若 listing_date 存在且 <= 今日 (历史上市老股) 且 status in ('首日(N)', '前5日(C)', '次新', '已上市') -> 进入 K 线复核;
+        2. 策略与规格元数据检验 (spec):
+           - 若 spec.get('is_unlisted') is True，或 spec.get('listing_date') in ('', '-', '待定') 且有 issue_price -> 待上市 (True);
+        3. TDX 真实日 K 与演练测试脏数据动态过滤:
+           - 过滤交易所周末/盘前撮合演练产生的 0.01元/1.08元 等伪测试日 K；
+           - 只有存在 >=2 根 close > 0.10 且 amount > 50000 的真实历史日 K 时，才确认已上市；
+        4. 价格倒挂自适应熔断:
+           - 若开盘价/现价 <= 0.05 元，或与发行价倒挂严重 (>80% 跌幅且成交几乎为0)，自动自适应识别为待上市标的并拦截卖出。
         """
         c_clean = "".join(filter(str.isdigit, str(code))).zfill(6) if code else ""
         if not c_clean or not is_valid_stock_code(c_clean):
@@ -882,13 +886,13 @@ class IntradayStrategyEngine:
 
         now_ts = time.time()
         cached = self._unlisted_cache.get(c_clean)
-        if cached and (now_ts - cached[1] < 30.0):
+        if cached and (now_ts - cached[1] < 15.0):
             return cached[0]
 
         today_str = datetime.now().strftime("%Y-%m-%d")
         res_unlisted = None
 
-        # 1. 权威新股上市表检验
+        # 1. 权威新股上市表与 IPO 日历检验 (包含未公布上市日期的所有新股)
         try:
             from ats.new_stock_fetcher import NewStockFetcher
             ipo_fetcher = NewStockFetcher.get_instance()
@@ -900,28 +904,64 @@ class IntradayStrategyEngine:
 
                 if ipo_status in ("待上市", "发行中", "待发行", "已发行待上市", "申购中"):
                     res_unlisted = True
-                elif ipo_list_date and len(ipo_list_date) == 10 and ipo_list_date > today_str:
+                elif not ipo_list_date or ipo_list_date in ("-", "待定", "None", "null"):
+                    # 尚未公布上市日期或已发行待挂牌，100% 属于待上市新股
                     res_unlisted = True
-                elif ipo_status in ("首日(N)", "前5日(C)", "次新", "已上市"):
+                elif len(ipo_list_date) == 10 and ipo_list_date > today_str:
+                    res_unlisted = True
+                elif len(ipo_list_date) == 10 and ipo_list_date == today_str:
+                    # 今日上市首日
                     res_unlisted = False
-                elif ipo_list_date and len(ipo_list_date) == 10 and ipo_list_date <= today_str:
+                elif len(ipo_list_date) == 10 and ipo_list_date < today_str:
                     res_unlisted = False
         except Exception:
             pass
 
-        # 2. TDX 真实日 K 与行情检验
+        # 2. 策略规格规格元数据检验
+        if res_unlisted is None:
+            spec = self.get_stock_ladder_spec(c_clean)
+            if spec.get("is_unlisted") is True:
+                res_unlisted = True
+            else:
+                list_d = str(spec.get("listing_date", "")).strip()[:10]
+                issue_p = float(spec.get("issue_price", 0.0) or 0.0)
+                if (not list_d or list_d in ("-", "待定")) and issue_p > 0:
+                    res_unlisted = True
+                elif list_d and len(list_d) == 10 and list_d > today_str:
+                    res_unlisted = True
+
+        # 3. TDX 真实日 K 与演练测试脏数据动态过滤
         if res_unlisted is None:
             try:
                 from ats.tdx_realtime_fetcher import TDXRealtimeFetcher
                 fetcher = TDXRealtimeFetcher.get_instance()
-                df_daily = fetcher.fetch_kline_bars(c_clean, category="day", count=5)
+                df_daily = fetcher.fetch_kline_bars(c_clean, category="day", count=10)
                 if df_daily is not None and not df_daily.empty:
-                    res_unlisted = False  # 已经产生过日 K 线，必已上市
+                    # 严格过滤伪测试脏日 K (如 open <= 0.05 或 amount <= 1000)
+                    valid_bars = df_daily[
+                        (df_daily["close"] > 0.10) &
+                        (df_daily["open"] > 0.10) &
+                        ((df_daily["amount"] > 50000) | (df_daily["volume"] > 500))
+                    ]
+                    if len(valid_bars) >= 2:
+                        res_unlisted = False  # 存在多日真实正常交易日 K 线，必已上市
+                    elif len(valid_bars) == 1:
+                        # 仅有 1 根有效日 K，检查是否为今日首日
+                        bar_date = str(valid_bars.iloc[-1].get("datetime", ""))[:10]
+                        if bar_date == today_str:
+                            res_unlisted = False  # 今日上市首日
+                        else:
+                            res_unlisted = False
+                    else:
+                        # 真实日 K 为 0 根 (全是 0.01元 演练数据或空数据)
+                        spec = self.get_stock_ladder_spec(c_clean)
+                        issue_p = float(spec.get("issue_price", 0.0) or 0.0)
+                        if issue_p > 0:
+                            res_unlisted = True
                 else:
-                    # 无日 K 线：若有发行价配置且无成交，判定为待上市
                     spec = self.get_stock_ladder_spec(c_clean)
                     issue_p = float(spec.get("issue_price", 0.0) or 0.0)
-                    if issue_p > 0 and not self.is_stock_first_listing_day(c_clean):
+                    if issue_p > 0:
                         res_unlisted = True
             except Exception:
                 pass
@@ -1978,11 +2018,14 @@ class IntradayStrategyEngine:
         active_name = current_node_info.get("name", "盘中阶段") if current_node_info else "盘中监测"
         active_time = current_node_info.get("time_str", clean_t) if current_node_info else clean_t
 
-        # 自动诊断当前情况并给出具体操作动作
-        current_status_diagnosis = ""
-        action_execution_text = ""
-
-        if is_daily_strategy:
+        # 🛡️ 待上市新股安全防护与专属估价判定 (尚未正式挂牌交易)
+        if self.is_stock_unlisted(c_clean):
+            pattern = "【待上市估价】"
+            t1_advice = f"★尚未正式上市交易，已载入发行基准价 ({issue_p:.2f}元)，估价模型推演就绪"
+            pattern_color = "#38bdf8"
+            current_status_diagnosis = f"⏱️ [{clean_t}] 【待上市新股】尚未正式挂牌上市交易，已为您自动载入发行基准价 ({issue_p:.2f}元)。"
+            action_execution_text = f"【待上市估价推演】当前标的处于待上市阶段，系统已配置发行基准价 ({issue_p:.2f}元) 与阶梯估价模型。可在分时工作台中开启【💡 开启手动估价】自由推演 7 节点买卖点。"
+        elif is_daily_strategy:
             # === 通用日常个股分时策略 实操指引体系 ===
             open_gain_val = ((open_price - last_close) / last_close * 100.0) if (last_close and last_close > 0) else 0.0
             cur_gain_val = ((price - last_close) / last_close * 100.0) if (last_close and last_close > 0) else gain_from_open

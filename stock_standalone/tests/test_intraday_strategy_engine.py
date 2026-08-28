@@ -452,40 +452,51 @@ def test_remaining_position_ratio_deduction_and_sync(engine):
 
 
 def test_unlisted_stock_auto_detection_and_no_sell_signals(engine):
-    """测试未上市新股自动检测机制及禁止误触发实盘卖出信号"""
-    code = "603448"
-    engine.reset_state(code)
+    """测试未上市新股动态自适应检测机制及禁止误触发实盘卖出信号"""
+    code_tb = "603448"
+    code_mk = "601123"
+    engine.reset_state(code_tb)
+    engine.reset_state(code_mk)
 
-    # 1. 模拟未上市新股的 IPO 日历信息 (待上市状态)
+    # 1. 模拟未上市新股的 IPO 日历信息 (包含 listing_date 为空字符串的实际场景)
     from ats.new_stock_fetcher import NewStockFetcher
     fetcher = NewStockFetcher.get_instance()
     if not hasattr(fetcher, '_cached_ipo_dict'):
         fetcher._cached_ipo_dict = {}
-    fetcher._cached_ipo_dict[code] = {
-        "code": code,
+    
+    fetcher._cached_ipo_dict[code_tb] = {
+        "code": code_tb,
         "name": "天博智能",
-        "status": "待上市",
         "issue_price": 62.65,
-        "listing_date": "2026-09-01"
+        "listing_date": ""  # 实际 IPO 日历中上市日期尚未公布
+    }
+    fetcher._cached_ipo_dict[code_mk] = {
+        "code": code_mk,
+        "name": "马矿股份",
+        "issue_price": 6.65,
+        "listing_date": ""
     }
 
-    # 2. 验证 is_stock_unlisted 准确判定为 True
+    # 2. 验证 is_stock_unlisted 对 603448 和 601123 均 100% 动态自适应判定为 True
     if hasattr(engine, '_unlisted_cache'):
-        engine._unlisted_cache.pop(code, None)
-    assert engine.is_stock_unlisted(code) is True
+        engine._unlisted_cache.pop(code_tb, None)
+        engine._unlisted_cache.pop(code_mk, None)
+
+    assert engine.is_stock_unlisted(code_tb) is True
+    assert engine.is_stock_unlisted(code_mk) is True
 
     # 3. 验证 auto_select_strategy 优先匹配该新股专属上市策略而非日常老股票策略
-    strat = engine.auto_select_strategy(0.0, code=code)
-    assert strat is not None
-    assert "603448" in strat.get("id", "") or "天博" in strat.get("name", "")
+    strat_tb = engine.auto_select_strategy(0.0, code=code_tb)
+    assert strat_tb is not None
+    assert "603448" in strat_tb.get("id", "") or "天博" in strat_tb.get("name", "")
 
-    # 4. 模拟输入撮合测试脏数据 (如 0.01元/1.08元)，验证 scan_and_evaluate_intraday_timeline 绝对不生成任何卖出信号
+    # 4. 模拟输入 TDX 撮合演练测试脏数据 (如 0.01元/1.08元)，验证 scan_and_evaluate_intraday_timeline 绝对不生成任何卖出信号
     df_dirty = pd.DataFrame([
         {"close": 1.08, "high": 1.08, "low": 0.01, "open": 0.01, "vwap": 0.68, "amount": 30000.0, "turnover": 0.1},
         {"close": 1.08, "high": 1.08, "low": 1.08, "open": 0.01, "vwap": 0.68, "amount": 30000.0, "turnover": 0.1},
     ], index=["09:30", "10:00"])
 
-    signals = engine.scan_and_evaluate_intraday_timeline(code, df_dirty)
+    signals = engine.scan_and_evaluate_intraday_timeline(code_tb, df_dirty)
     assert len(signals) == 0  # 待上市新股严禁生成实盘卖出信号
 
 

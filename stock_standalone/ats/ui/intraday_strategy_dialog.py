@@ -4345,8 +4345,17 @@ class IntegratedTradingStrategyPanel(QWidget):
         signals = state.get("signals", [])
         logs = state.get("execution_logs", [])
 
-        # 🛡️ 持仓扣减一致性核验与双保险
-        if signals:
+        # 🛡️ 待上市新股持仓与信号绝对纯净保护
+        if is_unlisted:
+            signals = []
+            logs = []
+            rem_ratio = 1.0
+            state["signals"] = []
+            state["triggered_rules"] = set()
+            state["remaining_ratio"] = 1.0
+            state["remaining_position_ratio"] = 1.0
+            state["execution_logs"] = []
+        elif signals:
             tot_sold = sum(
                 float(getattr(s, "sell_ratio", 0.0) or (s.debug_info.get("sell_ratio", 0.0) if hasattr(s, "debug_info") and isinstance(s.debug_info, dict) else 0.0))
                 for s in signals
@@ -5549,6 +5558,14 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
         # 0. 权威检测该标的是否为尚未挂牌交易的【待上市新股】
         is_unlisted = self.engine.is_stock_unlisted(c_clean)
         issue_p = float(spec.get("issue_price", 0.0) or 0.0)
+        if issue_p <= 0:
+            try:
+                from ats.new_stock_fetcher import NewStockFetcher
+                ipo_dict = getattr(NewStockFetcher.get_instance(), '_cached_ipo_dict', {})
+                if c_clean in ipo_dict:
+                    issue_p = float(ipo_dict[c_clean].get("issue_price", 0.0) or 0.0)
+            except Exception:
+                pass
 
         # 1. 只有当用户显式勾选了【✍️ 开启手动估价/异常推演 (默认关闭)】复选框时，才由手动 SpinBox 驱动
         if hasattr(self, "chk_manual_eval") and self.chk_manual_eval.isChecked() and getattr(self, "selected_data_source", "") == "MANUAL_EVAL":
@@ -6284,12 +6301,18 @@ class AllCodesStrategyEvalDialog(QDialog):
                 }
 
                 # 拼接文本报告
-                res_summary += f"📌 【{c} {c_name}】 -> 策略: {item_info['strategy_name']}\n"
-                res_summary += f"   开盘: {open_p:.2f}元 | 现价: {trade_p:.2f}元 ({pct_val:+.2f}%) | 综合得分: {score_val:.2f}分 ({item_info['pattern']})\n"
-                res_summary += f"   实操指引: {item_info['action_text']}\n"
-                for sig in sigs:
-                    res_summary += f"   🔴 {sig.reason} (建议价: {getattr(sig, 'suggested_price', sig.price):.2f})\n"
-                res_summary += "--------------------------------------------------\n"
+                if is_unlisted:
+                    res_summary += f"📌 【{c} {c_name}】 -> 策略: {item_info['strategy_name']} [💡 待上市新股]\n"
+                    res_summary += f"   发行价: {open_p:.2f}元 | 状态: 待上市挂牌 | 形态: 【待上市估价】 (模型得分: {score_val:.2f}分)\n"
+                    res_summary += f"   实操指引: {item_info['action_text']}\n"
+                    res_summary += "--------------------------------------------------\n"
+                else:
+                    res_summary += f"📌 【{c} {c_name}】 -> 策略: {item_info['strategy_name']}\n"
+                    res_summary += f"   开盘: {open_p:.2f}元 | 现价: {trade_p:.2f}元 ({pct_val:+.2f}%) | 综合得分: {score_val:.2f}分 ({item_info['pattern']})\n"
+                    res_summary += f"   实操指引: {item_info['action_text']}\n"
+                    for sig in sigs:
+                        res_summary += f"   🔴 {sig.reason} (建议价: {getattr(sig, 'suggested_price', sig.price):.2f})\n"
+                    res_summary += "--------------------------------------------------\n"
 
             except Exception as e:
                 item_info = {
@@ -6362,6 +6385,7 @@ class AllCodesStrategyEvalDialog(QDialog):
             c_name = data['name']
             score = data['score']
             pct = data['pct']
+            is_un = bool(data.get('is_unlisted'))
 
             # 0. 序号
             _safe_set_cell_item(self.table_all, row, 0, str(row + 1), fg_color=gray_color, align=Qt.AlignmentFlag.AlignCenter, sort_val=row + 1)
@@ -6369,33 +6393,44 @@ class AllCodesStrategyEvalDialog(QDialog):
             # 1. 代码
             _safe_set_cell_item(self.table_all, row, 1, c, fg_color=cyan_color, align=Qt.AlignmentFlag.AlignCenter, font=QFont("Consolas", 9, QFont.Weight.Bold))
 
-            # 2. 名称
-            _safe_set_cell_item(self.table_all, row, 2, c_name, fg_color="#f8fafc", align=Qt.AlignmentFlag.AlignCenter, font=QFont("Microsoft YaHei", 9, QFont.Weight.Bold))
+            # 2. 名称 (待上市新股展示专属徽章)
+            name_display = f"{c_name} 💡待上市" if is_un else c_name
+            name_fg = "#ffd700" if is_un else "#f8fafc"
+            _safe_set_cell_item(self.table_all, row, 2, name_display, fg_color=name_fg, align=Qt.AlignmentFlag.AlignCenter, font=QFont("Microsoft YaHei", 9, QFont.Weight.Bold))
 
             # 3. ⭐ 综合评分 (分级色彩胶囊独立列)
-            score_fg = "#ffffff"
-            if score >= 8.0:
-                score_bg = QColor("#064e3b")  # 绿色
-                score_fg = QColor("#34d399")
-            elif score >= 6.5:
-                score_bg = QColor("#78350f")  # 橙色
-                score_fg = QColor("#fbbf24")
+            if is_un:
+                score_bg = QColor("#082f49")  # 深蓝科技色
+                score_fg = QColor("#38bdf8")
+                score_str = f"💡 {score:.2f}分"
+                score_tip = f"【待上市新股估价模型】发行基准价: {data['open_p']:.2f}元\n尚未正式挂牌上市交易，已就绪估价推演"
             else:
-                score_bg = QColor("#7f1d1d")  # 红色
-                score_fg = QColor("#f87171")
+                score_fg = "#ffffff"
+                if score >= 8.0:
+                    score_bg = QColor("#064e3b")  # 绿色
+                    score_fg = QColor("#34d399")
+                elif score >= 6.5:
+                    score_bg = QColor("#78350f")  # 橙色
+                    score_fg = QColor("#fbbf24")
+                else:
+                    score_bg = QColor("#7f1d1d")  # 红色
+                    score_fg = QColor("#f87171")
+                score_str = f"⭐ {score:.2f}分" if not data.get("is_error") else "⚠️ 异常"
+                score_tip = f"综合加权评分: {score:.2f}分\n点击此列表头可直接按分数由高到低/由低到高排序"
 
-            score_str = f"⭐ {score:.2f}分" if not data.get("is_error") else "⚠️ 异常"
             _safe_set_cell_item(
                 self.table_all, row, 3, score_str,
                 fg_color=score_fg, bg_color=score_bg,
                 align=Qt.AlignmentFlag.AlignCenter,
                 font=QFont("Consolas", 10, QFont.Weight.Bold),
                 sort_val=score,
-                tooltip=f"综合加权评分: {score:.2f}分\n点击此列表头可直接按分数由高到低/由低到高排序"
+                tooltip=score_tip
             )
 
             # 4. 形态分类
-            _safe_set_cell_item(self.table_all, row, 4, data['pattern'], fg_color=gold_color, align=Qt.AlignmentFlag.AlignCenter)
+            pattern_display = "💡 待上市估价" if is_un else data['pattern']
+            pattern_fg = cyan_color if is_un else gold_color
+            _safe_set_cell_item(self.table_all, row, 4, pattern_display, fg_color=pattern_fg, align=Qt.AlignmentFlag.AlignCenter)
 
             # 5. 所属策略
             _safe_set_cell_item(self.table_all, row, 5, data['strategy_name'], fg_color="#38bdf8", align=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, tooltip=data['strategy_name'])
@@ -6424,10 +6459,13 @@ class AllCodesStrategyEvalDialog(QDialog):
             _safe_set_cell_item(self.table_all, row, 11, amt_str, fg_color="#f8fafc", align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, sort_val=amt_val)
 
             # 12. 实操指引与触发卖点
-            full_guide = data['action_text']
-            if data['signals']:
-                sig_texts = [f"🔴 {s.reason}(建议价:{getattr(s, 'suggested_price', s.price):.2f})" for s in data['signals']]
-                full_guide += " | 触发信号: " + "；".join(sig_texts)
+            if is_un:
+                full_guide = f"💡 【待上市估价推演】尚未挂牌交易，已载入发行基准价 ({data['open_p']:.2f}元)，估价模型推演就绪"
+            else:
+                full_guide = data['action_text']
+                if data['signals']:
+                    sig_texts = [f"🔴 {s.reason}(建议价:{getattr(s, 'suggested_price', s.price):.2f})" for s in data['signals']]
+                    full_guide += " | 触发信号: " + "；".join(sig_texts)
             _safe_set_cell_item(self.table_all, row, 12, full_guide, fg_color="#e2e8f0", align=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, tooltip=full_guide)
 
             # 13. 操作按钮 (🎯 查看此标的)
@@ -6552,10 +6590,17 @@ class AllCodesStrategyEvalDialog(QDialog):
 
         # 评分与形态胶囊 (点击可快速切换评分升/降序)
         score = data['score']
-        score_bg = "#064e3b" if score >= 8.0 else ("#78350f" if score >= 6.5 else "#7f1d1d")
-        score_border = "#10b981" if score >= 8.0 else ("#f59e0b" if score >= 6.5 else "#ef4444")
+        is_un = bool(data.get("is_unlisted"))
+        if is_un:
+            score_bg = "#082f49"
+            score_border = "#38bdf8"
+            score_title = f"🌟 估价模型: {score:.2f}分  (待上市估价)"
+        else:
+            score_bg = "#064e3b" if score >= 8.0 else ("#78350f" if score >= 6.5 else "#7f1d1d")
+            score_border = "#10b981" if score >= 8.0 else ("#f59e0b" if score >= 6.5 else "#ef4444")
+            score_title = f"🌟 综合得分: {score:.2f}分  ({data['pattern']})"
         
-        btn_score = QPushButton(f"🌟 综合得分: {score:.2f}分  ({data['pattern']})")
+        btn_score = QPushButton(score_title)
         btn_score.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_score.setToolTip("💡 点击快速按综合评分由高到低/由低到高重排")
         btn_score.setStyleSheet(f"""
@@ -6579,19 +6624,20 @@ class AllCodesStrategyEvalDialog(QDialog):
         c_layout.addLayout(stats_row)
 
         # 3. 实操指引
-        if data['action_text']:
+        act_text = f"【待上市估价推演】尚未正式挂牌上市交易，已自动载入发行基准价 ({data['open_p']:.2f}元)。可在分时工作台中开启【💡 开启手动估价】自由推演 7 节点买卖点。" if is_un else data['action_text']
+        if act_text:
             act_box = QFrame()
             act_box.setStyleSheet("background-color: #1e293b; border-radius: 4px; padding: 4px;")
             act_layout = QHBoxLayout(act_box)
             act_layout.setContentsMargins(8, 4, 8, 4)
-            lbl_act = QLabel(f"💡 <b>实操指引:</b> {data['action_text']}")
+            lbl_act = QLabel(f"💡 <b>实操指引:</b> {act_text}")
             lbl_act.setWordWrap(True)
             lbl_act.setStyleSheet("color: #e2e8f0; font-size: 12px;")
             act_layout.addWidget(lbl_act)
             c_layout.addWidget(act_box)
 
-        # 4. 触发信号列表
-        if data['signals']:
+        # 4. 触发信号列表 (待上市新股绝对不展示实盘卖出信号)
+        if not is_un and data['signals']:
             sig_box = QFrame()
             sig_box.setStyleSheet("background-color: #18181b; border: 1px dashed #ef4444; border-radius: 4px; padding: 4px;")
             sig_layout = QVBoxLayout(sig_box)

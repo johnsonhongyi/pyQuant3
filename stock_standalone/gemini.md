@@ -1,3 +1,25 @@
+## 2026-08-28 21:38
+- [x] **修复 `update_data` 中 `UnboundLocalError: local variable 'signals' referenced before assignment` 变量定义域 Bug (`ats/ui/intraday_strategy_dialog.py`, `tests/test_intraday_strategy_engine.py`)**：
+    - [x] **根因排查**：在 `IntradayIntegratedPanel.update_data` 进行待上市纯净状态清洗重构时，`signals` 与 `logs` 仅在 `if is_unlisted:` 内定义，导致 `is_unlisted=False` 时执行 `elif signals:` 触发未绑定局部变量异常；
+    - [x] **修复加固**：在 `if is_unlisted:` 判断前统一从 `state.get("signals", [])` 预先完成赋值，并在 `is_unlisted=True` 时清空，确保双分支变量生命周期绝对安全；
+    - [x] **自动化测试 100% 验证通过**：
+        - `pytest tests/test_intraday_strategy_engine.py tests/test_tdx_adaptive_config.py tests/test_signal_ledger.py -v` 全量 31 项测试 **100% PASSED**！
+
+## 2026-08-28 21:30
+- [x] **全量检测窗口接入 ATS 现成联动标准架构（鼠标单击即时联动 + 键盘 ↑ / ↓ 60ms 防抖联动 TDX/同花顺/全局主窗口）(`ats/ui/intraday_strategy_dialog.py`, `tests/test_tdx_adaptive_config.py`)**：
+    - [x] **ATS 标准联动中枢 (`_broadcast_link_stock`)**：
+        - 优先调用 `ATSMainWindow.link_stock(code, name)` 广播全局可视化与行情服务；
+        - 调用 `linkage_service.get_link_manager().push()` 物理直连通达信 (TDX) / 同花顺终端；
+        - 同步联动分时工作台切换下拉框标的并刷新走势图；
+    - [x] **表格与卡片双视图键盘上下键导航与 60ms 防抖**：
+        - 绑定 `table_all.currentCellChanged` 与 `_linkage_timer`（60ms 单次定时器），键盘方向键快速上下切换时平滑防抖，松开即刻精准联动；
+        - 绑定 `table_all.itemClicked` 鼠标单击单元格无延迟即时联动；
+        - 重写 `keyPressEvent` 支持在卡片视图下按 `↑`/`↓` 顺畅遍历卡片、自动滚动视口并联动 TDX；
+    - [x] **待上市新股“动态自适应数据驱动”架构重构 (`is_stock_unlisted`)**：
+        - 彻底解决 IPO 日历空上市日期（`listing_date=""`）新股的漏判问题，100% 自动识别 603448 天博智能、601123 马矿股份等待上市新股；
+        - 智能过滤 TDX 周末/盘前撮合演练产生的 0.01元/1.08元 伪测试日 K 线；
+        - 自动继承 IPO 真实发行价，彻底阻断待上市新股的误卖出信号；
+
 ## 2026-08-28 21:05
 - [x] **根治待上市新股未自动检测导致数据错乱误卖 & 策略库/标的库自动清洗不存在的垃圾标的策略 (`ats/intraday_strategy_engine.py`, `ats/new_stock_strategy_generator.py`, `ats/ui/intraday_strategy_dialog.py`, `tests/test_intraday_strategy_engine.py`)**：
     - [x] **根治待上市新股（如 603448 天博智能）未上市状态检测与脏数据误卖防御**：
