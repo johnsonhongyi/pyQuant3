@@ -4457,7 +4457,15 @@ class IntegratedTradingStrategyPanel(QWidget):
         # 7. SBC 实盘走势与基准线 (100% 策略与标的自适应)
         strat_name = strategy.get("name", "分时阶梯策略") if strategy else "分时阶梯策略"
         spec = self.engine.get_stock_ladder_spec(code)
-        issue_p = float(spec.get("issue_price", open_price * 0.5 if open_price > 0 else 100.0))
+        issue_p = float(spec.get("issue_price", 0.0) or 0.0)
+        if issue_p <= 0:
+            try:
+                from ats.new_stock_fetcher import NewStockFetcher
+                ipo_dict = NewStockFetcher.get_instance().fetch_ipo_calendar()
+                if code in ipo_dict:
+                    issue_p = float(ipo_dict[code].get("issue_price", 0.0) or 0.0)
+            except Exception:
+                pass
         float_mv_yi = float(spec.get("float_mv_yi", 14.24))
 
         # 获取昨日真实 OHLC (昨开、昨高、昨低、昨收)
@@ -4484,11 +4492,11 @@ class IntegratedTradingStrategyPanel(QWidget):
         cyan = "#38bdf8"
         green = "#00ff88"
 
-        # 🛡️ 识别新股首日保护模式 (引擎权威判定为首日，或无昨日有效 OHLC 数据)
-        is_first_listing_day = bool(self.engine.is_stock_first_listing_day(code) or (y_open <= 0.01 and y_high <= 0.01 and y_low <= 0.01))
+        # 🛡️ 识别新股首日保护模式 (100% 由策略引擎权威判定，绝不因盘前缺少昨日数据而误判)
+        is_first_listing_day = bool(self.engine.is_stock_first_listing_day(code))
 
         if is_first_listing_day:
-            # 🛡️ 【新股首日保护模式】：无昨日数据，以发行价 issue_p 与今日开盘价 open_price 为锚
+            # 🛡️ 【新股首日保护模式】：无昨日数据，以真实发行价 issue_p 与今日开盘价 open_price 为锚
             base_ref_p = issue_p if issue_p > 0 else (open_price if open_price > 0 else price)
 
             # 1. 今开 vs 发行价 (高开溢价为红，破发为绿)
@@ -5271,19 +5279,27 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
             return
 
         spec = self.engine.get_stock_ladder_spec(self.code)
-        issue_p = float(spec.get("issue_price", 100.0))
+        is_first_day = self.engine.is_stock_first_listing_day(self.code)
+        issue_p = float(spec.get("issue_price", 0.0) or 0.0)
         price_ladder = spec.get("price_ladder", [])
 
-        # 默认开盘估价取 +200% 强势基准（如果有价格阶梯则取第2档价格，否则 issue_p * 3.0）
-        suggested_open = round(issue_p * 3.0, 2)
-        if len(price_ladder) >= 2 and "price" in price_ladder[1]:
-            suggested_open = float(price_ladder[1]["price"])
-        elif len(price_ladder) >= 1 and "price" in price_ladder[0]:
-            suggested_open = float(price_ladder[0]["price"])
+        if is_first_day and issue_p > 0:
+            # 默认开盘估价取 +200% 强势基准（如果有价格阶梯则取第2档价格，否则 issue_p * 3.0）
+            suggested_open = round(issue_p * 3.0, 2)
+            if len(price_ladder) >= 2 and "price" in price_ladder[1]:
+                suggested_open = float(price_ladder[1]["price"])
+            elif len(price_ladder) >= 1 and "price" in price_ladder[0]:
+                suggested_open = float(price_ladder[0]["price"])
 
-        # 默认现价估价取开盘价 * 1.10（较开盘冲高 10%）
-        suggested_price = round(suggested_open * 1.10, 2)
-        suggested_turnover = 62.5
+            # 默认现价估价取开盘价 * 1.10（较开盘冲高 10%）
+            suggested_price = round(suggested_open * 1.10, 2)
+            suggested_turnover = 62.5
+        else:
+            # 常规非首日股票：基准价为昨收价/现价，开盘取基准*1.02，现价取基准*1.05
+            ref_base = issue_p if issue_p > 0 else 10.0
+            suggested_open = round(ref_base * 1.02, 2)
+            suggested_price = round(ref_base * 1.05, 2)
+            suggested_turnover = 5.0
 
         # 仅当手动估价勾选开启时才写入 custom_params；在实盘 TDX 直连模式下绝对不注入污染数据！
         if hasattr(self, 'chk_manual_eval') and self.chk_manual_eval.isChecked():
@@ -5545,14 +5561,12 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
         if curr_df is None and parent is not None and hasattr(parent, 'current_df') and parent.current_df is not None:
             curr_df = parent.current_df
 
-        if curr_df is None or curr_df.empty:
-            try:
-                curr_df = self.tdx_fetcher.fetch_intraday_bars(c_clean)
-            except Exception:
-                curr_df = None
-
-        if curr_df is not None and not curr_df.empty:
-            self.engine.hydrate_from_intraday_df(c_clean, curr_df)
+        try:
+            bars_df = self.tdx_fetcher.fetch_intraday_bars(c_clean)
+            if bars_df is not None and not bars_df.empty:
+                self.engine.hydrate_from_intraday_df(c_clean, bars_df)
+        except Exception:
+            pass
 
         snap = self.engine.extract_market_snapshot_from_df(curr_df, c_clean)
         open_price = snap["open_price"]
@@ -5883,14 +5897,24 @@ class PinzhunLaserMonitorWidget(QWidget):
         """根据当前标的重新渲染顶部阈值卡片（支持5档/6档价格阶梯与不同流通盘）"""
         c_clean = str(code).zfill(6)
         spec = self.engine.get_stock_ladder_spec(c_clean)
-        issue_p = float(spec.get("issue_price", 100.0))
+        is_first_day = self.engine.is_stock_first_listing_day(c_clean)
+        issue_p = float(spec.get("issue_price", 0.0) or 0.0)
+        if issue_p <= 0:
+            try:
+                from ats.new_stock_fetcher import NewStockFetcher
+                ipo_dict = NewStockFetcher.get_instance().fetch_ipo_calendar()
+                if c_clean in ipo_dict:
+                    issue_p = float(ipo_dict[c_clean].get("issue_price", 0.0) or 0.0)
+            except Exception:
+                pass
         float_shares_wan = float(spec.get("float_shares_wan", 1000.0))
         float_mv = float(spec.get("float_mv_yi", 15.0))
         lottery = spec.get("lottery_rate", "--")
         name = spec.get("name", resolve_stock_name(c_clean))
 
+        price_tag_name = "发行价" if (is_first_day or "上市" in str(spec.get("note", ""))) else "基准价"
         self.card_spec.setTitle(
-            f"🔑 【{name}】关键阈值速查（发行价 {issue_p:.2f} 元 | 流通股≈{float_shares_wan:.2f}万股 | 流通市值≈{float_mv:.2f}亿 | 中签率 {lottery}）"
+            f"🔑 【{name}】关键阈值速查（{price_tag_name} {issue_p:.2f} 元 | 流通股≈{float_shares_wan:.2f}万股 | 流通市值≈{float_mv:.2f}亿 | 中签率 {lottery}）"
         )
 
         # 清空已有子控件
@@ -6234,7 +6258,15 @@ class IntradaySimulationWidget(QWidget):
         """一键全天秒级回测"""
         cur_code = self._get_current_code()
         spec = self.engine.get_stock_ladder_spec(cur_code)
-        issue_p = float(spec.get("issue_price", 100.0))
+        issue_p = float(spec.get("issue_price", 0.0) or 0.0)
+        if issue_p <= 0:
+            try:
+                from ats.new_stock_fetcher import NewStockFetcher
+                ipo_dict = NewStockFetcher.get_instance().fetch_ipo_calendar()
+                if cur_code in ipo_dict:
+                    issue_p = float(ipo_dict[cur_code].get("issue_price", 0.0) or 0.0)
+            except Exception:
+                pass
         float_mv = float(spec.get("float_mv_yi", 15.0))
         stock_name = spec.get("name", resolve_stock_name(cur_code))
 
