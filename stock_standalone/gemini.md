@@ -1,3 +1,14 @@
+## 2026-08-28 11:30
+- [x] **实现基于 `max(lasth1d, lasth2d, lasth3d)` 的 2D/3D/5D 平台高点突破感知与首日新股发行价保护机制 (`stock_standalone/ats/tdx_realtime_fetcher.py`, `stock_standalone/ats/limit_up_engine.py`, `stock_standalone/tests/test_new_stock_module.py`)**：
+    - [x] **多维多日阻力高点精准提取**：
+        - 聚合 `lasth1d`（昨高）、`lasth2d`（前天高）、`lasth3d`（大前天高）、`high4` 与 `max5`；
+        - 精确计算 `max_2d = max(lasth1d, lasth2d)`、`max_3d = max(lasth1d, lasth2d, lasth3d)` 与 `max_5d = max(lasth1d..max5)`；
+        - 竞价开盘一举跳空跨越对应阻力平台时，实时打上 `💎 爆量突破` 并注明突破级别（如 `跨越5日高点` / `跨越3日高点` / `跨越2日高点`）；
+    - [x] **首日新股发行价保护与无历史极值免误杀**：
+        - 对 `is_first_day` 首日新股，全面保护 `issue_price`（发行价），不强行进行历史日线平台校验；
+        - 基于 `(price - issue_price) / issue_price` 判定估值健康度（$+50\% \sim +150\%$），配合 09:20~09:25 不可撤单真实千万级抢筹锁定 09:25 黄金上车窗口；
+    - [x] **全量 22 项跨模块自动化测试 100% 全部 PASSED**。
+
 ## 2026-08-28 11:20
 - [x] **实现早盘集合竞价真金白银单量拟合、大普微爆量突破与 N华大首日真金抢筹强过滤精准决策模型 (`stock_standalone/ats/tdx_realtime_fetcher.py`, `stock_standalone/ats/limit_up_engine.py`, `stock_standalone/ats/new_stock_fetcher.py`, `stock_standalone/tests/test_new_stock_module.py`)**：
     - [x] **拒绝海量杂乱信号，实施极度苛刻的真金真龙强过滤（每早全市场仅严选 1~3 只顶级标的）**：

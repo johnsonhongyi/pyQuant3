@@ -1282,13 +1282,31 @@ class TDXRealtimeFetcher:
             # 竞价单量相对日均量拟合比 (0.15 表示仅竞价单量就达到全天日均量的 15%+)
             bidding_fit_ratio = round(bidding_vol / benchmark_daily_vol, 2) if benchmark_daily_vol > 0 else 0.0
 
-            # 多日特征与多日突破判断 (是否突破 5日/10日高点平台，如大普微模式)
+            # 多日特征与多日突破判断 (支持 lasth1d / lasth2d / lasth3d / high4 / max5，新股保护 issue_price 发行价)
             mp_info = multi_period_cache.get(code_str, {})
             name_curr = name_map.get(code_str, q.get("name", code_str))
             is_first_day = ("N" in str(name_curr)) or (code_str.startswith("920") and pct > 30.0) or ("首日" in str(mp_info.get("status", "")))
-            issue_p = float(mp_info.get("issue_price", 0.0) or 0.0)
+            issue_p = float(mp_info.get("issue_price", 0.0) or q.get("issue_price", 0.0) or 0.0)
 
-            lasth5d = float(mp_info.get("lasth5d", mp_info.get("hmax", mp_info.get("high5", 0.0))) or 0.0)
+            lasth1d = float(mp_info.get("lasth1d", mp_info.get("last_high", 0.0)) or 0.0)
+            lasth2d = float(mp_info.get("lasth2d", 0.0) or 0.0)
+            lasth3d = float(mp_info.get("lasth3d", 0.0) or 0.0)
+            high4 = float(mp_info.get("high4", 0.0) or 0.0)
+            max5 = float(mp_info.get("max5", mp_info.get("hmax", mp_info.get("lasth5d", mp_info.get("high5", 0.0)))) or 0.0)
+
+            # 💡 精确获取最近 2 日、最近 3 日与 5 日平台高点 (排除 <=0 异常值)
+            valid_2d = [v for v in (lasth1d, lasth2d) if v > 0]
+            max_2d = max(valid_2d) if valid_2d else 0.0
+
+            valid_3d = [v for v in (lasth1d, lasth2d, lasth3d) if v > 0]
+            max_3d = max(valid_3d) if valid_3d else 0.0
+
+            valid_5d = [v for v in (lasth1d, lasth2d, lasth3d, high4, max5) if v > 0]
+            max_5d = max(valid_5d) if valid_5d else 0.0
+
+            # 多日有效阻力高点平台 (依次取 max_5d -> max_3d -> max_2d)
+            benchmark_high = max_5d if max_5d > 0 else (max_3d if max_3d > 0 else max_2d)
+
             dff = float(mp_info.get("dff", 0.0) or 0.0)
             dff2 = float(mp_info.get("dff2", 0.0) or 0.0)
             dff3 = float(mp_info.get("dff3", 0.0) or 0.0)
@@ -1296,10 +1314,24 @@ class TDXRealtimeFetcher:
             perc3d = float(mp_info.get("perc3d", 0.0) or 0.0)
 
             is_bidding_breakout = False
-            if price > 0 and lasth5d > 0 and price >= lasth5d - 0.01:
-                is_bidding_breakout = True
-            elif pct >= 3.0 and (dff2 >= 8.0 or dff3 >= 15.0):
-                is_bidding_breakout = True
+            breakout_level = ""
+            if not is_first_day:
+                if price > 0 and max_5d > 0 and price >= max_5d - 0.01:
+                    is_bidding_breakout = True
+                    breakout_level = "5日高点"
+                elif price > 0 and max_3d > 0 and price >= max_3d - 0.01:
+                    is_bidding_breakout = True
+                    breakout_level = "3日高点"
+                elif price > 0 and max_2d > 0 and price >= max_2d - 0.01:
+                    is_bidding_breakout = True
+                    breakout_level = "2日高点"
+                elif pct >= 3.0 and (dff2 >= 8.0 or dff3 >= 15.0):
+                    is_bidding_breakout = True
+                    breakout_level = "多头加速"
+
+            # 新股相对发行价溢价评估 (保护发行价，估值未透支判定)
+            ipo_premium_pct = round((price - issue_p) / issue_p * 100.0, 1) if (is_first_day and issue_p > 0 and price > 0) else pct
+            is_ipo_valuation_healthy = (ipo_premium_pct <= 220.0) if is_first_day else True
 
             # 盘口主力行为与集合竞价意图深度分析 (自适应识别竞价时态与严苛真龙过滤)
             now_hhmm = time.strftime("%H:%M")
@@ -1332,12 +1364,12 @@ class TDXRealtimeFetcher:
 
                 elif is_bidding_0920_0925 or (is_data_bidding and not is_clock_bidding):
                     # ── B. 09:20~09:25 不可撤单真实申报阶段 (黄金定龙/大普微爆量突破/N华大首日真金抢筹强过滤) ──
-                    if is_first_day and (bidding_amt_wan >= 800.0 or bidding_amt_yi >= 0.08) and (pct <= 220.0):
-                        # 💎 N华大模式：首日新股不可撤单阶段真金白银千万级抢筹，估值未透支，09:25最佳上车点
+                    if is_first_day and (bidding_amt_wan >= 800.0 or bidding_amt_yi >= 0.08) and is_ipo_valuation_healthy:
+                        # 💎 N华大模式：首日新股不可撤单阶段真金白银千万级抢筹，发行价估值保护未透支，09:25最佳上车点
                         order_intent = "💎 新股首日真金抢筹"
                         intent_score = 100
                     elif is_bidding_breakout and (bidding_amt_yi >= 0.3 or bidding_fit_ratio >= 0.20) and pct >= 4.0 and bid_pressure >= 75.0:
-                        # 💎 大普微模式：不可撤单重金爆量突破多日高点，全市场每早仅极少数
+                        # 💎 大普微模式：不可撤单重金爆量突破多日高点(max5/high4/lasth2d/lasth1d)，全市场每早仅极少数
                         order_intent = "💎 竞价爆量突破"
                         intent_score = 100
                     elif pct >= 9.5 and (ask_vol_sum == 0 or bid_pressure >= 80.0 or bidding_amt_yi >= 0.3):
@@ -1470,6 +1502,7 @@ class TDXRealtimeFetcher:
                 "bidding_amt_yi": bidding_amt_yi,
                 "bidding_fit_ratio": bidding_fit_ratio,
                 "is_bidding_breakout": is_bidding_breakout,
+                "breakout_level": breakout_level,
                 "turnover": turnover_val,
                 "vol_ratio": vol_ratio_val,
                 "slope_score": slope_score,
@@ -1509,6 +1542,7 @@ class TDXRealtimeFetcher:
             b_amt_wan = it.get("bidding_amt_wan", 0.0)
             b_fit_r = it.get("bidding_fit_ratio", 0.0)
             is_breakout = it.get("is_bidding_breakout", False)
+            b_level = it.get("breakout_level", "")
             turnover = it["turnover"]
             sec = it["sector"]
             max_sec_p = sector_max_pct.get(sec, pct)
@@ -1528,12 +1562,12 @@ class TDXRealtimeFetcher:
                     reason = f"首日新股真金白银巨资抢筹 (竞价{b_amt_wan:.0f}万/现价{price:.2f}), 估值合理未透支, 09:25黄金上车点 (防开盘极速脉冲)"
                     type_priority = 99
                 elif "爆量突破" in order_intent or (is_breakout and b_amt_yi >= 0.2):
-                    # 💎 竞价爆量突破龙：大普微模式 (不可撤单重金爆量 + 跳空跨过多日高点)
+                    # 💎 竞价爆量突破龙：大普微模式 (不可撤单重金爆量 + 跳空跨过 2D/3D/5D 高点)
                     buy_type = "💎 爆量突破"
                     buy_tag = "BID_BREAKOUT"
                     buy_zone = f"{price:.2f}"
                     stop_loss = round(price * 0.96, 2)
-                    reason = f"不可撤单阶段重金爆量抢筹 (竞价{b_amt_yi:.2f}亿/拟合比{b_fit_r:.1f}x), 跨越突破多日高点, 顶级龙头起爆"
+                    reason = f"不可撤单阶段重金爆量抢筹 (竞价{b_amt_yi:.2f}亿/拟合比{b_fit_r:.1f}x), 跨越{b_level or '多日高点'}, 顶级龙头起爆"
                     type_priority = 99
                 elif "一字" in order_intent or (pct >= 9.5 and bid_p >= 75.0):
                     buy_type = "👑 竞价一字"

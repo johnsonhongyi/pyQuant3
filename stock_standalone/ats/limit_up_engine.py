@@ -704,6 +704,21 @@ class LimitUpEngine:
             extra_d = r.get("extra_cols", {})
             ch_bc2 = _safe_int(r.get("ch_bc2", extra_d.get("ch_bc2", 999)), 999)
             supp_price = _safe_float(r.get("support", extra_d.get("support", 0.0)))
+
+            # 💡 最近 2日、3日与 5日平台高点计算 (max(lasth1d, lasth2d, lasth3d))
+            lasth1d = _safe_float(r.get("lasth1d", extra_d.get("lasth1d", 0.0)))
+            lasth2d = _safe_float(r.get("lasth2d", extra_d.get("lasth2d", 0.0)))
+            lasth3d = _safe_float(r.get("lasth3d", extra_d.get("lasth3d", 0.0)))
+            max5 = _safe_float(r.get("max5", extra_d.get("max5", r.get("hmax", extra_d.get("hmax", 0.0)))))
+
+            valid_2d = [v for v in (lasth1d, lasth2d) if v > 0]
+            max_2d = max(valid_2d) if valid_2d else 0.0
+            valid_3d = [v for v in (lasth1d, lasth2d, lasth3d) if v > 0]
+            max_3d = max(valid_3d) if valid_3d else 0.0
+            valid_5d = [v for v in (lasth1d, lasth2d, lasth3d, max5) if v > 0]
+            max_5d = max(valid_5d) if valid_5d else 0.0
+
+            is_breakout_multiday = (price > 0 and max_5d > 0 and price >= max_5d - 0.01) or (price > 0 and max_3d > 0 and price >= max_3d - 0.01) or (dff2 >= 8.0)
             
             # 1. 两日情绪与阳包阴反包判定 (昨日洗盘震荡/小阴回调，今日放量大阳反包)
             pct_yesterday = round(dff2 - pct, 2) if abs(dff2) > 0.01 else 0.0
@@ -866,7 +881,7 @@ class LimitUpEngine:
                     r["tier_tag"] = f"🚀 连板接力 ({consecutive}板)"
                     desc_tag = f"🚀 连板加速({momentum_score:.0f}分)"
                 elif "09:15" <= curr_hhmm <= "09:25":
-                    if (seal_amt_wan >= 2000 or seal_to_circ >= 3.0) and dff2 >= 8.0:
+                    if (seal_amt_wan >= 2000 or seal_to_circ >= 3.0) and is_breakout_multiday:
                         r["tier_tag"] = "💎 竞价爆量突破龙"
                         desc_tag = f"💎 爆量突破({momentum_score:.0f}分)"
                     elif seal_amt_wan >= 2000 or seal_to_circ >= 3.0:
@@ -876,7 +891,7 @@ class LimitUpEngine:
                         r["tier_tag"] = "🔥 竞价高开冲板"
                         desc_tag = f"🔥 竞价冲板({momentum_score:.0f}分)"
                 elif "09:25" < curr_hhmm < "09:30":
-                    if dff2 >= 8.0:
+                    if is_breakout_multiday:
                         r["tier_tag"] = "💎 定盘爆量突破龙"
                         desc_tag = f"💎 定盘突破({momentum_score:.0f}分)"
                     else:
@@ -937,7 +952,7 @@ class LimitUpEngine:
                 if "09:15" <= curr_hhmm <= "09:30" and is_first_day and (seal_amt_wan >= 800.0 or bid_p >= 75.0):
                     r["tier_tag"] = "💎 新股首日真金抢筹"
                     desc_tag = f"💎 首日抢筹({momentum_score:.0f}分)"
-                elif "09:20" <= curr_hhmm <= "09:25" and pct >= 3.0 and dff2 >= 8.0 and (seal_amt_wan >= 2000.0 or bid_p >= 75.0):
+                elif "09:20" <= curr_hhmm <= "09:25" and pct >= 3.0 and is_breakout_multiday and (seal_amt_wan >= 2000.0 or bid_p >= 75.0):
                     r["tier_tag"] = "💎 竞价爆量突破"
                     desc_tag = f"💎 爆量突破({momentum_score:.0f}分)"
                 elif "09:20" <= curr_hhmm <= "09:25" and pct >= 7.0 and bid_p >= 75.0:
