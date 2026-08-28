@@ -362,11 +362,11 @@ class TestNewStockModule(unittest.TestCase):
             alpha_quotes = fetcher.fetch_multi_stock_alpha_quotes(clean_codes, sector_map, mp_cache, name_map)
             self.assertEqual(len(alpha_quotes), 4)
 
-            # 验证 600001 一字顶格意图
+            # 验证 600001 竞价顶格/爆量突破意图
             q1 = next(q for q in alpha_quotes if q["code"] == "600001")
             self.assertEqual(q1["price"], 11.0)
             self.assertEqual(q1["pct"], 10.0)
-            self.assertTrue("一字" in q1["order_intent"] or "封" in q1["order_intent"])
+            self.assertTrue("突破" in q1["order_intent"] or "一字" in q1["order_intent"] or "封" in q1["order_intent"])
 
             # 验证 300002 高开抢筹意图 (+6.0%, 买盘压强 > 75%)
             q2 = next(q for q in alpha_quotes if q["code"] == "300002")
@@ -379,6 +379,76 @@ class TestNewStockModule(unittest.TestCase):
             self.assertTrue(q4["bid_pressure"] < 40.0)
 
             print("[Test 8] TDXRealtimeFetcher 集合竞价意图与高开竞速决策验证成功！")
+        finally:
+            fetcher.get_security_quotes_safe = original_get_quotes
+
+    def test_09_bidding_volume_fitting_and_breakout(self):
+        """测试【大普微模式】集合竞价重金单量拟合、爆量高开与多日平台高点突破"""
+        from ats.tdx_realtime_fetcher import TDXRealtimeFetcher
+        fetcher = TDXRealtimeFetcher.get_instance()
+
+        # 模拟大普微 (301666): 昨收 391.0, 5日最高价 410.0, 集合竞价 9:25 定盘撮合成交 13423 手 (6.3 亿) 顶格高开突破 469.20 (+20%)
+        # 模拟N华大 (920288): 发行价 12.57, 昨收 12.57, 集合竞价 9:25 定盘撮合成交 4976 手 (1253 万元) 25.18 (+100.32%)
+        # 模拟缩量假高开股 (600999): 昨收 10.0, 集合竞价高开到 10.6 (+6%), 但竞价单量仅 10 手 (1 万元), 属于典型假高开诱多
+        clean_codes = ["301666", "920288", "600999"]
+        sector_map = {"301666": "芯片龙头", "920288": "首发新股", "600999": "题材概念"}
+        mp_cache = {
+            "301666": {"dff": 5.0, "dff2": 15.0, "dff3": 25.0, "lasth5d": 410.0, "rank": 1},
+            "920288": {"dff": 0.0, "dff2": 0.0, "dff3": 0.0, "lasth5d": 0.0, "rank": 1, "issue_price": 12.57, "status": "首日上市"},
+            "600999": {"dff": 0.0, "dff2": 0.0, "dff3": 0.0, "lasth5d": 12.0, "rank": 999},
+        }
+        name_map = {"301666": "大普微", "920288": "N华大", "600999": "假高开诱多"}
+
+        original_get_quotes = fetcher.get_security_quotes_safe
+        try:
+            fetcher.get_security_quotes_safe = lambda codes, force=False: [
+                {
+                    # 大普微: 竞价成交 13423 手 (6.3亿), 突破 5日最高 410.0
+                    "code": "301666", "price": 0.0, "last_close": 391.0, "bid1": 469.20, "ask1": 0.0,
+                    "bid_vol1": 13423, "bid_vol2": 5000, "ask_vol1": 0, "open": 469.20, "vol": 13423, "amount": 629807160.0
+                },
+                {
+                    # N华大: 首日新股竞价定盘成交 4976 手 (1253 万元) 25.18 元 (+100.32%)
+                    "code": "920288", "name": "N华大", "price": 0.0, "last_close": 12.57, "bid1": 25.18, "ask1": 25.20,
+                    "bid_vol1": 4976, "bid_vol2": 2000, "ask_vol1": 500, "open": 25.18, "vol": 4976, "amount": 12529568.0
+                },
+                {
+                    # 假高开: 竞价单量仅 10 手, 买一压强极弱
+                    "code": "600999", "price": 0.0, "last_close": 10.0, "bid1": 10.60, "ask1": 10.70,
+                    "bid_vol1": 10, "bid_vol2": 5, "ask_vol1": 20000, "open": 10.60, "vol": 0, "amount": 0
+                }
+            ]
+
+            alpha_quotes = fetcher.fetch_multi_stock_alpha_quotes(clean_codes, sector_map, mp_cache, name_map)
+            self.assertEqual(len(alpha_quotes), 3)
+
+            # 1. 断言大普微: 识别为 💎 爆量突破 / 👑 竞价一字，金额达 6 亿+，优先级最高 (>= 99)
+            q_dpw = next(q for q in alpha_quotes if q["code"] == "301666")
+            self.assertEqual(q_dpw["price"], 469.20)
+            self.assertEqual(q_dpw["pct"], 20.0)
+            self.assertTrue(q_dpw["bidding_amt_yi"] >= 5.0, "竞价金额应超过5亿元")
+            self.assertTrue(q_dpw["is_bidding_breakout"], "应成功判定为突破多日高点")
+            self.assertTrue("爆量突破" in q_dpw["order_intent"] or "一字" in q_dpw["order_intent"])
+            self.assertIn(q_dpw["buy_type"], ["💎 爆量突破", "👑 竞价一字"])
+            self.assertTrue(q_dpw["type_priority"] >= 99)
+
+            # 2. 断言 N华大 (920288): 识别为 💎 首日真金抢筹，金额达 1253 万元，优先级顶级 (>= 99)
+            q_hd = next(q for q in alpha_quotes if q["code"] == "920288")
+            self.assertEqual(q_hd["price"], 25.18)
+            self.assertTrue(q_hd["bidding_amt_wan"] >= 1000.0, "N华大竞价金额应达1253万元")
+            self.assertTrue("新股" in q_hd["order_intent"] and "抢筹" in q_hd["order_intent"])
+            self.assertEqual(q_hd["buy_type"], "💎 首日真金抢筹")
+            self.assertTrue(q_hd["type_priority"] >= 99)
+            self.assertTrue("09:25黄金上车点" in q_hd["reason"])
+
+            # 3. 断言假高开股: 识别为 ⚠️ 缩量诱多 / 虚挂，优先级极低 (<= 25)，成功防砸过滤
+            q_fake = next(q for q in alpha_quotes if q["code"] == "600999")
+            self.assertEqual(q_fake["price"], 10.60)
+            self.assertTrue("诱多" in q_fake["order_intent"] or "测盘" in q_fake["order_intent"] or "虚挂" in q_fake["order_intent"])
+            self.assertEqual(q_fake["buy_type"], "⚠️ 缩量诱多")
+            self.assertTrue(q_fake["type_priority"] <= 25)
+
+            print("\n[Test 9] 大普微模式与 N华大首日真金抢筹 (集合竞价重金单量拟合、爆量突破与缩量诱多过滤) 验证全部通过！")
         finally:
             fetcher.get_security_quotes_safe = original_get_quotes
 

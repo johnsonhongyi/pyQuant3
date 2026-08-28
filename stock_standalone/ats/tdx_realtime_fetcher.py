@@ -1268,64 +1268,116 @@ class TDXRealtimeFetcher:
             bid_pressure = round((bid_vol_sum / total_depth) * 100.0, 1) if total_depth > 0 else 50.0
             taker_buy_ratio = round((b_vol / (b_vol + s_vol)) * 100.0, 1) if (b_vol + s_vol > 0) else 50.0
 
-            # 盘口主力行为与集合竞价意图深度分析
+            # 💡 竞价单量拟合与真金白银测算 (09:15~09:30)
+            bid1_v = float(q.get("bid_vol1", 0.0) or 0.0)
+            ask1_v = float(q.get("ask_vol1", 0.0) or 0.0)
+            bidding_vol = vol if vol > 0 else (bid1_v if bid1_v > 0 else ask1_v)
+            bidding_amt = bidding_vol * 100.0 * price if (bidding_vol > 0 and price > 0) else 0.0
+            bidding_amt_wan = round(bidding_amt / 10000.0, 1)
+            bidding_amt_yi = round(bidding_amt / 1e8, 3)
+
+            # 流通股本与基准日均量 (以流通盘 2% 估算基准全天量)
+            circ_shares = self.get_circulation_shares(code_str)
+            benchmark_daily_vol = (circ_shares / 100.0) * 0.02 if circ_shares > 0 else 50000.0
+            # 竞价单量相对日均量拟合比 (0.15 表示仅竞价单量就达到全天日均量的 15%+)
+            bidding_fit_ratio = round(bidding_vol / benchmark_daily_vol, 2) if benchmark_daily_vol > 0 else 0.0
+
+            # 多日特征与多日突破判断 (是否突破 5日/10日高点平台，如大普微模式)
+            mp_info = multi_period_cache.get(code_str, {})
+            name_curr = name_map.get(code_str, q.get("name", code_str))
+            is_first_day = ("N" in str(name_curr)) or (code_str.startswith("920") and pct > 30.0) or ("首日" in str(mp_info.get("status", "")))
+            issue_p = float(mp_info.get("issue_price", 0.0) or 0.0)
+
+            lasth5d = float(mp_info.get("lasth5d", mp_info.get("hmax", mp_info.get("high5", 0.0))) or 0.0)
+            dff = float(mp_info.get("dff", 0.0) or 0.0)
+            dff2 = float(mp_info.get("dff2", 0.0) or 0.0)
+            dff3 = float(mp_info.get("dff3", 0.0) or 0.0)
+            rank_val = int(mp_info.get("rank", mp_info.get("Rank", 999)) or 999)
+            perc3d = float(mp_info.get("perc3d", 0.0) or 0.0)
+
+            is_bidding_breakout = False
+            if price > 0 and lasth5d > 0 and price >= lasth5d - 0.01:
+                is_bidding_breakout = True
+            elif pct >= 3.0 and (dff2 >= 8.0 or dff3 >= 15.0):
+                is_bidding_breakout = True
+
+            # 盘口主力行为与集合竞价意图深度分析 (自适应识别竞价时态与严苛真龙过滤)
             now_hhmm = time.strftime("%H:%M")
+            is_clock_bidding = ("09:15" <= now_hhmm < "09:30")
+            is_data_bidding = (price_raw <= 0.0 or (vol <= 0.0 and amount <= 0.0))
+            is_bidding_session = is_clock_bidding or is_data_bidding
+
             is_bidding_0915_0920 = ("09:15" <= now_hhmm < "09:20")
-            is_bidding_0920_0925 = ("09:20" <= now_hhmm <= "09:25")
+            is_bidding_0920_0925 = ("09:20" <= now_hhmm <= "09:25") or (is_data_bidding and not is_clock_bidding)
             is_bidding_0925_0930 = ("09:25" < now_hhmm < "09:30")
-            is_bidding_session = is_bidding_0915_0920 or is_bidding_0920_0925 or is_bidding_0925_0930
 
             if is_bidding_session:
                 if is_bidding_0915_0920:
                     # ── A. 09:15~09:20 试撮合可撤单阶段 ──
-                    if pct >= 9.5 and bid_pressure >= 80.0:
+                    if pct >= 9.5 and bid_pressure >= 85.0:
                         order_intent = "👑 竞价试盘一字"
                         intent_score = 90
-                    elif pct >= 3.5 and bid_pressure >= 70.0:
+                    elif pct >= 4.0 and (bid_pressure >= 75.0 or bidding_amt_yi >= 0.15):
                         order_intent = "⚡ 试撮合抢筹"
                         intent_score = 80
-                    elif pct >= 3.0 and bid_pressure <= 40.0:
+                    elif pct >= 3.0 and (bid_pressure <= 45.0 or bidding_amt_wan < 100.0):
                         order_intent = "⚠️ 虚挂测盘"
-                        intent_score = 35
+                        intent_score = 25
                     elif pct <= -3.0:
                         order_intent = "🧱 竞价低开试盘"
-                        intent_score = 30
+                        intent_score = 20
                     else:
-                        order_intent = "⏱️ 竞价试撮合"
+                        order_intent = "⏱️ 竞价常规博弈"
                         intent_score = 50
-                elif is_bidding_0920_0925:
-                    # ── B. 09:20~09:25 不可撤单真实申报阶段 (黄金定龙与高开竞速) ──
-                    if pct >= 9.5 and (ask_vol_sum == 0 or bid_pressure >= 80.0):
+
+                elif is_bidding_0920_0925 or (is_data_bidding and not is_clock_bidding):
+                    # ── B. 09:20~09:25 不可撤单真实申报阶段 (黄金定龙/大普微爆量突破/N华大首日真金抢筹强过滤) ──
+                    if is_first_day and (bidding_amt_wan >= 800.0 or bidding_amt_yi >= 0.08) and (pct <= 220.0):
+                        # 💎 N华大模式：首日新股不可撤单阶段真金白银千万级抢筹，估值未透支，09:25最佳上车点
+                        order_intent = "💎 新股首日真金抢筹"
+                        intent_score = 100
+                    elif is_bidding_breakout and (bidding_amt_yi >= 0.3 or bidding_fit_ratio >= 0.20) and pct >= 4.0 and bid_pressure >= 75.0:
+                        # 💎 大普微模式：不可撤单重金爆量突破多日高点，全市场每早仅极少数
+                        order_intent = "💎 竞价爆量突破"
+                        intent_score = 100
+                    elif pct >= 9.5 and (ask_vol_sum == 0 or bid_pressure >= 80.0 or bidding_amt_yi >= 0.3):
                         order_intent = "👑 竞价一字顶格"
                         intent_score = 98
-                    elif (3.0 <= pct < 9.5) and bid_pressure >= 75.0:
-                        order_intent = "🚀 竞价高开抢筹"
-                        intent_score = 92
-                    elif (pct >= 3.0) and (perc3d <= 1.0 or dff2 >= 5.0) and bid_pressure >= 65.0:
+                    elif (4.0 <= pct < 9.5) and (bidding_amt_yi >= 0.15 and bid_pressure >= 78.0):
+                        order_intent = "🚀 竞价真金抢筹"
+                        intent_score = 94
+                    elif (pct >= 3.5) and (perc3d <= 1.0 or dff2 >= 6.0) and (bidding_amt_yi >= 0.1 or bid_pressure >= 70.0):
                         order_intent = "🔥 弱转强超预期"
                         intent_score = 90
-                    elif pct >= 3.0 and bid_pressure <= 40.0:
-                        order_intent = "⚠️ 竞价诱多抢跑"
-                        intent_score = 30
+                    elif pct >= 3.0 and (bidding_amt_wan < 150.0 or bid_pressure <= 45.0):
+                        order_intent = "⚠️ 竞价缩量诱多"
+                        intent_score = 15
                     elif pct <= -3.0 and bid_pressure <= 35.0:
                         order_intent = "🧱 竞价大幅低开"
-                        intent_score = 25
+                        intent_score = 15
                     else:
-                        order_intent = "⚖️ 竞价真实博弈"
+                        order_intent = "⏱️ 竞价常规博弈"
                         intent_score = 50
+
                 else:
                     # ── C. 09:25~09:30 定盘静默阶段 ──
-                    if pct >= 9.5:
+                    if is_first_day and (bidding_amt_wan >= 800.0 or bidding_amt_yi >= 0.08) and (pct <= 220.0):
+                        order_intent = "💎 新股定盘真金抢筹"
+                        intent_score = 100
+                    elif is_bidding_breakout and (bidding_amt_yi >= 0.3 or bidding_fit_ratio >= 0.20) and pct >= 4.0:
+                        order_intent = "💎 定盘爆量突破"
+                        intent_score = 100
+                    elif pct >= 9.5 and (bidding_amt_yi >= 0.2 or bid_pressure >= 80.0):
                         order_intent = "🔒 竞价一字定盘"
-                        intent_score = 95
-                    elif pct >= 3.0 and bid_pressure >= 70.0:
-                        order_intent = "🔒 定盘高开抢筹"
-                        intent_score = 88
-                    elif pct >= 3.0 and bid_pressure <= 40.0:
-                        order_intent = "⚠️ 定盘诱多压制"
-                        intent_score = 35
+                        intent_score = 98
+                    elif pct >= 4.0 and (bidding_amt_yi >= 0.15 or bid_pressure >= 75.0):
+                        order_intent = "🔒 定盘真金抢筹"
+                        intent_score = 92
+                    elif pct >= 3.0 and (bidding_amt_wan < 150.0 or bid_pressure <= 45.0):
+                        order_intent = "⚠️ 定盘缩量诱多"
+                        intent_score = 15
                     else:
-                        order_intent = "🔒 竞价定盘锁定"
+                        order_intent = "⏱️ 竞价常规博弈"
                         intent_score = 50
             else:
                 # ── D. 连续撮合交易时段 (09:30~15:00) ──
@@ -1413,6 +1465,11 @@ class TDXRealtimeFetcher:
                 "ask_vol_sum": ask_vol_sum,
                 "bid_pressure": bid_pressure,
                 "order_intent": order_intent,
+                "bidding_vol": bidding_vol,
+                "bidding_amt_wan": bidding_amt_wan,
+                "bidding_amt_yi": bidding_amt_yi,
+                "bidding_fit_ratio": bidding_fit_ratio,
+                "is_bidding_breakout": is_bidding_breakout,
                 "turnover": turnover_val,
                 "vol_ratio": vol_ratio_val,
                 "slope_score": slope_score,
@@ -1448,6 +1505,10 @@ class TDXRealtimeFetcher:
             slope = it["slope_score"]
             bid_p = it["bid_pressure"]
             order_intent = it["order_intent"]
+            b_amt_yi = it.get("bidding_amt_yi", 0.0)
+            b_amt_wan = it.get("bidding_amt_wan", 0.0)
+            b_fit_r = it.get("bidding_fit_ratio", 0.0)
+            is_breakout = it.get("is_bidding_breakout", False)
             turnover = it["turnover"]
             sec = it["sector"]
             max_sec_p = sector_max_pct.get(sec, pct)
@@ -1458,19 +1519,35 @@ class TDXRealtimeFetcher:
 
             # ── 💡 统一多模块智能阿尔法分拣决策 (集合竞价高开竞速与盘中连续撮合买点) ──
             if is_bidding_session:
-                if "一字" in order_intent or (pct >= 9.5 and bid_p >= 75.0):
+                if "新股" in order_intent and "抢筹" in order_intent:
+                    # 💎 新股首日真金抢筹：N华大模式 (首日新股千万级抢筹 + 溢价合理 + 09:25黄金上车点)
+                    buy_type = "💎 首日真金抢筹"
+                    buy_tag = "IPO_BID_SURGE"
+                    buy_zone = f"{price:.2f}"
+                    stop_loss = round(price * 0.94, 2)
+                    reason = f"首日新股真金白银巨资抢筹 (竞价{b_amt_wan:.0f}万/现价{price:.2f}), 估值合理未透支, 09:25黄金上车点 (防开盘极速脉冲)"
+                    type_priority = 99
+                elif "爆量突破" in order_intent or (is_breakout and b_amt_yi >= 0.2):
+                    # 💎 竞价爆量突破龙：大普微模式 (不可撤单重金爆量 + 跳空跨过多日高点)
+                    buy_type = "💎 爆量突破"
+                    buy_tag = "BID_BREAKOUT"
+                    buy_zone = f"{price:.2f}"
+                    stop_loss = round(price * 0.96, 2)
+                    reason = f"不可撤单阶段重金爆量抢筹 (竞价{b_amt_yi:.2f}亿/拟合比{b_fit_r:.1f}x), 跨越突破多日高点, 顶级龙头起爆"
+                    type_priority = 99
+                elif "一字" in order_intent or (pct >= 9.5 and bid_p >= 75.0):
                     buy_type = "👑 竞价一字"
                     buy_tag = "BID_LIMIT"
                     buy_zone = f"{price:.2f}"
                     stop_loss = round(price * 0.95, 2)
-                    reason = f"集合竞价一字顶格封板 (买盘压强{bid_p:.0f}%), {order_intent}"
+                    reason = f"集合竞价一字顶格封板 (竞价金额{b_amt_yi:.2f}亿, 买盘压强{bid_p:.0f}%), {order_intent}"
                     type_priority = 100
-                elif "高开抢筹" in order_intent:
-                    buy_type = "🚀 竞价高开"
+                elif "抢筹" in order_intent:
+                    buy_type = "🚀 竞价抢筹"
                     buy_tag = "BID_SURGE"
                     buy_zone = f"{round(price * 0.99, 2)} ~ {price:.2f}"
                     stop_loss = round(price * 0.97, 2)
-                    reason = f"不可撤单阶段真金白银高开竞速抢筹 (+{pct:.1f}%, 买盘压强{bid_p:.0f}%), 极速先手点"
+                    reason = f"不可撤单阶段真金白银高开抢筹 (+{pct:.1f}%, 竞价金额{b_amt_wan:.0f}万, 买盘压强{bid_p:.0f}%), 极速先手点"
                     type_priority = 96
                 elif "弱转强" in order_intent:
                     buy_type = "🔥 弱转强"
@@ -1480,11 +1557,11 @@ class TDXRealtimeFetcher:
                     reason = f"竞价大幅弱转强超预期 (+{pct:.1f}%, 多头底座DFF2={dff2:.1f}), 黄金反转抢手"
                     type_priority = 94
                 elif "诱多" in order_intent:
-                    buy_type = "⚠️ 诱多抢跑"
+                    buy_type = "⚠️ 缩量诱多"
                     buy_tag = "TRAP"
                     buy_zone = "--"
                     stop_loss = round(price * 0.95, 2)
-                    reason = f"竞价虚假高开但买盘压强极弱({bid_p:.0f}%), 卖盘重压防砸"
+                    reason = f"竞价虚假高开但单量不足 (竞价金额仅{b_amt_wan:.0f}万, 压强{bid_p:.0f}%), 卖盘重压防砸"
                     type_priority = 10
                 elif pct >= 4.5 and is_sec_leader:
                     buy_type = "👑 竞价领涨"
@@ -1595,22 +1672,37 @@ class TDXRealtimeFetcher:
                 reason = "⭐[重点关注] " + reason
 
             # 综合 Alpha 进攻得分 (0 ~ 100)
-            # 基础分为买点类型权重 (占比 60%)，动量与盘口扫买加成 (占比 40%)
-            base_score = type_priority * 0.55
-            momentum_bonus = min(18.0, max(0.0, pct * 2.0))
-            intent_bonus = 10.0 if ("扫买" in order_intent or "封板" in order_intent) else (5.0 if "托底" in order_intent else 0.0)
-            slope_bonus = min(10.0, slope * 0.10)
-            base_bonus = 7.0 if has_base else 0.0
-            focus_bonus = 6.0 if is_focus else 0.0
+            if is_bidding_session:
+                if "爆量突破" in order_intent or (is_breakout and b_amt_yi >= 0.2):
+                    alpha_score = 99.0 + (1.0 if b_amt_yi >= 1.0 else 0.0)
+                elif "一字" in order_intent:
+                    alpha_score = 98.0 + (2.0 if b_amt_yi >= 1.0 else 0.0)
+                elif "抢筹" in order_intent:
+                    alpha_score = round(min(97.0, 92.0 + min(5.0, b_amt_wan / 1000.0)), 1)
+                elif "弱转强" in order_intent:
+                    alpha_score = 91.0
+                elif "诱多" in order_intent or "测盘" in order_intent:
+                    alpha_score = 15.0
+                else:
+                    alpha_score = 50.0
+            else:
+                # 基础分为买点类型权重 (占比 60%)，动量与盘口扫买加成 (占比 40%)
+                base_score = type_priority * 0.55
+                momentum_bonus = min(18.0, max(0.0, pct * 2.0))
+                intent_bonus = 10.0 if ("扫买" in order_intent or "封板" in order_intent) else (5.0 if "托底" in order_intent else 0.0)
+                slope_bonus = min(10.0, slope * 0.10)
+                base_bonus = 7.0 if has_base else 0.0
+                focus_bonus = 6.0 if is_focus else 0.0
 
-            alpha_score = base_score + momentum_bonus + intent_bonus + slope_bonus + base_bonus + focus_bonus
-            alpha_score = round(min(100.0, max(0.0, alpha_score)), 1)
+                alpha_score = base_score + momentum_bonus + intent_bonus + slope_bonus + base_bonus + focus_bonus
+                alpha_score = round(min(100.0, max(0.0, alpha_score)), 1)
 
             it["buy_type"] = buy_type
             it["buy_tag"] = buy_tag
             it["buy_zone"] = buy_zone
             it["stop_loss"] = stop_loss
             it["reason"] = reason
+            it["type_priority"] = type_priority
             it["alpha_score"] = alpha_score
             results.append(it)
 

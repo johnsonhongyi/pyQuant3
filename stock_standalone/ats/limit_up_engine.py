@@ -866,15 +866,22 @@ class LimitUpEngine:
                     r["tier_tag"] = f"🚀 连板接力 ({consecutive}板)"
                     desc_tag = f"🚀 连板加速({momentum_score:.0f}分)"
                 elif "09:15" <= curr_hhmm <= "09:25":
-                    if seal_amt_wan >= 2000 or seal_to_circ >= 3.0:
+                    if (seal_amt_wan >= 2000 or seal_to_circ >= 3.0) and dff2 >= 8.0:
+                        r["tier_tag"] = "💎 竞价爆量突破龙"
+                        desc_tag = f"💎 爆量突破({momentum_score:.0f}分)"
+                    elif seal_amt_wan >= 2000 or seal_to_circ >= 3.0:
                         r["tier_tag"] = "👑 竞价一字顶格"
                         desc_tag = f"👑 竞价一字({momentum_score:.0f}分)"
                     else:
                         r["tier_tag"] = "🔥 竞价高开冲板"
                         desc_tag = f"🔥 竞价冲板({momentum_score:.0f}分)"
                 elif "09:25" < curr_hhmm < "09:30":
-                    r["tier_tag"] = "🔒 竞价一字定盘"
-                    desc_tag = f"🔒 定盘一字({momentum_score:.0f}分)"
+                    if dff2 >= 8.0:
+                        r["tier_tag"] = "💎 定盘爆量突破龙"
+                        desc_tag = f"💎 定盘突破({momentum_score:.0f}分)"
+                    else:
+                        r["tier_tag"] = "🔒 竞价一字定盘"
+                        desc_tag = f"🔒 定盘一字({momentum_score:.0f}分)"
                 elif is_reflexivity_leader:
                     r["tier_tag"] = "💎 冰点反身性龙"
                     desc_tag = f"💎 反身性龙头({momentum_score:.0f}分)"
@@ -926,7 +933,14 @@ class LimitUpEngine:
                 ch_score = ch_score * time_multiplier
                 momentum_score = round(min(88.0, max(45.0, ch_score)), 0)
 
-                if "09:20" <= curr_hhmm <= "09:25" and pct >= 7.0 and bid_p >= 75.0:
+                is_first_day = ("N" in str(r.get("name", ""))) or (code_str.startswith("920") and pct > 30.0) or ("首日" in str(r.get("status", "")))
+                if "09:15" <= curr_hhmm <= "09:30" and is_first_day and (seal_amt_wan >= 800.0 or bid_p >= 75.0):
+                    r["tier_tag"] = "💎 新股首日真金抢筹"
+                    desc_tag = f"💎 首日抢筹({momentum_score:.0f}分)"
+                elif "09:20" <= curr_hhmm <= "09:25" and pct >= 3.0 and dff2 >= 8.0 and (seal_amt_wan >= 2000.0 or bid_p >= 75.0):
+                    r["tier_tag"] = "💎 竞价爆量突破"
+                    desc_tag = f"💎 爆量突破({momentum_score:.0f}分)"
+                elif "09:20" <= curr_hhmm <= "09:25" and pct >= 7.0 and bid_p >= 75.0:
                     r["tier_tag"] = "🚀 竞价极速抢筹"
                     desc_tag = f"🚀 竞价抢筹({momentum_score:.0f}分)"
                 elif "09:20" <= curr_hhmm <= "09:25" and pct >= 3.0 and (dff2 >= 5.0 or pct_yesterday <= 0.0) and bid_p >= 65.0:
