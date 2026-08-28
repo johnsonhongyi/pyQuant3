@@ -18,7 +18,8 @@ from PyQt6.QtWidgets import (
     QLabel, QComboBox, QPushButton, QTableWidget, QTableWidgetItem, 
     QHeaderView, QMessageBox, QInputDialog, QDialog, QListWidget,
     QListWidgetItem, QTextEdit, QGroupBox, QLineEdit, QMenu, QSystemTrayIcon,
-    QSizePolicy, QTabWidget, QCheckBox, QRadioButton, QButtonGroup, QAbstractItemView
+    QSizePolicy, QTabWidget, QCheckBox, QRadioButton, QButtonGroup, QAbstractItemView,
+    QSpinBox, QDoubleSpinBox, QFileDialog
 )
 from PyQt6.QtGui import QAction, QIcon, QColor, QBrush, QPen, QFont, QPainter, QLinearGradient
 
@@ -1898,14 +1899,29 @@ class RamDiskSyncDialog(QDialog):
 
         lbl_mode = QLabel("存储模式:")
         self.cb_backup_mode = QComboBox()
-        self.cb_backup_mode.addItem("镜像覆盖 (保持最新快照)", "mirror")
-        self.cb_backup_mode.addItem("每日日期归档 (按年月日创建子文件夹)", "date_folder")
-        if self.sync_config.backup_mode == "date_folder":
+        self.cb_backup_mode.addItem("📅 每日日期归档 (按年月日创建文件夹，当天内覆盖最新)", "date_folder")
+        self.cb_backup_mode.addItem("⭐ 【推荐】差异快照版本归档 (按日归档 + 变动保留历史时间戳版本)", "diff_snapshot")
+        self.cb_backup_mode.addItem("🪞 镜像覆盖 (直接更新目标根目录最新单份)", "mirror")
+        
+        saved_mode = getattr(self.sync_config, "backup_mode", "date_folder")
+        if saved_mode == "diff_snapshot":
             self.cb_backup_mode.setCurrentIndex(1)
+        elif saved_mode == "mirror":
+            self.cb_backup_mode.setCurrentIndex(2)
         else:
             self.cb_backup_mode.setCurrentIndex(0)
+            
         safe_layout.addWidget(lbl_mode)
         safe_layout.addWidget(self.cb_backup_mode)
+
+        self.lbl_keep_days = QLabel("保留历史:")
+        self.spn_keep_days = QSpinBox()
+        self.spn_keep_days.setRange(0, 365)
+        self.spn_keep_days.setValue(getattr(self.sync_config, "keep_backup_days", 7))
+        self.spn_keep_days.setSuffix(" 天 (0为永久)")
+        self.spn_keep_days.setToolTip("自动清理超过此天数的历史日期归档文件夹，设置为 0 表示不限制天数永久保留")
+        safe_layout.addWidget(self.lbl_keep_days)
+        safe_layout.addWidget(self.spn_keep_days)
 
         self.chk_atomic = QCheckBox("原子安全替换 (先写临时文件后原子替换)")
         self.chk_atomic.setChecked(self.sync_config.atomic_swap)
@@ -1917,6 +1933,9 @@ class RamDiskSyncDialog(QDialog):
         safe_layout.addWidget(self.chk_log_enabled)
 
         safe_layout.addStretch()
+
+        self.cb_backup_mode.currentIndexChanged.connect(self._on_backup_mode_changed)
+        self._on_backup_mode_changed()
 
         layout.addWidget(gb_safe)
 
@@ -2146,17 +2165,25 @@ class RamDiskSyncDialog(QDialog):
             self.txt_tgt.setText(os.path.abspath(dir_p))
 
     def _open_target_dir(self):
+        # 智能直接打开当前实际生效的目标备份目录（如 D:\Ramdisk_Backup\20260828）
         tgt_p = self.txt_tgt.text().strip()
         if not tgt_p:
             tgt_p = self.sync_config.target_dir
-        if not os.path.exists(tgt_p):
+        
+        mode = self.cb_backup_mode.currentData() if hasattr(self, 'cb_backup_mode') else getattr(self.sync_config, "backup_mode", "date_folder")
+        effective_p = tgt_p
+        if mode in ["date_folder", "diff_snapshot"] and tgt_p:
+            today_str = datetime.datetime.now().strftime("%Y%m%d")
+            effective_p = os.path.join(tgt_p, today_str)
+
+        if not os.path.exists(effective_p):
             try:
-                os.makedirs(tgt_p, exist_ok=True)
-            except Exception as e:
-                QMessageBox.warning(self, "打开失败", f"无法创建目标目录:\n{e}")
-                return
+                os.makedirs(effective_p, exist_ok=True)
+            except Exception:
+                effective_p = tgt_p
+
         try:
-            os.startfile(tgt_p)
+            os.startfile(effective_p)
         except Exception as e:
             QMessageBox.warning(self, "打开失败", f"无法打开目录:\n{e}")
 
@@ -2199,7 +2226,7 @@ class RamDiskSyncDialog(QDialog):
         self.sync_engine.config.sync_scope = "specific_files" if self.rb_specific.isChecked() else "all_directory"
         self.sync_engine.config.specific_files = self._get_current_files_list()
         self.sync_engine.config.file_patterns = self._parse_patterns()
-        self.sync_engine.config.backup_mode = self.cb_backup_mode.currentData() or "mirror"
+        self.sync_engine.config.backup_mode = self.cb_backup_mode.currentData() or "date_folder"
         self.sync_engine.config.atomic_swap = self.chk_atomic.isChecked()
 
         scope_desc = f"多选指定 {len(self.sync_engine.config.specific_files)} 个文件" if self.sync_engine.config.sync_scope == "specific_files" else "全目录通配符扫描"
@@ -2233,6 +2260,13 @@ class RamDiskSyncDialog(QDialog):
         if self.parent() and hasattr(self.parent(), "log"):
             self.parent().log(f"ℹ️ [RamDisk Sync] 详细同步日志状态{state_str}")
 
+    def _on_backup_mode_changed(self):
+        """当存储模式改变时，动态启用/禁用保留天数配置控件"""
+        mode = self.cb_backup_mode.currentData()
+        is_date_mode = mode in ["date_folder", "diff_snapshot"]
+        self.lbl_keep_days.setEnabled(is_date_mode)
+        self.spn_keep_days.setEnabled(is_date_mode)
+
     def _save_and_apply(self):
         src = self.txt_src.text().strip()
         tgt = self.txt_tgt.text().strip()
@@ -2254,7 +2288,8 @@ class RamDiskSyncDialog(QDialog):
         self.sync_config.only_trading_hours = self.chk_trading_hours.isChecked()
         self.sync_config.trading_hours = self._parse_trading_hours()
         self.sync_config.file_patterns = self._parse_patterns()
-        self.sync_config.backup_mode = self.cb_backup_mode.currentData() or "mirror"
+        self.sync_config.backup_mode = self.cb_backup_mode.currentData() or "date_folder"
+        self.sync_config.keep_backup_days = self.spn_keep_days.value()
         self.sync_config.atomic_swap = self.chk_atomic.isChecked()
         self.sync_config.log_enabled = self.chk_log_enabled.isChecked()
 

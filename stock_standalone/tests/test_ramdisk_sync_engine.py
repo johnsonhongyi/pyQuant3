@@ -372,3 +372,146 @@ def test_verbose_log_and_worker_wake_event(temp_dirs):
     worker.trigger_sync_now(force=False)
     assert worker._trigger_event is True
 
+
+def test_backup_mode_diff_snapshot_and_rotation(temp_dirs):
+    """测试差异快照版本归档模式：变动保留历史时间戳版本，并自动轮转超额旧快照"""
+    src_dir = temp_dirs["src"]
+    tgt_dir = temp_dirs["tgt"]
+
+    cfg = RamDiskSyncConfig(config_path=temp_dirs["cfg"])
+    cfg.source_dir = src_dir
+    cfg.target_dir = tgt_dir
+    cfg.sync_scope = "specific_files"
+    cfg.specific_files = ["sina_MultiIndex_data.h5"]
+    cfg.backup_mode = "diff_snapshot"
+    cfg.max_snapshots_per_file = 3  # 最多保留 3 个快照版本
+
+    engine = RamDiskSyncEngine(cfg)
+
+    src_file = os.path.join(src_dir, "sina_MultiIndex_data.h5")
+    today_str = datetime.datetime.now().strftime("%Y%m%d")
+    date_subfolder = os.path.join(tgt_dir, today_str)
+
+    # 版本 1
+    with open(src_file, "w", encoding="utf-8") as f:
+        f.write("v1_data")
+    res1 = engine.sync_once(force=False, ignore_time_filter=True)
+    assert res1["status"] == "ok"
+    assert len(res1["synced_files"]) == 1
+    assert os.path.exists(os.path.join(date_subfolder, "sina_MultiIndex_data.h5"))
+
+    # 版本 2
+    time.sleep(1.1)
+    with open(src_file, "w", encoding="utf-8") as f:
+        f.write("v2_data_ticks")
+    res2 = engine.sync_once(force=False, ignore_time_filter=True)
+    assert len(res2["synced_files"]) == 1
+
+    # 版本 3
+    time.sleep(1.1)
+    with open(src_file, "w", encoding="utf-8") as f:
+        f.write("v3_data_ticks_more")
+    res3 = engine.sync_once(force=False, ignore_time_filter=True)
+    assert len(res3["synced_files"]) == 1
+
+    # 版本 4（触发轮转删除）
+    time.sleep(1.1)
+    with open(src_file, "w", encoding="utf-8") as f:
+        f.write("v4_data_ticks_final")
+    res4 = engine.sync_once(force=False, ignore_time_filter=True)
+    assert len(res4["synced_files"]) == 1
+
+    # 验证目录中：包含 1 个基准文件 + 最多 3 个快照文件
+    all_files = os.listdir(date_subfolder)
+    snapshots = [f for f in all_files if f.startswith("sina_MultiIndex_data_") and f.endswith(".h5")]
+    assert len(snapshots) <= 3
+    assert "sina_MultiIndex_data.h5" in all_files
+
+
+def test_normalize_dir_path():
+    """测试 Windows 盘符与路径规范化"""
+    from window_manager.sync_engine import normalize_dir_path
+    assert normalize_dir_path("G:") == "G:\\"
+    assert normalize_dir_path("g:") == "G:\\"
+    assert normalize_dir_path("D:\\Ramdisk_Backup") == os.path.abspath("D:\\Ramdisk_Backup")
+
+
+def test_clean_expired_backup_folders(temp_dirs):
+    """测试过期历史日期归档目录清理机制"""
+    tgt_dir = temp_dirs["tgt"]
+    today = datetime.date.today()
+
+    # 创建 4 个日期目录：今天、昨天、7天前、10天前(超期)
+    dir_today = today.strftime("%Y%m%d")
+    dir_yesterday = (today - datetime.timedelta(days=1)).strftime("%Y%m%d")
+    dir_7d = (today - datetime.timedelta(days=7)).strftime("%Y%m%d")
+    dir_15d = (today - datetime.timedelta(days=15)).strftime("%Y%m%d")
+    dir_custom = "custom_non_date_folder"  # 非日期目录，绝不应被误删
+
+    for d in [dir_today, dir_yesterday, dir_7d, dir_15d, dir_custom]:
+        os.makedirs(os.path.join(tgt_dir, d), exist_ok=True)
+
+    cfg = RamDiskSyncConfig(config_path=temp_dirs["cfg"])
+    cfg.target_dir = tgt_dir
+    cfg.backup_mode = "date_folder"
+    cfg.keep_backup_days = 7  # 保留 7 天
+
+    engine = RamDiskSyncEngine(cfg)
+
+    # 执行清理
+    cleaned = engine.clean_expired_backup_folders()
+    assert dir_15d in cleaned
+    assert not os.path.exists(os.path.join(tgt_dir, dir_15d))
+
+    # 验证 7 天内的目录及自定义目录未被删除
+    assert os.path.exists(os.path.join(tgt_dir, dir_today))
+    assert os.path.exists(os.path.join(tgt_dir, dir_yesterday))
+    assert os.path.exists(os.path.join(tgt_dir, dir_7d))
+    assert os.path.exists(os.path.join(tgt_dir, dir_custom))
+
+    # 验证 keep_backup_days = 0 时永久保留
+    cfg.keep_backup_days = 0
+    os.makedirs(os.path.join(tgt_dir, dir_15d), exist_ok=True)
+    cleaned_zero = engine.clean_expired_backup_folders()
+    assert len(cleaned_zero) == 0
+    assert os.path.exists(os.path.join(tgt_dir, dir_15d))
+
+
+def test_ramdisk_sync_dialog_ui_instantiation(temp_dirs):
+    """测试 RamDiskSyncDialog 界面控件的完整实例化与符号绑定（防范 NameError）"""
+    try:
+        from PyQt6.QtWidgets import QApplication
+        app = QApplication.instance()
+        if app is None:
+            app = QApplication([])
+    except Exception:
+        pytest.skip("非 GUI / PyQt6 环境，跳过 UI 渲染测试")
+
+    from window_manager.ui import RamDiskSyncDialog
+
+    cfg = RamDiskSyncConfig(config_path=temp_dirs["cfg"])
+    cfg.source_dir = temp_dirs["src"]
+    cfg.target_dir = temp_dirs["tgt"]
+    cfg.backup_mode = "diff_snapshot"
+    cfg.keep_backup_days = 15
+
+    engine = RamDiskSyncEngine(cfg)
+    dlg = RamDiskSyncDialog(cfg, engine)
+
+    # 验证所有控件实例正确生成
+    assert dlg.spn_keep_days is not None
+    assert dlg.spn_keep_days.value() == 15
+    assert dlg.cb_backup_mode.currentData() == "diff_snapshot"
+    assert dlg.spn_keep_days.isEnabled() is True
+
+    # 模拟切换模式为 mirror，验证联动禁用
+    dlg.cb_backup_mode.setCurrentIndex(2)  # mirror
+    assert dlg.spn_keep_days.isEnabled() is False
+
+    # 模拟切换回 date_folder，验证联动启用
+    dlg.cb_backup_mode.setCurrentIndex(0)  # date_folder
+    assert dlg.spn_keep_days.isEnabled() is True
+
+
+
+

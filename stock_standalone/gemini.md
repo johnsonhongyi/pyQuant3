@@ -1,3 +1,35 @@
+## 2026-08-28 12:36
+- [x] **彻底修复 `ui.py` 顶层缺失 `QSpinBox` 导入导致的 `NameError` 并完善全套 UI 自动化实例化测试 (`stock_standalone/webTools/window_manager/ui.py`, `stock_standalone/tests/test_ramdisk_sync_engine.py`)**：
+    - [x] **补齐 `PyQt6.QtWidgets` 顶层导入**：显式添加 `QSpinBox`, `QDoubleSpinBox`, `QFileDialog` 导入，消除对话框初始化异常；
+    - [x] **增加 UI 控件实例化自动化测试 (`test_ramdisk_sync_dialog_ui_instantiation`)**：端到端覆盖 `RamDiskSyncDialog` 初始化、控件渲染、数值读取、下拉框模式切换联动（`mirror` 禁用 / `diff_snapshot` 启用），杜绝任何未定义符号遗漏；
+    - [x] **全量 12 项 RamDisk 单元与 UI 测试 100% 全部 PASSED**。
+
+## 2026-08-28 12:28
+- [x] **实现每日日期归档与差异快照归档的历史保留天数限制设置与自动过期清理 (`stock_standalone/webTools/window_manager/sync_engine.py`, `stock_standalone/webTools/window_manager/ui.py`, `stock_standalone/tests/test_ramdisk_sync_engine.py`)**：
+    - [x] **保留天数设置选项与界面联动 (`keep_backup_days`)**：
+        - 设置界面新增「保留历史: `[ 7 ]` 天 (0为永久)」微调输入框，范围 `0~365` 天；
+        - 当切换为“镜像覆盖 (`mirror`)”时自动置灰禁用，切换为“每日日期归档 (`date_folder`)”或“差异快照版本归档 (`diff_snapshot`)”时自动激活；
+        - 配置自动原子落盘保存至 `ramdisk_sync_config.json`；
+    - [x] **核心清理引擎与过期历史目录轮转 (`clean_expired_backup_folders`)**：
+        - 自动扫描目标备份目录下的 `YYYYMMDD` 日期子文件夹，精确计算与当天日期的天数差；
+        - 超过 `keep_backup_days` 的历史老旧日期文件夹自动安全清理，非日期文件夹受绝对保护绝不误删；设置为 `0` 时永久保留；
+        - 同步日志实时透明汇报清理结果（如 `(已清理 2 个超期历史归档: 20260815, 20260816)`）；
+    - [x] **全量 11 项 RamDisk 单元测试 100% 全部 PASSED**。
+
+## 2026-08-28 12:15
+- [x] **实现 RamDisk 差异快照版本归档 (Diff Snapshot) 存储模式、路径规范化与全链路透明日志增强 (`stock_standalone/webTools/window_manager/sync_engine.py`, `stock_standalone/webTools/window_manager/ui.py`, `stock_standalone/tests/test_ramdisk_sync_engine.py`)**：
+    - [x] **排查破案与根因定位**：
+        1. **目标路径混淆**：用户配置的目标备份目录为 `D:\Ramdisk_Backup`（按日归档模式保存在 `D:\Ramdisk_Backup\20260828\`），数据实际上已 **100% 成功同步**；但用户在资源管理器中打开的是旧的物理目录 `E:\RamdiskBack`（存放 8/26、8/27 旧数据），误以为备份未生效；
+        2. **日志黑盒与缺乏明细**：原日志仅输出 `更新 1 个文件，未变动跳过 2 个`，未指明变动的文件（`sina_MultiIndex_data.h5` [140.5MB]）与目标路径，导致排查困难；
+        3. **盘中历史差异版本归档需求**：针对盘中多次差异变动覆盖问题，原生支持真正的多版本快照保留。
+    - [x] **三大核心能力落地升级**：
+        1. **⭐ 【推荐】差异快照版本归档 (`diff_snapshot`) 模式**：按日创建文件夹，每次文件发生差异变动同步时，除维护一份最新的标准文件外，自动生成一份带时间戳的历史差异快照（如 `sina_MultiIndex_data_112916.h5`），并支持 `max_snapshots_per_file`（默认 10 个）自动轮转清理老快照；
+        2. **Windows 盘符路径标准规范化 (`normalize_dir_path`)**：自动将 `G:` 转化为 `G:\`，杜绝 Windows 驱动器相对路径歧义；在安全原子替换后显式执行 `shutil.copystat` 锁定目标 `mtime`；
+        3. **全透明结构化日志与一键直达当天目录**：
+           - 同步日志清晰输出：`[11:29:16] 💾 [RamDisk Sync] 同步成功 (耗时 108ms): 更新 1 个 [sina_MultiIndex_data.h5 (140.5MB)] -> D:\Ramdisk_Backup\20260828\，未变动跳过 2 个 [tdx_last_df.h5, minute_kline_cache.pkl]`；
+           - UI 【📂 打开目录】按钮直接打开当天生效的快照子目录 `D:\Ramdisk_Backup\20260828\`；
+    - [x] **全量 10 项 RamDisk 同步单元测试 100% 全部 PASSED**。
+
 ## 2026-08-28 11:38
 - [x] **实现早盘集合竞价策略能力与关键信号向新股次新股模块全面同步 (`stock_standalone/ats/new_stock_fetcher.py`, `stock_standalone/ats/ui/new_stock_panel.py`, `stock_standalone/tests/test_new_stock_module.py`)**：
     - [x] **新股与次新股竞价信号同源判定**：
