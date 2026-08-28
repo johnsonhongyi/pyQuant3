@@ -519,7 +519,8 @@ class NewStockFetcher:
         for idx, row in df.iterrows():
             c = str(row["code"]).zfill(6)
             st = str(row.get("status", ""))
-            is_first_day = ("首日" in st) or ("N" in st)
+            nm = str(row.get("name", ""))
+            is_first_day = ("首日" in st) or ("N" in st) or ("N" in nm) or ("首日" in nm) or c.startswith("920")
             issue_p = safe_float(row.get("issue_price", 0.0))
 
             # 优先从本轮获取字典中取

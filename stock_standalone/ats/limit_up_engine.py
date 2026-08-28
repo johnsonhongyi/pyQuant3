@@ -680,7 +680,8 @@ class LimitUpEngine:
 
         # 3. 结合真实封板状态、多日历史归档、ch_bc2波谷周期与两日情绪推算标志性梯队与严格分层评分
         for r in records:
-            consecutive = self._calc_consecutive_boards(r["code"], r["is_limit_up"])
+            code_str = str(r.get("code", "")).strip().zfill(6)
+            consecutive = self._calc_consecutive_boards(code_str, r.get("is_limit_up", False))
             r["consecutive_boards"] = consecutive
 
             dff = _safe_float(r.get("dff", 0.0))

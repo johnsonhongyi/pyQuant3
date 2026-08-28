@@ -495,7 +495,10 @@ class TestNewStockModule(unittest.TestCase):
             }
         ]
 
-        with patch("ats.tdx_realtime_fetcher.TDXRealtimeFetcher.get_security_quotes_safe", return_value=quotes_mock):
+        from ats.tdx_realtime_fetcher import TDXRealtimeFetcher
+        tdx_inst = TDXRealtimeFetcher.get_instance()
+        with patch.object(tdx_inst, "get_security_quotes_safe", return_value=quotes_mock), \
+             patch.object(tdx_inst, "get_batch_finance_shares", return_value={"920288": (5000000.0, 20000000.0), "301666": (10000000.0, 40000000.0)}):
             res_df = fetcher.enrich_with_tdx_realtime(mock_df, force=True)
             self.assertIn("bidding_tag", res_df.columns)
             self.assertIn("bidding_advice", res_df.columns)
