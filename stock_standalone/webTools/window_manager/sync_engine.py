@@ -32,6 +32,20 @@ except ImportError:
 from . import core
 
 
+def normalize_dir_path(path_str: str) -> str:
+    """
+    规范化目录路径。
+    特别针对 Windows 盘符（如 'G:' 或 'g:'）转换为标准根路径 'G:\\'，杜绝相对路径歧义。
+    """
+    if not path_str:
+        return ""
+    p = os.path.expanduser(os.path.expandvars(str(path_str).strip()))
+    # 处理类似 "G:" 或 "g:" 的纯盘符
+    if len(p) == 2 and p[1] == ":" and p[0].isalpha():
+        return p.upper() + "\\"
+    return os.path.abspath(p)
+
+
 def detect_default_ramdisk_dir() -> str:
     """智能自动探测当前系统中的 RamDisk 物理路径"""
     # 1. 优先尝试从系统已加载的 commonTips 获取
@@ -39,7 +53,7 @@ def detect_default_ramdisk_dir() -> str:
         from JohnsonUtil import commonTips as cct
         ram_dir = cct.get_ramdisk_dir()
         if ram_dir and os.path.exists(ram_dir):
-            return ram_dir
+            return normalize_dir_path(ram_dir)
     except Exception:
         pass
 
@@ -58,12 +72,12 @@ def detect_default_ramdisk_dir() -> str:
     ]
     for c in candidates:
         if os.path.exists(c):
-            return os.path.abspath(c)
+            return normalize_dir_path(c)
 
     # 3. 环境变量探测
     env_ram = os.environ.get("RAMDISK_DIR")
     if env_ram and os.path.exists(env_ram):
-        return os.path.abspath(env_ram)
+        return normalize_dir_path(env_ram)
 
     # 4. 若均未探测到，返回推荐默认路径 D:\Ramdisk
     return r"D:\Ramdisk"
@@ -106,7 +120,9 @@ class RamDiskSyncConfig:
         self.sync_scope: str = "specific_files"  # "specific_files" (仅同步多选指定的具体文件) | "all_directory" (同步源目录下匹配通配符的所有文件)
         self.specific_files: List[str] = []
         self.file_patterns: List[str] = ["*.h5", "*.json", "*.pkl", "*.csv", "*.txt", "*.db", "*.parquet"]
-        self.backup_mode: str = "mirror"  # "mirror" (镜像覆盖) | "date_folder" (每日日期归档)
+        self.backup_mode: str = "mirror"  # "mirror" (镜像覆盖) | "date_folder" (每日日期归档) | "diff_snapshot" (差异快照版本归档)
+        self.keep_backup_days: int = 7  # 历史日期归档与差异快照保留天数 (0 表示永久保留，默认 7 天)
+        self.max_snapshots_per_file: int = 10  # diff_snapshot 模式下单文件同日最大保留版本数
         self.safe_copy_retry: int = 3
         self.safe_copy_retry_delay: float = 0.2
         self.atomic_swap: bool = True
@@ -138,10 +154,10 @@ class RamDiskSyncConfig:
         self.only_workdays = bool(loaded_data.get("only_workdays", True))
         
         src = loaded_data.get("source_dir", "")
-        self.source_dir = src if src else detect_default_ramdisk_dir()
+        self.source_dir = normalize_dir_path(src) if src else detect_default_ramdisk_dir()
         
         tgt = loaded_data.get("target_dir", "")
-        self.target_dir = tgt if tgt else detect_default_backup_dir()
+        self.target_dir = normalize_dir_path(tgt) if tgt else detect_default_backup_dir()
         
         self.sync_scope = loaded_data.get("sync_scope", "specific_files")
         self.specific_files = loaded_data.get("specific_files", [])
@@ -153,6 +169,8 @@ class RamDiskSyncConfig:
             self.file_patterns = ["*.h5", "*.json", "*.pkl", "*.csv", "*.txt", "*.db", "*.parquet"]
             
         self.backup_mode = loaded_data.get("backup_mode", "mirror")
+        self.keep_backup_days = max(0, int(loaded_data.get("keep_backup_days", 7)))
+        self.max_snapshots_per_file = max(1, int(loaded_data.get("max_snapshots_per_file", 10)))
         self.safe_copy_retry = int(loaded_data.get("safe_copy_retry", 3))
         self.safe_copy_retry_delay = float(loaded_data.get("safe_copy_retry_delay", 0.2))
         self.atomic_swap = bool(loaded_data.get("atomic_swap", True))
@@ -183,6 +201,8 @@ class RamDiskSyncConfig:
             "specific_files": self.specific_files,
             "file_patterns": self.file_patterns,
             "backup_mode": self.backup_mode,
+            "keep_backup_days": self.keep_backup_days,
+            "max_snapshots_per_file": self.max_snapshots_per_file,
             "safe_copy_retry": self.safe_copy_retry,
             "safe_copy_retry_delay": self.safe_copy_retry_delay,
             "atomic_swap": self.atomic_swap,
@@ -203,9 +223,9 @@ class RamDiskSyncConfig:
         if "only_workdays" in data:
             self.only_workdays = bool(data["only_workdays"])
         if "source_dir" in data:
-            self.source_dir = str(data["source_dir"])
+            self.source_dir = normalize_dir_path(str(data["source_dir"]))
         if "target_dir" in data:
-            self.target_dir = str(data["target_dir"])
+            self.target_dir = normalize_dir_path(str(data["target_dir"]))
         if "sync_scope" in data:
             self.sync_scope = str(data["sync_scope"])
         if "specific_files" in data and isinstance(data["specific_files"], list):
@@ -214,6 +234,10 @@ class RamDiskSyncConfig:
             self.file_patterns = data["file_patterns"]
         if "backup_mode" in data:
             self.backup_mode = str(data["backup_mode"])
+        if "keep_backup_days" in data:
+            self.keep_backup_days = max(0, int(data["keep_backup_days"]))
+        if "max_snapshots_per_file" in data:
+            self.max_snapshots_per_file = max(1, int(data["max_snapshots_per_file"]))
         if "safe_copy_retry" in data:
             self.safe_copy_retry = int(data["safe_copy_retry"])
         if "safe_copy_retry_delay" in data:
@@ -222,6 +246,18 @@ class RamDiskSyncConfig:
             self.atomic_swap = bool(data["atomic_swap"])
         if "log_enabled" in data:
             self.log_enabled = bool(data["log_enabled"])
+
+
+def format_file_size(size_bytes: int) -> str:
+    """格式化文件大小为易读字符串（如 140.5MB, 50.9KB）"""
+    if size_bytes < 1024:
+        return f"{size_bytes}B"
+    elif size_bytes < 1024 * 1024:
+        return f"{size_bytes / 1024:.1f}KB"
+    elif size_bytes < 1024 * 1024 * 1024:
+        return f"{size_bytes / (1024 * 1024):.1f}MB"
+    else:
+        return f"{size_bytes / (1024 * 1024 * 1024):.2f}GB"
 
 
 class RamDiskSyncEngine:
@@ -233,6 +269,21 @@ class RamDiskSyncEngine:
         self._synced_fingerprints: Dict[str, Tuple[float, int]] = {}
         self._last_sync_time: float = 0.0
         self._last_sync_result: Dict[str, Any] = {}
+
+    def get_effective_target_dir(self, dt: Optional[datetime.datetime] = None) -> str:
+        """
+        获取当前备份模式下实际生效的目标目录绝对路径。
+        例如：
+        - mirror: D:\\Ramdisk_Backup
+        - date_folder / diff_snapshot: D:\\Ramdisk_Backup\\20260828
+        """
+        if dt is None:
+            dt = datetime.datetime.now()
+        target_root = normalize_dir_path(self.config.target_dir) or detect_default_backup_dir()
+        if self.config.backup_mode in ["date_folder", "diff_snapshot"]:
+            today_str = dt.strftime("%Y%m%d")
+            return os.path.join(target_root, today_str)
+        return target_root
 
     def is_in_trading_time(self, dt: Optional[datetime.datetime] = None) -> Tuple[bool, str]:
         """
@@ -276,7 +327,7 @@ class RamDiskSyncEngine:
         扫描或获取待同步的文件列表（相对于源目录的相对路径）。
         支持多选指定文件模式 (specific_files) 与全目录扫描模式 (all_directory)。
         """
-        src_root = self.config.source_dir
+        src_root = normalize_dir_path(self.config.source_dir)
         if not src_root or not os.path.exists(src_root):
             return []
 
@@ -327,7 +378,8 @@ class RamDiskSyncEngine:
         判断单个文件是否有变动需要同步。
         返回: (has_changed: bool, reason: str)
         """
-        src_path = os.path.join(self.config.source_dir, rel_path)
+        src_root = normalize_dir_path(self.config.source_dir)
+        src_path = os.path.join(src_root, rel_path)
         dst_path = os.path.join(target_base_dir, rel_path)
 
         if not os.path.exists(src_path):
@@ -353,7 +405,7 @@ class RamDiskSyncEngine:
 
         # 大小发生变化
         if src_size != dst_size:
-            return True, f"文件大小变化 ({dst_size} -> {src_size} bytes)"
+            return True, f"文件大小变化 ({format_file_size(dst_size)} -> {format_file_size(src_size)})"
 
         # 源文件修改时间显著晚于目标文件（允许 0.9s 跨文件系统/FAT/NTFS 精度误差）
         if src_mtime - dst_mtime > 0.9:
@@ -365,6 +417,85 @@ class RamDiskSyncEngine:
             return True, "内存指纹变动"
 
         return False, "无变化 (指纹完全一致)"
+
+    def clean_expired_backup_folders(self, target_base_dir: Optional[str] = None) -> List[str]:
+        """
+        根据 keep_backup_days 配置清理过期的历史日期归档目录（如 20260815）。
+        仅在 backup_mode 为 'date_folder' 或 'diff_snapshot' 且 keep_backup_days > 0 时执行。
+        返回被清理的目录名称列表。
+        """
+        if self.config.backup_mode not in ["date_folder", "diff_snapshot"]:
+            return []
+        
+        keep_days = getattr(self.config, "keep_backup_days", 7)
+        if keep_days <= 0:
+            return []
+
+        target_root = normalize_dir_path(target_base_dir or self.config.target_dir) or detect_default_backup_dir()
+        if not target_root or not os.path.exists(target_root):
+            return []
+
+        today = datetime.date.today()
+        cleaned_dirs = []
+
+        try:
+            for item in os.listdir(target_root):
+                item_path = os.path.join(target_root, item)
+                if not os.path.isdir(item_path):
+                    continue
+                # 判断是否为 8 位纯数字日期目录 YYYYMMDD
+                if len(item) == 8 and item.isdigit():
+                    try:
+                        folder_year = int(item[0:4])
+                        folder_month = int(item[4:6])
+                        folder_day = int(item[6:8])
+                        folder_date = datetime.date(folder_year, folder_month, folder_day)
+                        days_diff = (today - folder_date).days
+                        if days_diff > keep_days:
+                            shutil.rmtree(item_path, ignore_errors=True)
+                            cleaned_dirs.append(item)
+                    except Exception:
+                        pass
+        except Exception as e:
+            print(f"[RamDiskSyncEngine] 清理过期备份目录异常: {e}", file=sys.stderr)
+
+        return cleaned_dirs
+
+    def _rotate_diff_snapshots(self, target_base_dir: str, rel_path: str, max_keep: int = 10):
+        """
+        清理超出最大保留数量的历史差异快照。
+        """
+        if max_keep <= 0:
+            return
+        dst_full = os.path.join(target_base_dir, rel_path)
+        dst_dir = os.path.dirname(dst_full)
+        stem, ext = os.path.splitext(os.path.basename(rel_path))
+        prefix = f"{stem}_"
+
+        try:
+            if not os.path.exists(dst_dir):
+                return
+            snapshot_files = []
+            for f in os.listdir(dst_dir):
+                if f.startswith(prefix) and f.endswith(ext) and f != os.path.basename(rel_path):
+                    p = os.path.join(dst_dir, f)
+                    if os.path.isfile(p):
+                        try:
+                            snapshot_files.append((p, os.path.getmtime(p)))
+                        except Exception:
+                            pass
+
+            # 按修改时间从新到旧排序
+            snapshot_files.sort(key=lambda x: x[1], reverse=True)
+            # 超出上限的旧快照予以删除
+            if len(snapshot_files) > max_keep:
+                for old_p, _ in snapshot_files[max_keep:]:
+                    try:
+                        os.remove(old_p)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
 
     def safe_copy_file(self, src_path: str, dst_path: str) -> Tuple[bool, str]:
         """
@@ -405,6 +536,12 @@ class RamDiskSyncEngine:
                 if self.config.atomic_swap and tmp_dst != dst_path:
                     os.replace(tmp_dst, dst_path)
 
+                # 确保替换后的目标文件 mtime 严格与源文件一致
+                try:
+                    shutil.copystat(src_path, dst_path)
+                except Exception:
+                    pass
+
                 return True, "OK"
 
             except (PermissionError, OSError) as e:
@@ -442,7 +579,11 @@ class RamDiskSyncEngine:
         result = {
             "status": "ok",
             "timestamp": timestamp_str,
-            "synced_files": [],
+            "effective_target": "",
+            "synced_files": [],               # 纯相对路径列表，如 ["sina_MultiIndex_data.h5"]
+            "synced_files_display": [],       # 包含文件名与大小，如 ["sina_MultiIndex_data.h5 (140.5MB)"]
+            "synced_file_names": [],          # 纯文件名列表，如 ["sina_MultiIndex_data.h5"]
+            "skipped_files": [],              # 跳过文件名列表，如 ["tdx_last_df.h5 (无变动)"]
             "skipped_count": 0,
             "failed_files": [],
             "message": "",
@@ -467,28 +608,22 @@ class RamDiskSyncEngine:
                 return result
 
         # 3. 检查源目录是否存在
-        src_root = self.config.source_dir
+        src_root = normalize_dir_path(self.config.source_dir)
         if not src_root or not os.path.exists(src_root):
             result["status"] = "error"
             result["message"] = f"源目录不存在: {src_root}"
             self._last_sync_result = result
             return result
 
-        # 4. 确定目标目录（支持 mirror 与 date_folder 模式）
-        target_root = self.config.target_dir
-        if not target_root:
-            target_root = detect_default_backup_dir()
-
-        if self.config.backup_mode == "date_folder":
-            today_str = now_dt.strftime("%Y%m%d")
-            effective_target = os.path.join(target_root, today_str)
-        else:
-            effective_target = target_root
+        # 4. 确定实际生效的目标目录
+        effective_target = self.get_effective_target_dir(now_dt)
+        result["effective_target"] = effective_target
+        os.makedirs(effective_target, exist_ok=True)
 
         # 5. 扫描源文件并逐一比对指纹
         matched_files = self.scan_source_files()
         if not matched_files:
-            result["message"] = "源目录下无匹配的文件"
+            result["message"] = f"源目录 ({src_root}) 下无匹配的待同步文件"
             result["duration_ms"] = round((time.time() - start_time) * 1000, 2)
             self._last_sync_result = result
             return result
@@ -496,6 +631,13 @@ class RamDiskSyncEngine:
         for rel_p in matched_files:
             src_full = os.path.join(src_root, rel_p)
             dst_full = os.path.join(effective_target, rel_p)
+
+            # 获取源文件大小描述
+            try:
+                stat_tmp = os.stat(src_full)
+                sz_str = format_file_size(stat_tmp.st_size)
+            except Exception:
+                sz_str = ""
 
             # 判断是否有变动
             if force:
@@ -506,9 +648,10 @@ class RamDiskSyncEngine:
 
             if not changed:
                 result["skipped_count"] += 1
+                result["skipped_files"].append(f"{os.path.basename(rel_p)} ({change_reason})")
                 continue
 
-            # 执行安全原子复制
+            # 执行主目标文件安全原子复制
             success, err_msg = self.safe_copy_file(src_full, dst_full)
             if success:
                 try:
@@ -516,24 +659,53 @@ class RamDiskSyncEngine:
                     self._synced_fingerprints[rel_p] = (stat.st_mtime, stat.st_size)
                 except Exception:
                     pass
-                result["synced_files"].append(rel_p)
-            else:
-                result["failed_files"].append((rel_p, err_msg))
 
-        # 6. 整理汇总信息
+                # 若启用 diff_snapshot 差异快照版本归档模式，同时保留一份带时间戳的历史快照
+                if self.config.backup_mode == "diff_snapshot":
+                    stem, ext = os.path.splitext(rel_p)
+                    time_tag = now_dt.strftime("%H%M%S")
+                    snap_rel = f"{stem}_{time_tag}{ext}"
+                    snap_dst = os.path.join(effective_target, snap_rel)
+                    self.safe_copy_file(src_full, snap_dst)
+                    # 轮转清理超额旧快照
+                    self._rotate_diff_snapshots(effective_target, rel_p, max_keep=self.config.max_snapshots_per_file)
+
+                display_desc = f"{os.path.basename(rel_p)} ({sz_str})" if sz_str else os.path.basename(rel_p)
+                result["synced_files"].append(rel_p)
+                result["synced_files_display"].append(display_desc)
+                result["synced_file_names"].append(os.path.basename(rel_p))
+            else:
+                result["failed_files"].append((os.path.basename(rel_p), err_msg))
+
+        # 6. 整理清晰透明的汇总日志并清理超期历史日期归档
         duration = round((time.time() - start_time) * 1000, 2)
         result["duration_ms"] = duration
         self._last_sync_time = time.time()
 
+        # 触发超期历史归档文件夹清理
+        cleaned_dirs = self.clean_expired_backup_folders()
+        result["cleaned_expired_dirs"] = cleaned_dirs
+
+        synced_desc = ", ".join(result["synced_files_display"])
+        skipped_names = [f.split()[0] for f in result["skipped_files"]]
+        skipped_desc = ", ".join(skipped_names)
+        clean_msg = f" (已清理 {len(cleaned_dirs)} 个超期历史归档: {', '.join(cleaned_dirs)})" if cleaned_dirs else ""
+
         if result["failed_files"]:
             result["status"] = "error" if not result["synced_files"] else "partial"
-            result["message"] = f"同步完成 (耗时 {duration}ms): 成功 {len(result['synced_files'])} 个，失败 {len(result['failed_files'])} 个，未变动跳过 {result['skipped_count']} 个。"
+            result["message"] = (
+                f"同步完成 (耗时 {duration}ms): 成功 {len(result['synced_files'])} 个 [{synced_desc}] -> {effective_target}，"
+                f"失败 {len(result['failed_files'])} 个，未变动跳过 {result['skipped_count']} 个{clean_msg}。"
+            )
         elif result["synced_files"]:
             result["status"] = "ok"
-            result["message"] = f"同步成功 (耗时 {duration}ms): 更新 {len(result['synced_files'])} 个文件，未变动跳过 {result['skipped_count']} 个。"
+            msg_tail = f"，未变动跳过 {result['skipped_count']} 个 [{skipped_desc}]" if skipped_names else ""
+            result["message"] = (
+                f"同步成功 (耗时 {duration}ms): 更新 {len(result['synced_files'])} 个 [{synced_desc}] -> {effective_target}{msg_tail}{clean_msg}。"
+            )
         else:
             result["status"] = "ok"
-            result["message"] = f"巡检完成 (耗时 {duration}ms): 所有 {result['skipped_count']} 个文件均无变化，已跳过 I/O。"
+            result["message"] = f"巡检完成 (耗时 {duration}ms): 所有 {result['skipped_count']} 个文件 [{skipped_desc}] 均无变化，已跳过 I/O{clean_msg}。"
 
         self._last_sync_result = result
         return result
@@ -549,6 +721,8 @@ class RamDiskSyncEngine:
                 "status": "disabled",
                 "message": "RamDisk 自动同步未启用",
                 "synced_files": [],
+                "synced_file_names": [],
+                "skipped_files": [],
                 "skipped_count": 0,
                 "failed_files": []
             }
@@ -556,7 +730,7 @@ class RamDiskSyncEngine:
         # 执行不受交易时间限制的增量同步
         result = self.sync_once(force=False, ignore_time_filter=True)
         if result.get("synced_files"):
-            result["message"] = f"启动初检初始化完成: 发现并同步补全了 {len(result['synced_files'])} 个目标缺失/变动文件。"
+            result["message"] = f"启动初检初始化完成: 发现并同步补全了 {len(result['synced_files'])} 个目标缺失/变动文件 [{', '.join(result['synced_files'])}] -> {result.get('effective_target', '')}。"
         elif result.get("status") == "ok":
             result["message"] = f"启动初检完成: 目标备份位置数据完整且与源目录一致 (共核验 {result.get('skipped_count', 0)} 个文件)。"
         return result
