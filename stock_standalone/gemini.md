@@ -1,3 +1,13 @@
+## 2026-08-28 10:10
+- [x] **彻底修复新股次新股自动刷新失效与数据锁死在静态旧缓存的 Bug (`stock_standalone/ats/new_stock_fetcher.py`, `stock_standalone/tests/test_new_stock_module.py`)**：
+    - [x] **精准锁定 Bug 根本原因**：
+        - 昨天在 commit `cef1b1d` 性能优化时，误删了 `NewStockFetcher.get_combined_new_stocks` 中的 TTL 缓存过期检测条件 `and (now - self._last_fetch_time < self._cache_ttl_seconds)`，导致非强制刷新时永久返回启动时的静态 DataFrame；
+        - 新股面板的 3 秒定时器 `_on_auto_timer_tick` 调用的即为 `force_refresh=False`，导致后台 Worker 每次都在 0ms 瞬间拿到旧数据返回，不再请求 TDX 实时行情；
+    - [x] **原貌精准复原（0 额外逻辑变动）**：
+        - 100% 恢复原有 TTL 缓存判定逻辑，在 2.0 秒内复用缓存，超出 2.0 秒自动触发 TDX 权威实时行情拉取与指标计算；
+        - 不改动任何其他原有逻辑，确保冷启动 0 阻塞与 3 秒自动刷新无缝协同；
+    - [x] **自动化测试 100% PASSED**：全量测试套件（新股模块 9 项、板块与聚合 18 项）全部通过。
+
 ## 2026-08-27 22:20
 - [x] **优化 RamDisk 启动初检日志去重与唤醒状态呈现（`webTools/window_manager/sync_engine.py`, `gemini.md`）**：
     - [x] **消除启动初检重复派发**：在 `RamDiskSyncWorker.run` 中移除了初检结果的多余 `emit_status` 调用，由 `sync_completed` 统一结构化汇报，彻底消除启动时重复输出两条初检日志的问题；
