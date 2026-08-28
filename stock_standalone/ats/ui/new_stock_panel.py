@@ -721,6 +721,12 @@ class NewStockPanel(QWidget):
                             self.df_data.at[idx, c_name] = ipc_row.get(k)
                             break
 
+                # 7. 同步天梯或 IPC 传入的竞价信号（若本地尚未打上时补充）
+                if "bidding_tag" not in self.df_data.columns or str(self.df_data.at[idx, "bidding_tag"]).strip() in ("", "--", "nan"):
+                    tag_cand = ipc_row.get("bidding_tag", ipc_row.get("tier_tag", ipc_row.get("order_intent", None)))
+                    if tag_cand and str(tag_cand).strip() not in ("", "--", "nan"):
+                        self.df_data.at[idx, "bidding_tag"] = str(tag_cand)
+
                 updated_any = True
 
         if updated_any or not self.df_data.empty:
