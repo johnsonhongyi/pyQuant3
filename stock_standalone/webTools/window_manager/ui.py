@@ -1212,10 +1212,10 @@ class RouteConfigDialog(QDialog):
         route_layout.addWidget(self.chk_enabled)
         
         routing_cfg = self.config_manager.config_data.get("routing_config", {})
-        enabled = routing_cfg.get("enabled", True)
-        dest = routing_cfg.get("destination", "192.168.50.0")
+        enabled = routing_cfg.get("enabled", False)
+        dest = routing_cfg.get("destination", "")
         mask = routing_cfg.get("mask", "255.255.255.0")
-        gw = routing_cfg.get("gateway", "192.168.1.2")
+        gw = routing_cfg.get("gateway", "")
         
         self.chk_enabled.setChecked(enabled)
         
