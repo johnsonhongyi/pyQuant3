@@ -1,3 +1,46 @@
+## 2026-08-29 23:18
+- [x] **彻底根治 Treeview `<Configure>` 连环死循环递归萎缩 Bug 与重构健壮黄金列宽规范体系 (`stock_standalone/popularity_resonance_gui.py`, `stock_standalone/popularity_resonance_config.json`, `stock_standalone/tests/test_popularity_resonance_features.py`)**：
+    - [x] **定位死循环递归萎缩底层元凶**：
+        - 原 `_adjust_tree_column_widths` 在 `<Configure>` 事件中强行改写 `tree.column(width=...)`，而修改列宽又会反向触发 Treeview 的 `<Configure>` 事件形成死循环震荡；
+        - 导致列宽在几次事件中连环萎缩至下限（24~28px），表头文字被严重截断（`买压/`、`逆势偏`、`挂单`、`df`、`Ra`）且污染了配置文件；
+    - [x] **实施物理剥离与健康加固**：
+        - 彻底移除 `tree.bind("<Configure>")` 递归修改逻辑，让 Treeview 利用原生的 `stretch=True/False` 与 `minwidth` 进行自然排版；
+        - 建立 `MIN_COLUMN_WIDTHS` 最小安全宽度保护底线，并提供自动清洗异常列宽机制；
+        - 用户拖拽单列（`<ButtonRelease-1>`）时仅精准同步被修改的单列，杜绝全局脏覆盖；
+        - 升级 `reset_sash_center` 一键恢复黄金列宽与 50% 居中，物理清洗 `popularity_resonance_config.json`；
+    - [x] **全量 25 项跨模块自动化回归测试 100% 全部 PASSED**。
+
+## 2026-08-29 23:10
+- [x] **实现人气共振中间垂直分隔栏一键 50% 绝对精准居中对齐与多入口触发体系 (`stock_standalone/popularity_resonance_gui.py`, `stock_standalone/tests/test_popularity_resonance_features.py`)**：
+    - [x] **一键精准居中核心算法 (`reset_sash_center`)**：
+        - 自动重置 `sash_ratio = 0.5` 并原子持久化落盘，彻底解决手动拖动无法像素级居中的痛点；
+        - 毫秒级约束 `sash_place(0, int(width * 0.5), 0)` 并触发所有子表格按 50% 宽度等比例平滑对齐；
+    - [x] **三大极速交互触发入口**：
+        - **顶部工具栏**：新增绿色 **`⚖️ 居中`** 专属按钮；
+        - **分隔栏双击**：鼠标在中间垂直分隔栏上双击（`<Double-Button-1>`）瞬间自动复位居中；
+        - **右键菜单**：各表格右键菜单新增 **`⚖️ 垂直分隔栏居中 (50%)`** 菜单项；
+    - [x] **全量 25 项跨模块自动化回归测试 100% 全部 PASSED**。
+
+## 2026-08-29 23:05
+- [x] **实现人气表格列宽等比例自适应缩放引擎与中间垂直分隔栏精准对称居中对齐 (`stock_standalone/popularity_resonance_gui.py`, `stock_standalone/tests/test_popularity_resonance_features.py`)**：
+    - [x] **列宽等比例自适应缩放算法 (Proportional Column Auto-Scale)**：
+        - 窗口无论最大化放大还是还原缩小时，依据各列基准宽度与单侧可用宽度动态计算 `scale = usable_width / total_base_width`，进行平滑等比例自适应缩放；
+        - 单侧表格总宽度永远精准匹配分栏宽度，绝对不会发生多余像素溢出推挤中间分隔栏；
+    - [x] **垂直分隔栏精准对称居中防跑偏**：
+        - 窗口缩放或恢复时实时约束 `sash_place(0, int(width * ratio), 0)`（默认 50%），消除单侧撑爆跑偏；
+        - 四个象限表格水平与垂直中线永远严格对齐，表头文字舒展清晰，绝不再变形挤压；
+    - [x] **全量 25 项跨模块自动化回归测试 100% 全部 PASSED**。
+
+## 2026-08-29 22:58
+- [x] **实现人气共振多表格列宽调整毫秒级跨窗口同步广播与统一持久化落盘 (`stock_standalone/popularity_resonance_gui.py`, `stock_standalone/tests/test_popularity_resonance_features.py`)**：
+    - [x] **拖动表头分隔线多表格同步联动**：
+        - 监听 Treeview `<ButtonRelease-1>` 拖动释放事件；
+        - 用户在东财、同花顺、龙虎榜、淘股吧、共振榜中任一表格调整某一列宽时，毫秒级将最新列宽广播应用到所有其他子表格及板块弹窗；
+    - [x] **统一持久化列宽配置与消除暴力冲刷**：
+        - 彻底废除 `_adjust_tree_column_widths` 对用户列宽的暴力覆盖，列宽配置自动原子保存到 `popularity_resonance_config.json` 的 `column_widths` 字典中；
+        - 窗口重绘与下次冷启动时，100% 恢复用户调整的专属列宽，表头文字不再挤压变形；
+    - [x] **全量 25 项跨模块自动化回归测试 100% 全部 PASSED**。
+
 ## 2026-08-29 22:52
 - [x] **深度排查并彻底清除 `popularity_resonance_gui.py` 的 `setup_ui` 中残留的 `<space>` 挂单绑定 (`stock_standalone/popularity_resonance_gui.py`, `stock_standalone/tests/test_popularity_resonance_features.py`)**：
     - [x] **定位残留元凶**：在 `setup_ui`（第 1633 行）中存在遗留的 `self.root.bind("<space>", self.on_quick_order)`，导致界面初始化时又将空格键重新绑定为挂单事件；
