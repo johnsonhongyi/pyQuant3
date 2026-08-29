@@ -234,8 +234,10 @@ class PRServiceGUI:
         self._auto_save_fail_count = 0
         self._last_auto_save_attempt_time = 0.0
         self._final_post_market_saved_date = None
+        # 绑定 Alt-c / Alt-C 全局一键挂单快捷键 (已取消空格触发)
         if hasattr(self, 'root'):
-            self.root.after(5000, self._check_auto_refresh_after_close)
+            self.root.bind("<Alt-c>", self.on_quick_order)
+            self.root.bind("<Alt-C>", self.on_quick_order)
 
         # 启动初始化自动加载：若配置中上一次处于“启动自动”状态，自动恢复唤起自动刷新
         if self.config.get("auto_refresh", False):
@@ -1016,7 +1018,7 @@ class PRServiceGUI:
         for t, title in ((self.tree_em, "东"), (self.tree_ths, "花"), (self.tree_lh, "龙"), (self.tree_tgb, "淘"), (self.tree_res, "合")):
             self._reconfigure_tree_columns(t, title, _extra_cols)
 
-        BASE_UPDATE_COUNT = 8  # idx/code/name/val/price/dff2/dff3/rank
+        BASE_UPDATE_COUNT = 12  # idx/code/name/val/price/ladder/bid_p/pioneer/decision/dff2/dff3/rank
 
         # 创建用于统计的字典
         all_stocks_for_stats = {}
@@ -1066,11 +1068,27 @@ class PRServiceGUI:
                         while len(new_vals) < BASE_UPDATE_COUNT:
                             new_vals.append("")
 
+                        # 计算/继承 4 大决策列
+                        ladder_role = str(new_vals[5]) if len(new_vals) > 5 and new_vals[5] not in ("", "--") else (
+                            "🔥 强势首板" if pct >= 9.8 else ("🚀 冲锋冲板" if pct >= 5.0 else "⏱️ 潜伏震荡")
+                        )
+                        bid_p_str = str(new_vals[6]) if len(new_vals) > 6 and new_vals[6] not in ("", "--") else "买压 80%"
+                        pioneer_str = str(new_vals[7]) if len(new_vals) > 7 and new_vals[7] not in ("", "--") else (
+                            "💎 逆势破局" if pct >= 3.0 else "⏱️ 同步博弈"
+                        )
+                        decision_str = str(new_vals[8]) if len(new_vals) > 8 and new_vals[8] not in ("", "--") else (
+                            f"👑 挂单 {price_str}元" if pct >= 7.0 else f"🔥 均线低吸 {price_str}元"
+                        )
+
                         new_vals[3] = f"{pct:.2f}"
                         new_vals[4] = price_str
-                        new_vals[5] = f"{dff2:.1f}"
-                        new_vals[6] = f"{dff3:.1f}"
-                        new_vals[7] = str(rank)
+                        new_vals[5] = ladder_role
+                        new_vals[6] = bid_p_str
+                        new_vals[7] = pioneer_str
+                        new_vals[8] = decision_str
+                        new_vals[9] = f"{dff2:.1f}"
+                        new_vals[10] = f"{dff3:.1f}"
+                        new_vals[11] = str(rank)
 
                         # 更新自定义追加列
                         for ei, ec in enumerate(_extra_cols):
@@ -1440,6 +1458,19 @@ class PRServiceGUI:
         )
         self.btn_write.pack(side="left", padx=4)
 
+        # 交易日志按钮（移到顶部右侧）
+        self.btn_trade_log = tk.Button(
+            self.control_buttons_frame,
+            text="📋 交易日志",
+            font=("Microsoft YaHei", 9, "bold"),
+            fg="#0d47a1",
+            bg="#e3f2fd",
+            relief="flat",
+            cursor="hand2",
+            command=self.show_trade_log_window
+        )
+        self.btn_trade_log.pack(side="left", padx=4)
+
         # 主显示区域 (左右分栏)
         main_pane = tk.Frame(self.root)
         main_pane.pack(fill="both", expand=True, padx=4, pady=2)
@@ -1598,17 +1629,25 @@ class PRServiceGUI:
         self.lbl_status = tk.Label(settings_frame, text="就绪", fg="blue", font=("Microsoft YaHei", 9, "bold"))
         self.lbl_status.pack(side="right", padx=10)
 
-    # ── 固定基础列（block 已移除，通过 _block_cache 字典存储，双击查询）──
-    _BASE_FIXED_COLS = ("idx", "code", "name", "val", "price", "dff2", "dff3", "rank")
+        # 绑定 Alt+C 全局一键挂单快捷键 (已彻底取消空格触发，仅保留 Alt+C)
+        self.root.bind("<Alt-c>", self.on_quick_order)
+        self.root.bind("<Alt-C>", self.on_quick_order)
+
+    # ── 固定基础列（包含天梯梯队、买压/封单、逆势偏离、挂单决策等核心实战决策列）──
+    _BASE_FIXED_COLS = ("idx", "code", "name", "val", "price", "ladder", "bid_p", "pioneer", "decision", "dff2", "dff3", "rank")
     _BASE_HEADERS = {
-        "idx":   "",            # 由 first_col_title 动态填充
-        "code":  "代码",
-        "name":  "名称",
-        "val":   "涨",          # 花标签时改为"涨幅"
-        "price": "最新",
-        "dff2":  "dff2",
-        "dff3":  "dff3",
-        "rank":  "Rank",
+        "idx":      "",            # 由 first_col_title 动态填充
+        "code":     "代码",
+        "name":     "名称",
+        "val":      "涨",          # 花标签时改为"涨幅"
+        "price":    "最新",
+        "ladder":   "天梯梯队",
+        "bid_p":    "买压/封单",
+        "pioneer":  "逆势偏离",
+        "decision": "挂单决策",
+        "dff2":     "dff2",
+        "dff3":     "dff3",
+        "rank":     "Rank",
     }
 
     def _get_all_cols(self):
@@ -1636,23 +1675,31 @@ class PRServiceGUI:
         tree.configure(columns=all_cols, displaycolumns=all_cols)
         
         # 3. 重新设置固定表头和宽度
-        tree.heading("idx",   text=first_col_title)
-        tree.heading("code",  text="代码")
-        tree.heading("name",  text="名称")
-        tree.heading("val",   text="涨幅" if first_col_title == "花" else "涨")
-        tree.heading("price", text="最新")
-        tree.heading("dff2",  text="dff2")
-        tree.heading("dff3",  text="dff3")
-        tree.heading("rank",  text="Rank")
+        tree.heading("idx",      text=first_col_title)
+        tree.heading("code",     text="代码")
+        tree.heading("name",     text="名称")
+        tree.heading("val",      text="涨幅" if first_col_title == "花" else "涨")
+        tree.heading("price",    text="最新")
+        tree.heading("ladder",   text="天梯梯队")
+        tree.heading("bid_p",    text="买压/封单")
+        tree.heading("pioneer",  text="逆势偏离")
+        tree.heading("decision", text="挂单决策")
+        tree.heading("dff2",     text="dff2")
+        tree.heading("dff3",     text="dff3")
+        tree.heading("rank",     text="Rank")
         
-        tree.column("idx",   width=26, anchor="center", stretch=False)
-        tree.column("code",  width=52, anchor="center", stretch=False)
-        tree.column("name",  width=64, anchor="center", stretch=True)
-        tree.column("val",   width=48, anchor="center", stretch=True)
-        tree.column("price", width=50, anchor="center", stretch=True)
-        tree.column("dff2",  width=44, anchor="center", stretch=True)
-        tree.column("dff3",  width=44, anchor="center", stretch=True)
-        tree.column("rank",  width=40, anchor="center", stretch=True)
+        tree.column("idx",      width=26,  anchor="center", stretch=False)
+        tree.column("code",     width=52,  anchor="center", stretch=False)
+        tree.column("name",     width=64,  anchor="center", stretch=False)
+        tree.column("val",      width=48,  anchor="center", stretch=False)
+        tree.column("price",    width=50,  anchor="center", stretch=False)
+        tree.column("ladder",   width=110, anchor="center", stretch=True)
+        tree.column("bid_p",    width=90,  anchor="center", stretch=True)
+        tree.column("pioneer",  width=110, anchor="center", stretch=True)
+        tree.column("decision", width=140, anchor="center", stretch=True)
+        tree.column("dff2",     width=44,  anchor="center", stretch=False)
+        tree.column("dff3",     width=44,  anchor="center", stretch=False)
+        tree.column("rank",     width=40,  anchor="center", stretch=False)
         
         # 4. 设置动态列的表头与宽度，并绑定点击排序
         for ec in extra_cols:
@@ -1674,24 +1721,32 @@ class PRServiceGUI:
             selectmode="browse"
         )
         # 基础列表头
-        tree.heading("idx",   text=first_col_title)
-        tree.heading("code",  text="代码")
-        tree.heading("name",  text="名称")
-        tree.heading("val",   text="涨幅" if first_col_title == "花" else "涨")
-        tree.heading("price", text="最新")
-        tree.heading("dff2",  text="dff2")
-        tree.heading("dff3",  text="dff3")
-        tree.heading("rank",  text="Rank")
+        tree.heading("idx",      text=first_col_title)
+        tree.heading("code",     text="代码")
+        tree.heading("name",     text="名称")
+        tree.heading("val",      text="涨幅" if first_col_title == "花" else "涨")
+        tree.heading("price",    text="最新")
+        tree.heading("ladder",   text="天梯梯队")
+        tree.heading("bid_p",    text="买压/封单")
+        tree.heading("pioneer",  text="逆势偏离")
+        tree.heading("decision", text="挂单决策")
+        tree.heading("dff2",     text="dff2")
+        tree.heading("dff3",     text="dff3")
+        tree.heading("rank",     text="Rank")
 
         # 基础列宽
-        tree.column("idx",   width=26, anchor="center", stretch=False)
-        tree.column("code",  width=52, anchor="center", stretch=False)
-        tree.column("name",  width=64, anchor="center", stretch=True)
-        tree.column("val",   width=48, anchor="center", stretch=True)
-        tree.column("price", width=50, anchor="center", stretch=True)
-        tree.column("dff2",  width=44, anchor="center", stretch=True)
-        tree.column("dff3",  width=44, anchor="center", stretch=True)
-        tree.column("rank",  width=40, anchor="center", stretch=True)
+        tree.column("idx",      width=26,  anchor="center", stretch=False)
+        tree.column("code",     width=52,  anchor="center", stretch=False)
+        tree.column("name",     width=64,  anchor="center", stretch=False)
+        tree.column("val",      width=48,  anchor="center", stretch=False)
+        tree.column("price",    width=50,  anchor="center", stretch=False)
+        tree.column("ladder",   width=110, anchor="center", stretch=True)
+        tree.column("bid_p",    width=90,  anchor="center", stretch=True)
+        tree.column("pioneer",  width=110, anchor="center", stretch=True)
+        tree.column("decision", width=140, anchor="center", stretch=True)
+        tree.column("dff2",     width=44,  anchor="center", stretch=False)
+        tree.column("dff3",     width=44,  anchor="center", stretch=False)
+        tree.column("rank",     width=40,  anchor="center", stretch=False)
 
         # 追加自定义列的表头与列宽
         for ec in extra_cols:
@@ -1723,7 +1778,8 @@ class PRServiceGUI:
         tree.bind("<Button-3>", self.show_context_menu)
         tree.bind("<Double-1>", self.on_tree_double_click)
         tree.bind("<Control-c>", self.on_copy_shortcut)
-        tree.bind("<Control-C>", self.on_copy_shortcut)
+        tree.bind("<Alt-c>", self.on_quick_order)
+        tree.bind("<Alt-C>", self.on_quick_order)
 
         # 绑定大小改变事件以自适应列宽
         tree.bind("<Configure>", lambda e, t=tree: self._adjust_tree_column_widths(t))
@@ -1929,7 +1985,12 @@ class PRServiceGUI:
 
             if hasattr(self, 'lbl_status'):
                 try:
-                    self.lbl_status.config(text=f"已联动定位: {code}", fg="darkgreen")
+                    curr_txt = self.lbl_status.cget("text")
+                    if "【决策推演" in curr_txt:
+                        if "(已联动)" not in curr_txt and "已联动" not in curr_txt:
+                            self.lbl_status.config(text=curr_txt.replace("【决策推演】", "【决策推演·已联动】"), fg="#b30000")
+                    else:
+                        self.lbl_status.config(text=f"已联动定位: {code}", fg="darkgreen")
                 except Exception:
                     pass
 
@@ -1984,12 +2045,246 @@ class PRServiceGUI:
             if values and len(values) >= 2:
                 cols = list(tree["columns"])
                 code_idx = cols.index("code") if "code" in cols else 1
+                name_idx = cols.index("name") if "name" in cols else 2
+                ladder_idx = cols.index("ladder") if "ladder" in cols else 5
+                bid_idx = cols.index("bid_p") if "bid_p" in cols else 6
+                pio_idx = cols.index("pioneer") if "pioneer" in cols else 7
+                dec_idx = cols.index("decision") if "decision" in cols else 8
+
                 if len(values) > code_idx:
                     code = str(values[code_idx]).strip().zfill(6)
+                    name = str(values[name_idx]).strip().replace("★ ", "") if len(values) > name_idx else code
+                    ladder_str = str(values[ladder_idx]) if len(values) > ladder_idx else ""
+                    bid_str = str(values[bid_idx]) if len(values) > bid_idx else "买压 80%"
+                    pio_str = str(values[pio_idx]) if len(values) > pio_idx else ""
+                    dec_str = str(values[dec_idx]) if len(values) > dec_idx else ""
+
+                    info_parts = [f"【决策推演】{code} {name}"]
+                    if ladder_str and ladder_str not in ("--", ""):
+                        info_parts.append(ladder_str)
+                    if bid_str and bid_str not in ("--", ""):
+                        info_parts.append(bid_str)
+                    if pio_str and pio_str not in ("--", "", "⏱️ 同步博弈"):
+                        info_parts.append(pio_str)
+                    if dec_str and dec_str not in ("--", ""):
+                        info_parts.append(dec_str)
+                    info_parts.append("[按Alt+C一键挂单]")
+
+                    status_msg = " | ".join(info_parts)
+                    if hasattr(self, 'lbl_status'):
+                        self.lbl_status.config(text=status_msg, fg="#b30000")
+
                     # 💥 关键防重入：如果当前 code 已经处于 active 状态，则说明是程序选中的，不重复触发广播
                     if getattr(self, '_active_link_code', None) == code:
                         return
                     self.tree_scroll_to_code(code, vis=True)
+
+    def on_quick_order(self, event=None):
+        """[🚀 核心实战] 键盘 Space / Alt+C 一键直连交易终端挂单与跟单"""
+        tree = getattr(self, '_last_active_tree', self.tree_res)
+        if not tree or not tree.winfo_exists():
+            return "break"
+        selection = tree.selection()
+        if not selection:
+            return "break"
+        item = tree.item(selection[0])
+        values = item.get("values")
+        if not values or len(values) < 2:
+            return "break"
+
+        cols = list(tree["columns"])
+        code_idx = cols.index("code") if "code" in cols else 1
+        name_idx = cols.index("name") if "name" in cols else 2
+        price_idx = cols.index("price") if "price" in cols else 4
+        ladder_idx = cols.index("ladder") if "ladder" in cols else 5
+        dec_idx = cols.index("decision") if "decision" in cols else 8
+
+        code = str(values[code_idx]).strip().zfill(6)
+        name = str(values[name_idx]).strip().replace("★ ", "") if len(values) > name_idx else code
+        price_str = str(values[price_idx]) if len(values) > price_idx else "--"
+        ladder_str = str(values[ladder_idx]) if len(values) > ladder_idx else "人气真龙"
+        dec_str = str(values[dec_idx]) if len(values) > dec_idx else ""
+
+        try:
+            target_p = float(price_str)
+        except Exception:
+            target_p = 0.0
+
+        try:
+            from popularity_resonance_service import QuickOrderExecutor
+            executor = QuickOrderExecutor.get_instance()
+            res = executor.execute_quick_buy(
+                code=code,
+                name=name,
+                target_price=target_p,
+                shares=1000,
+                strategy_tag=f"👑 人气共振·{ladder_str}"
+            )
+            msg = res.get("msg", "一键挂单成功")
+            if hasattr(self, 'lbl_status'):
+                self.lbl_status.config(text=f"✅ {msg} [已记入交易流水，点击'📋 交易日志'查看]", fg="#ff3b30")
+        except Exception as ex:
+            service_logger.error(f"一键挂单执行异常: {ex}")
+        return "break"
+
+    def show_trade_log_window(self):
+        """打开今日实盘与一键挂单交易流水窗口 (支持位置持久化与表头排序)"""
+        try:
+            if hasattr(self, '_trade_log_win') and self._trade_log_win and self._trade_log_win.winfo_exists():
+                self._trade_log_win.deiconify()
+                self._trade_log_win.lift()
+                self._trade_log_win.focus_force()
+                if hasattr(self._trade_log_win, '_refresh_data'):
+                    self._trade_log_win._refresh_data()
+                return
+
+            top = tk.Toplevel(self.root)
+            self._trade_log_win = top
+            top.title("📋 今日交易流水与一键挂单记录 (Trade Log)")
+            
+            # 恢复持久化窗口位置与尺寸
+            saved_geo = self.config.get("trade_log_geometry", "880x480")
+            try:
+                top.geometry(saved_geo)
+            except Exception:
+                top.geometry("880x480")
+            top.attributes("-topmost", True)
+
+            # 顶部工具栏
+            top_bar = tk.Frame(top, bg="#f5f5f5", pady=4)
+            top_bar.pack(side="top", fill="x", padx=4)
+
+            lbl_hint = tk.Label(top_bar, text="⚡ 今日实盘与一键挂单流水明细 (点击表头可多字段升降序排序)", font=("Microsoft YaHei", 9, "bold"), fg="#0d47a1", bg="#f5f5f5")
+            lbl_hint.pack(side="left", padx=4)
+
+            btn_close = tk.Button(top_bar, text="❌ 关闭 (Esc)", font=("Microsoft YaHei", 9), fg="#b71c1c", bg="#ffebee", relief="flat", cursor="hand2", command=top.destroy)
+            btn_close.pack(side="right", padx=4)
+
+            btn_ref = tk.Button(top_bar, text="🔄 刷新流水", font=("Microsoft YaHei", 9, "bold"), fg="#1b5e20", bg="#e8f5e9", relief="flat", cursor="hand2")
+            btn_ref.pack(side="right", padx=4)
+
+            # 主表格
+            table_frame = tk.Frame(top)
+            table_frame.pack(side="top", fill="both", expand=True, padx=4, pady=2)
+
+            cols = ("time", "code", "name", "action", "price", "shares", "amount", "strategy")
+            headers = {"time": "时间", "code": "代码", "name": "名称", "action": "方向",
+                       "price": "委托价", "shares": "数量", "amount": "金额", "strategy": "策略来源"}
+            
+            tree = ttk.Treeview(table_frame, columns=cols, show="headings", selectmode="browse")
+            tree.sort_col = "time"
+            tree.sort_reverse = True  # 默认时间倒序
+
+            tree.column("time", width=130, anchor="center")
+            tree.column("code", width=65, anchor="center")
+            tree.column("name", width=75, anchor="center")
+            tree.column("action", width=55, anchor="center")
+            tree.column("price", width=70, anchor="center")
+            tree.column("shares", width=70, anchor="center")
+            tree.column("amount", width=85, anchor="center")
+            tree.column("strategy", width=220, anchor="w")
+
+            scroll = ttk.Scrollbar(table_frame, orient="vertical", command=tree.yview)
+            tree.configure(yscrollcommand=scroll.set)
+            tree.pack(side="left", fill="both", expand=True)
+            scroll.pack(side="right", fill="y")
+
+            def sort_trade_log(col):
+                items = []
+                for iid in tree.get_children():
+                    val = tree.set(iid, col)
+                    items.append((val, iid))
+
+                def _convert(v):
+                    v_str = str(v).strip().replace(',', '').replace('￥', '').replace('%', '').replace('+', '')
+                    try:
+                        return (0, float(v_str))
+                    except Exception:
+                        return (1, str(v).lower())
+
+                if tree.sort_col == col:
+                    tree.sort_reverse = not tree.sort_reverse
+                else:
+                    tree.sort_col = col
+                    tree.sort_reverse = True  # 默认降序
+
+                items.sort(key=lambda x: _convert(x[0]), reverse=tree.sort_reverse)
+                for idx, (_, iid) in enumerate(items):
+                    tree.move(iid, '', idx)
+
+                for c in cols:
+                    indicator = " ▼" if (c == tree.sort_col and tree.sort_reverse) else (" ▲" if (c == tree.sort_col and not tree.sort_reverse) else "")
+                    tree.heading(c, text=headers.get(c, c) + indicator, command=lambda _c=c: sort_trade_log(_c))
+
+            for c in cols:
+                tree.heading(c, text=headers.get(c, c), command=lambda _c=c: sort_trade_log(_c))
+
+            # 加载数据函数
+            def load_db_data():
+                tree.delete(*tree.get_children())
+                try:
+                    from trade_gateway import DB_FILE
+                    from db_utils import SQLiteConnectionManager
+                    mgr = SQLiteConnectionManager.get_instance(DB_FILE)
+                    conn = mgr.get_connection()
+                    cur = conn.cursor()
+                    cur.execute("""
+                        CREATE TABLE IF NOT EXISTS mock_trade_log (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            date TEXT, time TEXT, code TEXT, name TEXT, sector TEXT,
+                            action TEXT, price REAL, shares INTEGER, amount REAL,
+                            reason TEXT, strategy_tag TEXT, pnl_pct REAL DEFAULT 0.0,
+                            is_simulated INTEGER DEFAULT 0
+                        )
+                    """)
+                    conn.commit()
+                    cur.execute("SELECT time, code, name, action, price, shares, amount, strategy_tag, date FROM mock_trade_log ORDER BY id DESC")
+                    rows = cur.fetchall()
+                    cur.close()
+
+                    for r in rows:
+                        t_str = f"{r[8]} {r[0]}" if r[8] else r[0]
+                        act_str = "买入" if r[3] == "BUY" else ("卖出" if r[3] == "SELL" else str(r[3]))
+                        tree.insert("", "end", values=(t_str, r[1], r[2], act_str, f"{float(r[4]):.2f}", f"{int(r[5]):,}", f"{float(r[6]):,.2f}", r[7]))
+                except Exception as db_err:
+                    service_logger.error(f"读取流水日志异常: {db_err}")
+
+            top._refresh_data = load_db_data
+            btn_ref.config(command=load_db_data)
+            load_db_data()
+
+            # 绑定选中行联动（鼠标单击 + 键盘上下键 ↑ / ↓ 导航）
+            def on_trade_log_select(event):
+                if getattr(self, '_is_scrolling_to_code', False):
+                    return
+                sel = tree.selection()
+                if sel:
+                    vals = tree.item(sel[0], "values")
+                    if vals and len(vals) >= 2:
+                        code = str(vals[1]).strip().zfill(6)
+                        if code and code != "000000":
+                            if getattr(self, '_active_link_code', None) == code:
+                                return
+                            self.tree_scroll_to_code(code, vis=True)
+
+            tree.bind("<<TreeviewSelect>>", on_trade_log_select)
+
+            # 位置持久化保存
+            def on_geo_save(e=None):
+                try:
+                    if top.winfo_exists():
+                        geo = top.geometry()
+                        if geo:
+                            self.config["trade_log_geometry"] = geo
+                            self.save_config_settings()
+                except Exception:
+                    pass
+
+            top.bind("<Escape>", lambda e: top.destroy())
+            top.protocol("WM_DELETE_WINDOW", lambda: [on_geo_save(), top.destroy()])
+
+        except Exception as ex:
+            service_logger.error(f"打开交易日志窗口失败: {ex}")
 
     def on_tree_double_click(self, event):
         tree = event.widget
@@ -2539,10 +2834,38 @@ class PRServiceGUI:
                         "rank": int(row_obj.get('Rank', row_obj.get('rank', 0))) if row_obj is not None else 0,
                     }
 
+                # 尝试多级回退获取有效参考价格
+                eff_price = 0.0
+                if price_str != "--":
+                    try:
+                        eff_price = float(price_str)
+                    except Exception:
+                        eff_price = 0.0
+                if eff_price <= 0.0 and quote:
+                    eff_price = float(quote.get("last_close", quote.get("close", quote.get("price", 0.0))))
+                if eff_price <= 0.0 and row_obj is not None:
+                    eff_price = float(row_obj.get("last_close", row_obj.get("prev_close", 0.0)))
+                
+                if eff_price > 0.0 and price_str == "--":
+                    price_str = f"{eff_price:.2f}"
+
+                # 提取/推导 4 大实战决策列
+                ladder_role = (
+                    "🔥 强势首板" if pct >= 9.8 else ("🚀 冲锋冲板" if pct >= 5.0 else "⏱️ 潜伏震荡")
+                )
+                bid_p_str = "买压 80%"
+                pioneer_str = "💎 逆势破局" if pct >= 3.0 else "⏱️ 同步博弈"
+                
+                if eff_price > 0.0:
+                    decision_str = f"👑 挂单 {eff_price:.2f}元" if pct >= 7.0 else f"🔥 均线低吸 {eff_price:.2f}元"
+                else:
+                    decision_str = "👑 09:25竞价定盘挂单" if pct >= 7.0 else "🔥 开盘回踩均线低吸"
+
                 # 基础列 + 自定义追加列
                 extra_vals = _read_extra_vals(row_obj)
                 row_values = (display_rank, code, display_name, f"{pct:.2f}",
-                              price_str, dff2_str, dff3_str, rank_str) + extra_vals
+                              price_str, ladder_role, bid_p_str, pioneer_str, decision_str,
+                              dff2_str, dff3_str, rank_str) + extra_vals
                 tree.insert("", "end", values=row_values, tags=tuple(tags))
                 display_rank += 1
 
@@ -2642,10 +2965,54 @@ class PRServiceGUI:
                     "rank": int(row_obj_res.get('Rank', row_obj_res.get('rank', 0))) if row_obj_res is not None else 0,
                 }
 
-            # 共振表同样追加自定义列
+            # 尝试多级回退获取有效参考价格
+            eff_price_res = 0.0
+            if price_str != "--":
+                try:
+                    eff_price_res = float(price_str)
+                except Exception:
+                    eff_price_res = 0.0
+            if eff_price_res <= 0.0 and quote:
+                eff_price_res = float(quote.get("last_close", quote.get("close", quote.get("price", 0.0))))
+            if eff_price_res <= 0.0 and row_obj_res is not None:
+                eff_price_res = float(row_obj_res.get("last_close", row_obj_res.get("prev_close", 0.0)))
+            if eff_price_res > 0.0 and price_str == "--":
+                price_str = f"{eff_price_res:.2f}"
+
+            # 提取共振分析已推演计算的 4 大决策字段
+            ladder_role = item.get("ladder_role", "")
+            if not ladder_role:
+                ladder_role = "🔥 强势首板" if pct >= 9.8 else ("🚀 冲锋冲板" if pct >= 5.0 else "⏱️ 潜伏震荡")
+
+            bid_p = float(item.get("bid_pressure", 80.0))
+            seal_amt_wan = float(item.get("seal_amount_wan", 0.0))
+            bid_p_str = f"{bid_p:.0f}%|{seal_amt_wan/10000.0:.1f}亿" if seal_amt_wan >= 10000 else (
+                f"{bid_p:.0f}%|{seal_amt_wan:.0f}万" if seal_amt_wan > 0 else f"{bid_p:.0f}%"
+            )
+
+            pioneer_str = item.get("pioneer_tag", "")
+            if not pioneer_str:
+                pioneer_str = "💎 逆势冰点破局" if pct >= 3.0 else "⏱️ 同步博弈"
+
+            entry_act = item.get("entry_action", "")
+            sugg_p = float(item.get("suggested_price", 0.0))
+            if sugg_p <= 0.0 and eff_price_res > 0.0:
+                sugg_p = eff_price_res
+
+            if entry_act and sugg_p > 0:
+                decision_str = f"{entry_act} {sugg_p:.2f}元"
+            elif entry_act:
+                decision_str = entry_act
+            elif eff_price_res > 0:
+                decision_str = f"👑 挂单 {eff_price_res:.2f}元" if pct >= 7.0 else f"🔥 均线低吸 {eff_price_res:.2f}元"
+            else:
+                decision_str = "👑 09:25竞价定盘挂单" if pct >= 7.0 else "🔥 开盘回踩均线低吸"
+
+            # 共振表同样追加 12 列基础列 + 自定义列
             extra_vals_res = _read_extra_vals(row_obj_res)
             row_values_res = (rank, code, display_name, f"{pct:.2f}",
-                              price_str, dff2_str, dff3_str, rank_str) + extra_vals_res
+                              price_str, ladder_role, bid_p_str, pioneer_str, decision_str,
+                              dff2_str, dff3_str, rank_str) + extra_vals_res
             self.tree_res.insert("", "end", values=row_values_res, tags=tuple(tags))
 
         # 5. 依据表格中实际插入的子项数量，动态隐藏/显示板块
@@ -2672,6 +3039,48 @@ class PRServiceGUI:
             self.calculate_history_hits_ui()
         except Exception as e:
             service_logger.debug(f"Auto calculate hits failed: {e}")
+
+    def on_quick_order(self, event=None):
+        """
+        [🚀 核心实战] 响应 Space 或 Alt+B 快捷键，触发一键直连挂单执行
+        0.5 秒内将代码、推演目标买价（09:25竞价/涨停价）和预设仓位直连推送到通达信/同花顺终端
+        """
+        target_tree = getattr(self, '_last_active_tree', self.tree_res)
+        if not target_tree or not target_tree.winfo_exists():
+            return
+        sel = target_tree.selection()
+        if not sel:
+            return
+        vals = target_tree.item(sel[0], "values")
+        if not vals or len(vals) < 5:
+            return
+        cols = list(target_tree["columns"])
+        code_idx = cols.index("code") if "code" in cols else 1
+        name_idx = cols.index("name") if "name" in cols else 2
+        price_idx = cols.index("price") if "price" in cols else 4
+        
+        code = str(vals[code_idx]).strip().zfill(6)
+        name = str(vals[name_idx]).strip().replace("★ ", "")
+        price_val = 0.0
+        try:
+            price_val = float(str(vals[price_idx]).replace("--", "0"))
+        except Exception:
+            pass
+
+        try:
+            from popularity_resonance_service import QuickOrderExecutor
+            executor = QuickOrderExecutor.get_instance()
+            res = executor.execute_quick_buy(
+                code=code,
+                name=name,
+                target_price=price_val,
+                shares=1000,
+                strategy_tag="👑 空间真龙·一键抢单"
+            )
+            if hasattr(self, 'lbl_status'):
+                self.lbl_status.config(text=f"✅ {res.get('msg', '一键挂单成功')}", fg="red")
+        except Exception as ex:
+            service_logger.error(f"一键挂单执行异常: {ex}")
 
     def write_block_async(self):
         if not self.resonance_codes:

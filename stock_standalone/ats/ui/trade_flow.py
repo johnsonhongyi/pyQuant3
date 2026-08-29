@@ -28,8 +28,83 @@ class TradeFlowTable(QWidget):
         self._all_flow_list = []
         self._current_page = 1
         self._page_size = 100
+        self._sort_col = 0
+        self._sort_order = Qt.SortOrder.DescendingOrder
         self._init_ui()
-        self.load_mock_flow()
+        self.load_real_trades()
+
+    def load_real_trades(self):
+        """从 TradeGateway 与 SQLite (signal_strategy.db) 实时加载真实的交易与一键挂单流水"""
+        try:
+            from trade_gateway import TradeGateway, DB_FILE
+            from db_utils import SQLiteConnectionManager
+            mgr = SQLiteConnectionManager.get_instance(DB_FILE)
+            conn = mgr.get_connection()
+            c = conn.cursor()
+            c.execute("""
+                CREATE TABLE IF NOT EXISTS mock_trade_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    date TEXT, time TEXT, code TEXT, name TEXT, sector TEXT,
+                    action TEXT, price REAL, shares INTEGER, amount REAL,
+                    reason TEXT, strategy_tag TEXT, pnl_pct REAL DEFAULT 0.0,
+                    is_simulated INTEGER DEFAULT 0
+                )
+            """)
+            conn.commit()
+            
+            c.execute("""
+                SELECT time, code, name, action, price, shares, amount, pnl_pct, strategy_tag, date
+                FROM mock_trade_log
+                ORDER BY id DESC
+            """)
+            rows = c.fetchall()
+            c.close()
+
+            if rows:
+                self._all_flow_list = []
+                for r in rows:
+                    t_str = f"{r[9]} {r[0]}" if r[9] else r[0]
+                    code_str = str(r[1]).zfill(6)
+                    name_str = str(r[2])
+                    action_str = "买入" if r[3] == "BUY" else ("卖出" if r[3] == "SELL" else str(r[3]))
+                    p_val = float(r[4])
+                    qty_val = int(r[5])
+                    amt_val = float(r[6])
+                    pnl_val = float(r[7]) if r[7] is not None else 0.0
+                    pnl_str = f"{pnl_val:+.2f}%" if abs(pnl_val) > 0.001 else "0.00%"
+                    strat_str = str(r[8]) if r[8] else "👑 空间真龙·一键挂单"
+                    
+                    self._all_flow_list.append([
+                        t_str, code_str, name_str, action_str,
+                        f"{p_val:.2f}", str(qty_val), f"{amt_val:.2f}",
+                        pnl_str, strat_str
+                    ])
+            else:
+                # 若暂无数据库流水，从 TradeGateway 内存获取
+                gw_logs = TradeGateway.get_instance().get_today_log()
+                if gw_logs:
+                    self._all_flow_list = []
+                    for item in reversed(gw_logs):
+                        self._all_flow_list.append([
+                            item.get('time', '--'),
+                            str(item.get('code', '')).zfill(6),
+                            item.get('name', '--'),
+                            "买入" if item.get('action') == "BUY" else "卖出",
+                            f"{float(item.get('price', 0)):.2f}",
+                            str(item.get('shares', 0)),
+                            f"{float(item.get('amount', 0)):.2f}",
+                            f"{float(item.get('pnl_pct', 0)):+.2f}%",
+                            item.get('reason', '👑 空间真龙·一键挂单')
+                        ])
+                else:
+                    self.load_mock_flow()
+        except Exception:
+            self.load_mock_flow()
+
+        self._sort_flow_list()
+        self.table.horizontalHeader().setSortIndicator(self._sort_col, self._sort_order)
+        self._update_pagination_ui()
+        self._render_current_page()
 
     def _init_ui(self):
         layout = QVBoxLayout(self)
@@ -49,8 +124,18 @@ class TradeFlowTable(QWidget):
         )
         self.table.setAlternatingRowColors(True)
         self.table.stock_activated.connect(self.stock_clicked.emit)
+        self.table.cellClicked.connect(self._on_cell_clicked)
+        self.table.currentCellChanged.connect(self._on_current_cell_changed)
         self.table.cellDoubleClicked.connect(self._on_cell_double_clicked)
+        self.table.horizontalHeader().setSortIndicatorShown(True)
+        self.table.horizontalHeader().sectionClicked.connect(self._on_header_clicked)
         layout.addWidget(self.table, 1)
+
+        # 键盘上下键防抖定时器 (60ms)
+        from PyQt6.QtCore import QTimer
+        self._link_timer = QTimer(self)
+        self._link_timer.setSingleShot(True)
+        self._link_timer.timeout.connect(self._do_broadcast_link)
 
         # 2. 分页控制工具栏 (默认 100 条/页)
         self.pagination_widget = QWidget()
@@ -156,9 +241,62 @@ class TradeFlowTable(QWidget):
         ]
         self.update_flow_list(mock_data)
 
+    def _extract_sort_key(self, row, col):
+        """提取行数据的排序键，支持时间、浮点数、整数、百分比和字符串自适应转换"""
+        if not row or col >= len(row):
+            return ""
+        val = str(row[col]).strip()
+        if not val or val in ("--", "nan", "None"):
+            return -999999999.0 if col in (4, 5, 6, 7) else ""
+
+        if col == 0:  # 时间/日期时间
+            return val
+        elif col in (4, 6):  # 成交价 / 成交金额
+            try:
+                return float(val.replace(',', '').replace('￥', ''))
+            except ValueError:
+                return 0.0
+        elif col == 5:  # 成交数量
+            try:
+                return int(val.replace(',', ''))
+            except ValueError:
+                return 0
+        elif col == 7:  # 距今涨跌幅 (+2.50%)
+            try:
+                return float(val.replace('%', '').replace('+', ''))
+            except ValueError:
+                return 0.0
+        else:
+            return val
+
+    def _sort_flow_list(self):
+        """对全量流水列表进行稳定原地排序"""
+        if not self._all_flow_list:
+            return
+        reverse = (self._sort_order == Qt.SortOrder.DescendingOrder)
+        self._all_flow_list.sort(key=lambda r: self._extract_sort_key(r, self._sort_col), reverse=reverse)
+
+    def _on_header_clicked(self, col: int):
+        """用户点击表头时切换排序方向并对全量流水重排"""
+        if self._sort_col == col:
+            self._sort_order = (
+                Qt.SortOrder.AscendingOrder
+                if self._sort_order == Qt.SortOrder.DescendingOrder
+                else Qt.SortOrder.DescendingOrder
+            )
+        else:
+            self._sort_col = col
+            self._sort_order = Qt.SortOrder.DescendingOrder  # 新点击列默认降序
+
+        self.table.horizontalHeader().setSortIndicator(self._sort_col, self._sort_order)
+        self._sort_flow_list()
+        self._render_current_page()
+
     def update_flow_list(self, flow_list):
         """接收全量流水列表并重置/渲染分页视图"""
         self._all_flow_list = list(flow_list) if flow_list else []
+        self._sort_flow_list()
+        self.table.horizontalHeader().setSortIndicator(self._sort_col, self._sort_order)
         self._update_pagination_ui()
         self._render_current_page()
 
@@ -312,6 +450,55 @@ class TradeFlowTable(QWidget):
             self._update_pagination_ui()
             self._render_current_page()
 
+    def _on_cell_clicked(self, row, col):
+        """鼠标单击单元格即时触发联动"""
+        if row < 0 or row >= self.table.rowCount():
+            return
+        code_item = self.table.item(row, 1)
+        name_item = self.table.item(row, 2)
+        if not code_item:
+            return
+        code = code_item.text().strip().zfill(6)
+        name = name_item.text().strip() if name_item else code
+        self._pending_link = (code, name)
+        self._do_broadcast_link()
+
+    def _on_current_cell_changed(self, curr_row, curr_col, prev_row, prev_col):
+        """键盘上下键 (↑ / ↓) 移动选定行时触发 60ms 防抖联动"""
+        if curr_row < 0 or curr_row >= self.table.rowCount():
+            return
+        code_item = self.table.item(curr_row, 1)
+        name_item = self.table.item(curr_row, 2)
+        if not code_item:
+            return
+        code = code_item.text().strip().zfill(6)
+        name = name_item.text().strip() if name_item else code
+        self._pending_link = (code, name)
+        self._link_timer.start(60)
+
+    def _do_broadcast_link(self):
+        """执行广播联动"""
+        if not hasattr(self, '_pending_link') or not self._pending_link:
+            return
+        code, name = self._pending_link
+        self.stock_clicked.emit(code, name)
+        self._broadcast_link_stock(code, name)
+
+    def _broadcast_link_stock(self, code: str, name: str = ""):
+        """物理直连广播到通达信/同花顺与全局主窗口"""
+        try:
+            from linkage_service import get_link_manager
+            if get_link_manager:
+                get_link_manager().push(code, flags={'tdx': True, 'ths': True, 'dfcf': False})
+        except Exception:
+            pass
+        try:
+            from ats.ui.main_window import ATSMainWindow
+            if hasattr(ATSMainWindow, '_instance') and ATSMainWindow._instance:
+                ATSMainWindow._instance.link_stock(code, name)
+        except Exception:
+            pass
+
     def _on_cell_double_clicked(self, row, col):
         code_item = self.table.item(row, 1)
         name_item = self.table.item(row, 2)
@@ -331,6 +518,7 @@ class TradeFlowTable(QWidget):
                 'status': f"成交流水: 于 {time_str} 执行【{action}】{qty}股 | 成交价: {price} | 成交总额: {amount}元 | 距今涨跌: {pnl_since}"
             }
             self.stock_double_clicked.emit(code, name, context_info)
+            self._broadcast_link_stock(code, name)
 
 
 class PositionPanel(QWidget):
@@ -538,3 +726,123 @@ class BacktestReportPanel(QWidget):
         for key, val in stats_dict.items():
             if key in self.value_labels:
                 self.value_labels[key].setText(str(val))
+
+
+from PyQt6.QtWidgets import QDialog, QApplication
+
+class TradeFlowDialog(QDialog):
+    """
+    今日交易流水与订单日志独立窗口 (Trade Flow Dialog)
+    真正的独立顶层窗口，支持位置持久化、Esc 键关闭、表头点击排序与实时刷新。
+    """
+    def __init__(self, parent=None):
+        # 强制设置为独立 Window，避免嵌入在父窗口中变成子控件
+        super().__init__(None, Qt.WindowType.Window | Qt.WindowType.WindowCloseButtonHint | Qt.WindowType.WindowMinMaxButtonsHint)
+        self.setWindowTitle("📋 ATS 今日交易流水日志 (Trade Flow & Execution Logs)")
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)
+        
+        from ats.ui.styles import apply_dark_theme
+        apply_dark_theme(self)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(6)
+
+        # 顶部工具栏
+        top_bar = QHBoxLayout()
+        lbl_title = QLabel("⚡ 今日实盘/模拟一键挂单与委托流水明细 (点击表头可多字段排序)")
+        lbl_title.setStyleSheet("font-size: 10pt; font-weight: bold; color: #00ffcc;")
+        top_bar.addWidget(lbl_title)
+        top_bar.addStretch()
+
+        btn_refresh = QPushButton("🔄 刷新流水")
+        btn_refresh.setStyleSheet("background-color: #1a2a1a; color: #00ff88; font-weight: bold; border: 1px solid #00ff88; border-radius: 4px; padding: 4px 10px;")
+        btn_refresh.clicked.connect(self.refresh_data)
+        top_bar.addWidget(btn_refresh)
+
+        btn_close = QPushButton("❌ 关闭")
+        btn_close.setStyleSheet("background-color: #2a1a1a; color: #ff5555; font-weight: bold; border: 1px solid #ff5555; border-radius: 4px; padding: 4px 10px;")
+        btn_close.clicked.connect(self.close)
+        top_bar.addWidget(btn_close)
+
+        layout.addLayout(top_bar)
+
+        # 流水表格
+        self.flow_table = TradeFlowTable(self)
+        layout.addWidget(self.flow_table, 1)
+
+        self._restore_geometry()
+
+    def refresh_data(self):
+        self.flow_table.load_real_trades()
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Escape:
+            self.close()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def closeEvent(self, event):
+        self._save_geometry()
+        event.accept()
+
+    def hideEvent(self, event):
+        self._save_geometry()
+        super().hideEvent(event)
+
+    def _save_geometry(self):
+        """持久化保存窗口位置与尺寸"""
+        try:
+            import json, os
+            from sys_utils import get_app_root
+            cfg_file = os.path.join(get_app_root(), "window_config.json")
+            data = {}
+            if os.path.exists(cfg_file):
+                with open(cfg_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            data["trade_flow_geometry"] = {
+                "x": self.x(), "y": self.y(),
+                "w": self.width(), "h": self.height()
+            }
+            with open(cfg_file, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=4, ensure_ascii=False)
+        except Exception:
+            pass
+
+    def _restore_geometry(self):
+        """恢复窗口位置与尺寸，并进行屏幕边界防护"""
+        try:
+            import json, os
+            from sys_utils import get_app_root
+            cfg_file = os.path.join(get_app_root(), "window_config.json")
+            if os.path.exists(cfg_file):
+                with open(cfg_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                geo = data.get("trade_flow_geometry")
+                if geo and isinstance(geo, dict):
+                    x = int(geo.get("x", 100))
+                    y = int(geo.get("y", 100))
+                    w = int(geo.get("w", 980))
+                    h = int(geo.get("h", 560))
+                    app = QApplication.instance()
+                    if app:
+                        screen = app.primaryScreen().geometry()
+                        if 0 <= x < screen.width() - 50 and 0 <= y < screen.height() - 50:
+                            self.setGeometry(x, y, max(600, w), max(350, h))
+                            return
+        except Exception:
+            pass
+        self.resize(980, 560)
+
+
+_TRADE_FLOW_WIN = None
+def open_trade_flow_dialog(parent=None):
+    global _TRADE_FLOW_WIN
+    if _TRADE_FLOW_WIN is None or not _TRADE_FLOW_WIN.isVisible():
+        _TRADE_FLOW_WIN = TradeFlowDialog()
+    _TRADE_FLOW_WIN.show()
+    _TRADE_FLOW_WIN.raise_()
+    _TRADE_FLOW_WIN.activateWindow()
+    _TRADE_FLOW_WIN.refresh_data()
+    return _TRADE_FLOW_WIN

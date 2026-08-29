@@ -679,6 +679,15 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         self.btn_export.clicked.connect(self._export_to_csv)
         ctrl_layout.addWidget(self.btn_export)
 
+        # 交易日志流水按钮
+        self.btn_trade_flow = QPushButton("📋 交易日志")
+        self.btn_trade_flow.setStyleSheet("""
+            QPushButton { background-color: #1a2a3a; color: #38bdf8; font-weight: bold; border: 1px solid #0284c7; border-radius: 4px; padding: 3px 8px; }
+            QPushButton:hover { background-color: #0284c7; color: #ffffff; }
+        """)
+        self.btn_trade_flow.clicked.connect(self._open_trade_flow)
+        ctrl_layout.addWidget(self.btn_trade_flow)
+
         # 置顶保持勾选
         self.chk_ontop = QCheckBox("置顶")
         self.chk_ontop.setChecked(self.stays_on_top)
@@ -2453,6 +2462,7 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         # ── 3. 全局刷新与导出 ──
         act_refresh = menu.addAction("🔄 刷新当前视图数据")
         act_export = menu.addAction("📤 导出为 CSV 文件")
+        act_trade_flow = menu.addAction("📋 打开今日交易流水日志 (Trade Flow)")
 
         action = menu.exec(self.table.viewport().mapToGlobal(pos))
         if not action:
@@ -2464,6 +2474,8 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
             self.reset_default_columns()
         elif action == act_narrow:
             self.toggle_narrow_mode()
+        elif action == act_trade_flow:
+            self._open_trade_flow()
         elif act_link and action == act_link:
             self.code_clicked.emit(c, n)
             self._broadcast_link_stock(c, n)
@@ -2503,6 +2515,103 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
             self._refresh_data_for_mode()
         elif action == act_export:
             self._export_to_csv()
+
+    def _open_trade_flow(self):
+        """打开 ATS 今日交易流水日志独立窗口"""
+        try:
+            from ats.ui.trade_flow import open_trade_flow_dialog
+            open_trade_flow_dialog(self)
+        except Exception as e:
+            logger.error(f"打开交易流水异常: {e}")
+
+    def _broadcast_link_stock(self, code: str, name: str = ""):
+        """广播联动股票代码到通达信/同花顺与全局行情"""
+        try:
+            from linkage_service import get_link_manager
+            if get_link_manager:
+                get_link_manager().push(code, flags={'tdx': True, 'ths': True, 'dfcf': False})
+        except Exception as ex:
+            logger.debug(f"天梯联动广播异常: {ex}")
+
+    def _on_current_cell_changed(self, row: int, col: int, prev_row: int, prev_col: int):
+        """响应键盘上下键或鼠标点击切换行，防抖联动外部终端并在底部状态栏展示决策提示"""
+        if row < 0 or row >= self.table.rowCount():
+            return
+        code_item = self.table.item(row, 0)
+        name_item = self.table.item(row, 1)
+        price_item = self.table.item(row, 2)
+        pct_item = self.table.item(row, 3)
+        tier_item = self.table.item(row, 5)
+        seal_item = self.table.item(row, 8)
+
+        if not code_item:
+            return
+        code = code_item.text().strip().zfill(6)
+        name = name_item.text().strip() if name_item else code
+        price_str = price_item.text().strip() if price_item else "--"
+        pct_str = pct_item.text().strip() if pct_item else "--"
+        tier_str = tier_item.text().strip() if tier_item else ""
+        seal_str = seal_item.text().strip() if seal_item else "--"
+
+        self.lbl_status.setText(f"【选定】{code} {name} | 现价:{price_str} ({pct_str}) | 梯队:{tier_str} | 封流比:{seal_str}% | [按Alt+C一键挂单]")
+        self.lbl_status.setStyleSheet("color: #00ffcc; font-weight: bold; font-size: 9pt;")
+        
+        self.code_clicked.emit(code, name)
+        self._broadcast_link_stock(code, name)
+
+    def _on_cell_double_clicked(self, row: int, col: int):
+        """双击打开 SBC 日内分时走势图"""
+        if row < 0 or row >= self.table.rowCount():
+            return
+        code_item = self.table.item(row, 0)
+        if not code_item:
+            return
+        code = code_item.text().strip().zfill(6)
+        try:
+            from ats.ui.intraday_strategy_dialog import open_sbc_chart_dialog
+            open_sbc_chart_dialog(self, code)
+        except Exception as ex:
+            logger.warning(f"双击打开 SBC 分时走势异常: {ex}")
+
+    def keyPressEvent(self, event):
+        """支持键盘 Alt+C 一键快速直连交易终端挂单与跟单"""
+        if event.key() == Qt.Key.Key_C and (event.modifiers() & Qt.KeyboardModifier.AltModifier):
+            self.on_quick_order_action()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def on_quick_order_action(self):
+        """[🚀 核心实战] 天梯一键直连挂单执行：0.5秒内将目标代码、价格与仓位推送到交易终端"""
+        row = self.table.currentRow()
+        if row < 0 or row >= self.table.rowCount():
+            return
+        code_item = self.table.item(row, 0)
+        name_item = self.table.item(row, 1)
+        price_item = self.table.item(row, 2)
+        tier_item = self.table.item(row, 5)
+
+        if not code_item:
+            return
+        code = code_item.text().strip().zfill(6)
+        name = name_item.text().strip() if name_item else code
+        price_val = _safe_float(price_item.text()) if price_item else 0.0
+        tier_tag = tier_item.text().strip() if tier_item else "连板龙头"
+
+        try:
+            from popularity_resonance_service import QuickOrderExecutor
+            executor = QuickOrderExecutor.get_instance()
+            res = executor.execute_quick_buy(
+                code=code,
+                name=name,
+                target_price=price_val,
+                shares=1000,
+                strategy_tag=f"👑 天梯连板·{tier_tag}"
+            )
+            self.lbl_status.setText(f"✅ {res.get('msg', '一键挂单成功')}")
+            self.lbl_status.setStyleSheet("color: #ff3b30; font-weight: bold; font-size: 9.5pt;")
+        except Exception as e:
+            logger.error(f"天梯一键挂单异常: {e}")
 
 
 

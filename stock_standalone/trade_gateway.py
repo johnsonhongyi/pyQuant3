@@ -450,6 +450,38 @@ class MockTradeGateway:
         )
         return True, f"模拟买入成功: {code} × {shares}股 @ {price:.3f} (止损{stop_loss:.3f})"
 
+    def execute_mock_buy(
+        self,
+        code: str,
+        name: str,
+        price: float,
+        shares: int = 1000,
+        strategy_tag: str = "",
+        sector: str = "人气共振",
+        reason: str = "键盘一键直连抢单"
+    ) -> tuple[bool, str]:
+        """快捷一键委托记账（直接记录流水并更新持仓）"""
+        code_str = str(code).zfill(6)
+        price_val = float(price) if float(price) > 0 else 1.0
+        shares_val = int(shares) if int(shares) > 0 else 1000
+        amount = price_val * shares_val
+
+        record = TradeRecord(
+            date=datetime.now().strftime('%Y-%m-%d'),
+            time=datetime.now().strftime('%H:%M:%S'),
+            code=code_str,
+            name=name,
+            sector=sector,
+            action="BUY",
+            price=price_val,
+            shares=shares_val,
+            amount=amount,
+            reason=reason,
+            strategy_tag=strategy_tag,
+        )
+        self._append_log(record)
+        return True, f"已记录交易流水: {code_str} {name}"
+
     # ── 模拟卖出 ──────────────────────────────────────────────────────────────
 
     def submit_sell(
@@ -713,3 +745,7 @@ def get_trade_gateway(total_capital: float = 100_000.0) -> MockTradeGateway:
         if _gateway_instance is None:
             _gateway_instance = MockTradeGateway(total_capital=total_capital)
     return _gateway_instance
+
+
+TradeGateway = MockTradeGateway
+MockTradeGateway.get_instance = staticmethod(get_trade_gateway)
