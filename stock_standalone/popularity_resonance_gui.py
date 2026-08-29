@@ -665,57 +665,101 @@ class PRServiceGUI:
                         curr_tags.remove("favorite")
                     tree.item(iid, tags=tuple(curr_tags))
 
-    def _adjust_tree_column_widths(self, tree):
-        try:
-            # 1. 确保 Treeview 已经有了实际分配的宽度
-            total_width = tree.winfo_width()
-            if total_width <= 50:
-                return
-            
-            # 2. 扣除滚动条的宽度（固定扣除 18 像素）
-            usable_width = total_width - 18
-            if usable_width <= 50:
-                return
+    DEFAULT_COLUMN_WIDTHS = {
+        "idx": 32,
+        "code": 58,
+        "name": 72,
+        "val": 52,
+        "price": 56,
+        "ladder": 95,
+        "bid_p": 78,
+        "pioneer": 82,
+        "decision": 96,
+        "dff2": 46,
+        "dff3": 46,
+        "rank": 42,
+        "dff": 48,
+        "slope": 48,
+        "win": 40,
+        "red": 40,
+        "ch_bc": 44,
+        "MainL": 50,
+        "ch_bc2": 44,
+        "MainU": 50
+    }
 
-            # 3. 找出展示中的列
-            display_cols = tree.cget("displaycolumns")
-            if not display_cols or display_cols == ("#all",) or display_cols == "":
-                display_cols = tree.cget("columns")
-            
-            display_cols = list(display_cols)
-            
-            # 4. 计算固定列和可拉伸列宽度
-            fixed_cols = []
-            stretch_cols = []
-            
-            for col in display_cols:
-                col_info = tree.column(col)
-                if col_info.get("stretch", True) and col not in ("idx", "code"):
-                    stretch_cols.append(col)
-                else:
-                    fixed_cols.append((col, col_info.get("width", 50)))
-            
-            fixed_width = 0
-            for col, w in fixed_cols:
-                fixed_width += w
-                
-            remaining_width = usable_width - fixed_width
-            if remaining_width <= 20:
-                # 剩余空间过窄时，强制拉伸列维持最小宽度为 30
-                min_w = 30
-                for col in stretch_cols:
-                    tree.column(col, width=min_w)
+    # 最小安全列宽（防止文字被严重压缩变形截断）
+    MIN_COLUMN_WIDTHS = {
+        "idx": 26,
+        "code": 50,
+        "name": 62,
+        "val": 44,
+        "price": 48,
+        "ladder": 75,
+        "bid_p": 65,
+        "pioneer": 68,
+        "decision": 75,
+        "dff2": 38,
+        "dff3": 38,
+        "rank": 35,
+        "dff": 40,
+        "slope": 40,
+        "win": 35,
+        "red": 35,
+        "ch_bc": 38,
+        "MainL": 42,
+        "ch_bc2": 38,
+        "MainU": 42
+    }
+
+    def _adjust_tree_column_widths(self, tree):
+        """保持 Treeview 自身 stretch 自然渲染，不执行递归强制改写"""
+        pass
+
+    def _on_tree_column_drag_release(self, event, tree):
+        """用户拖动表头分隔线调整列宽后，精准单列同步并持久化"""
+        try:
+            # 延时 40ms 等 Tkinter 原生完成列宽几何变化
+            if hasattr(self, 'root') and self.root:
+                self.root.after(40, lambda: self._sync_column_widths_from_tree(tree))
+        except Exception:
+            pass
+
+    def _sync_column_widths_from_tree(self, source_tree):
+        """仅同步真正被用户手动拖动改变宽度的列，防止全局覆盖污染"""
+        try:
+            if not source_tree or not source_tree.winfo_exists():
                 return
-                
-            # 5. 将剩余宽度平均分配给可拉伸列
-            if stretch_cols:
-                allocated_w = int(remaining_width / len(stretch_cols))
-                if allocated_w < 30:
-                    allocated_w = 30
-                for col in stretch_cols:
-                    tree.column(col, width=allocated_w)
+            saved_widths = self.config.setdefault("column_widths", {})
+            all_trees = [t for t in (self.tree_em, self.tree_ths, self.tree_lh, self.tree_tgb, self.tree_res) if t and t.winfo_exists()]
+            changed = False
+            for col in source_tree.cget("columns"):
+                try:
+                    cur_w = int(source_tree.column(col, "width"))
+                    old_w = saved_widths.get(col, self.DEFAULT_COLUMN_WIDTHS.get(col, 48))
+                    min_safe_w = self.MIN_COLUMN_WIDTHS.get(col, 35)
+                    # 只有当宽度发生实质变化且大于最小安全宽度时才更新
+                    if cur_w >= min_safe_w and abs(cur_w - old_w) >= 3:
+                        saved_widths[col] = cur_w
+                        changed = True
+                        for other_tree in all_trees:
+                            if other_tree != source_tree:
+                                try:
+                                    other_tree.column(col, width=cur_w)
+                                except Exception:
+                                    pass
+                        if hasattr(self, 'concept_tree') and self.concept_tree and self.concept_tree.winfo_exists():
+                            try:
+                                self.concept_tree.column(col, width=cur_w)
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+            if changed:
+                self.save_config_settings()
+                service_logger.debug(f"[列宽同步] 已精准同步并持久化列宽配置: {saved_widths}")
         except Exception as e:
-            service_logger.error(f"Adjust tree column widths failed: {e}")
+            service_logger.debug(f"Sync column widths failed: {e}")
 
     def _normalize_concept_name(self, name):
         if not name:
@@ -851,6 +895,9 @@ class PRServiceGUI:
         else:
             menu.add_command(label=f"☆ 取消重点关注 ({name})", command=lambda: self.remove_from_favorites(code))
             
+        menu.add_separator()
+        menu.add_command(label="⚖️ 垂直分隔栏居中 (50%)", command=self.reset_sash_center)
+
         menu.post(event.x_root, event.y_root)
 
     def copy_code_to_clipboard(self, code):
@@ -1150,13 +1197,7 @@ class PRServiceGUI:
             self.update_concept_ranking(all_stocks_for_stats)
 
     def load_config_settings(self):
-        if os.path.exists(CONFIG_FILE):
-            try:
-                with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-                    return json.load(f)
-            except:
-                pass
-        return {
+        cfg = {
             "blk_name": "RQG.blk",
             "limit": 50,
             "interval": 5,
@@ -1166,8 +1207,18 @@ class PRServiceGUI:
             "sort_col": None,
             "sort_descending": False,
             "auto_refresh": False,
-            "sash_ratio": 0.5
+            "sash_ratio": 0.5,
+            "column_widths": dict(getattr(self, 'DEFAULT_COLUMN_WIDTHS', {}))
         }
+        if os.path.exists(CONFIG_FILE):
+            try:
+                with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                    loaded = json.load(f)
+                    if isinstance(loaded, dict):
+                        cfg.update(loaded)
+            except Exception:
+                pass
+        return cfg
         
     def _get_dpi_scale_factor(self):
         try:
@@ -1213,6 +1264,40 @@ class PRServiceGUI:
                     self.sash_restored = True
         except Exception as e:
             service_logger.debug(f"Restore sash position failed: {e}")
+
+    def reset_sash_center(self, event=None):
+        """[⚖️ 核心功能] 一键将中间垂直分隔栏精准调整到 50% 绝对居中位置并恢复黄金列宽"""
+        try:
+            if not hasattr(self, "paned") or self.paned is None:
+                return
+            self.config["sash_ratio"] = 0.5
+            self.config["column_widths"] = dict(self.DEFAULT_COLUMN_WIDTHS)
+            
+            width = self.paned.winfo_width()
+            if width > 100:
+                target_sash = int(width * 0.5)
+                self.paned.sash_place(0, target_sash, 0)
+            self.sash_restored = True
+
+            # 触发所有子表格重新应用黄金列宽
+            all_trees = [t for t in (self.tree_em, self.tree_ths, self.tree_lh, self.tree_tgb, self.tree_res) if t and t.winfo_exists()]
+            for tree in all_trees:
+                for col in tree.cget("columns"):
+                    def_w = self.DEFAULT_COLUMN_WIDTHS.get(col, 48)
+                    min_w = self.MIN_COLUMN_WIDTHS.get(col, 35)
+                    is_stretch = col in ("ladder", "bid_p", "pioneer", "decision")
+                    try:
+                        tree.column(col, width=def_w, minwidth=min_w, stretch=is_stretch)
+                    except Exception:
+                        pass
+
+            self.save_config_settings()
+
+            if hasattr(self, 'lbl_status'):
+                self.lbl_status.config(text="✅ 垂直分隔栏与列宽已精准恢复 50% 居中", fg="#2e7d32")
+            service_logger.info("垂直分隔栏与列宽已自动恢复 50% 绝对居中")
+        except Exception as e:
+            service_logger.error(f"Reset sash center failed: {e}")
 
     def save_config_settings(self):
         try:
@@ -1471,6 +1556,19 @@ class PRServiceGUI:
         )
         self.btn_trade_log.pack(side="left", padx=4)
 
+        # ⚖️ 垂直分隔栏一键居中按钮
+        self.btn_center_sash = tk.Button(
+            self.control_buttons_frame,
+            text="⚖️ 居中",
+            font=("Microsoft YaHei", 9, "bold"),
+            fg="#2e7d32",
+            bg="#e8f5e9",
+            relief="flat",
+            cursor="hand2",
+            command=self.reset_sash_center
+        )
+        self.btn_center_sash.pack(side="left", padx=4)
+
         # 主显示区域 (左右分栏)
         main_pane = tk.Frame(self.root)
         main_pane.pack(fill="both", expand=True, padx=4, pady=2)
@@ -1519,9 +1617,10 @@ class PRServiceGUI:
         self.tgb_container = tk.Frame(self.right_frame, bg="white", highlightbackground="#CCCCCC", highlightthickness=1, bd=0)
         self.tree_tgb = self.create_treeview(self.tgb_container, "淘")
 
-        # 绑定 sash 的位置恢复与保存
+        # 绑定 sash 的位置恢复、保存与双击一键居中
         self.paned.bind("<Configure>", lambda e: self.restore_sash(e))
         self.paned.bind("<ButtonRelease-1>", self.save_sash_pos)
+        self.paned.bind("<Double-Button-1>", lambda e: self.reset_sash_center())
 
         # 多阶段连环延时，确保冷启动、加载配置、最大化及渲染完毕后 100% 自动装载和恢复 sash
         for delay_ms in (50, 150, 300, 500, 800, 1200):
@@ -1688,23 +1787,25 @@ class PRServiceGUI:
         tree.heading("dff3",     text="dff3")
         tree.heading("rank",     text="Rank")
         
-        tree.column("idx",      width=26,  anchor="center", stretch=False)
-        tree.column("code",     width=52,  anchor="center", stretch=False)
-        tree.column("name",     width=64,  anchor="center", stretch=False)
-        tree.column("val",      width=48,  anchor="center", stretch=False)
-        tree.column("price",    width=50,  anchor="center", stretch=False)
-        tree.column("ladder",   width=110, anchor="center", stretch=True)
-        tree.column("bid_p",    width=90,  anchor="center", stretch=True)
-        tree.column("pioneer",  width=110, anchor="center", stretch=True)
-        tree.column("decision", width=140, anchor="center", stretch=True)
-        tree.column("dff2",     width=44,  anchor="center", stretch=False)
-        tree.column("dff3",     width=44,  anchor="center", stretch=False)
-        tree.column("rank",     width=40,  anchor="center", stretch=False)
+        saved_widths = self.config.get("column_widths", {})
+        for c in self._BASE_FIXED_COLS:
+            def_w = self.DEFAULT_COLUMN_WIDTHS.get(c, 48)
+            min_w = self.MIN_COLUMN_WIDTHS.get(c, 35)
+            w = saved_widths.get(c, def_w)
+            if w < min_w:
+                w = def_w
+            is_stretch = c in ("ladder", "bid_p", "pioneer", "decision")
+            tree.column(c, width=w, minwidth=min_w, anchor="center", stretch=is_stretch)
         
         # 4. 设置动态列的表头与宽度，并绑定点击排序
         for ec in extra_cols:
             tree.heading(ec, text=ec, command=lambda c=ec, t=tree: self.sort_column(t, c, False))
-            tree.column(ec, width=48, anchor="center", stretch=True)
+            def_w = self.DEFAULT_COLUMN_WIDTHS.get(ec, 48)
+            min_w = self.MIN_COLUMN_WIDTHS.get(ec, 35)
+            w = saved_widths.get(ec, def_w)
+            if w < min_w:
+                w = def_w
+            tree.column(ec, width=w, minwidth=min_w, anchor="center", stretch=True)
             
         # 同时基础列也需要重新绑定排序
         for c in self._BASE_FIXED_COLS:
@@ -1734,24 +1835,20 @@ class PRServiceGUI:
         tree.heading("dff3",     text="dff3")
         tree.heading("rank",     text="Rank")
 
-        # 基础列宽
-        tree.column("idx",      width=26,  anchor="center", stretch=False)
-        tree.column("code",     width=52,  anchor="center", stretch=False)
-        tree.column("name",     width=64,  anchor="center", stretch=False)
-        tree.column("val",      width=48,  anchor="center", stretch=False)
-        tree.column("price",    width=50,  anchor="center", stretch=False)
-        tree.column("ladder",   width=110, anchor="center", stretch=True)
-        tree.column("bid_p",    width=90,  anchor="center", stretch=True)
-        tree.column("pioneer",  width=110, anchor="center", stretch=True)
-        tree.column("decision", width=140, anchor="center", stretch=True)
-        tree.column("dff2",     width=44,  anchor="center", stretch=False)
-        tree.column("dff3",     width=44,  anchor="center", stretch=False)
-        tree.column("rank",     width=40,  anchor="center", stretch=False)
+        # 统一读取持久化列宽（异常过小则自动清洗恢复为黄金默认值）
+        saved_widths = self.config.get("column_widths", {})
+        for col in all_cols:
+            def_w = self.DEFAULT_COLUMN_WIDTHS.get(col, 48)
+            min_w = self.MIN_COLUMN_WIDTHS.get(col, 35)
+            w = saved_widths.get(col, def_w)
+            if w < min_w:
+                w = def_w
+            is_stretch = col in ("ladder", "bid_p", "pioneer", "decision") or col in extra_cols
+            tree.column(col, width=w, minwidth=min_w, anchor="center", stretch=is_stretch)
 
-        # 追加自定义列的表头与列宽
+        # 追加自定义列的表头
         for ec in extra_cols:
             tree.heading(ec, text=ec)
-            tree.column(ec, width=48, anchor="center", stretch=True)
 
         scrollbar = ttk.Scrollbar(parent, orient="vertical", command=tree.yview,
                                   style="Slim.Vertical.TScrollbar")
@@ -1780,9 +1877,8 @@ class PRServiceGUI:
         tree.bind("<Control-c>", self.on_copy_shortcut)
         tree.bind("<Alt-c>", self.on_quick_order)
         tree.bind("<Alt-C>", self.on_quick_order)
-
-        # 绑定大小改变事件以自适应列宽
-        tree.bind("<Configure>", lambda e, t=tree: self._adjust_tree_column_widths(t))
+        # 绑定拖动表头分隔线调整列宽后的多表格同步与统一持久化
+        tree.bind("<ButtonRelease-1>", lambda e, t=tree: self._on_tree_column_drag_release(e, t), add="+")
 
         return tree
 

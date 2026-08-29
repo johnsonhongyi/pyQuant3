@@ -266,13 +266,23 @@ class TestPopularityResonanceFeatures(unittest.TestCase):
         self.assertIn("pattern_desc", r0)
 
     def test_popularity_gui_12_columns_structure(self):
-        """测试人气共振 GUI 的 12 列基础决策列定义"""
+        """测试人气共振 GUI 的 12 列基础决策列定义与默认列宽配置"""
         from popularity_resonance_gui import PRServiceGUI
         cols = PRServiceGUI._BASE_FIXED_COLS
         self.assertEqual(len(cols), 12)
         self.assertIn("ladder", cols)
         self.assertIn("bid_p", cols)
         self.assertIn("pioneer", cols)
+        self.assertIn("decision", cols)
+
+        # 验证默认列宽配置与居中方法
+        widths = PRServiceGUI.DEFAULT_COLUMN_WIDTHS
+        self.assertIn("ladder", widths)
+        self.assertIn("bid_p", widths)
+        self.assertIn("pioneer", widths)
+        self.assertIn("decision", widths)
+        self.assertTrue(widths["ladder"] >= 70)
+        self.assertTrue(hasattr(PRServiceGUI, "reset_sash_center"))
     def test_trade_flow_table_real_trade_logs(self):
         """测试 TradeFlowTable 能正确加载 TradeGateway 与 SQLite 中的真实交易流水"""
         from PyQt6.QtWidgets import QApplication
