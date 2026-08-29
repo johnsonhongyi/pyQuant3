@@ -142,6 +142,207 @@ class TestPopularityResonanceFeatures(unittest.TestCase):
         self.assertIn("盛达资源", gold_names)
         self.assertIn("赤峰黄金", gold_names)
 
+    def test_dynamic_feature_engine_time_slices_and_entry_points(self):
+        """测试 DynamicFeatureEngine 在不同交易时钟下的三大黄金挂单点推演"""
+        from popularity_resonance_service import DynamicFeatureEngine
+        engine = DynamicFeatureEngine()
+
+        # 1. 竞价期 (09:25) - 具备真金买压 (买压85%, 竞价2500万) 推演【买点 A: 09:25 竞价顶格挂单】
+        plan_auction = engine.infer_actionable_entry_points(
+            code="000017",
+            price=11.45,
+            stock_pct=9.99,
+            last_close=10.41,
+            bidding_amt_wan=2500.0,
+            seal_circ_ratio=5.2,
+            bid_pressure=85.0,
+            now_time_str="09:25:30"
+        )
+        self.assertEqual(plan_auction["action_code"], "BUY_AUCTION")
+        self.assertIn("09:25 竞价", plan_auction["action_type"])
+        self.assertEqual(plan_auction["suggested_price"], 11.45)
+
+        # 2. 开盘定龙期 (09:30:20) - 极速冲板 推演【买点 B: 涨停前秒级抢排】
+        plan_open_burst = engine.infer_actionable_entry_points(
+            code="002084",
+            price=5.80,
+            stock_pct=10.06,
+            last_close=5.27,
+            bid_pressure=90.0,
+            now_time_str="09:30:20"
+        )
+        self.assertEqual(plan_open_burst["action_code"], "BUY_MOMENTUM")
+        self.assertIn("秒级抢排", plan_open_burst["action_type"])
+
+        # 3. 盘中与分歧期 (10:15:00) - VWAP 均线支撑 推演【买点 C: 分歧低吸/反包】
+        plan_pullback = engine.infer_actionable_entry_points(
+            code="600540",
+            price=5.05,
+            stock_pct=4.5,
+            last_close=4.83,
+            vwap=4.98,
+            now_time_str="10:15:00"
+        )
+        self.assertEqual(plan_pullback["action_code"], "BUY_PULLBACK")
+        self.assertEqual(plan_pullback["suggested_price"], 4.98)
+
+    def test_counter_market_divergence_and_pioneer_dragon(self):
+        """测试大盘连续下跌/缩量冰点期，个股逆势高开与突发催化的【冰点逆势破局龙】感知"""
+        from popularity_resonance_service import DynamicFeatureEngine
+        engine = DynamicFeatureEngine()
+
+        # 场景 1: 大盘连跌弱势 (index_pct = -0.8%)，深中华A 逆势高开冲高 +9.99%，竞价真金 2000 万
+        res_counter = engine.evaluate_counter_market_divergence(
+            stock_pct=9.99,
+            index_pct=-0.8,
+            bidding_amt_wan=2000.0,
+            seal_circ_ratio=4.5
+        )
+        self.assertTrue(res_counter["is_counter_market"], "大盘弱势时逆势大涨应判定为破局龙")
+        self.assertEqual(res_counter["rs_divergence"], 10.79)
+        self.assertIn("💎 逆势冰点破局龙", res_counter["pioneer_tag"])
+
+        # 场景 2: 大盘下跌 (-0.5%)，个股同步下跌 (-1.2%)
+        res_sync = engine.evaluate_counter_market_divergence(
+            stock_pct=-1.2,
+            index_pct=-0.5
+        )
+        self.assertFalse(res_sync["is_counter_market"], "同步下跌不属于逆势破局")
+        self.assertIn("⏱️ 同步大盘博弈", res_sync["pioneer_tag"])
+
+    def test_three_dimensional_resonance_scoring_and_enrichment(self):
+        """测试三位一体综合评分模型：全网热度 + TDX 盘口真金 + ATS 天梯空间龙 + 诱多惩罚"""
+        from popularity_resonance_service import calculate_resonance_scores
+
+        em_mock = {"002084": 1, "000017": 2, "000001": 50, "999999": 3}
+        ths_mock = {"002084": 1, "000017": 3, "999999": 4}
+        tgb_mock = {"002084": 1, "000017": 2}
+        lh_mock = {"002084": 1}
+
+        # 运行三位一体共振评分 (在大盘弱势 index_pct = -0.6% 环境下)
+        results = calculate_resonance_scores(em_mock, ths_mock, tgb_mock, lh_mock, index_pct=-0.6)
+        self.assertTrue(len(results) > 0)
+
+        # 验证 Top 标的属性完整性
+        top1 = results[0]
+        self.assertIn("rs_divergence", top1)
+        self.assertIn("pioneer_tag", top1)
+        self.assertIn("entry_action", top1)
+        self.assertIn("suggested_price", top1)
+        self.assertIn("decision_status", top1)
+        self.assertGreater(top1["score"], 300, "多平台共振+盘口加成得分应显著高于基础分")
+
+    def test_quick_order_executor(self):
+        """测试一键直连交易终端与预埋单执行器 (QuickOrderExecutor)"""
+        from popularity_resonance_service import QuickOrderExecutor
+        executor = QuickOrderExecutor.get_instance()
+
+        res = executor.execute_quick_buy(
+            code="000017",
+            name="深中华A",
+            target_price=11.45,
+            shares=1000,
+            strategy_tag="💎 逆势冰点破局·09:25竞价挂单"
+        )
+        self.assertEqual(res["status"], "SUCCESS")
+        self.assertEqual(res["code"], "000017")
+        self.assertEqual(res["target_price"], 11.45)
+        self.assertIn("深中华A", res["msg"])
+
+    def test_limit_up_engine_popularity_resonance_injection(self):
+        """测试天梯引擎反向识别全网热搜与逆势破局龙标签"""
+        from ats.limit_up_engine import LimitUpEngine
+        engine = LimitUpEngine.get_instance()
+
+        df_mock = pd.DataFrame([
+            {"code": "000017", "name": "深中华A", "trade": 11.45, "percent": 9.99, "last_close": 10.41, "bid1": 11.45, "buy": 11.45},
+            {"code": "002084", "name": "海鸥住工", "trade": 5.80, "percent": 10.05, "last_close": 5.27, "bid1": 5.80, "buy": 5.80}
+        ]).set_index("code")
+
+        records = engine.scan_limit_up_records_from_df(df_mock, fetch_l2_quotes=False)
+        self.assertTrue(len(records) >= 2)
+        r0 = records[0]
+        self.assertIn("momentum_score", r0)
+        self.assertIn("pattern_desc", r0)
+
+    def test_popularity_gui_12_columns_structure(self):
+        """测试人气共振 GUI 的 12 列基础决策列定义"""
+        from popularity_resonance_gui import PRServiceGUI
+        cols = PRServiceGUI._BASE_FIXED_COLS
+        self.assertEqual(len(cols), 12)
+        self.assertIn("ladder", cols)
+        self.assertIn("bid_p", cols)
+        self.assertIn("pioneer", cols)
+    def test_trade_flow_table_real_trade_logs(self):
+        """测试 TradeFlowTable 能正确加载 TradeGateway 与 SQLite 中的真实交易流水"""
+        from PyQt6.QtWidgets import QApplication
+        _ = QApplication.instance() or QApplication([])
+
+        from ats.ui.trade_flow import TradeFlowTable, TradeFlowDialog
+        from trade_gateway import TradeGateway
+        from popularity_resonance_service import QuickOrderExecutor
+
+        # 触发一次模拟/实盘一键挂单
+        executor = QuickOrderExecutor.get_instance()
+        res = executor.execute_quick_buy(
+            code="300142",
+            name="沃森生物",
+            target_price=14.28,
+            shares=1000,
+            strategy_tag="👑 空间真龙·一键抢单"
+        )
+        self.assertTrue(res["ok"])
+
+        # 初始化 TradeFlowTable 并加载流水
+        table_widget = TradeFlowTable()
+        table_widget.load_real_trades()
+        self.assertTrue(len(table_widget._all_flow_list) >= 1)
+        
+        # 验证最新一条流水包含 300142 沃森生物
+        found = any("300142" in row[1] and "沃森生物" in row[2] for row in table_widget._all_flow_list)
+        self.assertTrue(found)
+
+        # 测试表头点击排序 (例如点击第4列成交价排序、第6列成交金额排序)
+        table_widget._on_header_clicked(4) # 点击成交价
+        self.assertEqual(table_widget._sort_col, 4)
+        prices = [float(r[4]) for r in table_widget._all_flow_list]
+        self.assertEqual(prices, sorted(prices, reverse=True))
+
+        table_widget._on_header_clicked(4) # 再次点击升序
+        prices_asc = [float(r[4]) for r in table_widget._all_flow_list]
+        self.assertEqual(prices_asc, sorted(prices_asc, reverse=False))
+
+        # 测试点击联动与键盘上下键联动防抖
+        clicked_stocks = []
+        table_widget.stock_clicked.connect(lambda c, n: clicked_stocks.append((c, n)))
+        table_widget._on_cell_clicked(0, 1)
+        self.assertTrue(len(clicked_stocks) >= 1)
+
+        # 测试上下键 currentCellChanged 防抖触发
+        table_widget._on_current_cell_changed(0, 1, -1, -1)
+        self.assertIsNotNone(table_widget._pending_link)
+
+    def test_trade_flow_dialog_structure(self):
+        """测试 TradeFlowDialog 独立弹窗组件初始化、持久化与刷新接口"""
+        from PyQt6.QtWidgets import QApplication
+        from PyQt6.QtCore import Qt
+        _ = QApplication.instance() or QApplication([])
+
+        from ats.ui.trade_flow import TradeFlowDialog
+        dlg = TradeFlowDialog()
+        self.assertIsNotNone(dlg.flow_table)
+        dlg.refresh_data()
+        self.assertIn("ATS 今日交易流水日志", dlg.windowTitle())
+
+        # 验证独立窗口属性 (独立顶层窗口，带关闭与最小最大化按钮)
+        flags = dlg.windowFlags()
+        self.assertTrue(bool(flags & Qt.WindowType.Window))
+
+        # 验证位置保存与恢复
+        dlg._save_geometry()
+        dlg._restore_geometry()
+
 
 if __name__ == '__main__':
     unittest.main()
+

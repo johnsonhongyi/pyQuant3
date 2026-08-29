@@ -991,9 +991,29 @@ class LimitUpEngine:
                 elif is_bullish_engulfing:
                     r["tier_tag"] = "📈 阳包阴跟涨"
                     desc_tag = f"📈 阳包阴({momentum_score:.0f}分)"
-                else:
-                    r["tier_tag"] = "📊 板块跟涨标的"
-                    desc_tag = f"📊 跟涨蓄势({momentum_score:.0f}分)"
+            # ── 💡 注入全网人气热搜与大盘逆势共振感知 ──
+            try:
+                from popularity_resonance_service import LadderResonanceBridge, DynamicFeatureEngine
+                pop_cache = LadderResonanceBridge.get_instance().get_cached_popularity_data()
+                em_pop = pop_cache.get("em", {})
+                ths_pop = pop_cache.get("ths", {})
+                em_rk = em_pop.get(code_str)
+                ths_rk = ths_pop.get(code_str)
+
+                if em_rk and ths_rk and em_rk <= 20 and ths_rk <= 20:
+                    r["resonance"] = f"💎 全网共振(东#{em_rk}|花#{ths_rk})"
+                elif em_rk and em_rk <= 10:
+                    r["resonance"] = f"🔥 东财热搜#{em_rk}"
+                elif ths_rk and ths_rk <= 10:
+                    r["resonance"] = f"🔥 同花顺热搜#{ths_rk}"
+                
+                # 逆势破局感知
+                if sh_pct <= -0.2 and pct >= 3.0:
+                    r["pioneer_tag"] = "💎 逆势冰点破局龙"
+                    if "破局" not in desc_tag:
+                        desc_tag = f"{desc_tag}|💎逆势破局"
+            except Exception:
+                pass
 
             r["momentum_score"] = momentum_score
             r["seal_quality_score"] = momentum_score

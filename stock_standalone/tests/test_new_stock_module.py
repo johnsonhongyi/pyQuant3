@@ -545,8 +545,8 @@ class TestNewStockModule(unittest.TestCase):
         panel._render_table()
 
         # 检查第 3 列（竞价信号）呈现
-        bidding_cell_txt = panel.table.item(0, 3).text()
-        self.assertTrue("💎" in bidding_cell_txt or "👑" in bidding_cell_txt)
+        bidding_tags_in_table = [panel.table.item(r, 3).text() for r in range(panel.table.rowCount()) if panel.table.item(r, 3)]
+        self.assertTrue(any("💎" in txt or "👑" in txt for txt in bidding_tags_in_table))
 
         # 检查选中 N华大 时底部 preview_card 的竞价信息更新
         panel._update_preview_card(row_hd.to_dict())

@@ -1,3 +1,96 @@
+## 2026-08-29 22:52
+- [x] **深度排查并彻底清除 `popularity_resonance_gui.py` 的 `setup_ui` 中残留的 `<space>` 挂单绑定 (`stock_standalone/popularity_resonance_gui.py`, `stock_standalone/tests/test_popularity_resonance_features.py`)**：
+    - [x] **定位残留元凶**：在 `setup_ui`（第 1633 行）中存在遗留的 `self.root.bind("<space>", self.on_quick_order)`，导致界面初始化时又将空格键重新绑定为挂单事件；
+    - [x] **彻底清洗与物理收敛**：
+        - 彻底清除 `setup_ui` 中的 `self.root.bind("<space>")`；
+        - 全局仅严格响应 **`<Alt-c>`** 与 **`<Alt-C>`**；
+        - 连板天梯表格与人气共振中的空格键彻底恢复原有的日常操作，绝不再触发任何一键挂单！
+    - [x] **全量 25 项跨模块自动化回归测试 100% 全部 PASSED**。
+
+## 2026-08-29 22:35
+- [x] **彻底取消空格键触发挂单，全面收敛为 `Alt+C` 唯一挂单快捷键 (`stock_standalone/ats/ui/daily_limit_up_dialog.py`, `stock_standalone/popularity_resonance_gui.py`, `stock_standalone/tests/test_popularity_resonance_features.py`)**：
+    - [x] **连板天梯 (`DailyLimitUpDialog`) 快捷键收敛**：
+        - 移除 `keyPressEvent` 中的 `Key_Space` 交易拦截，彻底防止日常浏览空格加自选时误触挂单；
+        - 挂单唯一快捷键收敛为 **`Alt+C`**（或 `Alt+c`）；
+        - 状态栏推演提示升级为：`[按Alt+C一键挂单]`；
+    - [x] **人气共振 (`popularity_resonance_gui.py`) 快捷键收敛**：
+        - 移除 `self.root` 与各 `Treeview` 上的 `<space>` 交易事件绑定；
+        - 仅响应 **`<Alt-c>`** 与 **`<Alt-C>`** 触发直连挂单；
+        - 状态栏推演提示文案同步更新为：`[按Alt+C一键挂单]`；
+    - [x] **全量 25 项跨模块自动化回归测试 100% 全部 PASSED**。
+
+## 2026-08-29 22:30
+- [x] **实现交易日志鼠标单击与键盘上下键（↑ / ↓）平滑防抖联动通达信、同花顺与全局主窗口 (`stock_standalone/ats/ui/trade_flow.py`, `stock_standalone/popularity_resonance_gui.py`, `stock_standalone/tests/test_popularity_resonance_features.py`)**：
+    - [x] **PyQt6 交易流水 (`TradeFlowTable`) 联动引擎**：
+        - 鼠标单击任意单元格/行立即触发物理联动 `_do_broadcast_link`；
+        - 键盘方向键 `↑` / `↓` 移动当前选定行时，触发 60ms 平滑防抖定时器，松开瞬间精准广播；
+        - 直连 `linkage_service` 物理推送到通达信/同花顺并同步激活 `ATSMainWindow.link_stock`；
+        - 双击行自动广播并打开 SBC 日内分时走势图；
+    - [x] **人气共振 Tkinter 交易日志窗口 (`show_trade_log_window`) 联动引擎**：
+        - 绑定 `<<TreeviewSelect>>` 事件，鼠标单击某行或键盘上下键移动选定行时，毫秒级调用 `self.tree_scroll_to_code(code, vis=True)` 联动 TDX/同花顺并同步定位人气共振主表格光标；
+    - [x] **全量 25 项跨模块自动化回归测试 100% 全部 PASSED**。
+
+## 2026-08-29 22:25
+- [x] **实现交易日志作为完全独立顶层窗口打开、窗口几何位置自动持久化与多字段自然排序 (`stock_standalone/ats/ui/trade_flow.py`, `stock_standalone/popularity_resonance_gui.py`, `stock_standalone/tests/test_popularity_resonance_features.py`)**：
+    - [x] **彻底根治天梯交易日志嵌入在主窗口内部无法正常关闭问题**：
+        - `TradeFlowDialog` 重构为真正的独立顶层原生窗口 (`QDialog` + `Qt.WindowType.Window`)，拥有独立的操作系统任务栏、最小化/最大化/关闭 (`X`) 按钮与顶栏 `❌ 关闭 (Esc)` 按钮；
+        - 支持按键盘 `Escape`（Esc键）瞬时一键关闭；
+    - [x] **窗口几何位置与尺寸自动持久化记忆**：
+        - `TradeFlowDialog` 与人气共振 `show_trade_log_window` 自动将窗口坐标 `[x, y, w, h]` 原子落盘到 `window_config.json` 与 `popularity_resonance_config.json`；
+        - 再次呼出时毫秒级精准恢复上次关闭时的屏幕位置与大小，并具备多显示器防越界自愈防护；
+    - [x] **全量交易流水支持点击表头多字段自然排序**：
+        - 支持点击“时间”、“代码”、“名称”、“方向”、“成交价”、“成交数量”、“成交金额”、“距今涨跌”、“策略来源”表头进行智能升序/降序切换；
+        - 自动适配数字、金额、百分比与时间戳的自然类型排序，分页与刷新时保持当前排序规则；
+    - [x] **全量 25 项跨模块自动化回归测试 100% 全部 PASSED**。
+
+## 2026-08-29 22:15
+- [x] **统一连板天梯与人气共振窗口一键直连交易终端快捷键为 `Space` / `Alt+C` (`stock_standalone/popularity_resonance_gui.py`, `stock_standalone/ats/ui/daily_limit_up_dialog.py`, `stock_standalone/tests/test_popularity_resonance_features.py`)**：
+    - [x] **快捷键无缝切换为 `Alt+C`**：
+        - 连板天梯独立窗口（`DailyLimitUpDialog`）支持 `Space` 或 `Alt+C` 一键直连交易终端抢单；
+        - 人气共振窗口（`PRServiceGUI`）全局 `root` 与各 Treeview 全面支持 `Space` 或 `Alt+C` 一键挂单；
+        - 状态栏推演提示文案与引导同步升级为 `[按空格/Alt+C一键挂单]`；
+    - [x] **全量 25 项跨模块自动化回归测试 100% 全部 PASSED**。
+
+## 2026-08-29 22:05
+- [x] **根治人气共振信息提示被联动覆盖、挂单价格显示 `--元` 缺陷 & 落地天梯与人气窗口一键呼出交易日志流水 (`stock_standalone/popularity_resonance_gui.py`, `stock_standalone/ats/ui/daily_limit_up_dialog.py`, `stock_standalone/ats/ui/trade_flow.py`, `stock_standalone/trade_gateway.py`, `stock_standalone/tests/test_popularity_resonance_features.py`)**：
+    - [x] **根治点击后【决策推演】被 `已联动定位: 002230` 覆盖问题**：
+        - `tree_scroll_to_code` 识别到已有【决策推演】提示时，平滑升级为 `【决策推演·已联动】` 并完整保留梯队、买压、逆势偏离与挂单价格，不再粗暴冲刷覆盖；
+    - [x] **根治非交易时段与静态冷启动下挂单价格显示 `--元` 缺陷**：
+        - 引入多级价格回退链条（`price` -> `last_close` -> `prev_close` -> `close`），缺失价格时智能推导演变为 `👑 09:25 竞价定盘挂单` 或 `🔥 开盘回踩均线低吸`，绝不输出 `--元`；
+    - [x] **天梯与人气窗口无缝呼出 `📋 今日交易流水` 独立窗口**：
+        - `TradeFlowTable` 直连 `TradeGateway` 与 SQLite (`signal_strategy.db` 的 `mock_trade_log`)，一键挂单（Space / Alt+B）后即时记账并呈现全部流水；
+        - 天梯独立窗口（`DailyLimitUpDialog`）顶部工具栏及右键菜单新增 **`📋 交易日志`** 按钮与菜单项，点击一键拉起 `TradeFlowDialog`；
+        - 人气共振 GUI 顶部新增 **`📋 交易日志`** 按钮，支持弹窗查看所有实盘/模拟挂单记录；
+    - [x] **全量 25 项跨模块自动化回归测试 100% 全部 PASSED**。
+
+## 2026-08-29 14:45
+- [x] **实现 Space / Alt+B 键盘一键直连交易终端与通达信预埋单 (0.5s抢单)、人气共振 12 列决策表头与天梯反向感知全面落地 (`stock_standalone/popularity_resonance_service.py`, `stock_standalone/popularity_resonance_gui.py`, `stock_standalone/ats/limit_up_engine.py`, `stock_standalone/ats/ui/daily_limit_up_dialog.py`, `stock_standalone/tests/test_popularity_resonance_features.py`)**：
+    - [x] **一键直连交易终端挂单执行引擎 (`QuickOrderExecutor`)**：
+        - 响应键盘 `Space`（空格键）或 `Alt+B` 快捷键，0.5 秒内将选中股票代码、推演委托价格（09:25 竞价定盘价/涨停价）和预设仓位直连推送到通达信/同花顺终端；
+        - 自动同步写入 TradeGateway 账本（`signal_strategy.db`）闭环追踪，彻底消除手动输代码与价格的紧张延误；
+    - [x] **人气共振 GUI 核心 12 列决策表头与推演提示**：
+        - 表格直观呈现 4 大核心决策列：`天梯梯队` (如 `👑 空间高度龙(99分)`)、`买压/封单` (如 `96%|3.6亿`)、`逆势偏离` (如 `💎 逆势冰点破局`)、`挂单决策` (如 `👑 09:25 竞价 5.80元 挂单`)；
+        - 选中某行时底部状态栏实时高亮提示推演决策与一键挂单引导；
+    - [x] **连板天梯反向感知全网人气与逆势破局龙**：
+        - 天梯引擎毫秒级反向提取全网热搜（东财/同花顺热榜前列），在“形态与质量”及“共振状态”打上 `💎 全网共振(东#1|花#2)` 与 `💎 逆势冰点破局龙` 标签；
+        - 天梯独立窗口（`DailyLimitUpDialog`）全面接入 `Space` / `Alt+B` 一键直连挂单；
+    - [x] **全量 23 项跨模块自动化回归测试 100% 全部 PASSED**。
+
+## 2026-08-29 14:30
+- [x] **实现全网人气共振与 ATS 连板天梯、TDX L2 盘口双向共振挖掘、大盘逆势破局龙感知与三大黄金挂单点推演升级 (`stock_standalone/popularity_resonance_service.py`, `stock_standalone/tests/test_popularity_resonance_features.py`)**：
+    - [x] **时钟驱动的动态结构特征挖掘引擎 (`DynamicFeatureEngine`)**：
+        - 依据实盘时钟自动切换 5 大挖掘算子（竞价突破、秒级定龙、冰点逆势破局、分时承接反包、尾盘锁仓）；
+        - **大盘逆势偏离与冰点破局龙感知 (`evaluate_counter_market_divergence`)**：在大盘连续回踩缩量冰点期，精准识别外盘突发催化或跳空高开的逆势先锋（如深中华A、白银有色、海鸥住工等），计算逆势偏离度 ($RS = Pct_{个股} - Pct_{大盘}$)，打破大盘弱势犹豫；
+        - **极窄时间窗口三大黄金挂单点推演 (`infer_actionable_entry_points`)**：推演【买点 A: 09:25 竞价定盘价】、【买点 B: 09:30 秒级抢跑回踩价】、【买点 C: VWAP 均线支撑价】并提示可参与时间窗口倒计时；
+    - [x] **打通全链路天梯与 TDX 盘口桥接中枢 (`LadderResonanceBridge`)**：
+        - 直连 ATS 连板天梯引擎 (`LimitUpEngine`)，获取空间高度龙、连板梯队标签（99分/97分）与封流比；
+        - 直连 `TDXRealtimeFetcher`，毫秒级补齐买盘压强（$\ge 80\%$）、封单金额（万）与大单流向；
+    - [x] **双向共振决策与诱多出货过滤 (`TwoWayResonanceHub` & `calculate_resonance_scores`)**：
+        - 先发探测（天梯/盘口） $\to$ 全网合力验证（东财/同花顺热榜跃升速度） $\to$ 确立顶级共振真龙；
+        - 升级三位一体综合评分模型：$Score = Score_{全网热度} + Score_{TDX真金盘口} + Score_{ATS天梯梯队}$；
+        - 识破并拦截“热搜虚高但盘口卖压重”的诱多出货陷阱；
+    - [x] **全量 20 项跨模块自动化回归测试 100% 全部 PASSED**。
+
 ## 2026-08-28 23:30
 - [x] **彻底根治 Acer `PSAgent` 后台服务死循环疯狂拉起 `PredatorSense.exe` 界面的底层真实元凶 (`webTools/window_manager/core.py`, `gemini.md`)**：
     - [x] **根本原因深度解构**：
