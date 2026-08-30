@@ -291,7 +291,26 @@ class QuickOrderExecutor:
         except Exception as e:
             logger.debug(f"TradeGateway 记录异常: {e}")
 
-        msg = f"已直连交易终端挂单: [{code_str} {name}] 委托价:{target_price:.2f}元 数量:{shares}股 ({strategy_tag})"
+        # 4. [⚡ 核心实战] 直连唤起通达信/同花顺交易终端并精准填单 (安全等待确认)
+        trade_res = None
+        try:
+            from JohnsonUtil.trade_automation import TradeAutomationEngine
+            auto_engine = TradeAutomationEngine.get_instance()
+            trade_res = auto_engine.execute_lightning_order(
+                code=code_str,
+                name=name or code_str,
+                target_price=target_price,
+                shares=shares,
+                strategy_tag=strategy_tag
+            )
+        except Exception as e:
+            logger.debug(f"TradeAutomation 呼出异常: {e}")
+
+        if trade_res and trade_res.get("trade_hwnd"):
+            msg = f"已直连通达信交易终端: [{code_str} {name}] 委托价:{target_price:.2f}元 数量:{shares}股 (已载入闪电买入，请核对并确认【买入】)"
+        else:
+            msg = f"已直连交易终端挂单: [{code_str} {name}] 委托价:{target_price:.2f}元 数量:{shares}股 ({strategy_tag})"
+
         try:
             logger.info(f"[一键挂单成功] {msg}")
         except Exception:
@@ -303,7 +322,8 @@ class QuickOrderExecutor:
             "name": name,
             "target_price": target_price,
             "shares": shares,
-            "msg": msg
+            "msg": msg,
+            "trade_res": trade_res
         }
 
 class DynamicFeatureEngine:

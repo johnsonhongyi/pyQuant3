@@ -249,6 +249,29 @@ class TestPopularityResonanceFeatures(unittest.TestCase):
         self.assertEqual(res["target_price"], 11.45)
         self.assertIn("深中华A", res["msg"])
 
+    def test_trade_automation_engine_and_self_check(self):
+        """测试 TradeAutomationEngine 的自测自检与闪电下单参数装载能力"""
+        from JohnsonUtil.trade_automation import TradeAutomationEngine
+        engine = TradeAutomationEngine.get_instance()
+
+        # 1. 自测自检环境探测
+        env_status = engine.check_trade_environment()
+        self.assertIn("tdx_running", env_status)
+        self.assertIn("ready", env_status)
+
+        # 2. 执行闪电挂单参数组装与剪贴板备份
+        res = engine.execute_lightning_order(
+            code="002907",
+            name="华森制药",
+            target_price=15.74,
+            shares=1000,
+            strategy_tag="👑 天梯连板·🔥 强势主升首板"
+        )
+        self.assertTrue(res["ok"])
+        self.assertEqual(res["code"], "002907")
+        self.assertEqual(res["price"], 15.74)
+        self.assertEqual(res["shares"], 1000)
+
     def test_limit_up_engine_popularity_resonance_injection(self):
         """测试天梯引擎反向识别全网热搜与逆势破局龙标签"""
         from ats.limit_up_engine import LimitUpEngine

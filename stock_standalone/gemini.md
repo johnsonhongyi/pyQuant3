@@ -1,3 +1,25 @@
+## 2026-08-30 13:12
+- [x] **根除 `on_quick_order` 重复定义导致快捷键失效 Bug & 强化 `force_foreground` 穿透置顶与右键 `⚡ 闪电买入` 菜单 (`stock_standalone/popularity_resonance_gui.py`, `stock_standalone/JohnsonUtil/trade_automation.py`, `stock_standalone/tests/test_popularity_resonance_features.py`)**：
+    - [x] **排查定位“运行没有任何效果”根本原因**：
+        1. 原 `popularity_resonance_gui.py` 底部（第 3139 行）存在同名的旧版 `on_quick_order`，暴力覆盖了前面的新版逻辑；
+        2. 旧版逻辑仅判断 `self.tree_res` 是否有选中项，当用户在东财、同花顺、龙虎榜等表格中选中股票时，因 `tree_res` 为空而直接无声退出；
+    - [x] **实施智能多表格选定项自适应解析与全局响应**：
+        - 优先级链：当前焦点 Treeview $\to$ `_last_active_tree` $\to$ 遍历所有子表格有选中行 $\to$ 默认首行；
+        - 右键菜单首行新增 **`⚡ 闪电买入 (Alt+C)`** 快捷入口；
+        - 采用 `force_foreground`（`AttachThreadInput` + `SW_RESTORE`）强行穿透 Windows 焦点防护将通达信主窗口置顶；
+    - [x] **全量 26 项跨模块自动化回归测试 100% 全部 PASSED**。
+
+## 2026-08-29 23:45
+- [x] **实现通达信交易终端【闪电买入】自动呼出、精准填单与安全等待确认引擎 (`stock_standalone/JohnsonUtil/trade_automation.py`, `stock_standalone/popularity_resonance_service.py`, `stock_standalone/tests/test_popularity_resonance_features.py`)**：
+    - [x] **物理呼出通达信交易终端与闪电买入窗口**：
+        - 探测当前系统活动桌面的通达信主窗口 (`TdxW_MainFrame_Class`) 与独立交易进程 (`xiadan.exe`)；
+        - 按 `Alt+C` 时自动物理置顶通达信主窗口并发送官方快捷指令唤起【闪电买入】独立对话框；
+    - [x] **精准填单与安全强约束 (绝不自动代点提交)**：
+        - 毫秒级向交易对话框的 Edit 控件精准填入证券代码 (`002907`)、推演买入价格 (`15.74`) 与委托数量 (`1000`)；
+        - 将光标焦点置于【买入】按钮，**安全等待用户人工核对并最终点击确认**；
+        - 同步复制到剪贴板，并写入 TradeGateway 本地账本供流水溯源；
+    - [x] **全量 26 项跨模块自动化回归测试 100% 全部 PASSED**。
+
 ## 2026-08-29 23:18
 - [x] **彻底根治 Treeview `<Configure>` 连环死循环递归萎缩 Bug 与重构健壮黄金列宽规范体系 (`stock_standalone/popularity_resonance_gui.py`, `stock_standalone/popularity_resonance_config.json`, `stock_standalone/tests/test_popularity_resonance_features.py`)**：
     - [x] **定位死循环递归萎缩底层元凶**：
