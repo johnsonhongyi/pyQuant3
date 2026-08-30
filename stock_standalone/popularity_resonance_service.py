@@ -269,15 +269,7 @@ class QuickOrderExecutor:
         except Exception as e:
             logger.debug(f"物理联动广播异常: {e}")
 
-        # 2. 剪贴板复制买入代码与价格指令
-        try:
-            import pyperclip
-            clip_str = f"{code_str} {target_price:.2f}" if target_price > 0 else code_str
-            pyperclip.copy(clip_str)
-        except Exception:
-            pass
-
-        # 3. 记录到 TradeGateway 模拟/实盘账本
+        # 2. 记录到 TradeGateway 模拟/实盘账本
         try:
             from trade_gateway import TradeGateway
             gw = TradeGateway.get_instance()

@@ -259,7 +259,7 @@ class TestPopularityResonanceFeatures(unittest.TestCase):
         self.assertIn("tdx_running", env_status)
         self.assertIn("ready", env_status)
 
-        # 2. 执行闪电挂单参数组装与剪贴板备份
+        # 2. 执行闪电挂单参数组装与下单调用
         res = engine.execute_lightning_order(
             code="002907",
             name="华森制药",

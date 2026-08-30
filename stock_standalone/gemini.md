@@ -1,3 +1,13 @@
+## 2026-08-30 22:38
+- [x] **彻底删除挂单/买入时的剪贴板备用机制，保持剪贴板干净与代码纯粹 (`stock_standalone/popularity_resonance_service.py`, `stock_standalone/JohnsonUtil/trade_automation.py`, `stock_standalone/tests/test_popularity_resonance_features.py`)**：
+    - [x] **移除冗余剪贴板写入操作**：
+        - 从 `popularity_resonance_service.py` 中的 `execute_quick_buy` 移除 `pyperclip.copy(clip_str)` 逻辑；
+        - 从 `JohnsonUtil/trade_automation.py` 中的 `execute_lightning_order` 移除 `pyperclip.copy(clip_str)` 逻辑；
+        - 挂单执行时不再静默污染系统剪贴板，专注于直连交易终端填单与本地账本记录；
+    - [x] **优化提示信息与回归测试**：
+        - 优化未识别到交易窗口时的回退提示文案；
+        - 更新相关测试用例注释并验证通过（11项回归测试 100% 全部通过）。
+
 ## 2026-08-30 13:12
 - [x] **根除 `on_quick_order` 重复定义导致快捷键失效 Bug & 强化 `force_foreground` 穿透置顶与右键 `⚡ 闪电买入` 菜单 (`stock_standalone/popularity_resonance_gui.py`, `stock_standalone/JohnsonUtil/trade_automation.py`, `stock_standalone/tests/test_popularity_resonance_features.py`)**：
     - [x] **排查定位“运行没有任何效果”根本原因**：

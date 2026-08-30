@@ -335,20 +335,12 @@ class TradeAutomationEngine:
         """
         code_str = str(code).strip().zfill(6)
         
-        # 1. 剪贴板复制备份 (格式: 代码 价格)
-        try:
-            import pyperclip
-            clip_str = f"{code_str} {target_price:.2f}" if target_price > 0 else code_str
-            pyperclip.copy(clip_str)
-        except Exception:
-            pass
-
-        # 2. 尝试获取或呼出交易窗口
+        # 1. 尝试获取或呼出交易窗口
         trade_hwnd = self.find_lightning_buy_window()
         if not trade_hwnd:
             trade_hwnd = self.open_lightning_buy_dialog(code_str)
 
-        # 3. 填入参数并聚焦确认
+        # 2. 填入参数并聚焦确认
         populated = False
         if trade_hwnd:
             populated = self.populate_order_details(trade_hwnd, code_str, target_price, shares)
@@ -362,5 +354,5 @@ class TradeAutomationEngine:
             "price": target_price,
             "shares": shares,
             "msg": f"[{code_str} {name}] 委托价:{target_price:.2f}元 数量:{shares}股 -> " +
-                   ("已载入交易终端，请核对并确认【买入】" if trade_hwnd else "已激活通达信并复制指令到剪贴板，请核对确认")
+                   ("已载入交易终端，请核对并确认【买入】" if trade_hwnd else "已尝试呼出交易终端，请核对确认")
         }
