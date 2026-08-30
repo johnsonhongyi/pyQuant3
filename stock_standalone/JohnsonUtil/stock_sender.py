@@ -363,12 +363,18 @@ class StockSender:
     def get_handle_by_pid(pid):
         handles = []
         def callback(hwnd, _):
-            if win32gui.IsWindowVisible(hwnd):
-                _, found_pid = win32process.GetWindowThreadProcessId(hwnd)
-                if found_pid == pid:
-                    handles.append(hwnd)
+            try:
+                if win32gui.IsWindow(hwnd) and win32gui.IsWindowVisible(hwnd):
+                    _, found_pid = win32process.GetWindowThreadProcessId(hwnd)
+                    if found_pid == pid:
+                        handles.append(hwnd)
+            except Exception:
+                pass
             return True
-        win32gui.EnumWindows(callback, None)
+        try:
+            win32gui.EnumWindows(callback, None)
+        except Exception:
+            pass
         return handles[0] if handles else 0
 
     @staticmethod

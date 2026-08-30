@@ -825,6 +825,13 @@ class PRServiceGUI:
             
         menu = tk.Menu(self.root, tearoff=0)
 
+        # ⚡ 闪电买入直连
+        menu.add_command(
+            label=f"⚡ 闪电买入 ({code} {name}) [Alt+C]",
+            command=self.on_quick_order
+        )
+        menu.add_separator()
+
         # 📋 复制股票代码
         menu.add_command(
             label=f"📋 复制代码 ({code})",
@@ -2176,19 +2183,63 @@ class PRServiceGUI:
                     self.tree_scroll_to_code(code, vis=True)
 
     def on_quick_order(self, event=None):
-        """[🚀 核心实战] 键盘 Space / Alt+C 一键直连交易终端挂单与跟单"""
-        tree = getattr(self, '_last_active_tree', self.tree_res)
-        if not tree or not tree.winfo_exists():
-            return "break"
-        selection = tree.selection()
+        """[🚀 核心实战] 键盘 Alt+C / 闪电买入 一键直连通达信交易终端与精准填单"""
+        target_tree = None
+        selection = []
+
+        # 优先级 1: 当前获得焦点的控件如果是 Treeview
+        try:
+            focused = self.root.focus_get()
+            if isinstance(focused, ttk.Treeview):
+                sel = focused.selection()
+                if sel:
+                    target_tree = focused
+                    selection = sel
+        except Exception:
+            pass
+
+        # 优先级 2: 上次激活的表格
         if not selection:
+            tree_candidate = getattr(self, '_last_active_tree', None)
+            if tree_candidate and tree_candidate.winfo_exists():
+                sel = tree_candidate.selection()
+                if sel:
+                    target_tree = tree_candidate
+                    selection = sel
+
+        # 优先级 3: 遍历所有子表格查找有选中的行
+        if not selection:
+            for t in (self.tree_res, self.tree_em, self.tree_ths, self.tree_lh, self.tree_tgb):
+                if t and t.winfo_exists():
+                    sel = t.selection()
+                    if sel:
+                        target_tree = t
+                        selection = sel
+                        break
+
+        # 优先级 4: 如果都没有选中，默认选中第 1 个有数据的表格的第 1 行
+        if not selection:
+            for t in (self.tree_res, self.tree_em, self.tree_ths, self.tree_lh, self.tree_tgb):
+                if t and t.winfo_exists():
+                    children = t.get_children()
+                    if children:
+                        target_tree = t
+                        selection = [children[0]]
+                        t.selection_set(children[0])
+                        t.focus(children[0])
+                        break
+
+        if not target_tree or not selection:
+            if hasattr(self, 'lbl_status'):
+                self.lbl_status.config(text="⚠️ 暂无可操作的股票标的，请先查询刷新！", fg="orange")
             return "break"
-        item = tree.item(selection[0])
+
+        item = target_tree.item(selection[0])
         values = item.get("values")
         if not values or len(values) < 2:
             return "break"
 
-        cols = list(tree["columns"])
+        cols = list(target_tree["columns"])
         code_idx = cols.index("code") if "code" in cols else 1
         name_idx = cols.index("name") if "name" in cols else 2
         price_idx = cols.index("price") if "price" in cols else 4
@@ -2206,6 +2257,16 @@ class PRServiceGUI:
         except Exception:
             target_p = 0.0
 
+        # 如果当前现价无效，尝试从挂单决策文本中提取数字价格（如 '👑 挂单 15.74元'）
+        if target_p <= 0 and dec_str:
+            import re
+            m = re.search(r'(\d+\.?\d*)\s*元', dec_str)
+            if m:
+                try:
+                    target_p = float(m.group(1))
+                except Exception:
+                    pass
+
         try:
             from popularity_resonance_service import QuickOrderExecutor
             executor = QuickOrderExecutor.get_instance()
@@ -2218,9 +2279,11 @@ class PRServiceGUI:
             )
             msg = res.get("msg", "一键挂单成功")
             if hasattr(self, 'lbl_status'):
-                self.lbl_status.config(text=f"✅ {msg} [已记入交易流水，点击'📋 交易日志'查看]", fg="#ff3b30")
+                self.lbl_status.config(text=f"⚡ {msg}", fg="#ff3b30")
         except Exception as ex:
             service_logger.error(f"一键挂单执行异常: {ex}")
+            if hasattr(self, 'lbl_status'):
+                self.lbl_status.config(text=f"❌ 一键挂单异常: {ex}", fg="red")
         return "break"
 
     def show_trade_log_window(self):
@@ -3136,47 +3199,6 @@ class PRServiceGUI:
         except Exception as e:
             service_logger.debug(f"Auto calculate hits failed: {e}")
 
-    def on_quick_order(self, event=None):
-        """
-        [🚀 核心实战] 响应 Space 或 Alt+B 快捷键，触发一键直连挂单执行
-        0.5 秒内将代码、推演目标买价（09:25竞价/涨停价）和预设仓位直连推送到通达信/同花顺终端
-        """
-        target_tree = getattr(self, '_last_active_tree', self.tree_res)
-        if not target_tree or not target_tree.winfo_exists():
-            return
-        sel = target_tree.selection()
-        if not sel:
-            return
-        vals = target_tree.item(sel[0], "values")
-        if not vals or len(vals) < 5:
-            return
-        cols = list(target_tree["columns"])
-        code_idx = cols.index("code") if "code" in cols else 1
-        name_idx = cols.index("name") if "name" in cols else 2
-        price_idx = cols.index("price") if "price" in cols else 4
-        
-        code = str(vals[code_idx]).strip().zfill(6)
-        name = str(vals[name_idx]).strip().replace("★ ", "")
-        price_val = 0.0
-        try:
-            price_val = float(str(vals[price_idx]).replace("--", "0"))
-        except Exception:
-            pass
-
-        try:
-            from popularity_resonance_service import QuickOrderExecutor
-            executor = QuickOrderExecutor.get_instance()
-            res = executor.execute_quick_buy(
-                code=code,
-                name=name,
-                target_price=price_val,
-                shares=1000,
-                strategy_tag="👑 空间真龙·一键抢单"
-            )
-            if hasattr(self, 'lbl_status'):
-                self.lbl_status.config(text=f"✅ {res.get('msg', '一键挂单成功')}", fg="red")
-        except Exception as ex:
-            service_logger.error(f"一键挂单执行异常: {ex}")
 
     def write_block_async(self):
         if not self.resonance_codes:
