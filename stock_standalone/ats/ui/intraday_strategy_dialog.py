@@ -48,7 +48,7 @@ from PyQt6.QtGui import QColor, QFont, QBrush, QIcon, QPainter, QPen, QPainterPa
 from sys_utils import resolve_stock_name
 from ats.intraday_strategy_engine import IntradayStrategyEngine
 from ats.tdx_realtime_fetcher import TDXRealtimeFetcher
-from ats.ui.styles import apply_dark_theme, DARK_THEME_QSS
+from ats.ui.styles import apply_dark_theme, DARK_THEME_QSS, bind_top_shortcut
 from signal_types import SignalPoint, SignalType, SignalSource
 
 logger = logging.getLogger("IntradayStrategyDialog")
@@ -349,6 +349,17 @@ class SBCChartCanvas(QWidget):
             self.run_adaptive_strategy_eval()
             event.accept()
             return
+        elif key == Qt.Key.Key_T and not (event.modifiers() & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier)):
+            from ats.ui.styles import is_editing_text
+            if not is_editing_text(self):
+                if parent_win and hasattr(parent_win, '_toggle_stay_on_top'):
+                    parent_win._toggle_stay_on_top()
+                    event.accept()
+                    return
+                elif parent_win and hasattr(parent_win, 'chk_on_top'):
+                    parent_win.chk_on_top.toggle()
+                    event.accept()
+                    return
         elif key == Qt.Key.Key_F:
             if parent_win and hasattr(parent_win, '_trigger_linkage'):
                 parent_win._trigger_linkage()
@@ -2199,6 +2210,7 @@ class SBCIntradayChartDialog(QWidget):
         # 8. 从 QSettings 与 config/intraday_ui_layout.json 强力物理恢复尺寸与屏显坐标
         self._restore_sbc_geometry()
         self.reload_chart()
+        bind_top_shortcut(self, self._toggle_stay_on_top)
 
     def _get_max_allowed_sbc_size(self) -> Tuple[int, int]:
         """获取 SBC 窗口最大允许尺寸规格 (不得超过屏幕可用宽高的 2/3)"""
@@ -2517,10 +2529,32 @@ class SBCIntradayChartDialog(QWidget):
             if hasattr(self, 'lbl_info') and self.lbl_info:
                 self.lbl_info.setText(f"📈 [周期直选] 当前周期: 【{new_mode.upper()}】 (快捷键: ←/→ 键轮转, 1~9 直选, F 联动, Esc 关闭)")
 
+    def _toggle_stay_on_top(self):
+        """切换 SBC 窗口置顶状态"""
+        self._is_stay_on_top = not getattr(self, '_is_stay_on_top', False)
+        flags = self.windowFlags()
+        if self._is_stay_on_top:
+            flags |= Qt.WindowType.WindowStaysOnTopHint
+            if hasattr(self, 'lbl_info') and self.lbl_info:
+                self.lbl_info.setText(f"📌 [窗口置顶: 开启] 当前标的: 【{self.code}】 (快捷键: T 开启/关闭置顶)")
+        else:
+            flags &= ~Qt.WindowType.WindowStaysOnTopHint
+            if hasattr(self, 'lbl_info') and self.lbl_info:
+                self.lbl_info.setText(f"📌 [窗口置顶: 关闭] 当前标的: 【{self.code}】 (快捷键: T 开启/关闭置顶)")
+        self.setWindowFlags(flags)
+        self.show()
+
     def keyPressEvent(self, event):
-        """⚡ 窗口级快捷键：支持 R 测算、F 联动、方向键/Tab 轮转、1~9 直选、0 重置、Esc 关闭"""
+        """⚡ 窗口级快捷键：支持 T 置顶切换、R 测算、F 联动、方向键/Tab 轮转、1~9 直选、0 重置、Esc 关闭"""
         key = event.key()
-        if key == Qt.Key.Key_R:
+        modifiers = event.modifiers()
+        if key == Qt.Key.Key_T and not (modifiers & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier)):
+            from ats.ui.styles import is_editing_text
+            if not is_editing_text(self):
+                self._toggle_stay_on_top()
+                event.accept()
+                return
+        elif key == Qt.Key.Key_R:
             self._on_eval_r_clicked()
             event.accept()
             return
@@ -5041,16 +5075,19 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
         self.timer.timeout.connect(self._on_tick_update)
         self.timer.start()
 
+        # 5. 快捷键 T 置顶支持
+        bind_top_shortcut(self, self._toggle_stay_on_top)
+
     def _toggle_stay_on_top(self):
-        """切换窗口置顶状态"""
-        self._is_stay_on_top = not self._is_stay_on_top
+        """切换窗口置顶状态 (快捷键: T)"""
+        self._is_stay_on_top = not getattr(self, '_is_stay_on_top', False)
         if self._is_stay_on_top:
             self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowStaysOnTopHint)
-            self.btn_topmost.setText("📌 置顶: 开")
+            self.btn_topmost.setText("📌 置顶 (T): 开")
             self.btn_topmost.setStyleSheet("background-color: #1e3a24; color: #00ff88; font-weight: bold; border: 1px solid #00ff88; border-radius: 4px; padding: 3px 8px;")
         else:
             self.setWindowFlags(self.windowFlags() & ~Qt.WindowType.WindowStaysOnTopHint)
-            self.btn_topmost.setText("📌 置顶: 关")
+            self.btn_topmost.setText("📌 置顶 (T): 关")
             self.btn_topmost.setStyleSheet("background-color: #242436; color: #d0d0e0; font-weight: bold; border: 1px solid #555566; border-radius: 4px; padding: 3px 8px;")
         self.show()
 
@@ -5532,8 +5569,16 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
         self._all_codes_eval_dialog.run_evaluation()
 
     def keyPressEvent(self, event):
-        """⚡ 窗口级快捷键：按下 R 键触发自适应策略测算"""
-        if event.key() == Qt.Key.Key_R:
+        """⚡ 窗口级快捷键：按下 T 键切换置顶，按下 R 键触发自适应策略测算"""
+        key = event.key()
+        modifiers = event.modifiers()
+        if key == Qt.Key.Key_T and not (modifiers & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier)):
+            from ats.ui.styles import is_editing_text
+            if not is_editing_text(self):
+                self._toggle_stay_on_top()
+                event.accept()
+                return
+        elif key == Qt.Key.Key_R:
             # 优先调用 Tab1 中的 SBC 画布测算
             if hasattr(self, 'tab1_sbc_canvas') and self.tab1_sbc_canvas:
                 self.tab1_sbc_canvas.code = self.code
@@ -6011,6 +6056,7 @@ class AllCodesStrategyEvalDialog(QDialog):
 
         self._init_ui()
         self._restore_geometry()
+        bind_top_shortcut(self, self._toggle_stay_on_top)
 
     def _init_ui(self):
         main_layout = QVBoxLayout(self)
@@ -6773,8 +6819,27 @@ class AllCodesStrategyEvalDialog(QDialog):
         """兼容接口：切换并联动标的"""
         self._broadcast_link_stock(target_code, resolve_stock_name(target_code))
 
+    def _toggle_stay_on_top(self):
+        """切换窗口置顶状态 (快捷键: T)"""
+        self._is_stay_on_top = not getattr(self, '_is_stay_on_top', False)
+        flags = self.windowFlags()
+        if self._is_stay_on_top:
+            flags |= Qt.WindowType.WindowStaysOnTopHint
+        else:
+            flags &= ~Qt.WindowType.WindowStaysOnTopHint
+        self.setWindowFlags(flags)
+        self.show()
+
     def keyPressEvent(self, event):
-        """键盘上下键事件处理：支持卡片视图下的键盘上下键切换联动"""
+        """键盘事件处理：支持快捷键 T 切换置顶，卡片视图下的键盘上下键切换联动"""
+        key = event.key()
+        modifiers = event.modifiers()
+        if key == Qt.Key.Key_T and not (modifiers & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier)):
+            from ats.ui.styles import is_editing_text
+            if not is_editing_text(self):
+                self._toggle_stay_on_top()
+                event.accept()
+                return
         if self.current_view_mode == "cards" and self.card_widgets:
             if event.key() in (Qt.Key.Key_Up, Qt.Key.Key_Left):
                 self._navigate_cards(-1)

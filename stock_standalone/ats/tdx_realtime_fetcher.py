@@ -602,17 +602,16 @@ class TDXRealtimeFetcher:
 
         now_t = time.time()
         is_trading, _ = is_trading_time()
-        cooldown_sec = 30.0 if is_trading else 60.0
+        cooldown_sec = 60.0 if is_trading else 180.0
 
-        # 若强制刷新或进入交易时段，清空非交易时段定盘与静默状态
-        if force or is_trading:
+        # 若强制刷新，清空非交易时段定盘与静默状态
+        if force:
             if self._off_hours_settled_codes:
                 self._off_hours_settled_codes.clear()
                 self._off_hours_success_counts.clear()
-            if force:
-                self._unlisted_or_dormant_codes.clear()
-                self._no_quote_counts.clear()
-                self._no_quote_last_attempt.clear()
+            self._unlisted_or_dormant_codes.clear()
+            self._no_quote_counts.clear()
+            self._no_quote_last_attempt.clear()
 
         cached_results = []
         active_codes = []
@@ -654,10 +653,12 @@ class TDXRealtimeFetcher:
                     host_info = f"{self.current_host[0]}" if self.current_host else "TDX"
                     if quotes:
                         self._record_request_feedback(cost_ms, is_error=False)
+                        returned_codes = set()
                         for q in quotes:
                             c_clean = str(q.get("code", "")).strip().zfill(6)
                             if not c_clean:
                                 continue
+                            returned_codes.add(c_clean)
                             p = safe_float(q.get("price", 0.0))
                             last_c = safe_float(q.get("last_close", 0.0))
                             if p > 0 or last_c > 0:
@@ -672,17 +673,47 @@ class TDXRealtimeFetcher:
                                     if self._off_hours_success_counts[c_clean] >= 3:
                                         self._off_hours_settled_codes.add(c_clean)
                         all_fetched_quotes.extend(quotes)
+
+                        # 处理该批次中个别未返回行情的标的（自动记录并冷却）
+                        missing_in_chunk = [c_c for _, c_c in req_params if c_c not in returned_codes]
+                        for c_m in missing_in_chunk:
+                            self._no_quote_counts[c_m] = self._no_quote_counts.get(c_m, 0) + 1
+                            self._no_quote_last_attempt[c_m] = now_t
+                            if self._no_quote_counts[c_m] >= 2:
+                                self._unlisted_or_dormant_codes.add(c_m)
+
                         self.add_log(f"⚡ [TDX] 成功获取批次 {len(quotes)} 只标的行情 (耗时: {cost_ms:.1f}ms, 主站: {host_info})", level="INFO")
                     else:
-                        self.add_log(f"⚠️ [TDX] 批次 [{codes_str[:30]}...] 未返回盘口数据，尝试单只补拉", level="WARN")
+                        # 批次未返回盘口数据（整批包含较多未上市代码或主站拒绝）：带 60s 日志防刷频
+                        if not hasattr(self, "_last_batch_warn_time"):
+                            self._last_batch_warn_time = {}
+                        batch_key = codes_str[:25]
+                        last_warn_t = self._last_batch_warn_time.get(batch_key, 0.0)
+                        if now_t - last_warn_t > 60.0:
+                            self._last_batch_warn_time[batch_key] = now_t
+                            self.add_log(f"⚠️ [TDX] 批次 [{codes_str[:30]}...] 未返回盘口数据，尝试单只补拉并自动冷却", level="WARN")
+
                         for mkt, c_clean in req_params:
                             try:
                                 single_q = self.api.get_security_quotes([(mkt, c_clean)])
-                                if single_q:
-                                    all_fetched_quotes.extend(single_q)
-                                    self._off_hours_cached_quotes[c_clean] = single_q[0]
+                                if single_q and len(single_q) > 0:
+                                    sq = single_q[0]
+                                    sp = safe_float(sq.get("price", 0.0))
+                                    slast = safe_float(sq.get("last_close", 0.0))
+                                    if sp > 0 or slast > 0:
+                                        all_fetched_quotes.extend(single_q)
+                                        self._off_hours_cached_quotes[c_clean] = sq
+                                        self._no_quote_counts[c_clean] = 0
+                                        self._unlisted_or_dormant_codes.discard(c_clean)
+                                        continue
                             except Exception:
                                 pass
+                            
+                            # 单只拉取依然无行情/未上市：立即进入冷却，绝不重复轰炸
+                            self._no_quote_counts[c_clean] = self._no_quote_counts.get(c_clean, 0) + 1
+                            self._no_quote_last_attempt[c_clean] = now_t
+                            if self._no_quote_counts[c_clean] >= 2:
+                                self._unlisted_or_dormant_codes.add(c_clean)
                 except Exception as e:
                     cost_ms = (time.time() - t_start) * 1000.0
                     self._record_request_feedback(cost_ms, is_error=True)

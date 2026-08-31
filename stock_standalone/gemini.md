@@ -1,3 +1,38 @@
+## 2026-08-31 14:05
+- [x] **实现原生 `QShortcut` 窗口级快捷键 `T` 置顶穿透响应 & 彻底根治 TDX 未上市/无行情标的死循环大量重试与警告刷屏 (`stock_standalone/ats/ui/styles.py`, `stock_standalone/ats/tdx_realtime_fetcher.py`, `stock_standalone/ats/ui/daily_limit_up_dialog.py`, `stock_standalone/ats/ui/dragon_monitor.py`, `stock_standalone/ats/ui/hot_sector_leaderboard.py`, `stock_standalone/ats/ui/chart_widgets.py`, `stock_standalone/ats/ui/main_window.py`, `stock_standalone/ats/ui/intraday_strategy_dialog.py`, `stock_standalone/ats/ui/multi_period_dialog.py`, `stock_standalone/ats/ui/trade_flow.py`, `stock_standalone/ats/ui/channel_scan_result_dialog.py`, `stock_standalone/tests/test_snap_windows_top_hotkey.py`)**：
+    - [x] **排查定位“快捷键 T 都没有切换置顶状态”根本原因**：
+        1. 在实际看盘操作中，用户鼠标点击了数据表格（`QTableWidget`）中的某一行或单元格，键盘焦点落于子控件上；
+        2. `QTableWidget` 默认拦截普通字符按键用于表格内快速定位，**未将按键事件冒泡传递至顶层窗口的 `keyPressEvent`**，导致窗口级按键拦截完全无法触发。
+    - [x] **实施原生 `QShortcut` 窗口级快捷键与通用绑定体系 (`ats.ui.styles.bind_top_shortcut`)**：
+        1. 采用 Qt 顶层 `QShortcut(QKeySequence(Qt.Key.Key_T), widget)` 机制，无论焦点位于表格、列表、按钮、滚动条还是背景上，按 `T` 键 **100% 毫秒级优先响应**；
+        2. 深度结合 `is_editing_text(self)`，在用户处于 `QLineEdit` 搜索框或数值输入框打字输入 `t`/`T` 时 100% 自动放行防误触；
+        3. 全量覆盖 10 大核心磁吸与独立窗口：连板天梯、2D/3D 加速龙头、行业板块龙头突击、涨跌分布明细、实时个股详情、SBC 分时图、分时阶梯主工作台、全量 Code 评估、多周期联动看板、今日交易流水与通道策略独立窗口。
+    - [x] **彻底根治 TDX 未上市/无行情标的连续大量重试与死循环警告刷屏**：
+        1. **排查定位死循环原因**：当批次中包含未上市/停牌/无行情代码（如 `688835, 920288, 301689...`）且 TDX 整批返回空时，单只补拉失败后未对代码标记 `_no_quote_counts` 与 `_unlisted_or_dormant_codes` 冷却集合，导致每 3~6 秒轮询定时器再次整批请求并再次循环重试 40 次；
+        2. **完善自动休眠与退避机制**：单只补拉无数据或批次遗漏标的自动累加计数，连续 2 次无行情自动加入 `_unlisted_or_dormant_codes`，进入 60~180 秒冷却期，完全移出后续轮询请求；
+        3. **增加 60 秒日志防刷频限流**，彻底消除控制台与日志刷屏。
+    - [x] **全量 45 项自动化与跨模块回归测试 100% 全部 PASSED**。
+
+## 2026-08-31 13:48
+- [x] **实现 ATS 所有磁吸窗口与独立看盘/策略/流水窗口快捷键 `T` 极速切换置顶与输入框防误触保护体系 (`stock_standalone/ats/ui/styles.py`, `stock_standalone/ats/ui/daily_limit_up_dialog.py`, `stock_standalone/ats/ui/dragon_monitor.py`, `stock_standalone/ats/ui/hot_sector_leaderboard.py`, `stock_standalone/ats/ui/chart_widgets.py`, `stock_standalone/ats/ui/main_window.py`, `stock_standalone/ats/ui/intraday_strategy_dialog.py`, `stock_standalone/ats/ui/multi_period_dialog.py`, `stock_standalone/ats/ui/trade_flow.py`, `stock_standalone/ats/ui/channel_scan_result_dialog.py`, `stock_standalone/tests/test_snap_windows_top_hotkey.py`)**：
+    - [x] **全量覆盖 10 大核心磁吸与独立看盘/评估/流水窗口**：
+        1. **连板天梯 (`DailyLimitUpDialog`)**：表头复选框更新为 `置顶 (T)`，按 `T` 键极速切换置顶，与磁吸贴边平滑互斥，保留 `Alt+C` 直连挂单与 `Return` 打开 SBC；
+        2. **2D/3D 加速龙头追踪器 (`DragonLeaderMonitorDialog`)**：支持按 `T` 键开启/关闭置顶；
+        3. **行业板块 / 龙头突击榜 (`HotSectorLeaderboardDialog`)**：支持按 `T` 键开启/关闭置顶；
+        4. **涨跌分布个股明细 (`DistributionDetailsDialog`)**：支持按 `T` 键开启/关闭置顶；
+        5. **实时个股详情 (`StockDetailDialog`)**：支持按 `T` 键开启/关闭置顶；
+        6. **SBC 分时走势卡片与独立窗口 (`SBCIntradayChartWidget` / `SBCIntradayChartDialog`)**：支持在图表区域或窗口内按 `T` 键切换置顶；
+        7. **分时阶梯策略主工作台 (`IntradayStrategyDialog` / `PinzhunLadderStandaloneWindow`)**：顶部按钮升级为 `📌 置顶 (T): 开/关`，按 `T` 键切换置顶；
+        8. **全量 Code 策略评估报告 (`AllCodesStrategyEvalDialog`)**：按 `T` 键切换置顶；
+        9. **选股多周期联动看板 (`MultiPeriodDialog`)**：底部复选框升级为 `置顶 (T)`，按 `T` 键切换置顶；
+        10. **今日交易流水日志 (`TradeFlowDialog`)** 与 **通道策略批量测算结果 (`ChannelReversalScanResultDialog`)**：工具栏新增 `置顶 (T)` 复选框并支持按 `T` 键切换置顶与状态持久化；
+    - [x] **通用输入框打字防误触保护引擎 (`ats.ui.styles.is_editing_text`)**：
+        - 智能探测当前获得焦点的控件是否属于 `QLineEdit`、`QTextEdit`、`QPlainTextEdit`、`QAbstractSpinBox`；
+        - 用户在搜索框或数值输入框打字输入 `t`/`T` 时，100% 阻断置顶切换，确保正常输入不发生任何误触；
+    - [x] **全量 44 项跨模块自动化测试 100% 全部 PASSED**：
+        - `test_snap_windows_top_hotkey.py`（12 项置顶快捷键与焦点保护专项测试全部通过）；
+        - `test_popularity_resonance_features.py`、`test_new_stock_module.py`、`test_sector_strength_and_detail_parity.py`（32 项跨模块回归测试 100% 全部通过）。
+
 ## 2026-08-30 22:38
 - [x] **彻底删除挂单/买入时的剪贴板备用机制，保持剪贴板干净与代码纯粹 (`stock_standalone/popularity_resonance_service.py`, `stock_standalone/JohnsonUtil/trade_automation.py`, `stock_standalone/tests/test_popularity_resonance_features.py`)**：
     - [x] **移除冗余剪贴板写入操作**：

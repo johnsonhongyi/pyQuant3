@@ -42,7 +42,7 @@ from logger_utils import LoggerFactory
 from ats.ui.styles import (
     COLOR_UP, COLOR_DOWN, COLOR_INFO, COLOR_ACCENT, COLOR_WARN, 
     auto_fit_columns_once, setup_header_persistence, save_config_node, save_config_nodes, load_config_node,
-    apply_dark_theme, ColorPreservingItemDelegate
+    apply_dark_theme, ColorPreservingItemDelegate, bind_top_shortcut
 )
 from ats.ui.favorite_panel import get_ats_extra_cols
 from ats.limit_up_engine import LimitUpEngine, get_ats_custom_extra_cols
@@ -688,12 +688,14 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         self.btn_trade_flow.clicked.connect(self._open_trade_flow)
         ctrl_layout.addWidget(self.btn_trade_flow)
 
-        # 置顶保持勾选
-        self.chk_ontop = QCheckBox("置顶")
+        # 置顶保持勾选 (快捷键: T)
+        self.chk_ontop = QCheckBox("置顶 (T)")
         self.chk_ontop.setChecked(self.stays_on_top)
+        self.chk_ontop.setToolTip("开启/关闭窗口置顶 (快捷键: T)")
         self.chk_ontop.setStyleSheet("color: #ffd700; font-size: 9pt;")
         self.chk_ontop.toggled.connect(self._on_stays_on_top_toggled)
         ctrl_layout.addWidget(self.chk_ontop)
+        bind_top_shortcut(self)
 
         main_layout.addLayout(ctrl_layout)
 
@@ -2242,30 +2244,64 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
             pass
 
     def keyPressEvent(self, event):
-        """键盘事件处理：回车打开SBC分时图，空格切换关注，Ctrl+C复制"""
-        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+        """键盘事件处理：Alt+C 挂单，T 切换置顶，回车打开SBC分时图，空格切换关注，Escape 关闭/磁吸"""
+        from ats.ui.styles import is_editing_text
+        key = event.key()
+        modifiers = event.modifiers()
+        
+        # 1. 优先响应 Alt+C 快捷直连挂单
+        if key == Qt.Key.Key_C and (modifiers & Qt.KeyboardModifier.AltModifier):
+            self.on_quick_order_action()
+            event.accept()
+            return
+            
+        # 2. 快捷键 T 切换置顶 (非文本输入框打字状态下)
+        if key == Qt.Key.Key_T and not (modifiers & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier)):
+            if not is_editing_text(self):
+                if hasattr(self, 'chk_ontop'):
+                    self.chk_ontop.toggle()
+                    event.accept()
+                    return
+
+        # 3. 回车打开 SBC
+        if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
             row = self.table.currentRow()
             if row >= 0:
                 self._on_cell_double_clicked(row, 0)
+                event.accept()
                 return
-        elif event.key() == Qt.Key.Key_Space:
-            row = self.table.currentRow()
-            if row >= 0:
-                code_item = self.table.item(row, 0)
-                if code_item:
-                    c = code_item.text().strip()
-                    try:
-                        from global_favorites import GlobalFavoriteManager
-                        fav_mgr = GlobalFavoriteManager()
-                        if c in fav_mgr.get_favorite_stocks():
-                            fav_mgr.remove_favorite_stock(c)
-                            self.lbl_status.setText(f"⭐ 已从重点关注移除: {c}")
-                        else:
-                            fav_mgr.add_favorite_stock(c)
-                            self.lbl_status.setText(f"⭐ 已加入重点关注: {c}")
-                    except Exception:
-                        pass
-                    return
+
+        # 4. 空格切换自选关注
+        elif key == Qt.Key.Key_Space:
+            if not is_editing_text(self):
+                row = self.table.currentRow()
+                if row >= 0:
+                    code_item = self.table.item(row, 0)
+                    if code_item:
+                        c = code_item.text().strip()
+                        try:
+                            from global_favorites import GlobalFavoriteManager
+                            fav_mgr = GlobalFavoriteManager()
+                            if c in fav_mgr.get_favorite_stocks():
+                                fav_mgr.remove_favorite_stock(c)
+                                self.lbl_status.setText(f"⭐ 已从重点关注移除: {c}")
+                            else:
+                                fav_mgr.add_favorite_stock(c)
+                                self.lbl_status.setText(f"⭐ 已加入重点关注: {c}")
+                        except Exception:
+                            pass
+                        event.accept()
+                        return
+
+        # 5. Esc 键磁吸或关闭
+        elif key == Qt.Key.Key_Escape:
+            if getattr(self, 'anchor_edge', None):
+                self.hide_to_edge()
+            else:
+                self.close()
+            event.accept()
+            return
+
         super().keyPressEvent(event)
 
     def _on_cell_clicked(self, row: int, col: int):
@@ -2572,14 +2608,6 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
             open_sbc_chart_dialog(self, code)
         except Exception as ex:
             logger.warning(f"双击打开 SBC 分时走势异常: {ex}")
-
-    def keyPressEvent(self, event):
-        """支持键盘 Alt+C 一键快速直连交易终端挂单与跟单"""
-        if event.key() == Qt.Key.Key_C and (event.modifiers() & Qt.KeyboardModifier.AltModifier):
-            self.on_quick_order_action()
-            event.accept()
-            return
-        super().keyPressEvent(event)
 
     def on_quick_order_action(self):
         """[🚀 核心实战] 天梯一键直连挂单执行：0.5秒内将目标代码、价格与仓位推送到交易终端"""

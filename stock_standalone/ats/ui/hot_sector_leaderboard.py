@@ -33,7 +33,7 @@ from logger_utils import LoggerFactory
 from ats.ui.styles import (
     COLOR_UP, COLOR_DOWN, COLOR_INFO, COLOR_ACCENT, COLOR_WARN, 
     auto_fit_columns_once, setup_header_persistence, save_config_node, load_config_node,
-    apply_dark_theme, ColorPreservingItemDelegate
+    apply_dark_theme, bind_top_shortcut, ColorPreservingItemDelegate
 )
 from ats.ui.favorite_panel import get_ats_extra_cols
 from ats.hot_sector_engine import HotSectorEngine
@@ -510,12 +510,14 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
         self.combo_filter.currentIndexChanged.connect(self._on_filter_changed)
         header_lay.addWidget(self.combo_filter)
 
-        # 置顶复选框
-        self.chk_on_top = QCheckBox("置顶")
+        # 置顶复选框 (快捷键: T)
+        self.chk_on_top = QCheckBox("置顶 (T)")
+        self.chk_on_top.setToolTip("开启/关闭窗口置顶 (快捷键: T)")
         self.chk_on_top.setStyleSheet("QCheckBox { color: #00FFCC; font-size: 9pt; font-weight: bold; }")
         self.chk_on_top.setChecked(self.stays_on_top)
         self.chk_on_top.stateChanged.connect(self._on_stays_on_top_toggled)
         header_lay.addWidget(self.chk_on_top)
+        bind_top_shortcut(self)
 
         # 🔔 语音与弹窗预警开关
         self.is_voice_alert_enabled = self._load_voice_alert_enabled()
@@ -1434,7 +1436,15 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
                     logger.debug(f"on_stock_clicked error: {e}")
 
     def keyPressEvent(self, event):
+        from ats.ui.styles import is_editing_text
         key = event.key()
+        modifiers = event.modifiers()
+        if key == Qt.Key.Key_T and not (modifiers & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier)):
+            if not is_editing_text(self):
+                if hasattr(self, 'chk_on_top'):
+                    self.chk_on_top.toggle()
+                    event.accept()
+                    return
         if key in (Qt.Key.Key_Up, Qt.Key.Key_Down, Qt.Key.Key_PageUp, Qt.Key.Key_PageDown):
             super().keyPressEvent(event)
             curr_row = self.table.currentRow()

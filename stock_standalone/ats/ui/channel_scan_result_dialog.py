@@ -19,7 +19,7 @@ from PyQt6.QtGui import QColor, QFont, QCursor, QKeySequence, QShortcut
 
 from ats.ui.styles import (
     setup_header_persistence, NumericTableWidgetItem, 
-    save_config_node, load_config_node
+    save_config_node, load_config_node, bind_top_shortcut
 )
 
 PERSIST_KEY_LAST_TDX_BLK = "channel_scan_last_selected_tdx_blk"
@@ -58,11 +58,15 @@ class ChannelReversalScanResultDialog(QWidget):
         self.esc_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Escape), self)
         self.esc_shortcut.activated.connect(self.close)
 
-        self.setWindowFlags(
+        flags = (
             Qt.WindowType.Window
             | Qt.WindowType.WindowMinMaxButtonsHint
             | Qt.WindowType.WindowCloseButtonHint
         )
+        self.stays_on_top = self._load_stays_on_top()
+        if self.stays_on_top:
+            flags |= Qt.WindowType.WindowStaysOnTopHint
+        self.setWindowFlags(flags)
         self.setWindowTitle(f"🎯 {self.period} 通道策略批量测算结果 - 来自【{self.source_tab_name}】")
         self.resize(1060, 640)
         self.setMinimumSize(800, 480)
@@ -74,9 +78,35 @@ class ChannelReversalScanResultDialog(QWidget):
         self._init_ui()
         self._populate_table()
 
+    def _load_stays_on_top(self) -> bool:
+        try:
+            return bool(load_config_node("channel_scan_stays_on_top", False))
+        except Exception:
+            return False
+
+    def _on_top_toggled(self, checked: bool):
+        self.stays_on_top = checked
+        flags = self.windowFlags()
+        if checked:
+            flags |= Qt.WindowType.WindowStaysOnTopHint
+        else:
+            flags &= ~Qt.WindowType.WindowStaysOnTopHint
+        self.setWindowFlags(flags)
+        self.show()
+        save_config_node("channel_scan_stays_on_top", checked)
+
     def keyPressEvent(self, event):
-        """按 Esc 键安全关闭独立结果窗口"""
-        if event.key() == Qt.Key.Key_Escape:
+        """支持按 T 键切换置顶，按 Esc 键安全关闭独立结果窗口"""
+        key = event.key()
+        modifiers = event.modifiers()
+        if key == Qt.Key.Key_T and not (modifiers & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier)):
+            from ats.ui.styles import is_editing_text
+            if not is_editing_text(self):
+                if hasattr(self, 'chk_on_top'):
+                    self.chk_on_top.toggle()
+                    event.accept()
+                    return
+        if key == Qt.Key.Key_Escape:
             self.close()
             event.accept()
             return
@@ -145,7 +175,16 @@ class ChannelReversalScanResultDialog(QWidget):
 
         lbl_tips = QLabel("💡 提示: <b>单击/双击</b>联动主终端与行情；<b>右键</b>调出 SBC 走势与分时阶梯盯盘。")
         lbl_tips.setStyleSheet("color: #94a3b8; font-size: 8.5pt;")
-        grid_lay.addWidget(lbl_tips, 1, 2, 1, 2)
+        grid_lay.addWidget(lbl_tips, 1, 2)
+
+        from PyQt6.QtWidgets import QCheckBox
+        self.chk_on_top = QCheckBox("置顶 (T)")
+        self.chk_on_top.setToolTip("开启/关闭窗口置顶 (快捷键: T)")
+        self.chk_on_top.setStyleSheet("color: #ffd700; font-size: 9pt; font-weight: bold;")
+        self.chk_on_top.setChecked(self.stays_on_top)
+        self.chk_on_top.toggled.connect(self._on_top_toggled)
+        grid_lay.addWidget(self.chk_on_top, 1, 3, Qt.AlignmentFlag.AlignRight)
+        bind_top_shortcut(self)
 
         main_layout.addWidget(stat_card)
 
