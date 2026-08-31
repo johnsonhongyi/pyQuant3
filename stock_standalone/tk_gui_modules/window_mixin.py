@@ -123,11 +123,19 @@ class WindowMixin:
                     # 限制在屏幕范围内
                     x, y = clamp_window_to_screens(x, y, width, height)
                     win.geometry(f"{width}x{height}+{x}+{y}")
+                    try:
+                        setattr(win, '_persisted_window_name', window_name)
+                    except Exception:
+                        pass
                     logger.debug(f"[load_window_position] 加载 {window_name}: {width}x{height} {x}+{y}")
                     return width, height, x, y
 
             # 默认居中
             self.center_window(win, int(default_width * scale), int(default_height * scale))
+            try:
+                setattr(win, '_persisted_window_name', window_name)
+            except Exception:
+                pass
             return int(default_width * scale), int(default_height * scale), None, None
             
         except Exception as e:
@@ -143,6 +151,10 @@ class WindowMixin:
         try:
             win.update_idletasks()
             window_name = str(window_name)
+            try:
+                setattr(win, '_persisted_window_name', window_name)
+            except Exception:
+                pass
             scale = self._get_dpi_scale_factor()
 
             geom = win.geometry().split('+')
@@ -179,6 +191,338 @@ class WindowMixin:
             logger.debug(f"[save_window_position] 已保存 {window_name}: {pos}")
         except Exception as e:
             logger.error(f"[save_window_position] 失败: {e}")
+
+    def collect_all_open_windows(self) -> dict[str, Any]:
+        """
+        全面收集当前所有打开并关联的 Tk 根窗口、Toplevel 子窗口、监控窗口及关联 Qt 窗口。
+        返回字典: {window_name: window_object}
+        """
+        windows: dict[str, Any] = {}
+
+        # 1. 主窗口 (self)
+        try:
+            if hasattr(self, 'winfo_exists') and self.winfo_exists():
+                windows["main_window"] = self
+                try:
+                    setattr(self, '_persisted_window_name', "main_window")
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        # 2. 监控窗口字典 (_pg_top10_window_simple)
+        if hasattr(self, "_pg_top10_window_simple") and isinstance(self._pg_top10_window_simple, dict):
+            for k, v in list(self._pg_top10_window_simple.items()):
+                if isinstance(v, dict):
+                    win = v.get("win")
+                    if win and hasattr(win, "winfo_exists") and win.winfo_exists():
+                        win_key = f"concept_top10_window-{k}"
+                        windows[win_key] = win
+                        try:
+                            setattr(win, '_persisted_window_name', win_key)
+                        except Exception:
+                            pass
+
+        # 3. 明确属性引用的子窗口
+        attr_mappings = [
+            ("_concept_win", "detail_window"),
+            ("detail_win", "detail_win_Category"),
+            ("kline_monitor", "KLineMonitor"),
+            ("_detailed_analysis_win", "SystemAnalysis"),
+            ("strategy_report_win", "StrategyReport"),
+            ("_voice_monitor_win", "VoiceMonitor"),
+            ("_realtime_monitor_win", "RealtimeMonitor"),
+            ("_stock_selection_win", "StockSelection"),
+            ("_multi_period_tester_win", "MultiPeriodTester"),
+        ]
+        for attr_name, default_key in attr_mappings:
+            if hasattr(self, attr_name):
+                sub_win = getattr(self, attr_name, None)
+                if sub_win and hasattr(sub_win, "winfo_exists") and sub_win.winfo_exists():
+                    actual_key = getattr(sub_win, '_persisted_window_name', None) or default_key
+                    windows[actual_key] = sub_win
+                    try:
+                        setattr(sub_win, '_persisted_window_name', actual_key)
+                    except Exception:
+                        pass
+
+        # 4. 递归/遍历 winfo_children() 发现的所有 Toplevel 顶级子窗口
+        try:
+            def _scan_children(parent: Any) -> None:
+                if not hasattr(parent, 'winfo_children'):
+                    return
+                for child in parent.winfo_children():
+                    if isinstance(child, tk.Toplevel) and child.winfo_exists():
+                        # 检查是否已收录
+                        if child not in windows.values():
+                            key = getattr(child, '_persisted_window_name', None) or getattr(child, '_window_name', None) or getattr(child, '_window_id', None)
+                            if not key:
+                                try:
+                                    t = child.title().strip() if hasattr(child, 'title') else ""
+                                    if t:
+                                        safe_t = "".join(c for c in t if c.isalnum() or c in ('_', '-', ' ')).strip()
+                                        key = f"top_window_{safe_t}" if safe_t else f"top_window_{id(child)}"
+                                    else:
+                                        key = f"top_window_{id(child)}"
+                                except Exception:
+                                    key = f"top_window_{id(child)}"
+
+                            final_key = key
+                            counter = 1
+                            while final_key in windows and windows[final_key] != child:
+                                final_key = f"{key}_{counter}"
+                                counter += 1
+
+                            windows[final_key] = child
+                            try:
+                                setattr(child, '_persisted_window_name', final_key)
+                            except Exception:
+                                pass
+
+                            _scan_children(child)
+
+            if hasattr(self, 'winfo_children'):
+                _scan_children(self)
+        except Exception as e:
+            logger.warning(f"[collect_all_open_windows] 遍历 winfo_children 异常: {e}")
+
+        # 5. 关联的 PyQt 窗口 (_pg_windows)
+        if hasattr(self, "_pg_windows") and isinstance(self._pg_windows, dict):
+            for k, v in list(self._pg_windows.items()):
+                if isinstance(v, dict):
+                    qwin = v.get("win")
+                    if qwin and ((hasattr(qwin, "isVisible") and qwin.isVisible()) or hasattr(qwin, "geometry")):
+                        win_key = f"pg_qt_window_{k}"
+                        windows[win_key] = qwin
+                        try:
+                            setattr(qwin, '_persisted_window_name', win_key)
+                        except Exception:
+                            pass
+
+        return windows
+
+    def save_all_windows_snapshot(self, snapshot_key: str = "manual_snapshot", file_path: Optional[str] = None) -> dict[str, Any]:
+        """
+        手动保存快照：全面持久化当前所有打开并关联的 Tk 窗口（及关联 PyQt 窗口）位置、几何与监控业务数据。
+        """
+        import time
+        if file_path is None:
+            file_path = WINDOW_CONFIG_FILE
+
+        scale = self._get_dpi_scale_factor()
+        config_file_path = self._get_config_file_path(file_path, scale)
+
+        all_windows = self.collect_all_open_windows()
+        snapshot_windows_pos: dict[str, Any] = {}
+
+        # 1. 抓取所有窗口位置几何信息（DPI 物理归一化）
+        for win_name, win in all_windows.items():
+            try:
+                # 判断是 Qt 窗口还是 Tk 窗口
+                if hasattr(win, 'winfo_geometry') or (hasattr(win, 'geometry') and not hasattr(win, 'windowHandle')):
+                    if hasattr(win, 'update_idletasks'):
+                        win.update_idletasks()
+                    geom = win.geometry().split('+')
+                    size = geom[0].split('x')
+                    w = int(int(size[0]) / scale)
+                    h = int(int(size[1]) / scale)
+                    x = int(int(geom[1]) / scale)
+                    y = int(int(geom[2]) / scale)
+                    snapshot_windows_pos[win_name] = {
+                        "x": x, "y": y, "width": w, "height": h, "type": "tk"
+                    }
+                elif hasattr(win, 'geometry'):
+                    # PyQt 窗口
+                    geom = win.geometry()
+                    w = int(geom.width() / scale)
+                    h = int(geom.height() / scale)
+                    x = int(geom.x() / scale)
+                    y = int(geom.y() / scale)
+                    snapshot_windows_pos[win_name] = {
+                        "x": x, "y": y, "width": w, "height": h, "type": "qt"
+                    }
+            except Exception as ex:
+                logger.warning(f"[save_all_windows_snapshot] 提取窗口 {win_name} 位置异常: {ex}")
+
+        # 2. 收集业务数据快照（监控列表）
+        monitor_list_data: list[Any] = []
+        if hasattr(self, "_pg_top10_window_simple") and isinstance(self._pg_top10_window_simple, dict):
+            try:
+                self.save_all_monitor_windows()
+                for k, v in self._pg_top10_window_simple.items():
+                    if isinstance(v, dict) and "stock_info" in v:
+                        monitor_list_data.append(v["stock_info"])
+            except Exception as ex:
+                logger.warning(f"[save_all_windows_snapshot] 保存监控列表元数据异常: {ex}")
+
+        # 3. 收集 UI 状态
+        try:
+            if hasattr(self, 'save_ui_states'):
+                self.save_ui_states()
+        except Exception:
+            pass
+
+        try:
+            if hasattr(self, 'query_manager'):
+                self.query_manager.save_search_history(confirm_threshold=9999)
+        except Exception:
+            pass
+
+        # 4. 构建快照结构
+        snapshot_payload = {
+            "timestamp": time.time(),
+            "time_str": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "scale": scale,
+            "windows": snapshot_windows_pos,
+            "monitor_list": monitor_list_data
+        }
+
+        # 5. 原子安全写盘
+        try:
+            data = {}
+            if os.path.exists(config_file_path):
+                try:
+                    with open(config_file_path, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                except Exception as e:
+                    logger.error(f"[save_all_windows_snapshot] 读取原配置失败: {e}")
+
+            # 存储快照节点
+            data[snapshot_key] = snapshot_payload
+
+            # 兼容老版本键与独立 _manual 键
+            if "main_window" in snapshot_windows_pos:
+                data["main_window_manual"] = {
+                    k: v for k, v in snapshot_windows_pos["main_window"].items() if k in ("x", "y", "width", "height")
+                }
+            for wname, pos_dict in snapshot_windows_pos.items():
+                data[f"{wname}_manual"] = {
+                    k: v for k, v in pos_dict.items() if k in ("x", "y", "width", "height")
+                }
+
+            tmp_file = config_file_path + ".tmp"
+            with open(tmp_file, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=4)
+            os.replace(tmp_file, config_file_path)
+
+            logger.info(f"✅ [save_all_windows_snapshot] 成功保存全量快照: 共 {len(snapshot_windows_pos)} 个窗口, {len(monitor_list_data)} 条监控列表项")
+        except Exception as e:
+            logger.error(f"❌ [save_all_windows_snapshot] 写盘失败: {e}")
+            if 'tmp_file' in locals() and os.path.exists(tmp_file):
+                try:
+                    os.remove(tmp_file)
+                except Exception:
+                    pass
+
+        return {
+            "success": True,
+            "total_windows": len(snapshot_windows_pos),
+            "window_names": list(snapshot_windows_pos.keys()),
+            "monitor_count": len(monitor_list_data),
+            "snapshot_data": snapshot_payload
+        }
+
+    def restore_all_windows_snapshot(self, snapshot_key: str = "manual_snapshot", file_path: Optional[str] = None) -> tuple[int, list[str]]:
+        """
+        恢复手动快照：恢复全部手动保存快照持久化的所有打开窗口位置，自适应当前屏幕与 DPI。
+        返回: (成功恢复窗口数, 成功恢复窗口名称列表)
+        """
+        if file_path is None:
+            file_path = WINDOW_CONFIG_FILE
+
+        scale = self._get_dpi_scale_factor()
+        config_file_path = self._get_config_file_path(file_path, scale)
+
+        if not os.path.exists(config_file_path):
+            logger.warning(f"[restore_all_windows_snapshot] 配置文件不存在: {config_file_path}")
+            return 0, []
+
+        try:
+            with open(config_file_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception as e:
+            logger.error(f"[restore_all_windows_snapshot] 读取配置文件失败: {e}")
+            return 0, []
+
+        # 检查快照
+        snapshot = data.get(snapshot_key)
+        saved_windows_pos: dict[str, Any] = {}
+
+        if isinstance(snapshot, dict) and "windows" in snapshot:
+            saved_windows_pos = snapshot["windows"]
+        else:
+            # 兼容回退机制：若无 manual_snapshot 节点，尝试从所有以 _manual 结尾的键恢复
+            for k, v in data.items():
+                if k.endswith("_manual") and isinstance(v, dict):
+                    base_k = k[:-7]
+                    saved_windows_pos[base_k] = v
+
+        if not saved_windows_pos:
+            logger.warning("[restore_all_windows_snapshot] 尚无手动快照数据")
+            return 0, []
+
+        # 收集当前已打开的所有窗口
+        current_open_windows = self.collect_all_open_windows()
+        restored_names: list[str] = []
+
+        # 1. 恢复主窗口 (优先处理)
+        if "main_window" in current_open_windows and "main_window" in saved_windows_pos:
+            try:
+                pos = saved_windows_pos["main_window"]
+                main_win = current_open_windows["main_window"]
+                w = int(pos.get("width", 1200) * scale)
+                h = int(pos.get("height", 480) * scale)
+                x = int(pos.get("x", 100) * scale)
+                y = int(pos.get("y", 100) * scale)
+                x, y = clamp_window_to_screens(x, y, w, h)
+                main_win.geometry(f"{w}x{h}+{x}+{y}")
+                if hasattr(main_win, 'update_idletasks'):
+                    main_win.update_idletasks()
+                restored_names.append("main_window")
+                logger.debug(f"[restore_all_windows_snapshot] 主窗口已恢复: {w}x{h}+{x}+{y}")
+            except Exception as e:
+                logger.warning(f"[restore_all_windows_snapshot] 恢复主窗口异常: {e}")
+
+        # 2. 遍历当前已打开的其他窗口进行精准恢复
+        for win_name, win in current_open_windows.items():
+            if win_name == "main_window":
+                continue
+
+            # 在快照中查找匹配项
+            pos = saved_windows_pos.get(win_name)
+            if not pos:
+                # 尝试模糊匹配键
+                for k, v in saved_windows_pos.items():
+                    if k == win_name or k.endswith(win_name) or win_name.endswith(k):
+                        pos = v
+                        break
+
+            if pos and isinstance(pos, dict):
+                try:
+                    w = int(pos.get("width", 500) * scale)
+                    h = int(pos.get("height", 400) * scale)
+                    x = int(pos.get("x", 100) * scale)
+                    y = int(pos.get("y", 100) * scale)
+
+                    # 防止换屏越界
+                    x, y = clamp_window_to_screens(x, y, w, h)
+
+                    if hasattr(win, 'winfo_geometry') or (hasattr(win, 'geometry') and not hasattr(win, 'windowHandle')):
+                        # Tkinter 窗口
+                        win.geometry(f"{w}x{h}+{x}+{y}")
+                        if hasattr(win, 'update_idletasks'):
+                            win.update_idletasks()
+                    elif hasattr(win, 'setGeometry'):
+                        # PyQt 窗口
+                        win.setGeometry(x, y, w, h)
+
+                    restored_names.append(win_name)
+                    logger.debug(f"[restore_all_windows_snapshot] 窗口 {win_name} 已恢复: {w}x{h}+{x}+{y}")
+                except Exception as e:
+                    logger.warning(f"[restore_all_windows_snapshot] 恢复窗口 {win_name} 异常: {e}")
+
+        logger.info(f"✅ [restore_all_windows_snapshot] 全量快照恢复完成: 共 {len(restored_names)} 个窗口已归位")
+        return len(restored_names), restored_names
 
     def _get_available_geometry_qt(self, window=None):
         """
@@ -294,6 +638,10 @@ class WindowMixin:
                 logger.debug(f"[load_window_position_qt] 最小尺寸防御检查忽略: {ex}")
 
             win.setGeometry(x, y, width, height)
+            try:
+                setattr(win, '_persisted_window_name', window_name)
+            except Exception:
+                pass
             return width, height, x, y
         except Exception as e:
             logger.error(f"[load_window_position_qt] 失败: {e}")
@@ -306,6 +654,10 @@ class WindowMixin:
             
         try:
             window_name = str(window_name)
+            try:
+                setattr(win, '_persisted_window_name', window_name)
+            except Exception:
+                pass
             scale = self._get_dpi_scale_factor()
 
             geom = win.geometry()
@@ -366,6 +718,10 @@ class WindowMixin:
             file_path = WINDOW_CONFIG_FILE
         try:
             window_name = str(window_name)
+            try:
+                setattr(win, '_persisted_window_name', window_name)
+            except Exception:
+                pass
             scale = self._get_dpi_scale_factor()
 
             geom = win.geometry()

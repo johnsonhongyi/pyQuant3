@@ -4925,18 +4925,48 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.resample_combo.pack(side="left", padx=5)
         self.resample_combo.bind("<<ComboboxSelected>>", lambda e: self.refresh_data())
         
-        # --- 窗口位置手动快照（Manual Snapshot，独立键 main_window_manual）---
+        # --- 窗口位置手动快照（Manual Snapshot，全面持久化所有打开关联窗口）---
         # 与 on_close 自动持久化槽（main_window）分开，用于切换屏幕/分辨率变形后的单独修复。
         _MANUAL_WIN_KEY = "main_window_manual"
 
         def save_main_pos_manual():
-            """手动快照：保存到独立键，不影响自动持久化槽"""
+            """手动全量快照：保存主窗口及所有已打开关联子窗口的位置与业务数据"""
+            if hasattr(self, 'save_all_windows_snapshot'):
+                try:
+                    res = self.save_all_windows_snapshot()
+                    total = res.get("total_windows", 1)
+                    m_cnt = res.get("monitor_count", 0)
+                    sub_cnt = max(0, total - 1)
+                    if sub_cnt > 0:
+                        toast_message(self, f"📍 全量快照已保存: 主窗口 + {sub_cnt}个关联子窗口 (监控:{m_cnt}项)")
+                    else:
+                        toast_message(self, "📍 手动快照已保存: 主窗口位置已记录（可用🔧恢复）")
+                    return
+                except Exception as e:
+                    logger.warning(f"[save_main_pos_manual] 全量快照保存异常，降级保存主窗: {e}")
+
             if hasattr(self, 'save_window_position'):
                 self.save_window_position(self, _MANUAL_WIN_KEY)
                 toast_message(self, "📍 手动快照已保存（可用🔧恢复）")
 
         def restore_main_pos_manual():
-            """从手动快照槽恢复；若尚未保存过则提示"""
+            """从手动快照槽恢复所有打开关联窗口的位置；若尚未保存过则提示"""
+            if hasattr(self, 'restore_all_windows_snapshot'):
+                try:
+                    count, restored_list = self.restore_all_windows_snapshot()
+                    if count > 0:
+                        sub_cnt = max(0, count - 1)
+                        if sub_cnt > 0:
+                            toast_message(self, f"🔧 全量快照已恢复: 主窗口 + {sub_cnt}个关联子窗口已归位")
+                        else:
+                            toast_message(self, "🔧 已从手动快照恢复主窗口位置")
+                        return
+                    else:
+                        toast_message(self, "⚠️ 尚无手动快照，请先点 📍 保存")
+                        return
+                except Exception as e:
+                    logger.warning(f"[restore_main_pos_manual] 全量快照恢复异常，降级恢复主窗: {e}")
+
             from tk_gui_modules.gui_config import WINDOW_CONFIG_FILE
             import json, os
             # 检查手动快照是否存在
@@ -4967,7 +4997,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # tooltip
         try:
             from tktooltip import ToolTip
-            ToolTip(self.top_save_pos_btn, msg="📍 手动保存窗口位置快照\n（独立于自动持久化，用于修复换屏变形）", delay=0.5)
+            ToolTip(self.top_save_pos_btn, msg="📍 手动保存全量快照\n（全面持久化主窗口及全部打开关联窗口的位置与数据，修复换屏变形）", delay=0.5)
         except Exception:
             pass
 
@@ -4978,7 +5008,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.top_load_pos_btn.pack(side="left", padx=2)
         try:
             from tktooltip import ToolTip
-            ToolTip(self.top_load_pos_btn, msg="🔧 恢复手动快照位置\n（修复换屏/分辨率变形，需先点📍保存）", delay=0.5)
+            ToolTip(self.top_load_pos_btn, msg="🔧 恢复手动快照位置\n（一键精准恢复全部打开关联窗口的快照位置，需先点📍保存）", delay=0.5)
         except Exception:
             pass
 
