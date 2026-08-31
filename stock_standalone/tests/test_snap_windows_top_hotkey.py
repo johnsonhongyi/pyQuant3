@@ -396,3 +396,49 @@ def test_tdx_dormant_cooling_and_no_infinite_retry():
     assert len(quotes3) == 0
     # Verified: api should NOT be called since all codes are in cooling period!
     mock_api.get_security_quotes.assert_not_called()
+
+
+def test_rolling_window_velocity_and_state_machine():
+    """14. Test TDXRealtimeFetcher rolling window velocity & state machine (anti-noise for low price stocks)"""
+    from ats.tdx_realtime_fetcher import TDXRealtimeFetcher
+
+    fetcher = TDXRealtimeFetcher.get_instance()
+    code = "000718"  # 苏宁环球 (2.00 元低价股)
+    last_close = 1.98
+    base_t = 1700000000.0
+
+    # 1. 模拟苏宁环球在 3 秒内在 2.00 和 2.01 之间微观跳动
+    # 刚启动采样 (t=0s)
+    vel1, tag1 = fetcher.calculate_rolling_velocity(code, 2.00, last_close, base_t)
+    assert vel1 == 0.0
+    assert tag1 == "⏱️ 窄幅整理"
+
+    # t = 3s (价格微跳到 2.01)
+    vel2, tag2 = fetcher.calculate_rolling_velocity(code, 2.01, last_close, base_t + 3.0)
+    # 由于时间跨度小于 5 秒，防放大启动保护生效，稳定为 0.0%
+    assert vel2 == 0.0
+
+    # t = 6s (价格回到 2.00)
+    vel3, tag3 = fetcher.calculate_rolling_velocity(code, 2.00, last_close, base_t + 6.0)
+    # 死区过滤生效，绝不跳变出 -10.2%！
+    assert abs(vel3) < 0.2
+
+    # 2. 模拟真实强势拉升：60 秒内从 2.00 快速拉升至 2.06 (+3.0%)
+    for i in range(1, 21):
+        cur_t = base_t + i * 3.0  # 每 3 秒一个点，直到 60 秒
+        cur_p = 2.00 + (2.06 - 2.00) * (i / 20.0)
+        vel_rise, tag_rise = fetcher.calculate_rolling_velocity(code, cur_p, last_close, cur_t)
+
+    # 60 秒达到 2.06，真实 1 分钟涨速应为约 +3.0%，状态机判定为 🚀 极速拉升
+    assert vel_rise >= 2.0
+    assert tag_rise == "🚀 极速拉升"
+
+    # 3. 模拟真实跳水：从 2.06 快速下挫至 2.01 (-2.5%)
+    for i in range(1, 21):
+        cur_t = base_t + 60.0 + i * 3.0
+        cur_p = 2.06 - (2.06 - 2.01) * (i / 20.0)
+        vel_fall, tag_fall = fetcher.calculate_rolling_velocity(code, cur_p, last_close, cur_t)
+
+    assert vel_fall <= -1.5
+    assert tag_fall == "❄️ 极速跳水"
+

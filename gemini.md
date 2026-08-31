@@ -1,3 +1,24 @@
+## 2026-08-31 14:32
+- [x] **重构工业级 60 秒滑动窗口真实涨速引擎 (`calculate_rolling_velocity`) 与 7 级实战状态机，彻底根治苏宁环球等低价股涨速乱变 (`-10.2%` -> `0.0%`) 缺陷 (`stock_standalone/ats/tdx_realtime_fetcher.py`, `stock_standalone/ats/ui/hot_sector_leaderboard.py`, `stock_standalone/tests/test_snap_windows_top_hotkey.py`)**：
+    - [x] **排查定位“涨速一直乱变、如苏宁环球上一周期 -10.2% 下一周期 0.0%”根本原因**：
+        1. **单点差分时间放大倍数畸变**：原代码仅记录上一轮单点价格与时间戳 `(old_p, old_t)`，并粗暴使用 `(price - old_p) * (60.0 / dt)`；当采样间隔 `dt = 1.0s ~ 3.0s` 时，苏宁环球（2.00 元低价股）仅因买一卖一跳价 1 分钱（0.5%），被放大 20~60 倍计算出 $\pm 10.0\% \sim 30.0\%$ 的虚假极端值；
+        2. **单点归零震荡**：下一周期若价格未发生 1 分钱跳变，`price - old_p == 0`，涨速瞬间跌回 `0.0%`，导致涨速在 `±10.2%` 与 `0.0%` 之间疯狂震荡；
+    - [x] **实施 60 秒真实滑动时序窗口与 7 级业务状态机体系**：
+        1. **时序队列与真窗口计算**：每只标的维护最近 180 秒时序队列 `deque([(t, price), ...], maxlen=60)`，寻找最接近 60 秒前（$45\text{s} \sim 90\text{s}$）的历史基准价格 $P_{base}$，直接计算 1 分钟内的真实净涨跌幅百分比；
+        2. **物理钳位 + 死区过滤 + EMA 指数平滑**：
+           - **物理钳位**：严格约束在标的涨跌停板上限内（主板 10%，双创 20%，北交所 30%）；
+           - **死区过滤**：微观价格变动 $< 0.15\%$ 视为买卖盘口震荡噪声，直接归零为 `0.0%`；
+           - **EMA 平滑**：采用 $\alpha = 0.45$ 的指数移动平均平滑滤波，彻底消除偶发脉冲毛刺；
+        3. **7 级实战状态机与 Tooltip 赋能**：
+           - $V \ge +2.0\%$: `🚀+X.X%` (极速拉升冲板)
+           - $+0.8\% \le V < +2.0\%$: `🔥+X.X%` (强势推升)
+           - $+0.3\% \le V < +0.8\%$: `⚡+X.X%` (稳步攀升)
+           - $-0.3\% \le V \le +0.3\%$: `0.0%` (窄幅整理，中性灰保持稳定)
+           - $-0.8\% \le V < -0.3\%$: `🔻-X.X%` (震荡回踩)
+           - $-1.5\% \le V < -0.8\%$: `⚠️-X.X%` (快速下挫)
+           - $V < -1.5\%$: `❄️-X.X%` (极速跳水)
+    - [x] **全量 46 项自动化与跨模块回归测试 100% 全部 PASSED**。
+
 ## 2026-08-31 14:15
 - [x] **实现 Windows Win32 API 原地无缝置顶 (`set_seamless_stay_on_top`) 彻底根治快捷键 `T` 切换置顶闪屏与重复刷新顽疾 (`stock_standalone/ats/ui/styles.py`, `stock_standalone/ats/ui/daily_limit_up_dialog.py`, `stock_standalone/ats/ui/dragon_monitor.py`, `stock_standalone/ats/ui/hot_sector_leaderboard.py`, `stock_standalone/ats/ui/chart_widgets.py`, `stock_standalone/ats/ui/main_window.py`, `stock_standalone/ats/ui/intraday_strategy_dialog.py`, `stock_standalone/ats/ui/multi_period_dialog.py`, `stock_standalone/ats/ui/trade_flow.py`, `stock_standalone/ats/ui/channel_scan_result_dialog.py`, `stock_standalone/tests/test_snap_windows_top_hotkey.py`)**：
     - [x] **排查定位“切换置顶总是重新闪屏刷新”根本原因**：

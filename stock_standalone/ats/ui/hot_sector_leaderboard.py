@@ -1182,6 +1182,7 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
         price = r["price"]
         pct = r["pct"]
         vel_pct = r.get("velocity_pct", 0.0)
+        vel_tag = r.get("velocity_tag", "⏱️ 窄幅整理")
         turnover = r.get("turnover", 0.0)
         vol_r = r.get("vol_ratio", 1.0)
         intent = r.get("order_intent", "⚖️ 均衡博弈")
@@ -1259,19 +1260,25 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
         it_pct.setFont(font_bold)
         self.table.setItem(row_idx, 5, it_pct)
 
-        # 6: 涨速%
-        if vel_pct > 0.8:
+        # 6: 涨速% (1分钟真实滑动窗口，多级业务阈值状态)
+        if vel_pct >= 2.0:
+            vel_str = f"🚀+{vel_pct:.1f}%"
+            vel_color = QColor("#ff2244")
+        elif vel_pct >= 0.8:
             vel_str = f"🔥+{vel_pct:.1f}%"
-            vel_color = QColor("#ff3344")
-        elif vel_pct > 0.1:
+            vel_color = QColor("#ff5533")
+        elif vel_pct >= 0.3:
             vel_str = f"⚡+{vel_pct:.1f}%"
-            vel_color = QColor("#ff8844")
-        elif vel_pct < -0.8:
+            vel_color = QColor("#ffaa33")
+        elif vel_pct <= -1.5:
             vel_str = f"❄️{vel_pct:.1f}%"
             vel_color = QColor("#00ff88")
-        elif vel_pct < -0.1:
+        elif vel_pct <= -0.8:
+            vel_str = f"⚠️{vel_pct:.1f}%"
+            vel_color = QColor("#00ddbb")
+        elif vel_pct <= -0.3:
             vel_str = f"🔻{vel_pct:.1f}%"
-            vel_color = QColor("#00ddcc")
+            vel_color = QColor("#00bbcc")
         else:
             vel_str = "0.0%"
             vel_color = QColor("#888899")
@@ -1279,6 +1286,8 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
         it_vel = NumericTableWidgetItem(vel_str)
         it_vel.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         it_vel.setForeground(QBrush(vel_color))
+        if vel_tag:
+            it_vel.setToolTip(f"【1分钟真实涨速】: {vel_pct:+.1f}%\n状态: {vel_tag}\n说明: 基于过去 60 秒滑动窗口真实净变化率与防抖平滑")
         self.table.setItem(row_idx, 6, it_vel)
 
         # 7: 换手%
