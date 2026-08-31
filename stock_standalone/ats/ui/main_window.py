@@ -29,7 +29,7 @@ from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal, QPropertyAnimation, QE
 from PyQt6.QtGui import QAction, QIcon, QColor, QBrush
 
 from ats.ui.favorite_panel import FavoritePanel
-from ats.ui.styles import DARK_THEME_QSS, enable_tab_direct_switch, save_config_node, load_config_node, bind_top_shortcut
+from ats.ui.styles import DARK_THEME_QSS, enable_tab_direct_switch, save_config_node, load_config_node, bind_top_shortcut, set_seamless_stay_on_top
 
 PERSIST_KEY_CHANNEL_SCAN_PERIOD = "channel_scan_selected_period"
 from ats.ui.universe_widget import UniverseTreeWidget
@@ -622,9 +622,7 @@ class StockDetailDialog(QDialog):
 
     def _on_stays_on_top_toggled(self, state):
         self.stays_on_top = self.chk_on_top.isChecked()
-        flags = self.windowFlags()
         if self.stays_on_top:
-            flags |= Qt.WindowType.WindowStaysOnTopHint
             # 【置顶与磁吸互斥】：开启置顶时，立即退出磁吸并恢复正常窗口显示
             if getattr(self, 'is_hidden_state', False):
                 self.show_normal_position()
@@ -639,11 +637,9 @@ class StockDetailDialog(QDialog):
             self.leave_ticks = 0
             self.setWindowOpacity(1.0)
         else:
-            flags &= ~Qt.WindowType.WindowStaysOnTopHint
             if hasattr(self, 'hover_timer') and self.hover_timer:
                 self.hover_timer.start()
-        self.setWindowFlags(flags)
-        self.show()
+        set_seamless_stay_on_top(self, self.stays_on_top)
         self._save_config_state()
 
     def _scan_kernel_trace(self):

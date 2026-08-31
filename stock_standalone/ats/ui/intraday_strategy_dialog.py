@@ -48,7 +48,7 @@ from PyQt6.QtGui import QColor, QFont, QBrush, QIcon, QPainter, QPen, QPainterPa
 from sys_utils import resolve_stock_name
 from ats.intraday_strategy_engine import IntradayStrategyEngine
 from ats.tdx_realtime_fetcher import TDXRealtimeFetcher
-from ats.ui.styles import apply_dark_theme, DARK_THEME_QSS, bind_top_shortcut
+from ats.ui.styles import apply_dark_theme, DARK_THEME_QSS, bind_top_shortcut, set_seamless_stay_on_top
 from signal_types import SignalPoint, SignalType, SignalSource
 
 logger = logging.getLogger("IntradayStrategyDialog")
@@ -2530,19 +2530,12 @@ class SBCIntradayChartDialog(QWidget):
                 self.lbl_info.setText(f"📈 [周期直选] 当前周期: 【{new_mode.upper()}】 (快捷键: ←/→ 键轮转, 1~9 直选, F 联动, Esc 关闭)")
 
     def _toggle_stay_on_top(self):
-        """切换 SBC 窗口置顶状态"""
+        """切换 SBC 窗口置顶状态 (无缝 0 闪烁 0 重新刷新)"""
         self._is_stay_on_top = not getattr(self, '_is_stay_on_top', False)
-        flags = self.windowFlags()
-        if self._is_stay_on_top:
-            flags |= Qt.WindowType.WindowStaysOnTopHint
-            if hasattr(self, 'lbl_info') and self.lbl_info:
-                self.lbl_info.setText(f"📌 [窗口置顶: 开启] 当前标的: 【{self.code}】 (快捷键: T 开启/关闭置顶)")
-        else:
-            flags &= ~Qt.WindowType.WindowStaysOnTopHint
-            if hasattr(self, 'lbl_info') and self.lbl_info:
-                self.lbl_info.setText(f"📌 [窗口置顶: 关闭] 当前标的: 【{self.code}】 (快捷键: T 开启/关闭置顶)")
-        self.setWindowFlags(flags)
-        self.show()
+        set_seamless_stay_on_top(self, self._is_stay_on_top)
+        if hasattr(self, 'lbl_info') and self.lbl_info:
+            txt = "开启" if self._is_stay_on_top else "关闭"
+            self.lbl_info.setText(f"📌 [窗口置顶: {txt}] 当前标的: 【{self.code}】 (快捷键: T 开启/关闭置顶)")
 
     def keyPressEvent(self, event):
         """⚡ 窗口级快捷键：支持 T 置顶切换、R 测算、F 联动、方向键/Tab 轮转、1~9 直选、0 重置、Esc 关闭"""
@@ -5079,17 +5072,15 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
         bind_top_shortcut(self, self._toggle_stay_on_top)
 
     def _toggle_stay_on_top(self):
-        """切换窗口置顶状态 (快捷键: T)"""
+        """切换窗口置顶状态 (快捷键: T, 无缝 0 闪烁)"""
         self._is_stay_on_top = not getattr(self, '_is_stay_on_top', False)
+        set_seamless_stay_on_top(self, self._is_stay_on_top)
         if self._is_stay_on_top:
-            self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowStaysOnTopHint)
             self.btn_topmost.setText("📌 置顶 (T): 开")
             self.btn_topmost.setStyleSheet("background-color: #1e3a24; color: #00ff88; font-weight: bold; border: 1px solid #00ff88; border-radius: 4px; padding: 3px 8px;")
         else:
-            self.setWindowFlags(self.windowFlags() & ~Qt.WindowType.WindowStaysOnTopHint)
             self.btn_topmost.setText("📌 置顶 (T): 关")
             self.btn_topmost.setStyleSheet("background-color: #242436; color: #d0d0e0; font-weight: bold; border: 1px solid #555566; border-radius: 4px; padding: 3px 8px;")
-        self.show()
 
     def _on_toggle_manual_eval(self, checked: bool):
         """【开关】手动估价/异常推演开关切换：默认关闭，防止干扰实盘"""
@@ -6820,15 +6811,12 @@ class AllCodesStrategyEvalDialog(QDialog):
         self._broadcast_link_stock(target_code, resolve_stock_name(target_code))
 
     def _toggle_stay_on_top(self):
-        """切换窗口置顶状态 (快捷键: T)"""
+        """切换窗口置顶状态 (快捷键: T, 无缝 0 闪烁)"""
         self._is_stay_on_top = not getattr(self, '_is_stay_on_top', False)
-        flags = self.windowFlags()
-        if self._is_stay_on_top:
-            flags |= Qt.WindowType.WindowStaysOnTopHint
-        else:
-            flags &= ~Qt.WindowType.WindowStaysOnTopHint
-        self.setWindowFlags(flags)
-        self.show()
+        set_seamless_stay_on_top(self, self._is_stay_on_top)
+        if hasattr(self, 'lbl_status') and self.lbl_status:
+            txt = "开启" if self._is_stay_on_top else "关闭"
+            self.lbl_status.setText(f"📌 [窗口置顶: {txt}] (快捷键: T 开启/关闭置顶)")
 
     def keyPressEvent(self, event):
         """键盘事件处理：支持快捷键 T 切换置顶，卡片视图下的键盘上下键切换联动"""

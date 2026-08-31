@@ -22,7 +22,7 @@ from tk_gui_modules.window_mixin import WindowMixin
 from tk_gui_modules.gui_config import WINDOW_CONFIG_FILE
 from tk_gui_modules.qt_table_utils import NumericTableWidgetItem
 from logger_utils import LoggerFactory
-from ats.ui.styles import COLOR_UP, COLOR_DOWN, COLOR_INFO, COLOR_ACCENT, COLOR_WARN, auto_fit_columns_once, setup_header_persistence, bind_top_shortcut
+from ats.ui.styles import COLOR_UP, COLOR_DOWN, COLOR_INFO, COLOR_ACCENT, COLOR_WARN, auto_fit_columns_once, setup_header_persistence, bind_top_shortcut, set_seamless_stay_on_top
 from JohnsonUtil import commonTips as cct
 
 logger = LoggerFactory.getLogger(__name__)
@@ -382,9 +382,7 @@ class DragonLeaderMonitorDialog(QDialog, WindowMixin):
 
     def _on_stays_on_top_toggled(self, state):
         self.stays_on_top = self.chk_on_top.isChecked()
-        flags = self.windowFlags()
         if self.stays_on_top:
-            flags |= Qt.WindowType.WindowStaysOnTopHint
             # 【置顶与磁吸互斥】：开启置顶时，立即退出磁吸并恢复正常窗口显示
             if getattr(self, 'is_hidden_state', False):
                 self.show_normal_position()
@@ -398,11 +396,9 @@ class DragonLeaderMonitorDialog(QDialog, WindowMixin):
             self.leave_ticks = 0
             self.setWindowOpacity(1.0)
         else:
-            flags &= ~Qt.WindowType.WindowStaysOnTopHint
             if hasattr(self, 'hover_timer') and self.hover_timer:
                 self.hover_timer.start()
-        self.setWindowFlags(flags)
-        self.show()
+        set_seamless_stay_on_top(self, self.stays_on_top)
         self._save_window_states()
 
     def _save_window_states(self, is_open=None) -> None:

@@ -33,7 +33,7 @@ from logger_utils import LoggerFactory
 from ats.ui.styles import (
     COLOR_UP, COLOR_DOWN, COLOR_INFO, COLOR_ACCENT, COLOR_WARN, 
     auto_fit_columns_once, setup_header_persistence, save_config_node, load_config_node,
-    apply_dark_theme, bind_top_shortcut, ColorPreservingItemDelegate
+    apply_dark_theme, bind_top_shortcut, ColorPreservingItemDelegate, set_seamless_stay_on_top
 )
 from ats.ui.favorite_panel import get_ats_extra_cols
 from ats.hot_sector_engine import HotSectorEngine
@@ -637,9 +637,7 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
 
     def _on_stays_on_top_toggled(self, state):
         self.stays_on_top = self.chk_on_top.isChecked()
-        flags = self.windowFlags()
         if self.stays_on_top:
-            flags |= Qt.WindowType.WindowStaysOnTopHint
             # 【置顶与磁吸互斥】：开启置顶时，立即退出磁吸并恢复正常窗口显示
             if self.is_hidden_state:
                 self.show_normal_position()
@@ -649,10 +647,7 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
             self.hover_ticks = 0
             self.leave_ticks = 0
             self.setWindowOpacity(1.0)
-        else:
-            flags &= ~Qt.WindowType.WindowStaysOnTopHint
-        self.setWindowFlags(flags)
-        self.show()
+        set_seamless_stay_on_top(self, self.stays_on_top)
         self._save_window_states()
 
     def _save_window_states(self, is_open=None) -> None:

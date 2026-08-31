@@ -42,7 +42,7 @@ from logger_utils import LoggerFactory
 from ats.ui.styles import (
     COLOR_UP, COLOR_DOWN, COLOR_INFO, COLOR_ACCENT, COLOR_WARN, 
     auto_fit_columns_once, setup_header_persistence, save_config_node, save_config_nodes, load_config_node,
-    apply_dark_theme, ColorPreservingItemDelegate, bind_top_shortcut
+    apply_dark_theme, ColorPreservingItemDelegate, bind_top_shortcut, set_seamless_stay_on_top
 )
 from ats.ui.favorite_panel import get_ats_extra_cols
 from ats.limit_up_engine import LimitUpEngine, get_ats_custom_extra_cols
@@ -2670,8 +2670,7 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         else:
             if hasattr(self, 'hover_timer') and self.hover_timer:
                 self.hover_timer.start()
-        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, checked)
-        self.show()
+        set_seamless_stay_on_top(self, checked)
         self._save_window_states()
 
     def start_slide_animation(self, target_geo: QRect, target_opacity: float = 1.0, duration: int = 250, is_snap_feedback: bool = False):
