@@ -4925,90 +4925,129 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.resample_combo.pack(side="left", padx=5)
         self.resample_combo.bind("<<ComboboxSelected>>", lambda e: self.refresh_data())
         
-        # --- 窗口位置手动快照（Manual Snapshot，全面持久化所有打开关联窗口）---
-        # 与 on_close 自动持久化槽（main_window）分开，用于切换屏幕/分辨率变形后的单独修复。
-        _MANUAL_WIN_KEY = "main_window_manual"
+        # --- 窗口位置手动快照（提供3个保存位置，全面持久化所有打开关联窗口）---
+        def get_snapshot_tooltip_text(action_prefix="📍 手动保存快照"):
+            try:
+                slots = self.get_snapshot_slots_info() if hasattr(self, 'get_snapshot_slots_info') else {}
+                lines = [f"{action_prefix}（提供3个保存位置）："]
+                for s in (1, 2, 3):
+                    info = slots.get(s, {})
+                    if info.get("exists"):
+                        lines.append(f"  • 槽位 {s}: {info.get('date_ymd', '')} ({info.get('window_count', 0)}个窗口)")
+                    else:
+                        lines.append(f"  • 槽位 {s}: [空 / 未保存]")
+                lines.append("（点击弹出选择菜单）")
+                return "\n".join(lines)
+            except Exception:
+                return f"{action_prefix}（提供3个保存位置，点击选择）"
 
-        def save_main_pos_manual():
-            """手动全量快照：保存主窗口及所有已打开关联子窗口的位置与业务数据"""
+        def do_save_snapshot_slot(slot: int):
+            """执行保存快照到指定槽位 (1, 2, 3)"""
             if hasattr(self, 'save_all_windows_snapshot'):
                 try:
-                    res = self.save_all_windows_snapshot()
+                    res = self.save_all_windows_snapshot(slot=slot)
                     total = res.get("total_windows", 1)
                     m_cnt = res.get("monitor_count", 0)
-                    sub_cnt = max(0, total - 1)
-                    if sub_cnt > 0:
-                        toast_message(self, f"📍 全量快照已保存: 主窗口 + {sub_cnt}个关联子窗口 (监控:{m_cnt}项)")
-                    else:
-                        toast_message(self, "📍 手动快照已保存: 主窗口位置已记录（可用🔧恢复）")
+                    ymd = res.get("date_ymd", "")
+                    toast_message(self, f"📍 槽位 {slot} 快照已保存: {ymd} (共{total}个窗口, 监控:{m_cnt}项)")
                     return
                 except Exception as e:
-                    logger.warning(f"[save_main_pos_manual] 全量快照保存异常，降级保存主窗: {e}")
-
+                    logger.warning(f"[save_main_pos_manual] 槽位 {slot} 快照保存异常: {e}")
             if hasattr(self, 'save_window_position'):
-                self.save_window_position(self, _MANUAL_WIN_KEY)
-                toast_message(self, "📍 手动快照已保存（可用🔧恢复）")
+                self.save_window_position(self, f"main_window_manual_{slot}")
+                toast_message(self, f"📍 槽位 {slot} 快照已保存")
 
-        def restore_main_pos_manual():
-            """从手动快照槽恢复所有打开关联窗口的位置；若尚未保存过则提示"""
+        def do_restore_snapshot_slot(slot: int):
+            """从指定槽位 (1, 2, 3) 恢复快照"""
             if hasattr(self, 'restore_all_windows_snapshot'):
                 try:
-                    count, restored_list = self.restore_all_windows_snapshot()
+                    count, restored_list = self.restore_all_windows_snapshot(slot=slot)
                     if count > 0:
-                        sub_cnt = max(0, count - 1)
-                        if sub_cnt > 0:
-                            toast_message(self, f"🔧 全量快照已恢复: 主窗口 + {sub_cnt}个关联子窗口已归位")
-                        else:
-                            toast_message(self, "🔧 已从手动快照恢复主窗口位置")
+                        slots = self.get_snapshot_slots_info() if hasattr(self, 'get_snapshot_slots_info') else {}
+                        ymd = slots.get(slot, {}).get("date_ymd", "")
+                        date_info = f" [{ymd}]" if ymd else ""
+                        toast_message(self, f"🔧 槽位 {slot} 快照已恢复{date_info}: 共{count}个窗口已精准归位")
                         return
                     else:
-                        toast_message(self, "⚠️ 尚无手动快照，请先点 📍 保存")
+                        toast_message(self, f"⚠️ 槽位 {slot} 尚无有效快照，请先保存")
                         return
                 except Exception as e:
-                    logger.warning(f"[restore_main_pos_manual] 全量快照恢复异常，降级恢复主窗: {e}")
+                    logger.warning(f"[restore_main_pos_manual] 槽位 {slot} 恢复异常: {e}")
 
-            from tk_gui_modules.gui_config import WINDOW_CONFIG_FILE
-            import json, os
-            # 检查手动快照是否存在
-            has_snapshot = False
+        def popup_save_slots_menu(event=None):
+            """弹出保存快照槽位选择菜单 (提供 3 个位置)"""
             try:
-                scale = self._get_dpi_scale_factor() if hasattr(self, '_get_dpi_scale_factor') else 1.0
-                cfg_path = self._get_config_file_path(WINDOW_CONFIG_FILE, scale) if hasattr(self, '_get_config_file_path') else WINDOW_CONFIG_FILE
-                if os.path.exists(cfg_path):
-                    with open(cfg_path, "r", encoding="utf-8") as _f:
-                        _d = json.load(_f)
-                    has_snapshot = _MANUAL_WIN_KEY in _d
-            except Exception:
-                pass
+                slots = self.get_snapshot_slots_info() if hasattr(self, 'get_snapshot_slots_info') else {}
+                menu = tk.Menu(self, tearoff=0)
+                menu.add_command(label="📍 选择要保存快照的位置 (覆盖保存):", state="disabled")
+                menu.add_separator()
+                for s in (1, 2, 3):
+                    info = slots.get(s, {})
+                    if info.get("exists"):
+                        label = f"📌 槽位 {s}: {info.get('date_ymd', '')} ({info.get('window_count', 0)}个窗口)"
+                    else:
+                        label = f"⚪ 槽位 {s}: [空 / 点击保存]"
+                    menu.add_command(label=label, command=lambda slot=s: do_save_snapshot_slot(slot))
 
-            if not has_snapshot:
-                toast_message(self, "⚠️ 尚无手动快照，请先点 📍 保存")
-                return
+                x = self.top_save_pos_btn.winfo_rootx()
+                y = self.top_save_pos_btn.winfo_rooty() + self.top_save_pos_btn.winfo_height()
+                menu.post(x, y)
+            except Exception as e:
+                logger.warning(f"弹出保存菜单异常: {e}")
+                do_save_snapshot_slot(1)
 
-            if hasattr(self, 'load_window_position'):
-                self.load_window_position(self, _MANUAL_WIN_KEY)
-                toast_message(self, "🔧 已从手动快照恢复位置")
+        def popup_restore_slots_menu(event=None):
+            """弹出恢复快照槽位选择菜单 (可选择 1/2/3 槽位恢复)"""
+            try:
+                slots = self.get_snapshot_slots_info() if hasattr(self, 'get_snapshot_slots_info') else {}
+                menu = tk.Menu(self, tearoff=0)
+                menu.add_command(label="🔧 选择要恢复的快照位置:", state="disabled")
+                menu.add_separator()
+                has_any = False
+                for s in (1, 2, 3):
+                    info = slots.get(s, {})
+                    if info.get("exists"):
+                        has_any = True
+                        label = f"🟢 槽位 {s}: {info.get('date_ymd', '')} ({info.get('window_count', 0)}个窗口)"
+                        menu.add_command(label=label, command=lambda slot=s: do_restore_snapshot_slot(slot))
+                    else:
+                        label = f"⚪ 槽位 {s}: [空 / 未保存]"
+                        menu.add_command(label=label, state="disabled")
+
+                if not has_any:
+                    toast_message(self, "⚠️ 尚无任何保存的快照，请先点击 📍 保存")
+                    return
+
+                x = self.top_load_pos_btn.winfo_rootx()
+                y = self.top_load_pos_btn.winfo_rooty() + self.top_load_pos_btn.winfo_height()
+                menu.post(x, y)
+            except Exception as e:
+                logger.warning(f"弹出恢复菜单异常: {e}")
+                do_restore_snapshot_slot(1)
 
         self.top_save_pos_btn = tk.Button(
-            ctrl_frame, text="📍", command=save_main_pos_manual,
+            ctrl_frame, text="📍", command=popup_save_slots_menu,
             font=("Segoe UI Symbol", 9), relief="flat", padx=2
         )
         self.top_save_pos_btn.pack(side="left", padx=2)
+
         # tooltip
         try:
             from tktooltip import ToolTip
-            ToolTip(self.top_save_pos_btn, msg="📍 手动保存全量快照\n（全面持久化主窗口及全部打开关联窗口的位置与数据，修复换屏变形）", delay=0.5)
+            save_tip = ToolTip(self.top_save_pos_btn, msg=get_snapshot_tooltip_text("📍 手动保存全量快照"), delay=0.4)
+            self.top_save_pos_btn.bind("<Enter>", lambda e: setattr(save_tip, 'msg', get_snapshot_tooltip_text("📍 手动保存全量快照")), add="+")
         except Exception:
             pass
 
         self.top_load_pos_btn = tk.Button(
-            ctrl_frame, text="🔧", command=restore_main_pos_manual,
+            ctrl_frame, text="🔧", command=popup_restore_slots_menu,
             font=("Segoe UI Symbol", 9), relief="flat", padx=2
         )
         self.top_load_pos_btn.pack(side="left", padx=2)
         try:
             from tktooltip import ToolTip
-            ToolTip(self.top_load_pos_btn, msg="🔧 恢复手动快照位置\n（一键精准恢复全部打开关联窗口的快照位置，需先点📍保存）", delay=0.5)
+            load_tip = ToolTip(self.top_load_pos_btn, msg=get_snapshot_tooltip_text("🔧 恢复手动快照位置"), delay=0.4)
+            self.top_load_pos_btn.bind("<Enter>", lambda e: setattr(load_tip, 'msg', get_snapshot_tooltip_text("🔧 恢复手动快照位置")), add="+")
         except Exception:
             pass
 
