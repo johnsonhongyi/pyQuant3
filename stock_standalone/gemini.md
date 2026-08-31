@@ -1,3 +1,21 @@
+## 2026-08-31 22:50
+- [x] **全面修复 TK 实时 K 线数据性能优化后的持久化拦截与自动更新重大 Bug & 回补 2026-08-31 今日全量数据 (`stock_standalone/cache_utils.py`, `stock_standalone/realtime_data_service.py`, `stock_standalone/sbc_core.py`, `stock_standalone/test_compression.py`)**：
+    - [x] **排查定位“全天运行后 minute_kline_cache.pkl 修改时间停滞在 2026-08-30、节点停在 2026-08-28 未自动持久化”四大根本诱因**：
+        1. **DataFrameCacheSlot 缓存指纹误拦截 (`cache_utils.py`)**：`save_df` 原先仅取 `df.tail(5)` 做 MD5 指纹比对。全市场按代码排序后尾部固定为单只代码（如 920xxx / 688xxx），当尾盘该股无成交时 `new_fp == _last_fp` 恒为真，导致盘中与收盘的所有定时落盘被虚假跳过；
+        2. **盘后宽限期时间逻辑判断写反 (`realtime_data_service.py`)**：`DataPublisher.save_cache` 中 `if not (1500 <= hhmm <= 1600): ... else: return`，导致在 15:00~16:00 最关键的收盘归档时段，所有非 force 保存直接退出；
+        3. **未直连零拷贝极速落盘实现**：性能优化引入的紧凑二进制 NumPy 结构数组直写（速度 <0.05 秒）未在主流程 `save_cache` 中生效，仍在走慢速且被拦截的 DataFrame 构造；
+        4. **单股提取格式支持**：`sbc_core.py` 缺乏对 v2 紧凑字典结构的原生微秒级单股提取解析。
+    - [x] **全面重构与修复持久化体系**：
+        1. **综合指纹计算 (`_calc_df_fp`)**：综合行数、首尾时间跨度、全市场总成交量与末尾采样，杜绝指纹误拦截；
+        2. **直连零拷贝落盘与盘后宽限期防抖**：`DataPublisher.save_cache` 直连 `MinuteKlineCache.save_cache`，默认持久化间隔缩短为 300 秒，15:00~16:00 宽限期提供 10 秒防抖落盘并及时清除 `_is_dirty`；
+        3. **开盘与盘后自适应回补机制 (`run_recovery`)**：若发现缺失今日分时节点，自动从 `sina_MultiIndex_data.h5` 增量回补全量分钟 K 线并强制持久化；
+        4. **类型与接口自适应兼容**：`KLineItem` 增强支持关键字参数，`KLINE_DTYPE` 补齐 `cum_vol_start` 字段，`get_klines` 与 `_get_daily_stats` 自动兼容 list 与结构化数组。
+    - [x] **今日（2026-08-31）全量分时数据回补与落盘验证**：
+        1. 从 `sina_MultiIndex_data.h5` 提取 219.5 万条 Tick 记录聚合为全市场分钟 K 线；
+        2. 成功回补合并并持久化至 `G:\minute_kline_cache.pkl`，文件大小 24.81 MB，包含 5571 只股票；
+        3. 抽样验证 000001、600519、300750、002594 等均完整包含 2026-08-31 09:25:00 至 15:05:00 全天分时；
+        4. 关联回归测试 100% 全部 PASSED。
+
 ## 2026-08-31 14:58
 - [x] **实现 4 小时交易时段分段（默认 30 分钟）价格/量能自动记忆缓存与区间涨速引擎 (`calculate_segmented_velocity`) & 分段周期选择与原子持久化 (`stock_standalone/ats/tdx_realtime_fetcher.py`, `stock_standalone/ats/hot_sector_engine.py`, `stock_standalone/ats/ui/hot_sector_leaderboard.py`, `stock_standalone/tests/test_snap_windows_top_hotkey.py`)**：
     - [x] **重构交易时段分段区间涨跌与量能增量模型**：
