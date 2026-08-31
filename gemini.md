@@ -1,3 +1,17 @@
+## 2026-08-31 14:58
+- [x] **实现 4 小时交易时段分段（默认 30 分钟）价格/量能自动记忆缓存与区间涨速引擎 (`calculate_segmented_velocity`) & 分段周期选择与原子持久化 (`stock_standalone/ats/tdx_realtime_fetcher.py`, `stock_standalone/ats/hot_sector_engine.py`, `stock_standalone/ats/ui/hot_sector_leaderboard.py`, `stock_standalone/tests/test_snap_windows_top_hotkey.py`)**：
+    - [x] **重构交易时段分段区间涨跌与量能增量模型**：
+        1. **交易时段划分与自适应匹配**：覆盖 A 股 4 小时交易全流程（`09:30~10:00 早盘冲刺定龙`、`10:00~10:30 分歧换手`、`10:30~11:00 午前震荡`、`11:00~11:30 午盘收敛`、`13:00~13:30 午后启动`、`13:30~14:00 题材发酵`、`14:00~14:30 尾盘博弈`、`14:30~15:00 尾盘定盘`）；
+        2. **个股价格/量能基准自动记忆缓存 (`_segment_stock_cache`)**：
+           - 无论 09:30 正常开盘还是盘中中途启动（如 10:15 启动），系统自动识别当前所处交易分段，并将接收到的第一笔有效价格与成交量作为该时段的初始基线 $P_{base}, \text{Vol}_{base}, \text{Amt}_{base}$；
+           - 时段净涨幅精确计算为 $(P_{now} - P_{base}) / P_{last\_close} \times 100\%$，时段增量成交额计算为 $(\text{Amt}_{now} - \text{Amt}_{base}) / 10000$ 万元；
+           - 跨时段（如 10:00:00）时自动承接，以 10:00 首笔数据开启新时段净统计，赋予涨跌极其扎实的持续性与周期实战价值；
+    - [x] **多分段模式支持、UI 选项与原子持久化**：
+        1. **分段模式选择器 (`combo_segment_mode`)**：支持 `⏱️ 30分分段 (默认)`、`⏱️ 15分分段`、`⏱️ 60分分段`、`⏱️ 全天开盘累计`、`⏱️ 60秒微观滑动`；
+        2. **配置原子持久化记忆**：通过 `ats_velocity_segment_mode` 保存与加载，切换瞬间自适应更新表头（如 `30分涨速%` / `15分涨速%`）并触发即时刷新；
+        3. **动态富文本 Tooltip 赋能**：清晰呈现所属分段、时段基准价（区分开盘基准与盘中启动初测）、现价、时段净拉升、时段增量成交额与 7 级实战状态；
+    - [x] **全量 48 项自动化与跨模块回归测试 100% 全部 PASSED**。
+
 ## 2026-08-31 14:32
 - [x] **重构工业级 60 秒滑动窗口真实涨速引擎 (`calculate_rolling_velocity`) 与 7 级实战状态机，彻底根治苏宁环球等低价股涨速乱变 (`-10.2%` -> `0.0%`) 缺陷 (`stock_standalone/ats/tdx_realtime_fetcher.py`, `stock_standalone/ats/ui/hot_sector_leaderboard.py`, `stock_standalone/tests/test_snap_windows_top_hotkey.py`)**：
     - [x] **排查定位“涨速一直乱变、如苏宁环球上一周期 -10.2% 下一周期 0.0%”根本原因**：

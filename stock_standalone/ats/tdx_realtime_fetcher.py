@@ -57,6 +57,87 @@ FALLBACK_TDX_HOSTS = [
     ("中信证券北京", "115.238.56.198", 7709)
 ]
 
+def get_trading_segment_info(now_ts: float, segment_mode: str = "30m") -> Tuple[str, str, float, float]:
+    """
+    根据当前时间戳与分段模式（30m/15m/60m/day_open/60s），计算当前所属交易分段信息。
+    :return: (segment_key, segment_label, start_epoch, end_epoch)
+    """
+    dt = datetime.fromtimestamp(now_ts) if now_ts > 0 else datetime.now()
+    hm = dt.strftime("%H:%M")
+
+    def make_epoch(h, m):
+        return datetime(dt.year, dt.month, dt.day, h, m, 0).timestamp()
+
+    if segment_mode == "day_open":
+        return "09:30~15:00", "⏱️ 全天开盘累计", make_epoch(9, 30), make_epoch(15, 0)
+    elif segment_mode == "60s":
+        return "60s_rolling", "⏱️ 60秒滑动窗口", now_ts - 60.0, now_ts
+    elif segment_mode == "15m":
+        slots_15m = [
+            ("09:15", "09:30", "09:15~09:30", "⏱️ 09:15~09:30 竞价"),
+            ("09:30", "09:45", "09:30~09:45", "⏱️ 09:30~09:45 冲刺"),
+            ("09:45", "10:00", "09:45~10:00", "⏱️ 09:45~10:00 定龙"),
+            ("10:00", "10:15", "10:00~10:15", "⏱️ 10:00~10:15 换手"),
+            ("10:15", "10:30", "10:15~10:30", "⏱️ 10:15~10:30 分歧"),
+            ("10:30", "10:45", "10:30~10:45", "⏱️ 10:30~10:45 震荡"),
+            ("10:45", "11:00", "10:45~11:00", "⏱️ 10:45~11:00 整理"),
+            ("11:00", "11:15", "11:00~11:15", "⏱️ 11:00~11:15 收敛"),
+            ("11:15", "11:30", "11:15~11:30", "⏱️ 11:15~11:30 午结"),
+            ("11:30", "13:00", "11:30~13:00", "⏱️ 11:30~13:00 午休"),
+            ("13:00", "13:15", "13:00~13:15", "⏱️ 13:00~13:15 午启"),
+            ("13:15", "13:30", "13:15~13:30", "⏱️ 13:15~13:30 助攻"),
+            ("13:30", "13:45", "13:30~13:45", "⏱️ 13:30~13:45 发酵"),
+            ("13:45", "14:00", "13:45~14:00", "⏱️ 13:45~14:00 扩散"),
+            ("14:00", "14:15", "14:00~14:15", "⏱️ 14:00~14:15 试盘"),
+            ("14:15", "14:30", "14:15~14:30", "⏱️ 14:15~14:30 抢跑"),
+            ("14:30", "14:45", "14:30~14:45", "⏱️ 14:30~14:45 定盘"),
+            ("14:45", "15:00", "14:45~15:00", "⏱️ 14:45~15:00 封死"),
+        ]
+        for s_hm, e_hm, k, lab in slots_15m:
+            if s_hm <= hm < e_hm:
+                sh, sm = map(int, s_hm.split(":"))
+                eh, em = map(int, e_hm.split(":"))
+                return k, lab, make_epoch(sh, sm), make_epoch(eh, em)
+        return "15:00+", "⏱️ 15:00+ 盘后总结", make_epoch(15, 0), make_epoch(15, 30)
+
+    elif segment_mode == "60m":
+        slots_60m = [
+            ("09:15", "09:30", "09:15~09:30", "⏱️ 09:15~09:30 竞价"),
+            ("09:30", "10:30", "09:30~10:30", "⏱️ 09:30~10:30 早盘一小时"),
+            ("10:30", "11:30", "10:30~11:30", "⏱️ 10:30~11:30 午前一小时"),
+            ("11:30", "13:00", "11:30~13:00", "⏱️ 11:30~13:00 午间休市"),
+            ("13:00", "14:00", "13:00~14:00", "⏱️ 13:00~14:00 午后一小时"),
+            ("14:00", "15:00", "14:00~15:00", "⏱️ 14:00~15:00 尾盘一小时"),
+        ]
+        for s_hm, e_hm, k, lab in slots_60m:
+            if s_hm <= hm < e_hm:
+                sh, sm = map(int, s_hm.split(":"))
+                eh, em = map(int, e_hm.split(":"))
+                return k, lab, make_epoch(sh, sm), make_epoch(eh, em)
+        return "15:00+", "⏱️ 15:00+ 盘后总结", make_epoch(15, 0), make_epoch(15, 30)
+
+    else:
+        # 默认 30m 黄金分段体系
+        slots_30m = [
+            ("09:15", "09:30", "09:15~09:30", "⏱️ 09:15~09:30 竞价试盘"),
+            ("09:30", "10:00", "09:30~10:00", "👑 09:30~10:00 早盘冲刺定龙"),
+            ("10:00", "10:30", "10:00~10:30", "💎 10:00~10:30 分歧换手确认"),
+            ("10:30", "11:00", "10:30~11:00", "⚡ 10:30~11:00 午前震荡分化"),
+            ("11:00", "11:30", "11:00~11:30", "⏱️ 11:00~11:30 午前收敛防守"),
+            ("11:30", "13:00", "11:30~13:00", "⏱️ 11:30~13:00 午间休市"),
+            ("13:00", "13:30", "13:00~13:30", "🚀 13:00~13:30 午后开盘助攻"),
+            ("13:30", "14:00", "13:30~14:00", "🔥 13:30~14:00 题材二次发酵"),
+            ("14:00", "14:30", "14:00~14:30", "⚠️ 14:00~14:30 尾盘博弈试盘"),
+            ("14:30", "15:00", "14:30~15:00", "🔒 14:30~15:00 尾盘定龙定盘"),
+        ]
+        for s_hm, e_hm, k, lab in slots_30m:
+            if s_hm <= hm < e_hm:
+                sh, sm = map(int, s_hm.split(":"))
+                eh, em = map(int, e_hm.split(":"))
+                return k, lab, make_epoch(sh, sm), make_epoch(eh, em)
+        return "15:00+", "⏱️ 15:00+ 盘后总结", make_epoch(15, 0), make_epoch(15, 30)
+
+
 def get_local_tdx_config_paths() -> List[str]:
     """
     动态自适应获取当前系统及 global.ini 中配置的所有有效通达信配置文件 (connect.cfg 等)
@@ -251,6 +332,9 @@ class TDXRealtimeFetcher:
         # 标的历史平滑涨速缓存与状态 {code: float}, {code: str}
         self._smoothed_velocity: Dict[str, float] = {}
         self._velocity_tags: Dict[str, str] = {}
+
+        # ⏱️ 交易时段分段基准缓存 {code: {segment_key: {'base_price': float, 'base_vol': float, 'base_amount': float, 'first_seen_time': float, 'date': str}}}
+        self._segment_stock_cache: Dict[str, Dict[str, Dict[str, Any]]] = {}
 
         # 标的真实流通股本与总股本永久缓存 (股数)
         self._finance_shares_cache: Dict[str, float] = {}
@@ -1366,12 +1450,153 @@ class TDXRealtimeFetcher:
         self._velocity_tags[c_clean] = tag
         return final_vel, tag
 
+    def calculate_segmented_velocity(
+        self,
+        code: str,
+        price: float,
+        open_price: float,
+        last_close: float,
+        vol: float,
+        amount: float,
+        now_ts: float,
+        segment_mode: str = "30m"
+    ) -> Dict[str, Any]:
+        """
+        【📈 交易时段分段（默认30分钟）价格/量能记忆与区间涨速引擎】
+
+        特性：
+        1. 自动根据当前时钟/行情时间划分 4 小时交易时段 (如 09:30~10:00, 10:00~10:30 等)；
+        2. 自动记忆每个时段每个标的的第一笔数据 (base_price, base_vol, base_amount, first_seen_time)；
+        3. 无论 09:30 正常开盘还是盘中中途启动 (如 10:15 启动)，自动匹配并锁定该时段的第一笔有效数据作为基准；
+        4. 计算该时段内的真实净拉升幅度 (%) 与时段增量成交量 (手) / 成交额 (万元)；
+        5. 输出标准化时段涨速、时段增量量能与实战状态标签，绝不因 1 分钱跳价发生噪音翻转！
+        """
+        c_clean = str(code).strip().zfill(6)
+        if price <= 0 or last_close <= 0 or now_ts <= 0:
+            return {
+                "velocity_pct": 0.0,
+                "velocity_tag": "⏱️ 窄幅横盘",
+                "segment_key": "09:30~10:00",
+                "segment_label": "👑 09:30~10:00 早盘冲刺定龙",
+                "segment_base_price": price,
+                "segment_vol_increment": 0.0,
+                "segment_amount_wan": 0.0,
+                "is_midway_init": False,
+            }
+
+        # 如果选择的是 60 秒滑动模式，直接回退调用 60 秒滑动算法
+        if segment_mode == "60s":
+            vel, tag = self.calculate_rolling_velocity(c_clean, price, last_close, now_ts)
+            return {
+                "velocity_pct": vel,
+                "velocity_tag": tag,
+                "segment_key": "60s_rolling",
+                "segment_label": "⏱️ 60秒滑动窗口",
+                "segment_base_price": price,
+                "segment_vol_increment": 0.0,
+                "segment_amount_wan": 0.0,
+                "is_midway_init": False,
+            }
+
+        if not hasattr(self, '_segment_stock_cache'):
+            self._segment_stock_cache = {}
+
+        today_str = datetime.fromtimestamp(now_ts).strftime("%Y-%m-%d") if now_ts > 0 else datetime.now().strftime("%Y-%m-%d")
+        seg_key, seg_label, seg_s_epoch, seg_e_epoch = get_trading_segment_info(now_ts, segment_mode)
+
+        if c_clean not in self._segment_stock_cache:
+            self._segment_stock_cache[c_clean] = {}
+
+        code_cache = self._segment_stock_cache[c_clean]
+
+        # 检查并清理非今日的过期缓存
+        for k in list(code_cache.keys()):
+            if code_cache[k].get("date") != today_str:
+                del code_cache[k]
+
+        # 确定本时段的基准数据 (第一笔有效数据)
+        if seg_key not in code_cache:
+            if (seg_key.startswith("09:30") or segment_mode == "day_open") and open_price > 0:
+                base_p = open_price
+            else:
+                base_p = price
+
+            base_v = vol if vol > 0 else 0.0
+            base_amt = amount if amount > 0 else 0.0
+
+            code_cache[seg_key] = {
+                "base_price": base_p,
+                "base_vol": base_v,
+                "base_amount": base_amt,
+                "first_seen_time": now_ts,
+                "date": today_str,
+                "is_midway_init": (now_ts - seg_s_epoch > 60.0) if seg_s_epoch > 0 else False
+            }
+
+        seg_base = code_cache[seg_key]
+        base_price = float(seg_base["base_price"])
+        base_vol = float(seg_base["base_vol"])
+        base_amt = float(seg_base["base_amount"])
+
+        # 计算时段内的真实净拉升幅度 (%)
+        if last_close > 0 and base_price > 0:
+            seg_vel_raw = (price - base_price) / last_close * 100.0
+        else:
+            seg_vel_raw = 0.0
+
+        # 物理钳位 (主板 10%，双创 20%，北交所 30%)
+        if c_clean.startswith(('300', '301', '688')):
+            max_limit = 20.0
+        elif c_clean.startswith(('8', '4', '920')):
+            max_limit = 30.0
+        else:
+            max_limit = 10.0
+        seg_vel = max(-max_limit, min(max_limit, seg_vel_raw))
+
+        # 微小死区过滤 (绝对值 < 0.15% 视为震荡横盘)
+        if abs(seg_vel) < 0.15:
+            seg_vel = 0.0
+
+        final_vel = round(seg_vel, 1)
+
+        # 计算时段内的增量成交量 (手) 与增量成交额 (万元)
+        vol_inc = max(0.0, vol - base_vol) if vol >= base_vol else 0.0
+        amt_inc_wan = round(max(0.0, amount - base_amt) / 10000.0, 1) if amount >= base_amt else 0.0
+
+        # 状态机判定
+        if final_vel >= 2.0:
+            tag = "🚀 极速拉升"
+        elif final_vel >= 0.8:
+            tag = "🔥 强势推升"
+        elif final_vel >= 0.3:
+            tag = "⚡ 稳步走高"
+        elif final_vel <= -1.5:
+            tag = "❄️ 深度跳水"
+        elif final_vel <= -0.8:
+            tag = "⚠️ 明显走弱"
+        elif final_vel <= -0.3:
+            tag = "🔻 震荡回踩"
+        else:
+            tag = "⏱️ 窄幅横盘"
+
+        return {
+            "velocity_pct": final_vel,
+            "velocity_tag": tag,
+            "segment_key": seg_key,
+            "segment_label": seg_label,
+            "segment_base_price": base_price,
+            "segment_vol_increment": vol_inc,
+            "segment_amount_wan": amt_inc_wan,
+            "is_midway_init": seg_base.get("is_midway_init", False),
+        }
+
     def fetch_multi_stock_alpha_quotes(
         self,
         codes: List[str],
         sector_map: Optional[Dict[str, str]] = None,
         multi_period_cache: Optional[Dict[str, Any]] = None,
-        name_map: Optional[Dict[str, str]] = None
+        name_map: Optional[Dict[str, str]] = None,
+        segment_mode: str = "30m"
     ) -> List[Dict[str, Any]]:
         """
         批量拉取多只股票的 TDX 高频盘口数据，并计算量比爆发力、分时 VWAP 偏离、
@@ -1381,6 +1606,7 @@ class TDXRealtimeFetcher:
         :param sector_map: 代码到所属强势板块的映射 {code: sector_name}
         :param multi_period_cache: 底层多日底蕴特征 {code: {dff, dff2, dff3, rank, perc3d...}}
         :param name_map: 代码到名称的映射 {code: name}
+        :param segment_mode: 交易时段分段模式 ('30m', '15m', '60m', 'day_open', '60s')
         :return: 包含完整 Alpha 动量与买点指引的字典列表，按 alpha_score 降序排列
         """
         if not codes:
@@ -1422,8 +1648,24 @@ class TDXRealtimeFetcher:
             # 涨幅 %
             pct = round((price - last_close) / last_close * 100.0, 2) if last_close > 0 else 0.0
 
-            # 1. 工业级 1 分钟滑动窗口真实涨速 (%/分) 与状态机标签
-            velocity_pct, velocity_tag = self.calculate_rolling_velocity(code_str, price, last_close, now_ts)
+            # 1. 交易时段分段（默认30分钟）价格/量能记忆与区间涨速引擎
+            seg_res = self.calculate_segmented_velocity(
+                code=code_str,
+                price=price,
+                open_price=open_p,
+                last_close=last_close,
+                vol=vol,
+                amount=amount,
+                now_ts=now_ts,
+                segment_mode=segment_mode
+            )
+            velocity_pct = seg_res["velocity_pct"]
+            velocity_tag = seg_res["velocity_tag"]
+            segment_key = seg_res["segment_key"]
+            segment_label = seg_res["segment_label"]
+            segment_base_price = seg_res["segment_base_price"]
+            segment_vol_inc = seg_res["segment_vol_increment"]
+            segment_amt_wan = seg_res["segment_amount_wan"]
 
             # 日内 VWAP (元)
             if vol > 0 and amount > 0:
@@ -1680,6 +1922,11 @@ class TDXRealtimeFetcher:
                 "pct": pct,
                 "velocity_pct": velocity_pct,
                 "velocity_tag": velocity_tag,
+                "segment_key": segment_key,
+                "segment_label": segment_label,
+                "segment_base_price": segment_base_price,
+                "segment_vol_inc": segment_vol_inc,
+                "segment_amt_wan": segment_amt_wan,
                 "vwap": vwap,
                 "vwap_dev_pct": vwap_dev_pct,
                 "vol": vol,

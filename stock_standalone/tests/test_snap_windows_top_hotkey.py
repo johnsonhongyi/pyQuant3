@@ -442,3 +442,87 @@ def test_rolling_window_velocity_and_state_machine():
     assert vel_fall <= -1.5
     assert tag_fall == "❄️ 极速跳水"
 
+
+def test_trading_segment_velocity_engine_and_cache():
+    """15. Test trading segment velocity & base price/volume cache across 4-hour market slices"""
+    from ats.tdx_realtime_fetcher import TDXRealtimeFetcher
+    from datetime import datetime
+
+    fetcher = TDXRealtimeFetcher.get_instance()
+    fetcher._segment_stock_cache.clear()
+
+    # 构造当天 09:35:00 的 epoch 时间戳
+    today = datetime.now()
+    t_0935 = datetime(today.year, today.month, today.day, 9, 35, 0).timestamp()
+    t_0955 = datetime(today.year, today.month, today.day, 9, 55, 0).timestamp()
+    t_1005 = datetime(today.year, today.month, today.day, 10, 5, 0).timestamp()
+    t_1025 = datetime(today.year, today.month, today.day, 10, 25, 0).timestamp()
+
+    code = "000718"
+    last_close = 2.00
+
+    # 1. 09:35: 首次进入 09:30~10:00 时段，开盘价 2.00，现价 2.00，量 1000手
+    res1 = fetcher.calculate_segmented_velocity(
+        code=code, price=2.00, open_price=2.00, last_close=last_close,
+        vol=1000, amount=200000, now_ts=t_0935, segment_mode="30m"
+    )
+    assert res1["segment_key"] == "09:30~10:00"
+    assert res1["segment_base_price"] == 2.00
+    assert res1["velocity_pct"] == 0.0
+    assert res1["velocity_tag"] == "⏱️ 窄幅横盘"
+
+    # 2. 09:55: 在同一个 09:30~10:00 时段内，价格拉升至 2.06 (+3.0%)，量达到 5000手
+    res2 = fetcher.calculate_segmented_velocity(
+        code=code, price=2.06, open_price=2.00, last_close=last_close,
+        vol=5000, amount=1020000, now_ts=t_0955, segment_mode="30m"
+    )
+    assert res2["segment_key"] == "09:30~10:00"
+    assert res2["segment_base_price"] == 2.00
+    assert res2["velocity_pct"] == 3.0
+    assert res2["velocity_tag"] == "🚀 极速拉升"
+    assert res2["segment_vol_increment"] == 4000.0
+
+    # 3. 10:05: 自动跨时段切换到 10:00~10:30 时段，第一笔数据为 2.06，建立新基准
+    res3 = fetcher.calculate_segmented_velocity(
+        code=code, price=2.06, open_price=2.00, last_close=last_close,
+        vol=6000, amount=1230000, now_ts=t_1005, segment_mode="30m"
+    )
+    assert res3["segment_key"] == "10:00~10:30"
+    assert res3["segment_base_price"] == 2.06
+    assert res3["velocity_pct"] == 0.0
+    assert res3["velocity_tag"] == "⏱️ 窄幅横盘"
+
+    # 4. 10:25: 在 10:00~10:30 时段内，价格小幅冲至 2.08 (净拉升 2.08 - 2.06 = +0.02 / 2.00 = +1.0%)
+    res4 = fetcher.calculate_segmented_velocity(
+        code=code, price=2.08, open_price=2.00, last_close=last_close,
+        vol=8000, amount=1650000, now_ts=t_1025, segment_mode="30m"
+    )
+    assert res4["segment_key"] == "10:00~10:30"
+    assert res4["velocity_pct"] == 1.0
+    assert res4["velocity_tag"] == "🔥 强势推升"
+    assert res4["segment_vol_increment"] == 2000.0
+
+
+def test_hot_sector_segment_combo_and_persistence(qapp):
+    """16. Test HotSectorLeaderboardDialog combo_segment_mode and persistence"""
+    from ats.ui.hot_sector_leaderboard import HotSectorLeaderboardDialog
+    from ats.ui.styles import load_config_node
+
+    dialog = HotSectorLeaderboardDialog()
+    assert hasattr(dialog, "combo_segment_mode")
+
+    # Switch to 15m segment (index 1)
+    dialog.combo_segment_mode.setCurrentIndex(1)
+    assert dialog._get_current_segment_mode_key() == "15m"
+    assert load_config_node("ats_velocity_segment_mode") == 1
+    assert "15分" in dialog.table.horizontalHeaderItem(6).text()
+
+    # Switch back to 30m segment (index 0)
+    dialog.combo_segment_mode.setCurrentIndex(0)
+    assert dialog._get_current_segment_mode_key() == "30m"
+    assert load_config_node("ats_velocity_segment_mode") == 0
+    assert "30分" in dialog.table.horizontalHeaderItem(6).text()
+
+    dialog.close()
+
+
