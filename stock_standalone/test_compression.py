@@ -8,7 +8,7 @@ def test_zstd_compression():
     df = pd.DataFrame({
         'code': [str(i).zfill(6) for i in range(10000)],
         'price': np.random.rand(10000),
-        'volume': np.random.randint(0, 100000, 10000)
+        'volume': np.random.randint(1, 100000, 10000)
     })
     
     test_file = "test_zstd_cache.pkl"

@@ -58,6 +58,17 @@ class DataFrameCacheSlot:
         self._last_fp: str = ""      # [NEW] 记录上次成功保存的指纹
         self._last_count: int = 0    # [NEW] 记录上次数据的行数
 
+    def _calc_df_fp(self, df: pd.DataFrame) -> str:
+        if df is None or df.empty:
+            return ""
+        count = len(df)
+        t_max = df['time'].max() if 'time' in df.columns else ''
+        t_min = df['time'].min() if 'time' in df.columns else ''
+        v_sum = df['volume'].sum() if 'volume' in df.columns else ''
+        tail_str = df.tail(5).to_csv(index=False)
+        fp_raw = f"{count}_{t_min}_{t_max}_{v_sum}_{tail_str}"
+        return hashlib.md5(fp_raw.encode('utf-8')).hexdigest()
+
     # =========================
     # DataFrame Cache
     # =========================
@@ -78,23 +89,52 @@ class DataFrameCacheSlot:
             else:
                 return pd.DataFrame()
 
+        def _dict_to_df(data_dict: dict) -> pd.DataFrame:
+            if not isinstance(data_dict, dict):
+                return pd.DataFrame()
+            if data_dict.get('__version__') == 2 and 'data' in data_dict:
+                sub_data = data_dict['data']
+            else:
+                sub_data = data_dict
+            
+            import numpy as np
+            codes_list = []
+            arrays_list = []
+            for code, arr in sub_data.items():
+                if isinstance(arr, np.ndarray) and len(arr) > 0:
+                    codes_list.append(np.full(len(arr), str(code).zfill(6), dtype='object'))
+                    arrays_list.append(arr)
+                elif hasattr(arr, 'raw_array') and len(arr) > 0:
+                    codes_list.append(np.full(len(arr), str(code).zfill(6), dtype='object'))
+                    arrays_list.append(arr.raw_array)
+            if arrays_list:
+                all_c = np.concatenate(codes_list)
+                all_d = np.concatenate(arrays_list)
+                return pd.DataFrame({
+                    'code': all_c, 'time': all_d['time'], 'open': all_d['open'],
+                    'high': all_d['high'], 'low': all_d['low'], 'close': all_d['close'],
+                    'volume': all_d['volume'], 'cum_vol_start': all_d['cum_vol_start']
+                })
+            return pd.DataFrame()
+
         try:
             # 优先尝试 zstd 压缩读取
             df = pd.read_pickle(self.cache_file, compression='zstd')
+            if isinstance(df, dict):
+                df = _dict_to_df(df)
             self._mem_df = df
             self._last_count = len(df)
-            # [FIX] 显式转换 tail(5) 为 csv 字符串并 encode 为 bytes
-            tail_str = df.tail(5).to_csv()
-            self._last_fp = hashlib.md5(tail_str.encode('utf-8')).hexdigest()
+            self._last_fp = self._calc_df_fp(df)
             return df
         except Exception:
             try:
                 # 兜底：尝试传统无压缩方式读取（兼容旧文件）
                 df = pd.read_pickle(self.cache_file)
+                if isinstance(df, dict):
+                    df = _dict_to_df(df)
                 self._mem_df = df
                 self._last_count = len(df)
-                tail_str = df.tail(5).to_csv()
-                self._last_fp = hashlib.md5(tail_str.encode('utf-8')).hexdigest()
+                self._last_fp = self._calc_df_fp(df)
                 # [Optimization] 如果是老文件，可以在此处标记下次保存会自动转为 zstd
                 return df
             except Exception as e:
@@ -110,6 +150,8 @@ class DataFrameCacheSlot:
                             df = pd.read_pickle(bak_file, compression='zstd')
                         except:
                             df = pd.read_pickle(bak_file)
+                        if isinstance(df, dict):
+                            df = _dict_to_df(df)
                         self._mem_df = df
                         if self.logger: self.logger.info("✅ Cache restored from backup successfully.")
                         # 恢复后立即覆盖主文件（修复坏文件）
@@ -136,11 +178,9 @@ class DataFrameCacheSlot:
         if not persist:
             return True
 
-        # 2. 冗余保存拦截 (Fingerprint)
-        # 仅对最后 5 行数据生成指纹，足以识别增量更新或全量变化，且速度极快
-        tail_str = df.tail(5).to_csv()
-        new_fp = hashlib.md5(tail_str.encode('utf-8')).hexdigest()
-        if not force and new_fp == self._last_fp:
+        # 2. 冗余保存拦截 (Fingerprint: 结合行数、时间范围、总成交量及尾部采样)
+        new_fp = self._calc_df_fp(df)
+        if not force and new_fp and new_fp == self._last_fp:
             return True
 
         # 3. 数据质量校验

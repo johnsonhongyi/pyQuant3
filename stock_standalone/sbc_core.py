@@ -251,18 +251,41 @@ def load_tick_data(code: str, use_live: bool = False, cache_path: str = r"G:\min
                 logger.warning(f"⚠️ Cache not found at {cache_path} or {local_alt}")
 
         try:
-            full = pd.DataFrame()
+            full = None
+            stock_df = pd.DataFrame()
             if os.path.exists(target_path):
                 # 优先尝试 zstd 压缩读取
                 try:
                     full = pd.read_pickle(target_path, compression='zstd')
                 except Exception:
-                    full = pd.read_pickle(target_path)
+                    try:
+                        full = pd.read_pickle(target_path)
+                    except Exception:
+                        pass
             
-            if not full.empty:
-                stock_df = full[full['code'] == code].copy().sort_values('time')
-            else:
-                stock_df = pd.DataFrame()
+            code_clean = str(code).strip().zfill(6)
+            if isinstance(full, dict):
+                data_dict = full.get('data', full) if full.get('__version__') == 2 else full
+                if code_clean in data_dict:
+                    arr = data_dict[code_clean]
+                    if hasattr(arr, 'raw_array'):
+                        arr = arr.raw_array
+                    if isinstance(arr, np.ndarray) and len(arr) > 0:
+                        stock_df = pd.DataFrame({
+                            'code': code_clean,
+                            'time': arr['time'],
+                            'open': arr['open'],
+                            'high': arr['high'],
+                            'low': arr['low'],
+                            'close': arr['close'],
+                            'volume': arr['volume'],
+                            'cum_vol_start': arr['cum_vol_start']
+                        }).sort_values('time')
+            elif isinstance(full, pd.DataFrame) and not full.empty:
+                if 'code' in full.columns:
+                    stock_df = full[full['code'] == code_clean].copy().sort_values('time')
+                else:
+                    stock_df = full.copy().sort_values('time')
 
             # [REFINED] 如果缓存不足 (< 200)，触发 Sina 补全逻辑，确保回放测试有数据
             if stock_df.empty or len(stock_df) < 200:
