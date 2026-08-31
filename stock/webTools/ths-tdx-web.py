@@ -340,12 +340,14 @@ if __name__ == '__main__':
     else:
         print('find AutoHotkey')
 
-    if not (find_window_by_title_safe('findSetWindowPos') or find_window_by_title_safe('窗口坐标分类管理器') or find_window_by_title_safe('桌面窗口坐标布局') or find_window_by_title_background('manage_window_layout')):
+    # if not (find_window_by_title_safe('findSetWindowPos') or find_window_by_title_safe('窗口坐标分类管理器') or find_window_by_title_safe('桌面窗口坐标布局') or find_window_by_title_background('manage_window_layout')):
         #manage_window_layout_path = 'C:\\Users\\Johnson\\Documents\\TDX\\55188\\manage_window_layout.exe -cli'
-        manage_window_layout_path = 'D:\\JohnsonProgram\\instockMonitorTK\\manage_window_layout.exe -cli'
+    manage_window_layout_path = 'D:\\JohnsonProgram\\instockMonitorTK\\manage_window_layout.exe'
+    if  os.path.exists(manage_window_layout_path):
+
         # os.system('cmd /c start python findSetWindowPos.py')
         # run_system_fpath(manage_window_layout_path)
-        os.system('cmd /c start %s'%(manage_window_layout_path))
+        os.system('cmd /c start %s %s'%(manage_window_layout_path," -cli"))
         print("run manage_window_layout")
         time.sleep(2)
 

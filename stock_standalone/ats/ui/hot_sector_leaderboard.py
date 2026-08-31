@@ -490,6 +490,31 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
         self.combo_time_slice.currentIndexChanged.connect(lambda: self._render_table_data(self.cached_results))
         header_lay.addWidget(self.combo_time_slice)
 
+        # ⏱️ 涨速交易时段分段选择器 (默认30分分段，支持15分/60分/开盘累计/60秒微观，自动持久化记忆)
+        self.combo_segment_mode = QComboBox()
+        self.combo_segment_mode.addItems([
+            "⏱️ 30分分段 (默认)",
+            "⏱️ 15分分段",
+            "⏱️ 60分分段",
+            "⏱️ 全天开盘累计",
+            "⏱️ 60秒微观滑动"
+        ])
+        saved_seg_idx = load_config_node("ats_velocity_segment_mode", 0)
+        try:
+            saved_seg_idx = int(saved_seg_idx)
+            if 0 <= saved_seg_idx < self.combo_segment_mode.count():
+                self.combo_segment_mode.setCurrentIndex(saved_seg_idx)
+        except Exception:
+            pass
+        self.combo_segment_mode.setToolTip("选择涨速计算的交易时段分段周期 (自动持久化记忆)")
+        self.combo_segment_mode.setStyleSheet("""
+            QComboBox { background-color: #162536; color: #66ccff; border: 1px solid #336699; border-radius: 3px; padding: 2px 6px; font-weight: bold; font-size: 9pt; }
+            QComboBox::drop-down { border: none; }
+            QComboBox QAbstractItemView { background-color: #101a26; color: #66ccff; selection-background-color: #243b59; }
+        """)
+        self.combo_segment_mode.currentIndexChanged.connect(self._on_segment_mode_changed)
+        header_lay.addWidget(self.combo_segment_mode)
+
         # 筛选下拉框 (支持盘中极度聚焦与买点分拣)
         self.combo_filter = QComboBox()
         self.combo_filter.addItems([
@@ -601,6 +626,41 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
 
         layout.addWidget(self.bottom_frame)
         self.setLayout(layout)
+        self._update_speed_column_header()
+
+    def _get_current_segment_mode_key(self) -> str:
+        """获取当前选中的分段模式 key ('30m', '15m', '60m', 'day_open', '60s')"""
+        if not hasattr(self, "combo_segment_mode"):
+            return "30m"
+        idx = self.combo_segment_mode.currentIndex()
+        mode_keys = ["30m", "15m", "60m", "day_open", "60s"]
+        if 0 <= idx < len(mode_keys):
+            return mode_keys[idx]
+        return "30m"
+
+    def _on_segment_mode_changed(self, index: int):
+        """用户切换分段周期：自动原子持久化，并触发即时刷新与表头更新"""
+        try:
+            save_config_node("ats_velocity_segment_mode", int(index))
+        except Exception as e:
+            logger.debug(f"保存 ats_velocity_segment_mode 异常: {e}")
+        self._update_speed_column_header()
+        self._force_refresh_data()
+
+    def _update_speed_column_header(self):
+        """根据当前分段模式动态更新第 6 列表头名称"""
+        mode = self._get_current_segment_mode_key()
+        label_map = {
+            "30m": "30分涨速%",
+            "15m": "15分涨速%",
+            "60m": "60分涨速%",
+            "day_open": "开盘涨速%",
+            "60s": "60秒涨速%"
+        }
+        col_label = label_map.get(mode, "时段涨速%")
+        item = self.table.horizontalHeaderItem(6)
+        if item:
+            item.setText(col_label)
 
     def _get_parent_mw(self):
         # 1. 优先从 _py_parent 或 parent() 链条查找
@@ -863,10 +923,12 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
         try:
             if not is_trading:
                 fetcher.add_log(f"非交易时段初始化/单次手动刷新 ({session_desc})", level="SLEEP")
+            seg_mode = self._get_current_segment_mode_key()
             results = self.engine.compute_hot_alpha_leaderboard(
                 top_sector_names=top_sectors,
                 current_df=current_df,
-                manual_watchlist=manual_list
+                manual_watchlist=manual_list,
+                segment_mode=seg_mode
             )
             self.cached_results = results
             self._render_table_data(results)
@@ -1182,7 +1244,11 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
         price = r["price"]
         pct = r["pct"]
         vel_pct = r.get("velocity_pct", 0.0)
-        vel_tag = r.get("velocity_tag", "⏱️ 窄幅整理")
+        vel_tag = r.get("velocity_tag", "⏱️ 窄幅横盘")
+        seg_label = r.get("segment_label", "⏱️ 30分分段")
+        seg_base_p = r.get("segment_base_price", price)
+        seg_amt_wan = r.get("segment_amount_wan", 0.0)
+        is_midway = r.get("is_midway_init", False)
         turnover = r.get("turnover", 0.0)
         vol_r = r.get("vol_ratio", 1.0)
         intent = r.get("order_intent", "⚖️ 均衡博弈")
@@ -1260,7 +1326,7 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
         it_pct.setFont(font_bold)
         self.table.setItem(row_idx, 5, it_pct)
 
-        # 6: 涨速% (1分钟真实滑动窗口，多级业务阈值状态)
+        # 6: 交易分段涨速% (支持 30分/15分/60分/开盘累计，多级业务阈值状态)
         if vel_pct >= 2.0:
             vel_str = f"🚀+{vel_pct:.1f}%"
             vel_color = QColor("#ff2244")
@@ -1286,8 +1352,17 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
         it_vel = NumericTableWidgetItem(vel_str)
         it_vel.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         it_vel.setForeground(QBrush(vel_color))
-        if vel_tag:
-            it_vel.setToolTip(f"【1分钟真实涨速】: {vel_pct:+.1f}%\n状态: {vel_tag}\n说明: 基于过去 60 秒滑动窗口真实净变化率与防抖平滑")
+        
+        tip_lines = [
+            f"【交易分段】: {seg_label}",
+            f"【时段基准价】: {seg_base_p:.2f} {'(盘中启动初测第一笔)' if is_midway else '(开盘/时段基准)'}",
+            f"【当前价格】: {price:.2f}",
+            f"【时段净拉升】: {vel_pct:+.2f}%",
+            f"【时段增量额】: {seg_amt_wan:.1f} 万元",
+            f"【状态评估】: {vel_tag}",
+            f"说明: 自动记忆每个交易时段个股首笔数据为基线进行净拉升统计"
+        ]
+        it_vel.setToolTip("\n".join(tip_lines))
         self.table.setItem(row_idx, 6, it_vel)
 
         # 7: 换手%

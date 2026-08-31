@@ -256,7 +256,8 @@ class HotSectorEngine:
         self,
         top_sector_names: List[str],
         current_df: Optional[pd.DataFrame] = None,
-        manual_watchlist: Optional[List[str]] = None
+        manual_watchlist: Optional[List[str]] = None,
+        segment_mode: str = "30m"
     ) -> List[Dict[str, Any]]:
         """
         同步计算最新 Hot Alpha 跟单排行榜
@@ -271,7 +272,8 @@ class HotSectorEngine:
             codes=codes,
             sector_map=sec_map,
             multi_period_cache=mp_cache,
-            name_map=n_map
+            name_map=n_map,
+            segment_mode=segment_mode
         )
 
         with self._results_lock:
