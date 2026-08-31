@@ -13,7 +13,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QFont
-from ats.ui.styles import COLOR_UP, COLOR_DOWN, COLOR_INFO, COLOR_ACCENT, COLOR_WARN, auto_fit_columns_once, NumericTableWidgetItem, bind_top_shortcut
+from ats.ui.styles import COLOR_UP, COLOR_DOWN, COLOR_INFO, COLOR_ACCENT, COLOR_WARN, auto_fit_columns_once, NumericTableWidgetItem, bind_top_shortcut, set_seamless_stay_on_top
 from ats.ui.base_table import BaseATSTableWidget
 
 class TradeFlowTable(QWidget):
@@ -800,13 +800,7 @@ class TradeFlowDialog(QDialog):
 
     def _on_top_toggled(self, checked: bool):
         self.stays_on_top = checked
-        flags = self.windowFlags()
-        if checked:
-            flags |= Qt.WindowType.WindowStaysOnTopHint
-        else:
-            flags &= ~Qt.WindowType.WindowStaysOnTopHint
-        self.setWindowFlags(flags)
-        self.show()
+        set_seamless_stay_on_top(self, checked)
         self._save_geometry()
 
     def refresh_data(self):

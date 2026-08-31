@@ -74,7 +74,7 @@ from PyQt6.QtGui import QBrush, QColor, QFont, QAction
 
 from tk_gui_modules.window_mixin import WindowMixin
 from ats.ui.base_table import BaseATSTableWidget
-from ats.ui.styles import NumericTableWidgetItem, bind_top_shortcut
+from ats.ui.styles import NumericTableWidgetItem, bind_top_shortcut, set_seamless_stay_on_top
 from logger_utils import LoggerFactory
 from sys_utils import get_app_root
 from multi_period_strategy_engine import MultiPeriodStrategyEngine
@@ -2553,13 +2553,7 @@ class MultiPeriodDialog(QDialog, WindowMixin):
     def _on_top_toggled(self, checked):
         self.stays_on_top = checked
         self._save_state()
-        flags = self.windowFlags()
-        if checked:
-            flags |= Qt.WindowType.WindowStaysOnTopHint
-        else:
-            flags &= ~Qt.WindowType.WindowStaysOnTopHint
-        self.setWindowFlags(flags)
-        self.show()
+        set_seamless_stay_on_top(self, checked)
 
     def _init_ui(self):
         main_layout = QVBoxLayout(self)

@@ -928,5 +928,57 @@ def bind_top_shortcut(widget, toggle_callable=None):
         return None
 
 
+def set_seamless_stay_on_top(widget, on_top: bool) -> bool:
+    """
+    【✨ 无缝置顶，0 闪屏 0 重复刷新】
+    在 Windows 平台下直接通过 Win32 SetWindowPos 原地切换置顶，
+    彻底消除 setWindowFlags() 销毁并重建 HWND 产生的剧烈闪烁与 showEvent 重复数据刷新。
+    非 Windows 平台平滑回退。
+    """
+    if widget is None:
+        return False
+
+    setattr(widget, "stays_on_top", bool(on_top))
+    setattr(widget, "_is_stay_on_top", bool(on_top))
+
+    import sys
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            hwnd = int(widget.winId())
+            if hwnd:
+                HWND_TOPMOST = -1
+                HWND_NOTOPMOST = -2
+                SWP_NOMOVE = 0x0002
+                SWP_NOSIZE = 0x0001
+                SWP_NOACTIVATE = 0x0010
+                SWP_FRAMECHANGED = 0x0020
+                SWP_SHOWWINDOW = 0x0040
+
+                flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED | SWP_SHOWWINDOW
+                target_hwnd = HWND_TOPMOST if on_top else HWND_NOTOPMOST
+
+                user32 = ctypes.windll.user32
+                user32.SetWindowPos(hwnd, target_hwnd, 0, 0, 0, 0, flags)
+                return True
+        except Exception:
+            pass
+
+    # 回退机制（非 Windows 平台）
+    try:
+        from PyQt6.QtCore import Qt
+        flags = widget.windowFlags()
+        if on_top:
+            flags |= Qt.WindowType.WindowStaysOnTopHint
+        else:
+            flags &= ~Qt.WindowType.WindowStaysOnTopHint
+        widget.setWindowFlags(flags)
+        widget.show()
+        return True
+    except Exception:
+        return False
+
+
+
 
 

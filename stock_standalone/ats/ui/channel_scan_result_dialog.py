@@ -19,7 +19,7 @@ from PyQt6.QtGui import QColor, QFont, QCursor, QKeySequence, QShortcut
 
 from ats.ui.styles import (
     setup_header_persistence, NumericTableWidgetItem, 
-    save_config_node, load_config_node, bind_top_shortcut
+    save_config_node, load_config_node, bind_top_shortcut, set_seamless_stay_on_top
 )
 
 PERSIST_KEY_LAST_TDX_BLK = "channel_scan_last_selected_tdx_blk"
@@ -86,13 +86,7 @@ class ChannelReversalScanResultDialog(QWidget):
 
     def _on_top_toggled(self, checked: bool):
         self.stays_on_top = checked
-        flags = self.windowFlags()
-        if checked:
-            flags |= Qt.WindowType.WindowStaysOnTopHint
-        else:
-            flags &= ~Qt.WindowType.WindowStaysOnTopHint
-        self.setWindowFlags(flags)
-        self.show()
+        set_seamless_stay_on_top(self, checked)
         save_config_node("channel_scan_stays_on_top", checked)
 
     def keyPressEvent(self, event):

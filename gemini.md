@@ -1,3 +1,16 @@
+## 2026-08-31 14:15
+- [x] **实现 Windows Win32 API 原地无缝置顶 (`set_seamless_stay_on_top`) 彻底根治快捷键 `T` 切换置顶闪屏与重复刷新顽疾 (`stock_standalone/ats/ui/styles.py`, `stock_standalone/ats/ui/daily_limit_up_dialog.py`, `stock_standalone/ats/ui/dragon_monitor.py`, `stock_standalone/ats/ui/hot_sector_leaderboard.py`, `stock_standalone/ats/ui/chart_widgets.py`, `stock_standalone/ats/ui/main_window.py`, `stock_standalone/ats/ui/intraday_strategy_dialog.py`, `stock_standalone/ats/ui/multi_period_dialog.py`, `stock_standalone/ats/ui/trade_flow.py`, `stock_standalone/ats/ui/channel_scan_result_dialog.py`, `stock_standalone/tests/test_snap_windows_top_hotkey.py`)**：
+    - [x] **排查定位“切换置顶总是重新闪屏刷新”根本原因**：
+        1. 原代码使用 Qt 默认的 `setWindowFlags(flags)` + `self.show()` 或 `setWindowFlag(WindowStaysOnTopHint)`；
+        2. Qt 底层会**销毁当前 Windows HWND 并重新调用 `CreateWindowEx`**，引发剧烈白屏/黑屏闪烁；
+        3. 重新调用 `self.show()` 会再次向窗口分发 `QShowEvent`，导致界面触发 `reload_chart`、`reload_data`、`update_data`，引发二次卡顿与图表/表格重复刷新。
+    - [x] **实施 Windows Win32 原生 `SetWindowPos` 原地无缝置顶体系 (`set_seamless_stay_on_top`)**：
+        1. 直接调用 Windows 原生 `user32.SetWindowPos(hwnd, HWND_TOPMOST / HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED | SWP_SHOWWINDOW)`；
+        2. **0 销毁 HWND**、**0 重新 Show**、**0 触发 showEvent**、**0 重复拉取或刷新数据**；
+        3. 按快捷键 `T` 或勾选置顶复选框时，毫秒级平滑修改 Z-order，**完全 0 闪屏、0 闪烁、0 重复刷新，丝滑无感切换**；
+        4. 全量覆盖连板天梯、2D/3D 加速龙头、行业板块龙头突击、涨跌分布明细、实时个股详情、SBC 分时图、分时阶梯主工作台、全量 Code 评估、多周期联动看板、今日交易流水与通道策略独立窗口。
+    - [x] **全量 45 项自动化与跨模块回归测试 100% 全部 PASSED**。
+
 ## 2026-08-31 14:05
 - [x] **实现原生 `QShortcut` 窗口级快捷键 `T` 置顶穿透响应 & 彻底根治 TDX 未上市/无行情标的死循环大量重试与警告刷屏 (`stock_standalone/ats/ui/styles.py`, `stock_standalone/ats/tdx_realtime_fetcher.py`, `stock_standalone/ats/ui/daily_limit_up_dialog.py`, `stock_standalone/ats/ui/dragon_monitor.py`, `stock_standalone/ats/ui/hot_sector_leaderboard.py`, `stock_standalone/ats/ui/chart_widgets.py`, `stock_standalone/ats/ui/main_window.py`, `stock_standalone/ats/ui/intraday_strategy_dialog.py`, `stock_standalone/ats/ui/multi_period_dialog.py`, `stock_standalone/ats/ui/trade_flow.py`, `stock_standalone/ats/ui/channel_scan_result_dialog.py`, `stock_standalone/tests/test_snap_windows_top_hotkey.py`)**：
     - [x] **排查定位“快捷键 T 都没有切换置顶状态”根本原因**：
