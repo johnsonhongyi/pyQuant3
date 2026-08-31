@@ -301,13 +301,78 @@ class WindowMixin:
 
         return windows
 
-    def save_all_windows_snapshot(self, snapshot_key: str = "manual_snapshot", file_path: Optional[str] = None) -> dict[str, Any]:
+    def get_snapshot_slots_info(self, file_path: Optional[str] = None) -> dict[int, dict[str, Any]]:
+        """
+        获取 3 个手动快照槽位的标记信息（年月日、保存时间、持久化窗口数量等）。
+        返回: {1: {...}, 2: {...}, 3: {...}}
+        """
+        if file_path is None:
+            file_path = WINDOW_CONFIG_FILE
+
+        scale = self._get_dpi_scale_factor()
+        config_file_path = self._get_config_file_path(file_path, scale)
+
+        data = {}
+        if os.path.exists(config_file_path):
+            try:
+                with open(config_file_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            except Exception as e:
+                logger.error(f"[get_snapshot_slots_info] 读取失败: {e}")
+
+        slots_info: dict[int, dict[str, Any]] = {}
+        for slot in (1, 2, 3):
+            key = f"manual_snapshot_{slot}"
+            snapshot = data.get(key)
+            # 如果 slot 1 没有单独键，但有兼容的 manual_snapshot 且未标注 slot 或 slot==1
+            if not snapshot and slot == 1 and "manual_snapshot" in data:
+                compat_snap = data["manual_snapshot"]
+                if isinstance(compat_snap, dict) and "windows" in compat_snap:
+                    snapshot = compat_snap
+
+            if isinstance(snapshot, dict) and "windows" in snapshot:
+                date_ymd = snapshot.get("date_ymd", "")
+                if not date_ymd:
+                    time_str = str(snapshot.get("time_str", ""))
+                    date_ymd = time_str[:10] if len(time_str) >= 10 else ""
+                win_count = len(snapshot.get("windows", {}))
+                mon_count = len(snapshot.get("monitor_list", []))
+                slots_info[slot] = {
+                    "slot": slot,
+                    "exists": True,
+                    "date_ymd": date_ymd,
+                    "window_count": win_count,
+                    "monitor_count": mon_count,
+                    "summary": f"{date_ymd} ({win_count}个窗口)" if date_ymd else f"({win_count}个窗口)",
+                    "label": f"槽位 {slot}: {date_ymd} ({win_count}窗)" if date_ymd else f"槽位 {slot}: ({win_count}窗)"
+                }
+            else:
+                slots_info[slot] = {
+                    "slot": slot,
+                    "exists": False,
+                    "date_ymd": "",
+                    "window_count": 0,
+                    "monitor_count": 0,
+                    "summary": "空 / 未保存",
+                    "label": f"槽位 {slot}: [空 / 未保存]"
+                }
+
+        return slots_info
+
+    def save_all_windows_snapshot(self, slot: int = 1, snapshot_key: Optional[str] = None, file_path: Optional[str] = None) -> dict[str, Any]:
         """
         手动保存快照：全面持久化当前所有打开并关联的 Tk 窗口（及关联 PyQt 窗口）位置、几何与监控业务数据。
+        支持 3 个槽位 (slot=1, 2, 3)，标记信息仅选用年月日（如 2026-08-31）及持久化窗口数量。
         """
         import time
         if file_path is None:
             file_path = WINDOW_CONFIG_FILE
+
+        if snapshot_key is None:
+            slot = max(1, min(3, int(slot)))
+            snapshot_key = f"manual_snapshot_{slot}"
+        else:
+            slot = 1
 
         scale = self._get_dpi_scale_factor()
         config_file_path = self._get_config_file_path(file_path, scale)
@@ -318,7 +383,6 @@ class WindowMixin:
         # 1. 抓取所有窗口位置几何信息（DPI 物理归一化）
         for win_name, win in all_windows.items():
             try:
-                # 判断是 Qt 窗口还是 Tk 窗口
                 if hasattr(win, 'winfo_geometry') or (hasattr(win, 'geometry') and not hasattr(win, 'windowHandle')):
                     if hasattr(win, 'update_idletasks'):
                         win.update_idletasks()
@@ -332,7 +396,6 @@ class WindowMixin:
                         "x": x, "y": y, "width": w, "height": h, "type": "tk"
                     }
                 elif hasattr(win, 'geometry'):
-                    # PyQt 窗口
                     geom = win.geometry()
                     w = int(geom.width() / scale)
                     h = int(geom.height() / scale)
@@ -368,10 +431,18 @@ class WindowMixin:
         except Exception:
             pass
 
-        # 4. 构建快照结构
+        # 4. 构建快照结构（仅记录年月日与持久化窗口数量）
+        now_time = time.time()
+        date_ymd = time.strftime("%Y-%m-%d", time.localtime(now_time))
+        total_wins = len(snapshot_windows_pos)
+        tag_label = f"{date_ymd} ({total_wins}个窗口)"
+
         snapshot_payload = {
-            "timestamp": time.time(),
-            "time_str": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "slot": slot,
+            "timestamp": now_time,
+            "date_ymd": date_ymd,
+            "tag_label": tag_label,
+            "total_windows": total_wins,
             "scale": scale,
             "windows": snapshot_windows_pos,
             "monitor_list": monitor_list_data
@@ -387,8 +458,11 @@ class WindowMixin:
                 except Exception as e:
                     logger.error(f"[save_all_windows_snapshot] 读取原配置失败: {e}")
 
-            # 存储快照节点
+            # 存储指定槽位
             data[snapshot_key] = snapshot_payload
+            # 同步更新通用槽 manual_snapshot
+            data["manual_snapshot"] = snapshot_payload
+            data["last_snapshot_slot"] = slot
 
             # 兼容老版本键与独立 _manual 键
             if "main_window" in snapshot_windows_pos:
@@ -405,7 +479,7 @@ class WindowMixin:
                 json.dump(data, f, ensure_ascii=False, indent=4)
             os.replace(tmp_file, config_file_path)
 
-            logger.info(f"✅ [save_all_windows_snapshot] 成功保存全量快照: 共 {len(snapshot_windows_pos)} 个窗口, {len(monitor_list_data)} 条监控列表项")
+            logger.info(f"✅ [save_all_windows_snapshot] 成功保存全量快照(槽位{slot}): {tag_label}, {len(monitor_list_data)} 条监控列表项")
         except Exception as e:
             logger.error(f"❌ [save_all_windows_snapshot] 写盘失败: {e}")
             if 'tmp_file' in locals() and os.path.exists(tmp_file):
@@ -416,15 +490,19 @@ class WindowMixin:
 
         return {
             "success": True,
-            "total_windows": len(snapshot_windows_pos),
+            "slot": slot,
+            "date_ymd": date_ymd,
+            "tag_label": tag_label,
+            "total_windows": total_wins,
             "window_names": list(snapshot_windows_pos.keys()),
             "monitor_count": len(monitor_list_data),
             "snapshot_data": snapshot_payload
         }
 
-    def restore_all_windows_snapshot(self, snapshot_key: str = "manual_snapshot", file_path: Optional[str] = None) -> tuple[int, list[str]]:
+    def restore_all_windows_snapshot(self, slot: Optional[int] = None, snapshot_key: Optional[str] = None, file_path: Optional[str] = None) -> tuple[int, list[str]]:
         """
         恢复手动快照：恢复全部手动保存快照持久化的所有打开窗口位置，自适应当前屏幕与 DPI。
+        支持从指定槽位 (slot=1, 2, 3) 恢复。
         返回: (成功恢复窗口数, 成功恢复窗口名称列表)
         """
         if file_path is None:
@@ -444,8 +522,21 @@ class WindowMixin:
             logger.error(f"[restore_all_windows_snapshot] 读取配置文件失败: {e}")
             return 0, []
 
+        # 确定快照 key
+        if snapshot_key is None:
+            if slot is not None:
+                slot = max(1, min(3, int(slot)))
+                snapshot_key = f"manual_snapshot_{slot}"
+            else:
+                snapshot_key = "manual_snapshot"
+
         # 检查快照
         snapshot = data.get(snapshot_key)
+        # 如果特定槽位没找到但查找的是默认槽位，尝试获取最近槽位
+        if not snapshot and snapshot_key == "manual_snapshot":
+            last_slot = data.get("last_snapshot_slot", 1)
+            snapshot = data.get(f"manual_snapshot_{last_slot}") or data.get("manual_snapshot_1")
+
         saved_windows_pos: dict[str, Any] = {}
 
         if isinstance(snapshot, dict) and "windows" in snapshot:
@@ -458,7 +549,7 @@ class WindowMixin:
                     saved_windows_pos[base_k] = v
 
         if not saved_windows_pos:
-            logger.warning("[restore_all_windows_snapshot] 尚无手动快照数据")
+            logger.warning(f"[restore_all_windows_snapshot] 槽位 {snapshot_key} 尚无快照数据")
             return 0, []
 
         # 收集当前已打开的所有窗口
@@ -491,7 +582,6 @@ class WindowMixin:
             # 在快照中查找匹配项
             pos = saved_windows_pos.get(win_name)
             if not pos:
-                # 尝试模糊匹配键
                 for k, v in saved_windows_pos.items():
                     if k == win_name or k.endswith(win_name) or win_name.endswith(k):
                         pos = v
@@ -508,12 +598,10 @@ class WindowMixin:
                     x, y = clamp_window_to_screens(x, y, w, h)
 
                     if hasattr(win, 'winfo_geometry') or (hasattr(win, 'geometry') and not hasattr(win, 'windowHandle')):
-                        # Tkinter 窗口
                         win.geometry(f"{w}x{h}+{x}+{y}")
                         if hasattr(win, 'update_idletasks'):
                             win.update_idletasks()
                     elif hasattr(win, 'setGeometry'):
-                        # PyQt 窗口
                         win.setGeometry(x, y, w, h)
 
                     restored_names.append(win_name)
@@ -521,7 +609,8 @@ class WindowMixin:
                 except Exception as e:
                     logger.warning(f"[restore_all_windows_snapshot] 恢复窗口 {win_name} 异常: {e}")
 
-        logger.info(f"✅ [restore_all_windows_snapshot] 全量快照恢复完成: 共 {len(restored_names)} 个窗口已归位")
+        slot_label = f" (槽位{snapshot.get('slot', '')})" if isinstance(snapshot, dict) and "slot" in snapshot else ""
+        logger.info(f"✅ [restore_all_windows_snapshot] 全量快照恢复完成{slot_label}: 共 {len(restored_names)} 个窗口已归位")
         return len(restored_names), restored_names
 
     def _get_available_geometry_qt(self, window=None):
