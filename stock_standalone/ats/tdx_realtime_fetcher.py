@@ -246,8 +246,11 @@ class TDXRealtimeFetcher:
         self._consecutive_slow_or_errors: int = 0
         self._consecutive_healthy: int = 0
 
-        # 瞬时上涨涨速历史追踪缓存 {code: (last_price, last_timestamp)}
-        self._velocity_history: Dict[str, Tuple[float, float]] = {}
+        # 工业级 1 分钟滑动窗口价格时序队列 {code: deque([(t, price), ...], maxlen=60)}
+        self._price_timeline_history: Dict[str, collections.deque] = {}
+        # 标的历史平滑涨速缓存与状态 {code: float}, {code: str}
+        self._smoothed_velocity: Dict[str, float] = {}
+        self._velocity_tags: Dict[str, str] = {}
 
         # 标的真实流通股本与总股本永久缓存 (股数)
         self._finance_shares_cache: Dict[str, float] = {}
@@ -1253,6 +1256,116 @@ class TDXRealtimeFetcher:
         self._yesterday_ohlc_cache[c_clean] = (res, now_ts)
         return res
 
+    def calculate_rolling_velocity(self, code: str, price: float, last_close: float, now_ts: float) -> Tuple[float, str]:
+        """
+        【📈 工业级 1 分钟/3 分钟真实滑动窗口涨速引擎 & 状态机判定】
+        彻底根治秒级单点差分乘以 60 造成的低价股/盘整股巨大噪声跳变（如苏宁环球 -10.2% 乱跳）。
+
+        算法机制：
+        1. 维护最近 180 秒的时序队列 deque([(t, price), ...], maxlen=60)；
+        2. 清除 >180s 的过期采样点，并追加当前最新采样；
+        3. 寻找与当前时间间隔最接近 60s (45s~90s) 的历史基准价格 P_base；
+        4. 依据真实时间跨度计算标准 1 分钟净涨幅，不足 45s 时使用时间标准化带 20s 软阻尼防抖；
+        5. 对低流动性买卖一档微小跳动应用 0.15% 物理死区过滤与 EMA (0.45) 平滑；
+        6. 输出标准真实涨速 % 与具备实战周期的状态机标签 (🚀 极速拉升 / 🔥 强势推升 / ⚡ 稳步攀升 / ⏱️ 窄幅整理 / 🔻 震荡回踩 / ⚠️ 快速下挫 / ❄️ 极速跳水)。
+        """
+        c_clean = str(code).strip().zfill(6)
+        if price <= 0 or last_close <= 0 or now_ts <= 0:
+            return 0.0, "⏱️ 窄幅整理"
+
+        if not hasattr(self, '_price_timeline_history'):
+            self._price_timeline_history = {}
+        if not hasattr(self, '_smoothed_velocity'):
+            self._smoothed_velocity = {}
+        if not hasattr(self, '_velocity_tags'):
+            self._velocity_tags = {}
+
+        if c_clean not in self._price_timeline_history:
+            self._price_timeline_history[c_clean] = collections.deque(maxlen=60)
+
+        history = self._price_timeline_history[c_clean]
+
+        # 1. 淘汰超过 180 秒的历史旧点
+        while history and (now_ts - history[0][0] > 180.0):
+            history.popleft()
+
+        # 2. 如果历史有点且时间戳异常（时间倒退或重复），重置
+        if history and now_ts < history[-1][0]:
+            history.clear()
+
+        # 3. 将当前价格加入队列
+        history.append((now_ts, price))
+
+        # 4. 如果数据点不足 2 个或总跨度小于 5 秒，返回平稳 0.0%
+        if len(history) < 2:
+            tag = self._velocity_tags.get(c_clean, "⏱️ 窄幅整理")
+            return self._smoothed_velocity.get(c_clean, 0.0), tag
+
+        span = now_ts - history[0][0]
+        if span < 5.0:
+            tag = self._velocity_tags.get(c_clean, "⏱️ 窄幅整理")
+            return self._smoothed_velocity.get(c_clean, 0.0), tag
+
+        # 5. 寻找距今最接近 60 秒的基准点
+        target_t = now_ts - 60.0
+        best_p = history[0][1]
+        best_dt = span
+
+        min_diff = 9999.0
+        for pt_t, pt_p in history:
+            diff = abs(pt_t - target_t)
+            if diff < min_diff:
+                min_diff = diff
+                best_p = pt_p
+                best_dt = now_ts - pt_t
+
+        # 6. 计算未经滤波的真实窗口涨速
+        if best_dt >= 45.0:
+            raw_vel = (price - best_p) / last_close * 100.0
+        else:
+            raw_vel = ((price - best_p) / last_close * 100.0) * (60.0 / max(best_dt, 20.0))
+
+        # 7. 物理涨跌幅极值钳位 (主板 10%，创业板/科创板 20%，北交所 30%)
+        if c_clean.startswith(('300', '301', '688')):
+            max_limit = 20.0
+        elif c_clean.startswith(('8', '4', '920')):
+            max_limit = 30.0
+        else:
+            max_limit = 10.0
+        raw_vel = max(-max_limit, min(max_limit, raw_vel))
+
+        # 8. 死区过滤：价格微动绝对值小于 0.15% 视为买一卖一跳价噪声，归零
+        if abs(raw_vel) < 0.15:
+            raw_vel = 0.0
+
+        # 9. EMA 指数平滑滤波 (α = 0.45)
+        last_vel = self._smoothed_velocity.get(c_clean, raw_vel)
+        smoothed_vel = 0.45 * raw_vel + 0.55 * last_vel
+        if abs(smoothed_vel) < 0.15:
+            smoothed_vel = 0.0
+
+        final_vel = round(smoothed_vel, 1)
+        self._smoothed_velocity[c_clean] = final_vel
+
+        # 10. 周期状态机判定
+        if final_vel >= 2.0:
+            tag = "🚀 极速拉升"
+        elif final_vel >= 0.8:
+            tag = "🔥 强势推升"
+        elif final_vel >= 0.3:
+            tag = "⚡ 稳步攀升"
+        elif final_vel <= -1.5:
+            tag = "❄️ 极速跳水"
+        elif final_vel <= -0.8:
+            tag = "⚠️ 快速下挫"
+        elif final_vel <= -0.3:
+            tag = "🔻 震荡回踩"
+        else:
+            tag = "⏱️ 窄幅整理"
+
+        self._velocity_tags[c_clean] = tag
+        return final_vel, tag
+
     def fetch_multi_stock_alpha_quotes(
         self,
         codes: List[str],
@@ -1309,14 +1422,8 @@ class TDXRealtimeFetcher:
             # 涨幅 %
             pct = round((price - last_close) / last_close * 100.0, 2) if last_close > 0 else 0.0
 
-            # 1. 瞬时/动态上涨涨速 (%/分)
-            velocity_pct = 0.0
-            if hasattr(self, '_velocity_history') and code_str in self._velocity_history:
-                old_p, old_t = self._velocity_history[code_str]
-                dt = now_ts - old_t
-                if 1.0 <= dt <= 30.0 and last_close > 0:
-                    velocity_pct = round((price - old_p) / last_close * 100.0 * (60.0 / dt), 1)
-            self._velocity_history[code_str] = (price, now_ts)
+            # 1. 工业级 1 分钟滑动窗口真实涨速 (%/分) 与状态机标签
+            velocity_pct, velocity_tag = self.calculate_rolling_velocity(code_str, price, last_close, now_ts)
 
             # 日内 VWAP (元)
             if vol > 0 and amount > 0:
@@ -1572,6 +1679,7 @@ class TDXRealtimeFetcher:
                 "last_close": last_close,
                 "pct": pct,
                 "velocity_pct": velocity_pct,
+                "velocity_tag": velocity_tag,
                 "vwap": vwap,
                 "vwap_dev_pct": vwap_dev_pct,
                 "vol": vol,
