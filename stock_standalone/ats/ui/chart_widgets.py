@@ -25,6 +25,7 @@ from tk_gui_modules.window_mixin import WindowMixin
 from tk_gui_modules.gui_config import WINDOW_CONFIG_FILE
 from tk_gui_modules.qt_table_utils import NumericTableWidgetItem
 from logger_utils import LoggerFactory
+from ats.ui.styles import bind_top_shortcut
 from JohnsonUtil import commonTips as cct
 from ats.opening_bubble_engine import get_opening_bubble_engine
 
@@ -153,8 +154,9 @@ class DistributionDetailsDialog(QDialog, WindowMixin):
         header_lay.addWidget(self.search_edit)
         header_lay.addSpacing(6)
         
-        # Stays on top checkbox
-        self.chk_on_top = QCheckBox("置顶")
+        # Stays on top checkbox (快捷键: T)
+        self.chk_on_top = QCheckBox("置顶 (T)")
+        self.chk_on_top.setToolTip("开启/关闭窗口置顶 (快捷键: T)")
         self.chk_on_top.setStyleSheet("""
             QCheckBox { color: #00FFCC; font-size: 9pt; font-weight: bold; }
             QCheckBox::indicator { width: 12px; height: 12px; }
@@ -162,6 +164,7 @@ class DistributionDetailsDialog(QDialog, WindowMixin):
         self.chk_on_top.setChecked(self.stays_on_top)
         self.chk_on_top.stateChanged.connect(self._on_stays_on_top_toggled)
         header_lay.addWidget(self.chk_on_top)
+        bind_top_shortcut(self)
         header_lay.addSpacing(8)
         
         # DNA Audit button
@@ -682,6 +685,32 @@ class DistributionDetailsDialog(QDialog, WindowMixin):
         if not self.is_hidden_state and not getattr(self, "_in_snap_action", False):
             if self.anchor_edge:
                 self.normal_geometry = self.geometry()
+
+    def keyPressEvent(self, event):
+        """键盘事件处理：T 键切换置顶，Escape 磁吸/关闭"""
+        from ats.ui.styles import is_editing_text
+        key = event.key()
+        modifiers = event.modifiers()
+
+        # 1. 快捷键 T 切换置顶 (非文本输入框打字状态下)
+        if key == Qt.Key.Key_T and not (modifiers & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier)):
+            if not is_editing_text(self):
+                if hasattr(self, 'chk_on_top'):
+                    self.chk_on_top.toggle()
+                    event.accept()
+                    return
+
+        # 2. Esc 键磁吸或关闭
+        elif key == Qt.Key.Key_Escape:
+            if getattr(self, 'anchor_edge', None):
+                self.hide_to_edge()
+            else:
+                self.close()
+            event.accept()
+            return
+
+        super().keyPressEvent(event)
+
     def _fallback_linkage(self, code, name=None):
         """物理与可视化联动兜底 (在 main_app 未加载完或找错时自愈)"""
         try:

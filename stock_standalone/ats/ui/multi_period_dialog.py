@@ -74,7 +74,7 @@ from PyQt6.QtGui import QBrush, QColor, QFont, QAction
 
 from tk_gui_modules.window_mixin import WindowMixin
 from ats.ui.base_table import BaseATSTableWidget
-from ats.ui.styles import NumericTableWidgetItem
+from ats.ui.styles import NumericTableWidgetItem, bind_top_shortcut
 from logger_utils import LoggerFactory
 from sys_utils import get_app_root
 from multi_period_strategy_engine import MultiPeriodStrategyEngine
@@ -2899,9 +2899,12 @@ class MultiPeriodDialog(QDialog, WindowMixin):
         self.link_ths_chk = QCheckBox("Ths", self)
         status_bar_layout.addWidget(self.link_ths_chk)
 
-        self.on_top_chk = QCheckBox("置顶", self)
+        self.on_top_chk = QCheckBox("置顶 (T)", self)
+        self.on_top_chk.setToolTip("开启/关闭窗口置顶 (快捷键: T)")
         self.on_top_chk.setChecked(self.stays_on_top)
+        self.on_top_chk.toggled.connect(self._on_top_toggled)
         status_bar_layout.addWidget(self.on_top_chk)
+        bind_top_shortcut(self)
 
         # Diagnostics
         status_bar_layout.addWidget(QLabel(" 诊断个股:", self))
@@ -3616,6 +3619,15 @@ class MultiPeriodDialog(QDialog, WindowMixin):
         self.run_filter(force_reload=False)
 
     def keyPressEvent(self, event):
+        key = event.key()
+        modifiers = event.modifiers()
+        if key == Qt.Key.Key_T and not (modifiers & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier)):
+            from ats.ui.styles import is_editing_text
+            if not is_editing_text(self):
+                if hasattr(self, 'on_top_chk'):
+                    self.on_top_chk.toggle()
+                    event.accept()
+                    return
         if event.key() == Qt.Key.Key_Escape:
             event.ignore()
         else:

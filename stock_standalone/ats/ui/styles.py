@@ -879,3 +879,54 @@ def enable_tab_direct_switch(tab_widget: QTabWidget) -> TabDirectSwitchEventFilt
     setattr(tab_widget, "_tab_direct_switch_filter", flt)
     return flt
 
+
+def is_editing_text(target_widget=None) -> bool:
+    """检查当前获得焦点的控件是否为可输入文本的编辑框（防快捷键误触）"""
+    try:
+        from PyQt6.QtWidgets import QApplication, QLineEdit, QTextEdit, QPlainTextEdit, QAbstractSpinBox
+        focus_w = QApplication.focusWidget()
+        if focus_w is not None and isinstance(focus_w, (QLineEdit, QTextEdit, QPlainTextEdit, QAbstractSpinBox)):
+            return True
+        if target_widget is not None and hasattr(target_widget, 'findChildren'):
+            for child in target_widget.findChildren((QLineEdit, QTextEdit, QPlainTextEdit, QAbstractSpinBox)):
+                if child.hasFocus():
+                    return True
+        return False
+    except Exception:
+        return False
+
+
+def bind_top_shortcut(widget, toggle_callable=None):
+    """
+    为指定窗口注册全局级 QShortcut(T)，解决子控件获得焦点时 keyPressEvent 无法穿透捕获问题。
+    激活时自动检查 is_editing_text，若在打字则安全跳过，否则调用 toggle_callable。
+    """
+    try:
+        from PyQt6.QtGui import QKeySequence, QShortcut
+        from PyQt6.QtCore import Qt
+
+        def _on_activated():
+            if is_editing_text(widget):
+                return
+            if toggle_callable is not None and callable(toggle_callable):
+                toggle_callable()
+            elif hasattr(widget, 'chk_ontop'):
+                widget.chk_ontop.toggle()
+            elif hasattr(widget, 'chk_on_top'):
+                widget.chk_on_top.toggle()
+            elif hasattr(widget, 'on_top_chk'):
+                widget.on_top_chk.toggle()
+            elif hasattr(widget, '_toggle_stay_on_top'):
+                widget._toggle_stay_on_top()
+
+        shortcut = QShortcut(QKeySequence(Qt.Key.Key_T), widget)
+        shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
+        shortcut.activated.connect(_on_activated)
+        setattr(widget, "_top_shortcut_t", shortcut)
+        return shortcut
+    except Exception:
+        return None
+
+
+
+

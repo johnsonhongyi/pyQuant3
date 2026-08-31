@@ -29,7 +29,7 @@ from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal, QPropertyAnimation, QE
 from PyQt6.QtGui import QAction, QIcon, QColor, QBrush
 
 from ats.ui.favorite_panel import FavoritePanel
-from ats.ui.styles import DARK_THEME_QSS, enable_tab_direct_switch, save_config_node, load_config_node
+from ats.ui.styles import DARK_THEME_QSS, enable_tab_direct_switch, save_config_node, load_config_node, bind_top_shortcut
 
 PERSIST_KEY_CHANNEL_SCAN_PERIOD = "channel_scan_selected_period"
 from ats.ui.universe_widget import UniverseTreeWidget
@@ -929,8 +929,9 @@ class StockDetailDialog(QDialog):
         header_layout.addWidget(self.price_pct_label)
         header_layout.addSpacing(10)
 
-        # 置顶复选框
-        self.chk_on_top = QCheckBox("置顶")
+        # 置顶复选框 (快捷键: T)
+        self.chk_on_top = QCheckBox("置顶 (T)")
+        self.chk_on_top.setToolTip("开启/关闭窗口置顶 (快捷键: T)")
         self.chk_on_top.setStyleSheet("""
             QCheckBox { color: #00FFCC; font-size: 9pt; font-weight: bold; }
             QCheckBox::indicator { width: 12px; height: 12px; }
@@ -938,6 +939,7 @@ class StockDetailDialog(QDialog):
         self.chk_on_top.setChecked(getattr(self, "stays_on_top", False))
         self.chk_on_top.stateChanged.connect(self._on_stays_on_top_toggled)
         header_layout.addWidget(self.chk_on_top)
+        bind_top_shortcut(self)
 
         layout.addLayout(header_layout)
         
@@ -1716,6 +1718,31 @@ class StockDetailDialog(QDialog):
                 self._is_auto_popping = True
                 QTimer.singleShot(500, lambda: setattr(self, '_is_auto_popping', False))
                 self.show_normal_position()
+
+    def keyPressEvent(self, event):
+        """键盘事件处理：T 键切换置顶，Escape 磁吸/关闭"""
+        from ats.ui.styles import is_editing_text
+        key = event.key()
+        modifiers = event.modifiers()
+
+        # 1. 快捷键 T 切换置顶 (非文本输入框打字状态下)
+        if key == Qt.Key.Key_T and not (modifiers & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier)):
+            if not is_editing_text(self):
+                if hasattr(self, 'chk_on_top'):
+                    self.chk_on_top.toggle()
+                    event.accept()
+                    return
+
+        # 2. Esc 键磁吸或关闭
+        elif key == Qt.Key.Key_Escape:
+            if getattr(self, 'anchor_edge', None):
+                self.hide_to_edge()
+            else:
+                self.close()
+            event.accept()
+            return
+
+        super().keyPressEvent(event)
 
 class ATSMainWindow(QMainWindow):
     realtime_data_signal = pyqtSignal(object)

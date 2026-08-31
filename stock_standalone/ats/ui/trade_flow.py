@@ -9,11 +9,11 @@ Contains widgets for:
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QHeaderView, QLabel, QGridLayout,
-    QPushButton, QComboBox, QSpinBox
+    QPushButton, QComboBox, QSpinBox, QCheckBox
 )
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QFont
-from ats.ui.styles import COLOR_UP, COLOR_DOWN, COLOR_INFO, COLOR_ACCENT, COLOR_WARN, auto_fit_columns_once, NumericTableWidgetItem
+from ats.ui.styles import COLOR_UP, COLOR_DOWN, COLOR_INFO, COLOR_ACCENT, COLOR_WARN, auto_fit_columns_once, NumericTableWidgetItem, bind_top_shortcut
 from ats.ui.base_table import BaseATSTableWidget
 
 class TradeFlowTable(QWidget):
@@ -737,7 +737,11 @@ class TradeFlowDialog(QDialog):
     """
     def __init__(self, parent=None):
         # 强制设置为独立 Window，避免嵌入在父窗口中变成子控件
-        super().__init__(None, Qt.WindowType.Window | Qt.WindowType.WindowCloseButtonHint | Qt.WindowType.WindowMinMaxButtonsHint)
+        flags = Qt.WindowType.Window | Qt.WindowType.WindowCloseButtonHint | Qt.WindowType.WindowMinMaxButtonsHint
+        self.stays_on_top = self._load_stays_on_top()
+        if self.stays_on_top:
+            flags |= Qt.WindowType.WindowStaysOnTopHint
+        super().__init__(None, flags)
         self.setWindowTitle("📋 ATS 今日交易流水日志 (Trade Flow & Execution Logs)")
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)
         
@@ -754,6 +758,14 @@ class TradeFlowDialog(QDialog):
         lbl_title.setStyleSheet("font-size: 10pt; font-weight: bold; color: #00ffcc;")
         top_bar.addWidget(lbl_title)
         top_bar.addStretch()
+
+        self.chk_on_top = QCheckBox("置顶 (T)")
+        self.chk_on_top.setToolTip("开启/关闭窗口置顶 (快捷键: T)")
+        self.chk_on_top.setStyleSheet("color: #ffd700; font-size: 9pt; font-weight: bold;")
+        self.chk_on_top.setChecked(self.stays_on_top)
+        self.chk_on_top.toggled.connect(self._on_top_toggled)
+        top_bar.addWidget(self.chk_on_top)
+        bind_top_shortcut(self)
 
         btn_refresh = QPushButton("🔄 刷新流水")
         btn_refresh.setStyleSheet("background-color: #1a2a1a; color: #00ff88; font-weight: bold; border: 1px solid #00ff88; border-radius: 4px; padding: 4px 10px;")
@@ -773,11 +785,44 @@ class TradeFlowDialog(QDialog):
 
         self._restore_geometry()
 
+    def _load_stays_on_top(self) -> bool:
+        try:
+            import json, os
+            from sys_utils import get_app_root
+            cfg_file = os.path.join(get_app_root(), "window_config.json")
+            if os.path.exists(cfg_file):
+                with open(cfg_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                return bool(data.get("trade_flow_stays_on_top", False))
+        except Exception:
+            pass
+        return False
+
+    def _on_top_toggled(self, checked: bool):
+        self.stays_on_top = checked
+        flags = self.windowFlags()
+        if checked:
+            flags |= Qt.WindowType.WindowStaysOnTopHint
+        else:
+            flags &= ~Qt.WindowType.WindowStaysOnTopHint
+        self.setWindowFlags(flags)
+        self.show()
+        self._save_geometry()
+
     def refresh_data(self):
         self.flow_table.load_real_trades()
 
     def keyPressEvent(self, event):
-        if event.key() == Qt.Key.Key_Escape:
+        key = event.key()
+        modifiers = event.modifiers()
+        if key == Qt.Key.Key_T and not (modifiers & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier)):
+            from ats.ui.styles import is_editing_text
+            if not is_editing_text(self):
+                if hasattr(self, 'chk_on_top'):
+                    self.chk_on_top.toggle()
+                    event.accept()
+                    return
+        if key == Qt.Key.Key_Escape:
             self.close()
             event.accept()
             return
@@ -805,6 +850,7 @@ class TradeFlowDialog(QDialog):
                 "x": self.x(), "y": self.y(),
                 "w": self.width(), "h": self.height()
             }
+            data["trade_flow_stays_on_top"] = getattr(self, "stays_on_top", False)
             with open(cfg_file, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=4, ensure_ascii=False)
         except Exception:
