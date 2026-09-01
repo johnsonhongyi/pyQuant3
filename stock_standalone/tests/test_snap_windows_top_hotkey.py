@@ -27,6 +27,32 @@ def qapp():
     return app
 
 
+def get_win32_ws_ex_topmost(widget):
+    """获取 Windows 真实的 WS_EX_TOPMOST 扩展样式状态"""
+    import sys
+    if sys.platform != "win32":
+        return getattr(widget, "stays_on_top", False)
+    try:
+        import ctypes
+        from ctypes import wintypes
+        hwnd = int(widget.winId())
+        user32 = ctypes.windll.user32
+        GWL_EXSTYLE = -20
+        WS_EX_TOPMOST = 0x00000008
+        if sys.maxsize > 2**32:
+            GetWindowLong = user32.GetWindowLongPtrW
+            GetWindowLong.argtypes = [wintypes.HWND, ctypes.c_int]
+            GetWindowLong.restype = ctypes.c_ssize_t
+        else:
+            GetWindowLong = user32.GetWindowLongW
+            GetWindowLong.argtypes = [wintypes.HWND, ctypes.c_int]
+            GetWindowLong.restype = wintypes.LONG
+        ex = GetWindowLong(hwnd, GWL_EXSTYLE)
+        return bool(ex & WS_EX_TOPMOST)
+    except Exception:
+        return getattr(widget, "stays_on_top", False)
+
+
 def trigger_shortcut_or_key(widget):
     """Trigger QShortcut or keyPressEvent directly on widget"""
     if hasattr(widget, '_top_shortcut_t') and widget._top_shortcut_t:
@@ -34,6 +60,7 @@ def trigger_shortcut_or_key(widget):
     else:
         event = QKeyEvent(QKeyEvent.Type.KeyPress, Qt.Key.Key_T, Qt.KeyboardModifier.NoModifier, "t")
         widget.keyPressEvent(event)
+
 
 
 def test_is_editing_text_helper(qapp):
@@ -524,5 +551,91 @@ def test_hot_sector_segment_combo_and_persistence(qapp):
     assert "30分" in dialog.table.horizontalHeaderItem(6).text()
 
     dialog.close()
+
+
+def test_seamless_topmost_physical_style_toggle(qapp):
+    """17. Test set_seamless_stay_on_top correctly flips WS_EX_TOPMOST physical style on Win32"""
+    from PyQt6.QtWidgets import QWidget
+    from ats.ui.styles import set_seamless_stay_on_top
+
+    w = QWidget()
+    w.show()
+    qapp.processEvents()
+
+    # 1. 切换置顶 -> True
+    set_seamless_stay_on_top(w, True)
+    qapp.processEvents()
+    assert w.stays_on_top is True
+    assert get_win32_ws_ex_topmost(w) is True
+
+    # 2. 彻底解除置顶 -> False (WS_EX_TOPMOST 剥离，其他程序可在窗口前)
+    set_seamless_stay_on_top(w, False)
+    qapp.processEvents()
+    assert w.stays_on_top is False
+    assert get_win32_ws_ex_topmost(w) is False
+
+    # 3. 再次切换置顶 -> True
+    set_seamless_stay_on_top(w, True)
+    qapp.processEvents()
+    assert w.stays_on_top is True
+    assert get_win32_ws_ex_topmost(w) is True
+
+    # 4. 再次彻底解除置顶 -> False
+    set_seamless_stay_on_top(w, False)
+    qapp.processEvents()
+    assert w.stays_on_top is False
+    assert get_win32_ws_ex_topmost(w) is False
+
+    w.close()
+
+
+def test_spatial_follow_hud_topmost_toggle(qapp):
+    """18. Test SpatialFollowHUD stays-on-top seamless toggle and physical style"""
+    from tk_gui_modules.spatial_follow_hud import SpatialFollowHUD
+
+    hud = SpatialFollowHUD()
+    hud.show()
+    qapp.processEvents()
+
+    init_top = hud.stays_on_top
+    init_style = get_win32_ws_ex_topmost(hud)
+    assert init_top == init_style
+
+    # Toggle
+    hud._toggle_stays_on_top()
+    qapp.processEvents()
+    assert hud.stays_on_top == (not init_top)
+    assert get_win32_ws_ex_topmost(hud) == (not init_top)
+
+    # Toggle back
+    hud._toggle_stays_on_top()
+    qapp.processEvents()
+    assert hud.stays_on_top == init_top
+    assert get_win32_ws_ex_topmost(hud) == init_top
+
+    hud.close()
+
+
+def test_volume_details_topmost_toggle(qapp):
+    """19. Test VolumeDetailsDialog stays-on-top seamless toggle"""
+    from signal_dashboard_panel import VolumeDetailsDialog
+
+    dlg = VolumeDetailsDialog()
+    dlg.show()
+    qapp.processEvents()
+
+    init_top = dlg.stays_on_top
+    dlg.chk_on_top.setChecked(not init_top)
+    qapp.processEvents()
+    assert dlg.stays_on_top == (not init_top)
+    assert get_win32_ws_ex_topmost(dlg) == (not init_top)
+
+    dlg.chk_on_top.setChecked(init_top)
+    qapp.processEvents()
+    assert dlg.stays_on_top == init_top
+    assert get_win32_ws_ex_topmost(dlg) == init_top
+
+    dlg.close()
+
 
 

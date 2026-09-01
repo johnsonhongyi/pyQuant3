@@ -930,35 +930,78 @@ def bind_top_shortcut(widget, toggle_callable=None):
 
 def set_seamless_stay_on_top(widget, on_top: bool) -> bool:
     """
-    【✨ 无缝置顶，0 闪屏 0 重复刷新】
-    在 Windows 平台下直接通过 Win32 SetWindowPos 原地切换置顶，
-    彻底消除 setWindowFlags() 销毁并重建 HWND 产生的剧烈闪烁与 showEvent 重复数据刷新。
+    【✨ 无缝置顶与彻底取消置顶，0 闪屏 0 重复刷新 0 焦点丢失】
+    在 Windows 平台下直接通过 Win32 SetWindowLongPtr + SetWindowPos 原地切换置顶与取消置顶：
+    1. 置顶时添加 WS_EX_TOPMOST 并设置 HWND_TOPMOST；
+    2. 取消置顶时彻底剥离 WS_EX_TOPMOST 并设置 HWND_NOTOPMOST，使其他外部程序窗口可正常覆盖在当前窗口上方；
+    3. 纯 Win32 原地操作，完全避免 setWindowFlags() 销毁并重建 HWND 产生的剧烈闪烁、showEvent 重复刷新及子控件焦点丢失；
+    4. 同步更新 widget.stays_on_top 属性状态。
     非 Windows 平台平滑回退。
     """
     if widget is None:
         return False
 
-    setattr(widget, "stays_on_top", bool(on_top))
-    setattr(widget, "_is_stay_on_top", bool(on_top))
+    is_top = bool(on_top)
+    setattr(widget, "stays_on_top", is_top)
+    setattr(widget, "_is_stay_on_top", is_top)
 
+    # Windows 原生 Win32 API 工业级无缝修改
     import sys
     if sys.platform == "win32":
         try:
             import ctypes
+            from ctypes import wintypes
+
             hwnd = int(widget.winId())
             if hwnd:
-                HWND_TOPMOST = -1
-                HWND_NOTOPMOST = -2
+                user32 = ctypes.windll.user32
+
+                GWL_EXSTYLE = -20
+                WS_EX_TOPMOST = 0x00000008
+
+                is_64bit = sys.maxsize > 2**32
+                if is_64bit:
+                    GetWindowLong = user32.GetWindowLongPtrW
+                    SetWindowLong = user32.SetWindowLongPtrW
+                    GetWindowLong.argtypes = [wintypes.HWND, ctypes.c_int]
+                    GetWindowLong.restype = ctypes.c_ssize_t
+                    SetWindowLong.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_ssize_t]
+                    SetWindowLong.restype = ctypes.c_ssize_t
+                else:
+                    GetWindowLong = user32.GetWindowLongW
+                    SetWindowLong = user32.SetWindowLongW
+                    GetWindowLong.argtypes = [wintypes.HWND, ctypes.c_int]
+                    GetWindowLong.restype = wintypes.LONG
+                    SetWindowLong.argtypes = [wintypes.HWND, ctypes.c_int, wintypes.LONG]
+                    SetWindowLong.restype = wintypes.LONG
+
+                user32.SetWindowPos.argtypes = [
+                    wintypes.HWND, wintypes.HWND,
+                    ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                    wintypes.UINT
+                ]
+                user32.SetWindowPos.restype = wintypes.BOOL
+
+                HWND_TOPMOST = wintypes.HWND(-1)
+                HWND_NOTOPMOST = wintypes.HWND(-2)
+
                 SWP_NOMOVE = 0x0002
                 SWP_NOSIZE = 0x0001
                 SWP_NOACTIVATE = 0x0010
                 SWP_FRAMECHANGED = 0x0020
                 SWP_SHOWWINDOW = 0x0040
-
                 flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED | SWP_SHOWWINDOW
-                target_hwnd = HWND_TOPMOST if on_top else HWND_NOTOPMOST
 
-                user32 = ctypes.windll.user32
+                # 显式更新 GWL_EXSTYLE 扩展样式并重排 Z-Order
+                ex_style = GetWindowLong(hwnd, GWL_EXSTYLE)
+                if is_top:
+                    ex_style |= WS_EX_TOPMOST
+                    target_hwnd = HWND_TOPMOST
+                else:
+                    ex_style &= ~WS_EX_TOPMOST
+                    target_hwnd = HWND_NOTOPMOST
+
+                SetWindowLong(hwnd, GWL_EXSTYLE, ex_style)
                 user32.SetWindowPos(hwnd, target_hwnd, 0, 0, 0, 0, flags)
                 return True
         except Exception:
@@ -968,7 +1011,7 @@ def set_seamless_stay_on_top(widget, on_top: bool) -> bool:
     try:
         from PyQt6.QtCore import Qt
         flags = widget.windowFlags()
-        if on_top:
+        if is_top:
             flags |= Qt.WindowType.WindowStaysOnTopHint
         else:
             flags &= ~Qt.WindowType.WindowStaysOnTopHint
@@ -977,6 +1020,8 @@ def set_seamless_stay_on_top(widget, on_top: bool) -> bool:
         return True
     except Exception:
         return False
+
+
 
 
 

@@ -868,17 +868,20 @@ class VolumeDetailsDialog(QDialog, WindowMixin):
     def _on_stays_on_top_toggled(self, state):
         self.stays_on_top = self.chk_on_top.isChecked()
         
-        # 动态改变窗口标志
-        flags = self.windowFlags()
-        if self.stays_on_top:
-            flags |= Qt.WindowType.WindowStaysOnTopHint
-        else:
-            flags &= ~Qt.WindowType.WindowStaysOnTopHint
-        self.setWindowFlags(flags)
-        
-        # 改变 flags 后需要重新 show，因为会重建窗口句柄
-        self.show()
+        # 动态无缝切换置顶标志（0 闪屏 0 重建句柄）
+        try:
+            from ats.ui.styles import set_seamless_stay_on_top
+            set_seamless_stay_on_top(self, self.stays_on_top)
+        except Exception:
+            flags = self.windowFlags()
+            if self.stays_on_top:
+                flags |= Qt.WindowType.WindowStaysOnTopHint
+            else:
+                flags &= ~Qt.WindowType.WindowStaysOnTopHint
+            self.setWindowFlags(flags)
+            self.show()
         logger.info(f"📌 [VolumeDetailsDialog stays-on-top] Changed to: {self.stays_on_top}")
+
 
     def closeEvent(self, event):
         """关闭事件时保存位置与置顶状态"""
