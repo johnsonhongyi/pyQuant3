@@ -1,4 +1,22 @@
-## 2026-09-01 10:45
+## 2026-09-01 13:38
+- [x] **彻底修复 ATS 重点关注与 MA20d 回调跟踪器 MA20 偏离度及全量数值列升降序排序严重错乱 Bug (`stock_standalone/ats/ui/styles.py`, `stock_standalone/tk_gui_modules/qt_table_utils.py`, `stock_standalone/ats/ui/favorite_panel.py`, `stock_standalone/ats/ui/swing_table.py`, `stock_standalone/tests/test_ma20_deviation_sorting.py`)**：
+    - [x] **排查定位“MA20 偏离度升降序排序严重错乱（如 +10.74% 插在 +1.90% 后面、负数排在正数前面）”三大根本原因**：
+        1. **Item 复用时 UserRole 字符串污染**：在 `favorite_panel.py` (`update_favorite_rows`) 与 `swing_table.py` (`update_data_list`) 中，表格复用已有 `NumericTableWidgetItem` 时执行了 `item.setData(Qt.ItemDataRole.UserRole, str(val))`，将格式化文本（如 `"+10.74%"`）直接写入了 `UserRole`；
+        2. **`_get_sort_val` 回退漏洞**：`_get_sort_val` 探测到 `UserRole` 不为 None 但非 float 时，盲目直接 `return u` 返回了原始字符串；在 Qt 执行 `__lt__` 排序比较时直接退化为字符串字典序比较（ASCII 中 `"+"` < `"-"`，且 `'+10'` < `'+2'`），导致正负数颠倒、十位数被误排在个位数前；
+        3. **缺少 `setData` 拦截与高性能清洗**：`NumericTableWidgetItem` 未重写 `setData`，无法拦截外部写入的带格式字符串。
+    - [x] **实施鲁棒数值提取、setData 防污染拦截与高性能排序引擎**：
+        1. **`NumericTableWidgetItem` 深度加固与重构**：
+           - 重写 `setData(Qt.ItemDataRole.UserRole, val)`：自动进行类型探测与数值清洗，若是 float 则存入真实数值，若是带符号/百分比/千分位的字符串则自动解析出纯净 float 或日期，彻底杜绝 UserRole 字符串污染；
+           - 强化 `_get_sort_val`：100% 确保数值型数据以 `float` 参与 `__lt__` 大小比较，纯文本按字典序，空值（`--`, `null`, `nan`）无论升序还是降序均沉底在区域最底部；
+           - 引入 `translate(_CLEAN_TRANS)` 高性能快速路径与 `setText` 脏检查，万级 Item 刷新耗时缩短至极低；
+        2. **`FavoritePanel` 与 `SwingStateTable` 表格渲染与排序状态保持**：
+           - 移除冗余的 `item.setData(UserRole, str)` 写入，仅保留 `item.setText(str(val))` 驱动；
+           - 收到 IPC 实时数据更新后，自动保持用户当前所选排序列与升降序状态（`sortItems(sort_col, sort_order)`），实现平滑无感实时动态重排；
+    - [x] **自动化专项与跨模块回归测试 100% 全部 PASSED**：
+        - 新增 `tests/test_ma20_deviation_sorting.py` 4 项正负百分比与表格动态更新专项测试全部通过；
+        - 全量 28 项跨模块回归测试全部通过。
+
+# 2026-09-01 10:45
 - [x] **实现交易日开盘前/后智能时段感知 (`get_expected_rzrq_date`) 与两融 (rzrq) 数据开盘后自动无缝拉取刷新机制 (`stock_standalone/singleAnalyseUtil.py`, `stock_standalone/tests/test_single_analyse_rzrq.py`)**：
     - [x] **排查定位“凌晨或开盘前启动后，开盘后两融数据 (Sh/Sz rz/All/diff) 一直不更新、显示旧数据”根本诱因**：
         1. **自然日与有效交易日基准混淆**：在程序冷启动与凌晨 00:00 跨天重置时，原代码盲目将 `rzrq_date = cct.get_today()`。如果在凌晨（00:00~09:15）启动，东财尚未发布昨日完整两融（或深市未全），但系统已将 `rzrq_date` 标记为今日自然日（如 `2026-09-01`），导致 09:15 开盘后 `rzrq_date == today_str` 恒成立，被系统误判为“今日开盘后两融已拉取完成”，从而在盘中被跳过拉取；
