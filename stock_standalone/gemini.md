@@ -1,3 +1,20 @@
+## 2026-09-01 10:45
+- [x] **实现交易日开盘前/后智能时段感知 (`get_expected_rzrq_date`) 与两融 (rzrq) 数据开盘后自动无缝拉取刷新机制 (`stock_standalone/singleAnalyseUtil.py`, `stock_standalone/tests/test_single_analyse_rzrq.py`)**：
+    - [x] **排查定位“凌晨或开盘前启动后，开盘后两融数据 (Sh/Sz rz/All/diff) 一直不更新、显示旧数据”根本诱因**：
+        1. **自然日与有效交易日基准混淆**：在程序冷启动与凌晨 00:00 跨天重置时，原代码盲目将 `rzrq_date = cct.get_today()`。如果在凌晨（00:00~09:15）启动，东财尚未发布昨日完整两融（或深市未全），但系统已将 `rzrq_date` 标记为今日自然日（如 `2026-09-01`），导致 09:15 开盘后 `rzrq_date == today_str` 恒成立，被系统误判为“今日开盘后两融已拉取完成”，从而在盘中被跳过拉取；
+        2. **盘前准备时段阻塞死循环**：在 `is_work_duration`（07:00~09:15）时段，原代码使用 `while 1:` 内部打点死循环锁死进程直至 09:15 开盘，导致 08:40~09:15 的盘前自动刷新逻辑被死循环完全拦截；
+        3. **盘中刷新条件缺失日期比对**：盘中 `need_fetch_rzrq` 仅判断数据为空或深市 partial，未比对 `rzrq_date != today_str`，导致凌晨启动的旧数据在盘中永远不触发自动更新。
+    - [x] **实施开盘前/开盘后智能交易日判定引擎 (`get_expected_rzrq_date`)**：
+        1. **开盘前 (int_time < 915)**：若为交易日，记录上一交易日 (`cct.get_last_trade_date()`)，使得系统在进入盘中时能通过 `rzrq_date != today_str` 立即识别出“今日开盘后最新两融尚未同步”；
+        2. **开盘后 (int_time >= 915)**：若成功获取到两市有效两融数据，将 `rzrq_date` 标记为今日 `today_str`；
+        3. **非交易日 (休市日)**：统一记录最近的前序有效交易日。
+    - [x] **重构主循环盘前与盘中调度与冷却机制**：
+        1. **跨天与冷启动自适应**：在启动、跨天及按 `c` 键手动刷新时，统一采用 `get_expected_rzrq_date` 初始化 `rzrq_date`；
+        2. **消除盘前内层阻塞死循环**：移除 `is_work_duration` 中的 `while 1` 锁死，改为 10 秒打点后返回外层主循环，使 08:40 盘前自动刷新与 09:15 开盘秒级感知；
+        3. **开盘后首次拉取短冷却与日常防 ban 保护**：当 `rzrq_date != today_str` 时，开盘后仅需 60 秒冷却即可立即触发拉取最新两融数据；拉取成功后恢复 300 秒日常冷却；
+    - [x] **新增自动化单元测试 (`tests/test_single_analyse_rzrq.py`)**：
+        - 覆盖凌晨、早盘前、开盘时、盘中、盘后及周末等 6 种时序场景，自动化断言 100% 全部 PASSED。
+
 ## 2026-09-01 10:02
 - [x] **实现 Windows 平台 Win32 64 位原生置顶与彻底解除置顶引擎 (`set_seamless_stay_on_top`) 彻底根治快捷键 `T` 关闭置顶后仍遮挡外部其他程序 Bug & 全量窗口覆盖 (`stock_standalone/ats/ui/styles.py`, `stock_standalone/tk_gui_modules/spatial_follow_hud.py`, `stock_standalone/trade_visualizer_qt6.py`, `stock_standalone/signal_dashboard_panel.py`, `stock_standalone/tests/test_snap_windows_top_hotkey.py`, `stock_standalone/tests/test_daily_limit_up_dialog.py`)**：
     - [x] **排查定位“快捷键关闭置顶后窗口仍旧在顶部、遮挡其他外部程序”根本原因**：
