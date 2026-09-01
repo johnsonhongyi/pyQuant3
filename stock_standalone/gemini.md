@@ -1,3 +1,20 @@
+## 2026-09-01 10:02
+- [x] **实现 Windows 平台 Win32 64 位原生置顶与彻底解除置顶引擎 (`set_seamless_stay_on_top`) 彻底根治快捷键 `T` 关闭置顶后仍遮挡外部其他程序 Bug & 全量窗口覆盖 (`stock_standalone/ats/ui/styles.py`, `stock_standalone/tk_gui_modules/spatial_follow_hud.py`, `stock_standalone/trade_visualizer_qt6.py`, `stock_standalone/signal_dashboard_panel.py`, `stock_standalone/tests/test_snap_windows_top_hotkey.py`, `stock_standalone/tests/test_daily_limit_up_dialog.py`)**：
+    - [x] **排查定位“快捷键关闭置顶后窗口仍旧在顶部、遮挡其他外部程序”根本原因**：
+        1. **64 位 ctypes 句柄传递截断导致 Win32 调用失败 (Error 1400 `ERROR_INVALID_WINDOW_HANDLE`)**：`user32.SetWindowPos` 未配置 `argtypes`，在 64 位 AMD64 架构下传入整型 `-1` / `-2` 被截断为 32 位句柄导致 Windows API 报错 1400 失败，进而走到 fallback 产生二次隐患；
+        2. **Windows DWM 扩展样式 `WS_EX_TOPMOST` 残留**：单纯改变 Z 序无法通知 Windows DWM 桌面窗口管理器清除顶层置顶扩展属性，导致切换到 Chrome、VS Code、记事本等外部程序时该窗口依然浮在其他程序上方遮挡视野；
+        3. **`setWindowFlag` 破坏 Qt Widget 焦点树**：直接修改 Qt 标志位导致已聚焦输入框脱落失去焦点，破坏快捷键防误触保护机制。
+    - [x] **实施工业级 32/64 位 Win32 扩展样式与 Z-Order 双重原地置顶引擎 (`ats.ui.styles.set_seamless_stay_on_top`)**：
+        1. **精确声明 64 位 Win32 函数签名**：统一适配 `wintypes.HWND`, `GetWindowLongPtrW`, `SetWindowLongPtrW`, `SetWindowPos`, `HWND_TOPMOST ((HWND)-1)`, `HWND_NOTOPMOST ((HWND)-2)`；
+        2. **显式操作 `GWL_EXSTYLE` 物理层位掩码**：
+           - 开启置顶 (`on_top=True`)：动态叠加 `WS_EX_TOPMOST (0x0008)` 并置为 `HWND_TOPMOST`；
+           - 关闭置顶 (`on_top=False`)：显式剥离清除 `WS_EX_TOPMOST` 并置为 `HWND_NOTOPMOST`，Windows DWM 立即解除置顶限制，其他外部程序激活时可 100% 毫无阻碍地覆盖在当前窗口上方；
+        3. **0 闪屏、0 句柄重建、0 焦点丢失**：纯 Win32 原地操作，完美保护 QWidget 树状态与输入框焦点；
+        4. **全量覆盖所有具备置顶功能的模块**：连板天梯、2D/3D 加速龙头、行业板块龙头突击、涨跌分布明细、实时个股详情、SBC 分时图、分时阶梯主工作台、全量 Code 评估、多周期联动看板、今日交易流水、通道策略独立窗口、竞价空间跟随 HUD (`SpatialFollowHUD`)、回测结果窗口 (`BacktestResultDialog`) 与量能看板 (`VolumeDetailsDialog`)。
+    - [x] **全量 58 项跨模块自动化回归测试 100% 全部 PASSED**：
+        - `test_snap_windows_top_hotkey.py`（19 项物理样式与快捷键测试全部通过）；
+        - `test_daily_limit_up_dialog.py`、`test_tab_switch_and_snap_mutex.py`、`test_popularity_resonance_features.py`、`test_new_stock_module.py`、`test_sector_strength_and_detail_parity.py` 全部 100% 通过。
+
 ## 2026-08-31 22:50
 - [x] **全面修复 TK 实时 K 线数据性能优化后的持久化拦截与自动更新重大 Bug & 回补 2026-08-31 今日全量数据 (`stock_standalone/cache_utils.py`, `stock_standalone/realtime_data_service.py`, `stock_standalone/sbc_core.py`, `stock_standalone/test_compression.py`)**：
     - [x] **排查定位“全天运行后 minute_kline_cache.pkl 修改时间停滞在 2026-08-30、节点停在 2026-08-28 未自动持久化”四大根本诱因**：

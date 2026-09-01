@@ -2736,20 +2736,25 @@ class ScrollableMsgBox(QtWidgets.QDialog, WindowMixin):
             self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowStaysOnTopHint)
 
     def on_pin_toggled(self, checked):
-        """动态切换窗口是否置顶，并立即同步至持久化配置"""
+        """动态切换窗口是否置顶，并立即同步至持久化配置 (无缝 0 闪屏 0 重建句柄)"""
         self.stay_on_top = checked
-        flags = self.windowFlags()
-        if checked:
-            self.setWindowFlags(flags | Qt.WindowType.WindowStaysOnTopHint)
-        else:
-            self.setWindowFlags(flags & ~Qt.WindowType.WindowStaysOnTopHint)
-        self.show()
+        try:
+            from ats.ui.styles import set_seamless_stay_on_top
+            set_seamless_stay_on_top(self, checked)
+        except Exception:
+            flags = self.windowFlags()
+            if checked:
+                self.setWindowFlags(flags | Qt.WindowType.WindowStaysOnTopHint)
+            else:
+                self.setWindowFlags(flags & ~Qt.WindowType.WindowStaysOnTopHint)
+            self.show()
 
         # 同步回主窗口成员变量并保存
         if self.parent():
             self.parent()._backtest_stay_on_top = checked
             if hasattr(self.parent(), '_save_visualizer_config'):
                 self.parent()._save_visualizer_config()
+
 
     def on_theme_changed(self, text):
         """动态切换配色，并立即重绘和持久化"""

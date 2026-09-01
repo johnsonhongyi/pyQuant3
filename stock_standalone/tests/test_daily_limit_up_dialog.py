@@ -77,8 +77,11 @@ class TestDailyLimitUpDialog(unittest.TestCase):
         dialog.current_records = mock_records
         dialog.combo_time_slice.setCurrentText("⏱️ 全天全时段")
         dialog.combo_tier_filter.setCurrentIndex(0)
-        dialog.search_edit.clear()
+        search_widget = getattr(dialog, 'search_edit', getattr(dialog, 'edit_search', None))
+        if search_widget:
+            search_widget.clear()
         dialog._apply_filter()
+
         self.assertGreaterEqual(dialog.table.rowCount(), 1)
 
         # 测试自适应列宽与板块列宽限制

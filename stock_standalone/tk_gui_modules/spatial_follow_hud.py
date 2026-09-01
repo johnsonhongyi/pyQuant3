@@ -361,14 +361,18 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
             self._save_stays_on_top(self.stays_on_top)
             self._update_pin_button_style()
             
-            # 动态切换 stays-on-top 标志并重绘激活
-            flags = self.windowFlags()
-            if self.stays_on_top:
-                flags |= Qt.WindowType.WindowStaysOnTopHint
-            else:
-                flags &= ~Qt.WindowType.WindowStaysOnTopHint
-            self.setWindowFlags(flags)
-            self.show()
+            # 动态无缝切换 stays-on-top 标志（0 闪屏 0 重构句柄）
+            try:
+                from ats.ui.styles import set_seamless_stay_on_top
+                set_seamless_stay_on_top(self, self.stays_on_top)
+            except Exception:
+                flags = self.windowFlags()
+                if self.stays_on_top:
+                    flags |= Qt.WindowType.WindowStaysOnTopHint
+                else:
+                    flags &= ~Qt.WindowType.WindowStaysOnTopHint
+                self.setWindowFlags(flags)
+                self.show()
             
             # 🚀 [NEW] 延时 250ms 异步应用透明度状态，给 OS Win32 句柄与 High-DPI 重建留出稳定时间，根除 UpdateLayeredWindow 警告
             QtCore.QTimer.singleShot(250, self._apply_opacity_ui_state)
@@ -376,6 +380,7 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
             logger.debug(f"📌 [HUD stays-on-top] Changed to: {self.stays_on_top}")
         finally:
             self._switching_flags = False  # ⭐ [SILENT-LOCK] 确保置顶修改后解除静默锁
+
 
     def _update_pin_button_style(self) -> None:
         """根据置顶状态更新 Pin 按钮外观"""
@@ -2253,12 +2258,16 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
         has_stays_on_top = bool(current_flags & Qt.WindowType.WindowStaysOnTopHint)
         if has_stays_on_top != getattr(self, 'stays_on_top', True):
             logger.warning(f"🛸 [HUD ShowEvent] StaysOnTop mismatch detected (actual: {has_stays_on_top}, expected: {self.stays_on_top}). Force correcting flags...")
-            if self.stays_on_top:
-                current_flags |= Qt.WindowType.WindowStaysOnTopHint
-            else:
-                current_flags &= ~Qt.WindowType.WindowStaysOnTopHint
-            self.setWindowFlags(current_flags)
-            self.show()
+            try:
+                from ats.ui.styles import set_seamless_stay_on_top
+                set_seamless_stay_on_top(self, self.stays_on_top)
+            except Exception:
+                if self.stays_on_top:
+                    current_flags |= Qt.WindowType.WindowStaysOnTopHint
+                else:
+                    current_flags &= ~Qt.WindowType.WindowStaysOnTopHint
+                self.setWindowFlags(current_flags)
+                self.show()
             
         # 🚀 [NEW] 在显示时延时 250ms 异步物理校准半透明比例，防止 DWM 图层重构时出现 Win32 参数错误警告
         QtCore.QTimer.singleShot(250, self._apply_opacity_ui_state)
