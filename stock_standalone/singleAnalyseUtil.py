@@ -682,6 +682,32 @@ def get_code_search_loop(num_input, code='', timed=60, dayl='10', ave=None):
     return ave
 
 
+def get_expected_rzrq_date(today_str=None, int_time=None):
+    """
+    计算当前两融 (rzrq) 数据应当记录的基准交易日期：
+    - 若今日为交易日且处于开盘前 (int_time < 915)：
+      两融数据为 T-1 日数据且尚未在当日交易时段锁定，记录为前一日交易日 (last_trade_date)。
+      使得系统在开盘后可识别到 rzrq_date != today_str，从而自动触发拉取更新为当日最新两融数据。
+    - 若今日为交易日且处于开盘后 (int_time >= 915)：
+      记录为今日交易日 (today_str)。
+    - 若今日为非交易日 (休市日)：
+      记录为最近一个前序交易日 (last_trade_date)。
+    """
+    if today_str is None:
+        today_str = cct.get_today()
+    if int_time is None:
+        int_time = cct.get_now_time_int()
+    
+    is_trade = cct.get_day_istrade_date(today_str) if today_str else cct.get_trade_date_status()
+    if is_trade:
+        if int_time < 915:
+            return cct.get_last_trade_date(today_str)
+        else:
+            return today_str
+    else:
+        return cct.get_last_trade_date(today_str)
+
+
 if __name__ == '__main__':
     # get_multiday_ave_compare('601198')
     from docopt import docopt
@@ -725,8 +751,8 @@ if __name__ == '__main__':
     # rzrq = ffu.get_dfcfw_rzrq_SHSZ2()
     rzrq = ffu.get_dfcfw_rzrq_SHSZ()
     last_rzrq_fetch_time = time.time()
-    rzrq_date = cct.get_today()
     today_str = cct.get_today()
+    rzrq_date = get_expected_rzrq_date(today_str)
     dl = 60
     fibc = 3
     fibl = fibonacciCount(['999999', '399001', '399006'], dl=dl)
@@ -763,7 +789,7 @@ if __name__ == '__main__':
                 today_str = current_today
                 rzrq = ffu.get_dfcfw_rzrq_SHSZ()
                 last_rzrq_fetch_time = time.time()
-                rzrq_date = today_str
+                rzrq_date = get_expected_rzrq_date(today_str)
                 fibcount = 0
                 fibl = fibonacciCount(['999999', '399001', '399006'], dl=dl)
                 cct.GlobalValues().setkey('top_max', None)
@@ -780,11 +806,14 @@ if __name__ == '__main__':
                 except_count = 0
                 first_run = True  # 次日跨天后也允许首次运行完整显示一次
                 trim_memory()
-            elif today_str != rzrq_date and (time.time() - last_rzrq_fetch_time > 180):
-                log.info("rzrq_date changed from %s to %s. Auto-initializing rzrq..." % (rzrq_date, today_str))
-                rzrq = ffu.get_dfcfw_rzrq_SHSZ()
+            elif today_str != rzrq_date and cct.get_work_time() and (time.time() - last_rzrq_fetch_time > 60):
+                log.info("rzrq_date (%s) != today_str (%s) during work time. Auto-initializing rzrq..." % (rzrq_date, today_str))
+                new_rz = ffu.get_dfcfw_rzrq_SHSZ()
                 last_rzrq_fetch_time = time.time()
-                rzrq_date = today_str
+                if new_rz and new_rz.get('all', 0) > 0:
+                    rzrq = new_rz
+                    if not new_rz.get('is_partial', False) or cct.get_now_time_int() >= 930:
+                        rzrq_date = today_str
 
             int_time = cct.get_now_time_int()
             is_work_time = cct.get_work_time()
@@ -802,17 +831,23 @@ if __name__ == '__main__':
                     need_fetch_rzrq = False
                     if len(rzrq) == 0 or rzrq.get('all', 0) == 0 or rzrq.get('sh', 0) == 0:
                         need_fetch_rzrq = True
+                    elif rzrq_date != today_str:
+                        # 开盘前启动记录了前一日交易日，盘中开盘后需要首次更新为今日两融数据
+                        need_fetch_rzrq = True
                     elif rzrq.get('is_partial', False) and (930 <= int_time <= 1505):
                         # 深市数据若早盘缺失，盘中每 5 分钟尝试补全一次
                         need_fetch_rzrq = True
 
-                    if need_fetch_rzrq and (time.time() - last_rzrq_fetch_time > 300):
-                        log.info("Intraday refreshing rzrq data (cooldown passed)...")
+                    # 冷却判断：开盘后首次更新（rzrq_date != today_str）只要冷却超 60 秒即可更新；普通轮询冷却 300 秒
+                    cooldown = 60 if (rzrq_date != today_str) else 300
+                    if need_fetch_rzrq and (time.time() - last_rzrq_fetch_time > cooldown):
+                        log.info("Intraday refreshing rzrq data (need_fetch_rzrq=True, rzrq_date=%s, today=%s)..." % (rzrq_date, today_str))
                         new_rz = ffu.get_dfcfw_rzrq_SHSZ()
                         last_rzrq_fetch_time = time.time()
                         if new_rz and new_rz.get('all', 0) > 0:
                             rzrq = new_rz
-                            rzrq_date = today_str
+                            if not new_rz.get('is_partial', False) or int_time >= 930:
+                                rzrq_date = today_str
 
                     log.info('start get_hot_count')
                     get_hot_countNew(percentDuration, rzrq, fibl, fibc)
@@ -867,25 +902,20 @@ if __name__ == '__main__':
             elif is_work_duration:
                 log.debug('into work_duration:%s' % (int_time))
                 trim_memory()
-                # 盘前准备阶段 (8:40 ~ 9:15)：若为交易日且深市未全或距上次抓取超 10 分钟，尝试刷新一次
+                # 盘前准备阶段 (8:40 ~ 9:15)：若为交易日且尚未更新到今日或深市未全，尝试刷新
                 if 840 <= int_time < 915 and (time.time() - last_rzrq_fetch_time > 180):
-                    if rzrq.get('is_partial', False) or (time.time() - last_rzrq_fetch_time > 600):
+                    if rzrq_date != today_str or rzrq.get('is_partial', False) or (time.time() - last_rzrq_fetch_time > 600):
                         log.info("Pre-market auto-refreshing rzrq data...")
                         new_rz = ffu.get_dfcfw_rzrq_SHSZ()
                         last_rzrq_fetch_time = time.time()
                         if new_rz and new_rz.get('all', 0) > 0:
                             rzrq = new_rz
-                            rzrq_date = today_str
+                            if not new_rz.get('is_partial', False):
+                                rzrq_date = today_str
 
-                while 1:
-                    if cct.get_work_duration():
-                        print(".", end='', flush=True)
-                        cct.sleep(ct.single_duration_sleep_time)
-                    else:
-                        print("#")
-                        cct.sleep(random.randint(0, 30))
-                        fibcount = 0
-                        break
+                # 休眠打点：每次休眠 10 秒后返回外层主循环，以便及时响应时间阶段切换与 8:40 盘前刷新
+                print(".", end='', flush=True)
+                cct.sleep(10)
 
             # 3. 盘后及非交易时间 (clean_duration / 夜间 / 周末 / 节假日)
             else:
@@ -961,7 +991,7 @@ if __name__ == '__main__':
                 log.info("Manually re-fetching rzrq data and resetting cache...")
                 rzrq = ffu.get_dfcfw_rzrq_SHSZ()
                 last_rzrq_fetch_time = time.time()
-                rzrq_date = cct.get_today()
+                rzrq_date = get_expected_rzrq_date(today_str)
                 cct.GlobalValues().setkey('suspended_codes', [])
                 _GLOBAL_LASTP_CACHE = None
                 _GLOBAL_LASTP_DATE = None
