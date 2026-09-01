@@ -308,6 +308,7 @@ class FavoritePanel(QWidget):
             sort_col = header.sortIndicatorSection() if (header and header.isSortIndicatorShown()) else -1
             sort_order = header.sortIndicatorOrder() if header else Qt.SortOrder.AscendingOrder
 
+            self.table.setUpdatesEnabled(False)
             self.table.setSortingEnabled(False)
             self.count_label.setText(f"共 {len(rows)} 只重点标的")
 
@@ -320,15 +321,11 @@ class FavoritePanel(QWidget):
                 if col_idx >= len(row_item):
                     return 0.0
                 val_str = str(row_item[col_idx]).strip()
-                import re
-                clean_str = val_str.replace(',', '').replace('%', '').replace('￥', '').replace('$', '')
-                m = re.search(r'[-+]?\d*\.?\d+', clean_str)
-                if m:
-                    try:
-                        return float(m.group())
-                    except ValueError:
-                        pass
-                return 0.0
+                s_clean = val_str.translate(str.maketrans('', '', '⭐★🐉🔥⚡❄️💎👑🚀⚠️🔻,%+￥$° ')).strip()
+                try:
+                    return float(s_clean)
+                except (ValueError, TypeError):
+                    return 0.0
 
             sorted_rows = sorted(rows, key=lambda x: (-_parse_num_val(x, 8), _parse_num_val(x, 4), str(x[0]).strip()))
 
@@ -383,7 +380,6 @@ class FavoritePanel(QWidget):
                         self.table.setItem(row_idx, col_idx, item)
                     else:
                         item.setText(str(val))
-                        item.setData(Qt.ItemDataRole.UserRole, val)
 
                     item.setTextAlignment(Qt.AlignmentFlag.AlignCenter if col_idx not in (1, reason_col_idx) else (Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter))
 

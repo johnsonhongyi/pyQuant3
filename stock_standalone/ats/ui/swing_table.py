@@ -302,16 +302,22 @@ class SwingStateTable(QWidget):
 
         self._is_mock_active = False
         self.table.setUpdatesEnabled(False)
+        
+        header = self.table.horizontalHeader()
+        sort_col = header.sortIndicatorSection() if (header and header.isSortIndicatorShown()) else -1
+        sort_order = header.sortIndicatorOrder() if header else Qt.SortOrder.AscendingOrder
+        
         self.table.setSortingEnabled(False)
         
         if not data_list:
             if self.table.rowCount() > 0:
                 self.table.setRowCount(0)
+            self.table.setUpdatesEnabled(True)
             return
 
         from global_favorites import GlobalFavoriteManager
         fav_mgr = GlobalFavoriteManager()
-        fav_stocks = fav_mgr.get_favorite_stocks()
+        fav_stocks = set(fav_mgr.get_favorite_stocks())
         sorted_list = sorted(data_list, key=lambda x: (str(x[0]).strip() not in fav_stocks, str(x[0]).strip()))
         
         if self.table.rowCount() != len(sorted_list):
@@ -337,7 +343,6 @@ class SwingStateTable(QWidget):
                     self.table.setItem(row_idx, col_idx, item)
                 else:
                     item.setText(str(text))
-                    item.setData(Qt.ItemDataRole.UserRole, str(text))
 
                 item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 
@@ -431,6 +436,8 @@ class SwingStateTable(QWidget):
                 
         auto_fit_columns_once(self.table, "ats_swing_table_state_v2", max_widths={self.table.columnCount() - 1: 350})
         self.table.setSortingEnabled(True)
+        if sort_col >= 0:
+            self.table.sortItems(sort_col, sort_order)
         self.table.setUpdatesEnabled(True)
         self._apply_favorite_filter()
 

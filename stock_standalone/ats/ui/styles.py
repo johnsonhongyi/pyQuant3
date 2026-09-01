@@ -211,6 +211,9 @@ class ColorPreservingItemDelegate(QStyledItemDelegate):
             option.palette.setBrush(QPalette.ColorGroup.Active, QPalette.ColorRole.Text, brush)
 
 
+_CLEAN_TRANS = str.maketrans('', '', '⭐★🐉🔥⚡❄️💎👑🚀⚠️🔻⏳🔔🥇🥈🥉,%+￥$°')
+
+
 class NumericTableWidgetItem(QTableWidgetItem):
     """
     量化金融终端增强型支持数值、日期与文本混合排序的表格项：
@@ -229,14 +232,39 @@ class NumericTableWidgetItem(QTableWidgetItem):
         super().__init__(display_str)
         
         if raw_val is not None:
-            self.setData(Qt.ItemDataRole.UserRole, raw_val)
+            self.set_raw_value(raw_val)
         elif isinstance(value, (int, float)) and not (isinstance(value, float) and (math.isnan(value) or math.isinf(value))):
-            self.setData(Qt.ItemDataRole.UserRole, value)
-            self._raw_value = value
+            self.set_raw_value(value)
         else:
             self._reparse_raw_value(display_str)
 
+    def setData(self, role: int, value: Any):
+        """拦截 UserRole 写入，智能解析并清洗为真实数值或纯净数据，杜绝格式化字符串污染数值排序"""
+        if role == Qt.ItemDataRole.UserRole:
+            if value is None:
+                self._raw_value = None
+                super().setData(role, None)
+                return
+            if isinstance(value, (int, float)):
+                if not (isinstance(value, float) and (math.isnan(value) or math.isinf(value))) and abs(value) < 99999900:
+                    val_float = float(value)
+                    self._raw_value = val_float
+                    super().setData(role, val_float)
+                else:
+                    self._raw_value = None
+                    super().setData(role, None)
+                return
+            # 传入的是字符串或其他对象，尝试解析出有效数值或数据
+            parsed = self._extract_clean_value(value)
+            self._raw_value = parsed
+            super().setData(role, parsed)
+            return
+
+        super().setData(role, value)
+
     def setText(self, atext: str):
+        if atext == super().text() and hasattr(self, '_raw_value') and self._raw_value is not None:
+            return
         super().setText(atext)
         # 文本变更时重新解析并更新，杜绝复用 Item 时的历史脏数据残留
         self._reparse_raw_value(atext)
@@ -244,55 +272,73 @@ class NumericTableWidgetItem(QTableWidgetItem):
     def set_raw_value(self, raw_val: Any):
         """显式绑定真实数值/原始数据"""
         self._raw_value = raw_val
-        if raw_val is not None and not (isinstance(raw_val, float) and (math.isnan(raw_val) or math.isinf(raw_val))):
-            self.setData(Qt.ItemDataRole.UserRole, raw_val)
+        if raw_val is not None:
+            if isinstance(raw_val, (int, float)):
+                if not (math.isnan(raw_val) or math.isinf(raw_val)) and abs(raw_val) < 99999900:
+                    super().setData(Qt.ItemDataRole.UserRole, float(raw_val))
+                else:
+                    super().setData(Qt.ItemDataRole.UserRole, None)
+            else:
+                parsed = self._extract_clean_value(raw_val)
+                self._raw_value = parsed
+                super().setData(Qt.ItemDataRole.UserRole, parsed)
         else:
-            self.setData(Qt.ItemDataRole.UserRole, None)
+            super().setData(Qt.ItemDataRole.UserRole, None)
 
     def set_pin_status(self, is_pinned: bool, pin_rank: int = 999):
         """设置置顶状态与梯队"""
         self.is_pinned = is_pinned or (pin_rank < 999)
         self.pin_rank = pin_rank if pin_rank < 999 else (0 if is_pinned else 999)
 
-    def _reparse_raw_value(self, text_val: str):
-        t = str(text_val).strip()
-        t_clean = t.replace('⭐', '').replace('★', '').replace('🐉', '').replace('🔥', '').replace('⚡', '').replace('❄️', '').replace('💎', '').replace('👑', '').strip()
-        if not t_clean or t_clean in ("-", "--", "---", "null", "None", "nan", "NaN", "N/A", "未分类", "暂无") or t_clean.lower() in ("nan", "none", "null", "n/a"):
-            self._raw_value = None
-            self.setData(Qt.ItemDataRole.UserRole, None)
-            return
+    @staticmethod
+    def _extract_clean_value(val_or_text: Any) -> Any:
+        """从任意输入中提取用于排序的纯净浮点数、日期或文本 (微秒级高性能快速路径)"""
+        if val_or_text is None:
+            return None
+        if isinstance(val_or_text, (int, float)):
+            if not (isinstance(val_or_text, float) and (math.isnan(val_or_text) or math.isinf(val_or_text))) and abs(val_or_text) < 99999900:
+                return float(val_or_text)
+            return None
+
+        t = str(val_or_text).strip()
+        if not t or t in ("-", "--", "---", "null", "None", "nan", "NaN", "N/A", "未分类", "暂无") or t.lower() in ("nan", "none", "null", "n/a"):
+            return None
+
+        # ⚡ 快速路径 1：去除货币、百分比、正号后直接转 float
+        s_clean = t.translate(_CLEAN_TRANS).strip()
+        if s_clean:
+            if '(' in s_clean and not any(k in t for k in ("前5日", "首日", "次新", "待上市", "N", "C")):
+                s_clean = s_clean.split('(')[0].strip()
+            try:
+                val = float(s_clean)
+                if not (math.isnan(val) or math.isinf(val)) and abs(val) < 99999900:
+                    return val
+            except (ValueError, TypeError):
+                pass
 
         # 检查是否为日期格式 (YYYY-MM-DD 或 YYYY/MM/DD)
-        if len(t_clean) == 10 and (t_clean[4] in ('-', '/') and t_clean[7] in ('-', '/')):
-            self._raw_value = t_clean
-            self.setData(Qt.ItemDataRole.UserRole, t_clean)
-            return
+        if len(t) == 10 and (t[4] in ('-', '/') and t[7] in ('-', '/')) and t[:4].isdigit():
+            return t
 
-        # 尝试提取纯数值 (支持百分比、千分位、正负号)
-        clean_num_str = t_clean.replace(',', '').replace('%', '').replace('+', '').replace('￥', '').replace('$', '').strip()
-        if '(' in clean_num_str and not any(k in t_clean for k in ("前5日", "首日", "次新", "待上市", "N", "C")):
-            clean_num_str = clean_num_str.split('(')[0].strip()
+        return s_clean if s_clean else t
 
-        try:
-            val = float(clean_num_str)
-            if not (math.isnan(val) or math.isinf(val)) and abs(val) < 99999900:
-                self._raw_value = val
-                self.setData(Qt.ItemDataRole.UserRole, val)
-                return
-        except (ValueError, TypeError):
-            pass
-
-        self._raw_value = t_clean
-        self.setData(Qt.ItemDataRole.UserRole, t_clean)
+    def _reparse_raw_value(self, text_val: str):
+        parsed = self._extract_clean_value(text_val)
+        self._raw_value = parsed
+        super().setData(Qt.ItemDataRole.UserRole, parsed)
 
     def _is_empty(self) -> bool:
         """判定当前单元格是否为无数据/缺失值占位符"""
         t = self.text().strip()
-        t_clean = t.replace('⭐', '').replace('★', '').replace('🐉', '').replace('🔥', '').replace('⚡', '').replace('❄️', '').replace('💎', '').replace('👑', '').strip()
+        t_clean = (
+            t.replace('⭐', '').replace('★', '').replace('🐉', '').replace('🔥', '')
+             .replace('⚡', '').replace('❄️', '').replace('💎', '').replace('👑', '')
+             .replace('🚀', '').replace('⚠️', '').replace('🔻', '').strip()
+        )
         if not t_clean or t_clean in ("-", "--", "---", "null", "None", "N/A", "未分类", "暂无", "nan", "NaN") or t_clean.lower() in ("nan", "none", "null", "n/a"):
             return True
 
-        u = self.data(Qt.ItemDataRole.UserRole)
+        u = super().data(Qt.ItemDataRole.UserRole)
         if u is not None and isinstance(u, (int, float)):
             if math.isnan(u) or math.isinf(u) or abs(u) >= 99999900:
                 return True
@@ -306,19 +352,22 @@ class NumericTableWidgetItem(QTableWidgetItem):
         return False
 
     def _get_sort_val(self, target=None):
-        """提取用于精准比较的数值或规范化文本"""
+        """提取用于精准比较的数值或规范化文本 (100% 确保数值型以 float 参与大小比较)"""
         item = target if target is not None else self
         if hasattr(item, '_is_empty') and item._is_empty():
             return None
 
         # 1. 优先使用 UserRole
-        u = item.data(Qt.ItemDataRole.UserRole)
+        u = item.data(Qt.ItemDataRole.UserRole) if isinstance(item, QTableWidgetItem) else getattr(item, '_raw_value', None)
         if u is not None:
             if isinstance(u, (int, float)):
                 if not (math.isnan(u) or math.isinf(u)) and abs(u) < 99999900:
                     return float(u)
                 return None
-            return u
+            # 若 UserRole 为字符串，必须强制进行数值提取，绝不直接当作普通字符串返回
+            parsed_u = self._extract_clean_value(u)
+            if parsed_u is not None:
+                return parsed_u
 
         # 2. 检查 _raw_value
         if hasattr(item, '_raw_value') and item._raw_value is not None:
@@ -327,22 +376,13 @@ class NumericTableWidgetItem(QTableWidgetItem):
                 if not (math.isnan(rv) or math.isinf(rv)) and abs(rv) < 99999900:
                     return float(rv)
                 return None
-            return rv
+            parsed_rv = self._extract_clean_value(rv)
+            if parsed_rv is not None:
+                return parsed_rv
 
         # 3. 解析文本
-        t = item.text().strip()
-        if not t or t in ("-", "--", "---", "null", "None", "N/A", "未分类", "暂无") or t.lower() in ("nan", "none", "null", "n/a"):
-            return None
-
-        clean_t = t.replace(',', '').replace('%', '').replace('+', '').replace('￥', '').replace('$', '').strip()
-        try:
-            f = float(clean_t)
-            if not (math.isnan(f) or math.isinf(f)) and abs(f) < 99999900:
-                return f
-        except Exception:
-            pass
-
-        return t
+        t = item.text().strip() if hasattr(item, 'text') else str(item).strip()
+        return self._extract_clean_value(t)
 
     def __lt__(self, other):
         if not isinstance(other, QTableWidgetItem):
@@ -387,27 +427,29 @@ class NumericTableWidgetItem(QTableWidgetItem):
         if empty_self and empty_other:
             return self.text() < other.text()
 
-        # 3. 提取排序值进行比较
+        # 3. 提取排序值进行比较 (严格区分 float 数值与纯文本)
         v1 = self._get_sort_val(self)
         v2 = self._get_sort_val(other) if hasattr(other, '_get_sort_val') else self._get_sort_val(other)
 
         if v1 is not None and v2 is not None:
-            # 类型一致比较 (数值 vs 数值, 字符串 vs 字符串)
-            if type(v1) == type(v2):
+            # 纯数值比较 (float vs float, int vs float 等)
+            if isinstance(v1, (int, float)) and isinstance(v2, (int, float)):
+                if v1 != v2:
+                    return float(v1) < float(v2)
+                return self.text() < other.text()
+
+            # 纯字符串比较
+            if isinstance(v1, str) and isinstance(v2, str):
                 if v1 != v2:
                     return v1 < v2
                 return self.text() < other.text()
-            elif isinstance(v1, (int, float)) and isinstance(v2, (int, float)):
-                if v1 != v2:
-                    return v1 < v2
-                return self.text() < other.text()
-            else:
-                # 混合类型：转为字符串比较
-                s1 = str(v1)
-                s2 = str(v2)
-                if s1 != s2:
-                    return s1 < s2
-                return self.text() < other.text()
+
+            # 混合类型：转为字符串比较
+            s1 = str(v1)
+            s2 = str(v2)
+            if s1 != s2:
+                return s1 < s2
+            return self.text() < other.text()
 
         return self.text() < other.text()
 
