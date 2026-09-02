@@ -248,6 +248,66 @@ class TestDailyLimitUpDialog(unittest.TestCase):
         self.assertEqual(desc_circ[:3], ["7.18%", "0.52%", "0.02%"])
         self.assertEqual(desc_circ[3:], ["--", "--"])
 
+    def test_kpi_card_interactive_filtering(self):
+        """测试天梯顶部 KPI 卡片 (涨停/连板/炸板) 点击点选单选、多选与取消过滤交互"""
+        dialog = DailyLimitUpDialog(parent=None)
+
+        mock_records = [
+            {
+                "code": "002886", "name": "沃特股份", "price": 30.84, "pct": 9.99,
+                "consecutive_boards": 4, "tier_tag": "👑 空间高度龙 (4板)",
+                "seal_amount_wan": 34721.0, "seal_to_circ_ratio": 5.38, "turnover_rate": 18.42,
+                "is_limit_up": True, "is_broken": False, "category": "PEEK材料"
+            },
+            {
+                "code": "601086", "name": "国芳集团", "price": 11.10, "pct": 10.01,
+                "consecutive_boards": 3, "tier_tag": "🚀 连板接力 (3板)",
+                "seal_amount_wan": 39871.0, "seal_to_circ_ratio": 5.39, "turnover_rate": 0.80,
+                "is_limit_up": True, "is_broken": False, "category": "IP经济"
+            },
+            {
+                "code": "000001", "name": "平安银行", "price": 12.00, "pct": 10.00,
+                "consecutive_boards": 1, "tier_tag": "🔥 首板",
+                "seal_amount_wan": 15000.0, "seal_to_circ_ratio": 1.20, "turnover_rate": 2.50,
+                "is_limit_up": True, "is_broken": False, "category": "银行"
+            },
+            {
+                "code": "000002", "name": "万科A", "price": 8.50, "pct": 6.20,
+                "consecutive_boards": 1, "tier_tag": "💔 炸板未回封",
+                "seal_amount_wan": 0.0, "seal_to_circ_ratio": 0.0, "turnover_rate": 6.80,
+                "is_limit_up": False, "is_broken": True, "category": "房地产"
+            }
+        ]
+
+        dialog.current_records = mock_records
+        dialog.combo_time_slice.setCurrentText("⚡ 自动实盘跟随")
+        dialog.combo_tier_filter.setCurrentIndex(0)
+        dialog._apply_filter()
+
+        # 1. 默认状态：处于【⚡ 自动实盘跟随】
+        self.assertEqual(dialog.combo_time_slice.currentText(), "⚡ 自动实盘跟随")
+        self.assertEqual(dialog.active_kpi_filters, set())
+
+        # 2. 点击【连板】卡片：自动记忆【⚡ 自动实盘跟随】并平滑切换为【⏱️ 全天全时段】，确保连板标的 100% 完整展示
+        dialog._toggle_kpi_filter("LADDER")
+        self.assertEqual(dialog.active_kpi_filters, {"LADDER"})
+        self.assertEqual(dialog.combo_time_slice.currentText(), "⏱️ 全天全时段")
+        self.assertEqual(dialog.table.rowCount(), 2)
+        codes_ladder = [dialog.table.item(r, 0).text() for r in range(2)]
+        self.assertEqual(set(codes_ladder), {"002886", "601086"})
+
+        # 3. 点击【涨停】卡片 (多选)：仍保持【⏱️ 全天全时段】，显示连板+涨停
+        dialog._toggle_kpi_filter("ZT")
+        self.assertEqual(dialog.active_kpi_filters, {"LADDER", "ZT"})
+        self.assertEqual(dialog.combo_time_slice.currentText(), "⏱️ 全天全时段")
+        self.assertEqual(dialog.table.rowCount(), 3)
+
+        # 4. 全部取消 KPI 过滤：自动平滑恢复先前记忆的【⚡ 自动实盘跟随】！
+        dialog._toggle_kpi_filter("LADDER")
+        dialog._toggle_kpi_filter("ZT")
+        self.assertEqual(dialog.active_kpi_filters, set())
+        self.assertEqual(dialog.combo_time_slice.currentText(), "⚡ 自动实盘跟随")
+
 
 if __name__ == "__main__":
     unittest.main()

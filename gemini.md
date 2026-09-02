@@ -1,3 +1,29 @@
+## 2026-09-02 14:22
+- [x] **实现天梯 KPI 过滤激活时时间片自动记忆与临时切【全天全时段】& 全部取消后自动恢复先前时段选择 (`stock_standalone/ats/ui/daily_limit_up_dialog.py`, `stock_standalone/tests/test_daily_limit_up_dialog.py`)**：
+    - [x] **时间片生命周期自动记忆与平滑恢复状态机 (`self._saved_time_slice_before_kpi`)**：
+        1. **点击激活 KPI 卡片时**：自动记忆当前时间片选择（如【⚡ 自动实盘跟随】），并平滑将下拉框切换为【⏱️ 全天全时段】，确保 14 家连板标的 / 56 家涨停标的 / 33 家炸板标的 100% 完整展示，杜绝因午盘/尾盘狭窄时间片导致标的被误过滤显示为空；
+        2. **时间片过滤双重保险**：在 `_apply_filter` 中若检测到 `self.active_kpi_filters` 激活，自动跳过分时切片过滤，确保数据 0 丢失；
+        3. **全部取消过滤自动恢复**：当所有 KPI 卡片全部取消时，系统自动平滑恢复先前记忆的时间片选择（如恢复为【⚡ 自动实盘跟随】）；
+    - [x] **自动化测试 100% 全部 PASSED**：更新 `test_kpi_card_interactive_filtering` 专项测试覆盖时间片记忆与恢复断言，全量 54 项自动化回归测试全部通过。
+
+## 2026-09-02 14:05
+- [x] **实现连板天梯顶部重点信息 KPI 卡片 (涨停/连板/炸板) 点击点选单选、多选与取消过滤交互体系 (`stock_standalone/ats/ui/daily_limit_up_dialog.py`, `stock_standalone/tests/test_daily_limit_up_dialog.py`)**：
+    - [x] **顶部 KPI 卡片交互按钮化与多选状态机 (`self.active_kpi_filters: Set[str]`)**：
+        1. **组件交互升级**：将顶部的【🔴 涨停: X 家】、【👑 连板: Y 家】、【💥 炸板: Z 家】升级为可点击的 `QPushButton` 交互卡片，支持手型光标与操作 ToolTip 提示；
+        2. **单选与多选组合状态管理 (`_toggle_kpi_filter`)**：
+           - 点击【涨停】：快速过滤仅展示封住涨停的标的（排除炸板）；
+           - 点击【连板】：快速过滤仅展示连板数 $\ge 2$ 的高统治力梯队标的；
+           - 点击【炸板】：快速过滤仅展示今日炸板未回封/冲高回落的博弈标的；
+           - **多选支持**：支持任意多选组合（如同时点选【连板】+【炸板】，即刻合并显示所有连板与炸板标的）；
+           - **取消恢复**：再次点击取消对应过滤，全部取消后自动平滑恢复默认全量展示；
+        3. **动态高亮与视觉状态反馈 (`_update_kpi_styles`)**：
+           - 选中激活时呈现高饱和度背景与发光边框（涨停绯红、连板金黄、炸板亮橙）；
+           - 未选中时保持半透明暗色背景，封板率恶化时自动呈现红字警示；
+    - [x] **数据原位过滤与状态栏实时反馈 (`_apply_filter`)**：
+        - 结合时间片生命周期、梯队分类、搜索词与自选股，原位毫秒级完成多维复合分拣；
+        - 状态栏实时显示 `🎯 KPI卡片【涨停+连板】已过滤: 精选 Top N/Total` 提示；
+    - [x] **自动化测试 100% 全部 PASSED**：新增 `test_kpi_card_interactive_filtering` 专项测试，全量 54 项自动化回归测试全部通过。
+
 ## 2026-09-02 13:48
 - [x] **实现 ATS 新股次新股同源 TDX 接口 VWAP 偏离度及 60分/30分/15分交易时段分段涨速引擎 & 分段选择器、60F简写支持与原子持久化 (`stock_standalone/ats/new_stock_fetcher.py`, `stock_standalone/ats/ui/new_stock_panel.py`, `stock_standalone/ats/ui/hot_sector_leaderboard.py`, `stock_standalone/tests/test_new_stock_module.py`, `stock_standalone/tests/test_new_stock_sorting_comprehensive.py`)**：
     - [x] **新股次新股直连 TDX 底层分段涨速与 VWAP 计算引擎**：
