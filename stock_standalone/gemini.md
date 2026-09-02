@@ -1,3 +1,20 @@
+## 2026-09-02 11:15
+- [x] **实现 ATS 搜索历史纯只读保护模式 (避免覆盖 TK 过滤) & 工具栏【过滤】前新增 `r` 按钮与快捷键 `R` 极速刷新历史 (`stock_standalone/ats/ui/main_window.py`, `stock_standalone/tests/test_sector_strength_and_detail_parity.py`)**：
+    - [x] **ATS 接入 History 纯只读保护模式（彻底根治覆盖/冲刷 TK 端 `search_history.json` 顽疾）**：
+        1. **共享只读安全加载 (`_load_search_history_data`)**：
+           - 纯只读加载全局 `search_history.json`（`history1` ~ `history5`），完好保留全部公式、`starred` 星标、`note` 注释与 `hit` 命中；
+           - ATS 自身所选历史分组与过滤表达式优先从本地配置 `window_config.json`（`ats_history_group` / `ats_query_expr`）隔离恢复，回退时取文件默认值；
+        2. **彻底禁用反向覆写磁盘 (`_save_search_history_data`)**：
+           - 将 `_save_search_history_data` 改造为只读保护：仅持久化 ATS 本地窗口配置（`window_config.json`），绝不覆写/破坏外部 TK 维护的 `search_history.json`；
+           - 过滤执行（`apply_filter`）、命中统计（`calculate_history_hits_ui`）以及清空过滤（`clear_filter`）期间，零磁盘写冲突、零历史覆盖；
+    - [x] **工具栏【过滤】前新增 `r` 刷新按钮与快捷键 `R` 极速刷新**：
+        1. **紧邻【过滤】按钮新增 `r` 刷新按钮 (`btn_reload_history`)**：
+           - 紧邻放置在 `query_combo` 与 `btn_filter` 之间，高对比度主题色科技风小方块，悬停提示 `"刷新重新加载 history 历史过滤规则 (快捷键: R)"`；
+           - 点击触发 `reload_search_history()`：重新从磁盘读取最新的 `search_history.json` 并平滑同步刷新当前下拉列表选项，配合 Toast 即时反馈；
+        2. **原生 `QShortcut` 快捷键 `R` 穿透响应与输入框防误触**：
+           - 全局绑定快捷键 `R`/`r`，结合 `is_editing_text(self)` 智能防误触：在 `QLineEdit` / 搜索框打字输入 `r` 时 100% 自动放行，在普通看盘浏览时一键极速刷新同步；
+    - [x] **全量 53 项跨模块自动化回归测试 100% 全部 PASSED**。
+
 ## 2026-09-02 11:00
 - [x] **实现 Top 3 强势板块跟单榜单选快速定位板块交互 & 全系统非明确板块 (`--`, `0` 等) 自动过滤剔除 (`stock_standalone/ats/hot_sector_engine.py`, `stock_standalone/ats/ui/hot_sector_leaderboard.py`, `stock_standalone/ats/ui/heatmap_widget.py`, `stock_standalone/bidding_momentum_detector.py`, `stock_standalone/tests/test_sector_strength_and_detail_parity.py`)**：
     - [x] **重构强势板块跟单榜交互：单选快速定位 + 再次点击恢复全选 + 全部板块重置**：

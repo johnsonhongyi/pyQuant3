@@ -1941,11 +1941,13 @@ class ATSMainWindow(QMainWindow):
             return os.path.join(get_app_root(), "datacsv", "search_history.json")
 
     def _load_search_history_data(self):
+        """【纯只读模式】以共享只读方式加载 search_history.json，绝不反向污染覆盖 TK 端数据"""
         import os
+        from ats.ui.styles import load_config_node
         filepath = self._get_search_history_filepath()
         h1, h2, h3, h4, h5 = [], [], [], [], []
-        self.last_query = ""
-        self.last_group = "history5"
+        file_last_q = ""
+        file_last_grp = "history5"
         if os.path.exists(filepath):
             try:
                 import json
@@ -1990,10 +1992,10 @@ class ATSMainWindow(QMainWindow):
                 h3 = [_normalize_record(r) for r in data.get("history3", [])]
                 h4 = [_normalize_record(r) for r in data.get("history4", [])]
                 h5 = [_normalize_record(r) for r in data.get("history5", [])]
-                self.last_query = data.get("last_query", "")
-                self.last_group = data.get("last_group", "history5")
+                file_last_q = data.get("last_query", "")
+                file_last_grp = data.get("last_group", "history5")
             except Exception as e:
-                print(f"[ATSMainWindow] Direct history load failed: {e}")
+                print(f"[ATSMainWindow] Direct history read-only load failed: {e}")
         
         self.search_histories = {
             "history1": h1,
@@ -2002,35 +2004,21 @@ class ATSMainWindow(QMainWindow):
             "history4": h4,
             "history5": h5
         }
+        # ATS 自身的 last_group 与 last_query 优先从本地配置读取，未配置时回退到文件
+        self.last_group = load_config_node("ats_history_group", file_last_grp)
+        self.last_query = load_config_node("ats_query_expr", file_last_q)
 
     def _save_search_history_data(self):
-        """将当前 search_histories 包含 query, note, starred, hit 原子落盘保存至 search_history.json"""
-        import os
-        import json
-        from ats.ui.styles import CONFIG_FILE_LOCK
-        filepath = self._get_search_history_filepath()
-        if not filepath:
-            return
-        try:
-            with CONFIG_FILE_LOCK:
-                cur_real_q = self._get_real_query() if hasattr(self, '_get_real_query') else ""
-                last_q_to_save = cur_real_q if cur_real_q else getattr(self, "last_query", "")
-                self.last_query = last_q_to_save
-                
-                data = {
-                    "history1": self.search_histories.get("history1", []),
-                    "history2": self.search_histories.get("history2", []),
-                    "history3": self.search_histories.get("history3", []),
-                    "history4": self.search_histories.get("history4", []),
-                    "history5": self.search_histories.get("history5", []),
-                    "last_query": last_q_to_save,
-                    "last_group": self.history_selector.currentText() if hasattr(self, 'history_selector') else "history5"
-                }
-                os.makedirs(os.path.dirname(os.path.abspath(filepath)), exist_ok=True)
-                with open(filepath, "w", encoding="utf-8") as f:
-                    json.dump(data, f, ensure_ascii=False, indent=2)
-        except Exception as e:
-            print(f"[ATSMainWindow] Save search history failed: {e}")
+        """【只读模式保护】仅将 ATS 自身的当前公式和分组持久化至 window_config.json，严禁覆盖 search_history.json"""
+        from ats.ui.styles import save_config_node
+        cur_real_q = self._get_real_query() if hasattr(self, '_get_real_query') else ""
+        last_q_to_save = cur_real_q if cur_real_q else getattr(self, "last_query", "")
+        self.last_query = last_q_to_save
+        cur_grp = self.history_selector.currentText() if hasattr(self, 'history_selector') else "history5"
+        self.last_group = cur_grp
+        
+        save_config_node("ats_query_expr", last_q_to_save)
+        save_config_node("ats_history_group", cur_grp)
 
         # 逐级异步 UI 刷新定时器 (Staggered Async Tier Timers for zero UI freezing)
         self._async_tier2_timer = QTimer(self)
@@ -2190,6 +2178,26 @@ class ATSMainWindow(QMainWindow):
         self.query_combo.currentIndexChanged.connect(self.apply_filter)
         toolbar.addWidget(self.query_combo)
         
+        # 🔄 r 刷新 history 按钮 (紧邻【过滤】按钮左侧，单键快速刷新全局历史规则)
+        self.btn_reload_history = QPushButton("R")
+        self.btn_reload_history.setToolTip("刷新重新加载 history 历史过滤规则 (快捷键: R)")
+        self.btn_reload_history.setStyleSheet("""
+            QPushButton { 
+                background-color: #2e2e36; 
+                color: #00ffcc; 
+                font-weight: bold; 
+                border: 1px solid #44444f; 
+                border-radius: 3px; 
+                padding: 1px 3px; 
+                min-width: 18px; 
+                max-width: 22px; 
+                font-size: 8.5pt; 
+            } 
+            QPushButton:hover { background-color: #3e3e4a; border-color: #00ffcc; color: #ffffff; }
+        """)
+        self.btn_reload_history.clicked.connect(lambda: self.reload_search_history(show_toast=True))
+        toolbar.addWidget(self.btn_reload_history)
+
         self.btn_filter = QPushButton("过滤")
         self.btn_filter.setToolTip("执行当前公式过滤 (Enter 亦可触发)")
         self.btn_filter.setStyleSheet("QPushButton { background-color: #2e2e36; color: #ffffff; border: 1px solid #44444f; border-radius: 3px; padding: 1px 4px; min-width: 26px; font-size: 8.5pt; } QPushButton:hover { background-color: #3e3e4a; border-color: #aad4ff; }")
@@ -2213,6 +2221,14 @@ class ATSMainWindow(QMainWindow):
         self.btn_view_filtered.setStyleSheet("QPushButton { background-color: #1a3333; color: #00ffcc; font-weight: bold; border: 1px solid #00ffcc; border-radius: 3px; padding: 1px 4px; min-width: 26px; font-size: 8.5pt; } QPushButton:hover { background-color: #00ffcc; color: #000000; }")
         self.btn_view_filtered.clicked.connect(self.view_filtered_stocks_dialog)
         toolbar.addWidget(self.btn_view_filtered)
+
+        # 绑定快捷键 R 刷新 history (输入框聚焦时自动放行防误触)
+        try:
+            from PyQt6.QtGui import QShortcut, QKeySequence
+            self.shortcut_reload_history = QShortcut(QKeySequence(Qt.Key.Key_R), self)
+            self.shortcut_reload_history.activated.connect(self._on_shortcut_reload_history)
+        except Exception as e:
+            logger.debug(f"[ATSMainWindow] Bind R shortcut failed: {e}")
         
         # 载入默认的公式数据
         self._on_history_group_changed()
@@ -2489,8 +2505,12 @@ class ATSMainWindow(QMainWindow):
         self.swing_table.btn_refresh.clicked.connect(lambda: self.load_db_data(force=True))
         self.backtest_panel.btn_run_backtest.clicked.connect(self.on_run_backtest_clicked)
 
-    def _on_history_group_changed(self):
-        group = self.history_selector.currentText()
+    def _on_history_group_changed(self, keep_current_query: bool = False):
+        group = self.history_selector.currentText() if hasattr(self, 'history_selector') else "history5"
+        self.last_group = group
+        from ats.ui.styles import save_config_node
+        save_config_node("ats_history_group", group)
+        
         h_list = self.search_histories.get(group, [])
             
         formatted_list = []
@@ -2500,29 +2520,32 @@ class ATSMainWindow(QMainWindow):
                 formatted_list.append(display_text)
                 
         self.query_combo.blockSignals(True)
+        current_text = self.query_combo.currentText().strip()
         self.query_combo.clear()
         self.query_combo.addItems(formatted_list)
         
         restored_idx = -1
-        last_q = getattr(self, "last_query", "")
-        if last_q and h_list:
-            last_q_clean = " ".join(str(last_q).split()).strip()
+        target_q = current_text if (keep_current_query and current_text) else getattr(self, "last_query", "")
+        if target_q and h_list:
+            target_q_clean = " ".join(str(target_q).split()).strip()
             for idx, item in enumerate(h_list):
                 item_q = item.get("query", "").strip() if isinstance(item, dict) else str(item).strip()
                 item_q_clean = " ".join(item_q.split()).strip()
                 item_disp = self._format_history_item_local(item)
                 item_disp_clean = " ".join(item_disp.split()).strip()
                 
-                if (item_q == last_q or 
-                    item_q_clean == last_q_clean or 
-                    item_disp == last_q or 
-                    item_disp_clean == last_q_clean or
-                    (item_q_clean and item_q_clean in last_q_clean)):
+                if (item_q == target_q or 
+                    item_q_clean == target_q_clean or 
+                    item_disp == target_q or 
+                    item_disp_clean == target_q_clean or
+                    (item_q_clean and item_q_clean in target_q_clean)):
                     restored_idx = idx
                     break
                 
         if restored_idx >= 0:
             self.query_combo.setCurrentIndex(restored_idx)
+        elif keep_current_query and current_text:
+            self.query_combo.setCurrentText(current_text)
         elif formatted_list:
             self.query_combo.setCurrentIndex(0)
         else:
@@ -2535,6 +2558,23 @@ class ATSMainWindow(QMainWindow):
         
         # 默认应用并加载当前历史过滤公式
         self.apply_filter()
+
+    def reload_search_history(self, show_toast: bool = True):
+        """【纯只读模式】从磁盘重新加载最新的 search_history.json 并刷新当前下拉列表"""
+        self._load_search_history_data()
+        self._on_history_group_changed(keep_current_query=True)
+        if show_toast:
+            from stock_logic_utils import toast_messageQT
+            group = self.history_selector.currentText() if hasattr(self, 'history_selector') else "history5"
+            count = len(self.search_histories.get(group, []))
+            toast_messageQT(self, f"🔄 已刷新 History ({group}: {count}条)")
+
+    def _on_shortcut_reload_history(self):
+        """快捷键 R 刷新 history (输入框聚焦打字时放行防误触)"""
+        from ats.ui.styles import is_editing_text
+        if is_editing_text(self):
+            return
+        self.reload_search_history(show_toast=True)
 
     def _format_history_item_local(self, item):
         if not isinstance(item, dict): 
@@ -2724,31 +2764,8 @@ class ATSMainWindow(QMainWindow):
         from ats.ui.styles import save_config_node
         save_config_node("ats_query_expr", query)
 
-        if query:
-            group = self.history_selector.currentText()
-            h_list = self.search_histories.get(group, [])
-            
-            exists = False
-            for item in h_list:
-                if isinstance(item, dict) and item.get("query") == query:
-                    exists = True
-                    break
-                elif isinstance(item, str) and item == query:
-                    exists = True
-                    break
-                    
-            if not exists:
-                h_list.insert(0, {"query": query, "starred": 0, "note": ""})
-                if len(h_list) > 500: # MAX_HISTORY
-                    h_list.pop()
-                
-                # 同步回写保存
-                self._save_search_history_data()
-                self._on_history_group_changed()
-            else:
-                self._save_search_history_data()
-        else:
-            self._save_search_history_data()
+        # 仅持久化本地 ATS 状态 (window_config.json)，绝不修改或覆写 search_history.json
+        self._save_search_history_data()
                 
         # 2. 广播更新主界面三大 Tab 看板 (重点关注, 回调跟踪器, 新股次新股)
         if hasattr(self, 'favorite_panel') and hasattr(self.favorite_panel, '_apply_row_visibility'):
@@ -2802,6 +2819,7 @@ class ATSMainWindow(QMainWindow):
             df_to_update = self.current_df if self.current_df is not None else self.dist_chart.current_df
             self.dist_chart.update_data([], stats_dict=None, df_all=df_to_update)
             
+        from stock_logic_utils import toast_messageQT
         toast_messageQT(self, "✨ 策略过滤已清空")
 
     def view_filtered_stocks_dialog(self):
