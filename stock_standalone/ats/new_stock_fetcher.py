@@ -244,11 +244,11 @@ class NewStockFetcher:
             self._load_persisted_data()
         return self._cached_ipo_dict
 
-    def get_combined_new_stocks(self, force_refresh: bool = False) -> pd.DataFrame:
+    def get_combined_new_stocks(self, force_refresh: bool = False, segment_mode: str = "30m") -> pd.DataFrame:
         """
         获取综合新股与次新股数据表:
         - 基础日历来自本地增量持久化日历；
-        - 所有实时行情（现价、昨收、涨跌幅、成交额、成交量、换手率、流通市值、总市值）100% 由 TDX API 权威直连计算赋予；
+        - 所有实时行情（现价、昨收、涨跌幅、成交额、成交量、换手率、流通市值、总市值、分段涨速、VWAP偏离）100% 由 TDX API 权威直连计算赋予；
         - 计算完成后自动原子落盘保存至 config/new_stock_data_cache.json。
         """
         now = time.time()
@@ -338,8 +338,8 @@ class NewStockFetcher:
             df.drop(columns=["_sort"], inplace=True)
             df.reset_index(drop=True, inplace=True)
 
-            # ⚡ 权威极速赋能：由 TDX API 直连赋予全部实时行情、真实股本、换手率与总/流通市值
-            df = self.enrich_with_tdx_realtime(df, force=force_refresh)
+            # ⚡ 权威极速赋能：由 TDX API 直连赋予全部实时行情、真实股本、换手率与总/流通市值、分段涨速与VWAP
+            df = self.enrich_with_tdx_realtime(df, force=force_refresh, segment_mode=segment_mode)
 
             # 写入磁盘持久化
             self._save_persisted_stocks_df(df)
@@ -348,9 +348,10 @@ class NewStockFetcher:
         self._last_fetch_time = time.time()
         return df
 
-    def enrich_with_tdx_realtime(self, df: pd.DataFrame, force: bool = False) -> pd.DataFrame:
+    def enrich_with_tdx_realtime(self, df: pd.DataFrame, force: bool = False, segment_mode: str = "30m") -> pd.DataFrame:
         """
         利用 TDX API 权威行情 + 真实流通股本/总股本批量推算全量新股数据 (最高绝对优先级)
+        计算 15分/30分/60分分段涨速及日内均线 VWAP 与 VWAP 偏离度。
         带【历史有效数据无损继承】：只要历史成功获取过有效现价与市值，绝不因临时网络波动清零为 `--`！
         """
         if df.empty:
@@ -367,7 +368,8 @@ class NewStockFetcher:
         codes_to_query = df["code"].tolist()
         quote_map: Dict[str, Dict[str, Any]] = {}
 
-        # ── 通道 1: TDXRealtimeFetcher 权威直连 (现价、昨收、成交量、成交额、流通市值、总市值、换手率) ──
+        now_ts = time.time()
+        # ── 通道 1: TDXRealtimeFetcher 权威直连 (现价、昨收、成交量、成交额、流通市值、总市值、换手率、分段涨速、VWAP) ──
         try:
             from ats.tdx_realtime_fetcher import TDXRealtimeFetcher
             tdx_fetcher = TDXRealtimeFetcher.get_instance()
@@ -416,6 +418,30 @@ class NewStockFetcher:
                         b_amt = b_vol * 100.0 * effective_p if (b_vol > 0 and effective_p > 0) else 0.0
                         b_amt_wan = round(b_amt / 10000.0, 1)
 
+                        # ⚡ 交易时段分段（默认30分/支持60分等）价格/量能记忆与区间涨速引擎
+                        seg_res = tdx_fetcher.calculate_segmented_velocity(
+                            code=c_clean,
+                            price=effective_p,
+                            open_price=op_p if op_p > 0 else effective_p,
+                            last_close=last_c if last_c > 0 else effective_p,
+                            vol=effective_vol,
+                            amount=effective_amt,
+                            now_ts=now_ts,
+                            segment_mode=segment_mode
+                        )
+
+                        # ⚡ 日内分时均价 VWAP (元) 与 VWAP 偏离度 (%)
+                        if effective_vol > 0 and effective_amt > 0:
+                            calc_vwap = effective_amt / (effective_vol * 100.0)
+                            if effective_p > 0 and (effective_p * 0.7 <= calc_vwap <= effective_p * 1.3):
+                                vwap = round(calc_vwap, 2)
+                            else:
+                                vwap = round((op_p + hi_p + lo_p + effective_p) / 4.0, 2) if op_p > 0 else effective_p
+                        else:
+                            vwap = effective_p if effective_p > 0 else (op_p if op_p > 0 else 0.0)
+
+                        vwap_dev_pct = round((effective_p - vwap) / vwap * 100.0, 2) if vwap > 0 else 0.0
+
                         if c_clean and (effective_p > 0 or last_c > 0):
                             if c_clean not in quote_map:
                                 quote_map[c_clean] = {}
@@ -437,6 +463,17 @@ class NewStockFetcher:
                             quote_map[c_clean]["bid_pressure"] = bid_p
                             quote_map[c_clean]["bidding_amt_wan"] = b_amt_wan
                             quote_map[c_clean]["bidding_vol"] = b_vol
+
+                            # 分段涨速与 VWAP 写入 quote_map
+                            quote_map[c_clean]["velocity_pct"] = seg_res.get("velocity_pct", 0.0)
+                            quote_map[c_clean]["velocity_tag"] = seg_res.get("velocity_tag", "⏱️ 窄幅横盘")
+                            quote_map[c_clean]["segment_label"] = seg_res.get("segment_label", "⏱️ 30分分段")
+                            quote_map[c_clean]["segment_base_price"] = seg_res.get("segment_base_price", effective_p)
+                            quote_map[c_clean]["segment_vol_increment"] = seg_res.get("segment_vol_increment", 0.0)
+                            quote_map[c_clean]["segment_amount_wan"] = seg_res.get("segment_amount_wan", 0.0)
+                            quote_map[c_clean]["is_midway_init"] = seg_res.get("is_midway_init", False)
+                            quote_map[c_clean]["vwap"] = vwap
+                            quote_map[c_clean]["vwap_dev_pct"] = vwap_dev_pct
 
                             # 💡 权威推算流通市值、总市值与换手率 (支持集合竞价)
                             lt_shares, zg_shares = shares_dict.get(c_clean, (0.0, 0.0))
@@ -512,6 +549,10 @@ class NewStockFetcher:
                                         quote_map[c_raw]["float_mv_yi"] = p_fmv
                                     if "total_mv_yi" not in quote_map[c_raw] and p_tmv > 0:
                                         quote_map[c_raw]["total_mv_yi"] = p_tmv
+                                    if "vwap" not in quote_map[c_raw] and eff_p_tx > 0:
+                                        quote_map[c_raw]["vwap"] = eff_p_tx
+                                        quote_map[c_raw]["vwap_dev_pct"] = 0.0
+                                        quote_map[c_raw]["velocity_pct"] = 0.0
         except Exception as e:
             logger.debug(f"腾讯行情备用补齐异常: {e}")
 
@@ -543,6 +584,14 @@ class NewStockFetcher:
                     if "total_mv_yi" not in q: q["total_mv_yi"] = safe_float(h.get("total_mv_yi", 0.0))
                     if "amount_yi" not in q: q["amount_yi"] = safe_float(h.get("amount_yi", 0.0))
                     if "pct" not in q: q["pct"] = safe_float(h.get("pct", 0.0))
+                    if "velocity_pct" not in q: q["velocity_pct"] = safe_float(h.get("velocity_pct", 0.0))
+                    if "velocity_tag" not in q: q["velocity_tag"] = h.get("velocity_tag", "⏱️ 窄幅横盘")
+                    if "segment_label" not in q: q["segment_label"] = h.get("segment_label", "⏱️ 30分分段")
+                    if "segment_base_price" not in q: q["segment_base_price"] = safe_float(h.get("segment_base_price", p))
+                    if "segment_amount_wan" not in q: q["segment_amount_wan"] = safe_float(h.get("segment_amount_wan", 0.0))
+                    if "is_midway_init" not in q: q["is_midway_init"] = bool(h.get("is_midway_init", False))
+                    if "vwap" not in q: q["vwap"] = safe_float(h.get("vwap", p))
+                    if "vwap_dev_pct" not in q: q["vwap_dev_pct"] = safe_float(h.get("vwap_dev_pct", 0.0))
 
             if p > 0:
                 df.at[idx, "price"] = p
@@ -578,6 +627,24 @@ class NewStockFetcher:
             tmv = safe_float(q.get("total_mv_yi", 0.0))
             if tmv > 0:
                 df.at[idx, "total_mv_yi"] = tmv
+
+            # ⚡ 分段涨速与 VWAP 赋值
+            df.at[idx, "velocity_pct"] = safe_float(q.get("velocity_pct", 0.0))
+            df.at[idx, "velocity_tag"] = q.get("velocity_tag", "⏱️ 窄幅横盘")
+            df.at[idx, "segment_label"] = q.get("segment_label", "⏱️ 30分分段")
+            df.at[idx, "segment_base_price"] = safe_float(q.get("segment_base_price", p if p > 0 else issue_p))
+            df.at[idx, "segment_amount_wan"] = safe_float(q.get("segment_amount_wan", 0.0))
+            df.at[idx, "is_midway_init"] = bool(q.get("is_midway_init", False))
+
+            vwap_val = safe_float(q.get("vwap", 0.0))
+            if vwap_val <= 0:
+                vwap_val = p if p > 0 else issue_p
+            df.at[idx, "vwap"] = vwap_val
+
+            vwap_dev_val = safe_float(q.get("vwap_dev_pct", 0.0))
+            if vwap_dev_val == 0.0 and p > 0 and vwap_val > 0 and abs(p - vwap_val) > 1e-4:
+                vwap_dev_val = round((p - vwap_val) / vwap_val * 100.0, 2)
+            df.at[idx, "vwap_dev_pct"] = vwap_dev_val
 
             # 💡 集合竞价策略信号判定与关键信息同步
             b_amt_wan = safe_float(q.get("bidding_amt_wan", 0.0))

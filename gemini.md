@@ -1,3 +1,22 @@
+## 2026-09-02 13:48
+- [x] **实现 ATS 新股次新股同源 TDX 接口 VWAP 偏离度及 60分/30分/15分交易时段分段涨速引擎 & 分段选择器、60F简写支持与原子持久化 (`stock_standalone/ats/new_stock_fetcher.py`, `stock_standalone/ats/ui/new_stock_panel.py`, `stock_standalone/ats/ui/hot_sector_leaderboard.py`, `stock_standalone/tests/test_new_stock_module.py`, `stock_standalone/tests/test_new_stock_sorting_comprehensive.py`)**：
+    - [x] **新股次新股直连 TDX 底层分段涨速与 VWAP 计算引擎**：
+        1. **同源分段涨速计算 (`calculate_segmented_velocity`)**：
+           - 在 `NewStockFetcher.enrich_with_tdx_realtime` 中直连 `TDXRealtimeFetcher.calculate_segmented_velocity`，支持 `30m`、`15m`、`60m`、`day_open` 与 `60s` 全量分段模式；
+           - 实时计算 `velocity_pct`、`velocity_tag`、`segment_label`、`segment_base_price`、`segment_amount_wan`、`is_midway_init`；
+        2. **工业级日内 VWAP 加权均价与偏离度模型**：
+           - 精确提取成交量加权均价 `vwap = amount / (vol * 100.0)`，并在 `[0.7*price, 1.3*price]` 合理范围内保护；
+           - 精确计算现价对 VWAP 均价的偏离度 `vwap_dev_pct = (price - vwap) / vwap * 100.0`；
+    - [x] **UI 交互增强、60F 简写支持、表头自适应联动与原子持久化**：
+        1. **分段选择下拉框 (`combo_segment_mode`)**：支持 `⏱️ 30分分段 (默认)`、`⏱️ 15分分段`、`⏱️ 60分分段`、`⏱️ 全天开盘累计`、`⏱️ 60秒微观滑动`，自动持久化至 `ats_new_stock_velocity_segment_mode`；
+        2. **表头动态联动与 60F 简写支持**：
+           - 60分分段时表头显示 `60分涨速%`，悬停 ToolTip 提示 `60分交易分段净涨速% (60F)`，列信息支持 `60F` 简写表达；
+        3. **7 级实战状态机与双指标富文本 ToolTip**：
+           - 涨速列根据 $\ge +2.0\%$、$\ge +0.8\%$、$\ge +0.3\%$、$\le -1.5\%$ 等展示 7 级实战图标（`🚀+X.X%`、`🔥+X.X%`、`⚡+X.X%`、`0.0%`、`🔻-X.X%`、`⚠️-X.X%`、`❄️-X.X%`）；
+           - 单元格悬停清晰提示交易分段、时段基准价、时段净拉升、时段增量额与状态评估；
+           - VWAP 偏离列清晰呈现分时均价、偏离度及“分时均线上方强势运行 / 跌破防守”诊断；
+    - [x] **全量 50 项自动化与跨模块回归测试 100% 全部 PASSED**。
+
 ## 2026-08-31 14:58
 - [x] **实现 4 小时交易时段分段（默认 30 分钟）价格/量能自动记忆缓存与区间涨速引擎 (`calculate_segmented_velocity`) & 分段周期选择与原子持久化 (`stock_standalone/ats/tdx_realtime_fetcher.py`, `stock_standalone/ats/hot_sector_engine.py`, `stock_standalone/ats/ui/hot_sector_leaderboard.py`, `stock_standalone/tests/test_snap_windows_top_hotkey.py`)**：
     - [x] **重构交易时段分段区间涨跌与量能增量模型**：
