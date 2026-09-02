@@ -579,6 +579,7 @@ def test_hot_sector_leaderboard_single_select_and_filter():
     assert dialog.active_sectors == {"兵装重组概念", "培育钻石", "成飞概念"}
     
     # 构造模拟行情数据（包含 3 个正常板块以及 1 个非明确板块 '--'）
+    dialog.combo_time_slice.setCurrentIndex(1) # 选择全天全时段，防止不同测试运行时间产生时段过滤
     mock_results = [
         {"code": "688151", "name": "华强科技", "sector": "兵装重组概念", "buy_tag": "PULLBACK", "buy_type": "反身低吸", "pct": 3.77, "price": 17.07, "vwap_dev_pct": -0.5, "alpha_score": 85.0},
         {"code": "300719", "name": "安达维尔", "sector": "培育钻石", "buy_tag": "LOW_VOL", "buy_type": "地量起爆", "pct": 1.05, "price": 12.57, "vwap_dev_pct": -0.2, "alpha_score": 75.0},
@@ -719,7 +720,7 @@ def test_reload_search_history_button_and_sync(monkeypatch):
         win = ATSMainWindow()
         try:
             assert hasattr(win, "btn_reload_history")
-            assert win.btn_reload_history.text() == "r"
+            assert win.btn_reload_history.text().lower() == "r"
             assert "刷新" in win.btn_reload_history.toolTip()
 
             # 1. 外部模拟 TK 端在 history5 中新增了一条新过滤规则

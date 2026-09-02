@@ -490,14 +490,14 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
         self.combo_time_slice.currentIndexChanged.connect(lambda: self._render_table_data(self.cached_results))
         header_lay.addWidget(self.combo_time_slice)
 
-        # ⏱️ 涨速交易时段分段选择器 (默认30分分段，支持15分/60分/开盘累计/60秒微观，自动持久化记忆)
+        # ⏱️ 涨速交易时段分段选择器 (极窄紧凑模式，支持30分/15分/60分/开盘/60秒，自动持久化记忆)
         self.combo_segment_mode = QComboBox()
         self.combo_segment_mode.addItems([
-            "⏱️ 30分分段 (默认)",
-            "⏱️ 15分分段",
-            "⏱️ 60分分段",
-            "⏱️ 全天开盘累计",
-            "⏱️ 60秒微观滑动"
+            "⏱️ 30分",
+            "⏱️ 15分",
+            "⏱️ 60分",
+            "⏱️ 开盘",
+            "⏱️ 60秒"
         ])
         saved_seg_idx = load_config_node("ats_velocity_segment_mode", 0)
         try:
@@ -506,11 +506,11 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
                 self.combo_segment_mode.setCurrentIndex(saved_seg_idx)
         except Exception:
             pass
-        self.combo_segment_mode.setToolTip("选择涨速计算的交易时段分段周期 (自动持久化记忆)")
+        self.combo_segment_mode.setToolTip("选择涨速计算的交易时段分段周期: 30分/15分/60分(60F)/开盘累计/60秒 (自动持久化记忆)")
         self.combo_segment_mode.setStyleSheet("""
-            QComboBox { background-color: #162536; color: #66ccff; border: 1px solid #336699; border-radius: 3px; padding: 2px 6px; font-weight: bold; font-size: 9pt; }
-            QComboBox::drop-down { border: none; }
-            QComboBox QAbstractItemView { background-color: #101a26; color: #66ccff; selection-background-color: #243b59; }
+            QComboBox { background-color: #162536; color: #66ccff; border: 1px solid #336699; border-radius: 3px; padding: 1px 2px; font-weight: bold; font-size: 8.5pt; min-width: 54px; max-width: 66px; }
+            QComboBox::drop-down { border: none; width: 12px; }
+            QComboBox QAbstractItemView { background-color: #101a26; color: #66ccff; selection-background-color: #243b59; min-width: 90px; }
         """)
         self.combo_segment_mode.currentIndexChanged.connect(self._on_segment_mode_changed)
         header_lay.addWidget(self.combo_segment_mode)
@@ -648,7 +648,7 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
         self._force_refresh_data()
 
     def _update_speed_column_header(self):
-        """根据当前分段模式动态更新第 6 列表头名称"""
+        """根据当前分段模式动态更新第 6 列表头名称 (支持 60F 简写)"""
         mode = self._get_current_segment_mode_key()
         label_map = {
             "30m": "30分涨速%",
@@ -661,6 +661,14 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
         item = self.table.horizontalHeaderItem(6)
         if item:
             item.setText(col_label)
+            tip_map = {
+                "30m": "30分交易分段净涨速% (30F)",
+                "15m": "15分交易分段净涨速% (15F)",
+                "60m": "60分交易分段净涨速% (60F)",
+                "day_open": "全天开盘累计净涨速%",
+                "60s": "60秒滑动微观涨速%"
+            }
+            item.setToolTip(tip_map.get(mode, "交易时段分段涨速%"))
 
     def _get_parent_mw(self):
         # 1. 优先从 _py_parent 或 parent() 链条查找

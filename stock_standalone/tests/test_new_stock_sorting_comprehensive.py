@@ -270,3 +270,78 @@ def test_today_event_highlight_and_priority(qapp, monkeypatch):
     assert res_desc_codes[3] == "920059"  # 普通项 (梯队2)
 
 
+def test_velocity_and_vwap_sorting(qapp):
+    """测试新增加的第9列(涨速%)与第10列(VWAP)在 NewStockPanel 上的高精度数值排序与空值沉底"""
+    mock_df = pd.DataFrame([
+        {
+            "code": "688808", "name": "联讯仪器", "status": "已上市",
+            "listing_date": "2026-04-24", "apply_date": "2026-04-14",
+            "issue_price": 81.88, "price": 2209.00, "pct": 0.46,
+            "velocity_pct": -0.8, "velocity_tag": "⚠️ 快速下挫", "segment_label": "⏱️ 60分分段",
+            "vwap": 2200.00, "vwap_dev_pct": 0.41,
+            "turnover": 0.48, "float_mv_yi": 426.25, "total_mv_yi": 2267.91,
+            "amount_yi": 2.03, "has_strategy": False
+        },
+        {
+            "code": "688635", "name": "长进光子", "status": "已上市",
+            "listing_date": "2026-05-27", "apply_date": "2026-05-18",
+            "issue_price": 40.98, "price": 300.00, "pct": -5.27,
+            "velocity_pct": -2.5, "velocity_tag": "❄️ 极速跳水", "segment_label": "⏱️ 60分分段",
+            "vwap": 310.00, "vwap_dev_pct": -3.23,
+            "turnover": 5.05, "float_mv_yi": 53.27, "total_mv_yi": 281.01,
+            "amount_yi": 2.69, "has_strategy": True
+        },
+        {
+            "code": "688835", "name": "高凯技术", "status": "次新",
+            "listing_date": "2026-08-25", "apply_date": "2026-08-14",
+            "issue_price": 61.36, "price": 272.86, "pct": 16.11,
+            "velocity_pct": 3.8, "velocity_tag": "🚀 极速拉升", "segment_label": "⏱️ 60分分段",
+            "vwap": 260.00, "vwap_dev_pct": 4.95,
+            "turnover": 22.89, "float_mv_yi": 51.25, "total_mv_yi": 272.73,
+            "amount_yi": 11.27, "has_strategy": False
+        },
+        {
+            "code": "920059", "name": "双英集团", "status": "次新",
+            "listing_date": "2026-08-19", "apply_date": "2026-08-10",
+            "issue_price": 11.13, "price": 14.76, "pct": -1.93,
+            "velocity_pct": 0.5, "velocity_tag": "⚡ 稳步攀升", "segment_label": "⏱️ 60分分段",
+            "vwap": 14.60, "vwap_dev_pct": 1.10,
+            "turnover": 5.07, "float_mv_yi": 4.77, "total_mv_yi": 22.45,
+            "amount_yi": 0.24, "has_strategy": False
+        }
+    ])
+
+    panel = NewStockPanel()
+    panel.df_data = mock_df
+    panel._render_table()
+
+    # 1. 测试第 9 列 (涨速%) 降序排序: 高凯技术 (+3.8%) > 双英集团 (+0.5%) > 联讯仪器 (-0.8%) > 长进光子 (-2.5%)
+    panel.sort_col = 9
+    panel.sort_order = Qt.SortOrder.DescendingOrder
+    panel.table.sortItems(9, Qt.SortOrder.DescendingOrder)
+
+    codes_vel_desc = [panel.table.item(r, 0).text() for r in range(4)]
+    assert codes_vel_desc == ["688835", "920059", "688808", "688635"]
+    assert "+3.8%" in panel.table.item(0, 9).text()
+    assert "-2.5%" in panel.table.item(3, 9).text()
+
+    # 2. 测试第 9 列 (涨速%) 升序排序: 长进光子 (-2.5%) < 联讯仪器 (-0.8%) < 双英集团 (+0.5%) < 高凯技术 (+3.8%)
+    panel.sort_col = 9
+    panel.sort_order = Qt.SortOrder.AscendingOrder
+    panel.table.sortItems(9, Qt.SortOrder.AscendingOrder)
+
+    codes_vel_asc = [panel.table.item(r, 0).text() for r in range(4)]
+    assert codes_vel_asc == ["688635", "688808", "920059", "688835"]
+
+    # 3. 测试第 10 列 (VWAP 偏离) 降序排序: 高凯技术 (+4.95%) > 双英集团 (+1.10%) > 联讯仪器 (+0.41%) > 长进光子 (-3.23%)
+    panel.sort_col = 10
+    panel.sort_order = Qt.SortOrder.DescendingOrder
+    panel.table.sortItems(10, Qt.SortOrder.DescendingOrder)
+
+    codes_vwap_desc = [panel.table.item(r, 0).text() for r in range(4)]
+    assert codes_vwap_desc == ["688835", "920059", "688808", "688635"]
+    assert "+5.0%" in panel.table.item(0, 10).text() or "+4.9%" in panel.table.item(0, 10).text()
+    assert "-3.2%" in panel.table.item(3, 10).text()
+
+
+

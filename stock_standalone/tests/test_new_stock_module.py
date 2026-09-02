@@ -620,6 +620,86 @@ class TestNewStockModule(unittest.TestCase):
         success = engine.hydrate_from_intraday_df("920288", multi_stock_df, open_price=13.64)
         self.assertFalse(success, "多股票截面表应被安全拦截并返回 False，不注入分时 K 线")
 
+    def test_13_new_stock_vwap_and_segmented_velocity(self):
+        """测试新股次新股同源 TDX VWAP 及分段涨速计算与 UI 下拉框模式联动"""
+        from unittest.mock import patch
+        from ats.new_stock_fetcher import NewStockFetcher
+        from ats.ui.new_stock_panel import NewStockPanel, get_new_stock_table_headers
+        from ats.tdx_realtime_fetcher import TDXRealtimeFetcher
+
+        fetcher = NewStockFetcher()
+        mock_df = pd.DataFrame([
+            {"code": "920288", "name": "N华大", "status": "首日(N)", "issue_price": 12.57, "listing_date": "2026-09-02", "apply_date": "2026-08-20"},
+            {"code": "301688", "name": "格林生物", "status": "首日(N)", "issue_price": 26.33, "listing_date": "2026-09-02", "apply_date": "2026-08-20"},
+            {"code": "920206", "name": "彩客科技", "status": "次新", "issue_price": 30.28, "listing_date": "2026-06-08", "apply_date": "2026-05-27"},
+        ])
+
+        quotes_mock = [
+            {
+                "code": "920288", "price": 25.18, "last_close": 12.57, "open": 25.18,
+                "high": 26.00, "low": 24.50, "vol": 5000, "amount": 12500000.0,
+                "bid1": 25.18, "ask1": 25.20
+            },
+            {
+                "code": "301688", "price": 55.90, "last_close": 26.33, "open": 50.00,
+                "high": 56.00, "low": 48.00, "vol": 18000, "amount": 95000000.0,
+                "bid1": 55.90, "ask1": 56.00
+            },
+            {
+                "code": "920206", "price": 48.11, "last_close": 44.67, "open": 45.00,
+                "high": 49.00, "low": 44.50, "vol": 4000, "amount": 18600000.0,
+                "bid1": 48.10, "ask1": 48.15
+            }
+        ]
+
+        tdx_inst = TDXRealtimeFetcher.get_instance()
+        with patch.object(tdx_inst, "get_security_quotes_safe", return_value=quotes_mock), \
+             patch.object(tdx_inst, "get_batch_finance_shares", return_value={"920288": (5000000.0, 20000000.0), "301688": (14000000.0, 74000000.0), "920206": (13000000.0, 34000000.0)}):
+            
+            # 1. 验证 60分分段模式下的计算
+            res_df = fetcher.enrich_with_tdx_realtime(mock_df, force=True, segment_mode="60m")
+            self.assertIn("velocity_pct", res_df.columns)
+            self.assertIn("vwap", res_df.columns)
+            self.assertIn("vwap_dev_pct", res_df.columns)
+
+            row_920288 = res_df[res_df["code"] == "920288"].iloc[0]
+            self.assertTrue(row_920288["vwap"] > 0)
+            self.assertAlmostEqual(row_920288["vwap"], 25.0, delta=0.5)
+            # VWAP 偏离度应为 (25.18 - 25.0) / 25.0 * 100% 约 +0.72%
+            self.assertTrue(row_920288["vwap_dev_pct"] >= 0.0)
+
+            # 2. 验证 UI 表头与分段模式下拉框
+            panel = NewStockPanel()
+            headers = get_new_stock_table_headers()
+            self.assertIn("涨速%", headers)
+            self.assertIn("VWAP", headers)
+            self.assertEqual(headers[9], "涨速%")
+            self.assertEqual(headers[10], "VWAP")
+
+            # 3. 验证分段下拉框切换联动表头
+            self.assertTrue(hasattr(panel, "combo_segment_mode"))
+            # 切换为 60分分段 (index 2)
+            panel.combo_segment_mode.setCurrentIndex(2)
+            self.assertEqual(panel._get_current_segment_mode_key(), "60m")
+            self.assertEqual(panel.table.horizontalHeaderItem(9).text(), "60分涨速%")
+
+            # 切换为 15分分段 (index 1)
+            panel.combo_segment_mode.setCurrentIndex(1)
+            self.assertEqual(panel._get_current_segment_mode_key(), "15m")
+            self.assertEqual(panel.table.horizontalHeaderItem(9).text(), "15分涨速%")
+
+            # 4. 验证表格数据渲染与单元格 ToolTip
+            panel.df_data = res_df
+            panel._render_table()
+
+            # 检查第 9 列（涨速%）和第 10 列（VWAP）单元格
+            item_vel = panel.table.item(0, 9)
+            item_vwap = panel.table.item(0, 10)
+            self.assertIsNotNone(item_vel)
+            self.assertIsNotNone(item_vwap)
+            self.assertTrue("分段" in item_vel.toolTip())
+            self.assertTrue("VWAP" in item_vwap.toolTip())
+
 
 if __name__ == "__main__":
     unittest.main()
