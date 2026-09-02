@@ -1,3 +1,23 @@
+## 2026-09-02 15:30
+- [x] **实现人气综合排行榜彻底删除无意义 4 列 (`ladder`, `bid_p`, `pioneer`, `decision`) & 全面落地 ATS 同源 VWAP 偏离度与 60F/分段涨速引擎及分段选择器 (`stock_standalone/popularity_resonance_service.py`, `stock_standalone/popularity_resonance_gui.py`, `stock_standalone/tests/test_popularity_resonance_features.py`)**：
+    - [x] **精简数据列与重构 10 列基础数据结构 (SSOT)**：
+        1. **彻底清除无意义 4 列**：从 `_BASE_FIXED_COLS`、`_BASE_HEADERS`、列宽配置、Treeview 视图及所有渲染链路中彻底移除【天梯梯队】(`ladder`)、【买压/封单】(`bid_p`)、【逆势偏离】(`pioneer`)、【挂单决策】(`decision`)；
+        2. **新增 2 大核心量化决策列**：
+           - **`velocity` (分段涨速%)**：默认宽 68 / min 55，支持拉伸；
+           - **`vwap_dev` (VWAP偏离%)**：默认宽 68 / min 55，支持拉伸；
+        3. 5 大主表格（东财、同花顺、龙虎大师、淘股吧、共振合表）全量同步应用；
+    - [x] **接入 ATS 底层 TDX 分段涨速与 7 级实战状态机**：
+        1. **同源直连 TDX 底层分段计算**：在 `calculate_resonance_scores`、`update_all_tables` 与 `refresh_realtime_fields` 中直连 `TDXRealtimeFetcher.calculate_segmented_velocity`，支持 `60m (60F)`、`30m`、`15m`、`day_open` 与 `60s` 全量分段模式；
+        2. **7 级实战状态机**：根据 $\ge +2.0\%$、$\ge +0.8\%$、$\ge +0.3\%$、$\le -1.5\%$ 等展示 7 级实战图标（`🚀+X.X%`、`🔥+X.X%`、`⚡+X.X%`、`0.0%`、`🔻-X.X%`、`⚠️-X.X%`、`❄️-X.X%`）；
+    - [x] **工业级日内 VWAP 加权均价与偏离度模型**：
+        1. 精确提取成交量加权均价 $\text{VWAP} = \frac{\text{Amount}}{\text{Vol} \times 100.0}$，受 $[0.7 \times P, 1.3 \times P]$ 物理约束保护；
+        2. 精确计算现价对 VWAP 均价的偏离百分比 $(P - \text{VWAP}) / \text{VWAP} \times 100\%$；
+    - [x] **UI 交互增强、顶部分段选择器与配置原子持久化**：
+        1. **分段模式选择器 (`combo_segment_mode`)**：顶部控制栏新增分段下拉框，支持 60分(60F)/30分/15分/开盘/60秒平滑切换，自动持久化至 `popularity_resonance_config.json`（`velocity_segment_mode`）；
+        2. **表头自适应联动**：切换时动态将表头更新为 `60分涨速%` / `30分涨速%` 等并即时触发重算刷新；
+        3. **排序算法与交互加固**：加固 `sort_column` / `try_convert` 正则提取纯净浮点数，彻底支持带 Emoji 标签的升降序排序；
+    - [x] **自动化测试与回归验证 100% 全部 PASSED**：全量 27 项跨模块自动化回归与专项测试全部通过。
+
 ## 2026-09-02 14:22
 - [x] **实现天梯 KPI 过滤激活时时间片自动记忆与临时切【全天全时段】& 全部取消后自动恢复先前时段选择 (`stock_standalone/ats/ui/daily_limit_up_dialog.py`, `stock_standalone/tests/test_daily_limit_up_dialog.py`)**：
     - [x] **时间片生命周期自动记忆与平滑恢复状态机 (`self._saved_time_slice_before_kpi`)**：
