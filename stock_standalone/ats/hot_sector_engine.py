@@ -25,6 +25,31 @@ from JohnsonUtil import commonTips as cct
 logger = logging.getLogger("HotSectorEngine")
 
 
+def is_valid_sector_name(sec: Any) -> bool:
+    """
+    严密判定板块名称是否为有效且明确的实体板块（过滤掉 '--', '0', '0.0', 'nan', '未知', 纯数字等）
+    """
+    if sec is None:
+        return False
+    s = str(sec).strip()
+    if not s:
+        return False
+    # 过滤占位符与无意义值
+    if s.lower() in ('--', '-', '---', '0', '0.0', '00', '000', '000000', 'none', 'nan', 'null', '未知', '其它', '其他', '未分类', 'default'):
+        return False
+    # 过滤纯数字（例如股票代码或数字ID被误作为板块名）
+    if s.isdigit():
+        return False
+    # 去除特殊前缀符号后如果为空或依然是无效词
+    import re
+    cleaned = re.sub(r'^[^\w\u4e00-\u9fa5]+', '', s).strip()
+    if not cleaned or cleaned.lower() in ('--', '-', '---', '0', '0.0', '00', '000', '000000', 'none', 'nan', 'null', '未知', '其它', '其他', '未分类'):
+        return False
+    if cleaned.isdigit():
+        return False
+    return True
+
+
 class HotSectorEngine:
     """
     强势板块龙头突击跟单引擎 (单例)
@@ -87,8 +112,12 @@ class HotSectorEngine:
         top_secs = []
         for item in sorted_by_strength:
             raw_name = str(item[0]).strip()
+            if not is_valid_sector_name(raw_name):
+                continue
             clean_sec = re.sub(r'^[^\w\u4e00-\u9fa5]+', '', raw_name).strip()
             sec_name = clean_sec if clean_sec else raw_name
+            if not is_valid_sector_name(sec_name):
+                continue
             # 🛡️ 自动过滤虚拟系统聚合池 (如 "实时报警" / "🔔 实时报警")，保留真实题材概念赛道 (竞价挖掘)
             if any(ex in sec_name for ex in ("实时报警", "系统报警", "异动汇总")):
                 continue
@@ -98,11 +127,13 @@ class HotSectorEngine:
                 break
 
         if sector_to_codes_map:
-            self.sector_to_codes = sector_to_codes_map
+            self.sector_to_codes = {k: v for k, v in sector_to_codes_map.items() if is_valid_sector_name(k)}
             self.code_to_sector = {}
-            for sec, codes in sector_to_codes_map.items():
+            for sec, codes in self.sector_to_codes.items():
                 clean_sec_key = re.sub(r'^[^\w\u4e00-\u9fa5]+', '', str(sec)).strip()
                 target_sec_name = clean_sec_key or str(sec).strip()
+                if not is_valid_sector_name(target_sec_name):
+                    continue
                 for c in codes:
                     c_clean = str(c).strip().zfill(6)
                     self.code_to_sector[c_clean] = target_sec_name
@@ -125,8 +156,11 @@ class HotSectorEngine:
         multi_period_cache = {}
         name_map = {}
 
+        # 0. 过滤非明确板块
+        valid_top_sectors = [s for s in top_sector_names if is_valid_sector_name(s)]
+
         # 1. 提取 Top 强势板块的成分股
-        for sec in top_sector_names:
+        for sec in valid_top_sectors:
             codes_in_sec = self.sector_to_codes.get(sec, [])
             for c in codes_in_sec:
                 c_clean = str(c).strip().zfill(6)
@@ -137,7 +171,7 @@ class HotSectorEngine:
         # 2. 如果 current_df 包含 category，进行板块成分股动态补全
         if current_df is not None and not current_df.empty and 'category' in current_df.columns:
             try:
-                for sec in top_sector_names:
+                for sec in valid_top_sectors:
                     # 匹配 category 列包含板块名的股票 (禁用 regex 避免括号告警)
                     mask = current_df['category'].astype(str).str.contains(sec, case=False, na=False, regex=False)
                     df_matched = current_df[mask]

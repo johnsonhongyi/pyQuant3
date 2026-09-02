@@ -511,6 +511,117 @@ def test_startup_profiler_toggle_persistence():
         profiler.set_enabled(orig_state)
 
 
+def test_invalid_sector_name_filtering():
+    """
+    【🎯 验证】严密测试 is_valid_sector_name 及热力图与强势板块引擎对 '--' / '0' 等非明确板块的 100% 拦截过滤
+    """
+    from ats.hot_sector_engine import is_valid_sector_name, HotSectorEngine
+    from ats.ui.heatmap_widget import SectorHeatmapWidget
+
+    # 1. is_valid_sector_name 核心断言
+    invalid_cases = [
+        None, "", "   ", "-", "--", "---", "0", "0.0", "00", "000", "000000",
+        "nan", "NaN", "null", "None", "未知", "其它", "其他", "未分类", "default",
+        "600519", "000001", "123456", "  --  ", " 0 "
+    ]
+    for inv in invalid_cases:
+        assert not is_valid_sector_name(inv), f"非明确板块 '{inv}' 应被判定为无效"
+
+    valid_cases = [
+        "兵装重组概念", "培育钻石", "成飞概念", "共封装光学(CPO)", "半导体",
+        "人工智能", "光伏设备", "国防军工", "华为概念", "低空经济", "6G概念"
+    ]
+    for val in valid_cases:
+        assert is_valid_sector_name(val), f"明确板块 '{val}' 应被判定为有效"
+
+    # 2. SectorHeatmapWidget 消费包含 '--' 和 '0' 的测试数据
+    hw = SectorHeatmapWidget()
+    mock_sector_data = {
+        "--": {"score": 11.8, "avg_pct": 1.66, "leader": "000001", "count": 7},
+        "0": {"score": 9.5, "avg_pct": 1.65, "leader": "000002", "count": 117},
+        "兵装重组概念": {"score": 54.2, "avg_pct": 5.44, "leader": "688151", "count": 7},
+        "培育钻石": {"score": 24.8, "avg_pct": 2.85, "leader": "300719", "count": 17},
+        "成飞概念": {"score": 9.9, "avg_pct": 1.83, "leader": "002190", "count": 43},
+    }
+    hw.update_from_tk_sector_data(mock_sector_data)
+
+    rendered_names = [s[0] for s in hw.sectors]
+    assert "--" not in rendered_names, "热力图 sectors 中不应包含 '--'"
+    assert "0" not in rendered_names, "热力图 sectors 中不应包含 '0'"
+    assert "兵装重组概念" in rendered_names
+    assert "培育钻石" in rendered_names
+    assert "成飞概念" in rendered_names
+
+    top_secs = hw.get_top_sectors(top_n=3)
+    assert "--" not in top_secs
+    assert "0" not in top_secs
+    assert len(top_secs) == 3
+    assert top_secs[0] == "兵装重组概念"
+
+    hw.close()
+
+
+def test_hot_sector_leaderboard_single_select_and_filter():
+    """
+    【🎯 验证】验证 HotSectorLeaderboardDialog 点击任意板块快速定位单选、再次点击恢复全选、
+    全部板块按钮重置、以及对 '--' / '0' 板块的完全过滤
+    """
+    from ats.ui.hot_sector_leaderboard import HotSectorLeaderboardDialog
+
+    dialog = HotSectorLeaderboardDialog()
+    
+    # 模拟设置 Top 3 强势板块
+    dialog.current_top_sectors = ["兵装重组概念", "培育钻石", "成飞概念"]
+    dialog.active_sectors = set(dialog.current_top_sectors)
+    dialog._update_sector_button_styles()
+
+    # 1. 默认状态：全部板块均被选中
+    assert dialog.active_sectors == {"兵装重组概念", "培育钻石", "成飞概念"}
+    
+    # 构造模拟行情数据（包含 3 个正常板块以及 1 个非明确板块 '--'）
+    mock_results = [
+        {"code": "688151", "name": "华强科技", "sector": "兵装重组概念", "buy_tag": "PULLBACK", "buy_type": "反身低吸", "pct": 3.77, "price": 17.07, "vwap_dev_pct": -0.5, "alpha_score": 85.0},
+        {"code": "300719", "name": "安达维尔", "sector": "培育钻石", "buy_tag": "LOW_VOL", "buy_type": "地量起爆", "pct": 1.05, "price": 12.57, "vwap_dev_pct": -0.2, "alpha_score": 75.0},
+        {"code": "002190", "name": "成飞集成", "sector": "成飞概念", "buy_tag": "LOW_VOL", "buy_type": "地量起爆", "pct": 3.16, "price": 27.11, "vwap_dev_pct": 0.1, "alpha_score": 80.0},
+        {"code": "000001", "name": "平安银行", "sector": "--", "buy_tag": "LEADER", "buy_type": "领涨龙头", "pct": 2.0, "price": 10.0, "vwap_dev_pct": 0.0, "alpha_score": 60.0},
+    ]
+    dialog.cached_results = mock_results
+
+    # 2. 渲染全量数据时，'--' 板块的股票被自动过滤掉
+    dialog._render_table_data(mock_results)
+    assert dialog.table.rowCount() == 3, f"预期 3 只标的（排除 '--'），实际为 {dialog.table.rowCount()}"
+
+    # 3. 用户点击 No.1 板块 (兵装重组概念)：只显示兵装重组概念，实现快速定位
+    dialog._select_single_sector(0)
+    assert dialog.active_sectors == {"兵装重组概念"}, f"点击 No.1 应单选兵装重组概念，实际为 {dialog.active_sectors}"
+    assert dialog.table.rowCount() == 1
+    assert dialog.table.item(0, 0).text() == "688151"
+
+    # 4. 用户点击 No.2 板块 (培育钻石)：单选切换为只显示培育钻石
+    dialog._select_single_sector(1)
+    assert dialog.active_sectors == {"培育钻石"}, f"点击 No.2 应单选培育钻石，实际为 {dialog.active_sectors}"
+    assert dialog.table.rowCount() == 1
+    assert dialog.table.item(0, 0).text() == "300719"
+
+    # 5. 用户再次点击 No.2 板块 (培育钻石)：平滑恢复全选
+    dialog._select_single_sector(1)
+    assert dialog.active_sectors == {"兵装重组概念", "培育钻石", "成飞概念"}
+    assert dialog.table.rowCount() == 3
+
+    # 6. 用户单选 No.3 板块 (成飞概念) 后，点击【🔥 全部板块】按钮：恢复全选
+    dialog._select_single_sector(2)
+    assert dialog.active_sectors == {"成飞概念"}
+    assert dialog.table.rowCount() == 1
+    assert dialog.table.item(0, 0).text() == "002190"
+
+    dialog._on_all_sectors_clicked()
+    assert dialog.active_sectors == {"兵装重组概念", "培育钻石", "成飞概念"}
+    assert dialog.table.rowCount() == 3
+
+    dialog.close()
+
+
+
 
 
 

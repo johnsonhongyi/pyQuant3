@@ -193,6 +193,29 @@ SECTOR_BLACKLIST = {
     '基金新增', '预亏预减'
 }
 
+def is_valid_sector_name(sec: Any) -> bool:
+    """
+    严密判定板块名称是否为有效且明确的实体板块（过滤掉 '--', '0', '0.0', 'nan', '未知', 纯数字等）
+    """
+    if sec is None:
+        return False
+    s = str(sec).strip()
+    if not s:
+        return False
+    # 过滤占位符与无意义值
+    if s.lower() in ('--', '-', '---', '0', '0.0', '00', '000', '000000', 'none', 'nan', 'null', '未知', '其它', '其他', '未分类', 'default'):
+        return False
+    # 过滤纯数字（例如股票代码或数字ID被误作为板块名）
+    if s.isdigit():
+        return False
+    # 去除特殊前缀符号后如果为空或依然是无效词
+    cleaned = re.sub(r'^[^\w\u4e00-\u9fa5]+', '', s).strip()
+    if not cleaned or cleaned.lower() in ('--', '-', '---', '0', '0.0', '00', '000', '000000', 'none', 'nan', 'null', '未知', '其它', '其他', '未分类'):
+        return False
+    if cleaned.isdigit():
+        return False
+    return True
+
 class TickSeries:
     """
     单只个股的分钟 K 线滚动队列，外加基础统计缓存。
@@ -412,8 +435,8 @@ class TickSeries:
         if self._splitted_cats is not None:
             return self._splitted_cats
         parts = _RE_CAT_SPLIT.split(str(self.category))
-        # [唯一性保护] 对单只个股的分类字符串执行去重，防止 "Sector1; Sector1" 导致映射冗余
-        self._splitted_cats = sorted(list({p.strip() for p in parts if p.strip() and p.strip() != 'nan'}))
+        # [唯一性保护] 对单只个股的分类字符串执行去重与有效性校验，过滤 '--', '0' 等非明确板块
+        self._splitted_cats = sorted(list({p.strip() for p in parts if p.strip() and is_valid_sector_name(p.strip())}))
         return self._splitted_cats
 
     def push_kline(self, kline: dict):
@@ -3219,7 +3242,7 @@ class BiddingMomentumDetector:
         from collections import defaultdict
         code_sector_map = defaultdict(list)
         for code, snap in self._global_snap_cache.items():
-            cats = [c.strip() for c in _RE_CAT_SPLIT.split(str(snap.get('category', ''))) if c.strip()]
+            cats = [c.strip() for c in _RE_CAT_SPLIT.split(str(snap.get('category', ''))) if c.strip() and is_valid_sector_name(c.strip())]
             for cat in cats:
                 code_sector_map[cat].append(snap)
 
@@ -4722,8 +4745,8 @@ class BiddingMomentumDetector:
             cat = str(getattr(row, 'category', ''))
             if not cat or cat == 'nan':
                 continue
-            # [🚀 切分去重] 确保单行内重复的分类不产生多次 add 动作
-            for p in {c.strip() for c in _RE_CAT_SPLIT.split(cat) if c.strip()}:
+            # [🚀 切分去重与有效性过滤] 确保单行内重复或非明确分类不产生映射
+            for p in {c.strip() for c in _RE_CAT_SPLIT.split(cat) if c.strip() and is_valid_sector_name(c.strip())}:
                 new_map[p].add(code)
         
         # [ROOT-FIX] 稳健更新策略：判定是全量市场数据还是局部更新

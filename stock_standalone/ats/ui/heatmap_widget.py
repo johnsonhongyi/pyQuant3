@@ -15,6 +15,7 @@ from typing import Dict, Any, List, Optional
 import pandas as pd
 from sys_utils import get_app_root
 from JohnsonUtil import commonTips as cct
+from ats.hot_sector_engine import is_valid_sector_name
 
 class SectorHeatmapWidget(QWidget):
     sector_selected = pyqtSignal(str) # sector name
@@ -135,8 +136,12 @@ class SectorHeatmapWidget(QWidget):
         for item in sorted_by_metric:
             if item:
                 raw_name = str(item[0]).strip()
+                if not is_valid_sector_name(raw_name):
+                    continue
                 clean_sec = re.sub(r'^[^\w\u4e00-\u9fa5]+', '', raw_name).strip()
                 sec_name = clean_sec if clean_sec else raw_name
+                if not is_valid_sector_name(sec_name):
+                    continue
                 # 🛡️ 自动过滤虚拟系统聚合池 (如 "实时报警" / "🔔 实时报警")，保留真实题材概念赛道 (竞价挖掘)
                 if any(ex in sec_name for ex in ("实时报警", "系统报警", "异动汇总")):
                     continue
@@ -186,6 +191,9 @@ class SectorHeatmapWidget(QWidget):
         self.sector_to_codes = {}
         for sec_name, info in sector_data.items():
             clean_sec = str(sec_name).strip()
+            # 🛡️ 严格过滤 '--', '0', 'nan', '未知' 等非明确板块
+            if not is_valid_sector_name(clean_sec):
+                continue
             score = float(info.get('score', 0.0) or 0.0)
             avg_pct = info.get('avg_pct_diff')
             if avg_pct is None or (avg_pct == 0.0 and info.get('avg_pct') is not None):
@@ -374,7 +382,7 @@ class SectorHeatmapWidget(QWidget):
                     temp_map = {}
                     for k, v in cats.to_dict().items():
                         v_str = str(v).split(';')[0].strip()
-                        if v_str:
+                        if is_valid_sector_name(v_str):
                             k_str = str(k).strip()
                             temp_map[k_str] = v_str
                             k_clean = "".join(c for c in k_str if c.isdigit()).zfill(6) if any(c.isdigit() for c in k_str) else k_str
@@ -398,6 +406,8 @@ class SectorHeatmapWidget(QWidget):
                             data = json.loads(json_str)
                             sector_data = data.get('sector_data', {})
                             for sec_name, info in sector_data.items():
+                                if not is_valid_sector_name(sec_name):
+                                    continue
                                 lcode = str(info.get('leader', '')).strip()
                                 if lcode:
                                     self._bidding_stock_to_sector[lcode] = sec_name
@@ -416,7 +426,7 @@ class SectorHeatmapWidget(QWidget):
             
             # Combine real-time categories and snapshot fallbacks
             for k, v in self._bidding_stock_to_sector.items():
-                if k not in stock_to_sector:
+                if is_valid_sector_name(v) and k not in stock_to_sector:
                     stock_to_sector[k] = v
                     
             # Perform aggregation
@@ -438,7 +448,7 @@ class SectorHeatmapWidget(QWidget):
                 code_str = str(code).strip()
                 code_clean = "".join(c for c in code_str if c.isdigit()).zfill(6) if any(c.isdigit() for c in code_str) else code_str
                 sec = stock_to_sector.get(code_str) or stock_to_sector.get(code_clean)
-                if not sec:
+                if not sec or not is_valid_sector_name(sec):
                     continue
                     
                 if sec not in self.sector_to_codes:
@@ -478,6 +488,8 @@ class SectorHeatmapWidget(QWidget):
                     
             sectors_list = []
             for sec, count in sector_counts.items():
+                if not is_valid_sector_name(sec):
+                    continue
                 avg_score = sector_scores[sec] / count
                 # Incorporate active count momentum into sector intensity scoring to prioritize highly resonant hot sectors
                 intensity_score = avg_score * (1.0 + 0.15 * count)
@@ -555,7 +567,7 @@ class SectorHeatmapWidget(QWidget):
                 if old_w is not None:
                     old_w.deleteLater()
 
-        display_items = self.sectors[:60]
+        display_items = [it for it in self.sectors if is_valid_sector_name(it[0])][:60]
         rows = max(1, (len(display_items) + cols - 1) // cols)
         needed_h = rows * (68 + 6) + 16
         self.grid_container.setMinimumHeight(needed_h)
@@ -563,6 +575,8 @@ class SectorHeatmapWidget(QWidget):
         import re
         for idx, item in enumerate(display_items):
             name, score, pct, count = item[:4]
+            if not is_valid_sector_name(name):
+                continue
             row = idx // cols
             col = idx % cols
 
@@ -646,6 +660,9 @@ class SectorHeatmapWidget(QWidget):
         fav_mgr = GlobalFavoriteManager()
         fav_sectors = fav_mgr.get_favorite_sectors()
         
+        # 🛡️ 严格清洗非明确板块
+        self.sectors = [s for s in self.sectors if is_valid_sector_name(s[0])]
+
         def get_sort_key(x):
             sec_name = x[0]
             clean_sec = re.sub(r'^[^\w\u4e00-\u9fa5]+', '', str(sec_name)).strip()
