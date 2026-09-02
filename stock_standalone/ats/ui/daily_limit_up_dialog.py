@@ -240,6 +240,10 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         self.current_top_leader_code: str = ""
         self.current_top_leader_name: str = ""
 
+        # 顶部 KPI 卡片交互点选过滤状态集合 ("ZT", "LADDER", "BROKEN") 与时间片记忆恢复
+        self.active_kpi_filters: Set[str] = set()
+        self._saved_time_slice_before_kpi: Optional[str] = None
+
         # 键盘上下键与单元格平滑防抖联动
         self._pending_linkage_row: int = -1
         self._last_emitted_code: str = ""
@@ -436,21 +440,33 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         main_layout.setContentsMargins(10, 10, 10, 10)
         main_layout.setSpacing(6)
 
-        # ── 1. 顶部 KPI 卡片摘要栏 (情绪与防猎状态) ──
+        # ── 1. 顶部 KPI 卡片摘要栏 (情绪与防猎状态，支持点击快速分拣) ──
         kpi_layout = QHBoxLayout()
         kpi_layout.setSpacing(8)
 
-        self.lbl_kpi_zt = QLabel("🔴 涨停: 0 家")
-        self.lbl_kpi_zt.setStyleSheet("background-color: #241414; color: #ff4444; border: 1px solid #552222; border-radius: 4px; padding: 4px 8px; font-weight: bold;")
-        kpi_layout.addWidget(self.lbl_kpi_zt)
+        self.btn_kpi_zt = QPushButton("🔴 涨停: 0 家")
+        self.btn_kpi_zt.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_kpi_zt.setToolTip("点击快速过滤：仅看涨停标的 (再次点击取消，支持多选组合)")
+        self.btn_kpi_zt.setStyleSheet("background-color: #241414; color: #ff4444; border: 1px solid #552222; border-radius: 4px; padding: 4px 8px; font-weight: bold;")
+        self.btn_kpi_zt.clicked.connect(lambda: self._toggle_kpi_filter("ZT"))
+        kpi_layout.addWidget(self.btn_kpi_zt)
+        self.lbl_kpi_zt = self.btn_kpi_zt  # 兼容属性引用
 
-        self.lbl_kpi_ladder = QLabel("👑 连板: 0 家")
-        self.lbl_kpi_ladder.setStyleSheet("background-color: #242014; color: #ffd700; border: 1px solid #554422; border-radius: 4px; padding: 4px 8px; font-weight: bold;")
-        kpi_layout.addWidget(self.lbl_kpi_ladder)
+        self.btn_kpi_ladder = QPushButton("👑 连板: 0 家")
+        self.btn_kpi_ladder.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_kpi_ladder.setToolTip("点击快速过滤：仅看连板(>=2板)梯队标的 (再次点击取消，支持多选组合)")
+        self.btn_kpi_ladder.setStyleSheet("background-color: #242014; color: #ffd700; border: 1px solid #554422; border-radius: 4px; padding: 4px 8px; font-weight: bold;")
+        self.btn_kpi_ladder.clicked.connect(lambda: self._toggle_kpi_filter("LADDER"))
+        kpi_layout.addWidget(self.btn_kpi_ladder)
+        self.lbl_kpi_ladder = self.btn_kpi_ladder  # 兼容属性引用
 
-        self.lbl_kpi_broken = QLabel("💥 炸板: 0 家")
-        self.lbl_kpi_broken.setStyleSheet("background-color: #241a14; color: #ff9900; border: 1px solid #553322; border-radius: 4px; padding: 4px 8px; font-weight: bold;")
-        kpi_layout.addWidget(self.lbl_kpi_broken)
+        self.btn_kpi_broken = QPushButton("💥 炸板: 0 家")
+        self.btn_kpi_broken.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_kpi_broken.setToolTip("点击快速过滤：仅看今日炸板未回封标的 (再次点击取消，支持多选组合)")
+        self.btn_kpi_broken.setStyleSheet("background-color: #241a14; color: #ff9900; border: 1px solid #553322; border-radius: 4px; padding: 4px 8px; font-weight: bold;")
+        self.btn_kpi_broken.clicked.connect(lambda: self._toggle_kpi_filter("BROKEN"))
+        kpi_layout.addWidget(self.btn_kpi_broken)
+        self.lbl_kpi_broken = self.btn_kpi_broken  # 兼容属性引用
 
         self.lbl_kpi_seal = QLabel("💰 封单比: 0.00%")
         self.lbl_kpi_seal.setStyleSheet("background-color: #14241e; color: #00ff88; border: 1px solid #225533; border-radius: 4px; padding: 4px 8px; font-weight: bold;")
@@ -1613,19 +1629,47 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
             time_slice = raw_slice
 
         tier_filter = self.combo_tier_filter.currentText() if hasattr(self, "combo_tier_filter") else "全部梯队"
-        kw = self.search_edit.text().strip().lower() if hasattr(self, "search_edit") else ""
+        edit_widget = getattr(self, "search_edit", getattr(self, "edit_search", None))
+        kw = edit_widget.text().strip().lower() if edit_widget else ""
+        fav_only = self.btn_fav_filter.isChecked() if hasattr(self, "btn_fav_filter") else False
+        fav_set = self.fav_manager.get_favorite_stocks() if (fav_only and hasattr(self, 'fav_manager') and self.fav_manager) else set()
 
         filtered = []
         for r in self.current_records:
+            code = str(r.get("code", "")).zfill(6)
+
+            # 0. 自选股快速过滤
+            if fav_only and code not in fav_set:
+                continue
+
             # 1. 关键词搜索
             if kw:
-                c = str(r.get("code", "")).lower()
+                c = code.lower()
                 n = str(r.get("name", "")).lower()
                 cat = str(r.get("category", "")).lower()
                 if kw not in c and kw not in n and kw not in cat:
                     continue
 
-            # 2. 梯队与开盘形态过滤
+            # 2. 🎯 KPI 卡片交互点选过滤 (支持 涨停 ZT、连板 LADDER、炸板 BROKEN 单选与多选组合)
+            if self.active_kpi_filters:
+                kpi_matched = False
+                tier_tag = str(r.get("tier_tag", ""))
+                is_broken = bool(r.get("is_broken", False)) or ("炸板" in tier_tag) or ("冲板未封" in tier_tag) or ("未回封" in tier_tag)
+                is_zt = (bool(r.get("is_limit_up", False)) or _safe_float(r.get("pct", 0.0)) >= 9.5) and not is_broken
+                consecutive = _safe_int(r.get("consecutive_boards", r.get("max_consecutive", 1)))
+                is_ladder = (consecutive >= 2) or ("连板" in tier_tag) or ("空间" in tier_tag) or ("加速" in tier_tag)
+
+                if "ZT" in self.active_kpi_filters and (is_zt or ("首板" in tier_tag and not is_broken) or (is_ladder and is_zt)):
+                    kpi_matched = True
+                if "LADDER" in self.active_kpi_filters and is_ladder:
+                    kpi_matched = True
+                if "BROKEN" in self.active_kpi_filters and is_broken:
+                    kpi_matched = True
+
+                if not kpi_matched:
+                    continue
+
+            # 3. 梯队与开盘形态过滤
             if tier_filter != "全部梯队":
                 tag = str(r.get("tier_tag", ""))
                 p_tag = str(r.get("pattern_tag", ""))
@@ -1651,8 +1695,8 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
                 if not matched:
                     continue
 
-            # 3. ⏱️ 盘中时间片生命周期过滤 (全天全时段时跳过过滤)
-            if "全天全时段" in time_slice:
+            # 3. ⏱️ 盘中时间片生命周期过滤 (全天全时段或激活 KPI 过滤时跳过过滤，确保 KPI 标的 100% 完整展示)
+            if "全天全时段" in time_slice or self.active_kpi_filters:
                 pass
             elif "黄金定龙" in time_slice:
                 # 09:30~10:00 黄金定龙期标的
@@ -1697,7 +1741,14 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
 
         self._populate_table_rows(filtered)
         top_focus_cnt = min(5, len(filtered))
-        self.lbl_status.setText(f"数据已过滤: 视图【{self.current_mode}】时间片【{time_slice}】精选 Top {top_focus_cnt}/{len(filtered)} 核心标的 (更新: {time.strftime('%H:%M:%S')})")
+        kpi_tag_desc = ""
+        if self.active_kpi_filters:
+            kpi_names = []
+            if "ZT" in self.active_kpi_filters: kpi_names.append("涨停")
+            if "LADDER" in self.active_kpi_filters: kpi_names.append("连板")
+            if "BROKEN" in self.active_kpi_filters: kpi_names.append("炸板")
+            kpi_tag_desc = f"🎯 KPI卡片【{'+'.join(kpi_names)}】 "
+        self.lbl_status.setText(f"{kpi_tag_desc}数据已过滤: 视图【{self.current_mode}】时间片【{time_slice}】精选 Top {top_focus_cnt}/{len(filtered)} 核心标的 (更新: {time.strftime('%H:%M:%S')})")
 
         # 🔔 自动触发时间片重点标的与大盘退潮雪崩语音弹窗通知 (精选 3-5 个)
         self._check_and_notify_slice_highlights(filtered, time_slice)
@@ -1850,6 +1901,139 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
             self._notify_slice_cd[c] = now_ts
             notifier.notify_special_signal(code=c, name=n, reason=reason, score=score, parent=self)
 
+    def _toggle_kpi_filter(self, filter_key: str):
+        """
+        【🎯 KPI 卡片交互过滤】：
+        点击卡片快速过滤对应重点信息（涨停、连板、炸板），支持多选组合，再次点击取消。
+        自动记忆与恢复【自动实盘跟随】等时间片状态：
+        - 激活 KPI 卡片时：自动记忆当前时间片选择（如【⚡ 自动实盘跟随】），并平滑切换为【⏱️ 全天全时段】，确保全量展示所有涨停/连板/炸板标的；
+        - 全部取消 KPI 过滤时：自动恢复之前记忆的时间片状态（如恢复为【⚡ 自动实盘跟随】）。
+        """
+        was_empty = (len(self.active_kpi_filters) == 0)
+
+        if filter_key in self.active_kpi_filters:
+            self.active_kpi_filters.remove(filter_key)
+        else:
+            self.active_kpi_filters.add(filter_key)
+
+        now_has_filter = (len(self.active_kpi_filters) > 0)
+
+        # 1. 首次激活 KPI 过滤：记忆当前时间片选择，并平滑切换为【全天全时段】
+        if was_empty and now_has_filter:
+            if hasattr(self, 'combo_time_slice'):
+                curr_slice = self.combo_time_slice.currentText()
+                self._saved_time_slice_before_kpi = curr_slice
+                if "全天全时段" not in curr_slice:
+                    for idx in range(self.combo_time_slice.count()):
+                        if "全天全时段" in self.combo_time_slice.itemText(idx):
+                            self.combo_time_slice.blockSignals(True)
+                            self.combo_time_slice.setCurrentIndex(idx)
+                            self.combo_time_slice.blockSignals(False)
+                            break
+
+        # 2. 全部取消 KPI 过滤：自动平滑恢复先前记忆的时间片状态
+        elif not now_has_filter and getattr(self, '_saved_time_slice_before_kpi', None):
+            if hasattr(self, 'combo_time_slice'):
+                saved_text = self._saved_time_slice_before_kpi
+                for idx in range(self.combo_time_slice.count()):
+                    if self.combo_time_slice.itemText(idx) == saved_text:
+                        self.combo_time_slice.blockSignals(True)
+                        self.combo_time_slice.setCurrentIndex(idx)
+                        self.combo_time_slice.blockSignals(False)
+                        break
+            self._saved_time_slice_before_kpi = None
+
+        self._update_kpi_styles()
+        self._apply_filter()
+
+    def _update_kpi_styles(self):
+        """根据当前选中的 KPI 过滤状态动态更新卡片的高亮边框与视觉风格"""
+        # 1. 涨停卡片
+        if "ZT" in self.active_kpi_filters:
+            self.btn_kpi_zt.setStyleSheet("""
+                QPushButton {
+                    background-color: #551414;
+                    color: #ffffff;
+                    border: 2px solid #ff3344;
+                    border-radius: 4px;
+                    padding: 3px 7px;
+                    font-weight: bold;
+                }
+                QPushButton:hover { background-color: #661818; }
+            """)
+        else:
+            self.btn_kpi_zt.setStyleSheet("""
+                QPushButton {
+                    background-color: #241414;
+                    color: #ff4444;
+                    border: 1px solid #552222;
+                    border-radius: 4px;
+                    padding: 4px 8px;
+                    font-weight: bold;
+                }
+                QPushButton:hover { background-color: #331818; }
+            """)
+
+        # 2. 连板卡片
+        if "LADDER" in self.active_kpi_filters:
+            self.btn_kpi_ladder.setStyleSheet("""
+                QPushButton {
+                    background-color: #554414;
+                    color: #ffffff;
+                    border: 2px solid #ffd700;
+                    border-radius: 4px;
+                    padding: 3px 7px;
+                    font-weight: bold;
+                }
+                QPushButton:hover { background-color: #665518; }
+            """)
+        else:
+            self.btn_kpi_ladder.setStyleSheet("""
+                QPushButton {
+                    background-color: #242014;
+                    color: #ffd700;
+                    border: 1px solid #554422;
+                    border-radius: 4px;
+                    padding: 4px 8px;
+                    font-weight: bold;
+                }
+                QPushButton:hover { background-color: #332b18; }
+            """)
+
+        # 3. 炸板卡片
+        if "BROKEN" in self.active_kpi_filters:
+            self.btn_kpi_broken.setStyleSheet("""
+                QPushButton {
+                    background-color: #552a14;
+                    color: #ffffff;
+                    border: 2px solid #ff9900;
+                    border-radius: 4px;
+                    padding: 3px 7px;
+                    font-weight: bold;
+                }
+                QPushButton:hover { background-color: #663318; }
+            """)
+        else:
+            brk_cnt = getattr(self, "_last_broken_count", 0)
+            rate = getattr(self, "_last_seal_rate", 100.0)
+            if rate < 50.0 and brk_cnt >= 10:
+                text_col = "#ff3344"
+                border_col = "#662222"
+            else:
+                text_col = "#ff9900"
+                border_col = "#553322"
+            self.btn_kpi_broken.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: #241a14;
+                    color: {text_col};
+                    border: 1px solid {border_col};
+                    border-radius: 4px;
+                    padding: 4px 8px;
+                    font-weight: bold;
+                }}
+                QPushButton:hover {{ background-color: #332218; }}
+            """)
+
     def _update_kpi_display(self, s: Dict[str, Any]):
         self._last_market_summary = s
         zt_cnt = s.get("zt_count", 0)
@@ -1862,6 +2046,8 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         leader = s.get("top_leader", "--")
         self.current_top_leader_code = s.get("top_leader_code", "")
         self.current_top_leader_name = s.get("top_leader_name", "")
+        self._last_broken_count = brk_cnt
+        self._last_seal_rate = rate
 
         # 市场情绪与防猎状态
         s_phase = s.get("sentiment_phase", "⚖️ 均衡博弈期")
@@ -1871,21 +2057,20 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         down_cnt = s.get("down_cnt", 0)
 
         if up_cnt > 0 or down_cnt > 0:
-            self.lbl_kpi_zt.setText(f"🔴 涨停: <b>{zt_cnt}</b> 家 (<b>{up_cnt}</b>涨/<b>{down_cnt}</b>跌)")
+            self.btn_kpi_zt.setText(f"🔴 涨停: {zt_cnt} 家 ({up_cnt}涨/{down_cnt}跌)")
         else:
-            self.lbl_kpi_zt.setText(f"🔴 涨停: <b>{zt_cnt}</b> 家")
+            self.btn_kpi_zt.setText(f"🔴 涨停: {zt_cnt} 家")
 
-        self.lbl_kpi_ladder.setText(f"👑 连板: <b>{multi_b}</b> 家 (最高 <b>{max_b}</b> 板)")
+        self.btn_kpi_ladder.setText(f"👑 连板: {multi_b} 家 (最高 {max_b} 板)")
         
         # 炸板率恶化时的防猎高亮警示
         if rate < 50.0 and brk_cnt >= 10:
-            self.lbl_kpi_broken.setStyleSheet("color: #ff3344; font-size: 10pt; font-weight: bold;")
-            self.lbl_kpi_broken.setText(f"🚨 炸板: <b>{brk_cnt}</b> 家 (封板率 <b>{rate:.1f}%</b> 退潮高危!)")
+            self.btn_kpi_broken.setText(f"🚨 炸板: {brk_cnt} 家 (封板率 {rate:.1f}% 退潮高危!)")
         else:
-            self.lbl_kpi_broken.setStyleSheet("color: #ff9900; font-size: 10pt;")
-            self.lbl_kpi_broken.setText(f"💥 炸板: <b>{brk_cnt}</b> 家 (封板率 <b>{rate:.1f}%</b>)")
+            self.btn_kpi_broken.setText(f"💥 炸板: {brk_cnt} 家 (封板率 {rate:.1f}%)")
 
         self.lbl_kpi_seal.setText(f"💰 平均封流比: <b>{avg_seal:.2f}%</b> | 封单总额: <b>{tot_amt:.2f}</b> 亿")
+        self._update_kpi_styles()
         
         btn_text = f"🏆 空间龙头: {leader}"
         if self.current_top_leader_code:
