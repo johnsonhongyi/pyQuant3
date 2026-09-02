@@ -671,10 +671,8 @@ class PRServiceGUI:
         "name": 72,
         "val": 52,
         "price": 56,
-        "ladder": 95,
-        "bid_p": 78,
-        "pioneer": 82,
-        "decision": 96,
+        "velocity": 68,
+        "vwap_dev": 68,
         "dff2": 46,
         "dff3": 46,
         "rank": 42,
@@ -695,10 +693,8 @@ class PRServiceGUI:
         "name": 62,
         "val": 44,
         "price": 48,
-        "ladder": 75,
-        "bid_p": 65,
-        "pioneer": 68,
-        "decision": 75,
+        "velocity": 55,
+        "vwap_dev": 55,
         "dff2": 38,
         "dff3": 38,
         "rank": 35,
@@ -1072,7 +1068,16 @@ class PRServiceGUI:
         for t, title in ((self.tree_em, "东"), (self.tree_ths, "花"), (self.tree_lh, "龙"), (self.tree_tgb, "淘"), (self.tree_res, "合")):
             self._reconfigure_tree_columns(t, title, _extra_cols)
 
-        BASE_UPDATE_COUNT = 12  # idx/code/name/val/price/ladder/bid_p/pioneer/decision/dff2/dff3/rank
+        BASE_UPDATE_COUNT = 10  # idx/code/name/val/price/velocity/vwap_dev/dff2/dff3/rank
+
+        tdx_fetcher = None
+        try:
+            from ats.tdx_realtime_fetcher import TDXRealtimeFetcher
+            tdx_fetcher = TDXRealtimeFetcher.get_instance()
+        except Exception:
+            pass
+        now_ts = time.time()
+        seg_mode = getattr(self, 'segment_mode', '60m')
 
         # 创建用于统计的字典
         all_stocks_for_stats = {}
@@ -1105,6 +1110,13 @@ class PRServiceGUI:
                         pct = float(row.get('percent', row.get('ratio', pct)))
                         price = float(row.get('trade', row.get('close', row.get('price', 0.0))))
                         price_str = f"{price:.2f}"
+                        open_p = float(row.get('open', price))
+                        high_p = float(row.get('high', price))
+                        low_p = float(row.get('low', price))
+                        last_close = float(row.get('last_close', row.get('prev_close', price)))
+                        vol = float(row.get('vol', row.get('volume', 0.0)))
+                        amount = float(row.get('amount', 0.0))
+
                         dff2 = float(row.get('dff2', row.get('DFF2', 0.0)))
                         dff3 = float(row.get('dff3', row.get('DFF3', 0.0)))
                         rank = int(row.get('Rank', row.get('rank', 0)))
@@ -1122,27 +1134,57 @@ class PRServiceGUI:
                         while len(new_vals) < BASE_UPDATE_COUNT:
                             new_vals.append("")
 
-                        # 计算/继承 4 大决策列
-                        ladder_role = str(new_vals[5]) if len(new_vals) > 5 and new_vals[5] not in ("", "--") else (
-                            "🔥 强势首板" if pct >= 9.8 else ("🚀 冲锋冲板" if pct >= 5.0 else "⏱️ 潜伏震荡")
-                        )
-                        bid_p_str = str(new_vals[6]) if len(new_vals) > 6 and new_vals[6] not in ("", "--") else "买压 80%"
-                        pioneer_str = str(new_vals[7]) if len(new_vals) > 7 and new_vals[7] not in ("", "--") else (
-                            "💎 逆势破局" if pct >= 3.0 else "⏱️ 同步博弈"
-                        )
-                        decision_str = str(new_vals[8]) if len(new_vals) > 8 and new_vals[8] not in ("", "--") else (
-                            f"👑 挂单 {price_str}元" if pct >= 7.0 else f"🔥 均线低吸 {price_str}元"
-                        )
+                        # ⚡ 实时计算分段涨速与 7 级实战状态机
+                        if tdx_fetcher:
+                            seg_res = tdx_fetcher.calculate_segmented_velocity(
+                                code=code_str,
+                                price=price,
+                                open_price=open_p,
+                                last_close=last_close,
+                                vol=vol,
+                                amount=amount,
+                                now_ts=now_ts,
+                                segment_mode=seg_mode
+                            )
+                            v_pct = seg_res.get("velocity_pct", 0.0)
+                        else:
+                            v_pct = 0.0
+
+                        if v_pct >= 2.0:
+                            velocity_str = f"🚀+{v_pct:.1f}%"
+                        elif v_pct >= 0.8:
+                            velocity_str = f"🔥+{v_pct:.1f}%"
+                        elif v_pct >= 0.3:
+                            velocity_str = f"⚡+{v_pct:.1f}%"
+                        elif v_pct <= -1.5:
+                            velocity_str = f"❄️{v_pct:.1f}%"
+                        elif v_pct <= -0.8:
+                            velocity_str = f"⚠️{v_pct:.1f}%"
+                        elif v_pct <= -0.3:
+                            velocity_str = f"🔻{v_pct:.1f}%"
+                        else:
+                            velocity_str = "0.0%"
+
+                        # ⚡ 日内 VWAP 与 VWAP 偏离度
+                        if vol > 0 and amount > 0:
+                            calc_vwap = amount / (vol * 100.0)
+                            if price > 0 and (price * 0.7 <= calc_vwap <= price * 1.3):
+                                vwap = round(calc_vwap, 2)
+                            else:
+                                vwap = round((open_p + high_p + low_p + price) / 4.0, 2) if open_p > 0 else price
+                        else:
+                            vwap = price
+
+                        vwap_dev_pct = round((price - vwap) / vwap * 100.0, 2) if vwap > 0 else 0.0
+                        vwap_dev_str = f"{vwap_dev_pct:+.2f}%" if vwap > 0 else "--"
 
                         new_vals[3] = f"{pct:.2f}"
                         new_vals[4] = price_str
-                        new_vals[5] = ladder_role
-                        new_vals[6] = bid_p_str
-                        new_vals[7] = pioneer_str
-                        new_vals[8] = decision_str
-                        new_vals[9] = f"{dff2:.1f}"
-                        new_vals[10] = f"{dff3:.1f}"
-                        new_vals[11] = str(rank)
+                        new_vals[5] = velocity_str
+                        new_vals[6] = vwap_dev_str
+                        new_vals[7] = f"{dff2:.1f}"
+                        new_vals[8] = f"{dff3:.1f}"
+                        new_vals[9] = str(rank)
 
                         # 更新自定义追加列
                         for ei, ec in enumerate(_extra_cols):
@@ -1203,6 +1245,10 @@ class PRServiceGUI:
         if all_stocks_for_stats:
             self.update_concept_ranking(all_stocks_for_stats)
 
+    def update_all_tables_from_ipc(self, df=None):
+        """兼容别名：通过 IPC DataFrame 刷新所有表格的实时分段涨速与 VWAP 偏离度等字段"""
+        return self.refresh_realtime_fields(df)
+
     def load_config_settings(self):
         cfg = {
             "blk_name": "RQG.blk",
@@ -1214,6 +1260,7 @@ class PRServiceGUI:
             "sort_col": None,
             "sort_descending": False,
             "auto_refresh": False,
+            "velocity_segment_mode": "60m",
             "sash_ratio": 0.5,
             "column_widths": dict(getattr(self, 'DEFAULT_COLUMN_WIDTHS', {}))
         }
@@ -1292,7 +1339,7 @@ class PRServiceGUI:
                 for col in tree.cget("columns"):
                     def_w = self.DEFAULT_COLUMN_WIDTHS.get(col, 48)
                     min_w = self.MIN_COLUMN_WIDTHS.get(col, 35)
-                    is_stretch = col in ("ladder", "bid_p", "pioneer", "decision")
+                    is_stretch = col in ("velocity", "vwap_dev")
                     try:
                         tree.column(col, width=def_w, minwidth=min_w, stretch=is_stretch)
                     except Exception:
@@ -1323,6 +1370,7 @@ class PRServiceGUI:
             if hasattr(self, "link_vis_var") and self.link_vis_var:
                 self.config["link_vis"] = self.link_vis_var.get()
             self.config["auto_refresh"] = bool(getattr(self, "is_running", False))
+            self.config["velocity_segment_mode"] = getattr(self, "segment_mode", "60m")
             
             # 保存窗口位置与大小（防极窄尺寸污染落盘）
             if hasattr(self, "root") and self.root:
@@ -1521,6 +1569,20 @@ class PRServiceGUI:
         # 右侧小按钮控制容器
         self.control_buttons_frame = tk.Frame(self.top_concept_frame)
         self.control_buttons_frame.pack(side="right", fill="y")
+
+        # ⏱️ 交易时段分段模式选择 (支持 60分/60F、30分、15分、开盘累计、60秒，自动持久化记忆)
+        self.combo_segment_mode = ttk.Combobox(
+            self.control_buttons_frame,
+            values=["⏱️ 60分(60F)", "⏱️ 30分(默认)", "⏱️ 15分", "⏱️ 开盘累计", "⏱️ 60秒"],
+            state="readonly",
+            width=11
+        )
+        saved_mode = self.config.get("velocity_segment_mode", "60m")
+        mode_idx_map = {"60m": 0, "30m": 1, "15m": 2, "day_open": 3, "60s": 4}
+        self.segment_mode = saved_mode if saved_mode in mode_idx_map else "60m"
+        self.combo_segment_mode.current(mode_idx_map.get(self.segment_mode, 0))
+        self.combo_segment_mode.pack(side="left", padx=2)
+        self.combo_segment_mode.bind("<<ComboboxSelected>>", self._on_segment_mode_changed)
 
         # 查询刷新按钮（移到顶部右侧）
         self.btn_refresh = tk.Button(
@@ -1739,18 +1801,59 @@ class PRServiceGUI:
         self.root.bind("<Alt-c>", self.on_quick_order)
         self.root.bind("<Alt-C>", self.on_quick_order)
 
-    # ── 固定基础列（包含天梯梯队、买压/封单、逆势偏离、挂单决策等核心实战决策列）──
-    _BASE_FIXED_COLS = ("idx", "code", "name", "val", "price", "ladder", "bid_p", "pioneer", "decision", "dff2", "dff3", "rank")
+    def _get_velocity_header_text(self) -> str:
+        """根据当前分段模式自适应生成表头文案 (支持 60F/30分/15分/开盘/60秒)"""
+        seg_mode = getattr(self, 'segment_mode', '60m')
+        if seg_mode == '60m':
+            return "60分涨速%"
+        elif seg_mode == '30m':
+            return "30分涨速%"
+        elif seg_mode == '15m':
+            return "15分涨速%"
+        elif seg_mode == 'day_open':
+            return "开盘涨速%"
+        elif seg_mode == '60s':
+            return "60秒涨速%"
+        return "涨速%"
+
+    def _on_segment_mode_changed(self, event=None):
+        """用户切换分段模式下拉框时，动态更新 5 大表格表头并立即重算重绘"""
+        inv_mode_map = {0: "60m", 1: "30m", 2: "15m", 3: "day_open", 4: "60s"}
+        idx = self.combo_segment_mode.current()
+        self.segment_mode = inv_mode_map.get(idx, "60m")
+        self.config["velocity_segment_mode"] = self.segment_mode
+        self.save_config_settings()
+        
+        # 动态刷新所有 5 大表格表头
+        _, _, extra_cols = self._get_all_cols()
+        for t, title in ((self.tree_em, "东"), (self.tree_ths, "花"), (self.tree_lh, "龙"), (self.tree_tgb, "淘"), (self.tree_res, "合")):
+            if t and t.winfo_exists():
+                self._reconfigure_tree_columns(t, title, extra_cols)
+                
+        # 立即根据最新分段模式重新计算并刷新表格数据
+        if hasattr(self, '_last_data_cache') and self._last_data_cache:
+            c = self._last_data_cache
+            self.update_all_tables(
+                c.get("em_data", {}),
+                c.get("ths_data", {}),
+                c.get("lh_data", {}),
+                c.get("tgb_data", {}),
+                c.get("resonance_results", []),
+                c.get("quotes", {})
+            )
+        elif hasattr(self, 'sync_manager') and self.sync_manager.get_current_df() is not None:
+            self.update_all_tables_from_ipc(self.sync_manager.get_current_df())
+
+    # ── 固定基础列（包含分段涨速%、VWAP偏离%等核心实战决策列）──
+    _BASE_FIXED_COLS = ("idx", "code", "name", "val", "price", "velocity", "vwap_dev", "dff2", "dff3", "rank")
     _BASE_HEADERS = {
         "idx":      "",            # 由 first_col_title 动态填充
         "code":     "代码",
         "name":     "名称",
         "val":      "涨",          # 花标签时改为"涨幅"
         "price":    "最新",
-        "ladder":   "天梯梯队",
-        "bid_p":    "买压/封单",
-        "pioneer":  "逆势偏离",
-        "decision": "挂单决策",
+        "velocity": "涨速%",       # 由 _get_velocity_header_text 动态填充 (如 60分涨速% / 30分涨速%)
+        "vwap_dev": "VWAP偏离%",
         "dff2":     "dff2",
         "dff3":     "dff3",
         "rank":     "Rank",
@@ -1781,15 +1884,14 @@ class PRServiceGUI:
         tree.configure(columns=all_cols, displaycolumns=all_cols)
         
         # 3. 重新设置固定表头和宽度
+        vel_header = self._get_velocity_header_text()
         tree.heading("idx",      text=first_col_title)
         tree.heading("code",     text="代码")
         tree.heading("name",     text="名称")
         tree.heading("val",      text="涨幅" if first_col_title == "花" else "涨")
         tree.heading("price",    text="最新")
-        tree.heading("ladder",   text="天梯梯队")
-        tree.heading("bid_p",    text="买压/封单")
-        tree.heading("pioneer",  text="逆势偏离")
-        tree.heading("decision", text="挂单决策")
+        tree.heading("velocity", text=vel_header)
+        tree.heading("vwap_dev", text="VWAP偏离%")
         tree.heading("dff2",     text="dff2")
         tree.heading("dff3",     text="dff3")
         tree.heading("rank",     text="Rank")
@@ -1801,7 +1903,7 @@ class PRServiceGUI:
             w = saved_widths.get(c, def_w)
             if w < min_w:
                 w = def_w
-            is_stretch = c in ("ladder", "bid_p", "pioneer", "decision")
+            is_stretch = c in ("velocity", "vwap_dev")
             tree.column(c, width=w, minwidth=min_w, anchor="center", stretch=is_stretch)
         
         # 4. 设置动态列的表头与宽度，并绑定点击排序
@@ -1829,15 +1931,14 @@ class PRServiceGUI:
             selectmode="browse"
         )
         # 基础列表头
+        vel_header = self._get_velocity_header_text()
         tree.heading("idx",      text=first_col_title)
         tree.heading("code",     text="代码")
         tree.heading("name",     text="名称")
         tree.heading("val",      text="涨幅" if first_col_title == "花" else "涨")
         tree.heading("price",    text="最新")
-        tree.heading("ladder",   text="天梯梯队")
-        tree.heading("bid_p",    text="买压/封单")
-        tree.heading("pioneer",  text="逆势偏离")
-        tree.heading("decision", text="挂单决策")
+        tree.heading("velocity", text=vel_header)
+        tree.heading("vwap_dev", text="VWAP偏离%")
         tree.heading("dff2",     text="dff2")
         tree.heading("dff3",     text="dff3")
         tree.heading("rank",     text="Rank")
@@ -1850,7 +1951,7 @@ class PRServiceGUI:
             w = saved_widths.get(col, def_w)
             if w < min_w:
                 w = def_w
-            is_stretch = col in ("ladder", "bid_p", "pioneer", "decision") or col in extra_cols
+            is_stretch = col in ("velocity", "vwap_dev") or col in extra_cols
             tree.column(col, width=w, minwidth=min_w, anchor="center", stretch=is_stretch)
 
         # 追加自定义列的表头
@@ -1903,12 +2004,19 @@ class PRServiceGUI:
             
         def try_convert(val):
             if val is None:
-                return (0, -9999.0)
-            val_str = str(val).strip().replace('%', '')
-            if not val_str or val_str == '--':
-                return (0, -9999.0)
+                return (0, -999999.0)
+            val_str = str(val).strip()
+            if not val_str or val_str in ('--', 'nan', 'None', 'null'):
+                return (0, -999999.0)
+            import re
+            m = re.search(r'[-+]?\d*\.?\d+', val_str.replace(',', ''))
+            if m:
+                try:
+                    return (0, float(m.group(0)))
+                except Exception:
+                    pass
             try:
-                return (0, float(val_str))
+                return (0, float(val_str.replace('%', '').replace(',', '')))
             except ValueError:
                 return (1, val_str.lower())
                 
@@ -1998,6 +2106,8 @@ class PRServiceGUI:
             base_headers = dict(self._BASE_HEADERS)
             base_headers["idx"] = first_title
             base_headers["val"] = "涨幅" if first_title == "花" else "涨"
+            base_headers["velocity"] = self._get_velocity_header_text()
+            base_headers["vwap_dev"] = "VWAP偏离%"
             # 补充自定义列（列名即显示文字）
             _, _, extra_cols = self._get_all_cols()
             for ec in extra_cols:
@@ -2149,28 +2259,24 @@ class PRServiceGUI:
                 cols = list(tree["columns"])
                 code_idx = cols.index("code") if "code" in cols else 1
                 name_idx = cols.index("name") if "name" in cols else 2
-                ladder_idx = cols.index("ladder") if "ladder" in cols else 5
-                bid_idx = cols.index("bid_p") if "bid_p" in cols else 6
-                pio_idx = cols.index("pioneer") if "pioneer" in cols else 7
-                dec_idx = cols.index("decision") if "decision" in cols else 8
+                pct_idx = cols.index("val") if "val" in cols else 3
+                price_idx = cols.index("price") if "price" in cols else 4
+                vel_idx = cols.index("velocity") if "velocity" in cols else 5
+                vwap_idx = cols.index("vwap_dev") if "vwap_dev" in cols else 6
 
                 if len(values) > code_idx:
                     code = str(values[code_idx]).strip().zfill(6)
                     name = str(values[name_idx]).strip().replace("★ ", "") if len(values) > name_idx else code
-                    ladder_str = str(values[ladder_idx]) if len(values) > ladder_idx else ""
-                    bid_str = str(values[bid_idx]) if len(values) > bid_idx else "买压 80%"
-                    pio_str = str(values[pio_idx]) if len(values) > pio_idx else ""
-                    dec_str = str(values[dec_idx]) if len(values) > dec_idx else ""
+                    pct_str = str(values[pct_idx]) if len(values) > pct_idx else "0.00"
+                    price_str = str(values[price_idx]) if len(values) > price_idx else "--"
+                    vel_str = str(values[vel_idx]) if len(values) > vel_idx else ""
+                    vwap_str = str(values[vwap_idx]) if len(values) > vwap_idx else ""
 
-                    info_parts = [f"【决策推演】{code} {name}"]
-                    if ladder_str and ladder_str not in ("--", ""):
-                        info_parts.append(ladder_str)
-                    if bid_str and bid_str not in ("--", ""):
-                        info_parts.append(bid_str)
-                    if pio_str and pio_str not in ("--", "", "⏱️ 同步博弈"):
-                        info_parts.append(pio_str)
-                    if dec_str and dec_str not in ("--", ""):
-                        info_parts.append(dec_str)
+                    info_parts = [f"【个股聚焦】{code} {name}", f"最新:{price_str}元({pct_str}%)"]
+                    if vel_str and vel_str not in ("--", ""):
+                        info_parts.append(f"涨速:{vel_str}")
+                    if vwap_str and vwap_str not in ("--", ""):
+                        info_parts.append(f"VWAP偏离:{vwap_str}")
                     info_parts.append("[按Alt+C一键挂单]")
 
                     status_msg = " | ".join(info_parts)
@@ -2243,29 +2349,17 @@ class PRServiceGUI:
         code_idx = cols.index("code") if "code" in cols else 1
         name_idx = cols.index("name") if "name" in cols else 2
         price_idx = cols.index("price") if "price" in cols else 4
-        ladder_idx = cols.index("ladder") if "ladder" in cols else 5
-        dec_idx = cols.index("decision") if "decision" in cols else 8
+        vel_idx = cols.index("velocity") if "velocity" in cols else 5
 
         code = str(values[code_idx]).strip().zfill(6)
         name = str(values[name_idx]).strip().replace("★ ", "") if len(values) > name_idx else code
         price_str = str(values[price_idx]) if len(values) > price_idx else "--"
-        ladder_str = str(values[ladder_idx]) if len(values) > ladder_idx else "人气真龙"
-        dec_str = str(values[dec_idx]) if len(values) > dec_idx else ""
+        vel_str = str(values[vel_idx]) if len(values) > vel_idx else ""
 
         try:
             target_p = float(price_str)
         except Exception:
             target_p = 0.0
-
-        # 如果当前现价无效，尝试从挂单决策文本中提取数字价格（如 '👑 挂单 15.74元'）
-        if target_p <= 0 and dec_str:
-            import re
-            m = re.search(r'(\d+\.?\d*)\s*元', dec_str)
-            if m:
-                try:
-                    target_p = float(m.group(1))
-                except Exception:
-                    pass
 
         try:
             from popularity_resonance_service import QuickOrderExecutor
@@ -2275,7 +2369,7 @@ class PRServiceGUI:
                 name=name,
                 target_price=target_p,
                 shares=1000,
-                strategy_tag=f"👑 人气共振·{ladder_str}"
+                strategy_tag=f"👑 人气共振·{name} ({vel_str})" if vel_str else f"👑 人气共振·{name}"
             )
             msg = res.get("msg", "一键挂单成功")
             if hasattr(self, 'lbl_status'):
@@ -2701,7 +2795,8 @@ class PRServiceGUI:
             t4.join()
             
             # 3. 计算人气共振得分
-            resonance_results = calculate_resonance_scores(em_data, ths_data, tgb_data, lh_data)
+            seg_mode = getattr(self, 'segment_mode', '60m')
+            resonance_results = calculate_resonance_scores(em_data, ths_data, tgb_data, lh_data, segment_mode=seg_mode)
             
             # 保存当前的共振股票代码
             limit = int(self.entry_limit.get() or "50")
@@ -2874,6 +2969,15 @@ class PRServiceGUI:
 
         _, _, _extra_cols = self._get_all_cols()
 
+        tdx_fetcher = None
+        try:
+            from ats.tdx_realtime_fetcher import TDXRealtimeFetcher
+            tdx_fetcher = TDXRealtimeFetcher.get_instance()
+        except Exception:
+            pass
+        now_ts = time.time()
+        seg_mode = getattr(self, 'segment_mode', '60m')
+
         def _read_extra_vals(row_obj) -> tuple:
             """从 df_cache 行中读取自定义列的值，找不到则返回 '--'"""
             if row_obj is None or not _extra_cols:
@@ -2993,7 +3097,7 @@ class PRServiceGUI:
                         "rank": int(row_obj.get('Rank', row_obj.get('rank', 0))) if row_obj is not None else 0,
                     }
 
-                # 尝试多级回退获取有效参考价格
+                # 尝试多级回退获取有效参考价格与量能
                 eff_price = 0.0
                 if price_str != "--":
                     try:
@@ -3008,22 +3112,73 @@ class PRServiceGUI:
                 if eff_price > 0.0 and price_str == "--":
                     price_str = f"{eff_price:.2f}"
 
-                # 提取/推导 4 大实战决策列
-                ladder_role = (
-                    "🔥 强势首板" if pct >= 9.8 else ("🚀 冲锋冲板" if pct >= 5.0 else "⏱️ 潜伏震荡")
-                )
-                bid_p_str = "买压 80%"
-                pioneer_str = "💎 逆势破局" if pct >= 3.0 else "⏱️ 同步博弈"
-                
-                if eff_price > 0.0:
-                    decision_str = f"👑 挂单 {eff_price:.2f}元" if pct >= 7.0 else f"🔥 均线低吸 {eff_price:.2f}元"
-                else:
-                    decision_str = "👑 09:25竞价定盘挂单" if pct >= 7.0 else "🔥 开盘回踩均线低吸"
+                open_p = eff_price
+                high_p = eff_price
+                low_p = eff_price
+                last_c = eff_price
+                vol = 0.0
+                amount = 0.0
+                if row_obj is not None:
+                    open_p = float(row_obj.get('open', eff_price))
+                    high_p = float(row_obj.get('high', eff_price))
+                    low_p = float(row_obj.get('low', eff_price))
+                    last_c = float(row_obj.get('last_close', row_obj.get('prev_close', eff_price)))
+                    vol = float(row_obj.get('vol', row_obj.get('volume', 0.0)))
+                    amount = float(row_obj.get('amount', 0.0))
+                elif quote:
+                    open_p = float(quote.get('open', eff_price))
+                    last_c = float(quote.get('yesterday_close', quote.get('last_close', eff_price)))
+                    amount = float(quote.get('amount', 0.0))
+                    vol = float(quote.get('vol', 0.0))
 
-                # 基础列 + 自定义追加列
+                # ⚡ 计算分段涨速与 7 级实战状态机
+                if tdx_fetcher:
+                    seg_res = tdx_fetcher.calculate_segmented_velocity(
+                        code=code_str,
+                        price=eff_price,
+                        open_price=open_p,
+                        last_close=last_c,
+                        vol=vol,
+                        amount=amount,
+                        now_ts=now_ts,
+                        segment_mode=seg_mode
+                    )
+                    v_pct = seg_res.get("velocity_pct", 0.0)
+                else:
+                    v_pct = 0.0
+
+                if v_pct >= 2.0:
+                    velocity_str = f"🚀+{v_pct:.1f}%"
+                elif v_pct >= 0.8:
+                    velocity_str = f"🔥+{v_pct:.1f}%"
+                elif v_pct >= 0.3:
+                    velocity_str = f"⚡+{v_pct:.1f}%"
+                elif v_pct <= -1.5:
+                    velocity_str = f"❄️{v_pct:.1f}%"
+                elif v_pct <= -0.8:
+                    velocity_str = f"⚠️{v_pct:.1f}%"
+                elif v_pct <= -0.3:
+                    velocity_str = f"🔻{v_pct:.1f}%"
+                else:
+                    velocity_str = "0.0%"
+
+                # ⚡ VWAP 与 VWAP 偏离度
+                if vol > 0 and amount > 0:
+                    calc_vwap = amount / (vol * 100.0)
+                    if eff_price > 0 and (eff_price * 0.7 <= calc_vwap <= eff_price * 1.3):
+                        vwap = round(calc_vwap, 2)
+                    else:
+                        vwap = round((open_p + high_p + low_p + eff_price) / 4.0, 2) if open_p > 0 else eff_price
+                else:
+                    vwap = eff_price
+
+                vwap_dev_pct = round((eff_price - vwap) / vwap * 100.0, 2) if vwap > 0 else 0.0
+                vwap_dev_str = f"{vwap_dev_pct:+.2f}%" if vwap > 0 else "--"
+
+                # 基础列 10 列 + 自定义追加列
                 extra_vals = _read_extra_vals(row_obj)
                 row_values = (display_rank, code, display_name, f"{pct:.2f}",
-                              price_str, ladder_role, bid_p_str, pioneer_str, decision_str,
+                              price_str, velocity_str, vwap_dev_str,
                               dff2_str, dff3_str, rank_str) + extra_vals
                 tree.insert("", "end", values=row_values, tags=tuple(tags))
                 display_rank += 1
@@ -3138,39 +3293,71 @@ class PRServiceGUI:
             if eff_price_res > 0.0 and price_str == "--":
                 price_str = f"{eff_price_res:.2f}"
 
-            # 提取共振分析已推演计算的 4 大决策字段
-            ladder_role = item.get("ladder_role", "")
-            if not ladder_role:
-                ladder_role = "🔥 强势首板" if pct >= 9.8 else ("🚀 冲锋冲板" if pct >= 5.0 else "⏱️ 潜伏震荡")
+            open_p = eff_price_res
+            high_p = eff_price_res
+            low_p = eff_price_res
+            last_c = eff_price_res
+            vol = float(item.get("vol", 0.0))
+            amount = float(item.get("amount", 0.0))
+            if row_obj_res is not None:
+                open_p = float(row_obj_res.get('open', eff_price_res))
+                high_p = float(row_obj_res.get('high', eff_price_res))
+                low_p = float(row_obj_res.get('low', eff_price_res))
+                last_c = float(row_obj_res.get('last_close', row_obj_res.get('prev_close', eff_price_res)))
+                vol = float(row_obj_res.get('vol', row_obj_res.get('volume', vol)))
+                amount = float(row_obj_res.get('amount', amount))
+            elif quote:
+                open_p = float(quote.get('open', eff_price_res))
+                last_c = float(quote.get('yesterday_close', quote.get('last_close', eff_price_res)))
 
-            bid_p = float(item.get("bid_pressure", 80.0))
-            seal_amt_wan = float(item.get("seal_amount_wan", 0.0))
-            bid_p_str = f"{bid_p:.0f}%|{seal_amt_wan/10000.0:.1f}亿" if seal_amt_wan >= 10000 else (
-                f"{bid_p:.0f}%|{seal_amt_wan:.0f}万" if seal_amt_wan > 0 else f"{bid_p:.0f}%"
-            )
+            # ⚡ 计算分段涨速与 7 级实战状态机
+            v_pct = float(item.get("velocity_pct", 0.0))
+            if tdx_fetcher:
+                seg_res = tdx_fetcher.calculate_segmented_velocity(
+                    code=code_str,
+                    price=eff_price_res,
+                    open_price=open_p,
+                    last_close=last_c,
+                    vol=vol,
+                    amount=amount,
+                    now_ts=now_ts,
+                    segment_mode=seg_mode
+                )
+                v_pct = seg_res.get("velocity_pct", v_pct)
 
-            pioneer_str = item.get("pioneer_tag", "")
-            if not pioneer_str:
-                pioneer_str = "💎 逆势冰点破局" if pct >= 3.0 else "⏱️ 同步博弈"
-
-            entry_act = item.get("entry_action", "")
-            sugg_p = float(item.get("suggested_price", 0.0))
-            if sugg_p <= 0.0 and eff_price_res > 0.0:
-                sugg_p = eff_price_res
-
-            if entry_act and sugg_p > 0:
-                decision_str = f"{entry_act} {sugg_p:.2f}元"
-            elif entry_act:
-                decision_str = entry_act
-            elif eff_price_res > 0:
-                decision_str = f"👑 挂单 {eff_price_res:.2f}元" if pct >= 7.0 else f"🔥 均线低吸 {eff_price_res:.2f}元"
+            if v_pct >= 2.0:
+                velocity_str = f"🚀+{v_pct:.1f}%"
+            elif v_pct >= 0.8:
+                velocity_str = f"🔥+{v_pct:.1f}%"
+            elif v_pct >= 0.3:
+                velocity_str = f"⚡+{v_pct:.1f}%"
+            elif v_pct <= -1.5:
+                velocity_str = f"❄️{v_pct:.1f}%"
+            elif v_pct <= -0.8:
+                velocity_str = f"⚠️{v_pct:.1f}%"
+            elif v_pct <= -0.3:
+                velocity_str = f"🔻{v_pct:.1f}%"
             else:
-                decision_str = "👑 09:25竞价定盘挂单" if pct >= 7.0 else "🔥 开盘回踩均线低吸"
+                velocity_str = "0.0%"
 
-            # 共振表同样追加 12 列基础列 + 自定义列
+            # ⚡ VWAP 与 VWAP 偏离度
+            vwap = float(item.get("vwap", 0.0))
+            if vwap <= 0.0 and vol > 0 and amount > 0:
+                calc_vwap = amount / (vol * 100.0)
+                if eff_price_res > 0 and (eff_price_res * 0.7 <= calc_vwap <= eff_price_res * 1.3):
+                    vwap = round(calc_vwap, 2)
+                else:
+                    vwap = round((open_p + high_p + low_p + eff_price_res) / 4.0, 2) if open_p > 0 else eff_price_res
+            if vwap <= 0.0:
+                vwap = eff_price_res
+
+            vwap_dev_pct = round((eff_price_res - vwap) / vwap * 100.0, 2) if vwap > 0 else float(item.get("vwap_dev_pct", 0.0))
+            vwap_dev_str = f"{vwap_dev_pct:+.2f}%" if vwap > 0 else "--"
+
+            # 共振表同样追加 10 列基础列 + 自定义列
             extra_vals_res = _read_extra_vals(row_obj_res)
             row_values_res = (rank, code, display_name, f"{pct:.2f}",
-                              price_str, ladder_role, bid_p_str, pioneer_str, decision_str,
+                              price_str, velocity_str, vwap_dev_str,
                               dff2_str, dff3_str, rank_str) + extra_vals_res
             self.tree_res.insert("", "end", values=row_values_res, tags=tuple(tags))
 

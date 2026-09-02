@@ -490,28 +490,34 @@ class LadderResonanceBridge:
             pass
         return {"em": {}, "ths": {}, "lh": {}, "tgb": {}, "resonance": []}
 
-    def enrich_with_ladder_and_tdx(self, stock_list: list[dict], index_pct: float = -0.5) -> list[dict]:
+    def enrich_with_ladder_and_tdx(self, stock_list: list[dict], index_pct: float = -0.5, segment_mode: str = "30m") -> list[dict]:
         """
         为全网人气股列表秒级注入：
-        1. ATS 连板天梯 (高度龙/连板加速/99分梯队)
-        2. TDX 盘口微观买盘压强 (bid_pressure) 与封流比 (seal_circ_ratio)
-        3. 逆势破局龙感知 (pioneer_tag) 与三大黄金挂单点推演 (entry_plan)
+        1. TDX 真实分段涨速 (velocity_pct, velocity_tag, segment_label)
+        2. 日内成交量加权均价 VWAP 与 VWAP 偏离度 (vwap_dev_pct)
+        3. 盘口量价深度与多维共振指标
         """
         if not stock_list:
             return []
 
         codes = [item["code"] for item in stock_list]
         feature_engine = DynamicFeatureEngine()
+        now_ts = time.time()
         
-        # 1. 尝试从 TDX 批量获取秒级深度盘口
+        # 1. 尝试从 TDX 批量获取秒级深度盘口与行情
         quotes_dict = {}
-        if self._tdx_fetcher:
-            try:
-                quotes_df = self._tdx_fetcher.get_security_quotes_df(codes)
-                if quotes_df is not None and not quotes_df.empty:
-                    quotes_dict = quotes_df.to_dict('index')
-            except Exception as e:
-                logger.debug(f"TDX 批量盘口拉取跳过: {e}")
+        tdx_fetcher = None
+        try:
+            from ats.tdx_realtime_fetcher import TDXRealtimeFetcher
+            tdx_fetcher = TDXRealtimeFetcher.get_instance()
+            quotes = tdx_fetcher.get_security_quotes_safe(codes)
+            if quotes:
+                for q in quotes:
+                    c_clean = str(q.get("code", "")).strip().zfill(6)
+                    if c_clean:
+                        quotes_dict[c_clean] = q
+        except Exception as e:
+            logger.debug(f"TDX 批量盘口拉取跳过: {e}")
 
         # 2. 读取 ATS 连板天梯记录
         ladder_records = {}
@@ -530,11 +536,49 @@ class LadderResonanceBridge:
             
             # 提取实时量价
             price = float(q_row.get("price", item.get("price", 0.0)))
+            open_p = float(q_row.get("open", price))
+            high_p = float(q_row.get("high", price))
+            low_p = float(q_row.get("low", price))
+            last_close = float(q_row.get("last_close", item.get("yesterday_close", price)))
             percent = float(q_row.get("percent", item.get("percent", 0.0)))
-            last_close = float(q_row.get("last_close", item.get("yesterday_close", 0.0)))
-            vwap = float(q_row.get("vwap", price))
+            vol = float(q_row.get("vol", 0.0))
+            amount = float(q_row.get("amount", 0.0))
 
-            # 提取/推算盘口微观五档深度
+            # ⚡ 交易时段分段涨速计算 (直连 TDXRealtimeFetcher)
+            if tdx_fetcher:
+                seg_res = tdx_fetcher.calculate_segmented_velocity(
+                    code=code,
+                    price=price,
+                    open_price=open_p,
+                    last_close=last_close,
+                    vol=vol,
+                    amount=amount,
+                    now_ts=now_ts,
+                    segment_mode=segment_mode
+                )
+                velocity_pct = seg_res.get("velocity_pct", 0.0)
+                velocity_tag = seg_res.get("velocity_tag", "⏱️ 窄幅横盘")
+                segment_label = seg_res.get("segment_label", "⏱️ 30分分段")
+                segment_base_price = seg_res.get("segment_base_price", price)
+            else:
+                velocity_pct = 0.0
+                velocity_tag = "⏱️ 窄幅横盘"
+                segment_label = "⏱️ 30分分段"
+                segment_base_price = price
+
+            # ⚡ 日内分时均价 VWAP (元) 与 VWAP 偏离度 (%)
+            if vol > 0 and amount > 0:
+                calc_vwap = amount / (vol * 100.0)
+                if price > 0 and (price * 0.7 <= calc_vwap <= price * 1.3):
+                    vwap = round(calc_vwap, 2)
+                else:
+                    vwap = round((open_p + high_p + low_p + price) / 4.0, 2) if open_p > 0 else price
+            else:
+                vwap = price if price > 0 else (open_p if open_p > 0 else last_close)
+
+            vwap_dev_pct = round((price - vwap) / vwap * 100.0, 2) if vwap > 0 else 0.0
+
+            # 提取盘口微观五档深度
             bid1_p = float(q_row.get("bid1", 0.0))
             bid1_v = float(q_row.get("bid_vol1", 0.0))
             ask1_v = float(q_row.get("ask_vol1", 0.0))
@@ -546,20 +590,9 @@ class LadderResonanceBridge:
             seal_amt_wan = round((bid1_p * bid1_v * 100) / 10000.0, 1) if bid1_p > 0 and bid1_v > 0 else 0.0
             seal_circ_ratio = float(ladder_item.get("seal_to_circ_ratio", 0.0))
             
-            # 天梯梯队与角色标签
             plates = int(ladder_item.get("continuous_plate_count", 0))
             ladder_role = ladder_item.get("role_name", "")
             ladder_score = int(ladder_item.get("score", 0))
-            if not ladder_role:
-                if percent >= 9.8:
-                    ladder_role = "🔥 强势首板"
-                    ladder_score = 90
-                elif percent >= 5.0:
-                    ladder_role = "🚀 冲锋冲板"
-                    ladder_score = 75
-                else:
-                    ladder_role = "⏱️ 潜伏震荡"
-                    ladder_score = 50
 
             # 逆势破局龙感知
             pioneer_info = feature_engine.evaluate_counter_market_divergence(
@@ -569,28 +602,20 @@ class LadderResonanceBridge:
                 seal_circ_ratio=seal_circ_ratio
             )
 
-            # 三大黄金挂单点推演
-            entry_plan = feature_engine.infer_actionable_entry_points(
-                code=code,
-                price=price,
-                stock_pct=percent,
-                last_close=last_close,
-                bidding_amt_wan=seal_amt_wan,
-                seal_circ_ratio=seal_circ_ratio,
-                bid_pressure=bid_pressure,
-                vwap=vwap
-            )
-
             # 假热度出货/诱多识别
             is_fake_trap = bool(bid_pressure < 35.0 and percent > 3.0 and ask1_v > total_bid_v * 2.0)
-            decision_status = "⚠️ 缩量诱多防砸" if is_fake_trap else (
-                "👑 顶级共振真龙" if (pioneer_info["is_counter_market"] or "空间" in ladder_role or ladder_score >= 95) else "🚀 梯队先锋跟进"
-            )
 
             # 注入全量多维指标
             item.update({
                 "price": price,
                 "percent": percent,
+                "last_close": last_close,
+                "velocity_pct": velocity_pct,
+                "velocity_tag": velocity_tag,
+                "segment_label": segment_label,
+                "segment_base_price": segment_base_price,
+                "vwap": vwap,
+                "vwap_dev_pct": vwap_dev_pct,
                 "bid_pressure": bid_pressure,
                 "seal_amount_wan": seal_amt_wan,
                 "seal_circ_ratio": seal_circ_ratio,
@@ -600,11 +625,6 @@ class LadderResonanceBridge:
                 "rs_divergence": pioneer_info["rs_divergence"],
                 "is_counter_market": pioneer_info["is_counter_market"],
                 "pioneer_tag": pioneer_info["pioneer_tag"],
-                "entry_action": entry_plan["action_type"],
-                "suggested_price": entry_plan["suggested_price"],
-                "entry_urgency": entry_plan["urgency"],
-                "entry_window_desc": entry_plan["window_desc"],
-                "decision_status": decision_status,
                 "is_fake_trap": is_fake_trap
             })
             enriched_list.append(item)
@@ -636,7 +656,8 @@ def calculate_resonance_scores(
     ths_data: dict[str, int],
     tgb_data: dict[str, int],
     lh_data: dict[str, int],
-    index_pct: float = -0.5
+    index_pct: float = -0.5,
+    segment_mode: str = "30m"
 ) -> list[dict]:
     r"""
     计算【全网热度 $\times$ TDX真金盘口 $\times$ ATS连板天梯】三位一体人气共振综合得分
@@ -698,9 +719,9 @@ def calculate_resonance_scores(
             "details": ", ".join(details)
         })
 
-    # 4. 通过 LadderResonanceBridge 注入 TDX 盘口与 ATS 天梯数据
+    # 4. 通过 LadderResonanceBridge 注入 TDX 盘口与分段涨速及 VWAP 数据
     bridge = LadderResonanceBridge.get_instance()
-    enriched_list = bridge.enrich_with_ladder_and_tdx(resonance_list, index_pct=index_pct)
+    enriched_list = bridge.enrich_with_ladder_and_tdx(resonance_list, index_pct=index_pct, segment_mode=segment_mode)
 
     # 5. 融合三位一体最终得分
     for item in enriched_list:

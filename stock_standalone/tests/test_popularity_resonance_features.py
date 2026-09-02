@@ -211,7 +211,7 @@ class TestPopularityResonanceFeatures(unittest.TestCase):
         self.assertIn("⏱️ 同步大盘博弈", res_sync["pioneer_tag"])
 
     def test_three_dimensional_resonance_scoring_and_enrichment(self):
-        """测试三位一体综合评分模型：全网热度 + TDX 盘口真金 + ATS 天梯空间龙 + 诱多惩罚"""
+        """测试三位一体综合评分模型：全网热度 + TDX 盘口真金 + 分段涨速 + VWAP偏离度 + 诱多惩罚"""
         from popularity_resonance_service import calculate_resonance_scores
 
         em_mock = {"002084": 1, "000017": 2, "000001": 50, "999999": 3}
@@ -219,17 +219,16 @@ class TestPopularityResonanceFeatures(unittest.TestCase):
         tgb_mock = {"002084": 1, "000017": 2}
         lh_mock = {"002084": 1}
 
-        # 运行三位一体共振评分 (在大盘弱势 index_pct = -0.6% 环境下)
-        results = calculate_resonance_scores(em_mock, ths_mock, tgb_mock, lh_mock, index_pct=-0.6)
+        # 运行三位一体共振评分 (在大盘弱势 index_pct = -0.6% 环境下，指定 60m 分段模式)
+        results = calculate_resonance_scores(em_mock, ths_mock, tgb_mock, lh_mock, index_pct=-0.6, segment_mode="60m")
         self.assertTrue(len(results) > 0)
 
-        # 验证 Top 标的属性完整性
+        # 验证 Top 标的属性完整性（包含 ATS 同源的分段涨速与日内 VWAP 偏离度）
         top1 = results[0]
-        self.assertIn("rs_divergence", top1)
-        self.assertIn("pioneer_tag", top1)
-        self.assertIn("entry_action", top1)
-        self.assertIn("suggested_price", top1)
-        self.assertIn("decision_status", top1)
+        self.assertIn("velocity_pct", top1)
+        self.assertIn("velocity_tag", top1)
+        self.assertIn("vwap", top1)
+        self.assertIn("vwap_dev_pct", top1)
         self.assertGreater(top1["score"], 300, "多平台共振+盘口加成得分应显著高于基础分")
 
     def test_quick_order_executor(self):
@@ -288,24 +287,39 @@ class TestPopularityResonanceFeatures(unittest.TestCase):
         self.assertIn("momentum_score", r0)
         self.assertIn("pattern_desc", r0)
 
-    def test_popularity_gui_12_columns_structure(self):
-        """测试人气共振 GUI 的 12 列基础决策列定义与默认列宽配置"""
+    def test_popularity_gui_10_columns_structure_and_segment_mode(self):
+        """测试人气共振 GUI 的 10 列基础决策列定义 (含 velocity 与 vwap_dev，彻底剔除无意义4列) 与分段切换"""
         from popularity_resonance_gui import PRServiceGUI
         cols = PRServiceGUI._BASE_FIXED_COLS
-        self.assertEqual(len(cols), 12)
-        self.assertIn("ladder", cols)
-        self.assertIn("bid_p", cols)
-        self.assertIn("pioneer", cols)
-        self.assertIn("decision", cols)
+        self.assertEqual(len(cols), 10)
+        self.assertIn("velocity", cols)
+        self.assertIn("vwap_dev", cols)
+        # 确保旧的 4 列已被彻底移除
+        self.assertNotIn("ladder", cols)
+        self.assertNotIn("bid_p", cols)
+        self.assertNotIn("pioneer", cols)
+        self.assertNotIn("decision", cols)
 
         # 验证默认列宽配置与居中方法
         widths = PRServiceGUI.DEFAULT_COLUMN_WIDTHS
-        self.assertIn("ladder", widths)
-        self.assertIn("bid_p", widths)
-        self.assertIn("pioneer", widths)
-        self.assertIn("decision", widths)
-        self.assertTrue(widths["ladder"] >= 70)
+        self.assertIn("velocity", widths)
+        self.assertIn("vwap_dev", widths)
+        self.assertTrue(widths["velocity"] >= 55)
+        self.assertTrue(widths["vwap_dev"] >= 55)
         self.assertTrue(hasattr(PRServiceGUI, "reset_sash_center"))
+
+        # 测试分段模式切换与表头动态文案
+        app = self.app
+        app.segment_mode = "60m"
+        self.assertEqual(app._get_velocity_header_text(), "60分涨速%")
+        app.segment_mode = "30m"
+        self.assertEqual(app._get_velocity_header_text(), "30分涨速%")
+        app.segment_mode = "15m"
+        self.assertEqual(app._get_velocity_header_text(), "15分涨速%")
+        app.segment_mode = "day_open"
+        self.assertEqual(app._get_velocity_header_text(), "开盘涨速%")
+        app.segment_mode = "60s"
+        self.assertEqual(app._get_velocity_header_text(), "60秒涨速%")
     def test_trade_flow_table_real_trade_logs(self):
         """测试 TradeFlowTable 能正确加载 TradeGateway 与 SQLite 中的真实交易流水"""
         from PyQt6.QtWidgets import QApplication
