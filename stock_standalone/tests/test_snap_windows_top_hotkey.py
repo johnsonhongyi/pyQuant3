@@ -404,6 +404,8 @@ def test_tdx_dormant_cooling_and_no_infinite_retry():
 
     unlisted_codes = ["688835", "920288", "301689"]
     fetcher.reset_code_dormancy()
+    for c in unlisted_codes:
+        fetcher._off_hours_cached_quotes.pop(c, None)
 
     # 1st call -> Batch fails -> single calls fail -> count incremented
     quotes1 = fetcher.get_security_quotes_safe(unlisted_codes, force=False)
