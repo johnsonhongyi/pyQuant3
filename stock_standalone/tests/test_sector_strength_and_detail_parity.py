@@ -650,6 +650,8 @@ def test_history_readonly_no_overwrite_tk(monkeypatch):
             json.dump(initial_data, f, ensure_ascii=False, indent=2)
 
         monkeypatch.setattr(ATSMainWindow, "_get_search_history_filepath", lambda self: fake_file)
+        monkeypatch.setattr("ats.ui.styles.load_config_node", lambda key, default=None: default)
+        monkeypatch.setattr("ats.ui.main_window.load_config_node", lambda key, default=None: default)
         
         win = ATSMainWindow()
         try:
@@ -711,6 +713,8 @@ def test_reload_search_history_button_and_sync(monkeypatch):
             json.dump(initial_data, f, ensure_ascii=False, indent=2)
 
         monkeypatch.setattr(ATSMainWindow, "_get_search_history_filepath", lambda self: fake_file)
+        monkeypatch.setattr("ats.ui.styles.load_config_node", lambda key, default=None: default)
+        monkeypatch.setattr("ats.ui.main_window.load_config_node", lambda key, default=None: default)
         
         win = ATSMainWindow()
         try:
@@ -762,6 +766,8 @@ def test_reload_shortcut_and_focus_protection(monkeypatch):
             json.dump(initial_data, f, ensure_ascii=False, indent=2)
 
         monkeypatch.setattr(ATSMainWindow, "_get_search_history_filepath", lambda self: fake_file)
+        monkeypatch.setattr("ats.ui.styles.load_config_node", lambda key, default=None: default)
+        monkeypatch.setattr("ats.ui.main_window.load_config_node", lambda key, default=None: default)
         
         win = ATSMainWindow()
         try:

@@ -37,6 +37,7 @@ class GlobalFavoriteManager:
         self.stock_grades = {}
         self._lock = threading.Lock()
         self._last_config_mtime = 0.0
+        self._last_file_hash = ""
         self._version = 0
         
         # Default config path - now hardcoded to independent favorite_stocks.json to avoid DPI scale issues
@@ -108,6 +109,7 @@ class GlobalFavoriteManager:
     RELOAD_COOLDOWN_SEC = 3.0  # 跨节点/跨进程同步防抖阈值 (1.0s)
 
     def _file_watcher_loop(self):
+        import hashlib
         while not self._watcher_stop.wait(2.0):
             try:
                 path = self._config_path
@@ -115,13 +117,23 @@ class GlobalFavoriteManager:
                     mtime = os.path.getmtime(path)
                     now = time.time()
                     with self._lock:
-                        # 只有 mtime 发生改变 且 距离上次重载超越大周期阈值(3.0s) 时才允许再次加载
-                        if abs(mtime - self._last_config_mtime) > 1e-4 and (now - getattr(self, '_last_reload_timestamp', 0)) >= self.RELOAD_COOLDOWN_SEC:
-                            need_load = True
-                        else:
-                            need_load = False
+                        # 只有 mtime 发生改变 且 距离上次重载超越大周期阈值(3.0s) 时才允许进行 Hash 脏检查
+                        time_changed = abs(mtime - self._last_config_mtime) > 1e-4 and (now - getattr(self, '_last_reload_timestamp', 0)) >= self.RELOAD_COOLDOWN_SEC
                     
-                    if need_load:
+                    if time_changed:
+                        # ⚡ 严格内容指纹脏检查：内容完全相同时静默同步 mtime，杜绝多进程乒乓重载风暴
+                        try:
+                            with open(path, "rb") as f:
+                                file_bytes = f.read()
+                            file_hash = hashlib.md5(file_bytes).hexdigest()
+                        except Exception:
+                            file_hash = ""
+                            
+                        with self._lock:
+                            if file_hash and file_hash == self._last_file_hash:
+                                self._last_config_mtime = mtime
+                                continue
+                        
                         logger.info(f"🔄 [GlobalFavorites] Config file changed externally ({path}), reloading (3min cooldown OK)...")
                         self.load_from_config(path)
             except Exception as e:
@@ -185,6 +197,7 @@ class GlobalFavoriteManager:
             self.save_to_config(FAVORITE_STOCKS_FILE)
 
     def load_from_config(self, config_path: str = None):
+        import hashlib
         # 强行限定仅读写专有的 favorite_stocks.json 配置文件
         path = FAVORITE_STOCKS_FILE
         if not os.path.exists(path):
@@ -197,8 +210,10 @@ class GlobalFavoriteManager:
             return
         try:
             mtime = os.path.getmtime(path)
-            with open(path, "r", encoding="utf-8") as f:
-                full_data = json.load(f)
+            with open(path, "rb") as f:
+                raw_bytes = f.read()
+            curr_hash = hashlib.md5(raw_bytes).hexdigest()
+            full_data = json.loads(raw_bytes.decode("utf-8"))
             
             ui_state = full_data.get("sector_bidding_panel_persistence_ui_state")
             if not ui_state:
@@ -235,23 +250,30 @@ class GlobalFavoriteManager:
 
                 with self._lock:
                     if (new_sectors != self.favorite_sectors or 
-                        new_stocks != self.favorite_stocks):
+                        new_stocks != self.favorite_stocks or 
+                        new_stocks_dates != self.favorite_stocks_dates):
                         changed = True
                     self.favorite_sectors = new_sectors
                     self.favorite_stocks = new_stocks
                     self.favorite_stocks_dates = new_stocks_dates
                     self._last_config_mtime = mtime
+                    self._last_file_hash = curr_hash
                     self._last_reload_timestamp = time.time()
-                logger.info(f"🔑 [GlobalFavorites] Loaded {len(self.favorite_sectors)} sectors and {len(self.favorite_stocks)} stocks from {path}.")
+                
                 if changed:
+                    logger.info(f"🔑 [GlobalFavorites] Loaded {len(self.favorite_sectors)} sectors and {len(self.favorite_stocks)} stocks from {path}.")
                     with self._lock:
                         self._version += 1
+                else:
+                    logger.debug(f"[GlobalFavorites] Unchanged favorites ({len(self.favorite_stocks)} stocks) synced from {path}.")
+                    
                 if auto_filled:
                     # 自动回补缺失日期后，立刻同步落盘持久化至 favorite_stocks.json
                     self.save_to_config()
             else:
                 with self._lock:
                     self._last_config_mtime = mtime
+                    self._last_file_hash = curr_hash
         except Exception as e:
             logger.error(f"Failed to load favorites from config: {e}")
 
@@ -271,12 +293,13 @@ class GlobalFavoriteManager:
             logger.error(f"[GlobalFavorites] Failed to backup favorite_stocks.json: {e}")
 
     def save_to_config(self, config_path: str = None):
+        import hashlib
         path = FAVORITE_STOCKS_FILE
         try:
             full_data = {}
             with self._lock:
-                fav_sectors = list(self.favorite_sectors)
-                fav_stocks = list(self.favorite_stocks)
+                fav_sectors = sorted(list(self.favorite_sectors))
+                fav_stocks = sorted(list(self.favorite_stocks))
                 fav_stocks_dates = dict(self.favorite_stocks_dates)
                 
             ui_state_key = "sector_bidding_panel_persistence_ui_state"
@@ -290,10 +313,19 @@ class GlobalFavoriteManager:
             full_data['favorite_stocks'] = fav_stocks
             full_data['favorite_stocks_dates'] = fav_stocks_dates
             
+            json_str = json.dumps(full_data, ensure_ascii=False, indent=2)
+            content_bytes = json_str.encode("utf-8")
+            new_hash = hashlib.md5(content_bytes).hexdigest()
+            
+            with self._lock:
+                if self._last_file_hash and new_hash == self._last_file_hash:
+                    # 内容完全相同，直接跳过写盘与磁盘 I/O
+                    return
+            
             # Write to a temp file first for atomic safety
             tmp_path = f"{path}.tmp.{os.getpid()}.{threading.get_ident()}"
-            with open(tmp_path, "w", encoding="utf-8") as f:
-                json.dump(full_data, f, ensure_ascii=False, indent=2)
+            with open(tmp_path, "wb") as f:
+                f.write(content_bytes)
             
             # Windows 下另一进程可能暂时占用文件，重试最多 3 次
             max_retries = 3
@@ -312,6 +344,7 @@ class GlobalFavoriteManager:
 
             with self._lock:
                 self._last_config_mtime = os.path.getmtime(path)
+                self._last_file_hash = new_hash
             logger.debug(f"Saved favorites to {path}")
         except Exception as e:
             logger.error(f"Failed to save favorites to config: {e}")
@@ -439,27 +472,18 @@ class GlobalFavoriteManager:
 
     def get_favorite_stock_date(self, code: str) -> str:
         code = str(code).strip().zfill(6)
-        should_save = False
         with self._lock:
             date_str = self.favorite_stocks_dates.get(code, "")
             if date_str:
-                norm_d = self._get_default_trade_date(date_str)
-                if norm_d != date_str:
-                    date_str = norm_d
-                    self.favorite_stocks_dates[code] = date_str
-                    should_save = True
+                return self._get_default_trade_date(date_str)
             elif code in self.favorite_stocks:
-                # 自动补全为最近交易日保底，确保可视化联动 100% 能找到添加日期
+                # 内存自动补全为最近交易日保底，确保可视化联动 100% 能找到添加日期
                 date_str = self._get_default_trade_date()
                 self.favorite_stocks_dates[code] = date_str
-                should_save = True
-
-        if should_save:
-            self.save_to_config()
+                return date_str
         return date_str
 
     def get_favorite_stocks_dates(self) -> dict:
-        should_save = False
         with self._lock:
             default_date = self._get_default_trade_date()
             for code in self.favorite_stocks:
@@ -467,12 +491,7 @@ class GlobalFavoriteManager:
                 norm_d = self._get_default_trade_date(cur_d) if cur_d else default_date
                 if cur_d != norm_d:
                     self.favorite_stocks_dates[code] = norm_d
-                    should_save = True
-            res = dict(self.favorite_stocks_dates)
-
-        if should_save:
-            self.save_to_config()
-        return res
+            return dict(self.favorite_stocks_dates)
 
     def get_favorite_sectors(self) -> Set[str]:
         with self._lock:
