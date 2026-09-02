@@ -715,9 +715,13 @@ class PRServiceGUI:
     def _on_tree_column_drag_release(self, event, tree):
         """用户拖动表头分隔线调整列宽后，精准单列同步并持久化"""
         try:
-            # 延时 40ms 等 Tkinter 原生完成列宽几何变化
+            # 过滤非表头/分隔线区域点击，防止常规行点选误触发列宽覆盖
+            region = tree.identify_region(event.x, event.y)
+            if region not in ("separator", "heading"):
+                return
+            # 延时 30ms 等 Tkinter 原生完成列宽几何变化
             if hasattr(self, 'root') and self.root:
-                self.root.after(40, lambda: self._sync_column_widths_from_tree(tree))
+                self.root.after(30, lambda: self._sync_column_widths_from_tree(tree))
         except Exception:
             pass
 
@@ -735,7 +739,7 @@ class PRServiceGUI:
                     old_w = saved_widths.get(col, self.DEFAULT_COLUMN_WIDTHS.get(col, 48))
                     min_safe_w = self.MIN_COLUMN_WIDTHS.get(col, 35)
                     # 只有当宽度发生实质变化且大于最小安全宽度时才更新
-                    if cur_w >= min_safe_w and abs(cur_w - old_w) >= 3:
+                    if cur_w >= min_safe_w and abs(cur_w - old_w) >= 2:
                         saved_widths[col] = cur_w
                         changed = True
                         for other_tree in all_trees:
@@ -1064,9 +1068,11 @@ class PRServiceGUI:
             return
 
         _, _, _extra_cols = self._get_all_cols()
-        # 实时推送时重新将列配置为实时的自定义列
+        target_cols = self._BASE_FIXED_COLS + tuple(_extra_cols)
+        # 仅当列结构发生变化（如动态添加了新的自定义指标列）时才重新配置表头，杜绝高频刷新覆写用户调整的列宽
         for t, title in ((self.tree_em, "东"), (self.tree_ths, "花"), (self.tree_lh, "龙"), (self.tree_tgb, "淘"), (self.tree_res, "合")):
-            self._reconfigure_tree_columns(t, title, _extra_cols)
+            if t and t.winfo_exists() and tuple(t.cget("columns")) != target_cols:
+                self._reconfigure_tree_columns(t, title, _extra_cols)
 
         BASE_UPDATE_COUNT = 10  # idx/code/name/val/price/velocity/vwap_dev/dff2/dff3/rank
 
@@ -1280,9 +1286,26 @@ class PRServiceGUI:
         except Exception:
             return 1.0
 
-    def save_sash_pos(self, event=None):
-        """仅在用户手动拖拽分隔栏并释放鼠标时，更新并持久化保存 sash 比例"""
+    def _on_sash_button_press(self, event):
+        """按下鼠标时识别是否点击在中间垂直分隔栏 (sash) 上"""
         try:
+            if not hasattr(self, "paned") or self.paned is None:
+                return
+            elem = self.paned.identify(event.x, event.y)
+            # identify 返回 ('sash', 0) 或 ('handle', 0) 或 'sash'
+            if elem and (elem == 'sash' or (isinstance(elem, tuple) and elem[0] in ('sash', 'handle'))):
+                self._is_dragging_sash = True
+            else:
+                self._is_dragging_sash = False
+        except Exception:
+            self._is_dragging_sash = False
+
+    def save_sash_pos(self, event=None):
+        """仅在用户真正手动拖拽中间分隔栏并释放鼠标时，更新并持久化保存 sash 比例"""
+        try:
+            if not getattr(self, "_is_dragging_sash", False):
+                return
+            self._is_dragging_sash = False
             if not hasattr(self, "paned") or self.paned is None:
                 return
             pos = self.paned.sash_coord(0)[0]
@@ -1296,26 +1319,48 @@ class PRServiceGUI:
                     self._last_paned_width = width
                     self.sash_restored = True
                     self.save_config_settings()
-                    service_logger.debug(f"[sash] 用户拖动调整并保存 sash_ratio={ratio:.4f}")
+                    service_logger.debug(f"[sash] 用户手动拖动调整并保存 sash_ratio={ratio:.4f}")
         except Exception as e:
             service_logger.error(f"Failed to save sash position: {e}")
 
-    def restore_sash(self, event=None, force=False):
-        """恢复 PanedWindow 中间分隔栏 (sash) 的持久化比例"""
+    def _apply_sash_place(self, target_sash):
+        """主线程安全放置 sash 坐标"""
         try:
-            if not hasattr(self, "paned") or self.paned is None:
+            if hasattr(self, "paned") and self.paned and self.paned.winfo_exists():
+                self.paned.sash_place(0, target_sash, 0)
+        except Exception:
+            pass
+
+    def _on_paned_configure(self, event):
+        """窗口放大、缩小、全屏最大化与向下还原时，100% 严格按比例等比例调整左右宽度"""
+        try:
+            if event.widget != self.paned:
+                return
+            if getattr(self, "_is_dragging_sash", False):
+                return
+            width = event.width
+            if width > 100:
+                self.restore_sash(force=True)
+        except Exception:
+            pass
+
+    def restore_sash(self, event=None, force=False):
+        """按配置中的 sash_ratio 等比例恢复/调整 PanedWindow 分隔栏位置"""
+        try:
+            if not hasattr(self, "paned") or self.paned is None or not self.paned.winfo_exists():
                 return
             width = self.paned.winfo_width()
-            if width > 100:  # 确保已经分配合理的大小
-                last_w = getattr(self, '_last_paned_width', 0)
-                if force or not getattr(self, 'sash_restored', False) or abs(width - last_w) >= 2:
-                    self._last_paned_width = width
-                    ratio = self.config.get("sash_ratio", 0.5)
-                    if not isinstance(ratio, (int, float)) or ratio < 0.15 or ratio > 0.85:
-                        ratio = 0.5
-                    target_sash = int(width * ratio)
-                    self.paned.sash_place(0, target_sash, 0)
-                    self.sash_restored = True
+            if width > 100:
+                ratio = self.config.get("sash_ratio", 0.5)
+                if not isinstance(ratio, (int, float)) or ratio < 0.15 or ratio > 0.85:
+                    ratio = 0.5
+                target_sash = int(width * ratio)
+                self._apply_sash_place(target_sash)
+                self._last_paned_width = width
+                self.sash_restored = True
+                # 在 idle 状态二次确认放置，杜绝 Tkinter 内部重绘覆写
+                if hasattr(self, 'root') and self.root:
+                    self.root.after_idle(lambda ts=target_sash: self._apply_sash_place(ts))
         except Exception as e:
             service_logger.debug(f"Restore sash position failed: {e}")
 
@@ -1330,16 +1375,20 @@ class PRServiceGUI:
             width = self.paned.winfo_width()
             if width > 100:
                 target_sash = int(width * 0.5)
-                self.paned.sash_place(0, target_sash, 0)
+                self._apply_sash_place(target_sash)
+                if hasattr(self, 'root') and self.root:
+                    self.root.after_idle(lambda ts=target_sash: self._apply_sash_place(ts))
             self.sash_restored = True
 
             # 触发所有子表格重新应用黄金列宽
             all_trees = [t for t in (self.tree_em, self.tree_ths, self.tree_lh, self.tree_tgb, self.tree_res) if t and t.winfo_exists()]
             for tree in all_trees:
-                for col in tree.cget("columns"):
+                tree_cols = tree.cget("columns")
+                last_col = tree_cols[-1] if tree_cols else "rank"
+                for col in tree_cols:
                     def_w = self.DEFAULT_COLUMN_WIDTHS.get(col, 48)
                     min_w = self.MIN_COLUMN_WIDTHS.get(col, 35)
-                    is_stretch = col in ("velocity", "vwap_dev")
+                    is_stretch = (col == last_col)
                     try:
                         tree.column(col, width=def_w, minwidth=min_w, stretch=is_stretch)
                     except Exception:
@@ -1686,9 +1735,10 @@ class PRServiceGUI:
         self.tgb_container = tk.Frame(self.right_frame, bg="white", highlightbackground="#CCCCCC", highlightthickness=1, bd=0)
         self.tree_tgb = self.create_treeview(self.tgb_container, "淘")
 
-        # 绑定 sash 的位置恢复、保存与双击一键居中
-        self.paned.bind("<Configure>", lambda e: self.restore_sash(e))
-        self.paned.bind("<ButtonRelease-1>", self.save_sash_pos)
+        # 绑定 sash 的位置等比例自适应缩放、拖拽状态机与双击一键居中
+        self.paned.bind("<Configure>", self._on_paned_configure)
+        self.paned.bind("<Button-1>", self._on_sash_button_press, add="+")
+        self.paned.bind("<ButtonRelease-1>", self.save_sash_pos, add="+")
         self.paned.bind("<Double-Button-1>", lambda e: self.reset_sash_center())
 
         # 多阶段连环延时，确保冷启动、加载配置、最大化及渲染完毕后 100% 自动装载和恢复 sash
@@ -1897,13 +1947,15 @@ class PRServiceGUI:
         tree.heading("rank",     text="Rank")
         
         saved_widths = self.config.get("column_widths", {})
+        last_col = all_cols[-1] if all_cols else "rank"
         for c in self._BASE_FIXED_COLS:
             def_w = self.DEFAULT_COLUMN_WIDTHS.get(c, 48)
             min_w = self.MIN_COLUMN_WIDTHS.get(c, 35)
             w = saved_widths.get(c, def_w)
             if w < min_w:
                 w = def_w
-            is_stretch = c in ("velocity", "vwap_dev")
+            # 只有最后一列允许 stretch 吸收多余空间，其余固定列独立锁定宽度，杜绝相互挤压弹回
+            is_stretch = (c == last_col)
             tree.column(c, width=w, minwidth=min_w, anchor="center", stretch=is_stretch)
         
         # 4. 设置动态列的表头与宽度，并绑定点击排序
@@ -1914,7 +1966,8 @@ class PRServiceGUI:
             w = saved_widths.get(ec, def_w)
             if w < min_w:
                 w = def_w
-            tree.column(ec, width=w, minwidth=min_w, anchor="center", stretch=True)
+            is_stretch = (ec == last_col)
+            tree.column(ec, width=w, minwidth=min_w, anchor="center", stretch=is_stretch)
             
         # 同时基础列也需要重新绑定排序
         for c in self._BASE_FIXED_COLS:
@@ -1945,13 +1998,14 @@ class PRServiceGUI:
 
         # 统一读取持久化列宽（异常过小则自动清洗恢复为黄金默认值）
         saved_widths = self.config.get("column_widths", {})
+        last_col = all_cols[-1] if all_cols else "rank"
         for col in all_cols:
             def_w = self.DEFAULT_COLUMN_WIDTHS.get(col, 48)
             min_w = self.MIN_COLUMN_WIDTHS.get(col, 35)
             w = saved_widths.get(col, def_w)
             if w < min_w:
                 w = def_w
-            is_stretch = col in ("velocity", "vwap_dev") or col in extra_cols
+            is_stretch = (col == last_col)
             tree.column(col, width=w, minwidth=min_w, anchor="center", stretch=is_stretch)
 
         # 追加自定义列的表头
@@ -2676,17 +2730,18 @@ class PRServiceGUI:
                 
         threading.Thread(target=run_task, daemon=True).start()
 
-    def refresh_layout(self, em_empty, ths_empty, lh_empty, res_empty, tgb_empty):
-        """动态控制无数据板块的隐藏/显示"""
-        # 左分栏
+    def refresh_layout(self, em_empty=False, ths_empty=False, lh_empty=True, res_empty=False, tgb_empty=False):
+        """动态控制板块布局，确保 4 象限稳定展示，杜绝左侧或右侧突发变空白"""
+        # 左分栏：东财(上) 与 同花顺(下)
         self.em_container.pack_forget()
         self.left_sep.pack_forget()
         self.ths_container.pack_forget()
         
+        # 默认左侧东财与同花顺常驻（即使暂无数据也展示表头骨架）
         left_visible = []
-        if not em_empty:
+        if not em_empty or (em_empty and ths_empty):
             left_visible.append(self.em_container)
-        if not ths_empty:
+        if not ths_empty or (em_empty and ths_empty):
             left_visible.append(self.ths_container)
             
         for i, widget in enumerate(left_visible):
@@ -2694,7 +2749,7 @@ class PRServiceGUI:
             if i < len(left_visible) - 1:
                 self.left_sep.pack(fill="x", pady=4)
             
-        # 右分栏
+        # 右分栏：龙虎(竞价时段/若有) + 共振合表(常驻) + 淘股吧(常驻/若有)
         self.lh_container.pack_forget()
         self.right_sep1.pack_forget()
         self.res_container.pack_forget()
@@ -2704,9 +2759,9 @@ class PRServiceGUI:
         right_visible = []
         if not lh_empty:
             right_visible.append(self.lh_container)
-        if not res_empty:
-            right_visible.append(self.res_container)
-        if not tgb_empty:
+        # 共振合表默认常驻
+        right_visible.append(self.res_container)
+        if not tgb_empty or (res_empty and tgb_empty):
             right_visible.append(self.tgb_container)
             
         for i, widget in enumerate(right_visible):
@@ -2850,21 +2905,17 @@ class PRServiceGUI:
             "quotes": quotes
         }
 
-        # 实时/缓存模式重新切回实时的自定义列配置
+        # 实时/缓存模式重新切回实时的自定义列配置 (仅结构变化时重构，保护已调列宽)
         _, _, _extra_cols = self._get_all_cols()
-        self._reconfigure_tree_columns(self.tree_em, "东", _extra_cols)
-        self._reconfigure_tree_columns(self.tree_ths, "花", _extra_cols)
-        self._reconfigure_tree_columns(self.tree_lh, "龙", _extra_cols)
-        self._reconfigure_tree_columns(self.tree_tgb, "淘", _extra_cols)
-        self._reconfigure_tree_columns(self.tree_res, "合", _extra_cols)
+        target_cols = self._BASE_FIXED_COLS + tuple(_extra_cols)
+        for t, title in ((self.tree_em, "东"), (self.tree_ths, "花"), (self.tree_lh, "龙"), (self.tree_tgb, "淘"), (self.tree_res, "合")):
+            if t and t.winfo_exists() and tuple(t.cget("columns")) != target_cols:
+                self._reconfigure_tree_columns(t, title, _extra_cols)
 
         self.clear_all_trees()
 
         # 用于统计前 10 概念热度的个股信息收集字典
         all_stocks_for_stats = {}
-
-        # 1. 提取所有进入"合"表（共振表）的股票代码，用于在其他原始排行榜中做去重过滤
-        resonance_set = {item["code"] for item in resonance_results}
 
         # 获取最新的行情快照 DataFrame
         df = getattr(self, "sync_manager", None)
@@ -3001,18 +3052,15 @@ class PRServiceGUI:
                     result.append("--")
             return tuple(result)
 
-        # 2. 定义带去重功能的单个表格填充辅助函数
+        # 2. 定义单个表格填充辅助函数 (保持各平台原始榜单完整独立呈现)
         def populate(tree, data_dict):
             import pandas as pd
             sorted_items = sorted(
                 data_dict.items(),
                 key=lambda x: (0 if str(x[0]).strip().zfill(6) in fav_stocks else 1, x[1])
             )
-            display_rank = 1
-            for _, (code, _) in enumerate(sorted_items, 1):
-                # 如果该个股已被归入共振榜，则在其他表（东、花、开、淘）中过滤去重
-                if code in resonance_set:
-                    continue
+            for orig_idx, (code, orig_rank) in enumerate(sorted_items, 1):
+                display_rank = orig_rank if (isinstance(orig_rank, int) and orig_rank > 0) else orig_idx
 
                 quote = quotes.get(code, {"name": "--", "percent": 0.0})
                 name = quote["name"]

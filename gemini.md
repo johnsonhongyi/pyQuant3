@@ -1,3 +1,33 @@
+## 2026-09-02 17:20
+- [x] **实现人气综合排行榜垂直分隔线 (sash) 严格左右等比例放大缩小体系 & 彻底根治全屏与还原比例失衡 Bug (`stock_standalone/popularity_resonance_gui.py`, `stock_standalone/tests/test_popularity_resonance_features.py`)**：
+    - [x] **排查定位“全屏放大不居中、还原变图4偏左”两大根本原因**：
+        1. **`ButtonRelease-1` 全局误触发篡改比例**：先前 `save_sash_pos` 绑定在整个 `PanedWindow` 的鼠标释放事件上；在窗口改变大小、还原或普通点击表格时，在布局过渡期计算出了畸变的比例（如 0.31）并覆写持久化到了 `sash_ratio`，导致后续缩放全部失衡偏左；
+        2. **缺乏 `<Configure>` 动态等比例维持引擎**：未在 PanedWindow 尺寸变化事件中按当前总宽度实时等比例计算 `target_sash = int(width * ratio)`，导致 Tkinter 默认将全部新增宽度错误分配给单边；
+    - [x] **实施严格等比例自适应与精准拖拽状态机体系**：
+        1. **`<Button-1>` + `identify` 拖拽状态机**：只有鼠标真正点在分隔栏（`sash`/`handle`）上拖动释放时，才记录新的比例；普通点击、缩放与还原 100% 防误触放行；
+        2. **`<Configure>` 实时等比例联动**：在窗口全屏最大化、向下还原或任意拖拽大小时，毫秒级按 `sash_ratio`（默认 0.5 居中）重新计算并锁定分隔线位置，确保左右面板永远严格保持 50:50（或用户自定义比例）等比例缩放；
+    - [x] **全量 27 项跨模块自动化回归与专项测试 100% 全部 PASSED**。
+
+## 2026-09-02 15:56
+- [x] **彻底根治人气综合排行榜窗口最大化/多列手动调整列宽 (涨速/VWAP等) 相互挤压与弹回 Bug (`stock_standalone/popularity_resonance_gui.py`, `stock_standalone/tests/test_popularity_resonance_features.py`)**：
+    - [x] **排查定位“调一个可以、调第2个就自动弹回去”两大根本原因**：
+        1. **多列同时 `stretch=True` 引发 Tkinter 动态挤压踩踏**：先前将 `velocity`、`vwap_dev` 及全部 `extra_cols` 设为了 `stretch=True`；在最大化窗口时，Tkinter 会自动将剩余空间分摊给这 8 个列；用户拉大第 1 个列时，Tkinter 会自动压缩第 2 个列，拖动第 2 个列时又压缩第 1 个列，同时 `_sync_column_widths_from_tree` 遍历所有列读取了被挤压的虚假渲染值存入 `saved_widths`，导致互相覆盖弹回；
+        2. **高频刷新盲目重构列配置**：`refresh_realtime_fields` 与 `update_all_tables` 在每轮 3~5 秒数据推送时无条件执行 `_reconfigure_tree_columns`，用配置覆写了用户正在拖动的列宽；
+    - [x] **实施绝对物理宽度锁定与精准单列持久化体系**：
+        1. **锁定常规列 `stretch=False`**：所有常规与关键决策列（`velocity`, `vwap_dev`, `code`, `name`, `price` 等）的 `stretch` 统一设为 `False`，完全以用户设定的绝对像素为准；仅最后一列设为 `stretch=True` 用于吸收右侧余量；
+        2. **增设 `identify_region` 与结构脏检查**：用户仅在真正拖动表头/分隔线（`separator`/`heading`）时才同步更新；刷新数据时若列结构未变绝不重构列配置；
+    - [x] **全量 27 项自动化回归与多列拖动专项测试 100% 全部 PASSED**。
+
+## 2026-09-02 15:45
+- [x] **彻底根治人气综合排行榜开发环境仅展示单边数据/左侧完全空白 & 彻底消除 `if code in resonance_set: continue` 错误去重与 `refresh_layout` 激进隐藏顽疾 (`stock_standalone/popularity_resonance_gui.py`, `stock_standalone/tests/test_popularity_resonance_features.py`)**：
+    - [x] **排查定位“开发环境只有一边数据/点击查询刷新也没有获取全数据”根本诱因**：
+        1. **致命的单表扣除/错误去重逻辑**：原代码在 `populate` 中执行了 `if code in resonance_set: continue`；当同步数量设大（如 1031）或缓存中已计算完全网共振榜时，`resonance_set` 包含了所有平台的全部标的，导致东财、同花顺、淘股吧、龙虎大师单表里的股票在渲染时被 100% 误杀剔除（空表 0 只）；
+        2. **`refresh_layout` 激进隐藏导致左侧变白板**：由于东财与同花顺子节点数为 0，`refresh_layout` 直接将左侧面板的所有容器全部 `pack_forget()` 隐藏，导致整个左半屏变成完全空白；
+    - [x] **实施独立原始榜单完整呈现与 4 象限常驻布局体系**：
+        1. **彻底移除单表错误去重**：东财表完整独立展示东财原始 Top 100，同花顺表完整展示同花顺原始 Top 100，淘股吧表完整展示淘股吧原始 Top 50，龙虎大师展示竞价龙虎榜，共振合表展示综合得分 Top 标的；
+        2. **加固 `refresh_layout` 骨架常驻**：左侧东财与同花顺容器默认常驻展示（即使暂无数据也保留表头与框架），右侧共振合表与淘股吧常驻展示，彻底恢复标准的四象限看盘看板；
+    - [x] **全量 27 项跨模块自动化回归与专项测试 100% 全部 PASSED**。
+
 ## 2026-09-02 15:30
 - [x] **实现人气综合排行榜彻底删除无意义 4 列 (`ladder`, `bid_p`, `pioneer`, `decision`) & 全面落地 ATS 同源 VWAP 偏离度与 60F/分段涨速引擎及分段选择器 (`stock_standalone/popularity_resonance_service.py`, `stock_standalone/popularity_resonance_gui.py`, `stock_standalone/tests/test_popularity_resonance_features.py`)**：
     - [x] **精简数据列与重构 10 列基础数据结构 (SSOT)**：
