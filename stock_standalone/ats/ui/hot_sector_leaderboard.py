@@ -36,7 +36,7 @@ from ats.ui.styles import (
     apply_dark_theme, bind_top_shortcut, ColorPreservingItemDelegate, set_seamless_stay_on_top
 )
 from ats.ui.favorite_panel import get_ats_extra_cols
-from ats.hot_sector_engine import HotSectorEngine
+from ats.hot_sector_engine import HotSectorEngine, is_valid_sector_name
 from JohnsonUtil import commonTips as cct
 
 logger = LoggerFactory.getLogger(__name__)
@@ -426,18 +426,18 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
 
         self.btn_sec1 = QPushButton("🔥 No.1 --")
         self.btn_sec1.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_sec1.setToolTip("点击开启/关闭该板块显示过滤")
-        self.btn_sec1.clicked.connect(lambda: self._toggle_sector_filter(0))
+        self.btn_sec1.setToolTip("点击只显示该板块标的，快速定位板块 (再次点击恢复全选)")
+        self.btn_sec1.clicked.connect(lambda: self._select_single_sector(0))
 
         self.btn_sec2 = QPushButton("🔥 No.2 --")
         self.btn_sec2.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_sec2.setToolTip("点击开启/关闭该板块显示过滤")
-        self.btn_sec2.clicked.connect(lambda: self._toggle_sector_filter(1))
+        self.btn_sec2.setToolTip("点击只显示该板块标的，快速定位板块 (再次点击恢复全选)")
+        self.btn_sec2.clicked.connect(lambda: self._select_single_sector(1))
 
         self.btn_sec3 = QPushButton("🔥 No.3 --")
         self.btn_sec3.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_sec3.setToolTip("点击开启/关闭该板块显示过滤")
-        self.btn_sec3.clicked.connect(lambda: self._toggle_sector_filter(2))
+        self.btn_sec3.setToolTip("点击只显示该板块标的，快速定位板块 (再次点击恢复全选)")
+        self.btn_sec3.clicked.connect(lambda: self._select_single_sector(2))
 
         self.sec_buttons = [self.btn_sec1, self.btn_sec2, self.btn_sec3]
         for btn in self.sec_buttons:
@@ -766,25 +766,25 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
     # ── 板块按钮交互与过滤 ──
     def _on_all_sectors_clicked(self):
         """点击【全部板块】：一键全选并激活所有当前 Top 3 强势板块"""
-        self.active_sectors = set(self.current_top_sectors)
+        valid_secs = [s for s in self.current_top_sectors if is_valid_sector_name(s)]
+        self.active_sectors = set(valid_secs)
         self._update_sector_button_styles()
         self._render_table_data(self.cached_results)
 
-    def _toggle_sector_filter(self, sec_idx: int):
-        """点击单个板块按钮：切换其开/关显示状态"""
+    def _select_single_sector(self, sec_idx: int):
+        """点击单个板块按钮：只显示该点击板块（快速定位板块），若已唯选该板块再次点击则恢复全选"""
         if sec_idx >= len(self.current_top_sectors):
             return
         sec_name = self.current_top_sectors[sec_idx]
-        if sec_name in self.active_sectors:
-            # 已开启 -> 关闭
-            self.active_sectors.remove(sec_name)
-        else:
-            # 已关闭 -> 开启
-            self.active_sectors.add(sec_name)
+        if not is_valid_sector_name(sec_name):
+            return
 
-        # 如果全部关闭了，则自动重置为全部开启，避免完全空白
-        if not self.active_sectors:
-            self.active_sectors = set(self.current_top_sectors)
+        valid_secs = [s for s in self.current_top_sectors if is_valid_sector_name(s)]
+        # 如果当前已经是唯一选中该板块，再次点击则切回全部板块；否则单选该板块
+        if self.active_sectors == {sec_name}:
+            self.active_sectors = set(valid_secs)
+        else:
+            self.active_sectors = {sec_name}
 
         self._update_sector_button_styles()
         self._render_table_data(self.cached_results)
@@ -797,7 +797,8 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
             ("#1b262a", "#44ddff", "#33bbdd"), # No.3 青色系
         ]
         
-        all_active = (set(self.current_top_sectors) <= self.active_sectors) and len(self.current_top_sectors) > 0
+        valid_current = [s for s in self.current_top_sectors if is_valid_sector_name(s)]
+        all_active = (set(valid_current) <= self.active_sectors) and len(valid_current) > 0
         if all_active:
             self.btn_top_all.setStyleSheet("""
                 QPushButton { background-color: #1a2a3a; color: #00FFCC; border: 1px solid #00FFCC; border-radius: 3px; font-weight: bold; font-size: 9.5pt; padding: 3px 8px; }
@@ -812,6 +813,9 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
         for i, btn in enumerate(self.sec_buttons):
             if i < len(self.current_top_sectors):
                 sname = self.current_top_sectors[i]
+                if not is_valid_sector_name(sname):
+                    btn.setVisible(False)
+                    continue
                 btn.setText(f"🔥 No.{i+1} {sname}")
                 btn.setVisible(True)
 
@@ -907,6 +911,8 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
             if hasattr(main_app, "fav_stocks") and main_app.fav_stocks:
                 manual_list = list(main_app.fav_stocks)
 
+        # 过滤非明确板块
+        top_sectors = [s for s in top_sectors if is_valid_sector_name(s)]
         # 降级默认板块
         if not top_sectors:
             top_sectors = ["共封装光学(CPO)", "国家大基金持股", "存储芯片"]
@@ -977,6 +983,10 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
         filtered = []
         for r in results:
             sec = r.get("sector", "")
+            # 🛡️ 过滤非明确板块 (除重点关注外)
+            if not is_valid_sector_name(sec) and sec != "重点关注":
+                continue
+
             # 板块标签开关过滤
             if self.active_sectors and sec not in self.active_sectors and sec != "重点关注":
                 continue
@@ -1076,13 +1086,15 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
         sec_leaders = {}
         for x in filtered:
             s = x.get("sector", "")
-            if not s or s == "重点关注":
+            if not is_valid_sector_name(s) or s == "重点关注":
                 continue
             if s not in sec_leaders or x.get("pct", -999) > sec_leaders[s].get("pct", -999):
                 sec_leaders[s] = x
 
         leader_strs = []
         for s in self.current_top_sectors:
+            if not is_valid_sector_name(s):
+                continue
             if s in sec_leaders:
                 lead_stock = sec_leaders[s]
                 s_short = s.split('(')[0] if '(' in s else s
@@ -1236,33 +1248,33 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
 
     def _populate_row(self, row_idx: int, r: Dict[str, Any], font_bold: QFont):
         """填充/原位更新单行数据"""
-        code = r["code"]
-        name = r["name"]
-        sec = r["sector"]
-        buy_type = r["buy_type"]
-        buy_tag = r["buy_tag"]
-        price = r["price"]
-        pct = r["pct"]
-        vel_pct = r.get("velocity_pct", 0.0)
+        code = str(r.get("code", "--"))
+        name = str(r.get("name", "--"))
+        sec = str(r.get("sector", "--"))
+        buy_type = str(r.get("buy_type", "蓄势观察"))
+        buy_tag = str(r.get("buy_tag", "OBSERVE"))
+        price = float(r.get("price", 0.0))
+        pct = float(r.get("pct", 0.0))
+        vel_pct = float(r.get("velocity_pct", 0.0))
         vel_tag = r.get("velocity_tag", "⏱️ 窄幅横盘")
         seg_label = r.get("segment_label", "⏱️ 30分分段")
-        seg_base_p = r.get("segment_base_price", price)
-        seg_amt_wan = r.get("segment_amount_wan", 0.0)
+        seg_base_p = float(r.get("segment_base_price", price))
+        seg_amt_wan = float(r.get("segment_amount_wan", 0.0))
         is_midway = r.get("is_midway_init", False)
-        turnover = r.get("turnover", 0.0)
-        vol_r = r.get("vol_ratio", 1.0)
+        turnover = float(r.get("turnover", 0.0))
+        vol_r = float(r.get("vol_ratio", 1.0))
         intent = r.get("order_intent", "⚖️ 均衡博弈")
-        slope = r["slope_score"]
-        vwap_dev = r["vwap_dev_pct"]
-        dff = r.get("dff", r.get("DFF", 0.0))
+        slope = float(r.get("slope_score", 50.0))
+        vwap_dev = float(r.get("vwap_dev_pct", 0.0))
+        dff = float(r.get("dff", r.get("DFF", 0.0)) or 0.0)
         rank_val = r.get("rank", r.get("Rank", r.get("排名", 0)))
-        dff2 = r.get("dff2", r.get("DFF2", 0.0))
-        dff3 = r.get("dff3", r.get("DFF3", 0.0))
+        dff2 = float(r.get("dff2", r.get("DFF2", 0.0)) or 0.0)
+        dff3 = float(r.get("dff3", r.get("DFF3", 0.0)) or 0.0)
         extra_vals = r.get("extra_vals", {})
-        buy_zone = r["buy_zone"]
-        stop_loss = r["stop_loss"]
-        alpha_score = r["alpha_score"]
-        reason = r["reason"]
+        buy_zone = str(r.get("buy_zone", "--"))
+        stop_loss = str(r.get("stop_loss", "--"))
+        alpha_score = float(r.get("alpha_score", 0.0))
+        reason = str(r.get("reason", "--"))
 
         pct_color = QColor("#ff4455") if pct > 0 else (QColor("#00ee77") if pct < 0 else QColor("#cccccc"))
         

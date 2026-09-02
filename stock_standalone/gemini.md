@@ -1,3 +1,27 @@
+## 2026-09-02 11:00
+- [x] **实现 Top 3 强势板块跟单榜单选快速定位板块交互 & 全系统非明确板块 (`--`, `0` 等) 自动过滤剔除 (`stock_standalone/ats/hot_sector_engine.py`, `stock_standalone/ats/ui/hot_sector_leaderboard.py`, `stock_standalone/ats/ui/heatmap_widget.py`, `stock_standalone/bidding_momentum_detector.py`, `stock_standalone/tests/test_sector_strength_and_detail_parity.py`)**：
+    - [x] **重构强势板块跟单榜交互：单选快速定位 + 再次点击恢复全选 + 全部板块重置**：
+        1. **单选快速定位逻辑 (`_select_single_sector`)**：
+           - 用户点击任意板块按钮（如 `No.1 兵装重组`、`No.2 培育钻石`、`No.3 成飞概念`），系统立即进入单选聚焦模式（`self.active_sectors = {sec_name}`），表格瞬间只显示所选板块标的，实现毫秒级快速定位；
+           - 若当前已处于单选该板块状态，用户再次点击同一板块按钮，系统平滑恢复全选（`self.active_sectors = set(self.current_top_sectors)`）；
+           - 点击 `🔥 全部板块` 按钮，一键全选重置所有当前 Top 3 强势板块；
+        2. **动态高亮与置灰视觉反馈 (`_update_sector_button_styles`)**：
+           - **单选状态**：选中的单个板块按钮高亮（主题色红/橙/青高饱和度背景与发光边框），其余板块按钮与 `全部板块` 按钮置灰；
+           - **全选状态**：`🔥 全部板块` 按钮高亮（亮青绿字与边框），所有有效 Top 3 板块按钮均保持高亮；
+    - [x] **全系统非明确板块 (`--`, `0`, `0.0`, `nan`, `未知`, 纯数字等) 统一严格判定与全链路自动过滤 (`is_valid_sector_name`)**：
+        1. **建立全局权威有效性判定规则 (`is_valid_sector_name`)**：
+           - 严格剔除 `None`、`""`、`"-"`、`"--"`、`"---"`、`"0"`、`"0.0"`、`"00"`、`"000"`、`"nan"`、`"null"`、`"none"`、`"未知"`、`"其它"`、`"其他"`、`"未分类"` 以及纯数字（如股票代码/ID 误写入分类）等非明确概念；
+        2. **热力图与聚合引擎全链路过滤 (`SectorHeatmapWidget` / `HotSectorEngine`)**：
+           - `update_from_tk_sector_data`、`load_live_sectors`、`render_grid` 与 `sort_sectors` 全面过滤非明确板块，热力图彻底消除 `--`（成员 7）和 `0`（成员 117）杂质卡片；
+           - `get_top_sectors` 与 `extract_top_sectors_from_heatmap` 提取 Top N 时自动跳过非明确板块，保证突击榜与跟单池均为真实产业/题材概念；
+        3. **数据源头与实体映射清洗 (`BiddingMomentumDetector` / `TickSeries`)**：
+           - `TickSeries.get_splitted_cats`、`_do_rebuild_sector_map` 与 `_ensure_sectors_reconstructed` 在切分 `category` 时即刻过滤无效板块，杜绝无效分类流入 `sector_map` 与持久化缓存；
+        4. **表格渲染健壮性加固 (`_populate_row`)**：
+           - 统一使用 `.get(key, default)` 安全提取字段，彻底杜绝 `KeyError` 等异常崩溃；
+    - [x] **全量 42 项自动化与跨模块回归测试 100% 全部 PASSED**：
+        - `test_sector_strength_and_detail_parity.py`（12 项板块强度、热力图清洗与跟单榜单选快速定位专项测试全部通过）；
+        - `test_snap_windows_top_hotkey.py`、`test_new_stock_module.py`（30 项跨模块回归测试全部通过）。
+
 ## 2026-09-01 13:38
 - [x] **彻底修复 ATS 重点关注与 MA20d 回调跟踪器 MA20 偏离度及全量数值列升降序排序严重错乱 Bug (`stock_standalone/ats/ui/styles.py`, `stock_standalone/tk_gui_modules/qt_table_utils.py`, `stock_standalone/ats/ui/favorite_panel.py`, `stock_standalone/ats/ui/swing_table.py`, `stock_standalone/tests/test_ma20_deviation_sorting.py`)**：
     - [x] **排查定位“MA20 偏离度升降序排序严重错乱（如 +10.74% 插在 +1.90% 后面、负数排在正数前面）”三大根本原因**：
