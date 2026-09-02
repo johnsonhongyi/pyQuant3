@@ -926,9 +926,18 @@ def is_editing_text(target_widget=None) -> bool:
     """检查当前获得焦点的控件是否为可输入文本的编辑框（防快捷键误触）"""
     try:
         from PyQt6.QtWidgets import QApplication, QLineEdit, QTextEdit, QPlainTextEdit, QAbstractSpinBox
+        # 若传入的控件本身即为可编辑文本框，直接返回 True
+        if target_widget is not None and isinstance(target_widget, (QLineEdit, QTextEdit, QPlainTextEdit, QAbstractSpinBox)):
+            return True
+
         focus_w = QApplication.focusWidget()
         if focus_w is not None and isinstance(focus_w, (QLineEdit, QTextEdit, QPlainTextEdit, QAbstractSpinBox)):
-            return True
+            if target_widget is None:
+                return True
+            if focus_w is target_widget or (hasattr(target_widget, 'isAncestorOf') and target_widget.isAncestorOf(focus_w)):
+                return True
+
+        # 保底支持：无头/非活动测试环境下由 widget 及其子级 hasFocus 判定
         if target_widget is not None and hasattr(target_widget, 'findChildren'):
             for child in target_widget.findChildren((QLineEdit, QTextEdit, QPlainTextEdit, QAbstractSpinBox)):
                 if child.hasFocus():

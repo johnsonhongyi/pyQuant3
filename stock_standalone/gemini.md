@@ -1,3 +1,15 @@
+## 2026-09-02 11:30
+- [x] **彻底根治 `GlobalFavorites` 自选股配置无变动却每 3~4 秒死循环打印 `Config file changed externally` 刷屏重载风暴 (`stock_standalone/global_favorites.py`, `stock_standalone/tests/test_favorites_perf_optimization.py`, `stock_standalone/tests/test_favorites_and_styles.py`)**：
+    - [x] **排查定位日志刷屏与死循环重载两大根本诱因**：
+        1. **单一 `mtime` 触发漏洞与多进程“乒乓球”互触**：原后台监听线程 `_file_watcher_loop` 仅以文件系统时间戳 `mtime` 判断是否外部修改；多进程环境下（TK 进程与 ATS 进程）任何一方 touch 或原子替换，由于缺乏内容 Hash 比对，立即互相唤醒触发 `Config file changed externally` 日志；
+        2. **只读 Getter 接口隐蔽落盘 (`get_favorite_stock_date` / `get_favorite_stocks_dates`)**：原只读访问器在查询时若检测到未记录日期，竟在读操作中调用 `self.save_to_config()` 触发磁盘写操作，导致 `favorite_stocks.json` 的 `mtime` 持续被刷新，从而引发 watcher 线程疯狂重载。
+    - [x] **实施工业级内容指纹脏检查与纯只读查询加固**：
+        1. **`_file_watcher_loop` 增加严格 MD5 内容指纹校验 (`_last_file_hash`)**：即使文件 `mtime` 变动，若文件内容 Hash 未变，立即静默同步 `mtime`，0 重载、0 打印日志；
+        2. **`save_to_config` 增加写入前 Hash 脏检查**：若待保存内容与当前磁盘 Hash 一致，直接跳过写盘，杜绝冗余磁盘 I/O；
+        3. **彻底清除只读 Getter 中的写盘副作用**：`get_favorite_stock_date` 与 `get_favorite_stocks_dates` 仅在内存规范化返回，100% 杜绝读操作引发写盘；
+        4. **`load_from_config` 实施静默同步**：若数据实质无增删变动，转为 `logger.debug` 静默，仅在真正增删自选时输出 `logger.info`。
+    - [x] **全量 60 项跨模块自动化回归测试 100% 全部 PASSED**。
+
 ## 2026-09-02 11:15
 - [x] **实现 ATS 搜索历史纯只读保护模式 (避免覆盖 TK 过滤) & 工具栏【过滤】前新增 `r` 按钮与快捷键 `R` 极速刷新历史 (`stock_standalone/ats/ui/main_window.py`, `stock_standalone/tests/test_sector_strength_and_detail_parity.py`)**：
     - [x] **ATS 接入 History 纯只读保护模式（彻底根治覆盖/冲刷 TK 端 `search_history.json` 顽疾）**：

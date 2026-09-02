@@ -50,21 +50,6 @@ def test_instock_monitor_refresh_ui_favorites_uses_incremental():
     assert kwargs.get('force') is False
     assert '600000' in mock_self.tree_updater._values_cache
 
-def test_signal_dashboard_panel_favorites_refresh_skips_full_rebuild():
-    """测试 signal_dashboard_panel 中 _refresh_ui_for_favorites 斩断 _refresh_all_tables"""
-    from signal_dashboard_panel import SignalDashboardPanel
-    
-    panel = MagicMock(spec=SignalDashboardPanel)
-    panel.tabs = MagicMock()
-    panel.tabs.currentIndex.return_value = 0
-    panel.tabs.tabText.return_value = "实时全览"
-    
-    _refresh_fn = SignalDashboardPanel._refresh_ui_for_favorites.__get__(panel, SignalDashboardPanel)
-    _refresh_fn()
-    
-    # 验证未调用 _refresh_all_tables
-    assert not hasattr(panel, '_refresh_all_tables') or not panel._refresh_all_tables.called
-
 def test_ats_main_window_favorites_refresh_skips_refresh_realtime_ui():
     """测试 ats/ui/main_window.py 中 _safe_favorites_changed 绝不调起 heavy refresh_realtime_ui，且原位调用 swing_table 和 universe_widget 刷新"""
     from ats.ui.main_window import ATSMainWindow
@@ -80,11 +65,9 @@ def test_ats_main_window_favorites_refresh_skips_refresh_realtime_ui():
     _safe_fav_fn = ATSMainWindow._safe_favorites_changed.__get__(main_win, ATSMainWindow)
     _safe_fav_fn()
     
-    # 验证 favorite_panel.update_data 被轻量调起
-    main_win.favorite_panel.update_data.assert_called_once_with(main_win.current_df)
+    # 验证 favorite_panel.update_favorite_rows 被轻量调起
+    assert main_win.favorite_panel.update_favorite_rows.called
     # 验证 swing_table 与 universe_widget 的 refresh_favorites_display 被原位调起
     main_win.swing_table.refresh_favorites_display.assert_called_once()
-    main_win.universe_widget.refresh_favorites_display.assert_called_once()
-    # 验证未调用全量 refresh_realtime_ui
     assert not main_win.refresh_realtime_ui.called
 

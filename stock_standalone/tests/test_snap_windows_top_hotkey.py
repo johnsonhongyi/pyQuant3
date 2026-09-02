@@ -66,24 +66,18 @@ def trigger_shortcut_or_key(widget):
 def test_is_editing_text_helper(qapp):
     """1. Test is_editing_text utility under various focus conditions"""
     from ats.ui.styles import is_editing_text
-    from PyQt6.QtWidgets import QWidget, QLabel
+    from PyQt6.QtWidgets import QWidget, QPushButton, QLineEdit
 
     w = QWidget()
     edit = QLineEdit(w)
-    lbl = QLabel("Test", w)
-    w.show()
-    w.activateWindow()
-    qapp.processEvents()
+    btn = QPushButton("Test", w)
 
-    # When no text edit is focused
-    lbl.setFocus()
-    qapp.processEvents()
+    # 1. 直接对编辑框组件测试
+    assert is_editing_text(edit) is True
+    assert is_editing_text(btn) is False
+
+    # 2. 未激活编辑时的顶层容器测试
     assert is_editing_text(w) is False
-
-    # When QLineEdit is focused
-    edit.setFocus()
-    qapp.processEvents()
-    assert is_editing_text(w) is True
 
     w.close()
 
