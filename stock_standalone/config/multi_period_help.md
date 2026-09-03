@@ -80,7 +80,7 @@
    |     /                 /                 /     [低吸蓄势区间: 0% <= ch_pos <= 35%]
    |   /                 /     .-----------/
    | /                 /     /           /
-   |/                /     /           / <--- 通达信 KX DRAWLINE 上涨支撑线
+   |/                /     /           / <--- 支撑线价格: ch_supp_price (通达信 KX DRAWLINE 支撑线)
    |               /     /           /        (★ 支撑线方向由 ch_supp_slope_deg > 0° 标识!)
    |             /     /           /          (对应通达信图表红字『支撑:9.38元』)
    |           /     /           /
@@ -129,9 +129,15 @@ ch_dir == 1 and ch_slope_deg > 1.5 and close >= ch_lower and ch_pos >= 0 and ch_
 
 ### 策略 2：通达信 KX 上涨支撑线回踩企稳 (支撑偏离法)
 ```python
-ch_dir == 1 and ch_supp_slope_deg > 0 and ch_supp_pos >= -1.0 and ch_supp_pos <= 4.5
+# 1. 大通道是上涨通道 (中轨向上)
+ch_dir == 1 
+# 2. 通达信支撑线方向是向上延伸的 (★ 核心判断！)
+and ch_supp_slope_deg > 0 
+# 3. 股价守住支撑线，且在支撑线上方 -1% ~ +4.5% 的极窄区间内回踩企稳
+and close >= ch_supp_price and ch_supp_pos <= 4.5
 ```
-* **实战解析**：要求通达信上涨支撑线向上倾斜（`ch_supp_slope_deg > 0`），且股价在支撑线上方 -1% ~ +4.5% 的狭窄区间内精准回踩企稳。
+* **单行紧凑写法**：`ch_dir == 1 and ch_supp_slope_deg > 0 and close >= ch_supp_price and ch_supp_pos <= 4.5`
+* **实战解析**：要求大通道向上（`ch_dir == 1`），通达信上涨支撑线向上倾斜（`ch_supp_slope_deg > 0`），股价守在今日支撑线价格上方（`close >= ch_supp_price`），且偏离不超过 4.5%（`ch_supp_pos <= 4.5`），属于盈亏比极高的极窄回踩伏击点。
 
 ### 策略 3：通道支撑 + 黄金分割 + 见底信号共振 (防破位反弹法)
 ```python
