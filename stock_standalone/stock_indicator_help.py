@@ -1,7 +1,44 @@
 # -*- coding: utf-8 -*-
+import os
+import json
 import tkinter as tk
 from tkinter import ttk
 import re
+from typing import List, Tuple, Dict, Any, Optional
+from JohnsonUtil import LoggerFactory
+
+log = LoggerFactory.getLogger("indicator_help")
+
+def load_custom_indicator_help() -> List[Tuple[str, str, str]]:
+    """
+    外置持久化补充指标文档动态加载器。
+    打包后用户仅需修改/扩展 config/indicator_help_custom.json，
+    无需重新打包或重启主程序，重新按 Ctrl + / 即可热加载生效。
+    """
+    custom_items = []
+    try:
+        from sys_utils import get_conf_path
+        cfg_file = get_conf_path("config/indicator_help_custom.json")
+        if cfg_file and os.path.exists(cfg_file) and os.path.getsize(cfg_file) > 0:
+            with open(cfg_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, list):
+                    for entry in data:
+                        if isinstance(entry, dict):
+                            k = str(entry.get("key", "")).strip()
+                            s = str(entry.get("summary", "")).strip()
+                            d = str(entry.get("detail", "")).strip()
+                            if k:
+                                custom_items.append((k, s, d))
+                        elif isinstance(entry, (list, tuple)) and len(entry) >= 2:
+                            k = str(entry[0]).strip()
+                            s = str(entry[1]).strip()
+                            d = str(entry[2]).strip() if len(entry) > 2 else ""
+                            if k:
+                                custom_items.append((k, s, d))
+    except Exception as e:
+        log.warning(f"Failed to load custom indicator help from config/indicator_help_custom.json: {e}")
+    return custom_items
 
 class IndicatorHelpWindow:
     """
@@ -21,7 +58,7 @@ class IndicatorHelpWindow:
         self.window.attributes('-topmost', True)  # 保持置顶
         
         # 提示语
-        tip_label = ttk.Label(self.window, text="提示: 双击列表项可查看详细计算逻辑与 Query 语句", foreground="gray")
+        tip_label = ttk.Label(self.window, text="提示: 双击列表项查看详情 | 支持外置补充配置 config/indicator_help_custom.json (免打包)", foreground="gray")
         tip_label.pack(side='bottom', fill='x', padx=10, pady=5)
 
         # 搜索框
@@ -103,6 +140,72 @@ class IndicatorHelpWindow:
              " 1 : bc2 < tc2，底点比顶点更靠近现在，代表低位见底后进入震荡走高/反弹格局。\n"
              "-1 : tc2 < bc2，顶点比底点更靠近现在，代表高位见顶后进入回落/派发格局。\n\n"
              "Query同义词: ch_pattern, trend_pattern, channel_pattern"),
+
+            ("ch_dir", "【核心】通道方向标识 (1: 向上, -1: 向下, 0: 平行)", 
+             "详细说明：基于自动通道中轨线性回归斜率(ch_slope)判定的通道全局运行方向标识。\n"
+             " 1 : 上涨通道 (中轨向上倾斜)\n"
+             "-1 : 下跌通道 (中轨向下倾斜)\n"
+             " 0 : 水平横盘通道\n\n"
+             "Query同义词: ch_dir, channel_dir"),
+
+            ("ch_pos", "【核心】通道相对位置百分比 (%) (0% 下轨 ~ 100% 上轨)", 
+             "详细说明：当前最新收盘价处于通道下轨 (0%) 到上轨 (100%) 之间的百分比位置 ((close - lower) / width * 100)。\n"
+             "ch_pos <= 30 代表股价回踩到通道下轨支撑区，适合寻找低吸/震荡企稳点；\n"
+             "ch_pos >= 80 代表股价触及通道上轨压力区。\n\n"
+             "Query同义词: ch_pos, channel_pos, ch_pct"),
+
+            ("ch_width", "通道极值宽度比例 (%)", 
+             "详细说明：通道上轨与下轨的价格差占中轨价格的百分比 ((upper - lower) / mid * 100)，反映通道波动张力与喇叭口扩张/收敛程度。\n\n"
+             "Query同义词: ch_width, channel_width"),
+
+            ("ch_supp_price / supp_price", "【核心】通达信上涨支撑线今日价格 (元)", 
+             "详细说明：通达信 KX DRAWLINE 算法从历史低点(ch_bc2)向上延伸至今日的精准反弹支撑价格(对应图表上红字如『支撑:9.38元』)。当股价回踩支撑线企稳时构成极佳买点。\n\n"
+             "Query同义词: ch_supp_price, supp_price, support_price, ch_supp, 支撑价"),
+
+            ("ch_supp_slope / ch_supp_slope_deg", "【核心】上涨支撑线方向斜率与反弹倾角 (°)", 
+             "详细说明：衡量通达信上涨支撑线的延伸方向与反弹攻击倾角：\n"
+             "ch_supp_slope > 0 或 ch_supp_slope_deg > 0 代表支撑线昂首向上（上涨支撑线）；\n"
+             "数值越大(如 +25°、+45°)代表底部探明后的反弹上攻动能越强劲。\n\n"
+             "Query同义词: ch_supp_slope, supp_slope, ch_supp_slope_deg, supp_slope_deg, supp_deg, 支撑角度"),
+
+            ("ch_supp_pos / supp_pos / supp_bias", "【核心】支撑线相对位置偏离度 (%)", 
+             "详细说明：当前最新价格相对于今日支撑价格的偏离百分比 ((close - supp_price) / supp_price * 100)。\n"
+             "正值(如 +1.5%)表示股价稳稳站在支撑线上方，负值表示破位跌破支撑线。\n"
+             "ch_supp_pos 在 -1.0% ~ +4.0% 之间代表股价精准在支撑线上方窄幅震荡回踩。\n\n"
+             "Query同义词: ch_supp_pos, supp_pos, supp_bias, 支撑偏离"),
+
+            ("ch_supp_days", "支撑线起点距今 K 线天数", 
+             "详细说明：自上涨支撑线首个锚定底点开始算起，已持续延伸运行的交易日 K 线根数。\n\n"
+             "Query同义词: ch_supp_days, supp_days"),
+
+            ("reversal_line / rev_price", "通达信趋势翻转线价格 (元)", 
+             "详细说明：通达信同款趋势翻转防守线价格(趋势线=(EMA5+EMA13+EMA21)/3，翻转=IF(MA3>趋势线, 趋势线, MA3))，对应图表上黄色『反转:8.91元』，用于判定短线趋势翻转与防守位。\n\n"
+             "Query同义词: reversal_line, reversal_price, rev_price, 反转价"),
+
+            ("ch_res_price / ch_res_slope / ch_res_slope_deg", "通达信阻力线价格、斜率与倾角", 
+             "详细说明：基于近期波段顶点与下飘形成的动态压力/阻力线价格与倾角。\n\n"
+             "Query同义词: ch_res_price, res_price, ch_res_slope, ch_res_slope_deg"),
+
+            ("fib_50 / fib_38 / fib_61", "斐波那契波段中轴与各阶黄金分割位", 
+             "详细说明：自动通道 5 阶斐波那契回撤中轴与支撑阻力价格(fib_50 为 50% 轴心位，fib_38 为 38.2% 强势回调支撑位)。\n\n"
+             "Query同义词: fib_50, fib_38, fib_61, fib_high, fib_low"),
+
+            ("sig_bottom", "【信号】MACD/变速率低位见底企稳信号 (1: 见底)", 
+             "详细说明：结合 MACD 柱状图二次微分与 A1X 变速率识别出的低位止跌见底信号 (sig_bottom=1)。\n\n"
+             "Query同义词: sig_bottom, bottom_signal, 见底信号"),
+
+            ("sig_launch", "【信号】SK/SD 极低位启动起爆信号 (1: 启动)", 
+             "详细说明：SK/SD 动能线极低位金叉向上且配合量价异动触发的起爆信号 (sig_launch=1)。\n\n"
+             "Query同义词: sig_launch, launch_signal, 启动信号"),
+
+            ("sig_escape", "【信号】RSI6 高位逃顶预警信号 (1: 逃顶)", 
+             "详细说明：RSI6 超买区域下穿 84 触发的高位逃顶警示信号 (sig_escape=1)。\n\n"
+             "Query同义词: sig_escape, escape_signal, 逃顶信号"),
+
+            ("STRATEGY: 通道支撑震荡低吸", "【策略用例】寻找上涨通道中在通道下轨/支撑线附近震荡企稳个股", 
+             "策略说明：要求大趋势处于上涨通道(ch_dir==1)，且价格回踩至通道下轨支撑区(ch_pos<=35)或支撑线附近(ch_supp_pos在-1%~5%)企稳，守住下轨不破位(close>=ch_lower)。\n\n"
+             "Query推荐组：\n"
+             "df.query('ch_dir == 1 and ch_slope_deg > 1.5 and close >= ch_lower and ch_pos <= 35 and ch_supp_pos >= -1.0')"),
 
             ("STRATEGY: 通道触底反弹", "【策略用例】寻找近期探底企稳并震荡走高个股", 
              "策略说明：结合自动通道极值，寻找近 15 天内刚见底企稳、股价守牢底部、且在通道内部向上爬升的低吸标的。\n\n"
@@ -206,6 +309,20 @@ class IndicatorHelpWindow:
              "   写法: (SWL > SWS and ma20d > ma60d and lastp{1-5}d > ma60{1-5}d and {or: per{1-3}d > 3.0}) and (close > 0)\n"
              "   展开为: (SWL > SWS and ma20d > ma60d and (lastp1d > ma601d and lastp2d > ma602d and lastp3d > ma603d and lastp4d > ma604d and lastp5d > ma605d) and (per1d > 3.0 or per2d > 3.0 or per3d > 3.0)) and (close > 0)\n"),
         ]
+
+        # [NEW] 动态加载外置持久化补充文档 (实现打包后免重新编译热加载)
+        custom_help = load_custom_indicator_help()
+        if custom_help:
+            existing_keys = {item[0]: idx for idx, item in enumerate(self.all_data)}
+            new_additions = []
+            for item in custom_help:
+                k = item[0]
+                if k in existing_keys:
+                    self.all_data[existing_keys[k]] = item
+                else:
+                    new_additions.append(item)
+            if new_additions:
+                self.all_data = new_additions + self.all_data
 
         # [NEW] 绑定退出事件以保存位置
         self.window.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -443,6 +560,17 @@ def get_indicator_help_dict():
 
     result = {}
     for item in raw_list:
+        keys_str = item[0]
+        summary = item[1]
+        detail = item[2] if len(item) > 2 else ""
+        keys = [k.strip() for k in keys_str.split("/") if k.strip()]
+        for k in keys:
+            result[k] = (summary, detail)
+            result[k.lower()] = (summary, detail)
+
+    # [NEW] 动态合入外置持久化配置 (使表头 Tooltip 悬浮提示也能免打包热更新)
+    custom_help = load_custom_indicator_help()
+    for item in custom_help:
         keys_str = item[0]
         summary = item[1]
         detail = item[2] if len(item) > 2 else ""

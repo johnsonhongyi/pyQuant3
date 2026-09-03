@@ -1,0 +1,112 @@
+[
+  {
+    "key": "ch_dir",
+    "summary": "【核心】通道方向标识 (1: 向上, -1: 向下, 0: 平行)",
+    "detail": "详细说明：基于通达信自动通道中轨线性回归斜率(ch_slope)判定的通道全局运行方向标识。\n 1 : 上涨通道 (中轨向上倾斜，对应通达信右上方通道与向上箭头)\n-1 : 下跌通道 (中轨向下倾斜)\n 0 : 水平横盘通道\n\nQuery用法示例: ch_dir == 1\nQuery同义词: ch_dir, channel_dir"
+  },
+  {
+    "key": "ch_slope / ch_slope_deg",
+    "summary": "自动通道物理线性回归斜率与倾角 (°)",
+    "detail": "详细说明：衡量通道整体倾斜度与上升动能强度：\nch_slope > 0 (倾角 ch_slope_deg > 0°) 代表上升趋势通道；\n数值越大(如 ch_slope_deg > 2.0° 或 > 5.0°)代表通道上升越陡峭有力，可有效过滤走平无动能的弱势通道。\n\nQuery用法示例: ch_dir == 1 and ch_slope_deg > 1.5\nQuery同义词: ch_slope, slope, ch_slope_deg, slope_deg"
+  },
+  {
+    "key": "ch_pos",
+    "summary": "【核心】通道相对位置百分比 (%) (0% 下轨 ~ 100% 上轨)",
+    "detail": "详细说明：当前最新收盘价处于通道下轨 (0%) 到上轨 (100%) 之间的百分比位置 ((close - lower) / (upper - lower) * 100)。\nch_pos <= 30 代表股价处于通道下轨支撑区域，极具低吸盈亏比；\nch_pos 在 30~70 为中轨震荡；\nch_pos >= 80 代表触及通道上轨压力区。\n\nQuery用法示例: ch_pos >= 0 and ch_pos <= 35\nQuery同义词: ch_pos, channel_pos, ch_pct"
+  },
+  {
+    "key": "ch_upper / ch_mid / ch_lower",
+    "summary": "通达信自动通道上轨、中轨(回归线)、下轨价格 (元)",
+    "detail": "详细说明：基于通达信『自动画通道』算法，全图 BARSLAST 动态寻优极值顶点与底点拟合线性回归中轨(ch_mid)，上下延伸 5 阶动态斐波那契支撑/阻力通道(ch_upper, ch_lower)。\n\nQuery用法示例: close >= ch_lower and close <= ch_mid\nQuery同义词: ch_upper, ch_mid, ch_lower"
+  },
+  {
+    "key": "ch_width",
+    "summary": "通道极值宽度比例 (%)",
+    "detail": "详细说明：通道上轨与下轨的价格差占中轨价格的百分比 ((upper - lower) / mid * 100)，反映通道波动张力与喇叭口扩张/收敛程度。\nch_width / ch_mid < 0.18 表示通道处于狭窄收敛蓄势状态。\n\nQuery用法示例: ch_width / ch_mid < 0.20\nQuery同义词: ch_width, channel_width"
+  },
+  {
+    "key": "ch_supp_price / supp_price",
+    "summary": "【核心】通达信上涨支撑线今日价格 (元)",
+    "detail": "详细说明：通达信 KX DRAWLINE 算法从历史低点(ch_bc2)延伸至今日的精准反弹支撑价格(对应图表上红字如『支撑:9.38元』)。当股价回踩支撑线企稳时构成极佳买点。\n\nQuery用法示例: close >= ch_supp_price\nQuery同义词: ch_supp_price, supp_price, support_price, ch_supp, 支撑价"
+  },
+  {
+    "key": "ch_supp_slope / ch_supp_slope_deg",
+    "summary": "【核心】上涨支撑线方向斜率与反弹倾角 (°)",
+    "detail": "详细说明：衡量通达信上涨支撑线的延伸方向与反弹攻击倾角（支撑线方向的专属标识！）：\nch_supp_slope > 0 或 ch_supp_slope_deg > 0 代表支撑线昂首向上（上涨支撑线）；\n数值越大(如 +25°、+43.4°)代表底部探明后的反弹上攻动能越强劲。\n\nQuery用法示例: ch_supp_slope_deg > 0\nQuery同义词: ch_supp_slope, supp_slope, ch_supp_slope_deg, supp_slope_deg, supp_deg, 支撑角度"
+  },
+  {
+    "key": "ch_supp_pos / supp_pos / supp_bias",
+    "summary": "【核心】支撑线相对位置偏离度 (%)",
+    "detail": "详细说明：当前最新价格相对于今日支撑价格的偏离百分比 ((close - supp_price) / supp_price * 100)。\n正值(如 +1.5%)表示股价稳稳站在支撑线上方，负值表示跌破支撑线。\nch_supp_pos 在 -1.0% ~ +4.5% 之间代表股价精准在支撑线上方窄幅震荡回踩。\n\nQuery用法示例: ch_supp_pos >= -1.0 and ch_supp_pos <= 4.5\nQuery同义词: ch_supp_pos, supp_pos, supp_bias, 支撑偏离"
+  },
+  {
+    "key": "ch_supp_days",
+    "summary": "支撑线起点距今 K 线天数",
+    "detail": "详细说明：自上涨支撑线首个锚定底点开始算起，已持续延伸运行的交易日 K 线根数。\n\nQuery同义词: ch_supp_days, supp_days"
+  },
+  {
+    "key": "reversal_line / rev_price",
+    "summary": "通达信趋势翻转线价格 (元)",
+    "detail": "详细说明：通达信同款趋势翻转防守线价格(趋势线=(EMA5+EMA13+EMA21)/3，翻转=IF(MA3>趋势线, 趋势线, MA3))，对应图表上黄色『反转:8.91元』，用于判定短线趋势翻转与防守位。\n\nQuery用法示例: close >= reversal_line\nQuery同义词: reversal_line, reversal_price, rev_price, 反转价"
+  },
+  {
+    "key": "ch_pattern",
+    "summary": "【核心】趋势格局判定 (1: 触底反弹/震荡走高, -1: 触顶回落/震荡下跌)",
+    "detail": "详细逻辑：\n 1 : bc2 < tc2，底点比顶点更靠近现在，代表低位见底后进入震荡走高/反弹格局。\n-1 : tc2 < bc2，顶点比底点更靠近现在，代表高位见顶后进入回落/派发格局。\n\nQuery用法示例: ch_pattern == 1 and ch_bc2 <= 20\nQuery同义词: ch_pattern, trend_pattern, channel_pattern"
+  },
+  {
+    "key": "ch_anchor_high_price / ch_anchor_low_price",
+    "summary": "自动通道顶点最高价 / 底点最低价",
+    "detail": "详细说明：自动通道拟合所锚定的全历史高点价格(upper_price)与低点价格(lower_price)。\n\nQuery同义词: ch_anchor_high_price, ch_anchor_low_price"
+  },
+  {
+    "key": "ch_tc2 / ch_bc2",
+    "summary": "通道顶点距今 K 线数 (tc2) / 底点距今 K 线数 (bc2)",
+    "detail": "详细说明：通达信 BARSLAST 动态寻优测得的顶点与底点距离当前交易日的 K 线根数。\n\nQuery同义词: ch_tc2, ch_bc2"
+  },
+  {
+    "key": "ch_nod",
+    "summary": "极值高低点间隔天数 (nod = abs(tc2 - bc2))",
+    "detail": "详细说明：统计股价从最高顶点下跌至最低底点（或从底点上涨至顶点）所经历的洗盘/拉升 K 线天数。\n\nQuery同义词: ch_nod, nod"
+  },
+  {
+    "key": "fib_50 / fib_38 / fib_61",
+    "summary": "斐波那契波段中轴与各阶黄金分割位",
+    "detail": "详细说明：自动通道 5 阶斐波那契回撤中轴与支撑阻力价格(fib_50 为 50% 轴心位，fib_38 为 38.2% 强势回调支撑位)。\n\nQuery用法示例: close >= fib_50\nQuery同义词: fib_50, fib_38, fib_61, fib_high, fib_low"
+  },
+  {
+    "key": "sig_bottom",
+    "summary": "【信号】MACD/变速率低位见底企稳信号 (1: 见底)",
+    "detail": "详细说明：结合 MACD 柱状图二次微分与 A1X 变速率识别出的低位止跌见底信号 (sig_bottom=1)。\n\nQuery用法示例: sig_bottom == 1\nQuery同义词: sig_bottom, bottom_signal, 见底信号"
+  },
+  {
+    "key": "sig_launch",
+    "summary": "【信号】SK/SD 极低位启动起爆信号 (1: 启动)",
+    "detail": "详细说明：SK/SD 动能线极低位金叉向上且配合量价异动触发的起爆信号 (sig_launch=1)。\n\nQuery用法示例: sig_launch == 1\nQuery同义词: sig_launch, launch_signal, 启动信号"
+  },
+  {
+    "key": "sig_escape",
+    "summary": "【信号】RSI6 高位逃顶预警信号 (1: 逃顶)",
+    "detail": "详细说明：RSI6 超买区域下穿 84 触发的高位逃顶警示信号 (sig_escape=1)。\n\nQuery同义词: sig_escape, escape_signal, 逃顶信号"
+  },
+  {
+    "key": "STRATEGY: 通道下轨支撑震荡低吸 (通道百分位法)",
+    "summary": "【策略用例】寻找上涨通道中在通道下轨附近窄幅震荡蓄势个股",
+    "detail": "策略逻辑：\n1. ch_dir == 1: 必须为上涨通道；\n2. ch_slope_deg > 1.5: 确保通道向上倾角明确，排除水平震荡；\n3. close >= ch_lower: 严守通道下轨支撑，未破位；\n4. ch_pos >= 0 and ch_pos <= 35: 股价处于下轨支撑区域(0%~35%)内窄幅震荡蓄势。\n\nQuery实现语句：\ndf.query('ch_dir == 1 and ch_slope_deg > 1.5 and close >= ch_lower and ch_pos >= 0 and ch_pos <= 35')"
+  },
+  {
+    "key": "STRATEGY: 通达信KX支撑线回踩企稳 (支撑偏离法)",
+    "summary": "【策略用例】寻找通达信上涨支撑线上方窄幅回踩企稳个股",
+    "detail": "策略逻辑：\n1. ch_dir == 1: 上涨通道；\n2. ch_supp_slope_deg > 0: 通达信 KX DRAWLINE 支撑线昂首向上倾斜；\n3. ch_supp_pos >= -1.0 and ch_supp_pos <= 4.5: 股价在支撑线上方 -1% ~ +4.5% 的极窄区间内回踩震荡，绝佳买点。\n\nQuery实现语句：\ndf.query('ch_dir == 1 and ch_supp_slope_deg > 0 and ch_supp_pos >= -1.0 and ch_supp_pos <= 4.5')"
+  },
+  {
+    "key": "STRATEGY: 通道支撑+黄金分割+见底信号共振 (防破位反弹法)",
+    "summary": "【策略用例】通道下轨支撑位出现多重止跌反弹信号共振",
+    "detail": "策略逻辑：\n在上涨通道下轨支撑区内，结合黄金分割中轴(fib_50)、见底信号(sig_bottom)或翻转线(reversal_line)形成多重支撑共振，防范阴跌破位风险。\n\nQuery实现语句：\ndf.query('ch_dir == 1 and ch_pos <= 35 and close >= ch_lower and (close >= fib_50 or sig_bottom == 1 or close >= reversal_line)')"
+  },
+  {
+    "key": "STRATEGY: 多周期周日共振选股 (周线上升+日线支撑震荡)",
+    "summary": "【策略用例】周线锁定大级别上涨通道，日线捕捉下轨支撑震荡买点",
+    "detail": "多周期配置规则：\n1. 周线 W: ch_dir == 1 and ch_slope_deg > 2.0 and close > fib_38 (周线大级别处于上升通道，拒绝向下破位股)\n2. 日线 D: ch_dir == 1 and close >= ch_lower and ch_pos <= 35 and ch_supp_pos >= -1.0 and ch_supp_pos <= 5.0 (日线紧贴通道下轨与支撑线窄幅震荡)\n\n实战优势：大周期顺势，小周期逆势找支撑，盈亏比极高。"
+  }
+]

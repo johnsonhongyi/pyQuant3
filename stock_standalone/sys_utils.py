@@ -287,6 +287,11 @@ RESOURCE_MAP = {
         "src": "config/intraday_newstock_strategies.json",
         "dst": "config/intraday_newstock_strategies.json",
         "delay_release": True
+    },
+    "indicator_help_custom.json": {
+        "src": "config/indicator_help_custom.json",
+        "dst": "config/indicator_help_custom.json",
+        "delay_release": True
     }
 }
 
