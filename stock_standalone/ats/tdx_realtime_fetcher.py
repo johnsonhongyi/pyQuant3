@@ -1596,7 +1596,8 @@ class TDXRealtimeFetcher:
         sector_map: Optional[Dict[str, str]] = None,
         multi_period_cache: Optional[Dict[str, Any]] = None,
         name_map: Optional[Dict[str, str]] = None,
-        segment_mode: str = "30m"
+        segment_mode: str = "30m",
+        raw_quotes: Optional[List[Dict[str, Any]]] = None
     ) -> List[Dict[str, Any]]:
         """
         批量拉取多只股票的 TDX 高频盘口数据，并计算量比爆发力、分时 VWAP 偏离、
@@ -1607,12 +1608,13 @@ class TDXRealtimeFetcher:
         :param multi_period_cache: 底层多日底蕴特征 {code: {dff, dff2, dff3, rank, perc3d...}}
         :param name_map: 代码到名称的映射 {code: name}
         :param segment_mode: 交易时段分段模式 ('30m', '15m', '60m', 'day_open', '60s')
+        :param raw_quotes: 可选的预提取原始盘口列表，若提供则跳过网络获取
         :return: 包含完整 Alpha 动量与买点指引的字典列表，按 alpha_score 降序排列
         """
         if not codes:
             return []
 
-        quotes = self.get_security_quotes_safe(codes)
+        quotes = raw_quotes if raw_quotes is not None else self.get_security_quotes_safe(codes)
         if not quotes:
             return []
 
@@ -1762,6 +1764,30 @@ class TDXRealtimeFetcher:
                 elif pct >= 3.0 and (dff2 >= 8.0 or dff3 >= 15.0):
                     is_bidding_breakout = True
                     breakout_level = "多头加速"
+
+            # ── 💡 开盘即最低 (极小下影) 与跳空缺口加速结构量化计算 ──
+            yesterday_high = lasth1d if lasth1d > 0 else last_close
+
+            # 1. 开盘价即最低价 / 极小下影加速 (Open is Low)
+            low_diff_pct = round((open_p - low_p) / open_p * 100.0, 3) if open_p > 0 else 999.0
+            # 开盘即最低或差异极其微小 (下影 <= 1.5分钱 或 <= 0.15% 差异率，且非大幅低开)
+            is_open_low_accel = bool(open_p > 0 and low_p > 0 and (low_p >= open_p - 0.015 or low_diff_pct <= 0.15) and (open_p >= last_close * 0.98))
+
+            # 2. 跳空高开且留有跳空缺口加速 (Gap-Up Acceleration)
+            # 条件：跳空高开 (高开 >= 0.8%) 且日内最低价始终运行在昨收与昨日最高之上 (未回补缺口)
+            open_jump_pct = round((open_p - last_close) / last_close * 100.0, 2) if last_close > 0 else 0.0
+            is_gap_accel = bool(open_jump_pct >= 0.8 and low_p > last_close and (yesterday_high <= 0 or low_p >= yesterday_high - 0.015))
+
+            # 3. 双加速结构 (Dual Acceleration: 跳空高开 + 开盘即最低)
+            is_dual_accel = bool(is_open_low_accel and is_gap_accel)
+
+            accel_tag = ""
+            if is_dual_accel:
+                accel_tag = "👑双加速"
+            elif is_open_low_accel:
+                accel_tag = "⚡光脚加速"
+            elif is_gap_accel:
+                accel_tag = "🚀缺口加速"
 
             # 新股相对发行价溢价评估 (保护发行价，估值未透支判定)
             ipo_premium_pct = round((price - issue_p) / issue_p * 100.0, 1) if (is_first_day and issue_p > 0 and price > 0) else pct
@@ -1951,6 +1977,12 @@ class TDXRealtimeFetcher:
                 "dff3": dff3,
                 "rank": rank_val,
                 "perc3d": perc3d,
+                "is_open_low_accel": is_open_low_accel,
+                "is_gap_accel": is_gap_accel,
+                "is_dual_accel": is_dual_accel,
+                "low_diff_pct": low_diff_pct,
+                "open_jump_pct": open_jump_pct,
+                "accel_tag": accel_tag,
                 "extra_vals": mp_info.get("extra_vals", {}),
             })
 
@@ -2139,6 +2171,27 @@ class TDXRealtimeFetcher:
                 reason = f"在均线附近窄幅震荡, 等待放量突破或回踩信号"
                 type_priority = 50
 
+            # ── 💡 开盘即最低与跳空缺口加速能力赋能与提权 ──
+            is_open_low = it.get("is_open_low_accel", False)
+            is_gap = it.get("is_gap_accel", False)
+            is_dual = it.get("is_dual_accel", False)
+            low_diff = it.get("low_diff_pct", 999.0)
+            accel_t = it.get("accel_tag", "")
+
+            accel_bonus = 0.0
+            if is_dual:
+                type_priority += 12
+                accel_bonus = 10.0
+                reason = f"【👑双加速(光脚+缺口)】{reason}"
+            elif is_open_low:
+                type_priority += 6
+                accel_bonus = 5.0
+                reason = f"【⚡光脚加速(开盘即最低)】{reason}"
+            elif is_gap:
+                type_priority += 6
+                accel_bonus = 5.0
+                reason = f"【🚀缺口加速(跳空未补)】{reason}"
+
             # 重点关注标的专属加权与置顶提权
             is_focus = (sec == "重点关注" or it.get("is_focus", False))
             if is_focus:
@@ -2159,8 +2212,10 @@ class TDXRealtimeFetcher:
                     alpha_score = 15.0
                 else:
                     alpha_score = 50.0
+                if is_dual:
+                    alpha_score = min(100.0, alpha_score + 2.0)
             else:
-                # 基础分为买点类型权重 (占比 60%)，动量与盘口扫买加成 (占比 40%)
+                # 基础分为买点类型权重 (占比 60%)，动量与盘口扫买加成 (占比 40%)，叠加加速结构加成
                 base_score = type_priority * 0.55
                 momentum_bonus = min(18.0, max(0.0, pct * 2.0))
                 intent_bonus = 10.0 if ("扫买" in order_intent or "封板" in order_intent) else (5.0 if "托底" in order_intent else 0.0)
@@ -2168,20 +2223,31 @@ class TDXRealtimeFetcher:
                 base_bonus = 7.0 if has_base else 0.0
                 focus_bonus = 6.0 if is_focus else 0.0
 
-                alpha_score = base_score + momentum_bonus + intent_bonus + slope_bonus + base_bonus + focus_bonus
+                alpha_score = base_score + momentum_bonus + intent_bonus + slope_bonus + base_bonus + focus_bonus + accel_bonus
                 alpha_score = round(min(100.0, max(0.0, alpha_score)), 1)
 
-            it["buy_type"] = buy_type
+            disp_buy_type = f"{accel_t}·{buy_type}" if (accel_t and "⚠️" not in buy_type) else buy_type
+            it["buy_type"] = disp_buy_type
             it["buy_tag"] = buy_tag
             it["buy_zone"] = buy_zone
             it["stop_loss"] = stop_loss
             it["reason"] = reason
             it["type_priority"] = type_priority
             it["alpha_score"] = alpha_score
+            it["accel_tag"] = accel_t
+            it["is_open_low_accel"] = is_open_low
+            it["is_gap_accel"] = is_gap
+            it["is_dual_accel"] = is_dual
+            it["low_diff_pct"] = low_diff
             results.append(it)
 
-        # 按 Alpha 得分降序排列
-        results.sort(key=lambda x: x["alpha_score"], reverse=True)
+        # 按 Alpha 得分降序排列，同分或同级时：双加速优先 > 单加速优先，开盘最低差异最小的绝对优先
+        def _alpha_sort_key(x):
+            dual_rank = 0 if x.get("is_dual_accel") else (1 if (x.get("is_open_low_accel") or x.get("is_gap_accel")) else 2)
+            diff_rank = x.get("low_diff_pct", 999.0)
+            return (-x.get("alpha_score", 0.0), dual_rank, diff_rank)
+
+        results.sort(key=_alpha_sort_key)
         return results
 
     def convert_quotes_to_df(self, quotes: List[Dict[str, Any]]) -> pd.DataFrame:

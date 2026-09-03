@@ -1027,6 +1027,76 @@ def test_engine_build_target_universe_only_matches_hot_sectors():
     assert "重点关注" not in sector_map.values()
 
 
+def test_hot_sector_dual_acceleration_and_open_low_features():
+    """验证龙头突击【开盘即最低光脚加速】、【跳空缺口加速】及【双加速结构】特征计算与优先级提权"""
+    from ats.tdx_realtime_fetcher import TDXRealtimeFetcher
+    fetcher = TDXRealtimeFetcher.get_instance()
+
+    quotes = [
+        {
+            # 标的 A: 昨收 10.0, 开盘 10.30, 最低 10.30, 现价 10.80 -> 跳空高开且开盘即最低 -> 双加速
+            "code": "000001", "name": "双加速股", "price": 10.80, "open": 10.30, "high": 10.90, "low": 10.30,
+            "last_close": 10.00, "vol": 10000, "amount": 10500000, "bid1": 10.80, "ask1": 10.81
+        },
+        {
+            # 标的 B: 昨收 10.0, 开盘 10.02, 最低 10.02, 现价 10.60 -> 开盘即最低但跳空幅度<0.8% -> 光脚加速
+            "code": "000002", "name": "光脚加速股", "price": 10.60, "open": 10.02, "high": 10.70, "low": 10.02,
+            "last_close": 10.00, "vol": 10000, "amount": 10300000, "bid1": 10.60, "ask1": 10.61
+        },
+        {
+            # 标的 C: 昨收 10.0, 开盘 10.50, 最低 10.15, 现价 10.60 -> 跳空高开未补缺口但下影较大(10.50->10.15) -> 缺口加速
+            "code": "000003", "name": "缺口加速股", "price": 10.60, "open": 10.50, "high": 10.70, "low": 10.15,
+            "last_close": 10.00, "vol": 10000, "amount": 10400000, "bid1": 10.60, "ask1": 10.61
+        },
+        {
+            # 标的 D: 昨收 10.0, 开盘 9.90, 最低 9.70, 现价 10.20 -> 常规波动
+            "code": "000004", "name": "常规股", "price": 10.20, "open": 9.90, "high": 10.30, "low": 9.70,
+            "last_close": 10.00, "vol": 10000, "amount": 10000000, "bid1": 10.20, "ask1": 10.21
+        }
+    ]
+
+    sec_map = {"000001": "核心板块", "000002": "核心板块", "000003": "核心板块", "000004": "核心板块"}
+    name_map = {"000001": "双加速股", "000002": "光脚加速股", "000003": "缺口加速股", "000004": "常规股"}
+
+    results = fetcher.fetch_multi_stock_alpha_quotes(
+        codes=["000001", "000002", "000003", "000004"],
+        raw_quotes=quotes,
+        sector_map=sec_map,
+        name_map=name_map
+    )
+
+    res_map = {r["code"]: r for r in results}
+    rA = res_map["000001"]
+    rB = res_map["000002"]
+    rC = res_map["000003"]
+    rD = res_map["000004"]
+
+    # 1. 断言形态标签与标识
+    assert rA["is_dual_accel"] is True
+    assert rA["accel_tag"] == "👑双加速"
+    assert "👑双加速" in rA["buy_type"]
+
+    assert rB["is_open_low_accel"] is True
+    assert rB["is_dual_accel"] is False
+    assert rB["accel_tag"] == "⚡光脚加速"
+    assert "⚡光脚加速" in rB["buy_type"]
+
+    assert rC["is_gap_accel"] is True
+    assert rC["is_dual_accel"] is False
+    assert rC["accel_tag"] == "🚀缺口加速"
+    assert "🚀缺口加速" in rC["buy_type"]
+
+    assert rD["is_dual_accel"] is False
+    assert rD["is_open_low_accel"] is False
+    assert rD["is_gap_accel"] is False
+
+    # 2. 断言双加速优先权与得分提权
+    assert rA["alpha_score"] > rB["alpha_score"]
+    assert rA["alpha_score"] > rD["alpha_score"]
+    assert results[0]["code"] == "000001", f"双加速标的应排在首位，实际首位为: {results[0]['code']}"
+
+
+
 
 
 

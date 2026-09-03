@@ -399,6 +399,82 @@ class TestDailyLimitUpDialog(unittest.TestCase):
             fav_mgr.remove_favorite_stock("000001")
             dialog.close()
 
+    def test_daily_limit_up_dual_acceleration_features(self):
+        """验证天梯【开盘即最低光脚加速】、【跳空缺口加速】及【双加速结构】在连板天梯中的优先置顶与视觉高亮"""
+        dialog = DailyLimitUpDialog()
+
+        # 构造3只同为1板的标的
+        records = [
+            {
+                "code": "000001", "name": "常规首板", "price": 11.00, "last_close": 10.00,
+                "open": 9.90, "high": 11.00, "low": 9.70, "pct": 10.00, "consecutive_boards": 1,
+                "is_limit_up": True, "is_broken": False, "seal_to_circ_ratio": 2.0, "seal_amount_wan": 1000.0,
+                "tier_tag": "🔥 换手首板", "momentum_score": 80.0
+            },
+            {
+                "code": "000002", "name": "光脚加速首板", "price": 11.00, "last_close": 10.00,
+                "open": 10.02, "high": 11.00, "low": 10.02, "pct": 10.00, "consecutive_boards": 1,
+                "is_limit_up": True, "is_broken": False, "seal_to_circ_ratio": 2.0, "seal_amount_wan": 1000.0,
+                "tier_tag": "🔥 换手首板", "momentum_score": 85.0
+            },
+            {
+                "code": "000003", "name": "双加速首板", "price": 11.00, "last_close": 10.00,
+                "open": 10.30, "high": 11.00, "low": 10.30, "pct": 10.00, "consecutive_boards": 1,
+                "is_limit_up": True, "is_broken": False, "seal_to_circ_ratio": 2.0, "seal_amount_wan": 1000.0,
+                "tier_tag": "🔥 换手首板", "momentum_score": 90.0
+            }
+        ]
+
+        # 通过 limit_up_engine 进行全流程计算赋予加速标签与提权
+        from ats.limit_up_engine import LimitUpEngine
+        engine = LimitUpEngine.get_instance()
+        # 模拟由 scan_limit_up_records_from_df 计算得到的加速结构
+        for r in records:
+            open_p = r["open"]
+            low_p = r["low"]
+            last_c = r["last_close"]
+            low_diff_pct = round((open_p - low_p) / open_p * 100.0, 3)
+            is_open_low = (low_p >= open_p - 0.015 or low_diff_pct <= 0.15)
+            open_jump = (open_p - last_c) / last_c * 100.0
+            is_gap = (open_jump >= 0.8 and low_p > last_c)
+            is_dual = (is_open_low and is_gap)
+            r["is_open_low_accel"] = is_open_low
+            r["is_gap_accel"] = is_gap
+            r["is_dual_accel"] = is_dual
+            r["low_diff_pct"] = low_diff_pct
+            r["accel_tag"] = "👑双加速" if is_dual else ("⚡光脚加速" if is_open_low else "")
+            r["pattern_desc"] = f"{r['accel_tag']}|动能{r['momentum_score']:.0f}分" if r["accel_tag"] else f"动能{r['momentum_score']:.0f}分"
+
+        dialog.current_records = records
+        dialog.combo_time_slice.setCurrentText("⏱️ 全天全时段")
+        dialog.combo_tier_filter.setCurrentIndex(0)
+        dialog.sort_level1_col = 4  # 连板数列
+        dialog.sort_level1_asc = False
+        dialog._sort_col = None
+        for c in list(dialog.fav_manager.get_favorite_stocks()):
+            dialog.fav_manager.remove_favorite_stock(c)
+        try:
+            # 1. 默认排序：同为1板情况下，双加速标的 000003 必须绝对优先排在第一位！
+            dialog._apply_filter()
+            self.assertEqual(dialog.table.rowCount(), 3)
+            self.assertEqual(dialog.table.item(0, 0).text(), "000003", f"双加速标的应排第1位，实际为: {dialog.table.item(0, 0).text()}")
+            self.assertEqual(dialog.table.item(1, 0).text(), "000002", f"光脚加速标的应排第2位，实际为: {dialog.table.item(1, 0).text()}")
+            self.assertEqual(dialog.table.item(2, 0).text(), "000001", f"常规标的应排第3位，实际为: {dialog.table.item(2, 0).text()}")
+
+            # 2. 验证视觉渲染：第 6 列形态与质量应包含 👑双加速 且字体呈现金色 #ffd700
+            item_desc = dialog.table.item(0, 6)
+            self.assertIn("👑双加速", item_desc.text())
+            self.assertEqual(item_desc.foreground().color().name().lower(), "#ffd700")
+
+            # 3. 验证 ToolTip 包含双加速深度透视
+            tooltip = item_desc.toolTip()
+            self.assertIn("👑 加速结构: 👑双加速", tooltip)
+            self.assertIn("双加速: 跳空高开+开盘即最低", tooltip)
+            self.assertIn("下影差异: 0.00%", tooltip)
+
+        finally:
+            dialog.close()
+
 
 if __name__ == "__main__":
     unittest.main()
