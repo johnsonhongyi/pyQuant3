@@ -1105,6 +1105,90 @@ def test_hot_sector_dual_acceleration_and_open_low_features():
     assert results[0]["code"] == "000001", f"双加速标的应排在首位，实际首位为: {results[0]['code']}"
 
 
+def test_hot_sector_alert_round_robin_rotation_and_cooldown():
+    """
+    【🎯 验证 4】验证龙头突击榜环形游标轮动 (Round-Robin) 与单股冷却防刷屏机制：
+    当候选池存在多只达标龙头时，必须依次轮流推送，绝不卡死在同一只股票上重复弹窗！
+    """
+    from ats.ui.hot_sector_leaderboard import HotSectorLeaderboardDialog
+    from ats.alert_notifier import AlertNotifier
+
+    # 1. 构造多只达标龙头标的
+    records = [
+        {
+            "code": "920725", "name": "惠丰钻石", "sector": "培育钻石",
+            "buy_type": "⚡光脚加速·👑领涨龙头", "buy_tag": "LEADER", "alpha_score": 100.0,
+            "reason": "【⚡光脚加速(开盘即最低)】 板块领涨龙头", "is_dual_accel": False
+        },
+        {
+            "code": "601212", "name": "白银有色", "sector": "有色金属",
+            "buy_type": "⚡光脚加速·👑领涨龙头", "buy_tag": "LEADER", "alpha_score": 100.0,
+            "reason": "【⚡光脚加速(开盘即最低)】 板块领涨龙头", "is_dual_accel": False
+        },
+        {
+            "code": "605580", "name": "恒盛能源", "sector": "煤炭概念",
+            "buy_type": "⚡光脚加速·👑领涨龙头", "buy_tag": "LEADER", "alpha_score": 100.0,
+            "reason": "【⚡光脚加速(开盘即最低)】 板块领涨龙头", "is_dual_accel": False
+        },
+        {
+            "code": "002716", "name": "湖南白银", "sector": "有色金属",
+            "buy_type": "🚀缺口加速·先行突破", "buy_tag": "BREAKOUT", "alpha_score": 87.0,
+            "reason": "【🚀缺口加速(跳空突破)】 先行突破", "is_dual_accel": False
+        }
+    ]
+
+    dlg = HotSectorLeaderboardDialog()
+    try:
+        dlg.is_voice_alert_enabled = True
+        dlg._alert_rotation_cursor = 0
+        dlg._stock_alert_cd.clear()
+
+        # 拦截 AlertNotifier 的通知投递
+        notifier = AlertNotifier.get_instance()
+        notifier.clear_queue()
+        notifier._stock_alert_state.clear()
+        dispatched = []
+        notifier._enqueue_notification_item = lambda item: dispatched.append(item)
+
+        # 模拟第 1 次定时器触发：必须推送第 1 只 (惠丰钻石)，游标推到 1
+        dlg._check_and_notify_sector_highlights(records)
+        assert len(dispatched) == 1, "第 1 次触发必须推送 1 只标的"
+        assert dispatched[-1]["code"] == "920725", "第 1 次触发应为惠丰钻石"
+        assert dispatched[-1]["source"] == "龙头突击"
+        assert dlg._alert_rotation_cursor == 1, "游标必须递增推进到 1"
+
+        # 模拟第 2 次定时器触发 (几秒后)：必须轮动推送第 2 只 (白银有色)，游标推到 2
+        dlg._check_and_notify_sector_highlights(records)
+        assert len(dispatched) == 2, "第 2 次触发必须成功轮动"
+        assert dispatched[-1]["code"] == "601212", "第 2 次触发应轮换为白银有色"
+        assert dlg._alert_rotation_cursor == 2, "游标必须递增推进到 2"
+
+        # 模拟第 3 次定时器触发：必须轮动推送第 3 只 (恒盛能源)，游标推到 3
+        dlg._check_and_notify_sector_highlights(records)
+        assert len(dispatched) == 3, "第 3 次触发必须成功轮动"
+        assert dispatched[-1]["code"] == "605580", "第 3 次触发应轮换为恒盛能源"
+        assert dlg._alert_rotation_cursor == 3, "游标必须递增推进到 3"
+
+        # 模拟第 4 次定时器触发：必须轮动推送第 4 只 (湖南白银)，游标环形回到 0
+        dlg._check_and_notify_sector_highlights(records)
+        assert len(dispatched) == 4, "第 4 次触发必须成功轮动"
+        assert dispatched[-1]["code"] == "002716", "第 4 次触发应轮换为湖南白银"
+        assert dlg._alert_rotation_cursor == 0, "游标应环形回到 0"
+
+        # 模拟第 5 次定时器触发：所有 4 只标的均处于 180 秒冷却期内，必须静默跳过，绝不重复轰炸！
+        dlg._check_and_notify_sector_highlights(records)
+        assert len(dispatched) == 4, "所有候选均在冷却期时必须静默拦截，杜绝重复刷屏"
+
+        # 验证 4 次推送依次是 4 只不同的标的，彻底消灭“总是提示同一只”缺陷！
+        codes_sent = [it["code"] for it in dispatched]
+        assert codes_sent == ["920725", "601212", "605580", "002716"]
+        assert len(set(codes_sent)) == 4, "必须 100% 轮换 4 只不同股票"
+
+    finally:
+        dlg.close()
+
+
+
 
 
 

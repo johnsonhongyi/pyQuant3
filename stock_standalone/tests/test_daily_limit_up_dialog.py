@@ -643,6 +643,8 @@ class TestDailyLimitUpDialog(unittest.TestCase):
                     def get_favorite_stocks(self): return set()
                     def is_favorite_stock(self, code): return False
                 dialog.fav_manager = MockFavManager()
+                dialog.combo_time_slice.setCurrentIndex(1)
+                dialog.active_time_slice = "⏱️ 全天全时段"
                 dialog.current_records = records
                 dialog._apply_filter()
 
@@ -656,6 +658,69 @@ class TestDailyLimitUpDialog(unittest.TestCase):
         finally:
             with engine._cache_lock:
                 engine._history_daily_records = old_history
+
+    def test_daily_limit_up_alert_round_robin_rotation(self):
+        """【专项测试】验证每日连板天梯环形游标轮动 (Round-Robin) 与单股冷却防刷屏机制"""
+        from ats.alert_notifier import AlertNotifier
+
+        dialog = DailyLimitUpDialog()
+        try:
+            records = [
+                {
+                    "code": "601086", "name": "国芳集团", "consecutive_boards": 4,
+                    "momentum_score": 100.0, "tier_tag": "👑空间总龙", "pattern_desc": "连板主升",
+                    "pct": 10.0, "is_broken": False, "is_dual_accel": False
+                },
+                {
+                    "code": "002909", "name": "集泰股份", "consecutive_boards": 3,
+                    "momentum_score": 98.0, "tier_tag": "🚀连板接力", "pattern_desc": "换手接力",
+                    "pct": 10.0, "is_broken": False, "is_dual_accel": False
+                },
+                {
+                    "code": "600892", "name": "大晟文化", "consecutive_boards": 2,
+                    "momentum_score": 95.0, "tier_tag": "⚡启动加速", "pattern_desc": "光脚加速",
+                    "pct": 10.0, "is_broken": False, "is_dual_accel": False
+                }
+            ]
+
+            dialog._ladder_rotation_cursor = 0
+            dialog._notify_slice_cd = {}
+
+            notifier = AlertNotifier.get_instance()
+            notifier.clear_queue()
+            notifier._stock_alert_state.clear()
+            dispatched = []
+            notifier._enqueue_notification_item = lambda item: dispatched.append(item)
+
+            # 1. 模拟第 1 次触发：必须推送第 1 只 (国芳集团)，游标推进到 1
+            dialog._check_and_notify_ladder_highlights(records)
+            self.assertEqual(len(dispatched), 1)
+            self.assertEqual(dispatched[-1]["code"], "601086")
+            self.assertEqual(dispatched[-1]["source"], "每日天梯")
+            self.assertEqual(dialog._ladder_rotation_cursor, 1)
+
+            # 2. 模拟第 2 次触发：必须轮换推送第 2 只 (集泰股份)，游标推进到 2
+            dialog._check_and_notify_ladder_highlights(records)
+            self.assertEqual(len(dispatched), 2)
+            self.assertEqual(dispatched[-1]["code"], "002909")
+            self.assertEqual(dialog._ladder_rotation_cursor, 2)
+
+            # 3. 模拟第 3 次触发：必须轮换推送第 3 只 (大晟文化)，游标环形回到 0
+            dialog._check_and_notify_ladder_highlights(records)
+            self.assertEqual(len(dispatched), 3)
+            self.assertEqual(dispatched[-1]["code"], "600892")
+            self.assertEqual(dialog._ladder_rotation_cursor, 0)
+
+            # 4. 模拟第 4 次触发：全部在冷却期内，静默跳过
+            dialog._check_and_notify_ladder_highlights(records)
+            self.assertEqual(len(dispatched), 3)
+
+            # 验证 3 次推送依次轮换 3 只不同标的
+            codes_sent = [it["code"] for it in dispatched]
+            self.assertEqual(codes_sent, ["601086", "002909", "600892"])
+
+        finally:
+            dialog.close()
 
 
 if __name__ == "__main__":

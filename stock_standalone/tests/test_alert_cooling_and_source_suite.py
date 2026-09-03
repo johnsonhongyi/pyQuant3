@@ -35,75 +35,79 @@ def test_alert_cooling_and_source_attribution(qapp):
     item_holder = []
     def _mock_enqueue(item):
         item_holder.append(item)
-    notifier._enqueue_notification_item = _mock_enqueue
+    orig_enqueue = notifier._enqueue_notification_item
+    try:
+        notifier._enqueue_notification_item = _mock_enqueue
 
-    notifier.notify_special_signal(
-        code="600613",
-        name="神奇制药",
-        reason="👑 空间高度龙 (4板) | 涨幅+10.05%",
-        score=92.0,
-        source="每日天梯"
-    )
-    assert len(item_holder) == 1, "首次触发必须成功放行"
-    assert item_holder[-1]['source'] == "每日天梯", "必须明确标记报警来源【每日天梯】"
-    assert item_holder[-1]['code'] == "600613"
+        notifier.notify_special_signal(
+            code="600613",
+            name="神奇制药",
+            reason="👑 空间高度龙 (4板) | 涨幅+10.05%",
+            score=92.0,
+            source="每日天梯"
+        )
+        assert len(item_holder) == 1, "首次触发必须成功放行"
+        assert item_holder[-1]['source'] == "每日天梯", "必须明确标记报警来源【每日天梯】"
+        assert item_holder[-1]['code'] == "600613"
 
-    # 2. 5 秒后推送相同信号：在 10 分钟冷却期内，必须静默拦截
-    current_count = len(item_holder)
-    notifier.notify_special_signal(
-        code="600613",
-        name="神奇制药",
-        reason="👑 空间高度龙 (4板) | 涨幅+10.08%", # 仅涨幅微小波动
-        score=92.0,
-        source="每日天梯"
-    )
-    assert len(item_holder) == current_count, "10分钟内相同同类信号必须静默拦截，不得重复刷屏"
+        # 2. 5 秒后推送相同信号：在 10 分钟冷却期内，必须静默拦截
+        current_count = len(item_holder)
+        notifier.notify_special_signal(
+            code="600613",
+            name="神奇制药",
+            reason="👑 空间高度龙 (4板) | 涨幅+10.08%", # 仅涨幅微小波动
+            score=92.0,
+            source="每日天梯"
+        )
+        assert len(item_holder) == current_count, "10分钟内相同同类信号必须静默拦截，不得重复刷屏"
 
-    # 3. 20 秒后出现【新异动信号】(例如出现炸板回封、阳包阴等新形态突变)，必须立即放行！
-    notifier.notify_special_signal(
-        code="600613",
-        name="神奇制药",
-        reason="💥 炸板回封强支撑 | 🔥阳包阴反转突破 | 涨幅+10.00%",
-        score=94.0,
-        source="每日天梯"
-    )
-    assert len(item_holder) == current_count + 1, "10分钟内出现新形态异动突变必须即时放行"
-    assert "阳包阴" in item_holder[-1]['reason']
+        # 3. 20 秒后出现【新异动信号】(例如出现炸板回封、阳包阴等新形态突变)，必须立即放行！
+        notifier.notify_special_signal(
+            code="600613",
+            name="神奇制药",
+            reason="💥 炸板回封强支撑 | 🔥阳包阴反转突破 | 涨幅+10.00%",
+            score=94.0,
+            source="每日天梯"
+        )
+        assert len(item_holder) == current_count + 1, "10分钟内出现新形态异动突变必须即时放行"
+        assert "阳包阴" in item_holder[-1]['reason']
 
-    # 4. 测试打分大幅提升 (>= 5 分) 即时放行
-    notifier.notify_special_signal(
-        code="003040",
-        name="楚天龙",
-        reason="分时突破",
-        score=80.0,
-        source="赛道热榜"
-    )
-    assert item_holder[-1]['code'] == "003040"
-    assert item_holder[-1]['source'] == "赛道热榜"
-    cur_cnt = len(item_holder)
+        # 4. 测试打分大幅提升 (>= 5 分) 即时放行
+        notifier.notify_special_signal(
+            code="003040",
+            name="楚天龙",
+            reason="分时突破",
+            score=80.0,
+            source="赛道热榜"
+        )
+        assert item_holder[-1]['code'] == "003040"
+        assert item_holder[-1]['source'] == "赛道热榜"
+        cur_cnt = len(item_holder)
 
-    # 4.1 打分飙升到 88 分 (+8分)，必须立即放行！
-    notifier.notify_special_signal(
-        code="003040",
-        name="楚天龙",
-        reason="分时突破",
-        score=88.0,
-        source="赛道热榜"
-    )
-    assert len(item_holder) == cur_cnt + 1, "打分显著提升 >= 5分 必须立即放行"
+        # 4.1 打分飙升到 88 分 (+8分)，必须立即放行！
+        notifier.notify_special_signal(
+            code="003040",
+            name="楚天龙",
+            reason="分时突破",
+            score=88.0,
+            source="赛道热榜"
+        )
+        assert len(item_holder) == cur_cnt + 1, "打分显著提升 >= 5分 必须立即放行"
 
-    # 5. 测试 10 分钟 (600秒) 冷却期满后允许再次提醒
-    # 人工模拟把楚天龙的上次播报时间调整到 605 秒前
-    notifier._stock_alert_state["003040"]['ts'] = time.time() - 605.0
-    cur_cnt2 = len(item_holder)
-    notifier.notify_special_signal(
-        code="003040",
-        name="楚天龙",
-        reason="分时突破",
-        score=88.0,
-        source="赛道热榜"
-    )
-    notifier.clear_queue()
+        # 5. 测试 10 分钟 (600秒) 冷却期满后允许再次提醒
+        # 人工模拟把楚天龙的上次播报时间调整到 605 秒前
+        notifier._stock_alert_state["003040"]['ts'] = time.time() - 605.0
+        cur_cnt2 = len(item_holder)
+        notifier.notify_special_signal(
+            code="003040",
+            name="楚天龙",
+            reason="分时突破",
+            score=88.0,
+            source="赛道热榜"
+        )
+        notifier.clear_queue()
+    finally:
+        notifier._enqueue_notification_item = orig_enqueue
 
 
 def test_active_buy_early_signal_alert(qapp):
@@ -147,19 +151,23 @@ def test_active_buy_early_signal_alert(qapp):
     # 3. 验证推入 AlertNotifier 时能够顺利放行并带有【赛道热榜】来源
     notifier = AlertNotifier.get_instance()
     pushed_holder = []
-    notifier._enqueue_notification_item = lambda it: pushed_holder.append(it)
-    notifier.clear_queue()
-    notifier._stock_alert_state.clear()
+    orig_enqueue = notifier._enqueue_notification_item
+    try:
+        notifier._enqueue_notification_item = lambda it: pushed_holder.append(it)
+        notifier.clear_queue()
+        notifier._stock_alert_state.clear()
 
-    notifier.notify_special_signal(
-        code=item["code"],
-        name=item["name"],
-        reason=f"{item['sector']} {item['buy_type']} [{item['order_intent']}] | {item['reason']}",
-        score=item["alpha_score"],
-        source="赛道热榜"
-    )
+        notifier.notify_special_signal(
+            code=item["code"],
+            name=item["name"],
+            reason=f"{item['sector']} {item['buy_type']} [{item['order_intent']}] | {item['reason']}",
+            score=item["alpha_score"],
+            source="赛道热榜"
+        )
 
-    assert len(pushed_holder) == 1
-    assert "主动扫买" in pushed_holder[0]["reason"]
-    assert pushed_holder[0]["source"] == "赛道热榜"
-    assert pushed_holder[0]["code"] == "603843"
+        assert len(pushed_holder) == 1
+        assert "主动扫买" in pushed_holder[0]["reason"]
+        assert pushed_holder[0]["source"] == "赛道热榜"
+        assert pushed_holder[0]["code"] == "603843"
+    finally:
+        notifier._enqueue_notification_item = orig_enqueue

@@ -355,6 +355,10 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
         self._has_init_fetched: bool = False # 记录是否已完成非交易时段初次初始化
         self.tdx_log_dialog: Optional[TDXFetchLogDialog] = None # 独立日志弹窗引用
 
+        # 4. 轮动播报调度器状态 (Round-Robin Alert Scheduler)
+        self._alert_rotation_cursor: int = 0  # 候选标的环形轮动游标
+        self._stock_alert_cd: Dict[str, float] = {}  # 单股本地冷却记录 {code: last_notified_ts}
+
         # 4. 初始化 UI 布局与表头
         self.extra_cols = get_ats_extra_cols()
         self.headers, _ = get_leaderboard_headers(self.extra_cols)
@@ -1364,7 +1368,7 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
             pass
 
     def _check_and_notify_sector_highlights(self, filtered_records: List[Dict[str, Any]]):
-        """【板块龙头与特异异动自动挖掘通知】精选 Top 1 核心龙头标的进行播报"""
+        """【板块龙头与特异异动自动挖掘通知】采用环形游标轮询 (Round-Robin) 与单股防刷屏冷却，依次轮动推送达标标的"""
         if not getattr(self, "is_voice_alert_enabled", True):
             return
         if not filtered_records:
@@ -1372,28 +1376,65 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
         try:
             from ats.alert_notifier import AlertNotifier
             notifier = AlertNotifier.get_instance()
-            # 优先选拔 👑双加速 标的，若无则选拔最强核心领涨龙头与先锋突破标的
-            candidates = []
-            dual_cands = [r for r in filtered_records if r.get("is_dual_accel")]
-            if dual_cands:
-                candidates = dual_cands[:1]
-            else:
-                for r in filtered_records:
-                    score = float(r.get("alpha_score", 0.0))
-                    tag = r.get("buy_tag", "")
-                    if score >= 80.0 or tag in ("LEADER", "SURGE", "BREAKOUT", "PULLBACK") or r.get("sector") == "重点关注":
-                        candidates.append(r)
-                    if len(candidates) >= 1:  # 精选最强 Top 1 核心标的，避免队列堆积
-                        break
 
-            for idx, top_cand in enumerate(candidates, 1):
-                c = str(top_cand.get("code", "")).zfill(6)
-                n = str(top_cand.get("name", c))
-                score = float(top_cand.get("alpha_score", 88.0))
-                buy_type = str(top_cand.get("buy_type", ""))
-                sec = str(top_cand.get("sector", ""))
-                reason = f"{buy_type} | {top_cand.get('reason', '')}"
-                notifier.notify_special_signal(code=c, name=n, reason=reason, score=score, parent=self)
+            # 1. 收集达标的优质候选标的池 (按优先级分层：双加速优先，其次打分 >= 80 或领涨/突破强特征标的)
+            dual_cands = [r for r in filtered_records if r.get("is_dual_accel")]
+            other_cands = []
+            for r in filtered_records:
+                if r.get("is_dual_accel"):
+                    continue
+                score = float(r.get("alpha_score", 0.0))
+                tag = r.get("buy_tag", "")
+                if score >= 80.0 or tag in ("LEADER", "SURGE", "BREAKOUT", "PULLBACK") or r.get("sector") == "重点关注":
+                    other_cands.append(r)
+
+            # 候选池按优先级组合：双加速在前，优质其他标的在后 (最多截取前 12 只构建轮动池)
+            pool = (dual_cands + other_cands)[:12]
+            if not pool:
+                return
+
+            if not hasattr(self, "_alert_rotation_cursor"):
+                self._alert_rotation_cursor = 0
+            if not hasattr(self, "_stock_alert_cd"):
+                self._stock_alert_cd = {}
+
+            now_ts = time.time()
+            SECTOR_STOCK_CD = 180.0  # 单股本地轮动冷却周期：3分钟 (180秒)
+
+            selected_cand = None
+            selected_idx = -1
+            n_cands = len(pool)
+
+            # 2. 环形游标轮询扫描 (Round-Robin Scan)：
+            # 从当前游标开始环形扫描一周，挑选出首个满足 180 秒冷却周期的优质标的
+            for step in range(n_cands):
+                curr_idx = (self._alert_rotation_cursor + step) % n_cands
+                cand = pool[curr_idx]
+                c = str(cand.get("code", "")).zfill(6)
+                last_ts = self._stock_alert_cd.get(c, 0.0)
+
+                if (now_ts - last_ts) >= SECTOR_STOCK_CD:
+                    selected_cand = cand
+                    selected_idx = curr_idx
+                    break
+
+            # 若所有候选标的均在 180 秒冷却期内，静默等待冷却，不重复轰炸同一只股票
+            if selected_cand is None:
+                return
+
+            # 3. 推进游标至下一位置，实现平滑流水式轮动！
+            self._alert_rotation_cursor = (selected_idx + 1) % n_cands
+
+            c = str(selected_cand.get("code", "")).zfill(6)
+            self._stock_alert_cd[c] = now_ts
+
+            n = str(selected_cand.get("name", c))
+            score = float(selected_cand.get("alpha_score", 88.0))
+            buy_type = str(selected_cand.get("buy_type", ""))
+            sec = str(selected_cand.get("sector", ""))
+            reason = f"{buy_type} | {selected_cand.get('reason', '')}"
+
+            notifier.notify_special_signal(code=c, name=n, reason=reason, score=score, parent=self, source="龙头突击")
         except Exception as e:
             logger.debug(f"_check_and_notify_sector_highlights error: {e}")
 

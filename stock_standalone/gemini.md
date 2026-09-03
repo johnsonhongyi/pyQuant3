@@ -1,3 +1,33 @@
+## 2026-09-03 14:05
+- [x] **彻底根治 ATS 信号提示小窗【总是提示同一只股票无法轮动】Bug & 全面落地环形游标轮动 (Round-Robin) 与单股防刷屏冷却调度体系 (`stock_standalone/ats/alert_notifier.py`, `stock_standalone/ats/ui/hot_sector_leaderboard.py`, `stock_standalone/ats/ui/daily_limit_up_dialog.py`, `stock_standalone/tests/test_alert_cooling_and_source_suite.py`, `stock_standalone/tests/test_sector_strength_and_detail_parity.py`, `stock_standalone/tests/test_daily_limit_up_dialog.py`)**：
+    - [x] **排查定位“右下角黄金特异信号弹窗死锁轰炸惠丰钻石、其他龙头标的无法轮动”四大根本诱因**：
+        1. **龙头突击榜无轮动机制**：`HotSectorLeaderboard._check_and_notify_sector_highlights` 每次只选截取第 0 只标的（`candidates = dual_cands[:1]` 或 `len(candidates) >= 1: break`），永远死磕榜首标的；
+        2. **发送端缺失单股冷却**：榜单定时刷新时未记录该股上次播报时间，同一只排头股被连续提交；
+        3. **`AlertNotifier` 高分股票冷却失效漏洞**：当股票打分 $\ge 95$ 分时被标记为 `is_priority_signal = True`，原逻辑错误地将单股冷却防重连同全局限频一起绕过，导致同一只高分股每隔几秒就被无限次重复弹窗；且缺少 `_stock_alert_state` 状态记录导致单元测试断言失败；
+        4. **实时波动数据使每日去重被穿透**：分时买盘压强百分比等实时动态数据导致信号描述每次都不一致，绕过了 `SignalLedger` 的字符串精确比对。
+    - [x] **全链路重构【候选标的环形游标轮动 + 单股防刷屏冷却 + 异动突变即时放行】调度体系 (SSOT)**：
+        1. **龙头突击榜环形游标轮动选择器 (`HotSectorLeaderboardDialog`)**：
+           - 引入实例级 `_alert_rotation_cursor: int` 与单股冷却字典 `_stock_alert_cd: Dict[str, float]`；
+           - 达标候选池（双加速优先，其次打分 $\ge 80$ 或领涨/突破强特征标的）截取前 12 只构建流水池；
+           - 采用环形游标扫描（Round-Robin Scan）：挑选出首个未在 180 秒冷却期内的标的，推送后游标推进到下一位置，实现平滑流水式轮动（惠丰钻石 -> 白银有色 -> 恒盛能源 -> 湖南白银……）；
+           - 全部标的冷却期内静默等待，绝不强行重复弹窗；
+           - 传入 `source="龙头突击"` 明确标记报警来源；
+        2. **每日天梯环形游标轮动选择器 (`DailyLimitUpDialog`)**：
+           - 类似地引入 `_ladder_rotation_cursor` 与 10 分钟单股冷却机制，并传入 `source="每日天梯"`；
+        3. **`AlertNotifier` 核心接收端铁壁防刷屏加固**：
+           - 恢复并规范 `self._stock_alert_state` 记录单股历史通知状态；
+           - **高优先级信号边界修正**：`is_priority_signal`（双加速/主动扫买/高分）仅豁免全局频控，**绝不豁免同一只股票的单股防刷屏冷却**（双加速 180 秒，普通信号 600 秒）；
+           - **重大异动突变放行豁免 (Mutation Breakthrough Bypass)**：若在单股冷却期内，检测到打分大幅跳升（$\ge 5$ 分）或出现关键新形态突变（炸板回封、阳包阴、双加速、反转突破等），允许即时放行；
+           - 队列排队去重（Queue Deduplication）与正则规范化去重（剥离秒级波动的买盘压强/均线偏离数值）；
+           - 弹窗标题与日志呈现来源标记 `⭐ 黄金特异信号 [龙头突击]: 惠丰钻石 (920725)`；
+           - 托盘初始化增加 `sip.isdeleted` 状态自愈防御；
+    - [x] **自动化测试与全系统回归 100% 全部 PASSED**：
+        - `test_alert_cooling_and_source_suite.py` 2 项测试全部 PASSED；
+        - `test_alert_voice_and_popup_fix.py` + `test_alert_notifier_screen_persistence.py` 9 项全部 PASSED；
+        - `test_sector_strength_and_detail_parity.py` 新增 `test_hot_sector_alert_round_robin_rotation_and_cooldown` 专项测试，20 项测试全部 PASSED；
+        - `test_daily_limit_up_dialog.py` 新增 `test_daily_limit_up_alert_round_robin_rotation` 专项测试，8 项测试全部 PASSED；
+        - `test_popularity_resonance_features.py` 11 项跨模块测试全部 PASSED。全系统 50 项测试全绿通过。
+
 ## 2026-09-03 13:25
 - [x] **彻底根治天梯与龙头突击【每日在同一个尺度、倒挂缺乏梯度】缺陷 & 全面落地多日强势底蕴与启动加速分层梯度动能体系 (`stock_standalone/ats/limit_up_engine.py`, `stock_standalone/ats/tdx_realtime_fetcher.py`, `stock_standalone/ats/ui/daily_limit_up_dialog.py`, `stock_standalone/tests/test_daily_limit_up_dialog.py`, `stock_standalone/tests/test_sector_strength_and_detail_parity.py`)**：
     - [x] **排查定位“4板总龙与3板接力撞顶99分分不出高下、1板98分反超压制2板94分”根本诱因**：
