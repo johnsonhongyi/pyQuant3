@@ -22015,8 +22015,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             # Treeview 表格定义
             columns = tuple(cct.v_reversal_pool_col) if hasattr(cct, 'v_reversal_pool_col') else ("code", "name", "phase", "structure", "dff", "Rank", "red","slope","dff3", "dff2", "entry_date", "anchor_low", "vol_ratio")
             tree = ttk.Treeview(pool_label_frame, columns=columns, show="headings", selectmode="browse")
-            tree.tag_configure("fav", background="#eefcf7", foreground="#00aa55")
-            tree.tag_configure("buy_zone", background="#fff9eb", foreground="#b87333")  # 黄金买入点 (潜伏/回踩)
+            tree.tag_configure("fav", background="#f0f9ff", foreground="#0050b3")  # 自选重点标的
+            tree.tag_configure("attack", background="#fff2f0", foreground="#cf1322")  # 🔥 重点进攻 (首拉/二拉起爆)
+            tree.tag_configure("pullback", background="#fffbe6", foreground="#d48806")  # 💎 黄金回踩
+            tree.tag_configure("buy_zone", background="#fffbe6", foreground="#d48806")  # 黄金买入点
+            tree.tag_configure("consol", background="#ffffff", foreground="#262626")  # 横盘潜伏
 
             headers = {
                 "code": "代码", "name": "名称", "phase": "当前阶段", "structure": "支撑分级",
@@ -22028,6 +22031,18 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             
             current_sort_column = None
             current_sort_reverse = False
+            current_stage_filter = "ALL"
+            stage_buttons = {}
+
+            def set_stage_filter(stage):
+                nonlocal current_stage_filter
+                current_stage_filter = stage
+                for st, btn in stage_buttons.items():
+                    if st == stage:
+                        btn.config(relief="sunken", bg="#cce5ff", font=("Microsoft YaHei", 8, "bold"))
+                    else:
+                        btn.config(relief="raised", bg="#f5f5f5", font=("Microsoft YaHei", 8))
+                refresh_pool_data()
 
             def tree_sort(tv, col, reverse):
                 nonlocal current_sort_column, current_sort_reverse
@@ -22244,8 +22259,16 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                             stats[phase_raw] = stats.get(phase_raw, 0) + 1
                             total_count += 1
                             
-                        # 动态更新 LabelFrame 标题，展示最新统计信息
-                        stats_text = f"🎯 V型反转 监控潜伏池 (总数: {total_count} | 横盘: {stats.get('CONSOLIDATING', 0)} | 首拉: {stats.get('WAVE_UP', 0)} | 回踩: {stats.get('PULLBACK', 0)} | 二拉: {stats.get('WAVE_UP_2', 0)})"
+                        # 动态更新 LabelFrame 标题，展示最新统计信息与当前过滤视图
+                        filter_name_map = {
+                            "ALL": "全部",
+                            "ATTACK": "🔥重点进攻",
+                            "PULLBACK": "💎黄金回踩",
+                            "CONSOLIDATING": "⏳横盘潜伏",
+                            "FAV": "⭐自选重点"
+                        }
+                        cur_filter_name = filter_name_map.get(current_stage_filter, "全部")
+                        stats_text = f"🎯 V型反转 监控潜伏池 [{cur_filter_name}] (总数: {total_count} | 首拉: {stats.get('WAVE_UP', 0)} | 二拉: {stats.get('WAVE_UP_2', 0)} | 回踩: {stats.get('PULLBACK', 0)} | 横盘: {stats.get('CONSOLIDATING', 0)})"
                         pool_label_frame.config(text=stats_text)
 
                         # ✅ [df_all 内存补齐] 直接从已在内存中的 df_all 提取均线/低价字段
@@ -22342,6 +22365,17 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         for code in list(pool):
                             flags = self.realtime_service.kline_cache.get_consolidation_flags(code)
                             phase_raw = flags.get("phase", "INIT")
+                            
+                            # ── 阶段过滤 ───────────────────────────────────────
+                            if current_stage_filter == "ATTACK" and phase_raw not in ("WAVE_UP", "WAVE_UP_2"):
+                                continue
+                            elif current_stage_filter == "PULLBACK" and phase_raw != "PULLBACK":
+                                continue
+                            elif current_stage_filter == "CONSOLIDATING" and phase_raw != "CONSOLIDATING":
+                                continue
+                            elif current_stage_filter == "FAV" and code not in fav_set:
+                                continue
+
                             phase_cn = phase_map.get(phase_raw, phase_raw)
                             
                             # 优先使用已持久化保存的名称，省去每次查询开销
@@ -22369,6 +22403,21 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                         vol_ratio_str = f"{recent_avg_vol / base_vol:.1f}x"
                             except Exception:
                                 pass
+
+                            # 提取 df 行用于综合进攻评分
+                            df_row_data = None
+                            if df_snap is not None and not df_snap.empty:
+                                c_clean = str(code).strip().zfill(6)
+                                if c_clean in df_snap.index:
+                                    df_row_data = df_snap.loc[c_clean]
+                                elif 'code' in df_snap.columns:
+                                    _m = df_snap[df_snap['code'] == c_clean]
+                                    if not _m.empty:
+                                        df_row_data = _m.iloc[0]
+
+                            priority_score = 0.0
+                            if hasattr(self.realtime_service.kline_cache, 'calculate_reversal_priority_score'):
+                                priority_score = self.realtime_service.kline_cache.calculate_reversal_priority_score(code, flags, df_row_data)
 
                             # 根据 columns 动态构建 values，随时可以自定义添加 col
                             row_values = []
@@ -22406,6 +22455,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                             pool_rows.append({
                                 "code": code,
                                 "is_fav": is_fav_stock,
+                                "priority_score": priority_score,
+                                "phase_raw": phase_raw,
                                 "values": tuple(row_values)
                             })
 
@@ -22436,6 +22487,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                     else:
                                         val_to_use = val if val is not None else ""
                                         return (prio, 1, val_to_use, row["code"])
+                                
                                 else:
                                     # 升序排列 (reverse=False)
                                     if is_num:
@@ -22447,20 +22499,20 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                             
                             pool_rows = sorted(pool_rows, key=get_sort_key, reverse=current_sort_reverse)
                         else:
-                            # 默认排序：代码升序，且重点关注置顶
-                            pool_rows = sorted(pool_rows, key=lambda r: (- (1 if r["is_fav"] else 0), r["code"]))
+                            # 默认综合进攻优先级排序：置顶自选与高爆发价值标的（二拉 > 首拉 > 黄金回踩 > 上涨通道支撑线 > 量价齐升 > 龙头Rank > 横盘）
+                            pool_rows = sorted(pool_rows, key=lambda r: (- (1 if r["is_fav"] else 0), - r.get("priority_score", 0.0), r["code"]))
 
                         # 数据批量插入与选中态恢复
                         for row in pool_rows:
                             row_tags = []
                             if row["is_fav"]:
                                 row_tags.append("fav")
+                            elif row.get("phase_raw") in ("WAVE_UP", "WAVE_UP_2"):
+                                row_tags.append("attack")
+                            elif row.get("phase_raw") == "PULLBACK":
+                                row_tags.append("pullback")
                             else:
-                                code_clean = row["code"]
-                                flags = self.realtime_service.kline_cache.get_consolidation_flags(code_clean)
-                                phase_raw = flags.get("phase", "INIT")
-                                if phase_raw in ["CONSOLIDATING", "PULLBACK"]:
-                                    row_tags.append("buy_zone")
+                                row_tags.append("consol")
                             
                             item_id = tree.insert("", "end", values=row["values"], tags=tuple(row_tags))
                             if selected_code and row["code"] == selected_code:
@@ -22611,11 +22663,54 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 else:
                     messagebox.showerror("Error", "请输入正确的6位股票代码！")
 
-            add_btn = tk.Button(pool_bar, text="➕ 手动添加监控", command=handle_add_stock, font=("Microsoft YaHei", 9), bg="#e8f8f5")
-            add_btn.pack(side="left", padx=5)
+            add_btn = tk.Button(pool_bar, text="➕ 添加", command=handle_add_stock, font=("Microsoft YaHei", 8), bg="#e8f8f5")
+            add_btn.pack(side="left", padx=3)
 
-            refresh_btn = tk.Button(pool_bar, text="🔄 刷新池", command=refresh_pool_data, font=("Microsoft YaHei", 9))
-            refresh_btn.pack(side="right", padx=5)
+            filter_frame = tk.Frame(pool_bar)
+            filter_frame.pack(side="left", padx=6)
+            
+            stages = [
+                ("ALL", "全部"),
+                ("ATTACK", "🔥 重点进攻"),
+                ("PULLBACK", "💎 黄金回踩"),
+                ("CONSOLIDATING", "⏳ 横盘潜伏"),
+                ("FAV", "⭐ 自选重点")
+            ]
+            for s_key, s_label in stages:
+                btn = tk.Button(filter_frame, text=s_label, font=("Microsoft YaHei", 8),
+                                relief="sunken" if s_key == "ALL" else "raised",
+                                bg="#cce5ff" if s_key == "ALL" else "#f5f5f5",
+                                command=lambda _s=s_key: set_stage_filter(_s))
+                btn.pack(side="left", padx=1)
+                stage_buttons[s_key] = btn
+
+            def handle_cleanup_pool():
+                if hasattr(self, 'realtime_service') and self.realtime_service and hasattr(self.realtime_service, 'kline_cache'):
+                    res = self.realtime_service.kline_cache.cleanup_v_reversal_pool(max_capacity=100, force_trim=True, df=getattr(self, 'df_all', None))
+                    refresh_pool_data()
+                    messagebox.showinfo("潜伏池智能清理", f"已成功完成智能清理与收敛！\n清理前容量: {res['initial_count']} 只\n清理后容量: {res['final_count']} 只\n常规淘汰: {res['evicted_count']} 只\n配额裁汰: {res['trimmed_count']} 只")
+
+            def handle_scan_channel_pool():
+                if hasattr(self, 'realtime_service') and self.realtime_service and hasattr(self.realtime_service, 'kline_cache'):
+                    added = self.realtime_service.kline_cache.scan_and_auto_add_uptrend_channel_stocks(
+                        df=getattr(self, 'df_all', None), max_add=30, max_pool_limit=120, force_replace=True
+                    )
+                    refresh_pool_data()
+                    cur_total = len(self.realtime_service.kline_cache.get_v_reversal_pool())
+                    if added > 0:
+                        msg = f"全市场自动通道扫描纳标完毕！\n新增纳标: {added} 只上涨趋势优质标的\n当前潜伏池总容量: {cur_total} 只"
+                    else:
+                        msg = f"扫描完毕！当前潜伏池已汇聚 {cur_total} 只优质多头标的，已保持当前最优配置。"
+                    messagebox.showinfo("通道上涨纳标", msg)
+
+            refresh_btn = tk.Button(pool_bar, text="🔄 刷新", command=refresh_pool_data, font=("Microsoft YaHei", 8))
+            refresh_btn.pack(side="right", padx=2)
+
+            scan_btn = tk.Button(pool_bar, text="🚀 通道纳标", command=handle_scan_channel_pool, font=("Microsoft YaHei", 8, "bold"), bg="#e8f5e9", fg="#2e7d32")
+            scan_btn.pack(side="right", padx=2)
+
+            clean_btn = tk.Button(pool_bar, text="🧹 智能清理", command=handle_cleanup_pool, font=("Microsoft YaHei", 8, "bold"), bg="#fff3e0", fg="#d35400")
+            clean_btn.pack(side="right", padx=2)
 
             # 绑定双击事件联动
             def on_tree_double_click(event):

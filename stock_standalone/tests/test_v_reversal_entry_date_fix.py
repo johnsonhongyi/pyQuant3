@@ -109,15 +109,15 @@ def test_entry_date_preserved_across_updates(kline_cache):
 def test_phase_transition_keeps_initial_entry_date(kline_cache):
     """测试 3: 波段状态跃迁 (CONSOLIDATING -> WAVE_UP -> PULLBACK -> WAVE_UP_2)，entry_date 锁定，phase_entry_date 推进"""
     code = "605337"
-    initial_date = "2026-08-01"
     today_str = cct.get_today()
+    initial_date = cct.last_tddate(2) if hasattr(cct, 'last_tddate') else today_str
     now_ts = time.time()
     
     kline_cache._consolidation_flags[code] = {
         "phase": "CONSOLIDATING",
         "entry_date": initial_date,
         "first_entry_date": initial_date,
-        "first_entry_ts": now_ts - 18 * 86400,
+        "first_entry_ts": now_ts - 2 * 86400,
         "phase_entry_date": today_str,
         "phase_ts": now_ts,
         "anchor_low": 10.0,
@@ -174,15 +174,15 @@ def test_phase_transition_keeps_initial_entry_date(kline_cache):
 def test_persistence_preserves_first_entry_date(kline_cache):
     """测试 4: 持久化保存与加载恢复，保留最初入池时间且不误淘汰活跃拉升股"""
     code = "688617"
-    historical_date = "2026-08-15"
     today_str = cct.get_today()
+    historical_date = cct.last_tddate(2) if hasattr(cct, 'last_tddate') else today_str
     now_ts = time.time()
     
     kline_cache._consolidation_flags[code] = {
         "phase": "WAVE_UP",
         "entry_date": historical_date,
         "first_entry_date": historical_date,
-        "first_entry_ts": now_ts - 4 * 86400,
+        "first_entry_ts": now_ts - 2 * 86400,
         "phase_entry_date": today_str,
         "phase_ts": now_ts,
         "anchor_low": 200.0,
