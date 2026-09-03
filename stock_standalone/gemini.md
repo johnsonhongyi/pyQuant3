@@ -1,3 +1,42 @@
+## 2026-09-03 23:18
+- [x] **根治【通道纳标提示 0 只】死锁缺陷 & 升级全市场【双轨通道识别 + 汰弱留强动态置换】引擎 (`realtime_data_service.py`, `instock_MonitorTK.py`, `tests/test_v_reversal_pool_enhancements.py`)**：
+    - [x] **深度排查并定位点击【🚀 通道纳标】返回 0 只的两大根本诱因**：
+        1. **池容量达到 100 触发硬拦截退出**：潜伏池当前刚好有 100 只标的，`available_slots = max_pool_limit - len(current_pool) = 100 - 100 = 0`，代码首行 `available_slots <= 0: return 0` 直接拦截退出，根本没有执行任何扫描；
+        2. **全市场截面宽表 `df_all` 缺少 `ch_dir` 列导致被一票否决**：`calc_trend_channel` 原生是在个股时序 K 线（数十根）上计算的，而全市场 5000+ 截面宽表 `df_all`（`top_all`）包含的是 `close, ma5d, ma10d, ma20d, ma60d, Rank, dff, percent`，默认没有 `ch_dir` 这一列！原代码 `not has_ch_dir: return 0` 导致全市场一票否决。
+    - [x] **落地【双轨智能识别 + 动态汰弱留强】方案**：
+        1. **双轨智能通道识别**：
+           - 轨1：若存在时序 `ch_dir`，按通道支撑线与斜率判定；
+           - 轨2：自适应截面多头均线通道（`ma5d > ma10d > ma20d` 或 `close > ma20d > ma60d`，站稳支撑 `low >= ma20d * 0.96`，动量与排名健康），即便没有预计算 `ch_dir` 列也能高胜率识别上涨通道标的；
+        2. **汰弱留强动态置换与弹性容量**：
+           - 扩容上限至 120 只，且支持 `force_replace=True`；
+           - 当池子已满时，自动在池内寻找非上涨通道、`INIT` 或表现最弱的滞涨标的进行淘汰，置换为最新扫描的高分上涨通道牛股；
+        3. **界面交互与提示信息优化**：
+           - 当纳标成功时提示新增与汰换只数；未发现更优标的时提示当前配置已最优。
+    - [x] **自动化测试回归全绿**：
+        - 新增 `test_scan_cross_sectional_and_dynamic_replacement_when_pool_full` 专项测试；
+        - 全部 19 项通道与潜伏池回归测试 100% 全部 PASSED。
+
+## 2026-09-03 22:45
+- [x] **根治 V-Reversal 监控潜伏池被误清空归零问题 & 全面落地【依据自动通道清理、绝不依时间淘汰】体系 (`realtime_data_service.py`, `tests/test_v_reversal_pool_enhancements.py`)**：
+    - [x] **深度排查并定位 V型反转没有任何 code (容量清零) 根本诱因**：
+        1. **入池历史日期触发硬性超时淘汰**：存量潜伏池中标的 `entry_date` 多为 8月中旬（距今交易日间隔 `total_dist >= 10`）。当 `cleanup_v_reversal_pool` 触发时，`total_dist >= 7` 与 `phase_dist >= 3` 规则将所有处于横盘潜伏的健康个股无差别判定为 `潜伏超期`，导致全池 83 只标的瞬间被淘汰归零；
+        2. **后台自动清理机制擅自触发并落盘**：`set_df_all_cache` 在行情注入时每隔 300 秒自动调用 `cleanup_v_reversal_pool`，并将清空后的 `v_reversal_pool: []` 状态立刻写回磁盘/Ramdisk，导致物理文件覆盖丢失；
+        3. **分时状态机逐股淘汰与阶段过滤视图干扰**：分时更新时 `trade_dist >= 3` 的硬淘汰逻辑以及前端阶段过滤选择（如选定“🔥重点进攻”时横盘标的被隐去）也是池中无 code 显示的原因之一。
+    - [x] **全面落实【依据自动通道清理，而不是时间】核心准则**：
+        1. **彻底废除纯时间超时淘汰**：在 `cleanup_v_reversal_pool` 中彻底废除 `total_dist >= 7`（潜伏超期）、`phase_dist >= 3`（横盘超时）等所有纯交易日时间淘汰逻辑；在 `update_wave_structure_state` 的 `CONSOLIDATING` 阶段废除 `trade_dist >= 3` 淘汰；无论潜伏多久，形态完好坚决保留；
+        2. **全面转向以自动通道（`ch_dir`）为核心清理依据**：
+           - 下降通道淘汰：`ch_dir == -1`，坚决清理剔除；
+           - 破位上涨支撑线淘汰：`close < ch_supp_price * 0.975` 或破位潜伏底座 `close < anchor_low * 0.975`；
+           - 破位 MA60 且处于弱势通道淘汰；
+           - 上涨通道（`ch_dir == 1`）且未破位标的 100% 坚决保留；
+        3. **停用后台自动清理与加固安全防御机制**：
+           - 在 `MinuteKlineCache.__init__` 中新增 `self.enable_auto_cleanup = False`，默认彻底停用后台自动清理；
+           - `set_df_all_cache` 增加 `getattr(self, 'enable_auto_cleanup', False)` 守卫，杜绝后台刷新行情时擅自删减/清空池子；
+           - 保留 UI 工具栏 `[🧹 智能清理]` 按钮供用户自主掌控手动清理（收敛至最大容量 `max_capacity` 标的）；
+    - [x] **自动化测试回归全绿**：
+        - `tests/test_v_reversal_pool_enhancements.py` 增补 `test_cleanup_driven_by_channel_not_time` 专项测试（验证入池 60 天的上涨通道股 100% 保留，入池 0 天的下降通道股 100% 清理）；
+        - 全部 7 项核心测试 100% PASSED。
+
 ## 2026-09-03 21:15
 - [x] **彻底根治通达信自动通道【远端暴跌通道盲目外推穿底导致三轨塌缩为0.01元】Bug & 全链路落地近端次级波段自适应重构与策略防呆体系 (`JSONData/tdx_data_Day.py`, `stock_logic_utils.py`, `multi_period_strategy_engine.py`, `tests/test_channel_robustness_suite.py`)**：
     - [x] **排查定位劲拓股份 (300400) 通道三轨塌缩为 0.01元、倾角-89.99°、pos=296500000000% 四大根本诱因**：
