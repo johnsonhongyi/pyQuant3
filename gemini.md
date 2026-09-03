@@ -1,3 +1,54 @@
+## 2026-09-03 11:20
+- [x] **彻底根治“所有重点关注全量侵入/霸屏”缺陷，严格实施【仅当前热点板块/新增板块中出现重点关注才优先显示，没有就不显示】业务闭环 (`stock_standalone/ats/hot_sector_engine.py`, `stock_standalone/ats/ui/hot_sector_leaderboard.py`, `stock_standalone/tests/test_sector_strength_and_detail_parity.py`)**：
+    - [x] **排查定位“全量自选股变成伪‘重点关注’板块霸占龙头突击榜”两大根本诱因**：
+        1. **`build_target_universe` 粗暴伪造板块**：原引擎在传入 `manual_watchlist` 时，若自选股不属于当前板块，强制赋予 `sector_map[c] = "重点关注"` 并强行加入目标池，导致平安银行、华润三九、黄河旋风等 14 只无关自选股涌入；
+        2. **`_render_table_data` 板块豁免漏洞**：原渲染逻辑在板块过滤中存在 `sec != "重点关注"` 与 `or not is_fav` 豁免分支，导致非当前板块个股被直接放行进主表格。
+    - [x] **底层引擎与 UI 渲染层双层铁壁防御实施**：
+        1. **底层引擎清洗 (`HotSectorEngine.build_target_universe`)**：
+           - 严格限定 `target_codes_set` 必须来自于当前有效 Top 3 强势板块及新晋板块；
+           - 重点关注标的仅当其**本身确实属于当前热点板块成分股**时才予以纳管，绝对不纳入非热点股票，100% 杜绝伪造“重点关注”板块；
+        2. **UI 定时数据采集切断 (`_on_ui_timer_tick`)**：
+           - 明确 `manual_list = None`，龙头突击榜严格聚焦当前强势板块与新增板块成分股，切断非热点自选股流入源头；
+        3. **严格板块闭环渲染 (`_render_table_data`)**：
+           - 彻底移除 `sec == "重点关注"` 和 `is_fav` 豁免漏洞；
+           - 标的必须严格属于当前激活板块（`sec in self.active_sectors`），所属强板块严格为真实的板块名（如“航运概念”、“免税店”、“期货概念”）；
+           - **业务状态机**：只有当前板块中出现了属于重点关注的标的时，该标的才标记为 `is_fav = True` 并享受置顶优先显示；若当前板块中没有重点关注标的，则完全按正常综合得分显示，绝无任何无关重点关注冒出！
+        4. **筛选模式与统计精确适配**：
+           - `filter_mode == "FOCUS"` 时严格仅筛选当前板块中匹配了重点关注的股票；
+           - 底部状态栏仅在 `fav_cnt > 0` 时展示 `⭐关注: {fav_cnt}`，为 0 时静默不干扰看盘。
+    - [x] **自动化测试与跨模块回归 100% 全部 PASSED**：
+        - 新增 `test_engine_build_target_universe_only_matches_hot_sectors` 与拓展 `test_hot_sector_favorite_toggle_and_priority_pinning`（核心断言 7：非当前板块的自选股绝不显示），全量 18 项板块测试与 30 项跨模块回归测试全部通过。
+
+## 2026-09-03 11:10
+- [x] **实现 ATS 龙头突击主表格右键【⭐ 设为重点关注 / ❌ 取消重点关注】& 重点关注标的置顶优先显示、⭐ 徽章与金色尊荣高亮体系 (`stock_standalone/ats/ui/hot_sector_leaderboard.py`, `stock_standalone/tests/test_sector_strength_and_detail_parity.py`)**：
+    - [x] **接入全局统一 `GlobalFavoriteManager` 右键重点关注闭环 (`_show_context_menu`)**：
+        1. **右键菜单动态呈现**：
+           - 未关注标的：`⭐ 设为重点关注 ({code})`；
+           - 已关注标的：`❌ 取消重点关注 ({code})`；
+           - 快捷复制支持：`📋 复制代码 {code}`、`📋 复制名称 {name}`；
+        2. **即时无感联动与安全触发**：
+           - 点击秒级调用 `fav_mgr.toggle_favorite_stock(code_clean)`；
+           - 自动通知父级主窗口 `_safe_favorites_changed()` 实现全系统自选池同步；
+           - 立即触发 `_render_table_data(self.cached_results)`，0 毫秒感知原地重排并切换高亮；
+    - [x] **实现重点关注标的置顶优先显示（Favorite Pin to Top）核心引擎 (`_render_table_data` / `_populate_row`)**：
+        1. **数据分拣置顶稳定排序**：
+           - 在 `_render_table_data` 准备 `filtered` 列表时，引入 `(0 if code in fav_set else 1, -alpha_score)` 双键排序；
+           - 重点关注标的无论综合得分多少、无论处于何种筛选模式，永远置顶排在最前（第 0 行起）；置顶区内部与非置顶区内部均保持原有 Alpha 降序；
+        2. **全列单元格 `NumericTableWidgetItem` 深度置顶特权**：
+           - 为所有 16+ 列的单元格绑定 `is_pinned=is_fav` 与 `pin_rank=(0 if is_fav else 999)`；
+           - **多维排序永久置顶**：无论交易员在表头点击任意列（涨幅%、分段涨速%、换手率、现价、代码、综合得分等）进行升序或降序排序，重点关注标的均 100% 保持在表格最顶端！
+        3. **尊荣金色高亮与视觉沉浸设计**：
+           - **名称列**：自动添加金色五角星徽章 `⭐ {name}`，前景色设为高亮金 `#ffd700`，加粗呈现；
+           - **代码列**：前景色同步升级为金色 `#ffd700` 并加粗；
+           - **整行半透明金光背景**：整行未指定特殊买点背景的单元格自动渲染淡雅半透明金光背景 `QColor(60, 45, 12, 110)`，在深色看板中尊贵醒目；
+    - [x] **全链路数据生态与统计联动加固**：
+        1. **高频 Alpha 数据池自动纳管**：在 `_on_ui_timer_tick` 中直连 `GlobalFavoriteManager().get_favorite_stocks()` 注入 `manual_list`，确保所有重点关注标的始终纳入后台毫秒级 Alpha 监控；
+        2. **筛选模式无缝兼容**：在 `filter_mode == "FOCUS"`（⭐ 仅看重点关注）时无缝命中右键关注标的；在全选模式下豁免板块过滤，杜绝被板块开关误杀；
+        3. **状态栏实时统计联动**：底部状态栏新增 `⭐关注: {fav_cnt}` 统计卡片，实时掌握盘中关注标的数量；
+    - [x] **自动化测试与跨模块回归 100% 全部 PASSED**：
+        - 新增 `test_hot_sector_favorite_toggle_and_priority_pinning` 专项测试，覆盖初始渲染、加关注置顶、名称 ⭐ 徽章、多列升降序永久置顶、取消关注恢复全生命周期断言；
+        - 全量 17 项板块强弱测试与 30 项跨模块回归测试全部通过。
+
 ## 2026-09-03 10:35
 - [x] **彻底根治 ATS 龙头突击新板块同步未默认全选显示 Bug & 全面落地专属【🆕 新概念极速捕捉】直达体系 (`stock_standalone/ats/ui/hot_sector_leaderboard.py`, `stock_standalone/tests/test_sector_strength_and_detail_parity.py`)**：
     - [x] **排查定位“新板块冲入 Top 3 未选中、表格不显示新板块标的”根本诱因**：

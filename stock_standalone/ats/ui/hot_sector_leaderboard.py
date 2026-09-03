@@ -991,9 +991,10 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
                     sec_to_codes = getattr(hw, "sector_to_codes", {})
                     top_sectors = self.engine.extract_top_sectors_from_heatmap(hw.sectors, sec_to_codes, top_n=3)
 
-            # 尝试从自选面板提取重点关注池
-            if hasattr(main_app, "fav_stocks") and main_app.fav_stocks:
-                manual_list = list(main_app.fav_stocks)
+            # 龙头突击榜标的严格来源于当前 Top 3 强势板块与新增板块成分股，不强行注入非热点自选股
+            manual_list = None
+        else:
+            manual_list = None
 
         # 过滤非明确板块
         top_sectors = [s for s in top_sectors if is_valid_sector_name(s)]
@@ -1099,15 +1100,27 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
         else:
             time_slice = raw_slice
 
+        # 获取全局重点关注集合 (用于在当前板块中精准匹配重点关注标的)
+        from global_favorites import GlobalFavoriteManager
+        fav_set = set(GlobalFavoriteManager().get_favorite_stocks())
+        parent_mw = self._get_parent_mw()
+        if parent_mw and hasattr(parent_mw, "fav_stocks") and parent_mw.fav_stocks:
+            fav_set |= set(parent_mw.fav_stocks)
+
         filtered = []
         for r in results:
             sec = r.get("sector", "")
-            # 🛡️ 过滤非明确板块 (除重点关注外)
-            if not is_valid_sector_name(sec) and sec != "重点关注":
+            code_str = str(r.get("code", "")).strip().zfill(6)
+            # 只有当该股票属于当前有效热点板块成分股，且其 code 存在于用户的重点关注中，才是有效匹配
+            is_fav = (code_str in fav_set)
+            r["is_focus"] = is_fav
+
+            # 🛡️ 过滤非明确板块
+            if not is_valid_sector_name(sec):
                 continue
 
-            # 板块标签开关过滤
-            if self.active_sectors and sec not in self.active_sectors and sec != "重点关注":
+            # 板块标签开关过滤：标的必须严格属于当前激活的热点板块 (当前 Top 3 或单选板块)
+            if self.active_sectors and sec not in self.active_sectors:
                 continue
 
             tag = r.get("buy_tag", "")
@@ -1137,7 +1150,8 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
             if getattr(self, "filter_mode", "ALL") == "TOP5_FOCUS":
                 filtered.append(r)
             elif getattr(self, "filter_mode", "ALL") == "FOCUS":
-                if sec == "重点关注" or r.get("is_focus", False) or "重点关注" in r.get("reason", ""):
+                # ⭐ 仅看重点关注：仅展示当前板块中匹配了重点关注的标的
+                if is_fav:
                     filtered.append(r)
             elif getattr(self, "filter_mode", "ALL") == "LOW_VOL":
                 if "地量" in r.get("buy_type", "") or "地量" in r.get("reason", ""):
@@ -1160,8 +1174,13 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
             else:
                 filtered.append(r)
 
+        # 👑 重点关注优先置顶排序：无论当前处于何种筛选模式，重点关注的 code 永远优先置顶排在最前！
+        filtered.sort(key=lambda x: (
+            0 if str(x.get("code", "")).strip().zfill(6) in fav_set else 1,
+            -float(x.get("alpha_score", 0.0))
+        ))
+
         if getattr(self, "filter_mode", "ALL") == "TOP5_FOCUS":
-            filtered.sort(key=lambda x: x.get("alpha_score", 0.0), reverse=True)
             filtered = filtered[:5]
 
         # 3. 原地填充表格
@@ -1175,7 +1194,7 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
         font_bold.setBold(True)
 
         for row_idx, r in enumerate(filtered):
-            self._populate_row(row_idx, r, font_bold)
+            self._populate_row(row_idx, r, font_bold, fav_set)
 
         # 4. 恢复并应用用户当前指定的排序列
         self.table.setSortingEnabled(True)
@@ -1197,12 +1216,14 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
 
         # 7. 更新底部统计栏与各板块领跑个股
         total_cnt = len(filtered)
+        fav_cnt = sum(1 for x in filtered if str(x.get("code", "")).strip().zfill(6) in fav_set)
         leader_cnt = sum(1 for x in filtered if x.get("buy_tag") == "LEADER")
         surge_cnt = sum(1 for x in filtered if x.get("buy_tag") == "SURGE")
         breakout_cnt = sum(1 for x in filtered if x.get("buy_tag") == "BREAKOUT")
         pullback_cnt = sum(1 for x in filtered if x.get("buy_tag") == "PULLBACK")
 
-        self.lbl_stats.setText(f"标的: {total_cnt} | 👑龙头: {leader_cnt} | ⚡扫盘: {surge_cnt} | 🚀先锋: {breakout_cnt} | 💎回踩: {pullback_cnt}")
+        fav_info = f"⭐关注: {fav_cnt} | " if fav_cnt > 0 else ""
+        self.lbl_stats.setText(f"标的: {total_cnt} | {fav_info}👑龙头: {leader_cnt} | ⚡扫盘: {surge_cnt} | 🚀先锋: {breakout_cnt} | 💎回踩: {pullback_cnt}")
 
         # 找出各板块内涨幅最高的领跑股
         sec_leaders = {}
@@ -1369,8 +1390,8 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
         except Exception as e:
             logger.debug(f"_check_and_notify_sector_highlights error: {e}")
 
-    def _populate_row(self, row_idx: int, r: Dict[str, Any], font_bold: QFont):
-        """填充/原位更新单行数据"""
+    def _populate_row(self, row_idx: int, r: Dict[str, Any], font_bold: QFont, fav_set: Optional[set] = None):
+        """填充/原位更新单行数据，支持重点关注置顶与金色高亮"""
         code = str(r.get("code", "--"))
         name = str(r.get("name", "--"))
         sec = str(r.get("sector", "--"))
@@ -1399,6 +1420,20 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
         alpha_score = float(r.get("alpha_score", 0.0))
         reason = str(r.get("reason", "--"))
 
+        # 判定是否属于重点关注
+        code_clean = code.strip().zfill(6)
+        is_fav = False
+        if fav_set is not None:
+            is_fav = (code_clean in fav_set)
+        else:
+            try:
+                from global_favorites import GlobalFavoriteManager
+                is_fav = (code_clean in GlobalFavoriteManager().get_favorite_stocks())
+            except Exception:
+                pass
+        pin_rank = 0 if is_fav else 999
+        fav_bg = QColor(60, 45, 12, 110) if is_fav else None
+
         pct_color = QColor("#ff4455") if pct > 0 else (QColor("#00ee77") if pct < 0 else QColor("#cccccc"))
         
         # 买点类型专属精细化视觉高亮
@@ -1422,26 +1457,38 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
             type_bg = QColor(30, 30, 35, 100)
 
         # 0: 代码
-        it_code = NumericTableWidgetItem(code)
+        it_code = NumericTableWidgetItem(code, is_pinned=is_fav, pin_rank=pin_rank)
         it_code.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-        it_code.setForeground(QBrush(QColor("#aad4ff")))
+        if is_fav:
+            it_code.setForeground(QBrush(QColor("#ffd700")))
+            it_code.setFont(font_bold)
+            it_code.setBackground(QBrush(fav_bg))
+        else:
+            it_code.setForeground(QBrush(QColor("#aad4ff")))
         self.table.setItem(row_idx, 0, it_code)
 
-        # 1: 名称
-        it_name = NumericTableWidgetItem(name)
+        # 1: 名称 (重点关注加 ⭐ 徽章)
+        disp_name = f"⭐ {name}" if is_fav and not name.startswith("⭐") else name
+        it_name = NumericTableWidgetItem(disp_name, is_pinned=is_fav, pin_rank=pin_rank)
         it_name.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-        it_name.setForeground(QBrush(QColor("#ffffff")))
+        if is_fav:
+            it_name.setForeground(QBrush(QColor("#ffd700")))
+            it_name.setBackground(QBrush(fav_bg))
+        else:
+            it_name.setForeground(QBrush(QColor("#ffffff")))
         it_name.setFont(font_bold)
         self.table.setItem(row_idx, 1, it_name)
 
         # 2: 所属强板块
-        it_sec = NumericTableWidgetItem(sec)
+        it_sec = NumericTableWidgetItem(sec, is_pinned=is_fav, pin_rank=pin_rank)
         it_sec.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
         it_sec.setForeground(QBrush(QColor("#ffbb55")))
+        if is_fav:
+            it_sec.setBackground(QBrush(fav_bg))
         self.table.setItem(row_idx, 2, it_sec)
 
         # 3: 买点类型
-        it_type = NumericTableWidgetItem(buy_type)
+        it_type = NumericTableWidgetItem(buy_type, is_pinned=is_fav, pin_rank=pin_rank)
         it_type.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
         it_type.setForeground(QBrush(type_color))
         it_type.setBackground(QBrush(type_bg))
@@ -1449,16 +1496,20 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
         self.table.setItem(row_idx, 3, it_type)
 
         # 4: 现价
-        it_p = NumericTableWidgetItem(f"{price:.2f}")
+        it_p = NumericTableWidgetItem(f"{price:.2f}", is_pinned=is_fav, pin_rank=pin_rank)
         it_p.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         it_p.setForeground(QBrush(pct_color))
+        if is_fav:
+            it_p.setBackground(QBrush(fav_bg))
         self.table.setItem(row_idx, 4, it_p)
 
         # 5: 涨幅%
-        it_pct = NumericTableWidgetItem(f"{pct:+.2f}%")
+        it_pct = NumericTableWidgetItem(f"{pct:+.2f}%", is_pinned=is_fav, pin_rank=pin_rank)
         it_pct.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         it_pct.setForeground(QBrush(pct_color))
         it_pct.setFont(font_bold)
+        if is_fav:
+            it_pct.setBackground(QBrush(fav_bg))
         self.table.setItem(row_idx, 5, it_pct)
 
         # 6: 交易分段涨速% (支持 30分/15分/60分/开盘累计，多级业务阈值状态)
@@ -1484,9 +1535,11 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
             vel_str = "0.0%"
             vel_color = QColor("#888899")
 
-        it_vel = NumericTableWidgetItem(vel_str)
+        it_vel = NumericTableWidgetItem(vel_str, is_pinned=is_fav, pin_rank=pin_rank)
         it_vel.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         it_vel.setForeground(QBrush(vel_color))
+        if is_fav:
+            it_vel.setBackground(QBrush(fav_bg))
         
         tip_lines = [
             f"【交易分段】: {seg_label}",
@@ -1502,20 +1555,24 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
 
         # 7: 换手%
         turn_str = f"{turnover:.2f}%" if turnover > 0 else "--"
-        it_turn = NumericTableWidgetItem(turn_str)
+        it_turn = NumericTableWidgetItem(turn_str, is_pinned=is_fav, pin_rank=pin_rank)
         it_turn.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         it_turn.setForeground(QBrush(QColor("#ffe066" if turnover >= 5.0 else "#c0c0d0")))
+        if is_fav:
+            it_turn.setBackground(QBrush(fav_bg))
         self.table.setItem(row_idx, 7, it_turn)
 
         # 8: 量比
-        it_vr = NumericTableWidgetItem(f"{vol_r:.2f}")
+        it_vr = NumericTableWidgetItem(f"{vol_r:.2f}", is_pinned=is_fav, pin_rank=pin_rank)
         it_vr.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         vr_color = QColor("#ff4466") if vol_r >= 2.5 else (QColor("#ffaa44") if vol_r >= 1.5 else QColor("#e2e2e5"))
         it_vr.setForeground(QBrush(vr_color))
+        if is_fav:
+            it_vr.setBackground(QBrush(fav_bg))
         self.table.setItem(row_idx, 8, it_vr)
 
         # 9: 盘口意图
-        it_intent = NumericTableWidgetItem(intent)
+        it_intent = NumericTableWidgetItem(intent, is_pinned=is_fav, pin_rank=pin_rank)
         it_intent.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
         if "扫买" in intent or "抢筹" in intent:
             it_intent.setForeground(QBrush(QColor("#ff3355")))
@@ -1529,81 +1586,105 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
             it_intent.setBackground(QBrush(QColor(20, 30, 50, 160)))
         else:
             it_intent.setForeground(QBrush(QColor("#aaaaaa")))
+            if is_fav:
+                it_intent.setBackground(QBrush(fav_bg))
         self.table.setItem(row_idx, 9, it_intent)
 
         # 10: 分时攻角
-        it_sl = NumericTableWidgetItem(f"{slope:.0f}")
+        it_sl = NumericTableWidgetItem(f"{slope:.0f}", is_pinned=is_fav, pin_rank=pin_rank)
         it_sl.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         it_sl.setForeground(QBrush(QColor("#00ffcc") if slope >= 60 else QColor("#aaaaaa")))
+        if is_fav:
+            it_sl.setBackground(QBrush(fav_bg))
         self.table.setItem(row_idx, 10, it_sl)
 
         # 11: VWAP偏离
-        it_dev = NumericTableWidgetItem(f"{vwap_dev:+.1f}%")
+        it_dev = NumericTableWidgetItem(f"{vwap_dev:+.1f}%", is_pinned=is_fav, pin_rank=pin_rank)
         it_dev.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         dev_color = QColor("#ff88aa") if vwap_dev > 0 else QColor("#66aacc")
         it_dev.setForeground(QBrush(dev_color))
+        if is_fav:
+            it_dev.setBackground(QBrush(fav_bg))
         self.table.setItem(row_idx, 11, it_dev)
 
         # 12: DFF (多日偏离度)
-        it_dff = NumericTableWidgetItem(f"{dff:+.2f}")
+        it_dff = NumericTableWidgetItem(f"{dff:+.2f}", is_pinned=is_fav, pin_rank=pin_rank)
         it_dff.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         it_dff.setForeground(QBrush(QColor(COLOR_UP if dff > 0 else COLOR_DOWN)))
+        if is_fav:
+            it_dff.setBackground(QBrush(fav_bg))
         self.table.setItem(row_idx, 12, it_dff)
 
         # 13: Rank (强度排位，支持全市场 1~9999 真实排位)
         rank_int = _safe_int(rank_val, 0)
         rank_str = str(rank_int) if rank_int > 0 else "--"
-        it_rank = NumericTableWidgetItem(rank_str)
+        it_rank = NumericTableWidgetItem(rank_str, is_pinned=is_fav, pin_rank=pin_rank)
         it_rank.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
         it_rank.setForeground(QBrush(QColor("#FFD700" if (0 < rank_int < 500) else "#e2e2e5")))
+        if is_fav:
+            it_rank.setBackground(QBrush(fav_bg))
         self.table.setItem(row_idx, 13, it_rank)
 
         # 14: DFF2 (2日加速)
-        it_d2 = NumericTableWidgetItem(f"{dff2:+.2f}")
+        it_d2 = NumericTableWidgetItem(f"{dff2:+.2f}", is_pinned=is_fav, pin_rank=pin_rank)
         it_d2.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         it_d2.setForeground(QBrush(QColor(COLOR_UP if dff2 > 0 else COLOR_DOWN)))
+        if is_fav:
+            it_d2.setBackground(QBrush(fav_bg))
         self.table.setItem(row_idx, 14, it_d2)
 
         # 15: DFF3 (3日加速)
-        it_d3 = NumericTableWidgetItem(f"{dff3:+.2f}")
+        it_d3 = NumericTableWidgetItem(f"{dff3:+.2f}", is_pinned=is_fav, pin_rank=pin_rank)
         it_d3.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         it_d3.setForeground(QBrush(QColor(COLOR_UP if dff3 > 0 else COLOR_DOWN)))
+        if is_fav:
+            it_d3.setBackground(QBrush(fav_bg))
         self.table.setItem(row_idx, 15, it_d3)
 
         # 填入动态自定义扩展列 (extra_cols，从列 16 开始)
         col_offset = 16
         for ec in self.extra_cols:
             ec_val = extra_vals.get(ec, "--")
-            it_ec = NumericTableWidgetItem(str(ec_val))
+            it_ec = NumericTableWidgetItem(str(ec_val), is_pinned=is_fav, pin_rank=pin_rank)
             it_ec.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             it_ec.setForeground(QBrush(QColor("#E0E0E0")))
+            if is_fav:
+                it_ec.setBackground(QBrush(fav_bg))
             self.table.setItem(row_idx, col_offset, it_ec)
             col_offset += 1
 
         # 建议买入区间
-        it_bz = NumericTableWidgetItem(buy_zone)
+        it_bz = NumericTableWidgetItem(buy_zone, is_pinned=is_fav, pin_rank=pin_rank)
         it_bz.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
         it_bz.setForeground(QBrush(QColor("#00ffaa")))
         it_bz.setFont(font_bold)
+        if is_fav:
+            it_bz.setBackground(QBrush(fav_bg))
         self.table.setItem(row_idx, col_offset, it_bz)
 
         # 止损防守位
-        it_sloss = NumericTableWidgetItem(f"{stop_loss:.2f}" if isinstance(stop_loss, (int, float)) else str(stop_loss))
+        it_sloss = NumericTableWidgetItem(f"{stop_loss:.2f}" if isinstance(stop_loss, (int, float)) else str(stop_loss), is_pinned=is_fav, pin_rank=pin_rank)
         it_sloss.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         it_sloss.setForeground(QBrush(QColor("#ffaa66")))
+        if is_fav:
+            it_sloss.setBackground(QBrush(fav_bg))
         self.table.setItem(row_idx, col_offset + 1, it_sloss)
 
         # 综合得分
-        it_score = NumericTableWidgetItem(f"{alpha_score:.1f}")
+        it_score = NumericTableWidgetItem(f"{alpha_score:.1f}", is_pinned=is_fav, pin_rank=pin_rank)
         it_score.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         it_score.setForeground(QBrush(QColor("#ffd700")))
         it_score.setFont(font_bold)
+        if is_fav:
+            it_score.setBackground(QBrush(fav_bg))
         self.table.setItem(row_idx, col_offset + 2, it_score)
 
         # 决策依据
-        it_rs = NumericTableWidgetItem(reason)
+        it_rs = NumericTableWidgetItem(reason, is_pinned=is_fav, pin_rank=pin_rank)
         it_rs.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         it_rs.setForeground(QBrush(QColor("#cccccc")))
+        if is_fav:
+            it_rs.setBackground(QBrush(fav_bg))
         self.table.setItem(row_idx, col_offset + 3, it_rs)
 
     def _on_item_clicked(self, item):
@@ -1692,6 +1773,12 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
 
         code = c_item.text().strip()
         name = n_item.text().strip() if n_item else code
+        code_clean = str(code).strip().zfill(6)
+        clean_name = name.replace("⭐ ", "").replace("★ ", "").strip()
+
+        from global_favorites import GlobalFavoriteManager
+        fav_mgr = GlobalFavoriteManager()
+        is_fav = code_clean in fav_mgr.get_favorite_stocks()
 
         menu = QMenu(self)
         menu.setStyleSheet("""
@@ -1700,23 +1787,51 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
             QMenu::item:selected { background-color: #2c3554; color: #00ffaa; }
         """)
 
-        act_link = menu.addAction(f"📊 联动查看 {name} ({code}) 分时K线")
+        # 1. 重点关注切换操作 (优先显示/取消优先)
+        if is_fav:
+            act_fav = menu.addAction(f"❌ 取消重点关注 ({code_clean})")
+        else:
+            act_fav = menu.addAction(f"⭐ 设为重点关注 ({code_clean})")
+
+        def _toggle_fav():
+            fav_mgr.toggle_favorite_stock(code_clean)
+            main_win = self._get_parent_mw()
+            if main_win and hasattr(main_win, '_safe_favorites_changed'):
+                try:
+                    main_win._safe_favorites_changed()
+                except Exception:
+                    pass
+            # 立即触发表格重新渲染以更新重点关注置顶与金色高亮
+            self._render_table_data(self.cached_results)
+
+        act_fav.triggered.connect(_toggle_fav)
+        menu.addSeparator()
+
+        # 2. 行情联动与分时图
+        act_link = menu.addAction(f"📊 联动查看 {clean_name} ({code_clean}) 分时K线")
         act_link.triggered.connect(lambda: self._on_item_clicked(c_item))
 
-        act_sbc = menu.addAction(f"📈 使用 SBC 打开独立分时图 ({code})")
+        act_sbc = menu.addAction(f"📈 使用 SBC 打开独立分时图 ({code_clean})")
         def _open_sbc():
             from ats.ui.intraday_strategy_dialog import open_sbc_chart_dialog
-            open_sbc_chart_dialog(self, code)
+            open_sbc_chart_dialog(self, code_clean)
         act_sbc.triggered.connect(_open_sbc)
 
-        act_send = menu.addAction(f"⚡ 发送到异动联动 ({code})")
+        act_send = menu.addAction(f"⚡ 发送到异动联动 ({code_clean})")
         def _send_link():
             from ats.ui.base_table import send_to_linkage
-            send_to_linkage(code, name, self)
+            send_to_linkage(code_clean, clean_name, self)
         act_send.triggered.connect(_send_link)
 
-        act_strategy = menu.addAction(f"🎯 调出 {name} 分时阶梯交易策略")
+        act_strategy = menu.addAction(f"🎯 调出 {clean_name} 分时阶梯交易策略")
         act_strategy.triggered.connect(lambda: self._on_item_double_clicked(c_item))
+
+        # 3. 复制操作
+        menu.addSeparator()
+        act_copy_code = menu.addAction(f"📋 复制代码 {code_clean}")
+        act_copy_code.triggered.connect(lambda: QApplication.clipboard().setText(code_clean))
+        act_copy_name = menu.addAction(f"📋 复制名称 {clean_name}")
+        act_copy_name.triggered.connect(lambda: QApplication.clipboard().setText(clean_name))
 
         menu.exec(self.table.viewport().mapToGlobal(pos))
 
