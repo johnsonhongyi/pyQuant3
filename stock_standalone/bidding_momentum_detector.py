@@ -185,17 +185,23 @@ def get_effective_trade_date(current_dt: Optional[datetime.datetime] = None) -> 
         today_str = f"{today_str[:4]}-{today_str[4:6]}-{today_str[6:]}"
     return today_str
     
-SECTOR_BLACKLIST = {
-    '深股通', '沪股通', '融资融券', '标普概念', 'MSCI中国', '剔除纳斯', 
-    '机构重仓', '昨日涨停', '昨日触板', '创业板综', '证金持股', '上证180',
-    '中证500', '沪深300', '深证成指', '基金重仓', '北向资金', '深成指',
-    '含HS300', '国企改革', '破净股', '预盈预增', 'QFII重仓', '社保重仓',
-    '基金新增', '预亏预减'
-}
+# ─── 统一系统板块黑名单接入 (整合全局权威规则) ───
+try:
+    from stock_logic_utils import SYSTEM_SECTOR_BLACKLIST, is_noise_concept
+    SECTOR_BLACKLIST = SYSTEM_SECTOR_BLACKLIST
+except ImportError:
+    SECTOR_BLACKLIST = {
+        '深股通', '沪股通', '融资融券', '标普概念', 'MSCI中国', '剔除纳斯', 
+        '机构重仓', '昨日涨停', '昨日触板', '创业板综', '证金持股', '上证180',
+        '中证500', '沪深300', '深证成指', '基金重仓', '北向资金', '深成指',
+        '含HS300', '国企改革', '破净股', '预盈预增', 'QFII重仓', '社保重仓',
+        '基金新增', '预亏预减'
+    }
+    is_noise_concept = lambda s: s in SECTOR_BLACKLIST
 
 def is_valid_sector_name(sec: Any) -> bool:
     """
-    严密判定板块名称是否为有效且明确的实体板块（过滤掉 '--', '0', '0.0', 'nan', '未知', 纯数字等）
+    严密判定板块名称是否为有效且明确的实体板块（过滤掉 '--', '0', '0.0', 'nan', '未知', 纯数字以及全局泛概念黑名单）
     """
     if sec is None:
         return False
@@ -213,6 +219,9 @@ def is_valid_sector_name(sec: Any) -> bool:
     if not cleaned or cleaned.lower() in ('--', '-', '---', '0', '0.0', '00', '000', '000000', 'none', 'nan', 'null', '未知', '其它', '其他', '未分类'):
         return False
     if cleaned.isdigit():
+        return False
+    # 结合全局泛概念黑名单进行双重校验
+    if is_noise_concept(cleaned):
         return False
     return True
 

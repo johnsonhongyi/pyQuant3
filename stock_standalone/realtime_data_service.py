@@ -327,9 +327,9 @@ def get_global_kline_cache() -> "MinuteKlineCache":
 class ScanChannelResult(int):
     """
     通道扫描结果对象，既是 int (完美兼容历史代码中 added > 0 或 assert added == 20 断言)，
-    又携带丰富的统计元数据 (total_eligible, pending_count, cur_total, evicted_replace, missing_ch_dir)。
+    又携带丰富的统计元数据 (total_eligible, pending_count, cur_total, evicted_replace, missing_ch_dir, top_sectors)。
     """
-    def __new__(cls, added_count: int, total_eligible: int = 0, pending_count: int = 0, cur_total: int = 0, evicted_replace: int = 0, missing_ch_dir: bool = False):
+    def __new__(cls, added_count: int, total_eligible: int = 0, pending_count: int = 0, cur_total: int = 0, evicted_replace: int = 0, missing_ch_dir: bool = False, top_sectors: list = None):
         obj = super().__new__(cls, added_count)
         obj.added = added_count
         obj.total_eligible = total_eligible
@@ -337,6 +337,7 @@ class ScanChannelResult(int):
         obj.cur_total = cur_total
         obj.evicted_replace = evicted_replace
         obj.missing_ch_dir = missing_ch_dir
+        obj.top_sectors = list(top_sectors) if top_sectors else []
         return obj
 
     def get(self, key, default=None):
@@ -349,8 +350,56 @@ class ScanChannelResult(int):
             "pending_count": self.pending_count,
             "cur_total": self.cur_total,
             "evicted_replace": self.evicted_replace,
-            "missing_ch_dir": self.missing_ch_dir
+            "missing_ch_dir": self.missing_ch_dir,
+            "top_sectors": self.top_sectors
         }
+
+
+# ─── 无效板块与泛概念过滤系统 (接入 stock_logic_utils.py 统一权威库) ───
+try:
+    from stock_logic_utils import SYSTEM_SECTOR_BLACKLIST, is_noise_concept, REAL_CONCEPT_KEYWORDS
+    INVALID_SECTOR_KEYWORDS = SYSTEM_SECTOR_BLACKLIST
+    VALID_SECTOR_WHITELIST = set(REAL_CONCEPT_KEYWORDS)
+    is_invalid_generic_sector = is_noise_concept
+except ImportError:
+    INVALID_SECTOR_KEYWORDS = {
+        "通", "沪股通", "深股通", "港股通", "北向资金", "南向资金", "融资融券", "转融券", "转融通", 
+        "含可转债", "高股息", "微盘股", "破净股", "中字头", "中字头股票", "中特估",
+        "机构重仓", "基金重仓", "社保重仓", "QFII重仓", "险资重仓", "证金持股", "汇金持股", "外资持股", "券商重仓",
+        "国企改革", "央企国企改革", "央企改革", "地方国资", "地方国企改革", "地方国资委", "国资委", "国企", "央企",
+        "股权激励", "股权转让", "资产重组", "债转股", "混改", "员工持股",
+        "MSCI", "MSCI中国", "富时罗素", "富时概念", "标普概念", "标普道琼斯", "标普道琼斯A股", 
+        "沪深300", "中证500", "中证800", "中证1000", "中证2000", "上证180", "上证50", "上证380",
+        "深证成指", "创业板综", "创业板50", "科创50", "含HS300", "深成500", "成份股", "A股", "B股", "AH股",
+        "昨日涨停", "昨日触板", "昨日首板", "昨日连板", "昨日大涨", "前期强势", "超跌反弹", "创历史新高", 
+        "近期新高", "低价股", "高价股", "次新股", "新股与次新股", "高送转", "送转",
+        "预盈预增", "预亏预减", "业绩预增", "半年报预增", "年报预增", "一季报预增", "三季报预增", "扭亏为盈", "ST板块", "退市整理",
+        "其它", "其他", "未知", "未分类", "默认", "综合", "概念", "板块", "预增"
+    }
+
+    VALID_SECTOR_WHITELIST = {
+        "半导体", "芯片", "AI", "人工智能", "算力", "机器人", "低空经济", "光伏", "储能",
+        "锂电", "固态电池", "电池", "军工", "航天", "商业航天", "卫星", "通信", "创新药", "医药", "医疗",
+        "汽车", "智能驾驶", "消费电子", "软件", "计算机", "数据要素", "游戏", "电网", "特高压", "电力",
+        "风电", "机械", "化工", "有色", "稀土", "新材料", "核电", "氢能", "华为", "苹果", "特斯拉",
+        "数字经济", "信创", "量子科技", "光刻机", "PCB", "传感器", "服务器", "液冷", "光模块", "CPO"
+    }
+
+    def is_invalid_generic_sector(sec_name: Any) -> bool:
+        if sec_name is None:
+            return True
+        s = str(sec_name).strip()
+        if len(s) < 2 or len(s) > 15 or s.isdigit():
+            return True
+        for ok_word in VALID_SECTOR_WHITELIST:
+            if ok_word in s and s not in ("深股通", "沪股通", "港股通", "融通"):
+                return False
+        if s in INVALID_SECTOR_KEYWORDS:
+            return True
+        for bad_word in INVALID_SECTOR_KEYWORDS:
+            if len(bad_word) >= 2 and bad_word in s:
+                return True
+        return False
 
 
 class MinuteKlineCache:
@@ -2390,11 +2439,15 @@ class MinuteKlineCache:
         else:
             score += 10.0   # INIT
             
-        # 2. 支撑结构级别权重
+        # 2. 支撑结构与加速级别权重 (强化加速能力与主线板块能力)
         structure = str(flags.get("structure", ""))
-        if structure == "多头排列":
+        if "加速" in structure or "🚀" in structure:
+            score += 26.0  # 具备加速起爆能力赋最高分
+        elif "主升" in structure or "🔥" in structure:
+            score += 22.0  # 具备板块共振主升能力
+        elif structure in ("多头排列", "多头排列加速", "📈多头通道", "上涨通道"):
             score += 18.0
-        elif structure in ("MA5回踩", "MA10回踩"):
+        elif structure in ("MA5回踩", "MA10回踩", "MA10通道支撑"):
             score += 14.0
         elif structure == "MA20/60粘合":
             score += 10.0
@@ -2663,6 +2716,30 @@ class MinuteKlineCache:
             ma60_col = _col(['ma60d', 'ma60'])
             dff3_col = _col(['dff3'])
             dff2_col = _col(['dff2'])
+            category_col = _col(['category', 'industry', 'block', 'hy'])
+
+            # ─── 预计算：全市场领跑核心板块能力识别 (Sector / Block Momentum) ───
+            top_categories = {}
+            if category_col and category_col in cols:
+                try:
+                    leader_df = df_snap.copy()
+                    if pct_col and pct_col in cols:
+                        leader_df = leader_df.sort_values(by=pct_col, ascending=False).head(120)
+                    elif rank_col and rank_col in cols:
+                        leader_df = leader_df.sort_values(by=rank_col, ascending=True).head(120)
+                    else:
+                        leader_df = leader_df.head(120)
+
+                    cat_counts = {}
+                    for cv in leader_df[category_col].dropna():
+                        for item in str(cv).replace('+', ';').replace(',', ';').split(';'):
+                            item = item.strip()
+                            if not is_invalid_generic_sector(item):
+                                cat_counts[item] = cat_counts.get(item, 0) + 1
+                    sorted_cats = sorted(cat_counts.items(), key=lambda x: x[1], reverse=True)
+                    top_categories = dict(sorted_cats[:8])
+                except Exception as _ex_cat:
+                    logger.debug(f"Calculate top categories failed: {_ex_cat}")
 
             candidates = []
 
@@ -2698,47 +2775,124 @@ class MinuteKlineCache:
                     ma20_v = float(row[ma20_col]) if ma20_col and pd.notna(row[ma20_col]) else 0.0
                     ma60_v = float(row[ma60_col]) if ma60_col and pd.notna(row[ma60_col]) else 0.0
                     dff3_v = float(row[dff3_col]) if dff3_col and pd.notna(row[dff3_col]) else 0.0
+                    dff2_v = float(row[dff2_col]) if dff2_col and pd.notna(row[dff2_col]) else 0.0
 
+                    # ─── 1. 基础排雷过滤 (坚决剔除问题标的与死水股) ───
+                    # 剔除 ST / 退市标的
+                    if name_v.startswith("*ST") or name_v.startswith("ST") or "退" in name_v:
+                        continue
+                    # 剔除当日大阴线破位狂跌
+                    if pct_v < -3.5:
+                        continue
+                    # 剔除极度缺乏流动性的织布机死水股
+                    if vr_v < 0.6:
+                        continue
+
+                    # ─── 2. 核心通道形态高级筛选 ───
                     is_channel_uptrend = False
                     structure_tag = "上涨通道"
 
-                    # ─── 轨1：存在时序自动通道特征 ───
+                    # 轨1：存在时序自动通道特征 (严格要求通道向上且站稳支撑)
                     if has_ch_dir and ch_col:
                         ch_dir_val = int(row[ch_col]) if pd.notna(row[ch_col]) else 0
-                        if ch_dir_val == 1:
+                        if ch_dir_val == 1 and slope_deg >= 0:
                             if supp_price <= 0 or c_price >= supp_price * 0.98:
                                 is_channel_uptrend = True
                                 structure_tag = "上涨通道"
 
-                    # ─── 轨2：截面宽表多头均线通道与支撑形态识别 ───
+                    # 轨2：截面宽表高级多头均线通道与量价共振识别
                     if not is_channel_uptrend:
-                        # 均线多头排列或价格站在生命线 MA20/MA60 上方
+                        # (1) 均线真多头排列：短中长期趋势完全向上发散，拒绝无序粘合或伪突破
                         is_ma_bull = (ma5_v > 0 and ma10_v > 0 and ma20_v > 0 and ma5_v >= ma10_v >= ma20_v)
-                        is_above_ma20_60 = (c_price >= ma20_v * 0.99 > 0) and (ma20_v >= ma60_v * 0.98 if ma60_v > 0 else True)
-                        on_ma_support = (low_v >= ma20_v * 0.96 > 0) or (low_v >= ma10_v * 0.97 > 0)
+                        # (2) 均线具备明显上升张角坡度 (MA5 明显领跑 MA20)
+                        has_up_angle = (ma5_v >= ma20_v * 1.008) if (ma5_v > 0 and ma20_v > 0) else False
+                        # (3) 大周期处在生命线上方 (MA20 处于 MA60 之上，且价格站在 MA60 上)
+                        is_above_ma60 = (ma20_v >= ma60_v * 0.995 and c_price >= ma60_v) if ma60_v > 0 else True
+                        # (4) 价格在短线关键均线 (MA5/MA10) 之上推升或处于回踩支撑买点
+                        on_ma_support = (c_price >= ma10_v * 0.985 > 0) and (low_v >= ma20_v * 0.97 > 0)
+                        # (5) 市场活跃度与大底动能收敛：排在全市场前列活跃梯队，且底座无坍塌
+                        is_active_lead = (rank_v <= 2000) and (dff3_v >= -8.0) and (dff2_v >= -8.0)
 
-                        if (is_ma_bull or is_above_ma20_60) and on_ma_support:
-                            if rank_v <= 3500 and pct_v >= -2.5:
-                                is_channel_uptrend = True
-                                if is_ma_bull and c_price >= ma5_v:
-                                    structure_tag = "多头排列加速"
-                                elif low_v <= ma20_v * 1.02:
-                                    structure_tag = "MA20通道支撑"
-                                else:
-                                    structure_tag = "上涨通道"
+                        if is_ma_bull and has_up_angle and is_above_ma60 and on_ma_support and is_active_lead:
+                            is_channel_uptrend = True
+                            if c_price >= ma5_v:
+                                structure_tag = "多头排列加速"
+                            elif low_v <= ma10_v * 1.015:
+                                structure_tag = "MA10通道支撑"
+                            else:
+                                structure_tag = "上涨通道"
 
                     if not is_channel_uptrend:
                         continue
 
-                    # 基础排雷：排除跌破关键支撑的破位股
+                    # 基础排雷防护：排除破位下轨支撑的标的
                     if supp_price > 0 and c_price < supp_price * 0.975:
                         continue
                     if ma60_v > 0 and c_price < ma60_v * 0.97:
                         continue
 
-                    # 综合通道潜力评分 (斜率/均线陡度 + 量比 + 涨幅 + 排名)
-                    slope_score = slope_deg * 2.0 if slope_deg != 0 else (5.0 if ma5_v > ma20_v else 0.0)
-                    score = slope_score + vr_v * 12.0 + pct_v * 2.0 + (dff3_v * 0.2) - (rank_v / 120.0)
+                    # ─── 3. 最强板块能力与加速能力深度量化 ───
+                    # (A) 板块能力识别 (严格剔除无效泛概念，只认真实产业题材)
+                    cat_str = str(row[category_col]) if (category_col and category_col in cols and pd.notna(row[category_col])) else ""
+                    belong_top_cat = None
+                    cat_score = 0.0
+                    if top_categories and cat_str:
+                        stock_valid_cats = [sc.strip() for sc in cat_str.replace('+', ';').replace(',', ';').split(';') if not is_invalid_generic_sector(sc.strip())]
+                        for r_idx, (cat_name, c_cnt) in enumerate(top_categories.items()):
+                            if any(cat_name == sc or cat_name in sc or sc in cat_name for sc in stock_valid_cats):
+                                belong_top_cat = cat_name
+                                cat_score = 28.0 if r_idx < 3 else 18.0
+                                break
+
+                    # (B) 加速能力识别 (斜率加速度 + 均线发散加速度 + 资金量价抢筹加速)
+                    accel_ratio = ((ma5_v - ma10_v) / ma10_v * 100.0) if (ma5_v > 0 and ma10_v > 0) else 0.0
+                    is_slope_accel = (slope_deg >= 12.0) or (accel_ratio >= 1.2)
+                    is_volume_accel = (vr_v >= 1.3 and pct_v >= 1.0)
+                    is_accelerating = is_slope_accel or is_volume_accel
+
+                    # (C) 最强个股门槛淘汰：拒绝既无板块支撑、又无加速能力、排名靠后的跟风杂毛
+                    if (not belong_top_cat) and (not is_accelerating) and (rank_v > 1200):
+                        continue
+
+                    # (D) 赋予极具可读性与实战价值的加速/主线结构标签
+                    if belong_top_cat and is_accelerating:
+                        structure_tag = f"🚀{belong_top_cat[:4]}加速"
+                    elif belong_top_cat:
+                        structure_tag = f"🔥{belong_top_cat[:4]}主升"
+                    elif is_accelerating:
+                        structure_tag = "🚀多头加速起爆"
+                    elif structure_tag == "上涨通道":
+                        structure_tag = "📈多头通道"
+
+                    # ─── 4. 最强个股龙头 + 最强板块 + 加速能力 综合潜力评分 ───
+                    # 龙头 Rank 分 (前排核心资产)
+                    lead_score = 0.0
+                    if rank_v <= 150: lead_score = 35.0
+                    elif rank_v <= 500: lead_score = 25.0
+                    elif rank_v <= 1000: lead_score = 15.0
+                    elif rank_v <= 1500: lead_score = 5.0
+
+                    # 加速能力分
+                    accel_score = (min(accel_ratio, 8.0) * 2.5) + (14.0 if is_slope_accel else 0.0) + (10.0 if is_volume_accel else 0.0)
+
+                    # 均线发散率 (MA5 vs MA20)
+                    ma_divergence = ((ma5_v - ma20_v) / ma20_v * 100.0) if (ma20_v > 0 and ma5_v > 0) else 0.0
+                    # 支撑贴近度奖励 (0~3% 为最佳回踩安全买点)
+                    support_p = supp_price if supp_price > 0 else ma10_v
+                    dist_to_supp = ((c_price - support_p) / support_p * 100.0) if support_p > 0 else 2.0
+                    supp_bonus = 8.0 if (0.0 <= dist_to_supp <= 3.5) else (4.0 if dist_to_supp < 0 else 2.0)
+
+                    slope_score = slope_deg * 2.5 if slope_deg > 0 else 5.0
+
+                    score = (lead_score +
+                             cat_score +
+                             accel_score +
+                             slope_score +
+                             min(vr_v, 5.0) * 7.0 +
+                             max(-2.0, min(pct_v, 9.5)) * 2.0 +
+                             min(ma_divergence, 15.0) * 1.5 +
+                             supp_bonus +
+                             (dff3_v * 0.15))
 
                     anchor_p = supp_price if supp_price > 0 else (ma20_v if ma20_v > 0 else low_v)
 
@@ -2749,7 +2903,8 @@ class MinuteKlineCache:
                         "supp_price": supp_price,
                         "anchor_low": anchor_p,
                         "structure": structure_tag,
-                        "name": name_v
+                        "name": name_v,
+                        "top_sector": belong_top_cat or ""
                     })
                 except Exception:
                     continue
@@ -2832,7 +2987,8 @@ class MinuteKlineCache:
                 pending_count=pending_count, 
                 cur_total=len(self._v_reversal_pool), 
                 evicted_replace=evicted_for_replace,
-                missing_ch_dir=(not has_ch_dir)
+                missing_ch_dir=(not has_ch_dir),
+                top_sectors=list(top_categories.keys())
             )
 
 

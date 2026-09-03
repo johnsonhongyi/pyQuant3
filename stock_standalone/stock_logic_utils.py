@@ -29,48 +29,87 @@ def safe_values(val: Any) -> Any:
         return val.values
     return val
 
-# === 概念过滤逻辑 ===
-GENERIC_KEYWORDS = [
-    "国企改革", "沪股通", "深股通", "融资融券", "高股息", "MSCI", "中字头",
-    "央企改革", "标普概念", "B股", "AH股", "转融券", "股权转让", "新股与次新股",
-    "战略", "指数", "主题", "计划", "预期", "改革", "通", "国企", "央企"
-]
+# === 全系统统一概念与板块黑名单过滤系统 (整合 popularity_resonance, bidding_momentum, signal_dashboard 等各模块规则) ===
+SYSTEM_SECTOR_BLACKLIST: set[str] = {
+    # 互联互通与交易通道
+    "深股通", "港股通", "沪股通", "北向资金", "南向资金", "融资融券", "转融券", "转融通", "转融券标的", 
+    "含可转债", "高股息", "微盘股", "破净股", "破发股", "低价股", "百元股", "中字头", "中字头股票", "中特估",
+    # 机构持仓与主力分类
+    "机构重仓", "基金重仓", "基金新增", "社保重仓", "QFII重仓", "险资重仓", "外资背景", "外资持股", 
+    "证金持股", "汇金持股", "国家队持股", "地方政府平台", "央企控股", "券商重仓", "核心资产",
+    # 资本运作与所有制泛属性
+    "国企改革", "央企国企改革", "央企改革", "地方国资", "地方国企改革", "地方国资委", "国资委", "国企", "央企",
+    "军工改革", "壳资源", "股权激励", "股权转让", "资产重组", "债转股", "混改", "员工持股",
+    # 大盘指数与成分股分类
+    "MSCI", "MSCI中国", "MSCI概念", "富时罗素", "富时概念", "富时罗素概念股", "标普概念", "标普道琼斯", 
+    "标普道琼斯A股", "标普道琼斯纳指", "剔除纳斯", "沪深300", "沪深300股", "中证500", "中证800", "中证1000", 
+    "中证2000", "上证180", "上证180股", "上证50", "上证50股", "上证380", "深证成指", "深成指", "深成指股", 
+    "深成500", "创业板综", "创业板设", "创业板50", "创业300股", "科创板", "科创50", "含HS300", "新三板", 
+    "参股新三板", "成分股", "A股", "B股", "AH股",
+    # 行情状态与历史表现
+    "昨日涨停", "昨日触板", "昨日首板", "昨日连板", "昨日大涨", "前期强势", "超跌反弹", "创历史新高", 
+    "近期新高", "次新股", "新股与次新股", "高送转", "送转", "送转股份", "业绩补偿",
+    # 业绩周期与财报预告
+    "预盈预增", "预亏预减", "业绩预增", "预增", "预亏", "预降预亏", "半年报预增", "年报预增", 
+    "一季报预增", "三季报预增", "中报", "中报送转", "季报", "年报", "一季报", "三季报", "扭亏为盈", "ST板块", "退市整理",
+    # 通用无意义占位符
+    "其它", "其他", "未知", "未分类", "默认", "综合", "概念", "板块"
+}
 
+# 兼容历史命名
+NOISE_CONCEPTS = SYSTEM_SECTOR_BLACKLIST
+SECTOR_BLACKLIST = SYSTEM_SECTOR_BLACKLIST
+GENERIC_KEYWORDS = list(SYSTEM_SECTOR_BLACKLIST)
+
+# 泛概念特征关键词 (模糊匹配)
+NOISE_KEYWORDS = (
+    "改革", "股通", "成指", "重仓", "持股", "融资", "昨日", "送转", "转债", 
+    "指数", "成分", "中报", "预增", "业绩", "季报", "年报", "预盈", "预亏", "主题", "计划", "战略", "预期"
+)
+
+# 真实产业与主线题材保护白名单 (优先保护，绝不误杀)
 REAL_CONCEPT_KEYWORDS = [
-    "半导体", "AI", "机器人", "光伏", "锂电", "医药", "芯片", "5G", "储能",
-    "新能源", "军工", "卫星", "航天", "汽车", "算力", "氢能", "量子", "云计算",
-    "电商", "游戏", "消费电子", "数据要素", "AI", "大模型"
+    "半导体", "AI", "人工智能", "机器人", "光伏", "锂电", "固态电池", "医药", "创新药", "芯片", "5G", "储能",
+    "新能源", "军工", "卫星", "商业航天", "航天", "汽车", "智能驾驶", "算力", "氢能", "量子", "云计算",
+    "电商", "游戏", "消费电子", "数据要素", "大模型", "信创", "华为", "苹果", "特斯拉", "电网", "特高压",
+    "风电", "核电", "新材料", "低空经济", "光刻机", "服务器", "液冷", "光模块", "CPO", "PCB"
 ]
 
-def is_generic_concept(concept_name: str) -> bool:
+def is_generic_concept(concept_name: Any) -> bool:
     """识别是否为泛概念（需过滤）"""
-    if any(k in concept_name for k in REAL_CONCEPT_KEYWORDS):
-        return False
-    if any(k in concept_name for k in GENERIC_KEYWORDS):
+    if concept_name is None:
         return True
-    if len(concept_name) <= 3:
+    s = str(concept_name).strip()
+    if len(s) < 2 or len(s) > 25 or s.isdigit():
         return True
-    if any(x in concept_name for x in ["通", "改革", "指数", "主题", "计划", "战略", "预期"]):
+    # 1. 白名单保护
+    for k in REAL_CONCEPT_KEYWORDS:
+        if k in s:
+            if s not in ("深股通", "沪股通", "港股通", "融通"):
+                return False
+    # 2. 精确命中黑名单
+    if s in SYSTEM_SECTOR_BLACKLIST:
         return True
+    # 3. 关键字模糊判定
+    if any(k in s for k in NOISE_KEYWORDS):
+        return True
+    # 4. 黑名单词根判定
+    for bad in SYSTEM_SECTOR_BLACKLIST:
+        if len(bad) >= 3 and bad in s:
+            return True
     return False
 
+# 统一别名
+is_noise_concept = is_generic_concept
+is_noise_sector = is_generic_concept
+
 def filter_concepts(cat_dict: dict[str, Any]) -> dict[str, Any]:
-    """批量过滤概念"""
-    INVALID: list[str] = [
-        "国企改革", "沪股通", "深股通", "融资融券", "MSCI", "富时", 
-        "标普", "中字头", "央企", "基金重仓", "机构重仓", "大盘股", "高股息"
-    ]
-    VALID_HINTS: list[str] = [
-        "能源", "科技", "芯片", "AI", "人工智能", "光伏", "储能", 
-        "汽车", "机器人", "碳", "半导体", "电力", "通信", "军工", "医药"
-    ]
+    """批量过滤概念字典，仅保留真实产业题材"""
     res: dict[str, Any] = {}
     for k, v in cat_dict.items():
-        if any(bad in k for bad in INVALID):
+        if is_generic_concept(k):
             continue
-        if len(v) > 500 or len(v) < 2:
-            continue
-        if not any(ok in k for ok in VALID_HINTS):
+        if isinstance(v, (list, set, tuple)) and (len(v) > 500 or len(v) < 2):
             continue
         res[k] = v
     return res
