@@ -791,6 +791,119 @@ def test_reload_shortcut_and_focus_protection(monkeypatch):
             win.close()
 
 
+def test_hot_sector_new_concept_auto_all_and_quick_access(monkeypatch):
+    """
+    【🎯 验证 4】验证 HotSectorLeaderboardDialog:
+    1. 默认全选状态下，盘中同步新板块进入 Top 3，自动保持全选且新板块股票 100% 自动包含在表格中（彻底根治未选中/不显示 Bug）
+    2. 新概念检测状态机自动识别新晋板块，顶部专属 `btn_new_concept` 动态变为高亮 `🆕 新概念: [板块名]`
+    3. 点击 `btn_new_concept` 一键直达单选聚焦该新概念，再次点击平滑切回全选
+    4. 在单选某板块状态下，当该板块跌出 Top 3 时，系统自动平滑解除单选恢复全选
+    5. 下拉框选择 `🆕 仅看新晋概念`，精确过滤出新概念标的
+    """
+    from ats.ui.hot_sector_leaderboard import HotSectorLeaderboardDialog
+
+    dialog = HotSectorLeaderboardDialog()
+    try:
+        dialog.combo_time_slice.setCurrentIndex(1) # 选择 ⏱️ 全天全时段，防止盘中时段切片过滤
+
+        # 1. 模拟初始状态：Top 3 为 ["航运概念", "期货概念", "黄金概念"]
+        initial_top = ["航运概念", "期货概念", "黄金概念"]
+        dialog._has_init_fetched = True
+        dialog.current_top_sectors = list(initial_top)
+        dialog.active_sectors = set(initial_top)
+        dialog.selected_single_sector = None
+        dialog.seen_sectors_history = set(initial_top)
+        dialog._update_sector_button_styles()
+
+        assert dialog.selected_single_sector is None
+        assert dialog.active_sectors == {"航运概念", "期货概念", "黄金概念"}
+        assert not dialog.btn_new_concept.isEnabled()
+        assert "暂无新概念" in dialog.btn_new_concept.text()
+
+        # 2. 构造模拟行情数据（包含 2只航运、2只期货、2只同花顺中特）
+        mock_results = [
+            {"code": "600428", "name": "中远海特", "sector": "航运概念", "pct": 4.03, "price": 11.62, "vwap_dev_pct": 1.4, "buy_tag": "PULLBACK", "buy_type": "反身低吸", "alpha_score": 85.0},
+            {"code": "600650", "name": "锦江在线", "sector": "航运概念", "pct": 4.73, "price": 11.30, "vwap_dev_pct": -0.1, "buy_tag": "SURGE", "buy_type": "主动扫买", "alpha_score": 88.0},
+            {"code": "000776", "name": "广发证券", "sector": "期货概念", "pct": 4.16, "price": 22.29, "vwap_dev_pct": 1.1, "buy_tag": "SURGE", "buy_type": "主动扫买", "alpha_score": 82.0},
+            {"code": "000712", "name": "锦龙股份", "sector": "期货概念", "pct": 2.20, "price": 13.45, "vwap_dev_pct": 1.8, "buy_tag": "LOW_VOL", "buy_type": "地量起爆", "alpha_score": 79.0},
+            {"code": "601318", "name": "中国平安", "sector": "同花顺中特", "pct": 3.13, "price": 58.40, "vwap_dev_pct": 1.0, "buy_tag": "SURGE", "buy_type": "主动扫买", "alpha_score": 90.0},
+            {"code": "002271", "name": "东方雨虹", "sector": "同花顺中特", "pct": 3.02, "price": 10.92, "vwap_dev_pct": 0.8, "buy_tag": "SURGE", "buy_type": "主动扫买", "alpha_score": 86.0},
+        ]
+
+        # 3. 模拟热力图推送新 Top 3：黄金概念跌出，新板块【同花顺中特】晋级进入 Top 3！
+        class DummyHeatmap:
+            def get_top_sectors(self, top_n=3):
+                return ["航运概念", "期货概念", "同花顺中特"]
+            sector_to_codes = {}
+            sectors = []
+
+        class DummyMainApp:
+            heatmap_widget = DummyHeatmap()
+            current_df = None
+            fav_stocks = []
+            def link_stock(self, code, name):
+                pass
+
+        dummy_app = DummyMainApp()
+        dialog._py_parent = dummy_app
+
+        # 拦截引擎计算，直接返回我们构造的 mock_results
+        monkeypatch.setattr(dialog.engine, "compute_hot_alpha_leaderboard", lambda *args, **kwargs: mock_results)
+
+        # 触发定时器数据更新
+        dialog._on_ui_timer_tick(force=True)
+
+        # ── 核心断言 1：默认全选下，新板块【同花顺中特】自动纳入 active_sectors，表格显示全部 6 只标的 ──
+        assert "同花顺中特" in dialog.active_sectors, "新板块【同花顺中特】应自动加入 active_sectors！"
+        assert dialog.active_sectors == {"航运概念", "期货概念", "同花顺中特"}
+        assert dialog.selected_single_sector is None, "默认应保持全选模式！"
+        assert dialog.table.rowCount() == 6, f"预期表格自动显示全部 6 只股票，实际为 {dialog.table.rowCount()}"
+
+        # ── 核心断言 2：新概念按钮与 No.3 板块按钮动态更新 ──
+        assert dialog.latest_new_sector == "同花顺中特"
+        assert dialog.btn_new_concept.isEnabled()
+        assert "同花顺中特" in dialog.btn_new_concept.text()
+        assert "🆕" in dialog.btn_sec3.text()
+        assert "同花顺中特" in dialog.btn_sec3.text()
+
+        # ── 核心断言 3：点击【🆕 新概念】按钮，一键单选聚焦该新概念 ──
+        dialog.btn_new_concept.click()
+        assert dialog.selected_single_sector == "同花顺中特"
+        assert dialog.active_sectors == {"同花顺中特"}
+        assert dialog.table.rowCount() == 2, f"单选新概念后应只显示 2 只标的，实际为 {dialog.table.rowCount()}"
+        codes_shown = {dialog.table.item(r, 0).text() for r in range(dialog.table.rowCount())}
+        assert codes_shown == {"601318", "002271"}
+        assert "聚焦" in dialog.btn_new_concept.text()
+
+        # 再次点击【🆕 新概念】按钮，平滑切回全选
+        dialog.btn_new_concept.click()
+        assert dialog.selected_single_sector is None
+        assert dialog.active_sectors == {"航运概念", "期货概念", "同花顺中特"}
+        assert dialog.table.rowCount() == 6
+
+        # ── 核心断言 4：单选状态下，若该单选板块跌出 Top 3，自动平滑解除单选恢复全选 ──
+        dialog._select_single_sector(2) # 单选同花顺中特
+        assert dialog.selected_single_sector == "同花顺中特"
+        assert dialog.table.rowCount() == 2
+
+        # 模拟下一轮 Top 3 变动：同花顺中特跌出，变为 ["航运概念", "期货概念", "固态电池"]
+        dummy_app.heatmap_widget.get_top_sectors = lambda top_n=3: ["航运概念", "期货概念", "固态电池"]
+        dialog._on_ui_timer_tick(force=True)
+
+        assert dialog.selected_single_sector is None, "单选板块跌出 Top 3 时，应自动解除单选！"
+        assert dialog.active_sectors == {"航运概念", "期货概念", "固态电池"}, "应平滑恢复全选当前 Top 3！"
+
+        # ── 核心断言 5：下拉框选择【🆕 仅看新晋概念】──
+        # 此时【固态电池】是新晋板块
+        assert dialog.latest_new_sector == "固态电池"
+        dialog.combo_filter.setCurrentIndex(8) # 🆕 仅看新晋概念
+        assert dialog.filter_mode == "NEW_CONCEPT"
+
+    finally:
+        dialog.close()
+
+
+
 
 
 

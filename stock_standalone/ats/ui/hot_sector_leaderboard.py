@@ -343,10 +343,15 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
 
         # 3. 状态与引擎
         self.engine = HotSectorEngine.get_instance()
-        self.filter_mode = "ALL" # ALL / LEADER_BREAKOUT / PULLBACK
+        self.filter_mode = "ALL" # ALL / TOP5_FOCUS / FOCUS / LOW_VOL / LEADER / BREAKOUT / PULLBACK / SURGE / NEW_CONCEPT
         self.cached_results: List[Dict[str, Any]] = []
         self.current_top_sectors: List[str] = []
         self.active_sectors: set = set() # 当前激活/选中的板块集合
+        self.selected_single_sector: Optional[str] = None # 用户手动单选锁定的具体板块名称 (None 表示处于全选模式)
+        self.seen_sectors_history: Set[str] = set() # 盘中已出现过的板块历史集合
+        self.newly_promoted_sectors: Set[str] = set() # 当前 Top 3 中属于新晋上榜的板块集合
+        self.latest_new_sector: Optional[str] = None # 最近一个新晋杀入 Top 3 的新板块名称
+        self.last_announced_new_sector: Optional[str] = None # 防重复播报与日志限流
         self._has_init_fetched: bool = False # 记录是否已完成非交易时段初次初始化
         self.tdx_log_dialog: Optional[TDXFetchLogDialog] = None # 独立日志弹窗引用
 
@@ -406,15 +411,15 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
         header_frame = QFrame()
         header_frame.setStyleSheet("QFrame { background-color: #18181c; border-radius: 4px; border: 1px solid #282830; }")
         header_lay = QHBoxLayout(header_frame)
-        header_lay.setContentsMargins(8, 4, 8, 4)
-        header_lay.setSpacing(8)
+        header_lay.setContentsMargins(6, 4, 6, 4)
+        header_lay.setSpacing(5)
 
         # 全选 / 全部板块按钮
         self.btn_top_all = QPushButton("🔥 全部板块")
         self.btn_top_all.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_top_all.setToolTip("点击重置并显示所有 Top 3 强势板块标的")
+        self.btn_top_all.setToolTip("点击重置并显示所有 Top 3 强势板块标的 (默认全选)")
         self.btn_top_all.setStyleSheet("""
-            QPushButton { background-color: #1a2a3a; color: #00FFCC; border: 1px solid #00FFCC; border-radius: 3px; font-weight: bold; font-size: 9.5pt; padding: 3px 8px; }
+            QPushButton { background-color: #1a2a3a; color: #00FFCC; border: 1px solid #00FFCC; border-radius: 3px; font-weight: bold; font-size: 9pt; padding: 2px 6px; }
             QPushButton:hover { background-color: #00FFCC; color: #000000; }
         """)
         self.btn_top_all.clicked.connect(self._on_all_sectors_clicked)
@@ -422,7 +427,7 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
 
         # Top 3 板块可点击切换按钮容器
         self.sec_tags_layout = QHBoxLayout()
-        self.sec_tags_layout.setSpacing(6)
+        self.sec_tags_layout.setSpacing(4)
 
         self.btn_sec1 = QPushButton("🔥 No.1 --")
         self.btn_sec1.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -444,6 +449,18 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
             self.sec_tags_layout.addWidget(btn)
         
         header_lay.addLayout(self.sec_tags_layout)
+
+        # 🆕 专属新概念/新热点板块极速捕捉直达按钮
+        self.btn_new_concept = QPushButton("🆕 暂无新概念")
+        self.btn_new_concept.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_new_concept.setToolTip("盘中新概念极速捕捉：当有新板块杀入 Top 3 时高亮激活，点击可一键直达单选聚焦该新板块 (再次点击恢复全选)")
+        self.btn_new_concept.setStyleSheet("""
+            QPushButton { background-color: #14161f; color: #555566; border: 1px solid #222533; border-radius: 3px; padding: 2px 6px; font-size: 8.5pt; }
+        """)
+        self.btn_new_concept.setEnabled(False)
+        self.btn_new_concept.clicked.connect(self._on_new_concept_clicked)
+        header_lay.addWidget(self.btn_new_concept)
+
         header_lay.addStretch()
 
         # 📜 TDX 数据获取日志与异常诊断按钮
@@ -456,7 +473,7 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
                 color: #aad4ff; 
                 border: 1px solid #334466; 
                 border-radius: 3px; 
-                padding: 2px 8px; 
+                padding: 2px 6px; 
                 font-size: 8.5pt; 
                 font-weight: bold; 
                 height: 20px;
@@ -481,10 +498,10 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
             "⚠️ 14:00~14:45 尾盘诱多",
             "🔒 14:45~15:00 尾盘定盘"
         ])
-        self.combo_time_slice.setMinimumWidth(185)
+        self.combo_time_slice.setMinimumWidth(155)
         self.combo_time_slice.setStyleSheet("""
-            QComboBox { background-color: #241e12; color: #ffd700; border: 1px solid #ffaa00; border-radius: 3px; padding: 2px 6px; font-weight: bold; font-size: 9pt; min-width: 180px; }
-            QComboBox::drop-down { width: 18px; }
+            QComboBox { background-color: #241e12; color: #ffd700; border: 1px solid #ffaa00; border-radius: 3px; padding: 2px 4px; font-weight: bold; font-size: 8.5pt; min-width: 150px; }
+            QComboBox::drop-down { width: 16px; }
             QComboBox QAbstractItemView { background-color: #1e1e24; color: #ffd700; selection-background-color: #3d3014; }
         """)
         self.combo_time_slice.currentIndexChanged.connect(lambda: self._render_table_data(self.cached_results))
@@ -525,7 +542,8 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
             "👑 仅看领涨龙头", 
             "🚀 仅看先锋突破", 
             "💎 仅看反身低吸", 
-            "⚡ 仅看扫盘冲板"
+            "⚡ 仅看扫盘冲板",
+            "🆕 仅看新晋概念"
         ])
         self.combo_filter.setStyleSheet("""
             QComboBox { background-color: #1c1c22; color: #00ffaa; border: 1px solid #3e3e4a; border-radius: 3px; padding: 2px 6px; font-size: 9pt; font-weight: bold; }
@@ -773,8 +791,9 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
 
     # ── 板块按钮交互与过滤 ──
     def _on_all_sectors_clicked(self):
-        """点击【全部板块】：一键全选并激活所有当前 Top 3 强势板块"""
+        """点击【全部板块】：一键全选并激活所有当前 Top 3 强势板块 (解除单选模式)"""
         valid_secs = [s for s in self.current_top_sectors if is_valid_sector_name(s)]
+        self.selected_single_sector = None
         self.active_sectors = set(valid_secs)
         self._update_sector_button_styles()
         self._render_table_data(self.cached_results)
@@ -789,16 +808,37 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
 
         valid_secs = [s for s in self.current_top_sectors if is_valid_sector_name(s)]
         # 如果当前已经是唯一选中该板块，再次点击则切回全部板块；否则单选该板块
-        if self.active_sectors == {sec_name}:
+        if self.selected_single_sector == sec_name or self.active_sectors == {sec_name}:
+            self.selected_single_sector = None
             self.active_sectors = set(valid_secs)
         else:
+            self.selected_single_sector = sec_name
             self.active_sectors = {sec_name}
 
         self._update_sector_button_styles()
         self._render_table_data(self.cached_results)
 
+    def _on_new_concept_clicked(self):
+        """点击【🆕 新概念】直达按钮：一键聚焦查看最新冲入 Top 3 的新板块龙头与跟单标的，再次点击恢复全选"""
+        target_sec = self.latest_new_sector
+        valid_secs = [s for s in self.current_top_sectors if is_valid_sector_name(s)]
+        if not target_sec or not is_valid_sector_name(target_sec) or target_sec not in valid_secs:
+            return
+
+        if self.selected_single_sector == target_sec or self.active_sectors == {target_sec}:
+            # 已经处于该新概念单选聚焦态，再次点击平滑切回全选
+            self.selected_single_sector = None
+            self.active_sectors = set(valid_secs)
+        else:
+            # 一键直达聚焦该新概念
+            self.selected_single_sector = target_sec
+            self.active_sectors = {target_sec}
+
+        self._update_sector_button_styles()
+        self._render_table_data(self.cached_results)
+
     def _update_sector_button_styles(self):
-        """刷新顶部 3 个板块按钮的高亮/置灰状态"""
+        """刷新顶部 全部板块、新概念按钮及 3 个板块按钮的高亮/置灰状态与 🆕 徽章"""
         color_themes = [
             ("#2a1b1b", "#ff5577", "#ff4466"), # No.1 红色系
             ("#2a221b", "#ffaa44", "#ff9933"), # No.2 橙色系
@@ -806,25 +846,55 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
         ]
         
         valid_current = [s for s in self.current_top_sectors if is_valid_sector_name(s)]
-        all_active = (set(valid_current) <= self.active_sectors) and len(valid_current) > 0
+        all_active = (self.selected_single_sector is None) and (set(valid_current) <= self.active_sectors) and len(valid_current) > 0
         if all_active:
             self.btn_top_all.setStyleSheet("""
-                QPushButton { background-color: #1a2a3a; color: #00FFCC; border: 1px solid #00FFCC; border-radius: 3px; font-weight: bold; font-size: 9.5pt; padding: 3px 8px; }
+                QPushButton { background-color: #1a2a3a; color: #00FFCC; border: 1px solid #00FFCC; border-radius: 3px; font-weight: bold; font-size: 9pt; padding: 2px 6px; }
                 QPushButton:hover { background-color: #00FFCC; color: #000000; }
             """)
         else:
             self.btn_top_all.setStyleSheet("""
-                QPushButton { background-color: #141720; color: #778899; border: 1px solid #24293e; border-radius: 3px; font-weight: bold; font-size: 9.5pt; padding: 3px 8px; }
+                QPushButton { background-color: #141720; color: #778899; border: 1px solid #24293e; border-radius: 3px; font-weight: bold; font-size: 9pt; padding: 2px 6px; }
                 QPushButton:hover { background-color: #00FFCC; color: #000000; }
             """)
 
+        # 🆕 刷新专属新概念按钮状态
+        if hasattr(self, "btn_new_concept"):
+            if self.latest_new_sector and self.latest_new_sector in valid_current:
+                is_new_active = (self.selected_single_sector == self.latest_new_sector) or (self.active_sectors == {self.latest_new_sector})
+                s_short = self.latest_new_sector.split('(')[0] if '(' in self.latest_new_sector else self.latest_new_sector
+                if is_new_active:
+                    self.btn_new_concept.setText(f"🆕 聚焦: {s_short}")
+                    self.btn_new_concept.setStyleSheet("""
+                        QPushButton { background-color: #4a1d6d; color: #ffffff; border: 1px solid #d055ff; border-radius: 3px; padding: 2px 6px; font-weight: bold; font-size: 8.5pt; }
+                        QPushButton:hover { background-color: #d055ff; color: #000000; }
+                    """)
+                else:
+                    self.btn_new_concept.setText(f"🆕 新概念: {s_short}")
+                    self.btn_new_concept.setStyleSheet("""
+                        QPushButton { background-color: #231530; color: #e077ff; border: 1px solid #a344db; border-radius: 3px; padding: 2px 6px; font-weight: bold; font-size: 8.5pt; }
+                        QPushButton:hover { background-color: #a344db; color: #ffffff; }
+                    """)
+                self.btn_new_concept.setToolTip(f"【🆕 盘中新概念突击】板块【{self.latest_new_sector}】最新冲入 Top 3！\n点击一键快速聚焦查看该新板块全部龙头与跟单标的 (再次点击恢复全选)")
+                self.btn_new_concept.setEnabled(True)
+            else:
+                self.btn_new_concept.setText("🆕 暂无新概念")
+                self.btn_new_concept.setStyleSheet("""
+                    QPushButton { background-color: #14161f; color: #555566; border: 1px solid #222533; border-radius: 3px; padding: 2px 6px; font-size: 8.5pt; }
+                """)
+                self.btn_new_concept.setToolTip("盘中新概念极速捕捉：当前 Top 3 强势板块保持稳定，无新晋轮动板块")
+                self.btn_new_concept.setEnabled(False)
+
+        # 刷新 3 个板块按钮
         for i, btn in enumerate(self.sec_buttons):
             if i < len(self.current_top_sectors):
                 sname = self.current_top_sectors[i]
                 if not is_valid_sector_name(sname):
                     btn.setVisible(False)
                     continue
-                btn.setText(f"🔥 No.{i+1} {sname}")
+                is_promoted = (sname in self.newly_promoted_sectors)
+                prefix_tag = "🆕" if is_promoted else ""
+                btn.setText(f"🔥 No.{i+1} {prefix_tag}{sname}")
                 btn.setVisible(True)
 
                 is_active = (sname in self.active_sectors)
@@ -832,14 +902,18 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
                 
                 if is_active:
                     btn.setStyleSheet(f"""
-                        QPushButton {{ background-color: {bg}; color: {fg}; border: 1px solid {border}; border-radius: 3px; padding: 2px 7px; font-weight: bold; font-size: 9pt; }}
+                        QPushButton {{ background-color: {bg}; color: {fg}; border: 1px solid {border}; border-radius: 3px; padding: 2px 5px; font-weight: bold; font-size: 9pt; }}
                         QPushButton:hover {{ background-color: {border}; color: #ffffff; }}
                     """)
                 else:
                     btn.setStyleSheet("""
-                        QPushButton { background-color: #14161f; color: #555566; border: 1px solid #222533; border-radius: 3px; padding: 2px 7px; font-size: 9pt; }
+                        QPushButton { background-color: #14161f; color: #555566; border: 1px solid #222533; border-radius: 3px; padding: 2px 5px; font-size: 9pt; }
                         QPushButton:hover { background-color: #1f2333; color: #888899; }
                     """)
+                tip = f"【🔥 No.{i+1} 强势板块】点击只显示该板块标的，快速定位板块 (再次点击恢复全选)"
+                if is_promoted:
+                    tip = f"【🆕 盘中新概念突击】板块【{sname}】刚刚新晋冲入 Top 3！\n点击快速单选聚焦该板块标的 (再次点击恢复全选)"
+                btn.setToolTip(tip)
             else:
                 btn.setVisible(False)
 
@@ -858,6 +932,8 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
             self.filter_mode = "PULLBACK"   # 💎 仅看反身低吸
         elif idx == 7:
             self.filter_mode = "SURGE"      # ⚡ 仅看扫盘冲板
+        elif idx == 8:
+            self.filter_mode = "NEW_CONCEPT" # 🆕 仅看新晋概念
         else:
             self.filter_mode = "ALL"
         self._render_table_data(self.cached_results)
@@ -925,12 +1001,47 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
         if not top_sectors:
             top_sectors = ["共封装光学(CPO)", "国家大基金持股", "存储芯片"]
 
-        # 板块变化或初次加载时初始化 active_sectors
+        # 板块变化或初次加载时初始化 active_sectors 并触发新概念检测
         if self.current_top_sectors != top_sectors:
+            old_sectors_set = set(self.current_top_sectors)
+            new_sectors_set = set(top_sectors)
+
+            # 1. 盘中新概念捕捉：检测新晋进入 Top 3 的板块
+            if self._has_init_fetched and old_sectors_set:
+                brand_new = [s for s in top_sectors if s not in old_sectors_set]
+                if brand_new:
+                    for s in brand_new:
+                        self.newly_promoted_sectors.add(s)
+                        self.seen_sectors_history.add(s)
+                    self.latest_new_sector = brand_new[0]
+                    if self.latest_new_sector != self.last_announced_new_sector:
+                        self.last_announced_new_sector = self.latest_new_sector
+                        fetcher.add_log(f"🚀 盘中新概念突发:【{self.latest_new_sector}】新晋冲入 Top 3 强势榜", level="SPEED")
+            else:
+                # 首次初始化启动时记录基础板块
+                for s in top_sectors:
+                    self.seen_sectors_history.add(s)
+
+            # 清理跌出当前 Top 3 的新晋板块
+            self.newly_promoted_sectors = {s for s in self.newly_promoted_sectors if s in new_sectors_set}
+            if self.latest_new_sector and self.latest_new_sector not in new_sectors_set:
+                self.latest_new_sector = next(iter(self.newly_promoted_sectors), None)
+
             self.current_top_sectors = list(top_sectors)
-            # 如果先前未设置或者刚启动，默认全选开启
-            if not self.active_sectors or not (self.active_sectors & set(top_sectors)):
+
+            # 2. 选区状态机同步（彻底修复默认全选 Bug）
+            if self.selected_single_sector is None:
+                # 全选模式 (默认)：新出现的板块自动加入 active_sectors，保持 100% 全选展示！
                 self.active_sectors = set(top_sectors)
+            else:
+                # 单选模式：检查用户单选的板块是否仍在 Top 3
+                if self.selected_single_sector in new_sectors_set:
+                    self.active_sectors = {self.selected_single_sector}
+                else:
+                    # 单选板块已跌出 Top 3，自动平滑解除单选恢复全选
+                    self.selected_single_sector = None
+                    self.active_sectors = set(top_sectors)
+
             self._update_sector_button_styles()
 
         # 计算并返回最新 Alpha 列表
@@ -1043,6 +1154,9 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
             elif getattr(self, "filter_mode", "ALL") == "SURGE":
                 if tag == "SURGE":
                     filtered.append(r)
+            elif getattr(self, "filter_mode", "ALL") == "NEW_CONCEPT":
+                if sec in self.newly_promoted_sectors or (self.latest_new_sector and sec == self.latest_new_sector):
+                    filtered.append(r)
             else:
                 filtered.append(r)
 
@@ -1106,7 +1220,8 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
             if s in sec_leaders:
                 lead_stock = sec_leaders[s]
                 s_short = s.split('(')[0] if '(' in s else s
-                leader_strs.append(f"{s_short}: {lead_stock['name']}({lead_stock['pct']:+.2f}%)")
+                is_new = "🆕" if s in self.newly_promoted_sectors else ""
+                leader_strs.append(f"{is_new}{s_short}: {lead_stock['name']}({lead_stock['pct']:+.2f}%)")
 
         self.lbl_update_time.setText(time.strftime("更新: %H:%M:%S"))
 
