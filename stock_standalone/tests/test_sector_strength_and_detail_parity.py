@@ -919,6 +919,9 @@ def test_hot_sector_favorite_toggle_and_priority_pinning(monkeypatch):
     from global_favorites import GlobalFavoriteManager
 
     fav_mgr = GlobalFavoriteManager()
+    with fav_mgr._lock:
+        orig_stocks = set(fav_mgr.favorite_stocks)
+        orig_dates = dict(fav_mgr.favorite_stocks_dates)
     fav_mgr.remove_favorite_stock("601318")
 
     class DummyParent(QWidget):
@@ -999,7 +1002,11 @@ def test_hot_sector_favorite_toggle_and_priority_pinning(monkeypatch):
         fav_mgr.remove_favorite_stock("000999")
 
     finally:
-        fav_mgr.remove_favorite_stock("601318")
+        with fav_mgr._lock:
+            fav_mgr.favorite_stocks = set(orig_stocks)
+            fav_mgr.favorite_stocks_dates = dict(orig_dates)
+            fav_mgr._version += 1
+        fav_mgr.save_to_config()
         dialog.close()
 
 

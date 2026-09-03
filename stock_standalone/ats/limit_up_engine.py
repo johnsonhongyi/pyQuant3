@@ -686,11 +686,46 @@ class LimitUpEngine:
             except Exception as e:
                 logger.debug(f"TDX 封单与股本数据拉取补充异常: {e}")
 
+        # 0. 预先构建近 3 日、5 日、10 日历史涨停与强势底蕴字典 (SSOT)
+        with self._cache_lock:
+            hist_dates = sorted(self._history_daily_records.keys())
+        recent_3d_dates = set(hist_dates[-3:]) if len(hist_dates) >= 3 else set(hist_dates)
+        recent_5d_dates = set(hist_dates[-5:]) if len(hist_dates) >= 5 else set(hist_dates)
+        recent_10d_dates = set(hist_dates[-10:]) if len(hist_dates) >= 10 else set(hist_dates)
+
+        multiday_zt_map = {}
+        for d in (hist_dates[-10:] if len(hist_dates) >= 10 else hist_dates):
+            for r_h in self._history_daily_records.get(d, []):
+                c_h = str(r_h.get("code", "")).strip().zfill(6)
+                if not c_h:
+                    continue
+                if c_h not in multiday_zt_map:
+                    multiday_zt_map[c_h] = {"zt_3d": 0, "zt_5d": 0, "zt_10d": 0, "max_consecutive": 0}
+                if r_h.get("is_limit_up", False):
+                    if d in recent_3d_dates: multiday_zt_map[c_h]["zt_3d"] += 1
+                    if d in recent_5d_dates: multiday_zt_map[c_h]["zt_5d"] += 1
+                    if d in recent_10d_dates: multiday_zt_map[c_h]["zt_10d"] += 1
+                cons_h = _safe_int(r_h.get("consecutive_boards", 1))
+                if cons_h > multiday_zt_map[c_h]["max_consecutive"]:
+                    multiday_zt_map[c_h]["max_consecutive"] = cons_h
+
         # 3. 结合真实封板状态、多日历史归档、ch_bc2波谷周期与两日情绪推算标志性梯队与严格分层评分
         for r in records:
             code_str = str(r.get("code", "")).strip().zfill(6)
-            consecutive = self._calc_consecutive_boards(code_str, r.get("is_limit_up", False))
+            is_zt_now = bool(r.get("is_limit_up", False))
+            consecutive = self._calc_consecutive_boards(code_str, is_zt_now)
             r["consecutive_boards"] = consecutive
+
+            # 聚合多日涨停历史与 N日M板 特征
+            h_stat = multiday_zt_map.get(code_str, {"zt_3d": 0, "zt_5d": 0, "zt_10d": 0, "max_consecutive": 0})
+            zt_3d = h_stat["zt_3d"] + (1 if is_zt_now else 0)
+            zt_5d = h_stat["zt_5d"] + (1 if is_zt_now else 0)
+            zt_10d = h_stat["zt_10d"] + (1 if is_zt_now else 0)
+            r["zt_cnt_3d"] = zt_3d
+            r["zt_cnt_5d"] = zt_5d
+            r["zt_cnt_10d"] = zt_10d
+            n_d_m_b = f"5日{zt_5d}板" if zt_5d >= 2 else (f"3日{zt_3d}板" if zt_3d >= 2 else f"{consecutive}板")
+            r["n_days_m_boards"] = n_d_m_b
 
             dff = _safe_float(r.get("dff", 0.0))
             dff2 = _safe_float(r.get("dff2", 0.0))
@@ -777,8 +812,21 @@ class LimitUpEngine:
             r["is_gap_accel"] = is_gap_accel
             r["is_dual_accel"] = is_dual_accel
             r["low_diff_pct"] = low_diff_pct
-            r["open_jump_pct"] = open_jump_pct
             r["accel_tag"] = accel_tag
+
+            # ── 💡 多阶【启动加速 (Launch Acceleration)】量化特征判定 ──
+            # 模式 1: 连板主升加速 (2进3、3进4及以上连板且今日加速)
+            is_ladder_accel = bool(consecutive >= 2 and (is_dual_accel or is_gap_accel or is_open_low_accel or seal_to_circ >= 3.0))
+            # 模式 2: 首板突破平台启动加速 (突破近3/5日平台且双加速/缺口/光脚加速)
+            is_breakout_launch_accel = bool(consecutive == 1 and is_breakout_multiday and (is_dual_accel or is_gap_accel or is_open_low_accel))
+            # 模式 3: 多日蓄势波段主升加速 (5日2板/3日2板等多波且今日涨停加速)
+            is_multiday_wave_accel = bool(consecutive == 1 and zt_5d >= 2 and (is_dual_accel or is_gap_accel or is_open_low_accel))
+
+            is_launch_accel = bool(is_ladder_accel or is_breakout_launch_accel or is_multiday_wave_accel)
+            r["is_launch_accel"] = is_launch_accel
+            r["is_ladder_accel"] = is_ladder_accel
+            r["is_breakout_launch_accel"] = is_breakout_launch_accel
+            r["is_multiday_wave_accel"] = is_multiday_wave_accel
 
             # ── 💡 交易时钟生命周期 (Time Window Alpha) ──
             # 区分：09:30~10:00黄金定龙期 / 10:00~11:30分歧低吸期 / 13:00~14:00午后助攻期 / 14:00~14:45尾盘诱多高危期
@@ -887,87 +935,92 @@ class LimitUpEngine:
                 r["tier_jumps"] = 0
                 r["bubble_alpha_score"] = 50.0
 
-            # ── 💡 核心量化打分：结合时序生命周期乘数与加速结构提权 ──
+            # ── 💡 核心量化打分：结合多日强势底蕴与启动加速的分层梯度体系 (Gradient Tier) ──
             if is_limit_up:
-                base_score = 80.0
-                if consecutive >= 4:
-                    base_score += 10.0
-                elif consecutive == 3:
-                    base_score += 7.0
-                elif consecutive == 2:
-                    base_score += 4.0
-
-                seal_bonus = min(6.0, seal_to_circ * 0.8) + min(3.0, (seal_amt_wan / 10000.0) * 0.6)
-                base_score += seal_bonus
-
-                if pct >= 19.5:
-                    base_score += 2.0
-
-                if is_reflexivity_leader:
-                    base_score += 6.0
-                elif is_support_bounce and is_bullish_engulfing:
-                    base_score += 5.0
-                elif is_bullish_engulfing or is_support_bounce:
-                    base_score += 2.5
-
-                # 双加速提权加成
-                if is_dual_accel:
-                    base_score += 8.0
-                elif is_open_low_accel or is_gap_accel:
-                    base_score += 4.0
-
-                dff_bonus = min(3.0, max(0.0, (dff2 * 0.04 + dff3 * 0.01)))
-                base_score += dff_bonus
-
-                momentum_score = round(min(99.0, max(80.0, base_score)), 0)
+                # 1. 封单质量加成 (0.0 ~ 2.2分)
+                seal_bonus = min(1.5, seal_to_circ * 0.3) + min(0.7, (seal_amt_wan / 10000.0) * 0.15)
+                # 2. 加速形态加成 (👑双加速 +1.5分, ⚡光脚/🚀缺口单加速 +0.8分)
+                accel_bonus = 1.5 if is_dual_accel else (0.8 if (is_open_low_accel or is_gap_accel) else 0.0)
+                # 3. 多日强势底蕴微调加成 (0.0 ~ 1.0分)
+                multiday_bonus = min(1.0, max(0.0, (dff2 * 0.02 + dff3 * 0.005)))
 
                 if consecutive >= 4:
+                    # 👑 梯队 A: 空间高度总龙 (基准 98.0，得分区间 99.0 ~ 100.0)
+                    base_score = 98.0 + min(1.0, (consecutive - 4) * 0.3)
+                    momentum_score = min(100.0, base_score + seal_bonus + accel_bonus + multiday_bonus)
                     r["tier_tag"] = f"👑 空间高度龙 ({consecutive}板)"
                     desc_tag = f"👑 空间总龙({momentum_score:.0f}分)"
-                elif consecutive >= 2:
-                    r["tier_tag"] = f"🚀 连板接力 ({consecutive}板)"
-                    desc_tag = f"🚀 连板加速({momentum_score:.0f}分)"
-                elif "09:15" <= curr_hhmm <= "09:25":
-                    if (seal_amt_wan >= 2000 or seal_to_circ >= 3.0) and is_breakout_multiday:
-                        r["tier_tag"] = "💎 竞价爆量突破龙"
-                        desc_tag = f"💎 爆量突破({momentum_score:.0f}分)"
-                    elif seal_amt_wan >= 2000 or seal_to_circ >= 3.0:
-                        r["tier_tag"] = "👑 竞价一字顶格"
-                        desc_tag = f"👑 竞价一字({momentum_score:.0f}分)"
-                    else:
-                        r["tier_tag"] = "🔥 竞价高开冲板"
-                        desc_tag = f"🔥 竞价冲板({momentum_score:.0f}分)"
-                elif "09:25" < curr_hhmm < "09:30":
-                    if is_breakout_multiday:
-                        r["tier_tag"] = "💎 定盘爆量突破龙"
-                        desc_tag = f"💎 定盘突破({momentum_score:.0f}分)"
-                    else:
-                        r["tier_tag"] = "🔒 竞价一字定盘"
-                        desc_tag = f"🔒 定盘一字({momentum_score:.0f}分)"
-                elif is_reflexivity_leader:
-                    r["tier_tag"] = "💎 冰点反身性龙"
-                    desc_tag = f"💎 反身性龙头({momentum_score:.0f}分)"
-                elif (seal_amt_wan >= 20000 or seal_to_circ >= 4.0) and momentum_score >= 95:
-                    r["tier_tag"] = "💎 统治级大封单"
-                    desc_tag = f"💎 极强封板({momentum_score:.0f}分)"
-                elif is_support_bounce and is_bullish_engulfing:
-                    r["tier_tag"] = "🎯 支撑阳包阴反转"
-                    desc_tag = f"🎯 支撑反包({momentum_score:.0f}分)"
-                elif pct >= 19.5:
-                    r["tier_tag"] = "⭐ 20cm强势首板"
-                    desc_tag = f"⭐ 20cm强封({momentum_score:.0f}分)"
-                elif is_bullish_engulfing:
-                    r["tier_tag"] = "⚡ 阳包阴强反转"
-                    desc_tag = f"⚡ 阳包阴({momentum_score:.0f}分)"
-                elif is_support_bounce:
-                    r["tier_tag"] = "🛡️ 关键支撑起爆"
-                    desc_tag = f"🛡️ 支撑起爆({momentum_score:.0f}分)"
-                elif dff2 > 15.0 or dff3 > 30.0:
-                    r["tier_tag"] = "🔥 强势主升首板"
-                    desc_tag = f"🔥 主升首板({momentum_score:.0f}分)"
+
+                elif consecutive == 3:
+                    # 🚀 梯队 B: 连板接力核心 (基准 95.0，得分区间 96.0 ~ 98.0)
+                    base_score = 95.0
+                    ladder_boost = 1.2 if is_ladder_accel else 0.4
+                    momentum_score = min(98.0, base_score + ladder_boost + seal_bonus + accel_bonus + multiday_bonus)
+                    r["tier_tag"] = f"🚀 连板接力 (3板)"
+                    desc_tag = f"🚀 连板加速({momentum_score:.0f}分)" if is_ladder_accel else f"🚀 连板接力({momentum_score:.0f}分)"
+
+                elif consecutive == 2:
+                    # ⚡ 梯队 C: 启动加速阶梯 (基准 92.0，得分区间 93.0 ~ 95.4，彻底消灭被1板倒挂)
+                    base_score = 92.0
+                    ladder_boost = 1.5 if is_ladder_accel else 0.5
+                    momentum_score = min(95.4, base_score + ladder_boost + seal_bonus + accel_bonus + multiday_bonus)
+                    r["tier_tag"] = "🚀 连板启动加速" if is_ladder_accel else "🚀 连板接力 (2板)"
+                    desc_tag = f"🚀 启动加速({momentum_score:.0f}分)" if is_ladder_accel else f"🚀 连板接力({momentum_score:.0f}分)"
+
                 else:
-                    r["tier_tag"] = "📋 换手蓄势首板"
-                    desc_tag = f"📋 换手首板({momentum_score:.0f}分)"
+                    # 🔥 梯队 D: 首板 (按多日底蕴与启动加速严格细分，封顶 92.4，绝不越级压制 2 板)
+                    if is_multiday_wave_accel or zt_5d >= 2:
+                        # D1: 多日波段蓄势加速 (如 5日2板/3日2板)
+                        base_score = 88.0
+                        launch_boost = 1.8 if is_launch_accel else 0.5
+                        momentum_score = min(92.4, base_score + launch_boost + seal_bonus + accel_bonus)
+                        r["tier_tag"] = f"👑 波段主升 ({n_d_m_b})"
+                        desc_tag = f"👑 主升加速({momentum_score:.0f}分)"
+                    elif is_breakout_launch_accel:
+                        # D2: 首板突破多日平台启动加速
+                        base_score = 87.5
+                        launch_boost = 2.0
+                        momentum_score = min(92.0, base_score + launch_boost + seal_bonus + accel_bonus)
+                        r["tier_tag"] = "💎 突破启动加速"
+                        desc_tag = f"💎 启动加速({momentum_score:.0f}分)"
+                    elif is_reflexivity_leader:
+                        # D3: 冰点反身性龙头
+                        base_score = 85.0
+                        momentum_score = min(89.4, base_score + seal_bonus + accel_bonus + 1.2)
+                        r["tier_tag"] = "💎 冰点反身性龙"
+                        desc_tag = f"💎 反身性龙头({momentum_score:.0f}分)"
+                    elif is_support_bounce and is_bullish_engulfing:
+                        # D4: 支撑阳包阴反转
+                        base_score = 84.0
+                        momentum_score = min(88.4, base_score + seal_bonus + accel_bonus + 1.0)
+                        r["tier_tag"] = "🎯 支撑阳包阴反转"
+                        desc_tag = f"🎯 支撑反包({momentum_score:.0f}分)"
+                    elif (seal_amt_wan >= 20000 or seal_to_circ >= 4.0):
+                        # D5: 统治级大封单首板
+                        base_score = 84.0
+                        momentum_score = min(88.4, base_score + seal_bonus + accel_bonus + 0.8)
+                        r["tier_tag"] = "💎 统治级大封单"
+                        desc_tag = f"💎 极强封板({momentum_score:.0f}分)"
+                    elif dff2 > 15.0 or dff3 > 30.0:
+                        # D6: 强势主升首板
+                        base_score = 83.0
+                        momentum_score = min(87.4, base_score + seal_bonus + accel_bonus)
+                        r["tier_tag"] = "🔥 强势主升首板"
+                        desc_tag = f"🔥 主升首板({momentum_score:.0f}分)"
+                    elif pct >= 19.5:
+                        # D7: 20cm 强势首板
+                        base_score = 82.0
+                        momentum_score = min(86.4, base_score + seal_bonus + accel_bonus)
+                        r["tier_tag"] = "⭐ 20cm强势首板"
+                        desc_tag = f"⭐ 20cm强封({momentum_score:.0f}分)"
+                    else:
+                        # D8: 普通常规换手首板
+                        base_score = 80.0
+                        momentum_score = min(85.4, base_score + seal_bonus + accel_bonus)
+                        r["tier_tag"] = "📋 换手蓄势首板"
+                        desc_tag = f"📋 换手首板({momentum_score:.0f}分)"
+
+                momentum_score = round(momentum_score, 0)
 
             elif is_broken:
                 momentum_score = round(min(58.0, max(30.0, 35.0 + pct * 1.5)), 0)
@@ -1252,7 +1305,7 @@ class LimitUpEngine:
         # 排除今天的记录（防止重复计数）
         past_dates = [d for d in sorted_dates if d != today_str]
 
-        for d in past_dates:
+        for idx, d in enumerate(past_dates):
             day_records = self._history_daily_records.get(d, [])
             # 查找该代码在历史日中是否为有效涨停
             found = False
@@ -1260,6 +1313,9 @@ class LimitUpEngine:
                 if str(rec.get("code", "")).strip().zfill(6) == c_clean:
                     if rec.get("is_limit_up", False) or _safe_float(rec.get("pct", 0.0)) >= get_limit_up_ratio_threshold(c_clean):
                         found = True
+                        prev_cb = _safe_int(rec.get("consecutive_boards", 0))
+                        if prev_cb > 0 and idx == 0:
+                            return prev_cb + 1
                         break
             if found:
                 boards += 1
