@@ -309,6 +309,97 @@ class TestDailyLimitUpDialog(unittest.TestCase):
         self.assertEqual(dialog.combo_time_slice.currentText(), "⚡ 自动实盘跟随")
 
 
+    def test_favorite_priority_pinning_and_toggle(self):
+        """测试天梯重点关注标的优先置顶显示、⭐ 徽章、金色高亮及切换联动"""
+        from global_favorites import GlobalFavoriteManager
+        from PyQt6.QtGui import QColor
+        fav_mgr = GlobalFavoriteManager()
+
+        mock_records = [
+            {
+                "code": "002886", "name": "沃特股份", "price": 30.84, "pct": 9.99,
+                "consecutive_boards": 4, "tier_tag": "👑 空间高度龙 (4板)",
+                "seal_amount_wan": 34721.0, "seal_to_circ_ratio": 5.38, "turnover_rate": 18.42,
+                "is_limit_up": True, "is_broken": False, "category": "PEEK材料"
+            },
+            {
+                "code": "601086", "name": "国芳集团", "price": 11.10, "pct": 10.01,
+                "consecutive_boards": 3, "tier_tag": "🚀 连板接力 (3板)",
+                "seal_amount_wan": 39871.0, "seal_to_circ_ratio": 5.39, "turnover_rate": 0.80,
+                "is_limit_up": True, "is_broken": False, "category": "IP经济"
+            },
+            {
+                "code": "000001", "name": "平安银行", "price": 12.00, "pct": 10.00,
+                "consecutive_boards": 1, "tier_tag": "🔥 首板",
+                "seal_amount_wan": 15000.0, "seal_to_circ_ratio": 1.20, "turnover_rate": 2.50,
+                "is_limit_up": True, "is_broken": False, "category": "银行"
+            }
+        ]
+
+        dialog = DailyLimitUpDialog(parent=None)
+        dialog.current_records = mock_records
+        dialog.combo_time_slice.setCurrentText("⏱️ 全天全时段")
+        dialog.combo_tier_filter.setCurrentIndex(0)
+        # 显式设定按连板数降序排序：沃特股份 (4板) > 国芳集团 (3板) > 平安银行 (1板)
+        dialog.sort_level1_col = 4
+        dialog.sort_level1_asc = False
+
+        # 确保初始未关注 000001
+        fav_mgr.remove_favorite_stock("000001")
+
+        try:
+            # 1. 初始渲染：002886 (4板) > 601086 (3板) > 000001 (1板)
+            dialog._apply_filter()
+            self.assertEqual(dialog.table.rowCount(), 3)
+            self.assertEqual(dialog.table.item(0, 0).text(), "002886")
+            self.assertEqual(dialog.table.item(1, 0).text(), "601086")
+            self.assertEqual(dialog.table.item(2, 0).text(), "000001")
+            self.assertFalse(dialog.table.item(2, 1).text().startswith("⭐"))
+
+            # 2. 将原本末位的 000001 设为重点关注
+            fav_mgr.add_favorite_stock("000001")
+            dialog._apply_filter()
+
+            # 3. 断言 000001 跃升至第一行 (第 0 行) 绝对置顶 (即使它只有 1 板)
+            self.assertEqual(dialog.table.item(0, 0).text(), "000001")
+            self.assertTrue(dialog.table.item(0, 1).text().startswith("⭐ 平安银行"))
+            # 非置顶区依然保持原有连板数排序：沃特股份 (4板) > 国芳集团 (3板)
+            self.assertEqual(dialog.table.item(1, 0).text(), "002886")
+            self.assertEqual(dialog.table.item(2, 0).text(), "601086")
+
+            # 断言单元格 is_pinned 置顶属性与金色高亮
+            item_code = dialog.table.item(0, 0)
+            item_name = dialog.table.item(0, 1)
+            self.assertTrue(getattr(item_code, "is_pinned", False))
+            self.assertEqual(getattr(item_code, "pin_rank", 999), 0)
+            self.assertEqual(item_code.foreground().color().name().lower(), "#ffd700")
+            self.assertEqual(item_name.foreground().color().name().lower(), "#ffd700")
+            self.assertIn("⭐关注: 1", dialog.lbl_status.text())
+
+            # 4. 切换排序列为涨幅降序，000001 依然永远置顶在第一行
+            dialog.sort_level1_col = 3  # 涨幅列
+            dialog.sort_level1_asc = False
+            dialog._apply_filter()
+            self.assertEqual(dialog.table.item(0, 0).text(), "000001")
+            # 非置顶区按涨幅降序：国芳集团 (10.01%) > 沃特股份 (9.99%)
+            self.assertEqual(dialog.table.item(1, 0).text(), "601086")
+            self.assertEqual(dialog.table.item(2, 0).text(), "002886")
+
+            # 5. 取消重点关注后，恢复正常按涨幅降序排序：国芳集团 (10.01%) > 平安银行 (10.00%) > 沃特股份 (9.99%)
+            fav_mgr.remove_favorite_stock("000001")
+            dialog._apply_filter()
+            self.assertEqual(dialog.table.item(0, 0).text(), "601086")
+            self.assertEqual(dialog.table.item(1, 0).text(), "000001")
+            self.assertEqual(dialog.table.item(2, 0).text(), "002886")
+            self.assertFalse(dialog.table.item(1, 1).text().startswith("⭐"))
+            self.assertFalse(getattr(dialog.table.item(1, 0), "is_pinned", False))
+            self.assertNotIn("⭐关注:", dialog.lbl_status.text())
+
+        finally:
+            fav_mgr.remove_favorite_stock("000001")
+            dialog.close()
+
+
 if __name__ == "__main__":
     unittest.main()
 

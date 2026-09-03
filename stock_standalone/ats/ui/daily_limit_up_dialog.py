@@ -1580,7 +1580,8 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
 
         def compound_sort_key(r: Dict[str, Any]) -> tuple:
             code = str(r.get("code", "")).zfill(6)
-            fav_flag = 0 if code in fav_stocks else 1
+            # 👑 重点关注标的拥有第一优先级绝对置顶特权 (0: 重点关注, 1: 普通项)
+            fav_rank = 0 if code in fav_stocks else 1
 
             subkeys = []
             for col_idx, is_desc in levels:
@@ -1597,12 +1598,10 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
             pct_subkey = self._make_column_subkey(r, 3, True)
             # 5. 封流比% (降序)
             seal_circ_subkey = self._make_column_subkey(r, 8, True)
-            # 7. 自选股标记 (仅作为同数值平局决胜)
-            fav_subkey = (fav_flag,)
-            # 8. 代码 (升序)
+            # 6. 代码 (升序)
             code_subkey = (0, code)
 
-            return (*subkeys, tier_subkey, quality_subkey, board_subkey, pct_subkey, seal_circ_subkey, fav_subkey, code_subkey)
+            return (fav_rank, *subkeys, tier_subkey, quality_subkey, board_subkey, pct_subkey, seal_circ_subkey, code_subkey)
 
         data_copy = list(records)
         data_copy.sort(key=compound_sort_key)
@@ -1728,16 +1727,21 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
 
             filtered.append(r)
 
-        # 4. 多级排序引擎：主 -> 从 -> 次 级联复合排序（无数据标的永远强制沉底）
+        # 4. 多级排序引擎：主 -> 从 -> 次 级联复合排序（无数据标的永远强制沉底，重点关注标的绝对置顶）
         if getattr(self, "sort_level1_col", None) is not None or getattr(self, "sort_level2_col", None) is not None or getattr(self, "sort_level3_col", None) is not None or getattr(self, "_sort_col", None) is not None:
             filtered = self._apply_multi_level_sort(filtered)
-        elif "全天全时段" not in time_slice:
-            filtered.sort(key=lambda x: (
-                _safe_float(x.get("momentum_score", 0.0)),
-                _safe_int(x.get("consecutive_boards", 1)),
-                _safe_float(x.get("seal_to_circ_ratio", 0.0)),
-                _safe_float(x.get("pct", 0.0))
-            ), reverse=True)
+        else:
+            all_favs = self.fav_manager.get_favorite_stocks() if hasattr(self, 'fav_manager') and self.fav_manager else set()
+            if "全天全时段" not in time_slice:
+                filtered.sort(key=lambda x: (
+                    0 if str(x.get("code", "")).zfill(6) in all_favs else 1,
+                    -_safe_float(x.get("momentum_score", 0.0)),
+                    -_safe_int(x.get("consecutive_boards", 1)),
+                    -_safe_float(x.get("seal_to_circ_ratio", 0.0)),
+                    -_safe_float(x.get("pct", 0.0))
+                ))
+            elif all_favs:
+                filtered.sort(key=lambda x: 0 if str(x.get("code", "")).zfill(6) in all_favs else 1)
 
         self._populate_table_rows(filtered)
         top_focus_cnt = min(5, len(filtered))
@@ -1748,7 +1752,10 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
             if "LADDER" in self.active_kpi_filters: kpi_names.append("连板")
             if "BROKEN" in self.active_kpi_filters: kpi_names.append("炸板")
             kpi_tag_desc = f"🎯 KPI卡片【{'+'.join(kpi_names)}】 "
-        self.lbl_status.setText(f"{kpi_tag_desc}数据已过滤: 视图【{self.current_mode}】时间片【{time_slice}】精选 Top {top_focus_cnt}/{len(filtered)} 核心标的 (更新: {time.strftime('%H:%M:%S')})")
+        fav_set_now = self.fav_manager.get_favorite_stocks() if hasattr(self, 'fav_manager') and self.fav_manager else set()
+        fav_cnt = sum(1 for r in filtered if str(r.get("code", "")).zfill(6) in fav_set_now)
+        fav_str = f" ⭐关注: {fav_cnt} |" if fav_cnt > 0 else ""
+        self.lbl_status.setText(f"{kpi_tag_desc}数据已过滤:{fav_str} 视图【{self.current_mode}】时间片【{time_slice}】精选 Top {top_focus_cnt}/{len(filtered)} 核心标的 (更新: {time.strftime('%H:%M:%S')})")
 
         # 🔔 自动触发时间片重点标的与大盘退潮雪崩语音弹窗通知 (精选 3-5 个)
         self._check_and_notify_slice_highlights(filtered, time_slice)
@@ -2112,14 +2119,18 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         self.lbl_status.setText(f"🏆 已联动并定位空间龙头: {c} {n} ({time.strftime('%H:%M:%S')})")
 
     def _set_table_item(self, row: int, col: int, text: str, user_data: Any = None, 
-                        fg: Optional[QColor] = None, align: int = Qt.AlignmentFlag.AlignCenter,
-                        is_bold: bool = False, tooltip: Optional[str] = None):
-        """【高性能单元格复用与脏检查】复用已有 QTableWidgetItem，杜绝高频垃圾回收与重绘风暴"""
+                        fg: Optional[QColor] = None, bg: Optional[QColor] = None,
+                        align: int = Qt.AlignmentFlag.AlignCenter,
+                        is_bold: bool = False, tooltip: Optional[str] = None,
+                        is_pinned: bool = False, pin_rank: int = 999):
+        """【高性能单元格复用与脏检查】复用已有 QTableWidgetItem，杜绝高频垃圾回收与重绘风暴，支持重点关注置顶特权"""
         item = self.table.item(row, col)
         if item is None:
-            item = NumericTableWidgetItem(text)
+            item = NumericTableWidgetItem(text, is_pinned=is_pinned, pin_rank=pin_rank)
             self.table.setItem(row, col, item)
         else:
+            if hasattr(item, 'set_pin_status'):
+                item.set_pin_status(is_pinned, pin_rank)
             if item.text() != text:
                 item.setText(text)
 
@@ -2137,6 +2148,11 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         else:
             item.setForeground(QBrush(QColor("#e2e2e5")))
 
+        if bg is not None:
+            item.setBackground(QBrush(bg))
+        else:
+            item.setBackground(QBrush(QColor(0, 0, 0, 0)))
+
         item.setTextAlignment(align)
 
         font = item.font()
@@ -2150,7 +2166,7 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
             item.setToolTip("")
 
     def _populate_table_rows(self, records: List[Dict[str, Any]]):
-        """【极速原位填充】批量关闭重绘，复用已有单元格对象，保障 60fps 丝滑拖拽与浏览"""
+        """【极速原位填充】批量关闭重绘，复用已有单元格对象，支持重点关注置顶与金色高亮，保障 60fps 丝滑拖拽与浏览"""
         self._is_populating = True
         self.table.setSortingEnabled(False)
         self.table.blockSignals(True)
@@ -2168,6 +2184,8 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         saved_h = self.table.horizontalScrollBar().value()
 
         try:
+            fav_stocks = self.fav_manager.get_favorite_stocks() if hasattr(self, 'fav_manager') and self.fav_manager else set()
+
             if self.table.rowCount() != len(records):
                 self.table.setRowCount(len(records))
 
@@ -2194,32 +2212,48 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
                 category = str(r.get("category", "--"))
                 extra_dict = r.get("extra_cols", {})
 
+                # 判定重点关注标的
+                is_fav = (code in fav_stocks)
+                pin_rank = 0 if is_fav else 999
+                fav_bg = QColor(60, 45, 12, 110) if is_fav else None
+
                 # 颜色设定
                 color_pct = QColor(COLOR_UP) if pct > 0 else (QColor(COLOR_DOWN) if pct < 0 else QColor("#e2e2e5"))
                 color_seal = QColor("#ffd700") if seal_to_circ >= 5.0 else QColor("#ffffff")
 
                 col = 0
-                # 0. 代码
-                self._set_table_item(row_idx, col, code, fg=QColor("#00ffcc"), align=Qt.AlignmentFlag.AlignCenter); col += 1
+                # 0. 代码 (重点关注金色高亮)
+                code_fg = QColor("#ffd700") if is_fav else QColor("#00ffcc")
+                self._set_table_item(row_idx, col, code, fg=code_fg, bg=fav_bg,
+                                     align=Qt.AlignmentFlag.AlignCenter, is_bold=is_fav,
+                                     is_pinned=is_fav, pin_rank=pin_rank); col += 1
 
-                # 1. 名称
-                name_fg = QColor("#ffd700") if consecutive >= 3 else QColor("#ffffff")
-                self._set_table_item(row_idx, col, name, fg=name_fg, align=Qt.AlignmentFlag.AlignCenter, is_bold=(consecutive >= 3)); col += 1
+                # 1. 名称 (重点关注加 ⭐ 徽章并尊荣金色高亮)
+                disp_name = f"⭐ {name}" if is_fav and not name.startswith("⭐") else name
+                name_fg = QColor("#ffd700") if (is_fav or consecutive >= 3) else QColor("#ffffff")
+                self._set_table_item(row_idx, col, disp_name, fg=name_fg, bg=fav_bg,
+                                     align=Qt.AlignmentFlag.AlignCenter,
+                                     is_bold=(is_fav or consecutive >= 3),
+                                     is_pinned=is_fav, pin_rank=pin_rank); col += 1
 
                 # 2. 现价
-                self._set_table_item(row_idx, col, f"{price:.2f}", user_data=price, fg=QColor("#ffffff"),
-                                     align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter); col += 1
+                self._set_table_item(row_idx, col, f"{price:.2f}", user_data=price, fg=QColor("#ffffff"), bg=fav_bg,
+                                     align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                                     is_pinned=is_fav, pin_rank=pin_rank); col += 1
 
                 # 3. 涨幅%
-                self._set_table_item(row_idx, col, f"{pct:+.2f}%", user_data=pct, fg=color_pct,
-                                     align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, is_bold=True); col += 1
+                self._set_table_item(row_idx, col, f"{pct:+.2f}%", user_data=pct, fg=color_pct, bg=fav_bg,
+                                     align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, is_bold=True,
+                                     is_pinned=is_fav, pin_rank=pin_rank); col += 1
 
                 # 4. 连板数
                 is_zt = r.get("is_limit_up", False)
                 cons_text = f"{consecutive}板" if (consecutive >= 1 and is_zt) else "--"
                 cons_data = consecutive if (consecutive >= 1 and is_zt) else None
                 cons_fg = QColor("#ff55ff") if (consecutive >= 3 and is_zt) else (QColor("#ffd700") if (consecutive == 2 and is_zt) else QColor("#e2e2e5"))
-                self._set_table_item(row_idx, col, cons_text, user_data=cons_data, fg=cons_fg, align=Qt.AlignmentFlag.AlignCenter); col += 1
+                self._set_table_item(row_idx, col, cons_text, user_data=cons_data, fg=cons_fg, bg=fav_bg,
+                                     align=Qt.AlignmentFlag.AlignCenter,
+                                     is_pinned=is_fav, pin_rank=pin_rank); col += 1
 
                 # 5. 梯队分类
                 tier_fg = QColor("#e2e2e5")
@@ -2249,7 +2283,9 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
                     tier_fg = QColor("#aad4ff") # 浅蓝
                 elif "炸板" in tier_tag:
                     tier_fg = QColor("#ff8800") # 橙色
-                self._set_table_item(row_idx, col, tier_tag, fg=tier_fg, align=Qt.AlignmentFlag.AlignCenter, is_bold=tier_bold); col += 1
+                self._set_table_item(row_idx, col, tier_tag, fg=tier_fg, bg=fav_bg,
+                                     align=Qt.AlignmentFlag.AlignCenter, is_bold=tier_bold,
+                                     is_pinned=is_fav, pin_rank=pin_rank); col += 1
 
                 # 6. 形态与质量
                 quality_score = _safe_float(r.get("seal_quality_score", 70.0))
@@ -2304,77 +2340,95 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
                     f"• 封单指标: 封单额 {seal_amt_wan:,.0f}万 | 封流比 {seal_to_circ:.2f}%\n"
                     f"• 大盘共振偏离: {rs_val:+.2f}% ({resonance})"
                 )
-                self._set_table_item(row_idx, col, desc_tag, user_data=momentum_score, fg=desc_fg,
-                                     align=Qt.AlignmentFlag.AlignCenter, is_bold=desc_bold, tooltip=tip); col += 1
+                self._set_table_item(row_idx, col, desc_tag, user_data=momentum_score, fg=desc_fg, bg=fav_bg,
+                                     align=Qt.AlignmentFlag.AlignCenter, is_bold=desc_bold, tooltip=tip,
+                                     is_pinned=is_fav, pin_rank=pin_rank); col += 1
 
                 # 7. 封单额(万)
                 seal_amt_txt = f"{seal_amt_wan:,.0f}" if (seal_amt_wan > 0 and is_zt) else "--"
                 seal_amt_data = seal_amt_wan if (seal_amt_wan > 0 and is_zt) else None
-                self._set_table_item(row_idx, col, seal_amt_txt, user_data=seal_amt_data, fg=color_seal,
-                                     align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter); col += 1
+                self._set_table_item(row_idx, col, seal_amt_txt, user_data=seal_amt_data, fg=color_seal, bg=fav_bg,
+                                     align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                                     is_pinned=is_fav, pin_rank=pin_rank); col += 1
 
                 # 8. 封流比%
                 seal_circ_txt = f"{seal_to_circ:.2f}%" if (seal_to_circ > 0 and is_zt) else "--"
                 seal_circ_data = seal_to_circ if (seal_to_circ > 0 and is_zt) else None
                 seal_circ_fg = QColor("#ffd700") if (seal_to_circ >= 10.0 and is_zt) else (QColor("#ff9900") if (seal_to_circ >= 5.0 and is_zt) else QColor("#ffffff"))
-                self._set_table_item(row_idx, col, seal_circ_txt, user_data=seal_circ_data, fg=seal_circ_fg,
-                                     align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter); col += 1
+                self._set_table_item(row_idx, col, seal_circ_txt, user_data=seal_circ_data, fg=seal_circ_fg, bg=fav_bg,
+                                     align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                                     is_pinned=is_fav, pin_rank=pin_rank); col += 1
 
                 # 9. 封成比%
                 seal_vol_txt = f"{seal_to_vol:.1f}%" if (seal_to_vol > 0 and is_zt) else "--"
                 seal_vol_data = seal_to_vol if (seal_to_vol > 0 and is_zt) else None
-                self._set_table_item(row_idx, col, seal_vol_txt, user_data=seal_vol_data, fg=QColor("#ffffff"),
-                                     align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter); col += 1
+                self._set_table_item(row_idx, col, seal_vol_txt, user_data=seal_vol_data, fg=QColor("#ffffff"), bg=fav_bg,
+                                     align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                                     is_pinned=is_fav, pin_rank=pin_rank); col += 1
 
                 # 10. 换手%
-                self._set_table_item(row_idx, col, f"{turnover:.2f}%", user_data=turnover, fg=QColor("#e2e2e5"),
-                                     align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter); col += 1
+                self._set_table_item(row_idx, col, f"{turnover:.2f}%", user_data=turnover, fg=QColor("#e2e2e5"), bg=fav_bg,
+                                     align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                                     is_pinned=is_fav, pin_rank=pin_rank); col += 1
 
                 # 11. 量比
-                self._set_table_item(row_idx, col, f"{vol_ratio:.2f}", user_data=vol_ratio, fg=QColor("#e2e2e5"),
-                                     align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter); col += 1
+                self._set_table_item(row_idx, col, f"{vol_ratio:.2f}", user_data=vol_ratio, fg=QColor("#e2e2e5"), bg=fav_bg,
+                                     align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                                     is_pinned=is_fav, pin_rank=pin_rank); col += 1
 
                 # 12. 成交额(亿)
                 amt_txt = f"{amt_yi:.2f}" if amt_yi > 0 else "--"
                 amt_data = amt_yi if amt_yi > 0 else None
-                self._set_table_item(row_idx, col, amt_txt, user_data=amt_data, fg=QColor("#e2e2e5"),
-                                     align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter); col += 1
+                self._set_table_item(row_idx, col, amt_txt, user_data=amt_data, fg=QColor("#e2e2e5"), bg=fav_bg,
+                                     align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                                     is_pinned=is_fav, pin_rank=pin_rank); col += 1
 
                 # 13. DFF
                 dff_fg = QColor(COLOR_UP) if dff > 0 else (QColor(COLOR_DOWN) if dff < 0 else QColor("#8e8e93"))
-                self._set_table_item(row_idx, col, f"{dff:+.2f}", user_data=dff, fg=dff_fg,
-                                     align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter); col += 1
+                self._set_table_item(row_idx, col, f"{dff:+.2f}", user_data=dff, fg=dff_fg, bg=fav_bg,
+                                     align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                                     is_pinned=is_fav, pin_rank=pin_rank); col += 1
 
                 # 14. Rank (全市场 1~9999 排名精准展示，0 或缺失显示 --)
                 rank_txt = str(rank_val) if rank_val > 0 else "--"
                 rank_data = rank_val if rank_val > 0 else None
-                self._set_table_item(row_idx, col, rank_txt, user_data=rank_data, fg=QColor("#e2e2e5"),
-                                     align=Qt.AlignmentFlag.AlignCenter); col += 1
+                self._set_table_item(row_idx, col, rank_txt, user_data=rank_data, fg=QColor("#e2e2e5"), bg=fav_bg,
+                                     align=Qt.AlignmentFlag.AlignCenter,
+                                     is_pinned=is_fav, pin_rank=pin_rank); col += 1
 
                 # 15. DFF2
-                self._set_table_item(row_idx, col, f"{dff2:+.1f}", user_data=dff2, fg=QColor("#e2e2e5"),
-                                     align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter); col += 1
+                self._set_table_item(row_idx, col, f"{dff2:+.1f}", user_data=dff2, fg=QColor("#e2e2e5"), bg=fav_bg,
+                                     align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                                     is_pinned=is_fav, pin_rank=pin_rank); col += 1
 
                 # 16. DFF3
-                self._set_table_item(row_idx, col, f"{dff3:+.1f}", user_data=dff3, fg=QColor("#e2e2e5"),
-                                     align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter); col += 1
+                self._set_table_item(row_idx, col, f"{dff3:+.1f}", user_data=dff3, fg=QColor("#e2e2e5"), bg=fav_bg,
+                                     align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                                     is_pinned=is_fav, pin_rank=pin_rank); col += 1
 
                 # 17. 大盘偏离
                 rs_fg = QColor(COLOR_UP) if rs_val > 0 else QColor(COLOR_DOWN)
-                self._set_table_item(row_idx, col, f"{rs_val:+.2f}%", user_data=rs_val, fg=rs_fg,
-                                     align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter); col += 1
+                self._set_table_item(row_idx, col, f"{rs_val:+.2f}%", user_data=rs_val, fg=rs_fg, bg=fav_bg,
+                                     align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                                     is_pinned=is_fav, pin_rank=pin_rank); col += 1
 
                 # 18. 共振状态
                 res_fg = QColor("#ff55ff") if resonance == "逆市抗跌" else (QColor("#00ff88") if resonance == "大盘共振" else QColor("#e2e2e5"))
-                self._set_table_item(row_idx, col, resonance, fg=res_fg, align=Qt.AlignmentFlag.AlignCenter); col += 1
+                self._set_table_item(row_idx, col, resonance, fg=res_fg, bg=fav_bg,
+                                     align=Qt.AlignmentFlag.AlignCenter,
+                                     is_pinned=is_fav, pin_rank=pin_rank); col += 1
 
                 # 19. 动态 ats_col 自定义列
                 for ec in self.extra_cols:
                     raw_val = extra_dict.get(ec, extra_dict.get(ec.lower(), extra_dict.get(ec.upper(), r.get(ec, r.get(ec.lower(), "--")))))
-                    self._set_table_item(row_idx, col, str(raw_val), fg=QColor("#e2e2e5"), align=Qt.AlignmentFlag.AlignCenter); col += 1
+                    self._set_table_item(row_idx, col, str(raw_val), fg=QColor("#e2e2e5"), bg=fav_bg,
+                                         align=Qt.AlignmentFlag.AlignCenter,
+                                         is_pinned=is_fav, pin_rank=pin_rank); col += 1
 
                 # 20. 所属板块
-                self._set_table_item(row_idx, col, category if category else "--", fg=QColor("#e2e2e5"), align=Qt.AlignmentFlag.AlignCenter); col += 1
+                self._set_table_item(row_idx, col, category if category else "--", fg=QColor("#e2e2e5"), bg=fav_bg,
+                                     align=Qt.AlignmentFlag.AlignCenter,
+                                     is_pinned=is_fav, pin_rank=pin_rank); col += 1
 
             # 恢复选中的焦点行
             if selected_code:
@@ -2463,7 +2517,7 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
                 if row >= 0:
                     code_item = self.table.item(row, 0)
                     if code_item:
-                        c = code_item.text().strip()
+                        c = code_item.text().strip().replace("⭐", "").strip()
                         try:
                             from global_favorites import GlobalFavoriteManager
                             fav_mgr = GlobalFavoriteManager()
@@ -2473,6 +2527,14 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
                             else:
                                 fav_mgr.add_favorite_stock(c)
                                 self.lbl_status.setText(f"⭐ 已加入重点关注: {c}")
+                            main_win = self.parent() or (self.window() if hasattr(self, 'window') else None)
+                            if main_win and hasattr(main_win, '_safe_favorites_changed'):
+                                try:
+                                    main_win._safe_favorites_changed()
+                                except Exception:
+                                    pass
+                            # 立即重排置顶并刷新高亮
+                            self._apply_filter()
                         except Exception:
                             pass
                         event.accept()
@@ -2660,9 +2722,12 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         act_60f = None
         act_fav = None
         act_copy = None
+        act_copy_name = None
 
         if has_stock:
-            act_link = menu.addAction(f"🔗 联动行情终端 ({c} {n})")
+            clean_n = n.replace("⭐", "").strip()
+            clean_c = c.replace("⭐", "").strip()
+            act_link = menu.addAction(f"🔗 联动行情终端 ({clean_c} {clean_n})")
             act_sbc = menu.addAction(f"📊 打开 SBC 日内分时走势图")
             act_60f = menu.addAction(f"🎯 60f 通道底部反转测算")
             menu.addSeparator()
@@ -2670,14 +2735,15 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
             try:
                 from global_favorites import GlobalFavoriteManager
                 fav_mgr = GlobalFavoriteManager()
-                is_fav = c in fav_mgr.get_favorite_stocks()
-                fav_txt = f"⭐ 取消重点关注 ({c})" if is_fav else f"⭐ 加入重点关注 ({c})"
+                is_fav = clean_c in fav_mgr.get_favorite_stocks()
+                fav_txt = f"❌ 取消重点关注 ({clean_c})" if is_fav else f"⭐ 设为重点关注 ({clean_c})"
                 act_fav = menu.addAction(fav_txt)
             except Exception:
                 pass
 
             menu.addSeparator()
-            act_copy = menu.addAction("📋 复制股票代码")
+            act_copy = menu.addAction(f"📋 复制代码 {clean_c}")
+            act_copy_name = menu.addAction(f"📋 复制名称 {clean_n}")
             menu.addSeparator()
 
         # ── 3. 全局刷新与导出 ──
@@ -2689,6 +2755,9 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         if not action:
             return
 
+        clean_c = c.replace("⭐", "").strip()
+        clean_n = n.replace("⭐", "").strip()
+
         if action == act_autofit:
             self.auto_fit_columns()
         elif action == act_reset_cols:
@@ -2698,12 +2767,12 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         elif action == act_trade_flow:
             self._open_trade_flow()
         elif act_link and action == act_link:
-            self.code_clicked.emit(c, n)
-            self._broadcast_link_stock(c, n)
+            self.code_clicked.emit(clean_c, clean_n)
+            self._broadcast_link_stock(clean_c, clean_n)
         elif act_sbc and action == act_sbc:
             try:
                 from ats.ui.intraday_strategy_dialog import open_sbc_chart_dialog
-                open_sbc_chart_dialog(self, c)
+                open_sbc_chart_dialog(self, clean_c)
             except Exception as ex:
                 logger.warning(f"打开 SBC 分时走势异常: {ex}")
         elif act_60f and action == act_60f:
@@ -2711,9 +2780,9 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
                 from ats.channel_bottom_reversal_strategy import ChannelBottomReversalStrategy
                 from ats.ui.channel_scan_result_dialog import ChannelReversalScanResultDialog
                 strategy = ChannelBottomReversalStrategy()
-                df_matched = strategy.scan_stocks_tdx([c], count=120)
+                df_matched = strategy.scan_stocks_tdx([clean_c], count=120)
                 if not df_matched.empty:
-                    df_matched["name"] = n
+                    df_matched["name"] = clean_n
                 diag = ChannelReversalScanResultDialog(parent=self, df_results=df_matched, total_scanned=1, source_tab_name="每日涨停")
                 diag.show()
             except Exception as ex:
@@ -2722,16 +2791,30 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
             try:
                 from global_favorites import GlobalFavoriteManager
                 fav_mgr = GlobalFavoriteManager()
-                if c in fav_mgr.get_favorite_stocks():
-                    fav_mgr.remove_favorite_stock(c)
+                if clean_c in fav_mgr.get_favorite_stocks():
+                    fav_mgr.remove_favorite_stock(clean_c)
+                    self.lbl_status.setText(f"⭐ 已从重点关注移除: {clean_c}")
                 else:
-                    fav_mgr.add_favorite_stock(c)
+                    fav_mgr.add_favorite_stock(clean_c)
+                    self.lbl_status.setText(f"⭐ 已加入重点关注: {clean_c}")
+                main_win = self.parent() or (self.window() if hasattr(self, 'window') else None)
+                if main_win and hasattr(main_win, '_safe_favorites_changed'):
+                    try:
+                        main_win._safe_favorites_changed()
+                    except Exception:
+                        pass
+                # 立即重新执行过滤与复合排序，0 毫秒感知原地重排置顶并切换高亮！
+                self._apply_filter()
             except Exception:
                 pass
         elif act_copy and action == act_copy:
             cb = QApplication.clipboard()
             if cb:
-                cb.setText(c)
+                cb.setText(clean_c)
+        elif act_copy_name and action == act_copy_name:
+            cb = QApplication.clipboard()
+            if cb:
+                cb.setText(clean_n)
         elif action == act_refresh:
             self._refresh_data_for_mode()
         elif action == act_export:
