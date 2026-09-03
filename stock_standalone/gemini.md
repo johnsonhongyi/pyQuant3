@@ -1,3 +1,33 @@
+## 2026-09-03 18:55
+- [x] **根治打包缺少 indicator_help_custom.json & 彻底重构 V-Reversal 监控潜伏池（自动清理/通道支撑优选/综合进攻优先级评分/阶段过滤）(`config/indicator_help_custom.json`, `sys_utils.py`, `realtime_data_service.py`, `instock_MonitorTK.py`, spec/nuitka 脚本, `tests/test_v_reversal_pool_enhancements.py`)**：
+    - [x] **配置打包与运行时全场景自愈闭环**：
+        - 修复打包遗漏：在 `instock_MonitorTK.spec`, `MultiPeriodTester.spec`, `MultiPeriodDialog.spec` 以及全套 nuitka 构建脚本（`nuitka_instockMonitor.bat`, `nuitka_build_console.bat`, `nuitka_build_console_onlyClang.bat`, `nuitka_build_multi_period_dialog_onlyClang.bat`）中补齐 `indicator_help_custom.json` 数据打包项；
+        - 自愈释放机制：在 `sys_utils.py` 中移除 `delay_release: True`，使其在 `ensure_all_configs_released()` 启动时自动解压释放；并在 `get_conf_path()` 中增强全路径探测与实体自愈复制兜底；
+        - 执行物理同步脚本 `scratch/sync_configs.py`，确保当前工程与打包发布目录实体配置文件完整一致。
+    - [x] **全面落实通道/支撑线/量价齐升核心实战准则**：
+        - `indicator_help_custom.json`: 明确收录并定义 `STRATEGY: 优选上涨通道+支撑线上+量价齐升 (高价值黄金进攻伏击)`，收录 `df.query('ch_dir == 1 and ch_supp_slope_deg > 0 and close >= ch_supp_price and vol_ratio >= 1.2 and percent > 0')`；
+        - `realtime_data_service.py` (`calculate_stock_daily_indicators`): 提取通达信通道方向 `ch_dir`、KX支撑线倾角 `ch_supp_slope_deg`、支撑价格 `ch_supp_price`、量比 `vol_ratio` 和 `percent`。在个股初筛阶段严厉剔除处于下降通道 (`ch_dir == -1`) 或破位支撑线 (`close < ch_supp_price * 0.975`) 的杂毛标的。
+    - [x] **破除 V反状态机死循环滞留与容量膨胀，落地智能自动清理引擎**：
+        - **断开顺延死循环**：在 `WAVE_UP`、`PULLBACK`、`WAVE_UP_2` 阶段引入 `phase_extend_count`，最多允许顺延 1 次（单阶段滞留不得超过 3 个交易日），超期坚决淘汰至 `INIT` 并移出潜伏池；
+        - **清除陈旧入池日期**：在 `INIT -> CONSOLIDATING` 重入池时，若历史 `entry_date` 距今超过 3 个交易日，彻底重置为 `today_str`，杜绝数月前僵尸日期滞留；
+        - **全局生命周期 TTL**：入池累计 $\ge 7$ 个交易日未能完成二波加速的标的，硬性淘汰退出；
+        - **综合进攻优先级评分算法 (`calculate_reversal_priority_score`)**：
+          - 阶段爆发力梯度：`WAVE_UP_2` (+100), `WAVE_UP` (+85), `PULLBACK` (+75), `CONSOLIDATING` (+45)；
+          - 上涨通道与支撑线：`ch_dir == 1` (+25), `ch_supp_slope_deg > 0` (+15~25), `close >= ch_supp_price` (+15)；
+          - 下跌通道与破位惩罚：`ch_dir == -1` (-30), `close < ch_supp_price` (-25)；
+          - 量价齐升与龙头Rank：`percent > 0 and vol_ratio >= 1.2` (+20~35), `Rank <= 100` (+25)；
+        - **智能自动清理引擎 (`cleanup_v_reversal_pool`)**：综合超时剔除、破位剔除与超额容量熔断，将潜伏池容量从数百只压制收敛至 80 只以内核心高爆发标的；
+        - **磁盘加载自愈 (`load_consolidation_state`)**：超额阈值调整为 80，恢复后即刻触发 `cleanup_v_reversal_pool` 压制历史脏数据。
+    - [x] **TK 界面展示与交互重构 (`instock_MonitorTK.py`)**：
+        - 工具栏增设 **阶段过滤按钮组**：`[全部]`, `[🔥 重点进攻]`, `[💎 黄金回踩]`, `[⏳ 横盘潜伏]`, `[⭐ 自选重点]`，一键聚焦核心标的；
+        - 工具栏新增 `[🧹 智能清理]` 按钮，支持用户随时主动触发容量熔断与淘汰清理，并弹窗反馈统计数据；
+        - 潜伏池默认排序切换为 **综合进攻优先级评分降序**，重点标的与高爆发、上涨通道、量价齐升股自动置顶；
+        - Treeview 标签色彩分层高亮：`attack` (进攻红), `pullback` (黄金黄), `fav` (自选蓝), `consol` (潜伏灰)。
+    - [x] **自动化测试全量覆盖与 100% 通过**：
+        - `test_v_reversal_pool_enhancements.py` 5 项测试全部 PASSED；
+        - `test_v_reversal_entry_date_fix.py` 5 项测试全部 PASSED；
+        - 全系统回归 10 项测试 100% 全部通过。
+
 ## 2026-09-03 14:05
 - [x] **彻底根治 ATS 信号提示小窗【总是提示同一只股票无法轮动】Bug & 全面落地环形游标轮动 (Round-Robin) 与单股防刷屏冷却调度体系 (`stock_standalone/ats/alert_notifier.py`, `stock_standalone/ats/ui/hot_sector_leaderboard.py`, `stock_standalone/ats/ui/daily_limit_up_dialog.py`, `stock_standalone/tests/test_alert_cooling_and_source_suite.py`, `stock_standalone/tests/test_sector_strength_and_detail_parity.py`, `stock_standalone/tests/test_daily_limit_up_dialog.py`)**：
     - [x] **排查定位“右下角黄金特异信号弹窗死锁轰炸惠丰钻石、其他龙头标的无法轮动”四大根本诱因**：
@@ -17022,5 +17052,18 @@ equest_dynamic_ipc_sync 中传入 orce=True 绕过防刷干扰。
   2. 涨跌分布个股明细：在 `DistributionDetailsDialog` 个股表格右键菜单中增加 `📈 调出 {name_clean} SBC 实盘分时走势`。
   3. 实时实盘个股详情：在 `StockDetailDialog` 底部操作栏增加 `📈 调出 SBC 分时走势` 按钮，并在窗口与表格右键菜单中增加 `📈 调出 {self.name} SBC 实盘分时走势`。
 
-
-
+## [2026-09-03 18:37:00] 修复打包后 indicator_help_custom.json 自动恢复 与 V型反转潜伏池重点/自动清理能力重构
+- **关联文件**:
+  - `stock_standalone/instock_MonitorTK.spec`
+  - `stock_standalone/MultiPeriodTester.spec`
+  - `stock_standalone/MultiPeriodDialog.spec`
+  - `stock_standalone/sys_utils.py`
+  - `stock_standalone/realtime_data_service.py`
+  - `stock_standalone/instock_MonitorTK.py`
+  - `stock_standalone/tests/test_v_reversal_pool_enhancements.py`
+- **任务目标**:
+  1. 修复打包规范缺少 `indicator_help_custom.json`，解决 `sys_utils.py` 中 `delay_release` 跳过自愈问题，强化 `get_conf_path` 模板自愈生成，并物理同步至 `instockMonitorTK/config`。
+  2. 重构 V型反转监控潜伏池（解决 490 只无重点、无限滞留问题）：
+     - 引入 `cleanup_v_reversal_pool` 自动清理引擎（TTL 超时、破位剔除、配额熔断限制最大容量 80 只、破除死循环刷新）。
+     - 实现多维综合进攻优先级评分算法与默认倒序排序（二拉 > 首拉 > 黄金回踩 > 放量异动 > 强势Rank），将真正核心标的置顶。
+     - 增加快捷阶段过滤栏（全部 / 重点进攻 / 黄金回踩 / 横盘潜伏 / 自选重点）与一键智能清理按钮。
