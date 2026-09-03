@@ -1437,12 +1437,21 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
         pct_color = QColor("#ff4455") if pct > 0 else (QColor("#00ee77") if pct < 0 else QColor("#cccccc"))
         
         # 买点类型专属精细化视觉高亮
-        if buy_tag == "LEADER":
+        if "双加速" in buy_type:
+            type_color = QColor("#FFD700") # 金黄双加速
+            type_bg = QColor(80, 20, 60, 180) # 尊荣金紫
+        elif buy_tag == "LEADER":
             type_color = QColor("#FF3399") # 亮洋红领涨龙头
             type_bg = QColor(65, 20, 45, 160)
         elif buy_tag == "SURGE":
             type_color = QColor("#FF5533") # 亮橙红扫盘冲板
             type_bg = QColor(65, 30, 20, 160)
+        elif "光脚加速" in buy_type:
+            type_color = QColor("#FFAA00") # 亮橙黄光脚加速
+            type_bg = QColor(60, 35, 10, 160)
+        elif "缺口加速" in buy_type:
+            type_color = QColor("#FF55BB") # 亮粉紫缺口加速
+            type_bg = QColor(50, 15, 45, 160)
         elif buy_tag == "BREAKOUT":
             type_color = QColor("#00FF88") # 荧光绿先锋起爆
             type_bg = QColor(10, 50, 30, 150)
@@ -1487,12 +1496,23 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
             it_sec.setBackground(QBrush(fav_bg))
         self.table.setItem(row_idx, 2, it_sec)
 
-        # 3: 买点类型
+        # 3: 买点类型 (支持加速结构详细透视 ToolTip)
+        accel_t = str(r.get("accel_tag", ""))
+        open_v = _safe_float(r.get("open", 0.0))
+        low_v = _safe_float(r.get("low", 0.0))
+        lc_v = _safe_float(r.get("last_close", 0.0))
+        diff_v = _safe_float(r.get("low_diff_pct", 0.0))
+        jump_v = _safe_float(r.get("open_jump_pct", 0.0))
+        type_tip = f"【买点分析】: {buy_type}\n" \
+                   f"• 👑 加速结构: {accel_t if accel_t else '常规波动'}\n" \
+                   f"• 📊 盘口开低跳空: 开{open_v:.2f} | 低{low_v:.2f} (下影差异: {diff_v:.2f}%) | 昨收{lc_v:.2f} (跳空幅度: {jump_v:+.2f}%)\n" \
+                   f"• 🎯 决策依据: {reason}"
         it_type = NumericTableWidgetItem(buy_type, is_pinned=is_fav, pin_rank=pin_rank)
         it_type.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
         it_type.setForeground(QBrush(type_color))
         it_type.setBackground(QBrush(type_bg))
         it_type.setFont(font_bold)
+        it_type.setToolTip(type_tip)
         self.table.setItem(row_idx, 3, it_type)
 
         # 4: 现价

@@ -1587,21 +1587,26 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
             for col_idx, is_desc in levels:
                 subkeys.append(self._make_column_subkey(r, col_idx, is_desc))
 
-            # 默认级联兜底（保证相同排序列内部按量化梯队与质量强度严格对齐，绝不混乱）
-            # 1. 梯队分类权重 (降序)
+            # 默认级联兜底（保证相同排序列内部按量化梯队与质量强度严格对齐，双加速与极小下影绝对优先）
+            # 1. 加速结构兜底优选 (双加速 > 单加速，且开盘与最低差异越小越优先)
+            dual_accel_rank = 0 if r.get("is_dual_accel") else (1 if (r.get("is_open_low_accel") or r.get("is_gap_accel")) else 2)
+            diff_rank = _safe_float(r.get("low_diff_pct", 999.0), 999.0)
+            accel_subkey = (dual_accel_rank, diff_rank)
+
+            # 2. 梯队分类权重 (降序)
             tier_subkey = self._make_column_subkey(r, 5, True)
-            # 2. 形态与质量评分 (降序)
+            # 3. 形态与质量评分 (降序)
             quality_subkey = self._make_column_subkey(r, 6, True)
-            # 3. 连板数 (降序)
+            # 4. 连板数 (降序)
             board_subkey = self._make_column_subkey(r, 4, True)
-            # 4. 涨幅% (降序)
+            # 5. 涨幅% (降序)
             pct_subkey = self._make_column_subkey(r, 3, True)
-            # 5. 封流比% (降序)
+            # 6. 封流比% (降序)
             seal_circ_subkey = self._make_column_subkey(r, 8, True)
-            # 6. 代码 (升序)
+            # 7. 代码 (升序)
             code_subkey = (0, code)
 
-            return (fav_rank, *subkeys, tier_subkey, quality_subkey, board_subkey, pct_subkey, seal_circ_subkey, code_subkey)
+            return (fav_rank, *subkeys, accel_subkey, tier_subkey, quality_subkey, board_subkey, pct_subkey, seal_circ_subkey, code_subkey)
 
         data_copy = list(records)
         data_copy.sort(key=compound_sort_key)
@@ -1735,13 +1740,19 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
             if "全天全时段" not in time_slice:
                 filtered.sort(key=lambda x: (
                     0 if str(x.get("code", "")).zfill(6) in all_favs else 1,
+                    0 if x.get("is_dual_accel") else (1 if (x.get("is_open_low_accel") or x.get("is_gap_accel")) else 2),
+                    _safe_float(x.get("low_diff_pct", 999.0), 999.0),
                     -_safe_float(x.get("momentum_score", 0.0)),
                     -_safe_int(x.get("consecutive_boards", 1)),
                     -_safe_float(x.get("seal_to_circ_ratio", 0.0)),
                     -_safe_float(x.get("pct", 0.0))
                 ))
-            elif all_favs:
-                filtered.sort(key=lambda x: 0 if str(x.get("code", "")).zfill(6) in all_favs else 1)
+            elif all_favs or any(x.get("is_dual_accel") for x in filtered):
+                filtered.sort(key=lambda x: (
+                    0 if str(x.get("code", "")).zfill(6) in all_favs else 1,
+                    0 if x.get("is_dual_accel") else (1 if (x.get("is_open_low_accel") or x.get("is_gap_accel")) else 2),
+                    _safe_float(x.get("low_diff_pct", 999.0), 999.0)
+                ))
 
         self._populate_table_rows(filtered)
         top_focus_cnt = min(5, len(filtered))
@@ -2202,6 +2213,7 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
                 turnover = _safe_float(r.get("turnover_rate", r.get("turnover", 0.0)))
                 vol_ratio = _safe_float(r.get("vol_ratio", 1.0))
                 amt_yi = _safe_float(r.get("amount_yi", 0.0))
+                last_close = _safe_float(r.get("last_close", price))
 
                 dff = _safe_float(r.get("dff", r.get("DFF", 0.0)))
                 rank_val = _safe_int(r.get("rank", r.get("Rank", r.get("排名", 0))), 0)
@@ -2299,7 +2311,17 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
 
                 desc_fg = QColor("#e2e2e5")
                 desc_bold = False
-                if is_reflex_lead:
+                accel_tag = str(r.get("accel_tag", ""))
+                if "双加速" in desc_tag or accel_tag == "👑双加速":
+                    desc_fg = QColor("#ffd700") # 金黄尊荣
+                    desc_bold = True
+                elif "光脚加速" in desc_tag or accel_tag == "⚡光脚加速":
+                    desc_fg = QColor("#ffaa00") # 亮橙黄
+                    desc_bold = True
+                elif "缺口加速" in desc_tag or accel_tag == "🚀缺口加速":
+                    desc_fg = QColor("#ff55bb") # 亮粉紫
+                    desc_bold = True
+                elif is_reflex_lead:
                     desc_fg = QColor("#00ffff")
                     desc_bold = True
                 elif momentum_score >= 95 and is_zt:
@@ -2322,10 +2344,17 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
                 bid_p = _safe_float(r.get("bid_pressure", 50.0))
                 vwap_val = _safe_float(r.get("vwap", price))
                 vwap_dev = _safe_float(r.get("vwap_dev_pct", 0.0))
+                open_v = _safe_float(r.get("open", 0.0))
+                low_v = _safe_float(r.get("low", 0.0))
+                diff_v = _safe_float(r.get("low_diff_pct", 0.0))
+                open_jump_v = _safe_float(r.get("open_jump_pct", 0.0))
 
                 tip = (
                     f"【{code} {name} 盘中潜伏与上车深度透视】\n"
                     f"────────────────────────\n"
+                    f"• 👑 加速结构: {accel_tag if accel_tag else '常规形态'}"
+                    f"{' (双加速: 跳空高开+开盘即最低)' if accel_tag == '👑双加速' else (' (开盘即最低/极小下影)' if accel_tag == '⚡光脚加速' else (' (跳空高开且缺口未补)' if accel_tag == '🚀缺口加速' else ''))}\n"
+                    f"• 📊 盘口开低跳空: 开{open_v:.2f} | 低{low_v:.2f} (下影差异: {diff_v:.2f}%) | 昨收{last_close:.2f} (跳空幅度: {open_jump_v:+.2f}%)\n"
                     f"• ⏰ 介入时机评估: {r.get('time_phase', '稳健定盘期')} ({r.get('time_tip', '')})\n"
                     f"• 上车信号梯度: {entry_stage}\n"
                     f"• 实战操作建议: {entry_advice}\n"

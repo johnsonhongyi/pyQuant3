@@ -1,3 +1,40 @@
+## 2026-09-03 11:50
+- [x] **突击龙头与连板天梯双端落地【开盘即最低光脚加速】、【跳空高开缺口加速】及【👑双加速结构】量化特征提权与专属视觉高亮体系 (`stock_standalone/ats/tdx_realtime_fetcher.py`, `stock_standalone/ats/limit_up_engine.py`, `stock_standalone/ats/ui/hot_sector_leaderboard.py`, `stock_standalone/ats/ui/daily_limit_up_dialog.py`, `stock_standalone/tests/test_sector_strength_and_detail_parity.py`, `stock_standalone/tests/test_daily_limit_up_dialog.py`)**：
+    - [x] **严谨量化模型构建与特征提取 (SSOT)**：
+        1. **加速因子 1【开盘即最低 / 极小下影加速】 (`is_open_low_accel`)**：
+           - 判定开盘价与最低价下影偏离率：$\text{low\_diff\_pct} = (Open - Low) / Open \times 100\%$；
+           - 当 $Open > 0$ 且 $Low > 0$ 且（$Low \ge Open - 0.015$ 元 或 $\text{low\_diff\_pct} \le 0.15\%$）且非大幅低开时，严格判定为开盘即最低光脚形态，赋予 `⚡光脚加速` 标签；
+        2. **加速因子 2【跳空高开缺口加速】 (`is_gap_accel`)**：
+           - 判定高开幅度 $(Open - LastClose) / LastClose \times 100\% \ge 0.8\%$；
+           - 判定日内最低价始终未回补跳空缺口（$Low > LastClose$ 且 $Low \ge Yesterday\_High - 0.015$），严格保留日内突破缺口，赋予 `🚀缺口加速` 标签；
+        3. **组合形态【👑双加速结构】 (Dual Acceleration)**：
+           - 同时满足【开盘即最低】与【跳空缺口未补】，代表顶级主力开盘最强抢筹与全天绝对控盘形态，赋予专属 `👑双加速` 顶级加速勋章；
+    - [x] **突击龙头（HotSectorLeaderboard）全链路赋能与排序提权**：
+        1. **Alpha 进攻得分与买点提权 (`TDXRealtimeFetcher.fetch_multi_stock_alpha_quotes`)**：
+           - 双加速标的买点优先级 `type_priority += 12`，Alpha 进攻得分 `alpha_score += 10.0`，买点说明自动前缀 `【👑双加速(光脚+缺口)】`；
+           - 单加速标的 `type_priority += 6`，`alpha_score += 5.0`，前缀对应说明；
+           - 多维排序引擎在 Alpha 得分同分或同级时，双加速标的绝对优先置顶，开盘与最低价差异越小（`low_diff_pct`）越优先！
+           - `fetch_multi_stock_alpha_quotes` 扩展支持 `raw_quotes` 参数，方便无网络无 I/O 高速推演与单测；
+        2. **UI 视觉高亮与深度透视 ToolTip (`HotSectorLeaderboardDialog`)**：
+           - 买点类型列引入金黄尊荣背景 `QColor(80, 20, 60, 180)` 与金色字体 `#ffd700`，加粗醒目呈现；
+           - 买点单元格 ToolTip 详细呈现加速结构、开盘价、最低价、下影差异率%、跳空幅度% 及决策依据；
+    - [x] **连板天梯（DailyLimitUpDialog）动能提权与多级排序优先**：
+        1. **动能引擎与形态注入 (`LimitUpEngine.scan_limit_up_records_from_df`)**：
+           - 行情读取阶段精准提取并持久化 `open`, `high`, `low`；
+           - 为双加速标的注入动能评分加成（`base_score += 8.0` / `ch_score += 8.0`），单加速 `+4.0`；
+           - 形态与质量列描述自动前缀 `👑双加速|...`；
+        2. **多级排序引擎加速优选 (`DailyLimitUpDialog._apply_multi_level_sort`)**：
+           - 在 `compound_sort_key` 复合排序元组中，在重点关注与用户显式排序列之后，立即引入 `accel_subkey = (dual_accel_rank, diff_rank)`；
+           - 在同板数（如均是 1 板）或同梯队内部，**双加速标的与开盘最低差异最小的标的 100% 绝对优先排在最前**；
+           - 兜底排序分支同步强化双加速与开盘最低差异优先；
+        3. **UI 视觉高亮与透视 ToolTip**：
+           - 形态与质量列对 `👑双加速` 自动渲染金色高亮 `#ffd700` 并加粗；
+           - ToolTip 全面透视开盘最低差异与跳空缺口；
+    - [x] **自动化测试与全系统回归 100% 全部 PASSED**：
+        - `test_sector_strength_and_detail_parity.py` 新增 `test_hot_sector_dual_acceleration_and_open_low_features` 专项测试，全量 19 项板块测试全部通过；
+        - `test_daily_limit_up_dialog.py` 新增 `test_daily_limit_up_dual_acceleration_features` 专项测试，全量 6 项天梯测试全部通过；
+        - 人气榜全量 11 项跨模块回归测试全部通过。
+
 ## 2026-09-03 11:30
 - [x] **实现连板天梯与龙头突击 100% 同源的重点关注标的优先置顶显示、⭐ 徽章与金色尊荣高亮体系 (`stock_standalone/ats/ui/daily_limit_up_dialog.py`, `stock_standalone/tests/test_daily_limit_up_dialog.py`)**：
     - [x] **排查定位天梯先前“重点关注无法优先置顶、只能平局决胜且缺乏视觉高亮”根本诱因**：

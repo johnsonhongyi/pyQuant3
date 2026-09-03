@@ -604,6 +604,8 @@ class LimitUpEngine:
                         bid1_p = _safe_float(q.get("bid1", 0.0))
                         ask1_p = _safe_float(q.get("ask1", 0.0))
                         open_tdx = _safe_float(q.get("open", 0.0))
+                        high_tdx = _safe_float(q.get("high", 0.0))
+                        low_tdx = _safe_float(q.get("low", 0.0))
                         
                         price_now = p_tdx if p_tdx > 0 else (bid1_p if bid1_p > 0 else (open_tdx if open_tdx > 0 else (ask1_p if ask1_p > 0 else r["price"])))
                         last_c = _safe_float(q.get("last_close", r["last_close"]))
@@ -612,6 +614,12 @@ class LimitUpEngine:
                         if last_c > 0:
                             r["last_close"] = last_c
                             r["pct"] = round((price_now - last_c) / last_c * 100.0, 2)
+                        if open_tdx > 0:
+                            r["open"] = open_tdx
+                        if high_tdx > 0:
+                            r["high"] = high_tdx
+                        if low_tdx > 0:
+                            r["low"] = low_tdx
 
                         vol_now = _safe_float(q.get("vol", r["vol"]))
                         amt_now = _safe_float(q.get("amount", r["amount"]))
@@ -740,6 +748,38 @@ class LimitUpEngine:
             r["supp_dist_pct"] = supp_dist_pct
             r["pct_yesterday"] = pct_yesterday
 
+            # ── 💡 开盘即最低 (极小下影) 与跳空缺口加速结构量化计算 ──
+            open_p = _safe_float(r.get("open", price))
+            low_p = _safe_float(r.get("low", price))
+            last_c = _safe_float(r.get("last_close", price))
+            yesterday_h = lasth1d if lasth1d > 0 else last_c
+
+            # 1. 开盘价即最低价 / 极小下影加速 (Open is Low)
+            low_diff_pct = round((open_p - low_p) / open_p * 100.0, 3) if open_p > 0 else 999.0
+            is_open_low_accel = bool(open_p > 0 and low_p > 0 and (low_p >= open_p - 0.015 or low_diff_pct <= 0.15) and (open_p >= last_c * 0.98))
+
+            # 2. 跳空高开且留有跳空缺口加速 (Gap-Up Acceleration)
+            open_jump_pct = round((open_p - last_c) / last_c * 100.0, 2) if last_c > 0 else 0.0
+            is_gap_accel = bool(open_jump_pct >= 0.8 and low_p > last_c and (yesterday_h <= 0 or low_p >= yesterday_h - 0.015))
+
+            # 3. 双加速结构 (Dual Acceleration: 跳空高开 + 开盘即最低)
+            is_dual_accel = bool(is_open_low_accel and is_gap_accel)
+
+            accel_tag = ""
+            if is_dual_accel:
+                accel_tag = "👑双加速"
+            elif is_open_low_accel:
+                accel_tag = "⚡光脚加速"
+            elif is_gap_accel:
+                accel_tag = "🚀缺口加速"
+
+            r["is_open_low_accel"] = is_open_low_accel
+            r["is_gap_accel"] = is_gap_accel
+            r["is_dual_accel"] = is_dual_accel
+            r["low_diff_pct"] = low_diff_pct
+            r["open_jump_pct"] = open_jump_pct
+            r["accel_tag"] = accel_tag
+
             # ── 💡 交易时钟生命周期 (Time Window Alpha) ──
             # 区分：09:30~10:00黄金定龙期 / 10:00~11:30分歧低吸期 / 13:00~14:00午后助攻期 / 14:00~14:45尾盘诱多高危期
             curr_hhmm = time.strftime("%H:%M")
@@ -847,7 +887,7 @@ class LimitUpEngine:
                 r["tier_jumps"] = 0
                 r["bubble_alpha_score"] = 50.0
 
-            # ── 💡 核心量化打分：结合时序生命周期乘数 ──
+            # ── 💡 核心量化打分：结合时序生命周期乘数与加速结构提权 ──
             if is_limit_up:
                 base_score = 80.0
                 if consecutive >= 4:
@@ -869,6 +909,12 @@ class LimitUpEngine:
                     base_score += 5.0
                 elif is_bullish_engulfing or is_support_bounce:
                     base_score += 2.5
+
+                # 双加速提权加成
+                if is_dual_accel:
+                    base_score += 8.0
+                elif is_open_low_accel or is_gap_accel:
+                    base_score += 4.0
 
                 dff_bonus = min(3.0, max(0.0, (dff2 * 0.04 + dff3 * 0.01)))
                 base_score += dff_bonus
@@ -945,6 +991,11 @@ class LimitUpEngine:
                 if vol_ratio > 1.8:
                     ch_score += 2.0
 
+                if is_dual_accel:
+                    ch_score += 8.0
+                elif is_open_low_accel or is_gap_accel:
+                    ch_score += 4.0
+
                 # 应用时间衰减惩罚
                 ch_score = ch_score * time_multiplier
                 momentum_score = round(min(88.0, max(45.0, ch_score)), 0)
@@ -1015,18 +1066,25 @@ class LimitUpEngine:
             except Exception:
                 pass
 
+            if accel_tag:
+                desc_tag = f"{accel_tag}|{desc_tag}"
+
             r["momentum_score"] = momentum_score
             r["seal_quality_score"] = momentum_score
             r["pattern_desc"] = desc_tag
 
-        # 4. 排序：真实涨停优先 > 连板数降序 > 动能评分降序 > 封流比降序 > 涨幅降序
-        records.sort(key=lambda x: (
-            1 if x["is_limit_up"] else 0,
-            x["consecutive_boards"],
-            x.get("momentum_score", 50.0),
-            x["seal_to_circ_ratio"],
-            x["pct"]
-        ), reverse=True)
+        # 4. 排序：真实涨停优先 > 连板数降序 > (双加速绝对优先 > 开盘最低差异微小) > 动能评分降序 > 封流比降序 > 涨幅降序
+        def _ladder_record_sort_key(x):
+            zt_rank = 1 if x["is_limit_up"] else 0
+            cb_rank = x.get("consecutive_boards", 0)
+            dual_rank = 0 if x.get("is_dual_accel") else (1 if (x.get("is_open_low_accel") or x.get("is_gap_accel")) else 2)
+            diff_rank = _safe_float(x.get("low_diff_pct", 999.0), 999.0)
+            score_rank = x.get("momentum_score", 50.0)
+            seal_rank = x.get("seal_to_circ_ratio", 0.0)
+            pct_rank = x.get("pct", 0.0)
+            return (zt_rank, cb_rank, -dual_rank, -diff_rank, score_rank, seal_rank, pct_rank)
+
+        records.sort(key=_ladder_record_sort_key, reverse=True)
 
         with self._cache_lock:
             self._current_live_records = records
