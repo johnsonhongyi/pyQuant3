@@ -1,3 +1,28 @@
+## 2026-09-03 11:30
+- [x] **实现连板天梯与龙头突击 100% 同源的重点关注标的优先置顶显示、⭐ 徽章与金色尊荣高亮体系 (`stock_standalone/ats/ui/daily_limit_up_dialog.py`, `stock_standalone/tests/test_daily_limit_up_dialog.py`)**：
+    - [x] **排查定位天梯先前“重点关注无法优先置顶、只能平局决胜且缺乏视觉高亮”根本诱因**：
+        1. **排序引擎 `fav_subkey` 垫底漏洞**：原 `_apply_multi_level_sort` 注释虽写“第一优先级置顶”，但实际将 `fav_flag` 放在了排序元组倒数第二位（仅在同数值平局时生效）；导致 4 板、3 板依然排在 1 板关注标的前面，无法绝对置顶；
+        2. **单元格填充层缺乏高亮与徽章**：`_populate_table_rows` 原先未根据 `code in fav_stocks` 给代码和名称赋予 ⭐ 徽章、金色高亮与淡金行背景，且未对复用的 `NumericTableWidgetItem` 绑定 `is_pinned/pin_rank` 特权；
+        3. **交互切换后未触发重排置顶**：右键菜单与空格键在修改关注后未通知主窗口 `_safe_favorites_changed()`，且未调用 `self._apply_filter()` 进行即时重排。
+    - [x] **全链路对齐龙头突击，落地天梯重点关注优先置顶四大核心引擎**：
+        1. **多级排序引擎第一优先级置顶 (`_apply_multi_level_sort`)**：
+           - 将 `fav_rank = (0 if code in fav_stocks else 1)` 提升为 `compound_sort_key` 复合排序元组的首项（第 0 项）；
+           - 无论用户选择按连板数、涨幅%、封流比、形态质量或 DFF 等任何多级排序，**重点关注标的永远绝对优先置顶在第 0 行起**；置顶区内部与非置顶区内部各自保持严格的多级排序；
+           - 兜底排序分支亦同步实现 `fav_stocks` 绝对优先置顶；
+        2. **UI 视觉与单元格置顶特权 (`_set_table_item` / `_populate_table_rows`)**：
+           - **名称列**：重点关注标的自动前缀金色五角星徽章 `⭐ {name}`，前景色高亮金 `#ffd700`，加粗呈现；
+           - **代码列**：前景色升级为高亮金 `#ffd700`，加粗呈现；
+           - **整行淡金光背景**：整行所有单元格自动渲染半透明金光背景 `QColor(60, 45, 12, 110)`；
+           - **全列单元格绑定置顶特权**：为 `NumericTableWidgetItem` 传入 `is_pinned=is_fav, pin_rank=pin_rank`，保障多维交互排序永久置顶；
+        3. **右键菜单与空格按键即时联动闭环 (`keyPressEvent` / `_show_context_menu`)**：
+           - 右键菜单动态呈现：`⭐ 设为重点关注 ({clean_c})` / `❌ 取消重点关注 ({clean_c})`，支持快速复制代码与名称；
+           - 按空格键或点击右键菜单后，立即通知主窗口 `_safe_favorites_changed()`，并毫秒级触发 `self._apply_filter()` 原地重排置顶与切换高亮；
+        4. **状态栏实时统计联动**：
+           - 底部状态栏在存在重点关注标的时实时展示 `⭐关注: {fav_cnt}` 统计卡片，为 0 时静默不干扰看盘；
+    - [x] **自动化测试与跨模块回归 100% 全部 PASSED**：
+        - 新增 `test_favorite_priority_pinning_and_toggle` 专项测试，覆盖初始渲染、加关注置顶（1板关注标的置顶排在4板前）、⭐ 徽章、金色高亮、排序列切换永久置顶、取消关注恢复全生命周期断言；
+        - 天梯 5 项测试、龙头突击 18 项测试与 30 项跨模块回归测试全部通过。
+
 ## 2026-09-03 11:20
 - [x] **彻底根治“所有重点关注全量侵入/霸屏”缺陷，严格实施【仅当前热点板块/新增板块中出现重点关注才优先显示，没有就不显示】业务闭环 (`stock_standalone/ats/hot_sector_engine.py`, `stock_standalone/ats/ui/hot_sector_leaderboard.py`, `stock_standalone/tests/test_sector_strength_and_detail_parity.py`)**：
     - [x] **排查定位“全量自选股变成伪‘重点关注’板块霸占龙头突击榜”两大根本诱因**：
