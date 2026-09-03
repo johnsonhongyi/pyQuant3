@@ -263,7 +263,9 @@ def generate_channel_strategy_text(row: Union[dict, pd.Series], df_code: Optiona
     if df_code is not None and not df_code.empty:
         last_c = df_code.iloc[-1]
         for col in ['close', 'ch_upper', 'ch_mid', 'ch_lower', 'ch_slope', 'ch_slope_deg', 'ch_pos', 'ch_pattern', 'ch_anchor_high_price', 'ch_anchor_low_price', 'ch_tc2', 'ch_bc2', 'ch_nod']:
-            if col in last_c and col not in row:
+            cur_v = row.get(col)
+            is_cur_invalid = (cur_v is None) or (pd.isna(cur_v)) or (col == 'ch_upper' and float(cur_v or 0) <= 0.05)
+            if col in last_c and (col not in row or is_cur_invalid):
                 val = last_c[col]
                 row[col] = val.item() if hasattr(val, 'item') and not isinstance(val, (str, bytes)) else val
 
@@ -272,15 +274,36 @@ def generate_channel_strategy_text(row: Union[dict, pd.Series], df_code: Optiona
     selected_suffix = None
     
     for suf in period_candidates:
-        key = f"ch_upper_{suf}" if suf else "ch_upper"
-        val = row.get(key, 0.0)
+        key_up = f"ch_upper_{suf}" if suf else "ch_upper"
+        key_lo = f"ch_lower_{suf}" if suf else "ch_lower"
+        val_up = row.get(key_up, 0.0)
+        val_lo = row.get(key_lo, 0.0)
         try:
-            val_f = float(val) if val is not None else 0.0
+            up_f = float(val_up) if val_up is not None and not pd.isna(val_up) else 0.0
+            lo_f = float(val_lo) if val_lo is not None and not pd.isna(val_lo) else 0.0
         except Exception:
-            val_f = 0.0
-        if val_f > 0:
+            up_f, lo_f = 0.0, 0.0
+        if up_f > 0.05 and lo_f > 0.01 and up_f > lo_f:
             selected_suffix = suf
             break
+
+    # 🛡️ 自愈降级：若各周期通道指标均无效，但具备股票代码，尝试读取日线实时重算
+    if selected_suffix is None:
+        code_val = row.get('code')
+        if code_val:
+            try:
+                from JSONData.tdx_data_Day import get_tdx_Exp_day_to_df
+                code_str = str(code_val).strip().zfill(6)
+                df_calc = get_tdx_Exp_day_to_df(code_str)
+                if df_calc is not None and not df_calc.empty and 'ch_upper' in df_calc.columns:
+                    last_calc = df_calc.iloc[-1]
+                    if float(last_calc.get('ch_upper', 0.0)) > 0.05:
+                        for col in ['close', 'ch_upper', 'ch_mid', 'ch_lower', 'ch_slope', 'ch_slope_deg', 'ch_pos', 'ch_pattern', 'ch_anchor_high_price', 'ch_anchor_low_price', 'ch_tc2', 'ch_bc2', 'ch_nod']:
+                            if col in last_calc:
+                                row[col] = last_calc[col]
+                        selected_suffix = ''
+            except Exception:
+                pass
 
     if selected_suffix is None:
         return ""
@@ -302,8 +325,18 @@ def generate_channel_strategy_text(row: Union[dict, pd.Series], df_code: Optiona
     pos = get_val('ch_pos', 0.0)
     pattern = int(get_val('ch_pattern', 1))
 
-    if upper_p <= 0 or mid_p <= 0:
+    # 🛡️ 严格的通道三轨与指标健康防呆校验 (彻底杜绝除零溢出、0.01塌缩及严重脱节坏数据)
+    if upper_p <= 0.05 or mid_p <= 0.05 or lower_p <= 0.01:
         return ""
+    if upper_p <= lower_p or (upper_p - lower_p) <= 0.01:
+        return ""
+    # 相对位置数值溢出拦截 (正常范围为 -100% ~ 200%)
+    if pos > 500.0 or pos < -500.0:
+        return ""
+    # 价格与三轨脱节拦截 (通道轨不应偏离当前股价超过合理范围)
+    if close_p > 0.5:
+        if upper_p < close_p * 0.25 or lower_p > close_p * 4.0:
+            return ""
 
     p_tag = selected_suffix.upper() if selected_suffix else "日线"
     lines = []
