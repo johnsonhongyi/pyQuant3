@@ -184,14 +184,12 @@ class HotSectorEngine:
             except Exception as e:
                 logger.debug(f"动态提取板块成分股异常: {e}")
 
-        # 3. 包含手动重点关注池或多日筛选出的龙头
+        # 3. 匹配手动重点关注池 (仅当其属于当前有效热点板块时才确保纳入，杜绝非热点自选股伪造板块侵入)
         if manual_watchlist:
             for c in manual_watchlist:
                 c_clean = str(c).strip().zfill(6)
-                if c_clean:
+                if c_clean and c_clean in sector_map:
                     target_codes_set.add(c_clean)
-                    if c_clean not in sector_map:
-                        sector_map[c_clean] = "重点关注"
 
         # 4. 从 current_df 提取多日底蕴特征与名称
         if current_df is not None and not current_df.empty:

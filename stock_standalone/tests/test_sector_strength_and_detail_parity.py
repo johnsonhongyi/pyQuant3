@@ -903,6 +903,131 @@ def test_hot_sector_new_concept_auto_all_and_quick_access(monkeypatch):
         dialog.close()
 
 
+def test_hot_sector_favorite_toggle_and_priority_pinning(monkeypatch):
+    """
+    测试 HotSectorLeaderboardDialog 重点关注置顶优先显示机制：
+    1. 重点关注股票在任何筛选与排序模式下均置顶优先显示 (第 0 行)；
+    2. 名称列自动附带 ⭐ 徽章且代码/名称呈现金色高亮；
+    3. 支持单元格 NumericTableWidgetItem 无论按任何列 (升序/降序) 排序永远置顶特权；
+    4. 底部状态栏实时显示重点关注标的数量；
+    5. 取消关注后平滑恢复原有相对排序与普通样式。
+    """
+    from PyQt6.QtWidgets import QApplication, QWidget
+    from PyQt6.QtCore import Qt
+    app = QApplication.instance() or QApplication([])
+    from ats.ui.hot_sector_leaderboard import HotSectorLeaderboardDialog
+    from global_favorites import GlobalFavoriteManager
+
+    fav_mgr = GlobalFavoriteManager()
+    fav_mgr.remove_favorite_stock("601318")
+
+    class DummyParent(QWidget):
+        def __init__(self):
+            super().__init__()
+            self.fav_stocks = set()
+            self.heatmap_widget = None
+
+    parent = DummyParent()
+    dialog = HotSectorLeaderboardDialog(parent)
+
+    try:
+        dialog.combo_time_slice.setCurrentIndex(1) # 选择 ⏱️ 全天全时段，防止分时切片过滤
+        dialog.active_sectors = {"航运概念", "期货概念"}
+        dialog.selected_single_sector = None
+
+        mock_results = [
+            {"code": "600428", "name": "中远海特", "sector": "航运概念", "alpha_score": 88.0, "pct": 5.2, "buy_tag": "LEADER", "buy_type": "领涨龙头"},
+            {"code": "601872", "name": "招商轮船", "sector": "航运概念", "alpha_score": 75.0, "pct": 3.1, "buy_tag": "SURGE", "buy_type": "扫盘冲板"},
+            {"code": "000996", "name": "中国中期", "sector": "期货概念", "alpha_score": 70.0, "pct": 2.5, "buy_tag": "BREAKOUT", "buy_type": "先锋起爆"},
+            {"code": "601318", "name": "中国平安", "sector": "航运概念", "alpha_score": 60.0, "pct": 1.2, "buy_tag": "PULLBACK", "buy_type": "反身低吸"},
+        ]
+
+        # 1. 初始状态：未关注 601318，按 alpha_score 排序排在最后 (第 3 行)
+        dialog._render_table_data(mock_results)
+        assert dialog.table.rowCount() == 4
+        assert dialog.table.item(3, 0).text().strip() == "601318"
+        assert "⭐" not in dialog.table.item(3, 1).text()
+        assert not getattr(dialog.table.item(3, 0), "is_pinned", False)
+
+        # 2. 将 601318 设为重点关注
+        fav_mgr.add_favorite_stock("601318")
+        dialog._render_table_data(mock_results)
+
+        # 核心断言 1：601318 无论综合得分多少，自动置顶优先显示在第 0 行
+        assert dialog.table.item(0, 0).text().strip() == "601318"
+        # 核心断言 2：名称自动添加 ⭐ 徽章
+        assert "⭐ 中国平安" in dialog.table.item(0, 1).text()
+        # 核心断言 3：NumericTableWidgetItem 单元格具备 is_pinned=True 和 pin_rank=0 置顶特权
+        assert getattr(dialog.table.item(0, 0), "is_pinned", False) is True
+        assert getattr(dialog.table.item(0, 0), "pin_rank", 999) == 0
+        # 核心断言 4：底部状态栏联动显示 ⭐关注: 1
+        assert "⭐关注: 1" in dialog.lbl_stats.text()
+
+        # 核心断言 5：无论按何种列排序（例如按涨幅%升序），重点关注股票依然置顶居首
+        dialog.table.sortItems(5, Qt.SortOrder.AscendingOrder)
+        assert dialog.table.item(0, 0).text().strip() == "601318", "按涨幅升序排序时，重点关注标的仍应稳居表格最前！"
+
+        # 按代码降序排序，重点关注标的依然稳居表格最前
+        dialog.table.sortItems(0, Qt.SortOrder.DescendingOrder)
+        assert dialog.table.item(0, 0).text().strip() == "601318", "按代码降序排序时，重点关注标的仍应稳居表格最前！"
+
+        # 核心断言 6：取消重点关注后，重置排序列为默认综合得分，平滑恢复正常排序与样式
+        fav_mgr.remove_favorite_stock("601318")
+        dialog.table.horizontalHeader().setSortIndicator(-1, Qt.SortOrder.AscendingOrder)
+        dialog._render_table_data(mock_results)
+        # 恢复默认按 alpha_score 降序排序，601318 综合得分最低回到末位
+        assert dialog.table.item(3, 0).text().strip() == "601318"
+        assert "⭐" not in dialog.table.item(3, 1).text()
+        assert not getattr(dialog.table.item(3, 0), "is_pinned", False)
+        assert "⭐关注:" not in dialog.lbl_stats.text()
+
+        # 核心断言 7：板块中出现了重点关注的才优先显示，不在当前板块的自选股绝不显示！
+        fav_mgr.add_favorite_stock("600027") # 华电国际 (电力行业，不在航运与期货概念中)
+        fav_mgr.add_favorite_stock("000999") # 华润三九 (中药行业，不在航运与期货概念中)
+        polluted_results = mock_results + [
+            {"code": "600027", "name": "华电国际", "sector": "电力行业", "alpha_score": 89.0, "pct": 2.7, "buy_tag": "SURGE"},
+            {"code": "000999", "name": "华润三九", "sector": "中药概念", "alpha_score": 89.0, "pct": 2.5, "buy_tag": "SURGE"},
+        ]
+        dialog._render_table_data(polluted_results)
+        current_codes = [dialog.table.item(r, 0).text().strip() for r in range(dialog.table.rowCount())]
+        assert "600027" not in current_codes, "非当前板块的重点关注股票绝不能显示！"
+        assert "000999" not in current_codes, "非当前板块的重点关注股票绝不能显示！"
+        assert dialog.table.rowCount() == 4
+        fav_mgr.remove_favorite_stock("600027")
+        fav_mgr.remove_favorite_stock("000999")
+
+    finally:
+        fav_mgr.remove_favorite_stock("601318")
+        dialog.close()
+
+
+def test_engine_build_target_universe_only_matches_hot_sectors():
+    """验证 HotSectorEngine 构建目标池时，非热点板块的自选关注股绝不被纳入，杜绝伪造重点关注板块"""
+    from ats.hot_sector_engine import HotSectorEngine
+    engine = HotSectorEngine()
+    engine.sector_to_codes = {
+        "航运概念": ["600428", "601872"],
+        "免税店": ["601888", "002607"]
+    }
+    
+    # 模拟外部传入包含非当前板块的自选股
+    manual_watchlist = ["600428", "600027", "000999"]
+    target_codes, sector_map, mp_cache, name_map = engine.build_target_universe(
+        top_sector_names=["航运概念", "免税店"],
+        manual_watchlist=manual_watchlist
+    )
+    
+    # 600428 属于航运概念，应在目标池中，且所属板块必须是真实的航运概念
+    assert "600428" in target_codes
+    assert sector_map["600428"] == "航运概念"
+    
+    # 600027 与 000999 不在航运概念与免税店中，坚决不能进入目标池，且绝不能生成"重点关注"板块
+    assert "600027" not in target_codes
+    assert "000999" not in target_codes
+    assert "重点关注" not in sector_map.values()
+
+
+
 
 
 
