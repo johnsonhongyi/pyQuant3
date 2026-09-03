@@ -778,8 +778,8 @@ class AlertNotifier(QObject if HAS_PYQT else object):
         now = time.time()
         code_str = str(code).strip().zfill(6)
         reason_str = str(reason).strip()
-        # 真正的高优先级信号豁免 (通达信实盘信号/实盘演示/强制测试/评分>=95.0)
-        is_priority_signal = is_force or ("通达信" in reason_str) or ("实盘演示" in reason_str) or (score >= 95.0)
+        # 真正的高优先级信号豁免 (👑双加速顶级信号/通达信实盘信号/实盘演示/强制测试/评分>=95.0)
+        is_priority_signal = is_force or ("双加速" in reason_str) or ("通达信" in reason_str) or ("实盘演示" in reason_str) or (score >= 95.0)
 
         # 0. 特异打分门槛过滤：小于 78.0 分且非强制/通达信信号的微弱异动静默过滤
         if score < 78.0 and not is_priority_signal:
@@ -894,7 +894,14 @@ class AlertNotifier(QObject if HAS_PYQT else object):
                 logger.warning(f"ShowMessage failed: {e}")
 
         # 3. 触发语音播报 (受 is_voice_enabled 控制)
-        voice_text = f"特异买点 {name}，{reason}"
+        if "双加速" in reason:
+            voice_text = f"双加速买点，{name}，跳空光脚加速"
+        elif "光脚加速" in reason:
+            voice_text = f"光脚加速买点，{name}，开盘即最低"
+        elif "缺口加速" in reason:
+            voice_text = f"缺口加速买点，{name}，跳空高开未补缺"
+        else:
+            voice_text = f"特异买点 {name}，{reason}"
         if self.is_voice_enabled():
             self._speak_text(voice_text)
         else:

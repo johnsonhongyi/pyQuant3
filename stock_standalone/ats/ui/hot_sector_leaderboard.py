@@ -1175,9 +1175,12 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
                 filtered.append(r)
 
         # 👑 重点关注优先置顶排序：无论当前处于何种筛选模式，重点关注的 code 永远优先置顶排在最前！
+        # 👑 同加速类型后在对比 Alpha 得分与开盘下影微小度：双加速 > 单加速 > 常规，同类型内得分最高优先
         filtered.sort(key=lambda x: (
             0 if str(x.get("code", "")).strip().zfill(6) in fav_set else 1,
-            -float(x.get("alpha_score", 0.0))
+            0 if x.get("is_dual_accel") else (1 if (x.get("is_open_low_accel") or x.get("is_gap_accel")) else 2),
+            -float(x.get("alpha_score", 0.0)),
+            float(x.get("low_diff_pct", 999.0))
         ))
 
         if getattr(self, "filter_mode", "ALL") == "TOP5_FOCUS":
@@ -1369,15 +1372,19 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
         try:
             from ats.alert_notifier import AlertNotifier
             notifier = AlertNotifier.get_instance()
-            # 筛选得分最高的 1 只核心领涨龙头与先锋突破标的
+            # 优先选拔 👑双加速 标的，若无则选拔最强核心领涨龙头与先锋突破标的
             candidates = []
-            for r in filtered_records:
-                score = float(r.get("alpha_score", 0.0))
-                tag = r.get("buy_tag", "")
-                if score >= 80.0 or tag in ("LEADER", "SURGE", "BREAKOUT", "PULLBACK") or r.get("sector") == "重点关注":
-                    candidates.append(r)
-                if len(candidates) >= 1:  # 精选最强 Top 1 核心标的，避免队列堆积
-                    break
+            dual_cands = [r for r in filtered_records if r.get("is_dual_accel")]
+            if dual_cands:
+                candidates = dual_cands[:1]
+            else:
+                for r in filtered_records:
+                    score = float(r.get("alpha_score", 0.0))
+                    tag = r.get("buy_tag", "")
+                    if score >= 80.0 or tag in ("LEADER", "SURGE", "BREAKOUT", "PULLBACK") or r.get("sector") == "重点关注":
+                        candidates.append(r)
+                    if len(candidates) >= 1:  # 精选最强 Top 1 核心标的，避免队列堆积
+                        break
 
             for idx, top_cand in enumerate(candidates, 1):
                 c = str(top_cand.get("code", "")).zfill(6)

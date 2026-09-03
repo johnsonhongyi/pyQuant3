@@ -2241,11 +2241,18 @@ class TDXRealtimeFetcher:
             it["low_diff_pct"] = low_diff
             results.append(it)
 
-        # 按 Alpha 得分降序排列，同分或同级时：双加速优先 > 单加速优先，开盘最低差异最小的绝对优先
+        # 按加速形态分层，同类型内对比 Alpha 得分：双加速优先 > 单加速优先，同类型内得分最高与下影差异最小优先
         def _alpha_sort_key(x):
             dual_rank = 0 if x.get("is_dual_accel") else (1 if (x.get("is_open_low_accel") or x.get("is_gap_accel")) else 2)
-            diff_rank = x.get("low_diff_pct", 999.0)
-            return (-x.get("alpha_score", 0.0), dual_rank, diff_rank)
+            try:
+                score_rank = -float(x.get("alpha_score", 0.0))
+            except Exception:
+                score_rank = 0.0
+            try:
+                diff_rank = float(x.get("low_diff_pct", 999.0))
+            except Exception:
+                diff_rank = 999.0
+            return (dual_rank, score_rank, diff_rank)
 
         results.sort(key=_alpha_sort_key)
         return results

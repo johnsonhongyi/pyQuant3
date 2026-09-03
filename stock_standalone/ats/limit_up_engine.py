@@ -1073,16 +1073,16 @@ class LimitUpEngine:
             r["seal_quality_score"] = momentum_score
             r["pattern_desc"] = desc_tag
 
-        # 4. 排序：真实涨停优先 > 连板数降序 > (双加速绝对优先 > 开盘最低差异微小) > 动能评分降序 > 封流比降序 > 涨幅降序
+        # 4. 排序：真实涨停优先 > 连板数降序 > (同加速类型后在对比评分与开盘下影微小度) > 封流比降序 > 涨幅降序
         def _ladder_record_sort_key(x):
             zt_rank = 1 if x["is_limit_up"] else 0
             cb_rank = x.get("consecutive_boards", 0)
             dual_rank = 0 if x.get("is_dual_accel") else (1 if (x.get("is_open_low_accel") or x.get("is_gap_accel")) else 2)
+            score_rank = _safe_float(x.get("momentum_score", 50.0), 50.0)
             diff_rank = _safe_float(x.get("low_diff_pct", 999.0), 999.0)
-            score_rank = x.get("momentum_score", 50.0)
-            seal_rank = x.get("seal_to_circ_ratio", 0.0)
-            pct_rank = x.get("pct", 0.0)
-            return (zt_rank, cb_rank, -dual_rank, -diff_rank, score_rank, seal_rank, pct_rank)
+            seal_rank = _safe_float(x.get("seal_to_circ_ratio", 0.0), 0.0)
+            pct_rank = _safe_float(x.get("pct", 0.0), 0.0)
+            return (zt_rank, cb_rank, -dual_rank, score_rank, -diff_rank, seal_rank, pct_rank)
 
         records.sort(key=_ladder_record_sort_key, reverse=True)
 

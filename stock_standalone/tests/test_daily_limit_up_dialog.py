@@ -472,6 +472,64 @@ class TestDailyLimitUpDialog(unittest.TestCase):
             self.assertIn("双加速: 跳空高开+开盘即最低", tooltip)
             self.assertIn("下影差异: 0.00%", tooltip)
 
+            # 4. 👑 核心断言：测试用户截图场景【同类型后在对比评分的能力】
+            # 构造 4 只股票：
+            # A: 300830 金现代 (缺口加速, 99分)
+            # B: 002787 华浪控股 (双加速, 99分)
+            # C: 301489 思泉新材 (缺口加速, 98分)
+            # D: 605068 明新旭腾 (双加速, 98分)
+            records_type_score = [
+                {
+                    "code": "300830", "name": "金现代", "price": 10.09, "last_close": 8.41,
+                    "open": 8.50, "high": 10.09, "low": 8.45, "pct": 19.98, "consecutive_boards": 1,
+                    "is_limit_up": True, "is_broken": False, "seal_to_circ_ratio": 6.73, "seal_amount_wan": 22872.0,
+                    "tier_tag": "💎 冰点反身性龙", "momentum_score": 99.0,
+                    "is_dual_accel": False, "is_gap_accel": True, "is_open_low_accel": False, "low_diff_pct": 0.10,
+                    "accel_tag": "🚀缺口加速", "pattern_desc": "🚀缺口加速|💎 反身性龙头(99分)"
+                },
+                {
+                    "code": "002787", "name": "华浪控股", "price": 24.40, "last_close": 22.18,
+                    "open": 22.50, "high": 24.40, "low": 22.50, "pct": 10.01, "consecutive_boards": 1,
+                    "is_limit_up": True, "is_broken": False, "seal_to_circ_ratio": 4.22, "seal_amount_wan": 25530.0,
+                    "tier_tag": "💎 冰点反身性龙", "momentum_score": 99.0,
+                    "is_dual_accel": True, "is_gap_accel": True, "is_open_low_accel": True, "low_diff_pct": 0.00,
+                    "accel_tag": "👑双加速", "pattern_desc": "👑双加速|💎 反身性龙头(99分)"
+                },
+                {
+                    "code": "301489", "name": "思泉新材", "price": 140.40, "last_close": 117.00,
+                    "open": 119.00, "high": 140.40, "low": 118.00, "pct": 20.00, "consecutive_boards": 1,
+                    "is_limit_up": True, "is_broken": False, "seal_to_circ_ratio": 3.55, "seal_amount_wan": 34662.0,
+                    "tier_tag": "💎 冰点反身性龙", "momentum_score": 98.0,
+                    "is_dual_accel": False, "is_gap_accel": True, "is_open_low_accel": False, "low_diff_pct": 0.12,
+                    "accel_tag": "🚀缺口加速", "pattern_desc": "🚀缺口加速|💎 反身性龙头(98分)"
+                },
+                {
+                    "code": "605068", "name": "明新旭腾", "price": 23.50, "last_close": 21.36,
+                    "open": 21.80, "high": 23.50, "low": 21.80, "pct": 10.02, "consecutive_boards": 1,
+                    "is_limit_up": True, "is_broken": False, "seal_to_circ_ratio": 1.38, "seal_amount_wan": 5255.0,
+                    "tier_tag": "💎 冰点反身性龙", "momentum_score": 98.0,
+                    "is_dual_accel": True, "is_gap_accel": True, "is_open_low_accel": True, "low_diff_pct": 0.00,
+                    "accel_tag": "👑双加速", "pattern_desc": "👑双加速|💎 反身性龙头(98分)"
+                }
+            ]
+            dialog.current_records = records_type_score
+            # 切换为按【第6列: 形态与质量】降序排序
+            dialog.sort_level1_col = 6
+            dialog.sort_level1_asc = False
+            dialog._sort_col = None
+            dialog._apply_filter()
+
+            self.assertEqual(dialog.table.rowCount(), 4)
+            # 必须严格先按加速类型分层，同类型内部对比评分：
+            # 第1位: 双加速 99分 (002787 华浪控股)
+            self.assertEqual(dialog.table.item(0, 0).text(), "002787", f"第1位应为双加速99分，实际为: {dialog.table.item(0, 0).text()}")
+            # 第2位: 双加速 98分 (605068 明新旭腾) -> 绝对不能被99分的缺口加速插队！
+            self.assertEqual(dialog.table.item(1, 0).text(), "605068", f"第2位应为双加速98分，实际为: {dialog.table.item(1, 0).text()}")
+            # 第3位: 缺口加速 99分 (300830 金现代)
+            self.assertEqual(dialog.table.item(2, 0).text(), "300830", f"第3位应为缺口加速99分，实际为: {dialog.table.item(2, 0).text()}")
+            # 第4位: 缺口加速 98分 (301489 思泉新材)
+            self.assertEqual(dialog.table.item(3, 0).text(), "301489", f"第4位应为缺口加速98分，实际为: {dialog.table.item(3, 0).text()}")
+
         finally:
             dialog.close()
 

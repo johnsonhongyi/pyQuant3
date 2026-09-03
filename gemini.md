@@ -1,3 +1,31 @@
+## 2026-09-03 12:45
+- [x] **彻底根治天梯与龙头突击【同加速类型后在对比评分】排序 Bug & 全面激活双加速消息急速反馈能力 (`stock_standalone/ats/ui/daily_limit_up_dialog.py`, `stock_standalone/ats/limit_up_engine.py`, `stock_standalone/ats/tdx_realtime_fetcher.py`, `stock_standalone/ats/ui/hot_sector_leaderboard.py`, `stock_standalone/ats/alert_notifier.py`, `stock_standalone/tests/test_daily_limit_up_dialog.py`, `stock_standalone/tests/test_sector_strength_and_detail_parity.py`)**：
+    - [x] **排查定位“用户点击形态与质量排序，缺口加速插队到双加速前面、双加速未成团置顶”根本诱因**：
+        1. **`col_idx == 6` subkey 忽略形态只比分数漏洞**：原 `DailyLimitUpDialog._make_column_subkey` 在第 6 列【形态与质量】降序排序时，首个比较项为 `-score`（动能评分）；导致高分缺口加速标的（如 99 分的金现代、黄河旋风）直接压制较低分数的双加速标的（如 98 分的明新旭腾、中远海能），且在同为 99 分时按字符串 Unicode 排序把 `🚀缺口加速` 误排在 `👑双加速` 前面；
+        2. **`col_idx == 4` (连板数) 与 `col_idx == 5` (梯队分类) subkey 越级漏洞**：连板数相同或梯队相同时，原有 subkey 均直接先比 `-score`，导致复合元组在 subkey 内部就分出大小，根本无法触发后面的加速形态优选；
+        3. **消息通知中心频控截断**：`AlertNotifier` 的免频控白名单中缺少 `"双加速"`，导致盘中顶级双加速信号可能被 10 秒全局频控拦截。
+    - [x] **全链路重构【先按加速类型分层，同类型内对比评分与下影微小度】排序铁律 (SSOT)**：
+        1. **`col_idx == 6` (形态与质量)**：
+           - 降序排序元组首项严格锁定 `accel_rank = (0: 👑双加速, 1: ⚡光脚/🚀缺口单加速, 2: 常规形态)`；
+           - 同形态内部次级比较 `-score`（99分排在98分前）；
+           - 同评分内部再次级比较 `low_diff_pct`（开盘最低差异越微小越优先）；
+           - 升序对称反转；
+        2. **`col_idx == 4` (连板数) & `col_idx == 5` (梯队分类)**：
+           - 同板数/同梯队内部，严格先按加速类型分层（`accel_rank`），同类型内再对比动能评分（`-score`）与下影微小度；
+        3. **复合兜底与默认排序全面对齐**：
+           - `compound_sort_key` 中的 `accel_subkey` 升级为 `(dual_accel_rank, score_rank, diff_rank)`；
+           - 默认未选排序列的兜底分支亦严格实施 `(accel_rank, -momentum_score, low_diff_pct)`；
+        4. **突击龙头（HotSectorLeaderboard）同源对齐**：
+           - `TDXRealtimeFetcher._alpha_sort_key` 与 `HotSectorLeaderboard._render_table_data` 均升级为：双加速优先 > 单加速优先 > 同类型内对比 Alpha 得分与下影微小度；
+    - [x] **全面激活双加速消息急速反馈能力**：
+        1. **免频控绿色通道**：`AlertNotifier.notify_special_signal` 中将 `"双加速"` 与 `"👑双加速"` 纳入最高优先级放行白名单，0 延迟绕过 10 秒限频；
+        2. **极速爆发式语音播报**：TTS 优化为短促有力的专属播报词：`"👑双加速买点！{name}，跳空光脚加速"`；
+        3. **通知候选池优先锁定**：突击龙头与连板天梯的通知调度器优先挑选 `is_dual_accel` 双加速标的，绝不被老龙头或高位板挤占通知配额；
+    - [x] **自动化测试与全系统回归 100% 全部 PASSED**：
+        - `test_daily_limit_up_dialog.py` 补充 4 股实战场景（华浪控股99分双加速、明新旭腾98分双加速、金现代99分缺口加速、思泉新材98分缺口加速）断言测试，6 项测试全部通过；
+        - `test_sector_strength_and_detail_parity.py` 19 项全部通过；
+        - `test_popularity_resonance_features.py` 11 项跨模块回归全部通过。
+
 ## 2026-09-03 11:50
 - [x] **突击龙头与连板天梯双端落地【开盘即最低光脚加速】、【跳空高开缺口加速】及【👑双加速结构】量化特征提权与专属视觉高亮体系 (`stock_standalone/ats/tdx_realtime_fetcher.py`, `stock_standalone/ats/limit_up_engine.py`, `stock_standalone/ats/ui/hot_sector_leaderboard.py`, `stock_standalone/ats/ui/daily_limit_up_dialog.py`, `stock_standalone/tests/test_sector_strength_and_detail_parity.py`, `stock_standalone/tests/test_daily_limit_up_dialog.py`)**：
     - [x] **严谨量化模型构建与特征提取 (SSOT)**：

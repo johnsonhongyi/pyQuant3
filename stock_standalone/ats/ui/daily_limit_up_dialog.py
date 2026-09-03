@@ -1348,7 +1348,7 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
                 return (0, -pct if is_descending else pct)
             return (1, 0.0)
 
-        # 4. 连板数
+        # 4. 连板数 (同板数内部加速类型优先，同类型后再对比评分与开盘最低差异)
         elif col_idx == 4:
             cb = _safe_int(r.get("consecutive_boards", r.get("max_consecutive", 0)))
             is_zt = r.get("is_limit_up")
@@ -1360,13 +1360,15 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
                 tier_w = _get_tier_weight(tag)
                 score = _safe_float(r.get("momentum_score", r.get("seal_quality_score", 0.0)))
                 pct = _safe_float(r.get("pct", 0.0))
+                accel_rank = 0 if r.get("is_dual_accel") else (1 if (r.get("is_open_low_accel") or r.get("is_gap_accel")) else 2)
+                diff_pct = _safe_float(r.get("low_diff_pct", 999.0), 999.0)
                 if is_descending:
-                    return (0, -float(cb), -tier_w, -score, -pct)
+                    return (0, -float(cb), accel_rank, -score, diff_pct, -tier_w, -pct)
                 else:
-                    return (0, float(cb), -tier_w, -score, -pct)
-            return (1, 0.0, 0, 0.0, 0.0)
+                    return (0, float(cb), -accel_rank, score, -diff_pct, tier_w, pct)
+            return (1, 0.0, 999, 0.0, 999.0, 0, 0.0)
 
-        # 5. 梯队分类 (核心修复：必须按 梯队基础权重 + 连板数 + 质量评分 复合数值排序，杜绝 2板 排在 3板 前面)
+        # 5. 梯队分类 (核心修复：必须按 梯队基础权重 + 连板数 + 同加速类型后在对比评分)
         elif col_idx == 5:
             tag = str(r.get("tier_tag", "")).strip()
             if tag and tag not in ("--", "-", "None"):
@@ -1384,13 +1386,15 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
                         except Exception:
                             cb = 0
                 score = _safe_float(r.get("momentum_score", r.get("seal_quality_score", 0.0)))
+                accel_rank = 0 if r.get("is_dual_accel") else (1 if (r.get("is_open_low_accel") or r.get("is_gap_accel")) else 2)
+                diff_pct = _safe_float(r.get("low_diff_pct", 999.0), 999.0)
                 if is_descending:
-                    return (0, -tier_w, -cb, -score, SortKeyStr(tag, True))
+                    return (0, -tier_w, -cb, accel_rank, -score, diff_pct)
                 else:
-                    return (0, tier_w, cb, score, SortKeyStr(tag, False))
-            return (1, 0, 0, 0.0, SortKeyStr("", is_descending))
+                    return (0, tier_w, cb, -accel_rank, score, -diff_pct)
+            return (1, 0, 0, 999, 0.0, 999.0)
 
-        # 6. 形态与质量 (按质量评分、连板数、梯队与形态聚合)
+        # 6. 形态与质量 (👑核心修复：同加速类型后在对比动能评分与开盘下影微小度)
         elif col_idx == 6:
             score = _safe_float(r.get("momentum_score", r.get("seal_quality_score", 0.0)))
             desc = str(r.get("pattern_desc", "")).strip()
@@ -1406,11 +1410,14 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
                 cb = _safe_int(r.get("consecutive_boards", r.get("max_consecutive", 0)))
                 tag = str(r.get("tier_tag", "")).strip()
                 tier_w = _get_tier_weight(tag)
+                # 👑 同类型后在对比评分：双加速(0) > 单加速(1) > 常规形态(2)
+                accel_rank = 0 if r.get("is_dual_accel") else (1 if (r.get("is_open_low_accel") or r.get("is_gap_accel")) else 2)
+                diff_pct = _safe_float(r.get("low_diff_pct", 999.0), 999.0)
                 if is_descending:
-                    return (0, -score, -cb, -tier_w, SortKeyStr(desc, True))
+                    return (0, accel_rank, -score, diff_pct, -cb, -tier_w)
                 else:
-                    return (0, score, cb, tier_w, SortKeyStr(desc, False))
-            return (1, 0.0, 0, 0, SortKeyStr("", is_descending))
+                    return (0, -accel_rank, score, -diff_pct, cb, tier_w)
+            return (1, 999, 0.0, 999.0, 0, 0)
 
         # 7. 封单额(万) (必须 > 0 才是有效封单，0/-- 沉底)
         elif col_idx == 7:
@@ -1588,10 +1595,11 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
                 subkeys.append(self._make_column_subkey(r, col_idx, is_desc))
 
             # 默认级联兜底（保证相同排序列内部按量化梯队与质量强度严格对齐，双加速与极小下影绝对优先）
-            # 1. 加速结构兜底优选 (双加速 > 单加速，且开盘与最低差异越小越优先)
+            # 1. 加速结构兜底优选 (👑同加速类型后在对比动能评分，且开盘与最低差异越小越优先)
             dual_accel_rank = 0 if r.get("is_dual_accel") else (1 if (r.get("is_open_low_accel") or r.get("is_gap_accel")) else 2)
+            score_rank = -_safe_float(r.get("momentum_score", 0.0))
             diff_rank = _safe_float(r.get("low_diff_pct", 999.0), 999.0)
-            accel_subkey = (dual_accel_rank, diff_rank)
+            accel_subkey = (dual_accel_rank, score_rank, diff_rank)
 
             # 2. 梯队分类权重 (降序)
             tier_subkey = self._make_column_subkey(r, 5, True)
@@ -1741,8 +1749,8 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
                 filtered.sort(key=lambda x: (
                     0 if str(x.get("code", "")).zfill(6) in all_favs else 1,
                     0 if x.get("is_dual_accel") else (1 if (x.get("is_open_low_accel") or x.get("is_gap_accel")) else 2),
-                    _safe_float(x.get("low_diff_pct", 999.0), 999.0),
                     -_safe_float(x.get("momentum_score", 0.0)),
+                    _safe_float(x.get("low_diff_pct", 999.0), 999.0),
                     -_safe_int(x.get("consecutive_boards", 1)),
                     -_safe_float(x.get("seal_to_circ_ratio", 0.0)),
                     -_safe_float(x.get("pct", 0.0))
@@ -1751,6 +1759,7 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
                 filtered.sort(key=lambda x: (
                     0 if str(x.get("code", "")).zfill(6) in all_favs else 1,
                     0 if x.get("is_dual_accel") else (1 if (x.get("is_open_low_accel") or x.get("is_gap_accel")) else 2),
+                    -_safe_float(x.get("momentum_score", 0.0)),
                     _safe_float(x.get("low_diff_pct", 999.0), 999.0)
                 ))
 
@@ -1897,15 +1906,25 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         CD_SECS = 3600.0
 
         candidates = []
-        for r in filtered_records:
-            score = _safe_float(r.get("momentum_score", 0.0))
-            if score >= 88.0 and not r.get("is_broken", False):
-                c = str(r.get("code", "")).zfill(6)
-                last_cd = self._notify_slice_cd.get(c, 0.0)
-                if (now_ts - last_cd) >= CD_SECS:
-                    candidates.append(r)
-            if len(candidates) >= 1:  # 精选最强 Top 1 核心龙头，杜绝队列排队积压
+        # 优先选拔 👑双加速 标的
+        dual_cands = [r for r in filtered_records if r.get("is_dual_accel") and not r.get("is_broken", False)]
+        for r in dual_cands:
+            c = str(r.get("code", "")).zfill(6)
+            last_cd = self._notify_slice_cd.get(c, 0.0)
+            if (now_ts - last_cd) >= CD_SECS:
+                candidates.append(r)
                 break
+
+        if not candidates:
+            for r in filtered_records:
+                score = _safe_float(r.get("momentum_score", 0.0))
+                if score >= 88.0 and not r.get("is_broken", False):
+                    c = str(r.get("code", "")).zfill(6)
+                    last_cd = self._notify_slice_cd.get(c, 0.0)
+                    if (now_ts - last_cd) >= CD_SECS:
+                        candidates.append(r)
+                if len(candidates) >= 1:  # 精选最强 Top 1 核心龙头，杜绝队列排队积压
+                    break
 
         for idx, top_cand in enumerate(candidates, 1):
             c = str(top_cand.get("code", "")).zfill(6)
