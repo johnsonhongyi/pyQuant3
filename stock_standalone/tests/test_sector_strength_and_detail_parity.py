@@ -943,6 +943,8 @@ def test_hot_sector_favorite_toggle_and_priority_pinning(monkeypatch):
         ]
 
         # 1. 初始状态：未关注 601318，按 alpha_score 排序排在最后 (第 3 行)
+        score_col = dialog.headers.index("综合得分") if "综合得分" in dialog.headers else (len(dialog.headers) - 2)
+        dialog.table.horizontalHeader().setSortIndicator(score_col, Qt.SortOrder.DescendingOrder)
         dialog._render_table_data(mock_results)
         assert dialog.table.rowCount() == 4
         assert dialog.table.item(3, 0).text().strip() == "601318"
