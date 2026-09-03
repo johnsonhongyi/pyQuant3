@@ -22012,9 +22012,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             add_entry = tk.Entry(pool_bar, width=8, font=("Consolas", 9))
             add_entry.pack(side="left", padx=2)
 
-            # Treeview 表格定义
+            # Treeview 表格定义 (selectmode="extended" 支持 Ctrl/Shift 多选)
             columns = tuple(cct.v_reversal_pool_col) if hasattr(cct, 'v_reversal_pool_col') else ("code", "name", "phase", "structure", "dff", "Rank", "red","slope","dff3", "dff2", "entry_date", "anchor_low", "vol_ratio")
-            tree = ttk.Treeview(pool_label_frame, columns=columns, show="headings", selectmode="browse")
+            tree = ttk.Treeview(pool_label_frame, columns=columns, show="headings", selectmode="extended")
             tree.tag_configure("fav", background="#f0f9ff", foreground="#0050b3")  # 自选重点标的
             tree.tag_configure("attack", background="#fff2f0", foreground="#cf1322")  # 🔥 重点进攻 (首拉/二拉起爆)
             tree.tag_configure("pullback", background="#fffbe6", foreground="#d48806")  # 💎 黄金回踩
@@ -22592,6 +22592,31 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     except Exception as e:
                         logger.error(f"Force evict failed: {e}")
 
+            def force_evict_stocks(codes: list):
+                """支持 Ctrl/Shift 多选后批量一键剔除并设为冷却"""
+                if not codes:
+                    return
+                if hasattr(self, 'realtime_service') and self.realtime_service and hasattr(self.realtime_service, 'kline_cache'):
+                    try:
+                        now_ts = time.time()
+                        evicted_count = 0
+                        with self.realtime_service.kline_cache._lock:
+                            for c in codes:
+                                state = self.realtime_service.kline_cache._consolidation_flags.get(c, {})
+                                state["phase"] = "INIT"
+                                state["last_fail_ts"] = now_ts
+                                state["evict_reason"] = "手动批量剔除"
+                                self.realtime_service.kline_cache._consolidation_flags[c] = state
+                                self.realtime_service.kline_cache._v_reversal_pool.discard(c)
+                                evicted_count += 1
+                            self.realtime_service.kline_cache.save_consolidation_state()
+                        logger.warning(f"手动操作：已成功批量从潜伏池剔除 {evicted_count} 只股票并设为冷却")
+                        refresh_pool_data()
+                        if hasattr(self, 'status_var2'):
+                            self.status_var2.set(f"已成功剔除 {evicted_count} 只标的，腾出潜伏池空间")
+                    except Exception as e:
+                        logger.error(f"Force evict multiple failed: {e}")
+
             def view_stock_kline(code: str):
                 # 🚀 优先使用系统内现成的联动日期功能 link_to_visualizer，确保时间与选股、竞价对齐
                 entry_date = None
@@ -22686,21 +22711,38 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
             def handle_cleanup_pool():
                 if hasattr(self, 'realtime_service') and self.realtime_service and hasattr(self.realtime_service, 'kline_cache'):
-                    res = self.realtime_service.kline_cache.cleanup_v_reversal_pool(max_capacity=100, force_trim=True, df=getattr(self, 'df_all', None))
+                    res = self.realtime_service.kline_cache.cleanup_v_reversal_pool(max_capacity=150, force_trim=True, df=getattr(self, 'df_all', None))
                     refresh_pool_data()
                     messagebox.showinfo("潜伏池智能清理", f"已成功完成智能清理与收敛！\n清理前容量: {res['initial_count']} 只\n清理后容量: {res['final_count']} 只\n常规淘汰: {res['evicted_count']} 只\n配额裁汰: {res['trimmed_count']} 只")
 
             def handle_scan_channel_pool():
                 if hasattr(self, 'realtime_service') and self.realtime_service and hasattr(self.realtime_service, 'kline_cache'):
-                    added = self.realtime_service.kline_cache.scan_and_auto_add_uptrend_channel_stocks(
-                        df=getattr(self, 'df_all', None), max_add=30, max_pool_limit=120, force_replace=True
+                    res = self.realtime_service.kline_cache.scan_and_auto_add_uptrend_channel_stocks(
+                        df=getattr(self, 'df_all', None), max_add=30, max_pool_limit=150, force_replace=True
                     )
                     refresh_pool_data()
-                    cur_total = len(self.realtime_service.kline_cache.get_v_reversal_pool())
-                    if added > 0:
-                        msg = f"全市场自动通道扫描纳标完毕！\n新增纳标: {added} 只上涨趋势优质标的\n当前潜伏池总容量: {cur_total} 只"
-                    else:
-                        msg = f"扫描完毕！当前潜伏池已汇聚 {cur_total} 只优质多头标的，已保持当前最优配置。"
+                    added = int(res)
+                    cur_total = getattr(res, 'cur_total', len(self.realtime_service.kline_cache.get_v_reversal_pool()))
+                    total_eligible = getattr(res, 'total_eligible', added)
+                    pending_count = getattr(res, 'pending_count', max(0, total_eligible - added))
+                    missing_ch = getattr(res, 'missing_ch_dir', False)
+
+                    warn_banner = ""
+                    if missing_ch:
+                        warn_banner = "\n⚠️ 警告: 行情数据缺少 'ch_dir' 列 (前置管道未计算通道)，已记入日志错误并由多头均线兜底识别。\n"
+
+                    msg = (
+                        f"全市场自动通道扫描完毕！\n"
+                        f"{warn_banner}"
+                        f"────────────────────────\n"
+                        f"【通道符合总数】: {total_eligible} 只\n"
+                        f"【本次优选纳标】: {added} 只 (按高分优先级择优录取)\n"
+                        f"【当前潜伏容量】: {cur_total} / 150 只\n"
+                        f"【排队待加储备】: {pending_count} 只\n"
+                        f"────────────────────────\n"
+                        f"💡 提示：当前仍有 {pending_count} 只通道上涨标的排队待入池。\n"
+                        f"您可使用 Ctrl / Shift 多选潜伏池股票，右键或按 Delete 批量删除，腾出名额后再点击纳标！"
+                    )
                     messagebox.showinfo("通道上涨纳标", msg)
 
             refresh_btn = tk.Button(pool_bar, text="🔄 刷新", command=refresh_pool_data, font=("Microsoft YaHei", 8))
@@ -22746,52 +22788,123 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             tree.bind("<KeyRelease-Home>", on_tree_select)
             tree.bind("<KeyRelease-End>", on_tree_select)
 
-            # 绑定右键菜单与自选同步修正
+            # 绑定右键菜单与自选同步修正 (支持 Ctrl/Shift 多选批量剔除/操作)
             def show_context_menu(event):
+                # 识别鼠标右键点击的目标行
+                clicked_item = tree.identify_row(event.y)
+                current_selected = list(tree.selection())
+
+                if clicked_item:
+                    # 如果右键点击的项目不在当前已多选的列表里，则将选中状态重设为被点击项目
+                    if clicked_item not in current_selected:
+                        tree.selection_set(clicked_item)
+                        current_selected = [clicked_item]
+                else:
+                    if not current_selected:
+                        return
+
+                selected_codes = []
+                for item_id in current_selected:
+                    vals = tree.item(item_id, "values")
+                    if vals and len(vals) > 0:
+                        selected_codes.append(vals[0])
+
+                if not selected_codes:
+                    return
+
+                # ─── 单选菜单 ───
+                if len(selected_codes) == 1:
+                    code = selected_codes[0]
+                    pyperclip.copy(code)
+                    if hasattr(self, 'status_var2'):
+                        self.status_var2.set(f"已复制股票代码 {code}")
+                    
+                    menu = tk.Menu(tree, tearoff=0)
+                    menu.add_command(label="🔍 联动查看分时/K线", command=lambda: view_stock_kline(code))
+                    menu.add_separator()
+                    menu.add_command(label="📋 复制股票代码", command=lambda: pyperclip.copy(code))
+                    menu.add_separator()
+                    menu.add_command(label="⚡ 强制剔除并冷却该股 (Delete)", command=lambda: force_evict_stock(code))
+                    menu.add_command(label="🔄 强制设为 CONSOLIDATING 潜伏", command=lambda: force_consolidate_stock(code))
+                    menu.add_separator()
+                    
+                    # 获取该股是否已是重点关注
+                    is_fav = False
+                    try:
+                        from global_favorites import GlobalFavoriteManager
+                        is_fav = code in GlobalFavoriteManager().get_favorite_stocks()
+                    except Exception:
+                        pass
+
+                    def toggle_favorite():
+                        try:
+                            from global_favorites import GlobalFavoriteManager
+                            manager = GlobalFavoriteManager()
+                            if is_fav:
+                                manager.remove_favorite_stock(code)
+                                logger.warning(f"手动操作：已将 {code} 移出重点关注个股")
+                            else:
+                                manager.add_favorite_stock(code)
+                                logger.warning(f"手动操作：已将 {code} 设为重点关注个股")
+                            refresh_pool_data()
+                        except Exception as e:
+                            logger.error(f"Toggle favorite failed: {e}")
+
+                    menu.add_command(label="❌ 取消重点关注" if is_fav else "⭐ 设为重点关注个股", command=toggle_favorite)
+                    menu.post(event.x_root, event.y_root)
+                else:
+                    # ─── 🚀 多选批量菜单 (Ctrl / Shift 多选) ───
+                    count = len(selected_codes)
+                    pyperclip.copy(",".join(selected_codes))
+                    if hasattr(self, 'status_var2'):
+                        self.status_var2.set(f"已选中并复制 {count} 只股票代码")
+
+                    def batch_delete():
+                        if messagebox.askyesno("批量剔除确认", f"确定从潜伏池中剔除选中的 {count} 只标的并设为冷却？\n这可为新通道牛股腾出配额。"):
+                            force_evict_stocks(selected_codes)
+
+                    def batch_toggle_fav(add: bool):
+                        try:
+                            from global_favorites import GlobalFavoriteManager
+                            manager = GlobalFavoriteManager()
+                            for c in selected_codes:
+                                if add: manager.add_favorite_stock(c)
+                                else: manager.remove_favorite_stock(c)
+                            refresh_pool_data()
+                        except Exception as e:
+                            logger.error(f"Batch toggle favorite failed: {e}")
+
+                    menu = tk.Menu(tree, tearoff=0)
+                    menu.add_command(label=f"📋 复制选中的 {count} 只股票代码 (逗号分隔)", command=lambda: pyperclip.copy(",".join(selected_codes)))
+                    menu.add_separator()
+                    menu.add_command(label=f"🗑️ 批量剔除选中的 {count} 只股票并设为冷却 (Delete)", command=batch_delete)
+                    menu.add_separator()
+                    menu.add_command(label=f"⭐ 批量设为重点关注 ({count} 只)", command=lambda: batch_toggle_fav(True))
+                    menu.add_command(label=f"❌ 批量取消重点关注 ({count} 只)", command=lambda: batch_toggle_fav(False))
+                    menu.post(event.x_root, event.y_root)
+
+            tree.bind("<Button-3>", show_context_menu) # Windows 右键
+
+            # 绑定 Delete / BackSpace 快捷键，支持键盘一键批量或单选剔除
+            def on_delete_key(event):
                 selected = tree.selection()
                 if not selected:
                     return
-                code = tree.item(selected[0], "values")[0]
-                
-                # 🚀 [NEW] 右键自动复制股票代码到剪贴板，并更新状态栏
-                pyperclip.copy(code)
-                self.status_var2.set(f"已复制股票代码 {code}")
-                
-                menu = tk.Menu(tree, tearoff=0)
-                menu.add_command(label="🔍 联动查看分时/K线", command=lambda: view_stock_kline(code))
-                menu.add_separator()
-                menu.add_command(label="📋 复制股票代码", command=lambda: [pyperclip.copy(code)])
-                menu.add_separator()
-                menu.add_command(label="⚡ 强制剔除并冷却该股", command=lambda: force_evict_stock(code))
-                menu.add_command(label="🔄 强制设为 CONSOLIDATING 潜伏", command=lambda: force_consolidate_stock(code))
-                menu.add_separator()
-                
-                # 获取该股是否已是重点关注
-                is_fav = False
-                try:
-                    from global_favorites import GlobalFavoriteManager
-                    is_fav = code in GlobalFavoriteManager().get_favorite_stocks()
-                except Exception:
-                    pass
+                codes = []
+                for item_id in selected:
+                    vals = tree.item(item_id, "values")
+                    if vals and len(vals) > 0:
+                        codes.append(vals[0])
+                if not codes:
+                    return
+                if len(codes) == 1:
+                    force_evict_stock(codes[0])
+                else:
+                    if messagebox.askyesno("批量剔除确认", f"确定从潜伏池中剔除选中的 {len(codes)} 只标的并设为冷却？"):
+                        force_evict_stocks(codes)
 
-                def toggle_favorite():
-                    try:
-                        from global_favorites import GlobalFavoriteManager
-                        manager = GlobalFavoriteManager()
-                        if is_fav:
-                            manager.remove_favorite_stock(code)
-                            logger.warning(f"手动操作：已将 {code} 移出重点关注个股")
-                        else:
-                            manager.add_favorite_stock(code)
-                            logger.warning(f"手动操作：已将 {code} 设为重点关注个股")
-                        refresh_pool_data()
-                    except Exception as e:
-                        logger.error(f"Toggle favorite failed: {e}")
-
-                menu.add_command(label="❌ 取消重点关注" if is_fav else "⭐ 设为重点关注个股", command=toggle_favorite)
-                menu.post(event.x_root, event.y_root)
-
-            tree.bind("<Button-3>", show_context_menu) # Windows 右键
+            tree.bind("<Delete>", on_delete_key)
+            tree.bind("<BackSpace>", on_delete_key)
 
             # 定义关闭回调
             def on_close():

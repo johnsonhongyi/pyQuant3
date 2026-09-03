@@ -1,3 +1,22 @@
+## 2026-09-03 23:28
+- [x] **潜伏池扩容至 150 只、新增 Ctrl/Shift 多选批量剔除/操作与纳标排队统计回显 (`realtime_data_service.py`, `instock_MonitorTK.py`, `tests/test_v_reversal_pool_enhancements.py`)**：
+    - [x] **潜伏池上限扩充至 150 只**：
+        - 将 `MinuteKlineCache.scan_and_auto_add_uptrend_channel_stocks` 的 `max_pool_limit` 默认值与入参由 120 扩容至 150 只；
+        - 将 UI 工具栏 `[🧹 智能清理]` 的 `max_capacity` 统一对齐为 150 只。
+    - [x] **全市场通道纳标统计指标全面回显与排队透视**：
+        - 设计 `ScanChannelResult(int)` 返回值类型，100% 保持 int 兼容性（确保 `added > 0` 与历史断言无缝工作）；
+        - 提供 `total_eligible`（全市场符合通道总数）、`added`（本次优选入池数）、`pending_count`（排队待纳标数）、`cur_total`（当前总容量）、`missing_ch_dir`（通道列缺失标志）；
+        - UI 弹窗清晰完整展示上述四维指标，并引导用户通过批量剔除腾出容量；
+        - 若底层宽表数据缺失 `ch_dir` 列，主动输出 `logger.error` 报警并弹窗显眼警告，防范数据管道潜在隐患。
+    - [x] **Treeview 表格支持 Ctrl / Shift 多选与右键/按键批量剔除**：
+        - 将 `tree` 的 `selectmode` 从 `"browse"` 升级为 `"extended"`，原生支持 `Ctrl` 点击多选与 `Shift` 连续多选；
+        - 新增 `force_evict_stocks(codes: list)` 线程安全批量剔除函数并设为冷却；
+        - 升级右键上下文菜单：多选时智能切换为批量操作菜单（显示选中只数、批量剔除并冷却、批量设为重点关注、批量取消关注、批量复制股票代码）；
+        - 键盘事件绑定：支持 `<Delete>` 与 `<BackSpace>` 快捷键一键批量/单选删除；
+        - 右键如果落在多选区内，自动保留全部多选范围，不破坏用户选区体验。
+    - [x] **自动化测试 100% 回归通过**：
+        - 运行 `pytest tests/test_v_reversal_pool_enhancements.py`，全部 10 项测试全绿通过。
+
 ## 2026-09-03 23:18
 - [x] **根治【通道纳标提示 0 只】死锁缺陷 & 升级全市场【双轨通道识别 + 汰弱留强动态置换】引擎 (`realtime_data_service.py`, `instock_MonitorTK.py`, `tests/test_v_reversal_pool_enhancements.py`)**：
     - [x] **深度排查并定位点击【🚀 通道纳标】返回 0 只的两大根本诱因**：
