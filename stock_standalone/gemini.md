@@ -1,3 +1,33 @@
+## 2026-09-03 13:25
+- [x] **彻底根治天梯与龙头突击【每日在同一个尺度、倒挂缺乏梯度】缺陷 & 全面落地多日强势底蕴与启动加速分层梯度动能体系 (`stock_standalone/ats/limit_up_engine.py`, `stock_standalone/ats/tdx_realtime_fetcher.py`, `stock_standalone/ats/ui/daily_limit_up_dialog.py`, `stock_standalone/tests/test_daily_limit_up_dialog.py`, `stock_standalone/tests/test_sector_strength_and_detail_parity.py`)**：
+    - [x] **排查定位“4板总龙与3板接力撞顶99分分不出高下、1板98分反超压制2板94分”根本诱因**：
+        1. **静态切片与扁平截断陷阱**：原有评分算法主要依赖单日日内数据（封流比、涨幅、加速），未与历史连板高度和近几日强势底蕴形成阶梯，打分挤压在 80~99 狭窄区间；
+        2. **多日强势底蕴完全未参与打分**：系统沉淀的近 14 天历史涨停（`_history_daily_records`）与多日平台高点（2D/3D/5D）仅作为微小的加分项，缺乏刚性分层梯度（Gradient Tier），导致启动加速特征无法拉开档次。
+    - [x] **全链路重构【多日强势底蕴感知 + 多阶启动加速 + 动能梯度分层】核心引擎 (SSOT)**：
+        1. **历史多日强势底蕴毫秒级聚合**：
+           - `LimitUpEngine.scan_limit_up_records_from_df` 循环前预先构建近 3 日、5 日、10 日历史涨停字典 `multiday_zt_map`；
+           - 实时精准计算并注入 `zt_cnt_3d`, `zt_cnt_5d`, `zt_cnt_10d`, `n_days_m_boards` (如 5日3板、3日2板)；
+        2. **多阶【启动加速 (Launch Acceleration)】量化特征精准识别**：
+           - **连板主升加速 (`is_ladder_accel`)**：连板数递增且今日呈现加速形态（双加速/缺口/光脚）；
+           - **突破启动加速 (`is_breakout_launch_accel`)**：首板突破近 3/5 日平台高点且跳空加速；
+           - **多日波段蓄势加速 (`is_multiday_wave_accel`)**：近 5 日内有 2 板及以上且今日涨停加速；
+        3. **动能评分刚性分层梯度体系 (Gradient Tier)**：
+           - **👑 梯队 A (>=4板 空间总龙)**：基准 98.0，得分锁定 **99.0 ~ 100.0 分**，稳居市场顶峰；
+           - **🚀 梯队 B (3板 连板接力核心)**：基准 95.0，加速加成得分锁定 **96.0 ~ 98.0 分**；
+           - **⚡ 梯队 C (2板 启动加速阶梯)**：基准 92.0，加速加成得分锁定 **93.0 ~ 95.4 分**（四舍五入 95分，彻底消灭被 1 板倒挂）；
+           - **💎 梯队 D1 (首板突破启动加速 / 多日波段主升)**：基准 87.5~88.0，得分 **90.0 ~ 92.4 分**（四舍五入 91~92分）；
+           - **📋 梯队 D2 (普通换手首板)**：基准 80.0，得分 **80.0 ~ 85.4 分**（四舍五入 80~85分）；
+        4. **突击龙头（HotSectorLeaderboard）同源多日底蕴加权**：
+           - `TDXRealtimeFetcher.fetch_multi_stock_alpha_quotes` 在计算 `alpha_score` 时注入多日强势（dff2>=8% +3分, dff3>=15% +3分, 突破多日平台 +4分, 蓄势启动加速 +3.5分）；
+           - 买点原因直观展示 `【突破多日平台】` 与 `【多日蓄势启动加速】`；
+        5. **天梯 UI 透视增强**：
+           - 第 6 列 ToolTip 补充多日强势底蕴（如 `5日3板 | 近3日2板`）与启动加速形态透视；
+    - [x] **自动化测试与跨模块回归 100% 全部 PASSED**：
+        - `test_daily_limit_up_dialog.py` 新增 `test_daily_limit_up_multi_day_gradient_tiers_and_launch_accel` 专项测试，实战严格断言：
+          - 国芳集团(4板, 100分) > 集泰股份(3板, 98分) > 大晟文化(2板加速, 95分) > 三安光电(1板突破双加速, 91分) > 嘉美包装(1板普通, 90分)；
+          - 天梯表格多级排序结果第 0~4 行顺序 100% 完全吻合！
+        - 全量 7 项天梯测试、19 项板块测试、11 项人气榜测试共 37 项全部 PASSED；生产环境 63 只自选股与 15 个自选板块 100% 完好无损。
+
 ## 2026-09-03 12:45
 - [x] **彻底根治天梯与龙头突击【同加速类型后在对比评分】排序 Bug & 全面激活双加速消息急速反馈能力 (`stock_standalone/ats/ui/daily_limit_up_dialog.py`, `stock_standalone/ats/limit_up_engine.py`, `stock_standalone/ats/tdx_realtime_fetcher.py`, `stock_standalone/ats/ui/hot_sector_leaderboard.py`, `stock_standalone/ats/alert_notifier.py`, `stock_standalone/tests/test_daily_limit_up_dialog.py`, `stock_standalone/tests/test_sector_strength_and_detail_parity.py`)**：
     - [x] **排查定位“用户点击形态与质量排序，缺口加速插队到双加速前面、双加速未成团置顶”根本诱因**：

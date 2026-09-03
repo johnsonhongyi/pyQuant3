@@ -2368,11 +2368,17 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
                 diff_v = _safe_float(r.get("low_diff_pct", 0.0))
                 open_jump_v = _safe_float(r.get("open_jump_pct", 0.0))
 
+                n_d_m_b = str(r.get("n_days_m_boards", f"{consecutive}板"))
+                zt_3d_v = _safe_int(r.get("zt_cnt_3d", 0))
+                zt_5d_v = _safe_int(r.get("zt_cnt_5d", 0))
+                is_launch_v = r.get("is_launch_accel", False)
+
                 tip = (
                     f"【{code} {name} 盘中潜伏与上车深度透视】\n"
                     f"────────────────────────\n"
                     f"• 👑 加速结构: {accel_tag if accel_tag else '常规形态'}"
                     f"{' (双加速: 跳空高开+开盘即最低)' if accel_tag == '👑双加速' else (' (开盘即最低/极小下影)' if accel_tag == '⚡光脚加速' else (' (跳空高开且缺口未补)' if accel_tag == '🚀缺口加速' else ''))}\n"
+                    f"• 📈 多日强势底蕴: {n_d_m_b} (近3日{zt_3d_v}板 | 近5日{zt_5d_v}板) | {'⚡【启动加速】' if is_launch_v else '正常推进'}\n"
                     f"• 📊 盘口开低跳空: 开{open_v:.2f} | 低{low_v:.2f} (下影差异: {diff_v:.2f}%) | 昨收{last_close:.2f} (跳空幅度: {open_jump_v:+.2f}%)\n"
                     f"• ⏰ 介入时机评估: {r.get('time_phase', '稳健定盘期')} ({r.get('time_tip', '')})\n"
                     f"• 上车信号梯度: {entry_stage}\n"

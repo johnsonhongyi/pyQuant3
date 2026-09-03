@@ -6,6 +6,7 @@ tests/test_daily_limit_up_dialog.py — 测试 DailyLimitUpDialog UI 创建与�
 import os
 import sys
 import unittest
+import time
 import pandas as pd
 from PyQt6.QtWidgets import QApplication
 
@@ -14,11 +15,30 @@ if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
 from ats.ui.daily_limit_up_dialog import DailyLimitUpDialog, get_limit_up_table_headers
+from ats.limit_up_engine import LimitUpEngine
 
 app = QApplication.instance() or QApplication(sys.argv)
 
 
 class TestDailyLimitUpDialog(unittest.TestCase):
+
+    @classmethod
+    def setUpClass(cls):
+        from global_favorites import GlobalFavoriteManager
+        cls._fav_mgr = GlobalFavoriteManager()
+        with cls._fav_mgr._lock:
+            cls._orig_fav_stocks = set(cls._fav_mgr.favorite_stocks)
+            cls._orig_fav_dates = dict(cls._fav_mgr.favorite_stocks_dates)
+
+    @classmethod
+    def tearDownClass(cls):
+        from global_favorites import GlobalFavoriteManager
+        fav_mgr = GlobalFavoriteManager()
+        with fav_mgr._lock:
+            fav_mgr.favorite_stocks = set(cls._orig_fav_stocks)
+            fav_mgr.favorite_stocks_dates = dict(cls._orig_fav_dates)
+            fav_mgr._version += 1
+        fav_mgr.save_to_config()
 
     def test_headers_and_extra_cols(self):
         headers, extra_cols = get_limit_up_table_headers()
@@ -450,9 +470,11 @@ class TestDailyLimitUpDialog(unittest.TestCase):
         dialog.combo_tier_filter.setCurrentIndex(0)
         dialog.sort_level1_col = 4  # 连板数列
         dialog.sort_level1_asc = False
-        dialog._sort_col = None
-        for c in list(dialog.fav_manager.get_favorite_stocks()):
-            dialog.fav_manager.remove_favorite_stock(c)
+        # 隔离自选股：创建一个独立的虚拟管理器，绝不污染全局单例与生产磁盘文件
+        class MockFavManager:
+            def get_favorite_stocks(self):
+                return set()
+        dialog.fav_manager = MockFavManager()
         try:
             # 1. 默认排序：同为1板情况下，双加速标的 000003 必须绝对优先排在第一位！
             dialog._apply_filter()
@@ -533,7 +555,110 @@ class TestDailyLimitUpDialog(unittest.TestCase):
         finally:
             dialog.close()
 
+    def test_daily_limit_up_multi_day_gradient_tiers_and_launch_accel(self):
+        """【专项测试】验证动能评分分层梯度体系 (Gradient Tier) 与多日强势底蕴感知：
+        实战检验：4板国芳集团 > 3板集泰股份 > 2板大晟文化 > 1板三安光电(突破双加速) > 1板嘉美包装(普通首板)
+        彻底根治'每日都在同一个尺度'以及'1板98分反超2板94分'的倒挂缺陷！
+        """
+        engine = LimitUpEngine.get_instance()
+        
+        # 构造多日历史记录字典模拟近 5 日涨停底蕴
+        today_str = time.strftime("%Y-%m-%d")
+        with engine._cache_lock:
+            old_history = dict(engine._history_daily_records)
+            past_dates = [d for d in sorted(old_history.keys()) if d != today_str]
+            last_date = past_dates[-1] if past_dates else "2026-09-02"
+            engine._history_daily_records[last_date] = [
+                {"code": "601086", "is_limit_up": True, "consecutive_boards": 3},
+                {"code": "002909", "is_limit_up": True, "consecutive_boards": 2},
+                {"code": "600892", "is_limit_up": True, "consecutive_boards": 1},
+            ]
+
+        try:
+
+            # 构造当日策略 DataFrame (包含 5 种梯度的真实标的)
+            data = {
+                "name": ["国芳集团", "集泰股份", "大晟文化", "三安光电", "嘉美包装"],
+                "trade": [6.60, 8.80, 11.20, 13.50, 4.50],
+                "close": [6.60, 8.80, 11.20, 13.50, 4.50],
+                "price": [6.60, 8.80, 11.20, 13.50, 4.50],
+                "open": [6.30, 8.40, 10.70, 12.80, 4.30],
+                "low": [6.30, 8.40, 10.70, 12.80, 4.15],
+                "high": [6.60, 8.80, 11.20, 13.50, 4.50],
+                "last_close": [6.00, 8.00, 10.18, 12.27, 4.09],
+                "percent": [10.0, 10.0, 10.02, 10.02, 10.02],
+                "pct": [10.0, 10.0, 10.02, 10.02, 10.02],
+                "dff": [10.0, 10.0, 10.0, 10.0, 10.0],
+                "dff2": [20.0, 20.0, 20.0, 10.0, 10.0],
+                "dff3": [32.0, 32.0, 20.0, 10.0, 10.0],
+                "lasth1d": [6.00, 8.00, 10.18, 12.27, 4.09],
+                "lasth2d": [5.50, 7.30, 9.30, 12.10, 4.05],
+                "lasth3d": [5.00, 6.70, 8.50, 12.00, 4.00],
+                "hmax": [6.00, 8.00, 10.18, 12.27, 4.09],
+                "vol": [100000, 100000, 100000, 100000, 100000],
+                "amount": [66000000, 88000000, 112000000, 135000000, 45000000],
+                "turnover": [5.0, 6.0, 7.0, 4.0, 3.0],
+                "bid1": [6.60, 8.80, 11.20, 13.50, 4.50],
+                "b1_v": [50000, 40000, 30000, 80000, 10000],
+            }
+            idx = ["601086", "002909", "600892", "600703", "002969"]
+            test_df = pd.DataFrame(data, index=idx)
+
+            # 扫描并计算带有分层梯度的实时记录
+            records = engine.scan_limit_up_records_from_df(test_df, fetch_l2_quotes=False)
+            rec_map = {r["code"]: r for r in records}
+
+            # 1. 验证各标的的分层梯度动能评分
+            score_gf = rec_map["601086"]["momentum_score"] # 国芳集团 (4板总龙)
+            score_jt = rec_map["002909"]["momentum_score"] # 集泰股份 (3板接力)
+            score_ds = rec_map["600892"]["momentum_score"] # 大晟文化 (2板连板加速)
+            score_sa = rec_map["600703"]["momentum_score"] # 三安光电 (1板突破双加速)
+            score_jm = rec_map["002969"]["momentum_score"] # 嘉美包装 (1板常规首板)
+
+            print(f"\n[实战梯度评分验证] 国芳集团(4板): {score_gf} | 集泰股份(3板): {score_jt} | 大晟文化(2板): {score_ds} | 三安光电(1板双加速): {score_sa} | 嘉美包装(1板普通): {score_jm}")
+
+            # 👑 核心断言 1: 空间总龙稳居第 1 梯度 (>= 98 分)
+            self.assertGreaterEqual(score_gf, 98.0)
+            # 👑 核心断言 2: 3板接力紧随其后且低于总龙
+            self.assertGreaterEqual(score_jt, 95.0)
+            self.assertGreater(score_gf, score_jt)
+            # 👑 核心断言 3: 2板启动加速得分 >= 93.0，且低于 3板
+            self.assertGreaterEqual(score_ds, 93.0)
+            self.assertGreater(score_jt, score_ds)
+            # 👑 核心断言 4 (彻底消灭倒挂): 2板得分严格高于 1板首板！(绝不允许 1板98分压制 2板94分)
+            self.assertGreater(score_ds, score_sa, f"2板大晟文化({score_ds}分) 必须严格高于 1板双加速三安光电({score_sa}分)")
+            # 👑 核心断言 5 (启动加速梯度): 1板突破启动加速标的明显高出普通首板
+            self.assertGreater(score_sa, score_jm, f"1板突破加速三安光电({score_sa}分) 必须严格高于 普通首板嘉美包装({score_jm}分)")
+
+            # 2. 验证多日聚合字段完备性
+            self.assertIn("zt_cnt_3d", rec_map["601086"])
+            self.assertIn("zt_cnt_5d", rec_map["601086"])
+            self.assertIn("n_days_m_boards", rec_map["601086"])
+            self.assertTrue(rec_map["600892"]["is_launch_accel"], "2板大晟文化应被标记为 is_launch_accel=True")
+
+            # 3. 验证天梯表格加载后的最终多级排序顺序
+            dialog = DailyLimitUpDialog()
+            try:
+                class MockFavManager:
+                    def get_favorite_stocks(self): return set()
+                    def is_favorite_stock(self, code): return False
+                dialog.fav_manager = MockFavManager()
+                dialog.current_records = records
+                dialog._apply_filter()
+
+                # 严格降序梯队检验：第0行=国芳集团, 第1行=集泰股份, 第2行=大晟文化, 第3行=三安光电, 第4行=嘉美包装
+                self.assertEqual(dialog.table.item(0, 0).text(), "601086", "第1位必须为4板空间总龙国芳集团")
+                self.assertEqual(dialog.table.item(1, 0).text(), "002909", "第2位必须为3板集泰股份")
+                self.assertEqual(dialog.table.item(2, 0).text(), "600892", "第3位必须为2板大晟文化")
+                self.assertEqual(dialog.table.item(3, 0).text(), "600703", "第4位必须为1板双加速三安光电")
+            finally:
+                dialog.close()
+        finally:
+            with engine._cache_lock:
+                engine._history_daily_records = old_history
+
 
 if __name__ == "__main__":
     unittest.main()
+
 

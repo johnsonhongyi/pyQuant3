@@ -2223,7 +2223,20 @@ class TDXRealtimeFetcher:
                 base_bonus = 7.0 if has_base else 0.0
                 focus_bonus = 6.0 if is_focus else 0.0
 
-                alpha_score = base_score + momentum_bonus + intent_bonus + slope_bonus + base_bonus + focus_bonus + accel_bonus
+                # 💡 融入多日强势底蕴与启动加速梯度加权 (Multi-Day Momentum & Launch Acceleration)
+                multiday_bonus = 0.0
+                if dff2 >= 8.0:
+                    multiday_bonus += 3.0
+                if dff3 >= 15.0:
+                    multiday_bonus += 3.0
+                if is_breakout:
+                    multiday_bonus += 4.0
+                    reason = f"【突破多日平台】{reason}"
+                elif has_base and (is_dual or is_gap or is_open_low):
+                    multiday_bonus += 3.5
+                    reason = f"【多日蓄势启动加速】{reason}"
+
+                alpha_score = base_score + momentum_bonus + intent_bonus + slope_bonus + base_bonus + focus_bonus + accel_bonus + multiday_bonus
                 alpha_score = round(min(100.0, max(0.0, alpha_score)), 1)
 
             disp_buy_type = f"{accel_t}·{buy_type}" if (accel_t and "⚠️" not in buy_type) else buy_type
