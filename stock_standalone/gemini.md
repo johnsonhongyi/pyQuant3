@@ -1,3 +1,23 @@
+## 2026-09-03 10:35
+- [x] **彻底根治 ATS 龙头突击新板块同步未默认全选显示 Bug & 全面落地专属【🆕 新概念极速捕捉】直达体系 (`stock_standalone/ats/ui/hot_sector_leaderboard.py`, `stock_standalone/tests/test_sector_strength_and_detail_parity.py`)**：
+    - [x] **排查定位“新板块冲入 Top 3 未选中、表格不显示新板块标的”根本诱因**：
+        1. **原 `active_sectors` 交集条件判断漏洞**：原代码在板块变动时使用 `if not self.active_sectors or not (self.active_sectors & set(top_sectors)):` 判断；在默认全选模式下，旧板块与新 Top 3 必然存在非空交集，导致 `self.active_sectors` 完全未被更新；新晋板块（如《同花顺中特》）未被纳入激活范围，被 `_render_table_data` 误杀过滤，标的数由 66 跌至 43 只，按钮置灰且全部板块按钮变暗；
+    - [x] **重构选区模式状态机（彻底根治默认全选 Bug）**：
+        1. **引入显式选区状态 `selected_single_sector: Optional[str]`**：
+           - **全选模式 (`None`，默认)**：任何盘中 Top 3 变动与新板块出现，`self.active_sectors` 自动同步为当前全部有效 Top 3 板块，新老标的 100% 自动完整显示在主表格中，零数据丢失、零需手动点选；
+           - **单选模式 (`sec_name`)**：用户主动锁定聚焦某个板块；若该单选板块跌出 Top 3，系统自动平滑解除单选恢复全选，杜绝空面板；
+    - [x] **实现专属【🆕 新概念极速捕捉】功能闭环**：
+        1. **新概念检测状态机 (`seen_sectors_history` / `newly_promoted_sectors` / `latest_new_sector`)**：盘中自动秒级捕捉从前三外新晋冲入 Top 3 的新概念与突发题材板块；
+        2. **顶部工具栏新增专属直达按钮 (`btn_new_concept`)**：
+           - 新概念涌现时自动激活呈现高对比度霓虹紫罗兰发光样式（如 `🆕 新概念: 同花顺中特`）；
+           - **一键直达秒级过滤**：点击立即单选聚焦该新概念的全部龙头与冲板标的，再次点击平滑切回全选；
+           - 无新概念时呈低对比度暗色态（`🆕 暂无新概念`）；
+        3. **Top 3 按钮 `🆕` 动态徽章**：新晋板块按钮文本动态更新为 `🔥 No.3 🆕同花顺中特`，并展示专属 ToolTip 提示；
+        4. **筛选下拉框与状态栏联动**：`combo_filter` 新增 `🆕 仅看新晋概念` 过滤选项，底部状态栏领涨股与日志实时标注 🆕 标识；
+    - [x] **工具栏紧凑排布与防挤压截断优化**：
+        - 优化工具栏各组件间距（5px）与按钮内边距（padding: 2px 5px），精简时间片下拉框宽度，彻底根治 `.3 同花顺中特` 与 `No.1 航运...` 被挤压截断问题；
+    - [x] **自动化测试与回归验证 100% 全部 PASSED**：新增 `test_hot_sector_new_concept_auto_all_and_quick_access` 专项测试，全量 16 项板块强弱与跨模块回归测试全部通过。
+
 ## 2026-09-02 17:20
 - [x] **实现人气综合排行榜垂直分隔线 (sash) 严格左右等比例放大缩小体系 & 彻底根治全屏与还原比例失衡 Bug (`stock_standalone/popularity_resonance_gui.py`, `stock_standalone/tests/test_popularity_resonance_features.py`)**：
     - [x] **排查定位“全屏放大不居中、还原变图4偏左”两大根本原因**：
