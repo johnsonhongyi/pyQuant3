@@ -438,6 +438,9 @@ def test_scan_cross_sectional_and_dynamic_replacement_when_pool_full(kline_cache
 
     # 断言：成功纳标 5 只！不再因满额或缺 ch_dir 返回 0
     assert added == 5
+    assert hasattr(added, "total_eligible")
+    assert added.total_eligible == 5
+    assert added.missing_ch_dir is True
     pool = kline_cache.get_v_reversal_pool()
     for i in range(5):
         c = f"688{i:03d}"
@@ -446,6 +449,70 @@ def test_scan_cross_sectional_and_dynamic_replacement_when_pool_full(kline_cache
         assert fl["phase"] == "CONSOLIDATING"
         assert "多头" in fl["structure"] or "通道" in fl["structure"]
         assert fl["ch_dir"] == 1
+
+
+def test_scan_channel_result_breakdown_and_limit_150(capsys):
+    """
+    测试容量上限150与扫描结果统计：
+    1. 验证符合条件总数、本次添加数、排队待添加数的计算；
+    2. 验证缺失 ch_dir 时触发 logger.error 报警日志；
+    3. 验证 ScanChannelResult 对象的属性访问和 int 兼容性。
+    """
+    kline_cache = MinuteKlineCache(simulation_mode=True)
+    # 模拟池内已有 140 只
+    for i in range(140):
+        c = f"600{i:03d}"
+        kline_cache._v_reversal_pool.add(c)
+        kline_cache._consolidation_flags[c] = {"phase": "CONSOLIDATING", "structure": "上涨通道", "ch_dir": 1}
+
+    # 构造 25 只符合上涨通道的候选股票 (无 ch_dir 模拟缺失 bug)
+    df_rows = []
+    for i in range(25):
+        df_rows.append({
+            "code": f"000{i:03d}",
+            "name": f"优质通道股{i}",
+            "close": 20.0,
+            "low": 19.5,
+            "ma5d": 19.8,
+            "ma10d": 19.0,
+            "ma20d": 18.0,
+            "ma60d": 16.0,
+            "Rank": 100 + i,
+            "ratio": 2.0,
+            "percent": 2.5
+        })
+    df_cs = pd.DataFrame(df_rows)
+    df_cs.set_index("code", drop=False, inplace=True)
+
+    import logging
+    from realtime_data_service import logger as r_logger
+    log_records = []
+    class LogCollector(logging.Handler):
+        def emit(self, record):
+            log_records.append(record.getMessage())
+    collector = LogCollector()
+    r_logger.addHandler(collector)
+    try:
+        res = kline_cache.scan_and_auto_add_uptrend_channel_stocks(
+            df=df_cs, max_add=30, max_pool_limit=150, force_replace=False
+        )
+    finally:
+        r_logger.removeHandler(collector)
+
+    # 1. 验证 int 兼容性：150 - 140 = 10，实际添加 10 只
+    assert int(res) == 10
+    assert res == 10
+
+    # 2. 验证详细统计信息
+    assert res.total_eligible == 25       # 全市场共发现 25 只
+    assert res.added == 10                # 本次优先纳标 10 只
+    assert res.pending_count == 15        # 尚有 15 只排队待添加
+    assert res.cur_total == 150           # 当前总容量达到 150
+    assert res.missing_ch_dir is True     # 标记基础数据缺失 ch_dir
+
+    # 3. 验证触发了 logger.error 报警
+    assert any("基础数据缺失 BUG" in msg for msg in log_records)
+
 
 
 

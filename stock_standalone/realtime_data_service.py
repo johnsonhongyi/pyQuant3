@@ -324,6 +324,35 @@ def get_global_kline_cache() -> "MinuteKlineCache":
     return _GLOBAL_KLINE_CACHE
 
 
+class ScanChannelResult(int):
+    """
+    通道扫描结果对象，既是 int (完美兼容历史代码中 added > 0 或 assert added == 20 断言)，
+    又携带丰富的统计元数据 (total_eligible, pending_count, cur_total, evicted_replace, missing_ch_dir)。
+    """
+    def __new__(cls, added_count: int, total_eligible: int = 0, pending_count: int = 0, cur_total: int = 0, evicted_replace: int = 0, missing_ch_dir: bool = False):
+        obj = super().__new__(cls, added_count)
+        obj.added = added_count
+        obj.total_eligible = total_eligible
+        obj.pending_count = pending_count
+        obj.cur_total = cur_total
+        obj.evicted_replace = evicted_replace
+        obj.missing_ch_dir = missing_ch_dir
+        return obj
+
+    def get(self, key, default=None):
+        return getattr(self, key, default)
+
+    def to_dict(self):
+        return {
+            "added": self.added,
+            "total_eligible": self.total_eligible,
+            "pending_count": self.pending_count,
+            "cur_total": self.cur_total,
+            "evicted_replace": self.evicted_replace,
+            "missing_ch_dir": self.missing_ch_dir
+        }
+
+
 class MinuteKlineCache:
     """
     分时K线缓存 (NumPy 结构化连续内存极速优化版)
@@ -2584,25 +2613,22 @@ class MinuteKlineCache:
         self, 
         df: Optional[pd.DataFrame] = None, 
         max_add: int = 30,
-        max_pool_limit: int = 120,
+        max_pool_limit: int = 150,
         force_replace: bool = True
-    ) -> int:
+    ) -> ScanChannelResult:
         """
         全市场自动通道上涨趋势选股与智能纳标引擎：
         从全量行情 df 或 _df_all_cache 中主动识别处于自动通道上涨趋势的优质个股，
         并将其自动纳标添加到 V-Reversal 监控池 (CONSOLIDATING 阶段)。
         
-        具备两大核心健壮性：
-        1. [双轨通道判定]：
-           - 优先支持时序精算通道列 (ch_dir == 1, ch_supp_price)；
-           - 无时序通道列时，自适应利用全市场截面宽表指标 (多头均线排列 ma5>ma10>ma20 或 close>ma20>ma60，站稳 ma20 支撑，dff2/dff3 反弹初起，Rank 靠前) 进行高胜率通道多头识别！
-        2. [汰弱留强与弹性容量]：
-           - 若当前池已达 100 只，支持弹性扩容至 max_pool_limit (默认 120)；
-           - 若仍无空位且 force_replace=True，自动在现有池中淘汰非上涨通道或评分最低的滞涨标的，置换为最新扫描的高分上涨通道牛股！
+        具备三大核心健壮性：
+        1. [缺失 ch_dir 自动报警]：若基础数据缺少 ch_dir 列，记录 logger.error 报警提示基础数据缺失；
+        2. [双轨通道判定]：优先支持时序通道 ch_dir==1；无时序通道时自适应多头均线识别；
+        3. [容量扩至 150 & 统计待加总数]：返回丰富统计，显示全市场符合条件总数与排队待加数，支持用户心中有数地手动清理。
         """
         df_snap = df if df is not None and not df.empty else getattr(self, '_df_all_cache', None)
         if df_snap is None or df_snap.empty:
-            return 0
+            return ScanChannelResult(0, total_eligible=0, pending_count=0, cur_total=len(self._v_reversal_pool), evicted_replace=0)
 
         with self._lock:
             current_pool = set(self._v_reversal_pool)
@@ -2611,6 +2637,10 @@ class MinuteKlineCache:
 
             cols = df_snap.columns
             has_ch_dir = 'ch_dir' in cols or 'channel_dir' in cols
+
+            # 🚨 用户核心强约束：若无 ch_dir 列，明确说明是基础数据缺失的 bug，输出 logger.error 报警！
+            if not has_ch_dir:
+                logger.error("❌ [基础数据缺失 BUG] 行情数据缺少通达信自动通道 'ch_dir' / 'channel_dir' 列！说明前置数据管道未挂载通道计算结果，请检查通道指标生成环节！")
 
             # 统一提取列名映射辅助函数
             def _col(names):
@@ -2724,13 +2754,14 @@ class MinuteKlineCache:
                 except Exception:
                     continue
 
+            total_eligible = len(candidates)
             if not candidates:
-                return 0
+                return ScanChannelResult(0, total_eligible=0, pending_count=0, cur_total=len(self._v_reversal_pool), evicted_replace=0, missing_ch_dir=(not has_ch_dir))
 
-            # 按评分从高到低排序
+            # 按评分从高到低排序，选择优先级最高的一批补充入池
             candidates.sort(key=lambda x: x["score"], reverse=True)
 
-            # 计算空位
+            # 计算空位 (上限提升至 150)
             available_slots = max(0, max_pool_limit - len(current_pool))
             limit_to_add = min(max_add, len(candidates))
 
@@ -2792,9 +2823,17 @@ class MinuteKlineCache:
 
             if added_count > 0 or evicted_for_replace > 0:
                 self.save_consolidation_state()
-                logger.info(f"🚀 [自动通道纳标] 成功添加 {added_count} 只通道上涨标的 (汰换淘汰 {evicted_for_replace} 只弱势股), 当前潜伏池容量: {len(self._v_reversal_pool)}")
+                logger.info(f"🚀 [自动通道纳标] 符合上涨通道共 {total_eligible} 只, 成功优选添加 {added_count} 只 (汰弱替换 {evicted_for_replace} 只), 剩余待添加: {max(0, total_eligible - added_count)} 只, 当前潜伏池容量: {len(self._v_reversal_pool)}")
 
-            return added_count
+            pending_count = max(0, total_eligible - added_count)
+            return ScanChannelResult(
+                added_count, 
+                total_eligible=total_eligible, 
+                pending_count=pending_count, 
+                cur_total=len(self._v_reversal_pool), 
+                evicted_replace=evicted_for_replace,
+                missing_ch_dir=(not has_ch_dir)
+            )
 
 
     def save_consolidation_state(self, filepath: str = "") -> bool:
