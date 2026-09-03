@@ -1,3 +1,30 @@
+## 2026-09-03 21:15
+- [x] **彻底根治通达信自动通道【远端暴跌通道盲目外推穿底导致三轨塌缩为0.01元】Bug & 全链路落地近端次级波段自适应重构与策略防呆体系 (`stock_standalone/JSONData/tdx_data_Day.py`, `stock_standalone/stock_logic_utils.py`, `stock_standalone/multi_period_strategy_engine.py`, `stock_standalone/tests/test_channel_robustness_suite.py`)**：
+    - [x] **排查定位劲拓股份 (300400) 通道三轨塌缩为 0.01元、倾角-89.99°、pos=296500000000% 四大根本诱因**：
+        1. **远端暴跌通道盲目向右外推破底**：6月16日见顶 45.98 元，随后暴跌至 7月21日的底点 18.68 元（日跌 0.92 元）。随后股价走出长达 32 根 K 线的触底反弹浪（涨至 33.65 元）。但 `calc_trend_channel` 仍将 32 天前的下跌通道向右盲目外推 32 天，导致中轨外推至 **-9.0 元（负数）**；
+        2. **粗暴截断破坏物理意义**：原代码使用 `mid = np.maximum(0.01, mid)`，将负数强行拉回到 0.01 元，导致上中下三轨全部塌缩为 0.01 元，宽度变为 0；
+        3. **除零溢出与策略生成器缺乏防呆**：通道宽度塌缩为 0 后除以 $10^{-8}$ 导致 `ch_pos` 暴涨为 $296500000000.0\%$，`generate_channel_strategy_text` 只判断 `pos > 100`，未对三轨有效性做防呆，误判为“🔥 强多头 (突破上轨加速浪)”，给出“回踩上轨 0.01 元低吸”荒谬指引；
+        4. **滚动极值盲区 (Rolling Shadow) 阻断反弹次高点识别**：45.98 元高点在 36 根周期内压制了 8 月 4 日的反弹高点 32.41 元，老高点移出窗口后又不是当天最高，导致系统死锁在远古高点；在 2D、3D、5D 周期下因数据更短同样塌缩为 0.01 元；
+        5. **`ch_pattern` 逻辑颠倒**：`'ch_pattern': np.full(n, 1 if bc2 < tc2 else -1)` 导致高点后于低点发生的多头走势被误赋为 `-1`（触顶走低）。
+    - [x] **全链路重构【自适应近端波段重构 + 外推失真平滑防护 + 策略铁壁防呆 + 缓存自愈】体系 (SSOT)**：
+        1. **自适应近端波段重构 (`JSONData/tdx_data_Day.py`)**：
+           - 当主极值锚点 `anchor > 10` 时，自动在见底/见顶后的新波段内寻优反弹高点/回调低点，精准锁定类似 18.68 $\to$ 32.41/34.26 的真实向上通道；
+           - 修正 `ch_pattern` 判定：`1 if (tc2 < bc2 or slope > 1e-6) else -1`，确保触底走高多头状态准确识别；
+        2. **严格外推失真校验与稳健平滑兜底 (`calc_trend_channel`)**：
+           - 彻底废除将负数强制截断为 0.01 元的破坏性逻辑；
+           - 约束中轨最新值必须在合理正数区间且不大幅背离当前收盘价；若失真，自动采用近端线性回归与波动率通道保底；
+        3. **策略文本生成器铁壁防呆 (`stock_logic_utils.py`)**：
+           - 增加通道三轨合理性校验：`upper_p <= 0.05`、`upper_p <= lower_p`、`pos > 500%` 或严重脱节时直接拦截返回空；
+           - 周期优选增加 `up_f > 0.05 and lo_f > 0.01 and up_f > lo_f` 严格校验；
+           - 增加仅含 `code` 时的自动重算自愈回填；
+        4. **引擎历史脏缓存自愈 (`multi_period_strategy_engine.py`)**：
+           - 装载数据时自动扫描 `ch_upper <= 0.05` 异常行，自动触发实时重算自愈回填真实通道指标；
+    - [x] **自动化测试与跨周期回归 100% 全部 PASSED**：
+        - 新增 `tests/test_channel_robustness_suite.py` 5 项全方位专项测试（日线稳定性、历史切片连续性、跨周期一致性、策略防呆自愈、极端数据外推保护）100% 全部 PASSED；
+        - `test_trend_channel.py` + `test_sbc_multi_period_signals.py` 14 项测试全部 PASSED；
+        - `test_v_reversal_pool_enhancements.py` + `test_alert_cooling_and_source_suite.py` 12 项测试全部 PASSED；
+        - 劲拓股份 (300400) 实盘验证：日线（上轨 37.87、中轨 32.47、下轨 28.15，倾角 46.76°，pos 56.6%）、2D（上轨 37.38、中轨 32.50、下轨 27.67）、3D（上轨 38.09、中轨 33.02、下轨 28.21）、5D（上轨 37.57、中轨 32.96、下轨 27.79）高度一致，策略指引准确输出“🟢 多头控盘 (中轨上方安全上升通道)，中轨 32.47~33.12 元企稳低吸”。
+
 ## 2026-09-03 14:05
 - [x] **彻底根治 ATS 信号提示小窗【总是提示同一只股票无法轮动】Bug & 全面落地环形游标轮动 (Round-Robin) 与单股防刷屏冷却调度体系 (`stock_standalone/ats/alert_notifier.py`, `stock_standalone/ats/ui/hot_sector_leaderboard.py`, `stock_standalone/ats/ui/daily_limit_up_dialog.py`, `stock_standalone/tests/test_alert_cooling_and_source_suite.py`, `stock_standalone/tests/test_sector_strength_and_detail_parity.py`, `stock_standalone/tests/test_daily_limit_up_dialog.py`)**：
     - [x] **排查定位“右下角黄金特异信号弹窗死锁轰炸惠丰钻石、其他龙头标的无法轮动”四大根本诱因**：

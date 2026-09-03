@@ -2140,11 +2140,10 @@ def calc_trend_channel(df, ur=6, lr=6):
         | (cross_sk_sd & (sk <= 0.05) & ((vol_ratio > 2) | (pct_chg > 0.035)))
     ).astype(np.int8)
 
-    # ======== 模块 5: 自动回归通道 (极速 np.argmax / argmin + 闭包线性回归) ========
-    hhv_win = 6 * ur  # 36 bars
-    llv_win = 6 * lr  # 36 bars
+    # ======== 模块 5: 自动回归通道 (自适应近端波段寻优 + 极速闭包线性回归 + 失真平滑防护) ========
+    hhv_win = min(n, 6 * ur)  # 36 bars
+    llv_win = min(n, 6 * lr)  # 36 bars
 
-    # 100% 遵照 TDX 原版全图 BARSLAST(TC1=H) 与 BARSLAST(BC1=L) 纯 C 级向量化寻优 (性能提升 50 倍)
     high_s = pd.Series(high)
     low_s = pd.Series(low)
 
@@ -2154,66 +2153,120 @@ def calc_trend_channel(df, ur=6, lr=6):
     tc1_idx = np.where(tc1_mask)[0]
     bc1_idx = np.where(bc1_mask)[0]
 
-    tc2 = int(n - tc1_idx[-1]) if len(tc1_idx) > 0 else 1
-    bc2 = int(n - bc1_idx[-1]) if len(bc1_idx) > 0 else 1
+    tc2_init = int(n - tc1_idx[-1]) if len(tc1_idx) > 0 else 1
+    bc2_init = int(n - bc1_idx[-1]) if len(bc1_idx) > 0 else 1
+    tc2 = max(1, tc2_init)
+    bc2 = max(1, bc2_init)
 
-    tc2 = max(1, tc2)
-    bc2 = max(1, bc2)
+    def _calc_raw_channel(t_len, b_len):
+        nod_val = abs(t_len - b_len)
+        if nod_val < 2:
+            nod_val = max(t_len, b_len, 5)
+        anc = min(t_len, b_len)
+        anc_idx = n - anc
+        r_start = max(0, anc_idx - (nod_val + 1) + 1)
+        r_slice = close[r_start:anc_idx + 1]
+        kl = len(r_slice)
+        if kl < 2:
+            return None
+        xm = (kl - 1.0) / 2.0
+        xdev = np.arange(kl, dtype=np.float64) - xm
+        vx = kl * (kl * kl - 1.0) / 12.0
+        ym = np.mean(r_slice)
+        slp = np.dot(xdev, r_slice - ym) / vx if vx > 1e-8 else 0.0
+        icp = ym - slp * xm
+        npv = slp * (kl - 1.0) + icp
+
+        cb = np.arange(n, 0, -1, dtype=np.float64)
+        m = npv - slp * (cb - anc)
+
+        c_start = max(0, n - max(t_len, b_len))
+        c_end = min(n - 1, n - min(t_len, b_len))
+        r_h = high[c_start:c_end + 1]
+        r_m = m[c_start:c_end + 1]
+        r_l = low[c_start:c_end + 1]
+        at = np.max(r_h - r_m) if len(r_h) > 0 else 0.0
+        ut = np.max(r_m - r_l) if len(r_l) > 0 else 0.0
+        at = max(0.0, float(at))
+        ut = max(0.0, float(ut))
+
+        up = m + at
+        lo = m - ut
+        return m, up, lo, slp, t_len, b_len, nod_val
+
+    def _is_channel_valid(res_tuple):
+        if res_tuple is None:
+            return False
+        m_arr, up_arr, lo_arr, slp, t_l, b_l, _ = res_tuple
+        c_now = close[-1]
+        m_now = m_arr[-1]
+        lo_now = lo_arr[-1]
+        up_now = up_arr[-1]
+        # 1. 最新中轨与下轨必须为有效正数
+        if m_now <= 0.05 or lo_now <= 0.01:
+            return False
+        # 2. 中轨不可过度偏离最新收盘价 (如跌至35%以下或暴涨至280%以上)
+        if c_now > 0.1 and (m_now < c_now * 0.35 or m_now > c_now * 2.8):
+            return False
+        # 3. 通道宽度必须具有物理意义
+        if (up_now - lo_now) <= 0.01:
+            return False
+        return True
+
+    # 1. 尝试使用全局滚动极值
+    channel_res = _calc_raw_channel(tc2, bc2)
+    anchor = min(tc2, bc2)
+
+    # 2. 自适应近端次级波段重构 (当近端锚点距今过远，或原通道外推出现失真时)
+    need_adaptive = (not _is_channel_valid(channel_res)) or (anchor > 10)
+    if need_adaptive and anchor > 3 and n > anchor:
+        if bc2 < tc2:
+            # 底点距今更近：股票已见底，正在反弹或新一轮波段中，在 [n - bc2, n] 内寻找反弹高点
+            sub_h = high[n - bc2:]
+            rel_max = int(np.argmax(sub_h))
+            tc2_cand = max(1, bc2 - rel_max)
+            cand_res = _calc_raw_channel(tc2_cand, bc2)
+            if _is_channel_valid(cand_res):
+                channel_res = cand_res
+                tc2 = tc2_cand
+        else:
+            # 高点距今更近：股票已见顶，正在回调中，在 [n - tc2, n] 内寻找回调低点
+            sub_l = low[n - tc2:]
+            rel_min = int(np.argmin(sub_l))
+            bc2_cand = max(1, tc2 - rel_min)
+            cand_res = _calc_raw_channel(tc2, bc2_cand)
+            if _is_channel_valid(cand_res):
+                channel_res = cand_res
+                bc2 = bc2_cand
+
+    # 3. 稳健线性回归保底兜底 (彻底杜绝任何 0.01 塌缩)
+    if not _is_channel_valid(channel_res):
+        win = min(n, max(15, min(30, int(n * 0.5))))
+        r_slice = close[-win:]
+        kl = len(r_slice)
+        xm = (kl - 1.0) / 2.0
+        xdev = np.arange(kl, dtype=np.float64) - xm
+        vx = kl * (kl * kl - 1.0) / 12.0
+        ym = np.mean(r_slice)
+        slope = np.dot(xdev, r_slice - ym) / vx if vx > 1e-8 else 0.0
+        icp = ym - slope * xm
+        np_val = slope * (kl - 1.0) + icp
+        currbarscount = np.arange(n, 0, -1, dtype=np.float64)
+        mid = np_val - slope * (currbarscount - 1.0)
+        c_now = close[-1]
+        mid = np.maximum(c_now * 0.5, mid)
+        std_p = np.std(r_slice) if kl > 1 else c_now * 0.05
+        band_w = max(std_p * 2.0, c_now * 0.06)
+        upper = mid + band_w
+        lower = np.maximum(0.01, mid - band_w)
+        tc2 = max(1, min(n, tc2))
+        bc2 = max(1, min(n, bc2))
+        nod = abs(tc2 - bc2) if abs(tc2 - bc2) >= 2 else 5
+    else:
+        mid, upper, lower, slope, tc2, bc2, nod = channel_res
 
     upper_price = high[n - tc2]
     lower_price = low[n - bc2]
-
-    nod = abs(tc2 - bc2)
-    if nod < 2:
-        nod = max(tc2, bc2, 5)
-
-    reg_len = nod + 1
-    anchor = min(tc2, bc2)
-    anchor_idx = n - anchor
-    reg_start = max(0, anchor_idx - reg_len + 1)
-    reg_slice = close[reg_start:anchor_idx + 1]
-    k_len = len(reg_slice)
-
-    if k_len >= 3:
-        # 闭包 O(N) 线性回归，替代重型 LAPACK np.polyfit
-        x_mean = (k_len - 1.0) / 2.0
-        x_dev = np.arange(k_len, dtype=np.float64) - x_mean
-        var_x = k_len * (k_len * k_len - 1.0) / 12.0
-        y_mean = np.mean(reg_slice)
-        slope = np.dot(x_dev, reg_slice - y_mean) / var_x
-        intercept = y_mean - slope * x_mean
-    else:
-        slope = 0.0
-        intercept = close[-1]
-
-    np_val = slope * (k_len - 1.0) + intercept  # FORCAST 锚定值
-
-    # 中轨: 从锚定点按斜率延伸
-    currbarscount = np.arange(n, 0, -1, dtype=np.float64)
-    mid = np_val - slope * (currbarscount - anchor)
-
-    # 上下偏离 (通道宽度)
-    ch_start_idx = n - max(tc2, bc2)
-    ch_end_idx = n - min(tc2, bc2)
-    if ch_start_idx < 0: ch_start_idx = 0
-    if ch_end_idx >= n: ch_end_idx = n - 1
-
-    region_high = high[ch_start_idx:ch_end_idx + 1]
-    region_mid = mid[ch_start_idx:ch_end_idx + 1]
-    region_low = low[ch_start_idx:ch_end_idx + 1]
-
-    at5 = np.max(region_high - region_mid) if len(region_high) > 0 else 0.0
-    ut5 = np.max(region_mid - region_low) if len(region_low) > 0 else 0.0
-    if at5 < 0: at5 = 0.0
-    if ut5 < 0: ut5 = 0.0
-
-    upper = mid + at5
-    lower = mid - ut5
-
-    # 安全下限防护：仅防止极端回归导致负值，不进行人工平切截断
-    mid = np.maximum(0.01, mid)
-    upper = np.maximum(0.01, upper)
-    lower = np.maximum(0.01, lower)
 
     ch_width = upper - lower
     ch_width_safe = np.where(ch_width > 1e-8, ch_width, 1e-8)
@@ -2338,7 +2391,7 @@ def calc_trend_channel(df, ur=6, lr=6):
     new_cols = {
         'ch_anchor_high_price': np.full(n, upper_price), 'ch_anchor_low_price': np.full(n, lower_price),
         'ch_tc2': np.full(n, tc2, dtype=np.int16), 'ch_bc2': np.full(n, bc2, dtype=np.int16),
-        'ch_nod': np.full(n, nod, dtype=np.int16), 'ch_pattern': np.full(n, 1 if bc2 < tc2 else -1, dtype=np.int8),
+        'ch_nod': np.full(n, nod, dtype=np.int16), 'ch_pattern': np.full(n, 1 if (tc2 < bc2 or slope > 1e-6) else -1, dtype=np.int8),
         'trend_dir': trend_dir, 'fib_high': fib_high, 'fib_low': fib_low,
         'fib_19': fib_19, 'fib_38': fib_38, 'fib_50': fib_50, 'fib_61': fib_61, 'fib_80': fib_80,
         'sig_bottom': sig_bottom, 'sig_top': sig_top, 'bottom_price': bottom_price, 'top_price': top_threshold,
