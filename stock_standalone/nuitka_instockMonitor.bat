@@ -121,6 +121,7 @@ set CMD="%PYTHON_EXEC%" -m nuitka --onefile "%MAIN_SCRIPT%" ^
     --include-data-file="%CSV_PATH%=a_trade_calendar\a_trade_calendar.csv" ^
     --include-data-file=config\multi_period_help.md=config\multi_period_help.md ^
     --include-data-file=config\multi_period_strategies.json=config\multi_period_strategies.json ^
+    --include-data-file=config\indicator_help_custom.json=config\indicator_help_custom.json ^
     --include-data-file=MonitorTK.ico=MonitorTK.ico ^
     --include-data-file=window_config.json=window_config.json ^
     --include-data-file=webTools\window_manager\window_layout_config.json=webTools\window_manager\window_layout_config.json ^

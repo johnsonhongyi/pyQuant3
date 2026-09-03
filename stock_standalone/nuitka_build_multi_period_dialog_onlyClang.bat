@@ -330,6 +330,7 @@ set CMD="%PYTHON_EXEC%" -m nuitka !NUITKA_MODE_OPT! "%MAIN_SCRIPT%" ^
     --include-data-file=JohnsonUtil\wencai\同花顺板块行业.xlsx=同花顺板块行业.xlsx ^
     --include-data-file=config\multi_period_help.md=config\multi_period_help.md ^
     --include-data-file=config\multi_period_strategies.json=config\multi_period_strategies.json ^
+    --include-data-file=config\indicator_help_custom.json=config\indicator_help_custom.json ^
     --include-package=ats ^
     --include-package=JSONData ^
     --include-package=tables ^

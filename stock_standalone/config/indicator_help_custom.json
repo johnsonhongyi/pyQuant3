@@ -113,5 +113,10 @@
     "key": "STRATEGY: 多周期周日共振选股 (周线上升+日线支撑震荡)",
     "summary": "【策略用例】周线锁定大级别上涨通道，日线捕捉下轨支撑震荡买点",
     "detail": "多周期配置规则：\n1. 周线 W: ch_dir == 1 and ch_slope_deg > 2.0 and close > fib_38 (周线大级别处于上升通道，拒绝向下破位股)\n2. 日线 D: ch_dir == 1 and close >= ch_lower and ch_pos <= 35 and ch_supp_pos >= -1.0 and ch_supp_pos <= 5.0 (日线紧贴通道下轨与支撑线窄幅震荡)\n\n实战优势：大周期顺势，小周期逆势找支撑，盈亏比极高。"
+  },
+  {
+    "key": "STRATEGY: 优选上涨通道+支撑线上+量价齐升 (高价值黄金进攻伏击)",
+    "summary": "【核心实战】上涨通道(ch_dir==1)+支撑线昂首(ch_supp_slope_deg>0)+站上支撑价+量价齐升",
+    "detail": "核心实战逻辑：\n1. ch_dir == 1 : 大级别必须为明确上涨通道 (中轨向上倾斜)，杜绝弱势阴跌通道；\n2. ch_supp_slope_deg > 0 : KX 支撑线昂首向上 (反弹动能明确，角度越大反弹越强劲)；\n3. close >= ch_supp_price : 股价守在支撑线上方，属于关键生命线之上的强支撑防守；\n4. 量价齐升 (vol_ratio >= 1.2 and percent > 0) : 拒绝缩量阴跌死水，必须有增量资金介入拉升！\n\nQuery实现语句：\ndf.query('ch_dir == 1 and ch_supp_slope_deg > 0 and close >= ch_supp_price and vol_ratio >= 1.2 and percent > 0')"
   }
 ]

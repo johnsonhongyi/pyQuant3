@@ -23,6 +23,7 @@ a = Analysis(
         ("MonitorTK.ico", "."),
         ("config/multi_period_help.md", "config"),
         ("config/multi_period_strategies.json", "config"),
+        ("config/indicator_help_custom.json", "config"),
         ("window_config.json", "."),
         ("scale2_window_config.json", "."),
         ("monitor_category_list.json", "."),
