@@ -1881,8 +1881,16 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
                     self.activateWindow()
                 break
 
+    def _check_and_notify_ladder_highlights(self, filtered_records: List[Dict[str, Any]], time_slice: str = ""):
+        """连板天梯重点标的环形轮动通知别名"""
+        if not hasattr(self, "_ladder_notify_seq"):
+            self._ladder_notify_seq = 0
+        self._ladder_notify_seq += 1
+        ts = time_slice or f"SLOT_{time.time()}_{self._ladder_notify_seq}"
+        return self._check_and_notify_slice_highlights(filtered_records, ts)
+
     def _check_and_notify_slice_highlights(self, filtered_records: List[Dict[str, Any]], time_slice: str):
-        """【时间片重点标的异动通知：每个时间切片仅在首次进入时精选 Top 1 核心龙头触发，60分钟内同一标的不重复】"""
+        """【时间片重点标的异动通知：采用环形游标轮动与单股冷却机制依次推送核心龙头标的】"""
         if not getattr(self, "is_voice_alert_enabled", True):
             return
 
@@ -1902,41 +1910,57 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
 
         if not hasattr(self, "_notify_slice_cd"):
             self._notify_slice_cd: Dict[str, float] = {}
+        if not hasattr(self, "_ladder_rotation_cursor"):
+            self._ladder_rotation_cursor: int = 0
         now_ts = time.time()
-        CD_SECS = 3600.0
+        CD_SECS = 600.0  # 单股天梯轮动冷却周期：10分钟 (600秒)
 
-        candidates = []
-        # 优先选拔 👑双加速 标的
+        # 1. 收集达标天梯优质标的 (未炸板，双加速优先，其次动能评分 >= 88.0 核心标的)
         dual_cands = [r for r in filtered_records if r.get("is_dual_accel") and not r.get("is_broken", False)]
-        for r in dual_cands:
-            c = str(r.get("code", "")).zfill(6)
+        other_cands = []
+        for r in filtered_records:
+            if r.get("is_dual_accel") or r.get("is_broken", False):
+                continue
+            score = _safe_float(r.get("momentum_score", 0.0))
+            if score >= 88.0:
+                other_cands.append(r)
+
+        pool = (dual_cands + other_cands)[:12]
+        if not pool:
+            return
+
+        selected_cand = None
+        selected_idx = -1
+        n_cands = len(pool)
+
+        # 2. 环形游标轮询扫描 (Round-Robin Scan)：
+        for step in range(n_cands):
+            curr_idx = (self._ladder_rotation_cursor + step) % n_cands
+            cand = pool[curr_idx]
+            c = str(cand.get("code", "")).zfill(6)
             last_cd = self._notify_slice_cd.get(c, 0.0)
+
             if (now_ts - last_cd) >= CD_SECS:
-                candidates.append(r)
+                selected_cand = cand
+                selected_idx = curr_idx
                 break
 
-        if not candidates:
-            for r in filtered_records:
-                score = _safe_float(r.get("momentum_score", 0.0))
-                if score >= 88.0 and not r.get("is_broken", False):
-                    c = str(r.get("code", "")).zfill(6)
-                    last_cd = self._notify_slice_cd.get(c, 0.0)
-                    if (now_ts - last_cd) >= CD_SECS:
-                        candidates.append(r)
-                if len(candidates) >= 1:  # 精选最强 Top 1 核心龙头，杜绝队列排队积压
-                    break
+        if selected_cand is None:
+            return
 
-        for idx, top_cand in enumerate(candidates, 1):
-            c = str(top_cand.get("code", "")).zfill(6)
-            n = str(top_cand.get("name", c))
-            score = _safe_float(top_cand.get("momentum_score", 88.0))
-            tier = str(top_cand.get("tier_tag", ""))
-            desc = str(top_cand.get("pattern_desc", ""))
-            pct_txt = f"{_safe_float(top_cand.get('pct', 0.0)):+.1f}%"
+        # 3. 推进游标并记录该股冷却
+        self._ladder_rotation_cursor = (selected_idx + 1) % n_cands
+        c = str(selected_cand.get("code", "")).zfill(6)
+        self._notify_slice_cd[c] = now_ts
 
-            reason = f"{tier} | {desc} | 涨幅{pct_txt}"
-            self._notify_slice_cd[c] = now_ts
-            notifier.notify_special_signal(code=c, name=n, reason=reason, score=score, parent=self)
+        n = str(selected_cand.get("name", c))
+        score = _safe_float(selected_cand.get("momentum_score", 88.0))
+        tier = str(selected_cand.get("tier_tag", ""))
+        desc = str(selected_cand.get("pattern_desc", ""))
+        pct_txt = f"{_safe_float(selected_cand.get('pct', 0.0)):+.1f}%"
+
+        reason = f"{tier} | {desc} | 涨幅{pct_txt}"
+        notifier.notify_special_signal(code=c, name=n, reason=reason, score=score, parent=self, source="每日天梯")
 
     def _toggle_kpi_filter(self, filter_key: str):
         """

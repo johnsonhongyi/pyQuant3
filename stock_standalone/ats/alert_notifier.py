@@ -456,11 +456,25 @@ class AlertNotifier(QObject if HAS_PYQT else object):
     
     @classmethod
     def get_instance(cls) -> 'AlertNotifier':
+        if cls._instance is not None and HAS_PYQT:
+            try:
+                from PyQt6.sip import isdeleted
+                if isdeleted(cls._instance):
+                    cls._instance = None
+            except Exception:
+                pass
         if cls._instance is None:
             cls._instance = cls()
         return cls._instance
 
     def __new__(cls, *args, **kwargs):
+        if cls._instance is not None and HAS_PYQT:
+            try:
+                from PyQt6.sip import isdeleted
+                if isdeleted(cls._instance):
+                    cls._instance = None
+            except Exception:
+                pass
         if cls._instance is None:
             if HAS_PYQT:
                 cls._instance = super().__new__(cls)
@@ -475,7 +489,8 @@ class AlertNotifier(QObject if HAS_PYQT else object):
             return
         self._initialized = True
         self.tray_icon = None
-        self._last_alert_ts = {}  # 单股冷却
+        self._stock_alert_state: Dict[str, dict] = {}  # 单股详细历史报警状态 (包含 ts, score, reason, source)
+        self._last_alert_ts = {}  # 单股冷却时间戳
         self._last_global_ts = 0.0 # 全局冷却
         self._last_notified_code = None
         self._last_parent = None
@@ -555,7 +570,22 @@ class AlertNotifier(QObject if HAS_PYQT else object):
         if not QApplication.instance():
             return
         try:
-            self.tray_icon = QSystemTrayIcon(self)
+            try:
+                from PyQt6.sip import isdeleted
+                parent_obj = self if not isdeleted(self) else None
+            except Exception:
+                parent_obj = self
+
+            if getattr(self, 'tray_icon', None):
+                try:
+                    from PyQt6.sip import isdeleted
+                    if not isdeleted(self.tray_icon):
+                        self._init_tray_context_menu()
+                        return
+                except Exception:
+                    pass
+
+            self.tray_icon = QSystemTrayIcon(parent_obj)
             icon_path = os.path.join(os.path.dirname(__file__), "..", "MonitorTK32.ico")
             if os.path.exists(icon_path):
                 self.tray_icon.setIcon(QIcon(icon_path))
@@ -594,8 +624,14 @@ class AlertNotifier(QObject if HAS_PYQT else object):
 
     def _init_tray_context_menu(self):
         """构建托盘图标右键菜单 (支持语音开关、弹窗开关、一键静音、多显示器切换、位置复位、测试通知等)"""
-        if not HAS_PYQT or not self.tray_icon:
+        if not HAS_PYQT or not getattr(self, 'tray_icon', None):
             return
+        try:
+            from PyQt6.sip import isdeleted
+            if isdeleted(self.tray_icon):
+                return
+        except Exception:
+            pass
         
         self.tray_menu = QMenu()
         self.tray_menu.setStyleSheet("""
@@ -757,14 +793,14 @@ class AlertNotifier(QObject if HAS_PYQT else object):
         logger.info(f"🎯 [TRAY_CLICK] 用户点击 Windows 托盘 Toast 弹窗，直达唤醒并定位股票: {code}")
         activate_and_locate_target_window(self._last_parent, code, "")
 
-    def notify(self, title, message, code="", score=90.0, level="GOLD", parent=None):
+    def notify(self, title, message, code="", score=90.0, level="GOLD", parent=None, source=""):
         """通用通知方法别名，无缝兼容多周期等系统调用"""
         name = str(title).strip()
         reason = str(message).strip()
-        return self.notify_special_signal(code=code, name=name, reason=reason, score=score, parent=parent)
+        return self.notify_special_signal(code=code, name=name, reason=reason, score=score, parent=parent, source=source)
 
-    def notify_special_signal(self, code, name, reason, score=90.0, win_rate="85.0%", parent=None, is_force=False):
-        """推送信信号弹窗与语音 (具备跨线程投递、全自动限频与去重保护)
+    def notify_special_signal(self, code, name, reason, score=90.0, win_rate="85.0%", parent=None, is_force=False, source: str = ""):
+        """推送信信号弹窗与语音 (具备跨线程投递、全自动限频与去重保护、单股冷却与异动突变即时放行)
         
         Args:
             code: 股票代码
@@ -774,56 +810,93 @@ class AlertNotifier(QObject if HAS_PYQT else object):
             win_rate: 历史有效胜率
             parent: 主界面句柄 (传入后开启应用内高亮 Toast 提示并支持点击直达唤醒)
             is_force: 是否强制弹窗/测试 (跳过限频和去重)
+            source: 报警来源模块标记 (如: "龙头突击", "每日天梯", "赛道热榜", "通达信实盘" 等)
         """
         now = time.time()
         code_str = str(code).strip().zfill(6)
         reason_str = str(reason).strip()
-        # 真正的高优先级信号豁免 (👑双加速顶级信号/通达信实盘信号/实盘演示/强制测试/评分>=95.0)
-        is_priority_signal = is_force or ("双加速" in reason_str) or ("通达信" in reason_str) or ("实盘演示" in reason_str) or (score >= 95.0)
+        # 真正的高优先级信号豁免 (👑双加速顶级信号/🔥主动扫买先手信号/通达信实盘信号/实盘演示/强制测试/评分>=95.0)
+        is_priority_signal = is_force or ("双加速" in reason_str) or ("主动扫买" in reason_str) or ("通达信" in reason_str) or ("实盘演示" in reason_str) or (score >= 95.0)
 
-        # 0. 特异打分门槛过滤：小于 78.0 分且非强制/通达信信号的微弱异动静默过滤
+        # 0. 特异打分门槛过滤：小于 78.0 分且非强制/优先级信号的微弱异动静默过滤
         if score < 78.0 and not is_priority_signal:
             return
 
-        # 0.1 通过共享 SignalLedger 校验是否今天已提示过相同的信号提示，防止 ATS 与多周期重复播报 (强制模式跳过)
+        # 提取用于去重和异动识别的核心形态特征 (剥离高频波动的秒级分时压强/均线偏离/涨幅微小变动)
+        import re
+        norm_reason = re.sub(r'\(买盘压强\s*\d+%\)', '', reason_str)
+        norm_reason = re.sub(r'站稳均线\([^)]+\)', '', norm_reason)
+        norm_reason = re.sub(r'涨幅[+-]?\d+\.?\d*%', '', norm_reason)
+        norm_reason = re.sub(r'\s+', ' ', norm_reason).strip()
+
+        # 0.1 单股冷却与新异动突变放行校验 (强制模式 is_force 跳过)
+        has_new_mutation = False
+        score_boost = False
         if not is_force:
+            last_state = self._stock_alert_state.get(code_str)
+            if last_state:
+                last_ts = float(last_state.get('ts', 0.0))
+                last_score = float(last_state.get('score', 0.0))
+                last_reason = str(last_state.get('reason', ''))
+
+                # 冷却时长：高优先级信号 (双加速/极高分) 180秒(3分钟)，普通信号 600秒(10分钟)
+                stock_cooldown = 180.0 if is_priority_signal else 600.0
+
+                if (now - last_ts) < stock_cooldown:
+                    # 冷却期内检查是否满足放行豁免：
+                    # 条件 1: 打分显著提升 (>= 5.0 分)
+                    score_boost = (score - last_score) >= 5.0
+
+                    # 条件 2: 出现新形态异动突变 (如炸板回封、阳包阴、双加速、反转突破等)
+                    MUTATION_KEYWORDS = ["炸板回封", "阳包阴", "双加速", "反转突破", "地天板", "首板突破", "光脚加速", "缺口加速", "主动扫买"]
+                    has_new_mutation = any(kw in reason_str and kw not in last_reason for kw in MUTATION_KEYWORDS)
+
+                    if not score_boost and not has_new_mutation:
+                        # 在单股冷却期内且无重大突变，静默拦截，杜绝同一只股票疯狂刷屏
+                        logger.debug(f"🔇 [ALERT_NOTIFY] 单股冷却拦截: [{code_str} | {name}] 在冷却期内 ({now - last_ts:.1f}s < {stock_cooldown}s) 且无新异动")
+                        return
+
+            # 1. 队列积压保护：如果当前串行轮播队列已积压超过 6 条，低优先级普通信号静默跳过，避免堆积
+            if len(self._notify_queue) >= 6 and not is_priority_signal and not has_new_mutation and not score_boost:
+                logger.debug(f"🔇 [ALERT_NOTIFY] 通知队列已积压 ({len(self._notify_queue)} 条)，低优先级信号跳过排队")
+                return
+
+            # 2. 通过共享 SignalLedger 校验是否今天已提示过相同的核心信号 (防止 ATS 与多周期重复播报)
             try:
                 from ats.signal_ledger import get_signal_ledger
                 ledger = get_signal_ledger()
-                if ledger.is_notified_today(code_str, reason_str):
-                    logger.info(f"🔇 [ALERT_NOTIFY] 该信号 [{code_str} | {reason_str}] 今日已播报提醒，自动去重跳过重复提示")
+                if not has_new_mutation and not score_boost and ledger.is_notified_today(code_str, norm_reason):
+                    logger.info(f"🔇 [ALERT_NOTIFY] 该核心信号 [{code_str} | {norm_reason}] 今日已播报提醒，自动去重跳过重复提示")
                     return
             except Exception as e_check:
                 logger.warning(f"[AlertNotifier] Deduplication check failed: {e_check}")
 
-        # 限频保护：非强制/通达信实盘信号执行严格的 10 秒全局限频与 300 秒(5分钟)单股冷却
-        if not is_priority_signal and not is_force:
-            # 1. 普通信号全局限频：10 秒内最多推送 1 条
-            if (now - self._last_global_ts) < 10.0:
-                return
-
-            # 2. 普通信号单股限频：同一股票 5 分钟 (300s) 内不重复推送
-            last_ts = self._last_alert_ts.get(code_str, 0.0)
-            if (now - last_ts) < 300.0:
-                return
+        # 记录单股与全局通知状态
+        self._stock_alert_state[code_str] = {
+            'ts': now,
+            'score': score,
+            'reason': reason_str,
+            'norm_reason': norm_reason,
+            'source': source
+        }
+        self._last_alert_ts[code_str] = now
+        self._last_global_ts = now
 
         # 标记为今日已播报提醒 (去重写入 SignalLedger)
         try:
             from ats.signal_ledger import get_signal_ledger
-            get_signal_ledger().mark_notified_today(code_str, reason)
+            get_signal_ledger().mark_notified_today(code_str, norm_reason or reason_str)
         except Exception:
             pass
-
-        self._last_global_ts = now
-        self._last_alert_ts[code_str] = now
 
         item = {
             'code': code_str,
             'name': name,
-            'reason': reason,
+            'reason': reason_str,
             'score': score,
             'win_rate': win_rate,
             'parent': parent,
+            'source': source,
             'ts': now
         }
 
@@ -838,7 +911,13 @@ class AlertNotifier(QObject if HAS_PYQT else object):
         self._enqueue_notification_item(item)
 
     def _enqueue_notification_item(self, item: dict):
-        """在 Qt 主线程中安全压入通知队列并启动串行轮播处理"""
+        """在 Qt 主线程中安全压入通知队列并启动串行轮播处理 (带队列内单股防重复保护)"""
+        code_to_add = str(item.get('code', '')).zfill(6)
+        # 队列去重：若当前排队队列中已有这只股票在等待播报，避免重复排队积压
+        if any(str(q.get('code', '')).zfill(6) == code_to_add for q in self._notify_queue):
+            logger.debug(f"🔇 [ALERT_QUEUE] 标的 [{code_to_add}] 已在通知队列中等待，跳过重复排队")
+            return
+
         self._notify_queue.append(item)
         self._process_queue()
 
@@ -859,14 +938,16 @@ class AlertNotifier(QObject if HAS_PYQT else object):
         score = item['score']
         win_rate = item['win_rate']
         parent = item['parent']
+        source = item.get('source', '')
 
         self._last_notified_code = code_str
         self._last_parent = parent
 
-        title = f"⭐ 黄金特异信号: {name} ({code_str})"
+        source_label = f" [{source}]" if source else ""
+        title = f"⭐ 黄金特异信号{source_label}: {name} ({code_str})"
         message = f"【打分】: {score:.1f}分 | 【胜率】: {win_rate}\n【逻辑】: {reason}"
 
-        logger.info(f"📢 [ALERT_NOTIFY] 串行轮播弹出信号 [{name} | {code_str}]: {reason}")
+        logger.info(f"📢 [ALERT_NOTIFY] 串行轮播弹出信号 [{name} | {code_str}]{source_label}: {reason}")
 
         # 1. 弹出右下角 Toast 卡片 (受 is_toast_enabled 控制)
         toast_success = False
