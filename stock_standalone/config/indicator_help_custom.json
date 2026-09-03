@@ -1,8 +1,28 @@
 [
   {
+    "key": "【图解】通达信自动通道与上涨支撑线结构全景图",
+    "summary": "▲ 上轨 / 中轨(ch_dir) / 下轨 / KX支撑线(ch_supp_slope_deg) 视觉图例与方向标识",
+    "detail": "================================================================================\n          【通达信自动回归通道 与 KX DRAWLINE 上涨支撑线 全景图例】\n================================================================================\n 价格(高)\n   ^\n   |                 / (上轨 ch_upper 压力位)\n   |               /\n   |             /                 / (中轨 ch_mid 线性回归线)\n   |           /                 /     [全局通道方向: ch_dir == 1, 倾角 ch_slope_deg]\n   |         /                 /\n   |       /                 /                 / (下轨 ch_lower 通道底座支撑位)\n   |     /                 /                 /     [低吸蓄势区间: 0% <= ch_pos <= 35%]\n   |   /                 /     .-----------/\n   | /                 /     /           /\n   |/                /     /           / <--- 通达信 KX DRAWLINE 上涨支撑线\n   |               /     /           /        (★ 支撑线方向由 ch_supp_slope_deg > 0° 标识!)\n   |             /     /           /          (对应通达信图表红字『支撑:9.38元』)\n   |           /     /           /\n   |         /     /           / <--- 股价回踩蓄势区: 在支撑线上方 [-1% <= 偏离 <= 4.5%]\n   |       /     /           /\n   |     /     /           /\n   |   /     /           /\n   | /     /           /\n   +------------------------------------------------------------------------> 时间(天)\n     <---------------------- 通道区间 (ch_nod 天) ------------------------>\n================================================================================\n\n【四线标识与核心判定规则】\n1. 上轨 (ch_upper) : 通道最高压力线 (高位警惕触轨回落: ch_pos >= 80, sig_top == 1)。\n2. 中轨 (ch_mid)   : 线性回归中轴线 (全局通道方向看: ch_dir == 1 且 ch_slope_deg > 0°)。\n3. 下轨 (ch_lower) : 通道底座极值支撑 (低吸防守买点: 0% <= ch_pos <= 35%, close >= ch_lower)。\n4. 支撑 (ch_supp)  : 通达信 KX DRAWLINE 上涨支撑线：\n   • ★ 支撑线专属方向正是由 ch_supp_slope_deg (倾角°) 标识！\n   • 当 ch_supp_slope_deg > 0° 时，支撑线昂首向上（上涨支撑线）；\n   • ch_supp_price 为今日基准价 (对应图表红字『支撑:9.38元』)；\n   • ch_supp_pos 衡量在支撑线上方回踩偏离度 (-1.0% <= ch_supp_pos <= 4.5% 为绝佳买点)。"
+  },
+  {
     "key": "ch_dir",
     "summary": "【核心】通道方向标识 (1: 向上, -1: 向下, 0: 平行)",
-    "detail": "详细说明：基于通达信自动通道中轨线性回归斜率(ch_slope)判定的通道全局运行方向标识。\n 1 : 上涨通道 (中轨向上倾斜，对应通达信右上方通道与向上箭头)\n-1 : 下跌通道 (中轨向下倾斜)\n 0 : 水平横盘通道\n\nQuery用法示例: ch_dir == 1\nQuery同义词: ch_dir, channel_dir"
+    "detail": "================================================================================\n 价格 ^\n      |         / 上轨 ch_upper (压力位)\n      |       /         / 中轨 ch_mid (回归线, ★ 方向由 ch_dir == 1 标识!)\n      |     /         /         / 下轨 ch_lower (支撑位)\n      +------------------------------------> 时间\n================================================================================\n详细说明：基于通达信自动通道中轨线性回归斜率(ch_slope)判定的通道全局运行方向标识。\n 1 : 上涨通道 (中轨向上倾斜，对应通达信右上方通道与向上箭头)\n-1 : 下跌通道 (中轨向下倾斜)\n 0 : 水平横盘通道\n\nQuery用法示例: ch_dir == 1\nQuery同义词: ch_dir, channel_dir"
+  },
+  {
+    "key": "ch_supp_slope / ch_supp_slope_deg",
+    "summary": "【核心】上涨支撑线方向斜率与反弹倾角 (°)",
+    "detail": "================================================================================\n          【通达信 KX DRAWLINE 上涨支撑线方向标识核心原理】\n================================================================================\n 价格 ^\n      |         / 上轨 ch_upper\n      |       /         / 中轨 ch_mid\n      |     /         /   / KX 上涨支撑线 (★ 方向由 ch_supp_slope_deg > 0° 标识!)\n      |   /         /   /         / 下轨 ch_lower\n      +------------------------------------> 时间\n================================================================================\n详细说明：衡量通达信上涨支撑线的延伸方向与反弹攻击倾角（支撑线方向的专属标识！）：\nch_supp_slope > 0 或 ch_supp_slope_deg > 0 代表支撑线昂首向上（上涨支撑线）；\n数值越大(如 +25°、+43.4°)代表底部探明后的反弹上攻动能越强劲。\n\nQuery用法示例: ch_supp_slope_deg > 0\nQuery同义词: ch_supp_slope, supp_slope, ch_supp_slope_deg, supp_slope_deg, supp_deg, 支撑角度"
+  },
+  {
+    "key": "ch_supp_price / supp_price",
+    "summary": "【核心】通达信上涨支撑线今日价格 (元)",
+    "detail": "详细说明：通达信 KX DRAWLINE 算法从历史低点(ch_bc2)延伸至今日的精准反弹支撑价格(对应图表上红字如『支撑:9.38元』)。当股价回踩支撑线企稳时构成极佳买点。\n\nQuery用法示例: close >= ch_supp_price\nQuery同义词: ch_supp_price, supp_price, support_price, ch_supp, 支撑价"
+  },
+  {
+    "key": "ch_supp_pos / supp_pos / supp_bias",
+    "summary": "【核心】支撑线相对位置偏离度 (%)",
+    "detail": "详细说明：当前最新价格相对于今日支撑价格的偏离百分比 ((close - supp_price) / supp_price * 100)。\n正值(如 +1.5%)表示股价稳稳站在支撑线上方，负值表示跌破支撑线。\nch_supp_pos 在 -1.0% ~ +4.5% 之间代表股价精准在支撑线上方窄幅震荡回踩。\n\nQuery用法示例: ch_supp_pos >= -1.0 and ch_supp_pos <= 4.5\nQuery同义词: ch_supp_pos, supp_pos, supp_bias, 支撑偏离"
   },
   {
     "key": "ch_slope / ch_slope_deg",
@@ -23,21 +43,6 @@
     "key": "ch_width",
     "summary": "通道极值宽度比例 (%)",
     "detail": "详细说明：通道上轨与下轨的价格差占中轨价格的百分比 ((upper - lower) / mid * 100)，反映通道波动张力与喇叭口扩张/收敛程度。\nch_width / ch_mid < 0.18 表示通道处于狭窄收敛蓄势状态。\n\nQuery用法示例: ch_width / ch_mid < 0.20\nQuery同义词: ch_width, channel_width"
-  },
-  {
-    "key": "ch_supp_price / supp_price",
-    "summary": "【核心】通达信上涨支撑线今日价格 (元)",
-    "detail": "详细说明：通达信 KX DRAWLINE 算法从历史低点(ch_bc2)延伸至今日的精准反弹支撑价格(对应图表上红字如『支撑:9.38元』)。当股价回踩支撑线企稳时构成极佳买点。\n\nQuery用法示例: close >= ch_supp_price\nQuery同义词: ch_supp_price, supp_price, support_price, ch_supp, 支撑价"
-  },
-  {
-    "key": "ch_supp_slope / ch_supp_slope_deg",
-    "summary": "【核心】上涨支撑线方向斜率与反弹倾角 (°)",
-    "detail": "详细说明：衡量通达信上涨支撑线的延伸方向与反弹攻击倾角（支撑线方向的专属标识！）：\nch_supp_slope > 0 或 ch_supp_slope_deg > 0 代表支撑线昂首向上（上涨支撑线）；\n数值越大(如 +25°、+43.4°)代表底部探明后的反弹上攻动能越强劲。\n\nQuery用法示例: ch_supp_slope_deg > 0\nQuery同义词: ch_supp_slope, supp_slope, ch_supp_slope_deg, supp_slope_deg, supp_deg, 支撑角度"
-  },
-  {
-    "key": "ch_supp_pos / supp_pos / supp_bias",
-    "summary": "【核心】支撑线相对位置偏离度 (%)",
-    "detail": "详细说明：当前最新价格相对于今日支撑价格的偏离百分比 ((close - supp_price) / supp_price * 100)。\n正值(如 +1.5%)表示股价稳稳站在支撑线上方，负值表示跌破支撑线。\nch_supp_pos 在 -1.0% ~ +4.5% 之间代表股价精准在支撑线上方窄幅震荡回踩。\n\nQuery用法示例: ch_supp_pos >= -1.0 and ch_supp_pos <= 4.5\nQuery同义词: ch_supp_pos, supp_pos, supp_bias, 支撑偏离"
   },
   {
     "key": "ch_supp_days",

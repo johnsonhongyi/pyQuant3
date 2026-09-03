@@ -352,15 +352,15 @@ class IndicatorHelpWindow:
         detail_win = tk.Toplevel(self.window)
         detail_win.title(f"详情: {title}")
         
-        # 恢复持久化位置与尺寸
+        # 恢复持久化位置与尺寸 (默认增大至 780x560 确保 ASCII 图例对齐完整)
         if hasattr(self.parent, 'load_window_position'):
-            self.parent.load_window_position(detail_win, "indicator_help_detail", default_width=580, default_height=450)
+            self.parent.load_window_position(detail_win, "indicator_help_detail", default_width=780, default_height=560)
         else:
             try:
                 from gui_utils import load_window_position_simple
-                load_window_position_simple(detail_win, "indicator_help_detail", default_width=580, default_height=450)
+                load_window_position_simple(detail_win, "indicator_help_detail", default_width=780, default_height=560)
             except Exception:
-                detail_win.geometry("580x450")
+                detail_win.geometry("780x560")
                 detail_win.update_idletasks()
                 x = self.window.winfo_x() + (self.window.winfo_width() // 2) - (detail_win.winfo_width() // 2)
                 y = self.window.winfo_y() + (self.window.winfo_height() // 2) - (detail_win.winfo_height() // 2)
@@ -385,19 +385,32 @@ class IndicatorHelpWindow:
         detail_win.bind("<Escape>", close_detail)
 
         # 内容区域
-        main_frame = ttk.Frame(detail_win, padding=15)
+        main_frame = ttk.Frame(detail_win, padding=12)
         main_frame.pack(fill='both', expand=True)
 
         ttk.Label(main_frame, text=f"{title}", font=("微软雅黑", 12, "bold")).pack(anchor='w')
-        ttk.Label(main_frame, text=f"{summary}", font=("微软雅黑", 10)).pack(anchor='w', pady=(5, 10))
+        ttk.Label(main_frame, text=f"{summary}", font=("微软雅黑", 10)).pack(anchor='w', pady=(4, 8))
         
-        # 详细文本框
-        text_area = tk.Text(main_frame, font=("Consolas", 10), wrap='word', bg="#f8f8f8", padx=5, pady=5)
+        # 详细文本框容器 (带垂直与水平滚动条，wrap='none' 确保字符图例永不折行乱码)
+        text_frame = ttk.Frame(main_frame)
+        text_frame.pack(fill='both', expand=True)
+
+        x_scroll = ttk.Scrollbar(text_frame, orient="horizontal")
+        y_scroll = ttk.Scrollbar(text_frame, orient="vertical")
+        
+        text_area = tk.Text(text_frame, font=("Consolas", 10), wrap='none', bg="#f8f9fa", padx=8, pady=8,
+                            xscrollcommand=x_scroll.set, yscrollcommand=y_scroll.set)
+        x_scroll.config(command=text_area.xview)
+        y_scroll.config(command=text_area.yview)
+
+        y_scroll.pack(side='right', fill='y')
+        x_scroll.pack(side='bottom', fill='x')
+        text_area.pack(side='left', fill='both', expand=True)
+
         text_area.insert('1.0', detail)
         text_area.configure(state='disabled') # 只读
-        text_area.pack(fill='both', expand=True)
 
-        ttk.Button(main_frame, text="关闭", command=close_detail).pack(pady=10)
+        ttk.Button(main_frame, text="关闭 (Esc)", command=close_detail).pack(pady=(8, 0))
 
     def on_close(self):
         """关闭窗口并保存位置"""
