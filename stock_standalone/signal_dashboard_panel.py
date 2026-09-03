@@ -365,13 +365,17 @@ class MarketAlertDetailDialog(QDialog, WindowMixin):
             self._is_updating = False # 🔓 [UNLOCK] 数据填充完毕，解锁联动
 
     def _is_generic_concept(self, name):
-        """[UTIL] 过滤泛概念"""
-        generics = [
-            "其它", "融资融券", "深股通", "沪股通", "预盈预增", "昨日涨停", 
-            "昨日大涨", "昨日首板", "破净股", "转融券标的", "富时罗素概念股",
-            "标普道琼斯纳指", "MSCI中国", "央企改革", "地方国企改革", "低价股"
-        ]
-        return any(g in str(name) for g in generics)
+        """[UTIL] 过滤泛概念 (接入系统统一板块黑名单库)"""
+        try:
+            from stock_logic_utils import is_generic_concept
+            return is_generic_concept(name)
+        except ImportError:
+            generics = [
+                "其它", "融资融券", "深股通", "沪股通", "预盈预增", "昨日涨停", 
+                "昨日大涨", "昨日首板", "破净股", "转融券标的", "富时罗素概念股",
+                "标普道琼斯纳指", "MSCI中国", "央企改革", "地方国企改革", "低价股"
+            ]
+            return any(g in str(name) for g in generics)
 
     def _fast_set_item(self, r, c, text, color=None, is_numeric=False):
         if is_numeric:

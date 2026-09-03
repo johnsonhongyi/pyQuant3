@@ -22019,6 +22019,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             tree.tag_configure("attack", background="#fff2f0", foreground="#cf1322")  # 🔥 重点进攻 (首拉/二拉起爆)
             tree.tag_configure("pullback", background="#fffbe6", foreground="#d48806")  # 💎 黄金回踩
             tree.tag_configure("buy_zone", background="#fffbe6", foreground="#d48806")  # 黄金买入点
+            tree.tag_configure("channel", background="#f6ffed", foreground="#237804")  # 📈 上涨通道 (多头趋势通道)
             tree.tag_configure("consol", background="#ffffff", foreground="#262626")  # 横盘潜伏
 
             headers = {
@@ -22249,14 +22250,17 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         except Exception as ex:
                             logger.error(f"Auto-adding favorite stocks to pool failed: {ex}")
                         
-                        # 统计各阶段数量
-                        stats = {"INIT": 0, "CONSOLIDATING": 0, "WAVE_UP": 0, "PULLBACK": 0, "WAVE_UP_2": 0}
+                        # 统计各阶段数量与通道股数量
+                        stats = {"INIT": 0, "CONSOLIDATING": 0, "WAVE_UP": 0, "PULLBACK": 0, "WAVE_UP_2": 0, "CHANNEL": 0}
                         total_count = 0
                         
                         for code in list(pool):
                             flags = self.realtime_service.kline_cache.get_consolidation_flags(code)
                             phase_raw = flags.get("phase", "INIT")
                             stats[phase_raw] = stats.get(phase_raw, 0) + 1
+                            struct_val = str(flags.get("structure", ""))
+                            if flags.get("ch_dir") == 1 or "通道" in struct_val or struct_val in ("上涨通道", "多头排列", "多头排列加速"):
+                                stats["CHANNEL"] = stats.get("CHANNEL", 0) + 1
                             total_count += 1
                             
                         # 动态更新 LabelFrame 标题，展示最新统计信息与当前过滤视图
@@ -22265,10 +22269,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                             "ATTACK": "🔥重点进攻",
                             "PULLBACK": "💎黄金回踩",
                             "CONSOLIDATING": "⏳横盘潜伏",
+                            "CHANNEL": "📈上涨通道",
                             "FAV": "⭐自选重点"
                         }
                         cur_filter_name = filter_name_map.get(current_stage_filter, "全部")
-                        stats_text = f"🎯 V型反转 监控潜伏池 [{cur_filter_name}] (总数: {total_count} | 首拉: {stats.get('WAVE_UP', 0)} | 二拉: {stats.get('WAVE_UP_2', 0)} | 回踩: {stats.get('PULLBACK', 0)} | 横盘: {stats.get('CONSOLIDATING', 0)})"
+                        stats_text = f"🎯 V型反转 监控潜伏池 [{cur_filter_name}] (总数: {total_count} | 通道: {stats.get('CHANNEL', 0)} | 首拉: {stats.get('WAVE_UP', 0)} | 二拉: {stats.get('WAVE_UP_2', 0)} | 回踩: {stats.get('PULLBACK', 0)} | 横盘: {stats.get('CONSOLIDATING', 0)})"
                         pool_label_frame.config(text=stats_text)
 
                         # ✅ [df_all 内存补齐] 直接从已在内存中的 df_all 提取均线/低价字段
@@ -22366,13 +22371,19 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                             flags = self.realtime_service.kline_cache.get_consolidation_flags(code)
                             phase_raw = flags.get("phase", "INIT")
                             
-                            # ── 阶段过滤 ───────────────────────────────────────
+                            # ── 阶段与通道过滤 ───────────────────────────────────────
                             if current_stage_filter == "ATTACK" and phase_raw not in ("WAVE_UP", "WAVE_UP_2"):
                                 continue
                             elif current_stage_filter == "PULLBACK" and phase_raw != "PULLBACK":
                                 continue
                             elif current_stage_filter == "CONSOLIDATING" and phase_raw != "CONSOLIDATING":
                                 continue
+                            elif current_stage_filter == "CHANNEL":
+                                struct_val = str(flags.get("structure", ""))
+                                is_channel = (flags.get("ch_dir") == 1 or "通道" in struct_val or struct_val in ("上涨通道"))
+                                # is_channel = (flags.get("ch_dir") == 1 or "通道" in struct_val or struct_val in ("上涨通道", "多头排列", "多头排列加速"))
+                                if not is_channel:
+                                    continue
                             elif current_stage_filter == "FAV" and code not in fav_set:
                                 continue
 
@@ -22429,11 +22440,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                 elif col == "phase":
                                     row_values.append(phase_cn)
                                 elif col == "structure":
-                                    # 支撑分级：直接从 flags 读取，不走 df_all 通用路径
-                                    structure_val = flags.get("structure", None)
-                                    if not structure_val or structure_val == "None" or str(structure_val).strip() == "":
-                                        structure_val = "-"
-                                    row_values.append(structure_val)
+                                    # 支撑分级：直接从 flags 读取，源头已完成统一板块过滤与主线标签生成
+                                    structure_val = flags.get("structure", "-")
+                                    row_values.append(structure_val if structure_val and structure_val != "None" and str(structure_val).strip() != "" else "-")
                                 elif col == "entry_date":
                                     row_values.append(flags.get("first_entry_date") or flags.get("entry_date", "-"))
                                 elif col == "anchor_low":
@@ -22452,9 +22461,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                             val = str(val)
                                     row_values.append(val)
 
+                            struct_text = str(flags.get("structure", ""))
+                            is_channel_stock = (flags.get("ch_dir") == 1 or "通道" in struct_text or struct_text in ("上涨通道", "多头排列", "多头排列加速"))
+
                             pool_rows.append({
                                 "code": code,
                                 "is_fav": is_fav_stock,
+                                "is_channel": is_channel_stock,
                                 "priority_score": priority_score,
                                 "phase_raw": phase_raw,
                                 "values": tuple(row_values)
@@ -22511,6 +22524,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                 row_tags.append("attack")
                             elif row.get("phase_raw") == "PULLBACK":
                                 row_tags.append("pullback")
+                            elif row.get("is_channel"):
+                                row_tags.append("channel")
                             else:
                                 row_tags.append("consol")
                             
@@ -22699,6 +22714,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 ("ATTACK", "🔥 重点进攻"),
                 ("PULLBACK", "💎 黄金回踩"),
                 ("CONSOLIDATING", "⏳ 横盘潜伏"),
+                ("CHANNEL", "📈 上涨通道"),
                 ("FAV", "⭐ 自选重点")
             ]
             for s_key, s_label in stages:
@@ -22726,21 +22742,24 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     total_eligible = getattr(res, 'total_eligible', added)
                     pending_count = getattr(res, 'pending_count', max(0, total_eligible - added))
                     missing_ch = getattr(res, 'missing_ch_dir', False)
+                    top_sectors = getattr(res, 'top_sectors', [])
+                    sector_banner = f"【领跑核心板块】: {', '.join(top_sectors[:5])}\n" if top_sectors else ""
 
                     warn_banner = ""
                     if missing_ch:
                         warn_banner = "\n⚠️ 警告: 行情数据缺少 'ch_dir' 列 (前置管道未计算通道)，已记入日志错误并由多头均线兜底识别。\n"
 
                     msg = (
-                        f"全市场自动通道扫描完毕！\n"
+                        f"全市场强势通道与加速扫描完毕！\n"
                         f"{warn_banner}"
                         f"────────────────────────\n"
+                        f"{sector_banner}"
                         f"【通道符合总数】: {total_eligible} 只\n"
-                        f"【本次优选纳标】: {added} 只 (按高分优先级择优录取)\n"
+                        f"【本次优选纳标】: {added} 只 (锁定最强龙头Rank + 核心主线 + 加速爆发)\n"
                         f"【当前潜伏容量】: {cur_total} / 150 只\n"
                         f"【排队待加储备】: {pending_count} 只\n"
                         f"────────────────────────\n"
-                        f"💡 提示：当前仍有 {pending_count} 只通道上涨标的排队待入池。\n"
+                        f"💡 选股策略：优先捕获【最强主线龙头】与【均线发散加速起爆】标的！\n"
                         f"您可使用 Ctrl / Shift 多选潜伏池股票，右键或按 Delete 批量删除，腾出名额后再点击纳标！"
                     )
                     messagebox.showinfo("通道上涨纳标", msg)

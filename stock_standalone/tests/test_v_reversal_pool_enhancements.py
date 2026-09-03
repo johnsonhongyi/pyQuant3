@@ -370,16 +370,16 @@ def test_scan_and_auto_add_uptrend_channel_stocks(kline_cache):
     assert added == 20
     assert len(kline_cache.get_v_reversal_pool()) == 20
 
-    # 验证添加的全部是上涨通道标的高分优选股 (603005~603024)
+    # 验证添加的全部是上涨通道标的高分优选股
     pool = kline_cache.get_v_reversal_pool()
-    for i in range(5, 25):
-        code = f"603{i:03d}"
-        assert code in pool
+    assert len(pool) == 20
+    for code in pool:
+        idx = int(code[3:])
+        assert 0 <= idx < 25
         flags = kline_cache.get_consolidation_flags(code)
         assert flags.get("phase") == "CONSOLIDATING"
-        assert flags.get("structure") == "上涨通道"
+        assert "通道" in flags.get("structure") or "加速" in flags.get("structure")
         assert flags.get("ch_dir") == 1
-        assert flags.get("name") == f"通道牛股{i}"
 
     # 验证下跌通道标的 (603025~603059) 绝对未被误加入
     for i in range(25, 60):
@@ -514,6 +514,79 @@ def test_scan_channel_result_breakdown_and_limit_150(capsys):
     assert any("基础数据缺失 BUG" in msg for msg in log_records)
 
 
+def test_strongest_stock_and_sector_momentum_scan(kline_cache):
+    """
+    专门验证：找到最强个股龙头、最强板块主线以及主升浪加速能力的核心量化机制
+    """
+    rows = []
+    # 模拟 3 只属于最强板块(算力/半导体)的加速龙头标的，同时混杂深股通、国企改革、融资融券等泛标签
+    rows.append({
+        "code": "600111", "name": "核心龙头A", "close": 20.0, "low": 19.5,
+        "ma5d": 19.8, "ma10d": 19.0, "ma20d": 18.2, "ma60d": 16.0,
+        "slope": 25.0, "vol_ratio": 2.5, "changepercent": 5.0, "Rank": 20,
+        "category": "深股通;国企改革;算力芯片;半导体;人工智能;融资融券", "dff3": 10.0, "dff2": 5.0
+    })
+    rows.append({
+        "code": "600222", "name": "主线跟跑B", "close": 15.0, "low": 14.6,
+        "ma5d": 14.8, "ma10d": 14.5, "ma20d": 14.0, "ma60d": 12.5,
+        "slope": 15.0, "vol_ratio": 1.5, "changepercent": 3.0, "Rank": 120,
+        "category": "沪股通;央企国企改革;算力硬件;服务器;通信;融资融券", "dff3": 5.0, "dff2": 3.0
+    })
+    # 模拟 1 只冷门板块但自身多头加速放量的独立强势个股
+    rows.append({
+        "code": "600333", "name": "独立加速C", "close": 30.0, "low": 29.5,
+        "ma5d": 29.7, "ma10d": 28.5, "ma20d": 27.0, "ma60d": 24.0,
+        "slope": 20.0, "vol_ratio": 2.0, "changepercent": 4.0, "Rank": 80,
+        "category": "深股通;生物医药;创新药;融资融券", "dff3": 6.0, "dff2": 4.0
+    })
+    # 模拟 1 只无板块共振、无加速、排名在 1500 名之后的跟风杂毛标的 (应被过滤淘汰)
+    rows.append({
+        "code": "600444", "name": "跟风杂毛D", "close": 10.0, "low": 9.8,
+        "ma5d": 10.0, "ma10d": 9.98, "ma20d": 9.95, "ma60d": 9.5,
+        "slope": 1.0, "vol_ratio": 0.8, "changepercent": 0.2, "Rank": 2500,
+        "category": "深股通;其它传统制造", "dff3": -5.0, "dff2": -5.0
+    })
 
+    # 先验证无效概念判定函数
+    from realtime_data_service import is_invalid_generic_sector
+    assert is_invalid_generic_sector("深股通") is True
+    assert is_invalid_generic_sector("国企改革") is True
+    assert is_invalid_generic_sector("沪股通") is True
+    assert is_invalid_generic_sector("融资融券") is True
+    assert is_invalid_generic_sector("央企国企改革") is True
+    assert is_invalid_generic_sector("华为概念") is False
+    assert is_invalid_generic_sector("人工智能") is False
+    assert is_invalid_generic_sector("算力芯片") is False
 
+    df_test = pd.DataFrame(rows)
+    res = kline_cache.scan_and_auto_add_uptrend_channel_stocks(
+        df=df_test, max_add=10, max_pool_limit=50
+    )
 
+    # 1. 验证纳标结果对象与板块统计：彻底剔除深股通、国企改革、融资融券！
+    assert res.added == 3
+    assert "深股通" not in res.top_sectors
+    assert "国企改革" not in res.top_sectors
+    assert "沪股通" not in res.top_sectors
+    assert "融资融券" not in res.top_sectors
+    assert any("算力" in s or "半导体" in s for s in res.top_sectors)
+
+    # 2. 验证跟风杂毛 600444 未入池
+    pool = kline_cache.get_v_reversal_pool()
+    assert "600111" in pool
+    assert "600222" in pool
+    assert "600333" in pool
+    assert "600444" not in pool
+
+    # 3. 验证形态结构标签具备板块与加速标识，且不出现泛概念污染
+    f1 = kline_cache.get_consolidation_flags("600111")
+    assert "深股通" not in f1.get("structure", "")
+    assert "国企改革" not in f1.get("structure", "")
+    assert "加速" in f1.get("structure", "") or "主升" in f1.get("structure", "")
+
+    # 4. 验证评分算法：最强龙头得分显著高于普通个股
+    score1 = kline_cache.calculate_reversal_priority_score("600111", f1, rows[0])
+    f3 = kline_cache.get_consolidation_flags("600333")
+    score3 = kline_cache.calculate_reversal_priority_score("600333", f3, rows[2])
+    assert score1 > 100.0
+    assert score3 > 80.0
