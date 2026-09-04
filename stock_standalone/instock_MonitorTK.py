@@ -22659,7 +22659,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 if entry_date and hasattr(self, 'link_to_visualizer'):
                     try:
                         self.link_to_visualizer(code, entry_date)
-                        logger.info(f"💡 [V-Reversal] 使用系统现成 link_to_visualizer 联动个股: {code} 时间: {entry_date}")
+                        logger.debug(f"💡 [V-Reversal] 使用系统现成 link_to_visualizer 联动个股: {code} 时间: {entry_date}")
                         return
                     except Exception as e:
                         logger.error(f"Failed calling link_to_visualizer: {e}")
