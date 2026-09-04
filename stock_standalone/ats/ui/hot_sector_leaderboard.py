@@ -72,23 +72,17 @@ def _safe_int(val: Any, default: int = 0) -> int:
 def compute_buy_type_sort_score(item: Dict[str, Any]) -> float:
     """
     计算买点类型排序的绝对量化得分 (Buy Type Sort Score, 降序排列时分值越高越优先/越强)：
-    严格铁律体系：
-    1. 👑双加速·👑领涨龙头 (双加速 + 领涨龙头/一字/爆量突破) -> 梯队基准 100,000
-    2. 👑双加速·⚡扫盘冲板 / 🔥主动扫买                   -> 梯队基准 92,000
-    3. 👑双加速·🚀先锋突破                               -> 梯队基准 88,000
-    4. 👑双加速·其他                                     -> 梯队基准 84,000
-    5. 🚀缺口加速·👑领涨龙头                             -> 梯队基准 78,000
-    6. ⚡光脚加速·👑领涨龙头                             -> 梯队基准 72,000
-    7. 👑领涨龙头 (常规形态)                             -> 梯队基准 66,000
-    8. 🚀缺口加速·⚡扫盘冲板 / 🔥主动扫买                -> 梯队基准 60,000
-    9. ⚡光脚加速·⚡扫盘冲板 / 🔥主动扫买                -> 梯队基准 54,000
-    10. ⚡扫盘冲板 / 🔥主动扫买 (常规形态)                -> 梯队基准 48,000
-    11. 🚀缺口加速·🚀先锋突破                            -> 梯队基准 42,000
-    12. ⚡光脚加速·🚀先锋突破                            -> 梯队基准 36,000
-    13. 🚀先锋突破 (常规形态)                            -> 梯队基准 30,000
-    14. 💎反身低吸 / 💎地量起爆 (回踩/低吸)               -> 梯队基准 22,000
-    15. 📋蓄势观察 (常规形态)                            -> 梯队基准 10,000
-    16. ⚠️破位转弱 / ⚠️诱多破位 (弱势出货防坑)           -> 梯队基准 1,000
+    核心设计：【快速定位带头大哥能力】
+    1. 领涨龙头族 (LEADER / 带头大哥) 拥有最高核心基准 95,000 分，享有最顶层统治力！
+       - 在领涨龙头内部，带头大哥由：涨幅大小 (Price Gain)、日内 VWAP 偏离度 (VWAP Premium)、
+         启动涨速 (Velocity)、全市场 Rank 排位 与加速形态 (双加速/缺口/光脚) 强强决胜！
+       - 20cm 领涨龙头 (如易点天下、四方精创) 动能大幅超越 10cm 标的，傲视全场稳居第 1、第 2 名！
+    2. 高涨幅扫盘助攻族 (SURGE 且 pct >= 7.0%)：基准 60,000 分；
+    3. 中低位扫买助攻族 (SURGE 且 pct < 7.0%)：基准 40,000 分 (杜绝 2%~3% 跟风股霸屏抢占视线)；
+    4. 先锋突破族 (BREAKOUT)：基准 30,000 分；
+    5. 回踩低吸族 (PULLBACK)：基准 20,000 分；
+    6. 蓄势观察族 (WATCH)：基准 10,000 分；
+    7. 破位诱多族 (WEAK)：基准 1,000 分。
     """
     if "buy_type_sort_score" in item:
         try:
@@ -98,74 +92,72 @@ def compute_buy_type_sort_score(item: Dict[str, Any]) -> float:
 
     buy_t = str(item.get("buy_type", ""))
     tag = str(item.get("buy_tag", ""))
-    
+    pct = float(item.get("pct", 0.0) or 0.0)
+    vwap_dev = float(item.get("vwap_dev_pct", 0.0) or 0.0)
+    vel_pct = float(item.get("velocity_pct", 0.0) or 0.0)
+    alpha_score = float(item.get("alpha_score", 0.0) or 0.0)
+    low_diff = float(item.get("low_diff_pct", 999.0) or 999.0)
+    bid_p = float(item.get("bid_pressure", 50.0) or 50.0)
+    rank_val = int(item.get("rank", item.get("Rank", 999)) or 999)
+
     is_dual = bool(item.get("is_dual_accel")) or ("双加速" in buy_t)
     is_gap = bool(item.get("is_gap_accel")) or ("缺口加速" in buy_t)
     is_open_low = bool(item.get("is_open_low_accel")) or ("光脚加速" in buy_t)
-    
+
+    # 核心买点特征判断
     is_leader = (tag in ("LEADER", "BID_LIMIT", "BID_BREAKOUT", "IPO_BID_SURGE") or 
                  any(k in buy_t for k in ("领涨龙头", "竞价领涨", "竞价一字", "爆量突破", "首日真金抢筹")))
     is_surge = (tag in ("SURGE", "BID_SURGE") or 
-                any(k in buy_t for k in ("扫盘冲板", "主动扫买", "竞价抢筹")))
+                any(k in buy_t for k in ("扫盘冲板", "主动扫买", "竞价抢筹", "脱离成本")))
     is_breakout = (tag == "BREAKOUT" or "先锋突破" in buy_t)
     is_pullback = (tag in ("PULLBACK", "BID_REVERSAL") or 
                    any(k in buy_t for k in ("地量起爆", "反身低吸", "弱转强")))
     is_weak = (tag in ("WEAK", "TRAP") or 
                any(k in buy_t for k in ("破位", "诱多", "转弱")))
-    
-    if is_dual:
-        if is_leader:
-            base = 100000.0
-        elif is_surge:
-            base = 92000.0
-        elif is_breakout:
-            base = 88000.0
-        elif is_weak:
-            base = 2000.0
-        else:
-            base = 84000.0
-    elif is_gap and is_leader:
-        base = 78000.0
-    elif is_open_low and is_leader:
-        base = 72000.0
-    elif is_leader:
-        base = 66000.0
-    elif is_gap and is_surge:
-        base = 60000.0
-    elif is_open_low and is_surge:
-        base = 54000.0
+
+    if is_leader:
+        # 👑 梯队 1：领涨龙头族 (带头大哥统治殿堂)
+        base = 95000.0
+        accel_add = 3000.0 if is_dual else (2000.0 if is_gap else (1000.0 if is_open_low else 0.0))
+        # 💡 带头大哥核心动能权值 (涨幅大 + VWAP 偏离高 + 启动早 + 全市场 Rank 靠前)
+        gain_add = min(20.0, max(0.0, pct)) * 300.0
+        vwap_add = max(0.0, min(10.0, vwap_dev)) * 500.0
+        vel_add = max(0.0, min(15.0, vel_pct)) * 60.0
+        rank_add = max(0.0, (100.0 - min(100.0, float(rank_val)))) * 8.0
+        score_add = min(100.0, max(0.0, alpha_score)) * 5.0
+        total_score = base + accel_add + gain_add + vwap_add + vel_add + rank_add + score_add
+        return round(total_score, 3)
+
     elif is_surge:
-        base = 48000.0
-    elif is_gap and is_breakout:
-        base = 42000.0
-    elif is_open_low and is_breakout:
-        base = 36000.0
+        # ⚡ 梯队 2：冲板助攻族 (冲板形态或涨幅>=6.5%，基准 60,000 分)
+        # ⚡ 梯队 3：中低位跟风扫买族 (基准 45,000 分，杜绝低位跟风股遮挡)
+        is_rush = ("冲板" in buy_t) or ("脱离成本" in buy_t) or (pct >= 6.5)
+        base = 60000.0 if is_rush else 45000.0
+        accel_add = 1200.0 if is_dual else (800.0 if is_gap else (400.0 if is_open_low else 0.0))
+        gain_add = min(20.0, max(-5.0, pct)) * 300.0
+        vwap_add = max(0.0, min(10.0, vwap_dev)) * 500.0
+        vel_add = max(0.0, min(15.0, vel_pct)) * 40.0
+        score_add = min(100.0, max(0.0, alpha_score)) * 4.0
+        return round(base + accel_add + gain_add + vwap_add + vel_add + score_add, 3)
+
     elif is_breakout:
         base = 30000.0
+        accel_add = 2000.0 if is_dual else (1500.0 if is_gap else (800.0 if is_open_low else 0.0))
+        gain_add = min(15.0, max(-5.0, pct)) * 100.0
+        return round(base + accel_add + gain_add + alpha_score * 3.0, 3)
+
     elif is_pullback:
-        base = 22000.0
+        base = 20000.0
+        return round(base + alpha_score * 3.0 + min(10.0, max(-5.0, pct)) * 50.0, 3)
+
     elif is_weak:
         base = 1000.0
-    else:
-        if is_gap:
-            base = 16000.0
-        elif is_open_low:
-            base = 13000.0
-        else:
-            base = 10000.0
+        return round(base + alpha_score * 0.5, 3)
 
-    alpha_score = float(item.get("alpha_score", 0.0) or 0.0)
-    pct = float(item.get("pct", 0.0) or 0.0)
-    low_diff = float(item.get("low_diff_pct", 999.0) or 999.0)
-    bid_p = float(item.get("bid_pressure", 50.0) or 50.0)
-    
-    fine_tune = (
-        min(100.0, max(0.0, alpha_score)) * 5.0 +
-        min(20.0, max(-10.0, pct)) * 10.0 +
-        max(0.0, min(1.0, 1.0 - (low_diff if low_diff < 900 else 1.0))) * 50.0 +
-        min(100.0, max(0.0, bid_p)) * 0.5
-    )
-    return round(base + fine_tune, 3)
+    else: # 蓄势观察 WATCH
+        base = 10000.0
+        accel_add = 1500.0 if is_dual else (1000.0 if is_gap else 0.0)
+        return round(base + accel_add + alpha_score * 2.0 + pct * 20.0, 3)
 
 
 def get_leaderboard_headers(extra_cols=None):
@@ -1618,6 +1610,9 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
         elif buy_tag == "SURGE":
             type_color = QColor("#FF5533") # 亮橙红扫盘冲板
             type_bg = QColor(65, 30, 20, 160)
+        elif "脱离成本" in buy_type:
+            type_color = QColor("#00E5FF") # 电光青脱离成本
+            type_bg = QColor(10, 45, 65, 170)
         elif "光脚加速" in buy_type:
             type_color = QColor("#FFAA00") # 亮橙黄光脚加速
             type_bg = QColor(60, 35, 10, 160)
@@ -1991,6 +1986,25 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
             QMenu::item { padding: 5px 20px; border-radius: 3px; }
             QMenu::item:selected { background-color: #2c3554; color: #00ffaa; }
         """)
+
+        # 0. ⚡ 极速实战买入联动与跟单指令 (闭环买卖能力)
+        p_item = self.table.item(row, 4)
+        cur_p_str = p_item.text().strip() if p_item else ""
+        buy_z_item = self.table.item(row, 16) if self.table.columnCount() > 16 else None
+        buy_z_str = buy_z_item.text().strip() if buy_z_item else cur_p_str
+
+        act_quick_buy = menu.addAction(f"⚡ 闪电跟单: 复制买入指令 ({code_clean} {clean_name} @ {cur_p_str}元)")
+        def _exec_quick_buy():
+            clip_text = f"{code_clean} {cur_p_str}"
+            QApplication.clipboard().setText(clip_text)
+            self._broadcast_link_stock(code_clean, clean_name)
+            try:
+                from stock_logic_utils import toast_messageQT
+                toast_messageQT(f"🎯 已复制买入指令: {clean_name}({code_clean}) 现价 {cur_p_str}元\n区间: {buy_z_str}，已联动外部终端！")
+            except Exception:
+                pass
+        act_quick_buy.triggered.connect(_exec_quick_buy)
+        menu.addSeparator()
 
         # 1. 重点关注切换操作 (优先显示/取消优先)
         if is_fav:

@@ -2084,7 +2084,12 @@ class TDXRealtimeFetcher:
                     reason = f"竞价阶段常规博弈 (+{pct:.1f}%, 买盘压强{bid_p:.0f}%)"
                     type_priority = 50
 
-            elif (pct >= 9.5 and ("涨停" in order_intent or bid_p >= 75.0)) or (is_sec_leader and pct >= 4.5 and vwap_dev >= 0.0):
+            # 💡 计算 VWAP 脱离成本区幅度 (成本线相对开盘价拉升的百分比)
+            open_p_val = float(it.get("open", 0.0) or 0.0)
+            vwap_escape_pct = ((vwap - open_p_val) / open_p_val * 100.0) if (open_p_val > 0 and vwap > 0) else 0.0
+            it["vwap_escape_pct"] = round(vwap_escape_pct, 2)
+
+            if (pct >= 9.5 and ("涨停" in order_intent or bid_p >= 75.0)) or (is_sec_leader and pct >= 4.5 and vwap_dev >= 0.0):
                 # 👑 领涨龙头：封死涨停或板块绝对领涨第一名
                 buy_type = "👑 领涨龙头"
                 buy_tag = "LEADER"
@@ -2092,6 +2097,15 @@ class TDXRealtimeFetcher:
                 stop_loss = round(vwap * 0.985, 2)
                 reason = f"板块领涨龙头 (买盘压强{bid_p:.0f}%), 站稳均线(+{vwap_dev:.1f}%), {order_intent}"
                 type_priority = 100
+
+            elif (vwap_escape_pct >= 1.5 and 0.5 <= vwap_dev <= 3.8 and 2.5 <= pct <= 9.0 and (vol_r >= 1.2 or slope >= 50.0)):
+                # ⚡ 脱离成本狙击：开盘资金爆量向上扫单，VWAP 强斜率向上快速拉离成本区，未封板前可直接买入参与的黄金狙击点！
+                buy_type = "⚡ 脱离成本狙击"
+                buy_tag = "LEADER" if is_sec_leader else "SURGE"
+                type_priority = 98 if is_sec_leader else 94
+                buy_zone = f"{price*0.995:.2f} ~ {round(price * 1.008, 2)}"
+                stop_loss = round(max(vwap * 0.988, open_p_val), 2)
+                reason = f"VWAP快速拉离成本(+{vwap_escape_pct:.1f}%), 均线护城河(+{vwap_dev:.1f}%), 攻角{slope:.0f}°, 黄金狙击买入点"
 
             elif "扫买" in order_intent and vwap_dev >= -0.2 and pct >= 1.5:
                 # 🔥 主动扫买点火抢筹：主力大单主动吃进外盘，盘中起涨先手黄金点 (盘中不等涨停即可第一时间发现并报警！)
@@ -2254,65 +2268,9 @@ class TDXRealtimeFetcher:
             it["low_diff_pct"] = low_diff
             
             # ── 💡 买点类型综合排序权值 (Buy Type Sort Score, 降序时最强绝对置顶) ──
-            # 铁律：双加速·领涨龙头 > 双加速·扫盘/先锋 > 缺口加速·领涨龙头 > 光脚加速·领涨龙头 > 常规领涨龙头 > 缺口加速·扫盘 > 光脚加速·扫盘 > 常规扫盘 > 先锋突破 > 回踩低吸 > 蓄势观察 > 破位转弱
-            is_leader_cand = (buy_tag in ("LEADER", "BID_LIMIT", "BID_BREAKOUT", "IPO_BID_SURGE") or 
-                              any(k in disp_buy_type for k in ("领涨龙头", "竞价领涨", "竞价一字", "爆量突破", "首日真金抢筹")))
-            is_surge_cand = (buy_tag in ("SURGE", "BID_SURGE") or 
-                             any(k in disp_buy_type for k in ("扫盘冲板", "主动扫买", "竞价抢筹")))
-            is_breakout_cand = (buy_tag == "BREAKOUT" or "先锋突破" in disp_buy_type)
-            is_pullback_cand = (buy_tag in ("PULLBACK", "BID_REVERSAL") or 
-                                any(k in disp_buy_type for k in ("地量起爆", "反身低吸", "弱转强")))
-            is_weak_cand = (buy_tag in ("WEAK", "TRAP") or 
-                            any(k in disp_buy_type for k in ("破位", "诱多", "转弱")))
-
-            if is_dual:
-                if is_leader_cand:
-                    tier_base = 100000.0
-                elif is_surge_cand:
-                    tier_base = 92000.0
-                elif is_breakout_cand:
-                    tier_base = 88000.0
-                elif is_weak_cand:
-                    tier_base = 2000.0
-                else:
-                    tier_base = 84000.0
-            elif is_gap and is_leader_cand:
-                tier_base = 78000.0
-            elif is_open_low and is_leader_cand:
-                tier_base = 72000.0
-            elif is_leader_cand:
-                tier_base = 66000.0
-            elif is_gap and is_surge_cand:
-                tier_base = 60000.0
-            elif is_open_low and is_surge_cand:
-                tier_base = 54000.0
-            elif is_surge_cand:
-                tier_base = 48000.0
-            elif is_gap and is_breakout_cand:
-                tier_base = 42000.0
-            elif is_open_low and is_breakout_cand:
-                tier_base = 36000.0
-            elif is_breakout_cand:
-                tier_base = 30000.0
-            elif is_pullback_cand:
-                tier_base = 22000.0
-            elif is_weak_cand:
-                tier_base = 1000.0
-            else:
-                if is_gap:
-                    tier_base = 16000.0
-                elif is_open_low:
-                    tier_base = 13000.0
-                else:
-                    tier_base = 10000.0
-
-            fine_tune = (
-                min(100.0, max(0.0, alpha_score)) * 5.0 +
-                min(20.0, max(-10.0, pct)) * 10.0 +
-                max(0.0, min(1.0, 1.0 - (low_diff if low_diff < 900 else 1.0))) * 50.0 +
-                min(100.0, max(0.0, bid_p)) * 0.5
-            )
-            it["buy_type_sort_score"] = round(tier_base + fine_tune, 3)
+            # 严格对齐 SSOT：统一由 compute_buy_type_sort_score 精准计算带头大哥动能权值
+            from ats.ui.hot_sector_leaderboard import compute_buy_type_sort_score
+            it["buy_type_sort_score"] = compute_buy_type_sort_score(it)
             results.append(it)
 
         # 按买点类型梯队分层，同类型内对比 Alpha 得分与盘口：双加速/缺口加速领涨龙头绝对优先置顶！
