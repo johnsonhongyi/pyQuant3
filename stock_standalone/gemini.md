@@ -1,3 +1,38 @@
+## 2026-09-04 12:05
+- [x] **彻底根治天梯未开同花顺却强行联动THS Bug & 全面落地天梯形态与质量对齐龙头突击排序分级功能及竞价破顶 (`stock_standalone/ats/ui/daily_limit_up_dialog.py`, `stock_standalone/ats/limit_up_engine.py`, `stock_standalone/tests/test_daily_limit_up_dialog.py`)**：
+    - [x] **排查定位“天梯未开启THS却自动联动THS”根本诱因**：
+        1. **重复定义且硬编码 `ths: True` 覆写漏洞**：`daily_limit_up_dialog.py` 第 2909 行存在一个重复冗余的 `_broadcast_link_stock` 方法，直接覆盖了 2553 行的标准方法，并在内部硬编码 `get_link_manager().push(code, flags={'tdx': True, 'ths': True, 'dfcf': False})`，强行开启 `ths: True`，完全绕过了 ATS 主窗口 `ATSMainWindow.link_stock` 的开关控制与 VIS 联动！
+    - [x] **排查定位“天梯形态与质量无法识别竞价破顶、全员92分扎堆扁平、未能对齐带头大哥排序分级”根本诱因**：
+        1. **天梯引擎缺失【破红线 / 竞价破顶】识别**：原 `limit_up_engine.py` 未对连续回调洗盘后跳空破阻力红线 $H_{\text{red}}=\max(\text{lasth1d}, \text{lasth2d})$ 的标的进行识别，易点天下、四方精创等带头大哥被淹没在普通首板中；
+        2. **排序逻辑粗暴采用扁平 rank**：原 `col_idx == 6` 仅按粗糙的 3 级 `accel_rank = (0, 1, 2)` 区分双加速、单加速与常规，未纳入破红线顶层形态，且在同加速类型内部全部扎堆在 round 后的 92 分死锁，无法体现 20cm 涨幅、VWAP 脱离度与动能强度。
+    - [x] **全链路落地【统一 ATS 联动体系 + 破红线加速识别 + 天梯形态与质量八级刚性量化打分】(SSOT)**：
+        1. **彻底根除 THS 强联 Bug，统一归口 ATS 联动分发**：
+           - 删除第 2909 行覆盖的硬编码 `_broadcast_link_stock` 方法；
+           - 规范 `_broadcast_link_stock`：优先调用 `parent` / `ATSMainWindow.link_stock` 统一联动体系（严格受主窗口 `cb_tdx` / `cb_ths` / `cb_vis` 控制）；兜底分支严格声明 `flags={'tdx': True, 'ths': False, 'dfcf': False}`，绝不擅自强开 THS；
+        2. **天梯引擎（LimitUpEngine）全面识别【👑 竞价破顶】与【👑 破红线加速】**：
+           - 计算 `is_break_red = (open_p >= max_2d - 0.015 and price >= max_2d and pct >= 2.0)`；
+           - 竞价期赋予 `👑 竞价破顶`，连续撮合期赋予 `👑 破红线加速`；
+           - 与加速结构融合：`👑破红线加速+👑双加速`、`👑破红线加速+🚀缺口加速`、`👑破红线加速+⚡光脚加速`；
+           - 首板分类增加 `D0: 破红线主升/竞价破顶起爆`，赋予 launch_boost 与 accel_bonus，未涨停分支注入 +10.0 动能奖励；
+        3. **天梯形态与质量（第 6 列）量化打分算法 (`compute_ladder_quality_sort_score`)**：
+           - **梯队 1**：👑双加速 + 👑破红线/竞价破顶 (基准 100,000 分，顶配主升破阻力)；
+           - **梯队 2**：👑双加速 (基准 90,000 分，开盘即最低+跳空缺口双重极速，如华浪控股)；
+           - **梯队 3**：🚀缺口加速/⚡光脚加速 + 👑破红线/竞价破顶 (基准 80,000 分，如易点天下)；
+           - **梯队 4**：👑破红线高开高走 / 👑竞价破顶 (基准 70,000 分)；
+           - **梯队 5**：🚀缺口加速 (基准 60,000 分，如金现代、思泉新材)；
+           - **梯队 6**：⚡光脚加速 (基准 50,000 分)；
+           - **梯队 7**：常规形态 (基准 30,000 分，如普通换手首板)；
+           - **梯队 8**：⚠️炸板分歧 (基准 5,000 分)；
+           - **同梯队微观决胜**：动能评分 (0~1000分) + 20cm带头大哥动能 (0~100分) + 连板高度 (0~100分) + 开盘下影微小度 (0~50分)；
+        4. **全端 UI 视觉与排序 subkey 完美对齐**：
+           - `col_idx == 6` 排序完全由 `compute_ladder_quality_sort_score` 决胜；
+           - `col_idx == 4` (连板数) 与 `col_idx == 5` (梯队分类) 同板/同梯队内部无缝对齐该量化得分；
+           - `_populate_table_rows` 为第 6 列注入 `user_data=q_sort_score`，破红线标的呈现 `#00E5FF` 电光青尊荣高亮，ToolTip 增补 `👑跨越前高阻力红线起爆` 透视；
+    - [x] **自动化测试 100% 全部 PASSED**：
+        - `tests/test_daily_limit_up_dialog.py` 全部 10 项测试全绿通过（新增联动 ATS 防护、THS 开关拦截、破红线加速与质量量化排序单调性专项测试）；
+        - `tests/test_sector_strength_and_detail_parity.py` 全部 21 项测试全绿通过（50.03s）；
+        - `tests/test_v_reversal_pool_enhancements.py` + `tests/test_alert_cooling_and_source_suite.py` 13 项全部通过。
+
 ## 2026-09-04 11:25
 - [x] **落地【连续回调后竞价高开破前高红线 + 09:25挂单锁定成本底座 + 防诱多回落】顶级擒龙模型 (`ats/tdx_realtime_fetcher.py`, `ats/ui/hot_sector_leaderboard.py`, `tests/test_sector_strength_and_detail_parity.py`)**：
     - [x] **深度破译实盘龙头核心指纹 (易点天下 301171 / 四方精创 300468 显微镜复盘)**：

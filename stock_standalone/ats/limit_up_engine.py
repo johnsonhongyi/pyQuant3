@@ -783,51 +783,6 @@ class LimitUpEngine:
             r["supp_dist_pct"] = supp_dist_pct
             r["pct_yesterday"] = pct_yesterday
 
-            # ── 💡 开盘即最低 (极小下影) 与跳空缺口加速结构量化计算 ──
-            open_p = _safe_float(r.get("open", price))
-            low_p = _safe_float(r.get("low", price))
-            last_c = _safe_float(r.get("last_close", price))
-            yesterday_h = lasth1d if lasth1d > 0 else last_c
-
-            # 1. 开盘价即最低价 / 极小下影加速 (Open is Low)
-            low_diff_pct = round((open_p - low_p) / open_p * 100.0, 3) if open_p > 0 else 999.0
-            is_open_low_accel = bool(open_p > 0 and low_p > 0 and (low_p >= open_p - 0.015 or low_diff_pct <= 0.15) and (open_p >= last_c * 0.98))
-
-            # 2. 跳空高开且留有跳空缺口加速 (Gap-Up Acceleration)
-            open_jump_pct = round((open_p - last_c) / last_c * 100.0, 2) if last_c > 0 else 0.0
-            is_gap_accel = bool(open_jump_pct >= 0.8 and low_p > last_c and (yesterday_h <= 0 or low_p >= yesterday_h - 0.015))
-
-            # 3. 双加速结构 (Dual Acceleration: 跳空高开 + 开盘即最低)
-            is_dual_accel = bool(is_open_low_accel and is_gap_accel)
-
-            accel_tag = ""
-            if is_dual_accel:
-                accel_tag = "👑双加速"
-            elif is_open_low_accel:
-                accel_tag = "⚡光脚加速"
-            elif is_gap_accel:
-                accel_tag = "🚀缺口加速"
-
-            r["is_open_low_accel"] = is_open_low_accel
-            r["is_gap_accel"] = is_gap_accel
-            r["is_dual_accel"] = is_dual_accel
-            r["low_diff_pct"] = low_diff_pct
-            r["accel_tag"] = accel_tag
-
-            # ── 💡 多阶【启动加速 (Launch Acceleration)】量化特征判定 ──
-            # 模式 1: 连板主升加速 (2进3、3进4及以上连板且今日加速)
-            is_ladder_accel = bool(consecutive >= 2 and (is_dual_accel or is_gap_accel or is_open_low_accel or seal_to_circ >= 3.0))
-            # 模式 2: 首板突破平台启动加速 (突破近3/5日平台且双加速/缺口/光脚加速)
-            is_breakout_launch_accel = bool(consecutive == 1 and is_breakout_multiday and (is_dual_accel or is_gap_accel or is_open_low_accel))
-            # 模式 3: 多日蓄势波段主升加速 (5日2板/3日2板等多波且今日涨停加速)
-            is_multiday_wave_accel = bool(consecutive == 1 and zt_5d >= 2 and (is_dual_accel or is_gap_accel or is_open_low_accel))
-
-            is_launch_accel = bool(is_ladder_accel or is_breakout_launch_accel or is_multiday_wave_accel)
-            r["is_launch_accel"] = is_launch_accel
-            r["is_ladder_accel"] = is_ladder_accel
-            r["is_breakout_launch_accel"] = is_breakout_launch_accel
-            r["is_multiday_wave_accel"] = is_multiday_wave_accel
-
             # ── 💡 交易时钟生命周期 (Time Window Alpha) ──
             # 区分：09:30~10:00黄金定龙期 / 10:00~11:30分歧低吸期 / 13:00~14:00午后助攻期 / 14:00~14:45尾盘诱多高危期
             curr_hhmm = time.strftime("%H:%M")
@@ -866,6 +821,71 @@ class LimitUpEngine:
 
             r["time_phase"] = time_phase
             r["time_tip"] = time_tip
+
+            # ── 💡 开盘即最低 (极小下影) 与跳空缺口加速结构量化计算 ──
+            open_p = _safe_float(r.get("open", price))
+            low_p = _safe_float(r.get("low", price))
+            last_c = _safe_float(r.get("last_close", price))
+            yesterday_h = lasth1d if lasth1d > 0 else last_c
+
+            # 1. 开盘价即最低价 / 极小下影加速 (Open is Low)
+            low_diff_pct = round((open_p - low_p) / open_p * 100.0, 3) if open_p > 0 else 999.0
+            is_open_low_accel = bool(open_p > 0 and low_p > 0 and (low_p >= open_p - 0.015 or low_diff_pct <= 0.15) and (open_p >= last_c * 0.98))
+
+            # 2. 跳空高开且留有跳空缺口加速 (Gap-Up Acceleration)
+            open_jump_pct = round((open_p - last_c) / last_c * 100.0, 2) if last_c > 0 else 0.0
+            is_gap_accel = bool(open_jump_pct >= 0.8 and low_p > last_c and (yesterday_h <= 0 or low_p >= yesterday_h - 0.015))
+
+            # 3. 双加速结构 (Dual Acceleration: 跳空高开 + 开盘即最低)
+            is_dual_accel = bool(is_open_low_accel and is_gap_accel)
+
+            # 4. 连续回调后高开破前高红线 (竞价破顶 / 破红线加速: 易点天下/四方精创擒龙模式)
+            is_bidding_phase = ("09:15" <= curr_hhmm <= "09:25")
+            is_break_red = bool(
+                (open_p > 0 and max_2d > 0 and open_p >= max_2d - 0.015 and price >= max_2d and pct >= 2.0) or
+                (is_bidding_phase and price > last_c and max_2d > 0 and price >= max_2d - 0.015)
+            )
+            r["is_bidding_break_red"] = bool(is_break_red and is_bidding_phase)
+            r["is_break_red_run"] = bool(is_break_red and not is_bidding_phase)
+            r["is_break_red"] = is_break_red
+
+            break_red_label = "👑竞价破顶" if is_bidding_phase else "👑破红线加速"
+            if is_break_red and is_dual_accel:
+                accel_tag = f"{break_red_label}+👑双加速"
+            elif is_dual_accel:
+                accel_tag = "👑双加速"
+            elif is_break_red and is_gap_accel:
+                accel_tag = f"{break_red_label}+🚀缺口加速"
+            elif is_break_red and is_open_low_accel:
+                accel_tag = f"{break_red_label}+⚡光脚加速"
+            elif is_break_red:
+                accel_tag = break_red_label
+            elif is_open_low_accel:
+                accel_tag = "⚡光脚加速"
+            elif is_gap_accel:
+                accel_tag = "🚀缺口加速"
+            else:
+                accel_tag = ""
+
+            r["is_open_low_accel"] = is_open_low_accel
+            r["is_gap_accel"] = is_gap_accel
+            r["is_dual_accel"] = is_dual_accel
+            r["low_diff_pct"] = low_diff_pct
+            r["accel_tag"] = accel_tag
+
+            # ── 💡 多阶【启动加速 (Launch Acceleration)】量化特征判定 ──
+            # 模式 1: 连板主升加速 (2进3、3进4及以上连板且今日加速)
+            is_ladder_accel = bool(consecutive >= 2 and (is_dual_accel or is_gap_accel or is_open_low_accel or is_break_red or seal_to_circ >= 3.0))
+            # 模式 2: 首板突破平台启动加速 (突破近3/5日平台且双加速/缺口/光脚加速/破红线)
+            is_breakout_launch_accel = bool(consecutive == 1 and (is_breakout_multiday or is_break_red) and (is_dual_accel or is_gap_accel or is_open_low_accel or is_break_red))
+            # 模式 3: 多日蓄势波段主升加速 (5日2板/3日2板等多波且今日涨停加速)
+            is_multiday_wave_accel = bool(consecutive == 1 and zt_5d >= 2 and (is_dual_accel or is_gap_accel or is_open_low_accel or is_break_red))
+
+            is_launch_accel = bool(is_ladder_accel or is_breakout_launch_accel or is_multiday_wave_accel or is_break_red)
+            r["is_launch_accel"] = is_launch_accel
+            r["is_ladder_accel"] = is_ladder_accel
+            r["is_breakout_launch_accel"] = is_breakout_launch_accel
+            r["is_multiday_wave_accel"] = is_multiday_wave_accel
 
             # ── 💡 索罗斯【反身性动能指数 (Reflexivity Momentum Index)】与冰点逆市挖掘 ──
             reflex_score = 50.0
@@ -939,8 +959,8 @@ class LimitUpEngine:
             if is_limit_up:
                 # 1. 封单质量加成 (0.0 ~ 2.2分)
                 seal_bonus = min(1.5, seal_to_circ * 0.3) + min(0.7, (seal_amt_wan / 10000.0) * 0.15)
-                # 2. 加速形态加成 (👑双加速 +1.5分, ⚡光脚/🚀缺口单加速 +0.8分)
-                accel_bonus = 1.5 if is_dual_accel else (0.8 if (is_open_low_accel or is_gap_accel) else 0.0)
+                # 2. 加速形态加成 (👑双加速/👑破红线 +1.5~2.0分, ⚡光脚/🚀缺口单加速 +0.8分)
+                accel_bonus = 2.0 if (is_break_red and is_dual_accel) else (1.5 if (is_dual_accel or is_break_red) else (0.8 if (is_open_low_accel or is_gap_accel) else 0.0))
                 # 3. 多日强势底蕴微调加成 (0.0 ~ 1.0分)
                 multiday_bonus = min(1.0, max(0.0, (dff2 * 0.02 + dff3 * 0.005)))
 
@@ -969,7 +989,14 @@ class LimitUpEngine:
 
                 else:
                     # 🔥 梯队 D: 首板 (按多日底蕴与启动加速严格细分，封顶 92.4，绝不越级压制 2 板)
-                    if is_multiday_wave_accel or zt_5d >= 2:
+                    if is_break_red:
+                        # D0: 连续回调后高开破前高红线 (易点天下/四方精创擒龙首板)
+                        base_score = 88.5
+                        launch_boost = 2.0
+                        momentum_score = min(92.4, base_score + launch_boost + seal_bonus + accel_bonus)
+                        r["tier_tag"] = "👑 破红线主升" if not is_bidding_phase else "👑 竞价破顶起爆"
+                        desc_tag = f"👑 破红线加速({momentum_score:.0f}分)" if not is_bidding_phase else f"👑 竞价破顶({momentum_score:.0f}分)"
+                    elif is_multiday_wave_accel or zt_5d >= 2:
                         # D1: 多日波段蓄势加速 (如 5日2板/3日2板)
                         base_score = 88.0
                         launch_boost = 1.8 if is_launch_accel else 0.5
@@ -1044,7 +1071,9 @@ class LimitUpEngine:
                 if vol_ratio > 1.8:
                     ch_score += 2.0
 
-                if is_dual_accel:
+                if is_break_red:
+                    ch_score += 10.0
+                elif is_dual_accel:
                     ch_score += 8.0
                 elif is_open_low_accel or is_gap_accel:
                     ch_score += 4.0
@@ -1059,7 +1088,14 @@ class LimitUpEngine:
                     is_first_day = bool(IntradayStrategyEngine.get_instance().is_stock_first_listing_day(code_str))
                 except Exception:
                     is_first_day = ("首日" in str(r.get("status", ""))) or (str(r.get("name", "")).startswith("N") and str(r.get("status", "")) in ("", "首日", "今日上市"))
-                if "09:15" <= curr_hhmm <= "09:30" and is_first_day and (seal_amt_wan >= 800.0 or bid_p >= 75.0):
+                if is_break_red:
+                    if is_bidding_phase:
+                        r["tier_tag"] = "👑 竞价破前高红线"
+                        desc_tag = f"👑 竞价破顶({momentum_score:.0f}分)"
+                    else:
+                        r["tier_tag"] = "👑 破红线高开高走"
+                        desc_tag = f"👑 破红线加速({momentum_score:.0f}分)"
+                elif "09:15" <= curr_hhmm <= "09:30" and is_first_day and (seal_amt_wan >= 800.0 or bid_p >= 75.0):
                     r["tier_tag"] = "💎 新股首日真金抢筹"
                     desc_tag = f"💎 首日抢筹({momentum_score:.0f}分)"
                 elif "09:20" <= curr_hhmm <= "09:25" and pct >= 3.0 and is_breakout_multiday and (seal_amt_wan >= 2000.0 or bid_p >= 75.0):
@@ -1120,11 +1156,14 @@ class LimitUpEngine:
                 pass
 
             if accel_tag:
-                desc_tag = f"{accel_tag}|{desc_tag}"
+                clean_accel = accel_tag.replace("👑", "").replace("🚀", "").replace("⚡", "").strip()
+                if clean_accel not in desc_tag:
+                    desc_tag = f"{accel_tag}|{desc_tag}"
 
             r["momentum_score"] = momentum_score
             r["seal_quality_score"] = momentum_score
             r["pattern_desc"] = desc_tag
+
 
         # 4. 排序：真实涨停优先 > 连板数降序 > (同加速类型后在对比评分与开盘下影微小度) > 封流比降序 > 涨幅降序
         def _ladder_record_sort_key(x):
