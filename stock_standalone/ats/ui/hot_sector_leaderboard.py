@@ -106,7 +106,7 @@ def compute_buy_type_sort_score(item: Dict[str, Any]) -> float:
 
     # 核心买点特征判断
     is_leader = (tag in ("LEADER", "BID_LIMIT", "BID_BREAKOUT", "IPO_BID_SURGE") or 
-                 any(k in buy_t for k in ("领涨龙头", "竞价领涨", "竞价一字", "爆量突破", "首日真金抢筹")))
+                 any(k in buy_t for k in ("领涨龙头", "竞价领涨", "竞价一字", "爆量突破", "首日真金抢筹", "破红线", "竞价破顶")))
     is_surge = (tag in ("SURGE", "BID_SURGE") or 
                 any(k in buy_t for k in ("扫盘冲板", "主动扫买", "竞价抢筹", "脱离成本")))
     is_breakout = (tag == "BREAKOUT" or "先锋突破" in buy_t)
