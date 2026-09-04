@@ -1,3 +1,14 @@
+## 2026-09-04 13:15
+- [x] **彻底根治 Tkinter 监控表 `per1d`（昨日涨幅）被 `percent`（当日涨幅）覆盖雷同 Bug (`stock_standalone/data_utils.py`, `stock_standalone/tests/test_per1d_parity_suite.py`)**：
+    - [x] **排查定位“Tk界面中所有股票 per1d 跟 percent 当日涨幅 100% 一模一样、丢失真实昨日涨跌幅”根本诱因**：
+        1. **流水线覆写漏洞**：`data_utils.py` 在 `complete_indicators_pipeline` 流水线第 442 行，计算完当日实时涨幅 `percent = (close - lastp1d) / lastp1d * 100` 后，错误地执行了一句 `top_all.loc[valid_mask, 'per1d'] = top_all.loc[valid_mask, 'percent']`；
+        2. **覆盖真实昨日特征**：从 TDX / HDF5 获取的原始特征中，`per1d` 完完全全且准确地代表 T-1 日（昨日）的涨跌幅（例如 920075 柏星龙为 `-4.5%`，`per2d` 为 `2.9%`，`perc3d` 为 `54.0%`），而第 442 行将其直接覆写为当日涨幅 `30.0%`，导致整表所有标的 `per1d` 与 `涨幅` 完全一致且昨日数据失真；
+        3. **大周期（w, m 等）连锁受损**：即使在非日线周期下前面已将上一周期涨幅正确平移到 `per1d`，流水线后段同样会被当期实时涨幅 `percent` 强行覆盖。
+    - [x] **全链路修复【彻底解绑 per1d 与 percent + 防御性上一周期涨幅补齐】(SSOT)**：
+        1. **删除破坏性覆盖代码**：彻底废除 `top_all.loc[valid_mask, 'per1d'] = top_all.loc[valid_mask, 'percent']`，确保原生昨日涨跌幅 100% 完好无损地保留并直通 UI；
+        2. **防御性安全补齐机制**：仅在外部数据源完全缺失 `per1d` 且存在 `lastp1d` 与 `lastp2d` 时，依据 `(lastp1d - lastp2d) / lastp2d * 100` 计算上一交易日真实涨跌幅补全，绝不使用当日涨幅替代；
+        3. **自动化测试 100% 通过**：编写专项测试套件 `tests/test_per1d_parity_suite.py`，严格验证柏星龙 (920075) 在流水线前后 `per1d` 保持 `-4.5%` 且与当日涨幅 `30.0%` 独立解绑，以及无 `per1d` 时的防御性补齐，2 项测试全部 PASSED。
+
 ## 2026-09-04 10:30
 - [x] **彻底根治龙头突击买点类型排序倒挂 Bug & 全面落地多层级买点优先级梯队与视口方向绝对锁定体系 (`stock_standalone/ats/tdx_realtime_fetcher.py`, `stock_standalone/ats/ui/hot_sector_leaderboard.py`, `stock_standalone/tests/test_sector_strength_and_detail_parity.py`)**：
     - [x] **排查定位“买点类型排序最强不在顶部、中科江南(双加速)沉底排第6、视图随选中的code滚动乱跳”三大诱因**：
