@@ -722,6 +722,149 @@ class TestDailyLimitUpDialog(unittest.TestCase):
         finally:
             dialog.close()
 
+    def test_daily_limit_up_linkage_ats_integration_and_ths_protection(self):
+        """【专项测试】验证天梯联动遵循 ATS 统一联动体系，严禁在未开启 THS 时强制联动 THS：
+        1. 当处于 ATS 主窗口上下文时，必须调用 ATSMainWindow.link_stock；
+        2. 兜底脱离 ATS 运行时，flags['ths'] 必须为 False，绝不强行开启同花顺联动。
+        """
+        dialog = DailyLimitUpDialog()
+        try:
+            # 1. 模拟脱离 ATS 主窗口运行时的独立联动兜底
+            pushed_calls = []
+            class MockLinkManager:
+                def push(self, code, flags=None, auto=False):
+                    pushed_calls.append((code, flags))
+
+            import linkage_service
+            old_get_mgr = linkage_service.get_link_manager
+            linkage_service.get_link_manager = lambda: MockLinkManager()
+            try:
+                dialog._broadcast_link_stock("000001", "平安银行")
+                self.assertEqual(len(pushed_calls), 1)
+                code_pushed, flags_pushed = pushed_calls[0]
+                self.assertEqual(code_pushed, "000001")
+                self.assertTrue(flags_pushed.get("tdx", False), "TDX 联动默认应为 True")
+                self.assertFalse(flags_pushed.get("ths", False), "未开启 THS 时 flags['ths'] 必须为 False！绝不硬编码强联 THS")
+            finally:
+                linkage_service.get_link_manager = old_get_mgr
+
+            # 2. 模拟关联 ATS 主窗口时的联动分发
+            linked_mw_calls = []
+            class MockMainWindow:
+                def link_stock(self, code, name):
+                    linked_mw_calls.append((code, name))
+
+            dialog._py_parent = MockMainWindow()
+            dialog._broadcast_link_stock("301171", "易点天下")
+            self.assertEqual(len(linked_mw_calls), 1)
+            self.assertEqual(linked_mw_calls[0], ("301171", "易点天下"))
+        finally:
+            dialog.close()
+
+    def test_daily_limit_up_break_red_and_quality_sorting_parity(self):
+        """【专项测试】验证天梯形态与质量对齐龙头突击修改的排序分级功能及竞价破顶：
+        实战检验：
+        四方精创 (破红线+双加速) > 华浪控股 (双加速) > 易点天下 (破红线+缺口加速) > 金现代 (普通缺口加速) > 浦发银行 (常规首板)
+        验证：
+        1. compute_ladder_quality_sort_score 绝对量化梯队单调递减；
+        2. 第 6 列【形态与质量】降序排列时顺序 100% 吻合；
+        3. 破红线加速标的前景色为 #00e5ff 电光青尊荣高亮，ToolTip 包含跨越阻力红线起爆。
+        """
+        dialog = DailyLimitUpDialog()
+        records = [
+            {
+                "code": "301171", "name": "易点天下", "price": 36.00, "last_close": 30.00,
+                "open": 31.00, "high": 36.00, "low": 30.50, "pct": 20.00, "consecutive_boards": 1,
+                "is_limit_up": True, "is_broken": False, "seal_to_circ_ratio": 5.0, "seal_amount_wan": 30000.0,
+                "tier_tag": "👑 破红线主升", "momentum_score": 92.0,
+                "is_break_red": True, "is_bidding_break_red": False, "is_break_red_run": True,
+                "is_dual_accel": False, "is_gap_accel": True, "is_open_low_accel": False, "low_diff_pct": 0.16,
+                "accel_tag": "👑破红线加速+🚀缺口加速", "pattern_desc": "👑破红线加速+🚀缺口加速|👑 主升加速(92分)"
+            },
+            {
+                "code": "002787", "name": "华浪控股", "price": 24.40, "last_close": 22.18,
+                "open": 22.50, "high": 24.40, "low": 22.50, "pct": 10.01, "consecutive_boards": 1,
+                "is_limit_up": True, "is_broken": False, "seal_to_circ_ratio": 4.22, "seal_amount_wan": 25530.0,
+                "tier_tag": "💎 冰点反身性龙", "momentum_score": 99.0,
+                "is_break_red": False, "is_dual_accel": True, "is_gap_accel": True, "is_open_low_accel": True, "low_diff_pct": 0.00,
+                "accel_tag": "👑双加速", "pattern_desc": "👑双加速|💎 反身性龙头(99分)"
+            },
+            {
+                "code": "300468", "name": "四方精创", "price": 26.00, "last_close": 21.67,
+                "open": 22.00, "high": 26.00, "low": 22.00, "pct": 20.00, "consecutive_boards": 1,
+                "is_limit_up": True, "is_broken": False, "seal_to_circ_ratio": 6.0, "seal_amount_wan": 35000.0,
+                "tier_tag": "👑 破红线主升", "momentum_score": 92.0,
+                "is_break_red": True, "is_bidding_break_red": False, "is_break_red_run": True,
+                "is_dual_accel": True, "is_gap_accel": True, "is_open_low_accel": True, "low_diff_pct": 0.00,
+                "accel_tag": "👑破红线加速+👑双加速", "pattern_desc": "👑破红线加速+👑双加速|👑 主升加速(92分)"
+            },
+            {
+                "code": "300830", "name": "金现代", "price": 10.09, "last_close": 8.41,
+                "open": 8.50, "high": 10.09, "low": 8.45, "pct": 19.98, "consecutive_boards": 1,
+                "is_limit_up": True, "is_broken": False, "seal_to_circ_ratio": 6.73, "seal_amount_wan": 22872.0,
+                "tier_tag": "💎 冰点反身性龙", "momentum_score": 99.0,
+                "is_break_red": False, "is_dual_accel": False, "is_gap_accel": True, "is_open_low_accel": False, "low_diff_pct": 0.10,
+                "accel_tag": "🚀缺口加速", "pattern_desc": "🚀缺口加速|💎 反身性龙头(99分)"
+            },
+            {
+                "code": "600000", "name": "浦发银行", "price": 11.00, "last_close": 10.00,
+                "open": 9.90, "high": 11.00, "low": 9.70, "pct": 10.00, "consecutive_boards": 1,
+                "is_limit_up": True, "is_broken": False, "seal_to_circ_ratio": 1.0, "seal_amount_wan": 5000.0,
+                "tier_tag": "📋 换手蓄势首板", "momentum_score": 80.0,
+                "is_break_red": False, "is_dual_accel": False, "is_gap_accel": False, "is_open_low_accel": False, "low_diff_pct": 2.0,
+                "accel_tag": "", "pattern_desc": "📋 换手首板(80分)"
+            }
+        ]
+
+        from ats.ui.daily_limit_up_dialog import compute_ladder_quality_sort_score
+        score_sf = compute_ladder_quality_sort_score(records[2]) # 四方精创 (破红线+双加速)
+        score_hl = compute_ladder_quality_sort_score(records[1]) # 华浪控股 (双加速)
+        score_yd = compute_ladder_quality_sort_score(records[0]) # 易点天下 (破红线+缺口加速)
+        score_jx = compute_ladder_quality_sort_score(records[3]) # 金现代 (普通缺口加速)
+        score_pf = compute_ladder_quality_sort_score(records[4]) # 浦发银行 (常规换手首板)
+
+        print(f"\n[天梯形态与质量量化得分验证] 四方精创: {score_sf} | 华浪控股: {score_hl} | 易点天下: {score_yd} | 金现代: {score_jx} | 浦发银行: {score_pf}")
+
+        # 👑 严格验证梯队单调递减
+        self.assertGreater(score_sf, score_hl, "破红线+双加速(四方精创) 必须高于 普通双加速(华浪控股)")
+        self.assertGreater(score_hl, score_yd, "普通双加速(华浪控股) 必须高于 破红线+缺口加速(易点天下)")
+        self.assertGreater(score_yd, score_jx, "破红线+缺口加速(易点天下) 必须高于 普通缺口加速(金现代)")
+        self.assertGreater(score_jx, score_pf, "普通缺口加速(金现代) 必须高于 常规换手首板(浦发银行)")
+
+        dialog.current_records = records
+        dialog.combo_time_slice.setCurrentText("⏱️ 全天全时段")
+        dialog.combo_tier_filter.setCurrentIndex(0)
+        # 切换为按【第6列: 形态与质量】降序排序
+        dialog.sort_level1_col = 6
+        dialog.sort_level1_asc = False
+        dialog._sort_col = None
+
+        class MockFavManager:
+            def get_favorite_stocks(self): return set()
+            def is_favorite_stock(self, code): return False
+        dialog.fav_manager = MockFavManager()
+
+        try:
+            dialog._apply_filter()
+            self.assertEqual(dialog.table.rowCount(), 5)
+
+            # 验证排序行位 100% 严格吻合梯队
+            self.assertEqual(dialog.table.item(0, 0).text(), "300468", "第1位应为破红线双加速四方精创")
+            self.assertEqual(dialog.table.item(1, 0).text(), "002787", "第2位应为双加速华浪控股")
+            self.assertEqual(dialog.table.item(2, 0).text(), "301171", "第3位应为破红线缺口加速易点天下")
+            self.assertEqual(dialog.table.item(3, 0).text(), "300830", "第4位应为普通缺口加速金现代")
+            self.assertEqual(dialog.table.item(4, 0).text(), "600000", "第5位应为常规换手首板浦发银行")
+
+            # 验证前景色渲染：易点天下与四方精创必须呈现 #00e5ff 电光青
+            item_yd = dialog.table.item(2, 6)
+            self.assertEqual(item_yd.foreground().color().name().lower(), "#00e5ff", "破红线标的应为 #00e5ff 电光青高亮")
+            self.assertIn("👑跨越前高阻力红线起爆", item_yd.toolTip(), "ToolTip 应包含跨越阻力红线起爆透视")
+
+            item_sf = dialog.table.item(0, 6)
+            self.assertEqual(item_sf.foreground().color().name().lower(), "#00e5ff", "破红线双加速标的应为 #00e5ff 电光青高亮")
+        finally:
+            dialog.close()
+
 
 if __name__ == "__main__":
     unittest.main()

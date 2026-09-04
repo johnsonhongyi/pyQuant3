@@ -56,6 +56,9 @@ _CONFIG_FILE_LOCK = threading.RLock()
 TIER_WEIGHTS: dict = {
     # ── 最强梯队：空间高度龙 ──
     "空间高度龙": 100, "👑 空间高度龙": 100, "【👑 空间高度龙】": 100,
+    # ── 👑 顶级擒龙：竞价破顶与破红线高开高走 (易点天下/四方精创模式) ──
+    "竞价破顶": 98, "👑 竞价破顶": 98, "👑 竞价破前高红线": 98, "【👑 竞价破顶】": 98,
+    "破红线主升": 96, "👑 破红线主升": 96, "破红线高开高走": 96, "👑 破红线高开高走": 96,
     # ── 强势连板 ──
     "连板接力": 90, "连板梯队": 90, "🚀 连板接力梯队": 90, "【🚀 连板接力梯队】": 90,
     "强势连板": 90, "涨停接力": 90,
@@ -111,6 +114,76 @@ def _get_tier_weight(tag: str) -> int:
         if k in tag and w > best:
             best = w
     return best
+
+
+def compute_ladder_quality_sort_score(r: Dict[str, Any]) -> float:
+    """
+    计算天梯形态与质量的绝对量化排序得分 (对齐龙头突击排序分级功能与竞价破顶擒龙模型)：
+    1. 梯队 1：👑双加速 + 👑破红线/竞价破顶 (基准 100,000分，顶配主升破阻力)；
+    2. 梯队 2：👑双加速 (基准 90,000分，开盘即最低+跳空缺口双重极速)；
+    3. 梯队 3：🚀缺口加速/⚡光脚加速 + 👑破红线/竞价破顶 (基准 80,000分，跳空破红线如易点天下/四方精创)；
+    4. 梯队 4：👑破红线高开高走 / 👑竞价破顶 (基准 70,000分，常规跨越阻力红线起爆)；
+    5. 梯队 5：🚀缺口加速 (基准 60,000分)；
+    6. 梯队 6：⚡光脚加速 (基准 50,000分)；
+    7. 梯队 7：常规形态 (基准 30,000分)；
+    8. 梯队 8：⚠️炸板分歧/尾盘偷袭 (基准 5,000分)；
+    同梯队内部微观决胜：
+    - 动能评分加成 (score * 10.0，0~1000分)
+    - 20cm带头大哥涨幅动能 (gain_bonus，0~100分，20cm胜过10cm)
+    - 连板阶梯高度加成 (cb * 20.0，0~100分)
+    - 开盘下影微小度 (low_diff_bonus，0~50分，下影越小越强)
+    """
+    if not r:
+        return 0.0
+    desc = str(r.get("pattern_desc", ""))
+    accel = str(r.get("accel_tag", ""))
+    tier = str(r.get("tier_tag", ""))
+
+    is_dual = bool(r.get("is_dual_accel") or ("双加速" in desc) or ("双加速" in accel))
+    is_gap = bool(r.get("is_gap_accel") or ("缺口加速" in desc) or ("缺口加速" in accel))
+    is_open_low = bool(r.get("is_open_low_accel") or ("光脚加速" in desc) or ("光脚加速" in accel))
+    is_break_red = bool(r.get("is_bidding_break_red") or r.get("is_break_red_run") or r.get("is_break_red") or
+                        ("破红线" in desc) or ("竞价破顶" in desc) or ("破红线" in accel) or ("竞价破顶" in accel) or ("破红线" in tier) or ("竞价破顶" in tier))
+    is_broken = bool(r.get("is_broken") or ("炸板" in desc) or ("炸板" in tier))
+
+    score = _safe_float(r.get("momentum_score", r.get("seal_quality_score", 0.0)))
+    if score <= 0.0 and desc:
+        import re
+        m = re.search(r'\((\d+)\s*分?\)', desc)
+        if m:
+            try:
+                score = float(m.group(1))
+            except Exception:
+                pass
+
+    diff_pct = _safe_float(r.get("low_diff_pct", 999.0), 999.0)
+    low_diff_bonus = max(0.0, 50.0 - min(50.0, diff_pct * 100.0)) # 0 ~ 50分
+    pct = _safe_float(r.get("pct", 0.0))
+    gain_bonus = min(20.0, max(0.0, pct)) * 5.0 # 0 ~ 100分 (20cm带头大哥赋能)
+    cb = _safe_int(r.get("consecutive_boards", r.get("max_consecutive", 0)))
+    cb_bonus = min(100.0, cb * 20.0) # 连板加成
+
+    # 刚性形态梯队基准分 (确保分层绝对单调递减，同层内用 score + 微观特征决胜，绝不越层)
+    if is_broken:
+        base = 5000.0
+    elif is_dual and is_break_red:
+        base = 100000.0
+    elif is_dual:
+        base = 90000.0
+    elif (is_gap or is_open_low) and is_break_red:
+        base = 80000.0
+    elif is_break_red:
+        base = 70000.0
+    elif is_gap:
+        base = 60000.0
+    elif is_open_low:
+        base = 50000.0
+    else:
+        base = 30000.0
+
+    total = base + score * 10.0 + gain_bonus + cb_bonus + low_diff_bonus
+    return round(total, 3)
+
 
 
 class SortKeyStr:
@@ -1348,27 +1421,24 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
                 return (0, -pct if is_descending else pct)
             return (1, 0.0)
 
-        # 4. 连板数 (同板数内部加速类型优先，同类型后再对比评分与开盘最低差异)
+        # 4. 连板数 (同板数内部形态与质量动能优先，同类型后再对比评分与开盘最低差异)
         elif col_idx == 4:
             cb = _safe_int(r.get("consecutive_boards", r.get("max_consecutive", 0)))
             is_zt = r.get("is_limit_up")
             if is_zt is None:
                 is_zt = (cb >= 1)
             if cb >= 1:
-                # 提取梯队与动能辅助权重，确保同板数内部自然对齐
+                q_score = compute_ladder_quality_sort_score(r)
                 tag = str(r.get("tier_tag", "")).strip()
                 tier_w = _get_tier_weight(tag)
-                score = _safe_float(r.get("momentum_score", r.get("seal_quality_score", 0.0)))
                 pct = _safe_float(r.get("pct", 0.0))
-                accel_rank = 0 if r.get("is_dual_accel") else (1 if (r.get("is_open_low_accel") or r.get("is_gap_accel")) else 2)
-                diff_pct = _safe_float(r.get("low_diff_pct", 999.0), 999.0)
                 if is_descending:
-                    return (0, -float(cb), accel_rank, -score, diff_pct, -tier_w, -pct)
+                    return (0, -float(cb), -q_score, -tier_w, -pct)
                 else:
-                    return (0, float(cb), -accel_rank, score, -diff_pct, tier_w, pct)
-            return (1, 0.0, 999, 0.0, 999.0, 0, 0.0)
+                    return (0, float(cb), q_score, tier_w, pct)
+            return (1, 0.0, 0.0, 0, 0.0)
 
-        # 5. 梯队分类 (核心修复：必须按 梯队基础权重 + 连板数 + 同加速类型后在对比评分)
+        # 5. 梯队分类 (核心修复：必须按 梯队基础权重 + 连板数 + 形态质量量化动能)
         elif col_idx == 5:
             tag = str(r.get("tier_tag", "")).strip()
             if tag and tag not in ("--", "-", "None"):
@@ -1385,39 +1455,24 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
                             cb = int(m.group(1))
                         except Exception:
                             cb = 0
-                score = _safe_float(r.get("momentum_score", r.get("seal_quality_score", 0.0)))
-                accel_rank = 0 if r.get("is_dual_accel") else (1 if (r.get("is_open_low_accel") or r.get("is_gap_accel")) else 2)
-                diff_pct = _safe_float(r.get("low_diff_pct", 999.0), 999.0)
+                q_score = compute_ladder_quality_sort_score(r)
                 if is_descending:
-                    return (0, -tier_w, -cb, accel_rank, -score, diff_pct)
+                    return (0, -tier_w, -cb, -q_score)
                 else:
-                    return (0, tier_w, cb, -accel_rank, score, -diff_pct)
-            return (1, 0, 0, 999, 0.0, 999.0)
+                    return (0, tier_w, cb, q_score)
+            return (1, 0, 0, 0.0)
 
-        # 6. 形态与质量 (👑核心修复：同加速类型后在对比动能评分与开盘下影微小度)
+        # 6. 形态与质量 (👑核心对齐龙头突击排序分级功能与竞价破顶擒龙模型)
         elif col_idx == 6:
             score = _safe_float(r.get("momentum_score", r.get("seal_quality_score", 0.0)))
             desc = str(r.get("pattern_desc", "")).strip()
-            if score <= 0.0 and desc:
-                import re
-                m = re.search(r'\((\d+)\s*分?\)', desc)
-                if m:
-                    try:
-                        score = float(m.group(1))
-                    except Exception:
-                        pass
             if score > 0.0 or (desc and desc not in ("--", "-", "None")):
-                cb = _safe_int(r.get("consecutive_boards", r.get("max_consecutive", 0)))
-                tag = str(r.get("tier_tag", "")).strip()
-                tier_w = _get_tier_weight(tag)
-                # 👑 同类型后在对比评分：双加速(0) > 单加速(1) > 常规形态(2)
-                accel_rank = 0 if r.get("is_dual_accel") else (1 if (r.get("is_open_low_accel") or r.get("is_gap_accel")) else 2)
-                diff_pct = _safe_float(r.get("low_diff_pct", 999.0), 999.0)
+                q_score = compute_ladder_quality_sort_score(r)
                 if is_descending:
-                    return (0, accel_rank, -score, diff_pct, -cb, -tier_w)
+                    return (0, -q_score)
                 else:
-                    return (0, -accel_rank, score, -diff_pct, cb, tier_w)
-            return (1, 999, 0.0, 999.0, 0, 0)
+                    return (0, q_score)
+            return (1, 0.0)
 
         # 7. 封单额(万) (必须 > 0 才是有效封单，0/-- 沉底)
         elif col_idx == 7:
@@ -1594,27 +1649,21 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
             for col_idx, is_desc in levels:
                 subkeys.append(self._make_column_subkey(r, col_idx, is_desc))
 
-            # 默认级联兜底（保证相同排序列内部按量化梯队与质量强度严格对齐，双加速与极小下影绝对优先）
-            # 1. 加速结构兜底优选 (👑同加速类型后在对比动能评分，且开盘与最低差异越小越优先)
-            dual_accel_rank = 0 if r.get("is_dual_accel") else (1 if (r.get("is_open_low_accel") or r.get("is_gap_accel")) else 2)
-            score_rank = -_safe_float(r.get("momentum_score", 0.0))
-            diff_rank = _safe_float(r.get("low_diff_pct", 999.0), 999.0)
-            accel_subkey = (dual_accel_rank, score_rank, diff_rank)
-
-            # 2. 梯队分类权重 (降序)
+            # 默认级联兜底（保证相同排序列内部按量化梯队与质量强度严格对齐，破红线加速/竞价破顶/双加速绝对优先）
+            # 1. 梯队分类权重 (降序: 空间高度龙 > 竞价破顶/破红线主升 > 连板接力 > 首板)
             tier_subkey = self._make_column_subkey(r, 5, True)
-            # 3. 形态与质量评分 (降序)
-            quality_subkey = self._make_column_subkey(r, 6, True)
-            # 4. 连板数 (降序)
+            # 2. 连板数 (降序)
             board_subkey = self._make_column_subkey(r, 4, True)
-            # 5. 涨幅% (降序)
+            # 3. 形态与质量评分 (降序: 绝对量化得分对齐龙头突击)
+            quality_subkey = self._make_column_subkey(r, 6, True)
+            # 4. 涨幅% (降序)
             pct_subkey = self._make_column_subkey(r, 3, True)
-            # 6. 封流比% (降序)
+            # 5. 封流比% (降序)
             seal_circ_subkey = self._make_column_subkey(r, 8, True)
-            # 7. 代码 (升序)
+            # 6. 代码 (升序)
             code_subkey = (0, code)
 
-            return (fav_rank, *subkeys, accel_subkey, tier_subkey, quality_subkey, board_subkey, pct_subkey, seal_circ_subkey, code_subkey)
+            return (fav_rank, *subkeys, tier_subkey, board_subkey, quality_subkey, pct_subkey, seal_circ_subkey, code_subkey)
 
         data_copy = list(records)
         data_copy.sort(key=compound_sort_key)
@@ -2355,7 +2404,12 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
                 desc_fg = QColor("#e2e2e5")
                 desc_bold = False
                 accel_tag = str(r.get("accel_tag", ""))
-                if "双加速" in desc_tag or accel_tag == "👑双加速":
+                is_break_red = bool(r.get("is_bidding_break_red") or r.get("is_break_red_run") or r.get("is_break_red") or 
+                                    ("破红线" in desc_tag) or ("竞价破顶" in desc_tag) or ("破红线" in accel_tag) or ("竞价破顶" in accel_tag))
+                if is_break_red:
+                    desc_fg = QColor("#00e5ff") # 电光青尊荣高亮 (擒龙带头大哥标识)
+                    desc_bold = True
+                elif "双加速" in desc_tag or accel_tag == "👑双加速":
                     desc_fg = QColor("#ffd700") # 金黄尊荣
                     desc_bold = True
                 elif "光脚加速" in desc_tag or accel_tag == "⚡光脚加速":
@@ -2401,7 +2455,8 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
                     f"【{code} {name} 盘中潜伏与上车深度透视】\n"
                     f"────────────────────────\n"
                     f"• 👑 加速结构: {accel_tag if accel_tag else '常规形态'}"
-                    f"{' (双加速: 跳空高开+开盘即最低)' if accel_tag == '👑双加速' else (' (开盘即最低/极小下影)' if accel_tag == '⚡光脚加速' else (' (跳空高开且缺口未补)' if accel_tag == '🚀缺口加速' else ''))}\n"
+                    f"{' (👑跨越前高阻力红线起爆)' if is_break_red else ''}"
+                    f"{' (双加速: 跳空高开+开盘即最低)' if '双加速' in accel_tag else (' (开盘即最低/极小下影)' if '光脚加速' in accel_tag else (' (跳空高开且缺口未补)' if '缺口加速' in accel_tag else ''))}\n"
                     f"• 📈 多日强势底蕴: {n_d_m_b} (近3日{zt_3d_v}板 | 近5日{zt_5d_v}板) | {'⚡【启动加速】' if is_launch_v else '正常推进'}\n"
                     f"• 📊 盘口开低跳空: 开{open_v:.2f} | 低{low_v:.2f} (下影差异: {diff_v:.2f}%) | 昨收{last_close:.2f} (跳空幅度: {open_jump_v:+.2f}%)\n"
                     f"• ⏰ 介入时机评估: {r.get('time_phase', '稳健定盘期')} ({r.get('time_tip', '')})\n"
@@ -2418,7 +2473,8 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
                     f"• 封单指标: 封单额 {seal_amt_wan:,.0f}万 | 封流比 {seal_to_circ:.2f}%\n"
                     f"• 大盘共振偏离: {rs_val:+.2f}% ({resonance})"
                 )
-                self._set_table_item(row_idx, col, desc_tag, user_data=momentum_score, fg=desc_fg, bg=fav_bg,
+                q_sort_score = compute_ladder_quality_sort_score(r)
+                self._set_table_item(row_idx, col, desc_tag, user_data=q_sort_score, fg=desc_fg, bg=fav_bg,
                                      align=Qt.AlignmentFlag.AlignCenter, is_bold=desc_bold, tooltip=tip,
                                      is_pinned=is_fav, pin_rank=pin_rank); col += 1
 
@@ -2550,15 +2606,27 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
                 self._broadcast_link_stock(c, n)
                 self.lbl_status.setText(f"🔗 已联动: {c} {n} (第 {row+1}/{self.table.rowCount()} 行)")
 
-    def _broadcast_link_stock(self, code: str, name: str):
-        """向全局主窗口与外部行情终端广播联动"""
+    def _broadcast_link_stock(self, code: str, name: str = ""):
+        """向全局主窗口与外部行情终端广播联动 (统一走 ATS 联动体系，尊重 cb_tdx/cb_ths/cb_vis 开关)"""
         try:
+            # 1. 优先使用 parent 主窗口联动
+            main_win = getattr(self, '_py_parent', None)
+            if main_win and hasattr(main_win, "link_stock"):
+                main_win.link_stock(code, name)
+                return
+            # 2. 从全局 QApplication 获取 ATSMainWindow 统一分发联动 (含外部终端开关与VIS通信)
             from ats.ui.main_window import ATSMainWindow
             app = QApplication.instance()
             if hasattr(app, 'main_window') and isinstance(app.main_window, ATSMainWindow):
                 app.main_window.link_stock(code, name)
-        except Exception:
-            pass
+                return
+            # 3. 兜底保护：若脱离 ATS 独立运行，默认仅推送 TDX，绝不强行开启 THS
+            from linkage_service import get_link_manager
+            if get_link_manager:
+                get_link_manager().push(code, flags={'tdx': True, 'ths': False, 'dfcf': False})
+        except Exception as ex:
+            logger.debug(f"天梯联动广播异常: {ex}")
+
 
     def keyPressEvent(self, event):
         """键盘事件处理：Alt+C 挂单，T 切换置顶，回车打开SBC分时图，空格切换关注，Escape 关闭/磁吸"""
@@ -2906,14 +2974,6 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         except Exception as e:
             logger.error(f"打开交易流水异常: {e}")
 
-    def _broadcast_link_stock(self, code: str, name: str = ""):
-        """广播联动股票代码到通达信/同花顺与全局行情"""
-        try:
-            from linkage_service import get_link_manager
-            if get_link_manager:
-                get_link_manager().push(code, flags={'tdx': True, 'ths': True, 'dfcf': False})
-        except Exception as ex:
-            logger.debug(f"天梯联动广播异常: {ex}")
 
     def _on_current_cell_changed(self, row: int, col: int, prev_row: int, prev_col: int):
         """响应键盘上下键或鼠标点击切换行，防抖联动外部终端并在底部状态栏展示决策提示"""
