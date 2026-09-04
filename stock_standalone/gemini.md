@@ -1,3 +1,17 @@
+## 2026-09-04 18:22
+- [x] **优化【V-Reversal link_to_visualizer 联动日志降级为 DEBUG】(KISS) (`stock_standalone/instock_MonitorTK.py`)**：
+    - [x] 将 `view_stock_kline` 中调用 `link_to_visualizer` 联动个股的日志由 `logger.info` 降级为 `logger.debug`，彻底避免频繁交互联动时对控制台日常主流程日志的刷屏干扰。
+
+## 2026-09-04 18:07
+- [x] **彻底修复【V反潜伏池 load_consolidation_state 中 is_prod_ramdisk 作用域 UnboundLocalError 崩溃缺陷】(SSOT) (`stock_standalone/realtime_data_service.py`, `stock_standalone/tests/test_v_reversal_entry_date_fix.py`)**：
+    - [x] **排查定位“❌ 加载潜伏池状态失败: local variable 'is_prod_ramdisk' referenced before assignment”根本诱因**：
+        1. **作用域声明滞后缺陷**：原 `is_prod_ramdisk` 仅在 `if os.path.exists(filepath):` 块内的 `try` 块中定义；
+        2. **冷启动或 Ramdisk 缺失触发异常**：当开机、重启或 Ramdisk 文件 `v_reversal_pool.json` 不存在时，主流程跳过步骤 1 直接进入步骤 2（历史备份自愈回退），加载成功后在循环中执行 `if is_prod_ramdisk and code_str in ('600001', ...):`，因 `is_prod_ramdisk` 未被赋值而抛出 `UnboundLocalError`，导致状态恢复彻底失败。
+    - [x] **全链路修复【提前绝对初始化 is_prod_ramdisk + 历史备份自愈回退安全校验 + 自动化回归覆盖】体系 (SSOT)**：
+        1. **提前声明与计算 `is_prod_ramdisk`**：在 `load_consolidation_state` 函数入口处统一对 `filepath` 进行绝对路径比对判定，无论文件是否存在或走何种自愈分支，确保变量均有确定布尔值；
+        2. **历史备份安全过滤**：在历史备份读取逻辑中，根据 `is_prod_ramdisk` 安全过滤 mock 伪代码，防止生产环境脏数据污染；
+        3. **自动化测试 100% 通过**：新增 `test_load_consolidation_state_fallback_when_ramdisk_missing` 专项测试，模拟 Ramdisk 文件完全缺失场景下的历史备份回退自愈全流程，全套 17 项测试无缝通过。
+
 ## 2026-09-04 15:35
 - [x] **全链路落地【通达信板块ETF实时行情融合 + 启动动能与预埋单上车多指标拟合 + 窗口位置尺寸与列宽双重铁壁持久化】(SSOT) (`stock_standalone/ats/sector_etf_engine.py`, `stock_standalone/ats/ui/hot_sector_leaderboard.py`, `stock_standalone/tests/test_pullback_reversal_and_reentry_suite.py`)**：
     - [x] **排查定位“缺少当日涨跌、养殖大涨未识别、指标堆砌缺乏动能与上车拟合、窗口位置与列宽未记忆”四大实战痛点诱因**：

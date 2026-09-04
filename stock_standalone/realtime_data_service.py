@@ -3067,6 +3067,7 @@ class MinuteKlineCache:
             
         state = None
         need_disk_resync = False
+        is_prod_ramdisk = (os.path.abspath(filepath) == os.path.abspath(str(cct.get_ramdisk_path("v_reversal_pool.json"))))
 
         # 1. 尝试从 Ramdisk 读取
         if os.path.exists(filepath):
@@ -3075,7 +3076,6 @@ class MinuteKlineCache:
                     candidate_state = json.load(f)
                 c_pool = candidate_state.get("v_reversal_pool", [])
                 # 校验有效性：潜伏池非空；且如果是生产 Ramdisk，严禁包含单测 mock 伪代码 (如 600001, 600002)
-                is_prod_ramdisk = (os.path.abspath(filepath) == os.path.abspath(str(cct.get_ramdisk_path("v_reversal_pool.json"))))
                 has_mock = is_prod_ramdisk and any(c in c_pool for c in ('600001', '600002', '600003'))
                 if len(c_pool) > 0 and not has_mock:
                     state = candidate_state
@@ -3093,7 +3093,7 @@ class MinuteKlineCache:
                     with gzip.open(b_file, "rt", encoding="utf-8") as f:
                         candidate_state = json.load(f)
                     c_pool = candidate_state.get("v_reversal_pool", [])
-                    has_mock = any(c in c_pool for c in ('600001', '600002', '600003'))
+                    has_mock = is_prod_ramdisk and any(c in c_pool for c in ('600001', '600002', '600003'))
                     if len(c_pool) > 0 and not has_mock:
                         state = candidate_state
                         need_disk_resync = True

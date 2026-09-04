@@ -5,6 +5,7 @@
 import os
 import sys
 import time
+import json
 import tempfile
 import pandas as pd
 import numpy as np
@@ -247,3 +248,55 @@ def test_favorite_and_manual_add_preserves_entry_date(kline_cache):
         
     assert state["entry_date"] == historical_date
     assert state["first_entry_date"] == historical_date
+
+
+def test_load_consolidation_state_fallback_when_ramdisk_missing():
+    """测试 6: 验证当 Ramdisk 文件缺失时，从历史备份自愈恢复绝不触发 is_prod_ramdisk 作用域异常"""
+    import gzip
+    from sys_utils import get_app_root
+    
+    cache = MinuteKlineCache(max_len=120, simulation_mode=True, verbose=False)
+    cache._consolidation_flags.clear()
+    cache._v_reversal_pool.clear()
+    
+    logs_dir = os.path.join(get_app_root(), "logs")
+    os.makedirs(logs_dir, exist_ok=True)
+    
+    test_backup_path = os.path.join(logs_dir, "v_reversal_pool_20991231_test.json.gz")
+    mock_data = {
+        "update_time": time.time(),
+        "v_reversal_pool": ["600519"],
+        "consolidation_flags": {
+            "600519": {
+                "phase": "首波拉升",
+                "entry_date": "2026-08-01",
+                "name": "贵州茅台"
+            }
+        }
+    }
+    
+    # 写入 gzip 历史备份
+    with gzip.open(test_backup_path, "wt", encoding="utf-8") as f:
+        json.dump(mock_data, f, ensure_ascii=False)
+        
+    non_existent_ramdisk = os.path.join(tempfile.gettempdir(), "test_non_existent_v_pool.json")
+    if os.path.exists(non_existent_ramdisk):
+        os.remove(non_existent_ramdisk)
+        
+    try:
+        # 调用加载：此时 non_existent_ramdisk 文件完全不存在，必须触发备份回溯自愈
+        success = cache.load_consolidation_state(non_existent_ramdisk)
+        assert success is True
+        assert "600519" in cache.get_v_reversal_pool()
+        flags = cache.get_consolidation_flags("600519")
+        assert flags.get("phase") == "WAVE_UP"
+        assert flags.get("name") == "贵州茅台"
+        # 且成功自愈写回到该目标路径
+        assert os.path.exists(non_existent_ramdisk)
+    finally:
+        if os.path.exists(test_backup_path):
+            os.remove(test_backup_path)
+        if os.path.exists(non_existent_ramdisk):
+            os.remove(non_existent_ramdisk)
+        if os.path.exists(non_existent_ramdisk + ".tmp"):
+            os.remove(non_existent_ramdisk + ".tmp")
