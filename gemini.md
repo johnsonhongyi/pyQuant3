@@ -1,3 +1,80 @@
+## 2026-09-04 15:35
+- [x] **全链路落地【通达信板块ETF实时行情融合 + 启动动能与预埋单上车多指标拟合 + 窗口位置尺寸与列宽双重铁壁持久化】(SSOT) (`stock_standalone/ats/sector_etf_engine.py`, `stock_standalone/ats/ui/hot_sector_leaderboard.py`, `stock_standalone/tests/test_pullback_reversal_and_reentry_suite.py`)**：
+    - [x] **排查定位“缺少当日涨跌、养殖大涨未识别、指标堆砌缺乏动能与上车拟合、窗口位置与列宽未记忆”四大实战痛点诱因**：
+        1. **盘中实时数据缺失与现价滞后**：原系统直接读取本地静态 `.day` 文件，盘中通达信尚未生成当日日线，导致养殖 ETF (159865) 今日低开高走大涨 +4.60% 无法被识别，现价仍停留在昨天收盘 5.430，表格缺失【今日涨跌%】列；
+        2. **指标堆砌未拟合实战决策**：指标众多但缺乏联合拟合，操盘手无法直观获知“哪些板块具备爆发启动动能”、“预埋单该在什么价位挂单上车”；
+        3. **持久化失效与居中重置**：`SectorETFRadarDialog` 被通过 `dlg.exec()` 模态调用，被 Qt 底层强行居中覆盖位置；列宽防抖定时器未在窗口关闭时强制落盘导致列宽未保存。
+    - [x] **全链路落地【秒级实时行情融合 + 启动动能/预埋上车多指标拟合 + 独立窗口与列宽铁壁持久化】体系 (SSOT)**：
+        1. **秒级实时盘口与当日涨跌%无缝融合 (`ats/sector_etf_engine.py`)**：
+           - `TDXRealtimeFetcher.get_instance().get_security_quotes_safe(all_codes)` 毫秒级批量拉取 20 大基准 ETF 实时盘口，动态将当日实时数据合入日 K 线末尾；
+           - 计算出精确的今日涨跌%（如养殖ETF实时现价 5.680，大涨 +4.60%），雷达表新增第 5 列【今日涨跌%】（红绿高亮 + 高精排序）；
+        2. **多指标联合拟合：启动动能评分与预埋单上车建议 (`ats/sector_etf_engine.py`)**：
+           - 结合前 1~3 日回踩支撑、今日低开高走拔起、反转位突破、通道倾角等多维指标，提炼出 5 级实战形态：
+             - `🚀 回踩起爆`（92~99分，⭐⭐⭐⭐⭐ 顶配启动，如养殖 ETF）：预埋建议 `"🎯 现价追入 / 回踩支撑{supp_p:.3f}预埋"`；
+             - `👑 突破加速`（86~93分，⭐⭐⭐⭐）：`"🚀 顺势持股 / 回踩中轨{ch_mid:.3f}预埋"`；
+             - `💎 支撑企稳`（78~85分，⭐⭐⭐，如黄金 ETF）：`"💎 支撑位{supp_p:.3f}挂单预埋"`；
+             - `🟡 箱体震荡`（45~70分，⭐⭐）：`"🟡 支撑{supp_p:.3f}吸 / 阻力{ch_upper:.3f}抛"`；
+             - `🔴 空头破位`（10~35分，⛔ 严防诱多）：`"⛔ 严禁上车(板块破位风险)"`；
+           - 雷达表新增第 6 列【启动动能】与第 7 列【预埋上车建议】，默认按启动动能降序置顶最强起爆赛道；
+        3. **窗口位置尺寸与列宽双重铁壁持久化 (`ats/ui/hot_sector_leaderboard.py`)**：
+           - 彻底废除 `dlg.exec()` 居中覆盖模式，改用主窗口单例非模态独立窗口（`show()`, `raise_()`, `activateWindow()`）；
+           - 重写 `moveEvent`、`resizeEvent`，带防抖自动保存 geometry；在 `closeEvent` 与 `hideEvent` 中显式执行 `_save_window_geometry()` 与 `_save_header_state()`；
+           - 升级为版本化键名 `sector_etf_radar_dialog_geo_v2`、`sector_etf_radar_dialog_header_v2`、`sector_etf_radar_sort_col_v2`，彻底告别历史脏配置干扰；
+    - [x] **自动化测试与全系统回归 100% 全部 PASSED**：
+        - `tests/test_pullback_reversal_and_reentry_suite.py` 6 项测试全部通过；
+        - `test_per1d_parity_suite.py`（2项）、`test_alert_cooling_and_source_suite.py`（2项）、`test_daily_limit_up_dialog.py`（10项）、`test_sector_strength_and_detail_parity.py`（21项）共 41 项自动化测试 100% 全部 PASSED！
+
+## 2026-09-04 15:05
+- [x] **全链路落地【全市场板块ETF趋势雷达：点击表头全指标高精排序 + 窗口尺寸坐标持久化 + 列宽持久化 + 上下键极速行情联动】(SSOT) (`stock_standalone/ats/ui/hot_sector_leaderboard.py`, `stock_standalone/tests/test_pullback_reversal_and_reentry_suite.py`)**：
+    - [x] **排查定位“雷达无法排序、窗口位置与列宽不记忆、缺少键盘上下键联动”四大体验与操盘痛点诱因**：
+        1. **缺乏表头排序能力**：原 `SectorETFRadarDialog` 为只读静态呈现，用户无法按通道量化评分、现价、支撑位、反转位或动能进行快速升序/降序筛选，无法迅速提炼当前全市场最强与触底企稳板块；
+        2. **缺乏窗口尺寸与位置记忆**：窗口关闭后再打开被 Qt 默认居中或尺寸重置，无法配合操盘手多屏与盯盘特定窗口布局；
+        3. **缺乏列宽持久化记忆**：用户手动拖拽调宽“通道量化诊断”或“细分概念”列后，重新打开窗口全部恢复默认，重复调整极耗精力；
+        4. **缺乏键盘导航联动**：用户需要频繁使用鼠标逐行双击，无法像通达信行情表一样使用键盘 `↑` / `↓` / `PageUp` / `PageDown` 极速扫视各赛道日 K 线。
+    - [x] **全链路落地【高精全列排序 + 窗口位置与列宽双重持久化 + 键盘方向键/单击极速联动】体系 (SSOT)**：
+        1. **点击表头全指标高精度量化排序 (`ats/ui/hot_sector_leaderboard.py`)**：
+           - 15 列全部升级为 `NumericTableWidgetItem`，现价、支撑位、反转位、量化评分、通道位置、倾角、5日/20日动能均绑定不可变浮点数值 `raw_val`，形态评级赋予十六进制梯队打分，杜绝 Qt 字典序乱序；
+           - 接入 `horizontalHeader().sortIndicatorChanged`，自动持久化记忆用户最后选择的排序列与排序方向；
+           - 填充数据前后安全调用 `setSortingEnabled(False)` 与 `True`，默认按【列 8 通道量化评分】降序排列，确保高分领涨与触底赛道永远置顶；
+        2. **窗口位置与尺寸（Geometry）安全持久化**：
+           - `_save_window_geometry`：在 `closeEvent` 与 `hideEvent` 触发时自动将 `x, y, w, h` 保存至配置文件；
+           - `_restore_window_geometry`：打开雷达窗口时自动读取并结合主屏幕 `availableGeometry()` 进行防出界边缘兜底，兼顾多显示器热插拔；
+        3. **列宽与列布局持久化记忆**：
+           - 接入 `setup_header_persistence(self.table, "sector_etf_radar_dialog_header_v1", default_widths=default_widths)`，定义 15 列黄金尺寸，用户拖拽列宽实时记忆；
+        4. **键盘上下键导航与单击极速行情联动**：
+           - 拦截 `keyPressEvent`（`Key_Up`、`Key_Down`、`Key_PageUp`、`Key_PageDown`、`Return`、`Enter`）并连接 `currentCellChanged` 与 `itemClicked`；
+           - 实现 `_link_row_by_index`，配备 `_last_linked_code` 防抖与同一行内单元格移动防重复联动机制；
+           - 优先调用父级 `_link_stock_by_code`（ATS 主窗口多通道联动系统），兜底调用原生 `link_tdx`；
+    - [x] **自动化测试与全系统回归 100% 全部 PASSED**：
+        - `tests/test_pullback_reversal_and_reentry_suite.py` 扩展测试 6，验证表头高精排序、升序降序单调性、窗口位置记忆读写、Down 键联动与防重机制，6 项测试全部通过；
+        - `test_per1d_parity_suite.py`（2项）、`test_alert_cooling_and_source_suite.py`（2项）等全绿通过。
+
+## 2026-09-04 14:45
+- [x] **全链路落地【通达信板块ETF通道支撑与反转评级引擎 + 20大热门核心概念扩充 + 早盘破位孤狼诱多脉冲拦截护城河 + 全景通道雷达透视】(SSOT) (`stock_standalone/ats/sector_etf_engine.py`, `stock_standalone/ats/tdx_realtime_fetcher.py`, `stock_standalone/ats/ui/hot_sector_leaderboard.py`, `stock_standalone/tests/test_pullback_reversal_and_reentry_suite.py`)**：
+    - [x] **排查定位“2个月收益率单一评价滞后过久、热门概念ETF覆盖不足、早盘异动全军覆灭”三大实战核心痛点诱因**：
+        1. **收益率单一指标严重滞后缺陷**：原系统仅基于“近2个月涨跌幅”评估板块大势，无法敏锐捕捉波段触底企稳与反转拐点（如黄金 ETF 近期回调但回踩通道支撑 9.18元 企稳筑底，证券 ETF 回踩 1.10元 支撑反转），单一 60 日涨幅指标滞后且脱离实战；
+        2. **科技与核心赛道概念缺失**：缺少 AI 人工智能、影视传媒、游戏、机器人、云计算、光伏、煤炭、银行等高频热门题材映射；
+        3. **早盘异动全军覆灭的病灶**：在盘中连续撮合阶段，进攻型买点（`先锋突破`、`主动扫买`）判定顺序在防守拦截之前；当处于空头破位下行通道（或跌破支撑）的弱势板块个股在早盘孤狼拉升脉冲 3%~5% 时，被误归为先锋突破或主动扫买，诱导操盘手追高，随后板块跳水引发早盘异动全军覆灭。
+    - [x] **全链路落地【通达信自动通道支撑与量化评分 + 20大赛道扩充 + 空头孤狼诱多拦截 + 雷达通道透视】体系 (SSOT)**：
+        1. **跟个股完全一致：通达信自动通道 (60,1,5,6) 支撑评级引擎 (`ats/sector_etf_engine.py`)**：
+           - 毫秒级二进制读取 60 根日 K 线，调用 `tdd.calc_trend_channel` 精准计算上升通道支撑线 (`supp_p`)、反转确认位 (`reversal_p`)、通道三轨、倾角 (`ch_slope_deg`) 与通道位置 (`ch_pos%`)；
+           - 权威建立通道趋势量化评级：`👑 突破加速`、`🟢 上升通道`、`💎 支撑企稳` (如黄金 85.11/9.18 企稳)、`🟡 箱体震荡`、`🔴 空头破位`；
+           - 输出 0~100 分综合量化通道评分 (`channel_score`) 与 5日/20日短线动能，彻底摆脱 2 个月涨跌幅的滞后；
+        2. **扩充至 20 大黄金核心赛道与倒排索引**：
+           - 涵盖：AI人工智能 (159819)、影视传媒 (512980)、游戏 (159869)、机器人 (562500)、云计算 (516510)、通信 (515880)、半导体 (512480)、计算机 (512720)、养殖 (159865)、农业 (159825)、黄金 (518880)、电力 (159611)、光伏 (515790)、煤炭 (515220)、消费 (159928)、证券 (512880)、银行 (512800)、军工 (512660)、汽车 (515700)、医药 (512010)、有色 (159980)；
+        3. **早盘破位孤狼诱多脉冲拦截护城河 (`ats/tdx_realtime_fetcher.py`)**：
+           - 将【板块通道破位防诱多拦截】提升至 `主动扫买`、`先锋突破`、`反身低吸` 之前；
+           - 当个股所属板块 ETF 处于空头破位通道（`is_down_trend=True` 或 `channel_score < 35.0`）且板块共振数 $\le 1$ 时，坚决定性为 **【⚠️ 诱多脉冲(板块破位)】**；
+           - 建议买入区间直接标定 `"-- (严禁追高/板块破位诱多)"`，打分压制在 2,000 分沉底，彻底杜绝诱导追高导致“全军覆灭”；
+        4. **主表第 2 列显性化与全市场 ETF 通道雷达重构 (`ats/ui/hot_sector_leaderboard.py`)**：
+           - 主表格第 2 列文字呈现：`猪肉 [🟢养殖 支撑5.40]`、`黄金 [💎黄金 企稳85.11]`、`半导体 [🔴半导体 破位]`；
+           - 单元格注入 `raw_val=etf_channel_score`，点击第 2 列表头即可按板块通道量化健康度进行高精排序！ToolTip 呈现完整三轨、支撑、反转与短线动能；
+           - 重构 `SectorETFRadarDialog` 为 15 列通道透视雷达：涵盖支撑位（站上青绿高亮、跌破暗红）、反转位、量化评分、通道位置、倾角与 5日/20日动能，按量化评分降序排列；
+           - 右键菜单完善通道支撑位、反转位与三轨量化诊断。
+    - [x] **自动化测试与全系统回归 100% 全部 PASSED**：
+        - `test_pullback_reversal_and_reentry_suite.py` 6 项专项测试全部通过；
+        - `test_per1d_parity_suite.py`（2项）、`test_alert_cooling_and_source_suite.py`（2项）、`test_daily_limit_up_dialog.py`（10项）、`test_sector_strength_and_detail_parity.py`（21项）共 41 项自动化测试 100% 全部 PASSED！
+
 ## 2026-09-04 14:05
 - [x] **彻底根治龙头突击右键菜单 C++ 对象析构崩溃 Bug & 全链路落地【全市场板块ETF趋势雷达 + 双击一键聚焦板块成分股 + 主表ETF趋势显性化】(SSOT) (`stock_standalone/ats/ui/hot_sector_leaderboard.py`, `stock_standalone/ats/sector_etf_engine.py`, `stock_standalone/tk_gui_modules/qt_table_utils.py`, `stock_standalone/tests/test_pullback_reversal_and_reentry_suite.py`)**：
     - [x] **排查定位“右键调出分时阶梯策略报错 wrapped C/C++ object has been deleted、板块大级别主升隐蔽、无法迅速定位热点与成分股”三大痛点诱因**：
