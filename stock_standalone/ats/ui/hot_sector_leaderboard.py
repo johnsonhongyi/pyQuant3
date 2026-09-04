@@ -69,6 +69,105 @@ def _safe_int(val: Any, default: int = 0) -> int:
         return default
 
 
+def compute_buy_type_sort_score(item: Dict[str, Any]) -> float:
+    """
+    计算买点类型排序的绝对量化得分 (Buy Type Sort Score, 降序排列时分值越高越优先/越强)：
+    严格铁律体系：
+    1. 👑双加速·👑领涨龙头 (双加速 + 领涨龙头/一字/爆量突破) -> 梯队基准 100,000
+    2. 👑双加速·⚡扫盘冲板 / 🔥主动扫买                   -> 梯队基准 92,000
+    3. 👑双加速·🚀先锋突破                               -> 梯队基准 88,000
+    4. 👑双加速·其他                                     -> 梯队基准 84,000
+    5. 🚀缺口加速·👑领涨龙头                             -> 梯队基准 78,000
+    6. ⚡光脚加速·👑领涨龙头                             -> 梯队基准 72,000
+    7. 👑领涨龙头 (常规形态)                             -> 梯队基准 66,000
+    8. 🚀缺口加速·⚡扫盘冲板 / 🔥主动扫买                -> 梯队基准 60,000
+    9. ⚡光脚加速·⚡扫盘冲板 / 🔥主动扫买                -> 梯队基准 54,000
+    10. ⚡扫盘冲板 / 🔥主动扫买 (常规形态)                -> 梯队基准 48,000
+    11. 🚀缺口加速·🚀先锋突破                            -> 梯队基准 42,000
+    12. ⚡光脚加速·🚀先锋突破                            -> 梯队基准 36,000
+    13. 🚀先锋突破 (常规形态)                            -> 梯队基准 30,000
+    14. 💎反身低吸 / 💎地量起爆 (回踩/低吸)               -> 梯队基准 22,000
+    15. 📋蓄势观察 (常规形态)                            -> 梯队基准 10,000
+    16. ⚠️破位转弱 / ⚠️诱多破位 (弱势出货防坑)           -> 梯队基准 1,000
+    """
+    if "buy_type_sort_score" in item:
+        try:
+            return float(item["buy_type_sort_score"])
+        except Exception:
+            pass
+
+    buy_t = str(item.get("buy_type", ""))
+    tag = str(item.get("buy_tag", ""))
+    
+    is_dual = bool(item.get("is_dual_accel")) or ("双加速" in buy_t)
+    is_gap = bool(item.get("is_gap_accel")) or ("缺口加速" in buy_t)
+    is_open_low = bool(item.get("is_open_low_accel")) or ("光脚加速" in buy_t)
+    
+    is_leader = (tag in ("LEADER", "BID_LIMIT", "BID_BREAKOUT", "IPO_BID_SURGE") or 
+                 any(k in buy_t for k in ("领涨龙头", "竞价领涨", "竞价一字", "爆量突破", "首日真金抢筹")))
+    is_surge = (tag in ("SURGE", "BID_SURGE") or 
+                any(k in buy_t for k in ("扫盘冲板", "主动扫买", "竞价抢筹")))
+    is_breakout = (tag == "BREAKOUT" or "先锋突破" in buy_t)
+    is_pullback = (tag in ("PULLBACK", "BID_REVERSAL") or 
+                   any(k in buy_t for k in ("地量起爆", "反身低吸", "弱转强")))
+    is_weak = (tag in ("WEAK", "TRAP") or 
+               any(k in buy_t for k in ("破位", "诱多", "转弱")))
+    
+    if is_dual:
+        if is_leader:
+            base = 100000.0
+        elif is_surge:
+            base = 92000.0
+        elif is_breakout:
+            base = 88000.0
+        elif is_weak:
+            base = 2000.0
+        else:
+            base = 84000.0
+    elif is_gap and is_leader:
+        base = 78000.0
+    elif is_open_low and is_leader:
+        base = 72000.0
+    elif is_leader:
+        base = 66000.0
+    elif is_gap and is_surge:
+        base = 60000.0
+    elif is_open_low and is_surge:
+        base = 54000.0
+    elif is_surge:
+        base = 48000.0
+    elif is_gap and is_breakout:
+        base = 42000.0
+    elif is_open_low and is_breakout:
+        base = 36000.0
+    elif is_breakout:
+        base = 30000.0
+    elif is_pullback:
+        base = 22000.0
+    elif is_weak:
+        base = 1000.0
+    else:
+        if is_gap:
+            base = 16000.0
+        elif is_open_low:
+            base = 13000.0
+        else:
+            base = 10000.0
+
+    alpha_score = float(item.get("alpha_score", 0.0) or 0.0)
+    pct = float(item.get("pct", 0.0) or 0.0)
+    low_diff = float(item.get("low_diff_pct", 999.0) or 999.0)
+    bid_p = float(item.get("bid_pressure", 50.0) or 50.0)
+    
+    fine_tune = (
+        min(100.0, max(0.0, alpha_score)) * 5.0 +
+        min(20.0, max(-10.0, pct)) * 10.0 +
+        max(0.0, min(1.0, 1.0 - (low_diff if low_diff < 900 else 1.0))) * 50.0 +
+        min(100.0, max(0.0, bid_p)) * 0.5
+    )
+    return round(base + fine_tune, 3)
+
+
 def get_leaderboard_headers(extra_cols=None):
     """组合跟单看板的列名与自定义列映射"""
     if extra_cols is None:
@@ -1087,8 +1186,15 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
             if it:
                 curr_selected_code = it.text().strip()
 
-        saved_scroll_v = self.table.verticalScrollBar().value()
+        v_bar = self.table.verticalScrollBar()
+        saved_scroll_v = v_bar.value()
+        max_scroll_v = v_bar.maximum()
         saved_scroll_h = self.table.horizontalScrollBar().value()
+
+        # 智能锁定视口方向：若用户当前处于最顶端观察区 (<= 5 像素) 则标记锁定在最强方向；
+        # 若处于最底端则锁定在最弱方向；刷新绝不跟随选中的 code 乱滚！
+        is_at_top = (saved_scroll_v <= 5)
+        is_at_bottom = (max_scroll_v > 10 and saved_scroll_v >= max_scroll_v - 5)
 
         h_header = self.table.horizontalHeader()
         sort_col = h_header.sortIndicatorSection()
@@ -1179,10 +1285,10 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
                 filtered.append(r)
 
         # 👑 重点关注优先置顶排序：无论当前处于何种筛选模式，重点关注的 code 永远优先置顶排在最前！
-        # 👑 同加速类型后在对比 Alpha 得分与开盘下影微小度：双加速 > 单加速 > 常规，同类型内得分最高优先
+        # 👑 买点类型与加速形态铁律梯队：双加速领涨 > 双加速扫盘/先锋 > 缺口加速领涨 > 光脚加速领涨 > 常规领涨 > 缺口加速扫盘 > 光脚加速扫盘 > 常规扫盘 > 先锋突破 > 回踩低吸 > 蓄势观察 > 破位转弱
         filtered.sort(key=lambda x: (
             0 if str(x.get("code", "")).strip().zfill(6) in fav_set else 1,
-            0 if x.get("is_dual_accel") else (1 if (x.get("is_open_low_accel") or x.get("is_gap_accel")) else 2),
+            -compute_buy_type_sort_score(x),
             -float(x.get("alpha_score", 0.0)),
             float(x.get("low_diff_pct", 999.0))
         ))
@@ -1208,7 +1314,7 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
         if 0 <= sort_col < len(self.headers):
             self.table.sortItems(sort_col, sort_order)
 
-        # 5. 恢复选中的焦点行
+        # 5. 恢复选中的焦点行 (仅更新选中状态，绝不随选中的 code 滚动视口)
         if curr_selected_code:
             for r_idx in range(self.table.rowCount()):
                 it = self.table.item(r_idx, 0)
@@ -1216,10 +1322,28 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
                     self.table.setCurrentCell(r_idx, 0)
                     break
 
-        # 6. 恢复滚动条位置 (杜绝跳屏)
-        self.table.verticalScrollBar().setValue(saved_scroll_v)
+        # 6. 视口方向绝对锁定：让视图始终稳定停留在用户观察的方向 (最强方向/最弱方向/原位)，杜绝跳屏与被拉扯
+        if is_at_top:
+            v_bar.setValue(0)
+        elif is_at_bottom:
+            v_bar.setValue(v_bar.maximum())
+        else:
+            v_bar.setValue(min(saved_scroll_v, v_bar.maximum()))
         self.table.horizontalScrollBar().setValue(saved_scroll_h)
         self.table.blockSignals(False)
+
+        # 进一步在事件循环下一 tick 确保视口不被 Qt 内部延迟滚动篡改
+        def _ensure_locked_scroll():
+            try:
+                if is_at_top:
+                    v_bar.setValue(0)
+                elif is_at_bottom:
+                    v_bar.setValue(v_bar.maximum())
+                else:
+                    v_bar.setValue(min(saved_scroll_v, v_bar.maximum()))
+            except Exception:
+                pass
+        QTimer.singleShot(0, _ensure_locked_scroll)
 
         # 7. 更新底部统计栏与各板块领跑个股
         total_cnt = len(filtered)
@@ -1544,7 +1668,7 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
             it_sec.setBackground(QBrush(fav_bg))
         self.table.setItem(row_idx, 2, it_sec)
 
-        # 3: 买点类型 (支持加速结构详细透视 ToolTip)
+        # 3: 买点类型 (支持加速结构详细透视 ToolTip 与量化排序权值)
         accel_t = str(r.get("accel_tag", ""))
         open_v = _safe_float(r.get("open", 0.0))
         low_v = _safe_float(r.get("low", 0.0))
@@ -1555,7 +1679,8 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
                    f"• 👑 加速结构: {accel_t if accel_t else '常规波动'}\n" \
                    f"• 📊 盘口开低跳空: 开{open_v:.2f} | 低{low_v:.2f} (下影差异: {diff_v:.2f}%) | 昨收{lc_v:.2f} (跳空幅度: {jump_v:+.2f}%)\n" \
                    f"• 🎯 决策依据: {reason}"
-        it_type = NumericTableWidgetItem(buy_type, is_pinned=is_fav, pin_rank=pin_rank)
+        buy_type_score = compute_buy_type_sort_score(r)
+        it_type = NumericTableWidgetItem(buy_type, is_pinned=is_fav, pin_rank=pin_rank, raw_val=buy_type_score)
         it_type.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
         it_type.setForeground(QBrush(type_color))
         it_type.setBackground(QBrush(type_bg))
@@ -1564,7 +1689,7 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
         self.table.setItem(row_idx, 3, it_type)
 
         # 4: 现价
-        it_p = NumericTableWidgetItem(f"{price:.2f}", is_pinned=is_fav, pin_rank=pin_rank)
+        it_p = NumericTableWidgetItem(f"{price:.2f}", is_pinned=is_fav, pin_rank=pin_rank, raw_val=price)
         it_p.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         it_p.setForeground(QBrush(pct_color))
         if is_fav:
@@ -1572,7 +1697,7 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
         self.table.setItem(row_idx, 4, it_p)
 
         # 5: 涨幅%
-        it_pct = NumericTableWidgetItem(f"{pct:+.2f}%", is_pinned=is_fav, pin_rank=pin_rank)
+        it_pct = NumericTableWidgetItem(f"{pct:+.2f}%", is_pinned=is_fav, pin_rank=pin_rank, raw_val=pct)
         it_pct.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         it_pct.setForeground(QBrush(pct_color))
         it_pct.setFont(font_bold)
@@ -1603,7 +1728,7 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
             vel_str = "0.0%"
             vel_color = QColor("#888899")
 
-        it_vel = NumericTableWidgetItem(vel_str, is_pinned=is_fav, pin_rank=pin_rank)
+        it_vel = NumericTableWidgetItem(vel_str, is_pinned=is_fav, pin_rank=pin_rank, raw_val=vel_pct)
         it_vel.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         it_vel.setForeground(QBrush(vel_color))
         if is_fav:
@@ -1623,7 +1748,7 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
 
         # 7: 换手%
         turn_str = f"{turnover:.2f}%" if turnover > 0 else "--"
-        it_turn = NumericTableWidgetItem(turn_str, is_pinned=is_fav, pin_rank=pin_rank)
+        it_turn = NumericTableWidgetItem(turn_str, is_pinned=is_fav, pin_rank=pin_rank, raw_val=turnover)
         it_turn.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         it_turn.setForeground(QBrush(QColor("#ffe066" if turnover >= 5.0 else "#c0c0d0")))
         if is_fav:
@@ -1631,7 +1756,7 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
         self.table.setItem(row_idx, 7, it_turn)
 
         # 8: 量比
-        it_vr = NumericTableWidgetItem(f"{vol_r:.2f}", is_pinned=is_fav, pin_rank=pin_rank)
+        it_vr = NumericTableWidgetItem(f"{vol_r:.2f}", is_pinned=is_fav, pin_rank=pin_rank, raw_val=vol_r)
         it_vr.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         vr_color = QColor("#ff4466") if vol_r >= 2.5 else (QColor("#ffaa44") if vol_r >= 1.5 else QColor("#e2e2e5"))
         it_vr.setForeground(QBrush(vr_color))
@@ -1640,7 +1765,18 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
         self.table.setItem(row_idx, 8, it_vr)
 
         # 9: 盘口意图
-        it_intent = NumericTableWidgetItem(intent, is_pinned=is_fav, pin_rank=pin_rank)
+        intent_score = 50.0
+        if "封板" in intent or "抢筹" in intent:
+            intent_score = 95.0
+        elif "扫买" in intent:
+            intent_score = 85.0
+        elif "托底" in intent:
+            intent_score = 75.0
+        elif "压盘" in intent:
+            intent_score = 40.0
+        elif "砸盘" in intent:
+            intent_score = 30.0
+        it_intent = NumericTableWidgetItem(intent, is_pinned=is_fav, pin_rank=pin_rank, raw_val=intent_score)
         it_intent.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
         if "扫买" in intent or "抢筹" in intent:
             it_intent.setForeground(QBrush(QColor("#ff3355")))
@@ -1659,7 +1795,7 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
         self.table.setItem(row_idx, 9, it_intent)
 
         # 10: 分时攻角
-        it_sl = NumericTableWidgetItem(f"{slope:.0f}", is_pinned=is_fav, pin_rank=pin_rank)
+        it_sl = NumericTableWidgetItem(f"{slope:.0f}", is_pinned=is_fav, pin_rank=pin_rank, raw_val=slope)
         it_sl.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         it_sl.setForeground(QBrush(QColor("#00ffcc") if slope >= 60 else QColor("#aaaaaa")))
         if is_fav:
@@ -1667,7 +1803,7 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
         self.table.setItem(row_idx, 10, it_sl)
 
         # 11: VWAP偏离
-        it_dev = NumericTableWidgetItem(f"{vwap_dev:+.1f}%", is_pinned=is_fav, pin_rank=pin_rank)
+        it_dev = NumericTableWidgetItem(f"{vwap_dev:+.1f}%", is_pinned=is_fav, pin_rank=pin_rank, raw_val=vwap_dev)
         it_dev.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         dev_color = QColor("#ff88aa") if vwap_dev > 0 else QColor("#66aacc")
         it_dev.setForeground(QBrush(dev_color))
@@ -1676,7 +1812,7 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
         self.table.setItem(row_idx, 11, it_dev)
 
         # 12: DFF (多日偏离度)
-        it_dff = NumericTableWidgetItem(f"{dff:+.2f}", is_pinned=is_fav, pin_rank=pin_rank)
+        it_dff = NumericTableWidgetItem(f"{dff:+.2f}", is_pinned=is_fav, pin_rank=pin_rank, raw_val=dff)
         it_dff.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         it_dff.setForeground(QBrush(QColor(COLOR_UP if dff > 0 else COLOR_DOWN)))
         if is_fav:
@@ -1686,7 +1822,8 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
         # 13: Rank (强度排位，支持全市场 1~9999 真实排位)
         rank_int = _safe_int(rank_val, 0)
         rank_str = str(rank_int) if rank_int > 0 else "--"
-        it_rank = NumericTableWidgetItem(rank_str, is_pinned=is_fav, pin_rank=pin_rank)
+        rank_sort_val = rank_int if rank_int > 0 else 99999
+        it_rank = NumericTableWidgetItem(rank_str, is_pinned=is_fav, pin_rank=pin_rank, raw_val=rank_sort_val)
         it_rank.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
         it_rank.setForeground(QBrush(QColor("#FFD700" if (0 < rank_int < 500) else "#e2e2e5")))
         if is_fav:
@@ -1694,7 +1831,7 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
         self.table.setItem(row_idx, 13, it_rank)
 
         # 14: DFF2 (2日加速)
-        it_d2 = NumericTableWidgetItem(f"{dff2:+.2f}", is_pinned=is_fav, pin_rank=pin_rank)
+        it_d2 = NumericTableWidgetItem(f"{dff2:+.2f}", is_pinned=is_fav, pin_rank=pin_rank, raw_val=dff2)
         it_d2.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         it_d2.setForeground(QBrush(QColor(COLOR_UP if dff2 > 0 else COLOR_DOWN)))
         if is_fav:
@@ -1702,7 +1839,7 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
         self.table.setItem(row_idx, 14, it_d2)
 
         # 15: DFF3 (3日加速)
-        it_d3 = NumericTableWidgetItem(f"{dff3:+.2f}", is_pinned=is_fav, pin_rank=pin_rank)
+        it_d3 = NumericTableWidgetItem(f"{dff3:+.2f}", is_pinned=is_fav, pin_rank=pin_rank, raw_val=dff3)
         it_d3.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         it_d3.setForeground(QBrush(QColor(COLOR_UP if dff3 > 0 else COLOR_DOWN)))
         if is_fav:
@@ -1739,7 +1876,7 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
         self.table.setItem(row_idx, col_offset + 1, it_sloss)
 
         # 综合得分
-        it_score = NumericTableWidgetItem(f"{alpha_score:.1f}", is_pinned=is_fav, pin_rank=pin_rank)
+        it_score = NumericTableWidgetItem(f"{alpha_score:.1f}", is_pinned=is_fav, pin_rank=pin_rank, raw_val=alpha_score)
         it_score.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         it_score.setForeground(QBrush(QColor("#ffd700")))
         it_score.setFont(font_bold)

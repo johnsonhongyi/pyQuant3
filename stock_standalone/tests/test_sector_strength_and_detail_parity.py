@@ -1188,6 +1188,105 @@ def test_hot_sector_alert_round_robin_rotation_and_cooldown():
         dlg.close()
 
 
+def test_hot_sector_buy_type_sorting_priority_and_viewport_lock():
+    """
+    【🎯 验证】全面验证龙头突击买点类型排序优先级铁律：
+    1. 👑双加速·👑领涨龙头 > 👑双加速·⚡扫盘冲板 > 🚀缺口加速·👑领涨龙头 > ⚡光脚加速·👑领涨龙头 > 👑领涨龙头 > 🚀缺口加速·⚡扫盘冲板 > ⚡扫盘冲板 > 📋蓄势观察 > ⚠️破位转弱；
+    2. 真实场景复现：中科江南 (双加速·扫盘) 优先置顶于普通扫盘与缺口扫盘，金一文化 (缺口加速·领涨) 优先于因赛集团 (缺口加速·扫盘)，中国出版 (常规领涨) 优先于亚世光电 (常规扫盘)；
+    3. 视口方向锁定验证：刷新时绝不随选中的 code 乱跳，始终稳居最强方向 (顶部 0)！
+    """
+    from ats.ui.hot_sector_leaderboard import HotSectorLeaderboardDialog, compute_buy_type_sort_score
+    from PyQt6.QtCore import Qt
+
+    # 1. 验证优先级函数单调性 (单调递减)
+    c1 = {"buy_type": "👑双加速·👑领涨龙头", "buy_tag": "LEADER", "is_dual_accel": True, "alpha_score": 98.0, "pct": 10.0}
+    c2 = {"buy_type": "👑双加速·⚡扫盘冲板", "buy_tag": "SURGE", "is_dual_accel": True, "alpha_score": 92.0, "pct": 8.3}
+    c3 = {"buy_type": "🚀缺口加速·👑领涨龙头", "buy_tag": "LEADER", "is_gap_accel": True, "alpha_score": 96.0, "pct": 9.9}
+    c4 = {"buy_type": "⚡光脚加速·👑领涨龙头", "buy_tag": "LEADER", "is_open_low_accel": True, "alpha_score": 94.0, "pct": 9.5}
+    c5 = {"buy_type": "👑领涨龙头", "buy_tag": "LEADER", "alpha_score": 93.0, "pct": 10.0}
+    c6 = {"buy_type": "🚀缺口加速·⚡扫盘冲板", "buy_tag": "SURGE", "is_gap_accel": True, "alpha_score": 90.0, "pct": 9.2}
+    c7 = {"buy_type": "⚡光脚加速·⚡扫盘冲板", "buy_tag": "SURGE", "is_open_low_accel": True, "alpha_score": 88.0, "pct": 7.5}
+    c8 = {"buy_type": "⚡扫盘冲板", "buy_tag": "SURGE", "alpha_score": 85.0, "pct": 6.8}
+    c9 = {"buy_type": "🚀缺口加速·🚀先锋突破", "buy_tag": "BREAKOUT", "is_gap_accel": True, "alpha_score": 84.0, "pct": 5.2}
+    c10 = {"buy_type": "🚀先锋突破", "buy_tag": "BREAKOUT", "alpha_score": 80.0, "pct": 4.5}
+    c11 = {"buy_type": "💎反身低吸", "buy_tag": "PULLBACK", "alpha_score": 75.0, "pct": 2.1}
+    c12 = {"buy_type": "📋蓄势观察", "buy_tag": "WATCH", "alpha_score": 50.0, "pct": -0.2}
+    c13 = {"buy_type": "⚠️破位转弱", "buy_tag": "WEAK", "alpha_score": 20.0, "pct": -3.5}
+
+    chain = [c1, c2, c3, c4, c5, c6, c7, c8, c9, c10, c11, c12, c13]
+    scores = [compute_buy_type_sort_score(x) for x in chain]
+
+    # 验证相邻两项严格单调递减
+    for i in range(len(scores) - 1):
+        assert scores[i] > scores[i+1], (
+            f"买点优先级倒挂: {chain[i]['buy_type']}({scores[i]}) 必须大于 {chain[i+1]['buy_type']}({scores[i+1]})"
+        )
+
+    # 2. 验证真实个股场景在表格排序中的实战表现
+    dlg = HotSectorLeaderboardDialog()
+    try:
+        dlg.current_top_sectors = ["文化传媒", "数字货币", "NFT概念"]
+        dlg.active_sectors = set(dlg.current_top_sectors)
+        dlg.combo_time_slice.setCurrentIndex(1) # 全天全时段
+
+        mock_stocks = [
+            # 中科江南：👑双加速·⚡扫盘冲板
+            {"code": "301153", "name": "中科江南", "sector": "数字货币", "buy_type": "👑双加速·⚡扫盘冲板", "buy_tag": "SURGE", "is_dual_accel": True, "price": 19.30, "pct": 8.31, "velocity_pct": 7.3, "alpha_score": 93.0, "low_diff_pct": 0.05},
+            # 易点天下：🚀缺口加速·👑领涨龙头
+            {"code": "301171", "name": "易点天下", "sector": "文化传媒", "buy_type": "🚀缺口加速·👑领涨龙头", "buy_tag": "LEADER", "is_gap_accel": True, "price": 41.34, "pct": 20.00, "velocity_pct": 17.1, "alpha_score": 99.0, "low_diff_pct": 0.10},
+            # 因赛集团：🚀缺口加速·⚡扫盘冲板
+            {"code": "300781", "name": "因赛集团", "sector": "NFT概念", "buy_type": "🚀缺口加速·⚡扫盘冲板", "buy_tag": "SURGE", "is_gap_accel": True, "price": 30.20, "pct": 9.26, "velocity_pct": 8.3, "alpha_score": 90.0, "low_diff_pct": 0.20},
+            # 金一文化：🚀缺口加速·👑领涨龙头
+            {"code": "002721", "name": "金一文化", "sector": "数字货币", "buy_type": "🚀缺口加速·👑领涨龙头", "buy_tag": "LEADER", "is_gap_accel": True, "price": 3.31, "pct": 9.97, "velocity_pct": 8.0, "alpha_score": 95.0, "low_diff_pct": 0.12},
+            # 中国出版：👑领涨龙头
+            {"code": "601949", "name": "中国出版", "sector": "NFT概念", "buy_type": "👑领涨龙头", "buy_tag": "LEADER", "price": 5.83, "pct": 10.00, "velocity_pct": 10.0, "alpha_score": 92.0, "low_diff_pct": 0.30},
+            # 亚世光电：⚡扫盘冲板
+            {"code": "002952", "name": "亚世光电", "sector": "数字货币", "buy_type": "⚡扫盘冲板", "buy_tag": "SURGE", "price": 22.10, "pct": 6.81, "velocity_pct": 7.5, "alpha_score": 86.0, "low_diff_pct": 0.25},
+            # ST际华：📋蓄势观察
+            {"code": "601718", "name": "ST际华", "sector": "文化传媒", "buy_type": "📋蓄势观察", "buy_tag": "WATCH", "price": 2.02, "pct": -0.49, "velocity_pct": -0.5, "alpha_score": 45.0, "low_diff_pct": 0.80},
+        ]
+
+        dlg.cached_results = mock_stocks
+        dlg._render_table_data(mock_stocks)
+
+        # 显式点击第 3 列【买点类型】进行降序排序
+        dlg.table.sortItems(3, Qt.SortOrder.DescendingOrder)
+
+        sorted_codes = [dlg.table.item(r, 0).text().strip() for r in range(dlg.table.rowCount())]
+        
+        # 断言 1：中科江南 (👑双加速) 绝不再沉底，高居前列！
+        idx_zk = sorted_codes.index("301153")
+        idx_ys = sorted_codes.index("300781") # 因赛集团 (缺口扫盘)
+        idx_as = sorted_codes.index("002952") # 亚世光电 (常规扫盘)
+        assert idx_zk < idx_ys, f"中科江南(双加速)必须排在因赛集团(缺口扫盘)前面，实际索引为 {idx_zk} vs {idx_ys}"
+        assert idx_zk < idx_as, f"中科江南(双加速)必须排在亚世光电(常规扫盘)前面，实际索引为 {idx_zk} vs {idx_as}"
+
+        # 断言 2：金一文化 (缺口加速·领涨龙头) 必须排在因赛集团 (缺口加速·扫盘冲板) 前面！
+        idx_jy = sorted_codes.index("002721")
+        assert idx_jy < idx_ys, f"金一文化(缺口加速领涨)必须排在因赛集团(缺口加速扫盘)前面，实际索引为 {idx_jy} vs {idx_ys}"
+
+        # 断言 3：中国出版 (👑领涨龙头) 必须排在亚世光电 (常规扫盘) 前面！
+        idx_cb = sorted_codes.index("601949")
+        assert idx_cb < idx_as, f"中国出版(领涨龙头)必须排在亚世光电(扫盘冲板)前面，实际索引为 {idx_cb} vs {idx_as}"
+
+        # 断言 4：ST际华 (蓄势观察) 必须排在最后！
+        idx_jh = sorted_codes.index("601718")
+        assert idx_jh == len(sorted_codes) - 1, f"ST际华(蓄势观察)必须排在最末位，实际索引为 {idx_jh}"
+
+        # 3. 验证视口锁定与不跟随选中的 code 滚动
+        dlg.table.setCurrentCell(len(sorted_codes) - 1, 0) # 选中最后一行 ST际华
+        dlg.table.verticalScrollBar().setValue(0) # 模拟用户拉回最顶端盯最强龙头
+
+        # 再次触发刷新渲染
+        dlg._render_table_data(mock_stocks)
+        # 验证垂直滚动条绝对锁定为 0 (最强方向)，绝不因为 ST际华在底部就滚到最后一行！
+        assert dlg.table.verticalScrollBar().value() == 0, "刷新后视口必须严格锁定在最强方向 (顶部 0)"
+
+    finally:
+        dlg.close()
+
+
+
 
 
 
