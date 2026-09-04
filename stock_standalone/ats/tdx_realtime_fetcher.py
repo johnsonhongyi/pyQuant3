@@ -2041,6 +2041,14 @@ class TDXRealtimeFetcher:
                     stop_loss = round(price * 0.96, 2)
                     reason = f"不可撤单阶段重金爆量抢筹 (竞价{b_amt_yi:.2f}亿/拟合比{b_fit_r:.1f}x), 跨越{b_level or '多日高点'}, 顶级龙头起爆"
                     type_priority = 99
+                elif (price > last_close and max_2d > 0 and price >= max_2d - 0.015 and (pct >= 2.0 or b_amt_wan >= 1000.0)):
+                    # 👑 竞价破顶：易点天下/四方精创模式 (连续回调后，竞价直接跳空破前高红线，09:25挂单锁死成本底座防诱多回落)
+                    buy_type = "👑 竞价破顶"
+                    buy_tag = "BID_BREAKOUT"
+                    buy_zone = f"{price:.2f} (09:25前直接挂单)"
+                    stop_loss = round(max(max_2d * 0.985, last_close), 2)
+                    reason = f"连续回调后竞价高开破前高红线({max_2d:.2f}元), 跨越洗盘高点, 09:25前挂单锁死成本底座(防冲高诱多回落)"
+                    type_priority = 100
                 elif "一字" in order_intent or (pct >= 9.5 and bid_p >= 75.0):
                     buy_type = "👑 竞价一字"
                     buy_tag = "BID_LIMIT"
@@ -2097,6 +2105,15 @@ class TDXRealtimeFetcher:
                 stop_loss = round(vwap * 0.985, 2)
                 reason = f"板块领涨龙头 (买盘压强{bid_p:.0f}%), 站稳均线(+{vwap_dev:.1f}%), {order_intent}"
                 type_priority = 100
+
+            elif (open_p_val > 0 and max_2d > 0 and open_p_val >= max_2d - 0.015 and price >= max_2d and pct >= 2.5):
+                # 👑 破红线高开高走：易点天下/四方精创模式 (高开越过连续回调阻力红线，高开高走起爆主升浪)
+                buy_type = "👑 破红线高开高走"
+                buy_tag = "LEADER"
+                type_priority = 99
+                buy_zone = f"{round(max(open_p_val, max_2d), 2)} ~ {price:.2f}"
+                stop_loss = round(max(max_2d * 0.985, open_p_val * 0.985), 2)
+                reason = f"连续回调后高开突破前高红线({max_2d:.2f}元)并持续高走, 彻底解放洗盘筹码, 黄金主升浪"
 
             elif (vwap_escape_pct >= 1.5 and 0.5 <= vwap_dev <= 3.8 and 2.5 <= pct <= 9.0 and (vol_r >= 1.2 or slope >= 50.0)):
                 # ⚡ 脱离成本狙击：开盘资金爆量向上扫单，VWAP 强斜率向上快速拉离成本区，未封板前可直接买入参与的黄金狙击点！
