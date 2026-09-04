@@ -65,6 +65,11 @@ def calculate_single_period_channel(df_kline: pd.DataFrame, period_tag: str = 'd
             "ch_upper": 0.0,
             "ch_mid": 0.0,
             "ch_lower": 0.0,
+            "ch_height": 0.0,
+            "ch_height_pct": 0.0,
+            "upper_height": 0.0,
+            "lower_height": 0.0,
+            "ch_pos": 50.0,
             "slope_deg": 0.0,
             "is_above_support": False,
             "is_above_reversal": False,
@@ -147,6 +152,12 @@ def calculate_single_period_channel(df_kline: pd.DataFrame, period_tag: str = 'd
 
     score = min(100.0, max(10.0, round(base_score, 1)))
 
+    ch_height = max(0.0, ch_up - ch_lo) if (ch_up > 0 and ch_lo > 0) else 0.0
+    ch_height_pct = (ch_height / max(1e-4, ch_mid) * 100.0) if ch_mid > 0 else 0.0
+    upper_height = max(0.0, ch_up - ch_mid) if (ch_up > 0 and ch_mid > 0) else 0.0
+    lower_height = max(0.0, ch_mid - ch_lo) if (ch_mid > 0 and ch_lo > 0) else 0.0
+    ch_pos = ((curr_close - ch_lo) / max(1e-4, ch_height) * 100.0) if ch_height > 1e-4 else 50.0
+
     return {
         "period": period_tag,
         "period_cn": PERIOD_NAMES.get(period_tag, period_tag),
@@ -156,6 +167,11 @@ def calculate_single_period_channel(df_kline: pd.DataFrame, period_tag: str = 'd
         "ch_upper": round(ch_up, 3),
         "ch_mid": round(ch_mid, 3),
         "ch_lower": round(ch_lo, 3),
+        "ch_height": round(ch_height, 3),
+        "ch_height_pct": round(ch_height_pct, 2),
+        "upper_height": round(upper_height, 3),
+        "lower_height": round(lower_height, 3),
+        "ch_pos": round(ch_pos, 1),
         "slope_deg": round(slope_deg, 2),
         "is_above_support": is_above_support,
         "is_above_reversal": is_above_reversal,
@@ -350,6 +366,20 @@ if __name__ == "__main__":
         for p, d in res["period_details"].items():
             above_str = "✅ 站上" if d["is_above_support"] else "❌ 跌破"
             print(f"{d['period_cn']:<8} {d['close']:<8.2f} {d['supp_price']:<8.2f} {d['reversal_price']:<8.2f} {above_str:<8} {d['dist_to_supp_pct']:<+10.1f} {d['channel_type_cn']:<10} {d['slope_deg']:<+8.1f}°")
+
+        print("\n📐 各周期通道三轨尺寸与大小高度明细:")
+        print(f"{'周期':<6} {'现价':<7} {'上轨':<7} {'中轨':<7} {'下轨':<7} {'通道高度':<9} {'高度振幅%':<10} {'上半高':<8} {'下半高':<8} {'位置%':<7}")
+        print("-" * 82)
+        for p, d in res["period_details"].items():
+            up_s = f"{d.get('ch_upper', 0.0):.2f}" if d.get('ch_upper', 0.0) > 0 else "-"
+            mid_s = f"{d.get('ch_mid', 0.0):.2f}" if d.get('ch_mid', 0.0) > 0 else "-"
+            lo_s = f"{d.get('ch_lower', 0.0):.2f}" if d.get('ch_lower', 0.0) > 0 else "-"
+            h_s = f"Δ{d.get('ch_height', 0.0):.2f}元" if d.get('ch_height', 0.0) > 0 else "-"
+            hpct_s = f"{d.get('ch_height_pct', 0.0):.1f}%" if d.get('ch_height_pct', 0.0) > 0 else "-"
+            u_h_s = f"{d.get('upper_height', 0.0):.2f}元" if d.get('upper_height', 0.0) > 0 else "-"
+            l_h_s = f"{d.get('lower_height', 0.0):.2f}元" if d.get('lower_height', 0.0) > 0 else "-"
+            pos_s = f"{d.get('ch_pos', 50.0):.1f}%" if d.get('ch_height', 0.0) > 0 else "-"
+            print(f"{d['period_cn']:<6} {d['close']:<7.2f} {up_s:<7} {mid_s:<7} {lo_s:<7} {h_s:<9} {hpct_s:<10} {u_h_s:<8} {l_h_s:<8} {pos_s:<7}")
 
         print("\n💡 【使用方法说明】:")
         print("1. 命令行直接执行:")

@@ -40,9 +40,9 @@
     "detail": "详细说明：基于通达信『自动画通道』算法，全图 BARSLAST 动态寻优极值顶点与底点拟合线性回归中轨(ch_mid)，上下延伸 5 阶动态斐波那契支撑/阻力通道(ch_upper, ch_lower)。\n\nQuery用法示例: close >= ch_lower and close <= ch_mid\nQuery同义词: ch_upper, ch_mid, ch_lower"
   },
   {
-    "key": "ch_width",
-    "summary": "通道极值宽度比例 (%)",
-    "detail": "详细说明：通道上轨与下轨的价格差占中轨价格的百分比 ((upper - lower) / mid * 100)，反映通道波动张力与喇叭口扩张/收敛程度。\nch_width / ch_mid < 0.18 表示通道处于狭窄收敛蓄势状态。\n\nQuery用法示例: ch_width / ch_mid < 0.20\nQuery同义词: ch_width, channel_width"
+    "key": "ch_height / ch_width",
+    "summary": "【通道尺寸】通道绝对高度与跨度 (Δ = 上轨 - 下轨, 单位: 元)",
+    "detail": "================================================================================\n 价格 ^\n      |         / 上轨 ch_upper (压力位)\n      |        |  ▲ 通道绝对高度: ch_height = 上轨 - 下轨 (Δ点数, 元)\n      |       /|  | (衡量波段箱体总厚度与操作空间，声迅股份 15.66元 vs 万向德农 6.77元)\n      |      / |  ▼\n      |     /   / 下轨 ch_lower (底座支撑位)\n      +------------------------------------> 时间\n================================================================================\n详细说明：通道上轨(ch_upper)与下轨(ch_lower)的绝对价格差 (ch_height = upper - lower)，单位为元。\n衡量个股在当前周期内的波段箱体总跨度点数。\n在 tdd 引擎与 Query 语法中，ch_height 与 ch_width 数学上完全等价。\n\nQuery用法示例: ch_height > 3.0\nQuery同义词: ch_height, ch_width, channel_height, 通道高度"
   },
   {
     "key": "ch_supp_days",
@@ -118,5 +118,65 @@
     "key": "STRATEGY: 优选上涨通道+支撑线上+量价齐升 (高价值黄金进攻伏击)",
     "summary": "【核心实战】上涨通道(ch_dir==1)+支撑线昂首(ch_supp_slope_deg>0)+站上支撑价+量价齐升",
     "detail": "核心实战逻辑：\n1. ch_dir == 1 : 大级别必须为明确上涨通道 (中轨向上倾斜)，杜绝弱势阴跌通道；\n2. ch_supp_slope_deg > 0 : KX 支撑线昂首向上 (反弹动能明确，角度越大反弹越强劲)；\n3. close >= ch_supp_price : 股价守在支撑线上方，属于关键生命线之上的强支撑防守；\n4. 量价齐升 (vol_ratio >= 1.2 and percent > 0) : 拒绝缩量阴跌死水，必须有增量资金介入拉升！\n\nQuery实现语句：\ndf.query('ch_dir == 1 and ch_supp_slope_deg > 0 and close >= ch_supp_price and vol_ratio >= 1.2 and percent > 0')"
+  },
+  {
+    "key": "ch_height_pct",
+    "summary": "【通道尺寸】通道高度振幅 (相对中轨振幅百分比 %)",
+    "detail": "详细说明：通道总高度相对于中轨价格的百分比 ((上轨 - 下轨) / 中轨 * 100%)。\n衡量通道本身的张力与开阔程度，消除了个股绝对股价高低的影响：\n• ch_height_pct < 15% : 通道狭窄，箱体空间有限或处于低波动蓄势期；\n• ch_height_pct > 20% : 通道开阔，具备充足的波段操作空间 (如宏裕包材 22.6%)；\n• ch_height_pct > 40%~80% : 极度开阔的扩张喇叭口通道，多见于主升浪暴走或妖股。\n\nQuery用法示例: ch_height_pct > 20\nQuery同义词: ch_height_pct, channel_height_pct, ch_amplitude_pct, ch_bandwidth_pct, 通道高度振幅, 通道振幅"
+  },
+  {
+    "key": "ch_width_pct",
+    "summary": "【通道尺寸】相对通道跨度 (通道高度相对现价百分比 %)",
+    "detail": "详细说明：通道绝对高度相对于当前收盘价的百分比 ((上轨 - 下轨) / close * 100%)。\n彻底消除股价绝对高低影响的核心标尺：\n• 万向德农 (13.70元): ch_width 为 6.77元，相对通道跨度高达 49.4%！说明通道空间相对股价极其辽阔；\n• 声迅股份 (75.25元): ch_width 为 15.66元，相对通道跨度仅 20.8%，属于高位平缓通道。\n\nQuery用法示例: ch_width_pct > 30\nQuery同义词: ch_width_pct, channel_width_pct, ch_rel_width, 相对通道跨度, 通道相对跨度"
+  },
+  {
+    "key": "upper_height / lower_height",
+    "summary": "【通道尺寸】上半通道高度 (突破上行空间) / 下半通道高度 (回踩防守空间)",
+    "detail": "详细说明：通道以中轴线性回归线(ch_mid)为基准切分出的上下两个半区的空间尺寸 (单位: 元)：\n• upper_height = 上轨 - 中轨 : 突破中轨后的上方盈利上行空间；\n• lower_height = 中轨 - 下轨 : 回踩中轨企稳的防守缓冲与吸筹空间。\n两者之和等于通道总高度 (upper_height + lower_height == ch_height)。\n\nQuery用法示例: upper_height > 1.5 and lower_height > 1.0\nQuery同义词: upper_height, lower_height, ch_upper_height, ch_lower_height, 上半通道高度, 下半通道高度"
+  },
+  {
+    "key": "bandwidth",
+    "summary": "【布林体系】布林带绝对带宽 (UPPER - LOWER, 单位: 元)",
+    "detail": "详细说明：20日布林带上轨与下轨的绝对价格差 (bandwidth = UPPER - LOWER)，反映统计标准差波动绝对厚度。\n注意误区：75元的声迅股份 (bandwidth=10.10) 与 13.7元的万向德农 (bandwidth=9.68) 绝对值看似相近，但占股价比例截然不同，实战中强烈推荐配合 bandwidth_pct 使用！\n\nQuery用法示例: bandwidth > 5.0\nQuery同义词: bandwidth, boll_bandwidth, 布林带宽"
+  },
+  {
+    "key": "bandwidth_pct",
+    "summary": "【布林体系】相对布林带宽比率 (bandwidth / close * 100%)",
+    "detail": "详细说明：布林带绝对带宽占当前收盘价的百分比 ((UPPER - LOWER) / close * 100%)。\n【灵魂指标】衡量个股相对振幅弹性与波动力度的真正标尺：\n• 万向德农 (13.70元): bandwidth 为 9.68元，bandwidth_pct 高达 70.6%！连续大阳爆拉将布林带极端撑开，弹性极大；\n• 声迅股份 (75.25元): bandwidth 为 10.10元，bandwidth_pct 仅 13.4%，属于高位平缓横盘震荡；\n• 实战规律: >30%~50% 为高弹性主升妖股，<20% 为温和慢牛或箱体整理。\n\nQuery用法示例: bandwidth_pct > 35\nQuery同义词: bandwidth_pct, boll_bandwidth_pct, relative_bandwidth, 相对带宽, 相对带宽比率"
+  },
+  {
+    "key": "boll_sq",
+    "summary": "【布林体系】布林中轨偏离与量化强度 ((close - ene) / bandwidth * 100)",
+    "detail": "详细说明：股价偏离布林中轨(ene)的距离占整个布林带宽度的百分比：\n• 正值表示股价在中轨上方，数值越大攻击越强；\n• 负值表示股价在中轨下方，数值越小越弱；\n• 实战中，妖股连板主升浪(如万朗磁塑 84.0、万向德农 38.89)通常处于 40~90 高位，而高位整理票(如声迅股份 26.18)通常在 10~30 之间。\n\nQuery用法示例: boll_sq > 40\nQuery同义词: boll_sq, boll_strength_quant"
+  },
+  {
+    "key": "bollpect",
+    "summary": "【布林体系】股价在布林带所处百分比位置 ((close - lower) / bandwidth * 100)",
+    "detail": "详细说明：当前收盘价在布林带下轨(0%)至上轨(100%)之间的百分比位置：\n• bollpect <= 20 : 处于布林下轨超跌支撑区；\n• bollpect 在 50 附近 : 处于布林中轨平衡带；\n• bollpect >= 80 : 逼近布林上轨压力区；\n• bollpect > 100 : 强势突破布林上轨加速拓展(如万朗磁塑高达 134.0)。\n\nQuery用法示例: bollpect >= 50 and bollpect <= 85\nQuery同义词: bollpect, boll_pct, boll_pos"
+  },
+  {
+    "key": "perc3d",
+    "summary": "【动能爆发】近3日累计动能与累计涨幅 (%)",
+    "detail": "详细说明：个股最近 3 个交易日的累计涨幅与爆发动能：\n【试金石指标】区分加速主升与高位滞涨的最核心指标：\n• 万向德农: perc3d 高达 +79.0%！短期暴涨连板拔起，资金极度狂热；\n• 声迅股份: perc3d 为 -1.0%！虽大趋势向上，但近三天横盘微跌，处于停滞整理；\n• 做短线暴利妖股选 perc3d > 15 或 > 20；做低吸潜伏选 -5 <= perc3d <= 8。\n\nQuery用法示例: perc3d > 20\nQuery同义词: perc3d, 3日动能, 3日涨幅"
+  },
+  {
+    "key": "ratio",
+    "summary": "【资金博弈】资金抢筹与动能爆发倍数",
+    "detail": "详细说明：衡量量能与日内振幅综合攻击强度的倍数指标：\n• 万向德农: ratio 高达 25.6！主力资金大举暴力抢筹接力，攻击烈度极高；\n• 声迅股份: ratio 仅 2.1，主力温和控盘，无剧烈爆量异动；\n• 实战中 ratio > 5.0 代表游资主力白刃战抢筹，ratio < 3.0 代表机构慢爬或散户整理。\n\nQuery用法示例: ratio > 5.0\nQuery同义词: ratio, 资金抢筹倍数"
+  },
+  {
+    "key": "dff2 / dff3",
+    "summary": "【均线发散】短期均线差离度 (dff2) / 中期均线差离度 (dff3)",
+    "detail": "详细说明：不同周期均线之间的发散差离程度：\n• dff2 : 短期均线差离度。万向德农短均线垂直向上拉开达 77.5，而声迅股份仅 7.4(均线紧密缠绕未加速)；\n• dff3 : 中长期均线差离度。衡量中长期大趋势的离差拉伸；\n• dff2 > 25 配合 perc3d > 15 为典型的主升发散攻击形态。\n\nQuery用法示例: dff2 > 25\nQuery同义词: dff2, dff3, 均线差离"
+  },
+  {
+    "key": "STRATEGY: 捕捉主升暴扣/妖股起爆 (万向德农/万朗磁塑形态)",
+    "summary": "【实战策略】高弹性+3日动能爆发+资金抢筹+均线发散主升浪",
+    "detail": "核心策略逻辑：\n1. 通道向上且站稳中轨: ch_dir == 1 and ch_slope_deg > 1.5 and close >= ch_lower and ch_pos > 50\n2. 3日动能爆发起爆: perc3d > 20 (排除横盘滞涨票)\n3. 相对带宽巨大 (消除价格基数干扰): bandwidth_pct > 35 (或 ch_width_pct > 35)\n4. 资金暴力抢筹与均线发散: ratio > 5.0 and dff2 > 25\n\nQuery实现语句：\ndf.query('ch_dir == 1 and ch_slope_deg > 1.5 and close >= ch_lower and ch_pos > 50 and perc3d > 20 and bandwidth_pct > 35 and ratio > 5.0 and dff2 > 25')"
+  },
+  {
+    "key": "STRATEGY: 捕捉宽幅稳健慢牛/回踩箱体蓄势 (声迅股份/迈瑞医疗形态)",
+    "summary": "【实战策略】大通道宽幅空间+回踩中下轨蓄势+动能未透支低吸",
+    "detail": "核心策略逻辑：\n1. 大通道向上有操作空间: ch_dir == 1 and ch_slope_deg > 1.5 and ch_width_pct > 15\n2. 动能平缓未透支 (排除暴涨连板妖股): perc3d >= -5 and perc3d <= 10\n3. 均线温和缠绕未脱离: dff2 < 15 and ratio < 5.0\n4. 处于通道中下轨蓄势安全带: close >= ch_lower and (ch_pos >= 25 and ch_pos <= 65)\n\nQuery实现语句：\ndf.query('ch_dir == 1 and ch_slope_deg > 1.5 and close >= ch_lower and (ch_pos >= 25 and ch_pos <= 65) and (perc3d >= -5 and perc3d <= 10) and dff2 < 15 and ch_width_pct > 15 and ratio < 5.0')"
   }
 ]

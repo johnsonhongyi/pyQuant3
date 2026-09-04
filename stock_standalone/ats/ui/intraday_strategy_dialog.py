@@ -905,8 +905,26 @@ class SBCChartCanvas(QWidget):
                     painter.setPen(QPen(QColor("#00FFFF")))
                     painter.drawText(int(ml + cw + 5), tag_y + 13, f"{p_hover:.2f}")
 
-                    # ③ 鼠标指针右上角跟随微浮标 (指针指到哪，价格跟到哪)
-                    tip_w = 52
+                    # 计算当前光标所指 K 棒序号
+                    idx_hover = -1
+                    if times and len(times) > 0:
+                        idx_hover = max(0, min(len(times) - 1, int(round(((hx - ml) / float(cw)) * (len(times) - 1)))))
+
+                    # ③ 鼠标指针右上角跟随微浮标 (指针指到哪，价格与通道大小高度跟到哪)
+                    tip_str = f"{p_hover:.2f}"
+                    ch_up_arr = c_info.get("ch_up", [])
+                    ch_mid_arr = c_info.get("ch_mid", [])
+                    ch_dn_arr = c_info.get("ch_dn", [])
+                    if 0 <= idx_hover < len(ch_up_arr) and 0 <= idx_hover < len(ch_dn_arr):
+                        c_u = float(ch_up_arr[idx_hover])
+                        c_d = float(ch_dn_arr[idx_hover])
+                        c_m = float(ch_mid_arr[idx_hover]) if idx_hover < len(ch_mid_arr) else 0.0
+                        if c_u > 0 and c_d > 0:
+                            h_diff = max(0.0, c_u - c_d)
+                            h_pct = (h_diff / max(1e-4, c_m)) * 100.0 if c_m > 0 else 0.0
+                            tip_str += f" | 通道:上{c_u:.2f} 中{c_m:.2f} 下{c_d:.2f} (高:{h_diff:.2f}元, {h_pct:.1f}%)"
+
+                    tip_w = max(52, len(tip_str) * 7 + 12)
                     tip_h = 16
                     tip_x = min(ml + cw - tip_w - 4, max(ml + 4, int(hx + 12)))
                     tip_y = max(mt + 4, min(mt + mh - tip_h - 4, int(hy - 20)))
@@ -915,11 +933,10 @@ class SBCChartCanvas(QWidget):
                     painter.drawRoundedRect(tip_x, tip_y, tip_w, tip_h, 2, 2)
                     painter.setPen(QPen(QColor("#FFFFFF")))
                     painter.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
-                    painter.drawText(tip_x + 4, tip_y + 12, f"{p_hover:.2f}")
+                    painter.drawText(tip_x + 6, tip_y + 12, tip_str)
 
                     # ④ 底部 X 轴时间/日期对齐标签
                     if times and len(times) > 0:
-                        idx_hover = max(0, min(len(times) - 1, int(round(((hx - ml) / float(cw)) * (len(times) - 1)))))
                         t_str = str(times[idx_hover])
                         if len(t_str) > 10:
                             t_str = t_str[-8:]  # 截取 HH:MM:SS 或 HH:MM
@@ -1504,6 +1521,9 @@ class SBCChartCanvas(QWidget):
             "main_h": main_h,
             "times": times,
             "n_items": n,
+            "ch_up": ch_up,
+            "ch_mid": ch_mid,
+            "ch_dn": ch_dn,
         }
 
         max_v = max(vols) if len(vols) > 0 and max(vols) > 0 else 1.0
@@ -1912,7 +1932,19 @@ class SBCChartCanvas(QWidget):
                     painter.drawLine(fib_start_x, int(y_fib), fib_end_x, int(y_fib))
                     right_axis_labels.append((y_fib, f"{f_val:.1f} {f_lbl}", f_col, QFont("Consolas", 7)))
 
-        # 8.2 上涨支撑线 (ch_supp_p) 右侧标签与短水平虚线
+        # 8.2 通达信通道三轨右侧 Y 轴标签 (上轨、中轨、下轨)
+        ch_up_last = float(ch_up[-1]) if len(ch_up) > 0 else 0.0
+        ch_mid_last = float(ch_mid[-1]) if len(ch_mid) > 0 else 0.0
+        ch_dn_last = float(ch_dn[-1]) if len(ch_dn) > 0 else 0.0
+
+        if ch_up_last > 0 and min_p <= ch_up_last <= max_p:
+            right_axis_labels.append((k_to_y(ch_up_last), f"上轨:{ch_up_last:.2f}", QColor("#FFFFFF"), QFont("Microsoft YaHei", 7, QFont.Weight.Bold)))
+        if ch_mid_last > 0 and min_p <= ch_mid_last <= max_p:
+            right_axis_labels.append((k_to_y(ch_mid_last), f"中轨:{ch_mid_last:.2f}", QColor("#B0B0C0"), QFont("Microsoft YaHei", 7)))
+        if ch_dn_last > 0 and min_p <= ch_dn_last <= max_p:
+            right_axis_labels.append((k_to_y(ch_dn_last), f"下轨:{ch_dn_last:.2f}", QColor("#FFFFFF"), QFont("Microsoft YaHei", 7, QFont.Weight.Bold)))
+
+        # 8.3 上涨支撑线 (ch_supp_p) 右侧标签与短水平虚线
         if ch_supp_p > 0 and min_p <= ch_supp_p <= max_p:
             y_supp_line = k_to_y(ch_supp_p)
             painter.setPen(QPen(QColor("#FF4444"), 1, Qt.PenStyle.DashLine))
@@ -2093,23 +2125,6 @@ class SBCChartCanvas(QWidget):
             if self.selected_trade_id is not None:
                 self._draw_selected_trade_linkage(painter, margin_left, margin_top, chart_w, main_h)
 
-        # 10. 顶部通道标题与参数标注 (两行结构化展示)
-        painter.setPen(QPen(QColor("#ffd700"), 1))
-        painter.setFont(QFont("Microsoft YaHei", 9, QFont.Weight.Bold))
-        info_header = f"📊 [{self.period_mode.upper()}] 通达信自动通道 (斜率:{ch_slope_deg:.1f}°)"
-        if ch_supp_p > 0:
-            info_header += f" | 支撑:{ch_supp_p:.2f}"
-        if rev_last > 0:
-            info_header += f" | 反转:{rev_last:.2f}"
-        painter.drawText(margin_left + 6, margin_top + 15, info_header)
-
-        # 第二行：上涨支撑线物理特征 (与第一行格式保持高度统一、简洁清晰)
-        if ch_supp_p > 0:
-            painter.setPen(QPen(QColor("#00E5FF"), 1))
-            painter.setFont(QFont("Microsoft YaHei", 9, QFont.Weight.Bold))
-            supp_info = f"📈 上涨支撑 (斜率:{ch_supp_slope_deg:.1f}°) | 偏离:{ch_supp_pos:+.2f}% | 周期:{ch_supp_days}"
-            painter.drawText(margin_left + 6, margin_top + 31, supp_info)
-
         # 11. 🌟 快捷键 R 自适应策略测算信号点与基准线绘制
         if getattr(self, 'auto_eval_enabled', True) and getattr(self, 'strategy_eval_result', None):
             res_strat = self.strategy_eval_result
@@ -2146,10 +2161,11 @@ class SBCChartCanvas(QWidget):
                         painter.setPen(QPen(QColor("#00FF66"), 1.2, Qt.PenStyle.DashLine))
                         painter.drawLine(int(x_p), int(margin_top + main_h), int(x_p), int(margin_top))
 
-                        # 通达信同款顶部【| 逆势先锋】绿色粗体文字
-                        painter.setFont(QFont("Microsoft YaHei", 8, QFont.Weight.Bold))
-                        painter.setPen(QPen(QColor("#00FF66")))
-                        painter.drawText(int(x_p + 3), int(margin_top + 14), "| 逆势先锋")
+                        # 通达信同款顶部【| 逆势先锋】绿色粗体文字 (避开左上角通道 HUD 卡片区域)
+                        if x_p > margin_left + 450:
+                            painter.setFont(QFont("Microsoft YaHei", 8, QFont.Weight.Bold))
+                            painter.setPen(QPen(QColor("#00FF66")))
+                            painter.drawText(int(x_p + 3), int(margin_top + 14), "| 逆势先锋")
 
                         # 通达信同款 K 棒底部【★逆势先锋】红绿指示
                         y_k_low = k_to_y(lows[p_idx_local])
@@ -2193,6 +2209,50 @@ class SBCChartCanvas(QWidget):
             else:
                 # 未命中时的浮动提示条 (位置调低靠左)
                 self._draw_compact_strategy_hud(painter, margin_left, margin_top, chart_w, main_h, res_strat)
+
+        # 12. 🌟 顶层绘制通道标题与三轨大小高度 HUD 卡片 (置于最顶层，彻底杜绝任何被底层图元遮挡)
+        info_header = f"📊 [{self.period_mode.upper()}] 通达信自动通道 (斜率:{ch_slope_deg:.1f}°)"
+        if ch_up_last > 0 and ch_dn_last > 0:
+            info_header += f" | 上轨:{ch_up_last:.2f} | 中轨:{ch_mid_last:.2f} | 下轨:{ch_dn_last:.2f}"
+        if ch_supp_p > 0:
+            info_header += f" | 支撑:{ch_supp_p:.2f}"
+        if rev_last > 0:
+            info_header += f" | 反转:{rev_last:.2f}"
+
+        hud_box_h = 24
+        if ch_up_last > 0 and ch_dn_last > 0:
+            hud_box_h += 16
+        if ch_supp_p > 0:
+            hud_box_h += 16
+        hud_box_w = max(420, min(chart_w - 20, int(len(info_header) * 8.0 + 20)))
+        painter.setPen(QPen(QColor("#253248"), 1))
+        painter.setBrush(QBrush(QColor(10, 15, 26, 220)))
+        painter.drawRoundedRect(margin_left + 4, margin_top + 3, hud_box_w, hud_box_h, 3, 3)
+
+        painter.setPen(QPen(QColor("#ffd700"), 1))
+        painter.setFont(QFont("Microsoft YaHei", 9, QFont.Weight.Bold))
+        painter.drawText(margin_left + 8, margin_top + 17, info_header)
+
+        curr_y_offset = margin_top + 33
+        # 第二行：通道大小高度 (绝对高度元, 相对宽幅%, 上半高, 下半高, 通道所处位置%)
+        if ch_up_last > 0 and ch_dn_last > 0:
+            ch_h_val = max(0.0, ch_up_last - ch_dn_last)
+            ch_h_pct = (ch_h_val / max(1e-4, ch_mid_last)) * 100.0
+            up_h = max(0.0, ch_up_last - ch_mid_last)
+            dn_h = max(0.0, ch_mid_last - ch_dn_last)
+            pos_desc = "超买突破" if ch_pos >= 90 else ("中上轨主升" if ch_pos >= 50 else ("中下轨企稳" if ch_pos >= 20 else "超跌触底"))
+            painter.setPen(QPen(QColor("#00FFCC"), 1))
+            painter.setFont(QFont("Microsoft YaHei", 9, QFont.Weight.Bold))
+            chan_dim_info = f"📐 通道高度: Δ{ch_h_val:.2f}元 (宽幅:{ch_h_pct:.1f}%) | 上半高:{up_h:.2f}元 | 下半高:{dn_h:.2f}元 | 通道位置:{ch_pos:.1f}% ({pos_desc})"
+            painter.drawText(margin_left + 8, curr_y_offset, chan_dim_info)
+            curr_y_offset += 16
+
+        # 第三行：上涨支撑线物理特征 (与第一行格式保持高度统一、简洁清晰)
+        if ch_supp_p > 0:
+            painter.setPen(QPen(QColor("#00E5FF"), 1))
+            painter.setFont(QFont("Microsoft YaHei", 9, QFont.Weight.Bold))
+            supp_info = f"📈 上涨支撑 (斜率:{ch_supp_slope_deg:.1f}°) | 偏离:{ch_supp_pos:+.2f}% | 周期:{ch_supp_days}"
+            painter.drawText(margin_left + 8, curr_y_offset, supp_info)
 
 
 VALID_SBC_PERIODS = ["1m", "2d", "3d", "5d", "5m", "15m", "30m", "60m", "day", "week", "month"]
