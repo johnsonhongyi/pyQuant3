@@ -105,7 +105,7 @@ def compute_buy_type_sort_score(item: Dict[str, Any]) -> float:
     is_open_low = bool(item.get("is_open_low_accel")) or ("光脚加速" in buy_t)
 
     # 核心买点特征判断
-    is_trap_pulse = ("昙花一现" in buy_t or "脉冲诱多" in buy_t)
+    is_trap_pulse = ("昙花一现" in buy_t or "脉冲诱多" in buy_t or "诱多脉冲" in buy_t)
     is_reversal_launch = (tag == "BID_REVERSAL_LAUNCH" or "弱转强起爆" in buy_t)
     is_reentry = (tag == "RE_ENTRY_BUY" or "割肉反转回补" in buy_t or "割肉" in buy_t)
 
@@ -377,17 +377,39 @@ class TDXFetchLogDialog(QDialog):
 
 class SectorETFRadarDialog(QDialog):
     """
-    全市场核心行业/题材基准 ETF 趋势结构与宏观大势透视雷达窗口
-    1. 基于通达信原生二进制接口毫秒级读取 13 大基准 ETF 60 日 K 线；
-    2. 按近 2 个月收益率降序排序，直观呈现主升/破位趋势；
-    3. 双击任意 ETF 行：直接联动通达信切换日 K 线；
-    4. 点击【🎯 聚焦关联板块成分股】：联动主看板只显示该赛道成分股。
+    全市场核心行业/题材基准 ETF 通道支撑结构与宏观大势透视雷达窗口
+    1. 基于通达信原生二进制日K线接口毫秒级读取 20 大核心基准 ETF 60 日 K 线；
+    2. 跟个股一样：采用通达信自动通道引擎计算通道支撑位、反转确认位、通道三轨与量化评分；
+    3. 支持点击表头按任意指标 (量化评分/支撑位/现价/动能等) 高精升序/降序排序；
+    4. 具备窗口大小位置持久化与列宽/列顺序跨会话自动保存与恢复；
+    5. 完美支持键盘上下键 (↑/↓/PageUp/PageDown) 及单击极速联动外部行情软件 (TDX/THS/VIS)。
+    """
+class SectorETFRadarDialog(QDialog):
+    """
+    全市场核心行业/题材基准 ETF 通道支撑结构与宏观大势透视雷达窗口
+    1. 基于通达信原生二进制日K线 + 毫秒级实时盘口快照动态计算；
+    2. 融合通达信自动通道引擎计算通道支撑位、反转确认位、通道三轨；
+    3. 🔥 显性化呈现【今日涨跌%】，彻底告别盘中数据缺失；
+    4. 🚀 多指标实战拟合：输出【启动动能评分】与【预埋单上车建议】，一眼锁定起爆上车标的；
+    5. 🪟 窗口位置大小 (Geometry) 与 列宽列顺序 (Header State) 独立持久化记忆与无损恢复；
+    6. 完美支持键盘上下键 (↑/↓/PageUp/PageDown) 及单击极速联动外部行情软件 (TDX/THS/VIS)。
     """
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("📊 全市场板块基准 ETF 趋势雷达 (2个月大级别慢牛/破位透视)")
-        self.resize(860, 520)
+        self._py_parent = parent
+        self._last_linked_code = None
+        self._is_loading_data = False
+        self._geo_save_timer = QTimer(self)
+        self._geo_save_timer.setSingleShot(True)
+        self._geo_save_timer.setInterval(300)
+        self._geo_save_timer.timeout.connect(self._save_window_geometry)
+
+        self.setWindowTitle("📊 全市场板块基准 ETF 趋势雷达 (通道支撑/反转位/启动动能/预埋上车)")
+        self.setWindowFlags(Qt.WindowType.Window | Qt.WindowType.WindowMinMaxButtonsHint | Qt.WindowType.WindowCloseButtonHint)
+        self.setAttribute(Qt.WidgetAttribute.WA_QuitOnClose, False)
+
         self._init_ui()
+        self._restore_window_geometry()
         self._load_data()
 
     def _init_ui(self):
@@ -402,12 +424,17 @@ class SectorETFRadarDialog(QDialog):
         lay.setSpacing(6)
 
         # 顶部提示栏
-        lbl_tip = QLabel("💡 宏观大势量化透视：基于通达信 60 日 K 线量化评级，绿色代表反弹慢牛主升结构，红色代表空头破位下行 | 双击 ETF 行即刻联动切换通达信日K线")
+        lbl_tip = QLabel("💡 键盘上下键 (↑/↓) 或单击即刻极速联动日K线 | 默认按【启动动能】置顶最强起爆与预埋上车板块 | 点击任意表头支持高精排序 | 窗口大小位置与列宽自动记忆")
         lbl_tip.setStyleSheet("color: #00ffcc; font-size: 8.5pt; font-weight: bold; padding: 4px; background-color: #141f26; border-radius: 3px;")
         lay.addWidget(lbl_tip)
 
-        # 主表格
-        headers = ["排名", "核心分类", "基准ETF代码", "ETF名称", "近2月收益率%", "现价", "MA20均线", "MA60均线", "大级别趋势评级", "核心覆盖赛道/题材", "趋势量化诊断"]
+        # 主表格 (18列全景透视)
+        headers = [
+            "排名", "核心赛道", "基准ETF代码", "ETF名称", "现价",
+            "今日涨跌%", "启动动能", "预埋上车建议", "通道趋势评级", "通道支撑位",
+            "反转位", "通道量化评分", "通道位置", "通道倾角", "5日动能%",
+            "20日动能%", "核心覆盖细分概念", "通道量化诊断"
+        ]
         self.table = QTableWidget(0, len(headers))
         self.table.setHorizontalHeaderLabels(headers)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -415,8 +442,37 @@ class SectorETFRadarDialog(QDialog):
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.table.setAlternatingRowColors(True)
         self.table.verticalHeader().setVisible(False)
+
+        # 绑定点击与上下键联动信号
         self.table.itemDoubleClicked.connect(self._on_row_double_clicked)
+        self.table.itemClicked.connect(self._on_row_clicked)
+        self.table.currentCellChanged.connect(self._on_current_cell_changed)
+
         lay.addWidget(self.table)
+
+        # 列宽与表头跨会话自动持久化
+        default_widths = {
+            0: 45,   # 排名
+            1: 85,   # 核心赛道
+            2: 75,   # 基准ETF代码
+            3: 88,   # ETF名称
+            4: 68,   # 现价
+            5: 78,   # 今日涨跌%
+            6: 95,   # 启动动能
+            7: 165,  # 预埋上车建议
+            8: 92,   # 通道趋势评级
+            9: 80,   # 通道支撑位
+            10: 75,  # 反转位
+            11: 72,  # 通道量化评分
+            12: 70,  # 通道位置
+            13: 70,  # 通道倾角
+            14: 75,  # 5日动能%
+            15: 75,  # 20日动能%
+            16: 160, # 核心覆盖细分概念
+            17: 240, # 通道量化诊断
+        }
+        setup_header_persistence(self.table, "sector_etf_radar_dialog_header_v2", default_widths=default_widths)
+        self.table.horizontalHeader().sortIndicatorChanged.connect(self._on_sort_changed)
 
         # 底部操作栏
         bot_lay = QHBoxLayout()
@@ -439,107 +495,374 @@ class SectorETFRadarDialog(QDialog):
 
         lay.addLayout(bot_lay)
 
+    def _restore_window_geometry(self):
+        """恢复用户保存的窗口位置与大小 (支持多屏与防出界)"""
+        geo_data = load_config_node("sector_etf_radar_dialog_geo_v2") or load_config_node("sector_etf_radar_dialog_geo")
+        if geo_data and isinstance(geo_data, dict):
+            try:
+                x = int(geo_data.get("x", 0))
+                y = int(geo_data.get("y", 0))
+                w = int(geo_data.get("w", 1160))
+                h = int(geo_data.get("h", 620))
+                screen = self.screen() or QApplication.primaryScreen()
+                if screen:
+                    s_geo = screen.availableGeometry()
+                    if w >= 400 and h >= 250:
+                        x = max(s_geo.left(), min(x, s_geo.right() - 120))
+                        y = max(s_geo.top(), min(y, s_geo.bottom() - 120))
+                        self.setGeometry(x, y, w, h)
+                        return
+            except Exception as ex:
+                logger.debug(f"restore geometry failed: {ex}")
+        self.resize(1160, 620)
+
+    def _save_window_geometry(self):
+        """保存当前窗口位置与大小"""
+        try:
+            geo = self.geometry()
+            save_config_node("sector_etf_radar_dialog_geo_v2", {
+                "x": geo.x(), "y": geo.y(), "w": geo.width(), "h": geo.height()
+            })
+        except Exception as ex:
+            logger.debug(f"save geometry failed: {ex}")
+
+    def _save_header_state(self):
+        """立即同步保存列宽与列顺序"""
+        try:
+            state_hex = self.table.horizontalHeader().saveState().toHex().data().decode("utf-8")
+            save_config_node("sector_etf_radar_dialog_header_v2", state_hex)
+        except Exception as ex:
+            logger.debug(f"save header state failed: {ex}")
+
+    def _restore_header_state(self) -> bool:
+        """立即同步恢复列宽与列顺序"""
+        try:
+            state_hex = load_config_node("sector_etf_radar_dialog_header_v2")
+            if state_hex and isinstance(state_hex, str):
+                self.table.horizontalHeader().blockSignals(True)
+                res = self.table.horizontalHeader().restoreState(QByteArray.fromHex(state_hex.encode("utf-8")))
+                self.table.horizontalHeader().blockSignals(False)
+                return bool(res)
+        except Exception as ex:
+            logger.debug(f"restore header state failed: {ex}")
+        return False
+
+    def moveEvent(self, event):
+        super().moveEvent(event)
+        if hasattr(self, "_geo_save_timer"):
+            self._geo_save_timer.start()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, "_geo_save_timer"):
+            self._geo_save_timer.start()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        QTimer.singleShot(0, self._restore_window_geometry)
+
+    def closeEvent(self, event):
+        self._save_window_geometry()
+        self._save_header_state()
+        super().closeEvent(event)
+
+    def hideEvent(self, event):
+        self._save_window_geometry()
+        self._save_header_state()
+        super().hideEvent(event)
+
     def _load_data(self):
-        from ats.sector_etf_engine import get_sector_etf_engine
-        engine = get_sector_etf_engine()
-        records = engine.get_all_sector_etfs_summary()
-        self.table.setRowCount(len(records))
-        font_bold = QFont()
-        font_bold.setBold(True)
+        self._is_loading_data = True
+        self.table.setSortingEnabled(False)
+        try:
+            from ats.sector_etf_engine import get_sector_etf_engine
+            engine = get_sector_etf_engine()
+            records = engine.get_all_sector_etfs_summary()
+            self.table.setRowCount(len(records))
+            font_bold = QFont()
+            font_bold.setBold(True)
 
-        for i, r in enumerate(records):
-            # 0: 排名
-            it_rank = QTableWidgetItem(str(i + 1))
-            it_rank.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.table.setItem(i, 0, it_rank)
+            for i, r in enumerate(records):
+                curr_p = float(r.get("curr_p", 0.0))
+                pct_today = float(r.get("pct_today", 0.0))
+                l_score = float(r.get("launch_score", 50.0))
+                l_stars = str(r.get("launch_stars", "⭐⭐"))
+                entry_adv = str(r.get("entry_advice", "观察中"))
+                supp_p = float(r.get("supp_p", 0.0))
+                rev_p = float(r.get("reversal_p", 0.0))
+                q_score = float(r.get("channel_score", 50.0))
+                ch_pos = float(r.get("ch_pos", 50.0))
+                slope_deg = float(r.get("ch_slope_deg", 0.0))
+                g5 = float(r.get("gain_5d", 0.0))
+                g20 = float(r.get("gain_20d", 0.0))
+                grade = str(r.get("trend_grade", "🟡 箱体震荡"))
 
-            # 1: 核心分类
-            it_cat = QTableWidgetItem(r.get("cat_name", ""))
-            it_cat.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            it_cat.setFont(font_bold)
-            it_cat.setForeground(QBrush(QColor("#ffbb55")))
-            self.table.setItem(i, 1, it_cat)
+                # 趋势形态打分 (用于形态列高精排序)
+                grade_score = 50000.0
+                if "起爆" in grade:
+                    grade_score = 95000.0
+                elif "突破" in grade:
+                    grade_score = 90000.0
+                elif "上升" in grade:
+                    grade_score = 80000.0
+                elif "企稳" in grade:
+                    grade_score = 70000.0
+                elif "破位" in grade:
+                    grade_score = 10000.0
 
-            # 2: 代码
-            it_code = QTableWidgetItem(r.get("code", ""))
-            it_code.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.table.setItem(i, 2, it_code)
+                # 0: 排名
+                it_rank = NumericTableWidgetItem(str(i + 1), raw_val=i + 1)
+                it_rank.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                self.table.setItem(i, 0, it_rank)
 
-            # 3: 名称
-            it_name = QTableWidgetItem(r.get("name", ""))
-            it_name.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            it_name.setFont(font_bold)
-            self.table.setItem(i, 3, it_name)
+                # 1: 核心赛道
+                it_cat = NumericTableWidgetItem(r.get("cat_name", ""), raw_val=r.get("cat_name", ""))
+                it_cat.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                it_cat.setFont(font_bold)
+                it_cat.setForeground(QBrush(QColor("#ffbb55")))
+                self.table.setItem(i, 1, it_cat)
 
-            # 4: 近2月收益率%
-            gain = float(r.get("gain_60d", 0.0))
-            it_gain = QTableWidgetItem(f"{gain:+.2f}%")
-            it_gain.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            it_gain.setFont(font_bold)
-            if gain > 0:
-                it_gain.setForeground(QBrush(QColor("#ff4455")))
-            elif gain < 0:
-                it_gain.setForeground(QBrush(QColor("#00ee77")))
-            self.table.setItem(i, 4, it_gain)
+                # 2: 基准ETF代码
+                it_code = NumericTableWidgetItem(r.get("code", ""), raw_val=r.get("code", ""))
+                it_code.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                self.table.setItem(i, 2, it_code)
 
-            # 5: 现价
-            it_p = QTableWidgetItem(f"{r.get('curr_p', 0.0):.3f}")
-            it_p.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.table.setItem(i, 5, it_p)
+                # 3: ETF名称
+                it_name = NumericTableWidgetItem(r.get("name", ""), raw_val=r.get("name", ""))
+                it_name.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                it_name.setFont(font_bold)
+                self.table.setItem(i, 3, it_name)
 
-            # 6: MA20
-            it_ma20 = QTableWidgetItem(f"{r.get('ma20', 0.0):.3f}")
-            it_ma20.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.table.setItem(i, 6, it_ma20)
+                # 4: 现价
+                it_p = NumericTableWidgetItem(f"{curr_p:.3f}", raw_val=curr_p)
+                it_p.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                self.table.setItem(i, 4, it_p)
 
-            # 7: MA60
-            it_ma60 = QTableWidgetItem(f"{r.get('ma60', 0.0):.3f}")
-            it_ma60.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.table.setItem(i, 7, it_ma60)
+                # 5: 今日涨跌% (🔥 新增核心红绿涨跌)
+                it_pct = NumericTableWidgetItem(f"{pct_today:+.2f}%", raw_val=pct_today)
+                it_pct.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                it_pct.setFont(font_bold)
+                if pct_today > 0:
+                    it_pct.setForeground(QBrush(QColor("#ff4455")))
+                elif pct_today < 0:
+                    it_pct.setForeground(QBrush(QColor("#00ee77")))
+                else:
+                    it_pct.setForeground(QBrush(QColor("#cccccc")))
+                self.table.setItem(i, 5, it_pct)
 
-            # 8: 大级别趋势评级
-            grade = r.get("trend_grade", "")
-            it_grade = QTableWidgetItem(grade)
-            it_grade.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            it_grade.setFont(font_bold)
-            if "主升" in grade:
-                it_grade.setForeground(QBrush(QColor("#00ffaa")))
-                it_grade.setBackground(QBrush(QColor(10, 50, 30, 160)))
-            elif "破位" in grade:
-                it_grade.setForeground(QBrush(QColor("#ff5566")))
-                it_grade.setBackground(QBrush(QColor(50, 15, 20, 160)))
+                # 6: 启动动能 (🚀 新增综合拟合评分 + 星级)
+                it_launch = NumericTableWidgetItem(f"{l_score:.1f} {l_stars}", raw_val=l_score)
+                it_launch.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                it_launch.setFont(font_bold)
+                if l_score >= 90.0:
+                    it_launch.setForeground(QBrush(QColor("#ff007f"))) # 顶级起爆：玫红高亮
+                    it_launch.setBackground(QBrush(QColor(50, 10, 30, 180)))
+                elif l_score >= 80.0:
+                    it_launch.setForeground(QBrush(QColor("#00ffcc"))) # 强劲启动：青绿高亮
+                elif l_score >= 65.0:
+                    it_launch.setForeground(QBrush(QColor("#ffd700"))) # 蓄势企稳：金黄
+                elif l_score < 40.0:
+                    it_launch.setForeground(QBrush(QColor("#888888"))) # 破位休眠：灰色
+                self.table.setItem(i, 6, it_launch)
+
+                # 7: 预埋上车建议 (🎯 新增挂单建议)
+                it_adv = NumericTableWidgetItem(entry_adv, raw_val=entry_adv)
+                it_adv.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+                it_adv.setFont(font_bold)
+                if "现价追入" in entry_adv or "回踩" in entry_adv:
+                    it_adv.setForeground(QBrush(QColor("#00ffbb")))
+                elif "预埋" in entry_adv or "低吸" in entry_adv:
+                    it_adv.setForeground(QBrush(QColor("#00e5ff")))
+                elif "严禁" in entry_adv:
+                    it_adv.setForeground(QBrush(QColor("#ff5566")))
+                else:
+                    it_adv.setForeground(QBrush(QColor("#ffbb33")))
+                it_adv.setToolTip(f"【{r.get('name')}】预埋单与上车策略：\n{entry_adv}\n通道支撑: {supp_p:.3f}元 | 反转位: {rev_p:.3f}元")
+                self.table.setItem(i, 7, it_adv)
+
+                # 8: 通道趋势评级
+                it_grade = NumericTableWidgetItem(grade, raw_val=grade_score)
+                it_grade.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                it_grade.setFont(font_bold)
+                if "起爆" in grade or "突破" in grade or "上升" in grade:
+                    it_grade.setForeground(QBrush(QColor("#00ffaa")))
+                    it_grade.setBackground(QBrush(QColor(10, 50, 30, 160)))
+                elif "企稳" in grade:
+                    it_grade.setForeground(QBrush(QColor("#00e5ff")))
+                    it_grade.setBackground(QBrush(QColor(15, 35, 50, 160)))
+                elif "破位" in grade:
+                    it_grade.setForeground(QBrush(QColor("#ff5566")))
+                    it_grade.setBackground(QBrush(QColor(50, 15, 20, 160)))
+                else:
+                    it_grade.setForeground(QBrush(QColor("#ffbb33")))
+                self.table.setItem(i, 8, it_grade)
+
+                # 9: 通道支撑位 (站上支撑青绿高亮，破位暗红)
+                it_supp = NumericTableWidgetItem(f"{supp_p:.3f}", raw_val=supp_p)
+                it_supp.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                it_supp.setFont(font_bold)
+                if curr_p >= supp_p * 0.992:
+                    it_supp.setForeground(QBrush(QColor("#00ffaa"))) # 稳居支撑线上方
+                else:
+                    it_supp.setForeground(QBrush(QColor("#ff5566"))) # 跌破支撑线
+                self.table.setItem(i, 9, it_supp)
+
+                # 10: 反转位 (金黄色)
+                it_rev = NumericTableWidgetItem(f"{rev_p:.3f}", raw_val=rev_p)
+                it_rev.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                it_rev.setForeground(QBrush(QColor("#ffd700")))
+                self.table.setItem(i, 10, it_rev)
+
+                # 11: 通道量化评分 (>=60 鲜绿, <45 警示红)
+                it_score = NumericTableWidgetItem(f"{q_score:.1f}", raw_val=q_score)
+                it_score.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                it_score.setFont(font_bold)
+                if q_score >= 60.0:
+                    it_score.setForeground(QBrush(QColor("#00ff88")))
+                elif q_score < 45.0:
+                    it_score.setForeground(QBrush(QColor("#ff5566")))
+                else:
+                    it_score.setForeground(QBrush(QColor("#ffd700")))
+                self.table.setItem(i, 11, it_score)
+
+                # 12: 通道位置
+                it_pos = NumericTableWidgetItem(f"{ch_pos:.1f}%", raw_val=ch_pos)
+                it_pos.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                if ch_pos >= 80.0:
+                    it_pos.setForeground(QBrush(QColor("#ff4455")))
+                elif ch_pos <= 25.0:
+                    it_pos.setForeground(QBrush(QColor("#00ffaa")))
+                self.table.setItem(i, 12, it_pos)
+
+                # 13: 通道倾角
+                it_slope = NumericTableWidgetItem(f"{slope_deg:+.1f}°", raw_val=slope_deg)
+                it_slope.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                if slope_deg > 0:
+                    it_slope.setForeground(QBrush(QColor("#ff4455")))
+                elif slope_deg < 0:
+                    it_slope.setForeground(QBrush(QColor("#00ee77")))
+                self.table.setItem(i, 13, it_slope)
+
+                # 14: 5日动能%
+                it_g5 = NumericTableWidgetItem(f"{g5:+.2f}%", raw_val=g5)
+                it_g5.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                it_g5.setFont(font_bold)
+                if g5 > 0:
+                    it_g5.setForeground(QBrush(QColor("#ff4455")))
+                elif g5 < 0:
+                    it_g5.setForeground(QBrush(QColor("#00ee77")))
+                self.table.setItem(i, 14, it_g5)
+
+                # 15: 20日动能%
+                it_g20 = NumericTableWidgetItem(f"{g20:+.2f}%", raw_val=g20)
+                it_g20.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                if g20 > 0:
+                    it_g20.setForeground(QBrush(QColor("#ff4455")))
+                elif g20 < 0:
+                    it_g20.setForeground(QBrush(QColor("#00ee77")))
+                self.table.setItem(i, 15, it_g20)
+
+                # 16: 核心覆盖细分概念
+                it_kw = NumericTableWidgetItem(r.get("keywords", ""), raw_val=r.get("keywords", ""))
+                it_kw.setToolTip(r.get("keywords", ""))
+                self.table.setItem(i, 16, it_kw)
+
+                # 17: 通道量化诊断
+                it_sum = NumericTableWidgetItem(r.get("summary", ""), raw_val=r.get("summary", ""))
+                it_sum.setToolTip(r.get("summary", ""))
+                self.table.setItem(i, 17, it_sum)
+
+        finally:
+            self.table.setSortingEnabled(True)
+            saved_sort_col = load_config_node("sector_etf_radar_sort_col_v2")
+            saved_sort_order = load_config_node("sector_etf_radar_sort_order_v2")
+            if saved_sort_col is not None and isinstance(saved_sort_col, int) and 0 <= saved_sort_col < self.table.columnCount():
+                order = Qt.SortOrder(saved_sort_order) if saved_sort_order in (0, 1) else Qt.SortOrder.DescendingOrder
+                self.table.sortItems(saved_sort_col, order)
             else:
-                it_grade.setForeground(QBrush(QColor("#ffbb33")))
-            self.table.setItem(i, 8, it_grade)
+                # 默认按【列 6 启动动能评分】降序排列，起爆与上车板块永远置顶
+                self.table.sortItems(6, Qt.SortOrder.DescendingOrder)
+            self._is_loading_data = False
 
-            # 9: 核心赛道
-            it_kw = QTableWidgetItem(r.get("keywords", ""))
-            it_kw.setToolTip(r.get("keywords", ""))
-            self.table.setItem(i, 9, it_kw)
+    def _on_sort_changed(self, logical_index: int, order: Qt.SortOrder):
+        """保存用户选定的排序列与排序方向"""
+        if not getattr(self, "_is_loading_data", False):
+            try:
+                save_config_node("sector_etf_radar_sort_col_v2", int(logical_index))
+                save_config_node("sector_etf_radar_sort_order_v2", int(order.value))
+            except Exception as ex:
+                logger.debug(f"save sort state failed: {ex}")
 
-            # 10: 趋势量化诊断
-            it_sum = QTableWidgetItem(r.get("summary", ""))
-            it_sum.setToolTip(r.get("summary", ""))
-            self.table.setItem(i, 10, it_sum)
-
-        self.table.resizeColumnsToContents()
-
-    def _on_row_double_clicked(self, item):
-        row = item.row()
+    def _link_row_by_index(self, row: int):
+        """联动指定行的基准 ETF 行情"""
+        if row < 0 or row >= self.table.rowCount() or self._is_loading_data:
+            return
         it_code = self.table.item(row, 2)
         it_name = self.table.item(row, 3)
-        if it_code:
-            code = it_code.text().strip()
-            name = it_name.text().strip() if it_name else code
-            parent = self.parent()
-            if parent and hasattr(parent, "_link_stock_by_code"):
+        if not it_code:
+            return
+        code = it_code.text().strip()
+        name = it_name.text().strip() if it_name else code
+        if not code or code == self._last_linked_code:
+            return
+        self._last_linked_code = code
+
+        parent = self._py_parent or self.parent()
+        if parent and hasattr(parent, "_link_stock_by_code"):
+            try:
                 parent._link_stock_by_code(code, name)
-            else:
-                try:
-                    from JSONData.tdx_data_Day import link_tdx
-                    link_tdx(code)
-                except Exception:
-                    pass
+            except Exception as ex:
+                logger.debug(f"link_stock_by_code failed: {ex}")
+        else:
+            try:
+                from JSONData.tdx_data_Day import link_tdx
+                link_tdx(code)
+            except Exception:
+                pass
+
+    def _on_row_clicked(self, item):
+        """单击表格项即刻联动"""
+        if item:
+            self._link_row_by_index(item.row())
+
+    def _on_current_cell_changed(self, currentRow, currentColumn, previousRow, previousColumn):
+        """单元格焦点变动 (含上下键) 即刻联动"""
+        if currentRow >= 0 and currentRow != previousRow:
+            self._link_row_by_index(currentRow)
+
+    def _on_row_double_clicked(self, item):
+        """双击表格行联动并聚焦 (若双击核心赛道列1，同步聚焦主表成分股)"""
+        if item:
+            self._link_row_by_index(item.row())
+            if item.column() == 1:
+                cat_item = self.table.item(item.row(), 1)
+                if cat_item:
+                    cat_name = cat_item.text().strip()
+                    parent = self._py_parent or self.parent()
+                    if parent and hasattr(parent, "_select_single_sector_by_name"):
+                        parent._select_single_sector_by_name(cat_name)
+
+    def keyPressEvent(self, event):
+        """键盘导航与上下键极速联动支持"""
+        key = event.key()
+        if key in (Qt.Key.Key_Up, Qt.Key.Key_Down, Qt.Key.Key_PageUp, Qt.Key.Key_PageDown):
+            super().keyPressEvent(event)
+            curr = self.table.currentRow()
+            if curr >= 0:
+                self._link_row_by_index(curr)
+            event.accept()
+            return
+        elif key in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space):
+            curr = self.table.currentRow()
+            if curr >= 0:
+                self._link_row_by_index(curr)
+            event.accept()
+            return
+        elif key == Qt.Key.Key_Escape:
+            self.close()
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
     def _on_focus_clicked(self):
         row = self.table.currentRow()
@@ -548,7 +871,7 @@ class SectorETFRadarDialog(QDialog):
         it_cat = self.table.item(row, 1)
         if it_cat:
             cat_name = it_cat.text().strip()
-            parent = self.parent()
+            parent = self._py_parent or self.parent()
             if parent and hasattr(parent, "_select_single_sector_by_name"):
                 parent._select_single_sector_by_name(cat_name)
                 self.close()
@@ -1122,10 +1445,25 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
         self._render_table_data(self.cached_results)
 
     def _open_sector_etf_radar_dialog(self):
-        """打开全市场板块基准 ETF 趋势雷达窗口 (大级别慢牛/破位透视)"""
+        """打开全市场板块基准 ETF 趋势雷达窗口 (通道支撑/反转位/启动动能/预埋上车)"""
         try:
-            dlg = SectorETFRadarDialog(self)
-            dlg.exec()
+            from PyQt6.sip import isdeleted
+            if hasattr(self, "_sector_etf_radar_dialog") and self._sector_etf_radar_dialog is not None:
+                try:
+                    if not isdeleted(self._sector_etf_radar_dialog):
+                        if self._sector_etf_radar_dialog.isMinimized():
+                            self._sector_etf_radar_dialog.showNormal()
+                        self._sector_etf_radar_dialog.show()
+                        self._sector_etf_radar_dialog.raise_()
+                        self._sector_etf_radar_dialog.activateWindow()
+                        self._sector_etf_radar_dialog._load_data()
+                        return
+                except Exception:
+                    pass
+            self._sector_etf_radar_dialog = SectorETFRadarDialog(self)
+            self._sector_etf_radar_dialog.show()
+            self._sector_etf_radar_dialog.raise_()
+            self._sector_etf_radar_dialog.activateWindow()
         except Exception as e:
             logger.error(f"打开 SectorETFRadarDialog 异常: {e}")
 
@@ -1918,19 +2256,29 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
         it_name.setFont(font_bold)
         self.table.setItem(row_idx, 1, it_name)
 
-        # 2: 所属强板块 (显性化展示基准 ETF 趋势结构与大级别收益率，并赋予量化排序权值)
+        # 2: 所属强板块 (显性化展示基准 ETF 通道支撑与量化评分，并赋予量化排序权值)
         etf_nm = str(r.get("etf_name", ""))
         etf_tr = str(r.get("etf_trend", ""))
+        etf_supp = _safe_float(r.get("etf_supp_p", 0.0))
+        etf_rev = _safe_float(r.get("etf_reversal_p", 0.0))
+        etf_score = _safe_float(r.get("etf_channel_score", 50.0))
+        etf_g5 = _safe_float(r.get("etf_gain_5d", 0.0))
         etf_g = _safe_float(r.get("etf_gain", 0.0))
 
         if etf_nm:
             short_etf = etf_nm.replace("ETF", "")
-            if "主升" in etf_tr:
-                disp_sec = f"{sec} [🟢{short_etf}+{etf_g:.1f}%]"
-                sec_color = QColor("#00ffcc") # 鲜亮荧光青绿，代表大级别主升趋势底座
+            if "起爆" in etf_tr:
+                disp_sec = f"{sec} [🚀{short_etf} 起爆{etf_supp:.2f}]"
+                sec_color = QColor("#ff007f") # 玫红高亮，回踩起爆顶级形态
+            elif "突破" in etf_tr or "上升" in etf_tr:
+                disp_sec = f"{sec} [🟢{short_etf} 支撑{etf_supp:.2f}]"
+                sec_color = QColor("#00ffcc") # 鲜亮荧光青绿，上升通道稳健多头
+            elif "企稳" in etf_tr:
+                disp_sec = f"{sec} [💎{short_etf} 企稳{etf_supp:.2f}]"
+                sec_color = QColor("#00e5ff") # 电光宝石青，支撑企稳反转黄金区
             elif "破位" in etf_tr:
-                disp_sec = f"{sec} [🔴{short_etf}{etf_g:.1f}%]"
-                sec_color = QColor("#ff5566") # 警示暗红，警惕诱多昙花一现
+                disp_sec = f"{sec} [🔴{short_etf} 破位]"
+                sec_color = QColor("#ff5566") # 警示暗红，空头破位
             else:
                 disp_sec = f"{sec} [🟡{short_etf}]"
                 sec_color = QColor("#ffbb55")
@@ -1938,14 +2286,17 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
             disp_sec = sec
             sec_color = QColor("#ffbb55")
 
-        it_sec = NumericTableWidgetItem(disp_sec, is_pinned=is_fav, pin_rank=pin_rank, raw_val=etf_g)
+        it_sec = NumericTableWidgetItem(disp_sec, is_pinned=is_fav, pin_rank=pin_rank, raw_val=etf_score)
         it_sec.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
         it_sec.setForeground(QBrush(sec_color))
         if is_fav:
             it_sec.setBackground(QBrush(fav_bg))
         sec_tip = f"【所属板块】: {sec}\n"
         if etf_nm:
-            sec_tip += f"• 📊 板块基准 ETF: {etf_nm}\n• 📈 趋势结构: {etf_tr} (近2月收益率: {etf_g:+.1f}%)\n"
+            sec_tip += f"• 📊 板块基准 ETF: {etf_nm}\n" \
+                       f"• 📈 通道趋势评级: {etf_tr} (量化评分: {etf_score:.1f}分)\n" \
+                       f"• 🛡️ 通道支撑位: {etf_supp:.2f}元 | 🎯 反转确认位: {etf_rev:.2f}元\n" \
+                       f"• ⚡ 近期动能: 5日动能 {etf_g5:+.1f}% | 近2月收益率 {etf_g:+.1f}%\n"
         sec_tip += "• 💡 提示: 双击此单元格或右键，可一键单选聚焦该板块成分股 (再次双击恢复全部)"
         it_sec.setToolTip(sec_tip)
         self.table.setItem(row_idx, 2, it_sec)
@@ -2412,17 +2763,20 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
             sec_name = sec_raw.split(" ")[0].split("[")[0].strip()
             etf_info = etf_eng.get_stock_sector_etf_trend(code_clean, sec_name)
             if etf_info.get("has_etf", False):
-                act_etf = menu.addAction(f"📊 板块ETF趋势: {etf_info.get('etf_name')} ({etf_info.get('trend_grade')})")
+                supp_val = etf_info.get('supp_p', 0.0)
+                score_val = etf_info.get('channel_score', 50.0)
+                act_etf = menu.addAction(f"📊 板块ETF趋势: {etf_info.get('etf_name')} ({etf_info.get('trend_grade')}, 支撑{supp_val:.2f}元, 评分{score_val:.0f}分)")
                 def _show_etf_dialog():
                     try:
                         from stock_logic_utils import toast_messageQT
                         toast_messageQT(
-                            f"【{sec_name}板块 ETF 大级别趋势结构诊断】\n"
+                            f"【{sec_name}板块 ETF 通道支撑与宏观大势诊断】\n"
                             f"• 基准 ETF: {etf_info.get('etf_name')}({etf_info.get('etf_code')})\n"
-                            f"• 趋势评级: {etf_info.get('trend_grade')}\n"
-                            f"• 近2月收益率: {etf_info.get('gain_60d'):+.2f}%\n"
-                            f"• 均线结构: MA20={etf_info.get('ma20'):.2f} | MA60={etf_info.get('ma60'):.2f}\n"
-                            f"• 趋势诊断: {etf_info.get('summary')}"
+                            f"• 通道趋势评级: {etf_info.get('trend_grade')} (量化评分: {etf_info.get('channel_score', 50.0):.1f}分)\n"
+                            f"• 🛡️ 通道支撑位: {etf_info.get('supp_p', 0.0):.2f}元 | 🎯 反转确认位: {etf_info.get('reversal_p', 0.0):.2f}元\n"
+                            f"• 通道三轨: 上轨{etf_info.get('ch_upper', 0.0):.2f} | 中轨{etf_info.get('ch_mid', 0.0):.2f} | 下轨{etf_info.get('ch_lower', 0.0):.2f}\n"
+                            f"• ⚡ 近期动能: 5日动能 {etf_info.get('gain_5d', 0.0):+.2f}% | 20日动能 {etf_info.get('gain_20d', 0.0):+.2f}%\n"
+                            f"• 趋势量化诊断: {etf_info.get('summary')}"
                         )
                     except Exception:
                         pass
@@ -2433,7 +2787,7 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
                 act_focus = menu.addAction(f"🎯 聚焦此板块成分股 ({sec_name})")
                 act_focus.triggered.connect(lambda checked=False, s=sec_name: self._select_single_sector_by_name(s))
 
-            act_radar = menu.addAction("📊 全市场板块ETF趋势雷达 (2个月大级别慢牛/破位透视)")
+            act_radar = menu.addAction("📊 全市场板块ETF趋势雷达 (通道支撑/反转位/量化评分透视)")
             act_radar.triggered.connect(self._open_sector_etf_radar_dialog)
         except Exception as e:
             logger.debug(f"etf menu error: {e}")

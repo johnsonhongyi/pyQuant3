@@ -2060,11 +2060,19 @@ class TDXRealtimeFetcher:
             etf_bonus = float(etf_trend_info.get("trend_score_bonus", 0.0))
             etf_name = str(etf_trend_info.get("etf_name", ""))
             etf_gain = float(etf_trend_info.get("gain_60d", 0.0))
+            etf_supp_p = float(etf_trend_info.get("supp_p", 0.0))
+            etf_reversal_p = float(etf_trend_info.get("reversal_p", 0.0))
+            etf_channel_score = float(etf_trend_info.get("channel_score", 50.0))
+            etf_gain_5d = float(etf_trend_info.get("gain_5d", 0.0))
             sec_res_count = sector_positive_count.get(sec, 0)
 
             it["etf_name"] = etf_name
             it["etf_gain"] = etf_gain
             it["etf_trend"] = etf_trend_info.get("trend_grade", "")
+            it["etf_supp_p"] = etf_supp_p
+            it["etf_reversal_p"] = etf_reversal_p
+            it["etf_channel_score"] = etf_channel_score
+            it["etf_gain_5d"] = etf_gain_5d
 
             # 💡 3. 检查是否属于割肉/止损标的主升确认回补
             reentry_tracker = get_reentry_tracker()
@@ -2132,13 +2140,13 @@ class TDXRealtimeFetcher:
                     if is_etf_up:
                         reason += f" | {etf_name}大级别趋势主升(+{etf_gain:.1f}%)"
                     type_priority = 98
-                elif is_etf_down and sec_res_count <= 1 and (pct >= 2.5 or "诱多" in order_intent):
-                    # ⚠️ 昙花一现脉冲：所属板块 ETF 处于空头破位下行通道，且无板块共振，警惕诱多
-                    buy_type = "⚠️ 昙花一现脉冲"
+                elif (is_etf_down or etf_channel_score < 35.0) and sec_res_count <= 1 and (pct >= 2.0 or "诱多" in order_intent):
+                    # ⚠️ 诱多脉冲(板块破位)：所属板块 ETF 处于空头破位下行通道(评分<35/破支撑)，且无板块共振，警惕诱多
+                    buy_type = "⚠️ 诱多脉冲(板块破位)"
                     buy_tag = "TRAP"
-                    buy_zone = "-- (严禁追高)"
+                    buy_zone = "-- (严禁追高/板块破位诱多)"
                     stop_loss = round(price * 0.95, 2)
-                    reason = f"所属{sec}板块对应{etf_name}处于空头破位下行通道(近2月{etf_gain:.1f}%), 且无板块共振, 异动多为昙花一现诱多, 谨慎追高"
+                    reason = f"所属{sec}板块对应{etf_name}通道空头破位(评分{etf_channel_score:.0f}/跌破支撑{etf_supp_p:.2f}元), 且无板块共振, 异动冲高多为诱多拉高出货, 严禁追高防被套"
                     type_priority = 10
                 elif "抢筹" in order_intent:
                     buy_type = "🚀 竞价抢筹"
@@ -2230,6 +2238,15 @@ class TDXRealtimeFetcher:
                 stop_loss = round(max(vwap * 0.988, open_p_val), 2)
                 reason = f"VWAP快速拉离成本(+{vwap_escape_pct:.1f}%), 均线护城河(+{vwap_dev:.1f}%), 攻角{slope:.0f}°, 黄金狙击买入点"
 
+            elif (is_etf_down or etf_channel_score < 35.0) and sec_res_count <= 1 and pct >= 1.5 and pct < 9.5 and not is_sec_leader:
+                # ⚠️ 诱多脉冲(板块破位)：所属板块 ETF 处于空头破位下行通道(通道评分<35/跌破支撑)，且无板块共振，个股冲高孤狼拉升多为拉高诱多砸盘，坚决拦截！
+                buy_type = "⚠️ 诱多脉冲(板块破位)"
+                buy_tag = "TRAP"
+                type_priority = 10
+                buy_zone = "-- (严禁追高/板块破位诱多)"
+                stop_loss = round(vwap * 0.97, 2)
+                reason = f"板块{etf_name}通道空头破位(评分{etf_channel_score:.0f}/跌破支撑{etf_supp_p:.2f}元), 无板块共振, 异动冲高多为拉高诱多砸盘, 严禁追高防被套"
+
             elif "扫买" in order_intent and vwap_dev >= -0.2 and pct >= 1.5:
                 # 🔥 主动扫买点火抢筹：主力大单主动吃进外盘，盘中起涨先手黄金点 (盘中不等涨停即可第一时间发现并报警！)
                 if pct >= 6.5:
@@ -2280,15 +2297,6 @@ class TDXRealtimeFetcher:
                 stop_loss = round(min(it['low'], vwap * 0.98), 2)
                 reason = f"回踩分时均线({vwap:.2f})企稳不破, 支撑极强, 冰点黄金潜伏上车点"
                 type_priority = 85
-
-            elif is_etf_down and sec_res_count <= 1 and pct >= 2.5 and vwap_dev < 0.5:
-                # ⚠️ 昙花一现脉冲：所属板块 ETF 处于空头破位下行通道，且无板块共振，孤狼冲高脉冲诱多
-                buy_type = "⚠️ 昙花一现脉冲"
-                buy_tag = "TRAP"
-                type_priority = 15
-                buy_zone = "-- (严禁追高)"
-                stop_loss = round(vwap * 0.97, 2)
-                reason = f"板块{etf_name}空头破位(近2月{etf_gain:.1f}%), 个股孤狼脉冲无板块协同, 严防冲高回落诱多"
 
             elif vwap_dev < -0.8 or pct < -2.0 or (it.get('high', price) > 0 and it.get('last_close', 0) > 0 and (it.get('high', price) - it.get('last_close', price)) / it.get('last_close', price) * 100.0 >= 4.5 and vwap_dev < -0.3):
                 # ⚠️ 破位转弱 / 冲高回落诱多被砸 (防猎避坑保护机制)
