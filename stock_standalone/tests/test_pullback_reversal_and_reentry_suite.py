@@ -204,3 +204,104 @@ def test_trap_pulse_filter_and_monotonic_tiers():
     assert score_tmkj > score_bo > score_pb > score_wt > score_trap > score_wk, (
         f"梯队顺序倒挂: 回补={score_tmkj} > 突破={score_bo} > 低吸={score_pb} > 观察={score_wt} > 脉冲={score_trap} > 破位={score_wk}"
     )
+
+
+def test_context_menu_crash_proof_and_stateless_handlers():
+    """测试 5: 验证右键菜单解绑 C++ 指针无状态分发、防崩溃保护与双击第2列聚焦板块"""
+    from ats.ui.hot_sector_leaderboard import HotSectorLeaderboardDialog
+    dialog = HotSectorLeaderboardDialog()
+    
+    # 1. 验证无状态方法在纯字符串调用下安全稳定执行
+    dialog._link_stock_by_code("002567", "唐人神")
+    dialog._open_stock_strategy_by_code("002567", "唐人神")
+
+    # 2. 验证防崩溃保护：传入已被析构或无效的 item 绝不报 RuntimeError
+    dialog._on_item_clicked(None)
+    dialog._on_item_double_clicked(None)
+
+    # 3. 验证板块单选聚焦与恢复全选
+    dialog.current_top_sectors = ["猪肉", "养鸡", "玉米"]
+    dialog.active_sectors = {"猪肉", "养鸡", "玉米"}
+    dialog.selected_single_sector = None
+
+    # 模拟双击第 2 列【所属强板块】聚焦 "猪肉"
+    dialog._select_single_sector_by_name("猪肉 [🟢养殖+6.5%]")
+    assert dialog.selected_single_sector == "猪肉"
+    assert dialog.active_sectors == {"猪肉"}
+
+    # 再次双击 "猪肉"，平滑恢复全选
+    dialog._select_single_sector_by_name("猪肉")
+    assert dialog.selected_single_sector is None
+    assert "猪肉" in dialog.active_sectors and "养鸡" in dialog.active_sectors
+
+    dialog.close()
+
+
+def test_sector_column_etf_display_and_radar_dialog():
+    """测试 6: 验证主表第2列显性化呈现 ETF 趋势与全市场 ETF 趋势雷达窗口"""
+    from ats.ui.hot_sector_leaderboard import HotSectorLeaderboardDialog, SectorETFRadarDialog
+    from PyQt6.QtGui import QFont
+
+    dialog = HotSectorLeaderboardDialog()
+    dialog.table.setRowCount(2)
+
+    font = QFont()
+    # 模拟两只不同板块标的：一只养殖（主升），一只半导体（破位）
+    rec_up = {
+        "code": "002567",
+        "name": "唐人神",
+        "sector": "猪肉",
+        "etf_name": "养殖ETF",
+        "etf_trend": "🟢 趋势主升",
+        "etf_gain": 6.47,
+        "price": 6.50,
+        "pct": 9.98,
+        "buy_type": "⚡ 脱离成本狙击",
+        "buy_tag": "SURGE",
+        "alpha_score": 92.0
+    }
+    rec_down = {
+        "code": "688001",
+        "name": "华兴源创",
+        "sector": "半导体",
+        "etf_name": "半导体ETF",
+        "etf_trend": "🔴 空头破位",
+        "etf_gain": -52.86,
+        "price": 28.00,
+        "pct": 2.1,
+        "buy_type": "⚠️ 昙花一现脉冲",
+        "buy_tag": "TRAP",
+        "alpha_score": 25.0
+    }
+
+    dialog._populate_row(0, rec_up, font)
+    dialog._populate_row(1, rec_down, font)
+
+    # 验证第 2 列【所属强板块】文本显性化
+    sec_item_up = dialog.table.item(0, 2)
+    assert sec_item_up is not None
+    assert "猪肉" in sec_item_up.text()
+    assert "🟢" in sec_item_up.text()
+    assert "养殖" in sec_item_up.text()
+    assert "+6.5%" in sec_item_up.text()
+    # 验证 raw_val 注入，支持排序
+    assert sec_item_up.raw_val == 6.47
+
+    sec_item_down = dialog.table.item(1, 2)
+    assert sec_item_down is not None
+    assert "半导体" in sec_item_down.text()
+    assert "🔴" in sec_item_down.text()
+    assert "-52.9%" in sec_item_down.text()
+    assert sec_item_down.raw_val == -52.86
+
+    # 验证 SectorETFRadarDialog 初始化与数据加载
+    radar_dlg = SectorETFRadarDialog(dialog)
+    assert radar_dlg.table.rowCount() >= 13
+    # 验证第一行收益率必然大于等于最后一行（降序排列）
+    g_first = float(radar_dlg.table.item(0, 4).text().replace("%", ""))
+    g_last = float(radar_dlg.table.item(radar_dlg.table.rowCount() - 1, 4).text().replace("%", ""))
+    assert g_first >= g_last, f"ETF 雷达未按 2 个月收益率降序排列: 首行={g_first}%, 末行={g_last}%"
+
+    radar_dlg.close()
+    dialog.close()
+
