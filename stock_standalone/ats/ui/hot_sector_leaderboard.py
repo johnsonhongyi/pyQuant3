@@ -105,6 +105,10 @@ def compute_buy_type_sort_score(item: Dict[str, Any]) -> float:
     is_open_low = bool(item.get("is_open_low_accel")) or ("光脚加速" in buy_t)
 
     # 核心买点特征判断
+    is_trap_pulse = ("昙花一现" in buy_t or "脉冲诱多" in buy_t)
+    is_reversal_launch = (tag == "BID_REVERSAL_LAUNCH" or "弱转强起爆" in buy_t)
+    is_reentry = (tag == "RE_ENTRY_BUY" or "割肉反转回补" in buy_t or "割肉" in buy_t)
+
     is_leader = (tag in ("LEADER", "BID_LIMIT", "BID_BREAKOUT", "IPO_BID_SURGE") or 
                  any(k in buy_t for k in ("领涨龙头", "竞价领涨", "竞价一字", "爆量突破", "首日真金抢筹", "破红线", "竞价破顶")))
     is_surge = (tag in ("SURGE", "BID_SURGE") or 
@@ -115,7 +119,28 @@ def compute_buy_type_sort_score(item: Dict[str, Any]) -> float:
     is_weak = (tag in ("WEAK", "TRAP") or 
                any(k in buy_t for k in ("破位", "诱多", "转弱")))
 
-    if is_leader:
+    if is_trap_pulse:
+        # ⚠️ 昙花一现脉冲 (空头破位板块孤狼脉冲, 严防诱多, 置于最底层)
+        base = 2000.0
+        return round(base + alpha_score * 0.5, 3)
+
+    elif is_reversal_launch:
+        # 👑 梯队 0：弱转强起爆族 (强势洗盘后早竞价平开/高开超预期弱转强, 顶级换手龙形态)
+        base = 96000.0
+        accel_add = 3000.0 if is_dual else (2000.0 if is_gap else (1000.0 if is_open_low else 0.0))
+        gain_add = min(20.0, max(-2.0, pct)) * 250.0
+        rev_add = min(15.0, max(0.0, float(item.get("reversal_diff", 0.0)))) * 150.0
+        score_add = min(100.0, max(0.0, alpha_score)) * 5.0
+        return round(base + accel_add + gain_add + rev_add + score_add, 3)
+
+    elif is_reentry:
+        # 💎 梯队 0.5：割肉反转回补族 (前期止损标的回踩企稳确认主升结构, 第一时间跟踪回补)
+        base = 94500.0
+        gain_add = min(20.0, max(-2.0, pct)) * 200.0
+        score_add = min(100.0, max(0.0, alpha_score)) * 5.0
+        return round(base + gain_add + score_add, 3)
+
+    elif is_leader:
         # 👑 梯队 1：领涨龙头族 (带头大哥统治殿堂)
         base = 95000.0
         accel_add = 3000.0 if is_dual else (2000.0 if is_gap else (1000.0 if is_open_low else 0.0))
@@ -1604,6 +1629,15 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
         if "双加速" in buy_type:
             type_color = QColor("#FFD700") # 金黄双加速
             type_bg = QColor(80, 20, 60, 180) # 尊荣金紫
+        elif "弱转强" in buy_type:
+            type_color = QColor("#FF1493") # 玫瑰紫红弱转强起爆
+            type_bg = QColor(80, 15, 55, 180)
+        elif "割肉" in buy_type or "回补" in buy_type:
+            type_color = QColor("#00E5FF") # 电光宝石青割肉回补
+            type_bg = QColor(10, 50, 70, 180)
+        elif "昙花一现" in buy_type:
+            type_color = QColor("#aaaaaa") # 暗灰脉冲诱多
+            type_bg = QColor(45, 20, 20, 150)
         elif buy_tag == "LEADER":
             type_color = QColor("#FF3399") # 亮洋红领涨龙头
             type_bg = QColor(65, 20, 45, 160)
@@ -1655,12 +1689,19 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
         it_name.setFont(font_bold)
         self.table.setItem(row_idx, 1, it_name)
 
-        # 2: 所属强板块
+        # 2: 所属强板块 (注入板块基准 ETF 趋势结构 ToolTip)
         it_sec = NumericTableWidgetItem(sec, is_pinned=is_fav, pin_rank=pin_rank)
         it_sec.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
         it_sec.setForeground(QBrush(QColor("#ffbb55")))
         if is_fav:
             it_sec.setBackground(QBrush(fav_bg))
+        etf_nm = str(r.get("etf_name", ""))
+        etf_tr = str(r.get("etf_trend", ""))
+        etf_g = _safe_float(r.get("etf_gain", 0.0))
+        sec_tip = f"【所属板块】: {sec}\n"
+        if etf_nm:
+            sec_tip += f"• 📊 板块基准 ETF: {etf_nm}\n• 📈 趋势结构: {etf_tr} (近2月收益率: {etf_g:+.1f}%)\n"
+        it_sec.setToolTip(sec_tip)
         self.table.setItem(row_idx, 2, it_sec)
 
         # 3: 买点类型 (支持加速结构详细透视 ToolTip 与量化排序权值)
@@ -1670,10 +1711,14 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
         lc_v = _safe_float(r.get("last_close", 0.0))
         diff_v = _safe_float(r.get("low_diff_pct", 0.0))
         jump_v = _safe_float(r.get("open_jump_pct", 0.0))
+        rev_d = _safe_float(r.get("reversal_diff", 0.0))
+        per1d_v = _safe_float(r.get("per1d", 0.0))
         type_tip = f"【买点分析】: {buy_type}\n" \
                    f"• 👑 加速结构: {accel_t if accel_t else '常规波动'}\n" \
-                   f"• 📊 盘口开低跳空: 开{open_v:.2f} | 低{low_v:.2f} (下影差异: {diff_v:.2f}%) | 昨收{lc_v:.2f} (跳空幅度: {jump_v:+.2f}%)\n" \
-                   f"• 🎯 决策依据: {reason}"
+                   f"• 📊 盘口开低跳空: 开{open_v:.2f} | 低{low_v:.2f} (下影差异: {diff_v:.2f}%) | 昨收{lc_v:.2f} (跳空幅度: {jump_v:+.2f}%)\n"
+        if rev_d != 0.0 or per1d_v != 0.0:
+            type_tip += f"• ⚡ 弱转强反差: 昨日{per1d_v:+.1f}% | 今日{pct:+.1f}% (反差动能: {rev_d:+.1f}%)\n"
+        type_tip += f"• 🎯 决策依据: {reason}"
         buy_type_score = compute_buy_type_sort_score(r)
         it_type = NumericTableWidgetItem(buy_type, is_pinned=is_fav, pin_rank=pin_rank, raw_val=buy_type_score)
         it_type.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -2024,6 +2069,65 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
             self._render_table_data(self.cached_results)
 
         act_fav.triggered.connect(_toggle_fav)
+
+        # 1.5 割肉回补雷达跟踪操作 (主升反转回补雷达)
+        try:
+            from ats.reentry_tracker import get_reentry_tracker
+            reentry_tr = get_reentry_tracker()
+            is_tracked_reentry = (code_clean in reentry_tr._closed_trades)
+
+            if is_tracked_reentry:
+                act_reentry = menu.addAction(f"❌ 移出割肉回补雷达 ({code_clean})")
+                def _toggle_reentry():
+                    reentry_tr.remove_tracked_code(code_clean)
+                    try:
+                        from stock_logic_utils import toast_messageQT
+                        toast_messageQT(f"已将 {clean_name}({code_clean}) 移出割肉回补雷达")
+                    except Exception:
+                        pass
+                    self._render_table_data(self.cached_results)
+                act_reentry.triggered.connect(_toggle_reentry)
+            else:
+                act_reentry = menu.addAction(f"💎 纳入割肉回补跟踪雷达 ({code_clean})")
+                def _toggle_reentry():
+                    p_val = _safe_float(cur_p_str, 0.0)
+                    reentry_tr.add_tracked_trade(code_clean, buy_price=p_val, sell_price=round(p_val * 0.95, 2))
+                    try:
+                        from stock_logic_utils import toast_messageQT
+                        toast_messageQT(f"🎯 已将 {clean_name}({code_clean}) 纳入割肉回补跟踪雷达！\n系统将实时监控回踩MA20企稳与反转突破，确认主升结构第一时间报警回补！")
+                    except Exception:
+                        pass
+                    self._render_table_data(self.cached_results)
+                act_reentry.triggered.connect(_toggle_reentry)
+        except Exception as e:
+            logger.debug(f"reentry_tracker menu error: {e}")
+
+        # 1.6 查看板块 ETF 趋势结构诊断
+        try:
+            from ats.sector_etf_engine import get_sector_etf_engine
+            etf_eng = get_sector_etf_engine()
+            sec_item = self.table.item(row, 2)
+            sec_name = sec_item.text().strip() if sec_item else ""
+            etf_info = etf_eng.get_stock_sector_etf_trend(code_clean, sec_name)
+            if etf_info.get("has_etf", False):
+                act_etf = menu.addAction(f"📊 板块ETF趋势: {etf_info.get('etf_name')} ({etf_info.get('trend_grade')})")
+                def _show_etf_dialog():
+                    try:
+                        from stock_logic_utils import toast_messageQT
+                        toast_messageQT(
+                            f"【{sec_name}板块 ETF 大级别趋势结构诊断】\n"
+                            f"• 基准 ETF: {etf_info.get('etf_name')}({etf_info.get('etf_code')})\n"
+                            f"• 趋势评级: {etf_info.get('trend_grade')}\n"
+                            f"• 近2月收益率: {etf_info.get('gain_60d'):+.2f}%\n"
+                            f"• 均线结构: MA20={etf_info.get('ma20'):.2f} | MA60={etf_info.get('ma60'):.2f}\n"
+                            f"• 趋势诊断: {etf_info.get('summary')}"
+                        )
+                    except Exception:
+                        pass
+                act_etf.triggered.connect(_show_etf_dialog)
+        except Exception as e:
+            logger.debug(f"etf menu error: {e}")
+
         menu.addSeparator()
 
         # 2. 行情联动与分时图
