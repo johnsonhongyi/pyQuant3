@@ -25,6 +25,8 @@ from pytdx.hq import TdxHq_API
 
 from logger_utils import LoggerFactory
 from JohnsonUtil import commonTips as cct
+from ats.sector_etf_engine import get_sector_etf_engine
+from ats.reentry_tracker import get_reentry_tracker
 
 import math
 
@@ -1748,6 +1750,10 @@ class TDXRealtimeFetcher:
             dff3 = float(mp_info.get("dff3", 0.0) or 0.0)
             rank_val = int(mp_info.get("rank", mp_info.get("Rank", 999)) or 999)
             perc3d = float(mp_info.get("perc3d", 0.0) or 0.0)
+            per1d = float(mp_info.get("per1d", 0.0) or 0.0)
+            per2d = float(mp_info.get("per2d", 0.0) or 0.0)
+            ma20_val = float(mp_info.get("ma20d", mp_info.get("ma20", 0.0)) or 0.0)
+            ch_supp_val = float(mp_info.get("ch_supp", mp_info.get("ch_lower", 0.0)) or 0.0)
 
             is_bidding_breakout = False
             breakout_level = ""
@@ -1977,6 +1983,13 @@ class TDXRealtimeFetcher:
                 "dff3": dff3,
                 "rank": rank_val,
                 "perc3d": perc3d,
+                "per1d": per1d,
+                "per2d": per2d,
+                "ma20": ma20_val,
+                "ch_supp": ch_supp_val,
+                "max_2d": max_2d,
+                "max_3d": max_3d,
+                "max_5d": max_5d,
                 "is_open_low_accel": is_open_low_accel,
                 "is_gap_accel": is_gap_accel,
                 "is_dual_accel": is_dual_accel,
@@ -1987,11 +2000,16 @@ class TDXRealtimeFetcher:
             })
 
         # 2. 板块内领涨与多维买点统一智能分拣
-        # 按板块分组统计最高涨幅与领跑者
+        # 按板块分组统计最高涨幅、领跑者与板块共振红盘家数
         sector_max_pct = {}
         sector_leader_code = {}
+        sector_positive_count = {}
+        sector_total_count = {}
         for it in parsed_items:
             sec = it["sector"]
+            sector_total_count[sec] = sector_total_count.get(sec, 0) + 1
+            if it["pct"] > 0:
+                sector_positive_count[sec] = sector_positive_count.get(sec, 0) + 1
             if sec not in sector_max_pct or it["pct"] > sector_max_pct[sec]:
                 sector_max_pct[sec] = it["pct"]
                 sector_leader_code[sec] = it["code"]
@@ -2022,6 +2040,44 @@ class TDXRealtimeFetcher:
 
             # 是否多日多头底座扎实 (2D/3D 加速)
             has_base = (dff2 > 0.0 or dff3 > 0.0)
+
+            per1d = it.get("per1d", 0.0)
+            per2d = it.get("per2d", 0.0)
+            ma20_val = it.get("ma20", 0.0)
+            ch_supp_val = it.get("ch_supp", 0.0)
+            max_2d = it.get("max_2d", 0.0)
+            max_5d = it.get("max_5d", 0.0)
+
+            # 💡 1. 计算弱转强反差动能 (Reversal Differential)
+            reversal_diff = round(pct - per1d, 2)
+            it["reversal_diff"] = reversal_diff
+
+            # 💡 2. 获取该板块对应的基准 ETF 趋势结构与共振分析
+            etf_engine = get_sector_etf_engine()
+            etf_trend_info = etf_engine.get_stock_sector_etf_trend(code, sec)
+            is_etf_up = etf_trend_info.get("is_trend_up", False)
+            is_etf_down = etf_trend_info.get("is_down_trend", False)
+            etf_bonus = float(etf_trend_info.get("trend_score_bonus", 0.0))
+            etf_name = str(etf_trend_info.get("etf_name", ""))
+            etf_gain = float(etf_trend_info.get("gain_60d", 0.0))
+            sec_res_count = sector_positive_count.get(sec, 0)
+
+            it["etf_name"] = etf_name
+            it["etf_gain"] = etf_gain
+            it["etf_trend"] = etf_trend_info.get("trend_grade", "")
+
+            # 💡 3. 检查是否属于割肉/止损标的主升确认回补
+            reentry_tracker = get_reentry_tracker()
+            reentry_info = reentry_tracker.check_reentry_signal(
+                code=code,
+                current_price=price,
+                ma20=ma20_val,
+                ch_supp=ch_supp_val,
+                high_2d=max_2d,
+                pct=pct,
+                is_bidding=is_bidding_session
+            )
+            is_reentry = reentry_info.get("is_reentry", False)
 
             # ── 💡 统一多模块智能阿尔法分拣决策 (集合竞价高开竞速与盘中连续撮合买点) ──
             if is_bidding_session:
@@ -2056,6 +2112,34 @@ class TDXRealtimeFetcher:
                     stop_loss = round(price * 0.95, 2)
                     reason = f"集合竞价一字顶格封板 (竞价金额{b_amt_yi:.2f}亿, 买盘压强{bid_p:.0f}%), {order_intent}"
                     type_priority = 100
+                elif is_reentry:
+                    # 💎 割肉反转回补：建仓早割肉后，回踩企稳确认主升结构，09:25直接挂单补回
+                    buy_type = reentry_info["buy_type"]
+                    buy_tag = "RE_ENTRY_BUY"
+                    buy_zone = f"{price:.2f} (09:25前挂单锁定成本底座)"
+                    stop_loss = reentry_info["stop_loss"]
+                    reason = reentry_info["reason"]
+                    if is_etf_up:
+                        reason += f" | {etf_name}大级别趋势主升(+{etf_gain:.1f}%)"
+                    type_priority = 98
+                elif (per1d <= -1.0 and pct >= -0.5 and reversal_diff >= 2.5 and (perc3d >= 8.0 or dff2 >= 4.0 or dff3 >= 8.0 or max_5d > 0 or has_base or bid_p >= 50.0 or reversal_diff >= 4.0)):
+                    # 👑 弱转强起爆：柏星龙/恒盛能源模式 (前期强势异动洗盘后，早竞价平开/高开弱转强起爆，09:25前挂单锁死成本底座)
+                    buy_type = "👑 弱转强起爆"
+                    buy_tag = "BID_REVERSAL_LAUNCH"
+                    buy_zone = f"{price:.2f} (09:25前直接挂单锁底座)"
+                    stop_loss = round(price * 0.96, 2)
+                    reason = f"前期强势回调后早竞价弱转强起爆 (昨日{per1d:+.1f}%,今日竞价{pct:+.1f}%,反差+{reversal_diff:.1f}%), 09:25前挂单锁死成本底座(防极速脉冲拉升)"
+                    if is_etf_up:
+                        reason += f" | {etf_name}大级别趋势主升(+{etf_gain:.1f}%)"
+                    type_priority = 98
+                elif is_etf_down and sec_res_count <= 1 and (pct >= 2.5 or "诱多" in order_intent):
+                    # ⚠️ 昙花一现脉冲：所属板块 ETF 处于空头破位下行通道，且无板块共振，警惕诱多
+                    buy_type = "⚠️ 昙花一现脉冲"
+                    buy_tag = "TRAP"
+                    buy_zone = "-- (严禁追高)"
+                    stop_loss = round(price * 0.95, 2)
+                    reason = f"所属{sec}板块对应{etf_name}处于空头破位下行通道(近2月{etf_gain:.1f}%), 且无板块共振, 异动多为昙花一现诱多, 谨慎追高"
+                    type_priority = 10
                 elif "抢筹" in order_intent:
                     buy_type = "🚀 竞价抢筹"
                     buy_tag = "BID_SURGE"
@@ -2114,6 +2198,28 @@ class TDXRealtimeFetcher:
                 buy_zone = f"{round(max(open_p_val, max_2d), 2)} ~ {price:.2f}"
                 stop_loss = round(max(max_2d * 0.985, open_p_val * 0.985), 2)
                 reason = f"连续回调后高开突破前高红线({max_2d:.2f}元)并持续高走, 彻底解放洗盘筹码, 黄金主升浪"
+
+            elif is_reentry:
+                # 💎 割肉反转回补：天马科技模式 (建仓早割肉后，回踩MA20/通道企稳并突破反转位，主升确立立即回补)
+                buy_type = "💎 割肉反转回补"
+                buy_tag = "RE_ENTRY_BUY"
+                type_priority = 98
+                buy_zone = reentry_info.get("buy_zone", f"{price:.2f}")
+                stop_loss = reentry_info.get("stop_loss", round(price * 0.96, 2))
+                reason = reentry_info.get("reason", "前期止损标的回踩企稳确认主升结构,触发反转回补")
+                if is_etf_up:
+                    reason += f" | {etf_name}趋势主升助推(+{etf_gain:.1f}%)"
+
+            elif (per1d <= -1.0 and reversal_diff >= 3.0 and vwap_dev >= 0.0 and pct >= 1.0):
+                # 👑 弱转强起爆延续：昨日回调洗盘后今日弱转强起爆 (柏星龙模式盘中主升浪)
+                buy_type = "👑 弱转强起爆"
+                buy_tag = "LEADER"
+                type_priority = 98
+                buy_zone = f"{vwap:.2f} ~ {price:.2f}"
+                stop_loss = round(vwap * 0.98, 2)
+                reason = f"昨日回调洗盘({per1d:+.1f}%)后今日弱转强起爆(+{pct:+.1f}%,反差+{reversal_diff:.1f}%), 站稳分时均线(+{vwap_dev:.1f}%), 黄金主升确认"
+                if is_etf_up:
+                    reason += f" | {etf_name}大级别趋势主升(+{etf_gain:.1f}%)"
 
             elif (vwap_escape_pct >= 1.5 and 0.5 <= vwap_dev <= 3.8 and 2.5 <= pct <= 9.0 and (vol_r >= 1.2 or slope >= 50.0)):
                 # ⚡ 脱离成本狙击：开盘资金爆量向上扫单，VWAP 强斜率向上快速拉离成本区，未封板前可直接买入参与的黄金狙击点！
@@ -2175,6 +2281,15 @@ class TDXRealtimeFetcher:
                 reason = f"回踩分时均线({vwap:.2f})企稳不破, 支撑极强, 冰点黄金潜伏上车点"
                 type_priority = 85
 
+            elif is_etf_down and sec_res_count <= 1 and pct >= 2.5 and vwap_dev < 0.5:
+                # ⚠️ 昙花一现脉冲：所属板块 ETF 处于空头破位下行通道，且无板块共振，孤狼冲高脉冲诱多
+                buy_type = "⚠️ 昙花一现脉冲"
+                buy_tag = "TRAP"
+                type_priority = 15
+                buy_zone = "-- (严禁追高)"
+                stop_loss = round(vwap * 0.97, 2)
+                reason = f"板块{etf_name}空头破位(近2月{etf_gain:.1f}%), 个股孤狼脉冲无板块协同, 严防冲高回落诱多"
+
             elif vwap_dev < -0.8 or pct < -2.0 or (it.get('high', price) > 0 and it.get('last_close', 0) > 0 and (it.get('high', price) - it.get('last_close', price)) / it.get('last_close', price) * 100.0 >= 4.5 and vwap_dev < -0.3):
                 # ⚠️ 破位转弱 / 冲高回落诱多被砸 (防猎避坑保护机制)
                 high_pct = round((it.get('high', price) - it.get('last_close', price)) / max(0.01, it.get('last_close', price)) * 100.0, 1) if it.get('last_close', 0) > 0 else pct
@@ -2235,6 +2350,12 @@ class TDXRealtimeFetcher:
                     alpha_score = 99.0 + (1.0 if b_amt_yi >= 1.0 else 0.0)
                 elif "一字" in order_intent:
                     alpha_score = 98.0 + (2.0 if b_amt_yi >= 1.0 else 0.0)
+                elif buy_type == "👑 弱转强起爆":
+                    alpha_score = round(min(99.0, 96.0 + min(3.0, reversal_diff * 0.5)), 1)
+                elif buy_type == "💎 割肉反转回补":
+                    alpha_score = 96.0
+                elif buy_type == "⚠️ 昙花一现脉冲":
+                    alpha_score = 15.0
                 elif "抢筹" in order_intent:
                     alpha_score = round(min(97.0, 92.0 + min(5.0, b_amt_wan / 1000.0)), 1)
                 elif "弱转强" in order_intent:
@@ -2245,8 +2366,10 @@ class TDXRealtimeFetcher:
                     alpha_score = 50.0
                 if is_dual:
                     alpha_score = min(100.0, alpha_score + 2.0)
+                if is_etf_up:
+                    alpha_score = min(100.0, alpha_score + 3.0)
             else:
-                # 基础分为买点类型权重 (占比 60%)，动量与盘口扫买加成 (占比 40%)，叠加加速结构加成
+                # 基础分为买点类型权重 (占比 55%)，动量与盘口扫买加成 (占比 45%)，叠加加速结构加成
                 base_score = type_priority * 0.55
                 momentum_bonus = min(18.0, max(0.0, pct * 2.0))
                 intent_bonus = 10.0 if ("扫买" in order_intent or "封板" in order_intent) else (5.0 if "托底" in order_intent else 0.0)
@@ -2267,7 +2390,20 @@ class TDXRealtimeFetcher:
                     multiday_bonus += 3.5
                     reason = f"【多日蓄势启动加速】{reason}"
 
-                alpha_score = base_score + momentum_bonus + intent_bonus + slope_bonus + base_bonus + focus_bonus + accel_bonus + multiday_bonus
+                # 💡 板块 ETF 大级别趋势结构赋能与共振加权
+                sec_bonus = 0.0
+                if is_etf_up:
+                    sec_bonus += etf_bonus  # +6.0
+                elif is_etf_down and sec_res_count <= 1:
+                    sec_bonus += etf_bonus  # -8.0
+                if sec_res_count >= 2:
+                    sec_bonus += 2.5  # 板块高开/红盘共振奖励
+
+                alpha_score = base_score + momentum_bonus + intent_bonus + slope_bonus + base_bonus + focus_bonus + accel_bonus + multiday_bonus + sec_bonus
+                if "弱转强起爆" in buy_type:
+                    alpha_score = max(alpha_score, 95.0)
+                elif "割肉反转回补" in buy_type:
+                    alpha_score = max(alpha_score, 94.0)
                 alpha_score = round(min(100.0, max(0.0, alpha_score)), 1)
 
             disp_buy_type = f"{accel_t}·{buy_type}" if (accel_t and "⚠️" not in buy_type) else buy_type
