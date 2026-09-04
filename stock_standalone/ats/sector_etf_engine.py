@@ -23,8 +23,8 @@ logger = LoggerFactory.getLogger("SectorETFEngine")
 # 核心赛道与通达信基准 ETF 权威映射字典
 SECTOR_TO_BENCHMARK_ETF: Dict[str, Dict[str, Any]] = {
     # 养殖业 / 水产 / 畜牧
-    "养殖": {"code": "159865", "name": "养殖ETF", "keywords": ["养殖", "畜禽", "水产", "猪肉", "鸡肉", "饲料", "渔业"]},
-    "农业": {"code": "159825", "name": "农业ETF", "keywords": ["农业", "种业", "农林牧渔", "粮食", "转基因", "化肥", "农药"]},
+    "养殖": {"code": "159865", "name": "养殖ETF", "keywords": ["养殖", "畜禽", "水产", "猪肉", "鸡肉", "饲料", "渔业", "生猪", "肉鸡", "禽类", "水产养殖", "兽药", "农药兽药"]},
+    "农业": {"code": "159825", "name": "农业ETF", "keywords": ["农业", "种业", "农林牧渔", "粮食", "转基因", "化肥", "农药", "玉米", "大豆", "水稻", "种植", "农业种植", "种子"]},
     "黄金": {"code": "518880", "name": "黄金ETF", "keywords": ["黄金", "贵金属", "白银", "珠宝"]},
     "电力": {"code": "159611", "name": "电力ETF", "keywords": ["电力", "绿色电力", "火电", "水电", "风电", "光伏发电", "热电"]},
     "消费": {"code": "159928", "name": "消费ETF", "keywords": ["消费", "食品", "饮料", "白酒", "调味品", "包装", "轻工"]},
@@ -188,6 +188,36 @@ class SectorETFEngine:
     def get_stock_sector_etf_trend(self, stock_code: str, sector_name: str) -> Dict[str, Any]:
         """别名兼容接口：根据个股代码与行业名称返回板块 ETF 趋势结构"""
         return self.evaluate_sector_trend_for_stock(sector_name)
+
+    def get_all_sector_etfs_summary(self) -> List[Dict[str, Any]]:
+        """
+        获取全市场 13 大基准行业/题材 ETF 的大级别趋势量化透视表
+        按 2 个月收益率降序排列，提供宏观大势把握与持续性判断
+        """
+        records = []
+        for cat_key, info in SECTOR_TO_BENCHMARK_ETF.items():
+            code = info["code"]
+            name = info["name"]
+            trend_data = self.get_etf_trend_structure(code)
+            rec = {
+                "cat_name": cat_key,
+                "code": code,
+                "name": name,
+                "trend_grade": trend_data.get("trend_grade", "🟡 震荡筑底"),
+                "is_trend_up": trend_data.get("is_trend_up", False),
+                "is_down_trend": trend_data.get("is_down_trend", False),
+                "gain_60d": trend_data.get("gain_60d", 0.0),
+                "curr_p": trend_data.get("curr_p", 0.0),
+                "ma20": trend_data.get("ma20", 0.0),
+                "ma60": trend_data.get("ma60", 0.0),
+                "summary": trend_data.get("summary", ""),
+                "keywords": " / ".join(info.get("keywords", [])[:6]),
+            }
+            records.append(rec)
+
+        # 按近 2 个月收益率降序排序，强势主升板块优先置顶
+        records.sort(key=lambda x: x["gain_60d"], reverse=True)
+        return records
 
 
 _GLOBAL_SECTOR_ETF_ENGINE = None

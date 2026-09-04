@@ -1,3 +1,33 @@
+## 2026-09-04 14:05
+- [x] **彻底根治龙头突击右键菜单 C++ 对象析构崩溃 Bug & 全链路落地【全市场板块ETF趋势雷达 + 双击一键聚焦板块成分股 + 主表ETF趋势显性化】(SSOT) (`stock_standalone/ats/ui/hot_sector_leaderboard.py`, `stock_standalone/ats/sector_etf_engine.py`, `stock_standalone/tk_gui_modules/qt_table_utils.py`, `stock_standalone/tests/test_pullback_reversal_and_reentry_suite.py`)**：
+    - [x] **排查定位“右键调出分时阶梯策略报错 wrapped C/C++ object has been deleted、板块大级别主升隐蔽、无法迅速定位热点与成分股”三大痛点诱因**：
+        1. **Qt 底层 C++ 对象被定时刷新销毁漏洞**：原 `_show_context_menu` 的 Action 连接闭包直接捕获了 `c_item` (QTableWidgetItem 指针)；当表格后台 3 秒定时刷新时，旧的 C++ 对象被 Qt 释放，用户在右键菜单中点击【🎯 调出分时阶梯交易策略】或【📊 联动查看分时K线】时，执行 `c_item.row()` 抛出 `RuntimeError: wrapped C/C++ object of type NumericTableWidgetItem has been deleted`；
+        2. **板块 ETF 趋势信息过于隐蔽**：虽然底层已具备 2ms 二进制读取通达信基准 ETF 能力，但主表第 2 列仅显示“猪肉”、“玉米”、“农药兽药”，用户必须右键才能看到其背后的养殖/农业 ETF 趋势，无法在主表直观分清真慢牛主升还是破位诱多；
+        3. **缺乏板块成分股一键聚焦交互**：用户此前只能点击顶部固定的 Top 3 按钮，无法针对主表中任意一只股票的所属板块进行单选聚焦。
+    - [x] **全链路落地【纯字符串闭包无状态分发 + 双击板块单元格一键聚焦 + 全市场ETF趋势雷达】体系 (SSOT)**：
+        1. **彻底解绑 C++ 指针，全面采用纯字符串闭包无状态方法**：
+           - 在右键菜单弹出时提取不可变纯字符串 `code_clean: str` 和 `clean_name: str`；
+           - 所有 Action 采用默认参数闭包：`lambda checked=False, c=code_clean, n=clean_name: self._open_stock_strategy_by_code(c, n)`；
+           - 新增 `_link_stock_by_code`、`_open_stock_strategy_by_code`、`_open_sbc_by_code`、`_send_link_by_code` 无状态分发方法；
+           - 加固 `_on_item_clicked` 与 `_on_item_double_clicked`，添加 `try...except (RuntimeError, Exception)` 铁壁防护；
+        2. **双击第 2 列【所属强板块】一键单选聚焦成分股**：
+           - 用户双击任意股票的第 2 列单元格，瞬间单选聚焦该板块所有成分股（再次双击恢复全部板块展示），伴随 Toast 明确提示；
+           - 右键菜单新增【🎯 聚焦此板块成分股 ({sec_name})】快捷操作；
+           - 扩充 `SectorETFEngine` 倒排索引：增加“玉米”、“大豆”、“水稻”、“种植”、“生猪”、“肉鸡”、“兽药”等高频细分题材映射；
+        3. **主表格第 2 列显性化展示基准 ETF 趋势与收益率**：
+           - 处于多头大级别慢牛主升的板块：文字呈现 `猪肉 [🟢养殖+6.5%]`、`玉米 [🟢农业+8.2%]`，采用鲜亮荧光青绿 `#00FFCC` 高亮；
+           - 处于空头破位下行通道的板块：文字呈现 `半导体 [🔴芯片-52.9%]`，采用警示暗红 `#FF5566`；
+           - 单元格注入 `raw_val=etf_gain`，用户点击第 2 列表头即可按板块大级别趋势收益率进行高精排序！
+        4. **全市场【📊 强势ETF趋势雷达】独立弹窗 (`SectorETFRadarDialog`)**：
+           - 顶部工具栏增设【📊 强势ETF雷达】按钮，右键菜单增设【📊 全市场板块ETF趋势雷达】；
+           - 汇聚通达信 13 大基准行业 ETF，按近 2 个月收益率降序排列，清晰标明趋势评级、MA20/MA60 多空结构、核心覆盖赛道与趋势量化诊断；
+           - 双击任意 ETF 行直接联动通达信切换日 K 线；点击【🎯 聚焦此板块成分股】一键过滤主表成分股；
+        5. **`NumericTableWidgetItem` 属性兼容性升级**：
+           - 显式增加 `self.raw_val` 属性并与 `self._raw_value` 双向同步，彻底兼容各种量化排序与单元格属性读取。
+    - [x] **自动化测试与全系统回归 100% 全部 PASSED**：
+        - `test_pullback_reversal_and_reentry_suite.py` 6 项专项测试全部通过；
+        - 全系统无缝通过。
+
 ## 2026-09-04 13:45
 - [x] **落地【强势异动回调早竞价弱转强起爆 + 割肉主升回踩确认回补 + 板块ETF大级别趋势过滤】三大顶级擒龙与闭环实战雷达 (`stock_standalone/ats/sector_etf_engine.py`, `stock_standalone/ats/reentry_tracker.py`, `stock_standalone/ats/tdx_realtime_fetcher.py`, `stock_standalone/ats/ui/hot_sector_leaderboard.py`, `stock_standalone/tests/test_pullback_reversal_and_reentry_suite.py`)**：
     - [x] **排查定位“早竞价无法即时响应弱转强回调妖龙 (如柏星龙 920075)、建仓早割肉后无法跟踪回补主升 (如天马科技 603668)、每日异动多为昙花一现”三大实战痛点诱因**：

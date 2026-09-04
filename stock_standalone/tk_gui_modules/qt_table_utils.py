@@ -38,6 +38,7 @@ class NumericTableWidgetItem(QTableWidgetItem):
         self.is_pinned = is_pinned or (pin_rank < 999)
         self.pin_rank = pin_rank if pin_rank < 999 else (0 if is_pinned else 999)
         self._raw_value = raw_val if raw_val is not None else value
+        self.raw_val = self._raw_value
         
         display_str = "--" if value is None else str(value)
         super().__init__(display_str)
@@ -83,6 +84,7 @@ class NumericTableWidgetItem(QTableWidgetItem):
         """显式绑定真实数值/原始数据"""
         import math
         self._raw_value = raw_val
+        self.raw_val = raw_val
         if raw_val is not None:
             if isinstance(raw_val, (int, float)):
                 if not (math.isnan(raw_val) or math.isinf(raw_val)) and abs(raw_val) < 99999900:

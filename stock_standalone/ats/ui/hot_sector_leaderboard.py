@@ -375,6 +375,185 @@ class TDXFetchLogDialog(QDialog):
         self._refresh_logs()
 
 
+class SectorETFRadarDialog(QDialog):
+    """
+    全市场核心行业/题材基准 ETF 趋势结构与宏观大势透视雷达窗口
+    1. 基于通达信原生二进制接口毫秒级读取 13 大基准 ETF 60 日 K 线；
+    2. 按近 2 个月收益率降序排序，直观呈现主升/破位趋势；
+    3. 双击任意 ETF 行：直接联动通达信切换日 K 线；
+    4. 点击【🎯 聚焦关联板块成分股】：联动主看板只显示该赛道成分股。
+    """
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("📊 全市场板块基准 ETF 趋势雷达 (2个月大级别慢牛/破位透视)")
+        self.resize(860, 520)
+        self._init_ui()
+        self._load_data()
+
+    def _init_ui(self):
+        apply_dark_theme(self)
+        self.setStyleSheet(self.styleSheet() + """
+            QDialog { background-color: #121214; color: #e2e2e5; font-family: 'Microsoft YaHei', sans-serif; }
+            QTableWidget { background-color: #18181c; alternate-background-color: #1c1c22; color: #e2e2e5; gridline-color: #282830; selection-background-color: #1e334d; border: 1px solid #282830; }
+            QHeaderView::section { background-color: #1a1a1f; color: #aad4ff; font-weight: bold; border: 1px solid #2e2e36; padding: 4px; }
+        """)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(8, 8, 8, 8)
+        lay.setSpacing(6)
+
+        # 顶部提示栏
+        lbl_tip = QLabel("💡 宏观大势量化透视：基于通达信 60 日 K 线量化评级，绿色代表反弹慢牛主升结构，红色代表空头破位下行 | 双击 ETF 行即刻联动切换通达信日K线")
+        lbl_tip.setStyleSheet("color: #00ffcc; font-size: 8.5pt; font-weight: bold; padding: 4px; background-color: #141f26; border-radius: 3px;")
+        lay.addWidget(lbl_tip)
+
+        # 主表格
+        headers = ["排名", "核心分类", "基准ETF代码", "ETF名称", "近2月收益率%", "现价", "MA20均线", "MA60均线", "大级别趋势评级", "核心覆盖赛道/题材", "趋势量化诊断"]
+        self.table = QTableWidget(0, len(headers))
+        self.table.setHorizontalHeaderLabels(headers)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.table.setAlternatingRowColors(True)
+        self.table.verticalHeader().setVisible(False)
+        self.table.itemDoubleClicked.connect(self._on_row_double_clicked)
+        lay.addWidget(self.table)
+
+        # 底部操作栏
+        bot_lay = QHBoxLayout()
+        btn_refresh = QPushButton("🔄 刷新雷达数据")
+        btn_refresh.setStyleSheet("QPushButton { background-color: #1b382b; color: #00ff88; border: 1px solid #00ff88; border-radius: 3px; padding: 4px 12px; font-weight: bold; }")
+        btn_refresh.clicked.connect(self._load_data)
+        bot_lay.addWidget(btn_refresh)
+
+        btn_focus = QPushButton("🎯 聚焦此板块成分股")
+        btn_focus.setStyleSheet("QPushButton { background-color: #1a2a3a; color: #00e5ff; border: 1px solid #00e5ff; border-radius: 3px; padding: 4px 12px; font-weight: bold; }")
+        btn_focus.clicked.connect(self._on_focus_clicked)
+        bot_lay.addWidget(btn_focus)
+
+        bot_lay.addStretch()
+
+        btn_close = QPushButton("关闭")
+        btn_close.setStyleSheet("QPushButton { background-color: #282830; color: #cccccc; border: 1px solid #3e3e4a; border-radius: 3px; padding: 4px 12px; }")
+        btn_close.clicked.connect(self.close)
+        bot_lay.addWidget(btn_close)
+
+        lay.addLayout(bot_lay)
+
+    def _load_data(self):
+        from ats.sector_etf_engine import get_sector_etf_engine
+        engine = get_sector_etf_engine()
+        records = engine.get_all_sector_etfs_summary()
+        self.table.setRowCount(len(records))
+        font_bold = QFont()
+        font_bold.setBold(True)
+
+        for i, r in enumerate(records):
+            # 0: 排名
+            it_rank = QTableWidgetItem(str(i + 1))
+            it_rank.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.table.setItem(i, 0, it_rank)
+
+            # 1: 核心分类
+            it_cat = QTableWidgetItem(r.get("cat_name", ""))
+            it_cat.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            it_cat.setFont(font_bold)
+            it_cat.setForeground(QBrush(QColor("#ffbb55")))
+            self.table.setItem(i, 1, it_cat)
+
+            # 2: 代码
+            it_code = QTableWidgetItem(r.get("code", ""))
+            it_code.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.table.setItem(i, 2, it_code)
+
+            # 3: 名称
+            it_name = QTableWidgetItem(r.get("name", ""))
+            it_name.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            it_name.setFont(font_bold)
+            self.table.setItem(i, 3, it_name)
+
+            # 4: 近2月收益率%
+            gain = float(r.get("gain_60d", 0.0))
+            it_gain = QTableWidgetItem(f"{gain:+.2f}%")
+            it_gain.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            it_gain.setFont(font_bold)
+            if gain > 0:
+                it_gain.setForeground(QBrush(QColor("#ff4455")))
+            elif gain < 0:
+                it_gain.setForeground(QBrush(QColor("#00ee77")))
+            self.table.setItem(i, 4, it_gain)
+
+            # 5: 现价
+            it_p = QTableWidgetItem(f"{r.get('curr_p', 0.0):.3f}")
+            it_p.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.table.setItem(i, 5, it_p)
+
+            # 6: MA20
+            it_ma20 = QTableWidgetItem(f"{r.get('ma20', 0.0):.3f}")
+            it_ma20.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.table.setItem(i, 6, it_ma20)
+
+            # 7: MA60
+            it_ma60 = QTableWidgetItem(f"{r.get('ma60', 0.0):.3f}")
+            it_ma60.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.table.setItem(i, 7, it_ma60)
+
+            # 8: 大级别趋势评级
+            grade = r.get("trend_grade", "")
+            it_grade = QTableWidgetItem(grade)
+            it_grade.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            it_grade.setFont(font_bold)
+            if "主升" in grade:
+                it_grade.setForeground(QBrush(QColor("#00ffaa")))
+                it_grade.setBackground(QBrush(QColor(10, 50, 30, 160)))
+            elif "破位" in grade:
+                it_grade.setForeground(QBrush(QColor("#ff5566")))
+                it_grade.setBackground(QBrush(QColor(50, 15, 20, 160)))
+            else:
+                it_grade.setForeground(QBrush(QColor("#ffbb33")))
+            self.table.setItem(i, 8, it_grade)
+
+            # 9: 核心赛道
+            it_kw = QTableWidgetItem(r.get("keywords", ""))
+            it_kw.setToolTip(r.get("keywords", ""))
+            self.table.setItem(i, 9, it_kw)
+
+            # 10: 趋势量化诊断
+            it_sum = QTableWidgetItem(r.get("summary", ""))
+            it_sum.setToolTip(r.get("summary", ""))
+            self.table.setItem(i, 10, it_sum)
+
+        self.table.resizeColumnsToContents()
+
+    def _on_row_double_clicked(self, item):
+        row = item.row()
+        it_code = self.table.item(row, 2)
+        it_name = self.table.item(row, 3)
+        if it_code:
+            code = it_code.text().strip()
+            name = it_name.text().strip() if it_name else code
+            parent = self.parent()
+            if parent and hasattr(parent, "_link_stock_by_code"):
+                parent._link_stock_by_code(code, name)
+            else:
+                try:
+                    from JSONData.tdx_data_Day import link_tdx
+                    link_tdx(code)
+                except Exception:
+                    pass
+
+    def _on_focus_clicked(self):
+        row = self.table.currentRow()
+        if row < 0:
+            return
+        it_cat = self.table.item(row, 1)
+        if it_cat:
+            cat_name = it_cat.text().strip()
+            parent = self.parent()
+            if parent and hasattr(parent, "_select_single_sector_by_name"):
+                parent._select_single_sector_by_name(cat_name)
+                self.close()
+
+
 class HotSectorLeaderboardDialog(QWidget, WindowMixin):
     """
     Top 3 强势板块龙头突击跟单看板窗口
@@ -582,6 +761,30 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
         header_lay.addWidget(self.btn_new_concept)
 
         header_lay.addStretch()
+
+        # 📊 强势板块基准 ETF 趋势雷达按钮 (大级别慢牛/破位透视)
+        self.btn_etf_radar = QPushButton("📊 强势ETF雷达")
+        self.btn_etf_radar.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_etf_radar.setToolTip("查看通达信全市场 13 大行业/题材基准 ETF 趋势结构与 2 个月大级别慢牛/破位透视雷达")
+        self.btn_etf_radar.setStyleSheet("""
+            QPushButton { 
+                background-color: #122822; 
+                color: #00ffaa; 
+                border: 1px solid #00aa77; 
+                border-radius: 3px; 
+                padding: 2px 6px; 
+                font-size: 8.5pt; 
+                font-weight: bold; 
+                height: 20px;
+            }
+            QPushButton:hover { 
+                background-color: #00aa77; 
+                color: #000000; 
+                border: 1px solid #00ffaa;
+            }
+        """)
+        self.btn_etf_radar.clicked.connect(self._open_sector_etf_radar_dialog)
+        header_lay.addWidget(self.btn_etf_radar)
 
         # 📜 TDX 数据获取日志与异常诊断按钮
         self.btn_log = QPushButton("📜 TDX日志")
@@ -918,25 +1121,48 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
         self._update_sector_button_styles()
         self._render_table_data(self.cached_results)
 
+    def _open_sector_etf_radar_dialog(self):
+        """打开全市场板块基准 ETF 趋势雷达窗口 (大级别慢牛/破位透视)"""
+        try:
+            dlg = SectorETFRadarDialog(self)
+            dlg.exec()
+        except Exception as e:
+            logger.error(f"打开 SectorETFRadarDialog 异常: {e}")
+
+    def _select_single_sector_by_name(self, sec_name: str):
+        """聚焦指定板块名称（双击第2列所属板块单元格、右键菜单或ETF雷达触发）：只显示该板块标的，再次触发恢复全选"""
+        if not sec_name:
+            return
+        sec_clean = sec_name.split(" ")[0].split("[")[0].strip()
+        if not is_valid_sector_name(sec_clean):
+            return
+
+        valid_secs = [s for s in self.current_top_sectors if is_valid_sector_name(s)]
+        # 如果当前已经是唯一聚焦该板块，再次点击则切回全部板块；否则单选该板块
+        if self.selected_single_sector == sec_clean or self.active_sectors == {sec_clean}:
+            self.selected_single_sector = None
+            self.active_sectors = set(valid_secs) if valid_secs else set()
+        else:
+            self.selected_single_sector = sec_clean
+            self.active_sectors = {sec_clean}
+
+        self._update_sector_button_styles()
+        self._render_table_data(self.cached_results)
+        try:
+            from stock_logic_utils import toast_messageQT
+            if self.selected_single_sector:
+                toast_messageQT(f"🎯 已聚焦【{sec_clean}】板块成分股 (再次双击或点击全部板块恢复)")
+            else:
+                toast_messageQT("🔥 已恢复显示全部板块标的")
+        except Exception:
+            pass
+
     def _select_single_sector(self, sec_idx: int):
         """点击单个板块按钮：只显示该点击板块（快速定位板块），若已唯选该板块再次点击则恢复全选"""
         if sec_idx >= len(self.current_top_sectors):
             return
         sec_name = self.current_top_sectors[sec_idx]
-        if not is_valid_sector_name(sec_name):
-            return
-
-        valid_secs = [s for s in self.current_top_sectors if is_valid_sector_name(s)]
-        # 如果当前已经是唯一选中该板块，再次点击则切回全部板块；否则单选该板块
-        if self.selected_single_sector == sec_name or self.active_sectors == {sec_name}:
-            self.selected_single_sector = None
-            self.active_sectors = set(valid_secs)
-        else:
-            self.selected_single_sector = sec_name
-            self.active_sectors = {sec_name}
-
-        self._update_sector_button_styles()
-        self._render_table_data(self.cached_results)
+        self._select_single_sector_by_name(sec_name)
 
     def _on_new_concept_clicked(self):
         """点击【🆕 新概念】直达按钮：一键聚焦查看最新冲入 Top 3 的新板块龙头与跟单标的，再次点击恢复全选"""
@@ -1247,7 +1473,10 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
                 continue
 
             # 板块标签开关过滤：标的必须严格属于当前激活的热点板块 (当前 Top 3 或单选板块)
-            if self.active_sectors and sec not in self.active_sectors:
+            if self.selected_single_sector:
+                if sec != self.selected_single_sector and self.selected_single_sector not in sec and sec not in self.selected_single_sector:
+                    continue
+            elif self.active_sectors and sec not in self.active_sectors:
                 continue
 
             tag = r.get("buy_tag", "")
@@ -1689,18 +1918,35 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
         it_name.setFont(font_bold)
         self.table.setItem(row_idx, 1, it_name)
 
-        # 2: 所属强板块 (注入板块基准 ETF 趋势结构 ToolTip)
-        it_sec = NumericTableWidgetItem(sec, is_pinned=is_fav, pin_rank=pin_rank)
-        it_sec.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-        it_sec.setForeground(QBrush(QColor("#ffbb55")))
-        if is_fav:
-            it_sec.setBackground(QBrush(fav_bg))
+        # 2: 所属强板块 (显性化展示基准 ETF 趋势结构与大级别收益率，并赋予量化排序权值)
         etf_nm = str(r.get("etf_name", ""))
         etf_tr = str(r.get("etf_trend", ""))
         etf_g = _safe_float(r.get("etf_gain", 0.0))
+
+        if etf_nm:
+            short_etf = etf_nm.replace("ETF", "")
+            if "主升" in etf_tr:
+                disp_sec = f"{sec} [🟢{short_etf}+{etf_g:.1f}%]"
+                sec_color = QColor("#00ffcc") # 鲜亮荧光青绿，代表大级别主升趋势底座
+            elif "破位" in etf_tr:
+                disp_sec = f"{sec} [🔴{short_etf}{etf_g:.1f}%]"
+                sec_color = QColor("#ff5566") # 警示暗红，警惕诱多昙花一现
+            else:
+                disp_sec = f"{sec} [🟡{short_etf}]"
+                sec_color = QColor("#ffbb55")
+        else:
+            disp_sec = sec
+            sec_color = QColor("#ffbb55")
+
+        it_sec = NumericTableWidgetItem(disp_sec, is_pinned=is_fav, pin_rank=pin_rank, raw_val=etf_g)
+        it_sec.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        it_sec.setForeground(QBrush(sec_color))
+        if is_fav:
+            it_sec.setBackground(QBrush(fav_bg))
         sec_tip = f"【所属板块】: {sec}\n"
         if etf_nm:
             sec_tip += f"• 📊 板块基准 ETF: {etf_nm}\n• 📈 趋势结构: {etf_tr} (近2月收益率: {etf_g:+.1f}%)\n"
+        sec_tip += "• 💡 提示: 双击此单元格或右键，可一键单选聚焦该板块成分股 (再次双击恢复全部)"
         it_sec.setToolTip(sec_tip)
         self.table.setItem(row_idx, 2, it_sec)
 
@@ -1932,48 +2178,103 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
             it_rs.setBackground(QBrush(fav_bg))
         self.table.setItem(row_idx, col_offset + 3, it_rs)
 
+    def _link_stock_by_code(self, code: str, name: str = ""):
+        """无状态行情联动：仅接收纯字符串，绝对不持有 QTableWidgetItem C++ 对象"""
+        code_clean = str(code).strip().zfill(6)
+        clean_name = name or code_clean
+        self.code_clicked.emit(code_clean, clean_name)
+        main_win = self._get_parent_mw()
+        if main_win and hasattr(main_win, "link_stock"):
+            try:
+                main_win.link_stock(code_clean, clean_name)
+            except Exception as e:
+                logger.debug(f"link_stock error: {e}")
+
+    def _open_stock_strategy_by_code(self, code: str, name: str = ""):
+        """无状态调出分时阶梯策略：仅接收纯字符串，彻底避免 C++ 对象销毁导致的 RuntimeError"""
+        code_clean = str(code).strip().zfill(6)
+        clean_name = name or code_clean
+        main_win = self._get_parent_mw()
+        if main_win and hasattr(main_win, "on_stock_clicked"):
+            try:
+                main_win.on_stock_clicked(code_clean, clean_name)
+            except Exception as e:
+                logger.debug(f"on_stock_clicked error: {e}")
+
+    def _open_sbc_by_code(self, code: str):
+        """无状态使用 SBC 打开独立分时图"""
+        code_clean = str(code).strip().zfill(6)
+        from ats.ui.intraday_strategy_dialog import open_sbc_chart_dialog
+        open_sbc_chart_dialog(self, code_clean)
+
+    def _send_link_by_code(self, code: str, name: str = ""):
+        """无状态发送到异动联动"""
+        code_clean = str(code).strip().zfill(6)
+        clean_name = name or code_clean
+        from ats.ui.base_table import send_to_linkage
+        send_to_linkage(code_clean, clean_name, self)
+
     def _on_item_clicked(self, item):
         if item:
-            self._link_current_row(item.row())
+            try:
+                self._link_current_row(item.row())
+            except (RuntimeError, Exception):
+                pass
 
     def _on_current_item_changed(self, current, previous):
         if current:
-            self._link_current_row(current.row())
+            try:
+                self._link_current_row(current.row())
+            except (RuntimeError, Exception):
+                pass
 
     def _link_current_row(self, row: int):
         if getattr(self, '_is_updating', False) or getattr(self, '_is_auto_popping', False):
             return
         if row < 0 or row >= self.table.rowCount():
             return
-        c_item = self.table.item(row, 0)
-        n_item = self.table.item(row, 1)
-        if c_item:
-            code = c_item.text().strip()
-            name = n_item.text().strip() if n_item else code
-            self.code_clicked.emit(code, name)
-            # 联动主窗口（分时图、K线与外部行情联动）
-            main_win = self._get_parent_mw()
-            if main_win and hasattr(main_win, "link_stock"):
-                try:
-                    main_win.link_stock(code, name)
-                except Exception as e:
-                    logger.debug(f"link_stock error: {e}")
+        try:
+            c_item = self.table.item(row, 0)
+            n_item = self.table.item(row, 1)
+            if c_item:
+                code = c_item.text().strip()
+                name = n_item.text().strip() if n_item else code
+                self._link_stock_by_code(code, name)
+        except (RuntimeError, Exception):
+            pass
 
     def _on_item_double_clicked(self, item):
         if not item:
             return
-        row = item.row()
-        c_item = self.table.item(row, 0)
-        n_item = self.table.item(row, 1)
-        if c_item:
-            code = c_item.text().strip()
-            name = n_item.text().strip() if n_item else code
-            main_win = self._get_parent_mw()
-            if main_win and hasattr(main_win, "on_stock_clicked"):
-                try:
-                    main_win.on_stock_clicked(code, name)
-                except Exception as e:
-                    logger.debug(f"on_stock_clicked error: {e}")
+        try:
+            row = item.row()
+            col = item.column()
+        except (RuntimeError, Exception):
+            return
+        if row < 0 or row >= self.table.rowCount():
+            return
+
+        # 🎯 双击第 2 列【所属强板块】：一键单选聚焦该板块所有成分股 (再次双击恢复全部)
+        if col == 2:
+            try:
+                sec_item = self.table.item(row, 2)
+                if sec_item:
+                    raw_sec_text = sec_item.text().strip()
+                    sec_clean = raw_sec_text.split(" ")[0].split("[")[0].strip()
+                    self._select_single_sector_by_name(sec_clean)
+                    return
+            except (RuntimeError, Exception):
+                pass
+
+        try:
+            c_item = self.table.item(row, 0)
+            n_item = self.table.item(row, 1)
+            if c_item:
+                code = c_item.text().strip()
+                name = n_item.text().strip() if n_item else code
+                self._open_stock_strategy_by_code(code, name)
+        except (RuntimeError, Exception):
+            pass
 
     def keyPressEvent(self, event):
         from ats.ui.styles import is_editing_text
@@ -2102,12 +2403,13 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
         except Exception as e:
             logger.debug(f"reentry_tracker menu error: {e}")
 
-        # 1.6 查看板块 ETF 趋势结构诊断
+        # 1.6 查看板块 ETF 趋势结构诊断与全市场雷达
         try:
             from ats.sector_etf_engine import get_sector_etf_engine
             etf_eng = get_sector_etf_engine()
             sec_item = self.table.item(row, 2)
-            sec_name = sec_item.text().strip() if sec_item else ""
+            sec_raw = sec_item.text().strip() if sec_item else ""
+            sec_name = sec_raw.split(" ")[0].split("[")[0].strip()
             etf_info = etf_eng.get_stock_sector_etf_trend(code_clean, sec_name)
             if etf_info.get("has_etf", False):
                 act_etf = menu.addAction(f"📊 板块ETF趋势: {etf_info.get('etf_name')} ({etf_info.get('trend_grade')})")
@@ -2125,29 +2427,31 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
                     except Exception:
                         pass
                 act_etf.triggered.connect(_show_etf_dialog)
+
+            # 🎯 聚焦板块成分股快捷选项 (快速查看)
+            if is_valid_sector_name(sec_name):
+                act_focus = menu.addAction(f"🎯 聚焦此板块成分股 ({sec_name})")
+                act_focus.triggered.connect(lambda checked=False, s=sec_name: self._select_single_sector_by_name(s))
+
+            act_radar = menu.addAction("📊 全市场板块ETF趋势雷达 (2个月大级别慢牛/破位透视)")
+            act_radar.triggered.connect(self._open_sector_etf_radar_dialog)
         except Exception as e:
             logger.debug(f"etf menu error: {e}")
 
         menu.addSeparator()
 
-        # 2. 行情联动与分时图
+        # 2. 行情联动与分时图 (使用纯字符串闭包解绑 C++ item，彻底消除 RuntimeError)
         act_link = menu.addAction(f"📊 联动查看 {clean_name} ({code_clean}) 分时K线")
-        act_link.triggered.connect(lambda: self._on_item_clicked(c_item))
+        act_link.triggered.connect(lambda checked=False, c=code_clean, n=clean_name: self._link_stock_by_code(c, n))
 
         act_sbc = menu.addAction(f"📈 使用 SBC 打开独立分时图 ({code_clean})")
-        def _open_sbc():
-            from ats.ui.intraday_strategy_dialog import open_sbc_chart_dialog
-            open_sbc_chart_dialog(self, code_clean)
-        act_sbc.triggered.connect(_open_sbc)
+        act_sbc.triggered.connect(lambda checked=False, c=code_clean: self._open_sbc_by_code(c))
 
         act_send = menu.addAction(f"⚡ 发送到异动联动 ({code_clean})")
-        def _send_link():
-            from ats.ui.base_table import send_to_linkage
-            send_to_linkage(code_clean, clean_name, self)
-        act_send.triggered.connect(_send_link)
+        act_send.triggered.connect(lambda checked=False, c=code_clean, n=clean_name: self._send_link_by_code(c, n))
 
         act_strategy = menu.addAction(f"🎯 调出 {clean_name} 分时阶梯交易策略")
-        act_strategy.triggered.connect(lambda: self._on_item_double_clicked(c_item))
+        act_strategy.triggered.connect(lambda checked=False, c=code_clean, n=clean_name: self._open_stock_strategy_by_code(c, n))
 
         # 3. 复制操作
         menu.addSeparator()
