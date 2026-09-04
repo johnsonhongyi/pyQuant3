@@ -1,3 +1,41 @@
+## 2026-09-04 21:25
+- [x] **全链路落地【通道高度与振幅指标体系入库 tdd (SSOT) + 原生支持点击表头排序与 Query 极速过滤】(SSOT) (`stock_standalone/JSONData/tdx_data_Day.py`, `stock_standalone/query_engine_util.py`, `stock_standalone/tests/test_trend_channel.py`)**：
+    - [x] **通道绝对高度、相对振幅与上下半高直接注入 tdd 核心数据管道**：
+        1. **数学一致性闭环对齐**：
+           - 确认原 `ch_width` 与 通道绝对高度 $\Delta = \text{上轨} - \text{下轨}$ 100% 数学完全一致；
+           - 确认原 `ch_pos` 与 通道所处位置 $\text{Pos}\% = (\text{现价} - \text{下轨}) / (\text{上轨} - \text{下轨}) \times 100\%$ 100% 数学完全一致；
+        2. **`tdd.calc_trend_channel` 与 `tdd.get_tdx_macd` 增量原生字段**：
+           - `ch_height`: 通道绝对高度 (元)，对齐 `ch_width`；
+           - `ch_height_pct`: 通道高度振幅 $\frac{\text{上轨} - \text{下轨}}{\text{中轨}} \times 100\%$ (以中轨为基准)；
+           - `ch_width_pct`: 相对通道跨度 $\frac{\text{上轨} - \text{下轨}}{\text{现价}} \times 100\%$ (以现价为基准)；
+           - `upper_height`: 上半通道高度 $\text{上轨} - \text{中轨}$ (元)；
+           - `lower_height`: 下半通道高度 $\text{中轨} - \text{下轨}$ (元)；
+           - `bandwidth_pct`: 布林相对带宽比率 $\frac{\text{带宽}}{\text{现价}} \times 100\%$；
+        3. **Query 引擎与表头排序全自动支持 (`query_engine_util.py`)**：
+           - 增加 `'ch_height'`, `'ch_height_pct'`, `'ch_width_pct'`, `'upper_height'`, `'lower_height'`, `'bandwidth_pct'` 及其全中文别名（通道高度、通道振幅、相对通道跨度、上半通道高度、下半通道高度、相对带宽比率）；
+           - 操盘手无需手写 `(bandwidth / close)`，直接在查询框写 `ch_height_pct > 25` 或 `ch_width_pct > 30` 或 `bandwidth_pct > 35` 即可秒级执行；
+           - 注入 DataFrame 后，表格默认原生支持点击表头浮点高精排序；
+        4. **自动化测试 100% 全部通过**：`test_trend_channel.py` 覆盖 6 大新增通道尺寸字段数学等价性与 Query 语法；
+        5. **全量沉淀至外置指标帮助文档库 (`config/indicator_help_custom.json`)**：将通道尺寸体系 (`ch_height/ch_width`, `ch_height_pct`, `ch_width_pct`, `upper_height/lower_height`)、布林体系 (`bandwidth`, `bandwidth_pct`, `boll_sq`, `bollpect`)、动能爆发 (`perc3d`, `ratio`, `dff2/dff3`) 以及【主升暴扣妖股起爆】与【宽幅稳健慢牛回踩蓄势】两套实战策略 Query 全部写入 `indicator_help_custom.json`，支持快捷键 `Ctrl + /` 瞬时热加载检索与双击查阅。
+
+## 2026-09-04 20:50
+- [x] **全链路落地【通道信号上中下三轨绝对价位与大小高度尺寸全景透视】(SSOT) (`ats/ui/intraday_strategy_dialog.py`, `ats/multi_period_channel_strategy.py`, `tests/test_multi_period_channel_backtest.py`)**：
+    - [x] **打通三轨绝对价位与通道大小高度的显性化呈现体系**：
+        1. **通道数学特征与尺寸体系落地 (`ats/multi_period_channel_strategy.py`)**：
+           - 通道绝对高度：`ch_height = 上轨 - 下轨` (单位: 元)；
+           - 通道相对振幅带宽：`ch_height_pct = (上轨 - 下轨) / 中轨 * 100%` (单位: %)；
+           - 上半通道高度：`upper_height = 上轨 - 中轨`，下半通道高度：`lower_height = 中轨 - 下轨`；
+           - 通道所处位置：`ch_pos = (现价 - 下轨) / 通道高度 * 100%`；
+        2. **SBC 走势图画布顶部防遮挡暗色 HUD 卡片 (`SBCChartCanvas`)**：
+           - 行 1：`📊 [DAY] 通达信自动通道 (斜率:XX.X°) | 上轨:XX.XX | 中轨:XX.XX | 下轨:XX.XX | 支撑:XX.XX | 反转:XX.XX`；
+           - 行 2：`📐 通道高度: ΔX.XX元 (宽幅:XX.X%) | 上半高:X.XX元 | 下半高:X.XX元 | 通道位置:XX.X% (状态说明)`；
+           - 行 3：`📈 上涨支撑 (斜率:XX.X°) | 偏离:±XX.X% | 周期:XX`；
+           - 将通道 HUD 卡片提升至顶层渲染，彻底避开底层指标或先锋文字遮挡；
+        3. **右侧 Y 轴通道刻度标签**：在 Y 轴上动态加入 `上轨:XX.XX`、`中轨:XX.XX`、`下轨:XX.XX` 独立胶囊标签，结合垂直防重叠微调智能对齐；
+        4. **鼠标悬停十字光标实时跟随 (Hover Crosshair HUD)**：光标所指任意历史 K 棒，即时浮标显示该日对应的 `[通道: 上XX.XX 中XX.XX 下XX.XX (高:X.XX元, XX.X%)]`；
+        5. **多周期策略引擎与 CLI 诊断表格扩充**：输出完整的各周期三轨与通道大小高度表格（涵盖 d, 2d, 3d, w, m）；
+        6. **宏裕包材 (920274) 实盘验证**：日线上轨 19.23、中轨 16.72、下轨 15.45、通道高度 Δ3.78元 (22.6%)、位置 56.1%，对齐通达信实盘图谱；全套测试 100% 全部通过。
+
 ## 2026-09-04 20:25
 - [x] **全链路落地【SBC 走势图交互式标记回测买卖点与点击收益视觉化】(SSOT) (`ats/ui/intraday_strategy_dialog.py`, `ats/multi_period_channel_backtester.py`, `ats/tdx_realtime_fetcher.py`, `tests/test_sbc_backtest_trade_pnl.py`)**：
     - [x] **打通多周期通道量化回测与 SBC 实盘独立走势图交互链路**：

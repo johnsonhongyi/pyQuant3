@@ -2273,6 +2273,15 @@ def calc_trend_channel(df, ur=6, lr=6):
     ch_pos = (close - lower) / ch_width_safe * 100.0
     ch_dir = 1 if slope > 1e-8 else (-1 if slope < -1e-8 else 0)
 
+    # 通道高度与振幅尺寸体系 (SSOT: 绝对高度、相对振幅、上下半高)
+    ch_height = ch_width
+    mid_safe = np.where(np.abs(mid) > 1e-8, mid, 1.0)
+    close_safe = np.where(np.abs(close) > 1e-8, close, 1.0)
+    ch_height_pct = (ch_height / mid_safe) * 100.0   # 通道高度振幅: (上轨 - 下轨) / 中轨 * 100%
+    ch_width_pct = (ch_height / close_safe) * 100.0   # 相对通道跨度: ch_width / close * 100%
+    upper_height = upper - mid                       # 上半通道高度: 上轨 - 中轨
+    lower_height = mid - lower                       # 下半通道高度: 中轨 - 下轨
+
     # 斜率角度: 标准化为百分比再转度
     mid_last = mid[-1] if mid[-1] > 1e-8 else 1.0
     ch_slope_pct = slope / mid_last * 100.0
@@ -2398,7 +2407,10 @@ def calc_trend_channel(df, ur=6, lr=6):
         'sig_launch': sig_launch, 'sk_val': sk, 'sd_val': sd,
         'ch_upper': upper, 'ch_mid': mid, 'ch_lower': lower,
         'ch_slope': np.round(slope, 6), 'ch_slope_deg': np.round(ch_slope_deg, 2),
-        'ch_width': ch_width, 'ch_pos': np.round(ch_pos, 2), 'ch_dir': ch_dir,
+        'ch_width': np.round(ch_width, 3), 'ch_height': np.round(ch_height, 3),
+        'ch_height_pct': np.round(ch_height_pct, 2), 'ch_width_pct': np.round(ch_width_pct, 2),
+        'upper_height': np.round(upper_height, 3), 'lower_height': np.round(lower_height, 3),
+        'ch_pos': np.round(ch_pos, 2), 'ch_dir': ch_dir,
         'sig_escape': sig_escape, 'sig_start': sig_start, 'rsi6': np.round(rsi6, 2),
         'ch_supp_price': np.round(np.full(n, supp_price_last), 3),
         'ch_supp_slope': np.round(np.full(n, supp_slope), 4),
@@ -2455,6 +2467,7 @@ def get_tdx_macd(df: pd.DataFrame, min_len: int = 39, rsi_period: int = 14, kdj_
     df['ene'] = middleband
 
     df['bandwidth'] = df['upper'] - df['lower']
+    df['bandwidth_pct'] = ((df['bandwidth'] / np.where(df['close'].abs() > 1e-8, df['close'], 1.0)) * 100).round(2)
     df['bollpect'] = (df['close'] - df['lower']) / df['bandwidth'] * 100
     df['boll_sq'] = ((df['close'] - df['ene']) / df['bandwidth'] * 100).round(2)
     # boll_strength_quant

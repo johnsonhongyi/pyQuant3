@@ -96,6 +96,15 @@ def test_03_single_period_channel_support_calculation():
     assert "is_above_support" in res
     assert "dist_to_supp_pct" in res
     assert res["score"] >= 60.0
+    assert "ch_height" in res
+    assert "ch_height_pct" in res
+    assert "upper_height" in res
+    assert "lower_height" in res
+    assert "ch_pos" in res
+    if res["ch_upper"] > 0 and res["ch_lower"] > 0:
+        assert res["ch_height"] >= 0
+        assert res["upper_height"] >= 0
+        assert res["lower_height"] >= 0
 
 
 def test_04_multi_period_resonance_strategy_up_trend():
