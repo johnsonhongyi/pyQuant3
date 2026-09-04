@@ -2252,20 +2252,76 @@ class TDXRealtimeFetcher:
             it["is_gap_accel"] = is_gap
             it["is_dual_accel"] = is_dual
             it["low_diff_pct"] = low_diff
+            
+            # ── 💡 买点类型综合排序权值 (Buy Type Sort Score, 降序时最强绝对置顶) ──
+            # 铁律：双加速·领涨龙头 > 双加速·扫盘/先锋 > 缺口加速·领涨龙头 > 光脚加速·领涨龙头 > 常规领涨龙头 > 缺口加速·扫盘 > 光脚加速·扫盘 > 常规扫盘 > 先锋突破 > 回踩低吸 > 蓄势观察 > 破位转弱
+            is_leader_cand = (buy_tag in ("LEADER", "BID_LIMIT", "BID_BREAKOUT", "IPO_BID_SURGE") or 
+                              any(k in disp_buy_type for k in ("领涨龙头", "竞价领涨", "竞价一字", "爆量突破", "首日真金抢筹")))
+            is_surge_cand = (buy_tag in ("SURGE", "BID_SURGE") or 
+                             any(k in disp_buy_type for k in ("扫盘冲板", "主动扫买", "竞价抢筹")))
+            is_breakout_cand = (buy_tag == "BREAKOUT" or "先锋突破" in disp_buy_type)
+            is_pullback_cand = (buy_tag in ("PULLBACK", "BID_REVERSAL") or 
+                                any(k in disp_buy_type for k in ("地量起爆", "反身低吸", "弱转强")))
+            is_weak_cand = (buy_tag in ("WEAK", "TRAP") or 
+                            any(k in disp_buy_type for k in ("破位", "诱多", "转弱")))
+
+            if is_dual:
+                if is_leader_cand:
+                    tier_base = 100000.0
+                elif is_surge_cand:
+                    tier_base = 92000.0
+                elif is_breakout_cand:
+                    tier_base = 88000.0
+                elif is_weak_cand:
+                    tier_base = 2000.0
+                else:
+                    tier_base = 84000.0
+            elif is_gap and is_leader_cand:
+                tier_base = 78000.0
+            elif is_open_low and is_leader_cand:
+                tier_base = 72000.0
+            elif is_leader_cand:
+                tier_base = 66000.0
+            elif is_gap and is_surge_cand:
+                tier_base = 60000.0
+            elif is_open_low and is_surge_cand:
+                tier_base = 54000.0
+            elif is_surge_cand:
+                tier_base = 48000.0
+            elif is_gap and is_breakout_cand:
+                tier_base = 42000.0
+            elif is_open_low and is_breakout_cand:
+                tier_base = 36000.0
+            elif is_breakout_cand:
+                tier_base = 30000.0
+            elif is_pullback_cand:
+                tier_base = 22000.0
+            elif is_weak_cand:
+                tier_base = 1000.0
+            else:
+                if is_gap:
+                    tier_base = 16000.0
+                elif is_open_low:
+                    tier_base = 13000.0
+                else:
+                    tier_base = 10000.0
+
+            fine_tune = (
+                min(100.0, max(0.0, alpha_score)) * 5.0 +
+                min(20.0, max(-10.0, pct)) * 10.0 +
+                max(0.0, min(1.0, 1.0 - (low_diff if low_diff < 900 else 1.0))) * 50.0 +
+                min(100.0, max(0.0, bid_p)) * 0.5
+            )
+            it["buy_type_sort_score"] = round(tier_base + fine_tune, 3)
             results.append(it)
 
-        # 按加速形态分层，同类型内对比 Alpha 得分：双加速优先 > 单加速优先，同类型内得分最高与下影差异最小优先
+        # 按买点类型梯队分层，同类型内对比 Alpha 得分与盘口：双加速/缺口加速领涨龙头绝对优先置顶！
         def _alpha_sort_key(x):
-            dual_rank = 0 if x.get("is_dual_accel") else (1 if (x.get("is_open_low_accel") or x.get("is_gap_accel")) else 2)
-            try:
-                score_rank = -float(x.get("alpha_score", 0.0))
-            except Exception:
-                score_rank = 0.0
-            try:
-                diff_rank = float(x.get("low_diff_pct", 999.0))
-            except Exception:
-                diff_rank = 999.0
-            return (dual_rank, score_rank, diff_rank)
+            return (
+                -float(x.get("buy_type_sort_score", 0.0)),
+                -float(x.get("alpha_score", 0.0)),
+                float(x.get("low_diff_pct", 999.0))
+            )
 
         results.sort(key=_alpha_sort_key)
         return results
