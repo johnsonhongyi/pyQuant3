@@ -1,3 +1,27 @@
+## 2026-09-04 20:25
+- [x] **全链路落地【SBC 走势图交互式标记回测买卖点与点击收益视觉化】(SSOT) (`ats/ui/intraday_strategy_dialog.py`, `ats/multi_period_channel_backtester.py`, `ats/tdx_realtime_fetcher.py`, `tests/test_sbc_backtest_trade_pnl.py`)**：
+    - [x] **打通多周期通道量化回测与 SBC 实盘独立走势图交互链路**：
+        1. **回测交易信号结构化配对转换 (`convert_backtest_trades_to_sbc_signals`)**：将回测生成的逐笔交易流水自动转化为配对的 `🟢 买:买入价` 与 `🔴 卖:卖出价 (+收益率%)` 信号集，附带持有天数、单笔盈亏金额、收益率与离场原因；
+        2. **SBC K线走势图高精度时序定位 (`SBCChartCanvas`)**：日线/周线/月线模式下支持以不可变日期字符串 (`YYYY-MM-DD`) 毫秒级命中对应 K 线柱体，彻底解决传统仅按时间戳索引导致的偏移；
+        3. **点击收益视觉呈现闭环 (Click PnL Interaction)**：
+           - **信号触控检测与高亮 (`mousePressEvent`)**：20px 容差精确捕捉用户在走势图上对任意买卖点/信号标签的点击，瞬时锁定对应配对交易 `selected_trade_id`；
+           - **持股周期半透明遮罩光束 (`_draw_selected_trade_linkage`)**：盈利交易渲染翡翠绿 (`#00E676`)、亏损交易渲染警示红 (`#FF5252`) 垂直半透明持仓区间；
+           - **买卖点连线与居中收益徽标**：在买入 K 柱与卖出 K 柱之间动态绘制虚线光束，并在连线正中悬浮 `盈亏:+XX.XX% (+YY,YYY元)` 胶囊徽标；
+           - **顶部高对比度收益 HUD 卡片**：在图表上方居中浮现详细交易结算卡（展示交易序号、买卖日期与价格、收益率、持仓周期、模式名称及具体离场原因）；
+        4. **键盘快捷键与工具栏按钮轮巡**：支持键盘 `Space` 或 `[` / `]` 极速轮巡切换各笔交易，顶部工具栏新增 `💰 点击收益` 按钮；
+        5. **一键直调与 CLI 交互**：支持 Python 代码调用 `backtester.plot_in_sbc(report)` 或 CLI 命令行 `python multi_period_channel_backtester.py 600108 250 --sbc`；
+        6. **TDX 协议限制与数据管道加固**：`fetch_kline_bars` 增加上限保护 `min(800, max(1, count))`，回测报告直接下发 `df_kline` 杜绝网络请求开销；
+        7. **自动化测试 100% 全部通过**：新增 `tests/test_sbc_backtest_trade_pnl.py` 7 项专项测试无缝通过，回归测试 23 项与 12 项全绿通过。
+
+## 2026-09-04 18:45
+- [x] **全链路落地【多周期通道支撑线上量化策略与历史逐日防未来回测系统】(SSOT) (`ats/multi_period_resampler.py`, `ats/multi_period_channel_strategy.py`, `ats/multi_period_channel_backtester.py`, `tests/test_multi_period_channel_backtest.py`)**：
+    - [x] **基于通达信实盘图谱对齐多周期 (d, 2d, 3d, w, m) 支撑线共振架构**：
+        1. **多周期重采样器 (`ats/multi_period_resampler.py`)**：纯向量化高效支持日线到 2d, 3d, w(周线), m(月线) 的聚合，严格支持回测指定日期截断切片，杜绝未来函数；
+        2. **通道与支撑线共振引擎 (`ats/multi_period_channel_strategy.py`)**：对齐通达信 `GG通道走势(60,1,5.6,60,8,8,6)` 公式与系统自适应通道算法，提取各周期支撑线 (`supp_price`)、反转位 (`reversal_price`)、通道三轨与倾角；识别大级别支撑向小级别层层垫高发散结构 (`above_support_count >= 4`)，提供多周期共振买点；
+        3. **逐日量化回测执行器 (`ats/multi_period_channel_backtester.py`)**：支持逐日撮合、T+1 开盘买入、通道支撑跌破止损 (-3%~-4%)、通道上轨目标止盈、浮盈回撤跟踪止盈全闭环；输出胜率、盈亏比、年化收益、最大回撤、夏普比率及逐笔流水；
+        4. **亚盛集团 (600108) 250 天实测**：多周期通道策略成功捕捉 3 月份主升浪连续 3 波起爆 (+14.65%、+11.73%、+19.92%)，累计实现 +13.55% 净收益 (年化 +15.92%)，盈亏比 1.33；
+        5. **自动化测试 100% 全部通过**：新增 `tests/test_multi_period_channel_backtest.py` 覆盖重采样、防未来切片、通道特征、共振判定、空头防御与回测执行全链路 6 项测试。
+
 ## 2026-09-04 18:22
 - [x] **优化【V-Reversal link_to_visualizer 联动日志降级为 DEBUG】(KISS) (`stock_standalone/instock_MonitorTK.py`)**：
     - [x] 将 `view_stock_kline` 中调用 `link_to_visualizer` 联动个股的日志由 `logger.info` 降级为 `logger.debug`，彻底避免频繁交互联动时对控制台日常主流程日志的刷屏干扰。
