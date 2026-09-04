@@ -439,7 +439,14 @@ def complete_indicators_pipeline(
                 top_all.loc[valid_mask, 'close'] - top_all.loc[valid_mask, 'lastp1d']
             ) / top_all.loc[valid_mask, 'lastp1d'].replace(0, np.nan) * 100
             top_all.loc[valid_mask, 'percent'] = raw_pct.round(2)
-            top_all.loc[valid_mask, 'per1d'] = top_all.loc[valid_mask, 'percent']
+            # 🛡️ [BUG FIX] 严禁将当日涨跌幅 percent 覆盖赋给 per1d！
+            # per1d 代表上一交易日(昨日/上一周期)涨跌幅，由 TDX/HDF5 原生计算或通过 (lastp1d - lastp2d) 取得。
+            # 若此处盲目覆盖，将导致 UI 与选股逻辑中 per1d 与 percent 100% 相同，彻底丢失昨日真实涨跌幅！
+            if 'per1d' not in top_all.columns and 'lastp2d' in top_all.columns:
+                last_raw_pct = (
+                    top_all.loc[valid_mask, 'lastp1d'] - top_all.loc[valid_mask, 'lastp2d']
+                ) / top_all.loc[valid_mask, 'lastp2d'].replace(0, np.nan) * 100
+                top_all.loc[valid_mask, 'per1d'] = last_raw_pct.round(2)
 
         # # 确定参考昨收列：在大周期(resample != 'd')中，未平移前 lastp1d 代表本周期未收盘的数据，真正的上期收盘昨收存放在 lastp2d
         # ref_lastp_col = 'lastp2d' if (resample != 'd' and 'lastp2d' in top_all.columns) else 'lastp1d'
