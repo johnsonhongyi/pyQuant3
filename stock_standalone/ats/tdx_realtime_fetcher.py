@@ -1182,7 +1182,7 @@ class TDXRealtimeFetcher:
             cat_code = 3  # 从 60m 拉取两倍数量后聚合
             fetch_count = min(800, max(count * 2, 60))
         else:
-            fetch_count = count
+            fetch_count = min(800, max(1, count))
             cat_map = {
                 "5m": 0, "5f": 0, "5min": 0,
                 "15m": 1, "15f": 1, "15min": 1,

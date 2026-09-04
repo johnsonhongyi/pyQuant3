@@ -295,6 +295,10 @@ class SBCChartCanvas(QWidget):
         self.strategy_eval_result = None
         self.auto_eval_enabled: bool = True
 
+        # 🎯 点击收益与交易对高亮状态
+        self.selected_trade_id: Optional[int] = None
+        self._signal_hit_boxes: List[Dict[str, Any]] = []
+
         self.setMinimumSize(320, 180)
         self.setStyleSheet("background-color: #0c0d14;")
         self.setMouseTracking(True)
@@ -308,6 +312,7 @@ class SBCChartCanvas(QWidget):
         self._is_box_zooming = False
         self._box_zoom_origin = None
         self._box_zoom_current = None
+        self.selected_trade_id = None
         self.setCursor(Qt.CursorShape.ArrowCursor)
         self.update()
 
@@ -386,6 +391,14 @@ class SBCChartCanvas(QWidget):
                 parent_win.switch_period_by_index(idx)
             event.accept()
             return
+        elif key in (Qt.Key.Key_BracketRight, Qt.Key.Key_Space):
+            self.cycle_selected_trade(1)
+            event.accept()
+            return
+        elif key == Qt.Key.Key_BracketLeft:
+            self.cycle_selected_trade(-1)
+            event.accept()
+            return
         elif key == Qt.Key.Key_0:
             self.reset_view()
             event.accept()
@@ -396,6 +409,21 @@ class SBCChartCanvas(QWidget):
             event.accept()
             return
         super().keyPressEvent(event)
+
+    def cycle_selected_trade(self, step: int = 1):
+        """【💰 轮巡切换回测交易对】按快捷键 (Space 或 [ / ]) 或点击按钮切换高亮交易并展示点击收益"""
+        if not self.signals:
+            return
+        tids = sorted(list({int(s.get("trade_id")) for s in self.signals if s.get("trade_id") is not None}))
+        if not tids:
+            return
+        if self.selected_trade_id is None or self.selected_trade_id not in tids:
+            self.selected_trade_id = tids[0] if step >= 0 else tids[-1]
+        else:
+            cur_idx = tids.index(self.selected_trade_id)
+            next_idx = (cur_idx + step) % len(tids)
+            self.selected_trade_id = tids[next_idx]
+        self.update()
 
     def run_adaptive_strategy_eval(self):
         """
@@ -566,6 +594,21 @@ class SBCChartCanvas(QWidget):
             return
 
         elif event.button() == Qt.MouseButton.LeftButton or event.button() == Qt.MouseButton.MiddleButton:
+            # 🎯 优先检查是否点击命中了买卖信号标签或关键成交点 (点击收益与持仓连线交互)
+            if event.button() == Qt.MouseButton.LeftButton and getattr(self, '_signal_hit_boxes', None):
+                m_pt = mouse_pos.toPoint() if hasattr(mouse_pos, 'toPoint') else QPoint(int(mouse_pos.x()), int(mouse_pos.y()))
+                for hb in reversed(self._signal_hit_boxes):
+                    rect = hb["rect"]
+                    expanded_rect = rect.adjusted(-6, -6, 6, 6)
+                    dist_sq = (hb["x"] - mouse_pos.x())**2 + (hb["y"] - mouse_pos.y())**2
+                    if expanded_rect.contains(m_pt) or dist_sq <= 400:
+                        hit_tid = hb.get("trade_id")
+                        if hit_tid is not None:
+                            self.selected_trade_id = hit_tid
+                            self.update()
+                            event.accept()
+                            return
+
             if self.df_intraday is not None and not self.df_intraday.empty:
                 total_n = len(self.df_intraday)
                 cur_start = max(0, self._zoom_start_idx)
@@ -761,6 +804,7 @@ class SBCChartCanvas(QWidget):
     def paintEvent(self, event):
         painter = QPainter(self)
         try:
+            self._signal_hit_boxes = []
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
             w = self.width()
@@ -1094,9 +1138,20 @@ class SBCChartCanvas(QWidget):
                             idx_s = i
                             break
 
+                trade_id_val = sig.get("trade_id") if isinstance(sig, dict) else getattr(sig, "trade_id", None)
+                is_selected_trade = (trade_id_val is not None and trade_id_val == self.selected_trade_id)
+                if is_selected_trade:
+                    border_color = QColor("#FFD700")
+                    bg_color = QColor(48, 38, 10, 230)
+
                 if idx_s >= 0:
                     x_s = time_to_x(idx_s)
-                    lbl_text = f"{prefix}:{sig_p:.2f}"
+                    pnl_pct_v = sig.get("pnl_pct") if isinstance(sig, dict) else getattr(sig, "pnl_pct", None)
+                    if not is_buy and pnl_pct_v is not None:
+                        lbl_text = f"{prefix}:{sig_p:.2f} ({float(pnl_pct_v):+.1f}%)"
+                    else:
+                        lbl_text = f"{prefix}:{sig_p:.2f}"
+
                     painter.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
                     fm = painter.fontMetrics()
                     tw_k = fm.horizontalAdvance(lbl_text) + 10
@@ -1118,6 +1173,17 @@ class SBCChartCanvas(QWidget):
                     tag_x = int(max(margin_left + 2, min(margin_left + chart_w - tw_k - 2, x_s - tw_k / 2 + (slot_cnt % 2) * 8)))
                     tag_y = int(max(margin_top + 2, min(margin_top + chart_h - th_k - 2, target_y)))
 
+                    # 注册点击区域
+                    tag_rect = QRect(tag_x, tag_y, tw_k, th_k)
+                    self._signal_hit_boxes.append({
+                        "rect": tag_rect,
+                        "trade_id": trade_id_val,
+                        "sig": sig,
+                        "x": x_s,
+                        "y": y_s,
+                        "is_buy": is_buy
+                    })
+
                     # 1. 绘制垂直贯穿虚线与引线
                     painter.setPen(QPen(QColor(border_color.red(), border_color.green(), border_color.blue(), 100), 1, Qt.PenStyle.DashLine))
                     painter.drawLine(int(x_s), int(margin_top + chart_h), int(x_s), int(margin_top))
@@ -1127,18 +1193,22 @@ class SBCChartCanvas(QWidget):
                     painter.drawLine(int(x_s), int(y_s), int(tag_x + tw_k / 2), int(tag_y + th_k if tag_y < y_s else tag_y))
 
                     # 3. 实际成交价处的精巧圆点
-                    painter.setPen(QPen(QColor("#ffffff"), 1.2))
+                    painter.setPen(QPen(QColor("#ffffff") if not is_selected_trade else QColor("#FFD700"), 1.2))
                     painter.setBrush(QBrush(dot_color))
                     painter.drawEllipse(int(x_s - 3), int(y_s - 3), 6, 6)
 
                     # 4. 半透明高对比度圆角胶囊
-                    painter.setPen(QPen(border_color, 1.2))
+                    painter.setPen(QPen(border_color, 1.8 if is_selected_trade else 1.2))
                     painter.setBrush(QBrush(bg_color))
                     painter.drawRoundedRect(tag_x, tag_y, tw_k, th_k, 3, 3)
 
                     # 5. 高对比度白字
                     painter.setPen(QPen(fg_color))
                     painter.drawText(tag_x + 5, tag_y + th_k - 4, lbl_text)
+
+            # 绘制当前选中的回测交易收益光束与详情卡片
+            if self.selected_trade_id is not None:
+                self._draw_selected_trade_linkage(painter, margin_left, margin_top, chart_w, chart_h)
 
         # 🌟 快捷键 R 自适应策略测算浮动 HUD (精简高对比度轻量卡片，靠左下放置不遮挡右侧K线与价格轴)
         if getattr(self, 'strategy_eval_result', None):
@@ -1228,6 +1298,99 @@ class SBCChartCanvas(QWidget):
         res_strat = getattr(self, 'strategy_eval_result', None)
         if res_strat:
             self._draw_compact_strategy_hud(painter, margin_left, margin_top, chart_w, main_h, res_strat)
+
+    def _draw_selected_trade_linkage(self, painter: QPainter, margin_left: int, margin_top: int, chart_w: int, main_h: int):
+        """
+        【🎯 点击收益联动图元】
+        当用户点击任意买卖信号时：
+        1. 绘制持有期高亮半透明垂直条带 (买入日期~卖出日期)；
+        2. 绘制从买入点到卖出点的直观光束连线与指示箭头；
+        3. 浮动渲染高对比度【点击收益卡片】HUD：
+           显示交易序号、买入/卖出价格、持仓天数、收益率、净利润与出场原因。
+        """
+        if self.selected_trade_id is None or not getattr(self, '_signal_hit_boxes', None):
+            return
+
+        matched_boxes = [hb for hb in self._signal_hit_boxes if hb.get("trade_id") == self.selected_trade_id]
+        if not matched_boxes:
+            return
+
+        buy_hb = next((hb for hb in matched_boxes if hb.get("is_buy")), None)
+        sell_hb = next((hb for hb in matched_boxes if not hb.get("is_buy")), None)
+
+        trade_sig = (buy_hb or sell_hb)["sig"]
+        t_id = trade_sig.get("trade_id", 0)
+        pnl_pct = float(trade_sig.get("pnl_pct", 0.0))
+        pnl_val = float(trade_sig.get("pnl", 0.0))
+        h_days = int(trade_sig.get("holding_days", 1))
+        b_p = float(trade_sig.get("buy_price", (buy_hb["sig"]["price"] if buy_hb else 0.0)))
+        s_p = float(trade_sig.get("sell_price", (sell_hb["sig"]["price"] if sell_hb else 0.0)))
+        b_d = str(trade_sig.get("buy_date", (buy_hb["sig"].get("time", "") if buy_hb else "")))[:10]
+        s_d = str(trade_sig.get("sell_date", (sell_hb["sig"].get("time", "") if sell_hb else "")))[:10]
+        pat_name = str(trade_sig.get("pattern_name", "共振启动"))
+        sell_rsn = str(trade_sig.get("sell_reason", "策略平仓"))
+
+        is_profit = pnl_pct >= 0
+        beam_color = QColor("#00FF88") if is_profit else QColor("#FF4D4F")
+        fill_color = QColor(0, 255, 136, 28) if is_profit else QColor(255, 77, 79, 28)
+
+        # 1. 持股周期半透明垂直条带 (若买卖均在可视区)
+        if buy_hb and sell_hb:
+            x_left = min(buy_hb["x"], sell_hb["x"])
+            x_right = max(buy_hb["x"], sell_hb["x"])
+            span_w = max(4.0, x_right - x_left)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QBrush(fill_color))
+            painter.drawRect(int(x_left), int(margin_top), int(span_w), int(main_h))
+
+            # 2. 买入到卖出的收益光束连线
+            pen_beam = QPen(beam_color, 2.2, Qt.PenStyle.DashDotLine)
+            painter.setPen(pen_beam)
+            painter.drawLine(int(buy_hb["x"]), int(buy_hb["y"]), int(sell_hb["x"]), int(sell_hb["y"]))
+
+            # 在连线中点绘制收益率胶囊小标签
+            mid_x = (buy_hb["x"] + sell_hb["x"]) / 2
+            mid_y = (buy_hb["y"] + sell_hb["y"]) / 2
+            badge_text = f"盈亏:{pnl_pct:+.2f}% ({pnl_val:+,.0f}元)"
+            painter.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
+            fm_b = painter.fontMetrics()
+            bw = fm_b.horizontalAdvance(badge_text) + 12
+            bh = fm_b.height() + 4
+            bx = int(mid_x - bw / 2)
+            by = int(max(margin_top + 4, min(margin_top + main_h - bh - 4, mid_y - bh / 2)))
+
+            painter.setPen(QPen(beam_color, 1.2))
+            painter.setBrush(QBrush(QColor(10, 16, 26, 230)))
+            painter.drawRoundedRect(bx, by, bw, bh, 3, 3)
+            painter.setPen(QPen(QColor("#FFFFFF") if not is_profit else QColor("#00FFAA")))
+            painter.drawText(bx + 6, by + bh - 4, badge_text)
+
+        # 3. 顶部/中部精致悬浮【点击收益卡片】HUD
+        card_title = f"🎯 【交易 #{t_id + 1} 收益详情】 盈亏率: {pnl_pct:+.2f}%  |  净利润: {pnl_val:+,.0f}元  (持仓: {h_days}天)"
+        card_detail = f"买入: {b_d} @ {b_p:.2f} ({pat_name}) ➔ 卖出: {s_d} @ {s_p:.2f} | 离场: {sell_rsn}"
+
+        painter.setFont(QFont("Microsoft YaHei", 8, QFont.Weight.Bold))
+        fm_c = painter.fontMetrics()
+        w1 = fm_c.horizontalAdvance(card_title)
+        w2 = fm_c.horizontalAdvance(card_detail)
+        card_w = max(w1, w2) + 24
+        card_h = 42
+
+        card_x = int(margin_left + (chart_w - card_w) / 2)
+        card_y = int(margin_top + 38)  # 避开顶部通道标题
+
+        painter.setPen(QPen(beam_color, 1.5))
+        painter.setBrush(QBrush(QColor(12, 18, 28, 240)))
+        painter.drawRoundedRect(card_x, card_y, card_w, card_h, 4, 4)
+
+        # 第一行标题
+        painter.setPen(QPen(beam_color))
+        painter.drawText(card_x + 10, card_y + 16, card_title)
+
+        # 第二行明细
+        painter.setFont(QFont("Consolas", 8, QFont.Weight.Normal))
+        painter.setPen(QPen(QColor("#ccddee")))
+        painter.drawText(card_x + 10, card_y + 34, card_detail)
 
     def _paint_kline(self, painter: QPainter, margin_left: int, margin_top: int, chart_w: int, chart_h: int):
         df_view, start_i, end_i = self._get_visible_slice()
@@ -1831,24 +1994,46 @@ class SBCChartCanvas(QWidget):
                 y_s = k_to_y(sig_p)
 
                 sig_hm = sig_t_raw.split()[-1][:5] if " " in sig_t_raw else sig_t_raw[:5]
+                sig_d = sig_t_raw[:10] if len(sig_t_raw) >= 10 else sig_t_raw
 
                 idx_k = -1
-                if self.period_mode in ["day", "week"]:
-                    idx_k = today_k_indices[-1]
+                if self.period_mode in ["day", "week", "month"]:
+                    for ki, tk in enumerate(times_k):
+                        if str(tk).startswith(sig_d):
+                            idx_k = ki
+                            break
+                    if idx_k < 0:
+                        for ki, tk in enumerate(times_k):
+                            if str(tk)[:10] >= sig_d:
+                                idx_k = ki
+                                break
+                    if idx_k < 0 and today_k_indices:
+                        idx_k = today_k_indices[-1]
                 else:
                     for ki in today_k_indices:
                         if k_hhmm_list[ki] >= sig_hm:
                             idx_k = ki
                             break
-                    if idx_k < 0:
+                    if idx_k < 0 and today_k_indices:
                         idx_k = today_k_indices[-1]
+
+                trade_id_val = sig.get("trade_id") if isinstance(sig, dict) else getattr(sig, "trade_id", None)
+                is_selected_trade = (trade_id_val is not None and trade_id_val == self.selected_trade_id)
+                if is_selected_trade:
+                    border_color = QColor("#FFD700")
+                    bg_color = QColor(48, 38, 10, 230)
 
                 if 0 <= idx_k < n:
                     x_k = k_to_x(idx_k)
                     y_hi_k = k_to_y(highs[idx_k])
                     y_lo_k = k_to_y(lows[idx_k])
 
-                    lbl_text = f"{prefix}:{sig_p:.2f}"
+                    pnl_pct_v = sig.get("pnl_pct") if isinstance(sig, dict) else getattr(sig, "pnl_pct", None)
+                    if not is_buy and pnl_pct_v is not None:
+                        lbl_text = f"{prefix}:{sig_p:.2f} ({float(pnl_pct_v):+.1f}%)"
+                    else:
+                        lbl_text = f"{prefix}:{sig_p:.2f}"
+
                     painter.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
                     fm = painter.fontMetrics()
                     tw_k = fm.horizontalAdvance(lbl_text) + 10
@@ -1871,6 +2056,17 @@ class SBCChartCanvas(QWidget):
                     tag_kx = int(max(margin_left + 2, min(margin_left + chart_w - tw_k - 2, x_k - tw_k / 2 + x_offset)))
                     tag_ky = int(max(margin_top + 2, min(margin_top + main_h - th_k - 2, target_y)))
 
+                    # 注册点击区域
+                    tag_rect = QRect(tag_kx, tag_ky, tw_k, th_k)
+                    self._signal_hit_boxes.append({
+                        "rect": tag_rect,
+                        "trade_id": trade_id_val,
+                        "sig": sig,
+                        "x": x_k,
+                        "y": y_s,
+                        "is_buy": is_buy
+                    })
+
                     # 1. 绘制垂直贯穿虚线
                     painter.setPen(QPen(QColor(border_color.red(), border_color.green(), border_color.blue(), 90), 1, Qt.PenStyle.DotLine))
                     painter.drawLine(int(x_k), int(margin_top + main_h), int(x_k), int(margin_top))
@@ -1880,18 +2076,22 @@ class SBCChartCanvas(QWidget):
                     painter.drawLine(int(x_k), int(y_s), int(tag_kx + tw_k / 2), int(tag_ky + th_k if tag_ky < y_s else tag_ky))
 
                     # 3. 实际成交价处的精巧圆点
-                    painter.setPen(QPen(QColor("#ffffff"), 1.2))
+                    painter.setPen(QPen(QColor("#ffffff") if not is_selected_trade else QColor("#FFD700"), 1.2))
                     painter.setBrush(QBrush(dot_color))
                     painter.drawEllipse(int(x_k - 3), int(y_s - 3), 6, 6)
 
                     # 4. 半透明高对比度圆角胶囊背景
-                    painter.setPen(QPen(border_color, 1.2))
+                    painter.setPen(QPen(border_color, 1.8 if is_selected_trade else 1.2))
                     painter.setBrush(QBrush(bg_color))
                     painter.drawRoundedRect(tag_kx, tag_ky, tw_k, th_k, 3, 3)
 
                     # 5. 高对比度白字
                     painter.setPen(QPen(fg_color))
                     painter.drawText(tag_kx + 5, tag_ky + th_k - 4, lbl_text)
+
+            # 绘制当前选中的回测交易收益光束与详情卡片
+            if self.selected_trade_id is not None:
+                self._draw_selected_trade_linkage(painter, margin_left, margin_top, chart_w, main_h)
 
         # 10. 顶部通道标题与参数标注 (两行结构化展示)
         painter.setPen(QPen(QColor("#ffd700"), 1))
@@ -2130,8 +2330,14 @@ class SBCIntradayChartDialog(QWidget):
         self.btn_eval_r.clicked.connect(lambda: self._on_eval_r_clicked(toggle=True))
         self._update_eval_btn_style()
 
+        self.btn_cycle_trade = QPushButton("💰 点击收益")
+        self.btn_cycle_trade.setStyleSheet("background-color: #1a233a; color: #ffd700; font-weight: bold; border: 1px solid #ffd700; border-radius: 3px; padding: 2px 8px; font-size: 8.5pt;")
+        self.btn_cycle_trade.setToolTip("快捷键: Space 或 [ / ] 键，依次轮巡高亮回测买卖交易对并展示点击收益详情")
+        self.btn_cycle_trade.clicked.connect(lambda: self.canvas.cycle_selected_trade(1))
+
         tb_layout.addStretch()
         tb_layout.addWidget(self.btn_eval_r)
+        tb_layout.addWidget(self.btn_cycle_trade)
         tb_layout.addWidget(btn_linkage)
         tb_layout.addWidget(btn_rearrange)
         tb_layout.addWidget(btn_refresh)
@@ -2142,6 +2348,9 @@ class SBCIntradayChartDialog(QWidget):
         # 2. 实盘走势图画布
         self.canvas = SBCChartCanvas(self)
         self.canvas.code = self.code
+        self.custom_trades_df = None
+        self.custom_signals = None
+        self.custom_kline_df = None
         layout.addWidget(self.canvas, 1)
 
         # 3. 折叠式行情数据与 TDX 通信日志区域
@@ -2979,6 +3188,29 @@ class SBCIntradayChartDialog(QWidget):
         self.reload_chart()
         QMessageBox.information(self, "🧹 缓存已强力重置", f"标的 [{c_clean} {resolve_stock_name(c_clean)}] 的内存与磁盘行情缓存已成功强力清除！\n已自动拉取最新 TDX 分时数据并重置评级与分时走势线！")
 
+    def set_custom_backtest_trades(self, trades_df: pd.DataFrame, df_kline: Optional[pd.DataFrame] = None):
+        """
+        【📈 注入多周期通道量化回测交易记录】
+        将回测买卖点与收益指标一键注入 SBC 走势图画布：
+        - 自动生成买卖信号对与收益率标签；
+        - 默认选中首笔交易并激活【点击收益】高亮光束与悬浮卡片；
+        - 切换至日K线通道模式展示完整回测周期。
+        """
+        from ats.multi_period_channel_backtester import convert_backtest_trades_to_sbc_signals
+        self.custom_trades_df = trades_df
+        self.custom_kline_df = df_kline
+        self.custom_signals = convert_backtest_trades_to_sbc_signals(trades_df)
+
+        if self.custom_signals:
+            self.canvas.selected_trade_id = 0
+
+        self.set_period_mode("day", reload=True, save=False)
+        t_cnt = len(trades_df) if trades_df is not None else 0
+        win_cnt = len(trades_df[trades_df['pnl_pct'] > 0]) if trades_df is not None and not trades_df.empty else 0
+        win_r = (win_cnt / t_cnt * 100.0) if t_cnt > 0 else 0.0
+        self.lbl_title.setText(f"📊 {self.code} {resolve_stock_name(self.code)} | [多周期通道回测] 交易:{t_cnt}笔 胜率:{win_r:.1f}% (点击标记看收益)")
+        self.lbl_info.setText("💡 【点击收益交互提示】: 鼠标直接点击任意 🟢买 / 🔴卖 信号标签，即可高亮持仓区间并展开单笔盈亏卡片；按 [ 与 ] 键或 Space 键可快速轮巡切换各笔交易。")
+
     def reload_chart(self):
         mode = getattr(self, '_current_period_mode', '1m')
         fetcher = TDXRealtimeFetcher.get_instance()
@@ -2993,23 +3225,26 @@ class SBCIntradayChartDialog(QWidget):
         amt = float(snap.get("amount", 0.0))
         to_rate = float(snap.get("turnover_rate", 0.0))
 
-        state = self.engine._get_stock_state(self.code, op) if self.engine else {}
-        sigs = state.get("signals", [])
+        if getattr(self, "custom_signals", None):
+            sigs = self.custom_signals
+        else:
+            state = self.engine._get_stock_state(self.code, op) if self.engine else {}
+            sigs = state.get("signals", [])
 
-        if not sigs and self.engine is not None and op > 1.0:
-            now_t = datetime.now().strftime("%H:%M:%S")
-            eval_res = self.engine.evaluate_seven_nodes(
-                code=self.code,
-                current_time_str=now_t,
-                open_price=op,
-                price=p,
-                high_price=hi,
-                low_price=lo,
-                vwap=vw,
-                turnover_rate=to_rate,
-                amount=amt
-            )
-            sigs = state.get("signals", []) or eval_res.get("signals", [])
+            if not sigs and self.engine is not None and op > 1.0:
+                now_t = datetime.now().strftime("%H:%M:%S")
+                eval_res = self.engine.evaluate_seven_nodes(
+                    code=self.code,
+                    current_time_str=now_t,
+                    open_price=op,
+                    price=p,
+                    high_price=hi,
+                    low_price=lo,
+                    vwap=vw,
+                    turnover_rate=to_rate,
+                    amount=amt
+                )
+                sigs = state.get("signals", []) or eval_res.get("signals", [])
 
         t_min = op * 1.03 if op > 1.0 else 0.0
         t_max = op * 1.05 if op > 1.0 else 0.0
@@ -3035,7 +3270,12 @@ class SBCIntradayChartDialog(QWidget):
             return
 
         if mode in ["5m", "15m", "30m", "60m", "day", "week", "month"]:
-            df_kline = fetcher.fetch_kline_bars(self.code, category=mode, count=150)
+            if getattr(self, "custom_kline_df", None) is not None and not self.custom_kline_df.empty:
+                df_kline = self.custom_kline_df
+            else:
+                fetch_c = min(800, max(250, len(self.custom_signals) * 5)) if getattr(self, "custom_signals", None) else 150
+                df_kline = fetcher.fetch_kline_bars(self.code, category=mode, count=fetch_c)
+
             if not df_kline.empty:
                 if op <= 1.0:
                     op = float(df_kline.iloc[-1].get("open", p))
@@ -3047,8 +3287,15 @@ class SBCIntradayChartDialog(QWidget):
                     lo = float(df_kline['low'].min()) if 'low' in df_kline.columns else p
                 cl_last = float(df_kline.iloc[-1].get("close", p))
                 self.canvas.set_kline_data(df_kline, open_p=op, vwap_p=vw, high_p=hi, low_p=lo, sell_min=t_min, sell_max=t_max, signals=sigs, period_mode=mode)
-                self.lbl_title.setText(f"📊 {self.code} {resolve_stock_name(self.code)} | [{mode.upper()}GG通道] 今:{op:.2f} 现:{cl_last:.2f}")
-                self.lbl_title.setToolTip(f"【{self.code} {resolve_stock_name(self.code)}】[{mode.upper()}K线通道] 今开={op:.2f}元, 现价={cl_last:.2f}元, VWAP={vw:.2f}元, 最高={hi:.2f}元, 最低={lo:.2f}元 | 买卖信号数: {len(sigs)} 步")
+                if getattr(self, "custom_trades_df", None) is not None:
+                    t_cnt = len(self.custom_trades_df)
+                    win_cnt = len(self.custom_trades_df[self.custom_trades_df['pnl_pct'] > 0]) if not self.custom_trades_df.empty else 0
+                    win_r = (win_cnt / t_cnt * 100.0) if t_cnt > 0 else 0.0
+                    self.lbl_title.setText(f"📊 {self.code} {resolve_stock_name(self.code)} | [多周期通道回测] 交易:{t_cnt}笔 胜率:{win_r:.1f}% (点击标记看收益)")
+                    self.lbl_title.setToolTip(f"【{self.code} {resolve_stock_name(self.code)}】多周期通道量化回测走势图 | 共 {t_cnt} 笔交易，胜率 {win_r:.1f}% | 点击任意买卖信号标记或按 Space/[/] 键查看单笔收益与持仓光束")
+                else:
+                    self.lbl_title.setText(f"📊 {self.code} {resolve_stock_name(self.code)} | [{mode.upper()}GG通道] 今:{op:.2f} 现:{cl_last:.2f}")
+                    self.lbl_title.setToolTip(f"【{self.code} {resolve_stock_name(self.code)}】[{mode.upper()}K线通道] 今开={op:.2f}元, 现价={cl_last:.2f}元, VWAP={vw:.2f}元, 最高={hi:.2f}元, 最低={lo:.2f}元 | 买卖信号数: {len(sigs)} 步")
                 if getattr(self, 'auto_eval_enabled', True):
                     self._on_eval_r_clicked(toggle=False)
             return
@@ -3159,6 +3406,11 @@ def open_sbc_chart_dialog(parent_win: Optional[QWidget] = None, code: str = "688
             dlg.set_period_mode(period_mode, reload=True, save=True)
         else:
             dlg.reload_chart()
+
+    trades_df = kwargs.get("trades_df", None)
+    df_kline = kwargs.get("df_kline", None)
+    if trades_df is not None:
+        dlg.set_custom_backtest_trades(trades_df, df_kline=df_kline)
 
     dlg.show()
     dlg.raise_()
