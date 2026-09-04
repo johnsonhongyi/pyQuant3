@@ -1,3 +1,22 @@
+## 2026-09-04 21:55
+- [x] **全链路落地【SBC 测算日志状态机去重 + 窗口关闭与隐藏野定时器物理销毁 + 非交易期自适应节流】(SSOT) (`stock_standalone/ats/ui/intraday_strategy_dialog.py`, `stock_standalone/tests/test_sbc_shortcut_r.py`)**：
+    - [x] **排查定位“无变化数据每2秒重复刷屏、关闭SBC窗口后后台野定时器持续执行、非交易期盲目轮询”三大实战痛点诱因**：
+        1. **无变化日志重复刷屏缺陷**：`SBCChartCanvas.run_adaptive_strategy_eval` 在定时器驱动下每 2 秒无条件调用 `logger.info` 打印相同的测算结果（如未缩量或相同买点），导致控制台日志海量膨胀，掩盖关键交易动作；
+        2. **关闭窗口后野定时器未销毁（僵尸线程/定时器）**：`SBCIntradayChartDialog.closeEvent` 中仅停止了 `hover_timer`、`snap_timer`、`_geo_save_timer`，遗漏了核心的 2 秒轮询定时器 `poll_timer` 与 `_save_timer`；且未从父级/全局 `_sbc_dialogs` 字典中注销，导致窗口关闭后定时器依然在后台无限期轮询执行并打印日志；
+        3. **非交易期无脑高频轮询**：非交易时段（盘后、夜间、休市日）行情数据静态不变，每 2 秒重复发起盘口请求与策略测算毫无意义，徒增系统负载。
+    - [x] **全链路落地【日志状态机签名比对 + 窗口关闭/隐藏生命周期强闭环 + 非交易期自适应节流】体系 (SSOT)**：
+        1. **测算结果状态机签名与去重静默机制 (`ats/ui/intraday_strategy_dialog.py`)**：
+           - 针对自适应通道策略与日内 7 节点分时策略，分别建立不可变特征签名元组 `cur_sig = (code, period_mode, is_matched, score, entry_price, reason)`；
+           - 仅当状态机签名发生实质性变化（信号改变、得分变动、买点更新）时，才触发 `logger.info`；若签名完全相同，自动降级为 `logger.debug` 保持静默，杜绝高频刷屏；
+           - 在 `set_data`、`set_kline_data` 切换个股或周期时，自动重置历史签名，确保切换后首条有效信息完整打印；
+        2. **SBC 窗口全生命周期定时器强闭环与字典注销**：
+           - `closeEvent`：显式执行 `poll_timer.stop()`、`_save_timer.stop()`、`hover_timer.stop()`、`snap_timer.stop()`；并从 `target_win._sbc_dialogs` 和 `SBCIntradayChartDialog._global_sbc_dialogs` 中安全 `pop` 注销，彻底消除后台僵尸引用；
+           - `hideEvent`：贴边收起或隐藏时自动暂停 `poll_timer` 与 `hover_timer`；`showEvent` 打开或滑出时自动唤醒恢复；
+        3. **非交易期自适应节流与窗口可见性守卫**：
+           - 轮询解耦为 `_on_poll_timer_tick`，首行检测 `not self.isVisible()`，若已不可见立即停止定时器并阻断执行；
+           - `reload_chart(is_timer_tick=True)` 接入 `cct.get_work_time()` 交易时段检测：非交易时段将 `poll_timer` 降频至 60 秒，并在首次载入后直接跳过后续重复测算与多余网络请求；实盘交易时段自动恢复 2 秒高频刷新；程序化主动调用保持零延迟立即执行；
+        4. **自动化测试 100% 全部 PASSED**：`test_sbc_shortcut_r.py` 扩充 `test_04_dialog_close_stops_poll_timer` 与 `test_05_eval_log_deduplication`，全套 27 项通道与 SBC 核心测试全绿通过。
+
 ## 2026-09-04 21:25
 - [x] **全链路落地【通道高度与振幅指标体系入库 tdd (SSOT) + 原生支持点击表头排序与 Query 极速过滤】(SSOT) (`stock_standalone/JSONData/tdx_data_Day.py`, `stock_standalone/query_engine_util.py`, `stock_standalone/tests/test_trend_channel.py`)**：
     - [x] **通道绝对高度、相对振幅与上下半高直接注入 tdd 核心数据管道**：

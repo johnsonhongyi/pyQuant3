@@ -464,7 +464,22 @@ class SBCChartCanvas(QWidget):
                 res["code"] = c_clean
                 self.strategy_eval_result = res
                 self.update()
-                logger.info(f"🎯 [SBC快捷键R测算·{p_mode}] {c_clean} 结果: matched={res.get('is_matched')} | score={res.get('score')} | entry={res.get('entry_price')} | reason={res.get('reason')}")
+
+                # 💡 [日志防重与状态机去重] 没有变化的数据日志绝不重复刷屏输出
+                cur_sig = (
+                    c_clean,
+                    p_mode,
+                    bool(res.get('is_matched', False)),
+                    round(float(res.get('score', 0.0) or 0.0), 1),
+                    round(float(res.get('entry_price', 0.0) or 0.0), 2),
+                    str(res.get('reason', ''))
+                )
+                last_sig = getattr(self, '_last_eval_log_signature', None)
+                if last_sig != cur_sig:
+                    self._last_eval_log_signature = cur_sig
+                    logger.info(f"🎯 [SBC快捷键R测算·{p_mode}] {c_clean} 结果: matched={res.get('is_matched')} | score={res.get('score')} | entry={res.get('entry_price')} | reason={res.get('reason')}")
+                else:
+                    logger.debug(f"[SBC测算] {c_clean} {p_mode} 结果未变(静默保持)")
             except Exception as e_eval:
                 logger.error(f"[SBC策略测算] 异常: {e_eval}")
                 self.strategy_eval_result = {
@@ -506,7 +521,19 @@ class SBCChartCanvas(QWidget):
                     "reason": f"分时7节点评分: {eval_res.get('total_score', 0)}分 ({eval_res.get('pattern_name', '')}) | {eval_res.get('guidance_text', '')}"
                 }
                 self.update()
-                logger.info(f"🎯 [SBC快捷键R分时测算] {c_clean} 评分: {eval_res.get('total_score', 0)}分 | {eval_res.get('pattern_name')}")
+
+                cur_node_sig = (
+                    c_clean,
+                    p_mode,
+                    round(float(eval_res.get("total_score", 0)), 1),
+                    str(eval_res.get("pattern_name", ""))
+                )
+                last_node_sig = getattr(self, '_last_node_log_signature', None)
+                if last_node_sig != cur_node_sig:
+                    self._last_node_log_signature = cur_node_sig
+                    logger.info(f"🎯 [SBC快捷键R分时测算] {c_clean} 评分: {eval_res.get('total_score', 0)}分 | {eval_res.get('pattern_name')}")
+                else:
+                    logger.debug(f"[SBC分时测算] {c_clean} 分时节点未变(静默保持)")
             except Exception as e_node:
                 logger.error(f"[SBC分时测算] 异常: {e_node}")
                 self.strategy_eval_result = {
@@ -776,11 +803,14 @@ class SBCChartCanvas(QWidget):
         self.target_sell_min = sell_min
         self.target_sell_max = sell_max
         self.signals = signals or []
-        if getattr(self, '_last_period_mode', None) != period_mode:
+        if getattr(self, '_last_period_mode', None) != period_mode or getattr(self, '_last_code', None) != getattr(self, 'code', None):
             self._zoom_start_idx = 0
             self._zoom_end_idx = -1
             self._last_period_mode = period_mode
-            self.strategy_eval_result = None  # 切换周期时重置策略测算结果
+            self._last_code = getattr(self, 'code', None)
+            self.strategy_eval_result = None  # 切换周期或标的时重置策略测算结果
+            self._last_eval_log_signature = None
+            self._last_node_log_signature = None
         self.period_mode = period_mode
         self.update()
 
@@ -793,11 +823,14 @@ class SBCChartCanvas(QWidget):
         self.target_sell_min = sell_min
         self.target_sell_max = sell_max
         self.signals = signals or []
-        if getattr(self, '_last_period_mode', None) != period_mode:
+        if getattr(self, '_last_period_mode', None) != period_mode or getattr(self, '_last_code', None) != getattr(self, 'code', None):
             self._zoom_start_idx = 0
             self._zoom_end_idx = -1
             self._last_period_mode = period_mode
-            self.strategy_eval_result = None  # 切换周期时重置策略测算结果
+            self._last_code = getattr(self, 'code', None)
+            self.strategy_eval_result = None  # 切换周期或标的时重置策略测算结果
+            self._last_eval_log_signature = None
+            self._last_node_log_signature = None
         self.period_mode = period_mode
         self.update()
 
@@ -2444,7 +2477,7 @@ class SBCIntradayChartDialog(QWidget):
         # 6. 实盘交易期 2 秒级高频自动刷新与动态绘制定时器
         self.poll_timer = QTimer(self)
         self.poll_timer.setInterval(2000)
-        self.poll_timer.timeout.connect(self.reload_chart)
+        self.poll_timer.timeout.connect(self._on_poll_timer_tick)
         self.poll_timer.start()
 
         # 7. 磁吸贴边、自动隐藏与滑出动画系统 (与 ATS 加速龙头监视器完全统一)
@@ -2480,6 +2513,14 @@ class SBCIntradayChartDialog(QWidget):
         self._restore_sbc_geometry()
         self.reload_chart()
         bind_top_shortcut(self, self._toggle_stay_on_top)
+
+    def _on_poll_timer_tick(self):
+        """定时器心跳周期检查与刷新：窗口隐藏或非交易期自动抑制"""
+        if not self.isVisible():
+            if hasattr(self, 'poll_timer') and self.poll_timer and self.poll_timer.isActive():
+                self.poll_timer.stop()
+            return
+        self.reload_chart(is_timer_tick=True)
 
     def _get_max_allowed_sbc_size(self) -> Tuple[int, int]:
         """获取 SBC 窗口最大允许尺寸规格 (不得超过屏幕可用宽高的 2/3)"""
@@ -2915,8 +2956,12 @@ class SBCIntradayChartDialog(QWidget):
                 self.lbl_info.setText("💡 [测算已关闭] 已清除图上测算介入标记。按 R 键可重新开启自动测算。")
 
     def showEvent(self, event):
-        """SBC 窗口打开展示事件：默认将焦点赋予当前显示的周期按钮上，便于键盘/鼠标快速操作"""
+        """SBC 窗口打开展示事件：恢复后台定时器，默认将焦点赋予当前显示的周期按钮上"""
         super().showEvent(event)
+        if hasattr(self, 'poll_timer') and self.poll_timer and not self.poll_timer.isActive():
+            self.poll_timer.start()
+        if hasattr(self, 'hover_timer') and self.hover_timer and not self.hover_timer.isActive():
+            self.hover_timer.start()
         if hasattr(self, 'canvas') and self.canvas:
             self.canvas.code = self.code
         if hasattr(self, 'btn_group_period') and self.btn_group_period:
@@ -2925,15 +2970,37 @@ class SBCIntradayChartDialog(QWidget):
                     btn.setFocus()
                     break
 
+    def hideEvent(self, event):
+        """窗口隐藏或贴边收起时，暂停后台高频轮询定时器，杜绝隐蔽消耗与日志刷屏"""
+        if hasattr(self, 'poll_timer') and self.poll_timer:
+            self.poll_timer.stop()
+        if hasattr(self, 'hover_timer') and self.hover_timer:
+            self.hover_timer.stop()
+        super().hideEvent(event)
+
     def closeEvent(self, event):
-        """关闭窗口时自动持久化保存几何大小与坐标，并维护打开列表"""
-        self.hover_timer.stop()
-        self.snap_timer.stop()
-        if hasattr(self, '_geo_save_timer'):
+        """关闭窗口时彻底停止所有后台轮询定时器，从全局管理字典注销，自动持久化坐标并维护打开列表"""
+        if hasattr(self, 'poll_timer') and self.poll_timer:
+            self.poll_timer.stop()
+        if hasattr(self, '_save_timer') and self._save_timer:
+            self._save_timer.stop()
+        if hasattr(self, 'hover_timer') and self.hover_timer:
+            self.hover_timer.stop()
+        if hasattr(self, 'snap_timer') and self.snap_timer:
+            self.snap_timer.stop()
+        if hasattr(self, '_geo_save_timer') and self._geo_save_timer:
             self._geo_save_timer.stop()
         self._do_save_sbc_geometry()
 
-        main_win = getattr(self, "main_workbench", None)
+        # 从全局打开字典注销当前实例，彻底断开强引用，避免后台幽灵存活
+        c_clean = getattr(self, "code", "")
+        main_win = getattr(self, "main_workbench", None) or (self.parent().window() if (self.parent() and hasattr(self.parent(), 'window')) else None)
+        target_win = main_win or (self.parent() if hasattr(self, 'parent') else None)
+        if target_win and hasattr(target_win, '_sbc_dialogs') and isinstance(target_win._sbc_dialogs, dict):
+            target_win._sbc_dialogs.pop(c_clean, None)
+        if hasattr(SBCIntradayChartDialog, '_global_sbc_dialogs') and isinstance(SBCIntradayChartDialog._global_sbc_dialogs, dict):
+            SBCIntradayChartDialog._global_sbc_dialogs.pop(c_clean, None)
+
         is_app_exiting = False
         if main_win:
             if not main_win.isVisible() or getattr(main_win, '_is_closing', False) or getattr(main_win, '_is_exiting', False):
@@ -3271,7 +3338,37 @@ class SBCIntradayChartDialog(QWidget):
         self.lbl_title.setText(f"📊 {self.code} {resolve_stock_name(self.code)} | [多周期通道回测] 交易:{t_cnt}笔 胜率:{win_r:.1f}% (点击标记看收益)")
         self.lbl_info.setText("💡 【点击收益交互提示】: 鼠标直接点击任意 🟢买 / 🔴卖 信号标签，即可高亮持仓区间并展开单笔盈亏卡片；按 [ 与 ] 键或 Space 键可快速轮巡切换各笔交易。")
 
-    def reload_chart(self):
+    def reload_chart(self, is_timer_tick: bool = False):
+        if is_timer_tick:
+            # 1. 窗口关闭/隐藏保护：若窗口已经不可见，彻底跳过轮询与计算
+            if not self.isVisible():
+                if hasattr(self, 'poll_timer') and self.poll_timer and self.poll_timer.isActive():
+                    self.poll_timer.stop()
+                return
+
+            # 2. 交易时段自适应判断：非交易时段降低轮询开销与日志刷屏
+            is_trading = False
+            try:
+                from JohnsonUtil import commonTips as cct
+                is_trading = bool(cct.get_work_time())
+            except Exception:
+                now = datetime.now()
+                is_trading = (now.weekday() < 5) and ((9, 15) <= (now.hour, now.minute) <= (11, 30) or (13, 0) <= (now.hour, now.minute) <= (15, 5))
+
+            if not is_trading:
+                # 非交易期将定时器降频至 60 秒
+                if hasattr(self, 'poll_timer') and self.poll_timer and self.poll_timer.interval() < 30000:
+                    self.poll_timer.setInterval(60000)
+                # 若非交易期已完成过首次加载，跳过重复的心跳计算与日志
+                if getattr(self, '_has_initial_loaded', False):
+                    return
+            else:
+                # 实盘交易期恢复 2 秒轮询
+                if hasattr(self, 'poll_timer') and self.poll_timer and self.poll_timer.interval() != 2000:
+                    self.poll_timer.setInterval(2000)
+
+        self._has_initial_loaded = True
+
         mode = getattr(self, '_current_period_mode', '1m')
         fetcher = TDXRealtimeFetcher.get_instance()
 

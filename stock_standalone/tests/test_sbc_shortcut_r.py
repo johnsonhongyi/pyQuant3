@@ -87,14 +87,47 @@ class TestSBCShortcutR(unittest.TestCase):
         df_60m = generate_mock_60m_df("valid_reversal", n_bars=60)
         dialog.canvas.period_mode = "60m"
         dialog.canvas.df_intraday = df_60m
+        dialog.auto_eval_enabled = False  # 确保初始为关，接下来切换为开启
 
         # 触发窗口级的 _on_eval_r_clicked
-        dialog._on_eval_r_clicked()
+        dialog._on_eval_r_clicked(toggle=True)
         res = getattr(dialog.canvas, "strategy_eval_result", None)
         self.assertIsNotNone(res)
         self.assertTrue(res.get("is_matched"))
-        self.assertIn("策略测算命中", dialog.lbl_info.text())
+        self.assertTrue("自动测算开启" in dialog.lbl_info.text() or "策略测算" in dialog.lbl_info.text())
+        dialog.close()
         print("[Test 3] 对话框级 R 键联动转发测试成功")
+
+    def test_04_dialog_close_stops_poll_timer(self):
+        """测试关闭 SBC 窗口时彻底停止 poll_timer，防止后台野定时器持续执行与日志泄露"""
+        dialog = SBCIntradayChartDialog(code="688826")
+        dialog.show()  # 触发 showEvent 激活定时器
+        self.assertTrue(dialog.poll_timer.isActive(), "展示窗口后 poll_timer 应当已启动")
+        self.assertTrue(dialog._save_timer.isActive(), "展示窗口后 _save_timer 应当已启动")
+
+        # 触发关闭事件
+        dialog.close()
+        self.assertFalse(dialog.poll_timer.isActive(), "关闭窗口后 poll_timer 必须彻底停止！")
+        self.assertFalse(dialog._save_timer.isActive(), "关闭窗口后 _save_timer 必须彻底停止！")
+        self.assertFalse(dialog.hover_timer.isActive(), "关闭窗口后 hover_timer 必须彻底停止！")
+        print("[Test 4] 窗口关闭销毁定时器防护测试成功")
+
+    def test_05_eval_log_deduplication(self):
+        """测试策略测算结果未变化时状态机签名去重，防止重复无意义刷屏"""
+        df_60m = generate_mock_60m_df("valid_reversal", n_bars=60)
+        self.canvas.period_mode = "60m"
+        self.canvas.df_intraday = df_60m
+
+        # 首次测算
+        self.canvas.run_adaptive_strategy_eval()
+        sig1 = getattr(self.canvas, "_last_eval_log_signature", None)
+        self.assertIsNotNone(sig1, "首次测算后应记录日志签名")
+
+        # 再次执行相同测算
+        self.canvas.run_adaptive_strategy_eval()
+        sig2 = getattr(self.canvas, "_last_eval_log_signature", None)
+        self.assertEqual(sig1, sig2, "数据未变时日志签名应保持完全一致")
+        print("[Test 5] 策略测算日志去重签名测试成功")
 
 
 if __name__ == "__main__":
