@@ -1,3 +1,15 @@
+## 2026-09-05 14:25
+- [x] **全链路落地【天梯顶部总计信息直观卡片展示 + 历史回溯非最近交易日联动可视化透传实际交易日】(SSOT) (`stock_standalone/ats/ui/daily_limit_up_dialog.py`, `stock_standalone/ats/ui/main_window.py`, `stock_standalone/ats/limit_up_engine.py`, `stock_standalone/tests/test_daily_limit_up_dialog.py`)**：
+    - [x] **天梯顶部标题栏直观呈现总计信息与多维统计 (`daily_limit_up_dialog.py`)**：
+        1. **窗口顶层标题栏规范对齐 (`setWindowTitle`)**：100% 对齐【涨跌分布个股明细】（`| {分类名称} (共 {count} 只)`）的成熟体验，将总计信息与当前模式直接展示在窗口最顶部的系统标题栏中，如：`🔥 每日涨停分析与强势股天梯 (Limit-Up & Multi-Day Momentum) | 【今日涨停】 (共 69 只)`，历史回溯模式下如 `| 【历史回溯·2026-08-31】 (共 160 只)`；
+        2. **彻底消除第一行工具栏挤压截断**：将原挤占在第一行 KPI 工具栏卡片中的控件移出布局，彻底根除因宽度受限导致的文字截断与排版挤压，使首行大盘 KPI 栏恢复宽敞呼吸感；
+        3. **动态统计与实时响应**：在 `_apply_filter` 中实时汇聚经过时间片、梯队、自选、搜索过滤后的有效标的数，窗口标题栏实时联动变更为 `(共 X 只)`；同时保留 `_reset_all_filters` 一键重置全部过滤；
+    - [x] **历史回溯非最近交易日联动可视化透传实际交易日 (`daily_limit_up_dialog.py`, `main_window.py`)**：
+        1. **非最近交易日判定引擎 (`_get_active_history_date_if_not_latest`)**：当处于历史回溯模式（`current_mode == 'HISTORY'`）且下拉框选中具体日期（如 `2026-08-31`）时，自动比对今日日期与 `cct.get_last_trade_date()`；仅当回溯日期与今日及最新交易日不同时提取有效日期；
+        2. **可视化联动协议对齐 TK (`trade_visualizer_qt6.py`)**：对齐 `popularity_resonance_gui.py` 标准，自动向 TCP 26668 发送 `TIME_LINK|{code}|{history_date}|label=历史回溯` 指令，驱动可视化终端精确跳转至该历史日的 K 线节点；
+        3. **ATS 主窗口通道兼容 (`ATSMainWindow.link_stock`)**：扩展 `link_stock(code, name, date=None)` 可选参数，优先支持外部透传的 `date`，向前兼容既有调用，并在脱离 ATS 独立运行时提供内置 Socket 兜底保障；
+        4. **单元测试 100% 全部 PASSED**：`tests/test_daily_limit_up_dialog.py` 扩充 `test_daily_limit_up_top_total_kpi_and_history_visualizer_date_linkage` 专项测试，11 项天梯测试全绿通过；`test_limit_up_persistence_and_history.py` 6 项测试全部通过。
+
 ## 2026-09-04 21:55
 - [x] **全链路落地【SBC 测算日志状态机去重 + 窗口关闭与隐藏野定时器物理销毁 + 非交易期自适应节流】(SSOT) (`stock_standalone/ats/ui/intraday_strategy_dialog.py`, `stock_standalone/tests/test_sbc_shortcut_r.py`)**：
     - [x] **排查定位“无变化数据每2秒重复刷屏、关闭SBC窗口后后台野定时器持续执行、非交易期盲目轮询”三大实战痛点诱因**：

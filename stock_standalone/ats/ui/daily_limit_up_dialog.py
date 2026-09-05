@@ -545,6 +545,10 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         self.lbl_kpi_seal.setStyleSheet("background-color: #14241e; color: #00ff88; border: 1px solid #225533; border-radius: 4px; padding: 4px 8px; font-weight: bold;")
         kpi_layout.addWidget(self.lbl_kpi_seal)
 
+        # 保持属性兼容，总计信息统一呈现于窗口顶层标题栏中 (对齐涨跌分布个股明细标题规范)
+        self.btn_kpi_total = QPushButton("📋 总计: 0 家")
+        self.lbl_kpi_total = self.btn_kpi_total
+
         # 模式与时间片切换栏
         self.combo_time_slice = QComboBox()
         self.combo_time_slice.addItems([
@@ -1826,6 +1830,25 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         fav_str = f" ⭐关注: {fav_cnt} |" if fav_cnt > 0 else ""
         self.lbl_status.setText(f"{kpi_tag_desc}数据已过滤:{fav_str} 视图【{self.current_mode}】时间片【{time_slice}】精选 Top {top_focus_cnt}/{len(filtered)} 核心标的 (更新: {time.strftime('%H:%M:%S')})")
 
+        # 🚀 顶部标题栏动态展示当前模式与标的总计 (与涨跌分布个股明细完全同构: 共 X 只)
+        mode_names = {
+            "TODAY": "今日涨停",
+            "BUBBLE": "起点雷达",
+            "RADAR": "盘中上车雷达",
+            "3D": "3日强势",
+            "5D": "5日强势",
+            "10D": "10日强势",
+            "LADDER": "连板天梯",
+            "HISTORY": f"历史回溯·{getattr(self, 'selected_history_date', '')}"
+        }
+        mode_str = mode_names.get(self.current_mode, self.current_mode)
+        tot_cnt = len(filtered)
+        base_title = "🔥 每日涨停分析与强势股天梯 (Limit-Up & Multi-Day Momentum)"
+        self.setWindowTitle(f"{base_title} | 【{mode_str}】 (共 {tot_cnt} 只)")
+
+        if hasattr(self, 'btn_kpi_total'):
+            self.btn_kpi_total.setText(f"📋 总计: {tot_cnt} 家")
+
         # 🔔 自动触发时间片重点标的与大盘退潮雪崩语音弹窗通知 (精选 3-5 个)
         self._check_and_notify_slice_highlights(filtered, time_slice)
 
@@ -2055,6 +2078,34 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
 
         self._update_kpi_styles()
         self._apply_filter()
+
+    def _reset_all_filters(self):
+        """【一键重置】点击顶部总计卡片：一键重置所有搜索、自选股过滤与 KPI 临时过滤，还原全量视图"""
+        has_filter = bool(self.active_kpi_filters or (hasattr(self, 'edit_search') and self.edit_search.text().strip()) or (hasattr(self, 'btn_fav_filter') and self.btn_fav_filter.isChecked()))
+        self.active_kpi_filters.clear()
+        if getattr(self, '_saved_time_slice_before_kpi', None) and hasattr(self, 'combo_time_slice'):
+            saved_text = self._saved_time_slice_before_kpi
+            for idx in range(self.combo_time_slice.count()):
+                if self.combo_time_slice.itemText(idx) == saved_text:
+                    self.combo_time_slice.blockSignals(True)
+                    self.combo_time_slice.setCurrentIndex(idx)
+                    self.combo_time_slice.blockSignals(False)
+                    break
+            self._saved_time_slice_before_kpi = None
+
+        self._update_kpi_styles()
+        if hasattr(self, 'edit_search'):
+            self.edit_search.blockSignals(True)
+            self.edit_search.clear()
+            self.edit_search.blockSignals(False)
+        if hasattr(self, 'btn_fav_filter'):
+            self.btn_fav_filter.blockSignals(True)
+            self.btn_fav_filter.setChecked(False)
+            self.btn_fav_filter.setStyleSheet(self._get_btn_style(False) if hasattr(self, '_get_btn_style') else "")
+            self.btn_fav_filter.blockSignals(False)
+        self._apply_filter()
+        if has_filter:
+            self.lbl_status.setText("✅ 已重置所有过滤条件，恢复全量标的展示")
 
     def _update_kpi_styles(self):
         """根据当前选中的 KPI 过滤状态动态更新卡片的高亮边框与视觉风格"""
@@ -2603,24 +2654,90 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
             if c and c != "N/A" and c != self._last_emitted_code:
                 self._last_emitted_code = c
                 self.code_clicked.emit(c, n)
-                self._broadcast_link_stock(c, n)
-                self.lbl_status.setText(f"🔗 已联动: {c} {n} (第 {row+1}/{self.table.rowCount()} 行)")
+                h_date = self._get_active_history_date_if_not_latest()
+                self._broadcast_link_stock(c, n, date=h_date)
+                date_tip = f" [{h_date}]" if h_date else ""
+                self.lbl_status.setText(f"🔗 已联动: {c} {n}{date_tip} (第 {row+1}/{self.table.rowCount()} 行)")
 
-    def _broadcast_link_stock(self, code: str, name: str = ""):
+    def _get_active_history_date_if_not_latest(self) -> Optional[str]:
+        """获取当前生效的历史回溯日期 (仅当选择的历史回溯日期不是最近的交易日时返回具体日期，否则返回 None)"""
+        try:
+            curr_mode = getattr(self, "current_mode", "TODAY")
+            hist_idx = self.combo_history_date.currentIndex() if hasattr(self, 'combo_history_date') else 0
+            if curr_mode != "HISTORY" and hist_idx <= 0:
+                return None
+            
+            # 获取选中的历史回溯日期文本
+            hist_text = self.combo_history_date.currentText().strip() if hasattr(self, 'combo_history_date') else ""
+            if not hist_text or hist_text == "实时今日":
+                return None
+            
+            # 提取日期 (标准 YYYY-MM-DD)
+            date_str = hist_text[:10]
+            if len(date_str) != 10 or date_str[4] != '-' or date_str[7] != '-':
+                return None
+            
+            # 对比今日与最近有效交易日
+            today_str = time.strftime("%Y-%m-%d")
+            latest_trade_date = ""
+            try:
+                from JohnsonUtil import commonTips as cct
+                if cct and hasattr(cct, "get_last_trade_date"):
+                    latest_trade_date = cct.get_last_trade_date()
+            except Exception:
+                pass
+            
+            # 当选择的历史回溯不是最近的交易日（既非今天，也非最新交易日）时返回
+            if date_str != today_str and (not latest_trade_date or date_str != latest_trade_date):
+                return date_str
+        except Exception as e:
+            logger.debug(f"获取历史回溯日期异常: {e}")
+        return None
+
+    def _send_to_visualizer_direct(self, code: str, date: Optional[str] = None):
+        """直接异步向 trade_visualizer_qt6 (26668端口) 发送可视化联动指令 (与 TK popularity_resonance_gui 同构)"""
+        import socket
+        import threading
+        
+        def _send():
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                    s.settimeout(0.2)
+                    s.connect(('127.0.0.1', 26668))
+                    if date:
+                        msg = f"TIME_LINK|{code}|{date}|label=历史回溯"
+                    else:
+                        msg = f"CODE|{code}"
+                    s.sendall(msg.encode("utf-8"))
+            except Exception:
+                pass
+        threading.Thread(target=_send, daemon=True).start()
+
+    def _broadcast_link_stock(self, code: str, name: str = "", date: Optional[str] = None):
         """向全局主窗口与外部行情终端广播联动 (统一走 ATS 联动体系，尊重 cb_tdx/cb_ths/cb_vis 开关)"""
         try:
+            if not date:
+                date = self._get_active_history_date_if_not_latest()
+
             # 1. 优先使用 parent 主窗口联动
             main_win = getattr(self, '_py_parent', None)
             if main_win and hasattr(main_win, "link_stock"):
-                main_win.link_stock(code, name)
+                try:
+                    main_win.link_stock(code, name, date=date)
+                except TypeError:
+                    main_win.link_stock(code, name)
                 return
             # 2. 从全局 QApplication 获取 ATSMainWindow 统一分发联动 (含外部终端开关与VIS通信)
             from ats.ui.main_window import ATSMainWindow
             app = QApplication.instance()
             if hasattr(app, 'main_window') and isinstance(app.main_window, ATSMainWindow):
-                app.main_window.link_stock(code, name)
+                try:
+                    app.main_window.link_stock(code, name, date=date)
+                except TypeError:
+                    app.main_window.link_stock(code, name)
                 return
-            # 3. 兜底保护：若脱离 ATS 独立运行，默认仅推送 TDX，绝不强行开启 THS
+            # 3. 兜底保护：若脱离 ATS 独立运行，直接向 trade_visualizer_qt6 发送 socket 指令，并推送 TDX
+            self._send_to_visualizer_direct(code, date=date)
             from linkage_service import get_link_manager
             if get_link_manager:
                 get_link_manager().push(code, flags={'tdx': True, 'ths': False, 'dfcf': False})

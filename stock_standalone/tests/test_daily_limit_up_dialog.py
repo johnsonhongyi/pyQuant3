@@ -865,6 +865,83 @@ class TestDailyLimitUpDialog(unittest.TestCase):
         finally:
             dialog.close()
 
+    def test_daily_limit_up_top_total_kpi_and_history_visualizer_date_linkage(self):
+        """测试天梯顶部总计信息卡片 (btn_kpi_total) 实时统计与历史回溯非最近交易日联动可视化传递日期"""
+        dialog = DailyLimitUpDialog(parent=None)
+        try:
+            # 1. 验证顶部总计 KPI 控件存在
+            self.assertTrue(hasattr(dialog, "btn_kpi_total"))
+            self.assertTrue(hasattr(dialog, "lbl_kpi_total"))
+            self.assertIn("总计", dialog.btn_kpi_total.text())
+
+            # 2. 注入模拟数据并验证统计文本实时计算
+            sample_records = [
+                {"code": "002084", "name": "海鸥住工", "pct": 10.0, "price": 6.38, "consecutive_boards": 5, "tier_tag": "👑 空间高度龙", "seal_amount_wan": 57752.0, "seal_to_circ_ratio": 14.04},
+                {"code": "600540", "name": "新赛股份", "pct": 10.1, "price": 5.56, "consecutive_boards": 3, "tier_tag": "🚀 连板接力 (3板)", "seal_amount_wan": 43104.0, "seal_to_circ_ratio": 13.33},
+                {"code": "600371", "name": "万向德农", "pct": 9.97, "price": 12.69, "consecutive_boards": 3, "tier_tag": "🚀 连板接力 (3板)", "seal_amount_wan": 41088.0, "seal_to_circ_ratio": 11.07},
+            ]
+            dialog.current_records = sample_records
+            dialog.combo_time_slice.setCurrentText("⏱️ 全天全时段")
+            dialog.combo_tier_filter.setCurrentIndex(0)
+            dialog._apply_filter()
+
+            # 断言顶部标题栏与总计包含 (共 3 只)
+            self.assertIn("共 3 只", dialog.windowTitle())
+            self.assertIn("总计: 3 家", dialog.btn_kpi_total.text())
+
+            # 3. 验证搜索过滤联动总计更新
+            dialog.edit_search.setText("海鸥")
+            dialog._apply_filter()
+            self.assertIn("共 1 只", dialog.windowTitle())
+            self.assertIn("总计: 1 家", dialog.btn_kpi_total.text())
+
+            # 4. 验证点击一键重置所有过滤
+            dialog._reset_all_filters()
+            self.assertEqual(dialog.edit_search.text(), "")
+            self.assertIn("共 3 只", dialog.windowTitle())
+            self.assertIn("总计: 3 家", dialog.btn_kpi_total.text())
+
+            # 5. 验证历史回溯非最近交易日识别逻辑
+            dialog.combo_history_date.blockSignals(True)
+            dialog.combo_history_date.clear()
+            dialog.combo_history_date.addItem("实时今日")
+            dialog.combo_history_date.addItem("2026-08-31")
+            dialog.combo_history_date.setCurrentIndex(1)
+            dialog.combo_history_date.blockSignals(False)
+            dialog.current_mode = "HISTORY"
+
+            # 模拟 cct.get_last_trade_date 返回与 2026-08-31 不同的日期
+            import JohnsonUtil.commonTips as cct
+            orig_get_last_trade_date = getattr(cct, "get_last_trade_date", None)
+            cct.get_last_trade_date = lambda *args: "2026-09-04"
+            try:
+                active_date = dialog._get_active_history_date_if_not_latest()
+                self.assertEqual(active_date, "2026-08-31", "非最近交易日应正确提取为 2026-08-31")
+
+                # 6. 验证联动派发时附带历史日期参数
+                captured_links = []
+                class MockParent:
+                    def link_stock(self, code, name, date=None):
+                        captured_links.append({"code": code, "name": name, "date": date})
+
+                dialog._py_parent = MockParent()
+                dialog._broadcast_link_stock("002084", "海鸥住工")
+
+                self.assertEqual(len(captured_links), 1)
+                self.assertEqual(captured_links[0]["code"], "002084")
+                self.assertEqual(captured_links[0]["date"], "2026-08-31", "向主界面及可视化派发的联动指令中必须携带历史回溯日期 2026-08-31")
+
+                # 若回溯日期恰好等于最近交易日，则不透传历史回溯日期 (保持常规实时查看)
+                cct.get_last_trade_date = lambda *args: "2026-08-31"
+                active_date_latest = dialog._get_active_history_date_if_not_latest()
+                self.assertIsNone(active_date_latest, "若回溯日期即为最近交易日，应返回 None")
+            finally:
+                if orig_get_last_trade_date:
+                    cct.get_last_trade_date = orig_get_last_trade_date
+
+        finally:
+            dialog.close()
+
 
 if __name__ == "__main__":
     unittest.main()
