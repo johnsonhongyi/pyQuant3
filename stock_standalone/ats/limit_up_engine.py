@@ -1560,8 +1560,8 @@ class LimitUpEngine:
 
         # 最高板空间龙
         top_leaders = [r for r in records if r.get("is_limit_up") and _safe_int(r.get("consecutive_boards", 1)) == max_boards]
-        top_leader_code = top_leaders[0]["code"] if top_leaders else (records[0]["code"] if records else "")
-        top_leader_name = top_leaders[0]["name"] if top_leaders else (records[0]["name"] if records else "")
+        top_leader_code = top_leaders[0].get("code", "") if top_leaders else (records[0].get("code", "") if records else "")
+        top_leader_name = top_leaders[0].get("name", top_leader_code) if top_leaders else (records[0].get("name", "") if records else "")
         top_leader_str = f"{top_leader_name} ({max_boards}板)" if (top_leaders and max_boards >= 2) else (top_leader_name if top_leader_name else "--")
 
         # ── 💡 深度全市场情绪退潮与防猎感知指数 (Deep Market Sentiment & Avalanche Index) ──

@@ -2917,10 +2917,10 @@ class ATSMainWindow(QMainWindow):
             self.lbl_rotator_status.setStyleSheet("color: #ff9900;")
             self.status_bar.showMessage("自动轮转引擎已暂停。")
 
-    def link_stock(self, code, name):
+    def link_stock(self, code, name, date=None):
         """
         [LINKAGE] 单击个股触发联动：
-        1. 向 trade_visualizer_qt6 可视化服务器 (TCP 端口 26668) 发送 CODE|{code} 切换行情。
+        1. 向 trade_visualizer_qt6 可视化服务器 (TCP 端口 26668) 发送 CODE|{code} 或 TIME_LINK 切换行情。
         2. 调用 get_link_manager().push() 执行外部通达信/同花顺终端物理联动。
         """
         code_clean = str(code).strip()
@@ -2936,32 +2936,35 @@ class ATSMainWindow(QMainWindow):
         now = time.time()
         last_code = getattr(self, "_last_linked_code", None)
         last_time = getattr(self, "_last_linked_time", 0)
-        if last_code == code_clean and (now - last_time) < 0.2:
-            # 500ms 内重复对同一代码发起联动，直接短路忽略，防止多重绑定信号引起重复联动导致 TDX/THS 闪烁
+        last_date = getattr(self, "_last_linked_date", None)
+        if last_code == code_clean and last_date == date and (now - last_time) < 0.2:
+            # 200ms 内重复对同一代码及同一日期发起联动，直接短路忽略，防止多重绑定信号引起重复联动导致 TDX/THS 闪烁
             return
         self._last_linked_code = code_clean
         self._last_linked_time = now
+        self._last_linked_date = date
         
-        self.status_bar.showMessage(f"🔗 [联动] 推送股票 {code_clean} {name} (已同步可视化及外部交易终端)")
+        date_tip = f" (日期: {date})" if date else ""
+        self.status_bar.showMessage(f"🔗 [联动] 推送股票 {code_clean} {name}{date_tip} (已同步可视化及外部交易终端)")
         
         # 1. 异步向 26668 发送切换个股 socket 指令 (VIS 联动)
         if hasattr(self, 'cb_vis') and self.cb_vis.isChecked():
             import socket
             import threading
             
-            # Check if this stock is in favorites and retrieve its add date
-            add_date = None
-            try:
-                from global_favorites import GlobalFavoriteManager
-                fav_mgr = GlobalFavoriteManager()
-                if code_clean in fav_mgr.get_favorite_stocks():
-                    add_date = fav_mgr.get_favorite_stock_date(code_clean)
-            except Exception:
-                pass
+            target_date = date
+            label_tag = "历史回溯" if date else "重点关注"
+            if not target_date:
+                try:
+                    from global_favorites import GlobalFavoriteManager
+                    fav_mgr = GlobalFavoriteManager()
+                    if code_clean in fav_mgr.get_favorite_stocks():
+                        target_date = fav_mgr.get_favorite_stock_date(code_clean)
+                except Exception:
+                    pass
             
-            # If add_date is available, format as TIME_LINK; otherwise CODE
-            if add_date:
-                cmd_str = f"TIME_LINK|{code_clean}|{add_date}|label=重点关注"
+            if target_date:
+                cmd_str = f"TIME_LINK|{code_clean}|{target_date}|label={label_tag}"
             else:
                 cmd_str = f"CODE|{code_clean}"
             
