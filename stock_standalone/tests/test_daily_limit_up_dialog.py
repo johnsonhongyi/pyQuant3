@@ -44,15 +44,19 @@ class TestDailyLimitUpDialog(unittest.TestCase):
         headers, extra_cols = get_limit_up_table_headers()
         self.assertIn("代码", headers)
         self.assertIn("名称", headers)
+        self.assertIn("距今%", headers)
         self.assertIn("封流比%", headers)
         self.assertIn("封成比%", headers)
         self.assertIn("DFF", headers)
         self.assertIn("Rank", headers)
         self.assertIn("DFF2", headers)
         self.assertIn("DFF3", headers)
-        # 断言表头列顺序：第6列为形态与质量，最后一列为所属板块
+        # 断言表头列顺序：第6列为形态与质量，第12列为成交额(亿)，第13列为距今%，第14列为DFF，最后一列为所属板块
         self.assertEqual(headers[-1], "所属板块")
         self.assertEqual(headers[6], "形态与质量")
+        self.assertEqual(headers[12], "成交额(亿)")
+        self.assertEqual(headers[13], "距今%")
+        self.assertEqual(headers[14], "DFF")
 
     def test_dialog_init_and_update(self):
         dialog = DailyLimitUpDialog(parent=None)
@@ -939,6 +943,92 @@ class TestDailyLimitUpDialog(unittest.TestCase):
                 if orig_get_last_trade_date:
                     cct.get_last_trade_date = orig_get_last_trade_date
 
+        finally:
+            dialog.close()
+
+    def test_history_non_latest_since_pct_column_and_calculation(self):
+        """测试天梯打开历史回溯不是最近交易日时，动态添加并显示距今涨幅列，计算距今的涨跌幅"""
+        import JohnsonUtil.commonTips as cct
+        from PyQt6.QtCore import Qt
+        dialog = DailyLimitUpDialog(parent=None)
+        try:
+            mock_records = [
+                {
+                    "code": "688356",
+                    "name": "键凯科技",
+                    "price": 100.0,
+                    "pct": 20.0,
+                    "consecutive_boards": 1,
+                    "tier_tag": "💎 冰点反身性龙",
+                    "seal_amount_wan": 47238.0,
+                    "seal_to_circ_ratio": 7.26,
+                    "seal_to_vol_ratio": 134.6,
+                    "turnover_rate": 5.39,
+                    "vol_ratio": 1.84,
+                    "amount_yi": 3.51,
+                    "is_limit_up": True,
+                    "is_broken": False,
+                    "dff": 0.0,
+                    "rank": 11,
+                    "dff2": 45.4,
+                    "dff3": 72.0,
+                    "rs_val": 19.91,
+                    "resonance": "同步整理",
+                    "category": "创新药",
+                    "date": "2026-08-31",
+                    "extra_cols": {}
+                }
+            ]
+            dialog.current_records = mock_records
+
+            # 1. 在 TODAY 模式下：列 13 (距今%) 默认必须是隐藏状态
+            dialog.current_mode = "TODAY"
+            dialog._apply_filter()
+            self.assertTrue(dialog.table.isColumnHidden(13), "TODAY 模式下距今%列必须隐藏")
+
+            # 2. 模拟切换至历史回溯非最近交易日 (如 2026-08-31)
+            dialog.combo_history_date.blockSignals(True)
+            dialog.combo_history_date.clear()
+            dialog.combo_history_date.addItem("实时今日")
+            dialog.combo_history_date.addItem("2026-08-31")
+            dialog.combo_history_date.setCurrentIndex(1)
+            dialog.combo_history_date.blockSignals(False)
+            dialog.current_mode = "HISTORY"
+            dialog.selected_history_date = "2026-08-31"
+
+            orig_get_last = getattr(cct, "get_last_trade_date", None)
+            cct.get_last_trade_date = lambda *args: "2026-09-04"
+            try:
+                # 注入当前最新价格 current_df：688356 现价从 100.0 涨至 125.0 (涨幅 +25.00%)
+                live_df = pd.DataFrame([
+                    {"code": "688356", "trade": 125.0, "percent": 5.0}
+                ]).set_index("code")
+                dialog.current_df = live_df
+
+                dialog._apply_filter()
+
+                # 断言列 13 (距今%) 动态展现
+                self.assertFalse(dialog.table.isColumnHidden(13), "历史回溯非最近交易日时距今%列必须动态展示")
+
+                # 断言距今% 计算结果：(125.0 - 100.0) / 100.0 * 100 = +25.00%
+                since_item = dialog.table.item(0, 13)
+                self.assertIsNotNone(since_item)
+                self.assertEqual(since_item.text(), "+25.00%")
+                self.assertAlmostEqual(since_item.data(Qt.ItemDataRole.UserRole), 25.0)
+
+                # 3. 当切回历史回溯的最近交易日 (如 2026-08-31)
+                cct.get_last_trade_date = lambda *args: "2026-08-31"
+                dialog._apply_filter()
+                self.assertTrue(dialog.table.isColumnHidden(13), "若回溯日期等于最近交易日，距今%列应恢复隐藏")
+
+                # 4. 当切回 TODAY 模式
+                dialog.current_mode = "TODAY"
+                dialog.combo_history_date.setCurrentIndex(0)
+                dialog._apply_filter()
+                self.assertTrue(dialog.table.isColumnHidden(13), "切回 TODAY 模式后距今%列必须隐藏")
+            finally:
+                if orig_get_last:
+                    cct.get_last_trade_date = orig_get_last
         finally:
             dialog.close()
 

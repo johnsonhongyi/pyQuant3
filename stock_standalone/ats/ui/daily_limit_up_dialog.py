@@ -252,7 +252,7 @@ def get_limit_up_table_headers(extra_cols=None) -> Tuple[List[str], List[str]]:
     base_headers = [
         "代码", "名称", "现价", "涨幅%", "连板数", "梯队分类", "形态与质量",
         "封单额(万)", "封流比%", "封成比%", "换手%", "量比", "成交额(亿)", 
-        "DFF", "Rank", "DFF2", "DFF3", "大盘偏离", "共振状态"
+        "距今%", "DFF", "Rank", "DFF2", "DFF3", "大盘偏离", "共振状态"
     ]
     extra_headers = [col_map.get(c, c) for c in extra_cols]
     tail_headers = ["所属板块"]
@@ -286,8 +286,9 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         self.last_sh_pct: float = 0.0
         self.is_narrow_mode: bool = False
         self._last_wide_width: int = 1280
-        # 极窄模式下保留的精选核心列索引：代码(0), 名称(1), 现价(2), 涨幅%(3), 连板数(4), 梯队(5), 形态与质量(6), 封单额(7), 封流比(8), 换手(10), DFF(13), Rank(14)
-        self._narrow_cols_to_keep = {0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 13, 14}
+        # 极窄模式下保留的精选核心列索引：代码(0), 名称(1), 现价(2), 涨幅%(3), 连板数(4), 梯队(5), 形态与质量(6), 封单额(7), 封流比(8), 换手(10), DFF(14), Rank(15)
+        self._narrow_cols_to_keep = {0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 14, 15}
+        self._latest_price_cache: Dict[str, Tuple[float, float]] = {}
 
         # 重点关注管理器与多级排序状态 (对齐赛马面板)
         try:
@@ -799,6 +800,7 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         self.table.setItemDelegate(ColorPreservingItemDelegate(self.table))
         self.table.setColumnCount(len(headers))
         self.table.setHorizontalHeaderLabels(headers)
+        self.table.setColumnHidden(13, True)  # 默认非历史回溯模式下隐藏距今%列 (仅当回溯非最近交易日时动态展示)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -1520,47 +1522,55 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
                 return (0, -a_yi if is_descending else a_yi)
             return (1, 0.0)
 
-        # 13. DFF
+        # 13. 距今% (计算从历史交易日价格距今的累计涨跌幅，允许正负，有数值即为有效数据)
         elif col_idx == 13:
+            v = r.get("since_pct", None)
+            if v is not None and str(v).strip() not in ("", "-", "--", "None", "nan"):
+                f_v = _safe_float(v, 0.0)
+                return (0, -f_v if is_descending else f_v)
+            return (1, 0.0)
+
+        # 14. DFF
+        elif col_idx == 14:
             v = r.get("dff", None)
             if v is not None and str(v).strip() not in ("", "-", "--", "None", "nan"):
                 f_v = _safe_float(v, 0.0)
                 return (0, -f_v if is_descending else f_v)
             return (1, 0.0)
 
-        # 14. Rank 列 (1 <= rank <= 9999 为有效全市场排名，越小越强)
-        elif col_idx == 14:
+        # 15. Rank 列 (1 <= rank <= 9999 为有效全市场排名，越小越强)
+        elif col_idx == 15:
             rk = _safe_int(r.get("rank", r.get("Rank", 0)), 0)
             if rk > 0:
                 return (0, float(rk) if is_descending else -float(rk))
             return (1, 99999.0)
 
-        # 15. DFF2
-        elif col_idx == 15:
+        # 16. DFF2
+        elif col_idx == 16:
             v = r.get("dff2", None)
             if v is not None and str(v).strip() not in ("", "-", "--", "None", "nan"):
                 f_v = _safe_float(v, 0.0)
                 return (0, -f_v if is_descending else f_v)
             return (1, 0.0)
 
-        # 16. DFF3
-        elif col_idx == 16:
+        # 17. DFF3
+        elif col_idx == 17:
             v = r.get("dff3", None)
             if v is not None and str(v).strip() not in ("", "-", "--", "None", "nan"):
                 f_v = _safe_float(v, 0.0)
                 return (0, -f_v if is_descending else f_v)
             return (1, 0.0)
 
-        # 17. 大盘偏离 (rs_val / topR)
-        elif col_idx == 17:
+        # 18. 大盘偏离 (rs_val / topR)
+        elif col_idx == 18:
             v = r.get("rs_val", r.get("topR", None))
             if v is not None and str(v).strip() not in ("", "-", "--", "None", "nan"):
                 f_v = _safe_float(v, 0.0)
                 return (0, -f_v if is_descending else f_v)
             return (1, 0.0)
 
-        # 18. 市场共振
-        elif col_idx == 18:
+        # 19. 市场共振
+        elif col_idx == 19:
             res = str(r.get("resonance", "")).strip()
             if res and res not in ("--", "-", "None"):
                 res_map = {"大盘共振": 3, "逆市抗跌": 2, "同步整理": 1, "同步走弱": 0}
@@ -1571,8 +1581,8 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
                     return (0, res_w, SortKeyStr(res, False))
             return (1, 0, SortKeyStr("", is_descending))
 
-        # 19. ch_bc2
-        elif col_idx == 19:
+        # 20. ch_bc2
+        elif col_idx == 20:
             v = r.get("ch_bc2", None)
             if v is not None and str(v).strip() not in ("", "-", "--", "None", "nan"):
                 f_v = _safe_float(v, 0.0)
@@ -1581,7 +1591,7 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
 
         # 扩展列或末尾所属板块
         else:
-            extra_idx = col_idx - 20
+            extra_idx = col_idx - 21
             if hasattr(self, "extra_cols") and 0 <= extra_idx < len(self.extra_cols):
                 ec_name = self.extra_cols[extra_idx]
                 extras = r.get("extra_cols", {})
@@ -1673,11 +1683,107 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         data_copy.sort(key=compound_sort_key)
         return data_copy
 
+    def _compute_since_pct_for_records(self, records: List[Dict[str, Any]]):
+        """
+        当选择历史回溯且不是最近交易日时，计算各标的从历史价格距今的最新涨跌幅并注入 record['since_pct']。
+        若非历史回溯或为最近交易日，清理 since_pct 为 None。
+        """
+        active_date = self._get_active_history_date_if_not_latest()
+        if not active_date or not records:
+            for r in records:
+                r["since_pct"] = None
+            return
+
+        # 准备提取最新现价
+        df = self.current_df
+        df_indexed = None
+        if df is not None and not df.empty:
+            if 'code' in df.columns and df.index.name != 'code':
+                try:
+                    df_indexed = df.set_index('code')
+                except Exception:
+                    df_indexed = df
+            else:
+                df_indexed = df
+
+        now_t = time.time()
+        missing_codes = []
+
+        # 1. 优先从 df / 本地价格缓存中获取最新价格
+        for r in records:
+            code = str(r.get("code", "")).zfill(6)
+            hist_p = _safe_float(r.get("price", 0.0))
+            if hist_p <= 0.0:
+                r["since_pct"] = None
+                continue
+
+            now_p = 0.0
+            # 尝试从 df 获取
+            if df_indexed is not None and code in df_indexed.index:
+                try:
+                    row = df_indexed.loc[code]
+                    if isinstance(row, pd.DataFrame):
+                        row = row.iloc[0]
+                    now_p = _safe_float(row.get("trade", row.get("close", row.get("price", 0.0))))
+                except Exception:
+                    now_p = 0.0
+
+            # 尝试从内存 TTL 缓存获取
+            if now_p <= 0.0 and hasattr(self, "_latest_price_cache"):
+                cached = self._latest_price_cache.get(code)
+                if cached:
+                    c_p, c_ts = cached
+                    if now_t - c_ts < 120.0 and c_p > 0.0:
+                        now_p = c_p
+
+            if now_p > 0.0:
+                since_pct = ((now_p - hist_p) / hist_p) * 100.0
+                r["since_pct"] = since_pct
+                if hasattr(self, "_latest_price_cache"):
+                    self._latest_price_cache[code] = (now_p, now_t)
+            else:
+                missing_codes.append(code)
+                r["since_pct"] = None
+
+        # 2. 对缺失的标的，通过 TDXRealtimeFetcher 批量拉取
+        if missing_codes:
+            try:
+                from ats.tdx_realtime_fetcher import TDXRealtimeFetcher
+                fetcher = TDXRealtimeFetcher.get_instance()
+                quotes = fetcher.get_security_quotes_safe(missing_codes)
+                price_map = {}
+                for q in quotes:
+                    c_q = str(q.get("code", "")).zfill(6)
+                    p_q = _safe_float(q.get("price", q.get("last_close", 0.0)))
+                    if p_q > 0.0:
+                        price_map[c_q] = p_q
+                        if hasattr(self, "_latest_price_cache"):
+                            self._latest_price_cache[c_q] = (p_q, now_t)
+
+                if price_map:
+                    for r in records:
+                        code = str(r.get("code", "")).zfill(6)
+                        if code in price_map:
+                            hist_p = _safe_float(r.get("price", 0.0))
+                            now_p = price_map[code]
+                            if hist_p > 0.0 and now_p > 0.0:
+                                r["since_pct"] = ((now_p - hist_p) / hist_p) * 100.0
+            except Exception as e:
+                logger.debug(f"批量获取最新价计算距今涨幅异常: {e}")
+
     def _apply_filter(self):
         """【三维精准分拣】联合时间片生命周期、梯队分类与搜索文本进行实时原位过滤"""
         if not hasattr(self, "current_records") or not self.current_records:
             self._populate_table_rows([])
+            is_hist_diff = bool(self._get_active_history_date_if_not_latest())
+            if getattr(self, "is_narrow_mode", False):
+                self.table.setColumnHidden(13, True)
+            else:
+                self.table.setColumnHidden(13, not is_hist_diff)
             return
+
+        # 🎯 若处于历史回溯且非最近交易日，动态计算距今累计涨跌幅
+        self._compute_since_pct_for_records(self.current_records)
 
         raw_slice = self.combo_time_slice.currentText() if hasattr(self, "combo_time_slice") else "⚡ 自动实盘跟随"
         if getattr(self, "current_mode", "TODAY") == "HISTORY" and "自动实盘跟随" in raw_slice:
@@ -1848,6 +1954,13 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
 
         if hasattr(self, 'btn_kpi_total'):
             self.btn_kpi_total.setText(f"📋 总计: {tot_cnt} 家")
+
+        # 🚀 历史回溯模式且非最近交易日时动态展示“距今%”列 (索引13)
+        is_hist_diff = bool(self._get_active_history_date_if_not_latest())
+        if getattr(self, "is_narrow_mode", False):
+            self.table.setColumnHidden(13, True)
+        else:
+            self.table.setColumnHidden(13, not is_hist_diff)
 
         # 🔔 自动触发时间片重点标的与大盘退潮雪崩语音弹窗通知 (精选 3-5 个)
         self._check_and_notify_slice_highlights(filtered, time_slice)
@@ -2568,49 +2681,65 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
                                      align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
                                      is_pinned=is_fav, pin_rank=pin_rank); col += 1
 
-                # 13. DFF
+                # 13. 距今% (计算从历史交易日价格距今的最新累计涨跌幅)
+                since_pct = r.get("since_pct", None)
+                if since_pct is not None and not (isinstance(since_pct, float) and math.isnan(since_pct)):
+                    since_fg = QColor(COLOR_UP) if since_pct > 0 else (QColor(COLOR_DOWN) if since_pct < 0 else QColor("#e2e2e5"))
+                    since_txt = f"{since_pct:+.2f}%"
+                    since_data = since_pct
+                else:
+                    since_fg = QColor("#8e8e93")
+                    since_txt = "--"
+                    since_data = None
+                hist_d_str = r.get("date", getattr(self, "selected_history_date", ""))
+                self._set_table_item(row_idx, col, since_txt, user_data=since_data, fg=since_fg, bg=fav_bg,
+                                     align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, is_bold=True,
+                                     tooltip=f"自历史回溯日({hist_d_str})收盘至当前的累计涨跌幅: {since_txt}",
+                                     is_pinned=is_fav, pin_rank=pin_rank); col += 1
+
+                # 14. DFF
                 dff_fg = QColor(COLOR_UP) if dff > 0 else (QColor(COLOR_DOWN) if dff < 0 else QColor("#8e8e93"))
                 self._set_table_item(row_idx, col, f"{dff:+.2f}", user_data=dff, fg=dff_fg, bg=fav_bg,
                                      align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
                                      is_pinned=is_fav, pin_rank=pin_rank); col += 1
 
-                # 14. Rank (全市场 1~9999 排名精准展示，0 或缺失显示 --)
+                # 15. Rank (全市场 1~9999 排名精准展示，0 或缺失显示 --)
                 rank_txt = str(rank_val) if rank_val > 0 else "--"
                 rank_data = rank_val if rank_val > 0 else None
                 self._set_table_item(row_idx, col, rank_txt, user_data=rank_data, fg=QColor("#e2e2e5"), bg=fav_bg,
                                      align=Qt.AlignmentFlag.AlignCenter,
                                      is_pinned=is_fav, pin_rank=pin_rank); col += 1
 
-                # 15. DFF2
+                # 16. DFF2
                 self._set_table_item(row_idx, col, f"{dff2:+.1f}", user_data=dff2, fg=QColor("#e2e2e5"), bg=fav_bg,
                                      align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
                                      is_pinned=is_fav, pin_rank=pin_rank); col += 1
 
-                # 16. DFF3
+                # 17. DFF3
                 self._set_table_item(row_idx, col, f"{dff3:+.1f}", user_data=dff3, fg=QColor("#e2e2e5"), bg=fav_bg,
                                      align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
                                      is_pinned=is_fav, pin_rank=pin_rank); col += 1
 
-                # 17. 大盘偏离
+                # 18. 大盘偏离
                 rs_fg = QColor(COLOR_UP) if rs_val > 0 else QColor(COLOR_DOWN)
                 self._set_table_item(row_idx, col, f"{rs_val:+.2f}%", user_data=rs_val, fg=rs_fg, bg=fav_bg,
                                      align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
                                      is_pinned=is_fav, pin_rank=pin_rank); col += 1
 
-                # 18. 共振状态
+                # 19. 共振状态
                 res_fg = QColor("#ff55ff") if resonance == "逆市抗跌" else (QColor("#00ff88") if resonance == "大盘共振" else QColor("#e2e2e5"))
                 self._set_table_item(row_idx, col, resonance, fg=res_fg, bg=fav_bg,
                                      align=Qt.AlignmentFlag.AlignCenter,
                                      is_pinned=is_fav, pin_rank=pin_rank); col += 1
 
-                # 19. 动态 ats_col 自定义列
+                # 20. 动态 ats_col 自定义列
                 for ec in self.extra_cols:
                     raw_val = extra_dict.get(ec, extra_dict.get(ec.lower(), extra_dict.get(ec.upper(), r.get(ec, r.get(ec.lower(), "--")))))
                     self._set_table_item(row_idx, col, str(raw_val), fg=QColor("#e2e2e5"), bg=fav_bg,
                                          align=Qt.AlignmentFlag.AlignCenter,
                                          is_pinned=is_fav, pin_rank=pin_rank); col += 1
 
-                # 20. 所属板块
+                # 21. 所属板块
                 self._set_table_item(row_idx, col, category if category else "--", fg=QColor("#e2e2e5"), bg=fav_bg,
                                      align=Qt.AlignmentFlag.AlignCenter,
                                      is_pinned=is_fav, pin_rank=pin_rank); col += 1
@@ -2664,7 +2793,7 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         try:
             curr_mode = getattr(self, "current_mode", "TODAY")
             hist_idx = self.combo_history_date.currentIndex() if hasattr(self, 'combo_history_date') else 0
-            if curr_mode != "HISTORY" and hist_idx <= 0:
+            if curr_mode != "HISTORY" or hist_idx <= 0:
                 return None
             
             # 获取选中的历史回溯日期文本
@@ -2931,9 +3060,12 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
 
             self.lbl_status.setText(f"📱 已切换为【极窄紧凑模式】 (核心11列, 适合侧边挂靠)")
         else:
-            # 1. 恢复展示全部列
+            # 1. 恢复展示全部列 (若非历史非最近日，距今%保持隐藏)
+            is_hist_diff = bool(self._get_active_history_date_if_not_latest())
             for col in range(col_count):
                 self.table.setColumnHidden(col, False)
+            if not is_hist_diff:
+                self.table.setColumnHidden(13, True)
 
             # 2. 恢复宽屏尺寸
             if self.width() < 700:
