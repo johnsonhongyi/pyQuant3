@@ -1,3 +1,17 @@
+## 2026-09-05 14:45
+- [x] **全链路落地【天梯历史回溯非最近交易日动态添加距今涨跌幅列】(SSOT) (`stock_standalone/ats/ui/daily_limit_up_dialog.py`, `stock_standalone/tests/test_daily_limit_up_dialog.py`)**：
+    - [x] **表头结构与位置精准对齐 (`get_limit_up_table_headers`)**：
+        1. **精确布局于“成交额(亿)”与“DFF”之间**：在标准表头列表中新增 `"距今%"` 动态列（索引 13），严格符合用户截图指示位置，后续列索引（DFF、Rank、DFF2、DFF3、大盘偏离、共振状态、扩展列）整体顺延 1 位；
+        2. **极窄模式与多级排序键无缝兼容**：更新 `_narrow_cols_to_keep` 保留核心列索引；在 `_make_column_subkey` 中支持对 `since_pct` 进行浮点方向感知多级排序；
+    - [x] **动态展示/隐藏机制 (`_apply_filter`, `_setup_ui`, `toggle_narrow_mode`)**：
+        1. **默认与实时模式静默隐藏**：默认今日或回溯至最近交易日时，列 13 自动隐藏（`setColumnHidden(13, True)`），不打扰常规实时监控；
+        2. **历史非最近日即时激活展开**：仅当用户选择历史回溯且选中的是过去的非最近交易日（`_get_active_history_date_if_not_latest()` 返回有效历史日期）时，列 13 动态展现（`setColumnHidden(13, False)`）；切回常规模式后自动恢复隐藏；
+    - [x] **距今涨跌幅实时轻量算力管道 (`_compute_since_pct_for_records`)**：
+        1. **优先内存 0 延迟获取**：优先从 ATS 主进程注入的 `self.current_df` 提取该标的当前最新成交价 $P_{now}$；
+        2. **二级本地 TTL 缓存与 TDXRealtimeFetcher 批量拉取兜底**：若缺失则通过批量行情接口 `get_security_quotes_safe` 安全拉取并注入 120s 内存缓存；
+        3. **涨跌幅精准计算与红涨绿跌呈现**：计算公式 $\text{since\_pct} = \frac{P_{now} - P_{hist}}{P_{hist}} \times 100\%$；在表格中以 `+XX.XX%` 红色（涨）/ 绿色（跌）加粗呈现；
+    - [x] **自动化测试 100% 全部 PASSED**：`tests/test_daily_limit_up_dialog.py` 扩充 `test_history_non_latest_since_pct_column_and_calculation` 专项测试，12 项测试全绿通过。
+
 ## 2026-09-05 14:25
 - [x] **全链路落地【天梯顶部总计信息直观卡片展示 + 历史回溯非最近交易日联动可视化透传实际交易日】(SSOT) (`stock_standalone/ats/ui/daily_limit_up_dialog.py`, `stock_standalone/ats/ui/main_window.py`, `stock_standalone/ats/limit_up_engine.py`, `stock_standalone/tests/test_daily_limit_up_dialog.py`)**：
     - [x] **天梯顶部标题栏直观呈现总计信息与多维统计 (`daily_limit_up_dialog.py`)**：
