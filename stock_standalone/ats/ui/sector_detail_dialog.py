@@ -58,14 +58,22 @@ def _safe_int(val: Any, default: int = 0) -> int:
 
 
 def _get_type_sort_weight(type_str: str) -> float:
-    """计算板块成分股类型角色的排序权重 (👑 龙头 > 🚀 先锋 > 确核 > 晋级 > 跟随)"""
+    """计算板块成分股类型角色的排序权重 (👑 龙头 > 🚀 先锋 > 🔥 涨停 > 🛡️ 中军 > 💎 首板 > ⚡ 活跃 > 确核 > 晋级 > 跟随)"""
     s = str(type_str or "")
     if "👑" in s or "龙头" in s:
         return 100.0
     if "🚀" in s or "先锋" in s:
+        return 92.0
+    if "🔥" in s or "涨停" in s:
         return 90.0
-    if "确核" in s:
+    if "🛡️" in s or "容量" in s or "中军" in s:
+        return 88.0
+    if "💎" in s:
+        return 85.0
+    if "⚡" in s or "活跃" in s:
         return 80.0
+    if "确核" in s:
+        return 75.0
     if "晋级" in s:
         return 70.0
     if "跟随" in s:
@@ -193,6 +201,13 @@ class ATSSectorDetailDialog(QDialog):
         self._update_filter_button_ui()
         self.btn_toggle_filter.clicked.connect(self.toggle_filter_state)
         top_row.addWidget(self.btn_toggle_filter)
+
+        # ⭐ 仅看强势股 (标记强势股快速筛选)
+        self.btn_strong_only = QPushButton()
+        self.strong_only_enabled = False
+        self._update_strong_button_ui()
+        self.btn_strong_only.clicked.connect(self._toggle_strong_only)
+        top_row.addWidget(self.btn_strong_only)
 
         top_row.addStretch()
 
@@ -420,6 +435,52 @@ class ATSSectorDetailDialog(QDialog):
             """)
             self.btn_toggle_filter.setToolTip("当前状态：【已关闭】展示板块全部成分股 (点击开启根据策略公式过滤)")
 
+    def _toggle_strong_only(self):
+        """切换仅看强势股状态"""
+        self.strong_only_enabled = not getattr(self, 'strong_only_enabled', False)
+        self._update_strong_button_ui()
+        self._apply_filter_and_render()
+
+    def _update_strong_button_ui(self):
+        """更新仅看强势股按钮高亮与文案"""
+        if not hasattr(self, 'btn_strong_only') or self.btn_strong_only is None:
+            return
+        if getattr(self, 'strong_only_enabled', False):
+            self.btn_strong_only.setText("⭐ 仅看强势股 (开)")
+            self.btn_strong_only.setStyleSheet("""
+                QPushButton {
+                    background-color: #ffd700;
+                    color: #000000;
+                    font-weight: bold;
+                    border: 1.5px solid #ffd700;
+                    border-radius: 4px;
+                    padding: 2px 8px;
+                    font-size: 8.5pt;
+                }
+                QPushButton:hover {
+                    background-color: #ffe57f;
+                }
+            """)
+            self.btn_strong_only.setToolTip("当前状态：【已开启】仅展示板块内强势股与龙头先锋 (点击展示全部)")
+        else:
+            self.btn_strong_only.setText("⭐ 仅看强势股 (关)")
+            self.btn_strong_only.setStyleSheet("""
+                QPushButton {
+                    background-color: #222228;
+                    color: #ffd700;
+                    font-weight: bold;
+                    border: 1px solid #554400;
+                    border-radius: 4px;
+                    padding: 2px 8px;
+                    font-size: 8.5pt;
+                }
+                QPushButton:hover {
+                    background-color: #33333d;
+                    border-color: #ffd700;
+                }
+            """)
+            self.btn_strong_only.setToolTip("当前状态：【已关闭】展示全部成分股 (点击仅筛选强势股与龙头)")
+
     def _get_active_query_expr(self) -> str:
         """获取当前活跃的策略公式"""
         parent_mw = self._get_parent_mw()
@@ -494,23 +555,49 @@ class ATSSectorDetailDialog(QDialog):
         if not hasattr(self, '_all_raw_rows') or not self._all_raw_rows:
             return
 
-        rows = self._all_raw_rows
+        rows = list(self._all_raw_rows)
         score = getattr(self, '_last_score', 0.0)
         leader_str = getattr(self, '_last_leader_str', '--')
         query_expr = self._get_active_query_expr()
 
+        # 1. 策略公式过滤
         if getattr(self, 'filter_enabled', False) and query_expr:
-            filtered_rows = self._filter_rows_by_query(rows, query_expr)
-            q_disp = query_expr if len(query_expr) <= 25 else query_expr[:22] + "..."
-            self.stats_lbl.setText(
-                f"成员数: {len(filtered_rows)}/{len(rows)} (已过滤) | 领涨标的: {leader_str} | 过滤: {q_disp}"
-            )
-            self.setWindowTitle(f"🔥 {self.sector_name} 板块明细 (过滤中 {len(filtered_rows)}/{len(rows)}只)")
-            self._render_rows(filtered_rows)
-        else:
-            self.stats_lbl.setText(f"成员数: {len(rows)} | 领涨标的: {leader_str}")
-            self.setWindowTitle(f"🔥 {self.sector_name} 板块明细 (实时高频 {len(rows)}只)")
-            self._render_rows(rows)
+            rows = self._filter_rows_by_query(rows, query_expr)
+
+        # 2. 强势股专用过滤 (仅保留真龙、龙头、先锋、涨停、或涨幅>=3%的标的)
+        is_strong_only = getattr(self, 'strong_only_enabled', False)
+        if is_strong_only:
+            rows = [
+                r for r in rows
+                if r.get('is_strong', False)
+                or _get_type_sort_weight(r.get('type', '')) >= 75.0
+                or _safe_float(r.get('pct', 0.0)) >= 3.0
+                or any(k in str(r.get('type', '')) for k in ('👑', '🚀', '🔥', '🛡️', '💎', '⚡', '先锋', '龙头'))
+            ]
+
+        # 统计原始总数与强势股总数
+        total_raw = len(self._all_raw_rows)
+        strong_raw_cnt = sum(
+            1 for r in self._all_raw_rows
+            if r.get('is_strong', False)
+            or _get_type_sort_weight(r.get('type', '')) >= 75.0
+            or _safe_float(r.get('pct', 0.0)) >= 3.0
+            or any(k in str(r.get('type', '')) for k in ('👑', '🚀', '🔥', '🛡️', '💎', '⚡', '先锋', '龙头'))
+        )
+
+        filter_tags = []
+        if getattr(self, 'filter_enabled', False) and query_expr:
+            q_disp = query_expr if len(query_expr) <= 20 else query_expr[:18] + "..."
+            filter_tags.append(f"公式: {q_disp}")
+        if is_strong_only:
+            filter_tags.append("⭐仅看强势股")
+
+        tag_str = f" [{' | '.join(filter_tags)}]" if filter_tags else ""
+        self.stats_lbl.setText(
+            f"成员数: {len(rows)}/{total_raw} (强势股: {strong_raw_cnt}只) | 领涨标的: {leader_str}{tag_str}"
+        )
+        self.setWindowTitle(f"🔥 {self.sector_name} 板块明细 (强势股: {strong_raw_cnt}只 / 呈现 {len(rows)}只)")
+        self._render_rows(rows)
 
     def on_global_filter_changed(self, query_expr: str = ""):
         """主窗口过滤公式变更/清空时自动触发"""
@@ -648,27 +735,48 @@ class ATSSectorDetailDialog(QDialog):
                 name_str = str(r.get('name', code_str))
                 name_item = QTableWidgetItem(name_str)
                 name_item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-                self.table.setItem(row_idx, 1, name_item)
                 
                 # 2. Score
                 score_val = _safe_float(r.get('score', 0.0))
                 score_item = NumericTableWidgetItem(f"{score_val:.1f}", raw_val=score_val)
                 score_item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
                 self.table.setItem(row_idx, 2, score_item)
-                
+
+                # 强势股显著高亮标记
+                is_strong = r.get('is_strong', False) or any(k in str(r.get('type', '')) for k in ('👑', '🚀', '🔥', '🛡️', '💎', '⚡'))
+                if is_strong:
+                    f_name = name_item.font()
+                    f_name.setBold(True)
+                    name_item.setFont(f_name)
+                    name_item.setToolTip(f"⭐ 板块强势标的 | 角色: {r.get('type', '')} | 得分: {score_val:.1f}")
+                self.table.setItem(row_idx, 1, name_item)
+
                 # 3. Type (绑定角色权重支持高精度升降序与梯队聚合)
                 type_str = str(r.get('type', '跟随'))
                 type_w = _get_type_sort_weight(type_str)
                 type_item = NumericTableWidgetItem(type_str, raw_val=type_w)
                 type_item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+                f_type = type_item.font()
+                f_type.setBold(True)
+                type_item.setFont(f_type)
                 if '👑' in type_str:
                     type_item.setForeground(QColor("#ffcc00")) # gold
                 elif '🚀' in type_str:
-                    type_item.setForeground(QColor("#ff5555")) # red
+                    type_item.setForeground(QColor("#ff5252")) # vibrant red
+                elif '🔥' in type_str:
+                    type_item.setForeground(QColor("#ff4081")) # magenta/pink
+                elif '🛡️' in type_str:
+                    type_item.setForeground(QColor("#ffd700")) # gold/orange
+                elif '💎' in type_str:
+                    type_item.setForeground(QColor("#00e5ff")) # cyan
+                elif '⚡' in type_str:
+                    type_item.setForeground(QColor("#38bdf8")) # sky blue
                 elif '确核' in type_str:
                     type_item.setForeground(QColor("#00e5ff")) # cyan
                 elif '晋级' in type_str:
                     type_item.setForeground(QColor("#ffd700"))
+                else:
+                    type_item.setForeground(QColor("#a0a0a5"))
                 self.table.setItem(row_idx, 3, type_item)
                 
                 # 4. Pct

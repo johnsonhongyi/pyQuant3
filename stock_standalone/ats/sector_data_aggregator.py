@@ -777,29 +777,63 @@ class SectorDataAggregator:
             final_leader_code = dynamic_leader_code
             final_leader_name = dynamic_leader_name
 
+        # ── 3. 强势股与真龙角色智能画像与标记 ──
+        try:
+            from ats.capital_dragon_engine import CapitalDragonEngine
+            c_eng = CapitalDragonEngine.get_instance()
+        except Exception:
+            c_eng = None
+
         for r in rows:
             c = r['code']
+            pct_val = _safe_float(r.get('pct', 0.0))
             if c == final_leader_code:
                 r['type'] = '👑 领涨龙头'
                 r['score'] = max(98.0, race_scores.get(c, _safe_float(r.get('score', 75.0))))
+                r['is_strong'] = True
                 r['pattern'] = race_hints.get(c, '板块领涨核心龙头')
                 if not final_leader_name or final_leader_name == '个股' or final_leader_name == c:
                     final_leader_name = r['name']
+            elif c_eng and c_eng.is_true_dragon(c):
+                d_info = c_eng.get_dragon_info(c) or {}
+                r['type'] = d_info.get('role', '🚀 主线板块先锋')
+                r['score'] = max(95.0, race_scores.get(c, _safe_float(r.get('score', 75.0))))
+                r['is_strong'] = True
+                r['pattern'] = d_info.get('reason', race_hints.get(c, '真龙中枢核心标的'))
             elif c in race_roles:
                 r['type'] = race_roles[c]
                 if c in race_scores:
                     r['score'] = race_scores[c]
                 if c in race_hints and race_hints[c]:
                     r['pattern'] = race_hints[c]
+                r['is_strong'] = any(k in str(r['type']) for k in ('👑', '🚀', '🔥', '先锋', '龙头', '确核'))
+            elif pct_val >= 9.5:
+                r['type'] = '🔥 强势涨停'
+                r['score'] = max(96.0, _safe_float(r.get('score', 0)))
+                r['is_strong'] = True
+                r['pattern'] = '涨停封板强势先锋'
+            elif pct_val >= 5.0:
+                r['type'] = '🚀 强势先锋'
+                r['score'] = max(88.0, _safe_float(r.get('score', 0)))
+                r['is_strong'] = True
+                r['pattern'] = '主线高位领涨先锋'
+            elif pct_val >= 3.0 or _safe_float(r.get('dff', 0.0)) >= 3.0:
+                r['type'] = '⚡ 活跃跟涨'
+                r['score'] = max(80.0, _safe_float(r.get('score', 0)))
+                r['is_strong'] = True
+            else:
+                r['is_strong'] = False
 
-        # ── 3. 排序：龙头置顶，其余按得分/涨幅降序排列 ──
+        # ── 4. 排序：龙头置顶，强势股优先，其余按得分/涨幅降序排列 ──
         def _get_sort_tuple(item):
             is_lead = 1 if item.get('code') == final_leader_code else 0
             is_champ = 1 if '👑' in str(item.get('type', '')) else 0
             is_pioneer = 1 if '🚀' in str(item.get('type', '')) else 0
+            is_limit = 1 if '🔥' in str(item.get('type', '')) else 0
+            is_strong = 1 if item.get('is_strong', False) else 0
             sc = _safe_float(item.get('score', 0.0))
             pct = _safe_float(item.get('pct', 0.0))
-            return (is_lead, is_champ, is_pioneer, sc, pct)
+            return (is_lead, is_champ, is_pioneer, is_limit, is_strong, sc, pct)
 
         rows.sort(key=_get_sort_tuple, reverse=True)
 
@@ -830,6 +864,7 @@ class SectorDataAggregator:
             'status': '✅ 实时在线更新 (TDX API直连 + 快照对齐)',
             'count': len(rows),
             'up_count': up_count,
+            'strong_count': sum(1 for r in rows if r.get('is_strong', False)),
             'avg_pct': round(avg_pct, 2)
         }
 
