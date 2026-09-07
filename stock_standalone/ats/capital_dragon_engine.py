@@ -100,6 +100,7 @@ class CapitalDragonEngine:
         self._cache_lock = threading.RLock()
         self._dragon_codes_set: Set[str] = set()
         self._trap_codes_set: Set[str] = set()
+        # 实时指数行情缓存 (完全由 TDX API 真实拉取填充，严禁伪造硬编码数据)
         self._index_data_cache: Dict[str, Dict[str, float]] = {}
         self._index_cache_ts: float = 0.0
 
@@ -119,11 +120,11 @@ class CapitalDragonEngine:
 
     def _fetch_tdx_index_data(self, index_codes: List[str]) -> Dict[str, Dict[str, float]]:
         """
-        使用通达信原生 TDX API 接口 (TDXRealtimeFetcher) 获取大盘综合指数真实成交额与盘口数据 (带 5 秒轻量防抖缓存)
+        使用通达信原生 TDX API 接口 (TDXRealtimeFetcher) 获取大盘综合指数真实成交额与盘口数据 (带 3 秒轻量防抖缓存)
         针对 399xxx (深市指数), 999xxx (通达信沪指), 899xxx (北证50), 000001 (上证指数), 159915 等标的
         """
         now = time.time()
-        if self._index_data_cache and (now - self._index_cache_ts < 5.0):
+        if self._index_data_cache and (now - self._index_cache_ts < 3.0):
             return dict(self._index_data_cache)
 
         results = dict(self._index_data_cache)
@@ -131,9 +132,24 @@ class CapitalDragonEngine:
             from ats.tdx_realtime_fetcher import TDXRealtimeFetcher
             fetcher = TDXRealtimeFetcher.get_instance()
 
+            # 核心基准指数强制优先保证 (通达信市场划分: 1=上交所, 0=深交所, 2=北交所)
+            core_reqs = [
+                (1, '999999'), (1, '000001'), (0, '399001'),
+                (0, '399006'), (2, '899050'), (0, '399005'), (0, '159915')
+            ]
+            seen_pairs = set()
             req_pairs = []
+            for mkt, cd in core_reqs:
+                if (mkt, cd) not in seen_pairs:
+                    seen_pairs.add((mkt, cd))
+                    req_pairs.append((mkt, cd))
+
             for c in index_codes:
+                if c is None:
+                    continue
                 c_clean = _clean_code(c)
+                if not c_clean or len(c_clean) != 6 or not c_clean.isdigit():
+                    continue
                 if c_clean.startswith(('89', '920', '83', '87', '88', '43', '82')):
                     mkt = 2  # 北交所 (如 899050 北证50)
                 elif c_clean.startswith(('60', '68', '99', '11', '51', '58', '90')):
@@ -142,31 +158,70 @@ class CapitalDragonEngine:
                     mkt = 1  # 000001 上证指数在通达信行情API中属于上海市场
                 else:
                     mkt = 0  # 深交所 (如 399001 深成指, 399006 创业板指, 399005 中小100, 159915 创业板ETF)
-                req_pairs.append((mkt, c_clean))
+                if (mkt, c_clean) not in seen_pairs:
+                    seen_pairs.add((mkt, c_clean))
+                    req_pairs.append((mkt, c_clean))
 
             if req_pairs:
                 with fetcher._conn_lock:
                     if not fetcher._is_connected or not fetcher.api:
                         fetcher.connect()
                     if fetcher._is_connected and fetcher.api:
-                        quotes = fetcher.api.get_security_quotes(req_pairs)
-                        if quotes:
-                            for q in quotes:
+                        chunk_size = 10
+                        all_quotes = []
+                        for idx_chk in range(0, len(req_pairs), chunk_size):
+                            chk = req_pairs[idx_chk:idx_chk + chunk_size]
+                            try:
+                                quotes = fetcher.api.get_security_quotes(chk)
+                                if quotes:
+                                    all_quotes.extend(quotes)
+                                else:
+                                    # 单只回退探查，杜绝单只不可识别代码击穿整个批次
+                                    for single_p in chk:
+                                        try:
+                                            sq = fetcher.api.get_security_quotes([single_p])
+                                            if sq:
+                                                all_quotes.extend(sq)
+                                        except Exception:
+                                            pass
+                            except Exception:
+                                for single_p in chk:
+                                    try:
+                                        sq = fetcher.api.get_security_quotes([single_p])
+                                        if sq:
+                                            all_quotes.extend(sq)
+                                    except Exception:
+                                        pass
+
+                        if all_quotes:
+                            for q in all_quotes:
                                 q_code = str(q.get('code', '')).strip().zfill(6)
                                 raw_amt = float(q.get('amount', 0.0) or 0.0)
                                 amt_yi = raw_amt / 1e8 if raw_amt > 1e7 else raw_amt
                                 p = float(q.get('price', 0.0) or 0.0)
                                 if amt_yi > 0:
-                                    results[q_code] = {
-                                        'amount_yi': amt_yi,
+                                    val_dict = {
+                                        'amount_yi': round(amt_yi, 2),
                                         'price': p,
                                         'last_close': float(q.get('last_close', 0.0) or 0.0),
                                         'vol': float(q.get('vol', 0.0) or 0.0)
                                     }
+                                    results[q_code] = val_dict
+                                    results[f"sh{q_code}"] = val_dict
+                                    results[f"sz{q_code}"] = val_dict
+                                    results[f"bj{q_code}"] = val_dict
+
+                                    # 999999 与 000001 (上证指数) 跨代码全映射支持
+                                    if q_code in ('999999', '000001'):
+                                        results['999999'] = val_dict
+                                        results['000001'] = val_dict
+                                        results['sh999999'] = val_dict
+                                        results['sh000001'] = val_dict
+
             self._index_data_cache = results
             self._index_cache_ts = now
         except Exception as e_tdx:
-            logger.debug(f"[CapitalDragonEngine] TDX API fetch error: {e_tdx}")
+            logger.warning(f"[CapitalDragonEngine] TDX API fetch error: {e_tdx}")
 
         return results
 
@@ -355,25 +410,34 @@ class CapitalDragonEngine:
         valid_stock_mask = (prices > 0.0) & (~pd.Series(is_idx_mask, index=df.index))
         valid_all_mask = (prices > 0.0)
 
-        # 针对 399xxx, 999xxx, 899xxx, 000001, 159915 等大盘指数从 TDX 接口获取真实成交额
-        idx_indices = [idx for i, idx in enumerate(df.index) if is_idx_mask[i]]
-        if idx_indices:
-            idx_codes_to_fetch = [codes_series.loc[idx] for idx in idx_indices]
+        # 针对 399xxx, 999xxx, 899xxx, 000001, 159915 等大盘指数从 TDX 接口获取真实成交额 (TDX API SSOT)
+        idx_row_indices = [i for i, is_idx in enumerate(is_idx_mask) if is_idx]
+        if idx_row_indices:
+            idx_codes_to_fetch = [str(codes_series.iloc[i]).strip() for i in idx_row_indices]
             tdx_idx_data = self._fetch_tdx_index_data(idx_codes_to_fetch)
-            for idx in idx_indices:
-                c_str = codes_series.loc[idx]
-                if c_str in tdx_idx_data:
-                    info = tdx_idx_data[c_str]
+            for i in idx_row_indices:
+                c_clean = str(codes_series.iloc[i]).strip()
+                raw_c = str(df.index[i]).strip()
+                info = (tdx_idx_data.get(c_clean) or 
+                        tdx_idx_data.get(raw_c) or 
+                        tdx_idx_data.get(f"sh{c_clean}") or 
+                        tdx_idx_data.get(f"sz{c_clean}") or 
+                        tdx_idx_data.get(f"bj{c_clean}"))
+                if not info and c_clean in ('999999', '000001'):
+                    info = tdx_idx_data.get('999999') or tdx_idx_data.get('000001')
+
+                if info:
                     real_amt = info.get('amount_yi', 0.0)
                     if real_amt > 0:
-                        amts_yi.loc[idx] = real_amt
-                    real_vr = info.get('vol_ratio', 1.0)
-                    if real_vr > 0.05 and idx in vol_ratio_s.index:
-                        vol_ratio_s.loc[idx] = real_vr
+                        amts_yi.iloc[i] = real_amt
+                    real_vr = info.get('vol_ratio')
+                    if real_vr is not None and real_vr > 0.05 and i < len(vol_ratio_s):
+                        vol_ratio_s.iloc[i] = real_vr
+                    real_p = info.get('price', 0.0)
+                    if real_p > 0 and prices.iloc[i] <= 0:
+                        prices.iloc[i] = real_p
                 else:
-                    # 兜底防御：若 TDX 暂未返回且 amts_yi 异常爆表 (>20000亿，说明是点数*股数异常乘积)
-                    if amts_yi.loc[idx] > 20000.0 and prices.loc[idx] > 0:
-                        amts_yi.loc[idx] = round(amts_yi.loc[idx] / prices.loc[idx] * 20.0, 1)
+                    logger.debug(f"[CapitalDragonEngine] TDX API did not return quote for index: {c_clean} ({raw_c})")
         
         # 预先向量化计算个股加速结构
         accel_cache = {}
@@ -539,7 +603,7 @@ class CapitalDragonEngine:
 
         # 计算全市场成交额排名前 35 (容量中军候选池，用于极限性能模式精准遴选，统一基于准确的 amts_yi 排序)
         top_amt_s = amts_yi[valid_all_mask].sort_values(ascending=False)
-        top_35_amt_codes = set(codes_series.loc[top_amt_s.index[:35]])
+        top_35_amt_codes = set(str(c).strip().zfill(6) for c in codes_series.loc[top_amt_s.index[:35]].values.ravel())
 
         for idx in df[valid_all_mask].index:
             code_str = codes_series.loc[idx]

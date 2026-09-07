@@ -194,21 +194,59 @@ class TestCapitalDragonEngine(unittest.TestCase):
         self.assertGreaterEqual(float(vr_series.loc["601988"]), 0.5)
 
     def test_tdx_index_amount_correction_and_api(self):
-        """验证通达信 TDX API 接口对 399xxx, 999xxx, 899xxx 等指数成交额真实修正"""
+        """验证通达信 TDX API 接口对 399xxx, 999xxx, 899xxx 等指数成交额真实修正与降序排列"""
         engine = CapitalDragonEngine.get_instance()
         # 测试直接调用 _fetch_tdx_index_data
-        idx_data = engine._fetch_tdx_index_data(["399006", "399001", "899050"])
-        if idx_data:
-            # 创业板指 399006 真实成交额约为 5000+ 亿 (严禁出现 563725.1亿 的点数乘股数异常值)
-            if "399006" in idx_data:
-                amt_399006 = idx_data["399006"]["amount_yi"]
-                self.assertGreater(amt_399006, 1000.0)
-                self.assertLess(amt_399006, 20000.0)
-            # 深证成指 399001 真实成交额约为 10000+ 亿 (严禁出现 8094494.2亿 异常值)
-            if "399001" in idx_data:
-                amt_399001 = idx_data["399001"]["amount_yi"]
-                self.assertGreater(amt_399001, 2000.0)
-                self.assertLess(amt_399001, 30000.0)
+        idx_data = engine._fetch_tdx_index_data(["399006", "399001", "899050", "999999", "399005", "159915"])
+        self.assertIn("999999", idx_data)
+        self.assertIn("399001", idx_data)
+        self.assertIn("399006", idx_data)
+        self.assertIn("899050", idx_data)
+        self.assertIn("399005", idx_data)
+
+        # 1. 创业板指 399006: 真实约为 5000+ 亿 (杜绝 563725.1 亿或 3317.3 亿异常)
+        self.assertGreater(idx_data["399006"]["amount_yi"], 3500.0)
+        self.assertLess(idx_data["399006"]["amount_yi"], 10000.0)
+
+        # 2. 上证指数 999999: 真实约为 8979 亿 (杜绝 18773.7 亿点数乘股数异常)
+        self.assertGreater(idx_data["999999"]["amount_yi"], 6000.0)
+        self.assertLess(idx_data["999999"]["amount_yi"], 15000.0)
+
+        # 3. 北证50 899050: 真实约为 184 亿 (杜绝 9673.3 亿异常)
+        self.assertGreater(idx_data["899050"]["amount_yi"], 50.0)
+        self.assertLess(idx_data["899050"]["amount_yi"], 500.0)
+
+        # 4. 中小100 399005: 真实约为 1338 亿 (杜绝 370530.1 亿或 873.8 亿异常)
+        self.assertGreater(idx_data["399005"]["amount_yi"], 800.0)
+        self.assertLess(idx_data["399005"]["amount_yi"], 3000.0)
+
+        # 5. 深成指 399001: 真实约为 10481 亿 (杜绝 8094494.2 亿或 11752.5 亿异常)
+        self.assertGreater(idx_data["399001"]["amount_yi"], 8000.0)
+        self.assertLess(idx_data["399001"]["amount_yi"], 20000.0)
+
+        # 验证全量分析下真实注入与排序
+        df_mock = pd.DataFrame({
+            'name': ['上证指数', '深成指', '北证50', '创业板指', '中小100', '中际旭创'],
+            'close': [3932.7, 13774.92, 1096.85, 3398.68, 8480.97, 898.46],
+            'amount': [18773.7e8, 11752.5e8, 9673.3e8, 3317.3e8, 873.8e8, 387.5e8],
+            'percent': [0.07, 1.91, 0.85, 3.41, 1.69, 10.38],
+            'ma20d': [3800.0, 13000.0, 1000.0, 3200.0, 8000.0, 800.0],
+            'dff2': [2.0] * 6,
+            'dff3': [2.0] * 6,
+        }, index=['sh999999', 'sz399001', 'bj899050', 'sz399006', 'sz399005', 'sz300308'])
+
+        rep = engine.analyze_capital_dragon_universe(df_mock, force=True)
+        recs = rep.get("dragon_records_all", [])
+        amts = [r["amount_yi"] for r in recs]
+        # 验证成交额必须降序排列且无异常爆表
+        self.assertEqual(amts, sorted(amts, reverse=True))
+        for r in recs:
+            if r["code"] == "999999":
+                self.assertAlmostEqual(r["amount_yi"], 8979.04, delta=50.0)
+            elif r["code"] == "399006":
+                self.assertAlmostEqual(r["amount_yi"], 5120.15, delta=50.0)
+            elif r["code"] == "899050":
+                self.assertAlmostEqual(r["amount_yi"], 184.17, delta=10.0)
 
 
 if __name__ == "__main__":
