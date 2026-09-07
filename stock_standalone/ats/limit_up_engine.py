@@ -157,11 +157,16 @@ _PERSIST_FILE_LOCK = threading.Lock()
 
 def _safe_atomic_write_json_gz(filepath: str, data: Any):
     """【Windows 友好型高压 Gzip 原子 JSON 写盘】带重试与清理，极大压缩磁盘并杜绝文件占用与 tmp 残留"""
+    import copy
     gz_target = filepath if filepath.endswith(".gz") else f"{filepath}.gz"
     tmp_path = f"{gz_target}.tmp_{int(time.time()*1000)}_{os.getpid()}"
     try:
+        try:
+            safe_data = copy.deepcopy(data)
+        except Exception:
+            safe_data = data
         with gzip.open(tmp_path, "wt", encoding="utf-8", compresslevel=6) as f:
-            json.dump(data, f, ensure_ascii=False, separators=(',', ':'))
+            json.dump(safe_data, f, ensure_ascii=False, separators=(',', ':'))
         
         # 多次重试替换，应对 Windows 文件短暂占用
         for retry in range(5):
@@ -384,8 +389,10 @@ class LimitUpEngine:
             self._history_daily_records[date_str] = records
 
             # 异步后台线程执行文件 I/O，杜绝阻塞主线程 UI
-            history_copy = {d: list(recs) for d, recs in self._history_daily_records.items()}
-            single_date_records = list(records)
+            # 必须在锁内深拷贝独立数据快照，彻底杜绝主线程与后台持久化线程并发修改
+            import copy
+            history_copy = {d: [dict(r) for r in recs] for d, recs in list(self._history_daily_records.items())}
+            single_date_records = [dict(r) for r in records]
             is_post_trading = is_eod or (time.strftime("%H:%M") >= "15:00")
 
             def _persist_worker():

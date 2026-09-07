@@ -415,8 +415,15 @@ def test_rank_beyond_999_display_in_all_windows(qapp):
     dlg_zt = DailyLimitUpDialog()
     dlg_zt._populate_table_rows(records)
 
-    # 检查 Rank 列 (col 14)
-    assert dlg_zt.table.item(0, 14).text().strip() in ("1250", "3800"), "天梯看板 Rank 列必须正确显示 1250/3800 而非 --"
+    # 检查 Rank 列
+    rank_col = -1
+    for c in range(dlg_zt.table.columnCount()):
+        h_item = dlg_zt.table.horizontalHeaderItem(c)
+        if h_item and h_item.text().strip() in ("Rank", "排名"):
+            rank_col = c
+            break
+    assert rank_col != -1, "必须找到 Rank/排名 列"
+    assert dlg_zt.table.item(0, rank_col).text().strip() in ("1250", "3800"), "天梯看板 Rank 列必须正确显示 1250/3800 而非 --"
 
 
 

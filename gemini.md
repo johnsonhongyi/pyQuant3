@@ -1,3 +1,23 @@
+## 2026-09-07 18:15
+- [x] **全链路落地【资金主线板块点击直开成分股详情 + 领涨先锋极速联动 + 强势股智能标记与一键筛选】(SSOT) (`stock_standalone/ats/ui/capital_dragon_panel.py`, `stock_standalone/ats/ui/sector_detail_dialog.py`, `stock_standalone/ats/sector_data_aggregator.py`, `stock_standalone/ats/limit_up_engine.py`, `stock_standalone/tests/test_capital_dragon_panel_integration.py`, `stock_standalone/tests/test_sector_aggregator_suite.py`)**：
+    - [x] **重塑核心资金主线卡片交互 (SectorCardWidget & ClickableLabel)**：
+        1. **板块卡片点击直开明细**：顶部 3 大主线卡片整体升级为 `SectorCardWidget`，支持单击卡片任意区域、板块标题或 `[🔍 查看明细]` 按钮直接打开对应板块的成分股高频详情弹窗 (`ATSSectorDetailDialog`)；
+        2. **动态提取全市场实时成分股透传**：`open_sector_detail` 从当前全市场快照 `_last_df_all` 中即时匹配并提取属于该板块的全量成分股代码集合透传给详情弹窗，确保盘中所有成分股 100% 完整覆盖；
+        3. **领涨先锋单击联动与双击直开 SBC**：将领涨先锋文本升级为独立响应式控件，单击触发外部行情（通达信/可视化终端）与主界面右侧分时/日K图无缝联动；双击直开 SBC 自适应通道分时图；手型光标与高亮下划线提示显著增强；
+    - [x] **表格主线列交互与快捷右键菜单**：
+        1. **主线列双击直开板块明细**：在真龙矩阵表格第 3 列【所属主线】加入专属 ToolTip 与双击响应，双击直接调起该主线板块明细；
+        2. **多维右键快捷菜单**：支持在表格任意行右键弹出菜单，一键直达“查看所属板块明细”、“在列表中仅筛选该板块”、“打开 SBC 通道”、“打开涨停天梯”与“打开板块雷达”；
+    - [x] **板块详情强势股智能标记与【⭐ 仅看强势股】快速筛选**：
+        1. **多维度强势股画像与权重判定 (`SectorDataAggregator.fetch_sector_detail`)**：结合真龙中枢 (`CapitalDragonEngine`)、涨停封板、高位大阳与量比动态判定，为板块成分股精确标定 `👑 领涨龙头`、`🚀 主线先锋`、`🔥 强势涨停`、`🛡️ 趋势容量中军`、`💎 弱转强首板`、`⚡ 活跃跟涨`；
+        2. **强势股显著视觉高亮 (`ATSSectorDetailDialog._render_rows`)**：强势股代码/名称采用加粗高对比度渲染并附带星标提示，角色列赋予专属高精胶囊色彩；
+        3. **【⭐ 仅看强势股】一键过滤开关**：板块详情弹窗顶部新增高亮快捷按钮，一键即时过滤并仅展示板块内的龙头、先锋、涨停与强势领涨股；
+    - [x] **修复并发归档 `dictionary changed size during iteration` 异常 (`ats/limit_up_engine.py`)**：
+        1. 在 `save_daily_records` 的 `_cache_lock` 临界区内对历史与分日记录执行彻底的深拷贝隔离快照，并在 `_safe_atomic_write_json_gz` 中加入深拷贝二次防御，彻底根除主线程高频更新与后台线程持久化写盘之间的数据竞态；
+    - [x] **全链路自动化回归测试 100% 全部 PASSED**：
+        - `test_capital_dragon_panel_integration.py` 扩充板块点击打开明细、先锋单击联动/双击打开 SBC、强势股标记与筛选测试（4项全绿）；
+        - `test_sector_aggregator_suite.py` 动态适配天梯表头 Rank 索引并全通（8项全绿）；
+        - 全套 45 项跨模块核心回归测试（含真龙引擎、面板集成、信号账本、天梯、SBC 等）100% PASSED！
+
 ## 2026-09-07 17:36
 - [x] **全链路重构落地【ATS 资金趋势与主线龙头捕捉中枢 (Capital-Trend & True Dragon Hub)】(SSOT) (`stock_standalone/ats/capital_dragon_engine.py`, `stock_standalone/ats/signal_ledger.py`, `stock_standalone/ats/volume_profiler.py`, `stock_standalone/ats/ui/dragon_monitor.py`, `stock_standalone/ats/ui/capital_dragon_panel.py`, `stock_standalone/ats/ui/main_window.py`, `stock_standalone/tests/test_capital_dragon_engine.py`, `stock_standalone/tests/test_capital_dragon_panel_integration.py`)**：
     - [x] **深度排查并定位“ATS 凌乱割裂、无法跟随资金捕捉龙头、个股异动随机性泛滥、缺乏资金趋势”四大系统性病灶**：
