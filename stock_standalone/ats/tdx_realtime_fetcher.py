@@ -782,23 +782,38 @@ class TDXRealtimeFetcher:
                             self._last_batch_warn_time[batch_key] = now_t
                             self.add_log(f"⚠️ [TDX] 批次 [{codes_str[:30]}...] 未返回盘口数据，尝试单只补拉并自动冷却", level="WARN")
 
-                        for mkt, c_clean in req_params:
-                            try:
-                                single_q = self.api.get_security_quotes([(mkt, c_clean)])
-                                if single_q and len(single_q) > 0:
-                                    sq = single_q[0]
-                                    sp = safe_float(sq.get("price", 0.0))
-                                    slast = safe_float(sq.get("last_close", 0.0))
-                                    if sp > 0 or slast > 0:
-                                        all_fetched_quotes.extend(single_q)
-                                        self._off_hours_cached_quotes[c_clean] = sq
-                                        self._no_quote_counts[c_clean] = 0
-                                        self._unlisted_or_dormant_codes.discard(c_clean)
-                                        continue
-                            except Exception:
-                                pass
-                            
-                            # 单只拉取依然无行情/未上市：立即进入冷却，绝不重复轰炸
+                        # 🚀 [PERF-FIX] 杜绝循环 50~80 次串行单只请求导致的网络 I/O 阻塞雪崩与主站流控！
+                        # 采用二分拆包探查 (最多 2 次批量请求即可隔离出正常标的)：
+                        if len(req_params) > 1:
+                            mid = len(req_params) // 2
+                            sub_batches = [req_params[:mid], req_params[mid:]]
+                            for sub_b in sub_batches:
+                                if not sub_b:
+                                    continue
+                                try:
+                                    sub_quotes = self.api.get_security_quotes(sub_b)
+                                    if sub_quotes and len(sub_quotes) > 0:
+                                        all_fetched_quotes.extend(sub_quotes)
+                                        for sq in sub_quotes:
+                                            sq_code = str(sq.get("code", "")).strip().zfill(6)
+                                            if sq_code:
+                                                self._off_hours_cached_quotes[sq_code] = sq
+                                                self._no_quote_counts[sq_code] = 0
+                                                self._unlisted_or_dormant_codes.discard(sq_code)
+                                    else:
+                                        # 该子批次包含异常代码，整批记一次未返回并自动冷却
+                                        for _, c_clean in sub_b:
+                                            self._no_quote_counts[c_clean] = self._no_quote_counts.get(c_clean, 0) + 1
+                                            self._no_quote_last_attempt[c_clean] = now_t
+                                            if self._no_quote_counts[c_clean] >= 2:
+                                                self._unlisted_or_dormant_codes.add(c_clean)
+                                except Exception:
+                                    for _, c_clean in sub_b:
+                                        self._no_quote_counts[c_clean] = self._no_quote_counts.get(c_clean, 0) + 1
+                                        self._no_quote_last_attempt[c_clean] = now_t
+                        else:
+                            # 仅 1 只标的：直接标记冷却，绝不重复重试
+                            _, c_clean = req_params[0]
                             self._no_quote_counts[c_clean] = self._no_quote_counts.get(c_clean, 0) + 1
                             self._no_quote_last_attempt[c_clean] = now_t
                             if self._no_quote_counts[c_clean] >= 2:
