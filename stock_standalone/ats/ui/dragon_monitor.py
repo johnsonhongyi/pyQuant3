@@ -547,36 +547,47 @@ class DragonLeaderMonitorDialog(QDialog, WindowMixin):
                 dff2_dict[c_str] = safe_float(r.get(dff2_col, 0.0))
                 dff3_dict[c_str] = safe_float(r.get(dff3_col, 0.0))
         
-        # 1. 每日自动替换更新潜力股 (2D/3D加速多头完美结构挖掘)
+        # 1. 每日自动替换更新潜力股 (基于 CapitalDragonEngine 资金趋势与主线真龙 SSOT)
+        cde_report = {}
+        cde_dragons = []
+        try:
+            from ats.capital_dragon_engine import CapitalDragonEngine
+            cde = CapitalDragonEngine.get_instance()
+            cde_report = cde.analyze_capital_dragon_universe(current_df, sh_pct)
+            cde_dragons = cde_report.get("dragon_records", [])
+        except Exception as e_cde:
+            logger.debug(f"[DragonMonitor] CapitalDragonEngine error: {e_cde}")
+
         new_auto_list = []
-        
-        for code, row in current_df.iterrows():
-            if isinstance(row, pd.DataFrame):
-                row = row.iloc[0]
-                
-            code_str = str(code).zfill(6)
-            if code_str in self.manual_codes:
-                continue # 已在手动监控中
-            if code_str in self.blacklist_codes:
-                continue # 已在黑名单中，不予挖掘
-                
-            dff = safe_float(dff_dict.get(code_str, 0.0))
-            dff2 = safe_float(dff2_dict.get(code_str, 0.0))
-            dff3 = safe_float(dff3_dict.get(code_str, 0.0))
-            pct = safe_float(row.get('percent', row.get('pct', row.get('changepercent', 0.0))))
-            rs_val = pct - sh_pct
-            
-            # Super Strong 2D/3D 加速多头条件过滤
-            is_accel = dff > 0.0 and dff2 > 0.0 and dff3 > 0.0
-            is_strong_rs = rs_val >= 2.0 and pct > 1.5
-            
-            # 复合特征判决
-            if is_accel and is_strong_rs:
-                new_auto_list.append((code_str, rs_val))
-                
-        # 排序并保留偏离度最高的前 15 只超级潜力股
-        new_auto_list.sort(key=lambda x: x[1], reverse=True)
-        self.auto_codes = [c[0] for c in new_auto_list[:15]]
+        cde_info_map = {}
+        for r in cde_dragons:
+            c_str = str(r["code"]).zfill(6)
+            if c_str in self.manual_codes or c_str in self.blacklist_codes:
+                continue
+            cde_info_map[c_str] = r
+            new_auto_list.append((c_str, r.get("priority", 50), r.get("amount_yi", 0.0), r.get("pct", 0.0)))
+
+        # 降级兜底：如果 cde_dragons 为空，使用原有 DFF 规则兜底
+        if not new_auto_list:
+            for code, row in current_df.iterrows():
+                if isinstance(row, pd.DataFrame):
+                    row = row.iloc[0]
+                code_str = str(code).zfill(6)
+                if code_str in self.manual_codes or code_str in self.blacklist_codes:
+                    continue
+                dff = safe_float(dff_dict.get(code_str, 0.0))
+                dff2 = safe_float(dff2_dict.get(code_str, 0.0))
+                dff3 = safe_float(dff3_dict.get(code_str, 0.0))
+                pct = safe_float(row.get('percent', row.get('pct', row.get('changepercent', 0.0))))
+                rs_val = pct - sh_pct
+                if dff > 0.0 and dff2 > 0.0 and dff3 > 0.0 and rs_val >= 2.0 and pct > 1.5:
+                    new_auto_list.append((code_str, 50, 0.0, rs_val))
+            new_auto_list.sort(key=lambda x: x[3], reverse=True)
+            self.auto_codes = [c[0] for c in new_auto_list[:20]]
+        else:
+            # 排序：优先按真龙优先级，再按成交额与涨幅
+            new_auto_list.sort(key=lambda x: (x[1], x[2], x[3]), reverse=True)
+            self.auto_codes = [c[0] for c in new_auto_list[:20]]
         
         # 2. 合并手动与自动代码列表
         all_codes = list(self.manual_codes) + [c for c in self.auto_codes if c not in self.manual_codes]
@@ -612,7 +623,15 @@ class DragonLeaderMonitorDialog(QDialog, WindowMixin):
                     name = row_name
                 price = safe_float(row.get('close', row.get('price', 0.0)))
                 pct = safe_float(row.get('percent', row.get('pct', row.get('changepercent', 0.0))))
-                state = str(row.get('state', '持股中' if pct > 0 else '回踩中'))
+                
+                # 🐉 优先使用真龙角色与真实成交额呈现状态
+                if code in cde_info_map:
+                    c_info = cde_info_map[code]
+                    state = f"{c_info.get('role', '真龙')} ({c_info.get('amount_yi', 0.0):.1f}亿)"
+                    source = f"{c_info.get('action_type', '🔥真龙')}"
+                else:
+                    state = str(row.get('state', '持股中' if pct > 0 else '回踩中'))
+                    
                 dff = safe_float(dff_dict.get(code, 0.0))
                 dff2 = safe_float(dff2_dict.get(code, 0.0))
                 dff3 = safe_float(dff3_dict.get(code, 0.0))

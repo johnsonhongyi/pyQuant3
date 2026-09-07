@@ -382,6 +382,32 @@ class TestSignalLedger(unittest.TestCase):
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0]["hit"], 2)
 
+    def test_dragon_surge_channel_admittance(self):
+        """测试真龙主升通道破格准入：偏离度远超 4.0% 依然准入并直接晋级 WATCH"""
+        ledger = SignalLedger()
+
+        # 普通冷门股票，偏离度 8.5% (> 4.0%)，必须被过滤
+        entry_normal = ledger.record_signal(
+            code="600001", name="冷门杂毛", price=10.0, pct=8.5, deviation=8.5
+        )
+        self.assertIsNone(entry_normal)
+
+        # 真龙股票 (空间高度龙)，偏离度 18.5% (远超 4.0%)，必须破格准入且为 WATCH
+        entry_dragon = ledger.record_signal(
+            code="600108", name="亚盛集团", price=4.5, pct=10.0, deviation=18.5,
+            dragon_role="👑 空间高度龙", dragon_amount_yi=8.5, dragon_buy_type="巨量换手板"
+        )
+        self.assertIsNotNone(entry_dragon)
+        self.assertEqual(entry_dragon.tier, "WATCH")
+        self.assertEqual(entry_dragon.dragon_role, "👑 空间高度龙")
+        self.assertGreaterEqual(entry_dragon.priority_score, 88.0)
+        self.assertEqual(entry_dragon.dragon_amount_yi, 8.5)
+
+        # 序列化为字典时字段完整
+        d = entry_dragon.to_dict()
+        self.assertEqual(d["dragon_role"], "👑 空间高度龙")
+        self.assertEqual(d["dragon_amount_yi"], 8.5)
+
 
 if __name__ == '__main__':
     unittest.main()

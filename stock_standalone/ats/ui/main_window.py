@@ -42,6 +42,7 @@ from ats.ui.dragon_monitor import DragonLeaderMonitorDialog
 from ats.ui.hot_sector_leaderboard import HotSectorLeaderboardDialog
 from ats.ui.daily_limit_up_dialog import DailyLimitUpDialog
 from ats.ui.new_stock_panel import NewStockPanel
+from ats.ui.capital_dragon_panel import CapitalDragonPanel
 from ats.universe_manager import UniverseManager
 from ats.swing_tracker import SwingTracker
 from ats.signal_ledger import SignalLedger
@@ -104,6 +105,17 @@ class LedgerUpdateWorker(QThread):
             # ── 阶段 A: 更新信号账本 (原 _update_signal_ledger 逻辑) ──────────────
             self._volume_profiler.update_market_context(df_all)
 
+            # 🐉 运行资金趋势与主线龙头核心引擎 (CapitalDragonEngine SSOT)
+            dragon_report = {}
+            dragon_codes = set()
+            try:
+                from ats.capital_dragon_engine import CapitalDragonEngine
+                cde = CapitalDragonEngine.get_instance()
+                dragon_report = cde.analyze_capital_dragon_universe(df_all)
+                dragon_codes = cde.get_dragon_codes()
+            except Exception as e_cde:
+                pass
+
             # 定位 MA20 列
             ma20_col = next((c for c in ('ma20d', 'ma20', 'MA20', 'ma20_series') if c in df_all.columns), None)
             close_col = 'close' if 'close' in df_all.columns else 'price'
@@ -114,10 +126,16 @@ class LedgerUpdateWorker(QThread):
                 dev_series = (close_s - safe_ma20) / safe_ma20 * 100.0
 
                 tracked_codes = set(self._signal_ledger.entries.keys())
+                fav_codes = set(self._fav_stocks) if self._fav_stocks else set()
+
+                # 🚀 双轨准入通道 (SSOT): 原有 MA20 回调通道 + 真龙主升破格准入通道
+                codes_clean_s = pd.Series([str(c).strip().zfill(6) for c in df_all.index], index=df_all.index)
                 valid_mask = (
                     ((dev_series >= self._signal_ledger.DEVIATION_MIN) &
                      (dev_series <= self._signal_ledger.DEVIATION_MAX)) |
-                    df_all.index.isin(tracked_codes)
+                    df_all.index.isin(tracked_codes) |
+                    df_all.index.isin(fav_codes) |
+                    codes_clean_s.isin(dragon_codes)
                 )
                 target_df = df_all[valid_mask]
 
@@ -131,7 +149,7 @@ class LedgerUpdateWorker(QThread):
                     try:
                         price = float(row.get(close_col, 0.0))
                         ma20_val = float(row.get(ma20_col, 0.0))
-                        if price <= 0 or ma20_val <= 0:
+                        if price <= 0:
                             continue
                         self._volume_profiler.update_profile(code_str, row)
                         valid_target_codes.append((code_str, row, price, ma20_val))
@@ -145,11 +163,29 @@ class LedgerUpdateWorker(QThread):
                     try:
                         name = str(row.get('name', ''))
                         pct = float(row.get('percent', 0.0))
-                        deviation = (price - ma20_val) / ma20_val * 100.0
+                        deviation = (price - ma20_val) / ma20_val * 100.0 if ma20_val > 0 else 0.0
                         vol_score = self._volume_profiler.get_volume_score(code_str)
+
+                        # 提取真龙画像与买点建议
+                        d_info = None
+                        c_clean = str(code_str).strip().zfill(6)
+                        if c_clean in dragon_codes:
+                            try:
+                                from ats.capital_dragon_engine import CapitalDragonEngine
+                                d_info = CapitalDragonEngine.get_instance().get_dragon_info(c_clean)
+                            except Exception:
+                                pass
+
+                        d_role = d_info.get("role", "") if d_info else ""
+                        d_buy = d_info.get("action_type", "") if d_info else ""
+                        d_reason = d_info.get("reason", "") if d_info else ""
+                        d_amt = d_info.get("amount_yi", 0.0) if d_info else 0.0
+
                         self._signal_ledger.record_signal(
                             code=code_str, name=name, price=price, pct=pct,
                             deviation=deviation, row=row, volume_score=vol_score,
+                            dragon_role=d_role, dragon_buy_type=d_buy,
+                            dragon_reason=d_reason, dragon_amount_yi=d_amt
                         )
                     except Exception:
                         continue
@@ -2252,29 +2288,36 @@ class ATSMainWindow(QMainWindow):
         
         self.center_splitter = QSplitter(Qt.Orientation.Vertical)
         
-        # 1. Top Tabs in center panel (顶部主看板 Tab: 重点关注 + 回调跟踪器)
+        # 1. Top Tabs in center panel (顶部主看板 Tab: 资金主线龙头 + 重点关注 + 回调跟踪器)
         self.top_tabs = QTabWidget()
         self.top_tabs.setStyleSheet("""
             QTabBar::tab { font-size: 10.5pt; font-weight: bold; padding: 6px 14px; min-width: 140px; }
             QTabBar::tab:selected { background-color: #1a2a1a; color: #ffd700; border-bottom: 3px solid #ffd700; }
         """)
         
+        # 🐉 Tab 0 (C 位): 资金主线与龙头中枢
+        self.capital_dragon_panel = CapitalDragonPanel(main_window=self)
+        self.capital_dragon_panel.stock_selected.connect(self.link_stock)
+        self.capital_dragon_panel.stock_double_clicked.connect(self.on_stock_clicked)
+        self.top_tabs.addTab(self.capital_dragon_panel, "🐉 资金主线与龙头中枢")
+        mark_checkpoint("03.3.2 CapitalDragonPanel (Tab 0 C-Bit)")
+
         self.favorite_panel = FavoritePanel()
         self.favorite_panel.stock_selected.connect(self.on_stock_clicked)
         self.top_tabs.addTab(self.favorite_panel, "⭐ 重点关注 (基础重点)")
-        mark_checkpoint("03.3.2 FavoritePanel (Tab 1)")
+        mark_checkpoint("03.3.3 FavoritePanel (Tab 1)")
 
         self.swing_table = SwingStateTable()
         self.swing_table.dragon_monitor_requested.connect(self.open_dragon_monitor)
         self.top_tabs.addTab(self.swing_table, "📉 大级别 MA20d 回调跟踪器")
-        mark_checkpoint("03.3.3 SwingStateTable (Tab 2)")
+        mark_checkpoint("03.3.4 SwingStateTable (Tab 2)")
 
         self.new_stock_panel = NewStockPanel(main_window=self)
         self.new_stock_panel.stock_selected.connect(self.link_stock)
         self.new_stock_panel.stock_double_clicked.connect(self.on_stock_clicked)
         self.top_tabs.addTab(self.new_stock_panel, "🆕 新股次新股 (IPO & 阶梯)")
         self.top_tabs.currentChanged.connect(self._on_top_tab_changed)
-        mark_checkpoint("03.3.4 NewStockPanel (Tab 3)")
+        mark_checkpoint("03.3.5 NewStockPanel (Tab 3)")
         
         # 顶部主看板 Tab 右上角添加【🔥 涨停天梯】、【🎯 60f通道测算】与【🪟 SBC 重排】组合入口
         top_corner_container = QWidget()
@@ -4393,9 +4436,12 @@ class ATSMainWindow(QMainWindow):
         # ⚡ Tier 1: 立即渲染当前激活的 Tab
         active_tab_idx = self.top_tabs.currentIndex() if hasattr(self, 'top_tabs') else 0
         if active_tab_idx == 0:
+            if hasattr(self, 'capital_dragon_panel'):
+                self.capital_dragon_panel.update_payload(self.current_df, sh_pct)
+        elif active_tab_idx == 1:
             if hasattr(self, 'favorite_panel') and fav_rows:
                 self.favorite_panel.update_favorite_rows(fav_rows)
-        else:
+        elif active_tab_idx == 2:
             if swing_rows:
                 self.swing_table.update_data_list(swing_rows)
 
@@ -4420,14 +4466,15 @@ class ATSMainWindow(QMainWindow):
         if getattr(self, '_is_closing', False):
             return
         active_tab_idx = self.top_tabs.currentIndex() if hasattr(self, 'top_tabs') else 0
-        if active_tab_idx == 0:
-            # 补齐更新未在激活态的 MA20d 跟踪器
-            if self._pending_swing_rows:
-                self.swing_table.update_data_list(self._pending_swing_rows)
-        else:
-            # 补齐更新未在激活态的重点关注
-            if hasattr(self, 'favorite_panel') and self._pending_fav_rows:
-                self.favorite_panel.update_favorite_rows(self._pending_fav_rows)
+        sh_pct = getattr(self, '_pending_sh_pct', 0.0)
+
+        # 补齐未在激活态的主面板
+        if active_tab_idx != 0 and hasattr(self, 'capital_dragon_panel'):
+            self.capital_dragon_panel.update_payload(self.current_df, sh_pct)
+        if active_tab_idx != 1 and hasattr(self, 'favorite_panel') and self._pending_fav_rows:
+            self.favorite_panel.update_favorite_rows(self._pending_fav_rows)
+        if active_tab_idx != 2 and hasattr(self, 'swing_table') and self._pending_swing_rows:
+            self.swing_table.update_data_list(self._pending_swing_rows)
 
     def _async_refresh_tier3(self):
         """Tier 3 (30ms 延迟): 异步加载右侧板块热力图与独立的辅助监控弹窗 (带防抖保护，杜绝主线程卡顿)"""
@@ -4478,6 +4525,17 @@ class ATSMainWindow(QMainWindow):
         # 1. 更新大盘量能环境上下文
         self.volume_profiler.update_market_context(df_all)
 
+        # 🐉 运行资金趋势与主线龙头核心引擎 (CapitalDragonEngine SSOT)
+        dragon_report = {}
+        dragon_codes = set()
+        try:
+            from ats.capital_dragon_engine import CapitalDragonEngine
+            cde = CapitalDragonEngine.get_instance()
+            dragon_report = cde.analyze_capital_dragon_universe(df_all)
+            dragon_codes = cde.get_dragon_codes()
+        except Exception:
+            pass
+
         # 2. 定位 MA20 列
         ma20_col = None
         for col_name in ['ma20d', 'ma20', 'MA20', 'ma20_series']:
@@ -4497,12 +4555,17 @@ class ATSMainWindow(QMainWindow):
         safe_ma20 = pd.to_numeric(df_all[ma20_col], errors='coerce').replace(0, float('nan'))
         dev_series = (close_s - safe_ma20) / safe_ma20 * 100.0
 
-        # 4. 筛选偏离度在目标范围内 OR 已在 ledger 中的标的
+        # 4. 筛选偏离度在目标范围内 OR 已在 ledger 中的标的 OR 属于重点关注/真龙主升标的
         tracked_codes = set(self.signal_ledger.entries.keys())
+        fav_codes = self.signal_ledger.get_favorite_stocks_set()
+        codes_clean_s = pd.Series([str(c).strip().zfill(6) for c in df_all.index], index=df_all.index)
+
         valid_mask = (
             ((dev_series >= self.signal_ledger.DEVIATION_MIN) &
              (dev_series <= self.signal_ledger.DEVIATION_MAX)) |
-            df_all.index.isin(tracked_codes)
+            df_all.index.isin(tracked_codes) |
+            df_all.index.isin(fav_codes) |
+            codes_clean_s.isin(dragon_codes)
         )
         target_df = df_all[valid_mask]
 
@@ -4523,7 +4586,7 @@ class ATSMainWindow(QMainWindow):
                 except (TypeError, ValueError):
                     pass
                     
-                if price <= 0 or ma20_val <= 0:
+                if price <= 0:
                     continue
                     
                 self.volume_profiler.update_profile(code_str, row)
@@ -4540,10 +4603,25 @@ class ATSMainWindow(QMainWindow):
             try:
                 name = str(row.get('name', ''))
                 pct = float(row.get('percent', 0.0))
-                deviation = (price - ma20_val) / ma20_val * 100.0
+                deviation = (price - ma20_val) / ma20_val * 100.0 if ma20_val > 0 else 0.0
                 
                 # 获取经过板块共振和多日连阳加成修正后的最终 vol_score
                 vol_score = self.volume_profiler.get_volume_score(code_str)
+
+                # 提取真龙画像与买点建议
+                d_info = None
+                c_clean = str(code_str).strip().zfill(6)
+                if c_clean in dragon_codes:
+                    try:
+                        from ats.capital_dragon_engine import CapitalDragonEngine
+                        d_info = CapitalDragonEngine.get_instance().get_dragon_info(c_clean)
+                    except Exception:
+                        pass
+
+                d_role = d_info.get("role", "") if d_info else ""
+                d_buy = d_info.get("action_type", "") if d_info else ""
+                d_reason = d_info.get("reason", "") if d_info else ""
+                d_amt = d_info.get("amount_yi", 0.0) if d_info else 0.0
 
                 # 写入信号账本（新信号锁定首次发现时间，已有信号仅更新最新数据）
                 self.signal_ledger.record_signal(
@@ -4554,6 +4632,10 @@ class ATSMainWindow(QMainWindow):
                     deviation=deviation,
                     row=row,
                     volume_score=vol_score,
+                    dragon_role=d_role,
+                    dragon_buy_type=d_buy,
+                    dragon_reason=d_reason,
+                    dragon_amount_yi=d_amt
                 )
             except Exception:
                 continue
@@ -4848,19 +4930,38 @@ class ATSMainWindow(QMainWindow):
         self._recorded_alpha_stocks[code] = max(pct_val, last_pct if last_pct is not None else -999.0)
 
         # 仅对暴拉偏离>=5.0%且偏离>=4.0%的排头黑马才触发系统 Toast 弹窗与语音 (杜绝刷屏)
+        # 🛡️ 铁壁防骚扰守卫：必须具备主流资金或真龙属性支持，彻底拦截无成交额的孤狼杂毛脉冲
         if pct_val >= 5.0 and (pct_val - sh_pct) >= 4.0 and last_pct is None:
+            is_valid_for_alert = True
             try:
-                from PyQt6.QtWidgets import QApplication
-                if QApplication.instance():
-                    from ats.alert_notifier import AlertNotifier
-                    AlertNotifier().notify_special_signal(
-                        code, name,
-                        reason=f"{resonance} | 暴拉偏离大盘: {pct_val - sh_pct:+.2f}%",
-                        score=90.0,
-                        parent=self
-                    )
+                from ats.capital_dragon_engine import CapitalDragonEngine
+                cde = CapitalDragonEngine.get_instance()
+                if cde.is_isolated_trap(code):
+                    is_valid_for_alert = False  # 孤狼或破位诱多，坚决不报警
+                elif not cde.is_true_dragon(code):
+                    # 非真龙标的，检查是否重点关注或成交额>=1.5亿
+                    favs = self.signal_ledger.get_favorite_stocks_set()
+                    if str(code).strip() not in favs:
+                        row = self.current_df.loc[code] if (self.current_df is not None and code in self.current_df.index) else None
+                        amt = float(row.get('amount', 0.0)) if row is not None else 0.0
+                        if amt < 1.5e8 and amt < 15000: # 不足 1.5 亿
+                            is_valid_for_alert = False
             except Exception:
-                pass
+                is_valid_for_alert = True
+
+            if is_valid_for_alert:
+                try:
+                    from PyQt6.QtWidgets import QApplication
+                    if QApplication.instance():
+                        from ats.alert_notifier import AlertNotifier
+                        AlertNotifier().notify_special_signal(
+                            code, name,
+                            reason=f"{resonance} | 暴拉偏离大盘: {pct_val - sh_pct:+.2f}%",
+                            score=90.0,
+                            parent=self
+                        )
+                except Exception:
+                    pass
 
         # 纯内存添加记录，绝不进行主线程阻塞式 IO 读写
         time_str = time.strftime("%H:%M:%S")

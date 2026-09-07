@@ -1,0 +1,449 @@
+# -*- coding: utf-8 -*-
+"""
+ats/ui/capital_dragon_panel.py — ATS 资金主线与真龙中枢核心 C 位看板 (SSOT)
+=============================================================================
+设计定位：
+1. 【今日核心资金主线看板 (Top Sector Cards)】：
+   - 顶部全景呈现全市场 Top 3 主力增量资金主线 (总成交额、涨停家数、上涨比率、领跑先锋)；
+2. 【全景真龙角色矩阵 (True Dragon Matrix Table)】：
+   - 汇聚【👑 空间高度龙】、【🛡️ 趋势容量中军】、【🚀 主线板块先锋】、【💎 强势换手首板】；
+   - 呈现真实成交额(亿)、换手率%、自适应趋势状态与建议买点区间；
+3. 【高响应行情联动与持久化】：
+   - 支持上下方向键、单击、双击秒级联动外部行情与 SBC 分时走势图；
+   - 列宽自动记忆与多列高精数值排序。
+"""
+
+import os
+import time
+import math
+import logging
+from typing import Optional, List, Dict, Any, Tuple
+import pandas as pd
+
+from PyQt6.QtWidgets import (
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTableWidget,
+    QTableWidgetItem, QHeaderView, QAbstractItemView, QPushButton,
+    QLineEdit, QFrame, QGridLayout, QSizePolicy
+)
+from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QPoint
+from PyQt6.QtGui import QColor, QBrush, QFont, QCursor
+
+from tk_gui_modules.qt_table_utils import NumericTableWidgetItem
+from ats.ui.styles import (
+    COLOR_UP, COLOR_DOWN, COLOR_INFO, COLOR_ACCENT, COLOR_WARN,
+    setup_header_persistence, auto_fit_columns_once
+)
+from ats.capital_dragon_engine import CapitalDragonEngine, _safe_float, _clean_code
+
+logger = logging.getLogger("CapitalDragonPanel")
+
+
+class CapitalDragonPanel(QWidget):
+    """
+    资金主线与龙头中枢核心面板
+    """
+    stock_selected = pyqtSignal(str, str)         # 单击/方向键联动 (code, name)
+    stock_double_clicked = pyqtSignal(str, str)  # 双击打开 SBC (code, name)
+
+    def __init__(self, parent=None, main_window=None):
+        super().__init__(parent)
+        self.main_window = main_window
+        self.engine = CapitalDragonEngine.get_instance()
+        self._last_report = {}
+        self._last_sig = None
+        self._is_updating = False
+
+        self._init_ui()
+
+    def _init_ui(self):
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(6, 6, 6, 6)
+        main_layout.setSpacing(6)
+
+        # 1. 顶部 3 大资金主线卡片展示区 (Top Mainstream Sector Cards)
+        self.top_sector_container = QWidget()
+        self.top_sector_layout = QHBoxLayout(self.top_sector_container)
+        self.top_sector_layout.setContentsMargins(0, 0, 0, 0)
+        self.top_sector_layout.setSpacing(8)
+
+        self.sector_card_widgets = []
+        for i in range(3):
+            card = QFrame()
+            card.setFrameShape(QFrame.Shape.StyledPanel)
+            card.setStyleSheet("""
+                QFrame {
+                    background-color: #161b22;
+                    border: 1px solid #30363d;
+                    border-radius: 6px;
+                    padding: 4px 8px;
+                }
+                QFrame:hover {
+                    border: 1px solid #58a6ff;
+                    background-color: #1f242c;
+                }
+            """)
+            card_layout = QVBoxLayout(card)
+            card_layout.setContentsMargins(4, 4, 4, 4)
+            card_layout.setSpacing(2)
+
+            lbl_title = QLabel(f"主线 {i+1}: 正在识别资金聚集...")
+            lbl_title.setStyleSheet("color: #ffd700; font-size: 10pt; font-weight: bold;")
+            lbl_desc = QLabel("成交额: -- 亿 | 涨幅: --% | 涨停: -- 家")
+            lbl_desc.setStyleSheet("color: #8b949e; font-size: 8.5pt;")
+            lbl_leader = QLabel("领涨先锋: --")
+            lbl_leader.setStyleSheet("color: #38bdf8; font-size: 8.5pt; font-weight: bold;")
+
+            card_layout.addWidget(lbl_title)
+            card_layout.addWidget(lbl_desc)
+            card_layout.addWidget(lbl_leader)
+
+            self.top_sector_layout.addWidget(card)
+            self.sector_card_widgets.append({
+                "frame": card,
+                "title": lbl_title,
+                "desc": lbl_desc,
+                "leader": lbl_leader,
+                "sector_name": ""
+            })
+
+        main_layout.addWidget(self.top_sector_container)
+
+        # 2. 中间过滤与控制工具条 (Filter Bar)
+        toolbar_layout = QHBoxLayout()
+        toolbar_layout.setContentsMargins(0, 0, 0, 0)
+        toolbar_layout.setSpacing(6)
+
+        self.lbl_stats = QLabel("🐉 资金主线龙头已就位: 0 只")
+        self.lbl_stats.setStyleSheet("color: #00ff88; font-weight: bold; font-size: 9.5pt;")
+        toolbar_layout.addWidget(self.lbl_stats)
+
+        toolbar_layout.addStretch()
+
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("🔍 搜索代码 / 名称 / 主线 / 角色...")
+        self.search_input.setFixedWidth(220)
+        self.search_input.setStyleSheet("""
+            QLineEdit {
+                background-color: #0d1117;
+                color: #c9d1d9;
+                border: 1px solid #30363d;
+                border-radius: 4px;
+                padding: 2px 6px;
+                font-size: 9pt;
+            }
+            QLineEdit:focus {
+                border: 1px solid #58a6ff;
+            }
+        """)
+        self.search_input.textChanged.connect(self._apply_filter)
+        toolbar_layout.addWidget(self.search_input)
+
+        self.btn_limit_up = QPushButton("🔥 涨停天梯")
+        self.btn_limit_up.setStyleSheet("""
+            QPushButton {
+                background-color: #3d1414; color: #ff5555; font-weight: bold;
+                border: 1px solid #ff4444; border-radius: 3px; padding: 3px 8px; font-size: 8.5pt;
+            }
+            QPushButton:hover { background-color: #ff4444; color: #000000; }
+        """)
+        self.btn_limit_up.clicked.connect(self._on_click_limit_up)
+        toolbar_layout.addWidget(self.btn_limit_up)
+
+        self.btn_hot_sector = QPushButton("📊 板块雷达")
+        self.btn_hot_sector.setStyleSheet("""
+            QPushButton {
+                background-color: #1a2a1a; color: #00ff88; font-weight: bold;
+                border: 1px solid #00ff88; border-radius: 3px; padding: 3px 8px; font-size: 8.5pt;
+            }
+            QPushButton:hover { background-color: #00ff88; color: #000000; }
+        """)
+        self.btn_hot_sector.clicked.connect(self._on_click_hot_sector)
+        toolbar_layout.addWidget(self.btn_hot_sector)
+
+        self.btn_dragon_mon = QPushButton("🐉 加速龙头")
+        self.btn_dragon_mon.setStyleSheet("""
+            QPushButton {
+                background-color: #2b1f0e; color: #ffd700; font-weight: bold;
+                border: 1px solid #ffd700; border-radius: 3px; padding: 3px 8px; font-size: 8.5pt;
+            }
+            QPushButton:hover { background-color: #ffd700; color: #000000; }
+        """)
+        self.btn_dragon_mon.clicked.connect(self._on_click_dragon_mon)
+        toolbar_layout.addWidget(self.btn_dragon_mon)
+
+        main_layout.addLayout(toolbar_layout)
+
+        # 3. 核心真龙矩阵表格 (True Dragon Matrix Table)
+        self.table = QTableWidget()
+        self.headers = [
+            "代码", "名称", "龙头角色", "所属主线", "现价", "涨幅%",
+            "成交额(亿)", "换手率%", "资金买点类型", "建议买入区间", "止损参考", "核心逻辑与驱动"
+        ]
+        self.table.setColumnCount(len(self.headers))
+        self.table.setHorizontalHeaderLabels(self.headers)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.setAlternatingRowColors(True)
+        self.table.verticalHeader().setVisible(False)
+        self.table.setSortingEnabled(False)
+
+        default_widths = {
+            "代码": 68, "名称": 78, "龙头角色": 115, "所属主线": 88, "现价": 68, "涨幅%": 68,
+            "成交额(亿)": 88, "换手率%": 68, "资金买点类型": 110, "建议买入区间": 110, "止损参考": 70, "核心逻辑与驱动": 280
+        }
+        setup_header_persistence(self.table, "capital_dragon_table_header_v1", default_widths=default_widths)
+
+        # 信号连接
+        self.table.itemClicked.connect(self._on_row_clicked)
+        self.table.itemDoubleClicked.connect(self._on_row_double_clicked)
+        self.table.currentCellChanged.connect(self._on_current_cell_changed)
+
+        main_layout.addWidget(self.table)
+
+    def update_payload(self, df_all: Optional[pd.DataFrame], sh_pct: float = 0.0):
+        """
+        接收最新行情快照，计算主线板块与真龙角色矩阵，并刷新表格
+        """
+        if df_all is None or df_all.empty or self._is_updating:
+            return
+
+        report = self.engine.analyze_capital_dragon_universe(df_all, sh_pct)
+        if not report:
+            return
+
+        # 特征签名检查，防无意义重绘
+        dragons = report.get("dragon_records", [])
+        top_secs = report.get("top_sectors", [])
+        sig_tuple = (
+            len(dragons),
+            tuple(d["code"] for d in dragons[:15]),
+            tuple(round(d["pct"], 1) for d in dragons[:15]),
+            tuple(s["name"] for s in top_secs[:3])
+        )
+
+        if sig_tuple == self._last_sig:
+            return
+        self._last_sig = sig_tuple
+        self._last_report = report
+
+        # 1. 刷新顶部主线卡片
+        self._render_top_sector_cards(top_secs)
+
+        # 2. 刷新核心真龙表格
+        self._render_table(dragons)
+
+    def _render_top_sector_cards(self, top_secs: List[Dict[str, Any]]):
+        for i in range(3):
+            w = self.sector_card_widgets[i]
+            if i < len(top_secs):
+                st = top_secs[i]
+                w["sector_name"] = st["name"]
+                grade = st.get("grade", "主线")
+                w["title"].setText(f"{grade}: {st['name']}")
+                
+                pct_col = COLOR_UP if st["avg_pct"] > 0 else (COLOR_DOWN if st["avg_pct"] < 0 else "#ffffff")
+                w["desc"].setText(
+                    f"总成交: <font color='#ffd700'><b>{st['total_amt_yi']:.1f}亿</b></font> | "
+                    f"均涨: <font color='{pct_col}'><b>{st['avg_pct']:+.2f}%</b></font> | "
+                    f"涨停: <font color='#ff4444'><b>{st['limit_up_count']}只</b></font>"
+                )
+                w["desc"].setTextFormat(Qt.TextFormat.RichText)
+                
+                if st.get("leader_name"):
+                    w["leader"].setText(f"🚀 先锋: {st['leader_name']} ({st['leader_code']}) +{st['leader_pct']:.1f}%")
+                else:
+                    w["leader"].setText("🚀 先锋: 正在争夺...")
+                w["frame"].setVisible(True)
+            else:
+                w["frame"].setVisible(False)
+
+    def _render_table(self, dragons: List[Dict[str, Any]]):
+        self._is_updating = True
+        try:
+            # 记住当前选中代码
+            selected_code = None
+            curr_row = self.table.currentRow()
+            if curr_row >= 0:
+                c_item = self.table.item(curr_row, 0)
+                if c_item:
+                    selected_code = c_item.text()
+
+            self.table.setSortingEnabled(False)
+            filter_text = self.search_input.text().strip().lower()
+            
+            matched_records = []
+            for d in dragons:
+                if filter_text:
+                    match_str = f"{d['code']} {d['name']} {d['role']} {d['sector']} {d['action_type']} {d['reason']}".lower()
+                    if filter_text not in match_str:
+                        continue
+                matched_records.append(d)
+
+            self.table.setRowCount(len(matched_records))
+            new_selected_row = -1
+
+            for row_idx, d in enumerate(matched_records):
+                code = d["code"]
+                name = d["name"]
+                role = d["role"]
+                sector = d["sector"]
+                price = d["price"]
+                pct = d["pct"]
+                amt = d["amount_yi"]
+                turnover = d["turnover"]
+                buy_type = d["action_type"]
+                buy_zone = d["buy_zone"]
+                stop_loss = d["stop_loss"]
+                reason = d["reason"]
+
+                if code == selected_code:
+                    new_selected_row = row_idx
+
+                # 0: 代码
+                it_code = NumericTableWidgetItem(code, 0)
+                it_code.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                self.table.setItem(row_idx, 0, it_code)
+
+                # 1: 名称
+                it_name = QTableWidgetItem(name)
+                it_name.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                self.table.setItem(row_idx, 1, it_name)
+
+                # 2: 龙头角色 (高辨识度徽标色)
+                it_role = NumericTableWidgetItem(role, d.get("priority", 0))
+                it_role.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                font = it_role.font()
+                font.setBold(True)
+                it_role.setFont(font)
+                if "空间" in role:
+                    it_role.setForeground(QBrush(QColor("#ff1744")))
+                elif "容量" in role:
+                    it_role.setForeground(QBrush(QColor("#ffd700")))
+                elif "先锋" in role:
+                    it_role.setForeground(QBrush(QColor("#00e676")))
+                else:
+                    it_role.setForeground(QBrush(QColor("#00b0ff")))
+                self.table.setItem(row_idx, 2, it_role)
+
+                # 3: 所属主线
+                it_sec = QTableWidgetItem(sector)
+                it_sec.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                it_sec.setForeground(QBrush(QColor("#e0e0e0")))
+                self.table.setItem(row_idx, 3, it_sec)
+
+                # 4: 现价
+                it_price = NumericTableWidgetItem(f"{price:.2f}", price)
+                it_price.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                self.table.setItem(row_idx, 4, it_price)
+
+                # 5: 涨幅%
+                pct_str = f"{pct:+.2f}%"
+                it_pct = NumericTableWidgetItem(pct_str, pct)
+                it_pct.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                font = it_pct.font()
+                font.setBold(True)
+                it_pct.setFont(font)
+                pct_col = COLOR_UP if pct > 0 else (COLOR_DOWN if pct < 0 else "#c9d1d9")
+                it_pct.setForeground(QBrush(QColor(pct_col)))
+                self.table.setItem(row_idx, 5, it_pct)
+
+                # 6: 成交额(亿)
+                it_amt = NumericTableWidgetItem(f"{amt:.1f}亿", amt)
+                it_amt.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                if amt >= 15.0:
+                    it_amt.setForeground(QBrush(QColor("#ffd700")))
+                    f = it_amt.font()
+                    f.setBold(True)
+                    it_amt.setFont(f)
+                else:
+                    it_amt.setForeground(QBrush(QColor("#ffffff")))
+                self.table.setItem(row_idx, 6, it_amt)
+
+                # 7: 换手率%
+                it_to = NumericTableWidgetItem(f"{turnover:.1f}%", turnover)
+                it_to.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                self.table.setItem(row_idx, 7, it_to)
+
+                # 8: 资金买点类型
+                it_buy = QTableWidgetItem(buy_type)
+                it_buy.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                it_buy.setForeground(QBrush(QColor("#38bdf8")))
+                self.table.setItem(row_idx, 8, it_buy)
+
+                # 9: 建议买入区间
+                it_zone = QTableWidgetItem(buy_zone)
+                it_zone.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                it_zone.setForeground(QBrush(QColor("#ffb74d")))
+                self.table.setItem(row_idx, 9, it_zone)
+
+                # 10: 止损参考
+                it_sl = NumericTableWidgetItem(f"{stop_loss:.2f}", stop_loss)
+                it_sl.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                it_sl.setForeground(QBrush(QColor("#ef5350")))
+                self.table.setItem(row_idx, 10, it_sl)
+
+                # 11: 核心逻辑与驱动
+                it_reason = QTableWidgetItem(reason)
+                it_reason.setToolTip(reason)
+                it_reason.setForeground(QBrush(QColor("#b0bec5")))
+                self.table.setItem(row_idx, 11, it_reason)
+
+            self.lbl_stats.setText(
+                f"🐉 资金主线龙头已就位: <b>{len(matched_records)}</b> 只 "
+                f"(空间龙: {self._last_report.get('space_dragon_count', 0)} | "
+                f"容量中军: {self._last_report.get('midcap_dragon_count', 0)} | "
+                f"主线先锋: {self._last_report.get('pioneer_dragon_count', 0)})"
+            )
+
+            if new_selected_row >= 0:
+                self.table.setCurrentCell(new_selected_row, 0)
+
+            auto_fit_columns_once(self.table, "capital_dragon_table_header_v1")
+            self.table.setSortingEnabled(True)
+
+        finally:
+            self._is_updating = False
+
+    def _apply_filter(self):
+        if self._last_report:
+            self._render_table(self._last_report.get("dragon_records", []))
+
+    def _on_row_clicked(self, item):
+        row = item.row()
+        c_item = self.table.item(row, 0)
+        n_item = self.table.item(row, 1)
+        if c_item and n_item:
+            code = c_item.text().strip()
+            name = n_item.text().strip()
+            self.stock_selected.emit(code, name)
+
+    def _on_current_cell_changed(self, cur_row, cur_col, prev_row, prev_col):
+        if cur_row >= 0 and cur_row != prev_row:
+            c_item = self.table.item(cur_row, 0)
+            n_item = self.table.item(cur_row, 1)
+            if c_item and n_item:
+                code = c_item.text().strip()
+                name = n_item.text().strip()
+                self.stock_selected.emit(code, name)
+
+    def _on_row_double_clicked(self, item):
+        row = item.row()
+        c_item = self.table.item(row, 0)
+        n_item = self.table.item(row, 1)
+        if c_item and n_item:
+            code = c_item.text().strip()
+            name = n_item.text().strip()
+            self.stock_double_clicked.emit(code, name)
+
+    def _on_click_limit_up(self):
+        if self.main_window and hasattr(self.main_window, 'open_daily_limit_up_analyzer'):
+            self.main_window.open_daily_limit_up_analyzer()
+
+    def _on_click_hot_sector(self):
+        if self.main_window and hasattr(self.main_window, 'open_hot_sector_leaderboard'):
+            self.main_window.open_hot_sector_leaderboard()
+
+    def _on_click_dragon_mon(self):
+        if self.main_window and hasattr(self.main_window, 'open_dragon_monitor'):
+            self.main_window.open_dragon_monitor()

@@ -1,3 +1,36 @@
+## 2026-09-07 17:36
+- [x] **全链路重构落地【ATS 资金趋势与主线龙头捕捉中枢 (Capital-Trend & True Dragon Hub)】(SSOT) (`stock_standalone/ats/capital_dragon_engine.py`, `stock_standalone/ats/signal_ledger.py`, `stock_standalone/ats/volume_profiler.py`, `stock_standalone/ats/ui/dragon_monitor.py`, `stock_standalone/ats/ui/capital_dragon_panel.py`, `stock_standalone/ats/ui/main_window.py`, `stock_standalone/tests/test_capital_dragon_engine.py`, `stock_standalone/tests/test_capital_dragon_panel_integration.py`)**：
+    - [x] **深度排查并定位“ATS 凌乱割裂、无法跟随资金捕捉龙头、个股异动随机性泛滥、缺乏资金趋势”四大系统性病灶**：
+        1. **`SignalLedger` 信号账本“把真龙拒之门外，把杂毛迎进大门”**：核心筛选公式被硬性死锁在 `dev_series in [-2.5%, 4.0%]`。处于主升浪的强势真龙（连板龙、主线先锋、大成交额趋势中军，偏离 MA20 远超 4%）被底层判定物理级全数过滤！留在账本里的全是均线附近弱势震荡的冷门杂毛股，盘中杂毛股一拉升 2% 就报先锋买点，全系统被杂毛随机异动严重绑架；
+        2. **`DragonLeaderMonitorDialog`“龙头”定义降维虚挂（假龙头）**：单纯比对 `dff > 0 and dff2 > 0 and dff3 > 0` 选前 15 名，完全未引入**成交额（流动性）**、**板块集聚效应**与**连板天梯辨识度**，几千万成交额的边缘微盘股经常混入所谓的“龙头追踪器”；
+        3. **主界面与信息流割裂凌乱**：【涨停天梯】、【热点板块】、【加速龙头】、【SBC】各自作为独立弹窗散落各处，主窗口 C 位却缺乏今日核心资金主线看板，操盘手必须手忙脚乱开好几个独立窗口；
+        4. **缺乏“趋势中的资金趋势”约束**：缺乏全市场成交额（Top 50）容量大票的趋势跟踪，缺乏板块大势与板块资金的合力检验，缺乏基于自适应趋势通道（多头通道向上、中轨/支撑回踩企稳）的防守与买点闭环。
+    - [x] **全链路落地【资金趋势与真龙画像引擎 + 双轨主升真龙破格准入 + 界面 C 位主线中枢 + 告警防骚扰守卫】体系 (SSOT)**：
+        1. **研发【资金趋势与真龙辨识度核心量化引擎】(`ats/capital_dragon_engine.py`)**：
+           - **全市场成交额分级**：`超大容量中军` ($\ge 15$ 亿或 Top 50，且多头趋势)、`主流活跃` ($3 \sim 15$ 亿)、`微盘孤狼` ($< 1$ 亿严格降权)；
+           - **主线板块资金集聚**：基于板块成交额、涨停家数、上涨占比提炼出市场 Top 3 核心资金主线与领跑先锋；
+           - **四维真龙角色精准画像**：【👑 空间高度龙】(连板天梯标杆)、【🛡️ 趋势容量中军】(巨额成交+通道向上)、【🚀 主线板块先锋】(主线最快拔起带队大哥)、【💎 弱转强卡位首板】；
+           - **资金趋势买点指引**：明确输出 `建议买入区间 (buy_zone)`、`止损参考 (stop_loss)` 与 `核心驱动原因`；
+           - **孤狼脉冲与破位诱多铁壁拦截**：无板块、无成交额支撑的微盘拉升标记为孤狼，空头下行通道拉升标记为破位诱多，彻底剔除；
+        2. **破除 `SignalLedger` MA20 壁垒，落地双轨真龙主升通道 (`ats/signal_ledger.py`, `ats/volume_profiler.py`, `ats/ui/main_window.py`)**：
+           - `SignalEntry` 扩展 `dragon_role`, `dragon_buy_type`, `dragon_reason`, `dragon_amount_yi`；
+           - `record_signal` 与 `LedgerUpdateWorker.run` 引入双轨通道：原有 MA20 回调通道（`[-2.5%, 4.0%]`）100% 保留兼容，同时新增【真龙主升通道】，对空间高度龙、主线先锋、容量中军破格全量准入，并赋予最高优先权与保底评分；
+           - `VolumeProfiler.analyze_sector_resonance` 板块龙头竞选中赋予真龙标的绝对优先级，根除在冷门小票中乱抢带队大哥的缺陷；
+        3. **升级 `DragonLeaderMonitorDialog` 接入真龙画像 (`ats/ui/dragon_monitor.py`)**：
+           - 废弃单纯 DFF 粗暴排序，无缝接入 `CapitalDragonEngine` 真龙清单；
+           - 表格首尾状态直观呈现【真龙角色 + 真实成交额 (亿元)】，彻底告别假龙头；
+        4. **打造 ATS 主窗口 C 位看板【🐉 资金主线与龙头中枢】(`ats/ui/capital_dragon_panel.py`, `ats/ui/main_window.py`)**：
+           - 挂载在主窗口 `top_tabs` 的第 0 项（原重点关注、MA20回调、新股顺延保留）；
+           - **顶部 3 大资金主线卡片**：全景展示核心主线名称、评级、成交额(亿)、涨跌幅、涨停数及领跑先锋；
+           - **核心真龙矩阵表**：12 列高精数值排序，高对比度胶囊色彩，支持拼音首字母/代码/主线即时搜索；
+           - 单击/上下键秒级联动外部行情与行情广播，双击直开 SBC 分时走势图；
+        5. **告警防骚扰铁壁守卫 (`ats/ui/main_window.py`)**：
+           - `notify_special_signal` 接入资金与真龙守卫：无成交额（<1.5亿）且所属板块下跌的孤狼个股仅作内存记录，严禁弹窗和语音骚扰，报警仅聚焦真龙与主流大票。
+    - [x] **自动化测试 100% 全部 PASSED**：
+        - 新增 `tests/test_capital_dragon_engine.py` (2项) 与 `tests/test_capital_dragon_panel_integration.py` (2项)；
+        - 扩展 `tests/test_signal_ledger.py` (14项全部通过)；
+        - 全套 43 项核心套件（涵盖天梯、通道回测、SBC、告警、真龙）100% 全部 PASSED！
+
 ## 2026-09-04 21:55
 - [x] **全链路落地【SBC 测算日志状态机去重 + 窗口关闭与隐藏野定时器物理销毁 + 非交易期自适应节流】(SSOT) (`stock_standalone/ats/ui/intraday_strategy_dialog.py`, `stock_standalone/tests/test_sbc_shortcut_r.py`)**：
     - [x] **排查定位“无变化数据每2秒重复刷屏、关闭SBC窗口后后台野定时器持续执行、非交易期盲目轮询”三大实战痛点诱因**：
