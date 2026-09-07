@@ -73,6 +73,62 @@ class CapitalDragonEngine:
         self._dragon_codes_set: Set[str] = set()
         self._trap_codes_set: Set[str] = set()
 
+    def _get_virtual_vol_ratio(self, df: pd.DataFrame) -> pd.Series:
+        """
+        获取或计算全市场的虚拟量比序列 (SSOT)
+        支持：
+        1. 直接从 df 的 vol_ratio 列提取；
+        2. 若 volume 列存在且中位数/均值在 0~20 之间（已被 calc_compute_volume 转换为虚拟量比强度），直接复用；
+        3. 若有原始成交量 (vol/volume) 与昨量 (lastv1d/last6vol)，结合 cct.get_work_time_ratio 实时按交易进度投影放大计算；
+        4. 兜底返回 1.0。
+        """
+        if df is None or df.empty:
+            return pd.Series(1.0, index=df.index if df is not None else [])
+
+        # 优先 1: 直接读取 vol_ratio / vr
+        for col in ('vol_ratio', 'vr', 'volume_ratio'):
+            if col in df.columns:
+                s = pd.to_numeric(df[col], errors='coerce').fillna(1.0)
+                if (s > 0).any():
+                    return s.round(2)
+
+        # 优先 2: 检查 volume 列是否已是虚拟量比（系统 data_utils.calc_compute_volume 注入特征：数值通常在 0.1 ~ 30 之间）
+        if 'volume' in df.columns:
+            s_vol = pd.to_numeric(df['volume'], errors='coerce').fillna(0.0)
+            if 0 < s_vol.max() <= 50.0 and s_vol.quantile(0.9) <= 15.0:
+                return s_vol.replace(0.0, 1.0).round(2)
+
+        # 优先 3: 结合日内交易时间比例进行向量化动态投影
+        try:
+            from JohnsonUtil import commonTips as cct
+            ratio_t = float(cct.get_work_time_ratio(resample='d'))
+        except Exception:
+            ratio_t = 1.0
+        ratio_t = max(0.05, min(ratio_t, 1.0))
+
+        raw_vol = None
+        for v_col in ('vol', 'volume', 'trade_vol'):
+            if v_col in df.columns:
+                cand = pd.to_numeric(df[v_col], errors='coerce').fillna(0.0)
+                if (cand > 0).any():
+                    raw_vol = cand
+                    break
+
+        base_vol = None
+        for b_col in ('lastv1d', 'last6vol', 'l6vol', 'prev_vol', 'vol_ma5'):
+            if b_col in df.columns:
+                cand = pd.to_numeric(df[b_col], errors='coerce').fillna(0.0)
+                if (cand > 0).any():
+                    base_vol = cand.replace(0.0, np.nan)
+                    break
+
+        if raw_vol is not None and base_vol is not None:
+            proj_vol = raw_vol / ratio_t
+            vr = (proj_vol / base_vol).fillna(1.0).clip(0.1, 50.0).round(2)
+            return vr
+
+        return pd.Series(1.0, index=df.index)
+
     def analyze_capital_dragon_universe(
         self,
         df_all: Optional[pd.DataFrame],
@@ -159,6 +215,15 @@ class CapitalDragonEngine:
         ch_supp_s = _get_series(['ch_supp', 'ch_lower'])
         ma20_s = _get_series(['ma20d', 'ma20', 'MA20'])
 
+        # 提取全市场系统的虚拟量比序列 (SSOT)
+        vol_ratio_s = self._get_virtual_vol_ratio(df)
+        try:
+            from JohnsonUtil import commonTips as cct
+            ratio_t = float(cct.get_work_time_ratio(resample='d'))
+        except Exception:
+            ratio_t = 1.0
+        ratio_t = max(0.05, min(ratio_t, 1.0))
+
         # 3. 统计主线板块资金集聚度
         sector_stats = {}
         valid_mask = (prices > 0.0) & (~codes_series.isin(['000001', '399001', '399006', 'sh000001', 'sz399001']))
@@ -169,6 +234,7 @@ class CapitalDragonEngine:
                 continue
             amt = float(amts_yi.loc[idx])
             p_val = float(pcts.loc[idx])
+            vr_val = float(vol_ratio_s.loc[idx]) if idx in vol_ratio_s.index else 1.0
             
             # 分割复合板块名 (如 "软件服务;人工智能;大数据")
             sub_secs = [s.strip() for s in sec.replace(';', ',').replace('、', ',').split(',') if s.strip()]
@@ -184,6 +250,10 @@ class CapitalDragonEngine:
                         "total_count": 0,
                         "avg_pct": 0.0,
                         "sum_pct": 0.0,
+                        "sum_vr_weighted": 0.0,
+                        "sum_vr": 0.0,
+                        "vol_ratio": 1.0,
+                        "proj_amt_yi": 0.0,
                         "leader_code": "",
                         "leader_name": "",
                         "leader_pct": -99.0,
@@ -193,6 +263,8 @@ class CapitalDragonEngine:
                 st["total_amt_yi"] += amt
                 st["total_count"] += 1
                 st["sum_pct"] += p_val
+                st["sum_vr_weighted"] += amt * vr_val
+                st["sum_vr"] += vr_val
                 if p_val > 0.0:
                     st["up_count"] += 1
                 if p_val >= 9.5: # 涨停门槛
@@ -212,13 +284,23 @@ class CapitalDragonEngine:
                 continue
             st["avg_pct"] = round(st["sum_pct"] / st["total_count"], 2)
             up_ratio = st["up_count"] / st["total_count"]
+
+            # 板块虚拟量比：成交额加权虚拟量比（资金权重优先），无成交额时使用算术平均
+            if st["total_amt_yi"] > 0:
+                sec_vr = st["sum_vr_weighted"] / st["total_amt_yi"]
+            else:
+                sec_vr = st["sum_vr"] / max(1, st["total_count"])
+            st["vol_ratio"] = round(float(sec_vr), 2)
+            st["proj_amt_yi"] = round(float(st["total_amt_yi"] / ratio_t), 1)
             
-            # 板块资金强度 = 成交额(亿)*0.3 + 涨停数*15 + 平均涨幅*5 + 上涨占比*20
+            # 板块资金强度 = 成交额(亿)*0.15 + 涨停数*15 + 平均涨幅*4 + 上涨占比*20 + 虚拟量比加速加分(最高15分)
+            vr_bonus = min(15.0, max(0.0, (st["vol_ratio"] - 1.0) * 8.0))
             strength_score = (
                 min(40.0, st["total_amt_yi"] * 0.15) +
                 st["limit_up_count"] * 15.0 +
                 max(0.0, st["avg_pct"]) * 4.0 +
-                up_ratio * 20.0
+                up_ratio * 20.0 +
+                vr_bonus
             )
             st["strength_score"] = round(strength_score, 1)
             
@@ -361,6 +443,7 @@ class CapitalDragonEngine:
 
             if dragon_role:
                 dragon_codes_set.add(code_str)
+                vr_val = float(vol_ratio_s.loc[idx]) if idx in vol_ratio_s.index else 1.0
                 dragon_records.append({
                     "code": code_str,
                     "name": name_str,
@@ -370,12 +453,13 @@ class CapitalDragonEngine:
                     "price": price_val,
                     "pct": pct_val,
                     "amount_yi": round(amt_yi, 2),
+                    "vol_ratio": round(vr_val, 2),
                     "turnover": round(turnover_val, 2),
                     "action_type": action_type,
                     "action_tip": action_tip,
                     "buy_zone": buy_zone,
                     "stop_loss": stop_loss,
-                    "reason": reason,
+                    "reason": reason if vr_val < 2.0 else f"{reason}, 虚拟量比加速({vr_val:.1f}x)",
                     "dff": dff,
                     "dff2": dff2,
                     "dff3": dff3,

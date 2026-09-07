@@ -651,6 +651,38 @@ class SectorDataAggregator:
                 vol_r = _safe_float(aq.get("vol_ratio", 1.0), 1.0)
                 pattern_hint = f"{aq.get('buy_tag', '')} | VWAP偏离{vwap_dev:+.1f}% | 量比{vol_r:.1f}"
 
+            # ── 💡 系统的虚拟量比提取 (SSOT) ──
+            vol_ratio_val = 1.0
+            if row is not None:
+                for vr_k in ('vol_ratio', 'vr', 'volume_ratio'):
+                    if vr_k in row:
+                        cand_vr = _safe_float(row[vr_k], 0.0)
+                        if cand_vr > 0:
+                            vol_ratio_val = cand_vr
+                            break
+                if vol_ratio_val == 1.0 and 'volume' in row:
+                    cand_v = _safe_float(row['volume'], 0.0)
+                    if 0 < cand_v <= 50.0:
+                        vol_ratio_val = cand_v
+            if vol_ratio_val == 1.0 and fallback_df is not None:
+                row_fb = self._get_df_row_safe(fallback_df, code_str)
+                if row_fb is not None:
+                    for vr_k in ('vol_ratio', 'vr', 'volume_ratio'):
+                        if vr_k in row_fb:
+                            cand_vr = _safe_float(row_fb[vr_k], 0.0)
+                            if cand_vr > 0:
+                                vol_ratio_val = cand_vr
+                                break
+                    if vol_ratio_val == 1.0 and 'volume' in row_fb:
+                        cand_v = _safe_float(row_fb['volume'], 0.0)
+                        if 0 < cand_v <= 50.0:
+                            vol_ratio_val = cand_v
+            if vol_ratio_val == 1.0 and aq and aq.get("vol_ratio"):
+                vol_ratio_val = _safe_float(aq.get("vol_ratio", 1.0), 1.0)
+
+            if vol_ratio_val >= 1.5 and "量比" not in pattern_hint:
+                pattern_hint = f"量比{vol_ratio_val:.1f}x | {pattern_hint}"
+
             # ── 💡 动态自定义列：从 df 严格映射提取 (优先 current_df，缺失从 fallback_df 补齐) ──
             extra_dict = {}
             for ec in extra_cols:
@@ -680,6 +712,7 @@ class SectorDataAggregator:
                 'rank': rank_val,
                 'dff2': dff2_val,
                 'dff3': dff3_val,
+                'vol_ratio': round(vol_ratio_val, 2),
                 'extra_cols': extra_dict,
                 'pattern': pattern_hint
             })
@@ -821,10 +854,14 @@ class SectorDataAggregator:
                 r['type'] = '⚡ 活跃跟涨'
                 r['score'] = max(80.0, _safe_float(r.get('score', 0)))
                 r['is_strong'] = True
+            elif _safe_float(r.get('vol_ratio', 1.0)) >= 2.0 and pct_val >= 1.5:
+                r['type'] = '⚡ 爆量加速'
+                r['score'] = max(82.0, _safe_float(r.get('score', 0)))
+                r['is_strong'] = True
             else:
                 r['is_strong'] = False
 
-        # ── 4. 排序：龙头置顶，强势股优先，其余按得分/涨幅降序排列 ──
+        # ── 4. 排序：龙头置顶，强势股优先，其余按得分/涨幅/虚拟量比降序排列 ──
         def _get_sort_tuple(item):
             is_lead = 1 if item.get('code') == final_leader_code else 0
             is_champ = 1 if '👑' in str(item.get('type', '')) else 0
@@ -833,7 +870,8 @@ class SectorDataAggregator:
             is_strong = 1 if item.get('is_strong', False) else 0
             sc = _safe_float(item.get('score', 0.0))
             pct = _safe_float(item.get('pct', 0.0))
-            return (is_lead, is_champ, is_pioneer, is_limit, is_strong, sc, pct)
+            vr = _safe_float(item.get('vol_ratio', 1.0))
+            return (is_lead, is_champ, is_pioneer, is_limit, is_strong, sc, pct, vr)
 
         rows.sort(key=_get_sort_tuple, reverse=True)
 
@@ -865,7 +903,8 @@ class SectorDataAggregator:
             'count': len(rows),
             'up_count': up_count,
             'strong_count': sum(1 for r in rows if r.get('is_strong', False)),
-            'avg_pct': round(avg_pct, 2)
+            'avg_pct': round(avg_pct, 2),
+            'avg_vol_ratio': round(sum(_safe_float(r.get('vol_ratio', 1.0)) for r in rows) / max(1, len(rows)), 2)
         }
 
         return rows, round(final_score, 1), leader_str, meta

@@ -1,3 +1,23 @@
+## 2026-09-07 20:50
+- [x] **全链路落地【资金主线板块与龙头中枢添加系统的虚拟量比 + 实时交易早盘加速流向极速定位】(SSOT) (`stock_standalone/ats/capital_dragon_engine.py`, `stock_standalone/ats/ui/capital_dragon_panel.py`, `stock_standalone/ats/sector_data_aggregator.py`, `stock_standalone/ats/ui/sector_detail_dialog.py`, `stock_standalone/tests/test_capital_dragon_engine.py`, `stock_standalone/tests/test_capital_dragon_panel_integration.py`)**：
+    - [x] **建立系统虚拟量比与全天预估成交数据中枢 (`ats/capital_dragon_engine.py`)**：
+        1. **日内交易时间进度自适应放大 (SSOT)**：接入 `cct.get_work_time_ratio(resample='d')`（上午 9:30~10:00 权重 35%，11:30 达到 65%），无需等待收盘，将盘中分时实际成交量/额按上午交易进度精准放大为全天预期投影；
+        2. **全市场虚拟量比序列安全提取 (`_get_virtual_vol_ratio`)**：优先读取 `vol_ratio`，其次识别 `volume` 信号强度，第三基于原始量 `vol` 与昨量 `lastv1d`/`last6vol` 现场向量投影，保障 0 延迟获取；
+        3. **板块加权虚拟量比与全天预估成交额**：在主线板块聚合中计算成交额加权虚拟量比与全天预估成交额（`proj_amt_yi`），对上午急速放量吸筹的板块赋予强度加分（最高 15 分）；
+        4. **真龙角色注入虚拟量比画像**：每条真龙记录注入 `vol_ratio`，若 $\ge 2.0x$ 自动增强决策理由与主升放量加速标记；
+    - [x] **重构主线卡片与真龙表格视觉呈现 (`ats/ui/capital_dragon_panel.py`)**：
+        1. **核心主线卡片全景透视**：在顶部 3 大主线卡片中显性展示 `成交: XX.X亿 (预估XX亿) | 量比: X.Xx | 均涨: +X.XX% | 涨停: X只`，ToolTip 提供详细成交与折算说明；
+        2. **真龙矩阵新增【虚拟量比】列（第 6 列）**：位于“涨幅%”与“成交额(亿)”之间，使用 `NumericTableWidgetItem` 原生支持点击表头正逆序高精度排序；
+        3. **分级视觉高亮**：$\ge 3.0x$ 鲜红暴扣加粗，$\ge 2.0x$ 金黄放量加粗，$\ge 1.2x$ 青色活跃放量，$\le 0.7x$ 灰色缩量；操盘手点击“虚拟量比”表头即可一秒锁定上午资金疯狂加速流入的龙头标的；
+    - [x] **板块成分股详情弹窗联动与强势股增强 (`ats/sector_data_aggregator.py`, `ats/ui/sector_detail_dialog.py`)**：
+        1. 在 `fetch_quotes_unified` 中为板块成分股提取 `vol_ratio` 并透传；
+        2. 在板块详情顶部 `stats_lbl` 中显性呈现 `板块虚拟量比: X.Xx`；
+        3. 强势股判定纳入量比加速形态（量比 $\ge 2.0x$ 且涨幅 $\ge 1.5\%$ 标定为 `⚡ 爆量加速` 强势股），并在悬浮提示中提供精准量比数值；
+    - [x] **全链路自动化回归测试 100% 全部 PASSED**：
+        - `test_capital_dragon_engine.py` 扩充系统虚拟量比与板块预估成交额断言；
+        - `test_capital_dragon_panel_integration.py` 扩充虚拟量比表头、列索引 6、x 格式化与卡片量比断言；
+        - 全套 45 项核心套件 100% 全部 PASSED！
+
 ## 2026-09-07 18:15
 - [x] **全链路落地【资金主线板块点击直开成分股详情 + 领涨先锋极速联动 + 强势股智能标记与一键筛选】(SSOT) (`stock_standalone/ats/ui/capital_dragon_panel.py`, `stock_standalone/ats/ui/sector_detail_dialog.py`, `stock_standalone/ats/sector_data_aggregator.py`, `stock_standalone/ats/limit_up_engine.py`, `stock_standalone/tests/test_capital_dragon_panel_integration.py`, `stock_standalone/tests/test_sector_aggregator_suite.py`)**：
     - [x] **重塑核心资金主线卡片交互 (SectorCardWidget & ClickableLabel)**：
