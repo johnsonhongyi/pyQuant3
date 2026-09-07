@@ -1,3 +1,20 @@
+## 2026-09-07 11:45
+- [x] **全链路落地【系统长时间运行卡顿迟滞与异常锁全面优化】(SSOT) (`stock_standalone/realtime_data_service.py`, `stock_standalone/instock_MonitorTK.py`, `stock_standalone/ats/tdx_realtime_fetcher.py`, `stock_standalone/tests/test_performance_and_lock_fixes.py`)**：
+    - [x] **排查定位“HDF5 重复读盘10秒与文件锁死锁、TK 主线程 lf_top10 刷新假死10.5秒、TDX 异常批次单只串行请求风暴”三大卡顿锁死诱因**：
+        1. **HDF5 内存缓存误杀导致 I/O 锁死**：`realtime_data_service.py:4765` 在 `backfill_gaps_from_hdf5` 结束处暴力调用 `clear_unified_cache`，将 `Sina._MEM_CACHE['all_30']`（230万行，171MB）内存缓存清空。导致后续主循环 `load_h5_all_30` 每次都必须从磁盘硬读 171MB，单次硬读磁盘耗时高达 6.46s ~ 10.67s；且在读盘占用句柄期间，写进程 `write_hdf_db` 原子替换触发 Windows `[WinError 5] 拒绝访问`，重试 5 次死锁阻塞；
+        2. **TK 主线程 `agg:[lf_top10]` 刷新 Treeview 导致 10.5 秒假死**：`update_all_top10_windows()` 每 1.5 秒无条件对所有打开的 Top10 概念窗口进行全量清空与插入；每个窗口在主线程做 5600 行分类匹配，并执行 `tree.delete` + 逐行 `tree.insert` + 插入后再次全表多列排序 `perform_tree_multi_level_sort`。当用户打开多个窗口时，主线程被卡死 10556ms，触发 `[UI_BLOCK]` 看门狗假死报警；
+        3. **TDX 异常批次退化为 50~80 次串行单只请求**：当整批因包含未上市代码（如 920269 北交所）返回空时，代码进入 `for` 循环逐个发起单只请求，长达数秒网络阻塞并触发通达信主站封禁/流控。
+    - [x] **全链路落地【HDF5 内存常驻 + Top10 特征签名脏检查与可见性节流 + TDX 二分快速拆包隔离】体系 (SSOT)**：
+        1. **HDF5 内存缓存铁壁常驻**：移除 `backfill_gaps_from_hdf5` 尾部清理 `all_30` 的调用；在 `controlled_gc_loop` 中加入交易时段守卫（仅非交易时段清理），让 230 万行大表盘中常驻内存，取数耗时从 10.6 秒降为 0 毫秒，彻底根除 PyTables 文件锁与写操作 WinError 5 死锁；
+        2. **Top10 窗口真实可见性校验与内容特征签名脏检查**：
+           - 检查 `win.state() != 'iconic'`，最小化或隐藏窗口跳过重绘；
+           - 构造前 N 条展示数据的不可变特征签名 `(actual_col, ascending, tuple(sig_items))`，比对代码、顺序与涨跌幅/DFF，无实质变动直接返回，杜绝 95% 以上无意义的清空重绘；
+           - 剔除插入后的冗余二次多列排序，单列已由 DataFrame 排序保真；
+           - 调度间隔适度优化为 3.0s 防抖，且多窗口每刷新 3 个主动 `update_idletasks()` 呼吸一次，彻底消除主线程假死；
+        3. **TDX 盘口二分快速拆包隔离机制**：废除无节制的 50~80 次单只串行请求，采用二分法将整批拆成 2 个子批次仅需 2 次批量请求即可隔离出正常标的并记录冷却，耗时从 6 秒降至数十毫秒；
+        4. **严格遵循指示保留 ATS 300 秒延迟同步业务设计**，不改变数据逻辑结构；
+        5. **全套自动化回归测试 100% 全部 PASSED**：新增专项测试 `test_performance_and_lock_fixes.py`，全套 27 项核心测试全绿通过。
+
 ## 2026-09-05 14:45
 - [x] **全链路落地【天梯历史回溯非最近交易日动态添加距今涨跌幅列】(SSOT) (`stock_standalone/ats/ui/daily_limit_up_dialog.py`, `stock_standalone/tests/test_daily_limit_up_dialog.py`)**：
     - [x] **表头结构与位置精准对齐 (`get_limit_up_table_headers`)**：

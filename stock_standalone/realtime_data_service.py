@@ -4760,9 +4760,9 @@ class DataPublisher:
                     except Exception as io_err:
                         logger.error(f"Failed to save bad gap codes to file: {io_err}")
 
-            # [MEMORY OPTIMIZE] 仅清理缓存引用，避免频繁 GC 导致 UI 卡顿，真正 GC 延迟到统一 GC 循环中
-            from JSONData import sina_data
-            sina_data.Sina(readonly=True).clear_unified_cache(force_gc=False)
+            # 🛡️ [PERF & LOCK-FIX] 保留 Sina._MEM_CACHE 中的 all_30 缓存常驻内存，
+            # 杜绝盘中重复从磁盘耗时 6~10 秒硬读 230 万行 HDF5，并彻底根除 PyTables 文件锁与写操作 WinError 5 冲突。
+            pass
             
         except Exception as e:
             logger.error(f"backfill_gaps error: {e}")

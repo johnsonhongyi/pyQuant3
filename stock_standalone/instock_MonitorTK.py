@@ -6750,8 +6750,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     # 虽然不刷表格，也要更新状态条，代表“数据已到达内存”
                     pass
                 
-                # 1. 独立调度：Top10 窗口
-                if lt_now - getattr(self, '_last_low_freq_ts', 0) > 1.5:
+                # 1. 独立调度：Top10 窗口 (3.0s 防抖节流，杜绝主线程假死)
+                if lt_now - getattr(self, '_last_low_freq_ts', 0) > 3.0:
                     self._put_deduped_task("lf_top10", lambda: self.update_all_top10_windows())
                     
                     # 2. 独立调度：概念列表统计与详情更新
@@ -6925,12 +6925,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 if dead_keys:
                     logger.debug(f"🧹 [GC] Cleaned {len(dead_keys)} dead code_to_alert_win references.")
 
-            # 5. 清理 Sina 内存缓存引用，确保 HDF5 大缓存被彻底丢弃回收
-            try:
-                from JSONData import sina_data
-                sina_data.Sina(readonly=True).clear_unified_cache(force_gc=False)
-            except Exception as gc_err:
-                logger.warning(f"Error clearing Sina cache in GC loop: {gc_err}")
+            # 5. 清理 Sina 内存缓存引用 (仅在非交易时段进行，交易时段保持常驻以避免磁盘重读与文件锁死锁)
+            if not cct.get_work_time():
+                try:
+                    from JSONData import sina_data
+                    sina_data.Sina(readonly=True).clear_unified_cache(force_gc=False)
+                except Exception as gc_err:
+                    logger.warning(f"Error clearing Sina cache in GC loop: {gc_err}")
 
             # 6. 强制执行垃圾回收
             cleaned = gc.collect()
@@ -19379,25 +19380,41 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     pass
 
     def update_all_top10_windows(self):
-        """强制刷新所有当前打开的 Concept Top10 窗口数据"""
+        """强制刷新所有当前打开的 Concept Top10 窗口数据 (防假死 + 可见性节流)"""
+        updated_count = 0
         # 1. 刷新独立窗口字典
         if hasattr(self, "_pg_top10_window_simple"):
             for k, v in list(self._pg_top10_window_simple.items()):
-                    win = v.get("win")
-                    # 检查是否开启了自动刷新
-                    if win and win.winfo_exists() and getattr(win, "_chk_auto", None) and win._chk_auto.get():
-                        concept_name = getattr(win, "_concept_name", None)
-                        if concept_name:
-                            self._fill_concept_top10_content(win, concept_name)
+                win = v.get("win")
+                # 检查是否开启了自动刷新与未最小化
+                if win and win.winfo_exists() and getattr(win, "_chk_auto", None) and win._chk_auto.get():
+                    try:
+                        if win.state() == 'iconic':
+                            continue
+                    except Exception:
+                        pass
+                    concept_name = getattr(win, "_concept_name", None)
+                    if concept_name:
+                        self._fill_concept_top10_content(win, concept_name)
+                        updated_count += 1
+                        # 🚀 [YIELD] 每刷新 3 个窗口主动呼吸一次，维持 UI 消息泵丝滑响应
+                        if updated_count % 3 == 0:
+                            try:
+                                self.update_idletasks()
+                            except Exception:
+                                pass
 
         # 2. 刷新复用窗口
         if hasattr(self, "_concept_top10_win"):
             win = self._concept_top10_win
-            # 检查是否开启了自动刷新
             if win and win.winfo_exists() and getattr(win, "_chk_auto", None) and win._chk_auto.get():
-                concept_name = getattr(win, "_concept_name", None)
-                if concept_name:
-                    self._fill_concept_top10_content(win, concept_name)
+                try:
+                    if win.state() != 'iconic':
+                        concept_name = getattr(win, "_concept_name", None)
+                        if concept_name:
+                            self._fill_concept_top10_content(win, concept_name)
+                except Exception:
+                    pass
         logger.debug(f'update_all_top10_windows_finish')
 
     def _fill_concept_top10_content(self, win, concept_name, df_concept=None, code=None, limit=50, is_init=False):
@@ -19408,13 +19425,17 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         - limit: 显示前 N 条
         """
         # ⭐ [OPTIMIZE] 智能重绘过滤：
-        # 1. 如果窗口不可见且已有数据，则跳过刷新以节省 CPU。
+        # 1. 如果窗口不可见/最小化且已有数据，则跳过刷新以节省 CPU。
         # 2. 如果窗口不可见但当前数据为空 (首次打开)，则强制刷新一次。
         tree = win._tree_top10
         has_items = len(tree.get_children()) > 0
-        if not win.winfo_viewable() and has_items:
-            return
+        try:
+            is_iconic = (win.state() == 'iconic')
+        except Exception:
+            is_iconic = False
 
+        if (not win.winfo_viewable() or is_iconic) and has_items:
+            return
 
         # 如果 df_concept 为 None，则从 self.df_all 动态获取
         if df_concept is None:
@@ -19434,20 +19455,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     'key': current_data_key,
                     'indices': df_concept.index
                 }
-            
-        df_hash = hash(tuple(df_concept.index)) + hash(len(df_concept))
-        # 增加数据版本的检测，确保价格等数值变化也能触发更新
-        data_version = getattr(self, "_data_update_version", 0)
-        
-        if getattr(win, "_last_fill_hash", None) == df_hash and \
-           getattr(win, "_last_fill_version", -1) == data_version:
+
+        if df_concept is None or df_concept.empty:
             return
-            
-        win._last_fill_hash = df_hash
-        win._last_fill_version = data_version
-        
-        # 只有在哈希变化时才清空旧行并重绘
-        tree.delete(*tree.get_children())
 
         # 排序状态获取
         self._init_tree_sort_state(tree)
@@ -19483,8 +19493,38 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         else:
             df_display = df_sorted.head(limit)
         
+        # 🛡️ [SSOT 极限性能优化] 构造前 N 条展示数据的不可变特征签名 (code, percent, dff, rank)
+        # 只要展示的前 N 只股票代码、顺序与关键数值没有实质变动，100% 保持现状，杜绝高频暴力清空与重建
+        sig_items = []
+        for row in df_display.itertuples():
+            code_r = str(row.Index)
+            p_val = getattr(row, 'percent', getattr(row, 'per1d', 0))
+            d_val = getattr(row, 'dff', 0)
+            r_val = getattr(row, 'Rank', getattr(row, 'rank', 0))
+            try:
+                p_f = round(float(p_val or 0), 2)
+            except Exception:
+                p_f = 0.0
+            try:
+                d_f = round(float(d_val or 0), 1)
+            except Exception:
+                d_f = 0.0
+            try:
+                r_i = int(r_val or 0)
+            except Exception:
+                r_i = 0
+            sig_items.append((code_r, p_f, d_f, r_i))
+        current_display_sig = (actual_col, ascending, tuple(sig_items))
+
+        if getattr(win, '_last_display_sig', None) == current_display_sig and has_items:
+            return
+
+        win._last_display_sig = current_display_sig
         tree._full_df = df_concept.copy()
         tree._display_limit = limit
+
+        # 仅在特征签名改变时才清空旧行并重绘
+        tree.delete(*tree.get_children())
         tree.config(height=min(10, len(df_display)) if len(df_display) > 0 else 5)
         
         # 批量插入 (使用 itertuples 提升速度)
@@ -19542,8 +19582,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             )
             code_to_iid[code_row] = iid
 
-        # 执行通用多级/单列排序自愈
-        self.perform_tree_multi_level_sort(tree)
+        # 仅当启用了二级排序复合列时才执行耗时的 perform_tree_multi_level_sort，单列已由 DataFrame 排序保真
+        if getattr(tree, 'sort_level2_col', None):
+            self.perform_tree_multi_level_sort(tree)
 
         # --- 更新状态栏数量 ---
         if hasattr(win, "_status_label_top10") and win._status_label_top10.winfo_exists():
