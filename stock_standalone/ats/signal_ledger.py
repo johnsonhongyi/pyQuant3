@@ -114,6 +114,7 @@ class SignalEntry:
         'tdx_label', 'tdx_boost', 'early_launch_boost',
         'tdx_price', 'tdx_time_str', 'promote_reason',
         'signal_source', 'signal_tag',
+        'dragon_role', 'dragon_buy_type', 'dragon_reason', 'dragon_amount_yi',
         '_date_str',
     ]
 
@@ -148,7 +149,13 @@ class SignalEntry:
         self.tdx_time_str = ''
         self.promote_reason = ''
         self.signal_source = 'ATS'  # 'ATS' / 'TDX' / 'FAVORITE' / 'MULTI_PERIOD'
-        self.signal_tag = ''        # 分类标记 ('⭐ 重点关注', '🔔 TDX 5均金叉10', '🚀 极点起爆' 等)
+        self.signal_tag = ''
+
+        # 🐉 资金主线与真龙角色属性 (SSOT)
+        self.dragon_role = ''
+        self.dragon_buy_type = ''
+        self.dragon_reason = ''
+        self.dragon_amount_yi = 0.0        # 分类标记 ('⭐ 重点关注', '🔔 TDX 5均金叉10', '🚀 极点起爆' 等)
 
         # 状态变更历史
         self.state_history = [{
@@ -209,6 +216,10 @@ class SignalEntry:
             'signal_source': getattr(self, 'signal_source', 'ATS'),
             'signal_tag': getattr(self, 'signal_tag', ''),
             'tdx_label': getattr(self, 'tdx_label', ''),
+            'dragon_role': getattr(self, 'dragon_role', ''),
+            'dragon_buy_type': getattr(self, 'dragon_buy_type', ''),
+            'dragon_reason': getattr(self, 'dragon_reason', ''),
+            'dragon_amount_yi': getattr(self, 'dragon_amount_yi', 0.0),
             'date': self._date_str,
         }
 
@@ -362,12 +373,15 @@ class SignalLedger:
         if loaded_count > 0:
             print(f"[SignalLedger] 跨日继承: 成功恢复 {loaded_count} 只昨日 WATCH/TRADE 精选标的")
 
-    def record_signal(self, code, name, price, pct, deviation, row=None, volume_score=0.0, signal_source='ATS', signal_tag=''):
+    def record_signal(self, code, name, price, pct, deviation, row=None, volume_score=0.0,
+                      signal_source='ATS', signal_tag='', dragon_role='',
+                      dragon_buy_type='', dragon_reason='', dragon_amount_yi=0.0):
         """发现新信号或更新已有信号
 
         核心逻辑:
         - 新信号 → 写入账本，锁定首次发现时间并打上特殊分类标记
         - 已有信号 → 仅更新最新价格/涨幅，不改变首次发现时间
+        - 🚀 双轨准入通道 (SSOT): 原有 MA20 回调通道 + 真龙主升破格准入通道
 
         Args:
             code: 股票代码
@@ -379,6 +393,7 @@ class SignalLedger:
             volume_score: 量能评分（由 VolumeProfiler 计算）
             signal_source: 信号来源 ('ATS' / 'TDX' / 'FAVORITE' / 'MULTI_PERIOD')
             signal_tag: 特殊分类标记 ('⭐ 重点关注', '🔔 TDX 5均金叉10', '🚀 极点起爆' 等)
+            dragon_role: 资金真龙角色 ('👑 空间高度龙', '🛡️ 趋势容量中军', '🚀 主线板块先锋' 等)
 
         Returns:
             SignalEntry or None
@@ -387,13 +402,31 @@ class SignalLedger:
 
         # ⚡ 高效获取重点关注集合 (利用缓存, 0ms)
         fav_stocks = self.get_favorite_stocks_set()
-        is_fav = str(code).strip() in fav_stocks
+        code_clean = str(code).strip().zfill(6)
+        is_fav = str(code).strip() in fav_stocks or code_clean in fav_stocks
+
+        # 🐉 真龙判定 (空间龙/容量中军/主线先锋不受 MA20 偏离度上限限制)
+        is_dragon = bool(dragon_role)
+        if not is_dragon:
+            try:
+                from ats.capital_dragon_engine import CapitalDragonEngine
+                cde = CapitalDragonEngine.get_instance()
+                if cde.is_true_dragon(code_clean):
+                    is_dragon = True
+                    d_info = cde.get_dragon_info(code_clean)
+                    if d_info:
+                        dragon_role = d_info.get("role", "")
+                        dragon_buy_type = d_info.get("action_type", "")
+                        dragon_reason = d_info.get("reason", "")
+                        dragon_amount_yi = d_info.get("amount_yi", 0.0)
+            except Exception:
+                is_dragon = False
 
         if row is not None and 'name' in row and str(row['name']).strip():
             name = str(row['name']).strip()
 
-        # 偏离度筛选（重点关注股票不受此限制，防止消失）
-        if not is_fav and (deviation < self.DEVIATION_MIN or deviation > self.DEVIATION_MAX):
+        # 偏离度筛选（重点关注股票与真龙股票不受偏离度上限限制，主升浪真龙破格准入）
+        if not is_fav and not is_dragon and (deviation < self.DEVIATION_MIN or deviation > self.DEVIATION_MAX):
             # 已存在的非关注信号如果严重破位，标记为 INACTIVE
             if code in self.entries and deviation < self.DEVIATION_EVICT:
                 entry = self.entries[code]
@@ -409,23 +442,32 @@ class SignalLedger:
             entry.signal_source = signal_source or entry.signal_source
             if signal_tag:
                 entry.signal_tag = signal_tag
+            if is_dragon:
+                entry.dragon_role = dragon_role or getattr(entry, 'dragon_role', '')
+                entry.dragon_buy_type = dragon_buy_type or getattr(entry, 'dragon_buy_type', '')
+                entry.dragon_reason = dragon_reason or getattr(entry, 'dragon_reason', '')
+                entry.dragon_amount_yi = dragon_amount_yi or getattr(entry, 'dragon_amount_yi', 0.0)
+                if not entry.signal_tag and entry.dragon_role:
+                    entry.signal_tag = entry.dragon_role
 
-            # 如果之前是 INACTIVE 但现在回到范围内，或被设为重点关注，恢复为 RADAR/WATCH
+            # 如果之前是 INACTIVE 但现在回到范围内，或被设为重点关注/真龙，恢复为 RADAR/WATCH
             if entry.tier == 'INACTIVE':
-                entry.tier = 'WATCH' if is_fav else 'RADAR'
+                entry.tier = 'WATCH' if (is_fav or is_dragon) else 'RADAR'
                 entry.state_history.append({
                     'ts': time.time(),
                     'action': 'REACTIVATED',
-                    'reason': f'重点关注或偏离度回到范围: {deviation:.2f}%',
+                    'reason': f'重点关注/真龙或偏离度回到范围: {deviation:.2f}%',
                 })
-            elif is_fav and entry.tier == 'RADAR':
-                entry.promote('WATCH', reason='⭐ 设为重点关注自动晋级')
+            elif (is_fav or is_dragon) and entry.tier == 'RADAR':
+                entry.promote('WATCH', reason=f'⭐ 设为重点关注或真龙自动晋级 ({dragon_role or "重点标的"})')
 
             # 重新计算优先级评分（使用首次发现时间，确保早期信号优先级不变）
             entry.priority_score = self._compute_priority(entry, row)
+            if is_dragon:
+                entry.priority_score = max(entry.priority_score, 88.0) # 真龙保底优先级
 
-            # 检查假异动掉队降级 (跌破 VWAP 且高点回落掉队)
-            if row is not None and entry.tier == 'WATCH' and not is_fav:
+            # 检查假异动掉队降级 (跌破 VWAP 且高点回落掉队，真龙与重点关注保护)
+            if row is not None and entry.tier == 'WATCH' and not is_fav and not is_dragon:
                 try:
                     vwap = float(row.get('vwap', row.get('avprice', row.get('avg_p', row.get('mean_price', row.get('avg_price', 0.0))))))
                     if vwap <= 0 and 'amount' in row and 'volume' in row:
@@ -453,11 +495,19 @@ class SignalLedger:
             phase = _detect_phase()
             entry = SignalEntry(code, name, price, pct, deviation, phase)
             entry.signal_source = signal_source
-            entry.signal_tag = signal_tag
-            if is_fav:
+            entry.signal_tag = signal_tag or (dragon_role if is_dragon else '')
+            entry.dragon_role = dragon_role
+            entry.dragon_buy_type = dragon_buy_type
+            entry.dragon_reason = dragon_reason
+            entry.dragon_amount_yi = dragon_amount_yi
+
+            if is_fav or is_dragon:
                 entry.tier = 'WATCH'
+                entry.promote_reason = f'⭐ 重点关注或真龙直接晋级 ({dragon_role or "重点标的"})'
             entry.volume_score = volume_score
             entry.priority_score = self._compute_priority(entry, row)
+            if is_dragon:
+                entry.priority_score = max(entry.priority_score, 88.0)
 
             self.entries[code] = entry
             self._signal_count += 1

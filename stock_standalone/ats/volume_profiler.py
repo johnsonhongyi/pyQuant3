@@ -374,31 +374,49 @@ class VolumeProfiler:
             sec_momentum = self.sectors[sec]
             sec_momentum.active_count += 1
             
-            # 认领板块内首发最强（首次放量最早且量能分最高）的股票为带队龙头
+            # 认领板块内首发最强（真龙属性最高、首次放量最早且量能分最高）的股票为带队龙头
             vol_score = profile.volume_score
             t_self = profile.first_surge_ts
             
+            # 检查是否为 CapitalDragonEngine 权威识别的真龙
+            is_self_dragon = False
+            try:
+                from ats.capital_dragon_engine import CapitalDragonEngine
+                is_self_dragon = CapitalDragonEngine.get_instance().is_true_dragon(code)
+            except Exception:
+                is_self_dragon = False
+
             if sec_momentum.leader_code is None:
                 sec_momentum.leader_code = code
                 sec_momentum.leader_score = vol_score
                 sec_momentum.leader_first_seen_ts = t_self
+                sec_momentum.is_leader_dragon = is_self_dragon
             else:
                 t_leader = sec_momentum.leader_first_seen_ts
+                is_leader_dragon = getattr(sec_momentum, 'is_leader_dragon', False)
                 is_better = False
                 
-                if t_self is not None and t_leader is not None:
-                    if t_self < t_leader - 30:  # 提前 30 秒以上启动为优
-                        is_better = True
-                    elif abs(t_self - t_leader) <= 120 and vol_score > sec_momentum.leader_score:
-                        # 2分钟内同时启动，看量能分强弱
-                        is_better = True
-                elif t_self is not None:
+                # 规则 1: 真龙属性压倒普通个股
+                if is_self_dragon and not is_leader_dragon:
                     is_better = True
+                elif not is_self_dragon and is_leader_dragon:
+                    is_better = False
+                else:
+                    # 规则 2: 同级别下看启动时序与量能分
+                    if t_self is not None and t_leader is not None:
+                        if t_self < t_leader - 30:  # 提前 30 秒以上启动为优
+                            is_better = True
+                        elif abs(t_self - t_leader) <= 120 and vol_score > sec_momentum.leader_score:
+                            # 2分钟内同时启动，看量能分强弱
+                            is_better = True
+                    elif t_self is not None:
+                        is_better = True
                     
                 if is_better:
                     sec_momentum.leader_code = code
                     sec_momentum.leader_score = vol_score
                     sec_momentum.leader_first_seen_ts = t_self
+                    sec_momentum.is_leader_dragon = is_self_dragon
                     
         # 2. 标记跟风与龙头的加权关系
         for code, profile in self.profiles.items():

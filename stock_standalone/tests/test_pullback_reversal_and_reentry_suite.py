@@ -317,6 +317,9 @@ def test_sector_column_etf_display_and_radar_dialog():
     assert sec_item_down.raw_val == 25.0
 
     # 验证 SectorETFRadarDialog 初始化与数据加载 (20大赛道)
+    from ats.ui.styles import save_config_node
+    save_config_node("sector_etf_radar_sort_col_v2", None)
+    save_config_node("sector_etf_radar_sort_order_v2", None)
     radar_dlg = SectorETFRadarDialog(dialog)
     assert radar_dlg.table.rowCount() >= 20
     assert radar_dlg.table.columnCount() == 18
