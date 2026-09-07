@@ -204,7 +204,12 @@ class TestCapitalDragonPanelIntegration(unittest.TestCase):
         self.assertTrue(self.panel.extreme_perf_mode)
         self.assertIn("开", self.panel.btn_extreme_perf.text())
 
-        # 点击切换为关闭
+        # 验证工具栏不再包含取消的 3 个冗余快捷按钮 (界面整洁不截断)
+        self.assertFalse(hasattr(self.panel, "btn_limit_up"))
+        self.assertFalse(hasattr(self.panel, "btn_hot_sector"))
+        self.assertFalse(hasattr(self.panel, "btn_dragon_mon"))
+
+        # 点击切换为关闭 (全量模式)
         self.panel.btn_extreme_perf.click()
         self.assertFalse(self.panel.extreme_perf_mode)
         self.assertIn("关", self.panel.btn_extreme_perf.text())
@@ -262,7 +267,7 @@ class TestCapitalDragonPanelIntegration(unittest.TestCase):
         # 3. 验证状态栏包含加速汇总统计与极限性能标签
         stats_text = self.panel.lbl_stats.text()
         self.assertIn("⚡加速:", stats_text)
-        self.assertIn("[⚡极限性能]", stats_text)
+        self.assertIn("⚡极限性能: 开", stats_text)
 
 
 if __name__ == "__main__":

@@ -253,50 +253,17 @@ class CapitalDragonPanel(QWidget):
         self.search_input.textChanged.connect(self._apply_filter)
         toolbar_layout.addWidget(self.search_input)
 
-        self.btn_limit_up = QPushButton("🔥 涨停天梯")
-        self.btn_limit_up.setStyleSheet("""
-            QPushButton {
-                background-color: #3d1414; color: #ff5555; font-weight: bold;
-                border: 1px solid #ff4444; border-radius: 3px; padding: 3px 8px; font-size: 8.5pt;
-            }
-            QPushButton:hover { background-color: #ff4444; color: #000000; }
-        """)
-        self.btn_limit_up.clicked.connect(self._on_click_limit_up)
-        toolbar_layout.addWidget(self.btn_limit_up)
-
-        self.btn_hot_sector = QPushButton("📊 板块雷达")
-        self.btn_hot_sector.setStyleSheet("""
-            QPushButton {
-                background-color: #1a2a1a; color: #00ff88; font-weight: bold;
-                border: 1px solid #00ff88; border-radius: 3px; padding: 3px 8px; font-size: 8.5pt;
-            }
-            QPushButton:hover { background-color: #00ff88; color: #000000; }
-        """)
-        self.btn_hot_sector.clicked.connect(self._on_click_hot_sector)
-        toolbar_layout.addWidget(self.btn_hot_sector)
-
-        self.btn_dragon_mon = QPushButton("🐉 加速龙头")
-        self.btn_dragon_mon.setStyleSheet("""
-            QPushButton {
-                background-color: #2b1f0e; color: #ffd700; font-weight: bold;
-                border: 1px solid #ffd700; border-radius: 3px; padding: 3px 8px; font-size: 8.5pt;
-            }
-            QPushButton:hover { background-color: #ffd700; color: #000000; }
-        """)
-        self.btn_dragon_mon.clicked.connect(self._on_click_dragon_mon)
-        toolbar_layout.addWidget(self.btn_dragon_mon)
-
-        # ⚡ 极限性能模式控制开关 (零卡顿/自适应精选)
+        # ⚡ 极限性能模式控制开关 (开启精选 Top 30，关闭展示全部 300+ 全量候选池)
         self.extreme_perf_mode = True
         self.btn_extreme_perf = QPushButton("⚡ 极限性能: 开")
         self.btn_extreme_perf.setStyleSheet("""
             QPushButton {
                 background-color: #1a2a1a; color: #00ff88; font-weight: bold;
-                border: 1px solid #00ff88; border-radius: 3px; padding: 3px 8px; font-size: 8.5pt;
+                border: 1px solid #00ff88; border-radius: 3px; padding: 3px 10px; font-size: 8.5pt;
             }
             QPushButton:hover { background-color: #00ff88; color: #000000; }
         """)
-        self.btn_extreme_perf.setToolTip("开启极限性能模式：原位更新零重绘，精选核心真龙，彻底杜绝主线程卡顿")
+        self.btn_extreme_perf.setToolTip("开启：精选核心真龙(Top 30/收敛容量中军)，原位批量图元零卡顿；\n关闭：展示全部 300+ 全量候选池。")
         self.btn_extreme_perf.clicked.connect(self._toggle_extreme_perf)
         toolbar_layout.addWidget(self.btn_extreme_perf)
 
@@ -349,14 +316,16 @@ class CapitalDragonPanel(QWidget):
             return
 
         # 特征签名检查，防无意义重绘
-        dragons = report.get("dragon_records", [])
+        is_extreme = getattr(self, 'extreme_perf_mode', True)
+        key = "dragon_records_converged" if is_extreme else "dragon_records_all"
+        dragons = report.get(key, report.get("dragon_records", []))
         top_secs = report.get("top_sectors", [])
         sig_tuple = (
             len(dragons),
             tuple(d["code"] for d in dragons[:15]),
             tuple(round(d["pct"], 1) for d in dragons[:15]),
             tuple(s["name"] for s in top_secs[:3]),
-            getattr(self, 'extreme_perf_mode', True)
+            is_extreme
         )
 
         if sig_tuple == self._last_sig:
@@ -437,7 +406,15 @@ class CapitalDragonPanel(QWidget):
             else:
                 w["frame"].setVisible(False)
 
-    def _render_table(self, dragons: List[Dict[str, Any]]):
+    def _render_table(self, dragons: Optional[List[Dict[str, Any]]] = None):
+        if dragons is None:
+            if self._last_report:
+                is_extreme = getattr(self, 'extreme_perf_mode', True)
+                key = "dragon_records_converged" if is_extreme else "dragon_records_all"
+                dragons = self._last_report.get(key, self._last_report.get("dragon_records", []))
+            else:
+                dragons = []
+
         self._is_updating = True
         self.table.setUpdatesEnabled(False)
         try:
@@ -460,7 +437,8 @@ class CapitalDragonPanel(QWidget):
                         continue
                 matched_records.append(d)
 
-            # ⚡ 极限性能模式：精选 Top 30 核心真龙，极大提升高频渲染丝滑度
+            # ⚡ 极限性能模式开启时：精选 Top 30 核心真龙，极大提升高频渲染丝滑度
+            # 关闭时：显示优化前的全部 300+ 全量候选池，不做 Top 30 截断
             if getattr(self, 'extreme_perf_mode', True) and not filter_text:
                 matched_records = matched_records[:30]
 
@@ -613,18 +591,28 @@ class CapitalDragonPanel(QWidget):
                 it_reason.setForeground(QBrush(QColor("#b0bec5")))
                 self.table.setItem(row_idx, 12, it_reason)
 
+            is_extreme = getattr(self, 'extreme_perf_mode', True)
             dual_cnt = self._last_report.get('dual_accel_count', 0) if self._last_report else 0
             gap_cnt = self._last_report.get('gap_accel_count', 0) if self._last_report else 0
             ol_cnt = self._last_report.get('open_low_count', 0) if self._last_report else 0
             accel_tot = dual_cnt + gap_cnt + ol_cnt
             accel_str = f" | ⚡加速: {accel_tot}只 (👑双加速:{dual_cnt} 🚀缺口:{gap_cnt})" if accel_tot > 0 else ""
-            perf_tag = " <font color='#00ff88'>[⚡极限性能]</font>" if getattr(self, 'extreme_perf_mode', True) else ""
+            perf_tag = " <font color='#00ff88'>[⚡极限性能: 开]</font>" if is_extreme else " <font color='#ffd700'>[⚡极限性能: 关 (全量300+)]</font>"
+
+            if is_extreme:
+                sp_cnt = self._last_report.get('space_dragon_count', 0) if self._last_report else 0
+                mc_cnt = self._last_report.get('midcap_dragon_count', 0) if self._last_report else 0
+                pn_cnt = self._last_report.get('pioneer_dragon_count', 0) if self._last_report else 0
+            else:
+                sp_cnt = self._last_report.get('all_space_count', self._last_report.get('space_dragon_count', 0)) if self._last_report else 0
+                mc_cnt = self._last_report.get('all_midcap_count', self._last_report.get('midcap_dragon_count', 0)) if self._last_report else 0
+                pn_cnt = self._last_report.get('all_pioneer_count', self._last_report.get('pioneer_dragon_count', 0)) if self._last_report else 0
 
             self.lbl_stats.setText(
                 f"🐉 资金主线龙头已就位: <b>{len(matched_records)}</b> 只 "
-                f"(空间龙: {self._last_report.get('space_dragon_count', 0)} | "
-                f"容量中军: {self._last_report.get('midcap_dragon_count', 0)} | "
-                f"主线先锋: {self._last_report.get('pioneer_dragon_count', 0)})"
+                f"(空间龙: {sp_cnt} | "
+                f"容量中军: {mc_cnt} | "
+                f"主线先锋: {pn_cnt})"
                 f"{accel_str}{perf_tag}"
             )
 
@@ -639,14 +627,14 @@ class CapitalDragonPanel(QWidget):
             self._is_updating = False
 
     def _toggle_extreme_perf(self):
-        """切换极限性能模式 (精选 Top 30，极速无阻滞渲染)"""
+        """切换极限性能模式 (开启精选 Top 30，关闭展示全部 300+ 全量候选池)"""
         self.extreme_perf_mode = not getattr(self, 'extreme_perf_mode', True)
         if self.extreme_perf_mode:
             self.btn_extreme_perf.setText("⚡ 极限性能: 开")
             self.btn_extreme_perf.setStyleSheet("""
                 QPushButton {
                     background-color: #1a2a1a; color: #00ff88; font-weight: bold;
-                    border: 1px solid #00ff88; border-radius: 3px; padding: 3px 8px; font-size: 8.5pt;
+                    border: 1px solid #00ff88; border-radius: 3px; padding: 3px 10px; font-size: 8.5pt;
                 }
                 QPushButton:hover { background-color: #00ff88; color: #000000; }
             """)
@@ -654,16 +642,19 @@ class CapitalDragonPanel(QWidget):
             self.btn_extreme_perf.setText("⚡ 极限性能: 关")
             self.btn_extreme_perf.setStyleSheet("""
                 QPushButton {
-                    background-color: #2a2a2a; color: #888888; font-weight: normal;
-                    border: 1px solid #555555; border-radius: 3px; padding: 3px 8px; font-size: 8.5pt;
+                    background-color: #2b1f0e; color: #ffd700; font-weight: bold;
+                    border: 1px solid #ffd700; border-radius: 3px; padding: 3px 10px; font-size: 8.5pt;
                 }
-                QPushButton:hover { background-color: #3a3a3a; color: #ffffff; }
+                QPushButton:hover { background-color: #ffd700; color: #000000; }
             """)
         self._apply_filter()
 
     def _apply_filter(self):
         if self._last_report:
-            self._render_table(self._last_report.get("dragon_records", []))
+            is_extreme = getattr(self, 'extreme_perf_mode', True)
+            key = "dragon_records_converged" if is_extreme else "dragon_records_all"
+            records = self._last_report.get(key, self._last_report.get("dragon_records", []))
+            self._render_table(records)
 
     def _on_row_clicked(self, item):
         row = item.row()

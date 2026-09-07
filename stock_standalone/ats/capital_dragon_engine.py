@@ -282,15 +282,16 @@ class CapitalDragonEngine:
             ratio_t = 1.0
         ratio_t = max(0.05, min(ratio_t, 1.0))
 
-        # 3. 统计主线板块资金集聚度 (过滤掉所有大盘指数与ETF代码，保证纯正个股主线)
+        # 3. 统计主线板块资金集聚度 (板块聚合时过滤大盘指数以纯化板块属性，个股/指数候选池保留全部标的)
         sector_stats = {}
         names_list = df['name'].astype(str).tolist() if 'name' in df.columns else [''] * len(df)
         is_idx_mask = [is_index_or_fund(c, names_list[i]) for i, c in enumerate(codes_series)]
-        valid_mask = (prices > 0.0) & (~pd.Series(is_idx_mask, index=df.index))
+        valid_stock_mask = (prices > 0.0) & (~pd.Series(is_idx_mask, index=df.index))
+        valid_all_mask = (prices > 0.0)
         
         # 预先向量化计算个股加速结构
         accel_cache = {}
-        for idx in df[valid_mask].index:
+        for idx in df[valid_all_mask].index:
             code_str = codes_series.loc[idx]
             op = float(open_s.loc[idx])
             lp = float(low_s.loc[idx])
@@ -329,7 +330,7 @@ class CapitalDragonEngine:
                 "accel_tag": accel_t
             }
 
-        for idx in df[valid_mask].index:
+        for idx in df[valid_stock_mask].index:
             code_str = codes_series.loc[idx]
             sec = sectors.loc[idx]
             if not sec or sec in ('--', 'nan', '未知', '其它', '其他', '0', '0.0', 'None'):
@@ -450,12 +451,11 @@ class CapitalDragonEngine:
         dragon_codes_set = set()
         trap_codes_set = set()
 
-        # 计算全市场成交额排名前 35 (容量中军候选池，严格避免泛滥)
-        top_amt_df = df[valid_mask].sort_values(by=amt_col, ascending=False) if amt_col else df[valid_mask]
+        # 计算全市场成交额排名前 35 (容量中军候选池，用于极限性能模式精准遴选)
+        top_amt_df = df[valid_all_mask].sort_values(by=amt_col, ascending=False) if amt_col else df[valid_all_mask]
         top_35_amt_codes = set(codes_series.loc[top_amt_df.index[:35]])
-        midcap_count = 0  # 严格控制容量中军总数不超过 20 只
 
-        for idx in df[valid_mask].index:
+        for idx in df[valid_all_mask].index:
             code_str = codes_series.loc[idx]
             name_str = str(df.loc[idx, 'name']) if 'name' in df.columns else code_str
             price_val = float(prices.loc[idx])
@@ -464,10 +464,6 @@ class CapitalDragonEngine:
             turnover_val = float(turnover_s.loc[idx])
             sec_str = str(sectors.loc[idx])
             
-            # 严格过滤大盘指数与基金代码
-            if is_index_or_fund(code_str, name_str):
-                continue
-
             dff = float(dff_s.loc[idx])
             dff2 = float(dff2_s.loc[idx])
             dff3 = float(dff3_s.loc[idx])
@@ -480,6 +476,12 @@ class CapitalDragonEngine:
                 if ts["name"] in sec_str:
                     matched_main_sec = ts["name"]
                     break
+
+            # 不再过滤大盘综合指数与宽基ETF，保留大盘与板块综合指数便于操盘手即时观测全景大势
+            clean_sec = sec_str.split(';')[0].split(',')[0].strip() if sec_str not in ('0', '', 'None', 'nan') else ""
+            final_sec = matched_main_sec or clean_sec
+            if not final_sec:
+                final_sec = "综合指数/ETF" if is_index_or_fund(code_str, name_str) else "主流活跃"
 
             # 提取连板信息
             ladder_info = ladder_dict.get(code_str, {})
@@ -533,9 +535,8 @@ class CapitalDragonEngine:
                     action_tip = "高位分歧承接，关注首阴或日内分时均线低吸机会"
                     reason = f"空间高度龙盘中分歧 ({l_days}板预期), 资金换手承接充分"
 
-            # 2. 【🛡️ 趋势容量中军】：成交额 Top 35 且通道多头向上的机构游资合力大票 (最多遴选 20 只绝对中军)
-            elif code_str in top_35_amt_codes and has_channel_base and amt_yi >= 5.0 and midcap_count < 20:
-                midcap_count += 1
+            # 2. 【🛡️ 趋势容量中军】：成交额排名前 35 或成交额>=8亿，且通道多头向上的机构游资合力大票 (含大盘宽基ETF)
+            elif (code_str in top_35_amt_codes or amt_yi >= 8.0) and has_channel_base:
                 dragon_role = "🛡️ 趋势容量中军"
                 role_priority = 90
                 supp_ref = max(ch_supp, ma20_val) if ch_supp > 0 else (ma20_val if ma20_val > 0 else round(price_val * 0.95, 2))
@@ -606,7 +607,7 @@ class CapitalDragonEngine:
                     "name": name_str,
                     "role": dragon_role,
                     "priority": role_priority,
-                    "sector": matched_main_sec or sec_str.split(';')[0].split(',')[0],
+                    "sector": final_sec,
                     "price": price_val,
                     "pct": pct_val,
                     "amount_yi": round(amt_yi, 2),
@@ -625,28 +626,48 @@ class CapitalDragonEngine:
                     "accel_tag": accel_tag,
                     "is_dual_accel": is_dual_accel,
                     "is_gap_accel": is_gap_accel,
-                    "is_open_low_accel": is_open_low_accel
+                    "is_open_low_accel": is_open_low_accel,
+                    "is_top35_amt": (code_str in top_35_amt_codes)
                 })
 
-        # 排序：优先按角色优先级降序，再按成交额与涨幅
-        dragon_records.sort(key=lambda x: (x["priority"], x["amount_yi"], x["pct"]), reverse=True)
-        # 精准遴选 Top 50 核心真龙 (杜绝 400+ 只冗余导致的界面渲染雪崩与主线程卡顿)
-        dragon_records = dragon_records[:50]
+        # 1. 优化前的全部 300+ 只全量候选池 (不限制容量中军数量，不截断 Top 50)
+        dragon_records_all = list(dragon_records)
+        dragon_records_all.sort(key=lambda x: (x["priority"], x["amount_yi"], x["pct"]), reverse=True)
+
+        # 2. 精准收敛池 (开启极限性能模式时生效：容量中军严格从 top_35_amt 中精选 Top 20 绝对中军，总池收敛至 Top 50)
+        converged = []
+        midcap_kept = 0
+        for r in dragon_records_all:
+            if "容量" in r["role"]:
+                if r.get("is_top35_amt", False) and midcap_kept < 20:
+                    midcap_kept += 1
+                    converged.append(r)
+            else:
+                converged.append(r)
+        converged.sort(key=lambda x: (x["priority"], x["amount_yi"], x["pct"]), reverse=True)
+        dragon_records_converged = converged[:50]
 
         report = {
             "timestamp": now,
             "calc_cost_ms": round((time.time() - t0) * 1000, 1),
             "top_sectors": top_sectors[:5],
-            "dragon_records": dragon_records,
+            "dragon_records": dragon_records_converged,
+            "dragon_records_converged": dragon_records_converged,
+            "dragon_records_all": dragon_records_all,
             "dragon_codes_set": dragon_codes_set,
             "trap_codes_set": trap_codes_set,
-            "space_dragon_count": sum(1 for r in dragon_records if "空间" in r["role"]),
-            "midcap_dragon_count": sum(1 for r in dragon_records if "容量" in r["role"]),
-            "pioneer_dragon_count": sum(1 for r in dragon_records if "先锋" in r["role"]),
-            "dual_accel_count": sum(1 for r in dragon_records if "双加速" in r.get("accel_tag", "")),
-            "gap_accel_count": sum(1 for r in dragon_records if "缺口加速" in r.get("accel_tag", "")),
-            "open_low_count": sum(1 for r in dragon_records if "光脚加速" in r.get("accel_tag", "")),
-            "accel_total_count": sum(1 for r in dragon_records if r.get("accel_tag"))
+            "space_dragon_count": sum(1 for r in dragon_records_converged if "空间" in r["role"]),
+            "midcap_dragon_count": sum(1 for r in dragon_records_converged if "容量" in r["role"]),
+            "pioneer_dragon_count": sum(1 for r in dragon_records_converged if "先锋" in r["role"]),
+            "all_space_count": sum(1 for r in dragon_records_all if "空间" in r["role"]),
+            "all_midcap_count": sum(1 for r in dragon_records_all if "容量" in r["role"]),
+            "all_pioneer_count": sum(1 for r in dragon_records_all if "先锋" in r["role"]),
+            "all_total_count": len(dragon_records_all),
+            "converged_total_count": len(dragon_records_converged),
+            "dual_accel_count": sum(1 for r in dragon_records_converged if "双加速" in r.get("accel_tag", "")),
+            "gap_accel_count": sum(1 for r in dragon_records_converged if "缺口加速" in r.get("accel_tag", "")),
+            "open_low_count": sum(1 for r in dragon_records_converged if "光脚加速" in r.get("accel_tag", "")),
+            "accel_total_count": sum(1 for r in dragon_records_converged if r.get("accel_tag"))
         }
 
         with self._cache_lock:

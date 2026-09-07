@@ -148,9 +148,17 @@ class TestCapitalDragonEngine(unittest.TestCase):
         report = engine.analyze_capital_dragon_universe(df, force=True)
 
         dragon_codes = report["dragon_codes_set"]
-        # 指数绝不能进入龙头池
-        self.assertNotIn("399005", dragon_codes)
-        self.assertNotIn("999999", dragon_codes)
+        # 指数与基金保留在候选池中，便于操盘手即时纵览全景综合走势
+        self.assertIn("399005", dragon_codes)
+        self.assertIn("999999", dragon_codes)
+        info_399 = engine.get_dragon_info("399005")
+        self.assertIsNotNone(info_399)
+        self.assertEqual(info_399.get("sector"), "综合指数/ETF")
+
+        # 验证同时包含全量池与极限性能收敛池
+        self.assertIn("dragon_records_all", report)
+        self.assertIn("dragon_records_converged", report)
+        self.assertGreaterEqual(len(report["dragon_records_all"]), len(report["dragon_records_converged"]))
 
         # 验证中际旭创被标记为双加速
         zj_info = engine.get_dragon_info("300308")

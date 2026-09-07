@@ -1,3 +1,23 @@
+## 2026-09-07 21:55
+- [x] **全链路落地【大盘综合指数/宽基ETF保留 + 【⚡极限性能】开关双态驱动 (开:精选Top30/收敛中军 vs 关:优化前全量300+) + 工具栏冗余快捷按钮精简】(SSOT) (`stock_standalone/ats/capital_dragon_engine.py`, `stock_standalone/ats/ui/capital_dragon_panel.py`, `stock_standalone/tests/test_capital_dragon_engine.py`, `stock_standalone/tests/test_capital_dragon_panel_integration.py`)**：
+    - [x] **保留大盘综合指数与宽基ETF (`ats/capital_dragon_engine.py`)**：
+        1. **指数与ETF保留纳入候选池**：解开 `is_index_or_fund` 丢弃限制，保留 399xxx、999xxx、899xxx、000001 及 159915 等宽基指数与 ETF 进入真龙/中军候选池，方便操盘手即时观测大盘与板块综合走势；
+        2. **所属主线规范呈现**：若指数无具体行业，自动识别为 `综合指数/ETF`，彻底消除显示 `0` 的缺陷；
+        3. **板块纯化隔离**：板块聚合时继续通过 `valid_stock_mask` 剔除大盘指数，防止大盘指数污染纯正行业主线；
+    - [x] **【⚡ 极限性能】开关双态驱动（开：精准收敛精选Top30 vs 关：全量300+展示）(`ats/capital_dragon_engine.py`, `ats/ui/capital_dragon_panel.py`)**：
+        1. **双池统一单趟测算**：`CapitalDragonEngine` 在同一运算周期内生成 `dragon_records_all`（全量 300+ 只未截断池）与 `dragon_records_converged`（容量中军 Top 20，总真龙 Top 50 精准收敛池），零额外 CPU 开销；
+        2. **开启状态 (默认)**：启用精准收敛，容量中军严格限制为成交额排名前 35 中的 Top 20 绝对中军，总真龙精简为 Top 50，表格渲染呈现 Top 30 核心真龙，启用图元批量更新，零卡顿；
+        3. **关闭状态**：显示优化前的全部 300+ 只全量候选池，不做 Top 20/Top 50/Top 30 截断，状态栏标注 `[⚡极限性能: 关 (全量300+)]`，操盘手一键点击 0 延迟无缝切换；
+    - [x] **工具栏冗余快捷按钮精简与防截断优化 (`ats/ui/capital_dragon_panel.py`)**：
+        1. **取消工具栏 3 个多余快捷按钮**：移除面板工具栏的 `🔥 涨停天梯`、`📊 板块雷达`、`🐉 加速龙头`，避免与 ATS 主窗口已有快捷按钮重复；
+        2. **彻底解决按钮被截断挤压缺陷**：移除多余按钮后为 `[⚡ 极限性能: 开/关]` 与搜索框腾出充分横向空间，按钮完全展开不再被窗口右边缘截断；
+        3. **右键菜单完整保留**：表格右键菜单依然保留涨停天梯、板块雷达等入口，操盘手操作高效顺畅；
+    - [x] **全链路自动化回归测试 100% 全部 PASSED**：
+        - `test_capital_dragon_engine.py`（3项全绿，覆盖指数保留、全量池与收敛池）；
+        - `test_capital_dragon_panel_integration.py`（6项全绿，覆盖双态切换、按钮取消与加速买点高亮）；
+        - `test_sector_aggregator_suite.py`（8项全绿）；
+        - 全套 17 项核心测试 100% 全部 PASSED！
+
 ## 2026-09-07 21:35
 - [x] **全链路落地【分时结构形态加速能力 (光脚/缺口/双加速) + 板块群起加速强度赋能 + ATS 极限性能模式根治卡顿】(SSOT) (`stock_standalone/ats/capital_dragon_engine.py`, `stock_standalone/ats/ui/capital_dragon_panel.py`, `stock_standalone/ats/sector_data_aggregator.py`, `stock_standalone/ats/ui/sector_detail_dialog.py`, `stock_standalone/tests/test_capital_dragon_engine.py`, `stock_standalone/tests/test_capital_dragon_panel_integration.py`)**：
     - [x] **建立分时结构形态加速计算中枢与真龙提权体系 (`ats/capital_dragon_engine.py`)**：
