@@ -178,6 +178,38 @@ class TestCapitalDragonEngine(unittest.TestCase):
         self.assertGreaterEqual(sec_cpo.get("accel_total_count", 0), 2)
         self.assertGreaterEqual(sec_cpo.get("dual_accel_count", 0), 1)
 
+    def test_virtual_vol_ratio_no_zero_bug(self):
+        """验证虚拟量比彻底根治 0.00x Bug：当某些非强势标的 vol_ratio 为 0 时，自动赋能投影或兜底 1.0"""
+        engine = CapitalDragonEngine.get_instance()
+        data = {
+            "000333": {"name": "美的集团", "close": 86.0, "percent": -1.0, "amount": 1.9e9, "vol_ratio": 0.0, "vol": 2e7, "lastv1d": 2e7},
+            "601988": {"name": "中国银行", "close": 6.4, "percent": -1.5, "amount": 1.8e9, "vol_ratio": 0.0, "vol": 3e8, "lastv1d": 3e8},
+            "601138": {"name": "工业富联", "close": 66.0, "percent": 4.5, "amount": 1.1e10, "vol_ratio": 1.52, "vol": 1e8, "lastv1d": 8e7}
+        }
+        df = pd.DataFrame.from_dict(data, orient='index')
+        vr_series = engine._get_virtual_vol_ratio(df)
+        self.assertEqual(vr_series.loc["601138"], 1.52)
+        # 美的集团与中国银行绝不允许出现 0.00x！必须 >= 0.1 且有效
+        self.assertGreaterEqual(float(vr_series.loc["000333"]), 0.5)
+        self.assertGreaterEqual(float(vr_series.loc["601988"]), 0.5)
+
+    def test_tdx_index_amount_correction_and_api(self):
+        """验证通达信 TDX API 接口对 399xxx, 999xxx, 899xxx 等指数成交额真实修正"""
+        engine = CapitalDragonEngine.get_instance()
+        # 测试直接调用 _fetch_tdx_index_data
+        idx_data = engine._fetch_tdx_index_data(["399006", "399001", "899050"])
+        if idx_data:
+            # 创业板指 399006 真实成交额约为 5000+ 亿 (严禁出现 563725.1亿 的点数乘股数异常值)
+            if "399006" in idx_data:
+                amt_399006 = idx_data["399006"]["amount_yi"]
+                self.assertGreater(amt_399006, 1000.0)
+                self.assertLess(amt_399006, 20000.0)
+            # 深证成指 399001 真实成交额约为 10000+ 亿 (严禁出现 8094494.2亿 异常值)
+            if "399001" in idx_data:
+                amt_399001 = idx_data["399001"]["amount_yi"]
+                self.assertGreater(amt_399001, 2000.0)
+                self.assertLess(amt_399001, 30000.0)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -238,7 +238,7 @@ def get_market_code(stock_code: str) -> int:
     2 -> 北京市场 (920, 83, 87, 88, 43, 82 等)
     """
     c = str(stock_code).strip().zfill(6)
-    if c.startswith(("920", "83", "87", "88", "43", "82")):
+    if c.startswith(("920", "89", "83", "87", "88", "43", "82")):
         return 2
     elif c.startswith(("60", "68", "99", "11", "51", "58", "90")):
         return 1

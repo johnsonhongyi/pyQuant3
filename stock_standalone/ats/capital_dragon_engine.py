@@ -100,6 +100,8 @@ class CapitalDragonEngine:
         self._cache_lock = threading.RLock()
         self._dragon_codes_set: Set[str] = set()
         self._trap_codes_set: Set[str] = set()
+        self._index_data_cache: Dict[str, Dict[str, float]] = {}
+        self._index_cache_ts: float = 0.0
 
     def get_cached_report(self, max_age: float = 3.0, df_check: Optional[pd.DataFrame] = None) -> Optional[Dict[str, Any]]:
         """获取最近缓存的分析报告 (零开销，极速，支持 df_check 校验避免跨数据集数据污染)"""
@@ -115,61 +117,125 @@ class CapitalDragonEngine:
                 return dict(self._cached_report)
         return None
 
+    def _fetch_tdx_index_data(self, index_codes: List[str]) -> Dict[str, Dict[str, float]]:
+        """
+        使用通达信原生 TDX API 接口 (TDXRealtimeFetcher) 获取大盘综合指数真实成交额与盘口数据 (带 5 秒轻量防抖缓存)
+        针对 399xxx (深市指数), 999xxx (通达信沪指), 899xxx (北证50), 000001 (上证指数), 159915 等标的
+        """
+        now = time.time()
+        if self._index_data_cache and (now - self._index_cache_ts < 5.0):
+            return dict(self._index_data_cache)
+
+        results = dict(self._index_data_cache)
+        try:
+            from ats.tdx_realtime_fetcher import TDXRealtimeFetcher
+            fetcher = TDXRealtimeFetcher.get_instance()
+
+            req_pairs = []
+            for c in index_codes:
+                c_clean = _clean_code(c)
+                if c_clean.startswith(('89', '920', '83', '87', '88', '43', '82')):
+                    mkt = 2  # 北交所 (如 899050 北证50)
+                elif c_clean.startswith(('60', '68', '99', '11', '51', '58', '90')):
+                    mkt = 1  # 上交所 (如 999999 上证指数, 510300 ETF)
+                elif c_clean == '000001':
+                    mkt = 1  # 000001 上证指数在通达信行情API中属于上海市场
+                else:
+                    mkt = 0  # 深交所 (如 399001 深成指, 399006 创业板指, 399005 中小100, 159915 创业板ETF)
+                req_pairs.append((mkt, c_clean))
+
+            if req_pairs:
+                with fetcher._conn_lock:
+                    if not fetcher._is_connected or not fetcher.api:
+                        fetcher.connect()
+                    if fetcher._is_connected and fetcher.api:
+                        quotes = fetcher.api.get_security_quotes(req_pairs)
+                        if quotes:
+                            for q in quotes:
+                                q_code = str(q.get('code', '')).strip().zfill(6)
+                                raw_amt = float(q.get('amount', 0.0) or 0.0)
+                                amt_yi = raw_amt / 1e8 if raw_amt > 1e7 else raw_amt
+                                p = float(q.get('price', 0.0) or 0.0)
+                                if amt_yi > 0:
+                                    results[q_code] = {
+                                        'amount_yi': amt_yi,
+                                        'price': p,
+                                        'last_close': float(q.get('last_close', 0.0) or 0.0),
+                                        'vol': float(q.get('vol', 0.0) or 0.0)
+                                    }
+            self._index_data_cache = results
+            self._index_cache_ts = now
+        except Exception as e_tdx:
+            logger.debug(f"[CapitalDragonEngine] TDX API fetch error: {e_tdx}")
+
+        return results
+
     def _get_virtual_vol_ratio(self, df: pd.DataFrame) -> pd.Series:
         """
         获取或计算全市场的虚拟量比序列 (SSOT)
         支持：
         1. 直接从 df 的 vol_ratio 列提取；
         2. 若 volume 列存在且中位数/均值在 0~20 之间（已被 calc_compute_volume 转换为虚拟量比强度），直接复用；
-        3. 若有原始成交量 (vol/volume) 与昨量 (lastv1d/last6vol)，结合 cct.get_work_time_ratio 实时按交易进度投影放大计算；
-        4. 兜底返回 1.0。
+        3. 对仍为 0 (<=0.05) 的股票，结合原始成交量 (vol/volume) 与昨量 (lastv1d/last6vol) 按交易进度动态投影放大；
+        4. 兜底返回 1.0 (基准量比)，严禁出现 0.00x。
         """
         if df is None or df.empty:
             return pd.Series(1.0, index=df.index if df is not None else [])
 
-        # 优先 1: 直接读取 vol_ratio / vr
+        res_vr = pd.Series(1.0, index=df.index)
+        has_extracted = False
+
+        # 优先 1: 读取 vol_ratio / vr / volume_ratio
         for col in ('vol_ratio', 'vr', 'volume_ratio'):
             if col in df.columns:
-                s = pd.to_numeric(df[col], errors='coerce').fillna(1.0)
+                s = pd.to_numeric(df[col], errors='coerce').fillna(0.0)
                 if (s > 0).any():
-                    return s.round(2)
+                    res_vr = s.copy()
+                    has_extracted = True
+                    break
 
         # 优先 2: 检查 volume 列是否已是虚拟量比（系统 data_utils.calc_compute_volume 注入特征：数值通常在 0.1 ~ 30 之间）
-        if 'volume' in df.columns:
+        if not has_extracted and 'volume' in df.columns:
             s_vol = pd.to_numeric(df['volume'], errors='coerce').fillna(0.0)
             if 0 < s_vol.max() <= 50.0 and s_vol.quantile(0.9) <= 15.0:
-                return s_vol.replace(0.0, 1.0).round(2)
+                res_vr = s_vol.copy()
+                has_extracted = True
 
-        # 优先 3: 结合日内交易时间比例进行向量化动态投影
-        try:
-            from JohnsonUtil import commonTips as cct
-            ratio_t = float(cct.get_work_time_ratio(resample='d'))
-        except Exception:
-            ratio_t = 1.0
-        ratio_t = max(0.05, min(ratio_t, 1.0))
+        # 优先 3: 对仍为 0 或极其微小 (<= 0.05) 的股票，结合日内交易时间比例进行向量化动态投影
+        need_calc_mask = (res_vr <= 0.05)
+        if need_calc_mask.any():
+            try:
+                from JohnsonUtil import commonTips as cct
+                ratio_t = float(cct.get_work_time_ratio(resample='d'))
+            except Exception:
+                ratio_t = 1.0
+            ratio_t = max(0.05, min(ratio_t, 1.0))
 
-        raw_vol = None
-        for v_col in ('vol', 'volume', 'trade_vol'):
-            if v_col in df.columns:
-                cand = pd.to_numeric(df[v_col], errors='coerce').fillna(0.0)
-                if (cand > 0).any():
-                    raw_vol = cand
-                    break
+            raw_vol = None
+            for v_col in ('vol', 'volume', 'trade_vol'):
+                if v_col in df.columns:
+                    cand = pd.to_numeric(df[v_col], errors='coerce').fillna(0.0)
+                    if (cand > 0).any():
+                        raw_vol = cand
+                        break
 
-        base_vol = None
-        for b_col in ('lastv1d', 'last6vol', 'l6vol', 'prev_vol', 'vol_ma5'):
-            if b_col in df.columns:
-                cand = pd.to_numeric(df[b_col], errors='coerce').fillna(0.0)
-                if (cand > 0).any():
-                    base_vol = cand.replace(0.0, np.nan)
-                    break
+            base_vol = None
+            for b_col in ('lastv1d', 'last6vol', 'l6vol', 'prev_vol', 'vol_ma5'):
+                if b_col in df.columns:
+                    cand = pd.to_numeric(df[b_col], errors='coerce').fillna(0.0)
+                    if (cand > 0).any():
+                        base_vol = cand.replace(0.0, np.nan)
+                        break
 
-        if raw_vol is not None and base_vol is not None:
-            proj_vol = raw_vol / ratio_t
-            vr = (proj_vol / base_vol).fillna(1.0).clip(0.1, 50.0).round(2)
-            return vr
+            if raw_vol is not None and base_vol is not None:
+                proj_vol = raw_vol / ratio_t
+                calc_vr = (proj_vol / base_vol).fillna(1.0).clip(0.1, 50.0)
+                res_vr.loc[need_calc_mask] = calc_vr.loc[need_calc_mask]
 
-        return pd.Series(1.0, index=df.index)
+        # 终极大兜底：所有 <= 0.05 的值强制置为 1.0 (正常基准)，杜绝显示 0.00x！
+        res_vr = res_vr.replace(0.0, 1.0)
+        res_vr[res_vr <= 0.05] = 1.0
+        return res_vr.clip(0.1, 50.0).round(2)
 
     def analyze_capital_dragon_universe(
         self,
@@ -288,6 +354,26 @@ class CapitalDragonEngine:
         is_idx_mask = [is_index_or_fund(c, names_list[i]) for i, c in enumerate(codes_series)]
         valid_stock_mask = (prices > 0.0) & (~pd.Series(is_idx_mask, index=df.index))
         valid_all_mask = (prices > 0.0)
+
+        # 针对 399xxx, 999xxx, 899xxx, 000001, 159915 等大盘指数从 TDX 接口获取真实成交额
+        idx_indices = [idx for i, idx in enumerate(df.index) if is_idx_mask[i]]
+        if idx_indices:
+            idx_codes_to_fetch = [codes_series.loc[idx] for idx in idx_indices]
+            tdx_idx_data = self._fetch_tdx_index_data(idx_codes_to_fetch)
+            for idx in idx_indices:
+                c_str = codes_series.loc[idx]
+                if c_str in tdx_idx_data:
+                    info = tdx_idx_data[c_str]
+                    real_amt = info.get('amount_yi', 0.0)
+                    if real_amt > 0:
+                        amts_yi.loc[idx] = real_amt
+                    real_vr = info.get('vol_ratio', 1.0)
+                    if real_vr > 0.05 and idx in vol_ratio_s.index:
+                        vol_ratio_s.loc[idx] = real_vr
+                else:
+                    # 兜底防御：若 TDX 暂未返回且 amts_yi 异常爆表 (>20000亿，说明是点数*股数异常乘积)
+                    if amts_yi.loc[idx] > 20000.0 and prices.loc[idx] > 0:
+                        amts_yi.loc[idx] = round(amts_yi.loc[idx] / prices.loc[idx] * 20.0, 1)
         
         # 预先向量化计算个股加速结构
         accel_cache = {}
@@ -451,9 +537,9 @@ class CapitalDragonEngine:
         dragon_codes_set = set()
         trap_codes_set = set()
 
-        # 计算全市场成交额排名前 35 (容量中军候选池，用于极限性能模式精准遴选)
-        top_amt_df = df[valid_all_mask].sort_values(by=amt_col, ascending=False) if amt_col else df[valid_all_mask]
-        top_35_amt_codes = set(codes_series.loc[top_amt_df.index[:35]])
+        # 计算全市场成交额排名前 35 (容量中军候选池，用于极限性能模式精准遴选，统一基于准确的 amts_yi 排序)
+        top_amt_s = amts_yi[valid_all_mask].sort_values(ascending=False)
+        top_35_amt_codes = set(codes_series.loc[top_amt_s.index[:35]])
 
         for idx in df[valid_all_mask].index:
             code_str = codes_series.loc[idx]

@@ -21,7 +21,7 @@ import pyqtgraph as pg
 
 logger = LoggerFactory.getLogger("qt_table_utils")
 
-_CLEAN_TRANS = str.maketrans('', '', '⭐★🐉🔥⚡❄️💎👑🚀⚠️🔻⏳🔔🥇🥈🥉,%+￥$°')
+_CLEAN_TRANS = str.maketrans('', '', '⭐★🐉🔥⚡❄️💎👑🚀⚠️🔻⏳🔔🥇🥈🥉,%+￥$°亿万xX')
 
 
 class NumericTableWidgetItem(QTableWidgetItem):
@@ -35,6 +35,11 @@ class NumericTableWidgetItem(QTableWidgetItem):
     """
     def __init__(self, value: Any = None, is_pinned: bool = False, raw_val: Any = None, pin_rank: int = 999):
         import math
+        # 兼容性容错：若第2个参数传入了数值类型 (如 amt/price) 且 raw_val 为空，自动纠偏为 raw_val
+        if not isinstance(is_pinned, bool) and isinstance(is_pinned, (int, float)) and raw_val is None:
+            raw_val = is_pinned
+            is_pinned = False
+
         self.is_pinned = is_pinned or (pin_rank < 999)
         self.pin_rank = pin_rank if pin_rank < 999 else (0 if is_pinned else 999)
         self._raw_value = raw_val if raw_val is not None else value

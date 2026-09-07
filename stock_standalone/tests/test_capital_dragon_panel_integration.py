@@ -264,10 +264,11 @@ class TestCapitalDragonPanelIntegration(unittest.TestCase):
         color_hex = item_mt_buy.foreground().color().name().upper()
         self.assertEqual(color_hex, "#FFD700")
 
-        # 3. 验证状态栏包含加速汇总统计与极限性能标签
+        # 3. 验证状态栏包含加速汇总统计，且删除极限性能标签以防状态栏遮挡 (状态保留在按钮中)
         stats_text = self.panel.lbl_stats.text()
         self.assertIn("⚡加速:", stats_text)
-        self.assertIn("⚡极限性能: 开", stats_text)
+        self.assertNotIn("极限性能", stats_text)
+        self.assertIn("⚡ 极限性能: 开", self.panel.btn_extreme_perf.text())
 
 
 if __name__ == "__main__":

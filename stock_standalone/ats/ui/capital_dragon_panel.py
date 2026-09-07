@@ -437,10 +437,10 @@ class CapitalDragonPanel(QWidget):
                         continue
                 matched_records.append(d)
 
-            # ⚡ 极限性能模式开启时：精选 Top 30 核心真龙，极大提升高频渲染丝滑度
-            # 关闭时：显示优化前的全部 300+ 全量候选池，不做 Top 30 截断
+            # ⚡ 极限性能模式开启时：精选 Top 50 核心真龙，极大提升高频渲染丝滑度
+            # 关闭时：显示优化前的全部 300+ 全量候选池，不做 Top 50 截断
             if getattr(self, 'extreme_perf_mode', True) and not filter_text:
-                matched_records = matched_records[:30]
+                matched_records = matched_records[:50]
 
             self.table.setRowCount(len(matched_records))
             new_selected_row = -1
@@ -463,7 +463,7 @@ class CapitalDragonPanel(QWidget):
                     new_selected_row = row_idx
 
                 # 0: 代码
-                it_code = NumericTableWidgetItem(code, 0)
+                it_code = NumericTableWidgetItem(code, raw_val=0)
                 it_code.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 self.table.setItem(row_idx, 0, it_code)
 
@@ -473,7 +473,7 @@ class CapitalDragonPanel(QWidget):
                 self.table.setItem(row_idx, 1, it_name)
 
                 # 2: 龙头角色 (高辨识度徽标色)
-                it_role = NumericTableWidgetItem(role, d.get("priority", 0))
+                it_role = NumericTableWidgetItem(role, raw_val=d.get("priority", 0))
                 it_role.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 font = it_role.font()
                 font.setBold(True)
@@ -497,13 +497,13 @@ class CapitalDragonPanel(QWidget):
                 self.table.setItem(row_idx, 3, it_sec)
 
                 # 4: 现价
-                it_price = NumericTableWidgetItem(f"{price:.2f}", price)
+                it_price = NumericTableWidgetItem(f"{price:.2f}", raw_val=price)
                 it_price.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
                 self.table.setItem(row_idx, 4, it_price)
 
                 # 5: 涨幅%
                 pct_str = f"{pct:+.2f}%"
-                it_pct = NumericTableWidgetItem(pct_str, pct)
+                it_pct = NumericTableWidgetItem(pct_str, raw_val=pct)
                 it_pct.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
                 font = it_pct.font()
                 font.setBold(True)
@@ -514,7 +514,7 @@ class CapitalDragonPanel(QWidget):
 
                 # 6: 虚拟量比 (系统的虚拟量比，反映资金加速流入速度)
                 vr_val = float(d.get("vol_ratio", 1.0))
-                it_vr = NumericTableWidgetItem(f"{vr_val:.2f}x", vr_val)
+                it_vr = NumericTableWidgetItem(f"{vr_val:.2f}x", raw_val=vr_val)
                 it_vr.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
                 f_vr = it_vr.font()
                 if vr_val >= 3.0:
@@ -534,7 +534,7 @@ class CapitalDragonPanel(QWidget):
                 self.table.setItem(row_idx, 6, it_vr)
 
                 # 7: 成交额(亿)
-                it_amt = NumericTableWidgetItem(f"{amt:.1f}亿", amt)
+                it_amt = NumericTableWidgetItem(f"{amt:.1f}亿", raw_val=amt)
                 it_amt.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
                 if amt >= 15.0:
                     it_amt.setForeground(QBrush(QColor("#ffd700")))
@@ -546,7 +546,7 @@ class CapitalDragonPanel(QWidget):
                 self.table.setItem(row_idx, 7, it_amt)
 
                 # 8: 换手率%
-                it_to = NumericTableWidgetItem(f"{turnover:.1f}%", turnover)
+                it_to = NumericTableWidgetItem(f"{turnover:.1f}%", raw_val=turnover)
                 it_to.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
                 self.table.setItem(row_idx, 8, it_to)
 
@@ -580,7 +580,7 @@ class CapitalDragonPanel(QWidget):
                 self.table.setItem(row_idx, 10, it_zone)
 
                 # 11: 止损参考
-                it_sl = NumericTableWidgetItem(f"{stop_loss:.2f}", stop_loss)
+                it_sl = NumericTableWidgetItem(f"{stop_loss:.2f}", raw_val=stop_loss)
                 it_sl.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
                 it_sl.setForeground(QBrush(QColor("#ef5350")))
                 self.table.setItem(row_idx, 11, it_sl)
@@ -597,7 +597,6 @@ class CapitalDragonPanel(QWidget):
             ol_cnt = self._last_report.get('open_low_count', 0) if self._last_report else 0
             accel_tot = dual_cnt + gap_cnt + ol_cnt
             accel_str = f" | ⚡加速: {accel_tot}只 (👑双加速:{dual_cnt} 🚀缺口:{gap_cnt})" if accel_tot > 0 else ""
-            perf_tag = " <font color='#00ff88'>[⚡极限性能: 开]</font>" if is_extreme else " <font color='#ffd700'>[⚡极限性能: 关 (全量300+)]</font>"
 
             if is_extreme:
                 sp_cnt = self._last_report.get('space_dragon_count', 0) if self._last_report else 0
@@ -613,7 +612,7 @@ class CapitalDragonPanel(QWidget):
                 f"(空间龙: {sp_cnt} | "
                 f"容量中军: {mc_cnt} | "
                 f"主线先锋: {pn_cnt})"
-                f"{accel_str}{perf_tag}"
+                f"{accel_str}"
             )
 
             if new_selected_row >= 0:
