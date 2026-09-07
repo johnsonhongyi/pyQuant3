@@ -590,3 +590,99 @@ def test_strongest_stock_and_sector_momentum_scan(kline_cache):
     score3 = kline_cache.calculate_reversal_priority_score("600333", f3, rows[2])
     assert score1 > 100.0
     assert score3 > 80.0
+
+
+def test_scan_and_auto_add_strictly_respects_pool_limit_and_no_overflow(kline_cache):
+    """
+    专门验证：当潜伏池容量已满 (如 150 只) 且全为优质标的无法汰换时，
+    严禁超额纳标！绝不允许绕过上限无限塞入新股票 (修复 2000+ 超额添加漏洞)。
+    """
+    # 1. 模拟池内已达满额 150 只高分标的 (不可汰换)
+    for i in range(150):
+        c = f"60{i:04d}"
+        kline_cache._v_reversal_pool.add(c)
+        kline_cache._consolidation_flags[c] = {
+            "phase": "CONSOLIDATING", "structure": "🚀主升加速", "ch_dir": 1
+        }
+
+    assert len(kline_cache.get_v_reversal_pool()) == 150
+
+    # 2. 构造 30 只新的优质上涨通道候选股票
+    df_rows = []
+    for i in range(30):
+        df_rows.append({
+            "code": f"688{i:03d}",
+            "name": f"新通道股{i}",
+            "close": 25.0,
+            "low": 24.5,
+            "ch_dir": 1,
+            "ch_supp_slope_deg": 15.0,
+            "ch_supp_price": 24.0,
+            "ch_supp_pos": 40.0,
+            "Rank": 50 + i,
+            "vol_ratio": 2.0,
+            "changepercent": 3.0
+        })
+    df_new = pd.DataFrame(df_rows)
+    df_new.set_index("code", drop=False, inplace=True)
+
+    # 3. 触发通道纳标：即使 force_replace=True，由于现有 150 只均无 <80 分的弱股，无法汰换
+    res = kline_cache.scan_and_auto_add_uptrend_channel_stocks(
+        df=df_new, max_add=30, max_pool_limit=150, force_replace=True
+    )
+
+    # 4. 核心断言：实际添加数必须为 0！绝不允许超额多加一只！
+    assert int(res) == 0
+    assert res.added == 0
+    assert res.cur_total == 150
+    assert res.total_eligible == 30
+    assert res.pending_count == 30
+    assert len(kline_cache.get_v_reversal_pool()) == 150
+
+    # 5. 验证新股票一只也没有被违规硬塞入池
+    pool = kline_cache.get_v_reversal_pool()
+    for i in range(30):
+        assert f"688{i:03d}" not in pool
+
+
+def test_update_df_all_cache_auto_channel_add_switch(kline_cache):
+    """
+    验证：
+    1. enable_auto_channel_add 默认为 False，行情推送 update_df_all_cache 绝不在后台静默纳标；
+    2. 只有显式开启 enable_auto_channel_add 时，才允许在后台受控增量纳标。
+    """
+    assert kline_cache.enable_auto_channel_add is False
+
+    # 构造模拟 500+ 行情
+    df_rows = []
+    for i in range(550):
+        df_rows.append({
+            "code": f"00{i:04d}",
+            "name": f"股票{i}",
+            "close": 10.0,
+            "low": 9.8,
+            "ch_dir": 1 if i < 30 else 0,
+            "ch_supp_slope_deg": 10.0,
+            "ch_supp_price": 9.5,
+            "ch_supp_pos": 40.0,
+            "Rank": 100 + i,
+            "vol_ratio": 1.5,
+            "changepercent": 2.0
+        })
+    df_market = pd.DataFrame(df_rows)
+    df_market.set_index("code", drop=False, inplace=True)
+
+    assert len(kline_cache.get_v_reversal_pool()) == 0
+
+    # 1. 默认状态下推送行情：绝不在后台静默纳标！
+    kline_cache.set_df_all_cache(df_market)
+    assert len(kline_cache.get_v_reversal_pool()) == 0
+
+    # 2. 显式开启开关：在后台安全增量纳标
+    kline_cache.enable_auto_channel_add = True
+    kline_cache._last_auto_add_scan_ts = 0.0
+    kline_cache._df_all_cache_fp = None
+    kline_cache.set_df_all_cache(df_market)
+    assert len(kline_cache.get_v_reversal_pool()) > 0
+    assert len(kline_cache.get_v_reversal_pool()) <= 150
+

@@ -435,6 +435,7 @@ class MinuteKlineCache:
         self._consolidation_flags: dict[str, dict[str, Any]] = {}
         self._v_reversal_pool: set[str] = set()
         self.enable_auto_cleanup: bool = False  # 彻底停用后台自动清理，避免后台自动削减/清空潜伏池数据，仅支持用户在UI上手动触发
+        self.enable_auto_channel_add: bool = False  # 彻底停用后台自动通道纳标，避免自动超额向潜伏池添加全市场股票，仅支持用户在UI上手动触发【🚀 通道纳标】或显式开启
         
         self._daily_indicators_cache = {}
         self._twap_cache = {}
@@ -1897,13 +1898,15 @@ class MinuteKlineCache:
                         logger.error(f"❌ [TK数据就绪] 自动清理潜伏池异常: {cln_err}")
 
             # 🚀 [Auto Add Uptrend Channel Stocks] 自动扫描全市场行情中处于自动通道上涨趋势 (ch_dir=1) 的个股，增量纳标到潜伏池
-            last_add_t = getattr(self, '_last_auto_add_scan_ts', 0.0)
-            if len(df) >= 500 and (now_t - last_add_t > 300.0 or len(self._v_reversal_pool) < 20):
-                self._last_auto_add_scan_ts = now_t
-                try:
-                    self.scan_and_auto_add_uptrend_channel_stocks(df=df, max_add=30, max_pool_limit=100)
-                except Exception as add_err:
-                    logger.error(f"❌ [自动通道纳标] 扫描纳标异常: {add_err}")
+            # 默认彻底停用后台静默纳标；仅在显式配置开启 enable_auto_channel_add 且池子未满额时才允许触发
+            if getattr(self, 'enable_auto_channel_add', False):
+                last_add_t = getattr(self, '_last_auto_add_scan_ts', 0.0)
+                if len(df) >= 500 and len(self._v_reversal_pool) < 150 and (now_t - last_add_t > 300.0 or len(self._v_reversal_pool) < 20):
+                    self._last_auto_add_scan_ts = now_t
+                    try:
+                        self.scan_and_auto_add_uptrend_channel_stocks(df=df, max_add=30, max_pool_limit=150, force_replace=False)
+                    except Exception as add_err:
+                        logger.error(f"❌ [自动通道纳标] 扫描纳标异常: {add_err}")
         except Exception as e:
             self._df_all_cache = df
 
@@ -2950,11 +2953,15 @@ class MinuteKlineCache:
                 # 重新计算可用空位
                 available_slots = max(0, max_pool_limit - len(self._v_reversal_pool))
 
-            actual_add_limit = min(limit_to_add, available_slots if available_slots > 0 else limit_to_add)
-            to_add = candidates[:actual_add_limit]
+            # 🚨 绝对防御：严禁超额添加！可用空位不足时严格受限，空位为0时绝不添加任何标的
+            actual_add_limit = min(limit_to_add, max(0, available_slots))
+            to_add = candidates[:actual_add_limit] if actual_add_limit > 0 else []
 
             added_count = 0
             for item in to_add:
+                # 再次执行硬性容量熔断防御，池子达到上限立即停止
+                if len(self._v_reversal_pool) >= max_pool_limit:
+                    break
                 c = item["code"]
                 st = self._consolidation_flags.get(c, {})
                 st["phase"] = "CONSOLIDATING"

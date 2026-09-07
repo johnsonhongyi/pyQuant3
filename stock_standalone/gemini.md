@@ -1,3 +1,21 @@
+## 2026-09-07 16:42
+- [x] **根治【TK自动添加 Bug & V型反转潜伏池总是超额添加全部上涨通道股票(2000+只)】核心缺陷 (`realtime_data_service.py`, `tests/test_v_reversal_pool_enhancements.py`)**：
+    - [x] **深度排查并定位池子从 150 限制暴增至 2134 只的两大根本诱因**：
+        1. **容量限制三元表达式漏洞 (`realtime_data_service.py:2953`)**：
+           原逻辑 `actual_add_limit = min(limit_to_add, available_slots if available_slots > 0 else limit_to_add)`。当池内标的满额（`available_slots == 0`）且无低于 80 分的弱股可汰换时，因 `available_slots > 0` 判定为 False 走入 `else` 分支直接返回了 `limit_to_add`（30）。导致 `max_pool_limit` 上限彻底形同虚设，池子无论多满每次依然强行添加 30 只；
+        2. **后台行情推送存在静默、失控的自动纳标 (`realtime_data_service.py:1899-1906`)**：
+           在 `set_df_all_cache` 中，后台每隔 300 秒无条件自动触发 `scan_and_auto_add_uptrend_channel_stocks`，且缺乏像 `enable_auto_cleanup = False` 那样的开关控制。后台每 5 分钟默默往潜伏池塞 30 只，叠加第 1 点容量限制失效的漏洞，使得全市场 2000 多只符合上涨通道的个股被源源不断全部硬塞入潜伏池（最终暴增至 2134 只，导致用户必须点击“智能清理”才能裁汰 1841 只）。
+    - [x] **全链路落地【容量硬约束绝对防御 + 后台自动纳标开关控制 + 池上限循环熔断】体系**：
+        1. **修复容量限制核心计算**：
+           将 `actual_add_limit` 严格修正为 `min(limit_to_add, max(0, available_slots))`。当 `available_slots <= 0` 时，`actual_add_limit` 恒为 0，绝不多加一只股票；
+        2. **添加循环硬熔断双保险**：
+           在入池循环中加入硬性安全保护：`if len(self._v_reversal_pool) >= max_pool_limit: break`，从底层杜绝任何越界超额可能；
+        3. **后台自动纳标增加独立安全开关**：
+           在 `MinuteKlineCache.__init__` 中新增 `self.enable_auto_channel_add = False`（默认彻底停用后台静默自动纳标，潜伏池仅支持用户在 UI 工具栏点击【🚀 通道纳标】或显式开启时才添加）；并在 `set_df_all_cache` 中增加开关校验与 `len(self._v_reversal_pool) < 150` 前置保护，统一默认上限为 150。
+    - [x] **自动化测试 100% 回归通过**：
+        - 在 `tests/test_v_reversal_pool_enhancements.py` 中新增 `test_scan_and_auto_add_strictly_respects_pool_limit_and_no_overflow`（验证池满 150 且不可汰换时再次纳标严格返回 0，绝不超额）和 `test_update_df_all_cache_auto_channel_add_switch`（验证默认 False 时行情推送不乱加股票，开启后才增量纳标）；
+        - 全部 13 项单元测试 100% PASSED。
+
 ## 2026-09-07 11:45
 - [x] **全链路落地【系统长时间运行卡顿迟滞与异常锁全面优化】(SSOT) (`stock_standalone/realtime_data_service.py`, `stock_standalone/instock_MonitorTK.py`, `stock_standalone/ats/tdx_realtime_fetcher.py`, `stock_standalone/tests/test_performance_and_lock_fixes.py`)**：
     - [x] **排查定位“HDF5 重复读盘10秒与文件锁死锁、TK 主线程 lf_top10 刷新假死10.5秒、TDX 异常批次单只串行请求风暴”三大卡顿锁死诱因**：
