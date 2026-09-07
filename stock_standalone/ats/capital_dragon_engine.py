@@ -52,6 +52,32 @@ def _clean_code(c: Any) -> str:
     return digits.zfill(6) if digits else s
 
 
+def is_index_or_fund(code: Any, name: Any = "") -> bool:
+    """
+    判断标的是否属于指数、ETF或大盘综合指数，纯化个股龙头中枢 (排除 399xxx, 999xxx, 899xxx, 000001等)
+    """
+    c = _clean_code(code)
+    nm = str(name).strip() if name is not None else ""
+
+    # 1. 常见指数代码前缀 (深证指数 399xxx, 通达信/上证指数 999xxx, 北证指数 899xxx)
+    if c.startswith(("399", "999", "899")):
+        return True
+
+    # 2. 沪深核心大盘指数代码 (排除平安银行 000001)
+    if c in ("000001", "000300", "000016", "000905", "000852", "000010"):
+        if nm and ("银行" in nm or "平安" in nm):
+            return False
+        return True
+
+    # 3. 常见指数/板块名称特征
+    if nm:
+        for kw in ("指数", "成指", "综指", "北证50", "科创50", "上证50", "中小100", "创业板指", "沪深300", "中证500", "中证1000"):
+            if kw in nm:
+                return True
+
+    return False
+
+
 class CapitalDragonEngine:
     """
     资金趋势与主线龙头核心量化引擎 (单例)
@@ -69,9 +95,25 @@ class CapitalDragonEngine:
     def __init__(self):
         self._cached_report: Dict[str, Any] = {}
         self._cached_time: float = 0.0
+        self._cached_df_len: int = 0
+        self._cached_df_first_code: str = ""
         self._cache_lock = threading.RLock()
         self._dragon_codes_set: Set[str] = set()
         self._trap_codes_set: Set[str] = set()
+
+    def get_cached_report(self, max_age: float = 3.0, df_check: Optional[pd.DataFrame] = None) -> Optional[Dict[str, Any]]:
+        """获取最近缓存的分析报告 (零开销，极速，支持 df_check 校验避免跨数据集数据污染)"""
+        with self._cache_lock:
+            if self._cached_report and (time.time() - self._cached_time <= max_age):
+                if df_check is not None:
+                    if len(df_check) != getattr(self, '_cached_df_len', 0):
+                        return None
+                    c_col = 'code' if 'code' in df_check.columns else None
+                    first_code = str(df_check[c_col].iloc[0]) if (c_col and len(df_check) > 0) else (str(df_check.index[0]) if len(df_check) > 0 else "")
+                    if first_code != getattr(self, '_cached_df_first_code', ""):
+                        return None
+                return dict(self._cached_report)
+        return None
 
     def _get_virtual_vol_ratio(self, df: pd.DataFrame) -> pd.Series:
         """
@@ -215,6 +257,22 @@ class CapitalDragonEngine:
         ch_supp_s = _get_series(['ch_supp', 'ch_lower'])
         ma20_s = _get_series(['ma20d', 'ma20', 'MA20'])
 
+        # 提取开盘价、最低价、昨收与昨日最高价用于分时加速形态量化判定
+        open_s = _get_series(['open', 'open_price', 'Open'])
+        low_s = _get_series(['low', 'low_price', 'Low'])
+        last_c_s = _get_series(['last_close', 'lastp', 'pre_close', 'close_last', 'last_c'])
+        yesterday_h_s = _get_series(['lasth1d', 'lasth', 'yesterday_high', 'last_high'])
+
+        # 昨收兜底计算
+        missing_lc = (last_c_s <= 0.0) & (prices > 0.0)
+        if missing_lc.any():
+            calc_lc = prices[missing_lc] / (1.0 + pcts[missing_lc] / 100.0)
+            last_c_s.loc[missing_lc] = calc_lc.round(2)
+
+        missing_yh = (yesterday_h_s <= 0.0)
+        if missing_yh.any():
+            yesterday_h_s.loc[missing_yh] = last_c_s.loc[missing_yh]
+
         # 提取全市场系统的虚拟量比序列 (SSOT)
         vol_ratio_s = self._get_virtual_vol_ratio(df)
         try:
@@ -224,11 +282,55 @@ class CapitalDragonEngine:
             ratio_t = 1.0
         ratio_t = max(0.05, min(ratio_t, 1.0))
 
-        # 3. 统计主线板块资金集聚度
+        # 3. 统计主线板块资金集聚度 (过滤掉所有大盘指数与ETF代码，保证纯正个股主线)
         sector_stats = {}
-        valid_mask = (prices > 0.0) & (~codes_series.isin(['000001', '399001', '399006', 'sh000001', 'sz399001']))
+        names_list = df['name'].astype(str).tolist() if 'name' in df.columns else [''] * len(df)
+        is_idx_mask = [is_index_or_fund(c, names_list[i]) for i, c in enumerate(codes_series)]
+        valid_mask = (prices > 0.0) & (~pd.Series(is_idx_mask, index=df.index))
         
+        # 预先向量化计算个股加速结构
+        accel_cache = {}
         for idx in df[valid_mask].index:
+            code_str = codes_series.loc[idx]
+            op = float(open_s.loc[idx])
+            lp = float(low_s.loc[idx])
+            lc = float(last_c_s.loc[idx])
+            yh = float(yesterday_h_s.loc[idx])
+
+            # 1. 开盘即最低 / 极小下影加速 (Open is Low / 光脚加速)
+            low_diff_pct = round((op - lp) / op * 100.0, 3) if op > 0 else 999.0
+            is_open_low = bool(op > 0 and lp > 0 and (lp >= op - 0.015 or low_diff_pct <= 0.15) and (op >= lc * 0.98))
+
+            # 2. 跳空高开且留有跳空缺口加速 (Gap-Up Acceleration / 缺口加速)
+            open_jump_pct = round((op - lc) / lc * 100.0, 2) if lc > 0 else 0.0
+            is_gap = bool(open_jump_pct >= 0.8 and lp > lc and (yh <= 0 or lp >= yh - 0.015))
+
+            # 结合天梯数据
+            ladder_info = ladder_dict.get(code_str, {})
+            if ladder_info:
+                if ladder_info.get("is_open_low_accel", False):
+                    is_open_low = True
+                if ladder_info.get("is_gap_accel", False):
+                    is_gap = True
+
+            is_dual = bool(is_open_low and is_gap)
+            accel_t = ""
+            if is_dual:
+                accel_t = "👑双加速"
+            elif is_gap:
+                accel_t = "🚀缺口加速"
+            elif is_open_low:
+                accel_t = "⚡光脚加速"
+
+            accel_cache[code_str] = {
+                "is_open_low": is_open_low,
+                "is_gap": is_gap,
+                "is_dual": is_dual,
+                "accel_tag": accel_t
+            }
+
+        for idx in df[valid_mask].index:
+            code_str = codes_series.loc[idx]
             sec = sectors.loc[idx]
             if not sec or sec in ('--', 'nan', '未知', '其它', '其他', '0', '0.0', 'None'):
                 continue
@@ -236,6 +338,11 @@ class CapitalDragonEngine:
             p_val = float(pcts.loc[idx])
             vr_val = float(vol_ratio_s.loc[idx]) if idx in vol_ratio_s.index else 1.0
             
+            ac_info = accel_cache.get(code_str, {})
+            has_dual = ac_info.get("is_dual", False)
+            has_gap = ac_info.get("is_gap", False)
+            has_ol = ac_info.get("is_open_low", False)
+
             # 分割复合板块名 (如 "软件服务;人工智能;大数据")
             sub_secs = [s.strip() for s in sec.replace(';', ',').replace('、', ',').split(',') if s.strip()]
             for s_name in sub_secs[:2]: # 仅取最核心的前2个概念
@@ -248,6 +355,10 @@ class CapitalDragonEngine:
                         "up_count": 0,
                         "limit_up_count": 0,
                         "total_count": 0,
+                        "dual_accel_count": 0,
+                        "gap_accel_count": 0,
+                        "open_low_count": 0,
+                        "accel_total_count": 0,
                         "avg_pct": 0.0,
                         "sum_pct": 0.0,
                         "sum_vr_weighted": 0.0,
@@ -270,6 +381,14 @@ class CapitalDragonEngine:
                 if p_val >= 9.5: # 涨停门槛
                     st["limit_up_count"] += 1
                 
+                # 统计板块内部群起加速能力 (这些显性反应了板块强度能力)
+                if has_dual:
+                    st["dual_accel_count"] += 1
+                elif has_gap:
+                    st["gap_accel_count"] += 1
+                elif has_ol:
+                    st["open_low_count"] += 1
+
                 # 记录板块领涨先锋
                 if p_val > st["leader_pct"]:
                     st["leader_pct"] = p_val
@@ -293,14 +412,23 @@ class CapitalDragonEngine:
             st["vol_ratio"] = round(float(sec_vr), 2)
             st["proj_amt_yi"] = round(float(st["total_amt_yi"] / ratio_t), 1)
             
-            # 板块资金强度 = 成交额(亿)*0.15 + 涨停数*15 + 平均涨幅*4 + 上涨占比*20 + 虚拟量比加速加分(最高15分)
+            # 板块加速结构汇总
+            st["accel_total_count"] = st["dual_accel_count"] + st["gap_accel_count"] + st["open_low_count"]
+            accel_bonus = min(15.0, (
+                st["dual_accel_count"] * 4.0 + 
+                st["gap_accel_count"] * 2.5 + 
+                st["open_low_count"] * 1.5
+            ))
+
+            # 板块资金强度 = 成交额(亿)*0.15 + 涨停数*15 + 平均涨幅*4 + 上涨占比*20 + 虚拟量比加速加分 + 加速结构加分
             vr_bonus = min(15.0, max(0.0, (st["vol_ratio"] - 1.0) * 8.0))
             strength_score = (
                 min(40.0, st["total_amt_yi"] * 0.15) +
                 st["limit_up_count"] * 15.0 +
                 max(0.0, st["avg_pct"]) * 4.0 +
                 up_ratio * 20.0 +
-                vr_bonus
+                vr_bonus +
+                accel_bonus
             )
             st["strength_score"] = round(strength_score, 1)
             
@@ -322,9 +450,10 @@ class CapitalDragonEngine:
         dragon_codes_set = set()
         trap_codes_set = set()
 
-        # 计算全市场成交额排名前 60 (容量中军候选池)
+        # 计算全市场成交额排名前 35 (容量中军候选池，严格避免泛滥)
         top_amt_df = df[valid_mask].sort_values(by=amt_col, ascending=False) if amt_col else df[valid_mask]
-        top_50_amt_codes = set(codes_series.loc[top_amt_df.index[:60]])
+        top_35_amt_codes = set(codes_series.loc[top_amt_df.index[:35]])
+        midcap_count = 0  # 严格控制容量中军总数不超过 20 只
 
         for idx in df[valid_mask].index:
             code_str = codes_series.loc[idx]
@@ -335,6 +464,10 @@ class CapitalDragonEngine:
             turnover_val = float(turnover_s.loc[idx])
             sec_str = str(sectors.loc[idx])
             
+            # 严格过滤大盘指数与基金代码
+            if is_index_or_fund(code_str, name_str):
+                continue
+
             dff = float(dff_s.loc[idx])
             dff2 = float(dff2_s.loc[idx])
             dff3 = float(dff3_s.loc[idx])
@@ -355,6 +488,13 @@ class CapitalDragonEngine:
             bid_amt_yi = float(ladder_info.get("bid_amount_yi", 0.0))
             is_first_limit = bool(ladder_info.get("is_first_board", False) or (is_limit_up and l_days <= 1))
 
+            # 提取加速形态
+            ac_info = accel_cache.get(code_str, {})
+            accel_tag = ac_info.get("accel_tag", "")
+            is_dual_accel = ac_info.get("is_dual", False)
+            is_gap_accel = ac_info.get("is_gap", False)
+            is_open_low_accel = ac_info.get("is_open_low", False)
+
             # 趋势通道状态判决
             has_channel_base = (dff2 > 0.0 or dff3 > 0.0 or (ma20_val > 0 and price_val >= ma20_val * 0.98))
             is_channel_down = (dff2 < -5.0 and dff3 < -5.0 and ma20_val > 0 and price_val < ma20_val * 0.95)
@@ -372,7 +512,7 @@ class CapitalDragonEngine:
             # ── 💡 四维真龙画像定位 ──
             dragon_role = ""
             role_priority = 0
-            action_type = ""
+            base_action = ""
             action_tip = ""
             buy_zone = ""
             stop_loss = round(price_val * 0.95, 2)
@@ -383,30 +523,31 @@ class CapitalDragonEngine:
                 dragon_role = "👑 空间高度龙"
                 role_priority = 100
                 if is_limit_up:
-                    action_type = "🔒 锁仓/巨量换手板"
+                    base_action = "👑 领涨龙头" if is_dual_accel else "🔒 锁仓换手板"
                     buy_zone = f"{price_val:.2f}"
                     action_tip = "情绪空间总龙头，开板可关注分歧换手回封机会"
                     reason = f"市场最高连板梯队 ({l_days}连板), 情绪总标杆, 巨资封单{bid_amt_yi:.2f}亿"
                 else:
-                    action_type = "💎 高位分歧低吸"
+                    base_action = "💎 高位分歧低吸"
                     buy_zone = f"{round(price_val * 0.97, 2)} ~ {price_val:.2f}"
                     action_tip = "高位分歧承接，关注首阴或日内分时均线低吸机会"
                     reason = f"空间高度龙盘中分歧 ({l_days}板预期), 资金换手承接充分"
 
-            # 2. 【🛡️ 趋势容量中军】：成交额 Top 50 且通道多头向上的机构游资合力大票
-            elif (code_str in top_50_amt_codes or amt_yi >= 12.0) and has_channel_base:
+            # 2. 【🛡️ 趋势容量中军】：成交额 Top 35 且通道多头向上的机构游资合力大票 (最多遴选 20 只绝对中军)
+            elif code_str in top_35_amt_codes and has_channel_base and amt_yi >= 5.0 and midcap_count < 20:
+                midcap_count += 1
                 dragon_role = "🛡️ 趋势容量中军"
                 role_priority = 90
                 supp_ref = max(ch_supp, ma20_val) if ch_supp > 0 else (ma20_val if ma20_val > 0 else round(price_val * 0.95, 2))
                 stop_loss = round(supp_ref * 0.97, 2)
                 
                 if pct_val >= 4.0:
-                    action_type = "🚀 主升趋势加速"
+                    base_action = "🚀 主升趋势加速"
                     buy_zone = f"{round(price_val * 0.98, 2)} ~ {price_val:.2f}"
                     action_tip = "容量大票放量主升，顺势持股或回踩分时均线加仓"
                     reason = f"全市场成交额巨量排头 (成交{amt_yi:.1f}亿), 多头通道稳健向上 (DFF2={dff2:.1f})"
                 else:
-                    action_type = "🎯 通道支撑企稳"
+                    base_action = "🎯 通道支撑企稳"
                     buy_zone = f"{supp_ref:.2f} ~ {round(supp_ref * 1.02, 2)}"
                     action_tip = "大票缩量回踩通道中轨/支撑位，低吸性价比极高"
                     reason = f"百亿级别容量中军 (成交{amt_yi:.1f}亿) 回踩多头支撑位 ({supp_ref:.2f}元), 机构承接有力"
@@ -417,7 +558,7 @@ class CapitalDragonEngine:
                 role_priority = 85
                 buy_zone = f"{price_val:.2f}" if is_limit_up else f"{round(price_val * 0.98, 2)} ~ {price_val:.2f}"
                 stop_loss = round(price_val * 0.96, 2)
-                action_type = "⚡ 主线率先冲关"
+                base_action = "👑 领涨龙头" if (is_limit_up or pct_val >= 8.0) else "⚡ 主线率先冲关"
                 action_tip = "核心主线带队大哥，享受板块助攻溢价"
                 reason = f"所属【{matched_main_sec}】核心主线率先拔起封板 (+{pct_val:.1f}%), 带动整个赛道爆发"
 
@@ -427,7 +568,7 @@ class CapitalDragonEngine:
                 role_priority = 80
                 buy_zone = f"{price_val:.2f}"
                 stop_loss = round(price_val * 0.95, 2)
-                action_type = "🔥 启动首板封死"
+                base_action = "👑 领涨龙头" if is_dual_accel else "🔥 启动首板封死"
                 action_tip = "量价结构健康的首板标的，次日关注接力一进二"
                 reason = f"成交额达标 (成交{amt_yi:.1f}亿/换手{turnover_val:.1f}%), 封板坚决"
 
@@ -437,13 +578,29 @@ class CapitalDragonEngine:
                 role_priority = 70
                 buy_zone = f"{round(price_val * 0.98, 2)} ~ {price_val:.2f}"
                 stop_loss = round(price_val * 0.96, 2)
-                action_type = "🌊 顺应主线共振"
+                base_action = "🌊 顺应主线共振"
                 action_tip = "跟随核心主线放量上攻，注意高抛低吸"
                 reason = f"所属【{matched_main_sec}】主流赛道放量走强 (成交{amt_yi:.1f}亿, 涨幅+{pct_val:.1f}%)"
 
             if dragon_role:
                 dragon_codes_set.add(code_str)
                 vr_val = float(vol_ratio_s.loc[idx]) if idx in vol_ratio_s.index else 1.0
+
+                # 结合分时结构形态加速能力融合买点类型 (对齐龙头突击与天梯: 👑双加速·👑 领涨龙头 / 🚀缺口加速·👑 领涨龙头 等)
+                if accel_tag:
+                    action_type = f"{accel_tag}·{base_action}"
+                    if is_dual_accel:
+                        role_priority += 15
+                        reason = f"【👑双加速主升结构】{reason}"
+                    elif is_gap_accel:
+                        role_priority += 8
+                        reason = f"【🚀缺口加速(跳空未补)】{reason}"
+                    elif is_open_low_accel:
+                        role_priority += 6
+                        reason = f"【⚡光脚加速(开盘即最低)】{reason}"
+                else:
+                    action_type = base_action
+
                 dragon_records.append({
                     "code": code_str,
                     "name": name_str,
@@ -464,11 +621,17 @@ class CapitalDragonEngine:
                     "dff2": dff2,
                     "dff3": dff3,
                     "limit_days": l_days,
-                    "is_limit_up": is_limit_up
+                    "is_limit_up": is_limit_up,
+                    "accel_tag": accel_tag,
+                    "is_dual_accel": is_dual_accel,
+                    "is_gap_accel": is_gap_accel,
+                    "is_open_low_accel": is_open_low_accel
                 })
 
         # 排序：优先按角色优先级降序，再按成交额与涨幅
         dragon_records.sort(key=lambda x: (x["priority"], x["amount_yi"], x["pct"]), reverse=True)
+        # 精准遴选 Top 50 核心真龙 (杜绝 400+ 只冗余导致的界面渲染雪崩与主线程卡顿)
+        dragon_records = dragon_records[:50]
 
         report = {
             "timestamp": now,
@@ -479,12 +642,19 @@ class CapitalDragonEngine:
             "trap_codes_set": trap_codes_set,
             "space_dragon_count": sum(1 for r in dragon_records if "空间" in r["role"]),
             "midcap_dragon_count": sum(1 for r in dragon_records if "容量" in r["role"]),
-            "pioneer_dragon_count": sum(1 for r in dragon_records if "先锋" in r["role"])
+            "pioneer_dragon_count": sum(1 for r in dragon_records if "先锋" in r["role"]),
+            "dual_accel_count": sum(1 for r in dragon_records if "双加速" in r.get("accel_tag", "")),
+            "gap_accel_count": sum(1 for r in dragon_records if "缺口加速" in r.get("accel_tag", "")),
+            "open_low_count": sum(1 for r in dragon_records if "光脚加速" in r.get("accel_tag", "")),
+            "accel_total_count": sum(1 for r in dragon_records if r.get("accel_tag"))
         }
 
         with self._cache_lock:
             self._cached_report = report
             self._cached_time = now
+            self._cached_df_len = len(df)
+            c_col = 'code' if 'code' in df.columns else None
+            self._cached_df_first_code = str(df[c_col].iloc[0]) if (c_col and len(df) > 0) else (str(df.index[0]) if len(df) > 0 else "")
             self._dragon_codes_set = dragon_codes_set
             self._trap_codes_set = trap_codes_set
 

@@ -286,6 +286,20 @@ class CapitalDragonPanel(QWidget):
         self.btn_dragon_mon.clicked.connect(self._on_click_dragon_mon)
         toolbar_layout.addWidget(self.btn_dragon_mon)
 
+        # ⚡ 极限性能模式控制开关 (零卡顿/自适应精选)
+        self.extreme_perf_mode = True
+        self.btn_extreme_perf = QPushButton("⚡ 极限性能: 开")
+        self.btn_extreme_perf.setStyleSheet("""
+            QPushButton {
+                background-color: #1a2a1a; color: #00ff88; font-weight: bold;
+                border: 1px solid #00ff88; border-radius: 3px; padding: 3px 8px; font-size: 8.5pt;
+            }
+            QPushButton:hover { background-color: #00ff88; color: #000000; }
+        """)
+        self.btn_extreme_perf.setToolTip("开启极限性能模式：原位更新零重绘，精选核心真龙，彻底杜绝主线程卡顿")
+        self.btn_extreme_perf.clicked.connect(self._toggle_extreme_perf)
+        toolbar_layout.addWidget(self.btn_extreme_perf)
+
         main_layout.addLayout(toolbar_layout)
 
         # 3. 核心真龙矩阵表格 (True Dragon Matrix Table)
@@ -318,15 +332,19 @@ class CapitalDragonPanel(QWidget):
 
         main_layout.addWidget(self.table)
 
-    def update_payload(self, df_all: Optional[pd.DataFrame], sh_pct: float = 0.0):
+    def update_payload(self, df_all: Optional[pd.DataFrame], sh_pct: float = 0.0, force: bool = False):
         """
-        接收最新行情快照，计算主线板块与真龙角色矩阵，并刷新表格
+        接收最新行情快照，优先复用后台 Worker 计算好的报告，彻底杜绝主线程卡顿
         """
         if df_all is None or df_all.empty or self._is_updating:
             return
 
         self._last_df_all = df_all
-        report = self.engine.analyze_capital_dragon_universe(df_all, sh_pct)
+        
+        # ⚡ 极限性能复用：优先直接从引擎读取后台 Worker 计算好的缓存报告 (0ms 耗时，零计算)
+        report = self.engine.get_cached_report(max_age=3.0, df_check=df_all)
+        if report is None or force:
+            report = self.engine.analyze_capital_dragon_universe(df_all, sh_pct)
         if not report:
             return
 
@@ -337,7 +355,8 @@ class CapitalDragonPanel(QWidget):
             len(dragons),
             tuple(d["code"] for d in dragons[:15]),
             tuple(round(d["pct"], 1) for d in dragons[:15]),
-            tuple(s["name"] for s in top_secs[:3])
+            tuple(s["name"] for s in top_secs[:3]),
+            getattr(self, 'extreme_perf_mode', True)
         )
 
         if sig_tuple == self._last_sig:
@@ -379,17 +398,33 @@ class CapitalDragonPanel(QWidget):
                 vr_col = "#ff1744" if vol_ratio >= 2.0 else ("#00e5ff" if vol_ratio >= 1.2 else "#c9d1d9")
                 proj_str = f" <font color='#888888'>(预估{proj_amt:.0f}亿)</font>" if proj_amt > st["total_amt_yi"] * 1.05 else ""
 
+                dual_cnt = st.get("dual_accel_count", 0)
+                gap_cnt = st.get("gap_accel_count", 0)
+                ol_cnt = st.get("open_low_count", 0)
+                accel_tot = st.get("accel_total_count", 0)
+
+                accel_desc = ""
+                if accel_tot > 0:
+                    accel_desc = f" | 加速: <font color='#ffd700'><b>{accel_tot}只</b></font>"
+
                 w["desc"].setText(
                     f"成交: <font color='#ffd700'><b>{st['total_amt_yi']:.1f}亿</b></font>{proj_str} | "
                     f"量比: <font color='{vr_col}'><b>{vol_ratio:.1f}x</b></font> | "
                     f"均涨: <font color='{pct_col}'><b>{st['avg_pct']:+.2f}%</b></font> | "
                     f"涨停: <font color='#ff4444'><b>{st['limit_up_count']}只</b></font>"
+                    f"{accel_desc}"
                 )
                 w["desc"].setTextFormat(Qt.TextFormat.RichText)
+
+                accel_tip_str = ""
+                if accel_tot > 0:
+                    accel_tip_str = f"⚡ 群起加速: 共 {accel_tot} 只呈现早盘加速形态 (👑双加速 {dual_cnt} 只, 🚀缺口加速 {gap_cnt} 只, ⚡光脚加速 {ol_cnt} 只)\n🔥 板块内群起加速，显性印证该主线早盘资金进攻动能超强！\n"
+
                 w["frame"].setToolTip(
                     f"💡 点击直接打开【{sec_name}】板块成分股明细与强势股\n"
                     f"📊 累计成交: {st['total_amt_yi']:.1f}亿元 | 全天预估: {proj_amt:.1f}亿元\n"
-                    f"⚡ 板块虚拟量比: {vol_ratio:.2f}x (按盘中交易进度折算)"
+                    f"⚡ 板块虚拟量比: {vol_ratio:.2f}x (按盘中交易进度折算)\n"
+                    f"{accel_tip_str}"
                 )
 
                 if l_name and l_code:
@@ -404,6 +439,7 @@ class CapitalDragonPanel(QWidget):
 
     def _render_table(self, dragons: List[Dict[str, Any]]):
         self._is_updating = True
+        self.table.setUpdatesEnabled(False)
         try:
             # 记住当前选中代码
             selected_code = None
@@ -423,6 +459,10 @@ class CapitalDragonPanel(QWidget):
                     if filter_text not in match_str:
                         continue
                 matched_records.append(d)
+
+            # ⚡ 极限性能模式：精选 Top 30 核心真龙，极大提升高频渲染丝滑度
+            if getattr(self, 'extreme_perf_mode', True) and not filter_text:
+                matched_records = matched_records[:30]
 
             self.table.setRowCount(len(matched_records))
             new_selected_row = -1
@@ -532,10 +572,27 @@ class CapitalDragonPanel(QWidget):
                 it_to.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
                 self.table.setItem(row_idx, 8, it_to)
 
-                # 9: 资金买点类型
+                # 9: 资金买点类型 (精细化视觉高亮，对齐龙头突击与天梯)
                 it_buy = QTableWidgetItem(buy_type)
                 it_buy.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                it_buy.setForeground(QBrush(QColor("#38bdf8")))
+                font_buy = it_buy.font()
+                font_buy.setBold(True)
+                it_buy.setFont(font_buy)
+                if "双加速" in buy_type:
+                    it_buy.setForeground(QBrush(QColor("#FFD700"))) # 金黄双加速
+                    it_buy.setBackground(QBrush(QColor(80, 20, 60, 180))) # 尊荣金紫
+                elif "缺口加速" in buy_type:
+                    it_buy.setForeground(QBrush(QColor("#FF55BB"))) # 亮粉紫缺口加速
+                    it_buy.setBackground(QBrush(QColor(50, 15, 45, 160)))
+                elif "光脚加速" in buy_type:
+                    it_buy.setForeground(QBrush(QColor("#FFAA00"))) # 亮橙黄光脚加速
+                    it_buy.setBackground(QBrush(QColor(60, 35, 10, 160)))
+                elif "主升" in buy_type or "先锋" in buy_type or "龙头" in buy_type:
+                    it_buy.setForeground(QBrush(QColor("#00e676")))
+                    it_buy.setBackground(QBrush(QColor(10, 50, 30, 150)))
+                else:
+                    it_buy.setForeground(QBrush(QColor("#38bdf8")))
+                    it_buy.setBackground(QBrush(QColor(0, 0, 0, 0)))
                 self.table.setItem(row_idx, 9, it_buy)
 
                 # 10: 建议买入区间
@@ -556,11 +613,19 @@ class CapitalDragonPanel(QWidget):
                 it_reason.setForeground(QBrush(QColor("#b0bec5")))
                 self.table.setItem(row_idx, 12, it_reason)
 
+            dual_cnt = self._last_report.get('dual_accel_count', 0) if self._last_report else 0
+            gap_cnt = self._last_report.get('gap_accel_count', 0) if self._last_report else 0
+            ol_cnt = self._last_report.get('open_low_count', 0) if self._last_report else 0
+            accel_tot = dual_cnt + gap_cnt + ol_cnt
+            accel_str = f" | ⚡加速: {accel_tot}只 (👑双加速:{dual_cnt} 🚀缺口:{gap_cnt})" if accel_tot > 0 else ""
+            perf_tag = " <font color='#00ff88'>[⚡极限性能]</font>" if getattr(self, 'extreme_perf_mode', True) else ""
+
             self.lbl_stats.setText(
                 f"🐉 资金主线龙头已就位: <b>{len(matched_records)}</b> 只 "
                 f"(空间龙: {self._last_report.get('space_dragon_count', 0)} | "
                 f"容量中军: {self._last_report.get('midcap_dragon_count', 0)} | "
                 f"主线先锋: {self._last_report.get('pioneer_dragon_count', 0)})"
+                f"{accel_str}{perf_tag}"
             )
 
             if new_selected_row >= 0:
@@ -570,7 +635,31 @@ class CapitalDragonPanel(QWidget):
             self.table.setSortingEnabled(True)
 
         finally:
+            self.table.setUpdatesEnabled(True)
             self._is_updating = False
+
+    def _toggle_extreme_perf(self):
+        """切换极限性能模式 (精选 Top 30，极速无阻滞渲染)"""
+        self.extreme_perf_mode = not getattr(self, 'extreme_perf_mode', True)
+        if self.extreme_perf_mode:
+            self.btn_extreme_perf.setText("⚡ 极限性能: 开")
+            self.btn_extreme_perf.setStyleSheet("""
+                QPushButton {
+                    background-color: #1a2a1a; color: #00ff88; font-weight: bold;
+                    border: 1px solid #00ff88; border-radius: 3px; padding: 3px 8px; font-size: 8.5pt;
+                }
+                QPushButton:hover { background-color: #00ff88; color: #000000; }
+            """)
+        else:
+            self.btn_extreme_perf.setText("⚡ 极限性能: 关")
+            self.btn_extreme_perf.setStyleSheet("""
+                QPushButton {
+                    background-color: #2a2a2a; color: #888888; font-weight: normal;
+                    border: 1px solid #555555; border-radius: 3px; padding: 3px 8px; font-size: 8.5pt;
+                }
+                QPushButton:hover { background-color: #3a3a3a; color: #ffffff; }
+            """)
+        self._apply_filter()
 
     def _apply_filter(self):
         if self._last_report:
