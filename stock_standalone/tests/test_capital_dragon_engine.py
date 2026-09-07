@@ -98,6 +98,14 @@ class TestCapitalDragonEngine(unittest.TestCase):
         self.assertTrue(engine.is_true_dragon("300750"))
         self.assertFalse(engine.is_true_dragon("000002"))
 
+        # 验证系统虚拟量比与板块预估成交额 (SSOT)
+        self.assertIn("vol_ratio", nd_info)
+        self.assertGreaterEqual(nd_info["vol_ratio"], 0.1)
+        sec_battery = next(s for s in report["top_sectors"] if "固态电池" in s["name"])
+        self.assertIn("vol_ratio", sec_battery)
+        self.assertIn("proj_amt_yi", sec_battery)
+        self.assertGreater(sec_battery["proj_amt_yi"], 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()

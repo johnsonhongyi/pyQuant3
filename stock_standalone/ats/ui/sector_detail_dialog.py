@@ -593,8 +593,10 @@ class ATSSectorDetailDialog(QDialog):
             filter_tags.append("⭐仅看强势股")
 
         tag_str = f" [{' | '.join(filter_tags)}]" if filter_tags else ""
+        avg_vr = getattr(self, '_last_meta', {}).get('avg_vol_ratio', 0.0) if hasattr(self, '_last_meta') else 0.0
+        avg_vr_str = f" | 板块虚拟量比: {avg_vr:.1f}x" if avg_vr > 0 else ""
         self.stats_lbl.setText(
-            f"成员数: {len(rows)}/{total_raw} (强势股: {strong_raw_cnt}只) | 领涨标的: {leader_str}{tag_str}"
+            f"成员数: {len(rows)}/{total_raw} (强势股: {strong_raw_cnt}只){avg_vr_str} | 领涨标的: {leader_str}{tag_str}"
         )
         self.setWindowTitle(f"🔥 {self.sector_name} 板块明细 (强势股: {strong_raw_cnt}只 / 呈现 {len(rows)}只)")
         self._render_rows(rows)
@@ -748,7 +750,8 @@ class ATSSectorDetailDialog(QDialog):
                     f_name = name_item.font()
                     f_name.setBold(True)
                     name_item.setFont(f_name)
-                    name_item.setToolTip(f"⭐ 板块强势标的 | 角色: {r.get('type', '')} | 得分: {score_val:.1f}")
+                    vr_info = f" | 虚拟量比: {r.get('vol_ratio'):.1f}x" if r.get('vol_ratio') else ""
+                    name_item.setToolTip(f"⭐ 板块强势标的 | 角色: {r.get('type', '')} | 得分: {score_val:.1f}{vr_info}")
                 self.table.setItem(row_idx, 1, name_item)
 
                 # 3. Type (绑定角色权重支持高精度升降序与梯队聚合)

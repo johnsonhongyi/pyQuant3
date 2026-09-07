@@ -38,6 +38,7 @@ class TestCapitalDragonPanelIntegration(unittest.TestCase):
         self.assertEqual(self.panel.table.columnCount(), len(self.panel.headers))
         self.assertIn("代码", self.panel.headers)
         self.assertIn("龙头角色", self.panel.headers)
+        self.assertIn("虚拟量比", self.panel.headers)
         self.assertIn("成交额(亿)", self.panel.headers)
 
     def test_update_payload_and_rendering(self):
@@ -81,6 +82,16 @@ class TestCapitalDragonPanelIntegration(unittest.TestCase):
         table_codes = [self.panel.table.item(r, 0).text() for r in range(self.panel.table.rowCount())]
         self.assertIn("300750", table_codes)
         self.assertIn("002812", table_codes)
+
+        # 验证虚拟量比列（第 6 列）
+        vr_col_idx = self.panel.headers.index("虚拟量比")
+        self.assertEqual(vr_col_idx, 6)
+        vr_item = self.panel.table.item(0, vr_col_idx)
+        self.assertIsNotNone(vr_item)
+        self.assertTrue(vr_item.text().endswith("x"))
+
+        # 验证卡片描述中显示量比
+        self.assertIn("量比:", card0["desc"].text())
 
         # 验证搜索框即时过滤
         self.panel.search_input.setText("宁德")

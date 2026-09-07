@@ -291,7 +291,7 @@ class CapitalDragonPanel(QWidget):
         # 3. 核心真龙矩阵表格 (True Dragon Matrix Table)
         self.table = QTableWidget()
         self.headers = [
-            "代码", "名称", "龙头角色", "所属主线", "现价", "涨幅%",
+            "代码", "名称", "龙头角色", "所属主线", "现价", "涨幅%", "虚拟量比",
             "成交额(亿)", "换手率%", "资金买点类型", "建议买入区间", "止损参考", "核心逻辑与驱动"
         ]
         self.table.setColumnCount(len(self.headers))
@@ -305,9 +305,9 @@ class CapitalDragonPanel(QWidget):
 
         default_widths = {
             "代码": 68, "名称": 78, "龙头角色": 115, "所属主线": 88, "现价": 68, "涨幅%": 68,
-            "成交额(亿)": 88, "换手率%": 68, "资金买点类型": 110, "建议买入区间": 110, "止损参考": 70, "核心逻辑与驱动": 280
+            "虚拟量比": 75, "成交额(亿)": 88, "换手率%": 68, "资金买点类型": 110, "建议买入区间": 110, "止损参考": 70, "核心逻辑与驱动": 280
         }
-        setup_header_persistence(self.table, "capital_dragon_table_header_v1", default_widths=default_widths)
+        setup_header_persistence(self.table, "capital_dragon_table_header_v2", default_widths=default_widths)
 
         # 信号连接
         self.table.itemClicked.connect(self._on_row_clicked)
@@ -373,12 +373,24 @@ class CapitalDragonPanel(QWidget):
                 w["frame"].setToolTip(f"💡 点击直接打开【{sec_name}】板块成分股明细与强势股")
 
                 pct_col = COLOR_UP if st["avg_pct"] > 0 else (COLOR_DOWN if st["avg_pct"] < 0 else "#ffffff")
+                vol_ratio = st.get("vol_ratio", 1.0)
+                proj_amt = st.get("proj_amt_yi", st["total_amt_yi"])
+
+                vr_col = "#ff1744" if vol_ratio >= 2.0 else ("#00e5ff" if vol_ratio >= 1.2 else "#c9d1d9")
+                proj_str = f" <font color='#888888'>(预估{proj_amt:.0f}亿)</font>" if proj_amt > st["total_amt_yi"] * 1.05 else ""
+
                 w["desc"].setText(
-                    f"总成交: <font color='#ffd700'><b>{st['total_amt_yi']:.1f}亿</b></font> | "
+                    f"成交: <font color='#ffd700'><b>{st['total_amt_yi']:.1f}亿</b></font>{proj_str} | "
+                    f"量比: <font color='{vr_col}'><b>{vol_ratio:.1f}x</b></font> | "
                     f"均涨: <font color='{pct_col}'><b>{st['avg_pct']:+.2f}%</b></font> | "
                     f"涨停: <font color='#ff4444'><b>{st['limit_up_count']}只</b></font>"
                 )
                 w["desc"].setTextFormat(Qt.TextFormat.RichText)
+                w["frame"].setToolTip(
+                    f"💡 点击直接打开【{sec_name}】板块成分股明细与强势股\n"
+                    f"📊 累计成交: {st['total_amt_yi']:.1f}亿元 | 全天预估: {proj_amt:.1f}亿元\n"
+                    f"⚡ 板块虚拟量比: {vol_ratio:.2f}x (按盘中交易进度折算)"
+                )
 
                 if l_name and l_code:
                     w["leader"].setText(f"🚀 先锋: {l_name} ({l_code}) +{st['leader_pct']:.1f}%")
@@ -482,7 +494,28 @@ class CapitalDragonPanel(QWidget):
                 it_pct.setForeground(QBrush(QColor(pct_col)))
                 self.table.setItem(row_idx, 5, it_pct)
 
-                # 6: 成交额(亿)
+                # 6: 虚拟量比 (系统的虚拟量比，反映资金加速流入速度)
+                vr_val = float(d.get("vol_ratio", 1.0))
+                it_vr = NumericTableWidgetItem(f"{vr_val:.2f}x", vr_val)
+                it_vr.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                f_vr = it_vr.font()
+                if vr_val >= 3.0:
+                    it_vr.setForeground(QBrush(QColor("#ff1744")))
+                    f_vr.setBold(True)
+                elif vr_val >= 2.0:
+                    it_vr.setForeground(QBrush(QColor("#ffd700")))
+                    f_vr.setBold(True)
+                elif vr_val >= 1.2:
+                    it_vr.setForeground(QBrush(QColor("#00e5ff")))
+                elif vr_val <= 0.7:
+                    it_vr.setForeground(QBrush(QColor("#888888")))
+                else:
+                    it_vr.setForeground(QBrush(QColor("#ffffff")))
+                it_vr.setFont(f_vr)
+                it_vr.setToolTip(f"系统的虚拟量比: {vr_val:.2f}x\n按上午实时交易进度计算全天预估成交倍速，量比越大资金加速流入越猛烈")
+                self.table.setItem(row_idx, 6, it_vr)
+
+                # 7: 成交额(亿)
                 it_amt = NumericTableWidgetItem(f"{amt:.1f}亿", amt)
                 it_amt.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
                 if amt >= 15.0:
@@ -492,36 +525,36 @@ class CapitalDragonPanel(QWidget):
                     it_amt.setFont(f)
                 else:
                     it_amt.setForeground(QBrush(QColor("#ffffff")))
-                self.table.setItem(row_idx, 6, it_amt)
+                self.table.setItem(row_idx, 7, it_amt)
 
-                # 7: 换手率%
+                # 8: 换手率%
                 it_to = NumericTableWidgetItem(f"{turnover:.1f}%", turnover)
                 it_to.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-                self.table.setItem(row_idx, 7, it_to)
+                self.table.setItem(row_idx, 8, it_to)
 
-                # 8: 资金买点类型
+                # 9: 资金买点类型
                 it_buy = QTableWidgetItem(buy_type)
                 it_buy.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 it_buy.setForeground(QBrush(QColor("#38bdf8")))
-                self.table.setItem(row_idx, 8, it_buy)
+                self.table.setItem(row_idx, 9, it_buy)
 
-                # 9: 建议买入区间
+                # 10: 建议买入区间
                 it_zone = QTableWidgetItem(buy_zone)
                 it_zone.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 it_zone.setForeground(QBrush(QColor("#ffb74d")))
-                self.table.setItem(row_idx, 9, it_zone)
+                self.table.setItem(row_idx, 10, it_zone)
 
-                # 10: 止损参考
+                # 11: 止损参考
                 it_sl = NumericTableWidgetItem(f"{stop_loss:.2f}", stop_loss)
                 it_sl.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
                 it_sl.setForeground(QBrush(QColor("#ef5350")))
-                self.table.setItem(row_idx, 10, it_sl)
+                self.table.setItem(row_idx, 11, it_sl)
 
-                # 11: 核心逻辑与驱动
+                # 12: 核心逻辑与驱动
                 it_reason = QTableWidgetItem(reason)
                 it_reason.setToolTip(reason)
                 it_reason.setForeground(QBrush(QColor("#b0bec5")))
-                self.table.setItem(row_idx, 11, it_reason)
+                self.table.setItem(row_idx, 12, it_reason)
 
             self.lbl_stats.setText(
                 f"🐉 资金主线龙头已就位: <b>{len(matched_records)}</b> 只 "
@@ -533,7 +566,7 @@ class CapitalDragonPanel(QWidget):
             if new_selected_row >= 0:
                 self.table.setCurrentCell(new_selected_row, 0)
 
-            auto_fit_columns_once(self.table, "capital_dragon_table_header_v1")
+            auto_fit_columns_once(self.table, "capital_dragon_table_header_v2")
             self.table.setSortingEnabled(True)
 
         finally:
