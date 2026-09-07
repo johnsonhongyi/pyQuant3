@@ -27,6 +27,12 @@ from ats.capital_dragon_engine import CapitalDragonEngine
 class TestCapitalDragonPanelIntegration(unittest.TestCase):
 
     def setUp(self):
+        engine = CapitalDragonEngine.get_instance()
+        with engine._cache_lock:
+            engine._cached_report = {}
+            engine._cached_time = 0.0
+            engine._cached_df_len = 0
+            engine._cached_df_first_code = ""
         self.panel = CapitalDragonPanel()
 
     def tearDown(self):
@@ -192,6 +198,73 @@ class TestCapitalDragonPanelIntegration(unittest.TestCase):
 
         dlg.deleteLater()
 
+    def test_extreme_perf_toggle(self):
+        """测试【⚡ 极限性能模式】按钮状态切换与标的展示截断"""
+        # 初始默认开启
+        self.assertTrue(self.panel.extreme_perf_mode)
+        self.assertIn("开", self.panel.btn_extreme_perf.text())
+
+        # 点击切换为关闭
+        self.panel.btn_extreme_perf.click()
+        self.assertFalse(self.panel.extreme_perf_mode)
+        self.assertIn("关", self.panel.btn_extreme_perf.text())
+
+        # 再次点击切换为开启
+        self.panel.btn_extreme_perf.click()
+        self.assertTrue(self.panel.extreme_perf_mode)
+        self.assertIn("开", self.panel.btn_extreme_perf.text())
+
+    def test_acceleration_buy_type_rendering_and_card_stats(self):
+        """测试分时加速形态（双加速、缺口加速、光脚加速）在买点类型列中的精细化视觉色彩与卡片加速汇聚"""
+        mock_data = {
+            # 双加速（缺口 + 光脚）
+            "600519": {
+                "name": "贵州茅台", "close": 1750.0, "open": 1720.0, "low": 1720.0, "lasth1d": 1700.0, "lastp": 1700.0,
+                "percent": 3.5, "amount": 6.8e9, "category": "白酒;大消费", "dff": 2.5, "dff2": 6.8, "dff3": 12.0, "ma20d": 1650.0
+            },
+            # 缺口加速（有跳空缺口，但有小下影）
+            "000858": {
+                "name": "五粮液", "close": 150.0, "open": 146.0, "low": 144.5, "lasth1d": 142.0, "lastp": 142.0,
+                "percent": 5.6, "amount": 3.2e9, "category": "白酒;大消费", "dff": 1.8, "dff2": 5.2, "dff3": 9.5, "ma20d": 138.0
+            },
+            # 光脚加速（无跳空缺口，但平开/微低开后光脚单边拉升）
+            "002304": {
+                "name": "洋河股份", "close": 98.0, "open": 94.0, "low": 94.0, "lasth1d": 95.0, "lastp": 94.5,
+                "percent": 4.2, "amount": 1.5e9, "category": "白酒;大消费", "dff": 1.2, "dff2": 4.0, "dff3": 7.5, "ma20d": 90.0
+            }
+        }
+        df_mock = pd.DataFrame.from_dict(mock_data, orient='index')
+        self.panel.update_payload(df_mock, sh_pct=1.0)
+
+        # 1. 验证顶部白酒主线卡片呈现了加速统计
+        card0 = self.panel.sector_card_widgets[0]
+        self.assertIn("加速:", card0["desc"].text())
+
+        # 2. 验证表格行数与买点类型列（索引 9）渲染
+        buy_col_idx = self.panel.headers.index("资金买点类型")
+        self.assertEqual(buy_col_idx, 9)
+
+        table_codes = [self.panel.table.item(r, 0).text() for r in range(self.panel.table.rowCount())]
+        self.assertIn("600519", table_codes)
+
+        # 查找茅台的买点类型 item
+        idx_mt = table_codes.index("600519")
+        item_mt_buy = self.panel.table.item(idx_mt, buy_col_idx)
+        self.assertIsNotNone(item_mt_buy)
+        # 应该包含双加速
+        self.assertIn("双加速", item_mt_buy.text())
+        # 字体加粗
+        self.assertTrue(item_mt_buy.font().bold())
+        # 颜色匹配 #FFD700
+        color_hex = item_mt_buy.foreground().color().name().upper()
+        self.assertEqual(color_hex, "#FFD700")
+
+        # 3. 验证状态栏包含加速汇总统计与极限性能标签
+        stats_text = self.panel.lbl_stats.text()
+        self.assertIn("⚡加速:", stats_text)
+        self.assertIn("[⚡极限性能]", stats_text)
+
 
 if __name__ == "__main__":
     unittest.main()
+

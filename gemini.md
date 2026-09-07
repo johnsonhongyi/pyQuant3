@@ -1,3 +1,28 @@
+## 2026-09-07 21:35
+- [x] **全链路落地【分时结构形态加速能力 (光脚/缺口/双加速) + 板块群起加速强度赋能 + ATS 极限性能模式根治卡顿】(SSOT) (`stock_standalone/ats/capital_dragon_engine.py`, `stock_standalone/ats/ui/capital_dragon_panel.py`, `stock_standalone/ats/sector_data_aggregator.py`, `stock_standalone/ats/ui/sector_detail_dialog.py`, `stock_standalone/tests/test_capital_dragon_engine.py`, `stock_standalone/tests/test_capital_dragon_panel_integration.py`)**：
+    - [x] **建立分时结构形态加速计算中枢与真龙提权体系 (`ats/capital_dragon_engine.py`)**：
+        1. **三维形态加速向量化判定 (SSOT)**：
+           - `⚡ 光脚加速`：开盘即最低价（`low >= open - 0.015` 或 `(open - low) / open <= 0.0015`），且非断崖低开（`open >= last_c * 0.98`）；
+           - `🚀 缺口加速`：跳空高开且日内缺口不补（`open_jump >= 0.8%` 且 `low > last_c` 且 `low >= yesterday_h - 0.015`）；
+           - `👑 双加速`：同时满足“光脚”与“跳空缺口”双重极速主升结构；
+        2. **合成加速买点类型与优先级提权**：将加速形态注入 `action_type`（如 `👑双加速·👑 领涨龙头`、`🚀缺口加速·👑 领涨龙头`、`👑双加速·🚀 主升趋势加速`），并在真龙排序权重中赋予加速优先权；
+        3. **板块强度融合群起加速赋能**：在板块资金聚合中统计各板块加速个股数量（`dual_accel_count`, `gap_accel_count`, `open_low_count`），注入 `accel_bonus`（最高 +16 分），推动群起加速板块优先脱颖而出晋级核心主线；
+    - [x] **重塑主线卡片与真龙表格视觉高亮 (`ats/ui/capital_dragon_panel.py`)**：
+        1. **主线卡片呈现加速统计**：顶部 3 大主线卡片显性展示 `成交: XX.X亿 | 量比: X.Xx | 均涨: +X.XX% | 涨停: X只 | 加速: Z只`，ToolTip 显示加速结构分类明细；
+        2. **资金买点类型精细化视觉高亮**：对齐龙头突击与天梯标准：【👑 双加速】金黄加粗高亮 (`#FFD700`) + 尊荣金紫底色，【🚀 缺口加速】亮粉紫加粗 (`#FF55BB`)，【⚡ 光脚加速】亮橙黄加粗 (`#FFAA00`)，一眼锁定形态加速最暴力的龙头；
+        3. **板块详情联动加速画像 (`ats/sector_data_aggregator.py`, `ats/ui/sector_detail_dialog.py`)**：成分股提取 `open`/`low`/`lasth1d`/`lastp`，为板块强势股注入 `👑 双加速先锋`、`🚀 缺口加速`、`⚡ 光脚加速` 标签，弹窗顶部统计栏呈现加速个股统计；
+    - [x] **根治 ATS 性能卡顿与落地【⚡ 极限性能模式】**：
+        1. **指数与基金铁壁剔除 (`is_index_or_fund`)**：彻底过滤 `399xxx`, `999xxx`, `899xxx`, `000001` 等大盘综合指数，杜绝数百亿的大盘指数挤占容量中军席位；
+        2. **容量中军与真龙池精准收敛**：容量中军从泛滥的 300+ 只收敛至 Top 20 绝对中军，总真龙池精准收敛至 Top 50，彻底根除单次渲染 400+ 行 6,000+ 个 Qt 对象导致的 GC 与重排死锁；
+        3. **工具栏新增【⚡ 极限性能】开关按钮**：默认开启，精简展示 Top 30 核心真龙；表格刷新加入 `setUpdatesEnabled(False)`/`True` 批量图元更新，杜绝主线程重排卡顿；
+        4. **跨数据集缓存守卫与 0 开销复用**：`update_payload` 优先读取后台 Worker 预先测算好的报告，并加入 `df_check` 数据集指纹校验，主线程 0 延迟零冗余计算；
+    - [x] **全链路自动化回归测试 100% 全部 PASSED**：
+        - `test_capital_dragon_panel_integration.py` 扩充双加速高亮、卡片加速统计、极限性能模式切换测试（6项全绿）；
+        - `test_capital_dragon_engine.py` 覆盖指数剔除、分时加速结构判定与板块加权断言（3项全绿）；
+        - `test_sector_aggregator_suite.py`（8项全绿）；
+        - `test_signal_ledger.py` 与 `test_limit_up_persistence_and_history.py`（20项全绿）；
+        - 全套跨模块核心测试 100% PASSED！
+
 ## 2026-09-07 20:50
 - [x] **全链路落地【资金主线板块与龙头中枢添加系统的虚拟量比 + 实时交易早盘加速流向极速定位】(SSOT) (`stock_standalone/ats/capital_dragon_engine.py`, `stock_standalone/ats/ui/capital_dragon_panel.py`, `stock_standalone/ats/sector_data_aggregator.py`, `stock_standalone/ats/ui/sector_detail_dialog.py`, `stock_standalone/tests/test_capital_dragon_engine.py`, `stock_standalone/tests/test_capital_dragon_panel_integration.py`)**：
     - [x] **建立系统虚拟量比与全天预估成交数据中枢 (`ats/capital_dragon_engine.py`)**：

@@ -106,6 +106,70 @@ class TestCapitalDragonEngine(unittest.TestCase):
         self.assertIn("proj_amt_yi", sec_battery)
         self.assertGreater(sec_battery["proj_amt_yi"], 0.0)
 
+    def test_index_filtering_and_acceleration_features(self):
+        from ats.capital_dragon_engine import is_index_or_fund
+        # 1. 验证指数过滤
+        self.assertTrue(is_index_or_fund("399005", "中小100"))
+        self.assertTrue(is_index_or_fund("999999", "上证指数"))
+        self.assertTrue(is_index_or_fund("899050", "北证50"))
+        self.assertTrue(is_index_or_fund("000001", "上证指数"))
+        self.assertFalse(is_index_or_fund("000001", "平安银行"))
+        self.assertFalse(is_index_or_fund("600519", "贵州茅台"))
+
+        # 2. 验证包含指数与双加速/缺口加速标的的全量分析
+        engine = CapitalDragonEngine.get_instance()
+        data = {
+            # 指数：巨额成交量，必须被过滤
+            "399005": {
+                "name": "中小100", "close": 8480.0, "open": 8400.0, "low": 8390.0, "last_close": 8350.0,
+                "percent": 1.5, "amount": 3.7e11, "category": "0", "dff": 0.0, "dff2": 10.0, "dff3": 20.0, "ma20d": 8000.0
+            },
+            "999999": {
+                "name": "上证指数", "close": 3932.0, "open": 3930.0, "low": 3925.0, "last_close": 3920.0,
+                "percent": 0.3, "amount": 1.8e11, "category": "0", "dff": 0.0, "dff2": 5.0, "dff3": 10.0, "ma20d": 3800.0
+            },
+            # 真实个股 A：双加速 (跳空高开 + 开盘即最低)
+            "300308": {
+                "name": "中际旭创", "close": 898.0, "open": 880.0, "low": 880.0, "last_close": 850.0, "lasth1d": 860.0,
+                "percent": 10.38, "amount": 3.8e9, "category": "共封装光学(CPO);光通信", "dff": 1.5, "dff2": 16.8, "dff3": 65.6, "ma20d": 800.0
+            },
+            # 真实个股 B：缺口加速 (跳空高开且缺口未补，但有微小下影)
+            "300502": {
+                "name": "新易盛", "close": 417.0, "open": 405.0, "low": 402.0, "last_close": 390.0, "lasth1d": 395.0,
+                "percent": 8.08, "amount": 2.1e9, "category": "共封装光学(CPO);光通信", "dff": 1.4, "dff2": 11.9, "dff3": 59.1, "ma20d": 370.0
+            },
+            # 真实个股 C：光脚加速 (平开/低开但开盘即最低)
+            "002384": {
+                "name": "东山精密", "close": 190.5, "open": 180.0, "low": 180.0, "last_close": 180.0, "lasth1d": 185.0,
+                "percent": 6.65, "amount": 1.3e9, "category": "共封装光学(CPO);消费电子", "dff": 1.2, "dff2": 10.9, "dff3": 27.8, "ma20d": 170.0
+            }
+        }
+        df = pd.DataFrame.from_dict(data, orient='index')
+        report = engine.analyze_capital_dragon_universe(df, force=True)
+
+        dragon_codes = report["dragon_codes_set"]
+        # 指数绝不能进入龙头池
+        self.assertNotIn("399005", dragon_codes)
+        self.assertNotIn("999999", dragon_codes)
+
+        # 验证中际旭创被标记为双加速
+        zj_info = engine.get_dragon_info("300308")
+        self.assertIsNotNone(zj_info)
+        self.assertEqual(zj_info.get("accel_tag"), "👑双加速")
+        self.assertTrue(zj_info.get("is_dual_accel"))
+        self.assertIn("👑双加速", zj_info.get("action_type"))
+
+        # 验证新易盛被标记为缺口加速
+        xys_info = engine.get_dragon_info("300502")
+        self.assertIsNotNone(xys_info)
+        self.assertEqual(xys_info.get("accel_tag"), "🚀缺口加速")
+        self.assertTrue(xys_info.get("is_gap_accel"))
+
+        # 验证板块加速计数与加成
+        sec_cpo = next(s for s in report["top_sectors"] if "共封装光学" in s["name"])
+        self.assertGreaterEqual(sec_cpo.get("accel_total_count", 0), 2)
+        self.assertGreaterEqual(sec_cpo.get("dual_accel_count", 0), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -595,8 +595,14 @@ class ATSSectorDetailDialog(QDialog):
         tag_str = f" [{' | '.join(filter_tags)}]" if filter_tags else ""
         avg_vr = getattr(self, '_last_meta', {}).get('avg_vol_ratio', 0.0) if hasattr(self, '_last_meta') else 0.0
         avg_vr_str = f" | 板块虚拟量比: {avg_vr:.1f}x" if avg_vr > 0 else ""
+        meta_d = getattr(self, '_last_meta', {}) or {}
+        dual_c = meta_d.get('dual_accel_count', 0)
+        gap_c = meta_d.get('gap_accel_count', 0)
+        accel_tot = meta_d.get('accel_total_count', 0)
+        accel_str = f" | ⚡加速: {accel_tot}只 (👑双加速:{dual_c} 🚀缺口:{gap_c})" if accel_tot > 0 else ""
+
         self.stats_lbl.setText(
-            f"成员数: {len(rows)}/{total_raw} (强势股: {strong_raw_cnt}只){avg_vr_str} | 领涨标的: {leader_str}{tag_str}"
+            f"成员数: {len(rows)}/{total_raw} (强势股: {strong_raw_cnt}只){avg_vr_str}{accel_str} | 领涨标的: {leader_str}{tag_str}"
         )
         self.setWindowTitle(f"🔥 {self.sector_name} 板块明细 (强势股: {strong_raw_cnt}只 / 呈现 {len(rows)}只)")
         self._render_rows(rows)

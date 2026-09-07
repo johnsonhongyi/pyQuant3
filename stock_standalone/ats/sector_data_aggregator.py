@@ -701,12 +701,43 @@ class SectorDataAggregator:
                                 break
                 extra_dict[ec] = cct.format_col_value(ec, val_raw)
 
+            # 提取价格与分时关键点 (open/low/prev_close/lasth1d)
+            price_val = 0.0
+            open_val = 0.0
+            low_val = 0.0
+            prev_close_val = 0.0
+            lasth1d_val = 0.0
+
+            if tq and tq.get('price', 0) > 0:
+                price_val = _safe_float(tq.get('price'))
+                open_val = _safe_float(tq.get('open'))
+                low_val = _safe_float(tq.get('low'))
+                prev_close_val = _safe_float(tq.get('prev_close'))
+            elif code_str in sina_quotes_map:
+                sq = sina_quotes_map[code_str]
+                price_val = _safe_float(sq.get('price'))
+                open_val = _safe_float(sq.get('open'))
+                low_val = _safe_float(sq.get('low'))
+                prev_close_val = _safe_float(sq.get('prev_close'))
+            
+            if row is not None:
+                if price_val <= 0: price_val = _safe_float(row.get('close', row.get('price', 0.0)))
+                if open_val <= 0: open_val = _safe_float(row.get('open', 0.0))
+                if low_val <= 0: low_val = _safe_float(row.get('low', 0.0))
+                if prev_close_val <= 0: prev_close_val = _safe_float(row.get('last_close', row.get('lastp', row.get('pre_close', 0.0))))
+                lasth1d_val = _safe_float(row.get('lasth1d', row.get('lasth', 0.0)))
+
             rows.append({
                 'code': code_str,
                 'name': name,
                 'score': score,
                 'type': type_str,
                 'pct': round(pct_val, 2),
+                'price': price_val,
+                'open': open_val,
+                'low': low_val,
+                'prev_close': prev_close_val,
+                'lasth1d': lasth1d_val,
                 'start_pct': round(pct_val - dff_val, 2),
                 'dff': dff_val,
                 'rank': rank_val,
@@ -810,18 +841,53 @@ class SectorDataAggregator:
             final_leader_code = dynamic_leader_code
             final_leader_name = dynamic_leader_name
 
-        # ── 3. 强势股与真龙角色智能画像与标记 ──
+        # ── 3. 强势股与真龙角色智能画像与标记 (融入分时加速形态) ──
         try:
             from ats.capital_dragon_engine import CapitalDragonEngine
             c_eng = CapitalDragonEngine.get_instance()
         except Exception:
             c_eng = None
 
+        dual_accel_cnt = 0
+        gap_accel_cnt = 0
+        open_low_cnt = 0
+
         for r in rows:
             c = r['code']
             pct_val = _safe_float(r.get('pct', 0.0))
+            op = _safe_float(r.get('open', 0.0))
+            lp = _safe_float(r.get('low', 0.0))
+            lc = _safe_float(r.get('prev_close', 0.0))
+            yh = _safe_float(r.get('lasth1d', lc))
+            if lc <= 0 and pct_val != 0:
+                p_curr = _safe_float(r.get('price', 0.0))
+                lc = p_curr / (1.0 + pct_val / 100.0) if p_curr > 0 else 0.0
+
+            # 1. 开盘即最低 (极小下影) 光脚加速
+            low_diff = (op - lp) / op * 100.0 if op > 0 else 999.0
+            is_ol = bool(op > 0 and lp > 0 and (lp >= op - 0.015 or low_diff <= 0.15) and (op >= lc * 0.98))
+
+            # 2. 跳空高开且缺口未补加速
+            open_jump = (op - lc) / lc * 100.0 if lc > 0 else 0.0
+            is_gp = bool(open_jump >= 0.8 and lp > lc and (yh <= 0 or lp >= yh - 0.015))
+
+            is_dl = bool(is_ol and is_gp)
+
+            acc_tag = ""
+            if is_dl:
+                dual_accel_cnt += 1
+                acc_tag = "👑双加速"
+            elif is_gp:
+                gap_accel_cnt += 1
+                acc_tag = "🚀缺口加速"
+            elif is_ol:
+                open_low_cnt += 1
+                acc_tag = "⚡光脚加速"
+            r['accel_tag'] = acc_tag
+
             if c == final_leader_code:
-                r['type'] = '👑 领涨龙头'
+                base_t = '👑 领涨龙头'
+                r['type'] = f"{acc_tag}·{base_t}" if acc_tag else base_t
                 r['score'] = max(98.0, race_scores.get(c, _safe_float(r.get('score', 75.0))))
                 r['is_strong'] = True
                 r['pattern'] = race_hints.get(c, '板块领涨核心龙头')
@@ -829,10 +895,21 @@ class SectorDataAggregator:
                     final_leader_name = r['name']
             elif c_eng and c_eng.is_true_dragon(c):
                 d_info = c_eng.get_dragon_info(c) or {}
-                r['type'] = d_info.get('role', '🚀 主线板块先锋')
+                base_t = d_info.get('role', '🚀 主线板块先锋')
+                r['type'] = f"{acc_tag}·{base_t}" if acc_tag else base_t
                 r['score'] = max(95.0, race_scores.get(c, _safe_float(r.get('score', 75.0))))
                 r['is_strong'] = True
                 r['pattern'] = d_info.get('reason', race_hints.get(c, '真龙中枢核心标的'))
+            elif is_dl:
+                r['type'] = '👑 双加速先锋'
+                r['score'] = max(93.0, _safe_float(r.get('score', 0)))
+                r['is_strong'] = True
+                r['pattern'] = f"👑双加速主升结构 (开盘即最低+跳空未补) | {r.get('pattern', '')}"
+            elif is_gp:
+                r['type'] = '🚀 缺口加速'
+                r['score'] = max(89.0, _safe_float(r.get('score', 0)))
+                r['is_strong'] = True
+                r['pattern'] = f"🚀跳空缺口加速 (高开+{open_jump:.1f}%缺口未补) | {r.get('pattern', '')}"
             elif c in race_roles:
                 r['type'] = race_roles[c]
                 if c in race_scores:
@@ -841,15 +918,19 @@ class SectorDataAggregator:
                     r['pattern'] = race_hints[c]
                 r['is_strong'] = any(k in str(r['type']) for k in ('👑', '🚀', '🔥', '先锋', '龙头', '确核'))
             elif pct_val >= 9.5:
-                r['type'] = '🔥 强势涨停'
+                r['type'] = f"{acc_tag}·🔥 强势涨停" if acc_tag else '🔥 强势涨停'
                 r['score'] = max(96.0, _safe_float(r.get('score', 0)))
                 r['is_strong'] = True
                 r['pattern'] = '涨停封板强势先锋'
             elif pct_val >= 5.0:
-                r['type'] = '🚀 强势先锋'
+                r['type'] = f"{acc_tag}·🚀 强势先锋" if acc_tag else '🚀 强势先锋'
                 r['score'] = max(88.0, _safe_float(r.get('score', 0)))
                 r['is_strong'] = True
                 r['pattern'] = '主线高位领涨先锋'
+            elif is_ol and pct_val >= 2.0:
+                r['type'] = '⚡ 光脚加速'
+                r['score'] = max(85.0, _safe_float(r.get('score', 0)))
+                r['is_strong'] = True
             elif pct_val >= 3.0 or _safe_float(r.get('dff', 0.0)) >= 3.0:
                 r['type'] = '⚡ 活跃跟涨'
                 r['score'] = max(80.0, _safe_float(r.get('score', 0)))
@@ -904,7 +985,11 @@ class SectorDataAggregator:
             'up_count': up_count,
             'strong_count': sum(1 for r in rows if r.get('is_strong', False)),
             'avg_pct': round(avg_pct, 2),
-            'avg_vol_ratio': round(sum(_safe_float(r.get('vol_ratio', 1.0)) for r in rows) / max(1, len(rows)), 2)
+            'avg_vol_ratio': round(sum(_safe_float(r.get('vol_ratio', 1.0)) for r in rows) / max(1, len(rows)), 2),
+            'dual_accel_count': dual_accel_cnt,
+            'gap_accel_count': gap_accel_cnt,
+            'open_low_count': open_low_cnt,
+            'accel_total_count': dual_accel_cnt + gap_accel_cnt + open_low_cnt
         }
 
         return rows, round(final_score, 1), leader_str, meta
