@@ -358,7 +358,20 @@ class SwingStateTable(QWidget):
                     else:
                         item.setForeground(COLOR_GRAY)
                 elif col_idx == 3: # State column
-                    if text == "回踩中":
+                    reason_text = str(row_data[-1]) if len(row_data) > 0 else ""
+                    if "🎯" in reason_text or "二次上车" in reason_text:
+                        item.setForeground(QColor("#00FFCC"))  # 亮青碧绿高亮
+                        item.setFont(FONT_BOLD)
+                        item.setToolTip(f"【🎯 卖出企稳·二次上车】\n{reason_text}\n(防丢失筹码保护，建议接回)")
+                    elif "🚀" in reason_text or "起爆加速" in reason_text or "主升展开" in reason_text:
+                        item.setForeground(QColor("#FF3366"))  # 亮粉红加速
+                        item.setFont(FONT_BOLD)
+                        item.setToolTip(f"【🚀 支撑企稳·加速冲板】\n{reason_text}\n(中农联合起爆模式)")
+                    elif "🏆" in reason_text or "完美双结构" in reason_text:
+                        item.setForeground(COLOR_GOLD)         # 尊荣金黄
+                        item.setFont(FONT_BOLD)
+                        item.setToolTip(f"【🏆 完美双结构·支撑企稳】\n{reason_text}\n(通道上涨+支撑线上+高度充足+振幅活跃)")
+                    elif text == "回踩中":
                         item.setForeground(COLOR_WARN_Q)
                     elif text == "回踩企稳":
                         item.setForeground(COLOR_INFO_Q)
