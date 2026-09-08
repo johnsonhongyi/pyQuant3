@@ -19,6 +19,7 @@ from PyQt6.QtWidgets import QApplication
 from ats.ui.favorite_panel import FavoritePanel
 from ats.ui.swing_table import SwingStateTable
 from ats.ui.new_stock_panel import NewStockPanel
+from ats.ui.capital_dragon_panel import CapitalDragonPanel
 from ats.ui.styles import load_config_node, save_config_node
 
 @pytest.fixture(scope="session")
@@ -279,5 +280,70 @@ def test_ledger_worker_fav_rows_and_swing_rows_update(qapp):
     panel.update_favorite_rows(results["fav_rows"])
     assert panel.table.rowCount() == 2
     assert panel.table.item(0, 2).text() in ("12.34", "1850.00")
+
+
+def test_capital_dragon_panel_strategy_filter(qapp):
+    """测试 🐉 资金主线与龙头中枢 面板的 🎯 策略过滤 按钮与联动过滤"""
+    save_config_node("ats_capital_dragon_filter_enabled", False)
+    panel = CapitalDragonPanel()
+
+    # 1. 验证初始状态
+    assert hasattr(panel, 'btn_toggle_filter')
+    assert panel.filter_enabled is False
+    assert "关" in panel.btn_toggle_filter.text()
+
+    # 2. 模拟注入两只真龙记录
+    mock_dragons = [
+        {
+            "code": "688039", "name": "当虹科技", "role": "👑 领涨龙头", "sector": "文化传媒概念",
+            "price": 40.09, "pct": 19.99, "vol_ratio": 1.65, "amount_yi": 2.9, "turnover": 6.4,
+            "action_type": "👑双加速·👑 领涨龙头", "buy_zone": "40.09", "stop_loss": 38.49,
+            "reason": "【👑双加速主升结构】", "priority": 100
+        },
+        {
+            "code": "002285", "name": "世联行", "role": "⚡ 领涨先锋", "sector": "物业管理",
+            "price": 2.60, "pct": 10.17, "vol_ratio": 1.31, "amount_yi": 3.2, "turnover": 6.1,
+            "action_type": "👑双加速·👑 领涨龙头", "buy_zone": "2.60", "stop_loss": 2.50,
+            "reason": "【👑双加速主升结构】", "priority": 90
+        }
+    ]
+    panel._last_report = {
+        "dragon_records_converged": mock_dragons,
+        "dragon_records_all": mock_dragons,
+        "dragon_records": mock_dragons,
+        "top_sectors": [],
+        "space_dragon_count": 0,
+        "midcap_dragon_count": 0,
+        "pioneer_dragon_count": 2
+    }
+    panel._render_table(mock_dragons)
+    assert panel.table.rowCount() == 2
+    assert "<b>2</b> 只" in panel.lbl_stats.text()
+    assert "过滤后" not in panel.lbl_stats.text()
+
+    # 3. 开启策略过滤
+    panel.toggle_filter_state()
+    assert panel.filter_enabled is True
+    assert "开" in panel.btn_toggle_filter.text()
+    assert load_config_node("ats_capital_dragon_filter_enabled") is True
+
+    # 4. 模拟主窗口只有 688039 命中当前策略公式
+    mock_mw = MagicMock()
+    mock_mw.filtered_codes_set = {"688039"}
+    panel.parent = lambda: mock_mw
+
+    panel._apply_filter()
+    assert panel.table.rowCount() == 1
+    assert panel.table.item(0, 0).text() == "688039"
+    assert "共 2 只 (过滤后 <b>1</b> 只)" in panel.lbl_stats.text()
+
+    # 5. 关闭策略过滤
+    panel.toggle_filter_state()
+    assert panel.filter_enabled is False
+    assert "关" in panel.btn_toggle_filter.text()
+    assert load_config_node("ats_capital_dragon_filter_enabled") is False
+    assert panel.table.rowCount() == 2
+    assert "过滤后" not in panel.lbl_stats.text()
+
 
 

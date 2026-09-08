@@ -31,12 +31,15 @@ from PyQt6.QtGui import QColor, QBrush, QFont, QCursor
 from tk_gui_modules.qt_table_utils import NumericTableWidgetItem
 from ats.ui.styles import (
     COLOR_UP, COLOR_DOWN, COLOR_INFO, COLOR_ACCENT, COLOR_WARN,
-    setup_header_persistence, auto_fit_columns_once
+    setup_header_persistence, auto_fit_columns_once,
+    load_config_node, save_config_node, parse_bool_config
 )
 from ats.capital_dragon_engine import (
     CapitalDragonEngine, _safe_float, _clean_code,
     compute_dragon_buy_type_sort_score
 )
+
+PERSIST_KEY_DRAGON_FILTER = "ats_capital_dragon_filter_enabled"
 
 logger = logging.getLogger("CapitalDragonPanel")
 
@@ -209,6 +212,10 @@ class CapitalDragonPanel(QWidget):
         self._last_sig = None
         self._is_updating = False
 
+        # 🎯 策略过滤持久化开关 (专属独立持久化，默认关闭)
+        saved_filter = load_config_node(PERSIST_KEY_DRAGON_FILTER, False)
+        self.filter_enabled = parse_bool_config(saved_filter, default=False)
+
         self._init_ui()
 
     def _init_ui(self):
@@ -254,6 +261,12 @@ class CapitalDragonPanel(QWidget):
         toolbar_layout.addWidget(self.lbl_stats)
 
         toolbar_layout.addStretch()
+
+        # 🎯 策略过滤持久化开关按钮
+        self.btn_toggle_filter = QPushButton()
+        self._update_filter_button_ui()
+        self.btn_toggle_filter.clicked.connect(self.toggle_filter_state)
+        toolbar_layout.addWidget(self.btn_toggle_filter)
 
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("🔍 搜索代码 / 名称 / 主线 / 角色...")
@@ -491,18 +504,28 @@ class CapitalDragonPanel(QWidget):
 
             self.table.setSortingEnabled(False)
             filter_text = self.search_input.text().strip().lower()
-            
+
+            parent_mw = self._get_parent_mw()
+            fset = None
+            if getattr(self, 'filter_enabled', False) and parent_mw is not None:
+                fset = getattr(parent_mw, 'filtered_codes_set', None)
+                if fset is None:
+                    fset = set()
+
             matched_records = []
             for d in dragons:
+                c_clean = str(d.get('code', '')).strip().zfill(6)
+                if fset is not None and c_clean not in fset:
+                    continue
                 if filter_text:
                     match_str = f"{d['code']} {d['name']} {d['role']} {d['sector']} {d['action_type']} {d['reason']}".lower()
                     if filter_text not in match_str:
                         continue
                 matched_records.append(d)
 
-            # ⚡ 极限性能模式开启时：精选 Top 50 核心真龙，极大提升高频渲染丝滑度
-            # 关闭时：显示优化前的全部 300+ 全量候选池，不做 Top 50 截断
-            if getattr(self, 'extreme_perf_mode', True) and not filter_text:
+            # ⚡ 极限性能模式开启时：若未启用文本搜索且未启用策略过滤，精选 Top 50 核心真龙，极大提升高频渲染丝滑度
+            # 关闭时或有过滤时：显示全部匹配候选池，不做 Top 50 截断
+            if getattr(self, 'extreme_perf_mode', True) and not filter_text and fset is None:
                 matched_records = matched_records[:50]
 
             self.table.setRowCount(len(matched_records))
@@ -685,8 +708,14 @@ class CapitalDragonPanel(QWidget):
                 mc_cnt = self._last_report.get('all_midcap_count', self._last_report.get('midcap_dragon_count', 0)) if self._last_report else 0
                 pn_cnt = self._last_report.get('all_pioneer_count', self._last_report.get('pioneer_dragon_count', 0)) if self._last_report else 0
 
+            total_dragons = len(dragons)
+            if getattr(self, 'filter_enabled', False) and fset is not None:
+                count_str = f"共 {total_dragons} 只 (过滤后 <b>{len(matched_records)}</b> 只)"
+            else:
+                count_str = f"<b>{len(matched_records)}</b> 只"
+
             self.lbl_stats.setText(
-                f"🐉 资金主线龙头已就位: <b>{len(matched_records)}</b> 只 "
+                f"🐉 资金主线龙头已就位: {count_str} "
                 f"(空间龙: {sp_cnt} | "
                 f"容量中军: {mc_cnt} | "
                 f"主线先锋: {pn_cnt})"
@@ -702,6 +731,71 @@ class CapitalDragonPanel(QWidget):
         finally:
             self.table.setUpdatesEnabled(True)
             self._is_updating = False
+
+    def toggle_filter_state(self):
+        """切换策略公式过滤状态并专属独立持久化"""
+        self.filter_enabled = not getattr(self, 'filter_enabled', False)
+        save_config_node(PERSIST_KEY_DRAGON_FILTER, bool(self.filter_enabled))
+        self._update_filter_button_ui()
+        self._apply_filter()
+
+    def _update_filter_button_ui(self):
+        """更新策略过滤按钮的高亮与状态文案"""
+        if getattr(self, 'filter_enabled', False):
+            self.btn_toggle_filter.setText("🎯 策略过滤 (开)")
+            self.btn_toggle_filter.setStyleSheet("""
+                QPushButton {
+                    background-color: #1a3322;
+                    color: #00ff88;
+                    font-weight: bold;
+                    border: 1.5px solid #00ff88;
+                    border-radius: 3px;
+                    padding: 2px 8px;
+                    font-size: 8.5pt;
+                }
+                QPushButton:hover {
+                    background-color: #00ff88;
+                    color: #000000;
+                }
+            """)
+            self.btn_toggle_filter.setToolTip("当前状态：【已开启】根据主窗口策略公式过滤当前真龙列表 (点击可关闭)")
+        else:
+            self.btn_toggle_filter.setText("🎯 策略过滤 (关)")
+            self.btn_toggle_filter.setStyleSheet("""
+                QPushButton {
+                    background-color: #222228;
+                    color: #888888;
+                    font-weight: bold;
+                    border: 1px solid #44444f;
+                    border-radius: 3px;
+                    padding: 2px 8px;
+                    font-size: 8.5pt;
+                }
+                QPushButton:hover {
+                    background-color: #33333d;
+                    color: #ffffff;
+                    border-color: #777788;
+                }
+            """)
+            self.btn_toggle_filter.setToolTip("当前状态：【已关闭】展示全部真龙标的 (点击开启根据策略公式过滤)")
+
+    def _get_parent_mw(self):
+        """稳健获取持有 filtered_codes_set 的主窗口实例"""
+        mw = getattr(self, 'main_window', None)
+        if mw and hasattr(mw, 'filtered_codes_set'):
+            return mw
+        p = getattr(self, 'parent', lambda: None)()
+        if p and hasattr(p, 'filtered_codes_set'):
+            return p
+        if hasattr(self, 'window'):
+            w = self.window()
+            if w and w is not self and hasattr(w, 'filtered_codes_set'):
+                return w
+        from PyQt6.QtWidgets import QApplication
+        for tw in QApplication.topLevelWidgets():
+            if hasattr(tw, 'filtered_codes_set'):
+                return tw
+        return None
 
     def _toggle_extreme_perf(self):
         """切换极限性能模式 (开启精选 Top 30，关闭展示全部 300+ 全量候选池)"""
