@@ -1,3 +1,23 @@
+## 2026-09-08 11:15
+- [x] **全链路落地【通道上涨与支撑线上的 MA20d 震荡企稳候选池重构 (通道高度/走势振幅/防丢筹码二次上车/加速起爆)】(SSOT) (`stock_standalone/ats/channel_swing_candidate_engine.py`, `stock_standalone/ats/swing_tracker.py`, `stock_standalone/ats/signal_ledger.py`, `stock_standalone/ats/ui/swing_table.py`, `stock_standalone/ats/ui/main_window.py`, `stock_standalone/tests/test_channel_swing_candidate.py`)**：
+    - [x] **痛点根治与实战走势闭环印证 (法尔胜/中农联合/爱尔眼科)**：
+        1. 根治原选股一刀切的死板偏离度 `[-1.5%, 5.0%]` 限制，放开至通道中轨与健康震荡带（`+8.8%`），解救法尔胜（+6.46%）等优质双结构标的；
+        2. 根治劣币驱逐良币：严厉一票否决下降通道阴跌股、MA20 俯冲向下股、通道极度收窄无空间股与日均振幅 < 1.9% 的死水织布机股（成功拦截爱尔眼科）；
+        3. 解决卖出后（`STATE_CLOSED`）生命周期脱节与丢失筹码，建立防丢失筹码护城河，支撑线企稳时自动触发 `🎯 卖出企稳·二次上车`；
+        4. 支持支撑线企稳后的次日加速特征识别（中农联合模式，冲板偏离度放宽至 16%）；
+    - [x] **新建通道上涨与支撑企稳核心中枢 (`stock_standalone/ats/channel_swing_candidate_engine.py`)**：
+        1. 5 大核心维度打分体系：通道上涨（`ch_slope_deg > 0` + 多头底座）、支撑线上（`close >= supp_price * 0.985`）、MA20 企稳（Higher Lows + 缩量回踩）、通道高度（`ch_height_pct >= 8%~25%`）、走势振幅（日均振幅 $\ge 2.8\%$ + 近期大阳脉冲）；
+        2. 输出 `swing_score` (0~100) 与形态定性（`🏆 完美双结构·支撑企稳`、`🎯 卖出企稳·二次上车`、`🚀 支撑企稳·加速冲板`、`📈 上升通道·蓄势待发`）；
+        3. 全市场与重点标的高性能向量化筛选；
+    - [x] **升级波段跟踪状态机与信号账本 (`stock_standalone/ats/swing_tracker.py`, `stock_standalone/ats/signal_ledger.py`)**：
+        1. `SwingTracker`：接入通道与支撑线数据，卖出标的在支撑线上企稳平滑跃迁至 `回踩企稳`（仓位 20%），突破 5 日线跃迁至 `持股中`（仓位 30%）；
+        2. `SignalLedger`：正式纳入【通道上涨·支撑线上企稳】为合法准入通道，放宽 5% 限制，优先级打分深度融合通道高度与振幅；
+    - [x] **UI 视觉高亮与后台 Worker 接入 (`stock_standalone/ats/ui/swing_table.py`, `stock_standalone/ats/ui/main_window.py`)**：
+        1. 表格显性展示通道倾角、支撑线价格、通道高度、走势振幅；
+        2. 完美双结构、二次上车、加速冲板专属高亮，悬浮 ToolTip 深度呈现形态细节；
+        3. `LedgerUpdateWorker` 后台异步测算，主线程 0 阻塞；
+    - [x] **自动化测试全覆盖**：编写 `test_channel_swing_candidate.py` 覆盖法尔胜、中农联合、爱尔眼科一票否决与二次上车状态机（4项全绿），全套 37 项组合回归测试 100% 全部 PASSED！
+
 ## 2026-09-08 10:35
 - [x] **全链路落地【核心资金主线卡片自适应缩放与折行 (根治ATS无法调节变形) + 先锋个股呈现虚拟量比与买点类型】(SSOT) (`stock_standalone/ats/capital_dragon_engine.py`, `stock_standalone/ats/ui/capital_dragon_panel.py`, `stock_standalone/tests/test_capital_dragon_engine.py`, `stock_standalone/tests/test_capital_dragon_panel_integration.py`)**：
     - [x] **溯源“为何 ATS 界面被卡死无法调节变形”**：

@@ -115,6 +115,7 @@ class SignalEntry:
         'tdx_price', 'tdx_time_str', 'promote_reason',
         'signal_source', 'signal_tag',
         'dragon_role', 'dragon_buy_type', 'dragon_reason', 'dragon_amount_yi',
+        'ch_slope_deg', 'supp_price', 'ch_height_pct', 'amplitude_pct', 'is_channel_swing',
         '_date_str',
     ]
 
@@ -156,6 +157,13 @@ class SignalEntry:
         self.dragon_buy_type = ''
         self.dragon_reason = ''
         self.dragon_amount_yi = 0.0        # 分类标记 ('⭐ 重点关注', '🔔 TDX 5均金叉10', '🚀 极点起爆' 等)
+
+        # 📈 通道上涨与支撑企稳属性 (SSOT)
+        self.ch_slope_deg = 0.0
+        self.supp_price = 0.0
+        self.ch_height_pct = 0.0
+        self.amplitude_pct = 0.0
+        self.is_channel_swing = False
 
         # 状态变更历史
         self.state_history = [{
@@ -375,13 +383,15 @@ class SignalLedger:
 
     def record_signal(self, code, name, price, pct, deviation, row=None, volume_score=0.0,
                       signal_source='ATS', signal_tag='', dragon_role='',
-                      dragon_buy_type='', dragon_reason='', dragon_amount_yi=0.0):
+                      dragon_buy_type='', dragon_reason='', dragon_amount_yi=0.0,
+                      ch_slope_deg=None, supp_price=None, ch_height_pct=None,
+                      amplitude_pct=None, is_channel_swing=False):
         """发现新信号或更新已有信号
 
         核心逻辑:
         - 新信号 → 写入账本，锁定首次发现时间并打上特殊分类标记
         - 已有信号 → 仅更新最新价格/涨幅，不改变首次发现时间
-        - 🚀 双轨准入通道 (SSOT): 原有 MA20 回调通道 + 真龙主升破格准入通道
+        - 🚀 三轨准入通道 (SSOT): 原有 MA20 回调通道 + 真龙主升破格准入通道 + 通道上涨支撑企稳通道
 
         Args:
             code: 股票代码
@@ -394,6 +404,11 @@ class SignalLedger:
             signal_source: 信号来源 ('ATS' / 'TDX' / 'FAVORITE' / 'MULTI_PERIOD')
             signal_tag: 特殊分类标记 ('⭐ 重点关注', '🔔 TDX 5均金叉10', '🚀 极点起爆' 等)
             dragon_role: 资金真龙角色 ('👑 空间高度龙', '🛡️ 趋势容量中军', '🚀 主线板块先锋' 等)
+            ch_slope_deg: 通道倾角 (度)
+            supp_price: 动态支撑线价格
+            ch_height_pct: 通道高度百分比
+            amplitude_pct: 走势振幅百分比
+            is_channel_swing: 是否通过通道上涨与支撑企稳判定
 
         Returns:
             SignalEntry or None
@@ -425,8 +440,18 @@ class SignalLedger:
         if row is not None and 'name' in row and str(row['name']).strip():
             name = str(row['name']).strip()
 
-        # 偏离度筛选（重点关注股票与真龙股票不受偏离度上限限制，主升浪真龙破格准入）
-        if not is_fav and not is_dragon and (deviation < self.DEVIATION_MIN or deviation > self.DEVIATION_MAX):
+        # 📈 通道上涨与支撑企稳判定 (法尔胜/中农联合模式，突破狭隘的 5% 限制)
+        if not is_channel_swing and (ch_slope_deg is not None or supp_price is not None or (row and ('ch_slope_deg' in row or 'ch_supp_price' in row))):
+            s_price = float(supp_price or (row.get('ch_supp_price', row.get('supp_price', 0.0)) if row else 0.0) or 0.0)
+            s_deg = float(ch_slope_deg or (row.get('ch_slope_deg', 0.0) if row else 0.0) or 0.0)
+            if s_deg > 0.0 and s_price > 0.01 and price >= s_price * 0.985:
+                is_channel_swing = True
+
+        dev_min = -2.2 if is_channel_swing else self.DEVIATION_MIN
+        dev_max = 8.8 if is_channel_swing else self.DEVIATION_MAX
+
+        # 偏离度筛选（重点关注、真龙、通道上涨支撑企稳不受原狭隘偏离度上限限制）
+        if not is_fav and not is_dragon and not is_channel_swing and (deviation < dev_min or deviation > dev_max):
             # 已存在的非关注信号如果严重破位，标记为 INACTIVE
             if code in self.entries and deviation < self.DEVIATION_EVICT:
                 entry = self.entries[code]
@@ -442,6 +467,12 @@ class SignalLedger:
             entry.signal_source = signal_source or entry.signal_source
             if signal_tag:
                 entry.signal_tag = signal_tag
+            if ch_slope_deg is not None: entry.ch_slope_deg = float(ch_slope_deg)
+            if supp_price is not None: entry.supp_price = float(supp_price)
+            if ch_height_pct is not None: entry.ch_height_pct = float(ch_height_pct)
+            if amplitude_pct is not None: entry.amplitude_pct = float(amplitude_pct)
+            if is_channel_swing: entry.is_channel_swing = True
+
             if is_dragon:
                 entry.dragon_role = dragon_role or getattr(entry, 'dragon_role', '')
                 entry.dragon_buy_type = dragon_buy_type or getattr(entry, 'dragon_buy_type', '')
@@ -500,6 +531,11 @@ class SignalLedger:
             entry.dragon_buy_type = dragon_buy_type
             entry.dragon_reason = dragon_reason
             entry.dragon_amount_yi = dragon_amount_yi
+            if ch_slope_deg is not None: entry.ch_slope_deg = float(ch_slope_deg)
+            if supp_price is not None: entry.supp_price = float(supp_price)
+            if ch_height_pct is not None: entry.ch_height_pct = float(ch_height_pct)
+            if amplitude_pct is not None: entry.amplitude_pct = float(amplitude_pct)
+            if is_channel_swing: entry.is_channel_swing = True
 
             if is_fav or is_dragon:
                 entry.tier = 'WATCH'
@@ -716,6 +752,18 @@ class SignalLedger:
         except Exception:
             pass
 
+        # 📈 通道上涨与支撑企稳提权 (实战法尔胜/中农联合模式)
+        swing_boost = 0.0
+        if getattr(entry, 'is_channel_swing', False):
+            swing_boost = 60.0
+            tag_str = str(getattr(entry, 'signal_tag', ''))
+            if '🚀' in tag_str or '加速' in tag_str:
+                swing_boost += 50.0
+            elif '🎯' in tag_str or '二次上车' in tag_str:
+                swing_boost += 40.0
+            elif '🏆' in tag_str or '完美双结构' in tag_str:
+                swing_boost += 30.0
+
         # 加权求和
         priority = (
             specialty_score * 0.40 +
@@ -724,6 +772,7 @@ class SignalLedger:
             deviation_score * 0.15 +
             fav_boost +
             global_boost +
+            swing_boost +
             getattr(entry, 'tdx_boost', 0.0) +
             getattr(entry, 'early_launch_boost', 0.0)
         )

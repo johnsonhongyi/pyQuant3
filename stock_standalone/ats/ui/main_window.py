@@ -128,13 +128,14 @@ class LedgerUpdateWorker(QThread):
                 tracked_codes = set(self._signal_ledger.entries.keys())
                 fav_codes = set(self._fav_stocks) if self._fav_stocks else set()
 
-                # 🚀 双轨准入通道 (SSOT): 原有 MA20 回调通道 + 真龙主升破格准入通道
+                # 🚀 三轨准入通道 (SSOT): 原有 MA20 回调通道 + 真龙主升破格准入通道 + 通道上涨支撑企稳通道
                 codes_clean_s = pd.Series([str(c).strip().zfill(6) for c in df_all.index], index=df_all.index)
+                trade_codes = set(self._universe_manager.trade_pool.keys()) if hasattr(self, '_universe_manager') else set()
                 valid_mask = (
-                    ((dev_series >= self._signal_ledger.DEVIATION_MIN) &
-                     (dev_series <= self._signal_ledger.DEVIATION_MAX)) |
+                    ((dev_series >= -2.2) & (dev_series <= 8.8)) |
                     df_all.index.isin(tracked_codes) |
                     df_all.index.isin(fav_codes) |
+                    codes_clean_s.isin(trade_codes) |
                     codes_clean_s.isin(dragon_codes)
                 )
                 target_df = df_all[valid_mask]
@@ -159,6 +160,10 @@ class LedgerUpdateWorker(QThread):
                 active_codes_list = [item[0] for item in valid_target_codes]
                 self._volume_profiler.analyze_sector_resonance(active_codes=active_codes_list)
 
+                # 导入通道上涨与支撑企稳核心引擎 (SSOT)
+                from ats.channel_swing_candidate_engine import ChannelSwingCandidateEngine
+                csce = ChannelSwingCandidateEngine.get_instance()
+
                 for code_str, row, price, ma20_val in valid_target_codes:
                     try:
                         name = str(row.get('name', ''))
@@ -181,11 +186,38 @@ class LedgerUpdateWorker(QThread):
                         d_reason = d_info.get("reason", "") if d_info else ""
                         d_amt = d_info.get("amount_yi", 0.0) if d_info else 0.0
 
+                        # 评估通道上涨与支撑企稳结构 (法尔胜/中农联合/爱尔眼科防御)
+                        is_traded = (code_str in trade_codes or c_clean in trade_codes)
+                        is_fav = (code_str in fav_codes or c_clean in fav_codes)
+                        swing_res = csce.evaluate_channel_swing_structure(
+                            code=code_str, name=name, price=price, row=row,
+                            is_traded_or_closed=is_traded, is_favorite=is_fav
+                        )
+                        s_slope = swing_res.get('ch_slope_deg', 0.0)
+                        s_supp = swing_res.get('supp_price', 0.0)
+                        s_h = swing_res.get('ch_height_pct', 0.0)
+                        s_amp = swing_res.get('amplitude_pct', 0.0)
+                        is_c_swing = bool(swing_res.get('is_above_support', False) and swing_res.get('is_channel_up', False))
+
+                        s_tag = ''
+                        if swing_res.get('is_accelerating'):
+                            s_tag = '🚀 支撑起爆'
+                        elif swing_res.get('is_reentry_candidate'):
+                            s_tag = '🎯 二次上车'
+                        elif swing_res.get('is_perfect_double'):
+                            s_tag = '🏆 完美双结构'
+                        elif is_c_swing:
+                            s_tag = '📈 上升通道'
+
                         self._signal_ledger.record_signal(
                             code=code_str, name=name, price=price, pct=pct,
                             deviation=deviation, row=row, volume_score=vol_score,
+                            signal_tag=s_tag,
                             dragon_role=d_role, dragon_buy_type=d_buy,
-                            dragon_reason=d_reason, dragon_amount_yi=d_amt
+                            dragon_reason=d_reason, dragon_amount_yi=d_amt,
+                            ch_slope_deg=s_slope, supp_price=s_supp,
+                            ch_height_pct=s_h, amplitude_pct=s_amp,
+                            is_channel_swing=is_c_swing
                         )
                     except Exception:
                         continue
@@ -372,8 +404,21 @@ class LedgerUpdateWorker(QThread):
                     else:
                         ma5_series = [real_ma5]
 
+                entry = self._signal_ledger.entries.get(code)
+                s_supp = getattr(entry, 'supp_price', None) if entry else None
+                s_deg = getattr(entry, 'ch_slope_deg', None) if entry else None
+                s_h = getattr(entry, 'ch_height_pct', None) if entry else None
+                s_amp = getattr(entry, 'amplitude_pct', None) if entry else None
+                s_tag = getattr(entry, 'signal_tag', None) if entry else None
+
+                trade_pool = getattr(self._universe_manager, 'trade_pool', {})
+                is_traded = (code in trade_pool or code_clean in trade_pool)
+
                 state, dev_str, position, reason = self._swing_tracker.update_stock_state(
-                    code, name, latest_close, close_series, ma20_series, ma5_series
+                    code, name, latest_close, close_series, ma20_series, ma5_series,
+                    supp_price=s_supp, ch_slope_deg=s_deg, ch_height_pct=s_h,
+                    amplitude_pct=s_amp, is_traded_or_closed=is_traded,
+                    swing_tag=s_tag
                 )
 
                 limit_ups = 0
@@ -4559,12 +4604,13 @@ class ATSMainWindow(QMainWindow):
         tracked_codes = set(self.signal_ledger.entries.keys())
         fav_codes = self.signal_ledger.get_favorite_stocks_set()
         codes_clean_s = pd.Series([str(c).strip().zfill(6) for c in df_all.index], index=df_all.index)
+        trade_codes = set(self.universe_manager.trade_pool.keys()) if hasattr(self, 'universe_manager') else set()
 
         valid_mask = (
-            ((dev_series >= self.signal_ledger.DEVIATION_MIN) &
-             (dev_series <= self.signal_ledger.DEVIATION_MAX)) |
+            ((dev_series >= -2.2) & (dev_series <= 8.8)) |
             df_all.index.isin(tracked_codes) |
             df_all.index.isin(fav_codes) |
+            codes_clean_s.isin(trade_codes) |
             codes_clean_s.isin(dragon_codes)
         )
         target_df = df_all[valid_mask]
@@ -4598,6 +4644,10 @@ class ATSMainWindow(QMainWindow):
         active_codes_list = [item[0] for item in valid_target_codes]
         self.volume_profiler.analyze_sector_resonance(active_codes=active_codes_list)
 
+        # 导入通道上涨与支撑企稳核心引擎 (SSOT)
+        from ats.channel_swing_candidate_engine import ChannelSwingCandidateEngine
+        csce = ChannelSwingCandidateEngine.get_instance()
+
         # 第三步: 将包含板块共振和连阳加权后的最终评分，正式录入信号账本
         for code_str, row, price, ma20_val in valid_target_codes:
             try:
@@ -4623,6 +4673,29 @@ class ATSMainWindow(QMainWindow):
                 d_reason = d_info.get("reason", "") if d_info else ""
                 d_amt = d_info.get("amount_yi", 0.0) if d_info else 0.0
 
+                # 评估通道上涨与支撑企稳结构 (法尔胜/中农联合/爱尔眼科防御)
+                is_traded = (code_str in trade_codes or c_clean in trade_codes)
+                is_fav = (code_str in fav_codes or c_clean in fav_codes)
+                swing_res = csce.evaluate_channel_swing_structure(
+                    code=code_str, name=name, price=price, row=row,
+                    is_traded_or_closed=is_traded, is_favorite=is_fav
+                )
+                s_slope = swing_res.get('ch_slope_deg', 0.0)
+                s_supp = swing_res.get('supp_price', 0.0)
+                s_h = swing_res.get('ch_height_pct', 0.0)
+                s_amp = swing_res.get('amplitude_pct', 0.0)
+                is_c_swing = bool(swing_res.get('is_above_support', False) and swing_res.get('is_channel_up', False))
+
+                s_tag = ''
+                if swing_res.get('is_accelerating'):
+                    s_tag = '🚀 支撑起爆'
+                elif swing_res.get('is_reentry_candidate'):
+                    s_tag = '🎯 二次上车'
+                elif swing_res.get('is_perfect_double'):
+                    s_tag = '🏆 完美双结构'
+                elif is_c_swing:
+                    s_tag = '📈 上升通道'
+
                 # 写入信号账本（新信号锁定首次发现时间，已有信号仅更新最新数据）
                 self.signal_ledger.record_signal(
                     code=code_str,
@@ -4632,10 +4705,16 @@ class ATSMainWindow(QMainWindow):
                     deviation=deviation,
                     row=row,
                     volume_score=vol_score,
+                    signal_tag=s_tag,
                     dragon_role=d_role,
                     dragon_buy_type=d_buy,
                     dragon_reason=d_reason,
-                    dragon_amount_yi=d_amt
+                    dragon_amount_yi=d_amt,
+                    ch_slope_deg=s_slope,
+                    supp_price=s_supp,
+                    ch_height_pct=s_h,
+                    amplitude_pct=s_amp,
+                    is_channel_swing=is_c_swing
                 )
             except Exception:
                 continue
