@@ -284,7 +284,56 @@ class TestCapitalDragonPanelIntegration(unittest.TestCase):
         self.assertNotIn("极限性能", stats_text)
         self.assertIn("⚡ 极限性能: 开", self.panel.btn_extreme_perf.text())
 
+    def test_sector_cards_auto_wrap_and_pioneer_vr_buy_type(self):
+        """测试顶部核心主线卡片自适应换行、自由变形缩放能力，以及先锋行呈现虚拟量比与买点类型"""
+        # 1. 验证卡片尺寸策略与自动折行属性 (彻底解除对 ATS 主窗口宽度的绑架)
+        card_w0 = self.panel.sector_card_widgets[0]["card_widget"]
+        self.assertTrue(card_w0.lbl_title.wordWrap())
+        self.assertTrue(card_w0.lbl_desc.wordWrap())
+        self.assertTrue(card_w0.lbl_leader.wordWrap())
+
+        # 验证最小尺寸宽度不会阻碍父窗口缩小
+        self.assertEqual(card_w0.minimumWidth(), 0)
+        self.assertLessEqual(card_w0.minimumSizeHint().width(), 100)
+        self.assertEqual(self.panel.top_sector_container.minimumWidth(), 0)
+
+        # 2. 模拟数据注入并验证先锋行包含虚拟量比与买点类型
+        mock_data = {
+            "600519": {
+                "name": "贵州茅台", "close": 1750.0, "open": 1720.0, "low": 1720.0, "lasth1d": 1700.0, "lastp": 1700.0,
+                "percent": 6.8, "amount": 6.8e9, "vol_ratio": 2.5, "category": "白酒;大消费", "dff": 2.5, "dff2": 6.8, "dff3": 12.0, "ma20d": 1650.0
+            },
+            "000858": {
+                "name": "五粮液", "close": 150.0, "open": 146.0, "low": 144.5, "lasth1d": 142.0, "lastp": 142.0,
+                "percent": 3.2, "amount": 3.2e9, "vol_ratio": 1.5, "category": "白酒;大消费", "dff": 1.8, "dff2": 5.2, "dff3": 9.5, "ma20d": 138.0
+            },
+            "002304": {
+                "name": "洋河股份", "close": 98.0, "open": 94.0, "low": 94.0, "lasth1d": 95.0, "lastp": 94.5,
+                "percent": 2.1, "amount": 1.5e9, "vol_ratio": 1.2, "category": "白酒;大消费", "dff": 1.2, "dff2": 4.0, "dff3": 7.5, "ma20d": 90.0
+            }
+        }
+        df_mock = pd.DataFrame.from_dict(mock_data, orient='index')
+        self.panel.update_payload(df_mock, sh_pct=1.0)
+
+        card0 = self.panel.sector_card_widgets[0]
+        leader_text = card0["leader"].text()
+        
+        # 验证先锋行显性包含：先锋名字、代码、涨幅、量比、买点形态
+        self.assertIn("贵州茅台", leader_text)
+        self.assertIn("600519", leader_text)
+        self.assertIn("+6.8%", leader_text)
+        self.assertIn("量比:", leader_text)
+        self.assertIn("2.5x", leader_text)
+        # 验证包含双加速或领涨买点
+        self.assertTrue("👑双加速" in leader_text or "领涨" in leader_text or "先锋" in leader_text)
+
+        # 验证悬浮提示 ToolTip
+        leader_tip = card0["leader"].toolTip()
+        self.assertIn("先锋虚拟量比:", leader_tip)
+        self.assertIn("先锋买点形态:", leader_tip)
+
 
 if __name__ == "__main__":
     unittest.main()
+
 

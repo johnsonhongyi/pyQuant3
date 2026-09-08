@@ -177,6 +177,11 @@ class TestCapitalDragonEngine(unittest.TestCase):
         sec_cpo = next(s for s in report["top_sectors"] if "共封装光学" in s["name"])
         self.assertGreaterEqual(sec_cpo.get("accel_total_count", 0), 2)
         self.assertGreaterEqual(sec_cpo.get("dual_accel_count", 0), 1)
+        # 验证先锋虚拟量比与买点类型正确填充 (SSOT)
+        self.assertIn("leader_vr", sec_cpo)
+        self.assertIn("leader_buy_type", sec_cpo)
+        self.assertEqual(sec_cpo["leader_code"], "300308")
+        self.assertIn("👑双加速", sec_cpo["leader_buy_type"])
 
     def test_virtual_vol_ratio_no_zero_bug(self):
         """验证虚拟量比彻底根治 0.00x Bug：当某些非强势标的 vol_ratio 为 0 时，自动赋能投影或兜底 1.0"""

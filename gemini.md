@@ -1,3 +1,23 @@
+## 2026-09-08 10:35
+- [x] **全链路落地【核心资金主线卡片自适应缩放与折行 (根治ATS无法调节变形) + 先锋个股呈现虚拟量比与买点类型】(SSOT) (`stock_standalone/ats/capital_dragon_engine.py`, `stock_standalone/ats/ui/capital_dragon_panel.py`, `stock_standalone/tests/test_capital_dragon_engine.py`, `stock_standalone/tests/test_capital_dragon_panel_integration.py`)**：
+    - [x] **溯源“为何 ATS 界面被卡死无法调节变形”**：
+        1. `SectorCardWidget` 内部的 `lbl_desc`（成交/均涨/涨停/加速）与 `lbl_leader`（先锋）未开启 `wordWrap=True`，属于单行长文本（约 350~400px）；
+        2. 顶部 3 个卡片并排在 `top_sector_layout` 中，单行文本直接将中间区域最小宽度强制顶到 1150px 以上；
+        3. 由于 `CapitalDragonPanel` 位于 ATS 主窗口 C 位，其 `minimumSizeHint()` 宽度通过 `main_splitter` 水平分割条硬生生锁死了整个主窗口及中间面板的缩放变形空间，导致用户无法拖动分割条或缩小窗口；
+    - [x] **根治 ATS 窗口变形阻碍与自适应折行优化 (`stock_standalone/ats/ui/capital_dragon_panel.py`)**：
+        1. **标签全域开启折行与弹性策略**：`lbl_title`、`lbl_desc`、`lbl_leader` 全面配置 `setWordWrap(True)`、`setSizePolicy(Expanding, Preferred)` 并显式设 `setMinimumWidth(0)`；
+        2. **卡片弹性尺寸与超低最小宽度 (`SectorCardWidget`)**：设置 `setMinimumWidth(0)`，重写 `minimumSizeHint()` 返回 `QSize(60, hint.height())`，允许在变窄时文本优雅折行且绝不逆向绑架父容器宽度；
+        3. **容器等宽均分与搜索框弹性适配**：`top_sector_container` 设 `setMinimumWidth(0)`，`top_sector_layout.addWidget(card, 1)` 等宽自适应缩放；搜索框配置 `min=80px, max=220px` 弹性适配；
+    - [x] **先锋个股数据增强：虚拟量比与买点形态显性呈现 (`stock_standalone/ats/capital_dragon_engine.py`, `stock_standalone/ats/ui/capital_dragon_panel.py`)**：
+        1. **引擎数据闭环回填 (`CapitalDragonEngine`)**：板块先锋统计新增提取先锋个股专属 `leader_vr`；在生成真龙矩阵后，通过 `dragon_action_map` 与加速形态缓存 `accel_cache` 为 Top Sectors 准确回填先锋的 `leader_buy_type`（如 `👑双加速·领涨龙头`、`🚀缺口加速·冲板`、`⚡ 领涨先锋` 等）；
+        2. **先锋行紧凑呈现与层级色彩渲染**：先锋行升级为富文本呈现 `🚀 先锋: 股票名 (代码) +涨幅% | 量比: X.Xx | 👑买点形态`，针对双加速（金黄）、缺口加速（粉紫）、光脚加速（橙黄）、封板（红）精细化着色；悬浮 ToolTip 显示详细量比与形态解析；
+    - [x] **自动化测试 100% 全部 PASSED**：
+        - `test_capital_dragon_panel_integration.py` 扩充卡片自动折行、最小宽度 <= 100、先锋量比与买点呈现断言（7项全绿）；
+        - `test_capital_dragon_engine.py` 扩充先锋 `leader_vr` 与 `leader_buy_type` 回填断言（7项全绿）；
+        - `test_sector_aggregator_suite.py`（8项全绿）；
+        - `test_signal_ledger.py`（14项全绿）；
+        - 全套 36 项核心测试全部 PASSED！
+
 ## 2026-09-08 10:20
 - [x] **全链路根治【资金主线成交额超常识异常数据 (石化机械/ST美丽数百万亿) + 资金买点绝对优先级全面对齐天梯 (双加速 > 缺口加速 > 光脚加速 > 常规主升 > 通道企稳) (SSOT)】(`stock_standalone/ats/capital_dragon_engine.py`, `stock_standalone/ats/ui/capital_dragon_panel.py`, `stock_standalone/ats/ui/hot_sector_leaderboard.py`, `stock_standalone/tests/test_capital_dragon_engine.py`, `stock_standalone/tests/test_capital_dragon_panel_integration.py`)**：
     - [x] **溯源“为何石化机械(000852)成交额显示9015505.0亿，*ST美丽(000010)显示1930436.0亿”**：
