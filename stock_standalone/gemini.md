@@ -1,3 +1,18 @@
+## 2026-09-08 14:30
+- [x] **全链路根治【资金主线后台刷新导致整窗突然闪屏、误发射切股联动与焦点抢占 Bug】(SSOT) (`ats/ui/capital_dragon_panel.py`, `ats/ui/main_window.py`, `tests/test_capital_dragon_panel_integration.py`)**：
+    - [x] **根治后台刷新误发切股联动与焦点震荡 (`ats/ui/capital_dragon_panel.py`)**：
+        1. 在 `_on_current_cell_changed` 与 `_on_row_clicked` 中增加 `if getattr(self, '_is_updating', False) or cur_row < 0: return` 保护守卫，彻底阻断表格重刷与 `setCurrentCell` 恢复期间的伪点击与误发射；
+        2. 在 `_render_table` 填充与排序期间全程实施 `self.table.blockSignals(True)` 与 `finally: self.table.blockSignals(False)` 双重防护，杜绝任何数据回填引起的信号外溢；
+        3. 纠偏 `auto_fit_columns_once` 的持久化键为 `capital_dragon_table_header_v3`，保持与表格配置 SSOT 一致；
+    - [x] **根治顶部卡片折叠与容器高度暴跌引起的整窗布局抖动 (`ats/ui/capital_dragon_panel.py`)**：
+        1. 废弃卡片少于 3 个时的 `setVisible(False)`，改为统一占位态展示（“主线 N: 正在识别资金聚集...”），保持 3 大卡片稳定等宽等高占位，彻底杜绝外层 `center_splitter` 重新计算几何引起的整窗闪烁跳动；
+    - [x] **主窗口事件与持久化逻辑合并 (`ats/ui/main_window.py`)**：
+        1. 合并 `_on_top_tab_changed`：补齐 Tab 0 (🐉 资金主线)、Tab 1 (⭐ 重点关注)、Tab 2 (📉 回调跟踪器)、Tab 3 (🆕 新股次新股) 的对应数据极速同步与 `_save_layout_state()` 持久化；
+        2. 彻底删除第 5466 行多余的同名重复定义，消除方法覆盖隐患；
+    - [x] **自动化测试与回归断言全覆盖 (`tests/test_capital_dragon_panel_integration.py`)**：
+        1. 新增 `test_no_false_linkage_or_flicker_during_update`，严格断言数据更新期间 `stock_selected` 信号发射数为 0、选中的代码平滑原位恢复、以及所有卡片稳定占位；
+        2. 24 项跨模块核心集成测试 100% 全部 PASSED！
+
 ## 2026-09-08 13:50
 - [x] **全链路落地【资金主线与龙头中枢 (CapitalDragonPanel) 支持 ATS 自定义列功能 (ats_col = ["ch_bc2"]) + 紧随资金买点类型后呈现 + co2int 智能整型格式化与数值排序】(SSOT) (`ats/capital_dragon_engine.py`, `ats/ui/capital_dragon_panel.py`, `tests/test_capital_dragon_engine.py`, `tests/test_capital_dragon_panel_integration.py`)**：
     - [x] **SSOT 表头与列结构扩展中枢 (`ats/capital_dragon_engine.py`)**：
