@@ -36,8 +36,10 @@ from ats.ui.styles import (
 )
 from ats.capital_dragon_engine import (
     CapitalDragonEngine, _safe_float, _clean_code,
-    compute_dragon_buy_type_sort_score
+    compute_dragon_buy_type_sort_score,
+    get_dragon_extra_cols, get_dragon_table_headers
 )
+from JohnsonUtil import commonTips as cct
 
 PERSIST_KEY_DRAGON_FILTER = "ats_capital_dragon_filter_enabled"
 
@@ -307,10 +309,8 @@ class CapitalDragonPanel(QWidget):
 
         # 3. 核心真龙矩阵表格 (True Dragon Matrix Table)
         self.table = QTableWidget()
-        self.headers = [
-            "代码", "名称", "龙头角色", "所属主线", "现价", "涨幅%", "虚拟量比",
-            "成交额(亿)", "换手率%", "资金买点类型", "建议买入区间", "止损参考", "核心逻辑与驱动"
-        ]
+        self.extra_cols = get_dragon_extra_cols()
+        self.headers = get_dragon_table_headers(self.extra_cols)
         self.table.setColumnCount(len(self.headers))
         self.table.setHorizontalHeaderLabels(self.headers)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -320,11 +320,22 @@ class CapitalDragonPanel(QWidget):
         self.table.verticalHeader().setVisible(False)
         self.table.setSortingEnabled(False)
 
+        try:
+            col_map = getattr(cct, 'vis_column_map', {}) or {}
+        except Exception:
+            col_map = {}
+
         default_widths = {
             "代码": 68, "名称": 78, "龙头角色": 115, "所属主线": 88, "现价": 68, "涨幅%": 68,
-            "虚拟量比": 75, "成交额(亿)": 88, "换手率%": 68, "资金买点类型": 110, "建议买入区间": 110, "止损参考": 70, "核心逻辑与驱动": 280
+            "虚拟量比": 75, "成交额(亿)": 88, "换手率%": 68, "资金买点类型": 110
         }
-        setup_header_persistence(self.table, "capital_dragon_table_header_v2", default_widths=default_widths)
+        for ec in self.extra_cols:
+            header_name = col_map.get(ec, col_map.get(ec.lower(), ec.upper()))
+            default_widths[header_name] = 75
+        default_widths.update({
+            "建议买入区间": 110, "止损参考": 70, "核心逻辑与驱动": 280
+        })
+        setup_header_persistence(self.table, "capital_dragon_table_header_v3", default_widths=default_widths)
 
         # 信号连接
         self.table.itemClicked.connect(self._on_row_clicked)
@@ -518,7 +529,8 @@ class CapitalDragonPanel(QWidget):
                 if fset is not None and c_clean not in fset:
                     continue
                 if filter_text:
-                    match_str = f"{d['code']} {d['name']} {d['role']} {d['sector']} {d['action_type']} {d['reason']}".lower()
+                    extra_vals_str = " ".join(str(d.get("extra_cols", {}).get(ec, d.get(ec, ""))) for ec in getattr(self, 'extra_cols', []))
+                    match_str = f"{d['code']} {d['name']} {d['role']} {d['sector']} {d['action_type']} {d['reason']} {extra_vals_str}".lower()
                     if filter_text not in match_str:
                         continue
                 matched_records.append(d)
@@ -674,23 +686,60 @@ class CapitalDragonPanel(QWidget):
                 it_buy.setToolTip(buy_tip)
                 self.table.setItem(row_idx, 9, it_buy)
 
-                # 10: 建议买入区间
+                # 10+: 动态自定义列 (ats_col, 紧随资金买点类型后面)
+                col_offset = 10
+                for ec in getattr(self, 'extra_cols', []):
+                    val_str = "--"
+                    if "extra_cols" in d and ec in d["extra_cols"]:
+                        val_str = str(d["extra_cols"][ec])
+                    elif ec in d:
+                        val_str = str(d[ec])
+                    elif self._last_df_all is not None and not self._last_df_all.empty:
+                        for k in (ec, ec.lower(), ec.upper()):
+                            if k in self._last_df_all.columns and code in self._last_df_all.index:
+                                val_raw = self._last_df_all.loc[code, k]
+                                val_str = cct.format_col_value(ec, val_raw)
+                                break
+
+                    raw_num = None
+                    try:
+                        raw_num = float(val_str)
+                    except Exception:
+                        raw_num = None
+
+                    it_ec = NumericTableWidgetItem(val_str, raw_val=raw_num)
+                    it_ec.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                    if raw_num is not None:
+                        if raw_num > 0:
+                            it_ec.setForeground(QBrush(QColor(COLOR_UP)))
+                        elif raw_num < 0:
+                            it_ec.setForeground(QBrush(QColor(COLOR_DOWN)))
+                        else:
+                            it_ec.setForeground(QBrush(QColor("#e2e2e5")))
+                    else:
+                        it_ec.setForeground(QBrush(QColor("#888888")))
+
+                    it_ec.setToolTip(f"【{ec.upper()} 自定义指标】: {val_str}")
+                    self.table.setItem(row_idx, col_offset, it_ec)
+                    col_offset += 1
+
+                # 建议买入区间
                 it_zone = QTableWidgetItem(buy_zone)
                 it_zone.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 it_zone.setForeground(QBrush(QColor("#ffb74d")))
-                self.table.setItem(row_idx, 10, it_zone)
+                self.table.setItem(row_idx, col_offset, it_zone)
 
-                # 11: 止损参考
+                # 止损参考
                 it_sl = NumericTableWidgetItem(f"{stop_loss:.2f}", raw_val=stop_loss)
                 it_sl.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
                 it_sl.setForeground(QBrush(QColor("#ef5350")))
-                self.table.setItem(row_idx, 11, it_sl)
+                self.table.setItem(row_idx, col_offset + 1, it_sl)
 
-                # 12: 核心逻辑与驱动
+                # 核心逻辑与驱动
                 it_reason = QTableWidgetItem(reason)
                 it_reason.setToolTip(reason)
                 it_reason.setForeground(QBrush(QColor("#b0bec5")))
-                self.table.setItem(row_idx, 12, it_reason)
+                self.table.setItem(row_idx, col_offset + 2, it_reason)
 
             is_extreme = getattr(self, 'extreme_perf_mode', True)
             dual_cnt = self._last_report.get('dual_accel_count', 0) if self._last_report else 0
