@@ -146,6 +146,46 @@ def compute_dragon_buy_type_sort_score(
     return round(base + action_bonus + pct_bonus + amt_bonus, 2)
 
 
+def get_dragon_extra_cols() -> List[str]:
+    """获取资金主线与龙头中枢追加的动态自定义列（排除基础列已有的字段）"""
+    try:
+        from JohnsonUtil import commonTips as cct
+        cfg_cols = getattr(cct, 'ats_col', []) or getattr(cct.CFG, 'ats_col', []) or []
+    except Exception:
+        cfg_cols = ['ch_bc2']
+    BASE_EXCLUDE = {
+        'code', 'name', 'price', 'close', 'trade', 'pct', 'percent', 'ratio',
+        'vol_ratio', 'amount', 'turnover', 'turnover_rate', 'action_type',
+        'role', 'sector', 'buy_zone', 'stop_loss', 'reason', 'dff', 'dff2', 'dff3'
+    }
+    extra = []
+    seen = set(BASE_EXCLUDE)
+    for c in cfg_cols:
+        c_str = str(c).strip()
+        if c_str and c_str.lower() not in seen:
+            extra.append(c_str)
+            seen.add(c_str.lower())
+    return extra
+
+
+def get_dragon_table_headers(extra_cols: Optional[List[str]] = None) -> List[str]:
+    """获取资金主线表格标准表头字段名称列表（在资金买点类型后面平滑嵌入自定义列）"""
+    if extra_cols is None:
+        extra_cols = get_dragon_extra_cols()
+    try:
+        from JohnsonUtil import commonTips as cct
+        col_map = getattr(cct, 'vis_column_map', {}) or {}
+    except Exception:
+        col_map = {}
+    base_pre = [
+        "代码", "名称", "龙头角色", "所属主线", "现价", "涨幅%", "虚拟量比",
+        "成交额(亿)", "换手率%", "资金买点类型"
+    ]
+    extra_headers = [col_map.get(c, col_map.get(c.lower(), c.upper())) for c in extra_cols]
+    base_post = ["建议买入区间", "止损参考", "核心逻辑与驱动"]
+    return base_pre + extra_headers + base_post
+
+
 class CapitalDragonEngine:
     """
     资金趋势与主线龙头核心量化引擎 (单例)
@@ -676,6 +716,7 @@ class CapitalDragonEngine:
         # 计算全市场成交额排名前 35 (容量中军候选池，用于极限性能模式精准遴选，统一基于准确的 amts_yi 排序)
         top_amt_s = amts_yi[valid_all_mask].sort_values(ascending=False)
         top_35_amt_codes = set(str(c).strip().zfill(6) for c in codes_series.loc[top_amt_s.index[:35]].values.ravel())
+        extra_cols = get_dragon_extra_cols()
 
         for idx in df[valid_all_mask].index:
             code_str = codes_series.loc[idx]
@@ -835,7 +876,17 @@ class CapitalDragonEngine:
                     pct=pct_val
                 )
 
-                dragon_records.append({
+                # 提取动态自定义列 (ats_col)
+                extra_dict = {}
+                for ec in extra_cols:
+                    val_raw = None
+                    for k in (ec, ec.lower(), ec.upper()):
+                        if k in df.columns:
+                            val_raw = df.loc[idx, k]
+                            break
+                    extra_dict[ec] = cct.format_col_value(ec, val_raw)
+
+                rec = {
                     "code": code_str,
                     "name": name_str,
                     "role": dragon_role,
@@ -861,8 +912,12 @@ class CapitalDragonEngine:
                     "is_dual_accel": is_dual_accel,
                     "is_gap_accel": is_gap_accel,
                     "is_open_low_accel": is_open_low_accel,
-                    "is_top35_amt": (code_str in top_35_amt_codes)
-                })
+                    "is_top35_amt": (code_str in top_35_amt_codes),
+                    "extra_cols": extra_dict
+                }
+                for ec, val in extra_dict.items():
+                    rec[ec] = val
+                dragon_records.append(rec)
 
         # 回填核心主线 Top Sectors 中先锋个股的资金买点类型 (SSOT)
         dragon_action_map = {d["code"]: d.get("action_type", "") for d in dragon_records}
@@ -904,6 +959,7 @@ class CapitalDragonEngine:
             "timestamp": now,
             "calc_cost_ms": round((time.time() - t0) * 1000, 1),
             "top_sectors": top_sectors[:5],
+            "extra_cols": extra_cols,
             "dragon_records": dragon_records_converged,
             "dragon_records_converged": dragon_records_converged,
             "dragon_records_all": dragon_records_all,

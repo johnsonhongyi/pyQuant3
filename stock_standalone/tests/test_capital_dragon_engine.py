@@ -301,6 +301,48 @@ class TestCapitalDragonEngine(unittest.TestCase):
         self.assertAlmostEqual(amt_yi_meili, 0.02, delta=0.01)
         self.assertLess(amt_yi_meili, 1.0)
 
+    def test_dragon_extra_cols_and_headers(self):
+        """验证资金主线追加动态自定义列 (ats_col) 与表头生成"""
+        from ats.capital_dragon_engine import get_dragon_extra_cols, get_dragon_table_headers
+        extra_cols = get_dragon_extra_cols()
+        self.assertIsInstance(extra_cols, list)
+        self.assertIn("ch_bc2", extra_cols)
+
+        headers = get_dragon_table_headers(extra_cols)
+        self.assertIn("代码", headers)
+        self.assertIn("资金买点类型", headers)
+        
+        idx_buy_type = headers.index("资金买点类型")
+        idx_ch_bc2 = headers.index("CH_BC2")
+        # 验证自定义列必须紧随在【资金买点类型】之后
+        self.assertEqual(idx_ch_bc2, idx_buy_type + 1)
+
+        idx_zone = headers.index("建议买入区间")
+        self.assertEqual(idx_zone, idx_ch_bc2 + len(extra_cols))
+
+        # 验证在 analyze_capital_dragon_universe 中提取 extra_cols
+        engine = CapitalDragonEngine.get_instance()
+        mock_data = {
+            "300750": {
+                "name": "宁德时代", "close": 265.0, "percent": 5.2, "amount": 4.8e9,
+                "category": "固态电池", "dff": 1.8, "dff2": 5.2, "dff3": 9.5, "ma20d": 240.0,
+                "ch_bc2": 3.0
+            }
+        }
+        df_mock = pd.DataFrame.from_dict(mock_data, orient='index')
+        report = engine.analyze_capital_dragon_universe(df_mock, force=True)
+        self.assertIn("extra_cols", report)
+        self.assertIn("ch_bc2", report["extra_cols"])
+
+        recs = report.get("dragon_records_all", [])
+        self.assertGreater(len(recs), 0)
+        rec_ningde = next((r for r in recs if r["code"] == "300750"), None)
+        self.assertIsNotNone(rec_ningde)
+        self.assertIn("extra_cols", rec_ningde)
+        # 验证 co2int 智能整型格式化为 '3'
+        self.assertEqual(rec_ningde["extra_cols"].get("ch_bc2"), "3")
+        self.assertEqual(rec_ningde.get("ch_bc2"), "3")
+
 
 if __name__ == "__main__":
     unittest.main()

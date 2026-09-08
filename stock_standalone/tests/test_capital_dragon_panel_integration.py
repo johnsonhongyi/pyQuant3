@@ -332,6 +332,64 @@ class TestCapitalDragonPanelIntegration(unittest.TestCase):
         self.assertIn("先锋虚拟量比:", leader_tip)
         self.assertIn("先锋买点形态:", leader_tip)
 
+    def test_capital_dragon_panel_custom_columns_rendering(self):
+        """测试资金主线表格动态自定义列 (ats_col) 呈现与买点类型后置顺序"""
+        headers = self.panel.headers
+        self.assertIn("资金买点类型", headers)
+        self.assertIn("CH_BC2", headers)
+        
+        buy_col = headers.index("资金买点类型")
+        bc2_col = headers.index("CH_BC2")
+        self.assertEqual(bc2_col, buy_col + 1)
+        self.assertEqual(headers.index("建议买入区间"), bc2_col + 1)
+
+        # 注入带 ch_bc2 的数据
+        mock_data = {
+            "300750": {
+                "name": "宁德时代", "close": 265.0, "percent": 5.2, "amount": 4.8e9,
+                "category": "固态电池;锂电池", "dff": 1.8, "dff2": 5.2, "dff3": 9.5, "ma20d": 240.0,
+                "ch_bc2": 3.0
+            },
+            "002812": {
+                "name": "恩捷股份", "close": 42.5, "percent": 9.98, "amount": 1.5e9,
+                "category": "固态电池;锂电池", "dff": 1.2, "dff2": 4.0, "dff3": 7.5, "ma20d": 38.0,
+                "ch_bc2": 0.0
+            }
+        }
+        df_mock = pd.DataFrame.from_dict(mock_data, orient='index')
+        self.panel.update_payload(df_mock, sh_pct=1.0)
+
+        self.assertGreater(self.panel.table.rowCount(), 0)
+        
+        # 查找宁德时代所在行
+        target_row = -1
+        for r in range(self.panel.table.rowCount()):
+            if self.panel.table.item(r, 0).text() == "300750":
+                target_row = r
+                break
+        self.assertGreaterEqual(target_row, 0)
+
+        # 验证资金买点类型列内容
+        item_buy = self.panel.table.item(target_row, buy_col)
+        self.assertIsNotNone(item_buy)
+        self.assertTrue(len(item_buy.text().strip()) > 0)
+
+        # 验证自定义列 CH_BC2 内容与类型 (co2int 转换为 '3')
+        item_bc2 = self.panel.table.item(target_row, bc2_col)
+        self.assertIsNotNone(item_bc2)
+        self.assertEqual(item_bc2.text().strip(), "3")
+        self.assertEqual(getattr(item_bc2, "_raw_value", None), 3.0)
+
+        # 验证后续列偏移正常
+        item_zone = self.panel.table.item(target_row, bc2_col + 1)
+        self.assertIsNotNone(item_zone)
+        self.assertIn("~", item_zone.text())
+
+        # 验证搜索框过滤自定义列内容
+        self.panel.search_input.setText("3")
+        self.assertGreaterEqual(self.panel.table.rowCount(), 1)
+        self.panel.search_input.setText("")
+
 
 if __name__ == "__main__":
     unittest.main()

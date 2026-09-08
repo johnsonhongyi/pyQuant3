@@ -1,3 +1,19 @@
+## 2026-09-08 13:50
+- [x] **全链路落地【资金主线与龙头中枢 (CapitalDragonPanel) 支持 ATS 自定义列功能 (ats_col = ["ch_bc2"]) + 紧随资金买点类型后呈现 + co2int 智能整型格式化与数值排序】(SSOT) (`stock_standalone/ats/capital_dragon_engine.py`, `stock_standalone/ats/ui/capital_dragon_panel.py`, `stock_standalone/tests/test_capital_dragon_engine.py`, `stock_standalone/tests/test_capital_dragon_panel_integration.py`)**：
+    - [x] **SSOT 表头与列结构扩展中枢 (`stock_standalone/ats/capital_dragon_engine.py`)**：
+        1. 新增并导出 `get_dragon_extra_cols()` 与 `get_dragon_table_headers()`；
+        2. 将 `extra_cols`（默认 `['ch_bc2']`）精准插入在【资金买点类型】之后、【建议买入区间】之前，生成如 `[..., "资金买点类型", "CH_BC2", "建议买入区间", "止损参考", "核心逻辑与驱动"]`；
+        3. 在 `analyze_capital_dragon_universe` 中提取自定义列，复用 `cct.format_col_value` 实现智能格式化（`ch_bc2` 规范为整数字符串，缺失值安全兜底 `'--'`），注入每条真龙记录与输出报告；
+    - [x] **UI 呈现、独立列宽持久化与搜索联动 (`stock_standalone/ats/ui/capital_dragon_panel.py`)**：
+        1. 接入 `get_dragon_extra_cols` 与 `get_dragon_table_headers` 初始化表格，升级持久化键为 `capital_dragon_table_header_v3`，为自定义列赋予 75px 默认宽度；
+        2. 行渲染中在第 9 列（资金买点类型）后按序填入自定义列项，采用 `NumericTableWidgetItem` 传入真实数值支持正逆序点击表头排序，正数标红（`COLOR_UP`）、负数标绿（`COLOR_DOWN`），带自定义悬浮提示；
+        3. 后续列（建议买入区间、止损参考、核心逻辑驱动）自适应动态偏移；
+        4. 文本搜索框模糊过滤逻辑联动匹配自定义列内容；
+    - [x] **自动化测试全覆盖**：
+        1. 在 `test_capital_dragon_engine.py` 中新增 `test_dragon_extra_cols_and_headers`，验证自定义列提取、位置关系与 `co2int` 格式化；
+        2. 在 `test_capital_dragon_panel_integration.py` 中新增 `test_capital_dragon_panel_custom_columns_rendering`，验证表格列顺序、单元格值、数值排序属性、后续列偏移与搜索联动；
+        3. 27 项全链路核心测试 100% 全部 PASSED！
+
 ## 2026-09-08 13:05
 - [x] **全链路落地【资金主线与龙头中枢 (CapitalDragonPanel) 策略过滤功能 (🎯 策略过滤 开/关) + 专属独立持久化 + 主窗口策略联动与动态统计】(SSOT) (`stock_standalone/ats/ui/capital_dragon_panel.py`, `stock_standalone/ats/ui/main_window.py`, `stock_standalone/tests/test_ats_tabs_strategy_filter.py`)**：
     - [x] **UI 控件与布局对齐**：
