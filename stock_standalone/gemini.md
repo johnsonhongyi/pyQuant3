@@ -1,3 +1,27 @@
+## 2026-09-08 18:10
+- [x] **全链路根治【通达信信号录入 `record_tdx_signal` 触发 `ValueError: The truth value of a Series is ambiguous` Bug】(SSOT) (`ats/signal_ledger.py`, `tests/test_signal_ledger.py`)**：
+    - [x] **根因溯源**：在 `SignalLedger.record_signal` 的通道上涨与支撑企稳判定逻辑中，判断条件直接使用了 `(row and ('ch_slope_deg' in row ...))` 以及 `... if row else 0.0`；当传入的 `df_row` 为 `pandas.Series` 时，Python 隐式计算 `bool(row)` 触发 Pandas 的歧义异常崩溃；
+    - [x] **优雅根治与多类型鲁棒兼容 (`ats/signal_ledger.py`)**：
+        1. 废弃所有对 `row` 的布尔隐式真值判断，重构为显式的 `row is not None`；
+        2. 兼容 `dict` 与 `pd.Series` 多种输入形态，通过 `try-except` 与 `hasattr(row, 'get')` 安全提取 `ch_supp_price` 与 `ch_slope_deg` 数值，缺失或无效值安全兜底 `0.0`；
+    - [x] **自动化测试全覆盖 (`tests/test_signal_ledger.py`)**：
+        1. 新增 `test_record_tdx_signal_with_pandas_series_row`，模拟传入科力股份（920088）真实 `pd.Series` 行数据，严格断言无异常且信号成功录入（15 项测试 100% PASSED）。
+
+## 2026-09-08 17:58
+- [x] **全链路根治【低 CPU 下鼠标迟滞感卡顿、重复全局事件过滤器与高频悬停定时器 (hover_timer 100ms) 节流优化】(SSOT) (`trade_visualizer_qt6.py`, `ats/ui/main_window.py`, `ats/ui/chart_widgets.py`, `ats/ui/dragon_monitor.py`, `ats/ui/daily_limit_up_dialog.py`, `ats/ui/hot_sector_leaderboard.py`, `tests/test_perf_event_filter_and_hover_throttle.py`)**：
+    - [x] **根治全局事件过滤器冗余与高频 MouseMove 拦截 (`trade_visualizer_qt6.py`)**：
+        1. 移除左侧列表初始化处冗余的 `self.input_filter = GlobalInputFilter(self)` 和 `installEventFilter`，消除重复注册双倍开销；
+        2. 在主窗口初始化唯一注册处增加单例防护；在 `closeEvent` 中补齐 `removeEventFilter` 释放；
+        3. 在 `GlobalInputFilter.eventFilter` 首行增加 $O(1)$ 快速守卫 `if event.type() == QtCore.QEvent.Type.MouseMove: return False`，绝不干预全系统高频鼠标移动，彻底杜绝 GIL 竞争与桌面鼠标迟滞；
+    - [x] **全磁吸浮窗高频悬停定时器节流 (QTimer Throttle) (`StockDetailDialog`, `DistributionDetailsDialog`, `DragonLeaderMonitorDialog`, `DailyLimitUpDialog`, `HotSectorLeaderboardDialog`)**：
+        1. 改变过去无脑 `hover_timer.start()` 的做法，初始化与常规屏幕中央显示状态下保持停止（STOPPED，0 开销）；
+        2. 仅在拖至边缘产生吸附（`self.anchor_edge is not None`）或隐藏感应条（`is_hidden_state`）时激活定时器；
+        3. 拖离边缘进入常规区域、置顶状态（`stays_on_top`）或窗口隐藏（`hideEvent`）时彻底停止定时器；
+        4. `_check_hover` 头部增加自愈休眠，非边缘状态自动 `stop()`，彻底消除多窗口后台并发 QTimerEvent 唤醒与 Windows DWM 桌面合成卡顿；
+    - [x] **自动化测试全覆盖 (`tests/test_perf_event_filter_and_hover_throttle.py`)**：
+        1. 覆盖 GlobalInputFilter 对 MouseMove 的零开销放行、5 大浮窗的 hover_timer 默认停止、贴边激活、脱离与隐藏停止断言（6项全部 PASSED）；
+        2. 24 项跨模块核心集成回归测试 100% 全部 PASSED！
+
 ## 2026-09-08 14:30
 - [x] **全链路根治【资金主线后台刷新导致整窗突然闪屏、误发射切股联动与焦点抢占 Bug】(SSOT) (`ats/ui/capital_dragon_panel.py`, `ats/ui/main_window.py`, `tests/test_capital_dragon_panel_integration.py`)**：
     - [x] **根治后台刷新误发切股联动与焦点震荡 (`ats/ui/capital_dragon_panel.py`)**：
