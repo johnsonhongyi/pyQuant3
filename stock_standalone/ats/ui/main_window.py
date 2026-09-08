@@ -3081,29 +3081,37 @@ class ATSMainWindow(QMainWindow):
                 print(f"[Linkage] External linkage failed: {e}")
 
     def _on_top_tab_changed(self, index: int):
-        """主看板顶部 Tab 切换事件：极速 0ms 补齐渲染与同步对应 Tab 页面数据"""
+        """主看板顶部 Tab 切换事件：极速 0ms 补齐渲染与同步对应 Tab 页面数据并自动持久化记忆"""
         try:
             if index == 0:
+                # 切换到 🐉 资金主线与龙头中枢
+                if hasattr(self, 'capital_dragon_panel') and hasattr(self.capital_dragon_panel, 'update_payload'):
+                    sh_pct = getattr(self, '_pending_sh_pct', 0.0)
+                    self.capital_dragon_panel.update_payload(self.current_df, sh_pct)
+            elif index == 1:
                 # 切换到 ⭐ 重点关注 (基础重点)
                 if hasattr(self, 'favorite_panel'):
                     if hasattr(self, '_pending_fav_rows') and self._pending_fav_rows:
                         self.favorite_panel.update_favorite_rows(self._pending_fav_rows)
                     elif hasattr(self.favorite_panel, '_apply_row_visibility'):
                         self.favorite_panel._apply_row_visibility()
-            elif index == 1:
+            elif index == 2:
                 # 切换到 📉 大级别 MA20d 回调跟踪器
                 if hasattr(self, 'swing_table'):
                     if hasattr(self, '_pending_swing_rows') and self._pending_swing_rows:
                         self.swing_table.update_data_list(self._pending_swing_rows)
                     elif hasattr(self.swing_table, '_apply_favorite_filter'):
                         self.swing_table._apply_favorite_filter()
-            elif index == 2:
+            elif index == 3:
                 # 切换到 🆕 新股次新股 (IPO & 阶梯)
                 if hasattr(self, 'new_stock_panel'):
                     if hasattr(self.new_stock_panel, '_apply_filter'):
                         self.new_stock_panel._apply_filter()
         except Exception as e:
             logger.debug(f"[ATSMainWindow] _on_top_tab_changed error: {e}")
+
+        if not getattr(self, '_is_restoring_sizes', False):
+            self._save_layout_state()
 
     def _get_today_signal_codes(self):
         """归纳今日所有已发现/记录的特异与共振强势股票代码列表 (供弹窗左右导航联动)"""
@@ -5462,11 +5470,6 @@ class ATSMainWindow(QMainWindow):
 
         # 弹出菜单在鼠标屏幕位置 (使用 QCursor.pos() 自动精准适配 High-DPI 缩放与多显示器拓展桌面)
         menu.exec(QCursor.pos())
-
-    def _on_top_tab_changed(self, index: int):
-        """自动持久化记忆当前打开的是【重点关注】还是【大级别回调跟踪器】Tab 选项卡"""
-        if not getattr(self, '_is_restoring_sizes', False):
-            self._save_layout_state()
 
     def _on_channel_scan_button_clicked(self):
         """

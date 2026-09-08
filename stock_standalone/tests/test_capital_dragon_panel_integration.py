@@ -390,6 +390,55 @@ class TestCapitalDragonPanelIntegration(unittest.TestCase):
         self.assertGreaterEqual(self.panel.table.rowCount(), 1)
         self.panel.search_input.setText("")
 
+    def test_no_false_linkage_or_flicker_during_update(self):
+        """验证后台刷新时不会误发射 stock_selected 切股联动信号，且卡片稳定占位不坍塌"""
+        mock_data = {
+            "300750": {
+                "name": "宁德时代", "close": 265.0, "percent": 5.2, "amount": 4.8e9,
+                "category": "固态电池", "dff": 1.8, "dff2": 5.2, "dff3": 9.5, "ma20d": 240.0
+            },
+            "002812": {
+                "name": "恩捷股份", "close": 42.5, "percent": 9.98, "amount": 1.5e9,
+                "category": "固态电池", "dff": 1.2, "dff2": 4.0, "dff3": 7.5, "ma20d": 38.0
+            }
+        }
+        df_mock = pd.DataFrame.from_dict(mock_data, orient='index')
+        self.panel.update_payload(df_mock, force=True)
+
+        # 模拟用户正常选中第一行
+        self.panel.table.setCurrentCell(0, 0)
+        selected_code_before = self.panel.table.item(0, 0).text()
+
+        # 监听 stock_selected 发射情况
+        emitted_signals = []
+        self.panel.stock_selected.connect(lambda c, n: emitted_signals.append((c, n)))
+
+        # 模拟后台刷新到来 (价格变动触发重新渲染)
+        mock_data_2 = {
+            "300750": {
+                "name": "宁德时代", "close": 266.0, "percent": 5.6, "amount": 5.0e9,
+                "category": "固态电池", "dff": 1.8, "dff2": 5.2, "dff3": 9.5, "ma20d": 240.0
+            },
+            "002812": {
+                "name": "恩捷股份", "close": 42.6, "percent": 10.0, "amount": 1.6e9,
+                "category": "固态电池", "dff": 1.2, "dff2": 4.0, "dff3": 7.5, "ma20d": 38.0
+            }
+        }
+        df_mock_2 = pd.DataFrame.from_dict(mock_data_2, orient='index')
+        self.panel.update_payload(df_mock_2, force=True)
+
+        # 1. 核心断言：后台刷新期间绝对严禁触发 stock_selected (杜绝抢焦与外部终端切股闪烁)
+        self.assertEqual(len(emitted_signals), 0, f"后台数据更新期间误发射了联动信号: {emitted_signals}")
+
+        # 2. 核心断言：之前选中的代码在更新后平滑恢复
+        curr_row = self.panel.table.currentRow()
+        self.assertGreaterEqual(curr_row, 0)
+        self.assertEqual(self.panel.table.item(curr_row, 0).text(), selected_code_before)
+
+        # 3. 核心断言：即使当前只有 1 个板块，所有 3 个卡片依然保持占位 (not isHidden)，绝不坍塌
+        for card_info in self.panel.sector_card_widgets:
+            self.assertFalse(card_info["frame"].isHidden())
+
 
 if __name__ == "__main__":
     unittest.main()

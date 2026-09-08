@@ -491,7 +491,22 @@ class CapitalDragonPanel(QWidget):
                     w["leader"].setToolTip("")
                 w["frame"].setVisible(True)
             else:
-                w["frame"].setVisible(False)
+                # 保持 3 大卡片稳定占位，绝不 setVisible(False)，彻底防止容器高度坍塌促发整窗 Splitter 重新布局与闪烁
+                w["sector_name"] = ""
+                w["leader_code"] = ""
+                w["leader_name"] = ""
+                if card_obj:
+                    card_obj.sector_name = ""
+                    card_obj.leader_code = ""
+                    card_obj.leader_name = ""
+                w["title"].setText(f"主线 {i+1}: 正在识别资金聚集...")
+                w["desc"].setText("成交: -- 亿 | 均涨: --% | 涨停: -- 只")
+                w["desc"].setTextFormat(Qt.TextFormat.PlainText)
+                w["leader"].setText("🚀 先锋: 正在争夺...")
+                w["leader"].setTextFormat(Qt.TextFormat.PlainText)
+                w["leader"].setToolTip("")
+                w["frame"].setToolTip("")
+                w["frame"].setVisible(True)
 
     def _render_table(self, dragons: Optional[List[Dict[str, Any]]] = None):
         if dragons is None:
@@ -503,6 +518,7 @@ class CapitalDragonPanel(QWidget):
                 dragons = []
 
         self._is_updating = True
+        self.table.blockSignals(True)
         self.table.setUpdatesEnabled(False)
         try:
             # 记住当前选中代码
@@ -774,10 +790,11 @@ class CapitalDragonPanel(QWidget):
             if new_selected_row >= 0:
                 self.table.setCurrentCell(new_selected_row, 0)
 
-            auto_fit_columns_once(self.table, "capital_dragon_table_header_v2")
+            auto_fit_columns_once(self.table, "capital_dragon_table_header_v3")
             self.table.setSortingEnabled(True)
 
         finally:
+            self.table.blockSignals(False)
             self.table.setUpdatesEnabled(True)
             self._is_updating = False
 
@@ -877,6 +894,8 @@ class CapitalDragonPanel(QWidget):
             self._render_table(records)
 
     def _on_row_clicked(self, item):
+        if getattr(self, '_is_updating', False) or item is None:
+            return
         row = item.row()
         c_item = self.table.item(row, 0)
         n_item = self.table.item(row, 1)
@@ -886,7 +905,10 @@ class CapitalDragonPanel(QWidget):
             self.stock_selected.emit(code, name)
 
     def _on_current_cell_changed(self, cur_row, cur_col, prev_row, prev_col):
-        if cur_row >= 0 and cur_row != prev_row:
+        # 正在后台刷新数据或无效行期间严禁触发切股联动与抢焦
+        if getattr(self, '_is_updating', False) or cur_row < 0:
+            return
+        if cur_row != prev_row:
             c_item = self.table.item(cur_row, 0)
             n_item = self.table.item(cur_row, 1)
             if c_item and n_item:
