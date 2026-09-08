@@ -588,7 +588,9 @@ class CapitalDragonEngine:
                         "leader_code": "",
                         "leader_name": "",
                         "leader_pct": -99.0,
-                        "leader_amt_yi": 0.0
+                        "leader_amt_yi": 0.0,
+                        "leader_vr": 1.0,
+                        "leader_buy_type": ""
                     }
                 st = sector_stats[s_name]
                 st["total_amt_yi"] += amt
@@ -615,6 +617,7 @@ class CapitalDragonEngine:
                     st["leader_code"] = codes_series.loc[idx]
                     st["leader_name"] = str(df.loc[idx, 'name']) if 'name' in df.columns else ""
                     st["leader_amt_yi"] = amt
+                    st["leader_vr"] = vr_val
 
         # 计算板块综合资金强度得分
         top_sectors = []
@@ -860,6 +863,19 @@ class CapitalDragonEngine:
                     "is_open_low_accel": is_open_low_accel,
                     "is_top35_amt": (code_str in top_35_amt_codes)
                 })
+
+        # 回填核心主线 Top Sectors 中先锋个股的资金买点类型 (SSOT)
+        dragon_action_map = {d["code"]: d.get("action_type", "") for d in dragon_records}
+        for st in top_sectors:
+            l_c = st.get("leader_code", "")
+            if l_c in dragon_action_map and dragon_action_map[l_c]:
+                st["leader_buy_type"] = dragon_action_map[l_c]
+            elif l_c:
+                ac_info = accel_cache.get(l_c, {})
+                tag = ac_info.get("accel_tag", "")
+                p_val = st.get("leader_pct", 0.0)
+                base_act = "冲板先锋" if p_val >= 9.5 else ("领涨先锋" if p_val >= 5.0 else "领涨突破")
+                st["leader_buy_type"] = f"{tag}·{base_act}" if tag else f"⚡ {base_act}"
 
         # 1. 优化前的全部 300+ 只全量候选池 (不限制容量中军数量，不截断 Top 50，优先按真龙优先级与形态买点得分排)
         dragon_records_all = list(dragon_records)

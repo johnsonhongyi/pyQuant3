@@ -25,7 +25,7 @@ from PyQt6.QtWidgets import (
     QTableWidgetItem, QHeaderView, QAbstractItemView, QPushButton,
     QLineEdit, QFrame, QGridLayout, QSizePolicy, QMenu
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QPoint
+from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QPoint, QSize
 from PyQt6.QtGui import QColor, QBrush, QFont, QCursor
 
 from tk_gui_modules.qt_table_utils import NumericTableWidgetItem
@@ -79,12 +79,15 @@ class SectorCardWidget(QFrame):
 
         self.setFrameShape(QFrame.Shape.StyledPanel)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self.setMinimumWidth(0)
+
         self.setStyleSheet("""
             QFrame {
                 background-color: #161b22;
                 border: 1px solid #30363d;
                 border-radius: 6px;
-                padding: 4px 8px;
+                padding: 4px 6px;
             }
             QFrame:hover {
                 border: 1px solid #58a6ff;
@@ -94,7 +97,7 @@ class SectorCardWidget(QFrame):
 
         card_layout = QVBoxLayout(self)
         card_layout.setContentsMargins(6, 4, 6, 4)
-        card_layout.setSpacing(2)
+        card_layout.setSpacing(3)
 
         # 标题栏：主线名称 + 查看明细按钮
         title_layout = QHBoxLayout()
@@ -104,13 +107,15 @@ class SectorCardWidget(QFrame):
         self.lbl_title = ClickableLabel(f"主线 {index+1}: 正在识别资金聚集...")
         self.lbl_title.setStyleSheet("color: #ffd700; font-size: 10pt; font-weight: bold;")
         self.lbl_title.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.lbl_title.setWordWrap(True)
+        self.lbl_title.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self.lbl_title.setMinimumWidth(0)
         self.lbl_title.clicked.connect(self._on_card_clicked)
-        title_layout.addWidget(self.lbl_title)
-
-        title_layout.addStretch()
+        title_layout.addWidget(self.lbl_title, 1)
 
         self.btn_detail = QPushButton("🔍 查看明细")
         self.btn_detail.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_detail.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.btn_detail.setStyleSheet("""
             QPushButton {
                 background-color: #21262d;
@@ -132,14 +137,17 @@ class SectorCardWidget(QFrame):
 
         card_layout.addLayout(title_layout)
 
-        # 描述行：成交额、均涨、涨停
+        # 描述行：成交额、均涨、涨停、加速（支持自动折行）
         self.lbl_desc = ClickableLabel("成交额: -- 亿 | 均涨: --% | 涨停: -- 家")
         self.lbl_desc.setStyleSheet("color: #8b949e; font-size: 8.5pt;")
         self.lbl_desc.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.lbl_desc.setWordWrap(True)
+        self.lbl_desc.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self.lbl_desc.setMinimumWidth(0)
         self.lbl_desc.clicked.connect(self._on_card_clicked)
         card_layout.addWidget(self.lbl_desc)
 
-        # 先锋行：带联动与双击响应
+        # 先锋行：代码、名称、涨幅、虚拟量比、买点类型（支持自动折行与联动）
         self.lbl_leader = ClickableLabel("🚀 先锋: --")
         self.lbl_leader.setStyleSheet("""
             QLabel {
@@ -153,10 +161,18 @@ class SectorCardWidget(QFrame):
             }
         """)
         self.lbl_leader.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.lbl_leader.setWordWrap(True)
+        self.lbl_leader.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self.lbl_leader.setMinimumWidth(0)
         self.lbl_leader.setToolTip("🎯 单击联动行情与K线 | 双击查看 SBC 分时通道")
         self.lbl_leader.clicked.connect(self._on_leader_clicked)
         self.lbl_leader.double_clicked.connect(self._on_leader_double_clicked)
         card_layout.addWidget(self.lbl_leader)
+
+    def minimumSizeHint(self) -> QSize:
+        # 允许宽度自由向内压缩缩小（支持自适应折行），绝不卡死外层主窗口
+        hint = super().minimumSizeHint()
+        return QSize(60, max(hint.height(), 40))
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
@@ -202,6 +218,8 @@ class CapitalDragonPanel(QWidget):
 
         # 1. 顶部 3 大资金主线卡片展示区 (Top Mainstream Sector Cards)
         self.top_sector_container = QWidget()
+        self.top_sector_container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self.top_sector_container.setMinimumWidth(0)
         self.top_sector_layout = QHBoxLayout(self.top_sector_container)
         self.top_sector_layout.setContentsMargins(0, 0, 0, 0)
         self.top_sector_layout.setSpacing(8)
@@ -212,7 +230,7 @@ class CapitalDragonPanel(QWidget):
             card.sector_clicked.connect(self.open_sector_detail)
             card.pioneer_clicked.connect(self._on_pioneer_clicked)
             card.pioneer_double_clicked.connect(self._on_pioneer_double_clicked)
-            self.top_sector_layout.addWidget(card)
+            self.top_sector_layout.addWidget(card, 1)  # stretch=1 权重均分，自适应等宽缩放
             self.sector_card_widgets.append({
                 "frame": card,
                 "title": card.lbl_title,
@@ -239,7 +257,9 @@ class CapitalDragonPanel(QWidget):
 
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("🔍 搜索代码 / 名称 / 主线 / 角色...")
-        self.search_input.setFixedWidth(220)
+        self.search_input.setMaximumWidth(220)
+        self.search_input.setMinimumWidth(80)
+        self.search_input.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         self.search_input.setStyleSheet("""
             QLineEdit {
                 background-color: #0d1117;
@@ -400,8 +420,48 @@ class CapitalDragonPanel(QWidget):
                 )
 
                 if l_name and l_code:
-                    w["leader"].setText(f"🚀 先锋: {l_name} ({l_code}) +{st['leader_pct']:.1f}%")
-                    w["leader"].setToolTip(f"🎯 单击联动【{l_name} ({l_code})】行情与K线 | 双击查看 SBC 分时通道")
+                    l_pct = st.get("leader_pct", 0.0)
+                    l_vr = st.get("leader_vr", 1.0)
+                    l_buy_type = st.get("leader_buy_type", "")
+
+                    l_pct_col = COLOR_UP if l_pct > 0 else (COLOR_DOWN if l_pct < 0 else "#ffffff")
+
+                    # 虚拟量比高亮色彩
+                    if l_vr >= 2.0:
+                        l_vr_col = "#ffd700"  # 爆量金黄
+                    elif l_vr >= 1.2:
+                        l_vr_col = "#00e5ff"  # 活跃青蓝
+                    elif l_vr <= 0.7:
+                        l_vr_col = "#8b949e"  # 缩量灰
+                    else:
+                        l_vr_col = "#c9d1d9"  # 正常白
+
+                    # 买点类型高亮色彩
+                    if "👑双加速" in l_buy_type or "👑" in l_buy_type:
+                        l_bt_col = "#ffd700"
+                    elif "🚀缺口加速" in l_buy_type:
+                        l_bt_col = "#ff55bb"
+                    elif "⚡光脚加速" in l_buy_type:
+                        l_bt_col = "#ffaa00"
+                    elif "板" in l_buy_type or "封" in l_buy_type or "涨停" in l_buy_type:
+                        l_bt_col = "#ff4444"
+                    else:
+                        l_bt_col = "#38bdf8"
+
+                    vr_text = f" | 量比: <font color='{l_vr_col}'><b>{l_vr:.1f}x</b></font>"
+                    bt_text = f" | <font color='{l_bt_col}'><b>{l_buy_type}</b></font>" if l_buy_type else ""
+
+                    w["leader"].setText(
+                        f"🚀 先锋: {l_name} ({l_code}) "
+                        f"<font color='{l_pct_col}'><b>{l_pct:+.1f}%</b></font>"
+                        f"{vr_text}{bt_text}"
+                    )
+                    w["leader"].setTextFormat(Qt.TextFormat.RichText)
+                    w["leader"].setToolTip(
+                        f"🎯 单击联动【{l_name} ({l_code})】行情与K线 | 双击查看 SBC 分时通道\n"
+                        f"📊 先锋虚拟量比: {l_vr:.2f}x (早盘放量加速评估)\n"
+                        f"💡 先锋买点形态: {l_buy_type or '主线冲锋'}"
+                    )
                 else:
                     w["leader"].setText("🚀 先锋: 正在争夺...")
                     w["leader"].setToolTip("")
