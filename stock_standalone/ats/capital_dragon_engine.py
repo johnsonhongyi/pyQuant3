@@ -55,7 +55,9 @@ def _clean_code(c: Any) -> str:
 def is_index_or_fund(code: Any, name: Any = "") -> bool:
     """
     判断标的是否属于指数、ETF或大盘综合指数，纯化个股龙头中枢 (排除 399xxx, 999xxx, 899xxx, 000001等)
+    严格区分深市个股与指数代码，杜绝将 000852(石化机械)、000010(*ST美丽) 等深市个股误判为指数
     """
+    raw_s = str(code).strip().lower()
     c = _clean_code(code)
     nm = str(name).strip() if name is not None else ""
 
@@ -63,19 +65,85 @@ def is_index_or_fund(code: Any, name: Any = "") -> bool:
     if c.startswith(("399", "999", "899")):
         return True
 
-    # 2. 沪深核心大盘指数代码 (排除平安银行 000001)
-    if c in ("000001", "000300", "000016", "000905", "000852", "000010"):
-        if nm and ("银行" in nm or "平安" in nm):
-            return False
+    # 2. 带有显式指数前缀的代码 (如 sh000001, sh000300, sh000016, sh000905, sh000852, sh000010)
+    if raw_s.startswith("sh") and c in ("000001", "000300", "000016", "000905", "000852", "000010"):
         return True
 
-    # 3. 常见指数/板块名称特征
+    # 3. 常见指数/板块名称特征 (如包含“指数”、“成指”、“综指”、“ETF”等关键字)
     if nm:
-        for kw in ("指数", "成指", "综指", "北证50", "科创50", "上证50", "中小100", "创业板指", "沪深300", "中证500", "中证1000"):
+        for kw in ("指数", "成指", "综指", "ETF", "北证50", "科创50", "上证50", "中小100", "创业板指", "沪深300", "中证500", "中证1000", "上证180"):
             if kw in nm:
                 return True
 
+    # 4. 纯 6 位数字代码 000001：若名称含“平安”或“银行”，或前缀为 sz 则为个股；仅当名称含“上证”或代码为 999999 时才为指数
+    if c == "000001":
+        if nm and ("银行" in nm or "平安" in nm):
+            return False
+        if "上证" in nm or raw_s.startswith("sh"):
+            return True
+        return False  # 纯代码 000001 且无明确上证标识时默认为平安银行个股，避免污染
+
+    # 其余纯数字 000xxx、001xxx、002xxx、003xxx 均为深市 A 股 (如 000852 石化机械, 000010 *ST美丽)
     return False
+
+
+def compute_dragon_buy_type_sort_score(
+    action_type: str,
+    is_dual_accel: bool = False,
+    is_gap_accel: bool = False,
+    is_open_low_accel: bool = False,
+    amount_yi: float = 0.0,
+    pct: float = 0.0
+) -> float:
+    """
+    计算资金主线买点类型的绝对量化得分 (对齐天梯形态质量与龙头突击梯队 SSOT):
+    👑 梯队 1: 👑双加速买点 (基准 90,000 分，双重主升加速绝对优先)
+    🚀 梯队 2: 🚀缺口加速买点 (基准 70,000 分，跳空高开且缺口未补)
+    ⚡ 梯队 3: ⚡光脚加速买点 (基准 55,000 分，开盘即最低)
+    🔥 梯队 4: 常规强势主升买点 (基准 40,000 分，如 领涨龙头 / 主升趋势加速 / 主线率先冲关 / 启动首板封死)
+    🎯 梯队 5: 通道支撑与分歧低吸买点 (基准 25,000 分，如 通道支撑企稳 / 高位分歧低吸 / 顺应主线共振)
+    📋 梯队 6: 其它常规观察买点 (基准 10,000 分)
+    ⚠️ 梯队 7: 破位诱多/孤狼 (基准 1,000 分)
+
+    同梯队内部微观决胜:
+    - 攻击型买点加成 (领涨龙头 +3000, 主升加速 +2000, 冲关/首板 +1500)
+    - 涨幅动能加成 (0 ~ 1000 分)
+    - 流动性微调加成 (min(500.0, amount_yi * 5.0)，绝不越级压倒形态)
+    """
+    act = str(action_type or "")
+    is_dual = is_dual_accel or ("双加速" in act)
+    is_gap = is_gap_accel or ("缺口加速" in act)
+    is_open_low = is_open_low_accel or ("光脚加速" in act)
+
+    if is_dual:
+        base = 90000.0
+    elif is_gap:
+        base = 70000.0
+    elif is_open_low:
+        base = 55000.0
+    elif any(k in act for k in ("领涨龙头", "主升趋势加速", "主线率先冲关", "启动首板", "锁仓换手")):
+        base = 40000.0
+    elif any(k in act for k in ("通道支撑企稳", "高位分歧低吸", "顺应主线共振")):
+        base = 25000.0
+    elif any(k in act for k in ("破位", "诱多", "孤狼")):
+        base = 1000.0
+    else:
+        base = 10000.0
+
+    action_bonus = 0.0
+    if "领涨龙头" in act:
+        action_bonus = 3000.0
+    elif "主升趋势加速" in act:
+        action_bonus = 2000.0
+    elif any(k in act for k in ("冲关", "首板", "锁仓")):
+        action_bonus = 1500.0
+    elif "通道支撑企稳" in act:
+        action_bonus = 500.0
+
+    pct_bonus = min(1000.0, max(0.0, pct) * 50.0)
+    amt_bonus = min(500.0, max(0.0, amount_yi) * 5.0)
+
+    return round(base + action_bonus + pct_bonus + amt_bonus, 2)
 
 
 class CapitalDragonEngine:
@@ -197,7 +265,8 @@ class CapitalDragonEngine:
                             for q in all_quotes:
                                 q_code = str(q.get('code', '')).strip().zfill(6)
                                 raw_amt = float(q.get('amount', 0.0) or 0.0)
-                                amt_yi = raw_amt / 1e8 if raw_amt > 1e7 else raw_amt
+                                # 通达信 TDX 原生 API 返回的 amount 永远是以【元】为单位，严格除以 1e8 转换为亿元
+                                amt_yi = raw_amt / 1e8
                                 p = float(q.get('price', 0.0) or 0.0)
                                 if amt_yi > 0:
                                     val_dict = {
@@ -699,6 +768,7 @@ class CapitalDragonEngine:
                     reason = f"全市场成交额巨量排头 (成交{amt_yi:.1f}亿), 多头通道稳健向上 (DFF2={dff2:.1f})"
                 else:
                     base_action = "🎯 通道支撑企稳"
+                    role_priority = 76  # 缩量企稳防守中军，基准优先级适度让位给主升加速与主线先锋
                     buy_zone = f"{supp_ref:.2f} ~ {round(supp_ref * 1.02, 2)}"
                     action_tip = "大票缩量回踩通道中轨/支撑位，低吸性价比极高"
                     reason = f"百亿级别容量中军 (成交{amt_yi:.1f}亿) 回踩多头支撑位 ({supp_ref:.2f}元), 机构承接有力"
@@ -741,22 +811,33 @@ class CapitalDragonEngine:
                 if accel_tag:
                     action_type = f"{accel_tag}·{base_action}"
                     if is_dual_accel:
-                        role_priority += 15
+                        role_priority += 25
                         reason = f"【👑双加速主升结构】{reason}"
                     elif is_gap_accel:
-                        role_priority += 8
+                        role_priority += 15
                         reason = f"【🚀缺口加速(跳空未补)】{reason}"
                     elif is_open_low_accel:
-                        role_priority += 6
+                        role_priority += 8
                         reason = f"【⚡光脚加速(开盘即最低)】{reason}"
                 else:
                     action_type = base_action
+
+                # 计算买点类型的绝对量化得分 (对齐天梯形态质量与龙头突击梯队 SSOT)
+                buy_type_score = compute_dragon_buy_type_sort_score(
+                    action_type=action_type,
+                    is_dual_accel=is_dual_accel,
+                    is_gap_accel=is_gap_accel,
+                    is_open_low_accel=is_open_low_accel,
+                    amount_yi=amt_yi,
+                    pct=pct_val
+                )
 
                 dragon_records.append({
                     "code": code_str,
                     "name": name_str,
                     "role": dragon_role,
                     "priority": role_priority,
+                    "buy_type_sort_score": buy_type_score,
                     "sector": final_sec,
                     "price": price_val,
                     "pct": pct_val,
@@ -780,9 +861,12 @@ class CapitalDragonEngine:
                     "is_top35_amt": (code_str in top_35_amt_codes)
                 })
 
-        # 1. 优化前的全部 300+ 只全量候选池 (不限制容量中军数量，不截断 Top 50)
+        # 1. 优化前的全部 300+ 只全量候选池 (不限制容量中军数量，不截断 Top 50，优先按真龙优先级与形态买点得分排)
         dragon_records_all = list(dragon_records)
-        dragon_records_all.sort(key=lambda x: (x["priority"], x["amount_yi"], x["pct"]), reverse=True)
+        dragon_records_all.sort(
+            key=lambda x: (x["priority"], x.get("buy_type_sort_score", 0.0), x["amount_yi"], x["pct"]),
+            reverse=True
+        )
 
         # 2. 精准收敛池 (开启极限性能模式时生效：容量中军严格从 top_35_amt 中精选 Top 20 绝对中军，总池收敛至 Top 50)
         converged = []
@@ -794,7 +878,10 @@ class CapitalDragonEngine:
                     converged.append(r)
             else:
                 converged.append(r)
-        converged.sort(key=lambda x: (x["priority"], x["amount_yi"], x["pct"]), reverse=True)
+        converged.sort(
+            key=lambda x: (x["priority"], x.get("buy_type_sort_score", 0.0), x["amount_yi"], x["pct"]),
+            reverse=True
+        )
         dragon_records_converged = converged[:50]
 
         report = {

@@ -253,16 +253,30 @@ class TestCapitalDragonPanelIntegration(unittest.TestCase):
         self.assertIn("600519", table_codes)
 
         # 查找茅台的买点类型 item
+        from tk_gui_modules.qt_table_utils import NumericTableWidgetItem
         idx_mt = table_codes.index("600519")
         item_mt_buy = self.panel.table.item(idx_mt, buy_col_idx)
         self.assertIsNotNone(item_mt_buy)
+        # 验证买点类型单元格已升级为 NumericTableWidgetItem (支持高精度量化排序)
+        self.assertIsInstance(item_mt_buy, NumericTableWidgetItem)
         # 应该包含双加速
         self.assertIn("双加速", item_mt_buy.text())
+        # 验证双加速排序分 >= 90000 分
+        self.assertGreaterEqual(float(item_mt_buy.raw_val), 90000.0)
         # 字体加粗
         self.assertTrue(item_mt_buy.font().bold())
         # 颜色匹配 #FFD700
         color_hex = item_mt_buy.foreground().color().name().upper()
         self.assertEqual(color_hex, "#FFD700")
+
+        # 验证买点类型优先级: 茅台(双加速) > 五粮液(缺口加速) > 洋河(光脚加速)
+        if "000858" in table_codes and "002304" in table_codes:
+            idx_wly = table_codes.index("000858")
+            idx_yh = table_codes.index("002304")
+            item_wly_buy = self.panel.table.item(idx_wly, buy_col_idx)
+            item_yh_buy = self.panel.table.item(idx_yh, buy_col_idx)
+            self.assertGreater(float(item_mt_buy.raw_val), float(item_wly_buy.raw_val))
+            self.assertGreater(float(item_wly_buy.raw_val), float(item_yh_buy.raw_val))
 
         # 3. 验证状态栏包含加速汇总统计，且删除极限性能标签以防状态栏遮挡 (状态保留在按钮中)
         stats_text = self.panel.lbl_stats.text()

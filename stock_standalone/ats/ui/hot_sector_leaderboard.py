@@ -71,18 +71,26 @@ def _safe_int(val: Any, default: int = 0) -> int:
 
 def compute_buy_type_sort_score(item: Dict[str, Any]) -> float:
     """
-    计算买点类型排序的绝对量化得分 (Buy Type Sort Score, 降序排列时分值越高越优先/越强)：
-    核心设计：【快速定位带头大哥能力】
-    1. 领涨龙头族 (LEADER / 带头大哥) 拥有最高核心基准 95,000 分，享有最顶层统治力！
-       - 在领涨龙头内部，带头大哥由：涨幅大小 (Price Gain)、日内 VWAP 偏离度 (VWAP Premium)、
-         启动涨速 (Velocity)、全市场 Rank 排位 与加速形态 (双加速/缺口/光脚) 强强决胜！
-       - 20cm 领涨龙头 (如易点天下、四方精创) 动能大幅超越 10cm 标的，傲视全场稳居第 1、第 2 名！
-    2. 高涨幅扫盘助攻族 (SURGE 且 pct >= 7.0%)：基准 60,000 分；
-    3. 中低位扫买助攻族 (SURGE 且 pct < 7.0%)：基准 40,000 分 (杜绝 2%~3% 跟风股霸屏抢占视线)；
-    4. 先锋突破族 (BREAKOUT)：基准 30,000 分；
-    5. 回踩低吸族 (PULLBACK)：基准 20,000 分；
-    6. 蓄势观察族 (WATCH)：基准 10,000 分；
-    7. 破位诱多族 (WEAK)：基准 1,000 分。
+    计算买点类型排序的绝对量化得分 (Buy Type Sort Score, 降序排列时分值越高越优先/越强):
+    👑 核心设计：全面对齐天梯形态质量与加速梯队标准 (SSOT)
+    形态加速铁律梯队 (刚性基准落差，同层微观微调上限 4,000 分，绝对不越层倒挂):
+    1. 👑 梯队 1: 👑双加速买点 (基准 92,000 ~ 100,000 分，开盘即最低+跳空未补双重极速)
+       - 👑双加速·领涨龙头 / 👑双加速·弱转强起爆: 基准 100,000 分
+       - 👑双加速·冲板助攻 / 👑双加速·先锋突破: 基准 92,000 分
+    2. 🚀 梯队 2: 🚀缺口加速买点 (基准 72,000 ~ 80,000 分，跳空高开且缺口未补)
+       - 🚀缺口加速·领涨龙头: 基准 80,000 分
+       - 🚀缺口加速·冲板助攻 / 🚀缺口加速·先锋突破: 基准 72,000 分
+    3. ⚡ 梯队 3: ⚡光脚加速买点 (基准 55,000 ~ 62,000 分，开盘即最低)
+       - ⚡光脚加速·领涨龙头: 基准 62,000 分
+       - ⚡光脚加速·冲板助攻 / ⚡光脚加速·先锋突破: 基准 55,000 分
+    4. 📋 梯队 4: 常规领涨与强势主升冲板 (基准 38,000 ~ 45,000 分，无加速结构)
+       - 常规领涨龙头: 基准 45,000 分
+       - 常规冲板助攻 / 脱离成本: 基准 38,000 分
+    5. 🎯 梯队 5: 先锋突破与回踩低吸 (基准 20,000 ~ 28,000 分)
+       - 先锋突破: 基准 28,000 分
+       - 回踩低吸: 基准 20,000 分
+    6. 📋 梯队 6: 蓄势观察 WATCH (基准 10,000 分)
+    7. ⚠️ 梯队 7: 破位诱多 / 昙花一现脉冲 (基准 1,000 ~ 2,000 分)
     """
     if "buy_type_sort_score" in item:
         try:
@@ -119,70 +127,39 @@ def compute_buy_type_sort_score(item: Dict[str, Any]) -> float:
     is_weak = (tag in ("WEAK", "TRAP") or 
                any(k in buy_t for k in ("破位", "诱多", "转弱")))
 
-    if is_trap_pulse:
-        # ⚠️ 昙花一现脉冲 (空头破位板块孤狼脉冲, 严防诱多, 置于最底层)
-        base = 2000.0
-        return round(base + alpha_score * 0.5, 3)
-
+    # 1. 刚性梯队基准分 (绝对单调分层，确保双加速 > 缺口加速 > 光脚加速 > 常规)
+    if is_trap_pulse or is_weak:
+        base = 1500.0
+    elif is_dual:
+        base = 100000.0 if (is_leader or is_reversal_launch) else 92000.0
+    elif is_gap:
+        base = 80000.0 if (is_leader or is_reversal_launch) else 72000.0
+    elif is_open_low:
+        base = 62000.0 if (is_leader or is_reversal_launch) else 55000.0
     elif is_reversal_launch:
-        # 👑 梯队 0：弱转强起爆族 (强势洗盘后早竞价平开/高开超预期弱转强, 顶级换手龙形态)
-        base = 96000.0
-        accel_add = 3000.0 if is_dual else (2000.0 if is_gap else (1000.0 if is_open_low else 0.0))
-        gain_add = min(20.0, max(-2.0, pct)) * 250.0
-        rev_add = min(15.0, max(0.0, float(item.get("reversal_diff", 0.0)))) * 150.0
-        score_add = min(100.0, max(0.0, alpha_score)) * 5.0
-        return round(base + accel_add + gain_add + rev_add + score_add, 3)
-
-    elif is_reentry:
-        # 💎 梯队 0.5：割肉反转回补族 (前期止损标的回踩企稳确认主升结构, 第一时间跟踪回补)
-        base = 94500.0
-        gain_add = min(20.0, max(-2.0, pct)) * 200.0
-        score_add = min(100.0, max(0.0, alpha_score)) * 5.0
-        return round(base + gain_add + score_add, 3)
-
+        base = 48000.0
     elif is_leader:
-        # 👑 梯队 1：领涨龙头族 (带头大哥统治殿堂)
-        base = 95000.0
-        accel_add = 3000.0 if is_dual else (2000.0 if is_gap else (1000.0 if is_open_low else 0.0))
-        # 💡 带头大哥核心动能权值 (涨幅大 + VWAP 偏离高 + 启动早 + 全市场 Rank 靠前)
-        gain_add = min(20.0, max(0.0, pct)) * 300.0
-        vwap_add = max(0.0, min(10.0, vwap_dev)) * 500.0
-        vel_add = max(0.0, min(15.0, vel_pct)) * 60.0
-        rank_add = max(0.0, (100.0 - min(100.0, float(rank_val)))) * 8.0
-        score_add = min(100.0, max(0.0, alpha_score)) * 5.0
-        total_score = base + accel_add + gain_add + vwap_add + vel_add + rank_add + score_add
-        return round(total_score, 3)
-
+        base = 45000.0
+    elif is_reentry:
+        base = 42000.0
     elif is_surge:
-        # ⚡ 梯队 2：冲板助攻族 (冲板形态或涨幅>=6.5%，基准 60,000 分)
-        # ⚡ 梯队 3：中低位跟风扫买族 (基准 45,000 分，杜绝低位跟风股遮挡)
-        is_rush = ("冲板" in buy_t) or ("脱离成本" in buy_t) or (pct >= 6.5)
-        base = 60000.0 if is_rush else 45000.0
-        accel_add = 1200.0 if is_dual else (800.0 if is_gap else (400.0 if is_open_low else 0.0))
-        gain_add = min(20.0, max(-5.0, pct)) * 300.0
-        vwap_add = max(0.0, min(10.0, vwap_dev)) * 500.0
-        vel_add = max(0.0, min(15.0, vel_pct)) * 40.0
-        score_add = min(100.0, max(0.0, alpha_score)) * 4.0
-        return round(base + accel_add + gain_add + vwap_add + vel_add + score_add, 3)
-
+        base = 38000.0
     elif is_breakout:
-        base = 30000.0
-        accel_add = 2000.0 if is_dual else (1500.0 if is_gap else (800.0 if is_open_low else 0.0))
-        gain_add = min(15.0, max(-5.0, pct)) * 100.0
-        return round(base + accel_add + gain_add + alpha_score * 3.0, 3)
-
+        base = 28000.0
     elif is_pullback:
         base = 20000.0
-        return round(base + alpha_score * 3.0 + min(10.0, max(-5.0, pct)) * 50.0, 3)
-
-    elif is_weak:
-        base = 1000.0
-        return round(base + alpha_score * 0.5, 3)
-
-    else: # 蓄势观察 WATCH
+    else:  # 蓄势观察 WATCH
         base = 10000.0
-        accel_add = 1500.0 if is_dual else (1000.0 if is_gap else 0.0)
-        return round(base + accel_add + alpha_score * 2.0 + pct * 20.0, 3)
+
+    # 2. 同梯队内部微观决胜微调 (上限 4,000 分，绝不越级冲垮层级)
+    gain_add = min(1500.0, max(0.0, pct) * 75.0)
+    vwap_add = min(1200.0, max(0.0, vwap_dev) * 120.0)
+    vel_add = min(600.0, max(0.0, vel_pct) * 40.0)
+    score_add = min(500.0, max(0.0, alpha_score) * 5.0)
+    low_diff_add = max(0.0, 200.0 - min(200.0, low_diff * 400.0))
+
+    total_score = base + gain_add + vwap_add + vel_add + score_add + low_diff_add
+    return round(total_score, 2)
 
 
 def get_leaderboard_headers(extra_cols=None):

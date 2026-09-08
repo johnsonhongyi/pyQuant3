@@ -33,7 +33,10 @@ from ats.ui.styles import (
     COLOR_UP, COLOR_DOWN, COLOR_INFO, COLOR_ACCENT, COLOR_WARN,
     setup_header_persistence, auto_fit_columns_once
 )
-from ats.capital_dragon_engine import CapitalDragonEngine, _safe_float, _clean_code
+from ats.capital_dragon_engine import (
+    CapitalDragonEngine, _safe_float, _clean_code,
+    compute_dragon_buy_type_sort_score
+)
 
 logger = logging.getLogger("CapitalDragonPanel")
 
@@ -550,8 +553,18 @@ class CapitalDragonPanel(QWidget):
                 it_to.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
                 self.table.setItem(row_idx, 8, it_to)
 
-                # 9: 资金买点类型 (精细化视觉高亮，对齐龙头突击与天梯)
-                it_buy = QTableWidgetItem(buy_type)
+                # 9: 资金买点类型 (精细化视觉高亮与量化排序，对齐龙头突击与天梯 SSOT)
+                buy_score = float(d.get("buy_type_sort_score", 0.0))
+                if buy_score <= 0.0:
+                    buy_score = compute_dragon_buy_type_sort_score(
+                        action_type=buy_type,
+                        is_dual_accel=d.get("is_dual_accel", False),
+                        is_gap_accel=d.get("is_gap_accel", False),
+                        is_open_low_accel=d.get("is_open_low_accel", False),
+                        amount_yi=amt,
+                        pct=pct
+                    )
+                it_buy = NumericTableWidgetItem(buy_type, raw_val=buy_score)
                 it_buy.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 font_buy = it_buy.font()
                 font_buy.setBold(True)
@@ -571,6 +584,11 @@ class CapitalDragonPanel(QWidget):
                 else:
                     it_buy.setForeground(QBrush(QColor("#38bdf8")))
                     it_buy.setBackground(QBrush(QColor(0, 0, 0, 0)))
+
+                buy_tip = f"【资金买点】: {buy_type}\n" \
+                          f"• 🎯 形态梯队排序分: {buy_score:.0f}\n" \
+                          f"• 💡 梯队优先级: 👑双加速 > 🚀缺口加速 > ⚡光脚加速 > 常规主升 > 🎯通道支撑企稳"
+                it_buy.setToolTip(buy_tip)
                 self.table.setItem(row_idx, 9, it_buy)
 
                 # 10: 建议买入区间

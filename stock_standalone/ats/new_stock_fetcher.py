@@ -108,7 +108,7 @@ class NewStockFetcher:
                         if isinstance(items, dict) and items:
                             self._cached_ipo_dict = items
                             self._last_calendar_fetch_time = float(data.get("updated_at", 0.0))
-                            logger.info(f"✅ 成功从磁盘恢复 IPO 日历: 共 {len(self._cached_ipo_dict)} 条记录")
+                            logger.info(f"[OK] 成功从磁盘恢复 IPO 日历: 共 {len(self._cached_ipo_dict)} 条记录")
             except Exception as e:
                 logger.debug(f"加载 IPO 日历持久化文件异常: {e}")
 
@@ -127,7 +127,7 @@ class NewStockFetcher:
                         df_loaded = pd.DataFrame(data)
                         if not df_loaded.empty and "code" in df_loaded.columns:
                             self._cached_stocks_df = df_loaded
-                            logger.info(f"✅ 成功从磁盘恢复新股数据表: 共 {len(df_loaded)} 条记录")
+                            logger.info(f"[OK] 成功从磁盘恢复新股数据表: 共 {len(df_loaded)} 条记录")
             except Exception as e:
                 logger.debug(f"加载新股数据表持久化文件异常: {e}")
 
