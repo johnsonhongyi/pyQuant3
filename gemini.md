@@ -1,3 +1,22 @@
+## 2026-09-08 13:05
+- [x] **全链路落地【资金主线与龙头中枢 (CapitalDragonPanel) 策略过滤功能 (🎯 策略过滤 开/关) + 专属独立持久化 + 主窗口策略联动与动态统计】(SSOT) (`stock_standalone/ats/ui/capital_dragon_panel.py`, `stock_standalone/ats/ui/main_window.py`, `stock_standalone/tests/test_ats_tabs_strategy_filter.py`)**：
+    - [x] **UI 控件与布局对齐**：
+        1. 在资金主线中间工具条 `toolbar_layout` 中，于 `[🔍 搜索代码/名...]` 左侧添加同款规格 `[🎯 策略过滤 (开/关)]` 切换按钮；
+        2. 开启状态呈现高亮深绿背景 (`#1a3322`) + 亮绿文字边框 (`#00ff88`)，关闭状态呈现暗灰风格 (`#222228` / `#888888`)；
+    - [x] **专属独立持久化配置**：
+        1. 使用专属独立配置键 `ats_capital_dragon_filter_enabled` 保存在 `window_config.json`，重启自动记忆上次开/关状态；
+        2. 默认保持关闭（`filter_enabled = False`），与系统其他面板保持完全一致；
+    - [x] **策略过滤核心算法与统计展示**：
+        1. 稳健获取主窗口全市场向量化计算的 `filtered_codes_set`，以 $O(1)$ 极速集合比对过滤候选池；
+        2. 与文本搜索框（`search_input`）实现平滑联合过滤；
+        3. 开启策略过滤时不盲目截断 Top 50，确保命中策略的龙头标的全量呈现；
+        4. 统计标签自适应呈现：开启时显示 `共 N 只 (过滤后 M 只)`，关闭时显示 `N 只`，对齐“★ 重点关注”设计哲学；
+    - [x] **全局广播联动与主窗口集成**：
+        1. 在 `main_window.py` 的 `apply_filter` 中增加对 `capital_dragon_panel._apply_filter()` 的通知，切换公式或实时行情更新时 0 延迟平滑刷新；
+    - [x] **自动化测试全覆盖**：
+        1. 在 `tests/test_ats_tabs_strategy_filter.py` 中新增 `test_capital_dragon_panel_strategy_filter`，覆盖初始状态、切换开/关、持久化、主窗口联动命中过滤、统计标签呈现；
+        2. 14 项过滤测试与 29 项跨模块核心测试 100% 全部 PASSED！
+
 ## 2026-09-08 11:15
 - [x] **全链路落地【通道上涨与支撑线上的 MA20d 震荡企稳候选池重构 (通道高度/走势振幅/防丢筹码二次上车/加速起爆)】(SSOT) (`stock_standalone/ats/channel_swing_candidate_engine.py`, `stock_standalone/ats/swing_tracker.py`, `stock_standalone/ats/signal_ledger.py`, `stock_standalone/ats/ui/swing_table.py`, `stock_standalone/ats/ui/main_window.py`, `stock_standalone/tests/test_channel_swing_candidate.py`)**：
     - [x] **痛点根治与实战走势闭环印证 (法尔胜/中农联合/爱尔眼科)**：

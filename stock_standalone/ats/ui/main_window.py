@@ -2855,7 +2855,9 @@ class ATSMainWindow(QMainWindow):
         # 仅持久化本地 ATS 状态 (window_config.json)，绝不修改或覆写 search_history.json
         self._save_search_history_data()
                 
-        # 2. 广播更新主界面三大 Tab 看板 (重点关注, 回调跟踪器, 新股次新股)
+        # 2. 广播更新主界面四大 Tab 看板 (资金主线, 重点关注, 回调跟踪器, 新股次新股)
+        if hasattr(self, 'capital_dragon_panel') and hasattr(self.capital_dragon_panel, '_apply_filter'):
+            self.capital_dragon_panel._apply_filter()
         if hasattr(self, 'favorite_panel') and hasattr(self.favorite_panel, '_apply_row_visibility'):
             self.favorite_panel._apply_row_visibility()
         if hasattr(self, 'swing_table') and hasattr(self.swing_table, '_apply_favorite_filter'):
