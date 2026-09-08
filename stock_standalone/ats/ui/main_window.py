@@ -667,13 +667,10 @@ class StockDetailDialog(QDialog):
         self._last_show_time = 0.0
         self._has_hovered_since_show = False
         self._is_auto_popping = False
-        self._switching = False
-        
-        # 悬停与离开监控定时器
+        # 悬停与离开监控定时器 (默认保持停止，仅在贴边或隐藏感应态激活，0 额外 CPU/DWM 开销)
         self.hover_timer = QTimer(self)
         self.hover_timer.setInterval(100)
         self.hover_timer.timeout.connect(self._check_hover)
-        self.hover_timer.start()
         
         # 拖拽结束防抖定时器
         self.snap_timer = QTimer(self)
@@ -781,9 +778,18 @@ class StockDetailDialog(QDialog):
         super().closeEvent(event)
 
     def hideEvent(self, event):
-        """隐藏时自动持久化窗口大小与位置"""
+        """隐藏时自动持久化窗口大小与位置，并彻底休眠悬停定时器"""
+        if hasattr(self, 'hover_timer') and self.hover_timer and self.hover_timer.isActive():
+            self.hover_timer.stop()
         self._save_geometry()
         super().hideEvent(event)
+
+    def showEvent(self, event):
+        """显示时仅当处于磁吸或隐藏感应条状态才激活悬停定时器"""
+        super().showEvent(event)
+        if (self.anchor_edge is not None or getattr(self, "is_hidden_state", False)) and not getattr(self, "stays_on_top", False):
+            if hasattr(self, 'hover_timer') and self.hover_timer and not self.hover_timer.isActive():
+                self.hover_timer.start()
 
     def update_batch_codes(self, new_batch_codes=None, current_code=None):
         """【关键机制】动态实时更新弹窗顶部的 [本轮强势信号] 下拉框列表，并 100% 自动高亮选中当前 code"""
@@ -1637,9 +1643,15 @@ class StockDetailDialog(QDialog):
             
             # 使用带有呼吸闪烁反馈的滑动动画平滑移动到磁吸位置
             self.start_slide_animation(self.normal_geometry, 1.0, duration=250, is_snap_feedback=True)
+            # 仅在进入贴边后激活悬停检测
+            if hasattr(self, 'hover_timer') and self.hover_timer and not self.hover_timer.isActive():
+                self.hover_timer.start()
         else:
             self.anchor_edge = None
             self.normal_geometry = None
+            # 脱离贴边进入屏幕常规区域，彻底停止悬停定时器，0 开销
+            if hasattr(self, 'hover_timer') and self.hover_timer and self.hover_timer.isActive():
+                self.hover_timer.stop()
 
     def hide_to_edge(self):
         # 【置顶与磁吸严格互斥】：置顶状态下绝对禁止折叠隐藏
@@ -1673,6 +1685,9 @@ class StockDetailDialog(QDialog):
             return
             
         self.is_hidden_state = True
+        # 隐藏到边缘时确保悬停唤醒定时器处于激活态
+        if hasattr(self, 'hover_timer') and self.hover_timer and not self.hover_timer.isActive():
+            self.hover_timer.start()
         # 启动滑入贴边隐藏的平滑过渡动画
         self.start_slide_animation(QRect(target_x, target_y, w, h), 0.35, duration=300)
 
@@ -1695,12 +1710,16 @@ class StockDetailDialog(QDialog):
         self.activateWindow()
 
     def _check_hover(self):
-        # 【置顶与磁吸严格互斥】：置顶状态下不执行任何贴边或离开折叠检测
+        # 【置顶与磁吸严格互斥】：置顶状态下不执行任何贴边或离开折叠检测，立即休眠
         if not self.isVisible() or getattr(self, "stays_on_top", False):
+            if hasattr(self, 'hover_timer') and self.hover_timer and self.hover_timer.isActive():
+                self.hover_timer.stop()
             return
             
-        # 仅在有贴边锚定边缘或处于贴边隐藏状态时才执行悬浮检测，其余时刻 0 开销
+        # 仅在有贴边锚定边缘或处于贴边隐藏状态时才执行悬浮检测，其余时刻 0 开销休眠
         if not self.anchor_edge and not self.is_hidden_state:
+            if hasattr(self, 'hover_timer') and self.hover_timer and self.hover_timer.isActive():
+                self.hover_timer.stop()
             return
             
         from PyQt6.QtWidgets import QApplication

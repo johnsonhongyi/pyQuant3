@@ -350,10 +350,10 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         self._has_hovered_since_show = False
         self._is_auto_popping = False
 
+        # 悬停与离开监控定时器 (默认保持停止，仅在贴边或隐藏感应态激活，0 额外开销)
         self.hover_timer = QTimer(self)
         self.hover_timer.setInterval(100)
         self.hover_timer.timeout.connect(self._check_hover)
-        self.hover_timer.start()
 
         self.snap_timer = QTimer(self)
         self.snap_timer.setSingleShot(True)
@@ -3406,10 +3406,16 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
             self.anchor_edge = edge
             self.normal_geometry = QRect(target_x, target_y, win_geo.width(), win_geo.height())
             self.start_slide_animation(self.normal_geometry, 1.0, duration=200, is_snap_feedback=True)
+            # 仅在进入贴边后激活悬停检测
+            if hasattr(self, 'hover_timer') and self.hover_timer and not self.hover_timer.isActive():
+                self.hover_timer.start()
         else:
             self.anchor_edge = None
             self.normal_geometry = None
             self._save_window_states(is_open=True)
+            # 脱离贴边进入屏幕常规区域，彻底停止悬停定时器，0 开销
+            if hasattr(self, 'hover_timer') and self.hover_timer and self.hover_timer.isActive():
+                self.hover_timer.stop()
 
     def hide_to_edge(self):
         # 【置顶与磁吸严格互斥】：置顶状态下绝对禁止折叠隐藏
@@ -3442,6 +3448,9 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
             return
             
         self.is_hidden_state = True
+        # 隐藏到边缘时确保悬停唤醒定时器处于激活态
+        if hasattr(self, 'hover_timer') and self.hover_timer and not self.hover_timer.isActive():
+            self.hover_timer.start()
         self.start_slide_animation(QRect(target_x, target_y, w, h), 0.35, duration=300)
 
     def show_normal_position(self):
@@ -3466,11 +3475,16 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         self._save_window_states(is_open=True)
 
     def _check_hover(self):
+        # 【置顶与磁吸严格互斥】：置顶状态下不执行任何贴边或离开折叠检测，立即休眠
         if not self.isVisible() or self.stays_on_top:
+            if hasattr(self, 'hover_timer') and self.hover_timer and self.hover_timer.isActive():
+                self.hover_timer.stop()
             return
             
-        # 仅在有贴边锚定边缘或处于贴边隐藏状态时才执行悬浮检测，其余时刻 0 开销
+        # 仅在有贴边锚定边缘或处于贴边隐藏状态时才执行悬浮检测，其余时刻 0 开销休眠
         if not self.anchor_edge and not self.is_hidden_state:
+            if hasattr(self, 'hover_timer') and self.hover_timer and self.hover_timer.isActive():
+                self.hover_timer.stop()
             return
 
         if QApplication.mouseButtons() & Qt.MouseButton.LeftButton:
@@ -3580,6 +3594,8 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         event.accept()
 
     def hideEvent(self, event):
+        if hasattr(self, 'hover_timer') and self.hover_timer and self.hover_timer.isActive():
+            self.hover_timer.stop()
         is_trade_day = cct.get_trade_date_status() if hasattr(cct, "get_trade_date_status") else True
         if is_trade_day and getattr(self, "current_mode", "") == "TODAY" and hasattr(self, "current_records") and self.current_records:
             today_str = time.strftime("%Y-%m-%d")
@@ -3603,6 +3619,10 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
 
     def showEvent(self, event):
         super().showEvent(event)
+        # 仅在处于磁吸边缘或感应隐藏条状态时恢复定时器，普通正常居中展示时保持停止
+        if (self.anchor_edge is not None or getattr(self, "is_hidden_state", False)) and not getattr(self, "stays_on_top", False):
+            if hasattr(self, 'hover_timer') and self.hover_timer and not self.hover_timer.isActive():
+                self.hover_timer.start()
         if self.layout():
             self.layout().activate()
         self._save_window_states(is_open=True)

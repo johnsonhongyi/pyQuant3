@@ -409,6 +409,38 @@ class TestSignalLedger(unittest.TestCase):
         self.assertEqual(d["dragon_amount_yi"], 8.5)
 
 
+    def test_record_tdx_signal_with_pandas_series_row(self):
+        """测试传入 pandas.Series 类型的 df_row 时不会触发 ValueError: The truth value of a Series is ambiguous"""
+        import pandas as pd
+        ledger = SignalLedger()
+        
+        row_series = pd.Series({
+            "code": "920088",
+            "name": "科力股份",
+            "close": 49.87,
+            "percent": 3.5,
+            "ch_slope_deg": 12.5,
+            "ch_supp_price": 48.0,
+            "amount": 50000000.0,
+            "volume": 1000000.0
+        })
+        
+        sig_dict = {
+            "code": "920088",
+            "name": "科力股份",
+            "price": 49.87,
+            "pct": 3.5,
+            "strategy": "5均金叉10",
+            "action": "买入",
+            "time": "18:07:43"
+        }
+        
+        # 必须能够正常录入，绝对不能抛出 ValueError 异常
+        entry = ledger.record_tdx_signal(sig_dict, row=row_series)
+        self.assertIsNotNone(entry)
+        self.assertEqual(entry.code, "920088")
+
+
 if __name__ == '__main__':
     unittest.main()
 

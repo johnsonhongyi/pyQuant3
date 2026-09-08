@@ -2984,6 +2984,10 @@ class GlobalInputFilter(QtCore.QObject):
         if not hasattr(self, 'main_window') or sip.isdeleted(self.main_window):
             return False
 
+        # ⚡ [PERF 核心优化]: 高频 MouseMove 事件绝不进入 Python 逻辑，以 O(1) 立即放行，杜绝全系统鼠标移动时的 GIL 争抢与迟滞
+        if event.type() == QtCore.QEvent.Type.MouseMove:
+            return False
+
         # App-wide 模式: 不检查窗口激活状态，只要应用程序有焦点即可
         # 注意: Qt 不支持真正的系统级快捷键，这是应用程序级别的最大范围
 
@@ -2999,11 +3003,6 @@ class GlobalInputFilter(QtCore.QObject):
                     elif event.button() == Qt.MouseButton.XButton2:  # 侧键前进 -> 下一个周期
                         self.main_window.switch_resample_next()
                 return True # 彻底拦截，防止 pyqtgraph 看到这些侧键导致 KeyError
-
-        # ⭐ [FIX] 拦截带有侧键标志的鼠标移动，彻底避免 pyqtgraph 内部状态不一致导致的崩溃
-        if event.type() == QtCore.QEvent.Type.MouseMove:
-            if event.buttons() & (Qt.MouseButton.XButton1 | Qt.MouseButton.XButton2):
-                return True
 
         # 键盘按键
         elif event.type() == QtCore.QEvent.Type.KeyPress:
@@ -3820,10 +3819,6 @@ class MainWindow(QMainWindow, WindowMixin):
         self.stock_table.verticalScrollBar().setFixedWidth(4)
         self.stock_table.horizontalScrollBar().setFixedHeight(4)
 
-        # ⭐ 安装全局事件过滤器，实现应用程序级别的快捷键捕捉
-        self.input_filter = GlobalInputFilter(self)
-        QApplication.instance().installEventFilter(self.input_filter)
-
 
         # 禁止编辑：防止误触发覆盖 Code/Name 等关键信息，只允许选择和复制
         self.stock_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -4154,9 +4149,10 @@ class MainWindow(QMainWindow, WindowMixin):
         # ⭐ [SYNC] 监听 Splitter 移动，实时更新按钮状态
         self.main_splitter.splitterMoved.connect(self.on_main_splitter_moved)
 
-        # 安装全局事件过滤器
-        self.input_filter = GlobalInputFilter(self)
-        QApplication.instance().installEventFilter(self.input_filter)
+        # 安装全局事件过滤器（单例保护，杜绝重复安装）
+        if getattr(self, 'input_filter', None) is None:
+            self.input_filter = GlobalInputFilter(self)
+            QApplication.instance().installEventFilter(self.input_filter)
         # Apply initial theme [MOVED AFTER PANELS INIT]
         # self.apply_qt_theme()
 
@@ -15638,6 +15634,14 @@ class MainWindow(QMainWindow, WindowMixin):
         if hasattr(self, "_sbc_req_thread") and self._sbc_req_thread and self._sbc_req_thread.isRunning():
             self._sbc_req_thread.quit()
             self._sbc_req_thread.wait(500)
+
+        # 0.17️⃣ 反注册全局事件过滤器，彻底释放事件循环引用
+        if hasattr(self, 'input_filter') and self.input_filter:
+            try:
+                QApplication.instance().removeEventFilter(self.input_filter)
+            except Exception:
+                pass
+            self.input_filter = None
 
         # 0.25️⃣ 停止所有 Qt Timer
         for attr in dir(self):

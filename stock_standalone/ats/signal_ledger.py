@@ -441,9 +441,28 @@ class SignalLedger:
             name = str(row['name']).strip()
 
         # 📈 通道上涨与支撑企稳判定 (法尔胜/中农联合模式，突破狭隘的 5% 限制)
-        if not is_channel_swing and (ch_slope_deg is not None or supp_price is not None or (row and ('ch_slope_deg' in row or 'ch_supp_price' in row))):
-            s_price = float(supp_price or (row.get('ch_supp_price', row.get('supp_price', 0.0)) if row else 0.0) or 0.0)
-            s_deg = float(ch_slope_deg or (row.get('ch_slope_deg', 0.0) if row else 0.0) or 0.0)
+        has_channel_data = (ch_slope_deg is not None) or (supp_price is not None) or (row is not None and ('ch_slope_deg' in row or 'ch_supp_price' in row))
+        if not is_channel_swing and has_channel_data:
+            s_price = 0.0
+            if supp_price is not None:
+                s_price = float(supp_price or 0.0)
+            elif row is not None:
+                try:
+                    raw_sp = row.get('ch_supp_price', row.get('supp_price', 0.0)) if hasattr(row, 'get') else (row['ch_supp_price'] if 'ch_supp_price' in row else 0.0)
+                    s_price = float(raw_sp or 0.0)
+                except Exception:
+                    s_price = 0.0
+
+            s_deg = 0.0
+            if ch_slope_deg is not None:
+                s_deg = float(ch_slope_deg or 0.0)
+            elif row is not None:
+                try:
+                    raw_deg = row.get('ch_slope_deg', 0.0) if hasattr(row, 'get') else (row['ch_slope_deg'] if 'ch_slope_deg' in row else 0.0)
+                    s_deg = float(raw_deg or 0.0)
+                except Exception:
+                    s_deg = 0.0
+
             if s_deg > 0.0 and s_price > 0.01 and price >= s_price * 0.985:
                 is_channel_swing = True
 
