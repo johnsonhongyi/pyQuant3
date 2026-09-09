@@ -1,3 +1,14 @@
+## 2026-09-09 13:00
+- [x] **落地落实【TDX API 早盘集合竞价实盘数据链路审查与增强】(SSOT) (`stock_standalone/ats/tdx_realtime_fetcher.py`, `stock_standalone/tests/test_tdx_bidding_and_dragon_panel_perf.py`)**：
+    - [x] **跨日 7x24 小时长时间运行自动重置机制**：
+        1. 在 `TDXRealtimeFetcher` 中引入 `_last_bidding_date` 追踪日期变更；
+        2. 每日早盘首笔拉取触发自动重置，清空前一交易日的 `_bidding_history`, `_bidding_locked_base`, `_bidding_sim_stats`, `_bidding_signals`，确保 7x24 小时无人值守挂机环境下每日早盘 09:20 准时重新锚定基准；
+    - [x] **09:25:00~09:29:59 定盘期状态智能补偿**：
+        1. 针对盘前新加入关注池的标的，在 09:25 定盘撮合后自动补充 `stage="FINALIZED"` 与定盘开盘涨幅描述，平滑衔接 09:30 连续交易时段；
+    - [x] **自动化测试回归全通过**：
+        1. `test_tdx_bidding_and_dragon_panel_perf.py` 补充跨日清空与定盘补偿场景断言（4 项测试全部 PASSED）；
+        2. 全量关联测试 24 项 100% 通过（exit code 0）。
+
 ## 2026-09-09 11:45
 - [x] **全链路根治【ATS 资金主线高频卡顿、后台更新 IPC 数据及自动刷新卡顿、鼠标点击/排序卡顿】与【TDX API 专属 09:16 交易时段放行、09:20 不可撤单拟合与 09:25 突击加速信号算法】(SSOT) (`ats/tdx_realtime_fetcher.py`, `ats/capital_dragon_engine.py`, `ats/ui/capital_dragon_panel.py`, `tests/test_tdx_bidding_and_dragon_panel_perf.py`, `tests/test_capital_dragon_panel_integration.py`)**：
     - [x] **TDX API 专属交易时间放行策略 (is_tdx_trading_allowed)**：
