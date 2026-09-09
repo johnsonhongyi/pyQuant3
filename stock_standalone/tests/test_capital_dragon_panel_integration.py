@@ -439,6 +439,148 @@ class TestCapitalDragonPanelIntegration(unittest.TestCase):
         for card_info in self.panel.sector_card_widgets:
             self.assertFalse(card_info["frame"].isHidden())
 
+    def test_lazy_rendering_when_panel_not_visible(self):
+        """测试当面板不可见时，触发后台数据更新实施懒加载拦截（0耗时0重绘），切回可见时瞬间补齐渲染"""
+        from unittest.mock import patch
+        
+        # 0. 模拟首帧已存在打底
+        self.panel._last_report = {"init": True}
+
+        # 1. 设置面板不可见
+        self.panel.setVisible(False)
+        self.assertFalse(self.panel.is_panel_visible())
+
+        mock_report = {
+            "top_sectors": [
+                {"name": "光伏概念", "grade": "主线", "total_amt_yi": 50.0, "avg_pct": 3.5, "limit_up_count": 2, "vol_ratio": 1.5}
+            ],
+            "dragon_records_converged": [
+                {
+                    "code": "600000", "name": "浦发银行", "role": "容量中军", "sector": "银行",
+                    "price": 10.0, "pct": 2.0, "vol_ratio": 1.1, "amount_yi": 10.0, "turnover": 0.8,
+                    "action_type": "主升", "buy_zone": "9.8-10.0", "stop_loss": 9.5, "reason": "稳健",
+                    "is_dual_accel": False, "is_gap_accel": False, "is_open_low_accel": False
+                }
+            ]
+        }
+
+        # 2. 模拟异步报告投递
+        with patch.object(self.panel, '_render_table') as mock_render_table:
+            self.panel._apply_report_to_ui(mock_report)
+            # 核心断言：面板不可见时，绝不调用 _render_table 进行任何表格重构，脏标记 _needs_render 为 True
+            self.assertFalse(mock_render_table.called)
+            self.assertTrue(self.panel._needs_render)
+            self.assertEqual(self.panel._pending_report, mock_report)
+
+        # 3. 模拟用户切回 Tab 0 或调用 ensure_rendered
+        with patch.object(self.panel, '_render_table') as mock_render_table:
+            self.panel.ensure_rendered()
+            # 核心断言：调用 ensure_rendered 后瞬间补齐渲染
+            self.assertTrue(mock_render_table.called)
+            self.assertFalse(self.panel._needs_render)
+
+    def test_scrollbar_position_preserved_on_update(self):
+        """测试数据高频更新与重排时，滚动条位置得到原位精确锁定，杜绝视口跳动"""
+        # 构建较多行以产生滚动条
+        dragons = []
+        for i in range(40):
+            dragons.append({
+                "code": f"600{i:03d}",
+                "name": f"股票{i}",
+                "role": "主线先锋" if i % 2 == 0 else "容量中军",
+                "sector": "测试板块",
+                "price": 10.0 + i,
+                "pct": 1.0 + (i % 10),
+                "vol_ratio": 1.5,
+                "amount_yi": 5.0,
+                "turnover": 3.0,
+                "action_type": "冲锋",
+                "buy_zone": "10-11",
+                "stop_loss": 9.0,
+                "reason": "测试",
+                "is_dual_accel": False,
+                "is_gap_accel": False,
+                "is_open_low_accel": False
+            })
+
+        # 首次渲染
+        self.panel._render_table(dragons)
+        self.assertEqual(self.panel.table.rowCount(), 40)
+
+        # 模拟用户滚动到中间位置 (比如滚动到第 15 行对应的像素值)
+        v_bar = self.panel.table.verticalScrollBar()
+        v_bar.setValue(15)
+        saved_v = v_bar.value()
+
+        # 模拟新数据带来涨幅微调
+        for d in dragons:
+            d["pct"] += 0.2
+
+        # 再次触发 _render_table
+        self.panel._render_table(dragons)
+
+        # 核心断言：滚动条位置原位锁定，绝对无跳动
+        self.assertEqual(v_bar.value(), saved_v)
+
+    def test_no_accidental_selection_on_update(self):
+        """测试用户未选中任何行时，后台数据刷新绝不无端调用 setCurrentCell 选中第0行"""
+        dragons = [
+            {
+                "code": f"00000{i}",
+                "name": f"测试{i}",
+                "role": "先锋",
+                "sector": "板块",
+                "price": 10.0,
+                "pct": 2.0,
+                "vol_ratio": 1.0,
+                "amount_yi": 2.0,
+                "turnover": 1.0,
+                "action_type": "跟踪",
+                "buy_zone": "--",
+                "stop_loss": 9.0,
+                "reason": "无",
+                "is_dual_accel": False,
+                "is_gap_accel": False,
+                "is_open_low_accel": False
+            }
+            for i in range(5)
+        ]
+        self.panel.table.clearSelection()
+        self.panel.table.setCurrentCell(-1, -1)
+
+    def test_tab_widget_nesting_visibility(self):
+        """测试在真实的 QTabWidget 嵌套体系下，切到非活动 Tab 时精准拦截懒渲染，切回时补齐渲染"""
+        from PyQt6.QtWidgets import QTabWidget, QLabel
+        tabs = QTabWidget()
+        tabs.addTab(self.panel, "资金主线")
+        tabs.addTab(QLabel("其他页面"), "重点关注")
+        tabs.show()
+
+        # 1. 处于当前 Tab 0 时，可见
+        tabs.setCurrentIndex(0)
+        self.assertTrue(self.panel.is_panel_visible())
+
+        # 2. 切换到 Tab 1，不可见
+        tabs.setCurrentIndex(1)
+        self.assertFalse(self.panel.is_panel_visible())
+
+        # 3. 在 Tab 1 时推送更新，触发懒加载拦截
+        self.panel._last_report = {"init": True}
+        mock_report = {
+            "top_sectors": [{"name": "光伏", "grade": "主线", "total_amt_yi": 10.0, "avg_pct": 1.0, "limit_up_count": 1}],
+            "dragon_records_converged": []
+        }
+        self.panel._apply_report_to_ui(mock_report)
+        self.assertTrue(self.panel._needs_render)
+
+        # 4. 切回 Tab 0 并调用 ensure_rendered
+        tabs.setCurrentIndex(0)
+        self.assertTrue(self.panel.is_panel_visible())
+        self.panel.ensure_rendered()
+        self.assertFalse(self.panel._needs_render)
+
+        tabs.deleteLater()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -23,7 +23,7 @@ import pandas as pd
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTableWidget,
     QTableWidgetItem, QHeaderView, QAbstractItemView, QPushButton,
-    QLineEdit, QFrame, QGridLayout, QSizePolicy, QMenu
+    QLineEdit, QFrame, QGridLayout, QSizePolicy, QMenu, QTabWidget
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QPoint, QSize
 from PyQt6.QtGui import QColor, QBrush, QFont, QCursor
@@ -64,9 +64,22 @@ class ClickableLabel(QLabel):
         super().mouseDoubleClickEvent(event)
 
 
+def _update_label_text(lbl: QLabel, new_text: str, is_rich: bool = False):
+    """
+    针对 QLabel 实施增量 Dirty Check 渲染：
+    仅在文本真实变动时更新，杜绝重复触发 QTextDocument 重建与排版开销
+    """
+    if lbl.text() != new_text:
+        target_format = Qt.TextFormat.RichText if is_rich else Qt.TextFormat.PlainText
+        if lbl.textFormat() != target_format:
+            lbl.setTextFormat(target_format)
+        lbl.setText(new_text)
+
+
 class SectorCardWidget(QFrame):
     """
     可交互式核心资金主线卡片 (SSOT):
+    - 物理级绝对锁定高度 (72px)，禁止折行抖动打扰外层 QSplitter
     - 单击卡片/标题/查看明细: 调起板块成分股明细并标记强势股 (sector_clicked)
     - 单击领涨先锋: 联动该股行情并广播 (pioneer_clicked)
     - 双击领涨先锋: 打开 SBC 分时通道走势图 (pioneer_double_clicked)
@@ -74,6 +87,8 @@ class SectorCardWidget(QFrame):
     sector_clicked = pyqtSignal(str)              # (sector_name)
     pioneer_clicked = pyqtSignal(str, str)        # (code, name)
     pioneer_double_clicked = pyqtSignal(str, str) # (code, name)
+
+    CARD_HEIGHT = 72  # 物理级绝对锁定高度，彻底根治 QSplitter 几何跳变引起的整窗闪屏
 
     def __init__(self, index: int, parent=None):
         super().__init__(parent)
@@ -84,7 +99,8 @@ class SectorCardWidget(QFrame):
 
         self.setFrameShape(QFrame.Shape.StyledPanel)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setFixedHeight(self.CARD_HEIGHT)
         self.setMinimumWidth(0)
 
         self.setStyleSheet("""
@@ -92,7 +108,6 @@ class SectorCardWidget(QFrame):
                 background-color: #161b22;
                 border: 1px solid #30363d;
                 border-radius: 6px;
-                padding: 4px 6px;
             }
             QFrame:hover {
                 border: 1px solid #58a6ff;
@@ -101,16 +116,16 @@ class SectorCardWidget(QFrame):
         """)
 
         card_layout = QVBoxLayout(self)
-        card_layout.setContentsMargins(6, 4, 6, 4)
-        card_layout.setSpacing(3)
+        card_layout.setContentsMargins(10, 7, 10, 7)
+        card_layout.setSpacing(4)
 
         # 标题栏：主线名称 + 查看明细按钮
         title_layout = QHBoxLayout()
         title_layout.setContentsMargins(0, 0, 0, 0)
-        title_layout.setSpacing(4)
+        title_layout.setSpacing(6)
 
         self.lbl_title = ClickableLabel(f"主线 {index+1}: 正在识别资金聚集...")
-        self.lbl_title.setStyleSheet("color: #ffd700; font-size: 10pt; font-weight: bold;")
+        self.lbl_title.setStyleSheet("color: #ffd700; font-size: 10.5pt; font-weight: bold;")
         self.lbl_title.setCursor(Qt.CursorShape.PointingHandCursor)
         self.lbl_title.setWordWrap(True)
         self.lbl_title.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
@@ -125,11 +140,11 @@ class SectorCardWidget(QFrame):
             QPushButton {
                 background-color: #21262d;
                 color: #58a6ff;
-                font-size: 8pt;
+                font-size: 8.5pt;
                 font-weight: bold;
                 border: 1px solid #30363d;
                 border-radius: 3px;
-                padding: 1px 5px;
+                padding: 2px 7px;
             }
             QPushButton:hover {
                 background-color: #388bfd26;
@@ -142,9 +157,9 @@ class SectorCardWidget(QFrame):
 
         card_layout.addLayout(title_layout)
 
-        # 描述行：成交额、均涨、涨停、加速（支持自动折行）
-        self.lbl_desc = ClickableLabel("成交额: -- 亿 | 均涨: --% | 涨停: -- 家")
-        self.lbl_desc.setStyleSheet("color: #8b949e; font-size: 8.5pt;")
+        # 描述行：成交额、均涨、涨停、加速（支持自动折行自适应展示）
+        self.lbl_desc = ClickableLabel("成交: -- 亿 | 均涨: --% | 涨停: -- 家")
+        self.lbl_desc.setStyleSheet("color: #8b949e; font-size: 9pt;")
         self.lbl_desc.setCursor(Qt.CursorShape.PointingHandCursor)
         self.lbl_desc.setWordWrap(True)
         self.lbl_desc.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
@@ -152,12 +167,12 @@ class SectorCardWidget(QFrame):
         self.lbl_desc.clicked.connect(self._on_card_clicked)
         card_layout.addWidget(self.lbl_desc)
 
-        # 先锋行：代码、名称、涨幅、虚拟量比、买点类型（支持自动折行与联动）
+        # 先锋行：代码、名称、涨幅、虚拟量比、买点类型（支持自动折行自适应展示）
         self.lbl_leader = ClickableLabel("🚀 先锋: --")
         self.lbl_leader.setStyleSheet("""
             QLabel {
                 color: #38bdf8;
-                font-size: 8.5pt;
+                font-size: 9pt;
                 font-weight: bold;
             }
             QLabel:hover {
@@ -174,10 +189,12 @@ class SectorCardWidget(QFrame):
         self.lbl_leader.double_clicked.connect(self._on_leader_double_clicked)
         card_layout.addWidget(self.lbl_leader)
 
+    def sizeHint(self) -> QSize:
+        return QSize(240, 92)
+
     def minimumSizeHint(self) -> QSize:
-        # 允许宽度自由向内压缩缩小（支持自适应折行），绝不卡死外层主窗口
-        hint = super().minimumSizeHint()
-        return QSize(60, max(hint.height(), 40))
+        # 宽度支持弹性缩放折行，高度确保三行文字舒适舒展不被裁切
+        return QSize(60, 86)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
@@ -229,6 +246,10 @@ class CapitalDragonPanel(QWidget):
         # ⚡ 切股联动去重与当前高亮代码
         self._last_emitted_code: Optional[str] = None
 
+        # ⚡ 工业级懒更新 (Lazy Rendering) 脏标记与挂起报告缓存
+        self._pending_report: Optional[dict] = None
+        self._needs_render: bool = False
+
         # 🎯 策略过滤持久化开关 (专属独立持久化，默认关闭)
         saved_filter = load_config_node(PERSIST_KEY_DRAGON_FILTER, False)
         self.filter_enabled = parse_bool_config(saved_filter, default=False)
@@ -240,7 +261,7 @@ class CapitalDragonPanel(QWidget):
         main_layout.setContentsMargins(6, 6, 6, 6)
         main_layout.setSpacing(6)
 
-        # 1. 顶部 3 大资金主线卡片展示区 (Top Mainstream Sector Cards)
+        # 1. 顶部 3 大资金主线卡片展示区 (Top Mainstream Sector Cards) - 弹性自适应缩放与折行
         self.top_sector_container = QWidget()
         self.top_sector_container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.top_sector_container.setMinimumWidth(0)
@@ -421,9 +442,58 @@ class CapitalDragonPanel(QWidget):
         if report:
             self._apply_report_to_ui(report)
 
+    def is_panel_visible(self) -> bool:
+        """
+        判断面板当前是否对用户可见（自身可见且未处于非活动 Tab 页，窗口未最小化）
+        """
+        # 1. 若宿主顶层窗口已最小化，判定为不可见
+        top_win = self.window()
+        if top_win and top_win.isMinimized():
+            return False
+
+        # 2. 逐级向上检查是否处于 QTabWidget 的非激活页面
+        curr = self
+        parent = self.parent()
+        while parent:
+            if isinstance(parent, QTabWidget):
+                cw = parent.currentWidget()
+                if cw is not None and cw is not curr and not cw.isAncestorOf(self):
+                    return False
+            curr = parent
+            parent = parent.parent()
+
+        # 3. 若已被显式 hide 则不可见
+        if self.isHidden():
+            return False
+
+        # 4. 若有父级容器，检查 isVisible；若无父级容器（单测或独立组件），未被显式 hide 即视为可见
+        if self.parent() is not None:
+            return self.isVisible()
+        return True
+
+    def ensure_rendered(self):
+        """当外部 Tab 切换或面板恢复显示时调用，确保挂起的数据瞬间补齐渲染"""
+        if self._needs_render and self._pending_report:
+            self._do_render_report(self._pending_report)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.ensure_rendered()
+
     def _apply_report_to_ui(self, report: dict):
         if not report:
             return
+        self._pending_report = report
+        # ⚡ 懒渲染拦截：首帧必须渲染打底；后续更新若面板不可见（处于非激活 Tab 或窗口最小化），仅打上脏标记，0 耗时 0 控件操作
+        if self._last_report and not self.is_panel_visible():
+            self._needs_render = True
+            return
+        self._do_render_report(report)
+
+    def _do_render_report(self, report: dict):
+        if not report:
+            return
+        self._needs_render = False
 
         # 特征签名检查，防无意义重绘
         is_extreme = getattr(self, 'extreme_perf_mode', True)
@@ -520,8 +590,7 @@ class CapitalDragonPanel(QWidget):
                     card_obj.leader_name = l_name
 
                 grade = st.get("grade", "主线")
-                w["title"].setText(f"{grade}: {sec_name}")
-                w["frame"].setToolTip(f"💡 点击直接打开【{sec_name}】板块成分股明细与强势股")
+                _update_label_text(w["title"], f"{grade}: {sec_name}", is_rich=False)
 
                 pct_col = COLOR_UP if st["avg_pct"] > 0 else (COLOR_DOWN if st["avg_pct"] < 0 else "#ffffff")
                 vol_ratio = st.get("vol_ratio", 1.0)
@@ -539,25 +608,27 @@ class CapitalDragonPanel(QWidget):
                 if accel_tot > 0:
                     accel_desc = f" | 加速: <font color='#ffd700'><b>{accel_tot}只</b></font>"
 
-                w["desc"].setText(
+                desc_html = (
                     f"成交: <font color='#ffd700'><b>{st['total_amt_yi']:.1f}亿</b></font>{proj_str} | "
                     f"量比: <font color='{vr_col}'><b>{vol_ratio:.1f}x</b></font> | "
                     f"均涨: <font color='{pct_col}'><b>{st['avg_pct']:+.2f}%</b></font> | "
                     f"涨停: <font color='#ff4444'><b>{st['limit_up_count']}只</b></font>"
                     f"{accel_desc}"
                 )
-                w["desc"].setTextFormat(Qt.TextFormat.RichText)
+                _update_label_text(w["desc"], desc_html, is_rich=True)
 
                 accel_tip_str = ""
                 if accel_tot > 0:
                     accel_tip_str = f"⚡ 群起加速: 共 {accel_tot} 只呈现早盘加速形态 (👑双加速 {dual_cnt} 只, 🚀缺口加速 {gap_cnt} 只, ⚡光脚加速 {ol_cnt} 只)\n🔥 板块内群起加速，显性印证该主线早盘资金进攻动能超强！\n"
 
-                w["frame"].setToolTip(
+                card_tip = (
                     f"💡 点击直接打开【{sec_name}】板块成分股明细与强势股\n"
                     f"📊 累计成交: {st['total_amt_yi']:.1f}亿元 | 全天预估: {proj_amt:.1f}亿元\n"
                     f"⚡ 板块虚拟量比: {vol_ratio:.2f}x (按盘中交易进度折算)\n"
                     f"{accel_tip_str}"
                 )
+                if w["frame"].toolTip() != card_tip:
+                    w["frame"].setToolTip(card_tip)
 
                 if l_name and l_code:
                     l_pct = st.get("leader_pct", 0.0)
@@ -591,21 +662,25 @@ class CapitalDragonPanel(QWidget):
                     vr_text = f" | 量比: <font color='{l_vr_col}'><b>{l_vr:.1f}x</b></font>"
                     bt_text = f" | <font color='{l_bt_col}'><b>{l_buy_type}</b></font>" if l_buy_type else ""
 
-                    w["leader"].setText(
+                    leader_html = (
                         f"🚀 先锋: {l_name} ({l_code}) "
                         f"<font color='{l_pct_col}'><b>{l_pct:+.1f}%</b></font>"
                         f"{vr_text}{bt_text}"
                     )
-                    w["leader"].setTextFormat(Qt.TextFormat.RichText)
-                    w["leader"].setToolTip(
+                    _update_label_text(w["leader"], leader_html, is_rich=True)
+                    leader_tip = (
                         f"🎯 单击联动【{l_name} ({l_code})】行情与K线 | 双击查看 SBC 分时通道\n"
                         f"📊 先锋虚拟量比: {l_vr:.2f}x (早盘放量加速评估)\n"
                         f"💡 先锋买点形态: {l_buy_type or '主线冲锋'}"
                     )
+                    if w["leader"].toolTip() != leader_tip:
+                        w["leader"].setToolTip(leader_tip)
                 else:
-                    w["leader"].setText("🚀 先锋: 正在争夺...")
-                    w["leader"].setToolTip("")
-                w["frame"].setVisible(True)
+                    _update_label_text(w["leader"], "🚀 先锋: 正在争夺...", is_rich=False)
+                    if w["leader"].toolTip():
+                        w["leader"].setToolTip("")
+                if not w["frame"].isVisible():
+                    w["frame"].setVisible(True)
             else:
                 # 保持 3 大卡片稳定占位，绝不 setVisible(False)，彻底防止容器高度坍塌促发整窗 Splitter 重新布局与闪烁
                 w["sector_name"] = ""
@@ -615,14 +690,15 @@ class CapitalDragonPanel(QWidget):
                     card_obj.sector_name = ""
                     card_obj.leader_code = ""
                     card_obj.leader_name = ""
-                w["title"].setText(f"主线 {i+1}: 正在识别资金聚集...")
-                w["desc"].setText("成交: -- 亿 | 均涨: --% | 涨停: -- 只")
-                w["desc"].setTextFormat(Qt.TextFormat.PlainText)
-                w["leader"].setText("🚀 先锋: 正在争夺...")
-                w["leader"].setTextFormat(Qt.TextFormat.PlainText)
-                w["leader"].setToolTip("")
-                w["frame"].setToolTip("")
-                w["frame"].setVisible(True)
+                _update_label_text(w["title"], f"主线 {i+1}: 正在识别资金聚集...", is_rich=False)
+                _update_label_text(w["desc"], "成交: -- 亿 | 均涨: --% | 涨停: -- 只", is_rich=False)
+                _update_label_text(w["leader"], "🚀 先锋: 正在争夺...", is_rich=False)
+                if w["leader"].toolTip():
+                    w["leader"].setToolTip("")
+                if w["frame"].toolTip():
+                    w["frame"].setToolTip("")
+                if not w["frame"].isVisible():
+                    w["frame"].setVisible(True)
 
     def _render_table(self, dragons: Optional[List[Dict[str, Any]]] = None):
         if dragons is None:
@@ -635,8 +711,13 @@ class CapitalDragonPanel(QWidget):
 
         self._is_updating = True
         self.table.blockSignals(True)
-        self.table.setUpdatesEnabled(False)
         try:
+            # 记录滚动条位置，彻底防止视口跳跃
+            v_bar = self.table.verticalScrollBar()
+            h_bar = self.table.horizontalScrollBar()
+            scroll_v = v_bar.value() if v_bar else 0
+            scroll_h = h_bar.value() if h_bar else 0
+
             # 1. 记住当前选中的标的代码与行位置
             selected_code = None
             curr_row = self.table.currentRow()
@@ -913,21 +994,26 @@ class CapitalDragonPanel(QWidget):
                 self.table.sortItems(sort_col, sort_order)
             self.table.setSortingEnabled(True)
 
-            # 4. 恢复选中行状态
+            # 4. 恢复选中行状态 (仅当之前用户确有选中项时恢复，杜绝无端选中第0行触发视口滚动)
             if selected_code:
                 for r in range(self.table.rowCount()):
                     it = self.table.item(r, 0)
                     if it and it.text().strip() == selected_code:
                         self.table.setCurrentCell(r, 0)
                         break
-            elif new_selected_row >= 0:
-                self.table.setCurrentCell(new_selected_row, 0)
 
-            auto_fit_columns_once(self.table, "capital_dragon_table_header_v3")
+            # 5. 锁定滚动条原位，绝对防止 setCurrentCell 触发的 scrollTo 导致视口跳跃
+            if v_bar and v_bar.value() != scroll_v:
+                v_bar.setValue(scroll_v)
+            if h_bar and h_bar.value() != scroll_h:
+                h_bar.setValue(scroll_h)
+
+            if not getattr(self, '_table_columns_fitted', False):
+                self._table_columns_fitted = True
+                auto_fit_columns_once(self.table, "capital_dragon_table_header_v3")
 
         finally:
             self.table.blockSignals(False)
-            self.table.setUpdatesEnabled(True)
             self._is_updating = False
 
     def toggle_filter_state(self):
