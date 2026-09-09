@@ -3103,10 +3103,13 @@ class ATSMainWindow(QMainWindow):
         """主看板顶部 Tab 切换事件：极速 0ms 补齐渲染与同步对应 Tab 页面数据并自动持久化记忆"""
         try:
             if index == 0:
-                # 切换到 🐉 资金主线与龙头中枢
-                if hasattr(self, 'capital_dragon_panel') and hasattr(self.capital_dragon_panel, 'update_payload'):
-                    sh_pct = getattr(self, '_pending_sh_pct', 0.0)
-                    self.capital_dragon_panel.update_payload(self.current_df, sh_pct)
+                # 切换到 🐉 资金主线与龙头中枢 (先极速补齐挂起渲染，再同步最新数据)
+                if hasattr(self, 'capital_dragon_panel'):
+                    if hasattr(self.capital_dragon_panel, 'ensure_rendered'):
+                        self.capital_dragon_panel.ensure_rendered()
+                    if hasattr(self.capital_dragon_panel, 'update_payload'):
+                        sh_pct = getattr(self, '_pending_sh_pct', 0.0)
+                        self.capital_dragon_panel.update_payload(self.current_df, sh_pct)
             elif index == 1:
                 # 切换到 ⭐ 重点关注 (基础重点)
                 if hasattr(self, 'favorite_panel'):

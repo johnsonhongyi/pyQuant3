@@ -1,3 +1,26 @@
+## 2026-09-09 17:05
+- [x] **物理级彻底根治【ATS 资金主线窗口更新后后台间隔特定时间闪屏、视口跳动与几何抖动 Bug】与【顶部核心主线卡片尺寸舒适度升级】(SSOT) (`stock_standalone/ats/ui/capital_dragon_panel.py`, `stock_standalone/ats/ui/main_window.py`, `stock_standalone/tests/test_capital_dragon_panel_integration.py`)**：
+    - [x] **顶部三大主线卡片尺寸与舒适度全面升级**：
+        1. 针对卡片默认尺寸偏小、文字贴边挤压裁切问题，调整 `SectorCardWidget` 尺寸提示为 `sizeHint: QSize(240, 92)`，最小舒适高度设为 `86px`；
+        2. 剔除 QFrame 样式内边距冲突，改由 Layout 统一控制 `card_layout.setContentsMargins(10, 7, 10, 7)` 与 `spacing(4)`；
+        3. 标题字号升级为 `10.5pt (加粗)`，查看明细按钮微调为 `padding: 2px 7px`，描述行与先锋行字号提升至 `9pt`，彻底消除文字被边框截断问题，呈现更饱满舒适的量化视觉；
+        4. 完整保留 `setWordWrap(True)` 自动换行与弹性自适应策略，宽度随 Splitter 自由伸缩；
+    - [x] **修复 `NameError: name 'QTabWidget' is not defined` 异常**：
+        1. 补齐 `capital_dragon_panel.py` 顶部的 `from PyQt6.QtWidgets import ..., QTabWidget`；
+        2. 在 `test_capital_dragon_panel_integration.py` 中新增真实的 `test_tab_widget_nesting_visibility` 测试用例，确保无论作为独立控件还是嵌入 `QTabWidget` 均 100% 稳定运行；
+    - [x] **全链路物理根因与防闪核心落地**：
+        1. **彻底剔除暴力 `setUpdatesEnabled`**：依托现有 `_set_or_update_cell` 原地更新与 Dirty Check，未变动单元格 0 变更，消除 Windows DWM 强制全视口刷白；
+        2. **滚动条原位锁定与安全选中恢复**：更新前记录 `verticalScrollBar().value()`，更新后若滚动条被移动立即原位恢复；用户未选中时绝不执行抢焦选中，杜绝视口跳动；
+        3. **非活动态懒渲染（Lazy Rendering）机制**：实现 `is_panel_visible()` 检测当前 Tab 状态与窗口最小化状态。非活动状态下只打脏标记 `_needs_render = True`，0 耗时 0 控件操作；切回活动 Tab 或触发 `showEvent` 时通过 `ensure_rendered()` 瞬间补齐最新数据；
+        4. **增量文本脏检查辅助函数**：引入 `_update_label_text`，文本相同直接 return，杜绝重复调用 `setTextFormat(RichText)` 引发的内部 QTextDocument 销毁与排版开销；
+        5. **列宽自适应收敛保护**：引入 `_table_columns_fitted` 防线，确保首次加载后绝不重复触发全表尺寸重排；
+    - [x] **自动化测试回归全通过**：
+        1. `test_capital_dragon_panel_integration.py`（**13 项测试全部 100% PASSED**）；
+        2. `test_tdx_bidding_and_dragon_panel_perf.py`（4 项测试全部 PASSED）；
+        3. `test_ats_tabs_strategy_filter.py`（7 项测试全部 PASSED）；
+        4. `test_capital_dragon_engine.py`（8 项测试全部 PASSED）；
+        5. 全量 32 项相关测试无任何回归问题。
+
 ## 2026-09-09 13:00
 - [x] **落地落实【TDX API 早盘集合竞价实盘数据链路审查与增强】(SSOT) (`stock_standalone/ats/tdx_realtime_fetcher.py`, `stock_standalone/tests/test_tdx_bidding_and_dragon_panel_perf.py`)**：
     - [x] **跨日 7x24 小时长时间运行自动重置机制**：
