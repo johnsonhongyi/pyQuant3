@@ -401,6 +401,7 @@ class TDXRealtimeFetcher:
         # 4. 实时集合竞价突击信号与评估结果: {code: {'signal': str, 'surge_pct': float, 'stage': str, 'desc': str, 'update_time': float}}
         self._bidding_signals: Dict[str, Dict[str, Any]] = {}
         self._bidding_lock = threading.Lock()
+        self._last_bidding_date: Optional[date] = None
 
         # 1 分钟分时 K 线缓存
         self._intraday_bars_cache: Dict[str, Tuple[pd.DataFrame, float, str]] = {}
@@ -766,6 +767,15 @@ class TDXRealtimeFetcher:
         ask1_v = int(safe_float(quote.get("ask_vol1", quote.get("ask1_volume", 0))))
 
         with self._bidding_lock:
+            # 🛡️ 跨日自动重置缓存：支持客户端 7x24 小时长期挂机稳定运行，每日早盘重置基准
+            curr_d = now.date()
+            if self._last_bidding_date != curr_d:
+                self._last_bidding_date = curr_d
+                self._bidding_history.clear()
+                self._bidding_locked_base.clear()
+                self._bidding_sim_stats.clear()
+                self._bidding_signals.clear()
+
             # 记录历史流水
             self._bidding_history[code].append({
                 "t": now_t,
@@ -882,12 +892,16 @@ class TDXRealtimeFetcher:
                     cached = dict(self._bidding_signals[code])
                     cached["bidding_stage"] = "FINALIZED" if t < dtime(9, 30, 0) else "TRADING"
                     return cached
-                return {
-                    "bidding_stage": "TRADING" if t < dtime(15, 5, 0) else "OFF_HOURS",
+                # 若未在不可撤单阶段捕获，但处于 09:25~09:30 定盘期，补充定盘状态
+                stage_name = "FINALIZED" if t < dtime(9, 30, 0) else ("TRADING" if t < dtime(15, 5, 0) else "OFF_HOURS")
+                res = {
+                    "bidding_stage": stage_name,
                     "bidding_surge_pct": 0.0,
-                    "bidding_signal": "",
-                    "bidding_desc": ""
+                    "bidding_signal": "竞价定盘已完成" if t < dtime(9, 30, 0) else "",
+                    "bidding_desc": f"竞价定盘开盘涨幅 {curr_pct:+.2f}%" if t < dtime(9, 30, 0) else ""
                 }
+                self._bidding_signals[code] = res
+                return res
 
     def get_bidding_analysis(self, code: str) -> Dict[str, Any]:
         """对外暴露的标的集合竞价意图与突击信号查询接口"""

@@ -149,13 +149,29 @@ def test_bidding_surge_and_intent_detection():
     assert res5["bidding_surge_pct"] >= 2.0
     assert any(sig in res5["bidding_signal"] for sig in ["抢筹", "反抢", "突击"])
 
-    # ── 场景 4: 09:25:30 盘中回溯查询 ──────────────────────────────────────
+    # ── 场景 4: 09:25:30 盘中定盘与回溯查询 ──────────────────────────────
     t6 = datetime.datetime.combine(trade_date, datetime.time(9, 26, 0))
     res6 = fetcher.record_and_evaluate_bidding_surge(q5, now_dt=t6)
+    assert res6["bidding_stage"] == "FINALIZED"
     assert res6["bidding_surge_pct"] >= 2.0
 
     analysis = fetcher.get_bidding_analysis(code)
     assert analysis["bidding_surge_pct"] >= 2.0
+
+    # ── 场景 5: 09:25:30 对新出现的标的进行定盘补偿测试 ────────────────────
+    new_code = "600519"
+    q_new = {"code": new_code, "price": 1800.0, "last_close": 1750.0, "bid_vol1": 100, "ask_vol1": 100}
+    res_new = fetcher.record_and_evaluate_bidding_surge(q_new, now_dt=t6)
+    assert res_new["bidding_stage"] == "FINALIZED"
+    assert "定盘" in res_new["bidding_signal"]
+
+    # ── 场景 6: 跨日自动清空与重置基准测试 (7x24 小时挂机安全) ──────────────
+    next_day = datetime.date(2026, 9, 15)
+    t_next_0916 = datetime.datetime.combine(next_day, datetime.time(9, 16, 30))
+    q_next = {"code": code, "price": 105.0, "last_close": 103.0, "bid_vol1": 1000, "ask_vol1": 1000}
+    res_next = fetcher.record_and_evaluate_bidding_surge(q_next, now_dt=t_next_0916)
+    assert res_next["bidding_stage"] == "SIMULATION"
+    assert code not in fetcher._bidding_locked_base  # 前一天的 09:20 锚定已干净清空
 
 
 def test_bidding_dump_warning():
