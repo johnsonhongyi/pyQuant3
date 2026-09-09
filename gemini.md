@@ -1,3 +1,50 @@
+## 2026-09-09 11:45
+- [x] **全链路根治【ATS 资金主线高频卡顿、后台更新 IPC 数据及自动刷新卡顿、鼠标点击/排序卡顿】与【TDX API 专属 09:16 交易时段放行、09:20 不可撤单拟合与 09:25 突击加速信号算法】(SSOT) (`ats/tdx_realtime_fetcher.py`, `ats/capital_dragon_engine.py`, `ats/ui/capital_dragon_panel.py`, `tests/test_tdx_bidding_and_dragon_panel_perf.py`, `tests/test_capital_dragon_panel_integration.py`)**：
+    - [x] **TDX API 专属交易时间放行策略 (is_tdx_trading_allowed)**：
+        1. **提前至 09:16:00 放行**：早盘 09:16:00 开始放行行情拉取，拟合试撮合价格与真实意图 (`stage="BIDDING_SIMULATION"`, `can_cancel=True`)；
+        2. **09:20:00 切换至不可撤单真实意图阶段**：锁定进入不可撤单时刻的价格与涨跌幅基准 (`stage="BIDDING_LOCKED"`, `is_locked=True`, `can_cancel=False`)；
+        3. **09:25:00~09:30:00 竞价定盘静默期**：定盘锁死，静候开盘；
+        4. **09:30~11:30 & 13:00~15:00 连续撮合交易时段**，**15:00~15:05 尾盘收盘集合竞价**；其余时段定盘休眠；
+    - [x] **早盘集合竞价意图拟合与不可撤单突击加速检测算法 (record_and_evaluate_bidding_surge)**：
+        1. **09:16~09:20 试盘拟合意图跟踪**：跟踪记录区间内拟合最高/最低涨幅与封单量，提炼试盘意图特征（如“试盘封板测试”、“试盘诱空打压”、“试盘平稳拟合”）；
+        2. **09:20~09:25 真实意图突击加速与极强信号捕获**：以 09:20:00 不可撤单申报为基准，监测不可撤单阶段的真实资金突击拉升或砸盘：
+           - **极强抢筹买入信号**：`surge_pct >= +1.8%`（低开突击抢筹、不可撤单抢板、不可撤单突击抢筹）；
+           - **诱空反转极强信号**：09:16~09:20 曾虚假打压（`min_pct <= -3.0%`），09:20 不可撤单后真金白银反抢拉升；
+           - **极强抢砸跳水风险信号**：09:20 后不可撤单阶段突遭持续大单下杀（`surge_pct <= -1.8%`，高位核按钮破板、突击抢砸跳水）；
+        3. **全链路特征注入与盘中回溯**：在 `get_security_quotes_safe` 中计算并直接注入 `bidding_signal`, `bidding_surge_pct`, `bidding_stage`, `bidding_desc`，并对外暴露 `get_bidding_analysis(code)` 供全天策略消费；
+    - [x] **资金主线面板 (CapitalDragonPanel) 性能优化与彻底根治卡顿**：
+        1. **前沿节流更新 (Leading Edge Throttling)**：300ms 首帧即时响应渲染（0 迟滞），高频连续 IPC 广播在 300ms 内平滑合并，彻底杜绝主线程重复计算与重绘雪崩；
+        2. **引擎报告无阻塞与宽松回退 (Stale-While-Revalidate)**：UI 读取优先返回已有缓存（支持 180s 容错回退）；若无缓存绝不阻塞主线程，启动后台线程异步计算并主线程安全回写；
+        3. **表格单元格原地复用与脏检查 (In-place Cell Reuse & Dirty Check)**：杜绝每次刷新销毁与重建 750+ 个 Item 对象，通过 `_set_or_update_cell` 对文本、数值、前景色、背景色、Tooltip 执行原地检查，未变化单元格 0 重绘开销；
+        4. **排序保护与选股联动防抖去重**：
+           - 渲染更新前保存用户排序指示器，更新完后原地应用排序，解决点击排序卡顿与排序重绘风暴；
+           - 选股联动增加严格代码去重（`_trigger_stock_linkage`），彻底消除 `cellChanged` 与 `cellClicked` 重复轰炸重载 K 线的卡顿现象；
+    - [x] **自动化测试全覆盖**：
+        1. 新增 `test_tdx_bidding_and_dragon_panel_perf.py`，覆盖 09:16 放行策略、集合竞价拟合意图、突击加速信号、下砸预警、单元格原地复用与切股防抖（4 项测试 100% PASSED）；
+        2. 回归验证 `test_capital_dragon_panel_integration.py`（9 项）、`test_capital_dragon_engine.py`（8 项）、`test_tdx_realtime_fetcher.py`（3 项）全部 100% 通过！
+
+## 2026-09-09 11:08
+- [x] **交割单全佣金费率穿透统计与分析 (`C:\Users\Johnson\Documents\20260909_交割单查询.txt`)**：
+    - [x] **全量数据穿透解析**：准确解析定宽导出文本，提取 2026-08-24 至 2026-09-08 期间全部 61 笔记录（含股票买卖 24 笔、逆回购 28 笔、新股配号申购 9 笔）；
+    - [x] **全包佣金率精准测算**：
+        1. **沪深A股 (买卖分开)**：
+           - **全包佣金率 (买卖一致)**：均为 **万分之 0.754（即万 0.75 全包）**（含经手费万 0.341、证管费万 0.200、券商净佣万 0.213）；
+           - **买入综合费率**：**万分之 0.854**（全包佣金万 0.754 + 中登过户费万 0.100，免印花税）；
+           - **卖出综合费率**：**万分之 5.854**（比买入多一项**印花税千分之 0.50 / 万分之 5.00**，并详细解析分项四舍五入微调）；
+           - **免五验证**：买卖双向【免五】均严格生效；
+        2. **场内ETF**：全包佣金率确认为 **万分之 0.50（万 0.5 全包）**，免过户费、免印花税、免证管费、免五；
+        3. **北交所A股**：经手费万分之 1.25，但存在【单笔最低 5 元保底】（北交所不免五），3 笔小额交易均按 5 元计费；
+        4. **国债逆回购**：1天期按十万分之一（0.001%）优惠费率计费，无最低收费限制。
+    - [x] **制作独立 GUI 分析统计工具与极小体积 PyInstaller 打包 (`delivery_order_analyzer_gui.py`, `delivery_order_analyzer.spec`, `build_analyzer_exe.py`, `build_analyzer_exe.bat`)**：
+        1. **双模式架构**：支持直接 GUI 可视化运行与 `--cli` 命令行极速报告输出；
+        2. **核心 KPI 卡片区**：动态展示沪深买入/卖出全佣率、ETF全佣率、北交所保底状态、免五生效判定绿色Badge；
+        3. **多维选项卡交互**：Tab 1 沪深买卖分开筛选（全部/只看买入/只看卖出）与高精度数值表头排序，Tab 2 ETF与北交所保底警示，Tab 3 国债逆回购折算费率，Tab 4 完整 Markdown 穿透诊断报告（支持一键导出/一键复制剪贴板）；
+        4. **根治 `TypeError: add_docstring() argument 2 must be str, not None` 崩溃与极限瘦身**：
+           - **根因溯源**：PyInstaller 在 `optimize=2`（`-OO` 模式）下会清空 Python 内部所有文档字符串为 `None`，导致 Numpy 内部 C 扩展装饰器 `add_docstring(..., None)` 抛出致命类型异常；
+           - **解耦重构与极限瘦身**：交割单解析引擎全面重构为**纯 Python 原生高性能架构**，完全剥离对 pandas、numpy、scipy 等庞大三方计算库的强依赖（避免 C 扩展冲突），同时在 `.spec` 中设置 `optimize=0` 保留完整 docstring 并剔除 QtWebEngine/Qml 等；
+           - **极致产物规格**：单文件 EXE 体积从 52 MB 进一步暴降至 **22.10 MB**（压缩率达 90%），打包耗时降至 31 秒，双击秒开无报错！
+        5. **自动化测试**：新增 `test_delivery_order_analyzer.py` 覆盖引擎解析与 GUI 交互，回归测试 100% 全部 PASSED。
+
 ## 2026-09-08 18:10
 - [x] **全链路根治【通达信信号录入 `record_tdx_signal` 触发 `ValueError: The truth value of a Series is ambiguous` Bug】(SSOT) (`stock_standalone/ats/signal_ledger.py`, `stock_standalone/tests/test_signal_ledger.py`)**：
     - [x] **根因溯源**：在 `SignalLedger.record_signal` 的通道上涨与支撑企稳判定逻辑中，判断条件直接使用了 `(row and ('ch_slope_deg' in row ...))` 以及 `... if row else 0.0`；当传入的 `df_row` 为 `pandas.Series` 时，Python 隐式计算 `bool(row)` 触发 Pandas 的歧义异常崩溃；

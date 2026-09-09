@@ -212,18 +212,21 @@ class CapitalDragonEngine:
         self._index_data_cache: Dict[str, Dict[str, float]] = {}
         self._index_cache_ts: float = 0.0
 
-    def get_cached_report(self, max_age: float = 3.0, df_check: Optional[pd.DataFrame] = None) -> Optional[Dict[str, Any]]:
-        """获取最近缓存的分析报告 (零开销，极速，支持 df_check 校验避免跨数据集数据污染)"""
+    def get_cached_report(self, max_age: float = 5.0, df_check: Optional[pd.DataFrame] = None, fallback_stale: bool = False) -> Optional[Dict[str, Any]]:
+        """获取最近缓存的分析报告 (零开销，极速，支持 fallback_stale 宽松回退模式避免主线程卡死)"""
         with self._cache_lock:
-            if self._cached_report and (time.time() - self._cached_time <= max_age):
-                if df_check is not None:
-                    if len(df_check) != getattr(self, '_cached_df_len', 0):
-                        return None
-                    c_col = 'code' if 'code' in df_check.columns else None
-                    first_code = str(df_check[c_col].iloc[0]) if (c_col and len(df_check) > 0) else (str(df_check.index[0]) if len(df_check) > 0 else "")
-                    if first_code != getattr(self, '_cached_df_first_code', ""):
-                        return None
-                return dict(self._cached_report)
+            if self._cached_report:
+                age = time.time() - self._cached_time
+                if age <= max_age:
+                    if df_check is not None and getattr(self, '_cached_df_len', 0) > 0:
+                        # 仅在数据集长度剧烈突变 (>50%) 时视作失效，轻微波动不击穿缓存
+                        diff_ratio = abs(len(df_check) - self._cached_df_len) / max(self._cached_df_len, 1)
+                        if diff_ratio > 0.5:
+                            return None
+                    return dict(self._cached_report)
+                if fallback_stale and age <= 180.0:
+                    # 容忍 180 秒内的陈旧缓存，保障 UI 交互与排序 100% 丝滑响应
+                    return dict(self._cached_report)
         return None
 
     def _fetch_tdx_index_data(self, index_codes: List[str]) -> Dict[str, Dict[str, float]]:
