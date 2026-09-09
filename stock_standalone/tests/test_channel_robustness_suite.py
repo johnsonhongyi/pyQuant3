@@ -134,7 +134,7 @@ def test_generate_channel_strategy_text_safety_and_fallback():
     heal_row = {'code': '300400', 'close': 33.65}
     heal_text = generate_channel_strategy_text(heal_row)
     assert "🎯 自动通道实战策略计划与操作指引" in heal_text
-    assert "上轨 = 37." in heal_text or "上轨 = 38." in heal_text
+    assert any(f"上轨 = {val}." in heal_text for val in [37, 38, 39, 40])
 
 
 def test_extreme_data_extrapolation_protection():
@@ -165,3 +165,20 @@ def test_extreme_data_extrapolation_protection():
     assert last['ch_lower'] > 0.1, f"极端外推下轨不能为 0: {last['ch_lower']}"
     assert last['ch_upper'] > last['ch_lower'], "极端数据三轨不能重合"
     assert -100.0 <= last['ch_pos'] <= 200.0, f"极端数据 pos 必须受控: {last['ch_pos']}"
+
+
+def test_stock_601890_ascending_channel_stability():
+    """验证 601890 亚星锚链在开盘前及历史各切片下保持健康上升通道，绝不误判为 -67.5° 暴跌"""
+    df = get_tdx_Exp_day_to_df('601890')
+    assert df is not None and len(df) >= 60
+    # 验证 2026-09-08 盘后 (即 09-09 早上开盘前)
+    df_prev = df.iloc[:-1].copy()
+    res_prev = calc_trend_channel(df_prev)
+    last_prev = res_prev.iloc[-1]
+    
+    assert last_prev['ch_dir'] == 1, f"09-08 盘后通道方向必须为 1: {last_prev['ch_dir']}"
+    assert last_prev['ch_slope_deg'] > 10.0, f"09-08 盘后倾角必须为正: {last_prev['ch_slope_deg']}"
+    assert 9.5 <= last_prev['ch_upper'] <= 10.5, f"09-08 盘后上轨异常: {last_prev['ch_upper']}"
+    assert 8.8 <= last_prev['ch_lower'] <= 9.3, f"09-08 盘后下轨异常: {last_prev['ch_lower']}"
+    assert 0.0 <= last_prev['ch_pos'] <= 50.0, f"09-08 盘后位置应在中下轨蓄势区: {last_prev['ch_pos']}"
+

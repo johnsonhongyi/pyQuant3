@@ -2205,20 +2205,26 @@ def calc_trend_channel(df, ur=6, lr=6):
         # 1. 最新中轨与下轨必须为有效正数
         if m_now <= 0.05 or lo_now <= 0.01:
             return False
-        # 2. 中轨不可过度偏离最新收盘价 (如跌至35%以下或暴涨至280%以上)
-        if c_now > 0.1 and (m_now < c_now * 0.35 or m_now > c_now * 2.8):
+        # 2. 中轨不可过度偏离最新收盘价 (如跌至45%以下或暴涨至220%以上)
+        if c_now > 0.1 and (m_now < c_now * 0.45 or m_now > c_now * 2.2):
             return False
         # 3. 通道宽度必须具有物理意义
         if (up_now - lo_now) <= 0.01:
             return False
+        # 4. 股价与通道位置脱节防呆：当前收盘价不可严重脱离轨道 (-80% ~ 220%)
+        w_now = max(up_now - lo_now, 1e-6)
+        pos_now = (c_now - lo_now) / w_now * 100.0
+        if pos_now < -80.0 or pos_now > 220.0:
+            return False
         return True
 
-    # 1. 尝试使用全局滚动极值
+    # 1. 尝试使用全局滚动极值 (遵照 TDX 原版自动通道)
     channel_res = _calc_raw_channel(tc2, bc2)
+    raw_valid = _is_channel_valid(channel_res)
     anchor = min(tc2, bc2)
 
-    # 2. 自适应近端次级波段重构 (当近端锚点距今过远，或原通道外推出现失真时)
-    need_adaptive = (not _is_channel_valid(channel_res)) or (anchor > 10)
+    # 2. 自适应近端次级波段重构 (当原通道穿底/塌缩或外推严重脱轨失真时介入，绝不无故篡改健康原版通道)
+    need_adaptive = not raw_valid
     if need_adaptive and anchor > 3 and n > anchor:
         if bc2 < tc2:
             # 底点距今更近：股票已见底，正在反弹或新一轮波段中，在 [n - bc2, n] 内寻找反弹高点
