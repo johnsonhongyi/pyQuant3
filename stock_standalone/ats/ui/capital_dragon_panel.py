@@ -204,6 +204,7 @@ class CapitalDragonPanel(QWidget):
     """
     stock_selected = pyqtSignal(str, str)         # 单击/方向键联动 (code, name)
     stock_double_clicked = pyqtSignal(str, str)  # 双击打开 SBC (code, name)
+    async_report_ready = pyqtSignal(dict)         # ⚡ 后台异步报告就绪信号 (主线程安全投递)
 
     def __init__(self, parent=None, main_window=None):
         super().__init__(parent)
@@ -213,6 +214,20 @@ class CapitalDragonPanel(QWidget):
         self._last_df_all = None
         self._last_sig = None
         self._is_updating = False
+
+        # 🎯 工业级防抖与节流控制器 (350ms 节流合并高频 IPC 行情广播，杜绝主线程雪崩)
+        self._pending_payload: Optional[Tuple[pd.DataFrame, float]] = None
+        self._throttle_timer = QTimer(self)
+        self._throttle_timer.setInterval(350)
+        self._throttle_timer.setSingleShot(True)
+        self._throttle_timer.timeout.connect(self._process_pending_payload)
+
+        # ⚡ 异步计算状态与信号槽绑定
+        self._is_async_calculating = False
+        self.async_report_ready.connect(self._on_async_report_ready)
+
+        # ⚡ 切股联动去重与当前高亮代码
+        self._last_emitted_code: Optional[str] = None
 
         # 🎯 策略过滤持久化开关 (专属独立持久化，默认关闭)
         saved_filter = load_config_node(PERSIST_KEY_DRAGON_FILTER, False)
@@ -348,17 +363,65 @@ class CapitalDragonPanel(QWidget):
 
     def update_payload(self, df_all: Optional[pd.DataFrame], sh_pct: float = 0.0, force: bool = False):
         """
-        接收最新行情快照，优先复用后台 Worker 计算好的报告，彻底杜绝主线程卡顿
+        接收最新行情快照，采用前沿节流 (Leading Edge Throttling) 合并高频 IPC 广播：
+        1. 首帧或间隔 >300ms 时立即响应渲染，用户界面 0 迟滞；
+        2. 300ms 内高频涌入时平滑合并到定时器，彻底杜绝主线程重算与重绘雪崩。
         """
-        if df_all is None or df_all.empty or self._is_updating:
+        if df_all is None or df_all.empty:
             return
 
         self._last_df_all = df_all
-        
-        # ⚡ 极限性能复用：优先直接从引擎读取后台 Worker 计算好的缓存报告 (0ms 耗时，零计算)
-        report = self.engine.get_cached_report(max_age=3.0, df_check=df_all)
-        if report is None or force:
-            report = self.engine.analyze_capital_dragon_universe(df_all, sh_pct)
+        self._pending_payload = (df_all, sh_pct)
+
+        now = time.time()
+        elapsed = now - getattr(self, '_last_update_time', 0.0)
+
+        if force or elapsed >= 0.3:
+            self._throttle_timer.stop()
+            self._process_pending_payload(force=force)
+        else:
+            if not self._throttle_timer.isActive():
+                rem_ms = max(int((0.3 - elapsed) * 1000), 50)
+                self._throttle_timer.start(rem_ms)
+
+    def _process_pending_payload(self, force: bool = False):
+        """节流定时器触发的数据处理入口"""
+        if self._pending_payload is None:
+            return
+        df_all, sh_pct = self._pending_payload
+        self._pending_payload = None
+        self._last_update_time = time.time()
+
+        # ⚡ 极限性能复用：优先直接从引擎读取后台 Worker 计算好的缓存报告 (0ms 耗时，零计算，支持 180s 容错回退)
+        report = self.engine.get_cached_report(max_age=5.0, df_check=df_all, fallback_stale=True)
+        if report is None:
+            # 若尚无可用缓存：在 force 或首帧冷启动时同步计算一次保底；在后续高频轮询中异步计算杜绝卡顿
+            if force or not self._last_report:
+                report = self.engine.analyze_capital_dragon_universe(df_all, sh_pct)
+            else:
+                if not self._is_async_calculating:
+                    self._is_async_calculating = True
+                    import threading
+                    def _async_worker():
+                        try:
+                            rep = self.engine.analyze_capital_dragon_universe(df_all, sh_pct)
+                            self.async_report_ready.emit(rep or {})
+                        except Exception as e:
+                            logger.warning(f"后台异步分析资金主线异常: {e}")
+                            self.async_report_ready.emit({})
+                    t = threading.Thread(target=_async_worker, daemon=True)
+                    t.start()
+                return
+
+        if report:
+            self._apply_report_to_ui(report)
+
+    def _on_async_report_ready(self, report: dict):
+        self._is_async_calculating = False
+        if report:
+            self._apply_report_to_ui(report)
+
+    def _apply_report_to_ui(self, report: dict):
         if not report:
             return
 
@@ -383,8 +446,61 @@ class CapitalDragonPanel(QWidget):
         # 1. 刷新顶部主线卡片
         self._render_top_sector_cards(top_secs)
 
-        # 2. 刷新核心真龙表格
+        # 2. 刷新核心真龙表格 (单元格复用更新，0 阻塞)
         self._render_table(dragons)
+
+    def _set_or_update_cell(
+        self, row: int, col: int, text: str, raw_val: Any = None,
+        align: int = Qt.AlignmentFlag.AlignCenter,
+        fg_color: Optional[str] = None,
+        bg_color: Optional[QColor] = None,
+        font_bold: bool = False,
+        tooltip: Optional[str] = None,
+        is_numeric: bool = True
+    ):
+        """原地更新单元格，实施 Dirty Check，避免重复销毁与重建对象，降低 90%+ 的 UI 渲染开销"""
+        item = self.table.item(row, col)
+        if item is None:
+            if is_numeric:
+                item = NumericTableWidgetItem(text, raw_val=raw_val)
+            else:
+                item = QTableWidgetItem(text)
+            item.setTextAlignment(align)
+            if fg_color:
+                item.setForeground(QBrush(QColor(fg_color)))
+            if bg_color:
+                item.setBackground(QBrush(bg_color))
+            if font_bold:
+                f = item.font()
+                f.setBold(True)
+                item.setFont(f)
+            if tooltip:
+                item.setToolTip(tooltip)
+            self.table.setItem(row, col, item)
+            return
+
+        # 针对已存在的 item 执行 Dirty Check 原地更新
+        if item.text() != text:
+            item.setText(text)
+        if is_numeric and hasattr(item, 'set_raw_value') and raw_val is not None:
+            if getattr(item, '_raw_value', None) != raw_val:
+                item.set_raw_value(raw_val)
+        if fg_color:
+            cur_fg = item.foreground().color().name()
+            if cur_fg.lower() != fg_color.lower():
+                item.setForeground(QBrush(QColor(fg_color)))
+        if bg_color is not None:
+            cur_bg = item.background().color()
+            if cur_bg != bg_color:
+                item.setBackground(QBrush(bg_color))
+        elif item.background().style() != Qt.BrushStyle.NoBrush:
+            item.setBackground(QBrush(QColor(0, 0, 0, 0)))
+        if font_bold != item.font().bold():
+            f = item.font()
+            f.setBold(font_bold)
+            item.setFont(f)
+        if tooltip and item.toolTip() != tooltip:
+            item.setToolTip(tooltip)
 
     def _render_top_sector_cards(self, top_secs: List[Dict[str, Any]]):
         for i in range(3):
@@ -521,15 +637,20 @@ class CapitalDragonPanel(QWidget):
         self.table.blockSignals(True)
         self.table.setUpdatesEnabled(False)
         try:
-            # 记住当前选中代码
+            # 1. 记住当前选中的标的代码与行位置
             selected_code = None
             curr_row = self.table.currentRow()
             if curr_row >= 0:
                 c_item = self.table.item(curr_row, 0)
                 if c_item:
-                    selected_code = c_item.text()
+                    selected_code = c_item.text().strip()
 
+            # 2. 记住用户当前激活的排序状态，避免刷新时排序冲突
+            h_header = self.table.horizontalHeader()
+            sort_col = h_header.sortIndicatorSection() if h_header.isSortIndicatorShown() else -1
+            sort_order = h_header.sortIndicatorOrder() if sort_col >= 0 else Qt.SortOrder.AscendingOrder
             self.table.setSortingEnabled(False)
+
             filter_text = self.search_input.text().strip().lower()
 
             parent_mw = self._get_parent_mw()
@@ -556,7 +677,10 @@ class CapitalDragonPanel(QWidget):
             if getattr(self, 'extreme_perf_mode', True) and not filter_text and fset is None:
                 matched_records = matched_records[:50]
 
-            self.table.setRowCount(len(matched_records))
+            target_row_count = len(matched_records)
+            if self.table.rowCount() != target_row_count:
+                self.table.setRowCount(target_row_count)
+
             new_selected_row = -1
 
             for row_idx, d in enumerate(matched_records):
@@ -577,92 +701,90 @@ class CapitalDragonPanel(QWidget):
                     new_selected_row = row_idx
 
                 # 0: 代码
-                it_code = NumericTableWidgetItem(code, raw_val=0)
-                it_code.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                self.table.setItem(row_idx, 0, it_code)
+                self._set_or_update_cell(
+                    row_idx, 0, code, raw_val=0,
+                    align=Qt.AlignmentFlag.AlignCenter, is_numeric=True
+                )
 
                 # 1: 名称
-                it_name = QTableWidgetItem(name)
-                it_name.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                self.table.setItem(row_idx, 1, it_name)
+                self._set_or_update_cell(
+                    row_idx, 1, name,
+                    align=Qt.AlignmentFlag.AlignCenter, is_numeric=False
+                )
 
                 # 2: 龙头角色 (高辨识度徽标色)
-                it_role = NumericTableWidgetItem(role, raw_val=d.get("priority", 0))
-                it_role.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                font = it_role.font()
-                font.setBold(True)
-                it_role.setFont(font)
+                role_col = "#00b0ff"
                 if "空间" in role:
-                    it_role.setForeground(QBrush(QColor("#ff1744")))
+                    role_col = "#ff1744"
                 elif "容量" in role:
-                    it_role.setForeground(QBrush(QColor("#ffd700")))
+                    role_col = "#ffd700"
                 elif "先锋" in role:
-                    it_role.setForeground(QBrush(QColor("#00e676")))
-                else:
-                    it_role.setForeground(QBrush(QColor("#00b0ff")))
-                self.table.setItem(row_idx, 2, it_role)
+                    role_col = "#00e676"
+                self._set_or_update_cell(
+                    row_idx, 2, role, raw_val=d.get("priority", 0),
+                    align=Qt.AlignmentFlag.AlignCenter, fg_color=role_col,
+                    font_bold=True, is_numeric=True
+                )
 
                 # 3: 所属主线
-                it_sec = QTableWidgetItem(sector)
-                it_sec.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                it_sec.setForeground(QBrush(QColor("#e0e0e0")))
-                if sector and sector not in ('--', '未知'):
-                    it_sec.setToolTip(f"💡 双击直接打开【{sector}】板块成分股明细与强势股")
-                self.table.setItem(row_idx, 3, it_sec)
+                sec_tip = f"💡 双击直接打开【{sector}】板块成分股明细与强势股" if (sector and sector not in ('--', '未知')) else None
+                self._set_or_update_cell(
+                    row_idx, 3, sector,
+                    align=Qt.AlignmentFlag.AlignCenter, fg_color="#e0e0e0",
+                    tooltip=sec_tip, is_numeric=False
+                )
 
                 # 4: 现价
-                it_price = NumericTableWidgetItem(f"{price:.2f}", raw_val=price)
-                it_price.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-                self.table.setItem(row_idx, 4, it_price)
+                self._set_or_update_cell(
+                    row_idx, 4, f"{price:.2f}", raw_val=price,
+                    align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, is_numeric=True
+                )
 
                 # 5: 涨幅%
                 pct_str = f"{pct:+.2f}%"
-                it_pct = NumericTableWidgetItem(pct_str, raw_val=pct)
-                it_pct.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-                font = it_pct.font()
-                font.setBold(True)
-                it_pct.setFont(font)
                 pct_col = COLOR_UP if pct > 0 else (COLOR_DOWN if pct < 0 else "#c9d1d9")
-                it_pct.setForeground(QBrush(QColor(pct_col)))
-                self.table.setItem(row_idx, 5, it_pct)
+                self._set_or_update_cell(
+                    row_idx, 5, pct_str, raw_val=pct,
+                    align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                    fg_color=pct_col, font_bold=True, is_numeric=True
+                )
 
                 # 6: 虚拟量比 (系统的虚拟量比，反映资金加速流入速度)
                 vr_val = float(d.get("vol_ratio", 1.0))
-                it_vr = NumericTableWidgetItem(f"{vr_val:.2f}x", raw_val=vr_val)
-                it_vr.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-                f_vr = it_vr.font()
+                vr_bold = False
                 if vr_val >= 3.0:
-                    it_vr.setForeground(QBrush(QColor("#ff1744")))
-                    f_vr.setBold(True)
+                    vr_col = "#ff1744"
+                    vr_bold = True
                 elif vr_val >= 2.0:
-                    it_vr.setForeground(QBrush(QColor("#ffd700")))
-                    f_vr.setBold(True)
+                    vr_col = "#ffd700"
+                    vr_bold = True
                 elif vr_val >= 1.2:
-                    it_vr.setForeground(QBrush(QColor("#00e5ff")))
+                    vr_col = "#00e5ff"
                 elif vr_val <= 0.7:
-                    it_vr.setForeground(QBrush(QColor("#888888")))
+                    vr_col = "#888888"
                 else:
-                    it_vr.setForeground(QBrush(QColor("#ffffff")))
-                it_vr.setFont(f_vr)
-                it_vr.setToolTip(f"系统的虚拟量比: {vr_val:.2f}x\n按上午实时交易进度计算全天预估成交倍速，量比越大资金加速流入越猛烈")
-                self.table.setItem(row_idx, 6, it_vr)
+                    vr_col = "#ffffff"
+                vr_tip = f"系统的虚拟量比: {vr_val:.2f}x\n按上午实时交易进度计算全天预估成交倍速，量比越大资金加速流入越猛烈"
+                self._set_or_update_cell(
+                    row_idx, 6, f"{vr_val:.2f}x", raw_val=vr_val,
+                    align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                    fg_color=vr_col, font_bold=vr_bold, tooltip=vr_tip, is_numeric=True
+                )
 
                 # 7: 成交额(亿)
-                it_amt = NumericTableWidgetItem(f"{amt:.1f}亿", raw_val=amt)
-                it_amt.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-                if amt >= 15.0:
-                    it_amt.setForeground(QBrush(QColor("#ffd700")))
-                    f = it_amt.font()
-                    f.setBold(True)
-                    it_amt.setFont(f)
-                else:
-                    it_amt.setForeground(QBrush(QColor("#ffffff")))
-                self.table.setItem(row_idx, 7, it_amt)
+                amt_col = "#ffd700" if amt >= 15.0 else "#ffffff"
+                amt_bold = amt >= 15.0
+                self._set_or_update_cell(
+                    row_idx, 7, f"{amt:.1f}亿", raw_val=amt,
+                    align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                    fg_color=amt_col, font_bold=amt_bold, is_numeric=True
+                )
 
                 # 8: 换手率%
-                it_to = NumericTableWidgetItem(f"{turnover:.1f}%", raw_val=turnover)
-                it_to.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-                self.table.setItem(row_idx, 8, it_to)
+                self._set_or_update_cell(
+                    row_idx, 8, f"{turnover:.1f}%", raw_val=turnover,
+                    align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, is_numeric=True
+                )
 
                 # 9: 资金买点类型 (精细化视觉高亮与量化排序，对齐龙头突击与天梯 SSOT)
                 buy_score = float(d.get("buy_type_sort_score", 0.0))
@@ -675,32 +797,29 @@ class CapitalDragonPanel(QWidget):
                         amount_yi=amt,
                         pct=pct
                     )
-                it_buy = NumericTableWidgetItem(buy_type, raw_val=buy_score)
-                it_buy.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                font_buy = it_buy.font()
-                font_buy.setBold(True)
-                it_buy.setFont(font_buy)
+                buy_fg = "#38bdf8"
+                buy_bg = None
                 if "双加速" in buy_type:
-                    it_buy.setForeground(QBrush(QColor("#FFD700"))) # 金黄双加速
-                    it_buy.setBackground(QBrush(QColor(80, 20, 60, 180))) # 尊荣金紫
+                    buy_fg = "#FFD700"
+                    buy_bg = QColor(80, 20, 60, 180)
                 elif "缺口加速" in buy_type:
-                    it_buy.setForeground(QBrush(QColor("#FF55BB"))) # 亮粉紫缺口加速
-                    it_buy.setBackground(QBrush(QColor(50, 15, 45, 160)))
+                    buy_fg = "#FF55BB"
+                    buy_bg = QColor(50, 15, 45, 160)
                 elif "光脚加速" in buy_type:
-                    it_buy.setForeground(QBrush(QColor("#FFAA00"))) # 亮橙黄光脚加速
-                    it_buy.setBackground(QBrush(QColor(60, 35, 10, 160)))
+                    buy_fg = "#FFAA00"
+                    buy_bg = QColor(60, 35, 10, 160)
                 elif "主升" in buy_type or "先锋" in buy_type or "龙头" in buy_type:
-                    it_buy.setForeground(QBrush(QColor("#00e676")))
-                    it_buy.setBackground(QBrush(QColor(10, 50, 30, 150)))
-                else:
-                    it_buy.setForeground(QBrush(QColor("#38bdf8")))
-                    it_buy.setBackground(QBrush(QColor(0, 0, 0, 0)))
+                    buy_fg = "#00e676"
+                    buy_bg = QColor(10, 50, 30, 150)
 
                 buy_tip = f"【资金买点】: {buy_type}\n" \
                           f"• 🎯 形态梯队排序分: {buy_score:.0f}\n" \
                           f"• 💡 梯队优先级: 👑双加速 > 🚀缺口加速 > ⚡光脚加速 > 常规主升 > 🎯通道支撑企稳"
-                it_buy.setToolTip(buy_tip)
-                self.table.setItem(row_idx, 9, it_buy)
+                self._set_or_update_cell(
+                    row_idx, 9, buy_type, raw_val=buy_score,
+                    align=Qt.AlignmentFlag.AlignCenter, fg_color=buy_fg,
+                    bg_color=buy_bg, font_bold=True, tooltip=buy_tip, is_numeric=True
+                )
 
                 # 10+: 动态自定义列 (ats_col, 紧随资金买点类型后面)
                 col_offset = 10
@@ -723,39 +842,41 @@ class CapitalDragonPanel(QWidget):
                     except Exception:
                         raw_num = None
 
-                    it_ec = NumericTableWidgetItem(val_str, raw_val=raw_num)
-                    it_ec.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                    ec_col = "#888888"
                     if raw_num is not None:
                         if raw_num > 0:
-                            it_ec.setForeground(QBrush(QColor(COLOR_UP)))
+                            ec_col = COLOR_UP
                         elif raw_num < 0:
-                            it_ec.setForeground(QBrush(QColor(COLOR_DOWN)))
+                            ec_col = COLOR_DOWN
                         else:
-                            it_ec.setForeground(QBrush(QColor("#e2e2e5")))
-                    else:
-                        it_ec.setForeground(QBrush(QColor("#888888")))
+                            ec_col = "#e2e2e5"
 
-                    it_ec.setToolTip(f"【{ec.upper()} 自定义指标】: {val_str}")
-                    self.table.setItem(row_idx, col_offset, it_ec)
+                    self._set_or_update_cell(
+                        row_idx, col_offset, val_str, raw_val=raw_num,
+                        align=Qt.AlignmentFlag.AlignCenter, fg_color=ec_col,
+                        tooltip=f"【{ec.upper()} 自定义指标】: {val_str}", is_numeric=True
+                    )
                     col_offset += 1
 
                 # 建议买入区间
-                it_zone = QTableWidgetItem(buy_zone)
-                it_zone.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                it_zone.setForeground(QBrush(QColor("#ffb74d")))
-                self.table.setItem(row_idx, col_offset, it_zone)
+                self._set_or_update_cell(
+                    row_idx, col_offset, buy_zone,
+                    align=Qt.AlignmentFlag.AlignCenter, fg_color="#ffb74d", is_numeric=False
+                )
 
                 # 止损参考
-                it_sl = NumericTableWidgetItem(f"{stop_loss:.2f}", raw_val=stop_loss)
-                it_sl.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-                it_sl.setForeground(QBrush(QColor("#ef5350")))
-                self.table.setItem(row_idx, col_offset + 1, it_sl)
+                self._set_or_update_cell(
+                    row_idx, col_offset + 1, f"{stop_loss:.2f}", raw_val=stop_loss,
+                    align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                    fg_color="#ef5350", is_numeric=True
+                )
 
                 # 核心逻辑与驱动
-                it_reason = QTableWidgetItem(reason)
-                it_reason.setToolTip(reason)
-                it_reason.setForeground(QBrush(QColor("#b0bec5")))
-                self.table.setItem(row_idx, col_offset + 2, it_reason)
+                self._set_or_update_cell(
+                    row_idx, col_offset + 2, reason,
+                    align=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                    fg_color="#b0bec5", tooltip=reason, is_numeric=False
+                )
 
             is_extreme = getattr(self, 'extreme_perf_mode', True)
             dual_cnt = self._last_report.get('dual_accel_count', 0) if self._last_report else 0
@@ -787,11 +908,22 @@ class CapitalDragonPanel(QWidget):
                 f"{accel_str}"
             )
 
-            if new_selected_row >= 0:
+            # 3. 恢复用户激活的排序列与排序规则
+            if sort_col >= 0:
+                self.table.sortItems(sort_col, sort_order)
+            self.table.setSortingEnabled(True)
+
+            # 4. 恢复选中行状态
+            if selected_code:
+                for r in range(self.table.rowCount()):
+                    it = self.table.item(r, 0)
+                    if it and it.text().strip() == selected_code:
+                        self.table.setCurrentCell(r, 0)
+                        break
+            elif new_selected_row >= 0:
                 self.table.setCurrentCell(new_selected_row, 0)
 
             auto_fit_columns_once(self.table, "capital_dragon_table_header_v3")
-            self.table.setSortingEnabled(True)
 
         finally:
             self.table.blockSignals(False)
@@ -893,6 +1025,16 @@ class CapitalDragonPanel(QWidget):
             records = self._last_report.get(key, self._last_report.get("dragon_records", []))
             self._render_table(records)
 
+    def _trigger_stock_linkage(self, code: str, name: str):
+        """统一的选股联动触发器 (带严格防抖去重，避免双发与频繁切换K线导致主线程卡顿)"""
+        if getattr(self, '_is_updating', False):
+            return
+        code_clean = str(code).strip()
+        if not code_clean or code_clean == getattr(self, '_last_emitted_code', None):
+            return
+        self._last_emitted_code = code_clean
+        self.stock_selected.emit(code_clean, name)
+
     def _on_row_clicked(self, item):
         if getattr(self, '_is_updating', False) or item is None:
             return
@@ -900,9 +1042,7 @@ class CapitalDragonPanel(QWidget):
         c_item = self.table.item(row, 0)
         n_item = self.table.item(row, 1)
         if c_item and n_item:
-            code = c_item.text().strip()
-            name = n_item.text().strip()
-            self.stock_selected.emit(code, name)
+            self._trigger_stock_linkage(c_item.text().strip(), n_item.text().strip())
 
     def _on_current_cell_changed(self, cur_row, cur_col, prev_row, prev_col):
         # 正在后台刷新数据或无效行期间严禁触发切股联动与抢焦
@@ -912,9 +1052,7 @@ class CapitalDragonPanel(QWidget):
             c_item = self.table.item(cur_row, 0)
             n_item = self.table.item(cur_row, 1)
             if c_item and n_item:
-                code = c_item.text().strip()
-                name = n_item.text().strip()
-                self.stock_selected.emit(code, name)
+                self._trigger_stock_linkage(c_item.text().strip(), n_item.text().strip())
 
     def open_sector_detail(self, sector_name: str):
         """

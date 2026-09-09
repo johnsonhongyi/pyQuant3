@@ -17,7 +17,7 @@ import threading
 import concurrent.futures
 import collections
 import datetime
-from datetime import datetime
+from datetime import datetime, date, time as dtime
 import pandas as pd
 import numpy as np
 from typing import Dict, List, Tuple, Optional, Any, Callable
@@ -245,41 +245,90 @@ def get_market_code(stock_code: str) -> int:
     return 0
 
 
+def is_tdx_trading_allowed(now_dt: Optional[datetime] = None) -> Tuple[bool, str, Dict[str, Any]]:
+    """
+    针对使用 TDX API 方式获取数据的专属交易时间放行策略 (SSOT):
+    1. 提前至 09:16:00 开始放行拉取，拟合价格意图 (可撤单阶段);
+    2. 09:20:00 切换至不可撤单阶段，监控真实申报意图;
+    3. 09:25:00 前突然加速突击的上涨或下跌作为极强信号捕获;
+    4. 09:25:00~09:30:00 竞价定盘与静默期;
+    5. 09:30:00~11:30:30 & 12:59:30~15:00:00 连续撮合交易时段;
+    6. 15:00:00~15:05:00 尾盘收盘集合竞价与定盘时段.
+    其余时间严格拦截并进入定盘/休眠，防止非交易时段徒耗流量.
+
+    返回: (is_allowed, desc_str, stage_info_dict)
+    """
+    now = now_dt or datetime.now()
+    t_str = now.strftime("%H:%M:%S")
+
+    # 1. 检查交易日状态
+    try:
+        if hasattr(cct, 'get_work_day_status') and not cct.get_work_day_status():
+            return False, f"周末/假日休市 ({t_str})", {"stage": "HOLIDAY", "is_bidding": False, "is_locked": False}
+    except Exception:
+        pass
+
+    if now.weekday() >= 5:
+        return False, f"周末休市 ({t_str})", {"stage": "HOLIDAY", "is_bidding": False, "is_locked": False}
+
+    t = now.time()
+
+    # 2. 核心交易时间轴判定
+    # A. 早盘集合竞价: 09:16:00 ~ 09:19:59 (试撮合拟合阶段, 可撤单)
+    if dtime(9, 16, 0) <= t < dtime(9, 20, 0):
+        return True, f"早盘试撮合意图拟合 ({t_str})", {
+            "stage": "BIDDING_SIMULATION", "is_bidding": True, "is_locked": False, "can_cancel": True
+        }
+
+    # B. 早盘不可撤单申报与突击捕获: 09:20:00 ~ 09:24:59 (真实意图阶段, 突击极强信号)
+    elif dtime(9, 20, 0) <= t < dtime(9, 25, 0):
+        return True, f"早盘不可撤单申报与突击监控 ({t_str})", {
+            "stage": "BIDDING_LOCKED", "is_bidding": True, "is_locked": True, "can_cancel": False
+        }
+
+    # C. 早盘竞价定盘静默期: 09:25:00 ~ 09:29:59 (定盘锁死, 静候开盘)
+    elif dtime(9, 25, 0) <= t < dtime(9, 30, 0):
+        return True, f"早盘集合竞价定盘静默 ({t_str})", {
+            "stage": "BIDDING_FINALIZED", "is_bidding": True, "is_locked": True, "can_cancel": False
+        }
+
+    # D. 上午连续交易时段: 09:30:00 ~ 11:30:30
+    elif dtime(9, 30, 0) <= t <= dtime(11, 30, 30):
+        return True, f"实盘交易中 ({t_str})", {
+            "stage": "CONTINUOUS_TRADING", "is_bidding": False, "is_locked": False, "can_cancel": True
+        }
+
+    # E. 下午连续交易时段: 12:59:30 ~ 15:00:00
+    elif dtime(12, 59, 30) <= t <= dtime(15, 0, 0):
+        return True, f"实盘交易中 ({t_str})", {
+            "stage": "CONTINUOUS_TRADING", "is_bidding": False, "is_locked": False, "can_cancel": True
+        }
+
+    # F. 尾盘收盘集合竞价: 15:00:00 ~ 15:05:00
+    elif dtime(15, 0, 0) < t <= dtime(15, 5, 0):
+        return True, f"尾盘收盘集合竞价 ({t_str})", {
+            "stage": "CLOSING_AUCTION", "is_bidding": True, "is_locked": True, "can_cancel": False
+        }
+
+    # G. 午间休市: 11:30:30 ~ 12:59:30
+    elif dtime(11, 30, 30) < t < dtime(12, 59, 30):
+        return False, f"午间休市休眠 ({t_str})", {
+            "stage": "NOON_REST", "is_bidding": False, "is_locked": False, "can_cancel": False
+        }
+
+    # H. 其余休盘时段 (< 09:16:00 或 > 15:05:00)
+    return False, f"休市休眠中 ({t_str})", {
+        "stage": "OFF_HOURS", "is_bidding": False, "is_locked": False, "can_cancel": False
+    }
+
+
 def is_trading_time(now_dt=None) -> Tuple[bool, str]:
     """
-    优先使用 JohnsonUtil.commonTips (cct) 原生实盘时段与交易日状态判定
-    返回 (is_trading, status_text)
+    向前兼容的交易时段判定入口，底层统一对接 TDX 专属放行策略
+    返回: (is_trading, status_text)
     """
-    t_str = time.strftime("%H:%M:%S")
-    try:
-        is_work_day = cct.get_work_day_status()
-        if not is_work_day:
-            return False, f"周末/假日休市 ({t_str})"
-
-        is_work_time = cct.get_work_time()
-        now_int = cct.get_now_time_int()
-
-        if is_work_time:
-            if now_int < 930:
-                return True, f"早盘集合竞价 ({t_str})"
-            elif now_int >= 1500:
-                return True, f"尾盘收盘集合竞价 ({t_str})"
-            return True, f"实盘交易中 ({t_str})"
-        else:
-            if 1130 <= now_int < 1300:
-                return False, f"午间休市休眠 ({t_str})"
-            return False, f"收盘休市休眠 ({t_str})"
-    except Exception as e:
-        logger.debug(f"cct.get_work_time 异常降级: {e}")
-
-    # 本地备用降级逻辑
-    now = now_dt or datetime.datetime.now()
-    if now.weekday() >= 5:
-        return False, f"周末休市 ({t_str})"
-    t = now.time()
-    if datetime.time(9, 15, 0) <= t <= datetime.time(11, 30, 30) or datetime.time(12, 59, 30) <= t <= datetime.time(15, 5, 0):
-        return True, f"实盘交易中 ({t_str})"
-    return False, f"休市休眠中 ({t_str})"
+    is_allowed, desc_str, _ = is_tdx_trading_allowed(now_dt=now_dt)
+    return is_allowed, desc_str
 
 
 # 兼容性别名
@@ -341,6 +390,20 @@ class TDXRealtimeFetcher:
         # 标的真实流通股本与总股本永久缓存 (股数)
         self._finance_shares_cache: Dict[str, float] = {}
         self._total_shares_cache: Dict[str, float] = {}
+
+        # 🎯 集合竞价早盘意图拟合与不可撤单突击加速监控数据结构 (09:16 ~ 09:25:00)
+        # 1. 历史快照队列: {code: deque([{'t': float, 'stage': str, 'price': float, 'pct': float, 'b1_v': int, 'a1_v': int}], maxlen=120)}
+        self._bidding_history: Dict[str, collections.deque] = collections.defaultdict(lambda: collections.deque(maxlen=120))
+        # 2. 09:20:00 进入不可撤单阶段时的基准定盘信息: {code: {'time': float, 'price': float, 'pct': float, 'b1_v': int, 'a1_v': int}}
+        self._bidding_locked_base: Dict[str, Dict[str, Any]] = {}
+        # 3. 09:16~09:20 试撮合拟合阶段统计特征: {code: {'max_pct': float, 'min_pct': float, 'end_pct': float, 'intent': str}}
+        self._bidding_sim_stats: Dict[str, Dict[str, Any]] = {}
+        # 4. 实时集合竞价突击信号与评估结果: {code: {'signal': str, 'surge_pct': float, 'stage': str, 'desc': str, 'update_time': float}}
+        self._bidding_signals: Dict[str, Dict[str, Any]] = {}
+        self._bidding_lock = threading.Lock()
+
+        # 1 分钟分时 K 线缓存
+        self._intraday_bars_cache: Dict[str, Tuple[pd.DataFrame, float, str]] = {}
 
         self.add_log("🚀 TDX 高频行情引擎初始化完成，准备测速与连接最优主站 (基准周期: 3.0s)", level="INFO")
 
@@ -674,6 +737,175 @@ class TDXRealtimeFetcher:
             self.api = None
             self._is_connected = False
 
+    def record_and_evaluate_bidding_surge(self, quote: Dict[str, Any], now_dt: Optional[datetime] = None) -> Dict[str, Any]:
+        """
+        【🎯 集合竞价意图拟合与不可撤单突击加速监控核心算法】
+        - 09:16 ~ 09:19:59 (试撮合拟合阶段): 记录最高/最低拟合涨幅，提炼试盘测试意图 (可撤单，测跟风或诱空)
+        - 09:20 ~ 09:24:59 (不可撤单真实意图阶段): 锁定 09:20 基准，跟踪突击加速幅度与速度，捕获极强抢筹或突击下杀信号
+        - 09:25:00 之后: 保留早盘竞价关键特征，供盘中各策略模块消费回溯
+        """
+        code = str(quote.get("code", "")).strip().zfill(6)
+        if not code:
+            return {}
+
+        now = now_dt or datetime.now()
+        now_t = time.time()
+        t = now.time()
+        p = safe_float(quote.get("price", 0.0))
+        last_c = safe_float(quote.get("last_close", 0.0))
+        if last_c <= 0.0:
+            return {
+                "bidding_stage": "UNKNOWN",
+                "bidding_surge_pct": 0.0,
+                "bidding_signal": "",
+                "bidding_desc": ""
+            }
+
+        curr_pct = round((p - last_c) / last_c * 100.0, 2) if p > 0 else 0.0
+        bid1_v = int(safe_float(quote.get("bid_vol1", quote.get("bid1_volume", 0))))
+        ask1_v = int(safe_float(quote.get("ask_vol1", quote.get("ask1_volume", 0))))
+
+        with self._bidding_lock:
+            # 记录历史流水
+            self._bidding_history[code].append({
+                "t": now_t,
+                "time_str": now.strftime("%H:%M:%S"),
+                "price": p,
+                "pct": curr_pct,
+                "b1_v": bid1_v,
+                "a1_v": ask1_v
+            })
+
+            # 判断阶段
+            # A. 09:16:00 ~ 09:19:59: 试撮合拟合阶段
+            if dtime(9, 16, 0) <= t < dtime(9, 20, 0):
+                stage = "SIMULATION"
+                if code not in self._bidding_sim_stats:
+                    self._bidding_sim_stats[code] = {
+                        "max_pct": curr_pct,
+                        "min_pct": curr_pct,
+                        "start_pct": curr_pct,
+                        "end_pct": curr_pct,
+                        "intent": "试盘平稳"
+                    }
+                else:
+                    stats = self._bidding_sim_stats[code]
+                    stats["max_pct"] = max(stats["max_pct"], curr_pct)
+                    stats["min_pct"] = min(stats["min_pct"], curr_pct)
+                    stats["end_pct"] = curr_pct
+
+                # 分析试盘意图
+                stats = self._bidding_sim_stats[code]
+                if stats["max_pct"] >= 9.5:
+                    intent = "试盘封板测试"
+                elif stats["min_pct"] <= -7.0:
+                    intent = "试盘诱空打压"
+                elif stats["max_pct"] >= 3.0:
+                    intent = "试盘冲高意图"
+                elif stats["min_pct"] <= -3.0:
+                    intent = "试盘低开试探"
+                else:
+                    intent = "试盘平稳拟合"
+                stats["intent"] = intent
+
+                res = {
+                    "bidding_stage": stage,
+                    "bidding_surge_pct": 0.0,
+                    "bidding_signal": f"试盘拟合:{intent}",
+                    "bidding_desc": f"试撮合拟合涨幅 {curr_pct:+.2f}% (区间: {stats['min_pct']:+.2f}%~{stats['max_pct']:+.2f}%)"
+                }
+                self._bidding_signals[code] = res
+                return res
+
+            # B. 09:20:00 ~ 09:25:00: 不可撤单申报阶段 (真实意图，突击加速极强信号)
+            elif dtime(9, 20, 0) <= t < dtime(9, 25, 0):
+                stage = "LOCKED"
+                if code not in self._bidding_locked_base:
+                    # 锚定 09:20:00 进入不可撤单时刻的基准涨幅与价格
+                    self._bidding_locked_base[code] = {
+                        "time": now_t,
+                        "price": p,
+                        "pct": curr_pct,
+                        "bid1_v": bid1_v,
+                        "ask1_v": ask1_v
+                    }
+                
+                base_info = self._bidding_locked_base[code]
+                base_pct = base_info["pct"]
+                surge_pct = round(curr_pct - base_pct, 2)
+                sim_stats = self._bidding_sim_stats.get(code, {})
+
+                signal = "竞价申报正常"
+                desc = f"不可撤单申报中，涨幅 {curr_pct:+.2f}% (较09:20基准变动 {surge_pct:+.2f}%)"
+
+                # ⚡ 核心极强信号判定规则：
+                # 1. 突击抢筹爆拉 (极强买入信号): 09:20后不可撤单突然拉升 >= 1.8%
+                if surge_pct >= 1.8:
+                    if curr_pct >= 9.5:
+                        signal = "竞价不可撤单抢板"
+                        desc = f"🔥 [竞价突击封板] 09:20不可撤单后从 {base_pct:+.2f}% 突击狂飙至涨停！"
+                    elif base_pct <= 1.0 and curr_pct >= 2.5:
+                        signal = "竞价低开突击抢筹"
+                        desc = f"🚀 [低开转抢筹] 09:20低开/平开 {base_pct:+.2f}%，不可撤单阶段突击猛拉 +{surge_pct:.2f}% 至 {curr_pct:+.2f}%"
+                    else:
+                        signal = "竞价不可撤单突击抢筹"
+                        desc = f"⚡ [突击加速] 不可撤单阶段突然加速抢升 +{surge_pct:.2f}% (当前: {curr_pct:+.2f}%)"
+                # 2. 试盘诱空后反手真抢 (反转极强信号)
+                elif sim_stats.get("min_pct", 0.0) <= -3.0 and curr_pct >= 1.0 and surge_pct >= 1.0:
+                    signal = "试盘诱空真实反抢"
+                    desc = f"⭐ [诱空反转] 09:16~09:20虚假打压至 {sim_stats['min_pct']:+.2f}%，09:20不可撤单后真金白银反抢至 {curr_pct:+.2f}%！"
+                # 3. 突击抢砸跳水 (极强风险/逃命信号): 09:20后不可撤单突然砸跌 <= -1.8%
+                elif surge_pct <= -1.8:
+                    if base_pct >= 7.0 and curr_pct < 5.0:
+                        signal = "竞价不可撤单抢砸跳水"
+                        desc = f"⚠️ [突击撤砸] 09:20不可撤单后高位大单抢砸跳水 {surge_pct:.2f}% (当前: {curr_pct:+.2f}%)"
+                    else:
+                        signal = "竞价不可撤单突击下砸"
+                        desc = f"❌ [突击砸盘] 不可撤单阶段突遭持续大单下杀 {surge_pct:.2f}% (当前: {curr_pct:+.2f}%)"
+                # 4. 09:20不可撤单阶段顶格大单一字封死
+                elif curr_pct >= 9.8 and base_pct >= 9.8 and bid1_v > 0:
+                    signal = "竞价一字真实封死"
+                    desc = f"🏆 [一字封板] 09:20后不可撤单真实巨量一字锁死"
+
+                res = {
+                    "bidding_stage": stage,
+                    "bidding_surge_pct": surge_pct,
+                    "bidding_signal": signal,
+                    "bidding_desc": desc
+                }
+                self._bidding_signals[code] = res
+                return res
+
+            # C. 09:25:00 之后 (定盘及连续交易时段): 保留早盘集合竞价结果，供全天回溯
+            else:
+                if code in self._bidding_signals:
+                    cached = dict(self._bidding_signals[code])
+                    cached["bidding_stage"] = "FINALIZED" if t < dtime(9, 30, 0) else "TRADING"
+                    return cached
+                return {
+                    "bidding_stage": "TRADING" if t < dtime(15, 5, 0) else "OFF_HOURS",
+                    "bidding_surge_pct": 0.0,
+                    "bidding_signal": "",
+                    "bidding_desc": ""
+                }
+
+    def get_bidding_analysis(self, code: str) -> Dict[str, Any]:
+        """对外暴露的标的集合竞价意图与突击信号查询接口"""
+        c_clean = str(code).strip().zfill(6)
+        with self._bidding_lock:
+            if c_clean in self._bidding_signals:
+                return dict(self._bidding_signals[c_clean])
+            sim = self._bidding_sim_stats.get(c_clean, {})
+            base = self._bidding_locked_base.get(c_clean, {})
+            return {
+                "bidding_stage": "OFF_HOURS",
+                "bidding_surge_pct": 0.0,
+                "bidding_signal": "",
+                "bidding_desc": "",
+                "sim_stats": sim,
+                "locked_base": base
+            }
+
     def get_security_quotes_safe(self, codes: List[str], force: bool = False) -> List[Dict[str, Any]]:
         """
         安全批量获取股票最新五档盘口行情（支持 force=True 强制透传全量穿透）
@@ -690,7 +922,8 @@ class TDXRealtimeFetcher:
             return []
 
         now_t = time.time()
-        is_trading, _ = is_trading_time()
+        is_allowed, stage_desc, stage_meta = is_tdx_trading_allowed()
+        is_trading = is_allowed
         cooldown_sec = 60.0 if is_trading else 180.0
 
         # 若强制刷新，清空非交易时段定盘与静默状态
@@ -761,6 +994,10 @@ class TDXRealtimeFetcher:
                                     self._off_hours_success_counts[c_clean] += 1
                                     if self._off_hours_success_counts[c_clean] >= 3:
                                         self._off_hours_settled_codes.add(c_clean)
+
+                                # 🎯 集合竞价早盘意图拟合与不可撤单突击加速分析 (09:16 ~ 09:25)
+                                b_res = self.record_and_evaluate_bidding_surge(q)
+                                q.update(b_res)
                         all_fetched_quotes.extend(quotes)
 
                         # 处理该批次中个别未返回行情的标的（自动记录并冷却）
@@ -800,6 +1037,8 @@ class TDXRealtimeFetcher:
                                                 self._off_hours_cached_quotes[sq_code] = sq
                                                 self._no_quote_counts[sq_code] = 0
                                                 self._unlisted_or_dormant_codes.discard(sq_code)
+                                                b_res = self.record_and_evaluate_bidding_surge(sq)
+                                                sq.update(b_res)
                                     else:
                                         # 该子批次包含异常代码，整批记一次未返回并自动冷却
                                         for _, c_clean in sub_b:
@@ -826,7 +1065,7 @@ class TDXRealtimeFetcher:
         return cached_results + all_fetched_quotes
 
     def clear_stock_cache(self, code: str):
-        """【🧹 彻底清理单股 TDX 行情缓存】清除 1 分钟 K 线内存缓存与盘后快照缓存"""
+        """【🧹 彻底清理单股 TDX 行情缓存】清除 1 分钟 K 线内存缓存、盘后快照缓存与集合竞价快照"""
         c_clean = str(code).strip().zfill(6)
         with self._conn_lock:
             self._intraday_bars_cache.pop(c_clean, None)
@@ -835,7 +1074,12 @@ class TDXRealtimeFetcher:
             self._no_quote_last_attempt.pop(c_clean, None)
             self._no_quote_counts.pop(c_clean, None)
             self._unlisted_or_dormant_codes.discard(c_clean)
-        self.add_log(f"🧹 已强力清除标的 [{c_clean}] 的 TDX 内存 K 线与快照缓存！", level="INFO")
+        with self._bidding_lock:
+            self._bidding_history.pop(c_clean, None)
+            self._bidding_locked_base.pop(c_clean, None)
+            self._bidding_sim_stats.pop(c_clean, None)
+            self._bidding_signals.pop(c_clean, None)
+        self.add_log(f"🧹 已强力清除标的 [{c_clean}] 的 TDX 内存 K 线、快照与集合竞价缓存！", level="INFO")
 
 
 
