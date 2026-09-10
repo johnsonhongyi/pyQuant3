@@ -130,53 +130,58 @@ def test_new_stock_panel_sorting_flow(qapp, monkeypatch):
     panel.df_data = mock_df
     panel._render_table()
 
-    # 1. 测试按“涨跌%”列 (col=8) 降序排序
-    panel.sort_col = 8
+    col_code = panel._get_col_by_header("代码")
+    col_pct = panel._get_col_by_header("涨跌%")
+    col_price = panel._get_col_by_header("现价")
+    col_listing = panel._get_col_by_header("上市日")
+
+    # 1. 测试按“涨跌%”列降序排序
+    panel.sort_col = col_pct
     panel.sort_order = Qt.SortOrder.DescendingOrder
-    panel.table.sortItems(8, Qt.SortOrder.DescendingOrder)
+    panel.table.sortItems(col_pct, Qt.SortOrder.DescendingOrder)
 
     # 检查第0行涨跌幅最大为 高凯技术 (+16.11%)
-    first_code = panel.table.item(0, 0).text()
-    first_pct = panel.table.item(0, 8).text()
+    first_code = panel.table.item(0, col_code).text()
+    first_pct = panel.table.item(0, col_pct).text()
     assert first_code == "688835"
     assert "+16.11%" in first_pct
 
     # 检查最后一行涨跌幅最小为 长进光子 (-5.27%)
     last_idx = panel.table.rowCount() - 1
-    last_code = panel.table.item(last_idx, 0).text()
-    last_pct = panel.table.item(last_idx, 8).text()
+    last_code = panel.table.item(last_idx, col_code).text()
+    last_pct = panel.table.item(last_idx, col_pct).text()
     assert last_code == "688635"
     assert "-5.27%" in last_pct
 
-    # 2. 测试按“现价”列 (col=7) 升序排序
-    panel.sort_col = 7
+    # 2. 测试按“现价”列升序排序
+    panel.sort_col = col_price
     panel.sort_order = Qt.SortOrder.AscendingOrder
-    panel.table.sortItems(7, Qt.SortOrder.AscendingOrder)
+    panel.table.sortItems(col_price, Qt.SortOrder.AscendingOrder)
 
     # 检查第0行价格最低为 双英集团 (14.76)
-    p_first_code = panel.table.item(0, 0).text()
-    p_first_val = panel.table.item(0, 7).text()
+    p_first_code = panel.table.item(0, col_code).text()
+    p_first_val = panel.table.item(0, col_price).text()
     assert p_first_code == "920059"
     assert "14.76" in p_first_val
 
     # 检查最后一行价格最高为 联讯仪器 (2209.00)
-    p_last_code = panel.table.item(last_idx, 0).text()
-    p_last_val = panel.table.item(last_idx, 7).text()
+    p_last_code = panel.table.item(last_idx, col_code).text()
+    p_last_val = panel.table.item(last_idx, col_price).text()
     assert p_last_code == "688808"
     assert "2209.00" in p_last_val
 
-    # 3. 测试按“上市日”列 (col=4) 降序排序
-    panel.sort_col = 4
+    # 3. 测试按“上市日”列降序排序
+    panel.sort_col = col_listing
     panel.sort_order = Qt.SortOrder.DescendingOrder
-    panel.table.sortItems(4, Qt.SortOrder.DescendingOrder)
+    panel.table.sortItems(col_listing, Qt.SortOrder.DescendingOrder)
 
-    d_first_code = panel.table.item(0, 0).text()
-    d_first_date = panel.table.item(0, 4).text()
+    d_first_code = panel.table.item(0, col_code).text()
+    d_first_date = panel.table.item(0, col_listing).text()
     assert d_first_code == "688835"  # 2026-08-25 最新
     assert d_first_date == "2026-08-25"
 
-    d_last_code = panel.table.item(last_idx, 0).text()
-    d_last_date = panel.table.item(last_idx, 4).text()
+    d_last_code = panel.table.item(last_idx, col_code).text()
+    d_last_date = panel.table.item(last_idx, col_listing).text()
     assert d_last_code == "688808"  # 2026-04-24 最早
     assert d_last_date == "2026-04-24"
 
@@ -239,31 +244,34 @@ def test_today_event_highlight_and_priority(qapp, monkeypatch):
     assert panel.table.item(2, 0).pin_rank == 1
     assert panel.table.item(3, 0).pin_rank == 999
 
+    col_code = panel._get_col_by_header("代码")
+    col_price = panel._get_col_by_header("现价")
+
     # 2. 点击表头进行任何列排序（例如按现价升序）
-    panel.sort_col = 6
+    panel.sort_col = col_price
     panel.sort_order = Qt.SortOrder.AscendingOrder
-    panel.table.sortItems(6, Qt.SortOrder.AscendingOrder)
+    panel.table.sortItems(col_price, Qt.SortOrder.AscendingOrder)
 
     # 验证升序模式下梯队绝对次序依然是: 梯队0 -> 梯队1 -> 梯队2
     # 梯队0内部: 洛轴股份 (15.88) < 高凯技术 (272.86)
     # 梯队1: 联讯仪器 (2209.00)
     # 梯队2: 双英集团 (14.76)
-    res_codes = [panel.table.item(r, 0).text() for r in range(4)]
+    res_codes = [panel.table.item(r, col_code).text() for r in range(4)]
     assert res_codes[0] == "301699"  # 今日申购 (梯队0，价格较低)
     assert res_codes[1] == "688835"  # 今日上市 (梯队0，价格较高)
     assert res_codes[2] == "688808"  # 重点关注 (梯队1，即便价格高达2209也在梯队2之前)
     assert res_codes[3] == "920059"  # 普通项 (梯队2，即便价格只有14.76也排在最下方)
 
     # 3. 点击按现价降序排序
-    panel.sort_col = 6
+    panel.sort_col = col_price
     panel.sort_order = Qt.SortOrder.DescendingOrder
-    panel.table.sortItems(6, Qt.SortOrder.DescendingOrder)
+    panel.table.sortItems(col_price, Qt.SortOrder.DescendingOrder)
 
     # 验证降序模式下梯队绝对次序依然是: 梯队0 -> 梯队1 -> 梯队2
     # 梯队0内部: 高凯技术 (272.86) > 洛轴股份 (15.88)
     # 梯队1: 联讯仪器 (2209.00)
     # 梯队2: 双英集团 (14.76)
-    res_desc_codes = [panel.table.item(r, 0).text() for r in range(4)]
+    res_desc_codes = [panel.table.item(r, col_code).text() for r in range(4)]
     assert res_desc_codes[0] == "688835"  # 今日上市 (梯队0，价格较高)
     assert res_desc_codes[1] == "301699"  # 今日申购 (梯队0，价格较低)
     assert res_desc_codes[2] == "688808"  # 重点关注 (梯队1)
@@ -315,33 +323,37 @@ def test_velocity_and_vwap_sorting(qapp):
     panel.df_data = mock_df
     panel._render_table()
 
-    # 1. 测试第 9 列 (涨速%) 降序排序: 高凯技术 (+3.8%) > 双英集团 (+0.5%) > 联讯仪器 (-0.8%) > 长进光子 (-2.5%)
-    panel.sort_col = 9
+    col_code = panel._get_col_by_header("代码")
+    col_speed = panel._get_col_by_header("涨速")
+    col_vwap = panel._get_col_by_header("VWAP")
+
+    # 1. 测试“涨速%”列降序排序: 高凯技术 (+3.8%) > 双英集团 (+0.5%) > 联讯仪器 (-0.8%) > 长进光子 (-2.5%)
+    panel.sort_col = col_speed
     panel.sort_order = Qt.SortOrder.DescendingOrder
-    panel.table.sortItems(9, Qt.SortOrder.DescendingOrder)
+    panel.table.sortItems(col_speed, Qt.SortOrder.DescendingOrder)
 
-    codes_vel_desc = [panel.table.item(r, 0).text() for r in range(4)]
+    codes_vel_desc = [panel.table.item(r, col_code).text() for r in range(4)]
     assert codes_vel_desc == ["688835", "920059", "688808", "688635"]
-    assert "+3.8%" in panel.table.item(0, 9).text()
-    assert "-2.5%" in panel.table.item(3, 9).text()
+    assert "+3.8%" in panel.table.item(0, col_speed).text()
+    assert "-2.5%" in panel.table.item(3, col_speed).text()
 
-    # 2. 测试第 9 列 (涨速%) 升序排序: 长进光子 (-2.5%) < 联讯仪器 (-0.8%) < 双英集团 (+0.5%) < 高凯技术 (+3.8%)
-    panel.sort_col = 9
+    # 2. 测试“涨速%”列升序排序: 长进光子 (-2.5%) < 联讯仪器 (-0.8%) < 双英集团 (+0.5%) < 高凯技术 (+3.8%)
+    panel.sort_col = col_speed
     panel.sort_order = Qt.SortOrder.AscendingOrder
-    panel.table.sortItems(9, Qt.SortOrder.AscendingOrder)
+    panel.table.sortItems(col_speed, Qt.SortOrder.AscendingOrder)
 
-    codes_vel_asc = [panel.table.item(r, 0).text() for r in range(4)]
+    codes_vel_asc = [panel.table.item(r, col_code).text() for r in range(4)]
     assert codes_vel_asc == ["688635", "688808", "920059", "688835"]
 
-    # 3. 测试第 10 列 (VWAP 偏离) 降序排序: 高凯技术 (+4.95%) > 双英集团 (+1.10%) > 联讯仪器 (+0.41%) > 长进光子 (-3.23%)
-    panel.sort_col = 10
+    # 3. 测试“VWAP 偏离”列降序排序: 高凯技术 (+4.95%) > 双英集团 (+1.10%) > 联讯仪器 (+0.41%) > 长进光子 (-3.23%)
+    panel.sort_col = col_vwap
     panel.sort_order = Qt.SortOrder.DescendingOrder
-    panel.table.sortItems(10, Qt.SortOrder.DescendingOrder)
+    panel.table.sortItems(col_vwap, Qt.SortOrder.DescendingOrder)
 
-    codes_vwap_desc = [panel.table.item(r, 0).text() for r in range(4)]
+    codes_vwap_desc = [panel.table.item(r, col_code).text() for r in range(4)]
     assert codes_vwap_desc == ["688835", "920059", "688808", "688635"]
-    assert "+5.0%" in panel.table.item(0, 10).text() or "+4.9%" in panel.table.item(0, 10).text()
-    assert "-3.2%" in panel.table.item(3, 10).text()
+    assert "+5.0%" in panel.table.item(0, col_vwap).text() or "+4.9%" in panel.table.item(0, col_vwap).text()
+    assert "-3.2%" in panel.table.item(3, col_vwap).text()
 
 
 

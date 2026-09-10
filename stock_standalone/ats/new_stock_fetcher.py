@@ -840,6 +840,17 @@ class NewStockFetcher:
             df.at[idx, "bidding_advice"] = bidding_advice
             df.at[idx, "bidding_amt_wan"] = b_amt_wan
 
+            # 🛡️ 严格状态守卫：未上市/今日申购标的严禁被赋予二级市场非零现价、涨跌幅、换手与成交额
+            if "待上市" in st or "今日申购" in st or "申购" in st:
+                df.at[idx, "price"] = 0.0
+                df.at[idx, "pct"] = 0.0
+                df.at[idx, "amount_yi"] = 0.0
+                df.at[idx, "turnover"] = 0.0
+                df.at[idx, "velocity_pct"] = 0.0
+                df.at[idx, "vwap_dev_pct"] = 0.0
+                df.at[idx, "bidding_tag"] = "--"
+                df.at[idx, "bidding_advice"] = "尚未上市交易"
+
         return df
 
     def _check_strategy_exists(self, code: str) -> bool:

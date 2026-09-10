@@ -2520,6 +2520,11 @@ class TDXRealtimeFetcher:
             )
             is_reentry = reentry_info.get("is_reentry", False)
 
+            # 💡 计算 VWAP 脱离成本区幅度 (成本线相对开盘价拉升的百分比)
+            open_p_val = float(it.get("open", 0.0) or 0.0)
+            vwap_escape_pct = ((vwap - open_p_val) / open_p_val * 100.0) if (open_p_val > 0 and vwap > 0) else 0.0
+            it["vwap_escape_pct"] = round(vwap_escape_pct, 2)
+
             # ── 💡 统一多模块智能阿尔法分拣决策 (集合竞价高开竞速与盘中连续撮合买点) ──
             if is_bidding_session:
                 if "新股" in order_intent and "抢筹" in order_intent:
@@ -2617,12 +2622,7 @@ class TDXRealtimeFetcher:
                     reason = f"竞价阶段常规博弈 (+{pct:.1f}%, 买盘压强{bid_p:.0f}%)"
                     type_priority = 50
 
-            # 💡 计算 VWAP 脱离成本区幅度 (成本线相对开盘价拉升的百分比)
-            open_p_val = float(it.get("open", 0.0) or 0.0)
-            vwap_escape_pct = ((vwap - open_p_val) / open_p_val * 100.0) if (open_p_val > 0 and vwap > 0) else 0.0
-            it["vwap_escape_pct"] = round(vwap_escape_pct, 2)
-
-            if (pct >= 9.5 and ("涨停" in order_intent or bid_p >= 75.0)) or (is_sec_leader and pct >= 4.5 and vwap_dev >= 0.0):
+            elif (pct >= 9.5 and ("涨停" in order_intent or bid_p >= 75.0)) or (is_sec_leader and pct >= 4.5 and vwap_dev >= 0.0):
                 # 👑 领涨龙头：封死涨停或板块绝对领涨第一名
                 buy_type = "👑 领涨龙头"
                 buy_tag = "LEADER"
