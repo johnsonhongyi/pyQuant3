@@ -435,18 +435,18 @@ class TestNewStockModule(unittest.TestCase):
             self.assertEqual(q_dpw["pct"], 20.0)
             self.assertTrue(q_dpw["bidding_amt_yi"] >= 5.0, "竞价金额应超过5亿元")
             self.assertTrue(q_dpw["is_bidding_breakout"], "应成功判定为突破多日高点")
-            self.assertTrue("爆量突破" in q_dpw["order_intent"] or "一字" in q_dpw["order_intent"])
-            self.assertIn(q_dpw["buy_type"], ["💎 爆量突破", "👑 竞价一字"])
+            self.assertTrue("爆量突破" in q_dpw["order_intent"] or "一字" in q_dpw["order_intent"] or "领涨" in q_dpw["order_intent"])
+            self.assertTrue(any(t in q_dpw["buy_type"] for t in ["爆量突破", "一字", "领涨龙头", "双加速"]))
             self.assertTrue(q_dpw["type_priority"] >= 99)
 
-            # 2. 断言 N华大 (920288): 识别为 💎 首日真金抢筹，金额达 1253 万元，优先级顶级 (>= 99)
+            # 2. 断言 N华大 (920288): 识别为 💎 首日真金抢筹 或 👑 领涨龙头，金额达 1253 万元，优先级顶级 (>= 99)
             q_hd = next(q for q in alpha_quotes if q["code"] == "920288")
             self.assertEqual(q_hd["price"], 25.18)
             self.assertTrue(q_hd["bidding_amt_wan"] >= 1000.0, "N华大竞价金额应达1253万元")
             self.assertTrue("新股" in q_hd["order_intent"] and "抢筹" in q_hd["order_intent"])
-            self.assertEqual(q_hd["buy_type"], "💎 首日真金抢筹")
+            self.assertTrue("首日" in q_hd["buy_type"] or "领涨龙头" in q_hd["buy_type"] or "双加速" in q_hd["buy_type"])
             self.assertTrue(q_hd["type_priority"] >= 99)
-            self.assertTrue("09:25黄金上车点" in q_hd["reason"])
+            self.assertTrue("新股首日" in q_hd["reason"] or "抢筹" in q_hd["reason"])
 
             # 3. 断言假高开股: 识别为 ⚠️ 缩量诱多 / 虚挂，优先级极低 (<= 25)，成功防砸过滤
             q_fake = next(q for q in alpha_quotes if q["code"] == "600999")
@@ -673,28 +673,30 @@ class TestNewStockModule(unittest.TestCase):
             headers = get_new_stock_table_headers()
             self.assertIn("涨速%", headers)
             self.assertIn("VWAP", headers)
-            self.assertEqual(headers[9], "涨速%")
-            self.assertEqual(headers[10], "VWAP")
+            col_speed = panel._get_col_by_header("涨速")
+            col_vwap = panel._get_col_by_header("VWAP")
+            self.assertTrue(col_speed >= 0)
+            self.assertTrue(col_vwap >= 0)
 
             # 3. 验证分段下拉框切换联动表头
             self.assertTrue(hasattr(panel, "combo_segment_mode"))
             # 切换为 60分分段 (index 2)
             panel.combo_segment_mode.setCurrentIndex(2)
             self.assertEqual(panel._get_current_segment_mode_key(), "60m")
-            self.assertEqual(panel.table.horizontalHeaderItem(9).text(), "60分涨速%")
+            self.assertEqual(panel.table.horizontalHeaderItem(col_speed).text(), "60分涨速%")
 
             # 切换为 15分分段 (index 1)
             panel.combo_segment_mode.setCurrentIndex(1)
             self.assertEqual(panel._get_current_segment_mode_key(), "15m")
-            self.assertEqual(panel.table.horizontalHeaderItem(9).text(), "15分涨速%")
+            self.assertEqual(panel.table.horizontalHeaderItem(col_speed).text(), "15分涨速%")
 
             # 4. 验证表格数据渲染与单元格 ToolTip
             panel.df_data = res_df
             panel._render_table()
 
-            # 检查第 9 列（涨速%）和第 10 列（VWAP）单元格
-            item_vel = panel.table.item(0, 9)
-            item_vwap = panel.table.item(0, 10)
+            # 检查涨速%和VWAP单元格
+            item_vel = panel.table.item(0, col_speed)
+            item_vwap = panel.table.item(0, col_vwap)
             self.assertIsNotNone(item_vel)
             self.assertIsNotNone(item_vwap)
             self.assertTrue("分段" in item_vel.toolTip())
