@@ -199,6 +199,7 @@ class TDXFetchLogDialog(QDialog):
             QFrame#top_info_frame { background-color: #18181c; border: 1px solid #282830; border-radius: 4px; }
         """)
         self._init_ui()
+        self._populate_servers_combo()
         self._refresh_logs()
 
         # 定时刷新器 (默认不开启，由用户勾选控制)
@@ -211,7 +212,7 @@ class TDXFetchLogDialog(QDialog):
         layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(8)
 
-        # 顶部状态卡片
+        # 顶部第一行状态卡片
         info_frame = QFrame()
         info_frame.setObjectName("top_info_frame")
         info_lay = QHBoxLayout(info_frame)
@@ -226,7 +227,7 @@ class TDXFetchLogDialog(QDialog):
         info_lay.addWidget(sep)
 
         self.lbl_server_info = QLabel("主站: --")
-        self.lbl_server_info.setStyleSheet("color: #ffaa44; font-size: 9pt;")
+        self.lbl_server_info.setStyleSheet("color: #ffaa44; font-size: 9pt; font-weight: bold;")
         info_lay.addWidget(self.lbl_server_info)
 
         info_lay.addStretch()
@@ -243,6 +244,86 @@ class TDXFetchLogDialog(QDialog):
         info_lay.addWidget(self.chk_auto_scroll)
 
         layout.addWidget(info_frame)
+
+        # 顶部第二行：主站手动选择与一键自动测速切换控制栏
+        server_ctl_frame = QFrame()
+        server_ctl_frame.setStyleSheet("background-color: #161822; border: 1px solid #282c3c; border-radius: 4px; padding: 2px;")
+        server_ctl_lay = QHBoxLayout(server_ctl_frame)
+        server_ctl_lay.setContentsMargins(8, 4, 8, 4)
+        server_ctl_lay.setSpacing(8)
+
+        lbl_select_title = QLabel("🎯 手动选择主站:")
+        lbl_select_title.setStyleSheet("color: #00ffcc; font-size: 8.5pt; font-weight: bold;")
+        server_ctl_lay.addWidget(lbl_select_title)
+
+        self.combo_servers = QComboBox()
+        self.combo_servers.setMinimumWidth(320)
+        self.combo_servers.setStyleSheet("""
+            QComboBox { 
+                background-color: #1a1e2b; 
+                color: #ffffff; 
+                border: 1px solid #334466; 
+                border-radius: 3px; 
+                padding: 3px 6px; 
+                font-size: 9pt; 
+                font-weight: bold; 
+            }
+            QComboBox::drop-down { width: 18px; }
+            QComboBox QAbstractItemView { 
+                background-color: #141620; 
+                color: #e2e2e5; 
+                selection-background-color: #243555; 
+                min-width: 360px; 
+            }
+        """)
+        self._is_populating_servers = False
+        self.combo_servers.currentIndexChanged.connect(self._on_server_combo_changed)
+        server_ctl_lay.addWidget(self.combo_servers)
+
+        self.btn_auto_switch = QPushButton("⚡ 自动测速选优")
+        self.btn_auto_switch.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_auto_switch.setToolTip("并发探测全国优质行情主站，并验证真实盘口数据，自动切换至最低延迟主站")
+        self.btn_auto_switch.setStyleSheet("""
+            QPushButton { 
+                background-color: #2a2012; 
+                color: #ffd700; 
+                border: 1px solid #ffaa00; 
+                border-radius: 3px; 
+                padding: 3px 12px; 
+                font-weight: bold; 
+                font-size: 8.5pt; 
+            }
+            QPushButton:hover { 
+                background-color: #ffd700; 
+                color: #000000; 
+            }
+        """)
+        self.btn_auto_switch.clicked.connect(self._on_click_auto_switch)
+        server_ctl_lay.addWidget(self.btn_auto_switch)
+
+        self.btn_failover = QPushButton("🔄 下一个备用主站")
+        self.btn_failover.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_failover.setToolTip("主动放弃当前主站，立即故障转移切换至备用服务器")
+        self.btn_failover.setStyleSheet("""
+            QPushButton { 
+                background-color: #182230; 
+                color: #66ccff; 
+                border: 1px solid #3388cc; 
+                border-radius: 3px; 
+                padding: 3px 10px; 
+                font-weight: bold; 
+                font-size: 8.5pt; 
+            }
+            QPushButton:hover { 
+                background-color: #66ccff; 
+                color: #000000; 
+            }
+        """)
+        self.btn_failover.clicked.connect(self._on_click_failover)
+        server_ctl_lay.addWidget(self.btn_failover)
+
+        server_ctl_lay.addStretch()
+        layout.addWidget(server_ctl_frame)
 
         # 中间日志文本展示区 (支持富文本彩色渲染)
         self.text_log = QTextEdit()
@@ -297,6 +378,64 @@ class TDXFetchLogDialog(QDialog):
 
         layout.addLayout(btn_lay)
 
+    def _populate_servers_combo(self):
+        """填充/同步服务器下拉选择框"""
+        from ats.tdx_realtime_fetcher import TDXRealtimeFetcher
+        fetcher = TDXRealtimeFetcher.get_instance()
+        servers = fetcher.get_available_servers()
+        if not servers:
+            return
+
+        self._is_populating_servers = True
+        self.combo_servers.blockSignals(True)
+        self.combo_servers.clear()
+
+        curr_host = fetcher.current_host
+        curr_key = (curr_host[1], curr_host[2]) if curr_host else None
+
+        selected_idx = 0
+        for idx, s in enumerate(servers):
+            tag = f"{s['latency']:.1f}ms" if s.get('is_active') else "备用"
+            display_text = f"[{s['ip']}:{s['port']}] {s['name']} ({tag})"
+            self.combo_servers.addItem(display_text, s)
+            if curr_key and (s['ip'], s['port']) == curr_key:
+                selected_idx = idx
+
+        self.combo_servers.setCurrentIndex(selected_idx)
+        self.combo_servers.blockSignals(False)
+        self._is_populating_servers = False
+
+    def _on_server_combo_changed(self, idx: int):
+        if self._is_populating_servers or idx < 0:
+            return
+        s = self.combo_servers.currentData()
+        if not s:
+            return
+        from ats.tdx_realtime_fetcher import TDXRealtimeFetcher
+        fetcher = TDXRealtimeFetcher.get_instance()
+        name = s.get("name", "TDX")
+        ip = s.get("ip")
+        port = s.get("port", 7709)
+        if ip:
+            fetcher.switch_host(name, ip, port)
+            self._refresh_logs()
+
+    def _on_click_auto_switch(self):
+        from ats.tdx_realtime_fetcher import TDXRealtimeFetcher
+        fetcher = TDXRealtimeFetcher.get_instance()
+        fetcher.add_log("⚡ 用户触发一键自动测速选优并切换主站...", level="SPEED")
+        fetcher.reselect_best_server()
+        self._populate_servers_combo()
+        self._refresh_logs()
+
+    def _on_click_failover(self):
+        from ats.tdx_realtime_fetcher import TDXRealtimeFetcher
+        fetcher = TDXRealtimeFetcher.get_instance()
+        fetcher.add_log("🔄 用户手动触发故障转移切换至备用主站...", level="SPEED")
+        fetcher.auto_failover()
+        self._populate_servers_combo()
+        self._refresh_logs()
+
     def _toggle_auto_refresh(self, checked: bool):
         if checked:
             self.timer.start()
@@ -305,6 +444,7 @@ class TDXFetchLogDialog(QDialog):
 
     def _on_click_refresh(self):
         """用户主动点击刷新按钮"""
+        self._populate_servers_combo()
         self._refresh_logs()
 
     def _refresh_logs(self):
