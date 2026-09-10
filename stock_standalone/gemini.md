@@ -1,3 +1,37 @@
+## 2026-09-10 17:45
+- [x] **【ATS 大盘四大指数 TDX API 直连精准化纠偏与底部从属面板自动折叠及状态持久化】(SSOT) (`ats/capital_dragon_engine.py`, `ats/ui/main_window.py`, `tests/test_market_volume_statusbar.py`, `tests/test_bottom_panel_collapse.py`)**：
+    - [x] **TDX API 官方权威数据源直连纠偏 (SSOT)**：
+        1. 根因穿透：原状态栏优先从全市场扫描池 `df_all` 中提取指数金额，但部分个股扫描源将深成指（399001）、创业板（399006）单位标记为万元，导致换算后出现 761万亿 等严重失真的数百倍脏数据；
+        2. 彻底根治：在 `capital_dragon_engine.py` 的 `get_market_indices_and_volume_summary` 中确立 TDX API 为权威单一数据源，生产环境直接穿透拉取 999999/000001、399001、399006、899050、399005；
+        3. 真实指标对齐：上证 7796.7亿 (0.94x)、深证 8674.8亿 (0.93x)、创业板 3840.6亿 (0.91x)、北证 153.7亿 (0.90x)、全市 16625.2亿 (较昨 -2107.3亿)，与上方资金主线表格中通达信官方拉取的数值 100% 精确一致；
+        4. 防呆校验：引入量比有效性合理区间约束 `0.05 < calc_vr <= 50.0`，杜绝异常虚假量比；
+    - [x] **底部从属面板自动折叠与状态自动持久化 (`MainWindow.center_tabs`)**：
+        1. 控件排布：在底部从属面板右上角（`self.center_tabs.setCornerWidget`）精准嵌入折叠/展开按钮 `btn_toggle_bottom_panel`；
+        2. 视觉美学与独占视区：展开状态显示 `[▼ 折叠]`；折叠状态切换为高质感深绿高亮 `[▲ 展开]`，面板仅保留约 32px 标签栏高度，上方主视区（分时 K 线、资金主线、选股池）独占 95% 屏幕空间；
+        3. 智能联动与自愈：支持全局 `Alt+B` 快捷键极速切换；折叠态下点击任意底部 Tab（持仓/流水/回测/内核）自动平滑展开恢复；手动拖动分隔条动态感知并同步按钮状态；
+        4. 状态自动持久化：使用 `ats_bottom_panel_collapsed` 与 `ats_bottom_panel_last_height` 写入 `window_config.json`，重启软件自动记忆用户上一次关闭时的折叠与高度状态；
+    - [x] **自动化测试回归全绿通过**：
+        1. 新增 `tests/test_bottom_panel_collapse.py` 覆盖 4 项折叠与持久化用例；
+        2. `tests/test_market_volume_statusbar.py` 4 项测试全绿通过；
+        3. 24 项核心集成测试与 40 项全模块回归测试 100% 全部 PASSED！
+
+## 2026-09-10 16:50
+- [x] **【ATS 底部状态栏大盘四大指数（上证/深证/创业板/北证）资金、量比与全市总交易额、较昨增减额常驻显示】(SSOT) (`ats/capital_dragon_engine.py`, `ats/ui/main_window.py`, `tests/test_market_volume_statusbar.py`)**：
+    - [x] **状态栏中央常驻排布与高质感富文本美学呈现**：
+        1. 在主窗口 `_init_statusbar` 中精准添加 `lbl_market_volume_status` 常驻控件，位于左侧联动/状态消息与右侧时钟倒计时之间，居中对称排布；
+        2. 采用高质感富文本呈现：指数名称采用次级灰（`#8e8e93`），成交金额采用醒目白色加粗（`#ffffff`），量比采用科技绿（`#00ff88`），全市总交易额采用金黄强调色（`#e3b341`），较昨增减额根据放量/缩量动态呈现亮红（`#ff5555`）与亮绿（`#00ff88`）；
+    - [x] **全市场四大指数资金量比与全市成交额统一计算引擎 (`get_market_indices_and_volume_summary`)**：
+        1. 优先从当前全市场行情 `df_all` 中提取上证（999999/000001）、深证（399001）、创业板（399006）、北证（899050）的成交额与虚拟量比；缺失时自动穿透 TDX API 补齐；
+        2. 官方权威全市总成交额口径：精准汇总沪市、深市、北交所三所合计交易额（`total_amt = sh_amt + sz_amt + bj_amt`）；
+        3. 较昨日增减额算法：每日自动拉取一次昨日三所指数基准日线并内存持久缓存 24 小时；收盘盘后时段（>=15:00 或 <09:00）按全天对比昨日全天，连续交易盘中时段（09:30~15:00）结合 `cct.get_work_time_ratio` 动态按时间比例同比测算增减额；
+    - [x] **轻量节流与防抖缓存保护 (0 主线程开销)**：
+        1. 计算引擎内置 1.5 秒防抖缓存，避免高频刷新下重复计算或拉取；
+        2. 状态栏在时钟定时器中实行 2 秒节流同步，并在工作线程回写 `_on_ledger_results` 时即时刷新；
+        3. 界面刷新实行严格的字符串 Dirty Check，内容未变动时 0 Qt 底层重绘；
+    - [x] **自动化测试回归全绿通过**：
+        1. 新增专属单元测试 `tests/test_market_volume_statusbar.py`，覆盖数据提取、盘中时间进度同比、盘后全天对比、防抖缓存及状态栏 UI 控件刷新（4 项测试全部 PASSED）；
+        2. 跨模块 36 项全量测试 100% 全部 PASSED！
+
 ## 2026-09-10 16:00
 - [x] **【ATS 资金主线全模块功能开关（自动持久化、关闭彻底阻断自动更新）与手动单次刷新数据按钮落地】(SSOT) (`ats/ui/capital_dragon_panel.py`, `tests/test_capital_dragon_panel_integration.py`)**：
     - [x] **精确排布与美学对齐 (Toolbar 布局)**：

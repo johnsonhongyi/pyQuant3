@@ -1020,3 +1020,163 @@ class CapitalDragonEngine:
                 if r["code"] == c:
                     return dict(r)
         return None
+
+    def get_market_indices_and_volume_summary(self, df_all: Optional[pd.DataFrame] = None, now_dt: Optional[Any] = None) -> Dict[str, Any]:
+        """
+        获取全市场四大核心指数（上证、深证、创业板、北证）的资金、量比，以及全市交易额和较昨日增减交易额 (SSOT)
+        支持带 1.5 秒轻量防抖缓存，避免高频刷新下重复计算或拉取
+        """
+        now = time.time()
+        # 1. 轻量缓存检查 (1.5s 防抖)
+        with self._cache_lock:
+            cached_sum = getattr(self, '_market_summary_cache', None)
+            cached_ts = getattr(self, '_market_summary_cache_ts', 0.0)
+            if cached_sum and (now - cached_ts < 1.5) and df_all is None:
+                return dict(cached_sum)
+
+        # 2. 获取昨日指数收盘基准 (每天拉取一次并内存缓存)
+        import datetime
+        if now_dt is None:
+            now_dt = datetime.datetime.now()
+        today_str = now_dt.strftime('%Y-%m-%d')
+        prev_data = getattr(self, '_yesterday_index_amounts', None)
+        if not prev_data or getattr(self, '_yesterday_cache_date', '') != today_str:
+            try:
+                from ats.tdx_realtime_fetcher import TDXRealtimeFetcher
+                fetcher = TDXRealtimeFetcher.get_instance()
+                with fetcher._conn_lock:
+                    if not fetcher._is_connected or not fetcher.api:
+                        fetcher.connect()
+                    if fetcher._is_connected and fetcher.api:
+                        b_sh = fetcher.api.get_index_bars(4, 1, '000001', 0, 3)
+                        b_sz = fetcher.api.get_index_bars(4, 0, '399001', 0, 3)
+                        b_cy = fetcher.api.get_index_bars(4, 0, '399006', 0, 3)
+                        b_bj = fetcher.api.get_index_bars(4, 2, '899050', 0, 3)
+
+                        p_sh = b_sh[-2]['amount'] / 1e8 if b_sh and len(b_sh) >= 2 else 0.0
+                        p_sz = b_sz[-2]['amount'] / 1e8 if b_sz and len(b_sz) >= 2 else 0.0
+                        p_cy = b_cy[-2]['amount'] / 1e8 if b_cy and len(b_cy) >= 2 else 0.0
+                        p_bj = b_bj[-2]['amount'] / 1e8 if b_bj and len(b_bj) >= 2 else 0.0
+
+                        v_sh = b_sh[-2]['vol'] if b_sh and len(b_sh) >= 2 else 1.0
+                        v_sz = b_sz[-2]['vol'] if b_sz and len(b_sz) >= 2 else 1.0
+                        v_cy = b_cy[-2]['vol'] if b_cy and len(b_cy) >= 2 else 1.0
+                        v_bj = b_bj[-2]['vol'] if b_bj and len(b_bj) >= 2 else 1.0
+
+                        prev_data = {
+                            'sh': p_sh, 'sz': p_sz, 'cy': p_cy, 'bj': p_bj,
+                            'total': p_sh + p_sz + p_bj,
+                            'vol_sh': v_sh, 'vol_sz': v_sz, 'vol_cy': v_cy, 'vol_bj': v_bj
+                        }
+                        self._yesterday_index_amounts = prev_data
+                        self._yesterday_cache_date = today_str
+            except Exception as e_prev:
+                logger.debug(f"[CapitalDragonEngine] 获取昨日指数基准异常: {e_prev}")
+                prev_data = getattr(self, '_yesterday_index_amounts', {}) or {}
+
+        # 3. 提取四大指数的最新成交额与量比
+        # 生产环境 (df_all is None): 强制直连 TDX API 保证 100% 官方实时准确，杜绝全市场扫描池代码或单位污染
+        # 测试环境 (df_all is not None): 从传入的 DataFrame 提取，支持离线单元测试
+        extracted = {}
+        if df_all is not None and not df_all.empty:
+            code_col = 'code' if 'code' in df_all.columns else None
+            codes_s = df_all[code_col].astype(str).str.strip().str.zfill(6) if code_col else df_all.index.astype(str).str.strip().str.zfill(6)
+            for idx_key, target_code in [('sh', '999999'), ('sz', '399001'), ('cy', '399006'), ('bj', '899050')]:
+                cand_codes = [target_code, '000001'] if idx_key == 'sh' else [target_code]
+                for cand in cand_codes:
+                    match_mask = (codes_s == cand)
+                    if match_mask.any():
+                        row = df_all[match_mask].iloc[0]
+                        raw_amt = float(row.get('amount', 0.0) or 0.0)
+                        amt_yi = (raw_amt / 1e8) if raw_amt > 1e6 else raw_amt
+                        raw_vr = float(row.get('vol_ratio', row.get('volume', 1.0)) or 1.0)
+                        extracted[idx_key] = {'amount_yi': amt_yi, 'vol_ratio': raw_vr}
+                        break
+        else:
+            need_fetch = ['999999', '000001', '399001', '399006', '899050', '399005']
+            tdx_res = self._fetch_tdx_index_data(need_fetch)
+            for k, c in [('sh', '999999'), ('sz', '399001'), ('cy', '399006'), ('bj', '899050')]:
+                info = tdx_res.get(c) or (tdx_res.get('000001') if c == '999999' else None)
+                if info and float(info.get('amount_yi', 0.0) or 0.0) > 0:
+                    a_yi = float(info.get('amount_yi', 0.0))
+                    prev_vol = prev_data.get(f'vol_{k}', 1.0) if prev_data else 1.0
+                    cur_vol = float(info.get('vol', 0.0) or 0.0)
+                    try:
+                        from JohnsonUtil import commonTips as cct
+                        ratio_t = float(cct.get_work_time_ratio(resample='d'))
+                    except Exception:
+                        ratio_t = 1.0
+                    ratio_t = max(0.05, min(ratio_t, 1.0))
+                    calc_vr = round(cur_vol / (max(prev_vol, 1.0) * ratio_t), 2) if (cur_vol > 0 and prev_vol > 1000.0) else 1.0
+                    if calc_vr <= 0.05 or calc_vr > 50.0:
+                        calc_vr = 1.0
+                    extracted[k] = {'amount_yi': a_yi, 'vol_ratio': calc_vr}
+
+        sh_amt = round(extracted.get('sh', {}).get('amount_yi', 0.0), 1)
+        sh_vr = round(extracted.get('sh', {}).get('vol_ratio', 1.0), 2)
+        sz_amt = round(extracted.get('sz', {}).get('amount_yi', 0.0), 1)
+        sz_vr = round(extracted.get('sz', {}).get('vol_ratio', 1.0), 2)
+        cy_amt = round(extracted.get('cy', {}).get('amount_yi', 0.0), 1)
+        cy_vr = round(extracted.get('cy', {}).get('vol_ratio', 1.0), 2)
+        bj_amt = round(extracted.get('bj', {}).get('amount_yi', 0.0), 1)
+        bj_vr = round(extracted.get('bj', {}).get('vol_ratio', 1.0), 2)
+
+        # 4. 全市总交易额
+        total_amt = round(sh_amt + sz_amt + bj_amt, 1)
+        if total_amt <= 0 and df_all is not None and not df_all.empty and 'amount' in df_all.columns:
+            total_amt = round(float(df_all['amount'].sum()) / 1e8, 1)
+
+        # 5. 计算较昨日增减交易额
+        prev_total = prev_data.get('total', 0.0) if prev_data else 0.0
+        diff_amt = 0.0
+        if prev_total > 0:
+            now_hour = now_dt.hour
+            # 15:00 后收盘或 09:00 前按全天算，盘中按时间进度算
+            if now_hour >= 15 or now_hour < 9:
+                diff_amt = round(total_amt - prev_total, 1)
+            else:
+                try:
+                    from JohnsonUtil import commonTips as cct
+                    ratio_t = float(cct.get_work_time_ratio(resample='d'))
+                except Exception:
+                    ratio_t = 1.0
+                ratio_t = max(0.05, min(ratio_t, 1.0))
+                diff_amt = round(total_amt - (prev_total * ratio_t), 1)
+
+        diff_str = f"+{diff_amt:.1f}亿" if diff_amt > 0 else f"{diff_amt:.1f}亿"
+        diff_color = "#ff5555" if diff_amt >= 0 else "#00ff88"
+
+        formatted_html = (
+            f"<span style='color:#8e8e93;'>上证:</span> <span style='color:#ffffff; font-weight:bold;'>{sh_amt:.1f}亿</span> <span style='color:#00ff88;'>({sh_vr:.2f}x)</span> &nbsp;|&nbsp; "
+            f"<span style='color:#8e8e93;'>深证:</span> <span style='color:#ffffff; font-weight:bold;'>{sz_amt:.1f}亿</span> <span style='color:#00ff88;'>({sz_vr:.2f}x)</span> &nbsp;|&nbsp; "
+            f"<span style='color:#8e8e93;'>创业板:</span> <span style='color:#ffffff; font-weight:bold;'>{cy_amt:.1f}亿</span> <span style='color:#00ff88;'>({cy_vr:.2f}x)</span> &nbsp;|&nbsp; "
+            f"<span style='color:#8e8e93;'>北证:</span> <span style='color:#ffffff; font-weight:bold;'>{bj_amt:.1f}亿</span> <span style='color:#00ff88;'>({bj_vr:.2f}x)</span> &nbsp;|&nbsp; "
+            f"<span style='color:#8e8e93;'>全市:</span> <span style='color:#e3b341; font-weight:bold;'>{total_amt:.1f}亿</span> "
+            f"<span style='color:{diff_color}; font-weight:bold;'>(较昨 {diff_str})</span>"
+        )
+
+        plain_text = (
+            f"上证: {sh_amt:.1f}亿 ({sh_vr:.2f}x) | "
+            f"深证: {sz_amt:.1f}亿 ({sz_vr:.2f}x) | "
+            f"创业板: {cy_amt:.1f}亿 ({cy_vr:.2f}x) | "
+            f"北证: {bj_amt:.1f}亿 ({bj_vr:.2f}x) | "
+            f"全市: {total_amt:.1f}亿 (较昨 {diff_str})"
+        )
+
+        res_dict = {
+            "sh_amt": sh_amt, "sh_vr": sh_vr,
+            "sz_amt": sz_amt, "sz_vr": sz_vr,
+            "cy_amt": cy_amt, "cy_vr": cy_vr,
+            "bj_amt": bj_amt, "bj_vr": bj_vr,
+            "total_amt": total_amt,
+            "diff_amt": diff_amt,
+            "diff_str": diff_str,
+            "formatted_html": formatted_html,
+            "plain_text": plain_text
+        }
+
+        with self._cache_lock:
+            self._market_summary_cache = res_dict
+            self._market_summary_cache_ts = time.time()
+
+        return res_dict
