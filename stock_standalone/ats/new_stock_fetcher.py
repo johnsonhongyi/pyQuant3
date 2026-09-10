@@ -32,6 +32,7 @@ DEFAULT_HEADERS = {
 # 本地持久化文件路径
 IPO_CALENDAR_CACHE_FILE = os.path.join(get_app_root(), "config", "new_stock_ipo_calendar.json")
 NEW_STOCK_DATA_CACHE_FILE = os.path.join(get_app_root(), "config", "new_stock_data_cache.json")
+LIFT_CALENDAR_CACHE_FILE = os.path.join(get_app_root(), "config", "new_stock_lift_calendar.json")
 
 # 出厂预置新股清单（当本地无文件且网络离线时的终极安全兜底）
 FACTORY_DEFAULT_NEW_STOCKS: List[Dict[str, Any]] = [
@@ -89,15 +90,17 @@ class NewStockFetcher:
     def __init__(self):
         self._cached_stocks_df: Optional[pd.DataFrame] = None
         self._cached_ipo_dict: Dict[str, Dict[str, Any]] = {}
+        self._cached_lift_dict: Dict[str, Dict[str, Any]] = {}
         self._last_fetch_time: float = 0.0
         self._last_calendar_fetch_time: float = 0.0
+        self._last_lift_fetch_time: float = 0.0
         self._cache_ttl_seconds: float = 2.0  # 2秒内存缓存，满足高频实时刷新
 
         # 启动时自动从本地磁盘持久化文件加载恢复
         self._load_persisted_data()
 
     def _load_persisted_data(self):
-        """【💾 磁盘持久化加载】冷启动瞬间恢复本地已有的 IPO 日历与全量新股表"""
+        """【💾 磁盘持久化加载】冷启动瞬间恢复本地已有的 IPO 日历、限售解禁日历与全量新股表"""
         # 1. 恢复 IPO 日历
         if os.path.exists(IPO_CALENDAR_CACHE_FILE):
             try:
@@ -118,7 +121,21 @@ class NewStockFetcher:
             if c not in self._cached_ipo_dict:
                 self._cached_ipo_dict[c] = dict(item)
 
-        # 2. 恢复新股汇总 DataFrame
+        # 2. 恢复限售解禁日历
+        if os.path.exists(LIFT_CALENDAR_CACHE_FILE):
+            try:
+                with open(LIFT_CALENDAR_CACHE_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if isinstance(data, dict):
+                        items = data.get("items", {})
+                        if isinstance(items, dict) and items:
+                            self._cached_lift_dict = items
+                            self._last_lift_fetch_time = float(data.get("updated_at", 0.0))
+                            logger.info(f"[OK] 成功从磁盘恢复限售解禁日历: 共 {len(self._cached_lift_dict)} 条记录")
+            except Exception as e:
+                logger.debug(f"加载限售解禁日历持久化文件异常: {e}")
+
+        # 3. 恢复新股汇总 DataFrame
         if os.path.exists(NEW_STOCK_DATA_CACHE_FILE):
             try:
                 with open(NEW_STOCK_DATA_CACHE_FILE, "r", encoding="utf-8") as f:
@@ -168,6 +185,135 @@ class NewStockFetcher:
                 os.rename(tmp_file, NEW_STOCK_DATA_CACHE_FILE)
         except Exception as e:
             logger.debug(f"持久化保存新股数据表异常: {e}")
+
+    def _save_persisted_lift_calendar(self):
+        """【💾 磁盘持久化保存】将限售解禁日历原子落盘保存至 config/new_stock_lift_calendar.json"""
+        if not self._cached_lift_dict:
+            return
+        try:
+            os.makedirs(os.path.dirname(LIFT_CALENDAR_CACHE_FILE), exist_ok=True)
+            payload = {
+                "updated_at": time.time(),
+                "count": len(self._cached_lift_dict),
+                "items": self._cached_lift_dict
+            }
+            tmp_file = f"{LIFT_CALENDAR_CACHE_FILE}.tmp_{os.getpid()}"
+            with open(tmp_file, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+            if os.path.exists(LIFT_CALENDAR_CACHE_FILE):
+                os.replace(tmp_file, LIFT_CALENDAR_CACHE_FILE)
+            else:
+                os.rename(tmp_file, LIFT_CALENDAR_CACHE_FILE)
+        except Exception as e:
+            logger.debug(f"持久化保存限售解禁日历异常: {e}")
+
+    def fetch_restricted_release_calendar(self, codes: List[str], force: bool = False) -> Dict[str, Dict[str, Any]]:
+        """
+        从东方财富数据中心批量拉取新股/次新股的最近限售解禁日历 (RPT_LIFT_STAGE):
+        - 批量查询语法: filter=(SECURITY_CODE in ("..."))
+        - 每批次最多 50 只标的，极速合并，单次请求约 0.2~0.4s
+        - 提取每只标的未来最近的解禁日期 (FREE_DATE >= today)、解禁股数、占总股本%与解禁类型
+        - 结果原子落盘保存至 config/new_stock_lift_calendar.json
+        """
+        now = time.time()
+        today_str = datetime.date.today().strftime("%Y-%m-%d")
+
+        # 6小时防频控：非强制刷新且本地已有缓存时，直接返回已有缓存
+        if not force and self._cached_lift_dict and (now - self._last_lift_fetch_time < 6 * 3600):
+            missing_codes = [c for c in codes if c not in self._cached_lift_dict]
+            if not missing_codes:
+                return self._cached_lift_dict
+
+        # 提取有效 6 位代码
+        valid_codes = list(set([str(c).strip().zfill(6) for c in codes if str(c).strip()]))
+        if not valid_codes:
+            return self._cached_lift_dict
+
+        target_codes = valid_codes if force else [c for c in valid_codes if c not in self._cached_lift_dict]
+        if not target_codes:
+            return self._cached_lift_dict
+
+        url = "https://datacenter-web.eastmoney.com/api/data/v1/get"
+        batch_size = 50
+        session = _get_direct_session()
+        updated_count = 0
+
+        for i in range(0, len(target_codes), batch_size):
+            chunk = target_codes[i:i + batch_size]
+            code_in_str = ",".join([f'"{c}"' for c in chunk])
+            flt = f'(SECURITY_CODE in ({code_in_str}))'
+
+            params = {
+                "sortColumns": "FREE_DATE",
+                "sortTypes": "1",
+                "pageSize": "500",
+                "pageNumber": "1",
+                "reportName": "RPT_LIFT_STAGE",
+                "filter": flt,
+                "columns": "SECURITY_CODE,SECURITY_NAME_ABBR,FREE_DATE,CURRENT_FREE_SHARES,ABLE_FREE_SHARES,LIFT_MARKET_CAP,FREE_RATIO,FREE_SHARES_TYPE,TOTAL_RATIO",
+                "source": "WEB",
+                "client": "WEB",
+            }
+            try:
+                resp = session.get(url, params=params, headers=DEFAULT_HEADERS, timeout=4.0)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    items = data.get("result", {}).get("data", []) if data.get("result") else []
+                    
+                    for it in items:
+                        c = str(it.get("SECURITY_CODE", "")).strip().zfill(6)
+                        if not c:
+                            continue
+                        f_date_raw = str(it.get("FREE_DATE", "") or "").split(" ")[0].strip()
+                        if not f_date_raw or f_date_raw in ("None", "null"):
+                            continue
+
+                        free_shares = safe_float(it.get("CURRENT_FREE_SHARES", 0.0))
+                        total_ratio = safe_float(it.get("TOTAL_RATIO", 0.0)) * 100.0  # 转为百分比
+                        free_type = str(it.get("FREE_SHARES_TYPE", "") or "").strip()
+
+                        candidate_info = {
+                            "code": c,
+                            "lift_date": f_date_raw,
+                            "lift_shares": free_shares,  # 万股
+                            "lift_ratio": total_ratio,   # 百分比
+                            "lift_type": free_type,
+                        }
+
+                        # 优先选未来最近一次解禁记录 (FREE_DATE >= today)
+                        if c not in self._cached_lift_dict:
+                            self._cached_lift_dict[c] = candidate_info
+                            updated_count += 1
+                        else:
+                            curr_saved = self._cached_lift_dict[c]
+                            curr_date = curr_saved.get("lift_date", "")
+                            if curr_date < today_str and f_date_raw >= today_str:
+                                self._cached_lift_dict[c] = candidate_info
+                                updated_count += 1
+                            elif curr_date >= today_str and f_date_raw >= today_str and f_date_raw < curr_date:
+                                self._cached_lift_dict[c] = candidate_info
+                                updated_count += 1
+                            elif curr_date < today_str and f_date_raw < today_str and f_date_raw > curr_date:
+                                self._cached_lift_dict[c] = candidate_info
+                                updated_count += 1
+            except Exception as ex:
+                logger.debug(f"批量拉取限售解禁日历异常 (chunk {i}~{i+batch_size}): {ex}")
+
+        # 对于查询后东财暂无解禁记录的标的，标记兜底占位
+        for c in target_codes:
+            if c not in self._cached_lift_dict:
+                self._cached_lift_dict[c] = {
+                    "code": c,
+                    "lift_date": "-",
+                    "lift_shares": 0.0,
+                    "lift_ratio": 0.0,
+                    "lift_type": ""
+                }
+
+        self._last_lift_fetch_time = time.time()
+        self._save_persisted_lift_calendar()
+        logger.info(f"✅ 东方财富新股限售解禁日历同步完成: 现存共 {len(self._cached_lift_dict)} 条记录 (本次更新/覆盖: {updated_count})")
+        return self._cached_lift_dict
 
     def fetch_ipo_calendar(self, page_size: int = 100, force: bool = False) -> Dict[str, Dict[str, Any]]:
         """
@@ -271,6 +417,9 @@ class NewStockFetcher:
         rows = []
         today_str = datetime.date.today().strftime("%Y-%m-%d")
 
+        # 增量同步/获取最新限售解禁日历
+        lift_dict = self.fetch_restricted_release_calendar(list(all_codes), force=force_refresh)
+
         for c in all_codes:
             ipo_info = ipo_dict.get(c, {})
 
@@ -298,6 +447,13 @@ class NewStockFetcher:
                 except Exception:
                     status = "次新"
 
+            # 限售解禁信息匹配
+            lift_info = lift_dict.get(c, {})
+            lift_date = lift_info.get("lift_date") or "-"
+            lift_shares = safe_float(lift_info.get("lift_shares", 0.0))
+            lift_ratio = safe_float(lift_info.get("lift_ratio", 0.0))
+            lift_type = str(lift_info.get("lift_type", ""))
+
             # 策略配置状态检测
             has_strategy = self._check_strategy_exists(c)
 
@@ -307,6 +463,10 @@ class NewStockFetcher:
                 "status": status,
                 "listing_date": listing_date if listing_date else "-",
                 "apply_date": apply_date if apply_date else "-",
+                "lift_date": lift_date,
+                "lift_shares": lift_shares,
+                "lift_ratio": lift_ratio,
+                "lift_type": lift_type,
                 "issue_price": issue_price if issue_price > 0 else 0.0,
                 "price": 0.0,
                 "pct": 0.0,
