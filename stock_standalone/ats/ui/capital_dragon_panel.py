@@ -37,12 +37,14 @@ from ats.ui.styles import (
 from ats.capital_dragon_engine import (
     CapitalDragonEngine, _safe_float, _clean_code,
     compute_dragon_buy_type_sort_score,
-    get_dragon_extra_cols, get_dragon_table_headers
+    get_dragon_extra_cols, get_dragon_table_headers,
+    is_index_or_fund, is_major_index, MAJOR_INDEX_CODES
 )
 from JohnsonUtil import commonTips as cct
 
 PERSIST_KEY_DRAGON_FILTER = "ats_capital_dragon_filter_enabled"
 PERSIST_KEY_DRAGON_AUTO_UPDATE = "ats_capital_dragon_auto_update_enabled"
+PERSIST_KEY_DRAGON_FOCUS_STOCKS = "ats_capital_dragon_focus_stocks"
 
 logger = logging.getLogger("CapitalDragonPanel")
 
@@ -259,7 +261,43 @@ class CapitalDragonPanel(QWidget):
         saved_auto_update = load_config_node(PERSIST_KEY_DRAGON_AUTO_UPDATE, True)
         self.auto_update_enabled = parse_bool_config(saved_auto_update, default=True)
 
+        # ⭐ 资金主线专属独立重点关注持久化 (与全局重点关注完全解耦，优先级在指数之下、普通个股之上)
+        saved_focus = load_config_node(PERSIST_KEY_DRAGON_FOCUS_STOCKS, [])
+        if isinstance(saved_focus, (list, tuple, set)):
+            self.dragon_focus_stocks = set(str(c).strip().zfill(6) for c in saved_focus if c)
+        else:
+            self.dragon_focus_stocks = set()
+
         self._init_ui()
+
+    def is_dragon_focused(self, code: str) -> bool:
+        """判定标的是否在资金主线独立重点关注池中"""
+        c_clean = str(code).strip().zfill(6)
+        return c_clean in getattr(self, 'dragon_focus_stocks', set())
+
+    def toggle_dragon_focus(self, code: str, name: str = ""):
+        """切换资金主线独立重点关注状态，自动持久化并原地刷新表格与排序"""
+        c_clean = str(code).strip().zfill(6)
+        if not c_clean:
+            return
+        if not hasattr(self, 'dragon_focus_stocks'):
+            self.dragon_focus_stocks = set()
+
+        if c_clean in self.dragon_focus_stocks:
+            self.dragon_focus_stocks.discard(c_clean)
+            toast_msg = f"⭐ 已取消【{name or c_clean}】资金主线重点关注"
+        else:
+            self.dragon_focus_stocks.add(c_clean)
+            toast_msg = f"⭐ 已将【{name or c_clean}】设为资金主线重点关注 (优先级仅次于指数)"
+
+        save_config_node(PERSIST_KEY_DRAGON_FOCUS_STOCKS, list(self.dragon_focus_stocks))
+        try:
+            from stock_logic_utils import toast_messageQT
+            toast_messageQT(self, toast_msg)
+        except Exception:
+            pass
+
+        self._render_table()
 
     def _init_ui(self):
         main_layout = QVBoxLayout(self)
@@ -573,15 +611,14 @@ class CapitalDragonPanel(QWidget):
         bg_color: Optional[QColor] = None,
         font_bold: bool = False,
         tooltip: Optional[str] = None,
-        is_numeric: bool = True
+        is_numeric: bool = True,
+        is_pinned: bool = False,
+        pin_rank: int = 999
     ):
         """原地更新单元格，实施 Dirty Check，避免重复销毁与重建对象，降低 90%+ 的 UI 渲染开销"""
         item = self.table.item(row, col)
         if item is None:
-            if is_numeric:
-                item = NumericTableWidgetItem(text, raw_val=raw_val)
-            else:
-                item = QTableWidgetItem(text)
+            item = NumericTableWidgetItem(text, is_pinned=is_pinned, raw_val=raw_val, pin_rank=pin_rank)
             item.setTextAlignment(align)
             if fg_color:
                 item.setForeground(QBrush(QColor(fg_color)))
@@ -599,7 +636,12 @@ class CapitalDragonPanel(QWidget):
         # 针对已存在的 item 执行 Dirty Check 原地更新
         if item.text() != text:
             item.setText(text)
-        if is_numeric and hasattr(item, 'set_raw_value') and raw_val is not None:
+        if hasattr(item, 'set_pin_status'):
+            item.set_pin_status(is_pinned, pin_rank=pin_rank)
+        elif hasattr(item, 'is_pinned'):
+            item.is_pinned = is_pinned
+            item.pin_rank = pin_rank
+        if hasattr(item, 'set_raw_value') and raw_val is not None:
             if getattr(item, '_raw_value', None) != raw_val:
                 item.set_raw_value(raw_val)
         if fg_color:
@@ -788,20 +830,67 @@ class CapitalDragonPanel(QWidget):
                 if fset is None:
                     fset = set()
 
+            focus_set = getattr(self, 'dragon_focus_stocks', set())
+
+            def _get_dragon_record_tier(record: Dict[str, Any]) -> Tuple[int, int]:
+                """
+                计算记录的置顶梯队与 pin_rank：
+                - Tier 0: 主要指数 (Major Index) -> tier=0, pin_rank=0 (绝对最前)
+                - Tier 1: 资金主线重点关注 (Dragon Focus) -> tier=1, pin_rank=1 (优先级仅次于指数，在普通个股之上)
+                - Tier 2: 普通真龙个股 -> tier=2, pin_rank=999
+                """
+                c_clean = _clean_code(record.get('code', ''))
+                nm = str(record.get('name', '')).strip()
+                is_idx = record.get('is_index', False) or is_major_index(c_clean, nm)
+                if is_idx:
+                    return 0, 0
+                if c_clean in focus_set:
+                    return 1, 1
+                return 2, 999
+
             matched_records = []
             for d in dragons:
-                c_clean = str(d.get('code', '')).strip().zfill(6)
-                if fset is not None and c_clean not in fset:
+                c_clean = _clean_code(d.get('code', ''))
+                tier, _ = _get_dragon_record_tier(d)
+                if tier != 0 and fset is not None and c_clean not in fset:
                     continue
                 if filter_text:
                     extra_vals_str = " ".join(str(d.get("extra_cols", {}).get(ec, d.get(ec, ""))) for ec in getattr(self, 'extra_cols', []))
-                    match_str = f"{d['code']} {d['name']} {d['role']} {d['sector']} {d['action_type']} {d['reason']} {extra_vals_str}".lower()
+                    match_str = f"{d.get('code', '')} {d.get('name', '')} {d.get('role', '')} {d.get('sector', '')} {d.get('action_type', '')} {d.get('reason', '')} {extra_vals_str}".lower()
                     if filter_text not in match_str:
                         continue
                 matched_records.append(d)
 
-            # ⚡ 极限性能模式开启时：若未启用文本搜索且未启用策略过滤，精选 Top 50 核心真龙，极大提升高频渲染丝滑度
-            # 关闭时或有过滤时：显示全部匹配候选池，不做 Top 50 截断
+            # 若开启极限性能模式且有重点关注标的，若 dragon_records_all 中有但 dragons 中未收录，补齐收录
+            if getattr(self, 'extreme_perf_mode', True) and self._last_report:
+                all_recs = self._last_report.get("dragon_records_all", [])
+                existing_codes = {_clean_code(r.get('code', '')) for r in matched_records}
+                for r in all_recs:
+                    c_c = _clean_code(r.get('code', ''))
+                    if c_c in focus_set and c_c not in existing_codes:
+                        if fset is not None and c_c not in fset:
+                            continue
+                        if filter_text:
+                            extra_vals_str = " ".join(str(r.get("extra_cols", {}).get(ec, r.get(ec, ""))) for ec in getattr(self, 'extra_cols', []))
+                            match_str = f"{r.get('code', '')} {r.get('name', '')} {r.get('role', '')} {r.get('sector', '')} {r.get('action_type', '')} {r.get('reason', '')} {extra_vals_str}".lower()
+                            if filter_text not in match_str:
+                                continue
+                        matched_records.append(r)
+                        existing_codes.add(c_c)
+
+            # 无论是否有排序列，预排序均保证：Tier 0 指数最前 -> Tier 1 重点关注次之 -> Tier 2 普通标的
+            matched_records.sort(
+                key=lambda x: (
+                    _get_dragon_record_tier(x)[0],  # 0: 指数, 1: 重点关注, 2: 普通
+                    -x.get("priority", 0),
+                    -float(x.get("buy_type_sort_score", 0.0) or 0.0),
+                    -float(x.get("amount_yi", 0.0) or 0.0),
+                    -float(x.get("pct", 0.0) or 0.0)
+                )
+            )
+
+            # ⚡ 极限性能模式开启时：若未启用文本搜索且未启用策略过滤，精选 Top 50 核心真龙
+            # 由于已按 Tier 排序，所有的主要指数和重点关注均绝对优先保留在 Top 50 内！
             if getattr(self, 'extreme_perf_mode', True) and not filter_text and fset is None:
                 matched_records = matched_records[:50]
 
@@ -812,8 +901,9 @@ class CapitalDragonPanel(QWidget):
             new_selected_row = -1
 
             for row_idx, d in enumerate(matched_records):
-                code = d["code"]
-                name = d["name"]
+                code = str(d["code"]).strip()
+                name = str(d["name"]).strip()
+                c_clean = _clean_code(code)
                 role = d["role"]
                 sector = d["sector"]
                 price = d["price"]
@@ -825,19 +915,39 @@ class CapitalDragonPanel(QWidget):
                 stop_loss = d["stop_loss"]
                 reason = d["reason"]
 
+                tier, pin_rank = _get_dragon_record_tier(d)
+                is_row_pinned = (tier < 2)
+
+                # 行背景微光与高亮：
+                # Tier 0 (指数): 沉稳微弱暗蓝底色
+                # Tier 1 (重点关注): 尊贵微弱暗金底色
+                # Tier 2 (普通): 默认
+                row_bg = None
+                if tier == 1:
+                    row_bg = QColor(50, 42, 16, 130)
+                elif tier == 0:
+                    row_bg = QColor(18, 28, 42, 120)
+
+                # 重点关注名称醒目标注
+                name_display = f"⭐ {name}" if (tier == 1 and not name.startswith("⭐")) else name
+
                 if code == selected_code:
                     new_selected_row = row_idx
 
-                # 0: 代码
+                # 0: 代码 (纯数字则传入数值以支持精确数字排序)
+                code_raw = int(c_clean) if c_clean.isdigit() else c_clean
                 self._set_or_update_cell(
-                    row_idx, 0, code, raw_val=0,
-                    align=Qt.AlignmentFlag.AlignCenter, is_numeric=True
+                    row_idx, 0, code, raw_val=code_raw,
+                    align=Qt.AlignmentFlag.AlignCenter, bg_color=row_bg,
+                    is_numeric=True, is_pinned=is_row_pinned, pin_rank=pin_rank
                 )
 
                 # 1: 名称
                 self._set_or_update_cell(
-                    row_idx, 1, name,
-                    align=Qt.AlignmentFlag.AlignCenter, is_numeric=False
+                    row_idx, 1, name_display, raw_val=name,
+                    align=Qt.AlignmentFlag.AlignCenter, bg_color=row_bg,
+                    font_bold=(tier < 2), is_numeric=False,
+                    is_pinned=is_row_pinned, pin_rank=pin_rank
                 )
 
                 # 2: 龙头角色 (高辨识度徽标色)
@@ -851,7 +961,8 @@ class CapitalDragonPanel(QWidget):
                 self._set_or_update_cell(
                     row_idx, 2, role, raw_val=d.get("priority", 0),
                     align=Qt.AlignmentFlag.AlignCenter, fg_color=role_col,
-                    font_bold=True, is_numeric=True
+                    bg_color=row_bg, font_bold=True, is_numeric=True,
+                    is_pinned=is_row_pinned, pin_rank=pin_rank
                 )
 
                 # 3: 所属主线
@@ -859,13 +970,16 @@ class CapitalDragonPanel(QWidget):
                 self._set_or_update_cell(
                     row_idx, 3, sector,
                     align=Qt.AlignmentFlag.AlignCenter, fg_color="#e0e0e0",
-                    tooltip=sec_tip, is_numeric=False
+                    bg_color=row_bg, tooltip=sec_tip, is_numeric=False,
+                    is_pinned=is_row_pinned, pin_rank=pin_rank
                 )
 
                 # 4: 现价
                 self._set_or_update_cell(
                     row_idx, 4, f"{price:.2f}", raw_val=price,
-                    align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, is_numeric=True
+                    align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                    bg_color=row_bg, is_numeric=True,
+                    is_pinned=is_row_pinned, pin_rank=pin_rank
                 )
 
                 # 5: 涨幅%
@@ -874,7 +988,8 @@ class CapitalDragonPanel(QWidget):
                 self._set_or_update_cell(
                     row_idx, 5, pct_str, raw_val=pct,
                     align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
-                    fg_color=pct_col, font_bold=True, is_numeric=True
+                    fg_color=pct_col, bg_color=row_bg, font_bold=True, is_numeric=True,
+                    is_pinned=is_row_pinned, pin_rank=pin_rank
                 )
 
                 # 6: 虚拟量比 (系统的虚拟量比，反映资金加速流入速度)
@@ -896,7 +1011,8 @@ class CapitalDragonPanel(QWidget):
                 self._set_or_update_cell(
                     row_idx, 6, f"{vr_val:.2f}x", raw_val=vr_val,
                     align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
-                    fg_color=vr_col, font_bold=vr_bold, tooltip=vr_tip, is_numeric=True
+                    fg_color=vr_col, bg_color=row_bg, font_bold=vr_bold, tooltip=vr_tip, is_numeric=True,
+                    is_pinned=is_row_pinned, pin_rank=pin_rank
                 )
 
                 # 7: 成交额(亿)
@@ -905,13 +1021,16 @@ class CapitalDragonPanel(QWidget):
                 self._set_or_update_cell(
                     row_idx, 7, f"{amt:.1f}亿", raw_val=amt,
                     align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
-                    fg_color=amt_col, font_bold=amt_bold, is_numeric=True
+                    fg_color=amt_col, bg_color=row_bg, font_bold=amt_bold, is_numeric=True,
+                    is_pinned=is_row_pinned, pin_rank=pin_rank
                 )
 
                 # 8: 换手率%
                 self._set_or_update_cell(
                     row_idx, 8, f"{turnover:.1f}%", raw_val=turnover,
-                    align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, is_numeric=True
+                    align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                    bg_color=row_bg, is_numeric=True,
+                    is_pinned=is_row_pinned, pin_rank=pin_rank
                 )
 
                 # 9: 资金买点类型 (精细化视觉高亮与量化排序，对齐龙头突击与天梯 SSOT)
@@ -946,7 +1065,8 @@ class CapitalDragonPanel(QWidget):
                 self._set_or_update_cell(
                     row_idx, 9, buy_type, raw_val=buy_score,
                     align=Qt.AlignmentFlag.AlignCenter, fg_color=buy_fg,
-                    bg_color=buy_bg, font_bold=True, tooltip=buy_tip, is_numeric=True
+                    bg_color=buy_bg or row_bg, font_bold=True, tooltip=buy_tip, is_numeric=True,
+                    is_pinned=is_row_pinned, pin_rank=pin_rank
                 )
 
                 # 10+: 动态自定义列 (ats_col, 紧随资金买点类型后面)
@@ -982,28 +1102,33 @@ class CapitalDragonPanel(QWidget):
                     self._set_or_update_cell(
                         row_idx, col_offset, val_str, raw_val=raw_num,
                         align=Qt.AlignmentFlag.AlignCenter, fg_color=ec_col,
-                        tooltip=f"【{ec.upper()} 自定义指标】: {val_str}", is_numeric=True
+                        bg_color=row_bg, tooltip=f"【{ec.upper()} 自定义指标】: {val_str}",
+                        is_numeric=True, is_pinned=is_row_pinned, pin_rank=pin_rank
                     )
                     col_offset += 1
 
                 # 建议买入区间
                 self._set_or_update_cell(
                     row_idx, col_offset, buy_zone,
-                    align=Qt.AlignmentFlag.AlignCenter, fg_color="#ffb74d", is_numeric=False
+                    align=Qt.AlignmentFlag.AlignCenter, fg_color="#ffb74d",
+                    bg_color=row_bg, is_numeric=False,
+                    is_pinned=is_row_pinned, pin_rank=pin_rank
                 )
 
                 # 止损参考
                 self._set_or_update_cell(
                     row_idx, col_offset + 1, f"{stop_loss:.2f}", raw_val=stop_loss,
                     align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
-                    fg_color="#ef5350", is_numeric=True
+                    fg_color="#ef5350", bg_color=row_bg, is_numeric=True,
+                    is_pinned=is_row_pinned, pin_rank=pin_rank
                 )
 
                 # 核心逻辑与驱动
                 self._set_or_update_cell(
                     row_idx, col_offset + 2, reason,
                     align=Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-                    fg_color="#b0bec5", tooltip=reason, is_numeric=False
+                    fg_color="#b0bec5", bg_color=row_bg, tooltip=reason, is_numeric=False,
+                    is_pinned=is_row_pinned, pin_rank=pin_rank
                 )
 
             is_extreme = getattr(self, 'extreme_perf_mode', True)
@@ -1012,6 +1137,9 @@ class CapitalDragonPanel(QWidget):
             ol_cnt = self._last_report.get('open_low_count', 0) if self._last_report else 0
             accel_tot = dual_cnt + gap_cnt + ol_cnt
             accel_str = f" | ⚡加速: {accel_tot}只 (👑双加速:{dual_cnt} 🚀缺口:{gap_cnt})" if accel_tot > 0 else ""
+
+            focus_cnt = sum(1 for r in matched_records if _get_dragon_record_tier(r)[0] == 1)
+            focus_str = f" | ⭐重点: <font color='#ffd700'><b>{focus_cnt}只</b></font>" if focus_cnt > 0 else ""
 
             if is_extreme:
                 sp_cnt = self._last_report.get('space_dragon_count', 0) if self._last_report else 0
@@ -1033,6 +1161,7 @@ class CapitalDragonPanel(QWidget):
                 f"(空间龙: {sp_cnt} | "
                 f"容量中军: {mc_cnt} | "
                 f"主线先锋: {pn_cnt})"
+                f"{focus_str}"
                 f"{accel_str}"
             )
 
@@ -1272,7 +1401,9 @@ class CapitalDragonPanel(QWidget):
         c_item = self.table.item(row, 0)
         n_item = self.table.item(row, 1)
         if c_item and n_item:
-            self._trigger_stock_linkage(c_item.text().strip(), n_item.text().strip())
+            code = _clean_code(c_item.text().strip())
+            name = n_item.text().replace("⭐", "").strip()
+            self._trigger_stock_linkage(code, name)
 
     def _on_current_cell_changed(self, cur_row, cur_col, prev_row, prev_col):
         # 正在后台刷新数据或无效行期间严禁触发切股联动与抢焦
@@ -1282,7 +1413,9 @@ class CapitalDragonPanel(QWidget):
             c_item = self.table.item(cur_row, 0)
             n_item = self.table.item(cur_row, 1)
             if c_item and n_item:
-                self._trigger_stock_linkage(c_item.text().strip(), n_item.text().strip())
+                code = _clean_code(c_item.text().strip())
+                name = n_item.text().replace("⭐", "").strip()
+                self._trigger_stock_linkage(code, name)
 
     def open_sector_detail(self, sector_name: str):
         """
@@ -1376,8 +1509,8 @@ class CapitalDragonPanel(QWidget):
         c_item = self.table.item(row, 0)
         n_item = self.table.item(row, 1)
         if c_item and n_item:
-            code = c_item.text().strip()
-            name = n_item.text().strip()
+            code = _clean_code(c_item.text().strip())
+            name = n_item.text().replace("⭐", "").strip()
             self.stock_double_clicked.emit(code, name)
 
     def _show_context_menu(self, pos):
@@ -1388,8 +1521,8 @@ class CapitalDragonPanel(QWidget):
         c_item = self.table.item(row, 0)
         n_item = self.table.item(row, 1)
         s_item = self.table.item(row, 3)
-        code = c_item.text().strip() if c_item else ""
-        name = n_item.text().strip() if n_item else ""
+        code = _clean_code(c_item.text().strip()) if c_item else ""
+        name = n_item.text().replace("⭐", "").strip() if n_item else ""
         sector = s_item.text().strip() if s_item else ""
 
         menu = QMenu(self)
@@ -1416,8 +1549,16 @@ class CapitalDragonPanel(QWidget):
             menu.addSeparator()
 
         if code:
+            is_idx = is_major_index(code, name)
+            if not is_idx:
+                is_foc = self.is_dragon_focused(code)
+                foc_text = f"⭐ 取消资金主线重点关注: {name} ({code})" if is_foc else f"⭐ 设为资金主线重点关注: {name} ({code})"
+                act_focus = menu.addAction(foc_text)
+                act_focus.triggered.connect(lambda checked=False, c=code, n=name: self.toggle_dragon_focus(c, n))
+                menu.addSeparator()
+
             act_sbc = menu.addAction(f"📈 打开 {name}({code}) SBC 通道走势图 (R)")
-            act_sbc.triggered.connect(lambda: self.stock_double_clicked.emit(code, name))
+            act_sbc.triggered.connect(lambda checked=False, c=code, n=name: self.stock_double_clicked.emit(c, n))
 
         act_ladder = menu.addAction("🔥 打开每日涨停天梯看板")
         act_ladder.triggered.connect(self._on_click_limit_up)
