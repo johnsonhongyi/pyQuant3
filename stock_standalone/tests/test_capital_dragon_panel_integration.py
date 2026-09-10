@@ -27,6 +27,10 @@ from ats.capital_dragon_engine import CapitalDragonEngine
 class TestCapitalDragonPanelIntegration(unittest.TestCase):
 
     def setUp(self):
+        from ats.ui.styles import save_config_node
+        from ats.ui.capital_dragon_panel import PERSIST_KEY_DRAGON_AUTO_UPDATE
+        save_config_node(PERSIST_KEY_DRAGON_AUTO_UPDATE, True)
+
         engine = CapitalDragonEngine.get_instance()
         with engine._cache_lock:
             engine._cached_report = {}
@@ -36,6 +40,9 @@ class TestCapitalDragonPanelIntegration(unittest.TestCase):
         self.panel = CapitalDragonPanel()
 
     def tearDown(self):
+        from ats.ui.styles import save_config_node
+        from ats.ui.capital_dragon_panel import PERSIST_KEY_DRAGON_AUTO_UPDATE
+        save_config_node(PERSIST_KEY_DRAGON_AUTO_UPDATE, True)
         self.panel.deleteLater()
 
     def test_panel_initial_state(self):

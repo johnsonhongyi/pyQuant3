@@ -32,6 +32,8 @@ from ats.ui.favorite_panel import FavoritePanel
 from ats.ui.styles import DARK_THEME_QSS, enable_tab_direct_switch, save_config_node, load_config_node, bind_top_shortcut, set_seamless_stay_on_top
 
 PERSIST_KEY_CHANNEL_SCAN_PERIOD = "channel_scan_selected_period"
+PERSIST_KEY_BOTTOM_PANEL_COLLAPSED = "ats_bottom_panel_collapsed"
+PERSIST_KEY_BOTTOM_PANEL_HEIGHT = "ats_bottom_panel_last_height"
 from ats.ui.universe_widget import UniverseTreeWidget
 from ats.ui.heatmap_widget import SectorHeatmapWidget
 from ats.ui.chart_widgets import DistributionBarChart, EquityCurveChart
@@ -2322,13 +2324,15 @@ class ATSMainWindow(QMainWindow):
         self.btn_view_filtered.clicked.connect(self.view_filtered_stocks_dialog)
         toolbar.addWidget(self.btn_view_filtered)
 
-        # 绑定快捷键 R 刷新 history (输入框聚焦时自动放行防误触)
+        # 绑定快捷键 R 刷新 history 与 Alt+B 折叠/展开底部面板
         try:
             from PyQt6.QtGui import QShortcut, QKeySequence
             self.shortcut_reload_history = QShortcut(QKeySequence(Qt.Key.Key_R), self)
             self.shortcut_reload_history.activated.connect(self._on_shortcut_reload_history)
+            self.shortcut_toggle_bottom = QShortcut(QKeySequence("Alt+B"), self)
+            self.shortcut_toggle_bottom.activated.connect(self.toggle_bottom_panel)
         except Exception as e:
-            logger.debug(f"[ATSMainWindow] Bind R shortcut failed: {e}")
+            logger.debug(f"[ATSMainWindow] Bind shortcuts failed: {e}")
         
         # 载入默认的公式数据
         self._on_history_group_changed()
@@ -2486,6 +2490,37 @@ class ATSMainWindow(QMainWindow):
         enable_tab_direct_switch(self.center_tabs)
         mark_checkpoint("03.3.8 KernelTracePanel (Bottom Tab 4)")
         
+        # 底部面板右上角折叠/展开按钮 (支持自动折叠与状态持久化)
+        bottom_corner_container = QWidget()
+        bottom_corner_layout = QHBoxLayout(bottom_corner_container)
+        bottom_corner_layout.setContentsMargins(0, 0, 4, 0)
+        bottom_corner_layout.setSpacing(4)
+
+        self.btn_toggle_bottom_panel = QPushButton("▼ 折叠")
+        self.btn_toggle_bottom_panel.setToolTip("折叠/展开底部持仓与回测面板 (快捷键: Alt+B)")
+        self.btn_toggle_bottom_panel.setFixedHeight(22)
+        self.btn_toggle_bottom_panel.setStyleSheet("""
+            QPushButton {
+                background-color: #222228;
+                color: #aaaaaa;
+                font-weight: bold;
+                border: 1px solid #44444c;
+                border-radius: 3px;
+                padding: 1px 8px;
+                font-size: 8.5pt;
+            }
+            QPushButton:hover {
+                background-color: #2c2c36;
+                color: #ffffff;
+                border-color: #666675;
+            }
+        """)
+        self.btn_toggle_bottom_panel.clicked.connect(self.toggle_bottom_panel)
+        bottom_corner_layout.addWidget(self.btn_toggle_bottom_panel)
+
+        self.center_tabs.setCornerWidget(bottom_corner_container, Qt.Corner.TopRightCorner)
+        self.center_tabs.tabBarClicked.connect(self._on_bottom_tab_clicked)
+
         self.center_splitter.addWidget(self.center_tabs)
         self.center_splitter.setSizes([450, 450])
         
@@ -2975,6 +3010,12 @@ class ATSMainWindow(QMainWindow):
         self.setStatusBar(self.status_bar)
         self.status_bar.showMessage("初始化独立自治交易系统，就绪。")
 
+        # 📊 状态栏中央常驻显示：大盘四大指数资金量比与全市交易额增减 (SSOT)
+        self.lbl_market_volume_status = QLabel()
+        self.lbl_market_volume_status.setTextFormat(Qt.TextFormat.RichText)
+        self.lbl_market_volume_status.setStyleSheet("font-size: 8.8pt; padding: 0 10px;")
+        self.status_bar.addPermanentWidget(self.lbl_market_volume_status)
+
         # 🕒 状态栏右侧常驻显示：数据更新时间与下次自动刷新倒计时
         self._last_data_update_time = None
         self._next_auto_refresh_time = None
@@ -2988,6 +3029,21 @@ class ATSMainWindow(QMainWindow):
         self._status_clock_timer.timeout.connect(self._refresh_statusbar_time_display)
         self._status_clock_timer.start(1000)
         self._refresh_statusbar_time_display()
+        self._refresh_market_volume_status()
+
+    def _refresh_market_volume_status(self):
+        """刷新底部状态栏的大盘四大核心指数（上证、深证、创业板、北证）资金量比与全市成交额增减"""
+        if not hasattr(self, 'lbl_market_volume_status') or self.lbl_market_volume_status is None:
+            return
+        try:
+            from ats.capital_dragon_engine import CapitalDragonEngine
+            cde = CapitalDragonEngine.get_instance()
+            summary = cde.get_market_indices_and_volume_summary()
+            html = summary.get('formatted_html', '')
+            if html and self.lbl_market_volume_status.text() != html:
+                self.lbl_market_volume_status.setText(html)
+        except Exception as e:
+            logger.debug(f"[ATSMainWindow] _refresh_market_volume_status error: {e}")
 
     def _refresh_statusbar_time_display(self):
         """动态刷新状态栏右侧的数据更新时间与下次自动刷新倒计时"""
@@ -3011,6 +3067,11 @@ class ATSMainWindow(QMainWindow):
         else:
             self.lbl_data_time_status.setText(f"🕒 数据更新: {t_str}  |  🔄 自动刷新: 已关闭 (等待TK推送)")
             self.lbl_data_time_status.setStyleSheet("color: #8e8e93; font-weight: bold; font-size: 9pt; padding-right: 8px;")
+
+        # 📊 每 2 秒节流同步一次大盘四大指数与全市交易额
+        if now - getattr(self, '_last_market_status_update', 0.0) >= 2.0:
+            self._last_market_status_update = now
+            self._refresh_market_volume_status()
 
     def toggle_rotation(self):
         if "▶" in self.btn_toggle_rotation.text():
@@ -4530,6 +4591,10 @@ class ATSMainWindow(QMainWindow):
         if stats_str:
             self.status_bar.showMessage(stats_str)
 
+        # 📊 状态栏大盘指数资金量比与全市成交额即时刷新 (SSOT)
+        if hasattr(self, '_refresh_market_volume_status'):
+            self._refresh_market_volume_status()
+
         # 🚀 Tier 2 (10ms 后): 补齐渲染非激活 Tab
         if hasattr(self, '_async_tier2_timer'):
             self._async_tier2_timer.start(10)
@@ -5202,7 +5267,159 @@ class ATSMainWindow(QMainWindow):
     def _on_center_splitter_moved(self, pos, index):
         if getattr(self, '_is_restoring_sizes', False):
             return
+        if hasattr(self, 'center_splitter') and hasattr(self, 'center_tabs'):
+            sizes = self.center_splitter.sizes()
+            tab_bar_h = self.center_tabs.tabBar().sizeHint().height() if hasattr(self.center_tabs, 'tabBar') else 32
+            if not tab_bar_h or tab_bar_h <= 0:
+                tab_bar_h = 32
+            if len(sizes) >= 2:
+                bot_h = sizes[1]
+                if bot_h <= tab_bar_h + 10:
+                    if not getattr(self, '_is_bottom_panel_collapsed', False):
+                        self._is_bottom_panel_collapsed = True
+                        if hasattr(self, 'btn_toggle_bottom_panel'):
+                            self.btn_toggle_bottom_panel.setText("▲ 展开")
+                            self.btn_toggle_bottom_panel.setStyleSheet("""
+                                QPushButton {
+                                    background-color: #1a3322;
+                                    color: #00ff88;
+                                    font-weight: bold;
+                                    border: 1px solid #00ff88;
+                                    border-radius: 3px;
+                                    padding: 1px 8px;
+                                    font-size: 8.5pt;
+                                }
+                                QPushButton:hover {
+                                    background-color: #244730;
+                                    color: #33ff99;
+                                    border-color: #33ff99;
+                                }
+                            """)
+                            self.btn_toggle_bottom_panel.setToolTip("展开底部面板 (快捷键: Alt+B)")
+                elif bot_h > tab_bar_h + 40:
+                    self._last_bottom_panel_height = bot_h
+                    if getattr(self, '_is_bottom_panel_collapsed', False):
+                        self._is_bottom_panel_collapsed = False
+                        if hasattr(self, 'btn_toggle_bottom_panel'):
+                            self.btn_toggle_bottom_panel.setText("▼ 折叠")
+                            self.btn_toggle_bottom_panel.setStyleSheet("""
+                                QPushButton {
+                                    background-color: #222228;
+                                    color: #aaaaaa;
+                                    font-weight: bold;
+                                    border: 1px solid #44444c;
+                                    border-radius: 3px;
+                                    padding: 1px 8px;
+                                    font-size: 8.5pt;
+                                }
+                                QPushButton:hover {
+                                    background-color: #2c2c36;
+                                    color: #ffffff;
+                                    border-color: #666675;
+                                }
+                            """)
+                            self.btn_toggle_bottom_panel.setToolTip("折叠底部面板，最大化上方主视区 (快捷键: Alt+B)")
         self._request_save_layout_debounced()
+
+    def toggle_bottom_panel(self):
+        """切换底部从属 Tab 面板（持仓/流水/回测/轨迹）的折叠与展开状态 (快捷键: Alt+B)"""
+        is_collapsed = getattr(self, '_is_bottom_panel_collapsed', False)
+        self.set_bottom_panel_collapsed(not is_collapsed, save=True)
+
+    def _on_bottom_tab_clicked(self, index: int):
+        """当底部面板处于折叠状态时，用户点击任意 Tab 标签栏自动恢复展开"""
+        if getattr(self, '_is_bottom_panel_collapsed', False):
+            self.set_bottom_panel_collapsed(False, save=True)
+
+    def set_bottom_panel_collapsed(self, collapsed: bool, save: bool = True):
+        """
+        设置底部面板折叠/展开状态并执行几何重排与持久化：
+        - 折叠时：收敛至仅保留 Tab 标签栏高度（~32px），上方主视区独占屏幕；
+        - 展开时：恢复上一次用户设定或默认的物理像素高度；
+        - 自动持久化记忆用户状态。
+        """
+        if not hasattr(self, 'center_splitter') or not hasattr(self, 'center_tabs'):
+            return
+
+        self._is_bottom_panel_collapsed = bool(collapsed)
+        tab_bar_h = self.center_tabs.tabBar().sizeHint().height() if hasattr(self.center_tabs, 'tabBar') else 32
+        if not tab_bar_h or tab_bar_h <= 0:
+            tab_bar_h = 32
+
+        cur_sizes = self.center_splitter.sizes()
+        total_h = sum(cur_sizes) if cur_sizes else 900
+
+        if collapsed:
+            # 记录折叠前的展开高度
+            if len(cur_sizes) >= 2 and cur_sizes[1] > tab_bar_h + 30:
+                self._last_bottom_panel_height = cur_sizes[1]
+            elif not hasattr(self, '_last_bottom_panel_height') or getattr(self, '_last_bottom_panel_height', 0) <= tab_bar_h + 30:
+                self._last_bottom_panel_height = 350
+
+            # 限制最小/最大高度为标签栏高度，让 Splitter 将上方撑至最大
+            self.center_tabs.setMinimumHeight(tab_bar_h)
+            self.center_tabs.setMaximumHeight(tab_bar_h)
+            top_h = max(100, total_h - tab_bar_h)
+            self.center_splitter.setSizes([top_h, tab_bar_h])
+
+            if hasattr(self, 'btn_toggle_bottom_panel'):
+                self.btn_toggle_bottom_panel.setText("▲ 展开")
+                self.btn_toggle_bottom_panel.setStyleSheet("""
+                    QPushButton {
+                        background-color: #1a3322;
+                        color: #00ff88;
+                        font-weight: bold;
+                        border: 1px solid #00ff88;
+                        border-radius: 3px;
+                        padding: 1px 8px;
+                        font-size: 8.5pt;
+                    }
+                    QPushButton:hover {
+                        background-color: #244730;
+                        color: #33ff99;
+                        border-color: #33ff99;
+                    }
+                """)
+                self.btn_toggle_bottom_panel.setToolTip("展开底部持仓/流水/回测面板 (快捷键: Alt+B)")
+        else:
+            # 解除高度锁定
+            self.center_tabs.setMinimumHeight(80)
+            self.center_tabs.setMaximumHeight(16777215)
+            restore_h = getattr(self, '_last_bottom_panel_height', 350)
+            if restore_h <= tab_bar_h + 30:
+                restore_h = 350
+            top_h = max(150, total_h - restore_h)
+            self.center_splitter.setSizes([top_h, restore_h])
+
+            if hasattr(self, 'btn_toggle_bottom_panel'):
+                self.btn_toggle_bottom_panel.setText("▼ 折叠")
+                self.btn_toggle_bottom_panel.setStyleSheet("""
+                    QPushButton {
+                        background-color: #222228;
+                        color: #aaaaaa;
+                        font-weight: bold;
+                        border: 1px solid #44444c;
+                        border-radius: 3px;
+                        padding: 1px 8px;
+                        font-size: 8.5pt;
+                    }
+                    QPushButton:hover {
+                        background-color: #2c2c36;
+                        color: #ffffff;
+                        border-color: #666675;
+                    }
+                """)
+                self.btn_toggle_bottom_panel.setToolTip("折叠底部面板，最大化上方主视区 (快捷键: Alt+B)")
+
+        if save and not getattr(self, '_is_restoring_sizes', False):
+            from ats.ui.styles import save_config_node
+            save_config_node(PERSIST_KEY_BOTTOM_PANEL_COLLAPSED, self._is_bottom_panel_collapsed)
+            save_config_node(PERSIST_KEY_BOTTOM_PANEL_HEIGHT, getattr(self, '_last_bottom_panel_height', 350))
+            if hasattr(self, '_save_layout_state'):
+                try:
+                    self._save_layout_state()
+                except Exception:
+                    pass
 
     def _on_right_splitter_moved(self, pos, index):
         if getattr(self, '_is_restoring_sizes', False):
@@ -5319,6 +5536,13 @@ class ATSMainWindow(QMainWindow):
                     self.cb_ladder.setChecked(bool(ladder_link))
                 # 无论是否已有持久化，启动恢复时显式触发一次状态同步，确保守护线程100%可靠拉起
                 self._on_ladder_link_toggled(self.cb_ladder.isChecked())
+
+            # 5. 恢复底部面板折叠/展开持久化状态
+            is_collapsed = data.get("ats_bottom_panel_collapsed", False)
+            last_h = data.get("ats_bottom_panel_last_height", 350)
+            self._last_bottom_panel_height = int(last_h) if last_h else 350
+            if bool(is_collapsed):
+                self.set_bottom_panel_collapsed(True, save=False)
         except Exception as e:
             print(f"[ATSMainWindow] Error restoring layout state: {e}")
 
@@ -5360,6 +5584,10 @@ class ATSMainWindow(QMainWindow):
             if hasattr(self, 'cb_ladder'):
                 updates["ats_link_ladder"] = self.cb_ladder.isChecked()
             
+            # 保存底部面板折叠/展开持久化状态与高度
+            updates["ats_bottom_panel_collapsed"] = getattr(self, '_is_bottom_panel_collapsed', False)
+            updates["ats_bottom_panel_last_height"] = getattr(self, '_last_bottom_panel_height', 350)
+
             save_config_nodes(updates)
         except Exception as e:
             print(f"[ATSMainWindow] Error saving layout state: {e}")
