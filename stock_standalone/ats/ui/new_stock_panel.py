@@ -1206,10 +1206,18 @@ class NewStockPanel(QWidget):
                     lift_sh = clean_num(row.get("lift_shares", 0.0))
                     lift_rt = clean_num(row.get("lift_ratio", 0.0))
                     lift_tp = str(row.get("lift_type", "")).strip() or "限售解禁"
+                    lift_stg = str(row.get("lift_stage", "")).strip()
+                    lift_b_idx = int(row.get("lift_batch_idx", 0) or 0)
+                    lift_b_tot = int(row.get("lift_batch_total", 0) or 0)
+                    if not lift_stg or lift_stg == "--":
+                        lift_stg = "首次解禁" if lift_b_idx <= 1 else f"第{lift_b_idx}次解禁"
+                    batch_tip = f"{lift_stg} (第 {lift_b_idx} / {lift_b_tot} 批)" if lift_b_tot > 1 else lift_stg
+
                     d_desc = f"(距今 {days_to_lift} 天)" if (days_to_lift is not None and days_to_lift >= 0) else ("(已到期)" if days_to_lift is not None else "")
                     lift_tips = [
                         f"【限售解禁详情】",
                         f"标的代码: {code} {name}",
+                        f"解禁轮次: {batch_tip}",
                         f"最近解禁日: {lift_val} {d_desc}",
                         f"解禁股份数: {lift_sh:.2f} 万股" if lift_sh > 0 else "解禁股份数: --",
                         f"占总股本比: {lift_rt:.2f}%" if lift_rt > 0 else "占总股本比: --",
@@ -1563,10 +1571,24 @@ class NewStockPanel(QWidget):
 
         title_text = f"【{name} ({code})】 发行价: {issue_p:.2f}元 | 上市: {listing_d} | {mv_desc}"
         if lift_d and lift_d != "-":
-            if lift_ratio > 0:
-                title_text += f" | 最近解禁: {lift_d}(占比{lift_ratio:.1f}%)"
+            lift_stage = str(row_data.get("lift_stage", "")).strip()
+            lift_batch_idx = int(row_data.get("lift_batch_idx", 0) or 0)
+            lift_batch_total = int(row_data.get("lift_batch_total", 0) or 0)
+
+            if not lift_stage or lift_stage == "--":
+                stage_str = "首次解禁" if lift_batch_idx <= 1 else f"第{lift_batch_idx}次解禁"
             else:
-                title_text += f" | 最近解禁: {lift_d}"
+                stage_str = lift_stage
+
+            if lift_batch_total > 1:
+                batch_info = f"{stage_str} {lift_batch_idx}/{lift_batch_total}批"
+            else:
+                batch_info = stage_str
+
+            if lift_ratio > 0:
+                title_text += f" | 最近解禁: {lift_d} ({batch_info}, 占比{lift_ratio:.1f}%)"
+            else:
+                title_text += f" | 最近解禁: {lift_d} ({batch_info})"
 
         self.lbl_spec_title.setText(title_text)
 

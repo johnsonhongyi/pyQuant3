@@ -218,9 +218,9 @@ class NewStockFetcher:
         now = time.time()
         today_str = datetime.date.today().strftime("%Y-%m-%d")
 
-        # 6小时防频控：非强制刷新且本地已有缓存时，直接返回已有缓存
+        # 6小时防频控：非强制刷新且本地已有缓存时，若均包含 lift_stage 则直接返回已有缓存
         if not force and self._cached_lift_dict and (now - self._last_lift_fetch_time < 6 * 3600):
-            missing_codes = [c for c in codes if c not in self._cached_lift_dict]
+            missing_codes = [c for c in codes if c not in self._cached_lift_dict or not self._cached_lift_dict[c].get("lift_stage")]
             if not missing_codes:
                 return self._cached_lift_dict
 
@@ -229,7 +229,7 @@ class NewStockFetcher:
         if not valid_codes:
             return self._cached_lift_dict
 
-        target_codes = valid_codes if force else [c for c in valid_codes if c not in self._cached_lift_dict]
+        target_codes = valid_codes if force else [c for c in valid_codes if (c not in self._cached_lift_dict or not self._cached_lift_dict[c].get("lift_stage"))]
         if not target_codes:
             return self._cached_lift_dict
 
@@ -259,7 +259,9 @@ class NewStockFetcher:
                 if resp.status_code == 200:
                     data = resp.json()
                     items = data.get("result", {}).get("data", []) if data.get("result") else []
-                    
+
+                    # 按股票代码将所有批次记录收集归类
+                    grouped_items: Dict[str, List[Dict[str, Any]]] = {}
                     for it in items:
                         c = str(it.get("SECURITY_CODE", "")).strip().zfill(6)
                         if not c:
@@ -272,30 +274,52 @@ class NewStockFetcher:
                         total_ratio = safe_float(it.get("TOTAL_RATIO", 0.0)) * 100.0  # 转为百分比
                         free_type = str(it.get("FREE_SHARES_TYPE", "") or "").strip()
 
-                        candidate_info = {
+                        grouped_items.setdefault(c, []).append({
                             "code": c,
                             "lift_date": f_date_raw,
                             "lift_shares": free_shares,  # 万股
                             "lift_ratio": total_ratio,   # 百分比
                             "lift_type": free_type,
+                        })
+
+                    # 精确计算每只标的自上市以来的所有解禁轮次 (第几次解禁/共几批)
+                    for c, recs in grouped_items.items():
+                        if not recs:
+                            continue
+                        # 严格按解禁日期升序排序
+                        recs.sort(key=lambda x: x["lift_date"])
+                        total_batches = len(recs)
+
+                        # 寻找未来最近一次解禁记录 (FREE_DATE >= today)
+                        target_idx = -1
+                        for idx, r in enumerate(recs):
+                            if r["lift_date"] >= today_str:
+                                target_idx = idx
+                                break
+
+                        # 若所有解禁都已发生在过去，取最近发生的那次
+                        if target_idx == -1:
+                            target_idx = total_batches - 1
+
+                        target = recs[target_idx]
+                        batch_num = target_idx + 1
+                        stage_name = "首次解禁" if batch_num == 1 else f"第{batch_num}次解禁"
+                        batch_desc = f"{stage_name}(第{batch_num}/{total_batches}批)"
+
+                        candidate_info = {
+                            "code": c,
+                            "lift_date": target["lift_date"],
+                            "lift_shares": target["lift_shares"],
+                            "lift_ratio": target["lift_ratio"],
+                            "lift_type": target["lift_type"],
+                            "lift_batch_idx": batch_num,
+                            "lift_batch_total": total_batches,
+                            "lift_stage": stage_name,
+                            "lift_batch_desc": batch_desc,
                         }
 
-                        # 优先选未来最近一次解禁记录 (FREE_DATE >= today)
-                        if c not in self._cached_lift_dict:
-                            self._cached_lift_dict[c] = candidate_info
-                            updated_count += 1
-                        else:
-                            curr_saved = self._cached_lift_dict[c]
-                            curr_date = curr_saved.get("lift_date", "")
-                            if curr_date < today_str and f_date_raw >= today_str:
-                                self._cached_lift_dict[c] = candidate_info
-                                updated_count += 1
-                            elif curr_date >= today_str and f_date_raw >= today_str and f_date_raw < curr_date:
-                                self._cached_lift_dict[c] = candidate_info
-                                updated_count += 1
-                            elif curr_date < today_str and f_date_raw < today_str and f_date_raw > curr_date:
-                                self._cached_lift_dict[c] = candidate_info
-                                updated_count += 1
+                        self._cached_lift_dict[c] = candidate_info
+                        updated_count += 1
             except Exception as ex:
                 logger.debug(f"批量拉取限售解禁日历异常 (chunk {i}~{i+batch_size}): {ex}")
 
@@ -307,7 +331,11 @@ class NewStockFetcher:
                     "lift_date": "-",
                     "lift_shares": 0.0,
                     "lift_ratio": 0.0,
-                    "lift_type": ""
+                    "lift_type": "",
+                    "lift_batch_idx": 0,
+                    "lift_batch_total": 0,
+                    "lift_stage": "--",
+                    "lift_batch_desc": "--",
                 }
 
         self._last_lift_fetch_time = time.time()
@@ -447,12 +475,21 @@ class NewStockFetcher:
                 except Exception:
                     status = "次新"
 
-            # 限售解禁信息匹配
+            # 限售解禁信息匹配 (带第几次解禁/总轮次)
             lift_info = lift_dict.get(c, {})
             lift_date = lift_info.get("lift_date") or "-"
             lift_shares = safe_float(lift_info.get("lift_shares", 0.0))
             lift_ratio = safe_float(lift_info.get("lift_ratio", 0.0))
             lift_type = str(lift_info.get("lift_type", ""))
+            lift_batch_idx = int(lift_info.get("lift_batch_idx", 0) or 0)
+            lift_batch_total = int(lift_info.get("lift_batch_total", 0) or 0)
+            lift_stage = str(lift_info.get("lift_stage", "") or "")
+            lift_batch_desc = str(lift_info.get("lift_batch_desc", "") or "")
+            if not lift_stage and lift_date != "-":
+                lift_stage = "首次解禁"
+                lift_batch_idx = 1
+                lift_batch_total = 1
+                lift_batch_desc = "首次解禁(第1/1批)"
 
             # 策略配置状态检测
             has_strategy = self._check_strategy_exists(c)
@@ -467,6 +504,10 @@ class NewStockFetcher:
                 "lift_shares": lift_shares,
                 "lift_ratio": lift_ratio,
                 "lift_type": lift_type,
+                "lift_batch_idx": lift_batch_idx,
+                "lift_batch_total": lift_batch_total,
+                "lift_stage": lift_stage,
+                "lift_batch_desc": lift_batch_desc,
                 "issue_price": issue_price if issue_price > 0 else 0.0,
                 "price": 0.0,
                 "pct": 0.0,
