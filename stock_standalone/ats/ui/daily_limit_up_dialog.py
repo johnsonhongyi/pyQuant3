@@ -306,9 +306,17 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         self._sort_col: Optional[int] = 3
         self._sort_order: Qt.SortOrder = Qt.SortOrder.DescendingOrder
 
-        # 内存列宽与多级排序字典 Cache (零 I/O 延迟，窗口关闭时统一原子落盘)
+        # 内存列宽与多级排序字典 Cache (零 I/O 延迟，用户手动调整微调时防抖落盘)
         self._column_widths_cache: Dict[str, List[int]] = {}
         self._sort_states_cache: Dict[str, Dict[str, Any]] = {}
+        self._is_programmatic_resize: bool = False
+        self._col_save_debounce_timer = QTimer(self)
+        self._col_save_debounce_timer.setInterval(500)
+        self._col_save_debounce_timer.setSingleShot(True)
+        self._col_save_debounce_timer.timeout.connect(self._save_current_column_widths)
+
+        self.btn_autofit: Optional[QPushButton] = None
+        self.btn_narrow_mode: Optional[QPushButton] = None
 
         # 空间龙头当前标的
         self.current_top_leader_code: str = ""
@@ -416,10 +424,12 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
             curr_sort_key = self._get_current_sort_config_key(current_mode)
 
             if hasattr(self, "table") and self.table:
-                col_count = self.table.columnCount()
-                curr_w = [self.table.columnWidth(i) for i in range(col_count)]
-                if sum(curr_w) >= 100 and (self.isVisible() or curr_header_key not in self._column_widths_cache):
-                    self._column_widths_cache[curr_header_key] = curr_w
+                # 仅当 cache 中尚未收录且非极窄/非程序临时排版时做初次底板填充，绝不覆盖已有自定义列宽
+                if curr_header_key not in self._column_widths_cache and not getattr(self, 'is_narrow_mode', False) and not getattr(self, '_is_programmatic_resize', False):
+                    col_count = self.table.columnCount()
+                    curr_w = [self.table.columnWidth(i) for i in range(col_count)]
+                    if sum(curr_w) >= 100:
+                        self._column_widths_cache[curr_header_key] = curr_w
 
             nodes_to_save = {}
 
@@ -460,7 +470,10 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
                 "is_narrow_mode": self.is_narrow_mode,
                 "last_wide_width": self._last_wide_width
             })
-            if hasattr(self, 'table') and self.table:
+            saved_w = self._column_widths_cache.get(curr_header_key)
+            if saved_w and len(saved_w) > 0 and sum(saved_w) >= 100:
+                node["column_widths"] = list(saved_w)
+            elif hasattr(self, 'table') and self.table and not getattr(self, 'is_narrow_mode', False):
                 node["column_widths"] = [self.table.columnWidth(i) for i in range(self.table.columnCount())]
             if is_open is not None:
                 node["is_open"] = is_open
@@ -496,7 +509,7 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
             self.is_narrow_mode = state.get("is_narrow_mode", False)
             if self.chk_ontop:
                 self.chk_ontop.setChecked(self.stays_on_top)
-            if hasattr(self, "btn_narrow_mode"):
+            if getattr(self, "btn_narrow_mode", None):
                 self.btn_narrow_mode.setChecked(self.is_narrow_mode)
         except Exception as e:
             logger.debug(f"恢复每日涨停看板状态异常: {e}")
@@ -734,28 +747,6 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         self.btn_fav_filter.clicked.connect(self._apply_filter)
         ctrl_layout.addWidget(self.btn_fav_filter)
 
-        # 📐 自适应与 📱 极窄模式快捷按钮
-        self.btn_autofit = QPushButton("📐 自适应")
-        self.btn_autofit.setToolTip("一键自适应调整所有表格列宽 (右键表格亦可调用)")
-        self.btn_autofit.setStyleSheet("""
-            QPushButton { background-color: #1a233a; color: #60a5fa; border: 1px solid #3b82f6; border-radius: 4px; padding: 3px 8px; font-weight: bold; }
-            QPushButton:hover { background-color: #3b82f6; color: #ffffff; }
-        """)
-        self.btn_autofit.clicked.connect(self.auto_fit_columns)
-        ctrl_layout.addWidget(self.btn_autofit)
-
-        self.btn_narrow_mode = QPushButton("📱 极窄模式")
-        self.btn_narrow_mode.setCheckable(True)
-        self.btn_narrow_mode.setChecked(self.is_narrow_mode)
-        self.btn_narrow_mode.setToolTip("开启/关闭极窄紧凑盯盘模式 (隐藏次要列，窗口宽度收敛至480px，适合侧边吸附)")
-        self.btn_narrow_mode.setStyleSheet("""
-            QPushButton { background-color: #2b1f3c; color: #c084fc; border: 1px solid #a855f7; border-radius: 4px; padding: 3px 8px; font-weight: bold; }
-            QPushButton:checked { background-color: #7e22ce; color: #ffffff; border-color: #d8b4fe; }
-            QPushButton:hover { background-color: #a855f7; color: #ffffff; }
-        """)
-        self.btn_narrow_mode.toggled.connect(self.toggle_narrow_mode)
-        ctrl_layout.addWidget(self.btn_narrow_mode)
-
         # 刷新与导出按钮
         self.btn_refresh = QPushButton("🔄 刷新")
         self.btn_refresh.setStyleSheet("""
@@ -885,16 +876,19 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
 
     def _save_current_header_state(self, mode: Optional[str] = None):
         """保存当前模式的列宽状态至内存 Cache"""
-        if getattr(self, '_is_populating', False) or getattr(self, '_is_restoring_header', False):
+        if getattr(self, '_is_populating', False) or getattr(self, '_is_restoring_header', False) or getattr(self, '_is_programmatic_resize', False):
+            return
+        if getattr(self, 'is_narrow_mode', False):
             return
         key = self._get_current_header_config_key(mode)
         header = self.table.horizontalHeader()
         if header and hasattr(self, 'table') and self.table:
             try:
-                col_count = self.table.columnCount()
-                widths = [self.table.columnWidth(i) for i in range(col_count)]
-                if sum(widths) >= 100 and (self.isVisible() or key not in self._column_widths_cache):
-                    self._column_widths_cache[key] = widths
+                if key not in self._column_widths_cache:
+                    col_count = self.table.columnCount()
+                    widths = [self.table.columnWidth(i) for i in range(col_count)]
+                    if sum(widths) >= 100:
+                        self._column_widths_cache[key] = widths
             except Exception as e:
                 logger.debug(f"Save header cache failed for {key}: {e}")
 
@@ -948,19 +942,42 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
             self._is_restoring_header = False
 
     def _on_header_section_resized(self, logicalIndex: int, oldSize: int, newSize: int):
-        """当用户手动拖拽调整表格列宽时，立即同步更新内存 Cache，零延迟无 I/O 阻塞"""
+        """当用户手动拖拽调整表格列宽时触发持久化：
+        除非一键自适应列宽或者极窄模式后手动调整了列宽才进行持久化；
+        代码程序级自适应或极窄布局调整绝不触发此逻辑。
+        """
+        if getattr(self, '_is_programmatic_resize', False):
+            return
         if getattr(self, '_is_populating', False) or getattr(self, '_is_restoring_header', False):
             return
         if not self.isVisible() or oldSize <= 0 or newSize <= 0 or oldSize == newSize:
             return
         key = self._get_current_header_config_key(getattr(self, "current_mode", "TODAY"))
+        col_count = self.table.columnCount() if (hasattr(self, 'table') and self.table) else 0
+        if col_count <= 0:
+            return
+
         widths = list(self._column_widths_cache.get(key) or [])
-        col_count = self.table.columnCount() if (hasattr(self, 'table') and self.table) else len(widths)
         if len(widths) < col_count:
-            widths = [self.table.columnWidth(i) for i in range(col_count)]
-        if 0 <= logicalIndex < len(widths):
+            widths = [self.table.columnWidth(i) if not self.table.isColumnHidden(i) else 65 for i in range(col_count)]
+
+        # 用户进行了手动微调：
+        # 若之前经历过一键自适应或极窄模式，本次手动拖拽代表认可当前排版并微调，
+        # 将当前所有非隐藏列的实际尺寸采纳为用户自定义基础，隐藏列保留原有尺寸（防止被置0）
+        for i in range(col_count):
+            if not self.table.isColumnHidden(i):
+                actual_w = self.table.columnWidth(i)
+                if actual_w > 10:
+                    widths[i] = actual_w
+
+        if 0 <= logicalIndex < len(widths) and newSize > 10:
             widths[logicalIndex] = int(newSize)
-            self._column_widths_cache[key] = widths
+
+        self._column_widths_cache[key] = widths
+
+        # 启动防抖定时器，500ms 后保存到磁盘 window_config.json
+        if hasattr(self, '_col_save_debounce_timer'):
+            self._col_save_debounce_timer.start()
 
     def _save_sort_states(self, mode: Optional[str] = None):
         """保存当前模式的多级排序状态至内存 Cache"""
@@ -1036,7 +1053,7 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
 
         menu.addSeparator()
         action_autofit = menu.addAction("📐 一键自适应列宽")
-        action_reset = menu.addAction("🔄 恢复默认列宽")
+        action_restore_custom = menu.addAction("🔄 恢复自定义的列宽数据")
         action_narrow = menu.addAction("📱 极窄模式 (Narrow Mode)")
         action_narrow.setCheckable(True)
         action_narrow.setChecked(self.is_narrow_mode)
@@ -1079,8 +1096,8 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         elif selected_action == action_autofit:
             self.auto_fit_columns()
             return
-        elif selected_action == action_reset:
-            self.reset_default_columns()
+        elif selected_action == action_restore_custom:
+            self.restore_custom_columns()
             return
         elif selected_action == action_narrow:
             self.toggle_narrow_mode()
@@ -2967,57 +2984,92 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
                 logger.debug(f"打开 SBC 分时窗口异常: {e}")
 
     def auto_fit_columns(self):
-        """一键自适应调整所有可见列宽（考虑单元格与表头最大宽度，加安全内边距并保存）"""
-        col_count = self.table.columnCount()
-        for col in range(col_count):
-            if self.table.isColumnHidden(col):
-                continue
-            self.table.resizeColumnToContents(col)
-            w = self.table.columnWidth(col)
-            # 增加 12px 安全内边距
-            new_w = max(48, w + 12)
-            if col == 0:    # 代码
-                new_w = max(58, min(80, new_w))
-            elif col == 1:  # 名称
-                new_w = max(68, min(105, new_w))
-            elif col == 2:  # 现价
-                new_w = max(56, min(80, new_w))
-            elif col == 3:  # 涨幅%
-                new_w = max(62, min(85, new_w))
-            elif col == 4:  # 连板数
-                new_w = max(52, min(75, new_w))
-            elif col == 5:  # 梯队分类
-                new_w = max(75, min(120, new_w))
-            elif col in (12, 13, 14, 15): # DFF / Rank / DFF2 / DFF3
-                new_w = max(48, min(75, new_w))
-            elif col == col_count - 1: # 最后一列：所属板块 (严格限制列宽)
-                new_w = max(65, min(95, new_w))
-            elif col == col_count - 2: # 倒数第二列：形态与质量
-                new_w = max(70, min(100, new_w))
-            self.table.setColumnWidth(col, new_w)
+        """一键自适应调整所有可见列宽（纯视图临时排版，绝不自动持久化列宽数据）"""
+        self._is_programmatic_resize = True
+        try:
+            header = self.table.horizontalHeader()
+            if header:
+                header.blockSignals(True)
 
-        # 触发持久化保存列宽
-        self._save_current_column_widths()
-        self.lbl_status.setText(f"📐 已完成一键自适应列宽 ({time.strftime('%H:%M:%S')})")
+            col_count = self.table.columnCount()
+            for col in range(col_count):
+                if self.table.isColumnHidden(col):
+                    continue
+                self.table.resizeColumnToContents(col)
+                w = self.table.columnWidth(col)
+                # 增加 12px 安全内边距
+                new_w = max(48, w + 12)
+                if col == 0:    # 代码
+                    new_w = max(58, min(80, new_w))
+                elif col == 1:  # 名称
+                    new_w = max(68, min(105, new_w))
+                elif col == 2:  # 现价
+                    new_w = max(56, min(80, new_w))
+                elif col == 3:  # 涨幅%
+                    new_w = max(62, min(85, new_w))
+                elif col == 4:  # 连板数
+                    new_w = max(52, min(75, new_w))
+                elif col == 5:  # 梯队分类
+                    new_w = max(75, min(120, new_w))
+                elif col in (12, 13, 14, 15): # DFF / Rank / DFF2 / DFF3
+                    new_w = max(48, min(75, new_w))
+                elif col == col_count - 1: # 最后一列：所属板块 (严格限制列宽)
+                    new_w = max(65, min(95, new_w))
+                elif col == col_count - 2: # 倒数第二列：形态与质量
+                    new_w = max(70, min(100, new_w))
+                self.table.setColumnWidth(col, new_w)
+
+            if header:
+                header.blockSignals(False)
+
+            self.lbl_status.setText(f"📐 已完成一键自适应列宽 (临时排版未持久化，手动微调列宽后将自动保存) ({time.strftime('%H:%M:%S')})")
+        except Exception as e:
+            logger.debug(f"自适应列宽异常: {e}")
+        finally:
+            self._is_programmatic_resize = False
+
+    def restore_custom_columns(self):
+        """恢复自定义的列宽数据（若未检测到历史自定义列宽，则兜底恢复默认紧凑列宽）"""
+        self._is_programmatic_resize = True
+        try:
+            key = self._get_current_header_config_key(getattr(self, "current_mode", "TODAY"))
+            widths = self._column_widths_cache.get(key)
+            if not widths or len(widths) < self.table.columnCount() or sum(widths) < 100:
+                widths = load_config_node(f"{key}_widths")
+                if not widths and getattr(self, "current_mode", "TODAY") == "BUBBLE":
+                    widths = load_config_node("ats_daily_limit_up_table_widths")
+
+            header = self.table.horizontalHeader()
+            if header:
+                header.blockSignals(True)
+
+            applied_custom = False
+            col_count = self.table.columnCount()
+            if widths and isinstance(widths, list) and len(widths) >= col_count and sum(widths) >= 100:
+                for i in range(col_count):
+                    w = widths[i]
+                    if isinstance(w, (int, float)) and w > 10:
+                        self.table.setColumnWidth(i, int(w))
+                self._column_widths_cache[key] = [int(w) for w in widths[:col_count]]
+                applied_custom = True
+            else:
+                self._apply_default_column_widths()
+
+            if header:
+                header.blockSignals(False)
+
+            if applied_custom:
+                self.lbl_status.setText(f"🔄 已恢复自定义的列宽数据 ({time.strftime('%H:%M:%S')})")
+            else:
+                self.lbl_status.setText(f"🔄 未检测到历史自定义列宽，已恢复默认标准列宽 ({time.strftime('%H:%M:%S')})")
+        except Exception as e:
+            logger.debug(f"恢复自定义列宽异常: {e}")
+        finally:
+            self._is_programmatic_resize = False
 
     def reset_default_columns(self):
-        """恢复默认紧凑列宽"""
-        default_widths = {
-            0: 62, 1: 72, 2: 60, 3: 65, 4: 56, 5: 85,
-            6: 78, 7: 68, 8: 65, 9: 60, 10: 58, 11: 72,
-            12: 58, 13: 48, 14: 52, 15: 52, 16: 68, 17: 72
-        }
-        col_count = self.table.columnCount()
-        for col in range(col_count):
-            if col == col_count - 1:
-                w = 80  # 所属板块默认 80px
-            elif col == col_count - 2:
-                w = 85  # 形态与质量默认 85px
-            else:
-                w = default_widths.get(col, 65)
-            self.table.setColumnWidth(col, w)
-        self._save_current_column_widths()
-        self.lbl_status.setText(f"🔄 已恢复默认紧凑列宽 ({time.strftime('%H:%M:%S')})")
+        """兼容保留：恢复自定义的列宽数据"""
+        self.restore_custom_columns()
 
     def toggle_narrow_mode(self, enabled: Optional[bool] = None):
         """切换极窄紧凑盯盘模式 / 宽屏全景模式"""
@@ -3026,7 +3078,7 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         else:
             self.is_narrow_mode = bool(enabled)
 
-        if hasattr(self, 'btn_narrow_mode'):
+        if getattr(self, 'btn_narrow_mode', None):
             self.btn_narrow_mode.blockSignals(True)
             self.btn_narrow_mode.setChecked(self.is_narrow_mode)
             self.btn_narrow_mode.blockSignals(False)
@@ -3053,18 +3105,20 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
             self.setMinimumWidth(320)
 
             # 3. 精简顶部 KPI 卡片
-            if hasattr(self, 'lbl_kpi_seal'):
+            if hasattr(self, 'lbl_kpi_seal') and self.lbl_kpi_seal:
                 self.lbl_kpi_seal.setVisible(False)
-            if hasattr(self, 'lbl_top_leader'):
+            if hasattr(self, 'lbl_top_leader') and self.lbl_top_leader:
                 self.lbl_top_leader.setVisible(False)
 
             self.lbl_status.setText(f"📱 已切换为【极窄紧凑模式】 (核心11列, 适合侧边挂靠)")
+            # 极窄模式临时自适应可见列宽（纯视图排版，绝不持久化覆盖自定义列宽！）
+            self.auto_fit_columns()
         else:
             # 1. 恢复展示全部列 (若非历史非最近日，距今%保持隐藏)
             is_hist_diff = bool(self._get_active_history_date_if_not_latest())
             for col in range(col_count):
                 self.table.setColumnHidden(col, False)
-            if not is_hist_diff:
+            if not is_hist_diff and col_count > 13:
                 self.table.setColumnHidden(13, True)
 
             # 2. 恢复宽屏尺寸
@@ -3074,15 +3128,14 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
             self.setMinimumWidth(480)
 
             # 3. 恢复顶部全量 KPI 卡片
-            if hasattr(self, 'lbl_kpi_seal'):
+            if hasattr(self, 'lbl_kpi_seal') and self.lbl_kpi_seal:
                 self.lbl_kpi_seal.setVisible(True)
-            if hasattr(self, 'lbl_top_leader'):
+            if hasattr(self, 'lbl_top_leader') and self.lbl_top_leader:
                 self.lbl_top_leader.setVisible(True)
 
             self.lbl_status.setText(f"🖥️ 已切换为【宽屏全量模式】 (全字段+自定义列)")
-
-        # 自适应调整可见列宽
-        self.auto_fit_columns()
+            # 退出极窄模式恢复宽屏时：恢复用户的自定义列宽数据！
+            self.restore_custom_columns()
 
     def _show_context_menu(self, pos):
         """表格区域右键菜单（支持一键自适应列宽、极窄模式切换及个股深度诊断）"""
@@ -3105,7 +3158,7 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
 
         # ── 1. 布局与列宽操作项 ──
         act_autofit = menu.addAction("📐 一键自适应列宽")
-        act_reset_cols = menu.addAction("🔄 恢复默认列宽")
+        act_restore_custom = menu.addAction("🔄 恢复自定义的列宽数据")
         act_narrow = menu.addAction("📱 极窄模式 (Narrow Mode)")
         act_narrow.setCheckable(True)
         act_narrow.setChecked(self.is_narrow_mode)
@@ -3155,8 +3208,8 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
 
         if action == act_autofit:
             self.auto_fit_columns()
-        elif action == act_reset_cols:
-            self.reset_default_columns()
+        elif action == act_restore_custom:
+            self.restore_custom_columns()
         elif action == act_narrow:
             self.toggle_narrow_mode()
         elif action == act_trade_flow:
