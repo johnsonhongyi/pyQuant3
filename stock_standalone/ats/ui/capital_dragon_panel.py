@@ -42,6 +42,7 @@ from ats.capital_dragon_engine import (
 from JohnsonUtil import commonTips as cct
 
 PERSIST_KEY_DRAGON_FILTER = "ats_capital_dragon_filter_enabled"
+PERSIST_KEY_DRAGON_AUTO_UPDATE = "ats_capital_dragon_auto_update_enabled"
 
 logger = logging.getLogger("CapitalDragonPanel")
 
@@ -254,6 +255,10 @@ class CapitalDragonPanel(QWidget):
         saved_filter = load_config_node(PERSIST_KEY_DRAGON_FILTER, False)
         self.filter_enabled = parse_bool_config(saved_filter, default=False)
 
+        # 🐉 全资金主线模块自动更新持久化开关 (专属独立持久化，默认开启)
+        saved_auto_update = load_config_node(PERSIST_KEY_DRAGON_AUTO_UPDATE, True)
+        self.auto_update_enabled = parse_bool_config(saved_auto_update, default=True)
+
         self._init_ui()
 
     def _init_ui(self):
@@ -299,6 +304,36 @@ class CapitalDragonPanel(QWidget):
         toolbar_layout.addWidget(self.lbl_stats)
 
         toolbar_layout.addStretch()
+
+        # 🐉 全资金主线模块功能开关按钮 (自动持久化，关闭时完全停止自动更新)
+        self.btn_toggle_module = QPushButton()
+        self._update_module_button_ui()
+        self.btn_toggle_module.clicked.connect(self.toggle_module_state)
+        toolbar_layout.addWidget(self.btn_toggle_module)
+
+        # 🔄 手动单次刷新数据按钮 (点击一次强制刷新一次数据)
+        self.btn_manual_refresh = QPushButton("🔄 手动刷新")
+        self.btn_manual_refresh.setStyleSheet("""
+            QPushButton {
+                background-color: #162638;
+                color: #58a6ff;
+                font-weight: bold;
+                border: 1px solid #388bfd;
+                border-radius: 3px;
+                padding: 2px 8px;
+                font-size: 8.5pt;
+            }
+            QPushButton:hover {
+                background-color: #1f6feb;
+                color: #ffffff;
+            }
+            QPushButton:pressed {
+                background-color: #0d419d;
+            }
+        """)
+        self.btn_manual_refresh.setToolTip("点击立即手动计算并刷新一次资金主线与核心真龙数据")
+        self.btn_manual_refresh.clicked.connect(self.manual_refresh)
+        toolbar_layout.addWidget(self.btn_manual_refresh)
 
         # 🎯 策略过滤持久化开关按钮
         self.btn_toggle_filter = QPushButton()
@@ -386,12 +421,19 @@ class CapitalDragonPanel(QWidget):
         """
         接收最新行情快照，采用前沿节流 (Leading Edge Throttling) 合并高频 IPC 广播：
         1. 首帧或间隔 >300ms 时立即响应渲染，用户界面 0 迟滞；
-        2. 300ms 内高频涌入时平滑合并到定时器，彻底杜绝主线程重算与重绘雪崩。
+        2. 300ms 内高频涌入时平滑合并到定时器，彻底杜绝主线程重算与重绘雪崩；
+        3. 🛡️ 当 auto_update_enabled 为 False 时，仅暂存行情，彻底阻断自动计算与重绘。
         """
         if df_all is None or df_all.empty:
             return
 
         self._last_df_all = df_all
+        self._pending_sh_pct = sh_pct
+
+        # 🛡️ 核心守卫：若未开启全资金主线自动更新且非手动强制触发，彻底阻断后续更新，不启动节流，不计算，不重绘
+        if not getattr(self, 'auto_update_enabled', True) and not force:
+            return
+
         self._pending_payload = (df_all, sh_pct)
 
         now = time.time()
@@ -413,10 +455,13 @@ class CapitalDragonPanel(QWidget):
         self._pending_payload = None
         self._last_update_time = time.time()
 
-        # ⚡ 极限性能复用：优先直接从引擎读取后台 Worker 计算好的缓存报告 (0ms 耗时，零计算，支持 180s 容错回退)
-        report = self.engine.get_cached_report(max_age=5.0, df_check=df_all, fallback_stale=True)
+        # ⚡ 极限性能复用：非 force 时优先直接从引擎读取后台 Worker 计算好的缓存报告 (0ms 耗时，零计算，支持 180s 容错回退)
+        report = None
+        if not force:
+            report = self.engine.get_cached_report(max_age=5.0, df_check=df_all, fallback_stale=True)
+
         if report is None:
-            # 若尚无可用缓存：在 force 或首帧冷启动时同步计算一次保底；在后续高频轮询中异步计算杜绝卡顿
+            # 若尚无可用缓存或为 force 强制刷新：在 force 或首帧冷启动时同步计算一次保底；在后续高频轮询中异步计算杜绝卡顿
             if force or not self._last_report:
                 report = self.engine.analyze_capital_dragon_universe(df_all, sh_pct)
             else:
@@ -473,6 +518,8 @@ class CapitalDragonPanel(QWidget):
 
     def ensure_rendered(self):
         """当外部 Tab 切换或面板恢复显示时调用，确保挂起的数据瞬间补齐渲染"""
+        if not getattr(self, 'auto_update_enabled', True):
+            return
         if self._needs_render and self._pending_report:
             self._do_render_report(self._pending_report)
 
@@ -1015,6 +1062,103 @@ class CapitalDragonPanel(QWidget):
         finally:
             self.table.blockSignals(False)
             self._is_updating = False
+
+    def toggle_module_state(self):
+        """切换全资金主线模块自动更新开关并专属独立持久化"""
+        self.auto_update_enabled = not getattr(self, 'auto_update_enabled', True)
+        save_config_node(PERSIST_KEY_DRAGON_AUTO_UPDATE, bool(self.auto_update_enabled))
+        self._update_module_button_ui()
+
+        if not self.auto_update_enabled:
+            # 关闭时：停止节流定时器，清除挂起脏标记，保持界面当前静止
+            self._throttle_timer.stop()
+            self._needs_render = False
+            try:
+                from stock_logic_utils import toast_messageQT
+                toast_messageQT(self, "⏸️ 资金主线模块已暂停自动更新 (可点击[🔄 手动刷新]按需更新)")
+            except Exception:
+                pass
+        else:
+            try:
+                from stock_logic_utils import toast_messageQT
+                toast_messageQT(self, "▶️ 资金主线模块已恢复自动更新")
+            except Exception:
+                pass
+            # 若暂存有最新行情快照，立即触发一次更新恢复最新状态
+            df_all = self._last_df_all
+            if df_all is None or df_all.empty:
+                if self.main_window and hasattr(self.main_window, 'current_df'):
+                    df_all = self.main_window.current_df
+            if df_all is not None and not df_all.empty:
+                sh_pct = getattr(self, '_pending_sh_pct', 0.0)
+                self.update_payload(df_all, sh_pct, force=True)
+
+    def _update_module_button_ui(self):
+        """更新全资金主线模块开关按钮的高亮与状态文案"""
+        if getattr(self, 'auto_update_enabled', True):
+            self.btn_toggle_module.setText("🐉 资金主线 (开)")
+            self.btn_toggle_module.setStyleSheet("""
+                QPushButton {
+                    background-color: #1a3322;
+                    color: #00ff88;
+                    font-weight: bold;
+                    border: 1.5px solid #00ff88;
+                    border-radius: 3px;
+                    padding: 2px 8px;
+                    font-size: 8.5pt;
+                }
+                QPushButton:hover {
+                    background-color: #00ff88;
+                    color: #000000;
+                }
+            """)
+            self.btn_toggle_module.setToolTip("全资金主线模块功能开关【已开启】：\n实时接收行情并后台自动计算与刷新资金主线与真龙矩阵。\n点击可切换为【关闭】，完全停止自动更新以节约系统资源。")
+        else:
+            self.btn_toggle_module.setText("🐉 资金主线 (关)")
+            self.btn_toggle_module.setStyleSheet("""
+                QPushButton {
+                    background-color: #222228;
+                    color: #888888;
+                    font-weight: bold;
+                    border: 1px solid #44444f;
+                    border-radius: 3px;
+                    padding: 2px 8px;
+                    font-size: 8.5pt;
+                }
+                QPushButton:hover {
+                    background-color: #33333d;
+                    color: #ffffff;
+                    border-color: #777788;
+                }
+            """)
+            self.btn_toggle_module.setToolTip("全资金主线模块功能开关【已关闭】：\n资金主线全部停止后台自动更新数据，界面保持当前静止状态。\n可点击右侧【🔄 手动刷新】按需单次更新，或点击此处重新开启自动更新。")
+
+    def manual_refresh(self):
+        """
+        手动刷新按钮：强制立即获取最新行情并计算刷新一次资金主线与真龙看板
+        无论自动更新开关是否开启，均可单次强制刷新
+        """
+        df_all = self._last_df_all
+        if df_all is None or df_all.empty:
+            if self.main_window and hasattr(self.main_window, 'current_df'):
+                df_all = self.main_window.current_df
+
+        if df_all is None or df_all.empty:
+            try:
+                from stock_logic_utils import toast_messageQT
+                toast_messageQT(self, "⚠️ 暂无可用行情数据，请等待底层行情就绪")
+            except Exception:
+                pass
+            return
+
+        sh_pct = getattr(self, '_pending_sh_pct', 0.0)
+        # 强制立即更新 (force=True 绕过 auto_update_enabled 校验并跳过陈旧缓存)
+        self.update_payload(df_all, sh_pct, force=True)
+        try:
+            from stock_logic_utils import toast_messageQT
+            toast_messageQT(self, "🔄 资金主线数据已手动刷新完成")
+        except Exception:
+            pass
 
     def toggle_filter_state(self):
         """切换策略公式过滤状态并专属独立持久化"""

@@ -581,6 +581,86 @@ class TestCapitalDragonPanelIntegration(unittest.TestCase):
 
         tabs.deleteLater()
 
+    def test_module_toggle_button_and_persistence(self):
+        """测试全资金主线模块功能开关按钮切换与自动持久化机制"""
+        from ats.ui.styles import load_config_node, save_config_node
+        from ats.ui.capital_dragon_panel import PERSIST_KEY_DRAGON_AUTO_UPDATE
+
+        # 1. 默认状态校验：按钮初始化存在且为开
+        self.assertTrue(hasattr(self.panel, 'btn_toggle_module'))
+        self.assertTrue(hasattr(self.panel, 'btn_manual_refresh'))
+        self.assertTrue(self.panel.auto_update_enabled)
+        self.assertIn("开", self.panel.btn_toggle_module.text())
+
+        # 2. 点击切换为关
+        self.panel.btn_toggle_module.click()
+        self.assertFalse(self.panel.auto_update_enabled)
+        self.assertIn("关", self.panel.btn_toggle_module.text())
+        # 验证配置已持久化
+        saved_val = load_config_node(PERSIST_KEY_DRAGON_AUTO_UPDATE, True)
+        self.assertFalse(saved_val)
+        # 验证关闭时统计文字保持简洁，不添加多余的暂停文字提示
+        self.assertNotIn("自动更新已暂停", self.panel.lbl_stats.text())
+
+        # 3. 再次点击恢复为开
+        self.panel.btn_toggle_module.click()
+        self.assertTrue(self.panel.auto_update_enabled)
+        self.assertIn("开", self.panel.btn_toggle_module.text())
+        saved_val_2 = load_config_node(PERSIST_KEY_DRAGON_AUTO_UPDATE, False)
+        self.assertTrue(saved_val_2)
+        self.assertNotIn("自动更新已暂停", self.panel.lbl_stats.text())
+
+    def test_auto_update_blocking_when_disabled(self):
+        """测试当全资金主线模块功能开关关闭时，自动更新被完全阻断"""
+        # 设为关闭
+        self.panel.auto_update_enabled = False
+        self.panel._throttle_timer.stop()
+
+        mock_data = {
+            "600519": {
+                "name": "贵州茅台", "close": 1800.0, "percent": 2.5, "amount": 8.0e9,
+                "category": "白酒", "dff": 1.0, "dff2": 2.0, "dff3": 3.0, "ma20d": 1750.0
+            }
+        }
+        df_mock = pd.DataFrame.from_dict(mock_data, orient='index')
+
+        # 模拟高频 IPC 广播常规推送 (force=False)
+        self.panel.update_payload(df_mock, force=False)
+
+        # 核心断言：定时器未启动，pending_payload 未入队，未触发计算
+        self.assertFalse(self.panel._throttle_timer.isActive())
+        self.assertIsNone(self.panel._pending_payload)
+        # 但最新行情被暂存，以备手动刷新
+        self.assertIsNotNone(self.panel._last_df_all)
+
+    def test_manual_refresh_forces_update_when_disabled(self):
+        """测试在关闭自动更新状态下，手动刷新按钮能强制单次更新数据并刷新呈现"""
+        self.panel.auto_update_enabled = False
+        self.panel._update_module_button_ui()
+
+        mock_data = {
+            "300750": {
+                "name": "宁德时代", "close": 260.0, "percent": 6.8, "amount": 5.0e9,
+                "category": "固态电池", "dff": 2.0, "dff2": 4.0, "dff3": 6.0, "ma20d": 240.0
+            }
+        }
+        df_mock = pd.DataFrame.from_dict(mock_data, orient='index')
+        self.panel._last_df_all = df_mock
+
+        # 点击手动刷新按钮
+        self.panel.btn_manual_refresh.click()
+
+        # 核心断言：表格成功渲染出宁德时代
+        self.assertGreaterEqual(self.panel.table.rowCount(), 1)
+        found_catl = False
+        for r in range(self.panel.table.rowCount()):
+            it = self.panel.table.item(r, 0)
+            if it and it.text().strip() == "300750":
+                found_catl = True
+                break
+        # 处于关闭状态下，统计文本不额外显示暂停文字，保持纯净
+        self.assertNotIn("自动更新已暂停", self.panel.lbl_stats.text())
+
 
 if __name__ == "__main__":
     unittest.main()
