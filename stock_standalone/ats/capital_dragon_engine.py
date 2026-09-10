@@ -87,6 +87,37 @@ def is_index_or_fund(code: Any, name: Any = "") -> bool:
     return False
 
 
+# 权威官方大盘与核心综合指数代码集合 (主要指数置顶梯队)
+MAJOR_INDEX_CODES = {
+    '999999', '000001', '399001', '399006', '399005', '899050',
+    '000300', '399300', '000016', '000688', '399688', '000905', '399905', '000852'
+}
+
+
+def is_major_index(code: Any, name: Any = "") -> bool:
+    """判定标的是否属于大盘核心指数 (上证/深证/创业板/中小100/北证50/沪深300等)"""
+    raw_s = str(code).strip().lower()
+    c = _clean_code(code)
+    nm = str(name).strip() if name else ""
+
+    # 1. 检查是否在权威核心指数代码池中
+    if c in MAJOR_INDEX_CODES:
+        # 纯指数代码前缀：999xxx (上证指数), 399xxx (深证/创业板/中小100), 899xxx (北证50)
+        if c.startswith(("999", "399", "899")):
+            return True
+        # 对于 000xxx 系列代码 (如 000001, 000300, 000016, 000905, 000852)：
+        # 必须带 sh 前缀，或者名称包含明确指数特征，杜绝误判深市个股 (如 000001 平安银行, 000852 石化机械, 000905 厦门港务)
+        if raw_s.startswith("sh"):
+            return True
+        if nm:
+            for kw in ("指数", "成指", "综指", "上证", "中证", "沪深", "科创", "创业板", "北证"):
+                if kw in nm:
+                    return True
+        return False
+
+    return is_index_or_fund(code, name)
+
+
 def compute_dragon_buy_type_sort_score(
     action_type: str,
     is_dual_accel: bool = False,
@@ -767,12 +798,14 @@ class CapitalDragonEngine:
             has_channel_base = (dff2 > 0.0 or dff3 > 0.0 or (ma20_val > 0 and price_val >= ma20_val * 0.98))
             is_channel_down = (dff2 < -5.0 and dff3 < -5.0 and ma20_val > 0 and price_val < ma20_val * 0.95)
 
-            # ── 💡 铁壁拦截：孤狼脉冲与破位诱多 ──
-            if is_channel_down and not matched_main_sec and not is_limit_up:
+            is_idx = is_major_index(code_str, name_str) or is_index_or_fund(code_str, name_str) or final_sec == "综合指数/ETF"
+
+            # ── 💡 铁壁拦截：孤狼脉冲与破位诱多 (核心指数免受个股拦截) ──
+            if not is_idx and is_channel_down and not matched_main_sec and not is_limit_up:
                 trap_codes_set.add(code_str)
                 continue  # 破位诱多，彻底剔除
 
-            if amt_yi < 0.8 and not is_limit_up and (not matched_main_sec or pct_val < 3.0):
+            if not is_idx and amt_yi < 0.8 and not is_limit_up and (not matched_main_sec or pct_val < 3.0):
                 # 成交额不足 8000 万且无板块无涨停的边缘杂毛
                 trap_codes_set.add(code_str)
                 continue
@@ -850,6 +883,16 @@ class CapitalDragonEngine:
                 action_tip = "跟随核心主线放量上攻，注意高抛低吸"
                 reason = f"所属【{matched_main_sec}】主流赛道放量走强 (成交{amt_yi:.1f}亿, 涨幅+{pct_val:.1f}%)"
 
+            if is_idx and not dragon_role:
+                dragon_role = "🛡️ 趋势容量中军"
+                role_priority = 98
+                supp_ref = max(ch_supp, ma20_val) if ch_supp > 0 else (ma20_val if ma20_val > 0 else round(price_val * 0.95, 2))
+                stop_loss = round(supp_ref * 0.97, 2)
+                base_action = "🎯 通道支撑企稳" if pct_val < 4.0 else "🚀 主升趋势加速"
+                action_tip = "权威大盘与核心综合指数，观测全市场风向标与宏观流动性"
+                reason = f"权威大盘核心指数 (成交{amt_yi:.1f}亿, 涨跌幅{pct_val:+.2f}%)，全景大势锚点"
+                buy_zone = f"{supp_ref:.2f} ~ {round(supp_ref * 1.02, 2)}"
+
             if dragon_role:
                 dragon_codes_set.add(code_str)
                 vr_val = float(vol_ratio_s.loc[idx]) if idx in vol_ratio_s.index else 1.0
@@ -916,6 +959,7 @@ class CapitalDragonEngine:
                     "is_gap_accel": is_gap_accel,
                     "is_open_low_accel": is_open_low_accel,
                     "is_top35_amt": (code_str in top_35_amt_codes),
+                    "is_index": is_idx,
                     "extra_cols": extra_dict
                 }
                 for ec, val in extra_dict.items():
@@ -935,25 +979,44 @@ class CapitalDragonEngine:
                 base_act = "冲板先锋" if p_val >= 9.5 else ("领涨先锋" if p_val >= 5.0 else "领涨突破")
                 st["leader_buy_type"] = f"{tag}·{base_act}" if tag else f"⚡ {base_act}"
 
-        # 1. 优化前的全部 300+ 只全量候选池 (不限制容量中军数量，不截断 Top 50，优先按真龙优先级与形态买点得分排)
+        def _get_dragon_tier(r):
+            if r.get("is_index", False) or is_major_index(r.get("code", ""), r.get("name", "")) or r.get("sector") == "综合指数/ETF":
+                return 0
+            return 1
+
+        # 1. 优化前的全部 300+ 只全量候选池 (主要指数享有绝对置顶优先级，排在所有个股之上)
         dragon_records_all = list(dragon_records)
         dragon_records_all.sort(
-            key=lambda x: (x["priority"], x.get("buy_type_sort_score", 0.0), x["amount_yi"], x["pct"]),
+            key=lambda x: (
+                1000000 if _get_dragon_tier(x) == 0 else 0,
+                x["priority"],
+                x.get("buy_type_sort_score", 0.0),
+                x["amount_yi"],
+                x["pct"]
+            ),
             reverse=True
         )
 
-        # 2. 精准收敛池 (开启极限性能模式时生效：容量中军严格从 top_35_amt 中精选 Top 20 绝对中军，总池收敛至 Top 50)
+        # 2. 精准收敛池 (开启极限性能模式时生效：主要指数 100% 绝对保留，容量中军严格从 top_35_amt 中精选 Top 20 绝对中军，总池收敛至 Top 50)
         converged = []
         midcap_kept = 0
         for r in dragon_records_all:
-            if "容量" in r["role"]:
+            if _get_dragon_tier(r) == 0:
+                converged.append(r)
+            elif "容量" in r["role"]:
                 if r.get("is_top35_amt", False) and midcap_kept < 20:
                     midcap_kept += 1
                     converged.append(r)
             else:
                 converged.append(r)
         converged.sort(
-            key=lambda x: (x["priority"], x.get("buy_type_sort_score", 0.0), x["amount_yi"], x["pct"]),
+            key=lambda x: (
+                1000000 if _get_dragon_tier(x) == 0 else 0,
+                x["priority"],
+                x.get("buy_type_sort_score", 0.0),
+                x["amount_yi"],
+                x["pct"]
+            ),
             reverse=True
         )
         dragon_records_converged = converged[:50]

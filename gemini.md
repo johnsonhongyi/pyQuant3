@@ -1,3 +1,22 @@
+## 2026-09-10 18:20
+- [x] **【ATS 资金主线主要指数置顶与排序保持、独立重点关注与自动持久化落地】(SSOT) (`stock_standalone/ats/capital_dragon_engine.py`, `stock_standalone/ats/ui/capital_dragon_panel.py`, `stock_standalone/tests/test_capital_dragon_indices_and_focus.py`)**：
+    - [x] **主要大盘核心指数始终置顶与排序保持 (Tier 0 顶级特权)**：
+        1. 权威指数集与防混淆识别：确立 `MAJOR_INDEX_CODES` 包含上证指数（999999/000001）、深证成指（399001）、创业板指（399006）、中小100（399005）、北证50（899050）、沪深300（000300/399300）等，并在 `is_major_index` 中严格区分深市 000001（平安银行）、000852（石化机械）等重号个股；
+        2. 引擎全量与收敛池置顶保护：在 `CapitalDragonEngine` 中赋予主要指数 `is_index = True`，`role = "🛡️ 趋势容量中军"`，以最高 Tier 权重置顶，并在精选 Top 50 收敛池中 100% 绝对保留；
+        3. 表格排序不变性：当用户在表格中点击任意表头（涨幅%、成交额、现价、代码、买点等）升序或降序排序时，主要指数（`pin_rank = 0`）始终稳居表格最顶层，且指数内部严格按所选列的真实高精数值进行排序；
+        4. 策略过滤豁免：开启 `🎯 策略过滤` 时，主要指数作为大盘行情基准锚点，自动豁免策略过滤一票否决，始终常驻置顶；
+    - [x] **资金主线专属独立重点关注 (Tier 1 次级特权，优先级仅次于指数)**：
+        1. 与全局重点关注彻底解耦：采用独立专属配置键 `ats_capital_dragon_focus_stocks` 保存至 `window_config.json`，与主程序的 `GlobalFavoriteManager` 互不干扰，支持重启自动记忆；
+        2. 3-Tier 排序阶梯体系：
+           - **Tier 0 (顶级)**: 主要指数（`pin_rank = 0`）—— 绝对最前；
+           - **Tier 1 (次级)**: 资金主线独立重点关注（`pin_rank = 1`）—— 紧跟指数之后、普通个股之前，内部按所选列排序；
+           - **Tier 2 (普通)**: 普通真龙个股（`pin_rank = 999`）—— 排在重点关注之后；
+        3. 高质感视觉与交互呈现：重点关注标的自动呈现高质感暗金微光底色（`rgba(50, 42, 16, 130)`）与醒目 `⭐ {name}` 前缀，并在工具条统计文字中实时显示 `⭐重点: X只`；
+        4. 右键菜单一键切换与防污染联动：右键点击标的弹出 `⭐ 设为/取消资金主线重点关注` 动态选项，切换即刻持久化并原地刷新；单击与双击选股联动自动提取纯净 6 位代码与纯净股票名称，彻底杜绝星号字符污染；
+    - [x] **自动化测试回归全绿通过**：
+        1. 新增专项测试 `tests/test_capital_dragon_indices_and_focus.py`（5 项测试全部 PASSED），覆盖主要指数识别、引擎层 Top 置顶、独立关注配置持久化、多列升降序 3-Tier 不变性、星标显示与选股联动防污染；
+        2. 全量关联测试 41 项全部 100% 通过（exit code 0）！
+
 ## 2026-09-10 17:45
 - [x] **【ATS 大盘四大指数 TDX API 直连精准化纠偏与底部从属面板自动折叠及状态持久化】(SSOT) (`stock_standalone/ats/capital_dragon_engine.py`, `stock_standalone/ats/ui/main_window.py`, `stock_standalone/tests/test_market_volume_statusbar.py`, `stock_standalone/tests/test_bottom_panel_collapse.py`)**：
     - [x] **TDX API 官方权威数据源直连纠偏 (SSOT)**：
