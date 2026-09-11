@@ -358,57 +358,72 @@ class TradeFlowTable(QWidget):
         self.spin_page.blockSignals(False)
 
     def _render_current_page(self):
-        """渲染当前页切片数据到 QTableWidget"""
-        self.table.setSortingEnabled(False)
-        self.table.setRowCount(0)
+        """渲染当前页切片数据到 QTableWidget (无闪烁双缓冲就地更新)"""
+        self.table.setUpdatesEnabled(False)
+        try:
+            vbar = self.table.verticalScrollBar()
+            scroll_pos = vbar.value() if vbar else 0
 
-        if not self._all_flow_list:
+            self.table.setSortingEnabled(False)
+
+            if not self._all_flow_list:
+                if self.table.rowCount() > 0:
+                    self.table.setRowCount(0)
+                self.table.setSortingEnabled(True)
+                return
+
+            if self._page_size <= 0:
+                page_data = self._all_flow_list
+            else:
+                start_idx = (self._current_page - 1) * self._page_size
+                end_idx = start_idx + self._page_size
+                page_data = self._all_flow_list[start_idx:end_idx]
+
+            target_rows = len(page_data)
+            if self.table.rowCount() != target_rows:
+                self.table.setRowCount(target_rows)
+
+            bold_font = self.table.font()
+            bold_font.setBold(True)
+
+            for row, data in enumerate(page_data):
+                # 兼容 8 列或 9 列数据格式
+                row_items = list(data)
+                if len(row_items) == 8:
+                    row_items.insert(7, "+0.00%")
+
+                for col, text in enumerate(row_items[:9]):
+                    text_str = str(text)
+                    item = self.table.item(row, col)
+                    if item is None:
+                        item = NumericTableWidgetItem(text_str)
+                        item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                        self.table.setItem(row, col, item)
+                    elif item.text() != text_str:
+                        item.setText(text_str)
+
+                    if col == 3: # 方向 (买入/卖出)
+                        if "买" in text_str or "BUY" in text_str or "ADD" in text_str:
+                            item.setForeground(QColor(COLOR_UP))
+                            item.setFont(bold_font)
+                        else:
+                            item.setForeground(QColor(COLOR_DOWN))
+                            item.setFont(bold_font)
+                    elif col == 7: # 距今涨跌
+                        txt_str = text_str.strip()
+                        if txt_str.startswith("+"):
+                            item.setForeground(QColor(COLOR_UP))
+                        elif txt_str.startswith("-"):
+                            item.setForeground(QColor(COLOR_DOWN))
+                        else:
+                            item.setForeground(QColor("#a0a0b8"))
+
+            auto_fit_columns_once(self.table, "ats_trade_flow_table_state_v2", max_widths={8: 350})
             self.table.setSortingEnabled(True)
-            return
-
-        if self._page_size <= 0:
-            page_data = self._all_flow_list
-        else:
-            start_idx = (self._current_page - 1) * self._page_size
-            end_idx = start_idx + self._page_size
-            page_data = self._all_flow_list[start_idx:end_idx]
-
-        self.table.setRowCount(len(page_data))
-        for row, data in enumerate(page_data):
-            # 兼容 8 列或 9 列数据格式
-            row_items = list(data)
-            if len(row_items) == 8:
-                # 插入默认距今涨跌幅占位
-                row_items.insert(7, "+0.00%")
-
-            for col, text in enumerate(row_items[:9]):
-                item = NumericTableWidgetItem(str(text))
-                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-
-                if col == 3: # 方向 (买入/卖出)
-                    if "买" in str(text) or "BUY" in str(text) or "ADD" in str(text):
-                        item.setForeground(QColor(COLOR_UP))
-                        font = self.table.font()
-                        font.setBold(True)
-                        item.setFont(font)
-                    else:
-                        item.setForeground(QColor(COLOR_DOWN))
-                        font = self.table.font()
-                        font.setBold(True)
-                        item.setFont(font)
-                elif col == 7: # 距今涨跌
-                    txt_str = str(text).strip()
-                    if txt_str.startswith("+"):
-                        item.setForeground(QColor(COLOR_UP))
-                    elif txt_str.startswith("-"):
-                        item.setForeground(QColor(COLOR_DOWN))
-                    else:
-                        item.setForeground(QColor("#a0a0b8"))
-
-                self.table.setItem(row, col, item)
-
-        auto_fit_columns_once(self.table, "ats_trade_flow_table_state_v2", max_widths={8: 350})
-        self.table.setSortingEnabled(True)
+            if vbar and vbar.value() != scroll_pos:
+                vbar.setValue(scroll_pos)
+        finally:
+            self.table.setUpdatesEnabled(True)
 
     def _go_first_page(self):
         if self._current_page != 1:
@@ -602,26 +617,43 @@ class PositionPanel(QWidget):
             self.lbl_pnl.setText(f"总盈亏: +0.00 (0.00%)")
             self.lbl_pnl.setStyleSheet("font-weight: bold; font-size: 12pt; color: #e2e2e5;")
 
-        self.table.setSortingEnabled(False)
-        self.table.setRowCount(0)
-        self.table.setRowCount(len(positions_list))
-        for row, data in enumerate(positions_list):
-            for col, text in enumerate(data):
-                item = NumericTableWidgetItem(str(text))
-                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                
-                if col == 6: # PnL
-                    if str(text).startswith("+"):
-                        item.setForeground(QColor(COLOR_UP))
-                    else:
-                        item.setForeground(QColor(COLOR_DOWN))
-                elif col == 7: # Allocation
-                    item.setFont(self._get_bold_font())
-                    item.setForeground(QColor(COLOR_INFO))
-                    
-                self.table.setItem(row, col, item)
-        auto_fit_columns_once(self.table, "ats_position_table_state")
-        self.table.setSortingEnabled(True)
+        self.table.setUpdatesEnabled(False)
+        try:
+            vbar = self.table.verticalScrollBar()
+            scroll_pos = vbar.value() if vbar else 0
+
+            self.table.setSortingEnabled(False)
+            target_count = len(positions_list) if positions_list else 0
+            if self.table.rowCount() != target_count:
+                self.table.setRowCount(target_count)
+
+            if positions_list:
+                for row, data in enumerate(positions_list):
+                    for col, text in enumerate(data):
+                        text_str = str(text)
+                        item = self.table.item(row, col)
+                        if item is None:
+                            item = NumericTableWidgetItem(text_str)
+                            item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                            self.table.setItem(row, col, item)
+                        elif item.text() != text_str:
+                            item.setText(text_str)
+
+                        if col == 6: # PnL
+                            if text_str.startswith("+"):
+                                item.setForeground(QColor(COLOR_UP))
+                            else:
+                                item.setForeground(QColor(COLOR_DOWN))
+                        elif col == 7: # Allocation
+                            item.setFont(self._get_bold_font())
+                            item.setForeground(QColor(COLOR_INFO))
+
+            auto_fit_columns_once(self.table, "ats_position_table_state")
+            self.table.setSortingEnabled(True)
+            if vbar and vbar.value() != scroll_pos:
+                vbar.setValue(scroll_pos)
+        finally:
+            self.table.setUpdatesEnabled(True)
 
     def _get_bold_font(self):
         font = self.table.font()

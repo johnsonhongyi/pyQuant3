@@ -374,169 +374,174 @@ class UniverseTreeWidget(QWidget):
             self.restore_header_state()
         self.tree.setSortingEnabled(True)
 
+    def _update_stock_item(self, item, code, name, price, pct, strategy, desc, is_fav):
+        """原地更新单个股票项，实施 Dirty Check，消除无效的 setText / 属性重设与闪烁"""
+        disp_name = f"⭐ {name}" if is_fav else name
+        col_texts = [code, disp_name, str(price), str(pct), str(desc), str(strategy)]
+        for col, txt in enumerate(col_texts):
+            if item.text(col) != txt:
+                item.setText(col, txt)
+
+        if item.data(0, Qt.ItemDataRole.UserRole) != code:
+            item.setData(0, Qt.ItemDataRole.UserRole, code)
+        if item.data(1, Qt.ItemDataRole.UserRole) != name:
+            item.setData(1, Qt.ItemDataRole.UserRole, name)
+
+        if is_fav:
+            bg_fav = QColor("#1A2A1A")
+            for col in range(6):
+                item.setBackground(col, bg_fav)
+            item.setForeground(0, QColor("#00FF88"))
+            item.setForeground(1, QColor("#00FF88"))
+            item.setForeground(2, QColor("#e2e2e5"))
+            item.setForeground(4, QColor("#e2e2e5"))
+            item.setForeground(5, QColor("#e2e2e5"))
+        else:
+            trans_brush = QColor(0, 0, 0, 0)
+            def_fg = QColor("#e2e2e5")
+            for col in range(6):
+                item.setBackground(col, trans_brush)
+                if col not in (3, 5):
+                    item.setForeground(col, def_fg)
+
+        # 时段标签颜色高亮 (Strategy column) — 早期信号用更醒目的颜色
+        strategy_str = str(strategy)
+        if '🔔' in strategy_str or '竞价' in strategy_str:
+            item.setForeground(5, QColor("#FF4444"))  # 竞价信号: 亮红
+            item.setFont(5, QFont("Microsoft YaHei", -1, QFont.Weight.Bold))
+        elif '🥇' in strategy_str or '黄金' in strategy_str:
+            item.setForeground(5, QColor("#FFD700"))  # 黄金早盘: 金色
+            item.setFont(5, QFont("Microsoft YaHei", -1, QFont.Weight.Bold))
+        elif '🥈' in strategy_str:
+            item.setForeground(5, QColor("#C0C0C0"))  # 盘中跟进: 银色
+        elif not is_fav:
+            item.setForeground(5, QColor("#888888"))  # 午后/其他: 灰色
+
+        # Respect A-share red/green convention for percentage column
+        pct_str = str(pct)
+        if pct_str.startswith("+") or pct_str.startswith("0") or pct_str.startswith(" "):
+            item.setForeground(3, QColor(COLOR_UP))
+        else:
+            item.setForeground(3, QColor(COLOR_DOWN))
+
+    def _sync_pool_subtree(self, root, title_prefix, stock_list, fav_stocks):
+        """增量比对并同步子树节点，保留已有节点并仅更新差异 (In-Place Diff Sync)"""
+        target_title = f"{title_prefix} ({len(stock_list)})"
+        if root.text(0) != target_title:
+            root.setText(0, target_title)
+
+        existing_items = {}
+        for i in range(root.childCount()):
+            child = root.child(i)
+            c = child.data(0, Qt.ItemDataRole.UserRole)
+            if c:
+                existing_items[c] = child
+
+        new_codes = set()
+        for entry in stock_list:
+            if entry and len(entry) >= 6:
+                new_codes.add(entry[0])
+
+        # 1. 安全移除已不在新数据中的标的 (倒序遍历)
+        for i in reversed(range(root.childCount())):
+            child = root.child(i)
+            c = child.data(0, Qt.ItemDataRole.UserRole)
+            if c not in new_codes:
+                root.removeChild(child)
+
+        # 2. 原地复用或新增子节点
+        for code, name, price, pct, strategy, desc in stock_list:
+            is_fav = code in fav_stocks
+            item = existing_items.get(code)
+            if item is None or item.treeWidget() is None:
+                item = UniverseTreeItem(root)
+            self._update_stock_item(item, code, name, price, pct, strategy, desc, is_fav)
+
     def update_pools(self, radar_list, watch_list, trade_list):
         self._is_mock_active = False
-        
-        # 🛡️ [排序状态记忆] 记录用户当前点击选择的排序列与排序方向 (如用户点击了涨跌幅列降序排序)
-        sort_col = self.tree.sortColumn()
-        sort_order = self.tree.header().sortIndicatorOrder() if self.tree.header() else Qt.SortOrder.DescendingOrder
-        if sort_col < 0:
-            sort_col = 3  # 默认按涨跌幅列排序
-            sort_order = Qt.SortOrder.DescendingOrder
 
-        self.tree.setSortingEnabled(False)
-        self.tree.clear()
-
+        # 🛡️ 锁定绘制更新与表头信号，杜绝中间态导致的全树闪烁与白屏
+        self.tree.setUpdatesEnabled(False)
         try:
-            from global_favorites import GlobalFavoriteManager
-            fav_stocks = GlobalFavoriteManager().get_favorite_stocks()
-        except Exception:
-            fav_stocks = set()
+            # 记录滚动条原位与当前选中的股票代码
+            vbar = self.tree.verticalScrollBar()
+            scroll_pos = vbar.value() if vbar else 0
+            selected_code = None
+            curr_item = self.tree.currentItem()
+            if curr_item:
+                selected_code = curr_item.data(0, Qt.ItemDataRole.UserRole)
 
-        # 1. Radar Pool
-        self.radar_root = UniverseTreeItem(self.tree)
-        self.radar_root.setText(0, f"候选雷达池 (Radar Pool) ({len(radar_list)})")
-        self.radar_root.setFont(0, QFont("Microsoft YaHei", 11, QFont.Weight.Bold))
-        self.radar_root.setData(0, Qt.ItemDataRole.UserRole, "root")
-        self.radar_root.setData(0, Qt.ItemDataRole.UserRole + 1, 1)
-        for code, name, price, pct, strategy, desc in radar_list:
-            is_fav = code in fav_stocks
-            item = UniverseTreeItem(self.radar_root)
-            item.setText(0, code)
-            item.setText(1, f"⭐ {name}" if is_fav else name)
-            item.setText(2, price)
-            item.setText(3, pct)
-            item.setText(4, desc)
-            item.setText(5, strategy)
-            item.setData(0, Qt.ItemDataRole.UserRole, code)
-            item.setData(1, Qt.ItemDataRole.UserRole, name)
-            if is_fav:
-                for col in range(6):
-                    item.setBackground(col, QColor("#1A2A1A"))
-                item.setForeground(0, QColor("#00FF88"))
-                item.setForeground(1, QColor("#00FF88"))
-                item.setForeground(2, QColor("#e2e2e5"))
-                item.setForeground(4, QColor("#e2e2e5"))
-                item.setForeground(5, QColor("#e2e2e5"))
-            
-            # 时段标签颜色高亮 (Strategy column) — 早期信号用更醒目的颜色
-            strategy_str = str(strategy)
-            if '🔔' in strategy_str or '竞价' in strategy_str:
-                item.setForeground(5, QColor("#FF4444"))  # 竞价信号: 亮红
-                item.setFont(5, QFont("Microsoft YaHei", -1, QFont.Weight.Bold))
-            elif '🥇' in strategy_str or '黄金' in strategy_str:
-                item.setForeground(5, QColor("#FFD700"))  # 黄金早盘: 金色
-                item.setFont(5, QFont("Microsoft YaHei", -1, QFont.Weight.Bold))
-            elif '🥈' in strategy_str:
-                item.setForeground(5, QColor("#C0C0C0"))  # 盘中跟进: 银色
-            elif not is_fav:
-                item.setForeground(5, QColor("#888888"))  # 午后/其他: 灰色
+            # 🛡️ [排序状态记忆]
+            sort_col = self.tree.sortColumn()
+            sort_order = self.tree.header().sortIndicatorOrder() if self.tree.header() else Qt.SortOrder.DescendingOrder
+            if sort_col < 0:
+                sort_col = 3  # 默认按涨跌幅列排序
+                sort_order = Qt.SortOrder.DescendingOrder
 
-            # Respect A-share red/green convention for percentage column
-            if pct.startswith("+") or pct.startswith("0") or pct.startswith(" "):
-                item.setForeground(3, QColor(COLOR_UP))
-            else:
-                item.setForeground(3, QColor(COLOR_DOWN))
+            self.tree.setSortingEnabled(False)
 
-        # 2. Watchlist Pool
-        self.watch_root = UniverseTreeItem(self.tree)
-        self.watch_root.setText(0, f"精选观察池 (Watchlist Pool) ({len(watch_list)})")
-        self.watch_root.setFont(0, QFont("Microsoft YaHei", 11, QFont.Weight.Bold))
-        self.watch_root.setData(0, Qt.ItemDataRole.UserRole, "root")
-        self.watch_root.setData(0, Qt.ItemDataRole.UserRole + 1, 2)
-        for code, name, price, pct, strategy, desc in watch_list:
-            is_fav = code in fav_stocks
-            item = UniverseTreeItem(self.watch_root)
-            item.setText(0, code)
-            item.setText(1, f"⭐ {name}" if is_fav else name)
-            item.setText(2, price)
-            item.setText(3, pct)
-            item.setText(4, desc)
-            item.setText(5, strategy)
-            item.setData(0, Qt.ItemDataRole.UserRole, code)
-            item.setData(1, Qt.ItemDataRole.UserRole, name)
-            if is_fav:
-                for col in range(6):
-                    item.setBackground(col, QColor("#1A2A1A"))
-                item.setForeground(0, QColor("#00FF88"))
-                item.setForeground(1, QColor("#00FF88"))
-                item.setForeground(2, QColor("#e2e2e5"))
-                item.setForeground(4, QColor("#e2e2e5"))
-                item.setForeground(5, QColor("#e2e2e5"))
-            
-            # 时段标签颜色高亮 (Strategy column) — 早期信号用更醒目的颜色
-            strategy_str = str(strategy)
-            if '🔔' in strategy_str or '竞价' in strategy_str:
-                item.setForeground(5, QColor("#FF4444"))  # 竞价信号: 亮红
-                item.setFont(5, QFont("Microsoft YaHei", -1, QFont.Weight.Bold))
-            elif '🥇' in strategy_str or '黄金' in strategy_str:
-                item.setForeground(5, QColor("#FFD700"))  # 黄金早盘: 金色
-                item.setFont(5, QFont("Microsoft YaHei", -1, QFont.Weight.Bold))
-            elif '🥈' in strategy_str:
-                item.setForeground(5, QColor("#C0C0C0"))  # 盘中跟进: 银色
-            elif not is_fav:
-                item.setForeground(5, QColor("#888888"))  # 午后/其他: 灰色
+            try:
+                from global_favorites import GlobalFavoriteManager
+                fav_stocks = GlobalFavoriteManager().get_favorite_stocks()
+            except Exception:
+                fav_stocks = set()
 
-            # Respect A-share red/green convention for percentage column
-            if pct.startswith("+") or pct.startswith("0") or pct.startswith(" "):
-                item.setForeground(3, QColor(COLOR_UP))
-            else:
-                item.setForeground(3, QColor(COLOR_DOWN))
+            # 确保三级池根节点常驻存在，绝不重复 clear 销毁
+            is_initial = False
+            if not hasattr(self, 'radar_root') or self.radar_root is None or self.radar_root.treeWidget() is None:
+                self.tree.clear()
+                self.radar_root = UniverseTreeItem(self.tree)
+                self.radar_root.setFont(0, QFont("Microsoft YaHei", 11, QFont.Weight.Bold))
+                self.radar_root.setData(0, Qt.ItemDataRole.UserRole, "root")
+                self.radar_root.setData(0, Qt.ItemDataRole.UserRole + 1, 1)
 
-        # 3. Trading Pool
-        self.trade_root = UniverseTreeItem(self.tree)
-        self.trade_root.setText(0, f"实盘交易池 (Trading Pool) ({len(trade_list)})")
-        self.trade_root.setFont(0, QFont("Microsoft YaHei", 11, QFont.Weight.Bold))
-        self.trade_root.setData(0, Qt.ItemDataRole.UserRole, "root")
-        self.trade_root.setData(0, Qt.ItemDataRole.UserRole + 1, 3)
-        for code, name, price, pct, strategy, desc in trade_list:
-            is_fav = code in fav_stocks
-            item = UniverseTreeItem(self.trade_root)
-            item.setText(0, code)
-            item.setText(1, f"⭐ {name}" if is_fav else name)
-            item.setText(2, price)
-            item.setText(3, pct)
-            item.setText(4, desc)
-            item.setText(5, strategy)
-            item.setData(0, Qt.ItemDataRole.UserRole, code)
-            item.setData(1, Qt.ItemDataRole.UserRole, name)
-            if is_fav:
-                for col in range(6):
-                    item.setBackground(col, QColor("#1A2A1A"))
-                item.setForeground(0, QColor("#00FF88"))
-                item.setForeground(1, QColor("#00FF88"))
-                item.setForeground(2, QColor("#e2e2e5"))
-                item.setForeground(4, QColor("#e2e2e5"))
-                item.setForeground(5, QColor("#e2e2e5"))
-            
-            # 时段标签颜色高亮 (Strategy column) — 早期信号用更醒目的颜色
-            strategy_str = str(strategy)
-            if '🔔' in strategy_str or '竞价' in strategy_str:
-                item.setForeground(5, QColor("#FF4444"))  # 竞价信号: 亮红
-                item.setFont(5, QFont("Microsoft YaHei", -1, QFont.Weight.Bold))
-            elif '🥇' in strategy_str or '黄金' in strategy_str:
-                item.setForeground(5, QColor("#FFD700"))  # 黄金早盘: 金色
-                item.setFont(5, QFont("Microsoft YaHei", -1, QFont.Weight.Bold))
-            elif '🥈' in strategy_str:
-                item.setForeground(5, QColor("#C0C0C0"))  # 盘中跟进: 银色
-            elif not is_fav:
-                item.setForeground(5, QColor("#888888"))  # 午后/其他: 灰色
+                self.watch_root = UniverseTreeItem(self.tree)
+                self.watch_root.setFont(0, QFont("Microsoft YaHei", 11, QFont.Weight.Bold))
+                self.watch_root.setData(0, Qt.ItemDataRole.UserRole, "root")
+                self.watch_root.setData(0, Qt.ItemDataRole.UserRole + 1, 2)
 
-            # Respect A-share red/green convention for percentage column
-            if pct.startswith("+") or pct.startswith("0") or pct.startswith(" "):
-                item.setForeground(3, QColor(COLOR_UP))
-            else:
-                item.setForeground(3, QColor(COLOR_DOWN))
-        
-        self.tree.expandAll()
-        if not getattr(self, '_has_restored_widths_once', False):
-            self._has_restored_widths_once = True
-            self.restore_header_state()
-            
-        # 🛡️ [排序状态恢复] 显式重新应用排序列与顺序，确保数据更新后排序 100% 保持不被重置
-        self.tree.setSortingEnabled(True)
-        if sort_col >= 0:
-            self.tree.sortByColumn(sort_col, sort_order)
+                self.trade_root = UniverseTreeItem(self.tree)
+                self.trade_root.setFont(0, QFont("Microsoft YaHei", 11, QFont.Weight.Bold))
+                self.trade_root.setData(0, Qt.ItemDataRole.UserRole, "root")
+                self.trade_root.setData(0, Qt.ItemDataRole.UserRole + 1, 3)
+                is_initial = True
+
+            # 增量原地更新各池数据 (In-Place Diff Sync)
+            self._sync_pool_subtree(self.radar_root, "候选雷达池 (Radar Pool)", radar_list, fav_stocks)
+            self._sync_pool_subtree(self.watch_root, "精选观察池 (Watchlist Pool)", watch_list, fav_stocks)
+            self._sync_pool_subtree(self.trade_root, "实盘交易池 (Trading Pool)", trade_list, fav_stocks)
+
+            # 仅在初次构建时展开全部；后续平滑更新绝不强行 expandAll，保持用户的折叠与浏览状态
+            if is_initial:
+                self.tree.expandAll()
+
+            if not getattr(self, '_has_restored_widths_once', False):
+                self._has_restored_widths_once = True
+                self.restore_header_state()
+
+            # 🛡️ [排序状态恢复]
+            self.tree.setSortingEnabled(True)
+            if sort_col >= 0:
+                self.tree.sortByColumn(sort_col, sort_order)
+
+            # 恢复选中的标的节点
+            if selected_code and selected_code != "root":
+                found = False
+                for root in (self.radar_root, self.watch_root, self.trade_root):
+                    for i in range(root.childCount()):
+                        child = root.child(i)
+                        if child.data(0, Qt.ItemDataRole.UserRole) == selected_code:
+                            self.tree.setCurrentItem(child)
+                            found = True
+                            break
+                    if found:
+                        break
+
+            # 锁定滚动条位置，彻底杜绝视口跳动与抖动
+            if vbar and vbar.value() != scroll_pos:
+                vbar.setValue(scroll_pos)
+        finally:
+            self.tree.setUpdatesEnabled(True)
 
     def _on_item_clicked(self, item, column):
         code = item.data(0, Qt.ItemDataRole.UserRole)

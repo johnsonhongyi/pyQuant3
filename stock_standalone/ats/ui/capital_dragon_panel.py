@@ -799,6 +799,7 @@ class CapitalDragonPanel(QWidget):
                 dragons = []
 
         self._is_updating = True
+        self.table.setUpdatesEnabled(False)
         self.table.blockSignals(True)
         try:
             # 动态同步自定义列 (ats_col)：若配置发生变化，即时平滑热重载表头与列结构
@@ -1198,6 +1199,7 @@ class CapitalDragonPanel(QWidget):
 
         finally:
             self.table.blockSignals(False)
+            self.table.setUpdatesEnabled(True)
             self._is_updating = False
 
     def toggle_module_state(self):
