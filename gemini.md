@@ -1,3 +1,22 @@
+## 2026-09-11 19:25
+- [x] **【彻底根除管理器后台底层写配置与注册表导致 PredatorSense.exe 频繁自动启动 Bug】(SSOT) (`stock_standalone/webTools/window_manager/core.py`, `stock_standalone/webTools/window_manager/ui.py`, `stock_standalone/webTools/window_manager/window_layout_config.json`, `stock_standalone/tests/test_acer_performance.py`)**：
+    - [x] **彻底根除注册表修改与宏碁系统服务事件监视器联动 (元凶 1)**：
+        1. **深入机理穿透**：宏碁官方系统常驻服务（`PSAgent.exe` / `PSAdminAgent.exe` / `PSSvc.exe`）通过 Windows `RegNotifyChangeKeyValue` 机制在底层全天候监听 `HKLM\SOFTWARE\OEM\PredatorSense`。此前控制器在初始化时调用 `_sanitize_turbo_button_registry()`，使用了 `KEY_SET_VALUE` 打开并在 `val != 0` 时调用了 `winreg.SetValueEx(key, "Turbo_Button_status", 0, ...)`。第三方进程只要以写入方式触碰该项，后台服务立即捕捉到变更通知并误判为硬件/按键事件，从而通过启动器死循环疯狂拉起 `PredatorSense.exe` 界面；
+        2. **物理级纯只读安全防线**：彻底清空并移除 `_sanitize_turbo_button_registry` 内部对注册表的写操作，拔除所有 `winreg.KEY_SET_VALUE` 和 `winreg.SetValueEx` 调用，全模块所有 OEM 注册表访问统一严格锁定为只读 `winreg.KEY_READ`，绝不修改注册表任何键值，彻底切断宏碁后台服务唤起链路；
+    - [x] **默认全面关闭开机与后台自动应用配置 (元凶 2)**：
+        1. **诱因穿透**：`ConfigManager.get_acer_performance_config()` 中缺省自愈配置将 `auto_apply_on_startup` 设为 `True`，且 `window_layout_config.json` 中被持久化为 `true`。管理器每次冷启动、后台静默运行（`-hide`）或托盘初始化时，都会在后台单次定时调度 `apply_acer_performance_async`，导致 `launch_predatorsense_gui` 被动唤起，即使 kill 也再次被调度拉起；
+        2. **彻底禁用后台自动下发**：将 `auto_apply_on_startup` 默认值及现行所有配置彻底修正为 `False`；在 `ui.py` 开机启动段严格增加 `is_auto_in_cfg is True` 校验，默认直接跳过并输出日志：`ℹ️ [AutoStart] 未开启开机自动应用 Acer 性能模式，保持系统原生状态，绝不后台写配置或拉起 PredatorSense。`，完全 0 后台动作、0 自动拉起；
+    - [x] **阻断守护进程擅自拉起启动器 (元凶 3)**：
+        1. 重构 `ensure_predatorsense_daemon()` 为纯只读守护探查，彻底剔除内部对 `PSLauncher.exe` 或 `explorer.exe shell:AppsFolder...` 的主动拉起调用，避免其干扰操作系统服务管理器的原生状态；
+    - [x] **状态一致优雅跳过 (State Deduplication) 与 Win32 122 异常防护 (元凶 4)**：
+        1. 重构 `apply_performance_profile`：执行调优前先探查系统当前已生效状态，当目标超频、风扇、CoolBoost 与当前状态一致且非强制时，直接返回成功：`当前硬件状态已完全符合目标配置，无需重复应用`，绝不唤起 UI；
+        2. 为 `launch_predatorsense_gui` 中 `win32gui.EnumWindows` 与内部 `enum_cb` 增加全面 `try...except` 保护，彻底解决 Windows 数据区太小的 `(122, 'EnumWindows')` 系统报错；
+    - [x] **自动化测试回归全绿通过 (5/5 PASSED)**：
+        1. 新增 `test_acer_registry_readonly_safety`，通过猴子补丁严格断言控制器初始化与运行过程没有任何向 OEM 注册表的写入操作；
+        2. `test_acer_config_persistence` 严格断言 `auto_apply_on_startup` 默认为 `False`；
+        3. `test_acer_apply_profile` 覆盖状态重复应用时优雅跳过（Step 3 命中“无需重复”或“生效状态”）；
+        4. 全量 5 项测试全部 100% PASSED（exit code 0）！
+
 ## 2026-09-11 19:10
 - [x] **【ATS 表格与树控件重影叠字、调节列宽残影与手动刷新整窗布局放大缩小彻底根治】(SSOT) (`stock_standalone/ats/ui/capital_dragon_panel.py`, `stock_standalone/ats/ui/universe_widget.py`, `stock_standalone/ats/ui/favorite_panel.py`, `stock_standalone/ats/ui/swing_table.py`, `stock_standalone/ats/ui/new_stock_panel.py`, `stock_standalone/ats/ui/trade_flow.py`, `stock_standalone/ats/ui/dragon_monitor.py`, `stock_standalone/tests/test_flicker_free_realtime_updates.py`, `stock_standalone/tests/test_capital_dragon_panel_integration.py`)**：
     - [x] **物理级根除“调节列宽各种重影”与“刷新覆盖未清理旧数据”底层元凶**：

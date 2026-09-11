@@ -2738,7 +2738,7 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
         # 🛡️ 严格约束：仅当【当前程序本身】被设置为 Windows 开机自启动，或本次启动带有开机后台静默参数 (-hide) 时才自动调度运行；非自启设置时不用自动运行程序
         try:
             acer_cfg = self.config_manager.get_acer_performance_config()
-            is_auto_in_cfg = acer_cfg.get("auto_apply_on_startup", True)
+            is_auto_in_cfg = acer_cfg.get("auto_apply_on_startup", False)
             is_current_autostart = core.is_autostart_enabled_for_current_app()
             is_silent_startup = getattr(self, "start_hidden", False) or ("-hide" in sys.argv or "--hide" in sys.argv)
 
@@ -2759,7 +2759,9 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
                 delay_ms = max(0, int(actual_delay * 1000))
                 QtCore.QTimer.singleShot(delay_ms, lambda: self.apply_acer_performance_async(acer_cfg, custom_msg_prefix="开机自动应用 Acer 性能预设"))
             else:
-                if not is_current_autostart and not is_silent_startup:
+                if not is_auto_in_cfg:
+                    self.log("ℹ️ [AutoStart] 未开启开机自动应用 Acer 性能模式，保持系统原生状态，绝不后台写配置或拉起 PredatorSense。")
+                elif not is_current_autostart and not is_silent_startup:
                     self.log("ℹ️ [AutoStart] 当前程序未配置为开机自启动，跳过后台自动调度。")
         except Exception as e:
             logger.error(f"启动自动应用 Acer 性能模式初始化异常: {e}")
