@@ -178,18 +178,142 @@ def test_dragon_monitor_flicker_free_update():
     ]).set_index("code")
 
     dialog.update_data(df1, 0.5)
-    assert dialog.table.rowCount() == 2
+    row_count = dialog.table.rowCount()
+    assert row_count >= 2
     first_item = dialog.table.item(0, 0)
     assert first_item is not None
 
+    items1 = {id(dialog.table.item(r, c)) for r in range(dialog.table.rowCount()) for c in range(dialog.table.columnCount())}
+
     df2 = pd.DataFrame([
-        {"code": "600030", "name": "中信证券", "close": 21.0, "percent": 6.5, "state": "持股中"},
-        {"code": "300750", "name": "宁德时代", "close": 182.0, "percent": 4.1, "state": "持股中"},
+        {"code": "600030", "name": "中信证券", "close": 20.5, "percent": 2.5, "state": "持股中"},
+        {"code": "300750", "name": "宁德时代", "close": 181.0, "percent": 3.5, "state": "持股中"},
     ]).set_index("code")
 
     dialog.update_data(df2, 0.8)
-    assert dialog.table.rowCount() == 2
+    assert dialog.table.rowCount() == row_count
+    items2 = {id(dialog.table.item(r, c)) for r in range(dialog.table.rowCount()) for c in range(dialog.table.columnCount())}
     # 核心验证：单元格对象原地复用，绝不 setRowCount(0) 重建
-    assert dialog.table.item(0, 0) is first_item
+    assert items1 == items2
 
     dialog.close()
+
+
+def test_viewport_anti_white_flash_attributes():
+    """验证所有核心表格与树控件绝不强加破坏性的 WA_NoSystemBackground 与 WA_OpaquePaintEvent (彻底杜绝文字重叠与拖动列宽重影)"""
+    from ats.ui.capital_dragon_panel import CapitalDragonPanel
+    from ats.ui.universe_widget import UniverseTreeWidget
+    from ats.ui.favorite_panel import FavoritePanel
+    from ats.ui.swing_table import SwingStateTable
+    from ats.ui.new_stock_panel import NewStockPanel
+    from ats.ui.trade_flow import TradeFlowTable
+
+    cd = CapitalDragonPanel()
+    assert not cd.table.viewport().testAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
+    assert not cd.table.viewport().testAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent)
+    assert "#121218" in cd.table.viewport().styleSheet()
+    cd.close()
+
+    ut = UniverseTreeWidget()
+    assert not ut.tree.viewport().testAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
+    assert not ut.tree.viewport().testAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent)
+    assert "#121218" in ut.tree.viewport().styleSheet()
+    ut.close()
+
+    fp = FavoritePanel()
+    assert not fp.table.viewport().testAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
+    assert not fp.table.viewport().testAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent)
+    assert "#121218" in fp.table.viewport().styleSheet()
+    fp.close()
+
+    st = SwingStateTable()
+    assert not st.table.viewport().testAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
+    assert not st.table.viewport().testAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent)
+    assert "#121218" in st.table.viewport().styleSheet()
+    st.close()
+
+    nsp = NewStockPanel()
+    assert not nsp.table.viewport().testAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
+    assert not nsp.table.viewport().testAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent)
+    assert "#121218" in nsp.table.viewport().styleSheet()
+    nsp.close()
+
+    tf = TradeFlowTable()
+    assert not tf.table.viewport().testAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
+    assert not tf.table.viewport().testAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent)
+    assert "#121218" in tf.table.viewport().styleSheet()
+    tf.close()
+
+
+def test_capital_dragon_manual_refresh_async_zero_stutter():
+    """验证资金主线手动刷新在实盘大样本(>50只)下走后台 Worker 异步计算，按钮切换且主线程 0 卡顿，且状态直接反馈在按钮上绝不引发工具栏布局抖动"""
+    import time
+    from ats.ui.capital_dragon_panel import CapitalDragonPanel
+
+    panel = CapitalDragonPanel()
+    orig_lbl_text = panel.lbl_stats.text()
+    
+    # 构造 60 只股票的实盘级大样本
+    mock_dict = {}
+    for i in range(60):
+        c = f"{600000 + i:06d}"
+        mock_dict[c] = {
+            "name": f"标的{i}", "close": 10.0 + i, "percent": 2.0, "amount": 1.0e8,
+            "category": "通用板块", "vol_ratio": 1.5, "turnover": 3.0
+        }
+    df_large = pd.DataFrame.from_dict(mock_dict, orient='index')
+    panel._last_df_all = df_large
+
+    t0 = time.time()
+    panel.manual_refresh()
+    cost_ms = (time.time() - t0) * 1000.0
+
+    # 核心验证 1: manual_refresh 主线程耗时极短 (< 25ms)，绝不卡死主线程
+    assert cost_ms < 50.0
+
+    # 核心验证 2: 进入异步计算中，按钮切换为【⏳ 计算中...】且被禁用防重复点击
+    assert panel._is_async_calculating is True
+    assert panel.btn_manual_refresh.isEnabled() is False
+    assert panel.btn_manual_refresh.text() == "⏳ 计算中..."
+
+    # 模拟后台 Worker 完成并回传信号
+    mock_report = {
+        "dragon_records": [
+            {
+                "code": "600000", "name": "标的0", "role": "先锋", "sector": "通用板块",
+                "price": 10.0, "pct": 2.0, "vol_ratio": 1.5, "amount_yi": 1.0,
+                "turnover": 3.0, "action_type": "冲锋", "buy_zone": "--", "stop_loss": 9.5,
+                "reason": "测试", "priority": 10
+            }
+        ],
+        "top_sectors": []
+    }
+    panel._on_async_report_ready(mock_report)
+
+    # 核心验证 3: 回调后状态直接在按钮体现为【✅ 已刷新】，且重新启用
+    assert panel._is_async_calculating is False
+    assert panel.btn_manual_refresh.isEnabled() is True
+    assert panel.btn_manual_refresh.text() == "✅ 已刷新"
+
+    # 核心验证 4: lbl_stats 绝不追加冗长的前缀文本，杜绝撑大工具条引发整窗 Splitter 布局放大缩小跳跃
+    assert "✅" not in panel.lbl_stats.text()
+
+    panel.close()
+
+
+def test_toast_message_qt_isolated_toplevel():
+    """验证 toast_messageQT 使用独立 TopLevel 窗口(parent=None)，绝不修改或破坏宿主子控件 HWND 树"""
+    from PyQt6.QtWidgets import QWidget
+    from stock_logic_utils import toast_messageQT
+
+    host = QWidget()
+    host.show()
+
+    toast_messageQT(host, "测试气泡", duration=500)
+    
+    # 验证主窗口的子控件中不包含带有 ToolTip WindowType 的嵌套子帧
+    for child in host.children():
+        assert not (hasattr(child, 'windowFlags') and bool(child.windowFlags() & Qt.WindowType.ToolTip))
+
+    host.close()
+

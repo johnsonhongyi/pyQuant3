@@ -258,6 +258,9 @@ class DragonLeaderMonitorDialog(QDialog, WindowMixin):
         self.extra_cols = get_dragon_extra_cols()
         self.cols = get_dragon_table_headers(self.extra_cols)
         self.table = QTableWidget(0, len(self.cols))
+        # 视口深暗黑底色设置，确保局部重绘与列宽调整时干净擦除旧图元，杜绝重影与白闪
+        self.table.viewport().setStyleSheet("background-color: #121218; border: none;")
+        self.table.setStyleSheet("QTableWidget { background-color: #121218; border: none; }")
         self.table.setHorizontalHeaderLabels(self.cols)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -662,7 +665,6 @@ class DragonLeaderMonitorDialog(QDialog, WindowMixin):
             ))
             
         # 4. 刷新渲染表格 (无闪烁双缓冲就地更新)
-        self.table.setUpdatesEnabled(False)
         try:
             vbar = self.table.verticalScrollBar()
             scroll_pos = vbar.value() if vbar else 0
@@ -775,7 +777,6 @@ class DragonLeaderMonitorDialog(QDialog, WindowMixin):
             if vbar and vbar.value() != scroll_pos:
                 vbar.setValue(scroll_pos)
         finally:
-            self.table.setUpdatesEnabled(True)
             self._is_updating = False
 
     def _get_main_app(self):

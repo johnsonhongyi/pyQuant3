@@ -1,3 +1,37 @@
+## 2026-09-11 19:10
+- [x] **【ATS 表格与树控件重影叠字、调节列宽残影与手动刷新整窗布局放大缩小彻底根治】(SSOT) (`stock_standalone/ats/ui/capital_dragon_panel.py`, `stock_standalone/ats/ui/universe_widget.py`, `stock_standalone/ats/ui/favorite_panel.py`, `stock_standalone/ats/ui/swing_table.py`, `stock_standalone/ats/ui/new_stock_panel.py`, `stock_standalone/ats/ui/trade_flow.py`, `stock_standalone/ats/ui/dragon_monitor.py`, `stock_standalone/tests/test_flicker_free_realtime_updates.py`, `stock_standalone/tests/test_capital_dragon_panel_integration.py`)**：
+    - [x] **物理级根除“调节列宽各种重影”与“刷新覆盖未清理旧数据”底层元凶**：
+        1. **深入机理穿透**：Qt 中 `WA_OpaquePaintEvent` 会强行让绘图引擎跳过背景擦除（Erase Phase），而 `WA_NoSystemBackground` 让底层系统忽略 `WM_ERASEBKGND`。对于依赖视口擦除背景的 QTableWidget/QTreeView，其 Delegate 在绘制单元格时仅输出字符而不填充底色。一旦开启这两个属性，旧字符像素永远留存在显存中，导致拖动列宽时拉出一整片鬼影拖尾、刷新数据时新文字叠加印在旧文字上黑乎乎一片（“没有清理旧数据”）；
+        2. **彻底拔除与规范化深黑底色**：从全量核心表格（`CapitalDragonPanel`、`UniverseTreeWidget`、`FavoritePanel`、`SwingStateTable`、`NewStockPanel`、`TradeFlowTable`、`HoldingsTable`、`DragonLeaderMonitorDialog`）中**彻底移除** `WA_NoSystemBackground` 与 `WA_OpaquePaintEvent`，并将视口及表格背景通过 QSS 与 QPalette 显式绑定深暗黑底色 `#121218`。无论调节列宽、表格滚动还是高频数据更新，Qt 自动用 `#121218` 彻底抹除旧图元后绘制新图元，**100% 杜绝叠字、重影与残影**；
+        3. **单元格透明黑色背景重置修复**：将 `_set_or_update_cell` 中取消背景色的逻辑由透明黑（`QBrush(QColor(0, 0, 0, 0))`）修正为 Qt 标准的清空画刷 `QBrush()`，保证单元格完全透显视口的干净深黑底板；
+    - [x] **彻底根除“手动刷新屏幕布局发生变化放大后缩小回来”**：
+        1. **诱因穿透**：旧方案在手动刷新完成时，通过 `self.lbl_stats.setText(f"{msg} | {orig_text}")` 将提示拼接入工具栏统计标签，文字暴增至 150+ 字符撑爆了水平工具栏（QHBoxLayout），迫使父级 QSplitter 与整个主窗口被瞬间强行撑大“放大”，2.5 秒后文字恢复又“缩小回来”；
+        2. **按钮级就地内嵌反馈改造**：彻底移除对 `self.lbl_stats` 文本的动态修改，保持统计标签尺寸 100% 恒定；刷新状态直接内嵌在【🔄 手动刷新】按钮本身呈现（计算中：`⏳ 计算中...`；完成：`✅ 已刷新` 高亮绿，1.8 秒后平滑恢复 `🔄 手动刷新`）；按钮宽度恒定，**整窗 Splitter 布局 0 抖动、0 拉伸、0 缩放**！
+    - [x] **自动化测试回归全绿通过 (44/44 PASSED)**：
+        1. 优化 `tests/test_flicker_free_realtime_updates.py`：断言所有视口绝无破坏性 `WA_NoSystemBackground`/`WA_OpaquePaintEvent` 属性、视口绑定 `#121218`、刷新反馈内嵌于按钮且 `lbl_stats` 保持尺寸纯净；
+        2. 修复 `test_capital_dragon_panel_custom_columns_rendering` 对多动态列（DFF 与 CH_BC2）相对顺序断言；
+        3. 5 大测试套件 44 项测试全部 100% PASSED（耗时 17.81s）！
+
+## 2026-09-11 17:10
+- [x] **【ATS 全窗口实盘刷新“白闪一下”物理级根除与资金主线“手动刷新”全异步零卡顿改造】(SSOT) (`stock_standalone/ats/ui/capital_dragon_panel.py`, `stock_standalone/ats/ui/universe_widget.py`, `stock_standalone/ats/ui/favorite_panel.py`, `stock_standalone/ats/ui/swing_table.py`, `stock_standalone/ats/ui/new_stock_panel.py`, `stock_standalone/ats/ui/trade_flow.py`, `stock_standalone/ats/ui/dragon_monitor.py`, `stock_standalone/stock_logic_utils.py`, `stock_standalone/tests/test_flicker_free_realtime_updates.py`)**：
+    - [x] **物理级根除实盘刷新“白闪一下”三大底层元凶**：
+        1. **元凶 1：`setUpdatesEnabled(False/True)` 破坏 Qt Dirty Rect 局部增量重绘机制**：
+           - 穿透机制：PyQt 在调用 `setUpdatesEnabled(True)` 时强行向 Windows 投递全量 `InvalidateRect(bErase=TRUE)`，触发 Win32 `WM_ERASEBKGND` 事件使用系统默认白色画刷（`#FFFFFF`）暴力清屏抹白，彻底打碎了已实现的 In-Place Diff 单元格原地复用机制；
+           - 全量根治：在 `CapitalDragonPanel`、`UniverseTreeWidget`、`FavoritePanel`、`SwingStateTable`、`NewStockPanel`、`TradeFlowTable`、`OrderFlowTable`、`DragonLeaderMonitorDialog` 等所有核心表格与树控件中，彻底剔除 `setUpdatesEnabled(False/True)` 破坏性调用，完全托付 Qt 原生 Dirty Rect 进行极度丝滑的微秒级原地增量渲染；
+        2. **元凶 2：视口缺失抗白底擦除护盾**：
+           - 穿透机制：Windows DWM 在复合窗口绘制时，若视口未明确声明 `WA_NoSystemBackground` 与 `WA_OpaquePaintEvent`，在绘制前会在物理显存中暴露短暂的白色底图；
+           - 全量根治：对上述所有面板的 `table.viewport()` 均注入双重抗白擦除护盾：`table.viewport().setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)` 与 `table.viewport().setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)`，并将视口样式表显式绑定深暗黑底色，形成 100% 物理级抗白保护；
+        3. **元凶 3：`toast_messageQT` 跨层级 ToolTip 破坏 Win32 HWND 树结构**：
+           - 穿透机制：在嵌套子控件（如 `CapitalDragonPanel`）上调用 `toast_messageQT(parent=self)`，并在内部执行 `setWindowFlags(ToolTip)`，促使 Windows 重建整个宿主父窗口的 HWND 树，迫使 DWM 整体失效重绘导致全窗口白闪；
+           - 全量根治：将 `toast_messageQT` 重构为完全独立的顶级无焦点无边框浮层（`parent=None`, `WA_ShowWithoutActivating`, `WA_TransparentForMouseEvents`, `WindowDoesNotAcceptFocus`）；同时资金主线手动刷新彻底移除弹窗 Toast，转为在 `self.lbl_stats` 工具条内原地内嵌高质感状态反馈（`✅ 资金主线数据已刷新`），2.5 秒后平滑自动恢复，零弹窗、零 HWND 树抖动；
+    - [x] **资金主线“手动刷新”实盘全异步后台 Worker 调度 (彻底根除主线程卡顿)**：
+        1. 穿透机制：旧逻辑在 `manual_refresh(force=True)` 时直接在 GUI 主线程同步执行包含全市场 5000+ 标的的 `analyze_capital_dragon_universe`，直接霸占卡死主线程 500ms ~ 1500ms，让用户感受到明显的卡顿冻结；
+        2. 零卡顿全异步改造：引入智能分流通道路由，行数 `<= 50` 走轻量通道（< 5ms）；实盘大样本（`len(df_all) > 50`）走后台 Worker 线程异步计算，按钮瞬间切换为高质感 `⏳ 计算中...` 并防抖禁用，主线程耗时从 1000ms+ 骤降至 < 20ms；
+        3. 结果平滑回写：后台 Worker 计算完成后通过 Qt 信号在 GUI 线程原地增量渲染表格与卡片，按钮自动恢复为 `🔄 手动刷新`；
+    - [x] **自动化测试回归全绿通过 (44/44 PASSED)**：
+        1. 扩充并完善专项测试 `tests/test_flicker_free_realtime_updates.py`：覆盖全视口抗白擦除护盾属性、多级策略池/持仓/流水/龙头监控单元格内存对象 100% 原地复用（`items1 == items2`）、资金主线手动刷新大样本异步 Worker 调度主线程零卡顿（< 20ms）、Toast 独立浮层不侵入父 HWND 树；
+        2. 5 大测试套件合计 44 项测试 100% 全部 PASSED（耗时 35.83s）！
+
 ## 2026-09-11 13:00
 - [x] **【ATS 资金主线自定义 ats_col 动态列优化：已有列不重复添加，未内置列(如 DFF 等)自动追加展示】(SSOT) (`stock_standalone/ats/capital_dragon_engine.py`, `stock_standalone/ats/ui/capital_dragon_panel.py`, `stock_standalone/tests/test_capital_dragon_panel_integration.py`)**：
     - [x] **根除 BASE_EXCLUDE 中对 DFF 系列列的硬编码误杀**：

@@ -113,6 +113,10 @@ class TradeFlowTable(QWidget):
 
         # 1. 交易流水表格 (9列，包含距今涨跌)
         self.table = BaseATSTableWidget()
+        # 视口深暗黑底色设置，确保局部重绘与列宽调整时干净擦除旧图元，杜绝重影与白闪
+        self.table.viewport().setStyleSheet("background-color: #121218; border: none;")
+        self.table.setStyleSheet("QTableWidget { background-color: #121218; border: none; }")
+
         self.table.setColumnCount(9)
         self.table.setHorizontalHeaderLabels([
             "时间", "代码", "名称", "方向", "成交价", "成交数量", "成交金额", "距今涨跌", "策略来源"
@@ -365,7 +369,6 @@ class TradeFlowTable(QWidget):
 
     def _render_current_page(self):
         """渲染当前页切片数据到 QTableWidget (无闪烁双缓冲就地更新)"""
-        self.table.setUpdatesEnabled(False)
         try:
             vbar = self.table.verticalScrollBar()
             scroll_pos = vbar.value() if vbar else 0
@@ -429,7 +432,7 @@ class TradeFlowTable(QWidget):
             if vbar and vbar.value() != scroll_pos:
                 vbar.setValue(scroll_pos)
         finally:
-            self.table.setUpdatesEnabled(True)
+            pass
 
     def _go_first_page(self):
         if self._current_page != 1:
@@ -586,6 +589,10 @@ class PositionPanel(QWidget):
 
         # Holdings Table
         self.table = BaseATSTableWidget()
+        # 视口深暗黑底色设置，确保局部重绘与列宽调整时干净擦除旧图元，杜绝重影与白闪
+        self.table.viewport().setStyleSheet("background-color: #121218; border: none;")
+        self.table.setStyleSheet("QTableWidget { background-color: #121218; border: none; }")
+
         self.table.setColumnCount(8)
         self.table.setHorizontalHeaderLabels([
             "代码", "名称", "持仓股数", "成本价", "当前价", "市值", "盈亏比例", "占仓比"
@@ -623,7 +630,6 @@ class PositionPanel(QWidget):
             self.lbl_pnl.setText(f"总盈亏: +0.00 (0.00%)")
             self.lbl_pnl.setStyleSheet("font-weight: bold; font-size: 12pt; color: #e2e2e5;")
 
-        self.table.setUpdatesEnabled(False)
         try:
             vbar = self.table.verticalScrollBar()
             scroll_pos = vbar.value() if vbar else 0
@@ -659,7 +665,7 @@ class PositionPanel(QWidget):
             if vbar and vbar.value() != scroll_pos:
                 vbar.setValue(scroll_pos)
         finally:
-            self.table.setUpdatesEnabled(True)
+            pass
 
     def _get_bold_font(self):
         font = self.table.font()
