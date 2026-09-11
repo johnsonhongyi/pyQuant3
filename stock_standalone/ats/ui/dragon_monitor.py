@@ -661,126 +661,122 @@ class DragonLeaderMonitorDialog(QDialog, WindowMixin):
                 code, name, price, pct, state, dff, dff2, dff3, extra_vals, rs_val, resonance, source
             ))
             
-        # 4. 刷新渲染表格
-        self.table.setSortingEnabled(False)
-        self.table.setRowCount(0)
-        self.table.setRowCount(len(rows_data))
-        
-        for idx, data in enumerate(rows_data):
-            code, name, price, pct, state, dff, dff2, dff3, extra_vals, rs_val, resonance, source = data
-            
-            c_item = QTableWidgetItem(code)
-            c_item.setForeground(QBrush(QColor("#00FF88" if source.startswith("手动") else "#FFE4C4")))
-            c_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            
-            n_item = QTableWidgetItem(name)
-            n_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            if source.startswith("手动"):
-                n_item.setText(f"⭐ {name}")
-                n_item.setForeground(QBrush(QColor("#00FF88")))
-                
-            p_item = NumericTableWidgetItem(f"{price:.2f}")
-            p_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            
-            pct_item = NumericTableWidgetItem(f"{pct:+.2f}%")
-            pct_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            if pct > 0:
-                pct_item.setForeground(QBrush(QColor(COLOR_UP)))
-            elif pct < 0:
-                pct_item.setForeground(QBrush(QColor(COLOR_DOWN)))
-                
-            st_item = QTableWidgetItem(state)
-            st_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            if "持股" in state:
-                st_item.setForeground(QBrush(QColor(COLOR_UP)))
-            else:
-                st_item.setForeground(QBrush(QColor(COLOR_WARN)))
-                
-            d1_item = NumericTableWidgetItem(f"{dff:.2f}")
-            d1_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            d1_item.setForeground(QBrush(QColor(COLOR_UP if dff > 0 else COLOR_DOWN)))
-            
-            d2_item = NumericTableWidgetItem(f"{dff2:.2f}")
-            d2_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            d2_item.setForeground(QBrush(QColor(COLOR_UP if dff2 > 0 else COLOR_DOWN)))
-            
-            d3_item = NumericTableWidgetItem(f"{dff3:.2f}")
-            d3_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            d3_item.setForeground(QBrush(QColor(COLOR_UP if dff3 > 0 else COLOR_DOWN)))
-            
-            self.table.setItem(idx, 0, c_item)
-            self.table.setItem(idx, 1, n_item)
-            self.table.setItem(idx, 2, p_item)
-            self.table.setItem(idx, 3, pct_item)
-            self.table.setItem(idx, 4, st_item)
-            self.table.setItem(idx, 5, d1_item)
-            self.table.setItem(idx, 6, d2_item)
-            self.table.setItem(idx, 7, d3_item)
-            
-            # 填入 extra_cols
-            col_offset = 8
-            for e_idx, e_val in enumerate(extra_vals):
-                e_item = NumericTableWidgetItem(str(e_val))
-                e_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                e_item.setForeground(QBrush(QColor("#E0E0E0")))
-                self.table.setItem(idx, col_offset + e_idx, e_item)
-                
-            col_offset += len(extra_vals)
-            
-            rs_item = NumericTableWidgetItem(f"{rs_val:+.2f}%")
-            rs_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            if rs_val >= 2.0:
-                rs_item.setForeground(QBrush(QColor(COLOR_UP)))
-                font = self.table.font()
-                font.setBold(True)
-                rs_item.setFont(font)
-            elif rs_val < -2.0:
-                rs_item.setForeground(QBrush(QColor(COLOR_DOWN)))
-                
-            res_item = QTableWidgetItem(resonance)
-            res_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            if resonance == "逆市抗跌":
-                res_item.setForeground(QBrush(QColor("#FF7F50"))) # Coral
-                font = self.table.font()
-                font.setBold(True)
-                res_item.setFont(font)
-            elif resonance == "大盘共振":
-                res_item.setForeground(QBrush(QColor(COLOR_UP)))
-                font = self.table.font()
-                font.setBold(True)
-                res_item.setFont(font)
-                
-            src_item = QTableWidgetItem(source)
-            src_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            if "自动" in source:
-                src_item.setForeground(QBrush(QColor("#FFD700")))
-                
-            self.table.setItem(idx, col_offset, rs_item)
-            self.table.setItem(idx, col_offset + 1, res_item)
-            self.table.setItem(idx, col_offset + 2, src_item)
-            
-            # 手动添加整行高亮特殊背景色
-            if source.startswith("手动"):
-                for col in range(len(self.cols)):
-                    item = self.table.item(idx, col)
-                    if item:
-                        item.setBackground(QBrush(QColor("#152a1a")))
-                        
-        if len(rows_data) != getattr(self, '_last_row_count', 0):
-            self._last_row_count = len(rows_data)
-            auto_fit_columns_once(self.table, "dragon_leader_monitor_header_v1")
-            
-        self.table.setSortingEnabled(True)
-        
-        # 恢复先前选中的个股焦点
-        if selected_code:
-            for r in range(self.table.rowCount()):
-                c_item = self.table.item(r, 0)
-                if c_item and c_item.text() == selected_code:
-                    self.table.setCurrentCell(r, 0)
-                    break
-                    
-        self._is_updating = False
+        # 4. 刷新渲染表格 (无闪烁双缓冲就地更新)
+        self.table.setUpdatesEnabled(False)
+        try:
+            vbar = self.table.verticalScrollBar()
+            scroll_pos = vbar.value() if vbar else 0
+
+            self.table.setSortingEnabled(False)
+            target_row_count = len(rows_data)
+            if self.table.rowCount() != target_row_count:
+                self.table.setRowCount(target_row_count)
+
+            def _set_cell(r, c, text, is_numeric=False, align=Qt.AlignmentFlag.AlignCenter, fg=None, bg=None, bold=False):
+                item = self.table.item(r, c)
+                text_str = str(text)
+                if item is None:
+                    item = NumericTableWidgetItem(text_str) if is_numeric else QTableWidgetItem(text_str)
+                    item.setTextAlignment(align)
+                    if fg:
+                        item.setForeground(QBrush(fg if isinstance(fg, QColor) else QColor(fg)))
+                    if bg:
+                        item.setBackground(QBrush(bg if isinstance(bg, QColor) else QColor(bg)))
+                    if bold:
+                        f = self.table.font()
+                        f.setBold(True)
+                        item.setFont(f)
+                    self.table.setItem(r, c, item)
+                else:
+                    if item.text() != text_str:
+                        item.setText(text_str)
+                    if fg:
+                        target_col = fg if isinstance(fg, QColor) else QColor(fg)
+                        if item.foreground().color() != target_col:
+                            item.setForeground(QBrush(target_col))
+                    if bg:
+                        target_bg = bg if isinstance(bg, QColor) else QColor(bg)
+                        if item.background().color() != target_bg:
+                            item.setBackground(QBrush(target_bg))
+                    elif item.background().style() != Qt.BrushStyle.NoBrush:
+                        item.setBackground(QBrush(QColor(0, 0, 0, 0)))
+                    if bold != item.font().bold():
+                        f = item.font()
+                        f.setBold(bold)
+                        item.setFont(f)
+
+            for idx, data in enumerate(rows_data):
+                code, name, price, pct, state, dff, dff2, dff3, extra_vals, rs_val, resonance, source = data
+                is_manual = source.startswith("手动")
+                row_bg = QColor("#152a1a") if is_manual else None
+
+                # 0: 代码
+                c_fg = QColor("#00FF88" if is_manual else "#FFE4C4")
+                _set_cell(idx, 0, code, is_numeric=False, fg=c_fg, bg=row_bg)
+
+                # 1: 名称
+                n_txt = f"⭐ {name}" if is_manual else name
+                n_fg = QColor("#00FF88") if is_manual else None
+                _set_cell(idx, 1, n_txt, is_numeric=False, fg=n_fg, bg=row_bg)
+
+                # 2: 现价
+                _set_cell(idx, 2, f"{price:.2f}", is_numeric=True, bg=row_bg)
+
+                # 3: 涨跌%
+                pct_col = COLOR_UP if pct > 0 else (COLOR_DOWN if pct < 0 else "#e2e2e5")
+                _set_cell(idx, 3, f"{pct:+.2f}%", is_numeric=True, fg=pct_col, bg=row_bg)
+
+                # 4: 状态
+                st_col = COLOR_UP if "持股" in state else COLOR_WARN
+                _set_cell(idx, 4, state, is_numeric=False, fg=st_col, bg=row_bg)
+
+                # 5: DFF
+                _set_cell(idx, 5, f"{dff:.2f}", is_numeric=True, fg=COLOR_UP if dff > 0 else COLOR_DOWN, bg=row_bg)
+
+                # 6: DFF2
+                _set_cell(idx, 6, f"{dff2:.2f}", is_numeric=True, fg=COLOR_UP if dff2 > 0 else COLOR_DOWN, bg=row_bg)
+
+                # 7: DFF3
+                _set_cell(idx, 7, f"{dff3:.2f}", is_numeric=True, fg=COLOR_UP if dff3 > 0 else COLOR_DOWN, bg=row_bg)
+
+                # 填入 extra_cols
+                col_offset = 8
+                for e_idx, e_val in enumerate(extra_vals):
+                    _set_cell(idx, col_offset + e_idx, str(e_val), is_numeric=True, fg="#E0E0E0", bg=row_bg)
+                col_offset += len(extra_vals)
+
+                # rs_val
+                rs_col = COLOR_UP if rs_val >= 2.0 else (COLOR_DOWN if rs_val < -2.0 else None)
+                _set_cell(idx, col_offset, f"{rs_val:+.2f}%", is_numeric=True, fg=rs_col, bg=row_bg, bold=(rs_val >= 2.0))
+
+                # 共振
+                res_col = "#FF7F50" if resonance == "逆市抗跌" else (COLOR_UP if resonance == "大盘共振" else None)
+                _set_cell(idx, col_offset + 1, resonance, is_numeric=False, fg=res_col, bg=row_bg, bold=(resonance in ("逆市抗跌", "大盘共振")))
+
+                # 来源
+                src_col = "#FFD700" if "自动" in source else None
+                _set_cell(idx, col_offset + 2, source, is_numeric=False, fg=src_col, bg=row_bg)
+
+            if len(rows_data) != getattr(self, '_last_row_count', 0):
+                self._last_row_count = len(rows_data)
+                auto_fit_columns_once(self.table, "dragon_leader_monitor_header_v1")
+
+            self.table.setSortingEnabled(True)
+
+            # 恢复先前选中的个股焦点
+            if selected_code:
+                for r in range(self.table.rowCount()):
+                    c_item = self.table.item(r, 0)
+                    if c_item and c_item.text() == selected_code:
+                        self.table.setCurrentCell(r, 0)
+                        break
+
+            # 锁定滚动条位置，彻底防止视口跳动
+            if vbar and vbar.value() != scroll_pos:
+                vbar.setValue(scroll_pos)
+        finally:
+            self.table.setUpdatesEnabled(True)
+            self._is_updating = False
 
     def _get_main_app(self):
         # 0. Prioritize QApplication.instance().main_window directly

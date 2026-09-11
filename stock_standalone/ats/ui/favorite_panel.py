@@ -308,13 +308,16 @@ class FavoritePanel(QWidget):
             sort_col = header.sortIndicatorSection() if (header and header.isSortIndicatorShown()) else -1
             sort_order = header.sortIndicatorOrder() if header else Qt.SortOrder.AscendingOrder
 
-            self.table.setUpdatesEnabled(False)
+            vbar = self.table.verticalScrollBar()
+            scroll_pos = vbar.value() if vbar else 0
+
             self.table.setSortingEnabled(False)
             self.count_label.setText(f"共 {len(rows)} 只重点标的")
 
             if not rows:
                 if self.table.rowCount() > 0:
                     self.table.setRowCount(0)
+                self.table.setSortingEnabled(True)
                 return
 
             def _parse_num_val(row_item, col_idx):
@@ -426,6 +429,8 @@ class FavoritePanel(QWidget):
             self.table.setSortingEnabled(True)
             if sort_col >= 0:
                 self.table.sortItems(sort_col, sort_order)
+            if vbar and vbar.value() != scroll_pos:
+                vbar.setValue(scroll_pos)
         finally:
             self.table.setUpdatesEnabled(True)
             

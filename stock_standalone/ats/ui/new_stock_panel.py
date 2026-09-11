@@ -1021,7 +1021,8 @@ class NewStockPanel(QWidget):
 
         target_row_count = len(df_filtered)
 
-        # ── 3. 屏蔽信号并进行原地单元格更新 ──
+        # ── 3. 屏蔽信号与绘制更新，就地更新单元格 ──
+        self.table.setUpdatesEnabled(False)
         self.table.blockSignals(True)
         self.table.setSortingEnabled(False)
 
@@ -1537,6 +1538,7 @@ class NewStockPanel(QWidget):
         self.table.horizontalScrollBar().setValue(h_scroll_val)
 
         self.table.blockSignals(False)
+        self.table.setUpdatesEnabled(True)
 
     def _on_stock_activated(self, code: str, name: str):
         """BaseATSTableWidget 激活行：仅联动行情与推演卡片，绝不主动弹窗"""

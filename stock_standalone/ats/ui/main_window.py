@@ -3829,7 +3829,7 @@ class ATSMainWindow(QMainWindow):
             if pos_formatted is not None:
                 self.position_panel.update_positions(pos_formatted, cash=cash_val, total_assets=total_assets_val)
 
-            # 更新三级池
+            # 更新三级池 (仅同步底层数据，若有实时行情则交由 _on_ledger_results 节拍渲染，避免双重竞争)
             radar_entries = payload.get("radar_entries", {})
             watch_entries = payload.get("watch_entries", {})
             trade_entries = payload.get("trade_entries", {})
@@ -3840,8 +3840,9 @@ class ATSMainWindow(QMainWindow):
                 self.universe_manager.radar_pool.update(radar_entries)
                 self.universe_manager.watch_pool.update(watch_entries)
                 self.universe_manager.trade_pool.update(trade_entries)
-                radar_list, watch_list, trade_list = self.universe_manager.get_pools()
-                self.universe_widget.update_pools(radar_list, watch_list, trade_list)
+                if getattr(self, 'current_df', None) is None or self.current_df.empty:
+                    radar_list, watch_list, trade_list = self.universe_manager.get_pools()
+                    self.universe_widget.update_pools(radar_list, watch_list, trade_list)
 
             init_codes = payload.get("init_codes", [])
             if init_codes:
