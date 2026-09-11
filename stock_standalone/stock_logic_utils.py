@@ -1027,11 +1027,21 @@ def toast_messageQT(parent, text, duration=1500):
         from PyQt6.QtWidgets import QFrame, QLabel, QHBoxLayout
         from PyQt6.QtCore import Qt, QTimer, QPoint
         
-        if parent is None or not hasattr(parent, 'winId'):
+        if parent is None:
             return
             
-        toast = QFrame(parent)
-        toast.setWindowFlags(Qt.WindowType.ToolTip | Qt.WindowType.FramelessWindowHint)
+        # 🛡️ 绝不能以嵌套子控件作为 parent 创建带有 WindowType.ToolTip 的原生窗口！
+        # 否则 Win32 底层会破坏父级控件树的 HWND 层次，导致宿主主窗口全屏重绘与白色闪烁！
+        # 规范做法：独立 TopLevel 无父级窗口 (parent=None)，绝不打扰任何既有宿主窗口！
+        toast = QFrame(None)
+        toast.setWindowFlags(
+            Qt.WindowType.ToolTip | 
+            Qt.WindowType.FramelessWindowHint | 
+            Qt.WindowType.WindowDoesNotAcceptFocus |
+            Qt.WindowType.WindowStaysOnTopHint
+        )
+        toast.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+        toast.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         toast.setStyleSheet("background-color: rgba(15, 15, 15, 230); border-radius: 4px; border: 1px solid #444;")
         
         lbl = QLabel(text, toast)
@@ -1043,11 +1053,14 @@ def toast_messageQT(parent, text, duration=1500):
         
         # 居中定位在 parent 上方
         toast.adjustSize()
-        px = parent.x() + (parent.width() - toast.width()) // 2
-        py = parent.y() + 50
-        # 转换为全局坐标
-        g_pos = parent.mapToGlobal(QPoint(px - parent.x(), py - parent.y()))
-        toast.move(g_pos)
+        try:
+            if hasattr(parent, 'mapToGlobal'):
+                px = (parent.width() - toast.width()) // 2
+                py = 50
+                g_pos = parent.mapToGlobal(QPoint(max(0, px), py))
+                toast.move(g_pos)
+        except Exception:
+            pass
         
         toast.show()
         

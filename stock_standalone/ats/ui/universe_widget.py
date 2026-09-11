@@ -169,6 +169,10 @@ class UniverseTreeWidget(QWidget):
         self.tree.setHeaderLabels(["代码", "名称", "现价", "涨幅", "核心特征/追踪状态", "筛选机制/持仓"])
         self.tree.setColumnCount(6)
         self.tree.setAlternatingRowColors(True)
+
+        # 视口深暗黑底色设置，确保局部重绘与列宽调整时干净擦除旧图元，杜绝重影与白闪
+        self.tree.viewport().setStyleSheet("background-color: #121218; border: none;")
+        self.tree.setStyleSheet("QTreeWidget { background-color: #121218; border: none; }")
         
         # 1. 物理极限压缩缩进，解决“左边留空导致挤压显示位置”的视觉缺陷
         self.tree.setIndentation(5)
@@ -460,8 +464,6 @@ class UniverseTreeWidget(QWidget):
     def update_pools(self, radar_list, watch_list, trade_list):
         self._is_mock_active = False
 
-        # 🛡️ 锁定绘制更新与表头信号，杜绝中间态导致的全树闪烁与白屏
-        self.tree.setUpdatesEnabled(False)
         try:
             # 记录滚动条原位与当前选中的股票代码
             vbar = self.tree.verticalScrollBar()
@@ -541,7 +543,7 @@ class UniverseTreeWidget(QWidget):
             if vbar and vbar.value() != scroll_pos:
                 vbar.setValue(scroll_pos)
         finally:
-            self.tree.setUpdatesEnabled(True)
+            pass
 
     def _on_item_clicked(self, item, column):
         code = item.data(0, Qt.ItemDataRole.UserRole)

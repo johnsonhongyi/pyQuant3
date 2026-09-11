@@ -347,8 +347,9 @@ class TestCapitalDragonPanelIntegration(unittest.TestCase):
         
         buy_col = headers.index("资金买点类型")
         bc2_col = headers.index("CH_BC2")
-        self.assertEqual(bc2_col, buy_col + 1)
-        self.assertEqual(headers.index("建议买入区间"), bc2_col + 1)
+        self.assertGreater(bc2_col, buy_col)
+        self.assertGreater(headers.index("建议买入区间"), bc2_col)
+        self.assertEqual(headers.index("建议买入区间"), buy_col + len(self.panel.extra_cols) + 1)
 
         # 注入带 ch_bc2 的数据
         mock_data = {

@@ -391,6 +391,10 @@ class NewStockPanel(QWidget):
 
         # 核心数据表格
         self.table = BaseATSTableWidget(self)
+        # 视口深暗黑底色设置，确保局部重绘与列宽调整时干净擦除旧图元，杜绝重影与白闪
+        self.table.viewport().setStyleSheet("background-color: #121218; border: none;")
+        self.table.setStyleSheet("QTableWidget { background-color: #121218; border: none; }")
+
         headers = get_new_stock_table_headers(self.extra_cols)
         self.table.setColumnCount(len(headers))
         self.table.setHorizontalHeaderLabels(headers)
@@ -717,6 +721,27 @@ class NewStockPanel(QWidget):
         self.lbl_status.setText(f"❌ 刷新异常: {err_msg[:25]}")
         self.lbl_status.setStyleSheet("color: #f87171; font-size: 8.5pt;")
 
+    def is_panel_visible(self) -> bool:
+        """判断面板当前是否对用户可见（自身可见且未处于非活动 Tab 页，窗口未最小化，单测未显式 hide）"""
+        top_win = self.window()
+        if top_win and top_win.isMinimized():
+            return False
+        curr = self
+        parent = self.parent()
+        while parent:
+            if isinstance(parent, QTabWidget):
+                cw = parent.currentWidget()
+                if cw is not None and cw is not curr and not cw.isAncestorOf(self):
+                    return False
+            curr = parent
+            parent = parent.parent()
+        if self.parent() is not None:
+            return self.isVisible()
+        # 无 parent 时（独立单测）：若被显式 hide()，返回 False；未被显式 hide 则返回 True
+        if self.testAttribute(Qt.WidgetAttribute.WA_WState_ExplicitShowHide) and self.isHidden():
+            return False
+        return True
+
     def update_from_ipc_df(self, df_ipc: pd.DataFrame, sh_pct: float = 0.0, force: bool = False):
         """
         接收来自 ATS 主终端 IPC 数据流的实时全市场 DataFrame:
@@ -739,8 +764,8 @@ class NewStockPanel(QWidget):
         self._last_ipc_sh_pct = sh_pct
 
         # ⚡【核心零卡顿守卫 (Visibility Short-Circuit)】
-        # 若当前面板不可见且非手动强制触发，仅暂存最新行情快照，0ms 物理阻断主线程全表运算与重排重绘！
-        if not force and not self.isVisible():
+        # 若当前面板不可见且非强制触发，仅暂存最新行情快照，0ms 物理阻断主线程全表运算与重排重绘！
+        if not force and not self.is_panel_visible():
             self._pending_ipc_df = df_ipc
             self._pending_ipc_sh_pct = sh_pct
             self._needs_render = True
@@ -888,7 +913,7 @@ class NewStockPanel(QWidget):
                 updated_any = True
 
         if updated_any or not self.df_data.empty:
-            if not force and not self.isVisible():
+            if not force and not self.is_panel_visible():
                 self._needs_render = True
                 return
             self._needs_render = False
@@ -1065,8 +1090,7 @@ class NewStockPanel(QWidget):
 
         target_row_count = len(df_filtered)
 
-        # ── 3. 屏蔽信号与绘制更新，就地更新单元格 ──
-        self.table.setUpdatesEnabled(False)
+        # ── 3. 屏蔽信号与排序，就地更新单元格 ──
         self.table.blockSignals(True)
         self.table.setSortingEnabled(False)
 
@@ -1582,7 +1606,6 @@ class NewStockPanel(QWidget):
         self.table.horizontalScrollBar().setValue(h_scroll_val)
 
         self.table.blockSignals(False)
-        self.table.setUpdatesEnabled(True)
 
     def _on_stock_activated(self, code: str, name: str):
         """BaseATSTableWidget 激活行：仅联动行情与推演卡片，绝不主动弹窗"""

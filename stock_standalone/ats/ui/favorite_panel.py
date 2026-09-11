@@ -119,6 +119,10 @@ class FavoritePanel(QWidget):
 
         # BaseATSTableWidget
         self.table = BaseATSTableWidget(self)
+        # 视口深暗黑底色设置，确保局部重绘与列宽调整时干净擦除旧图元，杜绝重影与白闪
+        self.table.viewport().setStyleSheet("background-color: #121218; border: none;")
+        self.table.setStyleSheet("QTableWidget { background-color: #121218; border: none; }")
+
         headers = get_ats_table_headers(self.extra_cols)
         self.table.setColumnCount(len(headers))
         self.table.setHorizontalHeaderLabels(headers)
@@ -294,7 +298,6 @@ class FavoritePanel(QWidget):
         if rows is None:
             return
 
-        self.table.setUpdatesEnabled(False)
         try:
             current_extra = get_ats_extra_cols()
             if not hasattr(self, 'extra_cols') or self.extra_cols != current_extra:
@@ -432,6 +435,6 @@ class FavoritePanel(QWidget):
             if vbar and vbar.value() != scroll_pos:
                 vbar.setValue(scroll_pos)
         finally:
-            self.table.setUpdatesEnabled(True)
+            pass
             
         self._apply_row_visibility()

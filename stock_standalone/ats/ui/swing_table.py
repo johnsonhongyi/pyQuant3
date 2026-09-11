@@ -54,7 +54,6 @@ class SwingStateTable(QWidget):
         self.filter_enabled = not self.filter_enabled
         save_config_node(PERSIST_KEY_SWING_FILTER, bool(self.filter_enabled))
         self._update_filter_button_ui()
-        self.table.setUpdatesEnabled(True)
         self._apply_favorite_filter()
 
     def _update_filter_button_ui(self):
@@ -142,6 +141,10 @@ class SwingStateTable(QWidget):
 
         # Table
         self.table = BaseATSTableWidget()
+        # 视口深暗黑底色设置，确保局部重绘与列宽调整时干净擦除旧图元，杜绝重影与白闪
+        self.table.viewport().setStyleSheet("background-color: #121218; border: none;")
+        self.table.setStyleSheet("QTableWidget { background-color: #121218; border: none; }")
+
         headers = get_ats_table_headers(self.extra_cols)
         self.table.setColumnCount(len(headers))
         self.table.setHorizontalHeaderLabels(headers)
@@ -301,7 +304,6 @@ class SwingStateTable(QWidget):
                 self.table.setHorizontalHeaderLabels(headers)
 
         self._is_mock_active = False
-        self.table.setUpdatesEnabled(False)
         
         header = self.table.horizontalHeader()
         sort_col = header.sortIndicatorSection() if (header and header.isSortIndicatorShown()) else -1
@@ -312,7 +314,6 @@ class SwingStateTable(QWidget):
         if not data_list:
             if self.table.rowCount() > 0:
                 self.table.setRowCount(0)
-            self.table.setUpdatesEnabled(True)
             return
 
         from global_favorites import GlobalFavoriteManager
@@ -451,7 +452,6 @@ class SwingStateTable(QWidget):
         self.table.setSortingEnabled(True)
         if sort_col >= 0:
             self.table.sortItems(sort_col, sort_order)
-        self.table.setUpdatesEnabled(True)
         self._apply_favorite_filter()
 
     def _load_show_favorite_config(self):
@@ -483,7 +483,6 @@ class SwingStateTable(QWidget):
     def _on_favorite_checkbox_changed(self, state):
         is_checked = (state == 2 or state is True or state == Qt.CheckState.Checked.value)
         self._save_show_favorite_config(is_checked)
-        self.table.setUpdatesEnabled(True)
         self._apply_favorite_filter()
 
     def _get_parent_mw(self):
@@ -600,6 +599,5 @@ class SwingStateTable(QWidget):
                 code_item.setForeground(COLOR_GRAY)
                 name_item.setForeground(COLOR_GRAY)
 
-        self.table.setUpdatesEnabled(True)
         self._apply_favorite_filter()
 
