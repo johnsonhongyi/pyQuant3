@@ -1213,7 +1213,7 @@ class ConfigManager:
             "overclock_mode": "Fast",  # "Default" (Normal/0), "Fast" (1), "Extreme" (2)
             "coolboost": True,
             "fan_mode": "Auto",        # "Auto" (0), "Max" (1), "Custom" (2)
-            "auto_apply_on_startup": True
+            "auto_apply_on_startup": False
         }
         acer_cfg = self.config_data.get("acer_performance", {})
         if not isinstance(acer_cfg, dict):
@@ -2268,25 +2268,15 @@ class AcerPerformanceController:
     @staticmethod
     def _sanitize_turbo_button_registry():
         """
-        🛡️ 硬件状态防御与自愈：检查并复位注册表中残留的 Turbo_Button_status 触发信号。
-        避免 Acer PSAgent / PSAdminAgent 硬件服务误将残留的 1 判定为实体按键长按，
-        从而在后台死循环疯狂调起 PredatorSense.exe 界面。
+        🛡️ 硬件状态只读防御：绝对不要修改注册表！
+        Acer PSAgent / PSAdminAgent / PSSvc 等后台系统服务通过 RegNotifyChangeKeyValue
+        严密监控 HKLM\\SOFTWARE\\OEM\\PredatorSense。
+        任何外部程序尝试用 KEY_SET_VALUE 打开或调用 SetValueEx 写入任何值，
+        都会立刻触发系统服务的注册表变更通知，导致系统后台服务误判为硬件/按键事件，
+        从而在后台通过启动器频繁疯狂调起 PredatorSense.exe 界面！
+        因此此处严格保持只读，100% 绝对禁止任何注册表写入操作！
         """
-        if sys.platform != "win32":
-            return
-        try:
-            import winreg
-            reg_path = r"SOFTWARE\OEM\PredatorSense"
-            key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, reg_path, 0, winreg.KEY_READ | winreg.KEY_SET_VALUE)
-            try:
-                val, _ = winreg.QueryValueEx(key, "Turbo_Button_status")
-                if val != 0:
-                    winreg.SetValueEx(key, "Turbo_Button_status", 0, winreg.REG_DWORD, 0)
-            except Exception:
-                pass
-            winreg.CloseKey(key)
-        except Exception:
-            pass
+        return
 
     @staticmethod
     def _normalize_oc_mode(mode):
@@ -2718,13 +2708,12 @@ class AcerPerformanceController:
         return False, "未找到有效的 Acer WMI 接口"
 
     def ensure_predatorsense_daemon(self):
-        """确保 PredatorSense 硬件守护通道运行，必要时通过 PSLauncher.exe 静默唤起"""
+        """
+        仅探查 PredatorSense 守护通道运行状态，绝对不主动通过 PSLauncher.exe 唤起服务。
+        避免干扰 Acer Windows 系统后台服务 (PSSvc / PSAgent)，杜绝诱发前台界面自启循环。
+        """
         try:
             import psutil
-            import subprocess
-            import time
-            import os
-
             running = False
             for proc in psutil.process_iter(['name']):
                 try:
@@ -2733,23 +2722,9 @@ class AcerPerformanceController:
                         break
                 except Exception:
                     pass
-
-            if not running:
-                launcher = r"C:\Program Files\Acer\PredatorSense Service\PSLauncher.exe"
-                if os.path.exists(launcher):
-                    try:
-                        subprocess.Popen([launcher], shell=True)
-                        time.sleep(1.5)
-                    except Exception:
-                        pass
-                else:
-                    try:
-                        subprocess.Popen(["explorer.exe", "shell:AppsFolder\\AcerIncorporated.PredatorSenseV30_48frkmn4z8aw4!App"])
-                        time.sleep(1.5)
-                    except Exception:
-                        pass
+            return running
         except Exception:
-            pass
+            return False
 
     def trigger_predator_ui_command(self, cmd_type="turbo"):
         """安全向 Acer 硬件下发控制指令 (KISS 极简高健壮架构)"""
@@ -2812,8 +2787,8 @@ class AcerPerformanceController:
             cold_type_str = "系统开机冷启动 (<300s)" if sys_cold_boot else ("应用无进程冷启动" if is_cold_start else "热唤醒")
             _do_log(f"[ColdStart Probe] 状态: PredatorSense.exe 存在={not is_cold_start} (创建距今: {ps_age_str}) | Uptime={sys_uptime:.1f}s | 认定类型: {cold_type_str}")
 
-            # 1. 确保底层 Acer 守护进程已拉起
-            _do_log("[Step 1/4] 校验并拉起 Acer 硬件守护进程 PSLauncher.exe ...")
+            # 1. 确保底层 Acer 守护进程已就绪
+            _do_log("[Step 1/4] 探查 Acer 硬件守护通道运行状态 ...")
             self.ensure_predatorsense_daemon()
             if sys_cold_boot:
                 _do_log("[Step 1/4] 系统刚开机，额外挂起等待 2.0s 待 Windows Acer 驱动与 WMI 服务完全就绪...")
@@ -2848,15 +2823,21 @@ class AcerPerformanceController:
                 for _ in range(max_enum_steps):
                     def enum_cb(hwnd, extra):
                         nonlocal main_hwnd
-                        title = win32gui.GetWindowText(hwnd)
-                        clsname = win32gui.GetClassName(hwnd)
-                        if win32gui.IsWindowVisible(hwnd) and ("predatorsense" in title.lower() or "HwndWrapper[PredatorSense.exe" in clsname):
-                            rect = win32gui.GetWindowRect(hwnd)
-                            if (rect[2] - rect[0]) > 600 and (rect[3] - rect[1]) > 400:
-                                main_hwnd = hwnd
+                        try:
+                            title = win32gui.GetWindowText(hwnd)
+                            clsname = win32gui.GetClassName(hwnd)
+                            if win32gui.IsWindowVisible(hwnd) and ("predatorsense" in title.lower() or "HwndWrapper[PredatorSense.exe" in clsname):
+                                rect = win32gui.GetWindowRect(hwnd)
+                                if (rect[2] - rect[0]) > 600 and (rect[3] - rect[1]) > 400:
+                                    main_hwnd = hwnd
+                        except Exception:
+                            pass
                         return True
 
-                    win32gui.EnumWindows(enum_cb, None)
+                    try:
+                        win32gui.EnumWindows(enum_cb, None)
+                    except Exception:
+                        pass
                     if main_hwnd:
                         win32gui.ShowWindow(main_hwnd, win32con.SW_RESTORE)
                         win32gui.SetForegroundWindow(main_hwnd)
@@ -3015,9 +2996,9 @@ class AcerPerformanceController:
         except Exception as e:
             _do_log(f"⚠️ UI 程序化点击调优过程异常: {e}")
 
-    def apply_performance_profile(self, profile: dict, log_cb=None, force=True) -> tuple:
+    def apply_performance_profile(self, profile: dict, log_cb=None, force=False) -> tuple:
         """
-        批量应用性能 Profile (跳过重复检测，无条件立即应用，100% 依赖 PredatorSense UI 程序化鼠标点击下发)
+        批量应用性能 Profile (智能状态去重：当状态完全一致时优雅跳过，避免多余调起 PredatorSense)
         profile: {"overclock_mode": "Fast", "coolboost": True, "fan_mode": "Auto", "post_action": "kill"}
         """
         def _do_log(msg):
@@ -3038,19 +3019,35 @@ class AcerPerformanceController:
         fm = profile.get("fan_mode")
         pa = profile.get("post_action", "kill")
 
-        # 1. 探查并打印执行前系统 3 大参数明细 (force_physical=True 强行物理探查 OEM 注册表)
-        phys_status = self.get_current_status(force_physical=True)
-        phys_oc = phys_status.get("overclock_mode")
-        phys_fm = phys_status.get("fan_mode")
-        phys_cb = phys_status.get("coolboost")
+        # 1. 探查并打印执行前系统 3 大参数明细 (结合当前已应用生效状态与只读物理探查)
+        curr_status = self.get_current_status(force_physical=False)
+        curr_oc = curr_status.get("overclock_mode")
+        curr_fm = curr_status.get("fan_mode")
+        curr_cb = curr_status.get("coolboost")
 
         _do_log(
-            f"[Acer Hardware] 执行前物理探查状态 -> "
-            f"超频(overclock_mode)={phys_oc}, 风扇(fan_mode)={phys_fm}, CoolBoost(coolboost)={'开启' if phys_cb else '关闭'}"
+            f"[Acer Hardware] 执行前状态探查 -> "
+            f"超频(overclock_mode)={curr_oc}, 风扇(fan_mode)={curr_fm}, CoolBoost(coolboost)={'开启' if curr_cb else '关闭'}"
         )
 
+        # 状态规范化比对
+        norm_oc = self._normalize_oc_mode(oc)
+        norm_fm = self._normalize_fan_mode(fm)
+        norm_cb = self._normalize_coolboost(cb)
+
+        match_oc = (norm_oc is None or norm_oc == curr_oc)
+        match_fm = (norm_fm is None or norm_fm == curr_fm)
+        match_cb = (norm_cb is None or norm_cb == curr_cb)
+
+        # 若状态全部吻合且非强制覆盖，直接跳过程序化 UI 点击
+        if not force and match_oc and match_fm and match_cb:
+            msg = f"当前硬件状态已完全符合目标配置，无需重复应用 [生效状态: 超频={curr_oc}, 风扇={curr_fm}, CoolBoost={'开启' if curr_cb else '关闭'}]"
+            _do_log(f"[Acer Hardware] 🍃 {msg}")
+            self._update_applied_cache(coolboost=curr_cb, overclock_mode=curr_oc, fan_mode=curr_fm)
+            return True, msg
+
         _do_log(
-            f"[Acer Hardware] ⚡ 跳过重复检测，立即执行程序化应用 -> "
+            f"[Acer Hardware] ⚡ 执行程序化应用 -> "
             f"目标超频={oc}, 目标风扇={fm}, 目标CoolBoost={cb}, 处理方式={pa}"
         )
 
@@ -3062,7 +3059,7 @@ class AcerPerformanceController:
                 coolboost=cb,
                 post_action=pa,
                 log_cb=log_cb,
-                force=True
+                force=force
             )
         except Exception as e:
             _do_log(f"⚠️ 唤起 UI 程序化点击调优异常: {e}")

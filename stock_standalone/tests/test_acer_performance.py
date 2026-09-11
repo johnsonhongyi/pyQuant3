@@ -74,7 +74,8 @@ def test_acer_config_persistence():
     assert cfg.get("overclock_mode") in ["Default", "Fast", "Extreme", "Normal"]
     assert isinstance(cfg.get("coolboost"), bool)
     assert isinstance(cfg.get("auto_apply_on_startup"), bool)
-    
+    assert cfg.get("auto_apply_on_startup") is False # 默认严格为 False，绝不在后台自动调度应用
+
     # 修改并保存
     new_cfg = {
         "overclock_mode": "Fast",
@@ -98,6 +99,27 @@ def test_acer_config_persistence():
             os.remove(cfg_file)
         except Exception:
             pass
+
+def test_acer_registry_readonly_safety(monkeypatch):
+    """测试 AcerPerformanceController 初始化与运行过程绝对不改写注册表 (零 SetValueEx 发生)"""
+    import winreg
+    set_val_called = []
+    orig_set_value = winreg.SetValueEx
+
+    def mock_set_value_ex(*args, **kwargs):
+        set_val_called.append((args, kwargs))
+        return orig_set_value(*args, **kwargs)
+
+    monkeypatch.setattr(winreg, "SetValueEx", mock_set_value_ex)
+
+    # 实例化控制器并获取状态
+    controller = AcerPerformanceController()
+    _ = controller.get_current_status(force_physical=True)
+    _ = controller.get_current_status(force_physical=False)
+
+    # 断言没有任何对 OEM 注册表的写调用
+    oem_writes = [call for call in set_val_called if "Turbo_Button_status" in str(call) or "GPU_Overclock_Level" in str(call)]
+    assert len(oem_writes) == 0, f"发现违规向 OEM 注册表写入数据: {oem_writes}"
 
 def test_acer_apply_profile():
     """测试批量应用 Acer 性能 Profile 接口及每步状态更新的准确性"""
