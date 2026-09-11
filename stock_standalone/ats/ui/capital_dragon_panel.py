@@ -801,6 +801,14 @@ class CapitalDragonPanel(QWidget):
         self._is_updating = True
         self.table.blockSignals(True)
         try:
+            # 动态同步自定义列 (ats_col)：若配置发生变化，即时平滑热重载表头与列结构
+            current_extra = get_dragon_extra_cols()
+            if getattr(self, 'extra_cols', None) != current_extra:
+                self.extra_cols = current_extra
+                self.headers = get_dragon_table_headers(self.extra_cols)
+                self.table.setColumnCount(len(self.headers))
+                self.table.setHorizontalHeaderLabels(self.headers)
+
             # 记录滚动条位置，彻底防止视口跳跃
             v_bar = self.table.verticalScrollBar()
             h_bar = self.table.horizontalScrollBar()
