@@ -178,16 +178,20 @@ def compute_dragon_buy_type_sort_score(
 
 
 def get_dragon_extra_cols() -> List[str]:
-    """获取资金主线与龙头中枢追加的动态自定义列（排除基础列已有的字段）"""
+    """获取资金主线与龙头中枢追加的动态自定义列（排除基础列已有的字段，若没有且在 ats_col 中则自动添加）"""
     try:
         from JohnsonUtil import commonTips as cct
         cfg_cols = getattr(cct, 'ats_col', []) or getattr(cct.CFG, 'ats_col', []) or []
     except Exception:
         cfg_cols = ['ch_bc2']
+    # 资金主线默认已有基础列（已有则无需重复添加）：
+    # 代码(code)、名称(name)、龙头角色(role)、所属主线(sector)、现价(price/close/trade)、
+    # 涨幅%(pct/percent)、虚拟量比(vol_ratio/vr)、成交额(amount/amt_yi)、换手率%(turnover)、
+    # 资金买点类型(action_type/buy_type)、建议买入区间(buy_zone)、止损参考(stop_loss)、核心逻辑与驱动(reason)
     BASE_EXCLUDE = {
         'code', 'name', 'price', 'close', 'trade', 'pct', 'percent', 'ratio',
-        'vol_ratio', 'amount', 'turnover', 'turnover_rate', 'action_type',
-        'role', 'sector', 'buy_zone', 'stop_loss', 'reason', 'dff', 'dff2', 'dff3'
+        'vol_ratio', 'vr', 'amount', 'amount_yi', 'amt_yi', 'turnover', 'turnover_rate',
+        'action_type', 'buy_type', 'role', 'sector', 'buy_zone', 'stop_loss', 'reason'
     }
     extra = []
     seen = set(BASE_EXCLUDE)
@@ -941,6 +945,15 @@ class CapitalDragonEngine:
                         if k in df.columns:
                             val_raw = df.loc[idx, k]
                             break
+                    # 若 df 中无该列，尝试回退使用引擎内部已推导的特征 (如 dff, dff2, dff3)
+                    if val_raw is None:
+                        ec_l = ec.lower()
+                        if ec_l == 'dff':
+                            val_raw = dff
+                        elif ec_l == 'dff2':
+                            val_raw = dff2
+                        elif ec_l == 'dff3':
+                            val_raw = dff3
                     extra_dict[ec] = cct.format_col_value(ec, val_raw)
 
                 rec = {

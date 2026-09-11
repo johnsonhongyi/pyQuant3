@@ -397,6 +397,77 @@ class TestCapitalDragonPanelIntegration(unittest.TestCase):
         self.assertGreaterEqual(self.panel.table.rowCount(), 1)
         self.panel.search_input.setText("")
 
+    def test_capital_dragon_panel_ats_col_with_dff_dynamic_update(self):
+        """测试资金主线自定义 ats_col (如包含 dff, win, red 等)：已有列不重复添加，未有列自动添加并正确展示"""
+        from JohnsonUtil import commonTips as cct
+        from ats.capital_dragon_engine import get_dragon_extra_cols, get_dragon_table_headers
+        from ats.ui.favorite_panel import get_ats_extra_cols
+
+        old_ats_col = getattr(cct, 'ats_col', ['ch_bc2'])
+        try:
+            # 模拟用户配置 ats_col = ["dff", "ch_dir", "ch_slope_deg", "ch_bc2", "win", "red", "price"]
+            # 其中 price 为资金主线已有的基础列，应被自动排除不重复添加；
+            # dff 为重点关注已有但资金主线未内置的列，资金主线应自动添加，而重点关注应自动排除
+            test_cols = ["dff", "ch_dir", "ch_slope_deg", "ch_bc2", "win", "red", "price"]
+            cct.ats_col = test_cols
+
+            # 1. 验证重点关注的排除逻辑：因为重点关注已有 dff 和 price，所以两者都被排除
+            fav_extra = get_ats_extra_cols()
+            self.assertNotIn("dff", fav_extra)
+            self.assertNotIn("price", fav_extra)
+            self.assertIn("ch_dir", fav_extra)
+
+            # 2. 验证资金主线的优化逻辑：
+            # 资金主线默认基础列已有 price，故 price 绝不重复添加；
+            # 资金主线默认无 dff，故 dff 成功自动追加！
+            dragon_extra = get_dragon_extra_cols()
+            self.assertIn("dff", dragon_extra, "资金主线应能自动添加 dff 自定义列")
+            self.assertNotIn("price", dragon_extra, "资金主线已有基础列 price，不应重复添加")
+            self.assertIn("ch_dir", dragon_extra)
+            self.assertIn("ch_slope_deg", dragon_extra)
+            self.assertIn("ch_bc2", dragon_extra)
+            self.assertIn("win", dragon_extra)
+            self.assertIn("red", dragon_extra)
+
+            # 3. 验证资金主线表头平滑嵌入
+            headers = get_dragon_table_headers(dragon_extra)
+            self.assertIn("DFF", headers)
+            self.assertIn("CH_DIR", headers)
+            self.assertIn("资金买点类型", headers)
+
+            # 4. 验证面板表格动态感知并渲染包含 DFF 的自定义列
+            mock_data = {
+                "300750": {
+                    "name": "宁德时代", "close": 265.0, "percent": 5.2, "amount": 4.8e9,
+                    "category": "固态电池;锂电池", "dff": 1.85, "dff2": 5.2, "dff3": 9.5, "ma20d": 240.0,
+                    "ch_dir": 1.0, "ch_slope_deg": 15.5, "ch_bc2": 3.0, "win": 1.0, "red": 0.5
+                },
+                "002812": {
+                    "name": "恩捷股份", "close": 42.5, "percent": 9.98, "amount": 1.5e9,
+                    "category": "固态电池;锂电池", "dff": 1.2, "dff2": 4.0, "dff3": 7.5, "ma20d": 38.0,
+                    "ch_dir": 1.0, "ch_slope_deg": 20.0, "ch_bc2": 0.0, "win": 1.0, "red": 0.8
+                }
+            }
+            df_mock = pd.DataFrame.from_dict(mock_data, orient='index')
+            self.panel.update_payload(df_mock, sh_pct=1.0, force=True)
+
+            # 表格列数应与新表头完全一致
+            self.assertEqual(self.panel.table.columnCount(), len(self.panel.headers))
+            dff_col = self.panel.headers.index("DFF")
+            self.assertGreaterEqual(dff_col, 10, "DFF 自定义列应在资金买点类型之后")
+
+            # 验证 DFF 单元格内容 (宁德时代 1.85, 恩捷股份 1.20)
+            dff_vals = [
+                self.panel.table.item(r, dff_col).text().strip()
+                for r in range(self.panel.table.rowCount())
+                if self.panel.table.item(r, dff_col) is not None
+            ]
+            self.assertIn("1.20", dff_vals)
+            self.assertIn("1.85", dff_vals)
+
+        finally:
+            cct.ats_col = old_ats_col
+
     def test_no_false_linkage_or_flicker_during_update(self):
         """验证后台刷新时不会误发射 stock_selected 切股联动信号，且卡片稳定占位不坍塌"""
         mock_data = {

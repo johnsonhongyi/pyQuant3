@@ -62,7 +62,7 @@ class TestCapitalDragonIndicesAndFocus:
             'nclose': [3345.0, 10480.0, 2140.0, 258.0, 1505.0, 37.5]
         }
         df = pd.DataFrame(data).set_index('code')
-        report = engine.analyze_capital_dragon_universe(df, sh_pct=1.2)
+        report = engine.analyze_capital_dragon_universe(df, sh_pct=1.2, force=True)
 
         converged = report.get('dragon_records_converged', [])
         assert len(converged) > 0

@@ -1,3 +1,31 @@
+## 2026-09-11 13:00
+- [x] **【ATS 资金主线自定义 ats_col 动态列优化：已有列不重复添加，未内置列(如 DFF 等)自动追加展示】(SSOT) (`stock_standalone/ats/capital_dragon_engine.py`, `stock_standalone/ats/ui/capital_dragon_panel.py`, `stock_standalone/tests/test_capital_dragon_panel_integration.py`)**：
+    - [x] **根除 BASE_EXCLUDE 中对 DFF 系列列的硬编码误杀**：
+        1. 穿透根本逻辑差异：重点关注 (`FavoritePanel`)、大级别ma20d (`SwingStateTable`) 与新股次新股 (`NewStockPanel`) 的基础表头中均已默认内置包含 `dff` 列，因而它们在解析自定义 `ats_col` 时排除 `dff` 是为了避免重复展示；但资金主线默认基础表头并不包含 `dff` 列；
+        2. 原代码在 `get_dragon_extra_cols()` 中将 `'dff', 'dff2', 'dff3'` 照搬加入 `BASE_EXCLUDE`，导致用户在 `ats_col = ["dff", "ch_dir", "ch_slope_deg", "ch_bc2", "win", "red"]` 中配置 `dff` 时被直接过滤；
+        3. 彻底重构排除边界：仅严格排除资金主线真正已内置的基础列（`code`, `name`, `price`, `pct`, `vol_ratio`, `amount`, `turnover`, `action_type`, `role`, `sector`, `buy_zone`, `stop_loss`, `reason`），对未内置的指标（`dff`, `dff2`, `dff3`, `ch_dir`, `ch_slope_deg`, `win`, `red` 等）全量开放并自动追加；若用户在 `ats_col` 中重复配置了已有的基础列（如 `price`），系统自动识别并豁免重复添加；
+    - [x] **引擎层特征提取与兜底回退保护 (`CapitalDragonEngine.analyze_capital_dragon_universe`)**：
+        1. 在提取动态自定义列 `extra_dict` 时，若传入的原始行情 `df` 缺少 `dff`、`dff2`、`dff3` 等列，自动回退使用引擎自身已推导的高精度特征，保证数值 100% 完整丰满，杜绝 `--` 占位符；
+    - [x] **面板表格动态热重载与高精数值渲染 (`CapitalDragonPanel._render_table`)**：
+        1. 在 `_render_table` 入口增加 `extra_cols` 动态 Dirty Check，配置变化时即刻自动重新设置 `table.setColumnCount` 并平滑热重载表头标签；
+        2. 自定义列紧跟资金买点类型之后平滑嵌入，支持 `NumericTableWidgetItem` 高精度数值排序与红绿涨跌色彩映射；
+    - [x] **自动化测试全绿通过**：
+        1. 新增专项测试 `test_capital_dragon_panel_ats_col_with_dff_dynamic_update`，验证重点关注排除 dff 与资金主线自动追加 dff 的对比行为、已有列不重复添加、新列自动添加及单元格真实数值（宁德时代 1.85, 恩捷股份 1.20）正确渲染；
+        2. 6 大测试套件 55 项测试全部 100% PASSED！
+
+## 2026-09-11 12:50
+- [x] **【ATS 新股次新股自动刷新时间与内存缓存 TTL 全量对齐 cct.ats_tdx_interval】(SSOT) (`stock_standalone/ats/new_stock_fetcher.py`, `stock_standalone/ats/ui/new_stock_panel.py`, `stock_standalone/tests/test_new_stock_module.py`)**：
+    - [x] **新股次新股主控看板 (`NewStockPanel`) 动态对齐**：
+        1. **顶部复选框标题与 Tooltip 动态对齐**：`self.cb_auto_refresh` 文本根据 `cct.ats_tdx_interval` 动态显示为 `自动刷新(5s)`（浮点数如 `2.5s` 自适应展示），Tooltip 同步对齐 `每 5s 后台静默拉取并刷新`；
+        2. **定时器周期与状态栏文字联动**：实现 `_get_refresh_interval_sec()` 与 `_sync_refresh_interval_ui()` 核心机制，启动定时器取值 `int(sec * 1000)`；实盘时段显示 `🟢 自动刷新已开启 (5s)`，休市时段显示 `🕒 休市静态模式 (非交易时段暂停轮询 5s)`；
+        3. **盘中热重载与切页即时同步**：在 `_on_auto_timer_tick` 定时触发及 `showEvent` 页面切回事件中无缝调用 `_sync_refresh_interval_ui`，无需重启即可自适应跟随全局间隔变更；
+    - [x] **新股多通道数据引擎 (`NewStockFetcher`) 缓存 TTL 动态跟随**：
+        1. 将 `self._cache_ttl_seconds` 初始化为 `float(getattr(cct, 'ats_tdx_interval', 5.0) or 5.0)`；
+        2. 在 `get_combined_new_stocks` 中使用动态 `ttl = float(getattr(cct, 'ats_tdx_interval', self._cache_ttl_seconds) or 5.0)` 进行防抖判定，彻底消除由于轮询间隔与缓存 TTL 不匹配引发的重复拉取或数据陈旧；
+    - [x] **自动化测试回归全绿通过**：
+        1. 在 `test_new_stock_module.py` 中新增 `test_13_auto_refresh_interval_alignment`，覆盖默认 5.0s、动态调整为 8.0s 与 2.5s、实盘/休市状态文字及 Fetcher TTL 动态联动；
+        2. 全量 6 大套件 54 项测试 100% 全部 PASSED！
+
 ## 2026-09-11 12:35
 - [x] **【ATS 全局可自定义 TDX API 轮询与防抖间隔 cct.ats_tdx_interval 落地】(SSOT) (`stock_standalone/JohnsonUtil/commonTips.py`, `stock_standalone/ats/capital_dragon_engine.py`, `stock_standalone/ats/tdx_realtime_fetcher.py`, `stock_standalone/ats/ui/main_window.py`)**：
     - [x] **commonTips.py 全局统一入口与 global.ini 自动持久化**：
