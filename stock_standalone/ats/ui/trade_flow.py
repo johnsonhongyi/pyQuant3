@@ -301,36 +301,42 @@ class TradeFlowTable(QWidget):
         self._render_current_page()
 
     def update_realtime_prices(self, current_df):
-        """实时行情推送时原位更新当前页可见行的距今涨跌幅"""
-        if current_df is None or current_df.empty:
+        """实时行情推送时原位更新当前页可见行的距今涨跌幅 (支持 isVisible 短路与零卡顿脏检查)"""
+        if not self.isVisible() or current_df is None or current_df.empty:
             return
-        self.table.setSortingEnabled(False)
-        for row in range(self.table.rowCount()):
-            code_item = self.table.item(row, 1)
-            price_item = self.table.item(row, 4)
-            pnl_item = self.table.item(row, 7)
-            if not code_item or not price_item or not pnl_item:
-                continue
-            code = code_item.text().strip()
-            if code in current_df.index:
-                try:
-                    trade_p = float(price_item.text().replace(',', ''))
-                    if trade_p > 0:
-                        row_cur = current_df.loc[code]
-                        now_p = float(row_cur.get('trade', row_cur.get('close', 0.0)))
-                        if now_p > 0:
-                            diff_pct = ((now_p - trade_p) / trade_p) * 100
-                            pnl_str = f"{diff_pct:+.2f}%"
-                            pnl_item.setText(pnl_str)
-                            if diff_pct > 0:
-                                pnl_item.setForeground(QColor(COLOR_UP))
-                            elif diff_pct < 0:
-                                pnl_item.setForeground(QColor(COLOR_DOWN))
-                            else:
-                                pnl_item.setForeground(QColor("#a0a0b8"))
-                except Exception:
-                    pass
-        self.table.setSortingEnabled(True)
+        sorting_was_enabled = self.table.isSortingEnabled()
+        if sorting_was_enabled:
+            self.table.setSortingEnabled(False)
+        try:
+            for row in range(self.table.rowCount()):
+                code_item = self.table.item(row, 1)
+                price_item = self.table.item(row, 4)
+                pnl_item = self.table.item(row, 7)
+                if not code_item or not price_item or not pnl_item:
+                    continue
+                code = code_item.text().strip()
+                if code in current_df.index:
+                    try:
+                        trade_p = float(price_item.text().replace(',', ''))
+                        if trade_p > 0:
+                            row_cur = current_df.loc[code]
+                            now_p = float(row_cur.get('trade', row_cur.get('close', 0.0)))
+                            if now_p > 0:
+                                diff_pct = ((now_p - trade_p) / trade_p) * 100
+                                pnl_str = f"{diff_pct:+.2f}%"
+                                if pnl_item.text() != pnl_str:
+                                    pnl_item.setText(pnl_str)
+                                    if diff_pct > 0:
+                                        pnl_item.setForeground(QColor(COLOR_UP))
+                                    elif diff_pct < 0:
+                                        pnl_item.setForeground(QColor(COLOR_DOWN))
+                                    else:
+                                        pnl_item.setForeground(QColor("#a0a0b8"))
+                    except Exception:
+                        pass
+        finally:
+            if sorting_was_enabled:
+                self.table.setSortingEnabled(True)
 
     def _get_total_pages(self) -> int:
         if self._page_size <= 0 or not self._all_flow_list:

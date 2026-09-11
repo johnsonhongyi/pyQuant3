@@ -231,13 +231,15 @@ class SectorHeatmapWidget(QWidget):
             self.sort_sectors(self.sort_combo.currentIndex())
 
     def load_live_sectors(self, force=False, current_df=None):
-        # 🛡️ [权威实时保护] 若已接收到活跃的盘中 IPC 实时推送，绝不用本地早盘静态旧快照反向冲刷覆盖最新数据！
+        # 🛡️ [权威实时保护与可见性短路]
+        if not self.isVisible() and not force:
+            return
         if getattr(self, '_has_live_ipc_data', False) and not force:
             return
 
         import time
         now = time.time()
-        if not force and hasattr(self, '_last_load_time') and now - self._last_load_time < 2.0:
+        if not force and hasattr(self, '_last_load_time') and now - self._last_load_time < 5.0:
             return
         self._last_load_time = now
         
