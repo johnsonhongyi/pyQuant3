@@ -387,12 +387,14 @@ class TDXRealtimeFetcher:
         self._off_hours_success_counts: Dict[str, int] = collections.defaultdict(int)
         self._off_hours_settled_codes: Set[str] = set()
 
-        # 自适应防限流与动态间隔退避控制器 (基准 3.0s，限流时自动延展至 15.0s)
-        self.base_interval_sec: float = 3.0
-        self.current_interval_sec: float = 3.0
-        self.max_backoff_interval: float = 15.0
+        # 自适应防限流与动态间隔退避控制器 (基准接入 cct.ats_tdx_interval，限流时自动延展至 15.0s)
+        _base_intv = float(getattr(cct, 'ats_tdx_interval', 5.0) or 5.0)
+        self.base_interval_sec: float = _base_intv
+        self.current_interval_sec: float = _base_intv
+        self.max_backoff_interval: float = max(15.0, _base_intv * 3.0)
         self._consecutive_slow_or_errors: int = 0
         self._consecutive_healthy: int = 0
+
 
         # 工业级 1 分钟滑动窗口价格时序队列 {code: deque([(t, price), ...], maxlen=60)}
         self._price_timeline_history: Dict[str, collections.deque] = {}
@@ -2932,12 +2934,14 @@ class TDXRealtimePollingWorker(threading.Thread):
     def __init__(
         self,
         codes: List[str],
-        interval_seconds: float = 3.0,
+        interval_seconds: Optional[float] = None,
         on_data_callback: Optional[Callable[[pd.DataFrame, Dict[str, Any]], None]] = None
     ):
         super().__init__(daemon=True, name="TDXPollingWorker")
         self.codes = [str(c).zfill(6) for c in codes]
-        self.interval = max(1.0, float(interval_seconds))
+        if interval_seconds is None:
+            interval_seconds = float(getattr(cct, 'ats_tdx_interval', 5.0) or 5.0)
+        self.interval = max(0.5, float(interval_seconds))
         self.callback = on_data_callback
         self.fetcher = TDXRealtimeFetcher.get_instance()
         self._running = False
@@ -2969,9 +2973,11 @@ class TDXRealtimePollingWorker(threading.Thread):
             except Exception as e:
                 logger.warning(f"TDX 轮询执行异常: {e}")
 
-            # 动态使用自适应间隔进行休眠
-            current_sleep = max(self.interval, self.fetcher.get_current_interval_sec())
+            # 动态使用自适应间隔进行休眠 (支持实时跟随 cct.ats_tdx_interval 动态调整)
+            _dyn_base = float(getattr(cct, 'ats_tdx_interval', self.interval) or self.interval)
+            current_sleep = max(_dyn_base, self.fetcher.get_current_interval_sec())
             time.sleep(current_sleep)
+
 
         logger.info("🛑 TDX 高频轮询 Worker 线程已安全停止")
 

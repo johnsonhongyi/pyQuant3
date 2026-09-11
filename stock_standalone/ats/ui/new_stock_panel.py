@@ -20,7 +20,7 @@ import logging
 import datetime
 import numpy as np
 import pandas as pd
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Tuple
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
@@ -284,10 +284,12 @@ class NewStockPanel(QWidget):
         self.btn_refresh.clicked.connect(lambda: self.load_data(force_refresh=True, is_manual_btn=True))
         top_bar.addWidget(self.btn_refresh)
 
-        # 自动刷新复选框 (默认开启，实盘交易时段 3 秒自动更新)
-        self.cb_auto_refresh = QCheckBox("自动刷新(3s)")
+        # 自动刷新复选框 (默认开启，实盘交易时段自动更新，时间间隔与 cct.ats_tdx_interval 动态对齐)
+        init_sec = float(getattr(cct, 'ats_tdx_interval', 5.0) or 5.0)
+        init_sec_str = f"{int(init_sec)}s" if init_sec.is_integer() else f"{init_sec:.1f}s"
+        self.cb_auto_refresh = QCheckBox(f"自动刷新({init_sec_str})")
         self.cb_auto_refresh.setChecked(True)
-        self.cb_auto_refresh.setToolTip("实盘交易时段 (09:15~11:30, 13:00~15:02) 每 3 秒后台静默拉取并刷新；非交易时段自动休眠")
+        self.cb_auto_refresh.setToolTip(f"实盘交易时段 (09:15~11:30, 13:00~15:02) 每 {init_sec_str} 后台静默拉取并刷新；非交易时段自动休眠")
         self.cb_auto_refresh.setStyleSheet("color: #00ff88; font-size: 8.5pt; font-weight: bold;")
         self.cb_auto_refresh.toggled.connect(self._on_auto_refresh_toggled)
         top_bar.addWidget(self.cb_auto_refresh)
@@ -530,6 +532,35 @@ class NewStockPanel(QWidget):
         """用户点击表头排序列时触发：记录并持久化"""
         self._save_sort_state(col, order)
 
+    def _get_refresh_interval_sec(self) -> float:
+        """获取当前配置的 TDX 全局刷新间隔 (秒)"""
+        try:
+            val = getattr(cct, 'ats_tdx_interval', 5.0)
+            return max(1.0, float(val if val is not None else 5.0))
+        except Exception:
+            return 5.0
+
+    def _sync_refresh_interval_ui(self) -> Tuple[float, str]:
+        """动态同步刷新间隔显示与定时器周期 (支持盘中动态调整 cct.ats_tdx_interval)"""
+        try:
+            sec = self._get_refresh_interval_sec()
+            sec_str = f"{int(sec)}s" if sec.is_integer() else f"{sec:.1f}s"
+            if hasattr(self, 'cb_auto_refresh'):
+                cur_text = f"自动刷新({sec_str})"
+                if self.cb_auto_refresh.text() != cur_text:
+                    self.cb_auto_refresh.setText(cur_text)
+                    self.cb_auto_refresh.setToolTip(
+                        f"实盘交易时段 (09:15~11:30, 13:00~15:02) 每 {sec_str} 后台静默拉取并刷新；非交易时段自动休眠"
+                    )
+            if hasattr(self, 'auto_refresh_timer'):
+                ms = int(sec * 1000)
+                if self.auto_refresh_timer.interval() != ms:
+                    self.auto_refresh_timer.setInterval(ms)
+            return sec, sec_str
+        except Exception as e:
+            logger.debug(f"同步新股刷新间隔异常: {e}")
+            return 5.0, "5s"
+
     def _is_market_active(self) -> bool:
         """判断当前是否处于 A 股实盘交易与竞价活跃时段 (09:15~11:30, 13:00~15:02)"""
         try:
@@ -546,7 +577,7 @@ class NewStockPanel(QWidget):
         【全系统生命周期启动】：
         1. 启动时瞬间从本地磁盘持久化数据加载并渲染，保证 0 秒开箱即显，绝无白屏或0标的；
         2. 发起后台静默增量刷新；
-        3. 启动 3 秒定时器：实盘时段自动静默刷新，非交易时段自动休眠。
+        3. 启动定时器（与 cct.ats_tdx_interval 动态对齐）：实盘时段自动静默刷新，非交易时段自动休眠。
         """
         try:
             fetcher = NewStockFetcher.get_instance()
@@ -561,19 +592,21 @@ class NewStockPanel(QWidget):
         # 延时 150ms 启动后台增量拉取，首帧 0 阻塞
         QTimer.singleShot(150, lambda: self.load_data(force_refresh=False))
 
+        sec, _ = self._sync_refresh_interval_ui()
         self.auto_refresh_timer = QTimer(self)
-        self.auto_refresh_timer.setInterval(3000)
+        self.auto_refresh_timer.setInterval(int(sec * 1000))
         self.auto_refresh_timer.timeout.connect(self._on_auto_timer_tick)
         self.auto_refresh_timer.start()
 
     def _on_auto_refresh_toggled(self, checked: bool):
+        sec, sec_str = self._sync_refresh_interval_ui()
         if checked:
-            self.auto_refresh_timer.start(3000)
+            self.auto_refresh_timer.start(int(sec * 1000))
             if self._is_market_active():
-                self.lbl_status.setText("🟢 自动刷新已开启 (3s)")
+                self.lbl_status.setText(f"🟢 自动刷新已开启 ({sec_str})")
                 self.lbl_status.setStyleSheet("color: #00ff88; font-size: 8.5pt; font-weight: bold;")
             else:
-                self.lbl_status.setText("🕒 休市静态模式 (非交易时段暂停轮询)")
+                self.lbl_status.setText(f"🕒 休市静态模式 (非交易时段暂停轮询 {sec_str})")
                 self.lbl_status.setStyleSheet("color: #94a3b8; font-size: 8.5pt;")
         else:
             self.auto_refresh_timer.stop()
@@ -582,6 +615,7 @@ class NewStockPanel(QWidget):
 
     def _on_auto_timer_tick(self):
         """定时器触发：仅在交易时段轮询，非交易时段彻底静止"""
+        self._sync_refresh_interval_ui()
         if self._is_fetching or not self.cb_auto_refresh.isChecked():
             return
 
@@ -589,6 +623,10 @@ class NewStockPanel(QWidget):
             return
 
         self.load_data(force_refresh=False)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._sync_refresh_interval_ui()
 
     def load_data(self, force_refresh: bool = False, is_manual_btn: bool = False):
         """启动后台线程拉取全量新股与实时数据（默认以 TDX + 权威日历为核心）"""
