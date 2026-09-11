@@ -729,7 +729,9 @@ class GlobalConfig:
         self.co2float = self.get_with_writeback("general", "co2float", fallback=["signal_strength"], value_type="list")
         self.co2int = self.get_with_writeback("general", "co2int", fallback=["ch_tc2", "ch_bc2", "ch_nod", "pdays","pbreak","obs_d"], value_type="list")
         self.ats_col = self.get_with_writeback("general", "ats_col", fallback=['ch_bc2'], value_type="list")
+        self.ats_tdx_interval = self.get_with_writeback("general", "ats_tdx_interval", fallback=5.0, value_type="float")
         # [NEW] 退市股票黑名单配置 (支持自动写回与配置化，如 000004 国恒退, 002808 恒久退等)
+
         self.delisted_codes = self.get_with_writeback("general", "delisted_codes", fallback=['000004', '002808', '000005', '000003', '000007', '000013', '000015', '000018', '000022', '000024', '000029', '000043', '000405', '000508', '000511'], value_type="list")
         self.vis_column_map = self.get_with_writeback(
             "general",
@@ -1044,7 +1046,9 @@ dna_audit_custom_cols: List[str] = CFG.dna_audit_custom_cols
 co2float: List[str] = CFG.co2float
 co2int: List[str] = CFG.co2int
 ats_col: List[str] = CFG.ats_col
+ats_tdx_interval: float = float(getattr(CFG, 'ats_tdx_interval', 5.0) or 5.0)
 delisted_codes: List[str] = CFG.delisted_codes
+
 
 # ⚡ [GLOBAL] 退市股票默认硬编码黑名单 (内置 000004 国恒退, 002808 恒久退等)
 DELISTED_BLACKLIST = {'000004', '002808', '000005', '000003', '000007', '000013', '000015', '000018', '000022', '000024', '000029', '000043', '000405', '000508', '000511'}

@@ -243,6 +243,15 @@ class CapitalDragonEngine:
         self._index_data_cache: Dict[str, Dict[str, float]] = {}
         self._index_cache_ts: float = 0.0
 
+        # ─── 大盘摘要后台独立线程缓存（主线程只读，0阻塞）─────────────────────────
+        # _bg_market_summary_cache: 最新计算完成的摘要，主线程只读（无锁读取可接受）
+        # _bg_market_summary_ts: 缓存写入时间戳
+        # _bg_updater_running: 防止重复启动后台线程
+        self._bg_market_summary_cache: Dict[str, Any] = {}
+        self._bg_market_summary_ts: float = 0.0
+        self._bg_updater_running: bool = False
+        self._bg_updater_lock = threading.Lock()
+
     def get_cached_report(self, max_age: float = 5.0, df_check: Optional[pd.DataFrame] = None, fallback_stale: bool = False) -> Optional[Dict[str, Any]]:
         """获取最近缓存的分析报告 (零开销，极速，支持 fallback_stale 宽松回退模式避免主线程卡死)"""
         with self._cache_lock:
@@ -266,10 +275,12 @@ class CapitalDragonEngine:
         针对 399xxx (深市指数), 999xxx (通达信沪指), 899xxx (北证50), 000001 (上证指数), 159915 等标的
         """
         now = time.time()
-        if self._index_data_cache and (now - self._index_cache_ts < 3.0):
+        tdx_intv = float(getattr(cct, 'ats_tdx_interval', 5.0) or 5.0)
+        if self._index_data_cache and (now - self._index_cache_ts < tdx_intv):
             return dict(self._index_data_cache)
 
         results = dict(self._index_data_cache)
+
         try:
             from ats.tdx_realtime_fetcher import TDXRealtimeFetcher
             fetcher = TDXRealtimeFetcher.get_instance()
@@ -1087,21 +1098,62 @@ class CapitalDragonEngine:
     def get_market_indices_and_volume_summary(self, df_all: Optional[pd.DataFrame] = None, now_dt: Optional[Any] = None) -> Dict[str, Any]:
         """
         获取全市场四大核心指数（上证、深证、创业板、北证）的资金、量比，以及全市交易额和较昨日增减交易额 (SSOT)
-        支持带 1.5 秒轻量防抖缓存，避免高频刷新下重复计算或拉取
-        """
-        now = time.time()
-        # 1. 轻量缓存检查 (1.5s 防抖)
-        with self._cache_lock:
-            cached_sum = getattr(self, '_market_summary_cache', None)
-            cached_ts = getattr(self, '_market_summary_cache_ts', 0.0)
-            if cached_sum and (now - cached_ts < 1.5) and df_all is None:
-                return dict(cached_sum)
 
-        # 2. 获取昨日指数收盘基准 (每天拉取一次并内存缓存)
+        ⚡ 极限性能优化版 (2026-09-11):
+        - 主线程调用：仅读 _bg_market_summary_cache（< 0.1ms，零网络IO）
+        - 生产环境后台线程（_start_market_summary_bg_updater）每 5s 独立拉取 TDX 数据更新缓存
+        - 测试环境（df_all is not None）：直接从 DataFrame 提取，支持离线单元测试（保持原逻辑）
+        """
+        # ── 测试环境（df_all 传入）：保留完整原逻辑，直接从 df 提取 ──────────────────
+        if df_all is not None and not df_all.empty:
+            return self._compute_market_summary_from_df(df_all, now_dt)
+
+        # ── 生产环境：主线程只读后台缓存（< 0.1ms，零阻塞）────────────────────────
+        cached = self._bg_market_summary_cache
+        if cached:
+            return dict(cached)
+
+        # 首次启动缓存为空时返回空占位（不阻塞主线程）
+        return {'formatted_html': '', 'plain_text': '', 'sh_amt': 0.0, 'sz_amt': 0.0,
+                'cy_amt': 0.0, 'bj_amt': 0.0, 'total_amt': 0.0, 'diff_amt': 0.0, 'diff_str': ''}
+
+    def _compute_market_summary_from_df(self, df_all: pd.DataFrame, now_dt: Optional[Any] = None) -> Dict[str, Any]:
+        """从传入的 df_all 提取大盘摘要（单元测试与强制刷新专用，与主线程调用完全解耦）"""
         import datetime
         if now_dt is None:
             now_dt = datetime.datetime.now()
+        prev_data = getattr(self, '_yesterday_index_amounts', {}) or {}
+        extracted = {}
+        code_col = 'code' if 'code' in df_all.columns else None
+        codes_s = df_all[code_col].astype(str).str.strip().str.zfill(6) if code_col else df_all.index.astype(str).str.strip().str.zfill(6)
+        for idx_key, target_code in [('sh', '999999'), ('sz', '399001'), ('cy', '399006'), ('bj', '899050')]:
+            cand_codes = [target_code, '000001'] if idx_key == 'sh' else [target_code]
+            for cand in cand_codes:
+                match_mask = (codes_s == cand)
+                if match_mask.any():
+                    row = df_all[match_mask].iloc[0]
+                    raw_amt = float(row.get('amount', 0.0) or 0.0)
+                    amt_yi = (raw_amt / 1e8) if raw_amt > 1e6 else raw_amt
+                    raw_vr = float(row.get('vol_ratio', row.get('volume', 1.0)) or 1.0)
+                    extracted[idx_key] = {'amount_yi': amt_yi, 'vol_ratio': raw_vr}
+                    break
+        res = self._build_summary_result(extracted, prev_data, now_dt)
+
+        self._bg_market_summary_cache = res
+        self._bg_market_summary_ts = time.time()
+        return res
+
+
+    def _compute_market_summary_bg(self) -> None:
+        """
+        后台线程专属：拉取 TDX API + 计算大盘摘要 → 写入 _bg_market_summary_cache
+        本函数**绝不**在主线程中调用，完全运行于独立 daemon 线程。
+        """
+        import datetime
+        now_dt = datetime.datetime.now()
         today_str = now_dt.strftime('%Y-%m-%d')
+
+        # ① 获取/刷新昨日指数收盘基准（每天拉取一次，内存持久缓存）
         prev_data = getattr(self, '_yesterday_index_amounts', None)
         if not prev_data or getattr(self, '_yesterday_cache_date', '') != today_str:
             try:
@@ -1120,12 +1172,10 @@ class CapitalDragonEngine:
                         p_sz = b_sz[-2]['amount'] / 1e8 if b_sz and len(b_sz) >= 2 else 0.0
                         p_cy = b_cy[-2]['amount'] / 1e8 if b_cy and len(b_cy) >= 2 else 0.0
                         p_bj = b_bj[-2]['amount'] / 1e8 if b_bj and len(b_bj) >= 2 else 0.0
-
                         v_sh = b_sh[-2]['vol'] if b_sh and len(b_sh) >= 2 else 1.0
                         v_sz = b_sz[-2]['vol'] if b_sz and len(b_sz) >= 2 else 1.0
                         v_cy = b_cy[-2]['vol'] if b_cy and len(b_cy) >= 2 else 1.0
                         v_bj = b_bj[-2]['vol'] if b_bj and len(b_bj) >= 2 else 1.0
-
                         prev_data = {
                             'sh': p_sh, 'sz': p_sz, 'cy': p_cy, 'bj': p_bj,
                             'total': p_sh + p_sz + p_bj,
@@ -1134,28 +1184,12 @@ class CapitalDragonEngine:
                         self._yesterday_index_amounts = prev_data
                         self._yesterday_cache_date = today_str
             except Exception as e_prev:
-                logger.debug(f"[CapitalDragonEngine] 获取昨日指数基准异常: {e_prev}")
+                logger.debug(f"[CapitalDragonEngine] 后台获取昨日指数基准异常: {e_prev}")
                 prev_data = getattr(self, '_yesterday_index_amounts', {}) or {}
 
-        # 3. 提取四大指数的最新成交额与量比
-        # 生产环境 (df_all is None): 强制直连 TDX API 保证 100% 官方实时准确，杜绝全市场扫描池代码或单位污染
-        # 测试环境 (df_all is not None): 从传入的 DataFrame 提取，支持离线单元测试
+        # ② 拉取四大指数实时行情
         extracted = {}
-        if df_all is not None and not df_all.empty:
-            code_col = 'code' if 'code' in df_all.columns else None
-            codes_s = df_all[code_col].astype(str).str.strip().str.zfill(6) if code_col else df_all.index.astype(str).str.strip().str.zfill(6)
-            for idx_key, target_code in [('sh', '999999'), ('sz', '399001'), ('cy', '399006'), ('bj', '899050')]:
-                cand_codes = [target_code, '000001'] if idx_key == 'sh' else [target_code]
-                for cand in cand_codes:
-                    match_mask = (codes_s == cand)
-                    if match_mask.any():
-                        row = df_all[match_mask].iloc[0]
-                        raw_amt = float(row.get('amount', 0.0) or 0.0)
-                        amt_yi = (raw_amt / 1e8) if raw_amt > 1e6 else raw_amt
-                        raw_vr = float(row.get('vol_ratio', row.get('volume', 1.0)) or 1.0)
-                        extracted[idx_key] = {'amount_yi': amt_yi, 'vol_ratio': raw_vr}
-                        break
-        else:
+        try:
             need_fetch = ['999999', '000001', '399001', '399006', '899050', '399005']
             tdx_res = self._fetch_tdx_index_data(need_fetch)
             for k, c in [('sh', '999999'), ('sz', '399001'), ('cy', '399006'), ('bj', '899050')]:
@@ -1165,7 +1199,6 @@ class CapitalDragonEngine:
                     prev_vol = prev_data.get(f'vol_{k}', 1.0) if prev_data else 1.0
                     cur_vol = float(info.get('vol', 0.0) or 0.0)
                     try:
-                        from JohnsonUtil import commonTips as cct
                         ratio_t = float(cct.get_work_time_ratio(resample='d'))
                     except Exception:
                         ratio_t = 1.0
@@ -1174,32 +1207,42 @@ class CapitalDragonEngine:
                     if calc_vr <= 0.05 or calc_vr > 50.0:
                         calc_vr = 1.0
                     extracted[k] = {'amount_yi': a_yi, 'vol_ratio': calc_vr}
+        except Exception as e_tdx:
+            logger.debug(f"[CapitalDragonEngine] 后台TDX拉取大盘指数异常: {e_tdx}")
+
+        if not extracted:
+            return  # 拉取失败，保留旧缓存，不用空结果覆盖
+
+        # ③ 写入后台缓存（原子覆盖，主线程下次读取即为最新值）
+        res = self._build_summary_result(extracted, prev_data, now_dt)
+        self._bg_market_summary_cache = res
+        self._bg_market_summary_ts = time.time()
+
+    def _build_summary_result(self, extracted: Dict, prev_data: Dict, now_dt: Any) -> Dict[str, Any]:
+        """从 extracted 和 prev_data 组装大盘摘要结果字典（纯计算，无 IO）"""
+        import datetime
+        if now_dt is None:
+            now_dt = datetime.datetime.now()
 
         sh_amt = round(extracted.get('sh', {}).get('amount_yi', 0.0), 1)
-        sh_vr = round(extracted.get('sh', {}).get('vol_ratio', 1.0), 2)
+        sh_vr  = round(extracted.get('sh', {}).get('vol_ratio', 1.0), 2)
         sz_amt = round(extracted.get('sz', {}).get('amount_yi', 0.0), 1)
-        sz_vr = round(extracted.get('sz', {}).get('vol_ratio', 1.0), 2)
+        sz_vr  = round(extracted.get('sz', {}).get('vol_ratio', 1.0), 2)
         cy_amt = round(extracted.get('cy', {}).get('amount_yi', 0.0), 1)
-        cy_vr = round(extracted.get('cy', {}).get('vol_ratio', 1.0), 2)
+        cy_vr  = round(extracted.get('cy', {}).get('vol_ratio', 1.0), 2)
         bj_amt = round(extracted.get('bj', {}).get('amount_yi', 0.0), 1)
-        bj_vr = round(extracted.get('bj', {}).get('vol_ratio', 1.0), 2)
+        bj_vr  = round(extracted.get('bj', {}).get('vol_ratio', 1.0), 2)
 
-        # 4. 全市总交易额
         total_amt = round(sh_amt + sz_amt + bj_amt, 1)
-        if total_amt <= 0 and df_all is not None and not df_all.empty and 'amount' in df_all.columns:
-            total_amt = round(float(df_all['amount'].sum()) / 1e8, 1)
 
-        # 5. 计算较昨日增减交易额
         prev_total = prev_data.get('total', 0.0) if prev_data else 0.0
         diff_amt = 0.0
         if prev_total > 0:
             now_hour = now_dt.hour
-            # 15:00 后收盘或 09:00 前按全天算，盘中按时间进度算
             if now_hour >= 15 or now_hour < 9:
                 diff_amt = round(total_amt - prev_total, 1)
             else:
                 try:
-                    from JohnsonUtil import commonTips as cct
                     ratio_t = float(cct.get_work_time_ratio(resample='d'))
                 except Exception:
                     ratio_t = 1.0
@@ -1217,16 +1260,12 @@ class CapitalDragonEngine:
             f"<span style='color:#8e8e93;'>全市:</span> <span style='color:#e3b341; font-weight:bold;'>{total_amt:.1f}亿</span> "
             f"<span style='color:{diff_color}; font-weight:bold;'>(较昨 {diff_str})</span>"
         )
-
         plain_text = (
-            f"上证: {sh_amt:.1f}亿 ({sh_vr:.2f}x) | "
-            f"深证: {sz_amt:.1f}亿 ({sz_vr:.2f}x) | "
-            f"创业板: {cy_amt:.1f}亿 ({cy_vr:.2f}x) | "
-            f"北证: {bj_amt:.1f}亿 ({bj_vr:.2f}x) | "
+            f"上证: {sh_amt:.1f}亿 ({sh_vr:.2f}x) | 深证: {sz_amt:.1f}亿 ({sz_vr:.2f}x) | "
+            f"创业板: {cy_amt:.1f}亿 ({cy_vr:.2f}x) | 北证: {bj_amt:.1f}亿 ({bj_vr:.2f}x) | "
             f"全市: {total_amt:.1f}亿 (较昨 {diff_str})"
         )
-
-        res_dict = {
+        return {
             "sh_amt": sh_amt, "sh_vr": sh_vr,
             "sz_amt": sz_amt, "sz_vr": sz_vr,
             "cy_amt": cy_amt, "cy_vr": cy_vr,
@@ -1238,8 +1277,31 @@ class CapitalDragonEngine:
             "plain_text": plain_text
         }
 
-        with self._cache_lock:
-            self._market_summary_cache = res_dict
-            self._market_summary_cache_ts = time.time()
+    def start_market_summary_bg_updater(self, interval_sec: Optional[float] = None) -> None:
+        """
+        启动大盘摘要后台定期刷新线程（daemon，每 interval_sec 秒刷新一次，默认接入 cct.ats_tdx_interval）。
+        应在主窗口初始化时（_init_status_clock 后）调用一次，并发调用自动幂等。
+        """
+        if interval_sec is None:
+            interval_sec = float(getattr(cct, 'ats_tdx_interval', 5.0) or 5.0)
 
-        return res_dict
+        with self._bg_updater_lock:
+            if self._bg_updater_running:
+                return
+            self._bg_updater_running = True
+
+        def _loop():
+            init_intv = float(getattr(cct, 'ats_tdx_interval', interval_sec) or interval_sec)
+            logger.info(f"[CapitalDragonEngine] 大盘摘要后台刷新线程已启动 (基准间隔 {init_intv}s, 动态跟随 cct.ats_tdx_interval)")
+            while True:
+                try:
+                    self._compute_market_summary_bg()
+                except Exception as e_loop:
+                    logger.debug(f"[CapitalDragonEngine] 后台摘要刷新异常: {e_loop}")
+                cur_intv = float(getattr(cct, 'ats_tdx_interval', interval_sec) or interval_sec)
+                time.sleep(cur_intv)
+
+        t = threading.Thread(target=_loop, daemon=True, name="MarketSummaryBgUpdater")
+        t.start()
+
+

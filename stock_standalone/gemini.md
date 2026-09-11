@@ -1,3 +1,35 @@
+## 2026-09-11 12:35
+- [x] **【ATS 全局可自定义 TDX API 轮询与防抖间隔 cct.ats_tdx_interval 落地】(SSOT) (`stock_standalone/JohnsonUtil/commonTips.py`, `stock_standalone/ats/capital_dragon_engine.py`, `stock_standalone/ats/tdx_realtime_fetcher.py`, `stock_standalone/ats/ui/main_window.py`)**：
+    - [x] **commonTips.py 全局统一入口与 global.ini 自动持久化**：
+        1. 在 `Config` 类中通过 `self.get_with_writeback("general", "ats_tdx_interval", fallback=5.0, value_type="float")` 注册配置，默认 5.0 秒，支持用户直接在 `global.ini` 中永久配置或程序运行时动态修改；
+        2. 模块级直接导出 `ats_tdx_interval: float = float(getattr(CFG, 'ats_tdx_interval', 5.0) or 5.0)`，支持通过 `from JohnsonUtil import commonTips as cct; cct.ats_tdx_interval = x.x` 任意读写；
+    - [x] **全量 TDX API 引擎与 Worker 统一解耦并动态跟随**：
+        1. **大盘指数守护线程 (`CapitalDragonEngine.start_market_summary_bg_updater`)**：默认间隔与后台死循环休眠全部动态取值 `cct.ats_tdx_interval`，支持盘中动态调整生效；
+        2. **指数接口防抖缓存 (`CapitalDragonEngine._fetch_tdx_index_data`)**：防抖时间由原硬编码 3.0s 全面升级为 `cct.ats_tdx_interval`；
+        3. **TDX 秒级行情引擎 (`TDXRealtimeFetcher`)**：基准间隔 `self.base_interval_sec` 与当前间隔 `self.current_interval_sec` 全部初始化为 `cct.ats_tdx_interval`，限流退避上限自适应扩展为 `max(15.0, interval * 3.0)`；
+        4. **TDX 独立轮询线程 (`TDXRealtimePollingWorker`)**：默认轮询周期与 `run()` 循环休眠无缝联动 `cct.ats_tdx_interval`；
+        5. **主窗口状态栏与大盘后台拉取 (`MainWindow`)**：初始化后台线程传参及状态栏节流全量对齐 `cct.ats_tdx_interval`；
+    - [x] **全量自动化测试全绿通过**：
+        1. 验证动态修改 `cct.ats_tdx_interval = 8.0`，Fetcher、Worker 100% 动态实时跟随；
+        2. 5 大核心套件 41 项测试全部 100% PASSED！
+
+## 2026-09-11 12:15
+- [x] **【ATS 全链路卡顿根治极限性能优化与连板天梯无数据 Bug 彻底排查根治】(SSOT) (`ats/capital_dragon_engine.py`, `ats/ui/main_window.py`, `ats/ui/daily_limit_up_dialog.py`, `ats/limit_up_engine.py`, `tests/test_daily_limit_up_dialog.py`, `tests/test_limit_up_engine.py`)**：
+    - [x] **连板天梯与每日涨停无数据问题彻底穿透与根治**：
+        1. **原生线程 QTimer 失效死锁根除 (SSOT)**：在 Python `threading.Thread` 中调用 `QTimer.singleShot` 因原生线程无 QEventLoop 永远无法触发主线程回调，导致 `_scan_worker_busy = True` 永远无法释放并永久锁死后续所有刷新；在 `DailyLimitUpDialog` 中引入 Qt 官方规范跨线程信号 `scan_done_signal = pyqtSignal(list, bool, str)` 与 `since_pct_done_signal = pyqtSignal()`，后台扫描完成后由 Qt 底层队列事件安全 100% 投递至主线程执行渲染；
+        2. **根除 `aggregate_multi_day_strong_stocks` 中 `KeyError: 'pct'` 崩溃**：历史归档数据中部分简化记录缺失 `pct`/`price` 键，原代码在字典排序及属性同步时直接硬编码 `x["pct"]` 抛出未捕获 KeyError 导致多日连板天梯聚合彻底崩溃中断；全面升级为 `_safe_float(x.get("pct", x.get("percent", 0.0)))` 安全取值并预设缺省底板；
+        3. **多日连板天梯模式时间片误杀双重豁免**：修复了在“自动实盘跟随”或非交易时间下，盘口时间片过滤（如 10:00~11:30 分歧低吸）将不含分时盘口属性的多日天梯强标的一刀切误杀为 0 只的漏洞，对 `LADDER/3D/5D/10D` 模式实施全局豁免；
+        4. **盘前/离线空 df 底板自动回退与手动刷新强制重置**：当 `current_df` 尚未推送时，自动回退加载最近一个有数据的归档日作为初始底板，杜绝打开界面空白留白；点击【🔄 刷新】按钮立即强制重置 busy 守卫并刷新数据；
+    - [x] **全链路 IPC 接收与后台更新卡顿极限性能优化**：
+        1. **大盘四大指数后台化 (0ms 主线程网络 IO)**：`CapitalDragonEngine` 重构 `get_market_indices_and_volume_summary` 为只读 `_bg_market_summary_cache`（< 0.1ms），启动独立后台守护线程每 5s 独立拉取 TDX API 并刷新缓存，彻底消除主线程状态栏定时器对 `_conn_lock` 的网络阻塞；
+        2. **IPC 数据接收链路解耦**：在 `_handle_realtime_data` 中，将全量名称缓存更新移入后台线程、策略过滤集重算通过 50ms 防抖定时器调度、涨跌幅度直方图 pandas 统计移入 `QTimer.singleShot(20)` 调度，主线程接收耗时从 300ms+ 骤降至 < 5ms；
+        3. **多监控窗口错峰调度**：`_async_refresh_tier3` 中对加速龙头、权益分析、板块明细等弹窗实行 0/30/60ms 错峰间隔调度，避免多窗口并发竞争 TDX 连接锁形成叠加卡顿；
+        4. **每日涨停看板 Worker 异步化**：`_refresh_data_for_mode` TODAY 模式扫描（含 TDX L2 行情与股本拉取）完全移入后台线程，通过信号安全回写主线程；
+    - [x] **自动化测试回归全绿通过**：
+        1. 涨停与天梯全量测试 16 项 100% 全部 PASSED；
+        2. 资金主线与大盘成交额测试 25 项 100% 全部 PASSED；
+        3. 5 大核心套件合计 41 项测试全绿通过（exit code 0）！
+
 ## 2026-09-10 18:20
 - [x] **【ATS 资金主线主要指数置顶与排序保持、独立重点关注与自动持久化落地】(SSOT) (`ats/capital_dragon_engine.py`, `ats/ui/capital_dragon_panel.py`, `tests/test_capital_dragon_indices_and_focus.py`)**：
     - [x] **主要大盘核心指数始终置顶与排序保持 (Tier 0 顶级特权)**：

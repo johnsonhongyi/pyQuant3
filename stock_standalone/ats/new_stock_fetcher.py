@@ -20,6 +20,7 @@ import pandas as pd
 from typing import Dict, List, Any, Optional, Tuple, Set
 
 from sys_utils import get_app_root, get_conf_path
+from JohnsonUtil import commonTips as cct
 
 logger = logging.getLogger("NewStockFetcher")
 
@@ -94,7 +95,7 @@ class NewStockFetcher:
         self._last_fetch_time: float = 0.0
         self._last_calendar_fetch_time: float = 0.0
         self._last_lift_fetch_time: float = 0.0
-        self._cache_ttl_seconds: float = 2.0  # 2秒内存缓存，满足高频实时刷新
+        self._cache_ttl_seconds: float = float(getattr(cct, 'ats_tdx_interval', 5.0) or 5.0)  # 动态对齐 ATS 全局 TDX 间隔
 
         # 启动时自动从本地磁盘持久化文件加载恢复
         self._load_persisted_data()
@@ -426,8 +427,9 @@ class NewStockFetcher:
         - 计算完成后自动原子落盘保存至 config/new_stock_data_cache.json。
         """
         now = time.time()
+        ttl = float(getattr(cct, 'ats_tdx_interval', self._cache_ttl_seconds) or 5.0)
         # ⚡ [0 毫秒冷启动即显与高频实时刷新] 非强制刷新时，在 TTL 有效期内直接复用内存缓存；超过 TTL 时自动拉取最新行情
-        if not force_refresh and self._cached_stocks_df is not None and not self._cached_stocks_df.empty and (now - self._last_fetch_time < self._cache_ttl_seconds):
+        if not force_refresh and self._cached_stocks_df is not None and not self._cached_stocks_df.empty and (now - self._last_fetch_time < ttl):
             return self._cached_stocks_df
 
         if self._cached_stocks_df is None or self._cached_stocks_df.empty:

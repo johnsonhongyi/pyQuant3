@@ -267,6 +267,8 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
     """
     code_clicked = pyqtSignal(str, str) # 单击联动 (code, name)
     code_double_clicked = pyqtSignal(str, str) # 双击查看详情 (code, name)
+    scan_done_signal = pyqtSignal(list, bool, str) # 后台扫描完成跨线程信号 (records, is_trade_day, today_str)
+    since_pct_done_signal = pyqtSignal() # 距今涨幅后台拉取完成跨线程信号
 
     def __init__(self, parent=None, restore_state=None):
         super().__init__(None) # 必须为 None，确保是系统级独立窗口，不依附于主窗口层级
@@ -277,6 +279,11 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         self.setMinimumWidth(360)
         self.setMinimumHeight(240)
         apply_dark_theme(self)
+
+        # ⚡ 跨线程信号绑定（保障后台扫描结果 100% 安全切回 Qt 主线程渲染）
+        self.scan_done_signal.connect(self._on_scan_done)
+        self.since_pct_done_signal.connect(self._refresh_since_pct_columns)
+
 
         self.engine = LimitUpEngine.get_instance()
         self.current_df: Optional[pd.DataFrame] = None
@@ -753,8 +760,9 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
             QPushButton { background-color: #1a2a1a; color: #00ff88; font-weight: bold; border: 1px solid #00ff88; border-radius: 4px; padding: 3px 8px; }
             QPushButton:hover { background-color: #00ff88; color: #000000; }
         """)
-        self.btn_refresh.clicked.connect(self._refresh_data_for_mode)
+        self.btn_refresh.clicked.connect(self._on_btn_refresh_clicked)
         ctrl_layout.addWidget(self.btn_refresh)
+
 
         self.btn_export = QPushButton("📤 导出")
         self.btn_export.setStyleSheet("""
@@ -1358,36 +1366,68 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
             return self.current_df
         return None
 
+    def _on_btn_refresh_clicked(self):
+        """用户点击【🔄 刷新】按钮：强制重置 busy 锁，立即执行当前模式的完整刷新"""
+        self._scan_worker_busy = False
+        self._last_refresh_time = 0.0
+        self._refresh_data_for_mode()
+
     def _refresh_data_for_mode(self):
-        """根据当前选定的视图模式计算并刷新数据"""
+
+        """根据当前选定的视图模式计算并刷新数据
+        ⚡ 极限性能优化 (2026-09-11):
+        - TODAY 模式：scan_limit_up_records_from_df 含 TDX API 调用，必须后台线程化
+        - 其他模式：相对轻量，保持现有策略（含轻度节流保护）
+        """
         df = self._resolve_active_strategy_df()
         today_str = time.strftime("%Y-%m-%d")
         is_trade_day = cct.get_trade_date_status() if hasattr(cct, "get_trade_date_status") else True
         effective_trade_date = today_str if is_trade_day else (cct.get_last_trade_date() if hasattr(cct, "get_last_trade_date") else today_str)
 
         if self.current_mode == "TODAY":
-            if df is not None and not df.empty:
-                self.current_records = self.engine.scan_limit_up_records_from_df(df, fetch_l2_quotes=True, extra_cols=self.extra_cols)
-                # 仅在实际交易日进行盘中/盘后自动归档 (非交易日不向磁盘写周六/周日归档)
-                if is_trade_day:
-                    now = time.time()
-                    is_post_trading = time.strftime("%H:%M") >= "15:00"
-                    if is_post_trading or (now - getattr(self, '_last_disk_save_time', 0.0) >= 300.0):
-                        self._last_disk_save_time = now
-                        recs_copy = list(self.current_records)
-                        threading.Thread(
-                            target=self.engine.save_daily_records_atomic,
-                            args=(today_str, recs_copy),
-                            kwargs={"force": is_post_trading, "is_eod": is_post_trading},
-                            daemon=True
-                        ).start()
-            else:
+            # ⚡ TODAY 模式：全部移入后台线程（scan 含 TDX API 阻塞，不可在主线程执行）
+            if getattr(self, '_scan_worker_busy', False):
+                return  # 防重入：上一次扫描仍在运行则跳过
+            if df is None or df.empty:
                 self.current_records = self.engine.get_records_by_date(effective_trade_date)
+                if not self.current_records:
+                    # 🛡️ 容错回退：若今日尚无归档（如盘前/新交易日刚开盘），自动加载最近一个有数据的归档日作为底板
+                    archived = self.engine.get_all_archived_dates()
+                    if archived:
+                        fallback_date = archived[-1]
+                        self.current_records = self.engine.get_records_by_date(fallback_date)
+                        effective_trade_date = fallback_date
+                summary = self.engine.get_market_limit_up_summary(effective_trade_date, current_df=df)
+                self._update_kpi_display(summary)
+                self._apply_filter()
+                return
+            self._scan_worker_busy = True
+            _df_snap = df
+            _engine = self.engine
+            _extra_cols = self.extra_cols
+            _is_trade_day = is_trade_day
+            _today_str = today_str
+
+
+            def _bg_scan():
+                records = []
+                try:
+                    records = _engine.scan_limit_up_records_from_df(
+                        _df_snap, fetch_l2_quotes=True, extra_cols=_extra_cols
+                    )
+                except Exception as _e:
+                    logger.error(f"[DailyLimitUpDialog] bg scan error: {_e}")
+                finally:
+                    # 必须使用 Qt 原生跨线程信号，确保在主线程事件循环中 100% 触发执行
+                    self.scan_done_signal.emit(records, _is_trade_day, _today_str)
+
+            threading.Thread(target=_bg_scan, daemon=True, name="LimitUpScanWorker").start()
+            return  # 主线程立即返回，等待 scan_done_signal 信号回调
+
+
         elif self.current_mode == "BUBBLE":
-            # 🌅 开盘起点与极速阶梯跃迁挖掘雷达
             self.current_records = self.engine.get_opening_bubble_records(current_df=df)
         elif self.current_mode == "RADAR":
-            # 🎯 盘中上车雷达视图
             self.current_records = self.engine.get_intraday_radar_records(current_df=df)
         elif self.current_mode == "3D":
             self.current_records = self.engine.aggregate_multi_day_strong_stocks(days=3, min_limit_ups=1, current_df=df)
@@ -1396,18 +1436,46 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         elif self.current_mode == "10D":
             self.current_records = self.engine.aggregate_multi_day_strong_stocks(days=10, min_limit_ups=1, current_df=df)
         elif self.current_mode == "LADDER":
-            # 连板天梯：连板数 >= 2 的标的
             all_strong = self.engine.aggregate_multi_day_strong_stocks(days=5, min_limit_ups=1, current_df=df)
             self.current_records = [r for r in all_strong if _safe_int(r.get("max_consecutive", r.get("consecutive_boards", 1))) >= 2]
         elif self.current_mode == "HISTORY" and self.selected_history_date:
             self.current_records = self.engine.get_records_by_date(self.selected_history_date)
 
-        # 更新顶部 KPI 卡片 (传入当前全量策略 df 获取全市场宏观情绪与涨跌广度)
+        # 更新顶部 KPI 卡片
         summary = self.engine.get_market_limit_up_summary(self.selected_history_date if self.current_mode == "HISTORY" else effective_trade_date, current_df=df)
         self._update_kpi_display(summary)
-
-        # 应用时间片与梯队过滤并填充表格
         self._apply_filter()
+
+    def _on_scan_done(self, records: list, is_trade_day: bool, today_str: str) -> None:
+        """后台扫描完成回调 — 在主线程执行 UI 渲染（由 QTimer.singleShot(0) 保证线程安全）"""
+        self._scan_worker_busy = False
+        self.current_records = records
+
+        # 异步归档（非交易日不写磁盘）
+        if is_trade_day:
+            now = time.time()
+            is_post_trading = time.strftime("%H:%M") >= "15:00"
+            if is_post_trading or (now - getattr(self, '_last_disk_save_time', 0.0) >= 300.0):
+                self._last_disk_save_time = now
+                recs_copy = list(self.current_records)
+                threading.Thread(
+                    target=self.engine.save_daily_records_atomic,
+                    args=(today_str, recs_copy),
+                    kwargs={"force": is_post_trading, "is_eod": is_post_trading},
+                    daemon=True
+                ).start()
+
+        # 更新 KPI 卡片与表格
+        try:
+            df = self._resolve_active_strategy_df()
+            effective_date = today_str
+            summary = self.engine.get_market_limit_up_summary(effective_date, current_df=df)
+            self._update_kpi_display(summary)
+        except Exception:
+            pass
+        self._apply_filter()
+
+
 
     def _make_column_subkey(self, r: Dict[str, Any], col_idx: int, is_descending: bool) -> tuple:
         """
@@ -1704,6 +1772,10 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         """
         当选择历史回溯且不是最近交易日时，计算各标的从历史价格距今的最新涨跌幅并注入 record['since_pct']。
         若非历史回溯或为最近交易日，清理 since_pct 为 None。
+
+        ⚡ 极限性能优化 (2026-09-11):
+        - 主线程只读 df/缓存，0 网络 IO
+        - missing_codes 的 TDX 拉取完全移入后台线程，完成后 QTimer.singleShot 触发局部刷新
         """
         active_date = self._get_active_history_date_if_not_latest()
         if not active_date or not records:
@@ -1726,7 +1798,7 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         now_t = time.time()
         missing_codes = []
 
-        # 1. 优先从 df / 本地价格缓存中获取最新价格
+        # 1. 优先从 df / 本地价格缓存中获取最新价格（主线程，零阻塞）
         for r in records:
             code = str(r.get("code", "")).zfill(6)
             hist_p = _safe_float(r.get("price", 0.0))
@@ -1760,33 +1832,91 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
                     self._latest_price_cache[code] = (now_p, now_t)
             else:
                 missing_codes.append(code)
-                r["since_pct"] = None
+                r["since_pct"] = None  # 先用 None 渲染，后台拉取后刷新
 
-        # 2. 对缺失的标的，通过 TDXRealtimeFetcher 批量拉取
-        if missing_codes:
-            try:
-                from ats.tdx_realtime_fetcher import TDXRealtimeFetcher
-                fetcher = TDXRealtimeFetcher.get_instance()
-                quotes = fetcher.get_security_quotes_safe(missing_codes)
-                price_map = {}
-                for q in quotes:
-                    c_q = str(q.get("code", "")).zfill(6)
-                    p_q = _safe_float(q.get("price", q.get("last_close", 0.0)))
-                    if p_q > 0.0:
-                        price_map[c_q] = p_q
-                        if hasattr(self, "_latest_price_cache"):
-                            self._latest_price_cache[c_q] = (p_q, now_t)
+        # 2. 对缺失的标的，后台线程拉取 TDX（不阻塞主线程！）
+        if missing_codes and not getattr(self, '_since_pct_bg_busy', False):
+            self._since_pct_bg_busy = True
+            _records_ref = records  # 注意：list 引用，后台可写入
+            _missing = list(missing_codes)
+            _price_cache = getattr(self, '_latest_price_cache', {})
+            _now_t = now_t
 
-                if price_map:
-                    for r in records:
-                        code = str(r.get("code", "")).zfill(6)
-                        if code in price_map:
-                            hist_p = _safe_float(r.get("price", 0.0))
-                            now_p = price_map[code]
-                            if hist_p > 0.0 and now_p > 0.0:
-                                r["since_pct"] = ((now_p - hist_p) / hist_p) * 100.0
-            except Exception as e:
-                logger.debug(f"批量获取最新价计算距今涨幅异常: {e}")
+            def _bg_fetch_prices():
+                try:
+                    from ats.tdx_realtime_fetcher import TDXRealtimeFetcher
+                    fetcher = TDXRealtimeFetcher.get_instance()
+                    quotes = fetcher.get_security_quotes_safe(_missing)
+                    price_map = {}
+                    for q in quotes:
+                        c_q = str(q.get("code", "")).zfill(6)
+                        p_q = _safe_float(q.get("price", q.get("last_close", 0.0)))
+                        if p_q > 0.0:
+                            price_map[c_q] = p_q
+                            _price_cache[c_q] = (p_q, _now_t)
+
+                    if price_map:
+                        for r in _records_ref:
+                            code = str(r.get("code", "")).zfill(6)
+                            if code in price_map:
+                                hist_p = _safe_float(r.get("price", 0.0))
+                                now_p = price_map[code]
+                                if hist_p > 0.0 and now_p > 0.0:
+                                    r["since_pct"] = ((now_p - hist_p) / hist_p) * 100.0
+
+                        # 后台拉取完成，触发主线程局部刷新 (Qt 跨线程信号)
+                        self.since_pct_done_signal.emit()
+
+                except Exception as e:
+                    logger.debug(f"批量获取最新价计算距今涨幅异常(后台): {e}")
+                finally:
+                    self._since_pct_bg_busy = False
+
+            threading.Thread(target=_bg_fetch_prices, daemon=True, name="SincePctBgFetcher").start()
+
+    def _refresh_since_pct_columns(self) -> None:
+        """后台拉取距今涨幅完成后，局部更新表格中的 since_pct 列（不重建整表）"""
+        try:
+            if not hasattr(self, 'current_records') or not self.current_records:
+                return
+            # 找 since_pct 列的列索引（固定列序中寻找"距今涨跌"）
+            since_pct_col_idx = -1
+            for ci in range(self.table.columnCount()):
+                header_item = self.table.horizontalHeaderItem(ci)
+                if header_item and "距今" in header_item.text():
+                    since_pct_col_idx = ci
+                    break
+            if since_pct_col_idx < 0:
+                return
+
+            code_col_idx = 0  # 代码列在第 0 列
+            for row_idx in range(self.table.rowCount()):
+                code_item = self.table.item(row_idx, code_col_idx)
+                if not code_item:
+                    continue
+                code = str(code_item.text()).strip().zfill(6)
+                # 找对应 record
+                rec = next((r for r in self.current_records if str(r.get("code", "")).zfill(6) == code), None)
+                if rec is None:
+                    continue
+                since_pct = rec.get("since_pct")
+                if since_pct is None:
+                    continue
+                cell_item = self.table.item(row_idx, since_pct_col_idx)
+                sign = "+" if since_pct >= 0 else ""
+                text = f"{sign}{since_pct:.2f}%"
+                color = QColor(COLOR_UP) if since_pct >= 0 else QColor(COLOR_DOWN)
+                if cell_item:
+                    cell_item.setText(text)
+                    cell_item.setForeground(QBrush(color))
+                else:
+                    new_item = QTableWidgetItem(text)
+                    new_item.setForeground(QBrush(color))
+                    self.table.setItem(row_idx, since_pct_col_idx, new_item)
+        except Exception as _e:
+            logger.debug(f"[DailyLimitUp] _refresh_since_pct_columns 异常: {_e}")
+
+
 
     def _apply_filter(self):
         """【三维精准分拣】联合时间片生命周期、梯队分类与搜索文本进行实时原位过滤"""
@@ -1803,10 +1933,11 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         self._compute_since_pct_for_records(self.current_records)
 
         raw_slice = self.combo_time_slice.currentText() if hasattr(self, "combo_time_slice") else "⚡ 自动实盘跟随"
-        if getattr(self, "current_mode", "TODAY") == "HISTORY" and "自动实盘跟随" in raw_slice:
-            # 历史回溯模式下，若选择自动实盘跟随，默认展示该历史日的全天完整数据，不应受当前本地时钟截断
+        if getattr(self, "current_mode", "TODAY") in ("HISTORY", "3D", "5D", "10D", "LADDER") and "自动实盘跟随" in raw_slice:
+            # 历史回溯与多日天梯模式下，若选择自动实盘跟随，默认展示全量数据，不应受当前本地时钟截断
             time_slice = "⏱️ 全天全时段"
         elif "全天全时段" in raw_slice:
+
             # 用户明确选择【全天全时段】时，锁定全量展示，绝不自动切换
             time_slice = "⏱️ 全天全时段"
         elif "自动实盘跟随" in raw_slice:
@@ -1883,10 +2014,11 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
                 if not matched:
                     continue
 
-            # 3. ⏱️ 盘中时间片生命周期过滤 (全天全时段或激活 KPI 过滤时跳过过滤，确保 KPI 标的 100% 完整展示)
-            if "全天全时段" in time_slice or self.active_kpi_filters:
+            # 3. ⏱️ 盘中时间片生命周期过滤 (全天全时段、多日模式或激活 KPI 过滤时跳过过滤，确保天梯与 KPI 标的 100% 完整展示)
+            if "全天全时段" in time_slice or self.active_kpi_filters or getattr(self, "current_mode", "TODAY") in ("3D", "5D", "10D", "LADDER"):
                 pass
             elif "黄金定龙" in time_slice:
+
                 # 09:30~10:00 黄金定龙期标的
                 t_phase = str(r.get("time_phase", ""))
                 is_zt = r.get("is_limit_up", False)

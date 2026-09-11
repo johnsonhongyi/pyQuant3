@@ -1432,19 +1432,28 @@ class LimitUpEngine:
             if zt_count < min_limit_ups and st["max_consecutive"] < 2:
                 continue
 
-            lat = st["latest_record"]
+            lat = dict(st["latest_record"])
+            lat.setdefault("price", 0.0)
+            lat.setdefault("pct", 0.0)
+            lat.setdefault("dff", 0.0)
+            lat.setdefault("dff2", 0.0)
+            lat.setdefault("dff3", 0.0)
+            lat.setdefault("rank", 9999)
+            if "extra_cols" not in lat or not isinstance(lat["extra_cols"], dict):
+                lat["extra_cols"] = {}
+
             # 若提供了实时 current_df，从中同步最新行情与策略指标
             if current_df is not None and not current_df.empty:
                 if c in current_df.index:
                     row = current_df.loc[c]
                     if isinstance(row, pd.DataFrame):
                         row = row.iloc[0]
-                    lat["price"] = _safe_float(row.get("trade", row.get("close", lat["price"])))
-                    lat["pct"] = _safe_float(row.get("percent", row.get("pct", lat["pct"])))
-                    lat["dff"] = _safe_float(row.get("dff", lat["dff"]))
-                    lat["dff2"] = _safe_float(row.get("DFF2", row.get("dff2", lat["dff2"])))
-                    lat["dff3"] = _safe_float(row.get("DFF3", row.get("dff3", lat["dff3"])))
-                    lat["rank"] = _safe_int(row.get("Rank", row.get("rank", lat["rank"])), lat["rank"])
+                    lat["price"] = _safe_float(row.get("trade", row.get("close", lat.get("price", 0.0))))
+                    lat["pct"] = _safe_float(row.get("percent", row.get("pct", lat.get("pct", 0.0))))
+                    lat["dff"] = _safe_float(row.get("dff", lat.get("dff", 0.0)))
+                    lat["dff2"] = _safe_float(row.get("DFF2", row.get("dff2", lat.get("dff2", 0.0))))
+                    lat["dff3"] = _safe_float(row.get("DFF3", row.get("dff3", lat.get("dff3", 0.0))))
+                    lat["rank"] = _safe_int(row.get("Rank", row.get("rank", lat.get("rank", 9999))), lat.get("rank", 9999))
 
                     for ec in extra_cols:
                         for k in (ec, ec.lower(), ec.upper()):
@@ -1480,6 +1489,8 @@ class LimitUpEngine:
                 tier = f"⚡ 活跃强势反包 ({n_d_m_b})"
 
             res_item = dict(lat)
+            res_item.setdefault("price", 0.0)
+            res_item.setdefault("pct", 0.0)
             res_item.update({
                 "n_days_m_boards": n_d_m_b,
                 "zt_count": zt_count,
@@ -1490,12 +1501,12 @@ class LimitUpEngine:
             })
             results.append(res_item)
 
-        # 排序：强势评分降序 > 连板数降序 > 涨幅降序
+        # 排序：强势评分降序 > 连板数降序 > 涨幅降序（全部使用健壮安全提取）
         results.sort(key=lambda x: (
-            x["strong_score"],
-            x["zt_count"],
-            x["max_consecutive"],
-            x["pct"]
+            _safe_float(x.get("strong_score", 0.0)),
+            _safe_int(x.get("zt_count", 0)),
+            _safe_int(x.get("max_consecutive", 0)),
+            _safe_float(x.get("pct", x.get("percent", 0.0)))
         ), reverse=True)
 
         return results

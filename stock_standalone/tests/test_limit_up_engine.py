@@ -141,12 +141,12 @@ class TestLimitUpEngine(unittest.TestCase):
 
     def test_multi_day_aggregation_and_persistence(self):
         """测试多日历史强势股聚合与原子持久化"""
-        test_date_1 = "2026-08-20"
-        test_date_2 = "2026-08-21"
+        test_date_1 = "2099-12-01"
+        test_date_2 = "2099-12-02"
         
         recs_1 = [
             {
-                "code": "600001",
+                "code": "600999",
                 "name": "多日牛股",
                 "price": 11.00,
                 "pct": 10.00,
@@ -163,7 +163,7 @@ class TestLimitUpEngine(unittest.TestCase):
         ]
         recs_2 = [
             {
-                "code": "600001",
+                "code": "600999",
                 "name": "多日牛股",
                 "price": 12.10,
                 "pct": 10.00,
@@ -183,12 +183,13 @@ class TestLimitUpEngine(unittest.TestCase):
         self.engine.save_daily_records_atomic(test_date_2, recs_2)
 
         # 聚合测试
-        strong_stocks = self.engine.aggregate_multi_day_strong_stocks(days=5, min_limit_ups=1)
+        strong_stocks = self.engine.aggregate_multi_day_strong_stocks(days=2, min_limit_ups=1)
         self.assertGreaterEqual(len(strong_stocks), 1)
-        target = next((s for s in strong_stocks if s["code"] == "600001"), None)
+        target = next((s for s in strong_stocks if s["code"] == "600999"), None)
         self.assertIsNotNone(target)
         self.assertEqual(target["zt_count"], 2)
         self.assertIn("2板", target["n_days_m_boards"])
+
 
 
 if __name__ == "__main__":

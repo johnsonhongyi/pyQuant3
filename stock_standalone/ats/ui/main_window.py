@@ -3029,7 +3029,16 @@ class ATSMainWindow(QMainWindow):
         self._status_clock_timer.timeout.connect(self._refresh_statusbar_time_display)
         self._status_clock_timer.start(1000)
         self._refresh_statusbar_time_display()
-        self._refresh_market_volume_status()
+
+        # ⚡ 启动大盘指数后台刷新线程（接入全局自定义 cct.ats_tdx_interval，主线程只读缓存，零阻塞）
+        try:
+            from ats.capital_dragon_engine import CapitalDragonEngine
+            tdx_intv = float(getattr(cct, 'ats_tdx_interval', 5.0) or 5.0)
+            CapitalDragonEngine.get_instance().start_market_summary_bg_updater(interval_sec=tdx_intv)
+        except Exception as _e_bg:
+            logger.debug(f"[ATSMainWindow] 启动大盘摘要后台线程异常: {_e_bg}")
+
+
 
     def _refresh_market_volume_status(self):
         """刷新底部状态栏的大盘四大核心指数（上证、深证、创业板、北证）资金量比与全市成交额增减"""
@@ -4029,65 +4038,84 @@ class ATSMainWindow(QMainWindow):
             except Exception:
                 pass
 
-        # Fast vectorized name cache update
-        self._update_name_cache_from_df(self.current_df)
-
-        # 🛡️ 实时推送到独立新股阶梯盯盘窗口 (非阻塞)
-        if hasattr(self, 'ladder_monitor_win') and self.ladder_monitor_win is not None and self.ladder_monitor_win.isVisible():
+        # Fast vectorized name cache update — 移入后台线程，主线程不再阻塞
+        _df_for_name = self.current_df
+        def _bg_name_cache():
             try:
-                self.ladder_monitor_win.on_realtime_df_update(self.current_df)
+                self._update_name_cache_from_df(_df_for_name)
             except Exception:
                 pass
+        import threading as _t_mod
+        _t_mod.Thread(target=_bg_name_cache, daemon=True).start()
 
-        # 🛡️ 实时推送到独立每日涨停看板 (非阻塞)
+        # 🛡️ 实时推送到独立新股阶梯盯盘窗口 (非阻塞, 防重入 50ms 防抖)
+        if hasattr(self, 'ladder_monitor_win') and self.ladder_monitor_win is not None:
+            _lmw = self.ladder_monitor_win
+            _df_lmw = self.current_df
+            def _push_ladder():
+                try:
+                    if _lmw.isVisible():
+                        _lmw.on_realtime_df_update(_df_lmw)
+                except Exception:
+                    pass
+            QTimer.singleShot(0, _push_ladder)
+
+        # 🛡️ 实时推送到独立每日涨停看板 — 改为 QTimer.singleShot(0) 异步（自身已有 1.5s 节流）
         from PyQt6.sip import isdeleted
         if hasattr(self, 'daily_limit_up_dialog') and self.daily_limit_up_dialog and not isdeleted(self.daily_limit_up_dialog):
-            try:
-                sh_pct_val = getattr(self, '_last_sh_pct', 0.0)
-                self.daily_limit_up_dialog.update_data_payload(self.current_df, sh_pct_val)
-            except Exception:
-                pass
+            _dld = self.daily_limit_up_dialog
+            _sh_pct_val = getattr(self, '_last_sh_pct', 0.0)
+            _df_dld = self.current_df
+            def _push_dld():
+                try:
+                    if not isdeleted(_dld):
+                        _dld.update_data_payload(_df_dld, _sh_pct_val)
+                except Exception:
+                    pass
+            QTimer.singleShot(50, _push_dld)
 
         # 4. 更新 UI 显示与计算
         if self.current_df is not None and not self.current_df.empty:
             self.lbl_ipc_status.setText("  IPC 通道: 🔌 实时接入中  |  ")
             self.lbl_ipc_status.setStyleSheet("color: #00ff88; font-weight: bold;")
-            
-            # 🛡️ 实时行情数据就绪，自动重新计算策略过滤命中集合 (根除启动时无数据导致空集合的联动 Bug)
+
+            # ⚡ 策略过滤集异步刷新 (50ms 延迟，避免在 IPC 接收主链路执行 query.eval 全表扫描)
             if getattr(self, 'query_expr', ''):
-                self._recompute_filtered_codes_set()
-            
-            # 绘制 A 股涨跌幅度直方图
-            if 'percent' in self.current_df.columns:
-                pcts = self.current_df['percent'].dropna()
-                bins = [-999, -8, -6, -4, -2, 0, 2, 4, 6, 8, 999]
-                counts = pd.cut(pcts, bins=bins).value_counts().sort_index().tolist()
-                
-                # 计算统计数据以更新市场温度与家数
-                up_count = int((pcts > 0).sum())
-                down_count = int((pcts < 0).sum())
-                flat_count = int((pcts == 0).sum())
-                total_count = up_count + down_count + flat_count
-                avg_pct = float(pcts.mean()) if total_count > 0 else 0.0
-                market_temp = (up_count / total_count * 100.0) if total_count > 0 else 0.0
-                
-                stats_dict = {
-                    "up": up_count,
-                    "down": down_count,
-                    "flat": flat_count,
-                    "avg": avg_pct,
-                    "temp": market_temp
-                }
-                
-                if len(counts) == 10:
-                    self.dist_chart.update_data(counts, stats_dict, self.current_df)
-            
+                if not hasattr(self, '_filter_recompute_timer'):
+                    self._filter_recompute_timer = QTimer(self)
+                    self._filter_recompute_timer.setSingleShot(True)
+                    self._filter_recompute_timer.timeout.connect(self._recompute_filtered_codes_set)
+                self._filter_recompute_timer.start(50)
+
+            # ⚡ 涨跌幅度直方图异步计算（pandas 统计移入 QTimer.singleShot，不阻塞主接收链路）
+            _df_hist = self.current_df
+            def _update_dist_chart():
+                try:
+                    if 'percent' not in _df_hist.columns:
+                        return
+                    pcts = _df_hist['percent'].dropna()
+                    bins = [-999, -8, -6, -4, -2, 0, 2, 4, 6, 8, 999]
+                    counts = pd.cut(pcts, bins=bins).value_counts().sort_index().tolist()
+                    up_count = int((pcts > 0).sum())
+                    down_count = int((pcts < 0).sum())
+                    flat_count = int((pcts == 0).sum())
+                    total_count = up_count + down_count + flat_count
+                    avg_pct = float(pcts.mean()) if total_count > 0 else 0.0
+                    market_temp = (up_count / total_count * 100.0) if total_count > 0 else 0.0
+                    stats_dict = {"up": up_count, "down": down_count, "flat": flat_count,
+                                  "avg": avg_pct, "temp": market_temp}
+                    if len(counts) == 10:
+                        self.dist_chart.update_data(counts, stats_dict, _df_hist)
+                except Exception:
+                    pass
+            QTimer.singleShot(20, _update_dist_chart)
+
             # ⚡ 30ms 防抖异步触发 UI 渲染 (极其流畅汇聚高频 IPC 广播数据包)
             self._trigger_realtime_ui_update()
-            
-            # 🚀 首次收到全量行情数据后，自动加载打开退出前持久化的磁吸/监控窗口 (加速龙头跟踪器、各涨跌明细面板等)
+
+            # 🚀 首次收到全量行情数据后，自动加载打开退出前持久化的磁吸/监控窗口
             self._restore_persistent_monitors_on_data_ready()
-            
+
             self.status_bar.showMessage(f"已同步接收到主进程最新实时行情快照 (个股数: {len(self.current_df)})")
             import time
             self._last_recv_t = time.time()
@@ -4619,32 +4647,52 @@ class ATSMainWindow(QMainWindow):
             self.swing_table.update_data_list(self._pending_swing_rows)
 
     def _async_refresh_tier3(self):
-        """Tier 3 (30ms 延迟): 异步加载右侧板块热力图与独立的辅助监控弹窗 (带防抖保护，杜绝主线程卡顿)"""
+        """Tier 3 (30ms 延迟): 异步加载右侧板块热力图与独立的辅助监控弹窗
+        ⚡ 各弹窗错峰 30ms 间隔调度，彻底避免多窗口同时竞争 TDX _conn_lock 造成叠加阻塞
+        """
         if getattr(self, '_is_closing', False):
             return
         if hasattr(self, 'heatmap_widget') and not getattr(self.heatmap_widget, '_has_live_ipc_data', False):
             self.heatmap_widget.load_live_sectors(force=False, current_df=self.current_df)
 
         from PyQt6.sip import isdeleted
-
         sh_pct = getattr(self, '_pending_sh_pct', 0.0)
-        if self.dragon_monitor_dialog and not isdeleted(self.dragon_monitor_dialog) and self.dragon_monitor_dialog.isVisible():
-            try:
-                self.dragon_monitor_dialog.update_data(self.current_df, sh_pct)
-            except Exception as e:
-                print(f"[ATSMainWindow] Error updating dragon monitor: {e}")
+        _df = self.current_df
 
-        if hasattr(self, '_equity_pop_dialog') and self._equity_pop_dialog is not None and not isdeleted(self._equity_pop_dialog) and self._equity_pop_dialog.isVisible():
-            try:
-                self._equity_pop_dialog.update_data(self.current_df)
-            except Exception as e:
-                print(f"[ATSMainWindow] Error updating equity pop dialog: {e}")
+        # ⚡ 龙头加速监控 (错峰 30ms)
+        _dmd = getattr(self, 'dragon_monitor_dialog', None)
+        if _dmd and not isdeleted(_dmd) and _dmd.isVisible():
+            def _upd_dragon():
+                try:
+                    if not isdeleted(_dmd) and _dmd.isVisible():
+                        _dmd.update_data(_df, sh_pct)
+                except Exception as e:
+                    logger.debug(f"[ATSMainWindow] Error updating dragon monitor: {e}")
+            QTimer.singleShot(0, _upd_dragon)
 
-        if hasattr(self, '_sector_detail_dialog') and self._sector_detail_dialog is not None and not isdeleted(self._sector_detail_dialog) and self._sector_detail_dialog.isVisible():
-            try:
-                self._sector_detail_dialog.update_data(self.current_df)
-            except Exception as e:
-                print(f"[ATSMainWindow] Error updating sector detail dialog: {e}")
+        # ⚡ 权益弹窗 (错峰 30ms 后)
+        _epd = getattr(self, '_equity_pop_dialog', None)
+        if _epd is not None and not isdeleted(_epd) and _epd.isVisible():
+            def _upd_equity():
+                try:
+                    if not isdeleted(_epd) and _epd.isVisible():
+                        _epd.update_data(_df)
+                except Exception as e:
+                    logger.debug(f"[ATSMainWindow] Error updating equity pop dialog: {e}")
+            QTimer.singleShot(30, _upd_equity)
+
+        # ⚡ 板块明细弹窗 (错峰 60ms 后)
+        _sdd = getattr(self, '_sector_detail_dialog', None)
+        if _sdd is not None and not isdeleted(_sdd) and _sdd.isVisible():
+            def _upd_sector():
+                try:
+                    if not isdeleted(_sdd) and _sdd.isVisible():
+                        _sdd.update_data(_df)
+                except Exception as e:
+                    logger.debug(f"[ATSMainWindow] Error updating sector detail dialog: {e}")
+            QTimer.singleShot(60, _upd_sector)
+
+
 
 
     def _update_signal_ledger(self, df_all):

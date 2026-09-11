@@ -702,6 +702,55 @@ class TestNewStockModule(unittest.TestCase):
             self.assertTrue("分段" in item_vel.toolTip())
             self.assertTrue("VWAP" in item_vwap.toolTip())
 
+    def test_13_auto_refresh_interval_alignment(self):
+        """验证新股次新股面板自动刷新时间全量对齐 cct.ats_tdx_interval 与动态联动"""
+        from JohnsonUtil import commonTips as cct
+        from ats.ui.new_stock_panel import NewStockPanel
+
+        old_val = getattr(cct, 'ats_tdx_interval', 5.0)
+        try:
+            # 1. 默认 5.0s 场景验证
+            cct.ats_tdx_interval = 5.0
+            panel = NewStockPanel()
+            self.assertEqual(panel.cb_auto_refresh.text(), "自动刷新(5s)")
+            self.assertIn("5s", panel.cb_auto_refresh.toolTip())
+            self.assertEqual(panel.auto_refresh_timer.interval(), 5000)
+
+            # 2. 动态修改为 8.0s
+            cct.ats_tdx_interval = 8.0
+            panel._sync_refresh_interval_ui()
+            self.assertEqual(panel.cb_auto_refresh.text(), "自动刷新(8s)")
+            self.assertIn("8s", panel.cb_auto_refresh.toolTip())
+            self.assertEqual(panel.auto_refresh_timer.interval(), 8000)
+
+            # 3. 动态修改为浮点数 2.5s
+            cct.ats_tdx_interval = 2.5
+            panel._sync_refresh_interval_ui()
+            self.assertEqual(panel.cb_auto_refresh.text(), "自动刷新(2.5s)")
+            self.assertIn("2.5s", panel.cb_auto_refresh.toolTip())
+            self.assertEqual(panel.auto_refresh_timer.interval(), 2500)
+
+            # 4. 验证复选框切换时状态文字提示对齐
+            # 4.1 休市状态下测试
+            panel._is_market_active = lambda: False
+            panel._on_auto_refresh_toggled(True)
+            self.assertIn("2.5s", panel.lbl_status.text())
+
+            # 4.2 实盘活跃状态下测试
+            panel._is_market_active = lambda: True
+            panel._on_auto_refresh_toggled(True)
+            self.assertIn("2.5s", panel.lbl_status.text())
+            self.assertIn("自动刷新已开启", panel.lbl_status.text())
+
+            # 5. 验证 NewStockFetcher TTL 动态跟随
+            fetcher = NewStockFetcher.get_instance()
+            ttl = float(getattr(cct, 'ats_tdx_interval', fetcher._cache_ttl_seconds) or 5.0)
+            self.assertEqual(ttl, 2.5)
+
+        finally:
+            cct.ats_tdx_interval = old_val
+
 
 if __name__ == "__main__":
     unittest.main()
+
