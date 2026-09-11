@@ -2464,7 +2464,6 @@ class ATSMainWindow(QMainWindow):
             top_corner_layout.addWidget(self.swing_table.btn_refresh)
 
         self.top_tabs.setCornerWidget(top_corner_container, Qt.Corner.TopRightCorner)
-        self.top_tabs.currentChanged.connect(self._on_top_tab_changed)
         enable_tab_direct_switch(self.top_tabs)
         self.center_splitter.addWidget(self.top_tabs)
         
@@ -3183,6 +3182,7 @@ class ATSMainWindow(QMainWindow):
             elif index == 1:
                 # 切换到 ⭐ 重点关注 (基础重点)
                 if hasattr(self, 'favorite_panel'):
+                    self._fav_needs_render = False
                     if hasattr(self, '_pending_fav_rows') and self._pending_fav_rows:
                         self.favorite_panel.update_favorite_rows(self._pending_fav_rows)
                     elif hasattr(self.favorite_panel, '_apply_row_visibility'):
@@ -3190,6 +3190,7 @@ class ATSMainWindow(QMainWindow):
             elif index == 2:
                 # 切换到 📉 大级别 MA20d 回调跟踪器
                 if hasattr(self, 'swing_table'):
+                    self._swing_needs_render = False
                     if hasattr(self, '_pending_swing_rows') and self._pending_swing_rows:
                         self.swing_table.update_data_list(self._pending_swing_rows)
                     elif hasattr(self.swing_table, '_apply_favorite_filter'):
@@ -3197,7 +3198,9 @@ class ATSMainWindow(QMainWindow):
             elif index == 3:
                 # 切换到 🆕 新股次新股 (IPO & 阶梯)
                 if hasattr(self, 'new_stock_panel'):
-                    if hasattr(self.new_stock_panel, '_apply_filter'):
+                    if hasattr(self.new_stock_panel, 'ensure_rendered'):
+                        self.new_stock_panel.ensure_rendered()
+                    elif hasattr(self.new_stock_panel, '_apply_filter'):
                         self.new_stock_panel._apply_filter()
         except Exception as e:
             logger.debug(f"[ATSMainWindow] _on_top_tab_changed error: {e}")
@@ -3940,6 +3943,7 @@ class ATSMainWindow(QMainWindow):
 
     def _handle_realtime_data(self, data_pkg):
         import pandas as pd
+        import time
         
         # 1. 识别协议格式与提取 DataFrame 及板块强度数据 (SSOT 架构)
         msg_type = 'UPDATE_DF_ALL'
@@ -4039,15 +4043,19 @@ class ATSMainWindow(QMainWindow):
             except Exception:
                 pass
 
-        # Fast vectorized name cache update — 移入后台线程，主线程不再阻塞
-        _df_for_name = self.current_df
-        def _bg_name_cache():
-            try:
-                self._update_name_cache_from_df(_df_for_name)
-            except Exception:
-                pass
-        import threading as _t_mod
-        _t_mod.Thread(target=_bg_name_cache, daemon=True).start()
+        # Fast vectorized name cache update — 节流 60s 或按需后台更新，杜绝每秒创建 OS 原生线程
+        _now_ts = time.time()
+        _last_name_update = getattr(self, '_last_name_cache_update_time', 0.0)
+        if _now_ts - _last_name_update > 60.0 or len(getattr(self, 'name_cache', {})) < 4000:
+            self._last_name_cache_update_time = _now_ts
+            _df_for_name = self.current_df
+            def _bg_name_cache():
+                try:
+                    self._update_name_cache_from_df(_df_for_name)
+                except Exception:
+                    pass
+            import threading as _t_mod
+            _t_mod.Thread(target=_bg_name_cache, daemon=True).start()
 
         # 🛡️ 实时推送到独立新股阶梯盯盘窗口 (非阻塞, 防重入 50ms 防抖)
         if hasattr(self, 'ladder_monitor_win') and self.ladder_monitor_win is not None:
@@ -4118,7 +4126,6 @@ class ATSMainWindow(QMainWindow):
             self._restore_persistent_monitors_on_data_ready()
 
             self.status_bar.showMessage(f"已同步接收到主进程最新实时行情快照 (个股数: {len(self.current_df)})")
-            import time
             self._last_recv_t = time.time()
             self._last_data_update_time = self._last_recv_t
             if hasattr(self, '_refresh_statusbar_time_display'):
@@ -4633,19 +4640,18 @@ class ATSMainWindow(QMainWindow):
             self._async_tier3_timer.start(30)
 
     def _async_refresh_tier2(self):
-        """Tier 2 (10ms 延迟): 异步渲染未在激活态的副 Tab 看板"""
+        """Tier 2 (10ms 延迟): 纯惰性脏标记维护 (0ms 耗时，绝不在主线程重绘不可见的后台 Tab)"""
         if getattr(self, '_is_closing', False):
             return
         active_tab_idx = self.top_tabs.currentIndex() if hasattr(self, 'top_tabs') else 0
-        sh_pct = getattr(self, '_pending_sh_pct', 0.0)
 
-        # 补齐未在激活态的主面板
-        if active_tab_idx != 0 and hasattr(self, 'capital_dragon_panel'):
-            self.capital_dragon_panel.update_payload(self.current_df, sh_pct)
-        if active_tab_idx != 1 and hasattr(self, 'favorite_panel') and self._pending_fav_rows:
-            self.favorite_panel.update_favorite_rows(self._pending_fav_rows)
-        if active_tab_idx != 2 and hasattr(self, 'swing_table') and self._pending_swing_rows:
-            self.swing_table.update_data_list(self._pending_swing_rows)
+        # 对未在激活态的副 Tab 看板仅记录脏标记与数据指针，彻底释放主线程 CPU，杜绝后台重绘卡顿
+        if active_tab_idx != 1:
+            self._fav_needs_render = True
+        if active_tab_idx != 2:
+            self._swing_needs_render = True
+        if active_tab_idx != 3 and hasattr(self, 'new_stock_panel'):
+            self.new_stock_panel._needs_render = True
 
     def _async_refresh_tier3(self):
         """Tier 3 (30ms 延迟): 异步加载右侧板块热力图与独立的辅助监控弹窗

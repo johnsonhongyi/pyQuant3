@@ -147,6 +147,9 @@ class NewStockPanel(QWidget):
         self.last_sh_pct = 0.0
         self._last_ipc_df: Optional[pd.DataFrame] = None
         self._last_ipc_sh_pct: float = 0.0
+        self._needs_render: bool = False
+        self._pending_ipc_df: Optional[pd.DataFrame] = None
+        self._pending_ipc_sh_pct: float = 0.0
         self.extra_cols = get_new_stock_extra_cols()
 
         # 排序持久化状态 (默认: 第3列 上市日 降序)
@@ -714,7 +717,7 @@ class NewStockPanel(QWidget):
         self.lbl_status.setText(f"❌ 刷新异常: {err_msg[:25]}")
         self.lbl_status.setStyleSheet("color: #f87171; font-size: 8.5pt;")
 
-    def update_from_ipc_df(self, df_ipc: pd.DataFrame, sh_pct: float = 0.0):
+    def update_from_ipc_df(self, df_ipc: pd.DataFrame, sh_pct: float = 0.0, force: bool = False):
         """
         接收来自 ATS 主终端 IPC 数据流的实时全市场 DataFrame:
         严格校验字段类型与有效性，并同步更新 DFF, Rank, DFF2, DFF3, 大盘偏离, 大盘共振 及 ats_col 自定义列
@@ -733,6 +736,16 @@ class NewStockPanel(QWidget):
                     sh_pct = clean_num(sh_row.get("percent", sh_row.get("pct", 0.0)))
                     break
         self.last_sh_pct = sh_pct
+        self._last_ipc_sh_pct = sh_pct
+
+        # ⚡【核心零卡顿守卫 (Visibility Short-Circuit)】
+        # 若当前面板不可见且非手动强制触发，仅暂存最新行情快照，0ms 物理阻断主线程全表运算与重排重绘！
+        if not force and not self.isVisible():
+            self._pending_ipc_df = df_ipc
+            self._pending_ipc_sh_pct = sh_pct
+            self._needs_render = True
+            return
+
         if self.df_data.empty:
             try:
                 fetcher = NewStockFetcher.get_instance()
@@ -745,22 +758,36 @@ class NewStockPanel(QWidget):
         if self.df_data.empty:
             return
 
-        ipc_index_set = set(str(k) for k in df_ipc.index)
-        has_code_col = 'code' in df_ipc.columns
+        # ⚡【极速 O(1) 预索引映射表】：一次性建立全市场 code -> ipc_idx 字典，杜绝循环内 5000 行全表扫描
+        ipc_index_map = {}
+        for k in df_ipc.index:
+            k_str = str(k).strip()
+            digits = "".join(c for c in k_str if c.isdigit()).zfill(6) if any(c.isdigit() for c in k_str) else k_str
+            ipc_index_map[k_str] = k
+            if digits:
+                ipc_index_map[digits] = k
+                ipc_index_map[digits.lstrip('0')] = k
+                ipc_index_map[f"sh{digits}"] = k
+                ipc_index_map[f"sz{digits}"] = k
+                ipc_index_map[f"bj{digits}"] = k
+
+        if 'code' in df_ipc.columns:
+            for ipc_idx, c_val in df_ipc['code'].dropna().items():
+                c_str = str(c_val).strip()
+                digits = "".join(c for c in c_str if c.isdigit()).zfill(6) if any(c.isdigit() for c in c_str) else c_str
+                if digits and digits not in ipc_index_map:
+                    ipc_index_map[digits] = ipc_idx
 
         updated_any = False
         for idx, row in self.df_data.iterrows():
             code = str(row["code"]).zfill(6)
             ipc_row = None
-            for key in (code, code.lstrip('0'), f"sh{code}", f"sz{code}", f"bj{code}"):
-                if key in ipc_index_set:
-                    ipc_row = df_ipc.loc[key]
-                    break
-            
-            if ipc_row is None and has_code_col:
-                matched = df_ipc[df_ipc['code'].astype(str).str.zfill(6) == code]
-                if not matched.empty:
-                    ipc_row = matched.iloc[0]
+            target_idx = ipc_index_map.get(code) or ipc_index_map.get(code.lstrip('0'))
+            if target_idx is not None:
+                try:
+                    ipc_row = df_ipc.loc[target_idx]
+                except KeyError:
+                    ipc_row = None
 
             if ipc_row is not None:
                 if hasattr(ipc_row, "iloc") and len(ipc_row.shape) > 1:
@@ -861,12 +888,29 @@ class NewStockPanel(QWidget):
                 updated_any = True
 
         if updated_any or not self.df_data.empty:
+            if not force and not self.isVisible():
+                self._needs_render = True
+                return
+            self._needs_render = False
             self._render_table()
             if self.selected_code:
                 match = self.df_data[self.df_data["code"] == self.selected_code]
                 if not match.empty:
                     self.selected_row_data = match.iloc[0].to_dict()
                     self._update_preview_card(self.selected_row_data)
+
+    def ensure_rendered(self):
+        """当用户切换到本面板时按需补齐渲染 (0ms 惰性渲染架构)"""
+        if getattr(self, '_needs_render', False):
+            self._needs_render = False
+            pending_df = getattr(self, '_pending_ipc_df', None)
+            pending_sh = getattr(self, '_pending_ipc_sh_pct', 0.0)
+            if pending_df is not None and not pending_df.empty:
+                self.update_from_ipc_df(pending_df, pending_sh, force=True)
+            else:
+                self._render_table()
+        elif self.table.rowCount() == 0 and not self.df_data.empty:
+            self._render_table()
 
     def _apply_filter(self):
         """应用分类筛选和关键词过滤"""
