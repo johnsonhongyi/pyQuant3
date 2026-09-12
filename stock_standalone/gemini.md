@@ -1,3 +1,31 @@
+## 2026-09-12 15:58
+- [x] **【彻底解决下降通道突然折弯走水平线与深V翻转严重Bug】(SSOT 权威对齐通达信 Clean 公式) (`JSONData/tdx_channel_factory.py`, `stock_logic_utils.py`, `tests/test_tdx_channel_visualizer_alignment.py`, `tests/test_channel_robustness_suite.py`)**：
+    - [x] **操盘手痛点与问题根因穿透**：
+        1. **下轨贴底水平线 (如 688813 的 81.117 元与 600084 的 3.240 元)**：此前代码使用了 `lower = np.clip(lo_raw, limit_min, limit_max)`，在轨线跌破最低限制时粗暴截断为固定常数，导致主图底部出现长达数十天的死板水平横线；
+        2. **上轨与中轨深V拔地尖刺翻折 (用户图 5 绿色圆圈特写)**：此前代码包含 `collapse_mask = in_trend & (up_raw <= limit_min)` 逻辑，在上轨跌破最低限制时强行将上轨拔高改写为 `lower + band_w_nominal`，导致原本跌向低位的轨线突然在单个 bar 猛烈拔高几十元，形成极其突兀的深 V 尖刺再水平横拉；中轨因 `(upper + lower) / 2` 同样被带崩；
+        3. **大暴跌主通道被 120 元 fallback 水平通道李代桃僵**：此前在 `is_dominant_downtrend` 或 `_is_channel_valid` 中粗暴检查 `up_arr[-1] <= 0.01`，当 688813（248.94 至 90.13）暴跌通道向右外推跌穿地下后，系统将主通道全盘否定，转而启用过去 30 天局部拟合（fallback 120 元缓升水平通道），导致图例标注斜率 -5.49，而画在图上的却是 120 元水平常数线！
+    - [x] **100% 遵照通达信官方 DRAWNULL 语法彻底重构**：
+        1. **通达信官方真实语法审查**：
+           ```pascal
+           上轨: IF(CH_UP<=CH_MAX AND CH_UP>=CH_MIN, CH_UP, DRAWNULL);
+           中轨: IF(CH_BASE+CH_SLOPE*CURRBARSCOUNT<=CH_MAX AND ...>=CH_MIN, ..., DRAWNULL);
+           下轨: IF(CH_DN<=CH_MAX AND CH_DN>=CH_MIN, CH_DN, DRAWNULL);
+           ```
+           通达信官方从来没有 `np.clip`，从来没有水平线！超出范围直接 `DRAWNULL`（停画 / `np.nan`）！
+        2. **区分【核心基准波段】与【向右外推段】**：
+           - **核心波段内 (`cb >= min(tc2, bc2)`)**：基准通道本体，三轨保持真实倾斜平行直线，绝不停画、绝无 NaN；
+           - **向右外推段 (`cb < min(tc2, bc2)`)**：一旦轨线跌破 `limit_min` 或超出 `limit_max`，优雅自然停画为 `np.nan`；
+           - 配合 PyQtGraph `connect='finite'`，超出限制后折线自然终止截断，绝不出现任何水平线，绝不发生深 V 折弯！
+        3. **彻底拔除一切人工篡改**：
+           - 拔除 `collapse_mask`、拔除 `np.clip`，坚决保留 688813（泰金新能）、600084（*ST尼雅）、301148（嘉戎技术）、600353（旭光电子）权威暴跌大通道；
+        4. **策略层停画自愈回退**：
+           - 在 `stock_logic_utils.py` 中，当外推停画为 NaN 时，自动回退到 `ch_anchor_high_price` 与 `ch_anchor_low_price` 锚定极值生成策略文本，保障“空头占优”与“跌破支撑”文案稳健输出；
+    - [x] **全量自动化回归验证 33/33 PASSED**：
+        1. `test_tdx_channel_visualizer_alignment.py` 13 项全部 PASSED；
+        2. `test_channel_robustness_suite.py` 6 项全部 PASSED；
+        3. `test_trend_channel.py` 与 `test_sbc_multi_period_signals.py` 14 项全部 PASSED；
+        4. 总体 33 项核心测试 100% 全部通过，几何断言无任何水平线段与深 V 向上折弯！
+
 ## 2026-09-12 15:05
 - [x] **【彻底解决可视化中下降通道未与通达信官方主图对齐Bug】(SSOT) (`JSONData/tdx_channel_factory.py`, `JSONData/tdx_data_Day.py`, `stock_logic_utils.py`, `trade_visualizer_qt6.py`, `tests/test_tdx_channel_visualizer_alignment.py`, `tests/test_channel_robustness_suite.py`)**：
     - [x] **深入机理穿透与三大核心根因彻底清除**：

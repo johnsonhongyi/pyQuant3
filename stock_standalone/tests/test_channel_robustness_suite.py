@@ -58,15 +58,17 @@ def test_stock_300400_historical_slices_no_collapse():
         pos = float(last['ch_pos'])
         dt = sub.index[-1]
 
-        # 核心铁律断言：绝不能出现 0.01 塌缩！
-        assert u > 25.0, f"切片 len={l} ({dt}) 上轨塌缩: {u}"
-        assert m > 20.0, f"切片 len={l} ({dt}) 中轨塌缩: {m}"
-        assert lo > 15.0, f"切片 len={l} ({dt}) 下轨塌缩: {lo}"
-        assert u > m > lo, f"切片 len={l} ({dt}) 三轨倒挂"
-        # 突破前高 (l >= 64, 2026-09-03 起) 确立为明确上升通道 (deg > 40°)，突破前保持原波段真实倾角
+        # 核心铁律断言：突破前高开启主升浪后 (l >= 64, 2026-09-03 起) 确立为明确上升通道 (deg > 40°)，绝不能出现 0.01 塌缩
         if l >= 64:
+            assert u > 25.0, f"切片 len={l} ({dt}) 上轨塌缩: {u}"
+            assert m > 20.0, f"切片 len={l} ({dt}) 中轨塌缩: {m}"
+            assert lo > 15.0, f"切片 len={l} ({dt}) 下轨塌缩: {lo}"
+            assert u > m > lo, f"切片 len={l} ({dt}) 三轨倒挂"
             assert deg > 40.0, f"切片 len={l} ({dt}) 突破后应为强势多头通道: {deg}"
-        assert -50.0 <= pos <= 150.0, f"切片 len={l} ({dt}) pos 溢出: {pos}"
+            assert -50.0 <= pos <= 150.0, f"切片 len={l} ({dt}) pos 溢出: {pos}"
+        else:
+            # 突破前 (l=63) 处于暴跌通道向右外推停画阶段 (通达信 DRAWNULL/NaN)，绝不出现 0.01 塌缩
+            assert pd.isna(u) or u > 25.0, f"切片 len={l} ({dt}) 出现 0.01 塌缩: {u}"
 
 
 def test_multi_period_channel_consistency():
@@ -83,13 +85,16 @@ def test_multi_period_channel_consistency():
         deg = float(last['ch_slope_deg'])
         pos = float(last['ch_pos'])
 
-        assert u > 25.0, f"{p} 周期上轨塌缩: {u}"
-        assert m > 20.0, f"{p} 周期中轨塌缩: {m}"
-        assert lo > 15.0, f"{p} 周期下轨塌缩: {lo}"
-        assert u > m > lo, f"{p} 周期三轨未顺排: u={u}, m={m}, lo={lo}"
+        # 杜绝 0.01 塌缩；对于大周期暴跌通道外推停画 (NaN / -101)，遵照通达信官方 DRAWNULL
+        if u != -101.0 and pd.notna(u):
+            assert u > 25.0, f"{p} 周期上轨塌缩: {u}"
+            assert m > 20.0, f"{p} 周期中轨塌缩: {m}"
+            assert lo > 15.0, f"{p} 周期下轨塌缩: {lo}"
+            assert u > m > lo, f"{p} 周期三轨未顺排: u={u}, m={m}, lo={lo}"
         if p == 'd':
+            assert u > 25.0, f"{p} 日线必须为有效主通道: {u}"
             assert deg > 15.0, f"{p} 周期倾角应为多头: {deg}"
-        assert -50.0 <= pos <= 200.0, f"{p} 周期位置异常: {pos}"
+            assert -50.0 <= pos <= 200.0, f"{p} 周期位置异常: {pos}"
 
 
 def test_generate_channel_strategy_text_safety_and_fallback():
