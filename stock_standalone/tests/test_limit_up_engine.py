@@ -179,17 +179,61 @@ class TestLimitUpEngine(unittest.TestCase):
             }
         ]
 
-        self.engine.save_daily_records_atomic(test_date_1, recs_1)
-        self.engine.save_daily_records_atomic(test_date_2, recs_2)
+        try:
+            self.engine.save_daily_records_atomic(test_date_1, recs_1, allow_test_date=True)
+            self.engine.save_daily_records_atomic(test_date_2, recs_2, allow_test_date=True)
 
-        # 聚合测试
-        strong_stocks = self.engine.aggregate_multi_day_strong_stocks(days=2, min_limit_ups=1)
-        self.assertGreaterEqual(len(strong_stocks), 1)
-        target = next((s for s in strong_stocks if s["code"] == "600999"), None)
-        self.assertIsNotNone(target)
-        self.assertEqual(target["zt_count"], 2)
-        self.assertIn("2板", target["n_days_m_boards"])
+            # 聚合测试
+            strong_stocks = self.engine.aggregate_multi_day_strong_stocks(days=2, min_limit_ups=1)
+            self.assertGreaterEqual(len(strong_stocks), 1)
+            target = next((s for s in strong_stocks if s["code"] == "600999"), None)
+            self.assertIsNotNone(target)
+            self.assertEqual(target["zt_count"], 2)
+            self.assertIn("2板", target["n_days_m_boards"])
+        finally:
+            # 彻底清理测试数据，绝不污染生产环境持久化文件
+            with self.engine._cache_lock:
+                self.engine._history_daily_records.pop(test_date_1, None)
+                self.engine._history_daily_records.pop(test_date_2, None)
+            from ats.limit_up_engine import ARCHIVE_PREFIX, LIMIT_UP_RECORDS_FILE, _safe_atomic_write_json_gz
+            for d in [test_date_1, test_date_2]:
+                for ext in [".json.gz", ".json"]:
+                    f_path = f"{ARCHIVE_PREFIX}{d}{ext}"
+                    if os.path.exists(f_path):
+                        try:
+                            os.remove(f_path)
+                        except Exception:
+                            pass
+            # 确保主文件中也绝不残留 2099 测试键
+            with self.engine._cache_lock:
+                pure_data = {k: v for k, v in self.engine._history_daily_records.items() if not k.startswith("2099")}
+                _safe_atomic_write_json_gz(LIMIT_UP_RECORDS_FILE, pure_data)
 
+    def test_dirty_future_date_filtering_and_self_healing(self):
+        """测试 2099 等未来脏日期的合法性拦截、持久化防污染与自愈清洗"""
+        from ats.limit_up_engine import _is_valid_trade_date_str
+
+        # 1. 验证日期格式与未来年份校验
+        self.assertFalse(_is_valid_trade_date_str("2099-12-02"))
+        self.assertFalse(_is_valid_trade_date_str("2099-12-01"))
+        self.assertFalse(_is_valid_trade_date_str("invalid-date"))
+        self.assertTrue(_is_valid_trade_date_str("2026-08-28"))
+
+        # 2. 默认模式下 save_daily_records_atomic 拒绝写入未来测试日期
+        test_future_date = "2099-12-03"
+        self.engine.save_daily_records_atomic(test_future_date, [{"code": "600000", "price": 10.0}])
+        self.assertNotIn(test_future_date, self.engine._history_daily_records, "生产模式下应主动拦截未来脏日期写盘")
+
+        # 3. 验证 get_all_archived_dates 绝不返回 2099 等未来日期
+        with self.engine._cache_lock:
+            # 假设内存中意外混入脏数据
+            self.engine._history_daily_records["2099-12-05"] = [{"code": "000001"}]
+        try:
+            archived = self.engine.get_all_archived_dates()
+            self.assertNotIn("2099-12-05", archived, "get_all_archived_dates 必须自动过滤未来脏日期")
+        finally:
+            with self.engine._cache_lock:
+                self.engine._history_daily_records.pop("2099-12-05", None)
 
 
 if __name__ == "__main__":
