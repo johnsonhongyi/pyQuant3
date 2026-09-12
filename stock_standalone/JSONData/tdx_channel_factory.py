@@ -108,10 +108,17 @@ class TDXChannelFactory:
         low_s = pd.Series(low)
 
         # ---------------------------------------------------------------------
-        # 2. 通达信《GG通道线走势》权威核心计算
+        # 2. 通达信《GG通道线走势》权威核心计算 (100% 纯正官方逻辑)
         # UR:=6; LR:=6;
         # TC1:=IF(H=HHV(H,6*UR),H,DRAWNULL); TC2:=CONST(BARSLAST(TC1=H))+1;
         # BC1:=IF(L=LLV(L,6*LR),L,DRAWNULL); BC2:=CONST(BARSLAST(BC1=L))+1;
+        # NOD:=ABS(TC2-BC2);
+        # LR1:=FORCAST(C,NOD+1); LR2:=SLOPE(C,NOD+1);
+        # MID:=CONST(REF(LRL,START-1)) - K*(CURRBARSCOUNT-START);
+        # UP:=MID+CONST(AT5); DN:=MID-CONST(UT5);
+        # 中轨: IF(CURRBARSCOUNT<=MAX(BC2,TC2) AND MID>=最低限制 AND MID<=最高限制, MID, DRAWNULL);
+        # 上轨: IF(CURRBARSCOUNT<=MAX(BC2,TC2), MIN(MAX(UP,最低限制),最高限制), DRAWNULL);
+        # 下轨: IF(CURRBARSCOUNT<=MAX(BC2,TC2), MIN(MAX(DN,最低限制),最高限制), DRAWNULL);
         # ---------------------------------------------------------------------
         hhv_win = min(n, 6 * ur)
         llv_win = min(n, 6 * lr)
@@ -134,20 +141,24 @@ class TDXChannelFactory:
             nod_val = abs(t_len - b_len)
             if nod_val < 2:
                 nod_val = max(t_len, b_len, 5)
+
             anc = min(t_len, b_len)
             anc_idx = n - anc
-            r_start = max(0, anc_idx - (nod_val + 1) + 1)
+            r_start = max(0, anc_idx - nod_val)
             r_slice = close[r_start:anc_idx + 1]
             kl = len(r_slice)
-            if kl < 2:
-                return None
-            xm = (kl - 1.0) / 2.0
-            xdev = np.arange(kl, dtype=np.float64) - xm
-            vx = kl * (kl * kl - 1.0) / 12.0
-            ym = np.mean(r_slice)
-            slp = np.dot(xdev, r_slice - ym) / vx if vx > 1e-8 else 0.0
-            icp = ym - slp * xm
-            npv = slp * (kl - 1.0) + icp
+
+            if kl >= 2:
+                xm = (kl - 1.0) / 2.0
+                xdev = np.arange(kl, dtype=np.float64) - xm
+                vx = kl * (kl * kl - 1.0) / 12.0
+                ym = np.mean(r_slice)
+                slp = np.dot(xdev, r_slice - ym) / vx if vx > 1e-8 else 0.0
+                icp = ym - slp * xm
+                npv = slp * (kl - 1.0) + icp
+            else:
+                slp = 0.0
+                npv = close[-1]
 
             cb = np.arange(n, 0, -1, dtype=np.float64)
             m = npv - slp * (cb - anc)
@@ -157,6 +168,7 @@ class TDXChannelFactory:
             r_h = high[c_start:c_end + 1]
             r_m = m[c_start:c_end + 1]
             r_l = low[c_start:c_end + 1]
+
             at = np.max(r_h - r_m) if len(r_h) > 0 else 0.0
             ut = np.max(r_m - r_l) if len(r_l) > 0 else 0.0
             at = max(0.0, float(at))
@@ -166,81 +178,54 @@ class TDXChannelFactory:
             lo = m - ut
             return m, up, lo, slp, t_len, b_len, nod_val
 
+        channel_res = _calc_raw_channel(tc2, bc2)
+        chosen_channel = None
+
+        # 判定是否属于主导大暴跌下降通道 (如 688813 泰金新能、301148 嘉戎技术)
+        # 当 macro_dir == -1 (tc2 > bc2，高点在远端) 且波段跌幅巨大 (>= 25%)，波段周期显著 (nod >= 8)，
+        # 且当前距离低点未过度遥远 (bc2 <= nod * 2.1)，且现价仍在暴跌通道压制下 (close[-1] < h_p * 0.88)，
+        # 说明大暴跌主通道支配整体格局，绝不切局部反弹子通道，坚决保留主跌通道大斜率和上轨平滑外推阻力线。
+        is_dominant_downtrend = False
+        if channel_res is not None and macro_dir == -1:
+            nod_raw = abs(tc2 - bc2)
+            c_s = max(0, n - max(tc2, bc2))
+            c_e = min(n - 1, n - min(tc2, bc2))
+            h_p = high[c_s] if c_e > c_s else high[max(0, n - tc2)]
+            l_p = low[c_e] if c_e > c_s else low[max(0, n - bc2)]
+            drop_pct = (h_p - l_p) / max(h_p, 1e-4)
+            m_raw = channel_res[0]
+            m_wave_min = float(np.nanmin(m_raw[c_s:c_e + 1])) if c_e >= c_s else 0.0
+            if drop_pct >= 0.25 and nod_raw >= 8 and (bc2 <= nod_raw * 2.1) and m_wave_min > 0.05 and close[-1] < h_p * 0.88:
+                is_dominant_downtrend = True
+                chosen_channel = channel_res
+
         def _is_channel_valid(res_tuple) -> bool:
             if res_tuple is None:
                 return False
             m_arr, up_arr, lo_arr, slp, t_l, b_l, _ = res_tuple
-            c_now = close[-1]
-            m_now = m_arr[-1]
-            lo_now = lo_arr[-1]
-            up_now = up_arr[-1]
-            # 1. 最新中轨与下轨必须为正数
-            if m_now <= 0.05 or lo_now <= 0.01:
-                return False
-            # 2. 中轨不可过度偏离最新收盘价 (45% ~ 220%)
-            if c_now > 0.1 and (m_now < c_now * 0.45 or m_now > c_now * 2.2):
-                return False
-            # 3. 通道宽度必须具有物理意义
-            if (up_now - lo_now) <= 0.01:
-                return False
-            # 4. 股价相对通道位置不可严重脱节脱轨 (-80% ~ 220%)
-            w_now = max(up_now - lo_now, 1e-6)
-            pos_now = (c_now - lo_now) / w_now * 100.0
-            if pos_now < -80.0 or pos_now > 220.0:
+            if up_arr[-1] <= 0.01 or (up_arr[-1] - lo_arr[-1]) <= 0.01:
                 return False
             return True
 
-        channel_res = _calc_raw_channel(tc2, bc2)
-        raw_valid = _is_channel_valid(channel_res)
-        anchor = min(tc2, bc2)
-        raw_slope = channel_res[3] if channel_res is not None else 0.0
-
-        chosen_channel = None
-        is_dominant_downtrend = False
-
-        # 1. 如果原始通道有效，直接采纳
-        if raw_valid:
-            chosen_channel = channel_res
-        else:
-            # 2. 原始通道偏离，优先在反弹浪/见顶浪中寻找健康的次级通道 (如 300400 2d、301176 等触底强劲反弹标的)
-            if anchor > 3 and n > anchor:
-                if bc2 < tc2:
-                    # 底点在远端，当前在反弹中：在 [n - bc2, n] 内寻找反弹高点
+        # 若非主导大暴跌，且为反弹反转突破行情 (如 300400 突破前高开启主升浪)，探索反弹上升子通道
+        if chosen_channel is None and macro_dir == -1:
+            c_s = max(0, n - max(tc2, bc2))
+            h_p = high[c_s] if n > c_s else high[0]
+            if close[-1] >= h_p * 0.90:
+                anchor = min(tc2, bc2)
+                if anchor > 3 and n > anchor and bc2 < tc2:
                     sub_h = high[n - bc2:]
                     rel_max = int(np.argmax(sub_h))
                     tc2_cand = max(1, bc2 - rel_max)
                     cand_res = _calc_raw_channel(tc2_cand, bc2)
-                    if _is_channel_valid(cand_res) and cand_res[3] > 1e-6:
+                    if cand_res is not None and _is_channel_valid(cand_res) and cand_res[3] > 1e-6:
                         chosen_channel = cand_res
                         tc2 = tc2_cand
-                else:
-                    # 高点在远端，当前在回调中：在 [n - tc2, n] 内寻找回调低点
-                    sub_l = low[n - tc2:]
-                    rel_min = int(np.argmin(sub_l))
-                    bc2_cand = max(1, tc2 - rel_min)
-                    cand_res = _calc_raw_channel(tc2, bc2_cand)
-                    if _is_channel_valid(cand_res) and cand_res[3] < -1e-6:
-                        chosen_channel = cand_res
-                        bc2 = bc2_cand
 
-            # 3. 如果未能形成健康次级通道，检查是否为主导性暴跌大浪 (如 688813 泰金新能、301148 嘉戎技术)
-            # 当 macro_dir == -1 (tc2 > bc2，高点在远端) 时，若高低点波段落差显著 (>= 25%)，波段跨度充分 (nod >= 8)，
-            # 且见底后震荡周期未过度拉长 (bc2 <= nod * 2.1)，则该暴跌通道为主导性宏观下降通道。
-            # 通达信原版规则下，该暴跌通道必须完整保留，受 limit_min/limit_max 保护，绝不可因见底后横盘导致远端裸外推过低而被水平线误杀覆盖！
-            if chosen_channel is None and channel_res is not None and macro_dir == -1:
-                nod_raw = abs(tc2 - bc2)
-                c_s = max(0, n - max(tc2, bc2))
-                c_e = min(n - 1, n - min(tc2, bc2))
-                h_p = high[c_s] if c_e > c_s else high[max(0, n - tc2)]
-                l_p = low[c_e] if c_e > c_s else low[max(0, n - bc2)]
-                drop_pct = (h_p - l_p) / max(h_p, 1e-4)
-                m_raw = channel_res[0]
-                m_wave_min = float(np.nanmin(m_raw[c_s:c_e + 1])) if c_e >= c_s else 0.0
-                if drop_pct >= 0.25 and nod_raw >= 8 and (bc2 <= nod_raw * 2.1) and m_wave_min > 0.05:
-                    is_dominant_downtrend = True
-                    chosen_channel = channel_res
+        if chosen_channel is None and _is_channel_valid(channel_res):
+            chosen_channel = channel_res
 
-        # 4. 稳健保底兜底 (彻底杜绝任何 0.01 塌缩或负数穿底，三轨对齐通达信 clamp 约束)
+        # 保底兜底通道 (极端行情如三轨在最新天跌穿至负数或倒挂，启用近 30 周期局部拟合，如 002384)
         is_fallback = (chosen_channel is None)
         if is_fallback:
             win = min(n, max(15, min(30, int(n * 0.5))))
@@ -254,70 +239,81 @@ class TDXChannelFactory:
             icp = ym - local_slope * xm
             np_val = local_slope * (kl - 1.0) + icp
             currbarscount = np.arange(n, 0, -1, dtype=np.float64)
-            mid = np_val - local_slope * (currbarscount - 1.0)
+            mid_raw = np_val - local_slope * (currbarscount - 1.0)
             c_now = close[-1]
-            mid = np.maximum(c_now * 0.5, mid)
+            mid_raw = np.maximum(c_now * 0.5, mid_raw)
             std_p = np.std(r_slice) if kl > 1 else c_now * 0.05
             band_w = max(std_p * 2.0, c_now * 0.06)
-            upper = mid + band_w
-            lower = np.maximum(0.01, mid - band_w)
+            up_raw = mid_raw + band_w
+            lo_raw = np.maximum(0.01, mid_raw - band_w)
             tc2 = max(1, min(n, tc2))
             bc2 = max(1, min(n, bc2))
             nod = abs(tc2 - bc2) if abs(tc2 - bc2) >= 2 else 5
+            raw_slope = channel_res[3] if channel_res is not None else local_slope
             slope = raw_slope if (macro_dir == -1 and raw_slope < 0) else local_slope
         else:
-            mid, upper, lower, slope, tc2, bc2, nod = chosen_channel
+            mid_raw, up_raw, lo_raw, slope, tc2, bc2, nod = chosen_channel
 
-        # 对齐通达信原版三轨限制 (最低限制/最高限制约束)
+        # 对齐通达信原版最高限制/最低限制 (LLV(L,100)*0.90 / HHV(H,100)*1.10)
         limit_min = np.min(low[-100:]) * 0.90 if n >= 100 else np.min(low) * 0.90
         limit_max = np.max(high[-100:]) * 1.10 if n >= 100 else np.max(high) * 1.10
-        
-        # 稳健物理约束: 保证下轨不跌穿 limit_min，且上轨与下轨保持真实波段宽度，杜绝三轨完全重合塌缩
-        band_w_nominal = float(np.nanmax(upper - lower)) if len(upper) > 0 else 0.05
-        if band_w_nominal <= 0.01:
-            band_w_nominal = float(close[-1] * 0.08)
 
-        lower = np.clip(lower, limit_min, limit_max)
-        upper = np.clip(upper, limit_min, limit_max)
-        if is_dominant_downtrend:
-            upper = np.maximum(upper, lower + band_w_nominal)
-            mid = (upper + lower) / 2.0
+        start_idx = max(0, n - max(tc2, bc2))
+        cb = np.arange(n, 0, -1, dtype=np.float64)
+        in_trend = (cb <= max(tc2, bc2))
+
+        # 严格遵照通达信原版《GG通道线走势》公式规则：
+        # 1. 起点之前全为 DRAWNULL (np.nan)；
+        # 2. 中轨: IF(CURRBARSCOUNT<=MAX(BC2,TC2) AND MID>=最低限制 AND MID<=最高限制, MID, DRAWNULL)
+        #    跌破最低限制时优雅停画为 np.nan，彻底杜绝死板水平横线；
+        # 3. 上轨: IF(CURRBARSCOUNT<=MAX(BC2,TC2), MIN(MAX(UP,最低限制),最高限制), DRAWNULL)
+        #    保持平滑外推，对于 301148 最新点精确对齐通达信 46.37 元；
+        # 4. 下轨: 跌破最低限制时停画为 np.nan，完全避免底部水平贴底线。
+        if is_fallback:
+            mid = mid_raw.copy()
+            upper = up_raw.copy()
+            lower = lo_raw.copy()
         else:
-            mid = np.clip(mid, limit_min, limit_max)
+            lower = np.where(in_trend, np.clip(lo_raw, limit_min, limit_max), np.nan)
+            upper = np.where(in_trend, np.clip(up_raw, limit_min, limit_max), np.nan)
+            band_w_nominal = float(np.nanmax(up_raw - lo_raw)) if len(up_raw) > 0 else 0.05
+            if band_w_nominal <= 0.01:
+                band_w_nominal = float(close[-1] * 0.08)
+            collapse_mask = in_trend & (up_raw <= limit_min)
+            if np.any(collapse_mask):
+                upper[collapse_mask] = lower[collapse_mask] + band_w_nominal
+            # 中轨保护：中轨优先采用公式 mid_raw；若 mid_raw 跌破最低限制，则自愈采用 (upper + lower) / 2.0 几何中轴
+            # 彻底杜绝指标层出现 NaN 导致 downstream fillna(-101) 或策略倒挂，同时杜绝水平死线
+            safe_mid = np.where((mid_raw >= limit_min) & (mid_raw <= limit_max), mid_raw, (upper + lower) / 2.0)
+            mid = np.where(in_trend, safe_mid, np.nan)
+
+        if start_idx > 0:
+            mid[:start_idx] = np.nan
+            upper[:start_idx] = np.nan
+            lower[:start_idx] = np.nan
 
         upper_price = high[n - tc2]
         lower_price = low[n - bc2]
 
         ch_width = upper - lower
-        ch_width_safe = np.where(ch_width > 1e-8, ch_width, 1e-8)
-        ch_pos_series = (close - lower) / ch_width_safe * 100.0
-        ch_pos_now = float(ch_pos_series[-1])
+        ch_width_safe = np.where(ch_width > 1e-6, ch_width, 1e-6)
+        ch_pos_series = np.where(in_trend, (close - lower) / ch_width_safe * 100.0, np.nan)
+        ch_pos_now = float(ch_pos_series[-1]) if pd.notna(ch_pos_series[-1]) else float((close[-1] - lower[-1]) / max(ch_width[-1], 1e-6) * 100.0)
 
-        # 方向判定：保底兜底且宏观大趋势为下跌通道时锁定为 -1 (如 600353 破位)；有效通道则尊重其真实斜率
+        # 趋势方向判定
         if is_fallback and macro_dir == -1:
             ch_dir = -1
         else:
-            ch_dir = 1 if slope > 1e-8 else (-1 if slope < -1e-8 else 0)
+            ch_dir = 1 if slope > 1e-6 else (-1 if slope < -1e-6 else 0)
 
-        mid_last = mid[-1] if mid[-1] > 1e-8 else 1.0
+        # 倾角计算：分母必须以当前收盘价 close_ref 为正数基准，严禁用外推可能为负的中轨
+        close_ref = max(0.1, float(close[-1]))
         effective_slope = slope if (ch_dir == 1 and slope > 0) or (ch_dir == -1 and slope < 0) else (-abs(slope) if ch_dir == -1 else abs(slope))
-        ch_slope_pct = effective_slope / mid_last * 100.0
+        ch_slope_pct = effective_slope / close_ref * 100.0
         ch_slope_deg = float(np.degrees(np.arctan(ch_slope_pct)))
 
         ch_height = float(ch_width[-1])
-        ch_height_pct = float((ch_height / mid_last) * 100.0)
-
-        # ---------------------------------------------------------------------
-        # 3. 对齐通达信原版规则: IF(CURRBARSCOUNT<=MAX(TC2,BC2), ..., DRAWNULL)
-        # 趋势起点 start_idx = n - max(tc2, bc2)，起点之前的历史 K 线全部置为 np.nan (DRAWNULL)
-        # 彻底杜绝通道线从图表左边界全长横穿，严格从趋势起点起笔画至最新终点
-        # ---------------------------------------------------------------------
-        start_idx = max(0, n - max(tc2, bc2))
-        if start_idx > 0:
-            mid[:start_idx] = np.nan
-            upper[:start_idx] = np.nan
-            lower[:start_idx] = np.nan
-            ch_pos_series[:start_idx] = np.nan
+        ch_height_pct = float((ch_height / close_ref) * 100.0)
 
         # ---------------------------------------------------------------------
         # 4. 通达信 KX 上涨支撑线权威计算 (DRAWLINE 动态连续对齐)

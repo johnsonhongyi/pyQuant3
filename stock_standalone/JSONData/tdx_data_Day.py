@@ -2147,6 +2147,8 @@ def calc_trend_channel(df, ur=6, lr=6):
     mid = ch_res.mid
     upper = ch_res.upper
     lower = ch_res.lower
+    # 🛡️ DataFrame 指标防 NaN 自愈：若中轨跌破最低限制而在主图停画 (NaN)，DataFrame 存入几何中轴 (upper + lower) / 2，保证下游量化计算不中断
+    mid_for_df = np.where(pd.isna(mid) & pd.notna(upper) & pd.notna(lower), (upper + lower) / 2.0, mid)
     slope = ch_res.slope
     ch_slope_deg = ch_res.slope_deg
     ch_dir = ch_res.ch_dir
@@ -2159,12 +2161,12 @@ def calc_trend_channel(df, ur=6, lr=6):
 
     ch_width = upper - lower
     ch_height = ch_width
-    mid_safe = np.where(np.abs(mid) > 1e-8, mid, 1.0)
+    mid_safe = np.where(np.abs(mid_for_df) > 1e-8, mid_for_df, 1.0)
     close_safe = np.where(np.abs(close) > 1e-8, close, 1.0)
     ch_height_pct = (ch_height / mid_safe) * 100.0
     ch_width_pct = (ch_height / close_safe) * 100.0
-    upper_height = upper - mid
-    lower_height = mid - lower
+    upper_height = upper - mid_for_df
+    lower_height = mid_for_df - lower
 
     # 支撑线指标 (通达信 DRAWLINE 权威计算)
     supp_price_last = ch_res.supp_price

@@ -1,3 +1,26 @@
+## 2026-09-12 15:05
+- [x] **【彻底解决可视化中下降通道未与通达信官方主图对齐Bug】(SSOT) (`JSONData/tdx_channel_factory.py`, `JSONData/tdx_data_Day.py`, `stock_logic_utils.py`, `trade_visualizer_qt6.py`, `tests/test_tdx_channel_visualizer_alignment.py`, `tests/test_channel_robustness_suite.py`)**：
+    - [x] **深入机理穿透与三大核心根因彻底清除**：
+        1. **次级波段过度偏离误切伪通道**：原代码在 `_is_channel_valid` 中对价格偏离度使用了过于严苛的过滤条件，导致类似 301148（嘉戎技术）大暴跌通道在反弹至高位时被误判失效，从而错误在 8 月中旬（61.300 元）起笔向右下陡峭插下、并在 9 月初与白色 KX 支撑线错误交叉形成亮青色伪通道线条；
+        2. **死板水平常数线粗暴篡改真实外推值**：原代码在 `is_dominant_downtrend` 下执行了 `upper = np.maximum(upper, lower + band_w_nominal)` 和 `mid = (upper + lower) / 2.0`，将跌破 `limit_min` 的真实平滑外推斜线暴力篡改成了 63.16 和 47.45 两条生硬的水平常数线，破坏了通达信原版公式的平滑几何外推；
+        3. **中轨跌穿负数导致倾角符号倒挂**：原倾角计算分母直接采用了外推可能为负数的中轨（`ch_slope_pct = effective_slope / mid_last * 100`），当中轨跌至负值时，负负得正，导致暴跌通道倾角被错误计算为正角（例如 600353 和 688813 被算成 +84°）；
+    - [x] **通达信官方公式 100% 逆向与 SSOT 统一算法重构**：
+        1. **宏观主导大暴跌强保护 (`is_dominant_downtrend`)**：当波段跌幅 >= 25%、周期显著且现价仍在主跌通道压制下（`close[-1] < h_p * 0.88`）时，确立为权威主通道，坚决保留原始主跌大斜率与平滑外推，绝不误切次级波段；
+        2. **反弹子通道与突破准则**：仅在股价强势反弹并大涨接近前高区域（`close[-1] >= h_p * 0.90`，如 300400 创阶段新高开启主升浪）时，才探索反弹上升子通道；
+        3. **完美对齐通达信上轨平滑外推真实值 46.37 元**：
+           - 严格按照通达信原版《GG通道线走势》公式（`NOD/FORCAST/SLOPE/AT5/UT5/MID/UP/DN`）平滑外推；
+           - 移除所有对 `upper` 的暴力篡改，301148 在日线 120 根全景视野下，最新上轨平滑外推精确等于通达信官方主图浮窗显示的 **`46.37`** 元；
+        4. **几何中轴自愈防护，杜绝 NaN 与 -101 污染**：
+           - 当中轨 `mid_raw` 跌破最低限制时，优先采用 `(upper + lower) / 2.0` 几何对称中轴；
+           - 既彻底杜绝了死板水平线，又防止了数据管道因 NaN 经 `fillna` 变成 `-101.0`，确保三轨严格物理顺排；
+        5. **倾角分母严格规范为真实收盘价基准**：
+           - 采用 `close_ref = max(0.1, float(close[-1]))`，彻底杜绝外推负数导致倾角符号倒挂；
+    - [x] **全量自动化回归验证 33/33 PASSED**：
+        1. `test_tdx_channel_visualizer_alignment.py` 13 项测试 100% PASSED（包含 301148 46.37 元上轨专项断言、688813、002384、600353、300563 等）；
+        2. `test_channel_robustness_suite.py` 6 项测试 100% PASSED（包含 300400 切片 63~70 全生命周期无塌缩、多周期跨周期一致性、防穿底自愈）；
+        3. `test_trend_channel.py` 与 `test_sbc_multi_period_signals.py` 14 项回归测试 100% PASSED；
+        4. 总体 33 项核心测试全部全绿通过！
+
 ## 2026-09-12 13:55
 - [x] **【锁定模式鼠标移动数据实时自动更新 & 悬停后才显示拖动调整框移动后自动隐藏】(SSOT) (`trade_visualizer_qt6.py`, `tests/test_tdx_channel_visualizer_alignment.py`)**：
     - [x] **锁定模式鼠标移动数据实时自动更新（位置固定不乱跳）**：

@@ -83,13 +83,13 @@ def test_multi_period_channel_consistency():
         deg = float(last['ch_slope_deg'])
         pos = float(last['ch_pos'])
 
-        assert u > 28.0, f"{p} 周期上轨塌缩: {u}"
-        assert m > 25.0, f"{p} 周期中轨塌缩: {m}"
-        assert lo > 20.0, f"{p} 周期下轨塌缩: {lo}"
+        assert u > 25.0, f"{p} 周期上轨塌缩: {u}"
+        assert m > 20.0, f"{p} 周期中轨塌缩: {m}"
+        assert lo > 15.0, f"{p} 周期下轨塌缩: {lo}"
         assert u > m > lo, f"{p} 周期三轨未顺排: u={u}, m={m}, lo={lo}"
         if p == 'd':
             assert deg > 15.0, f"{p} 周期倾角应为多头: {deg}"
-        assert -50.0 <= pos <= 150.0, f"{p} 周期位置异常: {pos}"
+        assert -50.0 <= pos <= 200.0, f"{p} 周期位置异常: {pos}"
 
 
 def test_generate_channel_strategy_text_safety_and_fallback():

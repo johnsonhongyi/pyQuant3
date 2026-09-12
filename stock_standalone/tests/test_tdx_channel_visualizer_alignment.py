@@ -144,10 +144,11 @@ def test_channel_and_support_start_point_alignment():
         assert np.isnan(res.upper[:start_idx]).all(), f"{code} 起点之前 upper 不全为 NaN"
         assert np.isnan(res.lower[:start_idx]).all(), f"{code} 起点之前 lower 不全为 NaN"
 
-        # 3. 验证从起点到最新交易日，通道三轨严格为有效实数
-        assert np.isfinite(res.mid[start_idx:]).all(), f"{code} 起点之后 mid 包含非实数"
-        assert np.isfinite(res.upper[start_idx:]).all(), f"{code} 起点之后 upper 包含非实数"
-        assert np.isfinite(res.lower[start_idx:]).all(), f"{code} 起点之后 lower 包含非实数"
+        # 3. 验证从起点到核心波段终点，通道三轨严格为有效实数；波段之后跌破最低限制自然停画 (通达信 DRAWNULL)
+        core_end = n - min(res.tc2, res.bc2) + 1
+        assert np.isfinite(res.mid[start_idx:core_end]).all(), f"{code} 波段内 mid 包含非实数"
+        assert np.isfinite(res.upper[start_idx:core_end]).all(), f"{code} 波段内 upper 包含非实数"
+        assert np.isfinite(res.lower[start_idx:core_end]).all(), f"{code} 波段内 lower 包含非实数"
 
         # 4. 验证最新支撑线严格从有效起点起笔，并延伸至最新交易日 (n-1)
         assert len(res.lines_for_visualizer) > 0, f"{code} 应有有效支撑线"
@@ -373,6 +374,17 @@ def test_301148_jiarong_descending_channel_alignment():
     np.testing.assert_allclose(vis_mid, res.mid, rtol=1e-5, atol=1e-4)
     np.testing.assert_allclose(vis_up, res.upper, rtol=1e-5, atol=1e-4)
     np.testing.assert_allclose(vis_dn, res.lower, rtol=1e-5, atol=1e-4)
+
+    # 6. ⭐ 核心对齐验证：通达信官方主图日线 120 根 K 棒全景视野下，最新上轨精确等于 46.37 元
+    df120 = get_tdx_Exp_day_to_df('301148', dl=120)
+    assert df120 is not None and len(df120) == 120
+    res120 = TDXChannelFactory.calculate(df120)
+    assert res120.ch_dir == -1, "120 根全景视野下必须为下跌通道"
+    assert res120.tc2 == 77, f"120 根全景视野下最高点 87.000 周期 tc2 应为 77: {res120.tc2}"
+    assert res120.bc2 == 39, f"120 根全景视野下最低点 35.260 周期 bc2 应为 39: {res120.bc2}"
+    assert float(res120.upper[-1]) == pytest.approx(46.37, abs=0.05), f"301148 全景最新上轨必须精准对齐通达信 46.37 元: {res120.upper[-1]}"
+    assert float(res120.mid[-1]) == pytest.approx(39.05, abs=0.1), f"中轨采用几何中轴自愈顺排，杜绝 NaN 与 -101: {res120.mid[-1]}"
+    assert res120.upper[-1] > res120.mid[-1] > res120.lower[-1], "三轨必须保持严格物理顺排"
 
 
 def test_date_axis_no_duplicate_out_of_bounds_ticks():
