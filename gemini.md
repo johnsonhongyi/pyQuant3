@@ -1,3 +1,28 @@
+## 2026-09-12 12:42
+- [x] **【通达信权威法则：当前显示K线数据位置保持最右侧，下放大左侧、上缩小左侧始终保持最右侧数据不变】(SSOT) (`stock_standalone/trade_visualizer_qt6.py`, `stock_standalone/tests/test_tdx_channel_visualizer_alignment.py`)**：
+    - [x] **上下键始终保持最右侧最新数据不变（彻底移除光标中心缩放对最新K线的篡改偏移）**：
+        1. **深入机理穿透**：原代码在用户鼠标悬停时（`crosshair_active == True`），按向上键直接以光标所在历史位置为中心缩放，导致 `new_max` 大幅向左收缩，视口最右侧最新交易日被瞬间切除丢出屏幕；
+        2. **通达信权威铁律绝对落地**：通达信上下键缩放是全局缩放，与鼠标光标当前悬停位置彻底解耦。无论是向下键（放大左侧/展示更早历史数据）还是向上键（缩小左侧/向右收拢看近期微观结构），视口右边界 `new_max = float(total_bars + RIGHT_MARGIN)` 永恒锁定在最右侧，最新 K 线柱及 2 根呼吸边距位置始终 100% 恒定不变，仅动态计算 `new_min = new_max - new_span`；
+        3. **光标越界优雅隐藏保护**：向上键向右收拢导致历史光标超出视口左边缘时，自动调用 `_hide_crosshair` 优雅隐藏；并在 `_hide_crosshair` 中强化 `try...except`，彻底防止未初始化 QObject 引发运行时异常；
+    - [x] **全量自动化测试回归 31/31 PASSED**：
+        1. 完善 `test_tdx_channel_visualizer_alignment.py` 中 `test_zoom_kline_right_anchored_expansion_and_auto_y_fit`，在光标悬停激活状态下连续触发向上键与向下键，严格断言右边界恒定为 `expected_x_max`；
+        2. 全量 4 大套件 31 项测试全部 100% PASSED！
+
+## 2026-09-12 12:35
+- [x] **【通达信上下键缩放模式右侧锚定向左展开与全屏比例权威对齐】(SSOT) (`stock_standalone/trade_visualizer_qt6.py`, `stock_standalone/tests/test_tdx_channel_visualizer_alignment.py`)**：
+    - [x] **上下键缩放模式彻底对齐通达信（最新 K 线右侧固定锚定，向左展开/收缩历史波段）**：
+        1. **重写 `zoom_kline` 彻底根除“中心等比缩放推空右侧”致命 Bug**：原代码直接调用 `vb.scaleBy(center=(center_x, 0))` 以视口正中缩放，导致按向下键（缩小）时右侧最新 K 线被硬生生推到了屏幕中央偏左，右侧露出了近 40% 的未来空白虚无区域。重构为通达信权威看盘模型：以最新交易日为绝对锚点，视口右边界 `x_max = total_bars + RIGHT_MARGIN`（预留 2 根呼吸边距）固定锁死；按向下键（缩小）时右侧纹丝不动，左边界 `x_min` 持续向左延伸展示更早的历史数据，K 线柱自动变细；按向上键（放大）时左边界向右收缩，K 线柱自动变粗看清近期波段；
+        2. **动态 Y 轴包络自适应 (`_auto_fit_visible_y_range`)**：按下键向左展开更多历史走势时，自动提取当前可见切片内的 `high.max()` 与 `low.min()`，平滑更新 `yRange`（留出 6% 边距），使新展露的历史最高点（如 87.00）与波段最低点自动包络于视口中；
+        3. **光标探查模式自适应**：当用户移动十字光标至特定历史 K 线时，自动切换为以当前十字光标为中心缩放，且严格施加右边界截断保护，绝不越界往右留空；
+    - [x] **根除 X 轴越界连续重复打印 `09-11` 日期重影 Bug**：
+        1. **重构 `DateAxis.tickStrings`**：彻底移除 `elif idx >= n: idx = n - 1` 粗暴逻辑，修正为：当索引越界（`idx < 0` 或 `idx >= n`）时直接输出空字符串 `""`，仅在有效数据范围内格式化日期标签，右侧空白区域 100% 纯净无重复重影；
+    - [x] **全屏主副图垂直比例与键盘事件全局响应优化**：
+        1. **`eventFilter` 全局按键响应**：移除必须在 `kline_plot` 内部悬停鼠标的苛刻限制，只要焦点未在列表编辑状态，任何位置按上下键微秒级响应 K 线缩放；
+        2. **`right_splitter` 伸缩因子与成交量高度优化**：显式设置 `right_splitter.setStretchFactor(0, 4)` 与 `(1, 1)`，全屏最大化时 K 线图占据约 80% 黄金视野；适度放宽 `volume_plot` 高度至 70~120px，主副图比例挺拔协调；
+    - [x] **自动化测试回归全绿通过 (31/31 PASSED)**：
+        1. 完善 `test_tdx_channel_visualizer_alignment.py`：新增 `test_date_axis_no_duplicate_out_of_bounds_ticks` 与 `test_zoom_kline_right_anchored_expansion_and_auto_y_fit` 专项测试；
+        2. 全量 4 大套件 31 项测试全部 100% PASSED！
+
 ## 2026-09-12 11:45
 - [x] **【通达信暴跌股票下降通道自适应权威对齐与全管道统一(SSOT)】(`stock_standalone/JSONData/tdx_channel_factory.py`, `stock_standalone/tests/test_tdx_channel_visualizer_alignment.py`, `stock_standalone/tests/test_channel_robustness_suite.py`, `stock_standalone/tests/test_momentum_rotation_engine.py`)**：
     - [x] **大暴跌股票（泰金新能 688813、嘉戎技术 301148）下降通道丢失与水平线误杀物理级根除**：
