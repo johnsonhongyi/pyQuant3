@@ -361,6 +361,10 @@ def generate_channel_strategy_text(row: Union[dict, pd.Series], df_code: Optiona
     upper_p = get_val('ch_upper', 0.0)
     mid_p = get_val('ch_mid', 0.0)
     lower_p = get_val('ch_lower', 0.0)
+
+    # 🛡️ 通达信停画自愈：当中轨跌破最低限制而在主图停画 (NaN / <=0.05) 时，若上轨与下轨有效，使用几何中轴 (upper + lower) / 2
+    if mid_p <= 0.05 and upper_p > lower_p > 0.01:
+        mid_p = (upper_p + lower_p) / 2.0
     
     # 动态实时重算通道百分位 (杜绝因静态缓存导致的盘中涨停/大跌位置失真)
     if upper_p > lower_p and (upper_p - lower_p) > 0.01 and close_p > 0:
