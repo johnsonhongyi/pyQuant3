@@ -29,7 +29,7 @@ global LastSentCode := ""
 global LastSentTick := 0
 global DEBOUNCE_INTERVAL_MS := 800  ; 800ms debounce for same stock code
 
-; Critical: register clipboard hook inside auto-execute section before any return
+; Register clipboard hook inside auto-execute section before any return
 OnClipboardChange("HandleClipboardChange")
 Log("=== Script started, AutoSendToDFCF=" . AutoSendToDFCF . " ===")
 
@@ -70,34 +70,236 @@ MouseIsOver(WinTitle) {
 }
 
 ; ================================
-; Clipboard Monitor (Auto Send on Copy)
+; Code Extraction Helpers (Single Responsibility)
 ; ================================
-HandleClipboardChange(Type) {
-    global custom_copy_triggered, ClipSaved, AutoSendToDFCF
-    if !custom_copy_triggered {
-        current := Clipboard
-        if (current != ClipSaved && current != "") {
-            ClipSaved := current
-            if RegExMatch(ClipSaved, "^(?:60|30|00|43|83|87|92)\d{4}(?!\d)|^(?:688|200)\d{3}(?!\d)", stockCode) {
-                Log("Clipboard detected code: " . stockCode . ", AutoSendToDFCF=" . AutoSendToDFCF)
-                if (AutoSendToDFCF) {
-                    Notify("Auto Send DFCF: " . stockCode, "sound", 0.3)
-                    WinGet, activeWinID, ID, A
-                    SendToDFCF(stockCode)
-                    Sleep, 200
-                    if (activeWinID) {
-                        WinActivate, ahk_id %activeWinID%
-                        WinWaitActive, ahk_id %activeWinID%,, 1
+GetCodeFromTDX(winId) {
+    Clipboard := ""
+    SendMessage, 0x111, 33819, 0,, ahk_id %winId%
+    ClipWait, 0.4
+    if (ErrorLevel || Clipboard == "") {
+        SendMessage, 0x111, 33819, 0,, ahk_class TdxW_MainFrame_Class
+        ClipWait, 0.4
+    }
+    code := ""
+    RegExMatch(Clipboard, "\b\d{6}\b", code)
+    Clipboard := ""
+    ClipSaved := ""
+    Log("TDX parsed code: " . code)
+    return code
+}
+
+GetCodeFromTHS() {
+    code := ""
+    SendMessage, 0x111, 31067, 0,, a
+    if WinExist("ahk_class #32770") {
+        WinActivate
+        WinWaitActive, ahk_class #32770,, 1
+        WinGetActiveTitle, title
+        Send, {Esc}
+        Log("THS popup title: " . title)
+        RegExMatch(title, "\b(?:60|30|00|43|83|87|92)\d{4}\b|(?:688|200)\d{3}\b", code)
+    }
+    Log("THS parsed code: " . code)
+    return code
+}
+
+GetCodeFromDFCF(winId) {
+    code := ""
+    WinGetTitle, title, ahk_id %winId%
+    WinGetClass, cls, ahk_id %winId%
+    Log("DFCF Main: HWND=" . winId . " CLS=" . cls . " TITLE=" . title)
+    
+    ; Strategy 1: Scan real-time stock data files (instant on browsing, zero lag)
+    dfcfExePath := ""
+    if (winId) {
+        WinGet, dfcfExePath, ProcessPath, ahk_id %winId%
+    }
+    if (dfcfExePath == "" || !FileExist(dfcfExePath)) {
+        WinGet, dfcfExePath, ProcessPath, ahk_exe mainfree.exe
+    }
+    if (dfcfExePath == "" || !FileExist(dfcfExePath)) {
+        dfcfExePath := "D:\MacTools\WinTools\eastmoney\swc8\mainfree.exe"
+    }
+    if (dfcfExePath != "") {
+        SplitPath, dfcfExePath,, dfcfDir
+        
+        latestTime := ""
+        latestCode := ""
+        
+        ; Check STK_REPORT_V2 (fast, small file count ~600, instant touch)
+        rptDir := dfcfDir . "\data\STOCK\STK_REPORT_V2"
+        if InStr(FileExist(rptDir), "D") {
+            Loop, Files, %rptDir%\*.rpt
+            {
+                if (A_LoopFileTimeModified > latestTime) {
+                    latestTime := A_LoopFileTimeModified
+                    if RegExMatch(A_LoopFileName, "^\d+_([A-Za-z0-9]{6})\.", m) {
+                        latestCode := m1
                     }
-                    ; 执行完成后彻底清空剪贴板，保持干净
-                    Clipboard := ""
-                    ClipSaved := ""
                 }
             }
         }
-    } else {
-        Log("Clipboard event suppressed by hotkey flag")
+        
+        ; Check K_RT_MSGTIP_V2 (comprehensive for indices and stocks)
+        msgDir := dfcfDir . "\data\STOCK\K_RT_MSGTIP_V2"
+        if InStr(FileExist(msgDir), "D") {
+            Loop, Files, %msgDir%\*.msg
+            {
+                if (A_LoopFileTimeModified > latestTime) {
+                    latestTime := A_LoopFileTimeModified
+                    if RegExMatch(A_LoopFileName, "^\d+_([A-Za-z0-9]{6})_", m) {
+                        latestCode := m1
+                    }
+                }
+            }
+        }
+        
+        if (latestCode != "") {
+            if RegExMatch(latestCode, "^(?:60|30|00|43|83|87|92)\d{4}$|^(?:688|200)\d{3}$") {
+                Log("Matched valid A-share from DFCF realtime data files: " . latestCode . " (time: " . latestTime . ")")
+                return latestCode
+            } else if RegExMatch(latestCode, "^\d{6}$") {
+                Log("Matched 6-digit code from DFCF realtime data files: " . latestCode . " (time: " . latestTime . ")")
+                return latestCode
+            }
+        }
+
+        ; Strategy 2: Fallback to RecentStocks.dat (historical cache)
+        datFile := dfcfDir . "\data\RecentStocks.dat"
+        if FileExist(datFile) {
+            FileRead, rawStr, %datFile%
+            if RegExMatch(rawStr, "^\s*([A-Za-z0-9]+)\t", m) {
+                candidate := m1
+                if RegExMatch(candidate, "^(?:60|30|00|43|83|87|92)\d{4}$|^(?:688|200)\d{3}$") {
+                    code := candidate
+                    Log("Matched valid A-share from DFCF RecentStocks.dat: " . code)
+                    return code
+                } else if RegExMatch(candidate, "^\d{6}$") {
+                    code := candidate
+                    Log("Matched 6-digit code from DFCF RecentStocks.dat: " . code)
+                    return code
+                }
+            }
+        }
     }
+
+    ; Strategy 2: check title
+    RegExMatch(title, "\b(?:60|30|00|43|83|87|92)\d{4}\b|(?:688|200)\d{3}\b", code)
+    if (code != "") {
+        Log("Matched from DFCF title: " . code)
+        return code
+    }
+
+    ; Strategy 3: ControlList scan
+    WinGet, ctrlList, ControlList, ahk_id %winId%
+    Loop, Parse, ctrlList, `n
+    {
+        if (A_LoopField != "") {
+            ControlGetText, txt, %A_LoopField%, ahk_id %winId%
+            if (txt != "") {
+                Log("DFCF Ctrl [" . A_LoopField . "]: " . SubStr(txt, 1, 50))
+                if RegExMatch(txt, "\b(?:60|30|00|43|83|87|92)\d{4}\b|(?:688|200)\d{3}\b", m) {
+                    Log("Matched from DFCF ctrl: " . m)
+                    return m
+                }
+            }
+        }
+    }
+
+    ; Strategy 4: SubWindows scan
+    WinGet, wList, List, ahk_exe mainfree.exe
+    Loop, %wList%
+    {
+        subH := wList%A_Index%
+        if (subH != winId) {
+            WinGetTitle, sT, ahk_id %subH%
+            if (sT != "") {
+                Log("DFCF sub: " . sT)
+                if RegExMatch(sT, "\b(?:60|30|00|43|83|87|92)\d{4}\b|(?:688|200)\d{3}\b", m) {
+                    Log("Matched from DFCF sub: " . m)
+                    return m
+                }
+            }
+        }
+    }
+
+    ; Strategy 5: Message 33819
+    Clipboard := ""
+    SendMessage, 0x111, 33819, 0,, ahk_id %winId%
+    ClipWait, 0.15
+    if (Clipboard != "") {
+        RegExMatch(Clipboard, "\b(?:60|30|00|43|83|87|92)\d{4}\b|(?:688|200)\d{3}\b", m)
+        if (m != "") {
+            Log("Matched from DFCF 33819: " . m)
+            code := m
+        }
+    }
+    Clipboard := ""
+
+    ; Strategy 6: Silent Ctrl+C
+    if (code == "") {
+        Clipboard := ""
+        Send, ^c
+        ClipWait, 0.2
+        if (Clipboard != "") {
+            Log("DFCF Ctrl+C: " . SubStr(Clipboard, 1, 50))
+            RegExMatch(Clipboard, "\b(?:60|30|00|43|83|87|92)\d{4}\b|(?:688|200)\d{3}\b", m)
+            if (m != "") {
+                Log("Matched from DFCF Ctrl+C: " . m)
+                code := m
+            }
+        }
+        Clipboard := ""
+        ClipSaved := ""
+    }
+
+    Log("DFCF Final code: " . code)
+    return code
+}
+
+; ================================
+; Sync Dispatchers
+; ================================
+SyncFromTDX(stockCode) {
+    global LastSentCode, LastSentTick, DEBOUNCE_INTERVAL_MS
+    nowTick := A_TickCount
+    if (stockCode == LastSentCode && (nowTick - LastSentTick < DEBOUNCE_INTERVAL_MS)) {
+        Notify("Duplicate click skipped: " . stockCode, "tooltip", 0.6)
+        return
+    }
+    Notify("Sync: " . stockCode, "tooltip", 0.8)
+    SendToDFCF(stockCode)
+    SendToHexin(stockCode)
+    LastSentCode := stockCode
+    LastSentTick := nowTick
+}
+
+SyncFromTHS(stockCode) {
+    global LastSentCode, LastSentTick, DEBOUNCE_INTERVAL_MS
+    nowTick := A_TickCount
+    if (stockCode == LastSentCode && (nowTick - LastSentTick < DEBOUNCE_INTERVAL_MS)) {
+        Notify("Duplicate click skipped: " . stockCode, "tooltip", 0.6)
+        return
+    }
+    Notify("THS Sync: " . stockCode, "tooltip", 0.8)
+    SendToTDX(stockCode)
+    SendToDFCF(stockCode)
+    LastSentCode := stockCode
+    LastSentTick := nowTick
+}
+
+SyncFromDFCF(stockCode) {
+    global LastSentCode, LastSentTick, DEBOUNCE_INTERVAL_MS
+    nowTick := A_TickCount
+    if (stockCode == LastSentCode && (nowTick - LastSentTick < DEBOUNCE_INTERVAL_MS)) {
+        Notify("Duplicate click skipped: " . stockCode, "tooltip", 0.6)
+        return
+    }
+    Notify("DFCF Sync: " . stockCode, "tooltip", 0.8)
+    SendToTDX(stockCode)
+    SendToHexin(stockCode)
+    LastSentCode := stockCode
+    LastSentTick := nowTick
 }
 
 ; ================================
@@ -160,6 +362,36 @@ SendToHexin(stockCode) {
 }
 
 ; ================================
+; Clipboard Monitor (Auto Send on Copy)
+; ================================
+HandleClipboardChange(Type) {
+    global custom_copy_triggered, ClipSaved, AutoSendToDFCF
+    if !custom_copy_triggered {
+        current := Clipboard
+        if (current != ClipSaved && current != "") {
+            ClipSaved := current
+            if RegExMatch(ClipSaved, "^(?:60|30|00|43|83|87|92)\d{4}(?!\d)|^(?:688|200)\d{3}(?!\d)", stockCode) {
+                Log("Clipboard detected code: " . stockCode . ", AutoSendToDFCF=" . AutoSendToDFCF)
+                if (AutoSendToDFCF) {
+                    Notify("Auto Send DFCF: " . stockCode, "sound", 0.3)
+                    WinGet, activeWinID, ID, A
+                    SendToDFCF(stockCode)
+                    Sleep, 200
+                    if (activeWinID) {
+                        WinActivate, ahk_id %activeWinID%
+                        WinWaitActive, ahk_id %activeWinID%,, 1
+                    }
+                    Clipboard := ""
+                    ClipSaved := ""
+                }
+            }
+        }
+    } else {
+        Log("Clipboard event suppressed by hotkey flag")
+    }
+}
+
+; ================================
 ; Hotkey: Block Alt+Q in TDX
 ; ================================
 #If WinActive("ahk_class TdxW_MainFrame_Class") || WinActive("ahk_class TdxW_SecondFrame_Class")
@@ -180,11 +412,8 @@ SendToHexin(stockCode) {
 
 !MButton::   ; Alt + Middle click
 MButton::
-{
-    global custom_copy_triggered, ClipSaved, LastSentCode, LastSentTick, DEBOUNCE_INTERVAL_MS, AutoSendToDFCF
     custom_copy_triggered := true
     
-    ; Activate target window under cursor if not already active
     MouseGetPos,,, hoverWin
     if (hoverWin) {
         WinActivate, ahk_id %hoverWin%
@@ -196,104 +425,26 @@ MButton::
 
     stockCode := ""
     try {
-        ; ----------------------------------------------------
-        ; 分支 1: 通达信触发 (TDX -> DFCF + THS)
-        ; ----------------------------------------------------
         if WinActive("ahk_class TdxW_MainFrame_Class") || WinActive("ahk_class TdxW_SecondFrame_Class") {
-            ClipBackup := ClipboardAll  ; 备份用户原剪贴板
-            Clipboard := ""
-            
-            SendMessage, 0x111, 33819, 0,, ahk_id %activeWinID%
-            ClipWait, 0.4
-            if (ErrorLevel || Clipboard == "") {
-                SendMessage, 0x111, 33819, 0,, ahk_class TdxW_MainFrame_Class
-                ClipWait, 0.4
-            }
-
-            RegExMatch(Clipboard, "\b\d{6}\b", stockCode)
-            Log("TDX parsed code: " . stockCode)
-            
-            ; 提取完立刻清空剪贴板，绝不保留在剪贴板中
-            Clipboard := ""
-            ClipSaved := ""
-
+            stockCode := GetCodeFromTDX(activeWinID)
             if (stockCode != "") {
-                nowTick := A_TickCount
-                if (stockCode == LastSentCode && (nowTick - LastSentTick < DEBOUNCE_INTERVAL_MS)) {
-                    Notify("Duplicate click skipped: " . stockCode, "tooltip", 0.6)
-                } else {
-                    Notify("Sync: " . stockCode, "tooltip", 0.8)
-                    SendToDFCF(stockCode)
-                    SendToHexin(stockCode)
-                    LastSentCode := stockCode
-                    LastSentTick := nowTick
-                }
+                SyncFromTDX(stockCode)
             } else {
-                Notify("No stock code found", "tooltip", 1)
+                Notify("No stock code found in TDX", "tooltip", 1)
             }
-            
-        ; ----------------------------------------------------
-        ; 分支 2: 同花顺触发 (THS -> TDX + DFCF)
-        ; ----------------------------------------------------
         } else if WinActive("ahk_exe hexin.exe") {
-            SendMessage, 0x111, 31067, 0,, a
-            if WinExist("ahk_class #32770") {
-                WinActivate
-                WinWaitActive, ahk_class #32770,, 1
-                WinGetActiveTitle, title
-                Send, {Esc}
-                Log("THS popup title: " . title)
-                RegExMatch(title, "\b(?:60|30|00|43|83|87|92)\d{4}\b|(?:688|200)\d{3}\b", stockCode)
-                Log("THS parsed code: " . stockCode)
-                
-                if (stockCode != "") {
-                    nowTick := A_TickCount
-                    if (stockCode == LastSentCode && (nowTick - LastSentTick < DEBOUNCE_INTERVAL_MS)) {
-                        Notify("Duplicate click skipped: " . stockCode, "tooltip", 0.6)
-                    } else {
-                        Notify("THS Sync: " . stockCode, "tooltip", 0.8)
-                        SendToTDX(stockCode)
-                        SendToDFCF(stockCode)
-                        LastSentCode := stockCode
-                        LastSentTick := nowTick
-                    }
-                }
-            }
-
-        ; ----------------------------------------------------
-        ; 分支 3: 东方财富触发 (DFCF -> TDX + THS)
-        ; ----------------------------------------------------
-        } else if WinActive("ahk_exe mainfree.exe") {
-            ; 策略 1: 优先尝试从窗口标题直接提取
-            WinGetActiveTitle, dfcfTitle
-            RegExMatch(dfcfTitle, "\b(?:60|30|00|43|83|87|92)\d{4}\b|(?:688|200)\d{3}\b", stockCode)
-
-            ; 策略 2: 若标题未含代码，通过临时复制 Ctrl+C 获取当前行情股票代码
-            if (stockCode == "") {
-                Clipboard := ""
-                Send, ^c
-                ClipWait, 0.3
-                RegExMatch(Clipboard, "\b(?:60|30|00|43|83|87|92)\d{4}\b|(?:688|200)\d{3}\b", stockCode)
-                ; 提取完立刻清空剪贴板，绝不保留
-                Clipboard := ""
-                ClipSaved := ""
-            }
-
-            Log("DFCF parsed code: " . stockCode)
-
+            stockCode := GetCodeFromTHS()
             if (stockCode != "") {
-                nowTick := A_TickCount
-                if (stockCode == LastSentCode && (nowTick - LastSentTick < DEBOUNCE_INTERVAL_MS)) {
-                    Notify("Duplicate click skipped: " . stockCode, "tooltip", 0.6)
-                } else {
-                    Notify("DFCF Sync: " . stockCode, "tooltip", 0.8)
-                    SendToTDX(stockCode)
-                    SendToHexin(stockCode)
-                    LastSentCode := stockCode
-                    LastSentTick := nowTick
-                }
+                SyncFromTHS(stockCode)
             } else {
-                Notify("No stock code found in DFCF", "tooltip", 1)
+                Notify("No stock code found in THS", "tooltip", 1)
+            }
+        } else if WinActive("ahk_exe mainfree.exe") {
+            stockCode := GetCodeFromDFCF(activeWinID)
+            if (stockCode != "") {
+                SyncFromDFCF(stockCode)
+            } else {
+                Notify("No stock code found in DFCF (check log)", "tooltip", 1.5)
             }
         }
     } catch e {
@@ -305,13 +456,11 @@ MButton::
             WinActivate, ahk_id %activeWinID%
             WinWaitActive, ahk_id %activeWinID%,, 1
         }
-        ; 执行完成后彻底清空剪贴板，确保剪贴板绝对干净
         Clipboard := ""
         ClipSaved := ""
         custom_copy_triggered := false
         Log("Hotkey finished, clipboard cleaned")
     }
-}
 return
 #If
 
