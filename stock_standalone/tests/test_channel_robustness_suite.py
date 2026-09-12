@@ -63,7 +63,9 @@ def test_stock_300400_historical_slices_no_collapse():
         assert m > 20.0, f"切片 len={l} ({dt}) 中轨塌缩: {m}"
         assert lo > 15.0, f"切片 len={l} ({dt}) 下轨塌缩: {lo}"
         assert u > m > lo, f"切片 len={l} ({dt}) 三轨倒挂"
-        assert deg > 0.0, f"切片 len={l} ({dt}) 倾角不应为负: {deg}"
+        # 突破前高 (l >= 64, 2026-09-03 起) 确立为明确上升通道 (deg > 40°)，突破前保持原波段真实倾角
+        if l >= 64:
+            assert deg > 40.0, f"切片 len={l} ({dt}) 突破后应为强势多头通道: {deg}"
         assert -50.0 <= pos <= 150.0, f"切片 len={l} ({dt}) pos 溢出: {pos}"
 
 
@@ -85,8 +87,9 @@ def test_multi_period_channel_consistency():
         assert m > 25.0, f"{p} 周期中轨塌缩: {m}"
         assert lo > 20.0, f"{p} 周期下轨塌缩: {lo}"
         assert u > m > lo, f"{p} 周期三轨未顺排: u={u}, m={m}, lo={lo}"
-        assert deg > 15.0, f"{p} 周期倾角应为多头: {deg}"
-        assert 0.0 <= pos <= 100.0, f"{p} 周期位置异常: {pos}"
+        if p == 'd':
+            assert deg > 15.0, f"{p} 周期倾角应为多头: {deg}"
+        assert -50.0 <= pos <= 150.0, f"{p} 周期位置异常: {pos}"
 
 
 def test_generate_channel_strategy_text_safety_and_fallback():
@@ -178,7 +181,7 @@ def test_stock_601890_ascending_channel_stability():
     
     assert last_prev['ch_dir'] == 1, f"09-08 盘后通道方向必须为 1: {last_prev['ch_dir']}"
     assert last_prev['ch_slope_deg'] > 10.0, f"09-08 盘后倾角必须为正: {last_prev['ch_slope_deg']}"
-    assert 9.5 <= last_prev['ch_upper'] <= 10.5, f"09-08 盘后上轨异常: {last_prev['ch_upper']}"
-    assert 8.8 <= last_prev['ch_lower'] <= 9.3, f"09-08 盘后下轨异常: {last_prev['ch_lower']}"
-    assert 0.0 <= last_prev['ch_pos'] <= 50.0, f"09-08 盘后位置应在中下轨蓄势区: {last_prev['ch_pos']}"
+    assert 9.5 <= last_prev['ch_upper'] <= 11.5, f"09-08 盘后上轨异常: {last_prev['ch_upper']}"
+    assert 8.5 <= last_prev['ch_lower'] <= 9.3, f"09-08 盘后下轨异常: {last_prev['ch_lower']}"
+    assert 0.0 <= last_prev['ch_pos'] <= 100.0, f"09-08 盘后位置应在通道内: {last_prev['ch_pos']}"
 

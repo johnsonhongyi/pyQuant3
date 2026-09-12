@@ -361,8 +361,18 @@ def generate_channel_strategy_text(row: Union[dict, pd.Series], df_code: Optiona
     upper_p = get_val('ch_upper', 0.0)
     mid_p = get_val('ch_mid', 0.0)
     lower_p = get_val('ch_lower', 0.0)
-    pos = get_val('ch_pos', 0.0)
-    pattern = int(get_val('ch_pattern', 1))
+    
+    # 动态实时重算通道百分位 (杜绝因静态缓存导致的盘中涨停/大跌位置失真)
+    if upper_p > lower_p and (upper_p - lower_p) > 0.01 and close_p > 0:
+        pos = (close_p - lower_p) / (upper_p - lower_p) * 100.0
+    else:
+        pos = get_val('ch_pos', 0.0)
+
+    # 提取通达信权威通道方向与支撑线指标
+    ch_dir = int(get_val('ch_dir', 1))
+    supp_p = get_val('ch_supp_price', 0.0)
+    supp_slope_deg = get_val('ch_supp_slope_deg', 0.0)
+    pattern = 1 if ch_dir == 1 else -1
 
     # 🛡️ 严格的通道三轨与指标健康防呆校验 (彻底杜绝除零溢出、0.01塌缩及严重脱节坏数据)
     if upper_p <= 0.05 or mid_p <= 0.05 or lower_p <= 0.01:
@@ -384,6 +394,14 @@ def generate_channel_strategy_text(row: Union[dict, pd.Series], df_code: Optiona
     lines.append("==================================================")
     lines.append(f"最新收盘价: {close_p:.2f} 元 (ch_pos = {pos:.1f}%)")
     lines.append(f"通道三轨: 上轨 = {upper_p:.2f} 元 | 中轨 = {mid_p:.2f} 元 | 下轨 = {lower_p:.2f} 元")
+    if supp_p > 0.05:
+        is_broken = close_p < supp_p * 0.985
+        status_icon = "⚠️ 已跌破" if is_broken else ("🟢 站稳" if close_p >= supp_p else "🟡 临界")
+        deg_str = f"+{supp_slope_deg:.1f}°" if supp_slope_deg > 0 else f"{supp_slope_deg:.1f}°"
+        res_info = f"上涨支撑线: {supp_p:.2f} 元 (角度: {deg_str}) | 状态: {status_icon}"
+        if not is_broken and ch_dir == 1 and abs(lower_p - supp_p) / max(lower_p, 0.01) < 0.05:
+            res_info += " ★ 下轨双共振!"
+        lines.append(res_info)
     lines.append("-" * 50)
 
     if pos > 100.0:
