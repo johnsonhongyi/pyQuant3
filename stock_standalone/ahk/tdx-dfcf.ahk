@@ -31,6 +31,11 @@ global DEBOUNCE_INTERVAL_MS := 800  ; 800ms debounce for same stock code
 
 ; Register clipboard hook inside auto-execute section before any return
 OnClipboardChange("HandleClipboardChange")
+
+; Automatically prune logs older than 2 days on startup and every 6 hours
+PruneLog(2)
+SetTimer, AutoPruneLog, % 6 * 3600 * 1000
+
 Log("=== Script started, AutoSendToDFCF=" . AutoSendToDFCF . " ===")
 
 return  ; Formal end of auto-execute section!
@@ -55,6 +60,10 @@ RemoveToolTip:
 ToolTip
 return
 
+AutoPruneLog:
+    PruneLog(2)
+return
+
 Log(msg) {
     global DEBUG_MODE, LOG_FILE
     if (!DEBUG_MODE)
@@ -63,10 +72,78 @@ Log(msg) {
     FileAppend, [%now%] %msg%`r`n, %LOG_FILE%
 }
 
-; Mouse hover helper
-MouseIsOver(WinTitle) {
-    MouseGetPos,,, WinHwnd
-    return WinExist(WinTitle . " ahk_id " . WinHwnd)
+PruneLog(days:=2) {
+    global LOG_FILE
+    if !FileExist(LOG_FILE)
+        return
+
+    cutoff := A_Now
+    EnvAdd, cutoff, -%days%, Days
+    FormatTime, cutoffStr, %cutoff%, [yyyy-MM-dd HH:mm:ss]
+
+    FileRead, content, %LOG_FILE%
+    if (content == "")
+        return
+
+    ; Zero I/O short-circuit: if first line is already within cutoff, do nothing
+    firstLineEnd := InStr(content, "`n")
+    if (firstLineEnd > 0) {
+        firstLine := SubStr(content, 1, firstLineEnd)
+        if RegExMatch(firstLine, "^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\]", m) {
+            if (m >= cutoffStr)
+                return
+        }
+    }
+
+    pos := 1
+    cutoffPos := 0
+    while (pos := RegExMatch(content, "m)^\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\]", m, pos)) {
+        if (m >= cutoffStr) {
+            cutoffPos := pos
+            break
+        }
+        nextN := InStr(content, "`n", false, pos)
+        if (!nextN)
+            break
+        pos := nextN + 1
+    }
+
+    if (cutoffPos > 1) {
+        newContent := SubStr(content, cutoffPos)
+        file := FileOpen(LOG_FILE, "w")
+        if IsObject(file) {
+            file.Write(newContent)
+            file.Close()
+        }
+    } else if (cutoffPos == 0) {
+        file := FileOpen(LOG_FILE, "w")
+        if IsObject(file)
+            file.Close()
+    }
+}
+
+; High-performance single-pass hover/active window tester
+IsStockWindowHoverOrActive() {
+    WinGet, activeHwnd, ID, A
+    if (activeHwnd) {
+        WinGetClass, aCls, ahk_id %activeHwnd%
+        if (aCls = "TdxW_MainFrame_Class" || aCls = "TdxW_SecondFrame_Class")
+            return true
+        WinGet, aExe, ProcessName, ahk_id %activeHwnd%
+        if (aExe = "hexin.exe" || aExe = "mainfree.exe")
+            return true
+    }
+    
+    MouseGetPos,,, hoverHwnd
+    if (hoverHwnd && hoverHwnd != activeHwnd) {
+        WinGetClass, hCls, ahk_id %hoverHwnd%
+        if (hCls = "TdxW_MainFrame_Class" || hCls = "TdxW_SecondFrame_Class")
+            return true
+        WinGet, hExe, ProcessName, ahk_id %hoverHwnd%
+        if (hExe = "hexin.exe" || hExe = "mainfree.exe")
+            return true
+    }
+    return false
 }
 
 ; ================================
@@ -104,29 +181,35 @@ GetCodeFromTHS() {
 }
 
 GetCodeFromDFCF(winId) {
+    static cachedDfcfDir := ""
     code := ""
     WinGetTitle, title, ahk_id %winId%
     WinGetClass, cls, ahk_id %winId%
     Log("DFCF Main: HWND=" . winId . " CLS=" . cls . " TITLE=" . title)
     
     ; Strategy 1: Scan real-time stock data files (instant on browsing, zero lag)
-    dfcfExePath := ""
-    if (winId) {
-        WinGet, dfcfExePath, ProcessPath, ahk_id %winId%
+    dfcfDir := cachedDfcfDir
+    if (dfcfDir == "" || !FileExist(dfcfDir)) {
+        dfcfExePath := ""
+        if (winId) {
+            WinGet, dfcfExePath, ProcessPath, ahk_id %winId%
+        }
+        if (dfcfExePath == "" || !FileExist(dfcfExePath)) {
+            WinGet, dfcfExePath, ProcessPath, ahk_exe mainfree.exe
+        }
+        if (dfcfExePath == "" || !FileExist(dfcfExePath)) {
+            dfcfExePath := "D:\MacTools\WinTools\eastmoney\swc8\mainfree.exe"
+        }
+        if (dfcfExePath != "") {
+            SplitPath, dfcfExePath,, dfcfDir
+            cachedDfcfDir := dfcfDir
+        }
     }
-    if (dfcfExePath == "" || !FileExist(dfcfExePath)) {
-        WinGet, dfcfExePath, ProcessPath, ahk_exe mainfree.exe
-    }
-    if (dfcfExePath == "" || !FileExist(dfcfExePath)) {
-        dfcfExePath := "D:\MacTools\WinTools\eastmoney\swc8\mainfree.exe"
-    }
-    if (dfcfExePath != "") {
-        SplitPath, dfcfExePath,, dfcfDir
-        
+    if (dfcfDir != "") {
         latestTime := ""
         latestCode := ""
         
-        ; Check STK_REPORT_V2 (fast, small file count ~600, instant touch)
+        ; 1.1 Check STK_REPORT_V2 (lightweight, ~600 files, instant touch on browsing)
         rptDir := dfcfDir . "\data\STOCK\STK_REPORT_V2"
         if InStr(FileExist(rptDir), "D") {
             Loop, Files, %rptDir%\*.rpt
@@ -140,7 +223,7 @@ GetCodeFromDFCF(winId) {
             }
         }
         
-        ; Check K_RT_MSGTIP_V2 (comprehensive for indices and stocks)
+        ; 1.2 Check K_RT_MSGTIP_V2 (most reliable, updated on EVERY stock switch)
         msgDir := dfcfDir . "\data\STOCK\K_RT_MSGTIP_V2"
         if InStr(FileExist(msgDir), "D") {
             Loop, Files, %msgDir%\*.msg
@@ -366,28 +449,26 @@ SendToHexin(stockCode) {
 ; ================================
 HandleClipboardChange(Type) {
     global custom_copy_triggered, ClipSaved, AutoSendToDFCF
-    if !custom_copy_triggered {
-        current := Clipboard
-        if (current != ClipSaved && current != "") {
-            ClipSaved := current
-            if RegExMatch(ClipSaved, "^(?:60|30|00|43|83|87|92)\d{4}(?!\d)|^(?:688|200)\d{3}(?!\d)", stockCode) {
-                Log("Clipboard detected code: " . stockCode . ", AutoSendToDFCF=" . AutoSendToDFCF)
-                if (AutoSendToDFCF) {
-                    Notify("Auto Send DFCF: " . stockCode, "sound", 0.3)
-                    WinGet, activeWinID, ID, A
-                    SendToDFCF(stockCode)
-                    Sleep, 200
-                    if (activeWinID) {
-                        WinActivate, ahk_id %activeWinID%
-                        WinWaitActive, ahk_id %activeWinID%,, 1
-                    }
-                    Clipboard := ""
-                    ClipSaved := ""
-                }
+    ; Zero-overhead early exit when auto push is disabled or hotkey in progress
+    if (custom_copy_triggered || !AutoSendToDFCF)
+        return
+
+    current := Clipboard
+    if (current != ClipSaved && current != "") {
+        ClipSaved := current
+        if RegExMatch(ClipSaved, "^(?:60|30|00|43|83|87|92)\d{4}(?!\d)|^(?:688|200)\d{3}(?!\d)", stockCode) {
+            Log("Clipboard detected code: " . stockCode . ", AutoSendToDFCF=" . AutoSendToDFCF)
+            Notify("Auto Send DFCF: " . stockCode, "sound", 0.3)
+            WinGet, activeWinID, ID, A
+            SendToDFCF(stockCode)
+            Sleep, 200
+            if (activeWinID) {
+                WinActivate, ahk_id %activeWinID%
+                WinWaitActive, ahk_id %activeWinID%,, 1
             }
+            Clipboard := ""
+            ClipSaved := ""
         }
-    } else {
-        Log("Clipboard event suppressed by hotkey flag")
     }
 }
 
@@ -401,14 +482,7 @@ HandleClipboardChange(Type) {
 ; ================================
 ; Hotkey: Middle Click Linkage (TDX / THS / DFCF)
 ; ================================
-#If WinActive("ahk_class TdxW_MainFrame_Class") 
-    || WinActive("ahk_class TdxW_SecondFrame_Class") 
-    || WinActive("ahk_exe hexin.exe")
-    || WinActive("ahk_exe mainfree.exe")
-    || MouseIsOver("ahk_class TdxW_MainFrame_Class")
-    || MouseIsOver("ahk_class TdxW_SecondFrame_Class")
-    || MouseIsOver("ahk_exe hexin.exe")
-    || MouseIsOver("ahk_exe mainfree.exe")
+#If IsStockWindowHoverOrActive()
 
 !MButton::   ; Alt + Middle click (Preserve/Copy clipboard)
 MButton::    ; Middle click (Clean clipboard)
