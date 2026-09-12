@@ -1539,6 +1539,13 @@ def generate_df_vect_daily_features(df, lastdays=cct.compute_lastdays):
         'bs': 'bs'
     }
 
+    # ⚡ [单例共享内存性能优化] 在循环外一次性获取多日特征字典引用，避免在每只股票循环内重复导入与初始化
+    multiday_dict = None
+    try:
+        from JSONData.multiday_feature_store import get_multiday_features_dict
+        multiday_dict = get_multiday_features_dict(max_days=lastdays)
+    except Exception:
+        multiday_dict = None
 
     for code, row in df.iterrows():
 
@@ -1569,6 +1576,17 @@ def generate_df_vect_daily_features(df, lastdays=cct.compute_lastdays):
                 feat_col = f'{ch_feat}{d}'
                 if feat_col in df.columns:
                     feat[feat_col] = row[feat_col]
+
+        # ===== 4️⃣ 注入多日精确换手率与量比特征 (单例共享内存 O(1) 纳秒级注入) =====
+        c_key = str(code).strip().zfill(6)
+        if multiday_dict and c_key in multiday_dict:
+            feat.update(multiday_dict[c_key])
+        elif multiday_dict and code in multiday_dict:
+            feat.update(multiday_dict[code])
+        else:
+            for d in range(1, lastdays + 1):
+                feat[f'ratio{d}'] = 0.0
+                feat[f'vol_ratio{d}'] = 1.0
 
         features_list.append(feat)
 
@@ -1602,6 +1620,14 @@ def generate_df_vect_daily_features_lastday(df, lastdays=cct.compute_lastdays):
         'perd': 'per'
     }
 
+    # ⚡ [单例共享内存性能优化] 在循环外一次性获取多日特征字典引用，避免在每只股票循环内重复导入与初始化
+    multiday_dict = None
+    try:
+        from JSONData.multiday_feature_store import get_multiday_features_dict
+        multiday_dict = get_multiday_features_dict(max_days=lastdays)
+    except Exception:
+        multiday_dict = None
+
     for code, row in df.iterrows():
         feat = {'code': code}
 
@@ -1629,6 +1655,17 @@ def generate_df_vect_daily_features_lastday(df, lastdays=cct.compute_lastdays):
                 feat_col = f'{ch_feat}{d}'
                 if feat_col in df.columns:
                     feat[feat_col] = row[feat_col]
+
+        # ===== 4️⃣ 注入多日精确换手率与量比特征 (单例共享内存 O(1) 纳秒级注入) =====
+        c_key = str(code).strip().zfill(6)
+        if multiday_dict and c_key in multiday_dict:
+            feat.update(multiday_dict[c_key])
+        elif multiday_dict and code in multiday_dict:
+            feat.update(multiday_dict[code])
+        else:
+            for d in range(1, lastdays + 1):
+                feat[f'ratio{d}'] = 0.0
+                feat[f'vol_ratio{d}'] = 1.0
 
         features_list.append(feat)
 
@@ -2284,6 +2321,35 @@ def calc_trend_channel(df, ur=6, lr=6):
     for da, s_val in supp_multidays.items():
         new_cols[f'ch_supp{da}'] = np.full(n, s_val)
         new_cols[f'ch_supp_price{da}'] = np.full(n, s_val)
+
+    # 动态注入多日精确换手率与量比预处理特征 (单例共享内存极速字典 O(1) 访问)
+    try:
+        from JSONData.multiday_feature_store import get_multiday_features_dict
+        max_d = int(getattr(cct, 'compute_lastdays', 9))
+        m_dict = get_multiday_features_dict(max_days=max_d)
+
+        c_code = None
+        if hasattr(df, 'name') and df.name:
+            c_code = str(df.name).strip().zfill(6)
+        elif 'code' in df.columns and len(df) > 0:
+            c_code = str(df['code'].iloc[-1]).strip().zfill(6)
+        elif df.index.name == 'code' and len(df) > 0:
+            c_code = str(df.index[0]).strip().zfill(6)
+
+        if m_dict and c_code and (c_code in m_dict or (len(c_code) == 6 and c_code in m_dict)):
+            r_item = m_dict.get(c_code, {})
+            for da in range(1, max_d + 1):
+                rc = f'ratio{da}'
+                vc = f'vol_ratio{da}'
+                if rc in r_item: new_cols[rc] = np.full(n, float(r_item[rc]))
+                if vc in r_item: new_cols[vc] = np.full(n, float(r_item[vc]))
+        else:
+            cur_r = float(df['ratio'].iloc[-1]) if ('ratio' in df.columns and len(df) > 0) else 0.0
+            for da in range(1, max_d + 1):
+                new_cols[f'ratio{da}'] = np.full(n, cur_r)
+                new_cols[f'vol_ratio{da}'] = np.full(n, 1.0)
+    except Exception:
+        pass
 
     df = df.assign(**new_cols)
     return df

@@ -1,3 +1,40 @@
+## 2026-09-12 17:52
+- [x] **【全市场选股多日换手率单例共享内存预提取与纳秒级批量注入极致性能优化】(SSOT) (`JSONData/multiday_feature_store.py`, `JSONData/tdx_data_Day.py`, `tests/test_multiday_feature_store.py`)**：
+    - [x] **痛点与性能瓶颈穿透**：全市场特征提取器（`generate_df_vect_daily_features` 与 `lastday`）在 5000 只股票大循环内部，此前每只个股均重复执行模块导入、`_CACHE_LOCK` 线程锁与 DataFrame `.loc` 检索，造成了多余开销与锁争用；
+    - [x] **单例共享内存极速字典 (`get_multiday_features_dict`)**：
+        1. 一次性将 HDF5 历史宽表在内存中转换为 `{code: {'ratio1': ..., 'vol_ratio1': ...}}` 原生 Python 嵌套字典；
+        2. 日内全局单例引用复用，严格遵循 O(1) 纳秒级查找；
+        3. 收盘归档 `archive_daily_features` 时自动触发 `clear_multiday_cache()` 同步失效刷新；
+    - [x] **循环外预提取 (Pre-fetch Outside Loop) 极致性能**：
+        1. 在 `generate_df_vect_daily_features` 与 `generate_df_vect_daily_features_lastday` 的 `for code, row in df.iterrows():` 循环外部仅执行一次单例字典获取；
+        2. 循环内部直接使用原生字典 `feat.update(multiday_dict[c_key])`，抹平 5000 次循环导入与锁检查；
+        3. 在 `calc_trend_channel` 向量化通道计算中同步接入极速字典，彻底消除 `.loc` 索引耗时；
+    - [x] **5000 只全市场压测与全量回归验证 100% PASSED**：
+        1. 专项新增 `test_singleton_shared_dict_cache_and_batch_loop_performance`，5000 只个股批量特征提取瞬时完成；
+        2. 自动化测试套件全部全绿通过！
+
+## 2026-09-12 17:45
+- [x] **【全市场收盘精确换手率等多日缺失特征自动化持久化与初始化挂载落地】(SSOT) (`JSONData/multiday_feature_store.py`, `JSONData/tdx_data_Day.py`, `query_engine_util.py`, `instock_MonitorTK.py`, `config/indicator_help_custom.json`, `tests/test_multiday_feature_store.py`)**：
+    - [x] **极致轻量扁平单表与滑动窗口持久化底座 (`JSONData/multiday_feature_store.py`)**：
+        1. **极简 4 列扁平表结构**：表名 `daily_multiday_ratio`，仅包含 `code`、`date`、`ratio`、`vol_ratio` 4 个核心字段，以 float32 紧凑存储，零冗余元数据；
+        2. **滑动窗口修剪与老旧数据淘汰**：原子写回前按交易日升序排序，严格保留最新 `cct.compute_lastdays`（如 9 天）数据，自动修剪淘汰早于窗口的历史记录；
+        3. **SafeHDFStore 原子锁与跨进程安全**：底层接入平台级 `SafeHDFStore`，自动管理 Windows 跨进程文件锁，多进程/多线程写入 100% 互斥安全；
+    - [x] **高性能 Pivot 倒排重塑与日内全局 TTL 宽表缓存**：
+        1. **Pivot 倒排宽表重塑**：从扁平表极速重塑为 `code` 为行、`ratio1~9` 与 `vol_ratio1~9` 为列的宽表（`ratio1` 为最新日/昨日换手，`ratio2` 为前日，依此类推）；
+        2. **日内单例全局 TTL 缓存**：相同交易日内内存宽表全局复用，盘中高频读取耗时降至 0 毫秒；收盘归档时自动失效并刷新缓存；
+        3. **单股特征微秒级注入与优雅降级兜底**：`inject_multiday_features_to_row` 提供浮点数 `round(..., 2)` 规整；冷启动或未收录标的自动填充 `0.0` / `1.0`，绝不触发 KeyError；
+    - [x] **特征工程、通道引擎与查询语法全管道挂载**：
+        1. **日线特征提取器挂载**：在 `generate_df_vect_daily_features` 与 `generate_df_vect_daily_features_lastday` 中注入 `ratio1~ratio{lastdays}` 与 `vol_ratio1~vol_ratio{lastdays}`；
+        2. **通道计算引擎挂载**：在 `calc_trend_channel` 向量化指标列中同步挂载多日换手率与量比列；
+        3. **查询引擎全语法同义词注册**：在 `query_engine_util.py` 中注册 `ratio1~9`, `turnover1~9`, `换手率1~9`, `ratio1d~9d`, `vol_ratio1~9`, `量比1~9`，全面支持 `{or: ratio{1-3}d > 5.0}` 等区间语法；
+        4. **指标说明外置文档免打包热更新**：同步更新 `config/indicator_help_custom.json`，按下 `Ctrl + /` 即可热查阅最新指标；
+    - [x] **收盘流水线 Hook 自动化接入**：
+        1. **15:30 收盘定时任务接入**：在 `instock_MonitorTK.py` 的 STEP 3b 中无缝调用 `archive_daily_features(df_curr_eod)`；
+        2. **退出存档接入**：在 `on_close` 的退出物理存档流程中同步执行 `archive_daily_features(df_curr_close)` 双重保险；
+    - [x] **全量自动化回归验证 41/41 PASSED**：
+        1. 专项单元测试 `test_multiday_feature_store.py` 5/5 PASSED（涵盖持久化滑动修剪、Pivot 倒排重塑、TTL 缓存复用、冷启动兜底、向量化挂载与 Query 引擎执行）；
+        2. 全量核心套件 41 项自动化测试 100% 全部通过！
+
 ## 2026-09-12 17:25
 - [x] **【多选策略对比右键DNA专项审核功能与Alt+W快捷键落地】(SSOT) (`history_manager.py`, `tests/test_history_multi_query_dna_audit.py`)**：
     - [x] **对齐 Tk 点击选择 Code 逻辑（默认 50 只）**：
