@@ -274,18 +274,26 @@ class TDXChannelFactory:
             upper = up_raw.copy()
             lower = lo_raw.copy()
         else:
-            lower = np.where(in_trend, np.clip(lo_raw, limit_min, limit_max), np.nan)
-            upper = np.where(in_trend, np.clip(up_raw, limit_min, limit_max), np.nan)
-            band_w_nominal = float(np.nanmax(up_raw - lo_raw)) if len(up_raw) > 0 else 0.05
-            if band_w_nominal <= 0.01:
-                band_w_nominal = float(close[-1] * 0.08)
-            collapse_mask = in_trend & (up_raw <= limit_min)
-            if np.any(collapse_mask):
-                upper[collapse_mask] = lower[collapse_mask] + band_w_nominal
-            # 中轨保护：中轨优先采用公式 mid_raw；若 mid_raw 跌破最低限制，则自愈采用 (upper + lower) / 2.0 几何中轴
-            # 彻底杜绝指标层出现 NaN 导致 downstream fillna(-101) 或策略倒挂，同时杜绝水平死线
-            safe_mid = np.where((mid_raw >= limit_min) & (mid_raw <= limit_max), mid_raw, (upper + lower) / 2.0)
-            mid = np.where(in_trend, safe_mid, np.nan)
+            # 严格遵照通达信原版《GG通道线走势》公式规则：
+            # 上轨: IF(CH_UP<=CH_MAX AND CH_UP>=CH_MIN, CH_UP, DRAWNULL)
+            # 中轨: IF(CH_BASE+CH_SLOPE*CURRBARSCOUNT<=CH_MAX AND ...>=CH_MIN, ..., DRAWNULL)
+            # 下轨: IF(CH_DN<=CH_MAX AND CH_DN>=CH_MIN, CH_DN, DRAWNULL)
+            #
+            # 区分【核心基准波段】与【向右外推段】：
+            # 1. 核心波段内 (cb >= min(tc2, bc2))：作为通道的定义本体，必须为平滑倾斜平行实线，绝不停画；
+            # 2. 向右外推段 (cb < min(tc2, bc2))：当超出 [limit_min, limit_max] 时优雅自然停画为 np.nan (通达信 DRAWNULL)；
+            # 3. 彻底杜绝一切人工折弯、死板水平常数线、贴底横线与突兀深V翻转！
+            core_bound = min(tc2, bc2)
+            is_core = in_trend & (cb >= core_bound)
+            is_extrap = in_trend & (cb < core_bound)
+
+            up_valid = is_core | (is_extrap & (up_raw >= limit_min) & (up_raw <= limit_max))
+            lo_valid = is_core | (is_extrap & (lo_raw >= limit_min) & (lo_raw <= limit_max))
+            mid_valid = is_core | (is_extrap & (mid_raw >= limit_min) & (mid_raw <= limit_max))
+
+            upper = np.where(up_valid, up_raw, np.nan)
+            lower = np.where(lo_valid, lo_raw, np.nan)
+            mid = np.where(mid_valid, mid_raw, np.nan)
 
         if start_idx > 0:
             mid[:start_idx] = np.nan
@@ -295,10 +303,15 @@ class TDXChannelFactory:
         upper_price = high[n - tc2]
         lower_price = low[n - bc2]
 
+        nominal_width = float(np.nanmax(up_raw - lo_raw)) if len(up_raw) > 0 else 0.05
+        if nominal_width <= 0.01:
+            nominal_width = float(close[-1] * 0.08)
+
         ch_width = upper - lower
-        ch_width_safe = np.where(ch_width > 1e-6, ch_width, 1e-6)
-        ch_pos_series = np.where(in_trend, (close - lower) / ch_width_safe * 100.0, np.nan)
-        ch_pos_now = float(ch_pos_series[-1]) if pd.notna(ch_pos_series[-1]) else float((close[-1] - lower[-1]) / max(ch_width[-1], 1e-6) * 100.0)
+        ch_width_safe = np.where((ch_width > 1e-6) & pd.notna(ch_width), ch_width, nominal_width)
+        ch_pos_series = np.where(in_trend & pd.notna(lower), (close - lower) / ch_width_safe * 100.0, np.nan)
+        valid_pos = ch_pos_series[pd.notna(ch_pos_series)]
+        ch_pos_now = float(valid_pos[-1]) if len(valid_pos) > 0 else 50.0
 
         # 趋势方向判定
         if is_fallback and macro_dir == -1:
@@ -312,7 +325,7 @@ class TDXChannelFactory:
         ch_slope_pct = effective_slope / close_ref * 100.0
         ch_slope_deg = float(np.degrees(np.arctan(ch_slope_pct)))
 
-        ch_height = float(ch_width[-1])
+        ch_height = float(ch_width[-1]) if pd.notna(ch_width[-1]) else nominal_width
         ch_height_pct = float((ch_height / close_ref) * 100.0)
 
         # ---------------------------------------------------------------------

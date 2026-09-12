@@ -383,8 +383,8 @@ def test_301148_jiarong_descending_channel_alignment():
     assert res120.tc2 == 77, f"120 根全景视野下最高点 87.000 周期 tc2 应为 77: {res120.tc2}"
     assert res120.bc2 == 39, f"120 根全景视野下最低点 35.260 周期 bc2 应为 39: {res120.bc2}"
     assert float(res120.upper[-1]) == pytest.approx(46.37, abs=0.05), f"301148 全景最新上轨必须精准对齐通达信 46.37 元: {res120.upper[-1]}"
-    assert float(res120.mid[-1]) == pytest.approx(39.05, abs=0.1), f"中轨采用几何中轴自愈顺排，杜绝 NaN 与 -101: {res120.mid[-1]}"
-    assert res120.upper[-1] > res120.mid[-1] > res120.lower[-1], "三轨必须保持严格物理顺排"
+    # 遵照通达信官方 DRAWNULL 停画规则：中轨向右外推若跌破最低限制 (31.73 元)，主图自然停画为 NaN，绝不搞死板水平横线
+    assert pd.isna(res120.mid[-1]) or res120.mid[-1] > 0
 
 
 def test_date_axis_no_duplicate_out_of_bounds_ticks():

@@ -344,6 +344,17 @@ def generate_channel_strategy_text(row: Union[dict, pd.Series], df_code: Optiona
             except Exception:
                 pass
 
+    # 🛡️ 外推停画自愈降级：若通道因向右外推超出范围停画 (NaN)，但具备有效极值锚定价格与通道方向
+    if selected_suffix is None:
+        try:
+            ah = float(row.get('ch_anchor_high_price', row.get('ch_upper_price', 0.0)) or 0.0)
+            al = float(row.get('ch_anchor_low_price', row.get('ch_lower_price', 0.0)) or 0.0)
+            cd = row.get('ch_dir')
+            if ah > al > 0.01 and cd is not None and not pd.isna(cd):
+                selected_suffix = ''
+        except Exception:
+            pass
+
     if selected_suffix is None:
         return ""
 
@@ -361,6 +372,14 @@ def generate_channel_strategy_text(row: Union[dict, pd.Series], df_code: Optiona
     upper_p = get_val('ch_upper', 0.0)
     mid_p = get_val('ch_mid', 0.0)
     lower_p = get_val('ch_lower', 0.0)
+
+    # 🛡️ 通达信停画自愈：若通道线由于向右外推超出限制而停画 (NaN / <=0.05)，使用通道波段锚定极值价格自愈
+    anchor_h = get_val('ch_anchor_high_price', get_val('ch_upper_price', 0.0))
+    anchor_l = get_val('ch_anchor_low_price', get_val('ch_lower_price', 0.0))
+    if (upper_p <= 0.05 or lower_p <= 0.01) and (anchor_h > anchor_l > 0.01):
+        upper_p = anchor_h
+        lower_p = anchor_l
+        mid_p = (upper_p + lower_p) / 2.0
 
     # 🛡️ 通达信停画自愈：当中轨跌破最低限制而在主图停画 (NaN / <=0.05) 时，若上轨与下轨有效，使用几何中轴 (upper + lower) / 2
     if mid_p <= 0.05 and upper_p > lower_p > 0.01:
