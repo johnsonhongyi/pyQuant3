@@ -373,6 +373,27 @@ class CapitalDragonPanel(QWidget):
         self.btn_manual_refresh.clicked.connect(self.manual_refresh)
         toolbar_layout.addWidget(self.btn_manual_refresh)
 
+        # 🔄 板块轮动与回踩启动深挖工作台按钮
+        self.btn_open_miner = QPushButton("🔄 回踩深挖")
+        self.btn_open_miner.setStyleSheet("""
+            QPushButton {
+                background-color: #1e3a3a;
+                color: #00ffd5;
+                font-weight: bold;
+                border: 1px solid #00e5bb;
+                border-radius: 3px;
+                padding: 2px 8px;
+                font-size: 8.5pt;
+            }
+            QPushButton:hover {
+                background-color: #00e5bb;
+                color: #000000;
+            }
+        """)
+        self.btn_open_miner.setToolTip("打开板块轮动前排引导与资金主线回踩启动深挖工作台 (Alt+R)")
+        self.btn_open_miner.clicked.connect(self._on_click_miner)
+        toolbar_layout.addWidget(self.btn_open_miner)
+
         # 🎯 策略过滤持久化开关按钮
         self.btn_toggle_filter = QPushButton()
         self._update_filter_button_ui()
@@ -1666,6 +1687,9 @@ class CapitalDragonPanel(QWidget):
         act_radar = menu.addAction("📊 打开板块雷达")
         act_radar.triggered.connect(self._on_click_hot_sector)
 
+        act_miner = menu.addAction("🔄 打开主线回踩深挖 (Alt+R)")
+        act_miner.triggered.connect(self._on_click_miner)
+
         menu.exec(self.table.viewport().mapToGlobal(pos))
 
     def _on_click_limit_up(self):
@@ -1675,6 +1699,13 @@ class CapitalDragonPanel(QWidget):
     def _on_click_hot_sector(self):
         if self.main_window and hasattr(self.main_window, 'open_hot_sector_leaderboard'):
             self.main_window.open_hot_sector_leaderboard()
+
+    def _on_click_miner(self):
+        if self.main_window and hasattr(self.main_window, 'open_sector_rotation_miner'):
+            self.main_window.open_sector_rotation_miner()
+        else:
+            from ats.ui.sector_rotation_miner_dialog import open_sector_rotation_miner_dialog
+            open_sector_rotation_miner_dialog(parent_window=self, current_df=getattr(self, 'raw_df', None))
 
     def _on_click_dragon_mon(self):
         if self.main_window and hasattr(self.main_window, 'open_dragon_monitor'):

@@ -1,3 +1,52 @@
+## 2026-09-12 23:50
+- [x] **【彻底解决天梯缓存2099未来脏日期污染Bug & 建立四重物理自愈与防污染守门体系】(SSOT) (`ats/limit_up_engine.py`, `ats/ui/daily_limit_up_dialog.py`, `tests/test_limit_up_engine.py`)**：
+    - [x] **根因精准穿透**：
+        1. **缓存存储位置与结构**：天梯历史回溯缓存位于 `stock_standalone/datacsv/`，由两部分组成：① 全量汇总主压缩包 `ats_limit_up_records.json.gz`；② 分日独立文件 `ats_limit_up_daily_archive_YYYY-MM-DD.json.gz`；
+        2. **2099 产生根因**：历史单元测试 `test_limit_up_engine.py` 直接调用 `engine.save_daily_records_atomic("2099-12-01", ...)` 与 `"2099-12-02"`，测试未隔离临时目录且无清理退出，导致 2099 测试键直接持久化写入了生产汇总主包；
+        3. **为何清理了 `instockMonitorTK/datacsv` 依然显示 2099**：
+           - 路径偏差：独立工作台运行根目录为 `stock_standalone/datacsv/`，而非旧版监控端；
+           - 结构残留：此前即便删除了分日归档，但主汇总大包 `ats_limit_up_records.json.gz` 内部仍然常驻包含 2099 键，且按字典序排在最新；启动时一键还原导致 2099 永不消失；
+    - [x] **落地四重物理自愈与防污染守门体系**：
+        1. **第一重（磁盘物理自愈修复）**：冷启动 `_load_persisted_history_records` 时，主动扫描检测非法未来日期（`> today` 或 `2099`），自动从内存剔除，物理删除脏归档分日文件，并立即触发原子写回主文件，实现零人工干预自动修复磁盘脏数据；
+        2. **第二重（落盘守门员拦截）**：`save_daily_records_atomic` 增加日期合法性校验守门员，默认拒绝任何未来或测试日期落盘至生产主持久化文件，切断后续污染源；
+        3. **第三重（引擎对外接口过滤）**：`get_all_archived_dates()` 严格过滤非法未来脏日期，确保向外提供的数据集 100% 为合规历史交易日；
+        4. **第四重（UI 下拉渲染双重防线）**：`DailyLimitUpDialog._populate_history_dates` 增加时间窗口校验，杜绝任何未来脏日期呈现在界面上下拉菜单中；
+    - [x] **重构测试生命周期与全量回归 100% PASSED**：
+        1. 重构 `test_multi_day_aggregation_and_persistence`，测试采用 `try...finally` 隔离清理机制，测试完毕自动物理回收临时数据；
+        2. 新增 `test_dirty_future_date_filtering_and_self_healing` 专项防守测试；
+        3. 全量 29 项天梯与轮动测试用例全绿通过，2099 脏数据物理清零！
+
+## 2026-09-12 23:45
+- [x] **【彻底解决盘后初始化 percent 为 0 导致 0 板块 0 标的 Bug & 落地四大自愈机制】(SSOT) (`ats/sector_rotation_pullback_miner.py`, `ats/ui/sector_rotation_miner_dialog.py`, `tests/test_sector_rotation_pullback_miner.py`)**：
+    - [x] **根因精准穿透**：盘后数据初始化后，`percent`、`dff`、`amount` 为 0，而 `per1d~per3d`、`close`、`ma20d` 等历史数据完整正确。原逻辑硬依赖 `dff > 0.5` 与 `pct > 0` 识别冲锋前排，导致前排为 0、板块为 0、回踩为 0，出现工作台空白无数据现象；
+    - [x] **落地四大核心自愈机制**：
+        1. **盘后模式智能感知与评估涨跌基准自动平移自愈**：当 `percent/dff` 为 0 的比例 $\ge 70\%$ 且 `per1d` 存在有效数据时，自动识别进入【🌙 盘后复盘模式】；冲锋与涨幅评价基准自动平移至最新收盘日 `per1d`，前序洗盘由 `per2d`、`per3d` 替代；
+        2. **多模态冲锋龙头画像扩充**：扩充“🌟 趋势大主升龙头”（`dff2 >= 8.0% and eval_pct >= 2.0%`），盘后模式下放宽盘中量比硬约束，融合真实换手率与多日累积强势度；
+        3. **主线板块防零兜底补齐机制**：在盘后或极端缩量行情下，若常规门槛筛选板块不足 `top_sectors_count`，自动按板块综合强度降序从全市场有效板块中保底补足，100% 杜绝 0 板块死寂状态；
+        4. **回踩启动多维形态判定与保底搜寻**：支持缩量洗盘企稳、MA20 黄金依托（$-2.5\% \le \text{dff2} \le +6.5\%$）、底部突破与 KX 支撑线回踩共振；候选数不足时自动启用主线成分股黄金依托企稳兜底；
+    - [x] **UI 交互与状态栏全透明提示**：
+        1. 状态栏透明展示当前工作模式：`🌙 [盘后复盘·以最新收盘日(per1d)为基准]` 或 `🔥 [盘中实时模式]`；
+        2. 下半区表格第 5 列表头动态自适应切换为 `涨幅 per1d` 或 `涨幅 dff`；
+    - [x] **全量自动化验证 6/6 PASSED**：新增 `test_06_post_market_zero_percent_self_healing` 专项测试，模拟全市场 5542 标的零涨幅场景，全部全绿通过！
+
+## 2026-09-12 23:25
+- [x] **【板块轮动前排引导与资金主线回踩启动自动化深挖中枢落地】(SSOT) (`ats/sector_rotation_pullback_miner.py`, `ats/ui/sector_rotation_miner_dialog.py`, `trade_visualizer_qt6.py`, `ats/ui/main_window.py`, `ats/ui/capital_dragon_panel.py`, `bidding_racing_panel.py`, `tests/test_sector_rotation_pullback_miner.py`)**：
+    - [x] **解决板块轮动与底部反弹痛点 (SSOT 核心量化引擎)**：
+        1. **阶段一：前排冲锋与引导标的发现**：结合 `dff`(当日偏离/涨幅)、`dff2`(距离MA20涨幅)、`dff3`(长期涨幅/底蕴)、`per1d~per9d`(时序涨跌幅)、`vol_ratio`(量比)、`ratio`(换手率) 及连板/天梯数据，精准锁定主升先锋、底部放量反弹先锋与爆量突击先锋；
+        2. **阶段二：自下而上主力主线聚合**：反查冲锋个股所属概念/行业板块，综合前排家数、平均涨幅、成交总额、涨停数与加权量比算法打分，锁定主力资金真正大举进攻的 Top 核心主线板块，剔除孤狼杂毛脉冲；
+        3. **阶段三：主线内深挖回踩启动**：在已确认主线板块内，锁定 -2.5% <= dff2 <= 6.5%（MA20 黄金依托区）、前期缩量洗盘 + 今日转阳、底部横盘筑底突破及通达信 KX 支撑线双共振标的，输出建议买区、止损位与高可解释性实战理由；
+    - [x] **5000 只标的全市场毫秒级极致性能优化**：
+        1. **向量化单次预提取 (`_extract_df_arrays`)**：耗时 < 4ms，将全市场宽表统一转换为原生 NumPy 一维连续数组，抹平循环内多次 `pd.to_numeric` 和 Series 开销；
+        2. **纯原生数组下标遍历**：循环内 0 Pandas `.loc` 检索，纯原生浮点数计算与集合过滤；
+        3. **零外部网络阻塞**：`LimitUpEngine` 仅读内存缓存，杜绝 IPO 日历与网络 I/O 阻塞；5000 只标的全流程耗时稳定在 100~115ms（远低于 150ms 阈值）；
+    - [x] **专业 Qt6 双视图工作台与全端 Alt+R 联动**：
+        1. **上下双视图 Splitter 响应式布局**：上半区展示 Top 主线板块（资金额、强度分、领涨龙头），点击即时单选联动过滤下半区回踩启动个股；
+        2. **多端深度集成与快捷键**：在主窗口、资金龙头面板、可视化端、竞价赛马端全面增加【🔄 轮动深挖】入口并绑定全局快捷键 `Alt+R`；
+        3. **实战辅助闭环**：双击联动外部行情或本地分时K线，右键支持【🧬 DNA 专项审核 (Alt+W)】与【⭐ 设为重点关注】，支持 `T` 键置顶与 `F5` 刷新；
+    - [x] **全量自动化回归验证 100% PASSED**：
+        1. 专项测试套件 `test_sector_rotation_pullback_miner.py` 5/5 PASSED（涵盖逻辑断言、5000 只标的性能压测与 UI 对话框生命周期）；
+        2. 全量关联套件（资金龙头面板、通道对齐、通道鲁棒性、多周期信号）全部全绿通过！
+
 ## 2026-09-12 20:30
 - [x] **【修复过滤框光标左右方向键失效与文本优先居左对齐展示】(SSOT) (`trade_visualizer_qt6.py`)**：
     - [x] **根因排查 (左右键失效)**：全局按键事件过滤器 `eventFilter`（第 2845 行）未判定当前输入焦点控件，将键盘 `Key_Left`、`Key_Right` 强行截断用于移动 K 线/分时图十字光标并直接 `return True`，导致过滤框内的光标无法左右移动；

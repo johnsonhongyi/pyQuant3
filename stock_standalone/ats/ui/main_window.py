@@ -2171,6 +2171,20 @@ class ATSMainWindow(QMainWindow):
         self.btn_limit_up_ladder.setStyleSheet("QPushButton { background-color: #3d1414; color: #ff5555; font-weight: bold; border: 1px solid #ff4444; border-radius: 3px; padding: 1px 4px; font-size: 8.5pt; } QPushButton:hover { background-color: #ff4444; color: #000; }")
         self.btn_limit_up_ladder.clicked.connect(self.open_daily_limit_up_analyzer)
         toolbar.addWidget(self.btn_limit_up_ladder)
+
+        self.btn_sector_miner = QPushButton("轮动深挖🔄")
+        self.btn_sector_miner.setToolTip("打开板块轮动前排引导与资金主线回踩启动深挖工作台 (快捷键 Alt+R)")
+        self.btn_sector_miner.setStyleSheet("QPushButton { background-color: #1e3a3a; color: #00ffd5; font-weight: bold; border: 1px solid #00e5bb; border-radius: 3px; padding: 1px 4px; font-size: 8.5pt; } QPushButton:hover { background-color: #00e5bb; color: #000; }")
+        self.btn_sector_miner.clicked.connect(self.open_sector_rotation_miner)
+        toolbar.addWidget(self.btn_sector_miner)
+
+        # 绑定快捷键 Alt+R
+        try:
+            from PyQt6.QtGui import QKeySequence, QShortcut
+            self.shortcut_miner = QShortcut(QKeySequence("Alt+R"), self)
+            self.shortcut_miner.activated.connect(self.open_sector_rotation_miner)
+        except Exception:
+            pass
         
         toolbar.addSeparator()
 
@@ -6238,6 +6252,13 @@ class ATSMainWindow(QMainWindow):
             except Exception as e:
                 print(f"[ATSMainWindow] Error closing hot sector leaderboard on close: {e}")
 
+        miner_win = getattr(self, '_sector_rotation_miner_win', None)
+        if miner_win and not isdeleted(miner_win):
+            try:
+                miner_win.close()
+            except Exception:
+                pass
+
         if hasattr(self, 'daily_limit_up_dialog') and self.daily_limit_up_dialog and not isdeleted(self.daily_limit_up_dialog):
             try:
                 self.daily_limit_up_dialog.close()
@@ -6510,6 +6531,13 @@ class ATSMainWindow(QMainWindow):
 
         if hasattr(self.hot_sector_dialog, '_force_refresh_data'):
             self.hot_sector_dialog._force_refresh_data()
+
+    def open_sector_rotation_miner(self):
+        """调起【🔥 板块轮动前排引导与资金主线回踩启动深挖工作台】独立窗口 (Alt+R)"""
+        if getattr(self, '_is_closing', False) or getattr(self, '_is_exiting', False):
+            return
+        from ats.ui.sector_rotation_miner_dialog import open_sector_rotation_miner_dialog
+        open_sector_rotation_miner_dialog(parent_window=self, current_df=self.current_df)
 
     def open_global_market_dialog(self):
         """打开/激活【🌐 全球外盘与热点情绪看板】独立自适应窗口 (不影响主界面原有布局)"""
