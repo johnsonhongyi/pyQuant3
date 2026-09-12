@@ -681,6 +681,54 @@ def test_channel_upper_and_support_multiday_preservation():
         assert f'ch_supp_price{da}' in last_feat, f"特征字典缺失 ch_supp_price{da}"
 
 
+def test_channel_and_support_line_double_resonance_strategy():
+    """
+    验证【上涨通道 + KX 支撑线同向双共振】策略语法展开与逻辑执行 (以 603601 再升科技为实操原型):
+    1. 检验宏语法展开 {OR: lasth{1-9}d > high4{1-9}} 与 {1-3} 占位符展开；
+    2. 模式1 (主升加速型) 精准命中再升科技 603601；
+    3. 模式2 (黄金低吸伏击型) 成功排除已大涨高位票，精准锁定低位回踩票；
+    4. 模式3 (严密双共振) 结合换手率 ratio 与多日支撑序列有效执行。
+    """
+    from query_engine_util import PandasQueryEngine
+    qe = PandasQueryEngine()
+
+    # 模拟 603601 再升科技实操数据
+    df_603601 = pd.DataFrame([{
+        'code': '603601', 'name': '再升科技',
+        'close': 10.79, 'percent': 8.33, 'ratio': 28.14, 'vol_ratio': 2.5,
+        'ch_dir': 1.0, 'ch_slope_deg': 17.87,
+        'ch_upper': 10.98, 'ch_mid': 9.69, 'ch_lower': 8.18, 'ch_pos': 93.05,
+        'ch_supp_price': 8.91, 'ch_supp1': 8.91, 'ch_supp_slope_deg': 26.6,
+        'ch_supp_pos': (10.79 - 8.91) / 8.91 * 100,
+        'lasth1d': 10.96, 'high41': 9.07,
+        'lasth2d': 9.96, 'high42': 9.07,
+        'lasth3d': 9.19, 'high43': 9.24,
+        'lasth4d': 9.15, 'high44': 9.24,
+        'lasth5d': 9.09, 'high45': 9.24,
+        'lasth6d': 9.32, 'high46': 9.24,
+        'lasth7d': 9.36, 'high47': 9.17,
+        'lasth8d': 9.39, 'high48': 9.17,
+        'lasth9d': 9.25, 'high49': 9.05,
+        'lastl1d': 9.90, 'lastl2d': 8.91, 'lastl3d': 9.00
+    }])
+
+    # 模式 1: 经典双共振·主升加速型
+    q1 = "{OR: lasth{1-9}d > high4{1-9}} and ch_dir == 1 and ch_slope_deg > 6.0 and ch_supp_slope_deg > 15.0 and close >= ch_supp_price and ch_supp_price >= ch_lower and close >= ch_mid and lastl{1-3}d >= ch_lower"
+    res1 = qe.execute(df_603601, q1)
+    assert len(res1) == 1, "模式1必须精准命中 603601 再升科技"
+
+    # 模式 2: 极致共振·黄金低吸伏击型 (再升科技已大涨93%应被安全过滤排除)
+    q2 = "ch_dir == 1 and ch_slope_deg > 3.0 and ch_supp_slope_deg > 10.0 and close >= ch_supp_price and ch_supp_pos <= 5.0 and ch_supp_price >= ch_lower and (ch_pos >= 20 and ch_pos <= 65)"
+    res2 = qe.execute(df_603601, q2)
+    assert len(res2) == 0, "模式2低吸策略必须安全排除已暴涨至 93% 的高位追高票"
+
+    # 模式 3: 严密双共振·量价齐升型
+    q3 = "{OR: lasth{1-9}d > high4{1-9}} and ch_dir == 1 and ch_slope_deg > 5.0 and ch_supp_slope_deg > 12.0 and close >= ch_supp1 and ch_supp1 >= ch_lower and lastl1d >= ch_supp1 * 0.98 and ratio >= 5.0 and percent > 0"
+    res3 = qe.execute(df_603601, q3)
+    assert len(res3) == 1, "模式3量价齐升必须精准命中 603601"
+
+
+
 
 
 
