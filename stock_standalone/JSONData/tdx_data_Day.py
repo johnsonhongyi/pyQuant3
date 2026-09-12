@@ -5,7 +5,11 @@ from __future__ import annotations
 
 import os
 import sys
-sys.path.append("..")
+_CURR_DIR = os.path.dirname(os.path.abspath(__file__))
+_PARENT_DIR = os.path.dirname(_CURR_DIR)
+for p in (_CURR_DIR, _PARENT_DIR):
+    if p not in sys.path:
+        sys.path.insert(0, p)
 import time
 from struct import *
 # import numpy as np
@@ -2261,7 +2265,15 @@ def calc_trend_channel(df, ur=6, lr=6):
         'cdp_support': np.round(np.full(n, ch_res.cdp_support), 3),
         'cdp_reversal': np.round(np.full(n, ch_res.cdp_reversal), 3),
         'cdp_resistance': np.round(np.full(n, ch_res.cdp_resistance), 3),
-        'cdp_breakthrough': np.round(np.full(n, ch_res.cdp_breakthrough), 3)
+        'cdp_breakthrough': np.round(np.full(n, ch_res.cdp_breakthrough), 3),
+        # 直觉与交互常用别名 (便于交互分析、ipdb调试与直接属性访问)
+        'ch_supp': np.round(np.full(n, supp_price_last), 3),
+        'ch_supplast': np.round(np.full(n, supp_price_last), 3),
+        'supp_price': np.round(np.full(n, supp_price_last), 3),
+        'supp_price_last': np.round(np.full(n, supp_price_last), 3),
+        'supp_slope': np.round(np.full(n, supp_slope), 4),
+        'upper_price': np.full(n, upper_price),
+        'lower_price': np.full(n, lower_price)
     }
 
     # 动态注入多日通道上轨及支撑线价格预处理特征 (格式同 high41, high42, ... high4{cct.compute_lastdays})

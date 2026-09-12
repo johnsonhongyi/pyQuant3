@@ -1,3 +1,19 @@
+## 2026-09-12 16:35
+- [x] **【注入直觉交互字段别名(ch_supp/supp_price/supp_slope等) & 全量同步至 config/indicator_help_custom.json 说明文档】(SSOT) (`JSONData/tdx_data_Day.py`, `config/indicator_help_custom.json`, `stock_indicator_help.py`)**：
+    - [x] **直觉字段别名注入 (彻底根除 AttributeError)**：
+        1. **痛点溯源**：操盘手在 `ipdb` 或量化调试时，习惯性直接访问 `df2.ch_supp`、`df2.supp_price`、`df2.supp_slope`、`df2.upper_price` 等简写，因原底层列名为 `ch_supp_price`、`ch_supp_slope`、`ch_anchor_high_price` 而报 `AttributeError`；
+        2. **零开销别名广播映射**：
+           - `ch_supp` / `ch_supplast` / `supp_price` / `supp_price_last` -> 映射到 `ch_supp_price` (今日支撑线价格)；
+           - `supp_slope` -> 映射到 `ch_supp_slope` (通达信支撑线几何斜率)；
+           - `upper_price` / `lower_price` -> 映射到 `ch_anchor_high_price` / `ch_anchor_low_price` (通道锚定极值)；
+           - 脚本顶部加强 `sys.path` 兼容，直接运行 `python .../tdx_data_Day.py` 不再报包导入错误；
+    - [x] **最新全部指标全量同步至 `config/indicator_help_custom.json`**：
+        1. **多日通道上轨价格序列**：`ch_upper1 ~ ch_upper{N}`（格式同 high41~high4{cct.compute_lastdays}），支持回溯与停画自愈；
+        2. **通达信 DRAWLINE 支撑线多日价格序列**：`ch_supp1 ~ ch_supp{N}` / `ch_supp_price1 ~ ch_supp_price{N}`，几何线性递推；
+        3. **通达信 CDP 逆势操作四维支撑反转体系**：`cdp_support`（明日支撑）、`cdp_reversal`（明日反转）、`cdp_resistance`（明日阻力）、`cdp_breakthrough`（明日突破）；
+        4. **便捷访问别名全量收录**：明确说明 `ch_supp`、`supp_price`、`supp_slope`、`upper_price`；
+        5. **外置文档免打包热加载验证**：通过 `stock_indicator_help.py` 验证加载 40 项全量指标，程序中按下 `Ctrl + /` 即可瞬时热查阅！
+
 ## 2026-09-12 16:20
 - [x] **【/review 可视化底层通道支撑线对齐审查 & 通道上轨与支撑线多日预处理保留 (cct.compute_lastdays)】(SSOT) (`JSONData/tdx_channel_factory.py`, `JSONData/tdx_data_Day.py`, `query_engine_util.py`, `tests/test_tdx_channel_visualizer_alignment.py`)**：
     - [x] **执行系统性 /review 深度代码审查**：
