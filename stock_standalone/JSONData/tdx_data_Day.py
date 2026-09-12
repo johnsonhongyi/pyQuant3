@@ -1559,6 +1559,13 @@ def generate_df_vect_daily_features(df, lastdays=cct.compute_lastdays):
                 colname = f'{suffix}{d}d'
                 feat[colname] = row[colname] if colname in df.columns else 0
 
+        # ===== 3️⃣ 保留多日通道上轨及支撑线价格 (格式同 high41, high42, ... high4{lastdays}) =====
+        for d in range(1, lastdays + 1):
+            for ch_feat in ('ch_upper', 'ch_supp', 'ch_supp_price'):
+                feat_col = f'{ch_feat}{d}'
+                if feat_col in df.columns:
+                    feat[feat_col] = row[feat_col]
+
         features_list.append(feat)
 
     return features_list
@@ -1611,6 +1618,13 @@ def generate_df_vect_daily_features_lastday(df, lastdays=cct.compute_lastdays):
             for suffix in ('eval', 'signal'):
                 colname = f'{suffix}{d}d'
                 feat[colname] = row[colname] if colname in df.columns else 0
+
+        # ===== 3️⃣ 保留多日通道上轨及支撑线价格 (格式同 high41, high42, ... high4{lastdays}) =====
+        for d in range(1, lastdays + 1):
+            for ch_feat in ('ch_upper', 'ch_supp', 'ch_supp_price'):
+                feat_col = f'{ch_feat}{d}'
+                if feat_col in df.columns:
+                    feat[feat_col] = row[feat_col]
 
         features_list.append(feat)
 
@@ -2249,6 +2263,16 @@ def calc_trend_channel(df, ur=6, lr=6):
         'cdp_resistance': np.round(np.full(n, ch_res.cdp_resistance), 3),
         'cdp_breakthrough': np.round(np.full(n, ch_res.cdp_breakthrough), 3)
     }
+
+    # 动态注入多日通道上轨及支撑线价格预处理特征 (格式同 high41, high42, ... high4{cct.compute_lastdays})
+    upper_multidays = ch_res.upper_multidays or {}
+    supp_multidays = ch_res.supp_multidays or {}
+    for da, u_val in upper_multidays.items():
+        new_cols[f'ch_upper{da}'] = np.full(n, u_val)
+    for da, s_val in supp_multidays.items():
+        new_cols[f'ch_supp{da}'] = np.full(n, s_val)
+        new_cols[f'ch_supp_price{da}'] = np.full(n, s_val)
+
     df = df.assign(**new_cols)
     return df
 

@@ -613,6 +613,74 @@ def test_kline_double_click_lock_and_right_click_reset_lifecycle():
     detail_win.hide.assert_called(), "恢复自动关闭后移出视口必须自动隐藏！"
 
 
+def test_channel_upper_and_support_multiday_preservation():
+    """
+    测试通道上轨价格及支撑线价格的多日数据预处理保留机制 (cct.compute_lastdays):
+    1. 动态读取 cct.compute_lastdays (如 9 天)；
+    2. DataFrame 列保留格式严格对齐 high41, high42, ... high4{max_days}；
+    3. TDXChannelResult 包含完整 upper_multidays 与 supp_multidays 映射；
+    4. 支撑线价格历史递推关系严谨 (supp_price_d = supp_price_last - supp_slope * (d - 1))；
+    5. generate_df_vect_daily_features 提取字典成功同步包含这些特征。
+    """
+    import JohnsonUtil.commonTips as cct
+    from JSONData.tdx_channel_factory import TDXChannelFactory
+    from JSONData.tdx_data_Day import generate_df_vect_daily_features
+
+    df = get_tdx_Exp_day_to_df('002384')
+    assert df is not None and len(df) >= 30, "002384 数据不足"
+    last = df.iloc[-1]
+    n = len(df)
+    max_days = int(getattr(cct, 'compute_lastdays', 9))
+    assert max_days >= 1, "compute_lastdays 必须大于等于 1"
+
+    # 1. 验证 TDXChannelFactory SSOT 工厂对象包含多日保留
+    ch_res = TDXChannelFactory.calculate(df)
+    assert ch_res.upper_multidays is not None, "TDXChannelResult 必须包含 upper_multidays"
+    assert ch_res.supp_multidays is not None, "TDXChannelResult 必须包含 supp_multidays"
+    assert len(ch_res.upper_multidays) == max_days, f"upper_multidays 长度应为 {max_days}"
+    assert len(ch_res.supp_multidays) == max_days, f"supp_multidays 长度应为 {max_days}"
+
+    supp_last = float(last['ch_supp_price'])
+    supp_slope = float(last['ch_supp_slope'])
+
+    # 2. 验证 DataFrame 中所有多日列均正确生成且有效
+    for da in range(1, max_days + 1):
+        col_up = f'ch_upper{da}'
+        col_supp = f'ch_supp{da}'
+        col_supp_p = f'ch_supp_price{da}'
+
+        assert col_up in df.columns, f"DataFrame 缺失通道上轨多日列: {col_up}"
+        assert col_supp in df.columns, f"DataFrame 缺失支撑线多日列: {col_supp}"
+        assert col_supp_p in df.columns, f"DataFrame 缺失支撑线价格多日列: {col_supp_p}"
+
+        up_val = float(last[col_up])
+        supp_val = float(last[col_supp])
+        supp_p_val = float(last[col_supp_p])
+
+        assert pd.notna(up_val) and up_val > 0, f"{col_up} 值无效: {up_val}"
+        assert pd.notna(supp_val) and supp_val > 0, f"{col_supp} 值无效: {supp_val}"
+        assert supp_val == supp_p_val, f"{col_supp} 与 {col_supp_p} 必须完全等价: {supp_val} vs {supp_p_val}"
+
+        # 支撑线线性递推验证: supp_price_d = supp_price_last - supp_slope * (d - 1)
+        expected_supp = round(max(0.01, supp_last - supp_slope * (da - 1)), 3)
+        assert abs(supp_val - expected_supp) < 1e-3, f"第 {da} 天支撑线价格递推不符: {supp_val} vs {expected_supp}"
+
+        # 工厂字典与 DataFrame 广播值一致性验证
+        assert ch_res.upper_multidays[da] == up_val, f"工厂 upper_multidays[{da}] 与 DataFrame 不一致"
+        assert ch_res.supp_multidays[da] == supp_val, f"工厂 supp_multidays[{da}] 与 DataFrame 不一致"
+
+    # 3. 验证 generate_df_vect_daily_features 提取字典成功同步包含多日特征
+    df_for_feat = df.tail(max_days + 5).copy()
+    feat_list = generate_df_vect_daily_features(df_for_feat, lastdays=max_days)
+    assert len(feat_list) > 0, "特征生成不能为空"
+    last_feat = feat_list[-1]
+
+    for da in range(1, max_days + 1):
+        assert f'ch_upper{da}' in last_feat, f"特征字典缺失 ch_upper{da}"
+        assert f'ch_supp{da}' in last_feat, f"特征字典缺失 ch_supp{da}"
+        assert f'ch_supp_price{da}' in last_feat, f"特征字典缺失 ch_supp_price{da}"
+
+
 
 
 
