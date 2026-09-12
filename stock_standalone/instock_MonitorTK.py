@@ -18413,21 +18413,34 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             clipboard_text = event.widget.clipboard_get()
         except tk.TclError:
             return
-        # 插入到光标位置
-        # event.widget.insert(tk.INSERT, clipboard_text)
-        # 先清空再黏贴
-        if clipboard_text.isdigit() and len(clipboard_text) == 6:
-            clipboard_text = f'index.str.contains("^{clipboard_text}")'
+
+        text = clipboard_text.strip() if clipboard_text else ""
+        if not text:
+            return
+
+        # 1. 如果本身已经是完整的查询表达式或包含 contains / 查询操作符，直接原样使用，避免破坏
+        query_ops = ['.str.contains', 'category.', 'index.', '>', '<', '==', '!=', '>=', '<=', ' and ', ' or ', ' & ', ' | ']
+        if any(op in text for op in query_ops):
+            final_text = text
+        # 2. 6位纯数字股票代码：转为代码前缀匹配
+        elif text.isdigit() and len(text) == 6:
+            final_text = f'index.str.contains("^{text}")'
         else:
-            allowed = r'\-\(\)'
-            pattern = rf'[\u4e00-\u9fa5]+[A-Za-z0-9{allowed}（）]*'
-            matches = re.findall(r'[\u4e00-\u9fa5]+[A-Za-z0-9\-\(\)（）]*', clipboard_text)
+            # 3. 板块/概念词提取与智能封装
+            # 去除首尾空白及外层包裹引号、书名号等（保留圆括号，概念常带圆括号如 光刻机(胶)）
+            cleaned = re.sub(r'^[【\["“\'`\s]+|[】\]"”\'`\s]+$', '', text)
+            cleaned = re.sub(r'^(?:所属)?(?:概念|板块|行业)[:：\s]+', '', cleaned).strip()
+
+            # 概念词允许以数字、英文或中文开头，包含中文、英文、数字、中英文括号、横线、斜杠等
+            # 如: "6G概念", "5G", "CPO概念", "AI手机", "人形机器人(减速器)", "半导体"
+            matches = re.findall(r'[\u4e00-\u9fa5A-Za-z0-9\-\(\)（）/]+', cleaned)
             if matches:
-                # clipboard_text = f'category.str.contains("^{matches[0]}")'
-                clipboard_text = f'category.str.contains("{matches[0]}")'
+                final_text = f'category.str.contains("{matches[0]}")'
+            else:
+                final_text = text
 
         event.widget.delete(0, tk.END)
-        event.widget.insert(0, clipboard_text)
+        event.widget.insert(0, final_text)
 
         # # 直接更新 _last_value，防止防抖再触发
         # val1 = self.search_var1.get().strip()

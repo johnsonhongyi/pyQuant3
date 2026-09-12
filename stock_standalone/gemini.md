@@ -1,3 +1,22 @@
+## 2026-09-12 20:15
+- [x] **【优化 Qt6 可视化端板块过滤输入框跟随窗口自动放大响应式布局】(SSOT) (`trade_visualizer_qt6.py`)**：
+    - [x] **根因分析**：原代码在工具栏中为板块过滤下拉框 `cat_filter_input` 写死了固定宽度 `setFixedWidth(80)`，导致长查询表达式（如 `category.str.contains("xxx", ...)`）严重被挤压截断，且右侧存在大片闲置空白区域无法有效利用；
+    - [x] **自适应伸缩策略 (Expanding SizePolicy)**：
+        1. 移除 `setFixedWidth(80)`，配置 `QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred`；
+        2. 设置合理的弹性区间：最小宽度 `setMinimumWidth(100)`，最大宽度 `setMaximumWidth(550)`，当窗口全屏或拉大时，自动平滑伸展占用右侧富余空间；
+        3. 下拉列表宽度优化：设置 `view().setMinimumWidth(350)`，展开历史 records 时保证清晰易读；
+    - [x] **语法编译验证**：通过 `python -m py_compile trade_visualizer_qt6.py` 严格校验。
+
+## 2026-09-12 20:10
+- [x] **【修复监控与可视化端搜索框右键粘贴概念吞掉前缀Bug (如"6G概念"变成"概念")】(SSOT) (`instock_MonitorTK.py`, `trade_visualizer_qt6.py`)**：
+    - [x] **根因排查与诊断**：原代码使用正则表达式 `[\u4e00-\u9fa5]+[A-Za-z0-9\-\(\)（）]*` 强行要求必须以汉字开头。当剪贴板为 `"6G概念"`、`"5G"`、`"CPO概念"`、`"AI手机"` 等以数字或字母开头的概念时，开头的英数前缀被正则直接忽略，从第一个汉字开始截断匹配，导致 `"6G概念"` 变成 `category.str.contains("概念")`，丢失核心前缀，且纯英文/数字板块（如 `5G`、`CPO`）无法匹配；
+    - [x] **智能兼容与表达式保护机制**：
+        1. **完整 Query 表达式直通保护**：若剪贴板内容本身已包含 `.str.contains`、`category.`、`index.` 或常用比较/逻辑运算符（`>`、`<`、`==`、`!=`、` and `、` or ` 等），判定为完整查询语句，原样保留粘贴，杜绝破坏用户已复制的复杂 Query；
+        2. **股票代码标准识别**：保留 6 位纯数字判定并自动包装为 `index.str.contains("^{text}")`；
+        3. **前缀/包裹符号清洗**：自动剥离常见的外层引号、书名号（如 `【6G概念】`、`"6G概念"`）与描述性前缀（如 `概念:`、`板块:`、`所属概念:`），并安全保留概念自带的圆括号（如 `光刻机(胶)`、`共封装光学(CPO)`）；
+        4. **通用概念词正则提取**：使用 `[\u4e00-\u9fa5A-Za-z0-9\-\(\)（）/]+` 允许以数字、字母、汉字等任意有效字符开头，完美支持 `"6G概念"`、`"5G"`、`"6G"`、`"CPO概念"`、`"AI手机"`、`"固态电池"` 等所有主流板块命名格式；
+    - [x] **多端同步修复与语法编译**：同步修复 Tk 端 `instock_MonitorTK.py` 与 Qt6 端 `trade_visualizer_qt6.py`；通过 `python -m py_compile` 编译与专项逻辑断言验证。
+
 ## 2026-09-12 17:52
 - [x] **【全市场选股多日换手率单例共享内存预提取与纳秒级批量注入极致性能优化】(SSOT) (`JSONData/multiday_feature_store.py`, `JSONData/tdx_data_Day.py`, `tests/test_multiday_feature_store.py`)**：
     - [x] **痛点与性能瓶颈穿透**：全市场特征提取器（`generate_df_vect_daily_features` 与 `lastday`）在 5000 只股票大循环内部，此前每只个股均重复执行模块导入、`_CACHE_LOCK` 线程锁与 DataFrame `.loc` 检索，造成了多余开销与锁争用；
