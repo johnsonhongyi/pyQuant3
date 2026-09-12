@@ -1019,23 +1019,25 @@ class QueryHistoryManager:
             toast_message(self.root, f"✅ 已复制 {len(queries)} 条组合公式 ({op.upper()})")
         except Exception: pass
 
-    def show_multi_query_details(self, queries):
+    def show_multi_query_details(self, queries, query_hits=None, df_target=None):
         """[NEW] 弹窗展示多选策略的【全中标的】与【未全中标的】矩阵对比"""
         if not queries: return
-        df_target = self._get_runtime_df()
+        if df_target is None:
+            df_target = self._get_runtime_df()
         if df_target is None or df_target.empty:
             toast_message(self.root, "❌ 暂无可用回测数据集")
             return
 
         from query_engine_util import query_engine
-        query_hits = {}
-        for i, q in enumerate(queries):
-            try:
-                sub = query_engine.execute(df_target, q)
-                query_hits[i] = set(sub.index) if (sub is not None and not sub.empty) else set()
-            except Exception as e:
-                logger.error(f"show_multi_query_details execute error for Q{i}: {e}")
-                query_hits[i] = set()
+        if query_hits is None:
+            query_hits = {}
+            for i, q in enumerate(queries):
+                try:
+                    sub = query_engine.execute(df_target, q)
+                    query_hits[i] = set(sub.index) if (sub is not None and not sub.empty) else set()
+                except Exception as e:
+                    logger.error(f"show_multi_query_details execute error for Q{i}: {e}")
+                    query_hits[i] = set()
 
         if not query_hits: return
         all_union = set.union(*query_hits.values()) if query_hits else set()
@@ -1216,13 +1218,195 @@ class QueryHistoryManager:
             
             s_menu.add_separator()
             s_menu.add_command(label="📋 复制当前标签页全部股票代码", command=lambda: _copy_all_codes_in_tree(target_tree))
+            s_menu.add_separator()
+            s_menu.add_command(label="🧬 DNA 专项审核 (Alt+W)", command=lambda: _trigger_dna_audit(target_tree))
             s_menu.tk_popup(event.x_root, event.y_root)
+
+        # 💡 [NEW] 针对 DNA 专项审核的选股逻辑 (默认 50 只，与 tk 点击选择 code 逻辑保持绝对一致)
+        def _get_target_codes_for_dna(target_tree, limit=50):
+            if not target_tree:
+                return {}
+            items = list(target_tree.get_children())
+            if not items:
+                return {}
+
+            # 筛选有效股票行 (排除类似占位提示行 "-")
+            valid_items = []
+            for it in items:
+                vals = target_tree.item(it, "values")
+                if vals and len(vals) > 0:
+                    c = str(vals[0]).strip()
+                    if c.isdigit() and len(c) == 6:
+                        valid_items.append(it)
+
+            if not valid_items:
+                return {}
+
+            selection = target_tree.selection()
+            valid_selection = [it for it in selection if it in valid_items]
+
+            target_items = []
+            if len(valid_selection) > 1:
+                # 多选模式：仅审计选中的 (上限 limit 只，默认 50 只)
+                target_items = valid_selection[:limit]
+            elif len(valid_selection) == 1:
+                # 单选模式：从当前选中行开始向下 limit 只 (包含选中项本身)
+                try:
+                    start_idx = valid_items.index(valid_selection[0])
+                except ValueError:
+                    start_idx = 0
+                target_items = valid_items[start_idx : start_idx + limit]
+            else:
+                # 没有选择 code，自动从顶部选择默认前 limit (50) 只
+                target_items = valid_items[:limit]
+
+            code_to_name = {}
+            for it in target_items:
+                vals = target_tree.item(it, "values")
+                if not vals: continue
+                c = str(vals[0]).strip()
+                n = str(vals[1]).strip() if len(vals) > 1 else ""
+                if c.isdigit() and len(c) == 6:
+                    code_to_name[c] = n
+
+            return code_to_name
+
+        def _run_dna_audit_standalone(code_to_name, parent_win):
+            try:
+                from backtest_feature_auditor import audit_multiple_codes, show_dna_audit_report_window
+            except Exception as e:
+                logger.error(f"Cannot import backtest_feature_auditor: {e}")
+                toast_message(parent_win, f"⚠️ 未能加载 DNA 审计模块: {e}", 2500)
+                return
+
+            codes = list(code_to_name.keys())
+            if not codes:
+                toast_message(parent_win, "⚠️ 待审计股票列表为空", 2000)
+                return
+
+            prog_top = tk.Toplevel(parent_win)
+            prog_top.title("🧬 DNA 专项审核中...")
+            prog_top.configure(bg='#f8f9fa')
+            w, h = 340, 140
+            try:
+                sw = parent_win.winfo_screenwidth()
+                sh = parent_win.winfo_screenheight()
+                x = (sw - w) // 2; y = (sh - h) // 2
+                prog_top.geometry(f"{w}x{h}+{x}+{y}")
+            except Exception:
+                prog_top.geometry(f"{w}x{h}")
+            prog_top.attributes("-topmost", True)
+
+            content = tk.Frame(prog_top, bg='#f8f9fa', padx=15, pady=15)
+            content.pack(expand=True, fill='both')
+
+            msg_lbl = tk.Label(content, text=f"正在对 {len(codes)} 只个股进行 DNA 专项审核...", font=("微软雅黑", 9), bg='#f8f9fa', fg='#333')
+            msg_lbl.pack(pady=(0, 10))
+
+            prog_var = tk.DoubleVar()
+            prog_bar = ttk.Progressbar(content, variable=prog_var, maximum=len(codes), mode='determinate', length=280)
+            prog_bar.pack(pady=5)
+
+            status_lbl = tk.Label(content, text="初始化中...", font=("微软雅黑", 8), bg='#f8f9fa', fg='#666')
+            status_lbl.pack()
+
+            def progress_cb(curr, total, msg):
+                def _upd():
+                    try:
+                        if not prog_top.winfo_exists(): return
+                        prog_var.set(curr)
+                        status_lbl.config(text=msg)
+                        if curr >= total:
+                            status_lbl.config(text="✅ 正在生成审计报告...")
+                    except Exception: pass
+                try:
+                    parent_win.after(0, _upd)
+                except Exception: pass
+
+            def run_thread():
+                try:
+                    try:
+                        from JohnsonUtil import commonTips as cct
+                        custom_cols = cct.dna_audit_custom_cols if (cct and hasattr(cct, 'dna_audit_custom_cols')) else ['dff2', 'dff3', 'Rank']
+                    except Exception:
+                        custom_cols = ['dff2', 'dff3', 'Rank']
+
+                    summaries = audit_multiple_codes(
+                        codes,
+                        code_to_name=code_to_name,
+                        progress_callback=progress_cb,
+                        custom_cols=custom_cols
+                    )
+
+                    def _show():
+                        if prog_top.winfo_exists():
+                            prog_top.destroy()
+                        show_dna_audit_report_window(summaries, parent=parent_win)
+
+                    parent_win.after(0, _show)
+                except Exception as err:
+                    logger.error(f"DNA audit standalone error: {err}")
+                    def _show_err():
+                        if prog_top.winfo_exists(): prog_top.destroy()
+                        toast_message(parent_win, f"❌ DNA 审计出错: {err}", 3000)
+                    parent_win.after(0, _show_err)
+
+            import threading
+            threading.Thread(target=run_thread, daemon=True).start()
+
+        def _trigger_dna_audit(target_tree=None):
+            try:
+                if target_tree is None:
+                    # 智能判断当前 Tab 激活的 Treeview
+                    try:
+                        cur_tab_idx = nb.index(nb.select())
+                    except Exception:
+                        cur_tab_idx = 0
+                    if cur_tab_idx == 0:
+                        target_tree = tree1
+                    elif cur_tab_idx == 1:
+                        target_tree = tree2
+                    else:
+                        target_tree = tree1 if len(tree1.get_children()) > 0 else tree2
+
+                code_to_name = _get_target_codes_for_dna(target_tree, limit=50)
+                if not code_to_name:
+                    # 若当前树为空，尝试另一个树
+                    alt_tree = tree2 if target_tree == tree1 else tree1
+                    code_to_name = _get_target_codes_for_dna(alt_tree, limit=50)
+
+                if not code_to_name:
+                    toast_message(top, "⚠️ 当前列表无有效股票，无法执行 DNA 专项审核", 2000)
+                    return
+
+                toast_message(top, f"🧬 正在对 {len(code_to_name)} 只股票发起 DNA 专项审核...", 1500)
+                root_host = self.root or getattr(self, 'master', None)
+                if root_host and hasattr(root_host, '_run_dna_audit_batch'):
+                    end_date = None
+                    if hasattr(root_host, '_get_audit_end_date'):
+                        try: end_date = root_host._get_audit_end_date()
+                        except Exception: pass
+                    root_host._run_dna_audit_batch(code_to_name, end_date=end_date)
+                else:
+                    _run_dna_audit_standalone(code_to_name, parent_win=top)
+            except Exception as e:
+                logger.error(f"_trigger_dna_audit error: {e}")
+
+        # 挂载内部测试引用
+        top._get_target_codes_for_dna = _get_target_codes_for_dna
+        top._trigger_dna_audit = _trigger_dna_audit
+
+        # 全局与 Treeview 绑定 Alt+w / Alt+W 快捷键
+        top.bind("<Alt-w>", lambda e: _trigger_dna_audit())
+        top.bind("<Alt-W>", lambda e: _trigger_dna_audit())
 
         for target_t in (tree1, tree2):
             target_t.bind("<<TreeviewSelect>>", lambda e, t=target_t: _on_stock_select(e, t))
             target_t.bind("<Button-3>", lambda e, t=target_t: _on_stock_context_menu(e, t))
             target_t.bind("<Control-c>", lambda e, t=target_t: _copy_selected_codes(t, "code"))
             target_t.bind("<Control-C>", lambda e, t=target_t: _copy_selected_codes(t, "code"))
+            target_t.bind("<Alt-w>", lambda e, t=target_t: _trigger_dna_audit(t))
+            target_t.bind("<Alt-W>", lambda e, t=target_t: _trigger_dna_audit(t))
 
         # Tab 3: 📋 组合公式与汇总概览
         f3 = ttk.Frame(nb)
@@ -1645,6 +1829,7 @@ def run_manager_process(history_path=None, df_all=None):
     print(f"File exists: {os.path.exists(history_path)}")
     
     root.mainloop()
+HistoryManager = QueryHistoryManager
 
 if __name__ == "__main__":
     # [NEW] 支持通过 -test 参数直接注入测试数据
