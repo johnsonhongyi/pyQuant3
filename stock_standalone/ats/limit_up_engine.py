@@ -152,6 +152,32 @@ def get_ats_custom_extra_cols() -> List[str]:
     return extra
 
 
+def _is_valid_trade_date_str(date_str: str) -> bool:
+    """
+    严格校验是否为合法的历史交易日日期字符串 (YYYY-MM-DD)，杜绝 2099 等未来测试脏日期。
+    """
+    if not date_str or not isinstance(date_str, str) or len(date_str) != 10:
+        return False
+    parts = date_str.split("-")
+    if len(parts) != 3 or not all(p.isdigit() for p in parts):
+        return False
+    try:
+        year = int(parts[0])
+        month = int(parts[1])
+        day = int(parts[2])
+        # 合理年份限制：1990 ~ 明年，防止年份溢出或测试脏数据 (如 2099)
+        today_str = time.strftime("%Y-%m-%d")
+        current_year = int(today_str[:4])
+        if not (1990 <= year <= current_year + 1 and 1 <= month <= 12 and 1 <= day <= 31):
+            return False
+        # 不允许明显超过当天的未来日期
+        if date_str > today_str:
+            return False
+        return True
+    except Exception:
+        return False
+
+
 _PERSIST_FILE_LOCK = threading.Lock()
 
 
@@ -306,13 +332,21 @@ class LimitUpEngine:
         self._load_persisted_history_records()
 
     def _load_persisted_history_records(self):
-        """【💾 磁盘持久化加载】冷启动瞬间恢复历史涨停与强势股归档记录 (支持 .json.gz 与 .json)"""
+        """【💾 磁盘持久化加载】冷启动瞬间恢复历史涨停与强势股归档记录 (支持 .json.gz 与 .json，内建脏日期自愈修复)"""
         with self._cache_lock:
+            has_dirty_dates = False
             # 1. 尝试从全量归档主文件加载 (优先 .json.gz)
             main_data = _safe_read_json_or_gz(LIMIT_UP_RECORDS_FILE)
             if main_data and isinstance(main_data, dict):
-                self._history_daily_records = main_data
-                logger.info(f"✅ 成功从主持久化文件加载涨停历史数据: 共 {len(main_data)} 个交易日记录")
+                cleaned_data = {}
+                for d, recs in main_data.items():
+                    if _is_valid_trade_date_str(d):
+                        cleaned_data[d] = recs
+                    else:
+                        has_dirty_dates = True
+                        logger.warning(f"🛡️ [天梯数据自愈] 剔除主持久化文件中的异常/未来脏日期: {d} ({len(recs) if isinstance(recs, list) else 0}条)")
+                self._history_daily_records = cleaned_data
+                logger.info(f"✅ 成功从主持久化文件加载涨停历史数据: 共 {len(cleaned_data)} 个交易日记录")
 
             # 2. 补充扫描分日归档文件 (ats_limit_up_daily_archive_YYYY-MM-DD.json.gz / .json)
             try:
@@ -320,6 +354,19 @@ class LimitUpEngine:
                     for fname in os.listdir(DATA_DIR):
                         if fname.startswith("ats_limit_up_daily_archive_") and (fname.endswith(".json.gz") or fname.endswith(".json")):
                             date_part = fname.replace("ats_limit_up_daily_archive_", "").replace(".json.gz", "").replace(".json", "")
+                            # 严格过滤非法未来脏日期 (如 2099)
+                            if not _is_valid_trade_date_str(date_part):
+                                has_dirty_dates = True
+                                logger.warning(f"🛡️ [天梯数据自愈] 忽略并隔离未来异常归档文件: {fname}")
+                                try:
+                                    bad_path = os.path.join(DATA_DIR, fname)
+                                    if os.path.exists(bad_path):
+                                        os.remove(bad_path)
+                                        logger.info(f"🗑️ [天梯数据自愈] 已物理删除脏测试归档文件: {fname}")
+                                except Exception:
+                                    pass
+                                continue
+
                             if date_part not in self._history_daily_records:
                                 fpath = os.path.join(DATA_DIR, fname)
                                 sub_data = _safe_read_json_or_gz(fpath)
@@ -328,7 +375,15 @@ class LimitUpEngine:
             except Exception as e:
                 logger.debug(f"扫描分日涨停归档异常: {e}")
 
-    def save_daily_records_atomic(self, date_str: str, records: List[Dict[str, Any]], force: bool = False, is_eod: bool = False):
+            # 3. 若发现并剔除了脏数据，立即将纯净版数据安全原子写回磁盘，完成自动物理修复
+            if has_dirty_dates and self._history_daily_records:
+                try:
+                    _safe_atomic_write_json_gz(LIMIT_UP_RECORDS_FILE, self._history_daily_records)
+                    logger.info(f"✅ [天梯数据自愈] 已将清洗后的涨停历史数据原子写回主文件，成功修复磁盘脏数据")
+                except Exception as e:
+                    logger.error(f"天梯数据自愈写回失败: {e}")
+
+    def save_daily_records_atomic(self, date_str: str, records: List[Dict[str, Any]], force: bool = False, is_eod: bool = False, allow_test_date: bool = False):
         """
         【💾 安全原子持久化与交易后压缩打包】
         1. 脏检查：仅当数据特征指纹发生变动时才执行落盘；
@@ -338,10 +393,16 @@ class LimitUpEngine:
         :param records: 涨停记录字典列表
         :param force: 是否强制覆写
         :param is_eod: 是否为收盘/交易后终态归档 (End-of-Day)
+        :param allow_test_date: 是否允许未来测试日期 (默认 False 阻断未来脏数据污染生产)
         """
         # 1. 防空数据检查
         if not date_str or not records:
             logger.debug(f"[LimitUpEngine] 持久化请求被忽略: 空日期或空记录集 (date={date_str})")
+            return
+
+        # 2. 严格防御未来脏日期污染生产环境持久化
+        if not _is_valid_trade_date_str(date_str) and not allow_test_date:
+            logger.warning(f"🛡️ [天梯数据防污染] 拒绝持久化未来或异常测试日期: {date_str} (跳过生产落盘)")
             return
 
         with self._cache_lock:
@@ -402,12 +463,13 @@ class LimitUpEngine:
                         single_file_gz = f"{ARCHIVE_PREFIX}{date_str}.json.gz"
                         _safe_atomic_write_json_gz(single_file_gz, single_date_records)
 
-                        # 2. 写入全量主归档文件 (保留最近 90 个交易日，防止文件过度膨胀)
-                        sorted_dates = sorted(history_copy.keys())
+                        # 2. 写入全量主归档文件 (保留最近 90 个交易日，且只保留有效交易日，防止未来脏日期长期驻留)
+                        valid_keys = [d for d in history_copy.keys() if _is_valid_trade_date_str(d)]
+                        sorted_dates = sorted(valid_keys)
                         if len(sorted_dates) > 90:
                             pruned_copy = {d: history_copy[d] for d in sorted_dates[-90:]}
                         else:
-                            pruned_copy = history_copy
+                            pruned_copy = {d: history_copy[d] for d in sorted_dates}
 
                         _safe_atomic_write_json_gz(LIMIT_UP_RECORDS_FILE, pruned_copy)
                         
@@ -1631,7 +1693,7 @@ class LimitUpEngine:
         }
 
     def get_all_archived_dates(self) -> List[str]:
-        """获取所有已持久化归档的历史交易日日期列表 (升序排列，带磁盘动态同步)"""
+        """获取所有已持久化归档的历史交易日日期列表 (升序排列，带磁盘动态同步与合法交易日过滤)"""
         with self._cache_lock:
             # 动态补齐磁盘最新归档日期
             try:
@@ -1639,6 +1701,8 @@ class LimitUpEngine:
                     for fname in os.listdir(DATA_DIR):
                         if fname.startswith("ats_limit_up_daily_archive_") and (fname.endswith(".json.gz") or fname.endswith(".json")):
                             date_part = fname.replace("ats_limit_up_daily_archive_", "").replace(".json.gz", "").replace(".json", "")
+                            if not _is_valid_trade_date_str(date_part):
+                                continue
                             if date_part not in self._history_daily_records:
                                 fpath = os.path.join(DATA_DIR, fname)
                                 sub_data = _safe_read_json_or_gz(fpath)
@@ -1646,7 +1710,8 @@ class LimitUpEngine:
                                     self._history_daily_records[date_part] = sub_data
             except Exception:
                 pass
-            return sorted(self._history_daily_records.keys())
+            valid_dates = [d for d in self._history_daily_records.keys() if _is_valid_trade_date_str(d)]
+            return sorted(valid_dates)
 
     def get_records_by_date(self, date_str: str) -> List[Dict[str, Any]]:
         """获取指定历史日期的涨停归档记录 (支持即时按需从 Gzip 或纯 JSON 分日归档文件加载)"""

@@ -22,6 +22,7 @@ import os
 import json
 import time
 import math
+import datetime
 import threading
 from typing import Optional, List, Dict, Any, Tuple
 
@@ -1249,10 +1250,15 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         self.combo_history_date.addItem("实时今日")
         archived_dates = self.engine.get_all_archived_dates()
         target_idx = 0
-        for idx, d in enumerate(reversed(archived_dates), 1):
+        today_str = time.strftime("%Y-%m-%d")
+        valid_idx = 1
+        for d in reversed(archived_dates):
+            if d > today_str or d.startswith("2099"):
+                continue
             self.combo_history_date.addItem(d)
             if d == curr_text:
-                target_idx = idx
+                target_idx = valid_idx
+            valid_idx += 1
         if target_idx > 0:
             self.combo_history_date.setCurrentIndex(target_idx)
         self.combo_history_date.blockSignals(False)
