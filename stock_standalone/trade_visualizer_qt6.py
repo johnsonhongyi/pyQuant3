@@ -3805,6 +3805,24 @@ class MainWindow(QMainWindow, WindowMixin):
         self.hline.setVisible(False)
         self.crosshair_label.setVisible(False)
 
+        # ⭐ [NEW] 通达信同款线位浮动标签 (显示当前鼠标所指线条名称与价格)
+        self.crosshair_line_tag = pg.TextItem(anchor=(-0.05, 0.5))
+        self.crosshair_line_tag.setZValue(120)
+        self.crosshair_line_tag.setVisible(False)
+        self.kline_plot.addItem(self.crosshair_line_tag, ignoreBounds=True)
+
+        # ⭐ [NEW] 通达信同款 Y 轴实时价格高亮游标
+        self.crosshair_y_cursor = pg.TextItem(anchor=(1.0, 0.5))
+        self.crosshair_y_cursor.setZValue(120)
+        self.crosshair_y_cursor.setVisible(False)
+        self.kline_plot.addItem(self.crosshair_y_cursor, ignoreBounds=True)
+
+        # ⭐ [NEW] 鼠标在 K 线上悬停 180ms 延时定时器 (快速划动不弹窗，悬停才显示，离开立即隐藏)
+        self.kline_hover_timer = QtCore.QTimer(self)
+        self.kline_hover_timer.setSingleShot(True)
+        self.kline_hover_timer.setInterval(180)
+        self.kline_hover_timer.timeout.connect(self._on_kline_hover_timeout)
+
         # 将十字线和浮窗添加到 K 线图 (全部忽略边界，防止触发autoRange)
         self.kline_plot.addItem(self.vline, ignoreBounds=True)
         self.kline_plot.addItem(self.hline, ignoreBounds=True)
@@ -4045,21 +4063,10 @@ class MainWindow(QMainWindow, WindowMixin):
                 detail_w, detail_h, detail_x, detail_y = self.load_window_position_qt(
                     self.kline_detail_win, "kline_detail_window", default_width=200, default_height=270)
                 
-                # 判定是否在同一个屏幕上
-                if main_x is not None and main_y is not None and detail_x is not None and detail_y is not None:
-                    from PyQt6.QtGui import QGuiApplication
-                    from PyQt6.QtCore import QPoint
-                    main_screen = QGuiApplication.screenAt(QPoint(main_x, main_y))
-                    detail_screen = QGuiApplication.screenAt(QPoint(detail_x, detail_y))
-                    
-                    if main_screen is not None and detail_screen is not None and main_screen == detail_screen:
-                        self.kline_detail_win.is_custom_positioned = True
-                        logger.info("kline_detail_win is on the same screen as MainWindow. Custom position enabled.")
-                    else:
-                        self.kline_detail_win.is_custom_positioned = False
-                        logger.info("kline_detail_win is on a different screen. Reverted to default positioning (follow mouse).")
-                else:
-                    self.kline_detail_win.is_custom_positioned = False
+                # 通达信模式：十字详情窗口默认采用智能跟随避让光标，绝不死锁在左下角遮挡 K 线走势
+                # 仅当用户在当次运行中主动拖动把手栏时，才由 mouseReleaseEvent 激活自定义位置
+                self.kline_detail_win.is_custom_positioned = False
+                logger.info("kline_detail_win initialized with dynamic cursor-following mode (aligning with TDX).")
             
             # ⭐ [SYNC] 重启后主动向主 TK 请求全量同步，确保数据第一时间到位
             QtCore.QTimer.singleShot(2000, self._request_full_sync)
@@ -7404,40 +7411,63 @@ class MainWindow(QMainWindow, WindowMixin):
 
     def _on_kline_mouse_moved(self, pos):
         """
-        K 线图鼠标移动事件处理器 - [PERF] 索引级脏检查节流
-        显示十字光标和 OHLC 数据浮窗
-        只在鼠标悬停在有效K线柱上时显示
+        K 线图鼠标移动事件处理器 - 通达信同款交互设计
+        1. 快速滑动中：微秒级实时更新十字线、通达信线位价格标签与 Y 轴游标，保持详情弹窗隐藏防遮挡；
+        2. 悬停停留 180ms：自适应弹出 K 线详情浮窗 (通达信智能跟随避让)；
+        3. 鼠标不在有效 K 线或移出视口：立即自动隐藏所有十字线、线位标签与详情浮窗。
         """
         if not self.crosshair_enabled or self.day_df.empty:
             self._hide_crosshair()
             return
         
-        self.mouse_last_pos = pos # ⭐ 记录鼠标位置 (1.1/1.2)
+        self.mouse_last_pos = pos
         self.mouse_last_scene = 'kline'
- 
-        # 检查鼠标是否在图表范围内
-        if self.kline_plot.sceneBoundingRect().contains(pos):
-            # 将场景坐标转换为数据坐标
-            mouse_point = self.kline_plot.vb.mapSceneToView(pos)
-            x, y = mouse_point.x(), mouse_point.y()
 
-            # 将 X 坐标转换为 DataFrame 索引
-            idx = int(round(x))
-            
-            # 记录当前索引，方便键盘操作接管
-            if 0 <= idx < len(self.day_df):
-                self.current_crosshair_idx = idx
-                last_idx = getattr(self, '_last_crosshair_idx', -1)
-                if idx == last_idx:
-                    # ⚡ [PERF]: 鼠标在同一根 K 线上滑动时，仅微秒级更新水平标线 Y 坐标，跳过繁重的 HTML 解析与重绘
-                    self.hline.setPos(y)
-                else:
-                    self._last_crosshair_idx = idx
-                    self._update_crosshair_ui(idx, y)  # 内部已调用 _update_ma_legend
-            else:
-                self._hide_crosshair()
-        else:
+        # 严格判断是否在 K 线图的 ViewBox 视口区域内 (移入副图或边缘空白立即隐藏)
+        if not hasattr(self.kline_plot, 'vb') or not self.kline_plot.vb.sceneBoundingRect().contains(pos):
             self._hide_crosshair()
+            return
+
+        mouse_point = self.kline_plot.vb.mapSceneToView(pos)
+        x, y = mouse_point.x(), mouse_point.y()
+        idx = int(round(x))
+
+        # 严格判断是否在有效 K 线柱范围内 (超出有效 K 线立即隐藏)
+        if idx < 0 or idx >= len(self.day_df):
+            self._hide_crosshair()
+            return
+
+        # 鼠标处于有效 K 线柱上
+        self.current_crosshair_idx = idx
+        self._last_crosshair_idx = idx
+
+        # 微秒级更新十字虚线
+        self.vline.setPos(idx)
+        self.hline.setPos(y)
+        self.vline.setVisible(True)
+        self.hline.setVisible(True)
+
+        # 实时更新通达信同款线位价格标签与 Y 轴价格高亮游标
+        self._update_line_price_tag(idx, y)
+        self._update_ma_legend(idx)
+
+        # 滑动过程中保持详情窗隐藏，防止遮挡走势图
+        if hasattr(self, 'kline_detail_win') and self.kline_detail_win:
+            if not getattr(self.kline_detail_win, 'is_dragging', False):
+                self.kline_detail_win.hide()
+
+        # 重启 180ms 悬停定时器 (停顿后才弹出详情窗口)
+        if hasattr(self, 'kline_hover_timer'):
+            self.kline_hover_timer.start(180)
+
+    def _on_kline_hover_timeout(self):
+        """鼠标在有效 K 线上悬停停留 180ms 后，才弹出十字详情窗口 (对齐通达信)"""
+        if not self.crosshair_enabled or self.day_df.empty:
+            return
+        idx = getattr(self, 'current_crosshair_idx', -1)
+        if idx < 0 or idx >= len(self.day_df):
+            return
+        self._show_kline_detail_window(idx)
 
     def _on_tick_mouse_moved(self, pos):
         """分时图鼠标移动回调 (1.2) - [PERF] 索引级脏检查节流"""
@@ -7554,11 +7584,17 @@ class MainWindow(QMainWindow, WindowMixin):
         self.tick_crosshair_label.setVisible(False)
 
     def _hide_crosshair(self):
-        """隐藏十字光标及其标签"""
+        """隐藏十字光标及其标签与详情窗口 (鼠标不在有效 K 线或离开视口时自动调用)"""
         self._last_crosshair_idx = -1
+        if hasattr(self, 'kline_hover_timer'):
+            self.kline_hover_timer.stop()
         self.vline.setVisible(False)
         self.hline.setVisible(False)
         self.crosshair_label.setVisible(False)
+        if hasattr(self, 'crosshair_line_tag') and self.crosshair_line_tag:
+            self.crosshair_line_tag.setVisible(False)
+        if hasattr(self, 'crosshair_y_cursor') and self.crosshair_y_cursor:
+            self.crosshair_y_cursor.setVisible(False)
         if hasattr(self, 'kline_detail_win') and self.kline_detail_win:
             self.kline_detail_win.hide()
         self._last_legend_idx = None
@@ -7595,7 +7631,7 @@ class MainWindow(QMainWindow, WindowMixin):
         boll_dn_v = row.get('boll_lower', np.nan)
 
         # 根据当前主题获取指标名称的匹配颜色 (保证与画线颜色一致)
-        is_dark = getattr(self, 'qt_theme', 'dark') == 'dark'
+        is_dark = self.__dict__.get('qt_theme', 'dark') == 'dark'
         if is_dark:
             c_ma5 = "#00FF00"   # Bright Green
             c_ma10 = "#FFA500"  # Orange
@@ -7802,27 +7838,146 @@ class MainWindow(QMainWindow, WindowMixin):
         self.ma_legend_label.setHtml(html_text)
         self.ma_legend_label.setVisible(True)
 
-    def _update_crosshair_ui(self, idx, y_price=None):
+    def _detect_crosshair_nearest_line(self, idx, y_price):
         """
-        核心 UI 更新逻辑：根据索引和可选的价格显示十字线和信息浮窗。
+        通达信同款线位吸附检测：根据当前 K 线 idx 和光标 Y 价格，
+        智能匹配最靠近的指标线（KX支撑线、自动通道三轨、均线、CDP等）或光标价格。
+        返回: (name, price_val, color_hex, display_str, priority)
         """
         if self.day_df.empty or idx < 0 or idx >= len(self.day_df):
-            self._hide_crosshair()
-            return
+            return ("光标价", y_price, "#00F0FF", f"价格: {y_price:.2f}", 99)
 
         row = self.day_df.iloc[idx]
+        candidates = []
+
+        # 1. 通达信 KX 上涨支撑线 (通达信原名: GG通道线走势(KX))
+        kx_val = row.get('ch_supp_price', row.get('chan_kx', np.nan))
+        if pd.notna(kx_val) and float(kx_val) > 0:
+            supp_f = float(kx_val)
+            deg = row.get('ch_supp_slope_deg', np.nan)
+            deg_str = f" (角:{deg:+.1f}°)" if pd.notna(deg) else ""
+            candidates.append(("GG通道线走势(KX)", supp_f, "#00FF88", f"GG通道线走势(KX): {supp_f:.2f}{deg_str}", 1))
+
+        # 2. 通达信自动通道三轨
+        c_up = row.get('chan_up', row.get('ch_upper', np.nan))
+        if pd.notna(c_up) and float(c_up) > 0:
+            candidates.append(("通道上轨", float(c_up), "#00B4FF", f"通道上轨: {float(c_up):.2f}", 2))
+            
+        c_mid = row.get('chan_mid', row.get('ch_mid', np.nan))
+        if pd.notna(c_mid) and float(c_mid) > 0:
+            candidates.append(("通道中轨", float(c_mid), "#E0E0E0", f"通道中轨: {float(c_mid):.2f}", 2))
+            
+        c_dn = row.get('chan_dn', row.get('ch_lower', np.nan))
+        if pd.notna(c_dn) and float(c_dn) > 0:
+            candidates.append(("通道下轨", float(c_dn), "#FF9900", f"通道下轨: {float(c_dn):.2f}", 2))
+
+        # 3. 经典均线组
+        ma5 = row.get('ma5', np.nan)
+        if pd.notna(ma5) and float(ma5) > 0:
+            candidates.append(("MA5", float(ma5), "#00FF00", f"MA5: {float(ma5):.2f}", 3))
+        ma10 = row.get('ma10', np.nan)
+        if pd.notna(ma10) and float(ma10) > 0:
+            candidates.append(("MA10", float(ma10), "#FFA500", f"MA10: {float(ma10):.2f}", 3))
+        ma20 = row.get('ma20', np.nan)
+        if pd.notna(ma20) and float(ma20) > 0:
+            candidates.append(("MA20", float(ma20), "#FFFF00", f"MA20: {float(ma20):.2f}", 3))
+        ma60 = row.get('ma60', np.nan)
+        if pd.notna(ma60) and float(ma60) > 0:
+            candidates.append(("MA60", float(ma60), "#00B4FF", f"MA60: {float(ma60):.2f}", 3))
+
+        # 4. 通达信 CDP 支撑与反转价
+        open_p = row.get('open', 0)
+        high_p = row.get('high', 0)
+        low_p = row.get('low', 0)
+        close_p = row.get('close', 0)
+        cdp_e = (open_p + high_p + low_p + 2.0 * close_p) / 5.0 if close_p > 0 else 0.0
+        if cdp_e > 0:
+            cdp_supp = 2.0 * cdp_e - high_p
+            cdp_rev = cdp_e - (high_p - low_p)
+            candidates.append(("TDX支撑", cdp_supp, "#FF4444", f"TDX支撑: {cdp_supp:.2f}", 4))
+            candidates.append(("TDX反转", cdp_rev, "#FFFF00", f"TDX反转: {cdp_rev:.2f}", 4))
+
+        # 5. K 线关键极值 (高/低/收/开)
+        if high_p > 0:
+            candidates.append(("最高价", high_p, "#FF5555", f"最高: {high_p:.2f}", 5))
+        if close_p > 0:
+            candidates.append(("收盘价", close_p, "#FFFFFF", f"收盘: {close_p:.2f}", 5))
+        if low_p > 0:
+            candidates.append(("最低价", low_p, "#00FF88", f"最低: {low_p:.2f}", 5))
+
+        # 计算视口垂直容差阈值 (约为视口垂直高度的 3.8%)
+        threshold = 0.5
+        try:
+            view_range = self.kline_plot.vb.viewRange()
+            y_span = abs(view_range[1][1] - view_range[1][0])
+            if y_span > 0:
+                threshold = y_span * 0.038
+        except Exception:
+            pass
+
+        # 找出垂直价差最小的候选线条
+        best_cand = None
+        min_diff = float('inf')
+        for cand in candidates:
+            diff = abs(y_price - cand[1])
+            if diff < min_diff:
+                min_diff = diff
+                best_cand = cand
+
+        if best_cand and min_diff <= threshold:
+            return best_cand
         
-        # 如果没有传入价格（键盘操作），则默认使用收盘价
-        if y_price is None:
-            y_price = row.get('close', 0)
+        # 未靠近任何线，返回光标物理价格
+        return ("光标价", y_price, "#00F0FF", f"价格: {y_price:.2f}", 99)
 
-        # 更新十字线位置
-        self.vline.setPos(idx)
-        self.hline.setPos(y_price)
-        self.vline.setVisible(True)
-        self.hline.setVisible(True)
+    def _update_line_price_tag(self, idx, y_price):
+        """更新十字光标处的线位浮动标签与 Y 轴价格高亮游标 (通达信同款)"""
+        if not hasattr(self, 'crosshair_line_tag') or not self.crosshair_line_tag:
+            return
 
-        # 准备数据
+        tag_info = self._detect_crosshair_nearest_line(idx, y_price)
+        name, target_p, color, disp_text, prio = tag_info
+
+        # 标签 HTML：半透明深暗黑底色 + 对应线条的高亮边框与字体
+        html = (
+            f"<div style='background-color:rgba(18, 18, 24, 225); "
+            f"border:1px solid {color}; border-radius:3px; padding:2px 6px; "
+            f"font-family:monospace; font-size:11px; color:{color}; "
+            f"white-space:nowrap; font-weight:bold;'>"
+            f"{disp_text}</div>"
+        )
+        self.crosshair_line_tag.setHtml(html)
+
+        # 智能调整水平方向 anchor，防止贴近右边缘被视口裁切
+        view_range = self.kline_plot.vb.viewRange()
+        x_range = view_range[0]
+        x_span = x_range[1] - x_range[0]
+        if x_span > 0 and idx > x_range[0] + x_span * 0.78:
+            self.crosshair_line_tag.setAnchor((1.08, 0.5))  # 靠近右侧时显示在光标左方
+        else:
+            self.crosshair_line_tag.setAnchor((-0.08, 0.5)) # 正常显示在光标右方
+
+        # 如果吸附到了线条，垂直锚点紧贴该线条价格，否则跟随鼠标 y_price
+        line_anchor_y = target_p if prio < 50 else y_price
+        self.crosshair_line_tag.setPos(idx, line_anchor_y)
+        self.crosshair_line_tag.setVisible(True)
+
+        # 同步更新 Y 轴边缘的实时价格高亮游标 (通达信同款暗红底白字小方块)
+        if hasattr(self, 'crosshair_y_cursor') and self.crosshair_y_cursor:
+            y_html = (
+                f"<div style='background-color:rgba(210, 40, 40, 240); "
+                f"border:1px solid #FFFFFF; border-radius:2px; padding:1px 4px; "
+                f"font-family:monospace; font-size:11px; color:#FFFFFF; "
+                f"white-space:nowrap; font-weight:bold;'>"
+                f"{y_price:.2f}</div>"
+            )
+            self.crosshair_y_cursor.setHtml(y_html)
+            self.crosshair_y_cursor.setAnchor((1.0, 0.5))
+            self.crosshair_y_cursor.setPos(x_range[1], y_price)
+            self.crosshair_y_cursor.setVisible(True)
+
+    def _build_crosshair_detail_html(self, idx, row):
+        """构建十字光标详情窗口的富文本 HTML (解耦与高复用)"""
         date_str = row.name.strftime('%Y-%m-%d') if hasattr(row.name, 'strftime') else str(row.name)
         open_p = row.get('open', 0)
         high_p = row.get('high', 0)
@@ -7831,7 +7986,6 @@ class MainWindow(QMainWindow, WindowMixin):
         volume = row.get('amount', 0)
         volume_yi = volume / 100000000
 
-        # ⭐ 核心逻辑：基于前一根 K 线计算涨幅和振幅 (解决 p_change 缺失问题)
         ratio = row.get('p_change', row.get('percent', 0.0))
         prev_close = 0
         if idx > 0:
@@ -7840,19 +7994,16 @@ class MainWindow(QMainWindow, WindowMixin):
         
         if prev_close > 0:
             calc_ratio = (close_p / prev_close - 1) * 100
-            # 如果存储 of ratio 为 0 而计算值非 0，优先用计算值（处理 history 数据缺 p_change 的情况）
             if abs(ratio) < 0.001 and abs(calc_ratio) > 0.001:
                 ratio = calc_ratio
             amplitude = (high_p - low_p) / prev_close * 100
         else:
-            # 第一根 K 线，根据 ratio 反推昨收，或者用 0
             if abs(ratio) > 0:
                 p_c = close_p / (1 + ratio/100)
                 amplitude = (high_p - low_p) / p_c * 100 if p_c > 0 else 0
             else:
                 amplitude = 0
 
-        # 颜色逻辑：涨幅 > 2 红色, < 0 绿色, 其他黄色；振幅 > 5 红色, 其他黄色
         RED, WHITE = "#FF3333", "#FFFFFF"
         ratio_color = RED if ratio > 2 else ("#00FF00" if ratio < 0 else "#FFFF00")
         amplitude_color = RED if amplitude > 5 else "#FFFF00"
@@ -7863,11 +8014,9 @@ class MainWindow(QMainWindow, WindowMixin):
         low_color = RED if abs(open_p - low_p) < 0.01 else WHITE
         high_color = RED if is_bullish else WHITE
 
-        # MA 颜色配置 (通达信风格)
         C_MA5, C_MA10, C_MA20, C_MA60 = "#00FF00", "#FFA500", "#FFFF00", "#00B4FF"
         ma5_v, ma10_v, ma20_v, ma60_v = row.get('ma5', 0), row.get('ma10', 0), row.get('ma20', 0), row.get('ma60', 0)
 
-        # 提取通达信自动通道三轨与支撑指标 (完全对齐通达信)
         c_mid_v = row.get('chan_mid', row.get('ch_mid', np.nan))
         c_up_v = row.get('chan_up', row.get('ch_upper', np.nan))
         c_dn_v = row.get('chan_dn', row.get('ch_lower', np.nan))
@@ -7877,7 +8026,6 @@ class MainWindow(QMainWindow, WindowMixin):
         c_up_s = f"{c_up_v:.2f}" if pd.notna(c_up_v) and float(c_up_v) > 0 else "-"
         c_dn_s = f"{c_dn_v:.2f}" if pd.notna(c_dn_v) and float(c_dn_v) > 0 else "-"
 
-        # 通达信原版 CDP 支撑与反转价 (完全对齐通达信右下角红黄字)
         cdp_e = (open_p + high_p + low_p + 2.0 * close_p) / 5.0 if close_p > 0 else 0.0
         cdp_supp_val = 2.0 * cdp_e - high_p if cdp_e > 0 else 0.0
         cdp_rev_val = cdp_e - (high_p - low_p) if cdp_e > 0 else 0.0
@@ -7914,7 +8062,6 @@ class MainWindow(QMainWindow, WindowMixin):
         <div style='color:#FFFFFF; font-family:monospace; margin-top:2px; white-space:nowrap;'>{date_str}</div>
         """
         
-        # 1.3: 检查是否有信号透视信息
         signal = next((s for s in self.current_kline_signals if s.bar_index == idx), None)
         if signal:
             text += f"""
@@ -7922,57 +8069,70 @@ class MainWindow(QMainWindow, WindowMixin):
             <div style='color:#FFD700; font-family:monospace; white-space:nowrap;'><b>动作:</b> {signal.signal_type.value}</div>
             <div style='color:#FFD700; font-family:monospace; white-space:normal; word-break:break-all;'><b>理由:</b> {signal.reason}</div>
             """
-            
-        self.crosshair_label.setHtml(text)
+        return text
 
-        # 自动调整原浮窗属性 (保留兼容，但不显示)
-        view_range = self.kline_plot.viewRange()
-        x_range, y_range = view_range[0], view_range[1]
-        boundary_x_right = x_range[0] + (x_range[1] - x_range[0]) * 0.75
-        boundary_x_left = x_range[0] + (x_range[1] - x_range[0]) * 0.10
-        anchor_x, anchor_y = 0.0, 1.1
-        if idx > boundary_x_right:
-            anchor_x = 1.1
-        elif idx < boundary_x_left:
-            anchor_x = -0.1
-        else:
-            anchor_x = -0.05
-        if y_price > y_range[0] + (y_range[1] - y_range[0]) * 0.75:
-            anchor_y = -0.1
-        else:
-            anchor_y = 1.1
+    def _show_kline_detail_window(self, idx):
+        """显示指定 K 线的悬浮详情窗 (悬停后才显示，通达信智能跟随避让光标)"""
+        if not hasattr(self, 'kline_detail_win') or not self.kline_detail_win:
+            return
+        if self.day_df.empty or idx < 0 or idx >= len(self.day_df):
+            return
 
-        self.crosshair_label.setAnchor((anchor_x, anchor_y))
-        self.crosshair_label.setPos(idx, y_price)
-        self.crosshair_label.setVisible(False)
+        row = self.day_df.iloc[idx]
+        text = self._build_crosshair_detail_html(idx, row)
 
-        # 渲染并显示独立的可手动拖拽和复用的 K 线悬浮详情窗
-        if hasattr(self, 'kline_detail_win') and self.kline_detail_win:
-            self.kline_detail_win.label.setText(text)
-            self.kline_detail_win.label.adjustSize()  # 强行触发子标签尺寸重算
-            self.kline_detail_win.adjustSize()        # 强行触发父窗口自适应缩放
-            
-            if self.kline_detail_win.is_custom_positioned:
-                # 校验持久化/拖拽后的自定义位置是否在 K 线图绘制物理区域内
-                try:
-                    plot_top_left = self.kline_plot.mapToGlobal(QtCore.QPoint(0, 0))
-                    kline_plot_global_rect = QtCore.QRect(plot_top_left, self.kline_plot.size())
-                    detail_geom = self.kline_detail_win.geometry()
-                    
-                    # 若详情窗几何中心点不在 K 线图物理区域内，判定为游离，重置为跟随鼠标默认方式
-                    if not kline_plot_global_rect.contains(detail_geom.center()):
-                        self.kline_detail_win.is_custom_positioned = False
-                        logger.info("[KLineDetail] Custom position is outside the KLine plot region. Reverting to default positioning.")
-                except Exception as e:
-                    pass
+        self.kline_detail_win.label.setText(text)
+        self.kline_detail_win.label.adjustSize()
+        self.kline_detail_win.adjustSize()
 
-            if not self.kline_detail_win.is_custom_positioned:
-                # 默认位置是鼠标位置，跟随鼠标的历史版本最初的设计
-                cursor_pos = QtGui.QCursor.pos()
-                self.kline_detail_win.move(cursor_pos.x() + 15, cursor_pos.y() + 15)
-            self.kline_detail_win.show()
+        # 通达信同款智能跟随避让：光标在右半侧显示在左边，在左半侧显示在右边，杜绝遮挡当前 K 线
+        if not getattr(self.kline_detail_win, 'is_custom_positioned', False):
+            cursor_pos = QtGui.QCursor.pos()
+            win_w = self.kline_detail_win.width()
+            win_h = self.kline_detail_win.height()
 
-        # ⚡ [NEW] 十字光标移动时，动态更新 K 线顶部 MA/布林等指标值
+            try:
+                plot_rect = self.kline_plot.mapToGlobal(QtCore.QPoint(0, 0))
+                plot_w = self.kline_plot.width()
+                if cursor_pos.x() > plot_rect.x() + plot_w * 0.5:
+                    target_x = cursor_pos.x() - win_w - 20
+                else:
+                    target_x = cursor_pos.x() + 20
+                
+                target_y = cursor_pos.y() - win_h // 2
+                screen = QtGui.QGuiApplication.screenAt(cursor_pos)
+                if screen:
+                    scr_geo = screen.availableGeometry()
+                    target_x = max(scr_geo.left() + 10, min(target_x, scr_geo.right() - win_w - 10))
+                    target_y = max(scr_geo.top() + 10, min(target_y, scr_geo.bottom() - win_h - 10))
+                self.kline_detail_win.move(int(target_x), int(target_y))
+            except Exception:
+                self.kline_detail_win.move(cursor_pos.x() + 20, cursor_pos.y() + 20)
+
+        self.kline_detail_win.show()
+
+    def _update_crosshair_ui(self, idx, y_price=None):
+        """
+        核心 UI 更新逻辑：更新十字交叉线、通达信线位价格标签、顶部指标
+        """
+        if self.day_df.empty or idx < 0 or idx >= len(self.day_df):
+            self._hide_crosshair()
+            return
+
+        row = self.day_df.iloc[idx]
+        if y_price is None:
+            y_price = row.get('close', 0)
+
+        # 更新十字线位置
+        self.vline.setPos(idx)
+        self.hline.setPos(y_price)
+        self.vline.setVisible(True)
+        self.hline.setVisible(True)
+
+        # 实时更新通达信同款线位浮动标签与 Y 轴游标
+        self._update_line_price_tag(idx, y_price)
+
+        # 动态更新 K 线顶部 MA/布林等指标值
         self._update_ma_legend(idx)
 
     def zoom_kline(self, in_=True):
@@ -7995,8 +8155,7 @@ class MainWindow(QMainWindow, WindowMixin):
         if 0 <= new_idx < len(self.day_df):
             self.current_crosshair_idx = new_idx
             self._update_crosshair_ui(new_idx)
-            # 确保十字线在移动后可见（如果原先被隐藏了）
-            self.vline.setVisible(True)
+            self._show_kline_detail_window(new_idx)
             self.hline.setVisible(True)
             self.crosshair_label.setVisible(False)
             

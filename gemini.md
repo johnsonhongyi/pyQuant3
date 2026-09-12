@@ -1,3 +1,16 @@
+## 2026-09-12 02:40
+- [x] **【通达信十字光标当前线位价格浮动吸附标签与详情窗口悬停才显示不在K线自动隐藏全量对齐】(SSOT) (`stock_standalone/trade_visualizer_qt6.py`, `stock_standalone/tests/test_tdx_channel_visualizer_alignment.py`)**：
+    - [x] **鼠标移到对应位置显示当前线价格（通达信同款线位浮动标签与 Y 轴实时价格游标）**：
+        1. **通达信同款线位吸附算法 (`_detect_crosshair_nearest_line`)**：根据光标所在的有效 K 线 (`idx`) 与垂直价格 (`y_price`)，自动在容差阈值内智能吸附匹配最靠近的指标线（KX 上涨支撑线 `GG通道线走势(KX)`、通道上中下轨 `通道上轨/中轨/下轨`、经典均线 `MA5/10/20/60`、CDP 支撑反转 `TDX支撑/反转` 或关键价位），若未靠近任何线条则平滑回退显示光标真实物理价格；
+        2. **轻量浮动标签 (`crosshair_line_tag` + `crosshair_y_cursor`)**：紧贴十字光标交点右侧（靠近视口右边缘自适应向左避让）实时呈现高反差半透明深暗黑底、亮色边框的线位价格标签；同时在 ViewBox 最右端边缘同步呈现通达信同款暗红底白字高亮游标，鼠标在同一根 K 线上垂直微移也能微秒级实时响应；
+    - [x] **十字详情窗口对齐通达信（悬停 180ms 才显示，快速滑动保持隐藏，不在 K 线柱立即自动隐藏）**：
+        1. **彻底解除左下角锁定遮挡**：修复冷启动时无脑开启 `is_custom_positioned = True` 导致详情窗死锁在左下角遮挡历史走势的 Bug；默认采用通达信同款智能跟随避让光标模式（光标在右半屏显示在左侧，光标在左半屏显示在右侧），绝不遮挡当前 K 线柱；
+        2. **180ms 悬停防抖机制 (`kline_hover_timer`)**：用户在 K 线图上快速划动时，仅实时渲染十字线与线位浮动标签，详情窗保持隐藏（0 遮挡、0 乱闪）；只有当鼠标在某根有效 K 线柱上悬停停留超过 180ms 时，才平滑弹出详情窗口；
+        3. **不在 K 线立即自动隐藏**：一旦鼠标移出有效 K 线柱范围（超出数据索引、移入成交量副图、移入副图指标区、移出视口），`_hide_crosshair` 立即将十字线、线位标签以及悬浮详情窗全部自动隐藏（`kline_detail_win.hide()`），彻底根除常驻遮挡问题；
+    - [x] **全量自动化测试 27/27 PASSED**：
+        1. 完善 `stock_standalone/tests/test_tdx_channel_visualizer_alignment.py`：新增 `test_crosshair_nearest_line_price_tag_detection` 与 `test_crosshair_hover_timer_and_auto_hide_lifecycle`，覆盖线位吸附检测、悬停 180ms 定时器生命周期与移出立即隐藏；
+        2. 全量 4 大测试套件 27 项测试全部 100% PASSED！
+
 ## 2026-09-12 02:25
 - [x] **【通达信自动通道三轨与上涨支撑线严格从趋势起点起笔，彻底消除左侧超长横贯线条】(SSOT) (`stock_standalone/JSONData/tdx_channel_factory.py`, `stock_standalone/tests/test_tdx_channel_visualizer_alignment.py`)**：
     - [x] **严格践行通达信原版规则 IF(CURRBARSCOUNT<=MAX(TC2,BC2), ..., DRAWNULL)**：
