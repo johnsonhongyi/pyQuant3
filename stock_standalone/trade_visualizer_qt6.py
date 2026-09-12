@@ -2954,18 +2954,35 @@ class KLineDetailWindow(QtWidgets.QFrame):
     K 线十字光标/鼠标 hover 的独立悬浮详情窗口，支持手动拖拽、复用和位置持久化。
     """
     def __init__(self, parent=None):
-        super().__init__(parent=None)  # parent设为None，使它成为独立顶层窗口，但设置Tool标志，使它依赖主窗口
+        # 兼容单元测试与非纯原生对象：仅当 parent 为已完成底层初始化的有效 QWidget 时作为 Qt 父窗口传入
+        valid_parent = None
+        if parent is not None and isinstance(parent, QtWidgets.QWidget):
+            try:
+                parent.windowFlags()
+                valid_parent = parent
+            except Exception:
+                valid_parent = None
+        super().__init__(parent=valid_parent)
         self.main_window = parent
+        self.auto_close_disabled = False
         self.is_custom_positioned = False
         self.is_hovered = False
-        self.hover_activation_delay = 2000
+        self.hover_activation_delay = 1000
         
+        # [NEW] 窗口大小调节与持久化状态
+        self.is_resizing = False
+        self.resize_edge = None
+        self.resize_start_pos = None
+        self.resize_start_geometry = None
+        self.is_custom_sized = False
+        self.custom_width = 240
+        self.custom_height = 280
         
-        # 窗口属性：工具窗口（不占任务栏）、无边框、置顶
+        # 窗口属性：工具窗口（不占任务栏）、无边框
+        # 设为 Tool 窗口并归属主窗口，操作系统确保其仅在主程序激活时浮动在主图上方，绝不跨屏幕置顶干扰其他应用（如通达信）
         self.setWindowFlags(
             Qt.WindowType.Tool | 
-            Qt.WindowType.FramelessWindowHint | 
-            Qt.WindowType.WindowStaysOnTopHint
+            Qt.WindowType.FramelessWindowHint
         )
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
@@ -2976,14 +2993,14 @@ class KLineDetailWindow(QtWidgets.QFrame):
         self.main_layout.setContentsMargins(0, 0, 0, 0)
         self.main_layout.setSpacing(0)
         
-        # 顶部拖拽把手栏 (平时隐藏，hover时显示)
+        # 顶部拖拽把手栏 (平时隐藏，hover或锁定时显示)
         self.handle_bar = QtWidgets.QFrame(self)
-        self.handle_bar.setFixedHeight(16)
+        self.handle_bar.setFixedHeight(18)
         self.handle_bar.setObjectName("HandleBar")
         self.handle_layout = QtWidgets.QHBoxLayout(self.handle_bar)
         self.handle_layout.setContentsMargins(6, 0, 6, 0)
         
-        self.handle_label = QtWidgets.QLabel("⠿ 拖动以调整位置", self.handle_bar)
+        self.handle_label = QtWidgets.QLabel("⠿ 拖动位置/边缘调大小", self.handle_bar)
         self.handle_label.setStyleSheet("color: #00f0ff; font-family: monospace; font-size: 10px; font-weight: bold; border: none; background: transparent;")
         self.handle_layout.addWidget(self.handle_label)
         self.handle_bar.setVisible(False)
@@ -3002,8 +3019,8 @@ class KLineDetailWindow(QtWidgets.QFrame):
         self.label.setObjectName("ContentLabel")
         self.label.setStyleSheet("font-family: monospace; font-size: 12px; line-height: 1.3;")
         self.label.setWordWrap(True)  # 开启自动换行，结合 HTML style 控制特定部分不换行
-        self.label.setMinimumWidth(200)  # 限制最小宽度，防止文字过窄导致高度无限拉长和setGeometry报错
-        self.label.setMaximumWidth(280)  # 限制最大宽度，防止理由文字过长时无限横向延伸，强制折行
+        self.label.setMinimumWidth(180)  # 限制最小宽度，防止文字过窄导致高度无限拉长
+        self.label.setMaximumWidth(280)  # 默认最大宽度，自定义拉伸时随窗口同步放宽
         self.content_layout.addWidget(self.label)
         
         self.main_layout.addWidget(self.content_frame)
@@ -3014,12 +3031,14 @@ class KLineDetailWindow(QtWidgets.QFrame):
         self.drag_position = None
         self.is_dragging = False
         
-        # 开启鼠标悬停跟踪
+        # 开启鼠标悬停跟踪并安装子部件事件过滤，确保边缘拉伸无死角
         self.setMouseTracking(True)
         self.content_frame.setMouseTracking(True)
         self.label.setMouseTracking(True)
+        self.content_frame.installEventFilter(self)
+        self.label.installEventFilter(self)
         
-        # 3秒静止悬停定时器
+        # 1秒静止悬停定时器
         self.hover_timer = QtCore.QTimer(self)
         self.hover_timer.setSingleShot(True)
         self.hover_timer.timeout.connect(self._on_hover_timeout)
@@ -3030,22 +3049,23 @@ class KLineDetailWindow(QtWidgets.QFrame):
         self.auto_hide_timer.setInterval(6000)
         self.auto_hide_timer.timeout.connect(self._on_auto_hide_timeout)
         
-        # 限制 KLineDetailWindow 自身最大宽度为 300，配合 label.setMaximumWidth(280)，实现彻底自动折行
-        self.setMinimumWidth(220)
+        # 放宽尺寸限制，允许用户在 200~800 宽、150~800 高之间自由拖拽拉伸
+        self.setMinimumWidth(200)
         self.setMinimumHeight(150)
-        self.setMaximumWidth(300)
+        self.setMaximumWidth(800)
+        self.setMaximumHeight(800)
 
     def _update_stylesheets(self):
-        if self.is_hovered:
-            # 鼠标悬停状态：高反差显示边框和把手背景
+        if self.is_hovered or self.auto_close_disabled:
+            # 鼠标悬停或锁定状态：高反差显示边框和把手背景
             self.setStyleSheet("""
                 QFrame#DetailContainer {
                     background: transparent;
                     border: none;
                 }
                 QFrame#HandleBar {
-                    background-color: rgba(0, 240, 255, 30);
-                    border-bottom: 1px solid rgba(0, 240, 255, 80);
+                    background-color: rgba(0, 240, 255, 35);
+                    border-bottom: 1px solid rgba(0, 240, 255, 100);
                     border-top-left-radius: 3px;
                     border-top-right-radius: 3px;
                 }
@@ -3073,15 +3093,119 @@ class KLineDetailWindow(QtWidgets.QFrame):
                 }
             """)
 
+    def set_persisted_size(self, w: int, h: int):
+        """恢复持久化保存的窗口大小"""
+        w = max(200, min(int(w), 800))
+        h = max(150, min(int(h), 800))
+        self.custom_width = w
+        self.custom_height = h
+        self.is_custom_sized = True
+        self.resize(w, h)
+        if hasattr(self, 'label'):
+            self.label.setMaximumWidth(max(180, w - 24))
+
+    def reset_to_default_size(self):
+        """重置窗口大小为默认自适应紧凑尺寸"""
+        self.is_custom_sized = False
+        self.custom_width = 240
+        self.custom_height = 280
+        if hasattr(self, 'label'):
+            self.label.setMaximumWidth(280)
+        self.adjustSize()
+        if self.main_window:
+            try:
+                import json, os
+                scale = self.main_window._get_dpi_scale_factor()
+                cfg_path = self.main_window._get_config_file_path(None, scale)
+                if os.path.exists(cfg_path):
+                    with open(cfg_path, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                    if "kline_detail_window" in data:
+                        data["kline_detail_window"]["custom_sized"] = False
+                        with open(cfg_path + '.tmp', 'w', encoding='utf-8') as f:
+                            json.dump(data, f, ensure_ascii=False, indent=4)
+                        os.replace(cfg_path + '.tmp', cfg_path)
+            except Exception as e:
+                logger.error(f"Failed to reset detail window size in config: {e}")
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        # 联动更新 label 最大宽度，使富文本与理由文字自动依据新宽度自适应换行折行
+        if hasattr(self, 'label'):
+            self.label.setMaximumWidth(max(180, self.width() - 24))
+
+    def _detect_resize_edge(self, pos):
+        """检测光标是否落在窗口右下角或边缘拉伸区域 (仅在悬停或锁定调整模式下生效)"""
+        if not (self.is_hovered or self.auto_close_disabled):
+            return None
+        r = self.rect()
+        x = pos.x()
+        y = pos.y()
+        edge_margin = 8
+        corner_margin = 16
+
+        in_corner = (x >= r.width() - corner_margin and x <= r.width() and
+                     y >= r.height() - corner_margin and y <= r.height())
+        in_right = (x >= r.width() - edge_margin and x <= r.width())
+        in_bottom = (y >= r.height() - edge_margin and y <= r.height())
+
+        if in_corner:
+            return 'bottom_right'
+        elif in_right:
+            return 'right'
+        elif in_bottom:
+            return 'bottom'
+        return None
+
+    def _update_cursor_for_pos(self, pos):
+        """根据光标所在物理区域动态切换光标手势"""
+        if not (self.is_hovered or self.auto_close_disabled):
+            self.unsetCursor()
+            return
+        edge = self._detect_resize_edge(pos)
+        if edge == 'bottom_right':
+            self.setCursor(Qt.CursorShape.SizeFDiagCursor)
+        elif edge == 'right':
+            self.setCursor(Qt.CursorShape.SizeHorCursor)
+        elif edge == 'bottom':
+            self.setCursor(Qt.CursorShape.SizeVerCursor)
+        elif self.is_hovered:
+            self.setCursor(Qt.CursorShape.SizeAllCursor)
+        else:
+            self.unsetCursor()
+
+    def eventFilter(self, obj, event):
+        """过滤子部件事件，避免子部件吞噬边缘拉伸的光标变形与点击事件"""
+        if obj in (getattr(self, 'content_frame', None), getattr(self, 'label', None)):
+            ev_type = event.type()
+            if ev_type == QtCore.QEvent.Type.MouseMove:
+                if not self.is_resizing and not self.is_dragging:
+                    pos = self.mapFromGlobal(event.globalPosition().toPoint())
+                    self._update_cursor_for_pos(pos)
+            elif ev_type == QtCore.QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
+                pos = self.mapFromGlobal(event.globalPosition().toPoint())
+                edge = self._detect_resize_edge(pos)
+                if edge:
+                    self.is_resizing = True
+                    self.resize_edge = edge
+                    self.resize_start_pos = event.globalPosition().toPoint()
+                    self.resize_start_geometry = self.geometry()
+                    try:
+                        self.grabMouse()
+                    except Exception:
+                        pass
+                    return True
+        return super().eventFilter(obj, event)
+
     def paintEvent(self, event):
-        """重写绘图事件以正确绘制半透明背景和边框，防止 WA_TranslucentBackground 导致全透明"""
+        """重写绘图事件以正确绘制半透明背景、边框及右下角拉伸把手图案"""
         from PyQt6.QtGui import QPainter, QBrush, QColor, QPen
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         
-        if self.is_hovered:
-            # 鼠标悬停状态：高反差显示暗黑蓝背景 (#111224, 230) 和亮青边框 (#00f0ff)
-            painter.setBrush(QBrush(QColor(17, 18, 36, 230)))
+        if self.is_hovered or self.auto_close_disabled:
+            # 鼠标悬停或锁定状态：高反差显示暗黑蓝背景 (#111224, 235) 和亮青边框 (#00f0ff)
+            painter.setBrush(QBrush(QColor(17, 18, 36, 235)))
             painter.setPen(QPen(QColor("#00f0ff"), 1))
         else:
             # 平时状态：采用跟原TextItem一样的 rgba(0, 0, 0, 180) 半透明黑，无边框
@@ -3092,93 +3216,268 @@ class KLineDetailWindow(QtWidgets.QFrame):
         rect = self.rect().adjusted(0, 0, -1, -1)
         painter.drawRoundedRect(rect, 4, 4)
 
+        # 悬停或锁定模式下，在右下角绘制精致的拉伸斜纹把手 (Resize Grip)
+        if self.is_hovered or self.auto_close_disabled:
+            grip_color = QColor(0, 240, 255, 180) if self.is_hovered else QColor(0, 240, 255, 100)
+            painter.setPen(QPen(grip_color, 1.5))
+            w = self.width()
+            h = self.height()
+            for offset in [4, 8, 12]:
+                painter.drawLine(w - offset, h - 2, w - 2, h - offset)
+
+    def lock_and_disable_auto_close(self):
+        """双击 K 线触发：锁定详情窗口，关闭自动关闭，以便自由拖动调整位置与大小"""
+        self.auto_close_disabled = True
+        self.is_custom_positioned = True
+        self.auto_hide_timer.stop()
+        self.is_hovered = False
+        # 顶部锁定信息自动隐藏，平时保持紧凑纯净，鼠标移入浮窗时才显现
+        self.handle_bar.setVisible(False)
+        self.handle_label.setText("⠿ [已锁定] 拖动位置/边缘调大小 | 右键恢复")
+        self.unsetCursor()
+        self._update_stylesheets()
+        if not self.is_custom_sized:
+            self.adjustSize()
+
+    def reset_to_auto_follow(self):
+        """右键触发：重置为自动跟随光标模式，恢复自动关闭"""
+        self.auto_close_disabled = False
+        self.is_custom_positioned = False
+        self.is_hovered = False
+        self.handle_bar.setVisible(False)
+        self.handle_label.setText("⠿ 拖动位置/边缘调大小")
+        self.unsetCursor()
+        self._update_stylesheets()
+        if not self.is_custom_sized:
+            self.adjustSize()
+        
+        # 联动主窗口：若鼠标在视口内则恢复跟随，否则按通达信规则自动隐藏
+        if self.main_window:
+            is_in_viewport = False
+            if hasattr(self.main_window, '_is_cursor_in_kline_viewport'):
+                try:
+                    is_in_viewport = self.main_window._is_cursor_in_kline_viewport()
+                except Exception:
+                    is_in_viewport = False
+            
+            idx = self.main_window.__dict__.get('current_crosshair_idx', -1)
+            if is_in_viewport and idx >= 0:
+                self.main_window._show_kline_detail_window(idx)
+                self.auto_hide_timer.start(6000)
+            else:
+                self.hide()
+                if hasattr(self.main_window, '_hide_crosshair'):
+                    self.main_window._hide_crosshair()
 
     def _on_hover_timeout(self):
+        """在窗口悬停达到延时后，才触发显示拖动调整框与拉伸把手"""
         self.is_hovered = True
         self.handle_bar.setVisible(True)
+        if self.auto_close_disabled:
+            self.handle_label.setText("⠿ [已锁定] 拖动位置/边缘调大小 | 右键恢复")
+        else:
+            self.handle_label.setText("⠿ 拖动位置/边缘调大小")
         self.setCursor(Qt.CursorShape.SizeAllCursor)
         self._update_stylesheets()
-        self.adjustSize()
+        if not self.is_custom_sized:
+            self.adjustSize()
 
     def _on_auto_hide_timeout(self):
-        """6秒无操作超时，自动隐藏详情窗口"""
-        if not self.is_hovered and not self.is_dragging:
+        """6秒无操作超时，自动隐藏详情窗口 (锁定模式下绝不自动隐藏)"""
+        if not self.auto_close_disabled and not self.is_hovered and not self.is_dragging and not self.is_resizing:
             self.hide()
 
     def setVisible(self, visible):
         super().setVisible(visible)
         if visible:
-            # 只要详情窗口被显示，就开始 6 秒倒计时自动隐藏
-            self.auto_hide_timer.start(6000)
+            # 锁定模式下关闭自动隐藏；普通跟随模式下开启 6 秒倒计时
+            if not self.auto_close_disabled:
+                self.auto_hide_timer.start(6000)
+            else:
+                self.auto_hide_timer.stop()
         else:
-            # 窗口隐藏时，立即停止计时
             self.auto_hide_timer.stop()
 
     def moveEvent(self, event):
         super().moveEvent(event)
-        # 只要窗口发生移动（跟随鼠标十字光标移动），在非悬停/非拖拽状态下重置 6 秒自动隐藏
-        if self.isVisible() and not self.is_hovered and not self.is_dragging:
+        # 非锁定/非悬停/非拖拽/非拉伸状态下跟随光标移动时重置 6 秒自动隐藏
+        if self.isVisible() and not self.auto_close_disabled and not self.is_hovered and not self.is_dragging and not self.is_resizing:
             self.auto_hide_timer.start(6000)
 
     def enterEvent(self, event):
-        # 鼠标进入时，启动 2 秒静止停留计时器，不立即激活 hover 状态
+        # 无论是否锁定模式：移入时均不直接显示把手，启动延时定时器，在窗口静止悬停后才触发显示拖动调整框
         if not self.is_hovered:
             self.hover_timer.start(self.hover_activation_delay)
-        # 鼠标进入详情窗口本身，停止 6 秒自动隐藏计时
         self.auto_hide_timer.stop()
         super().enterEvent(event)
 
     def leaveEvent(self, event):
-        # 鼠标离开，取消计时，如果是 hover 状态则恢复普通状态
         self.hover_timer.stop()
-        if self.is_hovered:
-            self.is_hovered = False
-            self.handle_bar.setVisible(False)
-            self.unsetCursor()
-            self._update_stylesheets()
+        # 核心防护：拖拽或拉伸中绝不打断
+        if self.is_dragging or self.is_resizing:
+            super().leaveEvent(event)
+            return
+
+        # 鼠标离开浮窗，拖动调整框立即自动隐藏
+        self.is_hovered = False
+        self.handle_bar.setVisible(False)
+        self.unsetCursor()
+        self._update_stylesheets()
+        if not self.is_custom_sized:
             self.adjustSize()
-        # 鼠标离开详情窗口本身，如果当前处于显示状态，重新启动 6 秒自动隐藏计时
+
+        if self.auto_close_disabled:
+            # 锁定模式下浮窗本身绝不隐藏！继续常驻在屏幕上
+            super().leaveEvent(event)
+            return
+
         if self.isVisible():
             self.auto_hide_timer.start(6000)
         super().leaveEvent(event)
 
     def mousePressEvent(self, event):
-        # 只有在已激活 hover 状态时才允许拖动，双保险
-        if self.is_hovered and event.button() == Qt.MouseButton.LeftButton:
-            self.is_dragging = True
-            self.drag_position = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
-            event.accept()
-
-    def mouseMoveEvent(self, event):
-        # 如果还在等待激活 hover，且鼠标在移动，说明不是静止停留，重置 2 秒计时
-        if not self.is_hovered:
-            self.hover_timer.start(self.hover_activation_delay)
-            # 每次鼠标在其上划过且未激活 hover 时，也属于用户活跃操作，重置 6 秒自动隐藏
-            self.auto_hide_timer.start(6000)
-            
-            # === 🚀 核心事件穿透：将未激活状态下的鼠标移动事件转发给底层 K 线图 ===
-            if self.main_window and hasattr(self.main_window, 'kline_plot'):
+        if event.button() == Qt.MouseButton.LeftButton:
+            # 1. 优先检测是否命中拉伸边缘 (右边缘/下边缘/右下角)
+            edge = self._detect_resize_edge(event.pos())
+            if edge:
+                self.is_resizing = True
+                self.resize_edge = edge
+                self.resize_start_pos = event.globalPosition().toPoint()
+                self.resize_start_geometry = self.geometry()
                 try:
-                    global_pos = event.globalPosition().toPoint()
-                    local_pos = self.main_window.kline_plot.mapFromGlobal(global_pos)
-                    scene_pos = self.main_window.kline_plot.mapToScene(local_pos)
-                    # 确保坐标位置在 kline_plot 矩形区域内才触发转发
-                    if self.main_window.kline_plot.rect().contains(local_pos):
-                        self.main_window._on_kline_mouse_moved(scene_pos)
+                    self.grabMouse() # 捕获全局鼠标，杜绝甩动丢事件
                 except Exception:
                     pass
-            
-        if event.buttons() == Qt.MouseButton.LeftButton and self.is_dragging:
-            self.move(event.globalPosition().toPoint() - self.drag_position)
+                event.accept()
+                return
+
+            # 2. 只要点击在把手栏区域、或者处于锁定模式、或者处于 hover 状态，均立即可拖动位置
+            click_in_handle = self.handle_bar.isVisible() and self.handle_bar.geometry().contains(event.pos())
+            can_drag = click_in_handle or self.auto_close_disabled or self.is_hovered
+            if can_drag:
+                self.is_dragging = True
+                self.drag_position = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+                try:
+                    self.grabMouse() # 捕获全局鼠标，杜绝甩动丢事件
+                except Exception:
+                    pass
+                event.accept()
+                return
+        elif event.button() == Qt.MouseButton.RightButton:
+            # 右键点击：立即重置为自动跟随光标模式，恢复自动关闭
+            self.reset_to_auto_follow()
             event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        # 1. 正在拉伸尺寸，平滑更新窗口高宽
+        if self.is_resizing and (event.buttons() & Qt.MouseButton.LeftButton):
+            if self.resize_start_pos and self.resize_start_geometry:
+                delta = event.globalPosition().toPoint() - self.resize_start_pos
+                start_geo = self.resize_start_geometry
+                new_w = start_geo.width()
+                new_h = start_geo.height()
+                if self.resize_edge in ('right', 'bottom_right'):
+                    new_w = max(200, min(start_geo.width() + delta.x(), 800))
+                if self.resize_edge in ('bottom', 'bottom_right'):
+                    new_h = max(150, min(start_geo.height() + delta.y(), 800))
+                self.resize(new_w, new_h)
+                self.custom_width = new_w
+                self.custom_height = new_h
+                self.is_custom_sized = True
+                if hasattr(self, 'label'):
+                    self.label.setMaximumWidth(max(180, new_w - 24))
+                self.update()
+            event.accept()
+            return
+
+        # 2. 如果正在拖拽位置，平滑更新窗口位置
+        if self.is_dragging and (event.buttons() & Qt.MouseButton.LeftButton):
+            if self.drag_position:
+                self.move(event.globalPosition().toPoint() - self.drag_position)
+            event.accept()
+            return
+
+        # 3. 悬停/锁定状态下微移检测拉伸边缘光标变形
+        if self.is_hovered or self.auto_close_disabled:
+            self._update_cursor_for_pos(event.pos())
+
+        # 未悬停前鼠标在浮窗微移，重置悬停定时器（必须静止悬停后才显示把手）
+        if not self.is_hovered:
+            self.hover_timer.start(self.hover_activation_delay)
+            if self.auto_close_disabled:
+                event.accept()
+                return
+            else:
+                self.auto_hide_timer.start(6000)
+                if self.main_window and hasattr(self.main_window, 'kline_plot'):
+                    try:
+                        global_pos = event.globalPosition().toPoint()
+                        local_pos = self.main_window.kline_plot.mapFromGlobal(global_pos)
+                        scene_pos = self.main_window.kline_plot.mapToScene(local_pos)
+                        if self.main_window.kline_plot.rect().contains(local_pos):
+                            self.main_window._on_kline_mouse_moved(scene_pos)
+                    except Exception:
+                        pass
+        super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
+        # 1. 完成拉伸调节并自动持久化大小
+        if event.button() == Qt.MouseButton.LeftButton and self.is_resizing:
+            self.is_resizing = False
+            self.resize_edge = None
+            try:
+                self.releaseMouse()
+            except Exception:
+                pass
+            self.is_custom_sized = True
+            self.custom_width = self.width()
+            self.custom_height = self.height()
+            if self.main_window:
+                self.main_window.save_detail_window_position()
+            self.unsetCursor()
+            event.accept()
+            return
+
+        # 2. 完成位置拖动并自动持久化位置
+        if event.button() == Qt.MouseButton.LeftButton and self.is_dragging:
             self.is_dragging = False
+            try:
+                self.releaseMouse()
+            except Exception:
+                pass
             self.is_custom_positioned = True
             if self.main_window:
                 self.main_window.save_detail_window_position()
+            
+            # 拖动移动完成后自动隐藏拖动调整框
+            self.is_hovered = False
+            self.handle_bar.setVisible(False)
+            self.unsetCursor()
+            self._update_stylesheets()
+            if not self.is_custom_sized:
+                self.adjustSize()
             event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def contextMenuEvent(self, event):
+        """右键快捷菜单：提供重置为自动跟随光标模式、重置大小选项"""
+        menu = QtWidgets.QMenu(self)
+        action_reset = menu.addAction("🔄 重置为自动跟随光标模式 (恢复自动关闭)")
+        action_reset.triggered.connect(self.reset_to_auto_follow)
+        if self.is_custom_sized:
+            action_reset_size = menu.addAction("📐 重置窗口大小为默认自适应")
+            action_reset_size.triggered.connect(self.reset_to_default_size)
+        if not self.auto_close_disabled:
+            action_lock = menu.addAction("📌 锁定当前位置 (关闭自动关闭)")
+            action_lock.triggered.connect(self.lock_and_disable_auto_close)
+        else:
+            action_unlock = menu.addAction("🔓 解除锁定 (恢复自动关闭)")
+            action_unlock.triggered.connect(self.reset_to_auto_follow)
+        menu.exec(event.globalPos())
+        event.accept()
 
 
 class MainWindow(QMainWindow, WindowMixin):
@@ -3747,6 +4046,13 @@ class MainWindow(QMainWindow, WindowMixin):
         # ⭐ 禁用自动范围，防止鼠标悬停时视图跳动
         self.kline_plot.disableAutoRange()
         self.right_splitter.addWidget(self.kline_widget)
+
+        # ⭐ [NEW] 双击 K 线打开十字星详情并锁定关闭自动关闭；右键恢复自动跟随并恢复自动关闭
+        if hasattr(self.kline_widget, 'viewport') and self.kline_widget.viewport():
+            self.kline_widget.viewport().installEventFilter(self)
+        # 保护 ViewBox：双击不触发原生 autoRange 破坏缩放
+        if hasattr(self.kline_plot, 'vb') and hasattr(self.kline_plot.vb, 'mouseDoubleClickEvent'):
+            self.kline_plot.vb.mouseDoubleClickEvent = lambda ev: ev.accept()
 
         # ⭐ 安装 ViewBox 守护钩子 (锁定 X 轴, Y 轴自动)
         # self._install_viewbox_guard(self.kline_plot)
@@ -7433,6 +7739,7 @@ class MainWindow(QMainWindow, WindowMixin):
             return
 
         # 鼠标处于有效 K 线柱上
+        idx_changed = (idx != self.__dict__.get('current_crosshair_idx', -1))
         self.current_crosshair_idx = idx
         self._last_crosshair_idx = idx
 
@@ -7446,22 +7753,113 @@ class MainWindow(QMainWindow, WindowMixin):
         self._update_line_price_tag(idx, y)
         self._update_ma_legend(idx)
 
-        # 滑动过程中保持详情窗隐藏，防止遮挡走势图
-        if hasattr(self, 'kline_detail_win') and self.kline_detail_win:
-            if not getattr(self.kline_detail_win, 'is_dragging', False):
-                self.kline_detail_win.hide()
+        # 跨 K 线滑动过程中保持详情窗隐藏防遮挡；同一 K 线微移保持显示不闪烁
+        k_detail_win = self.__dict__.get('kline_detail_win', None)
+        if k_detail_win:
+            # ⭐ 用户需求 1：锁定后鼠标移动到对应 K 线，数据实时自动更新（位置保持固定不乱跳）！
+            if getattr(k_detail_win, 'auto_close_disabled', False) is True:
+                if idx_changed or not k_detail_win.isVisible():
+                    self._show_kline_detail_window(idx, force=True)
+            elif not getattr(k_detail_win, 'is_dragging', False):
+                hover_timer = self.__dict__.get('kline_hover_timer', None)
+                if idx_changed:
+                    k_detail_win.hide()
+                    if hover_timer:
+                        hover_timer.start(180)
+                else:
+                    # 同一根 K 线柱内部微移：若详情窗尚未显示，保持或启动 180ms 计时；若已显示，保持显示绝不闪烁隐藏
+                    if not k_detail_win.isVisible() and hover_timer:
+                        if hasattr(hover_timer, 'isActive') and not hover_timer.isActive():
+                            hover_timer.start(180)
 
-        # 重启 180ms 悬停定时器 (停顿后才弹出详情窗口)
-        if hasattr(self, 'kline_hover_timer'):
-            self.kline_hover_timer.start(180)
+    def _get_global_cursor_pos(self):
+        """安全获取物理鼠标全局坐标，优先测试Mock/Win32 API，回退至 scene 映射，彻底免疫 PyQt6 QCursor.pos 内存溢出 Bug"""
+        # 1. 单元测试或受限环境：若 QCursor.pos() 为 Mock 对象或处于合理屏幕像素范围 (-5000 ~ 50000) 则采纳
+        try:
+            q_pos = QtGui.QCursor.pos()
+            if -5000 < q_pos.x() < 50000 and -5000 < q_pos.y() < 50000:
+                return q_pos
+        except Exception:
+            pass
+
+        # 2. 优先使用 Win32 物理鼠标坐标 (Windows 桌面原生 API，高精度且绝对免疫 PyQt 内存越界)
+        try:
+            import ctypes
+            from ctypes import wintypes
+            pt = wintypes.POINT()
+            if ctypes.windll.user32.GetCursorPos(ctypes.byref(pt)):
+                return QtCore.QPoint(pt.x, pt.y)
+        except Exception:
+            pass
+
+        # 3. 回退方案：基于当前 K 线鼠标最后有效场景坐标映射到全局
+        try:
+            target_w = self.__dict__.get('kline_widget', None) or self.__dict__.get('kline_plot', None)
+            mouse_pos = self.__dict__.get('mouse_last_pos', None)
+            if target_w and mouse_pos and hasattr(target_w, 'mapFromScene') and hasattr(target_w, 'mapToGlobal'):
+                view_pt = target_w.mapFromScene(mouse_pos)
+                return target_w.mapToGlobal(view_pt)
+        except Exception:
+            pass
+
+        return QtCore.QPoint(0, 0)
+
+    def _is_cursor_in_kline_viewport(self):
+        """物理级检测鼠标光标当前是否真实处于 K 线主图 ViewBox 视口内 (杜绝向副屏或外部程序漂移误触发)"""
+        try:
+            # 0. 检验主窗口是否处于系统激活状态（如果用户切换到副屏通达信，activeWindow() 为 None 或非本窗口，严禁显示）
+            try:
+                active_w = QtWidgets.QApplication.activeWindow()
+                if active_w is None:
+                    return False
+                if active_w != self:
+                    detail_win = self.__dict__.get('kline_detail_win', None)
+                    if detail_win and (active_w == detail_win or detail_win.isAncestorOf(active_w)):
+                        pass
+                    elif hasattr(self, 'isAncestorOf') and self.isAncestorOf(active_w):
+                        pass
+                    else:
+                        return False
+            except Exception:
+                pass
+
+            target_w = self.__dict__.get('kline_widget', None) or self.__dict__.get('kline_plot', None)
+            k_plot = self.__dict__.get('kline_plot', None)
+            if not target_w or not k_plot or not hasattr(k_plot, 'vb'):
+                return False
+
+            cursor_pos = self._get_global_cursor_pos()
+
+            # 1. 物理检查光标是否在 target_w 窗口矩形内 (副屏通达信时必然超出 rect)
+            if hasattr(target_w, 'mapFromGlobal'):
+                local_pos = target_w.mapFromGlobal(cursor_pos)
+                if hasattr(target_w, 'rect') and not target_w.rect().contains(local_pos):
+                    return False
+                # 2. 检查是否在 ViewBox 视口矩形内 (排查移入指标副图或边缘留白)
+                if hasattr(target_w, 'mapToScene') and hasattr(k_plot.vb, 'sceneBoundingRect'):
+                    scene_pos = target_w.mapToScene(local_pos)
+                    if hasattr(k_plot.vb.sceneBoundingRect(), 'contains'):
+                        if not k_plot.vb.sceneBoundingRect().contains(scene_pos):
+                            return False
+
+            return True
+        except Exception:
+            return False
 
     def _on_kline_hover_timeout(self):
         """鼠标在有效 K 线上悬停停留 180ms 后，才弹出十字详情窗口 (对齐通达信)"""
         if not self.crosshair_enabled or self.day_df.empty:
             return
-        idx = getattr(self, 'current_crosshair_idx', -1)
+
+        # 严格核验物理鼠标当前真实坐标：必须精确落在本窗口 K 线图视口内部 (杜绝鼠标移到其他屏幕或第三方应用误触发)
+        if not self._is_cursor_in_kline_viewport():
+            self._hide_crosshair()
+            return
+
+        idx = self.__dict__.get('current_crosshair_idx', -1)
         if idx < 0 or idx >= len(self.day_df):
             return
+
         self._show_kline_detail_window(idx)
 
     def _on_tick_mouse_moved(self, pos):
@@ -7595,7 +7993,8 @@ class MainWindow(QMainWindow, WindowMixin):
             if hasattr(self, 'crosshair_y_cursor') and self.crosshair_y_cursor:
                 self.crosshair_y_cursor.setVisible(False)
             if hasattr(self, 'kline_detail_win') and self.kline_detail_win:
-                self.kline_detail_win.hide()
+                if getattr(self.kline_detail_win, 'auto_close_disabled', False) is not True:
+                    self.kline_detail_win.hide()
             self._last_legend_idx = None
             self._update_ma_legend() # ⚡ [NEW] 鼠标离开时，MA 顶栏指标恢复显示最新一根 K 线的值
         except Exception:
@@ -8072,11 +8471,16 @@ class MainWindow(QMainWindow, WindowMixin):
             """
         return text
 
-    def _show_kline_detail_window(self, idx):
-        """显示指定 K 线的悬浮详情窗 (悬停后才显示，通达信智能跟随避让光标)"""
+    def _show_kline_detail_window(self, idx, force=False):
+        """显示指定 K 线的悬浮详情窗 (悬停后才显示，通达信智能跟随避让光标；force=True 为双击主动锁定唤起)"""
         if not hasattr(self, 'kline_detail_win') or not self.kline_detail_win:
             return
         if self.day_df.empty or idx < 0 or idx >= len(self.day_df):
+            return
+
+        # 校验物理光标是否在 K 线图内，若非强制模式且不在视口内，严禁弹到其他屏幕或外部应用
+        if not force and not self._is_cursor_in_kline_viewport():
+            self.kline_detail_win.hide()
             return
 
         row = self.day_df.iloc[idx]
@@ -8088,20 +8492,26 @@ class MainWindow(QMainWindow, WindowMixin):
 
         # 通达信同款智能跟随避让：光标在右半侧显示在左边，在左半侧显示在右边，杜绝遮挡当前 K 线
         if not getattr(self.kline_detail_win, 'is_custom_positioned', False):
-            cursor_pos = QtGui.QCursor.pos()
+            cursor_pos = self._get_global_cursor_pos()
             win_w = self.kline_detail_win.width()
             win_h = self.kline_detail_win.height()
 
             try:
-                plot_rect = self.kline_plot.mapToGlobal(QtCore.QPoint(0, 0))
-                plot_w = self.kline_plot.width()
+                target_w = getattr(self, 'kline_widget', None) or getattr(self, 'kline_plot', None)
+                plot_rect = target_w.mapToGlobal(QtCore.QPoint(0, 0))
+                plot_w = target_w.width()
                 if cursor_pos.x() > plot_rect.x() + plot_w * 0.5:
                     target_x = cursor_pos.x() - win_w - 20
                 else:
                     target_x = cursor_pos.x() + 20
                 
                 target_y = cursor_pos.y() - win_h // 2
-                screen = QtGui.QGuiApplication.screenAt(cursor_pos)
+                # ⭐ 严格绑定主窗口所在的屏幕，绝不向通达信或其他屏幕漂移
+                screen = None
+                if hasattr(target_w, 'screen'):
+                    screen = target_w.screen()
+                if not screen:
+                    screen = QtGui.QGuiApplication.screenAt(plot_rect) or QtGui.QGuiApplication.primaryScreen()
                 if screen:
                     scr_geo = screen.availableGeometry()
                     target_x = max(scr_geo.left() + 10, min(target_x, scr_geo.right() - win_w - 10))
@@ -14969,13 +15379,69 @@ class MainWindow(QMainWindow, WindowMixin):
         self.filter_tree.setFocus()
 
     def eventFilter(self, watched, event):
-        """处理 filter_tree viewport 点击事件，确保获取焦点"""
+        """处理全局或指定子控件的事件拦截"""
         from PyQt6.QtCore import QEvent
-        if watched == self.filter_tree.viewport():
+        if hasattr(self, 'filter_tree') and watched == self.filter_tree.viewport():
             if event.type() == QEvent.Type.MouseButtonPress:
                 # ⭐ 点击 filter_tree 区域时强制获取焦点
                 self.filter_tree.setFocus()
+
+        # ⭐ [NEW] 双击 K 线图打开十字星详情并锁定关闭自动关闭；右键恢复自动跟随并恢复自动关闭
+        if hasattr(self, 'kline_widget') and watched == self.kline_widget.viewport():
+            if event.type() == QEvent.Type.MouseButtonDblClick:
+                if event.button() == Qt.MouseButton.LeftButton:
+                    pos = event.position().toPoint() if hasattr(event, 'position') else event.pos()
+                    scene_pos = self.kline_widget.mapToScene(pos)
+                    if self._on_kline_double_clicked(scene_pos):
+                        return True
+            elif event.type() == QEvent.Type.MouseButtonPress:
+                if event.button() == Qt.MouseButton.RightButton:
+                    # 在 K 线图上右键点击：若当前处于锁定状态，则解除锁定并重置为自动跟随光标
+                    k_win = getattr(self, 'kline_detail_win', None)
+                    if k_win and getattr(k_win, 'auto_close_disabled', False):
+                        k_win.reset_to_auto_follow()
+                        return True
+
         return super().eventFilter(watched, event)
+
+    def _on_kline_double_clicked(self, scene_pos):
+        """
+        双击 K 线事件处理器：打开十字星详情并关闭自动关闭 (便于自由拖动调整位置)
+        """
+        if not hasattr(self, 'kline_plot') or not hasattr(self.kline_plot, 'vb'):
+            return False
+        if not self.kline_plot.vb.sceneBoundingRect().contains(scene_pos):
+            return False
+        if not hasattr(self, 'day_df') or self.day_df is None or self.day_df.empty:
+            return False
+
+        view_pt = self.kline_plot.vb.mapSceneToView(scene_pos)
+        x, y = view_pt.x(), view_pt.y()
+        idx = int(round(x))
+
+        if 0 <= idx < len(self.day_df):
+            self.current_crosshair_idx = idx
+            self._last_crosshair_idx = idx
+            # 更新十字虚线与通达信线位价格标签
+            if hasattr(self, 'vline') and hasattr(self, 'hline'):
+                self.vline.setPos(idx)
+                self.hline.setPos(y)
+                self.vline.setVisible(True)
+                self.hline.setVisible(True)
+            if hasattr(self, '_update_line_price_tag'):
+                self._update_line_price_tag(idx, y)
+            if hasattr(self, '_update_ma_legend'):
+                self._update_ma_legend(idx)
+
+            # 强制显示详情浮窗
+            self._show_kline_detail_window(idx, force=True)
+
+            # ⭐ 锁定详情窗并关闭自动关闭
+            k_win = getattr(self, 'kline_detail_win', None)
+            if k_win:
+                k_win.lock_and_disable_auto_close()
+            return True
+        return False
 
     def _select_stock_in_main_table(self, target_code):
         """在左侧 stock_table 中查找并滚动到指定 code"""
@@ -15655,6 +16121,12 @@ class MainWindow(QMainWindow, WindowMixin):
                 self.save_window_position_qt_visual(self.kline_detail_win, "kline_detail_window")
             except Exception as e:
                 logger.error(f"Failed to save detail window position: {e}")
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() in (QtCore.QEvent.Type.ActivationChange, QtCore.QEvent.Type.WindowStateChange):
+            if not self.isActiveWindow() or self.isMinimized():
+                self._hide_crosshair()
 
     def moveEvent(self, event):
         super().moveEvent(event)
