@@ -64,7 +64,7 @@ MouseIsOver(WinTitle) {
 }
 
 ; ================================
-; Clipboard Monitor
+; Clipboard Monitor (Auto Send on Copy)
 ; ================================
 OnClipboardChange("HandleClipboardChange")
 
@@ -75,12 +75,12 @@ HandleClipboardChange(Type) {
         if (current != ClipSaved && current != "") {
             ClipSaved := current
             if RegExMatch(ClipSaved, "^(?:60|30|00|43|83|87|92)\d{4}(?!\d)|^(?:688|200)\d{3}(?!\d)", stockCode) {
-                Log("Clipboard detected code: " . stockCode)
+                Log("Clipboard detected code: " . stockCode . ", AutoSendToDFCF=" . AutoSendToDFCF)
                 if (AutoSendToDFCF) {
-                    Notify("Auto Send: " . stockCode, "sound", 0.3)
+                    Notify("Auto Send DFCF: " . stockCode, "sound", 0.3)
                     WinGet, activeWinID, ID, A
                     SendToDFCF(stockCode)
-                    Sleep, 100
+                    Sleep, 200
                     if (activeWinID) {
                         WinActivate, ahk_id %activeWinID%
                         WinWaitActive, ahk_id %activeWinID%,, 1
@@ -94,49 +94,56 @@ HandleClipboardChange(Type) {
 }
 
 ; ================================
-; Target Sending Functions (Default Tested Working Pattern)
+; Target Sending Functions
 ; ================================
 SendToDFCF(stockCode) {
     Log("Execute SendToDFCF(" . stockCode . ")")
-    if WinExist("ahk_exe mainfree.exe") {
-        WinActivate
-        WinWaitActive,,, 1
-        Sleep, 150
-        SetKeyDelay, 100
+    targetWin := "ahk_exe mainfree.exe"
+    if WinExist(targetWin) {
+        WinActivate, %targetWin%
+        WinWaitActive, %targetWin%,, 1.5
+        Sleep, 200
+        SetKeyDelay, 60, 30
         Send, %stockCode%
-        Sleep, 250
+        Sleep, 350
         Send, {Enter}
-        Sleep, 100
+        Sleep, 400
+        Log("SendToDFCF completed: " . stockCode)
     } else {
-        Log("DFCF window not found")
-        Notify("DFCF not found: " . stockCode, "tooltip", 1)
+        Log("DFCF window not found (mainfree.exe)")
+        Notify("DFCF not found: " . stockCode, "tooltip", 1.5)
     }
 }
 
 SendToTDX(stockCode) {
     Log("Execute SendToTDX(" . stockCode . ")")
-    if WinExist("ahk_class TdxW_MainFrame_Class") {
-        WinActivate
-        WinWaitActive,,, 1
-        Sleep, 100
-        SetKeyDelay, 80
+    targetWin := "ahk_class TdxW_MainFrame_Class"
+    if WinExist(targetWin) {
+        WinActivate, %targetWin%
+        WinWaitActive, %targetWin%,, 1
+        Sleep, 150
+        SetKeyDelay, 80, 20
         Send, %stockCode%
-        Sleep, 200
+        Sleep, 250
         Send, {Enter}
-        Sleep, 100
+        Sleep, 250
+        Log("SendToTDX completed: " . stockCode)
     }
 }
 
 SendToHexin(stockCode) {
     Log("Execute SendToHexin(" . stockCode . ")")
-    if WinExist("ahk_exe hexin.exe") {
-        WinActivate
-        WinWaitActive,,, 1
-        SetKeyDelay, 50
-        Send, %stockCode%
+    targetWin := "ahk_exe hexin.exe"
+    if WinExist(targetWin) {
+        WinActivate, %targetWin%
+        WinWaitActive, %targetWin%,, 1
         Sleep, 150
+        SetKeyDelay, 50, 20
+        Send, %stockCode%
+        Sleep, 200
         Send, {Enter}
-        Sleep, 100
+        Sleep, 250
+        Log("SendToHexin completed: " . stockCode)
     }
 }
 
@@ -176,11 +183,9 @@ MButton::
     stockCode := ""
     try {
         if WinActive("ahk_class TdxW_MainFrame_Class") || WinActive("ahk_class TdxW_SecondFrame_Class") {
-            ; Clear clipboard first to avoid stale ClipWait hit
             ClipBackup := ClipboardAll
             Clipboard := ""
             
-            ; Send copy code message to active window or main frame
             SendMessage, 0x111, 33819, 0,, ahk_id %activeWinID%
             ClipWait, 0.4
             if (ErrorLevel || Clipboard == "") {
@@ -235,7 +240,7 @@ MButton::
         Log("Hotkey error: " . e.Message)
         Notify("Hotkey error: " . e.Message, "tray", 2)
     } finally {
-        Sleep, 150
+        Sleep, 200
         if (activeWinID) {
             WinActivate, ahk_id %activeWinID%
             WinWaitActive, ahk_id %activeWinID%,, 1
