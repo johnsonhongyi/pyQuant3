@@ -248,11 +248,51 @@ def test_crosshair_hover_timer_and_auto_hide_lifecycle():
     win.kline_detail_win.hide.assert_called()
     win.kline_hover_timer.start.assert_called_with(180)
 
-    # 3. 模拟悬停 180ms 定时器超时触发
+    # 3. 模拟悬停 180ms 定时器超时触发 (当鼠标仍在 K 线图内时正常弹出)
     win.current_crosshair_idx = 10
     win._show_kline_detail_window = MagicMock()
-    win._on_kline_hover_timeout()
-    win._show_kline_detail_window.assert_called_with(10)
+    from unittest import mock
+    with mock.patch.object(tv.QtWidgets.QApplication, 'activeWindow', return_value=win), \
+         mock.patch.object(tv.QtGui.QCursor, 'pos', return_value=tv.QtCore.QPoint(100, 100)):
+        win.kline_plot.mapFromGlobal.return_value = tv.QtCore.QPoint(50, 50)
+        win.kline_plot.rect.return_value.contains.return_value = True
+        win.kline_plot.mapToScene.return_value = MagicMock()
+        win.kline_plot.vb.sceneBoundingRect.return_value.contains.return_value = True
+        win.kline_plot.vb.mapSceneToView.return_value = MagicMock(x=lambda: 10.0)
+        win._on_kline_hover_timeout()
+        win._show_kline_detail_window.assert_called_with(10)
+
+    # 4. ⭐ 核心修复验证：当鼠标移动到其他屏幕或第三方应用(如通达信)时，悬停定时器触发必须立即隐藏，绝不弹出！
+    win._show_kline_detail_window.reset_mock()
+    win._hide_crosshair = MagicMock()
+    with mock.patch.object(tv.QtWidgets.QApplication, 'activeWindow', return_value=win), \
+         mock.patch.object(tv.QtGui.QCursor, 'pos', return_value=tv.QtCore.QPoint(2500, 500)):
+        win.kline_plot.mapFromGlobal.return_value = tv.QtCore.QPoint(2500, 500)
+        win.kline_plot.rect.return_value.contains.return_value = False  # 明确不在主视口内
+        win._on_kline_hover_timeout()
+        win._show_kline_detail_window.assert_not_called()
+        win._hide_crosshair.assert_called()
+
+    # 5. 模拟主程序非激活窗口（切换到通达信）时，悬停定时器触发必须立即隐藏，绝不弹出！
+    win._show_kline_detail_window.reset_mock()
+    win._hide_crosshair.reset_mock()
+    with mock.patch.object(tv.QtWidgets.QApplication, 'activeWindow', return_value=None):
+        win._on_kline_hover_timeout()
+        win._show_kline_detail_window.assert_not_called()
+        win._hide_crosshair.assert_called()
+
+
+def test_kline_detail_window_no_global_stays_on_top():
+    """验证 KLineDetailWindow 严禁携带全局跨程序置顶标志 WindowStaysOnTopHint，并绑定父对象"""
+    app = tv.QtWidgets.QApplication.instance() or tv.QtWidgets.QApplication([])
+    win = tv.MainWindow.__new__(tv.MainWindow)
+    detail_win = tv.KLineDetailWindow(win)
+    flags = detail_win.windowFlags()
+    # 绝不能包含 WindowStaysOnTopHint
+    assert not (flags & tv.Qt.WindowType.WindowStaysOnTopHint), "详情窗严禁包含 WindowStaysOnTopHint，防止跨屏幕干扰通达信！"
+    assert bool(flags & tv.Qt.WindowType.Tool), "详情窗应为 Tool 窗口"
+    assert detail_win.main_window == win
+
 
 
 def test_688813_taijin_descending_channel_alignment():
@@ -439,6 +479,127 @@ def test_zoom_kline_right_anchored_expansion_and_auto_y_fit():
         win.zoom_kline(in_=False)
         r = mock_vb.viewRange()[0]
         assert r[1] == pytest.approx(expected_x_max, abs=1e-4), "光标悬停时按向下键，最右侧最新K线位置仍必须严格保持不变！"
+
+
+def test_kline_double_click_lock_and_right_click_reset_lifecycle():
+    """验证双击 K 线打开十字星详情并锁定关闭自动关闭，以及右键重置为跟随光标模式恢复自动关闭完整闭环"""
+    from unittest.mock import MagicMock
+    app = tv.QtWidgets.QApplication.instance() or tv.QtWidgets.QApplication([])
+    df = get_tdx_Exp_day_to_df('300563')
+    win = tv.MainWindow.__new__(tv.MainWindow)
+    win.day_df = df
+    win.crosshair_enabled = True
+    win.current_kline_signals = []
+    win.current_crosshair_idx = -1
+    win.vline = MagicMock()
+    win.hline = MagicMock()
+    win.crosshair_label = MagicMock()
+    win.crosshair_line_tag = MagicMock()
+    win.crosshair_y_cursor = MagicMock()
+    win.ma_legend_label = MagicMock()
+    win.kline_hover_timer = MagicMock()
+    win._update_line_price_tag = MagicMock()
+    win._update_ma_legend = MagicMock()
+    win.save_detail_window_position = MagicMock()
+
+    # 实例化真实的 KLineDetailWindow
+    detail_win = tv.KLineDetailWindow(win)
+    win.kline_detail_win = detail_win
+
+    mock_vb = MagicMock()
+    mock_vb.sceneBoundingRect.return_value.contains.return_value = True
+    # 映射到 idx=25, price=23.50
+    mock_vb.mapSceneToView.return_value = tv.QtCore.QPointF(25.0, 23.50)
+    mock_kline_plot = MagicMock()
+    mock_kline_plot.vb = mock_vb
+    win.kline_plot = mock_kline_plot
+    win._show_kline_detail_window = MagicMock()
+
+    # 1. ⭐ 初始状态：未锁定，跟随光标模式，自动关闭生效
+    assert detail_win.auto_close_disabled is False
+    assert detail_win.is_custom_positioned is False
+    assert detail_win.handle_bar.isVisible() is False
+
+    # 2. ⭐ 双击 K 线图：打开十字星详情并关闭自动关闭 (锁定调整模式)
+    dummy_scene_pos = tv.QtCore.QPointF(100, 200)
+    handled = win._on_kline_double_clicked(dummy_scene_pos)
+    assert handled is True
+    assert win.current_crosshair_idx == 25
+    win.vline.setPos.assert_called_with(25)
+    win.hline.setPos.assert_called_with(23.50)
+    win._show_kline_detail_window.assert_called_with(25, force=True)
+
+    # 验证详情窗进入锁定调整状态
+    assert detail_win.auto_close_disabled is True, "双击后必须关闭自动关闭"
+    assert detail_win.is_custom_positioned is True, "双击后标记为自定义位置模式"
+    # ⭐ 用户需求 2：锁定后顶部的锁定信息平时自动隐藏！
+    assert detail_win.handle_bar.isHidden(), "锁定状态下把手栏平时自动隐藏，保持纯净紧凑"
+    assert detail_win.auto_hide_timer.isActive() is False, "自动隐藏定时器必须被停止"
+
+    # 3. ⭐ 用户需求 1：锁定状态下鼠标移动到新 K 线，数据实时自动更新！
+    detail_win.hide = MagicMock()
+    win._show_kline_detail_window.reset_mock()
+    # 模拟鼠标移动到 idx=30 的 K 线
+    mock_vb.mapSceneToView.return_value = tv.QtCore.QPointF(30.0, 24.80)
+    dummy_scene_pos_30 = tv.QtCore.QPointF(150, 210)
+    win._on_kline_mouse_moved(dummy_scene_pos_30)
+    
+    assert win.current_crosshair_idx == 30, "十字光标索引必须更新到新 K 线"
+    win._show_kline_detail_window.assert_called_with(30, force=True), "锁定模式下鼠标移动必须实时自动更新对应 K 线数据！"
+    detail_win.hide.assert_not_called(), "锁定模式下移动鼠标绝不能被隐藏！"
+
+    # 模拟移出视口 _hide_crosshair
+    win._hide_crosshair()
+    detail_win.hide.assert_not_called(), "锁定模式下移出视口十字线隐藏但详情窗绝不能被隐藏！"
+
+    # 4. ⭐ 用户需求 2：跟之前的逻辑一致，在窗口悬停后才触发显示拖动调整框，移动后自动隐藏
+    enter_ev = tv.QtGui.QEnterEvent(tv.QtCore.QPointF(10, 10), tv.QtCore.QPointF(100, 100), tv.QtCore.QPointF(100, 100))
+    detail_win.enterEvent(enter_ev)
+    assert detail_win.handle_bar.isHidden(), "刚进入未悬停前拖动调整框必须保持隐藏"
+    
+    # 悬停延时到达，触发显示
+    detail_win._on_hover_timeout()
+    assert not detail_win.handle_bar.isHidden(), "悬停后才触发显示拖动调整框"
+    assert "已锁定" in detail_win.handle_label.text(), "手柄栏必须提示已锁定"
+
+    # 点击并拖拽
+    press_event = tv.QtGui.QMouseEvent(
+        tv.QtCore.QEvent.Type.MouseButtonPress,
+        tv.QtCore.QPointF(10, 5),
+        tv.QtCore.QPointF(100, 100),
+        tv.Qt.MouseButton.LeftButton,
+        tv.Qt.MouseButton.LeftButton,
+        tv.Qt.KeyboardModifier.NoModifier
+    )
+    detail_win.mousePressEvent(press_event)
+    assert detail_win.is_dragging is True, "点击把手栏必须立即进入拖拽状态"
+
+    # 释放鼠标（移动完毕）
+    release_event = tv.QtGui.QMouseEvent(
+        tv.QtCore.QEvent.Type.MouseButtonRelease,
+        tv.QtCore.QPointF(10, 5),
+        tv.QtCore.QPointF(100, 100),
+        tv.Qt.MouseButton.LeftButton,
+        tv.Qt.MouseButton.NoButton,
+        tv.Qt.KeyboardModifier.NoModifier
+    )
+    detail_win.mouseReleaseEvent(release_event)
+    assert detail_win.is_dragging is False, "释放后退出拖拽状态"
+    win.save_detail_window_position.assert_called(), "拖动结束保存自定义位置"
+    # ⭐ 移动后自动隐藏拖动调整框！
+    assert detail_win.handle_bar.isHidden(), "移动后拖动调整框必须立即自动隐藏！"
+
+    # 5. ⭐ 右键重置为自动跟随光标模式，恢复自动关闭
+    detail_win.reset_to_auto_follow()
+    assert detail_win.auto_close_disabled is False, "右键重置后必须恢复自动关闭"
+    assert detail_win.is_custom_positioned is False, "右键重置后必须恢复自动跟随光标"
+    assert detail_win.handle_bar.isHidden(), "恢复跟随模式后手柄栏恢复默认隐藏"
+
+    # 6. ⭐ 恢复自动关闭后，移出视口调用 _hide_crosshair 必须正常自动隐藏
+    detail_win.hide.reset_mock()
+    win._hide_crosshair()
+    detail_win.hide.assert_called(), "恢复自动关闭后移出视口必须自动隐藏！"
+
 
 
 
