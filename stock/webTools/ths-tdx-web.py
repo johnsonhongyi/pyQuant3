@@ -335,7 +335,7 @@ if __name__ == '__main__':
     time.sleep(5)
 
     if not (find_window_by_title_background('AutoHotkey')):
-        run_system_fpath('D:\\MacTools\\WorkFile\\WorkSpace\\pyQuant3\\stock\\ahk\\tdx-dfcf.ahk')
+        run_system_fpath('D:\\MacTools\\WorkFile\\WorkSpace\\pyQuant3\\stock_standalone\\ahk\\tdx-dfcf.ahk')
         # run_system_fpath('D:\\MacTools\\WorkFile\\WorkSpace\\pyQuant3\\stock\\ahk\\ths-code.ahk')
     else:
         print('find AutoHotkey')
