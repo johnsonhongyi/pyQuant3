@@ -1,3 +1,18 @@
+## 2026-09-12 17:10
+- [x] **【上涨通道与通达信KX支撑线同向双共振策略设计落地】(SSOT) (`config/indicator_help_custom.json`, `tests/test_tdx_channel_visualizer_alignment.py`)**：
+    - [x] **原条件筛选 1436 支股票症结诊断**：
+        1. 缺少通达信 KX 上涨支撑线（KX DRAWLINE）指标约束，导致未形成通道与支撑线的双共振；
+        2. `ch_slope_deg > 1.5` 倾角过平，未能排除横盘钝化通道；`ch_pos > 4` 覆盖全通道（5%~100%+）；`lasth{1-9}d > high4{1-9}` 9 天内冲高极易满足；
+    - [x] **双共振几何机理与数学模型提炼 (以 603601 再升科技为原型)**：
+        1. **方向与倾角双共振**：通道昂首向上（`ch_dir == 1 and ch_slope_deg > 6.0`）与支撑线昂首向上（`ch_supp_slope_deg > 15.0`，再升科技 +26.6°）同向加速；
+        2. **空间依托双共振**：支撑线价格反超通道下轨进入通道内部（`ch_supp_price >= ch_lower`），股价稳守双重支撑（`close >= ch_supp_price and close >= ch_lower`）；
+        3. **回踩确认**：前日最低价分毫不差踩在支撑线上（再升科技前日最低 8.91 元踩中支撑线 8.91 元），随后放量暴拉大阳；
+    - [x] **实操落地三大高胜率实战策略表达式**：
+        1. **模式 1 (经典主升加速型)**：`{OR: lasth{1-9}d > high4{1-9}} and ch_dir == 1 and ch_slope_deg > 6.0 and ch_supp_slope_deg > 15.0 and close >= ch_supp_price and ch_supp_price >= ch_lower and close >= ch_mid and lastl{1-3}d >= ch_lower`；
+        2. **模式 2 (黄金低吸伏击型)**：`ch_dir == 1 and ch_slope_deg > 3.0 and ch_supp_slope_deg > 10.0 and close >= ch_supp_price and ch_supp_pos <= 5.0 and ch_supp_price >= ch_lower and (ch_pos >= 20 and ch_pos <= 65)`；
+        3. **模式 3 (严密量价齐升型)**：`{OR: lasth{1-9}d > high4{1-9}} and ch_dir == 1 and ch_slope_deg > 5.0 and ch_supp_slope_deg > 12.0 and close >= ch_supp1 and ch_supp1 >= ch_lower and lastl1d >= ch_supp1 * 0.98 and ratio >= 5.0 and percent > 0`；
+    - [x] **自动化测试回归 15/15 PASSED**：在 `test_tdx_channel_visualizer_alignment.py` 中新增 `test_channel_and_support_line_double_resonance_strategy`，全量测试 100% 通过。
+
 ## 2026-09-12 13:55
 - [x] **【锁定模式鼠标移动数据实时自动更新 & 悬停后才显示拖动调整框移动后自动隐藏】(SSOT) (`stock_standalone/trade_visualizer_qt6.py`, `stock_standalone/tests/test_tdx_channel_visualizer_alignment.py`)**：
     - [x] **锁定模式鼠标移动数据实时自动更新（位置固定不乱跳）**：
