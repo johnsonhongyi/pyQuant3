@@ -585,25 +585,21 @@ class DateAxis(pg.AxisItem):
         self.update()
 
     def tickStrings(self, values, scale, spacing):
-        """把整数索引映射成日期字符串，最后一天显示在末尾"""
+        """把整数索引映射成日期字符串，仅在有效数据索引范围内显示日期，越界留白区域显示空字符串"""
         strs = []
         n = len(self.dates)
         if n == 0:
-            # dates 为空，直接用原始值
             return [str(v) for v in values]
 
         for val in values:
             try:
-                idx = int(val)
-                if idx < 0:
-                    idx = 0  # 负索引归零
-                elif idx >= n:
-                    idx = n - 1  # 超出范围用最后一天
-                strs.append(str(self.dates[idx])[5:10])  # MM-DD
-            except Exception as e:
-                # 捕捉意外异常
-                logger.warning(f"[tickStrings] val={val} error: {e}")
-                strs.append("")  # 出错显示空
+                idx = int(round(val))
+                if 0 <= idx < n:
+                    strs.append(str(self.dates[idx])[5:10])  # MM-DD
+                else:
+                    strs.append("")  # 越界留白区域彻底显示为空，杜绝 09-11 连续重复打印
+            except Exception:
+                strs.append("")
         return strs
 
 
@@ -2846,31 +2842,29 @@ class GlobalInputFilter(QtCore.QObject):
                 return False
                 
             key = event.key()
-            # --- 通达信模式: 上下左右导航 ---
+            # --- 通达信模式: 上下键缩放，左右键移动十字光标 ---
             if key == Qt.Key.Key_Up:
                 # 1.1: 如果左侧列表或过滤器树有焦点，交给控件处理翻页
                 if self.main_window.stock_table.hasFocus() or \
                    (hasattr(self.main_window, 'filter_tree') and self.main_window.filter_tree.hasFocus()):
                     return False
-                # 1.2: 如果鼠标在 K 线图，缩放 K 线；如果在分时图，切换至上一只股票 (专业模式)
-                if self.main_window.is_mouse_in_kline_plot():
-                    self.main_window.zoom_kline(in_=True)
-                    return True
-                elif self.main_window.is_mouse_in_tick_plot():
+                # 1.2: 如果鼠标明确在分时图内部，切换至上一只股票；否则默认进入通达信 K 线缩放模式 (无论鼠标在何处均可缩放)
+                if self.main_window.is_mouse_in_tick_plot():
                     self.main_window.switch_stock_prev()
                     return True
-                return False # 其他情况交给系统
+                else:
+                    self.main_window.zoom_kline(in_=True)
+                    return True
             elif key == Qt.Key.Key_Down:
                 if self.main_window.stock_table.hasFocus() or \
                    (hasattr(self.main_window, 'filter_tree') and self.main_window.filter_tree.hasFocus()):
                     return False
-                if self.main_window.is_mouse_in_kline_plot():
-                    self.main_window.zoom_kline(in_=False)
-                    return True
-                elif self.main_window.is_mouse_in_tick_plot():
+                if self.main_window.is_mouse_in_tick_plot():
                     self.main_window.switch_stock_next()
                     return True
-                return False
+                else:
+                    self.main_window.zoom_kline(in_=False)
+                    return True
             elif key == Qt.Key.Key_Left:
                 # 1.2: 根据当前鼠标所在位置，决定是移动 K 线光标还是分时图光标
                 if self.main_window.is_mouse_in_tick_plot():
@@ -3852,9 +3846,10 @@ class MainWindow(QMainWindow, WindowMixin):
         self.tick_hline.setVisible(False)
         self.tick_crosshair_label.setVisible(False)
 
-        # 设置分割器大小 (80% 顶部, 20% 底部) - 给 K 线更多空间
-        # self.right_splitter.setSizes([800, 150])
-        self.right_splitter.setSizes([300, 100])  # 3:1 比例
+        # 设置分割器大小与拉伸权重 (通达信专业比例: 顶部 K 线区约 80%, 底部区约 20%)
+        self.right_splitter.setSizes([750, 200])
+        self.right_splitter.setStretchFactor(0, 4)
+        self.right_splitter.setStretchFactor(1, 1)
 
         # 3. Filter Panel (Initially Hidden)
         self.filter_panel = QWidget()
@@ -7585,20 +7580,26 @@ class MainWindow(QMainWindow, WindowMixin):
 
     def _hide_crosshair(self):
         """隐藏十字光标及其标签与详情窗口 (鼠标不在有效 K 线或离开视口时自动调用)"""
-        self._last_crosshair_idx = -1
-        if hasattr(self, 'kline_hover_timer'):
-            self.kline_hover_timer.stop()
-        self.vline.setVisible(False)
-        self.hline.setVisible(False)
-        self.crosshair_label.setVisible(False)
-        if hasattr(self, 'crosshair_line_tag') and self.crosshair_line_tag:
-            self.crosshair_line_tag.setVisible(False)
-        if hasattr(self, 'crosshair_y_cursor') and self.crosshair_y_cursor:
-            self.crosshair_y_cursor.setVisible(False)
-        if hasattr(self, 'kline_detail_win') and self.kline_detail_win:
-            self.kline_detail_win.hide()
-        self._last_legend_idx = None
-        self._update_ma_legend() # ⚡ [NEW] 鼠标离开时，MA 顶栏指标恢复显示最新一根 K 线的值
+        try:
+            self._last_crosshair_idx = -1
+            if hasattr(self, 'kline_hover_timer'):
+                self.kline_hover_timer.stop()
+            if hasattr(self, 'vline'):
+                self.vline.setVisible(False)
+            if hasattr(self, 'hline'):
+                self.hline.setVisible(False)
+            if hasattr(self, 'crosshair_label'):
+                self.crosshair_label.setVisible(False)
+            if hasattr(self, 'crosshair_line_tag') and self.crosshair_line_tag:
+                self.crosshair_line_tag.setVisible(False)
+            if hasattr(self, 'crosshair_y_cursor') and self.crosshair_y_cursor:
+                self.crosshair_y_cursor.setVisible(False)
+            if hasattr(self, 'kline_detail_win') and self.kline_detail_win:
+                self.kline_detail_win.hide()
+            self._last_legend_idx = None
+            self._update_ma_legend() # ⚡ [NEW] 鼠标离开时，MA 顶栏指标恢复显示最新一根 K 线的值
+        except Exception:
+            pass
 
     def _update_ma_legend(self, idx=None):
         """
@@ -8136,12 +8137,65 @@ class MainWindow(QMainWindow, WindowMixin):
         self._update_ma_legend(idx)
 
     def zoom_kline(self, in_=True):
-        """通达信模式：上下键缩放"""
+        """
+        通达信模式：上下键缩放
+        通达信权威法则：当前显示的 K 线数据位置始终保持最右侧不变，下放大左侧（显示更多历史），上缩小左侧（向右收缩看近期）
+        """
+        if not hasattr(self, 'day_df') or self.day_df is None or self.day_df.empty:
+            return
+
+        total_bars = len(self.day_df)
+        RIGHT_MARGIN = 2  # 与 _reset_kline_view 统一的右侧呼吸边距 (2根)
+        x_fixed_max = float(total_bars + RIGHT_MARGIN)
+
         vb = self.kline_plot.vb
-        view_range = vb.viewRange()
-        center_x = (view_range[0][1] + view_range[0][0]) / 2
-        scale = 0.85 if in_ else 1.15  # 这里的比例可以根据手感微调
-        vb.scaleBy(x=scale, center=(center_x, 0))
+        cur_range = vb.viewRange()[0]
+        cur_min = float(cur_range[0])
+        cur_max = float(cur_range[1])
+        cur_span = max(10.0, cur_max - cur_min)
+
+        # 通达信手感缩放步长因子 (每次增减约 25% 的 K 线跨度)
+        factor = 1.25
+
+        # 下放大左侧（显示更多历史，跨度增大），上缩小左侧（向右收缩看近期，跨度缩小）
+        new_span = cur_span / factor if in_ else cur_span * factor
+        min_span = min(15.0, float(total_bars + RIGHT_MARGIN))
+        max_span = float(total_bars + RIGHT_MARGIN + 1)
+        new_span = max(min_span, min(max_span, new_span))
+
+        # ⭐ 通达信权威核心法则：始终保持最右侧的数据显示不变！
+        new_max = x_fixed_max
+        new_min = new_max - new_span
+
+        # 更新 X 轴视口
+        vb.setXRange(new_min, new_max, padding=0)
+
+        # 如果十字光标超出新的可视范围，优雅隐藏
+        cur_cross_idx = getattr(self, 'current_crosshair_idx', -1)
+        if cur_cross_idx >= 0 and (cur_cross_idx < new_min or cur_cross_idx > new_max):
+            self._hide_crosshair()
+
+        # 联动自适应当前可视范围的 Y 轴高低点 (包络视野内所有历史波段极值)
+        self._auto_fit_visible_y_range(new_min, new_max)
+
+    def _auto_fit_visible_y_range(self, x_min, x_max):
+        """自适应调整当前可视区域内的 Y 轴价格范围，确保露出历史高低点完全包络"""
+        if not hasattr(self, 'day_df') or self.day_df is None or self.day_df.empty:
+            return
+
+        total_bars = len(self.day_df)
+        vis_start = int(max(0, x_min))
+        vis_end = int(min(total_bars, x_max + 1))
+
+        if vis_start < vis_end and vis_start < len(self.day_df):
+            sub_df = self.day_df.iloc[vis_start:vis_end]
+            if not sub_df.empty and 'high' in sub_df.columns and 'low' in sub_df.columns:
+                high_max = float(sub_df['high'].max())
+                low_min = float(sub_df['low'].min())
+                if high_max > low_min > 0:
+                    span_y = high_max - low_min
+                    margin = span_y * 0.06  # 6% 上下留白
+                    self.kline_plot.vb.setYRange(low_min - margin, high_max + margin, padding=0)
 
     def move_crosshair(self, step):
         """通达信模式：左右键移动十字光标并显示信息"""
@@ -12861,7 +12915,13 @@ class MainWindow(QMainWindow, WindowMixin):
                 self.vol_date_axis = DateAxis(day_df.index, orientation='bottom')
                 self.volume_plot = self.kline_widget.addPlot(row=1, col=0, axisItems={'bottom': self.vol_date_axis})
                 self.volume_plot.setXLink(self.kline_plot)
-                self.volume_plot.setMaximumHeight(85)
+                self.volume_plot.setMinimumHeight(70)
+                self.volume_plot.setMaximumHeight(120)
+                try:
+                    self.kline_widget.ci.layout.setRowStretchFactor(0, 4)
+                    self.kline_widget.ci.layout.setRowStretchFactor(1, 1)
+                except Exception:
+                    pass
                 self.volume_plot.setLabel('left', 'Volume')
                 self.volume_plot.showGrid(x=True, y=True)
                 self.volume_plot.setMenuEnabled(False)

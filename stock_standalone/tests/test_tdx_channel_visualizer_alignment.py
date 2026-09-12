@@ -335,6 +335,115 @@ def test_301148_jiarong_descending_channel_alignment():
     np.testing.assert_allclose(vis_dn, res.lower, rtol=1e-5, atol=1e-4)
 
 
+def test_date_axis_no_duplicate_out_of_bounds_ticks():
+    """验证 DateAxis 越界刻度不打印重复最后一天日期，杜绝 09-11 连续重影"""
+    from PyQt6.QtWidgets import QApplication
+    app = QApplication.instance() or QApplication([])
+    dates = [f"2026-09-0{i}" for i in range(1, 10)] + ["2026-09-10", "2026-09-11"]
+    axis = tv.DateAxis(dates=dates)
+    
+    # 模拟视口向右空出 5 个刻度以及左侧负数刻度
+    test_values = [-2, -1, 0, 5, 10, 11, 12, 13, 15]
+    ticks = axis.tickStrings(test_values, scale=1, spacing=1)
+    
+    # 索引 0 (2026-09-01) -> '09-01'
+    assert ticks[2] == '09-01'
+    # 索引 10 (2026-09-11) -> '09-11'
+    assert ticks[4] == '09-11'
+    
+    # 越界区域必须全部为空字符串，绝不可重复出现 '09-11'
+    assert ticks[0] == "", "负索引应为空"
+    assert ticks[1] == "", "负索引应为空"
+    assert ticks[5] == "", "未来越界索引 11 应为空"
+    assert ticks[6] == "", "未来越界索引 12 应为空"
+    assert ticks[7] == "", "未来越界索引 13 应为空"
+    assert ticks[8] == "", "未来越界索引 15 应为空"
+
+
+def test_zoom_kline_right_anchored_expansion_and_auto_y_fit():
+    """验证通达信同款缩放模式：右侧最新 K 线固定锚定不变，向下键向左展开历史数据，向上键收缩聚焦近期"""
+    from unittest.mock import MagicMock
+    df = get_tdx_Exp_day_to_df('301148')
+    assert df is not None and len(df) >= 60
+    total_bars = len(df)
+    RIGHT_MARGIN = 2
+    expected_x_max = float(total_bars + RIGHT_MARGIN)
+
+    win = tv.MainWindow.__new__(tv.MainWindow)
+    win.day_df = df
+    win.current_crosshair_idx = -1
+    win.vline = MagicMock()
+    win.vline.isVisible.return_value = False
+
+    # 模拟真实可更新范围的 ViewBox
+    class MockViewBox:
+        def __init__(self, init_x, init_y):
+            self.cur_x = list(init_x)
+            self.cur_y = list(init_y)
+        def viewRange(self):
+            return [list(self.cur_x), list(self.cur_y)]
+        def setXRange(self, min_x, max_x, padding=0):
+            self.cur_x = [min_x, max_x]
+        def setYRange(self, min_y, max_y, padding=0):
+            self.cur_y = [min_y, max_y]
+
+    init_span = 50.0
+    mock_vb = MockViewBox([expected_x_max - init_span, expected_x_max], [30.0, 70.0])
+    win.kline_plot = MagicMock()
+    win.kline_plot.vb = mock_vb
+
+    # 1. 模拟连续按向下键 (缩小显示更多历史) 3 次
+    for _ in range(3):
+        win.zoom_kline(in_=False)
+        r = mock_vb.viewRange()[0]
+        # 核心铁律：右侧最新 K 线位置始终锚定不变！
+        assert r[1] == pytest.approx(expected_x_max, abs=1e-4), f"右边界必须锚定在最新 K 线处，当前: {r[1]}"
+        # 左侧必须向左延伸，显示更多历史
+        assert r[0] < expected_x_max - init_span, "左侧边界必须向左扩展以展示历史数据"
+
+    expanded_range = mock_vb.viewRange()[0]
+    expanded_span = expanded_range[1] - expanded_range[0]
+    assert expanded_span > init_span, "缩小后可视跨度必须增大"
+
+    # 2. 验证 Y 轴随着历史展开自动包络视野内的最高低点
+    y_range = mock_vb.viewRange()[1]
+    vis_start = int(max(0, expanded_range[0]))
+    sub_df = df.iloc[vis_start:]
+    assert y_range[1] >= float(sub_df['high'].max()), "Y 轴上界必须包络可视区最高价"
+    assert y_range[0] <= float(sub_df['low'].min()), "Y 轴下界必须包络可视区最低价"
+
+    # 3. 模拟连续按向上键 (放大聚焦近期) 4 次
+    for _ in range(4):
+        win.zoom_kline(in_=True)
+        r = mock_vb.viewRange()[0]
+        # 右侧依然恒定
+        assert r[1] == pytest.approx(expected_x_max, abs=1e-4)
+
+    zoomed_in_range = mock_vb.viewRange()[0]
+    zoomed_in_span = zoomed_in_range[1] - zoomed_in_range[0]
+    assert zoomed_in_span < expanded_span, "放大后可视跨度必须缩小"
+    assert zoomed_in_span >= 15.0, "可视跨度不应低于保护下限"
+
+    # 4. ⭐ 核心场景验证：当十字光标激活 (鼠标悬停在图表中间) 时，上下键仍然始终保持最右侧的数据显示不变！
+    win.current_crosshair_idx = 35
+    win.vline.isVisible.return_value = True
+
+    # 向上键连续放大 3 次
+    for _ in range(3):
+        win.zoom_kline(in_=True)
+        r = mock_vb.viewRange()[0]
+        assert r[1] == pytest.approx(expected_x_max, abs=1e-4), "光标悬停时按向上键，最右侧最新K线位置仍必须严格保持不变！"
+
+    # 向下键连续缩小 5 次
+    for _ in range(5):
+        win.zoom_kline(in_=False)
+        r = mock_vb.viewRange()[0]
+        assert r[1] == pytest.approx(expected_x_max, abs=1e-4), "光标悬停时按向下键，最右侧最新K线位置仍必须严格保持不变！"
+
+
+
+
+
 
 
 
