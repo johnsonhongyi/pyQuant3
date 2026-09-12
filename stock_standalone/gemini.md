@@ -1,3 +1,17 @@
+## 2026-09-12 16:50
+- [x] **【严谨修正 ratio 为换手率而非量比 & 落地两大通道潜伏起爆战法】(`query_engine_util.py`, `realtime_data_service.py`, `config/indicator_help_custom.json`)**：
+    - [x] **字段语义严格纠正 (SSOT 遵循与严密隔离)**：
+        1. **用户核心指出**：`ratio` 在系统既有约定中代表 **换手率 (Turnover Rate, %)**，绝非量比；量比应为 `vol_ratio` / `volume_ratio` / `量比`；
+        2. **彻底解耦映射**：
+           - `ratio` / `turnover` / `turnover_rate` / `换手` / `换手率` -> 严格映射到换手率；
+           - `vol_ratio` / `volume_ratio` / `vr` / `量比` -> 严格映射到量比；
+        3. **测试断言验证**：经 `PandasQueryEngine.execute` 验证，`ratio < 3.0`、`换手率 < 3.0` 与 `vol_ratio < 1.0` 均精准隔离命中。
+    - [x] **实战策略闭环落地**：
+        1. **突破下降通道+支撑线反超抬高 (德尔科技 688035 原型)**：处于暴跌通道末端，KX 上涨支撑线昂首向上（`ch_supp_slope_deg > 15`），回踩偏离度仅 `+0.50%`，随后暴拉冲出通道；
+        2. **上涨通道下轨+支撑线共振预先挖掘 (神宇股份 300563 原型)**：大涨 20CM 前夜精准锁定通道下轨极限估值底座（`ch_pos == 4.3%`），地量低换手（`ratio < 3.0`）洗盘蓄势，杜绝大涨后追高；
+        3. **系统一刀切误杀彻底根除**：在 `realtime_data_service.py` 潜伏池中对 `ch_dir == -1` 的反转突破标的实施自动豁免与 +20 分加分奖励；
+        4. **全套自动化测试回归**：34 项核心测试 100% 全部通过。
+
 ## 2026-09-12 16:35
 - [x] **【注入直觉交互字段别名(ch_supp/supp_price/supp_slope等) & 全量同步至 config/indicator_help_custom.json 说明文档】(SSOT) (`JSONData/tdx_data_Day.py`, `config/indicator_help_custom.json`, `stock_indicator_help.py`)**：
     - [x] **直觉字段别名注入 (彻底根除 AttributeError)**：

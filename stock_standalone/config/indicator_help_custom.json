@@ -160,9 +160,9 @@
     "detail": "详细说明：个股最近 3 个交易日的累计涨幅与爆发动能：\n【试金石指标】区分加速主升与高位滞涨的最核心指标：\n• 万向德农: perc3d 高达 +79.0%！短期暴涨连板拔起，资金极度狂热；\n• 声迅股份: perc3d 为 -1.0%！虽大趋势向上，但近三天横盘微跌，处于停滞整理；\n• 做短线暴利妖股选 perc3d > 15 或 > 20；做低吸潜伏选 -5 <= perc3d <= 8。\n\nQuery用法示例: perc3d > 20\nQuery同义词: perc3d, 3日动能, 3日涨幅"
   },
   {
-    "key": "ratio",
-    "summary": "【资金博弈】资金抢筹与动能爆发倍数",
-    "detail": "详细说明：衡量量能与日内振幅综合攻击强度的倍数指标：\n• 万向德农: ratio 高达 25.6！主力资金大举暴力抢筹接力，攻击烈度极高；\n• 声迅股份: ratio 仅 2.1，主力温和控盘，无剧烈爆量异动；\n• 实战中 ratio > 5.0 代表游资主力白刃战抢筹，ratio < 3.0 代表机构慢爬或散户整理。\n\nQuery用法示例: ratio > 5.0\nQuery同义词: ratio, 资金抢筹倍数"
+    "key": "ratio / turnover / turnover_rate / 换手率",
+    "summary": "【核心盘口】换手率 (Turnover Rate, %)，指当日成交股数占流通股本比例",
+    "detail": "================================================================================\n          【核心量价盘口指标: ratio (换手率 Turnover Rate)】\n================================================================================\n详细说明：系统统一字段规范：\n• ratio / turnover / 换手率 : 严格代表【换手率 (%)】，绝非量比！\n• vol_ratio / 量比         : 严格代表【量比 (Volume Ratio)】！\n\n实战含义与形态应用：\n1. 底部地量洗盘 (压簧蓄势): ratio < 3.0% (代表流通盘换手极低，抛压衰竭，地量见地价)；\n2. 强势突破主升浪: ratio >= 10.0% (如神宇股份首板涨停当天换手率 18.05%，主力资金大举进场抢筹)；\n3. 恶性高位滞涨: ratio > 25.0% 且振幅巨大 (警惕高位筹码松动派发)。\n\nQuery用法示例: ratio < 3.0 (潜伏地量洗盘) 或 ratio >= 8.0 and close > lastp1d (放量拉升)\nQuery同义词: ratio, turnover, turnover_rate, 换手, 换手率"
   },
   {
     "key": "dff2 / dff3",
@@ -198,5 +198,15 @@
     "key": "ch_supp / supp_price / supp_slope / upper_price",
     "summary": "【便捷别名】通道与支撑线常用直觉快捷访问字段",
     "detail": "详细说明：系统为交互式分析 (ipdb/Jupyter/脚本) 与快速 Query 提供的便捷字段别名：\n• ch_supp / ch_supplast / supp_price / supp_price_last : 等价于 ch_supp_price (今日支撑线价格)\n• supp_slope : 等价于 ch_supp_slope (通达信支撑线几何斜率)\n• upper_price : 等价于 ch_anchor_high_price (通道锚定最高价)\n• lower_price : 等价于 ch_anchor_low_price (通道锚定最低价)\n以上所有别名在 DataFrame 列与行 Series 中均可直接通过属性或字典访问 (如 row.supp_price 或 row['supp_price'])。\n\nQuery用法示例: close >= supp_price and supp_slope > 0\nQuery同义词: ch_supp, supp_price, supp_price_last, supp_slope, upper_price, lower_price"
+  },
+  {
+    "key": "STRATEGY: 突破下降通道+支撑线反超抬高 (德尔科技临界点起爆形态)",
+    "summary": "【实战策略】暴跌通道触底逆转+上涨支撑线反超抬高+临界点回踩突破起爆",
+    "detail": "================================================================================\n    【突破下降通道与支撑线反超抬高实战策略 (以德尔科技 688035 为典型原型)】\n================================================================================\n【形态背景与核心逻辑】\n1. 宏观背景: 个股前期经历单边下跌，处于大级别下降通道中 (ch_dir == -1，如德尔科技从 107.28 跌至 52.00)；\n2. 支撑线反超下降通道 (动能与空间双重反超):\n   • 动能反超: 自底部探明以来的 KX DRAWLINE 上涨支撑线昂首向上 (ch_supp_slope_deg > 15°，远强于通道下倾斜率)；\n   • 空间抬高: 支撑线价格抬离底座，反超通道下轨甚至反超中轨 (ch_supp_price >= ch_mid 或 ch_supp_price > ch_lower)；\n3. 突破下降通道:\n   • 股价冲破下降通道中轨或上轨 (close >= ch_mid 或 close >= ch_upper / ch_upper1 或 ch_pos >= 50)，摆脱下压束缚；\n4. 临界点蓄势回踩 (绿色圆圈黄金介入点):\n   • 股价在突破前后紧贴支撑线震荡蓄势 (close >= ch_supp_price 且 0 <= ch_supp_pos <= 4.5%)，盈亏比极高，随后展开主升大反弹！\n\n【Query 筛选语句推荐】\n• 稳健蓄势回踩型 (锁定截图中圆圈位置蓄势票):\n  df.query('ch_dir == -1 and ch_supp_slope_deg > 15 and close >= ch_supp_price and ch_supp_pos <= 4.5 and (close >= ch_mid or ch_supp_price >= ch_mid or ch_pos >= 50)')\n\n• 强力上轨突破型 (锁定突破下降通道上轨起爆票):\n  df.query('ch_dir == -1 and ch_supp_slope_deg > 15 and (close >= ch_upper or close >= ch_upper1 or ch_pos >= 100) and close >= ch_supp_price')\n\nQuery同义词: 突破下降通道, 支撑线大于通道, 下降通道反转, 德尔科技形态"
+  },
+  {
+    "key": "STRATEGY: 上涨通道下轨+支撑线共振预先挖掘 (神宇股份大涨前夜潜伏形态)",
+    "summary": "【顶级实战】绝不追高！大涨20CM前夜锁定上涨通道下轨极低估+地量蓄势潜伏",
+    "detail": "================================================================================\n    【上涨通道下轨+支撑线共振预先挖掘战法 (以神宇股份 300563 为实操原型)】\n================================================================================\n【核心理念: 绝不追高，在大涨前1~3天/开盘前夜精准挖掘潜伏！】\n1. 上涨趋势大通道已确立: ch_dir == 1 且 ch_slope_deg > 1.0° (通道整体昂首向上，顺应多头大势)；\n2. 回踩通道底部极限安全带 (绝佳盈亏比底座): \n   • 股价处于通道底部 0% ~ 25% 极限低吸区: ch_pos <= 25.0 (神宇股份暴涨 20CM 前夜 ch_pos 仅 4.3%！)；\n   • 守住通道下轨不破位: close >= ch_lower * 0.98；\n3. 上方存在巨大的弹性爆发空间:\n   • 相对通道带宽宽广: ch_width_pct >= 10.0 或 ch_upper / close >= 1.15 (直指通道上轨至少 15%~25% 暴扣利润)；\n4. 地量极致洗盘 (主力蓄势起爆特征):\n   • 换手率极致地量: ratio < 3.0 (换手率处于3%以下地价区，主力高度控盘洗盘)；\n   • 或量比明显萎缩: vol_ratio < 1.3 (排除高位放量诱多，锁定缩量变盘临界点)；\n   • 均线系统紧密粘合未加速发散: dff2 < 15 (主升浪起爆前的均线集聚蓄能状态)；\n\n【Query 筛选语句推荐 (盘后/早盘一键运行挖掘次日起爆龙头)】\ndf.query('ch_dir == 1 and ch_slope_deg > 1.0 and ch_pos <= 25.0 and close >= ch_lower * 0.98 and ch_width_pct >= 10.0 and (vol_ratio < 1.3 or ratio < 3.0) and dff2 < 15')\n\nQuery同义词: 上涨通道共振, 上涨通道潜伏, 地量起爆, 神宇股份形态, 大涨前预先挖掘"
   }
 ]

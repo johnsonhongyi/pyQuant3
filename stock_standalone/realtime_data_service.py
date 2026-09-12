@@ -1984,9 +1984,23 @@ class MinuteKlineCache:
                         (is_channel_uptrend and (latest_close >= ch_supp_price * 0.98 if ch_supp_price > 0 else True))
                     )
 
-                    # 3. 优选硬约束（杜绝下降通道、跌破支撑线与垃圾后排股）
+                    # 3. 优选硬约束（杜绝普通阴跌下降通道、跌破支撑线与垃圾后排股；豁免突破下降通道且支撑线反超的黄金反转股）
                     if ch_dir == -1:
-                        is_trend_ok = False
+                        ch_upper = _fv(['ch_upper1', 'ch_upper'], 0.0)
+                        ch_mid = _fv(['ch_mid'], 0.0)
+                        supp_deg = _fv(['ch_supp_slope_deg', 'supp_slope_deg'], 0.0)
+                        is_channel_breakout = (
+                            supp_deg > 15.0 and ch_supp_price > 0 and latest_close >= ch_supp_price * 0.985
+                            and (
+                                (ch_upper > 0 and latest_close >= ch_upper) or
+                                (ch_mid > 0 and (ch_supp_price >= ch_mid or latest_close >= ch_mid))
+                            )
+                        )
+                        if is_channel_breakout:
+                            is_trend_ok = True
+                            structure_type = "下降通道突破反转"
+                        else:
+                            is_trend_ok = False
                     if ch_supp_price > 0 and latest_close < ch_supp_price * 0.975:
                         on_support = False
                     if rank_val > 3500 and percent_val <= 0 and not is_channel_uptrend:
@@ -2485,11 +2499,23 @@ class MinuteKlineCache:
             vol_ratio = _get_val(["vol_ratio", "ratio"], 1.0)
             rank = _get_val(["Rank", "rank"], 2000.0)
 
-            # ★ 用户核心实战准则：优选上涨通道 (ch_dir == 1)
+            # ★ 用户核心实战准则：优选上涨通道 (ch_dir == 1) 或 突破下降通道反转突破形态
             if ch_dir == 1:
                 score += 25.0
             elif ch_dir == -1:
-                score -= 30.0  # 下跌通道严厉扣分淘汰
+                ch_upper = _get_val(["ch_upper1", "ch_upper"], 0.0)
+                ch_mid = _get_val(["ch_mid"], 0.0)
+                is_channel_breakout = (
+                    ch_supp_slope_deg > 15.0 and ch_supp_price > 0 and close >= ch_supp_price * 0.985
+                    and (
+                        (ch_upper > 0 and close >= ch_upper) or
+                        (ch_mid > 0 and (ch_supp_price >= ch_mid or close >= ch_mid))
+                    )
+                )
+                if is_channel_breakout:
+                    score += 20.0  # 突破下降通道+支撑线反超抬高反转加分
+                else:
+                    score -= 30.0  # 普通阴跌通道严厉扣分淘汰
                 
             # ★ 支撑线昂首向上 (ch_supp_slope_deg > 0)
             if ch_supp_slope_deg > 0:
@@ -2589,10 +2615,21 @@ class MinuteKlineCache:
                         ch_dir = int(_fv(['ch_dir', 'channel_dir'], 0))
                         ma60 = _fv(['ma60d', 'ma60'], 0.0)
 
-                        # 1. 自动通道判定：处于下降通道 (ch_dir == -1)，直接清理淘汰
+                        # 1. 自动通道判定：处于下降通道 (ch_dir == -1)，豁免突破反转形态
                         if ch_dir == -1:
-                            evicted_map[code] = f"处于下降通道(ch_dir={ch_dir})"
-                            continue
+                            supp_deg = _fv(['ch_supp_slope_deg', 'supp_slope_deg'], 0.0)
+                            ch_upper = _fv(['ch_upper1', 'ch_upper'], 0.0)
+                            ch_mid = _fv(['ch_mid'], 0.0)
+                            is_channel_breakout = (
+                                supp_deg > 15.0 and supp_price > 0 and c_price >= supp_price * 0.985
+                                and (
+                                    (ch_upper > 0 and c_price >= ch_upper) or
+                                    (ch_mid > 0 and (supp_price >= ch_mid or c_price >= ch_mid))
+                                )
+                            )
+                            if not is_channel_breakout:
+                                evicted_map[code] = f"处于下降通道(ch_dir={ch_dir})"
+                                continue
 
                         # 2. 跌破上涨支撑线 2.5%
                         if supp_price > 0 and c_price > 0 and c_price < supp_price * 0.975:
