@@ -2140,158 +2140,45 @@ def calc_trend_channel(df, ur=6, lr=6):
         | (cross_sk_sd & (sk <= 0.05) & ((vol_ratio > 2) | (pct_chg > 0.035)))
     ).astype(np.int8)
 
-    # ======== 模块 5: 自动回归通道 (自适应近端波段寻优 + 极速闭包线性回归 + 失真平滑防护) ========
-    hhv_win = min(n, 6 * ur)  # 36 bars
-    llv_win = min(n, 6 * lr)  # 36 bars
+    # ======== 模块 5 & 8: 委托通达信通道与 KX 上涨支撑线统一工厂 (SSOT) ========
+    from JSONData.tdx_channel_factory import TDXChannelFactory
+    ch_res = TDXChannelFactory.calculate(df, ur=ur, lr=lr)
 
-    high_s = pd.Series(high)
-    low_s = pd.Series(low)
-
-    tc1_mask = (high == high_s.rolling(hhv_win, min_periods=1).max().values)
-    bc1_mask = (low == low_s.rolling(llv_win, min_periods=1).min().values)
-
-    tc1_idx = np.where(tc1_mask)[0]
-    bc1_idx = np.where(bc1_mask)[0]
-
-    tc2_init = int(n - tc1_idx[-1]) if len(tc1_idx) > 0 else 1
-    bc2_init = int(n - bc1_idx[-1]) if len(bc1_idx) > 0 else 1
-    tc2 = max(1, tc2_init)
-    bc2 = max(1, bc2_init)
-
-    def _calc_raw_channel(t_len, b_len):
-        nod_val = abs(t_len - b_len)
-        if nod_val < 2:
-            nod_val = max(t_len, b_len, 5)
-        anc = min(t_len, b_len)
-        anc_idx = n - anc
-        r_start = max(0, anc_idx - (nod_val + 1) + 1)
-        r_slice = close[r_start:anc_idx + 1]
-        kl = len(r_slice)
-        if kl < 2:
-            return None
-        xm = (kl - 1.0) / 2.0
-        xdev = np.arange(kl, dtype=np.float64) - xm
-        vx = kl * (kl * kl - 1.0) / 12.0
-        ym = np.mean(r_slice)
-        slp = np.dot(xdev, r_slice - ym) / vx if vx > 1e-8 else 0.0
-        icp = ym - slp * xm
-        npv = slp * (kl - 1.0) + icp
-
-        cb = np.arange(n, 0, -1, dtype=np.float64)
-        m = npv - slp * (cb - anc)
-
-        c_start = max(0, n - max(t_len, b_len))
-        c_end = min(n - 1, n - min(t_len, b_len))
-        r_h = high[c_start:c_end + 1]
-        r_m = m[c_start:c_end + 1]
-        r_l = low[c_start:c_end + 1]
-        at = np.max(r_h - r_m) if len(r_h) > 0 else 0.0
-        ut = np.max(r_m - r_l) if len(r_l) > 0 else 0.0
-        at = max(0.0, float(at))
-        ut = max(0.0, float(ut))
-
-        up = m + at
-        lo = m - ut
-        return m, up, lo, slp, t_len, b_len, nod_val
-
-    def _is_channel_valid(res_tuple):
-        if res_tuple is None:
-            return False
-        m_arr, up_arr, lo_arr, slp, t_l, b_l, _ = res_tuple
-        c_now = close[-1]
-        m_now = m_arr[-1]
-        lo_now = lo_arr[-1]
-        up_now = up_arr[-1]
-        # 1. 最新中轨与下轨必须为有效正数
-        if m_now <= 0.05 or lo_now <= 0.01:
-            return False
-        # 2. 中轨不可过度偏离最新收盘价 (如跌至45%以下或暴涨至220%以上)
-        if c_now > 0.1 and (m_now < c_now * 0.45 or m_now > c_now * 2.2):
-            return False
-        # 3. 通道宽度必须具有物理意义
-        if (up_now - lo_now) <= 0.01:
-            return False
-        # 4. 股价与通道位置脱节防呆：当前收盘价不可严重脱离轨道 (-80% ~ 220%)
-        w_now = max(up_now - lo_now, 1e-6)
-        pos_now = (c_now - lo_now) / w_now * 100.0
-        if pos_now < -80.0 or pos_now > 220.0:
-            return False
-        return True
-
-    # 1. 尝试使用全局滚动极值 (遵照 TDX 原版自动通道)
-    channel_res = _calc_raw_channel(tc2, bc2)
-    raw_valid = _is_channel_valid(channel_res)
-    anchor = min(tc2, bc2)
-
-    # 2. 自适应近端次级波段重构 (当原通道穿底/塌缩或外推严重脱轨失真时介入，绝不无故篡改健康原版通道)
-    need_adaptive = not raw_valid
-    if need_adaptive and anchor > 3 and n > anchor:
-        if bc2 < tc2:
-            # 底点距今更近：股票已见底，正在反弹或新一轮波段中，在 [n - bc2, n] 内寻找反弹高点
-            sub_h = high[n - bc2:]
-            rel_max = int(np.argmax(sub_h))
-            tc2_cand = max(1, bc2 - rel_max)
-            cand_res = _calc_raw_channel(tc2_cand, bc2)
-            if _is_channel_valid(cand_res):
-                channel_res = cand_res
-                tc2 = tc2_cand
-        else:
-            # 高点距今更近：股票已见顶，正在回调中，在 [n - tc2, n] 内寻找回调低点
-            sub_l = low[n - tc2:]
-            rel_min = int(np.argmin(sub_l))
-            bc2_cand = max(1, tc2 - rel_min)
-            cand_res = _calc_raw_channel(tc2, bc2_cand)
-            if _is_channel_valid(cand_res):
-                channel_res = cand_res
-                bc2 = bc2_cand
-
-    # 3. 稳健线性回归保底兜底 (彻底杜绝任何 0.01 塌缩)
-    if not _is_channel_valid(channel_res):
-        win = min(n, max(15, min(30, int(n * 0.5))))
-        r_slice = close[-win:]
-        kl = len(r_slice)
-        xm = (kl - 1.0) / 2.0
-        xdev = np.arange(kl, dtype=np.float64) - xm
-        vx = kl * (kl * kl - 1.0) / 12.0
-        ym = np.mean(r_slice)
-        slope = np.dot(xdev, r_slice - ym) / vx if vx > 1e-8 else 0.0
-        icp = ym - slope * xm
-        np_val = slope * (kl - 1.0) + icp
-        currbarscount = np.arange(n, 0, -1, dtype=np.float64)
-        mid = np_val - slope * (currbarscount - 1.0)
-        c_now = close[-1]
-        mid = np.maximum(c_now * 0.5, mid)
-        std_p = np.std(r_slice) if kl > 1 else c_now * 0.05
-        band_w = max(std_p * 2.0, c_now * 0.06)
-        upper = mid + band_w
-        lower = np.maximum(0.01, mid - band_w)
-        tc2 = max(1, min(n, tc2))
-        bc2 = max(1, min(n, bc2))
-        nod = abs(tc2 - bc2) if abs(tc2 - bc2) >= 2 else 5
-    else:
-        mid, upper, lower, slope, tc2, bc2, nod = channel_res
-
-    upper_price = high[n - tc2]
-    lower_price = low[n - bc2]
+    mid = ch_res.mid
+    upper = ch_res.upper
+    lower = ch_res.lower
+    slope = ch_res.slope
+    ch_slope_deg = ch_res.slope_deg
+    ch_dir = ch_res.ch_dir
+    ch_pos = ch_res.ch_pos_series
+    tc2 = ch_res.tc2
+    bc2 = ch_res.bc2
+    nod = ch_res.nod
+    upper_price = ch_res.upper_price
+    lower_price = ch_res.lower_price
 
     ch_width = upper - lower
-    ch_width_safe = np.where(ch_width > 1e-8, ch_width, 1e-8)
-    ch_pos = (close - lower) / ch_width_safe * 100.0
-    ch_dir = 1 if slope > 1e-8 else (-1 if slope < -1e-8 else 0)
-
-    # 通道高度与振幅尺寸体系 (SSOT: 绝对高度、相对振幅、上下半高)
     ch_height = ch_width
     mid_safe = np.where(np.abs(mid) > 1e-8, mid, 1.0)
     close_safe = np.where(np.abs(close) > 1e-8, close, 1.0)
-    ch_height_pct = (ch_height / mid_safe) * 100.0   # 通道高度振幅: (上轨 - 下轨) / 中轨 * 100%
-    ch_width_pct = (ch_height / close_safe) * 100.0   # 相对通道跨度: ch_width / close * 100%
-    upper_height = upper - mid                       # 上半通道高度: 上轨 - 中轨
-    lower_height = mid - lower                       # 下半通道高度: 中轨 - 下轨
+    ch_height_pct = (ch_height / mid_safe) * 100.0
+    ch_width_pct = (ch_height / close_safe) * 100.0
+    upper_height = upper - mid
+    lower_height = mid - lower
 
-    # 斜率角度: 标准化为百分比再转度
-    mid_last = mid[-1] if mid[-1] > 1e-8 else 1.0
-    ch_slope_pct = slope / mid_last * 100.0
-    ch_slope_deg = np.degrees(np.arctan(ch_slope_pct))
+    # 支撑线指标 (通达信 DRAWLINE 权威计算)
+    supp_price_last = ch_res.supp_price
+    supp_slope = ch_res.supp_slope
+    supp_slope_deg = ch_res.supp_slope_deg
+    supp_pos = ch_res.supp_pos
+    supp_days = ch_res.supp_days
+
+    # 压力线指标
+    res_price = upper_price
+    res_slope = (upper_price - close[-1]) / max(1, tc2)
+    close_last = close[-1] if close[-1] > 1e-8 else 1.0
+    res_slope_pct = res_slope / close_last * 100.0
+    res_slope_deg = np.degrees(np.arctan(res_slope_pct))
 
     # ======== 模块 6: RSI 逃顶 + 低位启动 (talib.RSI / MIN / MAX / EMA) ========
     rsi6 = talib.RSI(close, timeperiod=6)
@@ -2330,78 +2217,6 @@ def calc_trend_channel(df, ur=6, lr=6):
     ma3[np.isnan(ma3)] = close[np.isnan(ma3)]
     reversal_line = np.where(ma3 > trend_line, trend_line, ma3)
 
-    # ======== 模块 8: 通达信上涨支撑线与反弹特征 (KX DRAWLINE) ========
-    # KX_RAW:=DRAWLINE(LOW<=LLV(LOW,20),LOW,HIGH>=HHV(HIGH,20),LLV(LOW,4),1);
-    llv20 = low_s.rolling(20, min_periods=1).min().values
-    hhv20 = high_s.rolling(20, min_periods=1).max().values
-    llv4 = low_s.rolling(4, min_periods=1).min().values
-
-    cond1 = (low <= llv20)
-    cond2 = (high >= hhv20)
-
-    pairs = []
-    i = 0
-    while i < n:
-        if cond1[i]:
-            i_A = i
-            price_A = low[i]
-            i_B = -1
-            for j in range(i_A + 1, n):
-                if cond1[j]:
-                    i_A = j
-                    price_A = low[j]
-                elif cond2[j]:
-                    i_B = j
-                    price_B = llv4[j]
-                    break
-            if i_B != -1:
-                pairs.append((i_A, price_A, i_B, price_B))
-                i = i_B + 1
-            else:
-                break
-        else:
-            i += 1
-
-    supp_slope = 0.0
-    supp_days = bc2
-    if pairs:
-        last_i_A, last_p_A, last_i_B, last_p_B = pairs[-1]
-        # 仅当最近配对的起点或终点与当前低点处于同一反弹周期内，且斜率为正时采纳
-        is_recent_pair = (last_i_A >= max(0, n - bc2 - 3) or last_i_B >= max(0, n - bc2 - 3))
-        if is_recent_pair and last_i_B > last_i_A:
-            supp_k = (last_p_B - last_p_A) / float(last_i_B - last_i_A)
-            if supp_k > 1e-8:
-                supp_slope = supp_k
-                supp_price_last = supp_k * ((n - 1) - last_i_A) + last_p_A
-                supp_days = (n - 1) - last_i_A
-            else:
-                supp_k = (close[-1] - lower_price) / max(1, bc2)
-                supp_slope = supp_k
-                supp_price_last = lower_price + supp_k * bc2
-                supp_days = bc2
-        else:
-            supp_k = (close[-1] - lower_price) / max(1, bc2)
-            supp_slope = supp_k
-            supp_price_last = lower_price + supp_k * bc2
-            supp_days = bc2
-    else:
-        supp_k = (close[-1] - lower_price) / max(1, bc2)
-        supp_slope = supp_k
-        supp_price_last = lower_price + supp_k * bc2
-        supp_days = bc2
-
-    supp_price_last = max(0.01, float(supp_price_last))
-    close_last = close[-1] if close[-1] > 1e-8 else 1.0
-
-    supp_slope_pct = supp_slope / close_last * 100.0
-    supp_slope_deg = np.degrees(np.arctan(supp_slope_pct))
-    supp_pos = (close[-1] - supp_price_last) / supp_price_last * 100.0
-
-    res_price = upper_price
-    res_slope = (upper_price - close[-1]) / max(1, tc2)
-    res_slope_pct = res_slope / close_last * 100.0
-    res_slope_deg = np.degrees(np.arctan(res_slope_pct))
-
     # 批量更新至 DataFrame (避免 Block 重排)
     new_cols = {
         'ch_anchor_high_price': np.full(n, upper_price), 'ch_anchor_low_price': np.full(n, lower_price),
@@ -2426,7 +2241,11 @@ def calc_trend_channel(df, ur=6, lr=6):
         'reversal_line': np.round(reversal_line, 3),
         'ch_res_price': np.round(np.full(n, res_price), 3),
         'ch_res_slope': np.round(np.full(n, res_slope), 4),
-        'ch_res_slope_deg': np.round(np.full(n, res_slope_deg), 2)
+        'ch_res_slope_deg': np.round(np.full(n, res_slope_deg), 2),
+        'cdp_support': np.round(np.full(n, ch_res.cdp_support), 3),
+        'cdp_reversal': np.round(np.full(n, ch_res.cdp_reversal), 3),
+        'cdp_resistance': np.round(np.full(n, ch_res.cdp_resistance), 3),
+        'cdp_breakthrough': np.round(np.full(n, ch_res.cdp_breakthrough), 3)
     }
     df = df.assign(**new_cols)
     return df

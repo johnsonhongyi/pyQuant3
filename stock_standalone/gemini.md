@@ -1,3 +1,50 @@
+## 2026-09-12 02:25
+- [x] **【通达信自动通道三轨与上涨支撑线严格从趋势起点起笔，彻底消除左侧超长横贯线条】(SSOT) (`JSONData/tdx_channel_factory.py`, `tests/test_tdx_channel_visualizer_alignment.py`)**：
+    - [x] **严格践行通达信原版规则 IF(CURRBARSCOUNT<=MAX(TC2,BC2), ..., DRAWNULL)**：
+        1. **深入机理穿透**：通达信三轨公式明确约束 `MID:IF(CURRBARSCOUNT<=MAX(TC2,BC2), ..., DRAWNULL)`，即通道线必须在更远锚点（`start_idx = n - max(tc2, bc2)`）之前置为 `DRAWNULL`（即 `np.nan`）。原代码直接返回从第 0 根到第 `n-1` 根的全长数组，并在超出范围被 `limit_min` 截断成一条长长的水平横线，导致麦捷科技（300319）与神宇股份（300563）在底部反弹前整整两到四个月的图面上被画出了一条超长横贯平底线；
+        2. **彻底斩断超长线条**：在 `TDXChannelFactory.calculate` 中，将 `start_idx` 之前的历史 K 线的 `mid, upper, lower, ch_pos_series` 全部置为 `np.nan`；可视化端 pyqtgraph 通过 `connect='finite'` 自动忽略 NaN，通道三轨**严格从趋势起点（如 19.410 或 12.720）起笔，一路画至最新终点**，左侧幽灵横线 100% 彻底消失；
+    - [x] **KX 上涨支撑线与通道下轨起点终点严丝合缝双共振**：
+        1. 支撑线严格从当前活跃波段最低点（`i_A`，如 19.410）起笔，终点向右延伸至最新交易日（`n-1`）；
+        2. 通道下轨与上涨支撑线在同一根 K 棒（19.410）起笔，在最新 K 棒共振落笔，100% 对齐通达信官方主图；
+    - [x] **全量自动化测试 25/25 PASSED**：
+        1. 新增 `test_channel_and_support_start_point_alignment` 专项测试，覆盖 300563、300319、600353 起点前全为 NaN、起点后全为有效实数、支撑线起点与通道起点精准对齐；
+        2. 全量 4 大套件 25 项测试全部 100% PASSED！
+
+## 2026-09-12 02:00
+- [x] **【通达信自动通道、上涨支撑线统一工厂模式架构落地与双共振 0.12 元高精对齐】(SSOT) (`JSONData/tdx_channel_factory.py`, `JSONData/tdx_data_Day.py`, `trade_visualizer_qt6.py`, `tests/test_tdx_channel_visualizer_alignment.py`)**：
+    - [x] **统一工厂模式算法接口 (TDXChannelFactory) 落地彻底根除双轨代码**：
+        1. **架构原则践行**：严格遵循用户“不要单独实现，统一工厂模式算法接口”的指示与 SOLID / DRY 原则，新建单一权威数据工厂 `JSONData/tdx_channel_factory.py`，对外导出 `TDXChannelResult` 和 `TDXChannelFactory`；
+        2. **双端无缝接入统一数据源**：
+           - 可视化端 `trade_visualizer_qt6.py` 中 `calc_auto_channel` 与 `calc_kx_trend_lines_list` 彻底拔除原有冗余的近 200 行算法，直接委托 `TDXChannelFactory.get_visualizer_channel` 与 `TDXChannelFactory.get_kx_trend_lines`；
+           - 数据管道端 `JSONData/tdx_data_Day.py` 中 `calc_trend_channel` 拔除原有模块 5 与模块 8 近 300 行算法，统一调用 `TDXChannelFactory.calculate(df)`；
+           - 彻底消除分歧，实现可视化绘图与实盘策略管道 100% 数据一致；
+    - [x] **KX DRAWLINE 连续主升动态终点对齐与神宇股份 (300563) 0.12 元真实双共振**：
+        1. **机理突破**：通达信 `KX_RAW:=DRAWLINE(LOW<=LLV(LOW,20),LOW,HIGH>=HHV(HIGH,20),LLV(LOW,4),1);` 中，在同一推进浪中持续创新高时，终点动态更新至波段最新极值 (idx 69，LLV4=22.81)，而非在首个高点截断锁死；
+        2. **真·下轨双共振**：神宇股份 (300563) 在 09-11 当天，上涨支撑线为 22.810 元 (倾角 17.77°)，自动通道下轨为 22.689 元 (倾角 19.88°)，两者差值仅 **0.12 元**，斜率与价位 100% 紧密重叠共振，彻底对齐通达信主图；
+    - [x] **通达信同款 CDP 支撑与反转价全管道支持**：
+        1. 在 `TDXChannelResult` 及 `calc_trend_channel` 中统一注入通达信同款 CDP 指标：`cdp_support: 2*E - HIGH`、`cdp_reversal: E - (HIGH - LOW)`，可视化十字光标移动时精准呈现；
+    - [x] **自动化测试回归全绿通过 (24/24 PASSED)**：
+        1. 完善 `tests/test_tdx_channel_visualizer_alignment.py`：新增 `test_tdx_channel_factory_ssot_consistency`，验证管道与可视化 100% 零误差一致，神宇股份双共振断言误差 `< 0.30 元`；
+        2. 全量 4 大套件 24 项测试全部 100% PASSED！
+
+## 2026-09-12 01:15
+- [x] **【通达信自动通道、上涨支撑线无限延伸双共振、CDP 支撑反转与可视化数据全面对齐】(SSOT) (`trade_visualizer_qt6.py`, `JSONData/tdx_data_Day.py`, `stock_logic_utils.py`, `tests/test_tdx_channel_visualizer_alignment.py`, `tests/test_channel_robustness_suite.py`, `tests/test_momentum_rotation_engine.py`)**：
+    - [x] **KX DRAWLINE 上涨支撑线截断 Bug 彻底根除与通达信 100% 对齐 (神宇股份 300563)**：
+        1. **深入机理穿透**：通达信主图中 `KX_RAW:=DRAWLINE(LOW<=LLV(LOW,20),LOW,HIGH>=HHV(HIGH,20),LLV(LOW,4),1);` 中参数 `1` 代表线段向右无限延伸。而原可视化代码在 `calc_kx_trend_lines_list` 中加入了 `if closes[j] < val: cut_idx = j + 3; break` 破坏性逻辑，强行在股价跌破支撑线后仅向后画 3 天即暴力截断。神宇股份（300563）在 8 月中旬微跌破线后支撑线被强行切断消失，无法画到最新 K 线（09-11），导致通达信上清晰可见的“通道下轨与上涨支撑线几乎重合形成双共振”在可视化中完全丢失；
+        2. **彻底移除破坏性截断**：拔除 `cut_idx` 逻辑，严格遵循通达信规则让支撑线向右延伸至最新 K 线（`n - 1`）。神宇股份支撑线稳稳延伸至当前日（23.90 元附近），与通道下轨（23.05 元）形成完美“双共振”；
+    - [x] **可视化通道 NaN 抹除与顶部状态栏/详情窗通达信信息对齐 (东山精密 002384)**：
+        1. **东山精密三轨 NaN 修复**：原可视化 `calc_auto_channel` 在三轨未严格顺排时粗暴将三轨全部置为 `np.nan`，导致顶部图例出现 `MID:- UP:- DN:-`。对齐通达信三轨限制机制（`limit_min/limit_max`），优先复用引擎预计算的健康指标，彻底恢复真实物理价格（上轨 214.51 / 中轨 193.53 / 下轨 172.56）；
+        2. **通达信同款 CDP 支撑与反转价实时呈现**：在顶部状态栏与十字光标悬浮详情窗中完整注入通达信同款核心信息：`CDP 支撑: 2*E - HIGH`、`CDP 反转: E - (HIGH - LOW)` 以及上涨支撑线价格与倾角，鼠标移动时像通达信一样精准展示当前位置价格与支撑；
+    - [x] **通道大方向与上涨支撑线职责解耦，根除旭光电子 (600353) 误判上升通道 Bug**：
+        1. **大级别宏观方向严格保真**：旭光电子（600353）从 53.68 元暴跌至 20.72 元，高点在远端（`tc2 > bc2`），宏观通道在通达信中为坚定下跌通道；原保底代码在局部窗口（30 天反弹）上重算线性回归斜率为正后武断覆盖 `ch_dir = 1`，将大级别暴跌通道误报为“上升通道”；
+        2. **职责边界分离与跌破识别**：保底兜底在宏观下跌主浪下严格锁死 `ch_dir = -1`。将“宏观通道（Channel）”与“反弹支撑线（KX DRAWLINE）”彻底解耦：大通道为下跌通道（`ch_dir: -1, ch_slope_deg: -71.45°`），反弹支撑线为上涨支撑（`ch_supp_price: 33.xx 元, 倾角 +51°`），并精确识别当前价 31.18 元已跌破上涨支撑线；策略指引文本同步输出 `⚠️ 已跌破` 警示；
+    - [x] **策略文本实时动态 ch_pos 重算 (神宇股份 300563)**：
+        1. 穿透根本诱因：`generate_channel_strategy_text` 此前直接读取行情快照中的静态 `ch_pos`，在神宇股份（300563）当天从 23.28 元涨停暴拉至 27.92 元时，仍沿用盘前盘初的 `4.3%`（低吸买入），与当前逼近上轨 28.24 元（实为 `96.5%`）形成荒谬反差；
+        2. 现价动态重算：在生成策略计划头部根据实时现价动态重算 `pos = (close - lower) / (upper - lower) * 100.0`，神宇股份动态输出 `ch_pos = 96.5%`（多头控盘，防范高位震荡），杜绝刻舟求剑；
+    - [x] **自动化测试回归全绿通过 (23/23 PASSED)**：
+        1. 新增专项测试 `tests/test_tdx_channel_visualizer_alignment.py`，完整覆盖 002384、600353、300563 专属断言；
+        2. `test_momentum_rotation_engine.py`、`test_channel_robustness_suite.py`、`test_sbc_multi_period_signals.py` 等全量 4 大套件 23 项测试全部 100% PASSED！
+
 ## 2026-09-11 19:25
 - [x] **【彻底根除管理器后台底层写配置与注册表导致 PredatorSense.exe 频繁自动启动 Bug】(SSOT) (`webTools/window_manager/core.py`, `webTools/window_manager/ui.py`, `webTools/window_manager/window_layout_config.json`, `tests/test_acer_performance.py`)**：
     - [x] **彻底根除注册表修改与宏碁系统服务事件监视器联动 (元凶 1)**：

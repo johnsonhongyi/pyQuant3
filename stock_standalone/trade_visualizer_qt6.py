@@ -1653,205 +1653,24 @@ def realtime_worker_process(task_queue, queue, stop_flag, log_level=None, debug_
 
 def calc_auto_channel(day_df, ur=6, lr=6):
     """
-    计算自动画通道指标：
-    TC1:=IF(H=HHV(H,6*UR),H,DRAWNULL);
-    TC2:=CONST(BARSLAST(TC1=H))+1;
-    BC1:=IF(L=LLV(L,6*LR),L,DRAWNULL);
-    BC2:=CONST(BARSLAST(BC1=L))+1;
+    根据通达信原版公式计算自动回归通道线 (委托 TDXChannelFactory 统一权威工厂)
     """
-    n = len(day_df)
-    mid = np.full(n, np.nan)
-    up = np.full(n, np.nan)
-    dn = np.full(n, np.nan)
-    
-    if n < 20: # 基础数据量太少时直接返回 NaN
-        return mid, up, dn, 0.0, 0
-        
-    highs = day_df['high'].values
-    lows = day_df['low'].values
-    closes = day_df['close'].values
-    
-    # 1. 寻找最后一个符合 H = HHV(H, 36) 的高点
-    w_high = 6 * ur
-    hhv = day_df['high'].rolling(w_high, min_periods=1).max().values
-    high_matches = np.where(highs == hhv)[0]
-    if len(high_matches) == 0:
-        return mid, up, dn, 0.0, 0
-    idx_high = high_matches[-1]
-    
-    # 2. 寻找最后一个符合 L = LLV(L, 36) 的低点
-    w_low = 6 * lr
-    llv = day_df['low'].rolling(w_low, min_periods=1).min().values
-    low_matches = np.where(lows == llv)[0]
-    if len(low_matches) == 0:
-        return mid, up, dn, 0.0, 0
-    idx_low = low_matches[-1]
-    
-    # 远点和近点
-    idx_far = min(idx_high, idx_low)
-    idx_near = max(idx_high, idx_low)
-    nod = idx_near - idx_far
-    
-    if nod < 2: # 跨度太小，无法做有效的线性回归
-        return mid, up, dn, 0.0, 0
-        
-    # 3. 线性回归
-    x = np.arange(nod + 1)
-    y = closes[idx_far : idx_near + 1]
-    
-    # 计算斜率 K 和截距 C
-    # y = K * x + C
-    # 最小二乘公式
-    sum_x = np.sum(x)
-    sum_y = np.sum(y)
-    sum_xx = np.sum(x ** 2)
-    sum_xy = np.sum(x * y)
-    m = nod + 1
-    
-    denom = m * sum_xx - sum_x ** 2
-    if denom == 0:
-        return mid, up, dn, 0.0, 0
-        
-    k = (m * sum_xy - sum_x * sum_y) / denom
-    c = (sum_y - k * sum_x) / m
-    
-    # 中线拟合值
-    # LRL(i) = k * (i - idx_far) + c
-    lrl = k * np.arange(n - idx_far) + c # 从 idx_far 到 n-1 的直线值
-    
-    # 4. 计算偏差 AT5 和 UT5 (在区间 [idx_far, idx_near] 内)
-    lrl_segment = lrl[:nod + 1]
-    high_segment = highs[idx_far : idx_near + 1]
-    low_segment = lows[idx_far : idx_near + 1]
-    
-    at5 = np.max(high_segment - lrl_segment)
-    ut5 = np.max(lrl_segment - low_segment)
-    
-    at5 = max(0.0, at5)
-    ut5 = max(0.0, ut5)
-    
-    # 5. 生成结果线段 (只画 idx_far 之后的线)
-    limit_high = np.max(highs[-100:]) * 1.10 if n >= 100 else np.max(highs) * 1.10
-    limit_low = np.min(lows[-100:]) * 0.90 if n >= 100 else np.min(lows) * 0.90
-    
-    mid_vals = lrl
-    up_vals = lrl + at5
-    dn_vals = lrl - ut5
-    
-    # 过滤限制范围
-    valid_mask = (mid_vals >= limit_low) & (mid_vals <= limit_high)
-    
-    mid[idx_far:] = np.where(valid_mask, mid_vals, np.nan)
-    up[idx_far:] = np.where(valid_mask, np.clip(up_vals, limit_low, limit_high), np.nan)
-    dn[idx_far:] = np.where(valid_mask, np.clip(dn_vals, limit_low, limit_high), np.nan)
-    
-    return mid, up, dn, k, idx_far
+    if day_df is None or len(day_df) < 5:
+        n = len(day_df) if day_df is not None else 0
+        return np.full(n, np.nan), np.full(n, np.nan), np.full(n, np.nan), 0.0, 0
+    from JSONData.tdx_channel_factory import TDXChannelFactory
+    return TDXChannelFactory.get_visualizer_channel(day_df)
+
 
 def calc_kx_trend_lines_list(day_df, limit_low, limit_high, idx_far=0):
     """
-    独立计算每条 KX 趋势线数据：
-    KX_RAW:=DRAWLINE(LOW<=LLV(LOW,20),LOW,HIGH>=HHV(HIGH,20),LLV(LOW,4),1);
-    各条趋势线相互独立，若跌破趋势线则只多画3周期。
+    计算每条 KX 趋势线数据 (委托 TDXChannelFactory 统一权威工厂)
+    严格遵照通达信 DRAWLINE(LOW<=LLV(LOW,20), LOW, HIGH>=HHV(HIGH,20), LLV(LOW,4), 1) 动态连续对齐机制
     """
-    n = len(day_df)
-    lines_data = []
-    if n < 20:
-        return lines_data
-        
-    lows = day_df['low'].values
-    highs = day_df['high'].values
-    closes = day_df['close'].values
-    
-    # 1. 计算条件
-    llv20 = day_df['low'].rolling(20, min_periods=1).min().values
-    cond1 = lows <= llv20
-    
-    hhv20 = day_df['high'].rolling(20, min_periods=1).max().values
-    cond2 = highs >= hhv20
-    
-    llv4 = day_df['low'].rolling(4, min_periods=1).min().values
-    
-    # 2. 匹配线段 (DRAWLINE 配对逻辑)
-    pairs = []
-    i = 0
-    while i < n:
-        if cond1[i]:
-            i_A = i
-            price_A = lows[i]
-            i_B = -1
-            for j in range(i_A + 1, n):
-                if cond1[j]:
-                    # 遇到新的起点，废弃旧起点，覆盖更新为最新起点
-                    i_A = j
-                    price_A = lows[j]
-                elif cond2[j]:
-                    # 遇到终点，配对成功
-                    i_B = j
-                    price_B = llv4[j]
-                    break
-            if i_B != -1:
-                pairs.append((i_A, price_A, i_B, price_B))
-                i = i_B + 1
-            else:
-                break
-        else:
-            i += 1
-            
-    # 3. 独立计算每一条线的数据并进行跌破截断判定
-    start_draw_idx = max(0, idx_far - 10)
-    
-    for idx, (i_A, price_A, i_B, price_B) in enumerate(pairs):
-        # 长度限制：如果起点太靠前，跳过不画
-        if i_A < start_draw_idx:
-            continue
-            
-        k_val = (price_B - price_A) / (i_B - i_A)
-        
-        # 趋势线默认延伸范围
-        max_end = n
-        
-        # 计算整条曲线的延伸数据
-        segment_len = max_end - i_A
-        x_indices = np.arange(i_A, max_end)
-        y_vals = k_val * (x_indices - i_A) + price_A
-        
-        # 判定跌破/突破截断点：从 i_B 之后（外推区）开始检测
-        cut_idx = max_end
-        for j in range(i_B + 1, max_end):
-            val = y_vals[j - i_A]
-            
-            # 价格溢出过滤
-            if val < limit_low or val > limit_high:
-                cut_idx = j
-                break
-                
-            # 支撑线跌破（k > 0 且收盘价低于趋势线）
-            if k_val > 0:
-                if closes[j] < val:
-                    # 跌破后最多画3天
-                    cut_idx = min(max_end, j + 3)
-                    break
-            # 压力线突破（k < 0 且收盘价突破趋势线）
-            elif k_val < 0:
-                if closes[j] > val:
-                    # 突破后最多画3天
-                    cut_idx = min(max_end, j + 3)
-                    break
-                    
-        # 截断数据，确保至少画到终点 i_B
-        actual_len = max(i_B - i_A + 1, cut_idx - i_A)
-        x_draw = x_indices[:actual_len]
-        y_draw = y_vals[:actual_len]
-        
-        # 过滤最低限制和最高限制
-        valid_mask = (y_draw >= limit_low) & (y_draw <= limit_high)
-        x_draw = x_draw[valid_mask]
-        y_draw = y_draw[valid_mask]
-        
-        if len(x_draw) > 1:
-            lines_data.append({'x': x_draw, 'y': y_draw})
-            
-    return lines_data
+    if day_df is None or len(day_df) < 5:
+        return []
+    from JSONData.tdx_channel_factory import TDXChannelFactory
+    return TDXChannelFactory.get_kx_trend_lines(day_df, limit_low, limit_high, idx_far)
 
 def _normalize_dataframe(df: pd.DataFrame, normalize: bool = True) -> pd.DataFrame:
     """
@@ -7842,11 +7661,11 @@ class MainWindow(QMainWindow, WindowMixin):
             html_text += f"<span style='color:#FFFFFF; font-weight:bold; padding-left:14px;'> 翻转线: </span>" \
                          f"<span style='color:#FFFF00; font-weight:bold;'>REV:{rev_str}</span>"
 
-        # ⚡ [NEW] 如果自动画通道当前处于显示状态，动态把数值也绘制在顶部
+        # ⚡ [NEW] 如果自动画通道当前处于显示状态，动态把数值也绘制在顶部 (完全对齐通达信)
         if getattr(self, 'show_auto_channel', True):
-            chan_mid_v = row.get('chan_mid', np.nan)
-            chan_up_v = row.get('chan_up', np.nan)
-            chan_dn_v = row.get('chan_dn', np.nan)
+            chan_mid_v = row.get('chan_mid', row.get('ch_mid', np.nan))
+            chan_up_v = row.get('chan_up', row.get('ch_upper', np.nan))
+            chan_dn_v = row.get('chan_dn', row.get('ch_lower', np.nan))
             chan_kx_v = row.get('chan_kx', row.get('ch_supp_price', np.nan))
             supp_price_v = row.get('ch_supp_price', chan_kx_v)
             supp_slope_deg_v = row.get('ch_supp_slope_deg', np.nan)
@@ -7858,7 +7677,6 @@ class MainWindow(QMainWindow, WindowMixin):
             
             c_mid = "#A0A0A0" if is_dark else "#646464"
             c_up_dn = "#C8C8C8" if is_dark else "#646464"
-            c_kx = "#FFFFFF" if is_dark else "#000000"
             
             html_text += (
                 f"<span style='color:#FFFFFF; font-weight:bold; padding-left:14px;'> 通道: </span>"
@@ -7866,11 +7684,22 @@ class MainWindow(QMainWindow, WindowMixin):
                 f"<span style='color:{c_up_dn}; font-weight:bold;'>UP:{up_str}</span>&nbsp;&nbsp;"
                 f"<span style='color:{c_up_dn}; font-weight:bold;'>DN:{dn_str}</span>"
             )
-            if not pd.isna(supp_price_v):
-                html_text += f"&nbsp;&nbsp;<span style='color:#FF3333; font-weight:bold;'>支:{supp_str}</span>"
+            if not pd.isna(supp_price_v) and float(supp_price_v) > 0:
+                html_text += f"&nbsp;&nbsp;<span style='color:#FF3333; font-weight:bold;'>线支:{supp_str}</span>"
             if not pd.isna(supp_slope_deg_v):
                 c_slope = "#00FF88" if supp_slope_deg_v > 0 else "#FF7700"
-                html_text += f"&nbsp;&nbsp;<span style='color:{c_slope}; font-weight:bold;'>支撑角:{supp_slope_deg_v:.1f}°</span>"
+                html_text += f"&nbsp;&nbsp;<span style='color:{c_slope}; font-weight:bold;'>角:{supp_slope_deg_v:+.1f}°</span>"
+                
+            # 通达信原版 CDP 支撑与反转价 (完全对齐通达信右下角红黄字)
+            h_val = row.get('high', np.nan)
+            l_val = row.get('low', np.nan)
+            o_val = row.get('open', np.nan)
+            c_val = row.get('close', np.nan)
+            if pd.notna(h_val) and pd.notna(l_val) and pd.notna(o_val) and pd.notna(c_val) and float(c_val) > 0:
+                e_val = (float(h_val) + float(l_val) + float(o_val) + 2.0 * float(c_val)) / 5.0
+                cdp_supp = 2.0 * e_val - float(h_val)
+                cdp_rev = e_val - (float(h_val) - float(l_val))
+                html_text += f"&nbsp;&nbsp;<span style='color:#FF4444; font-weight:bold;'>支撑:{cdp_supp:.2f}</span>&nbsp;&nbsp;<span style='color:#FFFF00; font-weight:bold;'>反转:{cdp_rev:.2f}</span>"
 
         # 👑 [NEW] 如果在 Re-entry 历史回测中检测到了最佳/适合的分支策略，在均线下方新起一行展示
         if hasattr(self, 'current_code') and self.current_code:
@@ -8038,6 +7867,27 @@ class MainWindow(QMainWindow, WindowMixin):
         C_MA5, C_MA10, C_MA20, C_MA60 = "#00FF00", "#FFA500", "#FFFF00", "#00B4FF"
         ma5_v, ma10_v, ma20_v, ma60_v = row.get('ma5', 0), row.get('ma10', 0), row.get('ma20', 0), row.get('ma60', 0)
 
+        # 提取通达信自动通道三轨与支撑指标 (完全对齐通达信)
+        c_mid_v = row.get('chan_mid', row.get('ch_mid', np.nan))
+        c_up_v = row.get('chan_up', row.get('ch_upper', np.nan))
+        c_dn_v = row.get('chan_dn', row.get('ch_lower', np.nan))
+        c_supp_v = row.get('ch_supp_price', row.get('chan_kx', np.nan))
+        c_supp_deg_v = row.get('ch_supp_slope_deg', np.nan)
+        c_mid_s = f"{c_mid_v:.2f}" if pd.notna(c_mid_v) and float(c_mid_v) > 0 else "-"
+        c_up_s = f"{c_up_v:.2f}" if pd.notna(c_up_v) and float(c_up_v) > 0 else "-"
+        c_dn_s = f"{c_dn_v:.2f}" if pd.notna(c_dn_v) and float(c_dn_v) > 0 else "-"
+
+        # 通达信原版 CDP 支撑与反转价 (完全对齐通达信右下角红黄字)
+        cdp_e = (open_p + high_p + low_p + 2.0 * close_p) / 5.0 if close_p > 0 else 0.0
+        cdp_supp_val = 2.0 * cdp_e - high_p if cdp_e > 0 else 0.0
+        cdp_rev_val = cdp_e - (high_p - low_p) if cdp_e > 0 else 0.0
+
+        supp_line_html = ""
+        if pd.notna(c_supp_v) and float(c_supp_v) > 0:
+            deg_part = f" (角:{c_supp_deg_v:+.1f}°)" if pd.notna(c_supp_deg_v) else ""
+            supp_color = "#00FF88" if close_p >= float(c_supp_v) else "#FF4444"
+            supp_line_html = f"<div style='font-family:monospace; white-space:nowrap; color:{supp_color};'>上涨支撑线: {float(c_supp_v):.2f}{deg_part}</div>"
+
         text = f"""
         <table style='font-family:monospace; border-collapse:collapse; width:100%; white-space:nowrap;'>
         <tr><td style='color:{WHITE}'>开:</td><td style='text-align:right;color:{open_color}'>{open_p:.2f}</td><td style='padding-left:8px;color:{WHITE}'>收:</td><td style='text-align:right;color:{close_color}'>{close_p:.2f}</td></tr>
@@ -8055,6 +7905,12 @@ class MainWindow(QMainWindow, WindowMixin):
             <span style='color:{C_MA20}'>M20:{ma20_v:.2f}</span>
             <span style='color:{C_MA60}; padding-left:8px;'>M60:{ma60_v:.2f}</span>
         </div>
+        <hr style='margin:2px 0;'>
+        <div style='font-family:monospace; white-space:nowrap;'>
+            <span style='color:#00E5FF; font-weight:bold;'>通道:</span> <span style='color:#A0A0A0;'>中:{c_mid_s}</span> <span style='color:#00B4FF;'>上:{c_up_s}</span> <span style='color:#FF9900;'>下:{c_dn_s}</span><br>
+            <span style='color:#FF4444;'>TDX支撑:</span> <span style='color:#FF4444; font-weight:bold;'>{cdp_supp_val:.2f}</span>&nbsp;&nbsp;<span style='color:#FFFF00;'>反转:</span> <span style='color:#FFFF00; font-weight:bold;'>{cdp_rev_val:.2f}</span>
+        </div>
+        {supp_line_html}
         <div style='color:#FFFFFF; font-family:monospace; margin-top:2px; white-space:nowrap;'>{date_str}</div>
         """
         
