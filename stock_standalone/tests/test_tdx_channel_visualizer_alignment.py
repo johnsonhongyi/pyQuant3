@@ -156,3 +156,103 @@ def test_channel_and_support_start_point_alignment():
         assert latest_line['x'][-1] == n - 1, f"{code} 支撑线终点必须延伸至最新交易日: {latest_line['x'][-1]} vs {n-1}"
 
 
+def test_crosshair_nearest_line_price_tag_detection():
+    """测试通达信同款线位吸附检测：根据当前 K 线与 Y 价格精确吸附 KX 支撑线、通道三轨、均线或当前价格"""
+    from unittest.mock import MagicMock
+    df = get_tdx_Exp_day_to_df('300563')
+    assert df is not None and len(df) >= 60
+
+    # 构造 MainWindow 模拟对象
+    win = tv.MainWindow.__new__(tv.MainWindow)
+    win.day_df = df
+    win.kline_plot = MagicMock()
+    # 模拟 ViewBox viewRange: x 范围 [0, 100], y 范围 [15.0, 35.0], y_span = 20.0 (threshold ~ 0.76)
+    win.kline_plot.vb.viewRange.return_value = ([0, len(df)], [15.0, 35.0])
+
+    idx = len(df) - 1
+    last_row = df.iloc[-1]
+    supp_p = float(last_row['ch_supp_price'])
+    ch_up = float(last_row['ch_upper'])
+    ch_mid = float(last_row['ch_mid'])
+    ch_dn = float(last_row['ch_lower'])
+
+    # 1. 当光标 Y 价格接近 KX 支撑线时 (diff < 0.20)，吸附命中 GG通道线走势(KX)
+    tag_info = win._detect_crosshair_nearest_line(idx, supp_p + 0.05)
+    name, p_val, color, disp_text, prio = tag_info
+    assert name == "GG通道线走势(KX)", f"应吸附到 KX 支撑线: {name}"
+    assert "GG通道线走势(KX)" in disp_text
+    assert f"{supp_p:.2f}" in disp_text
+
+    # 2. 当光标 Y 价格接近通道上轨时 (diff < 0.20)，吸附命中 通道上轨
+    tag_info = win._detect_crosshair_nearest_line(idx, ch_up - 0.08)
+    name, p_val, color, disp_text, prio = tag_info
+    assert name == "通道上轨", f"应吸附到通道上轨: {name}"
+    assert f"{ch_up:.2f}" in disp_text
+
+    # 3. 当光标 Y 价格接近通道中轨时，吸附命中 通道中轨
+    tag_info = win._detect_crosshair_nearest_line(idx, ch_mid + 0.06)
+    name, p_val, color, disp_text, prio = tag_info
+    assert name == "通道中轨", f"应吸附到通道中轨: {name}"
+
+    # 4. 当光标 Y 价格接近通道下轨时，吸附命中 通道下轨 (注意神宇股份支撑线与下轨共振相近)
+    tag_info = win._detect_crosshair_nearest_line(idx, ch_dn - 0.15)
+    assert tag_info[0] in ["通道下轨", "GG通道线走势(KX)"]
+
+    # 5. 当光标远离所有指标线时 (例如 50.0 元)，返回当前光标物理价格
+    tag_info = win._detect_crosshair_nearest_line(idx, 50.0)
+    assert tag_info[0] == "光标价"
+    assert "价格: 50.00" in tag_info[3]
+
+
+def test_crosshair_hover_timer_and_auto_hide_lifecycle():
+    """测试鼠标移动、悬停 180ms 延时显示与移出有效 K 线柱立即自动隐藏机制 (对齐通达信)"""
+    from unittest.mock import MagicMock
+    df = get_tdx_Exp_day_to_df('300563')
+    win = tv.MainWindow.__new__(tv.MainWindow)
+    win.day_df = df
+    win.crosshair_enabled = True
+    win.current_kline_signals = []
+    win.vline = MagicMock()
+    win.hline = MagicMock()
+    win.crosshair_label = MagicMock()
+    win.crosshair_line_tag = MagicMock()
+    win.crosshair_y_cursor = MagicMock()
+    win.kline_detail_win = MagicMock()
+    win.kline_detail_win.is_dragging = False
+    win.kline_hover_timer = MagicMock()
+    win.ma_legend_label = MagicMock()
+    win.qt_theme = 'dark'
+    win._update_ma_legend = MagicMock()
+    win.kline_plot = MagicMock()
+    win.kline_plot.vb.viewRange.return_value = ([0, len(df)], [15.0, 35.0])
+
+    # 1. 模拟鼠标移出有效 K 线或离开视口时调用 _hide_crosshair
+    win._hide_crosshair()
+    win.kline_hover_timer.stop.assert_called()
+    win.vline.setVisible.assert_called_with(False)
+    win.hline.setVisible.assert_called_with(False)
+    win.crosshair_line_tag.setVisible.assert_called_with(False)
+    win.crosshair_y_cursor.setVisible.assert_called_with(False)
+    win.kline_detail_win.hide.assert_called()  # 必须立即自动隐藏！
+
+    # 2. 模拟鼠标移入有效 K 线柱 (idx = 10) 移动
+    # 模拟视口包含 pos
+    win.kline_plot.vb.sceneBoundingRect.return_value.contains.return_value = True
+    win.kline_plot.vb.mapSceneToView.return_value = MagicMock(x=lambda: 10.2, y=lambda: 22.5)
+    win._on_kline_mouse_moved(MagicMock())
+
+    # 验证快速滑动中：更新十字线与线位标签，重置 180ms 悬停定时器，详情窗保持隐藏
+    win.vline.setPos.assert_called_with(10)
+    win.hline.setPos.assert_called_with(22.5)
+    win.crosshair_line_tag.setVisible.assert_called_with(True)
+    win.kline_detail_win.hide.assert_called()
+    win.kline_hover_timer.start.assert_called_with(180)
+
+    # 3. 模拟悬停 180ms 定时器超时触发
+    win.current_crosshair_idx = 10
+    win._show_kline_detail_window = MagicMock()
+    win._on_kline_hover_timeout()
+    win._show_kline_detail_window.assert_called_with(10)
+
+
+
