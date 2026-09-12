@@ -1,3 +1,26 @@
+## 2026-09-12 16:20
+- [x] **【/review 可视化底层通道支撑线对齐审查 & 通道上轨与支撑线多日预处理保留 (cct.compute_lastdays)】(SSOT) (`JSONData/tdx_channel_factory.py`, `JSONData/tdx_data_Day.py`, `query_engine_util.py`, `tests/test_tdx_channel_visualizer_alignment.py`)**：
+    - [x] **执行系统性 /review 深度代码审查**：
+        1. **主流程安全性**：审查 `TDXChannelFactory.calculate`、`calc_trend_channel` 及 `generate_df_vect_daily_features`，全链路异常安全降级，严格遵守不中断主流程原则；
+        2. **并发与文件锁友好**：多日保留计算完全由 CPU/内存向量化计算完成，零新增磁盘 I/O，无任何 Windows 文件锁冲突风险；
+        3. **架构 KISS / YAGNI / SOLID / DRY**：严格以 `TDXChannelFactory` 为单一真实源 (SSOT)，一次性计算并复用，无重复计算；
+        4. **通达信 DRAWNULL 官方对齐**：完全对齐通达信官方 DRAWNULL 语义，自然截断停画，杜绝一切水平线与深 V 翻转；
+    - [x] **通道上轨与支撑线价格多日预处理保留落地 (格式同 high41, high42, ... high4{cct.compute_lastdays})**：
+        1. **动态天数绑定**：动态读取 `cct.compute_lastdays`（如 9 天），无硬编码天数；
+        2. **通道上轨多日价格 (`ch_upper1 ~ ch_upper{max_days}`)**：
+           - 倒数第 1 天（最新日）取 `upper[-1]`，若停画为 NaN 自愈回退至锚定高点 `upper_price`；
+           - 倒数第 $d$ 天取 `upper[-d]`，自愈安全保底；
+        3. **支撑线多日价格 (`ch_supp1 ~ ch_supp{max_days}` 与 `ch_supp_price1 ~ ch_supp_price{max_days}`)**：
+           - 倒数第 1 天取最新支撑价格 `supp_price_last`；
+           - 倒数第 $d$ 天按通达信 DRAWLINE 严谨几何斜率线性递推：$\text{round}(\text{supp\_price\_last} - \text{supp\_slope} \times (d - 1), 3)$；
+        4. **DataFrame、特征工程与查询引擎三维对齐**：
+           - `calc_trend_channel` 广播存入 DataFrame；
+           - `generate_df_vect_daily_features` 提取入向量化特征字典；
+           - `query_engine_util.py` 注册查询同义词等价组，支持条件筛选；
+    - [x] **全量自动化回归验证 34/34 PASSED**：
+        1. 新增 `test_channel_upper_and_support_multiday_preservation` 单元测试；
+        2. 包含 4 大测试套件 34 项测试 100% 全部通过！
+
 ## 2026-09-12 15:58
 - [x] **【彻底解决下降通道突然折弯走水平线与深V翻转严重Bug】(SSOT 权威对齐通达信 Clean 公式) (`JSONData/tdx_channel_factory.py`, `stock_logic_utils.py`, `tests/test_tdx_channel_visualizer_alignment.py`, `tests/test_channel_robustness_suite.py`)**：
     - [x] **操盘手痛点与问题根因穿透**：

@@ -61,6 +61,10 @@ class TDXChannelResult:
     cdp_resistance: float  # 2*E - LOW
     cdp_breakthrough: float  # E + (HIGH - LOW)
 
+    # 通道上轨与上涨支撑线多日预处理保留 (1 ~ cct.compute_lastdays, 格式同 high41, high42, ...)
+    upper_multidays: Optional[Dict[int, float]] = None
+    supp_multidays: Optional[Dict[int, float]] = None
+
 
 class TDXChannelFactory:
     """通达信自动通道与上涨支撑线权威工厂类"""
@@ -70,12 +74,20 @@ class TDXChannelFactory:
         cls,
         data: Union[pd.DataFrame, Dict[str, np.ndarray]],
         ur: int = 6,
-        lr: int = 6
+        lr: int = 6,
+        max_days: Optional[int] = None
     ) -> TDXChannelResult:
         """
         全量计算通达信通道、KX DRAWLINE 支撑线及 CDP 支撑反转。
         支持传入 pd.DataFrame 或字典。
         """
+        if max_days is None:
+            try:
+                import JohnsonUtil.commonTips as cct
+                max_days = int(getattr(cct, 'compute_lastdays', 9))
+            except Exception:
+                max_days = 9
+        max_days = max(1, max_days)
         # 1. 提取并校验输入数据
         if isinstance(data, pd.DataFrame):
             n = len(data)
@@ -101,7 +113,9 @@ class TDXChannelFactory:
                 limit_min=0.0, limit_max=0.0, lines_for_visualizer=[],
                 supp_price=0.0, supp_slope=0.0, supp_slope_deg=0.0,
                 supp_days=0, supp_pos=0.0, is_broken=False,
-                cdp_support=0.0, cdp_reversal=0.0, cdp_resistance=0.0, cdp_breakthrough=0.0
+                cdp_support=0.0, cdp_reversal=0.0, cdp_resistance=0.0, cdp_breakthrough=0.0,
+                upper_multidays={d: 0.0 for d in range(1, max_days + 1)},
+                supp_multidays={d: 0.0 for d in range(1, max_days + 1)}
             )
 
         high_s = pd.Series(high)
@@ -427,6 +441,17 @@ class TDXChannelFactory:
         cdp_resistance = float(2.0 * e_val - l_last)
         cdp_breakthrough = float(e_val + (h_last - l_last))
 
+        # ---------------------------------------------------------------------
+        # 6. 通道上轨与支撑线价格多日预处理保留 (格式同 high41, high42, ... high4{max_days})
+        # ---------------------------------------------------------------------
+        upper_multidays = {}
+        supp_multidays = {}
+        for da in range(1, max_days + 1):
+            u_val = float(upper[-da]) if n >= da and pd.notna(upper[-da]) else float(upper_price)
+            s_val = float(supp_price_last - supp_slope * (da - 1))
+            upper_multidays[da] = round(u_val, 3)
+            supp_multidays[da] = round(max(0.01, s_val), 3)
+
         return TDXChannelResult(
             mid=mid,
             upper=upper,
@@ -457,7 +482,9 @@ class TDXChannelFactory:
             cdp_support=cdp_support,
             cdp_reversal=cdp_reversal,
             cdp_resistance=cdp_resistance,
-            cdp_breakthrough=cdp_breakthrough
+            cdp_breakthrough=cdp_breakthrough,
+            upper_multidays=upper_multidays,
+            supp_multidays=supp_multidays
         )
 
     @classmethod
