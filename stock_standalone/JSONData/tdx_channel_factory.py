@@ -195,30 +195,53 @@ class TDXChannelFactory:
         anchor = min(tc2, bc2)
         raw_slope = channel_res[3] if channel_res is not None else 0.0
 
-        # 自适应次级波段重构 (当原通道穿底/塌缩或严重脱轨失真时介入)
-        need_adaptive = not raw_valid
-        if need_adaptive and anchor > 3 and n > anchor:
-            if bc2 < tc2:
-                # 底点距今更近：股票已见底反弹，在 [n - bc2, n] 内寻找有效推进高点
-                sub_h = high[n - bc2:]
-                rel_max = int(np.argmax(sub_h))
-                tc2_cand = max(1, bc2 - rel_max)
-                cand_res = _calc_raw_channel(tc2_cand, bc2)
-                if _is_channel_valid(cand_res):
-                    channel_res = cand_res
-                    tc2 = tc2_cand
-            else:
-                # 高点距今更近：股票见顶回调，在 [n - tc2, n] 内寻找回调低点
-                sub_l = low[n - tc2:]
-                rel_min = int(np.argmin(sub_l))
-                bc2_cand = max(1, tc2 - rel_min)
-                cand_res = _calc_raw_channel(tc2, bc2_cand)
-                if _is_channel_valid(cand_res):
-                    channel_res = cand_res
-                    bc2 = bc2_cand
+        chosen_channel = None
+        is_dominant_downtrend = False
 
-        # 稳健保底兜底 (彻底杜绝任何 0.01 塌缩或负数穿底，三轨对齐通达信 clamp 约束)
-        is_fallback = not _is_channel_valid(channel_res)
+        # 1. 如果原始通道有效，直接采纳
+        if raw_valid:
+            chosen_channel = channel_res
+        else:
+            # 2. 原始通道偏离，优先在反弹浪/见顶浪中寻找健康的次级通道 (如 300400 2d、301176 等触底强劲反弹标的)
+            if anchor > 3 and n > anchor:
+                if bc2 < tc2:
+                    # 底点在远端，当前在反弹中：在 [n - bc2, n] 内寻找反弹高点
+                    sub_h = high[n - bc2:]
+                    rel_max = int(np.argmax(sub_h))
+                    tc2_cand = max(1, bc2 - rel_max)
+                    cand_res = _calc_raw_channel(tc2_cand, bc2)
+                    if _is_channel_valid(cand_res) and cand_res[3] > 1e-6:
+                        chosen_channel = cand_res
+                        tc2 = tc2_cand
+                else:
+                    # 高点在远端，当前在回调中：在 [n - tc2, n] 内寻找回调低点
+                    sub_l = low[n - tc2:]
+                    rel_min = int(np.argmin(sub_l))
+                    bc2_cand = max(1, tc2 - rel_min)
+                    cand_res = _calc_raw_channel(tc2, bc2_cand)
+                    if _is_channel_valid(cand_res) and cand_res[3] < -1e-6:
+                        chosen_channel = cand_res
+                        bc2 = bc2_cand
+
+            # 3. 如果未能形成健康次级通道，检查是否为主导性暴跌大浪 (如 688813 泰金新能、301148 嘉戎技术)
+            # 当 macro_dir == -1 (tc2 > bc2，高点在远端) 时，若高低点波段落差显著 (>= 25%)，波段跨度充分 (nod >= 8)，
+            # 且见底后震荡周期未过度拉长 (bc2 <= nod * 2.1)，则该暴跌通道为主导性宏观下降通道。
+            # 通达信原版规则下，该暴跌通道必须完整保留，受 limit_min/limit_max 保护，绝不可因见底后横盘导致远端裸外推过低而被水平线误杀覆盖！
+            if chosen_channel is None and channel_res is not None and macro_dir == -1:
+                nod_raw = abs(tc2 - bc2)
+                c_s = max(0, n - max(tc2, bc2))
+                c_e = min(n - 1, n - min(tc2, bc2))
+                h_p = high[c_s] if c_e > c_s else high[max(0, n - tc2)]
+                l_p = low[c_e] if c_e > c_s else low[max(0, n - bc2)]
+                drop_pct = (h_p - l_p) / max(h_p, 1e-4)
+                m_raw = channel_res[0]
+                m_wave_min = float(np.nanmin(m_raw[c_s:c_e + 1])) if c_e >= c_s else 0.0
+                if drop_pct >= 0.25 and nod_raw >= 8 and (bc2 <= nod_raw * 2.1) and m_wave_min > 0.05:
+                    is_dominant_downtrend = True
+                    chosen_channel = channel_res
+
+        # 4. 稳健保底兜底 (彻底杜绝任何 0.01 塌缩或负数穿底，三轨对齐通达信 clamp 约束)
+        is_fallback = (chosen_channel is None)
         if is_fallback:
             win = min(n, max(15, min(30, int(n * 0.5))))
             r_slice = close[-win:]
@@ -243,14 +266,24 @@ class TDXChannelFactory:
             nod = abs(tc2 - bc2) if abs(tc2 - bc2) >= 2 else 5
             slope = raw_slope if (macro_dir == -1 and raw_slope < 0) else local_slope
         else:
-            mid, upper, lower, slope, tc2, bc2, nod = channel_res
+            mid, upper, lower, slope, tc2, bc2, nod = chosen_channel
 
         # 对齐通达信原版三轨限制 (最低限制/最高限制约束)
         limit_min = np.min(low[-100:]) * 0.90 if n >= 100 else np.min(low) * 0.90
         limit_max = np.max(high[-100:]) * 1.10 if n >= 100 else np.max(high) * 1.10
-        mid = np.clip(mid, limit_min, limit_max)
-        upper = np.clip(upper, limit_min, limit_max)
+        
+        # 稳健物理约束: 保证下轨不跌穿 limit_min，且上轨与下轨保持真实波段宽度，杜绝三轨完全重合塌缩
+        band_w_nominal = float(np.nanmax(upper - lower)) if len(upper) > 0 else 0.05
+        if band_w_nominal <= 0.01:
+            band_w_nominal = float(close[-1] * 0.08)
+
         lower = np.clip(lower, limit_min, limit_max)
+        upper = np.clip(upper, limit_min, limit_max)
+        if is_dominant_downtrend:
+            upper = np.maximum(upper, lower + band_w_nominal)
+            mid = (upper + lower) / 2.0
+        else:
+            mid = np.clip(mid, limit_min, limit_max)
 
         upper_price = high[n - tc2]
         lower_price = low[n - bc2]

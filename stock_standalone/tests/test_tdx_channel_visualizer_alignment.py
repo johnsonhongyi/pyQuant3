@@ -255,4 +255,86 @@ def test_crosshair_hover_timer_and_auto_hide_lifecycle():
     win._show_kline_detail_window.assert_called_with(10)
 
 
+def test_688813_taijin_descending_channel_alignment():
+    """测试 688813 泰金新能大暴跌下降通道完全呈现，对齐通达信官方主图"""
+    df = get_tdx_Exp_day_to_df('688813')
+    assert df is not None and len(df) >= 60, "泰金新能日线数据不足"
+    from JSONData.tdx_channel_factory import TDXChannelFactory
+    res = TDXChannelFactory.calculate(df)
+    n = len(df)
+
+    # 1. 验证大下降通道宏观方向与斜率
+    assert res.ch_dir == -1, f"泰金新能从 248.940 暴跌至 90.130 宏观方向必须为下跌通道 (-1): {res.ch_dir}"
+    assert res.slope < -1.0, f"主跌通道斜率必须为显著负斜率: {res.slope}"
+    assert res.slope_deg < -60.0, f"通道倾角必须为大倾角下跌 (-60°以下): {res.slope_deg}"
+
+    # 2. 验证趋势起点与波段极值
+    assert res.start_idx == 13, f"趋势起点必须为 248.940 高点所在日 (idx 13): {res.start_idx}"
+    assert res.tc2 == 57, f"高点周期 tc2 应为 57: {res.tc2}"
+    assert res.bc2 == 32, f"低点周期 bc2 应为 32: {res.bc2}"
+    assert res.upper_price == pytest.approx(248.94, abs=0.1)
+    assert res.lower_price == pytest.approx(90.13, abs=0.1)
+
+    # 3. 验证波段内 (idx 13 到 idx 38) 三轨物理真实性与顺排
+    for i in range(res.start_idx, n - res.bc2 + 1):
+        assert pd.notna(res.upper[i]), f"idx {i} 上轨不能为 NaN"
+        assert pd.notna(res.mid[i]), f"idx {i} 中轨不能为 NaN"
+        assert pd.notna(res.lower[i]), f"idx {i} 下轨不能为 NaN"
+        assert res.upper[i] > res.mid[i] > res.lower[i], f"idx {i} 三轨倒挂: up={res.upper[i]}, mid={res.mid[i]}, dn={res.lower[i]}"
+
+    # 4. 验证起点之前全为 NaN (DRAWNULL，绝无超长线条)
+    for i in range(res.start_idx):
+        assert pd.isna(res.upper[i]), f"idx {i} 起点前上轨必须为 NaN"
+        assert pd.isna(res.mid[i]), f"idx {i} 起点前中轨必须为 NaN"
+        assert pd.isna(res.lower[i]), f"idx {i} 起点前下轨必须为 NaN"
+
+    # 5. 验证可视化与底层数据一致性
+    vis_mid, vis_up, vis_dn, vis_k, vis_idx = tv.calc_auto_channel(df)
+    np.testing.assert_allclose(vis_mid, res.mid, rtol=1e-5, atol=1e-4)
+    np.testing.assert_allclose(vis_up, res.upper, rtol=1e-5, atol=1e-4)
+    np.testing.assert_allclose(vis_dn, res.lower, rtol=1e-5, atol=1e-4)
+
+
+def test_301148_jiarong_descending_channel_alignment():
+    """测试 301148 嘉戎技术大暴跌下降通道完全呈现，对齐通达信官方主图"""
+    df = get_tdx_Exp_day_to_df('301148')
+    assert df is not None and len(df) >= 60, "嘉戎技术日线数据不足"
+    from JSONData.tdx_channel_factory import TDXChannelFactory
+    res = TDXChannelFactory.calculate(df)
+    n = len(df)
+
+    # 1. 验证大下降通道宏观方向与斜率
+    assert res.ch_dir == -1, f"嘉戎技术宏观方向必须为下跌通道 (-1): {res.ch_dir}"
+    assert res.slope < -0.5, f"主跌通道斜率必须为负斜率: {res.slope}"
+    assert res.slope_deg < -50.0, f"通道倾角必须为大倾角下跌: {res.slope_deg}"
+
+    # 2. 验证趋势起点与波段极值
+    assert res.start_idx == 11, f"趋势起点必须为高点所在日 (idx 11): {res.start_idx}"
+    assert res.tc2 == 59, f"高点周期 tc2 应为 59: {res.tc2}"
+    assert res.bc2 == 39, f"低点周期 bc2 应为 39: {res.bc2}"
+    assert res.upper_price == pytest.approx(66.13, abs=0.1)
+    assert res.lower_price == pytest.approx(35.26, abs=0.1)
+
+    # 3. 验证波段内 (idx 11 到 idx 31) 三轨物理真实性与顺排
+    for i in range(res.start_idx, n - res.bc2 + 1):
+        assert pd.notna(res.upper[i]), f"idx {i} 上轨不能为 NaN"
+        assert pd.notna(res.mid[i]), f"idx {i} 中轨不能为 NaN"
+        assert pd.notna(res.lower[i]), f"idx {i} 下轨不能为 NaN"
+        assert res.upper[i] > res.mid[i] > res.lower[i], f"idx {i} 三轨倒挂: up={res.upper[i]}, mid={res.mid[i]}, dn={res.lower[i]}"
+
+    # 4. 验证起点之前全为 NaN (DRAWNULL，绝无超长线条)
+    for i in range(res.start_idx):
+        assert pd.isna(res.upper[i]), f"idx {i} 起点前上轨必须为 NaN"
+        assert pd.isna(res.mid[i]), f"idx {i} 起点前中轨必须为 NaN"
+        assert pd.isna(res.lower[i]), f"idx {i} 起点前下轨必须为 NaN"
+
+    # 5. 验证可视化与底层数据一致性
+    vis_mid, vis_up, vis_dn, vis_k, vis_idx = tv.calc_auto_channel(df)
+    np.testing.assert_allclose(vis_mid, res.mid, rtol=1e-5, atol=1e-4)
+    np.testing.assert_allclose(vis_up, res.upper, rtol=1e-5, atol=1e-4)
+    np.testing.assert_allclose(vis_dn, res.lower, rtol=1e-5, atol=1e-4)
+
+
+
+
 
