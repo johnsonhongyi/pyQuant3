@@ -2836,6 +2836,26 @@ class GlobalInputFilter(QtCore.QObject):
             if not self.main_window.isActiveWindow() and not is_briefing_active:
                 return False
 
+            # ⭐ 关键防护：如果当前焦点在文本输入控件中（如板块过滤框、代码搜索框、各类文本编辑框等），
+            # 必须放行所有键盘事件（左右方向键光标移动、空格、字符输入、退格删除等），严禁全局快捷键抢占！
+            focus_widget = QtWidgets.QApplication.focusWidget()
+            if focus_widget:
+                if isinstance(focus_widget, (
+                    QtWidgets.QLineEdit,
+                    QtWidgets.QTextEdit,
+                    QtWidgets.QPlainTextEdit,
+                    QtWidgets.QAbstractSpinBox,
+                    QtWidgets.QComboBox,
+                )):
+                    return False
+                if hasattr(self.main_window, 'cat_filter_input') and (
+                    focus_widget == self.main_window.cat_filter_input or 
+                    focus_widget == self.main_window.cat_filter_input.lineEdit()
+                ):
+                    return False
+                if hasattr(self.main_window, 'code_search_input') and focus_widget == self.main_window.code_search_input:
+                    return False
+
             # ⭐ 避开组合键(Alt/Ctrl)，交给 QShortcut 或系统处理，防止重复响应
             modifiers = event.modifiers()
             if modifiers & (Qt.KeyboardModifier.AltModifier | Qt.KeyboardModifier.ControlModifier):
@@ -6640,7 +6660,7 @@ class MainWindow(QMainWindow, WindowMixin):
             cleaned = re.sub(r'^(?:所属)?(?:概念|板块|行业)[:：\s]+', '', cleaned).strip()
             matches = re.findall(r'[\u4e00-\u9fa5A-Za-z0-9\-\(\)（）/]+', cleaned)
             if matches:
-                fmt = f'category.str.contains("{matches[0]}", case=False, regex=False)'
+                fmt = f'category.str.contains("{matches[0]}")'
             else:
                 fmt = text  # 原样
 
@@ -6649,11 +6669,20 @@ class MainWindow(QMainWindow, WindowMixin):
         # 立即触发过滤
         self._on_cat_filter_apply()
 
+    def _scroll_cat_filter_to_left(self):
+        """确保板块过滤输入框优先显示最左侧内容，光标归零"""
+        if hasattr(self, 'cat_filter_input') and self.cat_filter_input:
+            le = self.cat_filter_input.lineEdit()
+            if le:
+                le.setCursorPosition(0)
+                le.deselect()
+
     def _on_cat_filter_activated(self, index):
         """用户在板块过滤下拉框选择了某一项"""
         q = self.cat_filter_input.itemData(index)
         if q:
             self.cat_filter_input.setCurrentText(q)
+            # self._scroll_cat_filter_to_left()
             self._on_cat_filter_apply()
 
     def _on_cat_filter_apply(self):
@@ -6724,6 +6753,8 @@ class MainWindow(QMainWindow, WindowMixin):
         except Exception as e:
             logger.error(f"板块过滤失败: {e}")
             self.show_status_message(f"❌ 过滤出错: {e}", 3000)
+        # finally:
+        #     self._scroll_cat_filter_to_left()
 
     def _on_cat_filter_clear(self):
         """清空板块过滤，快速路径：un-hide 所有行"""

@@ -42,7 +42,7 @@ def parse_clipboard_concept_qt(text: str) -> str:
         cleaned = re.sub(r'^(?:所属)?(?:概念|板块|行业)[:：\s]+', '', cleaned).strip()
         matches = re.findall(r'[\u4e00-\u9fa5A-Za-z0-9\-\(\)（）/]+', cleaned)
         if matches:
-            return f'category.str.contains("{matches[0]}", case=False, regex=False)'
+            return f'category.str.contains("{matches[0]}")'
         else:
             return text
 
@@ -87,8 +87,8 @@ class TestRightClickSearchPaste(unittest.TestCase):
 
     def test_qt_visualizer_paste(self):
         """测试 Qt 可视化端粘贴"""
-        self.assertEqual(parse_clipboard_concept_qt("6G概念"), 'category.str.contains("6G概念", case=False, regex=False)')
-        self.assertEqual(parse_clipboard_concept_qt("5G"), 'category.str.contains("5G", case=False, regex=False)')
+        self.assertEqual(parse_clipboard_concept_qt("6G概念"), 'category.str.contains("6G概念")')
+        self.assertEqual(parse_clipboard_concept_qt("5G"), 'category.str.contains("5G")')
         self.assertEqual(parse_clipboard_concept_qt("002297"), 'index.str.contains("^002297")')
 
 

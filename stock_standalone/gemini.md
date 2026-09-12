@@ -1,3 +1,15 @@
+## 2026-09-12 20:30
+- [x] **【修复过滤框光标左右方向键失效与文本优先居左对齐展示】(SSOT) (`trade_visualizer_qt6.py`)**：
+    - [x] **根因排查 (左右键失效)**：全局按键事件过滤器 `eventFilter`（第 2845 行）未判定当前输入焦点控件，将键盘 `Key_Left`、`Key_Right` 强行截断用于移动 K 线/分时图十字光标并直接 `return True`，导致过滤框内的光标无法左右移动；
+    - [x] **根因排查 (优先展示最左侧)**：
+        1. 右键粘贴自动包裹时附带了冗余的长参数 `, case=False, regex=False`，导致内容过长；
+        2. `setCurrentText` 之后 QLineEdit 默认将光标置于文本最右端，导致输入框向右滚动，核心概念被滚出可视范围只看到末尾；
+    - [x] **全维度修复方案**：
+        1. **输入焦点按键全放行保护**：在全局 `KeyPress` 拦截器顶部增加判定，若当前聚焦在 `QLineEdit`、`QTextEdit`、`cat_filter_input`、`code_search_input` 等输入控件时，100% 豁免放行所有键盘事件（左右方向键、空格、退格、字符输入等），彻底恢复光标左右移动功能；
+        2. **去除冗余参数**：右键粘贴改为精简紧凑的 `category.str.contains("xxx")`，底层过滤引擎自动隐式补齐健壮性参数，两端格式完全统一；
+        3. **光标归零居左对齐 (`_scroll_cat_filter_to_left`)**：在粘贴完成、下拉选择、回车过滤及清空操作后，均调用 `le.setCursorPosition(0)` 与 `le.deselect()`，强制视口滚动至最左侧，优先展示核心概念内容；
+    - [x] **语法编译与全量验证**：通过 `python -m py_compile trade_visualizer_qt6.py`，全量单元测试通过。
+
 ## 2026-09-12 20:15
 - [x] **【优化 Qt6 可视化端板块过滤输入框跟随窗口自动放大响应式布局】(SSOT) (`trade_visualizer_qt6.py`)**：
     - [x] **根因分析**：原代码在工具栏中为板块过滤下拉框 `cat_filter_input` 写死了固定宽度 `setFixedWidth(80)`，导致长查询表达式（如 `category.str.contains("xxx", ...)`）严重被挤压截断，且右侧存在大片闲置空白区域无法有效利用；
