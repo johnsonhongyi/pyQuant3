@@ -6331,7 +6331,11 @@ class MainWindow(QMainWindow, WindowMixin):
         self.cat_filter_input = QComboBox()
         self.cat_filter_input.setEditable(True)
         self.cat_filter_input.lineEdit().setPlaceholderText("板块过滤...")
-        self.cat_filter_input.setFixedWidth(80)
+        self.cat_filter_input.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self.cat_filter_input.setMinimumWidth(100)
+        self.cat_filter_input.setMaximumWidth(550)
+        if self.cat_filter_input.view():
+            self.cat_filter_input.view().setMinimumWidth(350)
         self.cat_filter_input.setToolTip("选择 history5 记录或输入名称过滤 (支持右键粘贴自动智能格式化)")
         self.cat_filter_input.setStyleSheet("""
             QComboBox {
@@ -6623,14 +6627,19 @@ class MainWindow(QMainWindow, WindowMixin):
             self.show_status_message("📋 剪贴板为空", 2000)
             return
 
-        # 如果是6位数字，转为代码过滤
-        if text.isdigit() and len(text) == 6:
+        # 1. 如果本身已经是完整的查询表达式或包含 contains / 查询操作符，直接原样使用
+        query_ops = ['.str.contains', 'category.', 'index.', '>', '<', '==', '!=', '>=', '<=', ' and ', ' or ', ' & ', ' | ']
+        if any(op in text for op in query_ops):
+            fmt = text
+        # 2. 如果是6位数字，转为代码过滤
+        elif text.isdigit() and len(text) == 6:
             fmt = f'index.str.contains("^{text}")'
         else:
-            # 提取第一个中文词（允许混合英文/数字）
-            matches = re.findall(r'[\u4e00-\u9fa5]+[A-Za-z0-9\-\(\)（）]*', text)
+            # 3. 剥离外层包裹符号和前缀，提取板块/概念词（允许数字/英文开头，如 "6G概念", "5G", "CPO概念", "AI手机"）
+            cleaned = re.sub(r'^[【\["“\'`\s]+|[】\]"”\'`\s]+$', '', text)
+            cleaned = re.sub(r'^(?:所属)?(?:概念|板块|行业)[:：\s]+', '', cleaned).strip()
+            matches = re.findall(r'[\u4e00-\u9fa5A-Za-z0-9\-\(\)（）/]+', cleaned)
             if matches:
-                # fmt = matches[0]
                 fmt = f'category.str.contains("{matches[0]}", case=False, regex=False)'
             else:
                 fmt = text  # 原样
