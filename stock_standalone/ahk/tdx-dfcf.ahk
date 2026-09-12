@@ -16,12 +16,12 @@ if !A_IsAdmin {
 }
 
 ; ================================
-; Global State
+; Global State (Auto-Execute Section)
 ; ================================
 global ClipSaved := Clipboard
 global custom_copy_triggered := false
-global AutoSendToDFCF := False     ; Auto push switch (default off)
-global DEBUG_MODE := false         ; Debug log switch
+global AutoSendToDFCF := False     ; Auto push switch (default OFF)
+global DEBUG_MODE := true          ; Debug log switch (keep ON to hotkey_debug.log)
 global LOG_FILE := A_ScriptDir "\hotkey_debug.log"
 
 ; Debounce: record last sent code and timestamp to prevent rapid double-clicks
@@ -29,8 +29,14 @@ global LastSentCode := ""
 global LastSentTick := 0
 global DEBOUNCE_INTERVAL_MS := 800  ; 800ms debounce for same stock code
 
+; Critical: register clipboard hook inside auto-execute section before any return
+OnClipboardChange("HandleClipboardChange")
+Log("=== Script started, AutoSendToDFCF=" . AutoSendToDFCF . " ===")
+
+return  ; Formal end of auto-execute section!
+
 ; ================================
-; Notification and Log
+; Notification and Log Functions
 ; ================================
 Notify(msg, type:="tray", duration:=2) {
     if (type = "msgbox") {
@@ -66,8 +72,6 @@ MouseIsOver(WinTitle) {
 ; ================================
 ; Clipboard Monitor (Auto Send on Copy)
 ; ================================
-OnClipboardChange("HandleClipboardChange")
-
 HandleClipboardChange(Type) {
     global custom_copy_triggered, ClipSaved, AutoSendToDFCF
     if !custom_copy_triggered {
@@ -85,6 +89,9 @@ HandleClipboardChange(Type) {
                         WinActivate, ahk_id %activeWinID%
                         WinWaitActive, ahk_id %activeWinID%,, 1
                     }
+                    ; 执行完成后彻底清空剪贴板，保持干净
+                    Clipboard := ""
+                    ClipSaved := ""
                 }
             }
         }
@@ -97,6 +104,11 @@ HandleClipboardChange(Type) {
 ; Target Sending Functions
 ; ================================
 SendToDFCF(stockCode) {
+    global AutoSendToDFCF
+    if (!AutoSendToDFCF) {
+        Log("AutoSendToDFCF is OFF, skip SendToDFCF(" . stockCode . ")")
+        return
+    }
     Log("Execute SendToDFCF(" . stockCode . ")")
     targetWin := "ahk_exe mainfree.exe"
     if WinExist(targetWin) {
@@ -155,19 +167,21 @@ SendToHexin(stockCode) {
 #If
 
 ; ================================
-; Hotkey: Middle Click Linkage
+; Hotkey: Middle Click Linkage (TDX / THS / DFCF)
 ; ================================
 #If WinActive("ahk_class TdxW_MainFrame_Class") 
     || WinActive("ahk_class TdxW_SecondFrame_Class") 
     || WinActive("ahk_exe hexin.exe")
+    || WinActive("ahk_exe mainfree.exe")
     || MouseIsOver("ahk_class TdxW_MainFrame_Class")
     || MouseIsOver("ahk_class TdxW_SecondFrame_Class")
     || MouseIsOver("ahk_exe hexin.exe")
+    || MouseIsOver("ahk_exe mainfree.exe")
 
 !MButton::   ; Alt + Middle click
 MButton::
 {
-    global custom_copy_triggered, ClipSaved, LastSentCode, LastSentTick, DEBOUNCE_INTERVAL_MS
+    global custom_copy_triggered, ClipSaved, LastSentCode, LastSentTick, DEBOUNCE_INTERVAL_MS, AutoSendToDFCF
     custom_copy_triggered := true
     
     ; Activate target window under cursor if not already active
@@ -182,8 +196,11 @@ MButton::
 
     stockCode := ""
     try {
+        ; ----------------------------------------------------
+        ; 分支 1: 通达信触发 (TDX -> DFCF + THS)
+        ; ----------------------------------------------------
         if WinActive("ahk_class TdxW_MainFrame_Class") || WinActive("ahk_class TdxW_SecondFrame_Class") {
-            ClipBackup := ClipboardAll
+            ClipBackup := ClipboardAll  ; 备份用户原剪贴板
             Clipboard := ""
             
             SendMessage, 0x111, 33819, 0,, ahk_id %activeWinID%
@@ -195,6 +212,10 @@ MButton::
 
             RegExMatch(Clipboard, "\b\d{6}\b", stockCode)
             Log("TDX parsed code: " . stockCode)
+            
+            ; 提取完立刻清空剪贴板，绝不保留在剪贴板中
+            Clipboard := ""
+            ClipSaved := ""
 
             if (stockCode != "") {
                 nowTick := A_TickCount
@@ -211,6 +232,9 @@ MButton::
                 Notify("No stock code found", "tooltip", 1)
             }
             
+        ; ----------------------------------------------------
+        ; 分支 2: 同花顺触发 (THS -> TDX + DFCF)
+        ; ----------------------------------------------------
         } else if WinActive("ahk_exe hexin.exe") {
             SendMessage, 0x111, 31067, 0,, a
             if WinExist("ahk_class #32770") {
@@ -235,6 +259,42 @@ MButton::
                     }
                 }
             }
+
+        ; ----------------------------------------------------
+        ; 分支 3: 东方财富触发 (DFCF -> TDX + THS)
+        ; ----------------------------------------------------
+        } else if WinActive("ahk_exe mainfree.exe") {
+            ; 策略 1: 优先尝试从窗口标题直接提取
+            WinGetActiveTitle, dfcfTitle
+            RegExMatch(dfcfTitle, "\b(?:60|30|00|43|83|87|92)\d{4}\b|(?:688|200)\d{3}\b", stockCode)
+
+            ; 策略 2: 若标题未含代码，通过临时复制 Ctrl+C 获取当前行情股票代码
+            if (stockCode == "") {
+                Clipboard := ""
+                Send, ^c
+                ClipWait, 0.3
+                RegExMatch(Clipboard, "\b(?:60|30|00|43|83|87|92)\d{4}\b|(?:688|200)\d{3}\b", stockCode)
+                ; 提取完立刻清空剪贴板，绝不保留
+                Clipboard := ""
+                ClipSaved := ""
+            }
+
+            Log("DFCF parsed code: " . stockCode)
+
+            if (stockCode != "") {
+                nowTick := A_TickCount
+                if (stockCode == LastSentCode && (nowTick - LastSentTick < DEBOUNCE_INTERVAL_MS)) {
+                    Notify("Duplicate click skipped: " . stockCode, "tooltip", 0.6)
+                } else {
+                    Notify("DFCF Sync: " . stockCode, "tooltip", 0.8)
+                    SendToTDX(stockCode)
+                    SendToHexin(stockCode)
+                    LastSentCode := stockCode
+                    LastSentTick := nowTick
+                }
+            } else {
+                Notify("No stock code found in DFCF", "tooltip", 1)
+            }
         }
     } catch e {
         Log("Hotkey error: " . e.Message)
@@ -245,8 +305,11 @@ MButton::
             WinActivate, ahk_id %activeWinID%
             WinWaitActive, ahk_id %activeWinID%,, 1
         }
+        ; 执行完成后彻底清空剪贴板，确保剪贴板绝对干净
+        Clipboard := ""
+        ClipSaved := ""
         custom_copy_triggered := false
-        Log("Hotkey finished")
+        Log("Hotkey finished, clipboard cleaned")
     }
 }
 return
@@ -258,7 +321,7 @@ return
 ^!d::  ; Ctrl+Alt+D toggle auto push
 AutoSendToDFCF := !AutoSendToDFCF
 Notify("AutoSendToDFCF: " . (AutoSendToDFCF ? "ON" : "OFF"), "tray", 1)
-Log("AutoSendToDFCF = " . AutoSendToDFCF)
+Log("AutoSendToDFCF toggled to: " . AutoSendToDFCF)
 return
 
 ^!L::  ; Ctrl+Alt+L toggle debug log
