@@ -410,8 +410,10 @@ HandleClipboardChange(Type) {
     || MouseIsOver("ahk_exe hexin.exe")
     || MouseIsOver("ahk_exe mainfree.exe")
 
-!MButton::   ; Alt + Middle click
-MButton::
+!MButton::   ; Alt + Middle click (Preserve/Copy clipboard)
+MButton::    ; Middle click (Clean clipboard)
+    isAltTriggered := InStr(A_ThisHotkey, "!") || GetKeyState("Alt", "P")
+    origClip := Clipboard
     custom_copy_triggered := true
     
     MouseGetPos,,, hoverWin
@@ -421,7 +423,7 @@ MButton::
     
     WinGet, activeWinID, ID, A
     WinGetActiveTitle, actitle
-    Log("Hotkey triggered in window: " . actitle)
+    Log("Hotkey triggered (" . (isAltTriggered ? "Alt+MButton" : "MButton") . ") in window: " . actitle)
 
     stockCode := ""
     try {
@@ -456,10 +458,23 @@ MButton::
             WinActivate, ahk_id %activeWinID%
             WinWaitActive, ahk_id %activeWinID%,, 1
         }
-        Clipboard := ""
-        ClipSaved := ""
+        if (isAltTriggered) {
+            if (stockCode != "") {
+                Clipboard := stockCode
+                ClipSaved := stockCode
+                Notify("Synced & Copied: " . stockCode, "tooltip", 0.8)
+                Log("Hotkey finished, Alt+MButton -> stockCode copied to clipboard: " . stockCode)
+            } else {
+                Clipboard := origClip
+                ClipSaved := origClip
+                Log("Hotkey finished, Alt+MButton -> original clipboard restored")
+            }
+        } else {
+            Clipboard := ""
+            ClipSaved := ""
+            Log("Hotkey finished, normal MButton -> clipboard cleaned")
+        }
         custom_copy_triggered := false
-        Log("Hotkey finished, clipboard cleaned")
     }
 return
 #If
