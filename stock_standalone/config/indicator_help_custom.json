@@ -178,5 +178,25 @@
     "key": "STRATEGY: 捕捉宽幅稳健慢牛/回踩箱体蓄势 (声迅股份/迈瑞医疗形态)",
     "summary": "【实战策略】大通道宽幅空间+回踩中下轨蓄势+动能未透支低吸",
     "detail": "核心策略逻辑：\n1. 大通道向上有操作空间: ch_dir == 1 and ch_slope_deg > 1.5 and ch_width_pct > 15\n2. 动能平缓未透支 (排除暴涨连板妖股): perc3d >= -5 and perc3d <= 10\n3. 均线温和缠绕未脱离: dff2 < 15 and ratio < 5.0\n4. 处于通道中下轨蓄势安全带: close >= ch_lower and (ch_pos >= 25 and ch_pos <= 65)\n\nQuery实现语句：\ndf.query('ch_dir == 1 and ch_slope_deg > 1.5 and close >= ch_lower and (ch_pos >= 25 and ch_pos <= 65) and (perc3d >= -5 and perc3d <= 10) and dff2 < 15 and ch_width_pct > 15 and ratio < 5.0')"
+  },
+  {
+    "key": "ch_upper1 ~ ch_upper{N}",
+    "summary": "【核心多日】通道上轨多日预处理价格序列 (格式同 high41~high4{cct.compute_lastdays})",
+    "detail": "================================================================================\n          【通道上轨多日价格预处理保留机制 (cct.compute_lastdays)】\n================================================================================\n详细说明：根据全局配置 cct.compute_lastdays (默认为 9 天) 预处理保留的多日通道上轨价格：\n• ch_upper1 : 倒数第 1 天 (即最新交易日) 通道上轨价格；\n• ch_upper2 : 倒数第 2 天 (即昨日) 通道上轨价格；\n• ... 直至 ch_upper{N} (如 ch_upper9)；\n• 停画自愈机制：若通道向右外推超出范围停画为 NaN，自愈回退至锚定高点 upper_price，确保特征不断流。\n\nQuery用法示例: close > ch_upper1 and ch_upper1 > ch_upper2\nQuery同义词: ch_upper1, ch_upper2, ch_upper3, ch_upper4, ch_upper5, ch_upper6, ch_upper7, ch_upper8, ch_upper9"
+  },
+  {
+    "key": "ch_supp1 ~ ch_supp{N} / ch_supp_price1 ~ ch_supp_price{N}",
+    "summary": "【核心多日】通达信上涨支撑线多日价格递推序列 (格式同 high41~high4{cct.compute_lastdays})",
+    "detail": "================================================================================\n          【通达信 KX DRAWLINE 上涨支撑线多日价格递推机制】\n================================================================================\n详细说明：根据全局配置 cct.compute_lastdays (默认为 9 天) 严谨依照通达信 DRAWLINE 几何斜率递推的多日支撑线价格：\n• ch_supp1 / ch_supp_price1 : 倒数第 1 天 (最新日) 今日支撑线价格 (同 ch_supp_price)；\n• ch_supp2 / ch_supp_price2 : 倒数第 2 天 (昨日) 支撑线价格，严谨满足 supp_price - supp_slope * 1；\n• ch_supp{d} : 倒数第 d 天支撑线价格，算法公式: round(max(0.01, supp_price_last - supp_slope * (d - 1)), 3)；\n• 该序列消除了实时重算开销，便于回溯近 N 天股价与支撑线的距离收敛/回踩确认状态。\n\nQuery用法示例: close >= ch_supp1 and ch_supp1 > ch_supp2\nQuery同义词: ch_supp1, ch_supp2, ch_supp3, ch_supp4, ch_supp5, ch_supp_price1, ch_supp_price2"
+  },
+  {
+    "key": "cdp_support / cdp_reversal / cdp_resistance / cdp_breakthrough",
+    "summary": "【通达信同款】CDP 逆势操作四维支撑反转体系 (元)",
+    "detail": "================================================================================\n          【通达信 CDP 逆势操作四维价格点位计算】\n================================================================================\n公式基准：E = (HIGH + LOW + 2 * CLOSE) / 4 (昨日典型价格)\n1. cdp_support     : 明日支撑位 = 2*E - HIGH (高位回落第一防守支撑)\n2. cdp_reversal    : 明日反转位 = E - (HIGH - LOW) (超跌止损与极限反转位)\n3. cdp_resistance  : 明日阻力位 = 2*E - LOW (日内反弹第一目标阻力)\n4. cdp_breakthrough: 明日突破位 = E + (HIGH - LOW) (日内超强势突破暴扣位)\n\nQuery用法示例: close >= cdp_support and close <= cdp_resistance\nQuery同义词: cdp_support, cdp_reversal, cdp_resistance, cdp_breakthrough"
+  },
+  {
+    "key": "ch_supp / supp_price / supp_slope / upper_price",
+    "summary": "【便捷别名】通道与支撑线常用直觉快捷访问字段",
+    "detail": "详细说明：系统为交互式分析 (ipdb/Jupyter/脚本) 与快速 Query 提供的便捷字段别名：\n• ch_supp / ch_supplast / supp_price / supp_price_last : 等价于 ch_supp_price (今日支撑线价格)\n• supp_slope : 等价于 ch_supp_slope (通达信支撑线几何斜率)\n• upper_price : 等价于 ch_anchor_high_price (通道锚定最高价)\n• lower_price : 等价于 ch_anchor_low_price (通道锚定最低价)\n以上所有别名在 DataFrame 列与行 Series 中均可直接通过属性或字典访问 (如 row.supp_price 或 row['supp_price'])。\n\nQuery用法示例: close >= supp_price and supp_slope > 0\nQuery同义词: ch_supp, supp_price, supp_price_last, supp_slope, upper_price, lower_price"
   }
 ]
