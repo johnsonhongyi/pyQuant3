@@ -3572,6 +3572,17 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         except Exception as e:
             logger.error(f"[15:30 Task] STEP 3 ❌ StockSelector task failed: {e}")
 
+        # ── STEP 3b: 多日换手率与缺失特征自动化持久化归档 ─────────────────
+        try:
+            df_curr_eod = getattr(self, 'df_all', None)
+            if df_curr_eod is not None and not df_curr_eod.empty:
+                logger.warning("[15:30 Task] STEP 3b ▶ Archiving multiday features (ratio/vol_ratio)...")
+                from JSONData.multiday_feature_store import archive_daily_features
+                archive_daily_features(df_curr_eod)
+                logger.warning("[15:30 Task] STEP 3b ✅ 多日换手率自动持久化归档完成！")
+        except Exception as e_mfs:
+            logger.error(f"[15:30 Task] STEP 3b ❌ 多日换手率归档异常: {e_mfs}")
+
         # ── STEP 4: Write_market_all_day_mp (最重量级任务) ───────────────────
         logger.warning("[15:30 Task] STEP 4 ▶ Checking Write_market_all_day_mp...")
         # 注：today / write_all_day_date 已在函数顶部声明，此处直接复用
@@ -4077,6 +4088,14 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     archive_dir=ARCHIVE_DIR,
                     logger=logger
                 )
+
+                try:
+                    df_curr_close = getattr(self, 'df_all', None)
+                    if df_curr_close is not None and not df_curr_close.empty:
+                        from JSONData.multiday_feature_store import archive_daily_features
+                        archive_daily_features(df_curr_close)
+                except Exception as e_close_mfs:
+                    logger.debug(f"退出时多日换手率归档跳过: {e_close_mfs}")
 
             except Exception as e:
                 logger.warning(f"数据存档过程异常: {e}")
