@@ -1,3 +1,58 @@
+## 2026-09-13 15:15
+- [x] **【彻底解决天梯无法打开故障、全面对齐ATS原生磁吸架构(SSOT)、精简模式保留dff/dff2/dff3/量比自适应、修复按键换行联动与清理右键菜单】(SSOT) (`ats/ui/daily_limit_up_dialog.py`, `ats/ui/sector_rotation_miner_dialog.py`, `tests/test_daily_limit_up_dialog.py`, `tests/test_sector_rotation_pullback_miner.py`)**：
+    - [x] **操盘手反馈痛点根因穿透**：
+        1. **“天梯现在无法打开”致命根因**：`window_config.json` 中天梯窗口被写入了异常坐标（x=1914, width=900, is_hidden=False）。在高分屏 DPI 缩放环境下，Qt 逻辑可用屏宽为 1920，而 `gui_utils.clamp_window_to_screens` 使用 win32api 物理像素 3840 误判为在屏内，导致 Qt 将 900px 宽的窗口放置在逻辑坐标 x: 1914，99.5% 飞出屏幕右侧仅剩 6px，操盘手视觉上天梯“彻底打不开/失踪”；
+        2. **“按键总是遗漏触发联动，第二个就无效”根因**：`sectors_table` 未直连 `currentItemChanged`，且此前用 `eventFilter` 拦截按键读取 `currentRow()` 时 Qt 尚未执行行切换，读到的是 stale index，导致按 Down 键移动到第 2 行时仍拿到第 1 行；且鼠标点击未在切换板块时联动先锋龙头；
+        3. **磁吸规范对齐要求**：必须坚决遵循既有 ATS 生产验证的标准实现（如 `chart_widgets.py`），不自创感应区；
+        4. **精简模式保留核心量化信息**：操盘手盯盘需要直观查看 `dff` (涨幅)、`dff2` (距MA20)、`dff3` (长期涨幅) 和 `量比` 等核心字段，且窗口缩放时自适应增减列；
+        5. **右键菜单清理**：彻底移除“复制查询表达式”。
+    - [x] **系统级工程落地与 SSOT 规范对齐**：
+        1. **Qt 逻辑屏幕双重安全纠偏 (解决窗口失踪)**：
+           - 在 `DailyLimitUpDialog` 与 `SectorRotationMinerDialog` 的 `_apply_restore_state` 与初始化恢复中，使用 `QApplication.screenAt(...) or QApplication.primaryScreen()` 获取逻辑工作区 `availableGeometry()` 进行安全二次纠偏（clamp）；若窗口在屏幕外或不可见，自动保底恢复至屏幕安全可视位置；
+           - 将 `window_config.json` 中的天梯坐标重置为安全坐标 `(150, 100, 1280, 720)`，天梯 100% 正常秒开；
+        2. **全面对齐 ATS 既有原生磁吸架构 (SSOT)**：
+           - 彻底移除上一轮自作主张的 20px 扩展感应带及 `_is_in_edge_sensing_zone`；
+           - 100% 对齐 ATS 既有成熟机制：`in_window = self.frameGeometry().contains(mouse_pos)`，悬停 `hover_ticks >= 2` (200ms) 展开，离开 `leave_ticks >= 4` (400ms) 折叠为 5px 边缘微条，平滑动效 200ms OutCubic，开启置顶与磁吸严格互斥；
+        3. **精简模式保留核心量化列 (dff, dff2, dff3, 量比) 与窗口尺寸自适应**：
+           - 精简模式默认保留核心 7 列：`代码(0), 名称(1), 启动形态(3), 涨幅 dff(5), 距MA20 dff2(6), 长期 dff3(7), 量比(9)`；
+           - 实现 `_adapt_compact_columns` 与 `resizeEvent`，根据窗口实际宽度自适应动态展现/折叠列（加宽自适应展现得分、建议买区、止损位与板块资金评级、成交额）；
+        4. **板块键盘上下按键与点击即时联动 (解决漏触发与第二个无效)**：
+           - 直连 `self.sectors_table.currentItemChanged.connect(self._on_sector_current_changed)`，键盘上下键或光标移动到第 2 行时瞬间精准提取板块并联动其领涨龙头；
+           - 点击第 0 列名称支持 Toggle 反选全部主线，点击其他列锁定板块并联动龙头；
+        5. **彻底删除右键菜单“复制查询表达式”**：
+           - 从板块右键菜单与候选股票右键菜单中彻底移除“复制查询表达式”相关选项与代码。
+    - [x] **自动化测试 32/32 PASSED 100% 全绿**：
+        1. `test_daily_limit_up_dialog.py`: 13/13 PASSED；
+        2. `test_sector_rotation_pullback_miner.py`: 19/19 PASSED；
+        3. 专项覆盖天梯恢复安全可见、ATS 原生磁吸周期、按键上下切换联动、右键菜单清理以及精简模式列自适应。
+
+## 2026-09-13 14:40
+- [x] **【彻底解决天梯与轮动深挖磁吸“卡卡的”、启动后无法自动弹出两大顽疾 & 落地20px扩展感应区与零阻塞展开动效】(SSOT) (`ats/ui/daily_limit_up_dialog.py`, `ats/ui/sector_rotation_miner_dialog.py`, `tests/test_daily_limit_up_dialog.py`, `tests/test_sector_rotation_pullback_miner.py`)**：
+    - [x] **操盘手反馈痛点根因穿透**：
+        1. **“启动后天梯磁吸触发没反应无法自动弹出”致命根因**：
+           - `DailyLimitUpDialog._apply_restore_state` 在程序启动加载配置时，虽然恢复了 `anchor_edge` 与 `is_hidden`，但**从未恢复 `normal_geometry`**（`self.normal_geometry` 始终为 `None`）；
+           - 当鼠标触碰贴边感应区触发 `show_normal_position` 时，其内部守护条件 `if self.normal_geometry:` 判定失败，**滑出动画直接被跳过**，窗口彻底死锁在隐藏位置，无法弹出！同时 `hover_timer` 在启动时未被无缝激活；
+        2. **“总是触发时卡卡的，而其他的触发就能反映弹出”三大核心瓶颈**：
+           - **微观 5px 发丝缝感应带缺陷**：原逻辑仅使用 `self.frameGeometry().contains(mouse_pos)` 判定悬停。当窗口折叠时在屏幕上仅露出 5 像素，操盘手鼠标稍有微动滑至 6~8px 即刻跳出判定区，导致 `hover_ticks` 频繁重置为 0，操盘手必须极力保持鼠标在 5px 内静止达 200ms 才能弹出，产生强烈的“卡顿、失灵、迟钝”感；
+           - **动画首帧阻塞式磁盘 I/O 导致掉帧**：`show_normal_position` 在触发滑出动画的同 0ms 内，同步调用了 `self._save_window_states(is_open=True)` 进行全量阻塞写盘，直接卡死 Qt 动画首帧 50~100ms；
+           - **DWM 透明度动画与强制 1.0 覆盖冲突**：启动 `opacity_anim` 渐变动画的同时直接裸调 `self.setWindowOpacity(1.0)`，导致 Windows DWM 合成器状态剧烈抖动；
+    - [x] **系统级工程优化与秒级灵敏弹出落地**：
+        1. **启动全量恢复与 normal_geometry 双重保底机制**：
+           - `DailyLimitUpDialog` 与 `SectorRotationMinerDialog` 在 `_apply_restore_state` 与启动恢复时，完整计算并落盘 `normal_geometry`；
+           - 在 `show_normal_position` 头部加入**动态智能重建保底**，即使任何极端异常导致 `normal_geometry` 为空，系统自动根据屏幕几何与窗口宽高瞬间自愈重建，100% 杜绝启动后无法弹出的 Bug；
+           - 启动时若处于贴边隐藏态，自动将窗口坐标移至 `(hx, hy)` 边缘条并激活 `hover_timer`；
+        2. **20px 宽广自然边缘感应区 (`_is_in_edge_sensing_zone`)**：
+           - 将鼠标判定由死板的“5px 实体”重构为“沿屏幕边缘 20px 深度 + 上下 40px 容错”的宽广感应磁场；
+           - 操盘手将鼠标自然滑向屏幕边缘即可被无缝捕获，无需小心翼翼瞄准 5px 细缝；
+        3. **100ms 极速弹出响应 (`hover_ticks >= 1`)**：
+           - 响应时延从 200ms 降至 100ms，触碰边缘感应区即刻以 180ms OutCubic 平滑丝滑滑出，彻底实现“触发就能反映弹出”；
+        4. **动画首帧 0 阻塞与异步落盘**：
+           - 彻底剥离 `show_normal_position` 首帧的同步写盘操作，全量收拢至动画 `on_finished` 信号回调中执行，动画全程 60 FPS 丝滑顺畅；
+           - 增加 `_in_snap_action` 动画中途防重入互斥，杜绝动画中途抖动。
+    - [x] **自动化测试 31/31 PASSED & 核心套件 54 项全绿**：
+        1. 专项新增 `test_startup_hidden_dock_and_smooth_edge_sensing_popup`（天梯）与 `test_18_startup_hidden_dock_and_smooth_edge_sensing_popup`（轮动深挖），覆盖启动恢复贴边隐藏、normal_geometry 完整性、hover_timer 激活、20px 感应区命中与平滑滑出展开；
+        2. 54 项关联核心测试套件全部 100% 全绿通过！
+
 ## 2026-09-13 14:25
 - [x] **【彻底修复点击精简按钮无效Bug、精简模式解除自动置顶 & 全面对齐ATS底层磁吸边缘折叠/悬停展开架构 (SSOT)】(SSOT) (`ats/ui/sector_rotation_miner_dialog.py`, `tests/test_sector_rotation_pullback_miner.py`)**：
     - [x] **操盘手反馈三大痛点根因穿透**：

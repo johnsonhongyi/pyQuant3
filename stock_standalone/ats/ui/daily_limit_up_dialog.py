@@ -511,15 +511,67 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
             w = state.get("width", 1280)
             h = state.get("height", 720)
             self._last_wide_width = state.get("last_wide_width", 1280)
-            if x is not None and y is not None:
-                self.setGeometry(x, y, w, h)
-            self.anchor_edge = state.get("anchor_edge")
-            self.is_hidden_state = state.get("is_hidden", False)
+
+            rx = int(x) if x is not None else 100
+            ry = int(y) if y is not None else 100
+            rw = max(350, int(w))
+            rh = max(250, int(h))
+
+            from gui_utils import clamp_window_to_screens
+            rx, ry = clamp_window_to_screens(rx, ry, rw, rh)
+            # 在 Qt 逻辑坐标系下校验屏幕边界，杜绝高分屏 DPI 缩放下窗口越界或消失
+            from PyQt6.QtCore import QPoint
+            _scr = QApplication.screenAt(QPoint(rx, ry)) or QApplication.primaryScreen()
+            if _scr:
+                _s_geo = _scr.availableGeometry()
+                rx = max(_s_geo.left(), min(rx, _s_geo.right() - rw))
+                ry = max(_s_geo.top(), min(ry, _s_geo.bottom() - rh))
+            self.normal_geometry = QRect(rx, ry, rw, rh)
+
             self.stays_on_top = state.get("stays_on_top", False)
-            self.current_mode = state.get("current_mode", "TODAY")
-            self.is_narrow_mode = state.get("is_narrow_mode", False)
             if self.chk_ontop:
                 self.chk_ontop.setChecked(self.stays_on_top)
+
+            if self.stays_on_top:
+                self.anchor_edge = None
+                self.is_hidden_state = False
+                self.setGeometry(rx, ry, rw, rh)
+                self.setWindowOpacity(1.0)
+            else:
+                self.anchor_edge = state.get("anchor_edge")
+                is_hidden = state.get("is_hidden", False)
+                if is_hidden and self.anchor_edge:
+                    self.is_hidden_state = True
+                    strip_size = 5
+                    from PyQt6.QtCore import QPoint
+                    screen = QApplication.screenAt(QPoint(rx, ry)) or self.screen() or QApplication.primaryScreen()
+                    screen_geo = screen.availableGeometry() if screen else QRect(0, 0, 1920, 1080)
+
+                    if self.anchor_edge == "left":
+                        hx = screen_geo.left() - rw + strip_size
+                        hy = ry
+                    elif self.anchor_edge == "right":
+                        hx = screen_geo.right() - strip_size
+                        hy = ry
+                    elif self.anchor_edge == "top":
+                        hx = rx
+                        hy = screen_geo.top() - rh + strip_size
+                    else:
+                        hx, hy = rx, ry
+                        self.is_hidden_state = False
+
+                    self.setGeometry(hx, hy, rw, rh)
+                    self.setWindowOpacity(0.35)
+                    if hasattr(self, 'hover_timer') and self.hover_timer and not self.hover_timer.isActive():
+                        self.hover_timer.start()
+                else:
+                    self.setGeometry(rx, ry, rw, rh)
+                    self.setWindowOpacity(1.0)
+                    if self.anchor_edge and hasattr(self, 'hover_timer') and self.hover_timer and not self.hover_timer.isActive():
+                        self.hover_timer.start()
+
+            self.current_mode = state.get("current_mode", "TODAY")
+            self.is_narrow_mode = state.get("is_narrow_mode", False)
             if getattr(self, "btn_narrow_mode", None):
                 self.btn_narrow_mode.setChecked(self.is_narrow_mode)
         except Exception as e:
@@ -3596,13 +3648,13 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
             screen = QApplication.primaryScreen()
         screen_geo = screen.availableGeometry()
         win_geo = self.geometry()
-        margin = 20 # 调优为更从容自然的 20px，避免过早误吸
-        
+        margin = 35 # 35px 舒适自然磁吸感应范围
+
         snapped = False
         edge = None
         target_x = win_geo.left()
         target_y = win_geo.top()
-        
+
         if abs(win_geo.top() - screen_geo.top()) < margin:
             edge = "top"
             target_y = screen_geo.top()
@@ -3615,11 +3667,11 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
             edge = "right"
             target_x = screen_geo.right() - win_geo.width()
             snapped = True
-            
+
         if snapped:
             self.anchor_edge = edge
             self.normal_geometry = QRect(target_x, target_y, win_geo.width(), win_geo.height())
-            self.start_slide_animation(self.normal_geometry, 1.0, duration=200, is_snap_feedback=True)
+            self.start_slide_animation(self.normal_geometry, 1.0, duration=180, is_snap_feedback=True)
             # 仅在进入贴边后激活悬停检测
             if hasattr(self, 'hover_timer') and self.hover_timer and not self.hover_timer.isActive():
                 self.hover_timer.start()
@@ -3637,18 +3689,18 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
             return
         if not self.anchor_edge or self.is_hidden_state or not self.normal_geometry:
             return
-            
+
         screen = self.screen()
         if not screen:
             screen = QApplication.primaryScreen()
         screen_geo = screen.availableGeometry()
-        
+
         w = self.normal_geometry.width()
         h = self.normal_geometry.height()
         x = self.normal_geometry.x()
         y = self.normal_geometry.y()
         strip_size = 5
-        
+
         if self.anchor_edge == "left":
             target_x = screen_geo.left() - w + strip_size
             target_y = y
@@ -3660,26 +3712,42 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
             target_y = screen_geo.top() - h + strip_size
         else:
             return
-            
+
         self.is_hidden_state = True
         # 隐藏到边缘时确保悬停唤醒定时器处于激活态
         if hasattr(self, 'hover_timer') and self.hover_timer and not self.hover_timer.isActive():
             self.hover_timer.start()
-        self.start_slide_animation(QRect(target_x, target_y, w, h), 0.35, duration=300)
+        self.start_slide_animation(QRect(target_x, target_y, w, h), 0.35, duration=250)
 
     def show_normal_position(self):
-        if self.is_hidden_state:
+        if getattr(self, "is_hidden_state", False):
             self.is_hidden_state = False
             self._is_auto_popping = True
             QTimer.singleShot(500, lambda: setattr(self, '_is_auto_popping', False))
             self._last_show_time = time.time()
             self._has_hovered_since_show = False
+
+            # 兜底恢复 normal_geometry 避免启动后为 None 导致无法滑出
+            if not getattr(self, 'normal_geometry', None):
+                w = self.width()
+                h = self.height()
+                screen = self.screen() or QApplication.primaryScreen()
+                screen_geo = screen.availableGeometry() if screen else QRect(0, 0, 1920, 1080)
+                if self.anchor_edge == "left":
+                    self.normal_geometry = QRect(screen_geo.left(), self.y(), w, h)
+                elif self.anchor_edge == "right":
+                    self.normal_geometry = QRect(screen_geo.right() - w, self.y(), w, h)
+                elif self.anchor_edge == "top":
+                    self.normal_geometry = QRect(self.x(), screen_geo.top(), w, h)
+                else:
+                    self.normal_geometry = self.geometry()
+
             if self.normal_geometry:
                 self.start_slide_animation(self.normal_geometry, 1.0, duration=200)
             self.setWindowOpacity(1.0)
         else:
             self.setWindowOpacity(1.0)
-        
+
         if self.isMinimized():
             self.showNormal()
         else:
@@ -3690,30 +3758,34 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
 
     def _check_hover(self):
         # 【置顶与磁吸严格互斥】：置顶状态下不执行任何贴边或离开折叠检测，立即休眠
-        if not self.isVisible() or self.stays_on_top:
+        if not self.isVisible() or getattr(self, "stays_on_top", False):
             if hasattr(self, 'hover_timer') and self.hover_timer and self.hover_timer.isActive():
                 self.hover_timer.stop()
             return
-            
+
         # 仅在有贴边锚定边缘或处于贴边隐藏状态时才执行悬浮检测，其余时刻 0 开销休眠
-        if not self.anchor_edge and not self.is_hidden_state:
+        if not self.anchor_edge and not getattr(self, "is_hidden_state", False):
             if hasattr(self, 'hover_timer') and self.hover_timer and self.hover_timer.isActive():
                 self.hover_timer.stop()
+            return
+
+        # 滑动动画进行中直接短路，绝不中途打断动画或产生乱序闪烁
+        if getattr(self, "_in_snap_action", False):
             return
 
         if QApplication.mouseButtons() & Qt.MouseButton.LeftButton:
             self.leave_ticks = 0
             self.hover_ticks = 0
             return
-            
+
         from PyQt6.QtGui import QCursor
         mouse_pos = QCursor.pos()
         in_window = self.frameGeometry().contains(mouse_pos)
-        
+
         if in_window:
             self._has_hovered_since_show = True
-            
-        if self.is_hidden_state:
+
+        if getattr(self, "is_hidden_state", False):
             if in_window:
                 self.hover_ticks += 1
                 if self.hover_ticks >= 2:
@@ -3730,7 +3802,7 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
                     if time.time() - getattr(self, '_last_show_time', 0.0) < 1.2:
                         self.leave_ticks = 0
                         return
-                        
+
                     self.leave_ticks += 1
                     if self.leave_ticks >= 4:
                         self.hide_to_edge()
