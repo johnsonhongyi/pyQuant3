@@ -31,6 +31,7 @@ import logging
 import threading
 import re
 from typing import Dict, List, Tuple, Optional, Any, Set, Union
+from dataclasses import dataclass, field, asdict
 import pandas as pd
 import numpy as np
 
@@ -42,6 +43,92 @@ logger = LoggerFactory.getLogger("SectorRotationPullbackMiner")
 
 _RE_CLEAN_SECTOR = re.compile(r'^[^\w\u4e00-\u9fa5]+')
 _INVALID_SECTORS = frozenset({'--', '-', '---', '0', '0.0', '00', '000', '000000', 'none', 'nan', 'null', '未知', '其它', '其他', '未分类', 'default'})
+
+
+@dataclass
+class PullbackFilterConfig:
+    """
+    回踩确认启动底层筛选量化策略配置类 (可选择、可自定义、支持持久化)
+    """
+    mode_name: str = "🎯 经典标准"          # 策略模式名
+    dff2_min: float = -1.8                # 回踩 MA20d 偏离下限 (%)，默认 -1.8%
+    dff2_max: float = 4.5                 # 回踩 MA20d 偏离上限 (%)，默认 +4.5%
+    min_eval_pct: float = 0.3             # 最小收阳上涨幅度 (%)，底线必须收阳(>0)
+    max_eval_pct: float = 6.5             # 最大涨幅上限 (%)，防止追高
+    min_vol_ratio: float = 1.15           # 启动温和量比门槛，默认 1.15
+    min_turnover: float = 1.2             # 最小活跃换手率 (%)，剔除死水
+    min_amt_yi: float = 0.25              # 最小成交额 (亿元)，剔除僵尸股
+    min_dff3: float = -15.0               # 长期累积偏离底线 (%)，剔除常年阴跌
+    require_channel_supp: bool = False    # 是否强制要求通达信通道支撑共振
+    prefer_channel_supp: bool = True      # 通道支撑共振标的优先加分加权
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'PullbackFilterConfig':
+        if not isinstance(data, dict):
+            return cls()
+        valid_keys = {f.name for f in cls.__dataclass_fields__.values()}
+        filtered = {k: v for k, v in data.items() if k in valid_keys}
+        # 针对数值做安全转换
+        for float_k in ('dff2_min', 'dff2_max', 'min_eval_pct', 'max_eval_pct',
+                        'min_vol_ratio', 'min_turnover', 'min_amt_yi', 'min_dff3'):
+            if float_k in filtered:
+                try:
+                    filtered[float_k] = float(filtered[float_k])
+                except (ValueError, TypeError):
+                    pass
+        for bool_k in ('require_channel_supp', 'prefer_channel_supp'):
+            if bool_k in filtered:
+                filtered[bool_k] = bool(filtered[bool_k])
+        if 'mode_name' in filtered:
+            filtered['mode_name'] = str(filtered['mode_name'])
+        return cls(**filtered)
+
+
+PRESET_FILTER_MODES: Dict[str, PullbackFilterConfig] = {
+    "🎯 经典标准": PullbackFilterConfig(
+        mode_name="🎯 经典标准",
+        dff2_min=-1.8,
+        dff2_max=4.5,
+        min_eval_pct=0.3,
+        max_eval_pct=6.5,
+        min_vol_ratio=1.15,
+        min_turnover=1.2,
+        min_amt_yi=0.25,
+        min_dff3=-15.0,
+        require_channel_supp=False,
+        prefer_channel_supp=True
+    ),
+    "🚀 极速起爆": PullbackFilterConfig(
+        mode_name="🚀 极速起爆",
+        dff2_min=-1.0,
+        dff2_max=5.5,
+        min_eval_pct=1.2,
+        max_eval_pct=7.5,
+        min_vol_ratio=1.35,
+        min_turnover=2.0,
+        min_amt_yi=0.50,
+        min_dff3=-10.0,
+        require_channel_supp=False,
+        prefer_channel_supp=True
+    ),
+    "💎 稳健通道低吸": PullbackFilterConfig(
+        mode_name="💎 稳健通道低吸",
+        dff2_min=-1.5,
+        dff2_max=3.2,
+        min_eval_pct=0.2,
+        max_eval_pct=5.0,
+        min_vol_ratio=1.05,
+        min_turnover=1.0,
+        min_amt_yi=0.20,
+        min_dff3=-20.0,
+        require_channel_supp=True,
+        prefer_channel_supp=True
+    )
+}
+
 
 
 def _safe_float(val: Any, default: float = 0.0) -> float:
@@ -183,6 +270,10 @@ class SectorRotationPullbackMiner:
 
         # ch_supp 支撑线价格
         ch_supp_arr = _get_float_arr(['ch_supp', 'ch_supp_price', 'supp_price', 'ch_lower'], 0.0)
+        # ch_pos 通道位置 (0~100)
+        ch_pos_arr = _get_float_arr(['ch_pos', 'channel_pos'], 50.0)
+        # ch_slope 通道支撑线倾角 (度)
+        ch_slope_arr = _get_float_arr(['ch_supp_slope_deg', 'supp_slope_deg', 'ch_slope_deg'], 0.0)
 
         # 代码与名称
         idx_vals = df.index.values
@@ -214,6 +305,8 @@ class SectorRotationPullbackMiner:
             'p2_arr': p2_arr,
             'p3_arr': p3_arr,
             'ch_supp_arr': ch_supp_arr,
+            'ch_pos_arr': ch_pos_arr,
+            'ch_slope_arr': ch_slope_arr,
             'sec_arr': sec_arr
         }
 
@@ -473,21 +566,23 @@ class SectorRotationPullbackMiner:
         self,
         df: pd.DataFrame,
         leading_sectors: List[Dict[str, Any]],
-        dff2_min: float = -2.5,
-        dff2_max: float = 6.5,
+        dff2_min: float = -1.8,
+        dff2_max: float = 4.5,
         min_vol_ratio: float = 1.15,
-        max_dff_pct: float = 7.5,
-        ctx: Optional[Dict[str, Any]] = None
+        max_dff_pct: float = 6.5,
+        ctx: Optional[Dict[str, Any]] = None,
+        filter_config: Optional[PullbackFilterConfig] = None
     ) -> List[Dict[str, Any]]:
         """
-        【阶段三】：在已确认的主线板块内部，深挖“回踩确认后启动”的个股跟进
+        【阶段三】：在已确认的主线板块内部，深挖“MA20企稳+活跃势能+有效放量上涨/启动+通道支撑”的个股跟进
         :param df: 全市场实时或策略 DataFrame
         :param leading_sectors: 阶段二锁定的核心主线板块列表
-        :param dff2_min: 回踩 MA20d 下限偏离度 (默认 -2.5%)
-        :param dff2_max: 回踩 MA20d 上限偏离度 (默认 +6.5%)
+        :param dff2_min: 回踩 MA20d 下限偏离度 (默认 -1.8%)
+        :param dff2_max: 回踩 MA20d 上限偏离度 (默认 +4.5%)
         :param min_vol_ratio: 启动温和量比门槛 (默认 1.15)
-        :param max_dff_pct: 当日涨幅上限 (防止追高，默认 <= 7.5%)
+        :param max_dff_pct: 当日涨幅上限 (防止追高，默认 <= 6.5%)
         :param ctx: 预提取的高性能数组上下文 (可选，避免重复提取)
+        :param filter_config: 底层筛选策略配置 (可选择/自定义，优先级高于离散参数)
         :return: 回踩确认启动标的列表
         """
         if df is None or df.empty or not leading_sectors:
@@ -496,6 +591,32 @@ class SectorRotationPullbackMiner:
         target_sector_names = set(s["name"] for s in leading_sectors if is_valid_sector_name(s.get("name")))
         if not target_sector_names:
             return []
+
+        # 解析与对齐筛选配置 (SSOT)
+        cfg = filter_config or PullbackFilterConfig(
+            mode_name="🎯 经典标准",
+            dff2_min=dff2_min,
+            dff2_max=dff2_max,
+            min_eval_pct=0.3,
+            max_eval_pct=max_dff_pct,
+            min_vol_ratio=min_vol_ratio,
+            min_turnover=1.2,
+            min_amt_yi=0.25,
+            min_dff3=-15.0,
+            require_channel_supp=False,
+            prefer_channel_supp=True
+        )
+
+        c_dff2_min = cfg.dff2_min
+        c_dff2_max = cfg.dff2_max
+        c_min_pct = cfg.min_eval_pct
+        c_max_pct = cfg.max_eval_pct
+        c_min_vr = cfg.min_vol_ratio
+        c_min_to = cfg.min_turnover
+        c_min_amt = cfg.min_amt_yi
+        c_min_dff3 = cfg.min_dff3
+        c_req_ch = cfg.require_channel_supp
+        c_prefer_ch = cfg.prefer_channel_supp
 
         if ctx is None:
             ctx = self._extract_df_arrays(df)
@@ -508,11 +629,14 @@ class SectorRotationPullbackMiner:
         nm_arr = ctx['nm_arr']
         p_arr = ctx['p_arr']
         pct_arr = ctx['pct_arr']
+        amt_arr = ctx['amt_arr']
         dff_arr = ctx['dff_arr']
         dff2_arr = ctx['dff2_arr']
         dff3_arr = ctx['dff3_arr']
         ma20_arr = ctx['ma20_arr']
         ch_supp_arr = ctx['ch_supp_arr']
+        ch_pos_arr = ctx.get('ch_pos_arr', np.full(n, 50.0))
+        ch_slope_arr = ctx.get('ch_slope_arr', np.full(n, 0.0))
         vr_arr = ctx['vr_arr']
         to_arr = ctx['to_arr']
         sec_arr = ctx['sec_arr']
@@ -520,6 +644,10 @@ class SectorRotationPullbackMiner:
         eval_prev1_arr = ctx['eval_prev1_arr']
         eval_prev2_arr = ctx['eval_prev2_arr']
         is_post_market = ctx.get('is_post_market', False)
+
+        # 检测数据集中是否真实包含换手率与成交额数据 (若测试或精简流中未提供，则自动豁免，避免一刀切误杀)
+        has_valid_to = bool((to_arr > 0).any())
+        has_valid_amt = bool((amt_arr > 0).any())
 
         pullback_candidates = []
 
@@ -548,89 +676,106 @@ class SectorRotationPullbackMiner:
             eval_pct = float(eval_pct_arr[i])
             pct = float(pct_arr[i])
 
-            # 2. 避免高位接盘与严重破位
-            if eval_pct >= max_dff_pct:
-                continue  # 涨幅过大，已脱离低吸回踩区间
+            # 2. 维度一：有效上涨/启动底线 (坚决收阳，绝不选负涨幅阴跌或0%死水)
+            if eval_pct < c_min_pct or eval_pct > c_max_pct:
+                continue
+
+            # 3. 维度二：活跃流动性势能与长期底蕴 (真实数据列存在时强校验)
+            to = float(to_arr[i])
+            if has_valid_to and to < c_min_to:
+                continue
+            amt = float(amt_arr[i])
+            if has_valid_amt and amt < c_min_amt:
+                continue
+            dff3 = float(dff3_arr[i])
+            if dff3 < c_min_dff3:
+                continue
+
+            # 4. 维度三：MA20d 依托与震荡企稳
             ma20 = float(ma20_arr[i])
-            if ma20 > 0 and price < ma20 * 0.965:
-                continue  # 跌破 MA20 严重破位
+            if ma20 > 0 and price < ma20 * 0.980:
+                continue  # 跌破 MA20 支撑位破位排除
 
             dff = float(dff_arr[i])
             dff2 = float(dff2_arr[i])
-            dff3 = float(dff3_arr[i])
             ch_supp = float(ch_supp_arr[i])
+            ch_pos = float(ch_pos_arr[i])
+            ch_slope = float(ch_slope_arr[i])
             vr = float(vr_arr[i])
-            to = float(to_arr[i])
 
-            # 3. 校验 MA20 空间依托区间
-            if not (dff2_min <= dff2 <= dff2_max):
-                # 若 dff2 稍大但踩在通道支撑线上，给予豁免
-                if not (ch_supp > 0 and price >= ch_supp * 0.985 and price <= ch_supp * 1.05):
-                    continue
+            # 5. 维度四：通道支撑与 KX 支撑线共振研判
+            has_supp_line = (ch_supp > 0 and price >= ch_supp * 0.982 and price <= ch_supp * 1.045)
+            has_channel_base = (0.0 < ch_pos <= 38.0)
+            has_channel_support = has_supp_line or has_channel_base
 
-            # 4. 研判时序回踩洗盘与反弹形态
+            if c_req_ch and not has_channel_support:
+                continue
+
+            # MA20 空间区间判定 (若踩在通道支撑线上，上限可轻微放宽 1.0%)
+            max_dff2_allowed = (c_dff2_max + 1.0) if has_channel_support else c_dff2_max
+            if not (c_dff2_min <= dff2 <= max_dff2_allowed):
+                continue
+
+            # 6. 时序洗盘企稳与放量启动特征判定
             ep1 = float(eval_prev1_arr[i])
             ep2 = float(eval_prev2_arr[i])
 
+            is_volume_up = (vr >= c_min_vr) or (is_post_market and eval_pct >= 1.0)
             is_pullback_pattern = False
             pattern_name = ""
             pattern_score = 0.0
 
-            # 模式 A: 缩量洗盘·MA20企稳反身首阳 (前1~2天有阴线洗盘，最新企稳转阳)
-            has_wash = (ep1 <= 0.2 or ep2 <= 0.2 or (ep1 + ep2) < 0.0)
-            is_turn_up = (eval_pct >= 0.3) or (is_post_market and eval_pct >= -0.5)
-            if has_wash and is_turn_up and dff2 >= -2.0:
+            # 模式 A: 缩量洗盘·MA20企稳反身首阳 (前1~2天有阴线洗盘，最新企稳放量收阳)
+            if (ep1 <= 0.2 or ep2 <= 0.2 or (ep1 + ep2) < 0.0) and is_volume_up and dff2 >= -1.5:
                 is_pullback_pattern = True
                 pattern_name = "🎯 缩量洗盘·MA20企稳"
-                pattern_score = 85.0
-
-            # 模式 B: 底部超跌筑底·反弹放量起爆 (dff3低位，前期窄幅震荡蓄势，最新阳线脱离)
-            elif dff3 <= 15.0 and abs(ep1) <= 4.0 and abs(ep2) <= 4.0 and eval_pct >= 0.8 and dff2 >= -1.0:
-                is_pullback_pattern = True
-                pattern_name = "💎 底部筑底·放量起爆"
                 pattern_score = 88.0
 
-            # 模式 C: 通达信支撑线共振回踩企稳
-            elif ch_supp > 0 and price >= ch_supp * 0.985 and price <= ch_supp * 1.04 and eval_pct >= -0.5:
+            # 模式 B: 通道支撑+MA20双共振·踩线放量启动
+            elif has_channel_support and is_volume_up and dff2 >= -1.2:
                 is_pullback_pattern = True
                 pattern_name = "🚀 支撑共振·踩线反弹"
                 pattern_score = 90.0
 
-            # 模式 D: MA20 均线缠绕微升蓄势
-            elif -1.5 <= dff2 <= 3.5 and eval_pct >= -0.5:
+            # 模式 C: 底部超跌横盘筑底·放量突破起爆
+            elif dff3 <= 15.0 and abs(ep1) <= 4.0 and abs(ep2) <= 4.0 and eval_pct >= 1.0 and is_volume_up:
+                is_pullback_pattern = True
+                pattern_name = "💎 底部筑底·放量起爆"
+                pattern_score = 87.0
+
+            # 模式 D: MA20 均线依托缠绕微升蓄势
+            elif -1.2 <= dff2 <= 3.5 and eval_pct >= c_min_pct and (is_volume_up or eval_pct >= 1.5):
                 is_pullback_pattern = True
                 pattern_name = "📈 均线依托·多头微升"
-                pattern_score = 78.0
+                pattern_score = 80.0
 
             if not is_pullback_pattern:
                 continue
 
-            # 5. 量能配合 (盘中强校验量比，盘后自适应放宽)
-            if not is_post_market and vr < min_vol_ratio and eval_pct < 2.0:
-                continue  # 既无量也无涨幅的死水盘整
-
-            # 6. 计算标的综合回踩反转得分
-            # 基础形态分 + 板块主线分加成 + 量比加成 + 均线贴近贴度加成
+            # 7. 计算标的综合回踩反转得分
+            # 基础形态分 + 板块主线分加成 + 量比加成 + 均线贴近贴度加成 + 通道支撑共振加成
             sec_bonus = min(15.0, matched_sec.get("strength_score", 0.0) * 0.2)
             vr_bonus = min(10.0, max(0.0, (vr - 1.0) * 4.0)) if not is_post_market else 5.0
-            # dff2 越贴近 0~3% 黄金区间得分越高
-            dff2_sweet = 5.0 - abs(dff2 - 1.5) * 1.0
-            total_reversal_score = round(pattern_score + sec_bonus + vr_bonus + max(0.0, dff2_sweet), 1)
+            # dff2 越贴近 0~2.5% 黄金区间得分越高
+            dff2_sweet = 5.0 - abs(dff2 - 1.2) * 1.0
+            channel_bonus = 5.0 if (has_channel_support and c_prefer_ch) else 0.0
+            total_reversal_score = round(pattern_score + sec_bonus + vr_bonus + max(0.0, dff2_sweet) + channel_bonus, 1)
 
-            # 7. 计算建议买入区间与防守止损位
+            # 8. 计算建议买入区间与防守止损位
             supp_base = max(ch_supp, ma20) if ch_supp > 0 else (ma20 if ma20 > 0 else round(price * 0.95, 2))
-            stop_loss = round(supp_base * 0.97, 2)
+            stop_loss = round(supp_base * 0.975, 2)
             buy_zone = f"{round(price * 0.995, 2)} ~ {round(price * 1.015, 2)}"
             target_price = round(price * 1.08, 2)
 
             # 生成高可解释性实战理由
             wash_desc = f"前日{ep1:+.1f}%, 大前日{ep2:+.1f}%" if is_post_market else (f"昨日{ep1:+.1f}%, 前日{ep2:+.1f}%" if (ep1 != 0 or ep2 != 0) else "前序震荡洗盘")
-            action_desc = "盘后重点关注次日低吸启动!" if is_post_market else "绝佳低吸跟进点!"
+            supp_tag = f"通道支撑{ch_supp:.2f}元" if has_supp_line else (f"通道底座({ch_pos:.0f}%)" if has_channel_base else f"MA20依托{ma20:.2f}元")
+            action_desc = "盘后关注次日低吸启动!" if is_post_market else "有效放量上涨, 绝佳低吸跟进点!"
             reason = (
                 f"所属【{matched_sec['name']}】主力进攻主线(强度{matched_sec['strength_score']}), "
                 f"距MA20乖离度{dff2:+.1f}%, {wash_desc}, "
-                f"{'最新收盘企稳' if is_post_market else '今日温和放量企稳'}({eval_pct:+.1f}%), "
-                f"支撑位{supp_base:.2f}元稳固, {action_desc}"
+                f"{'最新收盘企稳收阳' if is_post_market else '今日放量收阳启动'}({eval_pct:+.1f}%, 量比{vr:.2f}), "
+                f"{supp_tag}稳固, {action_desc}"
             )
 
             pullback_candidates.append({
@@ -647,6 +792,7 @@ class SectorRotationPullbackMiner:
                 "per3d": float(ctx['p3_arr'][i]),
                 "ma20": ma20,
                 "ch_supp": ch_supp,
+                "ch_pos": ch_pos,
                 "vol_ratio": vr,
                 "turnover": to,
                 "sector": matched_sec["name"],
@@ -660,9 +806,12 @@ class SectorRotationPullbackMiner:
                 "is_post_market": is_post_market
             })
 
-        # 若候选数量少于 5 只，在主线板块内保底搜寻黄金依托企稳标的
+        # 若候选数量少于 5 只，在主线板块内保底搜寻企稳收阳标的 (底线：坚决必须收阳，杜绝负涨幅与僵尸股)
         if len(pullback_candidates) < 5:
             existing_codes = set(c["code"] for c in pullback_candidates)
+            min_fallback_pct = max(0.05, c_min_pct * 0.5)
+            min_fallback_to = max(0.5, c_min_to * 0.5)
+
             for i in range(n):
                 code = str(c_arr[i])
                 if code in existing_codes:
@@ -679,16 +828,31 @@ class SectorRotationPullbackMiner:
                 if not matched_sec:
                     continue
 
-                dff2 = float(dff2_arr[i])
                 eval_pct = float(eval_pct_arr[i])
+                # 保底守则：必须收阳且未追高，换手率具备基本势能 (有换手率列时校验)
+                if eval_pct < min_fallback_pct or eval_pct > c_max_pct:
+                    continue
+                to = float(to_arr[i])
+                if has_valid_to and to < min_fallback_to:
+                    continue
+
+                dff2 = float(dff2_arr[i])
                 ma20 = float(ma20_arr[i])
-                if -2.5 <= dff2 <= 5.5 and ma20 > 0 and price >= ma20 * 0.97 and eval_pct < max_dff_pct:
-                    supp_base = ma20
-                    stop_loss = round(supp_base * 0.97, 2)
+                ch_supp = float(ch_supp_arr[i])
+                ch_pos = float(ch_pos_arr[i])
+                has_ch = (ch_supp > 0 and price >= ch_supp * 0.982 and price <= ch_supp * 1.05) or (0.0 < ch_pos <= 40.0)
+
+                if c_req_ch and not has_ch:
+                    continue
+
+                if (c_dff2_min <= dff2 <= (c_dff2_max + 1.0)) and (ma20 <= 0 or price >= ma20 * 0.980):
+                    supp_base = max(ch_supp, ma20) if ch_supp > 0 else (ma20 if ma20 > 0 else round(price * 0.95, 2))
+                    stop_loss = round(supp_base * 0.975, 2)
                     buy_zone = f"{round(price * 0.995, 2)} ~ {round(price * 1.015, 2)}"
                     target_price = round(price * 1.08, 2)
                     action_desc = "盘后关注次日低吸!" if is_post_market else "低吸观察点!"
-                    reason = f"所属【{matched_sec['name']}】主线, 距MA20乖离度{dff2:+.1f}%, 均线依托企稳({eval_pct:+.1f}%), {action_desc}"
+                    p_name = "🚀 通道底座·企稳首阳" if has_ch else "🎯 均线依托·企稳蓄势"
+                    reason = f"所属【{matched_sec['name']}】主线, 距MA20乖离度{dff2:+.1f}%, 均线依托企稳收阳({eval_pct:+.1f}%), {action_desc}"
                     pullback_candidates.append({
                         "code": code,
                         "name": str(nm_arr[i]),
@@ -702,13 +866,14 @@ class SectorRotationPullbackMiner:
                         "per2d": float(ctx['p2_arr'][i]),
                         "per3d": float(ctx['p3_arr'][i]),
                         "ma20": ma20,
-                        "ch_supp": float(ch_supp_arr[i]),
+                        "ch_supp": ch_supp,
+                        "ch_pos": ch_pos,
                         "vol_ratio": float(vr_arr[i]),
-                        "turnover": float(to_arr[i]),
+                        "turnover": to,
                         "sector": matched_sec["name"],
                         "sector_score": matched_sec["strength_score"],
-                        "pattern_name": "🎯 均线依托·企稳蓄势",
-                        "reversal_score": 75.0,
+                        "pattern_name": p_name,
+                        "reversal_score": 75.0 + (3.0 if has_ch else 0.0),
                         "buy_zone": buy_zone,
                         "stop_loss": stop_loss,
                         "target_price": target_price,
@@ -726,7 +891,8 @@ class SectorRotationPullbackMiner:
         self,
         df: pd.DataFrame,
         top_sectors_count: int = 6,
-        min_vol_ratio: float = 1.15
+        min_vol_ratio: float = 1.15,
+        filter_config: Optional[PullbackFilterConfig] = None
     ) -> Dict[str, Any]:
         """
         一键全流程调度流水线：
@@ -743,16 +909,18 @@ class SectorRotationPullbackMiner:
         # 1. 识别主力主线板块与先锋
         leading_sectors = self.identify_leading_sectors(df, top_sectors_count=top_sectors_count, ctx=ctx)
 
-        # 2. 板块内深挖回踩确认启动个股
+        # 2. 板块内深挖回踩确认启动个股 (应用量化筛选策略配置)
         candidates = self.mine_pullback_reversal_stocks(
             df=df,
             leading_sectors=leading_sectors,
             min_vol_ratio=min_vol_ratio,
-            ctx=ctx
+            ctx=ctx,
+            filter_config=filter_config
         )
 
         cost_ms = round((time.time() - t0) * 1000, 2)
         is_post_market = ctx.get("is_post_market", False)
+        mode_label = filter_config.mode_name if filter_config else "🎯 经典标准"
         report = {
             "sectors": leading_sectors,
             "candidates": candidates,
@@ -761,6 +929,7 @@ class SectorRotationPullbackMiner:
             "sectors_count": len(leading_sectors),
             "candidates_count": len(candidates),
             "is_post_market": is_post_market,
+            "filter_mode": mode_label,
             "timestamp": time.time()
         }
 
@@ -769,7 +938,7 @@ class SectorRotationPullbackMiner:
             self._last_calc_time = time.time()
 
         logger.info(
-            f"[SectorRotationPullbackMiner] 扫描完成: 全市场{len(df)}只股票, "
+            f"[SectorRotationPullbackMiner] 扫描完成: 策略[{mode_label}], 全市场{len(df)}只股票, "
             f"锁定{len(leading_sectors)}大主线板块, 深挖出{len(candidates)}只回踩启动个股, 耗时 {cost_ms}ms"
         )
         return report

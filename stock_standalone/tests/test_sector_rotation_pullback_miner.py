@@ -428,6 +428,135 @@ class TestSectorRotationPullbackMiner(unittest.TestCase):
 
         dialog.close()
 
+    def test_10_pullback_filter_config_and_channel_support(self):
+        """测试可选择/自定义筛选策略配置、四维实战量化断言与通道支撑共振"""
+        from ats.sector_rotation_pullback_miner import (
+            PullbackFilterConfig, PRESET_FILTER_MODES
+        )
+        from ats.ui.sector_rotation_miner_dialog import (
+            SectorRotationMinerDialog, PullbackConfigDialog
+        )
+
+        # 1. 验证 PullbackFilterConfig 序列化与预设模式
+        cfg_default = PullbackFilterConfig()
+        self.assertEqual(cfg_default.mode_name, "🎯 经典标准")
+        self.assertGreaterEqual(cfg_default.min_eval_pct, 0.3)
+        self.assertTrue(cfg_default.prefer_channel_supp)
+
+        cfg_dict = cfg_default.to_dict()
+        cfg_restored = PullbackFilterConfig.from_dict(cfg_dict)
+        self.assertEqual(cfg_restored.dff2_min, cfg_default.dff2_min)
+        self.assertEqual(cfg_restored.min_eval_pct, cfg_default.min_eval_pct)
+
+        # 验证三款预设
+        self.assertIn("🎯 经典标准", PRESET_FILTER_MODES)
+        self.assertIn("🚀 极速起爆", PRESET_FILTER_MODES)
+        self.assertIn("💎 稳健通道低吸", PRESET_FILTER_MODES)
+        self.assertTrue(PRESET_FILTER_MODES["💎 稳健通道低吸"].require_channel_supp)
+
+        # 2. 构造多维样本数据
+        data = {
+            # 领涨前排龙头 1 与 2 形成低空经济主线
+            "000001": {"name": "龙头1", "close": 20.0, "percent": 9.9, "dff2": 5.0, "dff3": 20.0, "vol_ratio": 2.0, "amount": 10e8, "ratio": 8.0, "category": "低空经济"},
+            "000002": {"name": "前锋2", "close": 15.0, "percent": 7.0, "dff2": 4.0, "dff3": 15.0, "vol_ratio": 1.8, "amount": 8e8, "ratio": 6.0, "category": "低空经济"},
+            # 标的 A: 经典回踩企稳 + 踩在通道支撑线上 (收阳2.0%, MA20依托dff2=1.0%, ch_supp=9.9, vr=1.3, hsl=2.5%, amt=3e8)
+            "000010": {"name": "支撑企稳A", "close": 10.0, "percent": 2.0, "dff2": 1.0, "dff3": 5.0, "ma20d": 9.9, "ch_supp": 9.9, "ch_pos": 15.0, "per1d": -1.0, "vol_ratio": 1.3, "amount": 3e8, "ratio": 2.5, "category": "低空经济"},
+            # 标的 B: 负涨幅阴跌 (跌幅 -1.5%, 坚决不选!)
+            "000020": {"name": "阴跌负涨B", "close": 10.0, "percent": -1.5, "dff2": 1.0, "dff3": 5.0, "ma20d": 9.9, "ch_supp": 9.9, "ch_pos": 15.0, "per1d": -2.0, "vol_ratio": 1.2, "amount": 3e8, "ratio": 2.0, "category": "低空经济"},
+            # 标的 C: 跌破 MA20 破位 (dff2=-6.0%, 坚决不选!)
+            "000030": {"name": "破位均线C", "close": 8.0, "percent": 1.5, "dff2": -6.0, "dff3": 5.0, "ma20d": 8.5, "ch_supp": 8.5, "per1d": -1.0, "vol_ratio": 1.2, "amount": 3e8, "ratio": 2.0, "category": "低空经济"},
+            # 标的 D: 企稳但无通道支撑 (ch_supp=0, ch_pos=85.0%)
+            "000040": {"name": "高位无通道D", "close": 10.0, "percent": 1.8, "dff2": 1.2, "dff3": 5.0, "ma20d": 9.88, "ch_supp": 0.0, "ch_pos": 85.0, "per1d": -0.8, "vol_ratio": 1.25, "amount": 3e8, "ratio": 2.2, "category": "低空经济"}
+        }
+        df = pd.DataFrame.from_dict(data, orient='index')
+
+        # 3. 运行经典标准流水线
+        res_classic = self.miner.run_mining_pipeline(df, filter_config=PRESET_FILTER_MODES["🎯 经典标准"])
+        cand_codes_classic = [c["code"] for c in res_classic["candidates"]]
+        self.assertIn("000010", cand_codes_classic, "标的A具备MA20企稳+通道支撑+放量收阳，必须命中!")
+        self.assertNotIn("000020", cand_codes_classic, "标的B负涨幅阴跌(-1.5%)，坚决不能命中!")
+        self.assertNotIn("000030", cand_codes_classic, "标的C跌破MA20(-6.0%)，坚决不能命中!")
+        self.assertIn("000040", cand_codes_classic, "经典模式下无通道支撑但均线依托标的D可命中")
+
+        # 验证标的 A 获得了通道支撑加分与战法标记
+        cand_a = next(c for c in res_classic["candidates"] if c["code"] == "000010")
+        self.assertIn("通道支撑", cand_a["reason"])
+        self.assertTrue(cand_a["pct"] > 0, "候选标的必须严格收阳上涨!")
+
+        # 4. 运行“💎 稳健通道低吸”模式 (require_channel_supp = True)
+        res_channel = self.miner.run_mining_pipeline(df, filter_config=PRESET_FILTER_MODES["💎 稳健通道低吸"])
+        cand_codes_channel = [c["code"] for c in res_channel["candidates"]]
+        self.assertIn("000010", cand_codes_channel, "通道低吸模式下标的A必须命中!")
+        self.assertNotIn("000040", cand_codes_channel, "通道低吸模式下无通道支撑的标的D必须被剔除!")
+
+        # 5. 验证 UI 控件与微调对话框
+        dialog = SectorRotationMinerDialog(parent=None, current_df=df)
+        self.assertTrue(hasattr(dialog, "combo_filter_mode"))
+        self.assertTrue(hasattr(dialog, "btn_config"))
+        self.assertTrue(hasattr(dialog, "lbl_mode_summary"))
+
+        # 测试 UI 切换模式
+        dialog.combo_filter_mode.setCurrentText("🚀 极速起爆")
+        self.assertEqual(dialog._current_filter_config.mode_name, "🚀 极速起爆")
+        self.assertEqual(dialog._current_filter_config.min_eval_pct, 1.2)
+
+        # 测试微调对话框 (验证当前生效策略展示与预设按钮高亮及动态感知联动)
+        config_dlg = PullbackConfigDialog(dialog._current_filter_config, parent=dialog)
+        self.assertTrue(hasattr(config_dlg, "lbl_current_strategy"), "微调对话框必须包含当前生效策略指示标签!")
+        self.assertIn("🚀 极速起爆", config_dlg.lbl_current_strategy.text(), "微调对话框打开时必须直观显示当前生效的策略!")
+        self.assertIn("#ffd700", config_dlg.btn_breakout.styleSheet(), "当前生效策略对应的预设按钮必须呈激活高亮样式!")
+
+        # 切换预设模式：点击“🎯 经典标准”
+        config_dlg._apply_preset("🎯 经典标准")
+        self.assertIn("🎯 经典标准", config_dlg.lbl_current_strategy.text(), "点击预设后当前策略标签必须立即同步更新为经典标准!")
+        self.assertIn("#ffd700", config_dlg.btn_classic.styleSheet(), "经典标准按钮必须呈高亮激活态!")
+
+        # 手动微调参数：修改 MA20 依托下限与最小收阳
+        config_dlg.spin_dff2_min.setValue(-1.2)
+        config_dlg.spin_min_pct.setValue(0.5)
+        self.assertIn("⚙️ 自定义", config_dlg.lbl_current_strategy.text(), "参数微调后系统必须动态感知并自动切换为自定义模式!")
+        self.assertNotIn("#ffd700", config_dlg.btn_classic.styleSheet(), "偏离预设后预设按钮高亮必须自动取消!")
+
+        config_dlg._on_save_clicked()
+        custom_cfg = config_dlg.get_config()
+        self.assertEqual(custom_cfg.mode_name, "⚙️ 自定义")
+        self.assertEqual(custom_cfg.dff2_min, -1.2)
+        self.assertEqual(custom_cfg.min_eval_pct, 0.5)
+
+        config_dlg.close()
+        dialog.close()
+
+    def test_11_adaptive_window_size_and_resizable_constraints(self):
+        """测试窗口自适应缩放、最小尺寸解耦与小屏幕调整支持"""
+        from PyQt6.QtCore import Qt
+        from ats.ui.sector_rotation_miner_dialog import SectorRotationMinerDialog
+
+        data = {
+            "000001": {"name": "龙头1", "close": 20.0, "percent": 9.9, "category": "测试主线"}
+        }
+        df = pd.DataFrame.from_dict(data, orient='index')
+        dialog = SectorRotationMinerDialog(parent=None, current_df=df)
+
+        # 1. 验证 WindowFlags 必须包含最小化和最大化按钮 (独立专业窗口行为)
+        flags = dialog.windowFlags()
+        self.assertTrue(bool(flags & Qt.WindowType.WindowMinMaxButtonsHint), "窗口必须支持最小化与最大化按钮!")
+
+        # 2. 验证最小尺寸解耦限制：允许自由调整到小屏分屏尺寸
+        min_w = dialog.minimumWidth()
+        min_h = dialog.minimumHeight()
+        self.assertLessEqual(min_w, 700, f"窗口最小宽度必须允许 <=700px (当前: {min_w})!")
+        self.assertLessEqual(min_h, 450, f"窗口最小高度必须允许 <=450px (当前: {min_h})!")
+
+        # 3. 验证可以平滑自由 resize 到小屏幕尺寸 (如 750x480)
+        dialog.resize(750, 480)
+        self.assertLessEqual(dialog.width(), 760, "窗口必须可以顺利缩放到 750 左右，绝不被任何内部控件硬性顶死在 1200+!")
+
+        # 4. 验证表格允许按需横向滚动 (避免内部列把外层窗口撑爆)
+        self.assertEqual(dialog.sectors_table.horizontalScrollBarPolicy(), Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.assertEqual(dialog.candidates_table.horizontalScrollBarPolicy(), Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+
+        dialog.close()
+
 
 if __name__ == '__main__':
     unittest.main()

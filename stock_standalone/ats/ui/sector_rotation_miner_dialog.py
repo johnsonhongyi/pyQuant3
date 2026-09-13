@@ -28,7 +28,7 @@ from PyQt6.QtWidgets import (
     QDialog, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
     QSplitter, QCheckBox, QComboBox, QLineEdit, QMenu, QApplication,
-    QFrame, QMessageBox
+    QFrame, QMessageBox, QDoubleSpinBox, QFormLayout, QGroupBox, QDialogButtonBox
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QThread, QPoint, QEvent
 from PyQt6.QtGui import QColor, QFont, QBrush, QKeySequence, QShortcut
@@ -42,7 +42,8 @@ from ats.ui.styles import (
     save_config_node, load_config_node, set_seamless_stay_on_top
 )
 from ats.sector_rotation_pullback_miner import (
-    SectorRotationPullbackMiner, get_sector_rotation_miner, is_valid_sector_name
+    SectorRotationPullbackMiner, get_sector_rotation_miner, is_valid_sector_name,
+    PullbackFilterConfig, PRESET_FILTER_MODES
 )
 from global_favorites import GlobalFavoriteManager
 from ats.ui.base_table import send_to_linkage
@@ -55,18 +56,335 @@ class MinerWorkerThread(QThread):
     """后台扫描工作线程，完全不阻塞 Qt 主线程"""
     scan_finished = pyqtSignal(dict)
 
-    def __init__(self, df: pd.DataFrame, parent=None):
+    def __init__(self, df: pd.DataFrame, filter_config: Optional[PullbackFilterConfig] = None, parent=None):
         super().__init__(parent)
         self.df = df
+        self.filter_config = filter_config
 
     def run(self):
         try:
             miner = get_sector_rotation_miner()
-            res = miner.run_mining_pipeline(self.df)
+            res = miner.run_mining_pipeline(self.df, filter_config=self.filter_config)
             self.scan_finished.emit(res)
         except Exception as e:
             logger.error(f"[MinerWorkerThread] Scan failed: {e}", exc_info=True)
             self.scan_finished.emit({"sectors": [], "candidates": [], "error": str(e)})
+
+
+STYLE_PRESET_NORMAL = """
+    QPushButton {
+        background-color: #2b2b36;
+        color: #dcdcdc;
+        border: 1px solid #4a4a5a;
+        border-radius: 4px;
+        padding: 6px 12px;
+        font-weight: normal;
+    }
+    QPushButton:hover {
+        background-color: #383848;
+        border-color: #6a6a7a;
+    }
+"""
+
+STYLE_PRESET_ACTIVE = """
+    QPushButton {
+        background-color: #1a3a60;
+        color: #ffd700;
+        border: 2px solid #ffd700;
+        border-radius: 4px;
+        padding: 5px 11px;
+        font-weight: bold;
+    }
+    QPushButton:hover {
+        background-color: #234d7d;
+    }
+"""
+
+
+class PullbackConfigDialog(QDialog):
+    """
+    回踩确认启动底层筛选量化参数微调与自定义对话框 (Qt6)
+    """
+    def __init__(self, current_config: PullbackFilterConfig, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("⚙️ 回踩启动筛选策略参数自定义微调")
+        self.resize(520, 500)
+        self._config = PullbackFilterConfig.from_dict(current_config.to_dict())
+        self._is_updating_ui = False
+        apply_dark_theme(self)
+        self._init_ui()
+        self._sync_mode_state(self._config.mode_name)
+
+    def _init_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setSpacing(10)
+
+        # 1. 快捷预设按钮栏与当前生效策略指示
+        preset_box = QGroupBox("快捷填充预设模式")
+        preset_box.setStyleSheet(
+            "QGroupBox { font-weight: bold; color: #ffd700; border: 1px solid #444455; "
+            "border-radius: 4px; margin-top: 6px; padding-top: 10px; }"
+        )
+        preset_vlayout = QVBoxLayout(preset_box)
+        preset_vlayout.setContentsMargins(8, 8, 8, 8)
+        preset_vlayout.setSpacing(8)
+
+        preset_btn_layout = QHBoxLayout()
+        preset_btn_layout.setSpacing(8)
+
+        self.btn_classic = QPushButton("🎯 经典标准")
+        self.btn_classic.clicked.connect(lambda: self._apply_preset("🎯 经典标准"))
+        preset_btn_layout.addWidget(self.btn_classic)
+
+        self.btn_breakout = QPushButton("🚀 极速起爆")
+        self.btn_breakout.clicked.connect(lambda: self._apply_preset("🚀 极速起爆"))
+        preset_btn_layout.addWidget(self.btn_breakout)
+
+        self.btn_channel = QPushButton("💎 稳健通道低吸")
+        self.btn_channel.clicked.connect(lambda: self._apply_preset("💎 稳健通道低吸"))
+        preset_btn_layout.addWidget(self.btn_channel)
+
+        preset_vlayout.addLayout(preset_btn_layout)
+
+        # 当前生效策略指示器（位于预设按钮下方醒目展示）
+        self.lbl_current_strategy = QLabel()
+        self.lbl_current_strategy.setWordWrap(True)
+        self.lbl_current_strategy.setStyleSheet("""
+            QLabel {
+                background-color: #162232;
+                border: 1px solid #2a4c75;
+                border-radius: 4px;
+                padding: 6px 10px;
+                font-size: 13px;
+                color: #e0e8f0;
+            }
+        """)
+        preset_vlayout.addWidget(self.lbl_current_strategy)
+
+        layout.addWidget(preset_box)
+
+        # 2. 核心量化参数表单
+        form_box = QGroupBox("量化筛选四维阈值 (修改即自动归为自定义模式)")
+        form_box.setStyleSheet(
+            "QGroupBox { font-weight: bold; color: #aad4ff; border: 1px solid #444455; "
+            "border-radius: 4px; margin-top: 6px; padding-top: 10px; }"
+        )
+        form_layout = QFormLayout(form_box)
+        form_layout.setContentsMargins(10, 8, 10, 8)
+        form_layout.setSpacing(8)
+
+        # MA20 依托区间
+        ma_layout = QHBoxLayout()
+        self.spin_dff2_min = QDoubleSpinBox()
+        self.spin_dff2_min.setRange(-15.0, 10.0)
+        self.spin_dff2_min.setSingleStep(0.1)
+        self.spin_dff2_min.setSuffix(" %")
+        self.spin_dff2_min.setValue(self._config.dff2_min)
+
+        self.spin_dff2_max = QDoubleSpinBox()
+        self.spin_dff2_max.setRange(-5.0, 20.0)
+        self.spin_dff2_max.setSingleStep(0.1)
+        self.spin_dff2_max.setSuffix(" %")
+        self.spin_dff2_max.setValue(self._config.dff2_max)
+
+        ma_layout.addWidget(QLabel("下限:"))
+        ma_layout.addWidget(self.spin_dff2_min)
+        ma_layout.addWidget(QLabel("上限:"))
+        ma_layout.addWidget(self.spin_dff2_max)
+        form_layout.addRow("MA20依托乖离(dff2):", ma_layout)
+
+        # 涨幅区间 (坚决收阳 >= 0.0)
+        pct_layout = QHBoxLayout()
+        self.spin_min_pct = QDoubleSpinBox()
+        self.spin_min_pct.setRange(0.0, 10.0)
+        self.spin_min_pct.setSingleStep(0.1)
+        self.spin_min_pct.setSuffix(" %")
+        self.spin_min_pct.setValue(max(0.0, self._config.min_eval_pct))
+
+        self.spin_max_pct = QDoubleSpinBox()
+        self.spin_max_pct.setRange(1.0, 20.0)
+        self.spin_max_pct.setSingleStep(0.5)
+        self.spin_max_pct.setSuffix(" %")
+        self.spin_max_pct.setValue(self._config.max_eval_pct)
+
+        pct_layout.addWidget(QLabel("最小收阳:"))
+        pct_layout.addWidget(self.spin_min_pct)
+        pct_layout.addWidget(QLabel("防追高上限:"))
+        pct_layout.addWidget(self.spin_max_pct)
+        form_layout.addRow("涨幅区间 (坚决收阳):", pct_layout)
+
+        # 最小放量量比
+        self.spin_vr = QDoubleSpinBox()
+        self.spin_vr.setRange(0.5, 10.0)
+        self.spin_vr.setSingleStep(0.05)
+        self.spin_vr.setValue(self._config.min_vol_ratio)
+        form_layout.addRow("启动温和量比(vr >=):", self.spin_vr)
+
+        # 最小换手率
+        self.spin_to = QDoubleSpinBox()
+        self.spin_to.setRange(0.0, 50.0)
+        self.spin_to.setSingleStep(0.1)
+        self.spin_to.setSuffix(" %")
+        self.spin_to.setValue(self._config.min_turnover)
+        form_layout.addRow("活跃势能换手率(>=):", self.spin_to)
+
+        # 最小成交额
+        self.spin_amt = QDoubleSpinBox()
+        self.spin_amt.setRange(0.0, 50.0)
+        self.spin_amt.setSingleStep(0.05)
+        self.spin_amt.setSuffix(" 亿元")
+        self.spin_amt.setValue(self._config.min_amt_yi)
+        form_layout.addRow("成交额底线(>=):", self.spin_amt)
+
+        # 长期跌幅底线
+        self.spin_dff3 = QDoubleSpinBox()
+        self.spin_dff3.setRange(-50.0, 50.0)
+        self.spin_dff3.setSingleStep(1.0)
+        self.spin_dff3.setSuffix(" %")
+        self.spin_dff3.setValue(self._config.min_dff3)
+        form_layout.addRow("长期跌幅底线(dff3 >=):", self.spin_dff3)
+
+        # 通道支撑选项
+        ch_layout = QHBoxLayout()
+        self.chk_require_ch = QCheckBox("必须处于通道支撑/底座")
+        self.chk_require_ch.setChecked(self._config.require_channel_supp)
+        self.chk_prefer_ch = QCheckBox("通道支撑优先加权(+5分)")
+        self.chk_prefer_ch.setChecked(self._config.prefer_channel_supp)
+        ch_layout.addWidget(self.chk_require_ch)
+        ch_layout.addWidget(self.chk_prefer_ch)
+        form_layout.addRow("通道支撑共振:", ch_layout)
+
+        # 监听所有输入变动以动态感知模式变化
+        for spin in [self.spin_dff2_min, self.spin_dff2_max, self.spin_min_pct, self.spin_max_pct,
+                     self.spin_vr, self.spin_to, self.spin_amt, self.spin_dff3]:
+            spin.valueChanged.connect(self._on_param_changed)
+
+        self.chk_require_ch.toggled.connect(self._on_param_changed)
+        self.chk_prefer_ch.toggled.connect(self._on_param_changed)
+
+        layout.addWidget(form_box)
+
+        # 底部按钮
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+
+        self.btn_save = QPushButton("💾 保存并应用扫描")
+        self.btn_save.setStyleSheet("""
+            QPushButton {
+                background-color: #1e3a5f; color: #ffffff; font-weight: bold;
+                border: 1px solid #3d6ea8; border-radius: 4px; padding: 6px 14px;
+            }
+            QPushButton:hover { background-color: #2a5282; }
+        """)
+        self.btn_save.clicked.connect(self._on_save_clicked)
+        btn_layout.addWidget(self.btn_save)
+
+        self.btn_cancel = QPushButton("✕ 取消")
+        self.btn_cancel.setStyleSheet("padding: 6px 12px;")
+        self.btn_cancel.clicked.connect(self.reject)
+        btn_layout.addWidget(self.btn_cancel)
+
+        layout.addLayout(btn_layout)
+
+    def _detect_current_mode(self) -> str:
+        """根据当前表单数值智能识别是否匹配某个内置预设模式，否则为自定义"""
+        cur_dff2_min = round(self.spin_dff2_min.value(), 2)
+        cur_dff2_max = round(self.spin_dff2_max.value(), 2)
+        cur_min_pct = round(max(0.0, self.spin_min_pct.value()), 2)
+        cur_max_pct = round(self.spin_max_pct.value(), 2)
+        cur_vr = round(self.spin_vr.value(), 2)
+        cur_to = round(self.spin_to.value(), 2)
+        cur_amt = round(self.spin_amt.value(), 2)
+        cur_dff3 = round(self.spin_dff3.value(), 2)
+        cur_req_ch = self.chk_require_ch.isChecked()
+        cur_pref_ch = self.chk_prefer_ch.isChecked()
+
+        for name, p in PRESET_FILTER_MODES.items():
+            if (cur_dff2_min == round(p.dff2_min, 2) and
+                cur_dff2_max == round(p.dff2_max, 2) and
+                cur_min_pct == round(p.min_eval_pct, 2) and
+                cur_max_pct == round(p.max_eval_pct, 2) and
+                cur_vr == round(p.min_vol_ratio, 2) and
+                cur_to == round(p.min_turnover, 2) and
+                cur_amt == round(p.min_amt_yi, 2) and
+                cur_dff3 == round(p.min_dff3, 2) and
+                cur_req_ch == p.require_channel_supp and
+                cur_pref_ch == p.prefer_channel_supp):
+                return name
+        return "⚙️ 自定义"
+
+    def _sync_mode_state(self, mode_name: str):
+        """同步更新当前策略标签与预设按钮的高亮状态"""
+        self.btn_classic.setStyleSheet(STYLE_PRESET_ACTIVE if mode_name == "🎯 经典标准" else STYLE_PRESET_NORMAL)
+        self.btn_breakout.setStyleSheet(STYLE_PRESET_ACTIVE if mode_name == "🚀 极速起爆" else STYLE_PRESET_NORMAL)
+        self.btn_channel.setStyleSheet(STYLE_PRESET_ACTIVE if mode_name == "💎 稳健通道低吸" else STYLE_PRESET_NORMAL)
+
+        if mode_name == "🎯 经典标准":
+            self.lbl_current_strategy.setText(
+                "📌 当前生效策略: <b style='color: #00d2ff; font-size: 13px;'>🎯 经典标准</b> "
+                "<span style='color: #90caf9; font-size: 11px;'>(均衡稳健·MA20依托+放量收阳)</span>"
+            )
+        elif mode_name == "🚀 极速起爆":
+            self.lbl_current_strategy.setText(
+                "📌 当前生效策略: <b style='color: #ff5252; font-size: 13px;'>🚀 极速起爆</b> "
+                "<span style='color: #ff8a80; font-size: 11px;'>(追击主升突破·强收阳+高换手+大量比)</span>"
+            )
+        elif mode_name == "💎 稳健通道低吸":
+            self.lbl_current_strategy.setText(
+                "📌 当前生效策略: <b style='color: #ffd700; font-size: 13px;'>💎 稳健通道低吸</b> "
+                "<span style='color: #ffe082; font-size: 11px;'>(硬约束通道底座支撑+均线企稳低吸)</span>"
+            )
+        else:
+            self.lbl_current_strategy.setText(
+                "📌 当前生效策略: <b style='color: #ffb74d; font-size: 13px;'>⚙️ 自定义微调</b> "
+                "<span style='color: #b0bec5; font-size: 11px;'>(参数已手动微调，偏离标准预设)</span>"
+            )
+
+    def _on_param_changed(self):
+        if self._is_updating_ui:
+            return
+        mode_name = self._detect_current_mode()
+        self._sync_mode_state(mode_name)
+
+    def _apply_preset(self, mode_name: str):
+        if mode_name in PRESET_FILTER_MODES:
+            p = PRESET_FILTER_MODES[mode_name]
+            self._is_updating_ui = True
+            try:
+                self.spin_dff2_min.setValue(p.dff2_min)
+                self.spin_dff2_max.setValue(p.dff2_max)
+                self.spin_min_pct.setValue(p.min_eval_pct)
+                self.spin_max_pct.setValue(p.max_eval_pct)
+                self.spin_vr.setValue(p.min_vol_ratio)
+                self.spin_to.setValue(p.min_turnover)
+                self.spin_amt.setValue(p.min_amt_yi)
+                self.spin_dff3.setValue(p.min_dff3)
+                self.chk_require_ch.setChecked(p.require_channel_supp)
+                self.chk_prefer_ch.setChecked(p.prefer_channel_supp)
+            finally:
+                self._is_updating_ui = False
+            self._sync_mode_state(mode_name)
+
+    def _on_save_clicked(self):
+        mode_name = self._detect_current_mode()
+        self._config = PullbackFilterConfig(
+            mode_name=mode_name,
+            dff2_min=round(self.spin_dff2_min.value(), 2),
+            dff2_max=round(self.spin_dff2_max.value(), 2),
+            min_eval_pct=round(max(0.0, self.spin_min_pct.value()), 2),
+            max_eval_pct=round(self.spin_max_pct.value(), 2),
+            min_vol_ratio=round(self.spin_vr.value(), 2),
+            min_turnover=round(self.spin_to.value(), 2),
+            min_amt_yi=round(self.spin_amt.value(), 2),
+            min_dff3=round(self.spin_dff3.value(), 2),
+            require_channel_supp=self.chk_require_ch.isChecked(),
+            prefer_channel_supp=self.chk_prefer_ch.isChecked()
+        )
+        self.accept()
+
+    def get_config(self) -> PullbackFilterConfig:
+        return self._config
 
 
 class SectorRotationMinerDialog(QDialog, WindowMixin):
@@ -79,21 +397,32 @@ class SectorRotationMinerDialog(QDialog, WindowMixin):
         # [🚀 独立顶层解耦] 传入 None 剥离 Win32 HWND Owner 从属关系，彻底切断物理强行置顶，避免遮挡 ATS 主窗口
         super().__init__(None)
         self._parent_window = parent
+
+        # 启用完整独立窗口行为 (支持最小化、最大化与自由缩放调节)
+        flags = (
+            Qt.WindowType.Window
+            | Qt.WindowType.WindowMinMaxButtonsHint
+            | Qt.WindowType.WindowCloseButtonHint
+        )
+        self.setWindowFlags(flags)
         self.setWindowTitle("🔥 板块轮动前排引导与资金主线回踩启动深挖工作台")
-        self.resize(1220, 760)
+        self.resize(1180, 720)
+        self.setMinimumSize(680, 420) # 明确放开最小窗口限制，支持小屏/分屏自适应调整
 
         self.current_df = current_df
         self._all_candidates: List[Dict[str, Any]] = []
         self._last_sectors: List[Dict[str, Any]] = []
         self._selected_sector: Optional[str] = None
         self._worker: Optional[MinerWorkerThread] = None
+        self._current_filter_config: PullbackFilterConfig = PRESET_FILTER_MODES["🎯 经典标准"]
 
-        # 初始化 UI
+        # 初始化 UI 与快捷键
         self._init_ui()
         self._init_shortcuts()
+        self._init_filter_config()
 
         # 恢复窗口位置与尺寸
-        self.load_window_position_qt(self, "sector_rotation_miner_dialog", default_width=1220, default_height=760)
+        self.load_window_position_qt(self, "sector_rotation_miner_dialog", default_width=1180, default_height=720)
 
         # 恢复列宽持久化
         setup_header_persistence(self.sectors_table, "sector_miner_sectors_header")
@@ -108,102 +437,141 @@ class SectorRotationMinerDialog(QDialog, WindowMixin):
             QTimer.singleShot(100, self.trigger_scan)
 
     def _init_ui(self):
-        """构建现代暗色专业 UI 布局"""
+        """构建现代暗色专业 UI 布局 (自适应响应式，支持任意窗口尺寸调整)"""
         apply_dark_theme(self)
         main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(8, 8, 8, 8)
-        main_layout.setSpacing(6)
+        main_layout.setContentsMargins(6, 6, 6, 6)
+        main_layout.setSpacing(5)
 
-        # ── 1. 顶部控制栏 ──
+        # ── 1. 顶部控制栏 (自适应双行紧凑布局，彻底消除单行横向卡死窗口问题) ──
         top_bar = QFrame(self)
         top_bar.setStyleSheet("background-color: #1a1a22; border-radius: 6px; padding: 4px;")
-        top_layout = QHBoxLayout(top_bar)
+        top_layout = QVBoxLayout(top_bar)
         top_layout.setContentsMargins(6, 4, 6, 4)
-        top_layout.setSpacing(8)
+        top_layout.setSpacing(4)
 
-        # 标题与指示
-        lbl_title = QLabel("🔥 资金主线与回踩启动深挖")
-        lbl_title.setStyleSheet("font-size: 11pt; font-weight: bold; color: #ffd700;")
-        top_layout.addWidget(lbl_title)
+        # 1.1 主控制操作行 (Row 1)
+        row1_layout = QHBoxLayout()
+        row1_layout.setContentsMargins(0, 0, 0, 0)
+        row1_layout.setSpacing(6)
 
-        top_layout.addSpacing(10)
+        lbl_title = QLabel("🔥 轮动深挖与回踩启动")
+        lbl_title.setStyleSheet("font-size: 10.5pt; font-weight: bold; color: #ffd700;")
+        row1_layout.addWidget(lbl_title)
 
-        # 深度扫描按钮
+        row1_layout.addSpacing(6)
+
         self.btn_scan = QPushButton("🚀 一键深度挖掘")
         self.btn_scan.setStyleSheet("""
             QPushButton {
                 background-color: #1e3a5f; color: #ffffff; font-weight: bold;
-                border: 1px solid #3d6ea8; border-radius: 4px; padding: 5px 12px;
+                border: 1px solid #3d6ea8; border-radius: 4px; padding: 4px 10px;
             }
             QPushButton:hover { background-color: #2a5282; }
             QPushButton:pressed { background-color: #162c46; }
         """)
         self.btn_scan.clicked.connect(self.trigger_scan)
-        top_layout.addWidget(self.btn_scan)
+        row1_layout.addWidget(self.btn_scan)
 
-        # 自动刷新勾选框与频率
         self.chk_auto = QCheckBox("自动刷新")
         self.chk_auto.setStyleSheet("color: #aad4ff; font-weight: bold;")
         self.chk_auto.toggled.connect(self._on_auto_toggled)
-        top_layout.addWidget(self.chk_auto)
+        row1_layout.addWidget(self.chk_auto)
 
         self.combo_interval = QComboBox()
         self.combo_interval.addItems(["3 秒", "5 秒", "10 秒", "30 秒"])
-        self.combo_interval.setCurrentIndex(1) # 默认 5 秒
+        self.combo_interval.setCurrentIndex(1)
         self.combo_interval.currentIndexChanged.connect(self._on_interval_changed)
-        top_layout.addWidget(self.combo_interval)
+        row1_layout.addWidget(self.combo_interval)
 
-        top_layout.addSpacing(10)
+        lbl_mode = QLabel("策略:")
+        lbl_mode.setStyleSheet("color: #ffd700; font-weight: bold; font-size: 9pt;")
+        row1_layout.addWidget(lbl_mode)
 
-        # 参数微调展示
-        lbl_dff2_tip = QLabel("MA20依托: [-2.5%, +6.5%]")
-        lbl_dff2_tip.setStyleSheet("color: #88aacc; font-size: 8.5pt;")
-        top_layout.addWidget(lbl_dff2_tip)
+        self.combo_filter_mode = QComboBox()
+        self.combo_filter_mode.addItems(["🎯 经典标准", "🚀 极速起爆", "💎 稳健通道低吸", "⚙️ 自定义"])
+        self.combo_filter_mode.setStyleSheet("""
+            QComboBox {
+                background-color: #1a2233; color: #ffffff; border: 1px solid #3d6ea8;
+                border-radius: 4px; padding: 3px 6px; font-weight: bold;
+            }
+            QComboBox::drop-down { border: none; }
+            QComboBox QAbstractItemView { background-color: #1a1a22; selection-background-color: #2a5282; color: #ffffff; }
+        """)
+        self.combo_filter_mode.currentIndexChanged.connect(self._on_filter_mode_changed)
+        row1_layout.addWidget(self.combo_filter_mode)
 
-        lbl_pattern_tip = QLabel("时序: per1d~9d缩量企稳+今日首阳")
-        lbl_pattern_tip.setStyleSheet("color: #88ccaa; font-size: 8.5pt;")
-        top_layout.addWidget(lbl_pattern_tip)
+        self.btn_config = QPushButton("⚙️ 微调")
+        self.btn_config.setToolTip("自定义微调MA20依托区间、涨幅收阳门槛、量比、换手率与通道支撑")
+        self.btn_config.setStyleSheet("""
+            QPushButton {
+                background-color: #263345; color: #aad4ff; border: 1px solid #456285;
+                border-radius: 4px; padding: 3px 8px; font-weight: bold;
+            }
+            QPushButton:hover { background-color: #354a66; color: #ffffff; }
+            QPushButton:pressed { background-color: #1a2533; }
+        """)
+        self.btn_config.clicked.connect(self._open_filter_config_dialog)
+        row1_layout.addWidget(self.btn_config)
 
-        top_layout.addStretch()
+        row1_layout.addStretch()
 
-        # 候选过滤搜索框
         self.txt_filter = QLineEdit()
-        self.txt_filter.setPlaceholderText("🔍 快速过滤代码/名称/板块...")
-        self.txt_filter.setFixedWidth(180)
-        self.txt_filter.setStyleSheet("background-color: #121216; color: #ffffff; border: 1px solid #334455; border-radius: 4px; padding: 3px 6px;")
+        self.txt_filter.setPlaceholderText("🔍 快速过滤...")
+        self.txt_filter.setMinimumWidth(80)
+        self.txt_filter.setMaximumWidth(150)
+        self.txt_filter.setStyleSheet("background-color: #121216; color: #ffffff; border: 1px solid #334455; border-radius: 4px; padding: 3px 5px;")
         self.txt_filter.textChanged.connect(self._apply_candidate_filter)
-        top_layout.addWidget(self.txt_filter)
+        row1_layout.addWidget(self.txt_filter)
 
-        # 置顶按钮
         self.btn_top = QPushButton("📌 置顶 (T)")
         self.btn_top.setCheckable(True)
         self.btn_top.setStyleSheet("""
             QPushButton {
                 background-color: #2a2a32; color: #cccccc; border: 1px solid #444455;
-                border-radius: 4px; padding: 4px 8px;
+                border-radius: 4px; padding: 3px 7px;
             }
             QPushButton:checked { background-color: #995500; color: #ffffff; border-color: #ffaa00; }
         """)
         self.btn_top.toggled.connect(self._toggle_stay_on_top)
-        top_layout.addWidget(self.btn_top)
+        row1_layout.addWidget(self.btn_top)
 
-        # 关闭按钮 (支持点击或 Esc 快捷键)
         self.btn_close = QPushButton("✕ 关闭 (Esc)")
         self.btn_close.setStyleSheet("""
             QPushButton {
                 background-color: #2a2228; color: #ff8888; border: 1px solid #663344;
-                border-radius: 4px; padding: 4px 10px; font-weight: bold;
+                border-radius: 4px; padding: 3px 8px; font-weight: bold;
             }
             QPushButton:hover { background-color: #552233; color: #ffaaaa; border-color: #aa4455; }
             QPushButton:pressed { background-color: #331122; color: #ffffff; }
         """)
         self.btn_close.clicked.connect(self.close)
-        top_layout.addWidget(self.btn_close)
+        row1_layout.addWidget(self.btn_close)
+
+        top_layout.addLayout(row1_layout)
+
+        # 1.2 策略量化简报与快捷提示副行 (Row 2，自适应伸缩)
+        row2_layout = QHBoxLayout()
+        row2_layout.setContentsMargins(2, 0, 2, 0)
+        row2_layout.setSpacing(6)
+
+        self.lbl_mode_summary = QLabel("")
+        self.lbl_mode_summary.setStyleSheet("color: #88ccaa; font-size: 8.5pt;")
+        row2_layout.addWidget(self.lbl_mode_summary)
+
+        row2_layout.addStretch()
+
+        lbl_quick_tip = QLabel("💡 单击行过滤/反选 | ↑↓键移动 | 双击联动行情 | Alt+W 审计")
+        lbl_quick_tip.setStyleSheet("color: #778899; font-size: 8pt;")
+        row2_layout.addWidget(lbl_quick_tip)
+
+        top_layout.addLayout(row2_layout)
 
         main_layout.addWidget(top_bar)
 
-        # ── 2. 主体工作区 (QSplitter 上下切分) ──
+        # ── 2. 主体工作区 (QSplitter 上下切分，支持平滑缩放与最小高度保护) ──
         self.splitter = QSplitter(Qt.Orientation.Vertical, self)
+        self.splitter.setChildrenCollapsible(False)
         self.splitter.setStyleSheet("""
             QSplitter::handle {
                 background-color: #2e2e38; height: 5px;
@@ -217,10 +585,11 @@ class SectorRotationMinerDialog(QDialog, WindowMixin):
         sectors_panel = QWidget()
         sectors_layout = QVBoxLayout(sectors_panel)
         sectors_layout.setContentsMargins(0, 0, 0, 0)
-        sectors_layout.setSpacing(4)
+        sectors_layout.setSpacing(3)
 
         sec_header = QHBoxLayout()
-        lbl_sec_title = QLabel("🔥 当前引导冲锋的核心资金主线板块 (点击行联动筛选下方回踩池 | 上下键移动浏览 | 双击龙头联动股票 | 右键操作)")
+        lbl_sec_title = QLabel("🔥 引导冲锋·核心资金主线板块")
+        lbl_sec_title.setToolTip("点击行单选过滤下方回踩池(再次点击反选恢复) | 上下键移动光标浏览 | 双击龙头联动股票 | 右键操作")
         lbl_sec_title.setStyleSheet("color: #aad4ff; font-weight: bold; font-size: 9.5pt;")
         sec_header.addWidget(lbl_sec_title)
         sec_header.addStretch()
@@ -243,6 +612,8 @@ class SectorRotationMinerDialog(QDialog, WindowMixin):
         self.sectors_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.sectors_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.sectors_table.setAlternatingRowColors(True)
+        self.sectors_table.setMinimumHeight(100)
+        self.sectors_table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.sectors_table.itemClicked.connect(self._on_sector_row_clicked)
         self.sectors_table.installEventFilter(self)  # 键盘上下键独立平滑联动，绝不篡改鼠标点击 Toggle 状态
         self.sectors_table.itemDoubleClicked.connect(self._on_sector_double_clicked)
@@ -256,10 +627,11 @@ class SectorRotationMinerDialog(QDialog, WindowMixin):
         candidates_panel = QWidget()
         candidates_layout = QVBoxLayout(candidates_panel)
         candidates_layout.setContentsMargins(0, 0, 0, 0)
-        candidates_layout.setSpacing(4)
+        candidates_layout.setSpacing(3)
 
         cand_header = QHBoxLayout()
-        self.lbl_cand_title = QLabel("🎯 实际资金主线·回踩确认启动跟进池 (点击或上下键即时联动 / 双击联动 / 右键菜单 / Alt+W审计)")
+        self.lbl_cand_title = QLabel("🎯 资金主线·回踩确认启动跟进池")
+        self.lbl_cand_title.setToolTip("点击或上下键即时联动 / 双击联动外部行情 / 右键异动联动 / Alt+W 审计")
         self.lbl_cand_title.setStyleSheet("color: #aaffaa; font-weight: bold; font-size: 9.5pt;")
         cand_header.addWidget(self.lbl_cand_title)
         cand_header.addStretch()
@@ -282,6 +654,8 @@ class SectorRotationMinerDialog(QDialog, WindowMixin):
         self.candidates_table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.candidates_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.candidates_table.setAlternatingRowColors(True)
+        self.candidates_table.setMinimumHeight(120)
+        self.candidates_table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.candidates_table.itemClicked.connect(self._on_candidate_clicked)
         self.candidates_table.currentItemChanged.connect(self._on_candidate_current_changed)
         self.candidates_table.itemDoubleClicked.connect(self._on_candidate_double_clicked)
@@ -292,7 +666,7 @@ class SectorRotationMinerDialog(QDialog, WindowMixin):
         self.splitter.addWidget(candidates_panel)
 
         # 设置上下 Splitter 默认高度比例 (1 : 2)
-        self.splitter.setSizes([240, 460])
+        self.splitter.setSizes([200, 420])
         main_layout.addWidget(self.splitter)
 
         # ── 3. 底部状态栏 ──
@@ -318,6 +692,77 @@ class SectorRotationMinerDialog(QDialog, WindowMixin):
         set_seamless_stay_on_top(self, checked)
         self.btn_top.setChecked(checked)
 
+    def _init_filter_config(self):
+        """初始化底层筛选策略配置并恢复持久化状态"""
+        saved_mode = load_config_node("sector_miner_filter_mode", "🎯 经典标准")
+        custom_dict = load_config_node("sector_miner_custom_filter", {})
+
+        if saved_mode in PRESET_FILTER_MODES:
+            self._current_filter_config = PRESET_FILTER_MODES[saved_mode]
+        elif saved_mode == "⚙️ 自定义" and custom_dict:
+            self._current_filter_config = PullbackFilterConfig.from_dict(custom_dict)
+            self._current_filter_config.mode_name = "⚙️ 自定义"
+        else:
+            self._current_filter_config = PRESET_FILTER_MODES["🎯 经典标准"]
+            saved_mode = "🎯 经典标准"
+
+        # 设置下拉框选中项 (阻塞信号防止重复触发)
+        self.combo_filter_mode.blockSignals(True)
+        idx = self.combo_filter_mode.findText(saved_mode)
+        if idx >= 0:
+            self.combo_filter_mode.setCurrentIndex(idx)
+        else:
+            self.combo_filter_mode.setCurrentIndex(0)
+        self.combo_filter_mode.blockSignals(False)
+
+        self._update_mode_summary()
+
+    def _update_mode_summary(self):
+        """更新策略参数简要说明"""
+        cfg = self._current_filter_config
+        ch_text = "+通道" if cfg.require_channel_supp else ("优先通道" if cfg.prefer_channel_supp else "")
+        ch_suffix = f" | {ch_text}" if ch_text else ""
+        self.lbl_mode_summary.setText(
+            f"MA20:[{cfg.dff2_min:+.1f}%,{cfg.dff2_max:+.1f}%] | 收阳:>={cfg.min_eval_pct:.1f}% | 量比:>={cfg.min_vol_ratio:.2f} | 换手:>={cfg.min_turnover:.1f}%{ch_suffix}"
+        )
+
+    def _on_filter_mode_changed(self, index: int):
+        """切换策略模式"""
+        mode_name = self.combo_filter_mode.currentText()
+        if mode_name in PRESET_FILTER_MODES:
+            self._current_filter_config = PRESET_FILTER_MODES[mode_name]
+            save_config_node("sector_miner_filter_mode", mode_name)
+        elif mode_name == "⚙️ 自定义":
+            custom_dict = load_config_node("sector_miner_custom_filter", {})
+            if custom_dict:
+                self._current_filter_config = PullbackFilterConfig.from_dict(custom_dict)
+                self._current_filter_config.mode_name = "⚙️ 自定义"
+            save_config_node("sector_miner_filter_mode", "⚙️ 自定义")
+        self._update_mode_summary()
+        self.trigger_scan()
+
+    def _open_filter_config_dialog(self):
+        """弹出自定义参数微调窗口"""
+        dlg = PullbackConfigDialog(self._current_filter_config, self)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            new_cfg = dlg.get_config()
+            self._current_filter_config = new_cfg
+            save_config_node("sector_miner_custom_filter", new_cfg.to_dict())
+            save_config_node("sector_miner_filter_mode", new_cfg.mode_name)
+
+            self.combo_filter_mode.blockSignals(True)
+            idx = self.combo_filter_mode.findText(new_cfg.mode_name)
+            if idx >= 0:
+                self.combo_filter_mode.setCurrentIndex(idx)
+            else:
+                idx_custom = self.combo_filter_mode.findText("⚙️ 自定义")
+                if idx_custom >= 0:
+                    self.combo_filter_mode.setCurrentIndex(idx_custom)
+            self.combo_filter_mode.blockSignals(False)
+
+            self._update_mode_summary()
+            self.trigger_scan()
+
     def update_data_payload(self, df: pd.DataFrame):
         """外部数据源增量推送"""
         if df is not None and not df.empty:
@@ -337,7 +782,7 @@ class SectorRotationMinerDialog(QDialog, WindowMixin):
         self.btn_scan.setEnabled(False)
         self.status_bar.setText("⏳ 正在全市场深度扫描主线板块与回踩确认启动个股...")
 
-        self._worker = MinerWorkerThread(self.current_df, self)
+        self._worker = MinerWorkerThread(self.current_df, filter_config=self._current_filter_config, parent=self)
         self._worker.scan_finished.connect(self._on_scan_finished)
         self._worker.start()
 
@@ -360,8 +805,9 @@ class SectorRotationMinerDialog(QDialog, WindowMixin):
 
         is_post_market = bool(report.get("is_post_market", False))
         mode_prefix = "🌙 [盘后复盘·以最新收盘日(per1d)为基准]" if is_post_market else "🔥 [盘中实时模式]"
+        filter_mode = report.get("filter_mode", self._current_filter_config.mode_name)
         self.status_bar.setText(
-            f"✅ 扫描完成 | {mode_prefix} 全市场 {total_stocks} 只标的 | "
+            f"✅ 扫描完成 | 策略: [{filter_mode}] | {mode_prefix} 全市场 {total_stocks} 只标的 | "
             f"锁定 {len(sectors)} 大主线板块 | 挖掘出 {len(candidates)} 只回踩启动标的 | 耗时 {cost_ms}ms"
         )
 
