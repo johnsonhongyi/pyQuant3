@@ -1,3 +1,16 @@
+## 2026-09-13 13:15
+- [x] **【轮动深挖自动刷新全量对齐全局 cct.ats_tdx_interval 基准 (SSOT) & 支持独立微调与动态感知】(SSOT) (`ats/ui/sector_rotation_miner_dialog.py`, `tests/test_sector_rotation_pullback_miner.py`)**：
+    - [x] **操盘手提问与机制穿透**：
+        1. **原机制状态**：此前工作台提供 `[3秒, 5秒, 10秒, 30秒]` 局部下拉选择，默认选中 5 秒。虽然 5 秒恰好与系统全局 `cct.ats_tdx_interval = 5.0` 相同，但底层并未直接读取 `cct.ats_tdx_interval`，导致若操盘手在全局配置（`global.ini`）调整了刷新心跳，工作台无法感知和动态对齐；
+        2. **实战需求与 SSOT 协同**：深挖工作台涉及全市场 5000+ 标的多维动能与回踩计算，既需要默认遵循全局心跳基准避免数据刷新时序混乱，又需要赋予操盘手在不同交易阶段（早盘冲锋期 3s 极速抢筹、盘中震荡期 5s/10s 稳健省流、尾盘 30s 低耗）独立调节的灵活性；
+    - [x] **落地工程级 SSOT 对齐与动态协同机制**：
+        1. **启动时基准对齐**：通过 `_get_global_ats_interval()` 动态读取 `cct.ats_tdx_interval`，下拉框自适应生成档位并在对应项后醒目标注 `(全局基准)`，默认自动选中该基准；若全局配置了非标准间隔（如 8.0s），自适应追加并精准匹配；
+        2. **界面与 ToolTip 提示规范化**：复选框和下拉框 ToolTip 明确标注当前系统全局基准 `cct.ats_tdx_interval` 数值，勾选开启或切换时状态栏明确提示 `🔄 自动刷新已开启，每 X 秒同步扫描一次 (与系统全局基准同步 / 工作台独立微调)`；
+        3. **动态热同步接口 (`sync_with_global_interval`)**：支持系统全局间隔变更时工作台被动或主动热对齐，秒级自愈；
+    - [x] **自动化测试 14/14 PASSED**：
+        1. 专项新增 `test_14_auto_refresh_interval_alignment_with_cct_ats_tdx_interval`，断言全局基准 5.0s 初始化自动匹配、勾选启动 5000ms 定时器、独立微调 3000ms、全局动态变更 10.0s 热同步以及非标准 8.0s 自适应生成；
+        2. 轮动深挖专项全套 14 项自动化测试全部 100% 全绿通过！
+
 ## 2026-09-13 13:05
 - [x] **【实盘领涨龙头多维综合动能竞争选拔模型落地 & 盘中实时动态变动】(SSOT) (`ats/sector_rotation_pullback_miner.py`, `ats/ui/sector_rotation_miner_dialog.py`, `tests/test_sector_rotation_pullback_miner.py`)**：
     - [x] **操盘手实盘痛点根因穿透**：

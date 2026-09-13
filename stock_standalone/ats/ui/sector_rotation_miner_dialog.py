@@ -47,6 +47,7 @@ from ats.sector_rotation_pullback_miner import (
 )
 from global_favorites import GlobalFavoriteManager
 from ats.ui.base_table import send_to_linkage
+from JohnsonUtil import commonTips as cct
 from logger_utils import LoggerFactory
 
 logger = LoggerFactory.getLogger("SectorRotationMinerDialog")
@@ -473,14 +474,39 @@ class SectorRotationMinerDialog(QDialog, WindowMixin):
         self.btn_scan.clicked.connect(self.trigger_scan)
         row1_layout.addWidget(self.btn_scan)
 
+        base_sec = self._get_global_ats_interval()
+        base_sec_str = f"{int(base_sec)}" if base_sec.is_integer() else f"{base_sec:.1f}"
+
         self.chk_auto = QCheckBox("自动刷新")
         self.chk_auto.setStyleSheet("color: #aad4ff; font-weight: bold;")
+        self.chk_auto.setToolTip(
+            f"勾选开启盘中自动轮询扫描。\n"
+            f"• 默认对齐系统全局基准 (cct.ats_tdx_interval = {base_sec_str}s)\n"
+            f"• 亦可在右侧下拉框独立按需微调刷新频率"
+        )
         self.chk_auto.toggled.connect(self._on_auto_toggled)
         row1_layout.addWidget(self.chk_auto)
 
         self.combo_interval = QComboBox()
-        self.combo_interval.addItems(["3 秒", "5 秒", "10 秒", "30 秒"])
-        self.combo_interval.setCurrentIndex(1)
+        intervals = [3.0, 5.0, 10.0, 30.0]
+        if not any(abs(x - base_sec) < 0.1 for x in intervals):
+            intervals.append(base_sec)
+            intervals.sort()
+
+        default_idx = 1
+        for idx, sec in enumerate(intervals):
+            sec_text = f"{int(sec)} 秒" if sec.is_integer() else f"{sec:.1f} 秒"
+            if abs(sec - base_sec) < 0.1:
+                sec_text += " (全局基准)"
+                default_idx = idx
+            self.combo_interval.addItem(sec_text)
+
+        self.combo_interval.setCurrentIndex(default_idx)
+        self.combo_interval.setToolTip(
+            f"自动刷新间隔设置：\n"
+            f"• 系统全局基准: cct.ats_tdx_interval = {base_sec_str}s\n"
+            f"• 支持按需独立微调: 3s 极速抢筹 | 5s 均衡扫描 | 10s 稳健省流 | 30s 低耗"
+        )
         self.combo_interval.currentIndexChanged.connect(self._on_interval_changed)
         row1_layout.addWidget(self.combo_interval)
 
@@ -1586,22 +1612,76 @@ class SectorRotationMinerDialog(QDialog, WindowMixin):
         finally:
             QApplication.restoreOverrideCursor()
 
+    def _get_global_ats_interval(self) -> float:
+        """获取 ATS 全局统一的 TDX 刷新间隔基准 (SSOT: cct.ats_tdx_interval)"""
+        try:
+            val = getattr(cct, 'ats_tdx_interval', 5.0)
+            return max(1.0, float(val if val is not None else 5.0))
+        except Exception:
+            return 5.0
+
+    def _get_selected_interval_sec(self) -> float:
+        """获取当前下拉框选中的自动刷新秒数 (浮点数支持)"""
+        try:
+            txt = self.combo_interval.currentText().strip()
+            import re
+            m = re.search(r"(\d+(\.\d+)?)", txt)
+            if m:
+                return float(m.group(1))
+        except Exception:
+            pass
+        return self._get_global_ats_interval()
+
+    def sync_with_global_interval(self, new_interval: Optional[float] = None) -> float:
+        """动态对齐全局 cct.ats_tdx_interval 基准，同步刷新下拉框与定时器"""
+        try:
+            base_sec = self._get_global_ats_interval() if new_interval is None else float(new_interval)
+            best_idx = -1
+            min_diff = 999.0
+            for i in range(self.combo_interval.count()):
+                txt = self.combo_interval.itemText(i)
+                import re
+                m = re.search(r"(\d+(\.\d+)?)", txt)
+                if m:
+                    val = float(m.group(1))
+                    diff = abs(val - base_sec)
+                    if diff < min_diff:
+                        min_diff = diff
+                        best_idx = i
+
+            if best_idx >= 0 and best_idx != self.combo_interval.currentIndex():
+                self.combo_interval.blockSignals(True)
+                self.combo_interval.setCurrentIndex(best_idx)
+                self.combo_interval.blockSignals(False)
+
+            if self.chk_auto.isChecked():
+                sec = self._get_selected_interval_sec()
+                self.refresh_timer.start(int(sec * 1000))
+            return base_sec
+        except Exception as e:
+            logger.debug(f"[sync_with_global_interval] error: {e}")
+            return 5.0
+
     def _on_auto_toggled(self, checked: bool):
-        """开关自动刷新"""
+        """开关自动刷新 (以 cct.ats_tdx_interval 为基准，支持工作台按需独立微调)"""
         if checked:
-            idx = self.combo_interval.currentIndex()
-            sec = [3, 5, 10, 30][idx] if idx < 4 else 5
-            self.refresh_timer.start(sec * 1000)
-            self.status_bar.setText(f"🔄 自动刷新已开启，每 {sec} 秒同步扫描一次.")
+            sec = self._get_selected_interval_sec()
+            base_sec = self._get_global_ats_interval()
+            self.refresh_timer.start(int(sec * 1000))
+            sync_note = " (与系统全局基准同步)" if abs(sec - base_sec) < 0.1 else f" (工作台独立微调，系统基准: {base_sec:g}s)"
+            self.status_bar.setText(f"🔄 自动刷新已开启，每 {sec:g} 秒同步扫描一次{sync_note}.")
         else:
             self.refresh_timer.stop()
             self.status_bar.setText("⏸️ 自动刷新已暂停.")
 
     def _on_interval_changed(self, idx: int):
         """切换自动刷新间隔"""
+        sec = self._get_selected_interval_sec()
+        base_sec = self._get_global_ats_interval()
+        sync_note = " (与系统全局基准同步)" if abs(sec - base_sec) < 0.1 else f" (工作台独立微调，系统基准: {base_sec:g}s)"
         if self.chk_auto.isChecked():
-            sec = [3, 5, 10, 30][idx] if idx < 4 else 5
-            self.refresh_timer.start(sec * 1000)
+            self.refresh_timer.start(int(sec * 1000))
+            self.status_bar.setText(f"🔄 自动刷新间隔已切换为 {sec:g} 秒{sync_note}.")
 
     def _on_auto_refresh(self):
         """自动定时刷新"""

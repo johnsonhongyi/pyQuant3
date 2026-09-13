@@ -669,6 +669,55 @@ class TestSectorRotationPullbackMiner(unittest.TestCase):
             sec_afternoon = next(s for s in res_afternoon["sectors"] if s["name"] == "储能")
             self.assertEqual(sec_afternoon["leader_code"], "000044", "盘中出现连板高标龙头时必须动态更替为最新总龙头!")
 
+    def test_14_auto_refresh_interval_alignment_with_cct_ats_tdx_interval(self):
+        """测试自动刷新间隔与 cct.ats_tdx_interval 全局基准的对齐、自适应与独立微调"""
+        from ats.ui.sector_rotation_miner_dialog import SectorRotationMinerDialog
+        from JohnsonUtil import commonTips as cct
+
+        old_val = getattr(cct, 'ats_tdx_interval', 5.0)
+        try:
+            # 1. 全局基准为 5.0s 时初始化
+            cct.ats_tdx_interval = 5.0
+            dialog = SectorRotationMinerDialog(parent=None, current_df=None)
+            self.assertEqual(dialog._get_global_ats_interval(), 5.0)
+            self.assertIn("5 秒", dialog.combo_interval.currentText())
+            self.assertIn("(全局基准)", dialog.combo_interval.currentText())
+
+            # 2. 勾选自动刷新，定时器以 5000ms 启动且提示与全局同步
+            dialog.chk_auto.setChecked(True)
+            self.assertTrue(dialog.refresh_timer.isActive())
+            self.assertEqual(dialog.refresh_timer.interval(), 5000)
+            self.assertIn("与系统全局基准同步", dialog.status_bar.text())
+
+            # 3. 工作台独立微调为 3 秒：定时器以 3000ms 运行并提示独立微调
+            idx_3s = -1
+            for i in range(dialog.combo_interval.count()):
+                if "3 秒" in dialog.combo_interval.itemText(i):
+                    idx_3s = i
+                    break
+            self.assertGreaterEqual(idx_3s, 0)
+            dialog.combo_interval.setCurrentIndex(idx_3s)
+            self.assertEqual(dialog.refresh_timer.interval(), 3000)
+            self.assertIn("工作台独立微调", dialog.status_bar.text())
+
+            # 4. 全局动态更新为 10.0s 并调用 sync_with_global_interval
+            cct.ats_tdx_interval = 10.0
+            dialog.sync_with_global_interval()
+            self.assertIn("10 秒", dialog.combo_interval.currentText())
+            self.assertEqual(dialog.refresh_timer.interval(), 10000)
+
+            # 5. 非标准自定义间隔 (如 8.0s) 自适应生成选项并默认对齐
+            cct.ats_tdx_interval = 8.0
+            dialog2 = SectorRotationMinerDialog(parent=None, current_df=None)
+            self.assertEqual(dialog2._get_global_ats_interval(), 8.0)
+            self.assertIn("8 秒", dialog2.combo_interval.currentText())
+            self.assertIn("(全局基准)", dialog2.combo_interval.currentText())
+            dialog2.close()
+
+            dialog.close()
+        finally:
+            cct.ats_tdx_interval = old_val
+
 
 if __name__ == '__main__':
     unittest.main()
