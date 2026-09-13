@@ -107,8 +107,8 @@ def archive_daily_features(
                 logger.info(f"archive_daily_features: 当前为非交易日，自动对齐最近有效交易日: {date_str}")
             else:
                 now_int = cct.get_now_time_int() if (cct and hasattr(cct, 'get_now_time_int')) else 1530
-                if now_int < 1500 and not is_test_env:
-                    logger.warning(f"archive_daily_features: 当前时间 {now_int} < 1500 盘中尚未收盘，禁止将中间态数据作为多日收盘特征归档！")
+                if now_int < 1502 and not is_test_env:
+                    logger.warning(f"archive_daily_features: 当前时间 {now_int} < 1502 尚未完全收盘结算出清，禁止将中间态数据作为多日收盘特征归档！")
                     return False
                 date_str = str(cct.get_today()) if (cct and hasattr(cct, 'get_today')) else datetime.now().strftime('%Y-%m-%d')
         else:
@@ -488,9 +488,17 @@ def clean_and_repair_multiday_store(
             except Exception as e_sync:
                 logger.debug(f"clean_and_repair sync latest close failed: {e_sync}")
 
-        res['rows'] = len(df_existing)
+        try:
+            with h5a.SafeHDFStore(h5_path, mode='r') as store_chk:
+                if store_chk is not None and '/' + HDF5_TABLE_NAME in store_chk.keys():
+                    res['rows'] = len(store_chk.get(HDF5_TABLE_NAME))
+                else:
+                    res['rows'] = len(df_existing)
+        except Exception:
+            res['rows'] = len(df_existing)
+
         res['success'] = True
-        logger.info(f"✅ clean_and_repair_multiday_store 完成: 清除垃圾日期 {res['cleaned_invalid_dates']}, 最新交易日: {res['repaired_trade_date']}")
+        logger.info(f"✅ clean_and_repair_multiday_store 完成: 清除垃圾日期 {res['cleaned_invalid_dates']}, 最新交易日: {res['repaired_trade_date']}, 当前总行数: {res['rows']}")
         return res
     except Exception as e:
         logger.error(f"clean_and_repair_multiday_store 异常: {e}")

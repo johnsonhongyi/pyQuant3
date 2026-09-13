@@ -4096,7 +4096,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 try:
                     is_td = cct.get_trade_date_status() if (cct and hasattr(cct, 'get_trade_date_status')) else True
                     now_i = cct.get_now_time_int() if (cct and hasattr(cct, 'get_now_time_int')) else 1530
-                    if is_td and now_i >= 1500:
+                    if is_td and now_i >= 1502:
                         df_curr_close = getattr(self, 'df_all', None)
                         if df_curr_close is not None and not df_curr_close.empty:
                             from JSONData.multiday_feature_store import archive_daily_features
