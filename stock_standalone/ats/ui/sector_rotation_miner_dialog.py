@@ -561,7 +561,7 @@ class SectorRotationMinerDialog(QDialog, WindowMixin):
 
         row2_layout.addStretch()
 
-        lbl_quick_tip = QLabel("💡 单击行过滤/反选 | ↑↓键移动 | 双击联动行情 | Alt+W 审计")
+        lbl_quick_tip = QLabel("💡 单击板块过滤/反选 | 单击领涨龙头自动联动 | ↑↓浏览 | 双击联动 | Alt+W 审计")
         lbl_quick_tip.setStyleSheet("color: #778899; font-size: 8pt;")
         row2_layout.addWidget(lbl_quick_tip)
 
@@ -589,7 +589,7 @@ class SectorRotationMinerDialog(QDialog, WindowMixin):
 
         sec_header = QHBoxLayout()
         lbl_sec_title = QLabel("🔥 引导冲锋·核心资金主线板块")
-        lbl_sec_title.setToolTip("点击行单选过滤下方回踩池(再次点击反选恢复) | 上下键移动光标浏览 | 双击龙头联动股票 | 右键操作")
+        lbl_sec_title.setToolTip("单击板块过滤/反选下半区 | 单击领涨龙头自动联动股票 | 上下键移动光标浏览 | 右键菜单操作")
         lbl_sec_title.setStyleSheet("color: #aad4ff; font-weight: bold; font-size: 9.5pt;")
         sec_header.addWidget(lbl_sec_title)
         sec_header.addStretch()
@@ -875,12 +875,13 @@ class SectorRotationMinerDialog(QDialog, WindowMixin):
                 item_pio.setForeground(QBrush(QColor("#ff5555")))
             self.sectors_table.setItem(row, 4, item_pio)
 
-            # 5: 领涨先锋 (存入 leader_code 便于双击联动)
+            # 5: 领涨先锋 (存入 leader_code 与 leader_name 便于单击/双击自动联动)
             item_leader = QTableWidgetItem(leader)
             item_leader.setData(Qt.ItemDataRole.UserRole, l_code)
+            item_leader.setData(Qt.ItemDataRole.UserRole + 1, s.get('leader_name', ''))
             item_leader.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             item_leader.setForeground(QBrush(QColor("#ffcc66")))
-            item_leader.setToolTip(f"双击直接联动领涨龙头: {s.get('leader_name', '')} ({l_code})")
+            item_leader.setToolTip(f"👉 单击直接联动领涨龙头: {s.get('leader_name', '')} ({l_code})\n双击亦可全终端联动外部行情")
             self.sectors_table.setItem(row, 5, item_leader)
 
             # 6: 总成交额
@@ -1038,16 +1039,65 @@ class SectorRotationMinerDialog(QDialog, WindowMixin):
 
         self._render_candidates_table(filtered)
 
+    def _resolve_leader_code_and_name(self, row: int) -> Tuple[str, str]:
+        """从板块表格第 5 列解析领涨龙头代码与名称 (带多重保底)"""
+        leader_item = self.sectors_table.item(row, 5)
+        if not leader_item:
+            return "", ""
+        l_code = str(leader_item.data(Qt.ItemDataRole.UserRole) or "").strip()
+        l_name = str(leader_item.data(Qt.ItemDataRole.UserRole + 1) or "").strip()
+        raw_text = leader_item.text().strip()
+        if not l_name and raw_text:
+            l_name = raw_text.split('(')[0].strip()
+
+        # 保底 1: 若 l_code 为空，从文本中正则提取纯 6 位数字代码
+        if not l_code and raw_text:
+            import re
+            m = re.search(r'\b(\d{6})\b', raw_text)
+            if m:
+                l_code = m.group(1)
+
+        # 保底 2: 若仍为空且存在 current_df，根据名称反查代码
+        if not l_code and l_name and self.current_df is not None and not self.current_df.empty:
+            try:
+                if 'name' in self.current_df.columns:
+                    matched = self.current_df[self.current_df['name'] == l_name]
+                    if not matched.empty:
+                        l_code = str(matched.index[0])
+            except Exception:
+                pass
+
+        return l_code, l_name
+
     def _on_sector_row_clicked(self, item: QTableWidgetItem):
-        """点击板块行：若点击当前已选板块，则取消选择恢复显示全部；否则单选该板块联动下半区"""
+        """
+        点击板块表格行：
+        1. 若点击第 5 列（领涨先锋龙头）：自动联动龙头股票并锁定该板块（不触发反选取消）；
+        2. 若点击其他列：若点击当前已选板块则反选取消恢复全部主线，否则单选锁定该板块联动下半区。
+        """
         if not item:
             return
         row = item.row()
+        col = item.column()
         sec_item = self.sectors_table.item(row, 0)
         if not sec_item:
             return
         raw_text = sec_item.text().strip()
         sec_name = raw_text.replace("⭐", "").strip()
+
+        # [🚀 核心联动] 操盘手点击第 5 列（领涨先锋龙头单元格）
+        if col == 5:
+            leader_code, leader_name = self._resolve_leader_code_and_name(row)
+            # 锁定该板块展示回踩候选（保持锁定，不触发 Toggle 取消）
+            if self._selected_sector != sec_name:
+                self._set_selected_sector(sec_name)
+            # 自动联动领涨先锋龙头股票 (广播通达信/同花顺/Visualizer)
+            if leader_code:
+                self._broadcast_link_stock(leader_code, leader_name)
+                self.status_bar.setText(f"⚡ 已自动联动【{sec_name}】领涨先锋龙头: {leader_name} ({leader_code})")
+            return
+
+        # 点击其他列，执行标准单选与 Toggle 反选自愈逻辑
         if self._selected_sector == sec_name:
             # 再次点击已选中的板块，取消选中，恢复显示全部主线
             self._clear_sector_filter()
@@ -1065,7 +1115,20 @@ class SectorRotationMinerDialog(QDialog, WindowMixin):
                     if sec_item:
                         sec_name = sec_item.text().replace("⭐", "").strip()
                         self._set_selected_sector(sec_name)
+                        # 若当前处于第 5 列，键盘移动也跟随联动领涨龙头
+                        if self.sectors_table.currentColumn() == 5:
+                            leader_code, leader_name = self._resolve_leader_code_and_name(row)
+                            if leader_code:
+                                self._broadcast_link_stock(leader_code, leader_name)
                 return res
+            elif event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space):
+                # 键盘回车或空格：若当前在第 5 列或当前行有龙头，回车直接联动龙头股票
+                row = self.sectors_table.currentRow()
+                if row >= 0:
+                    leader_code, leader_name = self._resolve_leader_code_and_name(row)
+                    if leader_code:
+                        self._broadcast_link_stock(leader_code, leader_name)
+                        return True
         return super().eventFilter(watched, event)
 
     def _on_sector_current_changed(self, current: Optional[QTableWidgetItem], previous: Optional[QTableWidgetItem]):
@@ -1079,6 +1142,11 @@ class SectorRotationMinerDialog(QDialog, WindowMixin):
         if sec_item:
             sec_name = sec_item.text().replace("⭐", "").strip()
             self._set_selected_sector(sec_name)
+            # 若光标正处于第 5 列（领涨龙头），联动龙头
+            if current.column() == 5:
+                leader_code, leader_name = self._resolve_leader_code_and_name(row)
+                if leader_code:
+                    self._broadcast_link_stock(leader_code, leader_name)
 
     def _set_selected_sector(self, sec_name: str):
         """设置当前选中的主线板块并过滤下半区"""
@@ -1105,16 +1173,15 @@ class SectorRotationMinerDialog(QDialog, WindowMixin):
         row = item.row()
         col = item.column()
         sec_item = self.sectors_table.item(row, 0)
-        leader_item = self.sectors_table.item(row, 5)
         raw_sec = sec_item.text().strip() if sec_item else ""
         sec_name = raw_sec.replace("⭐", "").strip()
-        leader_code = leader_item.data(Qt.ItemDataRole.UserRole) if leader_item else ""
 
         # 双击第 5 列领涨先锋龙头：直接联动龙头股票
-        if col == 5 and leader_code:
-            leader_txt = leader_item.text().strip()
-            self._broadcast_link_stock(leader_code, leader_txt)
-            return
+        if col == 5:
+            leader_code, leader_name = self._resolve_leader_code_and_name(row)
+            if leader_code:
+                self._broadcast_link_stock(leader_code, leader_name)
+                return
 
         # 双击其他列：联动可视化端过滤板块
         if sec_name:
@@ -1158,13 +1225,11 @@ class SectorRotationMinerDialog(QDialog, WindowMixin):
             return
         row = item.row()
         sec_item = self.sectors_table.item(row, 0)
-        leader_item = self.sectors_table.item(row, 5)
         if not sec_item:
             return
         raw_sec = sec_item.text().strip()
         sec = raw_sec.replace("⭐", "").strip()
-        leader_code = leader_item.data(Qt.ItemDataRole.UserRole) if leader_item else ""
-        leader_text = leader_item.text().strip() if leader_item else ""
+        leader_code, leader_text = self._resolve_leader_code_and_name(row)
 
         fav_mgr = GlobalFavoriteManager()
         is_fav = fav_mgr.is_favorite_sector(sec)
