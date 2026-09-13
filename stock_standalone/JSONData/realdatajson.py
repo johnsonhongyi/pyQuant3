@@ -229,7 +229,7 @@ def get_sina_Market_json_src(market='all', showtime=True, num='100', retry_count
 
         df = pd.concat(results, ignore_index=True)
         if 'ratio' in df.columns:
-            df['ratio']=df['ratio'].apply(lambda x:round(float(x),1))
+            df['ratio']=df['ratio'].apply(lambda x:round(float(x),2))
         df['percent']=df['percent'].apply(lambda x:round(float(x),2))
 
     if df is not None and len(df) > 0:
@@ -1382,14 +1382,28 @@ def get_sina_Market_json(market='all', showtime=True, num='100', retry_count=3, 
                 log.warning(f"[SINA-COOLING-HOLD] 当前处于 API 限制/网络异常冷却避让期中 (剩余 {remaining_min:.1f} 分钟), 容忍并继续使用现有 HDF 缓存")
                 force_cache = True
 
-            # 非交易时间或盘后，且 HDF 缓存数据量完备，直接使用缓存避开 50s 在线网络抓取
-            if not cct.get_work_time() and len(h5) >= max(1000, conf_codes_len - 50):
+            # 🛡️ [DATA-INTEGRITY] 非交易时间/盘后完整性校验：
+            # 必须确保磁盘 HDF 缓存不是早盘或未走完的半截数据 (例如 ticktime < '15:00:00' 且数量占绝大多数)
+            is_stale_intraday_cache = False
+            if not cct.get_work_time() and len(h5) > 0 and 'ticktime' in h5.columns and not is_cooling:
+                try:
+                    str_ticks = h5['ticktime'].astype(str).str.extract(r'(\d{2}:\d{2}:\d{2})')[0].dropna()
+                    if not str_ticks.empty:
+                        closed_ratio = (str_ticks >= '15:00:00').mean()
+                        if closed_ratio < 0.1:
+                            is_stale_intraday_cache = True
+                            log.warning(f"[HDF-STALE-INTRADAY] 磁盘 HDF 缓存包含早盘未收盘数据 (收盘Tick占比仅 {closed_ratio:.1%}), 禁止作为收盘缓存使用, 强制在线刷新全天收盘数据！")
+                except Exception as e_tick:
+                    log.debug(f"Tick check failed: {e_tick}")
+
+            # 非交易时间或盘后，且 HDF 缓存数据量完备且非早盘半截残存，直接使用缓存避开 50s 在线网络抓取
+            if not cct.get_work_time() and len(h5) >= max(1000, conf_codes_len - 50) and not is_stale_intraday_cache:
                 force_cache = True
 
             o_time = h5[h5.timel != 0].timel
             if len(o_time) > 0:
                 l_time = time.time() - o_time.iloc[0]
-                if force_cache or l_time < limit_time:
+                if (force_cache or l_time < limit_time) and not is_stale_intraday_cache:
                     log.warning(f"[HDF-USE] rows={len(h5)} l_time={l_time:.1f}")
                     if market == 'all':
                         # co_inx = [inx for inx in h5.index if str(inx).startswith(('6','30','00','688','43','83','87','92'))]
@@ -1516,7 +1530,7 @@ def get_sina_Market_json(market='all', showtime=True, num='100', retry_count=3, 
         g_sina_blocked['cooling'] = False
         df = pd.concat(df_list, ignore_index=True)
         if 'ratio' in df.columns:
-            df['ratio'] = df['ratio'].astype(float).round(1)
+            df['ratio'] = df['ratio'].astype(float).round(2)
         if 'percent' in df.columns:
             df['percent'] = df['percent'].astype(float).round(2)
         df = df.drop_duplicates('code').set_index('code')

@@ -286,3 +286,60 @@ def test_singleton_shared_dict_cache_and_batch_loop_performance(temp_h5_store):
     feats_last = generate_df_vect_daily_features_lastday(df_big.iloc[:50], lastdays=9)
     assert len(feats_last) == 50
     assert feats_last[1]['ratio1'] == 2.0
+
+
+def test_clean_and_repair_multiday_store(temp_h5_store):
+    """验证 clean_and_repair_multiday_store 自动清理非交易日脏数据并保留合法交易日"""
+    from JSONData.multiday_feature_store import clean_and_repair_multiday_store
+
+    # 1. 模拟写入一个真实交易日 (2026-09-11) 与两个非法周末日期 (2026-09-12, 2026-09-13)
+    df_valid = pd.DataFrame([{'code': '688151', 'ratio': 3.43, 'vol_ratio': 1.0}])
+    df_weekend1 = pd.DataFrame([{'code': '688151', 'ratio': 1.80, 'vol_ratio': 1.0}])
+    df_weekend2 = pd.DataFrame([{'code': '688151', 'ratio': 1.80, 'vol_ratio': 1.0}])
+
+    archive_daily_features(df_valid, date_str="2026-09-11", store_path=temp_h5_store)
+    archive_daily_features(df_weekend1, date_str="2026-09-12", store_path=temp_h5_store)
+    archive_daily_features(df_weekend2, date_str="2026-09-13", store_path=temp_h5_store)
+
+    # 检查写入前包含非法日期
+    with h5a.SafeHDFStore(temp_h5_store, mode='r') as store:
+        df_dirty = store.get(HDF5_TABLE_NAME)
+    dirty_dates = df_dirty['date'].unique().tolist()
+    assert "2026-09-12" in dirty_dates
+    assert "2026-09-13" in dirty_dates
+
+    # 2. 执行自愈清洗
+    res = clean_and_repair_multiday_store(store_path=temp_h5_store, sync_from_latest_close=False)
+    assert res['success'] is True
+    assert "2026-09-12" in res['cleaned_invalid_dates']
+    assert "2026-09-13" in res['cleaned_invalid_dates']
+
+    # 3. 验证清洗后数据库仅保留 2026-09-11，且换手率为真实的 3.43
+    with h5a.SafeHDFStore(temp_h5_store, mode='r') as store:
+        df_clean = store.get(HDF5_TABLE_NAME)
+    clean_dates = df_clean['date'].unique().tolist()
+    assert "2026-09-12" not in clean_dates
+    assert "2026-09-13" not in clean_dates
+    assert "2026-09-11" in clean_dates
+    assert round(float(df_clean[df_clean['code'] == '688151']['ratio'].iloc[0]), 2) == 3.43
+
+
+def test_anti_regression_low_quality_coverage_protection(temp_h5_store):
+    """验证防倒退保护：早盘残缺低质数据无法覆盖已有的优质收盘数据"""
+    # 1. 模拟写入已收盘全量数据 (平均换手率 3.5%)
+    records_good = [{'code': f"{i:06d}", 'ratio': 3.5, 'vol_ratio': 1.0} for i in range(600)]
+    df_good = pd.DataFrame(records_good)
+    archive_daily_features(df_good, date_str="2026-09-11", store_path=temp_h5_store)
+
+    # 2. 模拟早盘半天快照 (平均换手率仅 1.0%，低于 3.5% 的 70%)
+    records_bad = [{'code': f"{i:06d}", 'ratio': 1.0, 'vol_ratio': 0.8} for i in range(600)]
+    df_bad = pd.DataFrame(records_bad)
+    ok = archive_daily_features(df_bad, date_str="2026-09-11", store_path=temp_h5_store)
+    # 防倒退守卫应拦截此次覆盖
+    assert ok is False, "早盘低换手率数据应被防倒退机制拦截"
+
+    # 验证数据库中仍保持原有的 3.5%
+    with h5a.SafeHDFStore(temp_h5_store, mode='r') as store:
+        df_check = store.get(HDF5_TABLE_NAME)
+    assert abs(float(df_check['ratio'].mean()) - 3.5) < 1e-4
+

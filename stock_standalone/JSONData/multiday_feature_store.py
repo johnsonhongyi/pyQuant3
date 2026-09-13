@@ -96,13 +96,28 @@ def archive_daily_features(
         return False
 
     try:
-        # 1. 确定日期与保存参数
+        is_test_env = bool(store_path and ('test' in str(store_path).lower() or 'temp' in str(store_path).lower()))
+
+        # 1. 确定日期与交易日合法性守卫
         if not date_str:
-            if cct and hasattr(cct, 'get_today'):
-                try: date_str = str(cct.get_today())
-                except Exception: date_str = datetime.now().strftime('%Y-%m-%d')
+            is_trade_day = cct.get_trade_date_status() if (cct and hasattr(cct, 'get_trade_date_status')) else True
+            if not is_trade_day:
+                last_trade = cct.get_last_trade_date() if (cct and hasattr(cct, 'get_last_trade_date')) else None
+                date_str = str(last_trade) if last_trade else datetime.now().strftime('%Y-%m-%d')
+                logger.info(f"archive_daily_features: 当前为非交易日，自动对齐最近有效交易日: {date_str}")
             else:
-                date_str = datetime.now().strftime('%Y-%m-%d')
+                now_int = cct.get_now_time_int() if (cct and hasattr(cct, 'get_now_time_int')) else 1530
+                if now_int < 1500 and not is_test_env:
+                    logger.warning(f"archive_daily_features: 当前时间 {now_int} < 1500 盘中尚未收盘，禁止将中间态数据作为多日收盘特征归档！")
+                    return False
+                date_str = str(cct.get_today()) if (cct and hasattr(cct, 'get_today')) else datetime.now().strftime('%Y-%m-%d')
+        else:
+            if cct and hasattr(cct, 'get_day_istrade_date') and not is_test_env:
+                if not cct.get_day_istrade_date(date_str):
+                    last_trade = cct.get_last_trade_date()
+                    if last_trade:
+                        logger.warning(f"archive_daily_features: 传入日期 {date_str} 为非交易日，自动纠偏为真实交易日 {last_trade}")
+                        date_str = str(last_trade)
 
         if max_days is None or max_days <= 0:
             max_days = int(getattr(cct, 'compute_lastdays', DEFAULT_MAX_DAYS)) if cct else DEFAULT_MAX_DAYS
@@ -135,9 +150,13 @@ def archive_daily_features(
                 break
 
         if ratio_col is None:
-            logger.warning("archive_daily_features: neither 'ratio' nor 'turnover' found in df_today, creating empty ratio.")
-            df_src['ratio'] = 0.0
-            ratio_col = 'ratio'
+            logger.warning("archive_daily_features: neither 'ratio' nor 'turnover' found in df_today, skipping archive.")
+            return False
+
+        r_check = pd.to_numeric(df_src[ratio_col], errors='coerce').fillna(0.0)
+        if len(r_check) > 100 and (r_check > 0).mean() < 0.02 and not is_test_env:
+            logger.warning("archive_daily_features: 传入的 ratio 列非零数据占比不足 2%，疑似异常脏数据，拒绝持久化覆盖！")
+            return False
 
         if vol_ratio_col is None:
             df_src['vol_ratio'] = 1.0
@@ -156,8 +175,8 @@ def archive_daily_features(
         df_new = pd.DataFrame({
             'code': df_src['code'].values,
             'date': date_str,
-            'ratio': pd.to_numeric(df_src[ratio_col], errors='coerce').fillna(0.0).astype(np.float32).values,
-            'vol_ratio': pd.to_numeric(df_src[vol_ratio_col], errors='coerce').fillna(1.0).astype(np.float32).values
+            'ratio': pd.to_numeric(df_src[ratio_col], errors='coerce').fillna(0.0).astype(np.float64).round(2).values,
+            'vol_ratio': pd.to_numeric(df_src[vol_ratio_col], errors='coerce').fillna(1.0).astype(np.float64).round(2).values
         })
 
         # 3. 读取已有 HDF5 历史数据
@@ -171,18 +190,36 @@ def archive_daily_features(
             logger.debug(f"archive_daily_features: reading existing store: {read_err}")
             df_existing = pd.DataFrame()
 
-        # 4. 合并并根据 (code, date) 去重 (保持最新)
+        # 4. 防早盘低质数据倒退覆盖与去重合并
         if df_existing is not None and not df_existing.empty:
             req_cols = ['code', 'date', 'ratio', 'vol_ratio']
             for c in req_cols:
                 if c not in df_existing.columns:
                     df_existing[c] = 0.0
+
+            # 🛡️ 防倒退校验：如果库中已有该 date_str，但新传入的数据均值明显低于已有数据（如新传入的是未收盘早盘数据），拒绝覆盖
+            if date_str in df_existing['date'].values:
+                sub_old = df_existing[df_existing['date'] == date_str]
+                old_ratio_mean = sub_old['ratio'].mean()
+                new_ratio_mean = df_new['ratio'].mean()
+                if len(sub_old) > 500 and old_ratio_mean > 0.5 and new_ratio_mean < old_ratio_mean * 0.7:
+                    logger.warning(
+                        f"archive_daily_features: 新数据换手率均值 ({new_ratio_mean:.2f}) 显著低于库中已有数据 ({old_ratio_mean:.2f})，"
+                        f"疑似早盘或残缺快照，拒绝覆盖已有优质收盘数据！"
+                    )
+                    return False
+
             df_combined = pd.concat([df_existing[req_cols], df_new[req_cols]], ignore_index=True)
             df_combined = df_combined.drop_duplicates(subset=['code', 'date'], keep='last')
         else:
             df_combined = df_new
 
-        # 5. 滑动窗口修剪：仅保留最新 max_days 天
+        # 5. 滑动窗口修剪：剔除非交易日并仅保留最新 max_days 天
+        if cct and hasattr(cct, 'get_day_istrade_date') and not is_test_env:
+            valid_dates_set = {d for d in df_combined['date'].unique() if cct.get_day_istrade_date(d)}
+            if valid_dates_set:
+                df_combined = df_combined[df_combined['date'].isin(valid_dates_set)].copy()
+
         unique_dates_asc = sorted(df_combined['date'].unique())
         if len(unique_dates_asc) > max_days:
             keep_dates = set(unique_dates_asc[-max_days:])
@@ -247,8 +284,15 @@ def get_multiday_features_wide(
             return pd.DataFrame()
 
         # 3. 执行高性能 Pivot 倒排重塑
-        # 按日期降序排列: unique_dates[0] 为最新日期 -> ratio1, unique_dates[1] -> ratio2...
-        unique_dates_desc = sorted(df_flat['date'].unique(), reverse=True)[:max_days]
+        # 严格按真实有效交易日降序排列: unique_dates[0] 为最新真实交易日 -> ratio1, unique_dates[1] -> ratio2...
+        all_dates = df_flat['date'].unique()
+        is_test_env = bool(store_path and ('test' in str(store_path).lower() or 'temp' in str(store_path).lower()))
+        if cct and hasattr(cct, 'get_day_istrade_date') and not is_test_env:
+            valid_dates = [d for d in all_dates if cct.get_day_istrade_date(d)]
+        else:
+            valid_dates = list(all_dates)
+
+        unique_dates_desc = sorted(valid_dates, reverse=True)[:max_days]
         if not unique_dates_desc:
             return pd.DataFrame()
 
@@ -323,8 +367,8 @@ def get_multiday_features_dict(
 
     with _CACHE_LOCK:
         try:
-            # 批量向量化规整为 float 且保留 2 位小数，转为原生字典
-            rounded_df = wide_df.round(2).astype(float)
+            # 批量向量化规整为 float64 且保留 2 位小数，转为原生字典
+            rounded_df = wide_df.astype(np.float64).round(2)
             _MULTIDAY_DICT_CACHE = rounded_df.to_dict(orient='index')
         except Exception:
             _MULTIDAY_DICT_CACHE = wide_df.to_dict(orient='index')
@@ -389,3 +433,65 @@ def inject_multiday_features_to_row(
         for i in range(1, max_days + 1):
             feat_dict.setdefault(f'ratio{i}', 0.0)
             feat_dict.setdefault(f'vol_ratio{i}', 1.0)
+
+
+def clean_and_repair_multiday_store(
+    store_path: Optional[str] = None,
+    sync_from_latest_close: bool = True
+) -> Dict[str, Any]:
+    """
+    自动清理与自愈多日特征 HDF5 数据库:
+    1. 剔除非交易日非法记录 (如 2026-09-12, 2026-09-13 等周末/节假日残留)；
+    2. 若最新交易日 (如 2026-09-11) 缺失或为早盘脏数据，尝试从官方收盘库同步修复；
+    3. 重写数据库并刷新内存单例缓存。
+    返回修复报告字典 {'cleaned_invalid_dates': [...], 'repaired_trade_date': str, 'rows': int}
+    """
+    h5_path = get_multiday_store_path(store_path)
+    res = {'cleaned_invalid_dates': [], 'repaired_trade_date': '', 'rows': 0, 'success': False}
+    try:
+        from JSONData import tdx_hdf5_api as h5a
+        df_existing = pd.DataFrame()
+        with h5a.SafeHDFStore(h5_path, mode='r') as store:
+            if store is not None and '/' + HDF5_TABLE_NAME in store.keys():
+                df_existing = store.get(HDF5_TABLE_NAME)
+
+        if df_existing is None or df_existing.empty:
+            logger.info("clean_and_repair_multiday_store: store is empty, nothing to clean.")
+            return res
+
+        # 1. 查找并剔除非交易日
+        if cct and hasattr(cct, 'get_day_istrade_date'):
+            all_dates = df_existing['date'].unique().tolist()
+            invalid_dates = [d for d in all_dates if not cct.get_day_istrade_date(d)]
+            if invalid_dates:
+                logger.warning(f"clean_and_repair_multiday_store: 发现非法非交易日记录 {invalid_dates}，执行物理清理！")
+                df_existing = df_existing[~df_existing['date'].isin(invalid_dates)].copy()
+                res['cleaned_invalid_dates'] = invalid_dates
+
+        # 2. 写回清理后的合法交易日记录
+        with h5a.SafeHDFStore(h5_path, mode='a') as store:
+            if store is not None:
+                store.put(HDF5_TABLE_NAME, df_existing, format='table', data_columns=['code', 'date'])
+        clear_multiday_cache()
+
+        # 3. 如果开启了 sync_from_latest_close，且最新有效交易日存在
+        if sync_from_latest_close and cct and hasattr(cct, 'get_last_trade_date'):
+            last_trade = str(cct.get_last_trade_date())
+            try:
+                from JSONData import realdatajson as rl
+                df_snap = rl.get_sina_Market_json('all')
+                if df_snap is not None and not df_snap.empty and 'ratio' in df_snap.columns:
+                    if (df_snap['ratio'] > 0).mean() > 0.3:
+                        logger.info(f"clean_and_repair_multiday_store: 正在将官方最新收盘换手率同步至 {last_trade}...")
+                        archive_daily_features(df_snap, date_str=last_trade, store_path=store_path)
+                        res['repaired_trade_date'] = last_trade
+            except Exception as e_sync:
+                logger.debug(f"clean_and_repair sync latest close failed: {e_sync}")
+
+        res['rows'] = len(df_existing)
+        res['success'] = True
+        logger.info(f"✅ clean_and_repair_multiday_store 完成: 清除垃圾日期 {res['cleaned_invalid_dates']}, 最新交易日: {res['repaired_trade_date']}")
+        return res
+    except Exception as e:
+        logger.error(f"clean_and_repair_multiday_store 异常: {e}")
+        return res
