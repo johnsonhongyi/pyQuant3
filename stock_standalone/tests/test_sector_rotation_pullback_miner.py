@@ -557,8 +557,74 @@ class TestSectorRotationPullbackMiner(unittest.TestCase):
 
         dialog.close()
 
+    def test_12_click_leader_pioneer_stock_linkage(self):
+        """测试点击板块中的领涨先锋龙头时自动联动股票代码与名称 (带多重保底)"""
+        from PyQt6.QtCore import Qt, QEvent
+        from PyQt6.QtGui import QKeyEvent
+        from ats.ui.sector_rotation_miner_dialog import SectorRotationMinerDialog
+
+        data = {
+            # 领涨先锋龙头 002202 金风科技 (+10.0%) 所属风电板块 (至少3只标的构成有效板块)
+            "002202": {"name": "金风科技", "close": 20.0, "percent": 10.0, "category": "风电", "dff2": 4.0, "dff3": 15.0, "vol_ratio": 2.0, "amount": 8e8, "ratio": 5.0},
+            "600875": {"name": "东方电气", "close": 18.0, "percent": 6.5, "category": "风电", "dff2": 3.0, "dff3": 12.0, "vol_ratio": 1.6, "amount": 6e8, "ratio": 4.0},
+            "300129": {"name": "泰胜风能", "close": 12.0, "percent": 2.0, "category": "风电", "dff2": 1.0, "dff3": 5.0, "vol_ratio": 1.3, "amount": 4e8, "ratio": 3.0, "ma20d": 11.8, "per1d": -1.0}
+        }
+        df = pd.DataFrame.from_dict(data, orient='index')
+        dialog = SectorRotationMinerDialog(parent=None, current_df=df)
+        report = self.miner.run_mining_pipeline(df)
+        dialog._on_scan_finished(report)
+
+        # 1. 验证板块表格存在风电板块且第 5 列领涨龙头为金风科技
+        self.assertGreater(dialog.sectors_table.rowCount(), 0)
+        row_found = -1
+        for r in range(dialog.sectors_table.rowCount()):
+            sec_item = dialog.sectors_table.item(r, 0)
+            if sec_item and "风电" in sec_item.text():
+                row_found = r
+                break
+        self.assertNotEqual(row_found, -1, "必须扫描出风电主线板块!")
+
+        leader_item = dialog.sectors_table.item(row_found, 5)
+        self.assertIsNotNone(leader_item, "风电板块第 5 列必须存在领涨龙头单元格!")
+        self.assertIn("金风科技", leader_item.text(), "领涨龙头文本必须包含金风科技!")
+
+        # 2. 模拟鼠标单击第 5 列领涨先锋龙头单元格
+        linked_codes = []
+        dialog.code_clicked.connect(lambda c: linked_codes.append(c))
+
+        dialog._on_sector_row_clicked(leader_item)
+        self.assertIn("002202", linked_codes, "单击领涨龙头单元格必须自动发射联动信号联动该股票!")
+        self.assertIn("已自动联动【风电】领涨先锋龙头", dialog.status_bar.text(), "状态栏必须更新领涨龙头联动提示!")
+        self.assertEqual(dialog._selected_sector, "风电", "点击龙头单元格必须同时锁定风电主线!")
+
+        # 3. 再次点击同一行第 5 列：领涨龙头必须持续联动，且坚决不触发反选取消
+        linked_codes.clear()
+        dialog._last_linked_code = None  # 清除防抖以确保测试连续响应
+        dialog._on_sector_row_clicked(leader_item)
+        self.assertIn("002202", linked_codes, "再次点击领涨龙头必须继续触发联动!")
+        self.assertEqual(dialog._selected_sector, "风电", "点击龙头单元格绝不能触发 Toggle 反选清空主线!")
+
+        # 4. 模拟键盘在第 5 列按 Enter 回车键联动
+        linked_codes.clear()
+        dialog._last_linked_code = None
+        dialog.sectors_table.setCurrentCell(row_found, 5)
+        enter_event = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Return, Qt.KeyboardModifier.NoModifier)
+        ret = dialog.eventFilter(dialog.sectors_table, enter_event)
+        self.assertTrue(ret, "在领涨龙头单元格按 Enter 回车键必须拦截并处理联动!")
+        self.assertIn("002202", linked_codes, "在领涨龙头单元格按 Enter 键必须联动股票!")
+
+        # 5. 验证 _resolve_leader_code_and_name 的三重保底机制
+        # 保底测试：清除 UserRole 的代码，验证从文本或 current_df 成功反查
+        leader_item.setData(Qt.ItemDataRole.UserRole, "")
+        code_resolved, name_resolved = dialog._resolve_leader_code_and_name(row_found)
+        self.assertEqual(code_resolved, "002202", "缺失 UserRole 代码时必须成功从 current_df 反查出 002202!")
+        self.assertEqual(name_resolved, "金风科技")
+
+        dialog.close()
+
 
 if __name__ == '__main__':
     unittest.main()
+
 
 
