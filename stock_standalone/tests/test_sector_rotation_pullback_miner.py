@@ -1034,9 +1034,97 @@ class TestSectorRotationPullbackMiner(unittest.TestCase):
         finally:
             dialog.close()
 
+    def test_20_cold_boot_view_mode_persistence_and_full_view_restoration(self):
+        """测试冷启动时100%按持久化view_mode恢复：全貌模式下两张表所有列均完全可见(绝无残缺隐藏)，精简模式下自适应紧凑"""
+        from ats.ui.sector_rotation_miner_dialog import SectorRotationMinerDialog
+        from ats.ui.styles import save_config_node, load_config_node
+        from PyQt6.QtWidgets import QApplication
+
+        # 1. 模拟冷启动：持久化配置为 full (全貌模式)
+        save_config_node("sector_miner_view_mode", "full")
+        save_config_node("sector_miner_stays_on_top", False)
+        save_config_node("sector_miner_anchor_edge", None)
+        save_config_node("sector_miner_is_hidden", False)
+
+        sample_df = pd.DataFrame({
+            'name': ['超声电子', '神宇股份', '一博科技', '胜蓝股份', '沪电股份', '博威合金'],
+            'percent': [10.0, 20.0, 1.4, 1.5, 5.0, 6.0],
+            'close': [15.0, 25.0, 30.0, 18.0, 28.0, 19.0],
+            'volume': [100000, 200000, 80000, 90000, 150000, 160000],
+            'amount': [1.5e8, 5.0e8, 1.2e8, 1.4e8, 2.5e8, 2.8e8],
+            'category': ['PCB概念', '铜缆高速连接', 'PCB概念', '铜缆高速连接', 'PCB概念', '铜缆高速连接'],
+            'dff': [10.0, 20.0, 1.4, 1.5, 5.0, 6.0],
+            'dff2': [1.2, 2.5, 0.5, -0.8, 1.8, 2.2],
+            'dff3': [3.0, 5.0, 1.0, 0.2, 4.0, 5.5],
+            'volume_ratio': [2.5, 3.2, 1.06, 1.27, 1.8, 2.0],
+            'turnover_ratio': [5.0, 8.0, 2.1, 2.5, 4.0, 4.5],
+            'channel_support': [True, True, True, True, True, True],
+            'limit_days': [1, 1, 0, 0, 0, 0],
+            'status': ['封板', '封板', '正常', '正常', '正常', '正常'],
+        }, index=['000823', '300563', '301366', '300843', '002463', '300548'])
+
+        dialog_full = SectorRotationMinerDialog(parent=None, current_df=sample_df)
+        dialog_full.show()
+        QApplication.processEvents()
+
+        try:
+            # 验证冷启动进入的是全貌模式
+            self.assertFalse(dialog_full._is_compact_mode, "冷启动应为全貌模式")
+            self.assertIn("精简 (M)", dialog_full.btn_compact.text())
+            self.assertFalse(dialog_full.lbl_title.isHidden())
+            self.assertFalse(dialog_full.row2_widget.isHidden())
+
+            # 核心断言：全貌模式下，板块表 (7列) 与候选表 (13列) 必须 100% 全部未被隐藏！绝无残缺隐藏！
+            for col in range(dialog_full.sectors_table.columnCount()):
+                self.assertFalse(dialog_full.sectors_table.isColumnHidden(col), f"全貌模式下板块表第 {col} 列绝不应被隐藏!")
+            for col in range(dialog_full.candidates_table.columnCount()):
+                self.assertFalse(dialog_full.candidates_table.isColumnHidden(col), f"全貌模式下候选表第 {col} 列绝不应被隐藏!")
+
+            # 验证所有核心列宽必须大于 0
+            for col in range(dialog_full.candidates_table.columnCount()):
+                self.assertGreater(dialog_full.candidates_table.columnWidth(col), 0)
+        finally:
+            dialog_full.close()
+
+        # 2. 模拟冷启动：持久化配置为 compact (精简模式)
+        save_config_node("sector_miner_view_mode", "compact")
+        save_config_node("sector_miner_stays_on_top", False)
+
+        dialog_compact = SectorRotationMinerDialog(parent=None, current_df=sample_df)
+        dialog_compact.show()
+        QApplication.processEvents()
+
+        try:
+            # 验证冷启动进入的是精简模式
+            self.assertTrue(dialog_compact._is_compact_mode, "冷启动应为精简模式")
+            self.assertIn("恢复全貌", dialog_compact.btn_compact.text())
+            self.assertTrue(dialog_compact.lbl_title.isHidden())
+            self.assertTrue(dialog_compact.row2_widget.isHidden())
+
+            # 精简模式下，核心列 dff, dff2, dff3, 量比必须可见
+            self.assertFalse(dialog_compact.candidates_table.isColumnHidden(0)) # 代码
+            self.assertFalse(dialog_compact.candidates_table.isColumnHidden(1)) # 名称
+            self.assertFalse(dialog_compact.candidates_table.isColumnHidden(3)) # 启动形态
+            self.assertFalse(dialog_compact.candidates_table.isColumnHidden(5)) # dff
+            self.assertFalse(dialog_compact.candidates_table.isColumnHidden(6)) # dff2
+            self.assertFalse(dialog_compact.candidates_table.isColumnHidden(7)) # dff3
+            self.assertFalse(dialog_compact.candidates_table.isColumnHidden(9)) # 量比
+
+            # 3. 从精简模式冷启动后，点击按钮恢复全貌
+            dialog_compact.btn_compact.click()
+            QApplication.processEvents()
+            self.assertFalse(dialog_compact._is_compact_mode, "点击后应恢复全貌模式")
+            # 恢复全貌后，所有 13 列必须全部恢复显示
+            for col in range(dialog_compact.candidates_table.columnCount()):
+                self.assertFalse(dialog_compact.candidates_table.isColumnHidden(col), f"恢复全貌后候选表第 {col} 列必须全部显示!")
+        finally:
+            dialog_compact.close()
+            save_config_node("sector_miner_view_mode", "full")
+
 
 if __name__ == '__main__':
     unittest.main()
+
 
 
 
