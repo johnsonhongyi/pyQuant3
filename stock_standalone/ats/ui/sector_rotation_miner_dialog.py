@@ -30,7 +30,10 @@ from PyQt6.QtWidgets import (
     QSplitter, QCheckBox, QComboBox, QLineEdit, QMenu, QApplication,
     QFrame, QMessageBox, QDoubleSpinBox, QFormLayout, QGroupBox, QDialogButtonBox
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QThread, QPoint, QEvent, QRect
+from PyQt6.QtCore import (
+    Qt, pyqtSignal, QTimer, QThread, QPoint, QEvent, QRect,
+    QParallelAnimationGroup, QPropertyAnimation, QEasingCurve
+)
 from PyQt6.QtGui import QColor, QFont, QBrush, QKeySequence, QShortcut
 import pandas as pd
 
@@ -417,22 +420,44 @@ class SectorRotationMinerDialog(QDialog, WindowMixin):
         self._worker: Optional[MinerWorkerThread] = None
         self._current_filter_config: PullbackFilterConfig = PRESET_FILTER_MODES["🎯 经典标准"]
 
-        # 视图模式（精简 vs 全貌）与磁吸贴边状态
+        # 视图模式（精简 vs 全貌）与几何尺寸
         self._is_compact_mode: bool = False
         self._full_geometry = None
         self._compact_geometry = None
         self._is_snapping: bool = False
+        self._in_snap_action: bool = False
+        self.anim_group = None
+        self.geom_anim = None
+        self.opacity_anim = None
+
+        # ATS 标准磁吸贴边与折叠感应状态 (对齐 DailyLimitUpDialog / HotSectorLeaderboard SSOT)
+        self.anchor_edge: Optional[str] = None
+        self.is_hidden_state: bool = False
+        self.normal_geometry: Optional[QRect] = None
+        self.hover_ticks: int = 0
+        self.leave_ticks: int = 0
+        self._is_dragging: bool = False
+        self._last_show_time: float = 0.0
+        self._has_hovered_since_show: bool = False
+        self._is_auto_popping: bool = False
+        self.stays_on_top: bool = False
 
         # 联动记忆与防抖 (遵循系统底层联动逻辑：相同 code 绝不触发外部联动)
         self._last_linked_code: Optional[str] = None
         self._last_linked_date: Optional[str] = None
         self._last_linked_time: float = 0.0
 
-        # 磁吸贴边防抖定时器 (拖拽后 200ms 检测靠近屏幕边缘贴边)
-        self._snap_timer = QTimer(self)
-        self._snap_timer.setSingleShot(True)
-        self._snap_timer.setInterval(200)
-        self._snap_timer.timeout.connect(self._detect_and_snap)
+        # 悬停与离开监控定时器 (默认保持停止，仅在贴边或隐藏感应态激活，0 额外开销)
+        self.hover_timer = QTimer(self)
+        self.hover_timer.setInterval(100)
+        self.hover_timer.timeout.connect(self._check_hover)
+
+        # 磁吸贴边防抖定时器 (拖拽释放后 300ms 检测靠近屏幕边缘贴边)
+        self.snap_timer = QTimer(self)
+        self.snap_timer.setSingleShot(True)
+        self.snap_timer.setInterval(300)
+        self.snap_timer.timeout.connect(self._detect_and_snap)
+        self._snap_timer = self.snap_timer
 
         # 自动刷新定时器
         self.refresh_timer = QTimer(self)
@@ -598,7 +623,7 @@ class SectorRotationMinerDialog(QDialog, WindowMixin):
             }
             QPushButton:hover { background-color: #2d4562; color: #ffffff; }
         """)
-        self.btn_compact.clicked.connect(self.toggle_compact_mode)
+        self.btn_compact.clicked.connect(lambda: self.toggle_compact_mode())
         row1_layout.addWidget(self.btn_compact)
 
         self.btn_close = QPushButton("✕ 关闭 (Esc)")
@@ -742,9 +767,15 @@ class SectorRotationMinerDialog(QDialog, WindowMixin):
 
     def _init_shortcuts(self):
         """绑定常用便捷快捷键 (坚决不抢占 Alt+R，确保专属于系统全局视窗轮转)"""
-        # 快捷键 T: 切换置顶
-        bind_top_shortcut(self)
-        
+        # 快捷键 T: 切换置顶 (使用全局穿透回调)
+        bind_top_shortcut(self, lambda: self._toggle_stay_on_top())
+
+        # 快捷键 M: 切换精简/全貌模式 (窗口级全局穿透，子控件获焦亦可触发)
+        m_shortcut = QShortcut(QKeySequence(Qt.Key.Key_M), self)
+        m_shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
+        m_shortcut.activated.connect(self._on_m_shortcut_activated)
+        setattr(self, "_compact_shortcut_m", m_shortcut)
+
         # 快捷键 F5: 刷新
         f5_shortcut = QShortcut(QKeySequence("F5"), self)
         f5_shortcut.activated.connect(self.trigger_scan)
@@ -753,10 +784,40 @@ class SectorRotationMinerDialog(QDialog, WindowMixin):
         dna_shortcut = QShortcut(QKeySequence("Alt+W"), self)
         dna_shortcut.activated.connect(self._run_dna_audit_selected)
 
-    def _toggle_stay_on_top(self, checked: bool):
-        """窗口置顶切换"""
+    def _on_m_shortcut_activated(self):
+        """M 快捷键响应：文本编辑时不抢占，其余状态秒切精简/全貌"""
+        from ats.ui.styles import is_editing_text
+        if not is_editing_text(self):
+            self.toggle_compact_mode()
+
+    def _toggle_stay_on_top(self, checked: Optional[bool] = None):
+        """窗口置顶切换 (支持无参调用用于快捷键 T)"""
+        if checked is None:
+            checked = not self.btn_top.isChecked()
         set_seamless_stay_on_top(self, checked)
-        self.btn_top.setChecked(checked)
+        self.stays_on_top = bool(checked)
+        if self.btn_top.isChecked() != checked:
+            self.btn_top.blockSignals(True)
+            self.btn_top.setChecked(checked)
+            self.btn_top.blockSignals(False)
+
+        # 【置顶与磁吸严格互斥】(对齐 ATS SSOT):
+        # 置顶开启时，完全禁用磁吸贴边与折叠，保持自由悬浮；置顶关闭时恢复磁吸贴边
+        if checked:
+            if hasattr(self, 'snap_timer') and self.snap_timer:
+                self.snap_timer.stop()
+            if hasattr(self, 'hover_timer') and self.hover_timer:
+                self.hover_timer.stop()
+            self.anchor_edge = None
+            self.normal_geometry = None
+            if getattr(self, 'is_hidden_state', False):
+                self.show_normal_position()
+            self.setWindowOpacity(1.0)
+        else:
+            if hasattr(self, 'hover_timer') and self.hover_timer and self.anchor_edge:
+                self.hover_timer.start()
+
+        self._save_current_filter_and_view_state()
 
     def _normalize_mode_name(self, name: Optional[str]) -> str:
         """智能规范化策略模式名称，容错 Unicode/Emoji 及空格波动"""
@@ -1796,8 +1857,50 @@ class SectorRotationMinerDialog(QDialog, WindowMixin):
         if self.isVisible():
             self.trigger_scan()
 
+    def start_slide_animation(self, target_geo: QRect, target_opacity: float = 1.0, duration: int = 220, is_snap_feedback: bool = False):
+        """高质感平滑缓动滑入与磁吸动效反馈 (对齐 DailyLimitUpDialog 与 DragonMonitor SSOT)"""
+        if hasattr(self, 'anim_group') and self.anim_group:
+            try:
+                self.anim_group.stop()
+            except Exception:
+                pass
+
+        self.anim_group = QParallelAnimationGroup(self)
+        self.geom_anim = QPropertyAnimation(self, b"geometry", self)
+        self.geom_anim.setDuration(duration)
+        self.geom_anim.setStartValue(self.geometry())
+        self.geom_anim.setEndValue(target_geo)
+        self.geom_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+        self.opacity_anim = QPropertyAnimation(self, b"windowOpacity", self)
+        self.opacity_anim.setDuration(duration)
+        self.opacity_anim.setStartValue(self.windowOpacity())
+        self.opacity_anim.setEndValue(target_opacity)
+        if is_snap_feedback:
+            self.opacity_anim.setKeyValueAt(0.5, 0.45)  # 磁吸贴边时瞬时透明度闪烁呼吸反馈
+        self.opacity_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+        self.anim_group.addAnimation(self.geom_anim)
+        self.anim_group.addAnimation(self.opacity_anim)
+        self._in_snap_action = True
+
+        def on_finished():
+            self._in_snap_action = False
+            if getattr(self, "is_hidden_state", False):
+                self.setWindowOpacity(0.35)
+            else:
+                self.setWindowOpacity(target_opacity)
+            self._save_current_filter_and_view_state()
+
+        self.anim_group.finished.connect(on_finished)
+        self.anim_group.start()
+
     def toggle_compact_mode(self, force_compact: Optional[bool] = None):
         """在【精简版样式 (Compact Mode)】与【全貌模式 (Full Mode)】之间平滑切换"""
+        # 容错处理：若从 QPushButton.clicked 传入 bool 参数 (非显式调用)，忽略该参数执行取反切换
+        if force_compact is not None and not isinstance(force_compact, bool):
+            force_compact = None
+
         if force_compact is not None:
             new_mode = bool(force_compact)
         else:
@@ -1810,6 +1913,10 @@ class SectorRotationMinerDialog(QDialog, WindowMixin):
 
         if self._is_compact_mode:
             # ── 1. 切换进入精简版样式 ──
+            # 若正处于贴边隐藏状态，先恢复正常展示
+            if getattr(self, "is_hidden_state", False):
+                self.show_normal_position()
+
             # 记忆当前全貌尺寸与坐标
             self._full_geometry = self.geometry()
 
@@ -1819,62 +1926,88 @@ class SectorRotationMinerDialog(QDialog, WindowMixin):
             self.combo_filter_mode.setVisible(False)
             self.btn_config.setVisible(False)
             self.txt_filter.setVisible(False)
+            self.combo_interval.setVisible(False)
             self.row2_widget.setVisible(False)
             self.lbl_compact_title.setVisible(True)
 
-            # 按钮文字与高亮切换为【🖥️ 恢复全貌】
+            # 按钮精炼以适配紧凑卡片宽度 (300~380px)
+            self.btn_scan.setText("🚀 挖掘")
+            self.chk_auto.setText("自动")
+            self.btn_top.setText("📌")
+            self.btn_close.setText("✕ 关闭")
+
+            # 按钮文字与高亮切换为【🖥️ 恢复全貌 (M)】
             self.btn_compact.setText("🖥️ 恢复全貌 (M)")
             self.btn_compact.setStyleSheet("""
                 QPushButton {
                     background-color: #1a3a60; color: #ffd700; border: 2px solid #ffd700;
-                    border-radius: 4px; padding: 3px 8px; font-weight: bold;
+                    border-radius: 4px; padding: 3px 6px; font-weight: bold;
                 }
                 QPushButton:hover { background-color: #234d7d; }
             """)
             self.btn_compact.setToolTip("当前处于精简盯盘卡片模式。点击一键恢复完整双表大工作台全貌 (快捷键 M)")
 
-            # 表格列精简折叠
+            # 表格列精简折叠并优化紧凑看盘列宽
             # 上半区板块表：只保留 0(板块名称), 3(板块均涨), 5(领涨龙头)
             for c in range(self.sectors_table.columnCount()):
                 self.sectors_table.setColumnHidden(c, c not in (0, 3, 5))
+            self.sectors_table.setColumnWidth(0, 95)
+            self.sectors_table.setColumnWidth(3, 60)
+            self.sectors_table.setColumnWidth(5, 140)
+
             # 下半区候选表：只保留 0(代码), 1(名称), 3(启动形态), 5(涨幅), 9(量比)
             for c in range(self.candidates_table.columnCount()):
                 self.candidates_table.setColumnHidden(c, c not in (0, 1, 3, 5, 9))
+            self.candidates_table.setColumnWidth(0, 55)
+            self.candidates_table.setColumnWidth(1, 65)
+            self.candidates_table.setColumnWidth(3, 90)
+            self.candidates_table.setColumnWidth(5, 55)
+            self.candidates_table.setColumnWidth(9, 50)
 
-            # 放开最小尺寸并调整为紧凑窗口
-            self.setMinimumSize(320, 350)
+            # 放开最小尺寸并平滑调整为紧凑卡片
+            self.setMinimumSize(300, 320)
 
-            # 恢复保存的精简尺寸，若无则自适应贴靠屏幕右侧黄金看盘位
+            # 恢复保存的精简尺寸，若无则自适应平滑贴靠屏幕右侧黄金看盘位
             saved_compact_geo = load_config_node("sector_miner_compact_geo", None)
             if saved_compact_geo and len(saved_compact_geo) == 4:
-                self.setGeometry(QRect(*saved_compact_geo))
+                target_geo = QRect(*saved_compact_geo)
             else:
                 screen = self.screen() or QApplication.primaryScreen()
                 s_geo = screen.availableGeometry() if screen else QRect(0, 0, 1920, 1080)
-                comp_w = 380
-                comp_h = min(680, s_geo.height() - 80)
+                comp_w = 370
+                comp_h = min(660, s_geo.height() - 80)
                 comp_x = max(s_geo.left(), s_geo.right() - comp_w - 10)
                 comp_y = s_geo.top() + 40
-                self.setGeometry(QRect(comp_x, comp_y, comp_w, comp_h))
+                target_geo = QRect(comp_x, comp_y, comp_w, comp_h)
 
-            # 精简模式默认开启置顶，作为盯盘利器
-            if not self.btn_top.isChecked():
-                self.btn_top.setChecked(True)
-                self._toggle_stay_on_top(True)
+            self.start_slide_animation(target_geo, 1.0, duration=220)
+            self.normal_geometry = target_geo
 
-            self.status_bar.setText("🧲 已切换为精简盯盘卡片模式. 点击【🖥️ 恢复全貌】或按 M 键还原.")
+            # 【用户明确需求：精简模式不要直接自动置顶，置顶手动选择】
+            # 完全保留用户当前的置顶设置，不再强制修改 self.btn_top
+
+            self.status_bar.setText("🧲 精简盯盘模式: 点击【🖥️ 恢复全貌 (M)】或按 M 键还原.")
         else:
             # ── 2. 恢复全貌模式 ──
+            # 若正处于贴边隐藏状态，先恢复正常展示
+            if getattr(self, "is_hidden_state", False):
+                self.show_normal_position()
+
             # 记忆当前精简尺寸
             self._compact_geometry = self.geometry()
 
-            # 还原控件可见性
+            # 还原控件可见性与完整文案
             self.lbl_compact_title.setVisible(False)
             self.lbl_title.setVisible(True)
+            self.btn_scan.setText("🚀 一键深度挖掘")
+            self.chk_auto.setText("自动刷新")
+            self.combo_interval.setVisible(True)
             self.lbl_mode.setVisible(True)
             self.combo_filter_mode.setVisible(True)
             self.btn_config.setVisible(True)
             self.txt_filter.setVisible(True)
+            self.btn_top.setText("📌 置顶 (T)")
+            self.btn_close.setText("✕ 关闭 (Esc)")
             self.row2_widget.setVisible(True)
 
             # 按钮文字还原
@@ -1899,62 +2032,219 @@ class SectorRotationMinerDialog(QDialog, WindowMixin):
 
             # 恢复全貌几何位置
             if self._full_geometry:
-                self.setGeometry(self._full_geometry)
+                target_geo = self._full_geometry
             else:
                 saved_full_geo = load_config_node("sector_miner_full_geo", None)
                 if saved_full_geo and len(saved_full_geo) == 4:
-                    self.setGeometry(QRect(*saved_full_geo))
+                    target_geo = QRect(*saved_full_geo)
                 else:
-                    self.resize(1180, 720)
+                    target_geo = QRect(self.x(), self.y(), 1180, 720)
 
+            self.start_slide_animation(target_geo, 1.0, duration=220)
+            self.normal_geometry = target_geo
             self.status_bar.setText("🖥️ 已恢复完整双表大工作台全貌.")
 
         self._save_current_filter_and_view_state()
 
-    def moveEvent(self, event):
-        """窗口移动时启动磁吸吸附防抖检测"""
-        super().moveEvent(event)
-        if hasattr(self, '_snap_timer') and not getattr(self, '_is_snapping', False):
-            self._snap_timer.start()
-
     def _detect_and_snap(self):
-        """边缘磁吸贴齐检测：靠近屏幕边缘 (<35px) 自动贴边吸附"""
+        """边缘磁吸贴齐检测：靠近屏幕边缘 (<25px) 自动贴边吸附并提供动效反馈 (对齐 ATS SSOT)"""
+        # 【置顶与磁吸严格互斥】：置顶状态下完全禁用磁吸贴边功能，保持自由悬浮置顶
+        if getattr(self, "stays_on_top", False) or getattr(self, "is_hidden_state", False):
+            return
+
         if QApplication.mouseButtons() & Qt.MouseButton.LeftButton:
-            # 鼠标仍按住拖拽中，延后检测
-            self._snap_timer.start()
+            if hasattr(self, 'snap_timer'):
+                self.snap_timer.start(300)
             return
 
         screen = self.screen() or QApplication.primaryScreen()
         if not screen:
             return
-        s_geo = screen.availableGeometry()
-        w_geo = self.geometry()
-        margin = 35
+        screen_geo = screen.availableGeometry()
+        win_geo = self.geometry()
+        margin = 25  # 调优为更自然的 25px 阈值，避免误吸
 
-        target_x = w_geo.left()
-        target_y = w_geo.top()
         snapped = False
+        edge = None
+        target_x = win_geo.left()
+        target_y = win_geo.top()
 
-        # 检测顶边吸附
-        if abs(w_geo.top() - s_geo.top()) < margin:
-            target_y = s_geo.top()
+        if abs(win_geo.top() - screen_geo.top()) < margin:
+            edge = "top"
+            target_y = screen_geo.top()
             snapped = True
-        # 检测左边吸附
-        if abs(w_geo.left() - s_geo.left()) < margin:
-            target_x = s_geo.left()
+        elif abs(win_geo.left() - screen_geo.left()) < margin:
+            edge = "left"
+            target_x = screen_geo.left()
             snapped = True
-        # 检测右边吸附
-        elif abs(w_geo.right() - s_geo.right()) < margin:
-            target_x = s_geo.right() - w_geo.width()
+        elif abs(win_geo.right() - screen_geo.right()) < margin:
+            edge = "right"
+            target_x = screen_geo.right() - win_geo.width()
             snapped = True
 
-        if snapped and (target_x != w_geo.left() or target_y != w_geo.top()):
-            self._is_snapping = True
-            try:
-                self.move(target_x, target_y)
-                self.status_bar.setText(f"🧲 窗口已自动磁吸贴边 (X:{target_x}, Y:{target_y})")
-            finally:
-                self._is_snapping = False
+        self._is_dragging = False
+        if snapped:
+            self.anchor_edge = edge
+            self.normal_geometry = QRect(target_x, target_y, win_geo.width(), win_geo.height())
+            self.start_slide_animation(self.normal_geometry, 1.0, duration=200, is_snap_feedback=True)
+            edge_desc = {"top": "顶部", "left": "左侧", "right": "右侧"}.get(edge, edge)
+            self.status_bar.setText(f"🧲 窗口已平滑磁吸贴齐屏幕{edge_desc} (X:{target_x}, Y:{target_y})")
+            # 仅在进入贴边后激活悬停检测
+            if hasattr(self, 'hover_timer') and self.hover_timer and not self.hover_timer.isActive():
+                self.hover_timer.start()
+        else:
+            self.anchor_edge = None
+            self.normal_geometry = None
+            # 脱离贴边进入屏幕常规区域，彻底停止悬停定时器，0 开销
+            if hasattr(self, 'hover_timer') and self.hover_timer and self.hover_timer.isActive():
+                self.hover_timer.stop()
+        self._save_current_filter_and_view_state()
+
+    def hide_to_edge(self):
+        """贴边自动折叠隐藏为 5px 边缘感应条 (对齐 ATS SSOT)"""
+        if getattr(self, "stays_on_top", False) or not self.anchor_edge or getattr(self, "is_hidden_state", False) or not self.normal_geometry:
+            return
+
+        screen = self.screen() or QApplication.primaryScreen()
+        if not screen:
+            return
+        screen_geo = screen.availableGeometry()
+
+        w = self.normal_geometry.width()
+        h = self.normal_geometry.height()
+        x = self.normal_geometry.x()
+        y = self.normal_geometry.y()
+        strip_size = 5
+
+        if self.anchor_edge == "left":
+            target_x = screen_geo.left() - w + strip_size
+            target_y = y
+        elif self.anchor_edge == "right":
+            target_x = screen_geo.right() - strip_size
+            target_y = y
+        elif self.anchor_edge == "top":
+            target_x = x
+            target_y = screen_geo.top() - h + strip_size
+        else:
+            return
+
+        self.is_hidden_state = True
+        if hasattr(self, 'hover_timer') and self.hover_timer and not self.hover_timer.isActive():
+            self.hover_timer.start()
+        self.start_slide_animation(QRect(target_x, target_y, w, h), 0.35, duration=300)
+
+    def show_normal_position(self):
+        """从边缘感应条平滑滑出展开 (对齐 ATS SSOT)"""
+        if getattr(self, "is_hidden_state", False):
+            self.is_hidden_state = False
+            self._is_auto_popping = True
+            QTimer.singleShot(500, lambda: setattr(self, '_is_auto_popping', False))
+            self._last_show_time = time.time()
+            self._has_hovered_since_show = False
+            if self.normal_geometry:
+                self.start_slide_animation(self.normal_geometry, 1.0, duration=200)
+            self.setWindowOpacity(1.0)
+        else:
+            self.setWindowOpacity(1.0)
+
+        if self.isMinimized():
+            self.showNormal()
+        else:
+            self.show()
+        self.raise_()
+        self.activateWindow()
+        self._save_current_filter_and_view_state()
+
+    def _check_hover(self):
+        """鼠标悬停与移开检测 (对齐 ATS SSOT)"""
+        # 【置顶与磁吸严格互斥】：置顶状态下不执行任何贴边或离开折叠检测，立即休眠
+        if not self.isVisible() or getattr(self, "stays_on_top", False):
+            if hasattr(self, 'hover_timer') and self.hover_timer and self.hover_timer.isActive():
+                self.hover_timer.stop()
+            return
+
+        # 仅在有贴边锚定边缘或处于贴边隐藏状态时才执行悬浮检测，其余时刻 0 开销休眠
+        if not self.anchor_edge and not getattr(self, "is_hidden_state", False):
+            if hasattr(self, 'hover_timer') and self.hover_timer and self.hover_timer.isActive():
+                self.hover_timer.stop()
+            return
+
+        if QApplication.mouseButtons() & Qt.MouseButton.LeftButton:
+            self.leave_ticks = 0
+            self.hover_ticks = 0
+            return
+
+        from PyQt6.QtGui import QCursor
+        mouse_pos = QCursor.pos()
+        in_window = self.frameGeometry().contains(mouse_pos)
+
+        if in_window:
+            self._has_hovered_since_show = True
+
+        if getattr(self, "is_hidden_state", False):
+            if in_window:
+                self.hover_ticks += 1
+                if self.hover_ticks >= 2:  # 悬停 200ms 自动滑出展开
+                    self.show_normal_position()
+                    self.hover_ticks = 0
+            else:
+                self.hover_ticks = 0
+        else:
+            if self.anchor_edge is not None:
+                if not in_window:
+                    if not getattr(self, '_has_hovered_since_show', False):
+                        self.leave_ticks = 0
+                        return
+                    if time.time() - getattr(self, '_last_show_time', 0.0) < 1.2:
+                        self.leave_ticks = 0
+                        return
+
+                    self.leave_ticks += 1
+                    if self.leave_ticks >= 4:  # 移开 400ms 自动折叠
+                        self.hide_to_edge()
+                        self.leave_ticks = 0
+                else:
+                    self.leave_ticks = 0
+
+    def moveEvent(self, event):
+        """窗口移动事件 (对齐 ATS SSOT)"""
+        super().moveEvent(event)
+        # 【置顶与磁吸严格互斥】：置顶状态下绝对禁止触发磁吸贴边
+        if getattr(self, "stays_on_top", False):
+            if hasattr(self, 'snap_timer') and self.snap_timer:
+                self.snap_timer.stop()
+            self.anchor_edge = None
+            self.normal_geometry = None
+            return
+        if not getattr(self, "is_hidden_state", False) and not getattr(self, "_in_snap_action", False):
+            self._is_dragging = True
+            self.anchor_edge = None
+            if hasattr(self, 'snap_timer'):
+                self.snap_timer.start(300)
+
+    def changeEvent(self, event):
+        """窗体事件：激活时从隐藏边缘自动唤醒 (对齐 ATS SSOT)"""
+        super().changeEvent(event)
+        if event.type() == event.Type.ActivationChange:
+            if self.isActiveWindow() and getattr(self, 'is_hidden_state', False):
+                self._is_auto_popping = True
+                QTimer.singleShot(500, lambda: setattr(self, '_is_auto_popping', False))
+                self.show_normal_position()
+
+    def showEvent(self, event):
+        """窗体显示事件"""
+        super().showEvent(event)
+        if (self.anchor_edge is not None or getattr(self, "is_hidden_state", False)) and not getattr(self, "stays_on_top", False):
+            if hasattr(self, 'hover_timer') and self.hover_timer and not self.hover_timer.isActive():
+                self.hover_timer.start()
+
+    def hideEvent(self, event):
+        """窗体隐藏事件"""
+        if hasattr(self, 'hover_timer') and self.hover_timer and self.hover_timer.isActive():
+            self.hover_timer.stop()
+        if hasattr(self, 'snap_timer') and self.snap_timer and self.snap_timer.isActive():
+            self.snap_timer.stop()
+        super().hideEvent(event)
 
     def keyPressEvent(self, event):
         """键盘事件：放行 Alt+R 专用于系统视窗轮转，支持 T 置顶，M 精简/全貌，F5 刷新，Alt+W 审核，Esc 退出"""
@@ -1972,7 +2262,7 @@ class SectorRotationMinerDialog(QDialog, WindowMixin):
             event.accept()
             return
 
-        # 🚀 支持 M 键快速切换精简/全貌模式
+        # 🚀 支持 M 键快速切换精简/全貌模式 (兜底)
         if key == Qt.Key.Key_M and not (modifiers & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier)):
             from ats.ui.styles import is_editing_text
             if not is_editing_text(self):
@@ -1985,10 +2275,11 @@ class SectorRotationMinerDialog(QDialog, WindowMixin):
             event.accept()
             return
 
+        # 🚀 支持 T 键快速切换置顶 (兜底)
         if key == Qt.Key.Key_T and not (modifiers & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier)):
             from ats.ui.styles import is_editing_text
             if not is_editing_text(self):
-                self.btn_top.toggle()
+                self._toggle_stay_on_top()
                 event.accept()
                 return
 
@@ -1997,8 +2288,10 @@ class SectorRotationMinerDialog(QDialog, WindowMixin):
     def closeEvent(self, event):
         """窗口关闭时全量原子持久化当前策略、自定义参数、刷新频率与视图几何"""
         self.refresh_timer.stop()
-        if hasattr(self, '_snap_timer'):
-            self._snap_timer.stop()
+        if hasattr(self, 'snap_timer'):
+            self.snap_timer.stop()
+        if hasattr(self, 'hover_timer'):
+            self.hover_timer.stop()
         self._save_current_filter_and_view_state()
         self.save_window_position_qt(self, "sector_rotation_miner_dialog")
         event.accept()
