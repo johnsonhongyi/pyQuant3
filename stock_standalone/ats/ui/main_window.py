@@ -3381,14 +3381,16 @@ class ATSMainWindow(QMainWindow):
             if hasattr(self, "_sector_detail_dialog") and self._sector_detail_dialog and not isdeleted(self._sector_detail_dialog):
                 dialog = self._sector_detail_dialog
                 dialog.sector_name = name
-                dialog.setWindowTitle(f"🔥 {name} 板块明细 (Real-time Sector Details)")
                 dialog.member_codes = member_codes or []
                 dialog._orig_member_codes = list(member_codes) if member_codes else None
                 dialog.full_view_enabled = False  # 默认关闭全景展示，使用资金主线传递过滤
                 if hasattr(dialog, '_update_full_view_button_ui'):
                     dialog._update_full_view_button_ui()
                 dialog.update_data(current_df)
-                dialog.show()
+                if dialog.isMinimized():
+                    dialog.showNormal()
+                elif not dialog.isVisible():
+                    dialog.show()
                 dialog.raise_()
                 dialog.activateWindow()
                 return

@@ -459,7 +459,21 @@ def test_sector_detail_full_view_toggle_and_status_text(qapp):
     assert dlg.full_view_enabled is False
     assert dlg.btn_full_view.text() == "🌐 全景展示 (关)"
     assert set(dlg.member_codes) == {'688981', '002371'}
+    dlg._stop_worker(wait_timeout_ms=1500)
 
+    # 5. 验证未加载完成时先不显示板块名称（防误判机制）以及底部更新用时展示
+    dlg_fresh = ATSSectorDetailDialog(sector_name="低空经济", member_codes=['000099'])
+    # 初始未加载完成前，标题必须为占位状态，避免误判
+    assert dlg_fresh.title_lbl.text() == "板块名称: 数据加载中..."
+    assert dlg_fresh.lbl_elapsed_time is not None
+
+    # 加载数据后，板块名称与耗时正式呈现
+    dlg_fresh.load_data(df_realtime=df_pool)
+    assert dlg_fresh.title_lbl.text() == "板块名称: 低空经济"
+    assert "⏱️ 耗时:" in dlg_fresh.lbl_elapsed_time.text()
+
+    dlg_fresh._stop_worker(wait_timeout_ms=1500)
+    dlg_fresh.close()
     dlg.close()
 
 
