@@ -337,6 +337,9 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         # 键盘上下键与单元格平滑防抖联动
         self._pending_linkage_row: int = -1
         self._last_emitted_code: str = ""
+        self._last_linked_code: Optional[str] = None
+        self._last_linked_date: Optional[str] = None
+        self._last_linked_time: float = 0.0
         self._is_populating: bool = False
         self._linkage_timer = QTimer(self)
         self._linkage_timer.setInterval(60)
@@ -2526,8 +2529,7 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
             return
         c = self.current_top_leader_code
         n = self.current_top_leader_name
-        self.code_clicked.emit(c, n)
-        self._broadcast_link_stock(c, n)
+        self._broadcast_link_stock(c, n, force=True)
 
         # 遍历表格，高亮并滚动到该龙头股票所在行
         found = False
@@ -2917,31 +2919,54 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
             self.table.setUpdatesEnabled(True)
 
     def _on_current_cell_changed(self, currentRow: int, currentColumn: int, previousRow: int, previousColumn: int):
-        """键盘上下键导航与鼠标点击行统一防抖入口"""
-        if self._is_populating or currentRow < 0:
+        """键盘上下键导航与鼠标点击行统一防抖入口 (即时更新状态栏决策提示，防抖合并真实切股联动)"""
+        if self._is_populating or currentRow < 0 or currentRow >= self.table.rowCount():
             return
+
+        # 0. 视觉即时响应：状态栏决策提示 0ms 更新 (现价、梯队、封流比、Alt+C 挂单提示)
+        code_item = self.table.item(currentRow, 0)
+        name_item = self.table.item(currentRow, 1)
+        if code_item:
+            code = code_item.text().strip().zfill(6)
+            name = name_item.text().strip() if name_item else code
+            price_item = self.table.item(currentRow, 2)
+            pct_item = self.table.item(currentRow, 3)
+            tier_item = self.table.item(currentRow, 5)
+            seal_item = self.table.item(currentRow, 8)
+            price_str = price_item.text().strip() if price_item else "--"
+            pct_str = pct_item.text().strip() if pct_item else "--"
+            tier_str = tier_item.text().strip() if tier_item else ""
+            seal_str = seal_item.text().strip() if seal_item else "--"
+            self.lbl_status.setText(f"【选定】{code} {name} | 现价:{price_str} ({pct_str}) | 梯队:{tier_str} | 封流比:{seal_str}% | [按Alt+C一键挂单]")
+            self.lbl_status.setStyleSheet("color: #00ffcc; font-weight: bold; font-size: 9pt;")
+
+        # 1. 行级防抖过滤：若同一行内切换不同列，绝不重复触发联动
         if currentRow == self._pending_linkage_row:
             return
         self._pending_linkage_row = currentRow
         self._linkage_timer.start()
 
     def _fire_linkage_debounced(self):
-        """防抖定时器到期后执行真实切股联动"""
+        """防抖定时器到期后执行真实切股联动 (跟随系统底层联动逻辑，同 code 绝不重复触发)"""
         row = self._pending_linkage_row
         if row < 0 or self._is_populating or row >= self.table.rowCount():
             return
         code_item = self.table.item(row, 0)
         name_item = self.table.item(row, 1)
-        if code_item:
-            c = code_item.text().strip()
-            n = name_item.text().strip() if name_item else c
-            if c and c != "N/A" and c != self._last_emitted_code:
-                self._last_emitted_code = c
-                self.code_clicked.emit(c, n)
-                h_date = self._get_active_history_date_if_not_latest()
-                self._broadcast_link_stock(c, n, date=h_date)
-                date_tip = f" [{h_date}]" if h_date else ""
-                self.lbl_status.setText(f"🔗 已联动: {c} {n}{date_tip} (第 {row+1}/{self.table.rowCount()} 行)")
+        if not code_item:
+            return
+        c = code_item.text().strip().zfill(6)
+        n = name_item.text().strip() if name_item else c
+        if not c or c == "N/A":
+            return
+        h_date = self._get_active_history_date_if_not_latest()
+        # 底层联动逻辑：同样的 code (且同日期) 绝不触发外部物理联动
+        if c == getattr(self, "_last_linked_code", None) and h_date == getattr(self, "_last_linked_date", None):
+            return
+        self._last_emitted_code = c
+        self._broadcast_link_stock(c, n, date=h_date)
+        date_tip = f" [{h_date}]" if h_date else ""
+        self.lbl_status.setText(f"🔗 已联动: {c} {n}{date_tip} (第 {row+1}/{self.table.rowCount()} 行)")
 
     def _get_active_history_date_if_not_latest(self) -> Optional[str]:
         """获取当前生效的历史回溯日期 (仅当选择的历史回溯日期不是最近的交易日时返回具体日期，否则返回 None)"""
@@ -2997,34 +3022,59 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
                 pass
         threading.Thread(target=_send, daemon=True).start()
 
-    def _broadcast_link_stock(self, code: str, name: str = "", date: Optional[str] = None):
-        """向全局主窗口与外部行情终端广播联动 (统一走 ATS 联动体系，尊重 cb_tdx/cb_ths/cb_vis 开关)"""
+    def _broadcast_link_stock(self, code: str, name: str = "", date: Optional[str] = None, force: bool = False):
+        """向全局主窗口与外部行情终端广播联动 (统一走 ATS 联动体系，尊重 cb_tdx/cb_ths/cb_vis 开关，单通道派发杜绝重复)"""
         try:
+            code_clean = "".join(filter(str.isdigit, str(code))).zfill(6)
+            if not code_clean:
+                return
+
             if not date:
                 date = self._get_active_history_date_if_not_latest()
 
-            # 1. 优先使用 parent 主窗口联动
-            main_win = getattr(self, '_py_parent', None)
+            # 0. 遵循系统底层联动逻辑：相同的 code (且日期一致) 绝不重复触发物理联动 (除非 force=True)
+            last_code = getattr(self, "_last_linked_code", None)
+            last_date = getattr(self, "_last_linked_date", None)
+            now = time.time()
+            if not force and last_code == code_clean and last_date == date:
+                return
+            self._last_linked_code = code_clean
+            self._last_linked_time = now
+            self._last_linked_date = date
+
+            # 发射 Qt 信号通知外部监听 (供主界面/测试用例统一监听)
+            self.code_clicked.emit(code_clean, name)
+
+            # 1. 单通道分发机制：优先使用 parent 主窗口联动 (杜绝双重调用)
+            main_win = getattr(self, '_py_parent', None) or (self.parent() if hasattr(self, 'parent') else None)
             if main_win and hasattr(main_win, "link_stock"):
                 try:
-                    main_win.link_stock(code, name, date=date)
+                    main_win.link_stock(code_clean, name, date=date, force=force)
                 except TypeError:
-                    main_win.link_stock(code, name)
+                    try:
+                        main_win.link_stock(code_clean, name, date=date)
+                    except TypeError:
+                        main_win.link_stock(code_clean, name)
                 return
+
             # 2. 从全局 QApplication 获取 ATSMainWindow 统一分发联动 (含外部终端开关与VIS通信)
             from ats.ui.main_window import ATSMainWindow
             app = QApplication.instance()
             if hasattr(app, 'main_window') and isinstance(app.main_window, ATSMainWindow):
                 try:
-                    app.main_window.link_stock(code, name, date=date)
+                    app.main_window.link_stock(code_clean, name, date=date, force=force)
                 except TypeError:
-                    app.main_window.link_stock(code, name)
+                    try:
+                        app.main_window.link_stock(code_clean, name, date=date)
+                    except TypeError:
+                        app.main_window.link_stock(code_clean, name)
                 return
+
             # 3. 兜底保护：若脱离 ATS 独立运行，直接向 trade_visualizer_qt6 发送 socket 指令，并推送 TDX
-            self._send_to_visualizer_direct(code, date=date)
+            self._send_to_visualizer_direct(code_clean, date=date)
             from linkage_service import get_link_manager
             if get_link_manager:
-                get_link_manager().push(code, flags={'tdx': True, 'ths': False, 'dfcf': False})
+                get_link_manager().push(code_clean, flags={'tdx': True, 'ths': False, 'dfcf': False})
         except Exception as ex:
             logger.debug(f"天梯联动广播异常: {ex}")
 
@@ -3104,7 +3154,6 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         if code_item and name_item:
             c = code_item.text().strip()
             n = name_item.text().strip()
-            self.code_clicked.emit(c, n)
             self._broadcast_link_stock(c, n)
 
     def _on_cell_double_clicked(self, row: int, col: int):
@@ -3353,8 +3402,7 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         elif action == act_trade_flow:
             self._open_trade_flow()
         elif act_link and action == act_link:
-            self.code_clicked.emit(clean_c, clean_n)
-            self._broadcast_link_stock(clean_c, clean_n)
+            self._broadcast_link_stock(clean_c, clean_n, force=True)
         elif act_sbc and action == act_sbc:
             try:
                 from ats.ui.intraday_strategy_dialog import open_sbc_chart_dialog
@@ -3415,31 +3463,6 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
             logger.error(f"打开交易流水异常: {e}")
 
 
-    def _on_current_cell_changed(self, row: int, col: int, prev_row: int, prev_col: int):
-        """响应键盘上下键或鼠标点击切换行，防抖联动外部终端并在底部状态栏展示决策提示"""
-        if row < 0 or row >= self.table.rowCount():
-            return
-        code_item = self.table.item(row, 0)
-        name_item = self.table.item(row, 1)
-        price_item = self.table.item(row, 2)
-        pct_item = self.table.item(row, 3)
-        tier_item = self.table.item(row, 5)
-        seal_item = self.table.item(row, 8)
-
-        if not code_item:
-            return
-        code = code_item.text().strip().zfill(6)
-        name = name_item.text().strip() if name_item else code
-        price_str = price_item.text().strip() if price_item else "--"
-        pct_str = pct_item.text().strip() if pct_item else "--"
-        tier_str = tier_item.text().strip() if tier_item else ""
-        seal_str = seal_item.text().strip() if seal_item else "--"
-
-        self.lbl_status.setText(f"【选定】{code} {name} | 现价:{price_str} ({pct_str}) | 梯队:{tier_str} | 封流比:{seal_str}% | [按Alt+C一键挂单]")
-        self.lbl_status.setStyleSheet("color: #00ffcc; font-weight: bold; font-size: 9pt;")
-        
-        self.code_clicked.emit(code, name)
-        self._broadcast_link_stock(code, name)
 
     def _on_cell_double_clicked(self, row: int, col: int):
         """双击打开 SBC 日内分时走势图"""

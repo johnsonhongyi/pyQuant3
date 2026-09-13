@@ -1,3 +1,42 @@
+## 2026-09-13 13:40
+- [x] **【彻底解决天梯与板块轮动触发两次联动Bug & 全面对齐系统底层联动逻辑 (SSOT)】(SSOT) (`ats/ui/daily_limit_up_dialog.py`, `ats/ui/sector_rotation_miner_dialog.py`, `ats/ui/main_window.py`)**：
+    - [x] **四重致命断层根因穿透**：
+        1. **天梯后置同名函数覆盖**：`daily_limit_up_dialog.py` 第 3418 行重复定义了 `_on_current_cell_changed`，因 Python 类动态机制无条件覆盖了第 2919 行原有的 60ms 定时器防抖和去重入口，导致单元格切换直接裸奔执行；
+        2. **信号与广播成对双发导致主界面被连续调用**：天梯多处代码成对执行 `self.code_clicked.emit(code, name)` 与 `self._broadcast_link_stock(code, name)`，且前者未传日期（`date=None`）后者带历史回溯日期，因参数差异直接击穿了主界面的 200ms 防抖，向外部终端连续发射两次；
+        3. **板块轮动内部串行轰炸**：`SectorRotationMinerDialog._broadcast_link_stock` 缺乏单通道短路，主窗口接管后仍继续开线程发 26668 socket 并调用 `link_manager.push` 和 `cct.to_toptdx`，导致单次点击被轰炸 3~4 次；
+        4. **底层防重逻辑认知偏差**：此前仅判定 0.2s 时间差，违背了系统底层“同样的 code 绝不触发外部物理联动”的铁律（操盘手 1s 后再点同一只股票又被刷新切屏一次）；
+    - [x] **系统性重构与单一通道彻底治理**：
+        1. **清理同名覆盖**：删除第 3418 行冗余方法，将状态栏决策提示合并入第 2919 行，全量恢复单一定时器（`_linkage_timer`）防抖合并机制；
+        2. **单一通道广播**：消除“信号+直调”成对双发，统一收拢为单一 `_broadcast_link_stock`，在轮动深挖中只要主窗口接管即刻 `return`，物理斩断多余广播通道；
+        3. **全系统底层防重对齐**：在 `ATSMainWindow.link_stock`、`DailyLimitUpDialog` 和 `SectorRotationMinerDialog` 入口处严格增加 `if not force and last_code == code_clean and last_date == date: return`，**同一代码绝不触发外部物理联动**，同时保留双击与右键菜单 `force=True` 强制执行通道；
+    - [x] **自动化测试 27/27 PASSED**：
+        1. `test_daily_limit_up_dialog.py` (12/12) + `test_sector_rotation_pullback_miner.py` (15/15) 全部 100% 全绿通过！
+
+## 2026-09-13 13:25
+- [x] **【彻底解决策略选择持久化记忆失效Bug & 落地磁吸模式与精简版样式 (Compact/Full View)】(SSOT) (`ats/ui/sector_rotation_miner_dialog.py`, `tests/test_sector_rotation_pullback_miner.py`)**：
+    - [x] **操盘手反馈痛点根因穿透**：
+        1. **策略持久化失效与被覆盖陷阱**：
+           - 此前 `closeEvent` 中仅保存了窗口几何坐标，未将当前选中的策略模式（`sector_miner_filter_mode`）、自定义微调参数（`sector_miner_custom_filter`）以及自动刷新状态进行全量退出原子落盘；
+           - 测试运行未做现场备份还原，执行时会把物理配置覆盖为测试项；
+           - 策略模式名称缺乏智能容错规范化，Emoji/Unicode 空格波动易导致退化为默认；
+        2. **缺乏磁吸与精简盯盘卡片模式**：
+           - 1180x720 大窗口在盯盘时会遮挡通达信/同花顺 K 线与盘口；
+           - 操盘手急需：在需要时能一键切为高密度精简卡片贴边置顶盯盘，随时可一键还原大工作台全貌；
+    - [x] **落地工程级策略持久化记忆与磁吸/精简/全貌双向自由切换**：
+        1. **策略与参数全生命周期原子落盘 (`_save_current_filter_and_view_state`)**：
+           - 下拉框切换、微调保存、窗口关闭 (`closeEvent`) 时，全量原子持久化当前策略模式、自定义参数字典、自动刷新开关、刷新间隔秒数、视图模式 (`full`/`compact`) 及各自的几何尺寸；
+           - 增加 `_normalize_mode_name`，对经典/极速/通道/自定义实现智能容错模糊匹配，100% 杜绝因字符差异回退默认；
+        2. **磁吸模式 (Edge Snap Mode)**：
+           - 引入 `_snap_timer` 与 `_detect_and_snap`，拖动窗口靠近屏幕左/右/顶边缘 (<35px) 时自动平滑吸附贴齐屏幕；
+        3. **精简版样式 (Compact Mode) ↔ 恢复全貌 (Full View)**：
+           - 控制栏新增 `🧲 精简 (M)` 按钮（支持快捷键 `M` 一键瞬间切换）；
+           - **精简模式**：窗口缩放为 380x580 紧凑卡片，自动隐藏全貌复杂控件与第二行副行，自动开启置顶；两张表格智能折叠宽字段，仅保留核心板块 3 列（板块、均涨、领涨龙头）与候选标的 5 列（代码、名称、形态、涨幅、量比）；
+           - **恢复全貌**：点击 `🖥️ 恢复全貌 (M)` 瞬间无缝还原 1180x720 完整双大表；
+           - **视图模式记忆**：跨会话自动记忆精简/全貌状态与各自独立坐标尺寸；
+    - [x] **全套自动化测试 15/15 PASSED**：
+        1. 专项新增 `test_15_compact_mode_and_strategy_persistence`，测试覆盖自定义参数跨会话 100% 自动恢复、精简模式切换、列折叠与恢复全貌校验；
+        2. 轮动深挖专项全套 15 项测试 100% 全部通过！
+
 ## 2026-09-13 13:15
 - [x] **【轮动深挖自动刷新全量对齐全局 cct.ats_tdx_interval 基准 (SSOT) & 支持独立微调与动态感知】(SSOT) (`ats/ui/sector_rotation_miner_dialog.py`, `tests/test_sector_rotation_pullback_miner.py`)**：
     - [x] **操盘手提问与机制穿透**：

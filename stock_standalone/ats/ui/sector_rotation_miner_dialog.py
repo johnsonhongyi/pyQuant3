@@ -30,7 +30,7 @@ from PyQt6.QtWidgets import (
     QSplitter, QCheckBox, QComboBox, QLineEdit, QMenu, QApplication,
     QFrame, QMessageBox, QDoubleSpinBox, QFormLayout, QGroupBox, QDialogButtonBox
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QThread, QPoint, QEvent
+from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QThread, QPoint, QEvent, QRect
 from PyQt6.QtGui import QColor, QFont, QBrush, QKeySequence, QShortcut
 import pandas as pd
 
@@ -417,6 +417,27 @@ class SectorRotationMinerDialog(QDialog, WindowMixin):
         self._worker: Optional[MinerWorkerThread] = None
         self._current_filter_config: PullbackFilterConfig = PRESET_FILTER_MODES["🎯 经典标准"]
 
+        # 视图模式（精简 vs 全貌）与磁吸贴边状态
+        self._is_compact_mode: bool = False
+        self._full_geometry = None
+        self._compact_geometry = None
+        self._is_snapping: bool = False
+
+        # 联动记忆与防抖 (遵循系统底层联动逻辑：相同 code 绝不触发外部联动)
+        self._last_linked_code: Optional[str] = None
+        self._last_linked_date: Optional[str] = None
+        self._last_linked_time: float = 0.0
+
+        # 磁吸贴边防抖定时器 (拖拽后 200ms 检测靠近屏幕边缘贴边)
+        self._snap_timer = QTimer(self)
+        self._snap_timer.setSingleShot(True)
+        self._snap_timer.setInterval(200)
+        self._snap_timer.timeout.connect(self._detect_and_snap)
+
+        # 自动刷新定时器
+        self.refresh_timer = QTimer(self)
+        self.refresh_timer.timeout.connect(self._on_auto_refresh)
+
         # 初始化 UI 与快捷键
         self._init_ui()
         self._init_shortcuts()
@@ -429,9 +450,10 @@ class SectorRotationMinerDialog(QDialog, WindowMixin):
         setup_header_persistence(self.sectors_table, "sector_miner_sectors_header")
         setup_header_persistence(self.candidates_table, "sector_miner_candidates_header")
 
-        # 自动刷新定时器
-        self.refresh_timer = QTimer(self)
-        self.refresh_timer.timeout.connect(self._on_auto_refresh)
+        # 恢复持久化的视图模式 (若上次退出为精简模式，则自适应切换)
+        saved_view = load_config_node("sector_miner_view_mode", "full")
+        if saved_view == "compact":
+            self.toggle_compact_mode(force_compact=True)
 
         # 首次加载数据
         if self.current_df is not None and not self.current_df.empty:
@@ -456,9 +478,14 @@ class SectorRotationMinerDialog(QDialog, WindowMixin):
         row1_layout.setContentsMargins(0, 0, 0, 0)
         row1_layout.setSpacing(6)
 
-        lbl_title = QLabel("🔥 轮动深挖与回踩启动")
-        lbl_title.setStyleSheet("font-size: 10.5pt; font-weight: bold; color: #ffd700;")
-        row1_layout.addWidget(lbl_title)
+        self.lbl_title = QLabel("🔥 轮动深挖与回踩启动")
+        self.lbl_title.setStyleSheet("font-size: 10.5pt; font-weight: bold; color: #ffd700;")
+        row1_layout.addWidget(self.lbl_title)
+
+        self.lbl_compact_title = QLabel("🔥 轮动精简")
+        self.lbl_compact_title.setStyleSheet("font-size: 10pt; font-weight: bold; color: #ffd700;")
+        self.lbl_compact_title.setVisible(False)
+        row1_layout.addWidget(self.lbl_compact_title)
 
         row1_layout.addSpacing(6)
 
@@ -510,9 +537,9 @@ class SectorRotationMinerDialog(QDialog, WindowMixin):
         self.combo_interval.currentIndexChanged.connect(self._on_interval_changed)
         row1_layout.addWidget(self.combo_interval)
 
-        lbl_mode = QLabel("策略:")
-        lbl_mode.setStyleSheet("color: #ffd700; font-weight: bold; font-size: 9pt;")
-        row1_layout.addWidget(lbl_mode)
+        self.lbl_mode = QLabel("策略:")
+        self.lbl_mode.setStyleSheet("color: #ffd700; font-weight: bold; font-size: 9pt;")
+        row1_layout.addWidget(self.lbl_mode)
 
         self.combo_filter_mode = QComboBox()
         self.combo_filter_mode.addItems(["🎯 经典标准", "🚀 极速起爆", "💎 稳健通道低吸", "⚙️ 自定义"])
@@ -562,6 +589,18 @@ class SectorRotationMinerDialog(QDialog, WindowMixin):
         self.btn_top.toggled.connect(self._toggle_stay_on_top)
         row1_layout.addWidget(self.btn_top)
 
+        self.btn_compact = QPushButton("🧲 精简 (M)")
+        self.btn_compact.setToolTip("切换精简盯盘卡片模式 / 恢复全貌 (快捷键 M)\n支持屏幕贴边磁吸吸附、独立悬浮置顶盯盘")
+        self.btn_compact.setStyleSheet("""
+            QPushButton {
+                background-color: #23354a; color: #aadcff; border: 1px solid #3d6ea8;
+                border-radius: 4px; padding: 3px 8px; font-weight: bold;
+            }
+            QPushButton:hover { background-color: #2d4562; color: #ffffff; }
+        """)
+        self.btn_compact.clicked.connect(self.toggle_compact_mode)
+        row1_layout.addWidget(self.btn_compact)
+
         self.btn_close = QPushButton("✕ 关闭 (Esc)")
         self.btn_close.setStyleSheet("""
             QPushButton {
@@ -576,8 +615,9 @@ class SectorRotationMinerDialog(QDialog, WindowMixin):
 
         top_layout.addLayout(row1_layout)
 
-        # 1.2 策略量化简报与快捷提示副行 (Row 2，自适应伸缩)
-        row2_layout = QHBoxLayout()
+        # 1.2 策略量化简报与快捷提示副行 (Row 2，自适应伸缩容器)
+        self.row2_widget = QWidget(self)
+        row2_layout = QHBoxLayout(self.row2_widget)
         row2_layout.setContentsMargins(2, 0, 2, 0)
         row2_layout.setSpacing(6)
 
@@ -587,11 +627,11 @@ class SectorRotationMinerDialog(QDialog, WindowMixin):
 
         row2_layout.addStretch()
 
-        lbl_quick_tip = QLabel("💡 单击板块过滤/反选 | 单击领涨龙头自动联动 | ↑↓浏览 | 双击联动 | Alt+W 审计")
+        lbl_quick_tip = QLabel("💡 单击板块过滤/反选 | 单击领涨龙头自动联动 | ↑↓浏览 | 双击联动 | M精简 | Alt+W 审计")
         lbl_quick_tip.setStyleSheet("color: #778899; font-size: 8pt;")
         row2_layout.addWidget(lbl_quick_tip)
 
-        top_layout.addLayout(row2_layout)
+        top_layout.addWidget(self.row2_widget)
 
         main_layout.addWidget(top_bar)
 
@@ -718,15 +758,34 @@ class SectorRotationMinerDialog(QDialog, WindowMixin):
         set_seamless_stay_on_top(self, checked)
         self.btn_top.setChecked(checked)
 
+    def _normalize_mode_name(self, name: Optional[str]) -> str:
+        """智能规范化策略模式名称，容错 Unicode/Emoji 及空格波动"""
+        if not name or not isinstance(name, str):
+            return "🎯 经典标准"
+        name_clean = name.strip()
+        if "起爆" in name_clean or "极速" in name_clean:
+            return "🚀 极速起爆"
+        if "通道" in name_clean or "低吸" in name_clean:
+            return "💎 稳健通道低吸"
+        if "自定义" in name_clean:
+            return "⚙️ 自定义"
+        if "经典" in name_clean or "标准" in name_clean:
+            return "🎯 经典标准"
+        return name_clean
+
     def _init_filter_config(self):
         """初始化底层筛选策略配置并恢复持久化状态"""
-        saved_mode = load_config_node("sector_miner_filter_mode", "🎯 经典标准")
+        raw_saved_mode = load_config_node("sector_miner_filter_mode", "🎯 经典标准")
+        saved_mode = self._normalize_mode_name(raw_saved_mode)
         custom_dict = load_config_node("sector_miner_custom_filter", {})
 
         if saved_mode in PRESET_FILTER_MODES:
             self._current_filter_config = PRESET_FILTER_MODES[saved_mode]
-        elif saved_mode == "⚙️ 自定义" and custom_dict:
-            self._current_filter_config = PullbackFilterConfig.from_dict(custom_dict)
+        elif saved_mode == "⚙️ 自定义":
+            if custom_dict and isinstance(custom_dict, dict):
+                self._current_filter_config = PullbackFilterConfig.from_dict(custom_dict)
+            else:
+                self._current_filter_config = PullbackFilterConfig.from_dict(PRESET_FILTER_MODES["🎯 经典标准"].to_dict())
             self._current_filter_config.mode_name = "⚙️ 自定义"
         else:
             self._current_filter_config = PRESET_FILTER_MODES["🎯 经典标准"]
@@ -738,10 +797,49 @@ class SectorRotationMinerDialog(QDialog, WindowMixin):
         if idx >= 0:
             self.combo_filter_mode.setCurrentIndex(idx)
         else:
-            self.combo_filter_mode.setCurrentIndex(0)
+            best_idx = 0
+            for i in range(self.combo_filter_mode.count()):
+                if self._normalize_mode_name(self.combo_filter_mode.itemText(i)) == saved_mode:
+                    best_idx = i
+                    break
+            self.combo_filter_mode.setCurrentIndex(best_idx)
         self.combo_filter_mode.blockSignals(False)
 
+        # 自动刷新状态恢复
+        saved_auto = load_config_node("sector_miner_auto_refresh", False)
+        if saved_auto:
+            self.chk_auto.blockSignals(True)
+            self.chk_auto.setChecked(True)
+            self.chk_auto.blockSignals(False)
+            sec = self._get_selected_interval_sec()
+            self.refresh_timer.start(int(sec * 1000))
+
         self._update_mode_summary()
+
+    def _save_current_filter_and_view_state(self):
+        """线程安全、全量原子保存当前策略模式、自定义参数、刷新状态与视图布局"""
+        try:
+            cur_mode = self.combo_filter_mode.currentText()
+            payload = {
+                "sector_miner_filter_mode": cur_mode,
+                "sector_miner_view_mode": "compact" if self._is_compact_mode else "full",
+                "sector_miner_auto_refresh": self.chk_auto.isChecked(),
+                "sector_miner_refresh_interval": self._get_selected_interval_sec(),
+            }
+            if self._current_filter_config and self._current_filter_config.mode_name == "⚙️ 自定义":
+                payload["sector_miner_custom_filter"] = self._current_filter_config.to_dict()
+
+            geo = self.geometry()
+            geo_list = [geo.x(), geo.y(), geo.width(), geo.height()]
+            if self._is_compact_mode:
+                payload["sector_miner_compact_geo"] = geo_list
+            else:
+                payload["sector_miner_full_geo"] = geo_list
+
+            from ats.ui.styles import save_config_nodes
+            save_config_nodes(payload)
+        except Exception as e:
+            logger.debug(f"保存策略与视图状态异常: {e}")
 
     def _update_mode_summary(self):
         """更新策略参数简要说明"""
@@ -754,17 +852,20 @@ class SectorRotationMinerDialog(QDialog, WindowMixin):
 
     def _on_filter_mode_changed(self, index: int):
         """切换策略模式"""
-        mode_name = self.combo_filter_mode.currentText()
+        raw_mode = self.combo_filter_mode.currentText()
+        mode_name = self._normalize_mode_name(raw_mode)
         if mode_name in PRESET_FILTER_MODES:
             self._current_filter_config = PRESET_FILTER_MODES[mode_name]
-            save_config_node("sector_miner_filter_mode", mode_name)
         elif mode_name == "⚙️ 自定义":
             custom_dict = load_config_node("sector_miner_custom_filter", {})
-            if custom_dict:
+            if custom_dict and isinstance(custom_dict, dict):
                 self._current_filter_config = PullbackFilterConfig.from_dict(custom_dict)
-                self._current_filter_config.mode_name = "⚙️ 自定义"
-            save_config_node("sector_miner_filter_mode", "⚙️ 自定义")
+            else:
+                self._current_filter_config = PullbackFilterConfig.from_dict(PRESET_FILTER_MODES["🎯 经典标准"].to_dict())
+            self._current_filter_config.mode_name = "⚙️ 自定义"
+
         self._update_mode_summary()
+        self._save_current_filter_and_view_state()
         self.trigger_scan()
 
     def _open_filter_config_dialog(self):
@@ -773,8 +874,6 @@ class SectorRotationMinerDialog(QDialog, WindowMixin):
         if dlg.exec() == QDialog.DialogCode.Accepted:
             new_cfg = dlg.get_config()
             self._current_filter_config = new_cfg
-            save_config_node("sector_miner_custom_filter", new_cfg.to_dict())
-            save_config_node("sector_miner_filter_mode", new_cfg.mode_name)
 
             self.combo_filter_mode.blockSignals(True)
             idx = self.combo_filter_mode.findText(new_cfg.mode_name)
@@ -787,6 +886,7 @@ class SectorRotationMinerDialog(QDialog, WindowMixin):
             self.combo_filter_mode.blockSignals(False)
 
             self._update_mode_summary()
+            self._save_current_filter_and_view_state()
             self.trigger_scan()
 
     def update_data_payload(self, df: pd.DataFrame):
@@ -1214,11 +1314,11 @@ class SectorRotationMinerDialog(QDialog, WindowMixin):
         raw_sec = sec_item.text().strip() if sec_item else ""
         sec_name = raw_sec.replace("⭐", "").strip()
 
-        # 双击第 5 列领涨先锋龙头：直接联动龙头股票
+        # 双击第 5 列领涨先锋龙头：直接联动龙头股票 (强制执行)
         if col == 5:
             leader_code, leader_name = self._resolve_leader_code_and_name(row)
             if leader_code:
-                self._broadcast_link_stock(leader_code, leader_name)
+                self._broadcast_link_stock(leader_code, leader_name, force=True)
                 return
 
         # 双击其他列：联动可视化端过滤板块
@@ -1296,7 +1396,7 @@ class SectorRotationMinerDialog(QDialog, WindowMixin):
         if chosen == act_filter:
             self._link_sector_to_visualizer(sec)
         elif act_link_leader and chosen == act_link_leader:
-            self._broadcast_link_stock(leader_code, leader_text)
+            self._broadcast_link_stock(leader_code, leader_text, force=True)
         elif act_pipe_leader and chosen == act_pipe_leader:
             send_to_linkage(leader_code, leader_text, self)
             self.status_bar.setText(f"⚡ 已将领涨先锋发送到异动联动: {leader_text} ({leader_code})")
@@ -1351,58 +1451,67 @@ class SectorRotationMinerDialog(QDialog, WindowMixin):
         code = code_item.text().strip()
         raw_name = name_item.text().strip() if name_item else ""
         name = raw_name.replace("⭐", "").strip()
-        self._broadcast_link_stock(code, name)
+        self._broadcast_link_stock(code, name, force=True)
 
-    def _broadcast_link_stock(self, code: str, name: str = "", date: Optional[str] = None):
+    def _broadcast_link_stock(self, code: str, name: str = "", date: Optional[str] = None, force: bool = False):
         """向本地可视化终端、主系统窗口与外部行情终端多通道广播联动 (SSOT)"""
         code_clean = "".join(filter(str.isdigit, str(code))).zfill(6)
         if not code_clean:
             return
 
-        # 0. 相同股票短时间 (300ms) 防抖，避免单次点击同时触发 currentItemChanged 和 itemClicked 重复派发
+        # 0. 遵循系统底层联动逻辑：相同的 code (且日期一致) 绝不重复触发外部物理联动 (除非 force=True)
+        last_code = getattr(self, "_last_linked_code", None)
+        last_date = getattr(self, "_last_linked_date", None)
         now = time.time()
-        if getattr(self, "_last_linked_code", None) == code_clean and (now - getattr(self, "_last_linked_time", 0.0)) < 0.3:
+        if not force and last_code == code_clean and last_date == date:
             return
         self._last_linked_code = code_clean
         self._last_linked_time = now
+        self._last_linked_date = date
 
-        # 1. 发射 Qt 信号通知外部监听
+        # 发射 Qt 信号通知外部监听
         self.code_clicked.emit(code_clean)
 
-        # 2. 优先通知宿主父窗口 (如 MainWindow / trade_visualizer_qt6)
+        # 1. 单通道分发机制：优先交由宿主主窗口 (ATSMainWindow) 统一管理分发
+        # 外部终端 (TDX/THS) 与 Visualizer 严格受控于主界面统一逻辑与开关，绝不产生二次重复轰炸
         parent_win = getattr(self, '_parent_window', None) or self.parent()
         if parent_win:
-            if hasattr(parent_win, "load_stock_by_code"):
+            if hasattr(parent_win, "link_stock"):
+                try:
+                    parent_win.link_stock(code_clean, name, date=date, force=force)
+                except TypeError:
+                    try:
+                        parent_win.link_stock(code_clean, name, date=date)
+                    except TypeError:
+                        parent_win.link_stock(code_clean, name)
+                self.status_bar.setText(f"⚡ 已联动行情标的: {name} ({code_clean})")
+                return
+            elif hasattr(parent_win, "load_stock_by_code"):
                 try:
                     parent_win.load_stock_by_code(code_clean, name=name)
+                    self.status_bar.setText(f"⚡ 已联动行情标的: {name} ({code_clean})")
+                    return
                 except Exception as e:
                     logger.debug(f"Parent load_stock_by_code failed: {e}")
-            elif hasattr(parent_win, "link_stock"):
-                try:
-                    parent_win.link_stock(code_clean, name, date=date)
-                except TypeError:
-                    parent_win.link_stock(code_clean, name)
-                except Exception as e:
-                    logger.debug(f"Parent link_stock failed: {e}")
-            elif hasattr(parent_win, "on_stock_selected"):
-                try:
-                    parent_win.on_stock_selected(code_clean)
-                except Exception as e:
-                    logger.debug(f"Parent on_stock_selected failed: {e}")
 
-        # 3. 通知全局 ATSMainWindow 统一分发 (如果存在)
+        # 2. 若 parent 不是主窗口，尝试从全局 QApplication 获取 ATSMainWindow 统一分发
         try:
             from ats.ui.main_window import ATSMainWindow
             app = QApplication.instance()
             if hasattr(app, "main_window") and isinstance(app.main_window, ATSMainWindow):
                 try:
-                    app.main_window.link_stock(code_clean, name, date=date)
+                    app.main_window.link_stock(code_clean, name, date=date, force=force)
                 except TypeError:
-                    app.main_window.link_stock(code_clean, name)
+                    try:
+                        app.main_window.link_stock(code_clean, name, date=date)
+                    except TypeError:
+                        app.main_window.link_stock(code_clean, name)
+                self.status_bar.setText(f"⚡ 已联动行情标的: {name} ({code_clean})")
+                return
         except Exception:
             pass
 
-        # 4. 直接异步向 trade_visualizer_qt6 (TCP 端口 26668) 发送指令
+        # 3. 兜底保护：脱离 ATS 独立运行场景，直接向 trade_visualizer_qt6 发送 socket 指令，并推送 TDX/THS
         import socket, threading
         def _send_vis():
             try:
@@ -1415,7 +1524,6 @@ class SectorRotationMinerDialog(QDialog, WindowMixin):
                 pass
         threading.Thread(target=_send_vis, daemon=True, name="VisLinkWorker").start()
 
-        # 5. 外部物理行情终端联动 (通达信/同花顺)
         try:
             from linkage_service import get_link_manager
             mgr = get_link_manager()
@@ -1496,7 +1604,7 @@ class SectorRotationMinerDialog(QDialog, WindowMixin):
 
         chosen = menu.exec(self.candidates_table.viewport().mapToGlobal(pos))
         if chosen == act_link:
-            self._broadcast_link_stock(code, name)
+            self._broadcast_link_stock(code, name, force=True)
         elif chosen == act_pipe:
             send_to_linkage(code, name, self)
             self.status_bar.setText(f"⚡ 已发送到异动联动: {name} ({code})")
@@ -1688,8 +1796,168 @@ class SectorRotationMinerDialog(QDialog, WindowMixin):
         if self.isVisible():
             self.trigger_scan()
 
+    def toggle_compact_mode(self, force_compact: Optional[bool] = None):
+        """在【精简版样式 (Compact Mode)】与【全貌模式 (Full Mode)】之间平滑切换"""
+        if force_compact is not None:
+            new_mode = bool(force_compact)
+        else:
+            new_mode = not self._is_compact_mode
+
+        if new_mode == self._is_compact_mode:
+            return
+
+        self._is_compact_mode = new_mode
+
+        if self._is_compact_mode:
+            # ── 1. 切换进入精简版样式 ──
+            # 记忆当前全貌尺寸与坐标
+            self._full_geometry = self.geometry()
+
+            # 隐藏全貌复杂控件，收起第二行
+            self.lbl_title.setVisible(False)
+            self.lbl_mode.setVisible(False)
+            self.combo_filter_mode.setVisible(False)
+            self.btn_config.setVisible(False)
+            self.txt_filter.setVisible(False)
+            self.row2_widget.setVisible(False)
+            self.lbl_compact_title.setVisible(True)
+
+            # 按钮文字与高亮切换为【🖥️ 恢复全貌】
+            self.btn_compact.setText("🖥️ 恢复全貌 (M)")
+            self.btn_compact.setStyleSheet("""
+                QPushButton {
+                    background-color: #1a3a60; color: #ffd700; border: 2px solid #ffd700;
+                    border-radius: 4px; padding: 3px 8px; font-weight: bold;
+                }
+                QPushButton:hover { background-color: #234d7d; }
+            """)
+            self.btn_compact.setToolTip("当前处于精简盯盘卡片模式。点击一键恢复完整双表大工作台全貌 (快捷键 M)")
+
+            # 表格列精简折叠
+            # 上半区板块表：只保留 0(板块名称), 3(板块均涨), 5(领涨龙头)
+            for c in range(self.sectors_table.columnCount()):
+                self.sectors_table.setColumnHidden(c, c not in (0, 3, 5))
+            # 下半区候选表：只保留 0(代码), 1(名称), 3(启动形态), 5(涨幅), 9(量比)
+            for c in range(self.candidates_table.columnCount()):
+                self.candidates_table.setColumnHidden(c, c not in (0, 1, 3, 5, 9))
+
+            # 放开最小尺寸并调整为紧凑窗口
+            self.setMinimumSize(320, 350)
+
+            # 恢复保存的精简尺寸，若无则自适应贴靠屏幕右侧黄金看盘位
+            saved_compact_geo = load_config_node("sector_miner_compact_geo", None)
+            if saved_compact_geo and len(saved_compact_geo) == 4:
+                self.setGeometry(QRect(*saved_compact_geo))
+            else:
+                screen = self.screen() or QApplication.primaryScreen()
+                s_geo = screen.availableGeometry() if screen else QRect(0, 0, 1920, 1080)
+                comp_w = 380
+                comp_h = min(680, s_geo.height() - 80)
+                comp_x = max(s_geo.left(), s_geo.right() - comp_w - 10)
+                comp_y = s_geo.top() + 40
+                self.setGeometry(QRect(comp_x, comp_y, comp_w, comp_h))
+
+            # 精简模式默认开启置顶，作为盯盘利器
+            if not self.btn_top.isChecked():
+                self.btn_top.setChecked(True)
+                self._toggle_stay_on_top(True)
+
+            self.status_bar.setText("🧲 已切换为精简盯盘卡片模式. 点击【🖥️ 恢复全貌】或按 M 键还原.")
+        else:
+            # ── 2. 恢复全貌模式 ──
+            # 记忆当前精简尺寸
+            self._compact_geometry = self.geometry()
+
+            # 还原控件可见性
+            self.lbl_compact_title.setVisible(False)
+            self.lbl_title.setVisible(True)
+            self.lbl_mode.setVisible(True)
+            self.combo_filter_mode.setVisible(True)
+            self.btn_config.setVisible(True)
+            self.txt_filter.setVisible(True)
+            self.row2_widget.setVisible(True)
+
+            # 按钮文字还原
+            self.btn_compact.setText("🧲 精简 (M)")
+            self.btn_compact.setStyleSheet("""
+                QPushButton {
+                    background-color: #23354a; color: #aadcff; border: 1px solid #3d6ea8;
+                    border-radius: 4px; padding: 3px 8px; font-weight: bold;
+                }
+                QPushButton:hover { background-color: #2d4562; color: #ffffff; }
+            """)
+            self.btn_compact.setToolTip("切换精简盯盘卡片模式 / 恢复全貌 (快捷键 M)\n支持屏幕贴边磁吸吸附、独立悬浮置顶盯盘")
+
+            # 表格所有列全量展现
+            for c in range(self.sectors_table.columnCount()):
+                self.sectors_table.setColumnHidden(c, False)
+            for c in range(self.candidates_table.columnCount()):
+                self.candidates_table.setColumnHidden(c, False)
+
+            # 恢复全貌最小尺寸
+            self.setMinimumSize(680, 420)
+
+            # 恢复全貌几何位置
+            if self._full_geometry:
+                self.setGeometry(self._full_geometry)
+            else:
+                saved_full_geo = load_config_node("sector_miner_full_geo", None)
+                if saved_full_geo and len(saved_full_geo) == 4:
+                    self.setGeometry(QRect(*saved_full_geo))
+                else:
+                    self.resize(1180, 720)
+
+            self.status_bar.setText("🖥️ 已恢复完整双表大工作台全貌.")
+
+        self._save_current_filter_and_view_state()
+
+    def moveEvent(self, event):
+        """窗口移动时启动磁吸吸附防抖检测"""
+        super().moveEvent(event)
+        if hasattr(self, '_snap_timer') and not getattr(self, '_is_snapping', False):
+            self._snap_timer.start()
+
+    def _detect_and_snap(self):
+        """边缘磁吸贴齐检测：靠近屏幕边缘 (<35px) 自动贴边吸附"""
+        if QApplication.mouseButtons() & Qt.MouseButton.LeftButton:
+            # 鼠标仍按住拖拽中，延后检测
+            self._snap_timer.start()
+            return
+
+        screen = self.screen() or QApplication.primaryScreen()
+        if not screen:
+            return
+        s_geo = screen.availableGeometry()
+        w_geo = self.geometry()
+        margin = 35
+
+        target_x = w_geo.left()
+        target_y = w_geo.top()
+        snapped = False
+
+        # 检测顶边吸附
+        if abs(w_geo.top() - s_geo.top()) < margin:
+            target_y = s_geo.top()
+            snapped = True
+        # 检测左边吸附
+        if abs(w_geo.left() - s_geo.left()) < margin:
+            target_x = s_geo.left()
+            snapped = True
+        # 检测右边吸附
+        elif abs(w_geo.right() - s_geo.right()) < margin:
+            target_x = s_geo.right() - w_geo.width()
+            snapped = True
+
+        if snapped and (target_x != w_geo.left() or target_y != w_geo.top()):
+            self._is_snapping = True
+            try:
+                self.move(target_x, target_y)
+                self.status_bar.setText(f"🧲 窗口已自动磁吸贴边 (X:{target_x}, Y:{target_y})")
+            finally:
+                self._is_snapping = False
+
     def keyPressEvent(self, event):
-        """键盘事件：放行 Alt+R 专用于系统视窗轮转，支持 T 置顶，F5 刷新，Alt+W 审核，Esc 退出"""
+        """键盘事件：放行 Alt+R 专用于系统视窗轮转，支持 T 置顶，M 精简/全貌，F5 刷新，Alt+W 审核，Esc 退出"""
         modifiers = event.modifiers()
         key = event.key()
 
@@ -1703,6 +1971,14 @@ class SectorRotationMinerDialog(QDialog, WindowMixin):
             self.close()
             event.accept()
             return
+
+        # 🚀 支持 M 键快速切换精简/全貌模式
+        if key == Qt.Key.Key_M and not (modifiers & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier)):
+            from ats.ui.styles import is_editing_text
+            if not is_editing_text(self):
+                self.toggle_compact_mode()
+                event.accept()
+                return
 
         if key == Qt.Key.Key_W and (modifiers & Qt.KeyboardModifier.AltModifier):
             self._run_dna_audit_selected()
@@ -1719,8 +1995,11 @@ class SectorRotationMinerDialog(QDialog, WindowMixin):
         super().keyPressEvent(event)
 
     def closeEvent(self, event):
-        """窗口关闭时保存坐标与尺寸"""
+        """窗口关闭时全量原子持久化当前策略、自定义参数、刷新频率与视图几何"""
         self.refresh_timer.stop()
+        if hasattr(self, '_snap_timer'):
+            self._snap_timer.stop()
+        self._save_current_filter_and_view_state()
         self.save_window_position_qt(self, "sector_rotation_miner_dialog")
         event.accept()
 
