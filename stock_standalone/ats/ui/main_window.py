@@ -2350,7 +2350,7 @@ class ATSMainWindow(QMainWindow):
 
         # 1. Left panel: Universe Tree (Width: 350)
         self.universe_widget = UniverseTreeWidget()
-        self.universe_widget.setMinimumWidth(300)
+        self.universe_widget.setMinimumWidth(0)
         self.main_splitter.addWidget(self.universe_widget)
         mark_checkpoint("03.3.1 Left UniverseTreeWidget")
 
@@ -2534,6 +2534,7 @@ class ATSMainWindow(QMainWindow):
 
         # 3. Right panel: Heatmap & Distribution charts (Width: 390)
         right_widget = QWidget()
+        right_widget.setMinimumWidth(0)
         right_layout = QVBoxLayout(right_widget)
         right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.setSpacing(6)

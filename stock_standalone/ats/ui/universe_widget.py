@@ -5,8 +5,8 @@ Visualizes the multi-tier stock universe pools: Radar, Watchlist, and Trading.
 Provides a tree structure with real-time mockup data.
 """
 
-from PyQt6.QtWidgets import QWidget, QVBoxLayout, QTreeWidget, QTreeWidgetItem, QHBoxLayout, QPushButton, QLabel, QLineEdit
-from PyQt6.QtCore import Qt, pyqtSignal, QTimer
+from PyQt6.QtWidgets import QWidget, QVBoxLayout, QTreeWidget, QTreeWidgetItem, QHBoxLayout, QPushButton, QLabel, QLineEdit, QSizePolicy
+from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QSize
 from PyQt6.QtGui import QColor, QFont
 from ats.ui.styles import COLOR_UP, COLOR_DOWN, COLOR_INFO, setup_header_persistence, auto_fit_columns_once
 from logger_utils import LoggerFactory
@@ -144,7 +144,12 @@ class UniverseTreeWidget(QWidget):
         self._init_ui()
         self.load_mock_data()
 
+    def minimumSizeHint(self):
+        # 允许左侧面板极度自由向左压缩调整，彻底杜绝 QSplitter 锁死卡顿
+        return QSize(50, 50)
+
     def _init_ui(self):
+        self.setMinimumWidth(0)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(5, 5, 5, 5)
         layout.setSpacing(6)
@@ -153,12 +158,17 @@ class UniverseTreeWidget(QWidget):
         header_layout = QHBoxLayout()
         title_label = QLabel("策略股票池 (Multi-Tier Universe)")
         title_label.setStyleSheet("font-weight: bold; color: #aad4ff; font-size: 12pt;")
+        title_label.setToolTip("策略股票池 (Multi-Tier Universe)")
+        title_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        title_label.setMinimumWidth(0)
         header_layout.addWidget(title_label)
         header_layout.addStretch()
         
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("搜索代码/名称...")
         self.search_input.setMaximumWidth(150)
+        self.search_input.setMinimumWidth(0)
+        self.search_input.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         self.search_input.setStyleSheet("background-color: #1a1a22; border: 1px solid #333; border-radius: 4px; padding: 2px 5px;")
         self.search_input.textChanged.connect(self.filter_tree)
         header_layout.addWidget(self.search_input)
@@ -166,6 +176,8 @@ class UniverseTreeWidget(QWidget):
 
         # Tree Widget
         self.tree = QTreeWidget()
+        self.tree.setMinimumWidth(0)
+        self.tree.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.tree.setHeaderLabels(["代码", "名称", "现价", "涨幅", "核心特征/追踪状态", "筛选机制/持仓"])
         self.tree.setColumnCount(6)
         self.tree.setAlternatingRowColors(True)
