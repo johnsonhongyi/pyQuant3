@@ -120,6 +120,8 @@ class ATSSectorDetailDialog(QDialog):
         self.linkage_cb = linkage_cb
         self.double_click_cb = double_click_cb
         self.member_codes = member_codes or []
+        self._orig_member_codes = list(member_codes) if member_codes else None
+        self.full_view_enabled = False  # 🌐 默认关闭全景展示，使用资金主线传递过滤
         self.extra_cols = get_sector_extra_cols()
         self._worker = None
         self._is_rendering = False
@@ -208,6 +210,12 @@ class ATSSectorDetailDialog(QDialog):
         self._update_strong_button_ui()
         self.btn_strong_only.clicked.connect(self._toggle_strong_only)
         top_row.addWidget(self.btn_strong_only)
+
+        # 🌐 全景展示开关 (默认关闭使用资金主线传递过滤，开启查看全景展示)
+        self.btn_full_view = QPushButton()
+        self._update_full_view_button_ui()
+        self.btn_full_view.clicked.connect(self._toggle_full_view)
+        top_row.addWidget(self.btn_full_view)
 
         top_row.addStretch()
 
@@ -345,17 +353,20 @@ class ATSSectorDetailDialog(QDialog):
         """【兼容/快速加载入口】支持同步直接根据传入 DataFrame 计算并渲染，或触发异步刷新"""
         if df_realtime is not None and not df_realtime.empty:
             self._cached_df = df_realtime
-        if member_codes:
+        if member_codes is not None:
             self.member_codes = member_codes
+            self._orig_member_codes = list(member_codes) if member_codes else None
         # 优先使用显式注入的 DataFrame 同步计算渲染（单测/极速离线保障）
         aggregator = SectorDataAggregator.get_instance()
         current_df = getattr(self, '_cached_df', None)
         get_name_fn = None
         if current_df is None:
             current_df, get_name_fn = aggregator.resolve_active_strategy_df(self)
+
+        active_codes = None if getattr(self, 'full_view_enabled', False) else (self.member_codes or getattr(self, '_orig_member_codes', None))
         rows, score, leader_str, meta = aggregator.fetch_sector_detail(
             sector_name=self.sector_name,
-            member_codes=self.member_codes,
+            member_codes=active_codes,
             current_df=current_df,
             extra_cols=self.extra_cols,
             get_name_fn=get_name_fn
@@ -377,9 +388,11 @@ class ATSSectorDetailDialog(QDialog):
         if current_df is None:
             current_df, get_name_fn = SectorDataAggregator.get_instance().resolve_active_strategy_df(self)
 
+        active_codes = None if getattr(self, 'full_view_enabled', False) else (self.member_codes or getattr(self, '_orig_member_codes', None))
+
         self._worker = SectorDetailWorker(
             sector_name=self.sector_name,
-            member_codes=self.member_codes,
+            member_codes=active_codes,
             current_df=current_df,
             extra_cols=self.extra_cols,
             get_name_fn=get_name_fn,
@@ -480,6 +493,56 @@ class ATSSectorDetailDialog(QDialog):
                 }
             """)
             self.btn_strong_only.setToolTip("当前状态：【已关闭】展示全部成分股 (点击仅筛选强势股与龙头)")
+
+    def _toggle_full_view(self):
+        """切换全景展示状态：关闭时使用资金主线传递过滤，打开后呈现全景题材全量成分股"""
+        self.full_view_enabled = not getattr(self, 'full_view_enabled', False)
+        if not self.full_view_enabled and getattr(self, '_orig_member_codes', None):
+            self.member_codes = list(self._orig_member_codes)
+        self._update_full_view_button_ui()
+        self.refresh_data(force=True)
+
+    def _update_full_view_button_ui(self):
+        """更新全景展示按钮的高亮与状态文案"""
+        if not hasattr(self, 'btn_full_view') or self.btn_full_view is None:
+            return
+        if getattr(self, 'full_view_enabled', False):
+            self.btn_full_view.setText("🌐 全景展示 (开)")
+            self.btn_full_view.setStyleSheet("""
+                QPushButton {
+                    background-color: #102a43;
+                    color: #00e5ff;
+                    font-weight: bold;
+                    border: 1.5px solid #00e5ff;
+                    border-radius: 4px;
+                    padding: 2px 8px;
+                    font-size: 8.5pt;
+                }
+                QPushButton:hover {
+                    background-color: #1e3a5f;
+                    color: #ffffff;
+                }
+            """)
+            self.btn_full_view.setToolTip("当前状态：【已开启】展示板块全景题材概念全部成分股 (点击切回资金主线聚焦)")
+        else:
+            self.btn_full_view.setText("🌐 全景展示 (关)")
+            self.btn_full_view.setStyleSheet("""
+                QPushButton {
+                    background-color: #222228;
+                    color: #888888;
+                    font-weight: bold;
+                    border: 1px solid #44444f;
+                    border-radius: 4px;
+                    padding: 2px 8px;
+                    font-size: 8.5pt;
+                }
+                QPushButton:hover {
+                    background-color: #33333d;
+                    color: #ffffff;
+                    border-color: #00e5ff;
+                }
+            """)
+            self.btn_full_view.setToolTip("当前状态：【已关闭】使用资金主线传递过滤核心成分股 (点击开启全景展示)")
 
     def _get_active_query_expr(self) -> str:
         """获取当前活跃的策略公式"""

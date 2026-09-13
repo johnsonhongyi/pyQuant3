@@ -1673,7 +1673,11 @@ class CapitalDragonPanel(QWidget):
                     if dlg.isMinimized():
                         dlg.showNormal()
                     dlg.sector_name = clean_sec
-                    dlg.member_codes = member_codes
+                    dlg.member_codes = send_codes or []
+                    dlg._orig_member_codes = list(send_codes) if send_codes else None
+                    dlg.full_view_enabled = False
+                    if hasattr(dlg, '_update_full_view_button_ui'):
+                        dlg._update_full_view_button_ui()
                     dlg.setWindowTitle(f"🔥 {clean_sec} 板块明细 (实时高频行情)")
                     dlg.refresh_data(force=True)
                     dlg.show()
@@ -1684,7 +1688,7 @@ class CapitalDragonPanel(QWidget):
                         clean_sec,
                         linkage_cb=lambda c, n: self.stock_selected.emit(c, n),
                         double_click_cb=lambda c, n: self.stock_double_clicked.emit(c, n),
-                        member_codes=member_codes,
+                        member_codes=send_codes,
                         parent=self.main_window or self
                     )
                     dlg.show()
