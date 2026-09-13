@@ -310,6 +310,48 @@ class SectorRotationPullbackMiner:
             'sec_arr': sec_arr
         }
 
+    @staticmethod
+    def _calculate_pioneer_momentum_score(p: Dict[str, Any]) -> float:
+        """
+        计算冲锋先锋标的的多维综合动能得分 (实盘真龙头选拔 SSOT)
+        衡量维度：
+        1. 连板高度与涨停封单 (40%~50%): 连板高标是板块灵魂
+        2. 即时涨幅势能 (20%): 当前涨幅大小
+        3. 资金容量与板块中军号召力 (15%): 成交额规模，杜绝小微盘无号召力跟风票抢龙头
+        4. 盘中爆发量比与交投活跃 (15%): 量比与换手率
+        """
+        pct = float(p.get("pct", 0.0))
+        amt_yi = float(p.get("amt_yi", 0.0))
+        vr = float(p.get("vol_ratio", 1.0))
+        to = float(p.get("turnover", 0.0))
+        p_type = str(p.get("pioneer_type", ""))
+
+        # 1. 连板与涨停地位分 (最高可达 200 分)
+        board_score = 0.0
+        if "连板" in p_type:
+            import re
+            m = re.search(r'(\d+)连板', p_type)
+            l_days = int(m.group(1)) if m else 2
+            board_score = 100.0 + l_days * 35.0
+        elif "涨停" in p_type or pct >= 9.5:
+            board_score = 80.0
+        elif "主升" in p_type or pct >= 6.0:
+            board_score = 45.0
+        elif pct >= 3.5:
+            board_score = 25.0
+
+        # 2. 涨幅势能分 (0~30分)
+        pct_score = max(0.0, pct) * 3.0
+
+        # 3. 资金成交额号召力 (0~25分): 对数衰减加分，大成交额票具备更强板块带动性与容资性
+        amt_score = min(25.0, math.log10(max(0.1, amt_yi) + 0.9) * 16.0)
+
+        # 4. 盘中爆发量比与换手率 (0~20分)
+        vr_score = min(10.0, max(0.0, (vr - 1.0) * 6.0))
+        to_score = min(10.0, to * 1.0)
+
+        return board_score + pct_score + amt_score + vr_score + to_score
+
     def identify_leading_sectors(
         self,
         df: pd.DataFrame,
@@ -501,6 +543,19 @@ class SectorRotationPullbackMiner:
                 if s_name in sector_agg:
                     sector_agg[s_name]["pioneer_count"] += 1
                     sector_agg[s_name]["pioneers"].append(p)
+
+        # 核心实战升级：从板块所属冲锋先锋中，基于综合动能评分选拔当前板块动能最强的领涨龙头 (实盘 SSOT)
+        for s_name, st in sector_agg.items():
+            sec_pioneers = st.get("pioneers", [])
+            if sec_pioneers:
+                best_p = max(sec_pioneers, key=self._calculate_pioneer_momentum_score)
+                st["leader_code"] = best_p["code"]
+                st["leader_name"] = best_p["name"]
+                st["leader_pct"] = best_p["pct"]
+                st["leader_type"] = best_p.get("pioneer_type", "领涨龙头")
+                st["leader_amt_yi"] = best_p.get("amt_yi", 0.0)
+                st["leader_vr"] = best_p.get("vol_ratio", 1.0)
+                st["leader_momentum"] = round(self._calculate_pioneer_momentum_score(best_p), 1)
 
         # 3. 计算板块资金主线综合强度得分
         result_sectors = []
