@@ -2173,18 +2173,10 @@ class ATSMainWindow(QMainWindow):
         toolbar.addWidget(self.btn_limit_up_ladder)
 
         self.btn_sector_miner = QPushButton("轮动深挖🔄")
-        self.btn_sector_miner.setToolTip("打开板块轮动前排引导与资金主线回踩启动深挖工作台 (快捷键 Alt+R)")
+        self.btn_sector_miner.setToolTip("打开板块轮动前排引导与资金主线回踩启动深挖工作台 (纯点击入口)")
         self.btn_sector_miner.setStyleSheet("QPushButton { background-color: #1e3a3a; color: #00ffd5; font-weight: bold; border: 1px solid #00e5bb; border-radius: 3px; padding: 1px 4px; font-size: 8.5pt; } QPushButton:hover { background-color: #00e5bb; color: #000; }")
         self.btn_sector_miner.clicked.connect(self.open_sector_rotation_miner)
         toolbar.addWidget(self.btn_sector_miner)
-
-        # 绑定快捷键 Alt+R
-        try:
-            from PyQt6.QtGui import QKeySequence, QShortcut
-            self.shortcut_miner = QShortcut(QKeySequence("Alt+R"), self)
-            self.shortcut_miner.activated.connect(self.open_sector_rotation_miner)
-        except Exception:
-            pass
         
         toolbar.addSeparator()
 
@@ -6533,7 +6525,7 @@ class ATSMainWindow(QMainWindow):
             self.hot_sector_dialog._force_refresh_data()
 
     def open_sector_rotation_miner(self):
-        """调起【🔥 板块轮动前排引导与资金主线回踩启动深挖工作台】独立窗口 (Alt+R)"""
+        """调起【🔥 板块轮动前排引导与资金主线回踩启动深挖工作台】独立窗口 (纯点击入口，不抢占 Alt+R)"""
         if getattr(self, '_is_closing', False) or getattr(self, '_is_exiting', False):
             return
         from ats.ui.sector_rotation_miner_dialog import open_sector_rotation_miner_dialog

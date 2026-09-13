@@ -5164,6 +5164,13 @@ class MainWindow(QMainWindow, WindowMixin):
                 if hasattr(self, "_toggle_signal_log"):
                     QtCore.QTimer.singleShot(0, self._toggle_signal_log)
 
+            elif content.startswith("QUERY|"):
+                query_str = content[6:].strip()
+                logger.info(f"[IPC] Command QUERY received: {query_str}")
+                if hasattr(self, 'cat_filter_input') and self.cat_filter_input:
+                    self.cat_filter_input.setCurrentText(query_str)
+                    if hasattr(self, '_on_cat_filter_apply'):
+                        QtCore.QTimer.singleShot(0, self._on_cat_filter_apply)
 
             else:
                 logger.warning(f"Unknown IPC command content: {content}")
@@ -5486,6 +5493,11 @@ class MainWindow(QMainWindow, WindowMixin):
         self.dna_action.setToolTip("🚀 [DNA-BATCH] 对当前焦点视图执行基因审计 (顺延前20只)")
         self.dna_action.triggered.connect(self._run_dna_audit_focused)
         self.toolbar.addAction(self.dna_action)
+
+        self.miner_action = QAction("🔄 轮动深挖", self)
+        self.miner_action.setToolTip("打开板块轮动前排引导与资金主线回踩启动深挖工作台 (纯点击入口)")
+        self.miner_action.triggered.connect(self._open_sector_rotation_miner)
+        self.toolbar.addAction(self.miner_action)
 
         # # [NEW] 渲染模式切换
         # self.toolbar.addSeparator()
@@ -10320,6 +10332,20 @@ class MainWindow(QMainWindow, WindowMixin):
     def _on_add_to_hotlist_from_menu(self, code: str, name: str, row):
         """从右键菜单添加到热点"""
         self.add_to_hotlist(code, name, row)
+
+    def _open_sector_rotation_miner(self):
+        """调起【板块轮动前排引导与资金主线回踩启动深挖工作台】(纯点击入口，绝不抢占 Alt+R)"""
+        try:
+            from ats.ui.sector_rotation_miner_dialog import open_sector_rotation_miner_dialog
+            current_df = getattr(self, 'full_data_df', None)
+            if current_df is None or (hasattr(current_df, 'empty') and current_df.empty):
+                current_df = getattr(self, 'day_df', None)
+            dialog = open_sector_rotation_miner_dialog(parent_window=self, current_df=current_df)
+            if dialog and not getattr(dialog, '_code_clicked_connected_vis', False):
+                dialog.code_clicked.connect(lambda c: self.load_stock_by_code(c))
+                dialog._code_clicked_connected_vis = True
+        except Exception as e:
+            logger.error(f"Failed to open sector rotation miner dialog: {e}")
 
     def _on_focus_changed(self, old, new):
         """记录最后一次获得焦点的表格或树"""

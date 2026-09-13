@@ -391,6 +391,10 @@ class GlobalFavoriteManager:
         self.save_to_config()
         return action
 
+    def is_favorite_sector(self, sector: str) -> bool:
+        with self._lock:
+            return sector in self.favorite_sectors
+
     def add_favorite_stock(self, code: str, add_date: str = None):
         code = str(code).strip().zfill(6)
         if not code or code == '000000' or sys_utils.is_delisted_stock(code):
@@ -469,6 +473,11 @@ class GlobalFavoriteManager:
 
         self.save_to_config()
         return action
+
+    def is_favorite_stock(self, code: str) -> bool:
+        code = str(code).strip().zfill(6)
+        with self._lock:
+            return code in self.favorite_stocks
 
     def get_favorite_stock_date(self, code: str) -> str:
         code = str(code).strip().zfill(6)

@@ -1,3 +1,61 @@
+## 2026-09-13 11:58
+- [x] **【彻底根除板块点击瞬间被取消Bug & 完善显示全部主线与单选Toggle五重反馈】(SSOT) (`ats/ui/sector_rotation_miner_dialog.py`, `tests/test_sector_rotation_pullback_miner.py`)**：
+    - [x] **根因精准穿透**：
+        1. **Qt 事件时序竞争陷阱**：此前为实现键盘上下键跟随，连接了 `sectors_table.currentItemChanged` 到 `_on_sector_current_changed`。当操盘手用鼠标点击任意板块行时，Qt 内部先派发 `currentItemChanged`，把 `self._selected_sector` 瞬间改成了该板块；随后 1 毫秒内派发 `itemClicked` 到 `_on_sector_row_clicked`；
+        2. **自我误杀清空**：`_on_sector_row_clicked` 读取当前行板块后与 `self._selected_sector` 比较，由于刚刚被 `currentItemChanged` 提前篡改，两者永远相等，被 100% 误判为“用户点击已选中的板块想取消”，直接调用了 `_clear_sector_filter()`！
+        3. **致命后果**：操盘手点击任何板块都无法选上，瞬间被取消恢复为全部主线；导致操盘手点击【显示全部主线】因为本来就是全部而毫无反应，点击板块取消也毫无差别；
+    - [x] **彻底解耦键盘事件与鼠标点击**：
+        1. **移除 `currentItemChanged` 信号绑定**：杜绝其在鼠标点击时提前介入篡改状态；
+        2. **精准键盘事件过滤器 (`installEventFilter`)**：在 `eventFilter` 中精准拦截 `Key_Up` / `Key_Down` / `Key_PageUp` / `Key_PageDown`，仅在操盘手用键盘上下键移动光标后才跟随联动过滤，绝不干扰鼠标点击流；
+        3. **鼠标点击独占 Toggle 控制权**：点击新板块时 100% 成功单选并过滤下半区；再次点击同一板块时精准反选取消，恢复全部主线；
+    - [x] **五重维度全协同视觉反馈**：
+        1. **按钮文字与样式**：单选时高亮显示 `✕ 显示全部主线 (当前: XXX)`，全部时恢复淡蓝 `显示全部主线`；
+        2. **表格焦点彻底清空**：取消过滤时不仅执行 `clearSelection()`，同步调用 `setCurrentCell(-1, -1)` 彻底消除虚线焦点框；
+        3. **状态栏全透明提示**：单选与清空时在状态栏实时显示当前过滤状态；
+        4. **候选列表联动防抖**：在 `_broadcast_link_stock` 增加 300ms 快速防抖，消除鼠标点击多重触发；
+    - [x] **全套自动化测试 100% PASSED**：
+        1. 针对性扩充 `test_09_click_and_keyboard_linkage_and_esc_close`，严格模拟真实 GUI 鼠标点击序列与键盘事件过滤，断言单选后候选数严格匹配子集、再次点击与按钮点击严格恢复全量；
+        2. 全量 46 项集成测试全部全绿通过！
+
+## 2026-09-13 00:35
+- [x] **【修复轮动深挖点击与上下键联动、补齐异动推送、彻底根除ATS遮挡与完善关闭/全部主线交互】(SSOT) (`ats/ui/sector_rotation_miner_dialog.py`, `tests/test_sector_rotation_pullback_miner.py`)**：
+    - [x] **全方位补齐点击与上下键即时联动 (单选点击 + 键盘上下键防抖联动)**：
+        1. **下半区候选标的即时联动**：新增 `_on_candidate_clicked` 与 `_on_candidate_current_changed`，连接 `candidates_table.itemClicked` 和 `currentItemChanged`；不管是鼠标单选某行还是键盘 Up/Down 方向键选行，均即时触发 `_broadcast_link_stock(code, name)`，跨 Visualizer、通达信、同花顺与主界面全生态联动；加入同列行号防抖机制，避免横向切换单元格重复触发；
+        2. **上半区主线板块键盘移动跟随**：连接 `sectors_table.currentItemChanged` 到 `_on_sector_current_changed`，操盘手在主线板块表格中用键盘上下键浏览时，下半区回踩池即时跟随过滤；
+    - [x] **补齐右键“⚡ 发送到异动联动” (Named Pipe IPC 直通)**：
+        1. 引入系统标准 `send_to_linkage(code, name, self)`；
+        2. 在下半区候选个股右键菜单增加 `⚡ 发送到异动联动: {name} ({code})`；
+        3. 在上半区板块右键菜单若存在领涨龙头，增加 `⚡ 发送领涨先锋到异动联动: {leader_text}`；
+    - [x] **彻底解决“点不点击置顶都挡住 ATS”的 Win32 Owner 遮挡缺陷**：
+        1. **深入机理穿透**：原代码 `super().__init__(parent)` 将 Win32 HWND 的 Owner 强行绑定至主窗口，Windows DWM 桌面合成器强制将 Owned Window 置于 Owner 之上，导致即使取消置顶、操盘手点击 ATS 主窗口也无法将其切换至前台；
+        2. **彻底解耦 Win32 HWND Owner**：初始化时严格执行 `super().__init__(None)`，切断物理强制层级；同时保存 `self._parent_window = parent` 逻辑引用，在 `_broadcast_link_stock`、`_link_sector_to_visualizer`、`_run_dna_audit_selected` 中平滑回溯父窗口派发指令，未置顶时 ATS 可自由切换到最前；
+    - [x] **“显示全部主线”支持双向切换 (Toggle) & 完善窗口退出关闭机制**：
+        1. **板块点击 Toggle 反选自愈**：在 `_on_sector_row_clicked` 中判断，若点击当前已选板块，则自动反选取消过滤，一键恢复显示全部主线；若点击不同板块则单选该板块；
+        2. **“显示全部主线”按钮动态感知**：单选某板块时高亮显示 `✕ 显示全部主线`，点击即可一键清空过滤；
+        3. **顶部新增关闭按钮与 Esc 键退出**：在控制栏右上角新增醒目的 `self.btn_close = QPushButton("✕ 关闭 (Esc)")`；在 `keyPressEvent` 中显式捕获 `Qt.Key.Key_Escape` 立即触发 `self.close()`；
+    - [x] **全量自动化测试 100% PASSED**：
+        1. 专项新增 `test_09_click_and_keyboard_linkage_and_esc_close`，覆盖单击联动、键盘上下键联动、列移动防抖、板块 Toggle 反选、关闭按钮、Esc 按键与 Win32 Owner 解耦校验，9/9 全绿通过；
+        2. 关联全套 46 项集成测试（涵盖天梯引擎、通道对齐、资金龙头等）全部 100% 通过无任何回归！
+
+## 2026-09-13 00:20
+- [x] **【彻底解放 Alt+R 全局视窗轮转 & 完善轮动深挖纯点击入口与全生态深度联动】(SSOT) (`ats/ui/sector_rotation_miner_dialog.py`, `ats/ui/main_window.py`, `ats/ui/capital_dragon_panel.py`, `trade_visualizer_qt6.py`, `instock_MonitorTK.py`, `global_favorites.py`, `tests/test_sector_rotation_pullback_miner.py`)**：
+    - [x] **根除 Alt+R 快捷键冲突，彻底解放全局视窗轮换器 (WindowRotatorDialog)**：
+        1. **冲突根因排除**：底层 `hotkey_rotator.py` 与 `instock_MonitorTK.py` 注册了全局 Win32 热键 `Alt+R`（向下轮转窗口）与 `Alt+Shift+R`（向上轮转窗口）。此前在 Qt 控件上设置了 `QShortcut("Alt+R")` 会截断系统热键导致视窗轮换器失效或触发降级为 `Alt+Q`；
+        2. **纯点击入口转换**：全面移除主窗口、资金龙头面板、可视化端中的 `Alt+R` 快捷键绑定，所有入口统一转为优雅纯点击操作；
+        3. **SectorRotationMinerDialog 显式放行**：在 `keyPressEvent` 中针对 `Alt+R` 显式执行 `event.ignore()`，确保在深挖工作台内连按 `Alt+R` 依然能流畅无缝触发全局视窗向下轮换；
+    - [x] **Tk 底层 Alt+R 视窗轮换全面接入轮动深挖窗口**：
+        1. **MRU 动态注册与搜集**：在 `instock_MonitorTK.py` 的 `_get_all_open_trade_windows` 中加入双路探测（内部 `self._sector_rotation_miner_win` + 外部标题扫描 `EnumWindows`），自动分配标准标识 `name_map[h] = "🔄 板块轮动回踩深挖 (SectorRotationMiner)"`；
+        2. **强力前台穿透聚焦**：在 `_force_focus_hwnd` 中加入 `_sector_rotation_miner_win` 的 `show()` / `raise_()` / `activateWindow()`，并在 `WindowRotatorDialog.show_rotator` 中自动呈现；
+        3. **Tk 控制栏点击入口直达**：在 `instock_MonitorTK.py` 的顶部 `ctrl_frame` 增加 `轮动🔄` 按钮，并在 `top_bar_groups` 与 `exec_map` 中同步注册 `open_sector_rotation_miner()`；
+    - [x] **可视化端 (Visualizer) 深度联动与全生态闭环**：
+        1. **工具栏纯点击直达**：在 `trade_visualizer_qt6.py` 工具栏新增 `self.miner_action = QAction("🔄 轮动深挖", self)`，点击即调起 `open_sector_rotation_miner_dialog`；
+        2. **选股信号直通切换**：监听 `dialog.code_clicked` 信号，双击深挖工作台标的直接无缝联动加载 Visualizer K 线与分时主图；
+        3. **IPC QUERY 板块联动过滤**：在 `process_ipc_command` 中增加 `QUERY|` 解析处理，双击深挖工作台上半区板块名或右键联动，自动向 Visualizer 投递 `category.str.contains(...)` 实时过滤板块！
+    - [x] **底层基础组件补齐与全自动化回归验证 100% PASSED**：
+        1. 在 `global_favorites.py` 中补齐线程安全的 `is_favorite_sector` 与 `is_favorite_stock` 核心查询接口；
+        2. 自动化测试套件 `test_sector_rotation_pullback_miner.py` 扩充至 8 大专项（包含 Alt+R 绝对放行测试、双击股票与板块龙头联动测试、重点关注切换测试、Tk/Visualizer 类结构与方法集成断言），8/8 全部通过；
+        3. 全量关联套件 28 项测试（包含涨停天梯、通道几何对齐等）100% 全绿无回归！
+
 ## 2026-09-12 23:50
 - [x] **【彻底解决天梯缓存2099未来脏日期污染Bug & 建立四重物理自愈与防污染守门体系】(SSOT) (`ats/limit_up_engine.py`, `ats/ui/daily_limit_up_dialog.py`, `tests/test_limit_up_engine.py`)**：
     - [x] **根因精准穿透**：

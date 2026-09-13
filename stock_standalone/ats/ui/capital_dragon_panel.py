@@ -390,7 +390,7 @@ class CapitalDragonPanel(QWidget):
                 color: #000000;
             }
         """)
-        self.btn_open_miner.setToolTip("打开板块轮动前排引导与资金主线回踩启动深挖工作台 (Alt+R)")
+        self.btn_open_miner.setToolTip("打开板块轮动前排引导与资金主线回踩启动深挖工作台")
         self.btn_open_miner.clicked.connect(self._on_click_miner)
         toolbar_layout.addWidget(self.btn_open_miner)
 
@@ -1687,7 +1687,7 @@ class CapitalDragonPanel(QWidget):
         act_radar = menu.addAction("📊 打开板块雷达")
         act_radar.triggered.connect(self._on_click_hot_sector)
 
-        act_miner = menu.addAction("🔄 打开主线回踩深挖 (Alt+R)")
+        act_miner = menu.addAction("🔄 打开主线回踩深挖")
         act_miner.triggered.connect(self._on_click_miner)
 
         menu.exec(self.table.viewport().mapToGlobal(pos))
