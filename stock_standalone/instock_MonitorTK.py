@@ -1014,6 +1014,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 "widgets": ["top_multi_period_btn"],
                 "pack_opts": [{"side": "left", "padx": 2}]
             },
+            "轮动深挖": {
+                "widgets": ["top_sector_miner_btn"],
+                "pack_opts": [{"side": "left", "padx": 2}]
+            },
             "右侧控制": {
                 "widgets": ["top_frame_right"],
                 "pack_opts": [{"side": "right", "padx": 2, "pady": 1}]
@@ -5327,6 +5331,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.top_signal_btn.pack(side="left", padx=2)
         self.top_multi_period_btn = tk.Button(ctrl_frame, text="多周期🎯", command=lambda: self.open_multi_period_tester(), font=self.default_font_bold, fg="orange", pady=2)
         self.top_multi_period_btn.pack(side="left", padx=2)
+        self.top_sector_miner_btn = tk.Button(ctrl_frame, text="轮动🔄", command=lambda: self.open_sector_rotation_miner(), font=self.default_font_bold, fg="#0066cc", pady=2)
+        self.top_sector_miner_btn.pack(side="left", padx=2)
 
         # 绑定操作说明快捷键 Alt+t (原 Alt-T 选股已禁用，原 Alt-G 操作说明替换为 Alt-T)
         self.bind_all("<Alt-t>", lambda e: self.open_guidance_window())
@@ -7996,6 +8002,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             "交易决策": ("交易", lambda: self.open_decision_flow_panel()),
             "信号总览": ("信号", lambda: self.open_live_signal_viewer()),
             "多周期筛选": ("多周期", lambda: self.open_multi_period_tester()),
+            "轮动深挖": ("轮动", lambda: self.open_sector_rotation_miner()),
         }
         
         # 设置列宽度，列2作为中部间隔列
@@ -15649,6 +15656,36 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         except Exception:
             pass
 
+        # 9.4. 板块轮动深挖工作台 (PyQt6 双路兼容)
+        if hasattr(self, '_sector_rotation_miner_win') and self._sector_rotation_miner_win is not None:
+            try:
+                win = self._sector_rotation_miner_win
+                if is_qt_win_alive(win) and win.isVisible():
+                    h = int(win.winId())
+                    if h not in current_visible_hwnds:
+                        current_visible_hwnds.append(h)
+                        name_map[h] = "🔄 板块轮动回踩深挖 (SectorRotationMiner)"
+            except Exception:
+                pass
+
+        # 9.4.1. 板块轮动深挖外部/其他进程窗口定位兜底
+        try:
+            import ctypes as _ctypes
+            for _m_title in (
+                "🔥 板块轮动前排引导与资金主线回踩启动深挖工作台",
+                "🔄 板块轮动前排引导与资金主线回踩启动深挖工作台",
+                "板块轮动前排引导与资金主线回踩启动深挖工作台"
+            ):
+                _m_hwnd = _ctypes.windll.user32.FindWindowW(None, _m_title)
+                if _m_hwnd:
+                    if _ctypes.windll.user32.IsWindow(_m_hwnd) and _ctypes.windll.user32.IsWindowVisible(_m_hwnd):
+                        if _m_hwnd not in current_visible_hwnds:
+                            current_visible_hwnds.append(_m_hwnd)
+                            name_map[_m_hwnd] = "🔄 板块轮动回踩深挖 (SectorRotationMiner)"
+                    break
+        except Exception:
+            pass
+
         # 10. 概念放量监控子窗口 (Tk - self.monitor_windows 中的所有有效 toplevel 窗口)
         if hasattr(self, 'monitor_windows') and self.monitor_windows:
             for win_id, win_info in self.monitor_windows.items():
@@ -15767,6 +15804,14 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     self._multi_period_tester_win.focus_force()
                 except Exception:
                     pass
+        elif hasattr(self, '_sector_rotation_miner_win') and self._sector_rotation_miner_win and is_qt_win_alive(self._sector_rotation_miner_win):
+            try:
+                if hwnd == int(self._sector_rotation_miner_win.winId()):
+                    self._sector_rotation_miner_win.show()
+                    self._sector_rotation_miner_win.raise_()
+                    self._sector_rotation_miner_win.activateWindow()
+            except Exception:
+                pass
 
         import ctypes
         user32 = ctypes.windll.user32
@@ -15897,6 +15942,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         name_map[hwnd] = "🎯 强庄二次起爆监控池 (RealtimeMonitor)"
                     elif "MultiPeriodTester" in raw_name:
                         name_map[hwnd] = "🎯 多周期策略筛选器 (MultiPeriodTester)"
+                    elif "SectorRotationMiner" in raw_name or "板块轮动" in raw_name:
+                        name_map[hwnd] = "🔄 板块轮动回踩深挖 (SectorRotationMiner)"
                     elif "MonitorWindow_" in raw_name:
                         # 提炼出独特代码如 "板块名称_代码"
                         mon_id = raw_name.split("MonitorWindow_")[-1].split("(")[0]
@@ -16503,6 +16550,67 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
     def toggle_multi_period_tester(self):
         """[NEW] 切换多周期联动策略筛选器的显示与隐藏"""
         self.open_multi_period_tester()
+
+    def open_sector_rotation_miner(self):
+        """[NEW] 打开/切换板块轮动前排引导与资金主线回踩启动深挖工作台 (纯点击入口，支持 Alt+R 视窗轮转)"""
+        import time
+        now = time.time()
+        starting_t = getattr(self, "_sector_miner_starting_t", 0.0)
+        if now - starting_t < 0.3:
+            return
+        self._sector_miner_starting_t = now
+
+        internal_win = getattr(self, '_sector_rotation_miner_win', None)
+        if is_qt_win_alive(internal_win):
+            try:
+                if internal_win.isVisible() and not internal_win.isMinimized():
+                    internal_win.hide()
+                    toast_message(self, "轮动深挖已隐藏")
+                else:
+                    if internal_win.isMinimized():
+                        internal_win.showNormal()
+                    else:
+                        internal_win.show()
+                    internal_win.raise_()
+                    internal_win.activateWindow()
+                    toast_message(self, "轮动深挖已置顶")
+                return
+            except Exception as e:
+                logger.error(f"Toggle internal sector miner failed: {e}")
+                self._sector_rotation_miner_win = None
+
+        # 检测是否有外部窗口
+        try:
+            import ctypes
+            for t in (
+                "🔥 板块轮动前排引导与资金主线回踩启动深挖工作台",
+                "🔄 板块轮动前排引导与资金主线回踩启动深挖工作台",
+                "板块轮动前排引导与资金主线回踩启动深挖工作台"
+            ):
+                hwnd = ctypes.windll.user32.FindWindowW(None, t)
+                if hwnd and ctypes.windll.user32.IsWindow(hwnd):
+                    if ctypes.windll.user32.IsIconic(hwnd):
+                        ctypes.windll.user32.ShowWindow(hwnd, 9)
+                    else:
+                        ctypes.windll.user32.ShowWindow(hwnd, 5)
+                    ctypes.windll.user32.SetForegroundWindow(hwnd)
+                    toast_message(self, "轮动深挖已置顶")
+                    return
+        except Exception:
+            pass
+
+        # 全新拉起内部 PyQt6 对话框
+        try:
+            from PyQt6 import QtWidgets
+            import sys
+            if not QtWidgets.QApplication.instance():
+                self._qt_app = QtWidgets.QApplication(sys.argv) if hasattr(sys, 'argv') else QtWidgets.QApplication([])
+            from ats.ui.sector_rotation_miner_dialog import open_sector_rotation_miner_dialog
+            current_df = getattr(self, 'last_df', getattr(self, 'df', None))
+            self._sector_rotation_miner_win = open_sector_rotation_miner_dialog(parent_window=self, current_df=current_df)
+            toast_message(self, "轮动深挖已启动")
+        except Exception as e:
+            logger.error(f"Failed to open sector rotation miner internally: {e}")
 
     def open_guidance_window(self):
         """直接打开每日操作指南选项卡"""
