@@ -3101,7 +3101,7 @@ class ATSMainWindow(QMainWindow):
             self.lbl_rotator_status.setStyleSheet("color: #ff9900;")
             self.status_bar.showMessage("自动轮转引擎已暂停。")
 
-    def link_stock(self, code, name, date=None):
+    def link_stock(self, code, name, date=None, force=False):
         """
         [LINKAGE] 单击个股触发联动：
         1. 向 trade_visualizer_qt6 可视化服务器 (TCP 端口 26668) 发送 CODE|{code} 或 TIME_LINK 切换行情。
@@ -3121,9 +3121,15 @@ class ATSMainWindow(QMainWindow):
         last_code = getattr(self, "_last_linked_code", None)
         last_time = getattr(self, "_last_linked_time", 0)
         last_date = getattr(self, "_last_linked_date", None)
-        if last_code == code_clean and last_date == date and (now - last_time) < 0.2:
-            # 200ms 内重复对同一代码及同一日期发起联动，直接短路忽略，防止多重绑定信号引起重复联动导致 TDX/THS 闪烁
+        
+        # 遵循系统底层联动逻辑：同样的 code (且日期一致) 绝不重复触发物理联动 (除非 force=True)
+        if not force and last_code == code_clean and last_date == date:
             return
+            
+        # 150ms 快速时间防抖，防止多重绑定信号引起重复联动导致 TDX/THS 闪烁
+        if not force and (now - last_time) < 0.15:
+            return
+            
         self._last_linked_code = code_clean
         self._last_linked_time = now
         self._last_linked_date = date

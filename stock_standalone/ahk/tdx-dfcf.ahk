@@ -7,11 +7,17 @@
 #MaxThreadsPerHotkey 2
 SetWorkingDir %A_ScriptDir%
 
-; Auto-elevate to Administrator to interact with elevated trading software
-if !A_IsAdmin {
+; Try elevate to Administrator if possible to interact with elevated software
+hasElevatedFlag := false
+for index, arg in A_Args {
+    if (arg = "/elevated")
+        hasElevatedFlag := true
+}
+if (!A_IsAdmin && !hasElevatedFlag) {
     try {
-        Run *RunAs "%A_ScriptFullPath%"
-        ExitApp
+        Run *RunAs "%A_ScriptFullPath%" /elevated,, UseErrorLevel
+        if (!ErrorLevel)
+            ExitApp
     }
 }
 
@@ -20,7 +26,8 @@ if !A_IsAdmin {
 ; ================================
 global ClipSaved := Clipboard
 global custom_copy_triggered := false
-global AutoSendToDFCF := False     ; Auto push switch (default OFF)
+global AutoSendToDFCF := False     ; Auto push switch to DFCF (default OFF)
+global AutoSendToTHS := True       ; Auto push switch to THS (default ON)
 global DEBUG_MODE := true          ; Debug log switch (keep ON to hotkey_debug.log)
 global LOG_FILE := A_ScriptDir "\hotkey_debug.log"
 
@@ -36,7 +43,7 @@ OnClipboardChange("HandleClipboardChange")
 PruneLog(2)
 SetTimer, AutoPruneLog, % 6 * 3600 * 1000
 
-Log("=== Script started, AutoSendToDFCF=" . AutoSendToDFCF . " ===")
+Log("=== Script started, AutoSendToDFCF=" . AutoSendToDFCF . ", AutoSendToTHS=" . AutoSendToTHS . " ===")
 
 return  ; Formal end of auto-execute section!
 
@@ -429,6 +436,11 @@ SendToTDX(stockCode) {
 }
 
 SendToHexin(stockCode) {
+    global AutoSendToTHS
+    if (!AutoSendToTHS) {
+        Log("AutoSendToTHS is OFF, skip SendToHexin(" . stockCode . ")")
+        return
+    }
     Log("Execute SendToHexin(" . stockCode . ")")
     targetWin := "ahk_exe hexin.exe"
     if WinExist(targetWin) {
@@ -441,6 +453,9 @@ SendToHexin(stockCode) {
         Send, {Enter}
         Sleep, 250
         Log("SendToHexin completed: " . stockCode)
+    } else {
+        Log("THS window not found (hexin.exe)")
+        Notify("THS not found: " . stockCode, "tooltip", 1.5)
     }
 }
 
@@ -448,19 +463,20 @@ SendToHexin(stockCode) {
 ; Clipboard Monitor (Auto Send on Copy)
 ; ================================
 HandleClipboardChange(Type) {
-    global custom_copy_triggered, ClipSaved, AutoSendToDFCF
-    ; Zero-overhead early exit when auto push is disabled or hotkey in progress
-    if (custom_copy_triggered || !AutoSendToDFCF)
+    global custom_copy_triggered, ClipSaved, AutoSendToDFCF, AutoSendToTHS
+    ; Zero-overhead early exit when auto push is disabled for both or hotkey in progress
+    if (custom_copy_triggered || (!AutoSendToDFCF && !AutoSendToTHS))
         return
 
     current := Clipboard
     if (current != ClipSaved && current != "") {
         ClipSaved := current
         if RegExMatch(ClipSaved, "^(?:60|30|00|43|83|87|92)\d{4}(?!\d)|^(?:688|200)\d{3}(?!\d)", stockCode) {
-            Log("Clipboard detected code: " . stockCode . ", AutoSendToDFCF=" . AutoSendToDFCF)
-            Notify("Auto Send DFCF: " . stockCode, "sound", 0.3)
+            Log("Clipboard detected code: " . stockCode . ", AutoSendToDFCF=" . AutoSendToDFCF . ", AutoSendToTHS=" . AutoSendToTHS)
+            Notify("Auto Send: " . stockCode, "sound", 0.3)
             WinGet, activeWinID, ID, A
             SendToDFCF(stockCode)
+            SendToHexin(stockCode)
             Sleep, 200
             if (activeWinID) {
                 WinActivate, ahk_id %activeWinID%
@@ -556,10 +572,22 @@ return
 ; ================================
 ; Shortcuts
 ; ================================
-^!d::  ; Ctrl+Alt+D toggle auto push
+^!d::  ; Ctrl+Alt+D toggle auto push to DFCF
 AutoSendToDFCF := !AutoSendToDFCF
 Notify("AutoSendToDFCF: " . (AutoSendToDFCF ? "ON" : "OFF"), "tray", 1)
 Log("AutoSendToDFCF toggled to: " . AutoSendToDFCF)
+return
+
+^!t::  ; Ctrl+Alt+T toggle auto push to THS
+AutoSendToTHS := !AutoSendToTHS
+Notify("AutoSendToTHS: " . (AutoSendToTHS ? "ON" : "OFF"), "tray", 1)
+Log("AutoSendToTHS toggled to: " . AutoSendToTHS)
+return
+
+^!r::  ; Ctrl+Alt+R reload script
+Notify("Reloading script...", "tray", 1)
+Log("=== Script reloading via shortcut ===")
+Reload
 return
 
 ^!L::  ; Ctrl+Alt+L toggle debug log
@@ -568,3 +596,4 @@ msg := DEBUG_MODE ? "Debug Log ON" : "Debug Log OFF"
 Notify(msg, "tray", 1)
 Log("====== " msg " ======")
 return
+

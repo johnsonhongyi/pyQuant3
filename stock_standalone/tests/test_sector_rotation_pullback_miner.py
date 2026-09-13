@@ -489,42 +489,51 @@ class TestSectorRotationPullbackMiner(unittest.TestCase):
         self.assertIn("000010", cand_codes_channel, "通道低吸模式下标的A必须命中!")
         self.assertNotIn("000040", cand_codes_channel, "通道低吸模式下无通道支撑的标的D必须被剔除!")
 
-        # 5. 验证 UI 控件与微调对话框
-        dialog = SectorRotationMinerDialog(parent=None, current_df=df)
-        self.assertTrue(hasattr(dialog, "combo_filter_mode"))
-        self.assertTrue(hasattr(dialog, "btn_config"))
-        self.assertTrue(hasattr(dialog, "lbl_mode_summary"))
+        # 5. 验证 UI 控件与微调对话框 (包含环境配置备份与自愈还原)
+        from ats.ui.styles import load_config_node, save_config_node
+        old_mode = load_config_node("sector_miner_filter_mode", None)
+        old_custom = load_config_node("sector_miner_custom_filter", None)
+        try:
+            dialog = SectorRotationMinerDialog(parent=None, current_df=df)
+            self.assertTrue(hasattr(dialog, "combo_filter_mode"))
+            self.assertTrue(hasattr(dialog, "btn_config"))
+            self.assertTrue(hasattr(dialog, "lbl_mode_summary"))
 
-        # 测试 UI 切换模式
-        dialog.combo_filter_mode.setCurrentText("🚀 极速起爆")
-        self.assertEqual(dialog._current_filter_config.mode_name, "🚀 极速起爆")
-        self.assertEqual(dialog._current_filter_config.min_eval_pct, 1.2)
+            # 测试 UI 切换模式
+            dialog.combo_filter_mode.setCurrentText("🚀 极速起爆")
+            self.assertEqual(dialog._current_filter_config.mode_name, "🚀 极速起爆")
+            self.assertEqual(dialog._current_filter_config.min_eval_pct, 1.2)
 
-        # 测试微调对话框 (验证当前生效策略展示与预设按钮高亮及动态感知联动)
-        config_dlg = PullbackConfigDialog(dialog._current_filter_config, parent=dialog)
-        self.assertTrue(hasattr(config_dlg, "lbl_current_strategy"), "微调对话框必须包含当前生效策略指示标签!")
-        self.assertIn("🚀 极速起爆", config_dlg.lbl_current_strategy.text(), "微调对话框打开时必须直观显示当前生效的策略!")
-        self.assertIn("#ffd700", config_dlg.btn_breakout.styleSheet(), "当前生效策略对应的预设按钮必须呈激活高亮样式!")
+            # 测试微调对话框 (验证当前生效策略展示与预设按钮高亮及动态感知联动)
+            config_dlg = PullbackConfigDialog(dialog._current_filter_config, parent=dialog)
+            self.assertTrue(hasattr(config_dlg, "lbl_current_strategy"), "微调对话框必须包含当前生效策略指示标签!")
+            self.assertIn("🚀 极速起爆", config_dlg.lbl_current_strategy.text(), "微调对话框打开时必须直观显示当前生效的策略!")
+            self.assertIn("#ffd700", config_dlg.btn_breakout.styleSheet(), "当前生效策略对应的预设按钮必须呈激活高亮样式!")
 
-        # 切换预设模式：点击“🎯 经典标准”
-        config_dlg._apply_preset("🎯 经典标准")
-        self.assertIn("🎯 经典标准", config_dlg.lbl_current_strategy.text(), "点击预设后当前策略标签必须立即同步更新为经典标准!")
-        self.assertIn("#ffd700", config_dlg.btn_classic.styleSheet(), "经典标准按钮必须呈高亮激活态!")
+            # 切换预设模式：点击“🎯 经典标准”
+            config_dlg._apply_preset("🎯 经典标准")
+            self.assertIn("🎯 经典标准", config_dlg.lbl_current_strategy.text(), "点击预设后当前策略标签必须立即同步更新为经典标准!")
+            self.assertIn("#ffd700", config_dlg.btn_classic.styleSheet(), "经典标准按钮必须呈高亮激活态!")
 
-        # 手动微调参数：修改 MA20 依托下限与最小收阳
-        config_dlg.spin_dff2_min.setValue(-1.2)
-        config_dlg.spin_min_pct.setValue(0.5)
-        self.assertIn("⚙️ 自定义", config_dlg.lbl_current_strategy.text(), "参数微调后系统必须动态感知并自动切换为自定义模式!")
-        self.assertNotIn("#ffd700", config_dlg.btn_classic.styleSheet(), "偏离预设后预设按钮高亮必须自动取消!")
+            # 手动微调参数：修改 MA20 依托下限与最小收阳
+            config_dlg.spin_dff2_min.setValue(-1.2)
+            config_dlg.spin_min_pct.setValue(0.5)
+            self.assertIn("⚙️ 自定义", config_dlg.lbl_current_strategy.text(), "参数微调后系统必须动态感知并自动切换为自定义模式!")
+            self.assertNotIn("#ffd700", config_dlg.btn_classic.styleSheet(), "偏离预设后预设按钮高亮必须自动取消!")
 
-        config_dlg._on_save_clicked()
-        custom_cfg = config_dlg.get_config()
-        self.assertEqual(custom_cfg.mode_name, "⚙️ 自定义")
-        self.assertEqual(custom_cfg.dff2_min, -1.2)
-        self.assertEqual(custom_cfg.min_eval_pct, 0.5)
+            config_dlg._on_save_clicked()
+            custom_cfg = config_dlg.get_config()
+            self.assertEqual(custom_cfg.mode_name, "⚙️ 自定义")
+            self.assertEqual(custom_cfg.dff2_min, -1.2)
+            self.assertEqual(custom_cfg.min_eval_pct, 0.5)
 
-        config_dlg.close()
-        dialog.close()
+            config_dlg.close()
+            dialog.close()
+        finally:
+            if old_mode is not None:
+                save_config_node("sector_miner_filter_mode", old_mode)
+            if old_custom is not None:
+                save_config_node("sector_miner_custom_filter", old_custom)
 
     def test_11_adaptive_window_size_and_resizable_constraints(self):
         """测试窗口自适应缩放、最小尺寸解耦与小屏幕调整支持"""
@@ -684,6 +693,7 @@ class TestSectorRotationPullbackMiner(unittest.TestCase):
             self.assertIn("(全局基准)", dialog.combo_interval.currentText())
 
             # 2. 勾选自动刷新，定时器以 5000ms 启动且提示与全局同步
+            dialog.chk_auto.setChecked(False)
             dialog.chk_auto.setChecked(True)
             self.assertTrue(dialog.refresh_timer.isActive())
             self.assertEqual(dialog.refresh_timer.interval(), 5000)
@@ -717,6 +727,88 @@ class TestSectorRotationPullbackMiner(unittest.TestCase):
             dialog.close()
         finally:
             cct.ats_tdx_interval = old_val
+
+    def test_15_compact_mode_and_strategy_persistence(self):
+        """测试磁吸与精简版样式 (Compact Mode)、恢复全貌与策略配置自动持久化记忆"""
+        from ats.ui.sector_rotation_miner_dialog import SectorRotationMinerDialog
+        from ats.sector_rotation_pullback_miner import PullbackFilterConfig
+        from ats.ui.styles import load_config_node, save_config_node
+
+        old_mode = load_config_node("sector_miner_filter_mode", None)
+        old_custom = load_config_node("sector_miner_custom_filter", None)
+        old_view = load_config_node("sector_miner_view_mode", None)
+
+        try:
+            # 1. 模拟自定义策略微调并持久化验证
+            custom_cfg = PullbackFilterConfig(
+                mode_name="⚙️ 自定义",
+                dff2_min=-3.1,
+                dff2_max=9.0,
+                min_eval_pct=1.2,
+                min_vol_ratio=1.35,
+                min_turnover=2.0,
+                prefer_channel_supp=True
+            )
+            save_config_node("sector_miner_filter_mode", "⚙️ 自定义")
+            save_config_node("sector_miner_custom_filter", custom_cfg.to_dict())
+
+            # 重新打开窗口，验证是否 100% 自动恢复“⚙️ 自定义”与微调参数
+            dialog = SectorRotationMinerDialog(parent=None, current_df=None)
+            self.assertEqual(dialog.combo_filter_mode.currentText(), "⚙️ 自定义")
+            self.assertEqual(dialog._current_filter_config.dff2_min, -3.1)
+            self.assertEqual(dialog._current_filter_config.dff2_max, 9.0)
+            self.assertEqual(dialog._current_filter_config.min_eval_pct, 1.2)
+            self.assertIn("MA20:[-3.1%,+9.0%]", dialog.lbl_mode_summary.text())
+
+            # 2. 验证精简模式 (Compact Mode) 切换
+            self.assertFalse(dialog._is_compact_mode)
+            self.assertEqual(dialog.btn_compact.text(), "🧲 精简 (M)")
+            self.assertFalse(dialog.lbl_title.isHidden())
+            self.assertFalse(dialog.row2_widget.isHidden())
+
+            # 触发切换进入精简模式
+            dialog.toggle_compact_mode(force_compact=True)
+            self.assertTrue(dialog._is_compact_mode)
+            self.assertIn("恢复全貌", dialog.btn_compact.text())
+            self.assertTrue(dialog.lbl_title.isHidden())
+            self.assertTrue(dialog.row2_widget.isHidden())
+            self.assertFalse(dialog.lbl_compact_title.isHidden())
+            self.assertTrue(dialog.btn_top.isChecked(), "精简模式下应默认自动开启置顶盯盘!")
+
+            # 验证精简模式下列折叠
+            self.assertTrue(dialog.sectors_table.isColumnHidden(1))  # 资金评级隐藏
+            self.assertTrue(dialog.sectors_table.isColumnHidden(6))  # 成交额隐藏
+            self.assertFalse(dialog.sectors_table.isColumnHidden(0)) # 板块名保留
+            self.assertFalse(dialog.sectors_table.isColumnHidden(5)) # 领涨龙头保留
+
+            self.assertTrue(dialog.candidates_table.isColumnHidden(4)) # 综合得分隐藏
+            self.assertTrue(dialog.candidates_table.isColumnHidden(10)) # 建议买区隐藏
+            self.assertFalse(dialog.candidates_table.isColumnHidden(0)) # 代码保留
+            self.assertFalse(dialog.candidates_table.isColumnHidden(1)) # 名称保留
+            self.assertFalse(dialog.candidates_table.isColumnHidden(5)) # 涨幅保留
+
+            # 3. 触发恢复全貌模式
+            dialog.toggle_compact_mode(force_compact=False)
+            self.assertFalse(dialog._is_compact_mode)
+            self.assertIn("精简", dialog.btn_compact.text())
+            self.assertFalse(dialog.lbl_title.isHidden())
+            self.assertFalse(dialog.row2_widget.isHidden())
+            self.assertFalse(dialog.sectors_table.isColumnHidden(1))
+            self.assertFalse(dialog.candidates_table.isColumnHidden(4))
+
+            # 4. 验证磁吸贴边检测
+            dialog.setGeometry(10, 10, 800, 500)
+            dialog._detect_and_snap()
+            self.assertTrue(dialog.x() <= 10 or dialog.y() <= 10)
+
+            dialog.close()
+        finally:
+            if old_mode is not None:
+                save_config_node("sector_miner_filter_mode", old_mode)
+            if old_custom is not None:
+                save_config_node("sector_miner_custom_filter", old_custom)
+            if old_view is not None:
+                save_config_node("sector_miner_view_mode", old_view)
 
 
 if __name__ == '__main__':
