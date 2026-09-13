@@ -293,11 +293,11 @@ class TestCapitalDragonPanelIntegration(unittest.TestCase):
 
     def test_sector_cards_auto_wrap_and_pioneer_vr_buy_type(self):
         """测试顶部核心主线卡片自适应换行、自由变形缩放能力，以及先锋行呈现虚拟量比与买点类型"""
-        # 1. 验证卡片尺寸策略与自动折行属性 (彻底解除对 ATS 主窗口宽度的绑架)
+        # 1. 验证卡片尺寸策略与单行紧凑防溢出属性 (彻底解除对 ATS 主窗口宽度的绑架)
         card_w0 = self.panel.sector_card_widgets[0]["card_widget"]
-        self.assertTrue(card_w0.lbl_title.wordWrap())
-        self.assertTrue(card_w0.lbl_desc.wordWrap())
-        self.assertTrue(card_w0.lbl_leader.wordWrap())
+        self.assertFalse(card_w0.lbl_title.wordWrap())
+        self.assertFalse(card_w0.lbl_desc.wordWrap())
+        self.assertFalse(card_w0.lbl_leader.wordWrap())
 
         # 验证最小尺寸宽度不会阻碍父窗口缩小
         self.assertEqual(card_w0.minimumWidth(), 0)

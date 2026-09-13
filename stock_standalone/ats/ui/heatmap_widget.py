@@ -188,11 +188,13 @@ class SectorHeatmapWidget(QWidget):
         if not sector_data:
             return
         sectors_list = []
-        self.sector_to_codes = {}
+        new_sector_to_codes = {}
         for sec_name, info in sector_data.items():
             clean_sec = str(sec_name).strip()
-            # 🛡️ 严格过滤 '--', '0', 'nan', '未知' 等非明确板块
+            # 🛡️ 严格过滤 '--', '0', 'nan', '未知' 等非明确板块以及虚拟系统聚合池 (如 "实时报警" / "🔔 实时报警")
             if not is_valid_sector_name(clean_sec):
+                continue
+            if any(ex in clean_sec for ex in ("实时报警", "系统报警", "异动汇总", "报警标注")):
                 continue
             score = float(info.get('score', 0.0) or 0.0)
             avg_pct = info.get('avg_pct_diff')
@@ -219,22 +221,29 @@ class SectorHeatmapWidget(QWidget):
                     codes_set.add(c)
 
             count = len(codes_set) if codes_set else int(info.get('count', 0) or 0)
-            self.sector_to_codes[clean_sec] = list(codes_set)
+            new_sector_to_codes[clean_sec] = list(codes_set)
             sectors_list.append(
                 (clean_sec, round(score, 1), change_pct_str, count, leader_code, leader_name)
             )
 
-        if sectors_list:
+        # 🛡️ [防残缺覆盖保护]
+        # 只有提取出 >= 3 个真实有效板块时，才视为全量权威更新；
+        # 若 < 3 个（例如冷启动尚未生成板块强度，或仅有系统报警空包），坚决不覆盖已有的大盘板块快照！
+        if len(sectors_list) >= 3:
             self._has_live_ipc_data = True
+            self.sector_to_codes = new_sector_to_codes
             self.sectors = sectors_list
             self._cached_session_sectors = list(sectors_list)
             self.sort_sectors(self.sort_combo.currentIndex())
+        elif not getattr(self, 'sectors', None) or len(self.sectors) < 3:
+            # 当前界面尚无有效真实板块，主动触发从持久化快照中加载 300+ 完整真实板块
+            self.load_live_sectors(force=True)
 
     def load_live_sectors(self, force=False, current_df=None):
         # 🛡️ [权威实时保护与可见性短路]
         if not self.isVisible() and not force:
             return
-        if getattr(self, '_has_live_ipc_data', False) and not force:
+        if getattr(self, '_has_live_ipc_data', False) and not force and getattr(self, 'sectors', None) and len(self.sectors) >= 3:
             return
 
         import time
@@ -294,7 +303,10 @@ class SectorHeatmapWidget(QWidget):
                     with open(path, 'rb') as f:
                         raw_data = f.read()
                     if raw_data:
-                        json_str = zlib.decompress(raw_data).decode('utf-8')
+                        try:
+                            json_str = zlib.decompress(raw_data).decode('utf-8')
+                        except Exception:
+                            json_str = gzip.decompress(raw_data).decode('utf-8')
                         data = json.loads(json_str)
                         self._cached_raw_sector_data = data.get('sector_data', {})
                         self._last_session_path = path
@@ -404,11 +416,16 @@ class SectorHeatmapWidget(QWidget):
                         try:
                             with open(spath, 'rb') as f:
                                 raw_data = f.read()
-                            json_str = zlib.decompress(raw_data).decode('utf-8')
+                            try:
+                                json_str = zlib.decompress(raw_data).decode('utf-8')
+                            except Exception:
+                                json_str = gzip.decompress(raw_data).decode('utf-8')
                             data = json.loads(json_str)
                             sector_data = data.get('sector_data', {})
                             for sec_name, info in sector_data.items():
                                 if not is_valid_sector_name(sec_name):
+                                    continue
+                                if any(ex in sec_name for ex in ("实时报警", "系统报警", "异动汇总", "报警标注")):
                                     continue
                                 lcode = str(info.get('leader', '')).strip()
                                 if lcode:

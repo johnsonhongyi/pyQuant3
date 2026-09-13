@@ -37,15 +37,15 @@ def is_valid_sector_name(sec: Any) -> bool:
     # 过滤占位符与无意义值
     if s.lower() in ('--', '-', '---', '0', '0.0', '00', '000', '000000', 'none', 'nan', 'null', '未知', '其它', '其他', '未分类', 'default'):
         return False
-    # 过滤纯数字（例如股票代码或数字ID被误作为板块名）
-    if s.isdigit():
-        return False
     # 去除特殊前缀符号后如果为空或依然是无效词
     import re
     cleaned = re.sub(r'^[^\w\u4e00-\u9fa5]+', '', s).strip()
     if not cleaned or cleaned.lower() in ('--', '-', '---', '0', '0.0', '00', '000', '000000', 'none', 'nan', 'null', '未知', '其它', '其他', '未分类'):
         return False
     if cleaned.isdigit():
+        return False
+    # 🛡️ 自动过滤虚拟系统聚合池 (如 "实时报警" / "🔔 实时报警" / "异动汇总")，保留真实题材概念赛道
+    if any(ex in s for ex in ("实时报警", "系统报警", "异动汇总", "报警标注")):
         return False
     return True
 

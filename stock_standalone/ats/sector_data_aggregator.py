@@ -425,17 +425,7 @@ class SectorDataAggregator:
                 if c and n and n != '未知':
                     code_to_name[c] = n
 
-            # 跟随者成员
-            for fol in matched_sec_info.get('followers', []):
-                c = str(fol.get('code', '')).strip().zfill(6)
-                if c and c != '000000' and c not in seen_codes:
-                    target_codes.append(c)
-                    seen_codes.add(c)
-                n = str(fol.get('name', '')).strip()
-                if c and n and n != '未知':
-                    code_to_name[c] = n
-
-        # ── 3. 若 current_df 包含 category 列，将模糊匹配到的成分股合并入池 ──
+        # ── 3. 若 current_df 包含 category 列，将模糊匹配到的盘中活跃成分股高优先级合并入池 ──
         if current_df is not None and not current_df.empty and 'category' in current_df.columns:
             try:
                 synonyms = [clean_sec] + SECTOR_SYNONYMS.get(clean_sec, [])
@@ -443,8 +433,11 @@ class SectorDataAggregator:
                 matched_series = current_df['category'].astype(str).str.contains(pattern, case=False, na=False)
                 df_matched = current_df[matched_series]
                 if not df_matched.empty:
+                    sort_cols = [c for c in ('amount', 'amount_yi', 'percent', 'pct') if c in df_matched.columns]
+                    if sort_cols:
+                        df_matched = df_matched.sort_values(by=sort_cols[0], ascending=False)
                     use_col = 'code' in df_matched.columns
-                    for idx, row_item in df_matched.iloc[:60].iterrows():
+                    for idx, row_item in df_matched.iterrows():
                         raw_c = row_item['code'] if use_col else idx
                         c_clean = str(raw_c).strip().zfill(6)
                         if c_clean and len(c_clean) == 6 and c_clean not in seen_codes:
@@ -456,7 +449,18 @@ class SectorDataAggregator:
             except Exception as ex:
                 logger.debug(f"current_df 板块匹配异常: {ex}")
 
-        # ── 4. 若成分股仍不足，从著名经典中军龙头库 FAMOUS_SECTOR_LEADERS 补齐 ──
+        # ── 4. 补充快照中的跟随者成员 ──
+        if matched_sec_info:
+            for fol in matched_sec_info.get('followers', []):
+                c = str(fol.get('code', '')).strip().zfill(6)
+                if c and c != '000000' and c not in seen_codes:
+                    target_codes.append(c)
+                    seen_codes.add(c)
+                n = str(fol.get('name', '')).strip()
+                if c and n and n != '未知':
+                    code_to_name[c] = n
+
+        # ── 5. 若成分股仍不足，从著名经典中军龙头库 FAMOUS_SECTOR_LEADERS 补齐 ──
         if len(target_codes) < 6:
             for key, st_list in FAMOUS_SECTOR_LEADERS.items():
                 if key == clean_sec or key in clean_sec or clean_sec in key:
@@ -534,7 +538,7 @@ class SectorDataAggregator:
                             'pct': pct
                         }
 
-            # B. 批量获取 TDX 高频 Alpha 盘口买点评级
+            # B. 批量获取 TDX 高频 Alpha 盘口买点评级 (传入 raw_quotes=tdx_quotes 内存复用，0 重复网络开销)
             sec_map = {c: sector_name for c in clean_codes}
             mp_cache = {}
             n_map = {}
@@ -549,7 +553,10 @@ class SectorDataAggregator:
                             'dff3': _safe_float(r_row.get('DFF3', r_row.get('dff3'))),
                             'rank': _safe_int(r_row.get('Rank', r_row.get('rank', r_row.get('排名', r_row.get('topR', 0)))), 0)
                         }
-            alpha_quotes = fetcher.fetch_multi_stock_alpha_quotes(clean_codes, sec_map, mp_cache, n_map)
+            try:
+                alpha_quotes = fetcher.fetch_multi_stock_alpha_quotes(clean_codes, sec_map, mp_cache, n_map, raw_quotes=tdx_quotes)
+            except TypeError:
+                alpha_quotes = fetcher.fetch_multi_stock_alpha_quotes(clean_codes, sec_map, mp_cache, n_map)
             for aq in alpha_quotes:
                 aq_code = str(aq.get("code", "")).strip().zfill(6)
                 if aq_code:
@@ -910,23 +917,22 @@ class SectorDataAggregator:
                 r['score'] = max(89.0, _safe_float(r.get('score', 0)))
                 r['is_strong'] = True
                 r['pattern'] = f"🚀跳空缺口加速 (高开+{open_jump:.1f}%缺口未补) | {r.get('pattern', '')}"
-            elif c in race_roles:
-                r['type'] = race_roles[c]
-                if c in race_scores:
-                    r['score'] = race_scores[c]
-                if c in race_hints and race_hints[c]:
-                    r['pattern'] = race_hints[c]
-                r['is_strong'] = any(k in str(r['type']) for k in ('👑', '🚀', '🔥', '先锋', '龙头', '确核'))
             elif pct_val >= 9.5:
                 r['type'] = f"{acc_tag}·🔥 强势涨停" if acc_tag else '🔥 强势涨停'
-                r['score'] = max(96.0, _safe_float(r.get('score', 0)))
+                r['score'] = max(96.0, race_scores.get(c, 0.0), _safe_float(r.get('score', 0)))
                 r['is_strong'] = True
                 r['pattern'] = '涨停封板强势先锋'
             elif pct_val >= 5.0:
                 r['type'] = f"{acc_tag}·🚀 强势先锋" if acc_tag else '🚀 强势先锋'
-                r['score'] = max(88.0, _safe_float(r.get('score', 0)))
+                r['score'] = max(88.0, race_scores.get(c, 0.0), _safe_float(r.get('score', 0)))
                 r['is_strong'] = True
                 r['pattern'] = '主线高位领涨先锋'
+            elif c in race_roles:
+                r['type'] = race_roles[c]
+                r['score'] = max(race_scores.get(c, _safe_float(r.get('score', 75.0))), 80.0 if pct_val >= 3.0 else 0.0)
+                if c in race_hints and race_hints[c]:
+                    r['pattern'] = race_hints[c]
+                r['is_strong'] = any(k in str(r['type']) for k in ('👑', '🚀', '🔥', '先锋', '龙头', '确核')) or pct_val >= 3.0
             elif is_ol and pct_val >= 2.0:
                 r['type'] = '⚡ 光脚加速'
                 r['score'] = max(85.0, _safe_float(r.get('score', 0)))

@@ -679,7 +679,8 @@ class CapitalDragonEngine:
                         "leader_pct": -99.0,
                         "leader_amt_yi": 0.0,
                         "leader_vr": 1.0,
-                        "leader_buy_type": ""
+                        "leader_buy_type": "",
+                        "_member_candidates": []
                     }
                 st = sector_stats[s_name]
                 st["total_amt_yi"] += amt
@@ -687,6 +688,7 @@ class CapitalDragonEngine:
                 st["sum_pct"] += p_val
                 st["sum_vr_weighted"] += amt * vr_val
                 st["sum_vr"] += vr_val
+                st["_member_candidates"].append((code_str, amt, p_val, has_dual, has_gap, has_ol))
                 if p_val > 0.0:
                     st["up_count"] += 1
                 if p_val >= 9.5: # 涨停门槛
@@ -715,6 +717,31 @@ class CapitalDragonEngine:
                 continue
             st["avg_pct"] = round(st["sum_pct"] / st["total_count"], 2)
             up_ratio = st["up_count"] / st["total_count"]
+
+            # 🎯 聚合板块全量成分股 (龙头先锋置顶 -> 群起加速/涨停优先 -> 成交额优先 -> 涨幅优先)
+            lead_c = st.get("leader_code", "")
+            raw_cands = st.pop("_member_candidates", [])
+            seen_c = set()
+            sorted_cands = []
+            if lead_c:
+                seen_c.add(lead_c)
+                sorted_cands.append(lead_c)
+            # 排序其余候选人
+            other_cands = [item for item in raw_cands if item[0] not in seen_c]
+            other_cands.sort(
+                key=lambda x: (
+                    1 if (x[3] or x[4] or x[5] or x[2] >= 9.5) else 0,  # 加速形态或涨停优先
+                    x[1],                                              # 成交额(亿)
+                    x[2]                                               # 涨幅%
+                ),
+                reverse=True
+            )
+            for item in other_cands:
+                c_code = item[0]
+                if c_code not in seen_c:
+                    seen_c.add(c_code)
+                    sorted_cands.append(c_code)
+            st["member_codes"] = sorted_cands
 
             # 板块虚拟量比：成交额加权虚拟量比（资金权重优先），无成交额时使用算术平均
             if st["total_amt_yi"] > 0:
