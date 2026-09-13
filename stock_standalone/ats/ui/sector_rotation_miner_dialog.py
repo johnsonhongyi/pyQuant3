@@ -876,12 +876,24 @@ class SectorRotationMinerDialog(QDialog, WindowMixin):
             self.sectors_table.setItem(row, 4, item_pio)
 
             # 5: 领涨先锋 (存入 leader_code 与 leader_name 便于单击/双击自动联动)
+            l_name = s.get('leader_name', '')
+            l_pct = float(s.get('leader_pct', 0.0))
+            l_type = s.get('leader_type', '领涨龙头')
+            l_amt = float(s.get('leader_amt_yi', 0.0))
+            l_vr = float(s.get('leader_vr', 1.0))
             item_leader = QTableWidgetItem(leader)
             item_leader.setData(Qt.ItemDataRole.UserRole, l_code)
-            item_leader.setData(Qt.ItemDataRole.UserRole + 1, s.get('leader_name', ''))
+            item_leader.setData(Qt.ItemDataRole.UserRole + 1, l_name)
             item_leader.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             item_leader.setForeground(QBrush(QColor("#ffcc66")))
-            item_leader.setToolTip(f"👉 单击直接联动领涨龙头: {s.get('leader_name', '')} ({l_code})\n双击亦可全终端联动外部行情")
+            tip_lines = [
+                f"👉 单击直接联动领涨龙头: {l_name} ({l_code})",
+                f"👑 动能画像: {l_type} | 涨幅: {l_pct:+.2f}%"
+            ]
+            if l_amt > 0:
+                tip_lines.append(f"💰 资金成交: {l_amt:.1f} 亿 | 盘中量比: {l_vr:.2f}")
+            tip_lines.append("⚡ 盘中随实时资金动能竞争与更替 | 双击全终端联动")
+            item_leader.setToolTip("\n".join(tip_lines))
             self.sectors_table.setItem(row, 5, item_leader)
 
             # 6: 总成交额

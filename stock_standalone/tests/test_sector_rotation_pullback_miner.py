@@ -622,9 +622,57 @@ class TestSectorRotationPullbackMiner(unittest.TestCase):
 
         dialog.close()
 
+    def test_13_leader_momentum_ranking_and_realtime_competition(self):
+        """测试领涨龙头基于连板、大成交中军与实时量比的多维综合动能选拔，及盘中动态更替"""
+        miner = self.miner
+
+        # 1. 测试动能评分函数：连板高标 > 首板 > 普通大涨
+        p_ladder = {"code": "000001", "name": "连板高标", "pct": 10.0, "amt_yi": 5.0, "vol_ratio": 2.0, "turnover": 8.0, "pioneer_type": "👑 3连板龙头"}
+        p_first = {"code": "000002", "name": "首板涨停", "pct": 10.0, "amt_yi": 3.0, "vol_ratio": 1.5, "turnover": 5.0, "pioneer_type": "👑 涨停先锋"}
+        p_small = {"code": "000003", "name": "微盘脉冲", "pct": 10.0, "amt_yi": 0.2, "vol_ratio": 1.1, "turnover": 2.0, "pioneer_type": "👑 涨停先锋"}
+
+        score_ladder = miner._calculate_pioneer_momentum_score(p_ladder)
+        score_first = miner._calculate_pioneer_momentum_score(p_first)
+        score_small = miner._calculate_pioneer_momentum_score(p_small)
+
+        self.assertGreater(score_ladder, score_first, "3连板龙头的综合动能得分必须显著高于首板标的!")
+        self.assertGreater(score_first, score_small, "相同涨幅下大成交额与活跃换手标的动能必须高于微盘脉冲股!")
+
+        # 2. 实盘仿真数据：同一主线板块【储能】下的多维真龙头选拔
+        # 场景一：早盘小票脉冲与大中军竞争 (大中军 000022 涨停且成交 25 亿，小票 000011 涨停但仅成交 0.3 亿)
+        data_morning = {
+            # 小票脉冲A涨停 10.0% (成交仅 0.3 亿，量比 1.1，微盘无带动性)
+            "000011": {"name": "小票脉冲A", "close": 10.0, "percent": 10.0, "category": "储能", "dff2": 3.0, "vol_ratio": 1.1, "amount": 0.3e8, "ratio": 1.5},
+            # 核心中军B亦涨停 10.0% (成交 25.0 亿，量比 2.8，百亿主力合力中军)
+            "000022": {"name": "中军核心B", "close": 50.0, "percent": 10.0, "category": "储能", "dff2": 4.5, "vol_ratio": 2.8, "amount": 25.0e8, "ratio": 6.5},
+            "000033": {"name": "储能跟风C", "close": 15.0, "percent": 2.0, "category": "储能", "dff2": 1.0, "vol_ratio": 1.2, "amount": 2.0e8, "ratio": 2.0, "ma20d": 14.8, "per1d": -1.0}
+        }
+        df_morning = pd.DataFrame.from_dict(data_morning, orient='index')
+        res_morning = miner.run_mining_pipeline(df_morning)
+        sec_morning = next(s for s in res_morning["sectors"] if s["name"] == "储能")
+        # 验证中军核心B凭借25亿大资金容量与高量比动能，从同为10%的竞争中胜出作为板块真正龙头旗手！
+        self.assertEqual(sec_morning["leader_code"], "000022", "同为涨停时大资金大容量核心标的必须胜出作为动能最强龙头!")
+        self.assertGreater(sec_morning["leader_amt_yi"], 20.0)
+
+        # 场景二：午盘实时动态更替：若出现连板龙头 000044 (2连板，成交 8 亿)，连板高度确立情绪总龙头
+        from unittest.mock import patch, MagicMock
+        data_afternoon = dict(data_morning)
+        data_afternoon["000044"] = {"name": "连板真龙D", "close": 22.0, "percent": 10.0, "category": "储能", "dff2": 6.0, "vol_ratio": 2.5, "amount": 8.0e8, "ratio": 8.0}
+        # 模拟 000044 属于连板天梯
+        with patch("ats.limit_up_engine.LimitUpEngine.get_instance") as mock_lue:
+            mock_inst = MagicMock()
+            mock_inst._current_live_records = [{"code": "000044", "limit_days": 2, "is_limit_up": True}]
+            mock_lue.return_value = mock_inst
+
+            df_afternoon = pd.DataFrame.from_dict(data_afternoon, orient='index')
+            res_afternoon = miner.run_mining_pipeline(df_afternoon)
+            sec_afternoon = next(s for s in res_afternoon["sectors"] if s["name"] == "储能")
+            self.assertEqual(sec_afternoon["leader_code"], "000044", "盘中出现连板高标龙头时必须动态更替为最新总龙头!")
+
 
 if __name__ == '__main__':
     unittest.main()
+
 
 
 
