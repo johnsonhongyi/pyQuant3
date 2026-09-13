@@ -99,6 +99,7 @@ class SectorCardWidget(QFrame):
         self.sector_name = ""
         self.leader_code = ""
         self.leader_name = ""
+        self.member_codes = []
 
         self.setFrameShape(QFrame.Shape.StyledPanel)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -788,10 +789,13 @@ class CapitalDragonPanel(QWidget):
                 l_name = st.get("leader_name", "")
                 w["leader_code"] = l_code
                 w["leader_name"] = l_name
+                sec_member_codes = list(st.get("member_codes", []))
+                w["member_codes"] = sec_member_codes
                 if card_obj:
                     card_obj.sector_name = sec_name
                     card_obj.leader_code = l_code
                     card_obj.leader_name = l_name
+                    card_obj.member_codes = sec_member_codes
 
                 grade = st.get("grade", "主线")
                 is_compact = (w["frame"].width() > 0 and w["frame"].width() < 270)
@@ -1599,16 +1603,16 @@ class CapitalDragonPanel(QWidget):
                 name = n_item.text().replace("⭐", "").strip()
                 self._trigger_stock_linkage(code, name)
 
-    def open_sector_detail(self, sector_name: str):
+    def open_sector_detail(self, sector_name: str, member_codes: Optional[List[str]] = None):
         """
         【🎯 直接打开板块详情核心入口】
-        清洗板块名称并从当前全市场行情中提取成分股代码，唤醒或复用 ATSSectorDetailDialog 并标记强势股
+        清洗板块名称并从当前全市场行情/卡片/主窗口中高效提取成分股代码，唤醒或复用 ATSSectorDetailDialog 并标记强势股
         """
         if not sector_name:
             return
         import re
         clean_sec = re.sub(r'^[^\w\u4e00-\u9fa5]+', '', str(sector_name)).strip()
-        for pfx in ("核心主线:", "核心主线", "主线:", "主线", "板块:", "板块"):
+        for pfx in ("核心主线:", "核心主线", "主线:", "主线", "板块:", "板块", "活跃赛道:", "活跃赛道", "轮动分支:", "轮动分支"):
             if clean_sec.startswith(pfx):
                 clean_sec = clean_sec[len(pfx):].strip()
         if not clean_sec or clean_sec in ('--', '未知'):
@@ -1616,21 +1620,50 @@ class CapitalDragonPanel(QWidget):
 
         logger.info(f"直接打开板块详情: {clean_sec}")
 
-        member_codes = []
-        df_all = getattr(self, '_last_df_all', None)
-        if df_all is not None and not df_all.empty:
-            sec_col = next((c for c in ('category', 'industry', 'concept') if c in df_all.columns), None)
-            if sec_col:
-                try:
-                    mask = df_all[sec_col].astype(str).str.contains(re.escape(clean_sec), case=False, na=False)
-                    df_sec = df_all[mask]
-                    if not df_sec.empty:
-                        member_codes = [_clean_code(c) for c in df_sec.index]
-                except Exception as e:
-                    logger.debug(f"从 df_all 提取板块成分股代码异常: {e}")
+        effective_codes = list(member_codes) if member_codes else []
 
+        # ── 1. 优先从顶部三大主线卡片预聚合好的优质活跃成分股中获取 (0ms 秒开) ──
+        if not effective_codes and hasattr(self, 'sector_card_widgets'):
+            for w in self.sector_card_widgets:
+                w_sec = str(w.get("sector_name", "")).strip()
+                if w_sec and (w_sec == clean_sec or w_sec in clean_sec or clean_sec in w_sec):
+                    c_list = w.get("member_codes", [])
+                    if c_list:
+                        effective_codes = list(c_list)
+                        break
+
+        # ── 2. 其次从最新分析报告 _last_report['top_sectors'] 中获取 ──
+        if not effective_codes and getattr(self, '_last_report', None):
+            for st in self._last_report.get("top_sectors", []):
+                st_name = str(st.get("name", "")).strip()
+                if st_name and (st_name == clean_sec or st_name in clean_sec or clean_sec in st_name):
+                    c_list = st.get("member_codes", [])
+                    if c_list:
+                        effective_codes = list(c_list)
+                        break
+
+        # ── 3. 再次从底表行情 (df_all / current_df) 中智能提取全量成分股 ──
+        if not effective_codes:
+            df_all = getattr(self, '_last_df_all', None)
+            if (df_all is None or df_all.empty) and self.main_window and hasattr(self.main_window, 'current_df'):
+                df_all = self.main_window.current_df
+            if df_all is not None and not df_all.empty:
+                sec_col = next((c for c in ('category', 'industry', 'concept') if c in df_all.columns), None)
+                if sec_col:
+                    try:
+                        mask = df_all[sec_col].astype(str).str.contains(re.escape(clean_sec), case=False, na=False)
+                        df_sec = df_all[mask]
+                        if not df_sec.empty:
+                            sort_cols = [c for c in ('amount', 'amount_yi', 'percent', 'pct') if c in df_sec.columns]
+                            if sort_cols:
+                                df_sec = df_sec.sort_values(by=sort_cols[0], ascending=False)
+                            effective_codes = [_clean_code(c) for c in df_sec.index]
+                    except Exception as e:
+                        logger.debug(f"从 df_all 提取板块成分股代码异常: {e}")
+
+        send_codes = effective_codes if effective_codes else None
         if self.main_window and hasattr(self.main_window, 'on_sector_clicked'):
-            self.main_window.on_sector_clicked(clean_sec, member_codes=member_codes)
+            self.main_window.on_sector_clicked(clean_sec, member_codes=send_codes)
         else:
             try:
                 from ats.ui.sector_detail_dialog import ATSSectorDetailDialog

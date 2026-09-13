@@ -223,6 +223,9 @@ def is_valid_sector_name(sec: Any) -> bool:
     # 结合全局泛概念黑名单进行双重校验
     if is_noise_concept(cleaned):
         return False
+    # 🛡️ 自动过滤虚拟系统聚合池 (如 "实时报警" / "🔔 实时报警" / "异动汇总")，保留真实题材概念赛道
+    if any(ex in s for ex in ("实时报警", "系统报警", "异动汇总", "报警标注")):
+        return False
     return True
 
 class TickSeries:

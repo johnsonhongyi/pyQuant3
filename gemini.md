@@ -1,3 +1,27 @@
+## 2026-09-13 16:15
+- [x] **【彻底解决轮动深挖冷启动显示异常、全貌列残缺隐藏Bug & 落地SSOT视图持久化与全量列可见性守护】(SSOT) (`ats/ui/sector_rotation_miner_dialog.py`, `tests/test_sector_rotation_pullback_miner.py`)**：
+    - [x] **操盘手反馈痛点根因穿透**：
+        1. **“冷启动打开第一次总是不正确，需手动按两次 M 键才正常”致命根因一 (`cur_mode` 导致退出保存静默崩溃)**：
+           - 在 `_save_current_filter_and_view_state` 中，`payload["sector_miner_filter_mode"] = cur_mode`，但 `cur_mode` 变量未定义，引发 `NameError`。该异常在 `except Exception as e` 中被静默捕获，导致退出或切换时 `sector_miner_view_mode` 以及各模式独立的 geometry 坐标从未成功写入持久化配置文件 `window_config.json`；
+        2. **致命根因二 (`setup_header_persistence` 二进制 blob 隐藏列冲突覆盖)**：
+           - `setup_header_persistence` 在表头上注册了 `header.saveState()` 并在窗口初始化 `showEvent` 时执行 `header.restoreState()`。精简模式下为了窄屏展示折叠了部分列，其隐藏状态被保存为十六进制字符串（hex blob）；当操盘手以全貌模式冷启动打开时，`restoreState` 强行将全貌表格的多列还原为“隐藏”！而全貌模式初始化代码中此前未对被隐藏的列进行重置展开，导致操盘手视觉上大工作台候选表列严重残缺（从 13 列骤降到 7 列），必须手动按两次 `M` 键（切精简再切全貌）借由 `toggle_compact_mode(False)` 的内部循环才能恢复全部列。
+    - [x] **系统级工程落地与 SSOT 规范重构**：
+        1. **修复保存逻辑与抽象单点 SSOT 视图切换 (`_apply_view_mode`)**：
+           - 修复 `_save_current_filter_and_view_state` 中 `cur_mode` 取值变量，确保策略模式、自定义参数字典、视图模式（`full` / `compact`）及各自独立的窗口尺寸 100% 原子落盘；
+           - 抽象统一视图应用核心方法 `_apply_view_mode(self, is_compact: bool, is_cold_boot: bool = False)`，冷启动与热切换（点击按钮/按快捷键 M）全量委托此单点 SSOT，保证行为 100% 一致；
+        2. **彻底移除二进制 header blob 对动态多模表格的污染**：
+           - 彻底停用 `setup_header_persistence` 对 `sectors_table` 和 `candidates_table` 的十六进制恢复，避免其隐藏列状态死锁干扰全貌模式；
+           - 引入 `_restore_full_column_widths`：在全貌模式下显式遍历所有列执行 `setColumnHidden(c, False)`，确保 13 列 100% 完全可见、宽度合理分布；
+        3. **`showEvent` 与启动生命周期守护**：
+           - 在 `showEvent` 中，若当前处于全貌模式，主动调用 `_restore_full_column_widths` 执行安全守护，100% 杜绝冷启动表格列被隐藏的问题。
+    - [x] **自动化测试 33/33 PASSED 100% 全绿**：
+        1. `test_sector_rotation_pullback_miner.py`: 20/20 PASSED；
+        2. `test_daily_limit_up_dialog.py`: 13/13 PASSED；
+        3. 专项新增 `test_20_cold_boot_view_mode_persistence_and_full_view_restoration`，全量覆盖：
+           - 持久化为 `full` 冷启动初始化：两张表格所有列 100% 未被隐藏，绝无残缺；
+           - 持久化为 `compact` 冷启动初始化：准确进入紧凑卡片，核心字段自适应保留；
+           - 从精简冷启动后点击/快捷键恢复全貌：13 列瞬间全部恢复显示。
+
 ## 2026-09-13 15:15
 - [x] **【彻底解决天梯无法打开故障、全面对齐ATS原生磁吸架构(SSOT)、精简模式保留dff/dff2/dff3/量比自适应、修复按键换行联动与清理右键菜单】(SSOT) (`ats/ui/daily_limit_up_dialog.py`, `ats/ui/sector_rotation_miner_dialog.py`, `tests/test_daily_limit_up_dialog.py`, `tests/test_sector_rotation_pullback_miner.py`)**：
     - [x] **操盘手反馈痛点根因穿透**：

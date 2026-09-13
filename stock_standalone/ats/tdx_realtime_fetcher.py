@@ -276,12 +276,13 @@ def is_tdx_trading_allowed(now_dt: Optional[datetime] = None) -> Tuple[bool, str
     now = now_dt or datetime.now()
     t_str = now.strftime("%H:%M:%S")
 
-    # 1. 检查交易日状态
-    try:
-        if hasattr(cct, 'get_work_day_status') and not cct.get_work_day_status():
-            return False, f"周末/假日休市 ({t_str})", {"stage": "HOLIDAY", "is_bidding": False, "is_locked": False}
-    except Exception:
-        pass
+    # 1. 检查交易日状态 (实时生产下校验全局工作日，若显式传入 now_dt 则基于其时间模拟)
+    if now_dt is None:
+        try:
+            if hasattr(cct, 'get_work_day_status') and not cct.get_work_day_status():
+                return False, f"周末/假日休市 ({t_str})", {"stage": "HOLIDAY", "is_bidding": False, "is_locked": False}
+        except Exception:
+            pass
 
     if now.weekday() >= 5:
         return False, f"周末休市 ({t_str})", {"stage": "HOLIDAY", "is_bidding": False, "is_locked": False}
