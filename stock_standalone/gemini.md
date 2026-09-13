@@ -1,3 +1,44 @@
+## 2026-09-13 14:25
+- [x] **【彻底修复点击精简按钮无效Bug、精简模式解除自动置顶 & 全面对齐ATS底层磁吸边缘折叠/悬停展开架构 (SSOT)】(SSOT) (`ats/ui/sector_rotation_miner_dialog.py`, `tests/test_sector_rotation_pullback_miner.py`)**：
+    - [x] **操盘手反馈三大痛点根因穿透**：
+        1. **点击精简模式按钮无效根因**：`QPushButton.clicked` 信号默认携带 `bool` 类型参数（`checked: bool = False`）。此前使用 `self.btn_compact.clicked.connect(self.toggle_compact_mode)` 直连，导致每次点击按钮时无条件将 `force_compact = False` 传入，强制执行“还原全貌”，若当前已是全貌则直接 `return`，操盘手鼠标点击按钮毫无反应（而按键盘 `M` 键未传参走取反逻辑因此有效）；
+        2. **精简模式强行自动置顶**：原逻辑在切入精简模式时硬编码执行 `_toggle_stay_on_top(True)`，违背了操盘手灵活排布看盘界面的需求；
+        3. **磁吸贴边未生效与未对齐底层生态**：此前仅简单吸附贴齐坐标，缺乏 ATS 完善的磁吸生命周期管理——包括贴边自动判定（`anchor_edge`）、未置顶离开 400ms 自动平滑折叠为 5px 边缘微感应条（`hide_to_edge`）、鼠标悬停 200ms 或激活窗口平滑滑出展开（`show_normal_position`）、以及【置顶与磁吸严格互斥】机制；
+    - [x] **工程级修复与全面对齐 ATS 磁吸生态 (SSOT)**：
+        1. **按钮槽函数参数隔离修复**：改为 `self.btn_compact.clicked.connect(lambda: self.toggle_compact_mode())`，并在 `toggle_compact_mode` 头部增加对 bool 信号参数的过滤容错，鼠标点击与键盘 `M` 键 100% 灵敏秒切；
+        2. **置顶完全交由操盘手手动选择**：彻底移除切入精简模式时的强制置顶逻辑，精简模式与全貌模式均严格保持操盘手当前的置顶状态（手动按 `T` 或点 `📌` 自由控制）；
+        3. **全面对齐 ATS 底层标准磁吸与边缘折叠/展开架构**：
+           - 对齐 `DailyLimitUpDialog`、`HotSectorLeaderboard` 与 `DragonMonitor` SSOT；
+           - 引入 `anchor_edge`、`is_hidden_state`、`normal_geometry`、`hover_ticks`、`leave_ticks` 状态机；
+           - 接入 `hover_timer` (100ms) 与 `snap_timer` (300ms)；
+           - 靠近左/右/顶边缘（<25px）触发 `start_slide_animation` 磁吸贴齐，并记录 `anchor_edge`；
+           - 贴边后鼠标移开 400ms 自动滑出折叠为 5px 边缘微感应条（透明度 0.35），悬停 200ms 或窗口激活瞬间 OutCubic 平滑滑出展开至 1.0 不透明度；
+           - **置顶与磁吸严格互斥**：操盘手开启置顶时，完全清空 `anchor_edge` 并停止 `hover_timer`，保持自由置顶悬浮看盘；取消置顶后恢复磁吸与边缘感应折叠；
+    - [x] **自动化测试 29/29 PASSED & 核心套件 52 项全绿**：
+        1. 专项新增 `test_17_button_click_toggle_and_ats_magnetic_snap_edge_cycle`，全量覆盖按钮鼠标物理点击切换、精简模式不强制置顶、ATS 磁吸贴边检测、边缘折叠 (hide_to_edge)、悬停展开 (show_normal_position) 与置顶互斥机制；
+        2. `test_daily_limit_up_dialog.py` (12/12) + `test_sector_rotation_pullback_miner.py` (17/17) 全部 100% 全绿通过，核心关联测试套件 52 项全部零回归全绿！
+
+## 2026-09-13 14:00
+- [x] **【磁吸平滑缓动动效 (OutCubic) 落地 & 精简模式全局快捷键 (M/T) 穿透与紧凑卡片宽度彻底释放】(SSOT) (`ats/ui/sector_rotation_miner_dialog.py`, `tests/test_sector_rotation_pullback_miner.py`)**：
+    - [x] **操盘手反馈痛点根因穿透**：
+        1. **快捷键“没反应”根因**：此前仅在 `keyPressEvent` 中拦截 `M` 与 `T`，当子控件（板块大表或候选大表）获得键盘焦点时，Qt 会将按键吞掉用于单元格定位，导致操盘手在表格内按 `M` 或 `T` 毫无反应；
+        2. **置顶快捷键异常**：`bind_top_shortcut` 默认反射查找 `chk_ontop` 等，未传无参回调，直调 `_toggle_stay_on_top` 缺失 `checked` 参数导致类型错误静默失败；
+        3. **精简模式宽度被顶部栏撑爆死锁**：顶部控制栏在精简模式下虽然隐藏了策略与搜索框，但“🚀 一键深度挖掘”、“自动刷新”与“✕ 关闭 (Esc)”等 6 个宽按钮累加 `minSizeHint` 超过 510~634px，物理锁死窗口导致无法缩至 350~380px 紧凑黄金宽度；
+        4. **磁吸模式缺乏动效反馈**：此前使用裸 `self.move()` 瞬间位移，无平滑滑动和透明度呼吸反馈，且标题栏偏移导致操盘手视觉感知不明显；
+    - [x] **工程级动效、穿透快捷键与紧凑布局重构**：
+        1. **高质感平滑缓动滑入与磁吸动效 (`start_slide_animation`)**：
+           - 对齐 `DailyLimitUpDialog` 与 `DragonMonitor` SSOT 规范，引入 `QParallelAnimationGroup` + `QPropertyAnimation(b"geometry")` + `QPropertyAnimation(b"windowOpacity")`；
+           - 采用 `QEasingCurve.Type.OutCubic` 缓动，贴边磁吸时附带透明度闪烁呼吸反馈（0.45 -> 1.0），动效高级丝滑；
+        2. **全局级穿透快捷键 (`_compact_shortcut_m` 与 `_top_shortcut_t`)**：
+           - 注册 `QShortcut(Qt.Key.Key_M, self, WindowShortcut)`，无论焦点在表格、表头还是过滤框，按下 `M` 键 0ms 瞬间秒切精简/全貌；
+           - 注册 `bind_top_shortcut(self, lambda: self._toggle_stay_on_top())`，支持无参自反转，按 `T` 键秒级无缝置顶；
+        3. **精简控制栏极简重构 (minSizeHint 压至 280px)**：
+           - 精简模式下：按钮自适应精炼为“🚀 挖掘”、“自动”、“📌”、“✕ 关闭”、“🖥️ 恢复全貌 (M)”，隐藏下拉框与副行；
+           - 窗口放开至 300x320 最小限制，默认平滑贴靠屏幕右侧黄金看盘位 (370x660)，两张表格智能折叠保留核心列；
+    - [x] **自动化测试 28/28 PASSED**：
+        1. 专项新增 `test_16_magnetic_snap_animation_and_compact_responsiveness`，全量覆盖全局快捷键穿透、磁吸动效、置顶切换与精简模式宽度自适应；
+        2. `test_daily_limit_up_dialog.py` (12/12) + `test_sector_rotation_pullback_miner.py` (16/16) 全部 100% 全绿通过！
+
 ## 2026-09-13 13:40
 - [x] **【彻底解决天梯与板块轮动触发两次联动Bug & 全面对齐系统底层联动逻辑 (SSOT)】(SSOT) (`ats/ui/daily_limit_up_dialog.py`, `ats/ui/sector_rotation_miner_dialog.py`, `ats/ui/main_window.py`)**：
     - [x] **四重致命断层根因穿透**：
