@@ -10,7 +10,7 @@ ATS Favorite Panel ("⭐ 重点关注" 专属 Tab 页面)
 """
 
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import Qt, pyqtSignal, QSize
 from PyQt6.QtGui import QColor, QFont
 import os
 import json
@@ -75,7 +75,11 @@ class FavoritePanel(QWidget):
     
     stock_selected = pyqtSignal(str, str, dict) # code, name, context_info
     dragon_monitor_requested = pyqtSignal()
-    
+
+    def minimumSizeHint(self) -> QSize:
+        # 允许中间面板极致弹性缩放，绝不撑大主窗口或挤压左右侧分割条
+        return QSize(150, 100)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.extra_cols = get_ats_extra_cols()

@@ -119,19 +119,19 @@ class SectorCardWidget(QFrame):
         """)
 
         card_layout = QVBoxLayout(self)
-        card_layout.setContentsMargins(10, 7, 10, 7)
-        card_layout.setSpacing(4)
+        card_layout.setContentsMargins(8, 4, 8, 4)
+        card_layout.setSpacing(3)
 
         # 标题栏：主线名称 + 查看明细按钮
         title_layout = QHBoxLayout()
         title_layout.setContentsMargins(0, 0, 0, 0)
-        title_layout.setSpacing(6)
+        title_layout.setSpacing(4)
 
         self.lbl_title = ClickableLabel(f"主线 {index+1}: 正在识别资金聚集...")
-        self.lbl_title.setStyleSheet("color: #ffd700; font-size: 10.5pt; font-weight: bold;")
+        self.lbl_title.setStyleSheet("color: #ffd700; font-size: 9.5pt; font-weight: bold;")
         self.lbl_title.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.lbl_title.setWordWrap(True)
-        self.lbl_title.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self.lbl_title.setWordWrap(False)
+        self.lbl_title.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self.lbl_title.setMinimumWidth(0)
         self.lbl_title.clicked.connect(self._on_card_clicked)
         title_layout.addWidget(self.lbl_title, 1)
@@ -143,11 +143,11 @@ class SectorCardWidget(QFrame):
             QPushButton {
                 background-color: #21262d;
                 color: #58a6ff;
-                font-size: 8.5pt;
+                font-size: 8pt;
                 font-weight: bold;
                 border: 1px solid #30363d;
                 border-radius: 3px;
-                padding: 2px 7px;
+                padding: 1px 5px;
             }
             QPushButton:hover {
                 background-color: #388bfd26;
@@ -160,22 +160,22 @@ class SectorCardWidget(QFrame):
 
         card_layout.addLayout(title_layout)
 
-        # 描述行：成交额、均涨、涨停、加速（支持自动折行自适应展示）
+        # 描述行：成交额、均涨、涨停、加速（支持弹性自适应展示）
         self.lbl_desc = ClickableLabel("成交: -- 亿 | 均涨: --% | 涨停: -- 家")
-        self.lbl_desc.setStyleSheet("color: #8b949e; font-size: 9pt;")
+        self.lbl_desc.setStyleSheet("color: #8b949e; font-size: 8.5pt;")
         self.lbl_desc.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.lbl_desc.setWordWrap(True)
-        self.lbl_desc.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self.lbl_desc.setWordWrap(False)
+        self.lbl_desc.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self.lbl_desc.setMinimumWidth(0)
         self.lbl_desc.clicked.connect(self._on_card_clicked)
         card_layout.addWidget(self.lbl_desc)
 
-        # 先锋行：代码、名称、涨幅、虚拟量比、买点类型（支持自动折行自适应展示）
+        # 先锋行：代码、名称、涨幅、虚拟量比、买点类型（支持弹性自适应展示）
         self.lbl_leader = ClickableLabel("🚀 先锋: --")
         self.lbl_leader.setStyleSheet("""
             QLabel {
                 color: #38bdf8;
-                font-size: 9pt;
+                font-size: 8.5pt;
                 font-weight: bold;
             }
             QLabel:hover {
@@ -184,8 +184,8 @@ class SectorCardWidget(QFrame):
             }
         """)
         self.lbl_leader.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.lbl_leader.setWordWrap(True)
-        self.lbl_leader.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self.lbl_leader.setWordWrap(False)
+        self.lbl_leader.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self.lbl_leader.setMinimumWidth(0)
         self.lbl_leader.setToolTip("🎯 单击联动行情与K线 | 双击查看 SBC 分时通道")
         self.lbl_leader.clicked.connect(self._on_leader_clicked)
@@ -193,11 +193,21 @@ class SectorCardWidget(QFrame):
         card_layout.addWidget(self.lbl_leader)
 
     def sizeHint(self) -> QSize:
-        return QSize(240, 92)
+        return QSize(200, self.CARD_HEIGHT)
 
     def minimumSizeHint(self) -> QSize:
-        # 宽度支持弹性缩放折行，高度确保三行文字舒适舒展不被裁切
-        return QSize(60, 86)
+        # 宽度支持物理级弹性压缩，彻底杜绝外层 QSplitter 锁死卡顿
+        return QSize(50, self.CARD_HEIGHT)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        p = self.parent()
+        while p and not hasattr(p, '_render_top_sector_cards'):
+            p = p.parent()
+        if p and getattr(p, '_last_report', None):
+            top_secs = p._last_report.get("top_sectors", [])
+            if top_secs:
+                p._render_top_sector_cards(top_secs)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
@@ -299,6 +309,10 @@ class CapitalDragonPanel(QWidget):
 
         self._render_table()
 
+    def minimumSizeHint(self) -> QSize:
+        # 允许中间面板极致弹性缩放，绝不撑大主窗口或挤压左右侧分割条
+        return QSize(150, 100)
+
     def _init_ui(self):
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(6, 6, 6, 6)
@@ -331,14 +345,16 @@ class CapitalDragonPanel(QWidget):
             })
 
         main_layout.addWidget(self.top_sector_container)
+        self.top_sector_container.minimumSizeHint = lambda: QSize(100, SectorCardWidget.CARD_HEIGHT)
 
         # 2. 中间过滤与控制工具条 (Filter Bar)
         toolbar_layout = QHBoxLayout()
         toolbar_layout.setContentsMargins(0, 0, 0, 0)
         toolbar_layout.setSpacing(6)
 
-        self.lbl_stats = QLabel("🐉 资金主线龙头已就位: 0 只")
+        self.lbl_stats = QLabel("🐉 龙头已就位: 0 只")
         self.lbl_stats.setStyleSheet("color: #00ff88; font-weight: bold; font-size: 9.5pt;")
+        self.lbl_stats.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         toolbar_layout.addWidget(self.lbl_stats)
 
         toolbar_layout.addStretch()
@@ -657,6 +673,13 @@ class CapitalDragonPanel(QWidget):
         super().showEvent(event)
         self.ensure_rendered()
 
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, '_last_report') and self._last_report:
+            top_secs = self._last_report.get("top_sectors", [])
+            if top_secs:
+                self._render_top_sector_cards(top_secs)
+
     def _apply_report_to_ui(self, report: dict):
         if not report:
             return
@@ -771,14 +794,26 @@ class CapitalDragonPanel(QWidget):
                     card_obj.leader_name = l_name
 
                 grade = st.get("grade", "主线")
-                _update_label_text(w["title"], f"{grade}: {sec_name}", is_rich=False)
+                is_compact = (w["frame"].width() > 0 and w["frame"].width() < 270)
+
+                # 响应式按钮文字
+                if card_obj and hasattr(card_obj, 'btn_detail'):
+                    card_obj.btn_detail.setText("🔍 明细" if is_compact else "🔍 查看明细")
+
+                # 响应式标题
+                if is_compact:
+                    title_icon = "🚀" if "活跃" in grade else ("🟡" if "轮动" in grade else "🐉")
+                    title_text = f"{title_icon} {sec_name}"
+                else:
+                    title_text = f"{grade}: {sec_name}"
+                _update_label_text(w["title"], title_text, is_rich=False)
 
                 pct_col = COLOR_UP if st["avg_pct"] > 0 else (COLOR_DOWN if st["avg_pct"] < 0 else "#ffffff")
                 vol_ratio = st.get("vol_ratio", 1.0)
                 proj_amt = st.get("proj_amt_yi", st["total_amt_yi"])
 
                 vr_col = "#ff1744" if vol_ratio >= 2.0 else ("#00e5ff" if vol_ratio >= 1.2 else "#c9d1d9")
-                proj_str = f" <font color='#888888'>(预估{proj_amt:.0f}亿)</font>" if proj_amt > st["total_amt_yi"] * 1.05 else ""
+                proj_str = f" <font color='#888888'>(预估{proj_amt:.0f}亿)</font>" if (proj_amt > st["total_amt_yi"] * 1.05 and not is_compact) else ""
 
                 dual_cnt = st.get("dual_accel_count", 0)
                 gap_cnt = st.get("gap_accel_count", 0)
@@ -786,16 +821,27 @@ class CapitalDragonPanel(QWidget):
                 accel_tot = st.get("accel_total_count", 0)
 
                 accel_desc = ""
-                if accel_tot > 0:
+                if accel_tot > 0 and not is_compact:
                     accel_desc = f" | 加速: <font color='#ffd700'><b>{accel_tot}只</b></font>"
+                elif accel_tot > 0 and is_compact:
+                    accel_desc = f" | 加速:<font color='#ffd700'><b>{accel_tot}</b></font>"
 
-                desc_html = (
-                    f"成交: <font color='#ffd700'><b>{st['total_amt_yi']:.1f}亿</b></font>{proj_str} | "
-                    f"量比: <font color='{vr_col}'><b>{vol_ratio:.1f}x</b></font> | "
-                    f"均涨: <font color='{pct_col}'><b>{st['avg_pct']:+.2f}%</b></font> | "
-                    f"涨停: <font color='#ff4444'><b>{st['limit_up_count']}只</b></font>"
-                    f"{accel_desc}"
-                )
+                if is_compact:
+                    desc_html = (
+                        f"成交: <font color='#ffd700'><b>{st['total_amt_yi']:.0f}亿</b></font> | "
+                        f"量比: <font color='{vr_col}'><b>{vol_ratio:.1f}x</b></font> | "
+                        f"均涨: <font color='{pct_col}'><b>{st['avg_pct']:+.1f}%</b></font> | "
+                        f"涨停: <font color='#ff4444'><b>{st['limit_up_count']}</b></font>"
+                        f"{accel_desc}"
+                    )
+                else:
+                    desc_html = (
+                        f"成交: <font color='#ffd700'><b>{st['total_amt_yi']:.1f}亿</b></font>{proj_str} | "
+                        f"量比: <font color='{vr_col}'><b>{vol_ratio:.1f}x</b></font> | "
+                        f"均涨: <font color='{pct_col}'><b>{st['avg_pct']:+.2f}%</b></font> | "
+                        f"涨停: <font color='#ff4444'><b>{st['limit_up_count']}只</b></font>"
+                        f"{accel_desc}"
+                    )
                 _update_label_text(w["desc"], desc_html, is_rich=True)
 
                 accel_tip_str = ""
@@ -828,26 +874,33 @@ class CapitalDragonPanel(QWidget):
                     else:
                         l_vr_col = "#c9d1d9"  # 正常白
 
-                    # 买点类型高亮色彩
-                    if "👑双加速" in l_buy_type or "👑" in l_buy_type:
-                        l_bt_col = "#ffd700"
-                    elif "🚀缺口加速" in l_buy_type:
-                        l_bt_col = "#ff55bb"
-                    elif "⚡光脚加速" in l_buy_type:
-                        l_bt_col = "#ffaa00"
-                    elif "板" in l_buy_type or "封" in l_buy_type or "涨停" in l_buy_type:
-                        l_bt_col = "#ff4444"
+                    if is_compact:
+                        leader_html = (
+                            f"🚀 先锋: {l_name} "
+                            f"<font color='{l_pct_col}'><b>{l_pct:+.1f}%</b></font> | "
+                            f"量比: <font color='{l_vr_col}'><b>{l_vr:.1f}x</b></font>"
+                        )
                     else:
-                        l_bt_col = "#38bdf8"
+                        # 买点类型高亮色彩
+                        if "👑双加速" in l_buy_type or "👑" in l_buy_type:
+                            l_bt_col = "#ffd700"
+                        elif "🚀缺口加速" in l_buy_type:
+                            l_bt_col = "#ff55bb"
+                        elif "⚡光脚加速" in l_buy_type:
+                            l_bt_col = "#ffaa00"
+                        elif "板" in l_buy_type or "封" in l_buy_type or "涨停" in l_buy_type:
+                            l_bt_col = "#ff4444"
+                        else:
+                            l_bt_col = "#38bdf8"
 
-                    vr_text = f" | 量比: <font color='{l_vr_col}'><b>{l_vr:.1f}x</b></font>"
-                    bt_text = f" | <font color='{l_bt_col}'><b>{l_buy_type}</b></font>" if l_buy_type else ""
+                        vr_text = f" | 量比: <font color='{l_vr_col}'><b>{l_vr:.1f}x</b></font>"
+                        bt_text = f" | <font color='{l_bt_col}'><b>{l_buy_type}</b></font>" if l_buy_type else ""
 
-                    leader_html = (
-                        f"🚀 先锋: {l_name} ({l_code}) "
-                        f"<font color='{l_pct_col}'><b>{l_pct:+.1f}%</b></font>"
-                        f"{vr_text}{bt_text}"
-                    )
+                        leader_html = (
+                            f"🚀 先锋: {l_name} ({l_code}) "
+                            f"<font color='{l_pct_col}'><b>{l_pct:+.1f}%</b></font>"
+                            f"{vr_text}{bt_text}"
+                        )
                     _update_label_text(w["leader"], leader_html, is_rich=True)
                     leader_tip = (
                         f"🎯 单击联动【{l_name} ({l_code})】行情与K线 | 双击查看 SBC 分时通道\n"
@@ -1256,14 +1309,22 @@ class CapitalDragonPanel(QWidget):
             else:
                 count_str = f"<b>{len(matched_records)}</b> 只"
 
-            self.lbl_stats.setText(
-                f"🐉 资金主线龙头已就位: {count_str} "
+            full_stats_text = (
+                f"🐉 龙头已就位: {count_str} "
                 f"(空间龙: {sp_cnt} | "
                 f"容量中军: {mc_cnt} | "
                 f"主线先锋: {pn_cnt})"
                 f"{focus_str}"
                 f"{accel_str}"
             )
+            clean_tooltip = (
+                f"🐉 龙头已就位统计:\n"
+                f"• 总数: {len(matched_records)} 只 (空间龙: {sp_cnt} | 容量中军: {mc_cnt} | 主线先锋: {pn_cnt})\n"
+                f"• 重点关注: {focus_cnt} 只\n"
+                f"• 早盘加速: {accel_tot} 只 (👑双加速: {dual_cnt}, 🚀缺口: {gap_cnt})"
+            )
+            self.lbl_stats.setToolTip(clean_tooltip)
+            self.lbl_stats.setText(full_stats_text)
 
             # 3. 恢复用户激活的排序列与排序规则
             if sort_col >= 0:

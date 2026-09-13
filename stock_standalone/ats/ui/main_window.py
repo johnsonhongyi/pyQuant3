@@ -2356,6 +2356,7 @@ class ATSMainWindow(QMainWindow):
 
         # 2. Center panel: Swing Table & Trading Tabs (Width: 700)
         center_widget = QWidget()
+        center_widget.setMinimumWidth(0)
         center_layout = QVBoxLayout(center_widget)
         center_layout.setContentsMargins(0, 0, 0, 0)
         center_layout.setSpacing(6)
@@ -2364,8 +2365,10 @@ class ATSMainWindow(QMainWindow):
         
         # 1. Top Tabs in center panel (顶部主看板 Tab: 资金主线龙头 + 重点关注 + 回调跟踪器)
         self.top_tabs = QTabWidget()
+        self.top_tabs.setMinimumWidth(0)
+        self.top_tabs.setUsesScrollButtons(True)
         self.top_tabs.setStyleSheet("""
-            QTabBar::tab { font-size: 10.5pt; font-weight: bold; padding: 6px 14px; min-width: 140px; }
+            QTabBar::tab { font-size: 10pt; font-weight: bold; padding: 5px 12px; min-width: 100px; }
             QTabBar::tab:selected { background-color: #1a2a1a; color: #ffd700; border-bottom: 3px solid #ffd700; }
         """)
         
@@ -3183,6 +3186,10 @@ class ATSMainWindow(QMainWindow):
 
     def _on_top_tab_changed(self, index: int):
         """主看板顶部 Tab 切换事件：极速 0ms 补齐渲染与同步对应 Tab 页面数据并自动持久化记忆"""
+        saved_sizes = None
+        if hasattr(self, 'main_splitter'):
+            saved_sizes = self.main_splitter.sizes()
+
         try:
             if index == 0:
                 # 切换到 🐉 资金主线与龙头中枢 (先极速补齐挂起渲染，再同步最新数据)
@@ -3217,6 +3224,10 @@ class ATSMainWindow(QMainWindow):
                         self.new_stock_panel._apply_filter()
         except Exception as e:
             logger.debug(f"[ATSMainWindow] _on_top_tab_changed error: {e}")
+        finally:
+            if saved_sizes and hasattr(self, 'main_splitter') and sum(saved_sizes) > 0:
+                # 严格锁定用户调整好的左右侧垂直分割比例，防止 Tab 切换时 QSplitter 重新分配空间撑大窗口或挤压左右面板
+                self.main_splitter.setSizes(saved_sizes)
 
         if not getattr(self, '_is_restoring_sizes', False):
             self._save_layout_state()
