@@ -426,5 +426,43 @@ def test_rank_beyond_999_display_in_all_windows(qapp):
     assert dlg_zt.table.item(0, rank_col).text().strip() in ("1250", "3800"), "天梯看板 Rank 列必须正确显示 1250/3800 而非 --"
 
 
+def test_sector_detail_full_view_toggle_and_status_text(qapp):
+    """测试板块详情'全景展示'双模平滑切换与精简实时状态文案"""
+    df_pool = pd.DataFrame({
+        'name': ['中芯国际', '北方华创', '长盈精密', 'ST得润'],
+        'percent': [5.0, 2.0, 3.5, 1.2],
+        'dff': [1.0, 0.5, 0.8, 0.2]
+    }, index=['688981', '002371', '300115', '002055'])
+
+    # 1. 初始化弹窗：模拟资金主线传入 2 只精选成员
+    dlg = ATSSectorDetailDialog(sector_name="芯片半导体", member_codes=['688981', '002371'])
+
+    # 验证默认状态：全景展示默认关闭，文案为 (关)
+    assert dlg.full_view_enabled is False
+    assert dlg.btn_full_view.text() == "🌐 全景展示 (关)"
+
+    dlg.load_data(df_realtime=df_pool)
+    assert dlg.table.rowCount() == 2
+    assert {dlg.table.item(0, 0).text(), dlg.table.item(1, 0).text()} == {'688981', '002371'}
+
+    # 2. 验证状态栏信息剪短紧凑
+    assert "✅ 实时 (TDX直连)" in dlg.lbl_status.text()
+    assert "TDX API直连 + 快照对齐" not in dlg.lbl_status.text()
+
+    # 3. 模拟用户点击【🌐 全景展示】开启全景展示
+    dlg.btn_full_view.click()
+    assert dlg.full_view_enabled is True
+    assert dlg.btn_full_view.text() == "🌐 全景展示 (开)"
+
+    # 4. 模拟用户再次点击【🌐 全景展示】关闭，切回资金主线传递过滤
+    dlg.btn_full_view.click()
+    assert dlg.full_view_enabled is False
+    assert dlg.btn_full_view.text() == "🌐 全景展示 (关)"
+    assert set(dlg.member_codes) == {'688981', '002371'}
+
+    dlg.close()
+
+
+
 
 

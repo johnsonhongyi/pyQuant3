@@ -1,3 +1,21 @@
+## 2026-09-13 23:25
+- [x] **【板块详情添加“全景展示”双模切换 & 剪短优化实时在线更新状态文案】(SSOT) (`ats/sector_data_aggregator.py`, `ats/ui/sector_detail_dialog.py`, `ats/ui/main_window.py`, `ats/ui/capital_dragon_panel.py`, `tests/test_sector_aggregator_suite.py`)**：
+    - [x] **操盘手反馈痛点根因穿透**：
+        1. **“资金主线聚焦”与“全景题材概念”双重视角需求**：从资金主线面板点击进入板块时，传递了资金主线中枢引擎精选的 42 只核心主线成分股（聚焦高质量标的），但在实盘深度复盘或排查轮动发散时，操盘手需要一键切换查看 96+ 只全部题材概念成分股的“全景展示”；
+        2. **状态栏信息占用过长导致挤压裁切**：原本状态文案为 `📡 状态: ✅ 实时在线更新 (TDX API直连 + 快照对齐)`（长达 31 个字符），在 780px 宽度弹窗工具栏中严重挤占空间，与右侧更新时间堆叠，不够紧凑。
+    - [x] **系统级工程落地与 SSOT 规范重构**：
+        1. **板块详情“全景展示”开关（默认关闭，按需开启）**：
+           - 在 `ATSSectorDetailDialog` 顶部操作栏中新增 `btn_full_view` 开关按钮，默认状态为 `🌐 全景展示 (关)`（`full_view_enabled = False`）；
+           - **默认聚焦模式**：默认严格使用资金主线传递的过滤列表（`_orig_member_codes`），精准呈现 42 只核心成分股；
+           - **全景展示模式**：点击开启切换为 `🌐 全景展示 (开)`（高亮青蓝配色），向后端传递 `member_codes = None`，无缝拉取题材概念全景 96+ 只成分股；再次点击无损切回 42 只主线过滤；
+           - **弹窗复用与多板块联动兼容**：在 `main_window.py:on_sector_clicked` 及 `capital_dragon_panel.py:open_sector_detail` 中，复用弹窗时自动重置 `full_view_enabled = False` 并更新 `_orig_member_codes`，确保切换不同板块时始终保持默认资金主线聚焦规范；
+        2. **剪短优化实时状态文案**：
+           - 在 `ats/sector_data_aggregator.py:fetch_sector_detail` 中，将冗长的状态文本优化为 `✅ 实时 (TDX直连)`；
+           - 在 `ATSSectorDetailDialog` 中呈现为紧凑的 `📡 状态: ✅ 实时 (TDX直连)`，从 31 字符精简至 16 字符，错落规整、绝无挤压或文字截断。
+    - [x] **自动化测试 67/67 PASSED 100% 全绿**：
+        1. 专项新增单测 `test_sector_detail_full_view_toggle_and_status_text`，完整覆盖默认关闭、过滤展示、一键切换全景、双向切回以及紧凑状态文案；
+        2. `tests/test_sector_aggregator_suite.py` 26 项全绿、`tests/test_capital_dragon_panel_integration.py` 13 项全绿、全套关联测试套件 67/67 零回归 100% 通过。
+
 ## 2026-09-13 16:15
 - [x] **【彻底解决轮动深挖冷启动显示异常、全貌列残缺隐藏Bug & 落地SSOT视图持久化与全量列可见性守护】(SSOT) (`ats/ui/sector_rotation_miner_dialog.py`, `tests/test_sector_rotation_pullback_miner.py`)**：
     - [x] **操盘手反馈痛点根因穿透**：

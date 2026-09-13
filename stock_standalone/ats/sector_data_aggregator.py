@@ -986,7 +986,7 @@ class SectorDataAggregator:
         leader_str = f"{final_leader_name} ({final_leader_code}) [{lead_pct_display:+.2f}%]" if final_leader_code else "--"
 
         meta = {
-            'status': '✅ 实时在线更新 (TDX API直连 + 快照对齐)',
+            'status': '✅ 实时 (TDX直连)',
             'count': len(rows),
             'up_count': up_count,
             'strong_count': sum(1 for r in rows if r.get('is_strong', False)),
