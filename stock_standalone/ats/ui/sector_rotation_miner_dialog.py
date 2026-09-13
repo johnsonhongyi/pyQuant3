@@ -471,6 +471,56 @@ class SectorRotationMinerDialog(QDialog, WindowMixin):
         # 恢复窗口位置与尺寸
         self.load_window_position_qt(self, "sector_rotation_miner_dialog", default_width=1180, default_height=720)
 
+        # 恢复 normal_geometry 与磁吸贴边状态
+        saved_normal = load_config_node("sector_miner_normal_geo", None)
+        if saved_normal and isinstance(saved_normal, (list, tuple)) and len(saved_normal) >= 4:
+            nx, ny, nw, nh = saved_normal[:4]
+            from gui_utils import clamp_window_to_screens
+            nx, ny = clamp_window_to_screens(nx, ny, nw, nh)
+            from PyQt6.QtCore import QPoint
+            _scr = QApplication.screenAt(QPoint(nx, ny)) or QApplication.primaryScreen()
+            if _scr:
+                _s_geo = _scr.availableGeometry()
+                nx = max(_s_geo.left(), min(nx, _s_geo.right() - nw))
+                ny = max(_s_geo.top(), min(ny, _s_geo.bottom() - nh))
+            self.normal_geometry = QRect(nx, ny, nw, nh)
+        else:
+            self.normal_geometry = self.geometry()
+
+        # 恢复持久化的置顶与磁吸折叠状态
+        saved_top = load_config_node("sector_miner_stays_on_top", False)
+        if saved_top:
+            self._toggle_stay_on_top(True)
+        else:
+            self.anchor_edge = load_config_node("sector_miner_anchor_edge", None)
+            saved_hidden = load_config_node("sector_miner_is_hidden", False)
+            if saved_hidden and self.anchor_edge and self.normal_geometry:
+                self.is_hidden_state = True
+                strip_size = 5
+                screen = self.screen() or QApplication.primaryScreen()
+                screen_geo = screen.availableGeometry() if screen else QRect(0, 0, 1920, 1080)
+                rw, rh = self.normal_geometry.width(), self.normal_geometry.height()
+                rx, ry = self.normal_geometry.x(), self.normal_geometry.y()
+                if self.anchor_edge == "left":
+                    hx = screen_geo.left() - rw + strip_size
+                    hy = ry
+                elif self.anchor_edge == "right":
+                    hx = screen_geo.right() - strip_size
+                    hy = ry
+                elif self.anchor_edge == "top":
+                    hx = rx
+                    hy = screen_geo.top() - rh + strip_size
+                else:
+                    hx, hy = rx, ry
+                    self.is_hidden_state = False
+                self.setGeometry(hx, hy, rw, rh)
+                self.setWindowOpacity(0.35)
+                if hasattr(self, 'hover_timer') and self.hover_timer and not self.hover_timer.isActive():
+                    self.hover_timer.start()
+            elif self.anchor_edge:
+                if hasattr(self, 'hover_timer') and self.hover_timer and not self.hover_timer.isActive():
+                    self.hover_timer.start()
+
         # 恢复列宽持久化
         setup_header_persistence(self.sectors_table, "sector_miner_sectors_header")
         setup_header_persistence(self.candidates_table, "sector_miner_candidates_header")
@@ -706,7 +756,8 @@ class SectorRotationMinerDialog(QDialog, WindowMixin):
         self.sectors_table.setMinimumHeight(100)
         self.sectors_table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.sectors_table.itemClicked.connect(self._on_sector_row_clicked)
-        self.sectors_table.installEventFilter(self)  # 键盘上下键独立平滑联动，绝不篡改鼠标点击 Toggle 状态
+        self.sectors_table.currentItemChanged.connect(self._on_sector_current_changed)
+        self.sectors_table.installEventFilter(self)  # 回车/空格直接联动龙头股票
         self.sectors_table.itemDoubleClicked.connect(self._on_sector_double_clicked)
         self.sectors_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.sectors_table.customContextMenuRequested.connect(self._on_sector_context_menu)
@@ -880,12 +931,16 @@ class SectorRotationMinerDialog(QDialog, WindowMixin):
     def _save_current_filter_and_view_state(self):
         """线程安全、全量原子保存当前策略模式、自定义参数、刷新状态与视图布局"""
         try:
-            cur_mode = self.combo_filter_mode.currentText()
+            norm_geo = self.normal_geometry if (getattr(self, 'is_hidden_state', False) and self.normal_geometry) else self.geometry()
             payload = {
                 "sector_miner_filter_mode": cur_mode,
                 "sector_miner_view_mode": "compact" if self._is_compact_mode else "full",
                 "sector_miner_auto_refresh": self.chk_auto.isChecked(),
                 "sector_miner_refresh_interval": self._get_selected_interval_sec(),
+                "sector_miner_anchor_edge": None if self.stays_on_top else self.anchor_edge,
+                "sector_miner_is_hidden": False if self.stays_on_top else getattr(self, 'is_hidden_state', False),
+                "sector_miner_stays_on_top": self.stays_on_top,
+                "sector_miner_normal_geo": [norm_geo.x(), norm_geo.y(), norm_geo.width(), norm_geo.height()],
             }
             if self._current_filter_config and self._current_filter_config.mode_name == "⚙️ 自定义":
                 payload["sector_miner_custom_filter"] = self._current_filter_config.to_dict()
@@ -1271,8 +1326,8 @@ class SectorRotationMinerDialog(QDialog, WindowMixin):
     def _on_sector_row_clicked(self, item: QTableWidgetItem):
         """
         点击板块表格行：
-        1. 若点击第 5 列（领涨先锋龙头）：自动联动龙头股票并锁定该板块（不触发反选取消）；
-        2. 若点击其他列：若点击当前已选板块则反选取消恢复全部主线，否则单选锁定该板块联动下半区。
+        1. 若点击第 0 列板块名称且已处于锁定状态：支持再次点击反选取消恢复全部主线；
+        2. 若点击其他列或切换到不同板块：单选锁定该板块联动下半区，并自动联动该主线领涨先锋龙头股票。
         """
         if not item:
             return
@@ -1284,44 +1339,25 @@ class SectorRotationMinerDialog(QDialog, WindowMixin):
         raw_text = sec_item.text().strip()
         sec_name = raw_text.replace("⭐", "").strip()
 
-        # [🚀 核心联动] 操盘手点击第 5 列（领涨先锋龙头单元格）
-        if col == 5:
-            leader_code, leader_name = self._resolve_leader_code_and_name(row)
-            # 锁定该板块展示回踩候选（保持锁定，不触发 Toggle 取消）
-            if self._selected_sector != sec_name:
-                self._set_selected_sector(sec_name)
-            # 自动联动领涨先锋龙头股票 (广播通达信/同花顺/Visualizer)
-            if leader_code:
-                self._broadcast_link_stock(leader_code, leader_name)
-                self.status_bar.setText(f"⚡ 已自动联动【{sec_name}】领涨先锋龙头: {leader_name} ({leader_code})")
+        # 点击已选中的第 0 列（名称）：反选取消，恢复显示全部主线
+        if col == 0 and self._selected_sector == sec_name:
+            self._clear_sector_filter()
             return
 
-        # 点击其他列，执行标准单选与 Toggle 反选自愈逻辑
-        if self._selected_sector == sec_name:
-            # 再次点击已选中的板块，取消选中，恢复显示全部主线
-            self._clear_sector_filter()
-        else:
+        # 锁定当前板块并联动下半区
+        if self._selected_sector != sec_name:
             self._set_selected_sector(sec_name)
 
+        # 自动联动领涨先锋龙头股票 (广播通达信/同花顺/Visualizer)
+        leader_code, leader_name = self._resolve_leader_code_and_name(row)
+        if leader_code:
+            self._broadcast_link_stock(leader_code, leader_name)
+            self.status_bar.setText(f"⚡ 已自动联动【{sec_name}】领涨先锋龙头: {leader_name} ({leader_code})")
+
     def eventFilter(self, watched, event):
-        """事件过滤器：精准捕获板块表格键盘上下键浏览，绝不干扰鼠标点击 Toggle 状态"""
+        """事件过滤器：回车或空格直接全终端联动龙头股票"""
         if watched == self.sectors_table and event.type() == QEvent.Type.KeyPress:
-            if event.key() in (Qt.Key.Key_Up, Qt.Key.Key_Down, Qt.Key.Key_PageUp, Qt.Key.Key_PageDown):
-                res = super().eventFilter(watched, event)
-                row = self.sectors_table.currentRow()
-                if row >= 0:
-                    sec_item = self.sectors_table.item(row, 0)
-                    if sec_item:
-                        sec_name = sec_item.text().replace("⭐", "").strip()
-                        self._set_selected_sector(sec_name)
-                        # 若当前处于第 5 列，键盘移动也跟随联动领涨龙头
-                        if self.sectors_table.currentColumn() == 5:
-                            leader_code, leader_name = self._resolve_leader_code_and_name(row)
-                            if leader_code:
-                                self._broadcast_link_stock(leader_code, leader_name)
-                return res
-            elif event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space):
-                # 键盘回车或空格：若当前在第 5 列或当前行有龙头，回车直接联动龙头股票
+            if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space):
                 row = self.sectors_table.currentRow()
                 if row >= 0:
                     leader_code, leader_name = self._resolve_leader_code_and_name(row)
@@ -1331,21 +1367,19 @@ class SectorRotationMinerDialog(QDialog, WindowMixin):
         return super().eventFilter(watched, event)
 
     def _on_sector_current_changed(self, current: Optional[QTableWidgetItem], previous: Optional[QTableWidgetItem]):
-        """键盘上下键或光标移动板块行，即时联动下半区回踩跟进池"""
+        """键盘上下键或光标移动板块行，即时联动下半区回踩跟进池与领涨龙头"""
         if not current:
             return
-        if previous is not None and previous.row() == current.row():
+        if previous is not None and previous.row() == current.row() and previous.tableWidget() == current.tableWidget():
             return
         row = current.row()
         sec_item = self.sectors_table.item(row, 0)
         if sec_item:
             sec_name = sec_item.text().replace("⭐", "").strip()
             self._set_selected_sector(sec_name)
-            # 若光标正处于第 5 列（领涨龙头），联动龙头
-            if current.column() == 5:
-                leader_code, leader_name = self._resolve_leader_code_and_name(row)
-                if leader_code:
-                    self._broadcast_link_stock(leader_code, leader_name)
+            leader_code, leader_name = self._resolve_leader_code_and_name(row)
+            if leader_code:
+                self._broadcast_link_stock(leader_code, leader_name)
 
     def _set_selected_sector(self, sec_name: str):
         """设置当前选中的主线板块并过滤下半区"""
@@ -1451,7 +1485,6 @@ class SectorRotationMinerDialog(QDialog, WindowMixin):
 
         menu.addSeparator()
         act_copy_sec = menu.addAction(f"📋 复制板块名称 ({sec})")
-        act_copy_expr = menu.addAction(f"📋 复制板块查询表达式 (category.str.contains(\"{sec}\"))")
 
         chosen = menu.exec(self.sectors_table.viewport().mapToGlobal(pos))
         if chosen == act_filter:
@@ -1472,10 +1505,6 @@ class SectorRotationMinerDialog(QDialog, WindowMixin):
         elif chosen == act_copy_sec:
             QApplication.clipboard().setText(sec)
             self.status_bar.setText(f"📋 已复制板块名称: {sec}")
-        elif chosen == act_copy_expr:
-            q_str = f'category.str.contains("{sec}")'
-            QApplication.clipboard().setText(q_str)
-            self.status_bar.setText(f"📋 已复制查询表达式: {q_str}")
 
     def _on_candidate_clicked(self, item: QTableWidgetItem):
         """单击候选标的行，即时跨终端广播联动"""
@@ -1660,7 +1689,6 @@ class SectorRotationMinerDialog(QDialog, WindowMixin):
         menu.addSeparator()
         act_copy_code = menu.addAction(f"📋 复制股票代码 ({code})")
         act_copy_sec = menu.addAction(f"📋 复制主线板块 ({sec})")
-        act_copy_query = menu.addAction(f"📋 复制查询表达式 (code in ['{code}'])")
         act_copy_row = menu.addAction("📋 复制本行决策理由")
 
         chosen = menu.exec(self.candidates_table.viewport().mapToGlobal(pos))
@@ -1681,10 +1709,6 @@ class SectorRotationMinerDialog(QDialog, WindowMixin):
         elif chosen == act_copy_sec:
             QApplication.clipboard().setText(sec)
             self.status_bar.setText(f"📋 已复制主线板块: {sec}")
-        elif chosen == act_copy_query:
-            expr = f"code in ['{code}']"
-            QApplication.clipboard().setText(expr)
-            self.status_bar.setText(f"📋 已复制查询表达式: {expr}")
         elif chosen == act_copy_row:
             QApplication.clipboard().setText(f"{code} {name} [{sec}]: {reason}")
             self.status_bar.setText(f"📋 已复制决策理由: {name} ({code})")
@@ -1947,22 +1971,8 @@ class SectorRotationMinerDialog(QDialog, WindowMixin):
             """)
             self.btn_compact.setToolTip("当前处于精简盯盘卡片模式。点击一键恢复完整双表大工作台全貌 (快捷键 M)")
 
-            # 表格列精简折叠并优化紧凑看盘列宽
-            # 上半区板块表：只保留 0(板块名称), 3(板块均涨), 5(领涨龙头)
-            for c in range(self.sectors_table.columnCount()):
-                self.sectors_table.setColumnHidden(c, c not in (0, 3, 5))
-            self.sectors_table.setColumnWidth(0, 95)
-            self.sectors_table.setColumnWidth(3, 60)
-            self.sectors_table.setColumnWidth(5, 140)
-
-            # 下半区候选表：只保留 0(代码), 1(名称), 3(启动形态), 5(涨幅), 9(量比)
-            for c in range(self.candidates_table.columnCount()):
-                self.candidates_table.setColumnHidden(c, c not in (0, 1, 3, 5, 9))
-            self.candidates_table.setColumnWidth(0, 55)
-            self.candidates_table.setColumnWidth(1, 65)
-            self.candidates_table.setColumnWidth(3, 90)
-            self.candidates_table.setColumnWidth(5, 55)
-            self.candidates_table.setColumnWidth(9, 50)
+            # 表格列自适应展示尽量多的核心列信息 (dff, dff2, dff3, 量比等)
+            self._adapt_compact_columns()
 
             # 放开最小尺寸并平滑调整为紧凑卡片
             self.setMinimumSize(300, 320)
@@ -1982,6 +1992,8 @@ class SectorRotationMinerDialog(QDialog, WindowMixin):
 
             self.start_slide_animation(target_geo, 1.0, duration=220)
             self.normal_geometry = target_geo
+            # 表格列自适应展示尽量多的核心列信息 (dff, dff2, dff3, 量比等)
+            self._adapt_compact_columns(target_geo.width())
 
             # 【用户明确需求：精简模式不要直接自动置顶，置顶手动选择】
             # 完全保留用户当前的置顶设置，不再强制修改 self.btn_top
@@ -2046,6 +2058,74 @@ class SectorRotationMinerDialog(QDialog, WindowMixin):
 
         self._save_current_filter_and_view_state()
 
+    def resizeEvent(self, event):
+        """窗口缩放事件：精简模式下自适应动态调整列展示"""
+        super().resizeEvent(event)
+        if getattr(self, '_is_compact_mode', False):
+            self._adapt_compact_columns()
+
+    def _adapt_compact_columns(self, target_width: Optional[int] = None):
+        """精简模式下自适应窗口尺寸呈现尽量多的核心列信息 (dff, dff2, dff3, 量比等)"""
+        if not getattr(self, '_is_compact_mode', False):
+            return
+        w = target_width if target_width is not None else self.width()
+
+        # 1. 下半区候选表自适应列展示与紧凑列宽
+        # 核心必显字段: 0(代码), 1(名称), 3(启动形态), 5(涨幅 dff), 6(距MA20 dff2), 7(长期 dff3), 9(量比)
+        cand_visible = {0, 1, 3, 5, 6, 7, 9}
+        if w >= 560:
+            cand_visible.add(4)   # 综合得分
+        if w >= 640:
+            cand_visible.add(10)  # 建议买区
+        if w >= 720:
+            cand_visible.add(11)  # 止损位
+        if w >= 800:
+            cand_visible.add(8)   # 近3日时序
+        if w >= 880:
+            cand_visible.add(2)   # 所属主线
+
+        for c in range(self.candidates_table.columnCount()):
+            self.candidates_table.setColumnHidden(c, c not in cand_visible)
+
+        self.candidates_table.setColumnWidth(0, 52)   # 代码
+        self.candidates_table.setColumnWidth(1, 62)   # 名称
+        self.candidates_table.setColumnWidth(3, 85)   # 启动形态
+        self.candidates_table.setColumnWidth(5, 58)   # 涨幅 dff
+        self.candidates_table.setColumnWidth(6, 68)   # 距MA20 dff2
+        self.candidates_table.setColumnWidth(7, 65)   # 长期 dff3
+        self.candidates_table.setColumnWidth(9, 48)   # 量比
+        if 4 in cand_visible:
+            self.candidates_table.setColumnWidth(4, 55)
+        if 10 in cand_visible:
+            self.candidates_table.setColumnWidth(10, 75)
+        if 11 in cand_visible:
+            self.candidates_table.setColumnWidth(11, 55)
+
+        # 2. 上半区板块表自适应列展示与紧凑列宽
+        # 核心必显字段: 0(板块名称), 3(板块均涨), 5(领涨先锋龙头)
+        sec_visible = {0, 3, 5}
+        if w >= 480:
+            sec_visible.add(1)    # 资金评级
+        if w >= 560:
+            sec_visible.add(4)    # 冲锋前排数
+        if w >= 640:
+            sec_visible.add(6)    # 总成交额
+        if w >= 720:
+            sec_visible.add(2)    # 强度得分
+
+        for c in range(self.sectors_table.columnCount()):
+            self.sectors_table.setColumnHidden(c, c not in sec_visible)
+
+        self.sectors_table.setColumnWidth(0, 90)   # 板块名称
+        if 1 in sec_visible:
+            self.sectors_table.setColumnWidth(1, 58) # 资金评级
+        self.sectors_table.setColumnWidth(3, 58)   # 板块均涨
+        if 4 in sec_visible:
+            self.sectors_table.setColumnWidth(4, 52) # 冲锋数
+        self.sectors_table.setColumnWidth(5, 120)  # 领涨先锋龙头
+        if 6 in sec_visible:
+            self.sectors_table.setColumnWidth(6, 65) # 总成交额
+
     def _detect_and_snap(self):
         """边缘磁吸贴齐检测：靠近屏幕边缘 (<25px) 自动贴边吸附并提供动效反馈 (对齐 ATS SSOT)"""
         # 【置顶与磁吸严格互斥】：置顶状态下完全禁用磁吸贴边功能，保持自由悬浮置顶
@@ -2062,7 +2142,7 @@ class SectorRotationMinerDialog(QDialog, WindowMixin):
             return
         screen_geo = screen.availableGeometry()
         win_geo = self.geometry()
-        margin = 25  # 调优为更自然的 25px 阈值，避免误吸
+        margin = 35  # 35px 舒适自然磁吸感应范围
 
         snapped = False
         edge = None
@@ -2086,7 +2166,7 @@ class SectorRotationMinerDialog(QDialog, WindowMixin):
         if snapped:
             self.anchor_edge = edge
             self.normal_geometry = QRect(target_x, target_y, win_geo.width(), win_geo.height())
-            self.start_slide_animation(self.normal_geometry, 1.0, duration=200, is_snap_feedback=True)
+            self.start_slide_animation(self.normal_geometry, 1.0, duration=180, is_snap_feedback=True)
             edge_desc = {"top": "顶部", "left": "左侧", "right": "右侧"}.get(edge, edge)
             self.status_bar.setText(f"🧲 窗口已平滑磁吸贴齐屏幕{edge_desc} (X:{target_x}, Y:{target_y})")
             # 仅在进入贴边后激活悬停检测
@@ -2131,7 +2211,7 @@ class SectorRotationMinerDialog(QDialog, WindowMixin):
         self.is_hidden_state = True
         if hasattr(self, 'hover_timer') and self.hover_timer and not self.hover_timer.isActive():
             self.hover_timer.start()
-        self.start_slide_animation(QRect(target_x, target_y, w, h), 0.35, duration=300)
+        self.start_slide_animation(QRect(target_x, target_y, w, h), 0.35, duration=250)
 
     def show_normal_position(self):
         """从边缘感应条平滑滑出展开 (对齐 ATS SSOT)"""
@@ -2141,6 +2221,22 @@ class SectorRotationMinerDialog(QDialog, WindowMixin):
             QTimer.singleShot(500, lambda: setattr(self, '_is_auto_popping', False))
             self._last_show_time = time.time()
             self._has_hovered_since_show = False
+
+            # 兜底恢复 normal_geometry 避免启动后为 None 导致无法滑出
+            if not getattr(self, 'normal_geometry', None):
+                w = self.width()
+                h = self.height()
+                screen = self.screen() or QApplication.primaryScreen()
+                screen_geo = screen.availableGeometry() if screen else QRect(0, 0, 1920, 1080)
+                if self.anchor_edge == "left":
+                    self.normal_geometry = QRect(screen_geo.left(), self.y(), w, h)
+                elif self.anchor_edge == "right":
+                    self.normal_geometry = QRect(screen_geo.right() - w, self.y(), w, h)
+                elif self.anchor_edge == "top":
+                    self.normal_geometry = QRect(self.x(), screen_geo.top(), w, h)
+                else:
+                    self.normal_geometry = self.geometry()
+
             if self.normal_geometry:
                 self.start_slide_animation(self.normal_geometry, 1.0, duration=200)
             self.setWindowOpacity(1.0)
@@ -2169,6 +2265,10 @@ class SectorRotationMinerDialog(QDialog, WindowMixin):
                 self.hover_timer.stop()
             return
 
+        # 滑动动画进行中直接短路，绝不中途打断动画或产生乱序闪烁
+        if getattr(self, "_in_snap_action", False):
+            return
+
         if QApplication.mouseButtons() & Qt.MouseButton.LeftButton:
             self.leave_ticks = 0
             self.hover_ticks = 0
@@ -2184,7 +2284,7 @@ class SectorRotationMinerDialog(QDialog, WindowMixin):
         if getattr(self, "is_hidden_state", False):
             if in_window:
                 self.hover_ticks += 1
-                if self.hover_ticks >= 2:  # 悬停 200ms 自动滑出展开
+                if self.hover_ticks >= 2:
                     self.show_normal_position()
                     self.hover_ticks = 0
             else:

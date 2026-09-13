@@ -1032,6 +1032,40 @@ class TestDailyLimitUpDialog(unittest.TestCase):
         finally:
             dialog.close()
 
+    def test_startup_hidden_dock_and_smooth_edge_sensing_popup(self):
+        """测试天梯启动时处于贴边隐藏状态 100% 恢复 normal_geometry、保持 hover_timer 激活，并支持感应区秒级弹出"""
+        from PyQt6.QtCore import QPoint, QRect
+        from PyQt6.QtWidgets import QApplication
+
+        restore_state = {
+            "x": 200,
+            "y": 150,
+            "width": 900,
+            "height": 550,
+            "anchor_edge": "right",
+            "is_hidden": True,
+            "stays_on_top": False,
+        }
+        dialog = DailyLimitUpDialog(parent=None, restore_state=restore_state)
+        try:
+            # 1. 验证启动后 normal_geometry 正确恢复，杜绝为 None 导致无法滑出
+            self.assertIsNotNone(dialog.normal_geometry, "启动时必须成功恢复 normal_geometry!")
+            self.assertEqual(dialog.normal_geometry.width(), 900)
+            self.assertEqual(dialog.normal_geometry.height(), 550)
+            self.assertTrue(dialog.is_hidden_state, "启动时必须保留 is_hidden_state!")
+            self.assertEqual(dialog.anchor_edge, "right")
+            self.assertAlmostEqual(dialog.windowOpacity(), 0.35, places=2)
+
+            # 2. 验证启动后 hover_timer 处于激活状态 (杜绝休眠导致鼠标靠近无反应)
+            self.assertTrue(dialog.hover_timer.isActive(), "贴边隐藏状态下 hover_timer 必须保持激活状态!")
+
+            # 3. 验证触发 show_normal_position 启动平滑滑出展开恢复全貌
+            dialog.show_normal_position()
+            self.assertFalse(dialog.is_hidden_state, "展开后 is_hidden_state 必须置为 False!")
+            self.assertIsNotNone(dialog.anim_group, "必须激活平滑滑出展开动画!")
+        finally:
+            dialog.close()
+
 
 if __name__ == "__main__":
     unittest.main()

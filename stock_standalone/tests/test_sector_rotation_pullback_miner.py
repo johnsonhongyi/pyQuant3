@@ -776,17 +776,28 @@ class TestSectorRotationPullbackMiner(unittest.TestCase):
             # 精简模式不应强制自动置顶，置顶完全由操盘手手动选择
             self.assertFalse(dialog.btn_top.isChecked(), "精简模式不应强制自动置顶，保持操盘手手动选择状态!")
 
-            # 验证精简模式下列折叠
-            self.assertTrue(dialog.sectors_table.isColumnHidden(1))  # 资金评级隐藏
-            self.assertTrue(dialog.sectors_table.isColumnHidden(6))  # 成交额隐藏
+            # 验证精简模式下自适应保留核心字段 (dff, dff2, dff3, 量比等)
+            dialog._adapt_compact_columns(target_width=370)
+            self.assertTrue(dialog.sectors_table.isColumnHidden(1))  # 资金评级在 370px 窄窗口下折叠
+            self.assertTrue(dialog.sectors_table.isColumnHidden(6))  # 成交额折叠
             self.assertFalse(dialog.sectors_table.isColumnHidden(0)) # 板块名保留
             self.assertFalse(dialog.sectors_table.isColumnHidden(5)) # 领涨龙头保留
 
-            self.assertTrue(dialog.candidates_table.isColumnHidden(4)) # 综合得分隐藏
-            self.assertTrue(dialog.candidates_table.isColumnHidden(10)) # 建议买区隐藏
             self.assertFalse(dialog.candidates_table.isColumnHidden(0)) # 代码保留
             self.assertFalse(dialog.candidates_table.isColumnHidden(1)) # 名称保留
-            self.assertFalse(dialog.candidates_table.isColumnHidden(5)) # 涨幅保留
+            self.assertFalse(dialog.candidates_table.isColumnHidden(3)) # 启动形态保留
+            self.assertFalse(dialog.candidates_table.isColumnHidden(5)) # 涨幅 dff 保留
+            self.assertFalse(dialog.candidates_table.isColumnHidden(6)) # 距MA20 dff2 保留 (用户需求)
+            self.assertFalse(dialog.candidates_table.isColumnHidden(7)) # 长期 dff3 保留 (用户需求)
+            self.assertFalse(dialog.candidates_table.isColumnHidden(9)) # 量比保留 (用户需求)
+            self.assertTrue(dialog.candidates_table.isColumnHidden(4))  # 综合得分在 370px 下折叠
+            self.assertTrue(dialog.candidates_table.isColumnHidden(10)) # 建议买区在 370px 下折叠
+
+            # 验证窗口加宽 (680px) 时自适应展现更多信息
+            dialog._adapt_compact_columns(target_width=680)
+            self.assertFalse(dialog.sectors_table.isColumnHidden(1))   # 资金评级自适应展现
+            self.assertFalse(dialog.candidates_table.isColumnHidden(4)) # 综合得分自适应展现
+            self.assertFalse(dialog.candidates_table.isColumnHidden(10))# 建议买区自适应展现
 
             # 3. 触发恢复全貌模式
             dialog.toggle_compact_mode(force_compact=False)
@@ -913,6 +924,115 @@ class TestSectorRotationPullbackMiner(unittest.TestCase):
         self.assertFalse(dialog.hover_timer.isActive(), "开启置顶时必须停用 hover_timer 避免干扰看盘!")
 
         dialog.close()
+
+    def test_18_startup_hidden_dock_and_smooth_edge_sensing_popup(self):
+        """启动时隐藏折叠状态 100% 恢复 normal_geometry、hover_timer 激活并平滑展开 (对齐 ATS SSOT)"""
+        from ats.ui.sector_rotation_miner_dialog import SectorRotationMinerDialog
+        from ats.ui.styles import save_config_node
+        from PyQt6.QtCore import QPoint, QRect
+
+        save_config_node("sector_miner_anchor_edge", "left")
+        save_config_node("sector_miner_is_hidden", True)
+        save_config_node("sector_miner_stays_on_top", False)
+        save_config_node("sector_miner_normal_geo", [100, 100, 400, 600])
+
+        dialog = SectorRotationMinerDialog(parent=None, current_df=None)
+        try:
+            # 1. 验证启动后 normal_geometry 与隐藏状态正确恢复
+            self.assertIsNotNone(dialog.normal_geometry, "启动时必须恢复 normal_geometry!")
+            self.assertEqual(dialog.normal_geometry.width(), 400)
+            self.assertEqual(dialog.normal_geometry.height(), 600)
+            self.assertTrue(dialog.is_hidden_state, "启动时必须处于 is_hidden_state!")
+            self.assertEqual(dialog.anchor_edge, "left")
+            self.assertAlmostEqual(dialog.windowOpacity(), 0.35, places=2)
+
+            # 2. 验证 hover_timer 处于激活状态
+            self.assertTrue(dialog.hover_timer.isActive(), "贴边隐藏状态下 hover_timer 必须激活!")
+
+            # 3. 验证触发 show_normal_position 启动平滑滑出展开
+            dialog.show_normal_position()
+            self.assertFalse(dialog.is_hidden_state, "展开后 is_hidden_state 必须置为 False!")
+            self.assertIsNotNone(dialog.anim_group, "必须启动滑出展开动效!")
+        finally:
+            save_config_node("sector_miner_anchor_edge", None)
+            save_config_node("sector_miner_is_hidden", False)
+            dialog.close()
+
+    def test_19_sector_arrow_key_and_click_linkage_and_menu_cleanup(self):
+        """验证板块表格按键/点击切换第2行即时触发联动，以及右键复制表达式菜单已彻底清理"""
+        from ats.ui.sector_rotation_miner_dialog import SectorRotationMinerDialog
+        from unittest.mock import MagicMock, patch
+        from PyQt6.QtWidgets import QMenu, QApplication
+        from PyQt6.QtCore import QPoint
+
+        sample_df = pd.DataFrame({
+            'name': ['超声电子', '神宇股份', '一博科技', '胜蓝股份', '沪电股份', '博威合金'],
+            'percent': [10.0, 20.0, 1.4, 1.5, 5.0, 6.0],
+            'close': [15.0, 25.0, 30.0, 18.0, 28.0, 19.0],
+            'volume': [100000, 200000, 80000, 90000, 150000, 160000],
+            'amount': [1.5e8, 5.0e8, 1.2e8, 1.4e8, 2.5e8, 2.8e8],
+            'category': ['PCB概念', '铜缆高速连接', 'PCB概念', '铜缆高速连接', 'PCB概念', '铜缆高速连接'],
+            'dff': [10.0, 20.0, 1.4, 1.5, 5.0, 6.0],
+            'dff2': [1.2, 2.5, 0.5, -0.8, 1.8, 2.2],
+            'dff3': [3.0, 5.0, 1.0, 0.2, 4.0, 5.5],
+            'volume_ratio': [2.5, 3.2, 1.06, 1.27, 1.8, 2.0],
+            'turnover_ratio': [5.0, 8.0, 2.1, 2.5, 4.0, 4.5],
+            'channel_support': [True, True, True, True, True, True],
+            'limit_days': [1, 1, 0, 0, 0, 0],
+            'status': ['封板', '封板', '正常', '正常', '正常', '正常'],
+        }, index=['000823', '300563', '301366', '300843', '002463', '300548'])
+
+        dialog = SectorRotationMinerDialog(parent=None, current_df=sample_df)
+        report = self.miner.run_mining_pipeline(sample_df)
+        dialog._on_scan_finished(report)
+        dialog._broadcast_link_stock = MagicMock()
+
+        try:
+            # 1. 验证按键光标在板块表格切换时，第2行绝不遗漏联动
+            self.assertGreaterEqual(dialog.sectors_table.rowCount(), 2)
+            row0_sec = dialog.sectors_table.item(0, 0).text().replace("⭐", "").strip()
+            row1_sec = dialog.sectors_table.item(1, 0).text().replace("⭐", "").strip()
+
+            # 选中第 0 行 (相当于初次聚焦)
+            dialog.sectors_table.setCurrentCell(0, 1)
+            self.assertEqual(dialog._selected_sector, row0_sec)
+            dialog._broadcast_link_stock.assert_called()
+
+            # 模拟操盘手按键盘 Down 键移动到第 2 行 (Row 1)
+            dialog._broadcast_link_stock.reset_mock()
+            dialog.sectors_table.setCurrentCell(1, 1)
+            # 断言第 2 行立即生效，下半区切换为第 2 行板块，且触发领涨龙头联动
+            self.assertEqual(dialog._selected_sector, row1_sec)
+            dialog._broadcast_link_stock.assert_called()
+
+            # 2. 验证右键菜单彻底删除了“复制查询表达式”
+            captured_actions = []
+            orig_qmenu = QMenu
+            class MonitoredMenu(orig_qmenu):
+                def exec(self, *args, **kwargs):
+                    for act in self.actions():
+                        captured_actions.append(act.text())
+                    return None
+
+            with patch("ats.ui.sector_rotation_miner_dialog.QMenu", MonitoredMenu):
+                rect0 = dialog.sectors_table.visualItemRect(dialog.sectors_table.item(0, 0))
+                dialog._on_sector_context_menu(rect0.center())
+                if dialog.candidates_table.rowCount() > 0:
+                    cand_rect = dialog.candidates_table.visualItemRect(dialog.candidates_table.item(0, 0))
+                    dialog._on_candidate_context_menu(cand_rect.center())
+
+            self.assertGreater(len(captured_actions), 0)
+            for txt in captured_actions:
+                self.assertNotIn("查询表达式", txt, "右键菜单严禁包含复制查询表达式!")
+
+            # 3. 验证精简模式下列自适应支持 dff, dff2, dff3, 量比
+            dialog.toggle_compact_mode(force_compact=True)
+            self.assertFalse(dialog.candidates_table.isColumnHidden(5)) # dff
+            self.assertFalse(dialog.candidates_table.isColumnHidden(6)) # dff2
+            self.assertFalse(dialog.candidates_table.isColumnHidden(7)) # dff3
+            self.assertFalse(dialog.candidates_table.isColumnHidden(9)) # 量比
+        finally:
+            dialog.close()
 
 
 if __name__ == '__main__':
