@@ -805,10 +805,22 @@ class IntradayStrategyEngine:
                     res_first_day = True
                 elif ipo_status in ("前5日(C)", "次新", "已上市") or (ipo_list_date and len(ipo_list_date) == 10 and ipo_list_date < today_str):
                     res_first_day = False
+            else:
+                # 🚀 [PERF-FIX] 绝大多数股票为已知老股票，未在每日新股上市表中且非 920 首日候选，直接秒级判定为 False！
+                # 杜绝循环调用 fetch_kline_bars 导致通达信网络请求排队雪崩与卡顿数秒！
+                spec = self.get_stock_ladder_spec(c_clean)
+                list_date = str(spec.get("listing_date", "")).strip()[:10]
+                if list_date and len(list_date) == 10 and list_date != "-":
+                    if list_date == today_str:
+                        res_first_day = True
+                    elif list_date < today_str:
+                        res_first_day = False
+                elif not c_clean.startswith("920"):
+                    res_first_day = False
         except Exception as e_ipo:
             logger.debug(f"新股上市表校验异常: {e_ipo}")
 
-        # 2. 【核心客观证据·TDX 真实日 K 线历史数量与日期检验】
+        # 2. 【仅当可能为 920 或特殊首日新股时才核验日 K 线】
         if res_first_day is None:
             try:
                 from ats.tdx_realtime_fetcher import TDXRealtimeFetcher
@@ -826,40 +838,11 @@ class IntradayStrategyEngine:
             except Exception:
                 pass
 
-        # 3. 【策略规格中的上市日期校验】
-        if res_first_day is None:
-            spec = self.get_stock_ladder_spec(c_clean)
-            list_date = str(spec.get("listing_date", "")).strip()[:10]
-            if list_date and len(list_date) == 10 and list_date != "-":
-                if list_date == today_str:
-                    res_first_day = True
-                elif list_date < today_str:
-                    res_first_day = False
-
-        # 4. 【昨日真实走势校验】：若已有昨日 OHLC，必为非首日
-        if res_first_day is None:
-            try:
-                from ats.tdx_realtime_fetcher import TDXRealtimeFetcher
-                y_ohlc = TDXRealtimeFetcher.get_instance().get_yesterday_ohlc(c_clean)
-                if y_ohlc and (float(y_ohlc.get("open", 0.0)) > 0 or float(y_ohlc.get("high", 0.0)) > 0):
-                    res_first_day = False
-            except Exception:
-                pass
-
-        # 5. 【历史收盘定盘记录校验】
-        if res_first_day is None:
-            closing_scorecards = self.load_listing_closing_scorecards()
-            if c_clean in closing_scorecards:
-                rec = closing_scorecards[c_clean]
-                rec_date = str(rec.get("date", rec.get("listing_date", ""))).strip()[:10]
-                if rec_date and rec_date < today_str:
-                    res_first_day = False
-
-        # 6. 【最终安全兜底】：未在 IPO 表中且无确凿首日证据的标的，一律判定为常规非首日股票
+        # 3. 【最终安全兜底】：未在 IPO 表中且无确凿首日证据的标的，一律判定为常规非首日股票
         if res_first_day is None:
             res_first_day = False
 
-        self._first_listing_day_cache[c_clean] = (res_first_day, now_ts)
+        self._first_listing_day_cache[c_clean] = (res_first_day, now_ts + 3600.0)
         return res_first_day
 
     def is_stock_unlisted(self, code: str) -> bool:

@@ -4094,10 +4094,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 )
 
                 try:
-                    df_curr_close = getattr(self, 'df_all', None)
-                    if df_curr_close is not None and not df_curr_close.empty:
-                        from JSONData.multiday_feature_store import archive_daily_features
-                        archive_daily_features(df_curr_close)
+                    is_td = cct.get_trade_date_status() if (cct and hasattr(cct, 'get_trade_date_status')) else True
+                    now_i = cct.get_now_time_int() if (cct and hasattr(cct, 'get_now_time_int')) else 1530
+                    if is_td and now_i >= 1500:
+                        df_curr_close = getattr(self, 'df_all', None)
+                        if df_curr_close is not None and not df_curr_close.empty:
+                            from JSONData.multiday_feature_store import archive_daily_features
+                            archive_daily_features(df_curr_close)
                 except Exception as e_close_mfs:
                     logger.debug(f"退出时多日换手率归档跳过: {e_close_mfs}")
 
