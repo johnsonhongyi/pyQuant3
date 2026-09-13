@@ -6,7 +6,7 @@ Lifecycle stages: 回踩中 (Pulling back), 回踩企稳 (Pullback stabilized), 
 """
 
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHeaderView, QLabel, QHBoxLayout, QPushButton
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import Qt, pyqtSignal, QSize
 from PyQt6.QtGui import QColor, QFont
 import os
 import json
@@ -36,6 +36,10 @@ class SwingStateTable(QWidget):
     stock_clicked = pyqtSignal(str, str) # code, name (for linkage)
     stock_double_clicked = pyqtSignal(str, str, dict) # code, name, context_info
     dragon_monitor_requested = pyqtSignal()
+
+    def minimumSizeHint(self) -> QSize:
+        # 允许中间面板极致弹性缩放，绝不撑大主窗口或挤压左右侧分割条
+        return QSize(150, 100)
 
     def __init__(self, parent=None):
         super().__init__(parent)

@@ -27,7 +27,7 @@ from PyQt6.QtWidgets import (
     QHeaderView, QSplitter, QGroupBox, QComboBox, QLineEdit,
     QMenu, QMessageBox, QFrame, QGridLayout, QApplication, QCheckBox
 )
-from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal
+from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal, QSize
 from PyQt6.QtGui import QColor, QFont, QBrush, QIcon, QCursor, QAction
 
 from ats.ui.base_table import BaseATSTableWidget
@@ -135,6 +135,10 @@ class NewStockPanel(QWidget):
 
     stock_selected = pyqtSignal(str, str)        # code, name (单击联动)
     stock_double_clicked = pyqtSignal(str, str) # code, name (双击详情)
+
+    def minimumSizeHint(self) -> QSize:
+        # 允许中间面板极致弹性缩放，绝不撑大主窗口或挤压左右侧分割条
+        return QSize(150, 100)
 
     def __init__(self, parent=None, main_window=None):
         super().__init__(parent)

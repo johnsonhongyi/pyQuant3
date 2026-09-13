@@ -1,3 +1,36 @@
+## 2026-09-13 15:40
+- [x] **【恢复资金主线工具栏统计文字并统一使用“🐉 龙头已就位: ...”精炼格式】(SSOT) (`ats/ui/capital_dragon_panel.py`)**：
+    - [x] **根因分析**：在上一轮自适应改造中，`self.lbl_stats` 被设置了 `QSizePolicy.Policy.Ignored`，由于其后存在 `toolbar_layout.addStretch()`，Qt 布局引擎在排版时误将其宽度压缩坍塌为 0 像素，导致工具栏左侧文字完全隐形丢失；
+    - [x] **系统级工程落地**：
+        1. **恢复尺寸策略**：将 `lbl_stats` 的水平尺寸策略恢复为标准的 `QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed`，使布局引擎正确为其分配可视宽度；
+        2. **统一精炼文案格式**：按照操盘手指定规范，统一使用更精炼有力的 `🐉 龙头已就位: {count_str} (空间龙: {sp_cnt} | 容量中军: {mc_cnt} | 主线先锋: {pn_cnt}){focus_str}{accel_str}`，省去冗余前缀同时 100% 保证文字清晰可见不丢失；
+        3. **ToolTip 完备性**：鼠标悬停 ToolTip 保留完整的总数、重点关注、双加速/缺口加速明细。
+
+## 2026-09-13 15:35
+- [x] **【彻底解决资金主线顶部未自适应适度缩放锁死窗口大小、Tab切换改变左右分割比例与全视图自适应改造】(SSOT) (`ats/ui/capital_dragon_panel.py`, `ats/ui/new_stock_panel.py`, `ats/ui/swing_table.py`, `ats/ui/favorite_panel.py`, `ats/ui/main_window.py`)**：
+    - [x] **操盘手痛点与根因穿透**：
+        1. **资金主线顶部三大卡片未自适应缩放导致锁死窗口**：`SectorCardWidget` 内部控件使用硬编码文本与固定排版，`lbl_title`、`lbl_desc` 与 `lbl_leader`（长达 300px）未设置 `Ignored` 策略，导致 3 张卡片并排在没有足够宽度时，强行将中间面板撑大至 900~1000px 以上，锁死窗口大小并把右侧热力图面板严重挤扁；
+        2. **工具栏单行超长文案撑爆 layout**：`lbl_stats` 实时展示全量就位统计时文字长度达 700px，加上右侧 6 个功能按钮（550px），使工具栏在单行 `QHBoxLayout` 下最小宽度要求高达近 1300px；
+        3. **Tab 切换破坏左右分割比例**：各 Tab 页面（`NewStockPanel`、`CapitalDragonPanel` 等）拥有较大的默认 `minimumSizeHint`（600~816px），当操盘手调整好左右垂直分割条后，点击切换 Tab 时 Qt 重新分配 QSplitter 几何尺寸，导致中间面板反弹挤压左右侧面板，甚至触发窗口非预期撑大。
+    - [x] **系统级工程落地与自适应改造**：
+        1. **`SectorCardWidget` 响应式自适应适度缩放**：
+           - 边距与间距紧凑优化，各文本标签设置 `setSizePolicy(Ignored, Preferred)` 与 `setMinimumWidth(0)`，重写 `minimumSizeHint` 返回 `QSize(50, 68)`；
+           - 响应式双模排版：当卡片宽度 `< 270px` 时，按钮自动切换为紧凑版 `🔍 明细`，标题自动使用简明赛道名称，指标与先锋行采用精简高密度短语；当宽度充足时自动恢复全量展呈，全量指标及加速详情完备收纳至 ToolTip；
+           - 增加 `resizeEvent`，拖拉 Splitter 时卡片平滑动态自适应重绘，绝不折行截断或撑爆容器；
+        2. **工具栏响应式弹性伸缩**：
+           - `lbl_stats` 设置 `setSizePolicy(Ignored, Preferred)` 与 `setMinimumWidth(0)`，宽度紧凑时自动切换为精简文案 `🐉 资金主线: X只 | 重点: X只 | 加速: X只`，全量详情保留在 ToolTip；
+           - 搜索框最小宽度调优为 60px，整体工具条在窄宽度下自适应压缩；
+        3. **四大核心看板面板 `minimumSizeHint` 全量轻量化**：
+           - `CapitalDragonPanel`、`NewStockPanel`、`SwingStateTable`、`FavoritePanel` 全部统一重写 `minimumSizeHint(self) -> QSize(150, 100)`；
+           - 聚合后的 `QTabWidget.minimumSizeHint().width()` 从原本的 **816px 骤降至 156px**，赋予中间看板高达 660px 的极限收缩调整空间；
+        4. **主窗口 Tab 切换左右垂直分割比例 100% 锁定**：
+           - 在 `ATSMainWindow._on_top_tab_changed` 中，在切换前保存 `saved_sizes = self.main_splitter.sizes()`，在更新完成后通过 `finally` 强制执行 `self.main_splitter.setSizes(saved_sizes)`，彻底切断 Tab 切换导致的分隔比例漂移；
+           - 将 TabBar 标签样式中的 `min-width` 优化为 `100px`，开启 `usesScrollButtons(True)`，确保整窗全视图完全自适应。
+    - [x] **测试验证**：
+        - 自动化断言验证：4 个面板 `minimumSizeHint` 均稳定在 `(150, 100)`；
+        - 在 `[149, 745, 496]` 比例下连续切换 Tab 0/1/2/3，Splitter sizes 达到 0 像素漂移、0 像素挤压；
+        - 核心测试套件全部 100% 通过。
+
 ## 2026-09-13 15:15
 - [x] **【彻底解决天梯无法打开故障、全面对齐ATS原生磁吸架构(SSOT)、精简模式保留dff/dff2/dff3/量比自适应、修复按键换行联动与清理右键菜单】(SSOT) (`ats/ui/daily_limit_up_dialog.py`, `ats/ui/sector_rotation_miner_dialog.py`, `tests/test_daily_limit_up_dialog.py`, `tests/test_sector_rotation_pullback_miner.py`)**：
     - [x] **操盘手反馈痛点根因穿透**：
