@@ -1382,17 +1382,22 @@ def get_sina_Market_json(market='all', showtime=True, num='100', retry_count=3, 
                 log.warning(f"[SINA-COOLING-HOLD] 当前处于 API 限制/网络异常冷却避让期中 (剩余 {remaining_min:.1f} 分钟), 容忍并继续使用现有 HDF 缓存")
                 force_cache = True
 
-            # 🛡️ [DATA-INTEGRITY] 非交易时间/盘后完整性校验：
-            # 必须确保磁盘 HDF 缓存不是早盘或未走完的半截数据 (例如 ticktime < '15:00:00' 且数量占绝大多数)
+            # 🛡️ [DATA-INTEGRITY] 盘后/非交易时间完整性校验：
+            # 仅在收盘且出清完成 (now_int >= 1502) 或非交易日/周末，才强制要求磁盘 HDF 缓存必须包含收盘结算数据 (ticktime >= '15:00:00')
+            # 预留 2 分钟集合竞价与分发缓冲，且杜绝在交易日中午休市 (11:30~13:00) 时误判死循环网络拉取
             is_stale_intraday_cache = False
-            if not cct.get_work_time() and len(h5) > 0 and 'ticktime' in h5.columns and not is_cooling:
+            now_int = cct.get_now_time_int() if (cct and hasattr(cct, 'get_now_time_int')) else 1530
+            is_trade_day = cct.get_trade_date_status() if (cct and hasattr(cct, 'get_trade_date_status')) else False
+            require_closed_data = (not is_trade_day) or (now_int >= 1502)
+
+            if require_closed_data and not cct.get_work_time() and len(h5) > 0 and 'ticktime' in h5.columns and not is_cooling:
                 try:
                     str_ticks = h5['ticktime'].astype(str).str.extract(r'(\d{2}:\d{2}:\d{2})')[0].dropna()
                     if not str_ticks.empty:
                         closed_ratio = (str_ticks >= '15:00:00').mean()
                         if closed_ratio < 0.1:
                             is_stale_intraday_cache = True
-                            log.warning(f"[HDF-STALE-INTRADAY] 磁盘 HDF 缓存包含早盘未收盘数据 (收盘Tick占比仅 {closed_ratio:.1%}), 禁止作为收盘缓存使用, 强制在线刷新全天收盘数据！")
+                            log.warning(f"[HDF-STALE-INTRADAY] 当前已收盘/非交易日，但磁盘 HDF 缓存仍为早盘未收盘数据 (收盘Tick占比仅 {closed_ratio:.1%}), 强制在线刷新全天收盘数据！")
                 except Exception as e_tick:
                     log.debug(f"Tick check failed: {e_tick}")
 
