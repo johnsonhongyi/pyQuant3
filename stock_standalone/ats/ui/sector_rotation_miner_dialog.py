@@ -468,13 +468,19 @@ class SectorRotationMinerDialog(QDialog, WindowMixin):
         self._init_shortcuts()
         self._init_filter_config()
 
-        # 恢复窗口位置与尺寸
-        self.load_window_position_qt(self, "sector_rotation_miner_dialog", default_width=1180, default_height=720)
+        # 恢复持久化的视图模式 (冷启动 SSOT: 精简版样式 vs 全貌模式)
+        saved_view = load_config_node("sector_miner_view_mode", "full")
+        self._is_compact_mode = (str(saved_view).strip().lower() == "compact")
 
-        # 恢复 normal_geometry 与磁吸贴边状态
+        # 统一应用视图模式 (冷启动模式：无动效首帧阻塞、精准几何定位、列可见性与尺寸严密对齐)
+        self._apply_view_mode(is_compact=self._is_compact_mode, is_cold_boot=True)
+
+        # 恢复 normal_geometry
         saved_normal = load_config_node("sector_miner_normal_geo", None)
         if saved_normal and isinstance(saved_normal, (list, tuple)) and len(saved_normal) >= 4:
             nx, ny, nw, nh = saved_normal[:4]
+            if self._is_compact_mode:
+                nw, nh = self._sanitize_compact_size(nw, nh, 1180, 720)
             from gui_utils import clamp_window_to_screens
             nx, ny = clamp_window_to_screens(nx, ny, nw, nh)
             from PyQt6.QtCore import QPoint
@@ -484,7 +490,7 @@ class SectorRotationMinerDialog(QDialog, WindowMixin):
                 nx = max(_s_geo.left(), min(nx, _s_geo.right() - nw))
                 ny = max(_s_geo.top(), min(ny, _s_geo.bottom() - nh))
             self.normal_geometry = QRect(nx, ny, nw, nh)
-        else:
+        elif not getattr(self, 'normal_geometry', None):
             self.normal_geometry = self.geometry()
 
         # 恢复持久化的置顶与磁吸折叠状态
@@ -520,15 +526,6 @@ class SectorRotationMinerDialog(QDialog, WindowMixin):
             elif self.anchor_edge:
                 if hasattr(self, 'hover_timer') and self.hover_timer and not self.hover_timer.isActive():
                     self.hover_timer.start()
-
-        # 恢复列宽持久化
-        setup_header_persistence(self.sectors_table, "sector_miner_sectors_header")
-        setup_header_persistence(self.candidates_table, "sector_miner_candidates_header")
-
-        # 恢复持久化的视图模式 (若上次退出为精简模式，则自适应切换)
-        saved_view = load_config_node("sector_miner_view_mode", "full")
-        if saved_view == "compact":
-            self.toggle_compact_mode(force_compact=True)
 
         # 首次加载数据
         if self.current_df is not None and not self.current_df.empty:
@@ -931,26 +928,51 @@ class SectorRotationMinerDialog(QDialog, WindowMixin):
     def _save_current_filter_and_view_state(self):
         """线程安全、全量原子保存当前策略模式、自定义参数、刷新状态与视图布局"""
         try:
+            cur_mode = self.combo_filter_mode.currentText() if hasattr(self, 'combo_filter_mode') else ""
             norm_geo = self.normal_geometry if (getattr(self, 'is_hidden_state', False) and self.normal_geometry) else self.geometry()
             payload = {
                 "sector_miner_filter_mode": cur_mode,
-                "sector_miner_view_mode": "compact" if self._is_compact_mode else "full",
-                "sector_miner_auto_refresh": self.chk_auto.isChecked(),
-                "sector_miner_refresh_interval": self._get_selected_interval_sec(),
-                "sector_miner_anchor_edge": None if self.stays_on_top else self.anchor_edge,
-                "sector_miner_is_hidden": False if self.stays_on_top else getattr(self, 'is_hidden_state', False),
-                "sector_miner_stays_on_top": self.stays_on_top,
+                "sector_miner_view_mode": "compact" if getattr(self, '_is_compact_mode', False) else "full",
+                "sector_miner_auto_refresh": self.chk_auto.isChecked() if hasattr(self, 'chk_auto') else True,
+                "sector_miner_refresh_interval": self._get_selected_interval_sec() if hasattr(self, '_get_selected_interval_sec') else 5.0,
+                "sector_miner_anchor_edge": None if getattr(self, 'stays_on_top', False) else getattr(self, 'anchor_edge', None),
+                "sector_miner_is_hidden": False if getattr(self, 'stays_on_top', False) else getattr(self, 'is_hidden_state', False),
+                "sector_miner_stays_on_top": getattr(self, 'stays_on_top', False),
                 "sector_miner_normal_geo": [norm_geo.x(), norm_geo.y(), norm_geo.width(), norm_geo.height()],
             }
-            if self._current_filter_config and self._current_filter_config.mode_name == "⚙️ 自定义":
+            if getattr(self, '_current_filter_config', None) and self._current_filter_config.mode_name == "⚙️ 自定义":
                 payload["sector_miner_custom_filter"] = self._current_filter_config.to_dict()
 
             geo = self.geometry()
             geo_list = [geo.x(), geo.y(), geo.width(), geo.height()]
-            if self._is_compact_mode:
-                payload["sector_miner_compact_geo"] = geo_list
+            if getattr(self, '_is_compact_mode', False):
+                # 精简模式：严禁保存全屏或超宽尺寸（width <= 750），防止污染
+                if not self.isMaximized() and geo.width() <= 750:
+                    payload["sector_miner_compact_geo"] = geo_list
+                    self._compact_geometry = geo
+                # 精简模式独立保存列宽（仅保存可见列，避免污染全貌模式列宽）
+                if hasattr(self, 'sectors_table') and hasattr(self, 'candidates_table'):
+                    payload["sector_miner_compact_sec_widths"] = [
+                        self.sectors_table.columnWidth(c) if not self.sectors_table.isColumnHidden(c) else -1
+                        for c in range(self.sectors_table.columnCount())
+                    ]
+                    payload["sector_miner_compact_cand_widths"] = [
+                        self.candidates_table.columnWidth(c) if not self.candidates_table.isColumnHidden(c) else -1
+                        for c in range(self.candidates_table.columnCount())
+                    ]
             else:
-                payload["sector_miner_full_geo"] = geo_list
+                # 全貌模式：保存全貌尺寸（width >= 680）
+                if not self.isMaximized() and geo.width() >= 680:
+                    payload["sector_miner_full_geo"] = geo_list
+                    self._full_geometry = geo
+                # 全貌模式独立保存列宽
+                if hasattr(self, 'sectors_table') and hasattr(self, 'candidates_table'):
+                    payload["sector_miner_full_sec_widths"] = [
+                        self.sectors_table.columnWidth(c) for c in range(self.sectors_table.columnCount())
+                    ]
+                    payload["sector_miner_full_cand_widths"] = [
+                        self.candidates_table.columnWidth(c) for c in range(self.candidates_table.columnCount())
+                    ]
 
             from ats.ui.styles import save_config_nodes
             save_config_nodes(payload)
@@ -1919,32 +1941,109 @@ class SectorRotationMinerDialog(QDialog, WindowMixin):
         self.anim_group.finished.connect(on_finished)
         self.anim_group.start()
 
-    def toggle_compact_mode(self, force_compact: Optional[bool] = None):
-        """在【精简版样式 (Compact Mode)】与【全貌模式 (Full Mode)】之间平滑切换"""
-        # 容错处理：若从 QPushButton.clicked 传入 bool 参数 (非显式调用)，忽略该参数执行取反切换
-        if force_compact is not None and not isinstance(force_compact, bool):
-            force_compact = None
+    def _restore_full_column_widths(self):
+        """恢复全貌模式下的标准列宽与用户持久化拖拽宽度"""
+        default_sec = [110, 75, 70, 70, 75, 150, 85, 75]
+        saved_sec_w = load_config_node("sector_miner_full_sec_widths", None)
+        for c in range(self.sectors_table.columnCount()):
+            if saved_sec_w and isinstance(saved_sec_w, list) and c < len(saved_sec_w) and saved_sec_w[c] > 20:
+                self.sectors_table.setColumnWidth(c, saved_sec_w[c])
+            elif c < len(default_sec):
+                self.sectors_table.setColumnWidth(c, default_sec[c])
 
-        if force_compact is not None:
-            new_mode = bool(force_compact)
+        default_cand = [65, 75, 90, 95, 65, 70, 75, 70, 110, 55, 85, 65, 200]
+        saved_cand_w = load_config_node("sector_miner_full_cand_widths", None)
+        for c in range(self.candidates_table.columnCount()):
+            if saved_cand_w and isinstance(saved_cand_w, list) and c < len(saved_cand_w) and saved_cand_w[c] > 20:
+                self.candidates_table.setColumnWidth(c, saved_cand_w[c])
+            elif c < len(default_cand):
+                self.candidates_table.setColumnWidth(c, default_cand[c])
+
+    def _restore_compact_column_widths(self):
+        """恢复精简模式下用户持久化的可见列宽（-1 表示隐藏列，不覆盖）"""
+        saved_sec_w = load_config_node("sector_miner_compact_sec_widths", None)
+        if saved_sec_w and isinstance(saved_sec_w, list):
+            for c in range(self.sectors_table.columnCount()):
+                if c < len(saved_sec_w) and saved_sec_w[c] > 20:
+                    # -1 = 该列在保存时是隐藏的，跳过（由 _adapt_compact_columns 控制可见性）
+                    self.sectors_table.setColumnWidth(c, saved_sec_w[c])
+
+        saved_cand_w = load_config_node("sector_miner_compact_cand_widths", None)
+        if saved_cand_w and isinstance(saved_cand_w, list):
+            for c in range(self.candidates_table.columnCount()):
+                if c < len(saved_cand_w) and saved_cand_w[c] > 20:
+                    self.candidates_table.setColumnWidth(c, saved_cand_w[c])
+
+    def _sanitize_compact_size(self, w: int, h: int, full_w: int, full_h: int) -> Tuple[int, int]:
+        """精简窗口尺寸上限校验与安全纠偏：精简尺寸必须严格小于全貌尺寸，严禁全屏"""
+        max_allowed_w = min(750, max(320, int(full_w * 0.70)))
+        safe_w = w
+        if safe_w > max_allowed_w or safe_w < 300:
+            safe_w = 380  # 黄金默认紧凑卡片宽度
+        safe_h = h
+        if safe_h < 320:
+            safe_h = min(650, full_h)
+        elif safe_h > full_h:
+            safe_h = full_h
+        return safe_w, safe_h
+
+    def _apply_view_mode(self, is_compact: bool, is_cold_boot: bool = False):
+        """统一应用视图模式 (精简版样式 vs 全貌模式)，统一冷启动与热切换逻辑 (SSOT)"""
+        self._is_compact_mode = bool(is_compact)
+        self._in_mode_switch = True  # 标记正在进行模式切换，阻断 moveEvent 误触发磁吸
+
+        # 模式切换时坚决切断贴边磁吸误触
+        if hasattr(self, 'snap_timer') and self.snap_timer:
+            self.snap_timer.stop()
+        self.anchor_edge = None
+        self.is_hidden_state = False
+        if hasattr(self, 'hover_timer') and self.hover_timer:
+            self.hover_timer.stop()
+
+        # 如果当前窗口处于最大化状态，必须立即解除最大化！
+        if self.isMaximized():
+            self.showNormal()
+
+        # 获取屏幕可用区域
+        screen = self.screen() or QApplication.primaryScreen()
+        s_geo = screen.availableGeometry() if screen else QRect(0, 0, 1920, 1080)
+
+        # 确定基准全貌尺寸 (full_w, full_h)
+        saved_full_geo = load_config_node("sector_miner_full_geo", None)
+        if getattr(self, "_full_geometry", None) and self._full_geometry.width() >= 680:
+            full_w = self._full_geometry.width()
+            full_h = self._full_geometry.height()
+        elif saved_full_geo and len(saved_full_geo) == 4 and saved_full_geo[2] >= 680:
+            full_w = saved_full_geo[2]
+            full_h = saved_full_geo[3]
         else:
-            new_mode = not self._is_compact_mode
-
-        if new_mode == self._is_compact_mode:
-            return
-
-        self._is_compact_mode = new_mode
+            full_w = 1180
+            full_h = min(720, s_geo.height() - 60)
 
         if self._is_compact_mode:
-            # ── 1. 切换进入精简版样式 ──
-            # 若正处于贴边隐藏状态，先恢复正常展示
-            if getattr(self, "is_hidden_state", False):
-                self.show_normal_position()
+            # ── 1. 切换为精简版样式 ──
+            if not is_cold_boot:
+                # 记录切换前的全貌几何 (若有效)
+                if not self.isMaximized() and self.width() >= 680:
+                    self._full_geometry = self.geometry()
+                # 【切换离开全貌前】立即保存全貌列宽（此时列状态仍是全貌，之后将被精简覆盖）
+                if hasattr(self, 'sectors_table') and hasattr(self, 'candidates_table'):
+                    try:
+                        from ats.ui.styles import save_config_nodes
+                        save_config_nodes({
+                            "sector_miner_full_sec_widths": [
+                                self.sectors_table.columnWidth(c)
+                                for c in range(self.sectors_table.columnCount())
+                            ],
+                            "sector_miner_full_cand_widths": [
+                                self.candidates_table.columnWidth(c)
+                                for c in range(self.candidates_table.columnCount())
+                            ],
+                        })
+                    except Exception:
+                        pass
 
-            # 记忆当前全貌尺寸与坐标
-            self._full_geometry = self.geometry()
-
-            # 隐藏全貌复杂控件，收起第二行
+            # 隐藏全貌控件，展示精简卡片控件
             self.lbl_title.setVisible(False)
             self.lbl_mode.setVisible(False)
             self.combo_filter_mode.setVisible(False)
@@ -1971,44 +2070,73 @@ class SectorRotationMinerDialog(QDialog, WindowMixin):
             """)
             self.btn_compact.setToolTip("当前处于精简盯盘卡片模式。点击一键恢复完整双表大工作台全貌 (快捷键 M)")
 
-            # 表格列自适应展示尽量多的核心列信息 (dff, dff2, dff3, 量比等)
-            self._adapt_compact_columns()
-
-            # 放开最小尺寸并平滑调整为紧凑卡片
+            # 设置尺寸约束：精简模式放开最小尺寸，并严控最大宽度！
             self.setMinimumSize(300, 320)
+            self.setMaximumSize(750, 16777215)  # 严格限制精简窗口宽度不超过 750，杜绝全屏Bug！
 
-            # 恢复保存的精简尺寸，若无则自适应平滑贴靠屏幕右侧黄金看盘位
+            # 计算精简目标尺寸：从历史保存复用，若无或不合法则使用 380x650
             saved_compact_geo = load_config_node("sector_miner_compact_geo", None)
-            if saved_compact_geo and len(saved_compact_geo) == 4:
-                target_geo = QRect(*saved_compact_geo)
+            req_w = 380
+            req_h = min(650, full_h)
+            if getattr(self, "_compact_geometry", None) and self._compact_geometry.width() <= 750:
+                req_w = self._compact_geometry.width()
+                req_h = self._compact_geometry.height()
+            elif saved_compact_geo and len(saved_compact_geo) == 4:
+                req_w = saved_compact_geo[2]
+                req_h = saved_compact_geo[3]
+
+            comp_w, comp_h = self._sanitize_compact_size(req_w, req_h, full_w, full_h)
+
+            # 【核心铁律】：点击切换精简不要移动窗口 (In-place 原地切换，左上角 0 像素位移，绝对不上移)
+            if is_cold_boot:
+                if saved_compact_geo and len(saved_compact_geo) == 4:
+                    cur_x, cur_y = saved_compact_geo[0], saved_compact_geo[1]
+                else:
+                    cur_x, cur_y = 150, 100
+                target_x = max(s_geo.left(), min(cur_x, s_geo.right() - comp_w))
+                target_y = max(s_geo.top(), min(cur_y, s_geo.bottom() - comp_h))
+                self.move(target_x, target_y)
+                self.resize(comp_w, comp_h)
             else:
-                screen = self.screen() or QApplication.primaryScreen()
-                s_geo = screen.availableGeometry() if screen else QRect(0, 0, 1920, 1080)
-                comp_w = 370
-                comp_h = min(660, s_geo.height() - 80)
-                comp_x = max(s_geo.left(), s_geo.right() - comp_w - 10)
-                comp_y = s_geo.top() + 40
-                target_geo = QRect(comp_x, comp_y, comp_w, comp_h)
+                # 物理锚点：使用 self.pos() 锁定顶层窗口真实的物理左上角
+                anchor_pos = self.pos()
+                target_x = max(s_geo.left(), min(anchor_pos.x(), s_geo.right() - comp_w))
+                target_y = max(s_geo.top(), min(anchor_pos.y(), s_geo.bottom() - comp_h))
+                # 原地只改变宽高，左上角位置保持绝对稳定！
+                self.resize(comp_w, comp_h)
+                self.move(target_x, target_y)
 
-            self.start_slide_animation(target_geo, 1.0, duration=220)
-            self.normal_geometry = target_geo
-            # 表格列自适应展示尽量多的核心列信息 (dff, dff2, dff3, 量比等)
-            self._adapt_compact_columns(target_geo.width())
+            self.normal_geometry = QRect(self.pos().x(), self.pos().y(), comp_w, comp_h)
+            self._compact_geometry = self.normal_geometry
 
-            # 【用户明确需求：精简模式不要直接自动置顶，置顶手动选择】
-            # 完全保留用户当前的置顶设置，不再强制修改 self.btn_top
-
-            self.status_bar.setText("🧲 精简盯盘模式: 点击【🖥️ 恢复全貌 (M)】或按 M 键还原.")
+            # 【列宽切换正确序列】：先自适应设置可见列，再恢复精简模式用户持久化列宽
+            # （必须先 _adapt_compact_columns 确定哪些列可见，再 _restore_compact_column_widths 覆盖可见列的宽度）
+            self._adapt_compact_columns(comp_w)
+            self._restore_compact_column_widths()  # 在可见性确定后恢复用户手动调整的精简列宽
+            self.status_bar.setText("🧲 精简盯盘模式: 原地紧凑呈现，点击【🖥️ 恢复全貌 (M)】或按 M 键还原.")
         else:
-            # ── 2. 恢复全貌模式 ──
-            # 若正处于贴边隐藏状态，先恢复正常展示
-            if getattr(self, "is_hidden_state", False):
-                self.show_normal_position()
+            # ── 2. 切换为全貌模式 ──
+            if not is_cold_boot:
+                if not self.isMaximized() and self.width() <= 750:
+                    self._compact_geometry = self.geometry()
+                # 【切换离开精简前】立即保存精简列宽（此时列状态仍是精简，之后将被全貌列宽覆盖）
+                if hasattr(self, 'sectors_table') and hasattr(self, 'candidates_table'):
+                    try:
+                        from ats.ui.styles import save_config_nodes
+                        save_config_nodes({
+                            "sector_miner_compact_sec_widths": [
+                                self.sectors_table.columnWidth(c) if not self.sectors_table.isColumnHidden(c) else -1
+                                for c in range(self.sectors_table.columnCount())
+                            ],
+                            "sector_miner_compact_cand_widths": [
+                                self.candidates_table.columnWidth(c) if not self.candidates_table.isColumnHidden(c) else -1
+                                for c in range(self.candidates_table.columnCount())
+                            ],
+                        })
+                    except Exception:
+                        pass
 
-            # 记忆当前精简尺寸
-            self._compact_geometry = self.geometry()
-
-            # 还原控件可见性与完整文案
+            # 还原全貌控件可见性与完整文案
             self.lbl_compact_title.setVisible(False)
             self.lbl_title.setVisible(True)
             self.btn_scan.setText("🚀 一键深度挖掘")
@@ -2033,36 +2161,79 @@ class SectorRotationMinerDialog(QDialog, WindowMixin):
             """)
             self.btn_compact.setToolTip("切换精简盯盘卡片模式 / 恢复全貌 (快捷键 M)\n支持屏幕贴边磁吸吸附、独立悬浮置顶盯盘")
 
-            # 表格所有列全量展现
+            # 解除最大尺寸限制，恢复全貌最小尺寸
+            self.setMaximumSize(16777215, 16777215)
+            self.setMinimumSize(680, 420)
+
+            # 计算全貌目标尺寸
+            req_w = max(680, full_w)
+            req_h = max(420, full_h)
+
+            if is_cold_boot:
+                if saved_full_geo and len(saved_full_geo) == 4:
+                    cur_x, cur_y = saved_full_geo[0], saved_full_geo[1]
+                else:
+                    saved_win_geo = load_config_node("sector_rotation_miner_dialog", None)
+                    if isinstance(saved_win_geo, dict) and "width" in saved_win_geo:
+                        cur_x = saved_win_geo.get("x", 150)
+                        cur_y = saved_win_geo.get("y", 100)
+                    else:
+                        cur_x, cur_y = 150, 100
+                target_x = max(s_geo.left(), min(cur_x, s_geo.right() - req_w))
+                target_y = max(s_geo.top(), min(cur_y, s_geo.bottom() - req_h))
+                self.move(target_x, target_y)
+                self.resize(req_w, req_h)
+            else:
+                # 原地展开：使用 self.pos() 锁定真实物理左上角，若右侧或底部放得下则 0 像素移动
+                anchor_pos = self.pos()
+                target_x = max(s_geo.left(), min(anchor_pos.x(), s_geo.right() - req_w))
+                target_y = max(s_geo.top(), min(anchor_pos.y(), s_geo.bottom() - req_h))
+                self.resize(req_w, req_h)
+                self.move(target_x, target_y)
+
+            self.normal_geometry = QRect(self.pos().x(), self.pos().y(), req_w, req_h)
+            self._full_geometry = self.normal_geometry
+
+            # 【全貌模式核心铁律】：100% 强制展现所有列，彻底杜绝任何历史残留隐藏！
             for c in range(self.sectors_table.columnCount()):
                 self.sectors_table.setColumnHidden(c, False)
             for c in range(self.candidates_table.columnCount()):
                 self.candidates_table.setColumnHidden(c, False)
 
-            # 恢复全貌最小尺寸
-            self.setMinimumSize(680, 420)
-
-            # 恢复全貌几何位置
-            if self._full_geometry:
-                target_geo = self._full_geometry
-            else:
-                saved_full_geo = load_config_node("sector_miner_full_geo", None)
-                if saved_full_geo and len(saved_full_geo) == 4:
-                    target_geo = QRect(*saved_full_geo)
-                else:
-                    target_geo = QRect(self.x(), self.y(), 1180, 720)
-
-            self.start_slide_animation(target_geo, 1.0, duration=220)
-            self.normal_geometry = target_geo
+            # 恢复全貌标准列宽
+            self._restore_full_column_widths()
             self.status_bar.setText("🖥️ 已恢复完整双表大工作台全貌.")
 
+        # 延迟重置 _in_mode_switch
+        QTimer.singleShot(300, lambda: setattr(self, "_in_mode_switch", False))
+
+    def toggle_compact_mode(self, force_compact: Optional[bool] = None):
+        """在【精简版样式 (Compact Mode)】与【全貌模式 (Full Mode)】之间平滑切换"""
+        # 容错处理：若从 QPushButton.clicked 传入 bool 参数 (非显式调用)，忽略该参数执行取反切换
+        if force_compact is not None and not isinstance(force_compact, bool):
+            force_compact = None
+
+        if force_compact is not None:
+            new_mode = bool(force_compact)
+        else:
+            new_mode = not self._is_compact_mode
+
+        if new_mode == self._is_compact_mode:
+            return
+
+        self._apply_view_mode(is_compact=new_mode, is_cold_boot=False)
         self._save_current_filter_and_view_state()
 
     def resizeEvent(self, event):
-        """窗口缩放事件：精简模式下自适应动态调整列展示"""
+        """窗口缩放事件：精简模式下自适应动态调整列展示，并记录用户调整后的尺寸便于复用"""
         super().resizeEvent(event)
         if getattr(self, '_is_compact_mode', False):
             self._adapt_compact_columns()
+            if not self.isMaximized() and self.width() <= 750:
+                self._compact_geometry = self.geometry()
+        else:
+            if not self.isMaximized() and self.width() >= 680:
+                self._full_geometry = self.geometry()
 
     def _adapt_compact_columns(self, target_width: Optional[int] = None):
         """精简模式下自适应窗口尺寸呈现尽量多的核心列信息 (dff, dff2, dff3, 量比等)"""
@@ -2309,6 +2480,11 @@ class SectorRotationMinerDialog(QDialog, WindowMixin):
     def moveEvent(self, event):
         """窗口移动事件 (对齐 ATS SSOT)"""
         super().moveEvent(event)
+        # 模式切换动画中或全屏/最大化，绝对不触发磁吸贴边
+        if getattr(self, "_in_mode_switch", False) or getattr(self, "_in_snap_action", False):
+            if hasattr(self, 'snap_timer') and self.snap_timer:
+                self.snap_timer.stop()
+            return
         # 【置顶与磁吸严格互斥】：置顶状态下绝对禁止触发磁吸贴边
         if getattr(self, "stays_on_top", False):
             if hasattr(self, 'snap_timer') and self.snap_timer:
@@ -2316,7 +2492,7 @@ class SectorRotationMinerDialog(QDialog, WindowMixin):
             self.anchor_edge = None
             self.normal_geometry = None
             return
-        if not getattr(self, "is_hidden_state", False) and not getattr(self, "_in_snap_action", False):
+        if not getattr(self, "is_hidden_state", False):
             self._is_dragging = True
             self.anchor_edge = None
             if hasattr(self, 'snap_timer'):
@@ -2332,8 +2508,17 @@ class SectorRotationMinerDialog(QDialog, WindowMixin):
                 self.show_normal_position()
 
     def showEvent(self, event):
-        """窗体显示事件"""
+        """窗体显示事件：确保显示时列展示与视图模式 100% 同步，坚决杜绝冷启动历史残留隐藏"""
         super().showEvent(event)
+        if getattr(self, '_is_compact_mode', False):
+            self._adapt_compact_columns(self.width())
+        else:
+            if hasattr(self, 'sectors_table') and hasattr(self, 'candidates_table'):
+                for c in range(self.sectors_table.columnCount()):
+                    self.sectors_table.setColumnHidden(c, False)
+                for c in range(self.candidates_table.columnCount()):
+                    self.candidates_table.setColumnHidden(c, False)
+
         if (self.anchor_edge is not None or getattr(self, "is_hidden_state", False)) and not getattr(self, "stays_on_top", False):
             if hasattr(self, 'hover_timer') and self.hover_timer and not self.hover_timer.isActive():
                 self.hover_timer.start()
