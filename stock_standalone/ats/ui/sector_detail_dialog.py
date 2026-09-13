@@ -133,6 +133,8 @@ class ATSSectorDetailDialog(QDialog):
         self._last_score = 0.0
         self._last_leader_str = "--"
         self._last_meta = {}
+        self._rendered_sector_name = ""
+        self._fetch_start_time = None
         
         self.setWindowTitle(f"🔥 {sector_name} 板块明细 (实时高频行情)")
         self.resize(780, 520)
@@ -190,8 +192,8 @@ class ATSSectorDetailDialog(QDialog):
         header_layout.setSpacing(4)
 
         top_row = QHBoxLayout()
-        self.title_lbl = QLabel(f"板块名称: {self.sector_name}")
-        self.title_lbl.setStyleSheet("font-size: 12.5pt; font-weight: bold; color: #00ff88;")
+        self.title_lbl = QLabel("板块名称: 数据加载中...")
+        self.title_lbl.setStyleSheet("font-size: 12.5pt; font-weight: bold; color: #888888;")
         top_row.addWidget(self.title_lbl)
 
         self.score_lbl = QLabel("强度得分: --")
@@ -292,6 +294,10 @@ class ATSSectorDetailDialog(QDialog):
 
         btn_layout.addStretch()
 
+        self.lbl_elapsed_time = QLabel("⏱️ 耗时: --")
+        self.lbl_elapsed_time.setStyleSheet("color: #888888; font-size: 8.5pt; margin-right: 10px;")
+        btn_layout.addWidget(self.lbl_elapsed_time)
+
         btn_close = QPushButton("关闭")
         btn_close.setStyleSheet("""
             QPushButton { background-color: #2a2e39; color: #d1d4dc; border: 1px solid #363c4e;
@@ -329,10 +335,39 @@ class ATSSectorDetailDialog(QDialog):
         except Exception:
             pass
 
+    def _stop_worker(self, wait_timeout_ms: int = 0):
+        """安全停止后台 Worker 线程，杜绝 QThread: Destroyed while thread is still running"""
+        w = getattr(self, '_worker', None)
+        if w and w.isRunning():
+            try:
+                w.finished_signal.disconnect()
+            except Exception:
+                pass
+            if not hasattr(ATSSectorDetailDialog, "_lingering_workers"):
+                ATSSectorDetailDialog._lingering_workers = set()
+            ATSSectorDetailDialog._lingering_workers.add(w)
+            w.finished.connect(lambda: ATSSectorDetailDialog._lingering_workers.discard(w))
+            w.quit()
+            if wait_timeout_ms > 0:
+                w.wait(wait_timeout_ms)
+        self._worker = None
+
+    def closeEvent(self, event):
+        self._save_geometry()
+        self._stop_worker(wait_timeout_ms=1000)
+        super().closeEvent(event)
+
     def accept(self):
         """OK/关闭按钮同样触发持久化"""
         self._save_geometry()
+        self._stop_worker(wait_timeout_ms=1000)
         super().accept()
+
+    def reject(self):
+        """ESC或右上角关闭触发安全停工"""
+        self._save_geometry()
+        self._stop_worker(wait_timeout_ms=1000)
+        super().reject()
 
     def _start_auto_refresh_timer(self):
         """启动后台定时自动静默更新 (盘中 15 秒轮询，休市 60 秒轮询)"""
@@ -344,13 +379,28 @@ class ATSSectorDetailDialog(QDialog):
         """【外部/主窗口数据同步入口】供主窗口实盘行情轮询时推送最新 DataFrame 或原地复用更新"""
         if current_df is not None and not current_df.empty:
             self._cached_df = current_df
-        if hasattr(self, 'title_lbl'):
-            self.title_lbl.setText(f"板块名称: {self.sector_name}")
-        self.setWindowTitle(f"🔥 {self.sector_name} 板块明细 (实时高频行情)")
-        self.refresh_data(force=False)
+
+        # 🛡️【防误判机制】当数据尚未加载完成，绝不提前显示新板块名称与旧数据，避免造成操盘误判
+        # 原地复用核心：保持表格结构稳定不调用 setRowCount(0)，消除横向抖动与白屏晃动
+        if getattr(self, '_rendered_sector_name', '') != self.sector_name:
+            if hasattr(self, 'title_lbl'):
+                self.title_lbl.setText("板块名称: 数据加载中...")
+                self.title_lbl.setStyleSheet("font-size: 12.5pt; font-weight: bold; color: #888888;")
+            if hasattr(self, 'score_lbl'):
+                self.score_lbl.setText("强度得分: --")
+            if hasattr(self, 'stats_lbl'):
+                self.stats_lbl.setText("成员数: 正在同步... | 领涨标的: --")
+
+        self.refresh_data(force=True)
 
     def load_data(self, df_realtime=None, member_codes=None):
         """【兼容/快速加载入口】支持同步直接根据传入 DataFrame 计算并渲染，或触发异步刷新"""
+        self._stop_worker(wait_timeout_ms=2000)
+        import time
+        self._fetch_start_time = time.perf_counter()
+        if hasattr(self, 'lbl_elapsed_time'):
+            self.lbl_elapsed_time.setText("⏱️ 耗时: 测算中...")
+
         if df_realtime is not None and not df_realtime.empty:
             self._cached_df = df_realtime
         if member_codes is not None:
@@ -376,11 +426,40 @@ class ATSSectorDetailDialog(QDialog):
     def refresh_data(self, force: bool = False):
         """异步拉取板块成分股最新实时高频行情与特征"""
         if self._worker and self._worker.isRunning():
-            return
+            if not force:
+                return
+            old_w = self._worker
+            try:
+                old_w.finished_signal.disconnect()
+            except Exception:
+                pass
+            if not hasattr(ATSSectorDetailDialog, "_lingering_workers"):
+                ATSSectorDetailDialog._lingering_workers = set()
+            ATSSectorDetailDialog._lingering_workers.add(old_w)
+            old_w.finished.connect(lambda: ATSSectorDetailDialog._lingering_workers.discard(old_w))
+            old_w.quit()
+            self._worker = None
+
+        import time
+        self._fetch_start_time = time.perf_counter()
+
+        if hasattr(self, 'lbl_elapsed_time'):
+            self.lbl_elapsed_time.setText("⏱️ 耗时: 测算中...")
 
         if force:
             self.btn_refresh.setEnabled(False)
             self.btn_refresh.setText("⏳ 正在刷新...")
+
+        # 🛡️【防误判机制】当数据尚未加载完成，绝不提前显示新板块名称与旧数据，避免造成操盘误判
+        # 原地复用核心：保持表格行原位平滑等待，杜绝清空表格导致的滚动条抽搐与视口晃动
+        if getattr(self, '_rendered_sector_name', '') != self.sector_name:
+            if hasattr(self, 'title_lbl'):
+                self.title_lbl.setText("板块名称: 数据加载中...")
+                self.title_lbl.setStyleSheet("font-size: 12.5pt; font-weight: bold; color: #888888;")
+            if hasattr(self, 'score_lbl'):
+                self.score_lbl.setText("强度得分: --")
+            if hasattr(self, 'stats_lbl'):
+                self.stats_lbl.setText("成员数: 正在同步... | 领涨标的: --")
 
         # 优先使用显式注入的 _cached_df，否则从统一聚合引擎探测感知系统活跃的策略 DataFrame
         current_df = getattr(self, '_cached_df', None)
@@ -675,14 +754,29 @@ class ATSSectorDetailDialog(QDialog):
         self._apply_filter_and_render()
 
     def _on_worker_finished(self, rows: list, score: float, leader_str: str, meta: dict):
+        import time
         self.btn_refresh.setEnabled(True)
         self.btn_refresh.setText("🔄 强制刷新数据")
+
+        # ⏱️ 计算并展示数据更新用时
+        start_t = getattr(self, '_fetch_start_time', None)
+        if start_t is not None:
+            elapsed = time.perf_counter() - start_t
+            if elapsed < 1.0:
+                elapsed_str = f"{elapsed * 1000.0:.0f}ms"
+            else:
+                elapsed_str = f"{elapsed:.2f}s"
+            if hasattr(self, 'lbl_elapsed_time'):
+                self.lbl_elapsed_time.setText(f"⏱️ 耗时: {elapsed_str}")
 
         now_str = datetime.datetime.now().strftime("%H:%M:%S")
         self.lbl_update_time.setText(f"最后更新: {now_str}")
 
+        # 🛡️ 数据加载完成，原子性呈现真实板块名称与亮绿高亮
+        self._rendered_sector_name = self.sector_name
         if hasattr(self, 'title_lbl'):
             self.title_lbl.setText(f"板块名称: {self.sector_name}")
+            self.title_lbl.setStyleSheet("font-size: 12.5pt; font-weight: bold; color: #00ff88;")
 
         self.score_lbl.setText(f"强度得分: {score:.1f}")
 

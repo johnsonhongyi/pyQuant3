@@ -1670,17 +1670,17 @@ class CapitalDragonPanel(QWidget):
                 from PyQt6.sip import isdeleted
                 dlg = getattr(self, "_sector_detail_dialog", None)
                 if dlg and not isdeleted(dlg):
-                    if dlg.isMinimized():
-                        dlg.showNormal()
                     dlg.sector_name = clean_sec
                     dlg.member_codes = send_codes or []
                     dlg._orig_member_codes = list(send_codes) if send_codes else None
                     dlg.full_view_enabled = False
                     if hasattr(dlg, '_update_full_view_button_ui'):
                         dlg._update_full_view_button_ui()
-                    dlg.setWindowTitle(f"🔥 {clean_sec} 板块明细 (实时高频行情)")
-                    dlg.refresh_data(force=True)
-                    dlg.show()
+                    dlg.update_data()
+                    if dlg.isMinimized():
+                        dlg.showNormal()
+                    elif not dlg.isVisible():
+                        dlg.show()
                     dlg.raise_()
                     dlg.activateWindow()
                 else:
