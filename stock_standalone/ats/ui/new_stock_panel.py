@@ -25,7 +25,8 @@ from typing import Dict, List, Any, Optional, Tuple
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QHeaderView, QSplitter, QGroupBox, QComboBox, QLineEdit,
-    QMenu, QMessageBox, QFrame, QGridLayout, QApplication, QCheckBox
+    QMenu, QMessageBox, QFrame, QGridLayout, QApplication, QCheckBox,
+    QTabWidget
 )
 from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal, QSize
 from PyQt6.QtGui import QColor, QFont, QBrush, QIcon, QCursor, QAction
@@ -727,24 +728,28 @@ class NewStockPanel(QWidget):
 
     def is_panel_visible(self) -> bool:
         """判断面板当前是否对用户可见（自身可见且未处于非活动 Tab 页，窗口未最小化，单测未显式 hide）"""
-        top_win = self.window()
-        if top_win and top_win.isMinimized():
-            return False
-        curr = self
-        parent = self.parent()
-        while parent:
-            if isinstance(parent, QTabWidget):
-                cw = parent.currentWidget()
-                if cw is not None and cw is not curr and not cw.isAncestorOf(self):
-                    return False
-            curr = parent
-            parent = parent.parent()
-        if self.parent() is not None:
-            return self.isVisible()
-        # 无 parent 时（独立单测）：若被显式 hide()，返回 False；未被显式 hide 则返回 True
-        if self.testAttribute(Qt.WidgetAttribute.WA_WState_ExplicitShowHide) and self.isHidden():
-            return False
-        return True
+        try:
+            top_win = self.window()
+            if top_win and top_win.isMinimized():
+                return False
+            curr = self
+            parent = self.parent()
+            while parent:
+                if isinstance(parent, QTabWidget):
+                    cw = parent.currentWidget()
+                    if cw is not None and cw is not curr and not cw.isAncestorOf(self):
+                        return False
+                curr = parent
+                parent = parent.parent()
+            if self.parent() is not None:
+                return self.isVisible()
+            # 无 parent 时（独立单测）：若被显式 hide()，返回 False；未被显式 hide 则返回 True
+            if self.testAttribute(Qt.WidgetAttribute.WA_WState_ExplicitShowHide) and self.isHidden():
+                return False
+            return True
+        except Exception as e:
+            logger.debug(f"is_panel_visible exception: {e}")
+            return True
 
     def update_from_ipc_df(self, df_ipc: pd.DataFrame, sh_pct: float = 0.0, force: bool = False):
         """

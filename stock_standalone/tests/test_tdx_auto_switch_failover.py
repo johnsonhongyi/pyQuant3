@@ -24,7 +24,7 @@ def test_tdx_available_servers():
 
 def test_tdx_auto_failover():
     fetcher = TDXRealtimeFetcher.get_instance()
-    ok = fetcher.auto_failover()
+    ok = fetcher.auto_failover(force=True)
     assert ok is True
     assert fetcher.current_host is not None
 
@@ -34,4 +34,7 @@ def test_tdx_realtime_quotes_with_bj():
     quotes = fetcher.get_security_quotes_safe(codes, force=True)
     assert len(quotes) == len(codes)
     for q in quotes:
-        assert float(q.get('price', 0.0)) > 0
+        # 开盘前 price 为 0.0，last_close 大于 0；开盘后两者均有效
+        p = float(q.get('price', 0.0))
+        lc = float(q.get('last_close', 0.0))
+        assert p > 0 or lc > 0

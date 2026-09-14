@@ -1,3 +1,38 @@
+## 2026-09-14 09:20
+- [x] **【彻底修复新股监控面板NameError: name 'QTabWidget' is not defined致命报错 & 加固面板可见性守护】(SSOT) (`ats/ui/new_stock_panel.py`, `ats/tdx_realtime_fetcher.py`, `tests/test_new_stock_module.py`)**：
+    - [x] **操盘手反馈痛点根因穿透**：
+        1. **`NameError: name 'QTabWidget' is not defined` 致命根因**：`ats/ui/new_stock_panel.py` 在 `is_panel_visible` 中执行 `isinstance(parent, QTabWidget)`，但顶部仅导入了 `QWidget, QVBoxLayout, ...`，漏掉了 `QTabWidget`，导致在 09:15:21、09:15:31、09:15:41 收到 IPC 数据流时每 10 秒抛出一次未定义异常；
+        2. **未开盘与试撮合阶段诱多买点分支兼容缺陷**：09:15~09:20 试盘阶段命中 `"⚠️ 虚挂测盘"` 时，`buy_type` 判定树此前漏了 `or "测盘" in order_intent`，导致试盘测盘股被误判为领涨。
+    - [x] **系统级工程落地与架构加固**：
+        1. **补充完整导入与安全防护**：在 `ats/ui/new_stock_panel.py` 顶部导入列表补齐 `QTabWidget`，同时在 `is_panel_visible` 外部包裹 `try...except` 容错守护，确保绝对不中断主流程；
+        2. **完善试盘诱多识别**：在 `fetch_multi_stock_alpha_quotes` 的买点决策树中，将 `or "测盘" in order_intent or "虚挂" in order_intent` 纳入 `⚠️ 缩量诱多`，确保任何试盘虚挂股票坚决防砸防诱多；
+        3. **测试用例全面对齐**：更新 `test_new_stock_module.py` 断言，完美兼容竞价试盘一字与多状态特征。
+    - [x] **自动化测试 34/34 PASSED 100% 全绿**：
+        1. `test_new_stock_lift_release.py` + `test_new_stock_module.py` + `test_new_stock_sorting_comprehensive.py`: 20/20 PASSED；
+        2. `test_tdx_early_morning_retry_guard.py` + `test_tdx_auto_switch_failover.py` + `test_tdx_realtime_fetcher.py`: 14/14 PASSED。
+
+## 2026-09-14 09:05
+- [x] **【彻底修复早盘TDX服务器初始化异常请求无限重试、探针误杀假活节点致命Bug & 落地08:45~09:15专属缓重试延时与全局连接熔断保护】(SSOT) (`ats/tdx_realtime_fetcher.py`, `tests/test_tdx_early_morning_retry_guard.py`, `tests/test_tdx_auto_switch_failover.py`, `tests/test_tdx_realtime_fetcher.py`)**：
+    - [x] **操盘手早盘关键痛点与底层网络真实回包穿透**：
+        1. **“在0915前0845后好像会进入服务器初始化时间，此时打开ats或者尝试机制都需要有控制能力不能重复无限重试”**：
+           - **业务事实**：每个交易日 08:45 ~ 09:15 是通达信官方主站清算重置、导入今日除权除息数据、装载集合竞价快照的窗口期。在此期间，通达信客户端明确提示“行情连接被主站断开，原因：当前主站可能正在初始化今天的数据。系统几分钟后会自动重新进入，请稍等”；
+           - **根因一（探针存活条件严重错误导致“假活”误杀）**：`_probe_host_alive` 和 `_ping_single_host` 硬编码要求 `price > 0`！但在未开盘时（08:45~09:25），全市场标的成交价必然为 `0.0`，而昨收价 `last_close`（如平安银行 11.74）正常有效。原代码将所有正常健康的优质主站错杀误判为“假活节点”并立即切断，触发恶性故障切换与报错刷屏；
+           - **根因二（缺少早盘初始化状态识别与缓重试延时退避）**：未在时间轴中将 08:45~09:15 识别为 `SERVER_INITIALIZING`。当连接失败后，上层多个定时器每隔 1~2 秒就再次发起连接，导致每秒都在遍历 8 台备用服务器并产生 1.2s 超时，不仅网络与主线程拥堵，而且高频频繁重连触发了通达信服务端防 DDOS 防御机制；
+           - **根因三（缺少全局连接失败熔断器）**：连接失败后没有任何冷却期记录，导致死循环重复重试；且连续空批次误触发 `auto_failover()` 导致早盘主站互相踩踏切换。
+    - [x] **系统级工程落地与架构加固**：
+        1. **修正探针与测速健康判定标准**：`p > 0 or lc > 0`，完美兼容开盘前 `price==0.0` 但 `last_close>0` 的真实业务事实，优质主站 100% 秒级识别并成功接入（测速瞬间命中 9+ 个可用主站，延迟低至 124ms）；
+        2. **构建早盘服务器初始化时段 (08:45~09:15) 专属状态 (SSOT)**：在 `is_tdx_trading_allowed` 中精确划定 `SERVER_INITIALIZING` 阶段，明确标识早盘系统维护期；
+        3. **落地早盘专属缓重试延时与动态逼近退避机制**：
+           - 早盘初始化时段若连接未就绪，严禁遍历 8 台备用服务器（仅轻量探测 1 台），立即启动动态冷却（08:45~09:05 冷却 60s，09:05~09:12 冷却 45s，09:12~09:15 冷却 20s，09:15 准时自动恢复）；
+           - 在冷却期内，上层任何调用直接命中内存守卫，**0 网络 I/O、0 耗时瞬间返回缓存**，彻底杜绝死循环无限重试；
+           - 日志友好输出 `⏳ [早盘初始化] 主站正在初始化今日盘口数据 (08:45~09:15)，启动缓重试延时保护 (冷却 XX 秒，预计 09:15 自动恢复)`，并开启 60s 防刷屏；
+        4. **落地全天通用连接失败指数退避熔断器 (Universal Circuit Breaker)**：非早盘时段连接失败按 5s -> 10s -> 20s -> 30s -> 60s 指数退避熔断，连接成功瞬间复位；
+        5. **早盘初始化时段禁止空批次 `auto_failover` 震荡**：`force=False` 时早盘空批次坚决不换站，`force=True` 时允许显式手动切换。
+    - [x] **自动化测试 64/64 PASSED 100% 全绿**：
+        1. 专项新增 `tests/test_tdx_early_morning_retry_guard.py`: 6/6 PASSED (覆盖 08:45~09:15 时段识别、未开盘探针存活判定、缓重试冷却 0 网络 I/O 拦截、空批次防换站踩踏、指数退避熔断)；
+        2. `test_tdx_auto_switch_failover.py` + `test_tdx_realtime_fetcher.py`: 8/8 PASSED；
+        3. 核心套件 `test_sector_aggregator_suite.py` + `test_sector_rotation_pullback_miner.py` + `test_daily_limit_up_dialog.py` + `test_multiday_feature_store.py`: 50/50 PASSED。
+
 ## 2026-09-14 00:35
 - [x] **【全面审核ratio修复完备性、穿透底层ticktime偏时全景 & 升级1502安全结算截止时间】(SSOT) (`JSONData/realdatajson.py`, `JSONData/multiday_feature_store.py`, `instock_MonitorTK.py`, `tests/test_multiday_feature_store.py`)**：
     - [x] **操盘手关键问题与底层数据真实穿透**：

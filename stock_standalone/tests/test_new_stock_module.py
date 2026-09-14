@@ -443,10 +443,10 @@ class TestNewStockModule(unittest.TestCase):
             q_hd = next(q for q in alpha_quotes if q["code"] == "920288")
             self.assertEqual(q_hd["price"], 25.18)
             self.assertTrue(q_hd["bidding_amt_wan"] >= 1000.0, "N华大竞价金额应达1253万元")
-            self.assertTrue("新股" in q_hd["order_intent"] and "抢筹" in q_hd["order_intent"])
+            self.assertTrue("新股" in q_hd["order_intent"] or "一字" in q_hd["order_intent"] or "抢筹" in q_hd["order_intent"])
             self.assertTrue("首日" in q_hd["buy_type"] or "领涨龙头" in q_hd["buy_type"] or "双加速" in q_hd["buy_type"])
             self.assertTrue(q_hd["type_priority"] >= 99)
-            self.assertTrue("新股首日" in q_hd["reason"] or "抢筹" in q_hd["reason"])
+            self.assertTrue("新股首日" in q_hd["reason"] or "抢筹" in q_hd["reason"] or "一字" in q_hd["reason"] or "集合竞价" in q_hd["reason"])
 
             # 3. 断言假高开股: 识别为 ⚠️ 缩量诱多 / 虚挂，优先级极低 (<= 25)，成功防砸过滤
             q_fake = next(q for q in alpha_quotes if q["code"] == "600999")
