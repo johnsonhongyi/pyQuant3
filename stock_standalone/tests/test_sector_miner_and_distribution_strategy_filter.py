@@ -20,6 +20,8 @@ from PyQt6.QtCore import Qt
 
 from ats.ui.sector_rotation_miner_dialog import SectorRotationMinerDialog
 from ats.ui.chart_widgets import DistributionDetailsDialog
+from ats.ui.hot_sector_leaderboard import HotSectorLeaderboardDialog
+from ats.ui.daily_limit_up_dialog import DailyLimitUpDialog
 from ats.ui.styles import save_config_node, load_config_node
 
 
@@ -36,10 +38,14 @@ def clean_config():
     """保证每个测试前后全局配置复位，消除持久化污染"""
     save_config_node("sector_miner_strategy_filter_enabled", False)
     save_config_node("ats_distribution_detail_filter_enabled", False)
+    save_config_node("hot_leaderboard_filter_enabled", False)
+    save_config_node("daily_limitup_filter_enabled", False)
     save_config_node("ats_query_expr", "")
     yield
     save_config_node("sector_miner_strategy_filter_enabled", False)
     save_config_node("ats_distribution_detail_filter_enabled", False)
+    save_config_node("hot_leaderboard_filter_enabled", False)
+    save_config_node("daily_limitup_filter_enabled", False)
     save_config_node("ats_query_expr", "")
 
 
@@ -232,14 +238,134 @@ def test_distribution_detail_strategy_filtering_and_title_update(qapp, sample_te
         dlg.close()
 
 
+def test_hot_sector_leaderboard_strategy_filter(qapp, sample_test_df):
+    """测试强势板块龙头突击跟单榜策略过滤按钮、状态切换、过滤逻辑与专属信息标签"""
+    save_config_node("hot_leaderboard_filter_enabled", False)
+    save_config_node("ats_query_expr", "percent > 5.0")
+
+    dlg = HotSectorLeaderboardDialog(parent=None)
+    try:
+        # 1. 验证按钮、时间指示器与过滤信息标签存在
+        assert hasattr(dlg, 'btn_toggle_filter')
+        assert hasattr(dlg, 'lbl_filter_info')
+        assert hasattr(dlg, 'lbl_update_time')
+        assert dlg.filter_enabled is False
+        assert dlg.lbl_filter_info.text() == ""
+        assert dlg.btn_toggle_filter.text() == "🎯 策略过滤 (关)"
+        assert "更新:" in dlg.lbl_update_time.text() or "💤" in dlg.lbl_update_time.text()
+
+        # 2. 模拟 Alpha 计算结果
+        test_results = [
+            {
+                'code': '603090', 'name': '宏盛股份', 'pct': 10.02, 'percent': 10.02,
+                'sector': '煤化工概念', 'buy_tag': 'LEADER', 'alpha_score': 95.0,
+                'price': 23.50, 'speed': 2.5, 'vwap_dev_pct': 1.2
+            },
+            {
+                'code': '002004', 'name': '华邦健康', 'pct': 0.90, 'percent': 0.90,
+                'sector': '煤化工概念', 'buy_tag': 'PULLBACK', 'alpha_score': 65.0,
+                'price': 4.50, 'speed': 0.1, 'vwap_dev_pct': -0.2
+            }
+        ]
+        dlg.current_top_sectors = ['煤化工概念']
+        dlg.active_sectors = {'煤化工概念'}
+        dlg.cached_results = test_results
+        dlg._render_table_data(test_results)
+
+        # 默认关闭时，2只股票全部呈现，过滤标签为空
+        assert dlg.table.rowCount() == 2
+        assert "标的: 2" in dlg.lbl_stats.text()
+        assert dlg.lbl_filter_info.text() == ""
+
+        # 3. 开启策略过滤 (percent > 5.0，仅宏盛股份保留)
+        dlg.toggle_filter_state()
+        assert dlg.filter_enabled is True
+        assert dlg.btn_toggle_filter.text() == "🎯 策略过滤 (开)"
+        assert load_config_node("hot_leaderboard_filter_enabled", False) is True
+        assert dlg.table.rowCount() == 1
+        assert "标的: 1" in dlg.lbl_stats.text()
+        assert dlg.lbl_filter_info.text() == "(过滤后: 1 只 / 共 2 只)"
+
+        # 4. 关闭策略过滤，恢复2只
+        dlg.toggle_filter_state()
+        assert dlg.filter_enabled is False
+        assert dlg.table.rowCount() == 2
+        assert "标的: 2" in dlg.lbl_stats.text()
+        assert dlg.lbl_filter_info.text() == ""
+    finally:
+        dlg.close()
+
+
+def test_daily_limit_up_dialog_strategy_filter_and_time_label(qapp, sample_test_df):
+    """测试每日涨停与天梯策略过滤按钮、状态切换、过滤逻辑、标题更新与专属信息标签"""
+    save_config_node("daily_limitup_filter_enabled", False)
+    save_config_node("ats_query_expr", "percent > 9.99")
+
+    dlg = DailyLimitUpDialog(parent=None)
+    try:
+        # 1. 验证按钮、时间标签控件与过滤信息标签
+        assert hasattr(dlg, 'btn_toggle_filter')
+        assert hasattr(dlg, 'lbl_filter_info')
+        assert hasattr(dlg, 'lbl_update_time')
+        assert dlg.filter_enabled is False
+        assert dlg.lbl_filter_info.text() == ""
+        assert dlg.btn_toggle_filter.text() == "🎯 策略过滤 (关)"
+        assert "更新:" in dlg.lbl_update_time.text() or "💤" in dlg.lbl_update_time.text()
+
+        # 2. 装载测试数据
+        test_records = [
+            {'code': '603090', 'name': '宏盛股份', 'pct': 10.02, 'percent': 10.02, 'is_limit_up': True, 'time_phase': '黄金定龙'},
+            {'code': '600876', 'name': '洛阳玻璃', 'pct': 9.98, 'percent': 9.98, 'is_limit_up': True, 'time_phase': '黄金定龙'},
+            {'code': '002004', 'name': '华邦健康', 'pct': 0.90, 'percent': 0.90, 'is_limit_up': False, 'time_phase': '黄金定龙'},
+        ]
+        dlg.current_records = test_records
+        dlg.current_mode = "TODAY"
+        dlg._apply_filter()
+
+        # 未开启策略过滤时，包含装载的全部 3 只标的
+        assert dlg.table.rowCount() == 3
+        assert "共 3 只" in dlg.windowTitle()
+        assert "[🎯策略过滤]" not in dlg.windowTitle()
+        assert dlg.lbl_filter_info.text() == ""
+
+        # 3. 开启策略过滤 (公式: percent > 9.99，仅 603090 命中)
+        dlg.toggle_filter_state()
+        assert dlg.filter_enabled is True
+        assert dlg.btn_toggle_filter.text() == "🎯 策略过滤 (开)"
+        assert load_config_node("daily_limitup_filter_enabled", False) is True
+
+        assert dlg.table.rowCount() == 1
+        assert "(过滤后 1 只 / 共 3 只) [🎯策略过滤]" in dlg.windowTitle()
+        assert dlg.lbl_filter_info.text() == "(过滤后: 1 只 / 共 3 只)"
+
+        # 验证此时无论 lbl_status 怎么被其他事件覆盖，lbl_filter_info 都稳固显示在按钮左侧不受任何干扰！
+        dlg.lbl_status.setText("【选定】000980 众泰汽车 | 现价:2.33")
+        assert dlg.lbl_filter_info.text() == "(过滤后: 1 只 / 共 3 只)"
+
+        # 4. 关闭策略过滤恢复
+        dlg.toggle_filter_state()
+        assert dlg.filter_enabled is False
+        assert dlg.btn_toggle_filter.text() == "🎯 策略过滤 (关)"
+        assert dlg.table.rowCount() == 3
+        assert "共 3 只" in dlg.windowTitle()
+        assert "[🎯策略过滤]" not in dlg.windowTitle()
+        assert dlg.lbl_filter_info.text() == ""
+    finally:
+        dlg.close()
+
+
 def test_global_filter_changed_broadcast(qapp, sample_test_df):
     """测试主窗口广播 on_global_filter_changed 时自动刷新"""
     save_config_node("ats_distribution_detail_filter_enabled", True)
     save_config_node("sector_miner_strategy_filter_enabled", True)
+    save_config_node("hot_leaderboard_filter_enabled", True)
+    save_config_node("daily_limitup_filter_enabled", True)
     save_config_node("ats_query_expr", "percent > 5.0")
 
     dist_dlg = DistributionDetailsDialog(bucket_idx=9, parent=None)
     miner_dlg = SectorRotationMinerDialog(parent=None, current_df=sample_test_df)
+    hot_dlg = HotSectorLeaderboardDialog(parent=None)
+    ladder_dlg = DailyLimitUpDialog(parent=None)
     try:
         dist_dlg.update_data(sample_test_df)
         miner_dlg._all_candidates = [
@@ -248,16 +374,39 @@ def test_global_filter_changed_broadcast(qapp, sample_test_df):
         ]
         miner_dlg._apply_candidate_filter()
 
+        hot_results = [
+            {'code': '002004', 'name': '华邦健康', 'pct': 0.90, 'percent': 0.90, 'sector': '煤化工概念', 'buy_tag': 'PULLBACK'},
+            {'code': '603090', 'name': '宏盛股份', 'pct': 10.02, 'percent': 10.02, 'sector': '煤化工概念', 'buy_tag': 'LEADER'}
+        ]
+        hot_dlg.current_top_sectors = ['煤化工概念']
+        hot_dlg.active_sectors = {'煤化工概念'}
+        hot_dlg.cached_results = hot_results
+        hot_dlg._render_table_data(hot_results)
+
+        ladder_records = [
+            {'code': '002004', 'name': '华邦健康', 'pct': 0.90, 'percent': 0.90, 'is_limit_up': True, 'time_phase': '黄金定龙'},
+            {'code': '603090', 'name': '宏盛股份', 'pct': 10.02, 'percent': 10.02, 'is_limit_up': True, 'time_phase': '黄金定龙'}
+        ]
+        ladder_dlg.current_records = ladder_records
+        ladder_dlg.current_mode = "TODAY"
+        ladder_dlg._apply_filter()
+
         # percent > 5.0 时，宏盛股份命中 (1 只)
         assert miner_dlg.candidates_table.rowCount() == 1
+        assert hot_dlg.table.rowCount() == 1
+        assert ladder_dlg.table.rowCount() == 1
         
         # 变更全局公式为 percent < 0.0 (命中任子行)
         save_config_node("ats_query_expr", "percent < 0.0")
         dist_dlg.on_global_filter_changed("percent < 0.0")
         miner_dlg.on_global_filter_changed("percent < 0.0")
+        hot_dlg.on_global_filter_changed("percent < 0.0")
+        ladder_dlg.on_global_filter_changed("percent < 0.0")
 
-        # miner_dlg 候选池两只涨幅均 > 0，因此变为 0 只
+        # 候选池、热榜、天梯涨幅均 > 0，因此均变为 0 只
         assert miner_dlg.candidates_table.rowCount() == 0
+        assert hot_dlg.table.rowCount() == 0
+        assert ladder_dlg.table.rowCount() == 0
 
         # dist_dlg 命中 300311 (1 只)
         vis = [r for r in range(dist_dlg.table.rowCount()) if not dist_dlg.table.isRowHidden(r)]
@@ -267,3 +416,5 @@ def test_global_filter_changed_broadcast(qapp, sample_test_df):
     finally:
         dist_dlg.close()
         miner_dlg.close()
+        hot_dlg.close()
+        ladder_dlg.close()
