@@ -39,6 +39,25 @@ from sys_utils import get_app_root
 from JohnsonUtil import commonTips as cct
 from logger_utils import LoggerFactory
 
+try:
+    from stock_logic_utils import extract_meaningful_sectors, get_most_valuable_sector, is_generic_concept, combine_industry_and_category
+except ImportError:
+    from realtime_data_service import is_invalid_generic_sector as is_generic_concept
+    def extract_meaningful_sectors(sec_str):
+        if not sec_str:
+            return []
+        raw = [s.strip() for s in str(sec_str).replace(';', ',').replace('、', ',').split(',') if s.strip()]
+        return [s for s in raw if not is_generic_concept(s)]
+    def combine_industry_and_category(category, industry):
+        ind = str(industry).strip() if industry else ""
+        cats = extract_meaningful_sectors(category)
+        return ";".join(([ind] if ind and not is_generic_concept(ind) else []) + cats)
+    def get_most_valuable_sector(sec_str, top_sectors=None, industry="", is_index=False, default="主流活跃"):
+        if is_index:
+            return "综合指数/ETF"
+        valid = extract_meaningful_sectors(sec_str)
+        return valid[0] if valid else default
+
 logger = LoggerFactory.getLogger("SectorRotationPullbackMiner")
 
 _RE_CLEAN_SECTOR = re.compile(r'^[^\w\u4e00-\u9fa5]+')
@@ -155,15 +174,19 @@ def _clean_code(c: Any) -> str:
 
 def is_valid_sector_name(sec: Any) -> bool:
     """
-    严密判定板块名称是否为有效且明确的实体板块（过滤掉 '--', '0', '0.0', 'nan', '未知', 纯数字等）
+    严密判定板块名称是否为有效且明确的实体板块（过滤掉 '--', '0', '0.0', 'nan', '未知', 纯数字以及国企改革/ST板块等泛概念）
     """
     if not sec:
         return False
     s = str(sec).strip()
     if not s or s.lower() in _INVALID_SECTORS or s.isdigit():
         return False
+    if is_generic_concept(s):
+        return False
     cleaned = _RE_CLEAN_SECTOR.sub('', s).strip()
     if not cleaned or cleaned.lower() in _INVALID_SECTORS or cleaned.isdigit():
+        return False
+    if is_generic_concept(cleaned):
         return False
     return True
 
@@ -280,9 +303,12 @@ class SectorRotationPullbackMiner:
         c_arr = [_clean_code(c) for c in idx_vals]
         nm_arr = [str(x) for x in df['name'].values] if 'name' in df.columns else c_arr
 
-        # 所属板块
-        sec_col = next((c for c in ('category', 'industry', 'concept') if c in df.columns), None)
-        sec_arr = [str(x) for x in df[sec_col].values] if sec_col else [''] * n
+        # 所属板块 (深度融合行业 industry 与概念 category，让实体行业与真实题材强强联合)
+        cat_col = next((c for c in ('category', 'concept') if c in df.columns), None)
+        ind_col = next((c for c in ('industry', 'hy', 'block') if c in df.columns), None)
+        cat_vals = [str(x) for x in df[cat_col].values] if cat_col else [''] * n
+        ind_vals = [str(x) for x in df[ind_col].values] if ind_col else [''] * n
+        sec_arr = [combine_industry_and_category(cat_vals[idx], ind_vals[idx]) for idx in range(n)]
 
         return {
             'n': n,
@@ -428,8 +454,11 @@ class SectorRotationPullbackMiner:
             dff3 = float(dff3_arr[i])
             sec = str(sec_arr[i])
 
+            # 真实涨幅兜底保护：盘中当 dff 为 0.0 但真实涨跌幅 pct 明显非零时（如首板涨停 10.05%），以真实涨幅为准
+            effective_eval_pct = pct if (not is_post_market and abs(eval_pct) < 0.001 and abs(pct) >= 0.01) else eval_pct
+
             ladder_item = limit_up_dict.get(code, {})
-            is_limit = bool(ladder_item.get("is_limit_up", False) or eval_pct >= 9.5)
+            is_limit = bool(ladder_item.get("is_limit_up", False) or effective_eval_pct >= 9.5)
             l_days = int(ladder_item.get("limit_days", 1 if is_limit else 0))
 
             # 冲锋先锋判定画像 (自适应盘中与盘后初始化)
@@ -439,16 +468,16 @@ class SectorRotationPullbackMiner:
             if is_limit or l_days >= 2:
                 is_pioneer = True
                 pioneer_type = f"👑 {l_days}连板龙头" if l_days >= 2 else "👑 涨停先锋"
-            elif eval_pct >= 4.5 and (vr >= 1.20 or is_post_market) and dff2 >= 1.5:
+            elif effective_eval_pct >= 4.5 and (vr >= 1.20 or is_post_market) and dff2 >= 1.5:
                 is_pioneer = True
                 pioneer_type = "🚀 主升先锋冲锋"
-            elif dff3 <= 15.0 and eval_pct >= 3.8 and dff2 >= 0.0 and (vr >= 1.25 or is_post_market):
+            elif dff3 <= 15.0 and effective_eval_pct >= 3.8 and dff2 >= 0.0 and (vr >= 1.25 or is_post_market):
                 is_pioneer = True
                 pioneer_type = "💎 底部放量大反弹"
-            elif eval_pct >= 3.5 and (to >= 3.0 or vr >= 1.8):
+            elif effective_eval_pct >= 3.5 and (to >= 3.0 or vr >= 1.8):
                 is_pioneer = True
                 pioneer_type = "⚡ 资金活跃突击"
-            elif dff2 >= 8.0 and eval_pct >= 2.0:
+            elif dff2 >= 8.0 and effective_eval_pct >= 2.0:
                 is_pioneer = True
                 pioneer_type = "🌟 趋势大主升龙头"
 
@@ -457,7 +486,7 @@ class SectorRotationPullbackMiner:
                     "code": code,
                     "name": name,
                     "price": price,
-                    "pct": eval_pct, # 使用评估涨幅，确保盘后复盘展示非零
+                    "pct": effective_eval_pct, # 使用修正后的有效评估涨幅，确保真实呈现
                     "real_pct": pct,
                     "amt_yi": amt,
                     "vol_ratio": vr,
@@ -491,8 +520,8 @@ class SectorRotationPullbackMiner:
             vr = float(vr_arr[i])
             to = float(to_arr[i])
 
-            # 分割复合概念 (取前2个核心概念)
-            sub_secs = [s.strip() for s in sec_raw.replace(';', ',').replace('、', ',').split(',') if s.strip()]
+            # 提取有效高价值实体板块 (彻底过滤国企改革、ST板块、深股通等泛概念)
+            sub_secs = extract_meaningful_sectors(sec_raw)
             for s_name in sub_secs[:2]:
                 if not is_valid_sector_name(s_name) or len(s_name) < 2:
                     continue
@@ -538,7 +567,7 @@ class SectorRotationPullbackMiner:
         # 挂载先锋列表到各板块
         for p in pioneers:
             sec_raw = p["sector_raw"]
-            sub_secs = [s.strip() for s in sec_raw.replace(';', ',').replace('、', ',').split(',') if s.strip()]
+            sub_secs = extract_meaningful_sectors(sec_raw)
             for s_name in sub_secs[:2]:
                 if s_name in sector_agg:
                     sector_agg[s_name]["pioneer_count"] += 1
@@ -588,10 +617,11 @@ class SectorRotationPullbackMiner:
             strength_score = amt_score + pio_score + limit_score + pct_score + ratio_score + vr_score
             st["strength_score"] = round(strength_score, 1)
 
-            # 主线评级画像
-            if st["limit_up_count"] >= 2 or (st["pioneer_count"] >= 3 and st["strength_score"] >= 50.0):
+            # 主线评级画像 (严格底线：板块均涨必须收红 >0 且多数上涨，杜绝海峡两岸等负涨幅板块霸占主线)
+            is_uptrend = (st["avg_pct"] > 0.0 and up_ratio >= 0.45)
+            if is_uptrend and (st["limit_up_count"] >= 2 or (st["pioneer_count"] >= 3 and st["strength_score"] >= 50.0)):
                 st["grade"] = "👑 核心主线"
-            elif st["limit_up_count"] >= 1 or st["pioneer_count"] >= 2 or st["strength_score"] >= 35.0:
+            elif is_uptrend and (st["limit_up_count"] >= 1 or st["pioneer_count"] >= 2 or st["strength_score"] >= 35.0):
                 st["grade"] = "🚀 活跃进攻"
             else:
                 st["grade"] = "🟡 轮动分支"
@@ -717,11 +747,12 @@ class SectorRotationPullbackMiner:
 
             sec_raw = str(sec_arr[i])
 
-            # 1. 匹配是否属于当前核心主线板块之一
+            # 1. 匹配是否属于当前核心主线板块之一 (严格基于纯化后的有效实体概念匹配)
             matched_sec = None
+            valid_secs_cand = extract_meaningful_sectors(sec_raw)
             for ts in leading_sectors:
                 s_name = ts["name"]
-                if s_name in sec_raw:
+                if any(s_name == vs or s_name in vs or vs in s_name for vs in valid_secs_cand):
                     matched_sec = ts
                     break
 
@@ -875,9 +906,11 @@ class SectorRotationPullbackMiner:
                 if price <= 0.0:
                     continue
                 sec_raw = str(sec_arr[i])
+                valid_secs_fb = extract_meaningful_sectors(sec_raw)
                 matched_sec = None
                 for ts in leading_sectors:
-                    if ts["name"] in sec_raw:
+                    s_name = ts["name"]
+                    if any(s_name == vs or s_name in vs or vs in s_name for vs in valid_secs_fb):
                         matched_sec = ts
                         break
                 if not matched_sec:

@@ -33,27 +33,37 @@ def safe_values(val: Any) -> Any:
 SYSTEM_SECTOR_BLACKLIST: set[str] = {
     # 互联互通与交易通道
     "深股通", "港股通", "沪股通", "北向资金", "南向资金", "融资融券", "转融券", "转融通", "转融券标的", 
-    "含可转债", "高股息", "微盘股", "破净股", "破发股", "低价股", "百元股", "中字头", "中字头股票", "中特估",
+    "含可转债", "高股息", "微盘股", "破净股", "破发股", "低价股", "百元股", "中字头", "中字头股票", "中特估", "同花顺中特估100", "中特估100",
     # 机构持仓与主力分类
     "机构重仓", "基金重仓", "基金新增", "社保重仓", "QFII重仓", "险资重仓", "外资背景", "外资持股", 
     "证金持股", "汇金持股", "国家队持股", "地方政府平台", "央企控股", "券商重仓", "核心资产",
-    # 资本运作与所有制泛属性
+    # 资本运作、金融操作与所有制泛属性
     "国企改革", "央企国企改革", "央企改革", "地方国资", "地方国企改革", "地方国资委", "国资委", "国企", "央企",
+    "地方国企", "上海国企改革", "深圳国企改革", "地方国资平台", "央企国资改革",
     "军工改革", "壳资源", "股权激励", "股权转让", "资产重组", "债转股", "混改", "员工持股",
+    "回购增持再贷款", "回购增持", "股份回购", "股票回购", "回购股份", "增持回购", "回购", "增持",
     # 大盘指数与成分股分类
     "MSCI", "MSCI中国", "MSCI概念", "富时罗素", "富时概念", "富时罗素概念股", "标普概念", "标普道琼斯", 
     "标普道琼斯A股", "标普道琼斯纳指", "剔除纳斯", "沪深300", "沪深300股", "中证500", "中证800", "中证1000", 
     "中证2000", "上证180", "上证180股", "上证50", "上证50股", "上证380", "深证成指", "深成指", "深成指股", 
     "深成500", "创业板综", "创业板设", "创业板50", "创业300股", "科创板", "科创50", "含HS300", "新三板", 
-    "参股新三板", "成分股", "A股", "B股", "AH股",
+    "参股新三板", "成分股", "成份股", "A股", "B股", "AH股", "茅指数", "宁组合",
+    # 参股金融与泛投资
+    "参股金融", "参股银行", "参股券商", "参股保险",
     # 行情状态与历史表现
     "昨日涨停", "昨日触板", "昨日首板", "昨日连板", "昨日大涨", "前期强势", "超跌反弹", "创历史新高", 
     "近期新高", "次新股", "新股与次新股", "高送转", "送转", "送转股份", "业绩补偿",
     # 业绩周期与财报预告
     "预盈预增", "预亏预减", "业绩预增", "预增", "预亏", "预降预亏", "半年报预增", "年报预增", 
-    "一季报预增", "三季报预增", "中报", "中报送转", "季报", "年报", "一季报", "三季报", "扭亏为盈", "ST板块", "退市整理",
+    "一季报预增", "三季报预增", "中报", "中报送转", "季报", "年报", "一季报", "三季报", "扭亏为盈", 
+    # 纯地理区域与行政规划泛属性 (非产业主线，杜绝海峡两岸/西部大开发等由于个股异动误冲主线)
+    "海峡两岸", "两岸自贸", "平潭发展", "福建自贸区", "西部大开发", "东北振兴", "成渝特区", "成渝经济区", "成渝自贸区",
+    "雄安新区", "京津冀一体化", "京津冀", "长三角一体化", "长三角", "珠三角", "粤港澳大湾区", "粤港澳",
+    "海南自贸港", "海南自贸区", "北部湾自贸区", "自贸区", "一带一路", "中俄贸易", "中韩自贸", "中日韩自贸",
+    # ST、风险警示与退市监管
+    "ST板块", "退市整理", "*ST板块", "ST股", "*ST股", "ST", "*ST", "摘帽", "风险警示", "退市风险", "退市",
     # 通用无意义占位符
-    "其它", "其他", "未知", "未分类", "默认", "综合", "概念", "板块"
+    "其它", "其他", "未知", "未分类", "默认", "综合", "概念", "板块", "0", "0.0", "--", "-"
 }
 
 # 兼容历史命名
@@ -64,15 +74,20 @@ GENERIC_KEYWORDS = list(SYSTEM_SECTOR_BLACKLIST)
 # 泛概念特征关键词 (模糊匹配)
 NOISE_KEYWORDS = (
     "改革", "股通", "成指", "重仓", "持股", "融资", "昨日", "送转", "转债", 
-    "指数", "成分", "中报", "预增", "业绩", "季报", "年报", "预盈", "预亏", "主题", "计划", "战略", "预期"
+    "指数", "成分", "中报", "预增", "业绩", "季报", "年报", "预盈", "预亏", "主题", "计划", 
+    "战略", "预期", "回购", "增持", "退市", "警示", "摘帽", "破净", "微盘", "低价股", 
+    "国资", "央企", "融通", "融券", "中特估", "两岸", "自贸区", "自贸港", "大开发"
 )
 
 # 真实产业与主线题材保护白名单 (优先保护，绝不误杀)
 REAL_CONCEPT_KEYWORDS = [
     "半导体", "AI", "人工智能", "机器人", "光伏", "锂电", "固态电池", "医药", "创新药", "芯片", "5G", "储能",
-    "新能源", "军工", "卫星", "商业航天", "航天", "汽车", "智能驾驶", "算力", "氢能", "量子", "云计算",
-    "电商", "游戏", "消费电子", "数据要素", "大模型", "信创", "华为", "苹果", "特斯拉", "电网", "特高压",
-    "风电", "核电", "新材料", "低空经济", "光刻机", "服务器", "液冷", "光模块", "CPO", "PCB"
+    "新能源", "军工", "卫星", "商业航天", "航天", "汽车", "智能驾驶", "车联网", "算力", "氢能", "量子", "云计算",
+    "电商", "跨境电商", "游戏", "消费电子", "数据要素", "数据安全", "网络安全", "信息安全", "大模型", "信创",
+    "华为", "苹果", "特斯拉", "电网", "智能电网", "特高压", "柔性直流输电", "风电", "核电", "新材料", "超硬材料", 
+    "培育钻石", "金刚石", "低空经济", "光刻机", "光刻胶", "服务器", "液冷", "光模块", "CPO", "PCB",
+    "先进封装", "存储芯片", "铜缆高速连接", "人造肉", "流感", "中药", "化学制药", "医疗器械",
+    "调味品", "食品饮料", "新型烟草", "电子烟", "香精香料", "水泥建材", "包装印刷"
 ]
 
 def is_generic_concept(concept_name: Any) -> bool:
@@ -80,28 +95,186 @@ def is_generic_concept(concept_name: Any) -> bool:
     if concept_name is None:
         return True
     s = str(concept_name).strip()
-    if len(s) < 2 or len(s) > 25 or s.isdigit():
+    if not s or len(s) < 2 or len(s) > 25 or s.isdigit():
         return True
-    # 1. 白名单保护
+
+    # 1. 绝对 ST / 退市识别 (包括 *ST, ST, ST板块, *ST板块, 前缀或后缀ST)
+    s_upper = s.upper()
+    if s_upper in ("ST", "*ST", "SST", "S*ST", "ST板块", "*ST板块", "ST股", "*ST股"):
+        return True
+    if s_upper.startswith(("*ST", "ST", "SST", "S*ST")):
+        return True
+
+    # 2. 精确命中黑名单
+    if s in SYSTEM_SECTOR_BLACKLIST or s_upper in SYSTEM_SECTOR_BLACKLIST:
+        return True
+
+    # 3. 强噪声复合关键词拦截 (回购增持、国企改革衍生、区域规划、监管标签等绝对泛概念，不予豁免)
+    strong_noise_patterns = (
+        "国企改革", "央企改革", "国资改革", "回购增持", "增持再贷款", "股份回购",
+        "深股通", "沪股通", "港股通", "融资融券", "转融通", "破净股", "微盘股", "退市整理",
+        "海峡两岸", "西部大开发", "长三角", "珠三角", "一带一路", "雄安新区", "自贸区", "自贸港"
+    )
+    if any(snp in s for snp in strong_noise_patterns):
+        return True
+
+    # 4. 白名单保护 (仅当未命中强噪声时生效)
     for k in REAL_CONCEPT_KEYWORDS:
         if k in s:
-            if s not in ("深股通", "沪股通", "港股通", "融通"):
-                return False
-    # 2. 精确命中黑名单
-    if s in SYSTEM_SECTOR_BLACKLIST:
-        return True
-    # 3. 关键字模糊判定
+            return False
+
+    # 5. 关键字模糊判定
     if any(k in s for k in NOISE_KEYWORDS):
         return True
-    # 4. 黑名单词根判定
+
+    # 6. 黑名单词根判定
     for bad in SYSTEM_SECTOR_BLACKLIST:
         if len(bad) >= 3 and bad in s:
             return True
+
     return False
 
 # 统一别名
 is_noise_concept = is_generic_concept
 is_noise_sector = is_generic_concept
+
+
+def combine_industry_and_category(category: Any, industry: Any) -> str:
+    """
+    将个股的行业分类 (industry) 与真实概念 (category) 深度融合为统一的板块字符串 (SSOT)
+    让真实的实体行业（如 '调味品', '光伏设备', '半导体', '水泥建材'）优先置顶，与高价值概念互补共振
+    :param category: 概念标签字符串 (如 '人造肉;烟草概念;新型烟草')
+    :param industry: 行业名称 (如 '调味品' 或 '食品饮料-调味品')
+    :return: 规范的分号分隔板块字符串 (如 '调味品;人造肉;新型烟草')
+    """
+    ind_name = ""
+    if industry:
+        s_ind = str(industry).strip()
+        if s_ind and s_ind.lower() not in ('0', '0.0', 'none', 'nan', 'null', '--', '-', '未知', '其它', '其他'):
+            # 处理行业层级 (如 "食品饮料-调味发酵品" 取 "调味品" 或末级)
+            if '-' in s_ind:
+                s_ind = s_ind.split('-')[-1].strip()
+            elif '>' in s_ind:
+                s_ind = s_ind.split('>')[-1].strip()
+            # 规范化调味发酵品 -> 调味品
+            if "调味" in s_ind:
+                s_ind = "调味品"
+            if s_ind and not is_generic_concept(s_ind):
+                ind_name = s_ind
+
+    valid_cats = extract_meaningful_sectors(category)
+    combined = []
+    seen = set()
+    if ind_name and ind_name not in seen:
+        combined.append(ind_name)
+        seen.add(ind_name)
+    for c in valid_cats:
+        # 若 c 中含有概念二字，剥离或规范化
+        if c not in seen:
+            combined.append(c)
+            seen.add(c)
+    return ";".join(combined)
+
+
+def extract_meaningful_sectors(sec_str: Any) -> List[str]:
+    """
+    从复合概念/板块字符串中清洗并提取所有具备明确产业题材价值的实体板块列表 (SSOT)
+    彻底过滤 "国企改革", "ST板块", "深股通", "回购增持再贷款" 等无明确信息的泛概念/噪声概念
+    :param sec_str: 原始板块概念字符串 (如 "ST板块;深股通;网络安全;信息安全;华为概念")
+    :return: 有序的有效实体板块列表 (如 ["网络安全", "信息安全", "华为概念"])
+    """
+    if not sec_str:
+        return []
+    s = str(sec_str).strip()
+    if not s or s.lower() in ('0', '0.0', 'none', 'nan', 'null', '--', '-', '未知', '其它', '其他'):
+        return []
+
+    # 兼容分号、逗号、顿号、加号、竖线等多种分隔符
+    delimiters = [';', '；', ',', '，', '、', '+', '|']
+    norm_s = s
+    for d in delimiters[1:]:
+        norm_s = norm_s.replace(d, ';')
+
+    raw_list = [item.strip() for item in norm_s.split(';') if item.strip()]
+    meaningful = []
+    seen = set()
+    for item in raw_list:
+        if item in seen:
+            continue
+        seen.add(item)
+        if not is_generic_concept(item):
+            meaningful.append(item)
+    return meaningful
+
+
+def get_most_valuable_sector(
+    sec_str: Any,
+    top_sectors: Optional[List[Union[str, Dict[str, Any]]]] = None,
+    industry: str = "",
+    is_index: bool = False,
+    default: str = "主流活跃"
+) -> str:
+    """
+    为个股或标的智能选定最具有代表性的明确高价值板块名称 (SSOT)
+    层层优选机制：
+    1. 大盘综合指数/ETF 优先判定 -> 返回 "综合指数/ETF"
+    2. 从复合概念中提取有效实体概念列表 (彻底剔除国企改革、ST板块、深股通等泛概念)
+    3. 核心主线共振优先：若有效概念命中了当前的 Top 核心主线，优先返回命中的核心主线板块
+    4. 实体产业白名单优先：若未命中核心主线，优先返回命中实体产业白名单的细分赛道 (如芯片、光伏、低空经济、网络安全等)
+    5. 概念首选：返回首个有效的实体概念
+    6. 细分行业兜底：若概念全为泛概念或为空，且有明确细分行业 (industry)，返回细分行业 (过滤后)
+    7. 最终兜底：返回 default (默认 "主流活跃")
+    绝对绝不返回 "国企改革"、"ST板块"、"回购增持再贷款" 等泛概念！
+    """
+    if is_index:
+        return "综合指数/ETF"
+
+    # 提取有效概念列表
+    valid_secs = extract_meaningful_sectors(sec_str)
+
+    # 规范化 top_sectors 列表
+    top_names: List[str] = []
+    if top_sectors:
+        for item in top_sectors:
+            if isinstance(item, str):
+                t_name = item.strip()
+            elif isinstance(item, dict):
+                t_name = str(item.get("name", "")).strip()
+            else:
+                t_name = ""
+            if t_name and not is_generic_concept(t_name):
+                top_names.append(t_name)
+
+    # 1. 核心主线共振优先匹配
+    if top_names and valid_secs:
+        for tn in top_names:
+            for vs in valid_secs:
+                if tn == vs or tn in vs or vs in tn:
+                    return tn
+
+    # 2. 实体产业题材白名单优先匹配
+    if valid_secs:
+        for vs in valid_secs:
+            for kw in REAL_CONCEPT_KEYWORDS:
+                if kw in vs:
+                    return vs
+        # 若未命中白名单，返回第 1 个有效实体概念
+        return valid_secs[0]
+
+    # 3. 细分行业兜底 (申万/通达信行业，如 "软件开发", "光学光电子", "专用设备")
+    if industry:
+        ind_clean = str(industry).strip()
+        if ind_clean and not is_generic_concept(ind_clean) and ind_clean not in ('0', '0.0', 'none', 'nan', '--'):
+            # 若行业名包含层级（如 "信息技术-软件开发"），取末级细分行业
+            if '-' in ind_clean:
+                ind_clean = ind_clean.split('-')[-1].strip()
+            elif '>' in ind_clean:
+                ind_clean = ind_clean.split('>')[-1].strip()
+            if ind_clean and not is_generic_concept(ind_clean):
+                return ind_clean
+
+    return default
+
 
 def filter_concepts(cat_dict: dict[str, Any]) -> dict[str, Any]:
     """批量过滤概念字典，仅保留真实产业题材"""

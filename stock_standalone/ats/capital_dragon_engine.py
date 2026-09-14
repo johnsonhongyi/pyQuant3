@@ -31,6 +31,25 @@ from sys_utils import get_app_root
 from JohnsonUtil import commonTips as cct
 from logger_utils import LoggerFactory
 
+try:
+    from stock_logic_utils import extract_meaningful_sectors, get_most_valuable_sector, is_generic_concept, combine_industry_and_category
+except ImportError:
+    from realtime_data_service import is_invalid_generic_sector as is_generic_concept
+    def extract_meaningful_sectors(sec_str):
+        if not sec_str:
+            return []
+        raw = [s.strip() for s in str(sec_str).replace(';', ',').replace('、', ',').split(',') if s.strip()]
+        return [s for s in raw if not is_generic_concept(s)]
+    def combine_industry_and_category(category, industry):
+        ind = str(industry).strip() if industry else ""
+        cats = extract_meaningful_sectors(category)
+        return ";".join(([ind] if ind and not is_generic_concept(ind) else []) + cats)
+    def get_most_valuable_sector(sec_str, top_sectors=None, industry="", is_index=False, default="主流活跃"):
+        if is_index:
+            return "综合指数/ETF"
+        valid = extract_meaningful_sectors(sec_str)
+        return valid[0] if valid else default
+
 logger = LoggerFactory.getLogger("CapitalDragonEngine")
 
 
@@ -519,9 +538,20 @@ class CapitalDragonEngine:
                     turnover_s = cand
                     break
 
-        # 板块分类列
-        sec_col = next((c for c in ('category', 'industry', 'concept') if c in df.columns), None)
-        sectors = df[sec_col].astype(str).str.strip() if sec_col else pd.Series('', index=df.index)
+        # 板块分类列 (深度融合行业 industry 与概念 category，让实体行业与题材强强联合)
+        cat_col = next((c for c in ('category', 'concept') if c in df.columns), None)
+        ind_col = next((c for c in ('industry', 'hy', 'block') if c in df.columns), None)
+        if cat_col and ind_col:
+            cat_s = df[cat_col].astype(str).values
+            ind_s = df[ind_col].astype(str).values
+            comb_list = [combine_industry_and_category(cat_s[i], ind_s[i]) for i in range(len(df))]
+            sectors = pd.Series(comb_list, index=df.index)
+        elif cat_col:
+            sectors = df[cat_col].astype(str).str.strip()
+        elif ind_col:
+            sectors = df[ind_col].astype(str).str.strip()
+        else:
+            sectors = pd.Series('', index=df.index)
 
         # 多周期特征
         def _get_series(col_names):
@@ -652,9 +682,9 @@ class CapitalDragonEngine:
             has_gap = ac_info.get("is_gap", False)
             has_ol = ac_info.get("is_open_low", False)
 
-            # 分割复合板块名 (如 "软件服务;人工智能;大数据")
-            sub_secs = [s.strip() for s in sec.replace(';', ',').replace('、', ',').split(',') if s.strip()]
-            for s_name in sub_secs[:2]: # 仅取最核心的前2个概念
+            # 提取有效高价值实体板块 (彻底过滤国企改革、ST板块、深股通、回购增持等泛概念)
+            valid_sub_secs = extract_meaningful_sectors(sec)
+            for s_name in valid_sub_secs[:2]: # 仅取最核心的前2个有效实体题材
                 if len(s_name) < 2:
                     continue
                 if s_name not in sector_stats:
@@ -771,10 +801,11 @@ class CapitalDragonEngine:
             )
             st["strength_score"] = round(strength_score, 1)
             
-            # 主线评级
-            if st["limit_up_count"] >= 3 or (st["strength_score"] >= 65 and st["total_amt_yi"] >= 50.0):
+            # 主线评级 (严格守卫：平均涨幅必须收红 >0 且多数上涨，杜绝整体下跌的板块霸占主线)
+            is_uptrend = (st["avg_pct"] > 0.0 and up_ratio >= 0.45)
+            if is_uptrend and (st["limit_up_count"] >= 3 or (st["strength_score"] >= 65 and st["total_amt_yi"] >= 50.0)):
                 st["grade"] = "👑 核心主线"
-            elif st["limit_up_count"] >= 1 or st["strength_score"] >= 45:
+            elif is_uptrend and (st["limit_up_count"] >= 1 or st["strength_score"] >= 45):
                 st["grade"] = "🚀 活跃赛道"
             else:
                 st["grade"] = "🟡 轮动分支"
@@ -809,18 +840,27 @@ class CapitalDragonEngine:
             ch_supp = float(ch_supp_s.loc[idx])
             ma20_val = float(ma20_s.loc[idx])
 
-            # 是否属于 Top 核心主线板块
+            # 是否属于 Top 核心主线板块 (严格基于纯化后的有效实体概念与 Top 5 核心主线匹配)
+            valid_secs_for_stock = extract_meaningful_sectors(sec_str)
             matched_main_sec = ""
             for ts in top_sectors[:5]:
-                if ts["name"] in sec_str:
-                    matched_main_sec = ts["name"]
+                t_name = ts["name"]
+                if any(t_name == vs or t_name in vs or vs in t_name for vs in valid_secs_for_stock):
+                    matched_main_sec = t_name
                     break
 
-            # 不再过滤大盘综合指数与宽基ETF，保留大盘与板块综合指数便于操盘手即时观测全景大势
-            clean_sec = sec_str.split(';')[0].split(',')[0].strip() if sec_str not in ('0', '', 'None', 'nan') else ""
-            final_sec = matched_main_sec or clean_sec
-            if not final_sec:
-                final_sec = "综合指数/ETF" if is_index_or_fund(code_str, name_str) else "主流活跃"
+            # 智能提取高价值明确板块 (彻底告别 ST板块、国企改革、回购增持等无明确信息标签)
+            ind_str = str(df.loc[idx, 'industry']) if 'industry' in df.columns else ""
+            is_idx = is_major_index(code_str, name_str) or is_index_or_fund(code_str, name_str)
+            final_sec = get_most_valuable_sector(
+                sec_str=sec_str,
+                top_sectors=[ts["name"] for ts in top_sectors[:5]],
+                industry=ind_str,
+                is_index=is_idx,
+                default="综合指数/ETF" if is_idx else "主流活跃"
+            )
+            if matched_main_sec:
+                final_sec = matched_main_sec
 
             # 提取连板信息
             ladder_info = ladder_dict.get(code_str, {})
