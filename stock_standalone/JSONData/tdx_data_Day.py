@@ -1577,6 +1577,15 @@ def generate_df_vect_daily_features(df, lastdays=cct.compute_lastdays):
                 if feat_col in df.columns:
                     feat[feat_col] = row[feat_col]
 
+        # 注入通道与支撑线核心基础指标 (SSOT 保证策略与 Query 引擎可用)
+        for base_k in (
+            'ch_dir', 'ch_slope_deg', 'ch_pos', 'ch_upper', 'ch_mid', 'ch_lower',
+            'ch_supp_price', 'ch_supp', 'ch_supplast', 'ch_supp_slope', 'ch_supp_slope_deg',
+            'ch_supp_pos', 'ch_supp_days', 'cdp_support', 'cdp_reversal', 'reversal_line'
+        ):
+            if base_k in df.columns:
+                feat[base_k] = row[base_k]
+
         # ===== 4️⃣ 注入多日精确换手率与量比特征 (单例共享内存 O(1) 纳秒级注入) =====
         c_key = str(code).strip().zfill(6)
         if multiday_dict and c_key in multiday_dict:
@@ -1655,6 +1664,15 @@ def generate_df_vect_daily_features_lastday(df, lastdays=cct.compute_lastdays):
                 feat_col = f'{ch_feat}{d}'
                 if feat_col in df.columns:
                     feat[feat_col] = row[feat_col]
+
+        # 注入通道与支撑线核心基础指标 (SSOT 保证策略与 Query 引擎可用)
+        for base_k in (
+            'ch_dir', 'ch_slope_deg', 'ch_pos', 'ch_upper', 'ch_mid', 'ch_lower',
+            'ch_supp_price', 'ch_supp', 'ch_supplast', 'ch_supp_slope', 'ch_supp_slope_deg',
+            'ch_supp_pos', 'ch_supp_days', 'cdp_support', 'cdp_reversal', 'reversal_line'
+        ):
+            if base_k in df.columns:
+                feat[base_k] = row[base_k]
 
         # ===== 4️⃣ 注入多日精确换手率与量比特征 (单例共享内存 O(1) 纳秒级注入) =====
         c_key = str(code).strip().zfill(6)
@@ -2310,7 +2328,9 @@ def calc_trend_channel(df, ur=6, lr=6):
         'supp_price_last': np.round(np.full(n, supp_price_last), 3),
         'supp_slope': np.round(np.full(n, supp_slope), 4),
         'upper_price': np.full(n, upper_price),
-        'lower_price': np.full(n, lower_price)
+        'lower_price': np.full(n, lower_price),
+        # KX DRAWLINE 趋势支撑线全长点位序列 (与通达信白线及可视化 crosshair 100% 对应)
+        'chan_kx': ch_res.kx_series if ch_res.kx_series is not None else np.full(n, np.nan)
     }
 
     # 动态注入多日通道上轨及支撑线价格预处理特征 (格式同 high41, high42, ... high4{cct.compute_lastdays})

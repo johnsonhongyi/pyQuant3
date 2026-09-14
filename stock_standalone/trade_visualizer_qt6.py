@@ -8303,7 +8303,9 @@ class MainWindow(QMainWindow, WindowMixin):
         candidates = []
 
         # 1. 通达信 KX 上涨支撑线 (通达信原名: GG通道线走势(KX))
-        kx_val = row.get('ch_supp_price', row.get('chan_kx', np.nan))
+        # 优先读取该 K 线所在坐标的真实白线价格 chan_kx；无坐标时回退至最新基准价 ch_supp_price
+        chan_kx_point = row.get('chan_kx', np.nan)
+        kx_val = chan_kx_point if pd.notna(chan_kx_point) and float(chan_kx_point) > 0 else row.get('ch_supp_price', np.nan)
         if pd.notna(kx_val) and float(kx_val) > 0:
             supp_f = float(kx_val)
             deg = row.get('ch_supp_slope_deg', np.nan)
@@ -8472,7 +8474,9 @@ class MainWindow(QMainWindow, WindowMixin):
         c_mid_v = row.get('chan_mid', row.get('ch_mid', np.nan))
         c_up_v = row.get('chan_up', row.get('ch_upper', np.nan))
         c_dn_v = row.get('chan_dn', row.get('ch_lower', np.nan))
-        c_supp_v = row.get('ch_supp_price', row.get('chan_kx', np.nan))
+        # 上涨支撑线：优先取当根 K 线在 KX 白线上的坐标 chan_kx，无坐标时回退至最新 ch_supp_price
+        chan_kx_point = row.get('chan_kx', np.nan)
+        c_supp_v = chan_kx_point if pd.notna(chan_kx_point) and float(chan_kx_point) > 0 else row.get('ch_supp_price', np.nan)
         c_supp_deg_v = row.get('ch_supp_slope_deg', np.nan)
         c_mid_s = f"{c_mid_v:.2f}" if pd.notna(c_mid_v) and float(c_mid_v) > 0 else "-"
         c_up_s = f"{c_up_v:.2f}" if pd.notna(c_up_v) and float(c_up_v) > 0 else "-"
@@ -8508,7 +8512,7 @@ class MainWindow(QMainWindow, WindowMixin):
         <hr style='margin:2px 0;'>
         <div style='font-family:monospace; white-space:nowrap;'>
             <span style='color:#00E5FF; font-weight:bold;'>通道:</span> <span style='color:#A0A0A0;'>中:{c_mid_s}</span> <span style='color:#00B4FF;'>上:{c_up_s}</span> <span style='color:#FF9900;'>下:{c_dn_s}</span><br>
-            <span style='color:#FF4444;'>TDX支撑:</span> <span style='color:#FF4444; font-weight:bold;'>{cdp_supp_val:.2f}</span>&nbsp;&nbsp;<span style='color:#FFFF00;'>反转:</span> <span style='color:#FFFF00; font-weight:bold;'>{cdp_rev_val:.2f}</span>
+            <span style='color:#FF4444;'>TDX量化支撑:</span> <span style='color:#FF4444; font-weight:bold;'>{cdp_supp_val:.2f}</span>&nbsp;&nbsp;<span style='color:#FFFF00;'>反转:</span> <span style='color:#FFFF00; font-weight:bold;'>{cdp_rev_val:.2f}</span>
         </div>
         {supp_line_html}
         <div style='color:#FFFFFF; font-family:monospace; margin-top:2px; white-space:nowrap;'>{date_str}</div>

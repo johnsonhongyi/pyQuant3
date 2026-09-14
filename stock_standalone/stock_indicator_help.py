@@ -159,7 +159,7 @@ class IndicatorHelpWindow:
              "Query同义词: ch_width, channel_width"),
 
             ("ch_supp_price / supp_price", "【核心】通达信上涨支撑线今日价格 (元)", 
-             "详细说明：通达信 KX DRAWLINE 算法从历史低点(ch_bc2)向上延伸至今日的精准反弹支撑价格(对应图表上红字如『支撑:9.38元』)。当股价回踩支撑线企稳时构成极佳买点。\n\n"
+             "详细说明：通达信 KX DRAWLINE 算法从历史低点(ch_bc2)向上延伸至今日的精准反弹支撑价格(对应主图白色上涨趋势支撑线；注意: 绝非右下角CDP量化红字支撑)。当股价回踩支撑线企稳时构成极佳买点。\n\n"
              "Query同义词: ch_supp_price, supp_price, support_price, ch_supp, 支撑价"),
 
             ("ch_supp_slope / ch_supp_slope_deg", "【核心】上涨支撑线方向斜率与反弹倾角 (°)", 
