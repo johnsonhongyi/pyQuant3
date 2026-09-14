@@ -50,16 +50,17 @@ from PyQt6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QHeaderView, QLabel, QSplitter, 
     QFrame, QMessageBox, QAbstractItemView, QPushButton, QComboBox, 
     QToolBar, QMenu, QSizePolicy, QStyle, QLineEdit, QCheckBox,
-    QTreeWidget, QTreeWidgetItem, QWidgetAction, QGraphicsRectItem
+    QTreeWidget, QTreeWidgetItem, QWidgetAction, QGraphicsRectItem,
+    QDateEdit, QCalendarWidget, QGraphicsOpacityEffect, QTableView
 )
 from PyQt6.QtCore import (
     QObject, Qt, pyqtSignal, QThread, QTimer, QPoint, QMutex, QMutexLocker, 
-    QRect, QPointF, QRectF
+    QRect, QPointF, QRectF, QDate
 )
 import time
 from PyQt6.QtGui import (
     QAction, QColor, QPainter, QPicture, QFont, QPen, QBrush, 
-    QActionGroup, QShortcut, QKeySequence,QFontMetrics
+    QActionGroup, QShortcut, QKeySequence, QFontMetrics, QTextCharFormat, QPalette
 )
 from PyQt6.QtWidgets import QGraphicsItem
 from PyQt6 import sip
@@ -2969,6 +2970,325 @@ class RealtimeWorker(QObject):
             print(f"[RealtimeWorker] {e}")
 
 
+class SliceCalendarPopup(QFrame):
+    """
+    历史切片日历下拉窗口 (独立浮窗模式，避免常驻占用工具栏空间)
+    """
+    date_selected = pyqtSignal(str)  # 选定历史日期信号 'YYYY-MM-DD'
+    reset_requested = pyqtSignal()   # 恢复全量最新信号
+
+    def __init__(self, parent=None):
+        super().__init__(parent, Qt.WindowType.Popup)
+        self.setStyleSheet("""
+            SliceCalendarPopup {
+                background-color: #1a1a22;
+                border: 1.5px solid #00ffcc;
+                border-radius: 6px;
+                padding: 4px;
+            }
+            QLabel {
+                color: #00ffcc;
+                font-weight: bold;
+                font-size: 8.5pt;
+            }
+            QPushButton {
+                background-color: #2e2e36;
+                color: #ffffaa;
+                border: 1px solid #44444f;
+                border-radius: 3px;
+                padding: 2px 5px;
+                font-size: 8pt;
+            }
+            QPushButton:hover {
+                background-color: #3e3e4a;
+                border-color: #00ffcc;
+                color: #ffffff;
+            }
+            QCalendarWidget {
+                background-color: #1a1a22;
+                color: #ffffff;
+            }
+            QCalendarWidget QWidget#qt_calendar_navigationbar {
+                background-color: #24242e;
+                border-bottom: 1px solid #3e3e4a;
+            }
+            QCalendarWidget QToolButton {
+                color: #00ffcc;
+                background-color: transparent;
+                font-weight: bold;
+                border: none;
+                border-radius: 3px;
+                padding: 3px;
+                font-size: 9pt;
+            }
+            QCalendarWidget QToolButton:hover {
+                background-color: #383846;
+                color: #ffffff;
+            }
+            QCalendarWidget QMenu {
+                background-color: #24242e;
+                color: #ffffff;
+                border: 1px solid #44444f;
+            }
+            QCalendarWidget QMenu::item:selected {
+                background-color: #008877;
+                color: #ffffff;
+            }
+            QCalendarWidget QSpinBox {
+                background-color: #1e1e24;
+                color: #ffffff;
+                border: 1px solid #44444f;
+            }
+            QCalendarWidget QTableView {
+                background-color: #1a1a22;
+                alternate-background-color: #20202a;
+                selection-background-color: #008877;
+                selection-color: #ffffff;
+                gridline-color: #2c2c38;
+            }
+            QCalendarWidget QAbstractItemView:enabled {
+                background-color: #1a1a22;
+                color: #ffffff;
+                selection-background-color: #008877;
+                selection-color: #ffffff;
+            }
+            QCalendarWidget QAbstractItemView:disabled {
+                color: #555555;
+            }
+        """)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(6)
+
+        # 1. 顶部状态与快速恢复
+        header_layout = QHBoxLayout()
+        self.lbl_title = QLabel("📅 历史切片日历 (点击即切片)")
+        self.lbl_title.setStyleSheet("color: #00ffcc; font-weight: bold; font-size: 8.5pt;")
+        header_layout.addWidget(self.lbl_title)
+        header_layout.addStretch()
+
+        btn_today = QPushButton("恢复最新")
+        btn_today.setStyleSheet("background-color: #2e2e36; color: #00ff88; border: 1px solid #44444f; border-radius: 3px; padding: 2px 6px; font-size: 8pt;")
+        btn_today.clicked.connect(self._on_reset_clicked)
+        header_layout.addWidget(btn_today)
+        layout.addLayout(header_layout)
+
+        # 2. 日历主体控件
+        self.calendar = QCalendarWidget()
+        # 彻底隐藏不必要的垂直周序号列 (36, 37...)，根治左侧白色色块与空间浪费
+        self.calendar.setVerticalHeaderFormat(QCalendarWidget.VerticalHeaderFormat.NoVerticalHeader)
+        self.calendar.setGridVisible(True)
+
+        # 设置暗黑调色板，彻底根除 Windows 原生浅色表头/白色方块
+        pal = QPalette()
+        pal.setColor(QPalette.ColorRole.Window, QColor("#1a1a22"))
+        pal.setColor(QPalette.ColorRole.WindowText, QColor("#e0e0e0"))
+        pal.setColor(QPalette.ColorRole.Base, QColor("#1a1a22"))
+        pal.setColor(QPalette.ColorRole.AlternateBase, QColor("#20202a"))
+        pal.setColor(QPalette.ColorRole.Text, QColor("#ffffff"))
+        pal.setColor(QPalette.ColorRole.Button, QColor("#24242e"))
+        pal.setColor(QPalette.ColorRole.ButtonText, QColor("#00ffcc"))
+        pal.setColor(QPalette.ColorRole.Highlight, QColor("#008877"))
+        pal.setColor(QPalette.ColorRole.HighlightedText, QColor("#ffffff"))
+        pal.setColor(QPalette.ColorRole.Light, QColor("#2e2e3a"))
+        pal.setColor(QPalette.ColorRole.Midlight, QColor("#282834"))
+        pal.setColor(QPalette.ColorRole.Dark, QColor("#14141a"))
+        self.calendar.setPalette(pal)
+
+        self._apply_dark_palette_to_children()
+
+        # 工作日表头与文字：高对比清爽冰青蓝
+        fmt_weekday = QTextCharFormat()
+        fmt_weekday.setForeground(QColor("#a0e6ff"))
+        for day in [Qt.DayOfWeek.Monday, Qt.DayOfWeek.Tuesday, Qt.DayOfWeek.Wednesday, Qt.DayOfWeek.Thursday, Qt.DayOfWeek.Friday]:
+            self.calendar.setWeekdayTextFormat(day, fmt_weekday)
+
+        # 周末表头与文字：柔和醒目珊瑚红
+        fmt_weekend = QTextCharFormat()
+        fmt_weekend.setForeground(QColor("#ff7777"))
+        self.calendar.setWeekdayTextFormat(Qt.DayOfWeek.Saturday, fmt_weekend)
+        self.calendar.setWeekdayTextFormat(Qt.DayOfWeek.Sunday, fmt_weekend)
+
+        self.calendar.clicked.connect(self._on_calendar_clicked)
+        layout.addWidget(self.calendar)
+
+        # 3. 底部快捷按钮行 (最近交易日快捷切片)
+        self.quick_widget = QWidget()
+        self.quick_layout = QHBoxLayout(self.quick_widget)
+        self.quick_layout.setContentsMargins(0, 0, 0, 0)
+        self.quick_layout.setSpacing(4)
+        layout.addWidget(self.quick_widget)
+
+    def _apply_dark_palette_to_children(self):
+        """递归确保内部 QTableView 和 QHeaderView 继承暗黑调色板"""
+        pal = self.calendar.palette()
+        for tv in self.calendar.findChildren(QTableView):
+            tv.setPalette(pal)
+            if tv.horizontalHeader():
+                tv.horizontalHeader().setPalette(pal)
+
+    def _on_calendar_clicked(self, qdate: QDate):
+        date_str = qdate.toString("yyyy-MM-dd")
+        self.date_selected.emit(date_str)
+        self.close()
+
+    def _on_reset_clicked(self):
+        self.reset_requested.emit()
+        self.close()
+
+    def show_under(self, anchor_widget, current_date_str: str, recent_dates: list = None):
+        """在指定锚点控件正下方弹出日历下拉窗口，并动态填充快捷节点，支持屏幕边缘碰撞保护"""
+        self._apply_dark_palette_to_children()
+        if current_date_str:
+            qdate = QDate.fromString(current_date_str, "yyyy-MM-dd")
+            if qdate.isValid():
+                self.calendar.setSelectedDate(qdate)
+        
+        # 刷新底部快捷按钮
+        while self.quick_layout.count() > 0:
+            item = self.quick_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        if recent_dates:
+            lbl_quick = QLabel("快捷:")
+            lbl_quick.setStyleSheet("color: #888888; font-size: 8pt;")
+            self.quick_layout.addWidget(lbl_quick)
+            # 取最近 4 个历史日
+            for i, d in enumerate(recent_dates[:4]):
+                btn = QPushButton(f"T-{i+1} {d[-5:]}")
+                btn.setToolTip(f"快速切片至 {d}")
+                btn.setStyleSheet("background-color: #2e2e36; color: #ffffaa; border: 1px solid #44444f; border-radius: 3px; padding: 2px 4px; font-size: 7.5pt;")
+                btn.clicked.connect(lambda checked, dt=d: self._on_quick_date_clicked(dt))
+                self.quick_layout.addWidget(btn)
+            self.quick_layout.addStretch()
+
+        # 计算屏幕全局位置 (边缘碰撞保护：若靠屏幕右边缘则向左对齐，防止溢出屏幕)
+        self.adjustSize()
+        popup_width = max(self.width(), 310)
+        global_pos = anchor_widget.mapToGlobal(QPoint(0, anchor_widget.height() + 2))
+        screen = anchor_widget.screen() or QApplication.primaryScreen()
+        if screen:
+            screen_geo = screen.availableGeometry()
+            if global_pos.x() + popup_width > screen_geo.right():
+                target_x = anchor_widget.mapToGlobal(QPoint(anchor_widget.width() - popup_width, anchor_widget.height() + 2)).x()
+                global_pos.setX(max(screen_geo.left() + 10, target_x))
+        self.move(global_pos)
+        self.show()
+
+    def _on_quick_date_clicked(self, date_str):
+        self.date_selected.emit(date_str)
+        self.close()
+
+
+class SliceFloatingBar(QFrame):
+    """
+    悬浮在 K 线图右上角的数据切片工具条，支持自动隐藏与下拉日历
+    """
+    def __init__(self, parent_kline_widget, main_window):
+        super().__init__(parent_kline_widget)
+        self.kline_widget = parent_kline_widget
+        self.main_window = main_window
+        self.setObjectName("SliceFloatingBar")
+        
+        # 内部水平紧凑布局
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(4, 2, 4, 2)
+        layout.setSpacing(4)
+        
+        # 1. 启停切片复选框
+        self.cb_slice_enable = QCheckBox("")
+        self.cb_slice_enable.setToolTip("开启/关闭历史数据切片回溯 (截止选定日期，重算并展示当时通道与支撑位)")
+        self.cb_slice_enable.setStyleSheet("QCheckBox { color: #00ffcc; font-size: 8.5pt; font-weight: bold; } QCheckBox::indicator { width: 12px; height: 12px; }")
+        self.cb_slice_enable.toggled.connect(self.main_window._on_history_slice_toggled)
+        layout.addWidget(self.cb_slice_enable)
+        
+        # 2. 📅 下拉日历按钮 (放置在左右箭头之前，避免干扰左右箭头的连续步退/步进点击)
+        self.btn_slice_calendar = QPushButton("📅")
+        self.btn_slice_calendar.setToolTip("点击打开历史切片日历下拉窗口 (选择任意历史日期或快捷日期)")
+        self.btn_slice_calendar.setFixedHeight(20)
+        self.btn_slice_calendar.setStyleSheet("QPushButton { background-color: #2e2e36; color: #ffffaa; border: 1px solid #44444f; border-radius: 3px; font-size: 8pt; padding: 1px 4px; } QPushButton:hover { background-color: #3e3e4a; border-color: #00ffcc; color: #ffffff; }")
+        self.btn_slice_calendar.clicked.connect(self.main_window._show_slice_calendar_popup)
+        layout.addWidget(self.btn_slice_calendar)
+
+        # 3. ◀ 步退按钮
+        self.btn_slice_prev = QPushButton("◀")
+        self.btn_slice_prev.setToolTip("回退到上一个交易日 (快捷倒带)")
+        self.btn_slice_prev.setFixedSize(16, 20)
+        self.btn_slice_prev.setStyleSheet("QPushButton { background-color: #2e2e36; color: #ffffff; border: 1px solid #44444f; border-radius: 3px; font-size: 8pt; padding: 0px; } QPushButton:hover { background-color: #3e3e4a; border-color: #00ffcc; }")
+        self.btn_slice_prev.clicked.connect(self.main_window._on_slice_prev_clicked)
+        layout.addWidget(self.btn_slice_prev)
+        
+        # 4. ▶ 步进按钮
+        self.btn_slice_next = QPushButton("▶")
+        self.btn_slice_next.setToolTip("前进到下一个交易日 (快捷快进)")
+        self.btn_slice_next.setFixedSize(16, 20)
+        self.btn_slice_next.setStyleSheet("QPushButton { background-color: #2e2e36; color: #ffffff; border: 1px solid #44444f; border-radius: 3px; font-size: 8pt; padding: 0px; } QPushButton:hover { background-color: #3e3e4a; border-color: #00ffcc; }")
+        self.btn_slice_next.clicked.connect(self.main_window._on_slice_next_clicked)
+        layout.addWidget(self.btn_slice_next)
+        
+        # 5. 最新按钮
+        self.btn_slice_reset = QPushButton("最新")
+        self.btn_slice_reset.setToolTip("恢复全量实时最新数据 (一键清除切片)")
+        self.btn_slice_reset.setFixedSize(30, 20)
+        self.btn_slice_reset.setStyleSheet("QPushButton { background-color: #2e2e36; color: #00ff88; border: 1px solid #44444f; border-radius: 3px; font-size: 8pt; padding: 0px; } QPushButton:hover { background-color: #3e3e4a; border-color: #00ff88; }")
+        self.btn_slice_reset.clicked.connect(self.main_window._on_slice_reset_clicked)
+        layout.addWidget(self.btn_slice_reset)
+        
+        self.adjustSize()
+        
+        # 自动隐藏/半透明定时器
+        self.hide_timer = QTimer(self)
+        self.hide_timer.setSingleShot(True)
+        self.hide_timer.timeout.connect(self._on_auto_hide_timeout)
+
+        # 初始半透明状态
+        self._update_style(is_sliced=False, is_hovered=False)
+
+    def _update_style(self, is_sliced: bool, is_hovered: bool):
+        opacity = 1.0 if is_hovered else (0.85 if is_sliced else 0.35)
+        border_color = "#ff5555" if is_sliced else ("#00ffcc" if is_hovered else "#44444f")
+        bg_color = "rgba(45, 20, 20, 230)" if is_sliced else "rgba(26, 26, 32, 210)"
+        self.setStyleSheet(f"""
+            QFrame#SliceFloatingBar {{
+                background-color: {bg_color};
+                border: 1px solid {border_color};
+                border-radius: 4px;
+            }}
+        """)
+        effect = QGraphicsOpacityEffect(self)
+        effect.setOpacity(opacity)
+        self.setGraphicsEffect(effect)
+
+    def enterEvent(self, event):
+        self.hide_timer.stop()
+        is_sliced = self.cb_slice_enable.isChecked()
+        self._update_style(is_sliced=is_sliced, is_hovered=True)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self.hide_timer.start(1200)  # 离开 1.2 秒后平滑半透明淡出
+        super().leaveEvent(event)
+
+    def _on_auto_hide_timeout(self):
+        is_sliced = self.cb_slice_enable.isChecked()
+        self._update_style(is_sliced=is_sliced, is_hovered=False)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.reposition()
+
+    def reposition(self):
+        """重新计算右上角位置 (悬浮在 K 线图内部右上角)"""
+        if self.kline_widget:
+            self.adjustSize()
+            x = self.kline_widget.width() - self.width() - 15
+            y = 10
+            self.move(max(10, x), y)
+            self.raise_()
+
+
 class KLineDetailWindow(QtWidgets.QFrame):
     """
     K 线十字光标/鼠标 hover 的独立悬浮详情窗口，支持手动拖拽、复用和位置持久化。
@@ -4064,8 +4384,35 @@ class MainWindow(QMainWindow, WindowMixin):
         self.kline_plot.setLabel('bottom', '日期索引')
         self.kline_plot.setLabel('left', '价格')
         # ⭐ 禁用自动范围，防止鼠标悬停时视图跳动
-        self.kline_plot.disableAutoRange()
         self.right_splitter.addWidget(self.kline_widget)
+
+        # ⏱️ [NEW] 历史切片悬浮工具条 (悬浮在 K 线图右上角，支持自动隐藏与下拉日历)
+        self.slice_floating_bar = SliceFloatingBar(self.kline_widget, self)
+        self.cb_slice_enable = self.slice_floating_bar.cb_slice_enable
+        self.btn_slice_prev = self.slice_floating_bar.btn_slice_prev
+        self.btn_slice_calendar = self.slice_floating_bar.btn_slice_calendar
+        self.btn_slice_next = self.slice_floating_bar.btn_slice_next
+        self.btn_slice_reset = self.slice_floating_bar.btn_slice_reset
+
+        # 保持 date_cutoff_edit 作为底层兼容代理 (隐藏，不占用工具栏空间)
+        self.date_cutoff_edit = QDateEdit(self)
+        self.date_cutoff_edit.setVisible(False)
+        self.date_cutoff_edit.setDisplayFormat("yyyy-MM-dd")
+        self.date_cutoff_edit.setDate(QDate.currentDate())
+        self.date_cutoff_edit.dateChanged.connect(self._on_slice_date_changed)
+
+        # 历史切片日历下拉浮窗实例 (延迟展示)
+        self.calendar_popup = SliceCalendarPopup(self)
+        self.calendar_popup.date_selected.connect(self._on_popup_date_selected)
+        self.calendar_popup.reset_requested.connect(self._on_slice_reset_clicked)
+
+        # 挂钩 kline_widget 的 resize 事件以自动对齐右上角
+        orig_kline_resize = self.kline_widget.resizeEvent
+        def _kline_resized(ev):
+            orig_kline_resize(ev)
+            if hasattr(self, 'slice_floating_bar'):
+                self.slice_floating_bar.reposition()
+        self.kline_widget.resizeEvent = _kline_resized
 
         # ⭐ [NEW] 双击 K 线打开十字星详情并锁定关闭自动关闭；右键恢复自动跟随并恢复自动关闭
         if hasattr(self.kline_widget, 'viewport') and self.kline_widget.viewport():
@@ -4185,11 +4532,12 @@ class MainWindow(QMainWindow, WindowMixin):
         # Top Controls - 按钮行
         button_row = QHBoxLayout()
 
-        # ⭐ 新增 History Selector ComboBox
+        # ⭐ History Selector ComboBox (恢复充足宽度 100px，杜绝截断为 histo)
         self.history_selector = QComboBox()
         self.history_selector.addItems(["history1", "history2", "history3", "history4", "history5"])
         self.history_selector.setCurrentIndex(4)  # 默认选 history5
-        self.history_selector.setMaximumWidth(100)
+        self.history_selector.setMinimumWidth(88)
+        self.history_selector.setMaximumWidth(102)
         self.history_selector.currentIndexChanged.connect(self.load_history_filters)
         button_row.addWidget(self.history_selector)
 
@@ -8822,6 +9170,7 @@ class MainWindow(QMainWindow, WindowMixin):
 
         # 5. ⚡ 统一状态赋值并执行唯一渲染
         if not local_day_df.empty:
+            self.raw_day_df = local_day_df.copy()  # ⭐ 备份全量原始日线数据供历史切片回溯使用
             self.day_df = local_day_df 
             self.current_day_df_code = code
 
@@ -8829,6 +9178,30 @@ class MainWindow(QMainWindow, WindowMixin):
             if self.resample == 'd':
                 self.daily_df_raw = self.day_df.copy()
             
+            # ⏱️ [HISTORY SLICE] 历史切片联动同步
+            latest_date_str = str(local_day_df.index[-1]).split()[0]
+            if hasattr(self, 'date_cutoff_edit') and hasattr(self, 'cb_slice_enable'):
+                if not self.cb_slice_enable.isChecked():
+                    self.date_cutoff_edit.blockSignals(True)
+                    self.date_cutoff_edit.setDate(QDate.fromString(latest_date_str, "yyyy-MM-dd"))
+                    self.date_cutoff_edit.blockSignals(False)
+                else:
+                    cutoff_str = self.date_cutoff_edit.date().toString("yyyy-MM-dd")
+                    sliced = local_day_df[local_day_df.index <= cutoff_str]
+                    if len(sliced) >= 5:
+                        self.day_df = sliced.copy()
+                        if cutoff_str < latest_date_str:
+                            effective_tick_df = None
+
+            if hasattr(self, 'btn_slice_calendar'):
+                if hasattr(self, 'cb_slice_enable') and self.cb_slice_enable.isChecked():
+                    cutoff_str = self.date_cutoff_edit.date().toString("MM-dd")
+                    self.btn_slice_calendar.setText(f"📅{cutoff_str}")
+                else:
+                    self.btn_slice_calendar.setText("📅")
+            if hasattr(self, 'slice_floating_bar') and self.slice_floating_bar:
+                self.slice_floating_bar.reposition()
+
             # 刷新信号坐标系
             self._refresh_stock_signal_cache(code)
             # 更新标题
@@ -14394,6 +14767,9 @@ class MainWindow(QMainWindow, WindowMixin):
 
         # 4. 组合最终标题并设置
         full_title = f"{main_title}\n<span style='color: #FFCC00; font-size: 10pt;'>{category_text}</span>" if category_text else main_title
+        if getattr(self, 'cb_slice_enable', None) and self.cb_slice_enable.isChecked():
+            slice_date_str = self.date_cutoff_edit.date().toString("yyyy-MM-dd")
+            full_title = f"<span style='color: #ff5555; font-weight: bold;'>[⏱️历史: {slice_date_str}]</span> " + full_title
         
         # # 👑 动态对齐：如果在 Re-entry 历史回测中检测到了最佳/适合的分支策略，在标题最显眼位置展现！
         # code_clean_t = code.strip()
@@ -14851,8 +15227,163 @@ class MainWindow(QMainWindow, WindowMixin):
                 self._splitter_reset_timer.setSingleShot(True)
                 self._splitter_reset_timer.timeout.connect(lambda: self._reset_kline_view(force=True))
             
-            self._splitter_reset_timer.start(50) # 50ms 防抖
-    
+    # ---------------------------------------------------------
+    # ⏱️ 历史切片全图回溯核心功能实现 (SSOT)
+    # ---------------------------------------------------------
+    def _show_slice_calendar_popup(self):
+        """弹出历史切片下拉日历浮窗 (支持日历点选与快捷日期)"""
+        if not hasattr(self, 'calendar_popup') or not hasattr(self, 'btn_slice_calendar'):
+            return
+        raw_df = getattr(self, 'raw_day_df', None)
+        if raw_df is None or raw_df.empty:
+            raw_df = getattr(self, 'day_df', None)
+        
+        recent_dates = []
+        if raw_df is not None and not raw_df.empty:
+            all_dates = sorted(list(set([str(d).split()[0] for d in raw_df.index])))
+            recent_dates = all_dates[::-1][1:6] # 取最近 5 个交易日供快捷点选
+            
+        cur_date_str = self.date_cutoff_edit.date().toString("yyyy-MM-dd") if hasattr(self, 'date_cutoff_edit') else ""
+        self.calendar_popup.show_under(self.btn_slice_calendar, cur_date_str, recent_dates)
+
+    def _on_popup_date_selected(self, date_str: str):
+        """从日历浮窗选定历史日期：自动开启切片并触发毫秒级重绘"""
+        if not hasattr(self, 'date_cutoff_edit'):
+            return
+        qdate = QDate.fromString(date_str, "yyyy-MM-dd")
+        if qdate.isValid():
+            self.date_cutoff_edit.setDate(qdate)
+            if hasattr(self, 'cb_slice_enable') and not self.cb_slice_enable.isChecked():
+                self.cb_slice_enable.setChecked(True)
+            else:
+                self._apply_history_slice()
+
+    def _on_history_slice_toggled(self, checked: bool):
+        """切片复选框状态改变：开启或关闭历史数据切片截断"""
+        if checked:
+            self.cb_slice_enable.setStyleSheet("QCheckBox { color: #ff5555; font-size: 8.5pt; font-weight: bold; } QCheckBox::indicator { width: 12px; height: 12px; }")
+            self.cb_slice_enable.setText("(开)")
+        else:
+            self.cb_slice_enable.setStyleSheet("QCheckBox { color: #00ffcc; font-size: 8.5pt; font-weight: bold; } QCheckBox::indicator { width: 12px; height: 12px; }")
+            self.cb_slice_enable.setText("")
+        self._apply_history_slice()
+
+    def _on_slice_date_changed(self, qdate):
+        """日期控件改变：如果处于切片状态则即时重绘"""
+        if hasattr(self, 'cb_slice_enable') and self.cb_slice_enable.isChecked():
+            self._apply_history_slice()
+
+    def _on_slice_prev_clicked(self):
+        """回退到上一个交易日 (快捷倒带)"""
+        raw_df = getattr(self, 'raw_day_df', None)
+        if raw_df is None or raw_df.empty:
+            raw_df = getattr(self, 'day_df', None)
+        if raw_df is None or raw_df.empty:
+            return
+
+        cur_date_str = self.date_cutoff_edit.date().toString("yyyy-MM-dd")
+        all_dates = sorted(list(set([str(d).split()[0] for d in raw_df.index])))
+        prev_dates = [d for d in all_dates if d < cur_date_str]
+        
+        if prev_dates:
+            target_date_str = prev_dates[-1]
+            qdate = QDate.fromString(target_date_str, "yyyy-MM-dd")
+            self.date_cutoff_edit.setDate(qdate)
+            if hasattr(self, 'cb_slice_enable') and not self.cb_slice_enable.isChecked():
+                self.cb_slice_enable.setChecked(True)
+            else:
+                self._apply_history_slice()
+        else:
+            logger.info("[HistorySlice] 已经到达最早历史交易日，无法再倒退")
+
+    def _on_slice_next_clicked(self):
+        """前进到下一个交易日 (快捷快进)"""
+        raw_df = getattr(self, 'raw_day_df', None)
+        if raw_df is None or raw_df.empty:
+            raw_df = getattr(self, 'day_df', None)
+        if raw_df is None or raw_df.empty:
+            return
+
+        cur_date_str = self.date_cutoff_edit.date().toString("yyyy-MM-dd")
+        all_dates = sorted(list(set([str(d).split()[0] for d in raw_df.index])))
+        next_dates = [d for d in all_dates if d > cur_date_str]
+        
+        if next_dates:
+            target_date_str = next_dates[0]
+            qdate = QDate.fromString(target_date_str, "yyyy-MM-dd")
+            self.date_cutoff_edit.setDate(qdate)
+            if hasattr(self, 'cb_slice_enable') and not self.cb_slice_enable.isChecked():
+                self.cb_slice_enable.setChecked(True)
+            else:
+                self._apply_history_slice()
+        else:
+            logger.info("[HistorySlice] 已经到达最新交易日")
+            if hasattr(self, 'cb_slice_enable') and self.cb_slice_enable.isChecked():
+                self.cb_slice_enable.setChecked(False)
+
+    def _on_slice_reset_clicked(self):
+        """恢复全量实时最新数据 (一键清除切片)"""
+        raw_df = getattr(self, 'raw_day_df', None)
+        if raw_df is not None and not raw_df.empty:
+            latest_date_str = str(raw_df.index[-1]).split()[0]
+            self.date_cutoff_edit.blockSignals(True)
+            self.date_cutoff_edit.setDate(QDate.fromString(latest_date_str, "yyyy-MM-dd"))
+            self.date_cutoff_edit.blockSignals(False)
+        if hasattr(self, 'cb_slice_enable') and self.cb_slice_enable.isChecked():
+            self.cb_slice_enable.setChecked(False)
+        else:
+            self._apply_history_slice()
+
+    def _apply_history_slice(self):
+        """执行历史切片重绘：截断数据截止选定日期，基于当时数据重算并渲染全部指标与支撑通道"""
+        raw_df = getattr(self, 'raw_day_df', None)
+        if raw_df is None or raw_df.empty:
+            raw_df = getattr(self, 'day_df', None)
+        if raw_df is None or raw_df.empty:
+            return
+
+        is_sliced = hasattr(self, 'cb_slice_enable') and self.cb_slice_enable.isChecked()
+        latest_date_str = str(raw_df.index[-1]).split()[0]
+
+        if not is_sliced:
+            # 恢复全量数据
+            self.day_df = raw_df.copy()
+            effective_tick_df = getattr(self, 'tick_df', None)
+        else:
+            cutoff_date = self.date_cutoff_edit.date().toString("yyyy-MM-dd")
+            # 截取截止历史日期的子集
+            sliced = raw_df[raw_df.index <= cutoff_date]
+            if len(sliced) < 5:
+                logger.warning(f"[HistorySlice] 选定日期 {cutoff_date} 数据过少 ({len(sliced)} 根)，保留至少 5 根以供通道计算")
+                sliced = raw_df.iloc[:min(len(raw_df), 5)]
+            self.day_df = sliced.copy()
+            # 历史回溯模式下，只有当日期是最新一天时才融合今日实时 tick
+            if cutoff_date >= latest_date_str:
+                effective_tick_df = getattr(self, 'tick_df', None)
+            else:
+                effective_tick_df = None
+
+        # 动态同步日历按钮文本与悬浮条外观
+        if hasattr(self, 'btn_slice_calendar'):
+            if is_sliced:
+                cutoff_str = self.date_cutoff_edit.date().toString("MM-dd")
+                self.btn_slice_calendar.setText(f"📅{cutoff_str}")
+                self.btn_slice_calendar.setStyleSheet("QPushButton { background-color: #4a2020; color: #ff9999; border: 1px solid #ff5555; border-radius: 3px; font-size: 8pt; padding: 1px 4px; font-weight: bold; } QPushButton:hover { background-color: #5e2828; border-color: #ff7777; color: #ffffff; }")
+            else:
+                self.btn_slice_calendar.setText("📅")
+                self.btn_slice_calendar.setStyleSheet("QPushButton { background-color: #2e2e36; color: #ffffaa; border: 1px solid #44444f; border-radius: 3px; font-size: 8pt; padding: 1px 4px; } QPushButton:hover { background-color: #3e3e4a; border-color: #00ffcc; color: #ffffff; }")
+        
+        if hasattr(self, 'slice_floating_bar') and self.slice_floating_bar:
+            self.slice_floating_bar._update_style(is_sliced=is_sliced, is_hovered=self.slice_floating_bar.underMouse())
+            self.slice_floating_bar.adjustSize()
+            self.slice_floating_bar.reposition()
+
+        code = getattr(self, 'current_code', '')
+        if code:
+            self._refresh_stock_signal_cache(code)
+            self._update_plot_title(code, self.day_df, effective_tick_df)
+            self.render_charts(code, self.day_df, effective_tick_df, force=True)
+
     def _on_toggle_filter_clicked(self):
         """处理面板上的 Toggle 按钮点击"""
         # 获取当前状态

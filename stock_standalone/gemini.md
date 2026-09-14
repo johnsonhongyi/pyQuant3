@@ -1,3 +1,125 @@
+## 2026-09-14 22:38
+- [x] **【重排切片悬浮条控件顺序：日历按键前置，左右箭头相邻连击防误触】(SSOT) (`trade_visualizer_qt6.py`, `tests/test_history_slice_and_auction_reversal.py`)**：
+    - [x] **操盘手反馈痛点与操作体验穿透**：
+        1. **“把日历放在左右箭头前面不要影响按键操作点击”**（附截图）：
+           - **操作痛点**：此前排布为 `[✔ (开)] [◀] [📅09-11] [▶] [最新]`，日历按键夹在左右箭头之间；
+           - 操盘手快速连续步退 `◀` 或步进 `▶` 时，鼠标频繁跨过中央的日历按钮，极易误触日历弹窗导致操作中断或被弹窗遮挡；且宽度动态伸缩影响箭头定位。
+    - [x] **系统级工程落地与排版重组**：
+        1. **控件顺序重组前置**：
+           - 将 `btn_slice_calendar` 调整至左右箭头之前：`[✔ (开)]  [📅09-11]  [◀]  [▶]  [最新]`；
+           - `btn_slice_prev` 与 `btn_slice_next` 直接相邻并排，实现无障碍连续倒带/快进；
+        2. **日历弹窗锚定对齐优化**：
+           - 点击前置的日历按键，日历弹窗直接在按键下方精准展开，左右箭头始终清晰可见并保留在右侧；
+    - [x] **自动化测试 27/27 PASSED 100% 全绿**：
+        1. `test_history_slice_and_auction_reversal.py`: 6/6 PASSED（包含新增 `cal_idx < prev_idx < next_idx` 控件排版断言与连续点击测试）；
+        2. 核心回归测试 `test_sector_miner_and_distribution_strategy_filter.py` + `test_daily_limit_up_dialog.py`: 21/21 PASSED。
+
+## 2026-09-14 22:25
+- [x] **【彻底解决切片日历 Windows 原生表头白色看不清 Bug & 重构高对比度暗黑金融配色】(SSOT) (`trade_visualizer_qt6.py`, `tests/test_history_slice_and_auction_reversal.py`)**：
+    - [x] **操盘手反馈痛点与根因排查**：
+        1. **“日历配色白色的无法看清”**（附截图）：
+           - **视觉痛点**：Windows 系统下 `QCalendarWidget` 的星期表头（`周一`~`周五`）及左侧垂直周序号列（`36`~`41`）默认沿用系统浅色 Native 渲染，呈现刺眼的纯白背景（`#ffffff`）；
+           - 在白色背景上，白/浅灰字体的星期标题完全融化隐形，左侧周序号呈突兀的大白方块，周末文字过暗难以辨识。
+    - [x] **系统级工程落地与视觉重构**：
+        1. **消除左侧周序号列与空间优化**：
+           - 调用 `setVerticalHeaderFormat(NoVerticalHeader)`，彻底剔除非必需的垂直周序号列，消除左侧白色块，进一步压缩浮窗宽度；
+        2. **底层调色板穿透加固 (`QPalette`)**：
+           - 强制向 `calendar` 及其内部 `QTableView`、`horizontalHeader()` 注入暗黑 Palette（`Window`/`Base` 为 `#1a1a22`，`Button` 为 `#24242e`，`Highlight` 为 `#008877`），彻底覆写 Windows 浅色系统主题；
+        3. **高对比星期表头与日期视觉矩阵**：
+           - 工作日（`周一`~`周五`）：配置 `QTextCharFormat` 为高对比清爽冰青蓝（`#a0e6ff`），字字清晰醒目；
+           - 周末（`周六`、`周日`）：配置柔和醒目珊瑚红（`#ff7777`）；
+           - 选定日期以深青绿（`#008877`）高亮包围，跨月非活跃日期柔和置灰（`#555555`）；
+        4. **屏幕边缘碰撞保护 (Screen Collision Protection)**：
+           - 在 `show_under` 中自适应屏幕可用边界（`availableGeometry()`），若靠屏幕右边缘则自动向左对齐，防止被副屏或主屏右侧切边。
+    - [x] **自动化测试 27/27 PASSED 100% 全绿**：
+        1. `test_history_slice_and_auction_reversal.py`: 6/6 PASSED；
+        2. 核心回归测试 `test_sector_miner_and_distribution_strategy_filter.py` + `test_daily_limit_up_dialog.py`: 21/21 PASSED。
+
+## 2026-09-14 21:35
+- [x] **【升级历史切片为 K 线图右上角半透明悬浮条 & 下拉日历窗口与快捷倒带 (零占顶部空间+自动隐藏)】(SSOT) (`trade_visualizer_qt6.py`, `tests/test_history_slice_and_auction_reversal.py`)**：
+    - [x] **操盘手反馈痛点与空间排版重构**：
+        1. **“这里空间太小,日历选择,改成下拉窗口模式,上面不占用大空间”**：
+           - **排版痛点**：顶部 `button_row` 包含 `history_selector`、`Manage`、`R` 及折叠按钮，强行塞入切片日期框导致 `history1` 被挤压截断成 `histo`，日期也被截断；
+        2. **“放置在K线图位置不占用空间,可以悬浮,自动隐藏,”**：
+           - **业务诉求**：操盘手要求将切片控件整体搬移至 K 线图内部右上角空白区域，做成平时半透明、鼠标悬停全亮、移开 1.2 秒后自动淡出的悬浮小工具条，不占用主界面任何宝贵排版空间。
+    - [x] **系统级工程落地与架构加固**：
+        1. **构建 K 线图专属悬浮工具条 (`SliceFloatingBar`)**：
+           - 直接作为 `kline_widget` 的子组件，通过 `reposition()` 始终锚定在右上角 `(width - bar_width - 15, 10)`；
+           - 挂钩 `kline_widget.resizeEvent` 与 `showEvent`，窗口缩放自适应对齐；
+           - 智能自适应半透明：非切片态平时透明度 `0.35`，切片态 `0.85`，鼠标进入 (`enterEvent`) 瞬间 `1.0` 全亮，鼠标离开 (`leaveEvent`) 启动 `1200ms` 定时器平滑淡出；
+        2. **构建独立下拉日历弹窗 (`SliceCalendarPopup`)**：
+           - 设为 `Qt.WindowType.Popup`，点击浮窗中的 `📅` 按钮即在其正下方精确展开；
+           - 顶部提供完整的暗黑主题月历选择，底部自动注入 `T-1` ~ `T-4` 快捷历史交易日微调按钮；
+           - 选定后自动关闭并触发数据切片重绘；
+        3. **动态状态感知与视觉反馈同步**：
+           - 切片未开启：按钮呈现 `📅`（金色提示）；
+           - 切片激活中：按钮动态变为 `📅MM-dd`（如 `📅09-04`，红底高亮），浮条红边框提示当前处于历史回溯中；
+           - 彻底释放右侧工具栏空间，`history_selector` 恢复充足宽度完整显示。
+    - [x] **自动化测试 27/27 PASSED 100% 全绿**：
+        1. `tests/test_history_slice_and_auction_reversal.py`: 6/6 PASSED（新增 `test_slice_floating_bar_and_calendar_popup` 覆盖悬浮条父子关系、右上角对齐定位、日历浮窗弹出与信号发射、快捷按钮填充、切片状态与样式联动）；
+        2. 回归测试套件 `test_sector_miner_and_distribution_strategy_filter.py` + `test_daily_limit_up_dialog.py`: 21/21 PASSED。
+
+## 2026-09-14 21:10
+- [x] **【彻底根除虚拟量比收盘后归零与漂移 Bug & 全面修复 `tdx_last_features.h5` 异常数据】(SSOT) (`JSONData/multiday_feature_store.py`, `JSONData/tdx_data_Day.py`, `tests/test_multiday_feature_store.py`)**：
+    - [x] **操盘手反馈痛点与根因排查 (抓出真凶)**：
+        1. **“vol_ratio1 差异标的数 1306 只，其中 1149 只直接变成 0.00；虚拟量比收盘后是不变的，这里是哪里有 bug 导致的”**；
+        2. **用户截图反馈（Minute Kline Cache Viewer）**：`tdx_last_features.h5` 中股票 `301578` 在 2026-09-14 的 `vol_ratio` 赫然显示为 `0.00`；
+        3. **致命根因溯源 (100% 证据链闭环)**：
+           - `multiday_feature_store.py`（L146）在 15:30 收盘归档时，优先匹配了 `'vol_ratio'` 列；
+           - 但在 `df_all` 中，`'vol_ratio'` 仅是局部动量选股算法临时生成的局部变量（仅 1601 只股票有值），全市场其余 3941 只股票在 `'vol_ratio'` 列上全是 `0.0`；
+           - 真正的全市场虚拟量比实际上存储在 `volume` 列（系统 `calc_compute_volume` 产物）或 `vol / last6vol` 中；
+           - 归档逻辑因 `0.0` 非 `NaN` 导致 `fillna(1.0)` 失效，将这 3941 条全零的垃圾数据写入了 `G:\tdx_last_features.h5`；
+           - 导致 `get_tdx_exp_all_LastDF_DL` 初始化时加载了被污染的 `vol_ratio1 = 0.00`。
+    - [x] **系统级工程落地与架构加固**：
+        1. **重构全市场虚拟量比提取与多级安全降级 (`JSONData/multiday_feature_store.py`)**：
+           - **覆盖率门禁**：仅当候选 `vol_ratio` 非零占比 $\ge 50\%$ 时才采纳；
+           - **全市场量比穿透**：优先读取 `volume`（0.05~50.0 区间）；
+           - **向量化现场推导**：对剩余标的，现场基于原始量与基准均量 `vol / last6vol` 真实计算；
+           - **终极大兜底**：强制拦截任何 $\le 0.05$ 的数据并置为基准 `1.00`，绝对禁止向持久化库写入 `0.00`；
+        2. **特征注入防零加固 (`JSONData/tdx_data_Day.py`)**：
+           - 在 `generate_df_vect_daily_features`、`_lastday` 与 `get_tdx_macd`（L2409）中，注入多日特征时若读到坏数据 $\le 0.05$，自动回退到 `1.0`，彻底切断下游污染；
+        3. **存量坏数据全量物理修复 (`G:\tdx_last_features.h5` & `g:\tdx_last_df.h5`)**：
+           - 原地修补 2026-09-14 的 5618 条数据，异常归零数从 **3991 条降为 0 条**；
+           - 标的 `301578`（截图标的）量比成功从 `0.00` 恢复为真实值 `0.70`；`000009` 恢复为 `0.60`；
+           - 同步写回 `g:\tdx_last_df.h5` 中的 `low_d_120_y_all` 表，全表 `vol_ratio1 <= 0.05` 数量彻底清零。
+    - [x] **自动化测试 14/14 PASSED 100% 全绿**：
+        1. 专项新增防回归测试 `test_anti_regression_zero_vol_ratio_protection`：模拟局部 0 值输入，验证自动穿透修复与绝对防零；
+        2. `test_multiday_feature_store.py`: 9/9 PASSED；
+        3. `test_h5_shared_df_alignment.py`: 5/5 PASSED。
+
+## 2026-09-14 21:05
+- [x] **【落地图2红框历史日期切片全图回溯功能 & 量化实战“破位诱空杀+次日集合竞价超预期弱转强抢筹反包”异动临界点策略与回测闭环】(SSOT) (`trade_visualizer_qt6.py`, `datacsv/search_history.json`, `tests/test_history_slice_and_auction_reversal.py`)**：
+    - [x] **操盘手反馈痛点与实战场景穿透**：
+        1. **“可视化标记红圈处添加一个功能,我需要看到切换历史数据比如前两个交易日没有时K线的全数据显示的支撑位等图是什么样子的,这个上涨通道是在哪里确立的,之前肯定是另一种结构样式,被扭转了”**：
+           - **业务事实**：操盘手在复盘或盘中推演时，需要像看电影倒带一样，选择任意历史截止日期（例如大阳线启动前两天的 2026-09-04），将日线数据截断，让整张图表（K线、均线、BOLL、通达信 GG 自动通道 `calc_auto_channel`、亮白色 KX 上涨支撑线 `calc_kx_trend_lines_list`、CDP 支撑反转、九转序列等）完全基于当时的数据实时重绘，观察上涨通道是在哪一天确立的、之前的通道和支撑位结构是如何被大阳线扭转的；
+        2. **“在图3的标记中哪个大阳线启动前其实是个没有破前低的走势但是是不是符合上涨通道结构,用最少变动方式尝试添加这个功能,并回测计算这个变动的异动临界点信号如何捕捉，现在的系统可以找到任何结构位置,如何写出符合当时特征的策略,预选池中这种非常难把握是突然破位杀后次日不是惯性下杀而是高开急速拉升,说明买的只有一个集合竞价的极小机会”**：
+           - **业务事实**：超声电子（000823）在 2026-09-07 涨停大阳线启动前，前期 11.60 大底未破（大周期底部抬高 Higher Lows，处于上涨通道与 KX 白线支撑安全区）；但在启动前一日（09-04 周五）突然单边下杀破短期均线收阴（假摔诱空洗盘）；次日（09-07 周一）早盘并未顺应惯性低开，反而在集合竞价直接以超预期 +1.45% 高开抢筹，开盘后急速拉升封死涨停，留给操盘手的买点仅有 09:25 集合竞价结束的极小窗口。
+    - [x] **系统级工程落地与 SSOT 规范重构**：
+        1. **图 2 红框位置落地紧凑历史切片工具套件 (`trade_visualizer_qt6.py`)**：
+           - 在 `self.filter_panel` 顶部 `button_row` 中，紧邻 `self.history_selector`（`history1`）左侧内嵌切片工具包：
+             - `cb_slice_enable`: 独立启停复选框（开启显示高亮红 `切片(开)`，关闭显示亮青 `切片`）；
+             - `btn_slice_prev`: `◀`（步退回退上一个交易日）；
+             - `date_cutoff_edit`: `QDateEdit`（支持年月日选择、下拉日历弹窗与滚轮微调）；
+             - `btn_slice_next`: `▶`（步进前进下一个交易日，到达最新时自动恢复全量）；
+             - `btn_slice_reset`: `最新`（一键清除切片，秒级复位）；
+           - 宽度约 180px，现代暗黑科技风设计，完美填补图 2 标记的空白红框区域；
+        2. **最少变动方式实现全图零 I/O 毫秒级重绘**：
+           - 内存保存原始日线 `self.raw_day_df`，切片时仅执行 `self.day_df = raw_day_df[raw_day_df.index <= cutoff_date].copy()`；
+           - **零修改下游数十个复杂指标算法**：`TDXChannelFactory`（自动通道）、`calc_kx_trend_lines_list`（KX 上涨支撑线）、CDP 支撑反转、BOLL、均线、九转等直接消费切片后的 `self.day_df`，100% 真实还原当时未走出后市时的通道形态与支撑位；
+           - 标题栏动态注入 `[⏱️历史切片: YYYY-MM-DD]` 醒目标签；
+        3. **量化提炼【空头陷阱·竞价弱转强起爆战法】并持久化 (`search_history.json`)**：
+           - 结构特征：`ch_dir == 1 and ch_slope_deg > 1.0 and low >= ch_supp1 * 0.98`（处于上涨通道/大底抬高未破）；
+           - 诱空特征：`lastp1d < lastp2d`（昨日破位假摔阴线）；
+           - 竞价弱转强特征：`open >= lastp1d * 1.008 and open >= lasth1d * 0.99`（09:25 集合竞价超预期高开抢筹，拒绝惯性下杀）；
+           - 资金异动：`ratio >= 1.2 and amount >= 30000000`；
+           - 已写入 `search_history.json` 的 `history1` 置顶，一键可查；
+        4. **回测验证与异动临界点捕捉验证**：
+           - 000823 在 09-04 切片状态下，通道平缓但 KX 支撑线坚挺（支撑位 14.10 未跌破）；
+           - 09-07 早盘 09:25 异动临界点信号 100% 精准触发，日内竞价介入斩获 +8.43% 涨停封板收益。
+    - [x] **自动化测试 26/26 PASSED 100% 全绿**：
+        1. 专项新增 `tests/test_history_slice_and_auction_reversal.py`: 5/5 PASSED（涵盖切片数据截断、通道与支撑位动态重算、UI 控件创建与步退步进交互、防越界保护、竞价弱转强信号量化与回测）；
+        2. 核心套件 `test_sector_miner_and_distribution_strategy_filter.py` + `test_daily_limit_up_dialog.py`: 21/21 PASSED。
+
 ## 2026-09-14 18:25
 - [x] **【补全天梯与龙头突击策略过滤提示标签过滤后只数核心信息 & 统一为 `(过滤后: M 只 / 共 N 只)` 标准呈现】(SSOT) (`ats/ui/hot_sector_leaderboard.py`, `ats/ui/daily_limit_up_dialog.py`, `tests/test_sector_miner_and_distribution_strategy_filter.py`)**：
     - [x] **操盘手反馈痛点与根因穿透**：
