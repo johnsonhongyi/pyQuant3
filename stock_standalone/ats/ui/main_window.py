@@ -50,6 +50,7 @@ from ats.swing_tracker import SwingTracker
 from ats.signal_ledger import SignalLedger
 from ats.volume_profiler import VolumeProfiler
 from ats.session_snapshot import SessionSnapshot
+from ats.ui.ats_window_manager import ATSWindowManager
 from JohnsonUtil import commonTips as cct
 
 
@@ -1868,6 +1869,7 @@ class ATSMainWindow(QMainWindow):
         self.signal_ledger = get_signal_ledger()
         self.volume_profiler = VolumeProfiler()
         self.session_snapshot = SessionSnapshot()
+        self.window_manager = ATSWindowManager.get_instance()
         import threading
         self.hdf5_history_lock = threading.Lock()
         
@@ -6715,5 +6717,37 @@ class ATSMainWindow(QMainWindow):
             mpd.open_multi_period_tester(parent_window=self)
         except Exception as e:
             print(f"[MultiPeriod] Failed to open internal MultiPeriodDialog: {e}")
+
+    # =========================================================================
+    # 🪟 ATS 窗口位置独立快照管理（对齐 Tk 槽位体系，防多屏覆盖）
+    # =========================================================================
+    def save_window_snapshot(self, slot: int = 1):
+        """保存当前全量 ATS 窗口位置快照到指定槽位 (1, 2, 3)"""
+        if hasattr(self, "window_manager") and self.window_manager:
+            res = self.window_manager.save_snapshot(slot=slot, main_window=self)
+            total = res.get("total_windows", 0)
+            ymd = res.get("date_ymd", "")
+            msg = f"📍 槽位 {slot} 快照已保存: {ymd} (共{total}个窗口已锁定)"
+            if hasattr(self, "status_bar") and self.status_bar:
+                self.status_bar.showMessage(msg, 6000)
+            return res
+        return {}
+
+    def restore_window_snapshot(self, slot: int = 1):
+        """从指定槽位 (1, 2, 3) 恢复全量 ATS 窗口位置快照（消除多屏覆盖与越界）"""
+        if hasattr(self, "window_manager") and self.window_manager:
+            count, restored = self.window_manager.restore_snapshot(slot=slot, main_window=self)
+            slots = self.window_manager.get_snapshot_slots_info()
+            ymd = slots.get(slot, {}).get("date_ymd", "")
+            date_info = f" [{ymd}]" if ymd else ""
+            if count > 0:
+                msg = f"🔧 槽位 {slot} 快照已恢复{date_info}: 共{count}个窗口已精准归位，覆盖消除"
+            else:
+                msg = f"⚠️ 槽位 {slot} 尚无有效快照，请先保存"
+            if hasattr(self, "status_bar") and self.status_bar:
+                self.status_bar.showMessage(msg, 6000)
+            return count, restored
+        return 0, []
+
 
 
