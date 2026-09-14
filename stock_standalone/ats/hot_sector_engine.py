@@ -50,6 +50,42 @@ def is_valid_sector_name(sec: Any) -> bool:
     return True
 
 
+def is_stock_matched_sector(cat_str: str, target_sector: str, synonyms: Optional[List[str]] = None) -> bool:
+    """
+    严密验证个股的 category 标签列表中是否真实匹配目标板块。
+    以分号 ';' 切割独立标签，剥离 '概念/板块/行业' 后缀进行精确等值比对。
+    彻底杜绝 '新型烟草(电子烟)' 误匹配 '烟草'、'卫星通信' 误匹配 '通信' 等子串包含误伤。
+    支持可选的 synonyms 同义词列表扩展。
+    """
+    if not cat_str or not target_sector:
+        return False
+    import re
+    targets = [str(target_sector).strip()]
+    if synonyms:
+        targets.extend([str(s).strip() for s in synonyms if s])
+
+    clean_targets = set()
+    for t in targets:
+        if not t:
+            continue
+        clean_targets.add(t)
+        clean_t = re.sub(r'(概念|板块|行业)$', '', t).strip()
+        if clean_t:
+            clean_targets.add(clean_t)
+
+    tags = [t.strip() for t in str(cat_str).split(';') if t.strip()]
+    for tag in tags:
+        # 1. 完全一致
+        if tag in clean_targets:
+            return True
+        # 2. 剥离 '概念/板块/行业' 后精确一致 (如 'PCB概念' 对应目标 'PCB')
+        tag_clean = re.sub(r'(概念|板块|行业)$', '', tag).strip()
+        if tag_clean in clean_targets:
+            return True
+    return False
+
+
+
 class HotSectorEngine:
     """
     强势板块龙头突击跟单引擎 (单例)
@@ -168,12 +204,12 @@ class HotSectorEngine:
                     target_codes_set.add(c_clean)
                     sector_map[c_clean] = sec
 
-        # 2. 如果 current_df 包含 category，进行板块成分股动态补全
+        # 2. 如果 current_df 包含 category，进行板块成分股动态补全 (使用独立标签精确匹配，杜绝子串误伤)
         if current_df is not None and not current_df.empty and 'category' in current_df.columns:
             try:
                 for sec in valid_top_sectors:
-                    # 匹配 category 列包含板块名的股票 (禁用 regex 避免括号告警)
-                    mask = current_df['category'].astype(str).str.contains(sec, case=False, na=False, regex=False)
+                    # 使用严格的独立标签精准匹配，杜绝粗暴 str.contains 导致 '新型烟草(电子烟)' 误匹配 '烟草'
+                    mask = current_df['category'].astype(str).apply(lambda cat: is_stock_matched_sector(cat, sec))
                     df_matched = current_df[mask]
                     for c_idx in df_matched.index[:40]: # 每个强板块最多取40只
                         c_clean = str(c_idx).strip().zfill(6)

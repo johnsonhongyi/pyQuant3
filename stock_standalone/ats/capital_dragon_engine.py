@@ -1239,7 +1239,7 @@ class CapitalDragonEngine:
                     prev_vol = prev_data.get(f'vol_{k}', 1.0) if prev_data else 1.0
                     cur_vol = float(info.get('vol', 0.0) or 0.0)
                     try:
-                        ratio_t = float(cct.get_work_time_ratio(resample='d'))
+                        ratio_t = float(cct.get_work_time_ratio(resample='d', now_time=now_dt))
                     except Exception:
                         ratio_t = 1.0
                     ratio_t = max(0.05, min(ratio_t, 1.0))
@@ -1259,7 +1259,7 @@ class CapitalDragonEngine:
         self._bg_market_summary_ts = time.time()
 
     def _build_summary_result(self, extracted: Dict, prev_data: Dict, now_dt: Any) -> Dict[str, Any]:
-        """从 extracted 和 prev_data 组装大盘摘要结果字典（纯计算，无 IO）"""
+        """从 extracted 和 prev_data 组装大盘摘要结果字典（纯计算，无 IO，支持较昨同期对比与全天虚拟量预测）"""
         import datetime
         if now_dt is None:
             now_dt = datetime.datetime.now()
@@ -1277,20 +1277,52 @@ class CapitalDragonEngine:
 
         prev_total = prev_data.get('total', 0.0) if prev_data else 0.0
         diff_amt = 0.0
+        diff_label = "较昨"
+        proj_total = total_amt
+        proj_str = ""
+        prev_same_amt = prev_total
+        is_intraday = False
+
+        # 计算日内时间进度权重
+        try:
+            ratio_t = float(cct.get_work_time_ratio(resample='d', now_time=now_dt))
+        except Exception:
+            ratio_t = 1.0
+        ratio_t = max(0.05, min(ratio_t, 1.0))
+
         if prev_total > 0:
             now_hour = now_dt.hour
-            if now_hour >= 15 or now_hour < 9:
-                diff_amt = round(total_amt - prev_total, 1)
+            now_minute = now_dt.minute
+            # 盘中时段判定：交易日且未到 15:00 收盘，且时间进度未满 1.0
+            is_intraday_time = (9 <= now_hour < 15) and not (now_hour == 9 and now_minute < 20)
+            if is_intraday_time and ratio_t < 1.0:
+                is_intraday = True
+                # ① 昨日同期估算基准 (亿元)
+                prev_same_amt = round(prev_total * ratio_t, 1)
+                # ② 较昨日同期增减额 (放量为正，缩量为负)
+                diff_amt = round(total_amt - prev_same_amt, 1)
+                diff_label = "较同期"
+                # ③ 全天预估虚拟成交额 (按日内时段加速进度外推)
+                proj_total = round(total_amt / ratio_t, 1)
+                proj_str = f"{proj_total / 10000.0:.2f}万亿" if proj_total >= 10000.0 else f"{proj_total:.1f}亿"
             else:
-                try:
-                    ratio_t = float(cct.get_work_time_ratio(resample='d'))
-                except Exception:
-                    ratio_t = 1.0
-                ratio_t = max(0.05, min(ratio_t, 1.0))
-                diff_amt = round(total_amt - (prev_total * ratio_t), 1)
+                # 盘后或非交易日：全天实际收盘额对比昨日全天收盘额
+                prev_same_amt = prev_total
+                diff_amt = round(total_amt - prev_total, 1)
+                diff_label = "较昨"
+                proj_total = total_amt
+                proj_str = f"{proj_total / 10000.0:.2f}万亿" if proj_total >= 10000.0 else f"{proj_total:.1f}亿"
 
         diff_str = f"+{diff_amt:.1f}亿" if diff_amt > 0 else f"{diff_amt:.1f}亿"
         diff_color = "#ff5555" if diff_amt >= 0 else "#00ff88"
+
+        # 盘中展示较昨同期与全天虚拟预估量，盘后展示较昨全天收盘对比
+        if is_intraday and proj_str:
+            diff_part_html = f"({diff_label} {diff_str} &nbsp;|&nbsp; 虚拟 {proj_str})"
+            diff_part_plain = f"({diff_label} {diff_str} | 虚拟 {proj_str})"
+        else:
+            diff_part_html = f"({diff_label} {diff_str})"
+            diff_part_plain = f"({diff_label} {diff_str})"
 
         formatted_html = (
             f"<span style='color:#8e8e93;'>上证:</span> <span style='color:#ffffff; font-weight:bold;'>{sh_amt:.1f}亿</span> <span style='color:#00ff88;'>({sh_vr:.2f}x)</span> &nbsp;|&nbsp; "
@@ -1298,13 +1330,49 @@ class CapitalDragonEngine:
             f"<span style='color:#8e8e93;'>创业板:</span> <span style='color:#ffffff; font-weight:bold;'>{cy_amt:.1f}亿</span> <span style='color:#00ff88;'>({cy_vr:.2f}x)</span> &nbsp;|&nbsp; "
             f"<span style='color:#8e8e93;'>北证:</span> <span style='color:#ffffff; font-weight:bold;'>{bj_amt:.1f}亿</span> <span style='color:#00ff88;'>({bj_vr:.2f}x)</span> &nbsp;|&nbsp; "
             f"<span style='color:#8e8e93;'>全市:</span> <span style='color:#e3b341; font-weight:bold;'>{total_amt:.1f}亿</span> "
-            f"<span style='color:{diff_color}; font-weight:bold;'>(较昨 {diff_str})</span>"
+            f"<span style='color:{diff_color}; font-weight:bold;'>{diff_part_html}</span>"
         )
         plain_text = (
             f"上证: {sh_amt:.1f}亿 ({sh_vr:.2f}x) | 深证: {sz_amt:.1f}亿 ({sz_vr:.2f}x) | "
             f"创业板: {cy_amt:.1f}亿 ({cy_vr:.2f}x) | 北证: {bj_amt:.1f}亿 ({bj_vr:.2f}x) | "
-            f"全市: {total_amt:.1f}亿 (较昨 {diff_str})"
+            f"全市: {total_amt:.1f}亿 {diff_part_plain}"
         )
+
+        if is_intraday:
+            diff_pct = (diff_amt / max(prev_same_amt, 1.0)) * 100.0
+            diff_pct_str = f"+{diff_pct:.2f}%" if diff_pct > 0 else f"{diff_pct:.2f}%"
+            tooltip_text = (
+                f"📊 全市成交额与虚拟量统计 (盘中实时)\n"
+                f"────────────────────────\n"
+                f"• 今日当前已成交: {total_amt:.1f} 亿元 (交易进度: {ratio_t*100.0:.1f}%)\n"
+                f"• 昨日同期成交额: {prev_same_amt:.1f} 亿元\n"
+                f"• 较昨同期增减额: {diff_str} ({diff_pct_str})\n"
+                f"• 全天预估虚拟量: {proj_str} (按日内时段加速曲线外推)\n"
+                f"• 昨日全天总成交: {prev_total:.1f} 亿元\n"
+                f"────────────────────────\n"
+                f"• 四大指数虚拟量比:\n"
+                f"  上证指数: {sh_amt:.1f}亿 ({sh_vr:.2f}x)\n"
+                f"  深证成指: {sz_amt:.1f}亿 ({sz_vr:.2f}x)\n"
+                f"  创业板指: {cy_amt:.1f}亿 ({cy_vr:.2f}x)\n"
+                f"  北证50:   {bj_amt:.1f}亿 ({bj_vr:.2f}x)"
+            )
+        else:
+            diff_pct = (diff_amt / max(prev_total, 1.0)) * 100.0 if prev_total > 0 else 0.0
+            diff_pct_str = f"+{diff_pct:.2f}%" if diff_pct > 0 else f"{diff_pct:.2f}%"
+            tooltip_text = (
+                f"📊 全市成交额统计 (收盘完结)\n"
+                f"────────────────────────\n"
+                f"• 今日全天总成交: {total_amt:.1f} 亿元\n"
+                f"• 昨日全天总成交: {prev_total:.1f} 亿元\n"
+                f"• 全天较昨日增减: {diff_str} ({diff_pct_str})\n"
+                f"────────────────────────\n"
+                f"• 四大指数全天量价:\n"
+                f"  上证指数: {sh_amt:.1f}亿 ({sh_vr:.2f}x)\n"
+                f"  深证成指: {sz_amt:.1f}亿 ({sz_vr:.2f}x)\n"
+                f"  创业板指: {cy_amt:.1f}亿 ({cy_vr:.2f}x)\n"
+                f"  北证50:   {bj_amt:.1f}亿 ({bj_vr:.2f}x)"
+            )
+
         return {
             "sh_amt": sh_amt, "sh_vr": sh_vr,
             "sz_amt": sz_amt, "sz_vr": sz_vr,
@@ -1313,6 +1381,13 @@ class CapitalDragonEngine:
             "total_amt": total_amt,
             "diff_amt": diff_amt,
             "diff_str": diff_str,
+            "diff_label": diff_label,
+            "prev_same_amt": prev_same_amt,
+            "proj_total_amt": proj_total,
+            "proj_total_str": proj_str,
+            "is_intraday": is_intraday,
+            "ratio_t": ratio_t,
+            "tooltip_text": tooltip_text,
             "formatted_html": formatted_html,
             "plain_text": plain_text
         }
