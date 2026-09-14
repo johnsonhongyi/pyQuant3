@@ -343,3 +343,42 @@ def test_anti_regression_low_quality_coverage_protection(temp_h5_store):
         df_check = store.get(HDF5_TABLE_NAME)
     assert abs(float(df_check['ratio'].mean()) - 3.5) < 1e-4
 
+
+def test_anti_regression_zero_vol_ratio_protection(temp_h5_store):
+    """
+    防回归专项测试：
+    当传入的 DataFrame 中存在局部残缺的 vol_ratio (存在大量 0.0)，
+    archive_daily_features 必须能自动穿透识别 volume 或 vol/last6vol，
+    且终极兜底确保任何入库记录的 vol_ratio 绝不出现 <= 0.05 的 0 值。
+    """
+    n_stocks = 200
+    mock_records = []
+    for i in range(n_stocks):
+        code = f"{i:06d}"
+        # 模拟 70% 股票被错误置为 vol_ratio = 0.0 (如动量选股残留)
+        is_partial = (i % 3 != 0)
+        vr_val = 0.0 if is_partial else 1.5
+        mock_records.append({
+            'code': code,
+            'ratio': round(1.0 + i * 0.05, 2),
+            'vol_ratio': vr_val,
+            'volume': 1.2,          # 真实的虚拟量比强度
+            'vol': 100000.0,
+            'last6vol': 90000.0     # 真实量能比 1.11
+        })
+    df_partial = pd.DataFrame(mock_records)
+
+    ok = archive_daily_features(df_partial, date_str="2026-09-14", store_path=temp_h5_store)
+    assert ok is True
+
+    # 验证持久化库中的数据
+    with h5a.SafeHDFStore(temp_h5_store, mode='r') as store:
+        df_stored = store.get(HDF5_TABLE_NAME)
+
+    assert len(df_stored) == n_stocks
+    zero_cnt = (df_stored['vol_ratio'] <= 0.05).sum()
+    assert zero_cnt == 0, f"持久化库中不应存在归零的 vol_ratio，但发现了 {zero_cnt} 条！"
+    # 验证被修复的股票数值在合理区间
+    assert (df_stored['vol_ratio'] >= 0.1).all()
+
+

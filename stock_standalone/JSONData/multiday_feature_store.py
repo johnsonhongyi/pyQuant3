@@ -143,24 +143,54 @@ def archive_daily_features(
                 ratio_col = col
                 break
 
-        vol_ratio_col = None
+        # 智能查找全市场虚拟量比 (SSOT)
+        # 1. 优先检查 vol_ratio 候选列，但必须通过全市场非零覆盖率门禁
+        vol_ratio_s = None
         for col in ['vol_ratio', 'volume_ratio', 'vr', '量比']:
             if col in df_src.columns:
-                vol_ratio_col = col
-                break
+                s = pd.to_numeric(df_src[col], errors='coerce').fillna(0.0)
+                # 只有当该列有效非零占比足够高 (>= 50%) 时，才认定为全市场有效量比
+                if len(s) > 0 and (s > 0.05).mean() >= 0.5:
+                    vol_ratio_s = s.copy()
+                    break
 
-        if ratio_col is None:
-            logger.warning("archive_daily_features: neither 'ratio' nor 'turnover' found in df_today, skipping archive.")
-            return False
+        # 2. 如果 vol_ratio 候选列缺失或大部分为 0 (如动量选股残留局部列)，检查 volume 列 (已被 calc_compute_volume 转换为虚拟量比强度)
+        if vol_ratio_s is None and 'volume' in df_src.columns:
+            s_vol = pd.to_numeric(df_src['volume'], errors='coerce').fillna(0.0)
+            if len(s_vol) > 0 and 0 < s_vol.max() <= 50.0 and s_vol.quantile(0.9) <= 20.0:
+                vol_ratio_s = s_vol.copy()
 
-        r_check = pd.to_numeric(df_src[ratio_col], errors='coerce').fillna(0.0)
-        if len(r_check) > 100 and (r_check > 0).mean() < 0.02 and not is_test_env:
-            logger.warning("archive_daily_features: 传入的 ratio 列非零数据占比不足 2%，疑似异常脏数据，拒绝持久化覆盖！")
-            return False
+        # 3. 若仍未提取到有效量比序列，初始化为基准 1.0
+        if vol_ratio_s is None:
+            vol_ratio_s = pd.Series(1.0, index=df_src.index)
 
-        if vol_ratio_col is None:
-            df_src['vol_ratio'] = 1.0
-            vol_ratio_col = 'vol_ratio'
+        # 4. 向量化补齐：对依然为 0 或极其微小 (<= 0.05) 的标的，结合原始成交量 (vol) 与历史均量 (last6vol/lastv1d) 现场计算全天实际量比
+        need_fill_mask = (vol_ratio_s <= 0.05)
+        if need_fill_mask.any():
+            raw_vol = None
+            for v_col in ('vol', 'volume', 'trade_vol'):
+                if v_col in df_src.columns:
+                    cand = pd.to_numeric(df_src[v_col], errors='coerce').fillna(0.0)
+                    if (cand > 0).any():
+                        raw_vol = cand
+                        break
+            
+            base_vol = None
+            for b_col in ('last6vol', 'lastv1d', 'l6vol', 'prev_vol', 'vol_ma5'):
+                if b_col in df_src.columns:
+                    cand = pd.to_numeric(df_src[b_col], errors='coerce').fillna(0.0)
+                    if (cand > 0).any():
+                        base_vol = cand.replace(0.0, np.nan)
+                        break
+
+            if raw_vol is not None and base_vol is not None:
+                calc_vr = (raw_vol / base_vol).fillna(1.0).clip(0.1, 50.0)
+                vol_ratio_s.loc[need_fill_mask] = calc_vr.loc[need_fill_mask]
+
+        # 5. 终极大兜底：所有仍然 <= 0.05 的值强制置为 1.0 (正常基准量比)，绝对严禁将 0.00 作为量比持久化入库！
+        vol_ratio_s = vol_ratio_s.replace(0.0, 1.0)
+        vol_ratio_s[vol_ratio_s <= 0.05] = 1.0
+        clean_vol_ratio = vol_ratio_s.clip(0.1, 50.0).round(2).values
 
         # 规范化代码格式 (6位纯数字字符串)
         df_src['code'] = df_src['code'].astype(str).str.strip().str.zfill(6)
@@ -176,7 +206,7 @@ def archive_daily_features(
             'code': df_src['code'].values,
             'date': date_str,
             'ratio': pd.to_numeric(df_src[ratio_col], errors='coerce').fillna(0.0).astype(np.float64).round(2).values,
-            'vol_ratio': pd.to_numeric(df_src[vol_ratio_col], errors='coerce').fillna(1.0).astype(np.float64).round(2).values
+            'vol_ratio': clean_vol_ratio[valid_mask] if len(clean_vol_ratio) == len(valid_mask) else pd.to_numeric(vol_ratio_s[valid_mask], errors='coerce').fillna(1.0).astype(np.float64).round(2).values
         })
 
         # 3. 读取已有 HDF5 历史数据
