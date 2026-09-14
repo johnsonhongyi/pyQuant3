@@ -290,8 +290,22 @@ def is_tdx_trading_allowed(now_dt: Optional[datetime] = None) -> Tuple[bool, str
     t = now.time()
 
     # 2. 核心交易时间轴判定
+    # 0-1. 早盘服务器初始化与清算时段: 08:45:00 ~ 09:15:00 (通达信主站清算重置与除权除息数据装载期)
+    if dtime(8, 45, 0) <= t < dtime(9, 15, 0):
+        return False, f"通达信主站早盘数据初始化中 ({t_str})", {
+            "stage": "SERVER_INITIALIZING", "is_bidding": False, "is_locked": False, "can_cancel": False,
+            "is_server_init": True
+        }
+
+    # 0-2. 早盘集合竞价准备期: 09:15:00 ~ 09:15:59 (准备进入竞价试撮合)
+    elif dtime(9, 15, 0) <= t < dtime(9, 16, 0):
+        return False, f"早盘集合竞价准备期 ({t_str})", {
+            "stage": "AUCTION_PREPARING", "is_bidding": False, "is_locked": False, "can_cancel": False,
+            "is_server_init": False
+        }
+
     # A. 早盘集合竞价: 09:16:00 ~ 09:19:59 (试撮合拟合阶段, 可撤单)
-    if dtime(9, 16, 0) <= t < dtime(9, 20, 0):
+    elif dtime(9, 16, 0) <= t < dtime(9, 20, 0):
         return True, f"早盘试撮合意图拟合 ({t_str})", {
             "stage": "BIDDING_SIMULATION", "is_bidding": True, "is_locked": False, "can_cancel": True
         }
@@ -395,6 +409,12 @@ class TDXRealtimeFetcher:
         self.max_backoff_interval: float = max(15.0, _base_intv * 3.0)
         self._consecutive_slow_or_errors: int = 0
         self._consecutive_healthy: int = 0
+
+        # 🛡️ 早盘服务器初始化缓重试延时与全局连接失败熔断器 (防死循环无限重试与服务器封禁)
+        self._global_connect_fail_count: int = 0
+        self._global_connect_cooldown_until: float = 0.0
+        self._last_server_init_warn_time: float = 0.0
+        self._last_connect_fail_warn_time: float = 0.0
 
 
         # 工业级 1 分钟滑动窗口价格时序队列 {code: deque([(t, price), ...], maxlen=60)}
@@ -668,12 +688,15 @@ class TDXRealtimeFetcher:
         t0 = time.time()
         try:
             if test_api.connect(ip, port, time_out=0.8):
-                # 必须验证能成功拉取真实行情且有效返回数据
+                # 必须验证能成功拉取真实行情且有效返回数据 (开盘前/早盘 price 为 0.0，但 last_close > 0)
                 quotes = test_api.get_security_quotes([(0, "000001"), (1, "600519")])
                 cost = (time.time() - t0) * 1000
                 test_api.disconnect()
-                if quotes and len(quotes) >= 1 and safe_float(quotes[0].get("price", 0.0)) > 0:
-                    return (cost, name, ip, port)
+                if quotes and len(quotes) >= 1:
+                    p = safe_float(quotes[0].get("price", 0.0))
+                    lc = safe_float(quotes[0].get("last_close", 0.0))
+                    if p > 0 or lc > 0:
+                        return (cost, name, ip, port)
         except Exception:
             pass
         return None
@@ -709,40 +732,71 @@ class TDXRealtimeFetcher:
             self.add_log(f"⚠️ 动态测速未探测到有效主站，使用默认高可用兜底主站: [{fb[0]}] ({fb[1]}:{fb[2]})", level="WARN")
 
     def _probe_host_alive(self, api: TdxHq_API) -> bool:
-        """轻量探针：验证连接的主站是否能真实返回股票行情数据 (防假活/拒绝服务节点)"""
+        """轻量探针：验证连接的主站是否能真实返回股票行情数据 (防假活/拒绝服务节点，兼容早盘未开盘 price==0 但昨收有效)"""
         try:
             q = api.get_security_quotes([(0, "000001")])
-            return bool(q and len(q) >= 1 and safe_float(q[0].get("price", 0.0)) > 0)
+            if q and len(q) >= 1:
+                p = safe_float(q[0].get("price", 0.0))
+                lc = safe_float(q[0].get("last_close", 0.0))
+                return bool(p > 0 or lc > 0)
+            return False
         except Exception:
             return False
 
-    def connect(self, probe: bool = True) -> bool:
-        """建立或确保连接（带真实行情探针健康校验）"""
+    def connect(self, probe: bool = True, force: bool = False) -> bool:
+        """建立或确保连接（带真实行情探针健康校验、早盘初始化缓重试延时与全局连接熔断保护）"""
         with self._conn_lock:
             if self._is_connected and self.api is not None:
                 return True
+
+            now_t = time.time()
+            now_dt = datetime.now()
+            is_allowed, stage_desc, stage_meta = is_tdx_trading_allowed(now_dt)
+            is_server_init = stage_meta.get("is_server_init", False)
+
+            # 🛡️ 守卫 1: 检查是否处于早盘服务器初始化缓重试冷却或全局连接熔断期 (force=True 时可跳过)
+            if not force and now_t < self._global_connect_cooldown_until:
+                remain_s = max(1, int(self._global_connect_cooldown_until - now_t))
+                if is_server_init:
+                    if now_t - self._last_server_init_warn_time > 60.0:
+                        self._last_server_init_warn_time = now_t
+                        self.add_log(f"⏳ [早盘初始化] 主站正在初始化今日数据 (08:45~09:15)，启动缓重试延时保护 (冷却余 {remain_s}s，预计 09:15 自动就绪)", level="INFO")
+                else:
+                    if now_t - self._last_connect_fail_warn_time > 60.0:
+                        self._last_connect_fail_warn_time = now_t
+                        self.add_log(f"💤 [连接熔断保护] 上次所有主站连接均失败，处于指数退避冷却中 (剩余 {remain_s}s)，避免高频尝试引发 IP 受限", level="WARN")
+                return False
 
             if not self.current_host:
                 self._init_best_server()
 
             if not self.current_host:
                 self.add_log("❌ 无可用 TDX 服务器列表，连接失败", level="ERROR")
+                self._global_connect_cooldown_until = now_t + 30.0
                 return False
 
             name, ip, port = self.current_host
             self.api = TdxHq_API(heartbeat=False)
             try:
                 if self.api.connect(ip, port, time_out=1.2):
-                    # 必须验证真实行情探针
+                    # 必须验证真实行情探针 (开盘前/早盘兼容 price==0 但昨收有效)
                     if not probe or self._probe_host_alive(self.api):
                         self._is_connected = True
+                        self._global_connect_fail_count = 0
+                        self._global_connect_cooldown_until = 0.0
                         self.add_log(f"已成功连接到主站 [{name}] ({ip}:{port}) (行情探针正常)", level="INFO")
                         return True
                     else:
-                        self.add_log(f"主站 [{name}] ({ip}:{port}) 建立连接但未响应盘口行情(假活节点)，立即触发故障切换", level="WARN")
+                        if is_server_init:
+                            self.add_log(f"主站 [{name}] ({ip}:{port}) 早盘数据初始化中暂无盘口响应，启动缓重试延时保护", level="INFO")
+                        else:
+                            self.add_log(f"主站 [{name}] ({ip}:{port}) 建立连接但未响应盘口行情(假活节点)，立即触发故障切换", level="WARN")
                         self.disconnect()
             except Exception as e:
-                self.add_log(f"连接主站 [{name}] ({ip}:{port}) 失败: {e}", level="WARN")
+                if is_server_init:
+                    self.add_log(f"主站 [{name}] ({ip}:{port}) 早盘初始化连接中断: {e}，启动缓重试延时保护", level="INFO")
+                else:
+                    self.add_log(f"连接主站 [{name}] ({ip}:{port}) 失败: {e}", level="WARN")
                 self.disconnect()
 
             # 故障转移：按活跃服务器池逐个探查可用节点
@@ -752,7 +806,9 @@ class TDXRealtimeFetcher:
                     if (fb[1], fb[2]) != (ip, port):
                         failover_targets.append((150.0, fb[0], fb[1], fb[2]))
 
-            for cost, f_name, f_ip, f_port in failover_targets[:8]:
+            # 🛡️ 早盘初始化期间最多仅快速尝试 1 个备用主站，常规时段最多尝试 8 个
+            max_try = 1 if is_server_init else 8
+            for cost, f_name, f_ip, f_port in failover_targets[:max_try]:
                 try:
                     self.api = TdxHq_API(heartbeat=False)
                     if self.api.connect(f_ip, f_port, time_out=1.2):
@@ -760,21 +816,50 @@ class TDXRealtimeFetcher:
                             self._is_connected = True
                             self.current_host = (f_name, f_ip, f_port)
                             self.latency_ms = cost
+                            self._global_connect_fail_count = 0
+                            self._global_connect_cooldown_until = 0.0
                             self.add_log(f"故障切换成功连接到备用服务器 [{f_name}] ({f_ip}:{f_port}), 延迟: {cost:.1f}ms", level="INFO")
                             return True
                         else:
                             self.disconnect()
                 except Exception as e_failover:
-                    self.add_log(f"尝试备用服务器 [{f_name}] ({f_ip}:{f_port}) 失败: {e_failover}", level="WARN")
+                    if not is_server_init:
+                        self.add_log(f"尝试备用服务器 [{f_name}] ({f_ip}:{f_port}) 失败: {e_failover}", level="WARN")
                     self.disconnect()
                     continue
 
-            self.add_log("所有备用 TDX HQ 服务器连接均失败，网络或 IP 可能受限", level="ERROR")
+            # 🛡️ 记录全局连接失败熔断与早盘缓重试冷却
+            self._global_connect_fail_count += 1
+            if is_server_init:
+                # 早盘服务器初始化缓重试延时计算：离 09:15 越远冷却越长，动态逼近
+                now_time = now_dt.time()
+                if now_time < dtime(9, 5, 0):
+                    backoff_sec = 60.0
+                elif now_time < dtime(9, 12, 0):
+                    backoff_sec = 45.0
+                else:
+                    backoff_sec = 20.0
+                self._global_connect_cooldown_until = now_t + backoff_sec
+                if now_t - self._last_server_init_warn_time > 60.0:
+                    self._last_server_init_warn_time = now_t
+                    self.add_log(f"⏳ [早盘初始化] 通达信主站群正在初始化今日盘口数据 (08:45~09:15)，启动缓重试延时保护 (冷却 {int(backoff_sec)}s，预计 09:15 自动恢复)", level="INFO")
+            else:
+                backoff_sec = min(60.0, 5.0 * (2 ** min(self._global_connect_fail_count - 1, 4)))
+                self._global_connect_cooldown_until = now_t + backoff_sec
+                if now_t - self._last_connect_fail_warn_time > 60.0:
+                    self._last_connect_fail_warn_time = now_t
+                    self.add_log(f"❌ 所有备用 TDX HQ 服务器连接均失败，网络或 IP 可能受限，启动熔断保护 (冷却 {int(backoff_sec)}s)", level="ERROR")
             return False
 
-    def auto_failover(self) -> bool:
+    def auto_failover(self, force: bool = False) -> bool:
         """【🚀 自动故障转移】主动断开异常主站并切换至下一个可用备用主站"""
         with self._conn_lock:
+            now_dt = datetime.now()
+            _, _, stage_meta = is_tdx_trading_allowed(now_dt)
+            if not force and stage_meta.get("is_server_init", False):
+                # 早盘服务器初始化期间主站无盘口属于正常现象，坚决不触发 auto_failover 震荡
+                return False
+
             old_host = self.current_host
             self.disconnect()
             curr_ip_port = (old_host[1], old_host[2]) if old_host else None
@@ -786,7 +871,7 @@ class TDXRealtimeFetcher:
 
             for cost, f_name, f_ip, f_port in candidate_pool:
                 self.current_host = (f_name, f_ip, f_port)
-                if self.connect(probe=True):
+                if self.connect(probe=True, force=force):
                     self.latency_ms = cost
                     self.add_log(f"🔄 自动故障转移成功：已由异常主站切换至 [{f_name}] ({f_ip}:{f_port}), 延迟: {cost:.1f}ms", level="INFO")
                     # 清空因异常主站导致的误冷却标的
@@ -799,7 +884,7 @@ class TDXRealtimeFetcher:
             for f_name, f_ip, f_port in FALLBACK_TDX_HOSTS:
                 if (f_ip, f_port) != curr_ip_port:
                     self.current_host = (f_name, f_ip, f_port)
-                    if self.connect(probe=True):
+                    if self.connect(probe=True, force=force):
                         self.latency_ms = 150.0
                         self.add_log(f"🔄 自动故障转移成功：已切换至兜底主站 [{f_name}] ({f_ip}:{f_port})", level="INFO")
                         self._unlisted_or_dormant_codes.clear()
@@ -1113,8 +1198,12 @@ class TDXRealtimeFetcher:
 
         with self._conn_lock:
             if not self._is_connected:
-                if not self.connect():
-                    self.add_log(f"无法建立 TDX 连接，跳过获取 {len(active_codes)} 只标的行情", level="ERROR")
+                # 🛡️ 守卫: 若处于早盘初始化缓重试延时或全局连接熔断冷却中，直接复用缓存，绝不进行网络阻塞与重复尝试
+                if not force and now_t < self._global_connect_cooldown_until:
+                    return cached_results
+                if not self.connect(force=force):
+                    if not stage_meta.get("is_server_init", False):
+                        self.add_log(f"无法建立 TDX 连接，跳过获取 {len(active_codes)} 只标的行情", level="WARN")
                     return cached_results
 
             for i in range(0, len(active_codes), chunk_size):
@@ -1166,7 +1255,8 @@ class TDXRealtimeFetcher:
                     else:
                         self._consecutive_empty_batches += 1
                         # 🚨 若当前主站连续 2 个批次都未返回盘口数据，极大概率为主站假死或流控拒绝，立即触发自动故障转移！
-                        if self._consecutive_empty_batches >= 2:
+                        # 🛡️ 守卫: 早盘服务器初始化时段 (08:45~09:15) 无盘口属于正常维护，禁止触发故障转移震荡
+                        if self._consecutive_empty_batches >= 2 and not stage_meta.get("is_server_init", False):
                             self.add_log(f"⚠️ [TDX故障自愈] 主站 [{host_info}] 连续批次未返回盘口数据，疑似失效或假死，立即自动故障转移！", level="WARN")
                             if self.auto_failover():
                                 try:
@@ -2603,7 +2693,7 @@ class TDXRealtimeFetcher:
                     stop_loss = round(price * 0.97, 2)
                     reason = f"竞价大幅弱转强超预期 (+{pct:.1f}%, 多头底座DFF2={dff2:.1f}), 黄金反转抢手"
                     type_priority = 94
-                elif "诱多" in order_intent:
+                elif "诱多" in order_intent or "测盘" in order_intent or "虚挂" in order_intent:
                     buy_type = "⚠️ 缩量诱多"
                     buy_tag = "TRAP"
                     buy_zone = "--"
