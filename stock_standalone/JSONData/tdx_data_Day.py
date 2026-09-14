@@ -1519,7 +1519,8 @@ def generate_df_vect_daily_features(df, lastdays=cct.compute_lastdays):
     返回:
         List[dict]，每个 dict 对应一只股票
     """
-    features_list = []
+    if df is None or len(df) == 0:
+        return []
 
     cols_map_today = {
         'open': 'lasto',
@@ -1539,7 +1540,7 @@ def generate_df_vect_daily_features(df, lastdays=cct.compute_lastdays):
         'bs': 'bs'
     }
 
-    # ⚡ [单例共享内存性能优化] 在循环外一次性获取多日特征字典引用，避免在每只股票循环内重复导入与初始化
+    # ⚡ [单例共享内存性能优化] 在循环外一次性获取多日特征字典引用
     multiday_dict = None
     try:
         from JSONData.multiday_feature_store import get_multiday_features_dict
@@ -1547,55 +1548,82 @@ def generate_df_vect_daily_features(df, lastdays=cct.compute_lastdays):
     except Exception:
         multiday_dict = None
 
-    for code, row in df.iterrows():
+    # 🚀 [极限性能优化 SSOT] 循环外一次性构建字段静态映射模板 (O(1) 预解析，彻底消灭行内动态循环与字符串拼接)
+    cols_set = set(df.columns)
+    has_name = 'name' in cols_set
+    
+    # 0️⃣ today
+    today_cols = [c for c in ('open', 'high', 'low', 'close', 'vol') if c in cols_set]
+    
+    # 1️⃣ 1d 当天映射
+    m1_list = [(c, f'{p}1d') for c, p in cols_map_today.items() if c in cols_set]
+    ev_sig_1d = [f'{s}1d' for s in ('eval', 'signal') if f'{s}1d' in cols_set]
+    
+    # 2️⃣ 历史 2d ~ lastdays 映射
+    hist_cols = []
+    for d in range(2, lastdays + 1):
+        for _, p in cols_map_today.items():
+            cn = f'{p}{d}d'
+            if cn in cols_set:
+                hist_cols.append(cn)
+        for s in ('eval', 'signal'):
+            cn = f'{s}{d}d'
+            if cn in cols_set:
+                hist_cols.append(cn)
 
-        feat = {'code': code, 'name': row['name'] if 'name' in df.columns else code}
-        # ========= 0️⃣ today（实时 OHLC） =========
-        for col in ('open', 'high', 'low', 'close', 'vol'):
-            feat[col] = row[col] if col in df.columns else 0
+    # 3️⃣ 通道上轨及支撑线价格
+    ch_cols = []
+    for d in range(1, lastdays + 1):
+        for ch_feat in ('ch_upper', 'ch_supp', 'ch_supp_price'):
+            fc = f'{ch_feat}{d}'
+            if fc in cols_set:
+                ch_cols.append(fc)
 
-        # ===== 1️⃣ 当天 (1d) =====
-        for col, prefix in cols_map_today.items():
-            feat[f'{prefix}1d'] = row[col] if col in df.columns else 0
-        for suffix in ('eval', 'signal'):
-            colname = f'{suffix}1d'
-            feat[colname] = row[colname] if colname in df.columns else 0
+    # 基础通道与支撑线指标
+    base_cols = [k for k in (
+        'ch_dir', 'ch_slope_deg', 'ch_pos', 'ch_upper', 'ch_mid', 'ch_lower',
+        'ch_supp_price', 'ch_supp', 'ch_supplast', 'ch_supp_slope', 'ch_supp_slope_deg',
+        'ch_supp_pos', 'ch_supp_days', 'cdp_support', 'cdp_reversal', 'reversal_line'
+    ) if k in cols_set]
 
-        # ===== 2️⃣ 历史 (2d ~ lastdays) =====
-        for d in range(2, lastdays + 1):
-            for _, prefix in cols_map_today.items():
-                colname = f'{prefix}{d}d'
-                feat[colname] = row[colname] if colname in df.columns else 0
-            for suffix in ('eval', 'signal'):
-                colname = f'{suffix}{d}d'
-                feat[colname] = row[colname] if colname in df.columns else 0
+    # 一次性转为原生字典索引 (彻底消灭 df.iterrows() 每行创建 pd.Series 的装箱与 GC 停顿)
+    df_dict = df.to_dict('index')
+    features_list = []
 
-        # ===== 3️⃣ 保留多日通道上轨及支撑线价格 (格式同 high41, high42, ... high4{lastdays}) =====
-        for d in range(1, lastdays + 1):
-            for ch_feat in ('ch_upper', 'ch_supp', 'ch_supp_price'):
-                feat_col = f'{ch_feat}{d}'
-                if feat_col in df.columns:
-                    feat[feat_col] = row[feat_col]
+    # 默认零值特征模板
+    fallback_ratios = {}
+    for d in range(1, lastdays + 1):
+        fallback_ratios[f'ratio{d}'] = 0.0
+        fallback_ratios[f'vol_ratio{d}'] = 1.0
 
-        # 注入通道与支撑线核心基础指标 (SSOT 保证策略与 Query 引擎可用)
-        for base_k in (
-            'ch_dir', 'ch_slope_deg', 'ch_pos', 'ch_upper', 'ch_mid', 'ch_lower',
-            'ch_supp_price', 'ch_supp', 'ch_supplast', 'ch_supp_slope', 'ch_supp_slope_deg',
-            'ch_supp_pos', 'ch_supp_days', 'cdp_support', 'cdp_reversal', 'reversal_line'
-        ):
-            if base_k in df.columns:
-                feat[base_k] = row[base_k]
+    for code, row in df_dict.items():
+        feat = {'code': code, 'name': row['name'] if has_name else code}
+        
+        # 0️⃣ today
+        for c in today_cols:
+            feat[c] = row[c]
+        # 1️⃣ 1d
+        for src, dst in m1_list:
+            feat[dst] = row[src]
+        for c in ev_sig_1d:
+            feat[c] = row[c]
+        # 2️⃣ 历史
+        for c in hist_cols:
+            feat[c] = row[c]
+        # 3️⃣ 通道
+        for c in ch_cols:
+            feat[c] = row[c]
+        for c in base_cols:
+            feat[c] = row[c]
 
-        # ===== 4️⃣ 注入多日精确换手率与量比特征 (单例共享内存 O(1) 纳秒级注入) =====
+        # 4️⃣ 注入多日换手率与量比 (防零值安全兜底)
         c_key = str(code).strip().zfill(6)
-        if multiday_dict and c_key in multiday_dict:
-            feat.update(multiday_dict[c_key])
-        elif multiday_dict and code in multiday_dict:
-            feat.update(multiday_dict[code])
-        else:
-            for d in range(1, lastdays + 1):
-                feat[f'ratio{d}'] = 0.0
-                feat[f'vol_ratio{d}'] = 1.0
+        item_dict = multiday_dict.get(c_key, multiday_dict.get(code, fallback_ratios)) if multiday_dict else fallback_ratios
+        feat.update(item_dict)
+        for d in range(1, lastdays + 1):
+            vr_k = f'vol_ratio{d}'
+            if vr_k in feat and (feat[vr_k] <= 0.05 or pd.isna(feat[vr_k])):
+                feat[vr_k] = 1.0
 
         features_list.append(feat)
 
@@ -1611,8 +1639,8 @@ def generate_df_vect_daily_features_lastday(df, lastdays=cct.compute_lastdays):
     返回:
         List[dict]，每个 dict 对应一只股票
     """
-
-    features_list = []
+    if df is None or len(df) == 0:
+        return []
 
     # 映射：今天字段 → last*1d
     cols_map_today = {
@@ -1629,7 +1657,7 @@ def generate_df_vect_daily_features_lastday(df, lastdays=cct.compute_lastdays):
         'perd': 'per'
     }
 
-    # ⚡ [单例共享内存性能优化] 在循环外一次性获取多日特征字典引用，避免在每只股票循环内重复导入与初始化
+    # ⚡ [单例共享内存性能优化] 在循环外一次性获取多日特征字典引用
     multiday_dict = None
     try:
         from JSONData.multiday_feature_store import get_multiday_features_dict
@@ -1637,53 +1665,71 @@ def generate_df_vect_daily_features_lastday(df, lastdays=cct.compute_lastdays):
     except Exception:
         multiday_dict = None
 
-    for code, row in df.iterrows():
+    cols_set = set(df.columns)
+    
+    # 1️⃣ 1d
+    m1_list = [(c, f'{p}1d') for c, p in cols_map_today.items() if c in cols_set]
+    ev_sig_1d = [f'{s}1d' for s in ('eval', 'signal') if f'{s}1d' in cols_set]
+
+    # 2️⃣ 历史 (2d ~ lastdays)
+    hist_cols = []
+    for d in range(2, lastdays + 1):
+        for _, p in cols_map_today.items():
+            cn = f'{p}{d}d'
+            if cn in cols_set:
+                hist_cols.append(cn)
+        for s in ('eval', 'signal'):
+            cn = f'{s}{d}d'
+            if cn in cols_set:
+                hist_cols.append(cn)
+
+    # 3️⃣ 通道
+    ch_cols = []
+    for d in range(1, lastdays + 1):
+        for ch_feat in ('ch_upper', 'ch_supp', 'ch_supp_price'):
+            fc = f'{ch_feat}{d}'
+            if fc in cols_set:
+                ch_cols.append(fc)
+
+    base_cols = [k for k in (
+        'ch_dir', 'ch_slope_deg', 'ch_pos', 'ch_upper', 'ch_mid', 'ch_lower',
+        'ch_supp_price', 'ch_supp', 'ch_supplast', 'ch_supp_slope', 'ch_supp_slope_deg',
+        'ch_supp_pos', 'ch_supp_days', 'cdp_support', 'cdp_reversal', 'reversal_line'
+    ) if k in cols_set]
+
+    df_dict = df.to_dict('index')
+    features_list = []
+
+    fallback_ratios = {}
+    for d in range(1, lastdays + 1):
+        fallback_ratios[f'ratio{d}'] = 0.0
+        fallback_ratios[f'vol_ratio{d}'] = 1.0
+
+    for code, row in df_dict.items():
         feat = {'code': code}
 
-        # ===== 1️⃣ 当天 (1d) =====
-        for col, prefix in cols_map_today.items():
-            feat[f'{prefix}1d'] = row[col] if col in df.columns else 0
+        # 1️⃣ 1d
+        for src, dst in m1_list:
+            feat[dst] = row[src]
+        for c in ev_sig_1d:
+            feat[c] = row[c]
+        # 2️⃣ 历史
+        for c in hist_cols:
+            feat[c] = row[c]
+        # 3️⃣ 通道
+        for c in ch_cols:
+            feat[c] = row[c]
+        for c in base_cols:
+            feat[c] = row[c]
 
-        for suffix in ('eval', 'signal'):
-            colname = f'{suffix}1d'
-            feat[colname] = row[colname] if colname in df.columns else 0
-
-        # ===== 2️⃣ 历史 (2d ~ lastdays) =====
-        for d in range(2, lastdays + 1):
-            for _, prefix in cols_map_today.items():
-                colname = f'{prefix}{d}d'
-                feat[colname] = row[colname] if colname in df.columns else 0
-
-            for suffix in ('eval', 'signal'):
-                colname = f'{suffix}{d}d'
-                feat[colname] = row[colname] if colname in df.columns else 0
-
-        # ===== 3️⃣ 保留多日通道上轨及支撑线价格 (格式同 high41, high42, ... high4{lastdays}) =====
-        for d in range(1, lastdays + 1):
-            for ch_feat in ('ch_upper', 'ch_supp', 'ch_supp_price'):
-                feat_col = f'{ch_feat}{d}'
-                if feat_col in df.columns:
-                    feat[feat_col] = row[feat_col]
-
-        # 注入通道与支撑线核心基础指标 (SSOT 保证策略与 Query 引擎可用)
-        for base_k in (
-            'ch_dir', 'ch_slope_deg', 'ch_pos', 'ch_upper', 'ch_mid', 'ch_lower',
-            'ch_supp_price', 'ch_supp', 'ch_supplast', 'ch_supp_slope', 'ch_supp_slope_deg',
-            'ch_supp_pos', 'ch_supp_days', 'cdp_support', 'cdp_reversal', 'reversal_line'
-        ):
-            if base_k in df.columns:
-                feat[base_k] = row[base_k]
-
-        # ===== 4️⃣ 注入多日精确换手率与量比特征 (单例共享内存 O(1) 纳秒级注入) =====
+        # 4️⃣ 注入多日换手率与量比 (防零值安全兜底)
         c_key = str(code).strip().zfill(6)
-        if multiday_dict and c_key in multiday_dict:
-            feat.update(multiday_dict[c_key])
-        elif multiday_dict and code in multiday_dict:
-            feat.update(multiday_dict[code])
-        else:
-            for d in range(1, lastdays + 1):
-                feat[f'ratio{d}'] = 0.0
-                feat[f'vol_ratio{d}'] = 1.0
+        item_dict = multiday_dict.get(c_key, multiday_dict.get(code, fallback_ratios)) if multiday_dict else fallback_ratios
+        feat.update(item_dict)
+        for d in range(1, lastdays + 1):
+            vr_k = f'vol_ratio{d}'
+            if vr_k in feat and (feat[vr_k] <= 0.05 or pd.isna(feat[vr_k])):
+                feat[vr_k] = 1.0
 
         features_list.append(feat)
 
@@ -2362,7 +2408,10 @@ def calc_trend_channel(df, ur=6, lr=6):
                 rc = f'ratio{da}'
                 vc = f'vol_ratio{da}'
                 if rc in r_item: new_cols[rc] = np.full(n, float(r_item[rc]))
-                if vc in r_item: new_cols[vc] = np.full(n, float(r_item[vc]))
+                if vc in r_item:
+                    v_val = float(r_item[vc])
+                    if v_val <= 0.05: v_val = 1.0
+                    new_cols[vc] = np.full(n, v_val)
         else:
             cur_r = float(df['ratio'].iloc[-1]) if ('ratio' in df.columns and len(df) > 0) else 0.0
             for da in range(1, max_d + 1):
@@ -7525,6 +7574,15 @@ def select_codes_from_tdx(tdxdata: pd.DataFrame, tdx_index_code_list: list) -> p
     return tdxdata.loc[existing_codes]
 
 
+# 盘前静态数据单例内存缓存 (键: (h5_fname, h5_table, today_str))，避免盘中与各模块重复从磁盘反序列化 load_hdf_db
+_TDX_STATIC_MEMORY_CACHE = {}
+
+def clear_tdx_static_memory_cache():
+    """清空盘前静态数据内存缓存"""
+    global _TDX_STATIC_MEMORY_CACHE
+    _TDX_STATIC_MEMORY_CACHE.clear()
+
+
 def get_append_lastp_to_df(top_all=None, lastpTDX_DF=None, dl=ct.Resample_LABELS_Days['d'], end=None, ptype='low', filter='y', power=True, lastp=False, newdays=None, checknew=True, resample='d',showtable=False,detect_calc_support=False,readonly=False):
     time_s = time.time()
     if end is not None:
@@ -7547,72 +7605,80 @@ def get_append_lastp_to_df(top_all=None, lastpTDX_DF=None, dl=ct.Resample_LABELS
     log.debug('h5_table:%s' % (h5_table))
 
     if lastpTDX_DF is None or len(lastpTDX_DF) == 0:
-        h5 = h5a.load_hdf_db(h5_fname, table=h5_table,code_l=codelist, timelimit=False,showtable=showtable)
-        print(("%s:%0.2f" % (h5_fname,time.time() - time_s)), end=' ')
-        
-        # 🛡️ 数据归零损坏自愈拦截
-        if h5 is not None and not h5.empty:
-            zero_check_col = 'llow' if 'llow' in h5.columns else ('lastp' if 'lastp' in h5.columns else None)
-            if zero_check_col is not None:
-                total_len = len(h5)
-                if total_len > 10:
-                    zero_count = (h5[zero_check_col] == 0).sum()
-                    if zero_count / total_len > 0.5:
-                        log.critical("🚨 [HDF-CORRUPTED] Detected all-zero data in %s/%s (%s/%s zeros). Forcing auto-rebuild." % (h5_fname, h5_table, zero_count, total_len))
-                        h5 = None
-
-        if h5 is not None and not h5.empty:
-            log.debug("load hdf data:%s %s %s" % (h5_fname, h5_table, len(h5)))
-            tdxdata = h5
-            if cct.GlobalValues().getkey('tdx_Index_Tdxdata') is None:
-                if tdx_index_code_list[0] in tdxdata.index:
-                    cct.GlobalValues().setkey('tdx_Index_Tdxdata', select_codes_from_tdx(tdxdata, tdx_index_code_list))
+        # 0. 优先命中进程内单例内存缓存
+        today_str = str(cct.get_today())
+        mem_cache_key = (h5_fname, h5_table, today_str)
+        cached_tdx = _TDX_STATIC_MEMORY_CACHE.get(mem_cache_key)
+        if cached_tdx is not None and not cached_tdx.empty:
+            tdxdata = cached_tdx.copy(deep=False)
+            h5 = tdxdata
+            log.debug("hit mem_cache for %s/%s (%d rows)" % (h5_fname, h5_table, len(tdxdata)))
         else:
-            if readonly:
-                # 只读模式：缓存不存在时不触发重建，直接返回空结果以保护 h5 不被全零覆盖
-                log.warning("[READONLY] No h5 cache for %s/%s, returning empty (rebuild skipped to protect data)" % (h5_fname, h5_table))
-                if lastpTDX_DF is None:
-                    return top_all, pd.DataFrame()
-                return top_all
-            log.info("no hdf data:%s %s" % (h5_fname, h5_table))
-            print(f"TDD: {len(codelist)} resample:{resample}",end='')
-            tdxdata = get_tdx_exp_all_LastDF_DL(
-                codelist, dt=dl, end=end, ptype=ptype, filter=filter, power=power, lastp=lastp, newdays=newdays, resample=resample,detect_calc_support=detect_calc_support)
+            h5 = h5a.load_hdf_db(h5_fname, table=h5_table,code_l=codelist, timelimit=False,showtable=showtable)
+            print(("%s:%0.2f" % (h5_fname,time.time() - time_s)), end=' ')
             
-            tdxdata.rename(columns={'open': 'lopen'}, inplace=True)
-            tdxdata.rename(columns={'high': 'lhigh'}, inplace=True)
-            tdxdata.rename(columns={'close': 'lastp'}, inplace=True)
-            tdxdata.rename(columns={'low': 'llow'}, inplace=True)
-            tdxdata.rename(columns={'vol': 'lvol'}, inplace=True)
-            tdxdata.rename(columns={'amount': 'lamount'}, inplace=True)
-            wcdf = wcd.get_wencai_data(top_all.name)
-            wcdf['category'] = wcdf['category'].apply(lambda x:x.replace('\r','').replace('\n',''))
-            tdxdata = cct.combine_dataFrame(tdxdata, wcdf.loc[:, ['category','hangye']])
-            if cct.GlobalValues().getkey('tdx_Index_Tdxdata') is None:
-                if tdx_index_code_list[0] in tdxdata.index:
-                    cct.GlobalValues().setkey('tdx_Index_Tdxdata', select_codes_from_tdx(tdxdata, tdx_index_code_list))
-            tdxdata = tdxdata.drop_duplicates(keep='first')  # 保留第一次出现的行
-            # 过滤掉价格为 0 或 NaN 的无效行，避免污染 H5 缓存
-            check_cols = ['llow', 'lastp', 'lopen', 'lhigh']
-            for c in check_cols:
-                if c in tdxdata.columns:
-                    tdxdata = tdxdata[tdxdata[c].notna() & (tdxdata[c] > 0.0)]
+            # 🛡️ 数据归零损坏自愈拦截
+            if h5 is not None and not h5.empty:
+                zero_check_col = 'llow' if 'llow' in h5.columns else ('lastp' if 'lastp' in h5.columns else None)
+                if zero_check_col is not None:
+                    total_len = len(h5)
+                    if total_len > 10:
+                        zero_count = (h5[zero_check_col] == 0).sum()
+                        if zero_count / total_len > 0.5:
+                            log.critical("🚨 [HDF-CORRUPTED] Detected all-zero data in %s/%s (%s/%s zeros). Forcing auto-rebuild." % (h5_fname, h5_table, zero_count, total_len))
+                            h5 = None
 
-            # 🛡️ 写入前零值门禁：防止 TDX 文件不可用时全零 DataFrame 覆盖 h5 缓存
-            _wchk_col = 'llow' if 'llow' in tdxdata.columns else ('lastp' if 'lastp' in tdxdata.columns else None)
-            _wchk_ok = True
-            if _wchk_col is not None and len(tdxdata) > 10:
-                _zero_ratio = (tdxdata[_wchk_col] == 0).sum() / len(tdxdata)
-                if _zero_ratio > 0.5:
-                    log.critical("🚨 [HDF-WRITE-BLOCKED] New tdxdata for %s/%s has %.0f%% zeros in '%s'. "
-                                 "Skipping write to protect existing h5 cache. "
-                                 "(Possible cause: TDX files unavailable / forced refresh during off-hours)"
-                                 % (h5_fname, h5_table, _zero_ratio * 100, _wchk_col))
-                    _wchk_ok = False
-            if _wchk_ok and not tdxdata.empty:
-                # 既然是重建分支，说明缓存不存在或损坏，必须以覆盖模式（append=False）写入，彻底清除损坏的垃圾零值数据
-                h5 = h5a.write_hdf_db(
-                    h5_fname, tdxdata, table=h5_table, append=False)
+            if h5 is not None and not h5.empty:
+                log.debug("load hdf data:%s %s %s" % (h5_fname, h5_table, len(h5)))
+                tdxdata = h5
+                _TDX_STATIC_MEMORY_CACHE[mem_cache_key] = tdxdata
+                if cct.GlobalValues().getkey('tdx_Index_Tdxdata') is None:
+                    if tdx_index_code_list[0] in tdxdata.index:
+                        cct.GlobalValues().setkey('tdx_Index_Tdxdata', select_codes_from_tdx(tdxdata, tdx_index_code_list))
+            else:
+                if readonly:
+                    # 只读模式：缓存不存在时不触发重建，直接返回空结果以保护 h5 不被全零覆盖
+                    log.warning("[READONLY] No h5 cache for %s/%s, returning empty (rebuild skipped to protect data)" % (h5_fname, h5_table))
+                    if lastpTDX_DF is None:
+                        return top_all, pd.DataFrame()
+                    return top_all
+                log.info("no hdf data:%s %s" % (h5_fname, h5_table))
+                print(f"TDD: {len(codelist)} resample:{resample}",end='')
+                tdxdata = get_tdx_exp_all_LastDF_DL(
+                    codelist, dt=dl, end=end, ptype=ptype, filter=filter, power=power, lastp=lastp, newdays=newdays, resample=resample,detect_calc_support=detect_calc_support)
+                
+                rename_cols = {'open': 'lopen', 'high': 'lhigh', 'close': 'lastp', 'low': 'llow', 'vol': 'lvol', 'amount': 'lamount'}
+                tdxdata.rename(columns=rename_cols, inplace=True)
+                wcdf = wcd.get_wencai_data(top_all.name)
+                if 'category' in wcdf.columns:
+                    wcdf['category'] = wcdf['category'].astype(str).str.replace(r'[\r\n]', '', regex=True)
+                tdxdata = cct.combine_dataFrame(tdxdata, wcdf.loc[:, ['category','hangye']])
+                if cct.GlobalValues().getkey('tdx_Index_Tdxdata') is None:
+                    if tdx_index_code_list[0] in tdxdata.index:
+                        cct.GlobalValues().setkey('tdx_Index_Tdxdata', select_codes_from_tdx(tdxdata, tdx_index_code_list))
+                tdxdata = tdxdata.drop_duplicates(keep='first')  # 保留第一次出现的行
+                # 过滤掉价格为 0 或 NaN 的无效行，避免污染 H5 缓存
+                check_cols = ['llow', 'lastp', 'lopen', 'lhigh']
+                for c in check_cols:
+                    if c in tdxdata.columns:
+                        tdxdata = tdxdata[tdxdata[c].notna() & (tdxdata[c] > 0.0)]
+
+                # 🛡️ 写入前零值门禁：防止 TDX 文件不可用时全零 DataFrame 覆盖 h5 缓存
+                _wchk_col = 'llow' if 'llow' in tdxdata.columns else ('lastp' if 'lastp' in tdxdata.columns else None)
+                _wchk_ok = True
+                if _wchk_col is not None and len(tdxdata) > 10:
+                    _zero_ratio = (tdxdata[_wchk_col] == 0).sum() / len(tdxdata)
+                    if _zero_ratio > 0.5:
+                        log.critical("🚨 [HDF-WRITE-BLOCKED] New tdxdata for %s/%s has %.0f%% zeros in '%s'. "
+                                     "Skipping write to protect existing h5 cache. "
+                                     "(Possible cause: TDX files unavailable / forced refresh during off-hours)"
+                                     % (h5_fname, h5_table, _zero_ratio * 100, _wchk_col))
+                        _wchk_ok = False
+                if _wchk_ok and not tdxdata.empty:
+                    # 既然是重建分支，说明缓存不存在或损坏，必须以覆盖模式（append=False）写入，彻底清除损坏的垃圾零值数据
+                    h5 = h5a.write_hdf_db(
+                        h5_fname, tdxdata, table=h5_table, append=False)
+                    _TDX_STATIC_MEMORY_CACHE[mem_cache_key] = tdxdata
 
         log.debug("TDX Col:%s" % tdxdata.columns.values[:10])
     else:
@@ -7633,15 +7699,12 @@ def get_append_lastp_to_df(top_all=None, lastpTDX_DF=None, dl=ct.Resample_LABELS
             tdx_diff = get_tdx_exp_all_LastDF_DL(
                 diff_code, dt=dl, end=end, ptype=ptype, filter=filter, power=power, lastp=lastp, newdays=newdays, resample=resample,detect_calc_support=detect_calc_support)
             if tdx_diff is not None and len(tdx_diff) > 0:
-                tdx_diff.rename(columns={'open': 'lopen'}, inplace=True)
-                tdx_diff.rename(columns={'high': 'lhigh'}, inplace=True)
-                tdx_diff.rename(columns={'close': 'lastp'}, inplace=True)
-                tdx_diff.rename(columns={'low': 'llow'}, inplace=True)
-                tdx_diff.rename(columns={'vol': 'lvol'}, inplace=True)
-                tdx_diff.rename(columns={'amount': 'lamount'}, inplace=True)
+                rename_cols2 = {'open': 'lopen', 'high': 'lhigh', 'close': 'lastp', 'low': 'llow', 'vol': 'lvol', 'amount': 'lamount'}
+                tdx_diff.rename(columns=rename_cols2, inplace=True)
                 tdx_diff = tdx_diff.drop_duplicates(keep='first')  # 保留第一次出现的行
                 wcdf = wcd.get_wencai_data(top_all.name)
-                wcdf['category'] = wcdf['category'].apply(lambda x:x.replace('\r','').replace('\n',''))
+                if 'category' in wcdf.columns:
+                    wcdf['category'] = wcdf['category'].astype(str).str.replace(r'[\r\n]', '', regex=True)
                 tdx_diff = cct.combine_dataFrame(tdx_diff, wcdf.loc[:, ['category']])
 
                 if newdays is None or newdays > 0:
@@ -7664,12 +7727,42 @@ def get_append_lastp_to_df(top_all=None, lastpTDX_DF=None, dl=ct.Resample_LABELS
                         h5 = h5a.write_hdf_db(h5_fname, tdx_diff, table=h5_table, append=True)
                 if not tdx_diff.empty:
                     tdxdata = pd.concat([tdxdata, tdx_diff], axis=0)
+                    if 'mem_cache_key' in locals():
+                        _TDX_STATIC_MEMORY_CACHE[mem_cache_key] = tdxdata
+
     if len(top_all) > 5:
-        for col_to_drop in ['ratio', 'vol_ratio']:
-            if col_to_drop in tdxdata.columns:
-                tdxdata = tdxdata.drop(columns=[col_to_drop])
-        top_all = cct.combine_dataFrame(
-            top_all, tdxdata, col=None, compare=None, append=False)
+        drop_cols = [c for c in ['ratio', 'vol_ratio'] if c in tdxdata.columns]
+        if drop_cols:
+            tdxdata = tdxdata.drop(columns=drop_cols)
+
+        # 极速向量化列拼接: 严格以 top_all 的行和索引为基准 (左对齐语义), 实时行情字段绝对优先
+        common_idx = top_all.index.intersection(tdxdata.index)
+        if len(common_idx) > 0:
+            top_part = top_all.loc[common_idx]
+            tdx_part = tdxdata.loc[common_idx]
+
+            # 🛡️ 实时数据绝对优先: 过滤 tdx_part 中与 top_part 重合的静态指标列 (同名列以实时 top_all 为准)
+            dup_cols = [c for c in tdx_part.columns if c in top_part.columns]
+            if dup_cols:
+                tdx_part = tdx_part.drop(columns=dup_cols)
+
+            merged_df = pd.concat([top_part, tdx_part], axis=1)
+
+            # 补充 top_all 独有的标的行 (若有新上市股票无 tdx 日线，保留并补 0)
+            top_only_idx = top_all.index.difference(tdxdata.index)
+            if not top_only_idx.empty:
+                top_only_df = top_all.loc[top_only_idx].copy()
+                for c in tdx_part.columns:
+                    if c not in top_only_df.columns:
+                        top_only_df[c] = 0
+                merged_df = pd.concat([merged_df, top_only_df], axis=0)
+
+            # 严格保持 top_all 原始顺序与行集合，严禁反向注入 tdxdata 独有的未监控标的
+            top_all = merged_df.reindex(top_all.index)
+        else:
+            top_all = cct.combine_dataFrame(
+                top_all, tdxdata, col=None, compare=None, append=False)
+
         top_all['llow'] = top_all.get('llow', 0)  # 列不存在时用默认0
         top_all = top_all[top_all['llow'] > 0]
     #20231110 add today topR
@@ -7681,7 +7774,7 @@ def get_append_lastp_to_df(top_all=None, lastpTDX_DF=None, dl=ct.Resample_LABELS
             if not cct.get_trade_date_status() or now_time < 915:
                 ref_col = 'lasth2d'
             else:
-                if (top_all['open'].iloc[-1] == top_all['lasto1d'].iloc[-1]) and (top_all['open'].iloc[0] == top_all['lasto1d'].iloc[0]):
+                if ('open' in top_all.columns and 'lasto1d' in top_all.columns) and (top_all['open'].iloc[-1] == top_all['lasto1d'].iloc[-1]) and (top_all['open'].iloc[0] == top_all['lasto1d'].iloc[0]):
                     ref_col = 'lasth2d'
                 else:
                     ref_col = 'lasth1d'
@@ -7711,31 +7804,18 @@ def get_append_lastp_to_df(top_all=None, lastpTDX_DF=None, dl=ct.Resample_LABELS
     # co2int = ['boll','dff','ra','ral','fib','fibl','op', 'ratio','red','top5','top10','ra']    
     for col in co2int:
         if col in top_all.columns:
-            top_all[col] = top_all[col].astype(int)
+            top_all[col] = pd.to_numeric(top_all[col], errors='coerce').fillna(0).astype(int)
+
     topR_series = top_all.get('topR', pd.Series(0, index=top_all.index))
-    # 四舍五入处理
-    top_all['topR'] = topR_series.apply(lambda x: round(x, 1))
+    top_all['topR'] = pd.to_numeric(topR_series, errors='coerce').fillna(0).round(1)
 
     # 2️⃣ 安全处理 df2 和 buy 列，缺失用默认值 0
-    df2_series = top_all.get('df2', pd.Series(0, index=top_all.index))
-    buy_series = top_all.get('buy', pd.Series(0, index=top_all.index))
+    if 'df2' not in top_all.columns:
+        top_all['df2'] = 0.0
+    if 'buy' not in top_all.columns:
+        top_all['buy'] = 0.0
 
-    top_all['df2'] = df2_series
-    top_all['buy'] = buy_series
-
-    # 3️⃣ 安全计算 dff
-    def safe_dff(x, y):
-        if y == 0 or pd.isnull(x) or pd.isnull(y):
-            return np.nan
-        return round((x - y) / y * 100, 1)
-
-
-    # # 只在满足条件时计算
-    # if (top_all.get('dff', pd.Series([0]*len(top_all)))[0] == 0) \
-    #         or (top_all.get('close', pd.Series([0]*len(top_all)))[0] == top_all.get('lastp1d', pd.Series([0]*len(top_all)))[0]):
-    #     top_all['dff'] = list(map(safe_dff, top_all['buy'].values, top_all['df2'].values))
-    
-    # 安全获取 Series 的第一个元素
+    # 3️⃣ 安全向量化计算 dff
     def safe_first(s, default=0):
         """返回 Series 或 list 的第一个元素，如果为空返回 default"""
         if s is None or len(s) == 0:
@@ -7749,14 +7829,16 @@ def get_append_lastp_to_df(top_all=None, lastpTDX_DF=None, dl=ct.Resample_LABELS
 
     # 只在满足条件时计算
     if (dff_first == 0) or (close_first == lastp1d_first):
-        top_all['dff'] = list(map(safe_dff, 
-                                  top_all.get('buy', pd.Series([])).values, 
-                                  top_all.get('df2', pd.Series([])).values))
-
+        buy_vals = pd.to_numeric(top_all['buy'], errors='coerce').values
+        df2_vals = pd.to_numeric(top_all['df2'], errors='coerce').values
+        valid_mask = (df2_vals != 0) & np.isfinite(buy_vals) & np.isfinite(df2_vals)
+        dff_calc = np.full(len(top_all), np.nan, dtype=float)
+        dff_calc[valid_mask] = np.round((buy_vals[valid_mask] - df2_vals[valid_mask]) / df2_vals[valid_mask] * 100, 1)
+        top_all['dff'] = dff_calc
 
     for col in co2int:
         if col in tdxdata.columns:
-            tdxdata[col] = tdxdata[col].astype(int)
+            tdxdata[col] = pd.to_numeric(tdxdata[col], errors='coerce').fillna(0).astype(int)
     # top_all = cct.reduce_memory_usage(top_all)       
     if lastpTDX_DF is None:
         tdx_code = [co for co in codelist if co in tdxdata.index]
