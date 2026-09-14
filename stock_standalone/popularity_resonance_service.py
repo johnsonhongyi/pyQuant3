@@ -48,14 +48,58 @@ def clean_stock_code(code: str) -> str:
 
 def fetch_realtime_quotes(codes: list[str]) -> dict[str, dict]:
     """
-    从新浪财经批量获取股票的实时行情（名称、最新价、涨幅）
-    返回: { 股票代码: { "name": 名称, "price": 最新价, "percent": 涨幅 } }
+    批量获取股票实时行情（名称、最新价、涨幅、昨收、开高低、量额等）
+    优先使用通达信 (pytdx) 独立高频秒级行情引擎；若有缺失或异常平滑降级至备用接口。
+    返回: { 股票代码: { "name": 名称, "price": 最新价, "percent": 涨幅, ... } }
     """
     if not codes:
         return {}
-        
+
+    clean_codes = [clean_stock_code(c) for c in codes if c]
+    result = {}
+
+    # 1. 优先使用通达信 (pytdx) 独立秒级盘口引擎批量获取
+    try:
+        from ats.tdx_realtime_fetcher import TDXRealtimeFetcher
+        from sys_utils import resolve_stock_name
+        tdx_fetcher = TDXRealtimeFetcher.get_instance()
+        quotes = tdx_fetcher.get_security_quotes_safe(clean_codes)
+        if quotes:
+            for q in quotes:
+                c = str(q.get("code", "")).strip().zfill(6)
+                if not c:
+                    continue
+                p = float(q.get("price", 0.0))
+                lc = float(q.get("last_close", 0.0))
+                pct = round((p - lc) / lc * 100.0, 2) if (lc > 0 and p > 0) else 0.0
+                try:
+                    name = resolve_stock_name(c) or "--"
+                except Exception:
+                    name = "--"
+                result[c] = {
+                    "name": name,
+                    "price": p,
+                    "percent": pct,
+                    "last_close": lc,
+                    "open": float(q.get("open", p)),
+                    "high": float(q.get("high", p)),
+                    "low": float(q.get("low", p)),
+                    "vol": float(q.get("vol", 0.0)),
+                    "amount": float(q.get("amount", 0.0)),
+                    "bid1": float(q.get("bid1", p)),
+                    "ask1": float(q.get("ask1", p)),
+                }
+    except Exception as e:
+        logger.debug(f"TDX 批量盘口引擎拉取跳过/降级: {e}")
+
+    # 若所有标的均已成功获取有效价格，直接返回
+    missing_codes = [c for c in clean_codes if c not in result or result[c].get("price", 0.0) <= 0.0]
+    if not missing_codes:
+        return result
+
+    # 2. 备选降级：若 TDX 尚未就绪或有未覆盖标的，通过备用 HTTP 接口补充
     url_codes = []
-    for c in codes:
+    for c in missing_codes:
         if c.startswith(('5', '6', '9')):
             prefix = 'sh'
         elif c.startswith(('43', '83', '87', '92')):
@@ -63,13 +107,12 @@ def fetch_realtime_quotes(codes: list[str]) -> dict[str, dict]:
         else:
             prefix = 'sz'
         url_codes.append(f"{prefix}{c}")
-        
+
     url = f"http://hq.sinajs.cn/list={','.join(url_codes)}"
     req = urllib.request.Request(url, headers={"Referer": "http://finance.sina.com.cn"})
-    
-    result = {}
+
     try:
-        with urllib.request.urlopen(req, timeout=5) as response:
+        with urllib.request.urlopen(req, timeout=4) as response:
             lines = response.read().decode('gbk').splitlines()
             for line in lines:
                 if not line.strip():
@@ -79,30 +122,37 @@ def fetch_realtime_quotes(codes: list[str]) -> dict[str, dict]:
                     continue
                 left, right = parts[0], parts[1]
                 code = left[-6:]
-                
+
                 val_str = right.strip('"; \n\r')
                 if not val_str:
                     continue
                 fields = val_str.split(',')
                 if len(fields) < 4:
                     continue
-                    
+
                 name = fields[0]
                 yesterday_close = float(fields[2] or 0)
                 current_price = float(fields[3] or 0)
-                
+
                 percent = 0.0
-                if yesterday_close > 0:
-                    percent = (current_price - yesterday_close) / yesterday_close * 100
-                    
-                result[code] = {
-                    "name": name,
-                    "price": current_price,
-                    "percent": percent
-                }
+                if yesterday_close > 0 and current_price > 0:
+                    percent = round((current_price - yesterday_close) / yesterday_close * 100.0, 2)
+
+                if code not in result or result[code].get("price", 0.0) <= 0.0:
+                    result[code] = {
+                        "name": name,
+                        "price": current_price,
+                        "percent": percent,
+                        "last_close": yesterday_close,
+                        "open": float(fields[1] or current_price) if len(fields) > 1 else current_price,
+                        "high": float(fields[4] or current_price) if len(fields) > 4 else current_price,
+                        "low": float(fields[5] or current_price) if len(fields) > 5 else current_price,
+                        "vol": float(fields[8] or 0.0) if len(fields) > 8 else 0.0,
+                        "amount": float(fields[9] or 0.0) if len(fields) > 9 else 0.0,
+                    }
     except Exception as e:
-        logger.error(f"批量抓取新浪行情失败: {e}")
-        
+        logger.debug(f"备用 HTTP 行情抓取跳过: {e}")
+
     return result
 
 def fetch_eastmoney(limit: int = 100) -> dict[str, int]:

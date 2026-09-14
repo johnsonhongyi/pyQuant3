@@ -217,6 +217,10 @@ class PRServiceGUI:
         # 尝试加载缓存数据并恢复表格
         self.load_cached_data()
 
+        # 🚀 启动后立即异步触发一次 TDX API 盘口秒级刷新，第一时间呈现最新价格与涨跌
+        if hasattr(self, 'root'):
+            self.root.after(300, lambda: threading.Thread(target=self.refresh_realtime_from_tdx, daemon=True).start())
+
         # 监听窗口关闭事件，确保最终配置得到持久化保存
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
@@ -591,24 +595,106 @@ class PRServiceGUI:
                 pass
         self.root.destroy()
 
+    def get_all_displayed_codes(self) -> list[str]:
+        """收集当前界面 5 个 Treeview 表格中所有正在展示的股票代码（去重且保序）"""
+        codes = []
+        seen = set()
+        all_trees = (self.tree_res, self.tree_em, self.tree_ths, self.tree_lh, self.tree_tgb)
+        for tree in all_trees:
+            if not tree or not tree.winfo_exists():
+                continue
+            for iid in tree.get_children():
+                vals = tree.item(iid, "values")
+                if vals and len(vals) > 1:
+                    c = str(vals[1]).strip().zfill(6)
+                    if c and c.isdigit() and c not in seen:
+                        seen.add(c)
+                        codes.append(c)
+        return codes
+
+    def refresh_realtime_from_tdx(self, force: bool = False):
+        """
+        [⚡ TDX API 直连] 毫秒级批量拉取当前五大榜单全部个股的实时盘口，
+        直接更新价格、涨跌幅、分段涨速、VWAP 偏离与涨跌红绿 tag，并驱动概念热度重算。
+        """
+        today = time.strftime("%Y-%m-%d")
+        current_view_date = getattr(self, "current_date", today)
+        if current_view_date != today:
+            return
+
+        codes = self.get_all_displayed_codes()
+        if not codes:
+            codes = [str(c).strip().zfill(6) for c in getattr(self, 'resonance_codes', []) if str(c).strip()]
+        if not codes:
+            return
+
+        try:
+            from ats.tdx_realtime_fetcher import TDXRealtimeFetcher
+            tdx_fetcher = TDXRealtimeFetcher.get_instance()
+            quotes = tdx_fetcher.get_security_quotes_safe(codes, force=force)
+            if not quotes:
+                return
+
+            tdx_quotes = {str(q.get("code", "")).strip().zfill(6): q for q in quotes if q.get("code")}
+            tdx_df = tdx_fetcher.convert_quotes_to_df(quotes)
+
+            # 更新合并到内存 current_df 快照
+            with self.df_lock:
+                if self.current_df is None or self.current_df.empty:
+                    self.current_df = tdx_df.copy()
+                else:
+                    for c_idx in tdx_df.index:
+                        if c_idx in self.current_df.index:
+                            for col in ('trade', 'price', 'close', 'open', 'high', 'low', 'last_close', 'percent', 'change_pct', 'volume', 'vol', 'amount', 'vwap', 'bid1', 'ask1'):
+                                if col in tdx_df.columns:
+                                    self.current_df.at[c_idx, col] = tdx_df.at[c_idx, col]
+                        else:
+                            self.current_df.loc[c_idx] = tdx_df.loc[c_idx]
+
+            cur_df = self.get_current_df()
+            if hasattr(self, 'root') and self.root:
+                self.root.after(0, lambda: self.refresh_realtime_fields(df=cur_df, tdx_quotes=tdx_quotes))
+        except Exception as e:
+            service_logger.debug(f"TDX API 实时刷新异常: {e}")
+
     def _start_ipc_polling_loop(self):
-        """交易时间内后台轻量级 IPC 动态行情定时轮询更新器"""
+        """后台高频 TDX API 秒级盘口更新 + 低频后台 IPC 动态辅助同步线程"""
         def polling_worker():
+            ipc_counter = 0.0
             while getattr(self, "root", None):
                 try:
-                    time.sleep(30)  # 每 30 秒后台静默轮询一次
+                    # 动态读取 TDX 轮询间隔配置，默认 3.0s (支持跟随 cct.ats_tdx_interval)
                     from JohnsonUtil import commonTips as cct
-                    if cct.get_work_time():
-                        # 若当前未在手动/自动主抓取中，拉取最新 IPC 行情切片
-                        if not getattr(self, '_ipc_sync_in_progress', False):
+                    tdx_interval = float(getattr(cct, 'ats_tdx_interval', 3.0) or 3.0)
+                    sleep_sec = max(1.0, min(tdx_interval, 10.0))
+                    time.sleep(sleep_sec)
+
+                    if not getattr(self, "root", None):
+                        break
+
+                    is_work_time = cct.get_work_time()
+                    today = time.strftime("%Y-%m-%d")
+
+                    # 1. ⚡ [高频主通道] TDX API 秒级盘口拉取与刷新（交易时间内且处于今日复盘）
+                    if is_work_time and getattr(self, 'current_date', today) == today:
+                        refresh_thread = getattr(self, 'refresh_thread', None)
+                        if not (refresh_thread and refresh_thread.is_alive()):
+                            self.refresh_realtime_from_tdx()
+
+                    # 2. 🐢 [低频辅助通道] IPC 全量衍生量化特征同步 (约 60 秒静默轮询一次)
+                    ipc_counter += sleep_sec
+                    if ipc_counter >= 60.0:
+                        ipc_counter = 0.0
+                        if is_work_time and not getattr(self, '_ipc_sync_in_progress', False):
                             refresh_thread = getattr(self, 'refresh_thread', None)
                             if not (refresh_thread and refresh_thread.is_alive()):
-                                service_logger.debug("[IPC 定时轮询] 交易时间内自动轮询拉取最新 IPC 行情数据...")
-                                self.request_dynamic_ipc_sync(timeout=6.0)
-                except Exception as e:
-                    service_logger.debug(f"[IPC 定时轮询] 异常: {e}")
+                                service_logger.debug("[IPC 辅助同步] 交易时间内后台低频同步 IPC 量化指标数据...")
+                                self.request_dynamic_ipc_sync(timeout=5.0)
 
-        threading.Thread(target=polling_worker, daemon=True).start()
+                except Exception as e:
+                    service_logger.debug(f"[实时轮询引擎] 异常: {e}")
+
+        threading.Thread(target=polling_worker, daemon=True, name="PR_RealtimePollingWorker").start()
 
     def _poll_favorites_loop(self):
         if not hasattr(self, 'root') or not self.root:
@@ -1035,7 +1121,7 @@ class PRServiceGUI:
         """当主程序通过 Socket 推送最新的 DataFrame 时的回调"""
         self.root.after(0, lambda: self.refresh_realtime_fields(df))
 
-    def refresh_realtime_fields(self, df=None):
+    def refresh_realtime_fields(self, df=None, tdx_quotes=None):
         today = time.strftime("%Y-%m-%d")
         current_view_date = self.current_date
         
@@ -1067,8 +1153,25 @@ class PRServiceGUI:
         self._last_realtime_today = today
 
         if df is None:
-            df = self.sync_manager.get_current_df()
-        if df is None or df.empty:
+            df = self.get_current_df()
+
+        # 🚀 [TDX 实时直连守护] 若当前未传入 df 且内存中尚无行情，通过 TDX API 立即拉取所有展示股票的盘口
+        if (df is None or df.empty) and not tdx_quotes:
+            codes = self.get_all_displayed_codes()
+            if codes:
+                try:
+                    from ats.tdx_realtime_fetcher import TDXRealtimeFetcher
+                    f = TDXRealtimeFetcher.get_instance()
+                    quotes = f.get_security_quotes_safe(codes)
+                    if quotes:
+                        tdx_quotes = {str(q.get("code", "")).strip().zfill(6): q for q in quotes if q.get("code")}
+                        df = f.convert_quotes_to_df(quotes)
+                        with self.df_lock:
+                            self.current_df = df.copy()
+                except Exception as e:
+                    service_logger.debug(f"TDX 行情直连补齐异常: {e}")
+
+        if (df is None or df.empty) and not tdx_quotes:
             return
 
         _, _, _extra_cols = self._get_all_cols()
@@ -1100,23 +1203,44 @@ class PRServiceGUI:
                     continue
                 code = old_vals[1]
                 code_str = str(code).strip().zfill(6)
-                
-                # 获取旧涨幅和价格，防止 df 中没有该股票时显示为空
-                pct = 0.0
-                try:
-                    pct = float(str(old_vals[3]).replace('%', ''))
-                except Exception:
-                    pass
-                price_str = str(old_vals[4])
+
+                # 优先从 tdx_quotes 读取最新实时盘口
+                q_item = tdx_quotes.get(code_str) if tdx_quotes else None
                 row = None
-                
-                if code_str in df.index:
+                if df is not None and not df.empty and code_str in df.index:
                     try:
                         row = df.loc[code_str]
                         import pandas as pd
                         if isinstance(row, pd.DataFrame):
                             row = row.iloc[0]
+                    except Exception:
+                        row = None
 
+                # 若既无 TDX 实时盘口，也无 df 记录，跳过该行
+                if q_item is None and row is None:
+                    continue
+
+                # 获取旧涨幅和价格作为保底
+                pct = 0.0
+                try:
+                    pct = float(str(old_vals[3]).replace('%', ''))
+                except Exception:
+                    pass
+                price_str = str(old_vals[4]) if len(old_vals) > 4 else "--"
+
+                try:
+                    # 1. 价格与量价字段：绝对优先从 TDX 实时盘口提取（秒级），若无则从 row 提取
+                    if q_item is not None:
+                        price = float(q_item.get('price', 0.0))
+                        last_close = float(q_item.get('last_close', price))
+                        pct = round((price - last_close) / last_close * 100.0, 2) if (last_close > 0 and price > 0) else float(q_item.get('percent', pct))
+                        price_str = f"{price:.2f}"
+                        open_p = float(q_item.get('open', price))
+                        high_p = float(q_item.get('high', price))
+                        low_p = float(q_item.get('low', price))
+                        vol = float(q_item.get('vol', 0.0))
+                        amount = float(q_item.get('amount', 0.0))
+                    elif row is not None:
                         pct = float(row.get('percent', row.get('ratio', pct)))
                         price = float(row.get('trade', row.get('close', row.get('price', 0.0))))
                         price_str = f"{price:.2f}"
@@ -1126,77 +1250,102 @@ class PRServiceGUI:
                         last_close = float(row.get('last_close', row.get('prev_close', price)))
                         vol = float(row.get('vol', row.get('volume', 0.0)))
                         amount = float(row.get('amount', 0.0))
+                    else:
+                        continue
 
-                        dff2 = float(row.get('dff2', row.get('DFF2', 0.0)))
-                        dff3 = float(row.get('dff3', row.get('DFF3', 0.0)))
-                        rank = int(row.get('Rank', row.get('rank', 0)))
+                    # 2. 量化特征字段（dff2, dff3, rank, block）：优先从 row 获取，若无 row 则保留 old_vals
+                    dff2_val = "--"
+                    dff3_val = "--"
+                    rank_val = "--"
+                    if len(old_vals) > 7 and str(old_vals[7]).strip() not in ("", "--"):
+                        dff2_val = str(old_vals[7]).strip()
+                    if len(old_vals) > 8 and str(old_vals[8]).strip() not in ("", "--"):
+                        dff3_val = str(old_vals[8]).strip()
+                    if len(old_vals) > 9 and str(old_vals[9]).strip() not in ("", "--"):
+                        rank_val = str(old_vals[9]).strip()
+
+                    block = '--'
+                    if row is not None:
+                        try:
+                            dff2_val = f"{float(row.get('dff2', row.get('DFF2', 0.0))):.1f}"
+                        except Exception:
+                            pass
+                        try:
+                            dff3_val = f"{float(row.get('dff3', row.get('DFF3', 0.0))):.1f}"
+                        except Exception:
+                            pass
+                        try:
+                            rank_val = str(int(row.get('Rank', row.get('rank', 0))))
+                        except Exception:
+                            pass
                         block = str(row.get('category', row.get('blockname', row.get('hy', '--'))))
-                        if block == 'nan' or block == 'None':
+                        if block in ('nan', 'None'):
                             block = '--'
 
-                        # 更新 _block_cache（不写进 Treeview）
-                        if block and block != '--':
-                            if not hasattr(self, '_block_cache'):
-                                self._block_cache = {}
-                            self._block_cache[code_str] = block
+                    # 更新 _block_cache（不写进 Treeview）
+                    if block and block != '--':
+                        if not hasattr(self, '_block_cache'):
+                            self._block_cache = {}
+                        self._block_cache[code_str] = block
 
-                        new_vals = list(old_vals)
-                        while len(new_vals) < BASE_UPDATE_COUNT:
-                            new_vals.append("")
+                    new_vals = list(old_vals)
+                    while len(new_vals) < BASE_UPDATE_COUNT:
+                        new_vals.append("")
 
-                        # ⚡ 实时计算分段涨速与 7 级实战状态机
-                        if tdx_fetcher:
-                            seg_res = tdx_fetcher.calculate_segmented_velocity(
-                                code=code_str,
-                                price=price,
-                                open_price=open_p,
-                                last_close=last_close,
-                                vol=vol,
-                                amount=amount,
-                                now_ts=now_ts,
-                                segment_mode=seg_mode
-                            )
-                            v_pct = seg_res.get("velocity_pct", 0.0)
+                    # ⚡ 实时计算分段涨速与 7 级实战状态机 (直连最新 TDX 盘口量价)
+                    if tdx_fetcher:
+                        seg_res = tdx_fetcher.calculate_segmented_velocity(
+                            code=code_str,
+                            price=price,
+                            open_price=open_p,
+                            last_close=last_close,
+                            vol=vol,
+                            amount=amount,
+                            now_ts=now_ts,
+                            segment_mode=seg_mode
+                        )
+                        v_pct = seg_res.get("velocity_pct", 0.0)
+                    else:
+                        v_pct = 0.0
+
+                    if v_pct >= 2.0:
+                        velocity_str = f"🚀+{v_pct:.1f}%"
+                    elif v_pct >= 0.8:
+                        velocity_str = f"🔥+{v_pct:.1f}%"
+                    elif v_pct >= 0.3:
+                        velocity_str = f"⚡+{v_pct:.1f}%"
+                    elif v_pct <= -1.5:
+                        velocity_str = f"❄️{v_pct:.1f}%"
+                    elif v_pct <= -0.8:
+                        velocity_str = f"⚠️{v_pct:.1f}%"
+                    elif v_pct <= -0.3:
+                        velocity_str = f"🔻{v_pct:.1f}%"
+                    else:
+                        velocity_str = "0.0%"
+
+                    # ⚡ 日内 VWAP 与 VWAP 偏离度
+                    if vol > 0 and amount > 0:
+                        calc_vwap = amount / (vol * 100.0)
+                        if price > 0 and (price * 0.7 <= calc_vwap <= price * 1.3):
+                            vwap = round(calc_vwap, 2)
                         else:
-                            v_pct = 0.0
+                            vwap = round((open_p + high_p + low_p + price) / 4.0, 2) if open_p > 0 else price
+                    else:
+                        vwap = price
 
-                        if v_pct >= 2.0:
-                            velocity_str = f"🚀+{v_pct:.1f}%"
-                        elif v_pct >= 0.8:
-                            velocity_str = f"🔥+{v_pct:.1f}%"
-                        elif v_pct >= 0.3:
-                            velocity_str = f"⚡+{v_pct:.1f}%"
-                        elif v_pct <= -1.5:
-                            velocity_str = f"❄️{v_pct:.1f}%"
-                        elif v_pct <= -0.8:
-                            velocity_str = f"⚠️{v_pct:.1f}%"
-                        elif v_pct <= -0.3:
-                            velocity_str = f"🔻{v_pct:.1f}%"
-                        else:
-                            velocity_str = "0.0%"
+                    vwap_dev_pct = round((price - vwap) / vwap * 100.0, 2) if vwap > 0 else 0.0
+                    vwap_dev_str = f"{vwap_dev_pct:+.2f}%" if vwap > 0 else "--"
 
-                        # ⚡ 日内 VWAP 与 VWAP 偏离度
-                        if vol > 0 and amount > 0:
-                            calc_vwap = amount / (vol * 100.0)
-                            if price > 0 and (price * 0.7 <= calc_vwap <= price * 1.3):
-                                vwap = round(calc_vwap, 2)
-                            else:
-                                vwap = round((open_p + high_p + low_p + price) / 4.0, 2) if open_p > 0 else price
-                        else:
-                            vwap = price
+                    new_vals[3] = f"{pct:.2f}"
+                    new_vals[4] = price_str
+                    new_vals[5] = velocity_str
+                    new_vals[6] = vwap_dev_str
+                    new_vals[7] = dff2_val
+                    new_vals[8] = dff3_val
+                    new_vals[9] = rank_val
 
-                        vwap_dev_pct = round((price - vwap) / vwap * 100.0, 2) if vwap > 0 else 0.0
-                        vwap_dev_str = f"{vwap_dev_pct:+.2f}%" if vwap > 0 else "--"
-
-                        new_vals[3] = f"{pct:.2f}"
-                        new_vals[4] = price_str
-                        new_vals[5] = velocity_str
-                        new_vals[6] = vwap_dev_str
-                        new_vals[7] = f"{dff2:.1f}"
-                        new_vals[8] = f"{dff3:.1f}"
-                        new_vals[9] = str(rank)
-
-                        # 更新自定义追加列
+                    # 更新自定义追加列 (若有 row 则更新，无 row 保持现有值)
+                    if row is not None:
                         for ei, ec in enumerate(_extra_cols):
                             idx_in_vals = BASE_UPDATE_COUNT + ei
                             while len(new_vals) <= idx_in_vals:
@@ -1217,22 +1366,22 @@ class PRServiceGUI:
                             except Exception:
                                 pass
 
-                        tree.item(iid, values=tuple(new_vals))
+                    tree.item(iid, values=tuple(new_vals))
 
-                        # 动态更新涨跌颜色 tag，并保持自选股状态
-                        curr_tags = list(tree.item(iid, "tags") or [])
-                        is_fav = "favorite" in curr_tags
-                        tag = "flat"
-                        if pct > 0:
-                            tag = "up"
-                        elif pct < 0:
-                            tag = "down"
-                        new_tags = [tag]
-                        if is_fav:
-                            new_tags.append("favorite")
-                        tree.item(iid, tags=tuple(new_tags))
-                    except Exception:
-                        pass
+                    # 动态更新涨跌颜色 tag，并保持自选股状态
+                    curr_tags = list(tree.item(iid, "tags") or [])
+                    is_fav = "favorite" in curr_tags
+                    tag = "flat"
+                    if pct > 0:
+                        tag = "up"
+                    elif pct < 0:
+                        tag = "down"
+                    new_tags = [tag]
+                    if is_fav:
+                        new_tags.append("favorite")
+                    tree.item(iid, tags=tuple(new_tags))
+                except Exception:
+                    pass
 
                 # 提取板块缓存（优先于 df 数据以支持离线自愈）
                 block_str = getattr(self, '_block_cache', {}).get(code_str, '--')
@@ -2795,9 +2944,8 @@ class PRServiceGUI:
 
     def _run_once_job(self, force_save=False):
         try:
-            # 💥 自动使用 IPC 动态端口同步拉取最新行情数据包，完事即刻物理释放端口
-            service_logger.info("正在通过 IPC 动态端口同步请求最新行情数据...")
-            self.request_dynamic_ipc_sync(timeout=8.0)
+            # 🚀 异步启动 IPC 动态端口数据同步守护（不阻塞主抓取和前台实时更新）
+            threading.Thread(target=lambda: self.request_dynamic_ipc_sync(timeout=5.0), daemon=True).start()
 
             today = time.strftime("%Y-%m-%d")
             # 💥 如果是自动刷新中或手动触发查询刷新，且跨天了，自动切换到今日日期
@@ -2823,35 +2971,43 @@ class PRServiceGUI:
             tgb_data = {}
             lh_data = {}
             all_quotes = {}
-            quotes_lock = threading.Lock()
-            
+
             def worker_task(source_name, fetch_func, target_dict):
                 try:
                     data = fetch_func()
                     if data:
                         target_dict.update(data)
-                        quotes = fetch_realtime_quotes(list(data.keys()))
-                        with quotes_lock:
-                            all_quotes.update(quotes)
                 except Exception as ex:
                     service_logger.error(f"获取 {source_name} 数据失败: {ex}")
-            
+
             # Start the 4 threads in parallel
             t1 = threading.Thread(target=worker_task, args=("em", fetch_eastmoney, em_data), daemon=True)
             t2 = threading.Thread(target=worker_task, args=("ths", fetch_ths, ths_data), daemon=True)
             t3 = threading.Thread(target=worker_task, args=("tgb", fetch_taoguba, tgb_data), daemon=True)
             t4 = threading.Thread(target=worker_task, args=("lh", fetch_longhu, lh_data), daemon=True)
-            
+
             t1.start()
             t2.start()
             t3.start()
             t4.start()
-            
+
             # Wait for all of them to finish
             t1.join()
             t2.join()
             t3.join()
             t4.join()
+
+            # ⚡ 汇集四大榜单所有标的，通过 TDX 盘口引擎秒级一次性批量拉齐最新行情
+            all_codes = set()
+            if em_data: all_codes.update(em_data.keys())
+            if ths_data: all_codes.update(ths_data.keys())
+            if tgb_data: all_codes.update(tgb_data.keys())
+            if lh_data: all_codes.update(lh_data.keys())
+            if all_codes:
+                try:
+                    all_quotes = fetch_realtime_quotes(list(all_codes))
+                except Exception as ex:
+                    service_logger.error(f"TDX 批量拉取实时行情失败: {ex}")
             
             # 3. 计算人气共振得分
             seg_mode = getattr(self, 'segment_mode', '60m')
@@ -3106,6 +3262,12 @@ class PRServiceGUI:
                     except Exception:
                         name = "--"
 
+                # ⚡ 优先采用 TDX API 返回的实时盘口现价与涨跌幅 (秒级)
+                price_from_quote = float(quote.get("price", 0.0)) if quote else 0.0
+                if price_from_quote > 0.0:
+                    price_str = f"{price_from_quote:.2f}"
+                    pct = float(quote.get("percent", pct))
+
                 if block_str == '--' or not block_str:
                     block_str = self._block_cache.get(code_str, '--')
 
@@ -3157,7 +3319,7 @@ class PRServiceGUI:
                     except Exception:
                         eff_price = 0.0
                 if eff_price <= 0.0 and quote:
-                    eff_price = float(quote.get("last_close", quote.get("close", quote.get("price", 0.0))))
+                    eff_price = float(quote.get("price", quote.get("last_close", 0.0)))
                 if eff_price <= 0.0 and row_obj is not None:
                     eff_price = float(row_obj.get("last_close", row_obj.get("prev_close", 0.0)))
                 
@@ -3170,7 +3332,14 @@ class PRServiceGUI:
                 last_c = eff_price
                 vol = 0.0
                 amount = 0.0
-                if row_obj is not None:
+                if quote and float(quote.get("price", 0.0)) > 0:
+                    open_p = float(quote.get('open', eff_price))
+                    high_p = float(quote.get('high', eff_price))
+                    low_p = float(quote.get('low', eff_price))
+                    last_c = float(quote.get('last_close', eff_price))
+                    vol = float(quote.get('vol', 0.0))
+                    amount = float(quote.get('amount', 0.0))
+                elif row_obj is not None:
                     open_p = float(row_obj.get('open', eff_price))
                     high_p = float(row_obj.get('high', eff_price))
                     low_p = float(row_obj.get('low', eff_price))

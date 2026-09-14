@@ -24,8 +24,6 @@ if (!A_IsAdmin && !hasElevatedFlag) {
 ; ================================
 ; Global State (Auto-Execute Section)
 ; ================================
-global ClipSaved := Clipboard
-global custom_copy_triggered := false
 global AutoSendToDFCF := False     ; Auto push switch to DFCF (default OFF)
 global AutoSendToTHS := True       ; Auto push switch to THS (default ON)
 global DEBUG_MODE := true          ; Debug log switch (keep ON to hotkey_debug.log)
@@ -35,9 +33,6 @@ global LOG_FILE := A_ScriptDir "\hotkey_debug.log"
 global LastSentCode := ""
 global LastSentTick := 0
 global DEBOUNCE_INTERVAL_MS := 800  ; 800ms debounce for same stock code
-
-; Register clipboard hook inside auto-execute section before any return
-OnClipboardChange("HandleClipboardChange")
 
 ; Automatically prune logs older than 2 days on startup and every 6 hours
 PruneLog(2)
@@ -460,35 +455,6 @@ SendToHexin(stockCode) {
 }
 
 ; ================================
-; Clipboard Monitor (Auto Send on Copy)
-; ================================
-HandleClipboardChange(Type) {
-    global custom_copy_triggered, ClipSaved, AutoSendToDFCF, AutoSendToTHS
-    ; Zero-overhead early exit when auto push is disabled for both or hotkey in progress
-    if (custom_copy_triggered || (!AutoSendToDFCF && !AutoSendToTHS))
-        return
-
-    current := Clipboard
-    if (current != ClipSaved && current != "") {
-        ClipSaved := current
-        if RegExMatch(ClipSaved, "^(?:60|30|00|43|83|87|92)\d{4}(?!\d)|^(?:688|200)\d{3}(?!\d)", stockCode) {
-            Log("Clipboard detected code: " . stockCode . ", AutoSendToDFCF=" . AutoSendToDFCF . ", AutoSendToTHS=" . AutoSendToTHS)
-            Notify("Auto Send: " . stockCode, "sound", 0.3)
-            WinGet, activeWinID, ID, A
-            SendToDFCF(stockCode)
-            SendToHexin(stockCode)
-            Sleep, 200
-            if (activeWinID) {
-                WinActivate, ahk_id %activeWinID%
-                WinWaitActive, ahk_id %activeWinID%,, 1
-            }
-            Clipboard := ""
-            ClipSaved := ""
-        }
-    }
-}
-
-; ================================
 ; Hotkey: Block Alt+Q in TDX
 ; ================================
 #If WinActive("ahk_class TdxW_MainFrame_Class") || WinActive("ahk_class TdxW_SecondFrame_Class")
@@ -504,7 +470,6 @@ HandleClipboardChange(Type) {
 MButton::    ; Middle click (Clean clipboard)
     isAltTriggered := InStr(A_ThisHotkey, "!") || GetKeyState("Alt", "P")
     origClip := Clipboard
-    custom_copy_triggered := true
     
     MouseGetPos,,, hoverWin
     if (hoverWin) {
@@ -551,20 +516,16 @@ MButton::    ; Middle click (Clean clipboard)
         if (isAltTriggered) {
             if (stockCode != "") {
                 Clipboard := stockCode
-                ClipSaved := stockCode
                 Notify("Synced & Copied: " . stockCode, "tooltip", 0.8)
                 Log("Hotkey finished, Alt+MButton -> stockCode copied to clipboard: " . stockCode)
             } else {
                 Clipboard := origClip
-                ClipSaved := origClip
                 Log("Hotkey finished, Alt+MButton -> original clipboard restored")
             }
         } else {
             Clipboard := ""
-            ClipSaved := ""
             Log("Hotkey finished, normal MButton -> clipboard cleaned")
         }
-        custom_copy_triggered := false
     }
 return
 #If

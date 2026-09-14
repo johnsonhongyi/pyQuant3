@@ -1,3 +1,22 @@
+## 2026-09-14 10:30
+- [x] **【人气综合排行榜全面接入 TDX API 实时行情更新 & 解耦低效 IPC 依赖实现价格与涨跌毫秒级刷新】(SSOT) (`popularity_resonance_service.py`, `popularity_resonance_gui.py`, `tests/test_pr_tdx_realtime_integration.py`)**：
+    - [x] **用户反馈痛点与根因穿透**：
+        1. **底层 IPC 动态同步效率极低**：此前每次刷新或轮询均开启动态端口向主程序请求全市场 5000+ 股票全量 DataFrame（Socket 通信+大对象序列化），耗时 5~8 秒且常因超时失败；`_run_once_job` 主流程开头同步阻塞 8 秒等 IPC，严重拖慢刷新；
+        2. **IPC 为空直接中断行情渲染**：原 `refresh_realtime_fields` 当 `df is None or df.empty` 时直接 `return`，导致无 IPC 数据时界面价格涨跌完全不更新；
+        3. **服务层仍使用旧版新浪 HTTP**：`fetch_realtime_quotes` 抓取新浪接口存在网络阻塞、反爬限流与数据残缺。
+    - [x] **系统级工程落地与 TDX 直连改造**：
+        1. **服务层 `fetch_realtime_quotes` 全面接入 TDX 秒级盘口引擎**：优先调用 `TDXRealtimeFetcher.get_instance().get_security_quotes_safe(codes)`，毫秒级获取全量现价、涨幅、昨收、开高低、成交量额等，并保留新浪接口作为后备兜底；
+        2. **GUI 客户端 `refresh_realtime_fields` 接入 TDX API 盘口直连**：
+           - 优先以 TDX 毫秒级盘口更新各表格的**最新价、涨跌幅%、分段涨速%及实战图标、VWAP 偏离%及红绿 Tag**；
+           - 当未传入 IPC `df` 且内存无行情时，自动通过 `TDXRealtimeFetcher` 拉齐当前五大榜单全部代码，绝不因 IPC 为空而中断刷新；
+           - 保持双层数据结构平滑融合：TDX 负责高频秒级量价更新，IPC / 本地缓存负责量化衍生特征（`dff2, dff3, rank, category` 等），互不干扰；
+        3. **高频 TDX 轮询与低频 IPC 解耦**：
+           - 后台定时器在交易时段以 3.0s（跟随 `cct.ats_tdx_interval`）高频执行 `refresh_realtime_from_tdx`，毫秒级更新界面价格；
+           - IPC 动态端口同步降频至约 60 秒一次静默辅助，并在 `_run_once_job` 中改为异步守护启动，彻底消除界面卡顿；
+        4. **启动即时响应**：在恢复缓存表格后立即异步触发一次 TDX API 盘口刷新，秒级呈现最新盘口。
+    - [x] **自动化测试 4/4 PASSED 100% 全绿**：
+        - 专项新增 `tests/test_pr_tdx_realtime_integration.py`，覆盖代码清洗、TDX 盘口解析、GUI 直连更新与量化指标完好保留验证。
+
 ## 2026-09-14 09:20
 - [x] **【彻底修复新股监控面板NameError: name 'QTabWidget' is not defined致命报错 & 加固面板可见性守护】(SSOT) (`ats/ui/new_stock_panel.py`, `ats/tdx_realtime_fetcher.py`, `tests/test_new_stock_module.py`)**：
     - [x] **操盘手反馈痛点根因穿透**：
