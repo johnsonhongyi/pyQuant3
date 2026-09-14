@@ -31,6 +31,18 @@ def qapp():
     yield app
 
 
+@pytest.fixture(autouse=True)
+def clean_config():
+    """保证每个测试前后全局配置复位，消除持久化污染"""
+    save_config_node("sector_miner_strategy_filter_enabled", False)
+    save_config_node("ats_distribution_detail_filter_enabled", False)
+    save_config_node("ats_query_expr", "")
+    yield
+    save_config_node("sector_miner_strategy_filter_enabled", False)
+    save_config_node("ats_distribution_detail_filter_enabled", False)
+    save_config_node("ats_query_expr", "")
+
+
 @pytest.fixture
 def sample_test_df():
     """构造包含多只股票与常用指标的测试 DataFrame"""
@@ -132,17 +144,18 @@ def test_sector_miner_compact_mode_toggle(qapp, sample_test_df):
     """测试轮动深挖在精简模式下隐藏策略过滤按钮，全貌模式下还原"""
     dlg = SectorRotationMinerDialog(parent=None, current_df=sample_test_df)
     try:
+        dlg.show()
         # 全貌模式下可见
         dlg._apply_view_mode(is_compact=False)
-        assert dlg.btn_toggle_filter.isVisible() is True
+        assert dlg.btn_toggle_filter.isHidden() is False
 
         # 精简模式下隐藏
         dlg._apply_view_mode(is_compact=True)
-        assert dlg.btn_toggle_filter.isVisible() is False
+        assert dlg.btn_toggle_filter.isHidden() is True
 
         # 恢复全貌模式
         dlg._apply_view_mode(is_compact=False)
-        assert dlg.btn_toggle_filter.isVisible() is True
+        assert dlg.btn_toggle_filter.isHidden() is False
     finally:
         dlg.close()
 

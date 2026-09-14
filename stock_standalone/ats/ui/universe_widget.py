@@ -6,9 +6,10 @@ Provides a tree structure with real-time mockup data.
 """
 
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QTreeWidget, QTreeWidgetItem, QHBoxLayout, QPushButton, QLabel, QLineEdit, QSizePolicy
-from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QSize
+from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QSize, QPoint
 from PyQt6.QtGui import QColor, QFont
 from ats.ui.styles import COLOR_UP, COLOR_DOWN, COLOR_INFO, setup_header_persistence, auto_fit_columns_once
+from ats.ui.ats_window_manager import ATSWindowManager
 from logger_utils import LoggerFactory
 
 logger = LoggerFactory.getLogger(__name__)
@@ -140,6 +141,7 @@ class UniverseTreeWidget(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.window_manager = ATSWindowManager.get_instance()
         self._is_mock_active = False
         self._init_ui()
         self.load_mock_data()
@@ -156,17 +158,55 @@ class UniverseTreeWidget(QWidget):
 
         # Title / Search Bar
         header_layout = QHBoxLayout()
+        header_layout.setSpacing(4)
         title_label = QLabel("策略股票池 (Multi-Tier Universe)")
-        title_label.setStyleSheet("font-weight: bold; color: #aad4ff; font-size: 12pt;")
+        title_label.setStyleSheet("font-weight: bold; color: #aad4ff; font-size: 11pt;")
         title_label.setToolTip("策略股票池 (Multi-Tier Universe)")
         title_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         title_label.setMinimumWidth(0)
         header_layout.addWidget(title_label)
         header_layout.addStretch()
         
+        # --- 窗口位置手动快照（提供3个保存位置，全面持久化所有打开关联窗口，防多屏覆盖）---
+        btn_qss = """
+            QPushButton {
+                background-color: #1a1a24;
+                color: #e2e2ec;
+                border: 1px solid #3a3a4e;
+                border-radius: 4px;
+                font-size: 10pt;
+                font-family: "Segoe UI Emoji", "Segoe UI Symbol", "Segoe UI", sans-serif;
+                min-width: 25px;
+                max-width: 25px;
+                min-height: 23px;
+                max-height: 23px;
+                padding: 0px;
+            }
+            QPushButton:hover {
+                background-color: #2a2a3b;
+                border-color: #5c6b84;
+                color: #60a5fa;
+            }
+            QPushButton:pressed {
+                background-color: #12121a;
+                border-color: #3b82f6;
+            }
+        """
+        self.btn_save_pos = QPushButton("📍")
+        self.btn_save_pos.setStyleSheet(btn_qss)
+        self.btn_save_pos.setToolTip(self.window_manager.get_snapshot_tooltip_text("📍 手动保存全量快照"))
+        self.btn_save_pos.clicked.connect(self._popup_save_slots_menu)
+        header_layout.addWidget(self.btn_save_pos)
+
+        self.btn_restore_pos = QPushButton("🔧")
+        self.btn_restore_pos.setStyleSheet(btn_qss)
+        self.btn_restore_pos.setToolTip(self.window_manager.get_snapshot_tooltip_text("🔧 恢复手动快照位置"))
+        self.btn_restore_pos.clicked.connect(self._popup_restore_slots_menu)
+        header_layout.addWidget(self.btn_restore_pos)
+
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("搜索代码/名称...")
-        self.search_input.setMaximumWidth(150)
+        self.search_input.setMaximumWidth(130)
         self.search_input.setMinimumWidth(0)
         self.search_input.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         self.search_input.setStyleSheet("background-color: #1a1a22; border: 1px solid #333; border-radius: 4px; padding: 2px 5px;")
@@ -257,6 +297,84 @@ class UniverseTreeWidget(QWidget):
             logger.debug(f"恢复策略股票池列宽异常: {e}")
         finally:
             self._is_restoring_header = False
+
+    # ==========================================
+    # 窗口位置独立快照管理 (对齐 Tk 3 槽位交互)
+    # ==========================================
+    def _popup_save_slots_menu(self):
+        """弹出保存快照槽位选择菜单 (提供 3 个位置)"""
+        try:
+            self._update_snapshot_tooltips()
+            menu = self.window_manager.build_save_menu(self, self._on_save_slot_selected)
+            if hasattr(self, "btn_save_pos") and self.btn_save_pos:
+                menu.exec(self.btn_save_pos.mapToGlobal(QPoint(0, self.btn_save_pos.height() + 2)))
+        except Exception as e:
+            logger.warning(f"弹出保存快照菜单异常: {e}")
+            self._on_save_slot_selected(1)
+
+    def _popup_restore_slots_menu(self):
+        """弹出恢复快照槽位选择菜单 (提供 3 个位置)"""
+        try:
+            self._update_snapshot_tooltips()
+            menu = self.window_manager.build_restore_menu(self, self._on_restore_slot_selected)
+            if hasattr(self, "btn_restore_pos") and self.btn_restore_pos:
+                menu.exec(self.btn_restore_pos.mapToGlobal(QPoint(0, self.btn_restore_pos.height() + 2)))
+        except Exception as e:
+            logger.warning(f"弹出恢复快照菜单异常: {e}")
+            self._on_restore_slot_selected(1)
+
+    def _on_save_slot_selected(self, slot: int):
+        """执行保存快照到指定槽位 (1, 2, 3)"""
+        try:
+            mw = self.window()
+            res = self.window_manager.save_snapshot(slot=slot, main_window=mw)
+            total = res.get("total_windows", 0)
+            ymd = res.get("date_ymd", "")
+            self._update_snapshot_tooltips()
+            msg = f"📍 槽位 {slot} 快照已保存: {ymd} (共{total}个窗口已锁定)"
+            self._notify_status(msg)
+        except Exception as e:
+            logger.error(f"[UniverseTreeWidget] 槽位 {slot} 快照保存失败: {e}")
+
+    def _on_restore_slot_selected(self, slot: int):
+        """从指定槽位 (1, 2, 3) 恢复快照"""
+        try:
+            mw = self.window()
+            count, restored_list = self.window_manager.restore_snapshot(slot=slot, main_window=mw)
+            slots = self.window_manager.get_snapshot_slots_info()
+            ymd = slots.get(slot, {}).get("date_ymd", "")
+            date_info = f" [{ymd}]" if ymd else ""
+            if count > 0:
+                msg = f"🔧 槽位 {slot} 快照已恢复{date_info}: 共{count}个窗口已精准归位，覆盖消除"
+            else:
+                msg = f"⚠️ 槽位 {slot} 尚无有效快照，请先保存"
+            self._notify_status(msg)
+        except Exception as e:
+            logger.error(f"[UniverseTreeWidget] 槽位 {slot} 恢复失败: {e}")
+
+    def _update_snapshot_tooltips(self):
+        """动态刷新按钮 ToolTip 提示"""
+        try:
+            if hasattr(self, "btn_save_pos") and self.btn_save_pos:
+                self.btn_save_pos.setToolTip(self.window_manager.get_snapshot_tooltip_text("📍 手动保存全量快照"))
+            if hasattr(self, "btn_restore_pos") and self.btn_restore_pos:
+                self.btn_restore_pos.setToolTip(self.window_manager.get_snapshot_tooltip_text("🔧 恢复手动快照位置"))
+        except Exception:
+            pass
+
+    def _notify_status(self, msg: str):
+        """统一向主窗口状态栏输出操作反馈"""
+        try:
+            mw = self.window()
+            if hasattr(mw, "status_bar") and mw.status_bar:
+                mw.status_bar.showMessage(msg, 6000)
+            elif hasattr(mw, "statusBar") and callable(mw.statusBar):
+                sb = mw.statusBar()
+                if sb:
+                    sb.showMessage(msg, 6000)
+        except Exception:
+            pass
+        logger.info(msg)
 
     def load_mock_data(self):
         self._is_mock_active = True

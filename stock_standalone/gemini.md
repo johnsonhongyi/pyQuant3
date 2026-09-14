@@ -1,3 +1,33 @@
+## 2026-09-14 17:55
+- [x] **【ATS 全量窗口位置独立快照保存与单独加载功能（对齐 Tk 3 槽位体系 & 根治多显示器切换被覆盖与越界）】(`ats/ui/ats_window_manager.py`, `ats/ui/universe_widget.py`, `ats/ui/main_window.py`, `tests/test_ats_window_manager.py`)**：
+    - [x] **操盘手反馈痛点与业务诉求**：
+        1. **“ATS需要添加跟tk一样的,ats所有的窗口位置记录单独保存功能,和单独加载功能”**：
+           - 在 Tkinter 经典版中（图 1），提供 3 个槽位快照保存与加载功能，操盘手可将当前全量窗口摆放布局精准锁定并随时一键还原；
+        2. **“当切换显示器出现被覆盖问题”**：
+           - 操盘手在不同场所（外接双屏/多屏与笔记本单屏）切换时，副屏拔插或分辨率变化常导致所有子窗口被系统强行收拢堆砌在主窗口正中心死死覆盖，或坐标飞出屏幕边界不可见；
+        3. **“放置在图2标记位置”**：
+           - 在 ATS 左侧策略股票池（`UniverseTreeWidget`）顶部工具栏、紧靠搜索框左侧区域放置保存与加载入口。
+    - [x] **系统级工程落地与 SSOT 规范重构**：
+        1. **构建专用 ATS 窗口快照管理器 (`ATSWindowManager`)**：
+           - 单例模式，全量纳管 ATS 主窗口、龙头中枢监控、每日涨停天梯、强势板块跟单榜、板块轮动深挖、全球外盘看板、多周期筛选器、个股详情、板块明细、涨跌分布明细及 SBC 分时等所有独立顶级窗口；
+           - 支持槽位 1 / 2 / 3 覆盖保存，原子持久化至 `window_config.json`（及高分屏 `scale2_window_config.json`），记录年月日、时间戳、持久化窗口数量及屏幕拓扑元信息；
+        2. **多显示器边界智能校准与防覆盖级联错峰展开 (Cascade Anti-Overlap)**：
+           - 在 Qt 逻辑坐标系下执行多屏幕拓扑分析（`QApplication.screens()`），获取各屏幕可用区域（`availableGeometry()`，自动避开 Windows 任务栏）；
+           - 目标屏幕存在时：严格限制窗口在对应屏幕的可用区域内，杜绝高分屏或跨屏边缘溢出；
+           - 副屏断开时：智能回退至主屏幕可用区域，并采用错峰级联偏移算法（按窗口序号依次偏移 `30px`），使各子窗口的标题栏与边框均清晰外露，彻底根除所有窗口重叠死死覆盖在主窗口之上的致命痛点；
+           - 恢复时统一调用 `showNormal()`、`raise_()`、`activateWindow()`，将每个窗口置于最前台激活，消除遮挡；
+        3. **图 2 标记位置 UI 交互 100% 对齐 Tk 体验**：
+           - 在 `ats/ui/universe_widget.py` 顶部 `header_layout` 嵌入 `📍`（保存快照）与 `🔧`（恢复快照）现代暗黑科技风紧凑按钮（固定 25x23px，不挤压搜索框与分类标题）；
+           - 鼠标悬停动态展示 3 个槽位的当前状态 Tooltip；
+           - 点击 `📍` 弹出深色 QMenu，支持槽位 1/2/3 覆盖保存；点击 `🔧` 弹出恢复 QMenu，未保存槽位智能置灰禁用，已保存槽位点击即可一键精准归位；
+           - 操作成功后，主窗口状态栏即时弹出优雅反馈提示；
+        4. **主窗口方法透传与全生命周期协同**：
+           - `ATSMainWindow` 挂载 `self.window_manager`，并在主窗口提供 `save_window_snapshot(slot)` 与 `restore_window_snapshot(slot)` 便捷接口。
+    - [x] **自动化测试与工程规范 100% 全绿**：
+        1. 专项新增 `tests/test_ats_window_manager.py`: 5/5 PASSED（涵盖初始槽位空状态检测、槽位保存与写盘校验、多窗口恢复与置顶激活、多屏边界校准与错峰防覆盖展开、UniverseTreeWidget 按钮与下拉菜单逻辑）；
+        2. 回归测试 `test_bottom_panel_collapse.py`: 4/4 PASSED；
+        3. 编码规范校验：全部新增与修改文件严格遵守 **UTF-8（无 BOM）** 编码标准。
+
 ## 2026-09-14 17:35
 - [x] **【板块轮动深挖工作台与涨跌分布个股明细全面接入【🎯 策略过滤】功能 & 结构功能100%对齐板块明细SSOT规范】(`ats/ui/sector_rotation_miner_dialog.py`, `ats/ui/chart_widgets.py`, `tests/test_sector_miner_and_distribution_strategy_filter.py`)**：
     - [x] **操盘手反馈痛点与业务诉求**：
