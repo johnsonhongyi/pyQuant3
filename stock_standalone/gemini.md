@@ -32,22 +32,43 @@
         7. `test_new_stock_module.py`: 13/13 PASSED；
         8. `test_capital_dragon_panel_integration.py`: 17/17 PASSED。
 
-## 2026-09-14 13:35
-- [ ] **【彻底清洗资金主线与底层板块无明确信息泛概念(国企改革/ST板块/回购增持等) & 智能提取高价值实体产业题材】(SSOT) (`stock_logic_utils.py`, `ats/capital_dragon_engine.py`, `ats/sector_rotation_pullback_miner.py`, `tests/test_sector_meaningful_extraction.py`)**：
-    - [ ] **操盘手反馈痛点与业务根因剖析**：
+## 2026-09-14 14:05
+- [x] **【彻底修复轮动挖掘丢失实体行业误入烟草假主线、海峡两岸区域泛概念霸榜两大缺陷 & 落地行业与概念全景深度融合】(SSOT) (`stock_logic_utils.py`, `ats/sector_rotation_pullback_miner.py`, `ats/capital_dragon_engine.py`, `tests/test_sector_meaningful_extraction.py`)**：
+    - [x] **操盘手反馈痛点与底层真实穿透**：
+        1. **“轮动挖掘中这些还都是烟草? 这个不是调味品么?还是其他的”**：
+           - **业务事实**：爱普股份（603020）官方行业分类正是【调味品】（主营食用香精与调味配料），当日与莲花控股（2连板 10.02%）、日辰股份（+4.17%）共同带动【调味品】板块群起大涨，爱普股份涨停首板；
+           - **根因一（行业列被抛弃导致调味品主线湮没）**：`_extract_df_arrays` 与 `capital_dragon_engine.py` 提取板块列时使用了 `next((c for c in ('category', 'industry', 'concept') if c in df.columns), None)`，只要存在 `category` 便彻底将 `industry` 抛弃！爱普股份的 `category` 仅记录边缘蹭标签 `"人造肉;烟草概念;新型烟草"`，导致真实的“调味品”行业属性丢失；顺灏股份同样含有烟草标签，两者拼凑出虚假的“烟草”主线；
+           - **根因二（海峡两岸等地理泛概念未被黑名单阻断）**：“海峡两岸”覆盖福建五花八门各行业个股，虽福建水泥涨停，但板块均涨为负（-0.62%），却冲上“👑 核心主线”；
+           - **根因三（先锋龙头涨幅显示 +0.0% 缺陷）**：`eval_pct` 取 `dff`，当 `dff` 为 0.0 而真实涨幅在 `percent`（+10.05%）时，爱普股份显示为 `(+0.0%)`。
+    - [x] **系统级工程落地与 SSOT 规范重构**：
+        1. **构建行业与实体概念深度融合中枢 (`combine_industry_and_category`)**：将个股真实的 `industry`（如调味品、光伏设备）与清洗后的有效概念融合，行业优先置顶，让爱普股份、莲花控股、日辰股份在【调味品】赛道形成合力共振；
+        2. **扩充地理与行政区域泛概念黑名单**：全面拦截 `海峡两岸`、`西部大开发`、`长三角`、`珠三角`、`成渝特区`、`一带一路`、`海南自贸` 等；
+        3. **主线评级画像硬守卫**：核心主线与活跃进攻必须满足 `avg_pct > 0.0` 且 `up_ratio >= 0.45`，彻底杜绝负涨幅板块霸榜；
+        4. **修复领涨先锋涨幅展示兜底**：当 `eval_pct == 0.0` 且 `pct != 0.0` 时自动回退至真实涨幅。
+    - [x] **自动化测试 56/56 PASSED 100% 全绿**：
+        1. 专项测试 `tests/test_sector_meaningful_extraction.py`: 6/6 PASSED（新增调味品板块合力识别、海峡两岸拦截与爱普股份龙头涨幅兜底）；
+        2. `tests/test_sector_rotation_pullback_miner.py`: 20/20 PASSED；
+        3. `tests/test_capital_dragon_panel_integration.py`: 17/17 PASSED；
+        4. `tests/test_v_reversal_pool_enhancements.py`: 13/13 PASSED。
+
+## 2026-09-14 13:55
+- [x] **【彻底清洗资金主线与底层板块无明确信息泛概念(国企改革/ST板块/回购增持等) & 智能提取高价值实体产业题材】(SSOT) (`stock_logic_utils.py`, `ats/capital_dragon_engine.py`, `ats/sector_rotation_pullback_miner.py`, `tests/test_sector_meaningful_extraction.py`)**：
+    - [x] **操盘手反馈痛点与业务根因剖析**：
         1. **顶部 3 大资金主线卡片被泛概念霸占**：如【👑 核心主线: 国企改革】（成交 358.2亿，涨停 4只），因涵盖大量国企股票而靠大基数误冲榜首，严重掩盖真正爆发的细分产业题材；
         2. **底层龙头表格【所属主线】列泛概念霸屏**：300311（任子行）显示为 `ST板块`，600876、002439、002268 等显示为 `国企改革`，002346 显示为 `回购增持再贷款...`，双击板块无法聚焦成分股；
         3. **根因穿透**：`capital_dragon_engine.py` 与 `sector_rotation_pullback_miner.py` 聚合时未接入泛概念过滤且盲切 `sub_secs[:2]`，匹配个股主线时未命中则粗暴回退 `split(';')[0]`。
-    - [ ] **系统级工程落地与 SSOT 规范重构**：
+    - [x] **系统级工程落地与 SSOT 规范重构**：
         1. **底层黑名单与过滤规则增强 (`stock_logic_utils.py`)**：全面覆盖 `ST/*ST/摘帽/退市`、`回购增持/再贷款`、`央企国企改革/地方国企` 等各类无明确产业信息的金融与监管标签；
         2. **构建 SSOT 板块清洗与有价值题材提取器**：
            - `extract_meaningful_sectors(sec_str)`：清洗复合板块并剔除所有泛概念与噪声；
            - `get_most_valuable_sector(...)`：优先匹配纯化后的 Top 主线，次优匹配产业白名单，兜底细分行业，绝不返回泛概念；
         3. **资金主线引擎全链路纯化 (`capital_dragon_engine.py`)**：主线聚合与个股画像所属主线均接入 SSOT 提取器，彻底根除“国企改革”和“ST板块”；
         4. **板块轮动深挖引擎纯化 (`sector_rotation_pullback_miner.py`)**：主线发现接入有效板块清洗。
-    - [ ] **自动化测试与回归断言**：
-        1. 专项新增 `tests/test_sector_meaningful_extraction.py`，验证泛概念过滤与 300311、600876、002346 等股票智能提取真实产业板块；
-        2. 运行 `tests/test_capital_dragon_panel_integration.py` 确保 100% 通过。
+    - [x] **自动化测试 55/55 PASSED 100% 全绿**：
+        1. 专项新增 `tests/test_sector_meaningful_extraction.py`: 5/5 PASSED（验证泛概念过滤、真实产业保护、复合板块纯化以及 300311、600876、002346、600172 等股票智能提取真实产业板块与主线聚合断言）；
+        2. `tests/test_capital_dragon_panel_integration.py`: 17/17 PASSED；
+        3. `tests/test_sector_rotation_pullback_miner.py`: 20/20 PASSED；
+        4. `tests/test_v_reversal_pool_enhancements.py`: 13/13 PASSED。
 
 ## 2026-09-14 13:16
 - [x] **【彻底修复大盘指数日内量比未折算退化、全市成交额裸减全天额失真两大缺陷 & 全链路落地四大指数虚拟量比与较昨同期增减+全天虚拟量预测】(SSOT) (`JohnsonUtil/commonTips.py`, `ats/capital_dragon_engine.py`, `ats/ui/main_window.py`, `tests/test_market_volume_statusbar.py`)**：

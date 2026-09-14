@@ -307,6 +307,28 @@ class BaseATSTableWidget(QTableWidget):
         sbc_action.triggered.connect(_open_sbc)
         menu.addAction(sbc_action)
 
+        # 🧬 调出 DNA 特征审计报告
+        try:
+            selected_pairs = self.get_selected_stock_pairs()
+            if len(selected_pairs) > 1:
+                dna_label = f"🧬 批量 DNA 特征审计 ({len(selected_pairs)} 只标的)"
+                audit_dict = {c: n for c, n in selected_pairs}
+            else:
+                dna_label = f"🧬 调出 {name or code_clean} DNA 特征审计报告"
+                audit_dict = {code_clean: name}
+
+            dna_action = QAction(dna_label, self)
+            def _open_dna_audit():
+                try:
+                    from ats.ui.multi_period_dialog import run_dna_audit_batch_qt
+                    run_dna_audit_batch_qt(audit_dict, parent=self.window())
+                except Exception as e:
+                    print(f"[BaseTable] DNA audit trigger error: {e}")
+            dna_action.triggered.connect(_open_dna_audit)
+            menu.addAction(dna_action)
+        except Exception:
+            pass
+
         menu.addSeparator()
         
         if is_fav:

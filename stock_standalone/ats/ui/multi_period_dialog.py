@@ -61,6 +61,7 @@ import time
 import re
 import io
 import threading
+from typing import Optional, Dict, List, Any
 import pandas as pd
 from PyQt6.QtWidgets import (
     QDialog, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
@@ -4854,72 +4855,15 @@ class MultiPeriodDialog(QDialog, WindowMixin):
             self._run_dna_audit_batch(code_to_name, resample=min_period)
 
     def _run_dna_audit_batch(self, code_to_name, end_date=None, resample='d'):
-        from backtest_feature_auditor import audit_multiple_codes
         try:
-            # We can use wait cursor as loading hint
-            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
             self.lbl_status.setText("🧬 正在执行 DNA 审计，请稍后...")
-            QApplication.processEvents()
-            # 1. 动态加载自定义列配置
-            try:
-                custom_cols = cct.dna_audit_custom_cols if (cct and hasattr(cct, 'dna_audit_custom_cols')) else ['dff2', 'dff3', 'Rank']
-            except:
-                custom_cols = ['dff2', 'dff3', 'Rank']
-                
-            # 2. 直接获取当前包含自定义列的 DataFrame
-            # 优先级: engine._period_dfs[resample] > engine._period_dfs other > flat_df > result_df > top_now (实时行情，必含自定义列)
-            def _has_custom(df, cols):
-                if df is None or df.empty: return False
-                return any(str(c).lower() in [x.lower() for x in df.columns] for c in cols)
-
-            df_active = None
-            # 1. 优先从 engine 对应最小周期获取数据
-            if hasattr(self, 'engine') and self.engine:
-                with self.engine.lock:
-                    cand = self.engine._period_dfs.get(resample)
-                    if _has_custom(cand, custom_cols):
-                        df_active = cand
-                    
-                    if df_active is None:
-                        # 遍历其它存在的周期 DataFrame
-                        for p_key, cand in self.engine._period_dfs.items():
-                            if _has_custom(cand, custom_cols):
-                                df_active = cand
-                                break
-
-            # 2. 其次从成员变量中找
-            if df_active is None:
-                for attr in ('_last_flat_df', 'last_result_df'):
-                    cand = getattr(self, attr, None)
-                    if _has_custom(cand, custom_cols):
-                        df_active = cand
-                        break
-            # 兜底：top_now 是实时行情 df，必然含有自定义列
-            if df_active is None:
-                top = getattr(self, 'top_now', None)
-                if top is not None and not top.empty:
-                    df_active = top
-                
-            summaries = audit_multiple_codes(
-                list(code_to_name.keys()),
-                end_date=end_date,
+            self._dna_audit_win = run_dna_audit_batch_qt(
                 code_to_name=code_to_name,
-                progress_callback=None,
-                resample=resample,
-                period_data=df_active,
-                custom_cols=custom_cols
+                parent=self,
+                end_date=end_date,
+                resample=resample
             )
-            
-            # Use Qt-native DNA audit window to completely avoid Tkinter runtime and missing tk dependency issues
-            try:
-                self._dna_audit_win = QtDnaAuditReportWindow(summaries, parent=self, end_date=end_date, resample=resample)
-                self._dna_audit_win.show()
-            except Exception as e:
-                QMessageBox.critical(self, "错误", f"调起 DNA 报告窗口失败: {e}")
-        except Exception as e:
-            QMessageBox.critical(self, "DNA审计出错", str(e))
         finally:
-            QApplication.restoreOverrideCursor()
             self.lbl_status.setText("准备就绪")
 
     def diagnose_stock_strategy(self, code=None, name=None, from_input_box=False):
@@ -5656,7 +5600,7 @@ class NumericWidgetItem(QTableWidgetItem):
 
 
 class QtDnaAuditReportWindow(QDialog, WindowMixin):
-    def __init__(self, summaries, parent=None, end_date=None, resample='d'):
+    def __init__(self, summaries, parent=None, end_date=None, resample='d', custom_cols=None, code_to_name=None):
         self.monitor_app = parent
         self._real_parent = parent
         active_modal = QApplication.activeModalWidget()
@@ -5675,10 +5619,14 @@ class QtDnaAuditReportWindow(QDialog, WindowMixin):
         self.summaries = summaries
         self.end_date = end_date
         self.resample = resample
-        try:
-            self.custom_cols = cct.dna_audit_custom_cols if (cct and hasattr(cct, 'dna_audit_custom_cols')) else ['dff2', 'dff3', 'Rank']
-        except:
-            self.custom_cols = ['dff2', 'dff3', 'Rank']
+        self.code_to_name = code_to_name or {}
+        if custom_cols is not None:
+            self.custom_cols = list(custom_cols)
+        else:
+            try:
+                self.custom_cols = cct.dna_audit_custom_cols if (cct and hasattr(cct, 'dna_audit_custom_cols')) else ['dff2', 'dff3', 'Rank']
+            except:
+                self.custom_cols = ['dff2', 'dff3', 'Rank']
         
         self.setWindowTitle(f"🧬 DNA 专项审计报告 (深度挖掘) - {len(summaries)}只 (周期: {resample.upper()})")
         self.setMinimumSize(600, 400)
@@ -5763,26 +5711,25 @@ class QtDnaAuditReportWindow(QDialog, WindowMixin):
         self._fill_data()
         self.table.setSortingEnabled(True)
         
-        # 寻找可用的 link_stock
+        # 寻找初始 link_target (若有)，即便为 None 也将通过多通道自愈体系兜底广播
         self.link_target = None
         if self.monitor_app and hasattr(self.monitor_app, 'link_stock'):
             self.link_target = self.monitor_app
         else:
             p = parent
             while p:
-                if hasattr(p, 'link_stock'):
+                if hasattr(p, 'link_stock') and callable(p.link_stock):
                     self.link_target = p
                     break
-                if hasattr(p, 'parent') and p.parent():
+                if hasattr(p, 'parent') and callable(p.parent) and p.parent():
                     p = p.parent()
-                elif hasattr(p, 'window') and p.window() and p.window() != p:
+                elif hasattr(p, 'window') and callable(p.window) and p.window() and p.window() != p:
                     p = p.window()
                 else:
                     break
 
-        if self.link_target:
-            self.table.stock_activated.connect(self.link_target.link_stock)
-        
+        # ⚡ 强制连接 BaseATSTableWidget.stock_activated 到本窗口的 link_stock (绝不再受 if link_target 限制)
+        self.table.stock_activated.connect(self.link_stock)
         self.table.itemSelectionChanged.connect(self._on_selection_changed)
         self.table.itemDoubleClicked.connect(self._on_item_double_clicked)
         self.table.cellClicked.connect(self._on_cell_clicked)
@@ -5884,66 +5831,231 @@ class QtDnaAuditReportWindow(QDialog, WindowMixin):
             html_content += header
             html_content += "-" * (60 + len(self.custom_cols) * 9) + "\n"
             for h in target_s.history[-15:]:
-                row_str = f"{h['date']:<12} {h['alpha']:>8.2f} {h['pct']:>8.2f} {h['idx_pct']:>8.2f} {h['c_upper']:>8.2f} {h['v_ratio']:>8.2f}"
+                d_str = str(h.get('date', '-'))
+                alpha = float(h.get('alpha', 0.0) or 0.0)
+                pct = float(h.get('pct', 0.0) or 0.0)
+                idx_pct = float(h.get('idx_pct', 0.0) or 0.0)
+                c_upper = float(h.get('c_upper', 0.0) or 0.0)
+                v_ratio = float(h.get('v_ratio', 0.0) or 0.0)
+                row_str = f"{d_str:<12} {alpha:>8.2f} {pct:>8.2f} {idx_pct:>8.2f} {c_upper:>8.2f} {v_ratio:>8.2f}"
                 for col in self.custom_cols:
                     val = h.get(col, 0)
-                    row_str += f" {int(val):>8}"
+                    try:
+                        row_str += f" {int(float(val)):>8}"
+                    except Exception:
+                        row_str += f" {str(val):>8}"
                 row_str += "\n"
                 html_content += row_str
             
             html_content += "</pre>"
             self.detail_text.setHtml(html_content)
             
+    def link_stock(self, code: str, name: str = "", date: Optional[str] = None, force: bool = False):
+        """
+        DNA 专项审计多通道自愈联动分发体系 (SSOT)
+        支持键盘上下键、鼠标单击、双击，彻底对齐通达信/同花顺/K线可视化器/主监控大盘
+        """
+        code_clean = "".join(filter(str.isdigit, str(code))).zfill(6)
+        if not code_clean:
+            return
+
+        import time
+        now = time.time()
+        last_code = getattr(self, "_last_linked_code", None)
+        last_time = getattr(self, "_last_linked_time", 0)
+        
+        # 相同代码 50ms 绝对防抖（防止多重事件瞬时连击）
+        if last_code == code_clean and (now - last_time) < 0.05:
+            return
+
+        # 相同代码防抖（除非 force=True）
+        if not force and last_code == code_clean and (now - last_time) < 0.2:
+            return
+        self._last_linked_code = code_clean
+        self._last_linked_time = now
+
+        # 1. 优先通过绑定的 link_target (若有效)
+        if self.link_target and hasattr(self.link_target, 'link_stock') and callable(self.link_target.link_stock):
+            try:
+                self.link_target.link_stock(code_clean, name)
+                self._post_link_actions(code_clean)
+                return
+            except Exception as e:
+                logger.debug(f"link_target.link_stock error: {e}")
+
+        # 2. 检查父窗口及链式对象 (self._real_parent, self.monitor_app, getattr(self, '_py_parent', None))
+        for cand in (self._real_parent, self.monitor_app, getattr(self, '_py_parent', None)):
+            if not cand:
+                continue
+            if hasattr(cand, 'link_stock') and callable(cand.link_stock):
+                try:
+                    cand.link_stock(code_clean, name)
+                    self._post_link_actions(code_clean)
+                    return
+                except Exception:
+                    pass
+            if hasattr(cand, 'linkage_cb') and cand.linkage_cb and callable(cand.linkage_cb):
+                try:
+                    cand.linkage_cb(code_clean, name)
+                    self._post_link_actions(code_clean)
+                    return
+                except Exception:
+                    pass
+            if hasattr(cand, '_get_parent_mw'):
+                try:
+                    mw = cand._get_parent_mw()
+                    if mw and hasattr(mw, 'link_stock') and callable(mw.link_stock):
+                        mw.link_stock(code_clean, name)
+                        self._post_link_actions(code_clean)
+                        return
+                except Exception:
+                    pass
+
+        # 3. 从全局 QApplication 查找 ATSMainWindow 统一派发
+        app = QApplication.instance()
+        if app:
+            mw = getattr(app, 'main_window', None)
+            if mw and hasattr(mw, 'link_stock') and callable(mw.link_stock):
+                try:
+                    mw.link_stock(code_clean, name)
+                    self._post_link_actions(code_clean)
+                    return
+                except Exception:
+                    pass
+            for widget in app.topLevelWidgets():
+                if widget and hasattr(widget, 'link_stock') and callable(widget.link_stock) and widget is not self:
+                    try:
+                        widget.link_stock(code_clean, name)
+                        self._post_link_actions(code_clean)
+                        return
+                    except Exception:
+                        pass
+
+        # 4. 兜底保护：直接向通达信/同花顺终端与 K线可视化器 (端口 26668) 派发
+        self._post_link_actions(code_clean, force_terminal=True)
+
+    def _post_link_actions(self, code_clean: str, force_terminal: bool = False):
+        """执行直接向联动服务与可视化端口的辅助投递"""
+        if force_terminal:
+            try:
+                from linkage_service import get_link_manager
+                lm = get_link_manager()
+                if lm:
+                    lm.push(code_clean, flags={'tdx': True, 'ths': False, 'dfcf': False})
+            except Exception:
+                pass
+        try:
+            import socket
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.settimeout(0.05)
+                s.connect(('127.0.0.1', 26668))
+                s.sendall(f"CODE|{code_clean}".encode('utf-8'))
+        except Exception:
+            pass
+
+    def _on_table_item_clicked(self, item):
+        if not item:
+            return
+        code_col, name_col = self.table._get_code_name_cols()
+        c_item = self.table.item(item.row(), code_col)
+        n_item = self.table.item(item.row(), name_col)
+        if c_item:
+            code = c_item.text().strip()
+            name = n_item.text().strip() if n_item else ""
+            self.link_stock(code, name, force=True)
+
+    def update_report(self, new_summaries, end_date=None, resample='d', code_to_name=None, custom_cols=None):
+        """动态更新报告内容，支持窗口平滑复用"""
+        if not new_summaries:
+            return
+        self.summaries = new_summaries
+        self.end_date = end_date
+        self.resample = resample
+        if code_to_name:
+            self.code_to_name = code_to_name
+        if custom_cols is not None:
+            self.custom_cols = list(custom_cols)
+        title_suffix = f" (截止: {end_date}, 周期: {resample.upper()})" if end_date else f" (周期: {resample.upper()})"
+        self.setWindowTitle(f"🧬 DNA 专项审计报告 (深度挖掘) - {len(new_summaries)}只{title_suffix}")
+        self._fill_data()
+        if self.table.rowCount() > 0:
+            self.table.setCurrentCell(0, 0)
+            self._on_selection_changed()
+
     def _on_item_double_clicked(self, item):
-        code = self.table.item(item.row(), 0).text()
-        name_item = self.table.item(item.row(), 1)
-        name = name_item.text().strip() if name_item else ""
-        if self.link_target and hasattr(self.link_target, 'link_stock'):
-            self.link_target.link_stock(code, name)
+        code_col, name_col = self.table._get_code_name_cols()
+        c_item = self.table.item(item.row(), code_col)
+        n_item = self.table.item(item.row(), name_col)
+        if not c_item:
+            return
+        code = c_item.text().strip()
+        name = n_item.text().strip() if n_item else ""
+        self.link_stock(code, name, force=True)
+        try:
+            from ats.ui.intraday_strategy_dialog import open_sbc_chart_dialog
+            open_sbc_chart_dialog(self, code)
+        except Exception:
+            pass
 
     def _on_cell_clicked(self, row, column):
-        if column == 0:  # 点击代码列
-            code_item = self.table.item(row, 0)
-            if code_item:
-                code = code_item.text().strip()
+        code_col, name_col = self.table._get_code_name_cols()
+        c_item = self.table.item(row, code_col)
+        n_item = self.table.item(row, name_col)
+        if not c_item:
+            return
+        code = c_item.text().strip()
+        name = n_item.text().strip() if n_item else ""
+        self.link_stock(code, name, force=True)
+
+        if column == 0:  # 点击代码列，级联寻找可以回填的诊断输入框或方法
+            diag_target = None
+            app = QApplication.instance()
+            search_pool = [self.monitor_app, self._real_parent, getattr(self, '_py_parent', None)]
+            if app:
+                mw = getattr(app, 'main_window', None)
+                if mw:
+                    search_pool.append(mw)
+                search_pool.extend(app.topLevelWidgets())
                 
-                # 级联寻找可以回填的 diag_edit/diag_entry 或是 诊断方法
-                diag_target = None
-                p = self.monitor_app
-                while p:
-                    if hasattr(p, 'diag_edit') or hasattr(p, 'diag_entry') or hasattr(p, 'diagnose_stock_strategy'):
-                        diag_target = p
+            for p in search_pool:
+                curr = p
+                while curr:
+                    if hasattr(curr, 'diag_edit') or hasattr(curr, 'diag_entry') or hasattr(curr, 'diagnose_stock_strategy'):
+                        diag_target = curr
                         break
-                    if hasattr(p, 'parent') and p.parent():
-                        p = p.parent()
-                    elif hasattr(p, 'window') and p.window() and p.window() != p:
-                        p = p.window()
+                    if hasattr(curr, 'parent') and callable(curr.parent) and curr.parent():
+                        curr = curr.parent()
+                    elif hasattr(curr, 'window') and callable(curr.window) and curr.window() and curr.window() != curr:
+                        curr = curr.window()
                     else:
                         break
-                
                 if diag_target:
-                    if hasattr(diag_target, 'diag_edit') and diag_target.diag_edit:
-                        # QLineEdit 或者 Tk Entry
-                        if hasattr(diag_target.diag_edit, 'setText'):
-                            diag_target.diag_edit.setText(code)
-                        else:
-                            try:
-                                diag_target.diag_edit.delete(0, 'end')
-                                diag_target.diag_edit.insert(0, code)
-                            except:
-                                pass
-                    elif hasattr(diag_target, 'diag_entry') and diag_target.diag_entry:
-                        if hasattr(diag_target.diag_entry, 'setText'):
-                            diag_target.diag_entry.setText(code)
-                        else:
-                            try:
-                                diag_target.diag_entry.delete(0, 'end')
-                                diag_target.diag_entry.insert(0, code)
-                            except:
-                                pass
-                                
-                    if hasattr(diag_target, 'diagnose_stock_strategy'):
+                    break
+                    
+            if diag_target:
+                if hasattr(diag_target, 'diag_edit') and diag_target.diag_edit:
+                    if hasattr(diag_target.diag_edit, 'setText'):
+                        diag_target.diag_edit.setText(code)
+                    else:
+                        try:
+                            diag_target.diag_edit.delete(0, 'end')
+                            diag_target.diag_edit.insert(0, code)
+                        except Exception:
+                            pass
+                elif hasattr(diag_target, 'diag_entry') and diag_target.diag_entry:
+                    if hasattr(diag_target.diag_entry, 'setText'):
+                        diag_target.diag_entry.setText(code)
+                    else:
+                        try:
+                            diag_target.diag_entry.delete(0, 'end')
+                            diag_target.diag_entry.insert(0, code)
+                        except Exception:
+                            pass
+                if hasattr(diag_target, 'diagnose_stock_strategy'):
+                    try:
                         diag_target.diagnose_stock_strategy(code)
+                    except Exception:
+                        pass
             
     def showEvent(self, event):
         super().showEvent(event)
@@ -5958,98 +6070,157 @@ class QtDnaAuditReportWindow(QDialog, WindowMixin):
                 self.save_window_position_qt_visual(self, self.window_name)
             except Exception as e:
                 logger.warning(f"Error saving window position: {e}")
-
-        # 1. 停止并安全清理当前窗口持有的子线程 worker
-        for attr in ("worker", "_hit_worker"):
-            w = getattr(self, attr, None)
-            if w is not None:
-                try:
-                    from PyQt6.sip import isdeleted
-                    if not isdeleted(w) and w.isRunning():
-                        logger.info(f"[MultiPeriodDialog] Stopping background {attr} thread...")
-                        w.requestInterruption()
-                        w.quit()
-                        if not w.wait(1000):
-                            logger.warning(f"[MultiPeriodDialog] {attr} thread timed out, terminating...")
-                            w.terminate()
-                            w.wait(500)
-                except Exception as e:
-                    logger.warning(f"[MultiPeriodDialog] Exception stopping {attr}: {e}")
-                finally:
-                    setattr(self, attr, None)
-
-        # 2. 清理 _active_workers 全局集合中残留的活跃 Worker
-        global _active_workers
-        for w in list(_active_workers):
-            try:
-                from PyQt6.sip import isdeleted
-                if not isdeleted(w) and w.isRunning():
-                    w.requestInterruption()
-                    w.quit()
-                    if not w.wait(800):
-                        w.terminate()
-                        w.wait(300)
-            except Exception:
-                pass
-        _active_workers.clear()
-
-        # 3. 停止对话框下的所有 QTimer 定时器
-        try:
-            for timer in self.findChildren(QTimer):
-                if timer.isActive():
-                    timer.stop()
-        except Exception as e:
-            logger.warning(f"[MultiPeriodDialog] Error stopping QTimers: {e}")
-
-        # 4. 🚀【广播多周期退出事件】：通知所有独立悬浮窗口 (DNA、诊断、个股详情等) 接收退出事件并主动 close() 销毁
-        try:
-            ui_event_hub.multi_period_closing.emit()
-        except Exception as e:
-            logger.warning(f"[MultiPeriodDialog] Error emitting multi_period_closing signal: {e}")
-
-        if hasattr(self, "_child_dialogs") and self._child_dialogs:
-            for dlg in list(self._child_dialogs):
-                try:
-                    from PyQt6.sip import isdeleted
-                    if not isdeleted(dlg):
-                        dlg.close()
-                except Exception:
-                    pass
-            self._child_dialogs.clear()
-
-        if hasattr(self, "_stock_category_wins") and self._stock_category_wins:
-            for win in list(self._stock_category_wins.values()):
-                try:
-                    from PyQt6.sip import isdeleted
-                    if not isdeleted(win):
-                        win.close()
-                except Exception:
-                    pass
-            self._stock_category_wins.clear()
-
-        for child_attr in ("_check_code_dialog", "_dna_audit_win", "_strategy_editor_win"):
-            child_win = getattr(self, child_attr, None)
-            if child_win is not None:
-                try:
-                    from PyQt6.sip import isdeleted
-                    if not isdeleted(child_win):
-                        child_win.close()
-                except Exception:
-                    pass
-                setattr(self, child_attr, None)
-
         super().closeEvent(event)
 
-    def _register_child_dialog(self, dlg):
-        """自动注册并跟踪由本多周期窗口发起的子弹窗 (个股详情、诊断报告等)，以便多周期退出时 100% 跟随关闭"""
-        if not hasattr(self, "_child_dialogs"):
-            self._child_dialogs = set()
-        if dlg is not None:
-            self._child_dialogs.add(dlg)
+
+def run_dna_audit_batch_qt(
+    code_to_name: Dict[str, str],
+    parent=None,
+    end_date=None,
+    resample='d',
+    period_data=None,
+    custom_cols=None
+) -> Optional[QtDnaAuditReportWindow]:
+    """
+    【跨模块通用的 PyQt6 / ATS 统一 DNA 审计启动器】(SSOT)
+    - 自动提取或推断 period_data 与 custom_cols 数据上下文
+    - 统一安全执行 audit_multiple_codes
+    - 创建或平滑复用 QtDnaAuditReportWindow
+    - 保证 100% 自愈联动能力与桌面视窗自由置顶
+    """
+    if not code_to_name:
+        return None
+        
+    from backtest_feature_auditor import audit_multiple_codes
+    from PyQt6.QtCore import Qt as _Qt
+    from PyQt6.QtWidgets import QApplication, QMessageBox, QWidget
+
+    app = QApplication.instance()
+    if not app:
+        return None
+
+    QApplication.setOverrideCursor(_Qt.CursorShape.WaitCursor)
+    QApplication.processEvents()
+    try:
+        # 1. 动态对齐自定义列
+        if custom_cols is None:
             try:
-                dlg.destroyed.connect(lambda obj=None, d=dlg: self._child_dialogs.discard(d) if hasattr(self, "_child_dialogs") else None)
+                custom_cols = cct.dna_audit_custom_cols if (cct and hasattr(cct, 'dna_audit_custom_cols')) else ['dff2', 'dff3', 'Rank']
             except Exception:
-                pass
+                custom_cols = ['dff2', 'dff3', 'Rank']
+
+        # 2. 智能解析 period_data 策略 DataFrame
+        if period_data is None or (isinstance(period_data, pd.DataFrame) and period_data.empty):
+            # 2.1 从 parent 获取
+            if parent:
+                if hasattr(parent, 'engine') and parent.engine:
+                    try:
+                        with parent.engine.lock:
+                            cand = parent.engine._period_dfs.get(resample)
+                            if cand is not None and not cand.empty:
+                                period_data = cand
+                            if period_data is None:
+                                for _, p_df in parent.engine._period_dfs.items():
+                                    if p_df is not None and not p_df.empty:
+                                        period_data = p_df
+                                        break
+                    except Exception:
+                        pass
+                if period_data is None:
+                    for attr in ('_last_flat_df', 'last_result_df', 'flat_df', 'result_df', 'df_all', 'current_df', 'top_now'):
+                        cand = getattr(parent, attr, None)
+                        if cand is not None and isinstance(cand, pd.DataFrame) and not cand.empty:
+                            period_data = cand
+                            break
+            # 2.2 从 SectorDataAggregator 统一聚合器探测
+            if period_data is None:
+                try:
+                    from ats.sector_data_aggregator import SectorDataAggregator
+                    period_data, _ = SectorDataAggregator.get_instance().resolve_active_strategy_df(parent)
+                except Exception:
+                    pass
+            # 2.3 从 ATSMainWindow 提取 df_all
+            if period_data is None:
+                mw = getattr(app, 'main_window', None)
+                if mw and hasattr(mw, 'df_all') and mw.df_all is not None and not mw.df_all.empty:
+                    period_data = mw.df_all
+            # 2.4 遍历 topLevelWidgets 查找可用 df
+            if period_data is None:
+                for widget in app.topLevelWidgets():
+                    for attr in ('df_all', 'current_df', '_last_flat_df'):
+                        cand = getattr(widget, attr, None)
+                        if cand is not None and isinstance(cand, pd.DataFrame) and not cand.empty:
+                            period_data = cand
+                            break
+                    if period_data is not None:
+                        break
+
+        # 3. 执行 DNA 批量审计计算
+        summaries = audit_multiple_codes(
+            list(code_to_name.keys()),
+            end_date=end_date,
+            code_to_name=code_to_name,
+            progress_callback=None,
+            resample=resample,
+            period_data=period_data,
+            custom_cols=custom_cols
+        )
+
+        if not summaries:
+            parent_widget = parent if (parent and isinstance(parent, QWidget)) else None
+            QMessageBox.information(
+                parent_widget,
+                "DNA 审计",
+                f"当前所选 {len(code_to_name)} 只标的未产生足够的历史数据或审计特征。"
+            )
+            return None
+
+        # 4. 检查是否可复用已有窗口
+        audit_win = None
+        if parent and hasattr(parent, '_dna_audit_win'):
+            old_win = getattr(parent, '_dna_audit_win', None)
+            from PyQt6.sip import isdeleted
+            if old_win and not isdeleted(old_win) and isinstance(old_win, QtDnaAuditReportWindow):
+                old_win.update_report(
+                    summaries,
+                    end_date=end_date,
+                    resample=resample,
+                    code_to_name=code_to_name,
+                    custom_cols=custom_cols
+                )
+                audit_win = old_win
+
+        if audit_win is None:
+            audit_win = QtDnaAuditReportWindow(
+                summaries,
+                parent=parent,
+                end_date=end_date,
+                resample=resample,
+                custom_cols=custom_cols,
+                code_to_name=code_to_name
+            )
+            if parent and hasattr(parent, '__dict__'):
+                parent._dna_audit_win = audit_win
+
+        if audit_win.isMinimized():
+            audit_win.showNormal()
+        elif not audit_win.isVisible():
+            audit_win.show()
+        audit_win.raise_()
+        audit_win.activateWindow()
+        return audit_win
+
+    except Exception as e:
+        logger.error(f"run_dna_audit_batch_qt error: {e}", exc_info=True)
+        parent_widget = parent if (parent and isinstance(parent, QWidget)) else None
+        QMessageBox.warning(
+            parent_widget,
+            "DNA 审计出错",
+            f"执行 DNA 审计时发生异常: {e}"
+        )
+        return None
+    finally:
+        QApplication.restoreOverrideCursor()
 
 
 class QtCheckCodeDialog(QDialog, WindowMixin):

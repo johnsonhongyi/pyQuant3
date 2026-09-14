@@ -420,7 +420,7 @@ def audit_multiple_codes(codes, start_date=None, end_date=None, code_to_name=Non
             main_app = None
             for obj in gc.get_objects():
                 obj_name = type(obj).__name__
-                if obj_name in ('StockMonitorApp', 'MultiPeriodDialog', 'StandaloneMultiPeriodTester', 'BiddingRacingRhythmPanel'):
+                if obj_name in ('ATSMainWindow', 'StockMonitorApp', 'MultiPeriodDialog', 'StandaloneMultiPeriodTester', 'BiddingRacingRhythmPanel'):
                     main_app = obj
                     break
             
@@ -1059,6 +1059,11 @@ def run_dna_audit_batch_tkinter(parent, code_to_name, end_date=None, tk_dispatch
             parent._dna_audit_running = False
             
     threading.Thread(target=run_task, daemon=True).start()
+
+def run_dna_audit_batch_qt(code_to_name, parent=None, end_date=None, resample='d', period_data=None, custom_cols=None):
+    """【跨模块通用的 PyQt6 / ATS 统一 DNA 审计启动器快捷导出】(SSOT)"""
+    from ats.ui.multi_period_dialog import run_dna_audit_batch_qt as _qt_runner
+    return _qt_runner(code_to_name, parent=parent, end_date=end_date, resample=resample, period_data=period_data, custom_cols=custom_cols)
 
 def main():
     parser = argparse.ArgumentParser(description="DNA 审计专家 v9.8 [Alpha Backtest Edition]")

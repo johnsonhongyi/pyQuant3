@@ -3237,6 +3237,31 @@ class ATSMainWindow(QMainWindow):
             except Exception as e:
                 print(f"[Linkage] External linkage failed: {e}")
 
+    def _run_dna_audit_batch(self, code_to_name, end_date=None, resample='d', period_data=None, custom_cols=None):
+        """
+        统一对指定代码列表执行 DNA 批量特征审计报告 (SSOT)
+        - 自动对接主窗口 current_df / df_all 策略快照
+        - 创建或平滑复用独立置顶 QtDnaAuditReportWindow
+        """
+        try:
+            from ats.ui.multi_period_dialog import run_dna_audit_batch_qt
+            if period_data is None:
+                period_data = getattr(self, 'current_df', None)
+                if period_data is None or (hasattr(period_data, 'empty') and period_data.empty):
+                    period_data = getattr(self, 'df_all', None)
+            self._dna_audit_win = run_dna_audit_batch_qt(
+                code_to_name,
+                parent=self,
+                end_date=end_date,
+                resample=resample,
+                period_data=period_data,
+                custom_cols=custom_cols
+            )
+            return self._dna_audit_win
+        except Exception as e:
+            print(f"[ATSMainWindow] _run_dna_audit_batch error: {e}")
+            return None
+
     def _on_top_tab_changed(self, index: int):
         """主看板顶部 Tab 切换事件：极速 0ms 补齐渲染与同步对应 Tab 页面数据并自动持久化记忆"""
         saved_sizes = None

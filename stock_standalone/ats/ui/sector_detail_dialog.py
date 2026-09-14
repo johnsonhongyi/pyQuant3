@@ -1169,26 +1169,38 @@ class ATSSectorDetailDialog(QDialog):
 
         menu.exec(self.table.viewport().mapToGlobal(pos))
 
+    def link_stock(self, code: str, name: str = ""):
+        """提供给子窗口 (如 DNA 审计) 和外部组件调用的标准联动接口"""
+        if self.linkage_cb and callable(self.linkage_cb):
+            try:
+                self.linkage_cb(code, name)
+                return
+            except Exception as e:
+                logger.debug(f"linkage_cb error: {e}")
+        mw = self._get_parent_mw()
+        if mw and hasattr(mw, 'link_stock') and callable(mw.link_stock):
+            try:
+                mw.link_stock(code, name)
+                return
+            except Exception as e:
+                logger.debug(f"mw.link_stock error: {e}")
+        from PyQt6.QtWidgets import QApplication
+        app = QApplication.instance()
+        if app:
+            main_w = getattr(app, 'main_window', None)
+            if main_w and hasattr(main_w, 'link_stock') and callable(main_w.link_stock):
+                try:
+                    main_w.link_stock(code, name)
+                except Exception:
+                    pass
+
     def _run_dna_audit(self):
-        """对板块内所有成员股（按表格顺序，最多20只）执行 DNA 审计。
-        优先通过主程序 parent_app._run_dna_audit_batch，降级到本地 QtDnaAuditReportWindow。
-        """
+        """对板块内所有成员股（支持多选、单选后续及默认前20只）执行 DNA 审计 (统一调用通用的 run_dna_audit_batch_qt)"""
         rows = self.table.rowCount()
         if rows == 0:
             return
 
-        # Collect all member stocks from the table (code in col 0, name in col 1)
-        items = []
-        for r in range(rows):
-            c_it = self.table.item(r, 0)
-            n_it = self.table.item(r, 1)
-            if c_it and n_it:
-                items.append((c_it.text().strip(), n_it.text().strip()))
-
-        # Align with chart_widgets.py selection logic:
-        #   multi-select  → all selected rows (up to 50)
-        #   single-select → current row + next 19 rows (total ≤ 20)
-        #   no selection  → first 20 rows of the table
+        # 收集选中股票或前20只股票
         sel_rows = sorted(set(i.row() for i in self.table.selectedItems()))
         if len(sel_rows) > 1:
             target = [(self.table.item(r, 0).text().strip(),
@@ -1201,62 +1213,24 @@ class ATSSectorDetailDialog(QDialog):
                       for r in range(start, min(start + 20, rows))
                       if self.table.item(r, 0) and self.table.item(r, 1)]
         else:
-            target = items[:20]
+            target = []
+            for r in range(min(20, rows)):
+                c_it = self.table.item(r, 0)
+                n_it = self.table.item(r, 1)
+                if c_it and n_it:
+                    target.append((c_it.text().strip(), n_it.text().strip()))
 
         code_to_name = {c: n for c, n in target if c}
         if not code_to_name:
             return
 
-        # Try main app first
-        main_app = getattr(self.parent(), 'parent_app', None)
-        if not main_app:
-            main_app = getattr(self.window(), 'parent_app', None)
-        if not main_app:
-            main_app = getattr(QApplication.instance(), 'parent_app', None)
-
-        if main_app and hasattr(main_app, '_run_dna_audit_batch'):
-            if hasattr(main_app, 'tk_dispatch_queue'):
-                _cn = dict(code_to_name)
-                main_app.tk_dispatch_queue.put(lambda: main_app._run_dna_audit_batch(_cn))
-            else:
-                main_app._run_dna_audit_batch(code_to_name)
-            return
-
-        # ATSMainWindow or any Qt window with _run_dna_audit_batch
-        win = self.window()
-        if hasattr(win, '_run_dna_audit_batch'):
-            win._run_dna_audit_batch(code_to_name)
-            return
-
-        # Local PyQt6 fallback (packaged env)
-        try:
-            from backtest_feature_auditor import audit_multiple_codes
-            from ats.ui.multi_period_dialog import QtDnaAuditReportWindow
-            from PyQt6.QtCore import Qt as _Qt
-            QApplication.setOverrideCursor(_Qt.CursorShape.WaitCursor)
-            QApplication.processEvents()
-            # 从统一聚合引擎探测感知系统活跃的策略 DataFrame
-            _period_data, _ = SectorDataAggregator.get_instance().resolve_active_strategy_df(self)
-            summaries = audit_multiple_codes(
-                list(code_to_name.keys()),
-                end_date=None,
-                code_to_name=code_to_name,
-                progress_callback=None,
-                resample='d',
-                period_data=_period_data
-            )
-            if summaries:
-                self._dna_audit_win = QtDnaAuditReportWindow(
-                    summaries, parent=self.window(), end_date=None, resample='d'
-                )
-                self._dna_audit_win.show()
-            else:
-                from PyQt6.QtWidgets import QMessageBox
-                QMessageBox.warning(self, "DNA 审计", "没有产生审计数据或结论。")
-        except Exception as e:
-            print(f"[ATSSectorDetailDialog] DNA audit local fallback failed: {e}")
-        finally:
-            QApplication.restoreOverrideCursor()
+        from ats.ui.multi_period_dialog import run_dna_audit_batch_qt
+        self._dna_audit_win = run_dna_audit_batch_qt(
+            code_to_name=code_to_name,
+            parent=self,
+            end_date=None,
+            resample='d'
+        )
 
     def showEvent(self, event):
         super().showEvent(event)
