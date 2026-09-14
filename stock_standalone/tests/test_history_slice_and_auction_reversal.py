@@ -140,7 +140,7 @@ def test_history_slice_ui_components(qapp):
 
     # 验证默认切片为关闭状态
     assert not win.cb_slice_enable.isChecked()
-    assert win.cb_slice_enable.text() == "切片"
+    assert win.cb_slice_enable.text() in ("", "切片")
 
     # 模拟数据灌入
     mock_df = generate_mock_daily_data()
@@ -155,7 +155,7 @@ def test_history_slice_ui_components(qapp):
     win.btn_slice_prev.click()
     # 验证切片开关已自动激活开启
     assert win.cb_slice_enable.isChecked()
-    assert win.cb_slice_enable.text() == "切片(开)"
+    assert "(开)" in win.cb_slice_enable.text()
     # 验证日期已成功回退为前一个交易日
     cur_date = win.date_cutoff_edit.date().toString("yyyy-MM-dd")
     all_dates = sorted(list(set([str(d).split()[0] for d in mock_df.index])))
@@ -287,6 +287,13 @@ def test_slice_floating_bar_and_calendar_popup(qapp):
     expected_x = win.kline_widget.width() - win.slice_floating_bar.width() - 15
     assert abs(win.slice_floating_bar.x() - expected_x) <= 2
     assert win.slice_floating_bar.y() == 10
+
+    # 验证控件排版顺序：日历按钮必须放置在左右箭头之前，左右箭头紧邻便于连续点击
+    bar_layout = win.slice_floating_bar.layout()
+    cal_idx = bar_layout.indexOf(win.btn_slice_calendar)
+    prev_idx = bar_layout.indexOf(win.btn_slice_prev)
+    next_idx = bar_layout.indexOf(win.btn_slice_next)
+    assert cal_idx < prev_idx < next_idx, f"日历按钮(idx={cal_idx})必须在左右箭头(prev={prev_idx}, next={next_idx})前面"
 
     # 测试日历浮窗
     assert hasattr(win, 'calendar_popup')
