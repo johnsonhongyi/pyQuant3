@@ -24,8 +24,11 @@ import pandas as pd
 from tk_gui_modules.window_mixin import WindowMixin
 from tk_gui_modules.gui_config import WINDOW_CONFIG_FILE
 from tk_gui_modules.qt_table_utils import NumericTableWidgetItem
+from ats.ui.styles import (
+    bind_top_shortcut, set_seamless_stay_on_top,
+    save_config_node, load_config_node, parse_bool_config
+)
 from logger_utils import LoggerFactory
-from ats.ui.styles import bind_top_shortcut, set_seamless_stay_on_top
 from JohnsonUtil import commonTips as cct
 from ats.opening_bubble_engine import get_opening_bubble_engine
 
@@ -96,6 +99,10 @@ class DistributionDetailsDialog(QDialog, WindowMixin):
         self.setMinimumWidth(650)
         self._is_updating = False
         
+        # 🎯 策略过滤持久化开关 (专属独立持久化，默认关闭)
+        saved_filter = load_config_node("ats_distribution_detail_filter_enabled", False)
+        self.filter_enabled = parse_bool_config(saved_filter, default=False)
+        
         # 1. Load stays-on-top parameter
         self.stays_on_top = self._load_stays_on_top()
         
@@ -130,6 +137,13 @@ class DistributionDetailsDialog(QDialog, WindowMixin):
         header_lay.addWidget(self.header_label)
         
         header_lay.addStretch()
+        
+        # 🎯 策略过滤持久化开关按钮 (所有个股明细通用，与板块明细结构一致、功能一样)
+        self.btn_toggle_filter = QPushButton()
+        self._update_filter_button_ui()
+        self.btn_toggle_filter.clicked.connect(self.toggle_filter_state)
+        header_lay.addWidget(self.btn_toggle_filter)
+        header_lay.addSpacing(6)
         
         # 搜索框 (与新股次新股搜索风格保持高度一致)
         self.search_edit = QLineEdit()
@@ -1276,9 +1290,189 @@ class DistributionDetailsDialog(QDialog, WindowMixin):
             self._is_updating = False
             self._apply_search_filter()
 
+    def toggle_filter_state(self):
+        """切换策略公式过滤状态并全局持久化"""
+        self.filter_enabled = not getattr(self, 'filter_enabled', False)
+        save_config_node("ats_distribution_detail_filter_enabled", bool(self.filter_enabled))
+        self._update_filter_button_ui()
+        self._apply_search_filter()
+
+    def _update_filter_button_ui(self):
+        """更新策略过滤按钮的高亮与状态文案"""
+        if not hasattr(self, 'btn_toggle_filter') or self.btn_toggle_filter is None:
+            return
+        if getattr(self, 'filter_enabled', False):
+            self.btn_toggle_filter.setText("🎯 策略过滤 (开)")
+            self.btn_toggle_filter.setStyleSheet("""
+                QPushButton {
+                    background-color: #1a3322;
+                    color: #00ff88;
+                    font-weight: bold;
+                    border: 1.5px solid #00ff88;
+                    border-radius: 3px;
+                    padding: 1px 6px;
+                    font-size: 8.5pt;
+                    height: 18px;
+                }
+                QPushButton:hover {
+                    background-color: #00ff88;
+                    color: #000000;
+                }
+            """)
+            self.btn_toggle_filter.setToolTip("当前状态：【已开启】自动根据主窗口策略公式过滤当前个股明细 (点击可关闭)")
+        else:
+            self.btn_toggle_filter.setText("🎯 策略过滤 (关)")
+            self.btn_toggle_filter.setStyleSheet("""
+                QPushButton {
+                    background-color: #222228;
+                    color: #888888;
+                    font-weight: bold;
+                    border: 1px solid #44444f;
+                    border-radius: 3px;
+                    padding: 1px 6px;
+                    font-size: 8.5pt;
+                    height: 18px;
+                }
+                QPushButton:hover {
+                    background-color: #33333d;
+                    color: #ffffff;
+                    border-color: #777788;
+                }
+            """)
+            self.btn_toggle_filter.setToolTip("当前状态：【已关闭】展示当前区间全部个股 (点击开启根据策略公式过滤)")
+
+    def _get_active_query_expr(self) -> str:
+        """获取当前活跃的策略公式"""
+        main_app = self._get_main_app()
+        if main_app and hasattr(main_app, 'query_expr') and main_app.query_expr:
+            return str(main_app.query_expr).strip()
+        for w in QApplication.topLevelWidgets():
+            if hasattr(w, 'query_expr') and w.query_expr:
+                return str(w.query_expr).strip()
+        saved_q = load_config_node("ats_query_expr", "")
+        return str(saved_q).strip() if saved_q else ""
+
+    def _get_strategy_hit_codes(self, query_expr: str):
+        """获取匹配当前策略公式的股票代码集合 (Set[str])"""
+        if not query_expr:
+            return None
+        try:
+            from stock_logic_utils import query_engine
+            # 1. 优先使用主窗口已预计算的全量过滤代码集合 (0ms 极速命中匹配)
+            main_app = self._get_main_app()
+            if not main_app:
+                for w in QApplication.topLevelWidgets():
+                    if hasattr(w, 'filtered_codes_set') and hasattr(w, 'query_expr'):
+                        main_app = w
+                        break
+            if main_app and hasattr(main_app, 'filtered_codes_set') and main_app.filtered_codes_set:
+                if getattr(main_app, 'query_expr', '') == query_expr:
+                    return main_app.filtered_codes_set
+
+            # 2. 否则从当前数据底座动态切片执行 query_engine.execute
+            current_df = getattr(self, 'current_df', None)
+            if (current_df is None or current_df.empty) and main_app and hasattr(main_app, 'current_df'):
+                current_df = main_app.current_df
+
+            row_codes = []
+            for r in range(self.table.rowCount()):
+                c_item = self.table.item(r, 0)
+                if c_item:
+                    c_clean = "".join(ch for ch in c_item.text() if ch.isdigit()).zfill(6)
+                    if c_clean:
+                        row_codes.append(c_clean)
+
+            if current_df is not None and not current_df.empty and row_codes:
+                sub_df = None
+                if 'code' in current_df.columns:
+                    c_ser = current_df['code'].astype(str).str.strip().str.zfill(6)
+                    sub_df = current_df[c_ser.isin(row_codes)].copy()
+                else:
+                    idx_ser = current_df.index.astype(str).str.strip().str.zfill(6)
+                    sub_df = current_df[idx_ser.isin(row_codes)].copy()
+
+                if sub_df is not None and not sub_df.empty:
+                    res = query_engine.execute(sub_df, query_expr)
+                    if isinstance(res, pd.DataFrame) and not res.empty:
+                        if 'code' in res.columns:
+                            return set(res['code'].astype(str).str.strip().str.zfill(6))
+                        else:
+                            return set(res.index.astype(str).str.strip().str.zfill(6))
+                    return set()
+
+            # 3. 备用兜底: 从当前表格构建临时 DataFrame 评估
+            if row_codes:
+                table_rows = []
+                for r in range(self.table.rowCount()):
+                    c_it = self.table.item(r, 0)
+                    n_it = self.table.item(r, 1)
+                    p_it = self.table.item(r, 2)
+                    c_txt = "".join(ch for ch in c_it.text() if ch.isdigit()).zfill(6) if c_it else ""
+                    n_txt = n_it.text() if n_it else ""
+                    p_val = safe_float(p_it.text().replace('%', '')) if p_it else 0.0
+                    table_rows.append({'code': c_txt, 'name': n_txt, 'percent': p_val, 'pct': p_val})
+                df_tbl = pd.DataFrame(table_rows)
+                df_tbl.set_index('code', inplace=True, drop=False)
+                res = query_engine.execute(df_tbl, query_expr)
+                if isinstance(res, pd.DataFrame) and not res.empty:
+                    return set(res.index.astype(str).str.strip().str.zfill(6))
+                return set()
+            return None
+        except Exception as e:
+            logger.debug(f"DistributionDetailsDialog _get_strategy_hit_codes error: {e}")
+            return None
+
+    def _get_bucket_desc(self) -> str:
+        """获取当前区间的自然语言描述"""
+        bucket_names = [
+            "跌幅超 8% (<-8%)",
+            "跌幅 6% 至 8% (-8% ~ -6%)",
+            "跌幅 4% 至 6% (-6% ~ -4%)",
+            "跌幅 2% 至 4% (-4% ~ -2%)",
+            "跌幅 0% 至 2% (-2% ~ 0%)",
+            "涨幅 0% 至 2% (0% ~ +2%)",
+            "涨幅 2% 至 4% (+2% ~ +4%)",
+            "涨幅 4% 至 6% (+4% ~ +6%)",
+            "涨幅 6% 至 8% (+6% ~ +8%)",
+            "涨幅超 8% (>+8%)"
+        ]
+        idx = getattr(self, 'bucket_idx', 0)
+        if 0 <= idx < len(bucket_names):
+            return bucket_names[idx]
+        return "全部"
+
+    def _update_window_title_and_stats(self, visible_cnt: int, total_rows: int):
+        """动态更新窗口标题与 Header 统计"""
+        bucket_desc = self._get_bucket_desc()
+        query_expr = self._get_active_query_expr()
+        is_strat = getattr(self, 'filter_enabled', False) and bool(query_expr)
+        is_filtered = (visible_cnt != total_rows) or is_strat
+
+        if is_filtered:
+            strat_tag = " [🎯策略过滤]" if is_strat else ""
+            title = f"📊 涨跌分布个股明细 | {bucket_desc} (过滤后 {visible_cnt} 只 / 共 {total_rows} 只){strat_tag}"
+            header_txt = f"📊 涨跌分布 ({bucket_desc}) | 过滤后: {visible_cnt} 只 / 共 {total_rows} 只"
+        else:
+            title = f"📊 涨跌分布个股明细 | {bucket_desc} (共 {total_rows} 只)"
+            header_txt = f"📊 涨跌分布 ({bucket_desc}) | 双击行切换/联动"
+
+        self.setWindowTitle(title)
+        if hasattr(self, 'header_label') and self.header_label:
+            self.header_label.setText(header_txt)
+
+    def on_global_filter_changed(self, query_expr: str):
+        """主窗口策略公式变更全局广播回调"""
+        if getattr(self, 'filter_enabled', False):
+            self._apply_search_filter()
+
     def _apply_search_filter(self):
-        """根据搜索框文本毫秒级动态过滤表格行 (支持代码/名称/板块/开盘形态联合匹配)"""
+        """根据搜索框文本与策略过滤条件毫秒级动态过滤表格行 (支持代码/名称/板块/开盘形态联合匹配)"""
         keyword = self.search_edit.text().strip().lower() if hasattr(self, 'search_edit') else ""
+        query_expr = self._get_active_query_expr()
+        filter_by_strategy = getattr(self, 'filter_enabled', False) and bool(query_expr)
+
+        hit_codes = self._get_strategy_hit_codes(query_expr) if filter_by_strategy else None
+
         total_rows = self.table.rowCount()
         visible_cnt = 0
         self.table.setSortingEnabled(False)
@@ -1287,23 +1481,34 @@ class DistributionDetailsDialog(QDialog, WindowMixin):
             c_item = self.table.item(r, 0)
             n_item = self.table.item(r, 1)
             sec_item = self.table.item(r, self.table.columnCount() - 1)
-            
-            code = c_item.text().strip().lower() if c_item else ""
+
+            raw_code = c_item.text().strip() if c_item else ""
+            clean_code = "".join(ch for ch in raw_code if ch.isdigit()).zfill(6)
+            code = raw_code.lower()
             name = n_item.text().strip().lower() if n_item else ""
             sector = sec_item.text().strip().lower() if sec_item else ""
-            
+
+            # 1. 策略公式过滤判定
+            if filter_by_strategy and hit_codes is not None:
+                if clean_code not in hit_codes:
+                    self.table.setRowHidden(r, True)
+                    continue
+
+            # 2. 搜索框文本判定
             if not keyword:
                 self.table.setRowHidden(r, False)
                 visible_cnt += 1
             else:
-                b_prof = bubble_engine.get_stock_profile(code)
+                b_prof = bubble_engine.get_stock_profile(clean_code or code)
                 p_tag = str(b_prof.get("pattern_tag", "")).lower()
                 p_desc = str(b_prof.get("pattern_desc", "")).lower()
                 matched = (keyword in code) or (keyword in name) or (keyword in sector) or (keyword in p_tag) or (keyword in p_desc)
                 self.table.setRowHidden(r, not matched)
                 if matched:
                     visible_cnt += 1
+
         self.table.setSortingEnabled(True)
+        self._update_window_title_and_stats(visible_cnt, total_rows)
 
 
 class DistributionBarChart(QWidget):

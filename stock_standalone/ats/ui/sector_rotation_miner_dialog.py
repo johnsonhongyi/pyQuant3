@@ -42,7 +42,8 @@ from tk_gui_modules.qt_table_utils import NumericTableWidgetItem
 from ats.ui.styles import (
     COLOR_UP, COLOR_DOWN, COLOR_INFO, COLOR_ACCENT, COLOR_WARN,
     apply_dark_theme, bind_top_shortcut, setup_header_persistence,
-    save_config_node, load_config_node, set_seamless_stay_on_top
+    save_config_node, load_config_node, set_seamless_stay_on_top,
+    parse_bool_config
 )
 from ats.sector_rotation_pullback_miner import (
     SectorRotationPullbackMiner, get_sector_rotation_miner, is_valid_sector_name,
@@ -420,6 +421,10 @@ class SectorRotationMinerDialog(QDialog, WindowMixin):
         self._worker: Optional[MinerWorkerThread] = None
         self._current_filter_config: PullbackFilterConfig = PRESET_FILTER_MODES["🎯 经典标准"]
 
+        # 🎯 策略过滤持久化开关 (专属独立持久化，默认关闭)
+        saved_filter = load_config_node("sector_miner_strategy_filter_enabled", False)
+        self.filter_enabled = parse_bool_config(saved_filter, default=False)
+
         # 视图模式（精简 vs 全貌）与几何尺寸
         self._is_compact_mode: bool = False
         self._full_geometry = None
@@ -640,6 +645,12 @@ class SectorRotationMinerDialog(QDialog, WindowMixin):
         row1_layout.addWidget(self.btn_config)
 
         row1_layout.addStretch()
+
+        # 🎯 策略过滤持久化开关按钮 (与板块明细结构一致、功能一样)
+        self.btn_toggle_filter = QPushButton()
+        self._update_filter_button_ui()
+        self.btn_toggle_filter.clicked.connect(self.toggle_filter_state)
+        row1_layout.addWidget(self.btn_toggle_filter)
 
         self.txt_filter = QLineEdit()
         self.txt_filter.setPlaceholderText("🔍 快速过滤...")
@@ -1291,12 +1302,144 @@ class SectorRotationMinerDialog(QDialog, WindowMixin):
         self.candidates_table.setSortingEnabled(True)
         self.lbl_count_info.setText(f"候选: {len(candidates)} 只")
 
-    def _apply_candidate_filter(self):
-        """应用板块单选或关键字过滤"""
-        kw = self.txt_filter.text().strip().lower()
-        filtered = []
+    def toggle_filter_state(self):
+        """切换策略公式过滤状态并全局持久化"""
+        self.filter_enabled = not getattr(self, 'filter_enabled', False)
+        save_config_node("sector_miner_strategy_filter_enabled", bool(self.filter_enabled))
+        self._update_filter_button_ui()
+        self._apply_candidate_filter()
 
-        for c in self._all_candidates:
+    def _update_filter_button_ui(self):
+        """更新策略过滤按钮的高亮与状态文案"""
+        if not hasattr(self, 'btn_toggle_filter') or self.btn_toggle_filter is None:
+            return
+        if getattr(self, 'filter_enabled', False):
+            self.btn_toggle_filter.setText("🎯 策略过滤 (开)")
+            self.btn_toggle_filter.setStyleSheet("""
+                QPushButton {
+                    background-color: #1a3322;
+                    color: #00ff88;
+                    font-weight: bold;
+                    border: 1.5px solid #00ff88;
+                    border-radius: 4px;
+                    padding: 3px 8px;
+                    font-size: 8.5pt;
+                }
+                QPushButton:hover {
+                    background-color: #00ff88;
+                    color: #000000;
+                }
+            """)
+            self.btn_toggle_filter.setToolTip("当前状态：【已开启】自动根据主窗口策略公式过滤回踩启动候选池 (点击可关闭)")
+        else:
+            self.btn_toggle_filter.setText("🎯 策略过滤 (关)")
+            self.btn_toggle_filter.setStyleSheet("""
+                QPushButton {
+                    background-color: #222228;
+                    color: #888888;
+                    font-weight: bold;
+                    border: 1px solid #44444f;
+                    border-radius: 4px;
+                    padding: 3px 8px;
+                    font-size: 8.5pt;
+                }
+                QPushButton:hover {
+                    background-color: #33333d;
+                    color: #ffffff;
+                    border-color: #777788;
+                }
+            """)
+            self.btn_toggle_filter.setToolTip("当前状态：【已关闭】展示回踩启动全部候选标的 (点击开启根据策略公式过滤)")
+
+    def _get_active_query_expr(self) -> str:
+        """获取当前活跃的策略公式"""
+        parent_mw = getattr(self, '_parent_window', None)
+        if parent_mw and hasattr(parent_mw, 'query_expr') and parent_mw.query_expr:
+            return str(parent_mw.query_expr).strip()
+        for w in QApplication.topLevelWidgets():
+            if hasattr(w, 'query_expr') and w.query_expr:
+                return str(w.query_expr).strip()
+        saved_q = load_config_node("ats_query_expr", "")
+        return str(saved_q).strip() if saved_q else ""
+
+    def _filter_candidates_by_query(self, candidates: list, query_expr: str) -> list:
+        """根据策略表达式过滤候选个股列表 (0ms 极速哈希 + 动态切片兜底)"""
+        if not candidates or not query_expr:
+            return candidates
+        try:
+            from stock_logic_utils import query_engine
+            # 1. 优先从主窗口获取已预计算的过滤代码集合 (0ms 极速命中匹配)
+            parent_mw = getattr(self, '_parent_window', None)
+            if not parent_mw:
+                for w in QApplication.topLevelWidgets():
+                    if hasattr(w, 'filtered_codes_set') and hasattr(w, 'query_expr'):
+                        parent_mw = w
+                        break
+            if parent_mw and hasattr(parent_mw, 'filtered_codes_set') and parent_mw.filtered_codes_set:
+                if getattr(parent_mw, 'query_expr', '') == query_expr:
+                    fset = parent_mw.filtered_codes_set
+                    return [c for c in candidates if str(c.get('code', '')).strip().zfill(6) in fset]
+
+            # 2. 否则从当前数据底座动态切片执行 query_engine.execute
+            current_df = getattr(self, 'current_df', None)
+            if (current_df is None or current_df.empty) and parent_mw and hasattr(parent_mw, 'current_df'):
+                current_df = parent_mw.current_df
+
+            cand_codes = [str(c.get('code', '')).strip().zfill(6) for c in candidates]
+            if current_df is not None and not current_df.empty:
+                sub_df = None
+                if 'code' in current_df.columns:
+                    c_ser = current_df['code'].astype(str).str.strip().str.zfill(6)
+                    sub_df = current_df[c_ser.isin(cand_codes)].copy()
+                else:
+                    idx_ser = current_df.index.astype(str).str.strip().str.zfill(6)
+                    sub_df = current_df[idx_ser.isin(cand_codes)].copy()
+
+                if sub_df is not None and not sub_df.empty:
+                    res = query_engine.execute(sub_df, query_expr)
+                    if isinstance(res, pd.DataFrame) and not res.empty:
+                        if 'code' in res.columns:
+                            hit_codes = set(res['code'].astype(str).str.strip().str.zfill(6))
+                        else:
+                            hit_codes = set(res.index.astype(str).str.strip().str.zfill(6))
+                        return [c for c in candidates if str(c.get('code', '')).strip().zfill(6) in hit_codes]
+                    else:
+                        return []
+
+            # 3. 备用兜底: 将 candidates 自身转为临时 DataFrame 评估
+            df_cands = pd.DataFrame(candidates)
+            if 'code' in df_cands.columns:
+                df_cands['code'] = df_cands['code'].astype(str).str.strip().str.zfill(6)
+                df_cands.set_index('code', inplace=True, drop=False)
+            if 'pct' in df_cands.columns and 'percent' not in df_cands.columns:
+                df_cands['percent'] = df_cands['pct']
+            res = query_engine.execute(df_cands, query_expr)
+            if isinstance(res, pd.DataFrame) and not res.empty:
+                hit_codes = set(res.index.astype(str).str.strip().str.zfill(6))
+                return [c for c in candidates if str(c.get('code', '')).strip().zfill(6) in hit_codes]
+            return []
+        except Exception as e:
+            logger.debug(f"SectorRotationMinerDialog _filter_candidates_by_query error: {e}")
+            return candidates
+
+    def on_global_filter_changed(self, query_expr: str):
+        """主窗口策略公式变更全局广播回调"""
+        if getattr(self, 'filter_enabled', False):
+            self._apply_candidate_filter()
+
+    def _apply_candidate_filter(self):
+        """应用板块单选、策略过滤或关键字过滤"""
+        kw = self.txt_filter.text().strip().lower() if hasattr(self, 'txt_filter') else ""
+        query_expr = self._get_active_query_expr()
+        filter_by_strategy = getattr(self, 'filter_enabled', False) and bool(query_expr)
+
+        # 若开启策略过滤，先进行策略筛选
+        base_candidates = self._all_candidates
+        if filter_by_strategy:
+            base_candidates = self._filter_candidates_by_query(base_candidates, query_expr)
+
+        filtered = []
+        for c in base_candidates:
             # 板块联动筛选
             if self._selected_sector:
                 if self._selected_sector not in c.get("sector", ""):
@@ -1314,6 +1457,15 @@ class SectorRotationMinerDialog(QDialog, WindowMixin):
             filtered.append(c)
 
         self._render_candidates_table(filtered)
+
+        # 动态更新候选只数提示
+        total_raw = len(self._all_candidates)
+        if filter_by_strategy:
+            self.lbl_count_info.setText(f"候选: {len(filtered)} 只 (🎯策略过滤 | 共 {total_raw} 只)")
+        elif self._selected_sector or kw:
+            self.lbl_count_info.setText(f"候选: {len(filtered)} 只 / 共 {total_raw} 只")
+        else:
+            self.lbl_count_info.setText(f"候选: {len(filtered)} 只")
 
     def _resolve_leader_code_and_name(self, row: int) -> Tuple[str, str]:
         """从板块表格第 5 列解析领涨龙头代码与名称 (带多重保底)"""
@@ -2049,6 +2201,8 @@ class SectorRotationMinerDialog(QDialog, WindowMixin):
             self.combo_filter_mode.setVisible(False)
             self.btn_config.setVisible(False)
             self.txt_filter.setVisible(False)
+            if hasattr(self, 'btn_toggle_filter') and self.btn_toggle_filter:
+                self.btn_toggle_filter.setVisible(False)
             self.combo_interval.setVisible(False)
             self.row2_widget.setVisible(False)
             self.lbl_compact_title.setVisible(True)
@@ -2146,6 +2300,8 @@ class SectorRotationMinerDialog(QDialog, WindowMixin):
             self.combo_filter_mode.setVisible(True)
             self.btn_config.setVisible(True)
             self.txt_filter.setVisible(True)
+            if hasattr(self, 'btn_toggle_filter') and self.btn_toggle_filter:
+                self.btn_toggle_filter.setVisible(True)
             self.btn_top.setText("📌 置顶 (T)")
             self.btn_close.setText("✕ 关闭 (Esc)")
             self.row2_widget.setVisible(True)

@@ -1,3 +1,33 @@
+## 2026-09-14 17:35
+- [x] **【板块轮动深挖工作台与涨跌分布个股明细全面接入【🎯 策略过滤】功能 & 结构功能100%对齐板块明细SSOT规范】(`ats/ui/sector_rotation_miner_dialog.py`, `ats/ui/chart_widgets.py`, `tests/test_sector_miner_and_distribution_strategy_filter.py`)**：
+    - [x] **操盘手反馈痛点与业务诉求**：
+        1. **“轮动深挖添加策略过滤功能”**：
+           - 在【🔥 板块轮动前排引导与资金主线回踩启动深挖工作台】（`SectorRotationMinerDialog`）中，操盘手需要根据当前策略公式对下半区资金主线回踩启动跟进池（`candidates_table`）进行策略公式筛选，仅聚焦于当前行情策略所认可的高确定性回踩标的；
+        2. **“个股明细也添加跟板块明细一致的策略过滤,上面的也是结构一致功能一样”**：
+           - 在【📊 涨跌分布个股明细】（`DistributionDetailsDialog`）中，操盘手需要与【板块明细】（`SectorDetailDialog`）同款的策略过滤功能，能一键过滤出各涨跌分布桶内命中策略公式的标的。
+    - [x] **系统级工程落地与 SSOT 规范重构**：
+        1. **结构、样式与交互 100% 对齐板块明细 SSOT**：
+           - 两个窗口均在搜索过滤框左侧嵌入标准 `btn_toggle_filter`（`QPushButton`）；
+           - 激活开启状态：文案 `🎯 策略过滤 (开)`，亮绿高亮态（`#1a3322` 背景，`#00ff88` 边框与文字）；
+           - 关闭状态：文案 `🎯 策略过滤 (关)`，暗黑质感态（`#222228` 背景，`#44444f` 边框，`#888888` 文字）；
+           - 独立持久化存储：轮动深挖采用 `sector_miner_strategy_filter_enabled`，个股明细采用 `ats_distribution_detail_filter_enabled`，默认关闭（`False`），操作原子持久化，重启与视窗切换不丢失状态；
+        2. **极速过滤算法与动态切片双轨保障**：
+           - 优先极速路径：主窗口已预计算 `filtered_codes_set` 时，实行 0ms 内存哈希集合判定；
+           - 动态切片兜底：主窗口集合未命中时，对 `current_df` 切片或临时 DataFrame 执行 `query_engine.execute`；
+           - 联合过滤：策略公式过滤与搜索框代码/名称/形态关键字、板块单选联动无缝取交集；
+        3. **统计信息与标题动态同步**：
+           - 轮动深挖：下半区计数标签动态更新为 `候选: M 只 (🎯策略过滤 | 共 N 只)`；
+           - 个股明细：窗口标题与 Header 标签动态更新为 `(过滤后 M 只 / 共 N 只) [🎯策略过滤]`；
+        4. **视图模式自适应与全局策略广播响应**：
+           - 轮动深挖在精简模式（M 键）下自动隐藏策略过滤按钮，恢复全貌时无缝展现；
+           - 接入 `on_global_filter_changed`，主窗口切换或修改策略公式时，开启状态的窗口即时无缝重算并更新。
+    - [x] **自动化测试 56/56 PASSED 100% 全绿**：
+        1. 专项新增 `tests/test_sector_miner_and_distribution_strategy_filter.py`: 6/6 PASSED（覆盖按钮状态切换、持久化记忆、公式过滤逻辑、搜索二次筛选、标题统计更新、精简模式适配及全局广播联动）；
+        2. 核心套件 `test_sector_rotation_pullback_miner.py`: 20/20 PASSED；
+        3. `test_ats_tabs_strategy_filter.py`: 7/7 PASSED；
+        4. `test_sector_meaningful_extraction.py`: 6/6 PASSED；
+        5. `test_capital_dragon_panel_integration.py`: 17/17 PASSED。
+
 ## 2026-09-14 13:45
 - [x] **【彻底解决个股所属板块匹配异常Bug & 全链路落地交易期每30分钟全市成交量与较同期变化统一语音弹窗定时播报】(SSOT) (`ats/hot_sector_engine.py`, `ats/sector_data_aggregator.py`, `ats/alert_notifier.py`, `ats/ui/main_window.py`, `tests/test_market_volume_statusbar.py`)**：
     - [x] **操盘手反馈痛点与根因穿透**：
