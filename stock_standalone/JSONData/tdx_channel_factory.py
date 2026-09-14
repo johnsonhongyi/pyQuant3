@@ -65,6 +65,9 @@ class TDXChannelResult:
     upper_multidays: Optional[Dict[int, float]] = None
     supp_multidays: Optional[Dict[int, float]] = None
 
+    # KX DRAWLINE 亮白色上涨支撑线全长点位序列 (全长 N，无白线处为 NaN)
+    kx_series: Optional[np.ndarray] = None
+
 
 class TDXChannelFactory:
     """通达信自动通道与上涨支撑线权威工厂类"""
@@ -115,7 +118,8 @@ class TDXChannelFactory:
                 supp_days=0, supp_pos=0.0, is_broken=False,
                 cdp_support=0.0, cdp_reversal=0.0, cdp_resistance=0.0, cdp_breakthrough=0.0,
                 upper_multidays={d: 0.0 for d in range(1, max_days + 1)},
-                supp_multidays={d: 0.0 for d in range(1, max_days + 1)}
+                supp_multidays={d: 0.0 for d in range(1, max_days + 1)},
+                kx_series=empty_arr
             )
 
         high_s = pd.Series(high)
@@ -444,11 +448,20 @@ class TDXChannelFactory:
         # ---------------------------------------------------------------------
         # 6. 通道上轨与支撑线价格多日预处理保留 (格式同 high41, high42, ... high4{max_days})
         # ---------------------------------------------------------------------
+        kx_series = np.full(n, np.nan, dtype=np.float64)
+        for item in lines_for_visualizer:
+            x_idx = item['x']
+            y_val = item['y']
+            kx_series[x_idx] = y_val
+
         upper_multidays = {}
         supp_multidays = {}
         for da in range(1, max_days + 1):
             u_val = float(upper[-da]) if n >= da and pd.notna(upper[-da]) else float(upper_price)
-            s_val = float(supp_price_last - supp_slope * (da - 1))
+            if n >= da and pd.notna(kx_series[-da]):
+                s_val = float(kx_series[-da])
+            else:
+                s_val = float(supp_price_last - supp_slope * (da - 1))
             upper_multidays[da] = round(u_val, 3)
             supp_multidays[da] = round(max(0.01, s_val), 3)
 
@@ -484,7 +497,8 @@ class TDXChannelFactory:
             cdp_resistance=cdp_resistance,
             cdp_breakthrough=cdp_breakthrough,
             upper_multidays=upper_multidays,
-            supp_multidays=supp_multidays
+            supp_multidays=supp_multidays,
+            kx_series=kx_series
         )
 
     @classmethod
