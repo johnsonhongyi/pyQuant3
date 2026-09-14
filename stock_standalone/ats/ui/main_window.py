@@ -3060,6 +3060,9 @@ class ATSMainWindow(QMainWindow):
             html = summary.get('formatted_html', '')
             if html and self.lbl_market_volume_status.text() != html:
                 self.lbl_market_volume_status.setText(html)
+            tooltip = summary.get('tooltip_text', '')
+            if tooltip and self.lbl_market_volume_status.toolTip() != tooltip:
+                self.lbl_market_volume_status.setToolTip(tooltip)
         except Exception as e:
             logger.debug(f"[ATSMainWindow] _refresh_market_volume_status error: {e}")
 
@@ -3090,6 +3093,56 @@ class ATSMainWindow(QMainWindow):
         if now - getattr(self, '_last_market_status_update', 0.0) >= 2.0:
             self._last_market_status_update = now
             self._refresh_market_volume_status()
+
+        # 📢 检查交易时段定时大盘成交额播报 (09:30 开启后每 30 分钟一次: 10:00, 10:30, 11:00, 11:30, 13:00, 13:30, 14:00, 14:30, 15:00)
+        self._check_market_volume_announcement()
+
+    def _check_market_volume_announcement(self, now_dt=None, force=False):
+        """
+        交易时段内定时播报全市成交量及较同期变化 (09:30 开启后每 30 分钟一次，统一通过 AlertNotifier 播报)
+        时间节点：10:00, 10:30, 11:00, 11:30, 13:00, 13:30, 14:00, 14:30, 15:00
+        """
+        try:
+            from datetime import datetime
+            if now_dt is None:
+                now_dt = datetime.now()
+            
+            cur_hm = now_dt.strftime("%H:%M")
+            SCHEDULE_SLOTS = {"10:00", "10:30", "11:00", "11:30", "13:00", "13:30", "14:00", "14:30", "15:00"}
+
+            if not force:
+                # 1. 交易日校验 (非交易日不播报)
+                is_trade_day = cct.get_work_day_status() if hasattr(cct, 'get_work_day_status') else (now_dt.weekday() < 5)
+                if not is_trade_day:
+                    return
+
+                if cur_hm not in SCHEDULE_SLOTS:
+                    return
+
+                # 2. 防抖校验：同一天同一个时间槽位仅播报一次
+                today_str = now_dt.strftime("%Y-%m-%d")
+                slot_key = (today_str, cur_hm)
+                if not hasattr(self, '_announced_market_volume_slots'):
+                    self._announced_market_volume_slots = set()
+                if slot_key in self._announced_market_volume_slots:
+                    return
+
+                # 清理非今天的历史槽位，防止内存增长
+                self._announced_market_volume_slots = {k for k in self._announced_market_volume_slots if k[0] == today_str}
+                self._announced_market_volume_slots.add(slot_key)
+
+            # 3. 获取大盘最新摘要数据
+            from ats.capital_dragon_engine import CapitalDragonEngine
+            from ats.alert_notifier import AlertNotifier
+            cde = CapitalDragonEngine.get_instance()
+            summary = cde.get_market_indices_and_volume_summary()
+            
+            # 若数据有效，触发统一通知播报
+            if summary and float(summary.get('total_amt', 0.0) or 0.0) > 0:
+                logger.info(f"📢 [MAIN_WINDOW] 触发 {cur_hm} 全市成交额定时播报: {summary.get('plain_text', '')}")
+                AlertNotifier.get_instance().notify_market_volume(summary, parent=self)
+        except Exception as e:
+            logger.debug(f"[MAIN_WINDOW] _check_market_volume_announcement error: {e}")
 
     def toggle_rotation(self):
         if "▶" in self.btn_toggle_rotation.text():

@@ -425,12 +425,14 @@ class SectorDataAggregator:
                 if c and n and n != '未知':
                     code_to_name[c] = n
 
-        # ── 3. 若 current_df 包含 category 列，将模糊匹配到的盘中活跃成分股高优先级合并入池 ──
+        # ── 3. 若 current_df 包含 category 列，将精确匹配到的盘中活跃成分股高优先级合并入池 ──
         if current_df is not None and not current_df.empty and 'category' in current_df.columns:
             try:
+                from ats.hot_sector_engine import is_stock_matched_sector
                 synonyms = [clean_sec] + SECTOR_SYNONYMS.get(clean_sec, [])
-                pattern = '|'.join([re.escape(s) for s in synonyms if s])
-                matched_series = current_df['category'].astype(str).str.contains(pattern, case=False, na=False)
+                matched_series = current_df['category'].astype(str).apply(
+                    lambda cat: is_stock_matched_sector(cat, clean_sec, synonyms)
+                )
                 df_matched = current_df[matched_series]
                 if not df_matched.empty:
                     sort_cols = [c for c in ('amount', 'amount_yi', 'percent', 'pct') if c in df_matched.columns]

@@ -1,3 +1,79 @@
+## 2026-09-14 13:45
+- [x] **【彻底解决个股所属板块匹配异常Bug & 全链路落地交易期每30分钟全市成交量与较同期变化统一语音弹窗定时播报】(SSOT) (`ats/hot_sector_engine.py`, `ats/sector_data_aggregator.py`, `ats/alert_notifier.py`, `ats/ui/main_window.py`, `tests/test_market_volume_statusbar.py`)**：
+    - [x] **操盘手反馈痛点与根因穿透**：
+        1. **“所属板块异常,个股的板块验证不匹配 中京电子,等”**：
+           - **业务事实**：在 Top 3 强势板块龙头突击跟单榜（`HotSectorLeaderboard`）中，当前板块为“烟草”时，中京电子（`002579`，主营 PCB/消费电子）、科森科技（`603626`，主营折叠屏/精密结构件）被严重错误归类显示为“烟草”板块；
+           - **根因分析**：`hot_sector_engine.py`（`build_target_universe`）与 `sector_data_aggregator.py`（`resolve_sector_member_codes`）在根据 `current_df['category']` 动态匹配成分股时，使用了粗暴的子串包含 `str.contains(sec)`。中京电子与科森科技含有极边缘的标签 `"新型烟草(电子烟)"`，因含有子串 `"烟草"`，被粗暴误判为“烟草”板块；
+        2. **“在ats中添加定时播报全市成交量,较同期的变化，交易期内每30分钟播报一次，时间从9:30开启时计算,10:00,....13:00,---15:00，使用ats的通知模块统一播报”**：
+           - **业务事实**：操盘手需要在交易期内每半小时听取全市成交额动态及与昨日同期的缩量/放量对比，及时感知市场资金温度。
+    - [x] **系统级工程落地与 SSOT 规范重构**：
+        1. **构建严格的独立标签精准匹配体系 (`is_stock_matched_sector`)**：
+           - 在 `ats/hot_sector_engine.py` 实现 `is_stock_matched_sector(cat_str, target_sector, synonyms=None)`；
+           - 严格以分号 `;` 切割独立标签，剥离 `(概念|板块|行业)$` 后缀进行精确等值比对，彻底杜绝 `"新型烟草(电子烟)"` 误匹配 `"烟草"`、`"卫星通信"` 误匹配 `"通信"`；
+           - 在 `ats/hot_sector_engine.py` 与 `ats/sector_data_aggregator.py` 全面落地应用，彻底根除中京电子、科森科技等个股的板块误伤；
+        2. **ATS 统一通知体系接入全市成交额定时播报 (`AlertNotifier.notify_market_volume`)**：
+           - 在 `ats/alert_notifier.py` 新增 `notify_market_volume(summary, parent=None)`；
+           - 规范专业金融播报文案：
+             - 盘中时段：`"全市成交额1万1882.8亿元，较同期缩量1779.1亿元，全天预估1.73万亿。"`（放量时为 `"较同期放量XX亿元"`）；
+             - 收盘时段：`"全市收盘总成交额1万6625.2亿元，全天较昨缩量2107.3亿元。"`；
+           - 右下角弹出半透明暗黑高分屏自适应 Toast 卡片（自适应多行高度，支持点击直达唤醒主窗）；
+           - 严格受全局开关 `is_voice_enabled()` 与 `is_toast_enabled()` 控制，并融入串行轮播队列（`_process_queue`），杜绝声音冲突；
+        3. **主窗口 1 秒时钟精准定时驱动 (`ATSMainWindow._check_market_volume_announcement`)**：
+           - 覆盖开盘 09:30 后每 30 分钟的关键节点：`{"10:00", "10:30", "11:00", "11:30", "13:00", "13:30", "14:00", "14:30", "15:00"}`；
+           - 严格交易日校验 (`cct.get_work_day_status()`) 与 `(today_str, cur_hm)` 防抖去重，避免重复播报；
+           - 提供 `get_alert_notifier()` SSOT 单例快捷导出。
+    - [x] **自动化测试 92/92 PASSED 100% 全绿**：
+        1. `test_market_volume_statusbar.py`: 8/8 PASSED（涵盖中京电子/科森科技板块标签精准验证、30分钟定时播报词生成与触发）；
+        2. `test_sector_aggregator_suite.py`: 9/9 PASSED；
+        3. `test_capital_dragon_engine.py`: 8/8 PASSED；
+        4. `test_pr_tdx_realtime_integration.py`: 4/4 PASSED；
+        5. `test_sector_rotation_pullback_miner.py`: 20/20 PASSED；
+        6. `test_daily_limit_up_dialog.py`: 13/13 PASSED；
+        7. `test_new_stock_module.py`: 13/13 PASSED；
+        8. `test_capital_dragon_panel_integration.py`: 17/17 PASSED。
+
+## 2026-09-14 13:35
+- [ ] **【彻底清洗资金主线与底层板块无明确信息泛概念(国企改革/ST板块/回购增持等) & 智能提取高价值实体产业题材】(SSOT) (`stock_logic_utils.py`, `ats/capital_dragon_engine.py`, `ats/sector_rotation_pullback_miner.py`, `tests/test_sector_meaningful_extraction.py`)**：
+    - [ ] **操盘手反馈痛点与业务根因剖析**：
+        1. **顶部 3 大资金主线卡片被泛概念霸占**：如【👑 核心主线: 国企改革】（成交 358.2亿，涨停 4只），因涵盖大量国企股票而靠大基数误冲榜首，严重掩盖真正爆发的细分产业题材；
+        2. **底层龙头表格【所属主线】列泛概念霸屏**：300311（任子行）显示为 `ST板块`，600876、002439、002268 等显示为 `国企改革`，002346 显示为 `回购增持再贷款...`，双击板块无法聚焦成分股；
+        3. **根因穿透**：`capital_dragon_engine.py` 与 `sector_rotation_pullback_miner.py` 聚合时未接入泛概念过滤且盲切 `sub_secs[:2]`，匹配个股主线时未命中则粗暴回退 `split(';')[0]`。
+    - [ ] **系统级工程落地与 SSOT 规范重构**：
+        1. **底层黑名单与过滤规则增强 (`stock_logic_utils.py`)**：全面覆盖 `ST/*ST/摘帽/退市`、`回购增持/再贷款`、`央企国企改革/地方国企` 等各类无明确产业信息的金融与监管标签；
+        2. **构建 SSOT 板块清洗与有价值题材提取器**：
+           - `extract_meaningful_sectors(sec_str)`：清洗复合板块并剔除所有泛概念与噪声；
+           - `get_most_valuable_sector(...)`：优先匹配纯化后的 Top 主线，次优匹配产业白名单，兜底细分行业，绝不返回泛概念；
+        3. **资金主线引擎全链路纯化 (`capital_dragon_engine.py`)**：主线聚合与个股画像所属主线均接入 SSOT 提取器，彻底根除“国企改革”和“ST板块”；
+        4. **板块轮动深挖引擎纯化 (`sector_rotation_pullback_miner.py`)**：主线发现接入有效板块清洗。
+    - [ ] **自动化测试与回归断言**：
+        1. 专项新增 `tests/test_sector_meaningful_extraction.py`，验证泛概念过滤与 300311、600876、002346 等股票智能提取真实产业板块；
+        2. 运行 `tests/test_capital_dragon_panel_integration.py` 确保 100% 通过。
+
+## 2026-09-14 13:16
+- [x] **【彻底修复大盘指数日内量比未折算退化、全市成交额裸减全天额失真两大缺陷 & 全链路落地四大指数虚拟量比与较昨同期增减+全天虚拟量预测】(SSOT) (`JohnsonUtil/commonTips.py`, `ats/capital_dragon_engine.py`, `ats/ui/main_window.py`, `tests/test_market_volume_statusbar.py`)**：
+    - [x] **操盘手反馈痛点与底层数学逻辑穿透**：
+        1. **“ats底部的指数数据没有使用虚拟量方式,同期的成交额减少多少,而不是直接对比”**：
+           - **根因一（`commonTips.py` 时间段分钟数算术严重笔误）**：`get_work_time_ratio`、`get_work_time_ratio_sbc` 及 `get_work_time_ratio_noworkday` 中，`segments` 被误写为 `(10*60, 11*30, 0.65)`（`11*30=330`）、`(13*60, 14*00, 0.80)`（`14*00=0`）、`(14*00, 15*00, 1.00)`（`15*00=0`）。导致交易日 10:00 之后，所有时间段匹配全量失败，循环直接掉入 `for...else: passed_ratio = 1.0`！**盘中 10:00~15:00 任意时刻 `ratio_t` 永远死锁为 1.0**；
+           - **根因二（四大指数量比退化为自然成交比例）**：由于 `ratio_t = 1.0`，`cur_vol / (prev_vol * ratio_t)` 退化为 `cur_vol / prev_vol`，上午 11:28 仅成交半天，导致四大指数量比全变成了 `0.55x, 0.56x, 0.58x, 0.60x`，操盘手视觉上完全没有体现虚拟量比；
+           - **根因三（盘中成交额直接裸减昨日全天成交额）**：`diff_amt = round(total_amt - (prev_total * 1.0), 1)`，导致盘中 11:28 成交 1.14 万亿直接拿去减昨天全天 1.98 万亿，暴减八千多亿（显示 `较昨 -8391.3亿`），严重失真误导。
+    - [x] **系统级工程落地与 SSOT 规范重构**：
+        1. **`commonTips.py` 时间段分钟数彻底纠正**：
+           - 将 `11*30` 纠正为 `11*60+30` (690)，`14*00` 纠正为 `14*60` (840)，`15*00` 纠正为 `15*60` (900)；
+           - `get_work_time_ratio` 扩充 `now_time=None` 支持，实现实时行情计算与离线仿真、单元测试完全兼容；
+           - 形成严密、连续、单调递增的标准日内时间进度曲线（09:25~09:30 0.05 -> 10:00 0.35 -> 11:30 0.65 -> 中午休市保持 0.65 -> 14:00 0.80 -> 15:00 1.00）；
+        2. **四大指数真实虚拟量比计算恢复**：后台更新器接入修正后的 `ratio_t`，盘中四大指数量比（如上证 0.83x、深成指 0.85x、创业板 0.87x、北证 0.90x）恢复为真实反映资金放量/缩量节奏的**虚拟量比**；
+        3. **全市成交额【较昨同期增减 + 全天虚拟成交量预测】双轨落地**：
+           - **盘中时段（09:15 ~ 15:00，`ratio_t < 1.0`）**：
+             - 昨日同期基准：`prev_same_amt = round(prev_total * ratio_t, 1)`；
+             - 较昨同期增减额：`diff_amt = round(total_amt - prev_same_amt, 1)`，明确标记为 `较同期`（放量红加粗，缩量绿加粗）；
+             - 全天虚拟预估量：`proj_total = round(total_amt / ratio_t, 1)`，格式化为 `虚拟 X.XX万亿`；
+             - 状态栏显示：`全市: 11882.8亿 (较同期 -1779.1亿 | 虚拟 1.73万亿)`；
+           - **盘后时段（>= 15:00 或 非交易日）**：全天实际收盘额对比昨日全天收盘额，显示 `全市: 16625.2亿 (较昨 -2107.3亿)`；
+        4. **状态栏 ToolTip 深度量化浮层增强**：鼠标悬停显示包含日内进度%、昨日同期成交、较同期增减与百分比、全天虚拟量预测、四大指数虚拟量比在内的详尽分析卡片。
+    - [x] **自动化测试 48/48 PASSED 100% 全绿**：
+        1. `test_market_volume_statusbar.py`: 6/6 PASSED（涵盖盘后全天对比、盘中较同期对比、防抖缓存、UI更新、日内较同期与虚拟量预测、时间比率单调性与边界用例）；
+        2. 核心套件 `test_capital_dragon_engine.py` + `test_capital_dragon_panel_integration.py` + `test_pr_tdx_realtime_integration.py` + `test_new_stock_module.py`: 42/42 PASSED。
+
 ## 2026-09-14 10:30
 - [x] **【人气综合排行榜全面接入 TDX API 实时行情更新 & 解耦低效 IPC 依赖实现价格与涨跌毫秒级刷新】(SSOT) (`popularity_resonance_service.py`, `popularity_resonance_gui.py`, `tests/test_pr_tdx_realtime_integration.py`)**：
     - [x] **用户反馈痛点与根因穿透**：

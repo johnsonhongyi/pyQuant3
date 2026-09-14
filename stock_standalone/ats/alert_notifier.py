@@ -315,8 +315,9 @@ class InAppToastWidget(QFrame if HAS_PYQT else object):
         scale = get_screen_dpi_scale(target_screen)
         self._current_scale = scale
 
-        base_w = 260
-        base_h = 94
+        line_count = str(message).count('\n') + 1
+        base_w = max(260, 275) if line_count > 2 else 260
+        base_h = max(94, 26 + line_count * 18) if line_count > 2 else 94
         self.card_w = int(base_w * scale)
         self.card_h = int(base_h * scale)
         title_f_size = max(11, int(12 * scale))
@@ -381,8 +382,9 @@ class InAppToastWidget(QFrame if HAS_PYQT else object):
             return
         
         self._current_scale = scale
-        base_w = 260
-        base_h = 94
+        line_count = str(getattr(self, 'message_text', '')).count('\n') + 1
+        base_w = max(260, 275) if line_count > 2 else 260
+        base_h = max(94, 26 + line_count * 18) if line_count > 2 else 94
         self.card_w = int(base_w * scale)
         self.card_h = int(base_h * scale)
         title_f_size = max(11, int(12 * scale))
@@ -793,6 +795,79 @@ class AlertNotifier(QObject if HAS_PYQT else object):
         logger.info(f"🎯 [TRAY_CLICK] 用户点击 Windows 托盘 Toast 弹窗，直达唤醒并定位股票: {code}")
         activate_and_locate_target_window(self._last_parent, code, "")
 
+    def notify_market_volume(self, summary: Dict[str, Any], parent=None):
+        """统一推送大盘全市成交量与较同期变化定时播报 (右下角 Toast 弹窗与语音播报)
+        每 30 分钟在交易时段统一触发 (10:00, 10:30, 11:00, 11:30, 13:00, 13:30, 14:00, 14:30, 15:00)
+        """
+        if not summary or float(summary.get('total_amt', 0.0) or 0.0) <= 0.0:
+            return
+
+        total_amt = float(summary.get('total_amt', 0.0) or 0.0)
+        diff_amt = float(summary.get('diff_amt', 0.0) or 0.0)
+        diff_str = str(summary.get('diff_str', ''))
+        diff_label = str(summary.get('diff_label', '较同期'))
+        proj_total_str = str(summary.get('proj_total_str', ''))
+        is_intraday = bool(summary.get('is_intraday', False))
+        sh_vr = float(summary.get('sh_vr', 1.0) or 1.0)
+        sz_vr = float(summary.get('sz_vr', 1.0) or 1.0)
+        cy_vr = float(summary.get('cy_vr', 1.0) or 1.0)
+        bj_vr = float(summary.get('bj_vr', 1.0) or 1.0)
+
+        # 1. 语音与展示文案格式化
+        if total_amt >= 10000.0:
+            amt_voice = f"{total_amt / 10000.0:.2f}万亿元"
+            amt_display = f"{total_amt:.1f}亿 ({total_amt / 10000.0:.2f}万亿)"
+        else:
+            amt_voice = f"{total_amt:.1f}亿元"
+            amt_display = f"{total_amt:.1f}亿"
+
+        diff_action = "放量" if diff_amt >= 0 else "缩量"
+        abs_diff_val = abs(diff_amt)
+        abs_diff_voice = f"{abs_diff_val:.1f}亿元"
+
+        if is_intraday:
+            if proj_total_str:
+                voice_text = f"全市成交额{amt_voice}，{diff_label}{diff_action}{abs_diff_voice}，全天预估{proj_total_str}。"
+            else:
+                voice_text = f"全市成交额{amt_voice}，{diff_label}{diff_action}{abs_diff_voice}。"
+            title = "📊 全市成交额播报 [盘中定时]"
+            proj_line = f"• 全天预估: {proj_total_str}\n" if proj_total_str else ""
+            message = (
+                f"• 当前成交: {amt_display}\n"
+                f"• {diff_label}: {diff_str} ({diff_action})\n"
+                f"{proj_line}"
+                f"• 指数量比: 沪{sh_vr:.2f}x | 深{sz_vr:.2f}x | 创{cy_vr:.2f}x | 北{bj_vr:.2f}x"
+            )
+        else:
+            voice_text = f"全市收盘总成交额{amt_voice}，全天较昨{diff_action}{abs_diff_voice}。"
+            title = "📊 全市成交额播报 [收盘播报]"
+            message = (
+                f"• 全天收盘: {amt_display}\n"
+                f"• 全天较昨: {diff_str} ({diff_action})\n"
+                f"• 指数量比: 沪{sh_vr:.2f}x | 深{sz_vr:.2f}x | 创{cy_vr:.2f}x | 北{bj_vr:.2f}x"
+            )
+
+        item = {
+            'type': 'market_volume',
+            'code': 'MARKET',
+            'name': '全市大盘',
+            'title': title,
+            'message': message,
+            'voice_text': voice_text,
+            'parent': parent,
+            'ts': time.time()
+        }
+
+        # 跨线程安全检测：如果在 Qt 子工作线程中，安全投递至主事件循环处理
+        if HAS_PYQT and QApplication.instance():
+            app = QApplication.instance()
+            from PyQt6.QtCore import QThread
+            if QThread.currentThread() != app.thread():
+                self.sig_notify_request.emit(item)
+                return
+
+        self._enqueue_notification_item(item)
+
     def notify(self, title, message, code="", score=90.0, level="GOLD", parent=None, source=""):
         """通用通知方法别名，无缝兼容多周期等系统调用"""
         name = str(title).strip()
@@ -912,6 +987,11 @@ class AlertNotifier(QObject if HAS_PYQT else object):
 
     def _enqueue_notification_item(self, item: dict):
         """在 Qt 主线程中安全压入通知队列并启动串行轮播处理 (带队列内单股防重复保护)"""
+        if item.get('type') == 'market_volume':
+            self._notify_queue.append(item)
+            self._process_queue()
+            return
+
         code_to_add = str(item.get('code', '')).zfill(6)
         # 队列去重：若当前排队队列中已有这只股票在等待播报，避免重复排队积压
         if any(str(q.get('code', '')).zfill(6) == code_to_add for q in self._notify_queue):
@@ -931,6 +1011,47 @@ class AlertNotifier(QObject if HAS_PYQT else object):
 
         self._is_busy = True
         item = self._notify_queue.popleft()
+
+        # ── 市场成交额定时播报专属分支 ──
+        if item.get('type') == 'market_volume':
+            title = item.get('title', '📊 全市成交额播报')
+            message = item.get('message', '')
+            voice_text = item.get('voice_text', '')
+            parent = item.get('parent')
+
+            logger.info(f"📢 [ALERT_NOTIFY] 串行轮播弹出大盘成交额: {voice_text}")
+
+            toast_success = False
+            if self.is_toast_enabled() and HAS_PYQT and QApplication.instance():
+                try:
+                    target_p = parent if parent else QApplication.activeWindow()
+                    self._current_toast = InAppToastWidget(title, message, code="", parent=target_p)
+                    toast_success = True
+                except Exception as e_toast:
+                    logger.warning(f"InAppToastWidget market volume failed: {e_toast}")
+
+            if self.is_toast_enabled() and not toast_success and self.tray_icon and HAS_PYQT:
+                try:
+                    if not self.tray_icon.isVisible():
+                        self.tray_icon.show()
+                    self.tray_icon.showMessage(title, message, QSystemTrayIcon.MessageIcon.Information, 6000)
+                except Exception as e:
+                    logger.warning(f"ShowMessage failed: {e}")
+
+            if self.is_voice_enabled():
+                self._speak_text(voice_text)
+            else:
+                logger.debug(f"🔇 [ALERT_NOTIFY] 全局语音已关闭，跳过发声: {voice_text}")
+
+            display_sec = max(5.0, min(9.5, len(voice_text) * 0.32 + 1.5))
+            display_ms = int(display_sec * 1000)
+
+            if HAS_PYQT and QApplication.instance():
+                QTimer.singleShot(display_ms, self._on_current_item_finished)
+            else:
+                import threading
+                threading.Timer(display_sec, self._on_current_item_finished).start()
+            return
 
         code_str = item['code']
         name = item['name']
@@ -1050,4 +1171,9 @@ class AlertNotifier(QObject if HAS_PYQT else object):
         import threading
         t = threading.Thread(target=_worker, name="ATSSafeVoiceThread", daemon=True)
         t.start()
+
+
+def get_alert_notifier() -> AlertNotifier:
+    """获取全局单例 AlertNotifier 实例 (SSOT)"""
+    return AlertNotifier.get_instance()
 

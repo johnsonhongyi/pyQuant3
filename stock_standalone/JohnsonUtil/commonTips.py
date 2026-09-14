@@ -4119,15 +4119,17 @@ def get_work_time_ratio_sbc(resample='d', now_time=None):
     else:
         now = now_time
 
+    today = pd.Timestamp(now.date())
+
     # ---------- 日内进度 ----------
     t = now.time()
     minutes = t.hour * 60 + t.minute
 
     segments = [
-        (9*60+30, 10*60, 0.35),   # 开盘 30 分钟权重提升到 35%
-        (10*60, 11*30, 0.65),   # 11:30 达到早盘总权重的 65%
-        (13*60, 14*00, 0.80),   # 14:00 达到 80% (午后量能相对较小)
-        (14*00, 15*00, 1.00),   # 15:00 收盘 100%
+        (9*60+30, 10*60, 0.35),       # 开盘 30 分钟权重提升到 35%
+        (10*60, 11*60+30, 0.65),     # 11:30 达到早盘总权重的 65%
+        (13*60, 14*60, 0.80),        # 14:00 达到 80% (午后量能相对较小)
+        (14*60, 15*60, 1.00),        # 15:00 收盘 100%
     ]
 
     prev_ratio = 0.0
@@ -4181,8 +4183,12 @@ def get_work_time_ratio_sbc(resample='d', now_time=None):
 
     return min(max(round(float(ratio),6), 0.01), 1.0)
 
-def get_work_time_ratio(resample='d'):
-    now = datetime.datetime.now()
+def get_work_time_ratio(resample='d', now_time=None):
+    if now_time is None:
+        now = datetime.datetime.now()
+    else:
+        now = now_time
+
     today = pd.Timestamp(now.date())
     tr_val = is_trade_date(today)
     is_tr_day = (tr_val is True or str(tr_val).strip().lower() in ('true', '1'))
@@ -4197,10 +4203,10 @@ def get_work_time_ratio(resample='d'):
     minutes = t.hour * 60 + t.minute
 
     segments = [
-        (9*60+30, 10*60, 0.35),   # 开盘 30 分钟权重提升到 35%
-        (10*60, 11*30, 0.65),   # 11:30 达到早盘总权重的 65%
-        (13*60, 14*00, 0.80),   # 14:00 达到 80% (午后量能相对较小)
-        (14*00, 15*00, 1.00),   # 15:00 收盘 100%
+        (9*60+30, 10*60, 0.35),       # 开盘 30 分钟权重提升到 35%
+        (10*60, 11*60+30, 0.65),     # 11:30 达到早盘总权重的 65%
+        (13*60, 14*60, 0.80),        # 14:00 达到 80% (午后量能相对较小)
+        (14*60, 15*60, 1.00),        # 15:00 收盘 100%
     ]
 
     prev_ratio = 0.0
@@ -4260,14 +4266,13 @@ def get_work_time_ratio_noworkday(resample='d'):
     minutes = t.hour * 60 + t.minute
 
     # ---- A股真实经验比例（可微调）----
-    # 开盘 9:30 - 10:00 约 25%
-    # 10:00 - 11:00 约 50%
-    # 11:00 - 11:30 约 60%
-    # 午后 13:00 - 14:00 约 78%
+    # 开盘 9:30 - 10:00 约 35%
+    # 10:00 - 11:30 约 65%
+    # 午后 13:00 - 14:00 约 80%
     # 14:00 - 15:00 约 100%
     segments = [
         (9*60+30, 10*60, 0.35),
-        (10*60, 11*30, 0.65),
+        (10*60, 11*60+30, 0.65),
         (13*60, 14*60, 0.80),
         (14*60, 15*60, 1.00),
     ]
