@@ -33,7 +33,8 @@ from logger_utils import LoggerFactory
 from ats.ui.styles import (
     COLOR_UP, COLOR_DOWN, COLOR_INFO, COLOR_ACCENT, COLOR_WARN, 
     auto_fit_columns_once, setup_header_persistence, save_config_node, load_config_node,
-    apply_dark_theme, bind_top_shortcut, ColorPreservingItemDelegate, set_seamless_stay_on_top
+    apply_dark_theme, bind_top_shortcut, ColorPreservingItemDelegate, set_seamless_stay_on_top,
+    parse_bool_config
 )
 from ats.ui.favorite_panel import get_ats_extra_cols
 from ats.hot_sector_engine import HotSectorEngine, is_valid_sector_name
@@ -1013,6 +1014,10 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
         self._is_updating = False
         self._is_restoring_sort = False
 
+        # 🎯 策略过滤持久化开关 (专属独立持久化，默认关闭)
+        saved_filter = load_config_node("hot_leaderboard_filter_enabled", False)
+        self.filter_enabled = parse_bool_config(saved_filter, default=False)
+
         # 0. Magnetic snap setup & Timers
         self.anchor_edge = None
         self.is_hidden_state = False
@@ -1401,6 +1406,17 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
 
         bottom_lay.addStretch()
 
+        # 🎯 策略过滤提示信息 (专属独立标签，显示在策略过滤按钮左侧，杜绝被左侧状态覆盖)
+        self.lbl_filter_info = QLabel("")
+        self.lbl_filter_info.setStyleSheet("color: #00ff88; font-size: 8.5pt;")
+        bottom_lay.addWidget(self.lbl_filter_info)
+
+        # 🎯 策略过滤持久化开关按钮 (红圈位置，对齐板块明细 SSOT)
+        self.btn_toggle_filter = QPushButton()
+        self._update_filter_button_ui()
+        self.btn_toggle_filter.clicked.connect(self.toggle_filter_state)
+        bottom_lay.addWidget(self.btn_toggle_filter)
+
         self.lbl_update_time = QLabel("更新: --:--:--")
         self.lbl_update_time.setStyleSheet("color: #778899; font-size: 8.5pt;")
         bottom_lay.addWidget(self.lbl_update_time)
@@ -1408,6 +1424,139 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
         layout.addWidget(self.bottom_frame)
         self.setLayout(layout)
         self._update_speed_column_header()
+
+    def toggle_filter_state(self):
+        """切换策略公式过滤状态并全局持久化"""
+        self.filter_enabled = not getattr(self, 'filter_enabled', False)
+        save_config_node("hot_leaderboard_filter_enabled", bool(self.filter_enabled))
+        self._update_filter_button_ui()
+        if hasattr(self, 'cached_results') and self.cached_results:
+            self._render_table_data(self.cached_results)
+        elif not self.filter_enabled and hasattr(self, 'lbl_filter_info') and self.lbl_filter_info:
+            self.lbl_filter_info.setText("")
+
+    def _update_filter_button_ui(self):
+        """更新策略过滤按钮的高亮与状态文案"""
+        if not hasattr(self, 'btn_toggle_filter') or self.btn_toggle_filter is None:
+            return
+        if getattr(self, 'filter_enabled', False):
+            self.btn_toggle_filter.setText("🎯 策略过滤 (开)")
+            self.btn_toggle_filter.setStyleSheet("""
+                QPushButton {
+                    background-color: #1a3322;
+                    color: #00ff88;
+                    font-weight: bold;
+                    border: 1.5px solid #00ff88;
+                    border-radius: 3px;
+                    padding: 2px 8px;
+                    font-size: 8.5pt;
+                    height: 20px;
+                }
+                QPushButton:hover {
+                    background-color: #00ff88;
+                    color: #000000;
+                }
+            """)
+            self.btn_toggle_filter.setToolTip("当前状态：【已开启】自动根据主窗口策略公式过滤龙头突击跟单标的 (点击可关闭)")
+        else:
+            if hasattr(self, 'lbl_filter_info') and self.lbl_filter_info:
+                self.lbl_filter_info.setText("")
+            self.btn_toggle_filter.setText("🎯 策略过滤 (关)")
+            self.btn_toggle_filter.setStyleSheet("""
+                QPushButton {
+                    background-color: #222228;
+                    color: #888888;
+                    font-weight: bold;
+                    border: 1px solid #44444f;
+                    border-radius: 3px;
+                    padding: 2px 8px;
+                    font-size: 8.5pt;
+                    height: 20px;
+                }
+                QPushButton:hover {
+                    background-color: #33333d;
+                    color: #ffffff;
+                    border-color: #777788;
+                }
+            """)
+            self.btn_toggle_filter.setToolTip("当前状态：【已关闭】展示当前选定板块全部跟单标的 (点击开启根据策略公式过滤)")
+
+    def _get_active_query_expr(self) -> str:
+        """获取当前活跃的策略公式"""
+        parent_mw = self._get_parent_mw()
+        if parent_mw and hasattr(parent_mw, 'query_expr') and parent_mw.query_expr:
+            return str(parent_mw.query_expr).strip()
+        for w in QApplication.topLevelWidgets():
+            if hasattr(w, 'query_expr') and w.query_expr:
+                return str(w.query_expr).strip()
+        saved_q = load_config_node("ats_query_expr", "")
+        return str(saved_q).strip() if saved_q else ""
+
+    def _filter_results_by_query(self, results: list, query_expr: str) -> list:
+        """根据策略表达式过滤龙头突击标的 (0ms 极速哈希 + 动态切片兜底)"""
+        if not results or not query_expr:
+            return results
+        try:
+            from stock_logic_utils import query_engine
+            # 1. 优先从主窗口获取已预计算的过滤代码集合 (0ms 极速命中匹配)
+            parent_mw = self._get_parent_mw()
+            if not parent_mw:
+                for w in QApplication.topLevelWidgets():
+                    if hasattr(w, 'filtered_codes_set') and hasattr(w, 'query_expr'):
+                        parent_mw = w
+                        break
+            if parent_mw and hasattr(parent_mw, 'filtered_codes_set') and parent_mw.filtered_codes_set:
+                if getattr(parent_mw, 'query_expr', '') == query_expr:
+                    fset = parent_mw.filtered_codes_set
+                    return [r for r in results if str(r.get('code', '')).strip().zfill(6) in fset]
+
+            # 2. 否则从当前数据底座动态切片执行 query_engine.execute
+            current_df = None
+            if parent_mw and hasattr(parent_mw, 'current_df'):
+                current_df = parent_mw.current_df
+
+            row_codes = [str(r.get('code', '')).strip().zfill(6) for r in results]
+            if current_df is not None and not current_df.empty and row_codes:
+                sub_df = None
+                if 'code' in current_df.columns:
+                    c_ser = current_df['code'].astype(str).str.strip().str.zfill(6)
+                    sub_df = current_df[c_ser.isin(row_codes)].copy()
+                else:
+                    idx_ser = current_df.index.astype(str).str.strip().str.zfill(6)
+                    sub_df = current_df[idx_ser.isin(row_codes)].copy()
+
+                if sub_df is not None and not sub_df.empty:
+                    res = query_engine.execute(sub_df, query_expr)
+                    if isinstance(res, pd.DataFrame) and not res.empty:
+                        if 'code' in res.columns:
+                            hit_codes = set(res['code'].astype(str).str.strip().str.zfill(6))
+                        else:
+                            hit_codes = set(res.index.astype(str).str.strip().str.zfill(6))
+                        return [r for r in results if str(r.get('code', '')).strip().zfill(6) in hit_codes]
+                    else:
+                        return []
+
+            # 3. 备用兜底: 将 results 自身转为临时 DataFrame 评估
+            df_rows = pd.DataFrame(results)
+            if 'code' in df_rows.columns:
+                df_rows['code'] = df_rows['code'].astype(str).str.strip().str.zfill(6)
+                df_rows.set_index('code', inplace=True, drop=False)
+            if 'pct' in df_rows.columns and 'percent' not in df_rows.columns:
+                df_rows['percent'] = df_rows['pct']
+            res = query_engine.execute(df_rows, query_expr)
+            if isinstance(res, pd.DataFrame) and not res.empty:
+                hit_codes = set(res.index.astype(str).str.strip().str.zfill(6))
+                return [r for r in results if str(r.get('code', '')).strip().zfill(6) in hit_codes]
+            return []
+        except Exception as e:
+            logger.debug(f"HotSectorLeaderboard _filter_results_by_query error: {e}")
+            return results
+
+    def on_global_filter_changed(self, query_expr: str):
+        """主窗口策略公式变更全局广播回调"""
+        if getattr(self, 'filter_enabled', False):
+            if hasattr(self, 'cached_results') and self.cached_results:
+                self._render_table_data(self.cached_results)
 
     def _get_current_segment_mode_key(self) -> str:
         """获取当前选中的分段模式 key ('30m', '15m', '60m', 'day_open', '60s')"""
@@ -1985,6 +2134,13 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
             else:
                 filtered.append(r)
 
+        # 🎯 策略公式过滤 (若开启且存在有效公式)
+        total_before_strat = len(filtered)
+        query_expr = self._get_active_query_expr()
+        is_strat_on = getattr(self, 'filter_enabled', False) and bool(query_expr)
+        if is_strat_on:
+            filtered = self._filter_results_by_query(filtered, query_expr)
+
         # 👑 重点关注优先置顶排序：无论当前处于何种筛选模式，重点关注的 code 永远优先置顶排在最前！
         # 👑 买点类型与加速形态铁律梯队：双加速领涨 > 双加速扫盘/先锋 > 缺口加速领涨 > 光脚加速领涨 > 常规领涨 > 缺口加速扫盘 > 光脚加速扫盘 > 常规扫盘 > 先锋突破 > 回踩低吸 > 蓄势观察 > 破位转弱
         filtered.sort(key=lambda x: (
@@ -2056,6 +2212,12 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
 
         fav_info = f"⭐关注: {fav_cnt} | " if fav_cnt > 0 else ""
         self.lbl_stats.setText(f"标的: {total_cnt} | {fav_info}👑龙头: {leader_cnt} | ⚡扫盘: {surge_cnt} | 🚀先锋: {breakout_cnt} | 💎回踩: {pullback_cnt}")
+
+        if hasattr(self, 'lbl_filter_info') and self.lbl_filter_info:
+            if is_strat_on:
+                self.lbl_filter_info.setText(f"(过滤后: {total_cnt} 只 / 共 {total_before_strat} 只)")
+            else:
+                self.lbl_filter_info.setText("")
 
         # 找出各板块内涨幅最高的领跑股
         sec_leaders = {}

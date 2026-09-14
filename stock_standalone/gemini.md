@@ -1,3 +1,52 @@
+## 2026-09-14 18:25
+- [x] **【补全天梯与龙头突击策略过滤提示标签过滤后只数核心信息 & 统一为 `(过滤后: M 只 / 共 N 只)` 标准呈现】(SSOT) (`ats/ui/hot_sector_leaderboard.py`, `ats/ui/daily_limit_up_dialog.py`, `tests/test_sector_miner_and_distribution_strategy_filter.py`)**：
+    - [x] **操盘手反馈痛点与根因穿透**：
+        1. **“缺少信息,”（图1图2对比反馈）**：
+           - **业务痛点**：在图 1 中，策略过滤按钮边上的提示标签此前只显示了 `(🎯策略过滤 | 共 67 只)` 与 `(🎯策略过滤 | 共 178 只)`，严重缺失了策略实际命中筛选后的具体剩余只数；而图 2（涨跌分布个股明细）中完整清晰地展示了 `过滤后: 58 只 / 共 2097 只`；
+    - [x] **系统级工程落地与 SSOT 规范重构**：
+        1. **全链路补齐过滤后只数与总量双核指标**：
+           - 龙头突击跟单榜：`self.lbl_filter_info.setText(f"(过滤后: {total_cnt} 只 / 共 {total_before_strat} 只)")`；
+           - 每日涨停天梯看板：`self.lbl_filter_info.setText(f"(过滤后: {tot_cnt} 只 / 共 {total_before_strat} 只)")`；
+           - 过滤关闭时自动置空 `""`；
+        2. **与窗口标题及明细看板格式 100% 对齐统一**：
+           - 与窗口标题 `(过滤后 M 只 / 共 N 只) [🎯策略过滤]` 及涨跌分布个股明细 `过滤后: M 只 / 共 N 只` 形成完全同构的标准金融量化指标呈现；
+    - [x] **自动化测试 21/21 PASSED 100% 全绿**：
+        1. `tests/test_sector_miner_and_distribution_strategy_filter.py`: 8/8 PASSED；
+        2. `tests/test_daily_limit_up_dialog.py`: 13/13 PASSED。
+
+## 2026-09-14 18:05
+- [x] **【强势板块龙头突击跟单榜与每日涨停天梯全面接入【🎯 策略过滤】& 天梯底栏同步落地【⏱️ 实时更新/非交易休眠指示】(SSOT)】(`ats/ui/hot_sector_leaderboard.py`, `ats/ui/daily_limit_up_dialog.py`, `tests/test_sector_miner_and_distribution_strategy_filter.py`)**：
+    - [x] **操盘手反馈痛点与业务诉求**：
+        1. **“在龙头突击标记红圈位置添加同样的策略过滤功能”**：
+           - 在【🔥 Top 3 强势板块龙头突击跟单榜】（`HotSectorLeaderboardDialog`）底栏红圈位置（统计信息右侧、更新时间左侧）嵌入同款【🎯 策略过滤】按钮，能一键过滤出当前选定板块内符合主窗口策略公式的标的；
+        2. **“在天梯下面也添加策略过滤功能”**：
+           - 在【🔥 每日涨停分析与强势股天梯】（`DailyLimitUpDialog`）底栏红圈位置嵌入同款【🎯 策略过滤】按钮，对当前模式（今日涨停/连板天梯/多日强势/历史回溯等）全量标的执行策略公式筛选；
+        3. **“右侧添加跟龙头突击蓝色圈一致的时间信息”**：
+           - 在天梯底栏右侧（截图蓝圈位置）添加与龙头突击跟单榜完全一致的时间/休眠状态指示（如 `💤 非交易休眠 (HH:MM:SS)` / `更新: HH:MM:SS`），解决天梯底栏无统一时钟与休眠状态指示的痛点。
+    - [x] **系统级工程落地与 SSOT 规范重构**：
+        1. **结构、样式与交互 100% 对齐板块明细 SSOT**：
+           - 两个窗口均在底栏嵌入标准 `btn_toggle_filter`（`QPushButton`）；
+           - 激活开启状态：文案 `🎯 策略过滤 (开)`，亮绿高亮态（`#1a3322` 背景，`#00ff88` 边框与文字）；
+           - 关闭状态：文案 `🎯 策略过滤 (关)`，暗黑质感态（`#222228` 背景，`#44444f` 边框，`#888888` 文字）；
+           - 独立持久化存储：龙头突击跟单榜采用 `hot_leaderboard_filter_enabled`，天梯看板采用 `daily_limitup_filter_enabled`，默认关闭（`False`），原子持久化落盘，重启与视窗切换不丢失状态；
+        2. **极速过滤算法与动态切片双轨保障**：
+           - 优先极速路径：主窗口已预计算 `filtered_codes_set` 时，实行 0ms 内存哈希集合判定；
+           - 动态切片兜底：主窗口集合未命中时，对 `current_df` 切片或临时 DataFrame 执行 `query_engine.execute`；
+           - 联合过滤：策略公式过滤与板块选择、时间片切片、模式过滤无缝取交集；
+        3. **统计信息、标题与时间指示动态同步**：
+           - 龙头突击跟单榜：底栏 `lbl_stats` 动态更新为 `标的: M (🎯策略过滤 | 共 N) | ...`；
+           - 每日涨停天梯看板：
+             - 窗口标题动态更新为 `(过滤后 M 只 / 共 N 只) [🎯策略过滤]`；
+             - 状态栏动态更新为 `... (🎯策略过滤 | 共 N 只)`；
+             - 底栏右侧新增 `lbl_update_time`（`color: #778899; font-size: 8.5pt;`），盘中实时更新时为 `更新: HH:MM:SS`，非交易时段自动展示 `💤 非交易休眠 (HH:MM:SS)`，每 5 秒与实盘时钟同步巡检；
+        4. **全局策略广播实时响应**：
+           - 两大窗口均接入 `on_global_filter_changed`，主窗口切换或修改策略公式时，开启状态的窗口即时无缝重算并更新。
+    - [x] **自动化测试 58/58 PASSED 100% 全绿**：
+        1. 专项新增/扩充 `tests/test_sector_miner_and_distribution_strategy_filter.py`: 8/8 PASSED（覆盖两大窗口按钮创建、状态切换、独立持久化、公式过滤逻辑、底栏统计/标题更新、时间标签格式与全局广播联动）；
+        2. `tests/test_daily_limit_up_dialog.py`: 13/13 PASSED；
+        3. `tests/test_sector_rotation_pullback_miner.py`: 20/20 PASSED；
+        4. `tests/test_capital_dragon_panel_integration.py`: 17/17 PASSED。
+
 ## 2026-09-14 17:55
 - [x] **【ATS 全量窗口位置独立快照保存与单独加载功能（对齐 Tk 3 槽位体系 & 根治多显示器切换被覆盖与越界）】(`ats/ui/ats_window_manager.py`, `ats/ui/universe_widget.py`, `ats/ui/main_window.py`, `tests/test_ats_window_manager.py`)**：
     - [x] **操盘手反馈痛点与业务诉求**：

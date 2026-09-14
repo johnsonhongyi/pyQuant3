@@ -43,7 +43,8 @@ from logger_utils import LoggerFactory
 from ats.ui.styles import (
     COLOR_UP, COLOR_DOWN, COLOR_INFO, COLOR_ACCENT, COLOR_WARN, 
     auto_fit_columns_once, setup_header_persistence, save_config_node, save_config_nodes, load_config_node,
-    apply_dark_theme, ColorPreservingItemDelegate, bind_top_shortcut, set_seamless_stay_on_top
+    apply_dark_theme, ColorPreservingItemDelegate, bind_top_shortcut, set_seamless_stay_on_top,
+    parse_bool_config
 )
 from ats.ui.favorite_panel import get_ats_extra_cols
 from ats.limit_up_engine import LimitUpEngine, get_ats_custom_extra_cols
@@ -326,6 +327,10 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         self.btn_autofit: Optional[QPushButton] = None
         self.btn_narrow_mode: Optional[QPushButton] = None
 
+        # 🎯 策略过滤持久化开关 (专属独立持久化，默认关闭)
+        saved_filter = load_config_node("daily_limitup_filter_enabled", False)
+        self.filter_enabled = parse_bool_config(saved_filter, default=False)
+
         # 空间龙头当前标的
         self.current_top_leader_code: str = ""
         self.current_top_leader_name: str = ""
@@ -405,6 +410,7 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         self._clock_tick_timer.setInterval(5000)
         self._clock_tick_timer.timeout.connect(self._on_clock_tick)
         self._clock_tick_timer.start()
+        self._update_time_label()
 
     def _on_clock_tick(self):
         """实盘时钟巡检：若处于【自动实盘跟随】且跨越了时间窗口，自动无缝平滑切片"""
@@ -415,6 +421,8 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
             if live_slice != getattr(self, "_last_time_slice_cache", ""):
                 self._last_time_slice_cache = live_slice
                 self._apply_filter()
+                return
+        self._update_time_label()
 
     def _load_stays_on_top(self) -> bool:
         try:
@@ -901,9 +909,179 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         main_layout.addWidget(self.table)
 
         # ── 4. 底部状态栏 ──
+        bottom_frame = QFrame()
+        bottom_frame.setStyleSheet("background: transparent; border: none;")
+        bottom_lay = QHBoxLayout(bottom_frame)
+        bottom_lay.setContentsMargins(0, 2, 0, 0)
+        bottom_lay.setSpacing(8)
+
         self.lbl_status = QLabel("就绪。实时监控全市场涨停与封单比数据。")
         self.lbl_status.setStyleSheet("color: #8e8e93; font-size: 8.5pt;")
-        main_layout.addWidget(self.lbl_status)
+        bottom_lay.addWidget(self.lbl_status)
+
+        bottom_lay.addStretch()
+
+        # 🎯 策略过滤提示信息 (专属独立标签，显示在策略过滤按钮左侧，杜绝被左侧状态覆盖)
+        self.lbl_filter_info = QLabel("")
+        self.lbl_filter_info.setStyleSheet("color: #00ff88; font-size: 8.5pt;")
+        bottom_lay.addWidget(self.lbl_filter_info)
+
+        # 🎯 策略过滤持久化开关按钮 (红圈位置，对齐板块明细 SSOT)
+        self.btn_toggle_filter = QPushButton()
+        self._update_filter_button_ui()
+        self.btn_toggle_filter.clicked.connect(self.toggle_filter_state)
+        bottom_lay.addWidget(self.btn_toggle_filter)
+
+        # ⏱️ 实时更新/非交易休眠指示 (蓝圈位置，对齐龙头突击跟单榜)
+        self.lbl_update_time = QLabel("更新: --:--:--")
+        self.lbl_update_time.setStyleSheet("color: #778899; font-size: 8.5pt;")
+        bottom_lay.addWidget(self.lbl_update_time)
+
+        main_layout.addWidget(bottom_frame)
+
+    def toggle_filter_state(self):
+        """切换策略公式过滤状态并全局持久化"""
+        self.filter_enabled = not getattr(self, 'filter_enabled', False)
+        save_config_node("daily_limitup_filter_enabled", bool(self.filter_enabled))
+        self._update_filter_button_ui()
+        self._apply_filter()
+
+    def _update_filter_button_ui(self):
+        """更新策略过滤按钮的高亮与状态文案 (对齐板块明细 SSOT 规范)"""
+        if not hasattr(self, 'btn_toggle_filter') or self.btn_toggle_filter is None:
+            return
+        if getattr(self, 'filter_enabled', False):
+            self.btn_toggle_filter.setText("🎯 策略过滤 (开)")
+            self.btn_toggle_filter.setStyleSheet("""
+                QPushButton {
+                    background-color: #1a3322;
+                    color: #00ff88;
+                    font-weight: bold;
+                    border: 1.5px solid #00ff88;
+                    border-radius: 3px;
+                    padding: 2px 8px;
+                    font-size: 8.5pt;
+                    height: 20px;
+                }
+                QPushButton:hover {
+                    background-color: #00ff88;
+                    color: #000000;
+                }
+            """)
+            self.btn_toggle_filter.setToolTip("当前状态：【已开启】自动根据主窗口策略公式过滤涨停天梯标的 (点击可关闭)")
+        else:
+            if hasattr(self, 'lbl_filter_info') and self.lbl_filter_info:
+                self.lbl_filter_info.setText("")
+            self.btn_toggle_filter.setText("🎯 策略过滤 (关)")
+            self.btn_toggle_filter.setStyleSheet("""
+                QPushButton {
+                    background-color: #222228;
+                    color: #888888;
+                    font-weight: bold;
+                    border: 1px solid #44444f;
+                    border-radius: 3px;
+                    padding: 2px 8px;
+                    font-size: 8.5pt;
+                    height: 20px;
+                }
+                QPushButton:hover {
+                    background-color: #33333d;
+                    color: #ffffff;
+                    border-color: #777788;
+                }
+            """)
+            self.btn_toggle_filter.setToolTip("当前状态：【已关闭】展示当前模式全部标的 (点击开启根据策略公式过滤)")
+
+    def _get_active_query_expr(self) -> str:
+        """获取当前活跃的策略公式"""
+        parent_mw = getattr(self, '_py_parent', None) or getattr(self, 'parent', lambda: None)()
+        if parent_mw and hasattr(parent_mw, 'query_expr') and parent_mw.query_expr:
+            return str(parent_mw.query_expr).strip()
+        for w in QApplication.topLevelWidgets():
+            if hasattr(w, 'query_expr') and w.query_expr:
+                return str(w.query_expr).strip()
+        saved_q = load_config_node("ats_query_expr", "")
+        return str(saved_q).strip() if saved_q else ""
+
+    def _filter_records_by_query(self, records: list, query_expr: str) -> list:
+        """根据策略表达式过滤天梯标的 (0ms 极速哈希 + 动态切片兜底)"""
+        if not records or not query_expr:
+            return records
+        try:
+            from stock_logic_utils import query_engine
+            # 1. 优先从主窗口获取已预计算的过滤代码集合 (0ms 极速命中匹配)
+            parent_mw = getattr(self, '_py_parent', None) or getattr(self, 'parent', lambda: None)()
+            if not parent_mw:
+                for w in QApplication.topLevelWidgets():
+                    if hasattr(w, 'filtered_codes_set') and hasattr(w, 'query_expr'):
+                        parent_mw = w
+                        break
+            if parent_mw and hasattr(parent_mw, 'filtered_codes_set') and parent_mw.filtered_codes_set:
+                if getattr(parent_mw, 'query_expr', '') == query_expr:
+                    fset = parent_mw.filtered_codes_set
+                    return [r for r in records if str(r.get('code', '')).strip().zfill(6) in fset]
+
+            # 2. 否则从当前数据底座动态切片执行 query_engine.execute
+            current_df = getattr(self, 'current_df', None)
+            if current_df is None or current_df.empty:
+                if parent_mw and hasattr(parent_mw, 'current_df'):
+                    current_df = parent_mw.current_df
+
+            row_codes = [str(r.get('code', '')).strip().zfill(6) for r in records]
+            if current_df is not None and not current_df.empty and row_codes:
+                sub_df = None
+                if 'code' in current_df.columns:
+                    c_ser = current_df['code'].astype(str).str.strip().str.zfill(6)
+                    sub_df = current_df[c_ser.isin(row_codes)].copy()
+                else:
+                    idx_ser = current_df.index.astype(str).str.strip().str.zfill(6)
+                    sub_df = current_df[idx_ser.isin(row_codes)].copy()
+
+                if sub_df is not None and not sub_df.empty:
+                    res = query_engine.execute(sub_df, query_expr)
+                    if isinstance(res, pd.DataFrame) and not res.empty:
+                        if 'code' in res.columns:
+                            hit_codes = set(res['code'].astype(str).str.strip().str.zfill(6))
+                        else:
+                            hit_codes = set(res.index.astype(str).str.strip().str.zfill(6))
+                        return [r for r in records if str(r.get('code', '')).strip().zfill(6) in hit_codes]
+                    else:
+                        return []
+
+            # 3. 备用兜底: 将 records 自身转为临时 DataFrame 评估
+            df_rows = pd.DataFrame(records)
+            if 'code' in df_rows.columns:
+                df_rows['code'] = df_rows['code'].astype(str).str.strip().str.zfill(6)
+                df_rows.set_index('code', inplace=True, drop=False)
+            if 'pct' in df_rows.columns and 'percent' not in df_rows.columns:
+                df_rows['percent'] = df_rows['pct']
+            res = query_engine.execute(df_rows, query_expr)
+            if isinstance(res, pd.DataFrame) and not res.empty:
+                hit_codes = set(res.index.astype(str).str.strip().str.zfill(6))
+                return [r for r in records if str(r.get('code', '')).strip().zfill(6) in hit_codes]
+            return []
+        except Exception as e:
+            logger.debug(f"DailyLimitUpDialog _filter_records_by_query error: {e}")
+            return records
+
+    def _update_time_label(self):
+        """更新底栏右侧时间与非交易休眠指示 (对齐龙头突击跟单榜 SSOT 规范)"""
+        if not hasattr(self, "lbl_update_time") or self.lbl_update_time is None:
+            return
+        try:
+            from ats.tdx_realtime_fetcher import is_trading_time
+            is_trading, _ = is_trading_time()
+            if not is_trading:
+                self.lbl_update_time.setText(f"💤 非交易休眠 ({time.strftime('%H:%M:%S')})")
+            else:
+                self.lbl_update_time.setText(time.strftime("更新: %H:%M:%S"))
+        except Exception:
+            self.lbl_update_time.setText(time.strftime("更新: %H:%M:%S"))
+
+    def on_global_filter_changed(self, query_expr: str):
+        """主窗口策略公式变更全局广播回调"""
+        if getattr(self, 'filter_enabled', False):
+            self._apply_filter()
 
     def _get_current_header_config_key(self, mode: Optional[str] = None) -> str:
         """获取当前模式对应的列宽持久化 key（起点雷达 BUBBLE 单独持久化，其余模式共用原始主 key）"""
@@ -2109,6 +2287,13 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
 
             filtered.append(r)
 
+        # 🎯 策略公式过滤 (若开启且存在有效公式)
+        total_before_strat = len(filtered)
+        query_expr = self._get_active_query_expr()
+        is_strat_on = getattr(self, 'filter_enabled', False) and bool(query_expr)
+        if is_strat_on:
+            filtered = self._filter_records_by_query(filtered, query_expr)
+
         # 4. 多级排序引擎：主 -> 从 -> 次 级联复合排序（无数据标的永远强制沉底，重点关注标的绝对置顶）
         if getattr(self, "sort_level1_col", None) is not None or getattr(self, "sort_level2_col", None) is not None or getattr(self, "sort_level3_col", None) is not None or getattr(self, "_sort_col", None) is not None:
             filtered = self._apply_multi_level_sort(filtered)
@@ -2144,7 +2329,6 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         fav_set_now = self.fav_manager.get_favorite_stocks() if hasattr(self, 'fav_manager') and self.fav_manager else set()
         fav_cnt = sum(1 for r in filtered if str(r.get("code", "")).zfill(6) in fav_set_now)
         fav_str = f" ⭐关注: {fav_cnt} |" if fav_cnt > 0 else ""
-        self.lbl_status.setText(f"{kpi_tag_desc}数据已过滤:{fav_str} 视图【{self.current_mode}】时间片【{time_slice}】精选 Top {top_focus_cnt}/{len(filtered)} 核心标的 (更新: {time.strftime('%H:%M:%S')})")
 
         # 🚀 顶部标题栏动态展示当前模式与标的总计 (与涨跌分布个股明细完全同构: 共 X 只)
         mode_names = {
@@ -2160,7 +2344,21 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         mode_str = mode_names.get(self.current_mode, self.current_mode)
         tot_cnt = len(filtered)
         base_title = "🔥 每日涨停分析与强势股天梯 (Limit-Up & Multi-Day Momentum)"
-        self.setWindowTitle(f"{base_title} | 【{mode_str}】 (共 {tot_cnt} 只)")
+
+        self.lbl_status.setText(f"{kpi_tag_desc}数据已过滤:{fav_str} 视图【{self.current_mode}】时间片【{time_slice}】精选 Top {top_focus_cnt}/{tot_cnt} 核心标的")
+
+        if hasattr(self, 'lbl_filter_info') and self.lbl_filter_info:
+            if is_strat_on:
+                self.lbl_filter_info.setText(f"(过滤后: {tot_cnt} 只 / 共 {total_before_strat} 只)")
+            else:
+                self.lbl_filter_info.setText("")
+
+        if is_strat_on:
+            self.setWindowTitle(f"{base_title} | 【{mode_str}】 (过滤后 {tot_cnt} 只 / 共 {total_before_strat} 只) [🎯策略过滤]")
+        else:
+            self.setWindowTitle(f"{base_title} | 【{mode_str}】 (共 {tot_cnt} 只)")
+
+        self._update_time_label()
 
         if hasattr(self, 'btn_kpi_total'):
             self.btn_kpi_total.setText(f"📋 总计: {tot_cnt} 家")
