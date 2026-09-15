@@ -10049,6 +10049,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         )
 
         menu.add_command(
+            label=f"📋 复制股票名称 ({stock_name})",
+            command=lambda: [pyperclip.copy(stock_name), self.status_var2.set(f"已复制股票名称 {stock_name}")]
+        )
+
+        menu.add_command(
             label=f"📝 复制提取信息 ({stock_code})",
             command=lambda: self.copy_stock_info(stock_code)
         )

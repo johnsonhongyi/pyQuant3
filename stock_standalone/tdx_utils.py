@@ -280,10 +280,59 @@ async def mouse_hook_loop(click_timeout=0.25, double_min=0.05, right_timeout=1.5
             logger.error(f"[MouseHook] loop error: {e}")
             await asyncio.sleep(1)
 
+def extract_or_resolve_code(text: str, code_startswith=None) -> Optional[str]:
+    """
+    从剪贴板文本中智能提取或解析 6 位标准股票代码。
+    支持场景：
+    1. 首词为 6 位数字代码 (如 "601988", "601398 工商银行")
+    2. 纯中文股票名称 (如 "工商银行", "ST天玑", "中国银行", "内蒙新华", "锦江在线")
+    3. 规整名称与别名 (如 "深赛格", "万科A", "st天玑", "*ST天玑")
+    4. 复合文本与表格打印行 (如 "300245  ST天玑    -14.29      95.00        0", "ST天玑 -14.29")
+    """
+    if not text:
+        return None
+        
+    text = str(text).strip()
+    if not text:
+        return None
+
+    if code_startswith is None:
+        code_startswith = ('00', '1', '3', '5', '6', '8', '9')
+    elif isinstance(code_startswith, str):
+        code_startswith = tuple(x.strip().strip("'").strip('"') for x in code_startswith.split(',') if x.strip())
+
+    parts = text.split()
+    if not parts:
+        return None
+
+    # 1. 首词为 6 位纯数字极速直通 (零额外开销)
+    p0 = parts[0]
+    if len(p0) == 6 and isDigit(p0) and p0.startswith(code_startswith):
+        return p0
+
+    # 2. 调用 sys_utils.resolve_stock_code 智能解析
+    try:
+        from sys_utils import resolve_stock_code
+        # 优先解析首词（针对纯股票名称或名称在首列的文本）
+        c = resolve_stock_code(p0)
+        if c and len(c) == 6 and isDigit(c) and c.startswith(code_startswith):
+            return c
+            
+        # 若有多列/整行复合文本，整体解析
+        if len(parts) > 1 or len(text) > len(p0):
+            c = resolve_stock_code(text)
+            if c and len(c) == 6 and isDigit(c) and c.startswith(code_startswith):
+                return c
+    except Exception as e:
+        logger.debug(f"[extract_or_resolve_code] resolve_stock_code error: {e}")
+
+    return None
+
 async def get_clipboard_contents(timesleep=0.5, code_startswith=None, keep_clipboard=False):
     """
     异步生成器：监控剪贴板并返回符合条件的股票代码。
     支持在后台线程中运行的 asyncio 任务环境，通过 to_thread 避免剪贴板操作阻塞循环。
+    现已全面支持 6 位股票代码以及股票中文名（如“工商银行”、“ST天玑”等）自动识别解析联动。
     """
     if pyperclip is None:
         logger.error("pyperclip is not installed. Clipboard monitoring disabled.")
@@ -296,8 +345,9 @@ async def get_clipboard_contents(timesleep=0.5, code_startswith=None, keep_clipb
         # 兼容 "'00','30'..." 格式
         code_startswith = tuple(x.strip().strip("'").strip('"') for x in code_startswith.split(',') if x.strip())
 
-    last_emit_code = None   # ⭐ 新增
-    # last_time = 0
+    last_emit_code = None
+    last_emit_text = None
+    last_emit_time = 0.0
     # 增加微小启动延迟，确保外部信号接收端（UI）已完成初始化绑定
     await asyncio.sleep(0.3)
     
@@ -307,16 +357,17 @@ async def get_clipboard_contents(timesleep=0.5, code_startswith=None, keep_clipb
             content = await asyncio.to_thread(pyperclip.paste)
             if content:
                 text = content.strip()
-                # 兼容格式如 "600000 浦发银行"
-                parts = text.split()
-                if parts:
-                    code = parts[0]
-                    now = time.time()
-                    if len(code) == 6 and isDigit(code) and code.startswith(code_startswith):
-                        # 如果代码变更，或者同一个代码在 2 秒后再次拷贝，则触发
-                        if code != last_emit_code:
+                # 仅对适中长度文本处理（2~500字符），过滤空字符串或超长无关文本
+                if 2 <= len(text) <= 500:
+                    code = extract_or_resolve_code(text, code_startswith)
+                    if code:
+                        now = time.time()
+                        # 触发条件：代码变更，或者用户再次复制了新文本（间隔大于1秒）
+                        if code != last_emit_code or (now - last_emit_time > 1.0 and text != last_emit_text):
                             yield code
                             last_emit_code = code
+                            last_emit_text = text
+                            last_emit_time = now
                             # 注意：这里不再清空剪贴板，确保用户可以黏贴到其他地方
         except Exception:
             # 捕获剪贴板锁定异常，稍后重试
@@ -351,11 +402,11 @@ def start_clipboard_listener(sender: Any, timesleep: float = 0.5, code_startswit
                         continue
                         
                     if hasattr(sender, 'send'):
-                        logger.debug(f"📋 Clipboard Monitoring: Sending detected code {code}")
+                        logger.info(f"📋 剪贴板自动联动: 命中并派发股票代码 [{code}]")
                         sender.send(code)
                     # 新增 UI callback
                     if on_new_code:
-                        logger.debug(f"📋 Clipboard Monitoring: Sending open_visualizer code {code}")
+                        logger.info(f"📋 剪贴板可视化联动: 触发打开/切换股票 [{code}]")
                         on_new_code(code)
                 except Exception as e:
                     # Assuming 'logger' is available in this scope (e.g., imported globally)
