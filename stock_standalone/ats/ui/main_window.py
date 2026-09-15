@@ -4503,7 +4503,8 @@ class ATSMainWindow(QMainWindow):
 
                 for attempt in range(MAX_RETRY):
                     try:
-                        with pd.HDFStore(path, mode='r') as store:
+                        from JSONData.tdx_hdf5_api import SafeHDFStore
+                        with SafeHDFStore(path, mode='r') as store:
                             code_query = ", ".join([f"'{c}'" for c in query_codes])
                             df = store.select('/all_30', where=f"code in [{code_query}]")
                         last_err = None

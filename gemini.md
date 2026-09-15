@@ -1,3 +1,33 @@
+## 2026-09-15 11:50
+- [x] **【彻底解决 HDF5 跨进程文件锁冲突 & 根除 DataWatchdog 掐死子进程导致内存缓存丢失 Bug】(SSOT) (`stock_standalone/JSONData/tdx_hdf5_api.py`, `stock/JSONData/tdx_hdf5_api.py`, `stock_standalone/ats/ui/main_window.py`, `tests/test_safe_hdf_store_lock.py`)**：
+    - [x] **操盘手反馈痛点与根因溯源 (100% 证据链闭环)**：
+        1. **“子进程在写 sina_MultiIndex_data.h5 时遇到了文件锁阻塞：❌ [CRITICAL] File Locked: sina_MultiIndex_data is being held by another process! 刚好阻塞满 301 秒，看门狗强杀子进程，内存缓存丢失。是哪里导致读取后没有快速释放导致关键 h5 被锁定”**；
+        2. **致命根因溯源排查**：
+           - **真凶 1：读模式退出时误删排他写锁 & 强制 Sleep 阻塞 (Premature Lock Hijack)**：原 `SafeHDFStore.__exit__` 判定 `if self.write_status:`（而 `write_status` 仅代表文件是否存在）。导致只读模式（`mode='r'`）退出时同样进入写逻辑分支，不仅白白执行 `time.sleep(0.1)` 拖延句柄释放，还在 `finally` 块中调用了 `self._release_lock()`。若当前进程内有写线程刚拿了锁，读操作退出时因 PID 相同，**直接将写线程的排他锁亲手撕毁删除**！
+           - **真凶 2：Windows 句柄竞争与 WinError 32 僵尸锁 (Zombie Lock Cascade)**：原 `_release_lock()` 删除 `.lock` 文件时若遇 Windows 并发句柄占用报错（`WinError 32`），直接捕获退出，锁文件残留变成“永久僵尸锁”；导致后续所有读写进程在 `_wait_for_lock()` / `_acquire_lock()` 中陷入死循环等待；
+           - **真凶 3：死进程僵尸锁未探测死等 20 秒 (Dead PID Deadlock)**：原 `_wait_for_lock()` 缺少对锁持有者 PID 的存活检测（`psutil.pid_exists`）与总超时退出保护，一旦产生僵尸锁便陷入 `while True` 死等，阻塞超过 300 秒触发 `DataWatchdog` 强杀子进程；
+           - **真凶 4：写进程原子替换期间裸奔脱锁 (Replace Race Window)**：原 `write_hdf_db` 在 `os.replace` 前通过 `with SafeHDFStore ... h5.close()` 拿锁，但 `h5.close()` 默认放锁，导致物理替换时处于无锁真空期，读进程随时介入打开文件导致 Windows 内核拒绝访问（`PermissionError`）；
+           - **真凶 5：外部模块绕过锁协议原生裸调**：`ats/ui/main_window.py` 等部分位置曾直接调用原生 `pd.HDFStore(path, mode='r')` 打开，不受跨进程锁协调。
+    - [x] **系统级工程落地与架构加固**：
+        1. **SafeHDFStore 读写职责严格物理隔离 (SRP / SOLID)**：
+           - `__exit__` 严格按 `if self.mode != 'r':` 分流：读模式下仅关闭底层句柄，绝不触发 `_release_lock()`，绝不执行无谓的 `time.sleep(0.1)` 阻塞；
+           - `close(self, release_lock=None)`：根据模式智能默认，读模式默认绝不释放排他锁；
+        2. **排他锁原子创建与重入续期安全**：
+           - `_acquire_lock` 采用 `"x"`（独占排他创建模式）打开锁文件，消除并发创建竞争；
+           - 同进程同 PID 重入安全续期时间戳并返回 True，严禁自我销毁锁；
+        3. **Windows 防僵尸锁 5 次退避微重试与死 PID 立即自愈**：
+           - `_release_lock` 增加 5 次每次 20ms 退避微重试，彻底杜绝 `WinError 32` 导致的僵尸锁残留；
+           - `_wait_for_lock` 增加 `psutil.pid_exists(lock_pid)` 检测，一旦锁持有进程已死或等待超过 `max_wait`，立即安全清理并打破等待，绝不死循环卡死；
+        4. **write_hdf_db 全程排他持锁原子替换**：
+           - 替换前通过 `lock_holder = SafeHDFStore(fname, mode='a'); lock_holder.close(release_lock=False)` 释放底层句柄但牢固保持排他锁；
+           - 替换期间将所有并发读写阻隔在等待区，执行 15 次平滑退避微重试；替换完成后统一在 `finally` 中释放排他锁；
+        5. **全代码树对齐与测试保障**：
+           - 修复 `stock/JSONData/tdx_hdf5_api.py` 冗余语法与锁逻辑同步；
+           - `stock_standalone/ats/ui/main_window.py` 全面纳入 `SafeHDFStore` 锁协议。
+    - [x] **自动化测试 100% 全绿**：
+        1. 专项新增 `tests/test_safe_hdf_store_lock.py`: 6/6 PASSED（验证读模式绝不误删排他锁、读模式退出零睡眠延迟、同进程重入安全续期、已死 PID 僵尸锁立即清理、微重试防 WinError 32 残留、write_hdf_db 排他持锁原子替换）；
+        2. 回归测试 `test_h5_shared_df_alignment.py` + `test_multiday_feature_store.py` + `test_history_slice_and_auction_reversal.py`: 20/20 PASSED。
+
 ## 2026-09-15 10:25
 - [x] **【彻底解决 QToolTip 提示文字变黑看不清 & 东方财富新股解禁日历无线重试刷屏 Bug】(SSOT) (`ats/ui/styles.py`, `ats/ui/main_window.py`, `ats/main_ats.py`, `ats/new_stock_fetcher.py`, `config/new_stock_lift_calendar.json`, `tests/test_tooltip_and_lift_calendar_sync.py`)**：
     - [x] **操盘手反馈痛点与根因排查 (抓出真凶)**：

@@ -469,8 +469,11 @@ class SafeHDFStore(pd.HDFStore):
             with timed_ctx("reopen_hdf"):
                 super().__init__(self.fname, mode=self.mode, **kwargs)
 
-    def close(self, release_lock=True):
+    def close(self, release_lock=None):
         """关闭 HDFStore 并释放锁"""
+        if release_lock is None:
+            # 读模式默认不释放锁，写模式默认释放锁
+            release_lock = (self.mode != 'r')
         with _HDF_GLOBAL_LOCK:
             try:
                 # 🛡️ 检测底层状态，避免重复关闭或已销毁对象的访问错误
@@ -479,7 +482,7 @@ class SafeHDFStore(pd.HDFStore):
             except Exception as e:
                 self.log.error(f"[{self.my_pid}] super().close() failed: {e}")
             finally:
-                if release_lock:
+                if release_lock and self.mode != 'r':
                     self._release_lock()
 
     def ensure_hdf_file(self):
@@ -608,53 +611,60 @@ class SafeHDFStore(pd.HDFStore):
                 # 检查锁文件是否存在
                 with timed_ctx("_acquire_lock"):
                     if os.path.exists(self._lock):
-                        with open(self._lock, "r") as f:
-                            content = f.read().strip()
-                        pid_str, ts_str = (content.split("|") + ["0", "0"])[:2]
-                        pid = int(pid_str) if pid_str.isdigit() else -1
-                        ts = float(ts_str) if ts_str.replace(".", "", 1).isdigit() else 0.0
+                        try:
+                            with open(self._lock, "r") as f:
+                                content = f.read().strip()
+                            pid_str, ts_str = (content.split("|") + ["0", "0"])[:2]
+                            pid = int(pid_str) if pid_str.isdigit() else -1
+                            ts = float(ts_str) if ts_str.replace(".", "", 1).isdigit() else 0.0
+                        except Exception:
+                            pid, ts = -1, 0.0
+
                         elapsed = time.time() - ts
                         total_wait = time.time() - self.start_time
-                        pid_alive = psutil.pid_exists(pid)
+                        pid_alive = psutil.pid_exists(pid) if pid > 0 else False
 
                         if pid == my_pid:
-                            # 自己持有锁，直接清理并重建锁
-                            self.log.info(f"[Lock] 超时自解锁 (pid={pid}) (my_pid:{my_pid}), removing and reacquiring")
+                            # 🛡️ [RE-ENTRANT] 本进程已持有锁（重入保护）：直接续期时间戳并成功获取，绝不可自我摧毁锁
                             try:
-                                os.remove(self._lock)
-                            except Exception as e:
-                                self.log.error(f"[Lock] failed to remove self lock: {e}")
-                            continue
+                                with open(self._lock, "w") as f:
+                                    f.write(f"{my_pid}|{time.time()}")
+                            except Exception:
+                                pass
+                            return True
 
                         if not pid_alive or elapsed > self.lock_timeout or total_wait > self.max_wait:
-                            # 锁超时或持有锁进程不存在，可以删除锁
-                            self.log.warning(f"[Lock] 强制解超时锁 pid={pid} (my_pid:{my_pid}), removing {self._lock}")
-                            try:
-                                os.remove(self._lock)
-                            except Exception as e:
-                                self.log.error(f"[Lock] 强制解超时锁 失败: {e}")
+                            # 锁超时或持有锁进程不存在，安全清理僵尸锁
+                            self.log.warning(f"[Lock] 安全清理超时僵尸锁 pid={pid} (my_pid:{my_pid}, alive={pid_alive}, elapsed={elapsed:.1f}s)")
+                            for _ in range(5):
+                                try:
+                                    if os.path.exists(self._lock):
+                                        os.remove(self._lock)
+                                    break
+                                except Exception:
+                                    time.sleep(0.02)
                             continue
 
                         # 其他进程持有锁，等待
                         retries += 1
-                        if retries % 3 == 0:
-                            self.log.debug(f"[Lock] 重试:{retries} 等待 进程锁, pid={pid},(my_pid:{my_pid}), alive={pid_alive}, elapsed={elapsed:.1f}s, total_wait={total_wait:.1f}s")
+                        if retries % 10 == 0:
+                            self.log.debug(f"[Lock] 等待进程锁 pid={pid}, my_pid={my_pid}, alive={pid_alive}, elapsed={elapsed:.1f}s, wait={total_wait:.1f}s")
                         time.sleep(self.probe_interval)
 
                     else:
-                        # 创建锁文件
+                        # 创建锁文件（以独占排他模式创建，防止两进程并发无锁创建碰撞）
                         try:
-                            with open(self._lock, "w") as f:
+                            with open(self._lock, "x") as f:
                                 f.write(f"{my_pid}|{time.time()}")
                             self.log.debug(f"[Lock] 创建锁文件 {self._lock} by pid={my_pid}")
                             return True
-                        except Exception as e:
-                            self.log.error(f"[Lock] 创建锁文件 失败: {e}")
+                        except (FileExistsError, OSError) as e:
+                            self.log.debug(f"[Lock] 创建锁冲突重试: {e}")
                             time.sleep(self.probe_interval)
         except Exception as e:
-                self.log.warning(f"[Lock] KeyboardInterrupt during lock acquire, releasing lock:{e}")
-                self._release_lock()
-                raise
+            self.log.warning(f"[Lock] 异常退出，安全释放锁: {e}")
+            self._release_lock()
+            raise
 
     def _forced_unlock(self):
         my_pid = os.getpid()
@@ -704,34 +714,60 @@ class SafeHDFStore(pd.HDFStore):
 
     def _wait_for_lock(self):
         """读取模式等待锁释放"""
-        # start_time = time.time()
         with timed_ctx("_wait_for_lock"):
             while os.path.exists(self._lock):
                 try:
                     with open(self._lock, "r") as f:
-                        pid_str, ts_str = f.read().strip().split("|")
-                        lock_pid = int(pid_str)
-                        ts = float(ts_str)
+                        content = f.read().strip()
+                    pid_str, ts_str = (content.split("|") + ["0", "0"])[:2]
+                    lock_pid = int(pid_str) if pid_str.isdigit() else -1
+                    ts = float(ts_str) if ts_str.replace(".", "", 1).isdigit() else 0.0
                 except Exception:
-                    lock_pid = None
-                    ts = 0
+                    lock_pid = -1
+                    ts = 0.0
+
                 elapsed = time.time() - ts
                 total_wait = time.time() - self.start_time
-                if elapsed > self.lock_timeout: 
-                    self._forced_unlock()
+                pid_alive = psutil.pid_exists(lock_pid) if lock_pid > 0 else False
+
+                # 🛡️ 异常防御：若持有锁进程已死、锁已超时或总等待超时，清理僵尸锁并打破等待，绝不死循环
+                if not pid_alive or elapsed > self.lock_timeout or total_wait > self.max_wait:
+                    self.log.warning(f"[Lock] 读模式检测到僵尸锁/超时锁 pid={lock_pid} (alive={pid_alive}, elapsed={elapsed:.1f}s, wait={total_wait:.1f}s)，执行安全清理")
+                    for _ in range(5):
+                        try:
+                            if os.path.exists(self._lock):
+                                os.remove(self._lock)
+                            break
+                        except Exception:
+                            time.sleep(0.02)
+                    break
+
                 self.log.debug(f"[{self.my_pid}] Waiting for lock held by pid={lock_pid}, elapsed={elapsed:.1f}s total_wait={total_wait:.1f}s")
                 time.sleep(self.probe_interval)
 
     def _release_lock(self):
         if os.path.exists(self._lock):
-            try:
-                with open(self._lock, "r") as f:
-                    pid_in_lock = int(f.read().split("|")[0])
-                if pid_in_lock == self.my_pid:
-                    os.remove(self._lock)
-                    self.log.debug(f"[{self.my_pid}] Lock released: {self._lock}")
-            except Exception as e:
-                self.log.error(f"[{self.my_pid}] Failed to release lock: {e}")
+            my_pid = self.my_pid
+            # 🛡️ Windows 高并发防占用微重试删除（重试 5 次，彻底杜绝 WinError 32 僵尸锁残留）
+            for r in range(5):
+                try:
+                    if not os.path.exists(self._lock):
+                        break
+                    with open(self._lock, "r") as f:
+                        content = f.read().strip()
+                    pid_str = content.split("|")[0] if content else "-1"
+                    pid_in_lock = int(pid_str) if pid_str.isdigit() else -1
+
+                    if pid_in_lock == my_pid or pid_in_lock == -1:
+                        os.remove(self._lock)
+                        self.log.debug(f"[{my_pid}] Lock released: {self._lock}")
+                    break
+                except (PermissionError, OSError):
+                    # Windows 文件句柄竞争退避，稍等 20ms 重试
+                    time.sleep(0.02)
+                except Exception as e:
+                    self.log.error(f"[{my_pid}] Failed to release lock: {e}")
+                    break
 
 
 
@@ -775,13 +811,13 @@ class SafeHDFStore(pd.HDFStore):
 
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        if self.write_status:
+        if self.mode != 'r':
             try:
                 self.close(release_lock=False)
                 # super().__exit__ is omitted because it calls self.close() with release_lock=True,
                 # which would prematurely release the lock before the repack/compression process completes.
                 h5_size = int(os.path.getsize(self.fname) / 1e6)
-                if h5_size > 10 and self.mode != 'r':
+                if h5_size > 10:
                     with timed_ctx("release_lock"):
                         # ===== 压缩逻辑 =====
                         # h5_size = int(os.path.getsize(self.fname) / 1e6)
@@ -798,8 +834,6 @@ class SafeHDFStore(pd.HDFStore):
                         config_status = cct.get_config_value(self.config_ini, self.fname_o, h5_size, new_limit)
                         if cct.get_config_value(self.config_ini, self.fname_o, h5_size, new_limit):
                             self.log.debug(f"to temp fname: {self.fname} read_ini_limit config_status: {config_status} to {self.temp_file}") 
-                            if self.mode == 'r':
-                                self._acquire_lock()
                             if os.path.exists(self.fname) and os.path.exists(self.temp_file):
                                 log.error(f"Remove tmp file exists: {self.temp_file}")
                                 os.remove(self.temp_file)
@@ -840,13 +874,13 @@ class SafeHDFStore(pd.HDFStore):
                                 os.chdir(back_path)
 
             finally:
-                time.sleep(0.1)
                 with timed_ctx("release_lock"):
                     self._release_lock()
                 self.log.debug(f'clean:{self.fname}')
         else:
+            # 🛡️ 读模式：只关闭句柄释放 Windows 句柄锁，绝不触碰写锁，绝不 sleep 0.1s 阻塞主线程
             with timed_ctx("exit close"):
-                self.close(release_lock=True)
+                self.close(release_lock=False)
 
 
 # class SafeHDFStore_no_timed_ctx(pd.HDFStore):
@@ -2343,52 +2377,36 @@ def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount
             # --- 阶段 2: 安全替换原文件 ---
             if os.path.exists(temp_fname) and os.path.getsize(temp_fname) > 1024:
                 success = False
-                # 注意：SafeHDFStore 内部已经有关闭逻辑，但在 replace 前需确保所有 tmp_h5 句柄已销毁
-                success = False
-                with SafeHDFStore(fname, mode='a') as h5:
-                    # SafeHDFStore 获取了进程锁，但它自己也打开了文件。
-                    # 我们需要关闭它内部的句柄才能进行 os.replace/os.remove
-                    h5.close() 
-                    
-                    # 🚀 安全替换原文件逻辑：不再调用全局 tables.file._open_files.close_all() 以免中断其他线程
-                    max_retry = 5  # 增加重试次数，应对高频读写冲突
+                # 🛡️ 跨进程安全持锁：获取排他锁并关闭底层 HDF5 句柄，替换期间全程绝对持锁，阻绝任何读进程打开文件
+                lock_holder = SafeHDFStore(fname, mode='a')
+                lock_holder.close(release_lock=False)  # 释放底层句柄，排他锁牢固持有！
+                try:
+                    max_retry = 15  # ⚡ 升级重试次数至 15 次，动态平滑覆盖读操作
                     for r in range(max_retry):
                         try:
-                            # [FIX] ⚡ 核心保护：原子替换前必须预检源文件是否存在
-                            # 防止由于外部清理或文件系统异常导致 temp_fname 丢失，从而触发后续可能的级联错误
+                            # 核心保护：原子替换前预检源文件
                             if not os.path.exists(temp_fname):
                                 log.error(f"❌ [CRITICAL] Source temp file MISSING before replace: {temp_fname}. Replacement ABORTED to protect original file.")
                                 break
 
-                            # 优先直接使用 os.replace (原子操作)
+                            # 直接使用 os.replace (原子操作)
                             os.replace(temp_fname, fname_path)
                             success = True
                             log.debug(f"✅ Atomic replace successful: {fname} (attempt {r+1})")
                             break
                         except Exception as re:
-                            # 针对 [WinError 5] 等权限错误，采用指数退避策略
-                            wait_time = 0.3 * (2 ** r) + random.uniform(0, 0.2)
+                            wait_time = min(0.35, 0.05 * (1.3 ** r) + random.uniform(0.01, 0.05))
                             if r == max_retry - 1:
                                 log.error(f"Final replace attempt failed after {max_retry} retries: {re}")
                                 break
                             if isinstance(re, PermissionError):
-                                log.error(f"❌ [CRITICAL] File Locked: {fname} is being held by another process! "
-                                          f"Please check and KILL stale python processes (e.g. PID {os.getpid()} or others in screenshot). "
-                                          f"Check if you have multiple 'python.exe' instances running in Task Manager.")
+                                log.debug(f"⚠️ [REPLACE-WAIT] {fname} transiently held, retrying in {wait_time:.2f}s (attempt {r+1}/{max_retry})...")
 
-                            wait_time = 0.3 * (r + 1)
-                            
-                            # 深度清理句柄记录，不执行全局关闭
                             gc.collect()
-                            is_last = (r == max_retry - 1)
-                            # 若前三次 replace 都失败，尝试强制删除原文件以打破死锁
-                            if is_last:
-                                try:
-                                    if os.path.exists(fname_path):
-                                        os.remove(fname_path)
-                                except: pass
-                            
                             time.sleep(wait_time)
+                finally:
+                    # 替换完成后统一切实释放跨进程写锁
+                    lock_holder._release_lock()
                 
                 if not success:
                     # 关键：如果替换失败，报错并退出，但不删除 temp_fname，防止数据彻底丢失
