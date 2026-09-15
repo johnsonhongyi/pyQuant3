@@ -1,3 +1,24 @@
+## 2026-09-15 12:55
+- [x] **【实现剪贴板股票中文名（如“工商银行”、“ST天玑”等）自动识别与全系统联动】(SSOT) (`sys_utils.py`, `tdx_utils.py`, `instock_MonitorTK.py`, `tests/test_clipboard_stock_name_linkage.py`)**：
+    - [x] **操盘手反馈痛点与业务场景**：
+        1. **“tk后台支持右键剪贴板的6位code的自动联动,以及推送中文名的联动接口,现在实现剪贴板的中文名的联动功能,code: 300245 ST天玑, 601988 中国银行, 601398 工商银行, 603230 内蒙新华, 600650 锦江在线 ... 现在支持601988 601398 复制后的剪贴板联动, 添加支持工商银行 ST天玑 等股票名的联动功能”**；
+        2. 原 `tdx_utils.py` 中的剪贴板监听仅匹配 6 位纯数字 (`len(code) == 6 and isDigit(code)`)，若从终端 `gem_tops` 表格或日常复制纯中文名（如 `工商银行`、`ST天玑`），剪贴板监听器直接丢弃，无法触发通达信/同花顺/东方财富与 K 线图可视化联动；
+    - [x] **系统级工程落地与架构加固**：
+        1. **SSOT 双向股票代码与中文名映射中心 (`sys_utils.py`)**：
+           - 构建内存高速反向字典 `_resolved_code_cache`（精确匹配）、`_resolved_code_normalized`（去除空格、全角转半角、大小写规整，如 `深 赛 格` -> `深赛格` -> `000058`，`万 科Ａ` -> `万科A` -> `000002`）与 `_resolved_code_strip_prefix`（剥离 `*ST`/`ST` 等前缀别名索引，如 `天玑` -> `300245`，`*ST天玑` -> `300245`）；
+           - 新增 `resolve_stock_code(name_or_text)` 权威解析函数与 `get_name_to_code_map()`；
+           - 在 `_load_name_cache()`、`_save_to_name_cache()` 与 `bulk_update_name_cache_from_df()` 中全自动原子同步维护反查映射；
+        2. **本地微型 HTTP `/link` 端点支持中文字符参数**：
+           - `/link?code=工商银行`、`/link?code=ST天玑` 或 `/link?name=工商银行` 自动解码并通过 `resolve_stock_code` 转换为 6 位股票代码投递系统联动；
+        3. **剪贴板智能提取器升级 (`tdx_utils.py`)**：
+           - 新增 `extract_or_resolve_code(text, code_startswith)`：首词为 6 位数字代码时走极速零开销路径；首词或整行为股票名时调用 `resolve_stock_code`；复合表格行（如 `300245 ST天玑 -14.29 95.00 0` 或 `ST天玑 -14.29`）自动提取 6 位代码；
+           - 升级 `get_clipboard_contents` 异步生成器，同时支持 6 位代码与股票中文名，并优化防重频控保护；
+        4. **Tk 盯盘后台右键菜单扩展 (`instock_MonitorTK.py`)**：
+           - 在 TreeView 右键主菜单中新增 `📋 复制股票名称 ({stock_name})`，右键复制名称即可直连剪贴板监听器触发全套联动；
+    - [x] **自动化测试 41/41 PASSED 100% 全绿**：
+        1. 专项新增 `tests/test_clipboard_stock_name_linkage.py`: 41/41 PASSED（涵盖 5 只核心标的、规整空格股票、ST前缀别名、gem_tops复合行文本、异步生成器连续模拟、HTTP接口中文名测试）；
+        2. 核心回归测试 26/26 PASSED。
+
 ## 2026-09-15 12:12
 - [x] **【全面审查（/review）HDF5 并发锁完备性：根治空锁文件 17.89 亿秒溢出误删、__init__ 孤儿锁泄漏与写全生命周期互斥】(SSOT) (`stock_standalone/JSONData/tdx_hdf5_api.py`, `stock/JSONData/tdx_hdf5_api.py`, `tests/test_safe_hdf_store_lock.py`)**：
     - [x] **深度代码审计审查出的 4 大并发隐藏隐患 (已 100% 根除)**：

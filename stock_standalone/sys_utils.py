@@ -4,6 +4,7 @@ import sys
 import json
 import configparser
 import threading
+from typing import Optional, Any, Dict, List
 from JohnsonUtil import LoggerFactory
 from JohnsonUtil import commonTips as cct
 
@@ -704,8 +705,162 @@ def ensure_all_configs_released():
     repair_system_configurations_and_delisted_stocks()
 
 _resolved_name_cache = {}
+_resolved_code_cache = {}          # 精确反查: name -> code
+_resolved_code_normalized = {}     # 规整反查: normalized_name -> code
+_resolved_code_strip_prefix = {}   # 去除ST等前缀反查: stripped_name -> code
 _name_cache_lock = threading.Lock()
 _SINA_ENGINE = None
+
+def _normalize_stock_name(name: str) -> str:
+    """去除名字内空格，全角转半角，转大写"""
+    if not name:
+        return ""
+    res = ""
+    for ch in str(name).strip():
+        code = ord(ch)
+        if code == 12288 or ch in (' ', '\t', '\r', '\n', '\u3000', '\xa0'):
+            continue
+        elif 65281 <= code <= 65374:
+            res += chr(code - 65248)
+        else:
+            res += ch
+    return res.upper()
+
+def _strip_stock_prefix(name: str) -> str:
+    """剥离 *ST, ST, S*ST, SST, S, N, C, DR, XD, XR 等前缀及 U/W 后缀"""
+    norm = _normalize_stock_name(name)
+    for pfx in ('*ST', 'S*ST', 'SST', 'ST', 'S', 'N', 'C', 'DR', 'XD', 'XR'):
+        if norm.startswith(pfx):
+            norm = norm[len(pfx):]
+            break
+    for sfx in ('-U', 'U', '-W', 'W'):
+        if norm.endswith(sfx) and len(norm) > len(sfx):
+            norm = norm[:-len(sfx)]
+            break
+    return norm
+
+def _sync_reverse_name_cache(code: str, name: str):
+    """原子同步单条反向映射到内存字典"""
+    global _resolved_code_cache, _resolved_code_normalized, _resolved_code_strip_prefix
+    c_clean = str(code).strip().zfill(6)
+    n_clean = str(name).strip()
+    if not n_clean or n_clean.startswith("个股_") or n_clean.isdigit() or n_clean == c_clean:
+        return
+    _resolved_code_cache[n_clean] = c_clean
+    
+    norm = _normalize_stock_name(n_clean)
+    if norm:
+        _resolved_code_normalized[norm] = c_clean
+        
+    stripped = _strip_stock_prefix(n_clean)
+    if stripped and len(stripped) >= 2:
+        if stripped not in _resolved_code_strip_prefix:
+            _resolved_code_strip_prefix[stripped] = c_clean
+
+def _rebuild_reverse_name_cache():
+    """根据 _resolved_name_cache 全量重建反向映射"""
+    global _resolved_name_cache, _resolved_code_cache, _resolved_code_normalized, _resolved_code_strip_prefix
+    code_cache = {}
+    norm_cache = {}
+    strip_cache = {}
+    for c, n in _resolved_name_cache.items():
+        c_clean = str(c).strip().zfill(6)
+        n_clean = str(n).strip()
+        if not n_clean or n_clean.startswith("个股_") or n_clean.isdigit() or n_clean == c_clean:
+            continue
+        code_cache[n_clean] = c_clean
+        norm = _normalize_stock_name(n_clean)
+        if norm:
+            norm_cache[norm] = c_clean
+        stripped = _strip_stock_prefix(n_clean)
+        if stripped and len(stripped) >= 2:
+            if stripped not in strip_cache:
+                strip_cache[stripped] = c_clean
+
+    _resolved_code_cache = code_cache
+    _resolved_code_normalized = norm_cache
+    _resolved_code_strip_prefix = strip_cache
+
+def get_name_to_code_map() -> dict:
+    """获取全量股票中文名到6位代码映射字典"""
+    global _resolved_code_cache
+    if not _resolved_code_cache and _resolved_name_cache:
+        _rebuild_reverse_name_cache()
+    return _resolved_code_cache.copy()
+
+def resolve_stock_code(name_or_text: str) -> Optional[str]:
+    """
+    智能将股票中文名（或包含股票代码/名称的文本）解析为标准 6 位股票代码。
+    支持：
+    1. 6 位标准代码直接通过 (如 '601988', '300245')
+    2. 股票精确中文名 (如 '工商银行' -> '601398', 'ST天玑' -> '300245', '中国银行' -> '601988')
+    3. 去空格与标准化 (如 '深赛格' -> '000058', '万科A' -> '000002')
+    4. ST前缀容错 (如 '天玑' -> '300245', '*ST天玑' -> '300245')
+    5. 复合文本分词/提取 (如 '300245  ST天玑    -14.29      95.00        0', '工商银行 4.36')
+    """
+    if not name_or_text:
+        return None
+        
+    raw = str(name_or_text).strip()
+    if not raw:
+        return None
+        
+    # 0. 剥离常见表情符号与特殊标记
+    for icon in ['🔴', '🟢', '📊', '⚠️', '🚀', '🟡', '🛡', '🛡️', '🚨', '⚠', '👑', '📋', '📝']:
+        raw = raw.replace(icon, '').strip()
+
+    # 确保反向字典已构建
+    global _resolved_code_cache
+    if not _resolved_code_cache and _resolved_name_cache:
+        _rebuild_reverse_name_cache()
+
+    # 1. 如果本身就是 6 位纯数字且以合规前缀开头
+    if len(raw) == 6 and raw.isdigit() and raw.startswith(('00', '1', '3', '5', '6', '8', '9')):
+        return raw
+
+    # 2. 精确匹配中文名 (O(1))
+    code = _resolved_code_cache.get(raw)
+    if code:
+        return code
+
+    # 3. 规整名称匹配 (去掉空格、全角转半角、大小写)
+    norm = _normalize_stock_name(raw)
+    code = _resolved_code_normalized.get(norm)
+    if code:
+        return code
+
+    # 4. 剥离/补齐 ST, *ST 等前缀容错
+    stripped = _strip_stock_prefix(raw)
+    if stripped:
+        code = _resolved_code_strip_prefix.get(stripped)
+        if code:
+            return code
+
+    # 5. 复合文本分词/正则扫描 (如 '300245 ST天玑 -14.29 95.00', '工商银行 4.36')
+    parts = raw.split()
+    if len(parts) > 1:
+        # 先查首词是否为 6 位代码
+        p0 = parts[0].strip()
+        if len(p0) == 6 and p0.isdigit() and p0.startswith(('00', '1', '3', '5', '6', '8', '9')):
+            return p0
+        # 再查首词是否为名称
+        c0 = resolve_stock_code(p0)
+        if c0:
+            return c0
+        # 扫描文本中出现的 6 位数字代码
+        import re
+        code_matches = re.findall(r'\b([03689]\d{5}|1\d{5}|5\d{5})\b', raw)
+        if code_matches:
+            return code_matches[0]
+        # 逐个 token 探测股票名
+        for p in parts[1:]:
+            token = p.strip()
+            if 2 <= len(token) <= 8:
+                c_token = _resolved_code_cache.get(token) or _resolved_code_normalized.get(_normalize_stock_name(token))
+                if c_token:
+                    return c_token
+
+    return None
 
 def _load_name_cache():
     global _resolved_name_cache
@@ -794,6 +949,12 @@ def _load_name_cache():
             except Exception as e:
                 logger.error(f"Failed to save bootstrapped cache: {e}")
 
+    # 重建反向股票代码索引
+    try:
+        _rebuild_reverse_name_cache()
+    except Exception as e:
+        logger.error(f"Failed to build reverse name cache: {e}")
+
 def _save_to_name_cache(code: str, name: str, allow_placeholder: bool = False):
     global _resolved_name_cache
     # 提取纯 6 位数字代码以保证缓存 key 的规范性
@@ -813,6 +974,7 @@ def _save_to_name_cache(code: str, name: str, allow_placeholder: bool = False):
         if _resolved_name_cache.get(code_clean) == name_clean:
             return
         _resolved_name_cache[code_clean] = name_clean
+        _sync_reverse_name_cache(code_clean, name_clean)
         try:
             path = os.path.join(get_app_root(), "datacsv", "stock_name_cache.json")
             os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -1226,6 +1388,7 @@ def bulk_update_name_cache_from_df(df):
                 if not need_update:
                     continue
             _resolved_name_cache[k] = v
+            _sync_reverse_name_cache(k, v)
             added_count += 1
 
         # 仅在有新增时才触发一次磁盘持久化（异步友好，不阻塞主线程）
@@ -1266,10 +1429,10 @@ def start_stock_name_server():
                 self.end_headers()
                 self.wfile.write(get_cached_stock_names())
             elif self.path.startswith('/link'):
-                from urllib.parse import urlparse, parse_qs
+                from urllib.parse import urlparse, parse_qs, unquote
                 query = urlparse(self.path).query
                 params = parse_qs(query)
-                code_list = params.get('code')
+                code_param = params.get('code') or params.get('name')
                 
                 self.send_response(200)
                 self.send_header('Content-type', 'application/json; charset=utf-8')
@@ -1278,19 +1441,21 @@ def start_stock_name_server():
                 self.send_header('Access-Control-Allow-Headers', 'X-Requested-With, Content-Type')
                 self.end_headers()
                 
-                if code_list and len(code_list[0]) == 6:
-                    code = code_list[0]
+                raw_target = unquote(code_param[0]).strip() if code_param else ""
+                code = resolve_stock_code(raw_target) if raw_target else None
+                
+                if code and len(code) == 6:
                     global _link_callback
                     if _link_callback is not None:
                         try:
                             _link_callback(code)
-                            self.wfile.write(b'{"status": "ok", "message": "linked"}')
+                            self.wfile.write(f'{{"status": "ok", "message": "linked", "code": "{code}"}}'.encode('utf-8'))
                         except Exception as e:
                             self.wfile.write(f'{{"status": "error", "message": "{str(e)}"}}'.encode('utf-8'))
                     else:
                         self.wfile.write(b'{"status": "error", "message": "no callback registered"}')
                 else:
-                    self.wfile.write(b'{"status": "error", "message": "invalid code"}')
+                    self.wfile.write(b'{"status": "error", "message": "invalid code or name"}')
             else:
                 self.send_error(404)
                 
