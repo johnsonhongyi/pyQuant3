@@ -31,7 +31,10 @@ from .core import (
     get_screen_topology_orientation_tag,
     cancel_window_maximized_or_fullscreen,
     clean_duplicate_display_configurations,
-    send_file_to_recycle_bin
+    send_file_to_recycle_bin,
+    get_window_host_relation,
+    get_window_family,
+    apply_overall_window_group_by_title
 )
 
 from .sync_engine import (
@@ -67,6 +70,9 @@ __all__ = [
     'send_file_to_recycle_bin',
     'get_display_configuration_details',
     'bring_window_to_top_by_title',
+    'get_window_host_relation',
+    'get_window_family',
+    'apply_overall_window_group_by_title',
     'check_and_add_route',
     'get_wm_show_msg_id',
     'check_and_activate_existing_instance',

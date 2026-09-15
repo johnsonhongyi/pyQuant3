@@ -19595,3 +19595,23 @@ equest_dynamic_ipc_sync 中传入 orce=True 绕过防刷干扰。
   3. 自动故障转移 (Failover)：在 `get_security_quotes_safe` 中检测到连续 2 批次空包时，自动触发 `auto_failover()` 切换至备用主站并立即重试，杜绝误冷却正常股票。
   4. UI 手动/自动切换主站：在 `TDXFetchLogDialog`（TDX 诊断日志窗口）中增加“🎯 手动选择主站”下拉框与“⚡ 自动测速选优”、“🔄 下一个备用主站”按钮，支持随时手动切换或一键并发测速选优。
   5. 修复盘初 1 分钟 K 线不足 30 根导致的疯狂重连问题。
+
+## [2026-09-15 12:15:00] 桌面窗口布局管理器支持“整体操作窗口”并修复附属浮窗拉伸变形 Bug
+- **关联文件**:
+  - `stock_standalone/webTools/window_manager/core.py`
+  - `stock_standalone/webTools/window_manager/ui.py`
+  - `stock_standalone/webTools/window_manager/__init__.py`
+  - `stock_standalone/tests/test_window_overall_layout_suite.py`
+- **根因诊断**:
+  1. **跨进程 DPI 上下文截断导致坐标除以 2**：管理器 UI 为 `PER_MONITOR_DPI_AWARE`，而通达信 (`TdxW.exe`) 为 32 位 `DPI Unaware`。在 4K 200% 主屏与 100% 副屏环境下，Win32 内核调用 `SetWindowPos` 时将传入的物理坐标（如 `1946`）按 200% DPI 虚拟化自动除以 2（变成 `973`），小窗口被错误投递到通达信主窗口内部。
+  2. **通达信 Docking 引擎被误激活**：原平移逻辑对 `#32770` 附属对话框浮窗误调用了 `cancel_window_maximized_or_fullscreen`（发送了 `SW_RESTORE`）以及 `SWP_FRAMECHANGED`（触发非客户区重算 `WM_NCCALCSIZE`），通达信将该浮窗判定为重排吸附停靠，横向强行拉满分栏宽度（拉伸至 1450px），造成图4横条变形。
+  3. **缺乏整体操作机制**：通达信主窗口与上证指数分时联动小窗为同一程序宿主与从属关系，割裂单独移动易产生错位与版面吸附冲突。
+- **修复与改进成果**:
+  1. **原生 DPI 上下文切换平移通道**：在 `core.py` 的 `set_window_hwnd_pos` 中，动态获取目标窗口的原生 DPI 上下文（`GetWindowDpiAwarenessContext`），在原生上下文下原子调用 `SetWindowPos`，彻底杜绝跨进程 DPI 虚拟化除以 2 截断，坐标 100% 绝对物理精度到达。
+  2. **附属浮窗安全通道与两阶段防拉伸纠偏**：通过 `get_window_host_relation` 智能判定从属关系，对附属浮窗移除 `SW_RESTORE` 与 `SWP_FRAMECHANGED` 破坏性标志，并内置 Anti-Stretch Guard 异常拉伸纠偏，保持图1精致独立悬浮形态。
+  3. **支持“整体操作窗口”**：
+     - 新增 `get_window_family` 整体家族提取与 `apply_overall_window_group_by_title` 联动对齐函数。
+     - UI 表格右键菜单增加 **`📦 整体操作窗口 (主程序与附属浮窗联动)`**，支持一键将主程序与名下所有附属浮窗成组安全协同对齐。
+     - 增加从属关系 ToolTip 友好提示。
+  4. **全链路回归验证**：新增 `tests/test_window_overall_layout_suite.py` 自动化测试套件，移动与恢复 5 轮循环测试 100% 通过，断言精度完美达标。
+
