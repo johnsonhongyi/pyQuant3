@@ -4811,6 +4811,11 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
                         cur_item.setForeground(QtGui.QColor("#10b981")) # 绿色，完全一致
                     else:
                         cur_item.setForeground(QtGui.QColor("#ef4444")) # 红色，不一致
+                        
+                    host_rel = core.get_window_host_relation(found_hwnd)
+                    if host_rel.get("is_sub_window"):
+                        h_t = host_rel.get('host_title', '') or '主程序'
+                        cur_item.setToolTip(f"💡 附属浮窗 (宿主程序: {h_t})\n右键可选用‘📦 整体操作窗口’进行联动对齐")
             else:
                 cur_item.setText("[未运行]")
                 cur_item.setForeground(QtGui.QColor("#6b7280")) # 灰色，未检测到
@@ -5331,6 +5336,7 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
 
         menu.addSeparator()
         apply_single_action = menu.addAction("🎯 应用该窗口坐标 (移动至配置位置)")
+        apply_overall_action = menu.addAction("📦 整体操作窗口 (主程序与附属浮窗联动)")
         apply_all_action = menu.addAction("🚀 应用当前方案所有窗口布局")
         menu.addSeparator()
 
@@ -5359,6 +5365,17 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
                 QMessageBox.information(self, "提示", f"桌面当前未检测到运行中的窗口: '{title}'\n可尝试通过右键菜单‘🚀 启动程序’启动它。")
             elif status == "error":
                 QMessageBox.warning(self, "错误", msg)
+        elif apply_overall_action and action == apply_overall_action:
+            current_res = self.get_current_selected_resolution()
+            mapping = self.config_manager.get_resolution_mapping(current_res) if current_res else {}
+            success, moved, msg = core.apply_overall_window_group_by_title(title, mapping)
+            if success:
+                self.log(f"✅ {msg}")
+                self.refresh_current_positions()
+                QMessageBox.information(self, "整体操作完成", f"{msg}\n已将主程序及附属小窗口整体安全对齐到位！")
+            else:
+                self.log(f"⚠️ 整体操作提示: {msg}")
+                QMessageBox.warning(self, "整体操作提示", msg)
         elif apply_all_action and action == apply_all_action:
             self.apply_current_layout()
         elif action == pin_action:
@@ -5892,11 +5909,15 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
                     is_minimized = (left < -10000 and top < -10000) or core.user32.IsIconic(hwnd)
                     is_diff = (left != cfg_parts[0] or top != cfg_parts[1] or w != cfg_parts[2] or h != cfg_parts[3])
                     
+                    host_rel = core.get_window_host_relation(hwnd)
+                    is_sub_win = host_rel.get("is_sub_window", False)
+
                     if is_maximized or is_minimized or is_diff:
-                        if is_maximized or is_minimized:
+                        if not is_sub_win and (is_maximized or is_minimized):
                             core.cancel_window_maximized_or_fullscreen(hwnd)
                         if core.set_window_hwnd_pos(hwnd, pos_str, title=actual_title):
-                            self.log(f"✅ 成功对齐窗口: '{actual_title}' -> [{pos_str}]")
+                            mode_tag = " [从属浮窗安全对齐]" if is_sub_win else ""
+                            self.log(f"✅ 成功对齐窗口{mode_tag}: '{actual_title}' -> [{pos_str}]")
                             moved_any = True
                     else:
                         self.log(f"➖ 窗口 '{actual_title}' 位置已是一致 [{pos_str}]")
@@ -5970,11 +5991,15 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
                         is_minimized = (left < -10000 and top < -10000) or core.user32.IsIconic(hwnd)
                         is_diff = (left != cfg_parts[0] or top != cfg_parts[1] or w != cfg_parts[2] or h != cfg_parts[3])
                         
+                        host_rel = core.get_window_host_relation(hwnd)
+                        is_sub_win = host_rel.get("is_sub_window", False)
+
                         if is_maximized or is_minimized or is_diff:
-                            if is_maximized or is_minimized:
+                            if not is_sub_win and (is_maximized or is_minimized):
                                 core.cancel_window_maximized_or_fullscreen(hwnd)
                             if core.set_window_hwnd_pos(hwnd, pos_str, title=actual_title):
-                                self.log(f"✅ 成功设置窗口: '{actual_title}' -> [{pos_str}]")
+                                mode_tag = " [从属浮窗安全对齐]" if is_sub_win else ""
+                                self.log(f"✅ 成功设置窗口{mode_tag}: '{actual_title}' -> [{pos_str}]")
                                 moved_any = True
                         else:
                             self.log(f"➖ 窗口 '{actual_title}' 位置一致 [{pos_str}]，跳过应用")

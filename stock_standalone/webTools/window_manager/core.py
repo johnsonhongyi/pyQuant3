@@ -77,6 +77,14 @@ user32.GetWindowLongW.restype = wintypes.LONG
 user32.SetWindowPos.argtypes = (wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, wintypes.UINT)
 user32.SetWindowPos.restype = wintypes.BOOL
 
+try:
+    user32.GetWindowDpiAwarenessContext.restype = wintypes.HANDLE
+    user32.GetWindowDpiAwarenessContext.argtypes = (wintypes.HWND,)
+    user32.SetThreadDpiAwarenessContext.restype = wintypes.HANDLE
+    user32.SetThreadDpiAwarenessContext.argtypes = (wintypes.HANDLE,)
+except Exception:
+    pass
+
 # 窗口显示常量
 SW_HIDE = 0
 SW_SHOWNORMAL = 1
@@ -826,10 +834,177 @@ def cancel_window_maximized_or_fullscreen(hwnd: int) -> bool:
     return False
 
 
+def get_window_text_safe(hwnd: int) -> str:
+    """安全获取窗口标题"""
+    if not hwnd or not user32.IsWindow(hwnd):
+        return ""
+    try:
+        length = user32.GetWindowTextLengthW(hwnd)
+        if length > 0:
+            buf = ctypes.create_unicode_buffer(length + 10)
+            user32.GetWindowTextW(hwnd, buf, length + 10)
+            return buf.value.strip()
+    except Exception:
+        pass
+    return ""
+
+
+def get_window_host_relation(hwnd: int) -> dict:
+    """
+    智能检测窗口的宿主从属关系，精准区分‘独立顶层主窗口’与‘附属浮窗/对话框/子窗口’。
+    返回:
+    {
+        "is_sub_window": bool,      # 是否属于附属/从属浮窗
+        "host_hwnd": int,           # 宿主主窗口 HWND (若无则为 0)
+        "host_title": str,          # 宿主主窗口标题
+        "class_name": str,          # 自身类名 (如 #32770)
+        "is_dialog": bool,          # 是否为 #32770 对话框
+        "exe_path": str,            # 物理可执行文件路径
+    }
+    """
+    res = {
+        "is_sub_window": False,
+        "host_hwnd": 0,
+        "host_title": "",
+        "class_name": "",
+        "is_dialog": False,
+        "exe_path": ""
+    }
+    if not hwnd or not user32.IsWindow(hwnd):
+        return res
+
+    try:
+        cbuf = ctypes.create_unicode_buffer(256)
+        user32.GetClassNameW(hwnd, cbuf, 256)
+        cls = cbuf.value
+        res["class_name"] = cls
+        res["is_dialog"] = (cls == "#32770")
+        res["exe_path"] = get_exe_path(hwnd)
+
+        owner = user32.GetWindow(hwnd, 4) # GW_OWNER = 4
+        parent = user32.GetParent(hwnd)
+        root = user32.GetAncestor(hwnd, 2) # GA_ROOT = 2
+        root_owner = user32.GetAncestor(hwnd, 3) # GA_ROOTOWNER = 3
+
+        host_candidate = 0
+        if owner and owner != hwnd and user32.IsWindow(owner):
+            host_candidate = owner
+        elif root_owner and root_owner != hwnd and user32.IsWindow(root_owner):
+            host_candidate = root_owner
+        elif parent and parent != hwnd and user32.IsWindow(parent):
+            desk = user32.GetDesktopWindow()
+            if parent != desk:
+                host_candidate = parent
+
+        if host_candidate:
+            pid_self = wintypes.DWORD()
+            pid_host = wintypes.DWORD()
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid_self))
+            user32.GetWindowThreadProcessId(host_candidate, ctypes.byref(pid_host))
+            if pid_self.value > 0 and pid_self.value == pid_host.value:
+                res["is_sub_window"] = True
+                res["host_hwnd"] = host_candidate
+                res["host_title"] = get_window_text_safe(host_candidate)
+    except Exception:
+        pass
+
+    return res
+
+
+def get_window_family(target_title_or_hwnd) -> dict:
+    """
+    获取指定窗口所在的整体窗口家族 (包含宿主主窗口与其名下的所有附属浮窗)，用于整体操作与成组对齐。
+    """
+    result = {
+        "main_hwnd": 0,
+        "main_title": "",
+        "main_rect": (0, 0, 0, 0),
+        "exe_path": "",
+        "children": []
+    }
+    
+    target_hwnd = 0
+    if isinstance(target_title_or_hwnd, int):
+        target_hwnd = target_title_or_hwnd
+    else:
+        found = find_windows_by_title_safe(str(target_title_or_hwnd))
+        if found:
+            target_hwnd = found[0][0]
+            
+    if not target_hwnd or not user32.IsWindow(target_hwnd):
+        return result
+
+    rel = get_window_host_relation(target_hwnd)
+    if rel["is_sub_window"] and rel["host_hwnd"]:
+        main_hwnd = rel["host_hwnd"]
+    else:
+        main_hwnd = target_hwnd
+
+    result["main_hwnd"] = main_hwnd
+    result["main_title"] = get_window_text_safe(main_hwnd)
+    result["main_rect"] = get_window_rect(main_hwnd)
+    result["exe_path"] = get_exe_path(main_hwnd)
+
+    target_pid = wintypes.DWORD()
+    user32.GetWindowThreadProcessId(main_hwnd, ctypes.byref(target_pid))
+    if target_pid.value > 0:
+        all_wins = list_visible_windows()
+        for w in all_wins:
+            if w.hwnd != main_hwnd and w.pid == target_pid.value:
+                c_rel = get_window_host_relation(w.hwnd)
+                if c_rel["is_sub_window"] and c_rel["host_hwnd"] == main_hwnd:
+                    result["children"].append({
+                        "hwnd": w.hwnd,
+                        "title": w.title,
+                        "rect": (w.left, w.top, w.width, w.height),
+                        "class_name": c_rel["class_name"]
+                    })
+    return result
+
+
+def apply_overall_window_group_by_title(target_title: str, mapping: dict, show_cmd=SW_SHOWNORMAL) -> tuple:
+    """
+    整体操作窗口：以宿主程序主窗口为核心，协同对其名下所有附属窗口执行原子级安全对齐。
+    返回 (success: bool, moved_count: int, msg: str)
+    """
+    family = get_window_family(target_title)
+    main_hwnd = family.get("main_hwnd", 0)
+    if not main_hwnd:
+        return False, 0, f"未找到 '{target_title}' 对应的运行中程序"
+
+    main_title = family.get("main_title", "")
+    moved = 0
+
+    # 1. 首先移动主窗口 (若 mapping 中有配置)
+    for cfg_title, raw_pos in mapping.items():
+        pos_str = str(raw_pos).split('|')[0].strip()
+        if cfg_title in main_title or main_title in cfg_title:
+            if set_window_hwnd_pos(main_hwnd, pos_str, title=main_title):
+                moved += 1
+            break
+
+    # 2. 依次安全移动从属小窗口
+    for child in family.get("children", []):
+        c_title = child["title"]
+        c_hwnd = child["hwnd"]
+        for cfg_title, raw_pos in mapping.items():
+            pos_str = str(raw_pos).split('|')[0].strip()
+            if cfg_title in c_title or c_title in cfg_title:
+                if set_window_hwnd_pos(c_hwnd, pos_str, title=c_title):
+                    moved += 1
+                break
+
+    return True, moved, f"已整体对齐 '{main_title}' 及其名下 {len(family.get('children', []))} 个附属小窗口"
+
+
 def set_window_hwnd_pos(hwnd, pos_str: str, title: str = ""):
     """
     通过 'x,y,width,height' 格式的字符串直接设置指定句柄的窗口位置与大小。
     执行前先判断是否最大化/全屏/最小化，自动取消并还原后再执行精准坐标与尺寸设定。
+    针对通达信等交易软件附属浮窗（如上证指数999999），智能启用专用安全通道：
+      - 禁用破坏性的 SW_RESTORE，防止触发通达信版面内部 Dock 吸附拉伸；
+      - 移除 SWP_FRAMECHANGED，避免触发非客户区重绘重排；
+      - 内置两阶段防拉伸异常尺寸纠偏（Anti-Stretch Guard）。
     针对跨显示器 (高分屏 -> 普分屏/三星显示器等) 引起的 WM_DPICHANGED 尺寸二次缩放，
     内置两阶段 (Two-Pass) 几何自适应补偿校准，确保一次应用 100% 准确到位，无需执行第二次。
     """
@@ -841,30 +1016,61 @@ def set_window_hwnd_pos(hwnd, pos_str: str, title: str = ""):
             # 仅对专属磁吸折叠窗口做反向纠偏；常规日常软件直接按精准坐标设定
             x, y, width, height = normalize_docked_window_rect(x, y, width, height, title=title)
 
-            # 🛡️ 核心防失效：若窗口处于全屏、最大化或最小化，先强制取消并还原为普通窗口
-            cancel_window_maximized_or_fullscreen(hwnd)
+            # 🛡️ 智能检测宿主关系：区分独立程序与从属对话框浮窗
+            host_rel = get_window_host_relation(hwnd)
+            is_sub_win = host_rel.get("is_sub_window", False)
 
-            # 一次性原子设定窗口坐标与大小，并触发系统刷新重绘
-            flags = SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED | SWP_SHOWWINDOW
-            success = bool(user32.SetWindowPos(hwnd, 0, x, y, width, height, flags))
+            if not is_sub_win:
+                # 独立主程序窗口：若处于全屏、最大化或最小化，先强制取消并还原为普通窗口
+                cancel_window_maximized_or_fullscreen(hwnd)
+                flags = SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED | SWP_SHOWWINDOW
+            else:
+                # 附属浮窗（如通达信联动小窗）：禁止无差别 SW_RESTORE，避免 SWP_FRAMECHANGED 诱发自动 Docking 拉伸
+                if user32.IsIconic(hwnd):
+                    user32.ShowWindow(hwnd, 9) # SW_RESTORE 仅在明确最小化时还原
+                flags = SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW
 
-            # 🛡️ 跨屏/跨 DPI 二次补偿校准 (彻底解决高分屏迁移到普分屏时的 WM_DPICHANGED 尺寸截断)
-            # 给 DWM 与 Win32 消息队列 40ms 处理跨屏 DPI 上下文切换
-            time.sleep(0.04)
-            cur_l, cur_t, cur_w, cur_h = get_window_rect(hwnd)
-            
-            # 若尺寸或坐标在跨屏后被 Windows DPI 回调篡改 (差值超过 4px) 或仍处于最大化
-            need_reapply = False
-            if user32.IsZoomed(hwnd):
-                user32.ShowWindow(hwnd, SW_RESTORE)
-                need_reapply = True
-            elif abs(cur_w - width) > 4 or abs(cur_h - height) > 4 or abs(cur_l - x) > 4 or abs(cur_t - y) > 4:
-                need_reapply = True
+            # 🛡️ 消除跨进程 DPI 虚拟化除以 2 的截断缺陷：临时切换至目标窗口的原生 DPI 上下文
+            target_dpi_ctx = None
+            old_dpi_ctx = None
+            try:
+                if hasattr(user32, 'GetWindowDpiAwarenessContext') and hasattr(user32, 'SetThreadDpiAwarenessContext'):
+                    target_dpi_ctx = user32.GetWindowDpiAwarenessContext(hwnd)
+                    if target_dpi_ctx:
+                        old_dpi_ctx = user32.SetThreadDpiAwarenessContext(target_dpi_ctx)
+            except Exception:
+                pass
 
-            if need_reapply:
-                user32.SetWindowPos(hwnd, 0, x, y, width, height, flags)
+            try:
+                # 一次性原子设定窗口坐标与大小，并触发系统刷新重绘
+                success = bool(user32.SetWindowPos(hwnd, 0, x, y, width, height, flags))
 
-            return success
+                # 🛡️ 跨屏/跨 DPI 二次补偿校准与防拉伸保护 (Anti-Stretch Guard)
+                # 给 DWM 与 Win32 消息队列 40ms 处理跨屏 DPI 上下文切换
+                time.sleep(0.04)
+                cur_l, cur_t, cur_w, cur_h = get_window_rect(hwnd)
+                
+                # 若尺寸或坐标在跨屏后被 Windows DPI 回调篡改 (差值超过 4px) 或仍处于最大化
+                need_reapply = False
+                if not is_sub_win and user32.IsZoomed(hwnd):
+                    user32.ShowWindow(hwnd, SW_RESTORE)
+                    need_reapply = True
+                elif is_sub_win and (cur_w > width * 1.3 or (cur_w > 1200 and width < 600)):
+                    # 🛡️ 核心防拉伸保护：若附属浮窗被宿主 Dock 引擎横向拉长为版面长条，强制纠偏压回配置尺寸
+                    need_reapply = True
+                elif abs(cur_w - width) > 4 or abs(cur_h - height) > 4 or abs(cur_l - x) > 4 or abs(cur_t - y) > 4:
+                    need_reapply = True
+
+                if need_reapply:
+                    user32.SetWindowPos(hwnd, 0, x, y, width, height, flags)
+
+                return success
+            finally:
+                if target_dpi_ctx and old_dpi_ctx:
+                    try:
+                        user32.SetThreadDpiAwarenessContext(old_dpi_ctx)
+                    except Exception:
+                        pass
     except Exception as e:
         print(f"Error setting window pos for HWND {hwnd}: {e}")
     return False
