@@ -1068,7 +1068,7 @@ class AlertNotifier(QObject if HAS_PYQT else object):
         title = f"⭐ 黄金特异信号{source_label}: {name} ({code_str})"
         message = f"【打分】: {score:.1f}分 | 【胜率】: {win_rate}\n【逻辑】: {reason}"
 
-        logger.info(f"📢 [ALERT_NOTIFY] 串行轮播弹出信号 [{name} | {code_str}]{source_label}: {reason}")
+        logger.info(f"📢 [ALERT_NOTIFY] 串行轮播弹出信号 [{name} | {code_str} ]{source_label}: {reason}")
 
         # 1. 弹出右下角 Toast 卡片 (受 is_toast_enabled 控制)
         toast_success = False

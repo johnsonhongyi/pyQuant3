@@ -5412,6 +5412,14 @@ class ATSMainWindow(QMainWindow):
             qss = re.sub(r'font-size:\s*\d+(\.\d+)?pt;', f'font-size: {size}pt;', qss)
             self.setStyleSheet(qss)
             
+            # 🛡️【全局 ToolTip 色彩保真】同步确保全局 QApplication 的 ToolTip 调色板为高对比冰白字与暗黑底
+            if app:
+                from PyQt6.QtGui import QPalette, QColor
+                pal = app.palette()
+                pal.setColor(QPalette.ColorRole.ToolTipBase, QColor("#1a1a24"))
+                pal.setColor(QPalette.ColorRole.ToolTipText, QColor("#f1f5f9"))
+                app.setPalette(pal)
+            
             # Force restore column widths for all tables/trees with persistent headers
             for table in self.findChildren(QTableView):
                 if hasattr(table, "restore_header_state"):

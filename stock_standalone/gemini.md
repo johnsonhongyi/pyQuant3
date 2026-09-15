@@ -1,3 +1,25 @@
+## 2026-09-15 10:25
+- [x] **【彻底解决 QToolTip 提示文字变黑看不清 & 东方财富新股解禁日历无线重试刷屏 Bug】(SSOT) (`ats/ui/styles.py`, `ats/ui/main_window.py`, `ats/main_ats.py`, `ats/new_stock_fetcher.py`, `config/new_stock_lift_calendar.json`, `tests/test_tooltip_and_lift_calendar_sync.py`)**：
+    - [x] **操盘手反馈痛点与根因排查 (抓出真凶)**：
+        1. **“提示文字的颜色谁让你变的,原来的配色没有问题,全被变黑什么都看不到”**（附图1图2）：
+           - **视觉痛点**：资金买点类型、分段评估、指标等单元格鼠标悬停弹出的 ToolTip 提示框，文字全变成了黑灰色，在深色底色上彻底无法辨识；
+           - **致命根因**：`DARK_THEME_QSS` 中此前缺少对 `QToolTip` 的显式 QSS 规则定义；Qt6 在 Windows 平台下，顶层系统提示窗口 `QToolTip` 默认使用 Windows 系统调色板的 `ToolTipText`（浅色系统下为纯黑色 `#000000`），导致深色背景上绘制纯黑字，形成视觉灾难；
+        2. **“东方财富解禁日历新股次新股数据同步一次就可以了为何无线的重试... 这是不被封不开心么”**：
+           - **运行痛点**：日志每 10 秒死循环打印一次 `✅ 东方财富新股限售解禁日历同步完成: 现存共 114 条记录 (本次更新/覆盖: 0)`，持续频繁请求东财数据中心，极度容易导致操盘手 IP 被东财风控封禁；
+           - **致命根因**：`fetch_restricted_release_calendar` 防频控检测基于 `not self._cached_lift_dict[c].get("lift_stage")`。市场中有 7 只刚上市新股（`601091, 301686, 920201, 301716, 920229, 001246, 920025`）在东财端尚无未来解禁披露（接口返回空）；而此前兜底逻辑包含 `if c not in self._cached_lift_dict:`，但这 7 只标的已在字典中（仅缺少 `lift_stage`），导致兜底逻辑被跳过，字典中永远缺失 `lift_stage`，引发每次定时器轮询都判定为 missing 从而死循环向东财发 HTTP 请求！
+    - [x] **系统级工程落地与架构加固**：
+        1. **QToolTip 高对比暗黑金融质感全局保真**：
+           - 在 `DARK_THEME_QSS` 中注入标准的 `QToolTip` 样式（深灰黑微光背景 `#1a1a24`，高亮冰白文字 `#f1f5f9`，极细立体边框 `#3e3e4a`，圆角 4px，padding 6px 8px）；
+           - 在 `apply_dark_theme`、`apply_qss_with_font_size` 以及 `main_ats.py` 启动入口中，向全局 `QApplication.palette` 强制写入 `ToolTipBase = #1a1a24` 与 `ToolTipText = #f1f5f9`，双重彻底锁定，杜绝任何 Windows 浅色原生黑字污染；
+        2. **东方财富解禁日历单次同步铁律与绝对防封保护**：
+           - 重构防频控逻辑：解禁日历作为低频数据，当日或 6 小时内只要已同步过且代码集合均在本地日历字典中，直接返回复用本地缓存；绝对禁止盘中每 5~10 秒重复打东财网络接口；
+           - 修复兜底补齐：对东财无解禁计划的标的，强制赋予 `lift_stage = "--"` 与 `lift_batch_desc = "--"` 占位符，杜绝因缺字段引发死循环判定；
+           - 原地清洗修复持久化文件 `config/new_stock_lift_calendar.json`，补齐 7 只标的的缺省字段。
+    - [x] **自动化测试 100% 全绿**：
+        1. 专项新增 `tests/test_tooltip_and_lift_calendar_sync.py`: 2/2 PASSED（涵盖 QToolTip QSS 规则检测、全局 Palette 明亮冰白字断言、解禁日历二次调用 0 网络请求与极速缓存复用断言）；
+        2. 回归测试 `tests/test_new_stock_lift_release.py`: 3/3 PASSED；
+        3. 回归测试 `tests/test_favorites_and_styles.py`: 4/4 PASSED。
+
 ## 2026-09-15 09:38
 - [x] **【彻底根除 ATS 冷启动非资金主线 Tab 布局变形 Bug & 严格锁定顶部所有 Tab 统一视口尺寸不能被改变】(SSOT) (`ats/ui/main_window.py`, `tests/test_startup_layout_and_tab_unified_sizes.py`)**：
     - [x] **操盘手反馈痛点与根因排查 (抓出真凶)**：

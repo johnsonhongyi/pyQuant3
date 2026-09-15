@@ -167,6 +167,17 @@ QStatusBar {
     color: #ff9900;
     font-weight: bold;
 }
+
+/* ToolTip Styling (高对比暗黑金融质感，防 Windows 原生黑字看不清) */
+QToolTip {
+    background-color: #1a1a24;
+    color: #f1f5f9;
+    border: 1px solid #3e3e4a;
+    border-radius: 4px;
+    padding: 6px 8px;
+    font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+    font-size: 9pt;
+}
 """
 
 COLOR_UP = "#ff4444"       # A-Share Up (Red)
@@ -562,6 +573,17 @@ def apply_dark_theme(widget):
     """为指定 Widget/Dialog 应用与 ATS 100% 绝对一致的极致暗黑高质主题 QSS"""
     if widget:
         widget.setStyleSheet(DARK_THEME_QSS)
+        try:
+            from PyQt6.QtWidgets import QApplication
+            from PyQt6.QtGui import QPalette, QColor
+            app = QApplication.instance()
+            if app:
+                pal = app.palette()
+                pal.setColor(QPalette.ColorRole.ToolTipBase, QColor("#1a1a24"))
+                pal.setColor(QPalette.ColorRole.ToolTipText, QColor("#f1f5f9"))
+                app.setPalette(pal)
+        except Exception:
+            pass
 
 
 def setup_header_persistence(table_or_tree, config_key, default_widths=None, max_widths=None):
