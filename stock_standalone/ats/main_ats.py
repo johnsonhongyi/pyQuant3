@@ -50,6 +50,14 @@ def main():
 
     app = QApplication(sys.argv)
     app.setApplicationName("ATS Autonomous Trading Terminal")
+    try:
+        from PyQt6.QtGui import QPalette, QColor
+        pal = app.palette()
+        pal.setColor(QPalette.ColorRole.ToolTipBase, QColor("#1a1a24"))
+        pal.setColor(QPalette.ColorRole.ToolTipText, QColor("#f1f5f9"))
+        app.setPalette(pal)
+    except Exception:
+        pass
     mark_checkpoint("02. QApplication Bootstrap")
     
     window = ATSMainWindow()

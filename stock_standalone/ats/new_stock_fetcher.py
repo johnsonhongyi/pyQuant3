@@ -219,9 +219,9 @@ class NewStockFetcher:
         now = time.time()
         today_str = datetime.date.today().strftime("%Y-%m-%d")
 
-        # 6小时防频控：非强制刷新且本地已有缓存时，若均包含 lift_stage 则直接返回已有缓存
+        # 6小时防频控：非强制刷新且本地已有缓存时，若全部标的均已在日历字典中，直接返回复用，杜绝高频请求被封 IP
         if not force and self._cached_lift_dict and (now - self._last_lift_fetch_time < 6 * 3600):
-            missing_codes = [c for c in codes if c not in self._cached_lift_dict or not self._cached_lift_dict[c].get("lift_stage")]
+            missing_codes = [c for c in codes if c not in self._cached_lift_dict]
             if not missing_codes:
                 return self._cached_lift_dict
 
@@ -324,17 +324,18 @@ class NewStockFetcher:
             except Exception as ex:
                 logger.debug(f"批量拉取限售解禁日历异常 (chunk {i}~{i+batch_size}): {ex}")
 
-        # 对于查询后东财暂无解禁记录的标的，标记兜底占位
+        # 对于查询后东财暂无解禁记录的标的，标记或补齐兜底占位
         for c in target_codes:
-            if c not in self._cached_lift_dict:
+            existing = self._cached_lift_dict.get(c)
+            if not existing or not existing.get("lift_stage"):
                 self._cached_lift_dict[c] = {
                     "code": c,
-                    "lift_date": "-",
-                    "lift_shares": 0.0,
-                    "lift_ratio": 0.0,
-                    "lift_type": "",
-                    "lift_batch_idx": 0,
-                    "lift_batch_total": 0,
+                    "lift_date": existing.get("lift_date", "-") if existing else "-",
+                    "lift_shares": existing.get("lift_shares", 0.0) if existing else 0.0,
+                    "lift_ratio": existing.get("lift_ratio", 0.0) if existing else 0.0,
+                    "lift_type": existing.get("lift_type", "") if existing else "",
+                    "lift_batch_idx": existing.get("lift_batch_idx", 0) if existing else 0,
+                    "lift_batch_total": existing.get("lift_batch_total", 0) if existing else 0,
                     "lift_stage": "--",
                     "lift_batch_desc": "--",
                 }
