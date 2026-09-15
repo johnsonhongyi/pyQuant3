@@ -425,53 +425,60 @@ class SafeHDFStore(pd.HDFStore):
             while True:
                 # 检查锁文件是否存在
                 if os.path.exists(self._lock):
-                    with open(self._lock, "r") as f:
-                        content = f.read().strip()
-                    pid_str, ts_str = (content.split("|") + ["0", "0"])[:2]
-                    pid = int(pid_str) if pid_str.isdigit() else -1
-                    ts = float(ts_str) if ts_str.replace(".", "", 1).isdigit() else 0.0
+                    try:
+                        with open(self._lock, "r") as f:
+                            content = f.read().strip()
+                        pid_str, ts_str = (content.split("|") + ["0", "0"])[:2]
+                        pid = int(pid_str) if pid_str.isdigit() else -1
+                        ts = float(ts_str) if ts_str.replace(".", "", 1).isdigit() else 0.0
+                    except Exception:
+                        pid, ts = -1, 0.0
+
                     elapsed = time.time() - ts
                     total_wait = time.time() - self.start_time
-                    pid_alive = psutil.pid_exists(pid)
+                    pid_alive = psutil.pid_exists(pid) if pid > 0 else False
 
                     if pid == my_pid:
-                        # 自己持有锁，直接清理并重建锁
-                        self.log.info(f"[Lock] 超时自解锁 (pid={pid}) (my_pid:{my_pid}), removing and reacquiring")
+                        # 🛡️ [RE-ENTRANT] 本进程已持有锁（重入保护）：直接续期时间戳并成功获取，绝不可自我摧毁锁
                         try:
-                            os.remove(self._lock)
-                        except Exception as e:
-                            self.log.error(f"[Lock] failed to remove self lock: {e}")
-                        continue
+                            with open(self._lock, "w") as f:
+                                f.write(f"{my_pid}|{time.time()}")
+                        except Exception:
+                            pass
+                        return True
 
                     if not pid_alive or elapsed > self.lock_timeout or total_wait > self.max_wait:
-                        # 锁超时或持有锁进程不存在，可以删除锁
-                        self.log.warning(f"[Lock] 强制解超时锁 pid={pid} (my_pid:{my_pid}), removing {self._lock}")
-                        try:
-                            os.remove(self._lock)
-                        except Exception as e:
-                            self.log.error(f"[Lock] 强制解超时锁 失败: {e}")
+                        # 锁超时或持有锁进程不存在，安全清理僵尸锁
+                        self.log.warning(f"[Lock] 安全清理超时僵尸锁 pid={pid} (my_pid:{my_pid}, alive={pid_alive}, elapsed={elapsed:.1f}s)")
+                        for _ in range(5):
+                            try:
+                                if os.path.exists(self._lock):
+                                    os.remove(self._lock)
+                                break
+                            except Exception:
+                                time.sleep(0.02)
                         continue
 
                     # 其他进程持有锁，等待
                     retries += 1
-                    if retries % 3 == 0:
-                        self.log.info(f"[Lock] 重试:{retries} 等待 进程锁, pid={pid},(my_pid:{my_pid}), alive={pid_alive}, elapsed={elapsed:.1f}s, total_wait={total_wait:.1f}s")
+                    if retries % 10 == 0:
+                        self.log.debug(f"[Lock] 等待进程锁 pid={pid}, my_pid={my_pid}, alive={pid_alive}, elapsed={elapsed:.1f}s, wait={total_wait:.1f}s")
                     time.sleep(self.probe_interval)
 
                 else:
-                    # 创建锁文件
+                    # 创建锁文件（以独占排他模式创建，防止两进程并发无锁创建碰撞）
                     try:
-                        with open(self._lock, "w") as f:
+                        with open(self._lock, "x") as f:
                             f.write(f"{my_pid}|{time.time()}")
-                        self.log.info(f"[Lock] 创建锁文件 {self._lock} by pid={my_pid}")
+                        self.log.debug(f"[Lock] 创建锁文件 {self._lock} by pid={my_pid}")
                         return True
-                    except Exception as e:
-                        self.log.error(f"[Lock] 创建锁文件 失败: {e}")
+                    except (FileExistsError, OSError) as e:
+                        self.log.debug(f"[Lock] 创建锁冲突重试: {e}")
                         time.sleep(self.probe_interval)
         except Exception as e:
-                self.log.warning(f"[Lock] KeyboardInterrupt during lock acquire, releasing lock:{e}")
-                self._release_lock()
-                raise
+            self.log.warning(f"[Lock] 异常退出，安全释放锁: {e}")
+            self._release_lock()
+            raise
 
     def _forced_unlock(self):
         my_pid = os.getpid()
@@ -520,59 +527,84 @@ class SafeHDFStore(pd.HDFStore):
 
     def _wait_for_lock(self):
         """读取模式等待锁释放"""
-        # start_time = time.time()
-        while os.path.exists(self._lock):
-            try:
-                with open(self._lock, "r") as f:
-                    pid_str, ts_str = f.read().strip().split("|")
-                    lock_pid = int(pid_str)
-                    ts = float(ts_str)
-            except Exception:
-                lock_pid = None
-                ts = 0
-            elapsed = time.time() - ts
-            total_wait = time.time() - self.start_time
-            if elapsed > self.lock_timeout: 
-                self._forced_unlock()
-            self.log.info(f"[{self.my_pid}] Waiting for lock held by pid={lock_pid}, elapsed={elapsed:.1f}s total_wait={total_wait:.1f}s")
-            time.sleep(self.probe_interval)
+        with timed_ctx("_wait_for_lock"):
+            while os.path.exists(self._lock):
+                try:
+                    with open(self._lock, "r") as f:
+                        content = f.read().strip()
+                    pid_str, ts_str = (content.split("|") + ["0", "0"])[:2]
+                    lock_pid = int(pid_str) if pid_str.isdigit() else -1
+                    ts = float(ts_str) if ts_str.replace(".", "", 1).isdigit() else 0.0
+                except Exception:
+                    lock_pid = -1
+                    ts = 0.0
+
+                elapsed = time.time() - ts
+                total_wait = time.time() - self.start_time
+                pid_alive = psutil.pid_exists(lock_pid) if lock_pid > 0 else False
+
+                # 🛡️ 异常防御：若持有锁进程已死、锁已超时或总等待超时，清理僵尸锁并打破等待，绝不死循环
+                if not pid_alive or elapsed > self.lock_timeout or total_wait > self.max_wait:
+                    self.log.warning(f"[Lock] 读模式检测到僵尸锁/超时锁 pid={lock_pid} (alive={pid_alive}, elapsed={elapsed:.1f}s, wait={total_wait:.1f}s)，执行安全清理")
+                    for _ in range(5):
+                        try:
+                            if os.path.exists(self._lock):
+                                os.remove(self._lock)
+                            break
+                        except Exception:
+                            time.sleep(0.02)
+                    break
+
+                self.log.debug(f"[{self.my_pid}] Waiting for lock held by pid={lock_pid}, elapsed={elapsed:.1f}s total_wait={total_wait:.1f}s")
+                time.sleep(self.probe_interval)
 
     def _release_lock(self):
         if os.path.exists(self._lock):
+            my_pid = self.my_pid
+            # 🛡️ Windows 高并发防占用微重试删除（重试 5 次，彻底杜绝 WinError 32 僵尸锁残留）
+            for r in range(5):
+                try:
+                    if not os.path.exists(self._lock):
+                        break
+                    with open(self._lock, "r") as f:
+                        content = f.read().strip()
+                    pid_str = content.split("|")[0] if content else "-1"
+                    pid_in_lock = int(pid_str) if pid_str.isdigit() else -1
+
+                    if pid_in_lock == my_pid or pid_in_lock == -1:
+                        os.remove(self._lock)
+                        self.log.debug(f"[{my_pid}] Lock released: {self._lock}")
+                    break
+                except (PermissionError, OSError):
+                    # Windows 文件句柄竞争退避，稍等 20ms 重试
+                    time.sleep(0.02)
+                except Exception as e:
+                    self.log.error(f"[{my_pid}] Failed to release lock: {e}")
+                    break
+
+    def close(self, release_lock=None):
+        """关闭 HDFStore 并释放锁"""
+        if release_lock is None:
+            # 读模式默认不释放锁，写模式默认释放锁
+            release_lock = (self.mode != 'r')
+        with _HDF_GLOBAL_LOCK:
             try:
-                with open(self._lock, "r") as f:
-                    pid_in_lock = int(f.read().split("|")[0])
-                if pid_in_lock == self.my_pid:
-                    os.remove(self._lock)
-                    self.log.info(f"[{self.my_pid}] Lock released: {self._lock}")
+                if hasattr(self, '_handle') and self._handle is not None:
+                    super().close()
             except Exception as e:
-                self.log.error(f"[{self.my_pid}] Failed to release lock: {e}")
-
-    # def release_lock(self):
-    #     """关闭 store 时释放自己持有的锁"""
-    #     my_pid = os.getpid()
-    #     if os.path.exists(self._lock):
-    #         try:
-    #             with open(self._lock, "r") as f:
-    #                 pid_str, _ = f.read().split("|")
-    #                 if int(pid_str) == my_pid:
-    #                     os.remove(self._lock)
-    #                     self.log.info(f"[Lock] released lock {self._lock} by pid={my_pid}")
-    #         except Exception as e:
-    #             self.log.error(f"[Lock] failed to release lock {self._lock}: {e}")
-
-    def close(self):
-        super().close()
-        # self._release_lock()
+                self.log.error(f"[{self.my_pid}] super().close() failed: {e}")
+            finally:
+                if release_lock and self.mode != 'r':
+                    self._release_lock()
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        if self.write_status:
+        if self.mode != 'r':
             try:
-                self.close()
-                super().__exit__(exc_type, exc_val, exc_tb)
-                if self.mode != 'r':
+                self.close(release_lock=False)
+                # super().__exit__ is omitted because it calls self.close() with release_lock=True
+                h5_size = int(os.path.getsize(self.fname) / 1e6)
+                if h5_size > 10:
                     # ===== 压缩逻辑 =====
-                    h5_size = int(os.path.getsize(self.fname) / 1e6)
                     h5_size_limit =  h5_size*2 if h5_size > 10 else 10
                     if self.fname_o.find('tdx_all_df') >= 0 or self.fname_o.find('sina_MultiIndex_data') >= 0:
                         h5_size = 40 if h5_size < 40 else h5_size
@@ -582,10 +614,7 @@ class SafeHDFStore(pd.HDFStore):
                         
                     read_ini_limit = cct.get_config_value(self.config_ini,self.fname_o,read=True)
                     self.log.info(f"fname: {self.fname} h5_size: {h5_size} big_limit: {self.big_H5_Size_limit} conf:{read_ini_limit}")
-                    # if (read_ini_limit is  None and h5_size > self.big_H5_Size_limit) or cct.get_config_value(self.config_ini, self.fname_o, h5_size, new_limit):
                     if cct.get_config_value(self.config_ini, self.fname_o, h5_size, new_limit):
-                        if self.mode == 'r':
-                            self._acquire_lock()
                         if os.path.exists(self.fname) and os.path.exists(self.temp_file):
                             log.error(f"Remove tmp file exists: {self.temp_file}")
                             os.remove(self.temp_file)
@@ -613,12 +642,11 @@ class SafeHDFStore(pd.HDFStore):
                         if cct.get_os_system() != 'mac':
                             os.chdir(back_path)
             finally:
-                time.sleep(0.1)
                 self._release_lock()
                 self.log.info(f'clean:{self.fname}')
         else:
-            self.close()
-            super().__exit__(exc_type, exc_val, exc_tb)
+            # 🛡️ 读模式：只关闭句柄释放 Windows 句柄锁，绝不触碰写锁，绝不 sleep 0.1s 阻塞主线程
+            self.close(release_lock=False)
 # class SafeHDFStore_lastOne(HDFStore):
 #     def __init__(self, fname, mode='r', **kwargs):
        
