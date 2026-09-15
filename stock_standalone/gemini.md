@@ -1,3 +1,31 @@
+## 2026-09-15 12:12
+- [x] **【全面审查（/review）HDF5 并发锁完备性：根治空锁文件 17.89 亿秒溢出误删、__init__ 孤儿锁泄漏与写全生命周期互斥】(SSOT) (`stock_standalone/JSONData/tdx_hdf5_api.py`, `stock/JSONData/tdx_hdf5_api.py`, `tests/test_safe_hdf_store_lock.py`)**：
+    - [x] **深度代码审计审查出的 4 大并发隐藏隐患 (已 100% 根除)**：
+        1. **Critical-1：空锁文件并发竞争导致 `elapsed` 溢出 17.89 亿秒与活跃排他锁被误判删除 (Empty File Race Window)**：
+           - **真凶剖析**：进程 A 以 `"x"` 创建锁文件时，在内容写入和冲刷磁盘的微秒级窗口期内，并发的进程 B 读到 `content == ""`；旧代码兜底 `pid_str, ts_str = ("".split("|") + ["0", "0"])[:2]` 解析出 `pid = -1, ts = 0.0`；
+           - 计算 `elapsed = time.time() - 0.0` 产生惊人的 **17.89 亿秒（1789445197s）**！且 `pid = -1` 被判定为“进程已死”，进程 B 误以为这是超时僵尸锁，亲手把进程 A 刚建立的活跃锁删除！导致写操作并发撞车与看门狗掐死子进程；
+        2. **Critical-2：`SafeHDFStore.__init__` 异常抛出时排他写锁残留为活进程孤儿锁 (Orphan Lock on Failed Init)**：
+           - 写模式在 `__init__` 开头获取了锁，若 5 次重试失败向外 `raise`，因未进入 `with` 块内部，`__exit__` 绝不会被调用，导致持锁 PID（当前活进程）残留在磁盘上，其他进程必须硬等 20 秒；
+        3. **Important-3：`_release_lock` 越权误删其他存活进程锁风险 (Permissive Lock Deletion)**：
+           - 原 `_release_lock` 包含 `if pid_in_lock == my_pid or pid_in_lock == -1:`，若遇空文件或解析异常，可能误删其他进程刚刚创建的锁；
+        4. **Important-4：`write_hdf_db` 阶段 1（复制与追加）脱锁裸奔引发 Windows 句柄冲突 (Copy-Replace Race Window)**：
+           - 原 `write_hdf_db` 仅在最后 `os.replace` 时持锁，而在阶段 1 `shutil.copy2` 和追加写期间未持有排他锁。并发写进程若同时进入，会导致 `shutil.copy2` 与 `os.replace` 产生 Windows 句柄独占碰撞（`WinError 32`）和写数据相互覆盖。
+    - [x] **系统级工程落地与架构加固**：
+        1. **SSOT 抽象 `_parse_lock_info(self)` 统一锁状态机 (DRY / SOLID)**：
+           - 精确分流 `exists`、`is_busy`（3秒内的新生锁/句柄独占锁，绝对禁止误删）、`is_me`（本进程锁）、`is_alive`（持有进程是否存活）、`is_stale`（已死进程或超20秒超时锁）；
+           - 彻底消除 17 亿秒计算溢出，读写等待循环对 `is_busy` 优雅退避等待；
+        2. **`SafeHDFStore.__init__` 全外层异常保护**：
+           - 获锁后用全局 `try...except` 覆盖所有打开与修复流程，一旦抛出任何致命异常，写模式 100% 确保调用 `_release_lock()` 释放锁后再向外抛出；
+        3. **严格锁定 `_release_lock` 释放权限**：
+           - 仅当 `lock_info['is_me']`（确属本进程持有的锁）时才执行 `os.remove`，绝对杜绝误删外部存活进程锁；
+        4. **`write_hdf_db` 升级为全事务排他锁保护**：
+           - 持锁时机提前至准备写入（读取/裁切/复制前），全程持有排他锁，并在 `finally` 块中统一切实释放；
+           - 本进程读探测支持 `is_me` 免等待直通，并发读写进程完全串行化排队，彻底根除 `shutil.copy2` 与 `os.replace` 句柄冲突；
+        5. **两处代码库（`stock_standalone` 与 `stock`）100% 同步加固**。
+    - [x] **自动化测试 32/32 PASSED 100% 全绿**：
+        1. `tests/test_safe_hdf_store_lock.py`: 9/9 PASSED（新增空锁防误删、父进程活跃锁防误删、`__init__` 异常释放专项测试）；
+        2. 核心回归测试套件: 23/23 PASSED。
+
 ## 2026-09-15 11:50
 - [x] **【彻底解决 HDF5 跨进程文件锁冲突 & 根除 DataWatchdog 掐死子进程导致内存缓存丢失 Bug】(SSOT) (`stock_standalone/JSONData/tdx_hdf5_api.py`, `stock/JSONData/tdx_hdf5_api.py`, `stock_standalone/ats/ui/main_window.py`, `tests/test_safe_hdf_store_lock.py`)**：
     - [x] **操盘手反馈痛点与根因溯源 (100% 证据链闭环)**：
