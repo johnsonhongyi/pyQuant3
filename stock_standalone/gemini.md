@@ -1,3 +1,37 @@
+## 2026-09-15 09:38
+- [x] **【彻底根除 ATS 冷启动非资金主线 Tab 布局变形 Bug & 严格锁定顶部所有 Tab 统一视口尺寸不能被改变】(SSOT) (`ats/ui/main_window.py`, `tests/test_startup_layout_and_tab_unified_sizes.py`)**：
+    - [x] **操盘手反馈痛点与根因排查 (抓出真凶)**：
+        1. **“当启动默认是大级别ma20d,新股次新股等打开的布局就是变形的,图1是调整好的资金主线,图2是退出时为新股次新股,冷启动打开就出现变形bug”**；
+        2. **“设定好分隔布局后,顶部的所有tab都是统一的窗口大小不能被改变.资金主线,重点关注,大级别,新股次新股都是”**；
+        3. **“只有调整好的资金主线,启动是资金主线,才正常,其他的都会变形,修复是资金主线后台导致的页面变形>?”**；
+        4. **致命根因溯源 (100% 证据链闭环，非资金主线后台问题，而是生命周期未就绪提前存盘覆写导致)**：
+           - 在 `__init__` 中调用 `_restore_layout_state()` 时，主窗口**尚未物理渲染展示**（`isVisible() is False`），总宽度仅为默认未最大化宽度（约 630px），`main_splitter` 被 Qt 压缩为 `[50, 460, 120]`；
+           - `_restore_layout_state()` 内部恢复完 splitters 后，过早释放锁 `self._is_restoring_sizes = False`；
+           - 紧接着恢复 `self.top_tabs.setCurrentIndex(int(top_index))`：
+             - 若退出时是**资金主线（Tab 0）**：因默认本来就是 0，未改变 index，不触发 `currentChanged`，磁盘配置安全；
+             - 若退出时是**重点关注（Tab 1）**、**大级别MA20d（Tab 2）**、**新股次新股（Tab 3）**：index 改变立即同步触发 `_on_top_tab_changed`；因 `_is_restoring_sizes` 已被释放，立刻调用 `_save_layout_state()`，**将 630px 下未就绪的半成品垃圾尺寸 `[50, 460, 120]` 瞬间覆写进磁盘**；
+           - 随后窗口调用 `showMaximized()`，`showEvent` 从磁盘读出的正是被污染的 `[50, 460, 120]`；加上 `stretchFactor(0, 1, 0)`，所有新增宽度全给中间，导致左栏被挤压为 50px（细缝）、右栏被挤压为 120px（截断），中间撑大为 1498px 的严重变形！
+    - [x] **系统级工程落地与架构加固**：
+        1. **主分割布局权威统一与绝对锁定 (`_unified_splitter_sizes`)**：
+           - 主窗口维护权威标准尺寸 SSOT（以 `[239, 1207, 222]` 为基准），在任何 Tab 切换（`_on_top_tab_changed`）时，强制应用 `main_splitter.setSizes(self._unified_splitter_sizes)`；
+           - 无论在资金主线、重点关注、大级别MA20d、新股次新股之间任意切换，中间面板视口大小与左右栏完全统一锁定，绝对不能被改变！
+           - Tab 切换仅轻量原子保存 Tab 索引，严禁触发全量 Splitter 尺寸写盘；
+        2. **物理级硬性防挤压底线防御 (Hard Minimum Limit)**：
+           - 左侧股票池（`universe_widget`）设置硬性 `setMinimumWidth(180)`；
+           - 右侧行业板块与分布（`right_widget`）设置硬性 `setMinimumWidth(180)`；
+           - 中间主看板设置硬性 `setMinimumWidth(400)`，彻底杜绝任何异常情况下左右栏被压成 50px/120px 细缝；
+        3. **启动恢复期穿透保护锁 (Startup Shielding)**：
+           - 全局 `self._is_restoring_sizes = True` 贯穿整个初始化及 `_restore_layout_state`，直至 `showEvent` 延迟 80ms 在全屏真实渲染就绪后再对齐并安全释放；
+        4. **`_save_layout_state()` 铁律防御门禁**：
+           - 增加 `not self.isVisible()`、`self.isMinimized()`、`sum(sizes) < 600`、`sizes[0] < 120` 或 `sizes[2] < 120` 严格拦截，严防未展开或异常挤压数据污染磁盘配置；
+        5. **存量异常配置物理修复**：
+           - 修复 `window_config.json`，清除畸变 state，恢复健康标准比例 `[239, 1207, 222]`。
+    - [x] **自动化测试 100% 全绿**：
+        1. 专项新增 `tests/test_startup_layout_and_tab_unified_sizes.py`: 1/1 PASSED（涵盖 Tab 0/1/2/3 四大模式冷启动防变形测试与连续切换尺寸统一断言）；
+        2. `tests/test_ats_tabs_strategy_filter.py`: 7/7 PASSED；
+        3. `tests/test_history_slice_and_auction_reversal.py`: 6/6 PASSED；
+        4. `tests/test_sector_miner_and_distribution_strategy_filter.py`: 8/8 PASSED。
+
 ## 2026-09-14 22:38
 - [x] **【重排切片悬浮条控件顺序：日历按键前置，左右箭头相邻连击防误触】(SSOT) (`trade_visualizer_qt6.py`, `tests/test_history_slice_and_auction_reversal.py`)**：
     - [x] **操盘手反馈痛点与操作体验穿透**：

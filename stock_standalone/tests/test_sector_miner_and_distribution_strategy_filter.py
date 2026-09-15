@@ -270,6 +270,8 @@ def test_hot_sector_leaderboard_strategy_filter(qapp, sample_test_df):
         dlg.current_top_sectors = ['煤化工概念']
         dlg.active_sectors = {'煤化工概念'}
         dlg.cached_results = test_results
+        if hasattr(dlg, 'combo_time_slice'):
+            dlg.combo_time_slice.setCurrentText("⏱️ 全天全时段")
         dlg._render_table_data(test_results)
 
         # 默认关闭时，2只股票全部呈现，过滤标签为空
