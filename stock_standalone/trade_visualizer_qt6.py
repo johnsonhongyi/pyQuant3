@@ -1189,7 +1189,7 @@ class DataLoaderThread(QThread):
                 for attempt in range(3):
                     if self._is_interrupted: return # ⭐ 循环内检查
                     try:
-                        with timed_ctx(f"get_tdx_Exp_day_to_df_att{attempt} {self.code}", warn_ms=300):
+                        with timed_ctx(f"get_tdx_Exp_day_to_df_att{attempt} {self.code}", warn_ms=800):
                             day_df = tdd.get_tdx_Exp_day_to_df(
                                 self.code, 
                                 dl=Resample_LABELS_Days[self.resample], 
@@ -14120,7 +14120,7 @@ class MainWindow(QMainWindow, WindowMixin):
                 self.all_today_sbc_signals = cached_sbc[1]
                 # logger.debug(f"[PERF] SBC Static Cache HIT for {code}")
             else:
-                with timed_ctx("sbc_core_analysis", warn_ms=200):
+                with timed_ctx("sbc_core_analysis", warn_ms=600):
                     try:
                         # run_sbc_analysis_core 内部会自动处理 tick_df 叠加
                         sbc_results = sbc_core.run_sbc_analysis_core(
