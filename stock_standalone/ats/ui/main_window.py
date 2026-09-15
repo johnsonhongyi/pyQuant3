@@ -1919,10 +1919,12 @@ class ATSMainWindow(QMainWindow):
         self._batch_history_timer.timeout.connect(self._flush_batch_stock_history)
         
         # Initialize ratios for equal proportional scaling
+        # Initialize ratios for equal proportional scaling
         self._main_ratio = [0.24, 0.49, 0.27]
         self._center_ratio = [0.5, 0.5]
         self._right_ratio = [0.5, 0.5]
-        self._is_restoring_sizes = False
+        self._is_restoring_sizes = True  # 启动初始化与渲染对齐期间全局加锁，严禁过早写盘
+        self._unified_splitter_sizes = [239, 1207, 222]  # 所有 Tab 统一锁定的权威主分割尺寸 (SSOT)
         
         # Connect thread-safe PyQt signals
         self.realtime_data_signal.connect(self._handle_realtime_data)
@@ -2350,15 +2352,15 @@ class ATSMainWindow(QMainWindow):
         self.main_splitter = QSplitter(Qt.Orientation.Horizontal)
         self.setCentralWidget(self.main_splitter)
 
-        # 1. Left panel: Universe Tree (Width: 350)
+        # 1. Left panel: Universe Tree (Width: 350, 物理级最小宽度 180px 防挤压)
         self.universe_widget = UniverseTreeWidget()
-        self.universe_widget.setMinimumWidth(0)
+        self.universe_widget.setMinimumWidth(180)
         self.main_splitter.addWidget(self.universe_widget)
         mark_checkpoint("03.3.1 Left UniverseTreeWidget")
 
-        # 2. Center panel: Swing Table & Trading Tabs (Width: 700)
+        # 2. Center panel: Swing Table & Trading Tabs (Width: 700, 物理级最小宽度 400px 防挤压)
         center_widget = QWidget()
-        center_widget.setMinimumWidth(0)
+        center_widget.setMinimumWidth(400)
         center_layout = QVBoxLayout(center_widget)
         center_layout.setContentsMargins(0, 0, 0, 0)
         center_layout.setSpacing(6)
@@ -2537,9 +2539,9 @@ class ATSMainWindow(QMainWindow):
         center_layout.addWidget(self.center_splitter)
         self.main_splitter.addWidget(center_widget)
 
-        # 3. Right panel: Heatmap & Distribution charts (Width: 390)
+        # 3. Right panel: Heatmap & Distribution charts (Width: 390, 物理级最小宽度 180px 防挤压)
         right_widget = QWidget()
-        right_widget.setMinimumWidth(0)
+        right_widget.setMinimumWidth(180)
         right_layout = QVBoxLayout(right_widget)
         right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.setSpacing(6)
@@ -2631,7 +2633,7 @@ class ATSMainWindow(QMainWindow):
         self.right_splitter.setCollapsible(0, False)
         self.right_splitter.setCollapsible(1, False)
         
-        self.main_splitter.setSizes([350, 700, 390])
+        self.main_splitter.setSizes([239, 1207, 222])
         
         # Bind splitterMoved signals to track user-adjusted resize ratios & auto save layout
         self.main_splitter.splitterMoved.connect(self._on_main_splitter_moved)
@@ -3265,10 +3267,16 @@ class ATSMainWindow(QMainWindow):
             return None
 
     def _on_top_tab_changed(self, index: int):
-        """主看板顶部 Tab 切换事件：极速 0ms 补齐渲染与同步对应 Tab 页面数据并自动持久化记忆"""
-        saved_sizes = None
+        """主看板顶部 Tab 切换事件：极速 0ms 补齐渲染，严格锁定各 Tab 统一窗口大小不能被改变，并原子持久化 Tab 索引"""
+        # 1. 严格锁定统一的主分割布局尺寸，杜绝任何 Tab 切换改变窗口大小或挤压左右面板
         if hasattr(self, 'main_splitter'):
-            saved_sizes = self.main_splitter.sizes()
+            # 若当前处于正常物理展现状态且各栏尺寸合法，更新权威统一分割尺寸
+            if self.isVisible() and not getattr(self, '_is_restoring_sizes', False):
+                cur_sizes = self.main_splitter.sizes()
+                if len(cur_sizes) == 3 and sum(cur_sizes) > 600 and cur_sizes[0] >= 150 and cur_sizes[2] >= 150:
+                    self._unified_splitter_sizes = list(cur_sizes)
+
+        target_sizes = getattr(self, '_unified_splitter_sizes', [239, 1207, 222])
 
         try:
             if index == 0:
@@ -3305,12 +3313,17 @@ class ATSMainWindow(QMainWindow):
         except Exception as e:
             logger.debug(f"[ATSMainWindow] _on_top_tab_changed error: {e}")
         finally:
-            if saved_sizes and hasattr(self, 'main_splitter') and sum(saved_sizes) > 0:
-                # 严格锁定用户调整好的左右侧垂直分割比例，防止 Tab 切换时 QSplitter 重新分配空间撑大窗口或挤压左右面板
-                self.main_splitter.setSizes(saved_sizes)
+            if target_sizes and hasattr(self, 'main_splitter') and sum(target_sizes) > 0:
+                # 强行对齐锁定权威统一分割尺寸，资金主线、重点关注、大级别、新股次新股完全统一，绝对不能被改变
+                self.main_splitter.setSizes(list(target_sizes))
 
+        # 仅原子持久化记录当前 Tab 索引，绝不触发全量未就绪的 splitter 尺寸写盘
         if not getattr(self, '_is_restoring_sizes', False):
-            self._save_layout_state()
+            try:
+                from ats.ui.styles import save_config_node
+                save_config_node("ats_top_tab_index", int(index))
+            except Exception as e:
+                logger.debug(f"[ATSMainWindow] 保存 ats_top_tab_index 异常: {e}")
 
     def _get_today_signal_codes(self):
         """归纳今日所有已发现/记录的特异与共振强势股票代码列表 (供弹窗左右导航联动)"""
@@ -5427,6 +5440,10 @@ class ATSMainWindow(QMainWindow):
     def _on_main_splitter_moved(self, pos, index):
         if getattr(self, '_is_restoring_sizes', False):
             return
+        if hasattr(self, 'main_splitter'):
+            sizes = self.main_splitter.sizes()
+            if len(sizes) == 3 and sizes[0] >= 150 and sizes[2] >= 150 and sum(sizes) > 600:
+                self._unified_splitter_sizes = list(sizes)
         self._request_save_layout_debounced()
 
     def _on_center_splitter_moved(self, pos, index):
@@ -5607,9 +5624,25 @@ class ATSMainWindow(QMainWindow):
         super().showEvent(event)
         if not getattr(self, '_layout_restored_on_show', False):
             self._layout_restored_on_show = True
-            # 延时 60ms 在窗口完成 showMaximized/物理屏幕渲染后再强行精准对齐一次物理尺寸
+            # 延时 80ms 在窗口完成 showMaximized/物理屏幕渲染后再强行精准对齐一次统一权威尺寸
             from PyQt6.QtCore import QTimer
-            QTimer.singleShot(60, self._restore_layout_state)
+            QTimer.singleShot(80, self._apply_unified_layout_on_ready)
+
+    def _apply_unified_layout_on_ready(self):
+        """窗口首轮物理展示就绪后，强制精准应用统一权威分割尺寸并释放恢复保护锁"""
+        try:
+            if hasattr(self, 'main_splitter'):
+                total_w = self.main_splitter.width()
+                u_sizes = list(getattr(self, '_unified_splitter_sizes', [239, 1207, 222]))
+                if total_w > 600 and sum(u_sizes) > 0:
+                    left_w = u_sizes[0]
+                    right_w = u_sizes[2]
+                    center_w = max(400, total_w - left_w - right_w)
+                    self.main_splitter.setSizes([left_w, center_w, right_w])
+                else:
+                    self.main_splitter.setSizes(u_sizes)
+        finally:
+            self._is_restoring_sizes = False
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -5618,6 +5651,7 @@ class ATSMainWindow(QMainWindow):
         # 绝不在此处重新计算 ratio 覆盖 setSizes，彻底防范左右栏被无谓挤压!
 
     def _restore_layout_state(self):
+        self._is_restoring_sizes = True
         try:
             import json
             import os
@@ -5636,39 +5670,37 @@ class ATSMainWindow(QMainWindow):
             if geom_hex:
                 self.restoreGeometry(QByteArray.fromHex(geom_hex.encode()))
                 
-            # 2. Restore splitters (优先使用二进制 state，降级使用像素 sizes 数组)
-            self._is_restoring_sizes = True
-            try:
-                if hasattr(self, 'main_splitter'):
-                    main_state = data.get("ats_main_splitter_state")
-                    if main_state:
-                        self.main_splitter.restoreState(QByteArray.fromHex(main_state.encode()))
+            # 2. Restore splitters (权威统一 sizes 驱动，彻底防范未渲染阶段的比例畸变)
+            if hasattr(self, 'main_splitter'):
+                main_sizes = data.get("ats_main_splitter_sizes")
+                if main_sizes and isinstance(main_sizes, list) and len(main_sizes) == 3:
+                    if main_sizes[0] >= 150 and main_sizes[2] >= 150 and sum(main_sizes) >= 600:
+                        self._unified_splitter_sizes = list(main_sizes)
                     else:
-                        main_sizes = data.get("ats_main_splitter_sizes")
-                        if main_sizes and isinstance(main_sizes, list) and len(main_sizes) == 3:
-                            self.main_splitter.setSizes(main_sizes)
-                        
-                if hasattr(self, 'center_splitter'):
+                        self._unified_splitter_sizes = [239, 1207, 222]
+                else:
+                    self._unified_splitter_sizes = [239, 1207, 222]
+                self.main_splitter.setSizes(list(self._unified_splitter_sizes))
+                
+            if hasattr(self, 'center_splitter'):
+                center_sizes = data.get("ats_center_splitter_sizes")
+                if center_sizes and isinstance(center_sizes, list) and len(center_sizes) == 2:
+                    self.center_splitter.setSizes(center_sizes)
+                else:
                     center_state = data.get("ats_center_splitter_state")
                     if center_state:
                         self.center_splitter.restoreState(QByteArray.fromHex(center_state.encode()))
-                    else:
-                        center_sizes = data.get("ats_center_splitter_sizes")
-                        if center_sizes and isinstance(center_sizes, list) and len(center_sizes) == 2:
-                            self.center_splitter.setSizes(center_sizes)
-                        
-                if hasattr(self, 'right_splitter'):
+                
+            if hasattr(self, 'right_splitter'):
+                right_sizes = data.get("ats_right_splitter_sizes")
+                if right_sizes and isinstance(right_sizes, list) and len(right_sizes) == 2:
+                    self.right_splitter.setSizes(right_sizes)
+                else:
                     right_state = data.get("ats_right_splitter_state")
                     if right_state:
                         self.right_splitter.restoreState(QByteArray.fromHex(right_state.encode()))
-                    else:
-                        right_sizes = data.get("ats_right_splitter_sizes")
-                        if right_sizes and isinstance(right_sizes, list) and len(right_sizes) == 2:
-                            self.right_splitter.setSizes(right_sizes)
-            finally:
-                self._is_restoring_sizes = False
             
-            # 3. Restore tabs active indexes
+            # 3. Restore tabs active indexes (全程在 _is_restoring_sizes = True 保护下调用，严禁非法写盘)
             if hasattr(self, 'top_tabs'):
                 top_index = data.get("ats_top_tab_index")
                 if top_index is not None and 0 <= int(top_index) < self.top_tabs.count():
@@ -5710,20 +5742,31 @@ class ATSMainWindow(QMainWindow):
                 self.set_bottom_panel_collapsed(True, save=False)
         except Exception as e:
             print(f"[ATSMainWindow] Error restoring layout state: {e}")
+        finally:
+            if self.isVisible():
+                self._is_restoring_sizes = False
 
     def _save_layout_state(self):
-        if getattr(self, '_is_restoring_sizes', False):
+        if getattr(self, '_is_restoring_sizes', False) or not self.isVisible() or self.isMinimized():
             return
+        if hasattr(self, 'main_splitter'):
+            sizes = self.main_splitter.sizes()
+            # 严格门禁：未展示全或被挤压时严禁写盘覆盖正常物理配置
+            if len(sizes) != 3 or sum(sizes) < 600 or sizes[0] < 120 or sizes[2] < 120:
+                return
         try:
             from ats.ui.styles import save_config_nodes
             updates = {}
             # Save geometry
             updates["ats_main_window_geometry"] = self.saveGeometry().toHex().data().decode()
             
-            # Save splitters (同时以二进制 State 与 像素 Sizes 两种方式精准持久化)
+            # Save splitters (统一权威 sizes 驱动落盘)
             if hasattr(self, 'main_splitter'):
                 updates["ats_main_splitter_state"] = self.main_splitter.saveState().toHex().data().decode()
-                updates["ats_main_splitter_sizes"] = self.main_splitter.sizes()
+                cur_sizes = self.main_splitter.sizes()
+                if len(cur_sizes) == 3 and cur_sizes[0] >= 150 and cur_sizes[2] >= 150:
+                    self._unified_splitter_sizes = list(cur_sizes)
+                updates["ats_main_splitter_sizes"] = list(getattr(self, '_unified_splitter_sizes', cur_sizes))
             if hasattr(self, 'center_splitter'):
                 updates["ats_center_splitter_state"] = self.center_splitter.saveState().toHex().data().decode()
                 updates["ats_center_splitter_sizes"] = self.center_splitter.sizes()
