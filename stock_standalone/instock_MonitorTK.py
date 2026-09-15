@@ -3422,7 +3422,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         today_1530 = datetime.combine(now.date(), dt.time(15, 30))
 
         if not hasattr(self, "_last_run_date"):
-            logger.info("schedule_15_30_job，开始_last_run_date...")
             self._last_run_date = None
 
         if now >= today_1530 and self._last_run_date != now.date():
@@ -3434,7 +3433,17 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 daemon=True
             ).start()
 
-        self._schedule_after(30 * 60 * 1000, self.schedule_15_30_job)
+        # 智能动态调度间隔：若当日已完成，30分钟低频检查；未到 15:30 时每 60 秒检查，临近自适应精确毫秒唤醒
+        if self._last_run_date == now.date():
+            next_interval_ms = 30 * 60 * 1000
+        else:
+            diff_sec = (today_1530 - now).total_seconds()
+            if diff_sec > 0:
+                next_interval_ms = int(min(60.0, max(1.0, diff_sec)) * 1000)
+            else:
+                next_interval_ms = 10 * 1000
+
+        self._schedule_after(next_interval_ms, self.schedule_15_30_job)
 
     def run_15_30_task(self):
         """盘后自动任务：包含离线行情存档与所有子面板的持久化。
@@ -3450,11 +3459,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             logger.info("[15:30 Task] Already running, skip.")
             return
 
-        # ── 早退守卫：今日所有任务已完成则直接跳过 ────────────────────────────
+        # ── 早退守卫：本进程今日所有 EOD 任务已完成则直接跳过 ────────────────────────────
         today = cct.get_today()
-        global write_all_day_date
-        if write_all_day_date == today:
-            logger.warning(f"[15:30 Task] skip: all EOD tasks already done for {today}")
+        if getattr(self, "_eod_completed_date", None) == today:
+            logger.warning(f"[15:30 Task] skip: all EOD tasks already completed for {today}")
             return
 
         # ── STEP 1: 准备 SectorBiddingPanel 并喂数 ──────────────────────────────
@@ -3594,20 +3602,25 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self._task_running = True
         try:
             if cct.get_trade_date_status():
-                logger.warning(f"[15:30 Task] STEP 4 ▶ Entering Write_market_all_day_mp for {today}")
-                t_start = time.time()
-                tdd.Write_market_all_day_mp('all')
-                elapsed = time.time() - t_start
-                logger.warning(f"[15:30 Task] STEP 4 ✅ Write_market_all_day_mp finished. Elapsed: {elapsed:.3f}s")
-                CFG = cct.GlobalConfig(conf_ini)
-                CFG.set_and_save("general", "write_all_day_date", today)
-                write_all_day_date = today
+                global write_all_day_date
+                if write_all_day_date == today:
+                    logger.warning(f"[15:30 Task] STEP 4 skip: Write_market_all_day_mp already done for {today}")
+                else:
+                    logger.warning(f"[15:30 Task] STEP 4 ▶ Entering Write_market_all_day_mp for {today}")
+                    t_start = time.time()
+                    tdd.Write_market_all_day_mp('all')
+                    elapsed = time.time() - t_start
+                    logger.warning(f"[15:30 Task] STEP 4 ✅ Write_market_all_day_mp finished. Elapsed: {elapsed:.3f}s")
+                    CFG = cct.GlobalConfig(conf_ini)
+                    CFG.set_and_save("general", "write_all_day_date", today)
+                    write_all_day_date = today
             else:
                 logger.info(f"[15:30 Task] STEP 4 skip: today={today} is not trade date.")
         except Exception as e_write:
             logger.error(f"[15:30 Task] STEP 4 ❌ Write_market_all_day_mp error: {e_write}\n{traceback.format_exc()}")
         finally:
             self._task_running = False
+            self._eod_completed_date = today
 
         logger.warning("[15:30 Task] ◀◀◀ run_15_30_task COMPLETED.")
 
