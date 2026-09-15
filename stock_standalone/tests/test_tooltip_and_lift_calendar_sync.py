@@ -67,6 +67,40 @@ class TestTooltipAndLiftCalendarSync(unittest.TestCase):
         self.assertLess(t2 - t1, 0.05, "二次获取必须直接命中内存缓存返回，严禁发起网络请求")
         self.assertEqual(res1, res2)
 
+    def test_03_distribution_details_dialog_tooltip_styling(self):
+        """测试 3: 验证涨跌分布个股明细窗口及表格具备显式 QToolTip 暗黑样式与高对比配色"""
+        from ats.ui.chart_widgets import DistributionDetailsDialog, DistributionBarChart
+        import pandas as pd
+
+        # 1. 验证对话框及其表格的样式表中拥有 QToolTip 暗黑高对比定义
+        dlg = DistributionDetailsDialog(bucket_idx=0)
+        self.assertIn("QToolTip", dlg.styleSheet())
+        self.assertIn("background-color: #1a1a24;", dlg.styleSheet())
+        self.assertIn("color: #f1f5f9;", dlg.styleSheet())
+        self.assertIn("QToolTip", dlg.table.styleSheet())
+        self.assertIn("background-color: #1a1a24;", dlg.table.styleSheet())
+
+        # 2. 验证数据行渲染后的 ToolTip 支持 HTML 富文本且具备高对比语义着色
+        mock_df = pd.DataFrame([
+            {
+                "code": "688120", "name": "华海清科", "percent": 8.65, "close": 255.50,
+                "volume_ratio": 2.19, "dff": -0.20, "dff2": 10.60, "dff3": 73.20, "category": "半导体"
+            }
+        ])
+        dlg.update_data(mock_df)
+        item = dlg.table.item(0, 0)
+        self.assertIsNotNone(item)
+        tip = item.toolTip()
+        self.assertIn("<div", tip)
+        self.assertIn("color: #00ffcc", tip) # 荧光青标题
+        self.assertIn("color: #94a3b8", tip) # 浅灰蓝标签
+        self.assertIn("华海清科", tip)
+
+        # 3. 验证分布柱状图部件包含 QToolTip 样式
+        chart = DistributionBarChart()
+        self.assertIn("QToolTip", chart.styleSheet())
+
 
 if __name__ == "__main__":
     unittest.main()
+

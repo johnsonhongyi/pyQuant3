@@ -26,7 +26,8 @@ from tk_gui_modules.gui_config import WINDOW_CONFIG_FILE
 from tk_gui_modules.qt_table_utils import NumericTableWidgetItem
 from ats.ui.styles import (
     bind_top_shortcut, set_seamless_stay_on_top,
-    save_config_node, load_config_node, parse_bool_config
+    save_config_node, load_config_node, parse_bool_config,
+    apply_dark_theme, DARK_THEME_QSS
 )
 from logger_utils import LoggerFactory
 from JohnsonUtil import commonTips as cct
@@ -120,7 +121,24 @@ class DistributionDetailsDialog(QDialog, WindowMixin):
         # Load window position and size
         self.load_window_position_qt(self, f"distribution_details_dialog_{bucket_idx}", default_width=750, default_height=550)
         self._is_updating = True
-        self.setStyleSheet("QDialog { background-color: #1a1e2b; color: #ffffff; }")
+        # 继承统一的 ATS 暗黑 Mode QSS 风格与高对比调色板
+        apply_dark_theme(self)
+        self.setStyleSheet(self.styleSheet() + """
+            QDialog {
+                background-color: #1a1e2b;
+                color: #ffffff;
+            }
+            /* 保证顶层窗口与子视图 QToolTip 暗黑金融微光底色与高对比文字 */
+            QToolTip {
+                background-color: #1a1a24;
+                color: #f1f5f9;
+                border: 1px solid #3e3e4a;
+                border-radius: 4px;
+                padding: 6px 8px;
+                font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+                font-size: 9pt;
+            }
+        """)
         
         # Layout
         layout = QVBoxLayout(self)
@@ -270,6 +288,16 @@ class DistributionDetailsDialog(QDialog, WindowMixin):
             }
             QScrollBar:add-page:horizontal, QScrollBar::sub-page:horizontal {
                 background: transparent;
+            }
+            /* 单元格悬浮提示 QToolTip 样式直达定义，彻底避免退回 Windows 原生白底 */
+            QToolTip {
+                background-color: #1a1a24;
+                color: #f1f5f9;
+                border: 1px solid #3e3e4a;
+                border-radius: 4px;
+                padding: 6px 8px;
+                font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+                font-size: 9pt;
             }
         """)
         
@@ -1141,7 +1169,8 @@ class DistributionDetailsDialog(QDialog, WindowMixin):
 
             bubble_engine = get_opening_bubble_engine()
 
-            for i, (code, row) in enumerate(df_filtered.iterrows()):
+            for i, (idx_val, row) in enumerate(df_filtered.iterrows()):
+                code = str(row.get('code', idx_val)).strip()
                 name = str(row.get('name', '--'))
                 pct = safe_float(row.get('percent', 0.0))
                 price = safe_float(row.get('close', row.get('trade', 0.0)))
@@ -1164,14 +1193,23 @@ class DistributionDetailsDialog(QDialog, WindowMixin):
                 open_pct = b_prof.get("open_pct", 0.0)
                 alpha_score = b_prof.get("alpha_score", 50.0)
                 
+                if open_pct > 0:
+                    open_pct_color = "#ff4d4f"
+                elif open_pct < 0:
+                    open_pct_color = "#44ff44"
+                else:
+                    open_pct_color = "#cbd5e1"
+                
                 tip_text = (
-                    f"🎯 【{code} {name}】开盘起点与跃迁画像\n"
-                    f"────────────────────────\n"
-                    f"🌅 开盘涨幅: {open_pct:+.2f}%\n"
-                    f"⚡ 梯级跃迁轨迹: {traj_str}\n"
-                    f"💎 形态特征: {p_tag} ({p_desc})\n"
-                    f"🔥 差异化评分: {alpha_score:.0f} 分\n"
-                    f"📊 实时量比: {ratio:.2f} | 现价: {price:.2f} 元"
+                    f"<div style='font-family: \"Microsoft YaHei\", \"Segoe UI\", sans-serif; font-size: 9pt; color: #f1f5f9; line-height: 1.45;'>"
+                    f"<div style='font-size: 9.5pt; font-weight: bold; color: #00ffcc; margin-bottom: 3px;'>🎯 【{code} {name}】开盘起点与跃迁画像</div>"
+                    f"<div style='border-top: 1px solid #3e3e4a; margin: 3px 0 5px 0;'></div>"
+                    f"<div>🌅 <span style='color: #94a3b8;'>开盘涨幅:</span> <span style='color: {open_pct_color}; font-weight: bold;'>{open_pct:+.2f}%</span></div>"
+                    f"<div>⚡ <span style='color: #94a3b8;'>梯级跃迁轨迹:</span> <span style='color: #38bdf8; font-weight: bold;'>{traj_str}</span></div>"
+                    f"<div>💎 <span style='color: #94a3b8;'>形态特征:</span> <span style='color: #ffd700; font-weight: bold;'>{p_tag}</span> <span style='color: #cbd5e1;'>({p_desc})</span></div>"
+                    f"<div>🔥 <span style='color: #94a3b8;'>差异化评分:</span> <span style='color: #fb923c; font-weight: bold;'>{alpha_score:.0f} 分</span></div>"
+                    f"<div>📊 <span style='color: #94a3b8;'>实时量比:</span> <span style='color: #ffffff; font-weight: bold;'>{ratio:.2f}</span> | <span style='color: #94a3b8;'>现价:</span> <span style='color: #ffffff; font-weight: bold;'>{price:.2f} 元</span></div>"
+                    f"</div>"
                 )
 
                 # 0: 代码
@@ -1523,6 +1561,7 @@ class DistributionBarChart(QWidget):
         QTimer.singleShot(800, lambda: self._restore_details_dialog_if_saved(cold_start=True))
 
     def _init_ui(self):
+        apply_dark_theme(self)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(5, 5, 5, 5)
         layout.setSpacing(4)
@@ -1633,7 +1672,14 @@ class DistributionBarChart(QWidget):
                         from PyQt6.QtWidgets import QToolTip
                         global_pos = self.plot_widget.mapToGlobal(pos.toPoint())
                         
-                        tip_text = f"📊 {desc}\n只数: {count} 只\n全市场占比: {pct_str}"
+                        tip_text = (
+                            f"<div style='font-family: \"Microsoft YaHei\", \"Segoe UI\", sans-serif; font-size: 9pt; color: #f1f5f9; line-height: 1.4;'>"
+                            f"<div style='font-weight: bold; color: #00ffcc; margin-bottom: 2px;'>📊 {desc}</div>"
+                            f"<div style='border-top: 1px solid #3e3e4a; margin: 2px 0 4px 0;'></div>"
+                            f"<div><span style='color: #94a3b8;'>只数:</span> <span style='color: #ffd700; font-weight: bold;'>{count} 只</span></div>"
+                            f"<div><span style='color: #94a3b8;'>全市场占比:</span> <span style='color: #38bdf8; font-weight: bold;'>{pct_str}</span></div>"
+                            f"</div>"
+                        )
                         QToolTip.showText(global_pos, tip_text, self.plot_widget)
                         return
             

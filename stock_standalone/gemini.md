@@ -77,6 +77,36 @@
         1. 专项新增 `tests/test_safe_hdf_store_lock.py`: 6/6 PASSED（验证读模式绝不误删排他锁、读模式退出零睡眠延迟、同进程重入安全续期、已死 PID 僵尸锁立即清理、微重试防 WinError 32 残留、write_hdf_db 排他持锁原子替换）；
         2. 回归测试 `test_h5_shared_df_alignment.py` + `test_multiday_feature_store.py` + `test_history_slice_and_auction_reversal.py`: 20/20 PASSED。
 
+## 2026-09-15 18:18
+- [x] **【彻底修复 ATS 涨跌分布个股明细提示窗白底浅字看不清 Bug】(SSOT) (`ats/ui/chart_widgets.py`, `tests/test_tooltip_and_lift_calendar_sync.py`)**：
+    - [x] **操盘手反馈痛点与根因排查 (抓出真凶)**：
+        1. **“修复ats的个股明细的 提示窗配色导致的无法看清的bug”**（附截图）：
+           - **视觉痛点**：在“涨跌分布个股明细”窗口中鼠标悬浮在股票行时，弹出的“【开盘起点与跃迁画像】”提示窗口背景呈现纯白色，而文字几乎为浅灰与白色，在白底上近乎隐形，严重影响盘中实时决策；
+           - **致命根因**：
+             1. `DistributionDetailsDialog` 在初始化时执行 `self.setStyleSheet("QDialog { background-color: #1a1e2b; color: #ffffff; }")`，未调用 `apply_dark_theme(self)`，覆盖并切断了全局 `DARK_THEME_QSS`；
+             2. 子组件 `self.table` 设置的独立样式表也未声明 `QToolTip` 样式；
+             3. 对话框设置了独立窗口属性（`flags |= Qt.WindowType.Window`），在 Windows 下缺少 QSS `QToolTip` 规则时，Qt 顶层 ToolTip 标签退回 Windows 原生浅色绘制（纯白背景 `#ffffff`）；而全局调色板的 `ToolTipText` 为冰白色（`#f1f5f9`），形成了致命的“白底白字”灾难。
+    - [x] **系统级工程落地与架构加固**：
+        1. **继承暗黑金融质感与 QSS 就近覆盖双保险**：
+           - 在 `DistributionDetailsDialog.__init__` 中调用 `apply_dark_theme(self)`，对齐全系统对话框（如 `SectorDetailDialog`、`DailyLimitUpDialog`）规范；
+           - 在对话框自身 stylesheet 以及 `self.table.setStyleSheet` 中显式注入 `QToolTip` 暗黑微光样式（背景 `#1a1a24`，文字 `#f1f5f9`，边框 `#3e3e4a`，圆角 4px，内边距 6px 8px），杜绝任何系统原生浅色回退；
+           - `DistributionBarChart` 同步纳入暗黑主题管理，图表悬浮提示同步优化；
+        2. **ToolTip 富文本语义化高对比升级**：
+           - 将 `tip_text` 升级为支持自适应与内联高对比配色的 HTML 富文本格式：
+             - 标题：赛博荧光青 `#00ffcc`
+             - 字段标签：柔和浅灰蓝 `#94a3b8`
+             - 开盘涨幅：动态红涨绿跌（`#ff4d4f` / `#44ff44` / `#cbd5e1`）
+             - 梯级跃迁轨迹：天蓝色 `#38bdf8`
+             - 形态特征：高光黄金色 `#ffd700`
+             - 差异化评分：活力亮橙色 `#fb923c`
+             - 实时量比与现价：纯白高亮 `#ffffff`
+             - 哪怕在任何极端系统环境下，文字内联色彩均保持绝对清晰可辨，金融质感卓越。
+        3. **安全健壮性增强**：
+           - 对 `update_data` 中的遍历健壮性加固，通过 `str(row.get('code', idx_val)).strip()` 安全提取代码，彻底防止整数 index 引发 `AttributeError`。
+    - [x] **自动化测试 100% 全绿**：
+        1. 扩展 `tests/test_tooltip_and_lift_calendar_sync.py`: 3/3 PASSED（覆盖 QToolTip 规则、调色板断言、解禁日历缓存复用、涨跌分布个股明细与图表 QToolTip 样式与富文本断言）；
+        2. 回归测试 `tests/test_ats_window_manager.py`: 5/5 PASSED。
+
 ## 2026-09-15 10:25
 - [x] **【彻底解决 QToolTip 提示文字变黑看不清 & 东方财富新股解禁日历无线重试刷屏 Bug】(SSOT) (`ats/ui/styles.py`, `ats/ui/main_window.py`, `ats/main_ats.py`, `ats/new_stock_fetcher.py`, `config/new_stock_lift_calendar.json`, `tests/test_tooltip_and_lift_calendar_sync.py`)**：
     - [x] **操盘手反馈痛点与根因排查 (抓出真凶)**：
