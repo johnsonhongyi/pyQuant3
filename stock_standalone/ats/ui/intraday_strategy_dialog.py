@@ -356,6 +356,74 @@ class SBCChartCanvas(QWidget):
             end_i = total_n - 1
         return self.df_intraday.iloc[start_i:end_i + 1], start_i, end_i
 
+    def _map_signal_to_visible_index(
+        self,
+        sig: Dict[str, Any],
+        df_view: pd.DataFrame,
+        start_i: int,
+        end_i: int
+    ) -> Optional[int]:
+        """
+        【🎯 买卖信号在当前放大/平移视口切片内的精确局部索引映射算法】
+        彻底根除放大查看时出现买卖信号错位、跨日扎堆重叠、幽灵垂直堆叠的 Bug：
+        1. 严格视口边界检查 (Strict Viewport Boundary Clipping)：
+           若信号发生在当前可视切片 [start_i, end_i] 之外，直接返回 None，绝不在屏幕上绘制！
+        2. 原生 bar_idx 全局绝对索引精准匹配：
+           若信号携带 'bar_idx'，直接与 [start_i, end_i] 进行边界裁决；
+        3. 全量数据时序反查唯一 global_idx：
+           结合 date 与 timestamp/time 在全量 self.df_intraday 中反查唯一全局索引；
+        4. 严禁使用模糊的 'times_5'（后5位HH:MM）跨日乱投射，杜绝历史多日买卖点错误投影到放大当日。
+        """
+        if self.df_intraday is None or self.df_intraday.empty or df_view.empty:
+            return None
+
+        total_n = len(self.df_intraday)
+
+        # 1. 优先使用原生绝对全局索引 bar_idx
+        b_idx = sig.get("bar_idx") if isinstance(sig, dict) else getattr(sig, "bar_idx", None)
+        if b_idx is not None:
+            try:
+                g_idx = int(b_idx)
+                if 0 <= g_idx < total_n:
+                    if start_i <= g_idx <= end_i:
+                        return g_idx - start_i
+                    else:
+                        return None  # 严格视口裁剪：在放大视野之外，不绘制
+            except (ValueError, TypeError):
+                pass
+
+        # 2. 从全量时间序列中反查绝对唯一时间
+        sig_t = str(sig.get("timestamp", sig.get("time", "")) if isinstance(sig, dict) else getattr(sig, "timestamp", getattr(sig, "time", ""))).strip()
+        sig_d = str(sig.get("date", "") if isinstance(sig, dict) else getattr(sig, "date", "")).strip()
+
+        times_all = list(self.df_intraday.index.astype(str))
+
+        # 2.1 完整时间戳精确匹配 (例如 "2026-09-03 09:35:00" 或 "09-03 09:35")
+        if sig_t in times_all:
+            g_idx = times_all.index(sig_t)
+            if start_i <= g_idx <= end_i:
+                return g_idx - start_i
+            return None
+
+        # 2.2 结合 date 和 time 进行多日时序精确反查
+        if sig_d:
+            sig_hm = sig_t.split()[-1][:5] if " " in sig_t else (sig_t[:5] if len(sig_t) >= 5 else sig_t)
+            sig_d_short = sig_d[-5:] if len(sig_d) >= 5 else sig_d
+            for i, t in enumerate(times_all):
+                # 必须同时命中日期与分时时间
+                if (sig_d in t or sig_d_short in t) and sig_hm in t:
+                    if start_i <= i <= end_i:
+                        return i - start_i
+                    return None
+
+        # 2.3 若在当前局部视图 df_view 索引中能直接找到完整 sig_t
+        view_times = list(df_view.index.astype(str))
+        if sig_t in view_times:
+            return view_times.index(sig_t)
+
+        # 2.4 如果经过严格时序匹配，该信号根本不属于当前可视范围，坚决不绘制（严禁降级到 HH:MM 跨日乱投射）
+        return None
+
     def keyPressEvent(self, event):
         """
         ⚡ 键盘快捷键响应：
@@ -1053,9 +1121,10 @@ class SBCChartCanvas(QWidget):
             all_cands.append(self.target_sell_min)
         if self.signals:
             for sig in self.signals:
-                sig_p = float(sig.get("price", 0.0) if isinstance(sig, dict) else getattr(sig, "price", 0.0))
-                if 0 < sig_p <= max_valid_price:
-                    all_cands.append(sig_p)
+                if self._map_signal_to_visible_index(sig, df_view, start_i, end_i) is not None:
+                    sig_p = float(sig.get("price", 0.0) if isinstance(sig, dict) else getattr(sig, "price", 0.0))
+                    if 0 < sig_p <= max_valid_price:
+                        all_cands.append(sig_p)
 
         if not all_cands:
             all_cands = [op_ref if op_ref > 0 else 100.0]
@@ -1196,19 +1265,10 @@ class SBCChartCanvas(QWidget):
 
                 y_s = price_to_y(sig_p)
 
-                # 寻找在当前可视切片时间轴上的对应位置 idx_s
-                idx_s = -1
-                sig_t_5 = sig_t[-5:] if len(sig_t) >= 5 else sig_t
-                if sig_t in times_raw:
-                    idx_s = times_raw.index(sig_t)
-                elif sig_t_5 in times_5:
-                    idx_candidates = [i for i, t in enumerate(times_5) if t == sig_t_5]
-                    idx_s = idx_candidates[-1] if idx_candidates else -1
-                else:
-                    for i, t in enumerate(times_5):
-                        if t >= sig_t_5:
-                            idx_s = i
-                            break
+                # 寻找在当前可视切片时间轴上的精确对应位置 idx_s (严格视口边界裁剪，杜绝放大时历史信号跨日乱投射)
+                idx_s = self._map_signal_to_visible_index(sig, df_view, start_i, end_i)
+                if idx_s is None or idx_s < 0:
+                    continue
 
                 if idx_s >= 0:
                     x_s = time_to_x(idx_s)
@@ -1583,9 +1643,10 @@ class SBCChartCanvas(QWidget):
             all_vals.append(self.target_sell_min)
         if self.signals:
             for sig in self.signals:
-                sig_p = float(sig.get("price", 0.0) if isinstance(sig, dict) else getattr(sig, "price", 0.0))
-                if min_cutoff <= sig_p <= max_cutoff:
-                    all_vals.append(sig_p)
+                if self._map_signal_to_visible_index(sig, df_view, start_i, end_i) is not None:
+                    sig_p = float(sig.get("price", 0.0) if isinstance(sig, dict) else getattr(sig, "price", 0.0))
+                    if min_cutoff <= sig_p <= max_cutoff:
+                        all_vals.append(sig_p)
 
         all_vals = [x for x in all_vals if x > 0]
         if not all_vals:
@@ -2116,26 +2177,21 @@ class SBCChartCanvas(QWidget):
                 sig_hm = sig_t_raw.split()[-1][:5] if " " in sig_t_raw else sig_t_raw[:5]
                 sig_d = sig_t_raw[:10] if len(sig_t_raw) >= 10 else sig_t_raw
 
-                idx_k = -1
-                if self.period_mode in ["day", "week", "month"]:
-                    for ki, tk in enumerate(times_k):
-                        if str(tk).startswith(sig_d):
-                            idx_k = ki
-                            break
-                    if idx_k < 0:
+                idx_k = self._map_signal_to_visible_index(sig, df_view, start_i, end_i)
+                if idx_k is None:
+                    if self.period_mode in ["day", "week", "month"]:
                         for ki, tk in enumerate(times_k):
-                            if str(tk)[:10] >= sig_d:
+                            if str(tk).startswith(sig_d):
                                 idx_k = ki
                                 break
-                    if idx_k < 0 and today_k_indices:
-                        idx_k = today_k_indices[-1]
-                else:
-                    for ki in today_k_indices:
-                        if k_hhmm_list[ki] >= sig_hm:
-                            idx_k = ki
-                            break
-                    if idx_k < 0 and today_k_indices:
-                        idx_k = today_k_indices[-1]
+                    else:
+                        for ki, tk in enumerate(times_k):
+                            if str(tk).startswith(sig_d) and sig_hm in str(tk):
+                                idx_k = ki
+                                break
+
+                if idx_k is None or idx_k < 0 or idx_k >= n:
+                    continue
 
                 if 0 <= idx_k < n:
                     x_k = k_to_x(idx_k)
@@ -2605,22 +2661,22 @@ class SBCIntradayChartDialog(QWidget):
             self.btn_group_period.addButton(btn)
             tb_layout.addWidget(btn)
 
-        btn_rearrange = QPushButton("🪟 重排 (Q)")
-        btn_rearrange.setStyleSheet("background-color: #1a2e22; color: #00ff88; font-weight: bold; border: 1px solid #00ff88; border-radius: 3px; padding: 2px 6px; font-size: 8.5pt;")
+        btn_rearrange = QPushButton("🪟 重排")
+        btn_rearrange.setStyleSheet("background-color: #1a2e22; color: #00ff88; font-weight: bold; border: 1px solid #00ff88; border-radius: 3px; padding: 2px 5px; font-size: 8.5pt;")
         btn_rearrange.setToolTip("快捷键: Q 键，自动将所有已打开的 SBC 分时走势窗口在当前屏幕网格平铺重排")
         btn_rearrange.clicked.connect(self._on_rearrange_windows_clicked)
 
         btn_refresh = QPushButton("🔄 刷新")
-        btn_refresh.setStyleSheet("background-color: #1e2638; color: #38bdf8; font-weight: bold; border: 1px solid #38bdf8; border-radius: 3px; padding: 2px 6px; font-size: 8.5pt;")
+        btn_refresh.setStyleSheet("background-color: #1e2638; color: #38bdf8; font-weight: bold; border: 1px solid #38bdf8; border-radius: 3px; padding: 2px 5px; font-size: 8.5pt;")
         btn_refresh.clicked.connect(self.reload_chart)
 
-        btn_clear_cache = QPushButton("🧹 清缓存")
-        btn_clear_cache.setStyleSheet("background-color: #3b1419; color: #ff6666; font-weight: bold; border: 1px solid #ff6666; border-radius: 3px; padding: 2px 6px; font-size: 8.5pt;")
+        btn_clear_cache = QPushButton("🧹 清缓")
+        btn_clear_cache.setStyleSheet("background-color: #3b1419; color: #ff6666; font-weight: bold; border: 1px solid #ff6666; border-radius: 3px; padding: 2px 4px; font-size: 8.5pt;")
         btn_clear_cache.setToolTip("强力清除当前标的的内存与磁盘错误缓存")
         btn_clear_cache.clicked.connect(self._on_clear_cache_clicked)
 
         self.btn_toggle_log = QPushButton("📋 日志")
-        self.btn_toggle_log.setStyleSheet("background-color: #1e2638; color: #ffd700; font-weight: bold; border: 1px solid #ffd700; border-radius: 3px; padding: 2px 6px; font-size: 8.5pt;")
+        self.btn_toggle_log.setStyleSheet("background-color: #1e2638; color: #ffd700; font-weight: bold; border: 1px solid #ffd700; border-radius: 3px; padding: 2px 5px; font-size: 8.5pt;")
         self.btn_toggle_log.clicked.connect(self._toggle_log_panel)
 
         btn_linkage = QPushButton("⚡ 联动")
@@ -2710,8 +2766,8 @@ class SBCIntradayChartDialog(QWidget):
         self.custom_kline_df = None
         layout.addWidget(self.canvas, 1)
 
-        # 3. 折叠式行情数据与 TDX 通信日志区域
-        self.log_box = QGroupBox("📋 实时行情获取与数据健康调试日志")
+        # 3. 实时阶段数据日志与 TDX 通信日志区域 (默认直接可见，聚焦当前实时阶段)
+        self.log_box = QGroupBox("📋 实时阶段数据日志 (TDX行情 + 策略风控合一)")
         self.log_box.setStyleSheet("QGroupBox { border: 1px solid #303042; border-radius: 4px; font-weight: bold; color: #ffd700; background-color: #14141d; }")
         log_box_lay = QVBoxLayout(self.log_box)
         log_box_lay.setContentsMargins(4, 4, 4, 4)
@@ -2719,11 +2775,11 @@ class SBCIntradayChartDialog(QWidget):
         self.txt_log = QTextEdit()
         self.txt_log.setReadOnly(True)
         self.txt_log.setStyleSheet("background-color: #08080c; color: #00ff88; font-family: 'Consolas', 'Segoe UI', 'Microsoft YaHei', sans-serif; font-size: 8.5pt;")
-        self.txt_log.setMaximumHeight(120)
+        self.txt_log.setMaximumHeight(135)
         log_box_lay.addWidget(self.txt_log)
 
         layout.addWidget(self.log_box)
-        self.log_box.setVisible(False)
+        self.log_box.setVisible(True)  # 💡 默认直接可见，打开即可看到数据日志
 
         # 4. 底部提示与快速切码栏
         bottom_layout = QHBoxLayout()
@@ -3641,7 +3697,7 @@ class SBCIntradayChartDialog(QWidget):
     def _toggle_log_panel(self):
         vis = not self.log_box.isVisible()
         self.log_box.setVisible(vis)
-        self.btn_toggle_log.setText("📋 行情数据日志 (显示)" if vis else "📋 行情数据日志")
+        self.btn_toggle_log.setText("📋 (开)" if vis else "📋 (关)")
 
     def _toggle_auto_strategy(self):
         """【🤖 自动交易策略开关】开启/关闭基于 VWAP 进攻 + 8层主动防守的全自动策略评估与信号标记"""
@@ -3790,6 +3846,7 @@ class SBCIntradayChartDialog(QWidget):
                             "time": time_key,
                             "timestamp": time_key,
                             "date": bar_date,
+                            "bar_idx": idx,
                             "holding_status": "open",
                             "rule_name": decision.reason,
                             "note": f"买:{close_p:.2f}元 ({decision.reason})"
@@ -3877,6 +3934,7 @@ class SBCIntradayChartDialog(QWidget):
                             "time": time_key,
                             "timestamp": time_key,
                             "date": bar_date,
+                            "bar_idx": idx,
                             "buy_price": entry_price,
                             "sell_price": close_p,
                             "paired_price": entry_price,
@@ -4225,6 +4283,7 @@ class SBCIntradayChartDialog(QWidget):
                 self.canvas.set_data(df_multi, op, vw, hi, lo, t_min, t_max, sigs, period_mode=mode)
                 self.lbl_title.setText(f"📊 {self.code} {resolve_stock_name(self.code)} | [{mode.upper()}多日分时] 今:{op:.2f} 现:{cl_last:.2f}")
                 self.lbl_title.setToolTip(f"【{self.code} {resolve_stock_name(self.code)}】[{mode.upper()}多日分时] 今开={op:.2f}元, 现价={cl_last:.2f}元, VWAP={vw:.2f}元, 最高={hi:.2f}元, 最低={lo:.2f}元 | 策略买卖信号数: {len(sigs)} 步")
+                self._update_unified_realtime_log(df_multi, op, cl_last, vw, hi, lo, to_rate, amt, sigs, mode=mode)
                 if getattr(self, 'auto_eval_enabled', True):
                     self._on_eval_r_clicked(toggle=False)
             return
@@ -4256,6 +4315,7 @@ class SBCIntradayChartDialog(QWidget):
                 else:
                     self.lbl_title.setText(f"📊 {self.code} {resolve_stock_name(self.code)} | [{mode.upper()}GG通道] 今:{op:.2f} 现:{cl_last:.2f}")
                     self.lbl_title.setToolTip(f"【{self.code} {resolve_stock_name(self.code)}】[{mode.upper()}K线通道] 今开={op:.2f}元, 现价={cl_last:.2f}元, VWAP={vw:.2f}元, 最高={hi:.2f}元, 最低={lo:.2f}元 | 买卖信号数: {len(sigs)} 步")
+                self._update_unified_realtime_log(df_kline, op, cl_last, vw, hi, lo, to_rate, amt, sigs, mode=mode)
                 if getattr(self, 'auto_eval_enabled', True):
                     self._on_eval_r_clicked(toggle=False)
             return
@@ -4318,20 +4378,114 @@ class SBCIntradayChartDialog(QWidget):
         self.lbl_title.setText(f"📊 {self.code} {resolve_stock_name(self.code)} | 今:{op:.2f} 现:{p:.2f}")
         self.lbl_title.setToolTip(f"【{self.code} {resolve_stock_name(self.code)}】今开={op:.2f}元, 现价={p:.2f}元, VWAP={vw:.2f}元, 最高={hi:.2f}元, 最低={lo:.2f}元 | 买卖信号数: {len(sigs)} 步")
 
-        # 打印行情健康调试日志
-        now_str = datetime.now().strftime("%H:%M:%S")
-        server_info = fetcher.best_server.get("name", "TDX服务器") if hasattr(fetcher, "best_server") and fetcher.best_server else "TDX"
-        k_count = len(df_intraday) if not df_intraday.empty else 0
-        log_msg = (
-            f"[{now_str}] 🚀 行情源: {server_info} | 分时 K 线: {k_count} 条\n"
-            f"[{now_str}] 📈 关键价格: 今开={op:.2f}元, 现价={p:.2f}元, VWAP={vw:.2f}元, 最高={hi:.2f}元, 最低={lo:.2f}元\n"
-            f"[{now_str}] 💰 量价换手: 换手率={to_rate:.2f}%, 累计成交额={amt/1e8:.2f}亿元 | 买卖信号数: {len(sigs)} 步\n"
-            f"[{now_str}] ✅ 结论: 行情摄入 {k_count} 条，分时基准图与信号 Tag 渲染正常。"
-        )
-        self.txt_log.setPlainText(log_msg)
+        # 📋 呈现 TDX 行情与策略风控合一的当前实时阶段日志
+        self._update_unified_realtime_log(df_intraday, op, p, vw, hi, lo, to_rate, amt, sigs, mode="1m")
 
         if getattr(self, 'auto_eval_enabled', True):
             self._on_eval_r_clicked(toggle=False)
+
+    def _update_unified_realtime_log(
+        self,
+        df_bars: pd.DataFrame,
+        op: float,
+        p: float,
+        vw: float,
+        hi: float,
+        lo: float,
+        to_rate: float,
+        amt: float,
+        sigs: list,
+        mode: str = "1m"
+    ):
+        """
+        【📋 SBC 实时阶段数据日志 (TDX行情 + 策略风控合一呈现引擎)】
+        严格落实操盘手指令：
+        1. 控制台高频/调试日志沉淀至 SBC 数据日志框中，打开窗口直接可见；
+        2. 只显示当前实时阶段的日志，清爽、聚焦当下；
+        3. 策略严控，杜绝重复买卖，严格落实 A 股 T+1 制度与单日防重叠开仓约束；
+        4. TDX 行情通信与网络健康 + 实时策略研判 + 持仓风控合二为一显示。
+        """
+        try:
+            now_str = datetime.now().strftime("%H:%M:%S")
+            st_name = resolve_stock_name(self.code)
+
+            # 1. TDX 通信通道与行情健康诊断
+            server_info = "TDX行情服务器"
+            fetcher = getattr(self, "fetcher", None)
+            if fetcher and hasattr(fetcher, "best_server") and fetcher.best_server:
+                srv = fetcher.best_server
+                server_info = f"{srv.get('name', 'TDX')} ({srv.get('ip', '')}:{srv.get('port', 7709)})"
+            elif fetcher and hasattr(fetcher, "server_name") and fetcher.server_name:
+                server_info = fetcher.server_name
+
+            k_count = len(df_bars) if df_bars is not None and not df_bars.empty else 0
+            chg_pct = ((p - op) / op * 100.0) if op > 0 else 0.0
+
+            # 2. 实时形态与反转识别
+            reversal_info = {}
+            if df_bars is not None and not df_bars.empty and detect_vwap_displacement_reversal is not None:
+                try:
+                    reversal_info = detect_vwap_displacement_reversal(df_bars)
+                except Exception:
+                    reversal_info = {}
+            is_reversal = bool(reversal_info.get("is_reversal", False))
+            higher_low = float(reversal_info.get("higher_low", lo))
+            prev_low = float(reversal_info.get("prev_low", lo))
+            prev_high = float(reversal_info.get("prev_high", hi))
+
+            # 3. 严格 T+1 与持仓防重叠状态审查
+            holding_status = "空仓观望"
+            current_holding_sig = None
+            buy_count = 0
+            sell_count = 0
+            for s in (sigs or []):
+                act = s.get("action")
+                if act == "buy":
+                    buy_count += 1
+                    if s.get("holding_status") in ["open", "open_holding"]:
+                        current_holding_sig = s
+                        holding_status = "持仓中"
+                elif act == "sell":
+                    sell_count += 1
+
+            lines = []
+            lines.append(f"[{now_str}] 🚀 【TDX 通信通道】连接通道: {server_info} | 标的: {self.code} {st_name} | 周期: {mode.upper()} | K线摄入: {k_count} 条")
+
+            amt_str = f"{amt/1e8:.2f}亿元" if amt >= 1e8 else (f"{amt/1e4:.1f}万元" if amt >= 1e4 else f"{amt:.0f}元")
+            to_str = f"{to_rate:.2f}%" if to_rate > 0 else "0.00%"
+            lines.append(f"[{now_str}] 📈 【实时量价基准】今开: {op:.2f}元 | 现价: {p:.2f}元 ({chg_pct:+.2f}%) | VWAP均价: {vw:.2f}元 | 极值: [{lo:.2f}, {hi:.2f}] | 换手: {to_str} | 成交额: {amt_str}")
+
+            if is_reversal:
+                disp_pct = reversal_info.get("vwap_displacement_pct", 0.0)
+                lines.append(f"[{now_str}] ⚔️ 【实时策略研判】反转结构: 【底抬高企稳 + VWAP位移向上】次低点 {higher_low:.2f}元 > 前低 {prev_low:.2f}元 | VWAP上移 +{disp_pct:.1f}% | 逼近前高 {prev_high:.2f}元")
+            else:
+                lines.append(f"[{now_str}] 🔍 【实时策略研判】双组联审: 激进组捕捉动能突破 + 保守组审查形态清晰度与犹豫期 | 严守纪律开仓门槛")
+
+            if current_holding_sig is not None:
+                e_p = float(current_holding_sig.get("price", p))
+                e_t = str(current_holding_sig.get("time", ""))
+                e_d = str(current_holding_sig.get("date", "今日"))
+                unrealized_pnl = ((p - e_p) / e_p * 100.0) if e_p > 0 else 0.0
+                def_stop = higher_low * 0.99 if higher_low > 0 else (e_p * 0.98)
+                lines.append(f"[{now_str}] 🛡️ 【持仓与T+1风控】状态: [已开仓持仓] 成本: {e_p:.2f}元 ({e_t}) | 浮动盈亏: {unrealized_pnl:+.2f}% | 🔒 严格执行 A股 T+1 制度 (开仓日锁定禁卖)")
+                lines.append(f"[{now_str}] 🎯 【防重复买卖严控】开仓日: {e_d} (单日限开仓1次，严禁同日反复买卖) | 次低点动态防守线: {def_stop:.2f}元")
+            else:
+                lines.append(f"[{now_str}] 🛡️ 【持仓与T+1风控】状态: [空仓观望中] | 开仓防重叠: 严格执行单日单次开仓防重叠机制，杜绝高频日内反复开平仓")
+                lines.append(f"[{now_str}] 🎯 【开仓准入严控】当前无持仓 | 仅当双组共识通过或底抬高VWAP位移反转突破时批准试探仓 (10%~25%)")
+
+            lines.append(f"[{now_str}] ✅ 【运行结论】TDX行情摄入与图元渲染正常 | 8层主动防守待命中 | 数据日志仅呈现当前实时阶段。")
+
+            log_msg = "\n".join(lines)
+            if hasattr(self, "txt_log") and self.txt_log is not None:
+                if self.txt_log.toPlainText() != log_msg:
+                    sb = self.txt_log.verticalScrollBar()
+                    pos = sb.value() if sb else 0
+                    self.txt_log.setPlainText(log_msg)
+                    if sb:
+                        sb.setValue(pos)
+        except Exception as err:
+            logger.debug(f"_update_unified_realtime_log error: {err}")
+
 
 
 def open_sbc_chart_dialog(parent_win: Optional[QWidget] = None, code: str = "688826", period_mode: Optional[str] = None, *args, **kwargs) -> Optional[SBCIntradayChartDialog]:

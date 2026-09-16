@@ -109,7 +109,7 @@ class ProactiveExitEngine:
             timestamps=[t],
         )
         self._positions[code] = item
-        logger.info(f"[{code}] 成功注册进 ProactiveExitEngine 8层守护池 (成本价: ¥{entry_price:.2f})")
+        logger.debug(f"[{code}] 成功注册进 ProactiveExitEngine 8层守护池 (成本价: {entry_price:.2f}元)")
         return item
 
     def unregister_position(self, code: str) -> Optional[PositionWatchItem]:
@@ -378,7 +378,7 @@ class ProactiveExitEngine:
                     action_type="REDUCE_HALF" if pos.reduce_count == 0 else "EXIT_ALL",
                     size_pct=0.5 if pos.reduce_count == 0 else 1.0,
                     trigger_price=current_price,
-                    reason=f"价格反弹逼近前高阻力位 ¥{ref_high:.2f} (当前 ¥{current_price:.2f})，停留已久但量比萎缩(量比 {volume_ratio:.2f})无法突破，判定反弹力竭主动离场",
+                    reason=f"价格反弹逼近前高阻力位 {ref_high:.2f} (当前 {current_price:.2f})，停留已久但量比萎缩(量比 {volume_ratio:.2f})无法突破，判定反弹力竭主动离场",
                     timestamp=now,
                 )
         else:
@@ -394,7 +394,7 @@ class ProactiveExitEngine:
                         action_type="EXIT_ALL",
                         size_pct=1.0,
                         trigger_price=current_price,
-                        reason=f"价格冲击前高 ¥{ref_high:.2f} 失败，从反弹高点 ¥{pos.rally_peak_price:.2f} 回落已达 {drop_from_peak*100:.2f}% (超过清仓线 {retreat_pct*100:.1f}%)，确认为诱多派发，立即全清",
+                        reason=f"价格冲击前高 {ref_high:.2f} 失败，从反弹高点 {pos.rally_peak_price:.2f} 回落已达 {drop_from_peak*100:.2f}% (超过清仓线 {retreat_pct*100:.1f}%)，确认为诱多派发，立即全清",
                         timestamp=now,
                     )
 
@@ -476,7 +476,7 @@ class ProactiveExitEngine:
                     action_type="REDUCE_30",
                     size_pct=0.3,
                     trigger_price=current_price,
-                    reason=f"分时波峰序列连续 3 次下移 (¥{peaks[-3]:.2f} -> ¥{peaks[-2]:.2f} -> ¥{peaks[-1]:.2f}) 且位于均价线下方，结构性转弱，减仓 30%",
+                    reason=f"分时波峰序列连续 3 次下移 ({peaks[-3]:.2f} -> {peaks[-2]:.2f} -> {peaks[-1]:.2f}) 且位于均价线下方，结构性转弱，减仓 30%",
                     timestamp=now,
                 )
 
@@ -501,7 +501,7 @@ class ProactiveExitEngine:
                 action_type="REDUCE_HALF",
                 size_pct=0.5,
                 trigger_price=current_price,
-                reason=f"价格运行在近期高位 ¥{current_price:.2f}，但资金流向差 DFF 出现严重负流向 ({dff:.2f})，呈现顶背离，减半仓防范跳水",
+                reason=f"价格运行在近期高位 {current_price:.2f}，但资金流向差 DFF 出现严重负流向 ({dff:.2f})，呈现顶背离，减半仓防范跳水",
                 timestamp=now,
             )
 
@@ -532,7 +532,7 @@ class ProactiveExitEngine:
                         action_type="EXIT_ALL",
                         size_pct=1.0,
                         trigger_price=current_price,
-                        reason=f"日线 MA5 均线已拐头向下 (¥{ma5d:.2f} < ¥{ma5d_prev5:.2f}) 且 60 分通道斜率 ({channel_slope_60m:.1f}°) 下行，大级别破位，分时反抽 VWAP 均价即刻出清，严防大级别深套",
+                        reason=f"日线 MA5 均线已拐头向下 ({ma5d:.2f} < {ma5d_prev5:.2f}) 且 60 分通道斜率 ({channel_slope_60m:.1f}°) 下行，大级别破位，分时反抽 VWAP 均价即刻出清，严防大级别深套",
                         timestamp=now,
                     )
 
@@ -556,7 +556,7 @@ class ProactiveExitEngine:
                 action_type="EXIT_ALL",
                 size_pct=1.0,
                 trigger_price=current_price,
-                reason=f"价格跌破今日分时均线 VWAP (¥{vwap_today:.2f}) 持续超过 {threshold_mins} 分钟且未能站回，最后防线触发，强制 100% 清仓",
+                reason=f"价格跌破今日分时均线 VWAP ({vwap_today:.2f}) 持续超过 {threshold_mins} 分钟且未能站回，最后防线触发，强制 100% 清仓",
                 timestamp=now,
             )
 

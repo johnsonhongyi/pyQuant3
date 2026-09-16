@@ -182,7 +182,7 @@ class ConsensusArbiter:
         # 2. 保守组（辅助监管审查员）行使审查与一票否决权
         # 2.1 犹豫期一票否决
         if con_vote.is_hesitation_period or con_vote.decision == "HESITATE":
-            logger.info(f"[{code}] 保守组行使辅助监管否决权: 分时处于犹豫期 ({con_vote.hesitation_details})")
+            logger.debug(f"[{code}] 保守组行使辅助监管否决权: 分时处于犹豫期 ({con_vote.hesitation_details})")
             return ArbiterDecision(
                 allow=False,
                 action="HOLD",
@@ -196,7 +196,7 @@ class ConsensusArbiter:
         con_cfg = self.rule_model.conservative_config
         min_clarity = con_cfg.min_structure_clarity if con_cfg else 70.0
         if con_vote.structure_clarity_score < min_clarity:
-            logger.info(f"[{code}] 保守组行使辅助监管否决权: 分时结构混乱 (清晰度 {con_vote.structure_clarity_score:.1f} < {min_clarity})")
+            logger.debug(f"[{code}] 保守组行使辅助监管否决权: 分时结构混乱 (清晰度 {con_vote.structure_clarity_score:.1f} < {min_clarity})")
             return ArbiterDecision(
                 allow=False,
                 action="HOLD",
@@ -223,7 +223,7 @@ class ConsensusArbiter:
             chosen_size = 0.10  # 默认 10% 试探仓
 
         action_type = "BUY_ADD" if pos.has_position else "BUY_SCOUT"
-        logger.info(f"[{code}] ★ 激进与保守双组共识通过! 批准开仓动作: {action_type} (建议仓位: {chosen_size*100:.1f}%)")
+        logger.debug(f"[{code}] ★ 激进与保守双组共识通过! 批准开仓动作: {action_type} (建议仓位: {chosen_size*100:.1f}%)")
 
         return ArbiterDecision(
             allow=True,

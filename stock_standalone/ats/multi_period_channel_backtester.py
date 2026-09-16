@@ -442,7 +442,7 @@ class MultiPeriodChannelBacktester:
         lines.append("## 🏆 核心绩效总结")
         lines.append("| 绩效指标 | 策略表现 | 评价 / 基准对比 |")
         lines.append("| :--- | :--- | :--- |")
-        lines.append(f"| **累计总收益率** | **{res['total_return_pct']:+.2f}%** | 初始: ¥{res['initial_capital']:,.0f} → 期末: ¥{res['final_equity']:,.0f} |")
+        lines.append(f"| **累计总收益率** | **{res['total_return_pct']:+.2f}%** | 初始: {res['initial_capital']:,.0f} → 期末: {res['final_equity']:,.0f} |")
         lines.append(f"| **年化收益率 (CAGR)** | **{res['annualized_return_pct']:+.2f}%** | 基准买入持有: {res['bnh_return_pct']:+.2f}% (超额: {res['excess_return_pct']:+.2f}%) |")
         lines.append(f"| **胜率 (Win Rate)** | **{res['win_rate_pct']:.1f}%** | 盈利笔数: {res['win_trades']} / 亏损笔数: {res['loss_trades']} |")
         lines.append(f"| **盈亏比 (Profit Factor)** | **{res['profit_factor']:.2f}** | 总盈利 / 总亏损 |")

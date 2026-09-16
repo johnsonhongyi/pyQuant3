@@ -1,3 +1,62 @@
+## 2026-09-16 12:26
+- [x] **【SBC 走势图局部放大查看时买卖信号错位、跨日扎堆重叠、幽灵垂直堆叠 Bug 彻底根治】(`ats/ui/intraday_strategy_dialog.py`, `tests/test_sbc_zoom_signal_clipping.py`)**：
+    - [x] **操盘手反馈痛点与截屏排查**：
+        1. **操盘手反馈**：“当放大查看就出现异常的买卖信号的bug”，并发送全景对比放大截屏；
+        2. **截屏比对破案分析**：
+           - **全景视图正常**：10日分时视图下，买卖点清晰分布在 09-03 至 09-15 的各交易日对应时间点上；
+           - **放大出现灾难性错位**：当用户滚轮缩放或框选放大至 09-14~09-16 局部时，09-03、09-04、09-07、09-10、09-11 等历史前几日的所有买卖点全部瞬移并垂直堆叠在 09-15/09-16 的分界虚线上，甚至 09-09 的卖点被错误投射到了 09-16 最右侧；
+           - **根本原因排查**：
+             ① 原 `_paint_intraday` 在局部可视切片 `df_view` 中寻找信号时间 `sig_t` 时，若未直接匹配，居然降级到 `times_5`（仅取后5位 HH:MM）在可视切片中倒序查找 `idx_candidates[-1]`！因为每天都有 `09:35`、`13:56` 等相同的分钟数，导致历史 10 天里所有前几天的买卖点，全被强行当成放大的最后几天（09-15/09-16）的买卖点错误绘制；
+             ② 缺乏严格的视口边界裁剪（Strict Viewport Boundary Clipping）：对于不在当前放大视口范围 `[start_i, end_i]` 内的历史信号，没有做任何裁剪跳过，而是强行兜底塞入局部视口；
+             ③ K线模式下同样存在 `if idx_k < 0 and today_k_indices: idx_k = today_k_indices[-1]` 的粗暴兜底，导致找不到的历史信号全堆在最后一根 K 棒上；
+             ④ 放大时的 Y 轴价格区间统计（`all_cands`）把视野外的历史历史极端信号也一并计入，导致放大视口被拉伸变扁。
+    - [x] **系统级工程落地与架构加固 (KISS / SOLID / DRY)**：
+        1. **原生携带全局绝对索引 (`bar_idx`)**：
+           - 在 `_eval_vwap_proactive_strategy` 生成买卖信号字典时，统一将当前遍历的绝对 K 线索引 `idx` 存入 `"bar_idx": idx`；
+        2. **严格视口边界检查与局部坐标精确映射算法 (`_map_signal_to_visible_index`)**：
+           - 优先以原生绝对全局索引 `bar_idx` 与当前可视范围 `[start_i, end_i]` 比较判定；
+           - 若无 `bar_idx`，以完整日期时间（`date + time`）在全量 `self.df_intraday` 中反查唯一全局索引 `global_idx`；
+           - **严格视口裁剪**：若 `global_idx < start_i` 或 `global_idx > end_i`，直接返回 `None`，屏幕坚决不绘制，绝不把视野外的陈旧历史信号乱投射；
+           - **精确局部映射**：仅当信号确在视口内时，返回局部相对索引 `local_idx = global_idx - start_i`，分时线与信号坐标 100% 像素级重合；
+           - 彻底删除了任何降级到 `times_5`（仅比较时分）和 `today_k_indices[-1]`（强行堆在最后一棒）的粗暴逻辑；
+        3. **视口内动态价格极值保护**：
+           - 仅将当前视口内可见的信号价格纳入 Y 轴 `all_cands` 极值计算，杜绝视野外历史极端价格压扁放大后局部的波段细节。
+    - [x] **自动化测试 100% 验证通过 (24/24 PASSED)**：
+        1. 专项测试 `tests/test_sbc_zoom_signal_clipping.py`: 4/4 PASSED（涵盖全景下多日信号正确分布、放大至最后一日时前几日信号严格裁剪为 None 且不渲染、重置全景后全部恢复）；
+        2. 回归测试 `tests/test_sbc_unified_log_and_config_release.py`: 6/6 PASSED；
+        3. 回归测试 `tests/test_sbc_alt_switch_and_reversal.py`: 4/4 PASSED；
+        4. 回归测试 `tests/test_sbc_multi_period_signals.py`: 10/10 PASSED。
+
+## 2026-09-16 12:10
+- [x] **【SBC 实时数据日志与 TDX 行情合二为一显示（打开直接可见、聚焦当前实时阶段、严控 T+1 与防重复买卖）& 控制台调试日志降级治理 & vwap_trading_rules.json 打包环境自动释放】(`ats/ui/intraday_strategy_dialog.py`, `ats/vwap_rule_model.py`, `ats/consensus_arbiter.py`, `ats/proactive_exit_engine.py`, `tests/test_sbc_unified_log_and_config_release.py`)**：
+    - [x] **操盘手反馈痛点与业务场景**：
+        1. **控制台刷屏，窗口内看不到核心实时日志**：操盘手反馈“1.sbc的日志不要放在控制台日志中,而是放置在sbc的数据日志中,打开可以直接看到,数据日志只显示当前实时阶段的日志,不能重复的买卖,需要策略严控,T+1. 跟tdx的日志合二为一显示”；
+        2. **高频日志需调整为 DEBUG 模式**：双组共识通过、8层守护池注册、保守组犹豫期与结构混乱否决日志在控制台高频刷屏；且遗留货币符号 `¥` 在 Windows GBK 控制台偶发 `UnicodeEncodeError` 崩溃；
+        3. **打包环境找不到规则配置文件**：操盘手反馈“2026-09-16 11:30:36,371 [WARNING] 规则配置文件不存在: G:\Temp\_MEI134002\config\vwap_trading_rules.json，使用硬编码兜底 配置 这个vwap_trading_rules.json没有使用打包的get_app_root获取配置策略,以及打包自动释放vwap_trading_rules.json开发的策略到打包环境中”。
+    - [x] **系统级工程落地与架构加固 (KISS / SOLID / DRY)**：
+        1. **`vwap_trading_rules.json` 打包环境物理根目录定位与全自动释放 (`resolve_and_ensure_config_path`)**：
+           - 严格采用 `sys_utils.get_app_root()` 定位外部持久化配置文件 `target_path = os.path.join(app_root, "config", "vwap_trading_rules.json")`；
+           - 若外部不存在，优先从包内资源目录 `sys_utils.get_base_path()` 或源码目录自动复制释放；若未命中则从内置标准全量规则字典自动生成并释放；
+           - `VWAPRuleModel.reload()` 具备自愈能力，彻底消除 PyInstaller / Nuitka 打包临时目录找不到配置文件的报警；
+        2. **日志级别降级与 GBK 字符安全治理**：
+           - `ConsensusArbiter` 的共识通过与一票否决日志、`ProactiveExitEngine` 守护池注册日志统一降级为 `logger.debug`，彻底消灭控制台高频刷屏；
+           - 将 `ats/` 代码中所有遗留货币符号 `¥` 统一替换为汉字 `元`，彻底规避 Windows GBK 终端乱码与报错；
+        3. **SBC 数据日志升级：合二为一、打开直接可见、聚焦当前实时阶段、严控 T+1**：
+           - **打开直接可见**：SBC 独立窗口初始化默认 `self.log_box.setVisible(True)`，用户启动 `run_sbc.py` 或打开窗口一眼直达；
+           - **精简右上角按钮防挤压**：重排按钮改为 `🪟 重排`，清缓存改为 `🧹 清缓`，优化边距，确保“📋 日志”按钮文字绝不被截断；
+           - **合二为一构建器 (`_update_unified_realtime_log`)**：
+             - 🚀 【TDX 通信通道】：实时呈现当前连接的 TDX 服务器名称、IP、端口、标的代码与名称、K线摄入条数；
+             - 📈 【实时量价基准】：呈现今开、现价、涨跌幅、VWAP 均价线、极值区间、换手率与累计成交额；
+             - ⚔️ 【实时策略研判】：呈现底抬高反转形态判定、次低点、前低、前高、VWAP 位移量或双组联合审查状态；
+             - 🛡️ 【持仓与 T+1 风控】：清晰标注持仓状态、成本价、浮动盈亏，并明确展示“🔒 严格执行 A股 T+1 制度 (开仓日锁定禁卖)”；
+             - 🎯 【防重复买卖严控】：明确标注“单日限开仓1次，严禁同日反复买卖”，呈现关键次低点动态防守线；
+             - ✅ 【运行结论】：标明 TDX 行情摄入正常，8 层主动防守阵列全天候守护，仅呈现当前实时阶段日志；
+           - 全周期支持：无论是 1m 模式、多日（2d/3d/5d/10d）分时还是 K 线通道，均统一触发当前实时阶段日志刷新，绝不堆叠陈旧历史日志。
+    - [x] **自动化测试 100% 验证通过 (17/17 PASSED)**：
+        1. 专项测试 `tests/test_sbc_unified_log_and_config_release.py`: 6/6 PASSED（涵盖配置自动释放、DEBUG 级别日志与无 ¥ 符号、SBC 数据日志默认可见、合二为一内容与 T+1 强断言）；
+        2. 回归测试 `tests/test_sbc_alt_switch_and_reversal.py`: 4/4 PASSED；
+        3. 回归测试 `tests/test_sbc_quick_code_switch.py`: 7/7 PASSED。
+
 ## 2026-09-16 11:55
 - [x] **【VWAP 向上位移企稳 + 底抬高高低点转换反转策略 & 实盘防守保护（彻底解决实盘一直在卖飞主升浪）& Alt 键快捷开新 SBC 窗口并自动平铺重排】(`ats/vwap_trading_engine.py`, `ats/proactive_exit_engine.py`, `intraday_decision_engine.py`, `ats/ui/intraday_strategy_dialog.py`, `tests/test_sbc_alt_switch_and_reversal.py`)**：
     - [x] **操盘手反馈痛点与业务场景**：
