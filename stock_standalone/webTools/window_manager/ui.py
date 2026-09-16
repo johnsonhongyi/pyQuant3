@@ -2906,6 +2906,23 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
         except Exception as e:
             logger.error(f"托盘图标 RamDisk 快捷菜单初始化异常: {e}")
 
+        # 🚀 Antigravity 账户极速切换与自动同步快捷菜单
+        try:
+            from . import antigravity_manager
+            self.tray_menu.addSeparator()
+            self.ag_sub_menu = self.tray_menu.addMenu("🚀 Antigravity 账户切换")
+            self.ag_sub_menu.aboutToShow.connect(self._update_ag_tray_submenu)
+            
+            # 启动 Antigravity 后台文件监视与自动同步守护线程
+            if not hasattr(self, '_ag_sync_worker') or not self._ag_sync_worker:
+                self._ag_sync_worker = antigravity_manager.AntigravitySyncWorker(
+                    check_interval_sec=1.5,
+                    on_sync_callback=self._on_ag_auto_synced
+                )
+                self._ag_sync_worker.start()
+        except Exception as e:
+            logger.error(f"托盘图标 Antigravity 快捷菜单初始化异常: {e}")
+
         self.tray_menu.addSeparator()
         quit_action = self.tray_menu.addAction("❌ 完全退出")
         quit_action.triggered.connect(self.force_quit)
@@ -3001,6 +3018,9 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
             # 停止 RamDisk 同步守护线程
             if hasattr(self, 'ramdisk_sync_worker') and self.ramdisk_sync_worker:
                 self.ramdisk_sync_worker.stop()
+            # 停止 Antigravity 自动同步守护线程
+            if hasattr(self, '_ag_sync_worker') and self._ag_sync_worker:
+                self._ag_sync_worker.stop()
         except Exception:
             pass
         try:
@@ -3036,6 +3056,8 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
                     self._hotkey_hook = None
                 if hasattr(self, 'ramdisk_sync_worker') and self.ramdisk_sync_worker:
                     self.ramdisk_sync_worker.stop()
+                if hasattr(self, '_ag_sync_worker') and self._ag_sync_worker:
+                    self._ag_sync_worker.stop()
             except:
                 pass
             event.accept()
@@ -4009,6 +4031,134 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
         is_key_event = any(k in text for k in ["启动初检", "启动", "停止", "异常", "错误", "失败"])
         if getattr(self.ramdisk_sync_config, "log_enabled", False) or is_key_event:
             self.log(f"ℹ️ [RamDisk Sync] {text}")
+
+    # ==========================================
+    # 🚀 Antigravity 账户极速切换与自动同步功能
+    # ==========================================
+    def _update_ag_tray_submenu(self):
+        """动态构建系统托盘右键中的‘Antigravity 账户切换’子菜单"""
+        if not hasattr(self, 'ag_sub_menu') or not self.ag_sub_menu:
+            return
+        self.ag_sub_menu.clear()
+
+        try:
+            from . import antigravity_manager
+            curr = antigravity_manager.get_current_account()
+            curr_summary = curr.get('summary') or '未登录/无有效账户'
+            
+            # 顶部当前活跃账户展示行
+            curr_act = self.ag_sub_menu.addAction(f"👤 当前: {curr_summary}")
+            curr_act.setEnabled(False)
+            self.ag_sub_menu.addSeparator()
+
+            accounts = antigravity_manager.list_accounts()
+            if not accounts:
+                empty_act = self.ag_sub_menu.addAction("(暂无已保存账户配置)")
+                empty_act.setEnabled(False)
+            else:
+                for acc in accounts:
+                    email = acc["email"]
+                    name = acc["name"]
+                    is_curr = acc["is_current"]
+                    prefix = "✔️ " if is_curr else "     "
+                    label = f"{prefix}{name} <{email}>"
+                    act = self.ag_sub_menu.addAction(label)
+                    if is_curr:
+                        f = act.font()
+                        f.setBold(True)
+                        act.setFont(f)
+                    act.triggered.connect(lambda checked=False, target_email=email: self._on_switch_ag_account_from_tray(target_email))
+
+            self.ag_sub_menu.addSeparator()
+            sync_act = self.ag_sub_menu.addAction("🔄 立即同步至 Antigravity IDE")
+            sync_act.triggered.connect(self._trigger_ag_sync_from_tray)
+
+            backup_act = self.ag_sub_menu.addAction("💾 备份当前活跃账户")
+            backup_act.triggered.connect(self._trigger_ag_backup_from_tray)
+
+            open_dir_act = self.ag_sub_menu.addAction("📂 打开账户配置目录...")
+            open_dir_act.triggered.connect(self._open_ag_accounts_dir)
+        except Exception as e:
+            logger.error(f"构建 Antigravity 托盘子菜单异常: {e}")
+
+    def _on_switch_ag_account_from_tray(self, target_email: str):
+        """从托盘右键一键切换 Antigravity 账户"""
+        try:
+            from . import antigravity_manager
+            self.log(f"🚀 [Antigravity] 正在切换至账户: {target_email} ...")
+            success, msg = antigravity_manager.switch_account(target_email, auto_sync=True)
+            self.log(f"🚀 [Antigravity 切换结果] {msg}")
+            if hasattr(self, "tray_icon") and self.tray_icon and self.tray_icon.isVisible():
+                self.tray_icon.showMessage(
+                    "Antigravity 账户切换",
+                    msg,
+                    QtWidgets.QSystemTrayIcon.MessageIcon.Information if success else QtWidgets.QSystemTrayIcon.MessageIcon.Warning,
+                    3500
+                )
+        except Exception as e:
+            err = f"切换账户异常: {e}"
+            self.log(f"❌ [Antigravity] {err}")
+            if hasattr(self, "tray_icon") and self.tray_icon and self.tray_icon.isVisible():
+                self.tray_icon.showMessage("Antigravity 账户切换异常", err, QtWidgets.QSystemTrayIcon.MessageIcon.Critical, 3500)
+
+    def _trigger_ag_sync_from_tray(self):
+        """从托盘右键手动触发 Antigravity -> Antigravity IDE 同步"""
+        try:
+            from . import antigravity_manager
+            self.log("🔄 [Antigravity] 正在执行状态同步至 Antigravity IDE...")
+            changed, msg = antigravity_manager.do_sync()
+            self.log(f"🔄 [Antigravity 同步结果] {msg}")
+            if hasattr(self, "tray_icon") and self.tray_icon and self.tray_icon.isVisible():
+                self.tray_icon.showMessage(
+                    "Antigravity 状态同步",
+                    msg,
+                    QtWidgets.QSystemTrayIcon.MessageIcon.Information,
+                    3000
+                )
+        except Exception as e:
+            err = f"状态同步异常: {e}"
+            self.log(f"❌ [Antigravity] {err}")
+            if hasattr(self, "tray_icon") and self.tray_icon and self.tray_icon.isVisible():
+                self.tray_icon.showMessage("Antigravity 状态同步异常", err, QtWidgets.QSystemTrayIcon.MessageIcon.Warning, 3000)
+
+    def _trigger_ag_backup_from_tray(self):
+        """从托盘右键手动备份当前活跃账户"""
+        try:
+            from . import antigravity_manager
+            ok, msg, path = antigravity_manager.backup_current_account()
+            self.log(f"💾 [Antigravity 备份] {msg}")
+            if hasattr(self, "tray_icon") and self.tray_icon and self.tray_icon.isVisible():
+                self.tray_icon.showMessage(
+                    "Antigravity 账户备份",
+                    msg,
+                    QtWidgets.QSystemTrayIcon.MessageIcon.Information if ok else QtWidgets.QSystemTrayIcon.MessageIcon.Warning,
+                    3000
+                )
+        except Exception as e:
+            err = f"账户备份异常: {e}"
+            self.log(f"❌ [Antigravity] {err}")
+
+    def _open_ag_accounts_dir(self):
+        """打开账户配置所在文件夹"""
+        try:
+            from . import antigravity_manager
+            antigravity_manager.open_accounts_directory()
+        except Exception as e:
+            logger.error(f"打开 Antigravity 账户目录失败: {e}")
+
+    def _on_ag_auto_synced(self, msg: str):
+        """后台 Worker 检测到数据库或账户变动自动同步后的跨线程安全回调"""
+        def _safe_post():
+            self.log(f"🔄 [Antigravity 自动同步] {msg}")
+            if hasattr(self, "tray_icon") and self.tray_icon and self.tray_icon.isVisible():
+                self.tray_icon.showMessage(
+                    "Antigravity 状态已自动同步",
+                    msg,
+                    QtWidgets.QSystemTrayIcon.MessageIcon.Information,
+                    2500
+                )
+        QtCore.QTimer.singleShot(0, _safe_post)
+
 
     def refresh_topology_configs_combo(self, select_filepath=None):
         """刷新运行目录下的显示器拓扑配置文件下拉框"""

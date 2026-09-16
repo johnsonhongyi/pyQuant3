@@ -45,6 +45,16 @@ from .sync_engine import (
     detect_default_backup_dir
 )
 
+from .antigravity_manager import (
+    list_accounts as list_antigravity_accounts,
+    get_current_account as get_current_antigravity_account,
+    backup_current_account as backup_current_antigravity_account,
+    switch_account as switch_antigravity_account,
+    do_sync as sync_antigravity_ide,
+    open_accounts_directory as open_antigravity_accounts_directory,
+    AntigravitySyncWorker
+)
+
 from .ui import (
     WindowPosManagerUI,
     main as run_ui
@@ -86,8 +96,16 @@ __all__ = [
     'RamDiskSyncWorker',
     'detect_default_ramdisk_dir',
     'detect_default_backup_dir',
+    'list_antigravity_accounts',
+    'get_current_antigravity_account',
+    'backup_current_antigravity_account',
+    'switch_antigravity_account',
+    'sync_antigravity_ide',
+    'open_antigravity_accounts_directory',
+    'AntigravitySyncWorker',
     'WindowPosManagerUI',
     'run_ui'
 ]
+
 
 

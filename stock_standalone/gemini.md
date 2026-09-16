@@ -1,3 +1,32 @@
+## 2026-09-16 16:15
+- [x] **【Antigravity 账户切换与 IDE 状态自动同步功能全景落地 & 深度集成至窗口布局管理器】(`sync_antigravity_ide.py`, `webTools/window_manager/antigravity_manager.py`, `webTools/window_manager/__init__.py`, `webTools/window_manager/ui.py`, `webTools/manage_window_layout.py`, `tests/test_antigravity_manager.py`)**：
+    - [x] **操盘手反馈需求与业务场景**：
+        1. “`sync_antigravity_ide.py` 功能转移到 `manage_window_layout.py` 管理器下. 可以右键切换账户并自动同步更新, 非常好的设计, 把这个账户切换功能集成在 `sync_antigravity_ide.py` 中, 并把这个功能迁移到管理器下”；
+        2. 原 `sync_antigravity_ide.py` 仅具备单向被动监视同步能力，缺乏账户枚举、当前活跃账户识别、安全备份和命令行极速切换功能；
+        3. 窗口布局管理器（`manage_window_layout.py`）常驻系统托盘，操盘手需要通过托盘右键菜单直接查看已存账户、打钩标记当前账户、一键切换账户，并在切换后全自动同步至 Antigravity IDE `state.vscdb`。
+    - [x] **系统级工程落地与架构加固 (KISS / SOLID / DRY)**：
+        1. **`sync_antigravity_ide.py` 升级为全功能账户管理与同步引擎**：
+           - 新增 `list_accounts()`、`get_current_account()`、`backup_current_account()`、`switch_account()`、`do_sync()`；
+           - 切换前自动执行 `backup_current_account()` 将当前活跃账户最新认证状态与 token 留存至本地备份库，彻底杜绝数据丢失；
+           - 写入数据覆盖 `antigravityAuthStatus`、`oauthToken`、`userStatus`、`antigravityUnifiedStateSync.*` 及 `antigravityOnboarding`，全自动同步至 `OLD_DB_PATH`、`NEW_DB_PATH` 及 `.backup` 备用库；
+           - 扩展 CLI 参数：`--list` (`-l`)、`--switch` (`-s`)、`--backup` (`-b`)、`--sync`，无参默认保持原有守护监视循环（100% 向后兼容）；
+        2. **核心逻辑抽象迁移至 `webTools/window_manager/antigravity_manager.py` (SRP / DRY)**：
+           - 封装高内聚、线程安全的账户状态机与 `AntigravitySyncWorker` 后台守护线程；
+           - 增加 `mask_email` 邮箱隐私打码处理（如 `h***8@gmail.com`），提升金融托盘界面的专业度与安全性；
+           - 通过 `window_manager/__init__.py` 规范对外暴露统一 API；
+        3. **托盘右键菜单无缝集成 (`window_manager/ui.py`)**：
+           - 托盘右键新增 `🚀 Antigravity 账户切换` 专用子菜单，展开时动态加载账户列表；
+           - 顶部高亮展示当前活跃账户（如 `👤 当前: li li (lililover.lili@gmail.com)`）；
+           - 动态列出所有本地已存账户，当前激活账户打钩（`✔️`）并加粗高亮；点击任意其他账户，一键完成切换 + 自动同步，右下角弹出托盘通知气泡；
+           - 底部提供 `🔄 立即同步至 Antigravity IDE`、`💾 备份当前活跃账户`、`📂 打开账户配置目录...` 快捷入口；
+           - 托盘启动时自启后台守护线程，毫秒级监听数据库变动并跨线程安全回调更新气泡；在 `force_quit` 与 `closeEvent` 中实现无泄漏优雅退出；
+        4. **桌面管理器 CLI 命令行全面支持 (`manage_window_layout.py`)**：
+           - 支持 `--ag-list`、`--ag-switch <email>`、`--ag-sync`、`--ag-backup`、`--ag-daemon`；
+           - 针对 Windows 控制台环境全局加固 stdout UTF-8 防错，杜绝 GBK 下打印特殊字符或 Emoji 导致的 `UnicodeEncodeError` 崩溃。
+    - [x] **自动化测试 100% 验证通过 (10/10 PASSED)**：
+        1. 专项测试 `tests/test_antigravity_manager.py`: 4/4 PASSED（涵盖邮箱脱敏打码、账户数据与认证解析、临时 SQLite 库读写/备份/切换/同步闭环测试、Qt 托盘菜单动态构建与槽函数连接）；
+        2. 回归测试 `tests/test_vwap_rules_auto_release_and_sbc_restore.py` + `tests/test_new_stock_translated_ats_col.py`: 6/6 PASSED。
+
 ## 2026-09-16 13:17
 - [x] **【全系统高频无价值日志三重根治：收盘定盘重复写盘 / 策略配置每次 new 刷屏 / 窗口重排中间日志冗余】(`ats/intraday_strategy_engine.py`, `ats/vwap_rule_model.py`, `ats/ui/intraday_strategy_dialog.py`)**：
     - [x] **操盘手反馈痛点**：运行日志中 `💾 [收盘定盘]` 每秒重复多条、`成功加载策略规则配置` 刷屏、`🪟 [SBC窗口重排]` 每次出现两条无价值中间日志；核心原则：**只有临界点日志才有意义，每根 K 线的状态日志完全没有实际价值**。
