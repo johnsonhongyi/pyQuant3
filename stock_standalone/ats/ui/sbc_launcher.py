@@ -118,20 +118,45 @@ class SBCProcessManager:
             return None
 
     def close_launcher_process(self) -> bool:
-        """【🛑 统一关闭持仓盯盘进程】优雅关闭以触发 aboutToQuit 独立持久化"""
+        """【🛑 统一关闭持仓盯盘进程】向其窗口投递 WM_CLOSE 消息优雅关闭，触发 aboutToQuit 独立持久化"""
         self.cleanup_dead_processes()
         proc = self._procs.get("__holdings_launcher__")
         if not proc or proc.poll() is not None:
             self._procs.pop("__holdings_launcher__", None)
             return True
 
-        logger.info(f"[SBCLauncher] 正在关闭持仓盯盘独立进程 (PID={proc.pid}) 并等待持久化...")
+        logger.info(f"[SBCLauncher] 正在优雅关闭持仓盯盘独立进程 (PID={proc.pid}) 并等待持久化...")
         try:
-            proc.terminate()
+            if sys.platform == "win32":
+                import win32gui
+                import win32process
+                import win32con
+
+                target_pid = proc.pid
+
+                def _enum_cb(hwnd, _):
+                    try:
+                        _, w_pid = win32process.GetWindowThreadProcessId(hwnd)
+                        if w_pid == target_pid and win32gui.IsWindow(hwnd):
+                            win32gui.PostMessage(hwnd, win32con.WM_CLOSE, 0, 0)
+                    except Exception:
+                        pass
+                    return True
+
+                try:
+                    win32gui.EnumWindows(_enum_cb, None)
+                except Exception:
+                    pass
+
             try:
-                proc.wait(timeout=1.5)
+                proc.wait(timeout=2.0)
             except subprocess.TimeoutExpired:
-                proc.kill()
+                logger.warning(f"[SBCLauncher] 持仓盯盘进程 (PID={proc.pid}) 等待超时，执行 terminate")
+                proc.terminate()
+                try:
+                    proc.wait(timeout=1.0)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
             self._procs.pop("__holdings_launcher__", None)
             logger.info("[SBCLauncher] 持仓盯盘进程已安全退出并完成持久化。")
             return True
@@ -210,20 +235,40 @@ class SBCProcessManager:
         if not self._procs:
             return
 
-        logger.info(f"[SBCLauncher] 🛑 正在统一终止关闭 {len(self._procs)} 个 SBC 独立子进程...")
+        logger.info(f"[SBCLauncher] 🛑 正在统一优雅关闭 {len(self._procs)} 个 SBC 独立子进程...")
+        # 1. 在 Windows 上优先向所有子进程顶层窗口投递 WM_CLOSE 消息，确保执行退出落盘
+        if sys.platform == "win32":
+            try:
+                import win32gui
+                import win32process
+                import win32con
+                pids = {p.pid for p in self._procs.values() if p and p.poll() is None}
+                if pids:
+                    def _enum_all(hwnd, _):
+                        try:
+                            _, w_pid = win32process.GetWindowThreadProcessId(hwnd)
+                            if w_pid in pids and win32gui.IsWindow(hwnd):
+                                win32gui.PostMessage(hwnd, win32con.WM_CLOSE, 0, 0)
+                        except Exception:
+                            pass
+                        return True
+                    win32gui.EnumWindows(_enum_all, None)
+            except Exception:
+                pass
+
         procs_to_wait = []
         for code, proc in list(self._procs.items()):
             if proc and proc.poll() is None:
                 try:
                     proc.terminate()
-                    procs_to_wait.append((code, proc))
                 except Exception as e:
-                    logger.debug(f"[SBCLauncher] 终止子进程 {code} (PID={proc.pid}) 异常: {e}")
+                    logger.debug(f"[SBCLauncher] 终止子进程 {code} (PID={getattr(proc, 'pid', 'unknown')}) 异常: {e}")
+                procs_to_wait.append((code, proc))
 
-        # 优雅等待最多 1.0 秒
+        # 2. 优雅等待最多 1.5 秒
         for code, proc in procs_to_wait:
             try:
-                proc.wait(timeout=1.0)
+                proc.wait(timeout=1.5)
             except subprocess.TimeoutExpired:
                 try:
                     logger.warning(f"[SBCLauncher] 子进程 {code} (PID={proc.pid}) 未按时退出，执行强制 kill")

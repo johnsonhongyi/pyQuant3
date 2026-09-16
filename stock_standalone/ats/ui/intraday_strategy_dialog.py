@@ -513,8 +513,12 @@ class SBCChartCanvas(QWidget):
             self.selected_trade_id = tids[0] if step >= 0 else tids[-1]
         else:
             cur_idx = tids.index(self.selected_trade_id)
-            next_idx = (cur_idx + step) % len(tids)
-            self.selected_trade_id = tids[next_idx]
+            next_idx = cur_idx + step
+            if next_idx >= len(tids) or next_idx < 0:
+                # 💡 遍历完所有交易后再次点击，自动关闭收益卡片与高亮，避免遮挡看盘
+                self.selected_trade_id = None
+            else:
+                self.selected_trade_id = tids[next_idx]
         self.update()
 
     def run_adaptive_strategy_eval(self):
@@ -530,7 +534,7 @@ class SBCChartCanvas(QWidget):
             try:
                 from ats.tdx_realtime_fetcher import TDXRealtimeFetcher
                 fetcher = TDXRealtimeFetcher.get_instance()
-                cat_req = p_mode if p_mode in ("5m", "15m", "30m", "60m", "day", "week", "month") else "60m"
+                cat_req = p_mode if p_mode in ("5m", "15m", "30m", "60m", "day", "2k", "3k", "week", "month") else "60m"
                 df_k = fetcher.fetch_kline_bars(c_clean, category=cat_req, count=150)
                 if not df_k.empty and len(df_k) >= 15:
                     self.df_intraday = df_k
@@ -546,8 +550,8 @@ class SBCChartCanvas(QWidget):
             self.update()
             return
 
-        # 2. K 线多周期形态测算 (5m / 15m / 30m / 60m / day / week / month)
-        if p_mode in ("5m", "15m", "30m", "60m", "day", "week", "month"):
+        # 2. K 线多周期形态测算 (5m / 15m / 30m / 60m / day / 2d / 3d / week / month)
+        if p_mode in ("5m", "15m", "30m", "60m", "day", "2d", "3d", "2k", "3k", "week", "month"):
             try:
                 from ats.channel_bottom_reversal_strategy import ChannelBottomReversalStrategy
                 strategy = ChannelBottomReversalStrategy()
@@ -732,7 +736,11 @@ class SBCChartCanvas(QWidget):
                     if expanded_rect.contains(m_pt) or dist_sq <= 400:
                         hit_tid = hb.get("trade_id")
                         if hit_tid is not None:
-                            self.selected_trade_id = hit_tid
+                            if self.selected_trade_id == hit_tid:
+                                # 💡 再次点击同一买卖信号标签，支持 toggle 关闭收益展示
+                                self.selected_trade_id = None
+                            else:
+                                self.selected_trade_id = hit_tid
                             self.update()
                             event.accept()
                             return
@@ -966,11 +974,11 @@ class SBCChartCanvas(QWidget):
                 painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, f"⏳ 正在加载 [{self.period_mode}] 行情走势图...")
                 return
 
-            # 1. K 线图模式 (5m / 15m / 30m / 60m / day / week / month)
-            if self.period_mode in ["5m", "15m", "30m", "60m", "day", "week", "month"]:
+            # 1. K 线图模式 (5m / 15m / 30m / 60m / day / 2d / 3d / week / month)
+            if self.period_mode in ["5m", "15m", "30m", "60m", "day", "2d", "3d", "2k", "3k", "week", "month"]:
                 self._paint_kline(painter, margin_left, margin_top, chart_w, chart_h)
             else:
-                # 2. 分时图模式 (1m / 2d / 3d)
+                # 2. 分时图模式 (1m / 5d / 10d)
                 self._paint_intraday(painter, margin_left, margin_top, chart_w, chart_h)
 
             # 3. 🔍 顶层绘制鼠标左键框选放大矩形遮罩 (Rubberband Box Zoom)
@@ -1640,10 +1648,14 @@ class SBCChartCanvas(QWidget):
         if len(b_dn) > 0:
             all_vals += [x for x in b_dn if min_cutoff <= x <= max_cutoff]
 
+        # 🌟 优化通道上下轨纳入范围：只要数值正向有效且在合理价格包络内 (0.4 * full_low ~ 2.5 * full_high)，均纳入 Y 轴缩放，
+        # 杜绝大斜率下行通道起点的高位上轨被 1.10 硬截断剔除导致上轨出界缺失！
+        chan_min_cut = max(0.01, full_low * 0.40)
+        chan_max_cut = full_high * 2.50
         if len(ch_up) > local_chan_start and local_chan_start < n:
-            all_vals += [x for x in ch_up[local_chan_start:] if min_cutoff <= x <= max_cutoff]
+            all_vals += [x for x in ch_up[local_chan_start:] if chan_min_cut <= x <= chan_max_cut]
         if len(ch_dn) > local_chan_start and local_chan_start < n:
-            all_vals += [x for x in ch_dn[local_chan_start:] if min_cutoff <= x <= max_cutoff]
+            all_vals += [x for x in ch_dn[local_chan_start:] if chan_min_cut <= x <= chan_max_cut]
 
         if ch_supp_p > 0 and (total_n - ch_supp_days <= end_i) and min_cutoff <= ch_supp_p <= max_cutoff:
             all_vals.append(ch_supp_p)
@@ -1714,50 +1726,44 @@ class SBCChartCanvas(QWidget):
                     painter.setPen(QPen(f_col, 1, Qt.PenStyle.DotLine))
                     painter.drawLine(fib_start_x, int(y_fib), fib_end_x, int(y_fib))
 
-        # 2. 🌟 绘制通达信自动通道三轨 (从波段起点开始，三轨各自独立延伸，各自在低于最低价10%/高于最高价10%处独立截止)
+        # 2. 🌟 绘制通达信自动通道三轨 (从波段起点开始，三轨各自独立平滑延伸，Qt 视口自动裁切，绝不掐断整条通道)
         if len(ch_up) > 1 and len(ch_dn) > 1 and local_chan_start < n:
             path_ch_up = QPainterPath()
             path_ch_mid = QPainterPath()
             path_ch_dn = QPainterPath()
 
-            # 2.1 上轨独立绘制 (一直画到最新 K 棒或自身越界，不与下轨等长绑定截断)
+            # 2.1 上轨独立绘制 (去除 break，确保通道从起点到终点平滑完整绘制)
             started_up = False
             for i in range(local_chan_start, n):
                 v = ch_up[i] if i < len(ch_up) else 0.0
-                if min_cutoff <= v <= max_cutoff:
+                if v > 0:
                     if not started_up:
                         path_ch_up.moveTo(k_to_x(i), k_to_y(v))
                         started_up = True
                     else:
                         path_ch_up.lineTo(k_to_x(i), k_to_y(v))
-                else:
-                    break
 
             # 2.2 中轨独立绘制
             started_mid = False
             for i in range(local_chan_start, n):
                 v = ch_mid[i] if i < len(ch_mid) else 0.0
-                if min_cutoff <= v <= max_cutoff:
+                if v > 0:
                     if not started_mid:
                         path_ch_mid.moveTo(k_to_x(i), k_to_y(v))
                         started_mid = True
                     else:
                         path_ch_mid.lineTo(k_to_x(i), k_to_y(v))
-                else:
-                    break
 
             # 2.3 下轨独立绘制
             started_dn = False
             for i in range(local_chan_start, n):
                 v = ch_dn[i] if i < len(ch_dn) else 0.0
-                if min_cutoff <= v <= max_cutoff:
+                if v > 0:
                     if not started_dn:
                         path_ch_dn.moveTo(k_to_x(i), k_to_y(v))
                         started_dn = True
                     else:
                         path_ch_dn.lineTo(k_to_x(i), k_to_y(v))
-                else:
-                    break
 
             # 上下轨用通达信亮白色粗实线，中轨用白点划线
             painter.setPen(QPen(QColor("#FFFFFF"), 1.5, Qt.PenStyle.SolidLine))
@@ -2193,7 +2199,7 @@ class SBCChartCanvas(QWidget):
 
                 idx_k = self._map_signal_to_visible_index(sig, df_view, start_i, end_i)
                 if idx_k is None:
-                    if self.period_mode in ["day", "week", "month"]:
+                    if self.period_mode in ["day", "2d", "3d", "2k", "3k", "week", "month"]:
                         for ki, tk in enumerate(times_k):
                             if str(tk).startswith(sig_d):
                                 idx_k = ki
@@ -2399,7 +2405,8 @@ class SBCChartCanvas(QWidget):
                 self._draw_compact_strategy_hud(painter, margin_left, margin_top, chart_w, main_h, res_strat)
 
         # 12. 🌟 顶层绘制通道标题与三轨大小高度 HUD 卡片 (置于最顶层，彻底杜绝任何被底层图元遮挡)
-        info_header = f"📊 [{self.period_mode.upper()}] 通达信自动通道 (斜率:{ch_slope_deg:.1f}°)"
+        p_disp = "2D" if str(self.period_mode).lower() in ("2d", "2k") else ("3D" if str(self.period_mode).lower() in ("3d", "3k") else self.period_mode.upper())
+        info_header = f"📊 [{p_disp}] 通达信自动通道 (斜率:{ch_slope_deg:.1f}°)"
         if ch_up_last > 0 and ch_dn_last > 0:
             info_header += f" | 上轨:{ch_up_last:.2f} | 中轨:{ch_mid_last:.2f} | 下轨:{ch_dn_last:.2f}"
         if ch_supp_p > 0:
@@ -2443,7 +2450,7 @@ class SBCChartCanvas(QWidget):
             painter.drawText(margin_left + 8, curr_y_offset, supp_info)
 
 
-VALID_SBC_PERIODS = ["1m", "2d", "3d", "5d", "10d", "5m", "15m", "30m", "60m", "day", "week", "month"]
+VALID_SBC_PERIODS = ["1m", "2d", "3d", "5d", "10d", "5m", "15m", "30m", "60m", "day", "2k", "3k", "week", "month"]
 
 
 class SBCQuickCodeLineEdit(QLineEdit):
@@ -2636,14 +2643,14 @@ class SBCIntradayChartDialog(QWidget):
         self.btn_group_period = QButtonGroup(self)
         periods = [
             ("1日", "1m"),
-            ("2日", "2d"),
-            ("3日", "3d"),
             ("5日", "5d"),
             ("10日", "10d"),
             ("5分K", "5m"),
             ("30分K", "30m"),
             ("60分K", "60m"),
             ("日K", "day"),
+            ("2D", "2d"),
+            ("3D", "3d"),
             ("周K", "week"),
             ("月K", "month")
         ]
@@ -3253,8 +3260,12 @@ class SBCIntradayChartDialog(QWidget):
 
     def rotate_period(self, step: int = 1):
         """环形顺时针/逆时针轮转切换 SBC 周期"""
-        period_list = ["1m", "2d", "3d", "5d", "10d", "5m", "30m", "60m", "day", "week", "month"]
+        period_list = ["1m", "5d", "10d", "5m", "30m", "60m", "day", "2d", "3d", "week", "month"]
         curr = getattr(self, "_current_period_mode", "1m").lower()
+        if curr in ("2k",):
+            curr = "2d"
+        elif curr in ("3k",):
+            curr = "3d"
         if curr not in period_list:
             curr = "1m"
         idx = period_list.index(curr)
@@ -3266,7 +3277,7 @@ class SBCIntradayChartDialog(QWidget):
 
     def switch_period_by_index(self, index: int):
         """通过数字键 1~9 直接切换到指定序号的周期"""
-        period_list = ["1m", "2d", "3d", "5d", "10d", "5m", "30m", "60m", "day", "week", "month"]
+        period_list = ["1m", "5d", "10d", "5m", "30m", "60m", "day", "2d", "3d", "week", "month"]
         if 0 <= index < len(period_list):
             new_mode = period_list[index]
             self.set_period_mode(new_mode)
@@ -3454,26 +3465,27 @@ class SBCIntradayChartDialog(QWidget):
                 is_app_exiting = True
         else:
             # 独立运行 run_sbc.py 模式
+            is_holdings_mode = (os.environ.get("SBC_IS_HOLDINGS_LAUNCHER") == "1")
             if app_inst:
                 other_visible_sbc = any(
-                    isinstance(tw, SBCIntradayChartDialog) and tw != self and tw.isVisible()
+                    isinstance(tw, SBCIntradayChartDialog) and tw != self and tw.isVisible() and not getattr(tw, '_is_closing', False)
                     for tw in app_inst.topLevelWidgets()
                 )
                 if not other_visible_sbc:
-                    # 这是最后一个可见 SBC 窗口，关闭意味着程序整体退出！
-                    # 此时必须将退出保存标记置为 True，并触发全局保存，绝不能抹去窗口记录！
-                    is_app_exiting = True
-                    try:
-                        save_all_open_sbc_windows()
-                    except Exception:
-                        pass
+                    if is_holdings_mode:
+                        # 💡 最后一个持仓盯盘窗口退出
+                        is_app_exiting = True
+                    else:
+                        is_app_exiting = False
 
-        # 若非整个程序退出（即用户在多窗口运行时手动单独关闭该 SBC 窗口），从持久化打开列表中移除
-        if not is_app_exiting:
-            try:
-                _remove_sbc_open_record(self.code)
-            except Exception:
-                pass
+        self._is_closing = True
+
+        # 若非整个程序退出（即用户手动单独关闭该 SBC 窗口），立即从持久化列表中除名
+        # 若处于持仓盯盘模式，无论是单窗口关闭还是逐个关闭，均立即剔除该标的，支持增减盯盘标的
+        try:
+            _remove_sbc_open_record(self.code)
+        except Exception:
+            pass
         try:
             if hasattr(self, 'ladder_engine') and self.ladder_engine:
                 self.ladder_engine.save_intraday_cache(force=False)
@@ -4071,7 +4083,8 @@ class SBCIntradayChartDialog(QWidget):
         self.custom_signals = convert_backtest_trades_to_sbc_signals(trades_df)
 
         if self.custom_signals:
-            self.canvas.selected_trade_id = 0
+            # 💡 默认不选中任何交易对，绝不自动弹出悬浮卡片遮挡看盘；需用户手动点击标记或按快捷键才展示
+            self.canvas.selected_trade_id = None
 
         self.set_period_mode("day", reload=True, save=False)
         t_cnt = len(trades_df) if trades_df is not None else 0
@@ -4330,8 +4343,8 @@ class SBCIntradayChartDialog(QWidget):
         t_min = op * 1.03 if op > 1.0 else 0.0
         t_max = op * 1.05 if op > 1.0 else 0.0
 
-        if mode in ["2d", "3d", "5d", "10d"]:
-            days = 2 if mode == "2d" else (3 if mode == "3d" else (5 if mode == "5d" else 10))
+        if mode in ["5d", "10d"]:
+            days = 5 if mode == "5d" else 10
             df_multi = fetcher.fetch_multi_day_intraday_bars(self.code, days=days)
             if not df_multi.empty:
                 if op <= 1.0:
@@ -4364,7 +4377,7 @@ class SBCIntradayChartDialog(QWidget):
                     self._on_eval_r_clicked(toggle=False)
             return
 
-        if mode in ["5m", "15m", "30m", "60m", "day", "week", "month"]:
+        if mode in ["5m", "15m", "30m", "60m", "day", "2d", "3d", "2k", "3k", "week", "month"]:
             if getattr(self, "custom_kline_df", None) is not None and not self.custom_kline_df.empty:
                 df_kline = self.custom_kline_df
             else:
@@ -4389,8 +4402,9 @@ class SBCIntradayChartDialog(QWidget):
                     self.lbl_title.setText(f"📊 {self.code} {resolve_stock_name(self.code)} | [多周期通道回测] 交易:{t_cnt}笔 胜率:{win_r:.1f}% (点击标记看收益)")
                     self.lbl_title.setToolTip(f"【{self.code} {resolve_stock_name(self.code)}】多周期通道量化回测走势图 | 共 {t_cnt} 笔交易，胜率 {win_r:.1f}% | 点击任意买卖信号标记或按 Space/[/] 键查看单笔收益与持仓光束")
                 else:
-                    self.lbl_title.setText(f"📊 {self.code} {resolve_stock_name(self.code)} | [{mode.upper()}GG通道] 今:{op:.2f} 现:{cl_last:.2f}")
-                    self.lbl_title.setToolTip(f"【{self.code} {resolve_stock_name(self.code)}】[{mode.upper()}K线通道] 今开={op:.2f}元, 现价={cl_last:.2f}元, VWAP={vw:.2f}元, 最高={hi:.2f}元, 最低={lo:.2f}元 | 买卖信号数: {len(sigs)} 步")
+                    p_disp = "2D" if mode.lower() in ("2d", "2k") else ("3D" if mode.lower() in ("3d", "3k") else mode.upper())
+                    self.lbl_title.setText(f"📊 {self.code} {resolve_stock_name(self.code)} | [{p_disp}GG通道] 今:{op:.2f} 现:{cl_last:.2f}")
+                    self.lbl_title.setToolTip(f"【{self.code} {resolve_stock_name(self.code)}】[{p_disp}K线通道] 今开={op:.2f}元, 现价={cl_last:.2f}元, VWAP={vw:.2f}元, 最高={hi:.2f}元, 最低={lo:.2f}元 | 买卖信号数: {len(sigs)} 步")
                 self._update_unified_realtime_log(df_kline, op, cl_last, vw, hi, lo, to_rate, amt, sigs, mode=mode)
                 if getattr(self, 'auto_eval_enabled', True):
                     self._on_eval_r_clicked(toggle=False)
@@ -4618,6 +4632,9 @@ def open_sbc_chart_dialog(parent_win: Optional[QWidget] = None, code: str = "688
 
 
 def _get_sbc_layout_cfg_path():
+    custom_cfg = os.environ.get("SBC_LAYOUT_CONFIG_PATH")
+    if custom_cfg and os.path.isabs(custom_cfg):
+        return custom_cfg
     from sys_utils import get_app_root
     cfg_dir = os.path.join(get_app_root(), "config")
     os.makedirs(cfg_dir, exist_ok=True)
@@ -4781,7 +4798,7 @@ def _record_sbc_open(code: str, geo=None, period_mode: Optional[str] = None):
 
 
 def _remove_sbc_open_record(code: str):
-    """从已打开 SBC 窗口列表中移除指定个股"""
+    """从已打开 SBC 窗口列表中移除指定个股 (同时支持 ATS 常规与 SBC Launcher 持仓盯盘配置)"""
     try:
         c_clean = str(code).zfill(6)
         cfg_path = _get_sbc_layout_cfg_path()
@@ -4789,10 +4806,14 @@ def _remove_sbc_open_record(code: str):
             return
         with open(cfg_path, "r", encoding="utf-8") as f:
             data = json.load(f)
-        sbc_list = data.get("sbc_open_windows", [])
-        new_list = [item for item in sbc_list if item.get("code") != c_clean]
-        if len(new_list) != len(sbc_list):
-            data["sbc_open_windows"] = new_list
+        modified = False
+        for key in ("sbc_open_windows", "sbc_holdings_windows"):
+            if key in data and isinstance(data[key], list):
+                new_list = [item for item in data[key] if item.get("code") != c_clean]
+                if len(new_list) != len(data[key]):
+                    data[key] = new_list
+                    modified = True
+        if modified:
             tmp_path = cfg_path + f".tmp_{os.getpid()}"
             with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
@@ -5089,20 +5110,51 @@ def rearrange_all_sbc_windows(parent_win=None):
             if w not in active_dialogs:
                 active_dialogs.append(w)
 
-    # 3. 构造统一代理列表，并尝试枚举 Windows 系统中跨独立子进程的所有 SBC 窗口
+    # 区分调用源与分组目标：
+    is_in_launcher = (os.environ.get("SBC_IS_HOLDINGS_LAUNCHER") == "1")
+    current_pid = os.getpid()
+
+    # 尝试获取持仓盯盘启动器子进程 PID (如果在 ATS 主进程中运行)
+    launcher_pid = None
+    if not is_in_launcher:
+        try:
+            from ats.ui.sbc_launcher import SBCProcessManager
+            mgr = SBCProcessManager.get_instance()
+            proc = mgr._procs.get("__holdings_launcher__")
+            if proc and proc.poll() is None:
+                launcher_pid = proc.pid
+        except Exception:
+            pass
+
+    # 3. 构造统一代理列表，并尝试枚举 Windows 系统中跨独立子进程的 SBC 窗口 (按组隔离)
     active_proxies: List[_SBCWindowProxy] = [_SBCWindowProxy(dlg=d) for d in active_dialogs]
     known_hwnds = {p.hwnd for p in active_proxies if p.hwnd}
 
     if sys.platform == "win32":
         try:
             import win32gui
+            import win32process
             def _enum_cb(hwnd, _):
                 if win32gui.IsWindowVisible(hwnd) and hwnd not in known_hwnds:
                     title = win32gui.GetWindowText(hwnd)
                     # 识别 SBC 实盘分时窗口特征
                     if "SBC 实盘分时走势" in title or "关键阶梯基准图" in title:
-                        active_proxies.append(_SBCWindowProxy(hwnd=hwnd, title=title))
-                        known_hwnds.add(hwnd)
+                        try:
+                            _, w_pid = win32process.GetWindowThreadProcessId(hwnd)
+                        except Exception:
+                            w_pid = 0
+                        # 💡 核心分组隔离：
+                        if is_in_launcher:
+                            # 1. 若当前在 Launcher 进程中，只重排本持仓进程窗口，绝不干扰 ATS 窗口
+                            if w_pid == current_pid:
+                                active_proxies.append(_SBCWindowProxy(hwnd=hwnd, title=title))
+                                known_hwnds.add(hwnd)
+                        else:
+                            # 2. 若当前在 ATS 主进程中，严格剔除 Launcher 的持仓窗口，仅重排 ATS 自身的窗口
+                            if launcher_pid and w_pid == launcher_pid:
+                                return True
+                            active_proxies.append(_SBCWindowProxy(hwnd=hwnd, title=title))
+                            known_hwnds.add(hwnd)
                 return True
             win32gui.EnumWindows(_enum_cb, None)
         except Exception as win_err:
@@ -5157,76 +5209,42 @@ def rearrange_all_sbc_windows(parent_win=None):
             if pxy.is_maximized_or_minimized():
                 pxy.show_normal()
 
-        # 提取期望尺寸
-        dlg_sizes = [pxy.get_preferred_size(sg) for pxy in pxys_on_screen]
+        # 统一计算网格行列数与严格等大等高的窗口尺寸 (彻底消除大小不等与 Win32 压扁)
+        cols = 2 if count <= 2 else (3 if count <= 6 else 4)
+        rows = math.ceil(count / cols)
 
-        margin_x = 10
-        margin_y = 10
-        pad_x = 20
-        pad_y = 20
+        margin_x = 8
+        margin_y = 8
+        pad_left = 12
+        pad_top = 12
+        pad_right = 12
+        pad_bottom = 12
 
-        sim_x = sg.left() + pad_x
-        sim_y = sg.top() + pad_y
-        row_max_h = 0
-        is_overflow = False
-        legacy_positions = []
+        avail_w = max(640, sg.width() - pad_left - pad_right)
+        avail_h = max(420, sg.height() - pad_top - pad_bottom)
 
-        for idx, (w, h) in enumerate(dlg_sizes):
-            if sim_x + w > sg.right() and sim_x > sg.left() + pad_x:
-                sim_x = sg.left() + pad_x
-                sim_y += row_max_h + margin_y
-                row_max_h = 0
+        calc_w = int((avail_w - (cols - 1) * margin_x) / cols)
+        target_w = max(640, min(calc_w, avail_w))
 
-            if (sim_x + w > sg.right()) or (sim_y + h > sg.bottom()):
-                is_overflow = True
-                break
-
-            legacy_positions.append((sim_x, sim_y, w, h))
-            sim_x += w + margin_x
-            row_max_h = max(row_max_h, h)
-
-        if not is_overflow and len(legacy_positions) == count:
-            # 策略 A：【未超出屏幕 -> 保持旧逻辑与现有尺寸不变】
-            logger.debug(f"[SBC重排] 原尺寸平铺 {count} 个窗口 (含跨进程)")
-            for idx, pxy in enumerate(pxys_on_screen):
-                pos_x, pos_y, w, h = legacy_positions[idx]
-                pxy.apply_geometry(pos_x, pos_y, w, h)
+        calc_h = int((avail_h - (rows - 1) * margin_y) / rows)
+        if rows == 1:
+            target_h = min(calc_h, int(target_w * 0.62), int(avail_h * 0.65))
         else:
-            # 策略 B：【现有尺寸超出屏幕 -> 启动自适应缩放】
-            logger.debug(f"[SBC重排] 自适应网格缩放 {count} 个窗口 (含跨进程)")
-            cols = 2 if count <= 2 else 3
-            rows = math.ceil(count / cols)
+            target_h = calc_h
+        target_h = max(420, min(target_h, avail_h))
 
-            margin_x = 8
-            margin_y = 8
-            pad_left = 12
-            pad_top = 12
-            pad_right = 12
-            pad_bottom = 12
+        logger.debug(f"[SBC重排] 统一等大等高平铺 {count} 个窗口: {target_w}x{target_h} ({cols}列 x {rows}行)")
 
-            avail_w = max(400, sg.width() - pad_left - pad_right)
-            avail_h = max(300, sg.height() - pad_top - pad_bottom)
+        for idx_d, pxy in enumerate(pxys_on_screen):
+            r = idx_d // cols
+            c = idx_d % cols
 
-            target_w = int((avail_w - (cols - 1) * margin_x) / cols)
-            target_w = max(320, min(target_w, avail_w))
+            pos_x = sg.left() + pad_left + c * (target_w + margin_x)
+            pos_y = sg.top() + pad_top + r * (target_h + margin_y)
 
-            raw_target_h = int((avail_h - (rows - 1) * margin_y) / rows)
-            if rows == 1:
-                target_h = min(raw_target_h, int(target_w * 0.62), int(avail_h * 0.60))
-            else:
-                target_h = raw_target_h
-            target_h = max(200, min(target_h, avail_h))
+            pxy.apply_geometry(pos_x, pos_y, target_w, target_h)
 
-            for idx_d, pxy in enumerate(pxys_on_screen):
-                r = idx_d // cols
-                c = idx_d % cols
-
-                pos_x = sg.left() + pad_left + c * (target_w + margin_x)
-                pos_y = sg.top() + pad_top + r * (target_h + margin_y)
-
-                pxy.apply_geometry(pos_x, pos_y, target_w, target_h)
-
-            SBCIntradayChartDialog._global_sbc_size = (target_w, target_h)
+        SBCIntradayChartDialog._global_sbc_size = (target_w, target_h)
 
     # 6. 持久化最新窗口坐标
     try:

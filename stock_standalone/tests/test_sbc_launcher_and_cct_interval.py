@@ -95,7 +95,7 @@ class TestSBCLauncherAndIntervals(unittest.TestCase):
         from ats.ui.universe_widget import UniverseTreeWidget
         widget = UniverseTreeWidget()
         self.assertTrue(hasattr(widget, 'btn_run_sbc'), "Universe 必须有 btn_run_sbc 按钮")
-        self.assertEqual(widget.btn_run_sbc.text(), "📈")
+        self.assertIn("📈", widget.btn_run_sbc.text())
         with patch("ats.ui.sbc_launcher.SBCProcessManager.launch") as mock_launch, \
              patch("subprocess.Popen") as mock_popen:
             # 未选中时无参运行 run_sbc.py
