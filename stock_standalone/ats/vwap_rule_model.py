@@ -13,11 +13,145 @@ import logging
 from dataclasses import dataclass, field
 from typing import Dict, Any, Optional, Callable, List
 
+import shutil
+
+try:
+    from sys_utils import get_app_root, get_base_path
+except ImportError:
+    def get_app_root() -> str:
+        return os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    def get_base_path() -> str:
+        return get_app_root()
+
 logger = logging.getLogger("VWAPRuleModel")
 
-DEFAULT_CONFIG_PATH = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "..", "config", "vwap_trading_rules.json")
-)
+
+def resolve_and_ensure_config_path() -> str:
+    """
+    智能定位并确保 vwap_trading_rules.json 配置文件存在：
+    1. 严格使用 sys_utils.get_app_root() 获取外部物理应用程序根目录 (打包 EXE 所在目录或源码根目录)；
+    2. 目标文件位于 target_path = os.path.join(get_app_root(), "config", "vwap_trading_rules.json")；
+    3. 若 target_path 已存在，直接返回；
+    4. 若 target_path 不存在，自动从打包只读资源目录 (sys_utils.get_base_path() 或源码目录) 自动释放到 target_path；
+    5. 若包内资源未命中，自动释放内置标准全量规则 JSON 到 target_path；
+    6. 彻底根除 PyInstaller / Nuitka 打包环境下 Temp 临时目录找不到配置文件的警告。
+    """
+    app_root = get_app_root()
+    target_config = os.path.abspath(os.path.join(app_root, "config", "vwap_trading_rules.json"))
+    if os.path.exists(target_config) and os.path.getsize(target_config) > 20:
+        return target_config
+
+    os.makedirs(os.path.dirname(target_config), exist_ok=True)
+
+    # 尝试源目录候选 (包内只读资源 或 源码相对路径)
+    candidate_sources = [
+        os.path.join(get_base_path(), "config", "vwap_trading_rules.json"),
+        os.path.join(os.path.dirname(__file__), "..", "config", "vwap_trading_rules.json"),
+        os.path.join(os.path.dirname(__file__), "config", "vwap_trading_rules.json"),
+    ]
+    for src in candidate_sources:
+        src_abs = os.path.abspath(src)
+        if os.path.exists(src_abs) and os.path.getsize(src_abs) > 20:
+            try:
+                shutil.copy2(src_abs, target_config)
+                logger.info(f"已从包内资源自动释放策略配置: {src_abs} -> {target_config}")
+                return target_config
+            except Exception as e:
+                logger.warning(f"复制策略配置文件异常: {e}")
+
+    # 内置标准规则兜底释放
+    builtin_rules = {
+        "version": "2.2",
+        "hot_reload": True,
+        "description": "ATS/SBC 全自动分时多周期交易系统策略规则（防守优先 + 双组投票共用仓位 + 底抬高反转）",
+        "strategy_groups": {
+            "aggressive": {
+                "name": "激进组",
+                "enabled": True,
+                "role": "momentum_attacker",
+                "buy_rules": [
+                    {
+                        "id": "buy_vwap_displacement_reversal",
+                        "name": "底抬高VWAP位移反转突破",
+                        "enabled": True,
+                        "priority": 95,
+                        "conditions": {
+                            "reversal_structure": True,
+                            "higher_low_confirmed": True,
+                            "vwap_displacement_up": True
+                        },
+                        "action": {
+                            "type": "BUY_SCOUT",
+                            "size_pct": 0.25
+                        }
+                    },
+                    {
+                        "id": "buy_vwap_base_breakout",
+                        "name": "VWAP筑底突破",
+                        "enabled": True,
+                        "priority": 85,
+                        "conditions": {
+                            "price_crossing_vwap": True,
+                            "min_consolidation_minutes": 10,
+                            "max_consolidation_range_pct": 1.2,
+                            "min_volume_ratio": 1.1,
+                            "vwap_directions": ["UP", "FLAT"],
+                            "min_multi_period_score": 65
+                        },
+                        "action": {
+                            "type": "BUY_SCOUT",
+                            "size_pct": 0.15
+                        }
+                    }
+                ]
+            },
+            "conservative": {
+                "name": "保守组",
+                "enabled": True,
+                "role": "risk_sentinel",
+                "consensus_required": True,
+                "veto_on_hesitation": True,
+                "parameters": {
+                    "min_structure_clarity": 70.0,
+                    "max_hesitation_star_ratio": 0.40,
+                    "min_consolidation_minutes": 15,
+                    "max_consolidation_range_pct": 1.0,
+                    "min_volume_ratio": 1.2,
+                    "min_multi_period_score": 75.0,
+                    "max_dff_outflow": -0.2
+                }
+            }
+        },
+        "proactive_exit_rules": {
+            "enabled": True,
+            "layers": {
+                "layer1_time_decay": {"id": "layer1_time_decay", "name": "时间衰减保护", "enabled": True, "priority": 100},
+                "layer2_no_volume": {"id": "layer2_no_volume", "name": "无量不涨离场", "enabled": True, "priority": 95},
+                "layer3_failed_rally": {"id": "layer3_failed_rally", "name": "反弹前高不过", "enabled": True, "priority": 90},
+                "layer4_distribution": {"id": "layer4_distribution", "name": "冲高派发出局", "enabled": True, "priority": 85},
+                "layer5_oscillation_no_new_high": {"id": "layer5_oscillation_no_new_high", "name": "震荡不创新高", "enabled": True, "priority": 80},
+                "layer6_volume_price_divergence": {"id": "layer6_volume_price_divergence", "name": "量价背离出局", "enabled": True, "priority": 75},
+                "layer7_multi_timeframe_rollover": {"id": "layer7_multi_timeframe_rollover", "name": "大级别MA5d破位", "enabled": True, "priority": 70},
+                "layer8_vwap_break_final": {"id": "layer8_vwap_break_final", "name": "VWAP均价线破位终极兜底", "enabled": True, "priority": 60}
+            }
+        },
+        "market_guardian_rules": {"enabled": True}
+    }
+    try:
+        tmp_path = target_config + ".tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(builtin_rules, f, ensure_ascii=False, indent=2)
+        if os.path.exists(target_config):
+            os.remove(target_config)
+        os.replace(tmp_path, target_config)
+        logger.info(f"已自动生成并释放初始策略配置文件: {target_config}")
+    except Exception as e:
+        logger.error(f"释放初始策略配置异常: {e}")
+
+    return target_config
+
+
+DEFAULT_CONFIG_PATH = resolve_and_ensure_config_path()
 
 
 @dataclass
@@ -83,9 +217,13 @@ class VWAPRuleModel:
         """重新从磁盘加载规则配置"""
         with self._lock:
             if not os.path.exists(self.config_path):
-                logger.warning(f"规则配置文件不存在: {self.config_path}，使用硬编码兜底配置")
-                self._apply_fallback_config()
-                return False
+                recovered = resolve_and_ensure_config_path()
+                if os.path.exists(recovered):
+                    self.config_path = recovered
+                else:
+                    logger.warning(f"规则配置文件不存在: {self.config_path}，使用硬编码兜底配置")
+                    self._apply_fallback_config()
+                    return False
 
             try:
                 mtime = os.path.getmtime(self.config_path)
