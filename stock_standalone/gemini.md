@@ -1,3 +1,34 @@
+## 2026-09-16 11:55
+- [x] **【VWAP 向上位移企稳 + 底抬高高低点转换反转策略 & 实盘防守保护（彻底解决实盘一直在卖飞主升浪）& Alt 键快捷开新 SBC 窗口并自动平铺重排】(`ats/vwap_trading_engine.py`, `ats/proactive_exit_engine.py`, `intraday_decision_engine.py`, `ats/ui/intraday_strategy_dialog.py`, `tests/test_sbc_alt_switch_and_reversal.py`)**：
+    - [x] **操盘手反馈痛点与业务场景**：
+        1. **反转结构缺乏策略识别，实盘一直在卖**：操盘手反馈“现在开始迭代策略, 这是分时走势,.vwap位移了,企稳,高低点转换了,系统现在没有处理这个的策略,当下的实盘一直在卖”；
+        2. **实盘频繁误卖根本原因排查与根除**：
+           - 原 `ProactiveExitEngine` Layer 1（时间衰减）在多日分时隔日开盘 20 分钟内无大幅拉升时机械止损（如 300672 早盘被误卖 -0.76%）；
+           - Layer 3（前高不过阻力离场）与 Layer 4（冲高派发）将反转初期对前高的正常蓄势洗盘误判为阻力滞涨与诱多派发（如 688635 在 279 阻力位触发卖出）；
+           - 原 `IntradayDecisionEngine` 预设 6% 硬性目标止盈（`take_profit_pct=0.06`），反转突破冲高至 +6.1% 时机械清仓，严重截断主升浪收益；
+        3. **多窗口同屏回测与比对需求**：操盘手提出“在sbc切换code时如果按住alt,打开新的sbc窗口回测并自动重排”。
+    - [x] **系统级工程落地与架构加固 (KISS / SOLID / DRY)**：
+        1. **算法级识别底抬高企稳 + VWAP位移 + 高低点转换 (`detect_vwap_displacement_reversal`)**：
+           - 多日与单日分时全兼容自适应：从多日分时中智能提取各交易日低点序列（$L_1, L_2$）、高点序列（$H_1, H_2$）及日内成交均价 $VWAP$；
+           - 次低点抬高企稳判定：$L_2 \ge L_1 \times 1.008$（次低点高于前低至少 0.8%）；
+           - 价值中枢（VWAP）向上位移：$VWAP_{today} \ge VWAP_{prev} \times 1.002$ 且现价站稳当日 VWAP 之上；
+           - 高低点转换突破：现价逼近或突破前期关键阻力高点 $H_1$；
+           - 规则 0 反转买入：`evaluate_buy_opportunity` 新增最高优先级反转突破买入，激进组赋予 0.25 仓位建议，保守组一致同意审核通过；
+        2. **实盘反转持仓保护机制 (`is_reversal_protected`)**：
+           - `PositionWatchItem` 与持仓上下文注入 `is_reversal_protected` 与关键次低点防守线 `higher_low_stop`；
+           - **防守端豁免**：在反转保护期内，全面豁免 Layer 1 时间衰减止损、Layer 3 前高阻力离场、Layer 4 冲高派发出局；
+           - **止盈豁免**：在 `IntradayDecisionEngine` 中，反转保护生效期间豁免硬性 6% 目标止盈，让反转主升浪利润充分奔跑；
+           - **关键次低点动态防守**：仅当价格有效跌破次低点（$L_2 \times 0.99$）时才触发 `exit_higher_low_broken` 纪律清仓；
+           - **实盘走势图验证完全吻合**：688635 与 300672 在 09-15 买入后，09-16 冲高全程保持 `open_holding`（持仓奔跑中），虚假卖点被彻底消除！
+        3. **Alt 键快捷开新 SBC 窗口并自动平铺重排 (`_open_new_sbc_and_rearrange`)**：
+           - **输入框回车**：检测 `Qt.KeyboardModifier.AltModifier`，触发独立开窗；
+           - **下拉列表点选**：检测 `QApplication.keyboardModifiers() & AltModifier`，支持 Alt+左键点选开窗；
+           - **“切换”按钮点击**：支持 Alt+左键点击开窗；
+           - **就地无缝自动重排**：通过 `open_sbc_chart_dialog` 拉起新独立窗口后，`QTimer.singleShot(80, ...)` 触发 `rearrange_all_sbc_windows` 动态网格平铺所有 SBC 窗口，底部状态栏直观提示用户。
+    - [x] **自动化测试 100% 验证通过 (11/11 PASSED)**：
+        1. 专项测试 `tests/test_sbc_alt_switch_and_reversal.py`: 4/4 PASSED（涵盖底抬高反转算法判定、反转保护豁免 L1/L3、实盘引擎豁免 6% 目标止盈、Alt 开新窗并重排）；
+        2. 回归测试 `tests/test_sbc_quick_code_switch.py`: 7/7 PASSED。
+
 ## 2026-09-16 11:20
 - [x] **【SBC 走势窗口底部选股框深度优化：点选与主显区直观显示“代码 股票名称”、自适应拓宽至 160px、点击智能全选、支持纯中文名反查代码】(`ats/ui/intraday_strategy_dialog.py`, `tests/test_sbc_quick_code_switch.py`)**：
     - [x] **操盘手最新反馈与直观展示需求**：

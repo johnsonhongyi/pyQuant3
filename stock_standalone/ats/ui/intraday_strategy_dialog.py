@@ -55,19 +55,20 @@ from signal_types import SignalPoint, SignalType, SignalSource
 try:
     from ats.proactive_exit_engine import ProactiveExitEngine, ExitAction
     from ats.consensus_arbiter import ConsensusArbiter, SharedPositionState, VoteResult
-    from ats.vwap_trading_engine import VWAPTradingEngine, VWAPTickState
+    from ats.vwap_trading_engine import VWAPTradingEngine, VWAPTickState, detect_vwap_displacement_reversal
     from ats.ui.vwap_rule_editor import VWAPRuleEditorDialog
 except ImportError:
     try:
         from stock_standalone.ats.proactive_exit_engine import ProactiveExitEngine, ExitAction
         from stock_standalone.ats.consensus_arbiter import ConsensusArbiter, SharedPositionState, VoteResult
-        from stock_standalone.ats.vwap_trading_engine import VWAPTradingEngine, VWAPTickState
+        from stock_standalone.ats.vwap_trading_engine import VWAPTradingEngine, VWAPTickState, detect_vwap_displacement_reversal
         from stock_standalone.ats.ui.vwap_rule_editor import VWAPRuleEditorDialog
     except ImportError:
         ProactiveExitEngine = None
         ConsensusArbiter = None
         VWAPTradingEngine = None
         VWAPRuleEditorDialog = None
+        detect_vwap_displacement_reversal = None
 
 logger = logging.getLogger("IntradayStrategyDialog")
 
@@ -2794,12 +2795,12 @@ class SBCIntradayChartDialog(QWidget):
 
         self.txt_switch_code = SBCQuickCodeLineEdit(self.combo_switch_code)
         self.combo_switch_code.setLineEdit(self.txt_switch_code)
-        self.txt_switch_code.code_submitted.connect(self.switch_code)
+        self.txt_switch_code.code_submitted.connect(self._on_switch_code_submitted)
         self.combo_switch_code.activated.connect(self._on_combo_code_activated)
         bottom_layout.addWidget(self.combo_switch_code)
 
         btn_switch_go = QPushButton("切换")
-        btn_switch_go.setToolTip("点击切换当前标的代码 (亦可在输入框直接按 Enter 或右键自动粘贴)")
+        btn_switch_go.setToolTip("点击切换当前标的代码 (亦可在输入框直接按 Enter 或右键自动粘贴；按住 Alt 键点击/回车可在新独立窗口打开回测并自动重排)")
         btn_switch_go.setStyleSheet("""
             QPushButton {
                 background-color: #1e2638; color: #38bdf8; font-weight: bold; border: 1px solid #38bdf8;
@@ -2809,7 +2810,7 @@ class SBCIntradayChartDialog(QWidget):
                 background-color: #2a3a55; color: #00ff88; border: 1px solid #00ff88;
             }
         """)
-        btn_switch_go.clicked.connect(lambda: self.txt_switch_code._on_return_pressed())
+        btn_switch_go.clicked.connect(self._on_switch_btn_clicked)
         bottom_layout.addWidget(btn_switch_go)
 
         layout.addLayout(bottom_layout)
@@ -3670,6 +3671,18 @@ class SBCIntradayChartDialog(QWidget):
         if df_bars is None or df_bars.empty or ProactiveExitEngine is None or VWAPTradingEngine is None:
             return []
 
+        # 💥 [NEW] 预先判定分时多日底抬高企稳与VWAP位移反转结构
+        reversal_info = {}
+        if detect_vwap_displacement_reversal is not None:
+            try:
+                reversal_info = detect_vwap_displacement_reversal(df_bars)
+            except Exception:
+                reversal_info = {}
+        is_reversal_struct = bool(reversal_info.get("is_reversal", False))
+        higher_low_level = float(reversal_info.get("higher_low", 0.0))
+        prev_low_level = float(reversal_info.get("prev_low", 0.0))
+        prev_high_level = float(reversal_info.get("prev_high", 0.0))
+
         signals = []
         exit_engine = ProactiveExitEngine()
         vwap_engine = VWAPTradingEngine()
@@ -3743,6 +3756,12 @@ class SBCIntradayChartDialog(QWidget):
                     decision = vwap_engine.evaluate_buy_opportunity(
                         state=tick_state,
                         multi_period_score=75.0,
+                        extra_ctx={
+                            "is_reversal_structure": is_reversal_struct,
+                            "higher_low": higher_low_level,
+                            "prev_low": prev_low_level,
+                            "prev_high": prev_high_level,
+                        },
                         now=idx * 60.0
                     )
                     if decision.allow:
@@ -3800,10 +3819,29 @@ class SBCIntradayChartDialog(QWidget):
                         volume=vol_p,
                         volume_ratio=1.1,
                         current_time=idx * 60.0,
-                        extra_ctx={"open": entry_price, "high": high_p, "ma5d": close_p * 1.005, "ma5d_prev5": close_p * 1.01, "channel_slope_60m": -6.0}
+                        extra_ctx={
+                            "open": entry_price,
+                            "high": high_p,
+                            "is_reversal_structure": is_reversal_struct,
+                            "higher_low": higher_low_level,
+                            "prev_low": prev_low_level,
+                            "prev_high": prev_high_level,
+                            "ma5d": close_p * 1.005,
+                            "ma5d_prev5": close_p * 1.01,
+                            "channel_slope_60m": 6.0 if is_reversal_struct else -6.0
+                        }
                     )
 
-                    if exit_act or is_last_bar:
+                    # 💥 反转主升持仓保护：若结构反转成立且未破次低点止损，最后K线保持持有中，绝不强平卖飞
+                    if is_last_bar and is_reversal_struct and not exit_act:
+                        for b_s in signals:
+                            if b_s.get("trade_id") == current_trade_id and b_s.get("action") == "buy":
+                                b_s["holding_status"] = "open_holding"
+                                b_s["current_price"] = close_p
+                                b_s["unrealized_pnl_pct"] = round((close_p - entry_price) / entry_price * 100.0, 2)
+                                b_s["note"] += f" | 🚀 底抬高反转主升中 (浮盈 {b_s['unrealized_pnl_pct']:+.1f}%)"
+                                break
+                    elif exit_act or is_last_bar:
                         in_pos = False
                         pnl_pct = (close_p - entry_price) / entry_price * 100.0 if entry_price > 0 else 0.0
                         pnl_val = (close_p - entry_price) * 1000.0
@@ -4003,8 +4041,21 @@ class SBCIntradayChartDialog(QWidget):
             return f"{c_clean} {st_name}"
         return c_clean
 
+    def _on_switch_btn_clicked(self):
+        """响应点击【切换】按钮 (按住 Alt 键则在新窗口打开回测并自动重排)"""
+        if hasattr(self, 'txt_switch_code') and self.txt_switch_code:
+            self.txt_switch_code._on_return_pressed()
+
+    def _on_switch_code_submitted(self, code: str):
+        """响应输入框/右键提交代码：若按住 Alt 键，在新窗口打开回测并自动重排；否则就地切换"""
+        modifiers = QApplication.keyboardModifiers()
+        if bool(modifiers & Qt.KeyboardModifier.AltModifier):
+            self._open_new_sbc_and_rearrange(code)
+        else:
+            self.switch_code(code)
+
     def _on_combo_code_activated(self, index: int):
-        """【📜 下拉选择标的】响应从最近 10 个历史列表中点击选择标的并立即切换"""
+        """【📜 下拉选择标的】响应从最近 10 个历史列表中点击选择标的并立即切换 (按住 Alt 则在新窗口打开并自动重排)"""
         if index < 0:
             return
         combo = getattr(self, 'combo_switch_code', None)
@@ -4015,7 +4066,34 @@ class SBCIntradayChartDialog(QWidget):
             text = combo.itemText(index)
             code = SBCQuickCodeLineEdit.extract_code(text)
         if code:
-            self.switch_code(code)
+            modifiers = QApplication.keyboardModifiers()
+            if bool(modifiers & Qt.KeyboardModifier.AltModifier):
+                self._open_new_sbc_and_rearrange(code)
+            else:
+                self.switch_code(code)
+
+    def _open_new_sbc_and_rearrange(self, code: str):
+        """【🪟 Alt 开新窗回测并自动重排】按住 Alt 键切换标的时，开新独立 SBC 窗口回测并自动平铺重排"""
+        c_clean = "".join(filter(str.isdigit, str(code))).zfill(6)
+        if not c_clean or c_clean == "000000":
+            return
+        # 1. 持久化记录最近代码并刷新下拉框
+        try:
+            _save_sbc_recent_code(c_clean)
+            self._refresh_recent_codes_combo()
+        except Exception:
+            pass
+
+        cur_period = getattr(self, '_current_period_mode', '1m')
+        main_win = getattr(self, "main_workbench", None) or (self.parent().window() if (self.parent() and hasattr(self.parent(), 'window')) else None)
+        new_dlg = open_sbc_chart_dialog(parent_win=main_win, code=c_clean, period_mode=cur_period)
+        if new_dlg:
+            new_dlg.show()
+            new_dlg.raise_()
+            new_dlg.activateWindow()
+            st_name = resolve_stock_name(c_clean)
+            self.lbl_info.setText(f"🚀 已在独立窗口打开标的 [{c_clean} {st_name}] 回测并自动重排！")
+            QTimer.singleShot(80, lambda: rearrange_all_sbc_windows(parent_win=new_dlg))
 
     def _refresh_recent_codes_combo(self):
         """【🔄 刷新最近标的下拉框】保留最新 10 个，显示 '代码 股票名称' 并高亮当前代码"""

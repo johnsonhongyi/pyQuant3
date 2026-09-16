@@ -54,6 +54,10 @@ class PositionWatchItem:
     rally_dwell_seconds: float = 0.0      # 接近阻力位停留时间(秒)
     rally_peak_price: float = 0.0         # 本轮反弹摸到的最高价
 
+    # 💥 [NEW] 底抬高企稳与VWAP向上位移反转保护特征
+    is_reversal_protected: bool = False   # 是否处于底抬高企稳+VWAP位移反转结构保护中
+    higher_low_stop: float = 0.0          # 底抬高关键防守线 (Higher Low 次低点)
+
 
 @dataclass
 class ExitAction:
@@ -137,6 +141,13 @@ class ProactiveExitEngine:
         now = current_time if current_time is not None else time.time()
         ctx = extra_ctx or {}
 
+        # 💥 [NEW] 反转结构持仓保护上下文注入与次低点止损更新
+        if ctx.get("is_reversal_structure", False):
+            pos.is_reversal_protected = True
+        hl_ctx = float(ctx.get("higher_low", 0.0))
+        if hl_ctx > 0:
+            pos.higher_low_stop = max(pos.higher_low_stop, hl_ctx)
+
         try:
             # 1. 更新持仓极值与分时历史
             if price > pos.highest_price:
@@ -157,6 +168,20 @@ class ProactiveExitEngine:
                 pos.minutes_below_vwap += 1
             else:
                 pos.minutes_below_vwap = 0
+
+            # 💥 [NEW] 阶梯次低点硬止损保护：若跌破关键底抬高防守线，直接全清离场
+            if pos.higher_low_stop > 0 and price < pos.higher_low_stop * 0.99:
+                return self._record_action(pos, ExitAction(
+                    code=pos.code,
+                    rule_id="exit_higher_low_broken",
+                    rule_name="跌破次低点防守线(企稳结构破坏)",
+                    layer=8,
+                    action_type="EXIT_ALL",
+                    size_pct=1.0,
+                    trigger_price=price,
+                    reason=f"价格跌破底抬高关键防守线 {pos.higher_low_stop:.2f}元 (现价 {price:.2f}元)，反转企稳结构失效，执行清仓止损",
+                    timestamp=now,
+                ))
 
             # 2. 依次按优先级评估 8 层守护
             # Layer 1: 时间衰减
@@ -220,6 +245,10 @@ class ProactiveExitEngine:
     def _eval_layer1_time_decay(
         self, pos: PositionWatchItem, current_price: float, now: float
     ) -> Optional[ExitAction]:
+        # 💥 [NEW] 底抬高企稳与VWAP位移反转结构生效时，若价格在次低点或成本线上方，豁免时间衰减止损
+        if pos.is_reversal_protected and current_price >= pos.entry_price * 0.992:
+            return None
+
         minutes_held = (now - pos.entry_time) / 60.0
         if minutes_held < 10.0:
             return None
@@ -312,6 +341,10 @@ class ProactiveExitEngine:
     def _eval_layer3_failed_rally(
         self, pos: PositionWatchItem, current_price: float, volume_ratio: float, now: float
     ) -> Optional[ExitAction]:
+        # 💥 [NEW] 底抬高企稳与VWAP位移反转结构生效时，突破/逼近前高属于反转主升确立，绝非反弹力竭，彻底豁免 Layer 3 出局
+        if pos.is_reversal_protected:
+            return None
+
         # 寻找前高参考阻力位：依次比较 prev_day_high, vwap_yesterday, intraday_high_before
         candidates = [c for c in [pos.prev_day_high, pos.vwap_yesterday, pos.intraday_high_before] if c > pos.entry_price * 0.98]
         if not candidates:
@@ -373,6 +406,10 @@ class ProactiveExitEngine:
     def _eval_layer4_distribution(
         self, pos: PositionWatchItem, current_price: float, volume_ratio: float, ctx: Dict[str, Any], now: float
     ) -> Optional[ExitAction]:
+        # 💥 [NEW] 底抬高企稳与VWAP位移反转结构生效时，突破冲高回踩属于健康洗盘，豁免 Layer 4 派发出局
+        if pos.is_reversal_protected:
+            return None
+
         open_price = ctx.get("open", pos.entry_price)
         intraday_high = ctx.get("high", pos.highest_price)
         high_drop_event = bool(ctx.get("pattern_high_drop", False))
