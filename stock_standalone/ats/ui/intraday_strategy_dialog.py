@@ -2590,6 +2590,43 @@ class SBCQuickCodeLineEdit(QLineEdit):
             self.code_submitted.emit(c_clean)
 
 
+def _is_ats_shutting_down() -> bool:
+    """检查当前是否处于 ATS 主系统退出/关闭流程中 (支持标记文件、环境变量与主进程 PID 探针)"""
+    try:
+        from sys_utils import get_app_root
+        closing_flag_file = os.path.join(get_app_root(), "config", ".ats_closing")
+        if os.path.exists(closing_flag_file):
+            return True
+    except Exception:
+        pass
+
+    if os.environ.get("ATS_IS_CLOSING") == "1":
+        return True
+
+    parent_pid = os.environ.get("ATS_MAIN_PID")
+    if parent_pid:
+        try:
+            pid = int(parent_pid)
+            if sys.platform == "win32":
+                import ctypes
+                kernel32 = ctypes.windll.kernel32
+                SYNCHRONIZE = 0x00100000
+                h_proc = kernel32.OpenProcess(SYNCHRONIZE, False, pid)
+                if h_proc:
+                    kernel32.CloseHandle(h_proc)
+                else:
+                    return True
+            else:
+                try:
+                    os.kill(pid, 0)
+                except OSError:
+                    return True
+        except Exception:
+            pass
+
+    return False
+
+
 class SBCIntradayChartDialog(QWidget):
     """
     SBC 实盘分时走势与关键阶梯基准图 彻底独立实时观察窗口 (100% 非模态、非置顶、自由层级覆盖与多屏拉伸)
@@ -3174,10 +3211,22 @@ class SBCIntradayChartDialog(QWidget):
                         if sw < 1000 and sh < 650:
                             target_w, target_h = sw, sh
 
+                    open_item_geo = None
+                    if "sbc_open_windows" in data and isinstance(data["sbc_open_windows"], list):
+                        for item in data["sbc_open_windows"]:
+                            if item.get("code") == self.code:
+                                open_item_geo = item
+                                break
+                    if not open_item_geo and "sbc_holdings_windows" in data and isinstance(data["sbc_holdings_windows"], list):
+                        for item in data["sbc_holdings_windows"]:
+                            if item.get("code") == self.code:
+                                open_item_geo = item
+                                break
+
                     code_geo = data.get("sbc_geometries", {}).get(self.code)
                     latest_geo = data.get("sbc_window_geometry") or data.get("sbc_geometries", {}).get("latest")
                     
-                    geo_dict = code_geo or latest_geo
+                    geo_dict = open_item_geo or code_geo or latest_geo
                     if isinstance(geo_dict, dict) and "width" in geo_dict and "height" in geo_dict:
                         gw = int(geo_dict.get("width", target_w))
                         gh = int(geo_dict.get("height", target_h))
@@ -3480,12 +3529,26 @@ class SBCIntradayChartDialog(QWidget):
 
         self._is_closing = True
 
-        # 若非整个程序退出（即用户手动单独关闭该 SBC 窗口），立即从持久化列表中除名
-        # 若处于持仓盯盘模式，无论是单窗口关闭还是逐个关闭，均立即剔除该标的，支持增减盯盘标的
-        try:
-            _remove_sbc_open_record(self.code)
-        except Exception:
-            pass
+        # 若处于持仓盯盘模式，手动单独关闭某窗口时立即除名并写盘保存当前剩余有效窗口；统一退出时则保留
+        is_holdings_mode = (os.environ.get("SBC_IS_HOLDINGS_LAUNCHER") == "1")
+        if is_holdings_mode:
+            if not is_app_exiting and not _is_ats_shutting_down():
+                try:
+                    _remove_sbc_open_record(self.code)
+                except Exception:
+                    pass
+                try:
+                    from run_sbc import save_launcher_holdings_windows
+                    save_launcher_holdings_windows()
+                except Exception:
+                    pass
+        else:
+            # 常规 ATS SBC 窗口：只有用户手动单独关闭时（非随 ATS 统一退出）才除名！
+            if not is_app_exiting and not _is_ats_shutting_down():
+                try:
+                    _remove_sbc_open_record(self.code)
+                except Exception:
+                    pass
         try:
             if hasattr(self, 'ladder_engine') and self.ladder_engine:
                 self.ladder_engine.save_intraday_cache(force=False)
@@ -4830,7 +4893,12 @@ def _remove_sbc_open_record(code: str):
 
 
 def save_all_open_sbc_windows():
-    """【💾 全局保存所有已打开的 SBC 窗口与坐标、周期】ATS 退出或定时刷盘时调用"""
+    """【💾 全局保存所有已打开的 SBC 窗口与坐标、周期】ATS 退出或定时刷盘时调用
+    全面支持：
+    1. 当前 ATS 进程内的 SBCIntradayChartDialog 窗口；
+    2. 由 ATS 调起的独立 SBC 子进程窗口 (通过 SBCProcessManager 与 Win32 窗口位置检测)；
+    3. 杜绝在子进程运行态下将 sbc_open_windows 误清空为 []！
+    """
     try:
         from PyQt6.QtWidgets import QApplication
         from PyQt6.sip import isdeleted
@@ -4838,14 +4906,17 @@ def save_all_open_sbc_windows():
         last_valid_geo = None
         period_map = {}
         latest_period = None
+
+        # 1. 扫描当前主进程内的 SBC 窗口 (同进程或单测模式)
         for w in QApplication.topLevelWidgets():
             if isinstance(w, SBCIntradayChartDialog) and not isdeleted(w) and w.isVisible():
+                if getattr(w, '_is_closing', False):
+                    continue
                 geo = w.normal_geometry if (getattr(w, 'is_hidden_state', False) and getattr(w, 'normal_geometry', None)) else w.geometry()
                 c = getattr(w, 'code', None)
                 cur_period = getattr(w, '_current_period_mode', '1m')
                 if c:
                     c_clean = str(c).zfill(6)
-                    # 💡 持久化当前窗口设置：周期、自动策略开关、回测测算开关、数据日志显隐
                     is_auto_strat = bool(getattr(w, 'btn_auto_strategy', None).isChecked() if hasattr(w, 'btn_auto_strategy') else True)
                     is_log_vis = bool(getattr(w, 'log_box', None).isVisible() if hasattr(w, 'log_box') else False)
                     eval_btn = getattr(w, 'btn_eval_r', None)
@@ -4869,6 +4940,78 @@ def save_all_open_sbc_windows():
                     if geo.width() >= 200 and geo.height() >= 100:
                         last_valid_geo = geo
 
+        # 2. 扫描由 SBCProcessManager 纳管的活跃独立子进程窗口 (实盘独立进程模式)
+        try:
+            from ats.ui.sbc_launcher import SBCProcessManager
+            mgr = SBCProcessManager.get_instance()
+            mgr.cleanup_dead_processes()
+            running_codes = mgr.get_running_codes()
+
+            if running_codes:
+                cfg_path_read = _get_sbc_layout_cfg_path()
+                old_data_read = {}
+                if os.path.exists(cfg_path_read):
+                    try:
+                        with open(cfg_path_read, "r", encoding="utf-8") as f_r:
+                            old_data_read = json.load(f_r)
+                    except Exception:
+                        pass
+                old_open_items = {item.get("code"): item for item in old_data_read.get("sbc_open_windows", []) if isinstance(item, dict) and item.get("code")}
+
+                subproc_geos = {}
+                if sys.platform == "win32":
+                    try:
+                        import win32gui, win32process
+                        pids = {p.pid for p in mgr._procs.values() if p and p.poll() is None}
+                        def _enum_subproc_cb(hwnd, _):
+                            try:
+                                if win32gui.IsWindowVisible(hwnd):
+                                    _, w_pid = win32process.GetWindowThreadProcessId(hwnd)
+                                    if w_pid in pids:
+                                        t = win32gui.GetWindowText(hwnd)
+                                        for c in running_codes:
+                                            if c in t:
+                                                l, top, r, b = win32gui.GetWindowRect(hwnd)
+                                                w = max(320, r - l)
+                                                h = max(180, b - top)
+                                                subproc_geos[c] = {"x": l, "y": top, "width": w, "height": h}
+                                                break
+                            except Exception:
+                                pass
+                            return True
+                        win32gui.EnumWindows(_enum_subproc_cb, None)
+                    except Exception:
+                        pass
+
+                existing_c = {item["code"] for item in active_list}
+                for c in running_codes:
+                    if c not in existing_c:
+                        old_item = old_open_items.get(c, {})
+                        s_geo = subproc_geos.get(c)
+                        gx = s_geo["x"] if s_geo else old_item.get("x", 100)
+                        gy = s_geo["y"] if s_geo else old_item.get("y", 100)
+                        gw = s_geo["width"] if s_geo else old_item.get("width", 680)
+                        gh = s_geo["height"] if s_geo else old_item.get("height", 420)
+                        gp = old_item.get("period_mode") or old_data_read.get("sbc_period_modes", {}).get(c) or "10d"
+
+                        active_list.append({
+                            "code": c,
+                            "x": gx,
+                            "y": gy,
+                            "width": gw,
+                            "height": gh,
+                            "anchor_edge": old_item.get("anchor_edge"),
+                            "is_hidden_state": bool(old_item.get("is_hidden_state", False)),
+                            "period_mode": gp,
+                            "auto_strategy": old_item.get("auto_strategy", True),
+                            "log_visible": old_item.get("log_visible", False),
+                            "eval_r": old_item.get("eval_r", True)
+                        })
+                        period_map[c] = gp
+                        latest_period = gp
+        except Exception as e_proc_mgr:
+            logger.debug(f"SBCProcessManager 扫描活跃子进程异常: {e_proc_mgr}")
+
         cfg_path = _get_sbc_layout_cfg_path()
         data = {}
         if os.path.exists(cfg_path):
@@ -4879,6 +5022,7 @@ def save_all_open_sbc_windows():
                 data = {}
 
         data["sbc_open_windows"] = active_list
+        data["initialized"] = True
         if "sbc_period_modes" not in data:
             data["sbc_period_modes"] = {}
         data["sbc_period_modes"].update(period_map)
@@ -4911,9 +5055,12 @@ def save_all_open_sbc_windows():
         logger.debug(f"保存所有已打开 SBC 窗口列表异常: {e}")
 
 
-def restore_all_open_sbc_windows(parent_win=None) -> List[SBCIntradayChartDialog]:
-    """【🚀 启动时自动恢复所有持久化的 SBC 窗口、位置、所选周期及设置】"""
-    restored_dialogs: List[SBCIntradayChartDialog] = []
+def restore_all_open_sbc_windows(parent_win=None, as_subprocess: bool = False) -> List:
+    """【🚀 启动时自动恢复所有持久化的 SBC 窗口、位置、所选周期及设置】
+    :param parent_win: 父工作台引用
+    :param as_subprocess: 是否以独立子进程方式唤起 (ATS 启动默认 True，彻底隔离主线程)
+    """
+    restored_dialogs = []
     try:
         cfg_path = _get_sbc_layout_cfg_path()
         if not os.path.exists(cfg_path):
@@ -4922,6 +5069,20 @@ def restore_all_open_sbc_windows(parent_win=None) -> List[SBCIntradayChartDialog
             data = json.load(f)
         sbc_list = data.get("sbc_open_windows", [])
         if not sbc_list:
+            return restored_dialogs
+
+        if as_subprocess:
+            from ats.ui.sbc_launcher import launch_sbc_process
+            for item in sbc_list:
+                code = item.get("code")
+                if not code:
+                    continue
+                saved_period = item.get("period_mode") or item.get("period") or (
+                    data.get("sbc_period_modes", {}).get(str(code).zfill(6))
+                ) or "10d"
+                proc = launch_sbc_process(code, period_mode=saved_period)
+                if proc:
+                    restored_dialogs.append(proc)
             return restored_dialogs
 
         from gui_utils import clamp_window_to_screens

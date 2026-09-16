@@ -127,13 +127,90 @@ class SBCProcessManager:
 
         logger.info(f"[SBCLauncher] 正在优雅关闭持仓盯盘独立进程 (PID={proc.pid}) 并等待持久化...")
         try:
+            # 💡 【核心持久化】在关闭前精确捕获当前仍然处于打开显示状态的窗口列表，已经手动关闭的窗口 HWND 已消亡，绝对不会被持久化！
+            active_launcher_windows = []
             if sys.platform == "win32":
                 import win32gui
                 import win32process
                 import win32con
+                import re
 
                 target_pid = proc.pid
 
+                # 1. 优先扫描当前真正存活且可见的持仓盯盘窗口
+                def _scan_visible_cb(hwnd, _):
+                    try:
+                        if win32gui.IsWindowVisible(hwnd):
+                            _, w_pid = win32process.GetWindowThreadProcessId(hwnd)
+                            if w_pid == target_pid:
+                                t = win32gui.GetWindowText(hwnd)
+                                m = re.search(r"[【\[(]?(\d{6})", t)
+                                if m:
+                                    c = m.group(1)
+                                    if not any(item.get("code") == c for item in active_launcher_windows):
+                                        l, top, r, b = win32gui.GetWindowRect(hwnd)
+                                        w = max(640, r - l)
+                                        h = max(420, b - top)
+                                        active_launcher_windows.append({
+                                            "code": c,
+                                            "x": l,
+                                            "y": top,
+                                            "width": w,
+                                            "height": h,
+                                            "period_mode": "10d"
+                                        })
+                    except Exception:
+                        pass
+                    return True
+
+                try:
+                    win32gui.EnumWindows(_scan_visible_cb, None)
+                except Exception:
+                    pass
+
+                # 2. 将当前仍然打开的窗口精准写盘持久化至 sbc_launcher_holdings_layout.json
+                try:
+                    import json
+                    from run_sbc import _get_launcher_layout_cfg_path
+                    cfg_path = _get_launcher_layout_cfg_path()
+                    old_data = {}
+                    if os.path.exists(cfg_path):
+                        try:
+                            with open(cfg_path, "r", encoding="utf-8") as f:
+                                old_data = json.load(f)
+                        except Exception:
+                            old_data = {}
+
+                    old_period_map = old_data.get("sbc_period_modes", {})
+                    for item in active_launcher_windows:
+                        c = item["code"]
+                        if c in old_period_map:
+                            item["period_mode"] = old_period_map[c]
+
+                    save_data = {
+                        "sbc_holdings_windows": active_launcher_windows,
+                        "sbc_open_windows": active_launcher_windows,
+                        "initialized": True
+                    }
+                    if "sbc_period_modes" in old_data:
+                        save_data["sbc_period_modes"] = old_data["sbc_period_modes"]
+
+                    tmp_path = cfg_path + f".tmp_{os.getpid()}"
+                    with open(tmp_path, "w", encoding="utf-8") as f:
+                        json.dump(save_data, f, ensure_ascii=False, indent=2)
+                    try:
+                        if os.path.exists(cfg_path):
+                            os.replace(tmp_path, cfg_path)
+                        else:
+                            os.rename(tmp_path, cfg_path)
+                    except Exception:
+                        import shutil
+                        shutil.move(tmp_path, cfg_path)
+                    logger.info(f"[SBCLauncher] ✅ 统一关闭时成功精准持久化当前打开的 {len(active_launcher_windows)} 个盯盘窗口 (已手动关闭的彻底排除)")
+                except Exception as e_save:
+                    logger.error(f"[SBCLauncher] 统一关闭写盘异常: {e_save}")
+
+                # 3. 向窗口投递 WM_CLOSE 优雅退出
                 def _enum_cb(hwnd, _):
                     try:
                         _, w_pid = win32process.GetWindowThreadProcessId(hwnd)
@@ -216,9 +293,12 @@ class SBCProcessManager:
         logger.info(f"[SBCLauncher] 🚀 正在启动标的 {c_clean} 的独立 SBC 进程: {' '.join(cmd)}")
         try:
             creationflags = subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0
+            env = os.environ.copy()
+            env["ATS_MAIN_PID"] = str(os.getpid())
             proc = subprocess.Popen(
                 cmd,
                 cwd=app_root,
+                env=env,
                 creationflags=creationflags,
                 close_fds=(sys.platform != "win32")
             )
