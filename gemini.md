@@ -1,3 +1,20 @@
+## 2026-09-16 21:10
+- [x] **【Git 分支分叉 (Diverged) 与 Merge 冲突根因破案及完全对齐】(`gemini.md`, `stock_standalone/gemini.md`)**：
+    - [x] **操盘手反馈问题**：“修复问题,哪里导致的出现不一致的bug”；“gemini.md 两个差异可以丢弃”；
+    - [x] **分叉与不一致致命根因破案 (P0)**：
+        1. **同名 Commit 分叉 (`736de040` vs `dcdce323`)**：
+           - 今日 16:41:31 向远程 `origin/main` 推送了提交 `736de040`（《管理器添加antigravity_manager灾难恢复及切换自愈2》）；
+           - 随后 16:52:21 本地重做/修正了该提交，生成包含 `manage_window_layout.spec` 的新 commit `dcdce323`；
+           - 本地随后在其后继续提交了 3 个功能提交（`ce89a505`、`389c09c8`、`b83d065d`），导致本地领先远程 4 个 commit，远程领先分叉点 1 个 commit；
+        2. **Git Pull 触发 3-way Merge 挂起与未合并标记**：
+           - 在 VS Code 中执行拉取/同步时触发三方合并，代码文件自动合并成功，但两处 `gemini.md` 顶部均有新记录追加，产生文本重叠冲突（`both modified: gemini.md`），留下 `<<<<<<< HEAD ... ======= >>>>>>> 736de040` 未决标记并出现 `↓M, !`；
+        3. **多工作树 (Worktree) 视图视觉混淆**：
+           - 机器存在两个 worktree：`pyQuant3`（分支 `main`）与 `pyQuant3_1b58ad8`（分支 `legacy-simtrade`），VS Code 源代码管理器将其合并展示引发关注；
+    - [x] **根治措施与验证**：
+        1. 按照指示丢弃 `736de040` 在 `gemini.md` 的无效冲突标记，以本地 HEAD 为准执行 `checkout --ours`；
+        2. 成功完成 Merge Commit 并闭环（`Merge branch 'origin/main' into main`），工作区彻底恢复 Clean 状态；
+        3. 5/5 项 `antigravity_manager` 测试及 15/15 项 `SBC` + `TDX` 实时集成测试 100% PASSED 全部通过。
+
 ## 2026-09-16 19:48
 - [x] **【人气综合 TDX API 盘口自动更新全面对齐 cct.ats_tdx_interval、实盘误杀 bug 根治与底部自定义频率及持久化】(`stock_standalone/popularity_resonance_gui.py`, `stock_standalone/tests/test_pr_tdx_realtime_integration.py`)**：
     - [x] **操盘手明确要求**：“人气综合之前调整为TDX的API更新涨跌,60分涨速,以及vwap信息,但是实盘没有自动对齐ats_tdx_interval数据自动更新,这个更新频率可以默认跟随cct.ats_tdx_interval ,并在人气窗口图2标记位置添加自定义设置减少服务器压力.自动持久化”；
