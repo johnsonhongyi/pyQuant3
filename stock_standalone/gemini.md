@@ -1,3 +1,33 @@
+## 2026-09-16 12:35
+- [x] **【新股次新股 (IPO_阶梯) 自定义 ats_col 包含转义列 (win -> 连阳) 提取失败与单元格空白 Bug 彻底根除】(`ats/ui/new_stock_panel.py`, `tests/test_new_stock_translated_ats_col.py`)**：
+    - [x] **操盘手反馈痛点与业务场景**：
+        1. **操盘手反馈**：“新股次新股获取连阳 win失败,这个转义的bug,是自定义的ats_col = ["dff","ch_dir","ch_slope_deg","ch_bc2","win","red"],资金主线获取win没有任何问题”，并上传 IPO_阶梯看板截屏；
+        2. **截屏比对破案分析**：
+           - 截屏中，表头通过 `vis_column_map` 成功将英文 `"win"` 映射为了中文 **`"连阳"`**；
+           - 旁边的 `"ch_dir"`、`"ch_slope_deg"`、`"ch_bc2"`、`"red"` 均能正常展示数据（如 `-1.00`, `-74.15`, `+34.00`, `+6.00`），**唯独被蓝笔圈出的 `连阳` 列下方所有行全部是一片空白**！
+           - **根本原因深入排查**：
+             ① 原 `_render_table` 中通过 `idx = self._get_col_by_header(c_extra)` 获取自定义列号时，直接传入了原始英文列名 `c_extra="win"`。但表头生成的正是转义后的中文名 **`"连阳"`**，`_get_col_by_header("win")` 在表头中完全匹配不到，返回 `-1`！导致 `extra_col_map` 中直接遗漏了 `"win"`，行渲染循环根本没有遍历到该列，整列变成完全空白；
+             ② 原 `update_from_ipc_df` 从 IPC 行情行提取自定义列时，仅通过 `(c_name, c_name.lower(), c_name.upper())` 匹配，若传入的 IPC DataFrame 行 key 是转义后的中文名（`"连阳"`），则提取失败；
+             ③ 原 `_render_table` 提取单元格数值时同样只查了英文键，缺乏转义中文名（`"连阳"`）双向容错；
+             ④ 缺乏对 `ats_col` 配置热变化的动态同步检测。
+    - [x] **系统级工程落地与架构加固 (KISS / SOLID / DRY)**：
+        1. **表头双向模糊与精确匹配 (`extra_col_map`)**：
+           - 在 `_render_table` 中构建自定义列号映射时，自适应获取 `mapped_h = col_map.get(c_extra, col_map.get(c_extra.lower(), c_extra))`；
+           - 同时将转义后的中文名与原始英文名传入 `idx = self._get_col_by_header(mapped_h, c_extra)`，确保无论是中文表头（`"连阳"`）还是英文表头（`"win"`），均能 100% 精准定位到列号；
+        2. **IPC 行情提取双向兼容 (`update_from_ipc_df`)**：
+           - 提取 `ats_col` 时，候选 key 同时包含 `[c_name, c_name.lower(), c_name.upper(), mapped_name]`；
+           - 命中后同时向 `self.df_data` 中注入 `c_name` 与 `mapped_name`，无论底层数据源是中文还是英文均无缝吸纳；
+           - 优化 `turnover`, `price`, `pct`, `amount_yi`, `float_mv_yi`, `total_mv_yi` 的列存在性安全读取，彻底消除 KeyError 隐患；
+        3. **行渲染多重候选容错提取与格式对齐**：
+           - 渲染每一行单元格时，同时支持英文与中文键查找 `raw_c_val`；
+           - 统一使用 `f"{c_num:+.2f}"` 与红绿高亮着色，与旁边的 `red` 阳线数等列在视觉上高度协调一致；
+        4. **配置热重载支持**：
+           - `update_from_ipc_df` 开头检测 `current_extra = get_new_stock_extra_cols()`，当用户在配置中增删列时自动重置并更新表头。
+    - [x] **自动化测试 100% 验证通过 (20/20 PASSED)**：
+        1. 专项测试 `tests/test_new_stock_translated_ats_col.py`: 3/3 PASSED（涵盖表头生成 win -> 连阳、update_from_ipc_df 提取连阳并在单元格中成功渲染出 `+0.00`/`+3.00` 绝非空白、IPC 中文 key 兼容支持）；
+        2. 回归测试 `tests/test_new_stock_sorting_comprehensive.py`: 4/4 PASSED；
+        3. 回归测试 `tests/test_new_stock_module.py`: 13/13 PASSED。
+
 ## 2026-09-16 12:26
 - [x] **【SBC 走势图局部放大查看时买卖信号错位、跨日扎堆重叠、幽灵垂直堆叠 Bug 彻底根治】(`ats/ui/intraday_strategy_dialog.py`, `tests/test_sbc_zoom_signal_clipping.py`)**：
     - [x] **操盘手反馈痛点与截屏排查**：

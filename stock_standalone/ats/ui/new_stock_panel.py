@@ -780,6 +780,14 @@ class NewStockPanel(QWidget):
             self._needs_render = True
             return
 
+        # 动态同步自定义列 (ats_col)：若配置发生变化，即时平滑热重载表头与列结构
+        cur_extra = get_new_stock_extra_cols()
+        if getattr(self, 'extra_cols', None) != cur_extra:
+            self.extra_cols = cur_extra
+            headers = get_new_stock_table_headers(self.extra_cols)
+            self.table.setColumnCount(len(headers))
+            self.table.setHorizontalHeaderLabels(headers)
+
         if self.df_data.empty:
             try:
                 fetcher = NewStockFetcher.get_instance()
@@ -829,8 +837,8 @@ class NewStockPanel(QWidget):
 
                 # ── 新股行情权威性原则 ──
                 # 新股现价、涨跌幅、换手率等核心实时行情由底层 TDX API 权威直连驱动，IPC 仅同步全市场指标，绝不覆写已由 TDX 算好的真实价格与涨跌幅！
-                local_p = clean_num(self.df_data.at[idx, "price"], default=0.0)
-                local_pct = clean_num(self.df_data.at[idx, "pct"], default=0.0)
+                local_p = clean_num(self.df_data.at[idx, "price"] if "price" in self.df_data.columns else 0.0, default=0.0)
+                local_pct = clean_num(self.df_data.at[idx, "pct"] if "pct" in self.df_data.columns else 0.0, default=0.0)
 
                 p = clean_num(ipc_row.get("close", ipc_row.get("price", ipc_row.get("now", 0.0))))
                 # 仅当本地尚无价格时，才允许从 IPC 降级补充
@@ -842,7 +850,7 @@ class NewStockPanel(QWidget):
                         self.df_data.at[idx, "pct"] = pct_val
 
                 # 换手率：若本地无换手率且 IPC 有有效换手率时补充
-                local_to = clean_num(self.df_data.at[idx, "turnover"], default=0.0)
+                local_to = clean_num(self.df_data.at[idx, "turnover"] if "turnover" in self.df_data.columns else 0.0, default=0.0)
                 if local_to <= 0:
                     to_val = ipc_row.get("turnoverrate", ipc_row.get("turnover_ratio", ipc_row.get("hsl")))
                     if to_val is not None:
@@ -851,7 +859,7 @@ class NewStockPanel(QWidget):
                             self.df_data.at[idx, "turnover"] = to_clean
 
                 # 成交额：若本地无成交额且 IPC 有有效成交额时补充
-                local_amt = clean_num(self.df_data.at[idx, "amount_yi"], default=0.0)
+                local_amt = clean_num(self.df_data.at[idx, "amount_yi"] if "amount_yi" in self.df_data.columns else 0.0, default=0.0)
                 if local_amt <= 0:
                     amt_val = ipc_row.get("amount", ipc_row.get("turnover", 0.0))
                     amt_clean = clean_num(amt_val, default=0.0)
@@ -886,7 +894,7 @@ class NewStockPanel(QWidget):
                     self.df_data.at[idx, "resonance"] = str(res_raw)
 
                 # 5. 同步市值字段 (若本地无市值时从 IPC 补充)
-                local_fmv = clean_num(self.df_data.at[idx, "float_mv_yi"], default=0.0)
+                local_fmv = clean_num(self.df_data.at[idx, "float_mv_yi"] if "float_mv_yi" in self.df_data.columns else 0.0, default=0.0)
                 if local_fmv <= 0:
                     fmv_raw = ipc_row.get("nmc", ipc_row.get("float_mv", ipc_row.get("float_mv_yi")))
                     if fmv_raw is not None and not pd.isna(fmv_raw):
@@ -896,7 +904,7 @@ class NewStockPanel(QWidget):
                         if fmv_num > 0:
                             self.df_data.at[idx, "float_mv_yi"] = fmv_num
 
-                local_tmv = clean_num(self.df_data.at[idx, "total_mv_yi"], default=0.0)
+                local_tmv = clean_num(self.df_data.at[idx, "total_mv_yi"] if "total_mv_yi" in self.df_data.columns else 0.0, default=0.0)
                 if local_tmv <= 0:
                     tmv_raw = ipc_row.get("mktcap", ipc_row.get("total_mv", ipc_row.get("total_mv_yi")))
                     if tmv_raw is not None and not pd.isna(tmv_raw):
@@ -906,11 +914,24 @@ class NewStockPanel(QWidget):
                         if tmv_num > 0:
                             self.df_data.at[idx, "total_mv_yi"] = tmv_num
 
-                # 6. 提取动态自定义列 (ats_col)
+                # 6. 提取动态自定义列 (ats_col, 支持 vis_column_map 中英文双向兼容提取)
+                try:
+                    col_map = getattr(cct, 'vis_column_map', {}) or {}
+                except Exception:
+                    col_map = {}
+
                 for c_name in self.extra_cols:
-                    for k in (c_name, c_name.lower(), c_name.upper()):
+                    mapped_name = col_map.get(c_name, col_map.get(c_name.lower(), c_name))
+                    cand_keys = [c_name, c_name.lower(), c_name.upper()]
+                    if mapped_name and mapped_name not in cand_keys:
+                        cand_keys.append(mapped_name)
+
+                    for k in cand_keys:
                         if k in ipc_row:
-                            self.df_data.at[idx, c_name] = ipc_row.get(k)
+                            val = ipc_row.get(k)
+                            self.df_data.at[idx, c_name] = val
+                            if mapped_name and mapped_name != c_name:
+                                self.df_data.at[idx, mapped_name] = val
                             break
 
                 # 7. 同步天梯或 IPC 传入的竞价信号（若本地尚未打上时补充）
@@ -1136,10 +1157,16 @@ class NewStockPanel(QWidget):
         c_res = self._get_col_by_header("大盘共振", "共振")
         c_strat = self._get_col_by_header("阶梯策略")
 
-        # 动态自定义列映射
+        # 动态自定义列映射 (支持 vis_column_map 中英文双向匹配，彻底解决连阳/win等转义列索引丢失Bug)
+        try:
+            col_map = getattr(cct, 'vis_column_map', {}) or {}
+        except Exception:
+            col_map = {}
+
         extra_col_map = {}
         for c_extra in self.extra_cols:
-            idx = self._get_col_by_header(c_extra)
+            mapped_h = col_map.get(c_extra, col_map.get(c_extra.lower(), c_extra))
+            idx = self._get_col_by_header(mapped_h, c_extra)
             if idx >= 0:
                 extra_col_map[c_extra] = idx
 
@@ -1562,8 +1589,13 @@ class NewStockPanel(QWidget):
 
             # ── 动态自定义列 (ats_col) ──
             for c_ext_col, col_idx in extra_col_map.items():
+                mapped_name = col_map.get(c_ext_col, col_map.get(c_ext_col.lower(), c_ext_col))
+                cand_keys = [c_ext_col, c_ext_col.lower(), c_ext_col.upper()]
+                if mapped_name and mapped_name not in cand_keys:
+                    cand_keys.append(mapped_name)
+
                 raw_c_val = None
-                for k in (c_ext_col, c_ext_col.lower(), c_ext_col.upper()):
+                for k in cand_keys:
                     if k in row:
                         raw_c_val = row.get(k)
                         break
