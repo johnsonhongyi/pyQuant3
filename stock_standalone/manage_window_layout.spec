@@ -25,6 +25,8 @@ a = Analysis(
     hiddenimports=[
         'webTools.window_manager.core', 
         'webTools.window_manager.ui',
+        'webTools.window_manager.antigravity_manager',
+        'sqlite3',
         'screeninfo', 
         'win32gui', 
         'win32con', 
@@ -43,7 +45,6 @@ a = Analysis(
         'pandas',
         'numpy',
         'pyqtgraph',
-        'sqlite3',
         'tables',
         'h5py',
         'tushare',
