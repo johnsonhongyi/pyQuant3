@@ -12,6 +12,18 @@ import sys
 import os
 import ctypes
 
+# 针对 Windows 控制台环境，防止 GBK 编码输出特殊字符或 Emoji 导致 UnicodeEncodeError 崩溃
+if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
+    try:
+        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+    except Exception:
+        pass
+if sys.stderr and hasattr(sys.stderr, 'reconfigure'):
+    try:
+        sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+    except Exception:
+        pass
+
 def get_app_root() -> str:
     """获取程序物理根目录。"""
     current_dir = os.path.dirname(os.path.abspath(__file__)) # webTools
@@ -82,6 +94,8 @@ if __name__ == '__main__':
     debug_mode = False
     autostart_action = None
     sync_action = None
+    ag_action = None
+    ag_target = None
 
     hide_mode = False
 
@@ -115,6 +129,23 @@ if __name__ == '__main__':
         elif arg_lower in ['--sync-status', '-sync-status']:
             sync_action = 'status'
             use_ui = False
+        elif arg_lower in ['--ag-list', '-ag-list', '--ag-accounts', '-ag-accounts']:
+            ag_action = 'list'
+            use_ui = False
+        elif arg_lower in ['--ag-switch', '-ag-switch']:
+            ag_action = 'switch'
+            use_ui = False
+            if i < len(sys.argv) - 1:
+                ag_target = sys.argv[i + 1]
+        elif arg_lower in ['--ag-backup', '-ag-backup']:
+            ag_action = 'backup'
+            use_ui = False
+        elif arg_lower in ['--ag-sync', '-ag-sync']:
+            ag_action = 'sync'
+            use_ui = False
+        elif arg_lower in ['--ag-daemon', '-ag-daemon']:
+            ag_action = 'daemon'
+            use_ui = False
         elif arg_lower == '-log':
             debug_mode = True
             if i + 1 < len(sys.argv):
@@ -141,6 +172,11 @@ if __name__ == '__main__':
         print("  --sync-force          强制全量备份 RamDisk 数据（忽略指纹比对）并退出。")
         print("  --sync-daemon         以纯命令行控制台守护进程模式运行 RamDisk 自动同步。")
         print("  --sync-status         查询当前 RamDisk 自动同步配置与运行状态。")
+        print("  --ag-list             查询本地 Antigravity 账户列表及当前生效状态。")
+        print("  --ag-switch <email>   一键切换 Antigravity 账户并自动同步至 IDE。")
+        print("  --ag-sync             立即执行一次从 Antigravity 到 Antigravity IDE 状态同步。")
+        print("  --ag-backup           备份当前活跃 Antigravity 账户配置到本地配置库。")
+        print("  --ag-daemon           以命令行守护进程模式运行 Antigravity 变动监听与自动同步。")
         print("  -log <level>          开启调试模式并指定级别 (例如: -log debug)。\n")
         sys.exit(0)
 
@@ -222,7 +258,68 @@ if __name__ == '__main__':
             sync_worker.stop()
         sys.exit(0)
 
-    # 6. 关键隔离：只有在启动 UI 模式时才去检查单实例并唤醒已有 UI 视窗；
+    # 6. 如果是处理 Antigravity 账户与同步命令行逻辑
+    if ag_action:
+        from window_manager import (
+            list_antigravity_accounts, get_current_antigravity_account,
+            backup_current_antigravity_account, switch_antigravity_account,
+            sync_antigravity_ide
+        )
+        if ag_action == 'list':
+            curr = get_current_antigravity_account()
+            accounts = list_antigravity_accounts()
+            print("\n" + "=" * 65)
+            print("  [Antigravity 账户列表与状态中心]")
+            print("=" * 65)
+            print(f"当前活跃账户: {curr.get('summary', '未登录/无有效账户')}\n")
+            if not accounts:
+                print("  [空] 未找到任何已配置的账户文件。")
+            else:
+                for idx, acc in enumerate(accounts, 1):
+                    flag = "[当前激活] => " if acc["is_current"] else "            "
+                    print(f"  {idx}. {flag}{acc['name']} <{acc['email']}>")
+                    print(f"      文件: {acc['filename']} (最后更新: {acc['mtime_str']})")
+            print("=" * 65 + "\n")
+            sys.exit(0)
+
+        elif ag_action == 'switch':
+            if not ag_target:
+                print("\n[Antigravity Switch] [错误] 请指定要切换的目标账户邮箱或名称，例如: --ag-switch hongyi2008@gmail.com\n")
+                sys.exit(1)
+            print(f"\n[Antigravity Switch] 正在切换至账户: {ag_target} ...")
+            success, msg = switch_antigravity_account(ag_target, auto_sync=True)
+            print(f"[Antigravity Switch] {'[OK] ' if success else '[FAIL] '}{msg}\n")
+            sys.exit(0 if success else 1)
+
+        elif ag_action == 'backup':
+            print("\n[Antigravity Backup] 正在备份当前活跃账户...")
+            success, msg, path = backup_current_antigravity_account()
+            print(f"[Antigravity Backup] {'[OK] ' if success else '[FAIL] '}{msg}\n")
+            sys.exit(0 if success else 1)
+
+        elif ag_action == 'sync':
+            print("\n[Antigravity Sync] 正在执行状态同步至 Antigravity IDE...")
+            changed, msg = sync_antigravity_ide()
+            print(f"[Antigravity Sync] {msg}\n")
+            sys.exit(0)
+
+        elif ag_action == 'daemon':
+            print("\n[Antigravity Daemon] 正在以控制台守护进程模式启动变动监听与自动同步... 按 Ctrl+C 退出。\n")
+            from window_manager import AntigravitySyncWorker
+            worker = AntigravitySyncWorker(
+                check_interval_sec=1.0,
+                on_sync_callback=lambda m: print(f"[{time.strftime('%H:%M:%S')}] 🔄 [AutoSync] {m}")
+            )
+            worker.start()
+            try:
+                while True:
+                    time.sleep(1)
+            except KeyboardInterrupt:
+                print("\n[Antigravity Daemon] 收到终止信号，正在退出...")
+                worker.stop()
+            sys.exit(0)
+
+    # 7. 关键隔离：只有在启动 UI 模式时才去检查单实例并唤醒已有 UI 视窗；
     # 纯命令行 CLI 模式 (-cli) 绝对不去唤醒/打开 UI 窗口！
     if use_ui:
         if check_and_activate_existing_instance():
