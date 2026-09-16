@@ -1706,10 +1706,22 @@ class CapitalDragonPanel(QWidget):
         if self.main_window and hasattr(self.main_window, 'link_stock'):
             self.main_window.link_stock(code, name)
 
+    def open_sbc_chart(self, code: str, name: str = ""):
+        """【📈 打开 SBC 通道走势图】使用 ATS 统一的 SBC 窗口调度，确保所有走势图等大等高平铺重排"""
+        if not code:
+            return
+        c_clean = _clean_code(code)
+        try:
+            from ats.ui.intraday_strategy_dialog import open_sbc_chart_dialog
+            open_sbc_chart_dialog(self.main_window or self, c_clean, period_mode="10d")
+        except Exception as e:
+            logger.error(f"[CapitalDragonPanel] 打开 SBC 走势图异常: {e}")
+
     def _on_pioneer_double_clicked(self, code: str, name: str):
         if not code:
             return
         logger.info(f"先锋双击打开 SBC: {name} ({code})")
+        self.open_sbc_chart(code, name)
         self.stock_double_clicked.emit(code, name)
         if self.main_window and hasattr(self.main_window, 'on_stock_clicked'):
             self.main_window.on_stock_clicked(code, name, {})
@@ -1777,7 +1789,10 @@ class CapitalDragonPanel(QWidget):
                 menu.addSeparator()
 
             act_sbc = menu.addAction(f"📈 打开 {name}({code}) SBC 通道走势图 (R)")
-            act_sbc.triggered.connect(lambda checked=False, c=code, n=name: self.stock_double_clicked.emit(c, n))
+            act_sbc.triggered.connect(lambda checked=False, c=code, n=name: self.open_sbc_chart(c, n))
+
+            act_detail = menu.addAction(f"🔍 查看 {name}({code}) 个股详情")
+            act_detail.triggered.connect(lambda checked=False, c=code, n=name: self.stock_double_clicked.emit(c, n))
 
         act_ladder = menu.addAction("🔥 打开每日涨停天梯看板")
         act_ladder.triggered.connect(self._on_click_limit_up)
