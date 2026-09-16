@@ -1095,6 +1095,34 @@ class IntradayDecisionEngine:
             pnl_pct = (price - cost_price) / cost_price
             debug["盈亏比例"] = pnl_pct
             
+            # 💥 [NEW] 底抬高企稳与VWAP向上位移反转结构识别与持仓保护
+            lastl1 = float(row.get('lastl1d', snapshot.get('lastl1d', 0)))
+            lastl2 = float(row.get('lastl2d', snapshot.get('lastl2d', 0)))
+            lastl3 = float(row.get('lastl3d', snapshot.get('lastl3d', 0)))
+            lasth1 = float(row.get('lasth1d', snapshot.get('lasth1d', 0)))
+            
+            is_reversal_structure = False
+            higher_low_level = 0.0
+            if lastl1 > 0 and lastl2 > 0 and lastl1 >= lastl2 * 1.008:
+                higher_low_level = lastl1
+                if nclose > 0 and price >= nclose * 0.992:
+                    is_reversal_structure = True
+            elif lastl2 > 0 and lastl3 > 0 and lastl2 >= lastl3 * 1.008:
+                higher_low_level = lastl2
+                if nclose > 0 and price >= nclose * 0.992:
+                    is_reversal_structure = True
+
+            if snapshot.get("is_reversal_structure") or debug.get("is_reversal_structure"):
+                is_reversal_structure = True
+                higher_low_level = max(higher_low_level, float(snapshot.get("higher_low", debug.get("higher_low", 0.0))))
+
+            debug["is_reversal_structure"] = is_reversal_structure
+            debug["higher_low_level"] = higher_low_level
+
+            # 阶梯次低点硬止损保护
+            if higher_low_level > 0 and price < higher_low_level * 0.99:
+                return {"triggered": True, "action": "止损", "position": 0.0, "reason": f"跌破底抬高关键防守位 ¥{higher_low_level:.2f}"}
+
             # 1. 基础百分比硬止损 (亏损超限，全清)
             if pnl_pct < -self.stop_loss_pct:
                 return {"triggered": True, "action": "止损", "position": 0.0, "reason": f"硬止损触发: 亏损{abs(pnl_pct):.1%}"}
@@ -1117,18 +1145,21 @@ class IntradayDecisionEngine:
             highest_since_buy = float(snapshot.get('highest_since_buy', high))
             
             if nclose > 0 and price < nclose:
-                # 高点下移 (Lower Highs)
-                if highest_since_buy > 0 and high < highest_since_buy * 0.985 and pnl_pct < -0.015:
-                    return {"triggered": True, "action": "主动减仓", "position": 0.4, "reason": f"高点下移反弹无力,亏损{abs(pnl_pct):.1%}"}
-                    
-                # 强拒绝 (Strong Rejection)
-                distance_to_vwap = (nclose - high) / nclose if nclose > 0 else 1.0
-                if 0 < distance_to_vwap < 0.005 and high > 0 and (high - price) / high > 0.015 and pnl_pct < -0.01:
-                    return {"triggered": True, "action": "主动防守", "position": 0.3, "reason": "触及均线受阻回落(强拒绝)"}
-                    
-                # 极弱反弹 (Weak Rejection)
-                if distance_to_vwap > 0.015 and high > 0 and (high - price) / high > 0.01 and volume < 0.6 and pnl_pct < -0.015:
-                    return {"triggered": True, "action": "极弱止损", "position": 0.2, "reason": "远端弱势反弹失败伴随缩量"}
+                if is_reversal_structure:
+                    debug["反转保护"] = "底抬高反转突破中，豁免前高阻力减仓与高点下移防守"
+                else:
+                    # 高点下移 (Lower Highs)
+                    if highest_since_buy > 0 and high < highest_since_buy * 0.985 and pnl_pct < -0.015:
+                        return {"triggered": True, "action": "主动减仓", "position": 0.4, "reason": f"高点下移反弹无力,亏损{abs(pnl_pct):.1%}"}
+                        
+                    # 强拒绝 (Strong Rejection)
+                    distance_to_vwap = (nclose - high) / nclose if nclose > 0 else 1.0
+                    if 0 < distance_to_vwap < 0.005 and high > 0 and (high - price) / high > 0.015 and pnl_pct < -0.01:
+                        return {"triggered": True, "action": "主动防守", "position": 0.3, "reason": "触及均线受阻回落(强拒绝)"}
+                        
+                    # 极弱反弹 (Weak Rejection)
+                    if distance_to_vwap > 0.015 and high > 0 and (high - price) / high > 0.01 and volume < 0.6 and pnl_pct < -0.015:
+                        return {"triggered": True, "action": "极弱止损", "position": 0.2, "reason": "远端弱势反弹失败伴随缩量"}
                     
             if structure == "派发" and volume < 0.5 and pnl_pct < -0.015:
                  return {"triggered": True, "action": "流动性预警", "position": 0.4, "reason": "派发结构伴随量能枯竭"}
@@ -1146,7 +1177,10 @@ class IntradayDecisionEngine:
     
             # 6. 分步止盈与移动止盈
             if pnl_pct >= self.take_profit_pct:
-                return {"triggered": True, "action": "目标止盈", "position": 0.0, "reason": f"达到目标止盈: {pnl_pct:.1%}"}
+                if is_reversal_structure:
+                    debug["止盈豁免"] = f"底抬高VWAP位移反转主升中，豁免机械目标止盈({pnl_pct:.1%})，持股博弈主升浪"
+                else:
+                    return {"triggered": True, "action": "目标止盈", "position": 0.0, "reason": f"达到目标止盈: {pnl_pct:.1%}"}
                 
             if highest_since_buy > 0 and highest_since_buy > cost_price:
                 drawdown = (highest_since_buy - price) / highest_since_buy

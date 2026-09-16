@@ -11,6 +11,7 @@ import time
 import logging
 from dataclasses import dataclass, field
 from typing import Dict, Any, Optional, List, Tuple
+import pandas as pd
 
 from ats.vwap_rule_model import VWAPRuleModel
 from ats.consensus_arbiter import ConsensusArbiter, VoteResult, ArbiterDecision
@@ -274,8 +275,23 @@ class VWAPTradingEngine:
         # ---------------------------------------------------------------------
         agg_vote = VoteResult(voter_group="aggressive", decision="REJECT")
 
+        is_reversal = ctx.get("is_reversal_structure", False)
+        hl_price = float(ctx.get("higher_low", 0.0))
+        prev_l = float(ctx.get("prev_low", 0.0))
+        prev_h = float(ctx.get("prev_high", 0.0))
+
+        # 规则 0: VWAP 位移底抬高反转突破 (高低点转换主升反转，最高优先级)
+        if is_reversal:
+            agg_vote = VoteResult(
+                voter_group="aggressive",
+                decision="APPROVE",
+                proposed_size_pct=0.25,
+                rule_id="buy_vwap_displacement_reversal",
+                rule_name="VWAP位移底抬高反转突破",
+                reason=f"底抬高企稳(次低{hl_price:.2f}元>前底{prev_l:.2f}元) + VWAP向上位移 + 突破前高({prev_h:.2f}元)高低点转换",
+            )
         # 规则 1: VWAP 筑底放量突破 (301531 式)
-        if (
+        elif (
             state.price_vs_vwap in ("CROSSING_UP", "ABOVE")
             and state.consolidation_minutes >= 10
             and state.volume_ratio >= 1.1
@@ -333,7 +349,12 @@ class VWAPTradingEngine:
             hesitation_details=state.hesitation_reason,
         )
 
-        if state.is_hesitation_period:
+        if is_reversal:
+            # 反转主升确立，保守组豁免犹豫期并全力支持开仓
+            con_vote.decision = "APPROVE"
+            con_vote.proposed_size_pct = 0.20
+            con_vote.reason = f"保守组审核通过: 底抬高企稳({hl_price:.2f}元)且VWAP位移向上，确立主升反转架构"
+        elif state.is_hesitation_period:
             con_vote.decision = "HESITATE"
             con_vote.reason = f"保守组否决: {state.hesitation_reason}"
         elif state.structure_clarity_score < min_clarity:
@@ -355,3 +376,113 @@ class VWAPTradingEngine:
             now=t,
         )
         return decision
+
+
+def detect_vwap_displacement_reversal(df_bars: pd.DataFrame) -> Dict[str, Any]:
+    """
+    【📈 分时/多日走势：底抬高企稳 + VWAP位移 + 高低点转换反转结构识别器】
+    支持多日分时 (df_bars 包含多天数据) 与单日分时 (df_bars 为单日分时数据)。
+    """
+    res = {
+        "is_reversal": False,
+        "higher_low": 0.0,
+        "prev_low": 0.0,
+        "prev_high": 0.0,
+        "vwap_today": 0.0,
+        "vwap_yesterday": 0.0,
+        "vwap_displacement_pct": 0.0,
+        "reason": ""
+    }
+    if df_bars is None or df_bars.empty or len(df_bars) < 10:
+        return res
+
+    # 1. 尝试按交易日分组 (针对 2d/3d/5d/10d 多日分时)
+    dates = []
+    if "date" in df_bars.columns:
+        dates = df_bars["date"].dropna().unique().tolist()
+    elif "datetime" in df_bars.columns:
+        dates = [str(d)[:10] for d in df_bars["datetime"].dropna().unique()]
+        dates = list(dict.fromkeys(dates))
+    elif isinstance(df_bars.index, pd.Index):
+        first_idx = str(df_bars.index[0])
+        if " " in first_idx:
+            dates = list(dict.fromkeys([str(idx).split()[0] for idx in df_bars.index]))
+
+    if len(dates) >= 2:
+        # 多日分时场景 (以 688635 / 300672 5日图为例)
+        date_groups = []
+        for d in dates:
+            if "date" in df_bars.columns:
+                sub = df_bars[df_bars["date"] == d]
+            else:
+                sub = df_bars[[str(idx).startswith(d) for idx in df_bars.index]]
+            if not sub.empty:
+                h = float(sub["high"].max())
+                l = float(sub["low"].min())
+                c = float(sub["close"].iloc[-1])
+                vw = float(sub["vwap"].iloc[-1]) if "vwap" in sub.columns else c
+                date_groups.append({"date": d, "high": h, "low": l, "close": c, "vwap": vw, "len": len(sub)})
+
+        if len(date_groups) >= 2:
+            today_info = date_groups[-1]
+            prev_info = date_groups[-2]
+
+            # 寻找今日之前的波谷最低点 L1 (探底大底)
+            prior_lows = [g["low"] for g in date_groups[:-1]]
+            l1 = min(prior_lows)
+            # 昨日或最近回踩低点 L2
+            l2 = prev_info["low"]
+
+            # 昨日或前波段高点 H1
+            h1 = prev_info["high"]
+            curr_p = today_info["close"]
+            vw_today = today_info["vwap"]
+            vw_prev = prev_info["vwap"]
+
+            # 条件 1: 次低点抬高企稳 (L2 >= L1 * 1.008 或今日最低 >= L1 * 1.01)
+            # 例如 688635: 09-14=254, 09-15=261.1 > 254; 300672: 09-14=158, 09-15=160.6 > 158
+            is_hl = (l2 >= l1 * 1.008) or (today_info["low"] >= l1 * 1.01 and l2 >= l1 * 0.995)
+
+            # 条件 2: VWAP 向上位移 (vw_today >= vw_prev * 1.002 且当前价站稳均线之上)
+            vw_disp_pct = (vw_today - vw_prev) / vw_prev * 100.0 if vw_prev > 0 else 0.0
+            is_vwap_displaced = (vw_disp_pct >= 0.18) and (curr_p >= vw_today * 0.99)
+
+            # 条件 3: 高低点转换 (突破前高 H1 或冲击前高)
+            is_breakout = (curr_p >= h1 * 0.99) or (today_info["high"] >= h1)
+
+            if is_hl and (is_vwap_displaced or is_breakout):
+                res["is_reversal"] = True
+                res["higher_low"] = l2 if l2 > l1 else today_info["low"]
+                res["prev_low"] = l1
+                res["prev_high"] = h1
+                res["vwap_today"] = vw_today
+                res["vwap_yesterday"] = vw_prev
+                res["vwap_displacement_pct"] = round(vw_disp_pct, 2)
+                res["reason"] = f"多日底抬高企稳(次低{res['higher_low']:.2f}元>前底{l1:.2f}元) + VWAP向上位移({vw_disp_pct:+.2f}%) + 突破前高({h1:.2f}元)结构转换"
+                return res
+
+    # 2. 单日分时场景 (1-day intraday)
+    n = len(df_bars)
+    if n >= 30:
+        p1 = df_bars.iloc[:n//2]
+        p2 = df_bars.iloc[n//2:]
+        l1 = float(p1["low"].min())
+        h1 = float(p1["high"].max())
+        l2 = float(p2["low"].min())
+        curr_p = float(df_bars["close"].iloc[-1])
+        vw_early = float(p1["vwap"].iloc[-1]) if "vwap" in p1.columns else curr_p
+        vw_curr = float(df_bars["vwap"].iloc[-1]) if "vwap" in df_bars.columns else curr_p
+
+        if l2 > l1 * 1.005 and vw_curr > vw_early and curr_p >= h1 * 0.995:
+            disp_pct = (vw_curr - vw_early) / vw_early * 100.0 if vw_early > 0 else 0.0
+            res["is_reversal"] = True
+            res["higher_low"] = l2
+            res["prev_low"] = l1
+            res["prev_high"] = h1
+            res["vwap_today"] = vw_curr
+            res["vwap_yesterday"] = vw_early
+            res["vwap_displacement_pct"] = round(disp_pct, 2)
+            res["reason"] = f"日内底抬高企稳(次低{l2:.2f}元>早盘底{l1:.2f}元) + 分时VWAP上移 + 突破日内前高({h1:.2f}元)"
+            return res
+
+    return res
