@@ -15,7 +15,7 @@ import atexit
 import subprocess
 from typing import Optional, Dict, List
 
-from sys_utils import get_app_root
+from sys_utils import get_app_root, is_packaged_env
 from logger_utils import LoggerFactory
 
 logger = LoggerFactory.getLogger("ATS.SBCLauncher")
@@ -59,8 +59,26 @@ def _activate_window_by_title_keyword(keyword: str) -> bool:
     return False
 
 
+def _is_widget_alive(w) -> bool:
+    """安全判断 QWidget 实例是否存活且可见 (兼容 sip.isdeleted 与各类窗口引用)"""
+    if not w:
+        return False
+    try:
+        from PyQt6.sip import isdeleted
+        if isdeleted(w):
+            return False
+    except (TypeError, ValueError):
+        pass
+    except Exception:
+        return False
+    try:
+        return bool(getattr(w, "isVisible", lambda: False)())
+    except Exception:
+        return False
+
+
 class SBCProcessManager:
-    """SBC 独立子进程全局生命周期管理器 (单例)"""
+    """SBC 独立子进程与进程内降级全局生命周期管理器 (单例)"""
     _instance: Optional["SBCProcessManager"] = None
 
     @classmethod
@@ -72,6 +90,8 @@ class SBCProcessManager:
     def __init__(self):
         # 记录正在运行的 SBC 子进程: key -> subprocess.Popen
         self._procs: Dict[str, subprocess.Popen] = {}
+        # 记录打包或降级环境下在进程内打开的持仓盯盘窗口实例列表
+        self._in_process_holdings: List = []
         # 注册退出钩子，保证即使异常崩溃也能清理子进程
         atexit.register(self.close_all)
 
@@ -85,40 +105,85 @@ class SBCProcessManager:
             self._procs.pop(k, None)
 
     def is_launcher_running(self) -> bool:
-        """检查持仓盯盘启动器 (run_sbc.py) 是否正在运行"""
+        """检查持仓盯盘启动器是否正在运行 (同时支持独立子进程与进程内降级模式)"""
         self.cleanup_dead_processes()
         proc = self._procs.get("__holdings_launcher__")
-        return bool(proc and proc.poll() is None)
+        if proc and proc.poll() is None:
+            return True
+        if self._in_process_holdings:
+            self._in_process_holdings = [w for w in self._in_process_holdings if _is_widget_alive(w)]
+            if self._in_process_holdings:
+                return True
+        return False
 
-    def launch_holdings_watcher(self) -> Optional[subprocess.Popen]:
-        """【🚀 启动持仓盯盘独立进程】以独立进程调起 run_sbc.py 自动恢复或加载当前持仓"""
+    def launch_holdings_watcher(self):
+        """【🚀 启动持仓盯盘】在开发环境下使用独立进程，在打包环境或无外部脚本时全自动安全降级在当前进程内启动"""
         self.cleanup_dead_processes()
-        existing = self._procs.get("__holdings_launcher__")
-        if existing and existing.poll() is None:
-            logger.info(f"[SBCLauncher] 持仓盯盘进程已在运行 (PID={existing.pid})，尝试激活窗口...")
+        if self.is_launcher_running():
+            logger.info("[SBCLauncher] 持仓盯盘已在运行中，尝试激活窗口...")
             self.activate_launcher_windows()
-            return existing
+            return self._procs.get("__holdings_launcher__") or self._in_process_holdings
 
         app_root = get_app_root()
         run_sbc_path = os.path.join(app_root, "run_sbc.py")
-        cmd = [sys.executable, run_sbc_path]
-        flags = subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0
+        is_interpreter = ("python" in os.path.basename(sys.executable).lower())
+        can_run_subproc = (not is_packaged_env()) and is_interpreter and os.path.exists(run_sbc_path)
+
+        if can_run_subproc:
+            cmd = [sys.executable, run_sbc_path]
+            flags = subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0
+            try:
+                proc = subprocess.Popen(
+                    cmd,
+                    cwd=app_root,
+                    creationflags=flags,
+                    close_fds=(sys.platform != "win32")
+                )
+                self._procs["__holdings_launcher__"] = proc
+                logger.info(f"[SBCLauncher] ✅ 成功调起持仓盯盘独立进程 (PID={proc.pid})")
+                return proc
+            except Exception as e:
+                logger.warning(f"[SBCLauncher] 启动持仓盯盘子进程失败，转为进程内降级: {e}")
+
+        # 💡 【打包环境与无外部脚本安全降级】直接在当前进程内存中调起持仓盯盘，严禁调用 sys.executable 误调起 ATS 主程序！
+        logger.info("[SBCLauncher] 处于打包环境或无外部脚本，在当前进程内调起持仓盯盘窗口...")
         try:
-            proc = subprocess.Popen(
-                cmd,
-                cwd=app_root,
-                creationflags=flags,
-                close_fds=(sys.platform != "win32")
-            )
-            self._procs["__holdings_launcher__"] = proc
-            logger.info(f"[SBCLauncher] ✅ 成功调起持仓盯盘独立进程 (PID={proc.pid})")
-            return proc
-        except Exception as e:
-            logger.error(f"[SBCLauncher] 启动持仓盯盘进程失败: {e}", exc_info=True)
+            import run_sbc
+            os.environ["SBC_LAYOUT_CONFIG_PATH"] = run_sbc._get_launcher_layout_cfg_path()
+            os.environ["SBC_IS_HOLDINGS_LAUNCHER"] = "1"
+            restored = run_sbc.restore_launcher_holdings_windows()
+            if not restored:
+                from ats.ui.intraday_strategy_dialog import open_sbc_chart_dialog
+                dlg = open_sbc_chart_dialog(None, code="600733", period_mode="10d")
+                if dlg:
+                    dlg.show()
+                    restored = [dlg]
+            self._in_process_holdings = restored or []
+            logger.info(f"[SBCLauncher] ✅ [打包兼容/内存模式] 成功在进程内调起 {len(self._in_process_holdings)} 个持仓盯盘窗口")
+            return self._in_process_holdings
+        except Exception as e_fallback:
+            logger.error(f"[SBCLauncher] 进程内调起持仓盯盘异常: {e_fallback}", exc_info=True)
             return None
 
     def close_launcher_process(self) -> bool:
-        """【🛑 统一关闭持仓盯盘进程】向其窗口投递 WM_CLOSE 消息优雅关闭，触发 aboutToQuit 独立持久化"""
+        """【🛑 统一关闭持仓盯盘】优雅关闭并持久化保存持仓盯盘窗口 (支持独立子进程与进程内降级模式)"""
+        # 1. 优先关闭并持久化保存在当前进程内打开的持仓盯盘窗口
+        if self._in_process_holdings:
+            try:
+                import run_sbc
+                alive_wins = [w for w in self._in_process_holdings if _is_widget_alive(w)]
+                if alive_wins:
+                    logger.info(f"[SBCLauncher] 正在关闭进程内 {len(alive_wins)} 个持仓盯盘窗口并持久化...")
+                    run_sbc.save_launcher_holdings_windows()
+                    for w in alive_wins:
+                        try:
+                            w.close()
+                        except Exception:
+                            pass
+                self._in_process_holdings.clear()
+                logger.info("[SBCLauncher] 进程内持仓盯盘窗口已统一关闭并完成持久化。")
+            except Exception as e_inproc_close:
+                logger.error(f"[SBCLauncher] 关闭进程内持仓盯盘窗口异常: {e_inproc_close}")
         self.cleanup_dead_processes()
         proc = self._procs.get("__holdings_launcher__")
         if not proc or proc.poll() is not None:
@@ -242,7 +307,17 @@ class SBCProcessManager:
             return False
 
     def activate_launcher_windows(self):
-        """尝试将所有 SBC 窗口置顶激活"""
+        """尝试将所有 SBC 窗口置顶激活 (同时支持进程内与独立子进程窗口)"""
+        if self._in_process_holdings:
+            try:
+                for w in self._in_process_holdings:
+                    if _is_widget_alive(w):
+                        w.show()
+                        w.raise_()
+                        w.activateWindow()
+            except Exception:
+                pass
+
         try:
             import win32gui, win32con
             def _enum_cb(hwnd, _):
@@ -272,41 +347,68 @@ class SBCProcessManager:
 
         self.cleanup_dead_processes()
 
-        # 1. 检查当前是否已有该股票的运行中子进程
+        # 1. 检查当前是否已有该股票的运行中子进程或进程内窗口
         existing_proc = self._procs.get(c_clean)
         if existing_proc and existing_proc.poll() is None:
             logger.info(f"[SBCLauncher] 标的 {c_clean} 已在独立子进程 (PID={existing_proc.pid}) 运行中，尝试唤醒窗口...")
             if _activate_window_by_title_keyword(f"【{c_clean}"):
                 return existing_proc
 
-        # 2. 构造命令行启动 run_sbc.py 独立进程
+        try:
+            from PyQt6.QtWidgets import QApplication
+            from ats.ui.intraday_strategy_dialog import SBCIntradayChartDialog
+            for w in QApplication.topLevelWidgets():
+                if isinstance(w, SBCIntradayChartDialog) and _is_widget_alive(w):
+                    if getattr(w, "code", None) == c_clean:
+                        w.show()
+                        w.raise_()
+                        w.activateWindow()
+                        logger.info(f"[SBCLauncher] 标的 {c_clean} 已在进程内窗口运行中，已激活置顶")
+                        return w
+        except Exception:
+            pass
+
+        # 2. 检查是否满足独立子进程启动条件 (非打包环境 + 存在 Python 解释器 + 存在 run_sbc.py 脚本)
         app_root = get_app_root()
         run_sbc_path = os.path.join(app_root, "run_sbc.py")
-        if not os.path.exists(run_sbc_path):
-            logger.error(f"[SBCLauncher] 找不到 run_sbc.py 路径: {run_sbc_path}")
-            return None
+        is_interpreter = ("python" in os.path.basename(sys.executable).lower())
+        can_run_subproc = (not is_packaged_env()) and is_interpreter and os.path.exists(run_sbc_path)
 
-        cmd = [sys.executable, run_sbc_path, c_clean]
-        if period_mode:
-            cmd.append(str(period_mode))
+        if can_run_subproc:
+            cmd = [sys.executable, run_sbc_path, c_clean]
+            if period_mode:
+                cmd.append(str(period_mode))
 
-        logger.info(f"[SBCLauncher] 🚀 正在启动标的 {c_clean} 的独立 SBC 进程: {' '.join(cmd)}")
+            logger.info(f"[SBCLauncher] 🚀 正在启动标的 {c_clean} 的独立 SBC 进程: {' '.join(cmd)}")
+            try:
+                creationflags = subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0
+                env = os.environ.copy()
+                env["ATS_MAIN_PID"] = str(os.getpid())
+                proc = subprocess.Popen(
+                    cmd,
+                    cwd=app_root,
+                    env=env,
+                    creationflags=creationflags,
+                    close_fds=(sys.platform != "win32")
+                )
+                self._procs[c_clean] = proc
+                logger.info(f"[SBCLauncher] ✅ 标的 {c_clean} SBC 独立子进程启动成功 (PID={proc.pid})")
+                return proc
+            except Exception as e:
+                logger.warning(f"[SBCLauncher] 启动标的 {c_clean} SBC 子进程失败，转为进程内降级: {e}")
+
+        # 3. 💡 【打包环境与无外部脚本安全降级】在当前进程内打开 SBC 走势图，绝不调用 sys.executable 误调起 ATS 主程序！
+        logger.info(f"[SBCLauncher] 处于打包环境或无外部脚本，在当前进程内调起标的 {c_clean} SBC 走势图...")
         try:
-            creationflags = subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0
-            env = os.environ.copy()
-            env["ATS_MAIN_PID"] = str(os.getpid())
-            proc = subprocess.Popen(
-                cmd,
-                cwd=app_root,
-                env=env,
-                creationflags=creationflags,
-                close_fds=(sys.platform != "win32")
-            )
-            self._procs[c_clean] = proc
-            logger.info(f"[SBCLauncher] ✅ 标的 {c_clean} SBC 独立子进程启动成功 (PID={proc.pid})")
-            return proc
-        except Exception as e:
-            logger.error(f"[SBCLauncher] ❌ 启动标的 {c_clean} SBC 独立进程失败: {e}", exc_info=True)
+            from ats.ui.intraday_strategy_dialog import open_sbc_chart_dialog
+            dlg = open_sbc_chart_dialog(None, code=c_clean, period_mode=period_mode or "10d")
+            if dlg:
+                dlg.show()
+                dlg.raise_()
+                dlg.activateWindow()
+                return dlg
+        except Exception as e_inproc:
+            logger.error(f"[SBCLauncher] 进程内调起标的 {c_clean} SBC 异常: {e_inproc}", exc_info=True)
             return None
 
     def close_all(self):
