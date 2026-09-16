@@ -1,3 +1,26 @@
+## 2026-09-16 09:20
+- [x] **【实现 SBC 分时走势图 10日分时支持 + 全自动交易策略所见即所得标记 + 8层防守阵列 + 策略可视化调参面板】(SSOT) (`ats/ui/intraday_strategy_dialog.py`, `ats/ui/vwap_rule_editor.py`, `ats/signal_auto_dispatcher.py`, `ats/vwap_trading_engine.py`, `ats/proactive_exit_engine.py`, `ats/consensus_arbiter.py`, `ats/market_guardian.py`, `tests/test_vwap_trading_system.py`)**：
+    - [x] **操盘手反馈痛点与业务场景**：
+        1. **10日分时与周期精简**：原周期名称冗长占用顶部工具栏过多横向空间，已精简为 `1日`、`2日`、`3日`、`5日`，并在 `5日` 右侧新增 `10日` (`10d`) 分时切换，底层动态拉取多达 2400+ 条 1 分钟 K 线；
+        2. **自动交易策略接入与可见性 (所见即所得)**：操盘手反馈“运行 run_sbc.py 遇到 line 3325 IndentationError”，且在 SBC 走势图界面上未看到自动交易策略买卖点标记；
+        3. **止损出局痛点根治**：针对 600733 等标的，分时视角过小易被诱骗、震荡势冲高派发、反弹前高不过时犹豫不决导致浮亏放大、MA5d 大级别回落分时无法守护等问题，急需 8 层主动防守阵列与双组投票决策机制。
+    - [x] **系统级工程落地与架构加固**：
+        1. **修复 `run_sbc.py` 启动缩进异常 (IndentationError)**：
+           - 根除 `_check_hover_or_leave` 中 `self.leave_ticks = 0` 缩进缺失，保证 `run_sbc.py` 顺畅启动；
+        2. **SBC 实盘走势图全周期自动策略买卖信号注入与标记 (1日/2日/3日/5日/10日)**：
+           - 修复 1m (1日) 模式下未注入 `auto_sigs` 的问题，确保无论在 1日还是多日分时下，策略自动逐 Tick 跑测并呈现 `▲买入`、`▼L1-L7主动出局`、`◆L8 VWAP兜底` 图元标记、收益胶囊与详细规则 Tooltip；
+           - 顶部工具栏新增 `🤖 自动策略 (开/关)` 与 `⚙️ 策略调参` 按钮，信息栏实时更新策略总胜率与防护拦截统计；
+        3. **策略规则可视化调参界面 (`ats/ui/vwap_rule_editor.py` - VWAPRuleEditorDialog)**：
+           - 提供三选项卡可视化编辑：🛡️ 8 层主动防守阵列参数（L1时间衰减、L2无量不涨、L3反弹前高不过、L4冲高派发、L5震荡不创高、L6量价背离、L7大级别MA5d、L8 VWAP兜底）；⚔️ 进攻端与激进/保守双组投票机制（结构清晰度、犹豫期十字星容差）；🌐 宏观大盘与板块守护（熔断、集中抛压、买入冻结）；
+           - 支持 `💾 保存并盘中热生效`（毫秒级热落盘并触发 SBC 分时图重载测算）与 `🔄 恢复默认规则`；
+        4. **统一信号调度器 (`ats/signal_auto_dispatcher.py`)**：
+           - 落实防守优先调度次序：Tick 接入 -> MarketGuardian 宏观守护审查 -> ProactiveExitEngine 8 层主动防守 -> VWAPTradingEngine 动能突破与清晰度评分 -> ConsensusArbiter 严格双重同意 (Dual Consent) 开仓 -> 虚拟撮合与信号推送；
+        5. **健壮性与接口兼容加固**：
+           - `VWAPTradingEngine.__init__` 智能防御入参顺序互换，杜绝 AttributeError。
+    - [x] **自动化测试 25/25 PASSED 100% 全绿**：
+        1. `tests/test_vwap_trading_system.py`: 13/13 PASSED（涵盖 8 层防守、双重同意与一票否决、犹豫期十字星识别、大盘风控、SignalAutoDispatcher 全流程与历史 DataFrame 回测）；
+        2. `tests/test_sbc_rearrange.py`: 12/12 PASSED（涵盖 SBC 窗口平铺重排、全周期切换与几何尺寸持久化）。
+
 ## 2026-09-15 12:55
 - [x] **【实现剪贴板股票中文名（如“工商银行”、“ST天玑”等）自动识别与全系统联动】(SSOT) (`sys_utils.py`, `tdx_utils.py`, `instock_MonitorTK.py`, `tests/test_clipboard_stock_name_linkage.py`)**：
     - [x] **操盘手反馈痛点与业务场景**：
@@ -19664,5 +19687,38 @@ equest_dynamic_ipc_sync 中传入 orce=True 绕过防刷干扰。
      - 新增 `get_window_family` 整体家族提取与 `apply_overall_window_group_by_title` 联动对齐函数。
      - UI 表格右键菜单增加 **`📦 整体操作窗口 (主程序与附属浮窗联动)`**，支持一键将主程序与名下所有附属浮窗成组安全协同对齐。
      - 增加从属关系 ToolTip 友好提示。
-  4. **全链路回归验证**：新增 `tests/test_window_overall_layout_suite.py` 自动化测试套件，移动与恢复 5 轮循环测试 100% 通过，断言精度完美达标。
 
+
+## [2026-09-15 22:20:00] 基于 ATS/SBC 的全自动分时多周期交易系统实施 (防守优先 + 双组投票共用仓位)
+- **关联文件**:
+  - `stock_standalone/config/vwap_trading_rules.json`
+  - `stock_standalone/ats/vwap_rule_model.py`
+  - `stock_standalone/ats/proactive_exit_engine.py`
+  - `stock_standalone/ats/consensus_arbiter.py`
+  - `stock_standalone/ats/vwap_trading_engine.py`
+  - `stock_standalone/ats/market_guardian.py`
+  - `stock_standalone/tests/test_vwap_trading_system.py`
+  - `stock_standalone/design/ats基于sbc的实时交易架构设计2.md`
+- **核心实现成果**:
+  1. **防守端绝对优先（ProactiveExitEngine 8层主动出局守护）**:
+     - 彻底破除“VWAP破位不舍得止损、反弹前高没走、亏损放大”的心魔，实现机械化离场。
+     - **Layer 1 时间衰减**: 买入 20 分钟涨幅不足 0.3% 主动减半，30 分钟浮亏强制清仓。
+     - **Layer 2 无量不涨**: 缩量盘跌（连续滑动窗口量缩 50% 且不涨）减半清仓。
+     - **Layer 3 反弹前高不过**: 专克 600733 假反弹！冲击前高阻力区徘徊缩量无法突破主动离场；遇阻回撤超 1.5% 确认派发 100% 清仓。
+     - **Layer 4 冲高派发**: 冲高回落放量收阴，浮盈锁利/浮亏立即清仓。
+     - **Layer 5 震荡不创高**: 波峰序列连续 3 次下移且位于均价线下减仓 30%。
+     - **Layer 6 量价背离**: 高位结合 DFF 资金加速流出（$<-0.5$）减半避险。
+     - **Layer 7 大级别 MA5d 拐头**: 日线 MA5 下倾 + 60分通道加速走弱，分时反抽均价直接清仓。
+     - **Layer 8 VWAP 破位兜底**: 跌破今日 VWAP 持续 5 分钟未能站回，最后一道防线强平。
+  2. **仓位与决策机制（ConsensusArbiter 共享仓位 + 双组投票）**:
+     - **共用单一仓位池（`SharedPositionState`）**: 激进组与保守组统一管理持仓与加减仓，杜绝分仓撕裂。
+     - **开仓严格双重同意（Dual Consent / AND 逻辑）**: 激进组捕捉分时动能突破；保守组作为辅助监管审查员，专职对分时结构清晰度（低于 70 门槛）和多空拉锯犹豫期（十字星聚集或高频锯齿）行使**一票否决权（VETO）**。两组均同意才批准开仓！
+     - **出局宽出机制（Fast Exit / OR 逻辑）**: 8 层守护或任一策略组察觉风险，无需双组共识，秒级执行清仓/减仓。
+  3. **进攻端（VWAPTradingEngine）**:
+     - 动态计算 VWAP 斜率、穿越判定、横盘筑底分钟数。
+     - 内置形态清晰度评分算法与十字星密集犹豫期自动探针。
+  4. **宏观大盘哨兵（MarketGuardian）**:
+     - 实现恐慌熔断清仓、弱势冻结买入信号、板块集中抛压避险机制。
+  5. **自动化回归验证**:
+  6. **UI 细节优化**:
+     - SBC 实盘分时窗口顶部周期切换按钮名称由 `1日分时`, `2日分时`, `3日分时`, `5日分时` 精简为 **`1日`, `2日`, `3日`, `5日`**，彻底释放约 80px 横向空间，根除工具栏拥挤截断。
