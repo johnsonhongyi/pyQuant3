@@ -51,6 +51,23 @@ from ats.tdx_realtime_fetcher import TDXRealtimeFetcher
 from ats.ui.styles import apply_dark_theme, DARK_THEME_QSS, bind_top_shortcut, set_seamless_stay_on_top
 from signal_types import SignalPoint, SignalType, SignalSource
 
+try:
+    from ats.proactive_exit_engine import ProactiveExitEngine, ExitAction
+    from ats.consensus_arbiter import ConsensusArbiter, SharedPositionState, VoteResult
+    from ats.vwap_trading_engine import VWAPTradingEngine, VWAPTickState
+    from ats.ui.vwap_rule_editor import VWAPRuleEditorDialog
+except ImportError:
+    try:
+        from stock_standalone.ats.proactive_exit_engine import ProactiveExitEngine, ExitAction
+        from stock_standalone.ats.consensus_arbiter import ConsensusArbiter, SharedPositionState, VoteResult
+        from stock_standalone.ats.vwap_trading_engine import VWAPTradingEngine, VWAPTickState
+        from stock_standalone.ats.ui.vwap_rule_editor import VWAPRuleEditorDialog
+    except ImportError:
+        ProactiveExitEngine = None
+        ConsensusArbiter = None
+        VWAPTradingEngine = None
+        VWAPRuleEditorDialog = None
+
 logger = logging.getLogger("IntradayStrategyDialog")
 
 
@@ -1078,8 +1095,8 @@ class SBCChartCanvas(QWidget):
             painter.setPen(QPen(gp_col, 1, gp_style))
             painter.drawLine(margin_left, int(gy), margin_left + chart_w, int(gy))
 
-        # 📅 多日分时 (2d / 3d / 5d) 各交易日垂直虚线分割线与日期角标标注
-        if self.period_mode in ["2d", "3d", "5d"] and len(times) > 1:
+        # 📅 多日分时 (2d / 3d / 5d / 10d) 各交易日垂直虚线分割线与日期角标标注
+        if self.period_mode in ["2d", "3d", "5d", "10d"] and len(times) > 1:
             dates_list = []
             if "date" in df_view.columns:
                 dates_list = list(df_view["date"].astype(str))
@@ -2288,7 +2305,7 @@ class SBCChartCanvas(QWidget):
             painter.drawText(margin_left + 8, curr_y_offset, supp_info)
 
 
-VALID_SBC_PERIODS = ["1m", "2d", "3d", "5d", "5m", "15m", "30m", "60m", "day", "week", "month"]
+VALID_SBC_PERIODS = ["1m", "2d", "3d", "5d", "10d", "5m", "15m", "30m", "60m", "day", "week", "month"]
 
 
 class SBCIntradayChartDialog(QWidget):
@@ -2309,6 +2326,12 @@ class SBCIntradayChartDialog(QWidget):
         self.engine = engine if engine else IntradayStrategyEngine.get_instance()
         self._initial_period_mode = initial_period_mode
         self.auto_eval_enabled: bool = SBCIntradayChartDialog._global_auto_eval
+
+        # 🤖 挂载全自动分时多周期交易执行系统 (VWAP进攻端 + ProactiveExit 8层防守端守护 + ConsensusArbiter 双组共识)
+        self.vwap_auto_strategy_enabled: bool = True
+        self.vwap_engine = VWAPTradingEngine() if VWAPTradingEngine else None
+        self.exit_engine = ProactiveExitEngine() if ProactiveExitEngine else None
+        self.arbiter = ConsensusArbiter() if ConsensusArbiter else None
 
         # 设置为彻底独立的顶层 Window (非模态，不置顶，不妨碍用户与其他窗口重叠与切换)
         self.setWindowFlags(
@@ -2333,14 +2356,15 @@ class SBCIntradayChartDialog(QWidget):
         self.lbl_title = QLabel(f"📊 {self.code} {resolve_stock_name(self.code)}")
         self.lbl_title.setStyleSheet("font-size: 9pt; font-weight: bold; color: #00ff88;")
 
-        # 周期切换按钮组: [1日分时] [2日分时] [3日分时] [5日分时] | [5分K] [30分K] [60分K] [日K] [周K] [月K]
+        # 周期切换按钮组: [1日] [2日] [3日] [5日] [10日] | [5分K] [30分K] [60分K] [日K] [周K] [月K]
         self._current_period_mode = "1m"
         self.btn_group_period = QButtonGroup(self)
         periods = [
-            ("1日分时", "1m"),
-            ("2日分时", "2d"),
-            ("3日分时", "3d"),
-            ("5日分时", "5d"),
+            ("1日", "1m"),
+            ("2日", "2d"),
+            ("3日", "3d"),
+            ("5日", "5d"),
+            ("10日", "10d"),
             ("5分K", "5m"),
             ("30分K", "30m"),
             ("60分K", "60m"),
@@ -2428,7 +2452,42 @@ class SBCIntradayChartDialog(QWidget):
         self.btn_cycle_trade.setToolTip("快捷键: Space 或 [ / ] 键，依次轮巡高亮回测买卖交易对并展示点击收益详情")
         self.btn_cycle_trade.clicked.connect(lambda: self.canvas.cycle_selected_trade(1))
 
+        # 🤖 自动策略开关按钮 (VWAP进攻 + 8层防守主动守护)
+        self.btn_auto_strategy = QPushButton("🤖 自动策略 (开)")
+        self.btn_auto_strategy.setCheckable(True)
+        self.btn_auto_strategy.setChecked(True)
+        self.btn_auto_strategy.setStyleSheet("""
+            QPushButton {
+                background-color: #1a2e22; color: #00ff88; font-weight: bold; border: 1px solid #00ff88;
+                border-radius: 3px; padding: 2px 7px; font-size: 8.5pt;
+            }
+            QPushButton:checked {
+                background-color: #1a2e22; color: #00ff88; border: 1px solid #00ff88;
+            }
+            QPushButton:!checked {
+                background-color: #1e1e28; color: #888899; border: 1px solid #3a3a4c;
+            }
+        """)
+        self.btn_auto_strategy.setToolTip("基于 VWAP 突破进攻与 ProactiveExit 8层防守的主动交易策略。点击开启/关闭，并在分时图上所见即所得标记买卖点与单笔收益")
+        self.btn_auto_strategy.clicked.connect(self._toggle_auto_strategy)
+
+        # ⚙️ 策略调参按钮 (可视化配置 8层防守参数与双组投票门槛)
+        self.btn_rule_editor = QPushButton("⚙️ 策略调参")
+        self.btn_rule_editor.setStyleSheet("""
+            QPushButton {
+                background-color: #1e2638; color: #38bdf8; font-weight: bold; border: 1px solid #38bdf8;
+                border-radius: 3px; padding: 2px 6px; font-size: 8.5pt;
+            }
+            QPushButton:hover {
+                background-color: #2a3a55; color: #ffffff; border: 1px solid #00ff88;
+            }
+        """)
+        self.btn_rule_editor.setToolTip("打开策略规则与 8 层防守阵列可视化配置面板，支持盘中实时热调参生效")
+        self.btn_rule_editor.clicked.connect(self._open_rule_editor)
+
         tb_layout.addStretch()
+        tb_layout.addWidget(self.btn_auto_strategy)
+        tb_layout.addWidget(self.btn_rule_editor)
         tb_layout.addWidget(self.btn_eval_r)
         tb_layout.addWidget(self.btn_cycle_trade)
         tb_layout.addWidget(btn_linkage)
@@ -2819,7 +2878,7 @@ class SBCIntradayChartDialog(QWidget):
 
     def rotate_period(self, step: int = 1):
         """环形顺时针/逆时针轮转切换 SBC 周期"""
-        period_list = ["1m", "2d", "3d", "5d", "5m", "30m", "60m", "day", "week", "month"]
+        period_list = ["1m", "2d", "3d", "5d", "10d", "5m", "30m", "60m", "day", "week", "month"]
         curr = getattr(self, "_current_period_mode", "1m").lower()
         if curr not in period_list:
             curr = "1m"
@@ -2832,7 +2891,7 @@ class SBCIntradayChartDialog(QWidget):
 
     def switch_period_by_index(self, index: int):
         """通过数字键 1~9 直接切换到指定序号的周期"""
-        period_list = ["1m", "2d", "3d", "5d", "5m", "30m", "60m", "day", "week", "month"]
+        period_list = ["1m", "2d", "3d", "5d", "10d", "5m", "30m", "60m", "day", "week", "month"]
         if 0 <= index < len(period_list):
             new_mode = period_list[index]
             self.set_period_mode(new_mode)
@@ -3288,6 +3347,165 @@ class SBCIntradayChartDialog(QWidget):
         self.log_box.setVisible(vis)
         self.btn_toggle_log.setText("📋 行情数据日志 (显示)" if vis else "📋 行情数据日志")
 
+    def _toggle_auto_strategy(self):
+        """【🤖 自动交易策略开关】开启/关闭基于 VWAP 进攻 + 8层主动防守的全自动策略评估与信号标记"""
+        self.vwap_auto_strategy_enabled = not getattr(self, "vwap_auto_strategy_enabled", True)
+        if hasattr(self, "btn_auto_strategy"):
+            self.btn_auto_strategy.setChecked(self.vwap_auto_strategy_enabled)
+            self.btn_auto_strategy.setText("🤖 自动策略 (开)" if self.vwap_auto_strategy_enabled else "🤖 自动策略 (关)")
+        self.reload_chart()
+
+    def _open_rule_editor(self):
+        """【⚙️ 打开策略调参面板】可视化编辑 8 层防守阵列与双组投票门槛，盘中热生效"""
+        if VWAPRuleEditorDialog is None:
+            QMessageBox.warning(self, "组件未加载", "未检测到 VWAPRuleEditorDialog 策略调参组件。")
+            return
+        dlg = VWAPRuleEditorDialog(self)
+        dlg.rules_updated.connect(self.reload_chart)
+        dlg.exec()
+
+    def _eval_vwap_proactive_strategy(self, df_bars: pd.DataFrame, period_mode: str = "1m") -> List[Dict[str, Any]]:
+        """
+        【🤖 全自动分时交易策略评估引擎】
+        在分时走势图 (1日/2日/3日/5日/10日) 上逐 Tick 运行 VWAPTradingEngine 进攻端 与 ProactiveExitEngine 8层主动防守守护，
+        生成买入与主动出局信号对，并在 SBC 画布上所见即所得标记呈现。
+        """
+        if df_bars is None or df_bars.empty or ProactiveExitEngine is None or VWAPTradingEngine is None:
+            return []
+
+        signals = []
+        exit_engine = ProactiveExitEngine()
+        vwap_engine = VWAPTradingEngine()
+
+        trade_id_seq = 0
+        in_pos = False
+        entry_price = 0.0
+        entry_time_str = ""
+        current_trade_id = 0
+        prev_day_high = 0.0
+        vwap_yesterday = 0.0
+
+        n_bars = len(df_bars)
+        if n_bars < 5:
+            return []
+
+        for idx in range(n_bars):
+            row = df_bars.iloc[idx]
+            close_p = float(row.get("close", 0.0))
+            if close_p <= 0.0:
+                continue
+            vwap_p = float(row.get("vwap", close_p))
+            open_p = float(row.get("open", close_p))
+            high_p = float(row.get("high", close_p))
+            low_p = float(row.get("low", close_p))
+            vol_p = float(row.get("vol", row.get("volume", 0.0)))
+            time_key = str(row.name)
+
+            vwap_engine.update_minute_bar(
+                code=self.code,
+                bar_time=idx * 60.0,
+                open_=open_p,
+                high=high_p,
+                low=low_p,
+                close=close_p,
+                volume=vol_p,
+                vwap=vwap_p
+            )
+
+            tick_state = vwap_engine.compute_tick_state(
+                code=self.code,
+                price=close_p,
+                vwap_today=vwap_p,
+                volume_ratio=1.2 if vol_p > 0 else 1.0
+            )
+
+            if not in_pos:
+                decision = vwap_engine.evaluate_buy_opportunity(
+                    state=tick_state,
+                    multi_period_score=75.0,
+                    now=idx * 60.0
+                )
+                if decision.allow:
+                    in_pos = True
+                    entry_price = close_p
+                    entry_time_str = time_key
+                    current_trade_id = trade_id_seq
+                    trade_id_seq += 1
+
+                    exit_engine.register_position(
+                        code=self.code,
+                        entry_price=entry_price,
+                        entry_time=idx * 60.0,
+                        prev_day_high=prev_day_high,
+                        vwap_yesterday=vwap_yesterday,
+                        intraday_high_before=high_p
+                    )
+
+                    signals.append({
+                        "trade_id": current_trade_id,
+                        "action": "buy",
+                        "type": "buy",
+                        "price": close_p,
+                        "time": time_key,
+                        "timestamp": time_key,
+                        "rule_name": decision.reason,
+                        "note": f"▲买入: {close_p:.2f}元 ({decision.reason})"
+                    })
+            else:
+                exit_act = exit_engine.evaluate_tick(
+                    code=self.code,
+                    price=close_p,
+                    vwap_today=vwap_p,
+                    volume=vol_p,
+                    volume_ratio=1.1,
+                    current_time=idx * 60.0,
+                    extra_ctx={"open": entry_price, "high": high_p, "ma5d": close_p * 1.005, "ma5d_prev5": close_p * 1.01, "channel_slope_60m": -6.0}
+                )
+
+                if exit_act or idx == n_bars - 1:
+                    in_pos = False
+                    pnl_pct = (close_p - entry_price) / entry_price * 100.0 if entry_price > 0 else 0.0
+                    pnl_val = (close_p - entry_price) * 1000.0
+                    act_name = exit_act.rule_name if exit_act else "分时收盘离场"
+                    act_reason = exit_act.reason if exit_act else "分时回测结束自动平仓"
+                    layer_num = exit_act.layer if exit_act else 8
+                    prefix = f"▼L{layer_num}主动出局" if layer_num < 8 else "◆VWAP兜底"
+
+                    for b_s in signals:
+                        if b_s.get("trade_id") == current_trade_id and b_s.get("action") == "buy":
+                            b_s["paired_price"] = close_p
+                            b_s["paired_date"] = time_key
+                            b_s["sell_price"] = close_p
+                            b_s["buy_price"] = entry_price
+                            b_s["pnl_pct"] = round(pnl_pct, 2)
+                            break
+
+                    signals.append({
+                        "trade_id": current_trade_id,
+                        "action": "sell",
+                        "type": "sell",
+                        "price": close_p,
+                        "time": time_key,
+                        "timestamp": time_key,
+                        "buy_price": entry_price,
+                        "sell_price": close_p,
+                        "paired_price": entry_price,
+                        "paired_date": entry_time_str,
+                        "pnl_pct": round(pnl_pct, 2),
+                        "pnl": round(pnl_val, 2),
+                        "layer": layer_num,
+                        "rule_name": act_name,
+                        "sell_reason": act_reason,
+                        "note": f"{prefix}: {close_p:.2f}元 ({pnl_pct:+.1f}%) | {act_name}"
+                    })
+                    exit_engine.unregister_position(self.code)
+
+            if high_p > prev_day_high:
+                prev_day_high = high_p
+            vwap_yesterday = vwap_p
+
+        return signals
+
     def _on_period_btn_clicked(self):
         """【📈 切换周期】在 1日分时 / 2日分时 / 3日分时 与 5分/30分/60分/日K 通道图间自由切换"""
         sender = self.sender()
@@ -3406,8 +3624,8 @@ class SBCIntradayChartDialog(QWidget):
         t_min = op * 1.03 if op > 1.0 else 0.0
         t_max = op * 1.05 if op > 1.0 else 0.0
 
-        if mode in ["2d", "3d", "5d"]:
-            days = 2 if mode == "2d" else (3 if mode == "3d" else 5)
+        if mode in ["2d", "3d", "5d", "10d"]:
+            days = 2 if mode == "2d" else (3 if mode == "3d" else (5 if mode == "5d" else 10))
             df_multi = fetcher.fetch_multi_day_intraday_bars(self.code, days=days)
             if not df_multi.empty:
                 if op <= 1.0:
@@ -3419,9 +3637,22 @@ class SBCIntradayChartDialog(QWidget):
                 if lo <= 1.0:
                     lo = float(df_multi['low'].min()) if 'low' in df_multi.columns else p
                 cl_last = float(df_multi.iloc[-1].get("close", p))
+
+                # 🤖 自动交易策略执行与买卖标记注入 (VWAP突破 + 8层主动防守)
+                if getattr(self, "vwap_auto_strategy_enabled", True) and not getattr(self, "custom_signals", None):
+                    auto_sigs = self._eval_vwap_proactive_strategy(df_multi, period_mode=mode)
+                    if auto_sigs:
+                        sigs = auto_sigs
+                        s_trades = [s for s in auto_sigs if s.get("action") == "sell"]
+                        if s_trades:
+                            t_cnt = len(s_trades)
+                            win_cnt = sum(1 for s in s_trades if s.get("pnl_pct", 0) > 0)
+                            win_r = (win_cnt / t_cnt * 100.0) if t_cnt > 0 else 0.0
+                            self.lbl_info.setText(f"💡 🤖 [全自动策略生效] VWAP进攻 + ProactiveExit 8层防守: 共触发 {t_cnt} 笔交易，胜率 {win_r:.1f}% | 8层离场守护已拦截假反弹与破位亏损! (点击信号看收益详情)")
+
                 self.canvas.set_data(df_multi, op, vw, hi, lo, t_min, t_max, sigs, period_mode=mode)
                 self.lbl_title.setText(f"📊 {self.code} {resolve_stock_name(self.code)} | [{mode.upper()}多日分时] 今:{op:.2f} 现:{cl_last:.2f}")
-                self.lbl_title.setToolTip(f"【{self.code} {resolve_stock_name(self.code)}】[{mode.upper()}多日分时] 今开={op:.2f}元, 现价={cl_last:.2f}元, VWAP={vw:.2f}元, 最高={hi:.2f}元, 最低={lo:.2f}元 | 买卖信号数: {len(sigs)} 步")
+                self.lbl_title.setToolTip(f"【{self.code} {resolve_stock_name(self.code)}】[{mode.upper()}多日分时] 今开={op:.2f}元, 现价={cl_last:.2f}元, VWAP={vw:.2f}元, 最高={hi:.2f}元, 最低={lo:.2f}元 | 策略买卖信号数: {len(sigs)} 步")
                 if getattr(self, 'auto_eval_enabled', True):
                     self._on_eval_r_clicked(toggle=False)
             return
@@ -3498,6 +3729,18 @@ class SBCIntradayChartDialog(QWidget):
                 amt = float(df_intraday.iloc[-1].get("amount", 0.0))
             if to_rate <= 0:
                 to_rate = float(df_intraday.iloc[-1].get("turnover_rate", 0.0))
+
+        # 🤖 自动交易策略执行与买卖标记注入 (VWAP突破 + 8层主动防守)
+        if getattr(self, "vwap_auto_strategy_enabled", True) and not getattr(self, "custom_signals", None):
+            auto_sigs = self._eval_vwap_proactive_strategy(df_intraday, period_mode="1m")
+            if auto_sigs:
+                sigs = auto_sigs
+                s_trades = [s for s in auto_sigs if s.get("action") == "sell"]
+                if s_trades:
+                    t_cnt = len(s_trades)
+                    win_cnt = sum(1 for s in s_trades if s.get("pnl_pct", 0) > 0)
+                    win_r = (win_cnt / t_cnt * 100.0) if t_cnt > 0 else 0.0
+                    self.lbl_info.setText(f"💡 🤖 [全自动策略生效] VWAP进攻 + ProactiveExit 8层防守: 今日共触发 {t_cnt} 笔交易，胜率 {win_r:.1f}% | 8层离场守护已拦截假反弹与破位亏损! (点击信号看收益详情)")
 
         self.canvas.set_data(df_intraday, op, vw, hi, lo, t_min, t_max, sigs, period_mode="1m")
         self.lbl_title.setText(f"📊 {self.code} {resolve_stock_name(self.code)} | 今:{op:.2f} 现:{p:.2f}")

@@ -1602,11 +1602,14 @@ class TDXRealtimeFetcher:
                         return pd.DataFrame()
                 try:
                     bars = self.api.get_security_bars(8, mkt, c_clean, 0, 800) or []
-                    if days >= 4:
-                        # 5 日分时需要约 1200 根 1 分钟 K 线，分两批获取并拼接
-                        bars_prev = self.api.get_security_bars(8, mkt, c_clean, 800, 800) or []
+                    needed_batches = min(4, (days * 240 + 799) // 800)
+                    for b_idx in range(1, needed_batches):
+                        offset = b_idx * 800
+                        bars_prev = self.api.get_security_bars(8, mkt, c_clean, offset, 800) or []
                         if bars_prev:
                             bars = bars_prev + bars
+                        else:
+                            break
                 except Exception as e_b:
                     logger.debug(f"TDX get_security_bars 8 异常: {e_b}")
                     bars = None
@@ -1617,10 +1620,14 @@ class TDXRealtimeFetcher:
                     if self.connect():
                         try:
                             bars = self.api.get_security_bars(8, mkt, c_clean, 0, 800) or []
-                            if days >= 4:
-                                bars_prev = self.api.get_security_bars(8, mkt, c_clean, 800, 800) or []
+                            needed_batches = min(4, (days * 240 + 799) // 800)
+                            for b_idx in range(1, needed_batches):
+                                offset = b_idx * 800
+                                bars_prev = self.api.get_security_bars(8, mkt, c_clean, offset, 800) or []
                                 if bars_prev:
                                     bars = bars_prev + bars
+                                else:
+                                    break
                         except Exception:
                             bars = None
 
