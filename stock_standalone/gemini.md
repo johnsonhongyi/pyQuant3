@@ -1,3 +1,25 @@
+## 2026-09-16 11:20
+- [x] **【SBC 走势窗口底部选股框深度优化：点选与主显区直观显示“代码 股票名称”、自适应拓宽至 160px、点击智能全选、支持纯中文名反查代码】(`ats/ui/intraday_strategy_dialog.py`, `tests/test_sbc_quick_code_switch.py`)**：
+    - [x] **操盘手最新反馈与直观展示需求**：
+        1. 操盘手实测后指出：“点选是显示code和name直观”，原输入框内部在切股后仍被单调的纯 6 位数字覆写覆盖（如仅显示 `688635`），无法直观获知当前观察或回测标的之公司中文名称；
+        2. 原输入框宽度 135px 偏窄，难以舒适承载“代码 股票名称”（如 `688635 长进光子`）。
+    - [x] **系统级工程落地与体验极致化 (KISS / SOLID / DRY)**：
+        1. **输入框与下拉框统一直观显示“代码 股票名称” (`_format_code_with_name`)**：
+           - 在 `SBCIntradayChartDialog` 中统一封装 `_format_code_with_name`；
+           - 在 `switch_code`、`_refresh_recent_codes_combo`、`reload_chart` 三大主路径中，将输入框文本与下拉框选项统一设为 `f"{code} {st_name}"`（如 `688635 长进光子`、`600733 北汽蓝谷`）；
+           - 操盘手无论点选下拉列表项、还是通过回车/右键/外部注入回测标的切换，主显区与下拉项均直观呈现代码与公司名，一目了然；
+        2. **自适应拓宽控件尺寸 (160px / 170px)**：
+           - 将 `combo_switch_code` 固定宽度从 135px 增宽至 160px，下拉菜单最小宽度拓宽至 170px；
+           - 完美容纳 6 位代码 + 4~6 位中文字符（如 `*ST天玑`、`中信证券`、`长进光子`），杜绝文字挤压与截断；
+        3. **点击智能全选体验 (`had_focus` + `focusInEvent`)**：
+           - 操盘手首次左键点击输入框时，自动触发 `selectAll()`，用户直接键盘键入新代码或按 Backspace 即刻覆写，无须手动双击全选或逐字删除原股票名称；
+        4. **`extract_code` 智能中文反查回落**：
+           - 提取算法不仅支持连续 6 位代码、前缀、带中文的字符串，更引入 `resolve_stock_code` 中文反查回落；
+           - 操盘手直接输入或粘贴“长进光子”、“北汽蓝谷”等纯公司名称，亦能秒级提取出 `688635`、`600733` 并顺畅切换。
+    - [x] **自动化测试 100% 验证通过 (7/7 PASSED)**：
+        1. 专项测试 `tests/test_sbc_quick_code_switch.py`: 7/7 PASSED（包含输入框直观呈现代码+名称断言、纯中文名反查代码提取、右键粘贴与下拉切换联动全量断言）；
+        2. 回归测试 `tests/test_sbc_shortcut_r.py`: 5/5 PASSED。
+
 ## 2026-09-16 10:28
 - [x] **【研发纯 Python 高精度农历节假日推演与交易日历生成工具（直通 2099 年）】(SSOT) (`tools/generate_trade_calendar_2099.py`, `sys_utils.py`, `JSONData/a_trade_calendar.csv`, `tests/test_trade_calendar_2099.py`)**：
     - [x] **操盘手反馈痛点与业务场景**：

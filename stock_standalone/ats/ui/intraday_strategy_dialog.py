@@ -13,6 +13,7 @@ ats/ui/intraday_strategy_dialog.py — ATS 分时阶梯交易策略 & 频准激�
 
 import sys
 import os
+import re
 import json
 import shutil
 import time
@@ -2374,6 +2375,143 @@ class SBCChartCanvas(QWidget):
 VALID_SBC_PERIODS = ["1m", "2d", "3d", "5d", "10d", "5m", "15m", "30m", "60m", "day", "week", "month"]
 
 
+class SBCQuickCodeLineEdit(QLineEdit):
+    """
+    SBC 专用快捷代码输入框：
+    - 支持手动输入 6 位代码并按 Enter 回车快速切换标的
+    - 支持鼠标右键单击直接读取系统剪贴板，自动提取 6 位代码，填入并触发切换
+    - 智能提取：兼容纯 6 位数字、前缀带 sh/sz/bj、以及混合中文字符串中的 6 位股票代码
+    """
+    code_submitted = pyqtSignal(str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setPlaceholderText("代码(回车/右键)")
+        self.setToolTip("⚡ 快速切换标的代码：\n1. 输入代码按 Enter 键立即切换\n2. 鼠标右键点击直接自动粘贴剪贴板中的 6 位代码并切换\n3. 点击右侧下拉箭头查看并切换最近 10 个历史标的")
+        is_in_combo = parent is not None and isinstance(parent, QComboBox)
+        if not is_in_combo:
+            self.setFixedWidth(105)
+            self.setFixedHeight(22)
+            self.setStyleSheet("""
+                QLineEdit {
+                    background-color: #141420;
+                    color: #00ff88;
+                    border: 1px solid #303042;
+                    border-radius: 3px;
+                    padding: 1px 5px;
+                    font-size: 8.5pt;
+                    font-weight: bold;
+                    selection-background-color: #00ff88;
+                    selection-color: #000000;
+                }
+                QLineEdit:hover {
+                    border: 1px solid #38bdf8;
+                }
+                QLineEdit:focus {
+                    border: 1px solid #00ff88;
+                    background-color: #1a1a2e;
+                }
+            """)
+        else:
+            self.setStyleSheet("""
+                QLineEdit {
+                    background-color: transparent;
+                    color: #00ff88;
+                    border: none;
+                    padding: 0px 2px;
+                    font-size: 8.5pt;
+                    font-weight: bold;
+                    selection-background-color: #00ff88;
+                    selection-color: #000000;
+                }
+            """)
+        self.returnPressed.connect(self._on_return_pressed)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.RightButton:
+            # 鼠标右键点击：直接自动提取剪贴板 6 位代码并自动粘贴提交
+            if self._handle_auto_paste_code():
+                event.accept()
+                return
+        had_focus = self.hasFocus()
+        super().mousePressEvent(event)
+        if not had_focus:
+            self.selectAll()
+
+    def focusInEvent(self, event):
+        super().focusInEvent(event)
+        QTimer.singleShot(0, self.selectAll)
+
+    def contextMenuEvent(self, event):
+        # 兜底：若剪贴板无有效 6 位代码，右键弹出上下文菜单
+        clip_code = self._extract_code_from_clipboard()
+        menu = self.createStandardContextMenu()
+        menu.addSeparator()
+        if clip_code:
+            paste_act = menu.addAction(f"📋 自动粘贴代码并切换 ({clip_code})")
+            paste_act.triggered.connect(lambda: self._submit_code(clip_code))
+        else:
+            paste_act = menu.addAction("📋 剪贴板未检测到6位代码")
+            paste_act.setEnabled(False)
+        menu.exec(event.globalPos())
+
+    @staticmethod
+    def extract_code(text: Optional[str]) -> Optional[str]:
+        """从任意文本中智能提取 6 位股票代码 (支持纯代码、sh/sz/bj前缀、中文字符混合、纯中文名称反查)"""
+        if not text or not isinstance(text, str):
+            return None
+        t_clean = text.strip()
+        if not t_clean:
+            return None
+        # 1. 优先正则匹配连续 6 位数字 (标准 A 股代码，例如 "688635 长进光子" -> "688635")
+        matches = re.findall(r'\d{6}', t_clean)
+        if matches:
+            return matches[0]
+        # 2. 备用：纯数字字符提取后若恰好为 6 位 (或少于6位自动补齐，例如 "733" -> "000733")
+        digits = re.sub(r'\D', '', t_clean)
+        if len(digits) == 6:
+            return digits
+        elif 0 < len(digits) < 6:
+            return digits.zfill(6)
+        # 3. 智能解析：纯中文名称反查 (例如 "长进光子" -> "688635", "北汽蓝谷" -> "600733")
+        try:
+            from sys_utils import resolve_stock_code
+            resolved = resolve_stock_code(t_clean)
+            if resolved and len(resolved) == 6 and resolved.isdigit():
+                return resolved
+        except Exception:
+            pass
+        return None
+
+    def _extract_code_from_clipboard(self) -> Optional[str]:
+        try:
+            clipboard = QApplication.clipboard()
+            text = (clipboard.text() or "").strip()
+            return self.extract_code(text)
+        except Exception:
+            return None
+
+    def _handle_auto_paste_code(self) -> bool:
+        code = self._extract_code_from_clipboard()
+        if code:
+            self.setText(code)
+            self.selectAll()
+            self._submit_code(code)
+            return True
+        return False
+
+    def _on_return_pressed(self):
+        text = self.text().strip()
+        code = self.extract_code(text)
+        if code:
+            self._submit_code(code)
+
+    def _submit_code(self, code: str):
+        c_clean = "".join(filter(str.isdigit, str(code))).zfill(6)
+        if len(c_clean) == 6:
+            self.code_submitted.emit(c_clean)
+
+
 class SBCIntradayChartDialog(QWidget):
     """
     SBC 实盘分时走势与关键阶梯基准图 彻底独立实时观察窗口 (100% 非模态、非置顶、自由层级覆盖与多屏拉伸)
@@ -2586,11 +2724,95 @@ class SBCIntradayChartDialog(QWidget):
         layout.addWidget(self.log_box)
         self.log_box.setVisible(False)
 
-        # 4. 底部提示
+        # 4. 底部提示与快速切码栏
+        bottom_layout = QHBoxLayout()
+        bottom_layout.setContentsMargins(2, 0, 2, 0)
+        bottom_layout.setSpacing(6)
+
         self.lbl_info = QLabel("💡 提示: 独立窗口支持【主窗口智能磁吸吸附】与脱离自由全屏。青蓝线为分时现价，黄虚线为 VWAP 均价，红虚线为开盘价，橙虚线为最高价，绿虚线为止盈目标。")
         self.lbl_info.setStyleSheet("color: #888899; font-size: 8.5pt;")
         self.lbl_info.setWordWrap(True)
-        layout.addWidget(self.lbl_info)
+        bottom_layout.addWidget(self.lbl_info, 1)
+
+        # 快速切换代码下拉组合框 (支持手动输入/回车切换/右键自动粘贴/下拉历史回测标的)
+        self.combo_switch_code = QComboBox(self)
+        self.combo_switch_code.setEditable(True)
+        self.combo_switch_code.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.combo_switch_code.setMaxVisibleItems(10)
+        self.combo_switch_code.setFixedWidth(160)
+        self.combo_switch_code.setFixedHeight(22)
+        self.combo_switch_code.setToolTip("⚡ 快速切换标的代码：\n1. 输入代码按 Enter 键立即切换\n2. 鼠标右键点击直接自动粘贴剪贴板中的 6 位代码并切换\n3. 点击右侧小箭头下拉选择最近访问/回测的 10 个标的 (含名称)")
+        self.combo_switch_code.setStyleSheet("""
+            QComboBox {
+                background-color: #141420;
+                color: #00ff88;
+                border: 1px solid #303042;
+                border-radius: 3px;
+                padding: 0px 2px 0px 4px;
+                font-size: 8.5pt;
+                font-weight: bold;
+            }
+            QComboBox:hover {
+                border: 1px solid #38bdf8;
+            }
+            QComboBox:focus {
+                border: 1px solid #00ff88;
+            }
+            QComboBox::drop-down {
+                subcontrol-origin: padding;
+                subcontrol-position: top right;
+                width: 16px;
+                border-left: 1px solid #2a2a3c;
+                background-color: #1a1a28;
+                border-top-right-radius: 3px;
+                border-bottom-right-radius: 3px;
+            }
+            QComboBox::drop-down:hover {
+                background-color: #26263a;
+            }
+            QComboBox::down-arrow {
+                border-left: 4px solid transparent;
+                border-right: 4px solid transparent;
+                border-top: 5px solid #00ff88;
+                width: 0;
+                height: 0;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #12121c;
+                color: #00ff88;
+                border: 1px solid #38bdf8;
+                selection-background-color: #1e3a2e;
+                selection-color: #ffffff;
+                padding: 2px;
+                font-size: 8.5pt;
+                font-weight: bold;
+                outline: none;
+            }
+        """)
+        if self.combo_switch_code.view():
+            self.combo_switch_code.view().setMinimumWidth(170)
+
+        self.txt_switch_code = SBCQuickCodeLineEdit(self.combo_switch_code)
+        self.combo_switch_code.setLineEdit(self.txt_switch_code)
+        self.txt_switch_code.code_submitted.connect(self.switch_code)
+        self.combo_switch_code.activated.connect(self._on_combo_code_activated)
+        bottom_layout.addWidget(self.combo_switch_code)
+
+        btn_switch_go = QPushButton("切换")
+        btn_switch_go.setToolTip("点击切换当前标的代码 (亦可在输入框直接按 Enter 或右键自动粘贴)")
+        btn_switch_go.setStyleSheet("""
+            QPushButton {
+                background-color: #1e2638; color: #38bdf8; font-weight: bold; border: 1px solid #38bdf8;
+                border-radius: 3px; padding: 2px 6px; font-size: 8.5pt;
+            }
+            QPushButton:hover {
+                background-color: #2a3a55; color: #00ff88; border: 1px solid #00ff88;
+            }
+        """)
+        btn_switch_go.clicked.connect(lambda: self.txt_switch_code._on_return_pressed())
+        bottom_layout.addWidget(btn_switch_go)
+
+        layout.addLayout(bottom_layout)
 
         # 5. 30 分钟定时物理落盘与退出刷盘策略 (交易时段 30 分钟落盘一次，关闭窗口落盘；非交易时段只落盘一次)
         self._has_saved_post_market = False
@@ -2638,6 +2860,13 @@ class SBCIntradayChartDialog(QWidget):
         self._restore_sbc_geometry()
         self.reload_chart()
         bind_top_shortcut(self, self._toggle_stay_on_top)
+
+        # 9. 加载并持久化最近访问标的代码 (保留最新 10 个)
+        try:
+            _save_sbc_recent_code(self.code)
+            self._refresh_recent_codes_combo()
+        except Exception:
+            pass
 
     def _on_poll_timer_tick(self):
         """定时器心跳周期检查与刷新：窗口隐藏或非交易期自动抑制"""
@@ -3680,7 +3909,148 @@ class SBCIntradayChartDialog(QWidget):
         self.lbl_title.setText(f"📊 {self.code} {resolve_stock_name(self.code)} | [多周期通道回测] 交易:{t_cnt}笔 胜率:{win_r:.1f}% (点击标记看收益)")
         self.lbl_info.setText("💡 【点击收益交互提示】: 鼠标直接点击任意 🟢买 / 🔴卖 信号标签，即可高亮持仓区间并展开单笔盈亏卡片；按 [ 与 ] 键或 Space 键可快速轮巡切换各笔交易。")
 
+        # 注入回测记录时同步持久化记录最近回测标的 (保留最新 10 个)
+        try:
+            _save_sbc_recent_code(self.code)
+            self._refresh_recent_codes_combo()
+        except Exception:
+            pass
+
+    def switch_code(self, new_code: str):
+        """【⚡ 快速切换 SBC 图表标的代码】
+        - 验证并规范化股票代码（提取纯数字并补齐 6 位）；
+        - 同步更新当前标的、画布标的并清空旧标的历史数据；
+        - 更新窗口标题、顶部信息并维护全局对话框注册表；
+        - 立即重新拉取数据并重新渲染走势图。
+        """
+        if not new_code:
+            return
+        c_clean = "".join(filter(str.isdigit, str(new_code))).zfill(6)
+        if not c_clean or c_clean == "000000":
+            self.lbl_info.setText(f"⚠️ 无效的股票代码: {new_code}")
+            return
+
+        old_code = getattr(self, "code", "")
+        self.code = c_clean
+
+        # 更新画布属性并重置视口
+        if hasattr(self, 'canvas') and self.canvas:
+            self.canvas.code = c_clean
+            self.canvas.strategy_eval_result = None
+            self.canvas.reset_view()
+
+        # 清除旧标的的自定义回测数据，防止数据污染
+        self.custom_trades_df = None
+        self.custom_signals = None
+        self.custom_kline_df = None
+
+        # 更新窗口标题与标题栏
+        st_name = resolve_stock_name(c_clean)
+        self.setWindowTitle(f"📈 【{c_clean} {st_name}】SBC 实盘分时走势与关键阶梯基准图")
+        self.lbl_title.setText(f"📊 {c_clean} {st_name}")
+
+        # 维护全局 dialog 注册表
+        try:
+            target_win = getattr(self, "main_workbench", None)
+            if target_win and hasattr(target_win, '_sbc_dialogs'):
+                sbc_dict = target_win._sbc_dialogs
+            else:
+                if not hasattr(SBCIntradayChartDialog, '_global_sbc_dialogs'):
+                    SBCIntradayChartDialog._global_sbc_dialogs = {}
+                sbc_dict = SBCIntradayChartDialog._global_sbc_dialogs
+
+            if old_code and old_code in sbc_dict and sbc_dict[old_code] is self:
+                sbc_dict.pop(old_code, None)
+            sbc_dict[c_clean] = self
+        except Exception:
+            pass
+
+        # 记录新窗口配置
+        try:
+            _record_sbc_open(c_clean, self.geometry(), period_mode=getattr(self, '_current_period_mode', '1m'))
+        except Exception:
+            pass
+
+        # 同步输入框文字为直观的 "代码 股票名称" 并全选，方便下次直接输入/右键
+        if hasattr(self, 'txt_switch_code') and self.txt_switch_code:
+            display_label = self._format_code_with_name(c_clean)
+            if self.txt_switch_code.text() != display_label:
+                self.txt_switch_code.setText(display_label)
+            self.txt_switch_code.selectAll()
+
+        # 重新拉取数据刷新走势图
+        self.reload_chart()
+
+        # 持久化记录最近代码并刷新下拉框 (保留最新 10 个，显示名称)
+        try:
+            _save_sbc_recent_code(c_clean)
+            self._refresh_recent_codes_combo()
+        except Exception:
+            pass
+
+        # 更新底部反馈提示
+        self.lbl_info.setText(f"✅ 已切换至标的: {c_clean} {st_name}")
+
+    def _format_code_with_name(self, code: str) -> str:
+        """【🏷️ 格式化标的文本】生成直观的 '代码 股票名称' 显示格式 (如 '688635 长进光子')"""
+        if not code:
+            return ""
+        c_clean = "".join(filter(str.isdigit, str(code))).zfill(6)
+        if not c_clean or c_clean == "000000":
+            return str(code)
+        st_name = resolve_stock_name(c_clean)
+        if st_name and st_name != c_clean and not st_name.startswith("个股_"):
+            return f"{c_clean} {st_name}"
+        return c_clean
+
+    def _on_combo_code_activated(self, index: int):
+        """【📜 下拉选择标的】响应从最近 10 个历史列表中点击选择标的并立即切换"""
+        if index < 0:
+            return
+        combo = getattr(self, 'combo_switch_code', None)
+        if combo is None:
+            return
+        code = combo.itemData(index)
+        if not code:
+            text = combo.itemText(index)
+            code = SBCQuickCodeLineEdit.extract_code(text)
+        if code:
+            self.switch_code(code)
+
+    def _refresh_recent_codes_combo(self):
+        """【🔄 刷新最近标的下拉框】保留最新 10 个，显示 '代码 股票名称' 并高亮当前代码"""
+        combo = getattr(self, 'combo_switch_code', None)
+        if combo is None:
+            return
+        recent_codes = _load_sbc_recent_codes()
+        if self.code and self.code not in recent_codes:
+            recent_codes.insert(0, self.code)
+            recent_codes = recent_codes[:10]
+
+        combo.blockSignals(True)
+        combo.clear()
+        target_idx = -1
+        display_label = self._format_code_with_name(self.code)
+        for idx, c in enumerate(recent_codes):
+            label = self._format_code_with_name(c)
+            combo.addItem(label, c)
+            if c == self.code:
+                target_idx = idx
+
+        if target_idx >= 0:
+            combo.setCurrentIndex(target_idx)
+        if hasattr(self, 'txt_switch_code') and self.txt_switch_code is not None:
+            self.txt_switch_code.setText(display_label)
+            self.txt_switch_code.selectAll()
+        combo.blockSignals(False)
+
     def reload_chart(self, is_timer_tick: bool = False):
+        # 保持输入框与当前标的代码+名称同步 (非编辑输入状态下)
+        if hasattr(self, 'txt_switch_code') and self.txt_switch_code and not self.txt_switch_code.hasFocus():
+            expected_display = self._format_code_with_name(self.code)
+            if self.txt_switch_code.text() != expected_display:
+                self.txt_switch_code.setText(expected_display)
+
         if is_timer_tick:
             # 1. 窗口关闭/隐藏保护：若窗口已经不可见，彻底跳过轮询与计算
             if not self.isVisible():
@@ -3923,13 +4293,9 @@ def open_sbc_chart_dialog(parent_win: Optional[QWidget] = None, code: str = "688
         dlg = SBCIntradayChartDialog(parent=target_win, code=c_clean, engine=engine, initial_period_mode=period_mode)
         sbc_dict[c_clean] = dlg
     else:
-        dlg.code = c_clean
-        dlg.lbl_title.setText(f"📊 标的: {c_clean} {resolve_stock_name(c_clean)} | SBC 实盘走势基准线")
-        dlg.setWindowTitle(f"📈 【{c_clean} {resolve_stock_name(c_clean)}】SBC 实盘分时走势与关键阶梯基准图")
+        dlg.switch_code(c_clean)
         if period_mode:
             dlg.set_period_mode(period_mode, reload=True, save=True)
-        else:
-            dlg.reload_chart()
 
     trades_df = kwargs.get("trades_df", None)
     df_kline = kwargs.get("df_kline", None)
@@ -3948,6 +4314,90 @@ def _get_sbc_layout_cfg_path():
     cfg_dir = os.path.join(get_app_root(), "config")
     os.makedirs(cfg_dir, exist_ok=True)
     return os.path.join(cfg_dir, "intraday_ui_layout.json")
+
+
+def _load_sbc_recent_codes() -> List[str]:
+    """【💾 读取最近访问/回测标的】保留最近 10 个有效 6 位标的代码 (双保险: JSON + QSettings)"""
+    # 1. 优先从 config/intraday_ui_layout.json 读取
+    try:
+        cfg_path = _get_sbc_layout_cfg_path()
+        if os.path.exists(cfg_path):
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            codes = data.get("sbc_recent_codes", [])
+            if isinstance(codes, list):
+                valid = []
+                for c in codes:
+                    c_str = str(c.get("code") if isinstance(c, dict) else c).strip()
+                    c_clean = "".join(filter(str.isdigit, c_str)).zfill(6)
+                    if len(c_clean) == 6 and c_clean != "000000" and c_clean not in valid:
+                        valid.append(c_clean)
+                if valid:
+                    return valid[:10]
+    except Exception:
+        pass
+
+    # 2. 兜底从 QSettings 读取
+    try:
+        settings = QSettings("pyQuant3", "SBCIntradayChartDialog")
+        saved = settings.value("recent_codes", [])
+        if isinstance(saved, list):
+            valid = []
+            for c in saved:
+                c_clean = "".join(filter(str.isdigit, str(c))).zfill(6)
+                if len(c_clean) == 6 and c_clean != "000000" and c_clean not in valid:
+                    valid.append(c_clean)
+            if valid:
+                return valid[:10]
+    except Exception:
+        pass
+    return []
+
+
+def _save_sbc_recent_code(code: str):
+    """【💾 原子持久化最近访问标的】LRU 队列保留最新 10 个，新代码置顶"""
+    if not code:
+        return
+    c_clean = "".join(filter(str.isdigit, str(code))).zfill(6)
+    if len(c_clean) != 6 or c_clean == "000000":
+        return
+    try:
+        recent = _load_sbc_recent_codes()
+        if c_clean in recent:
+            recent.remove(c_clean)
+        recent.insert(0, c_clean)
+        recent = recent[:10]
+
+        cfg_path = _get_sbc_layout_cfg_path()
+        data = {}
+        if os.path.exists(cfg_path):
+            try:
+                with open(cfg_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            except Exception:
+                data = {}
+        data["sbc_recent_codes"] = recent
+
+        tmp_path = cfg_path + f".tmp_rec_{os.getpid()}"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        try:
+            if os.path.exists(cfg_path):
+                os.replace(tmp_path, cfg_path)
+            else:
+                os.rename(tmp_path, cfg_path)
+        except Exception:
+            import shutil
+            shutil.move(tmp_path, cfg_path)
+
+        # 同步写入 QSettings 双保险
+        try:
+            settings = QSettings("pyQuant3", "SBCIntradayChartDialog")
+            settings.setValue("recent_codes", recent)
+        except Exception:
+            pass
+    except Exception as e:
+        logger.debug(f"保存 SBC 最近代码异常: {e}")
 
 
 def _record_sbc_open(code: str, geo=None, period_mode: Optional[str] = None):
