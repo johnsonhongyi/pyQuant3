@@ -2912,14 +2912,6 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
             self.tray_menu.addSeparator()
             self.ag_sub_menu = self.tray_menu.addMenu("🚀 Antigravity 账户切换")
             self.ag_sub_menu.aboutToShow.connect(self._update_ag_tray_submenu)
-            
-            # 启动 Antigravity 后台文件监视与自动同步守护线程
-            if not hasattr(self, '_ag_sync_worker') or not self._ag_sync_worker:
-                self._ag_sync_worker = antigravity_manager.AntigravitySyncWorker(
-                    check_interval_sec=1.5,
-                    on_sync_callback=self._on_ag_auto_synced
-                )
-                self._ag_sync_worker.start()
         except Exception as e:
             logger.error(f"托盘图标 Antigravity 快捷菜单初始化异常: {e}")
 

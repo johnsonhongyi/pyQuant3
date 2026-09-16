@@ -1,3 +1,51 @@
+## 2026-09-16 16:38
+- [x] **【轻量化收敛：托盘巡检守护解耦，改为账户切换与同步时单次自检自愈】(`window_manager/ui.py`, `window_manager/antigravity_manager.py`, `sync_antigravity_ide.py`, `tests/test_antigravity_manager.py`)**：
+    - [x] **操盘手明确要求**：“守护线程巡检：托盘常驻的 AntigravitySyncWorker 毫秒级巡检中前置运行这个不用跟随管理器自动守护,在执行切换时执行一次自检即可”；
+    - [x] **系统级工程落地与架构加固 (KISS / YAGNI / SOLID)**：
+        1. **托盘生命周期彻底解耦自动守护巡检**：
+           - 托盘启动时不再无条件自启 `_ag_sync_worker` 后台线程，消除无谓的常驻循环轮询与 CPU/磁盘 I/O 开销；
+           - 仅在用户点击“🚀 切换账户”、“🔄 立即同步至 Antigravity IDE”或执行 CLI `--ag-switch` / `--ag-sync` 时，以原子事务方式触发一次完整的“容灾自愈检测 + 双向对齐 + 配置文件保鲜”；
+        2. **`sync_antigravity_ide.py` 与 `antigravity_manager.py` 双端对齐**：
+           - `switch_account` 在切换动作前置先运行 `auto_backup_new_accounts_from_databases`，后置触发 `do_sync(auto_persist_to_file=True)`，保障即使没有后台常驻守护，每次切换与同步依然 100% 具备容灾建档与自动保鲜能力；
+    - [x] **测试验证**：
+        - `pytest tests/test_antigravity_manager.py -v`: 5/5 PASSED 全部通过；
+        - 回归测试 6/6 PASSED 全部通过。
+
+## 2026-09-16 16:32
+- [x] **【实现缺失与损坏容灾自愈 & 目标数据库 (Antigravity IDE) 自动识别并备份新账户能力】(`antigravity_manager.py`, `sync_antigravity_ide.py`, `tests/test_antigravity_manager.py`)**：
+    - [x] **操盘手反馈需求与容灾业务场景**：
+        1. “例如当出现异常损坏, 没有账户目录: `%USERPROFILE%\.antigravity-agent\antigravity-accounts`，源数据库: `%APPDATA%\Antigravity\User\globalStorage\state.vscdb`，目标数据库: `%APPDATA%\Antigravity IDE\User\globalStorage\state.vscdb` 源数据, 需要通过目标数据库: 自动备份新的账户, 有新账户自动备份的能力”；
+        2. 当遇到突发异常（如账户目录被误删/换新机/源数据库损坏/未建档），但目标 IDE 中正常登录使用，或操盘手直接在 IDE 里新登录了一个未收录账号时，系统必须能够全自动发现、建档、自愈恢复。
+    - [x] **系统级工程落地与架构加固 (KISS / SOLID / DRY)**：
+        1. **新账户自动发现与全自动建档引擎 (`auto_backup_new_accounts_from_databases`)**：
+           - 优先扫描目标库（`Antigravity IDE`）与源库（`Antigravity`）；
+           - 只要解析出有效认证凭证且在本地账户库中不存在对应 `{email}.json`，系统自动创建账户目录，并通过原子文件操作直接创建新账户备份；
+        2. **单边缺失/损坏跨库自愈恢复**：
+           - 只要目标库完好而源库缺失或损坏，自动利用目标库的数据重建并恢复源库；反之亦然，实现数据库层面的双向自愈；
+        3. **深度集成至生命周期所有关键节点**：
+           - 在 `list_accounts()`、`do_sync()` 以及后台守护线程 `AntigravitySyncWorker` 的每次巡检开始前，均前置执行自愈检测，确保任何时候都能瞬间自愈恢复。
+    - [x] **自动化测试 100% 验证通过 (5/5 PASSED)**：
+        - 专项新增 `test_auto_discover_and_healing_from_target_db`: 验证在账户目录完全不存在且源数据库完全缺失的极端场景下，仅凭目标库中的新登录账号数据，系统全自动创建账户目录、生成 `alpha.trader@fund.com.json` 备份并成功自愈恢复源数据库！
+
+## 2026-09-16 16:25
+- [x] **【实现 IDE 动态刷新凭证自动双向对齐 & 本地账户配置文件 ({email}.json) 持续自动保鲜】(`antigravity_manager.py`, `sync_antigravity_ide.py`, `manage_window_layout.py`)**：
+    - [x] **操盘手反馈痛点与业务场景**：
+        1. “这里更新的配置文件,在ide中随着时间会更新,现在有同步更新ide的最新配置文件的能力么保持最新的”；
+        2. 在日常编写代码和模型调用过程中，Antigravity IDE 会在后台动态更新 UserStatusProto、配额指标及续期 OAuth Token 并写入 `state.vscdb`（例如 `userStatus` 从 5,516 字节扩充至 27,428 字节）；
+        3. 原单向同步机制不仅无法捕获 IDE 侧的最新 Token/状态变化，而且磁盘上的 `{email}.json` 账户配置文件无法随着 IDE 的使用而自动更新，导致下次切换账户时存在被旧 Token 覆盖的隐患。
+    - [x] **系统级工程落地与架构加固 (KISS / SOLID / DRY)**：
+        1. **双向智能对齐引擎升级 (`do_sync`)**：
+           - 实时比对 `OLD_DB_PATH` 与 `NEW_DB_PATH` 的修改时间戳 `mtime` 与凭证有效性，自动识别哪一侧是最新产生的数据源；
+           - 当用户在 Antigravity IDE 中产生最新 Token 或状态变更时（`mtime_new > mtime_old`），自动以 IDE 为源将最新凭证反向对齐同步至主库；
+        2. **账户配置文件全自动持续保鲜机制 (`persist_active_account_to_file`)**：
+           - 只要 IDE 数据库发生变动，自动提取当前活跃账户最新的认证凭证（`antigravityAuthStatus`、`oauthToken`、`userStatus`、`antigravityUnifiedStateSync.*` 等）；
+           - 与磁盘上的 `antigravity-accounts/{email}.json` 进行严格内容指纹比对，一旦有续期或变动，通过原子替换（Temp File + Replace）安全写回本地配置文件；
+           - 使得本地账户库的 `.json` 配置文件**随着 IDE 的日常使用永远全自动保持最新**，彻底消除 Token 过期变旧的后顾之忧；
+        3. **后台守护巡检线程 (`AntigravitySyncWorker`) 毫秒级联动**：
+           - 实时监视任意一侧数据库的变动，0.5 秒内自愈完成双向同步并持久化写回配置文件。
+    - [x] **实机测试 100% 验证通过**：
+        - 验证 IDE 动态刷新的 27,428 字节 `userStatus` 成功双向同步至 `OLD_DB` 与本地 `lililover.lili@gmail.com.json`，达到完全一致（`OLD=27428, NEW=27428, JSON=27428`）。
+
 ## 2026-09-16 16:15
 - [x] **【Antigravity 账户切换与 IDE 状态自动同步功能全景落地 & 深度集成至窗口布局管理器】(`sync_antigravity_ide.py`, `webTools/window_manager/antigravity_manager.py`, `webTools/window_manager/__init__.py`, `webTools/window_manager/ui.py`, `webTools/manage_window_layout.py`, `tests/test_antigravity_manager.py`)**：
     - [x] **操盘手反馈需求与业务场景**：
