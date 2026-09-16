@@ -19,6 +19,18 @@ from datetime import datetime, timedelta
 from ipc_sync_manager import IPCSyncManager
 from sys_utils import get_app_root
 from JohnsonUtil import commonTips as cct
+
+def _safe_int(val, default: int = 0) -> int:
+    """安全地将值转换为整数，针对 NaN、None、非数字字符串优雅容错回退 default"""
+    try:
+        if val is None or pd.isna(val):
+            return default
+        f = float(val)
+        if pd.isna(f) or f != f:
+            return default
+        return int(f)
+    except Exception:
+        return default
 # 导入 tkcalendar 库支持，高保真还原日历选择器
 try:
     import JohnsonUtil.tkcalendar_patch
@@ -136,6 +148,9 @@ class PRServiceGUI:
         self.link_tdx_var = tk.BooleanVar(value=self.config.get("link_tdx", True))
         self.link_ths_var = tk.BooleanVar(value=self.config.get("link_ths", True))
         self.link_vis_var = tk.BooleanVar(value=self.config.get("link_vis", True))
+        # TDX 实时行情自动刷新变量 (对齐 cct.ats_tdx_interval 全局基准与图2自定义设置)
+        self.tdx_auto_var = tk.BooleanVar(value=self.config.get("tdx_auto_refresh", True))
+        self._is_crawling = False
         
         # 初始化本地 StockSender 作为 fallback
         if StockSender:
@@ -657,39 +672,140 @@ class PRServiceGUI:
         except Exception as e:
             service_logger.debug(f"TDX API 实时刷新异常: {e}")
 
+    def _get_global_ats_interval(self) -> float:
+        """获取全局统一的 TDX 刷新间隔基准 (SSOT: cct.ats_tdx_interval)"""
+        try:
+            from JohnsonUtil import commonTips as cct
+            val = getattr(cct, 'ats_tdx_interval', 5.0)
+            return float(val or 5.0)
+        except Exception:
+            return 5.0
+
+    def _get_current_tdx_interval(self) -> float:
+        """获取当前生效的 TDX 刷新间隔（秒），支持跟随 cct.ats_tdx_interval 或独立微调"""
+        custom = self.config.get("tdx_refresh_interval", "auto")
+        if custom == "auto" or custom is None or custom == "":
+            return self._get_global_ats_interval()
+        try:
+            val = float(custom)
+            if val > 0:
+                return val
+        except Exception:
+            pass
+        return self._get_global_ats_interval()
+
+    def _is_tdx_auto_refresh_enabled(self) -> bool:
+        """判断是否开启了 TDX 自动刷新"""
+        if hasattr(self, 'tdx_auto_var') and self.tdx_auto_var is not None:
+            return bool(self.tdx_auto_var.get())
+        return bool(self.config.get("tdx_auto_refresh", True))
+
+    def _init_tdx_interval_combo(self):
+        """初始化 TDX 刷新频率下拉框选项并恢复保存的选中状态"""
+        if not hasattr(self, 'combo_tdx_interval') or self.combo_tdx_interval is None:
+            return
+        base_sec = self._get_global_ats_interval()
+        base_str = f"{int(base_sec)}s" if base_sec.is_integer() else f"{base_sec:.1f}s"
+        
+        # 预设候选列表: (显示文本, 存储配置值)
+        self._tdx_interval_options = [
+            (f"默认 ({base_str})", "auto"),
+            ("3 秒 (极速)", 3.0),
+            ("5 秒 (均衡)", 5.0),
+            ("10 秒 (稳健)", 10.0),
+            ("15 秒 (省流)", 15.0),
+            ("30 秒 (低耗)", 30.0),
+            ("60 秒 (节能)", 60.0),
+        ]
+        
+        saved_val = self.config.get("tdx_refresh_interval", "auto")
+        target_idx = 0
+        
+        if saved_val != "auto" and saved_val is not None:
+            try:
+                f_saved = float(saved_val)
+                matched = False
+                for idx, (_, val) in enumerate(self._tdx_interval_options):
+                    if val != "auto" and abs(float(val) - f_saved) < 0.01:
+                        target_idx = idx
+                        matched = True
+                        break
+                if not matched and f_saved > 0:
+                    custom_lbl = f"{int(f_saved)} 秒 (自定义)" if f_saved.is_integer() else f"{f_saved:.1f} 秒 (自定义)"
+                    self._tdx_interval_options.append((custom_lbl, f_saved))
+                    target_idx = len(self._tdx_interval_options) - 1
+            except Exception:
+                target_idx = 0
+                
+        self.combo_tdx_interval["values"] = [opt[0] for opt in self._tdx_interval_options]
+        self.combo_tdx_interval.current(target_idx)
+
+    def _get_selected_tdx_interval_cfg(self):
+        """从当前下拉框选中项中获取需要持久化保存的配置值"""
+        if not hasattr(self, 'combo_tdx_interval') or self.combo_tdx_interval is None:
+            return "auto"
+        curr_idx = self.combo_tdx_interval.current()
+        if hasattr(self, '_tdx_interval_options') and 0 <= curr_idx < len(self._tdx_interval_options):
+            return self._tdx_interval_options[curr_idx][1]
+        return "auto"
+
+    def _on_tdx_auto_toggled(self):
+        """响应 TDX 自动刷新勾选状态切换"""
+        is_enabled = bool(self.tdx_auto_var.get())
+        self.config["tdx_auto_refresh"] = is_enabled
+        self.save_config_settings()
+        if is_enabled:
+            intv_sec = self._get_current_tdx_interval()
+            intv_str = f"{int(intv_sec)}s" if intv_sec.is_integer() else f"{intv_sec:.1f}s"
+            if hasattr(self, 'lbl_status'):
+                self.lbl_status.config(text=f"TDX自动刷新已开启 ({intv_str})", fg="blue")
+            # 立即触发一次刷新
+            threading.Thread(target=self.refresh_realtime_from_tdx, daemon=True).start()
+        else:
+            if hasattr(self, 'lbl_status'):
+                self.lbl_status.config(text="TDX自动刷新已暂停", fg="#888888")
+
+    def _on_tdx_interval_changed(self, event=None):
+        """响应 TDX 刷新频率下拉框选择切换"""
+        cfg_val = self._get_selected_tdx_interval_cfg()
+        self.config["tdx_refresh_interval"] = cfg_val
+        self.save_config_settings()
+        intv_sec = self._get_current_tdx_interval()
+        intv_str = f"{int(intv_sec)}s" if intv_sec.is_integer() else f"{intv_sec:.1f}s"
+        selected_text = self.combo_tdx_interval.get() if hasattr(self, 'combo_tdx_interval') else ""
+        if hasattr(self, 'lbl_status'):
+            self.lbl_status.config(text=f"TDX刷新频率已更新: {selected_text} ({intv_str})", fg="blue")
+
     def _start_ipc_polling_loop(self):
-        """后台高频 TDX API 秒级盘口更新 + 低频后台 IPC 动态辅助同步线程"""
+        """后台高频 TDX API 秒级盘口更新 + 低频后台 IPC 动态辅助同步线程 (全面对齐 cct.ats_tdx_interval 与自定义设置)"""
         def polling_worker():
             ipc_counter = 0.0
             while getattr(self, "root", None):
                 try:
-                    # 动态读取 TDX 轮询间隔配置，默认 3.0s (支持跟随 cct.ats_tdx_interval)
-                    from JohnsonUtil import commonTips as cct
-                    tdx_interval = float(getattr(cct, 'ats_tdx_interval', 3.0) or 3.0)
-                    sleep_sec = max(1.0, min(tdx_interval, 10.0))
+                    # 动态读取当前 TDX 刷新间隔 (默认跟随 cct.ats_tdx_interval，如 5.0s；支持图2独立微调)
+                    sleep_sec = max(1.0, min(self._get_current_tdx_interval(), 60.0))
                     time.sleep(sleep_sec)
 
                     if not getattr(self, "root", None):
                         break
 
+                    from JohnsonUtil import commonTips as cct
                     is_work_time = cct.get_work_time()
                     today = time.strftime("%Y-%m-%d")
 
-                    # 1. ⚡ [高频主通道] TDX API 秒级盘口拉取与刷新（交易时间内且处于今日复盘）
-                    if is_work_time and getattr(self, 'current_date', today) == today:
-                        refresh_thread = getattr(self, 'refresh_thread', None)
-                        if not (refresh_thread and refresh_thread.is_alive()):
+                    # 1. ⚡ [高频主通道] TDX API 秒级盘口拉取与刷新（开启自动刷新、交易时间内且处于今日复盘）
+                    if self._is_tdx_auto_refresh_enabled() and is_work_time and getattr(self, 'current_date', today) == today:
+                        # 仅在全网爬虫真正处于写入树表的极短瞬间避让，绝不因后台常驻等待线程而阻断秒级实时盘口！
+                        if not getattr(self, '_is_crawling', False):
                             self.refresh_realtime_from_tdx()
 
                     # 2. 🐢 [低频辅助通道] IPC 全量衍生量化特征同步 (约 60 秒静默轮询一次)
                     ipc_counter += sleep_sec
                     if ipc_counter >= 60.0:
                         ipc_counter = 0.0
-                        if is_work_time and not getattr(self, '_ipc_sync_in_progress', False):
-                            refresh_thread = getattr(self, 'refresh_thread', None)
-                            if not (refresh_thread and refresh_thread.is_alive()):
-                                service_logger.debug("[IPC 辅助同步] 交易时间内后台低频同步 IPC 量化指标数据...")
-                                self.request_dynamic_ipc_sync(timeout=5.0)
+                        if is_work_time and not getattr(self, '_ipc_sync_in_progress', False) and not getattr(self, '_is_crawling', False):
+                            service_logger.debug("[IPC 辅助同步] 交易时间内后台低频同步 IPC 量化指标数据...")
+                            self.request_dynamic_ipc_sync(timeout=5.0)
 
                 except Exception as e:
                     service_logger.debug(f"[实时轮询引擎] 异常: {e}")
@@ -1275,7 +1391,7 @@ class PRServiceGUI:
                         except Exception:
                             pass
                         try:
-                            rank_val = str(int(row.get('Rank', row.get('rank', 0))))
+                            rank_val = str(_safe_int(row.get('Rank', row.get('rank', 0))))
                         except Exception:
                             pass
                         block = str(row.get('category', row.get('blockname', row.get('hy', '--'))))
@@ -1397,7 +1513,7 @@ class PRServiceGUI:
                         "ma5d": row.get('ma5d', 0.0) if row is not None else 0.0,
                         "ma20d": row.get('ma20d', 0.0) if row is not None else 0.0,
                         "ma60d": row.get('ma60d', 0.0) if row is not None else 0.0,
-                        "rank": int(row.get('Rank', row.get('rank', 0))) if row is not None else 0,
+                        "rank": _safe_int(row.get('Rank', row.get('rank', 0))) if row is not None else 0,
                     }
 
         # 实时根据推送的行情重新分析和更新板块排行展示
@@ -1416,6 +1532,8 @@ class PRServiceGUI:
             "link_tdx": True,
             "link_ths": True,
             "link_vis": True,
+            "tdx_auto_refresh": True,
+            "tdx_refresh_interval": "auto",
             "sort_col": None,
             "sort_descending": False,
             "auto_refresh": False,
@@ -1571,6 +1689,10 @@ class PRServiceGUI:
                 self.config["link_ths"] = self.link_ths_var.get()
             if hasattr(self, "link_vis_var") and self.link_vis_var:
                 self.config["link_vis"] = self.link_vis_var.get()
+            if hasattr(self, "tdx_auto_var") and self.tdx_auto_var:
+                self.config["tdx_auto_refresh"] = bool(self.tdx_auto_var.get())
+            if hasattr(self, "combo_tdx_interval") and self.combo_tdx_interval:
+                self.config["tdx_refresh_interval"] = self._get_selected_tdx_interval_cfg()
             self.config["auto_refresh"] = bool(getattr(self, "is_running", False))
             self.config["velocity_segment_mode"] = getattr(self, "segment_mode", "60m")
             
@@ -1913,6 +2035,22 @@ class PRServiceGUI:
         chk_ths.pack(side="left", padx=5)
         chk_vis = tk.Checkbutton(link_frame, text="可视化(vis)", variable=self.link_vis_var, command=self.save_config_settings)
         chk_vis.pack(side="left", padx=5)
+
+        # ⚡ TDX API 实时更新自定义配置 (图2标记位置，对齐 cct.ats_tdx_interval 全局基准并支持独立微调减少服务器压力)
+        tk.Label(link_frame, text="|", fg="#C0C0C0").pack(side="left", padx=(10, 8))
+        self.chk_tdx_auto = tk.Checkbutton(
+            link_frame,
+            text="TDX自动刷新",
+            variable=self.tdx_auto_var,
+            command=self._on_tdx_auto_toggled
+        )
+        self.chk_tdx_auto.pack(side="left", padx=2)
+
+        tk.Label(link_frame, text="频率:").pack(side="left", padx=(4, 2))
+        self.combo_tdx_interval = ttk.Combobox(link_frame, width=13, state="readonly")
+        self._init_tdx_interval_combo()
+        self.combo_tdx_interval.pack(side="left", padx=2)
+        self.combo_tdx_interval.bind("<<ComboboxSelected>>", self._on_tdx_interval_changed)
 
         # 第二行：系统参数配置
         settings_frame = tk.Frame(bottom_frame)
@@ -2943,6 +3081,7 @@ class PRServiceGUI:
         threading.Thread(target=self._run_once_job, args=(True,), daemon=True).start()
 
     def _run_once_job(self, force_save=False):
+        self._is_crawling = True
         try:
             # 🚀 异步启动 IPC 动态端口数据同步守护（不阻塞主抓取和前台实时更新）
             threading.Thread(target=lambda: self.request_dynamic_ipc_sync(timeout=5.0), daemon=True).start()
@@ -3050,6 +3189,7 @@ class PRServiceGUI:
         except Exception as e:
             self.root.after(0, lambda: self.lbl_status.config(text=f"刷新失败: {e}", fg="red"))
         finally:
+            self._is_crawling = False
             self.root.after(0, lambda: self.btn_refresh.config(state="normal", text="查询刷新"))
 
     def update_all_tables(self, em_data, ths_data, lh_data, tgb_data, resonance_results, quotes):

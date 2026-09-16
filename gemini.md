@@ -1,3 +1,25 @@
+## 2026-09-16 19:48
+- [x] **【人气综合 TDX API 盘口自动更新全面对齐 cct.ats_tdx_interval、实盘误杀 bug 根治与底部自定义频率及持久化】(`stock_standalone/popularity_resonance_gui.py`, `stock_standalone/tests/test_pr_tdx_realtime_integration.py`)**：
+    - [x] **操盘手明确要求**：“人气综合之前调整为TDX的API更新涨跌,60分涨速,以及vwap信息,但是实盘没有自动对齐ats_tdx_interval数据自动更新,这个更新频率可以默认跟随cct.ats_tdx_interval ,并在人气窗口图2标记位置添加自定义设置减少服务器压力.自动持久化”；
+    - [x] **实盘未自动更新致命根因破案 (P0)**：
+        1. **`refresh_thread.is_alive()` 粗暴误杀拦截**：原代码在 `_start_ipc_polling_loop` 轮询判定时加入 `if not (refresh_thread and refresh_thread.is_alive()):`。在实盘看盘时，操盘手会开启底部的自动刷新（图1按钮显示为“停止自动”），导致 `self.refresh_thread` 处于常驻存活状态（包含长时间 `time.sleep` 等待）。该前置条件恒为 False，**直接导致实盘盘中 TDX 秒级盘口更新被 100% 阻断拦截**；
+        2. **解决措施**：将粗暴的线程存活拦截重构为仅针对爬虫真正写入树表瞬间的轻量标记 `self._is_crawling`，爬虫 sleep 等待期间 TDX 实时盘口轮询完全畅通执行！
+    - [x] **系统级工程落地与架构加固 (SSOT / KISS / SOLID)**：
+        1. **更新频率全量动态对齐 `cct.ats_tdx_interval` (SSOT)**：
+           - 封装 `_get_global_ats_interval()` 动态读取全局基准 `cct.ats_tdx_interval`（如 5.0s）；
+           - 封装 `_get_current_tdx_interval()`，未自定义时以 `"auto"` 模式完全跟随全局基准，支持全局参数修改后热生效；
+           - 轮询线程以 `sleep_sec = max(1.0, min(self._get_current_tdx_interval(), 60.0))` 动态控制心跳；
+        2. **图 2 标记位置新增自定义设置 UI 控件**：
+           - 在底部 `link_frame` 的 `[ ] 可视化(vis)` 右侧精准新增竖线分隔符、`[√] TDX自动刷新` 复选框与 `频率:` 下拉框（`ttk.Combobox`）；
+           - 下拉框提供 `默认 (5s)`（对应 `"auto"`）、`3 秒 (极速)`、`5 秒 (均衡)`、`10 秒 (稳健)`、`15 秒 (省流)`、`30 秒 (低耗)`、`60 秒 (节能)` 等档位，支持非标数值自适应展示；
+           - 操盘手按需调整为 10s、15s 或 30s 可大幅降低对通达信行情服务器的高频拉取压力；
+        3. **配置全自动双向持久化与启动恢复**：
+           - `load_config_settings` 与 `save_config_settings` 完整收敛 `"tdx_auto_refresh": True` 与 `"tdx_refresh_interval": "auto"`；
+           - 切换下拉框或勾选状态时即时自动写盘落盘，下次启动全自动无缝恢复。
+    - [x] **自动化测试 100% 验证通过 (13/13 PASSED)**：
+        - 专项测试 `tests/test_pr_tdx_realtime_integration.py`: 7/7 PASSED（涵盖全局基准对齐与动态热同步、自定义设置与配置持久化、爬虫存活状态下 TDX 实时更新畅通无阻断验证）；
+        - 回归测试: 6/6 PASSED 全部通过。
+
 ## 2026-09-16 17:40
 - [x] **【SBC 分时走势全面转向独立子进程、跨进程统一重排支持与极限性能优化】(`ats/ui/sbc_launcher.py`, `ats/ui/intraday_strategy_dialog.py`, `ats/ui/main_window.py`, `tests/test_sbc_launcher_and_cct_interval.py`, `tests/test_sbc_rearrange.py`)**：
     - [x] **操盘手明确要求**：
