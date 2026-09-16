@@ -5080,10 +5080,23 @@ def restore_all_open_sbc_windows(parent_win=None, as_subprocess: bool = False) -
                 saved_period = item.get("period_mode") or item.get("period") or (
                     data.get("sbc_period_modes", {}).get(str(code).zfill(6))
                 ) or "10d"
-                proc = launch_sbc_process(code, period_mode=saved_period)
-                if proc:
-                    restored_dialogs.append(proc)
-            return restored_dialogs
+                res = launch_sbc_process(code, period_mode=saved_period)
+                if res:
+                    restored_dialogs.append(res)
+                    # 💡 若降级在当前进程内创建了窗口，同步恢复其几何坐标与尺寸
+                    if isinstance(res, SBCIntradayChartDialog):
+                        try:
+                            from gui_utils import clamp_window_to_screens
+                            x = item.get("x", 100)
+                            y = item.get("y", 100)
+                            w = item.get("width", 680)
+                            h = item.get("height", 420)
+                            rx, ry = clamp_window_to_screens(x, y, w, h)
+                            res.setGeometry(rx, ry, w, h)
+                        except Exception:
+                            pass
+            if restored_dialogs:
+                return restored_dialogs
 
         from gui_utils import clamp_window_to_screens
         for item in sbc_list:

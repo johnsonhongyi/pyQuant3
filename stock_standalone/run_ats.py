@@ -10,6 +10,13 @@ import multiprocessing
 
 if __name__ == "__main__":
     multiprocessing.freeze_support()
+    # 💡 命令行参数分发：若带有 --sbc 或 --sbc-holdings，作为独立 SBC 进程运行，严禁调起 ATS 主程序
+    if any(arg in sys.argv for arg in ("--sbc", "--sbc-holdings", "--holdings-sbc")):
+        try:
+            import run_sbc
+            sys.exit(run_sbc.main())
+        except Exception as e:
+            print(f"[ATS Launcher] 命令行分发到 SBC 异常: {e}")
 
 from PyQt6.QtWidgets import QApplication
 

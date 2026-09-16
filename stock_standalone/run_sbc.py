@@ -166,9 +166,27 @@ def restore_launcher_holdings_windows() -> List[SBCIntradayChartDialog]:
 
 
 def main():
-    # 解析命令行参数
-    has_cli_code = len(sys.argv) > 1 and sys.argv[1].strip() and not sys.argv[1].strip().startswith("-")
-    is_holdings_mode = not has_cli_code or ("--holdings" in sys.argv)
+    # 解析命令行参数：过滤掉标志参数，提取有效的股票代码与看盘周期
+    non_flag_args = []
+    is_holdings_mode = False
+    for arg in sys.argv[1:]:
+        a = arg.strip()
+        if a in ("--holdings", "--sbc-holdings", "--holdings-sbc"):
+            is_holdings_mode = True
+        elif a == "--sbc":
+            continue
+        elif not a.startswith("-"):
+            non_flag_args.append(a)
+
+    cli_code = None
+    period = "10d"
+    if non_flag_args:
+        cli_code = non_flag_args[0]
+        if len(non_flag_args) > 1:
+            period = non_flag_args[1]
+
+    if not cli_code:
+        is_holdings_mode = True
 
     if is_holdings_mode:
         # 💡 核心持久化隔离：明确重定向持久化路径到持仓专用配置文件，并标记为持仓盯盘启动器
@@ -194,11 +212,9 @@ def main():
 
     app.aboutToQuit.connect(_on_app_about_to_quit)
 
-    if has_cli_code:
-        code = sys.argv[1].strip()
-        period = sys.argv[2].strip() if len(sys.argv) > 2 else "10d"
-        print(f"[SBC Launcher] 启动指定 SBC 实盘分时窗口: 标的代码={code}, 初始周期={period}")
-        window = open_sbc_chart_dialog(code=code, period_mode=period)
+    if cli_code:
+        print(f"[SBC Launcher] 启动指定 SBC 实盘分时窗口: 标的代码={cli_code}, 初始周期={period}")
+        window = open_sbc_chart_dialog(code=cli_code, period_mode=period)
         if window:
             window.show()
     else:

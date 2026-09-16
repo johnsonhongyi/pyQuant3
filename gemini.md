@@ -1,3 +1,30 @@
+## 2026-09-16 23:20
+- [x] **【打包环境彻底兼容：根除盯盘误调起 ATS 主程序、修复找不到 run_sbc.py 报错并实现全自动平滑降级】(`sbc_launcher.py`, `intraday_strategy_dialog.py`, `run_ats.py`, `run_sbc.py`, `tests/test_sbc_packaged_env_and_fallback.py`)**：
+    - [x] **操盘手反馈问题与实盘现场破案 (P0)**：
+        1. “盯盘出现bug,直接运行了一个ats,速度修复”；
+        2. “打包后直接运行了一个ats主程序”；
+        3. `[09-16 22:54:38] ERROR:sbc_launcher.py(launch:286): [SBCLauncher] 找不到 run_sbc.py 路径: D:\JohnsonProgram\instockMonitorTK\run_sbc.py`；
+        4. “速度修复,多进程打开了ats主窗口及上面的bug,打包环境无法使用”。
+    - [x] **三大致命根因破案 (P0)**：
+        1. **打包环境盲目调用 `sys.executable` 误启第二个 ATS 主程序**：在 PyInstaller/Nuitka 冻结环境中，`sys.executable` 即为 `ATS_Terminal.exe` 自身。`launch_holdings_watcher` 盲目拼接 `[sys.executable, run_sbc_path]`，直接导致 `ATS_Terminal.exe` 自身被再次启动，主入口无参数拦截直接弹出全新的 `ATSMainWindow` 主界面；
+        2. **打包安装目录无源码脚本引发致命阻断**：在生产部署环境（如 `D:\JohnsonProgram\instockMonitorTK\`）中仅有编译后的 exe，不存在 `run_sbc.py` 源码。`launch()` 因 `not os.path.exists` 直接打 ERROR 并返回 None，且无任何降级兜底，导致 ATS 启动自动恢复与用户点击 SBC 在打包环境下全面瘫痪；
+        3. **生命周期纳管未适配进程内对象**：原 `SBCProcessManager` 仅管理外部 `subprocess.Popen`，缺乏对打包降级模式下进程内窗口对象的生命周期跟踪，导致二次点击无法统一保存和关闭。
+    - [x] **系统级工程根治落地 (SOLID / KISS / DRY / 健壮性优先)**：
+        1. **打包环境拦截与全自动进程内无缝平滑降级 (`sbc_launcher.py`)**：
+           - 严格限定仅在非打包且 Python 解释器环境下（`not is_packaged_env()` 且 `"python" in sys.executable` 且 `run_sbc.py` 存在）才调起独立 Python 子进程；
+           - 在打包环境或无外部脚本时，`launch(code)` 自动安全降级在当前进程内调用 `open_sbc_chart_dialog`，100% 正常弹窗置顶，杜绝找不到文件报错，绝不调用 `sys.executable`；
+           - `launch_holdings_watcher()` 在打包环境下直接在内存中执行 `run_sbc.restore_launcher_holdings_windows()`，自动平铺持仓标的，杜绝多开 ATS 主程序；
+        2. **双模统一生命周期纳管与 `_is_widget_alive` 安全检测**：
+           - 统一抽象 `_is_widget_alive` 辅助函数，兼容 sip 包装与普通窗口引用；
+           - `is_launcher_running` 与 `close_launcher_process` 同步纳管 `_in_process_holdings`，二次点击一键确认统一精准保存并关闭持仓盯盘窗口；
+        3. **启动恢复加固与未来架构前瞻 (`run_ats.py`, `run_sbc.py`, `intraday_strategy_dialog.py`)**：
+           - `restore_all_open_sbc_windows` 增加降级捕获，在当前进程内自动复位已持久化窗口的几何尺寸与坐标；
+           - `run_ats.py` 最开头增加 `--sbc` 与 `--sbc-holdings` 命令行参数拦截与分发，彻底阻断任何情况下子进程启动误进主界面；
+           - `run_sbc.py` 规范化命令行解析，支持带标志与无标志的全格式兼容。
+    - [x] **自动化测试 100% 验证通过 (33/33 PASSED)**：
+        - 专项新增测试 `tests/test_sbc_packaged_env_and_fallback.py`: 3/3 PASSED（全真验证打包环境下 SBC 降级在当前进程打开、持仓盯盘内存模式恢复与统一关闭、`run_ats.py` 命令行分发阻断主窗口）；
+        - 全量回归测试: 30/30 PASSED 全部通过（包含多窗口重排、持仓隔离、时间间隔、持久化等）。
+
 ## 2026-09-16 21:45
 - [x] **【SBC 窗口持久化与生命周期彻底闭环：手动关闭即时除名、统一关闭仅持久化打开窗口、ATS 独立子进程跟随恢复】(`run_sbc.py`, `intraday_strategy_dialog.py`, `sbc_launcher.py`, `main_window.py`, `tests/test_sbc_open_persistence_and_manual_close_isolation.py`)**：
     - [x] **操盘手明确要求**：
