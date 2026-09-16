@@ -4321,8 +4321,15 @@ class ATSMainWindow(QMainWindow):
         def _restore_sbc():
             try:
                 from ats.ui.intraday_strategy_dialog import restore_all_open_sbc_windows
-                logger.info("[ATSMainWindow] IPC数据就绪，自动加载打开持久化的 SBC 独立分时窗口...")
-                restore_all_open_sbc_windows(self)
+                from sys_utils import get_app_root
+                c_flag = os.path.join(get_app_root(), "config", ".ats_closing")
+                if os.path.exists(c_flag):
+                    try:
+                        os.remove(c_flag)
+                    except Exception:
+                        pass
+                logger.info("[ATSMainWindow] IPC数据就绪，自动加载打开持久化的 SBC 独立分时窗口 (独立子进程)...")
+                restore_all_open_sbc_windows(self, as_subprocess=True)
             except Exception as e:
                 logger.warning(f"[ATSMainWindow] Error auto-restoring SBC chart dialogs: {e}")
 
@@ -6245,6 +6252,15 @@ class ATSMainWindow(QMainWindow):
 
             # 3. 持久化所有打开的 SBC 独立分时走势图窗口状态与位置
             try:
+                os.environ["ATS_IS_CLOSING"] = "1"
+                try:
+                    from sys_utils import get_app_root
+                    c_flag = os.path.join(get_app_root(), "config", ".ats_closing")
+                    with open(c_flag, "w", encoding="utf-8") as f_c:
+                        f_c.write(str(os.getpid()))
+                except Exception:
+                    pass
+
                 from ats.ui.intraday_strategy_dialog import save_all_open_sbc_windows
                 save_all_open_sbc_windows()
             except Exception as e_sbc:

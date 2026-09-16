@@ -71,13 +71,18 @@ def _get_current_holding_codes() -> List[str]:
 
 
 def save_launcher_holdings_windows():
-    """【💾 持久化保存所有盯盘窗口】独立保存至 sbc_launcher_holdings_layout.json"""
+    """【💾 持久化保存所有盯盘窗口】独立保存至 sbc_launcher_holdings_layout.json (支持增减，统一关闭时精准持久化未关闭窗口)"""
     try:
         from PyQt6.sip import isdeleted
         active_list = []
+        app_inst = QApplication.instance()
+        is_exiting = bool(app_inst and app_inst.property("is_app_exiting"))
         for w in QApplication.topLevelWidgets():
-            if isinstance(w, SBCIntradayChartDialog) and not isdeleted(w) and w.isVisible():
-                if getattr(w, '_is_closing', False) or getattr(w, 'is_hidden_state', False):
+            if isinstance(w, SBCIntradayChartDialog) and not isdeleted(w):
+                # 若非统一退出阶段（单窗口手动关闭），跳过正在关闭的实例；若为统一退出阶段，只要曾经正常显示就持久化
+                if not is_exiting and (getattr(w, '_is_closing', False) or not w.isVisible()):
+                    continue
+                if getattr(w, 'is_hidden_state', False):
                     continue
                 geo = w.normal_geometry if getattr(w, 'normal_geometry', None) else w.geometry()
                 c = getattr(w, 'code', None)
@@ -94,7 +99,12 @@ def save_launcher_holdings_windows():
                     })
 
         cfg_path = _get_launcher_layout_cfg_path()
-        data = {"sbc_holdings_windows": active_list}
+        # 💡 同步写入 sbc_holdings_windows 与 sbc_open_windows，并标记 initialized=True
+        data = {
+            "sbc_holdings_windows": active_list,
+            "sbc_open_windows": active_list,
+            "initialized": True
+        }
         tmp_path = cfg_path + f".tmp_{os.getpid()}"
         with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
@@ -112,14 +122,16 @@ def save_launcher_holdings_windows():
 
 
 def restore_launcher_holdings_windows() -> List[SBCIntradayChartDialog]:
-    """【🚀 恢复持仓盯盘窗口】优先从独立配置恢复；若无则自动读取持仓标的"""
+    """【🚀 恢复持仓盯盘窗口】优先从独立配置恢复未关闭的标的；仅在从未初始化的初次启动时才自动读取持仓"""
     restored = []
     cfg_path = _get_launcher_layout_cfg_path()
+    has_initialized_config = False
     if os.path.exists(cfg_path):
         try:
             with open(cfg_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            win_list = data.get("sbc_holdings_windows", [])
+            has_initialized_config = bool(data.get("initialized", False) or "sbc_holdings_windows" in data or "sbc_open_windows" in data)
+            win_list = data.get("sbc_holdings_windows") or data.get("sbc_open_windows") or []
             for item in win_list:
                 code = item.get("code")
                 if not code:
@@ -135,11 +147,12 @@ def restore_launcher_holdings_windows() -> List[SBCIntradayChartDialog]:
         except Exception as e:
             print(f"[SBC Launcher] 读取历史盯盘配置异常: {e}")
 
-    # 若无历史记录，自动从当前真实持仓标的启动盯盘
-    if not restored:
+    # 💡 只有在配置文件彻底不存在且未曾初始化过时，才自动从当前真实持仓标的启动盯盘
+    # 一旦操盘手曾启动并手动增减过标的，严禁在恢复时擅自把用户关闭的股票重新拉出来！
+    if not restored and not has_initialized_config:
         holdings = _get_current_holding_codes()
         if holdings:
-            print(f"[SBC Launcher] 无历史配置，自动为当前 {len(holdings)} 只持仓股启动独立盯盘窗口...")
+            print(f"[SBC Launcher] 初次启动无历史配置，自动为当前 {len(holdings)} 只持仓股启动独立盯盘窗口...")
             for code in holdings:
                 dlg = open_sbc_chart_dialog(None, code=code, period_mode="10d")
                 if dlg:

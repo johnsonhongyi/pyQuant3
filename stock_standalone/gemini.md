@@ -1,3 +1,23 @@
+## 2026-09-16 21:45
+- [x] **【SBC 窗口持久化与生命周期彻底闭环：手动关闭即时除名、统一关闭仅持久化打开窗口、ATS 独立子进程跟随恢复】(`run_sbc.py`, `intraday_strategy_dialog.py`, `sbc_launcher.py`, `main_window.py`, `tests/test_sbc_open_persistence_and_manual_close_isolation.py`)**：
+    - [x] **操盘手明确要求**：
+        1. “刚刚测试ATS打开的sbc窗口在ats关闭时候没有持久化打开的窗口,在ats重新打开的时候没有跟随打开”；
+        2. “没有手动关闭ats的sbc窗口.手动关闭的sbc窗口不用持久化.底层逻辑一直如此设计的”；
+        3. “现在[SBC Launcher] 手动关闭的窗口还是被持久化了,当统一关闭时只持久化没有关闭的窗口”；
+        4. “当执行盯盘的统一关闭并持久化时候管理的打开窗口就是需要盯盘的窗口,已经手动关闭的不用持久化”。
+    - [x] **三大致命根因破案 (P0)**：
+        1. **ATS 退出盲目清空 `sbc_open_windows`**：ATS 打开 SBC 转为独立子进程后，主进程内无 `SBCIntradayChartDialog` 实例，ATS 退出调用 `save_all_open_sbc_windows()` 时 `QApplication.topLevelWidgets()` 为空，直接将配置覆盖为 `[]`，导致下次启动无记录可恢复；
+        2. **SBC 子进程随 ATS 退出被误除名**：`SBCIntradayChartDialog.closeEvent` 曾无条件执行 `_remove_sbc_open_record(self.code)`，未区分“用户看盘时手动点 X”与“随主程序统一退出”，导致随 ATS 关闭时被抹杀；
+        3. **[SBC Launcher] 统一关闭与持仓回退冲突**：统一关闭向持仓窗口发送 `WM_CLOSE` 时，各窗口将自身除名致使 `sbc_holdings_windows` 变空；再次点击盯盘时因配置为空误触发 `_get_current_holding_codes()`，把操盘手此前已手动关闭的持仓股重新拉出。
+    - [x] **系统级工程根治落地 (SOLID / KISS / DRY)**：
+        1. **ATS 启动恢复全量走独立子进程 (`as_subprocess=True`)**：`main_window.py` 启动恢复调用 `restore_all_open_sbc_windows(self, as_subprocess=True)`，通过 `launch_sbc_process` 调起，统一由 `SBCProcessManager` 纳管，彻底隔离主线程，杜绝 ATS 卡顿；
+        2. **ATS 退出双端纳管与 Win32 坐标精准同步**：`save_all_open_sbc_windows` 纳入 `SBCProcessManager` 活跃子进程扫描，结合 Win32 `GetWindowRect` 毫秒级探测其实际屏幕位置与周期完整落盘；设置 `config/.ats_closing` 退出标记，子进程感知主程序退出跳过除名，安全保留记录；
+        3. **[SBC Launcher] 统一关闭前精准持久化打开窗口**：在 `close_launcher_process` 向窗口发消息前，优先通过 Win32 扫描属于该 PID 的当前真正打开且可见的窗口列表写入配置，已手动关闭的窗口 HWND 已消亡彻底被排除；标记 `initialized=True`，严禁回退拉取全部持仓；
+        4. **手动关闭即时除名**：用户在看盘时手动单独关闭某窗口，`not is_app_exiting and not _is_ats_shutting_down()` 即时将其从配置除名并写盘保存当前剩余窗口，实现真正的自由增减。
+    - [x] **自动化测试 100% 验证通过 (39/39 PASSED)**：
+        - 专项新增测试 `tests/test_sbc_open_persistence_and_manual_close_isolation.py`: 2/2 PASSED（全真验证持仓盯盘手动关闭除名、统一关闭仅持久化未关闭窗口、ATS 独立子进程退出保存与恢复）；
+        - 全量回归测试: 37/37 PASSED 全部通过。
+
 ## 2026-09-16 21:10
 - [x] **【Git 分支分叉 (Diverged) 与 Merge 冲突根因破案及完全对齐】(`gemini.md`, `stock_standalone/gemini.md`)**：
     - [x] **操盘手反馈问题**：“修复问题,哪里导致的出现不一致的bug”；“gemini.md 两个差异可以丢弃”；
