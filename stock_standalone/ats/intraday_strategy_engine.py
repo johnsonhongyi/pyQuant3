@@ -207,7 +207,7 @@ class IntradayStrategyEngine:
             return {}
 
     def save_listing_closing_scorecard(self, code: str, eval_result: Dict[str, Any]) -> bool:
-        """【收盘定盘持久化】保存新股上市首日 15:00 收盘综合评分与 7 节点评级，作为永久历史档案"""
+        """【收盘定盘持久化】仅应在真正收盘(15:00)或程序退出时调用，盘中轮询中绝对不调用。"""
         c_clean = str(code).zfill(6)
         fp = self._get_closing_eval_filepath()
         try:
@@ -238,7 +238,7 @@ class IntradayStrategyEngine:
                     os.replace(tmp_fp, fp)
                 else:
                     os.rename(tmp_fp, fp)
-                logger.info(f"💾 [收盘定盘] 标的 [{c_clean}] 上市首日收盘综合评分 ({eval_result.get('total_weighted_score')}分, {eval_result.get('pattern')}) 已成功永久持久化！")
+                logger.info(f"💾 [收盘定盘] [{c_clean}] {eval_result.get('total_weighted_score')}分 ({eval_result.get('pattern')}) 已存档")
                 return True
             finally:
                 if os.path.exists(tmp_fp):
@@ -249,6 +249,33 @@ class IntradayStrategyEngine:
         except Exception as e:
             logger.error(f"保存新股首日收盘账本异常: {e}")
             return False
+
+    def flush_all_closing_scorecards_on_exit(self) -> None:
+        """【退出定盘合并落盘】窗口关闭或 ATS 退出时召唤：
+        遍历内存中所有标的的 timeline_eval_cache，
+        只要是首日新股且有有效评分，就一次性全量落盘保存。
+        """
+        saved_count = 0
+        for c_clean, state in list(self.rule_state_map.items()):
+            eval_result = state.get("timeline_eval_cache")
+            if not eval_result:
+                continue
+            score = float(eval_result.get("total_weighted_score", 0.0) or 0.0)
+            open_price = float(eval_result.get("open_price", 0.0) or 0.0)
+            # 仅存档首日新股（非通用日常策略）且有有效评分的标的
+            strat = state.get("current_strategy") or {}
+            strat_id = str(strat.get("id", ""))
+            strat_type = str(strat.get("strategy_type", ""))
+            if strat_type in ("daily_surge", "general", "daily") or "strategy_c_daily" in strat_id:
+                continue
+            if open_price > 1.0 and score > 0.0:
+                try:
+                    self.save_listing_closing_scorecard(c_clean, eval_result)
+                    saved_count += 1
+                except Exception as e:
+                    logger.debug(f"flush_all_closing_scorecards_on_exit [{c_clean}] 异常: {e}")
+        if saved_count > 0:
+            logger.info(f"💾 [退出定盘] 共落盘 {saved_count} 个首日新股收盘综合评分")
 
     def save_intraday_cache_throttled(self, interval_sec: float = 300.0) -> bool:
         """
@@ -2157,7 +2184,8 @@ class IntradayStrategyEngine:
         }
 
         state["timeline_eval_cache"] = eval_result
-        if clean_t >= "14:55" and open_price > 1.0 and not is_daily_strategy:
+        # 💾 收盘定盘：仅在真正收盘时刻 15:00 写盘一次；盘中绝不写盘，退出由 flush_all_closing_scorecards_on_exit 兜底
+        if clean_t >= "15:00" and open_price > 1.0 and not is_daily_strategy:
             self.save_listing_closing_scorecard(code, eval_result)
 
         # 🕒 交易收盘后 (>=15:00) 统一持久化；盘中则启用 300 秒（5分钟）防抖低频节流持久化 (仅在 _is_dirty 时执行)

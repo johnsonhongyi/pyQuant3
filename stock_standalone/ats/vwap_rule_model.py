@@ -289,7 +289,7 @@ class VWAPRuleModel:
                 self._raw_config = data
                 self._last_mtime = mtime
                 self._parse_config(data)
-                logger.info(f"成功加载策略规则配置: {self.config_path} (版本: {data.get('version')})")
+                logger.debug(f"成功加载策略规则配置: {self.config_path} (版本: {data.get('version')})")
                 
                 # 触发监听回调
                 for cb in self._change_callbacks:
@@ -313,7 +313,10 @@ class VWAPRuleModel:
             try:
                 mtime = os.path.getmtime(self.config_path)
                 if mtime > self._last_mtime:
-                    return self.reload()
+                    result = self.reload()
+                    if result:
+                        logger.info(f"🔄 [热重载] 策略规则配置已更新: {self.config_path}")
+                    return result
             except Exception:
                 pass
             return False

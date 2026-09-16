@@ -6451,9 +6451,12 @@ class ATSMainWindow(QMainWindow):
         # 安全持久化分时策略引擎状态（有实质数据变动才落盘）
         try:
             from ats.intraday_strategy_engine import IntradayStrategyEngine
-            IntradayStrategyEngine.get_instance().save_intraday_cache(force=False)
+            eng = IntradayStrategyEngine.get_instance()
+            eng.save_intraday_cache(force=False)
+            eng.flush_all_closing_scorecards_on_exit()   # 退出时统一落盘首日新股收盘定盘评分
         except Exception as e:
             print(f"[ATSMainWindow] Error saving intraday strategy cache on close: {e}")
+
             
         super().closeEvent(event)
 
