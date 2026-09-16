@@ -1,3 +1,29 @@
+## 2026-09-16 20:18
+- [x] **【SBC Launcher 与 ATS SBC 窗口分组独立重排、增减持久化与 2D/3D K线通道对齐】(`intraday_strategy_dialog.py`, `run_sbc.py`, `main_window.py`, `universe_widget.py`, `tests/test_sbc_holdings_isolation_and_channel.py`)**：
+    - [x] **操盘手明确要求**：
+        1. “关闭[SBC Launcher] 的窗口,重排就正常了,这是什么问题,两者无法一起重排[SBC Launcher] 的在一起,ats的在一起分组”；
+        2. “更新的2d,3d周期没有跟sbc的周,月一致,对齐日,周月的”；
+        3. “[SBC Launcher] 重排都很完美,点击盯盘持久化有个问题,手动关闭其中的sbc窗口说明不用跟随[SBC Launcher] 一起持久化,这样才能增减盯盘窗口,所以统一关闭并持久化的是还打开的sbc窗口,这个需要调整”；
+        4. “左侧列的持久化自动加载总是有问题,现价涨幅被截断成了18.”。
+    - [x] **问题根因剖析与彻底根治**：
+        1. **2D/3D 周期对齐日、周、月 K 线与通达信通道 (P0)**：
+           - 根因：原 `canvas.paintEvent` 仅对 `["5m", "15m", "30m", "60m", "day", "week", "month"]` 调用 `_paint_kline`，2D/3D 被 fallback 进 `_paint_intraday` 画成单根分时折线；且 `reload_chart` 中将 2d/3d 误分配给多日分时接口；
+           - 根治：将 `2d` 与 `3d` 全面纳入 `_paint_kline` 和 `set_kline_data`，通过 `fetcher.fetch_kline_bars(category="2d"/"3d")` 提取 2日K/3日K 聚合柱，完整绘制红绿蜡烛图、成交量柱、MA5/20/60、通达信自动通道三轨、神奇九转序列与多空阶梯，通道 HUD 顶部规范对齐显示 `📊 [2D] 通达信自动通道` 与 `📊 [3D] 通达信自动通道`！
+        2. **[SBC Launcher] 与 ATS 彻底分组独立重排 (P0)**：
+           - 根因：原 `rearrange_all_sbc_windows` 用 Win32 `EnumWindows` 全局抓取所有带 SBC 的窗口混排成 6 宫格，跨进程 DPI 缩放与 minimumSizeHint 冲突导致 3 大 3 小叠盖错位；关闭 Launcher 仅剩单一进程窗口后表象正常；
+           - 根治：引入进程 PID 分组识别隔离！在 `[SBC Launcher]` 内部触发重排时仅排本持仓进程窗口，在 `ATS 主系统` 触发重排时获取 `launcher_pid` 严格过滤剔除持仓盯盘窗口，两套分组各自独立计算等大等高网格，彻底互不干扰！
+        3. **手动关闭即时除名（自由增减持仓盯盘标的）(P0)**：
+           - `_remove_sbc_open_record(code)` 同时支持 `sbc_open_windows` 与 `sbc_holdings_windows`；用户在 `[SBC Launcher]` 中手动点击 `X` 关闭某股票，系统立即从 `sbc_launcher_holdings_layout.json` 剔除该代码；
+           - 退出保存或二次点击“统一关闭”时严格过滤仅持久化当前仍然活着且可见的窗口，下次启动精准恢复剩余标的。
+        4. **左侧列表格列宽防挤压 (P0)**：
+           - 将 `main_window.py` 中 `self.universe_widget.setMinimumWidth` 提升至 300px；
+           - 将 `self.main_splitter.setSizes([239, 1207, 222])` 调整为 `[320, 1126, 222]`，配合 `[72, 88, 68, 68, 120, 100]` 强制保底宽度，100% 杜绝文字截断与 `18.` 现象。
+    - [x] **自动化测试 100% 验证通过 (28/28 PASSED)**：
+        - `tests/test_sbc_holdings_isolation_and_channel.py`: 8/8 PASSED；
+        - `tests/test_sbc_launcher_and_cct_interval.py`: 7/7 PASSED；
+        - `tests/test_sbc_rearrange.py`: 12/12 PASSED；
+        - `tests/test_universe_sbc_context_menu.py`: 1/1 PASSED。
+
 ## 2026-09-16 19:48
 - [x] **【人气综合 TDX API 盘口自动更新全面对齐 cct.ats_tdx_interval、实盘误杀 bug 根治与底部自定义频率及持久化】(`popularity_resonance_gui.py`, `tests/test_pr_tdx_realtime_integration.py`)**：
     - [x] **操盘手明确要求**：“人气综合之前调整为TDX的API更新涨跌,60分涨速,以及vwap信息,但是实盘没有自动对齐ats_tdx_interval数据自动更新,这个更新频率可以默认跟随cct.ats_tdx_interval ,并在人气窗口图2标记位置添加自定义设置减少服务器压力.自动持久化”；

@@ -77,7 +77,9 @@ def save_launcher_holdings_windows():
         active_list = []
         for w in QApplication.topLevelWidgets():
             if isinstance(w, SBCIntradayChartDialog) and not isdeleted(w) and w.isVisible():
-                geo = w.normal_geometry if (getattr(w, 'is_hidden_state', False) and getattr(w, 'normal_geometry', None)) else w.geometry()
+                if getattr(w, '_is_closing', False) or getattr(w, 'is_hidden_state', False):
+                    continue
+                geo = w.normal_geometry if getattr(w, 'normal_geometry', None) else w.geometry()
                 c = getattr(w, 'code', None)
                 cur_period = getattr(w, '_current_period_mode', '10d')
                 if c:
@@ -151,6 +153,15 @@ def restore_launcher_holdings_windows() -> List[SBCIntradayChartDialog]:
 
 
 def main():
+    # 解析命令行参数
+    has_cli_code = len(sys.argv) > 1 and sys.argv[1].strip() and not sys.argv[1].strip().startswith("-")
+    is_holdings_mode = not has_cli_code or ("--holdings" in sys.argv)
+
+    if is_holdings_mode:
+        # 💡 核心持久化隔离：明确重定向持久化路径到持仓专用配置文件，并标记为持仓盯盘启动器
+        os.environ["SBC_LAYOUT_CONFIG_PATH"] = _get_launcher_layout_cfg_path()
+        os.environ["SBC_IS_HOLDINGS_LAUNCHER"] = "1"
+
     # 自动检查并后台静默拉起主 Tk 行情进程 (P0)
     try:
         ensure_backend_tk_running()
@@ -159,18 +170,17 @@ def main():
 
     app = QApplication(sys.argv)
 
-    # 💡 核心特性：退出时自动独立持久化保存所有盯盘窗口
+    # 💡 核心特性：退出时自动独立持久化保存所有盯盘窗口 (仅在持仓盯盘模式生效)
     def _on_app_about_to_quit():
         try:
             app.setProperty("is_app_exiting", True)
-            save_launcher_holdings_windows()
+            if is_holdings_mode:
+                save_launcher_holdings_windows()
         except Exception as err:
             print(f"[SBC Launcher] 退出持久化警告: {err}")
 
     app.aboutToQuit.connect(_on_app_about_to_quit)
 
-    # 解析命令行参数
-    has_cli_code = len(sys.argv) > 1 and sys.argv[1].strip()
     if has_cli_code:
         code = sys.argv[1].strip()
         period = sys.argv[2].strip() if len(sys.argv) > 2 else "10d"
@@ -182,21 +192,16 @@ def main():
         # 💡 无参启动：专门用来盯持仓的盘
         restored = restore_launcher_holdings_windows()
         if not restored:
-            # 若持仓亦为空，从最近访问或默认 600733 启动
-            try:
-                from ats.ui.intraday_strategy_dialog import _load_sbc_recent_codes
-                recent = _load_sbc_recent_codes()
-                code = recent[0] if recent else "600733"
-            except Exception:
-                code = "600733"
+            # 若持仓亦为空，启动默认 600733 (严禁读取 ATS 的 recent_codes，彻底杜绝配置串扰)
+            code = "600733"
             period = "10d"
-            print(f"[SBC Launcher] 无持仓与历史记录，启动默认/最近标的: {code}")
+            print(f"[SBC Launcher] 无持仓与历史记录，启动默认 SBC 窗口: 标的代码={code}, 周期={period}")
             window = open_sbc_chart_dialog(code=code, period_mode=period)
             if window:
                 window.show()
         else:
             codes_str = ", ".join(getattr(d, 'code', '') for d in restored)
-            print(f"[SBC Launcher] 成功自动启动并加载 {len(restored)} 个持仓盯盘窗口: [{codes_str}]")
+            print(f"[SBC Launcher] 成功自动恢复上次退出的 {len(restored)} 个持仓盯盘窗口: [{codes_str}]")
 
     sys.exit(app.exec())
 

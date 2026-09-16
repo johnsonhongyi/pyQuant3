@@ -304,20 +304,23 @@ class UniverseTreeWidget(QWidget):
         self._is_restoring_header = True
         try:
             from ats.ui.styles import load_config_node
-            from PyQt6.QtCore import QByteArray
             widths = load_config_node("ats_universe_tree_widths")
+            # 💡 强制保底最小安全列宽 (代码>=72, 名称>=88, 现价>=68, 涨幅>=68, 彻底防止截断)
+            min_col_widths = [72, 88, 68, 68, 120, 100]
             if widths and isinstance(widths, list):
                 self.tree.header().blockSignals(True)
                 for c, w in enumerate(widths):
-                    if c < self.tree.columnCount() and int(w) > 10:
-                        self.tree.setColumnWidth(c, int(w))
+                    if c < self.tree.columnCount():
+                        min_w = min_col_widths[c] if c < len(min_col_widths) else 50
+                        safe_w = max(min_w, int(w))
+                        self.tree.setColumnWidth(c, safe_w)
                 self.tree.header().blockSignals(False)
             else:
-                state_hex = load_config_node("ats_universe_tree_state")
-                if state_hex and isinstance(state_hex, str):
-                    self.tree.header().blockSignals(True)
-                    self.tree.header().restoreState(QByteArray.fromHex(state_hex.encode("utf-8")))
-                    self.tree.header().blockSignals(False)
+                self.tree.header().blockSignals(True)
+                for c, min_w in enumerate(min_col_widths):
+                    if c < self.tree.columnCount():
+                        self.tree.setColumnWidth(c, min_w)
+                self.tree.header().blockSignals(False)
         except Exception as e:
             logger.debug(f"恢复策略股票池列宽异常: {e}")
         finally:
@@ -1008,15 +1011,14 @@ class UniverseTreeWidget(QWidget):
         menu.exec(global_pos)
 
     def _open_sbc_chart(self, code, name):
-        """调出 SBC 实盘走势窗口 (在 ATS 主进程中统一调度，确保平铺重排与界面无大小不等)"""
+        """调出 SBC 实盘走势窗口 (统一独立子进程调度，避免阻塞 ATS 主进程)"""
         try:
-            from ats.ui.intraday_strategy_dialog import open_sbc_chart_dialog
-            open_sbc_chart_dialog(self.window(), code, period_mode="10d")
+            from ats.ui.sbc_launcher import launch_sbc_process
+            launch_sbc_process(code, "10d")
         except Exception as e:
             try:
-                from ats.ui.intraday_strategy_dialog import SBCIntradayChartDialog
-                dlg = SBCIntradayChartDialog(self.window(), code=code, initial_period_mode="10d")
-                dlg.show()
+                from ats.ui.intraday_strategy_dialog import open_sbc_chart_dialog
+                open_sbc_chart_dialog(self.window(), code, period_mode="10d")
             except Exception as e2:
                 logger.error(f"[Universe] 调出 SBC 窗口失败: {e2}")
 

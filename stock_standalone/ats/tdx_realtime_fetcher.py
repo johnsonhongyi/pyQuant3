@@ -1711,9 +1711,18 @@ class TDXRealtimeFetcher:
         c_clean = str(code).zfill(6)
         cat_str = str(category).lower().strip()
         is_120m = cat_str in ("120m", "120f", "120min", "2h", "120")
+        is_2d = cat_str in ("2d", "2k", "2day", "2日", "2日k")
+        is_3d = cat_str in ("3d", "3k", "3day", "3日", "3日k")
+
         if is_120m:
             cat_code = 3  # 从 60m 拉取两倍数量后聚合
             fetch_count = min(800, max(count * 2, 60))
+        elif is_2d:
+            cat_code = 4  # 从日线拉取两倍数量后聚合
+            fetch_count = min(800, max(count * 2, 60))
+        elif is_3d:
+            cat_code = 4  # 从日线拉取三倍数量后聚合
+            fetch_count = min(800, max(count * 3, 90))
         else:
             fetch_count = min(800, max(1, count))
             cat_map = {
@@ -1783,6 +1792,59 @@ class TDXRealtimeFetcher:
                     })
                 if rows_120:
                     df = pd.DataFrame(rows_120)
+
+            # 若为 2D 周期，将每相邻两根日 K 线精确聚合为一根标准 2D K 线
+            if is_2d and len(df) >= 2:
+                rows_2d = []
+                offset = len(df) % 2
+                for i in range(offset, len(df), 2):
+                    b1 = df.iloc[i]
+                    b2 = df.iloc[i + 1]
+                    t_val = str(b2.get("datetime", b2.get("time", "")))
+                    op_v = float(b1.get("open", 0.0))
+                    hp_v = max(float(b1.get("high", 0.0)), float(b2.get("high", 0.0)))
+                    lp_v = min(float(b1.get("low", 0.0)), float(b2.get("low", 0.0)))
+                    cl_v = float(b2.get("close", 0.0))
+                    vol_v = float(b1.get("vol", 0.0)) + float(b2.get("vol", 0.0))
+                    amt_v = float(b1.get("amount", 0.0)) + float(b2.get("amount", 0.0))
+                    rows_2d.append({
+                        "datetime": t_val,
+                        "time": t_val,
+                        "open": op_v,
+                        "high": hp_v,
+                        "low": lp_v,
+                        "close": cl_v,
+                        "vol": vol_v,
+                        "amount": amt_v
+                    })
+                if rows_2d:
+                    df = pd.DataFrame(rows_2d)
+
+            # 若为 3D 周期，将每相邻三根日 K 线精确聚合为一根标准 3D K 线
+            if is_3d and len(df) >= 3:
+                rows_3d = []
+                offset = len(df) % 3
+                for i in range(offset, len(df), 3):
+                    chunk = df.iloc[i:i + 3]
+                    t_val = str(chunk.iloc[-1].get("datetime", chunk.iloc[-1].get("time", "")))
+                    op_v = float(chunk.iloc[0].get("open", 0.0))
+                    hp_v = float(chunk["high"].max())
+                    lp_v = float(chunk["low"].min())
+                    cl_v = float(chunk.iloc[-1].get("close", 0.0))
+                    vol_v = float(chunk["vol"].sum())
+                    amt_v = float(chunk["amount"].sum()) if "amount" in chunk.columns else (cl_v * vol_v * 100.0)
+                    rows_3d.append({
+                        "datetime": t_val,
+                        "time": t_val,
+                        "open": op_v,
+                        "high": hp_v,
+                        "low": lp_v,
+                        "close": cl_v,
+                        "vol": vol_v,
+                        "amount": amt_v
+                    })
+                if rows_3d:
+                    df = pd.DataFrame(rows_3d)
 
             if "datetime" in df.columns:
                 df["time"] = df["datetime"].astype(str)
