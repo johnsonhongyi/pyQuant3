@@ -2779,7 +2779,7 @@ class SBCIntradayChartDialog(QWidget):
         log_box_lay.addWidget(self.txt_log)
 
         layout.addWidget(self.log_box)
-        self.log_box.setVisible(True)  # 💡 默认直接可见，打开即可看到数据日志
+        self.log_box.setVisible(False)  # 💡 默认直接可见，打开即可看到数据日志
 
         # 4. 底部提示与快速切码栏
         bottom_layout = QHBoxLayout()

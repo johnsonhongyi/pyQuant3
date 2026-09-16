@@ -26,21 +26,36 @@ except ImportError:
 logger = logging.getLogger("VWAPRuleModel")
 
 
+def _get_rule_version_and_content(file_or_dict) -> tuple:
+    """安全解析规则配置的版本号与内容文本，用于版本比对"""
+    try:
+        if isinstance(file_or_dict, dict):
+            ver = float(file_or_dict.get("version", "1.0"))
+            return ver, json.dumps(file_or_dict)
+        if os.path.exists(file_or_dict):
+            with open(file_or_dict, "r", encoding="utf-8") as f:
+                txt = f.read()
+            d = json.loads(txt)
+            ver = float(d.get("version", "1.0"))
+            return ver, txt
+    except Exception:
+        pass
+    return 1.0, ""
+
+
 def resolve_and_ensure_config_path() -> str:
     """
-    智能定位并确保 vwap_trading_rules.json 配置文件存在：
+    智能定位并确保 vwap_trading_rules.json 配置文件存在，并支持包内/新版配置自动热升级释放：
     1. 严格使用 sys_utils.get_app_root() 获取外部物理应用程序根目录 (打包 EXE 所在目录或源码根目录)；
     2. 目标文件位于 target_path = os.path.join(get_app_root(), "config", "vwap_trading_rules.json")；
-    3. 若 target_path 已存在，直接返回；
-    4. 若 target_path 不存在，自动从打包只读资源目录 (sys_utils.get_base_path() 或源码目录) 自动释放到 target_path；
-    5. 若包内资源未命中，自动释放内置标准全量规则 JSON 到 target_path；
-    6. 彻底根除 PyInstaller / Nuitka 打包环境下 Temp 临时目录找不到配置文件的警告。
+    3. 智能版本与特征比对：
+       - 若 target_path 不存在，自动从包内只读资源或源码目录复制释放；
+       - 若 target_path 已存在，但包内只读资源/源码的规则版本更高 (如 v2.2 > v2.1) 或目标文件缺失新规则：
+         自动将外部旧配置安全备份为 vwap_trading_rules.json.bak_v{old}，并将最新版配置自动释放覆盖！
+    4. 彻底解决 PyInstaller / Nuitka 打包发布后外部残留旧配置导致最新策略无法生效的问题。
     """
     app_root = get_app_root()
     target_config = os.path.abspath(os.path.join(app_root, "config", "vwap_trading_rules.json"))
-    if os.path.exists(target_config) and os.path.getsize(target_config) > 20:
-        return target_config
-
     os.makedirs(os.path.dirname(target_config), exist_ok=True)
 
     # 尝试源目录候选 (包内只读资源 或 源码相对路径)
@@ -49,15 +64,49 @@ def resolve_and_ensure_config_path() -> str:
         os.path.join(os.path.dirname(__file__), "..", "config", "vwap_trading_rules.json"),
         os.path.join(os.path.dirname(__file__), "config", "vwap_trading_rules.json"),
     ]
+
+    best_src = None
+    best_src_ver = 1.0
+    best_src_content = ""
     for src in candidate_sources:
         src_abs = os.path.abspath(src)
         if os.path.exists(src_abs) and os.path.getsize(src_abs) > 20:
+            ver, content = _get_rule_version_and_content(src_abs)
+            if ver >= best_src_ver:
+                best_src = src_abs
+                best_src_ver = ver
+                best_src_content = content
+
+    target_exists = os.path.exists(target_config) and os.path.getsize(target_config) > 20
+    target_ver, target_content = _get_rule_version_and_content(target_config) if target_exists else (0.0, "")
+
+    # 1. 命中有效源文件
+    if best_src:
+        if not target_exists:
             try:
-                shutil.copy2(src_abs, target_config)
-                logger.info(f"已从包内资源自动释放策略配置: {src_abs} -> {target_config}")
+                shutil.copy2(best_src, target_config)
+                logger.info(f"已首次从包内资源释放策略配置: {best_src} -> {target_config} (v{best_src_ver})")
                 return target_config
             except Exception as e:
                 logger.warning(f"复制策略配置文件异常: {e}")
+        elif os.path.normpath(best_src).lower() != os.path.normpath(target_config).lower():
+            # 外部目标文件已存在，但不是同一文件：检查是否需要升级覆盖
+            # 升级触发条件：源版本更高，或目标文件缺失 buy_vwap_displacement_reversal 规则
+            needs_upgrade = (best_src_ver > target_ver) or (
+                "buy_vwap_displacement_reversal" in best_src_content and "buy_vwap_displacement_reversal" not in target_content
+            )
+            if needs_upgrade:
+                try:
+                    import time
+                    bak_path = target_config + f".bak_v{target_ver}_{int(time.time())}"
+                    shutil.copy2(target_config, bak_path)
+                    shutil.copy2(best_src, target_config)
+                    logger.info(f"🚀 [自动热升级] 检测到打包环境策略配置版本更新 (v{best_src_ver} > v{target_ver})，已备份旧配置至 {os.path.basename(bak_path)} 并自动释放最新配置到: {target_config}")
+                except Exception as err:
+                    logger.warning(f"升级覆盖最新策略配置文件异常: {err}")
+            return target_config
+        else:
+            return target_config
 
     # 内置标准规则兜底释放
     builtin_rules = {
@@ -138,13 +187,20 @@ def resolve_and_ensure_config_path() -> str:
         "market_guardian_rules": {"enabled": True}
     }
     try:
+        if target_exists:
+            import time
+            bak_path = target_config + f".bak_v{target_ver}_{int(time.time())}"
+            try:
+                shutil.copy2(target_config, bak_path)
+            except Exception:
+                pass
         tmp_path = target_config + ".tmp"
         with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(builtin_rules, f, ensure_ascii=False, indent=2)
         if os.path.exists(target_config):
             os.remove(target_config)
         os.replace(tmp_path, target_config)
-        logger.info(f"已自动生成并释放初始策略配置文件: {target_config}")
+        logger.info(f"已自动生成并释放初始策略配置文件: {target_config} (v{builtin_rules.get('version')})")
     except Exception as e:
         logger.error(f"释放初始策略配置异常: {e}")
 
