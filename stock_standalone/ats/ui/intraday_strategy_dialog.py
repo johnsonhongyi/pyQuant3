@@ -1169,12 +1169,13 @@ class SBCChartCanvas(QWidget):
             painter.setFont(QFont("Arial", 8, QFont.Weight.Bold))
             painter.drawText(margin_left + chart_w + 3, int(y_vwap + 3), f"VWAP:{vwaps[-1]:.2f}")
 
-        # 🌟 绘制分时图上的买卖信号点与悬浮 Tag (自适应防遮挡 + 半透明毛玻璃 + 高对比度设计)
+        # 🌟 绘制分时图上的买卖信号点与悬浮 Tag (自适应简略显示 + 2D真实碰撞避让 + 半透明毛玻璃 + 高对比度设计)
         if self.signals:
             times_raw = list(df_view.index.astype(str))
             times_5 = [t[-5:] if len(t) >= 5 else t for t in times_raw]
 
-            sig_drawn_slots = {}
+            placed_boxes = []  # 记录已放置标签的真实 2D 包围盒 QRect，杜绝重叠堆叠
+
             for sig in self.signals:
                 sig_p = float(sig.get("price", 0.0) if isinstance(sig, dict) else getattr(sig, "price", 0.0))
                 if sig_p <= 0 or sig_p > max_valid_price:
@@ -1183,11 +1184,13 @@ class SBCChartCanvas(QWidget):
                 sig_t = str(sig.get("timestamp", sig.get("time", "")) if isinstance(sig, dict) else getattr(sig, "timestamp", getattr(sig, "time", ""))).strip()
                 action_type = str(sig.get("action", sig.get("type", "sell")) if isinstance(sig, dict) else getattr(sig, "action", getattr(sig, "type", "sell"))).lower()
                 is_buy = "buy" in action_type or "买" in action_type
-                prefix = "🟢 买" if is_buy else "🔴 卖"
-                border_color = QColor("#00ff88") if is_buy else QColor("#ff4d4f")
-                bg_color = QColor(10, 32, 18, 185) if is_buy else QColor(36, 12, 16, 185) # 半透明毛玻璃
-                fg_color = QColor("#ffffff") # 高对比度清晰白字
-                dot_color = QColor("#00ff88") if is_buy else QColor("#ff4d4f")
+                trade_id_val = sig.get("trade_id") if isinstance(sig, dict) else getattr(sig, "trade_id", None)
+                is_selected_trade = (trade_id_val is not None and trade_id_val == self.selected_trade_id)
+
+                border_color = QColor("#FFD700") if is_selected_trade else (QColor("#00ff88") if is_buy else QColor("#ff4d4f"))
+                bg_color = QColor(48, 38, 10, 230) if is_selected_trade else (QColor(10, 32, 18, 190) if is_buy else QColor(36, 12, 16, 190))
+                fg_color = QColor("#ffffff")
+                dot_color = QColor("#FFD700") if is_selected_trade else (QColor("#00ff88") if is_buy else QColor("#ff4d4f"))
 
                 y_s = price_to_y(sig_p)
 
@@ -1205,45 +1208,71 @@ class SBCChartCanvas(QWidget):
                             idx_s = i
                             break
 
-                trade_id_val = sig.get("trade_id") if isinstance(sig, dict) else getattr(sig, "trade_id", None)
-                is_selected_trade = (trade_id_val is not None and trade_id_val == self.selected_trade_id)
-                if is_selected_trade:
-                    border_color = QColor("#FFD700")
-                    bg_color = QColor(48, 38, 10, 230)
-
                 if idx_s >= 0:
                     x_s = time_to_x(idx_s)
                     pnl_pct_v = sig.get("pnl_pct") if isinstance(sig, dict) else getattr(sig, "pnl_pct", None)
-                    if not is_buy and pnl_pct_v is not None:
-                        lbl_text = f"{prefix}:{sig_p:.2f} ({float(pnl_pct_v):+.1f}%)"
+
+                    # 💡 【买卖点自适应简略显示】：未选中时采用紧凑格式，选中时展开完整详情，大幅减少像素宽度
+                    if is_selected_trade:
+                        if not is_buy and pnl_pct_v is not None:
+                            lbl_text = f"🔴 卖:{sig_p:.2f} ({float(pnl_pct_v):+.1f}%)"
+                        else:
+                            lbl_text = f"🟢 买:{sig_p:.2f}"
                     else:
-                        lbl_text = f"{prefix}:{sig_p:.2f}"
+                        # 简略紧凑模式：买点显示 买:价格(保留1位)；卖点突出收益率(若有)或精简价格
+                        if is_buy:
+                            lbl_text = f"买:{sig_p:.1f}"
+                        else:
+                            if pnl_pct_v is not None:
+                                lbl_text = f"卖:{float(pnl_pct_v):+.1f}%"
+                            else:
+                                lbl_text = f"卖:{sig_p:.1f}"
 
                     painter.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
                     fm = painter.fontMetrics()
-                    tw_k = fm.horizontalAdvance(lbl_text) + 10
+                    tw_k = fm.horizontalAdvance(lbl_text) + 8
                     th_k = fm.height() + 4
 
-                    # 智能自适应放置在价格曲线上方或下方，并支持错层排布避让
-                    slot_cnt = sig_drawn_slots.get(idx_s, 0)
-                    sig_drawn_slots[idx_s] = slot_cnt + 1
+                    # 💡 【2D 包围盒真实防碰撞避让算法】：尝试上下错层与水平微调，避免多标签重叠遮挡
+                    target_x_base = x_s - tw_k / 2
+                    target_y_base = y_s + 8 if is_buy else y_s - th_k - 8
 
-                    if is_buy:
-                        target_y = y_s + 10 + slot_cnt * (th_k + 4)
-                        if target_y + th_k > margin_top + chart_h - 4:
-                            target_y = y_s - th_k - 10 - slot_cnt * (th_k + 4)
-                    else:
-                        target_y = y_s - th_k - 10 - slot_cnt * (th_k + 4)
-                        if target_y < margin_top + 4:
-                            target_y = y_s + 10 + slot_cnt * (th_k + 4)
+                    dy_layers = [0, 1, -1, 2, -2, 3, -3]
+                    dx_offsets = [0, 10, -10, 20, -20]
+                    found_rect = None
+                    is_micro_mode = False
 
-                    tag_x = int(max(margin_left + 2, min(margin_left + chart_w - tw_k - 2, x_s - tw_k / 2 + (slot_cnt % 2) * 8)))
-                    tag_y = int(max(margin_top + 2, min(margin_top + chart_h - th_k - 2, target_y)))
+                    for dy_l in dy_layers:
+                        for dx_o in dx_offsets:
+                            cand_y = int(target_y_base + dy_l * (th_k + 4))
+                            cand_x = int(target_x_base + dx_o)
+                            cand_x = int(max(margin_left + 2, min(margin_left + chart_w - tw_k - 2, cand_x)))
+                            cand_y = int(max(margin_top + 2, min(margin_top + chart_h - th_k - 2, cand_y)))
+                            cand_rect = QRect(cand_x, cand_y, tw_k, th_k)
 
-                    # 注册点击区域
-                    tag_rect = QRect(tag_x, tag_y, tw_k, th_k)
+                            # 检查与已放置矩形是否碰撞 (预留 2px 呼吸间距)
+                            padded = cand_rect.adjusted(-2, -2, 2, 2)
+                            if not any(padded.intersects(box) for box in placed_boxes):
+                                found_rect = cand_rect
+                                break
+                        if found_rect:
+                            break
+
+                    if not found_rect:
+                        # 极端拥挤场景：降级为微型紧凑圆标 Micro-Badge (16x16px)
+                        is_micro_mode = True
+                        mb_w, mb_h = 16, 16
+                        mb_x = int(max(margin_left + 2, min(margin_left + chart_w - mb_w - 2, x_s - mb_w / 2)))
+                        mb_y = int(max(margin_top + 2, min(margin_top + chart_h - mb_h - 2, target_y_base)))
+                        found_rect = QRect(mb_x, mb_y, mb_w, mb_h)
+
+                    placed_boxes.append(found_rect)
+                    tag_x, tag_y = found_rect.x(), found_rect.y()
+                    tw_actual, th_actual = found_rect.width(), found_rect.height()
+
+                    # 注册点击区域供鼠标选中与高亮
                     self._signal_hit_boxes.append({
-                        "rect": tag_rect,
+                        "rect": found_rect,
                         "trade_id": trade_id_val,
                         "sig": sig,
                         "x": x_s,
@@ -1252,26 +1281,31 @@ class SBCChartCanvas(QWidget):
                     })
 
                     # 1. 绘制垂直贯穿虚线与引线
-                    painter.setPen(QPen(QColor(border_color.red(), border_color.green(), border_color.blue(), 100), 1, Qt.PenStyle.DashLine))
+                    painter.setPen(QPen(QColor(border_color.red(), border_color.green(), border_color.blue(), 90), 1, Qt.PenStyle.DashLine))
                     painter.drawLine(int(x_s), int(margin_top + chart_h), int(x_s), int(margin_top))
 
                     # 2. 从标签中心向实际成交价连接精巧微引线
-                    painter.setPen(QPen(QColor(border_color.red(), border_color.green(), border_color.blue(), 180), 1, Qt.PenStyle.SolidLine))
-                    painter.drawLine(int(x_s), int(y_s), int(tag_x + tw_k / 2), int(tag_y + th_k if tag_y < y_s else tag_y))
+                    painter.setPen(QPen(QColor(border_color.red(), border_color.green(), border_color.blue(), 170), 1, Qt.PenStyle.SolidLine))
+                    painter.drawLine(int(x_s), int(y_s), int(tag_x + tw_actual / 2), int(tag_y + th_actual if tag_y < y_s else tag_y))
 
                     # 3. 实际成交价处的精巧圆点
                     painter.setPen(QPen(QColor("#ffffff") if not is_selected_trade else QColor("#FFD700"), 1.2))
                     painter.setBrush(QBrush(dot_color))
                     painter.drawEllipse(int(x_s - 3), int(y_s - 3), 6, 6)
 
-                    # 4. 半透明高对比度圆角胶囊
-                    painter.setPen(QPen(border_color, 1.8 if is_selected_trade else 1.2))
-                    painter.setBrush(QBrush(bg_color))
-                    painter.drawRoundedRect(tag_x, tag_y, tw_k, th_k, 3, 3)
-
-                    # 5. 高对比度白字
-                    painter.setPen(QPen(fg_color))
-                    painter.drawText(tag_x + 5, tag_y + th_k - 4, lbl_text)
+                    # 4. 绘制标签实体 (微型徽章模式 vs 紧凑胶囊模式)
+                    if is_micro_mode:
+                        painter.setPen(QPen(border_color, 1.5 if is_selected_trade else 1.0))
+                        painter.setBrush(QBrush(bg_color))
+                        painter.drawEllipse(tag_x, tag_y, mb_w, mb_h)
+                        painter.setPen(QPen(fg_color))
+                        painter.drawText(found_rect, Qt.AlignmentFlag.AlignCenter, "▲" if is_buy else "▼")
+                    else:
+                        painter.setPen(QPen(border_color, 1.8 if is_selected_trade else 1.2))
+                        painter.setBrush(QBrush(bg_color))
+                        painter.drawRoundedRect(tag_x, tag_y, tw_actual, th_actual, 3, 3)
+                        painter.setPen(QPen(fg_color))
+                        painter.drawText(tag_x + 4, tag_y + th_actual - 4, lbl_text)
 
             # 绘制当前选中的回测交易收益光束与详情卡片
             if self.selected_trade_id is not None:
@@ -2057,7 +2091,7 @@ class SBCChartCanvas(QWidget):
             if not today_k_indices:
                 today_k_indices = list(range(n))
 
-            sig_drawn_slots = {}
+            placed_boxes = []  # 记录已放置标签的真实 2D 包围盒 QRect，杜绝重叠堆叠
 
             for sig_idx, sig in enumerate(self.signals):
                 sig_p = float(sig.get("price", 0.0) if isinstance(sig, dict) else getattr(sig, "price", 0.0))
@@ -2067,11 +2101,13 @@ class SBCChartCanvas(QWidget):
                 sig_t_raw = str(sig.get("timestamp", sig.get("time", "")) if isinstance(sig, dict) else getattr(sig, "timestamp", getattr(sig, "time", ""))).strip()
                 action_type = str(sig.get("action", sig.get("type", "sell")) if isinstance(sig, dict) else getattr(sig, "action", getattr(sig, "type", "sell"))).lower()
                 is_buy = "buy" in action_type or "买" in action_type
-                prefix = "🟢 买" if is_buy else "🔴 卖"
-                border_color = QColor("#00ff88") if is_buy else QColor("#ff4d4f")
-                bg_color = QColor(10, 32, 18, 185) if is_buy else QColor(36, 12, 16, 185) # 半透明毛玻璃
-                fg_color = QColor("#ffffff") # 高对比度清晰白字
-                dot_color = QColor("#00ff88") if is_buy else QColor("#ff4d4f")
+                trade_id_val = sig.get("trade_id") if isinstance(sig, dict) else getattr(sig, "trade_id", None)
+                is_selected_trade = (trade_id_val is not None and trade_id_val == self.selected_trade_id)
+
+                border_color = QColor("#FFD700") if is_selected_trade else (QColor("#00ff88") if is_buy else QColor("#ff4d4f"))
+                bg_color = QColor(48, 38, 10, 230) if is_selected_trade else (QColor(10, 32, 18, 190) if is_buy else QColor(36, 12, 16, 190))
+                fg_color = QColor("#ffffff")
+                dot_color = QColor("#FFD700") if is_selected_trade else (QColor("#00ff88") if is_buy else QColor("#ff4d4f"))
 
                 y_s = k_to_y(sig_p)
 
@@ -2099,49 +2135,74 @@ class SBCChartCanvas(QWidget):
                     if idx_k < 0 and today_k_indices:
                         idx_k = today_k_indices[-1]
 
-                trade_id_val = sig.get("trade_id") if isinstance(sig, dict) else getattr(sig, "trade_id", None)
-                is_selected_trade = (trade_id_val is not None and trade_id_val == self.selected_trade_id)
-                if is_selected_trade:
-                    border_color = QColor("#FFD700")
-                    bg_color = QColor(48, 38, 10, 230)
-
                 if 0 <= idx_k < n:
                     x_k = k_to_x(idx_k)
                     y_hi_k = k_to_y(highs[idx_k])
                     y_lo_k = k_to_y(lows[idx_k])
 
                     pnl_pct_v = sig.get("pnl_pct") if isinstance(sig, dict) else getattr(sig, "pnl_pct", None)
-                    if not is_buy and pnl_pct_v is not None:
-                        lbl_text = f"{prefix}:{sig_p:.2f} ({float(pnl_pct_v):+.1f}%)"
+
+                    # 💡 【买卖点自适应简略显示】：未选中时采用紧凑格式，选中时展开完整详情，大幅减少像素宽度
+                    if is_selected_trade:
+                        if not is_buy and pnl_pct_v is not None:
+                            lbl_text = f"🔴 卖:{sig_p:.2f} ({float(pnl_pct_v):+.1f}%)"
+                        else:
+                            lbl_text = f"🟢 买:{sig_p:.2f}"
                     else:
-                        lbl_text = f"{prefix}:{sig_p:.2f}"
+                        # 简略紧凑模式：买点显示 买:价格(保留1位)；卖点突出收益率(若有)或精简价格
+                        if is_buy:
+                            lbl_text = f"买:{sig_p:.1f}"
+                        else:
+                            if pnl_pct_v is not None:
+                                lbl_text = f"卖:{float(pnl_pct_v):+.1f}%"
+                            else:
+                                lbl_text = f"卖:{sig_p:.1f}"
 
                     painter.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
                     fm = painter.fontMetrics()
-                    tw_k = fm.horizontalAdvance(lbl_text) + 10
+                    tw_k = fm.horizontalAdvance(lbl_text) + 8
                     th_k = fm.height() + 4
 
-                    # 智能自适应放置在 K 棒上方或下方，避开蜡烛柱实体与影线
-                    slot_cnt = sig_drawn_slots.get(idx_k, 0)
-                    sig_drawn_slots[idx_k] = slot_cnt + 1
+                    # 💡 【2D 包围盒真实防碰撞避让算法】：尝试避开K棒实体影线与上下错层
+                    target_x_base = x_k - tw_k / 2
+                    target_y_base = y_lo_k + 8 if is_buy else y_hi_k - th_k - 8
 
-                    if is_buy:
-                        target_y = y_lo_k + 8 + slot_cnt * (th_k + 4)
-                        if target_y + th_k > margin_top + main_h - 4:
-                            target_y = y_hi_k - th_k - 8 - slot_cnt * (th_k + 4)
-                    else:
-                        target_y = y_hi_k - th_k - 8 - slot_cnt * (th_k + 4)
-                        if target_y < margin_top + 4:
-                            target_y = y_lo_k + 8 + slot_cnt * (th_k + 4)
+                    dy_layers = [0, 1, -1, 2, -2, 3, -3]
+                    dx_offsets = [0, 10, -10, 20, -20]
+                    found_rect = None
+                    is_micro_mode = False
 
-                    x_offset = (slot_cnt % 2) * 8
-                    tag_kx = int(max(margin_left + 2, min(margin_left + chart_w - tw_k - 2, x_k - tw_k / 2 + x_offset)))
-                    tag_ky = int(max(margin_top + 2, min(margin_top + main_h - th_k - 2, target_y)))
+                    for dy_l in dy_layers:
+                        for dx_o in dx_offsets:
+                            cand_y = int(target_y_base + dy_l * (th_k + 4))
+                            cand_x = int(target_x_base + dx_o)
+                            cand_x = int(max(margin_left + 2, min(margin_left + chart_w - tw_k - 2, cand_x)))
+                            cand_y = int(max(margin_top + 2, min(margin_top + main_h - th_k - 2, cand_y)))
+                            cand_rect = QRect(cand_x, cand_y, tw_k, th_k)
+
+                            # 检查与已放置矩形是否碰撞 (预留 2px 呼吸间距)
+                            padded = cand_rect.adjusted(-2, -2, 2, 2)
+                            if not any(padded.intersects(box) for box in placed_boxes):
+                                found_rect = cand_rect
+                                break
+                        if found_rect:
+                            break
+
+                    if not found_rect:
+                        # 极端拥挤场景：降级为微型紧凑圆标 Micro-Badge (16x16px)
+                        is_micro_mode = True
+                        mb_w, mb_h = 16, 16
+                        mb_x = int(max(margin_left + 2, min(margin_left + chart_w - mb_w - 2, x_k - mb_w / 2)))
+                        mb_y = int(max(margin_top + 2, min(margin_top + main_h - mb_h - 2, target_y_base)))
+                        found_rect = QRect(mb_x, mb_y, mb_w, mb_h)
+
+                    placed_boxes.append(found_rect)
+                    tag_kx, tag_ky = found_rect.x(), found_rect.y()
+                    tw_actual, th_actual = found_rect.width(), found_rect.height()
 
                     # 注册点击区域
-                    tag_rect = QRect(tag_kx, tag_ky, tw_k, th_k)
                     self._signal_hit_boxes.append({
-                        "rect": tag_rect,
+                        "rect": found_rect,
                         "trade_id": trade_id_val,
                         "sig": sig,
                         "x": x_k,
@@ -2154,22 +2215,27 @@ class SBCChartCanvas(QWidget):
                     painter.drawLine(int(x_k), int(margin_top + main_h), int(x_k), int(margin_top))
 
                     # 2. 从标签框连接到实际成交价的精巧微引线
-                    painter.setPen(QPen(QColor(border_color.red(), border_color.green(), border_color.blue(), 180), 1, Qt.PenStyle.SolidLine))
-                    painter.drawLine(int(x_k), int(y_s), int(tag_kx + tw_k / 2), int(tag_ky + th_k if tag_ky < y_s else tag_ky))
+                    painter.setPen(QPen(QColor(border_color.red(), border_color.green(), border_color.blue(), 170), 1, Qt.PenStyle.SolidLine))
+                    painter.drawLine(int(x_k), int(y_s), int(tag_kx + tw_actual / 2), int(tag_ky + th_actual if tag_ky < y_s else tag_ky))
 
                     # 3. 实际成交价处的精巧圆点
                     painter.setPen(QPen(QColor("#ffffff") if not is_selected_trade else QColor("#FFD700"), 1.2))
                     painter.setBrush(QBrush(dot_color))
                     painter.drawEllipse(int(x_k - 3), int(y_s - 3), 6, 6)
 
-                    # 4. 半透明高对比度圆角胶囊背景
-                    painter.setPen(QPen(border_color, 1.8 if is_selected_trade else 1.2))
-                    painter.setBrush(QBrush(bg_color))
-                    painter.drawRoundedRect(tag_kx, tag_ky, tw_k, th_k, 3, 3)
-
-                    # 5. 高对比度白字
-                    painter.setPen(QPen(fg_color))
-                    painter.drawText(tag_kx + 5, tag_ky + th_k - 4, lbl_text)
+                    # 4. 绘制标签实体 (微型徽章模式 vs 紧凑胶囊模式)
+                    if is_micro_mode:
+                        painter.setPen(QPen(border_color, 1.5 if is_selected_trade else 1.0))
+                        painter.setBrush(QBrush(bg_color))
+                        painter.drawEllipse(tag_kx, tag_ky, mb_w, mb_h)
+                        painter.setPen(QPen(fg_color))
+                        painter.drawText(found_rect, Qt.AlignmentFlag.AlignCenter, "▲" if is_buy else "▼")
+                    else:
+                        painter.setPen(QPen(border_color, 1.8 if is_selected_trade else 1.2))
+                        painter.setBrush(QBrush(bg_color))
+                        painter.drawRoundedRect(tag_kx, tag_ky, tw_actual, th_actual, 3, 3)
+                        painter.setPen(QPen(fg_color))
+                        painter.drawText(tag_kx + 4, tag_ky + th_actual - 4, lbl_text)
 
             # 绘制当前选中的回测交易收益光束与详情卡片
             if self.selected_trade_id is not None:
@@ -3366,9 +3432,11 @@ class SBCIntradayChartDialog(QWidget):
 
     def _eval_vwap_proactive_strategy(self, df_bars: pd.DataFrame, period_mode: str = "1m") -> List[Dict[str, Any]]:
         """
-        【🤖 全自动分时交易策略评估引擎】
-        在分时走势图 (1日/2日/3日/5日/10日) 上逐 Tick 运行 VWAPTradingEngine 进攻端 与 ProactiveExitEngine 8层主动防守守护，
-        生成买入与主动出局信号对，并在 SBC 画布上所见即所得标记呈现。
+        【🤖 全自动分时交易策略评估引擎 (严格遵守 A 股 T+1 制度与单日防重叠开仓)】
+        在分时走势图 (1日/2日/3日/5日/10日) 上逐 Tick 运行 VWAPTradingEngine 进攻端 与 ProactiveExitEngine 8层主动防守守护：
+        1. 严格执行 A 股 T+1 交易规则：当日买入的头寸在买入日（T 日）绝对不可卖出平仓，必须次日（T+1 及之后）才解锁离场防守；
+        2. 严格执行单日防重叠开仓约束：同一交易日内至多开仓 1 次，持仓未平绝不重叠开仓，彻底杜绝同一天反复频繁开平仓；
+        3. 回测数据末尾保护：若回测结束时仍在买入当日，维持开仓持有中状态（Open Position），绝不伪造虚假同日卖点。
         """
         if df_bars is None or df_bars.empty or ProactiveExitEngine is None or VWAPTradingEngine is None:
             return []
@@ -3381,9 +3449,12 @@ class SBCIntradayChartDialog(QWidget):
         in_pos = False
         entry_price = 0.0
         entry_time_str = ""
+        entry_date = ""
         current_trade_id = 0
         prev_day_high = 0.0
         vwap_yesterday = 0.0
+        opened_dates = set()  # 记录已开仓的交易日，单日限开仓 1 次，杜绝重叠堆叠
+        unique_dates_seen = []
 
         n_bars = len(df_bars)
         if n_bars < 5:
@@ -3400,6 +3471,24 @@ class SBCIntradayChartDialog(QWidget):
             low_p = float(row.get("low", close_p))
             vol_p = float(row.get("vol", row.get("volume", 0.0)))
             time_key = str(row.name)
+
+            # ── 1. 交易日标识提取 (适配多日分时与单日分时) ──
+            bar_date = str(row.get("date", "")).strip()
+            if not bar_date:
+                dt_val = str(row.get("datetime", "")).strip()
+                if len(dt_val) >= 10 and ("-" in dt_val[:10] or "/" in dt_val[:10]):
+                    bar_date = dt_val[:10]
+                elif " " in time_key:
+                    bar_date = time_key.split()[0]
+                else:
+                    bar_date = "day_0"
+
+            if not unique_dates_seen or unique_dates_seen[-1] != bar_date:
+                unique_dates_seen.append(bar_date)
+                # 跨入新交易日，重置昨日高点与昨日 VWAP
+                if len(unique_dates_seen) > 1:
+                    prev_day_high = max(prev_day_high, high_p)
+                    vwap_yesterday = vwap_p
 
             vwap_engine.update_minute_bar(
                 code=self.code,
@@ -3420,85 +3509,120 @@ class SBCIntradayChartDialog(QWidget):
             )
 
             if not in_pos:
-                decision = vwap_engine.evaluate_buy_opportunity(
-                    state=tick_state,
-                    multi_period_score=75.0,
-                    now=idx * 60.0
-                )
-                if decision.allow:
-                    in_pos = True
-                    entry_price = close_p
-                    entry_time_str = time_key
-                    current_trade_id = trade_id_seq
-                    trade_id_seq += 1
+                # ── 2. 开仓检查 (单日限 1 次，避免密集反复重叠开仓) ──
+                if bar_date not in opened_dates:
+                    decision = vwap_engine.evaluate_buy_opportunity(
+                        state=tick_state,
+                        multi_period_score=75.0,
+                        now=idx * 60.0
+                    )
+                    if decision.allow:
+                        in_pos = True
+                        entry_price = close_p
+                        entry_time_str = time_key
+                        entry_date = bar_date
+                        current_trade_id = trade_id_seq
+                        trade_id_seq += 1
+                        opened_dates.add(bar_date)
 
-                    exit_engine.register_position(
+                        exit_engine.register_position(
+                            code=self.code,
+                            entry_price=entry_price,
+                            entry_time=idx * 60.0,
+                            prev_day_high=prev_day_high,
+                            vwap_yesterday=vwap_yesterday,
+                            intraday_high_before=high_p
+                        )
+
+                        signals.append({
+                            "trade_id": current_trade_id,
+                            "action": "buy",
+                            "type": "buy",
+                            "price": close_p,
+                            "time": time_key,
+                            "timestamp": time_key,
+                            "date": bar_date,
+                            "holding_status": "open",
+                            "rule_name": decision.reason,
+                            "note": f"买:{close_p:.2f}元 ({decision.reason})"
+                        })
+            else:
+                # ── 3. 持仓平仓检查 (严格遵循 T+1 制度：当日买次日才能卖) ──
+                is_same_day = (bar_date == entry_date)
+                is_last_bar = (idx == n_bars - 1)
+
+                if is_same_day:
+                    # 💡 【T+1 强规则拦截】：买入当日筹码法定冻结，绝对不可平仓！继续持有至次日
+                    # 内部仅更新持仓跟踪指标，不执行平仓卖出
+                    if is_last_bar:
+                        # 若直到最后一条数据仍处于买入当日，保持持有状态，绝不伪造同日卖出
+                        for b_s in signals:
+                            if b_s.get("trade_id") == current_trade_id and b_s.get("action") == "buy":
+                                b_s["holding_status"] = "open_holding"
+                                b_s["current_price"] = close_p
+                                b_s["unrealized_pnl_pct"] = round((close_p - entry_price) / entry_price * 100.0, 2)
+                                break
+                else:
+                    # 💡 【T+1 解锁】：已跨入次日或之后交易日，激活 8 层主动防守引擎离场评估
+                    exit_act = exit_engine.evaluate_tick(
                         code=self.code,
-                        entry_price=entry_price,
-                        entry_time=idx * 60.0,
-                        prev_day_high=prev_day_high,
-                        vwap_yesterday=vwap_yesterday,
-                        intraday_high_before=high_p
+                        price=close_p,
+                        vwap_today=vwap_p,
+                        volume=vol_p,
+                        volume_ratio=1.1,
+                        current_time=idx * 60.0,
+                        extra_ctx={"open": entry_price, "high": high_p, "ma5d": close_p * 1.005, "ma5d_prev5": close_p * 1.01, "channel_slope_60m": -6.0}
                     )
 
-                    signals.append({
-                        "trade_id": current_trade_id,
-                        "action": "buy",
-                        "type": "buy",
-                        "price": close_p,
-                        "time": time_key,
-                        "timestamp": time_key,
-                        "rule_name": decision.reason,
-                        "note": f"▲买入: {close_p:.2f}元 ({decision.reason})"
-                    })
-            else:
-                exit_act = exit_engine.evaluate_tick(
-                    code=self.code,
-                    price=close_p,
-                    vwap_today=vwap_p,
-                    volume=vol_p,
-                    volume_ratio=1.1,
-                    current_time=idx * 60.0,
-                    extra_ctx={"open": entry_price, "high": high_p, "ma5d": close_p * 1.005, "ma5d_prev5": close_p * 1.01, "channel_slope_60m": -6.0}
-                )
+                    if exit_act or is_last_bar:
+                        in_pos = False
+                        pnl_pct = (close_p - entry_price) / entry_price * 100.0 if entry_price > 0 else 0.0
+                        pnl_val = (close_p - entry_price) * 1000.0
+                        act_name = exit_act.rule_name if exit_act else "分时回测结束平仓"
+                        act_reason = exit_act.reason if exit_act else "回测周期截止次日收盘结算"
+                        layer_num = exit_act.layer if exit_act else 8
+                        prefix = f"L{layer_num}出局" if layer_num < 8 else "VWAP兜底"
 
-                if exit_act or idx == n_bars - 1:
-                    in_pos = False
-                    pnl_pct = (close_p - entry_price) / entry_price * 100.0 if entry_price > 0 else 0.0
-                    pnl_val = (close_p - entry_price) * 1000.0
-                    act_name = exit_act.rule_name if exit_act else "分时收盘离场"
-                    act_reason = exit_act.reason if exit_act else "分时回测结束自动平仓"
-                    layer_num = exit_act.layer if exit_act else 8
-                    prefix = f"▼L{layer_num}主动出局" if layer_num < 8 else "◆VWAP兜底"
+                        # 计算跨越交易日数
+                        holding_days = 1
+                        try:
+                            if entry_date in unique_dates_seen and bar_date in unique_dates_seen:
+                                holding_days = max(1, unique_dates_seen.index(bar_date) - unique_dates_seen.index(entry_date))
+                        except Exception:
+                            holding_days = 1
 
-                    for b_s in signals:
-                        if b_s.get("trade_id") == current_trade_id and b_s.get("action") == "buy":
-                            b_s["paired_price"] = close_p
-                            b_s["paired_date"] = time_key
-                            b_s["sell_price"] = close_p
-                            b_s["buy_price"] = entry_price
-                            b_s["pnl_pct"] = round(pnl_pct, 2)
-                            break
+                        for b_s in signals:
+                            if b_s.get("trade_id") == current_trade_id and b_s.get("action") == "buy":
+                                b_s["paired_price"] = close_p
+                                b_s["paired_date"] = time_key
+                                b_s["sell_price"] = close_p
+                                b_s["buy_price"] = entry_price
+                                b_s["pnl_pct"] = round(pnl_pct, 2)
+                                b_s["holding_days"] = holding_days
+                                b_s["holding_status"] = "closed"
+                                break
 
-                    signals.append({
-                        "trade_id": current_trade_id,
-                        "action": "sell",
-                        "type": "sell",
-                        "price": close_p,
-                        "time": time_key,
-                        "timestamp": time_key,
-                        "buy_price": entry_price,
-                        "sell_price": close_p,
-                        "paired_price": entry_price,
-                        "paired_date": entry_time_str,
-                        "pnl_pct": round(pnl_pct, 2),
-                        "pnl": round(pnl_val, 2),
-                        "layer": layer_num,
-                        "rule_name": act_name,
-                        "sell_reason": act_reason,
-                        "note": f"{prefix}: {close_p:.2f}元 ({pnl_pct:+.1f}%) | {act_name}"
-                    })
-                    exit_engine.unregister_position(self.code)
+                        signals.append({
+                            "trade_id": current_trade_id,
+                            "action": "sell",
+                            "type": "sell",
+                            "price": close_p,
+                            "time": time_key,
+                            "timestamp": time_key,
+                            "date": bar_date,
+                            "buy_price": entry_price,
+                            "sell_price": close_p,
+                            "paired_price": entry_price,
+                            "paired_date": entry_time_str,
+                            "pnl_pct": round(pnl_pct, 2),
+                            "pnl": round(pnl_val, 2),
+                            "holding_days": holding_days,
+                            "layer": layer_num,
+                            "rule_name": act_name,
+                            "sell_reason": act_reason,
+                            "note": f"{prefix}: {close_p:.2f}元 ({pnl_pct:+.1f}%) | {act_name}"
+                        })
+                        exit_engine.unregister_position(self.code)
 
             if high_p > prev_day_high:
                 prev_day_high = high_p
