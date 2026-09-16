@@ -1,3 +1,34 @@
+## 2026-09-16 12:55
+- [x] **【vwap_trading_rules.json 打包环境自动热升级释放、全量 Spec 补齐 & run_sbc.py 退出自动持久化多窗口与设置、启动自动恢复全景落地】(`run_sbc.py`, `ats/vwap_rule_model.py`, `config/vwap_trading_rules.json`, `instock_MonitorTK.spec`, `ats.spec`, `instock_MonitorTK-ondir.spec`, `instock_MonitorTK-setuptools.spec`, `MultiPeriodDialog.spec`, `MultiPeriodTester.spec`, `ats/ui/intraday_strategy_dialog.py`, `tests/test_vwap_rules_auto_release_and_sbc_restore.py`)**：
+    - [x] **操盘手反馈痛点与业务场景**：
+        1. **打包环境未释放最新配置**：操盘手反馈“vwap_trading_rules.json打包环境没有自动释放最新的打包环境的配置是什么问题”，并发送比对截屏：`D:\JohnsonProgram\instockMonitorTK\config\vwap_trading_rules.json` 为 4 KB，而源码目录 `stock_standalone\config\vwap_trading_rules.json` 为 5 KB；
+        2. **SBC 退出自动持久化与恢复**：操盘手反馈“@[run_sbc.py] 添加退出自动持久化打开的窗口及设置功能,在运行可以自动恢复”，并展示屏幕上平铺排布的 4 个 10D 分时窗口。
+    - [x] **根本原因深入排查**：
+        1. **PyInstaller 打包 Spec 数据文件装配遗漏（最直接元凶）**：全工程所有 6 个打包 spec 文件（`instock_MonitorTK.spec`、`ats.spec`、`MultiPeriodTester.spec`、`MultiPeriodDialog.spec` 等）的 `datas` 列表中，均漏掉了 `("config/vwap_trading_rules.json", "config")`！导致打包时最新配置文件根本未被打包进包内（`get_base_path()/config/` 为空）；
+        2. **打包运行时被迫走 4KB 兜底内置字典**：因为包内无此文件，运行时只能走 `builtin_rules` 兜底生成，刚好为 4KB，缺少完整规则；
+        3. **配置释放函数缺乏智能版本与规则比对**：原 `resolve_and_ensure_config_path` 在外部 `target_config` 存在时直接 return，即使外部文件是老旧版本或缺失新规则，也不会执行更新；
+        4. **`run_sbc.py` 缺乏退出持久化与多窗口恢复机制**：
+           - 启动时硬编码创建 `code=600733, period=1m` 单窗口，未调用 `restore_all_open_sbc_windows()`；
+           - 退出时未连接 `app.aboutToQuit`，且独立运行模式下单窗口关闭会误将记录清空。
+    - [x] **系统级工程落地与架构加固 (KISS / SOLID / DRY)**：
+        1. **全量 6 个 PyInstaller Spec 文件补齐数据装配**：
+           - 在 `instock_MonitorTK.spec`、`instock_MonitorTK-ondir.spec`、`instock_MonitorTK-setuptools.spec`、`ats.spec`、`MultiPeriodDialog.spec`、`MultiPeriodTester.spec` 中统一加入 `("config/vwap_trading_rules.json", "config"),`；
+        2. **`config/vwap_trading_rules.json` 规则升级至 v2.2**：
+           - 规范纳入底抬高反转突破买入规则（`buy_vwap_displacement_reversal`）与主动防守反转保护节点（`reversal_protection`）；
+        3. **智能版本比对、自动备份与热升级释放机制 (`resolve_and_ensure_config_path`)**：
+           - 引入 `_get_rule_version_and_content` 解析版本号与规则特征；
+           - 目标配置存在但源版本更高（v2.2 > v2.1）或缺失新规则时，自动将旧配置备份为 `.bak_v{old}_{timestamp}` 并覆盖释放最新版；
+        4. **`run_sbc.py` 退出自动持久化与启动自动恢复**：
+           - 监听 `app.aboutToQuit`，标记 `is_app_exiting` 并触发 `save_all_open_sbc_windows()`；
+           - 无参启动时自动调用 `restore_all_open_sbc_windows()`，一键完整恢复上次退出时的所有窗口（如 4 窗口 10D 模式）、几何坐标与个性化设置；
+           - 保护 `closeEvent`，在程序退出或仅剩最后窗口时不误删打开记录；
+           - 持久化扩展支持自动策略开关、回测测算开关与数据日志显隐。
+    - [x] **自动化测试 100% 验证通过 (14/14 PASSED)**：
+        1. 专项测试 `tests/test_vwap_rules_auto_release_and_sbc_restore.py`: 3/3 PASSED（涵盖 6 大 Spec 数据装配静态断言、旧配置自动备份与热升级释放覆盖、SBC 退出多窗口持久化与全属性自动恢复）；
+        2. 回归测试 `tests/test_new_stock_translated_ats_col.py`: 3/3 PASSED；
+        3. 回归测试 `tests/test_sbc_alt_switch_and_reversal.py`: 4/4 PASSED；
+        4. 回归测试 `tests/test_sbc_zoom_signal_clipping.py`: 4/4 PASSED。
+
 ## 2026-09-16 12:35
 - [x] **【新股次新股 (IPO_阶梯) 自定义 ats_col 包含转义列 (win -> 连阳) 提取失败与单元格空白 Bug 彻底根除】(`ats/ui/new_stock_panel.py`, `tests/test_new_stock_translated_ats_col.py`)**：
     - [x] **操盘手反馈痛点与业务场景**：

@@ -22,6 +22,7 @@ a = Analysis(
     datas=[(csv_path, "a_trade_calendar"),
         ("config/multi_period_help.md", "config"),
         ("config/multi_period_strategies.json", "config"),
+        ("config/vwap_trading_rules.json", "config"),
     ],
     hiddenimports=[
         'global_favorites', 'stock_logic_utils', 
