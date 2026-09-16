@@ -1,3 +1,17 @@
+## 2026-09-16 13:17
+- [x] **【全系统高频无价值日志三重根治：收盘定盘重复写盘 / 策略配置每次 new 刷屏 / 窗口重排中间日志冗余】(`ats/intraday_strategy_engine.py`, `ats/vwap_rule_model.py`, `ats/ui/intraday_strategy_dialog.py`)**：
+    - [x] **操盘手反馈痛点**：运行日志中 `💾 [收盘定盘]` 每秒重复多条、`成功加载策略规则配置` 刷屏、`🪟 [SBC窗口重排]` 每次出现两条无价值中间日志；核心原则：**只有临界点日志才有意义，每根 K 线的状态日志完全没有实际价值**。
+    - [x] **根本原因**：
+        1. `save_listing_closing_scorecard` 无防重复守卫，只要 `time >= 14:55` 每次 evaluate 调用都写盘并打 INFO；
+        2. `VWAPRuleModel.reload()` 在每次 `VWAPTradingEngine()` / `ProactiveExitEngine()` new 实例时触发，`__init__` 都打 INFO；
+        3. 窗口重排打两条中间策略选择日志 + 一条最终汇总，冗余；
+        4. SBC 快捷键 R 测算在评分未命中时仍打 INFO。
+    - [x] **修复方案 (KISS / DRY)**：
+        1. **`ats/intraday_strategy_engine.py` - `save_listing_closing_scorecard`**：加入 `_closing_saved_today` 内存字典，以 `code + date + score` 为唯一键，相同组合静默 `return True`，彻底消除重复写盘与刷屏；
+        2. **`ats/vwap_rule_model.py` - `reload()`**：日志降级为 `logger.debug`；`check_and_reload_if_modified` 文件真正变更时才打 `🔄 [热重载]` INFO；
+        3. **`ats/ui/intraday_strategy_dialog.py` - 窗口重排**：两条中间策略选择 INFO 改为 DEBUG，合并为最终一条简洁 INFO `🪟 [SBC窗口重排] N 个窗口已在 M 个屏幕平铺完成`；
+        4. **`ats/ui/intraday_strategy_dialog.py` - SBC 快捷键R测算**：K线多周期仅在 `matched=True` 或 `score>=80` 时打 INFO，否则 DEBUG；分时7节点仅在 `score>=7.0` 时打 INFO，否则 DEBUG；相同结果完全静默无任何输出。
+
 ## 2026-09-16 12:55
 - [x] **【vwap_trading_rules.json 打包环境自动热升级释放、全量 Spec 补齐 & run_sbc.py 退出自动持久化多窗口与设置、启动自动恢复全景落地】(`run_sbc.py`, `ats/vwap_rule_model.py`, `config/vwap_trading_rules.json`, `instock_MonitorTK.spec`, `ats.spec`, `instock_MonitorTK-ondir.spec`, `instock_MonitorTK-setuptools.spec`, `MultiPeriodDialog.spec`, `MultiPeriodTester.spec`, `ats/ui/intraday_strategy_dialog.py`, `tests/test_vwap_rules_auto_release_and_sbc_restore.py`)**：
     - [x] **操盘手反馈痛点与业务场景**：

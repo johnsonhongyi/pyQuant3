@@ -552,7 +552,7 @@ class SBCChartCanvas(QWidget):
                 self.strategy_eval_result = res
                 self.update()
 
-                # 💡 [日志防重与状态机去重] 没有变化的数据日志绝不重复刷屏输出
+                # 💡 [临界点日志] 仅在命中信号或首次出现时打 INFO，无命中只打 DEBUG
                 cur_sig = (
                     c_clean,
                     p_mode,
@@ -564,9 +564,13 @@ class SBCChartCanvas(QWidget):
                 last_sig = getattr(self, '_last_eval_log_signature', None)
                 if last_sig != cur_sig:
                     self._last_eval_log_signature = cur_sig
-                    logger.info(f"🎯 [SBC快捷键R测算·{p_mode}] {c_clean} 结果: matched={res.get('is_matched')} | score={res.get('score')} | entry={res.get('entry_price')} | reason={res.get('reason')}")
-                else:
-                    logger.debug(f"[SBC测算] {c_clean} {p_mode} 结果未变(静默保持)")
+                    is_matched = bool(res.get('is_matched', False))
+                    score_val = round(float(res.get('score', 0.0) or 0.0), 1)
+                    if is_matched or score_val >= 80:
+                        logger.info(f"🎯 [SBC测算命中·{p_mode}] {c_clean} score={score_val} | entry={res.get('entry_price')} | {res.get('reason', '')[:60]}")
+                    else:
+                        logger.debug(f"[SBC测算·{p_mode}] {c_clean} 未命中(score={score_val})")
+                # 相同结果静默保持，无任何日志输出
             except Exception as e_eval:
                 logger.error(f"[SBC策略测算] 异常: {e_eval}")
                 self.strategy_eval_result = {
@@ -618,9 +622,14 @@ class SBCChartCanvas(QWidget):
                 last_node_sig = getattr(self, '_last_node_log_signature', None)
                 if last_node_sig != cur_node_sig:
                     self._last_node_log_signature = cur_node_sig
-                    logger.info(f"🎯 [SBC快捷键R分时测算] {c_clean} 评分: {eval_res.get('total_score', 0)}分 | {eval_res.get('pattern_name')}")
-                else:
-                    logger.debug(f"[SBC分时测算] {c_clean} 分时节点未变(静默保持)")
+                    ts = round(float(eval_res.get("total_score", 0)), 1)
+                    pn = eval_res.get("pattern_name", "")
+                    # 只在形态强势(>=7分)或形态首次变化时才打 INFO，低分只打 DEBUG
+                    if ts >= 7.0:
+                        logger.info(f"🎯 [SBC分时评分] {c_clean} {ts}分 | {pn}")
+                    else:
+                        logger.debug(f"[SBC分时测算] {c_clean} {ts}分 | {pn}")
+                # 相同结果静默保持，无任何日志输出
             except Exception as e_node:
                 logger.error(f"[SBC分时测算] 异常: {e_node}")
                 self.strategy_eval_result = {
@@ -5038,7 +5047,7 @@ def rearrange_all_sbc_windows(parent_win=None):
         # 4.4 根据是否溢出选择排布策略：
         if not is_overflow and len(legacy_positions) == count:
             # 策略 A：【未超出屏幕 -> 保持旧逻辑与现有尺寸不变】
-            logger.info(f"🪟 [SBC窗口重排] 现有尺寸容纳正常，采用旧版原尺寸平铺 (共 {count} 个窗口)")
+            logger.debug(f"[SBC重排] 原尺寸平铺 {count} 个窗口")
             for idx, dlg in enumerate(dlgs_on_screen):
                 pos_x, pos_y, w, h = legacy_positions[idx]
                 dlg.resize(w, h)
@@ -5063,7 +5072,7 @@ def rearrange_all_sbc_windows(parent_win=None):
                     dlg._is_programmatic_move = False
         else:
             # 策略 B：【现有尺寸超出屏幕 -> 启动自适应缩放 (<=2个按2列自适应，>2个按最多3列自适应)】
-            logger.info(f"🪟 [SBC窗口重排] 现有尺寸超出屏幕边界，启动智能自适应网格缩放 (共 {count} 个窗口)")
+            logger.debug(f"[SBC重排] 自适应网格缩放 {count} 个窗口")
             if count <= 2:
                 cols = 2
             else:
@@ -5126,7 +5135,7 @@ def rearrange_all_sbc_windows(parent_win=None):
     except Exception as e:
         logger.debug(f"重排后持久化坐标异常: {e}")
 
-    logger.info(f"🪟 [SBC自适应窗口重排] 已成功在 {len(screen_map)} 个屏幕上将 {len(active_dialogs)} 个 SBC 窗口自适应平铺排布！")
+    logger.info(f"🪟 [SBC窗口重排] {len(active_dialogs)} 个窗口已在 {len(screen_map)} 个屏幕平铺完成")
 
 
 import copy
