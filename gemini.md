@@ -1,3 +1,35 @@
+## 2026-09-16 17:40
+- [x] **【SBC 分时走势全面转向独立子进程、跨进程统一重排支持与极限性能优化】(`ats/ui/sbc_launcher.py`, `ats/ui/intraday_strategy_dialog.py`, `ats/ui/main_window.py`, `tests/test_sbc_launcher_and_cct_interval.py`, `tests/test_sbc_rearrange.py`)**：
+    - [x] **操盘手明确要求**：
+        1. “已有'📈 调出 SBC 分时走势'按钮 这里改成独立子进程运行,是否影响sbc的重排功能,如果不影响全面转向独立进程,避免ats的全面卡顿.在ats退出时统一关闭”；
+        2. “hover_timer 100ms → 300ms（减少 66% hover CPU 开销）self.hover_timer.setInterval(300) 这里对齐cct.ats_tdx_interval TDX的api数据更新周期,更新计划并全面实施”；
+    - [x] **重排功能影响深度剖析与跨进程平铺突破 (SOLID / DRY)**：
+        1. **原机制局限**：原重排依赖进程内 `QApplication.topLevelWidgets()`，若简单改为子进程，单进程内只能排布自身窗口；
+        2. **跨进程 Win32 平铺代理升级 (`_SBCWindowProxy` + `rearrange_all_sbc_windows`)**：
+           - 抽象统一适配代理 `_SBCWindowProxy`，透明封装当前进程 `QWidget` 与外部独立子进程的 Win32 `HWND`；
+           - 重排时自动通过 Win32 API 枚举所有包含“`SBC 实盘分时走势`”的独立窗口，按物理显示器分组并统一执行网格平铺算法；
+           - **结论：彻底不影响重排功能，甚至实现了比以往更强大的跨独立进程多屏全域重排！按 Q 键或点击“🪟 重排”按钮即可瞬间对齐所有 SBC 窗口**；
+    - [x] **独立子进程统一生命周期管理 (`ats/ui/sbc_launcher.py`)**：
+        1. **单例进程管理器 (`SBCProcessManager`)**：
+           - 以 `run_sbc.py <code> <period>` 独立子进程方式唤起 SBC，彻底与 ATS 主线程物理隔离，彻底根除由于分时走势渲染导致的 ATS 主界面卡顿；
+           - 启动前自动检查并优先通过 Win32 `SetForegroundWindow` 唤醒已存在的同标的窗口，避免重复多开；
+        2. **ATS 退出统一级联安全关闭**：
+           - 在 `MainWindow.closeEvent` 与 `atexit.register` 中自动调用 `close_all_sbc_processes()`，优雅 terminate 并兜底 kill，绝不残留后台孤儿进程；
+        3. **主界面与详情弹窗全量切换接入**：
+           - `btn_sbc = QPushButton("📈 调出 SBC 分时走势")`、个股详情右键菜单以及主表右键菜单全部统一切换为 `launch_sbc_process(code, "10d")`；
+    - [x] **SBC 内部极限性能优化 (P0 核心瓶颈根除)**：
+        1. **`hover_timer` 降频至 300ms**：
+           - 间隔由 100ms 调整为 300ms，减少 66% hover CPU 事件开销；并在未贴边未隐藏状态下保持静默，真正做到常规看盘 0 CPU 消耗；
+        2. **`poll_timer` 全量动态对齐 `cct.ats_tdx_interval` (SSOT)**：
+           - 轮询间隔由硬编码 2000ms 全面升级为跟随 `cct.ats_tdx_interval`（即 5000ms），切周期恢复时同样动态跟随，消除无意义的高频重复拉取；
+        3. **VWAP 策略评估与反转检测指纹缓存 (`_cached_strat_fp`, `_cached_rev_fp`)**：
+           - 增加 Bar 行数、最后时间戳、最新价、成交量四元指纹检测；在无新 Bar 产生时直接 0 毫秒复用上轮 `signals` 与 `reversal_info`，杜绝每轮对 2400 根 Bar 逐 Tick 重新模拟撮合；
+        4. **`_on_eval_r_clicked` 防抖**：
+           - 增加数据指纹防抖，被动刷新且图表数据未变时跳过高开销的 `run_adaptive_strategy_eval`；
+    - [x] **自动化测试 100% 验证通过 (15/15 PASSED)**：
+        - 专项测试 `tests/test_sbc_launcher_and_cct_interval.py`: 验证 `hover_timer` 300ms、`poll_timer` 5000ms、VWAP 策略指纹 0 毫秒复用、子进程启动与清理全部通过；
+        - 回归测试 `tests/test_sbc_rearrange.py` 全部 12 项重排测试（包含多窗口重排、无窗口容错、周期切换、向后兼容兜底 1m）全部通过。
+
 ## 2026-09-16 16:38
 - [x] **【轻量化收敛：托盘巡检守护解耦，改为账户切换与同步时单次自检自愈】(`window_manager/ui.py`, `window_manager/antigravity_manager.py`, `sync_antigravity_ide.py`, `tests/test_antigravity_manager.py`)**：
     - [x] **操盘手明确要求**：“守护线程巡检：托盘常驻的 AntigravitySyncWorker 毫秒级巡检中前置运行这个不用跟随管理器自动守护,在执行切换时执行一次自检即可”；

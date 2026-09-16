@@ -53,6 +53,11 @@ from ats.ui.styles import apply_dark_theme, DARK_THEME_QSS, bind_top_shortcut, s
 from signal_types import SignalPoint, SignalType, SignalSource
 
 try:
+    from JohnsonUtil import commonTips as cct
+except ImportError:
+    cct = None
+
+try:
     from ats.proactive_exit_engine import ProactiveExitEngine, ExitAction
     from ats.consensus_arbiter import ConsensusArbiter, SharedPositionState, VoteResult
     from ats.vwap_trading_engine import VWAPTradingEngine, VWAPTickState, detect_vwap_displacement_reversal
@@ -2887,9 +2892,10 @@ class SBCIntradayChartDialog(QWidget):
         self._save_timer.timeout.connect(self._do_save_sbc_geometry)
         self._save_timer.start()
 
-        # 6. 实盘交易期 2 秒级高频自动刷新与动态绘制定时器
+        # 6. 实盘交易期数据自动刷新定时器 (对齐 cct.ats_tdx_interval 全局基准)
+        _tdx_intv_ms = int(float(getattr(cct, 'ats_tdx_interval', 5.0) or 5.0) * 1000) if cct else 5000
         self.poll_timer = QTimer(self)
-        self.poll_timer.setInterval(2000)
+        self.poll_timer.setInterval(max(1000, _tdx_intv_ms))
         self.poll_timer.timeout.connect(self._on_poll_timer_tick)
         self.poll_timer.start()
 
@@ -2907,7 +2913,7 @@ class SBCIntradayChartDialog(QWidget):
         self._is_auto_popping = False
 
         self.hover_timer = QTimer(self)
-        self.hover_timer.setInterval(100)
+        self.hover_timer.setInterval(300)  # 100ms → 300ms 减少 66% hover CPU 开销
         self.hover_timer.timeout.connect(self._check_hover)
         self.hover_timer.start()
 
@@ -2921,6 +2927,14 @@ class SBCIntradayChartDialog(QWidget):
         self._geo_save_timer.setSingleShot(True)
         self._geo_save_timer.setInterval(350)
         self._geo_save_timer.timeout.connect(self._do_save_sbc_geometry)
+
+        # 7.2 VWAP 策略引擎缓存与增量计算指纹 (P0 消除每轮全量 2400 根 Bar 逐 Tick 重新模拟)
+        self._vwap_engine_cache = VWAPTradingEngine() if VWAPTradingEngine else None
+        self._exit_engine_cache = ProactiveExitEngine() if ProactiveExitEngine else None
+        self._cached_strat_fp = None
+        self._cached_vwap_signals = []
+        self._cached_rev_fp = None
+        self._cached_reversal_info = {}
 
         # 8. 从 QSettings 与 config/intraday_ui_layout.json 强力物理恢复尺寸与屏显坐标
         self._restore_sbc_geometry()
@@ -3360,6 +3374,16 @@ class SBCIntradayChartDialog(QWidget):
             self.canvas.code = self.code
             self.canvas.auto_eval_enabled = bool(self.auto_eval_enabled)
             if self.auto_eval_enabled:
+                # 🚀 防抖校验：若非手动切换 (toggle=False)，且当前图表 bar 数量与最新价无变化，跳过高开销的自适应测算
+                cur_data_fp = None
+                if hasattr(self.canvas, 'df_data') and self.canvas.df_data is not None and not self.canvas.df_data.empty:
+                    df_d = self.canvas.df_data
+                    cur_data_fp = (len(df_d), str(df_d.index[-1]), float(df_d.iloc[-1].get("close", 0.0)))
+                
+                if not toggle and cur_data_fp and cur_data_fp == getattr(self, '_last_eval_r_fp', None):
+                    return  # 数据未变，跳过重复测算
+
+                self._last_eval_r_fp = cur_data_fp
                 self.canvas.run_adaptive_strategy_eval()
                 res = getattr(self.canvas, 'strategy_eval_result', None)
                 if res and res.get("is_matched", False):
@@ -3754,13 +3778,34 @@ class SBCIntradayChartDialog(QWidget):
         if df_bars is None or df_bars.empty or ProactiveExitEngine is None or VWAPTradingEngine is None:
             return []
 
-        # 💥 [NEW] 预先判定分时多日底抬高企稳与VWAP位移反转结构
-        reversal_info = {}
-        if detect_vwap_displacement_reversal is not None:
-            try:
-                reversal_info = detect_vwap_displacement_reversal(df_bars)
-            except Exception:
-                reversal_info = {}
+        n_bars = len(df_bars)
+        if n_bars < 5:
+            return []
+
+        last_row = df_bars.iloc[-1]
+        last_close = float(last_row.get("close", 0.0))
+        last_vol = float(last_row.get("vol", last_row.get("volume", 0.0)))
+        last_idx = str(df_bars.index[-1])
+
+        # 🚀 指纹缓存判定 (P0 核心瓶颈突破)：若数据行数与最新价未变，直接复用上轮计算结果，0 毫秒极速返回
+        strat_fp = (self.code, period_mode, n_bars, last_idx, last_close, last_vol)
+        if getattr(self, '_cached_strat_fp', None) == strat_fp and hasattr(self, '_cached_vwap_signals'):
+            return self._cached_vwap_signals
+
+        # 💥 [NEW] 预先判定分时多日底抬高企稳与VWAP位移反转结构 (带指纹缓存)
+        rev_fp = (self.code, n_bars, last_idx, last_close)
+        if getattr(self, '_cached_rev_fp', None) == rev_fp and hasattr(self, '_cached_reversal_info'):
+            reversal_info = self._cached_reversal_info
+        else:
+            reversal_info = {}
+            if detect_vwap_displacement_reversal is not None:
+                try:
+                    reversal_info = detect_vwap_displacement_reversal(df_bars)
+                except Exception:
+                    reversal_info = {}
+            self._cached_rev_fp = rev_fp
+            self._cached_reversal_info = reversal_info
+
         is_reversal_struct = bool(reversal_info.get("is_reversal", False))
         higher_low_level = float(reversal_info.get("higher_low", 0.0))
         prev_low_level = float(reversal_info.get("prev_low", 0.0))
@@ -3980,6 +4025,9 @@ class SBCIntradayChartDialog(QWidget):
                 prev_day_high = high_p
             vwap_yesterday = vwap_p
 
+        # 缓存计算结果与指纹
+        self._cached_strat_fp = strat_fp
+        self._cached_vwap_signals = signals
         return signals
 
     def _on_period_btn_clicked(self):
@@ -4238,9 +4286,10 @@ class SBCIntradayChartDialog(QWidget):
                 if getattr(self, '_has_initial_loaded', False):
                     return
             else:
-                # 实盘交易期恢复 2 秒轮询
-                if hasattr(self, 'poll_timer') and self.poll_timer and self.poll_timer.interval() != 2000:
-                    self.poll_timer.setInterval(2000)
+                # 实盘交易期恢复轮询 (对齐 cct.ats_tdx_interval 全局基准)
+                _tdx_ms = int(float(getattr(cct, 'ats_tdx_interval', 5.0) or 5.0) * 1000) if cct else 5000
+                if hasattr(self, 'poll_timer') and self.poll_timer and self.poll_timer.interval() != _tdx_ms:
+                    self.poll_timer.setInterval(max(1000, _tdx_ms))
 
         self._has_initial_loaded = True
 
@@ -4865,7 +4914,7 @@ def restore_all_open_sbc_windows(parent_win=None) -> List[SBCIntradayChartDialog
             h = item.get("height", 420)
             saved_period = item.get("period_mode") or item.get("period") or (
                 data.get("sbc_period_modes", {}).get(str(code).zfill(6))
-            ) or "10d"
+            ) or "1m"
             rx, ry = clamp_window_to_screens(x, y, w, h)
             
             dlg = open_sbc_chart_dialog(parent_win, code, period_mode=saved_period)
@@ -4926,10 +4975,98 @@ def restore_all_open_sbc_windows(parent_win=None) -> List[SBCIntradayChartDialog
     return restored_dialogs
 
 
+class _SBCWindowProxy:
+    """SBC 窗口统一适配代理：透明封装当前进程 QWidget 与跨进程独立子进程的 Win32 HWND"""
+    def __init__(self, dlg=None, hwnd=None, title=""):
+        self.dlg = dlg
+        self.hwnd = hwnd if hwnd else (int(dlg.winId()) if dlg and hasattr(dlg, 'winId') else 0)
+        self.title = title or (dlg.windowTitle() if dlg and hasattr(dlg, 'windowTitle') else "")
+
+    def is_maximized_or_minimized(self) -> bool:
+        if self.dlg:
+            return self.dlg.isMaximized() or self.dlg.isMinimized() or self.dlg.isFullScreen()
+        if self.hwnd:
+            try:
+                import win32gui
+                return bool(win32gui.IsIconic(self.hwnd) or win32gui.IsZoomed(self.hwnd))
+            except Exception:
+                pass
+        return False
+
+    def show_normal(self):
+        if self.dlg:
+            self.dlg.showNormal()
+        elif self.hwnd:
+            try:
+                import win32gui, win32con
+                win32gui.ShowWindow(self.hwnd, win32con.SW_RESTORE)
+            except Exception:
+                pass
+
+    def get_geometry(self) -> QRect:
+        if self.dlg:
+            return self.dlg.geometry()
+        if self.hwnd:
+            try:
+                import win32gui
+                rect = win32gui.GetWindowRect(self.hwnd)
+                return QRect(rect[0], rect[1], max(10, rect[2] - rect[0]), max(10, rect[3] - rect[1]))
+            except Exception:
+                pass
+        return QRect(100, 100, 800, 500)
+
+    def get_preferred_size(self, screen_geo: QRect) -> Tuple[int, int]:
+        if self.dlg:
+            unmax = getattr(self.dlg, "_unmaximized_size", None)
+            if unmax and isinstance(unmax, (tuple, list)) and len(unmax) == 2:
+                w, h = int(unmax[0]), int(unmax[1])
+            else:
+                w, h = self.dlg.width(), self.dlg.height()
+        elif self.hwnd:
+            geo = self.get_geometry()
+            w, h = geo.width(), geo.height()
+        else:
+            w, h = 800, 500
+        w = max(320, min(w, screen_geo.width()))
+        h = max(200, min(h, screen_geo.height()))
+        return w, h
+
+    def apply_geometry(self, pos_x: int, pos_y: int, w: int, h: int):
+        if self.dlg:
+            self.dlg.resize(w, h)
+            self.dlg._unmaximized_size = (w, h)
+            if hasattr(self.dlg, "snap_timer"):
+                self.dlg.snap_timer.stop()
+            self.dlg.anchor_edge = None
+            self.dlg.normal_geometry = None
+            self.dlg.is_hidden_state = False
+            self.dlg._is_dragging = False
+            self.dlg._is_user_dragging = False
+            self.dlg.setWindowOpacity(1.0)
+            self.dlg._is_programmatic_move = True
+            try:
+                self.dlg.move(pos_x, pos_y)
+                if hasattr(self.dlg, "_save_sbc_geometry"):
+                    self.dlg._save_sbc_geometry()
+                self.dlg.raise_()
+                self.dlg.activateWindow()
+            finally:
+                self.dlg._is_programmatic_move = False
+        elif self.hwnd:
+            try:
+                import win32gui, win32con
+                win32gui.ShowWindow(self.hwnd, win32con.SW_RESTORE)
+                win32gui.SetWindowPos(self.hwnd, 0, pos_x, pos_y, w, h, win32con.SWP_NOZORDER | win32con.SWP_SHOWWINDOW)
+                win32gui.SetForegroundWindow(self.hwnd)
+            except Exception:
+                pass
+
+
 def rearrange_all_sbc_windows(parent_win=None):
     """
-    【🪟 全局 SBC 独立窗口基于各自物理屏幕网格平铺重排】
-    自动按物理显示器分组，对每个屏幕上打开的 SBC 分时走势独立窗口分别在其所在屏幕内就地网格平铺重排。
+    【🪟 全局 SBC 独立窗口基于各自物理屏幕网格平铺重排 (全面支持多进程与跨独立进程)】
+    自动按物理显示器分组，对每个屏幕上打开的 SBC 分时走势独立窗口 (包含当前进程与外部独立子进程) 分别在所在屏幕内就地网格平铺重排。
+    - 多进程/跨进程全支持：利用 Win32 原生句柄透明聚合所有 SBC 独立进程窗口，打破单进程 Qt 内存隔离壁垒；
     - 多屏幕独立处理：每个物理显示器各自平铺重排，绝不把副屏窗口强行拉到主屏；
     - 尺寸与状态保持：保持各窗口已有宽高尺寸，彻底重置贴边半隐藏状态为完全展开显示；
     - 自动持久化：重排完成后即时同步保存全部最新窗口坐标。
@@ -4946,79 +5083,83 @@ def rearrange_all_sbc_windows(parent_win=None):
                 if d not in active_dialogs:
                     active_dialogs.append(d)
 
-    # 2. 从全局 topLevelWidgets 补充收集所有可见的 SBCIntradayChartDialog
+    # 2. 从全局 topLevelWidgets 补充收集当前进程内所有可见的 SBCIntradayChartDialog
     for w in QApplication.topLevelWidgets():
         if isinstance(w, SBCIntradayChartDialog) and not isdeleted(w) and w.isVisible():
             if w not in active_dialogs:
                 active_dialogs.append(w)
 
-    if not active_dialogs:
+    # 3. 构造统一代理列表，并尝试枚举 Windows 系统中跨独立子进程的所有 SBC 窗口
+    active_proxies: List[_SBCWindowProxy] = [_SBCWindowProxy(dlg=d) for d in active_dialogs]
+    known_hwnds = {p.hwnd for p in active_proxies if p.hwnd}
+
+    if sys.platform == "win32":
+        try:
+            import win32gui
+            def _enum_cb(hwnd, _):
+                if win32gui.IsWindowVisible(hwnd) and hwnd not in known_hwnds:
+                    title = win32gui.GetWindowText(hwnd)
+                    # 识别 SBC 实盘分时窗口特征
+                    if "SBC 实盘分时走势" in title or "关键阶梯基准图" in title:
+                        active_proxies.append(_SBCWindowProxy(hwnd=hwnd, title=title))
+                        known_hwnds.add(hwnd)
+                return True
+            win32gui.EnumWindows(_enum_cb, None)
+        except Exception as win_err:
+            logger.debug(f"[SBC重排] Win32 跨进程枚举提示: {win_err}")
+
+    if not active_proxies:
         if parent_win and not os.environ.get("PYTEST_CURRENT_TEST"):
             QMessageBox.information(parent_win, "🪟 窗口重排", "当前暂无打开的 SBC 分时走势独立窗口。")
         return
 
-    # 2.1 [FIX] 前置检查：若有任何窗口处于最大化或最小化状态，先强制还原为正常窗口大小
-    for dlg in active_dialogs:
-        if dlg.isMaximized() or dlg.isMinimized():
-            dlg.showNormal()
+    # 3.1 前置检查：若有任何窗口处于最大化或最小化状态，先强制还原为正常窗口大小
+    for pxy in active_proxies:
+        if pxy.is_maximized_or_minimized():
+            pxy.show_normal()
 
-    # 3. 按窗口当前所在物理屏幕进行分组 (多显示器支持)
+    # 4. 按窗口当前所在物理屏幕进行分组 (多显示器支持)
     screens = QApplication.screens()
     primary_screen = QApplication.primaryScreen() or (screens[0] if screens else None)
-    screen_map = {}  # screen_obj -> list of dlgs
+    screen_map: Dict[Any, List[_SBCWindowProxy]] = {}
 
-    for dlg in active_dialogs:
+    for pxy in active_proxies:
         dlg_screen = None
-        if hasattr(dlg, "screen") and callable(dlg.screen):
+        pxy_geo = pxy.get_geometry()
+        if screens:
             try:
-                dlg_screen = dlg.screen()
+                dlg_screen = QApplication.screenAt(pxy_geo.center())
             except Exception:
                 dlg_screen = None
-        if not dlg_screen and hasattr(dlg, "geometry"):
-            try:
-                dlg_screen = QApplication.screenAt(dlg.geometry().center())
-            except Exception:
-                dlg_screen = None
-        if not dlg_screen and screens:
-            for s in screens:
-                try:
-                    if s.geometry().intersects(dlg.geometry()):
-                        dlg_screen = s
-                        break
-                except Exception:
-                    pass
+            if not dlg_screen:
+                for s in screens:
+                    try:
+                        if s.geometry().intersects(pxy_geo):
+                            dlg_screen = s
+                            break
+                    except Exception:
+                        pass
         if not dlg_screen:
             dlg_screen = primary_screen
 
         if dlg_screen not in screen_map:
             screen_map[dlg_screen] = []
-        screen_map[dlg_screen].append(dlg)
+        screen_map[dlg_screen].append(pxy)
 
-    # 4. 对每个屏幕分别独立执行：现有尺寸优先重排，超出屏幕边界时才自适应缩放 (<=2个按2列，>2个按最多3列)
-    for target_screen, dlgs_on_screen in screen_map.items():
-        if not target_screen or not dlgs_on_screen:
+    # 5. 对每个屏幕分别独立执行网格平铺
+    for target_screen, pxys_on_screen in screen_map.items():
+        if not target_screen or not pxys_on_screen:
             continue
         sg = target_screen.availableGeometry()
-        count = len(dlgs_on_screen)
+        count = len(pxys_on_screen)
 
-        # 4.1 确保所有窗口退出最大化/全屏/最小化
-        for dlg in dlgs_on_screen:
-            if dlg.isMaximized() or dlg.isMinimized() or dlg.isFullScreen():
-                dlg.showNormal()
+        for pxy in pxys_on_screen:
+            if pxy.is_maximized_or_minimized():
+                pxy.show_normal()
 
-        # 4.2 提取每个窗口的当前/历史期望尺寸
-        dlg_sizes = []
-        for dlg in dlgs_on_screen:
-            unmax = getattr(dlg, "_unmaximized_size", None)
-            if unmax and isinstance(unmax, (tuple, list)) and len(unmax) == 2:
-                w, h = int(unmax[0]), int(unmax[1])
-            else:
-                w, h = dlg.width(), dlg.height()
-            w = max(320, min(w, sg.width()))
-            h = max(200, min(h, sg.height()))
-            dlg_sizes.append((w, h))
+        # 提取期望尺寸
+        dlg_sizes = [pxy.get_preferred_size(sg) for pxy in pxys_on_screen]
 
-        # 4.3 模拟【旧版保持原尺寸平铺排布】：检测是否会超出屏幕边界
         margin_x = 10
         margin_y = 10
         pad_x = 20
@@ -5044,39 +5185,16 @@ def rearrange_all_sbc_windows(parent_win=None):
             sim_x += w + margin_x
             row_max_h = max(row_max_h, h)
 
-        # 4.4 根据是否溢出选择排布策略：
         if not is_overflow and len(legacy_positions) == count:
             # 策略 A：【未超出屏幕 -> 保持旧逻辑与现有尺寸不变】
-            logger.debug(f"[SBC重排] 原尺寸平铺 {count} 个窗口")
-            for idx, dlg in enumerate(dlgs_on_screen):
+            logger.debug(f"[SBC重排] 原尺寸平铺 {count} 个窗口 (含跨进程)")
+            for idx, pxy in enumerate(pxys_on_screen):
                 pos_x, pos_y, w, h = legacy_positions[idx]
-                dlg.resize(w, h)
-                dlg._unmaximized_size = (w, h)
-
-                if hasattr(dlg, "snap_timer"):
-                    dlg.snap_timer.stop()
-                dlg.anchor_edge = None
-                dlg.normal_geometry = None
-                dlg.is_hidden_state = False
-                dlg._is_dragging = False
-                dlg._is_user_dragging = False
-                dlg.setWindowOpacity(1.0)
-                dlg._is_programmatic_move = True
-                try:
-                    dlg.move(pos_x, pos_y)
-                    if hasattr(dlg, "_save_sbc_geometry"):
-                        dlg._save_sbc_geometry()
-                    dlg.raise_()
-                    dlg.activateWindow()
-                finally:
-                    dlg._is_programmatic_move = False
+                pxy.apply_geometry(pos_x, pos_y, w, h)
         else:
-            # 策略 B：【现有尺寸超出屏幕 -> 启动自适应缩放 (<=2个按2列自适应，>2个按最多3列自适应)】
-            logger.debug(f"[SBC重排] 自适应网格缩放 {count} 个窗口")
-            if count <= 2:
-                cols = 2
-            else:
-                cols = 3
+            # 策略 B：【现有尺寸超出屏幕 -> 启动自适应缩放】
+            logger.debug(f"[SBC重排] 自适应网格缩放 {count} 个窗口 (含跨进程)")
+            cols = 2 if count <= 2 else 3
             rows = math.ceil(count / cols)
 
             margin_x = 8
@@ -5099,43 +5217,24 @@ def rearrange_all_sbc_windows(parent_win=None):
                 target_h = raw_target_h
             target_h = max(200, min(target_h, avail_h))
 
-            for idx_d, dlg in enumerate(dlgs_on_screen):
+            for idx_d, pxy in enumerate(pxys_on_screen):
                 r = idx_d // cols
                 c = idx_d % cols
 
                 pos_x = sg.left() + pad_left + c * (target_w + margin_x)
                 pos_y = sg.top() + pad_top + r * (target_h + margin_y)
 
-                dlg.resize(target_w, target_h)
-                dlg._unmaximized_size = (target_w, target_h)
-
-                if hasattr(dlg, "snap_timer"):
-                    dlg.snap_timer.stop()
-                dlg.anchor_edge = None
-                dlg.normal_geometry = None
-                dlg.is_hidden_state = False
-                dlg._is_dragging = False
-                dlg._is_user_dragging = False
-                dlg.setWindowOpacity(1.0)
-                dlg._is_programmatic_move = True
-                try:
-                    dlg.move(pos_x, pos_y)
-                    if hasattr(dlg, "_save_sbc_geometry"):
-                        dlg._save_sbc_geometry()
-                    dlg.raise_()
-                    dlg.activateWindow()
-                finally:
-                    dlg._is_programmatic_move = False
+                pxy.apply_geometry(pos_x, pos_y, target_w, target_h)
 
             SBCIntradayChartDialog._global_sbc_size = (target_w, target_h)
 
-    # 5. 持久化最新窗口坐标
+    # 6. 持久化最新窗口坐标
     try:
         save_all_open_sbc_windows()
     except Exception as e:
         logger.debug(f"重排后持久化坐标异常: {e}")
 
-    logger.info(f"🪟 [SBC窗口重排] {len(active_dialogs)} 个窗口已在 {len(screen_map)} 个屏幕平铺完成")
+    logger.info(f"🪟 [SBC窗口重排] 跨进程共 {len(active_proxies)} 个窗口已在 {len(screen_map)} 个屏幕平铺完成")
 
 
 import copy

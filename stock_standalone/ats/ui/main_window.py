@@ -1128,8 +1128,8 @@ class StockDetailDialog(QDialog):
             QPushButton:hover { background-color: #244633; }
         """)
         def _on_open_sbc_clicked():
-            from ats.ui.intraday_strategy_dialog import open_sbc_chart_dialog
-            open_sbc_chart_dialog(self, self.code)
+            from ats.ui.sbc_launcher import launch_sbc_process
+            launch_sbc_process(self.code, "10d")
         btn_sbc.clicked.connect(_on_open_sbc_clicked)
 
         btn_close = QPushButton("关闭窗口")
@@ -1163,11 +1163,11 @@ class StockDetailDialog(QDialog):
             }
         """)
 
-        # 📈 调出 SBC 实盘分时走势
+        # 📈 调出 SBC 实盘分时走势 (独立子进程运行，彻底隔离主进程)
         sbc_act = menu.addAction(f"📈 调出 {self.name} SBC 实盘分时走势")
         def _open_sbc():
-            from ats.ui.intraday_strategy_dialog import open_sbc_chart_dialog
-            open_sbc_chart_dialog(self, self.code)
+            from ats.ui.sbc_launcher import launch_sbc_process
+            launch_sbc_process(self.code, "10d")
         sbc_act.triggered.connect(_open_sbc)
 
         # ⚡ 发送到异动联动
@@ -5897,11 +5897,11 @@ class ATSMainWindow(QMainWindow):
 
         menu.addSeparator()
 
-        # 3. SBC 独立分时走势图
+        # 3. SBC 独立分时走势图 (独立子进程运行，彻底隔离主进程)
         sbc_act = QAction(f"📈 调出 SBC 独立分时走势图", self)
         def _open_sbc():
-            from ats.ui.intraday_strategy_dialog import open_sbc_chart_dialog
-            open_sbc_chart_dialog(self, code_clean)
+            from ats.ui.sbc_launcher import launch_sbc_process
+            launch_sbc_process(code_clean, "10d")
         sbc_act.triggered.connect(_open_sbc)
         menu.addAction(sbc_act)
 
@@ -6249,6 +6249,13 @@ class ATSMainWindow(QMainWindow):
                 save_all_open_sbc_windows()
             except Exception as e_sbc:
                 print(f"[ATSMainWindow] Error persisting SBC dialogs on close: {e_sbc}")
+
+            # 3.1 统一安全关闭所有拉起的 SBC 独立子进程 (绝不残留后台孤儿进程)
+            try:
+                from ats.ui.sbc_launcher import close_all_sbc_processes
+                close_all_sbc_processes()
+            except Exception as e_proc:
+                print(f"[ATSMainWindow] Error closing SBC subprocesses: {e_proc}")
         except Exception as e_persist:
             print(f"[ATSMainWindow] Error persisting active monitor dialogs on close: {e_persist}")
         

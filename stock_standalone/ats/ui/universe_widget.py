@@ -159,12 +159,37 @@ class UniverseTreeWidget(QWidget):
         # Title / Search Bar
         header_layout = QHBoxLayout()
         header_layout.setSpacing(4)
-        title_label = QLabel("策略股票池 (Multi-Tier Universe)")
-        title_label.setStyleSheet("font-weight: bold; color: #aad4ff; font-size: 11pt;")
-        title_label.setToolTip("策略股票池 (Multi-Tier Universe)")
-        title_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-        title_label.setMinimumWidth(0)
-        header_layout.addWidget(title_label)
+
+        # 📈 【SBC Launcher 独立持仓盯盘】左侧核心入口：专门盯持仓盘，支持二次点击统一关闭保存
+        self.btn_run_sbc = QPushButton("📈 盯盘")
+        self.btn_run_sbc.setStyleSheet("""
+            QPushButton {
+                background-color: #1a2e22;
+                border: 1px solid #00ff88;
+                border-radius: 4px;
+                color: #00ff88;
+                font-weight: bold;
+                font-size: 8.5pt;
+                min-width: 44px;
+                max-width: 52px;
+                min-height: 23px;
+                max-height: 23px;
+                padding: 1px 3px;
+            }
+            QPushButton:hover {
+                background-color: #244633;
+                border-color: #00ffaa;
+                color: #ffffff;
+            }
+            QPushButton:pressed {
+                background-color: #0f1c15;
+            }
+        """)
+        self.btn_run_sbc.setToolTip("📈 [SBC Launcher] 独立持仓盯盘启动器 (单击: 启动盯盘 | 二次点击: 统一保存并关闭)")
+        self.btn_run_sbc.clicked.connect(self._on_launch_run_sbc_clicked)
+        self.btn_run_sbc.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.btn_run_sbc.customContextMenuRequested.connect(self._popup_run_sbc_menu)
+        header_layout.addWidget(self.btn_run_sbc)
         header_layout.addStretch()
         
         # --- 窗口位置手动快照（提供3个保存位置，全面持久化所有打开关联窗口，防多屏覆盖）---
@@ -806,15 +831,191 @@ class UniverseTreeWidget(QWidget):
         
         menu.exec(self.tree.mapToGlobal(pos))
 
+    def _on_launch_run_sbc_clicked(self):
+        """【📈 SBC Launcher 持仓盯盘】首次点击调起独立进程，二次点击弹出统一关闭并保存菜单"""
+        try:
+            from ats.ui.sbc_launcher import SBCProcessManager
+            mgr = SBCProcessManager.get_instance()
+
+            if mgr.is_launcher_running():
+                # 二次点击：弹出统一关闭保存或激活菜单
+                self._popup_launcher_running_menu()
+            else:
+                # 首次点击：调起独立进程盯持仓
+                proc = mgr.launch_holdings_watcher()
+                if proc:
+                    self._update_launcher_btn_state(running=True)
+                    self._notify_status("📈 [SBC Launcher] 已成功调起持仓盯盘独立进程")
+        except Exception as e:
+            logger.error(f"[UniverseWidget] 调起持仓盯盘异常: {e}", exc_info=True)
+
+    def _update_launcher_btn_state(self, running: bool):
+        """动态更新盯盘按钮文本与发光视觉状态"""
+        if not hasattr(self, 'btn_run_sbc') or not self.btn_run_sbc:
+            return
+        if running:
+            self.btn_run_sbc.setText("📈 盯盘中")
+            self.btn_run_sbc.setStyleSheet("""
+                QPushButton {
+                    background-color: #0d3824;
+                    border: 1.5px solid #00ff88;
+                    border-radius: 4px;
+                    color: #00ff88;
+                    font-weight: bold;
+                    font-size: 8.5pt;
+                    min-width: 48px;
+                    max-width: 56px;
+                    min-height: 23px;
+                    max-height: 23px;
+                    padding: 1px 3px;
+                }
+                QPushButton:hover {
+                    background-color: #1a4d33;
+                    border-color: #38bdf8;
+                    color: #ffffff;
+                }
+            """)
+        else:
+            self.btn_run_sbc.setText("📈 盯盘")
+            self.btn_run_sbc.setStyleSheet("""
+                QPushButton {
+                    background-color: #1a2e22;
+                    border: 1px solid #00ff88;
+                    border-radius: 4px;
+                    color: #00ff88;
+                    font-weight: bold;
+                    font-size: 8.5pt;
+                    min-width: 44px;
+                    max-width: 52px;
+                    min-height: 23px;
+                    max-height: 23px;
+                    padding: 1px 3px;
+                }
+                QPushButton:hover {
+                    background-color: #244633;
+                    border-color: #00ffaa;
+                    color: #ffffff;
+                }
+            """)
+
+    def _popup_launcher_running_menu(self):
+        """二次点击已在运行的 [SBC Launcher] 时弹出统一关闭保存与操作菜单"""
+        from PyQt6.QtWidgets import QMenu
+        from ats.ui.sbc_launcher import SBCProcessManager
+        mgr = SBCProcessManager.get_instance()
+
+        menu = QMenu(self)
+        menu.setStyleSheet("""
+            QMenu {
+                background-color: #1a1a24;
+                border: 1px solid #2e2e36;
+                color: #e2e2e5;
+                padding: 4px;
+            }
+            QMenu::item {
+                padding: 6px 20px;
+                border-radius: 4px;
+                font-weight: bold;
+            }
+            QMenu::item:selected {
+                background-color: #2c2c35;
+                color: #00ff88;
+            }
+        """)
+
+        act_close = menu.addAction("🛑 统一关闭并保存所有盯盘窗口 (持久化)")
+        def _do_close():
+            mgr.close_launcher_process()
+            self._update_launcher_btn_state(running=False)
+            self._notify_status("🛑 [SBC Launcher] 盯盘窗口已统一关闭并完成独立持久化保存。")
+        act_close.triggered.connect(_do_close)
+
+        act_activate = menu.addAction("🪟 置顶激活所有已打开的盯盘窗口")
+        act_activate.triggered.connect(mgr.activate_launcher_windows)
+
+        act_restart = menu.addAction("🔄 重新读取最新持仓并重开盯盘")
+        def _do_restart():
+            mgr.close_launcher_process()
+            mgr.launch_holdings_watcher()
+            self._update_launcher_btn_state(running=True)
+            self._notify_status("🔄 [SBC Launcher] 已重新读取最新持仓并启动盯盘。")
+        act_restart.triggered.connect(_do_restart)
+
+        btn = getattr(self, "btn_run_sbc", None)
+        pos = btn.mapToGlobal(QPoint(0, btn.height() + 2)) if btn else self.mapToGlobal(QPoint(0, 0))
+        menu.exec(pos)
+
+    def _popup_run_sbc_menu(self, pos):
+        """📈 SBC 快捷操作右键菜单"""
+        from PyQt6.QtWidgets import QMenu
+        from ats.ui.sbc_launcher import SBCProcessManager
+        mgr = SBCProcessManager.get_instance()
+
+        menu = QMenu(self)
+        menu.setStyleSheet("""
+            QMenu {
+                background-color: #1a1a24;
+                border: 1px solid #2e2e36;
+                color: #e2e2e5;
+                padding: 4px;
+            }
+            QMenu::item {
+                padding: 6px 20px;
+                border-radius: 4px;
+            }
+            QMenu::item:selected {
+                background-color: #2c2c35;
+                color: #00ff88;
+            }
+        """)
+
+        # 1. 启动或统一关闭持仓盯盘
+        if mgr.is_launcher_running():
+            act_toggle = menu.addAction("🛑 统一关闭并保存所有盯盘窗口 (持久化)")
+            def _do_close_toggle():
+                mgr.close_launcher_process()
+                self._update_launcher_btn_state(running=False)
+                self._notify_status("🛑 [SBC Launcher] 盯盘窗口已统一关闭并保存。")
+            act_toggle.triggered.connect(_do_close_toggle)
+        else:
+            act_toggle = menu.addAction("📈 启动独立持仓盯盘 (run_sbc.py)")
+            def _do_launch_toggle():
+                mgr.launch_holdings_watcher()
+                self._update_launcher_btn_state(running=True)
+                self._notify_status("📈 [SBC Launcher] 已成功启动持仓盯盘。")
+            act_toggle.triggered.connect(_do_launch_toggle)
+
+        # 2. 若有选中标的，单独打开选中标的
+        cur_item = self.tree.currentItem() if hasattr(self, 'tree') and self.tree else None
+        if cur_item:
+            c_text = cur_item.text(0).strip()
+            n_text = cur_item.text(1).strip()
+            digits = "".join(filter(str.isdigit, c_text))
+            if len(digits) >= 6 and digits != "000000":
+                code_sel = digits[:6]
+                act_sel = menu.addAction(f"📈 调出当前选中标的【{n_text} ({code_sel})】SBC 分时走势")
+                act_sel.triggered.connect(lambda: self._open_sbc_chart(code_sel, n_text))
+
+        # 3. 平铺重排
+        act_rearrange = menu.addAction("🪟 一键平铺重排所有 SBC 窗口 (Q)")
+        def _do_rearrange():
+            from ats.ui.intraday_strategy_dialog import rearrange_all_sbc_windows
+            rearrange_all_sbc_windows(parent_win=self.window())
+        act_rearrange.triggered.connect(_do_rearrange)
+
+        btn = getattr(self, "btn_run_sbc", None)
+        global_pos = btn.mapToGlobal(pos) if btn else self.mapToGlobal(pos)
+        menu.exec(global_pos)
+
     def _open_sbc_chart(self, code, name):
-        """调出 SBC 实盘走势独立窗口"""
+        """调出 SBC 实盘走势窗口 (在 ATS 主进程中统一调度，确保平铺重排与界面无大小不等)"""
         try:
             from ats.ui.intraday_strategy_dialog import open_sbc_chart_dialog
-            open_sbc_chart_dialog(code, self.window(), initial_period_mode="60m")
+            open_sbc_chart_dialog(self.window(), code, period_mode="10d")
         except Exception as e:
             try:
                 from ats.ui.intraday_strategy_dialog import SBCIntradayChartDialog
-                dlg = SBCIntradayChartDialog(self.window(), code=code, initial_period_mode="60m")
+                dlg = SBCIntradayChartDialog(self.window(), code=code, initial_period_mode="10d")
                 dlg.show()
             except Exception as e2:
                 logger.error(f"[Universe] 调出 SBC 窗口失败: {e2}")
