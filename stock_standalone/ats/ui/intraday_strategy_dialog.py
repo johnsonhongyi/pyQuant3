@@ -3413,11 +3413,29 @@ class SBCIntradayChartDialog(QWidget):
             SBCIntradayChartDialog._global_sbc_dialogs.pop(c_clean, None)
 
         is_app_exiting = False
-        if main_win:
+        app_inst = QApplication.instance()
+        if app_inst and app_inst.property("is_app_exiting"):
+            is_app_exiting = True
+        elif main_win:
             if not main_win.isVisible() or getattr(main_win, '_is_closing', False) or getattr(main_win, '_is_exiting', False):
                 is_app_exiting = True
+        else:
+            # 独立运行 run_sbc.py 模式
+            if app_inst:
+                other_visible_sbc = any(
+                    isinstance(tw, SBCIntradayChartDialog) and tw != self and tw.isVisible()
+                    for tw in app_inst.topLevelWidgets()
+                )
+                if not other_visible_sbc:
+                    # 这是最后一个可见 SBC 窗口，关闭意味着程序整体退出！
+                    # 此时必须将退出保存标记置为 True，并触发全局保存，绝不能抹去窗口记录！
+                    is_app_exiting = True
+                    try:
+                        save_all_open_sbc_windows()
+                    except Exception:
+                        pass
 
-        # 若非整个程序退出（即用户手动单独关闭该 SBC 窗口），从持久化打开列表中移除
+        # 若非整个程序退出（即用户在多窗口运行时手动单独关闭该 SBC 窗口），从持久化打开列表中移除
         if not is_app_exiting:
             try:
                 _remove_sbc_open_record(self.code)
@@ -4748,6 +4766,12 @@ def save_all_open_sbc_windows():
                 cur_period = getattr(w, '_current_period_mode', '1m')
                 if c:
                     c_clean = str(c).zfill(6)
+                    # 💡 持久化当前窗口设置：周期、自动策略开关、回测测算开关、数据日志显隐
+                    is_auto_strat = bool(getattr(w, 'btn_auto_strategy', None).isChecked() if hasattr(w, 'btn_auto_strategy') else True)
+                    is_log_vis = bool(getattr(w, 'log_box', None).isVisible() if hasattr(w, 'log_box') else False)
+                    eval_btn = getattr(w, 'btn_eval_r', None)
+                    is_eval_r = bool(eval_btn and ("开" in eval_btn.text())) if eval_btn else True
+
                     active_list.append({
                         "code": c_clean,
                         "x": geo.x(),
@@ -4756,7 +4780,10 @@ def save_all_open_sbc_windows():
                         "height": geo.height(),
                         "anchor_edge": getattr(w, "anchor_edge", None),
                         "is_hidden_state": bool(getattr(w, "is_hidden_state", False)),
-                        "period_mode": cur_period
+                        "period_mode": cur_period,
+                        "auto_strategy": is_auto_strat,
+                        "log_visible": is_log_vis,
+                        "eval_r": is_eval_r
                     })
                     period_map[c_clean] = cur_period
                     latest_period = cur_period
@@ -4805,17 +4832,18 @@ def save_all_open_sbc_windows():
         logger.debug(f"保存所有已打开 SBC 窗口列表异常: {e}")
 
 
-def restore_all_open_sbc_windows(parent_win=None):
-    """【🚀 启动时自动恢复所有持久化的 SBC 窗口、位置及所选周期】"""
+def restore_all_open_sbc_windows(parent_win=None) -> List[SBCIntradayChartDialog]:
+    """【🚀 启动时自动恢复所有持久化的 SBC 窗口、位置、所选周期及设置】"""
+    restored_dialogs: List[SBCIntradayChartDialog] = []
     try:
         cfg_path = _get_sbc_layout_cfg_path()
         if not os.path.exists(cfg_path):
-            return
+            return restored_dialogs
         with open(cfg_path, "r", encoding="utf-8") as f:
             data = json.load(f)
         sbc_list = data.get("sbc_open_windows", [])
         if not sbc_list:
-            return
+            return restored_dialogs
 
         from gui_utils import clamp_window_to_screens
         for item in sbc_list:
@@ -4828,11 +4856,12 @@ def restore_all_open_sbc_windows(parent_win=None):
             h = item.get("height", 420)
             saved_period = item.get("period_mode") or item.get("period") or (
                 data.get("sbc_period_modes", {}).get(str(code).zfill(6))
-            ) or "1m"
+            ) or "10d"
             rx, ry = clamp_window_to_screens(x, y, w, h)
             
             dlg = open_sbc_chart_dialog(parent_win, code, period_mode=saved_period)
             if dlg:
+                restored_dialogs.append(dlg)
                 dlg._is_programmatic_move = True
                 dlg._is_user_dragging = False
                 try:
@@ -4853,14 +4882,39 @@ def restore_all_open_sbc_windows(parent_win=None):
                         dlg.normal_geometry = None
                         dlg.is_hidden_state = False
                         dlg.setWindowOpacity(1.0)
+
+                    # 💡 恢复设置：周期模式
                     if hasattr(dlg, 'set_period_mode'):
-                        dlg.set_period_mode(saved_period, reload=False, save=False)
+                        dlg.set_period_mode(saved_period, reload=True, save=False)
+
+                    # 💡 恢复设置：自动策略开关
+                    if "auto_strategy" in item:
+                        target_auto = bool(item.get("auto_strategy"))
+                        if hasattr(dlg, 'btn_auto_strategy') and dlg.btn_auto_strategy.isChecked() != target_auto:
+                            dlg.btn_auto_strategy.setChecked(target_auto)
+                            if hasattr(dlg, '_toggle_auto_strategy'):
+                                dlg._toggle_auto_strategy()
+
+                    # 💡 恢复设置：数据日志框显隐
+                    if "log_visible" in item:
+                        target_log = bool(item.get("log_visible"))
+                        if hasattr(dlg, 'log_box'):
+                            dlg.log_box.setVisible(target_log)
+
+                    # 💡 恢复设置：回测测算开关
+                    if "eval_r" in item:
+                        target_eval = bool(item.get("eval_r"))
+                        eval_btn = getattr(dlg, 'btn_eval_r', None)
+                        if eval_btn and (("开" in eval_btn.text()) != target_eval):
+                            if hasattr(dlg, '_on_eval_r_clicked'):
+                                dlg._on_eval_r_clicked(toggle=True)
+
                     dlg._save_sbc_geometry()
                 finally:
                     dlg._is_programmatic_move = False
     except Exception as e:
         logger.warning(f"自动恢复 SBC 窗口列表异常: {e}")
-        logger.warning(f"自动恢复 SBC 窗口列表异常: {e}")
+    return restored_dialogs
 
 
 def rearrange_all_sbc_windows(parent_win=None):

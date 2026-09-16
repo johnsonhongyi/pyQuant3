@@ -28,6 +28,7 @@ a = Analysis(
         ("strategy_config.json", "."),
         ("config/multi_period_help.md", "config"),
         ("config/multi_period_strategies.json", "config"),
+        ("config/vwap_trading_rules.json", "config"),
     ],
     hiddenimports=[
         'global_favorites', 'stock_logic_utils', 'pandas', 'numpy', 'pyqtgraph', 'sqlite3',
