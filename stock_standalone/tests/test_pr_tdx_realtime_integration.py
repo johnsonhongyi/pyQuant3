@@ -220,6 +220,125 @@ class TestPRTDXRealtimeIntegration(unittest.TestCase):
             self.assertIn("favorite", items_store["item2"]["tags"])
             self.assertIn("down", items_store["item2"]["tags"])
 
+    def test_tdx_interval_global_alignment_and_customization(self):
+        """验证 TDX 刷新间隔默认对齐全局 cct.ats_tdx_interval 与自定义设置生效"""
+        from popularity_resonance_gui import PRServiceGUI
+        from JohnsonUtil import commonTips as cct
+
+        mock_root = MagicMock()
+        with patch.object(PRServiceGUI, '__init__', lambda s, r: None):
+            gui = PRServiceGUI(mock_root)
+            gui.config = {"tdx_refresh_interval": "auto"}
+
+            # 1. 验证默认模式跟随 cct.ats_tdx_interval
+            old_intv = getattr(cct, 'ats_tdx_interval', 5.0)
+            try:
+                cct.ats_tdx_interval = 5.0
+                self.assertEqual(gui._get_global_ats_interval(), 5.0)
+                self.assertEqual(gui._get_current_tdx_interval(), 5.0)
+
+                # 动态调整全局基准，验证动态感知跟随
+                cct.ats_tdx_interval = 8.0
+                self.assertEqual(gui._get_global_ats_interval(), 8.0)
+                self.assertEqual(gui._get_current_tdx_interval(), 8.0)
+            finally:
+                cct.ats_tdx_interval = old_intv
+
+            # 2. 验证自定义独立设置 (如 10.0s, 30.0s)
+            gui.config["tdx_refresh_interval"] = 10.0
+            self.assertEqual(gui._get_current_tdx_interval(), 10.0)
+
+            gui.config["tdx_refresh_interval"] = 30.0
+            self.assertEqual(gui._get_current_tdx_interval(), 30.0)
+
+            # 3. 验证无效值容错回退为全局基准
+            gui.config["tdx_refresh_interval"] = -5.0
+            self.assertEqual(gui._get_current_tdx_interval(), gui._get_global_ats_interval())
+
+    def test_tdx_auto_refresh_toggle_and_config_persistence(self):
+        """验证 TDX 自动刷新开关与下拉框选择在配置中正确持久化保存与恢复"""
+        from popularity_resonance_gui import PRServiceGUI
+        import tkinter as tk
+
+        mock_root = MagicMock()
+        with patch.object(PRServiceGUI, '__init__', lambda s, r: None):
+            gui = PRServiceGUI(mock_root)
+            gui.config = {
+                "tdx_auto_refresh": True,
+                "tdx_refresh_interval": "auto"
+            }
+            gui.lbl_status = MagicMock()
+            gui.refresh_realtime_from_tdx = MagicMock()
+            gui.save_config_settings = MagicMock()
+
+            # Mock tdx_auto_var
+            gui.tdx_auto_var = MagicMock()
+            gui.tdx_auto_var.get.return_value = False
+            gui._on_tdx_auto_toggled()
+            self.assertFalse(gui.config["tdx_auto_refresh"])
+            gui.save_config_settings.assert_called()
+
+            # Mock combo_tdx_interval 下拉框切换
+            gui.combo_tdx_interval = MagicMock()
+            gui._tdx_interval_options = [
+                ("默认 (5s)", "auto"),
+                ("3 秒 (极速)", 3.0),
+                ("10 秒 (稳健)", 10.0),
+            ]
+            gui.combo_tdx_interval.current.return_value = 2  # 选中 10 秒
+            gui.combo_tdx_interval.get.return_value = "10 秒 (稳健)"
+            
+            gui._on_tdx_interval_changed()
+            self.assertEqual(gui.config["tdx_refresh_interval"], 10.0)
+            self.assertEqual(gui._get_current_tdx_interval(), 10.0)
+
+    def test_tdx_realtime_not_blocked_by_running_crawler(self):
+        """
+        [P0 核心防误杀验证] 验证爬虫处于常驻自动循环(refresh_thread.is_alive()==True)时，
+        TDX API 实时盘口拉取不再被错误阻断拦截。
+        """
+        from popularity_resonance_gui import PRServiceGUI
+        from JohnsonUtil import commonTips as cct
+
+        mock_root = MagicMock()
+        with patch.object(PRServiceGUI, '__init__', lambda s, r: None):
+            gui = PRServiceGUI(mock_root)
+            gui.root = mock_root
+            gui.config = {"tdx_auto_refresh": True, "tdx_refresh_interval": "auto"}
+            gui.tdx_auto_var = MagicMock()
+            gui.tdx_auto_var.get.return_value = True
+            gui.current_date = time.strftime("%Y-%m-%d")
+            gui._is_crawling = False
+            gui.refresh_realtime_from_tdx = MagicMock()
+
+            # 模拟后台爬虫常驻线程正在运行
+            mock_crawler_thread = MagicMock()
+            mock_crawler_thread.is_alive.return_value = True
+            gui.refresh_thread = mock_crawler_thread
+
+            today = time.strftime("%Y-%m-%d")
+            # 模拟交易时段
+            with patch("JohnsonUtil.commonTips.get_work_time", return_value=True):
+                # 触发轮询中的核心前置条件检测
+                should_refresh = (
+                    gui._is_tdx_auto_refresh_enabled() and
+                    cct.get_work_time() and
+                    getattr(gui, 'current_date', today) == today and
+                    not getattr(gui, '_is_crawling', False)
+                )
+                self.assertTrue(should_refresh, "当自动爬虫线程存活但未在写表时，TDX 实时刷新必须正常触发！")
+
+                # 若用户主动关闭了 TDX 自动刷新
+                gui.tdx_auto_var.get.return_value = False
+                should_refresh_disabled = (
+                    gui._is_tdx_auto_refresh_enabled() and
+                    cct.get_work_time() and
+                    getattr(gui, 'current_date', today) == today and
+                    not getattr(gui, '_is_crawling', False)
+                )
+                self.assertFalse(should_refresh_disabled, "当用户关闭 TDX 自动刷新时，应停止拉取以减轻服务器压力")
+
 
 if __name__ == "__main__":
     unittest.main()
+
