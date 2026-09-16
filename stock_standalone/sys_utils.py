@@ -21,6 +21,12 @@ def setup_qt_clean_environment():
     os.environ["QT_AUTO_SCREEN_SCALE_FACTOR"] = "1"
     os.environ["QT_ENABLE_HIGHDPI_SCALING"] = "1"
     os.environ["QT_SCALE_FACTOR_ROUNDING_POLICY"] = "PassThrough"
+    # 彻底封死 a_trade_calendar 启动时静默联网拉取导致的 10~16 秒主线程卡顿
+    os.environ["A_TRADE_CALENDAR_NO_UPDATE"] = "1"
+    # 统一终端编码为 UTF-8 避免 GBK 下 Emoji 报 UnicodeEncodeError
+    if "PYTHONIOENCODING" not in os.environ:
+        os.environ["PYTHONIOENCODING"] = "utf-8"
+
 
     font_logging_rules = (
         "qt.qpa.fonts.warning=false;"
