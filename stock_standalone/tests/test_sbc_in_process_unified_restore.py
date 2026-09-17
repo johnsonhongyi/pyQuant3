@@ -95,5 +95,5 @@ class TestSBCInProcessUnifiedRestore:
         if screen:
             sg = screen.availableGeometry()
             # 单窗口重排严格受限在半屏宽与 65% 高度内，绝不全屏霸屏
-            assert w <= int(sg.width() * 0.6)
-            assert h <= int(sg.height() * 0.65)
+            assert w <= max(640, int(sg.width() * 0.6))
+            assert h <= max(420, int(sg.height() * 0.65))

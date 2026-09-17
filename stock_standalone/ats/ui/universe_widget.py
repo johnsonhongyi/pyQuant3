@@ -190,6 +190,36 @@ class UniverseTreeWidget(QWidget):
         self.btn_run_sbc.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.btn_run_sbc.customContextMenuRequested.connect(self._popup_run_sbc_menu)
         header_layout.addWidget(self.btn_run_sbc)
+
+        # 🎯 新股次新超短检测工具独立启动器按钮
+        self.btn_run_ipo = QPushButton("🎯 次新")
+        self.btn_run_ipo.setStyleSheet("""
+            QPushButton {
+                background-color: #2b2210;
+                border: 1px solid #eab308;
+                border-radius: 4px;
+                color: #facc15;
+                font-weight: bold;
+                font-size: 8.5pt;
+                min-width: 44px;
+                max-width: 52px;
+                min-height: 23px;
+                max-height: 23px;
+                padding: 1px 3px;
+            }
+            QPushButton:hover {
+                background-color: #3d3016;
+                border-color: #fde047;
+                color: #ffffff;
+            }
+            QPushButton:pressed {
+                background-color: #1a1408;
+            }
+        """)
+        self.btn_run_ipo.setToolTip("🎯 调起新股次新股超短检测工具 (SBC 极限 10日 VWAP 预判与预下单)")
+        self.btn_run_ipo.clicked.connect(self._on_launch_ipo_detector_clicked)
+        header_layout.addWidget(self.btn_run_ipo)
+
         header_layout.addStretch()
         
         # --- 窗口位置手动快照（提供3个保存位置，全面持久化所有打开关联窗口，防多屏覆盖）---
@@ -815,6 +845,11 @@ class UniverseTreeWidget(QWidget):
         eval_action.triggered.connect(lambda: self._run_60f_channel_eval(code, name))
         menu.addAction(eval_action)
 
+        # 🎯 发送到新股次新超短检测工具 (VWAP预下单)
+        ipo_action = QAction(f"🎯 发送到新股次新超短检测工具 ({code})", self)
+        ipo_action.triggered.connect(lambda: self._send_to_ipo_detector(code, name))
+        menu.addAction(ipo_action)
+
         menu.addSeparator()
 
         # ⚡ 发送到异动联动
@@ -1183,4 +1218,29 @@ class UniverseTreeWidget(QWidget):
                         item.setData(col, Qt.ItemDataRole.BackgroundRole, None)
                     item.setForeground(0, QColor("#e2e2e5"))
                     item.setForeground(1, QColor("#e2e2e5"))
+
+    def _on_launch_ipo_detector_clicked(self):
+        """【🎯 新股次新超短】调起独立进程检测工具"""
+        try:
+            from ats.ui.ipo_detector_ipc import launch_ipo_detector_process, is_ipo_detector_alive
+            if not is_ipo_detector_alive():
+                launch_ipo_detector_process()
+                self._notify_status("🎯 [IPO超短] 已成功调起新股次新股超短检测独立工具。")
+            else:
+                self._notify_status("🎯 [IPO超短] 检测工具已在运行中。")
+        except Exception as e:
+            logger.error(f"[Universe] 调起超短检测工具异常: {e}")
+
+    def _send_to_ipo_detector(self, code: str, name: str = ""):
+        """【⚡ 一键发送】将选中标的发送到超短检测工具"""
+        try:
+            from ats.ui.ipo_detector_ipc import send_stock_to_ipo_detector
+            digits = "".join(filter(str.isdigit, str(code)))
+            if len(digits) >= 6:
+                clean_code = digits[:6]
+                send_stock_to_ipo_detector(clean_code, name)
+                self._notify_status(f"⚡ 已发送【{name} ({clean_code})】至新股次新超短检测工具！")
+        except Exception as e:
+            logger.error(f"[Universe] 发送标的至检测工具异常: {e}")
+
 

@@ -307,6 +307,14 @@ class BaseATSTableWidget(QTableWidget):
         sbc_action.triggered.connect(_open_sbc)
         menu.addAction(sbc_action)
 
+        # 🎯 发送到新股次新超短检测工具 (VWAP预下单)
+        ipo_action = QAction(f"🎯 发送到新股次新超短检测工具 ({code_clean})", self)
+        def _send_to_ipo_detector():
+            from ats.ui.ipo_detector_ipc import send_stock_to_ipo_detector
+            send_stock_to_ipo_detector(code_clean, name)
+        ipo_action.triggered.connect(_send_to_ipo_detector)
+        menu.addAction(ipo_action)
+
         # 🧬 调出 DNA 特征审计报告
         try:
             selected_pairs = self.get_selected_stock_pairs()

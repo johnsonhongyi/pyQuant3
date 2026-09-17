@@ -377,6 +377,16 @@ class NewStockPanel(QWidget):
         self.btn_open_sbc.clicked.connect(self._on_open_sbc_clicked)
         top_bar.addWidget(self.btn_open_sbc)
 
+        self.btn_open_ipo_detector = QPushButton("🎯 超短检测")
+        self.btn_open_ipo_detector.setToolTip("打开独立的新股次新股超短检测工具 (SBC 极限 10日 VWAP 预判与预下单)")
+        self.btn_open_ipo_detector.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_open_ipo_detector.setStyleSheet("""
+            QPushButton { background-color: #2e2410; color: #facc15; font-weight: bold; border: 1px solid #eab308; border-radius: 3px; padding: 2px 5px; font-size: 8.5pt; }
+            QPushButton:hover { background-color: #eab308; color: #000000; }
+        """)
+        self.btn_open_ipo_detector.clicked.connect(self._on_open_ipo_detector_clicked)
+        top_bar.addWidget(self.btn_open_ipo_detector)
+
         # 🎯 策略过滤持久化开关按钮
         self.btn_toggle_filter = QPushButton()
         self._update_filter_button_ui()
@@ -1932,6 +1942,15 @@ class NewStockPanel(QWidget):
         except Exception as e:
             QMessageBox.critical(self, "错误", f"调起 SBC 实盘窗口异常: {e}")
 
+    def _on_open_ipo_detector_clicked(self):
+        """调出新股次新股超短检测独立工具或发送当前选中标的"""
+        from ats.ui.ipo_detector_ipc import launch_ipo_detector_process, send_stock_to_ipo_detector, is_ipo_detector_alive
+        if self.selected_code:
+            send_stock_to_ipo_detector(self.selected_code, self.selected_name)
+        else:
+            if not is_ipo_detector_alive():
+                launch_ipo_detector_process()
+
     def _toggle_favorite(self):
         """右键菜单：切换重点关注 (极速响应与全系统 0ms 联动)"""
         if not self.selected_code:
@@ -1989,6 +2008,9 @@ class NewStockPanel(QWidget):
 
         act_sbc = menu.addAction(f"📈 调出 【{self.selected_name}】 SBC 实盘分时走势")
         act_sbc.triggered.connect(self._on_open_sbc_clicked)
+
+        act_ipo = menu.addAction(f"🎯 发送到新股次新超短检测工具 (VWAP预下单)")
+        act_ipo.triggered.connect(self._on_open_ipo_detector_clicked)
 
         menu.addSeparator()
 
