@@ -206,3 +206,60 @@ def update_detector_heartbeat(pid: int):
     data["heartbeat"] = time.time()
     data["detector_pid"] = pid
     _write_ipc_data(data)
+
+
+def save_ats_ipc_df(df) -> bool:
+    """
+    【⚡ IPC 快照共享】
+    由 ATS 主程序在刷新 current_df 时调用，将全市场高密 DataFrame 原子持久化至共享缓存。
+    新股次新超短检测工具等独立进程可 0ms 秒级读取，无需占用网络或复杂通信。
+    """
+    if df is None:
+        return False
+    try:
+        import pandas as pd
+        if not isinstance(df, pd.DataFrame) or df.empty:
+            return False
+        cfg_dir = os.path.join(get_app_root(), "config")
+        os.makedirs(cfg_dir, exist_ok=True)
+        target = os.path.join(cfg_dir, "ats_ipc_df.pkl")
+        tmp = target + ".tmp"
+        df.to_pickle(tmp)
+        if os.path.exists(tmp):
+            os.replace(tmp, target)
+            return True
+    except Exception as e:
+        logger.debug(f"保存 ATS IPC DF 快照异常: {e}")
+    return False
+
+
+_CACHED_ATS_IPC_DF = None
+_CACHED_ATS_IPC_MTIME = 0.0
+
+
+def get_ats_ipc_df():
+    """
+    【⚡ IPC 快照读取】
+    读取 ATS 共享的最新全市场 IPC DataFrame 快照 (基于 mtime 内存缓存，纳秒级读取)。
+    """
+    global _CACHED_ATS_IPC_DF, _CACHED_ATS_IPC_MTIME
+    try:
+        import pandas as pd
+        cfg_dir = os.path.join(get_app_root(), "config")
+        target = os.path.join(cfg_dir, "ats_ipc_df.pkl")
+        if os.path.exists(target):
+            mtime = os.path.getmtime(target)
+            # 若文件未修改且内存已有缓存，0ms 立即直出，绝不重复反序列化
+            if mtime == _CACHED_ATS_IPC_MTIME and _CACHED_ATS_IPC_DF is not None:
+                return _CACHED_ATS_IPC_DF
+            # 30 分钟内快照均可有效复用
+            if time.time() - mtime < 1800.0:
+                df = pd.read_pickle(target)
+                if df is not None and isinstance(df, pd.DataFrame) and not df.empty:
+                    _CACHED_ATS_IPC_DF = df
+                    _CACHED_ATS_IPC_MTIME = mtime
+                    return _CACHED_ATS_IPC_DF
+    except Exception as e:
+        logger.debug(f"读取 ATS IPC DF 快照异常: {e}")
+    return _CACHED_ATS_IPC_DF
+

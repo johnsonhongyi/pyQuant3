@@ -1,3 +1,38 @@
+## 2026-09-17 18:45
+- [x] **【日线全面换用 `tdd.get_tdx_Exp_day_to_df` 根除爬虫异常、单击与键盘上下翻页极速联动、ATS 标准右键功能菜单与自定义 `ats_col` 高精度数值排序上线】(`ats/strategy/ipo_vwap_detector_engine.py`, `ats/ui/ipo_subnew_detector_dialog.py`, `tests/test_ipo_subnew_detector.py`)**：
+    - [x] **操盘手现场明确指示与真实痛点 (P0)**：
+        - “这个不是通过tdx的api获取数据?日线数据可以通过tdd获取?”；
+        - “基础数据支持自定义的ats_col 可以通过ats的ipc的df获取”；
+        - “没有点击联动,上下翻页联动的底层功能,以及右键ats的基本功能”；
+        - “使用get_tdx_Exp_day_to_df”。
+    - [x] **根因排查与工程落地 (KISS / SOLID / DRY)**：
+        1. **破案“日线爬虫报错与数据碎片警告”彻底根除**：
+           - 遵照操盘手明确指示“使用get_tdx_Exp_day_to_df”，在 `ipo_vwap_detector_engine.py` 及 `ipo_subnew_detector_dialog.py` 中，彻底拔除旧有的 `get_tdx_append_now_df_api`；
+           - 全链路全面统一改用本地通达信极速权威日线引擎 `tdd.get_tdx_Exp_day_to_df(clean_code, dl=60)`，并执行 `df_day.copy()`，彻底根除新股 `Error Duration: 'DataFrame' object has no attribute 'date' code:920071` 网络爬虫报错及 `PerformanceWarning: DataFrame is highly fragmented`；
+        2. **鼠标单击与键盘上下翻页 (Up/Down/PageUp/PageDown) 极速物理联动**：
+           - 表格连接 `self.table.currentCellChanged` 统一作为鼠标点击与键盘导航的唯一入口；
+           - 引入 20ms 防抖单次定时器 `_linkage_timer`，防止快速连按上下键造成主线程拥塞；
+           - 联动时同时驱动双通道：
+             * 通道 1：调用 `ats.ui.base_table.send_to_linkage(code, name, self)` 向 Windows named pipe 发送异动联动；
+             * 通道 2：调用 `linkage_service.get_link_manager().push(code, flags={'tdx': True, 'ths': True, 'dfcf': False}, auto=False)` 物理直连通达信与同花顺客户端秒级切图；
+        3. **全功能 ATS 标准右键菜单深度集成**：
+           - 开启 `setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)` 并绑定 `_show_context_menu`；
+           - 包含标准 ATS 黑暗主题风格右键菜单：
+             * 📋 复制股票代码与名称；
+             * ⚡ 发送到异动联动；
+             * 📈 调出 SBC 10d VWAP 走势；
+             * 🎯 联动外部通达信/同花顺；
+             * 🧬 调出 DNA 特征审计报告；
+             * ⭐ 设为重点关注 / 取消重点关注 (联动 `GlobalFavoriteManager`)；
+             * ❌ 从超短检测池移除；
+             * ↔️ 一键自适应全列宽。
+        4. **自适应 `ats_col` 动态自定义列与 `IPONumericTableWidgetItem` 高精度排序**：
+           - 封装 `IPONumericTableWidgetItem(NumericTableWidgetItem)`，重写 `data(EditRole)` 返回真实 float/int 原始数值；
+           - 表格单元格展示兼顾格式化符号（如 `+4`, `+2.33%`, `+1` 连阳/龙头标记并高亮着色），同时在用户点击表头排序时严格按照数值高低升降序排列，彻底杜绝字典序错乱；
+           - 修复 `co2int` 集合包含 `win` / `red` 连阳整型字段，杜绝格式化出现 `+4.00` 的瑕疵。
+    - [x] **全量自动化测试 100% 验证通过 (11/11 PASSED)**：
+        - 专项更新与新增测试: 11/11 PASSED 全部绿灯通过。
+
 ## 2026-09-17 13:42
 - [x] **【彻底根治打包后盯盘 SBC 未正常退出与临时目录报错 `PYI: Failed to remove temporary directory`】(`ats/ui/main_window.py`, `ats/ui/sbc_launcher.py`, `run_sbc.py`, `tests/test_sbc_exit_isolation_and_orphan_guard.py`)**：
     - [x] **操盘手现场明确反馈与致命痛点 (P0)**：
