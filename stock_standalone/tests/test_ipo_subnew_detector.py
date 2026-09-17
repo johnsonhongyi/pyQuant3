@@ -254,7 +254,7 @@ class TestIPOSubnewDetector(unittest.TestCase):
             {"code": "001365", "win": 1, "dff": -0.5, "ch_bc2": 0}
         ]).set_index("code")
 
-        ok = save_ats_ipc_df(test_df)
+        ok = save_ats_ipc_df(test_df, force=True)
         self.assertTrue(ok)
 
         loaded_df = get_ats_ipc_df()
@@ -262,6 +262,17 @@ class TestIPOSubnewDetector(unittest.TestCase):
         self.assertIn("301683", loaded_df.index)
         self.assertEqual(loaded_df.loc["301683", "win"], 3)
         self.assertEqual(loaded_df.loc["301683", "dff"], 1.85)
+
+        # 验证收盘后数据无变动时安全跳过写盘
+        ok_dup = save_ats_ipc_df(test_df, force=False)
+        self.assertTrue(ok_dup)
+
+        # 验证盘中未满 30 分钟集中更新节流拦截
+        with patch("ats.ui.ipo_detector_ipc.datetime") as mock_dt:
+            from datetime import datetime as real_dt
+            mock_dt.now.return_value = real_dt(2026, 9, 17, 10, 0, 0)
+            ok_throttle = save_ats_ipc_df(test_df, force=False, min_interval=1800.0)
+            self.assertFalse(ok_throttle)
 
     def test_dialog_ats_col_dynamic_rendering(self):
         """【测试】验证 IPOSubnewDetectorDialog 从 IPC df 提取自定义 ats_col 并在表格中精准渲染"""
@@ -420,7 +431,113 @@ class TestIPOSubnewDetector(unittest.TestCase):
             # 验证产生了整批 batch_analyzed 信号
             self.assertTrue(len(received_batches) > 0)
 
+    def test_navigation_keys_and_deduplicated_linkage(self):
+        """【测试】验证上下翻页/PageUp/PageDown与鼠标单击统一入口及防重联动机制"""
+        from PyQt6.QtWidgets import QApplication
+        from PyQt6.QtCore import Qt
+        from PyQt6.QtGui import QKeyEvent
+        app = QApplication.instance() or QApplication(sys.argv)
+
+        from ats.ui.ipo_subnew_detector_dialog import IPOSubnewDetectorDialog
+        with patch("ats.ui.ipo_subnew_detector_dialog.IPOScanWorker"):
+            dlg = IPOSubnewDetectorDialog(initial_code="001365")
+            dlg.add_stock("688826")
+            dlg.add_stock("301677")
+
+            # 模拟联动拦截
+            linkage_calls = []
+            dlg._broadcast_link_external = lambda code: linkage_calls.append(code)
+
+            # 1. 选中第 0 行，触发联动 (最新置顶的 301677)
+            dlg._trigger_linkage_for_row(0)
+            dlg._fire_linkage_debounced()
+            self.assertEqual(len(linkage_calls), 1)
+            self.assertEqual(linkage_calls[0], "301677")
+
+            # 2. 防重测试：再次针对第 0 行或同代码触发，必须被四重防重机制拦截！
+            dlg._trigger_linkage_for_row(0)
+            dlg._fire_linkage_debounced()
+            self.assertEqual(len(linkage_calls), 1)  # 严格保持 1，无重复联动
+
+            # 3. 键盘 Down 导航到第 1 行 (688826)
+            dlg._handle_navigation_key(Qt.Key.Key_Down)
+            dlg._fire_linkage_debounced()
+            self.assertEqual(len(linkage_calls), 2)
+            self.assertEqual(linkage_calls[1], "688826")
+
+            # 4. 键盘 PageDown 导航 (翻动一页)
+            dlg._handle_navigation_key(Qt.Key.Key_PageDown)
+            dlg._fire_linkage_debounced()
+            pagedown_row = dlg.table.currentRow()
+            expected_pagedown_code = dlg.table.item(pagedown_row, 0).text().strip()
+            self.assertEqual(len(linkage_calls), 3)
+            self.assertEqual(linkage_calls[2], expected_pagedown_code)
+
+            # 5. 键盘 Up 导航回到上一行
+            dlg._handle_navigation_key(Qt.Key.Key_Up)
+            dlg._fire_linkage_debounced()
+            up_row = dlg.table.currentRow()
+            expected_up_code = dlg.table.item(up_row, 0).text().strip()
+            self.assertEqual(len(linkage_calls), 4)
+            self.assertEqual(linkage_calls[3], expected_up_code)
+            self.assertEqual(up_row, pagedown_row - 1)
+
+            dlg.close()
+
+    def test_tdx_global_cache_pool_ramdisk_persistence(self):
+        """【测试】验证 TDXGlobalCachePool 极限压缩原子持久化与跨进程自动重载"""
+        from ats.tdx_realtime_fetcher import TDXGlobalCachePool
+
+        pool1 = TDXGlobalCachePool()
+        test_code = "001365"
+        mock_records = [
+            {"datetime": "2026-09-17 09:30", "open": 30.0, "high": 31.0, "low": 29.5, "close": 30.5, "vol": 1000, "amount": 30500.0}
+        ]
+        pool1.set_static_history_bars(test_code, 10, mock_records, 500000.0, 15000000.0)
+
+        # 强制原子落盘
+        saved = pool1.flush_to_ramdisk(force=True)
+        self.assertTrue(saved)
+        self.assertTrue(os.path.exists(pool1._ramdisk_path))
+
+        # 模拟另一个独立进程初始化载入
+        pool2 = TDXGlobalCachePool()
+        entry = pool2.get_static_history_bars(test_code, 10)
+        self.assertIsNotNone(entry)
+        self.assertEqual(entry["days"], 10)
+        self.assertEqual(entry["last_cum_vol"], 500000.0)
+        self.assertEqual(entry["last_cum_amt"], 15000000.0)
+        self.assertEqual(len(entry["records"]), 1)
+
+    def test_unlisted_stocks_filter_and_periodic_flush_control(self):
+        """【测试】验证未上市股票拦截、flush_if_due 5-10分钟统一持久化与控制台日志"""
+        from ats.ui.ipo_subnew_detector_dialog import is_stock_actually_listed, IPOSubnewDetectorDialog
+        from ats.tdx_realtime_fetcher import TDXGlobalCachePool
+
+        # 1. 验证未上市股票 100% 拦截
+        unlisted_samples = ["301686", "920201", "301716", "920229", "001246", "920025", "301660", "920202", "301569", "920295"]
+        for u in unlisted_samples:
+            self.assertFalse(is_stock_actually_listed(u), f"股票 {u} 未上市却未被拦截！")
+
+        # 2. 验证已上市股票正常放行
+        self.assertTrue(is_stock_actually_listed("001365"))
+
+        # 3. 验证 flush_if_due 集中持久化保护机制 (默认5分钟内不重复写盘)
+        pool = TDXGlobalCachePool.get_instance()
+        pool.set_static_history_bars("600733", 10, [], 100.0, 1000.0)
+        # 刚刚写入，未满 300 秒，flush_if_due 必须返回 False
+        res1 = pool.flush_if_due(interval=300.0)
+        self.assertFalse(res1)
+
+        # 满足时间间隔时 (设置 interval=0.0)，才执行集中落盘
+        res2 = pool.flush_if_due(interval=0.0)
+        self.assertTrue(res2)
+        # 落盘后已无 dirty 数据，再次调用返回 False
+        res3 = pool.flush_if_due(interval=0.0)
+        self.assertFalse(res3)
+
 
 if __name__ == "__main__":
     unittest.main()
+
 
