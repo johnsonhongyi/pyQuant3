@@ -280,6 +280,12 @@ class SBCChartCanvas(QWidget):
     - 🔄 支持鼠标右键一键重置回 100% 全景视图；
     - 🎯 通达信自动通道严格截止于最高价/最低价波段起点，杜绝左上角冗长斜线。
     """
+    # 📐 极致高屏占比四周紧凑边距 (消除巨幅黑边，走势图饱满撑满窗口)
+    MARGIN_LEFT = 42
+    MARGIN_RIGHT = 52
+    MARGIN_TOP = 18
+    MARGIN_BOTTOM = 22
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.df_intraday = pd.DataFrame()
@@ -667,8 +673,8 @@ class SBCChartCanvas(QWidget):
         if delta_y == 0:
             return
 
-        margin_left = 55
-        margin_right = 75
+        margin_left = self.MARGIN_LEFT
+        margin_right = self.MARGIN_RIGHT
         chart_w = max(10, self.width() - margin_left - margin_right)
         mouse_pos = event.position() if hasattr(event, "position") else event.pos()
         mouse_x = mouse_pos.x()
@@ -788,8 +794,8 @@ class SBCChartCanvas(QWidget):
                 orig_end = total_n - 1
 
             cur_count = orig_end - orig_start + 1
-            margin_left = 55
-            margin_right = 75
+            margin_left = self.MARGIN_LEFT
+            margin_right = self.MARGIN_RIGHT
             chart_w = max(10, self.width() - margin_left - margin_right)
             bar_px = max(1.0, chart_w / max(1, cur_count))
             shift_bars = int(round(dx / bar_px))
@@ -816,8 +822,8 @@ class SBCChartCanvas(QWidget):
                         orig_end = total_n - 1
 
                     cur_count = orig_end - orig_start + 1
-                    margin_left = 55
-                    margin_right = 75
+                    margin_left = self.MARGIN_LEFT
+                    margin_right = self.MARGIN_RIGHT
                     chart_w = max(10, self.width() - margin_left - margin_right)
                     bar_px = max(1.0, chart_w / max(1, cur_count))
                     shift_bars = int(round(dx / bar_px))
@@ -875,8 +881,8 @@ class SBCChartCanvas(QWidget):
         elif event.button() == Qt.MouseButton.LeftButton:
             if self._is_box_zooming and self._box_zoom_origin and self._box_zoom_current and self.df_intraday is not None and not self.df_intraday.empty:
                 # 结算框选放大区域
-                margin_left = 55
-                margin_right = 75
+                margin_left = self.MARGIN_LEFT
+                margin_right = self.MARGIN_RIGHT
                 chart_w = max(10, self.width() - margin_left - margin_right)
 
                 x1 = min(self._box_zoom_origin.x(), self._box_zoom_current.x())
@@ -963,10 +969,10 @@ class SBCChartCanvas(QWidget):
 
             painter.fillRect(0, 0, w, h, QColor("#0c0d14"))
 
-            margin_left = 55
-            margin_right = 75
-            margin_top = 30
-            margin_bottom = 30
+            margin_left = self.MARGIN_LEFT
+            margin_right = self.MARGIN_RIGHT
+            margin_top = self.MARGIN_TOP
+            margin_bottom = self.MARGIN_BOTTOM
 
             chart_w = w - margin_left - margin_right
             chart_h = h - margin_top - margin_bottom
@@ -1045,7 +1051,7 @@ class SBCChartCanvas(QWidget):
                     painter.drawLine(int(hx), int(mt), int(hx), int(mt + mh))
 
                     # ② 右侧 Y 轴动态价格高亮胶囊 (醒目青底白字)
-                    tag_w = 58
+                    tag_w = 48
                     tag_h = 18
                     tag_y = max(mt, min(mt + mh - tag_h, int(hy - tag_h / 2)))
                     painter.setPen(QPen(QColor("#00E5FF"), 1.2))
@@ -2646,6 +2652,196 @@ def _is_ats_shutting_down() -> bool:
     return False
 
 
+class SBCWindowMemoryManager:
+    """
+    【⚡ SBC 窗口全内存持久化注册中心】
+    彻底淘汰在主线程频繁遍历 topLevelWidgets() 与 win32 EnumWindows 的慢速全局扫描，
+    实现 0 毫秒内存索引与瞬间直达：
+    1. 窗口创建/打开时立即注册到内存字典；
+    2. 窗口关闭时立即从内存注销并自动更新内存元数据；
+    3. 标的代码/周期/位置变更时立即秒级同步内存数据；
+    4. 彻底脱离主流程同步磁盘写盘，所有落盘均由 350ms 防抖定时器异步完成；
+    5. Alt+周期切换与 Q 键重排直接从内存字典毫秒级抓取存活窗口对象。
+    """
+    _instance: Optional["SBCWindowMemoryManager"] = None
+
+    def __init__(self):
+        self._dialogs: Dict[str, Any] = {}          # code -> SBCIntradayChartDialog
+        self._metadata: Dict[str, dict] = {}        # code -> {"code": ..., "x": ..., "y": ..., "width": ..., "height": ..., "period_mode": ...}
+        self._debounce_timer: Optional[QTimer] = None
+
+    @classmethod
+    def get_instance(cls) -> "SBCWindowMemoryManager":
+        if cls._instance is None:
+            cls._instance = SBCWindowMemoryManager()
+        return cls._instance
+
+    def clear(self):
+        """清空内存注册中心"""
+        self._dialogs.clear()
+        self._metadata.clear()
+
+    def register(self, code_or_dlg: Any, geo_dict: Optional[dict] = None, period_mode: Optional[str] = None):
+        """注册窗口对象或代码元数据至内存注册中心"""
+        if not code_or_dlg:
+            return
+        if isinstance(code_or_dlg, str):
+            c_clean = "".join(filter(str.isdigit, str(code_or_dlg))).zfill(6)
+            if not c_clean or c_clean == "000000":
+                return
+            entry = dict(geo_dict) if isinstance(geo_dict, dict) else {}
+            entry["code"] = c_clean
+            if "x" not in entry: entry["x"] = 100
+            if "y" not in entry: entry["y"] = 100
+            if "width" not in entry: entry["width"] = 680
+            if "height" not in entry: entry["height"] = 420
+            if period_mode:
+                entry["period_mode"] = period_mode
+            elif "period_mode" not in entry:
+                entry["period_mode"] = "10d" if os.environ.get("SBC_IS_HOLDINGS_LAUNCHER") == "1" else "1m"
+            self._metadata[c_clean] = entry
+            return
+
+        dlg = code_or_dlg
+        code = getattr(dlg, "code", "")
+        if not code:
+            return
+        c_clean = "".join(filter(str.isdigit, str(code))).zfill(6)
+        if not c_clean or c_clean == "000000":
+            return
+        self._dialogs[c_clean] = dlg
+        geo = getattr(dlg, "normal_geometry", None) if (getattr(dlg, "is_hidden_state", False) and getattr(dlg, "normal_geometry", None)) else (getattr(dlg, "normal_geometry", None) or dlg.geometry())
+        period = period_mode or getattr(dlg, "_current_period_mode", "10d" if os.environ.get("SBC_IS_HOLDINGS_LAUNCHER") == "1" else "1m")
+        entry = dict(geo_dict) if isinstance(geo_dict, dict) else {}
+        entry["code"] = c_clean
+        entry["x"] = entry.get("x", geo.x() if geo else 100)
+        entry["y"] = entry.get("y", geo.y() if geo else 100)
+        entry["width"] = entry.get("width", geo.width() if geo else 680)
+        entry["height"] = entry.get("height", geo.height() if geo else 420)
+        entry["period_mode"] = period
+        self._metadata[c_clean] = entry
+
+    def get_window(self, code: str) -> Optional[dict]:
+        """获取指定代码的内存元数据"""
+        c_clean = "".join(filter(str.isdigit, str(code))).zfill(6)
+        return self._metadata.get(c_clean)
+
+    def get_all_windows(self) -> List[dict]:
+        """获取当前内存中记录的全部窗口元数据"""
+        return list(self._metadata.values())
+
+    def unregister(self, code_or_dlg: Any):
+        code = code_or_dlg if isinstance(code_or_dlg, str) else getattr(code_or_dlg, "code", "")
+        if not code:
+            return
+        c_clean = "".join(filter(str.isdigit, str(code))).zfill(6)
+        self._dialogs.pop(c_clean, None)
+        self._metadata.pop(c_clean, None)
+
+    def update_code(self, old_code: str, new_code: str, dlg: Any):
+        self.unregister(old_code)
+        self.register(dlg)
+
+    def update_period(self, code: str, period_mode: str):
+        c_clean = "".join(filter(str.isdigit, str(code))).zfill(6)
+        if c_clean in self._metadata:
+            self._metadata[c_clean]["period_mode"] = period_mode
+
+    def update_geometry(self, code: str, geo_dict: dict):
+        c_clean = "".join(filter(str.isdigit, str(code))).zfill(6)
+        if c_clean in self._metadata and isinstance(geo_dict, dict):
+            self._metadata[c_clean].update(geo_dict)
+        elif isinstance(geo_dict, dict):
+            entry = dict(geo_dict)
+            entry["code"] = c_clean
+            self._metadata[c_clean] = entry
+
+    def get_active_dialogs(self) -> List[Any]:
+        """0 毫秒直接从内存注册中心提取存活有效的窗口列表"""
+        try:
+            from PyQt6.sip import isdeleted
+        except ImportError:
+            isdeleted = lambda x: False
+        active = []
+        dead_codes = []
+        for c, dlg in list(self._dialogs.items()):
+            try:
+                if dlg is None or isdeleted(dlg) or getattr(dlg, "_is_closing", False):
+                    dead_codes.append(c)
+                elif dlg.isVisible() or getattr(dlg, "is_hidden_state", False):
+                    active.append(dlg)
+            except Exception:
+                dead_codes.append(c)
+        for dc in dead_codes:
+            self._dialogs.pop(dc, None)
+            self._metadata.pop(dc, None)
+        return active
+
+    def find_by_code(self, code: str) -> Optional[Any]:
+        """0 毫秒从内存注册中心通过代码精准检索"""
+        if not code:
+            return None
+        c_clean = "".join(filter(str.isdigit, str(code))).zfill(6)
+        dlg = self._dialogs.get(c_clean)
+        if dlg is not None:
+            try:
+                from PyQt6.sip import isdeleted
+                if not isdeleted(dlg) and not getattr(dlg, "_is_closing", False):
+                    return dlg
+            except Exception:
+                pass
+            self._dialogs.pop(c_clean, None)
+            self._metadata.pop(c_clean, None)
+        return None
+
+    def trigger_debounced_save(self, delay_ms: int = 350):
+        """【💾 异步防抖物理落盘】主线程零阻塞，在空闲时批量原子写盘一次"""
+        from PyQt6.QtCore import QTimer
+        if self._debounce_timer is None:
+            self._debounce_timer = QTimer()
+            self._debounce_timer.setSingleShot(True)
+            self._debounce_timer.timeout.connect(self._flush_metadata_to_disk)
+        self._debounce_timer.start(delay_ms)
+
+    def _flush_metadata_to_disk(self):
+        """物理写盘实现"""
+        try:
+            cfg_path = _get_sbc_layout_cfg_path()
+            active_list = []
+            for c, meta in list(self._metadata.items()):
+                active_list.append(dict(meta))
+            if not active_list and not os.path.exists(cfg_path):
+                return
+            data = {}
+            if os.path.exists(cfg_path):
+                try:
+                    with open(cfg_path, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                except Exception:
+                    data = {}
+            data["sbc_open_windows"] = active_list
+            data["sbc_holdings_windows"] = active_list
+            if active_list:
+                data["initialized"] = True
+                last_meta = active_list[-1]
+                data["sbc_window_size"] = {"width": last_meta.get("width", 680), "height": last_meta.get("height", 420)}
+                data["sbc_window_geometry"] = {"x": last_meta.get("x", 100), "y": last_meta.get("y", 100), "width": last_meta.get("width", 680), "height": last_meta.get("height", 420)}
+            
+            tmp_path = cfg_path + f".tmp_mem_{os.getpid()}"
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            try:
+                if os.path.exists(cfg_path):
+                    os.replace(tmp_path, cfg_path)
+                else:
+                    os.rename(tmp_path, cfg_path)
+            except Exception:
+                import shutil
+                shutil.move(tmp_path, cfg_path)
+        except Exception as e:
+            logger.debug(f"[SBCMemoryManager] 异步刷盘提示: {e}")
+
+
 class SBCIntradayChartDialog(QWidget):
     """
     SBC 实盘分时走势与关键阶梯基准图 彻底独立实时观察窗口 (100% 非模态、非置顶、自由层级覆盖与多屏拉伸)
@@ -3012,6 +3208,12 @@ class SBCIntradayChartDialog(QWidget):
         except Exception:
             pass
 
+        # 10. 注册到全局 SBC 窗口内存持久化注册中心 (0 毫秒索引与瞬间直达)
+        try:
+            SBCWindowMemoryManager.get_instance().register(self)
+        except Exception:
+            pass
+
     def _on_poll_timer_tick(self):
         """定时器心跳周期检查与刷新：窗口隐藏或非交易期自动抑制"""
         if not self.isVisible():
@@ -3021,7 +3223,7 @@ class SBCIntradayChartDialog(QWidget):
         self.reload_chart(is_timer_tick=True)
 
     def _get_max_allowed_sbc_size(self) -> Tuple[int, int]:
-        """获取 SBC 窗口最大允许尺寸规格 (不得超过屏幕可用宽高的 2/3)"""
+        """获取 SBC 窗口最大允许尺寸规格 (严格限制不得超过屏幕可用宽高的 2/3，防止全屏霸屏遮挡 ATS)"""
         try:
             screen = self.screen() or QApplication.primaryScreen()
             if screen:
@@ -3034,19 +3236,18 @@ class SBCIntradayChartDialog(QWidget):
         return 1280, 720
 
     def _get_effective_normal_geometry(self) -> Optional[dict]:
-        """获取有效的正常窗口尺寸与坐标 (最大化状态下严格提取恢复尺寸 _unmaximized_size，绝不记忆最大化全屏或2/3截断尺寸)"""
+        """获取有效的正常窗口尺寸与坐标 (最大化状态下严格提取恢复尺寸 _unmaximized_size，绝不记忆最大化全屏或截断尺寸)"""
         if self.isMinimized() or getattr(self, "_in_snap_action", False):
             return None
 
         if self.isMaximized() or self.isFullScreen():
-            # 💡 最大化或全屏状态下，严格提取未最大化前的真实尺寸 _unmaximized_size，绝不使用全屏或 2/3 截断尺寸！
+            # 💡 最大化或全屏状态下，严格提取未最大化前的真实尺寸 _unmaximized_size
             uw, uh = 680, 420
             if hasattr(self, "_unmaximized_size") and isinstance(self._unmaximized_size, (tuple, list)):
                 uw, uh = self._unmaximized_size
             elif SBCIntradayChartDialog._global_sbc_size:
                 gw, gh = SBCIntradayChartDialog._global_sbc_size
-                if gw < 1000 and gh < 650:
-                    uw, uh = gw, gh
+                uw, uh = gw, gh
             
             # 位置提取 normalGeometry 或 100, 100
             nx, ny = 100, 100
@@ -3056,11 +3257,12 @@ class SBCIntradayChartDialog(QWidget):
                     nx, ny = ng.x(), ng.y()
             except Exception:
                 pass
+            max_w, max_h = self._get_max_allowed_sbc_size()
             return {
                 "x": nx,
                 "y": ny,
-                "width": max(320, min(uw, 900)),
-                "height": max(180, min(uh, 600))
+                "width": max(320, min(uw, max_w)),
+                "height": max(180, min(uh, max_h))
             }
 
         elif getattr(self, 'is_hidden_state', False) and getattr(self, 'normal_geometry', None):
@@ -3092,10 +3294,17 @@ class SBCIntradayChartDialog(QWidget):
             return
 
         self._memory_geo_dict = geo_dict
-        if geo_dict["width"] < 1000 and geo_dict["height"] < 650:
+        max_w, max_h = self._get_max_allowed_sbc_size()
+        if geo_dict["width"] <= max_w and geo_dict["height"] <= max_h:
             SBCIntradayChartDialog._global_sbc_size = (geo_dict["width"], geo_dict["height"])
             self._unmaximized_size = (geo_dict["width"], geo_dict["height"])
         SBCIntradayChartDialog._global_sbc_geo = dict(self._memory_geo_dict)
+
+        # 0 毫秒同步更新内存注册中心元数据
+        try:
+            SBCWindowMemoryManager.get_instance().update_geometry(self.code, geo_dict)
+        except Exception:
+            pass
 
         if hasattr(self, '_geo_save_timer'):
             self._geo_save_timer.start(350)
@@ -3115,6 +3324,11 @@ class SBCIntradayChartDialog(QWidget):
             mode_clean = "1m"
 
         self._current_period_mode = mode_clean
+        # 0 毫秒同步更新内存注册中心周期
+        try:
+            SBCWindowMemoryManager.get_instance().update_period(self.code, mode_clean)
+        except Exception:
+            pass
 
         # 同步更新顶部按钮组的 checked 高亮状态并使当前按钮获得焦点
         if hasattr(self, 'btn_group_period') and self.btn_group_period:
@@ -3559,6 +3773,10 @@ class SBCIntradayChartDialog(QWidget):
     def showEvent(self, event):
         """SBC 窗口打开展示事件：恢复后台定时器，默认将焦点赋予当前显示的周期按钮上"""
         super().showEvent(event)
+        try:
+            SBCWindowMemoryManager.get_instance().register(self)
+        except Exception:
+            pass
         if hasattr(self, 'poll_timer') and self.poll_timer and not self.poll_timer.isActive():
             self.poll_timer.start()
         if hasattr(self, 'hover_timer') and self.hover_timer and not self.hover_timer.isActive():
@@ -3630,6 +3848,12 @@ class SBCIntradayChartDialog(QWidget):
         if hasattr(SBCIntradayChartDialog, '_global_sbc_dialogs') and isinstance(SBCIntradayChartDialog._global_sbc_dialogs, dict):
             SBCIntradayChartDialog._global_sbc_dialogs.pop(c_clean, None)
 
+        # 0 毫秒从 SBC 全局内存持久化注册中心注销除名
+        try:
+            SBCWindowMemoryManager.get_instance().unregister(self)
+        except Exception:
+            pass
+
         is_app_exiting = False
         app_inst = QApplication.instance()
         if app_inst and app_inst.property("is_app_exiting"):
@@ -3676,8 +3900,7 @@ class SBCIntradayChartDialog(QWidget):
         w, h = self.width(), self.height()
         if w >= 320 and h >= 180:
             max_w, max_h = self._get_max_allowed_sbc_size()
-            # 严格保护：若尺寸过大（例如超过屏幕宽度的 60%），防止是最大化过渡中的假事件
-            if w <= int(max_w * 0.9) and h <= int(max_h * 0.9):
+            if w <= max_w and h <= max_h:
                 self._unmaximized_size = (w, h)
                 if self.anchor_edge:
                     self.anchor_edge = None
@@ -4236,8 +4459,7 @@ class SBCIntradayChartDialog(QWidget):
 
         modifiers = QApplication.keyboardModifiers()
         if bool(modifiers & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier)):
-            count = sync_all_open_sbc_period(mode)
-            self.set_period_mode(mode, reload=True, save=True)
+            count = sync_all_open_sbc_period(mode, trigger_dlg=self)
             self.lbl_info.setText(f"🌐 [批量同步] 已将全部 {count} 个已打开 SBC 窗口的周期批量同步切换至 [{mode.upper()}]！")
             return
 
@@ -4339,6 +4561,12 @@ class SBCIntradayChartDialog(QWidget):
             if old_code and old_code in sbc_dict and sbc_dict[old_code] is self:
                 sbc_dict.pop(old_code, None)
             sbc_dict[c_clean] = self
+        except Exception:
+            pass
+
+        # 0 毫秒更新 SBC 全局内存持久化注册中心 (瞬间直达)
+        try:
+            SBCWindowMemoryManager.get_instance().update_code(old_code, c_clean, self)
         except Exception:
             pass
 
@@ -4782,7 +5010,7 @@ class SBCIntradayChartDialog(QWidget):
 
 def find_existing_sbc_window_by_code(code: str) -> Optional[SBCIntradayChartDialog]:
     """【🔍 查找指定标的已打开的 SBC 窗口】
-    遍历 QApplication 所有顶层窗口与全局字典，精准定位当前正在显示该代码的存活 SBC 窗口。
+    优先 0 毫秒从 SBCWindowMemoryManager 内存持久化中心 O(1) 检索，彻底淘汰 topLevelWidgets 全局扫描！
     """
     if not code:
         return None
@@ -4790,32 +5018,37 @@ def find_existing_sbc_window_by_code(code: str) -> Optional[SBCIntradayChartDial
     if not c_clean or c_clean == "000000":
         return None
 
-    try:
-        from PyQt6.QtWidgets import QApplication
-        from PyQt6.sip import isdeleted
-    except ImportError:
-        return None
-
-    # 1. 优先遍历当前进程内所有已存在的顶级窗口
-    for w in QApplication.topLevelWidgets():
-        if isinstance(w, SBCIntradayChartDialog):
-            try:
-                if not isdeleted(w) and not getattr(w, '_is_closing', False):
-                    w_code = "".join(filter(str.isdigit, str(getattr(w, 'code', '')))).zfill(6)
-                    if w_code == c_clean:
-                        return w
-            except Exception:
-                continue
+    # 1. 优先 0 毫秒从内存注册中心高速检索 (O(1))
+    mgr = SBCWindowMemoryManager.get_instance()
+    dlg = mgr.find_by_code(c_clean)
+    if dlg is not None:
+        return dlg
 
     # 2. 从全局字典兜底排查
     global_dict = getattr(SBCIntradayChartDialog, '_global_sbc_dialogs', {})
     if c_clean in global_dict:
         dlg = global_dict[c_clean]
         try:
+            from PyQt6.sip import isdeleted
             if dlg and not isdeleted(dlg) and not getattr(dlg, '_is_closing', False):
+                mgr.register(dlg)
                 return dlg
         except Exception:
             pass
+
+    # 3. 极端兜底遍历顶级窗口并回写到内存注册中心
+    try:
+        from PyQt6.QtWidgets import QApplication
+        from PyQt6.sip import isdeleted
+        for w in QApplication.topLevelWidgets():
+            if isinstance(w, SBCIntradayChartDialog):
+                if not isdeleted(w) and not getattr(w, '_is_closing', False):
+                    w_code = "".join(filter(str.isdigit, str(getattr(w, 'code', '')))).zfill(6)
+                    mgr.register(w)
+                    if w_code == c_clean:
+                        return w
+    except Exception:
+        pass
 
     return None
 
@@ -4867,12 +5100,14 @@ def activate_and_raise_sbc_window(dlg: SBCIntradayChartDialog, period_mode: Opti
     return dlg
 
 
-def sync_all_open_sbc_period(target_mode: str) -> int:
-    """【⚡ 全局同步所有已打开 SBC 窗口的看盘周期】
+def sync_all_open_sbc_period(target_mode: str, trigger_dlg: Optional[SBCIntradayChartDialog] = None) -> int:
+    """【⚡ 全局同步所有已打开 SBC 窗口的看盘周期 (内存持久化 + 错峰直达)】
     当操盘手按住 Alt 点击任意周期按钮时调用：
-    1. 遍历当前进程内所有已打开且存活的 SBCIntradayChartDialog 窗口，统一调用 set_period_mode；
-    2. 同步更新持久化 JSON 配置文件 (sbc_open_windows / sbc_holdings_windows / sbc_period_modes)；
-    3. 返回成功同步的窗口总数。
+    1. 0 毫秒从 SBCWindowMemoryManager 内存持久化中心读取所有存活窗口；
+    2. 0 毫秒立即同步更新所有窗口的内存周期元数据与顶部按钮高亮选中状态；
+    3. 操作当前窗口原地立即刷新 (操盘手眼前瞬间直达！)；
+    4. 其余背景窗口采用 QTimer 错峰分帧加载 (每隔 35ms 刷新一个)，消除主线程多窗口并发拉取卡死；
+    5. 磁盘落盘脱离主路径，交由 350ms 防抖定时器异步完成。
     """
     if not isinstance(target_mode, str):
         target_mode = "1m"
@@ -4880,53 +5115,57 @@ def sync_all_open_sbc_period(target_mode: str) -> int:
     if mode_clean not in VALID_SBC_PERIODS:
         mode_clean = "1m"
 
-    count = 0
-    try:
-        from PyQt6.QtWidgets import QApplication
-        from PyQt6.sip import isdeleted
-        for w in QApplication.topLevelWidgets():
-            if isinstance(w, SBCIntradayChartDialog):
-                try:
-                    if not isdeleted(w) and not getattr(w, '_is_closing', False):
-                        if w.isVisible() or getattr(w, 'is_hidden_state', False):
-                            w.set_period_mode(mode_clean, reload=True, save=True)
-                            count += 1
-                except Exception:
-                    pass
-    except Exception as e:
-        logger.debug(f"同步 SBC 周期异常: {e}")
+    mgr = SBCWindowMemoryManager.get_instance()
+    active_dialogs = mgr.get_active_dialogs()
+    if not active_dialogs:
+        # 兜底补充一次
+        try:
+            from PyQt6.QtWidgets import QApplication
+            from PyQt6.sip import isdeleted
+            for w in QApplication.topLevelWidgets():
+                if isinstance(w, SBCIntradayChartDialog) and not isdeleted(w) and not getattr(w, '_is_closing', False):
+                    mgr.register(w)
+                    if w not in active_dialogs:
+                        active_dialogs.append(w)
+        except Exception:
+            pass
 
-    # 同步更新配置文件，使下次恢复时所有窗口周期也保持一致
+    count = len(active_dialogs)
+    if count == 0:
+        return 0
+
+    # 1. 0 毫秒立即同步内存元数据与顶部 UI 按钮状态
+    for w in active_dialogs:
+        try:
+            w._current_period_mode = mode_clean
+            mgr.update_period(getattr(w, "code", ""), mode_clean)
+            if hasattr(w, "btn_group_period") and w.btn_group_period:
+                for btn in w.btn_group_period.buttons():
+                    btn_mode = (btn.property("period_mode") or "").strip().lower()
+                    is_match = (btn_mode == mode_clean)
+                    btn.setChecked(is_match)
+                    if is_match and (w is trigger_dlg or w.isActiveWindow()):
+                        btn.setFocus()
+        except Exception:
+            pass
+
+    # 2. 当前窗口瞬间重载走势图 (眼前直达)
+    current_focus_win = trigger_dlg or next((w for w in active_dialogs if w.isActiveWindow()), active_dialogs[0])
     try:
-        cfg_path = _get_sbc_layout_cfg_path()
-        if os.path.exists(cfg_path):
-            with open(cfg_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            modified = False
-            for k in ("sbc_open_windows", "sbc_holdings_windows"):
-                if k in data and isinstance(data[k], list):
-                    for item in data[k]:
-                        if isinstance(item, dict):
-                            item["period_mode"] = mode_clean
-                            modified = True
-            if "sbc_period_modes" not in data:
-                data["sbc_period_modes"] = {}
-            data["sbc_period_modes"]["latest"] = mode_clean
-            modified = True
-            if modified:
-                tmp_path = cfg_path + f".tmp_{os.getpid()}"
-                with open(tmp_path, "w", encoding="utf-8") as f:
-                    json.dump(data, f, ensure_ascii=False, indent=2)
-                try:
-                    if os.path.exists(cfg_path):
-                        os.replace(tmp_path, cfg_path)
-                    else:
-                        os.rename(tmp_path, cfg_path)
-                except Exception:
-                    import shutil
-                    shutil.move(tmp_path, cfg_path)
-    except Exception as err:
-        logger.debug(f"同步写入周期配置异常: {err}")
+        current_focus_win.reload_chart()
+    except Exception:
+        pass
+
+    # 3. 其余非焦点窗口采用 35ms 错峰分帧加载，绝不阻塞主线程
+    delay = 35
+    for w in active_dialogs:
+        if w is current_focus_win:
+            continue
+        QTimer.singleShot(delay, lambda target_w=w: target_w.reload_chart() if hasattr(target_w, "reload_chart") else None)
+        delay += 35
+
+    # 4. 异步防抖物理写盘，主线程零 I/O 阻塞
+    mgr.trigger_debounced_save(delay_ms=350)
 
     return count
 
@@ -5104,9 +5343,18 @@ def _save_sbc_recent_code(code: str):
 
 
 def _record_sbc_open(code: str, geo=None, period_mode: Optional[str] = None):
-    """记录新打开的 SBC 窗口"""
+    """记录新打开的 SBC 窗口 (内存注册中心瞬间直达 + 异步防抖写盘)"""
     try:
         c_clean = str(code).zfill(6)
+        # 💡 0毫秒直达内存持久化注册中心
+        try:
+            geo_dict = None
+            if geo:
+                geo_dict = {"x": geo.x(), "y": geo.y(), "width": geo.width(), "height": geo.height()}
+            SBCWindowMemoryManager.get_instance().register(c_clean, geo_dict=geo_dict, period_mode=period_mode)
+        except Exception:
+            pass
+
         cfg_path = _get_sbc_layout_cfg_path()
         data = {}
         if os.path.exists(cfg_path):
@@ -5179,6 +5427,12 @@ def _remove_sbc_open_record(code: str):
     """从已打开 SBC 窗口列表中移除指定个股 (同时支持 ATS 常规与 SBC Launcher 持仓盯盘配置)"""
     try:
         c_clean = str(code).zfill(6)
+        # 💡 0毫秒直达内存持久化注册中心注销
+        try:
+            SBCWindowMemoryManager.get_instance().unregister(c_clean)
+        except Exception:
+            pass
+
         cfg_path = _get_sbc_layout_cfg_path()
         if not os.path.exists(cfg_path):
             return
@@ -5703,7 +5957,7 @@ def rearrange_all_sbc_windows(parent_win=None):
             if pxy.is_maximized_or_minimized():
                 pxy.show_normal()
 
-        # 统一计算网格行列数与严格等大等高的窗口尺寸 (彻底消除大小不等与 Win32 压扁)
+        # 统一计算网格行列数与严格等大等高的窗口尺寸 (彻底消除大小不等与 Win32 压扁，严格受限不得全屏霸屏)
         cols = 2 if count <= 2 else (3 if count <= 6 else 4)
         rows = math.ceil(count / cols)
 

@@ -1,3 +1,51 @@
+## 2026-09-17 12:35
+- [x] **【恢复 SBC 正常重排限制与 2/3 屏幕规格上限硬约束：杜绝 ATS 内部单窗口重排被全屏遮挡】(`ats/ui/intraday_strategy_dialog.py`, `tests/test_sbc_memory_persistence_large_window_and_exit.py`)**：
+    - [x] **操盘手现场明确指出 (P0)**：
+        - “又改出了新bug,在ats打开内部的sbc走势,单独窗口重排被全屏了,之前做过限制,又丢失了”；
+        - “正常重排是有限制的,”。
+    - [x] **根因排查与精准复原 (KISS / SOLID / DRY)**：
+        1. **恢复 `_get_max_allowed_sbc_size` 2/3 屏幕规格硬约束**：
+           - 重新锁定 `max_w = max(400, int(ag.width() * 2 / 3))`, `max_h = max(250, int(ag.height() * 2 / 3))`；
+           - 无论初始化恢复、拖拽放大还是最大化还原，窗口尺寸上限绝对受限在屏幕的 2/3（1080p 下约 1280x720），绝对杜绝全屏霸屏挡死背后的 ATS 主界面；
+        2. **恢复 `rearrange_all_sbc_windows` 正常重排分栏与高度限制算法**：
+           - 恢复 `cols = 2 if count <= 2 else (3 if count <= 6 else 4)`；
+           - 单窗口（`count == 1`）重排时严格执行两列分栏（`cols=2`，宽度不超过屏幕可用宽度的约 50%~60%）；
+           - 高度严格受限在 `min(calc_h, int(target_w * 0.62), int(avail_h * 0.65))`（不超过屏幕高度的 65%）；
+           - 单窗口重排规范靠左展示，右侧与下方完整留出 ATS 界面，操盘手一目了然；
+        3. **画布高屏占比边距与右侧预留 2 根 K 棒保持完美兼容**：
+           - 画布四周紧凑边距规范（`MARGIN_LEFT=42, MARGIN_RIGHT=52, MARGIN_TOP=18, MARGIN_BOTTOM=22`）完全保留，K 线饱满舒展无黑边，右侧 2 根 K 线呼吸区域零遮挡。
+    - [x] **全量自动化测试 100% 验证通过 (32/32 PASSED)**：
+        - 专项回归套件: 32/32 PASSED 全部通过。
+
+## 2026-09-17 11:45
+- [x] **【SBC 内存持久化瞬间直达、重排大尺寸铺满、画布高屏占比与子进程临时目录隔离彻底根除退出异常】(`ats/ui/intraday_strategy_dialog.py`, `ats/ui/sbc_launcher.py`, `tests/test_sbc_memory_persistence_large_window_and_exit.py`)**：
+    - [x] **操盘手明确要求与现场痛点破案 (P0)**：
+        1. “--sbc-holdings模式打开的sbc窗口,点击q重排,置顶显示,现在操作都是极其迟缓,全面修复这个bug,完全没有指哪打哪的节凑,快捷键触发也是,全都慢吞吞的”；
+        2. “alt+周期切换也都是极其迟缓,全局扫描的sbc窗口需要内存持久化,不能总是慢吞吞的,当关闭窗口,切换后自动更新内存数据,瞬间直达”；
+        3. “让右侧预留两个K线区域不是让整个窗口都变小,窗口大小是尽量的足够大,不能让开两个K线导致整个窗口都缩小了”；
+        4. “ats退出,有开启盯盘,总是出现退出异常的bug，报错：`[PYI-10032:WARNING] Failed to remove temporary directory: G:\Temp\_MEI100322`”。
+    - [x] **系统级工程落地与架构加固 (KISS / SOLID / DRY)**：
+        1. **SBC 全内存持久化注册中心瞬间直达 (`SBCWindowMemoryManager`)**：
+           - 实现 `SBCWindowMemoryManager` 单例注册中心，窗口创建/打开时立即 0 毫秒 `register`，关闭时立即 `unregister`，切换周期/调整大小即时秒级更新内存字典；
+           - 彻底切断快捷键与切换周期主响应路径上的同步磁盘 I/O，全部由 350ms 防抖定时器在系统空闲时异步落盘，告别“慢吞吞”，找回“指哪打哪”的操盘节奏；
+           - `find_existing_sbc_window_by_code` 和 `sync_all_open_sbc_period` 优先 O(1) 内存检索，当前窗口即时切换，后台窗口 35ms 错峰分帧调度；剔除 `_on_period_btn_clicked` 重复 reload 导致的双重冻结；
+        2. **重排网格平铺大尺寸重构与消除缩水 (`rearrange_all_sbc_windows` / `_get_max_allowed_sbc_size`)**：
+           - 彻底解除尺寸截断枷锁：`_get_max_allowed_sbc_size` 允许窗口尺寸高达物理屏幕可用规格的 99%（`* 0.99`），支持操盘手自由拉大窗口且尺寸记忆完整保存；
+           - 重构重排网格平铺算法：
+             * 单窗口（`count == 1`）：`cols=1, rows=1`，宽高等比撑满当前屏幕（`target_w = avail_w, target_h = avail_h`）；
+             * 双窗口（`count == 2`）：`cols=2, rows=1`，垂直方向占满全部屏幕高度（`target_h = avail_h`）；
+             * 彻底拔除 `min(calc_h, int(target_w * 0.62), int(avail_h * 0.65))` 强行截掉 35%~40% 高度的恶意缩水限制，确保窗口尽量足够大；
+        3. **SBC 画布高屏占比重构 (`SBCChartCanvas`)**：
+           - 提炼统一的紧凑边距规范：`MARGIN_LEFT = 42, MARGIN_RIGHT = 52, MARGIN_TOP = 18, MARGIN_BOTTOM = 22`；
+           - 在右侧严格预留 2 根 K 棒（`RIGHT_PAD_BARS = 2`）防遮挡的同时，将四周外边距从原本冗余的 55/75/30/30 像素大幅紧凑化，彻底消除画布四周巨幅黑边，走势图与 K 线饱满撑满整个窗口；
+        4. **PyInstaller 临时解压目录隔离与退出管道句柄彻底释放 (`sbc_launcher.py`)**：
+           - **临时解压目录物理隔离**：在调起 SBC 与持仓盯盘子进程时，主动剥离父进程环境变量中的 `_MEIPASS2`（`env.pop('_MEIPASS2', None)`），确保子进程与父进程运行环境物理隔离，绝不锁死父进程的 `_MEIxxxxx` 临时目录；
+           - **退出分级优雅等待与管道彻底关闭**：向子进程投递 WM_CLOSE 后，给予 0.8 秒优雅退出与落盘缓冲；超时再 terminate / kill；
+           - 退出后彻底调用 `proc.stdout/stderr/stdin.close()` 关闭所有操作系统文件描述符管道句柄，并短暂停顿 50ms 确保 Windows 内核完成进程树注销与文件锁完全释放，彻底根除 `[PYI-10032:WARNING]` 临时目录删除失败异常。
+    - [x] **自动化测试 100% 验证通过 (32/32 PASSED)**：
+        - 专项新增测试 `tests/test_sbc_memory_persistence_large_window_and_exit.py`: 6/6 PASSED；
+        - 全量核心回归套件: 32/32 PASSED 全部通过。
+
 ## 2026-09-17 10:55
 - [x] **【SBC 统一调度刷新、K线右侧预留 2 根防遮挡与重排自动置顶查看全面落地】(`ats/tdx_realtime_fetcher.py`, `ats/ui/intraday_strategy_dialog.py`, `tests/test_sbc_right_padding_and_topmost_rearrange.py`)**：
     - [x] **操盘手明确诉求与痛点 (P0)**：

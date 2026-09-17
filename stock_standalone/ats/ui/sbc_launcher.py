@@ -191,6 +191,8 @@ class SBCProcessManager:
             app_root = get_app_root()
             flags = subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0
             env = os.environ.copy()
+            # 💡 核心隔离：剥离 PyInstaller 父进程临时解压目录环境变量，避免子进程锁死父进程 _MEIxxxxx 导致退出报 PYI-10032 警告
+            env.pop("_MEIPASS2", None)
             env["ATS_SBC_SUBPROCESS"] = "1"
             env["SBC_IS_HOLDINGS_LAUNCHER"] = "1"
             try:
@@ -361,7 +363,7 @@ class SBCProcessManager:
                     pass
 
             try:
-                proc.wait(timeout=2.0)
+                proc.wait(timeout=1.5)
             except subprocess.TimeoutExpired:
                 logger.warning(f"[SBCLauncher] 持仓盯盘进程 (PID={proc.pid}) 等待超时，执行 terminate")
                 proc.terminate()
@@ -369,6 +371,17 @@ class SBCProcessManager:
                     proc.wait(timeout=1.0)
                 except subprocess.TimeoutExpired:
                     proc.kill()
+                    try:
+                        proc.wait(timeout=0.5)
+                    except Exception:
+                        pass
+            # 💡 彻底关闭子进程管道句柄，释放操作系统内核对 DLL 的文件锁
+            try:
+                for pipe in (proc.stdout, proc.stderr, proc.stdin):
+                    if pipe and not getattr(pipe, 'closed', False):
+                        pipe.close()
+            except Exception:
+                pass
             self._procs.pop("__holdings_launcher__", None)
             logger.info("[SBCLauncher] 持仓盯盘进程已安全退出并完成持久化。")
             return True
@@ -444,6 +457,8 @@ class SBCProcessManager:
             app_root = get_app_root()
             creationflags = subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0
             env = os.environ.copy()
+            # 💡 核心隔离：剥离 PyInstaller 父进程临时解压目录环境变量
+            env.pop("_MEIPASS2", None)
             env["ATS_SBC_SUBPROCESS"] = "1"
             env["ATS_MAIN_PID"] = str(os.getpid())
 
@@ -506,27 +521,48 @@ class SBCProcessManager:
         procs_to_wait = []
         for code, proc in list(self._procs.items()):
             if proc and proc.poll() is None:
-                try:
-                    proc.terminate()
-                except Exception as e:
-                    logger.debug(f"[SBCLauncher] 终止子进程 {code} (PID={getattr(proc, 'pid', 'unknown')}) 异常: {e}")
                 procs_to_wait.append((code, proc))
 
-        # 2. 优雅等待最多 1.5 秒
+        # 2. 给予子进程在收到 WM_CLOSE 后优雅保存退出的缓冲时间 (最多 0.8s)
+        remaining = []
         for code, proc in procs_to_wait:
             try:
-                proc.wait(timeout=1.5)
-            except subprocess.TimeoutExpired:
+                proc.wait(timeout=0.8)
+            except (subprocess.TimeoutExpired, Exception):
+                remaining.append((code, proc))
+
+        # 3. 对未能优雅退出的子进程执行分级终止并严格等待
+        if remaining:
+            for code, proc in remaining:
                 try:
-                    logger.warning(f"[SBCLauncher] 子进程 {code} (PID={proc.pid}) 未按时退出，执行强制 kill")
-                    proc.kill()
+                    proc.terminate()
                 except Exception:
                     pass
+            for code, proc in remaining:
+                try:
+                    proc.wait(timeout=0.6)
+                except (subprocess.TimeoutExpired, Exception):
+                    try:
+                        proc.kill()
+                        proc.wait(timeout=0.4)
+                    except Exception:
+                        pass
+
+        # 4. 彻底关闭所有子进程的操作系统管道文件描述符，断开 DLL 文件锁
+        for code, proc in procs_to_wait:
+            try:
+                for pipe in (proc.stdout, proc.stderr, proc.stdin):
+                    if pipe and not getattr(pipe, 'closed', False):
+                        pipe.close()
             except Exception:
                 pass
 
+        if sys.platform == "win32" and procs_to_wait:
+            import time
+            time.sleep(0.05)
+
         self._procs.clear()
-        logger.info("[SBCLauncher] 🏁 所有 SBC 独立子进程已全部退出完成。")
+        logger.info("[SBCLauncher] 🏁 所有 SBC 独立子进程已全部安全退出且句柄彻底释放。")
 
     def get_running_codes(self) -> List[str]:
         """获取当前正在运行的所有 SBC 子进程标的代码"""
