@@ -767,16 +767,21 @@ class IPOSubnewDetectorDialog(QMainWindow):
             return
 
         self.lbl_status.setText(f"⏳ 正在扫描 {len(self.monitored_codes)} 只新股/次新股 VWAP 结构 (多进程批量+多线程并发)...")
+        # 扫描期间全程保持表格物理行静止稳定，绝不打乱排序
+        if self.table.isSortingEnabled():
+            self.table.setSortingEnabled(False)
         self.worker = IPOScanWorker(self.monitored_codes, batch_size=8, perf_log_enabled=self.perf_log_enabled)
         self.worker.batch_analyzed.connect(self._on_batch_analyzed)
         self.worker.stock_analyzed.connect(self._on_stock_analyzed)
         self.worker.scan_finished.connect(self._on_scan_finished)
         self.worker.perf_log_emitted.connect(self._on_perf_log_received)
-        self.worker.start()
+        # 🛡️ 明确降级为 LowPriority，保障 GUI 主线程 60fps 丝滑响应，鼠标滚轮与键盘翻页零卡顿
+        from PyQt6.QtCore import QThread
+        self.worker.start(QThread.Priority.LowPriority)
 
     def _on_perf_log_received(self, text: str):
-        """实时将后台 Worker 发送的分组性能审计日志打印并滚入内嵌控制台"""
-        if hasattr(self, "txt_perf_console"):
+        """实时将后台 Worker 发送的分组性能审计日志打印并滚入内嵌控制台 (仅在开启模式下追加)"""
+        if getattr(self, "perf_log_enabled", False) and hasattr(self, "txt_perf_console"):
             self.txt_perf_console.appendPlainText(text)
             self.txt_perf_console.ensureCursorVisible()
 
@@ -786,34 +791,28 @@ class IPOSubnewDetectorDialog(QMainWindow):
             self.signals_map[sig.code] = sig
             self._pending_render_queue.append(sig)
         if not self._render_timer.isActive():
-            self._render_timer.start(30)
+            self._render_timer.start(40)
 
     def _on_stock_analyzed(self, sig: VWAPDetectorSignal):
         """单只兼容接收 (如手动单只优先评估)"""
         self.signals_map[sig.code] = sig
         self._pending_render_queue.append(sig)
         if not self._render_timer.isActive():
-            self._render_timer.start(30)
+            self._render_timer.start(40)
 
     def _flush_pending_renders(self):
-        """【🚀 分帧错峰平滑刷新】每 30ms 渲染至多 6 只，消除并发冲刷 UI 导致的掉帧、全表重排与界面卡死"""
+        """【🚀 分帧错峰原地平滑刷新】每 40ms 原地更新至多 8 只，原地 setText 与调色，全程冻结排序，消灭重排风暴"""
         if not self._pending_render_queue:
             self._render_timer.stop()
             return
 
         self._is_table_updating = True
-        batch_size = 6
-        was_sorting = self.table.isSortingEnabled()
-        if was_sorting:
-            self.table.setSortingEnabled(False)
+        batch_size = 8
         try:
             for _ in range(min(batch_size, len(self._pending_render_queue))):
                 sig = self._pending_render_queue.popleft()
                 self._update_table_row_data(sig, manage_sorting=False)
         finally:
-            if was_sorting and not self._pending_render_queue:
-                # 只有整批队列彻底清空时才恢复排序状态，避免批次间高频重新计算全表排序
-                self.table.setSortingEnabled(True)
             self._is_table_updating = False
 
         if not self._pending_render_queue:
@@ -822,16 +821,12 @@ class IPOSubnewDetectorDialog(QMainWindow):
     def _on_scan_finished(self, count: int, cost: float, perf_summary: Optional[Dict[str, Any]] = None):
         # 若仍有排队渲染未完成，单次强制刷新剩余全部
         if self._pending_render_queue:
-            was_sorting = self.table.isSortingEnabled()
-            if was_sorting:
-                self.table.setSortingEnabled(False)
             try:
                 while self._pending_render_queue:
                     sig = self._pending_render_queue.popleft()
                     self._update_table_row_data(sig, manage_sorting=False)
             finally:
-                if was_sorting:
-                    self.table.setSortingEnabled(True)
+                pass
             self._render_timer.stop()
 
         # 统一任务完成集中持久化 (5-10分钟统一持久化，绝不实时写盘)
@@ -865,12 +860,27 @@ class IPOSubnewDetectorDialog(QMainWindow):
             f"🎯 预下单: {pre_cnt} 只 | 🚀 回踩启动: {pull_cnt} 只 | ⚡ 加速: {break_cnt} 只 | 耗时: {cost:.2f}s{perf_text}"
         )
 
-        # 扫描结束统一按用户当前排序列整理一次
-        if self.table.isSortingEnabled():
-            col = self.table.horizontalHeader().sortIndicatorSection()
-            order = self.table.horizontalHeader().sortIndicatorOrder()
-            if col >= 0:
-                self.table.sortItems(col, order)
+        # 扫描结束统一按用户当前排序列整理一次，并精准记住操盘手选中项，恢复高亮行焦点
+        selected_code = ""
+        cur_r = self.table.currentRow()
+        if cur_r >= 0:
+            it_c = self.table.item(cur_r, 0)
+            if it_c:
+                selected_code = it_c.text().strip()
+
+        col = self.table.horizontalHeader().sortIndicatorSection()
+        order = self.table.horizontalHeader().sortIndicatorOrder()
+        self.table.setSortingEnabled(True)
+        if col >= 0:
+            self.table.sortItems(col, order)
+
+        # 恢复选中高亮行
+        if selected_code:
+            for r in range(self.table.rowCount()):
+                it_c = self.table.item(r, 0)
+                if it_c and it_c.text().strip() == selected_code:
+                    self.table.setCurrentCell(r, 0)
+                    break
 
         # 只有在操盘手开启【⏳ 自动轮询: 开】时，才在上一轮全部完成 15 秒之后单次延时启动下一轮，绝不追尾抢跑！
         if getattr(self, "auto_refresh_enabled", False):
@@ -1019,7 +1029,7 @@ class IPOSubnewDetectorDialog(QMainWindow):
             self._is_table_updating = False
 
     def _update_table_row_data(self, sig: VWAPDetectorSignal, target_row: Optional[int] = None, manage_sorting: bool = True):
-        """【🛡️ 整行原子写入】写入期间严格禁用 sorting，彻底杜绝数据错位串行与重复排列表风暴"""
+        """【🛡️ 整行原子原地增量更新】复用已存在的单元格对象，纯原地 setText 与调色，消除全表排版与重绘风暴"""
         prev_updating = getattr(self, "_is_table_updating", False)
         self._is_table_updating = True
         was_sorting = self.table.isSortingEnabled() if manage_sorting else False
@@ -1048,72 +1058,103 @@ class IPOSubnewDetectorDialog(QMainWindow):
                 is_valid_signal = (sig.signal_type in ("PRE_ORDER", "PULLBACK_BUY", "BREAKOUT"))
                 self.table.setRowHidden(row, not is_valid_signal)
 
-            # 现价 (支持高精度纯数值排序)
-            it_price = IPONumericTableWidgetItem(f"{sig.price:.2f}" if sig.price > 0 else "--", raw_val=float(sig.price) if sig.price > 0 else -999999.0)
-            it_price.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            self.table.setItem(row, 2, it_price)
+            # 辅助函数：原地复用或创建数值单元格
+            def _set_numeric_cell(col_idx, val_str, raw_val, fg=None, bg=None):
+                it = self.table.item(row, col_idx)
+                if isinstance(it, IPONumericTableWidgetItem):
+                    if it.text() != val_str:
+                        it.setText(val_str)
+                    it.raw_val = float(raw_val)
+                    if fg is not None:
+                        it.setForeground(fg)
+                    if bg is not None:
+                        it.setBackground(bg)
+                else:
+                    it = IPONumericTableWidgetItem(val_str, raw_val=float(raw_val))
+                    it.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                    if fg is not None:
+                        it.setForeground(fg)
+                    if bg is not None:
+                        it.setBackground(bg)
+                    self.table.setItem(row, col_idx, it)
 
-            # 涨跌幅 (支持高精度纯数值排序)
-            it_chg = IPONumericTableWidgetItem(f"{sig.change_pct:+.2f}%" if sig.price > 0 else "--", raw_val=float(sig.change_pct) if sig.price > 0 else -999999.0)
-            it_chg.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            if sig.change_pct > 0:
-                it_chg.setForeground(QColor("#ff4444"))
-            elif sig.change_pct < 0:
-                it_chg.setForeground(QColor("#00ff88"))
-            self.table.setItem(row, 3, it_chg)
+            # 辅助函数：原地复用或创建文本单元格
+            def _set_text_cell(col_idx, text_str, fg=None, bg=None, font=None, tooltip=None, align=None):
+                it = self.table.item(row, col_idx)
+                if it is not None:
+                    if it.text() != text_str:
+                        it.setText(text_str)
+                    if fg is not None:
+                        it.setForeground(fg)
+                    if bg is not None:
+                        it.setBackground(bg)
+                    if font is not None:
+                        it.setFont(font)
+                    if tooltip is not None:
+                        it.setToolTip(tooltip)
+                    if align is not None:
+                        it.setTextAlignment(align)
+                else:
+                    it = QTableWidgetItem(text_str)
+                    if fg is not None:
+                        it.setForeground(fg)
+                    if bg is not None:
+                        it.setBackground(bg)
+                    if font is not None:
+                        it.setFont(font)
+                    if tooltip is not None:
+                        it.setToolTip(tooltip)
+                    if align is not None:
+                        it.setTextAlignment(align)
+                    self.table.setItem(row, col_idx, it)
 
-            # 10d VWAP (支持高精度纯数值排序)
-            it_vw = IPONumericTableWidgetItem(f"{sig.vwap:.2f}" if sig.vwap > 0 else "--", raw_val=float(sig.vwap) if sig.vwap > 0 else -999999.0)
-            it_vw.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            it_vw.setForeground(QColor("#ffcc00"))
-            self.table.setItem(row, 4, it_vw)
+            # 2. 现价
+            p_str = f"{sig.price:.2f}" if sig.price > 0 else "--"
+            _set_numeric_cell(2, p_str, float(sig.price) if sig.price > 0 else -999999.0)
 
-            # VWAP偏离 (支持高精度纯数值排序)
-            it_diff = IPONumericTableWidgetItem(f"{sig.vwap_diff_pct:+.1f}%" if sig.vwap > 0 else "--", raw_val=float(sig.vwap_diff_pct) if sig.vwap > 0 else -999999.0)
-            it_diff.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            if sig.vwap_diff_pct > 0:
-                it_diff.setForeground(QColor("#ff8800"))
-            elif sig.vwap_diff_pct < 0:
-                it_diff.setForeground(QColor("#00bbff"))
-            self.table.setItem(row, 5, it_diff)
+            # 3. 涨跌幅
+            chg_str = f"{sig.change_pct:+.2f}%" if sig.price > 0 else "--"
+            chg_fg = QColor("#ff4444") if sig.change_pct > 0 else (QColor("#00ff88") if sig.change_pct < 0 else QColor("#e2e2e5"))
+            _set_numeric_cell(3, chg_str, float(sig.change_pct) if sig.price > 0 else -999999.0, fg=chg_fg)
 
-            # VWAP结构形态
-            it_struct = QTableWidgetItem(sig.structure_tag)
-            if sig.consolidation_days >= 1:
-                it_struct.setForeground(QColor("#ffd700"))
-                it_struct.setFont(QFont("Arial", 9, QFont.Weight.Bold))
-            elif sig.pullback_no_touch:
-                it_struct.setForeground(QColor("#00ff88"))
-                it_struct.setFont(QFont("Arial", 9, QFont.Weight.Bold))
-            self.table.setItem(row, 6, it_struct)
+            # 4. 10d VWAP
+            vw_str = f"{sig.vwap:.2f}" if sig.vwap > 0 else "--"
+            _set_numeric_cell(4, vw_str, float(sig.vwap) if sig.vwap > 0 else -999999.0, fg=QColor("#ffcc00"))
 
-            # 大趋势K线状态
-            it_trend = QTableWidgetItem(sig.trend_desc or "--")
-            if sig.has_kline_launch_sig:
-                it_trend.setForeground(QColor("#ff33aa"))
-            self.table.setItem(row, 7, it_trend)
+            # 5. VWAP偏离
+            diff_str = f"{sig.vwap_diff_pct:+.1f}%" if sig.vwap > 0 else "--"
+            diff_fg = QColor("#ff8800") if sig.vwap_diff_pct > 0 else (QColor("#00bbff") if sig.vwap_diff_pct < 0 else QColor("#e2e2e5"))
+            _set_numeric_cell(5, diff_str, float(sig.vwap_diff_pct) if sig.vwap > 0 else -999999.0, fg=diff_fg)
 
-            # 信号评级
-            it_sig = QTableWidgetItem(sig.signal_level)
-            it_sig.setFont(QFont("Arial", 9, QFont.Weight.Bold))
-            if sig.signal_type == "PRE_ORDER":
-                it_sig.setForeground(QColor("#ffd700"))  # 金黄
-                it_sig.setBackground(QColor("#2d2400"))
-            elif sig.signal_type == "PULLBACK_BUY":
-                it_sig.setForeground(QColor("#00ff88"))  # 荧光绿
-                it_sig.setBackground(QColor("#002d18"))
+            # 6. VWAP结构形态
+            struct_fg = QColor("#ffd700") if sig.consolidation_days >= 1 else (QColor("#00ff88") if sig.pullback_no_touch else QColor("#e2e2e5"))
+            struct_font = QFont("Arial", 9, QFont.Weight.Bold) if (sig.consolidation_days >= 1 or sig.pullback_no_touch) else None
+            _set_text_cell(6, sig.structure_tag, fg=struct_fg, font=struct_font)
+
+            # 7. 大趋势K线状态
+            trend_fg = QColor("#ff33aa") if sig.has_kline_launch_sig else QColor("#e2e2e5")
+            _set_text_cell(7, sig.trend_desc or "--", fg=trend_fg)
+
+            # 8. 信号评级
+            sig_fg = QColor("#ffd700")
+            sig_bg = QColor("#2d2400")
+            if sig.signal_type == "PULLBACK_BUY":
+                sig_fg = QColor("#00ff88")
+                sig_bg = QColor("#002d18")
             elif sig.signal_type == "BREAKOUT":
-                it_sig.setForeground(QColor("#ff007f"))  # 亮粉红
-                it_sig.setBackground(QColor("#2d0015"))
+                sig_fg = QColor("#ff007f")
+                sig_bg = QColor("#2d0015")
             elif sig.signal_type == "WEAK_EXIT":
-                it_sig.setForeground(QColor("#ff5555"))
-            self.table.setItem(row, 8, it_sig)
+                sig_fg = QColor("#ff5555")
+                sig_bg = QColor("#2d1111")
+            elif sig.signal_type == "WATCH":
+                sig_fg = QColor("#ffffff")
+                sig_bg = QColor("#1f2430")
+            _set_text_cell(8, sig.signal_level, fg=sig_fg, bg=sig_bg, font=QFont("Arial", 9, QFont.Weight.Bold))
 
-            # 极窄止损位 (支持高精度纯数值排序)
-            it_sl = IPONumericTableWidgetItem(f"{sig.stop_loss_price:.2f}" if sig.stop_loss_price > 0 else "--", raw_val=float(sig.stop_loss_price) if sig.stop_loss_price > 0 else -999999.0)
-            it_sl.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            it_sl.setForeground(QColor("#ff5555"))
-            self.table.setItem(row, 9, it_sl)
+            # 9. 极窄止损位
+            sl_str = f"{sig.stop_loss_price:.2f}" if sig.stop_loss_price > 0 else "--"
+            _set_numeric_cell(9, sl_str, float(sig.stop_loss_price) if sig.stop_loss_price > 0 else -999999.0, fg=QColor("#ff5555"))
 
             # ── 动态自定义列 (ats_col, 优先从 ATS 的 IPC df 提取，tdd 兜底) ──
             ipc_row = None
@@ -1138,8 +1179,6 @@ class IPOSubnewDetectorDialog(QMainWindow):
             if ipc_row is not None and hasattr(ipc_row, "iloc") and len(ipc_row.shape) > 1:
                 ipc_row = ipc_row.iloc[0]
 
-            # 兜底：若 IPC df 暂无该股，直接从后台 Worker 已计算好的 sig.extra_data 0ms 纯内存提取
-            # 坚决杜绝在 UI 主线程执行任何通达信日线文件读取或指标计算，彻底消除界面卡死与 (未响应)
             extra_mem_row = getattr(sig, "extra_data", None) or {}
 
             try:
@@ -1167,7 +1206,6 @@ class IPOSubnewDetectorDialog(QMainWindow):
                             raw_c_val = source_row.get(k)
                             break
 
-                it_ext = None
                 if raw_c_val is not None and not pd.isna(raw_c_val):
                     try:
                         num_v = float(raw_c_val)
@@ -1175,47 +1213,28 @@ class IPOSubnewDetectorDialog(QMainWindow):
                             if c_name.lower() in co2int:
                                 int_v = int(num_v)
                                 disp_str = f"+{int_v}" if int_v > 0 else f"{int_v}"
-                                it_ext = IPONumericTableWidgetItem(disp_str, raw_val=float(int_v))
-                                if c_name.lower() == "ch_bc2":
-                                    if int_v > 0:
-                                        it_ext.setForeground(QColor("#ffd700"))
-                                        it_ext.setFont(QFont("Arial", 9, QFont.Weight.Bold))
-                                    else:
-                                        it_ext.setForeground(QColor("#8f939d"))
-                                elif c_name.lower() in ("win", "red"):
-                                    if int_v > 0:
-                                        it_ext.setForeground(QColor("#ff4444"))
-                                    elif int_v < 0:
-                                        it_ext.setForeground(QColor("#00ff88"))
-                                    else:
-                                        it_ext.setForeground(QColor("#8f939d"))
-                                else:
-                                    it_ext.setForeground(QColor("#e2e2e5"))
+                                ext_fg = QColor("#ffd700") if (c_name.lower() == "ch_bc2" and int_v > 0) else (
+                                    QColor("#ff4444") if (c_name.lower() in ("win", "red") and int_v > 0) else (
+                                        QColor("#00ff88") if (c_name.lower() in ("win", "red") and int_v < 0) else QColor("#e2e2e5")
+                                    )
+                                )
+                                _set_numeric_cell(col_idx, disp_str, float(int_v), fg=ext_fg)
                             else:
                                 disp_str = f"{num_v:+.2f}"
-                                it_ext = IPONumericTableWidgetItem(disp_str, raw_val=float(num_v))
-                                if num_v > 0:
-                                    it_ext.setForeground(QColor("#ff4444"))
-                                elif num_v < 0:
-                                    it_ext.setForeground(QColor("#00ff88"))
-                                else:
-                                    it_ext.setForeground(QColor("#8f939d"))
+                                ext_fg = QColor("#ff4444") if num_v > 0 else (QColor("#00ff88") if num_v < 0 else QColor("#8f939d"))
+                                _set_numeric_cell(col_idx, disp_str, float(num_v), fg=ext_fg)
+                        else:
+                            _set_numeric_cell(col_idx, "--", -999999.0)
                     except Exception:
-                        it_ext = IPONumericTableWidgetItem(str(raw_c_val))
-
-                if it_ext is None:
-                    it_ext = IPONumericTableWidgetItem("--", raw_val=-999999.0)
-                it_ext.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-                self.table.setItem(row, col_idx, it_ext)
+                        _set_text_cell(col_idx, str(raw_c_val), align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                else:
+                    _set_numeric_cell(col_idx, "--", -999999.0)
 
             # 为什么 (详细解释)
-            it_desc = QTableWidgetItem(sig.signal_desc)
-            it_desc.setToolTip(sig.signal_desc)
-            self.table.setItem(row, 10 + n_extra, it_desc)
+            _set_text_cell(10 + n_extra, sig.signal_desc, tooltip=sig.signal_desc)
 
             # 更新时间
-            it_time = QTableWidgetItem(sig.update_time or "--")
-            self.table.setItem(row, 11 + n_extra, it_time)
+            _set_text_cell(11 + n_extra, sig.update_time or "--")
         finally:
             if was_sorting:
                 self.table.setSortingEnabled(True)

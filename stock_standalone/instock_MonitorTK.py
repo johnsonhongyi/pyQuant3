@@ -15553,6 +15553,19 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         except Exception:
             pass
 
+        # 5.2. 🎯 新股次新股超短检测工具 (外部独立进程 / PyQt6)
+        try:
+            from ats.ui.ipo_detector_ipc import find_ipo_detector_window
+            ipo_hwnd = find_ipo_detector_window()
+            if ipo_hwnd:
+                import ctypes
+                if ctypes.windll.user32.IsWindow(ipo_hwnd) and ctypes.windll.user32.IsWindowVisible(ipo_hwnd):
+                    if ipo_hwnd not in current_visible_hwnds:
+                        current_visible_hwnds.append(ipo_hwnd)
+                        name_map[ipo_hwnd] = "🎯 新股次新超短检测 (IPODetector)"
+        except Exception:
+            pass
+
         # 6. 信号仪表盘 (PyQt6 - SignalDashboardPanel)
         if hasattr(self, '_signal_dashboard_win') and self._signal_dashboard_win is not None:
             try:
@@ -15965,6 +15978,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         name_map[hwnd] = "🎯 多周期策略筛选器 (MultiPeriodTester)"
                     elif "SectorRotationMiner" in raw_name or "板块轮动" in raw_name:
                         name_map[hwnd] = "🔄 板块轮动回踩深挖 (SectorRotationMiner)"
+                    elif "新股次新" in raw_name or "超短检测" in raw_name or "SBC 极限" in raw_name:
+                        name_map[hwnd] = "🎯 新股次新超短检测工具 (SBC Detector)"
                     elif "MonitorWindow_" in raw_name:
                         # 提炼出独特代码如 "板块名称_代码"
                         mon_id = raw_name.split("MonitorWindow_")[-1].split("(")[0]
