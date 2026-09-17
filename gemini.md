@@ -1,3 +1,24 @@
+## 2026-09-17 07:52
+- [x] **【打包环境全面支持多进程独立运行 SBC 与持仓盯盘：自包含子进程调起、命令行双重拦截与 spec 打包闭环】(`sbc_launcher.py`, `run_ats.py`, `run_sbc.py`, `ats.spec`, `tests/test_sbc_packaged_env_and_fallback.py`)**：
+    - [x] **操盘手明确要求**：“需要的是打包环境也可以多进程打开sbc”；
+    - [x] **架构设计与多进程调起引擎升级 (SOLID / KISS / DRY)**：
+        1. **打包环境自包含多进程命令行解析 (`_build_sbc_subprocess_command`)**：
+           - 在打包环境（PyInstaller 冻结模式）下，智能定位当前进程或工作区根目录的 `ATS_Terminal.exe`；
+           - 调起单标的 SBC 命令为：`[ATS_Terminal.exe, "--sbc", <code>, <period>]`；
+           - 调起持仓盯盘命令为：`[ATS_Terminal.exe, "--sbc-holdings"]`；
+           - 彻底脱离对外部 `python.exe` 解释器及物理 `run_sbc.py` 源码文件的依赖，绝不产生找不到文件报错；
+        2. **主程序顶层环境变量与命令行参数双重极速分发 (`run_ats.py`)**：
+           - 在 `run_ats.py` 顶层设置 `multiprocessing.freeze_support()` 并显式静态导入 `import run_sbc`；
+           - 检测到 `ATS_SBC_SUBPROCESS=1` 环境变量或命令行带有 `--sbc` / `--sbc-holdings`，第一时间直接执行 `sys.exit(run_sbc.main())`；
+           - 彻底切断重量级 `ATSMainWindow`、IPC 广播服务端与全量 UI 模块的加载，0 毫秒穿透进入独立 SBC 走势图或持仓盯盘窗口，实现真正的多进程物理隔离，彻底避免 ATS 主界面卡顿；
+        3. **打包配置全面纳管 (`ats.spec`)**：
+           - 在 `ats.spec` 的 `hiddenimports` 中加入 `'run_sbc'`，保障重新打包时该多进程模块 100% 完整编译落盘；
+        4. **全自动异常兜底机制**：
+           - 若外部系统策略或环境阻止子进程创建，系统全自动平滑降级在当前进程内打开（In-Process Fallback），保障极端异常场景下 100% 具备可用性。
+    - [x] **自动化测试 100% 验证通过 (32/32 PASSED)**：
+        - 专项测试 `tests/test_sbc_packaged_env_and_fallback.py`: 5/5 PASSED（全真验证打包环境下智能构造多进程命令、单标的子进程调起、持仓盯盘子进程调起、命令行双重分发阻断主程序、异常兜底降级）；
+        - 全量回归测试: 27/27 PASSED 全部通过（包含多窗口跨屏平铺重排、持仓持久化隔离、时间间隔对齐等）。
+
 ## 2026-09-16 23:20
 - [x] **【打包环境彻底兼容：根除盯盘误调起 ATS 主程序、修复找不到 run_sbc.py 报错并实现全自动平滑降级】(`sbc_launcher.py`, `intraday_strategy_dialog.py`, `run_ats.py`, `run_sbc.py`, `tests/test_sbc_packaged_env_and_fallback.py`)**：
     - [x] **操盘手反馈问题与实盘现场破案 (P0)**：

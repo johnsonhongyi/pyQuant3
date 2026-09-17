@@ -10,15 +10,6 @@ import multiprocessing
 
 if __name__ == "__main__":
     multiprocessing.freeze_support()
-    # 💡 命令行参数分发：若带有 --sbc 或 --sbc-holdings，作为独立 SBC 进程运行，严禁调起 ATS 主程序
-    if any(arg in sys.argv for arg in ("--sbc", "--sbc-holdings", "--holdings-sbc")):
-        try:
-            import run_sbc
-            sys.exit(run_sbc.main())
-        except Exception as e:
-            print(f"[ATS Launcher] 命令行分发到 SBC 异常: {e}")
-
-from PyQt6.QtWidgets import QApplication
 
 # Ensure workspace root is in path (Nuitka / PyInstaller / dev 统一兼容的物理根目录方案)
 try:
@@ -29,6 +20,23 @@ except Exception:
 
 if current_dir not in sys.path:
     sys.path.insert(0, current_dir)
+
+import run_sbc
+
+# 💡 命令行参数与环境变量双重分发：若带有 --sbc / --sbc-holdings 或 ATS_SBC_SUBPROCESS=1，直接作为独立 SBC 子进程运行，彻底阻断进入 ATS 主界面
+if __name__ == "__main__":
+    is_sbc_subproc = (
+        os.environ.get("ATS_SBC_SUBPROCESS") == "1" or
+        any(arg in sys.argv for arg in ("--sbc", "--sbc-holdings", "--holdings-sbc", "--holdings"))
+    )
+    if is_sbc_subproc:
+        try:
+            sys.exit(run_sbc.main())
+        except Exception as e:
+            print(f"[ATS Launcher] 命令行分发到 SBC 异常: {e}")
+            sys.exit(1)
+
+from PyQt6.QtWidgets import QApplication
 
 from ats.ui.main_window import ATSMainWindow
 from sys_utils import ensure_backend_tk_running

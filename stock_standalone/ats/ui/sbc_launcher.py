@@ -77,6 +77,68 @@ def _is_widget_alive(w) -> bool:
         return False
 
 
+def _build_sbc_subprocess_command(code: Optional[str] = None, period_mode: Optional[str] = "10d", is_holdings: bool = False) -> Optional[List[str]]:
+    """
+    智能构造多进程调起 SBC 的命令行 (全面支持源码开发与 PyInstaller 打包环境)
+    - 源码环境: [sys.executable, run_sbc.py, <code>, <period>] 或 [sys.executable, run_sbc.py]
+    - 打包环境: [target_exe, "--sbc", <code>, <period>] 或 [target_exe, "--sbc-holdings"]
+    """
+    app_root = get_app_root()
+    is_frozen = is_packaged_env()
+    is_py_interpreter = ("python" in os.path.basename(sys.executable).lower())
+
+    # 1. 源码开发环境: 若当前为 Python 解释器且源码 run_sbc.py 存在，优先使用 python 解释器执行
+    run_sbc_path = os.path.join(app_root, "run_sbc.py")
+    if not is_frozen and is_py_interpreter and os.path.exists(run_sbc_path):
+        if is_holdings:
+            return [sys.executable, run_sbc_path]
+        else:
+            cmd = [sys.executable, run_sbc_path, str(code)]
+            if period_mode:
+                cmd.append(str(period_mode))
+            return cmd
+
+    # 2. 打包环境 (PyInstaller / Nuitka 冻结模式): 定位用于启动独立 SBC 子进程的可执行文件
+    target_exe = None
+    if is_frozen and sys.executable.lower().endswith(".exe"):
+        curr_base = os.path.basename(sys.executable).lower()
+        if "ats" in curr_base:
+            target_exe = sys.executable
+        else:
+            # 检查同目录下是否存在 ATS_Terminal.exe
+            candidate = os.path.join(app_root, "ATS_Terminal.exe")
+            if os.path.exists(candidate):
+                target_exe = candidate
+            else:
+                target_exe = sys.executable
+    else:
+        candidate_ats = os.path.join(app_root, "ATS_Terminal.exe")
+        if os.path.exists(candidate_ats):
+            target_exe = candidate_ats
+
+    if target_exe and os.path.exists(target_exe):
+        if is_holdings:
+            return [target_exe, "--sbc-holdings"]
+        else:
+            cmd = [target_exe, "--sbc", str(code)]
+            if period_mode:
+                cmd.append(str(period_mode))
+            return cmd
+
+    # 3. 兜底尝试外部存在 python 且存在 run_sbc.py
+    if os.path.exists(run_sbc_path):
+        py_exe = sys.executable if is_py_interpreter else "python"
+        if is_holdings:
+            return [py_exe, run_sbc_path]
+        else:
+            cmd = [py_exe, run_sbc_path, str(code)]
+            if period_mode:
+                cmd.append(str(period_mode))
+            return cmd
+
+    return None
+
+
 class SBCProcessManager:
     """SBC 独立子进程与进程内降级全局生命周期管理器 (单例)"""
     _instance: Optional["SBCProcessManager"] = None
@@ -117,25 +179,33 @@ class SBCProcessManager:
         return False
 
     def launch_holdings_watcher(self):
-        """【🚀 启动持仓盯盘】在开发环境下使用独立进程，在打包环境或无外部脚本时全自动安全降级在当前进程内启动"""
+        """【🚀 启动持仓盯盘】在开发环境与打包环境下均优先调起独立子进程运行"""
         self.cleanup_dead_processes()
         if self.is_launcher_running():
             logger.info("[SBCLauncher] 持仓盯盘已在运行中，尝试激活窗口...")
             self.activate_launcher_windows()
             return self._procs.get("__holdings_launcher__") or self._in_process_holdings
 
-        app_root = get_app_root()
-        run_sbc_path = os.path.join(app_root, "run_sbc.py")
-        is_interpreter = ("python" in os.path.basename(sys.executable).lower())
-        can_run_subproc = (not is_packaged_env()) and is_interpreter and os.path.exists(run_sbc_path)
-
-        if can_run_subproc:
-            cmd = [sys.executable, run_sbc_path]
+        cmd = _build_sbc_subprocess_command(is_holdings=True)
+        if cmd:
+            app_root = get_app_root()
             flags = subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0
+            env = os.environ.copy()
+            env["ATS_SBC_SUBPROCESS"] = "1"
+            env["SBC_IS_HOLDINGS_LAUNCHER"] = "1"
+            try:
+                import run_sbc
+                env["SBC_LAYOUT_CONFIG_PATH"] = run_sbc._get_launcher_layout_cfg_path()
+            except Exception:
+                pass
+            env["ATS_MAIN_PID"] = str(os.getpid())
+
+            logger.info(f"[SBCLauncher] 🚀 正在启动持仓盯盘独立多进程: {' '.join(cmd)}")
             try:
                 proc = subprocess.Popen(
                     cmd,
                     cwd=app_root,
+                    env=env,
                     creationflags=flags,
                     close_fds=(sys.platform != "win32")
                 )
@@ -143,10 +213,10 @@ class SBCProcessManager:
                 logger.info(f"[SBCLauncher] ✅ 成功调起持仓盯盘独立进程 (PID={proc.pid})")
                 return proc
             except Exception as e:
-                logger.warning(f"[SBCLauncher] 启动持仓盯盘子进程失败，转为进程内降级: {e}")
+                logger.warning(f"[SBCLauncher] 调起持仓盯盘子进程异常，转为内存模式降级: {e}")
 
-        # 💡 【打包环境与无外部脚本安全降级】直接在当前进程内存中调起持仓盯盘，严禁调用 sys.executable 误调起 ATS 主程序！
-        logger.info("[SBCLauncher] 处于打包环境或无外部脚本，在当前进程内调起持仓盯盘窗口...")
+        # 💡 【兜底降级】若无法调起独立子进程，在当前进程内打开持仓盯盘窗口
+        logger.info("[SBCLauncher] 无法调起外部子进程，在当前进程内调起持仓盯盘窗口...")
         try:
             import run_sbc
             os.environ["SBC_LAYOUT_CONFIG_PATH"] = run_sbc._get_launcher_layout_cfg_path()
@@ -159,7 +229,7 @@ class SBCProcessManager:
                     dlg.show()
                     restored = [dlg]
             self._in_process_holdings = restored or []
-            logger.info(f"[SBCLauncher] ✅ [打包兼容/内存模式] 成功在进程内调起 {len(self._in_process_holdings)} 个持仓盯盘窗口")
+            logger.info(f"[SBCLauncher] ✅ [内存降级模式] 成功调起 {len(self._in_process_holdings)} 个持仓盯盘窗口")
             return self._in_process_holdings
         except Exception as e_fallback:
             logger.error(f"[SBCLauncher] 进程内调起持仓盯盘异常: {e_fallback}", exc_info=True)
@@ -368,22 +438,17 @@ class SBCProcessManager:
         except Exception:
             pass
 
-        # 2. 检查是否满足独立子进程启动条件 (非打包环境 + 存在 Python 解释器 + 存在 run_sbc.py 脚本)
-        app_root = get_app_root()
-        run_sbc_path = os.path.join(app_root, "run_sbc.py")
-        is_interpreter = ("python" in os.path.basename(sys.executable).lower())
-        can_run_subproc = (not is_packaged_env()) and is_interpreter and os.path.exists(run_sbc_path)
-
-        if can_run_subproc:
-            cmd = [sys.executable, run_sbc_path, c_clean]
-            if period_mode:
-                cmd.append(str(period_mode))
+        # 2. 构造多进程启动命令 (全面支持源码开发与 PyInstaller 打包环境)
+        cmd = _build_sbc_subprocess_command(code=c_clean, period_mode=period_mode, is_holdings=False)
+        if cmd:
+            app_root = get_app_root()
+            creationflags = subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0
+            env = os.environ.copy()
+            env["ATS_SBC_SUBPROCESS"] = "1"
+            env["ATS_MAIN_PID"] = str(os.getpid())
 
             logger.info(f"[SBCLauncher] 🚀 正在启动标的 {c_clean} 的独立 SBC 进程: {' '.join(cmd)}")
             try:
-                creationflags = subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0
-                env = os.environ.copy()
-                env["ATS_MAIN_PID"] = str(os.getpid())
                 proc = subprocess.Popen(
                     cmd,
                     cwd=app_root,
@@ -397,8 +462,8 @@ class SBCProcessManager:
             except Exception as e:
                 logger.warning(f"[SBCLauncher] 启动标的 {c_clean} SBC 子进程失败，转为进程内降级: {e}")
 
-        # 3. 💡 【打包环境与无外部脚本安全降级】在当前进程内打开 SBC 走势图，绝不调用 sys.executable 误调起 ATS 主程序！
-        logger.info(f"[SBCLauncher] 处于打包环境或无外部脚本，在当前进程内调起标的 {c_clean} SBC 走势图...")
+        # 3. 💡 【兜底降级】若无法调起独立子进程，在当前进程内打开 SBC 走势图
+        logger.info(f"[SBCLauncher] 无法调起独立子进程，在当前进程内调起标的 {c_clean} SBC 走势图...")
         try:
             from ats.ui.intraday_strategy_dialog import open_sbc_chart_dialog
             dlg = open_sbc_chart_dialog(None, code=c_clean, period_mode=period_mode or "10d")
