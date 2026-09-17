@@ -1944,12 +1944,20 @@ class NewStockPanel(QWidget):
 
     def _on_open_ipo_detector_clicked(self):
         """调出新股次新股超短检测独立工具或发送当前选中标的"""
-        from ats.ui.ipo_detector_ipc import launch_ipo_detector_process, send_stock_to_ipo_detector, is_ipo_detector_alive
+        from ats.ui.ipo_detector_ipc import (
+            launch_ipo_detector_process, send_stock_to_ipo_detector,
+            is_ipo_detector_alive, activate_ipo_detector_window
+        )
         if self.selected_code:
             send_stock_to_ipo_detector(self.selected_code, self.selected_name)
         else:
+            # 优先激活置顶已有窗口
+            if activate_ipo_detector_window():
+                return
             if not is_ipo_detector_alive():
                 launch_ipo_detector_process()
+            else:
+                activate_ipo_detector_window()
 
     def _toggle_favorite(self):
         """右键菜单：切换重点关注 (极速响应与全系统 0ms 联动)"""

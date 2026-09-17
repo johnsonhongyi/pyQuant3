@@ -69,12 +69,76 @@ def _write_ipc_data(data: Dict[str, Any]) -> bool:
     return False
 
 
+def find_ipo_detector_window() -> Optional[int]:
+    """
+    通过 Windows API 枚举查找当前桌面是否存在新股次新超短检测工具窗口 HWND
+    严格遵守安全规范，绝不修改进程 WindowStation 或 Desktop，确保 100% 渲染安全。
+    """
+    if sys.platform != "win32":
+        return None
+    try:
+        import win32gui
+        found_hwnd = None
+
+        def _enum_cb(hwnd, _):
+            nonlocal found_hwnd
+            try:
+                if win32gui.IsWindowVisible(hwnd):
+                    t = win32gui.GetWindowText(hwnd)
+                    if "新股次新股超短检测" in t or "SBC 极限 10日 VWAP" in t:
+                        found_hwnd = hwnd
+                        return False
+            except Exception:
+                pass
+            return True
+
+        win32gui.EnumWindows(_enum_cb, None)
+        return found_hwnd
+    except Exception:
+        # ctypes fallback (安全无侵入)
+        try:
+            import ctypes
+            from ctypes import wintypes
+            user32 = ctypes.windll.user32
+            found_hwnd = None
+            WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+            def _c_cb(hwnd, _):
+                nonlocal found_hwnd
+                try:
+                    if user32.IsWindowVisible(hwnd):
+                        length = user32.GetWindowTextLengthW(hwnd)
+                        if length > 0:
+                            buf = ctypes.create_unicode_buffer(length + 1)
+                            user32.GetWindowTextW(hwnd, buf, length + 1)
+                            title = buf.value
+                            if "新股次新股超短检测" in title or "SBC 极限 10日 VWAP" in title:
+                                found_hwnd = hwnd
+                                return False
+                except Exception:
+                    pass
+                return True
+
+            user32.EnumWindows(WNDENUMPROC(_c_cb), 0)
+            return found_hwnd
+        except Exception:
+            return None
+
+
 def is_ipo_detector_alive() -> bool:
-    """检查独立检测工具进程是否处于活跃存活状态"""
+    """检查独立检测工具进程是否处于活跃存活状态 (多重探针：窗口探测 > 进程存在 > 心跳验证)"""
+    # 1. 优先查桌面是否存在该窗口，若存在则 100% 存活
+    if sys.platform == "win32":
+        hwnd = find_ipo_detector_window()
+        if hwnd:
+            return True
+
+    # 2. 检查 IPC 文件与底层系统进程
     data = _read_ipc_data()
     hb = float(data.get("heartbeat", 0.0))
     pid = int(data.get("detector_pid", 0))
-    if time.time() - hb < 4.0 and pid > 0:
+
+    if pid > 0:
         if sys.platform == "win32":
             try:
                 import ctypes
@@ -83,16 +147,18 @@ def is_ipo_detector_alive() -> bool:
                 h_proc = kernel32.OpenProcess(SYNCHRONIZE, False, pid)
                 if h_proc:
                     kernel32.CloseHandle(h_proc)
-                    return True
-                return False
+                    if time.time() - hb < 15.0 or hb == 0.0:
+                        return True
             except Exception:
-                return True
+                pass
         else:
             try:
                 os.kill(pid, 0)
-                return True
+                if time.time() - hb < 15.0 or hb == 0.0:
+                    return True
             except Exception:
-                return False
+                pass
+
     return False
 
 
@@ -132,31 +198,45 @@ def build_ipo_detector_command(code: Optional[str] = None) -> List[str]:
     return [sys.executable, "-m", "run_ipo_detector"]
 
 
-def activate_ipo_detector_window() -> bool:
-    """尝试将已有新股次新检测工具窗口置顶激活 (对齐 SBCProcessManager.activate_launcher_windows)"""
+def activate_ipo_detector_window(target_hwnd: Optional[int] = None) -> bool:
+    """
+    【安全置顶激活 (严格对齐 SBCProcessManager.activate_launcher_windows 标准范式)】
+    将已有新股次新检测工具窗口唤醒、解除最小化、置顶激活。
+    绝不调用任何 SetProcessWindowStation / AttachThreadInput 等破坏渲染管线的危险操作。
+    """
     if sys.platform != "win32":
         return False
     try:
         import win32gui
         import win32con
-        activated = False
-        def _enum_cb(hwnd, _):
-            nonlocal activated
-            try:
-                if win32gui.IsWindowVisible(hwnd):
-                    t = win32gui.GetWindowText(hwnd)
-                    if "新股次新股超短检测" in t or "SBC 极限 10日 VWAP" in t:
-                        if win32gui.IsIconic(hwnd):
-                            win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
-                        win32gui.SetForegroundWindow(hwnd)
-                        activated = True
-            except Exception:
-                pass
+        hwnd = target_hwnd or find_ipo_detector_window()
+        if hwnd and win32gui.IsWindow(hwnd):
+            if win32gui.IsIconic(hwnd):
+                win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+            else:
+                win32gui.ShowWindow(hwnd, win32con.SW_SHOW)
+            win32gui.SetForegroundWindow(hwnd)
             return True
-        win32gui.EnumWindows(_enum_cb, None)
-        return activated
     except Exception:
-        return False
+        pass
+
+    # ctypes 纯净回退
+    try:
+        import ctypes
+        user32 = ctypes.windll.user32
+        hwnd = target_hwnd or find_ipo_detector_window()
+        if hwnd and user32.IsWindow(hwnd):
+            SW_RESTORE = 9
+            SW_SHOW = 5
+            if user32.IsIconic(hwnd):
+                user32.ShowWindow(hwnd, SW_RESTORE)
+            else:
+                user32.ShowWindow(hwnd, SW_SHOW)
+            user32.SetForegroundWindow(hwnd)
+            return True
+    except Exception:
+        pass
+    return False
 
 
 def launch_ipo_detector_process(code: Optional[str] = None) -> Optional[subprocess.Popen]:
@@ -164,14 +244,24 @@ def launch_ipo_detector_process(code: Optional[str] = None) -> Optional[subproce
     【🚀 独立进程启动】
     以高可靠、句柄隔离 (close_fds=True)、父进程守护模式启动新股次新股超短检测工具
     严格对齐 --sbc-holdings 独立子进程启动规范：
-    1. 若已有活跃子进程，直接置顶激活前置，绝不重复生成第二个实例；
+    1. 优先查窗与置顶：若已有窗口或活跃子进程，直接置顶激活前置，绝不重复生成第二个实例；
     2. stdout/stderr 严格重定向到独立的 logs/ipo_detector.log 文件，切断与父进程控制台句柄冲突；
     3. 剥离 _MEIPASS2 防止 PyInstaller 锁死；
     4. 独立进程组 CREATE_NEW_PROCESS_GROUP。
     """
+    # 1. 优先激活桌面已有窗口！
+    if activate_ipo_detector_window():
+        logger.info("[IPC] 新股次新超短检测工具已有窗口，已成功置顶激活，无需重复启动。")
+        if code:
+            send_stock_to_ipo_detector(code)
+        return None
+
+    # 2. 检查进程存活
     if is_ipo_detector_alive():
-        logger.info("[IPC] 新股次新超短检测工具已在运行中，激活现有窗口...")
+        logger.info("[IPC] 新股次新超短检测工具进程已在运行中，尝试激活窗口...")
         activate_ipo_detector_window()
+        if code:
+            send_stock_to_ipo_detector(code)
         return None
 
     cmd = build_ipo_detector_command(code)

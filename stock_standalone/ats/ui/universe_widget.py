@@ -1260,17 +1260,25 @@ class UniverseTreeWidget(QWidget):
                     item.setForeground(1, QColor("#e2e2e5"))
 
     def _on_launch_ipo_detector_clicked(self):
-        """【次新超短】调起独立进程检测工具或自动置顶已有窗口"""
+        """【次新超短】优先置顶已有检测工具窗口，无窗口时才拉起独立进程"""
         try:
             from ats.ui.ipo_detector_ipc import (
                 launch_ipo_detector_process, is_ipo_detector_alive, activate_ipo_detector_window
             )
-            if not is_ipo_detector_alive():
-                launch_ipo_detector_process()
-                self._notify_status("[IPO超短] 已成功调起新股次新股超短检测独立工具。")
-            else:
-                activate_ipo_detector_window()
+            # 1. 优先查窗并置顶：若桌面已有该窗口，立刻强力置顶并返回，绝不误开新窗口！
+            if activate_ipo_detector_window():
                 self._notify_status("[IPO超短] 检测工具已在运行，已自动激活并置顶窗口。")
+                return
+
+            # 2. 若子进程存活或正在启动中，尝试再次激活
+            if is_ipo_detector_alive():
+                activate_ipo_detector_window()
+                self._notify_status("[IPO超短] 检测工具已在运行，已同步激活置顶窗口。")
+                return
+
+            # 3. 确实没有任何运行实例时，才拉起新独立进程
+            launch_ipo_detector_process()
+            self._notify_status("[IPO超短] 已成功调起新股次新股超短检测独立工具。")
         except Exception as e:
             logger.error(f"[Universe] 调起超短检测工具异常: {e}")
 
