@@ -915,7 +915,7 @@ if __name__ == '__main__':
 
                 # 休眠打点：每次休眠 10 秒后返回外层主循环，以便及时响应时间阶段切换与 8:40 盘前刷新
                 print(".", end='', flush=True)
-                cct.sleep(10)
+                cct.sleep(cct.duration_sleep_time)
 
             # 3. 盘后及非交易时间 (clean_duration / 夜间 / 周末 / 节假日)
             else:

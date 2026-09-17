@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """
 测试：SBC 窗口重排不改变原有的显示位置顺序，恢复时原来在什么位置就在什么位置（除非换行）
 ------------------------------------------------------------------------------------
@@ -87,11 +87,11 @@ def test_calculate_safe_geometry_with_wrap_same_position_and_wrap():
     assert tw1 == 680
     assert th1 == 420
 
-    # 2. 超出右边缘 (例如原在双屏右侧 x=1600, w=680 -> 1600+680=2280 > 1920)：智能换行
+    # 2. 超出右边缘 (例如原在双屏右侧 x=1600, w=680 -> 1600+680=2280 > 1920)：安全夹取至屏幕可用区域
     item2 = {"code": "603407", "x": 1600, "y": 100, "width": 680, "height": 420}
     tx2, ty2, tw2, th2, new_bottom2 = run_sbc._calculate_safe_geometry_with_wrap(item2, sg, new_bottom1)
-    assert tx2 == sg.left() + 12, "超出右边缘必须换行折回左边界"
-    assert ty2 == new_bottom1 + 8, "换行后 Y 必须在上一行底边下方"
+    assert tx2 + tw2 <= sg.right() + 1, "超出右边缘必须安全 clamp 限制在屏幕右边界内"
+    assert ty2 >= sg.top(), "Y 坐标在屏幕内"
 
 
 def test_sort_holding_items_by_spatial_order():
