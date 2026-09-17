@@ -1020,8 +1020,16 @@ def set_window_hwnd_pos(hwnd, pos_str: str, title: str = ""):
             host_rel = get_window_host_relation(hwnd)
             is_sub_win = host_rel.get("is_sub_window", False)
 
+            # 仅对通达信等特定从属浮窗（如类名为 #32770 且属于通达信进程的从属对话框）作为特殊应用进行上下文切换
+            is_tdx_sub_win = False
+            if is_sub_win:
+                exe_name = str(host_rel.get("exe_path", "")).lower()
+                host_t = str(host_rel.get("host_title", "")).lower()
+                if "tdxw" in exe_name or "tdx" in exe_name or "通达信" in host_t or host_rel.get("is_dialog", False):
+                    is_tdx_sub_win = True
+
             if not is_sub_win:
-                # 独立主程序窗口：若处于全屏、最大化或最小化，先强制取消并还原为普通窗口
+                # 独立主程序窗口（东方财富、同花顺、Chrome 等）：若处于全屏、最大化或最小化，先强制取消并还原为普通窗口
                 cancel_window_maximized_or_fullscreen(hwnd)
                 flags = SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED | SWP_SHOWWINDOW
             else:
@@ -1030,16 +1038,17 @@ def set_window_hwnd_pos(hwnd, pos_str: str, title: str = ""):
                     user32.ShowWindow(hwnd, 9) # SW_RESTORE 仅在明确最小化时还原
                 flags = SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW
 
-            # 🛡️ 消除跨进程 DPI 虚拟化除以 2 的截断缺陷：临时切换至目标窗口的原生 DPI 上下文
+            # 🛡️ 消除跨进程 DPI 虚拟化除以 2 的截断缺陷：仅对通达信等特定从属浮窗做特殊处理，严禁全局滥用于常规独立主程序
             target_dpi_ctx = None
             old_dpi_ctx = None
-            try:
-                if hasattr(user32, 'GetWindowDpiAwarenessContext') and hasattr(user32, 'SetThreadDpiAwarenessContext'):
-                    target_dpi_ctx = user32.GetWindowDpiAwarenessContext(hwnd)
-                    if target_dpi_ctx:
-                        old_dpi_ctx = user32.SetThreadDpiAwarenessContext(target_dpi_ctx)
-            except Exception:
-                pass
+            if is_tdx_sub_win:
+                try:
+                    if hasattr(user32, 'GetWindowDpiAwarenessContext') and hasattr(user32, 'SetThreadDpiAwarenessContext'):
+                        target_dpi_ctx = user32.GetWindowDpiAwarenessContext(hwnd)
+                        if target_dpi_ctx:
+                            old_dpi_ctx = user32.SetThreadDpiAwarenessContext(target_dpi_ctx)
+                except Exception:
+                    pass
 
             try:
                 # 一次性原子设定窗口坐标与大小，并触发系统刷新重绘
@@ -1063,6 +1072,13 @@ def set_window_hwnd_pos(hwnd, pos_str: str, title: str = ""):
 
                 if need_reapply:
                     user32.SetWindowPos(hwnd, 0, x, y, width, height, flags)
+
+                if success and not is_sub_win:
+                    # 🛡️ 针对东方财富等常规独立主窗口：补发移动结束消息，通知其 DirectUI/CEF 引擎刷新自愈，避免需要手动拖动一次才能恢复比例
+                    try:
+                        user32.PostMessageW(hwnd, 0x0232, 0, 0)  # WM_EXITSIZEMOVE = 0x0232
+                    except Exception:
+                        pass
 
                 return success
             finally:

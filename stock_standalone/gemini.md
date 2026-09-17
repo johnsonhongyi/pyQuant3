@@ -1,3 +1,24 @@
+## 2026-09-17 23:28
+- [x] **【彻底解决东方财富在低 DPI 屏幕设置窗口后变形/大字体重叠问题，通达信特定从属浮窗 DPI 上下文切换精准隔离】(`webTools/window_manager/core.py`, `tests/test_window_pos_dpi_isolation.py`)**：
+    - [x] **操盘手现场明确指示与真实痛点 (P0)**：
+        - “管理器最近的更新什么导致东方财富设置窗口后变形,依旧在低dpi的显示显示大dpi的样子”；
+        - “需要重新拖动一次还能恢复正确比例”；
+        - “修复这个bug,通达信特定从属浮窗是特殊应用可以特殊处理,不用全局使用”。
+    - [x] **根因深度破案与技术机理**：
+        1. 2026-09-15 提交的 `dcce99b4`（*管理器修复TDX子窗口位置处理功能*）在 `set_window_hwnd_pos` 中无差别引入了 `user32.SetThreadDpiAwarenessContext(target_dpi_ctx)`，使发起移动的线程被临时降级为目标窗口的 DPI 上下文；
+        2. 东方财富经典版为 System DPI Aware / DPI Unaware，调用线程被切入其高 DPI 上下文后，Windows User32 绕过了对东方财富的跨监视器 DPI 自动适配通知（`WM_DPICHANGED`），导致窗口物理外框被缩小至低 DPI，但 DirectUI/GDI 排版引擎仍然使用高 DPI 超大字号绘制，产生严重字体挤压变形；
+        3. 用户手动拖动 1 像素时，Windows Shell 发送了 `WM_EXITSIZEMOVE` 消息，促使东方财富 DirectUI 重新测量排版恢复正常。
+    - [x] **全体系工程落地与修复验证 (KISS / SOLID / DRY)**：
+        1. **通达信附属浮窗精准特异性隔离**：
+           - 严格判断宿主关系与进程特征（`is_tdx_sub_win`：属于 `is_sub_win` 且为通达信进程或 `#32770` 附属小窗）；
+           - 仅对通达信特定从属浮窗执行上下文切换，**坚决杜绝全局滥用**；
+        2. **独立顶层主窗口原生 Per-Monitor DPI 与自动刷新自愈**：
+           - 对东方财富、同花顺、Chrome 等所有独立主窗口（`not is_sub_win`），100% 保持管理器 Per-Monitor DPI Aware 物理像素设置通道，杜绝 DPI 虚拟化；
+           - 窗口落位成功后，向独立主窗口安全补发 `WM_EXITSIZEMOVE (0x0232)` 消息，模拟拖拽释放事件，通知其 DirectUI/CEF 引擎主动完成重绘自愈，彻底消除需要人工拖动一次的缺陷；
+        3. **全量自动化测试 100% 验证通过**：
+           - 新建 `tests/test_window_pos_dpi_isolation.py` 严格断言东方财富 0 调用 DPI 上下文切换且必须补发 `WM_EXITSIZEMOVE`，通达信附属浮窗正常上下文切换，测试全绿通过；
+           - 回归 `tests/test_ats_window_manager.py`（5/5 PASSED）全量通过。
+
 ## 2026-09-17 22:30
 - [x] **【彻底查清 `.ats_closing` 实际用处并迁移至 RamDisk，杜绝基层文件改动与硬盘小文件残留】(`ats/ui/intraday_strategy_dialog.py`, `ats/ui/main_window.py`, `tests/test_ats_closing_ramdisk.py`, `tests/test_sbc_ctrl_c_and_alt_exit_persistence.py`)**：
     - [x] **操盘手现场明确指示与疑问**：
