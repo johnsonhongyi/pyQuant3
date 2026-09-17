@@ -895,21 +895,179 @@ class KlineBackupViewer(QMainWindow, WindowMixin):
             table_view.setColumnWidth(i, target_w)
 
     def auto_load(self):
-        # Default path resolution
-        path = None
+        """
+        自动探测并加载缓存文件：
+        优先扫描 RamDisk (数十GB/s吞吐)，自适应比对 tdx_global_cache_pool.pkl.z 与 minute_kline_cache.pkl 的修改时间，
+        载入最新生成的缓存；若 RamDisk 无可用缓存，则回退探测当前工作目录。
+        """
+        candidates = []
+        target_names = ["tdx_global_cache_pool.pkl.z", "minute_kline_cache.pkl"]
+
+        # 1. 扫描 RamDisk 路径
         if cct:
-            ram_path = cct.get_ramdisk_path("minute_kline_cache.pkl")
-            if ram_path and os.path.exists(ram_path):
-                path = str(ram_path)
-        
-        if not path:
-            # Check current directory
-            local_path = "minute_kline_cache.pkl"
-            if os.path.exists(local_path):
-                path = local_path
-        
-        if path:
-            self.load_data(path)
+            for fname in target_names:
+                try:
+                    ram_path = cct.get_ramdisk_path(fname)
+                    if ram_path and os.path.exists(ram_path):
+                        candidates.append((os.path.getmtime(ram_path), str(ram_path)))
+                except Exception:
+                    pass
+
+            # 兜底探测 cct.get_ramdisk_dir()
+            try:
+                ram_dir = cct.get_ramdisk_dir()
+                if ram_dir:
+                    if ram_dir.endswith(":") and len(ram_dir) == 2:
+                        ram_dir = ram_dir + os.sep
+                    for fname in target_names:
+                        full_p = os.path.join(ram_dir, fname)
+                        if os.path.exists(full_p) and not any(c[1] == full_p for c in candidates):
+                            candidates.append((os.path.getmtime(full_p), full_p))
+            except Exception:
+                pass
+
+        # 2. 扫描当前工作目录
+        for fname in target_names:
+            local_p = fname
+            if os.path.exists(local_p) and not any(c[1] == local_p for c in candidates):
+                try:
+                    candidates.append((os.path.getmtime(local_p), local_p))
+                except Exception:
+                    pass
+
+        # 3. 按修改时间倒序（最新修改的优先载入）
+        if candidates:
+            candidates.sort(key=lambda x: x[0], reverse=True)
+            chosen_path = candidates[0][1]
+            print(f"[auto_load] 命中候选缓存 (共 {len(candidates)} 个)，优先载入最新: {chosen_path}")
+            self.load_data(chosen_path)
+
+    def _convert_tdx_cache_payload_to_df(self, payload: Any, file_path: str = "") -> pd.DataFrame:
+        """
+        【TDX 全局缓存池载荷自适应重构】
+        将 TDXGlobalCachePool 的字典 payload 重构为标准分时 DataFrame
+        """
+        if isinstance(payload, pd.DataFrame):
+            return payload
+
+        if not isinstance(payload, dict):
+            return pd.DataFrame()
+
+        # 提取历史静态分时字典或兼容直接字典
+        hist = payload.get("history_static_bars")
+        if hist is None:
+            if any(isinstance(v, (dict, list)) for v in payload.values()):
+                hist = payload
+            else:
+                hist = {}
+
+        cache_date = str(payload.get("date", ""))
+        updated_at = payload.get("updated_at", 0)
+
+        rows = []
+        for code_key, entry in hist.items():
+            clean_code = str(code_key).zfill(6)
+            records = []
+            if isinstance(entry, dict):
+                records = entry.get("records", [])
+            elif isinstance(entry, list):
+                records = entry
+            elif isinstance(entry, pd.DataFrame):
+                sub_df = entry.copy()
+                sub_df["code"] = clean_code
+                rows.append(sub_df)
+                continue
+
+            if not records:
+                continue
+
+            if isinstance(records, list):
+                sub_df = pd.DataFrame(records)
+                sub_df["code"] = clean_code
+                rows.append(sub_df)
+            elif isinstance(records, pd.DataFrame):
+                sub_df = records.copy()
+                sub_df["code"] = clean_code
+                rows.append(sub_df)
+
+        if not rows:
+            return pd.DataFrame()
+
+        full_df = pd.concat(rows, ignore_index=True)
+
+        # 时间字段对齐与规范化
+        if "time" not in full_df.columns:
+            if "datetime" in full_df.columns:
+                full_df["time"] = full_df["datetime"].astype(str)
+            elif "date" in full_df.columns and "time_only" in full_df.columns:
+                full_df["time"] = full_df["date"].astype(str) + " " + full_df["time_only"].astype(str)
+        else:
+            # 针对已有 time 列但缺少年份（形如 '09-04 09:31'）或为空的行，结合 date + time_only 规整
+            if "date" in full_df.columns and "time_only" in full_df.columns:
+                valid_dt_mask = full_df["date"].notna() & full_df["time_only"].notna()
+                if valid_dt_mask.any():
+                    t_str = full_df["time"].astype(str)
+                    needs_fix = valid_dt_mask & (~t_str.str.startswith("20"))
+                    if needs_fix.any():
+                        full_df.loc[needs_fix, "time"] = (
+                            full_df.loc[needs_fix, "date"].astype(str) + " " + full_df.loc[needs_fix, "time_only"].astype(str)
+                        )
+            # 若仍有 time 为空/nan 的行且 datetime 列存在，回退补全 datetime
+            if "datetime" in full_df.columns:
+                dt_mask = full_df["time"].isna() | (full_df["time"].astype(str).isin(["nan", "nan nan", "None", ""]))
+                if dt_mask.any():
+                    full_df.loc[dt_mask, "time"] = full_df.loc[dt_mask, "datetime"].astype(str)
+
+        # 核心：确保 datetime 列全量同步 time，彻底消灭由多源合并产生的全 NaN 现象
+        if "datetime" in full_df.columns:
+            full_df["datetime"] = full_df["time"]
+
+        # 核心行情字段别名规范化
+        if "close" not in full_df.columns:
+            if "price" in full_df.columns:
+                full_df["close"] = full_df["price"]
+            elif "trade" in full_df.columns:
+                full_df["close"] = full_df["trade"]
+        if "price" not in full_df.columns and "close" in full_df.columns:
+            full_df["price"] = full_df["close"]
+
+        if "volume" not in full_df.columns and "vol" in full_df.columns:
+            full_df["volume"] = full_df["vol"]
+
+        # 记录元数据供 UI 统计展示
+        self._tdx_cache_metadata = {
+            "date": cache_date,
+            "version": payload.get("version", 1),
+            "updated_at": updated_at,
+            "stock_count": len(hist),
+            "total_bars": len(full_df),
+            "file_path": file_path
+        }
+
+        return full_df
+
+    def _load_tdx_cache_pool_file(self, file_path: str) -> pd.DataFrame:
+        """
+        【RamDisk TDX 缓存极速解压与重构】
+        支持 zlib level 1 压缩二进制包 (0.2~0.5ms 解压)，自动反序列化并转为 DataFrame
+        """
+        import zlib
+        import pickle
+
+        with open(file_path, "rb") as f:
+            compressed_data = f.read()
+
+        if not compressed_data:
+            return pd.DataFrame()
+
+        try:
+            raw_bytes = zlib.decompress(compressed_data)
+        except Exception:
+            raw_bytes = compressed_data
+
+        payload = pickle.loads(raw_bytes)
+        return self._convert_tdx_cache_payload_to_df(payload, file_path=file_path)
+
 
     def _normalize_dataframe(self, df: pd.DataFrame) -> pd.DataFrame:
         """
@@ -1037,12 +1195,12 @@ class KlineBackupViewer(QMainWindow, WindowMixin):
                     start_path = path
                     break
 
-        # 修改这里，添加 HDF5 支持
+        # 添加 TDX Global Cache (*.pkl.z *.z) 与 HDF5/CSV/Pickle 全面支持
         file_name, _ = QFileDialog.getOpenFileName(
             self,
             "Open Cache File",
             start_path,
-            "All Support (*.h5 *.pkl *.csv *.json *.gz);;CSV Files (*.csv);;HDF5 Files (*.h5);;Session Files (*.json *.json.gz);;Pickle Files (*.pkl);;All Files (*)"
+            "All Support (*.h5 *.pkl *.pkl.z *.z *.csv *.json *.gz);;TDX Global Cache (*.pkl.z *.z);;Pickle Files (*.pkl *.pkl.z *.z);;HDF5 Files (*.h5);;CSV Files (*.csv);;Session Files (*.json *.json.gz);;All Files (*)"
         )
 
         if file_name:
@@ -1251,8 +1409,18 @@ class KlineBackupViewer(QMainWindow, WindowMixin):
             self.add_file_to_history(file_path)
 
             ext = os.path.splitext(file_path)[1].lower()
+            file_lower = file_path.lower()
+            is_tdx_compressed = (
+                file_lower.endswith(".pkl.z")
+                or file_lower.endswith(".z")
+                or file_lower.endswith(".pklz")
+                or ext in (".z", ".pklz")
+            )
 
-            if ext == ".pkl":
+            if is_tdx_compressed:
+                df = self._load_tdx_cache_pool_file(file_path)
+
+            elif ext == ".pkl":
                 # 获取配置中的首选压缩方式
                 config_ini = cct.get_ramdisk_path('h5config.txt') if cct else None
                 if not config_ini:
@@ -1280,11 +1448,20 @@ class KlineBackupViewer(QMainWindow, WindowMixin):
                         continue
                 
                 if df is None:
+                    # 自适应探测：可能文件内部是 zlib 压缩的 TDX 缓存池格式
+                    try:
+                        df = self._load_tdx_cache_pool_file(file_path)
+                    except Exception:
+                        pass
+
+                if df is None:
                     raise last_err
 
                 # 🛡️ 自适应兼容：如果从 pickle 中直接读出了紧凑字典，自动重构为 DataFrame
                 if isinstance(df, dict):
-                    if df.get('__version__') == 2 and 'data' in df:
+                    if 'history_static_bars' in df:
+                        df = self._convert_tdx_cache_payload_to_df(df, file_path=file_path)
+                    elif df.get('__version__') == 2 and 'data' in df:
                         codes_list = []
                         arrays_list = []
                         for code, arr in df['data'].items():
@@ -1511,11 +1688,19 @@ class KlineBackupViewer(QMainWindow, WindowMixin):
                 except:
                     pass
 
-                self.stats_label.setText(
-                    f"📊 File: {os.path.basename(file_path)} | Last Modified: {time_str} | "
-                    f"Stocks: {stock_count} | Total Nodes: {total_nodes}\n"
-                    f"🔑 Fingerprint (MD5): {fp}"
-                )
+                meta = getattr(self, '_tdx_cache_metadata', None)
+                if meta and meta.get('file_path') == file_path:
+                    meta_date = meta.get('date', '--')
+                    self.stats_label.setText(
+                        f"⚡ TDX Global Cache Pool | Date: {meta_date} | Stocks: {stock_count} | Total Bars: {total_nodes}\n"
+                        f"📁 File: {os.path.basename(file_path)} | Modified: {time_str} | MD5: {fp}"
+                    )
+                else:
+                    self.stats_label.setText(
+                        f"📊 File: {os.path.basename(file_path)} | Last Modified: {time_str} | "
+                        f"Stocks: {stock_count} | Total Nodes: {total_nodes}\n"
+                        f"🔑 Fingerprint (MD5): {fp}"
+                    )
             except Exception as stats_e:
                 print(f"Stats Error: {stats_e}")
                 self.stats_label.setText(f"Loaded {os.path.basename(file_path)} (Stats failed)")
@@ -2238,7 +2423,24 @@ class KlineBackupViewer(QMainWindow, WindowMixin):
                 if str(cfg_compression).lower() == 'none':
                     cfg_compression = None
 
-                if ext == ".pkl":
+                is_z_file = (
+                    self.current_file.lower().endswith(".pkl.z")
+                    or self.current_file.lower().endswith(".z")
+                    or ext in (".z", ".pklz")
+                )
+
+                if is_z_file:
+                    import zlib
+                    import pickle
+                    self.statusBar().showMessage(f"Saving to {self.current_file} (zlib level 1 compressed)...")
+                    raw_bytes = pickle.dumps(df, protocol=pickle.HIGHEST_PROTOCOL)
+                    compressed = zlib.compress(raw_bytes, 1)
+                    tmp_p = self.current_file + f".{os.getpid()}.tmp"
+                    with open(tmp_p, "wb") as f:
+                        f.write(compressed)
+                    os.replace(tmp_p, self.current_file)
+                    self.statusBar().showMessage(f"Successfully saved to {os.path.basename(self.current_file)} (zlib level 1)!")
+                elif ext == ".pkl":
                     self.statusBar().showMessage(f"Saving to {self.current_file} ({cfg_compression} compressed)...")
                     df.to_pickle(self.current_file, compression=cfg_compression)
                     self.statusBar().showMessage(f"Successfully saved to {os.path.basename(self.current_file)} ({cfg_compression})!")
@@ -2293,7 +2495,7 @@ class KlineBackupViewer(QMainWindow, WindowMixin):
             self,
             "转存为新文件",
             self.current_file if self.current_file else os.getcwd(),
-            "Pickle Files (*.pkl);;CSV Files (*.csv);;Session Files (*.json *.json.gz);;HDF5 Files (*.h5 *.hdf5 *.hdf);;All Files (*)"
+            "TDX Global Cache (*.pkl.z *.z);;Pickle Files (*.pkl);;CSV Files (*.csv);;Session Files (*.json *.json.gz);;HDF5 Files (*.h5 *.hdf5 *.hdf);;All Files (*)"
         )
 
         if not file_path:
@@ -2328,7 +2530,23 @@ class KlineBackupViewer(QMainWindow, WindowMixin):
             if str(cfg_compression).lower() == 'none':
                 cfg_compression = None
 
-            if ext == ".pkl":
+            is_z_file = (
+                file_path.lower().endswith(".pkl.z")
+                or file_path.lower().endswith(".z")
+                or ext in (".z", ".pklz")
+            )
+            if is_z_file:
+                import zlib
+                import pickle
+                self.statusBar().showMessage(f"Saving to {file_path} (zlib level 1 compressed)...")
+                raw_bytes = pickle.dumps(df, protocol=pickle.HIGHEST_PROTOCOL)
+                compressed = zlib.compress(raw_bytes, 1)
+                tmp_p = file_path + f".{os.getpid()}.tmp"
+                with open(tmp_p, "wb") as f:
+                    f.write(compressed)
+                os.replace(tmp_p, file_path)
+                self.statusBar().showMessage(f"Successfully saved to {os.path.basename(file_path)} (zlib level 1)!")
+            elif ext == ".pkl":
                 self.statusBar().showMessage(f"Saving to {file_path} ({cfg_compression} compressed)...")
                 df.to_pickle(file_path, compression=cfg_compression)
                 self.statusBar().showMessage(f"Successfully saved to {os.path.basename(file_path)} ({cfg_compression})!")

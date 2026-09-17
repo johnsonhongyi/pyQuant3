@@ -411,13 +411,19 @@ class TDXGlobalCachePool:
         # 分区 2: 多日分时最终计算结果短效缓存 {(clean_code, days): (df, timestamp, date_str)}
         self._multi_day_df_cache: Dict[Tuple[str, int], Tuple[pd.DataFrame, float, str]] = {}
 
-        # 分区 3: 实时行情快照缓存 {clean_code: (quote_dict, timestamp)}
+        # 分区 3: 交易日计算增量分时与时间戳状态 {(clean_code, days): {'df': DataFrame, 'latest_bar_time': str, 'today_bar_count': int, 'last_cum_vol': float, 'last_cum_amt': float, 'updated_at': float, 'frozen': bool}}
+        self._incremental_intraday_pool: Dict[Tuple[str, int], Dict[str, Any]] = {}
+
+        # 分区 4: 交易日日线特征指标缓存 {clean_code: {'metrics': dict, 'updated_at': float}}
+        self._daily_metrics_cache: Dict[str, Dict[str, Any]] = {}
+
+        # 分区 5: 实时行情快照缓存 {clean_code: (quote_dict, timestamp)}
         self._quotes_cache: Dict[str, Tuple[Dict[str, Any], float]] = {}
 
-        # 分区 4: 多周期 K 线缓存 {(clean_code, category): (df, timestamp)}
+        # 分区 6: 多周期 K 线缓存 {(clean_code, category): (df, timestamp)}
         self._kline_cache: Dict[Tuple[str, str], Tuple[pd.DataFrame, float]] = {}
 
-        # 分区 5: 真实流通股本与总股本缓存 {clean_code: float}
+        # 分区 7: 真实流通股本与总股本缓存 {clean_code: float}
         self._shares_cache: Dict[str, float] = {}
 
         # 监控统计指标
@@ -441,7 +447,7 @@ class TDXGlobalCachePool:
     def _load_from_ramdisk(self) -> bool:
         """
         【RamDisk 极速加载】
-        从内存盘读取 zlib level 1 压缩二进制包，0.2ms 完成跨进程历史静态缓存热重载
+        从内存盘读取 zlib level 1 压缩二进制包，0.2ms 完成跨进程历史静态缓存与增量计算状态热重载
         """
         try:
             if not os.path.exists(self._ramdisk_path):
@@ -472,12 +478,23 @@ class TDXGlobalCachePool:
                         if local_entry is None or v.get("updated_at", 0) > local_entry.get("updated_at", 0):
                             self._history_static_bars[k] = v
 
+                remote_inc = payload.get("incremental_intraday_pool", {})
+                if isinstance(remote_inc, dict):
+                    for k, v in remote_inc.items():
+                        local_inc = self._incremental_intraday_pool.get(k)
+                        if local_inc is None or v.get("updated_at", 0) > local_inc.get("updated_at", 0):
+                            self._incremental_intraday_pool[k] = v
+
+                remote_metrics = payload.get("daily_metrics_cache", {})
+                if isinstance(remote_metrics, dict):
+                    self._daily_metrics_cache.update(remote_metrics)
+
                 remote_shares = payload.get("shares_cache", {})
                 if isinstance(remote_shares, dict):
                     self._shares_cache.update(remote_shares)
 
                 self._last_ramdisk_mtime = mtime
-                logger.info(f"⚡ [TDXGlobalCachePool] 已从 RamDisk 载入 {len(self._history_static_bars)} 只股票的静态历史分时 (解压耗时 < 1ms)")
+                logger.info(f"⚡ [TDXGlobalCachePool] 已从 RamDisk 载入 {len(self._history_static_bars)} 只静态历史分时 / {len(self._incremental_intraday_pool)} 组增量分时 (解压耗时 < 1ms)")
             return True
         except Exception as e:
             logger.debug(f"[TDXGlobalCachePool] 从 RamDisk 载入缓存异常: {e}")
@@ -500,21 +517,28 @@ class TDXGlobalCachePool:
         """
         【RamDisk 极限压缩原子持久化】
         采用 zlib level 1 极限极速无损压缩与原子替换 (tmp -> os.replace)，
-        100 只股票仅占 2.25MB，写入仅需 1~2ms，多进程 0 锁竞态与 0 截断风险
+        包含静态历史分时、时间戳增量分时、日线指标与收盘固化标记 (frozen)，写入仅需 1~2ms
         """
         now = time.time()
         with self._mutex:
             if not force and (now - self._last_flush_ts < 300.0):
                 return False
 
-            if not self._history_static_bars and not self._shares_cache:
+            if not self._history_static_bars and not self._incremental_intraday_pool and not self._shares_cache:
                 return False
 
             today_str = self._current_date_str
+            # 判断是否收盘后 (15:05 之后为收盘固化状态)
+            current_hm = datetime.now().strftime("%H:%M")
+            is_after_close = (current_hm >= "15:05")
+
             payload = {
                 "date": today_str,
-                "version": 1,
+                "version": 2,
+                "frozen": is_after_close,
                 "history_static_bars": dict(self._history_static_bars),
+                "incremental_intraday_pool": dict(self._incremental_intraday_pool),
+                "daily_metrics_cache": dict(self._daily_metrics_cache),
                 "shares_cache": dict(self._shares_cache),
                 "updated_at": now
             }
@@ -535,7 +559,7 @@ class TDXGlobalCachePool:
                 pass
             with self._mutex:
                 self._is_dirty = False
-            logger.info(f"💾 [TDXGlobalCachePool] 5-10分钟统一持久化完成: 已保存 {len(payload['history_static_bars'])} 只股票至 RamDisk ({len(compressed)/1024:.1f} KB)")
+            logger.info(f"💾 [TDXGlobalCachePool] RamDisk 持久化完成: 已保存 {len(payload['history_static_bars'])} 只静态分时 / {len(payload['incremental_intraday_pool'])} 组增量分时 ({len(compressed)/1024:.1f} KB, 收盘固化={is_after_close})")
             return True
         except Exception as e:
             logger.debug(f"[TDXGlobalCachePool] 写入 RamDisk 异常: {e}")
@@ -563,6 +587,8 @@ class TDXGlobalCachePool:
                 self._current_date_str = today_str
                 self._history_static_bars.clear()
                 self._multi_day_df_cache.clear()
+                self._incremental_intraday_pool.clear()
+                self._daily_metrics_cache.clear()
                 self._quotes_cache.clear()
                 self._kline_cache.clear()
                 # 尝试移除 RamDisk 上的跨日文件
@@ -642,12 +668,106 @@ class TDXGlobalCachePool:
             if df is not None and not df.empty:
                 self._multi_day_df_cache[key] = (df.copy(), time.time(), self._current_date_str)
 
-    # ── 3. 全局同步与管理能力 ──
+    # ── 3. 交易日计算增量分时与时间戳复用 ──
+    def get_incremental_intraday(self, code: str, days: int, ttl: float = 2.4) -> Optional[Tuple[pd.DataFrame, Dict[str, Any]]]:
+        """
+        【时间戳增量复用 & 收盘固化直出】
+        - 若当前处于收盘后 (15:05 后) 或非交易日，且包含今日数据或打上了 frozen，直接 0 网络直出
+        - 盘中在 TTL (如 2.4s) 内直接返回
+        - 返回 (DataFrame 副本, entry_metadata)
+        """
+        self._check_date_rollover()
+        c_clean = str(code).zfill(6)
+        key = (c_clean, int(days))
+        current_hm = datetime.now().strftime("%H:%M")
+        is_after_close = (current_hm >= "15:05")
+
+        with self._mutex:
+            entry = self._incremental_intraday_pool.get(key)
+            if entry is not None:
+                df = entry.get("df")
+                ts = entry.get("updated_at", 0.0)
+                is_frozen = entry.get("frozen", False) or is_after_close
+                if df is not None and not df.empty:
+                    # 收盘后或在 TTL 内直接 0ms 纯内存命中
+                    if is_frozen or (time.time() - ts < ttl):
+                        self.stats["total_queries"] += 1
+                        self.stats["cache_hits"] += 1
+                        self.stats["saved_network_calls"] += 1
+                        return df.copy(), dict(entry)
+
+        # 本地未命中，尝试从 RamDisk 探测同步 (如外部 ATS/SBC 刚更新了)
+        self._maybe_sync_from_ramdisk()
+        with self._mutex:
+            entry = self._incremental_intraday_pool.get(key)
+            if entry is not None:
+                df = entry.get("df")
+                ts = entry.get("updated_at", 0.0)
+                is_frozen = entry.get("frozen", False) or is_after_close
+                if df is not None and not df.empty:
+                    if is_frozen or (time.time() - ts < ttl):
+                        self.stats["total_queries"] += 1
+                        self.stats["cache_hits"] += 1
+                        self.stats["saved_network_calls"] += 1
+                        return df.copy(), dict(entry)
+            return None
+
+    def set_incremental_intraday(self, code: str, days: int, df: pd.DataFrame, 
+                                 latest_bar_time: str, today_bar_count: int, 
+                                 last_cum_vol: float, last_cum_amt: float):
+        """
+        【写入增量分时与时间戳状态】
+        """
+        self._check_date_rollover()
+        c_clean = str(code).zfill(6)
+        key = (c_clean, int(days))
+        current_hm = datetime.now().strftime("%H:%M")
+        is_after_close = (current_hm >= "15:05")
+
+        with self._mutex:
+            if df is not None and not df.empty:
+                self._incremental_intraday_pool[key] = {
+                    "df": df.copy(),
+                    "date": self._current_date_str,
+                    "days": days,
+                    "latest_bar_time": str(latest_bar_time),
+                    "today_bar_count": int(today_bar_count),
+                    "last_cum_vol": float(last_cum_vol),
+                    "last_cum_amt": float(last_cum_amt),
+                    "updated_at": time.time(),
+                    "frozen": is_after_close
+                }
+                # 同步填充短期 df 缓存
+                self._multi_day_df_cache[key] = (df.copy(), time.time(), self._current_date_str)
+                self._is_dirty = True
+
+    # ── 4. 交易日特征指标缓存 (日线 OHLC + 均线 + 通道支撑) ──
+    def get_daily_metrics(self, code: str) -> Optional[Dict[str, Any]]:
+        self._check_date_rollover()
+        c_clean = str(code).zfill(6)
+        with self._mutex:
+            entry = self._daily_metrics_cache.get(c_clean)
+            if entry and entry.get("date") == self._current_date_str:
+                return dict(entry.get("metrics", {}))
+        return None
+
+    def set_daily_metrics(self, code: str, metrics: Dict[str, Any]):
+        self._check_date_rollover()
+        c_clean = str(code).zfill(6)
+        with self._mutex:
+            self._daily_metrics_cache[c_clean] = {
+                "date": self._current_date_str,
+                "metrics": dict(metrics),
+                "updated_at": time.time()
+            }
+            self._is_dirty = True
+
+    # ── 5. 全局同步与管理能力 ──
     def invalidate(self, code: Optional[str] = None, partition: Optional[str] = None):
         """
         【全局同步能力】清除/重置指定股票或全量股票的缓存
         :param code: None 表示全量标的，否则针对指定股票代码
-        :param partition: None 表示全部分区，否则可选 'history', 'df', 'quotes', 'kline', 'shares'
+        :param partition: None 表示全部分区，否则可选 'history', 'df', 'incremental', 'metrics', 'quotes', 'kline', 'shares'
         """
         with self._mutex:
             c_clean = str(code).zfill(6) if code else None
@@ -664,6 +784,20 @@ class TDXGlobalCachePool:
                         self._multi_day_df_cache.pop(k, None)
                 else:
                     self._multi_day_df_cache.clear()
+
+            if partition in (None, "incremental"):
+                if c_clean:
+                    keys = [k for k in self._incremental_intraday_pool.keys() if k[0] == c_clean]
+                    for k in keys:
+                        self._incremental_intraday_pool.pop(k, None)
+                else:
+                    self._incremental_intraday_pool.clear()
+
+            if partition in (None, "metrics"):
+                if c_clean:
+                    self._daily_metrics_cache.pop(c_clean, None)
+                else:
+                    self._daily_metrics_cache.clear()
 
             if partition in (None, "quotes"):
                 if c_clean:
@@ -685,7 +819,7 @@ class TDXGlobalCachePool:
                 else:
                     self._shares_cache.clear()
 
-            if partition in (None, "history"):
+            if partition in (None, "history", "incremental"):
                 self.flush_to_ramdisk(force=True)
 
             target_str = f"标的 {c_clean}" if c_clean else "全量标的"
@@ -704,7 +838,9 @@ class TDXGlobalCachePool:
                 "hit_rate_pct": round(hit_rate, 1),
                 "saved_network_calls": self.stats["saved_network_calls"],
                 "static_history_count": len(self._history_static_bars),
+                "incremental_intraday_count": len(self._incremental_intraday_pool),
                 "multi_day_df_count": len(self._multi_day_df_cache),
+                "metrics_count": len(self._daily_metrics_cache),
                 "kline_count": len(self._kline_cache),
                 "current_date": self._current_date_str
             }
@@ -1975,16 +2111,18 @@ class TDXRealtimeFetcher:
         try:
             today_date_str = datetime.now().strftime("%Y-%m-%d")
 
-            # 1. 优先从全局缓存池提取短期 TTL 缓存 (2.4 秒内直接返回)
+            # 1. 优先从全局缓存池提取增量/收盘固化缓存 (收盘后 0 网络直出；盘中在 TTL 内 0 网络直出)
             try:
                 _base_intv = float(getattr(cct, 'ats_tdx_interval', 3.0) or 3.0)
             except Exception:
                 _base_intv = 3.0
             _cache_ttl = max(1.5, _base_intv * 0.8)
 
-            cached_df = self.cache_pool.get_multi_day_df(c_clean, days, ttl=_cache_ttl)
-            if cached_df is not None and not cached_df.empty:
-                return cached_df
+            cached_inc = self.cache_pool.get_incremental_intraday(c_clean, days, ttl=_cache_ttl)
+            if cached_inc is not None:
+                df_inc, _ = cached_inc
+                if df_inc is not None and not df_inc.empty:
+                    return df_inc
 
             mkt = get_market_code(c_clean)
             tot_circ_shares = self.get_circulation_shares(c_clean)
@@ -2003,7 +2141,7 @@ class TDXRealtimeFetcher:
             with self._conn_lock:
                 if not self._is_connected or self.api is None:
                     if not self.connect():
-                        return cached_df if (cached_entry and cached_df is not None) else pd.DataFrame()
+                        return pd.DataFrame()
                 try:
                     bars = self.api.get_security_bars(8, mkt, c_clean, 0, 800) or []
                     needed_batches = min(4, (fetch_days * 240 + 799) // 800)
@@ -2036,7 +2174,7 @@ class TDXRealtimeFetcher:
                             bars = None
 
             if not bars:
-                return cached_df if (cached_entry and cached_df is not None) else pd.DataFrame()
+                return pd.DataFrame()
 
             df = pd.DataFrame(bars)
             if df.empty or "datetime" not in df.columns:
@@ -2045,7 +2183,7 @@ class TDXRealtimeFetcher:
             df["date_str"] = df["datetime"].astype(str).str[:10]
             df["time_str"] = df["datetime"].astype(str).str[11:16]
 
-            # 3. 分支 A: 若命中历史静态缓存，执行【当日极速增量合并】
+            # 3. 分支 A: 若命中历史静态缓存，执行【当日时间戳增量比对与合并】
             if has_valid_hist and days > 1:
                 hist_records = list(hist_entry.get("records", []))
                 cum_vol_shares = float(hist_entry.get("last_cum_vol", 0.0))
@@ -2055,9 +2193,24 @@ class TDXRealtimeFetcher:
                 latest_date = today_dates[-1] if today_dates else today_date_str
                 df_today = df[df["date_str"] == latest_date].copy()
 
+                today_records_raw = df_today.to_dict('records')
+                latest_bar_t = str(today_records_raw[-1].get("time_str", "")) if today_records_raw else ""
+
+                # ⚡ 时间戳微秒级复用检查：若通达信尚未产生新一分钟 Bar，0 重算直接复用现有已算好的 DataFrame
+                with self.cache_pool._mutex:
+                    cached_pool_entry = self.cache_pool._incremental_intraday_pool.get((c_clean, days))
+                if (cached_pool_entry is not None 
+                    and cached_pool_entry.get("latest_bar_time") == latest_bar_t
+                    and cached_pool_entry.get("today_bar_count") == len(today_records_raw)):
+                    existing_df = cached_pool_entry.get("df")
+                    if existing_df is not None and not existing_df.empty:
+                        self.cache_pool.stats["total_queries"] += 1
+                        self.cache_pool.stats["cache_hits"] += 1
+                        return existing_df.copy()
+
                 today_records = []
                 date_short = latest_date[5:]
-                for r in df_today.to_dict('records'):
+                for r in today_records_raw:
                     t_str = str(r.get("time_str", ""))
                     time_label = f"{date_short} {t_str}"
                     p = float(r.get("close", 0.0))
@@ -2101,7 +2254,13 @@ class TDXRealtimeFetcher:
                 df_res = pd.DataFrame(all_records)
                 if not df_res.empty:
                     df_res.set_index("time", inplace=True)
-                    self.cache_pool.set_multi_day_df(c_clean, days, df_res)
+                    self.cache_pool.set_incremental_intraday(
+                        c_clean, days, df_res,
+                        latest_bar_time=latest_bar_t,
+                        today_bar_count=len(today_records),
+                        last_cum_vol=cum_vol_shares,
+                        last_cum_amt=cum_amt
+                    )
                 return df_res
 
             # 4. 分支 B: 首次拉取或未命中静态缓存，全量计算并长效写入全局静态缓存
@@ -2182,7 +2341,15 @@ class TDXRealtimeFetcher:
             df_res = pd.DataFrame(res_rows)
             if not df_res.empty:
                 df_res.set_index("time", inplace=True)
-                self.cache_pool.set_multi_day_df(c_clean, days, df_res)
+                latest_bar_t = str(res_rows[-1].get("time_only", "")) if res_rows else ""
+                today_recs_cnt = sum(1 for r in res_rows if r.get("date") == today_date_identified)
+                self.cache_pool.set_incremental_intraday(
+                    c_clean, days, df_res,
+                    latest_bar_time=latest_bar_t,
+                    today_bar_count=today_recs_cnt,
+                    last_cum_vol=cum_vol_shares,
+                    last_cum_amt=cum_amt
+                )
             return df_res
         except Exception as e:
             logger.debug(f"拉取 {c_clean} 多日分时数据异常: {e}")
