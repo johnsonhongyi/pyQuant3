@@ -247,15 +247,35 @@ class DataFrameModel(QAbstractTableModel):
         return None
 
     def sort(self, column, order):
-        """Sort table by given column number."""
+        """【高精度智能排序】支持数值自适应探测与索引重置，杜绝字典序错乱与行错位"""
         try:
             if 0 <= column < self._data.shape[1]:
                 col_name = self._data.columns[column]
                 self.layoutAboutToBeChanged.emit()
-                self._data = self._data.sort_values(
-                    by=col_name, 
-                    ascending=(order == Qt.SortOrder.AscendingOrder)
-                )
+                ascending = (order == Qt.SortOrder.AscendingOrder)
+                col_s = self._data[col_name]
+                
+                # 智能数值探测：如果是数值列或纯数字字符串，按纯数值排序！
+                try:
+                    # 剥除可能存在的逗号、百分号、正号
+                    clean_s = col_s.astype(str).str.replace(',', '', regex=False).str.replace('%', '', regex=False).str.replace('+', '', regex=False).str.strip()
+                    temp_num = pd.to_numeric(clean_s, errors='coerce')
+                    valid_ratio = temp_num.notna().sum() / max(1, len(self._data))
+                    if valid_ratio >= 0.5:
+                        sorted_idx = temp_num.sort_values(ascending=ascending, na_position='last').index
+                        self._data = self._data.loc[sorted_idx].reset_index(drop=True)
+                    else:
+                        self._data = self._data.sort_values(
+                            by=col_name, 
+                            ascending=ascending,
+                            na_position='last'
+                        ).reset_index(drop=True)
+                except Exception:
+                    self._data = self._data.sort_values(
+                        by=col_name, 
+                        ascending=ascending
+                    ).reset_index(drop=True)
+
                 self.layoutChanged.emit()
         except Exception as e:
             print(f"Sort Error: {e}")
@@ -798,6 +818,13 @@ class KlineBackupViewer(QMainWindow, WindowMixin):
         self.full_results_table.setSelectionBehavior(_SelectRows)
         self.full_results_table.setSortingEnabled(True)
         self._connect_table_signals(self.full_results_table, self.on_row_selection_linkage)
+
+        # 🛡️ 显式为所有视图启用表头点击排序与指示器箭头
+        for tbl in [self.summary_table, self.detail_table, self.full_results_table]:
+            tbl.setSortingEnabled(True)
+            hdr = tbl.horizontalHeader()
+            hdr.setSectionsClickable(True)
+            hdr.setSortIndicatorShown(True)
         
         # Add a label for the bottom area
         bottom_container = QWidget()
