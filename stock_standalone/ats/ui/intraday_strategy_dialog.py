@@ -2814,6 +2814,21 @@ class SBCIntradayChartDialog(QWidget):
         tb_layout.addWidget(btn_refresh)
         tb_layout.addWidget(btn_clear_cache)
         tb_layout.addWidget(self.btn_toggle_log)
+
+        self.btn_exit_all = QPushButton("🚪 退出保存")
+        self.btn_exit_all.setStyleSheet("""
+            QPushButton {
+                background-color: #3b1419; color: #ff8888; font-weight: bold; border: 1px solid #ff4444;
+                border-radius: 3px; padding: 2px 5px; font-size: 8.5pt;
+            }
+            QPushButton:hover {
+                background-color: #551922; color: #ffffff; border: 1px solid #ff6666;
+            }
+        """)
+        self.btn_exit_all.setToolTip("快捷键: 按住 Alt 点击窗口右上角关闭 [X] 键，或 Ctrl+Shift+Q。\n一键将当前所有打开的盯盘窗口与布局原样持久化保存，并安全退出。")
+        self.btn_exit_all.clicked.connect(self._exit_and_save_all)
+        tb_layout.addWidget(self.btn_exit_all)
+
         layout.addLayout(tb_layout)
 
         # 2. 实盘走势图画布
@@ -3385,7 +3400,24 @@ class SBCIntradayChartDialog(QWidget):
             self.close()
             event.accept()
             return
+        # 💡 [NEW] 快捷键全部退出并持久化：Ctrl+Shift+Q 或 Alt+Escape
+        if (key == Qt.Key.Key_Q and (modifiers & Qt.KeyboardModifier.ControlModifier) and (modifiers & Qt.KeyboardModifier.ShiftModifier)) or \
+           (key == Qt.Key.Key_Escape and (modifiers & Qt.KeyboardModifier.AltModifier)):
+            self._exit_and_save_all()
+            event.accept()
+            return
         super().keyPressEvent(event)
+
+    def _exit_and_save_all(self):
+        """【🛑 全部退出并持久化】持久化保存所有已打开的盯盘窗口并安全退出"""
+        try:
+            from run_sbc import quit_and_save_all_sbc_windows
+            quit_and_save_all_sbc_windows()
+        except Exception as e:
+            logger.warning(f"一键退出持久化异常: {e}")
+            app = QApplication.instance()
+            if app:
+                app.quit()
 
     def _trigger_linkage(self):
         """⚡ 按下 F 键触发全系统与通达信/外部行情联动"""
@@ -3484,6 +3516,34 @@ class SBCIntradayChartDialog(QWidget):
 
     def closeEvent(self, event):
         """关闭窗口时彻底停止所有后台轮询定时器，从全局管理字典注销，自动持久化坐标并维护打开列表"""
+        # 💡 [NEW] 操盘手快捷交互：按住 Alt 键点击右上角关闭 [X] 键，触发全部退出并持久化！
+        is_alt_pressed = False
+        try:
+            from PyQt6.QtCore import Qt
+            from PyQt6.QtWidgets import QApplication
+            if bool(QApplication.keyboardModifiers() & Qt.KeyboardModifier.AltModifier):
+                is_alt_pressed = True
+            elif sys.platform == "win32":
+                import ctypes
+                # 0x12 为 VK_MENU (Alt 键物理状态，最高位为 1 表示按下)
+                if bool(ctypes.windll.user32.GetAsyncKeyState(0x12) & 0x8000):
+                    is_alt_pressed = True
+        except Exception:
+            pass
+
+        if is_alt_pressed:
+            logger.info("🛑 [SBC退出] 检测到操盘手按住 Alt 点击关闭键，触发全部盯盘窗口一键退出并持久化！")
+            try:
+                from run_sbc import quit_and_save_all_sbc_windows
+                quit_and_save_all_sbc_windows()
+            except Exception as e:
+                logger.warning(f"Alt退出持久化异常: {e}")
+                app_inst = QApplication.instance()
+                if app_inst:
+                    app_inst.quit()
+            event.accept()
+            return
+
         if hasattr(self, 'poll_timer') and self.poll_timer:
             self.poll_timer.stop()
         if hasattr(self, '_save_timer') and self._save_timer:
@@ -3513,26 +3573,15 @@ class SBCIntradayChartDialog(QWidget):
             if not main_win.isVisible() or getattr(main_win, '_is_closing', False) or getattr(main_win, '_is_exiting', False):
                 is_app_exiting = True
         else:
-            # 独立运行 run_sbc.py 模式
-            is_holdings_mode = (os.environ.get("SBC_IS_HOLDINGS_LAUNCHER") == "1")
-            if app_inst:
-                other_visible_sbc = any(
-                    isinstance(tw, SBCIntradayChartDialog) and tw != self and tw.isVisible() and not getattr(tw, '_is_closing', False)
-                    for tw in app_inst.topLevelWidgets()
-                )
-                if not other_visible_sbc:
-                    if is_holdings_mode:
-                        # 💡 最后一个持仓盯盘窗口退出
-                        is_app_exiting = True
-                    else:
-                        is_app_exiting = False
+            # 独立运行 run_sbc.py 模式：若未显式标记全局退出，单个关闭 [X] 视为单独关闭
+            is_app_exiting = False
 
         self._is_closing = True
 
         # 若处于持仓盯盘模式，手动单独关闭某窗口时立即除名并写盘保存当前剩余有效窗口；统一退出时则保留
         is_holdings_mode = (os.environ.get("SBC_IS_HOLDINGS_LAUNCHER") == "1")
         if is_holdings_mode:
-            if not is_app_exiting and not _is_ats_shutting_down():
+            if not is_app_exiting:
                 try:
                     _remove_sbc_open_record(self.code)
                 except Exception:
@@ -3776,49 +3825,59 @@ class SBCIntradayChartDialog(QWidget):
 
     def _check_hover(self):
         """100ms 鼠标位置巡检：实现边缘悬停极速展开与移出自动收缩隐藏"""
-        # 【置顶与磁吸严格互斥】：置顶状态下不执行任何贴边或离开折叠检测
-        if not self.isVisible() or getattr(self, "stays_on_top", False):
-            return
+        try:
+            # 【置顶与磁吸严格互斥】：置顶状态下不执行任何贴边或离开折叠检测
+            if not self.isVisible() or getattr(self, "stays_on_top", False):
+                return
 
-        # 仅在有贴边锚定边缘或处于贴边隐藏状态时才执行悬浮检测，其余时刻 0 开销
-        if not self.anchor_edge and not self.is_hidden_state:
-            return
+            # 仅在有贴边锚定边缘或处于贴边隐藏状态时才执行悬浮检测，其余时刻 0 开销
+            if not self.anchor_edge and not self.is_hidden_state:
+                return
 
-        if QApplication.mouseButtons() & Qt.MouseButton.LeftButton:
-            self.leave_ticks = 0
-            self.hover_ticks = 0
-            return
+            if QApplication.mouseButtons() & Qt.MouseButton.LeftButton:
+                self.leave_ticks = 0
+                self.hover_ticks = 0
+                return
 
-        mouse_pos = QCursor.pos()
-        in_window = self.frameGeometry().contains(mouse_pos)
+            mouse_pos = QCursor.pos()
+            in_window = self.frameGeometry().contains(mouse_pos)
 
-        if in_window:
-            self._has_hovered_since_show = True
-
-        if self.is_hidden_state:
             if in_window:
-                self.hover_ticks += 1
-                if self.hover_ticks >= 2:
-                    self.show_normal_position()
+                self._has_hovered_since_show = True
+
+            if self.is_hidden_state:
+                if in_window:
+                    self.hover_ticks += 1
+                    if self.hover_ticks >= 2:
+                        self.show_normal_position()
+                        self.hover_ticks = 0
+                else:
                     self.hover_ticks = 0
             else:
-                self.hover_ticks = 0
-        else:
-            if self.anchor_edge is not None:
-                if not in_window:
-                    if not getattr(self, '_has_hovered_since_show', False):
-                        self.leave_ticks = 0
-                        return
-                    if time.time() - getattr(self, '_last_show_time', 0.0) < 1.2:
-                        self.leave_ticks = 0
-                        return
+                if self.anchor_edge is not None:
+                    if not in_window:
+                        if not getattr(self, '_has_hovered_since_show', False):
+                            self.leave_ticks = 0
+                            return
+                        if time.time() - getattr(self, '_last_show_time', 0.0) < 1.2:
+                            self.leave_ticks = 0
+                            return
 
-                    self.leave_ticks += 1
-                    if self.leave_ticks >= 4:
-                        self.hide_to_edge()
+                        self.leave_ticks += 1
+                        if self.leave_ticks >= 4:
+                            self.hide_to_edge()
+                            self.leave_ticks = 0
+                    else:
                         self.leave_ticks = 0
-                else:
-                    self.leave_ticks = 0
+        except (KeyboardInterrupt, SystemExit):
+            try:
+                from run_sbc import quit_and_save_all_sbc_windows
+                quit_and_save_all_sbc_windows()
+            except Exception:
+                pass
+            raise
+        except Exception:
+            return
 
     def _toggle_log_panel(self):
         vis = not self.log_box.isVisible()
