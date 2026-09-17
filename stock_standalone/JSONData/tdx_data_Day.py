@@ -64,14 +64,16 @@ ta = LazyModule('pandas_ta')
 h5a = LazyModule('JSONData.tdx_hdf5_api')
 wcd = LazyModule('JSONData.wencaiData')
 sina_data = LazyModule('JSONData.sina_data')
-# pd.options.display.float_format = '{:.2f}'.format
-# np.set_printoptions(precision=2, suppress=True)
-# pd = cct.LazyModule('pandas')
-# np = cct.LazyModule('numpy')
-# ta = cct.LazyModule('pandas_ta')
-# h5a = LazyModule('JSONData.tdx_hdf5_api')
-# wcd = LazyModule('JSONData.wencaiData')
-# ConfigObj = LazyClass('configobj', 'ConfigObj')
+# 禁用高频指标计算中的 SettingWithCopyWarning 与内存碎片 PerformanceWarning 刷屏提示
+try:
+    import warnings
+    import pandas as _pd_conf
+    _pd_conf.options.mode.chained_assignment = None
+    if hasattr(_pd_conf, 'errors') and hasattr(_pd_conf.errors, 'PerformanceWarning'):
+        warnings.filterwarnings('ignore', category=_pd_conf.errors.PerformanceWarning)
+except Exception:
+    pass
+
 
 # import pandas_ta as ta
 # import talib

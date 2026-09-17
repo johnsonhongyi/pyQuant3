@@ -35,6 +35,18 @@ from PyQt6.QtCore import QTimer
 from ats.ui.ipo_subnew_detector_dialog import IPOSubnewDetectorDialog
 from sys_utils import ensure_backend_tk_running
 
+# 全局屏蔽非致命的 SettingWithCopyWarning 与内存碎片 PerformanceWarning 刷屏提示
+try:
+    import warnings
+    import pandas as pd
+    pd.options.mode.chained_assignment = None
+    if hasattr(pd, 'errors') and hasattr(pd.errors, 'PerformanceWarning'):
+        warnings.filterwarnings('ignore', category=pd.errors.PerformanceWarning)
+    warnings.filterwarnings('ignore', message='.*DataFrame is highly fragmented.*')
+    warnings.filterwarnings('ignore', message='.*A value is trying to be set on a copy of a slice from a DataFrame.*')
+except Exception:
+    pass
+
 
 def main():
     # 解析命令行参数

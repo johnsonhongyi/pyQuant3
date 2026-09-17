@@ -14,9 +14,20 @@ import os
 import sys
 import json
 import unittest
+import warnings
 from unittest.mock import patch, MagicMock
 import pandas as pd
 import numpy as np
+
+# 深度屏蔽高频指标计算中的 PerformanceWarning 与 SettingWithCopyWarning
+try:
+    pd.options.mode.chained_assignment = None
+    if hasattr(pd, 'errors') and hasattr(pd.errors, 'PerformanceWarning'):
+        warnings.filterwarnings('ignore', category=pd.errors.PerformanceWarning)
+except Exception:
+    pass
+warnings.filterwarnings('ignore', message='.*DataFrame is highly fragmented.*')
+warnings.filterwarnings('ignore', message='.*A value is trying to be set on a copy of a slice from a DataFrame.*')
 
 # 确保路径
 app_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -218,6 +229,198 @@ class TestIPOSubnewDetector(unittest.TestCase):
             dlg.save_persisted_state()
             dlg.close()
 
+    def test_tdd_daily_kline_support_evaluation(self):
+        """【测试】验证通过 tdd 获取日线通道支撑与 pbottom 算法准确度 (使用 get_tdx_Exp_day_to_df)"""
+        from ats.strategy.ipo_vwap_detector_engine import VWAPDetectorSignal
+        sig = VWAPDetectorSignal(code="301683", name="测试标的", price=95.5)
+        mock_tdd_df = pd.DataFrame([
+            {"close": 92.0, "low": 90.5, "ma5d": 91.0, "pbottom": 94.0, "ptop": 105.0},
+            {"close": 93.5, "low": 91.8, "ma5d": 92.0, "pbottom": 94.0, "ptop": 105.0},
+            {"close": 95.0, "low": 93.0, "ma5d": 93.5, "pbottom": 94.0, "ptop": 105.0},
+            {"close": 95.5, "low": 94.2, "ma5d": 94.0, "pbottom": 94.5, "ptop": 105.0}
+        ])
+
+        with patch("JSONData.tdx_data_Day.get_tdx_Exp_day_to_df", return_value=mock_tdd_df):
+            self.engine._evaluate_kline_trend("301683", sig)
+            self.assertEqual(sig.trend_support_level, 94.5)
+            self.assertTrue(sig.has_kline_launch_sig)
+            self.assertIn("通道下轨支撑", sig.trend_desc)
+
+    def test_save_and_get_ats_ipc_df(self):
+        """【测试】验证 save_ats_ipc_df 与 get_ats_ipc_df 快照读写与数据保真"""
+        from ats.ui.ipo_detector_ipc import save_ats_ipc_df, get_ats_ipc_df
+        test_df = pd.DataFrame([
+            {"code": "301683", "win": 3, "dff": 1.85, "ch_bc2": 2},
+            {"code": "001365", "win": 1, "dff": -0.5, "ch_bc2": 0}
+        ]).set_index("code")
+
+        ok = save_ats_ipc_df(test_df)
+        self.assertTrue(ok)
+
+        loaded_df = get_ats_ipc_df()
+        self.assertIsNotNone(loaded_df)
+        self.assertIn("301683", loaded_df.index)
+        self.assertEqual(loaded_df.loc["301683", "win"], 3)
+        self.assertEqual(loaded_df.loc["301683", "dff"], 1.85)
+
+    def test_dialog_ats_col_dynamic_rendering(self):
+        """【测试】验证 IPOSubnewDetectorDialog 从 IPC df 提取自定义 ats_col 并在表格中精准渲染"""
+        from PyQt6.QtWidgets import QApplication
+        from PyQt6.QtCore import Qt
+        app = QApplication.instance() or QApplication(sys.argv)
+
+        test_ipc_df = pd.DataFrame([
+            {"code": "001365", "win": 4, "dff": 2.33, "ch_bc2": 1, "price": 35.0}
+        ]).set_index("code")
+
+        with patch("ats.ui.ipo_subnew_detector_dialog.IPOScanWorker.start"), \
+             patch("ats.ui.ipo_detector_ipc.get_ats_ipc_df", return_value=test_ipc_df):
+            from ats.ui.ipo_subnew_detector_dialog import IPOSubnewDetectorDialog
+            dlg = IPOSubnewDetectorDialog(initial_code="001365")
+            dlg.ipc_df = test_ipc_df
+
+            # 模拟收到 001365 信号并更新表格
+            sig = VWAPDetectorSignal(
+                code="001365", name="天海电子", price=35.0, change_pct=2.5,
+                vwap=34.2, vwap_diff_pct=2.3, structure_tag="蓄势走平3天",
+                signal_type="PRE_ORDER", signal_level="🎯 预下单", stop_loss_price=34.0,
+                signal_desc="在VWAP上走平蓄势，预下单潜伏"
+            )
+            dlg._update_table_row_data(sig)
+
+            # 验证动态列包含 win, dff, ch_bc2
+            self.assertIn("win", dlg.extra_cols)
+            # 获取 win 所在列
+            win_idx = 10 + dlg.extra_cols.index("win")
+            item_win = dlg.table.item(0, win_idx)
+            self.assertIsNotNone(item_win)
+            self.assertEqual(item_win.text(), "+4")
+            self.assertEqual(item_win.data(Qt.ItemDataRole.EditRole), 4.0)
+
+            # 获取 dff 所在列
+            if "dff" in dlg.extra_cols:
+                dff_idx = 10 + dlg.extra_cols.index("dff")
+                item_dff = dlg.table.item(0, dff_idx)
+                self.assertIsNotNone(item_dff)
+                self.assertEqual(item_dff.text(), "+2.33")
+                self.assertEqual(item_dff.data(Qt.ItemDataRole.EditRole), 2.33)
+
+            dlg.close()
+
+    def test_dialog_click_and_keyboard_linkage(self):
+        """【测试】验证表格单击与键盘上下键切换行仅联动通达信，绝不触发异动弹窗 (与 ATS 严格对齐)"""
+        from PyQt6.QtWidgets import QApplication
+        app = QApplication.instance() or QApplication(sys.argv)
+
+        with patch("ats.ui.ipo_subnew_detector_dialog.IPOScanWorker.start"):
+            from ats.ui.ipo_subnew_detector_dialog import IPOSubnewDetectorDialog
+            dlg = IPOSubnewDetectorDialog(initial_code="001365")
+
+            with patch("ats.ui.base_table.send_to_linkage") as mock_linkage, \
+                 patch.object(dlg, "_broadcast_link_external") as mock_broadcast:
+                # 模拟切换单元格行到第 0 行
+                dlg._on_current_cell_changed(0, 0, -1, -1)
+                self.assertEqual(dlg._pending_linkage_row, 0)
+
+                # 触发防抖联动
+                dlg._fire_linkage_debounced()
+
+                # 单击绝不调用 send_to_linkage (绝不主动弹出设置报警规则)
+                mock_linkage.assert_not_called()
+                # 仅触发外部通达信/同花顺切图
+                mock_broadcast.assert_called_once_with("001365")
+                self.assertIn("001365", dlg.lbl_status.text())
+
+            dlg.close()
+
+    def test_dialog_context_menu_actions(self):
+        """【测试】验证表格右键弹出 ATS 核心菜单 (复制、异动联动、SBC走势、通达信联动、重点关注等)"""
+        from PyQt6.QtWidgets import QApplication
+        from PyQt6.QtCore import QPoint
+        app = QApplication.instance() or QApplication(sys.argv)
+
+        with patch("ats.ui.ipo_subnew_detector_dialog.IPOScanWorker.start"):
+            from ats.ui.ipo_subnew_detector_dialog import IPOSubnewDetectorDialog
+            dlg = IPOSubnewDetectorDialog(initial_code="001365")
+
+            # 模拟右键点击
+            with patch("PyQt6.QtWidgets.QMenu.exec") as mock_menu_exec:
+                dlg._show_context_menu(QPoint(10, 10))
+                mock_menu_exec.assert_called_once()
+
+            dlg.close()
+
+    def test_buffered_render_and_zero_main_thread_io(self):
+        """【测试】验证信号分帧缓冲队列与 UI 主线程绝对零 I/O 零阻塞"""
+        from PyQt6.QtWidgets import QApplication
+        app = QApplication.instance() or QApplication(sys.argv)
+
+        with patch("ats.ui.ipo_subnew_detector_dialog.IPOScanWorker.start"):
+            from ats.ui.ipo_subnew_detector_dialog import IPOSubnewDetectorDialog
+            dlg = IPOSubnewDetectorDialog(initial_code="001365")
+
+            # 模拟 Worker emit 分析信号
+            sig = VWAPDetectorSignal(
+                code="001365",
+                name="山东药玻",
+                price=25.5,
+                vwap=25.0,
+                signal_type="PRE_ORDER",
+                signal_level="🎯 预下单",
+                extra_data={"win": 3, "dff": 1.25, "ch_bc2": 1}
+            )
+
+            # 验证 emit 后进入缓冲队列，避免直接阻塞主线程
+            dlg._on_stock_analyzed(sig)
+            self.assertEqual(len(dlg._pending_render_queue), 1)
+            self.assertTrue(dlg._render_timer.isActive())
+
+            # 模拟执行分帧刷新
+            with patch("JSONData.tdx_data_Day.get_tdx_Exp_day_to_df") as mock_tdd:
+                dlg._flush_pending_renders()
+                # 铁律：UI 渲染绝不可调用任何通达信日线文件 I/O
+                mock_tdd.assert_not_called()
+                self.assertEqual(len(dlg._pending_render_queue), 0)
+
+            dlg.close()
+
+    def test_batch_grouping_multiprocess_and_multithread_worker(self):
+        """【测试】验证 IPOScanWorker 批量分组多进程预取日线与多线程并发跑策略机制"""
+        from PyQt6.QtWidgets import QApplication
+        app = QApplication.instance() or QApplication(sys.argv)
+
+        from ats.ui.ipo_subnew_detector_dialog import IPOScanWorker
+        test_codes = ["001365", "688826", "301677", "688835"]
+
+        mock_day_df = pd.DataFrame({
+            "close": [30.0, 31.0, 32.0, 33.0, 34.0],
+            "low": [29.0, 30.0, 31.0, 32.0, 33.0],
+            "high": [31.0, 32.0, 33.0, 34.0, 35.0],
+            "vol": [1000, 1100, 1200, 1300, 1400],
+            "amount": [10000, 11000, 12000, 13000, 14000],
+            "code": ["001365"] * 5
+        })
+
+        with patch("ats.strategy.ipo_vwap_detector_engine.batch_fetch_day_kline_fast", return_value={"001365": mock_day_df}) as mock_batch_mp, \
+             patch.object(IPOVWAPDetectorEngine.get_instance(), "analyze_stock") as mock_analyze:
+            mock_sig = VWAPDetectorSignal(code="001365", name="测试", price=34.0)
+            mock_analyze.return_value = mock_sig
+
+            worker = IPOScanWorker(test_codes, batch_size=2)
+            received_batches = []
+            worker.batch_analyzed.connect(lambda b: received_batches.append(b))
+
+            # 执行多进程多线程批量流水线
+            worker.run()
+
+            # 验证多进程批量预取被触发调用 (每批次 2 只，共 2 个批次)
+            self.assertEqual(mock_batch_mp.call_count, 2)
+            # 验证 analyze_stock 接收到了预取的 day_df
+            self.assertEqual(mock_analyze.call_count, 4)
+            # 验证产生了整批 batch_analyzed 信号
+            self.assertTrue(len(received_batches) > 0)
+
 
 if __name__ == "__main__":
     unittest.main()
+
