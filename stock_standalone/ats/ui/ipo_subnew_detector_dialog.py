@@ -187,6 +187,13 @@ class IPOScanWorker(QThread):
             self.scan_finished.emit(0, 0.0, {})
             return
 
+        # 0. 在并发跑策略前预热解析所有标的名称，100% 写入内存字典，杜绝工作线程中多线程并发 I/O
+        try:
+            from ats.strategy.ipo_vwap_detector_engine import preload_ipo_stock_names
+            preload_ipo_stock_names(self.codes)
+        except Exception:
+            pass
+
         # 1. 将全量代码切分成若干批次 (批量分组计算，杜绝单只零碎调度浪费性能)
         batches = [self.codes[i:i + self.batch_size] for i in range(0, len(self.codes), self.batch_size)]
         tot_day_ms = 0.0
@@ -194,9 +201,9 @@ class IPOScanWorker(QThread):
         tot_strat_ms = 0.0
         all_stock_costs = []
 
-        start_msg = f"🚀 启动批量分组并发扫描: 共 {len(self.codes)} 只标的 | 切分 {len(batches)} 组 (每组至多 {self.batch_size} 只)"
+        start_msg = f"[IPO-SCAN] 启动批量顺序扫描: 共 {len(self.codes)} 只标的 | 切分 {len(batches)} 组 (每组至多 {self.batch_size} 只)"
         if self.perf_log_enabled:
-            print(f"\n[IPO-PERF] ══════════════════════════════════════════════════════════════════", flush=True)
+            print(f"\n[IPO-PERF] ------------------------------------------------------------", flush=True)
             print(f"[IPO-PERF] {start_msg}", flush=True)
         self.perf_log_emitted.emit(f"[IPO-PERF] {start_msg}")
 
@@ -206,55 +213,48 @@ class IPOScanWorker(QThread):
 
             t_batch_start = time.perf_counter()
 
-            # ── 步骤 A: 多进程 (multiprocessing) 批量预取该批次日线 fastohlc 原始数据 ──
+            # ── 步骤 A: 批量顺序读取日线 fastohlc 原始数据 (纯内存与本地 txt，零 H5，零锁) ──
             t_day_start = time.perf_counter()
             day_df_map = {}
             try:
                 from ats.strategy.ipo_vwap_detector_engine import batch_fetch_day_kline_fast
                 day_df_map = batch_fetch_day_kline_fast(batch_codes, dl=60)
             except Exception as e_mp:
-                logger.debug(f"多进程批量预取批次 {b_idx} 日线异常: {e_mp}")
+                logger.debug(f"批量预取批次 {b_idx} 日线异常: {e_mp}")
             t_day_ms = (time.perf_counter() - t_day_start) * 1000
             tot_day_ms += t_day_ms
 
-            # ── 步骤 B: 多线程 (ThreadPoolExecutor) 分组并发跑该批次各股票的策略计算 ──
+            # ── 步骤 B: 纯单线程顺序跑策略计算 (对齐 --sbc-holdings，零线程池竞争，安全稳定) ──
             t_strat_start = time.perf_counter()
             batch_results = []
-            workers = min(len(batch_codes), 8)
-            with ThreadPoolExecutor(max_workers=workers) as executor:
-                future_to_code = {
-                    executor.submit(self._analyze_one, c, day_df_map.get(c)): c 
-                    for c in batch_codes
-                }
-                for fut in as_completed(future_to_code):
-                    if not self.is_running:
-                        break
-                    try:
-                        sig = fut.result()
-                        if sig:
-                            batch_results.append(sig)
-                            count += 1
-                            # 收集单股耗时指标
-                            p_bars = sig.extra_data.get("_perf_bars_ms", 0.0)
-                            p_strat = sig.extra_data.get("_perf_strat_ms", 0.0)
-                            p_tot = sig.extra_data.get("_perf_total_ms", 0.0)
-                            tot_bars_ms += p_bars
-                            tot_strat_ms += p_strat
-                            all_stock_costs.append((sig.code, p_tot, p_bars, p_strat))
-                    except Exception as e:
-                        logger.debug(f"并发分析单股异常: {e}")
+            for c in batch_codes:
+                if not self.is_running:
+                    break
+                try:
+                    sig = self._analyze_one(c, day_df_map.get(c))
+                    if sig:
+                        batch_results.append(sig)
+                        count += 1
+                        p_bars = sig.extra_data.get("_perf_bars_ms", 0.0)
+                        p_strat = sig.extra_data.get("_perf_strat_ms", 0.0)
+                        p_tot = sig.extra_data.get("_perf_total_ms", 0.0)
+                        tot_bars_ms += p_bars
+                        tot_strat_ms += p_strat
+                        all_stock_costs.append((sig.code, p_tot, p_bars, p_strat))
+                except Exception as e:
+                    logger.debug(f"分析单股异常: {e}")
 
             t_batch_total_ms = (time.perf_counter() - t_batch_start) * 1000
 
-            # 方案 1: 批次性能分析器 (输出批次序号、股票列表、各阶段耗时、Top3 瓶颈标的)
+            # 批次性能日志
             batch_stock_costs = [item for item in all_stock_costs if item[0] in batch_codes]
             batch_stock_costs.sort(key=lambda x: x[1], reverse=True)
             top3 = batch_stock_costs[:3]
             top3_str = " | ".join(f"{c}(总{t:.0f}ms/分时{b:.0f}ms)" for c, t, b, s in top3)
             codes_summary = ",".join(batch_codes)
-            batch_log = f"⚡ 批次 {b_idx + 1}/{len(batches)} ({len(batch_codes)}只: {codes_summary}) | 日线预取: {t_day_ms:.1f}ms | 批次总耗时: {t_batch_total_ms:.1f}ms (均{t_batch_total_ms / max(1, len(batch_codes)):.1f}ms/只)"
+            batch_log = f"[IPO-SCAN] 批次 {b_idx + 1}/{len(batches)} ({len(batch_codes)}只: {codes_summary}) | 日线预取: {t_day_ms:.1f}ms | 批次总耗时: {t_batch_total_ms:.1f}ms (均{t_batch_total_ms / max(1, len(batch_codes)):.1f}ms/只)"
             if top3:
-                batch_log += f"\n   └─ 耗时 Top3 瓶颈: {top3_str}"
+                batch_log += f"\n   └─ 耗时 Top3: {top3_str}"
 
             if self.perf_log_enabled:
                 print(f"[IPO-PERF] {batch_log}", flush=True)
@@ -304,7 +304,7 @@ class IPOSubnewDetectorDialog(QMainWindow):
     def __init__(self, initial_code: Optional[str] = None):
         super().__init__(None)
 
-        self.setWindowTitle("🎯 ATS 新股次新股超短检测工具 (SBC 极限 10日 VWAP 预判与异动引擎)")
+        self.setWindowTitle("新股次新股超短检测工具 (SBC 极限 10日 VWAP 预判与异动引擎)")
         self.setMinimumSize(980, 580)
         self.resize(1180, 680)
         self.setStyleSheet("""
@@ -379,6 +379,15 @@ class IPOSubnewDetectorDialog(QMainWindow):
         self._pending_render_queue = deque()
         self._render_timer = QTimer(self)
         self._render_timer.timeout.connect(self._flush_pending_renders)
+
+        # 0. 初始化全局实时行情 IPC 同步管理器 (为自定义扩展列连阳/DFF/ch_bc2等提供实时高速数据流)
+        try:
+            from multi_period_strategy_engine import get_global_ipc_sync_manager
+            self.ipc_mgr = get_global_ipc_sync_manager()
+            if self.ipc_mgr and not getattr(self.ipc_mgr, '_listener_running', False):
+                self.ipc_mgr.start()
+        except Exception:
+            self.ipc_mgr = None
 
         self._init_ui()
         self._load_persisted_state()
@@ -531,7 +540,7 @@ class IPOSubnewDetectorDialog(QMainWindow):
         QShortcut(QKeySequence("Delete"), self, self._on_shortcut_delete)
 
     def _load_persisted_state(self):
-        """从本地磁盘恢复上次保存的监控池与窗口位置"""
+        """从本地磁盘恢复上次保存的监控池、已计算信号全景数据与窗口位置 (支持冷启动 0 秒瞬间直出)"""
         cfg_file = get_ipo_detector_layout_file()
         codes = []
         if os.path.exists(cfg_file):
@@ -556,6 +565,38 @@ class IPOSubnewDetectorDialog(QMainWindow):
                         else:
                             self.btn_perf.setText("📊 性能日志: 关")
                             self.btn_perf.setStyleSheet("")
+
+                    # ⚡ 冷启动核心：从持久化缓存中直接反序列化还原上次各标的的 VWAPDetectorSignal 信号全景
+                    raw_sigs = data.get("cached_signals", {})
+                    if isinstance(raw_sigs, dict):
+                        for c_k, s_dict in raw_sigs.items():
+                            if isinstance(s_dict, dict) and s_dict.get("code"):
+                                try:
+                                    sig_obj = VWAPDetectorSignal(
+                                        code=str(s_dict.get("code")),
+                                        name=str(s_dict.get("name", "")),
+                                        price=float(s_dict.get("price", 0.0)),
+                                        change_pct=float(s_dict.get("change_pct", 0.0)),
+                                        vwap=float(s_dict.get("vwap", 0.0)),
+                                        vwap_diff_pct=float(s_dict.get("vwap_diff_pct", 0.0)),
+                                        structure_tag=str(s_dict.get("structure_tag", "常规")),
+                                        consolidation_days=int(s_dict.get("consolidation_days", 0)),
+                                        pullback_no_touch=bool(s_dict.get("pullback_no_touch", False)),
+                                        is_above_vwap=bool(s_dict.get("is_above_vwap", False)),
+                                        trend_support_level=float(s_dict.get("trend_support_level", 0.0)),
+                                        trend_slope_deg=float(s_dict.get("trend_slope_deg", 0.0)),
+                                        has_kline_launch_sig=bool(s_dict.get("has_kline_launch_sig", False)),
+                                        trend_desc=str(s_dict.get("trend_desc", "")),
+                                        signal_type=str(s_dict.get("signal_type", "WATCH")),
+                                        signal_level=str(s_dict.get("signal_level", "⚪")),
+                                        signal_desc=str(s_dict.get("signal_desc", "")),
+                                        stop_loss_price=float(s_dict.get("stop_loss_price", 0.0)),
+                                        update_time=str(s_dict.get("update_time", "")),
+                                        extra_data=s_dict.get("extra_data", {})
+                                    )
+                                    self.signals_map[sig_obj.code] = sig_obj
+                                except Exception:
+                                    pass
             except Exception as e:
                 logger.debug(f"加载持久化配置异常: {e}")
 
@@ -563,11 +604,20 @@ class IPOSubnewDetectorDialog(QMainWindow):
         if codes:
             codes = [c for c in codes if is_stock_actually_listed(c)]
 
+        # 🛡️ 智能自愈防护 (P0)：若本地配置中仅有 <= 2 只标的 (说明此前被未沙盒隔离的测试覆盖写入)，
+        # 自动融合全市场 35 只新股次新股，恢复完整新股池！
+        if len(codes) <= 2:
+            default_codes = self._get_default_ipo_subnew_codes()
+            for dc in default_codes:
+                if dc not in codes:
+                    codes.append(dc)
+
         # 若过滤后为空或无历史配置，默认加载系统真正已上市的次新股
         if not codes:
             codes = self._get_default_ipo_subnew_codes()
 
         self.monitored_codes = list(dict.fromkeys(codes))
+        # 瞬间重建表格并填入已有的历史信号数据 (0秒直出)
         self._rebuild_table_rows()
         # 清洗并写回持久化配置
         self.save_persisted_state()
@@ -621,10 +671,38 @@ class IPOSubnewDetectorDialog(QMainWindow):
         return res[:35] if len(res) > 35 else res
 
     def save_persisted_state(self):
-        """集中持久化保存当前窗口几何与监控池"""
+        """集中持久化保存当前窗口几何、监控池与全量信号计算结果 (支持冷启动秒出)"""
         cfg_file = get_ipo_detector_layout_file()
+        # 序列化当前已算好的全量信号
+        cached_sigs = {}
+        for code, sig in self.signals_map.items():
+            if sig:
+                cached_sigs[code] = {
+                    "code": sig.code,
+                    "name": sig.name,
+                    "price": sig.price,
+                    "change_pct": sig.change_pct,
+                    "vwap": sig.vwap,
+                    "vwap_diff_pct": sig.vwap_diff_pct,
+                    "structure_tag": sig.structure_tag,
+                    "consolidation_days": sig.consolidation_days,
+                    "pullback_no_touch": sig.pullback_no_touch,
+                    "is_above_vwap": sig.is_above_vwap,
+                    "trend_support_level": sig.trend_support_level,
+                    "trend_slope_deg": sig.trend_slope_deg,
+                    "has_kline_launch_sig": sig.has_kline_launch_sig,
+                    "trend_desc": sig.trend_desc,
+                    "signal_type": sig.signal_type,
+                    "signal_level": sig.signal_level,
+                    "signal_desc": sig.signal_desc,
+                    "stop_loss_price": sig.stop_loss_price,
+                    "update_time": sig.update_time,
+                    "extra_data": getattr(sig, "extra_data", {}) or {}
+                }
+
         data = {
             "monitored_codes": self.monitored_codes,
+            "cached_signals": cached_sigs,
             "geometry": {
                 "x": self.x(),
                 "y": self.y(),
@@ -634,11 +712,19 @@ class IPOSubnewDetectorDialog(QMainWindow):
             "perf_log_enabled": getattr(self, "perf_log_enabled", False),
             "saved_at": time.strftime("%Y-%m-%d %H:%M:%S")
         }
+        tmp_file = cfg_file + f".tmp_{os.getpid()}"
         try:
-            with open(cfg_file, "w", encoding="utf-8") as f:
+            with open(tmp_file, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
+            if os.path.exists(tmp_file):
+                os.replace(tmp_file, cfg_file)
         except Exception as e:
             logger.debug(f"保存检测工具配置异常: {e}")
+            try:
+                if os.path.exists(tmp_file):
+                    os.remove(tmp_file)
+            except Exception:
+                pass
 
     def add_stock(self, code: str):
         """添加股票到监控池 (自动置顶于首位)"""
@@ -752,6 +838,12 @@ class IPOSubnewDetectorDialog(QMainWindow):
         try:
             from ats.tdx_realtime_fetcher import TDXGlobalCachePool
             TDXGlobalCachePool.get_instance().flush_if_due(interval=300.0)
+        except Exception:
+            pass
+
+        # 集中持久化当前监控池与全量信号计算结果，确保下次冷启动瞬间直出
+        try:
+            self.save_persisted_state()
         except Exception:
             pass
 
@@ -1548,6 +1640,24 @@ class IPOSubnewDetectorDialog(QMainWindow):
         if getattr(self, "extra_cols", None) != cur_extra:
             self._setup_table_headers()
             self._rebuild_table_rows()
+
+        # 5. 从全局 IPC 同步管理器获取最新实时行情快照 (实时回补连阳/DFF/ch_bc2等自定义列)
+        if getattr(self, "ipc_mgr", None):
+            try:
+                df_now = self.ipc_mgr.get_current_df()
+                if df_now is not None and not df_now.empty and len(df_now) > 100:
+                    was_empty = (self.ipc_df is None or self.ipc_df.empty)
+                    self.ipc_df = df_now
+                    # 若首次拿到实时行情，且表格已有行，触发快速刷新回补自定义列
+                    if was_empty and self.table.rowCount() > 0 and not getattr(self, "_is_table_updating", False):
+                        for r in range(self.table.rowCount()):
+                            it_c = self.table.item(r, 0)
+                            if it_c:
+                                cd = it_c.text().strip()
+                                if cd in self.signals_map:
+                                    self._update_table_row_data(self.signals_map[cd], target_row=r, manage_sorting=False)
+            except Exception as e_ipcdf:
+                logger.debug(f"从 IPC 获取实时行情异常: {e_ipcdf}")
 
 
 

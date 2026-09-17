@@ -22,6 +22,7 @@ if current_dir not in sys.path:
     sys.path.insert(0, current_dir)
 
 import run_sbc
+import run_ipo_detector
 
 # 💡 命令行参数与环境变量双重分发：若带有 --sbc / --sbc-holdings 或 ATS_SBC_SUBPROCESS=1，直接作为独立 SBC 子进程运行，彻底阻断进入 ATS 主界面
 if __name__ == "__main__":
@@ -47,20 +48,27 @@ if __name__ == "__main__":
                 pass
             sys.exit(0)
 
-    # 💡 新股次新股超短检测工具独立子进程分发
+    # 💡 新股次新股超短检测工具独立子进程分发 (对齐 --sbc-holdings 独立子进程规范)
     is_ipo_subproc = (
         os.environ.get("ATS_IPO_SUBPROCESS") == "1" or
         any(arg in sys.argv for arg in ("--ipo-detector", "--subnew-detector", "--ipo", "--subnew"))
     )
     if is_ipo_subproc:
-        import run_ipo_detector
         try:
             sys.exit(run_ipo_detector.main())
         except KeyboardInterrupt:
+            try:
+                run_ipo_detector.quit_and_save_detector()
+            except Exception:
+                pass
             sys.exit(0)
         except SystemExit as se:
             sys.exit(se.code if isinstance(se.code, int) else 0)
         except BaseException:
+            try:
+                run_ipo_detector.quit_and_save_detector()
+            except Exception:
+                pass
             sys.exit(0)
 
 from PyQt6.QtWidgets import QApplication

@@ -48,7 +48,21 @@ except Exception:
     pass
 
 
+_active_window = None
+
+def quit_and_save_detector():
+    """安全退出并集中持久化检测工具窗口 (对齐 run_sbc.quit_and_save_all_sbc_windows)"""
+    global _active_window
+    if _active_window:
+        try:
+            _active_window.save_persisted_state()
+            _active_window.close()
+        except Exception:
+            pass
+
+
 def main():
+    global _active_window
     # 解析命令行参数
     initial_code = None
     args = sys.argv[1:]
@@ -73,6 +87,7 @@ def main():
     app = QApplication.instance() or QApplication(sys.argv)
 
     window = IPOSubnewDetectorDialog(initial_code=initial_code)
+    _active_window = window
     window.show()
 
     # 退出集中持久化双重保险

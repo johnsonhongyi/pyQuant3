@@ -521,6 +521,11 @@ class TDXGlobalCachePool:
                 remote_hist = payload.get("history_static_bars", {})
                 if isinstance(remote_hist, dict):
                     for k, v in remote_hist.items():
+                        # 自愈熔断：若 last_cum_amt 异常过大 (>1e11) 或 VWAP > 3000，判定为历史脏数据自动抛弃重拉
+                        l_amt = float(v.get("last_cum_amt", 0.0))
+                        l_vol = float(v.get("last_cum_vol", 0.0))
+                        if l_amt > 1e11 or (l_vol > 0 and (l_amt / l_vol) > 3000.0):
+                            continue
                         local_entry = self._history_static_bars.get(k)
                         if local_entry is None or v.get("updated_at", 0) > local_entry.get("updated_at", 0):
                             self._history_static_bars[k] = v
@@ -528,6 +533,10 @@ class TDXGlobalCachePool:
                 remote_inc = payload.get("incremental_intraday_pool", {})
                 if isinstance(remote_inc, dict):
                     for k, v in remote_inc.items():
+                        l_amt = float(v.get("last_cum_amt", 0.0))
+                        l_vol = float(v.get("last_cum_vol", 0.0))
+                        if l_amt > 1e11 or (l_vol > 0 and (l_amt / l_vol) > 3000.0):
+                            continue
                         local_inc = self._incremental_intraday_pool.get(k)
                         if local_inc is None or v.get("updated_at", 0) > local_inc.get("updated_at", 0):
                             self._incremental_intraday_pool[k] = v
@@ -719,9 +728,20 @@ class TDXGlobalCachePool:
                     for d in unique_dates:
                         if d in keep_dates:
                             for r in date_dict[d]:
-                                new_records.append(r)
-                                cum_vol += float(r.get("vol", 0.0))
-                                cum_amt += float(r.get("amount", 0.0))
+                                b_vol = float(r.get("bar_vol", r.get("vol", 0.0)))
+                                b_amt = float(r.get("bar_amt", r.get("amount", 0.0)))
+                                cum_vol += b_vol
+                                cum_amt += b_amt
+                                r_copy = dict(r)
+                                r_copy["bar_vol"] = b_vol
+                                r_copy["bar_amt"] = b_amt
+                                r_copy["vol"] = cum_vol / 100.0
+                                r_copy["volume"] = cum_vol / 100.0
+                                r_copy["amount"] = cum_amt
+                                r_copy["cum_vol_shares"] = cum_vol
+                                r_copy["cum_amt"] = cum_amt
+                                r_copy["vwap"] = round(cum_amt / cum_vol, 2) if (cum_vol > 0 and cum_amt > 0) else float(r.get("close", 0.0))
+                                new_records.append(r_copy)
 
                     if new_records:
                         self._history_static_bars[c_clean] = {
@@ -2407,6 +2427,10 @@ class TDXRealtimeFetcher:
                         "volume": cum_vol_shares / 100.0,
                         "vol": cum_vol_shares / 100.0,
                         "amount": cum_amt,
+                        "bar_vol": vol_shares,
+                        "bar_amt": amt,
+                        "cum_vol_shares": cum_vol_shares,
+                        "cum_amt": cum_amt,
                         "turnover": to_rate,
                         "turnover_rate": to_rate
                     })
@@ -2482,6 +2506,10 @@ class TDXRealtimeFetcher:
                         "volume": cum_vol_shares / 100.0,
                         "vol": cum_vol_shares / 100.0,
                         "amount": cum_amt,
+                        "bar_vol": vol_shares,
+                        "bar_amt": amt,
+                        "cum_vol_shares": cum_vol_shares,
+                        "cum_amt": cum_amt,
                         "turnover": to_rate,
                         "turnover_rate": to_rate
                     }
