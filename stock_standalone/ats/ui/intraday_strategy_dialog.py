@@ -3446,7 +3446,7 @@ class SBCIntradayChartDialog(QWidget):
             # 0. 优先从类内存变量读取最新尺寸与测算状态
             if SBCIntradayChartDialog._global_sbc_size:
                 gw, gh = SBCIntradayChartDialog._global_sbc_size
-                if gw < 1000 and gh < 650:
+                if gw >= 200 and gh >= 100:
                     target_w, target_h = gw, gh
             restored_auto_eval = SBCIntradayChartDialog._global_auto_eval
 
@@ -3464,7 +3464,7 @@ class SBCIntradayChartDialog(QWidget):
                         sz = data["sbc_window_size"]
                         sw = int(sz.get("width", target_w))
                         sh = int(sz.get("height", target_h))
-                        if sw < 1000 and sh < 650:
+                        if sw >= 200 and sh >= 100:
                             target_w, target_h = sw, sh
 
                     open_item_geo = None
@@ -3486,7 +3486,7 @@ class SBCIntradayChartDialog(QWidget):
                     if isinstance(geo_dict, dict) and "width" in geo_dict and "height" in geo_dict:
                         gw = int(geo_dict.get("width", target_w))
                         gh = int(geo_dict.get("height", target_h))
-                        if gw < 1000 and gh < 650:
+                        if gw >= 200 and gh >= 100:
                             target_w, target_h = gw, gh
                         x = int(geo_dict.get("x", x))
                         y = int(geo_dict.get("y", y))
@@ -3538,10 +3538,9 @@ class SBCIntradayChartDialog(QWidget):
             if target_period and str(target_period).lower() in VALID_SBC_PERIODS:
                 self.set_period_mode(str(target_period).lower(), reload=False, save=False)
 
-            # 4. 安全性防越界与屏幕规格 2/3 尺寸上限约束 (绝不超过屏幕 2/3 规格)
-            max_w, max_h = self._get_max_allowed_sbc_size()
-            target_w = max(320, min(target_w, max_w))
-            target_h = max(180, min(target_h, max_h))
+            # 4. 安全性防越界保护：保留持久化的物理尺寸与所在物理屏幕
+            target_w = max(320, target_w)
+            target_h = max(180, target_h)
 
             from gui_utils import clamp_window_to_screens
             rx, ry = clamp_window_to_screens(x, y, target_w, target_h)
@@ -5188,11 +5187,50 @@ def sync_all_open_sbc_period(target_mode: str, trigger_dlg: Optional[SBCIntraday
     return count
 
 
-def open_sbc_chart_dialog(parent_win: Optional[QWidget] = None, code: str = "688826", period_mode: Optional[str] = None, *args, **kwargs) -> Optional[SBCIntradayChartDialog]:
+def _get_screen_for_geometry(x: int, y: int, w: int, h: int):
+    """【🖥 多屏幕精准定位】根据窗口几何坐标匹配所在的物理屏幕，优先中心点与几何相交匹配，绝不盲目回退主屏"""
+    from PyQt6.QtWidgets import QApplication
+    from PyQt6.QtCore import QPoint, QRect
+    screens = QApplication.screens()
+    if not screens:
+        return QApplication.primaryScreen()
+    cx = x + max(1, w) // 2
+    cy = y + max(1, h) // 2
+    try:
+        scr = QApplication.screenAt(QPoint(cx, cy))
+        if scr:
+            return scr
+    except Exception:
+        pass
+    # 相交检测
+    target_rect = QRect(x, y, max(1, w), max(1, h))
+    for s in screens:
+        try:
+            if s.geometry().intersects(target_rect):
+                return s
+        except Exception:
+            pass
+    # 最近距离匹配
+    best_scr = QApplication.primaryScreen() or screens[0]
+    min_dist = float('inf')
+    for s in screens:
+        try:
+            sc = s.geometry().center()
+            dist = (cx - sc.x()) ** 2 + (cy - sc.y()) ** 2
+            if dist < min_dist:
+                min_dist = dist
+                best_scr = s
+        except Exception:
+            pass
+    return best_scr
+
+
+def open_sbc_chart_dialog(parent_win: Optional[QWidget] = None, code: str = "688826", period_mode: Optional[str] = None, record_open: bool = True, *args, **kwargs) -> Optional[SBCIntradayChartDialog]:
     """
     【📈 全局通用 SBC 独立分时走势图调起入口】支持在 ATS 任意表格/面板右键菜单中一键唤醒调起分时图
     - 💡 核心防重：若该标的已打开过，严禁重复创建新窗口，而是将其置顶并激活到最前台；
     - 若尚未打开，则创建新独立窗口并展示。
+    - :param record_open: 是否触发写入磁盘记录 (启动恢复批量创建时设为 False，杜绝过程写盘覆盖历史持久化配置)
     """
     # 兼容各种调用形式 (code, parent=self / parent_win, code)
     if "parent" in kwargs and parent_win is None:
@@ -5216,7 +5254,8 @@ def open_sbc_chart_dialog(parent_win: Optional[QWidget] = None, code: str = "688
         df_kline = kwargs.get("df_kline", None)
         if trades_df is not None:
             existing_dlg.set_custom_backtest_trades(trades_df, df_kline=df_kline)
-        _record_sbc_open(c_clean, existing_dlg.geometry(), period_mode=getattr(existing_dlg, '_current_period_mode', '1m'))
+        if record_open:
+            _record_sbc_open(c_clean, existing_dlg.geometry(), period_mode=getattr(existing_dlg, '_current_period_mode', '1m'))
         return existing_dlg
 
     main_win = parent_win.window() if (parent_win and hasattr(parent_win, 'window')) else None
@@ -5255,7 +5294,8 @@ def open_sbc_chart_dialog(parent_win: Optional[QWidget] = None, code: str = "688
     dlg.show()
     dlg.raise_()
     dlg.activateWindow()
-    _record_sbc_open(c_clean, dlg.geometry(), period_mode=getattr(dlg, '_current_period_mode', '1m'))
+    if record_open:
+        _record_sbc_open(c_clean, dlg.geometry(), period_mode=getattr(dlg, '_current_period_mode', '1m'))
     return dlg
 
 
@@ -5689,16 +5729,12 @@ def restore_all_open_sbc_windows(parent_win=None, as_subprocess: bool = False) -
             saved_period = item.get("period_mode") or item.get("period") or (
                 data.get("sbc_period_modes", {}).get(str(code).zfill(6))
             ) or "1m"
-            # 💡 原位恢复与换行保护：原来在什么位置排布就在什么位置排布，除非换行
-            screen_obj = QApplication.primaryScreen()
-            sg = screen_obj.availableGeometry() if screen_obj else QRect(0, 0, 1920, 1080)
-            target_x, target_y = x, y
-            if (target_x + w) > (sg.right() + 10):
-                target_x = sg.left() + 12
-                target_y = target_y + h + 8
-            rx, ry = clamp_window_to_screens(target_x, target_y, w, h)
+
+            # 💡 【核心：多屏幕物理屏幕原位精准恢复】
+            # 优先匹配窗口原先所在的物理显示器屏幕，绝不强行将副屏窗口拉回主屏，原位原貌呈现操盘手保存的物理排布！
+            rx, ry = clamp_window_to_screens(x, y, w, h)
             
-            dlg = open_sbc_chart_dialog(parent_win, code, period_mode=saved_period)
+            dlg = open_sbc_chart_dialog(parent_win, code, period_mode=saved_period, record_open=False)
             if dlg:
                 restored_dialogs.append(dlg)
                 dlg._is_programmatic_move = True
@@ -5747,8 +5783,6 @@ def restore_all_open_sbc_windows(parent_win=None, as_subprocess: bool = False) -
                         if eval_btn and (("开" in eval_btn.text()) != target_eval):
                             if hasattr(dlg, '_on_eval_r_clicked'):
                                 dlg._on_eval_r_clicked(toggle=True)
-
-                    dlg._save_sbc_geometry()
                 finally:
                     dlg._is_programmatic_move = False
     except Exception as e:
