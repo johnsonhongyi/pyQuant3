@@ -14,6 +14,7 @@ import json
 import time
 import subprocess
 import logging
+from datetime import datetime
 from typing import List, Dict, Optional, Any
 
 from sys_utils import get_app_root, is_packaged_env
@@ -208,25 +209,80 @@ def update_detector_heartbeat(pid: int):
     _write_ipc_data(data)
 
 
-def save_ats_ipc_df(df) -> bool:
+_LAST_ATS_IPC_SAVE_TS: float = 0.0
+_LAST_ATS_IPC_SIGNATURE: Any = None
+_LAST_ATS_IPC_CLOSED_SAVED_DATE: str = ""
+
+
+def get_ats_ipc_df_path() -> str:
     """
-    【⚡ IPC 快照共享】
-    由 ATS 主程序在刷新 current_df 时调用，将全市场高密 DataFrame 原子持久化至共享缓存。
-    新股次新超短检测工具等独立进程可 0ms 秒级读取，无需占用网络或复杂通信。
+    获取 ATS IPC DataFrame 快照绝对路径 (全系统统一默认迁入 RamDisk 内存盘)
+    - 优先基于 cct.get_ramdisk_dir 获取高速 RamDisk 目录 (如 G:\ats_ipc_df.pkl)；
+    - 仅在无 RamDisk 挂载时降级回退至本地 config/ 目录。
     """
+    try:
+        from JohnsonUtil import commonTips as cct
+        ram_dir = cct.get_ramdisk_dir()
+        if ram_dir and os.path.exists(ram_dir):
+            return os.path.join(ram_dir, "ats_ipc_df.pkl")
+    except Exception:
+        pass
+    cfg_dir = os.path.join(get_app_root(), "config")
+    os.makedirs(cfg_dir, exist_ok=True)
+    return os.path.join(cfg_dir, "ats_ipc_df.pkl")
+
+
+def save_ats_ipc_df(df, force: bool = False, min_interval: float = 1800.0) -> bool:
+    """
+    【⚡ IPC 快照共享 (统一默认迁入 RamDisk + 30分钟集中持久化 + 收盘无变动不更新)】
+    - 优先将全市场高密 DataFrame 原子持久化至 RamDisk 内存盘 (数十 GB/s 吞吐，0 磨损 SSD)；
+    - 盘中默认 30 分钟 (1800s) 集中持久化更新一次，彻底消除每分钟频繁刷盘；
+    - 15:05 收盘后，若当天已落盘且数据无变动，坚决不更新 (0 写入、0 冗余)。
+    """
+    global _LAST_ATS_IPC_SAVE_TS, _LAST_ATS_IPC_SIGNATURE, _LAST_ATS_IPC_CLOSED_SAVED_DATE
     if df is None:
         return False
     try:
         import pandas as pd
         if not isinstance(df, pd.DataFrame) or df.empty:
             return False
-        cfg_dir = os.path.join(get_app_root(), "config")
-        os.makedirs(cfg_dir, exist_ok=True)
-        target = os.path.join(cfg_dir, "ats_ipc_df.pkl")
-        tmp = target + ".tmp"
+
+        now = time.time()
+        now_dt = datetime.now()
+        today_str = now_dt.strftime("%Y-%m-%d")
+        curr_hm = now_dt.strftime("%H:%M")
+
+        # 数据特征轻量指纹 (校验行数、列集合及首尾代码)
+        data_sig = (
+            len(df),
+            tuple(df.columns),
+            str(df.index[0]) if len(df) > 0 else "",
+            str(df.index[-1]) if len(df) > 0 else ""
+        )
+
+        # 1. 收盘后数据变动防护 (15:05 之后)
+        is_after_close = curr_hm >= "15:05" or curr_hm < "09:15"
+        if not force and is_after_close:
+            # 若今日已落盘过收盘数据且数据特征无变动，坚决不重复写盘
+            if _LAST_ATS_IPC_CLOSED_SAVED_DATE == today_str and _LAST_ATS_IPC_SIGNATURE == data_sig:
+                return True
+
+        # 2. 盘中 30 分钟集中更新节流控制 (非 force 且未满 30 分钟跳过写盘)
+        if not force and not is_after_close:
+            if now - _LAST_ATS_IPC_SAVE_TS < min_interval:
+                return False
+
+        target = get_ats_ipc_df_path()
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        tmp = target + f".{os.getpid()}.tmp"
         df.to_pickle(tmp)
         if os.path.exists(tmp):
             os.replace(tmp, target)
+            _LAST_ATS_IPC_SAVE_TS = now
+            _LAST_ATS_IPC_SIGNATURE = data_sig
+            if is_after_close:
+                _LAST_ATS_IPC_CLOSED_SAVED_DATE = today_str
+            logger.info(f"💾 [ATS-IPC] 全市场行情快照已保存至 RamDisk: {target} (行数: {len(df)}, 30分钟集中更新/收盘保护生效)")
             return True
     except Exception as e:
         logger.debug(f"保存 ATS IPC DF 快照异常: {e}")
@@ -240,25 +296,26 @@ _CACHED_ATS_IPC_MTIME = 0.0
 def get_ats_ipc_df():
     """
     【⚡ IPC 快照读取】
-    读取 ATS 共享的最新全市场 IPC DataFrame 快照 (基于 mtime 内存缓存，纳秒级读取)。
+    从 RamDisk (或 fallback config) 读取 ATS 共享的最新全市场 IPC DataFrame 快照。
+    - 基于 mtime 内存单例缓存，纳秒级 0ms 直出；
+    - 收盘后当天数据永久有效；盘中支持热重载。
     """
     global _CACHED_ATS_IPC_DF, _CACHED_ATS_IPC_MTIME
     try:
         import pandas as pd
-        cfg_dir = os.path.join(get_app_root(), "config")
-        target = os.path.join(cfg_dir, "ats_ipc_df.pkl")
+        target = get_ats_ipc_df_path()
         if os.path.exists(target):
             mtime = os.path.getmtime(target)
             # 若文件未修改且内存已有缓存，0ms 立即直出，绝不重复反序列化
             if mtime == _CACHED_ATS_IPC_MTIME and _CACHED_ATS_IPC_DF is not None:
                 return _CACHED_ATS_IPC_DF
-            # 30 分钟内快照均可有效复用
-            if time.time() - mtime < 1800.0:
-                df = pd.read_pickle(target)
-                if df is not None and isinstance(df, pd.DataFrame) and not df.empty:
-                    _CACHED_ATS_IPC_DF = df
-                    _CACHED_ATS_IPC_MTIME = mtime
-                    return _CACHED_ATS_IPC_DF
+
+            # 跨日或首次载入
+            df = pd.read_pickle(target)
+            if df is not None and isinstance(df, pd.DataFrame) and not df.empty:
+                _CACHED_ATS_IPC_DF = df
+                _CACHED_ATS_IPC_MTIME = mtime
+                return _CACHED_ATS_IPC_DF
     except Exception as e:
         logger.debug(f"读取 ATS IPC DF 快照异常: {e}")
     return _CACHED_ATS_IPC_DF
