@@ -702,7 +702,12 @@ class CaptureWindowsDialog(QDialog):
             if search_kw and search_kw not in title.lower() and search_kw not in exe_path.lower():
                 continue
             
-            item = QListWidgetItem(f"{title}  [{pos_str}]")
+            display_title = title
+            is_tdx_stock = (("tdx" in exe_path.lower() or "通达信" in title) and core.is_stock_code_title(title))
+            if is_tdx_stock:
+                display_title = f"{title} 💡[通达信从属浮窗]"
+
+            item = QListWidgetItem(f"{display_title}  [{pos_str}]")
             item_data = (title, pos_str, exe_path)
             item.setData(QtCore.Qt.ItemDataRole.UserRole, item_data)
             self.list_widget.addItem(item)
@@ -756,17 +761,17 @@ class CaptureWindowsDialog(QDialog):
                         break
                         
                 if found_hwnd:
-                    left, top, width, height = core.get_window_rect(found_hwnd)
-                    if left < -10000 and top < -10000:
-                        continue
-                    new_pos_str = f"{left},{top},{width},{height}"
-                    
-                    if new_pos_str != pos_str:
-                        item.setText(f"{title}  [{new_pos_str}]")
+                    left, top, w, h = core.get_window_rect(found_hwnd)
+                    if not (left < -10000 and top < -10000):
+                        new_pos_str = f"{left},{top},{w},{h}"
                         new_item_data = (title, new_pos_str, exe_path)
                         item.setData(QtCore.Qt.ItemDataRole.UserRole, new_item_data)
                         
-                        # 同步更新 self.all_windows 里的对应项
+                        display_title = title
+                        if ("tdx" in exe_path.lower() or "通达信" in title) and core.is_stock_code_title(title):
+                            display_title = f"{title} 💡[通达信从属浮窗]"
+                        item.setText(f"{display_title}  [{new_pos_str}]")
+                        
                         for idx, (t_all, p_all, e_all) in enumerate(self.all_windows):
                             if t_all == title:
                                 self.all_windows[idx] = (title, new_pos_str, exe_path)
@@ -823,6 +828,13 @@ class CaptureWindowsDialog(QDialog):
             center_all = menu.addAction(f"居中所有选中窗口 ({len(selected_items)}个) 于程序所在屏幕")
             
         item_data = item.data(QtCore.Qt.ItemDataRole.UserRole)
+        import_as_tdx_wildcard = None
+        if item_data:
+            title_cur = item_data[0]
+            exe_cur = item_data[2] if len(item_data) > 2 else ""
+            if core.is_stock_code_title(title_cur) or "通达信" in title_cur or "tdx" in exe_cur.lower():
+                import_as_tdx_wildcard = menu.addAction("🔀 以通配格式 [通达信从属浮窗] 导入")
+
         open_dir_action = None
         if item_data and len(item_data) > 2 and item_data[2]:
             menu.addSeparator()
@@ -833,6 +845,11 @@ class CaptureWindowsDialog(QDialog):
             self.center_windows_on_current_screen([item])
         elif center_all and action == center_all:
             self.center_windows_on_current_screen(selected_items)
+        elif import_as_tdx_wildcard and action == import_as_tdx_wildcard:
+            # 直接将标题改为通配格式并触发导入
+            _, pos_str, exe_path = item_data
+            self.selected_windows = [("[通达信从属浮窗]", pos_str, exe_path)]
+            self.accept()
         elif open_dir_action and action == open_dir_action:
             exe_path = item_data[2]
             import subprocess
@@ -4917,11 +4934,12 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
                 titles_to_try.append(title.replace('.exe', '.py'))
                 
             found_hwnd = None
+            found_actual_title = ""
             found_exe_path = ""
             for t in titles_to_try:
                 found = core.find_windows_by_title_safe(t)
                 if found:
-                    found_hwnd, _ = found[0]
+                    found_hwnd, found_actual_title = found[0]
                     found_exe_path = core.get_exe_path(found_hwnd)
                     break
                     
@@ -4947,7 +4965,13 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
                     cur_item.setForeground(QtGui.QColor("#eab308")) # 黄色
                 else:
                     real_pos = f"{left},{top},{width},{height}"
-                    cur_item.setText(real_pos)
+                    # 💡 若使用了通配符、语义占位符或命中不同名称的个股，将实际窗口名标注出来
+                    is_wildcard = '*' in title or '?' in title or core.is_tdx_semantic_sub_title(title)
+                    is_title_diff = bool(found_actual_title and found_actual_title != title)
+                    if (is_wildcard or is_title_diff) and found_actual_title:
+                        cur_item.setText(f"[{found_actual_title}] {real_pos}")
+                    else:
+                        cur_item.setText(real_pos)
                     
                     if real_pos == cfg_pos:
                         cur_item.setForeground(QtGui.QColor("#10b981")) # 绿色，完全一致
@@ -4955,12 +4979,16 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
                         cur_item.setForeground(QtGui.QColor("#ef4444")) # 红色，不一致
                         
                     host_rel = core.get_window_host_relation(found_hwnd)
+                    tip_prefix = f"🎯 通配当前命中: '{found_actual_title}'\n" if is_wildcard or is_title_diff else ""
                     if host_rel.get("is_sub_window"):
                         h_t = host_rel.get('host_title', '') or '主程序'
-                        cur_item.setToolTip(f"💡 附属浮窗 (宿主程序: {h_t})\n右键可选用‘📦 整体操作窗口’进行联动对齐")
+                        cur_item.setToolTip(f"{tip_prefix}💡 附属浮窗 (宿主程序: {h_t})\n右键可选用‘📦 整体操作窗口’进行联动对齐")
+                    elif tip_prefix:
+                        cur_item.setToolTip(tip_prefix.strip())
             else:
                 cur_item.setText("[未运行]")
                 cur_item.setForeground(QtGui.QColor("#6b7280")) # 灰色，未检测到
+                cur_item.setToolTip("")
                 
         self.table_widget.blockSignals(False)
         self.refresh_app_shortcuts(rebuild=False)
@@ -5480,6 +5508,21 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
         apply_single_action = menu.addAction("🎯 应用该窗口坐标 (移动至配置位置)")
         apply_overall_action = menu.addAction("📦 整体操作窗口 (主程序与附属浮窗联动)")
         apply_all_action = menu.addAction("🚀 应用当前方案所有窗口布局")
+        
+        # 🔀 通配方式支持：针对通达信从属浮窗、个股窗口或含有括号的窗口，提供一键转换为通配模式
+        convert_wildcard_tdx_action = None
+        convert_wildcard_glob_action = None
+        is_stock_or_tdx = (
+            core.is_stock_code_title(title) or 
+            "tdx" in title.lower() or 
+            "通达信" in title or 
+            core.is_tdx_semantic_sub_title(title) or 
+            "(" in title or "（" in title
+        )
+        if is_stock_or_tdx:
+            convert_wildcard_tdx_action = menu.addAction("🔀 转换为通配: [通达信从属浮窗] (推荐)")
+            convert_wildcard_glob_action = menu.addAction("🌐 转换为通配: *(*) (任意个股代码)")
+            
         menu.addSeparator()
 
         pinned_list = self.config_manager.config_data.setdefault("pinned_shortcuts", [])
@@ -5500,6 +5543,28 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
             self._launch_as_admin(exe_path, title, pos_item)
         elif open_dir_action and action == open_dir_action:
             self.open_program_dir(exe_path)
+        elif convert_wildcard_tdx_action and action == convert_wildcard_tdx_action:
+            title_item.setText("[通达信从属浮窗]")
+            self.save_current_table_to_memory()
+            self.request_save_config_debounced()
+            self.refresh_current_positions()
+            self.log(f"🎯 已将规则 '{title}' 成功转换为通配模式: '[通达信从属浮窗]' (可自动适配通达信当前任意个股浮窗)")
+            QMessageBox.information(
+                self, 
+                "通配设置成功", 
+                f"已成功将规则转换为: '[通达信从属浮窗]'！\n\n无论通达信后续切换到上证指数、春光集团还是其他任意个股，该规则均能自动适配并对齐浮窗位置。"
+            )
+        elif convert_wildcard_glob_action and action == convert_wildcard_glob_action:
+            title_item.setText("*(*)")
+            self.save_current_table_to_memory()
+            self.request_save_config_debounced()
+            self.refresh_current_positions()
+            self.log(f"🎯 已将规则 '{title}' 成功转换为通配模式: '*(*)'")
+            QMessageBox.information(
+                self, 
+                "通配设置成功", 
+                f"已成功将规则转换为: '*(*)'！\n\n系统将自动通过通配符模糊匹配任意带有括号个股代码的窗口。"
+            )
         elif apply_single_action and action == apply_single_action:
             pos_text = pos_item.text().strip() if pos_item else ""
             status, msg = self.apply_window_layout_by_title(title, pos_text)

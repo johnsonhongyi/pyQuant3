@@ -1,3 +1,44 @@
+## 2026-09-18 00:04
+- [x] **【彻底修复通达信金融终端多屏（副屏一、副屏二、副屏三）被误判为从属子浮窗导致无法更新位置的 Bug】(`webTools/window_manager/core.py`, `tests/test_tdx_wildcard_matching.py`)**：
+    - [x] **操盘手现场明确指示与真实痛点 (P0)**：
+        - “出现新的问题,通达信金融终端(开心果交易版) 副屏一的副屏也被识别为子窗口,没法更新位置,但是单独的子窗口”；
+        - 通达信多屏系统开启的“副屏一”、“副屏二”、“副屏三”是完整独立的工作区分屏大窗口，操盘手单独配置了其在各副显示器上的位置和大小；
+        - Win32 底层通达信为主窗口指定了副屏的 GW_OWNER，导致 `get_window_host_relation` 误判其为 `is_sub_window = True`；进而触发跳过 `cancel_window_maximized_or_fullscreen`、移除 `SWP_FRAMECHANGED`，使副屏若处于最大化或跨屏时位置完全无法更新。
+    - [x] **全体系工程落地与精准特异性豁免 (KISS / SOLID / DRY)**：
+        1. **`get_window_host_relation` 核心豁免**：
+           - 严格检测窗口标题：若包含“副屏”（如 `副屏一`、`副屏二`、`副屏三`），即使底层挂载了宿主 PID，**100% 裁决为 `is_sub_window = False`**，恢复为完全独立顶级大窗口；
+        2. **恢复独立窗口的完整移动与自愈能力**：
+           - 允许副屏正常执行 `cancel_window_maximized_or_fullscreen(hwnd)`，自动解除最大化并还原物理尺寸；
+           - 恢复完整的 `SWP_FRAMECHANGED` 标志位，确保非客户区和 DWM 刷新；
+           - 移动完成后自动补发 `WM_EXITSIZEMOVE`，触发 DirectUI 引擎自适应排版；
+        3. **防止通配符/个股泛化误伤副屏**：
+           - `find_tdx_sub_windows` 与 `matches_window_title` 严密排除包含“副屏”的窗口，防止个股通配符误抓副屏；
+        4. **全量自动化测试 100% 验证通过**：
+           - `tests/test_tdx_wildcard_matching.py` 新增 `test_tdx_sub_screen_identified_as_independent_window`（5/5 PASSED）；
+           - 回归 `tests/test_window_pos_dpi_isolation.py` 与 `tests/test_ats_window_manager.py`（5/5 PASSED）全绿。
+
+## 2026-09-17 23:54
+- [x] **【上线通达信特定从属浮窗通用通配引擎：支持语义宏、通配符 `*(*)` 与个股智能自适应候选兜底】(`webTools/window_manager/core.py`, `webTools/window_manager/ui.py`, `tests/test_tdx_wildcard_matching.py`)**：
+    - [x] **操盘手现场明确指示与真实痛点 (P0)**：
+        - “没有方法设置对通达信特定从属浮窗有通配方式适配个股和名称的title都不一样”；
+        - 通达信脱离出来的附属小浮窗，窗口标题随操盘手查看的股票而动态改变（如当前查看上证指数为 `上证指数(999999)`，切换后变为 `春光集团(301531)`）；
+        - 此前管理器配置中标题只能写死具体股票名，一旦切换股票即失效；且旧有 `find_windows_by_title_safe` 对所有字符执行 `re.escape`，导致通配符 `*(*)` 彻底失效。
+    - [x] **全体系工程落地与四重智能通配引擎 (KISS / SOLID / DRY)**：
+        1. **底层引擎：四重递进通配查找算法 (`core.find_windows_by_title_safe`)**：
+           - **第一重·专属语义宏**：支持配置 `[通达信从属浮窗]`、`通达信从属浮窗`、`通达信个股浮窗`、`TDX_SUB_WIN`，自动匹配通达信当前激活的从属浮窗；
+           - **第二重·智能通配符匹配**：逐字符编译通配符（`*` -> `.*`，`?` -> `.`），半角与全角括号智能自适应兼容（`(` / `（` 均能匹配），配置 `*(*)` 或 `*(??????)` 即可 100% 匹配任意股票/指数浮窗，杜绝普通主窗口误伤；
+           - **第三重·常规模糊匹配**：保持对所有日常软件字面量向后兼容；
+           - **第四重·个股智能候选兜底 (Smart Fallback)**：配置中即使仍保存为具体的 `上证指数(999999)`，当通达信切换为 `春光集团(301531)` 时，智能检测通达信宿主关系与 `#32770` 从属特性，自动兜底识别为同一个浮窗进行对齐，用户无需手动改配置也能自愈；
+        2. **整体操作窗口通配升级 (`core.apply_overall_window_group_by_title`)**：
+           - 引入 `core.matches_window_title` 替换原先死板的 `in` 判定，使主程序与通配浮窗联动对齐全面畅通；
+        3. **UI 交互全链路通配支撑 (`ui.py`)**：
+           - **表格实时状态高亮反馈**：当使用通配符或命中不同股票时，在“当前实际位置”列清晰高亮当前命中的个股（如 `[春光集团(301531)] 1946,-296,477,333`），浮窗归属一目了然；
+           - **右键菜单一键转为通配**：表格右键菜单智能检测通达信或股票窗口，提供快捷项：“🔀 转换为通配: [通达信从属浮窗] (推荐)” 与 “🌐 转换为通配: *(*)”，点一下即可一键转换并自动保存；
+           - **捕获窗口智能标记与通配导入**：捕获列表中自动标注 `💡[通达信从属浮窗]`，支持右键直接“以通配格式导入”，极大简化配置流程；
+        4. **全量自动化测试 100% 验证通过**：
+           - 新建 `tests/test_tdx_wildcard_matching.py`（4/4 PASSED 全部绿灯通过）；
+           - 回归 `tests/test_window_pos_dpi_isolation.py` 与 `tests/test_ats_window_manager.py`（5/5 PASSED）全量通过。
+
 ## 2026-09-17 23:28
 - [x] **【彻底解决东方财富在低 DPI 屏幕设置窗口后变形/大字体重叠问题，通达信特定从属浮窗 DPI 上下文切换精准隔离】(`webTools/window_manager/core.py`, `tests/test_window_pos_dpi_isolation.py`)**：
     - [x] **操盘手现场明确指示与真实痛点 (P0)**：
