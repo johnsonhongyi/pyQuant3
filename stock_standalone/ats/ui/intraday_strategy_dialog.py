@@ -2698,6 +2698,7 @@ class SBCIntradayChartDialog(QWidget):
             btn = QPushButton(text)
             btn.setCheckable(True)
             btn.setProperty("period_mode", mode)
+            btn.setToolTip(f"切换至 {text} 周期 (按住 Ctrl/Alt 点击可一键同步所有已打开的 SBC 窗口)")
             if mode == "1m":
                 btn.setChecked(True)
             btn.setStyleSheet("""
@@ -3588,7 +3589,7 @@ class SBCIntradayChartDialog(QWidget):
                     pass
                 try:
                     from run_sbc import save_launcher_holdings_windows
-                    save_launcher_holdings_windows()
+                    save_launcher_holdings_windows(force=True)
                 except Exception:
                     pass
         else:
@@ -3875,7 +3876,10 @@ class SBCIntradayChartDialog(QWidget):
                 quit_and_save_all_sbc_windows()
             except Exception:
                 pass
-            raise
+            app_inst = QApplication.instance()
+            if app_inst:
+                app_inst.quit()
+            return
         except Exception:
             return
 
@@ -4165,11 +4169,19 @@ class SBCIntradayChartDialog(QWidget):
         return signals
 
     def _on_period_btn_clicked(self):
-        """【📈 切换周期】在 1日分时 / 2日分时 / 3日分时 与 5分/30分/60分/日K 通道图间自由切换"""
+        """【📈 切换周期】在 1日分时 / 2日分时 / 3日分时 与 5分/30分/60分/日K 通道图间自由切换 (支持 Ctrl/Alt+点击 一键批量同步所有窗口)"""
         sender = self.sender()
         if not sender:
             return
         mode = sender.property("period_mode") or "1m"
+
+        modifiers = QApplication.keyboardModifiers()
+        if bool(modifiers & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier)):
+            count = sync_all_open_sbc_period(mode)
+            self.set_period_mode(mode, reload=True, save=True)
+            self.lbl_info.setText(f"🌐 [批量同步] 已将全部 {count} 个已打开 SBC 窗口的周期批量同步切换至 [{mode.upper()}]！")
+            return
+
         self.set_period_mode(mode, reload=True, save=True)
 
     def _on_rearrange_windows_clicked(self):
@@ -4351,6 +4363,15 @@ class SBCIntradayChartDialog(QWidget):
             self._refresh_recent_codes_combo()
         except Exception:
             pass
+
+        # 💡 若该标的已在某个窗口中打开，不要重复创建，直接置顶激活它并自动平铺
+        existing = find_existing_sbc_window_by_code(c_clean)
+        if existing:
+            activate_and_raise_sbc_window(existing)
+            st_name = resolve_stock_name(c_clean)
+            self.lbl_info.setText(f"📌 标的 [{c_clean} {st_name}] 已经处于打开状态，已自动置顶激活！")
+            QTimer.singleShot(80, lambda: rearrange_all_sbc_windows(parent_win=existing))
+            return
 
         cur_period = getattr(self, '_current_period_mode', '1m')
         main_win = getattr(self, "main_workbench", None) or (self.parent().window() if (self.parent() and hasattr(self.parent(), 'window')) else None)
@@ -4700,9 +4721,162 @@ class SBCIntradayChartDialog(QWidget):
 
 
 
+def find_existing_sbc_window_by_code(code: str) -> Optional[SBCIntradayChartDialog]:
+    """【🔍 查找指定标的已打开的 SBC 窗口】
+    遍历 QApplication 所有顶层窗口与全局字典，精准定位当前正在显示该代码的存活 SBC 窗口。
+    """
+    if not code:
+        return None
+    c_clean = "".join(filter(str.isdigit, str(code))).zfill(6)
+    if not c_clean or c_clean == "000000":
+        return None
+
+    try:
+        from PyQt6.QtWidgets import QApplication
+        from PyQt6.sip import isdeleted
+    except ImportError:
+        return None
+
+    # 1. 优先遍历当前进程内所有已存在的顶级窗口
+    for w in QApplication.topLevelWidgets():
+        if isinstance(w, SBCIntradayChartDialog):
+            try:
+                if not isdeleted(w) and not getattr(w, '_is_closing', False):
+                    w_code = "".join(filter(str.isdigit, str(getattr(w, 'code', '')))).zfill(6)
+                    if w_code == c_clean:
+                        return w
+            except Exception:
+                continue
+
+    # 2. 从全局字典兜底排查
+    global_dict = getattr(SBCIntradayChartDialog, '_global_sbc_dialogs', {})
+    if c_clean in global_dict:
+        dlg = global_dict[c_clean]
+        try:
+            if dlg and not isdeleted(dlg) and not getattr(dlg, '_is_closing', False):
+                return dlg
+        except Exception:
+            pass
+
+    return None
+
+
+def activate_and_raise_sbc_window(dlg: SBCIntradayChartDialog, period_mode: Optional[str] = None) -> SBCIntradayChartDialog:
+    """【📌 激活并置顶 SBC 窗口】
+    将已存在的 SBC 窗口展开、前置、获取焦点并强制置顶到 Windows 前台，绝不重复开窗。
+    """
+    if not dlg:
+        return dlg
+
+    try:
+        # 若处于贴边收起隐藏状态，立即平滑滑出展开
+        if getattr(dlg, "is_hidden_state", False) and hasattr(dlg, "show_normal_position"):
+            dlg.show_normal_position()
+
+        # 若窗口处于最小化，恢复正常大小
+        if dlg.isMinimized():
+            dlg.showNormal()
+
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
+
+        # 切换周期（若显式指定且与当前不同）
+        if period_mode and hasattr(dlg, "set_period_mode"):
+            cur_p = getattr(dlg, "_current_period_mode", None)
+            if cur_p != period_mode:
+                dlg.set_period_mode(period_mode, reload=True, save=True)
+
+        # Windows 原生前台唤醒强力置顶
+        if sys.platform == "win32":
+            try:
+                import ctypes
+                hwnd = int(dlg.winId())
+                ctypes.windll.user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+                ctypes.windll.user32.SetForegroundWindow(hwnd)
+            except Exception:
+                pass
+
+        # 临时在窗口信息栏给予反馈
+        if hasattr(dlg, "lbl_info") and dlg.lbl_info:
+            c = getattr(dlg, "code", "")
+            st_name = resolve_stock_name(c)
+            dlg.lbl_info.setText(f"📌 [标的已打开·已置顶] 【{c} {st_name}】 (快捷键: T 置顶/取消)")
+    except Exception as e:
+        logger.debug(f"激活置顶 SBC 窗口异常: {e}")
+
+    return dlg
+
+
+def sync_all_open_sbc_period(target_mode: str) -> int:
+    """【⚡ 全局同步所有已打开 SBC 窗口的看盘周期】
+    当操盘手按住 Alt 点击任意周期按钮时调用：
+    1. 遍历当前进程内所有已打开且存活的 SBCIntradayChartDialog 窗口，统一调用 set_period_mode；
+    2. 同步更新持久化 JSON 配置文件 (sbc_open_windows / sbc_holdings_windows / sbc_period_modes)；
+    3. 返回成功同步的窗口总数。
+    """
+    if not isinstance(target_mode, str):
+        target_mode = "1m"
+    mode_clean = target_mode.strip().lower()
+    if mode_clean not in VALID_SBC_PERIODS:
+        mode_clean = "1m"
+
+    count = 0
+    try:
+        from PyQt6.QtWidgets import QApplication
+        from PyQt6.sip import isdeleted
+        for w in QApplication.topLevelWidgets():
+            if isinstance(w, SBCIntradayChartDialog):
+                try:
+                    if not isdeleted(w) and not getattr(w, '_is_closing', False):
+                        if w.isVisible() or getattr(w, 'is_hidden_state', False):
+                            w.set_period_mode(mode_clean, reload=True, save=True)
+                            count += 1
+                except Exception:
+                    pass
+    except Exception as e:
+        logger.debug(f"同步 SBC 周期异常: {e}")
+
+    # 同步更新配置文件，使下次恢复时所有窗口周期也保持一致
+    try:
+        cfg_path = _get_sbc_layout_cfg_path()
+        if os.path.exists(cfg_path):
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            modified = False
+            for k in ("sbc_open_windows", "sbc_holdings_windows"):
+                if k in data and isinstance(data[k], list):
+                    for item in data[k]:
+                        if isinstance(item, dict):
+                            item["period_mode"] = mode_clean
+                            modified = True
+            if "sbc_period_modes" not in data:
+                data["sbc_period_modes"] = {}
+            data["sbc_period_modes"]["latest"] = mode_clean
+            modified = True
+            if modified:
+                tmp_path = cfg_path + f".tmp_{os.getpid()}"
+                with open(tmp_path, "w", encoding="utf-8") as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+                try:
+                    if os.path.exists(cfg_path):
+                        os.replace(tmp_path, cfg_path)
+                    else:
+                        os.rename(tmp_path, cfg_path)
+                except Exception:
+                    import shutil
+                    shutil.move(tmp_path, cfg_path)
+    except Exception as err:
+        logger.debug(f"同步写入周期配置异常: {err}")
+
+    return count
+
+
 def open_sbc_chart_dialog(parent_win: Optional[QWidget] = None, code: str = "688826", period_mode: Optional[str] = None, *args, **kwargs) -> Optional[SBCIntradayChartDialog]:
     """
     【📈 全局通用 SBC 独立分时走势图调起入口】支持在 ATS 任意表格/面板右键菜单中一键唤醒调起分时图
+    - 💡 核心防重：若该标的已打开过，严禁重复创建新窗口，而是将其置顶并激活到最前台；
+    - 若尚未打开，则创建新独立窗口并展示。
     """
     # 兼容各种调用形式 (code, parent=self / parent_win, code)
     if "parent" in kwargs and parent_win is None:
@@ -4717,6 +4891,17 @@ def open_sbc_chart_dialog(parent_win: Optional[QWidget] = None, code: str = "688
     c_clean = "".join(filter(str.isdigit, str(code))).zfill(6)
     if not c_clean or c_clean == "000000":
         return None
+
+    # 💡 【核心：防重复打开】优先在当前所有存活顶层窗口中查找该标的，若已存在直接置顶激活返回
+    existing_dlg = find_existing_sbc_window_by_code(c_clean)
+    if existing_dlg is not None:
+        activate_and_raise_sbc_window(existing_dlg, period_mode=period_mode)
+        trades_df = kwargs.get("trades_df", None)
+        df_kline = kwargs.get("df_kline", None)
+        if trades_df is not None:
+            existing_dlg.set_custom_backtest_trades(trades_df, df_kline=df_kline)
+        _record_sbc_open(c_clean, existing_dlg.geometry(), period_mode=getattr(existing_dlg, '_current_period_mode', '1m'))
+        return existing_dlg
 
     main_win = parent_win.window() if (parent_win and hasattr(parent_win, 'window')) else None
     target_win = main_win or parent_win
@@ -4733,13 +4918,18 @@ def open_sbc_chart_dialog(parent_win: Optional[QWidget] = None, code: str = "688
     dlg = sbc_dict.get(c_clean)
     engine = IntradayStrategyEngine.get_instance()
 
-    if dlg is None or not dlg.isVisible():
+    from PyQt6.sip import isdeleted
+    if dlg is None or isdeleted(dlg) or getattr(dlg, '_is_closing', False):
         dlg = SBCIntradayChartDialog(parent=target_win, code=c_clean, engine=engine, initial_period_mode=period_mode)
         sbc_dict[c_clean] = dlg
     else:
-        dlg.switch_code(c_clean)
-        if period_mode:
-            dlg.set_period_mode(period_mode, reload=True, save=True)
+        # 已有实例但此前未在 topLevelWidgets 中命中，置顶激活它
+        activate_and_raise_sbc_window(dlg, period_mode=period_mode)
+        trades_df = kwargs.get("trades_df", None)
+        df_kline = kwargs.get("df_kline", None)
+        if trades_df is not None:
+            dlg.set_custom_backtest_trades(trades_df, df_kline=df_kline)
+        return dlg
 
     trades_df = kwargs.get("trades_df", None)
     df_kline = kwargs.get("df_kline", None)
@@ -4750,6 +4940,12 @@ def open_sbc_chart_dialog(parent_win: Optional[QWidget] = None, code: str = "688
     dlg.raise_()
     dlg.activateWindow()
     _record_sbc_open(c_clean, dlg.geometry(), period_mode=getattr(dlg, '_current_period_mode', '1m'))
+    if os.environ.get("SBC_IS_HOLDINGS_LAUNCHER") == "1":
+        try:
+            from run_sbc import save_launcher_holdings_windows
+            save_launcher_holdings_windows(force=True)
+        except Exception:
+            pass
     return dlg
 
 

@@ -25,7 +25,8 @@
            - **贴边收缩精准落盘**：即便窗口处于贴边收起状态（`is_hidden_state=True`），退出时依然准确保存其 `normal_geometry`，杜绝还原时尺寸塌陷。
         5. **架构健壮性细节修复**：
            - `_get_launcher_layout_cfg_path` 增加对 `SBC_LAYOUT_CONFIG_PATH` 环境变量优先支持；
-           - `run_sbc.py` 导入 `QTimer` 并优化 `QApplication.instance() or QApplication(sys.argv)`，杜绝重复创建导致的死锁。
+           - `run_sbc.py` 补充 `import time` 杜绝落盘 NameError，并优化 `QApplication.instance() or QApplication(sys.argv)`，杜绝重复创建导致的死锁；
+           - `intraday_strategy_dialog.py` 单窗口关闭时显式传入 `save_launcher_holdings_windows(force=True)`，彻底消除防抖吞掉除名写盘的问题。
     - [x] **自动化测试 100% 验证通过 (39/39 PASSED)**：
         - 专项测试 `tests/test_sbc_ctrl_c_and_alt_exit_persistence.py`: 5/5 PASSED（包含 Alt 点击退出持久化、单窗口正常关闭除名、app.exec 捕获 KeyboardInterrupt 自动落盘、槽函数 excepthook 捕获落盘、贴边收起状态 normal_geometry 精准持久化）；
         - 专项测试 `tests/test_sbc_packaged_env_and_fallback.py`: 7/7 PASSED；
