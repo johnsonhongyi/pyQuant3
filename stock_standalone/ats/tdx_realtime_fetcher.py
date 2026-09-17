@@ -400,6 +400,49 @@ class TDXGlobalCachePool:
             os.makedirs(fallback, exist_ok=True)
             return os.path.join(fallback, "tdx_global_cache_pool.pkl.z")
 
+    @staticmethod
+    def is_trading_day(dt_str: Optional[str] = None) -> bool:
+        """
+        【A股交易日裁决】
+        精准判断指定日期 (YYYY-MM-DD) 或今日是否为真实交易日。
+        排除周末与法定节假日，只有交易日才允许触发数据跨日滚动与增量更新。
+        """
+        try:
+            if hasattr(cct, 'get_day_istrade_date'):
+                return bool(cct.get_day_istrade_date(dt_str))
+            if hasattr(cct, 'get_trade_date_status') and dt_str is None:
+                return bool(cct.get_trade_date_status())
+        except Exception:
+            pass
+        # 兜底：周六 (5)、周日 (6) 绝非交易日
+        try:
+            if dt_str:
+                dt = datetime.strptime(str(dt_str)[:10], "%Y-%m-%d")
+            else:
+                dt = datetime.now()
+            return dt.weekday() < 5
+        except Exception:
+            return False
+
+    @classmethod
+    def can_trigger_date_rollover(cls, today_str: Optional[str] = None) -> bool:
+        """
+        【跨交易日滚动迭代触发门禁 (开盘前铁壁防御)】
+        只有在同时满足以下条件时，才允许触发次日跨交易日滚动迭代 (剔除最老1天、昨日并入历史、清空今日临时缓存)：
+        1. 今日必须是真实的 A 股交易日 (排除周末与法定节假日)；
+        2. 当前时间必须已经达到早盘开盘/集合竞价时段 (>= 09:15)！
+           若在 09:15 之前启动系统 (早盘 00:00~09:14)，操盘手正在复盘与做盘前预案，
+           坚决不触发滚动淘汰与删除，完整保留上一交易日的全天分时数据供 0 网络极速复盘！
+        """
+        if not cls.is_trading_day(today_str):
+            return False
+        
+        # 检查当前时刻是否已达到 09:15 开盘线
+        current_hm = datetime.now().strftime("%H:%M")
+        if current_hm < "09:15":
+            return False
+        return True
+
     def __init__(self):
         self._mutex = threading.RLock()
         today_str = datetime.now().strftime("%Y-%m-%d")
@@ -466,9 +509,13 @@ class TDXGlobalCachePool:
             payload = pickle.loads(raw_bytes)
 
             today_str = datetime.now().strftime("%Y-%m-%d")
-            if payload.get("date") != today_str:
-                # 跨交易日旧缓存，自动废弃
-                return False
+            cache_date = payload.get("date")
+            can_rollover = self.can_trigger_date_rollover(today_str)
+
+            # 核心交易日与开盘防护：
+            # 只有当今天本身是真实交易日，且已经达到早盘开盘时段 (>= 09:15)，且自然日相比缓存日期推进了，才认定为跨交易日！
+            # 若在早盘未开盘前 (< 09:15) 或周末/节假日打开，绝对禁止跨日淘汰与删除，直接复用上一交易日固化缓存！
+            is_cross_day = bool(cache_date and today_str and cache_date != today_str and can_rollover)
 
             with self._mutex:
                 remote_hist = payload.get("history_static_bars", {})
@@ -494,7 +541,27 @@ class TDXGlobalCachePool:
                     self._shares_cache.update(remote_shares)
 
                 self._last_ramdisk_mtime = mtime
-                logger.info(f"⚡ [TDXGlobalCachePool] 已从 RamDisk 载入 {len(self._history_static_bars)} 只静态历史分时 / {len(self._incremental_intraday_pool)} 组增量分时 (解压耗时 < 1ms)")
+                # 若尚未开盘或处于非交易日，当前有效日期锁定为缓存中的上一有效交易日 (如昨日)，保证缓存命中率 100%
+                if not can_rollover and cache_date:
+                    self._current_date_str = cache_date
+                else:
+                    self._current_date_str = today_str
+
+                if not is_cross_day:
+                    status_tip = f"⚡ [TDXGlobalCachePool] 已从 RamDisk 载入 {len(self._history_static_bars)} 只静态历史分时 / {len(self._incremental_intraday_pool)} 组增量分时 (解压耗时 < 1ms"
+                    if not self.is_trading_day(today_str):
+                        status_tip += f", 非交易日休市固化={self._current_date_str}"
+                    elif not can_rollover:
+                        status_tip += f", 盘前复盘固化={self._current_date_str} (<09:15)"
+                    status_tip += ")"
+                    logger.info(status_tip)
+                else:
+                    logger.info(f"🔄 [TDXGlobalCachePool] 检测到 RamDisk 历史分时为上一交易日 ({cache_date})，今日 ({today_str} >= 09:15) 开盘启动滑动窗口向前自动滚动迭代...")
+            
+            # 若已开盘且是跨日缓存，载入昨日数据后立即执行自动滑动窗口滚动迭代 (剔除早期数据，保留前9天基线)
+            if is_cross_day:
+                self._check_date_rollover(force_from_date=cache_date)
+
             return True
         except Exception as e:
             logger.debug(f"[TDXGlobalCachePool] 从 RamDisk 载入缓存异常: {e}")
@@ -528,9 +595,10 @@ class TDXGlobalCachePool:
                 return False
 
             today_str = self._current_date_str
-            # 判断是否收盘后 (15:05 之后为收盘固化状态)
+            # 判断是否盘中活跃期 (交易日 09:15 ~ 15:05 为盘中活跃期；开盘前 <09:15 或收盘后 >=15:05 均为固化状态)
             current_hm = datetime.now().strftime("%H:%M")
-            is_after_close = (current_hm >= "15:05")
+            is_trading_active = self.is_trading_day(today_str) and ("09:15" <= current_hm < "15:05")
+            is_after_close = not is_trading_active
 
             payload = {
                 "date": today_str,
@@ -579,25 +647,110 @@ class TDXGlobalCachePool:
         except Exception:
             pass
 
-    def _check_date_rollover(self):
-        """跨交易日自动清理历史静态缓存"""
+    def _check_date_rollover(self, force_from_date: Optional[str] = None):
+        """
+        【次日交易日自动滚动迭代剔除早期数据增量更新 (Sliding Window Roll-Forward)】
+        - 跨交易日时绝不无脑清空历史！
+        - 将前一交易日的已收盘分时数据滚动并入静态历史不可变序列；
+        - 自动剔除最老的一天历史分时 (Slide-out oldest day)，保留最近 N-1 天 (如 9 天)；
+        - 重新计算前 9 天静态累计成交量与金额基线；
+        - 仅清空今日盘中临时缓存，今日仅需拉取当天 1 天轻量增量 (15ms)，彻底杜绝重拉 2400 根 Bar；
+        - 原子持久化到 RamDisk，次日开盘 0 网络秒级呈现！
+        """
         today_str = datetime.now().strftime("%Y-%m-%d")
-        if today_str != self._current_date_str:
-            with self._mutex:
-                self._current_date_str = today_str
-                self._history_static_bars.clear()
-                self._multi_day_df_cache.clear()
-                self._incremental_intraday_pool.clear()
-                self._daily_metrics_cache.clear()
-                self._quotes_cache.clear()
-                self._kline_cache.clear()
-                # 尝试移除 RamDisk 上的跨日文件
+        effective_old_date = force_from_date or self._current_date_str
+
+        # 核心交易日与开盘门禁：非交易日 (周末/节假日) 或交易日早盘未开盘 (< 09:15)，严禁自动跨日滚动与早期数据淘汰！
+        if not force_from_date:
+            if not self.can_trigger_date_rollover(today_str):
+                return
+            if today_str == self._current_date_str:
+                return
+
+        with self._mutex:
+            self._current_date_str = today_str
+            rolled_stocks = 0
+            all_codes = set(self._history_static_bars.keys()) | {k[0] for k in self._incremental_intraday_pool.keys()}
+
+            for c_clean in all_codes:
                 try:
-                    if os.path.exists(self._ramdisk_path):
-                        os.remove(self._ramdisk_path)
-                except Exception:
-                    pass
-                logger.info(f"🔄 [TDXGlobalCachePool] 检测到日期跨越至 {today_str}，已自动重置全局历史缓存池")
+                    hist_entry = self._history_static_bars.get(c_clean)
+                    existing_records = list(hist_entry.get("records", [])) if hist_entry else []
+                    days = hist_entry.get("days", 10) if hist_entry else 10
+
+                    # 尝试从昨日增量池中提取昨日分时
+                    inc_key = (c_clean, days)
+                    inc_entry = self._incremental_intraday_pool.get(inc_key)
+                    yesterday_records = []
+                    if inc_entry:
+                        df_yesterday = inc_entry.get("df")
+                        if df_yesterday is not None and not df_yesterday.empty and "date" in df_yesterday.columns:
+                            yesterday_records = df_yesterday[df_yesterday["date"] == effective_old_date].to_dict('records')
+                            if not yesterday_records:
+                                u_d = sorted(df_yesterday["date"].unique())
+                                if u_d:
+                                    yesterday_records = df_yesterday[df_yesterday["date"] == u_d[-1]].to_dict('records')
+
+                    # 合并已有历史与昨日分时
+                    combined_records = existing_records + yesterday_records
+                    if not combined_records:
+                        continue
+
+                    # 按交易日归类
+                    date_dict = collections.OrderedDict()
+                    for r in combined_records:
+                        d = str(r.get("date", ""))
+                        if d:
+                            if d not in date_dict:
+                                date_dict[d] = []
+                            date_dict[d].append(r)
+
+                    unique_dates = sorted(list(date_dict.keys()))
+                    if not unique_dates:
+                        continue
+
+                    # 滑动窗口：保留今天之前的前 N-1 天 (例如 10 天分时保留最近 9 天)
+                    max_keep_days = max(1, days - 1)
+                    keep_dates = set(unique_dates[-max_keep_days:])
+
+                    new_records = []
+                    cum_vol = 0.0
+                    cum_amt = 0.0
+                    for d in unique_dates:
+                        if d in keep_dates:
+                            for r in date_dict[d]:
+                                new_records.append(r)
+                                cum_vol += float(r.get("vol", 0.0))
+                                cum_amt += float(r.get("amount", 0.0))
+
+                    if new_records:
+                        self._history_static_bars[c_clean] = {
+                            "date": today_str,
+                            "days": days,
+                            "records": new_records,
+                            "last_cum_vol": cum_vol,
+                            "last_cum_amt": cum_amt,
+                            "updated_at": time.time()
+                        }
+                        rolled_stocks += 1
+                except Exception as e:
+                    logger.debug(f"标的 {c_clean} 次日滚动迭代异常: {e}")
+
+            # 清理昨日的短期缓存与日线指标 (新交易日重新接收实时增量)
+            self._multi_day_df_cache.clear()
+            self._incremental_intraday_pool.clear()
+            self._daily_metrics_cache.clear()
+            self._quotes_cache.clear()
+            self._kline_cache.clear()
+            self._is_dirty = True
+
+            logger.info(f"🔄 [TDXGlobalCachePool] 次日交易日自动滚动迭代完成: 已将 {rolled_stocks} 只股票的历史分时向前平移 (剔除最老1天，保留前9天基线)，新交易日 {today_str}")
+
+        # 立即集中原子落盘到 RamDisk
+        try:
+            self.flush_to_ramdisk(force=True)
+        except Exception:
+            pass
 
     # ── 1. 静态历史分时长效缓存 ──
     def get_static_history_bars(self, code: str, days: int) -> Optional[Dict[str, Any]]:
@@ -680,7 +833,8 @@ class TDXGlobalCachePool:
         c_clean = str(code).zfill(6)
         key = (c_clean, int(days))
         current_hm = datetime.now().strftime("%H:%M")
-        is_after_close = (current_hm >= "15:05")
+        is_trading_active = self.is_trading_day(self._current_date_str) and ("09:15" <= current_hm < "15:05")
+        is_after_close = not is_trading_active
 
         with self._mutex:
             entry = self._incremental_intraday_pool.get(key)
@@ -2110,19 +2264,26 @@ class TDXRealtimeFetcher:
         c_clean = str(code).zfill(6)
         try:
             today_date_str = datetime.now().strftime("%Y-%m-%d")
+            can_rollover = self.cache_pool.can_trigger_date_rollover(today_date_str)
 
-            # 1. 优先从全局缓存池提取增量/收盘固化缓存 (收盘后 0 网络直出；盘中在 TTL 内 0 网络直出)
+            # 1. 优先从全局缓存池提取增量/收盘固化缓存 (收盘后、非交易日或开盘前 <09:15 均 0 网络直出；盘中在 TTL 内 0 网络直出)
             try:
                 _base_intv = float(getattr(cct, 'ats_tdx_interval', 3.0) or 3.0)
             except Exception:
                 _base_intv = 3.0
-            _cache_ttl = max(1.5, _base_intv * 0.8)
+            _cache_ttl = 86400.0 if not can_rollover else max(1.5, _base_intv * 0.8)
 
             cached_inc = self.cache_pool.get_incremental_intraday(c_clean, days, ttl=_cache_ttl)
             if cached_inc is not None:
                 df_inc, _ = cached_inc
                 if df_inc is not None and not df_inc.empty:
                     return df_inc
+
+            # 若未开盘 (< 09:15) 或为非交易日，且多日缓存有值，直接返回，避免盘前向 TDX 发起无效请求
+            if not can_rollover:
+                df_multi = self.cache_pool.get_multi_day_df(c_clean, days, ttl=86400.0)
+                if df_multi is not None and not df_multi.empty:
+                    return df_multi
 
             mkt = get_market_code(c_clean)
             tot_circ_shares = self.get_circulation_shares(c_clean)

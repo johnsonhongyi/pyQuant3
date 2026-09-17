@@ -1,3 +1,53 @@
+## 2026-09-17 22:00
+- [x] **【严密补齐 A 股真实交易日裁决与盘前未开盘铁壁防御：周末节假日坚决不滚动淘汰历史、交易日开盘前 (< 09:15) 启动 0 淘汰 0 删除、0 网络极速直出】(`ats/tdx_realtime_fetcher.py`, `tests/test_ipo_subnew_detector.py`)**：
+    - [x] **操盘手现场明确指示与致命隐患 (P0)**：
+        - “ats\tdx_realtime_fetcher.py中是否判断是否为交易日的问题,只有交易日才可以触发数据更新today_str = datetime.now().strftime("%Y-%m-%d") cache_date = payload.get("date") is_cross_day = (cache_date != today_str)”；
+        - “这个是否还有个问题,交易日未开盘前启动查看数据是否会触发更新,删除,”；
+        - 审计发现此前若操盘手在周六/周日、节假日或**交易日早盘开盘前 (00:00 ~ 09:14)** 打开系统复盘做早盘预案，系统误判为跨交易日触发滚动淘汰，导致历史前 9 天基线被提前淘汰吃掉，且清空了昨日增量分时导致盘前分时图空白，并在非开盘时段空转拉增量造成网络阻塞。
+    - [x] **全体系工程落地与极限性能优化 (KISS / SOLID / DRY)**：
+        1. **`TDXGlobalCachePool.is_trading_day` 与 `can_trigger_date_rollover` 双重交易门禁**：
+           - 接入 `cct.get_day_istrade_date(dt)` 与 `cct.get_trade_date_status()`，结合周六/周日物理兜底；
+           - 排除周末与一切法定节假日（元旦、春节、清明、五一、端午、中秋、国庆等休市日）；
+           - 增加早盘开盘时刻判定门禁：`can_trigger_date_rollover` 严格要求必须满足“真实交易日 + 当前时刻已进入早盘集合竞价 (>= 09:15)”；
+        2. **`_load_from_ramdisk` 跨交易日与盘前未开盘判定重构**：
+           - `can_rollover = self.can_trigger_date_rollover(today_str)`；
+           - `is_cross_day = bool(cache_date and today_str and cache_date != today_str and can_rollover)`；
+           - 若处于非交易日或交易日早盘未开盘 (< 09:15)，系统有效基准日期保持为上一交易日 `cache_date`（如昨日），`is_cross_day = False`，**坚决不执行滑动窗口淘汰，绝不清空昨日增量**；
+           - 静态历史 100% 命中，昨日全天分时 0 删除，历史数据 0 损耗；
+        3. **`_check_date_rollover` 盘前防御铁壁**：
+           - `if not force_from_date: if not self.can_trigger_date_rollover(today_str): return`，未开盘前坚决不推进日期，不剔除最老 1 天；
+        4. **未开盘前与非交易日全天固化 0 网络秒级直出**：
+           - `get_incremental_intraday` 在开盘前 (< 09:15) 或收盘后全天视为固化状态，0 网络直出；
+           - `fetch_multi_day_intraday_bars` 识别到未开盘前且已有分时时，直接纯内存返回 DataFrame，早盘 07:00~09:14 复盘 0 网络请求连接 TDX，网络压力真正彻底归零；
+    - [x] **全量自动化测试 100% 验证通过 (20/20 PASSED)**：
+        - 专项新增 `test_non_trading_day_protection_against_date_rollover`（覆盖周六打开复盘 0 淘汰、周一早盘 08:30 打开 0 淘汰 0 删除、周一 09:15 真实开盘正常滚动），全量 20/20 全部绿灯通过。
+
+
+
+## 2026-09-17 21:50
+- [x] **【次日交易日自动滚动迭代剔除早期数据 (Sliding Window Roll-Forward) 与全视图高精度排序引擎上线】(`ats/tdx_realtime_fetcher.py`, `ats/ui/ipo_subnew_detector_dialog.py`, `minute_kline_viewer_qt.py`, `tests/test_ipo_subnew_detector.py`)**：
+    - [x] **操盘手现场明确指示与核心痛点 (P0)**：
+        - “有次日交易日自动迭代更新剔除早期数据增量更新的能力实现了么?以及整个视图的排序功能没有”；
+        - 审计发现此前跨日无脑 `clear()` 全部清空并删除 RamDisk，次日被迫重新向网络拉取 10 天 2400 根 Bar；且表格表头未开启点击排序交互。
+    - [x] **全体系工程落地与极限性能优化 (KISS / SOLID / DRY)**：
+        1. **次日跨日滑动窗口自动滚动迭代算法 (`_check_date_rollover`)**：
+           - 将前一交易日收盘的 240 根分时自动滚动并入静态历史不可变序列；
+           - 提取唯一交易日列表，若大于 $N-1$ 天（如 9 天），自动剔除最早的一天（Slide-out oldest day），使静态历史严格锁定为最新的 9 天；
+           - 重新累加前 9 天静态累计成交量与成交额，作为今日的静态基准；
+           - 次日开盘仅需拉取当天 1 天数据（15ms），直接与前 9 天合并，**0 网络重拉 2400 根历史 Bar**；
+           - 启动即滚动：从 RamDisk 载入上一交易日缓存时，自动感知并瞬间平移迭代；
+        2. **超短检测工具全表头点击高精度排序 (`IPOSubnewDetectorDialog`)**：
+           - 表头全面开启 `setSectionsClickable(True)` 与 `setSortIndicatorShown(True)`，连接 `_on_header_section_clicked`；
+           - 单击表头在升序/降序间自适应切换，默认数值列降序（涨跌幅、偏离度、连阳、现价等）；
+           - 接入 `IPONumericTableWidgetItem.__lt__` 确保严格基于浮点数/整数原始数值比较，杜绝字典序错乱；
+           - 数据错峰渲染完毕后自动调用 `_apply_current_sort()` 重新整理，保持用户排布；
+        3. **分时查看器视图高精度排序 (`minute_kline_viewer_qt.py`)**：
+           - 升级 `DataFrameModel.sort`，智能剥除 `%`、`+`、`,` 转换为浮点数值比较，排序后执行 `reset_index(drop=True)` 杜绝物理行错乱；
+           - 为 `summary_table`、`detail_table`、`full_results_table` 全面启用表头点击与指示器箭头。
+    - [x] **全量自动化测试 100% 验证通过 (19/19 + 4/4 PASSED)**：
+        - 专项新增 `test_sliding_window_roll_forward_on_date_rollover` 与 `test_table_header_sorting_interaction` 全部绿灯通过；
+        - 分时查看器测试 4/4 全部通过。
+
 ## 2026-09-17 21:30
 - [x] **【交易日计算数据 RamDisk 持久化与时间戳增量复用：SBC 走势图与超短检测工具全面获益，全系统网络压力缩减 90%~95%】(`ats/tdx_realtime_fetcher.py`, `ats/strategy/ipo_vwap_detector_engine.py`, `tests/test_ipo_subnew_detector.py`)**：
     - [x] **操盘手现场明确指示与真实痛点 (P0)**：

@@ -564,6 +564,189 @@ class TestIPOSubnewDetector(unittest.TestCase):
         self.assertEqual(meta2["latest_bar_time"], "14:56")
         self.assertEqual(len(df_cached2), 2)
 
+    def test_sliding_window_roll_forward_on_date_rollover(self):
+        """【测试】验证次日交易日自动滚动迭代剔除早期数据 (Sliding Window Roll-Forward)"""
+        from ats.tdx_realtime_fetcher import TDXGlobalCachePool
+        pool = TDXGlobalCachePool.get_instance()
+        test_code = "001365"
+        days = 3 # 设定窗口为 3 天，跨日后应保留最近 2 天 (N-1)
+
+        # 模拟 Day 1 (2026-09-15) 与 Day 2 (2026-09-16) 的静态历史
+        mock_records = [
+            {"date": "2026-09-15", "time": "09-15 09:30", "time_only": "09:30", "close": 30.0, "open": 30.0, "vol": 1000.0, "amount": 30000.0},
+            {"date": "2026-09-16", "time": "09-16 09:30", "time_only": "09:30", "close": 31.0, "open": 31.0, "vol": 1500.0, "amount": 46500.0},
+        ]
+        pool.set_static_history_bars(test_code, days, mock_records, 2500.0, 76500.0)
+
+        # 模拟 Day 3 (2026-09-17) 的当日增量分时
+        df_day3 = pd.DataFrame([
+            {"time": "09-17 14:55", "date": "2026-09-17", "time_only": "14:55", "close": 32.0, "open": 31.5, "vwap": 31.8, "vol": 2000.0, "amount": 63600.0, "volume": 20.0},
+        ]).set_index("time")
+        pool.set_incremental_intraday(test_code, days, df_day3, "14:55", 1, 2000.0, 63600.0)
+
+        # 跨入次日 Day 4 (2026-09-18)
+        with patch("ats.tdx_realtime_fetcher.datetime") as mock_dt:
+            from datetime import datetime as real_dt
+            mock_dt.now.return_value = real_dt(2026, 9, 18, 9, 0, 0)
+            mock_dt.strftime = real_dt.strftime
+            pool._check_date_rollover(force_from_date="2026-09-17")
+
+        # 验证滑动窗口结果：
+        # 1. 静态历史池中必须保留该股票，绝不能被全量清空！
+        hist_entry = pool.get_static_history_bars(test_code, days)
+        self.assertIsNotNone(hist_entry)
+        
+        # 2. 验证最老的一天 2026-09-15 已经被剔除 (Slide out oldest day)
+        recs = hist_entry["records"]
+        dates = [r["date"] for r in recs]
+        self.assertNotIn("2026-09-15", dates)
+        
+        # 3. 验证保留了最近的 2 天 (2026-09-16 和 2026-09-17)
+        self.assertIn("2026-09-16", dates)
+        self.assertIn("2026-09-17", dates)
+        self.assertEqual(len(set(dates)), 2)
+
+        # 4. 验证累计成交量已精准滚动更新为 Day 2 + Day 3 的和
+        self.assertEqual(hist_entry["last_cum_vol"], 1500.0 + 2000.0)
+        self.assertEqual(hist_entry["last_cum_amt"], 46500.0 + 63600.0)
+
+    def test_table_header_sorting_interaction(self):
+        """【测试】验证超短检测工具表头点击排序与数值高精度升降序排列"""
+        from PyQt6.QtWidgets import QApplication
+        from PyQt6.QtCore import Qt
+        app = QApplication.instance() or QApplication(sys.argv)
+
+        with patch("ats.ui.ipo_subnew_detector_dialog.IPOScanWorker.start"):
+            from ats.ui.ipo_subnew_detector_dialog import IPOSubnewDetectorDialog
+            dlg = IPOSubnewDetectorDialog()
+            
+            # 添加两只模拟股票
+            dlg.monitored_codes = ["001365", "688826"]
+            dlg._rebuild_table_rows()
+
+            sig1 = VWAPDetectorSignal(code="001365", name="天海电子", price=30.0, change_pct=1.5, vwap=29.0)
+            sig2 = VWAPDetectorSignal(code="688826", name="沈鼓集团", price=50.0, change_pct=8.8, vwap=48.0)
+            dlg._update_table_row_data(sig1, target_row=0)
+            dlg._update_table_row_data(sig2, target_row=1)
+
+            # 点击第 3 列 (涨跌幅)，默认应为降序
+            dlg._on_header_section_clicked(3)
+            self.assertEqual(dlg._current_sort_col, 3)
+            self.assertEqual(dlg._current_sort_order, Qt.SortOrder.DescendingOrder)
+            # 首行应该是涨幅更大的 688826 (+8.8%)
+            self.assertEqual(dlg.table.item(0, 0).text(), "688826")
+            self.assertEqual(dlg.table.item(1, 0).text(), "001365")
+
+            # 再次点击同一列，应切换为升序排列
+            dlg._on_header_section_clicked(3)
+            self.assertEqual(dlg._current_sort_order, Qt.SortOrder.AscendingOrder)
+            # 首行应该是涨幅较小的 001365 (+1.5%)
+            self.assertEqual(dlg.table.item(0, 0).text(), "001365")
+            self.assertEqual(dlg.table.item(1, 0).text(), "688826")
+
+            dlg.close()
+
+    def test_non_trading_day_protection_against_date_rollover(self):
+        """【测试】验证非交易日 (周末/节假日) 严禁误触发跨日滚动淘汰与历史数据损耗"""
+        import tempfile
+        import zlib
+        import pickle
+        from ats.tdx_realtime_fetcher import TDXGlobalCachePool
+
+        tmp_dir = tempfile.mkdtemp()
+        tmp_ramdisk_file = os.path.join(tmp_dir, "tdx_global_cache_pool.pkl.z")
+
+        # 模拟上一交易日 (周五 2026-09-18) 的完整分时缓存
+        test_code = "600733"
+        friday_payload = {
+            "date": "2026-09-18",
+            "version": 2,
+            "frozen": True,
+            "history_static_bars": {
+                test_code: {
+                    "date": "2026-09-18",
+                    "days": 3,
+                    "records": [
+                        {"date": "2026-09-16", "time": "09-16 15:00", "close": 10.0, "vol": 100.0, "amount": 1000.0},
+                        {"date": "2026-09-17", "time": "09-17 15:00", "close": 11.0, "vol": 200.0, "amount": 2200.0},
+                    ],
+                    "last_cum_vol": 300.0,
+                    "last_cum_amt": 3200.0,
+                    "updated_at": 1000.0
+                }
+            },
+            "incremental_intraday_pool": {
+                (test_code, 3): {
+                    "df": pd.DataFrame([{"time": "09-18 15:00", "date": "2026-09-18", "close": 12.0}]),
+                    "latest_bar_time": "15:00",
+                    "today_bar_count": 1,
+                    "frozen": True,
+                    "updated_at": 1000.0
+                }
+            },
+            "daily_metrics_cache": {},
+            "shares_cache": {},
+            "updated_at": 1000.0
+        }
+
+        with open(tmp_ramdisk_file, "wb") as f:
+            f.write(zlib.compress(pickle.dumps(friday_payload, protocol=pickle.HIGHEST_PROTOCOL), 1))
+
+        pool = TDXGlobalCachePool()
+        pool._history_static_bars.clear()
+        pool._incremental_intraday_pool.clear()
+        pool._last_ramdisk_mtime = 0.0
+        pool._ramdisk_path = tmp_ramdisk_file
+
+        # 场景 1: 周六 (2026-09-19) 打开系统复盘 (非交易日)
+        with patch.object(pool, "is_trading_day", return_value=False), \
+             patch("ats.tdx_realtime_fetcher.datetime") as mock_dt:
+            from datetime import datetime as real_dt
+            mock_dt.now.return_value = real_dt(2026, 9, 19, 10, 0, 0)
+            mock_dt.strptime = real_dt.strptime
+            mock_dt.strftime = real_dt.strftime
+
+            loaded = pool._load_from_ramdisk()
+            self.assertTrue(loaded)
+
+            # 核心断言 1: 非交易日当前日期锁定为上一交易日 (2026-09-18)，绝不把今天误当成新交易日
+            self.assertEqual(pool._current_date_str, "2026-09-18")
+
+            # 核心断言 2: 周五的 2 天静态历史完好无损，0 剔除！
+            hist = pool.get_static_history_bars(test_code, 3)
+            self.assertIsNotNone(hist)
+            self.assertEqual(len(hist["records"]), 2)
+            self.assertEqual(hist["records"][0]["date"], "2026-09-16")
+
+            # 核心断言 3: 周六调用 _check_date_rollover 被铁壁拦截，绝不滚动淘汰
+            pool._check_date_rollover()
+            self.assertEqual(pool._current_date_str, "2026-09-18")
+            self.assertEqual(len(hist["records"]), 2)
+
+            # 核心断言 4: 增量池直接识别为非交易日固化状态，0 网络直出
+            inc = pool.get_incremental_intraday(test_code, 3)
+            self.assertIsNotNone(inc)
+            df_inc, _ = inc
+            self.assertFalse(df_inc.empty)
+
+        # 场景 2: 周一 (2026-09-21) 正式开盘 (真实交易日)
+        with patch.object(pool, "is_trading_day", return_value=True), \
+             patch("ats.tdx_realtime_fetcher.datetime") as mock_dt:
+            mock_dt.now.return_value = real_dt(2026, 9, 21, 9, 15, 0)
+            mock_dt.strptime = real_dt.strptime
+            mock_dt.strftime = real_dt.strftime
+
+            # 触发真实跨日滚动
+            pool._check_date_rollover(force_from_date="2026-09-18")
+
+            # 核心断言 5: 进入新交易日 2026-09-21，周五 09-18 数据并入历史，最老的 09-16 被正常淘汰剔除
+            self.assertEqual(pool._current_date_str, "2026-09-21")
+            new_hist = pool.get_static_history_bars(test_code, 3)
+            new_dates = [r["date"] for r in new_hist["records"]]
+            self.assertNotIn("2026-09-16", new_dates)
+            self.assertIn("2026-09-17", new_dates)
+            self.assertIn("2026-09-18", new_dates)
+
 
 if __name__ == "__main__":
     unittest.main()

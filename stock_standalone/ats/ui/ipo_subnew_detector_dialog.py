@@ -372,6 +372,8 @@ class IPOSubnewDetectorDialog(QMainWindow):
         self._pending_linkage_row = -1
         self._pending_linkage_code = ""
         self._last_linkage_code = ""
+        self._current_sort_col = -1
+        self._current_sort_order = Qt.SortOrder.DescendingOrder
 
         # 待渲染平滑队列与 30ms 分帧渲染定时器 (彻底消除多线程并发冲刷 UI 导致的掉帧、全表重排与顿卡)
         self._pending_render_queue = deque()
@@ -823,19 +825,62 @@ class IPOSubnewDetectorDialog(QMainWindow):
         self.save_persisted_state()
 
     def _setup_table_headers(self):
-        """动态配置表格列头与列宽自适应 (支持动态 ats_col)"""
+        """动态配置表格列头与列宽自适应 (支持动态 ats_col 与表头点击排序)"""
         self.extra_cols = get_ipo_detector_extra_cols()
         headers = get_ipo_detector_table_headers(self.extra_cols)
         self.table.setColumnCount(len(headers))
         self.table.setHorizontalHeaderLabels(headers)
 
         hv = self.table.horizontalHeader()
+        hv.setSectionsClickable(True)
+        hv.setSortIndicatorShown(True)
+        try:
+            hv.sectionClicked.disconnect()
+        except Exception:
+            pass
+        hv.sectionClicked.connect(self._on_header_section_clicked)
+
         desc_col_idx = 10 + len(self.extra_cols)
         for i in range(len(headers)):
             if i == desc_col_idx:
                 hv.setSectionResizeMode(i, QHeaderView.ResizeMode.Stretch)
             else:
                 hv.setSectionResizeMode(i, QHeaderView.ResizeMode.ResizeToContents)
+
+    def _on_header_section_clicked(self, logical_index: int):
+        """【📊 表头点击排序】支持全表高精度数值与文本升降序切换"""
+        total_cols = self.table.columnCount()
+        # 最后一列是操作按钮，不进行排序
+        if logical_index >= total_cols - 1:
+            return
+
+        if getattr(self, "_current_sort_col", -1) == logical_index:
+            # 同一列切换升降序
+            if self._current_sort_order == Qt.SortOrder.DescendingOrder:
+                self._current_sort_order = Qt.SortOrder.AscendingOrder
+            else:
+                self._current_sort_order = Qt.SortOrder.DescendingOrder
+        else:
+            self._current_sort_col = logical_index
+            # 默认降序 (看涨跌幅、偏离度、连阳等更符合看盘习惯)
+            self._current_sort_order = Qt.SortOrder.DescendingOrder
+
+        self.table.horizontalHeader().setSortIndicator(self._current_sort_col, self._current_sort_order)
+        self._apply_current_sort()
+
+    def _apply_current_sort(self):
+        """应用当前记录的排序列与排序方向"""
+        col = getattr(self, "_current_sort_col", -1)
+        if col < 0 or col >= self.table.columnCount() - 1:
+            return
+        if getattr(self, "_is_table_updating", False):
+            return
+
+        try:
+            self.table.setSortingEnabled(True)
+            self.table.sortItems(col, self._current_sort_order)
+        except Exception as e:
+            logger.debug(f"表格排序异常: {e}")
 
     def _rebuild_table_rows(self):
         """根据当前 monitored_codes 重建表格行"""
