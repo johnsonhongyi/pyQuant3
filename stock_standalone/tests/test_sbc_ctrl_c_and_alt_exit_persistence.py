@@ -162,10 +162,10 @@ class TestSBCCtrlCAndAltExitPersistence(unittest.TestCase):
         run_sbc._setup_signal_handlers()
         excepthook = sys.excepthook
 
-        with patch("sys.exit") as mock_exit:
+        with patch.object(self.app, "quit") as mock_app_quit:
             # 模拟 Qt 槽函数冒泡出的 KeyboardInterrupt 触发 sys.excepthook
             excepthook(KeyboardInterrupt, KeyboardInterrupt(), None)
-            mock_exit.assert_called_with(0)
+            mock_app_quit.assert_called()
 
             # 验证文件已成功持久化保存
             self.assertTrue(os.path.exists(self.temp_cfg))
