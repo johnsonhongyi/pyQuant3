@@ -740,6 +740,99 @@ class TestCapitalDragonPanelIntegration(unittest.TestCase):
         # 处于关闭状态下，统计文本不额外显示暂停文字，保持纯净
         self.assertNotIn("自动更新已暂停", self.panel.lbl_stats.text())
 
+    def test_context_menu_actions_and_alignment(self):
+        """测试资金主线表格右键菜单包含复制、异动联动、SBC走势图、次新超短、DNA审计、双重关注等完整对齐项"""
+        from unittest.mock import patch, MagicMock
+        from PyQt6.QtCore import QPoint
+
+        mock_data = {
+            "300750": {
+                "name": "宁德时代", "close": 260.0, "percent": 6.8, "amount": 5.0e9,
+                "category": "固态电池", "dff": 2.0, "dff2": 4.0, "dff3": 6.0, "ma20d": 240.0
+            }
+        }
+        df_mock = pd.DataFrame.from_dict(mock_data, orient='index')
+        self.panel.update_payload(df_mock, force=True)
+
+        self.assertGreaterEqual(self.panel.table.rowCount(), 1)
+
+        # 模拟在第一行单元格右键点击
+        cell_rect = self.panel.table.visualItemRect(self.panel.table.item(0, 0))
+        click_pos = cell_rect.center()
+
+        captured_menu = None
+
+        def mock_exec(menu_self, *args, **kwargs):
+            nonlocal captured_menu
+            captured_menu = menu_self
+            return None
+
+        from PyQt6.QtWidgets import QMenu
+        with patch.object(QMenu, "exec", mock_exec):
+            self.panel._show_context_menu(click_pos)
+
+        self.assertIsNotNone(captured_menu, "右键菜单应成功创建并调出 exec")
+        action_texts = [a.text() for a in captured_menu.actions() if a.text()]
+
+        # 1. 验证复制股票代码
+        self.assertTrue(any("📋 复制股票代码 300750" in t for t in action_texts), f"缺少复制股票代码: {action_texts}")
+
+        # 2. 验证发送到异动联动
+        self.assertTrue(any("⚡ 发送到异动联动 300750" in t for t in action_texts), f"缺少异动联动: {action_texts}")
+
+        # 3. 验证 SBC 通道走势图与详情
+        self.assertTrue(any("📈 打开 宁德时代(300750) SBC 通道走势图" in t for t in action_texts), f"缺少 SBC 走势图: {action_texts}")
+        self.assertTrue(any("🔍 查看 宁德时代(300750) 个股详情" in t for t in action_texts), f"缺少个股详情: {action_texts}")
+
+        # 4. 验证发送到新股次新超短检测工具
+        self.assertTrue(any("🎯 发送到新股次新超短检测工具 (300750)" in t for t in action_texts), f"缺少次新检测工具: {action_texts}")
+
+        # 5. 验证 DNA 特征审计报告
+        self.assertTrue(any("🧬 调出" in t and "DNA 特征审计报告" in t for t in action_texts), f"缺少 DNA 审计: {action_texts}")
+
+        # 6. 验证全系统重点关注与资金主线置顶关注
+        self.assertTrue(any("全系统重点关注" in t for t in action_texts), f"缺少全系统重点关注: {action_texts}")
+        self.assertTrue(any("资金主线专属置顶" in t for t in action_texts), f"缺少资金主线专属置顶: {action_texts}")
+
+        # 7. 验证板块成分股明细与筛选
+        self.assertTrue(any("查看【固态电池】板块成分股明细" in t for t in action_texts), f"缺少板块成分股明细: {action_texts}")
+        self.assertTrue(any("在列表中仅筛选【固态电池】" in t for t in action_texts), f"缺少板块筛选: {action_texts}")
+
+        # 8. 验证天梯看板、板块雷达、回踩深挖
+        self.assertTrue(any("🔥 打开每日涨停天梯看板" in t for t in action_texts), f"缺少天梯看板: {action_texts}")
+        self.assertTrue(any("📊 打开板块雷达" in t for t in action_texts), f"缺少板块雷达: {action_texts}")
+        self.assertTrue(any("🔄 打开主线回踩深挖" in t for t in action_texts), f"缺少回踩深挖: {action_texts}")
+
+    def test_copy_to_clipboard(self):
+        """测试复制股票代码到系统剪贴板"""
+        self.panel._copy_to_clipboard("600519", "贵州茅台")
+        clipboard_text = QApplication.clipboard().text()
+        self.assertEqual(clipboard_text, "600519")
+
+    def test_empty_area_context_menu(self):
+        """测试在表格空白区域右键弹出的通用看板菜单"""
+        from unittest.mock import patch
+        from PyQt6.QtCore import QPoint
+        from PyQt6.QtWidgets import QMenu
+
+        captured_menu = None
+        def mock_exec(menu_self, *args, **kwargs):
+            nonlocal captured_menu
+            captured_menu = menu_self
+            return None
+
+        # 传入一个远离表格内容的坐标
+        empty_pos = QPoint(500, 500)
+        with patch.object(QMenu, "exec", mock_exec):
+            self.panel._show_context_menu(empty_pos)
+
+        self.assertIsNotNone(captured_menu)
+        action_texts = [a.text() for a in captured_menu.actions() if a.text()]
+        self.assertTrue(any("🔥 打开每日涨停天梯看板" in t for t in action_texts))
+        self.assertTrue(any("📊 打开板块雷达" in t for t in action_texts))
+        self.assertTrue(any("🔄 打开主线回踩深挖" in t for t in action_texts))
+        self.assertTrue(any("🔄 手动刷新资金主线数据" in t for t in action_texts))
+
 
 if __name__ == "__main__":
     unittest.main()

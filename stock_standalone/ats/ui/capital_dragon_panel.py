@@ -23,10 +23,11 @@ import pandas as pd
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTableWidget,
     QTableWidgetItem, QHeaderView, QAbstractItemView, QPushButton,
-    QLineEdit, QFrame, QGridLayout, QSizePolicy, QMenu, QTabWidget
+    QLineEdit, QFrame, QGridLayout, QSizePolicy, QMenu, QTabWidget,
+    QApplication
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QPoint, QSize
-from PyQt6.QtGui import QColor, QBrush, QFont, QCursor
+from PyQt6.QtGui import QColor, QBrush, QFont, QCursor, QAction
 
 from tk_gui_modules.qt_table_utils import NumericTableWidgetItem
 from ats.ui.styles import (
@@ -1744,18 +1745,52 @@ class CapitalDragonPanel(QWidget):
             name = n_item.text().replace("⭐", "").strip()
             self.stock_double_clicked.emit(code, name)
 
-    def _show_context_menu(self, pos):
-        item = self.table.itemAt(pos)
-        if not item:
-            return
-        row = item.row()
-        c_item = self.table.item(row, 0)
-        n_item = self.table.item(row, 1)
-        s_item = self.table.item(row, 3)
-        code = _clean_code(c_item.text().strip()) if c_item else ""
-        name = n_item.text().replace("⭐", "").strip() if n_item else ""
-        sector = s_item.text().strip() if s_item else ""
+    def _copy_to_clipboard(self, code: str, name: str = ""):
+        """复制股票代码到系统剪贴板并给出交互反馈"""
+        try:
+            QApplication.clipboard().setText(code)
+            toast_text = f"📋 已复制股票代码: {code}"
+            if name:
+                toast_text += f" ({name})"
+            try:
+                from stock_logic_utils import toast_messageQT
+                toast_messageQT(self, toast_text)
+            except Exception:
+                pass
+            if self.main_window and hasattr(self.main_window, 'statusBar'):
+                sb = self.main_window.statusBar()
+                if sb:
+                    sb.showMessage(toast_text, 3000)
+        except Exception as e:
+            logger.error(f"[CapitalDragonPanel] 复制股票代码异常: {e}")
 
+    def _toggle_global_favorite(self, code: str, name: str = ""):
+        """切换全系统重点关注状态，通知全系统各观察池和表格安全刷新"""
+        try:
+            from global_favorites import GlobalFavoriteManager
+            fav_mgr = GlobalFavoriteManager()
+            is_fav = fav_mgr.is_favorite_stock(code)
+            fav_mgr.toggle_favorite_stock(code)
+            win = self.window()
+            if win and hasattr(win, '_safe_favorites_changed'):
+                win._safe_favorites_changed()
+            action_str = "已取消全系统重点关注" if is_fav else "已加入全系统重点关注"
+            toast_text = f"⭐ 【{name or code}】{action_str}"
+            try:
+                from stock_logic_utils import toast_messageQT
+                toast_messageQT(self, toast_text)
+            except Exception:
+                pass
+            if self.main_window and hasattr(self.main_window, 'statusBar'):
+                sb = self.main_window.statusBar()
+                if sb:
+                    sb.showMessage(toast_text, 3000)
+        except Exception as e:
+            logger.error(f"[CapitalDragonPanel] 切换全系统重点关注异常: {e}")
+
+    def _show_context_menu(self, pos):
+        """资金主线与真龙矩阵右键菜单 (与全系统重点关注等 Tab 100% 对齐)"""
+        item = self.table.itemAt(pos)
         menu = QMenu(self)
         menu.setStyleSheet("""
             QMenu {
@@ -1764,12 +1799,127 @@ class CapitalDragonPanel(QWidget):
                 border: 1px solid #30363d;
                 padding: 4px;
             }
+            QMenu::item {
+                padding: 5px 20px;
+                border-radius: 4px;
+            }
             QMenu::item:selected {
                 background-color: #1f6feb;
                 color: #ffffff;
             }
+            QMenu::separator {
+                height: 1px;
+                background-color: #30363d;
+                margin: 4px 6px;
+            }
         """)
 
+        # 点击空白区域时的通用菜单
+        if not item:
+            act_ladder = menu.addAction("🔥 打开每日涨停天梯看板")
+            act_ladder.triggered.connect(self._on_click_limit_up)
+
+            act_radar = menu.addAction("📊 打开板块雷达")
+            act_radar.triggered.connect(self._on_click_hot_sector)
+
+            act_miner = menu.addAction("🔄 打开主线回踩深挖")
+            act_miner.triggered.connect(self._on_click_miner)
+
+            menu.addSeparator()
+            act_refresh = menu.addAction("🔄 手动刷新资金主线数据")
+            act_refresh.triggered.connect(self.manual_refresh)
+
+            menu.exec(self.table.viewport().mapToGlobal(pos))
+            return
+
+        row = item.row()
+        c_item = self.table.item(row, 0)
+        n_item = self.table.item(row, 1)
+        s_item = self.table.item(row, 3)
+        code = _clean_code(c_item.text().strip()) if c_item else ""
+        name = n_item.text().replace("⭐", "").strip() if n_item else ""
+        sector = s_item.text().strip() if s_item else ""
+
+        if code:
+            # 1. 📋 复制股票代码 (首项，一键直达剪贴板)
+            copy_label = f"📋 复制股票代码 {code}"
+            if name:
+                copy_label += f" ({name})"
+            act_copy = menu.addAction(copy_label)
+            act_copy.triggered.connect(lambda checked=False, c=code, n=name: self._copy_to_clipboard(c, n))
+
+            menu.addSeparator()
+
+            # 2. ⚡ 发送到异动联动
+            act_linkage = menu.addAction(f"⚡ 发送到异动联动 {code}")
+            def _on_linkage():
+                try:
+                    from ats.ui.base_table import send_to_linkage
+                    send_to_linkage(code, name, self)
+                    if self.main_window and hasattr(self.main_window, 'statusBar'):
+                        sb = self.main_window.statusBar()
+                        if sb:
+                            sb.showMessage(f"⚡ 已发送 {name}({code}) 到异动联动", 3000)
+                except Exception as e:
+                    logger.error(f"[CapitalDragonPanel] 发送异动联动异常: {e}")
+            act_linkage.triggered.connect(_on_linkage)
+
+            # 3. 📈 打开 SBC 通道走势图与个股详情
+            act_sbc = menu.addAction(f"📈 打开 {name}({code}) SBC 通道走势图 (R)")
+            act_sbc.triggered.connect(lambda checked=False, c=code, n=name: self.open_sbc_chart(c, n))
+
+            act_detail = menu.addAction(f"🔍 查看 {name}({code}) 个股详情")
+            act_detail.triggered.connect(lambda checked=False, c=code, n=name: self.stock_double_clicked.emit(c, n))
+
+            # 4. 🎯 发送到新股次新超短检测工具
+            act_ipo = menu.addAction(f"🎯 发送到新股次新超短检测工具 ({code})")
+            def _on_send_ipo():
+                try:
+                    from ats.ui.ipo_detector_ipc import send_stock_to_ipo_detector
+                    send_stock_to_ipo_detector(code, name)
+                    try:
+                        from stock_logic_utils import toast_messageQT
+                        toast_messageQT(self, f"🎯 已发送 {name}({code}) 到新股次新超短检测工具")
+                    except Exception:
+                        pass
+                except Exception as e:
+                    logger.error(f"[CapitalDragonPanel] 发送到次新超短检测工具异常: {e}")
+            act_ipo.triggered.connect(_on_send_ipo)
+
+            # 5. 🧬 调出 DNA 特征审计报告
+            act_dna = menu.addAction(f"🧬 调出 {name or code} DNA 特征审计报告")
+            def _on_dna_audit():
+                try:
+                    from ats.ui.multi_period_dialog import run_dna_audit_batch_qt
+                    run_dna_audit_batch_qt({code: name}, parent=self.window())
+                except Exception as e:
+                    logger.error(f"[CapitalDragonPanel] 调出 DNA 审计报告异常: {e}")
+            act_dna.triggered.connect(_on_dna_audit)
+
+            menu.addSeparator()
+
+            # 6. ⭐ 重点关注管理 (全系统重点关注联动 + 资金主线专属置顶关注)
+            is_idx = is_major_index(code, name)
+            if not is_idx:
+                try:
+                    from global_favorites import GlobalFavoriteManager
+                    fav_mgr = GlobalFavoriteManager()
+                    is_global_fav = fav_mgr.is_favorite_stock(code)
+                except Exception:
+                    is_global_fav = False
+
+                fav_text = f"❌ 取消全系统重点关注: {name} ({code})" if is_global_fav else f"⭐ 设为全系统重点关注: {name} ({code})"
+                act_global_fav = menu.addAction(fav_text)
+                act_global_fav.triggered.connect(lambda checked=False, c=code, n=name: self._toggle_global_favorite(c, n))
+
+                is_foc = self.is_dragon_focused(code)
+                foc_text = f"⭐ 取消资金主线专属置顶: {name} ({code})" if is_foc else f"⭐ 设为资金主线专属置顶: {name} ({code})"
+                act_focus = menu.addAction(foc_text)
+                act_focus.triggered.connect(lambda checked=False, c=code, n=name: self.toggle_dragon_focus(c, n))
+
+                menu.addSeparator()
+
+        # 7. 板块成分股与板块筛选
         if sector and sector not in ('--', '未知'):
             act_sec = menu.addAction(f"📊 查看【{sector}】板块成分股明细 (标记强势股)")
             act_sec.triggered.connect(lambda: self.open_sector_detail(sector))
@@ -1779,21 +1929,7 @@ class CapitalDragonPanel(QWidget):
 
             menu.addSeparator()
 
-        if code:
-            is_idx = is_major_index(code, name)
-            if not is_idx:
-                is_foc = self.is_dragon_focused(code)
-                foc_text = f"⭐ 取消资金主线重点关注: {name} ({code})" if is_foc else f"⭐ 设为资金主线重点关注: {name} ({code})"
-                act_focus = menu.addAction(foc_text)
-                act_focus.triggered.connect(lambda checked=False, c=code, n=name: self.toggle_dragon_focus(c, n))
-                menu.addSeparator()
-
-            act_sbc = menu.addAction(f"📈 打开 {name}({code}) SBC 通道走势图 (R)")
-            act_sbc.triggered.connect(lambda checked=False, c=code, n=name: self.open_sbc_chart(c, n))
-
-            act_detail = menu.addAction(f"🔍 查看 {name}({code}) 个股详情")
-            act_detail.triggered.connect(lambda checked=False, c=code, n=name: self.stock_double_clicked.emit(c, n))
-
+        # 8. 全局大看板与深挖工具
         act_ladder = menu.addAction("🔥 打开每日涨停天梯看板")
         act_ladder.triggered.connect(self._on_click_limit_up)
 
