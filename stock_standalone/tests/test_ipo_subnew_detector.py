@@ -833,6 +833,31 @@ class TestIPOSubnewDetector(unittest.TestCase):
             self.assertEqual(dlg2.table.item(0, 8).text(), "🎯 预下单")
             dlg2.close()
 
+    def test_activate_and_single_instance_window_detection(self):
+        """【测试】验证独立检测工具窗口探测、强力置顶与防重复多开机制"""
+        from ats.ui.ipo_detector_ipc import (
+            find_ipo_detector_window, activate_ipo_detector_window,
+            is_ipo_detector_alive, launch_ipo_detector_process
+        )
+        import sys
+        
+        # 1. 验证接口调用不抛出异常
+        hwnd = find_ipo_detector_window()
+        # 若已有窗口，验证可以正确识别与强力置顶
+        if hwnd:
+            self.assertIsInstance(hwnd, int)
+            res = activate_ipo_detector_window(hwnd)
+            self.assertTrue(res)
+            self.assertTrue(is_ipo_detector_alive())
+            
+            # 2. 核心防多开断言：已有窗口时调用 launch_ipo_detector_process 必须返回 None
+            proc = launch_ipo_detector_process()
+            self.assertIsNone(proc, "已有检测工具窗口时严禁重复拉起新进程！")
+        else:
+            # 纯无窗口环境下的防御性测试
+            res = activate_ipo_detector_window(0)
+            self.assertFalse(res)
+
 
 if __name__ == "__main__":
     unittest.main()
