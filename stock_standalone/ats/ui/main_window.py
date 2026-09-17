@@ -6408,6 +6408,19 @@ class ATSMainWindow(QMainWindow):
         except Exception as ex_sbc:
             print(f"[ATSMainWindow] 关闭 SBC 子进程异常: {ex_sbc}")
 
+        # 4.8 🛑 统一优雅关闭新股次新超短检测工具 (确保子进程安全落盘退出，不留孤儿进程)
+        try:
+            from ats.ui.ipo_detector_ipc import close_ipo_detector_process
+            close_ipo_detector_process()
+            if hasattr(self, 'ipo_detector_dialog') and self.ipo_detector_dialog:
+                try:
+                    self.ipo_detector_dialog.close()
+                except Exception:
+                    pass
+            print("[ATSMainWindow] 新股次新超短检测工具已统一安全退出!")
+        except Exception as ex_ipo:
+            print(f"[ATSMainWindow] 关闭新股超短检测工具异常: {ex_ipo}")
+
 
         # 5. 关闭散落的行情分布弹窗、搜索历史与辅助对话框
         try:

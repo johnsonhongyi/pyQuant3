@@ -63,8 +63,7 @@ from ats.strategy.ipo_vwap_detector_engine import (
 from ats.ui.ipo_detector_ipc import (
     get_ipo_detector_layout_file,
     pop_queued_stocks,
-    update_detector_heartbeat,
-    get_ats_ipc_df
+    update_detector_heartbeat
 )
 from ats.new_stock_fetcher import NewStockFetcher
 
@@ -1505,14 +1504,6 @@ class IPOSubnewDetectorDialog(QMainWindow):
             self._setup_table_headers()
             self._rebuild_table_rows()
 
-        # 5. 极速读取 ATS 主程序同步的最新 IPC DataFrame
-        try:
-            from ats.ui.ipo_detector_ipc import get_ats_ipc_df
-            ats_df = get_ats_ipc_df()
-            if ats_df is not None and not ats_df.empty:
-                self.ipc_df = ats_df
-        except Exception:
-            pass
 
 
     def closeEvent(self, event):
