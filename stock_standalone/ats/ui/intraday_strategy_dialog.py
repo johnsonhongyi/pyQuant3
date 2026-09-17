@@ -3169,16 +3169,17 @@ class SBCIntradayChartDialog(QWidget):
             data["sbc_period_modes"]["latest"] = cur_period
             data["sbc_period_modes"][self.code] = cur_period
 
-            # 同步更新 sbc_open_windows 中当前个股条目的尺寸、坐标与选择的周期
-            if "sbc_open_windows" in data and isinstance(data["sbc_open_windows"], list):
-                for item in data["sbc_open_windows"]:
-                    if item.get("code") == self.code:
-                        item["width"] = geo_dict["width"]
-                        item["height"] = geo_dict["height"]
-                        item["x"] = geo_dict["x"]
-                        item["y"] = geo_dict["y"]
-                        item["period_mode"] = cur_period
-                        break
+            # 同步更新 sbc_open_windows 与 sbc_holdings_windows 中当前个股条目的尺寸、坐标与选择的周期
+            for win_key in ("sbc_open_windows", "sbc_holdings_windows"):
+                if win_key in data and isinstance(data[win_key], list):
+                    for item in data[win_key]:
+                        if item.get("code") == self.code:
+                            item["width"] = geo_dict["width"]
+                            item["height"] = geo_dict["height"]
+                            item["x"] = geo_dict["x"]
+                            item["y"] = geo_dict["y"]
+                            item["period_mode"] = cur_period
+                            break
 
             tmp_path = cfg_path + f".tmp_{os.getpid()}"
             with open(tmp_path, "w", encoding="utf-8") as f:
@@ -3585,11 +3586,6 @@ class SBCIntradayChartDialog(QWidget):
             if not is_app_exiting:
                 try:
                     _remove_sbc_open_record(self.code)
-                except Exception:
-                    pass
-                try:
-                    from run_sbc import save_launcher_holdings_windows
-                    save_launcher_holdings_windows(force=True)
                 except Exception:
                     pass
         else:
@@ -4942,8 +4938,9 @@ def open_sbc_chart_dialog(parent_win: Optional[QWidget] = None, code: str = "688
     _record_sbc_open(c_clean, dlg.geometry(), period_mode=getattr(dlg, '_current_period_mode', '1m'))
     if os.environ.get("SBC_IS_HOLDINGS_LAUNCHER") == "1":
         try:
-            from run_sbc import save_launcher_holdings_windows
-            save_launcher_holdings_windows(force=True)
+            import run_sbc
+            if not getattr(run_sbc, '_is_restoring_holdings', False):
+                run_sbc.save_launcher_holdings_windows(force=True)
         except Exception:
             pass
     return dlg
