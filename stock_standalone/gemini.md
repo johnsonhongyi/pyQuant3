@@ -1,3 +1,26 @@
+## 2026-09-18 01:30
+- [x] **【资金主线面板右键菜单标准功能全量补齐与重点关注等 Tab 100% 对齐】(`ats/ui/capital_dragon_panel.py`, `tests/test_capital_dragon_panel_integration.py`, `20260918_0130_task.md`)**：
+    - [x] **操盘手现场明确指示与真实痛点 (P0)**：
+        - “次新检测工具单实例互斥与强制置顶防多开修复... 这个不用改了已经解决了,只尽快实现第一次 速度修改”；
+        - 指标明确：仅需极速实现第一项【资金主线面板右键菜单对齐】，为资金主线面板 (`CapitalDragonPanel`) 补齐右键“复制股票代码”、“全局重点关注”、“发送到异动联动”、“发送到次新检测工具”等标准操作，与【⭐ 重点关注】等其他 Tab 保持 100% 一致。
+    - [x] **全体系工程落地与功能对齐 (KISS / SOLID / DRY)**：
+        1. **规范化八大右键功能动作层级**：
+           - **首项**：`📋 复制股票代码 <code> (<name>)` (一键写入系统剪贴板，联动状态栏/Toast 轻提示)；
+           - **第二项**：`⚡ 发送到异动联动 <code>` (接入 `ats.ui.base_table.send_to_linkage`)；
+           - **第三项**：`📈 打开 <code> SBC 通道走势图 (R)` + `🔍 查看 <code> 个股详情`；
+           - **第四项**：`🎯 发送到新股次新超短检测工具 (<code>)` (接入 `ats.ui.ipo_detector_ipc.send_stock_to_ipo_detector`)；
+           - **第五项**：`🧬 调出 <code> DNA 特征审计报告` (接入 `ats.ui.multi_period_dialog.run_dna_audit_batch_qt`)；
+           - **第六项**：重点关注管理（非指数标的呈现 `⭐ 设为/取消全系统重点关注` + `⭐ 设为/取消资金主线专属置顶` 双重关注独立切换）；
+           - **第七项**：板块成分股与筛选（`📊 查看【<sector>】板块成分股明细` + `🔍 在列表中仅筛选【<sector>】`）；
+           - **第八项**：全局看板与深挖（`🔥 打开每日涨停天梯看板` + `📊 打开板块雷达` + `🔄 打开主线回踩深挖`）；
+           - **空白区域兜底**：右键点击表格空白处呈现天梯看板、板块雷达、主线回踩深挖与手动刷新数据菜单；
+        2. **辅助方法内聚实现**：
+           - `_copy_to_clipboard(code, name)`：复制 6 位纯净代码并通知主窗口状态栏；
+           - `_toggle_global_favorite(code, name)`：切换 `GlobalFavoriteManager` 并在全系统触发安全刷新；
+        3. **全量自动化测试 100% 验证通过 (20/20 PASSED)**：
+           - 专项新增 `test_context_menu_actions_and_alignment`、`test_copy_to_clipboard`、`test_empty_area_context_menu`；
+           - `pytest tests/test_capital_dragon_panel_integration.py` 20/20 PASSED 全部绿灯通过。
+
 ## 2026-09-17 23:58
 - [x] **【彻底根治新股次新超短检测工具多进程访问 HDF5 崩溃 (0xc0000005) 与量价暴涨 Bug，窗口名称取消 ATS 前缀与二次点击自动置顶】(`ats/strategy/ipo_vwap_detector_engine.py`, `ats/tdx_realtime_fetcher.py`, `ats/ui/ipo_subnew_detector_dialog.py`, `ats/ui/universe_widget.py`, `ats/ui/ipo_detector_ipc.py`, `tests/test_ipo_subnew_detector.py`)**：
     - [x] **操盘手现场明确指示与核心痛点 (P0)**：
