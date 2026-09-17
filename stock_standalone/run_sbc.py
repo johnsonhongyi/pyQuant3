@@ -77,10 +77,12 @@ def _get_current_holding_codes() -> List[str]:
 
 
 _last_save_holdings_time = 0.0
+_last_saved_content_fingerprint = ""
+_is_restoring_holdings = False
 
 def save_launcher_holdings_windows(force: bool = False):
     """【💾 持久化保存所有盯盘窗口】独立保存至 sbc_launcher_holdings_layout.json (支持增减，统一关闭时精准持久化未关闭窗口)"""
-    global _last_save_holdings_time
+    global _last_save_holdings_time, _last_saved_content_fingerprint
     now = time.time()
     if not force and (now - _last_save_holdings_time < 0.8):
         return
@@ -114,6 +116,11 @@ def save_launcher_holdings_windows(force: bool = False):
                     })
 
         cfg_path = _get_launcher_layout_cfg_path()
+        # 💡 内容指纹比对：若待保存内容与上次一致且文件已存在，且非强制退出流程，跳过无意义的重复落盘与控制台打印
+        current_fingerprint = json.dumps(active_list, sort_keys=True)
+        if not is_exiting and os.path.exists(cfg_path) and current_fingerprint == _last_saved_content_fingerprint:
+            return
+
         # 💡 同步写入 sbc_holdings_windows 与 sbc_open_windows，并标记 initialized=True
         data = {
             "sbc_holdings_windows": active_list,
@@ -131,6 +138,7 @@ def save_launcher_holdings_windows(force: bool = False):
         except Exception:
             import shutil
             shutil.move(tmp_path, cfg_path)
+        _last_saved_content_fingerprint = current_fingerprint
         print(f"[SBC Launcher] 成功持久化保存 {len(active_list)} 个持仓盯盘窗口至 {cfg_path}")
     except Exception as err:
         print(f"[SBC Launcher] 保存持仓盯盘窗口异常: {err}")
@@ -255,47 +263,52 @@ def _setup_signal_handlers():
 
 def restore_launcher_holdings_windows() -> List[SBCIntradayChartDialog]:
     """【🚀 恢复持仓盯盘窗口】优先从独立配置恢复未关闭的标的；仅在从未初始化的初次启动时才自动读取持仓"""
+    global _is_restoring_holdings
+    _is_restoring_holdings = True
     restored = []
     cfg_path = _get_launcher_layout_cfg_path()
     has_initialized_config = False
-    if os.path.exists(cfg_path):
-        try:
-            with open(cfg_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            has_initialized_config = bool(data.get("initialized", False) or "sbc_holdings_windows" in data or "sbc_open_windows" in data)
-            win_list = data.get("sbc_holdings_windows") or data.get("sbc_open_windows") or []
-            for item in win_list:
-                code = item.get("code")
-                if not code:
-                    continue
-                period = item.get("period_mode", "10d")
-                dlg = open_sbc_chart_dialog(None, code=code, period_mode=period)
-                if dlg:
-                    dlg.show()
-                    w = max(640, item.get("width", 680))
-                    h = max(420, item.get("height", 420))
-                    dlg.setGeometry(item.get("x", 100), item.get("y", 100), w, h)
-                    restored.append(dlg)
-        except Exception as e:
-            print(f"[SBC Launcher] 读取历史盯盘配置异常: {e}")
+    try:
+        if os.path.exists(cfg_path):
+            try:
+                with open(cfg_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                has_initialized_config = bool(data.get("initialized", False) or "sbc_holdings_windows" in data or "sbc_open_windows" in data)
+                win_list = data.get("sbc_holdings_windows") or data.get("sbc_open_windows") or []
+                for item in win_list:
+                    code = item.get("code")
+                    if not code:
+                        continue
+                    period = item.get("period_mode", "10d")
+                    dlg = open_sbc_chart_dialog(None, code=code, period_mode=period)
+                    if dlg:
+                        dlg.show()
+                        w = max(640, item.get("width", 680))
+                        h = max(420, item.get("height", 420))
+                        dlg.setGeometry(item.get("x", 100), item.get("y", 100), w, h)
+                        restored.append(dlg)
+            except Exception as e:
+                print(f"[SBC Launcher] 读取历史盯盘配置异常: {e}")
 
-    # 💡 只有在配置文件彻底不存在且未曾初始化过时，才自动从当前真实持仓标的启动盯盘
-    # 一旦操盘手曾启动并手动增减过标的，严禁在恢复时擅自把用户关闭的股票重新拉出来！
-    if not restored and not has_initialized_config:
-        holdings = _get_current_holding_codes()
-        if holdings:
-            print(f"[SBC Launcher] 初次启动无历史配置，自动为当前 {len(holdings)} 只持仓股启动独立盯盘窗口...")
-            for code in holdings:
-                dlg = open_sbc_chart_dialog(None, code=code, period_mode="10d")
-                if dlg:
-                    dlg.show()
-                    restored.append(dlg)
-            # 自动平铺重排
-            if restored:
-                rearrange_all_sbc_windows()
-
-    if restored:
-        save_launcher_holdings_windows(force=True)
+        # 💡 只有在配置文件彻底不存在且未曾初始化过时，才自动从当前真实持仓标的启动盯盘
+        # 一旦操盘手曾启动并手动增减过标的，严禁在恢复时擅自把用户关闭的股票重新拉出来！
+        if not restored and not has_initialized_config:
+            holdings = _get_current_holding_codes()
+            if holdings:
+                print(f"[SBC Launcher] 初次启动无历史配置，自动为当前 {len(holdings)} 只持仓股启动独立盯盘窗口...")
+                for code in holdings:
+                    dlg = open_sbc_chart_dialog(None, code=code, period_mode="10d")
+                    if dlg:
+                        dlg.show()
+                        restored.append(dlg)
+                # 自动平铺重排
+                if restored:
+                    rearrange_all_sbc_windows()
+                # 仅在初次根据真实持仓全新初始化生成新窗口时才持久化落盘一次
+                if restored:
+                    save_launcher_holdings_windows(force=True)
+    finally:
+        _is_restoring_holdings = False
 
     return restored
 
@@ -378,7 +391,6 @@ def main():
         else:
             codes_str = ", ".join(getattr(d, 'code', '') for d in restored)
             print(f"[SBC Launcher] 成功自动恢复上次退出的 {len(restored)} 个持仓盯盘窗口: [{codes_str}]")
-            save_launcher_holdings_windows(force=True)
 
     exit_code = 0
     try:

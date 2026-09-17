@@ -457,11 +457,13 @@ class SBCChartCanvas(QWidget):
                     parent_win.chk_on_top.toggle()
                     event.accept()
                     return
-        elif key == Qt.Key.Key_F:
-            if parent_win and hasattr(parent_win, '_trigger_linkage'):
-                parent_win._trigger_linkage()
-            event.accept()
-            return
+        elif key == Qt.Key.Key_F and not (event.modifiers() & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier)):
+            from ats.ui.styles import is_editing_text
+            if not is_editing_text(self):
+                if parent_win and hasattr(parent_win, '_trigger_linkage'):
+                    parent_win._trigger_linkage()
+                event.accept()
+                return
         elif key == Qt.Key.Key_Q:
             if parent_win and hasattr(parent_win, '_on_rearrange_windows_clicked'):
                 parent_win._on_rearrange_windows_clicked()
@@ -841,8 +843,15 @@ class SBCChartCanvas(QWidget):
                 return
 
         # 4. 🎯 正常悬停：记录 hover_pos 触发实时十字光标与价格浮标
+        # 🚀 极致性能优化：增加 25ms 悬停渲染节流与像素位移阈值，避免 1000Hz 鼠标滑动导致 CPU 飙高与卡顿
         self._hover_pos = mouse_pos
-        self.update()
+        now_t = time.time()
+        last_hover_t = getattr(self, '_last_hover_update_t', 0.0)
+        last_hover_pt = getattr(self, '_last_hover_pos', None)
+        if (now_t - last_hover_t >= 0.025) or (last_hover_pt is None or (abs(mouse_pos.x() - last_hover_pt.x()) > 3 or abs(mouse_pos.y() - last_hover_pt.y()) > 3)):
+            self._last_hover_update_t = now_t
+            self._last_hover_pos = mouse_pos
+            self.update()
         super().mouseMoveEvent(event)
 
     def leaveEvent(self, event):
@@ -1047,10 +1056,14 @@ class SBCChartCanvas(QWidget):
                     painter.setPen(QPen(QColor("#00FFFF")))
                     painter.drawText(int(ml + cw + 5), tag_y + 13, f"{p_hover:.2f}")
 
-                    # 计算当前光标所指 K 棒序号
+                    # 计算当前光标所指 K 棒序号 (自适应对齐右侧预留 2 槽位)
                     idx_hover = -1
                     if times and len(times) > 0:
-                        idx_hover = max(0, min(len(times) - 1, int(round(((hx - ml) / float(cw)) * (len(times) - 1)))))
+                        b_step = c_info.get("bar_step")
+                        if b_step and b_step > 0:
+                            idx_hover = max(0, min(len(times) - 1, int((hx - ml) / float(b_step))))
+                        else:
+                            idx_hover = max(0, min(len(times) - 1, int(round(((hx - ml) / float(cw)) * (len(times) - 1)))))
 
                     # ③ 鼠标指针右上角跟随微浮标 (指针指到哪，价格与通道大小高度跟到哪)
                     tip_str = f"{p_hover:.2f}"
@@ -1684,6 +1697,12 @@ class SBCChartCanvas(QWidget):
             max_p = min_p + 1.0
         p_range = max_p - min_p
 
+        # 🌟 操盘手实操优化：右侧预留 2 个 K 线位置，彻底消除最新 K 棒贴死右边框及被右轴/买卖点遮挡
+        RIGHT_PAD_BARS = 2
+        total_slots = max(1, n + RIGHT_PAD_BARS)
+        bar_step = chart_w / float(total_slots)
+        bar_w = max(2.0, min(24.0, bar_step * 0.7))
+
         self._coord_info = {
             "ready": True,
             "min_p": min_p,
@@ -1697,6 +1716,8 @@ class SBCChartCanvas(QWidget):
             "ch_up": ch_up,
             "ch_mid": ch_mid,
             "ch_dn": ch_dn,
+            "bar_step": bar_step,
+            "right_pad_bars": RIGHT_PAD_BARS,
         }
 
         max_v = max(vols) if len(vols) > 0 and max(vols) > 0 else 1.0
@@ -1705,9 +1726,7 @@ class SBCChartCanvas(QWidget):
             return margin_top + main_h - ((p_val - min_p) / p_range) * main_h
 
         def k_to_x(idx_val: int) -> float:
-            return margin_left + (idx_val / max(1, n - 1)) * chart_w
-
-        bar_w = max(2.0, (chart_w / n) * 0.7)
+            return margin_left + (idx_val + 0.5) * bar_step
 
         # 1. 🌟 绘制 Fibonacci 黄金分割阶梯线 (基于加载的所有数据价格区间，通达信同款自上而下对齐)
         if fib_range > 1e-4:
@@ -2738,30 +2757,10 @@ class SBCIntradayChartDialog(QWidget):
         self.btn_toggle_log.setStyleSheet("background-color: #1e2638; color: #ffd700; font-weight: bold; border: 1px solid #ffd700; border-radius: 3px; padding: 2px 5px; font-size: 8.5pt;")
         self.btn_toggle_log.clicked.connect(self._toggle_log_panel)
 
-        btn_linkage = QPushButton("⚡ 联动")
-        btn_linkage.setStyleSheet("background-color: #2a1f10; color: #ffaa44; font-weight: bold; border: 1px solid #ffaa44; border-radius: 3px; padding: 2px 6px; font-size: 8.5pt;")
-        btn_linkage.setToolTip("调用 ATS 主系统联动功能联动当前标的")
-        def _on_send_linkage():
-            c_digits = "".join(filter(str.isdigit, str(self.code))).zfill(6)
-            st_name = resolve_stock_name(c_digits)
-            # 1. 优先调用 main_workbench 上的 link_stock
-            main_win = getattr(self, "main_workbench", None)
-            if main_win and hasattr(main_win, "link_stock") and callable(getattr(main_win, "link_stock")):
-                main_win.link_stock(c_digits, st_name)
-                return
-            # 2. 遍历全局 topLevelWidgets 查找具有 link_stock 的 ATS 主工作台
-            from PyQt6.QtWidgets import QApplication
-            for w in QApplication.topLevelWidgets():
-                if hasattr(w, "link_stock") and callable(getattr(w, "link_stock")):
-                    w.link_stock(c_digits, st_name)
-                    return
-            # 3. 备用：向本地联动服务推送
-            try:
-                from linkage_service import get_link_manager
-                get_link_manager().push(c_digits, flags={'tdx': True, 'ths': True, 'dfcf': False}, auto=False)
-            except Exception:
-                pass
-        btn_linkage.clicked.connect(_on_send_linkage)
+        self.btn_linkage = QPushButton("🔗 联动 (F)")
+        self.btn_linkage.setStyleSheet("background-color: #2a1f10; color: #ffaa44; font-weight: bold; border: 1px solid #ffaa44; border-radius: 3px; padding: 2px 6px; font-size: 8.5pt;")
+        self.btn_linkage.setToolTip("快捷键: F 键。全系统与通达信/同花顺/可视化终端物理联动当前标的")
+        self.btn_linkage.clicked.connect(self._trigger_linkage)
 
         self.btn_eval_r = QPushButton("⚡ 测算 (开)")
         self.btn_eval_r.clicked.connect(lambda: self._on_eval_r_clicked(toggle=True))
@@ -2810,7 +2809,7 @@ class SBCIntradayChartDialog(QWidget):
         tb_layout.addWidget(self.btn_rule_editor)
         tb_layout.addWidget(self.btn_eval_r)
         tb_layout.addWidget(self.btn_cycle_trade)
-        tb_layout.addWidget(btn_linkage)
+        tb_layout.addWidget(self.btn_linkage)
         tb_layout.addWidget(btn_rearrange)
         tb_layout.addWidget(btn_refresh)
         tb_layout.addWidget(btn_clear_cache)
@@ -2944,6 +2943,11 @@ class SBCIntradayChartDialog(QWidget):
         bottom_layout.addWidget(btn_switch_go)
 
         layout.addLayout(bottom_layout)
+
+        # 挂载窗口级 F 快捷键，确保焦点在任意非文本输入控件时均能灵敏响应
+        from PyQt6.QtGui import QShortcut, QKeySequence
+        self._shortcut_f = QShortcut(QKeySequence("F"), self)
+        self._shortcut_f.activated.connect(self._on_shortcut_f_activated)
 
         # 5. 30 分钟定时物理落盘与退出刷盘策略 (交易时段 30 分钟落盘一次，关闭窗口落盘；非交易时段只落盘一次)
         self._has_saved_post_market = False
@@ -3372,10 +3376,12 @@ class SBCIntradayChartDialog(QWidget):
             self._on_eval_r_clicked()
             event.accept()
             return
-        elif key == Qt.Key.Key_F:
-            self._trigger_linkage()
-            event.accept()
-            return
+        elif key == Qt.Key.Key_F and not (modifiers & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier)):
+            from ats.ui.styles import is_editing_text
+            if not is_editing_text(self):
+                self._trigger_linkage()
+                event.accept()
+                return
         elif key == Qt.Key.Key_Q:
             self._on_rearrange_windows_clicked()
             event.accept()
@@ -3421,21 +3427,78 @@ class SBCIntradayChartDialog(QWidget):
             if app:
                 app.quit()
 
+    def _on_shortcut_f_activated(self):
+        """⚡ 窗口级 F 快捷键触发槽函数：在非文本编辑状态下触发联动"""
+        from ats.ui.styles import is_editing_text
+        if not is_editing_text(self):
+            self._trigger_linkage()
+
     def _trigger_linkage(self):
-        """⚡ 按下 F 键触发全系统与通达信/外部行情联动"""
+        """⚡ 按下 F 键或点击联动按钮：触发全系统与通达信/同花顺/可视化外部行情联动"""
         code = "".join(filter(str.isdigit, str(self.code))).zfill(6) if self.code else ""
-        name = getattr(self, "name", "") or resolve_stock_name(code)
         if not code:
             return
+        name = getattr(self, "name", "") or resolve_stock_name(code)
+
+        # 150ms 快速防抖，防止操盘手按键连击
+        import time
+        now = time.time()
+        if (now - getattr(self, "_last_linkage_trigger_time", 0.0)) < 0.15:
+            return
+        self._last_linkage_trigger_time = now
+
+        # 1. 优先调用 ATS 进程内主工作台的 link_stock (若存在)
         try:
-            from ats.ui.main_window import ATSMainWindow
-            app = QApplication.instance()
-            if hasattr(app, 'main_window') and isinstance(app.main_window, ATSMainWindow):
-                app.main_window.link_stock(code, name)
-        except Exception as e:
-            logger.debug(f"SBC link_stock exception: {e}")
+            main_win = getattr(self, "main_workbench", None)
+            if main_win and hasattr(main_win, "link_stock") and callable(getattr(main_win, "link_stock")):
+                main_win.link_stock(code, name)
+            else:
+                from PyQt6.QtWidgets import QApplication
+                for w in QApplication.topLevelWidgets():
+                    if hasattr(w, "link_stock") and callable(getattr(w, "link_stock")):
+                        w.link_stock(code, name)
+                        break
+        except Exception as e_app:
+            logger.debug(f"[SBC Linkage] 进程内 link_stock 异常: {e_app}")
+
+        # 2. 物理直连通达信 (TDX) / 同花顺 (THS) (LinkManager 独立多进程队列)
+        # 无论在 ATS 内部还是在独立 SBC / 持仓盯盘子进程中，都能直接触发外部物理软件跳转
+        try:
+            from linkage_service import get_link_manager
+            get_link_manager().push(code, flags={'tdx': True, 'ths': True, 'dfcf': False}, auto=False)
+        except Exception as e_tdx:
+            logger.debug(f"[SBC Linkage] 通达信物理推送异常: {e_tdx}")
+
+        # 3. 异步向 26668 端口发送切换个股 socket 指令 (VIS 独立行情可视化器)
+        try:
+            import socket
+            import threading
+            def _send_vis(c):
+                try:
+                    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                        s.settimeout(0.1)
+                        s.connect(('127.0.0.1', 26668))
+                        s.sendall(f"CODE|{c}".encode("utf-8"))
+                except Exception:
+                    pass
+            threading.Thread(target=_send_vis, args=(code,), daemon=True).start()
+        except Exception as e_vis:
+            logger.debug(f"[SBC Linkage] VIS 联动异常: {e_vis}")
+
+        # 4. 界面即时视觉反馈 (底部状态栏提示 + 按钮高亮动画)
         if hasattr(self, 'lbl_info') and self.lbl_info:
-            self.lbl_info.setText(f"🔗 [F快捷联动] 已触发行情联动: {code} {name}")
+            self.lbl_info.setText(f"🔗 [F联动] 已同步通达信/可视化/全系统: 【{code} {name}】")
+
+        if hasattr(self, 'btn_linkage') and self.btn_linkage:
+            orig_ss = getattr(self, '_btn_linkage_default_ss', None)
+            if not orig_ss:
+                orig_ss = self.btn_linkage.styleSheet()
+                self._btn_linkage_default_ss = orig_ss
+            self.btn_linkage.setStyleSheet(
+                "background-color: #7c2d12; color: #ffedd5; font-weight: bold; "
+                "border: 1px solid #f97316; border-radius: 3px; padding: 2px 6px; font-size: 8.5pt;"
+            )
+            QTimer.singleShot(250, lambda: self.btn_linkage.setStyleSheet(self._btn_linkage_default_ss) if hasattr(self, 'btn_linkage') and self.btn_linkage else None)
 
     def _update_eval_btn_style(self):
         """更新测算按钮样式与高亮状态反馈"""
@@ -4940,7 +5003,7 @@ def open_sbc_chart_dialog(parent_win: Optional[QWidget] = None, code: str = "688
         try:
             import run_sbc
             if not getattr(run_sbc, '_is_restoring_holdings', False):
-                run_sbc.save_launcher_holdings_windows(force=True)
+                run_sbc.save_launcher_holdings_windows(force=False)
         except Exception:
             pass
     return dlg
@@ -5478,33 +5541,37 @@ class _SBCWindowProxy:
         h = max(200, min(h, screen_geo.height()))
         return w, h
 
-    def apply_geometry(self, pos_x: int, pos_y: int, w: int, h: int):
+    def apply_geometry(self, pos_x: int, pos_y: int, w: int, h: int, activate: bool = False):
         if self.dlg:
-            self.dlg.resize(w, h)
-            self.dlg._unmaximized_size = (w, h)
-            if hasattr(self.dlg, "snap_timer"):
-                self.dlg.snap_timer.stop()
-            self.dlg.anchor_edge = None
-            self.dlg.normal_geometry = None
-            self.dlg.is_hidden_state = False
-            self.dlg._is_dragging = False
-            self.dlg._is_user_dragging = False
-            self.dlg.setWindowOpacity(1.0)
             self.dlg._is_programmatic_move = True
             try:
+                self.dlg.resize(w, h)
+                self.dlg._unmaximized_size = (w, h)
+                if hasattr(self.dlg, "snap_timer"):
+                    self.dlg.snap_timer.stop()
+                self.dlg.anchor_edge = None
+                self.dlg.normal_geometry = None
+                self.dlg.is_hidden_state = False
+                self.dlg._is_dragging = False
+                self.dlg._is_user_dragging = False
+                self.dlg.setWindowOpacity(1.0)
                 self.dlg.move(pos_x, pos_y)
-                if hasattr(self.dlg, "_save_sbc_geometry"):
-                    self.dlg._save_sbc_geometry()
-                self.dlg.raise_()
-                self.dlg.activateWindow()
+                # 🚀 性能优化：重排平铺时由外层统一落盘，严禁在循环内对每个窗口重复写盘与频繁激活
+                if activate:
+                    self.dlg.raise_()
+                    self.dlg.activateWindow()
             finally:
                 self.dlg._is_programmatic_move = False
         elif self.hwnd:
             try:
                 import win32gui, win32con
                 win32gui.ShowWindow(self.hwnd, win32con.SW_RESTORE)
-                win32gui.SetWindowPos(self.hwnd, 0, pos_x, pos_y, w, h, win32con.SWP_NOZORDER | win32con.SWP_SHOWWINDOW)
-                win32gui.SetForegroundWindow(self.hwnd)
+                flags = win32con.SWP_NOZORDER | win32con.SWP_SHOWWINDOW
+                if not activate:
+                    flags |= win32con.SWP_NOACTIVATE
+                win32gui.SetWindowPos(self.hwnd, 0, pos_x, pos_y, w, h, flags)
+                if activate:
+                    win32gui.SetForegroundWindow(self.hwnd)
             except Exception:
                 pass
 
@@ -5552,11 +5619,12 @@ def rearrange_all_sbc_windows(parent_win=None):
         except Exception:
             pass
 
-    # 3. 构造统一代理列表，并尝试枚举 Windows 系统中跨独立子进程的 SBC 窗口 (按组隔离)
+    # 3. 构造统一代理列表：若在 Launcher 进程内且已有活跃窗口，直接复用，彻底跳过漫长的 Win32 全机窗口枚举
     active_proxies: List[_SBCWindowProxy] = [_SBCWindowProxy(dlg=d) for d in active_dialogs]
     known_hwnds = {p.hwnd for p in active_proxies if p.hwnd}
 
-    if sys.platform == "win32":
+    # 仅在非 Launcher 或当前进程内尚未收集到窗口时，才跨进程枚举
+    if sys.platform == "win32" and not (is_in_launcher and len(active_proxies) > 0):
         try:
             import win32gui
             import win32process
@@ -5668,13 +5736,53 @@ def rearrange_all_sbc_windows(parent_win=None):
             pos_x = sg.left() + pad_left + c * (target_w + margin_x)
             pos_y = sg.top() + pad_top + r * (target_h + margin_y)
 
-            pxy.apply_geometry(pos_x, pos_y, target_w, target_h)
+            # 🚀 极致性能优化：平铺过程全部静默排布 (activate=False)，彻底消除 Windows DWM 频闪与排队拥塞
+            pxy.apply_geometry(pos_x, pos_y, target_w, target_h, activate=False)
 
         SBCIntradayChartDialog._global_sbc_size = (target_w, target_h)
 
-    # 6. 持久化最新窗口坐标
+    # 6. 🌟 【全部平铺窗口自动触发置顶查看】
+    # 遍历所有平铺代理窗口，统一执行前置置顶唤醒 (Raise & TopMost View)，让操盘手清晰一览全部标的
+    for pxy in active_proxies:
+        try:
+            if pxy.dlg is not None:
+                pxy.dlg.raise_()
+            elif pxy.hwnd:
+                import win32gui, win32con
+                win32gui.SetWindowPos(
+                    pxy.hwnd,
+                    win32con.HWND_TOP,
+                    0, 0, 0, 0,
+                    win32con.SWP_NOMOVE | win32con.SWP_NOSIZE | win32con.SWP_NOACTIVATE | win32con.SWP_SHOWWINDOW
+                )
+        except Exception:
+            pass
+
+    # 最后对操作发起窗口或首选窗口温和激活输入焦点，确保可直接敲击键盘快捷键
     try:
-        save_all_open_sbc_windows()
+        top_pxy = parent_win or (active_proxies[-1].dlg if active_proxies and active_proxies[-1].dlg else None)
+        if top_pxy:
+            if hasattr(top_pxy, 'raise_'):
+                top_pxy.raise_()
+            if hasattr(top_pxy, 'activateWindow'):
+                top_pxy.activateWindow()
+            elif hasattr(top_pxy, 'hwnd') and top_pxy.hwnd:
+                import win32gui
+                win32gui.SetForegroundWindow(top_pxy.hwnd)
+    except Exception:
+        pass
+
+    # 7. 持久化最新窗口坐标 (按运行模式精准分流落盘，彻底消除 Launcher 误写 ATS 配置)
+    try:
+        if is_in_launcher:
+            try:
+                from run_sbc import save_launcher_holdings_windows
+                save_launcher_holdings_windows(force=True)
+            except Exception as err_l:
+                logger.debug(f"持仓重排持久化异常: {err_l}")
+                save_all_open_sbc_windows()
+        else:
+            save_all_open_sbc_windows()
     except Exception as e:
         logger.debug(f"重排后持久化坐标异常: {e}")
 
