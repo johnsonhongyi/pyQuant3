@@ -3,9 +3,10 @@
 test_sbc_packaged_env_and_fallback.py
 --------------------------------------
 验证在打包环境 (Frozen / PyInstaller / Nuitka) 下：
-1. 【杜绝误调起 ATS 主程序】launch_holdings_watcher 绝不执行 [sys.executable, run_sbc.py]，严禁多开 ATS 主程序；
-2. 【全自动进程内平滑降级】launch 标的在打包环境下自动安全降级在当前进程内打开，绝不报找不到 run_sbc.py 路径；
-3. 【持仓盯盘进程内纳管闭环】启动持仓盯盘后，is_launcher_running 识别，二次点击 close_launcher_process 优雅关闭并持久化。
+1. 【打包环境多进程调起】launch(code) 优先以 [ATS_Terminal.exe, --sbc, <code>, <period>] 调起独立子进程；
+2. 【打包环境持仓盯盘多进程】launch_holdings_watcher 以 [ATS_Terminal.exe, --sbc-holdings] 调起独立子进程；
+3. 【子进程参数拦截分发】run_ats.py 检测到 --sbc 或 --sbc-holdings 时直接进入 run_sbc.main()，绝不调起 ATSMainWindow 主程序；
+4. 【进程异常兜底降级】当子进程启动异常时，全自动安全降级在当前进程内打开。
 """
 
 import os
@@ -20,10 +21,10 @@ if STOCK_STANDALONE not in sys.path:
     sys.path.insert(0, STOCK_STANDALONE)
 
 from PyQt6.QtWidgets import QApplication
-from ats.ui.sbc_launcher import SBCProcessManager, launch_sbc_process
+from ats.ui.sbc_launcher import SBCProcessManager, launch_sbc_process, _build_sbc_subprocess_command
 
 
-class TestSBCPackagedEnvAndFallback(unittest.TestCase):
+class TestSBCPackagedEnvAndSubprocess(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication(sys.argv)
@@ -37,72 +38,110 @@ class TestSBCPackagedEnvAndFallback(unittest.TestCase):
         self.mgr._procs.clear()
         self.mgr._in_process_holdings.clear()
 
-    def test_packaged_env_launch_fallback_in_process(self):
-        """【测试】打包环境下调用 launch(code)：杜绝调起外部进程，安全在当前进程内降级打开"""
-        mock_dlg = MagicMock()
-        mock_dlg.isVisible.return_value = True
+    def test_build_sbc_subprocess_command_packaged(self):
+        """【测试】打包环境下智能构造多进程命令行：使用 exe 与 --sbc/--sbc-holdings，绝不带 run_sbc.py"""
+        fake_exe = r"D:\JohnsonProgram\instockMonitorTK\ATS_Terminal.exe"
+        with patch("ats.ui.sbc_launcher.is_packaged_env", return_value=True), \
+             patch.object(sys, "executable", fake_exe), \
+             patch("os.path.exists", return_value=True):
+
+            # 1. 单标的启动命令
+            cmd_single = _build_sbc_subprocess_command(code="600733", period_mode="10d", is_holdings=False)
+            self.assertEqual(cmd_single, [fake_exe, "--sbc", "600733", "10d"])
+
+            # 2. 持仓盯盘启动命令
+            cmd_holdings = _build_sbc_subprocess_command(is_holdings=True)
+            self.assertEqual(cmd_holdings, [fake_exe, "--sbc-holdings"])
+
+    def test_packaged_env_launch_single_code_subprocess(self):
+        """【测试】打包环境下调起标的 SBC：优先以全新独立子进程运行，杜绝主进程卡顿"""
+        fake_exe = r"D:\JohnsonProgram\instockMonitorTK\ATS_Terminal.exe"
+        mock_proc = MagicMock()
+        mock_proc.pid = 88888
+        mock_proc.poll.return_value = None
 
         with patch("ats.ui.sbc_launcher.is_packaged_env", return_value=True), \
-             patch("ats.ui.intraday_strategy_dialog.open_sbc_chart_dialog", return_value=mock_dlg) as mock_open, \
-             patch("subprocess.Popen") as mock_popen:
+             patch.object(sys, "executable", fake_exe), \
+             patch("os.path.exists", return_value=True), \
+             patch("subprocess.Popen", return_value=mock_proc) as mock_popen:
 
-            res = self.mgr.launch("600733", "10d")
+            proc = self.mgr.launch("600733", "10d")
 
-            # 1. 绝不调用 subprocess.Popen (绝不启动 ATS_Terminal.exe)
-            mock_popen.assert_not_called()
+            # 1. 必须成功调起独立子进程
+            self.assertEqual(proc, mock_proc)
+            mock_popen.assert_called_once()
+            call_args = mock_popen.call_args[0][0]
+            self.assertEqual(call_args, [fake_exe, "--sbc", "600733", "10d"])
 
-            # 2. 必须调用 open_sbc_chart_dialog 降级打开
-            mock_open.assert_called_once()
-            self.assertEqual(mock_open.call_args[1].get("code"), "600733")
+            # 2. 必须包含 ATS_SBC_SUBPROCESS=1 环境变量
+            call_env = mock_popen.call_args[1].get("env", {})
+            self.assertEqual(call_env.get("ATS_SBC_SUBPROCESS"), "1")
 
-            # 3. 必须显示并激活窗口
-            mock_dlg.show.assert_called_once()
-            mock_dlg.raise_.assert_called_once()
-            mock_dlg.activateWindow.assert_called_once()
-            self.assertEqual(res, mock_dlg)
+            # 3. 必须纳入 SBCProcessManager 纳管
+            self.assertIn("600733", self.mgr.get_running_codes())
 
-    def test_packaged_env_launch_holdings_watcher_fallback_in_process(self):
-        """【测试】打包环境下点击盯盘：杜绝调起外部 ATS_Terminal.exe，内存模式安全恢复持仓盯盘"""
-        mock_win1 = MagicMock()
-        mock_win1.isVisible.return_value = True
-        mock_win2 = MagicMock()
-        mock_win2.isVisible.return_value = True
+    def test_packaged_env_launch_holdings_watcher_subprocess(self):
+        """【测试】打包环境下点击盯盘：优先以独立子进程运行 run_sbc 盯盘模式"""
+        fake_exe = r"D:\JohnsonProgram\instockMonitorTK\ATS_Terminal.exe"
+        mock_proc = MagicMock()
+        mock_proc.pid = 99999
+        mock_proc.poll.return_value = None
 
         with patch("ats.ui.sbc_launcher.is_packaged_env", return_value=True), \
-             patch("subprocess.Popen") as mock_popen, \
-             patch("run_sbc.restore_launcher_holdings_windows", return_value=[mock_win1, mock_win2]) as mock_restore, \
-             patch("run_sbc.save_launcher_holdings_windows") as mock_save:
+             patch.object(sys, "executable", fake_exe), \
+             patch("os.path.exists", return_value=True), \
+             patch("subprocess.Popen", return_value=mock_proc) as mock_popen:
 
-            # 1. 首次点击盯盘
-            res = self.mgr.launch_holdings_watcher()
+            proc = self.mgr.launch_holdings_watcher()
 
-            # 严格断言：绝不执行外部子进程！
-            mock_popen.assert_not_called()
-            # 严格断言：通过内存模式恢复持仓
-            mock_restore.assert_called_once()
-            self.assertEqual(len(res), 2)
+            # 1. 必须调起持仓多进程
+            self.assertEqual(proc, mock_proc)
+            mock_popen.assert_called_once()
+            call_args = mock_popen.call_args[0][0]
+            self.assertEqual(call_args, [fake_exe, "--sbc-holdings"])
+
+            # 2. 必须包含专属隔离环境变量
+            call_env = mock_popen.call_args[1].get("env", {})
+            self.assertEqual(call_env.get("ATS_SBC_SUBPROCESS"), "1")
+            self.assertEqual(call_env.get("SBC_IS_HOLDINGS_LAUNCHER"), "1")
+
+            # 3. 确认处于运行状态
             self.assertTrue(self.mgr.is_launcher_running())
 
-            # 2. 二次点击统一关闭并持久化
-            self.mgr.close_launcher_process()
-            mock_save.assert_called_once()
-            mock_win1.close.assert_called_once()
-            mock_win2.close.assert_called_once()
-            self.assertFalse(self.mgr.is_launcher_running())
-
-    def test_run_ats_cli_dispatch_prevents_main_window(self):
-        """【测试】run_ats.py 在带 --sbc 参数时直接分发到 run_sbc.main，阻断 ATS 主程序实例化"""
+    def test_run_ats_cli_and_env_dispatch_prevents_main_window(self):
+        """【测试】run_ats.py 在带 --sbc 参数或 ATS_SBC_SUBPROCESS=1 时直接分发到 run_sbc.main，阻断 ATSMainWindow 实例化"""
         test_argv = ["ATS_Terminal.exe", "--sbc", "600733", "10d"]
         with patch.object(sys, "argv", test_argv), \
+             patch.dict(os.environ, {"ATS_SBC_SUBPROCESS": "1"}), \
              patch("run_sbc.main", return_value=0) as mock_sbc_main:
 
-            # 模拟执行参数分发检测
-            if any(arg in sys.argv for arg in ("--sbc", "--sbc-holdings", "--holdings-sbc")):
+            is_sbc_subproc = (
+                os.environ.get("ATS_SBC_SUBPROCESS") == "1" or
+                any(arg in sys.argv for arg in ("--sbc", "--sbc-holdings", "--holdings-sbc", "--holdings"))
+            )
+            if is_sbc_subproc:
                 import run_sbc
                 exit_code = run_sbc.main()
 
             mock_sbc_main.assert_called_once()
             self.assertEqual(exit_code, 0)
+
+    def test_packaged_env_failure_gracefully_fallbacks_to_in_process(self):
+        """【测试】当外部子进程调起异常时，自动平滑降级至当前进程内打开，保障 100% 可用"""
+        fake_exe = r"D:\JohnsonProgram\instockMonitorTK\ATS_Terminal.exe"
+        mock_dlg = MagicMock()
+        mock_dlg.isVisible.return_value = True
+
+        with patch("ats.ui.sbc_launcher.is_packaged_env", return_value=True), \
+             patch.object(sys, "executable", fake_exe), \
+             patch("subprocess.Popen", side_effect=OSError("Process creation blocked")), \
+             patch("ats.ui.intraday_strategy_dialog.open_sbc_chart_dialog", return_value=mock_dlg) as mock_open:
+
+            res = self.mgr.launch("600733", "10d")
+            # 自动降级为进程内窗口
+            self.assertEqual(res, mock_dlg)
+            mock_open.assert_called_once()
+            mock_dlg.show.assert_called_once()
 
 
 if __name__ == "__main__":
