@@ -58,12 +58,13 @@ class TestSBCCtrlCAndAltExitPersistence(unittest.TestCase):
         os.environ["SBC_IS_HOLDINGS_LAUNCHER"] = "1"
         run_sbc._last_save_holdings_time = 0.0
         self._cleanup_all_dialogs()
-        closing_flag = os.path.join(STOCK_STANDALONE, "config", ".ats_closing")
-        if os.path.exists(closing_flag):
-            try:
-                os.remove(closing_flag)
-            except Exception:
-                pass
+        from ats.ui.intraday_strategy_dialog import get_ats_closing_flag_path
+        for flag_file in (get_ats_closing_flag_path(), os.path.join(STOCK_STANDALONE, "config", ".ats_closing")):
+            if os.path.exists(flag_file):
+                try:
+                    os.remove(flag_file)
+                except Exception:
+                    pass
         if os.path.exists(self.temp_cfg):
             try:
                 os.remove(self.temp_cfg)
@@ -72,12 +73,13 @@ class TestSBCCtrlCAndAltExitPersistence(unittest.TestCase):
 
     def tearDown(self):
         self._cleanup_all_dialogs()
-        closing_flag = os.path.join(STOCK_STANDALONE, "config", ".ats_closing")
-        if os.path.exists(closing_flag):
-            try:
-                os.remove(closing_flag)
-            except Exception:
-                pass
+        from ats.ui.intraday_strategy_dialog import get_ats_closing_flag_path
+        for flag_file in (get_ats_closing_flag_path(), os.path.join(STOCK_STANDALONE, "config", ".ats_closing")):
+            if os.path.exists(flag_file):
+                try:
+                    os.remove(flag_file)
+                except Exception:
+                    pass
         if os.path.exists(self.temp_cfg):
             try:
                 os.remove(self.temp_cfg)

@@ -729,7 +729,30 @@ class TestIPOSubnewDetector(unittest.TestCase):
             df_inc, _ = inc
             self.assertFalse(df_inc.empty)
 
-        # 场景 2: 周一 (2026-09-21) 正式开盘 (真实交易日)
+        # 场景 2: 周一早晨 (2026-09-21 08:30) 打开系统做早盘预案 (交易日但未开盘 < 09:15)
+        with patch.object(pool, "is_trading_day", return_value=True), \
+             patch("ats.tdx_realtime_fetcher.datetime") as mock_dt:
+            from datetime import datetime as real_dt
+            mock_dt.now.return_value = real_dt(2026, 9, 21, 8, 30, 0)
+            mock_dt.strptime = real_dt.strptime
+            mock_dt.strftime = real_dt.strftime
+
+            # 重新载入 RamDisk 缓存 (模拟操盘手 08:30 启动新进程查看数据)
+            pool._last_ramdisk_mtime = 0.0
+            loaded = pool._load_from_ramdisk()
+            self.assertTrue(loaded)
+
+            # 核心断言 5: 开盘前 (<09:15) 当前有效日期维持上一交易日 (2026-09-18)，绝不提前淘汰历史！
+            self.assertEqual(pool._current_date_str, "2026-09-18")
+
+            # 核心断言 6: 盘前尝试触发 _check_date_rollover 被严格拦截，数据 0 损耗
+            pool._check_date_rollover()
+            hist_pre = pool.get_static_history_bars(test_code, 3)
+            self.assertIsNotNone(hist_pre)
+            self.assertEqual(len(hist_pre["records"]), 2)
+            self.assertIn("2026-09-16", [r["date"] for r in hist_pre["records"]])
+
+        # 场景 3: 周一早盘 (2026-09-21 09:15) 正式集合竞价开盘 (达到 >= 09:15)
         with patch.object(pool, "is_trading_day", return_value=True), \
              patch("ats.tdx_realtime_fetcher.datetime") as mock_dt:
             mock_dt.now.return_value = real_dt(2026, 9, 21, 9, 15, 0)
@@ -739,7 +762,7 @@ class TestIPOSubnewDetector(unittest.TestCase):
             # 触发真实跨日滚动
             pool._check_date_rollover(force_from_date="2026-09-18")
 
-            # 核心断言 5: 进入新交易日 2026-09-21，周五 09-18 数据并入历史，最老的 09-16 被正常淘汰剔除
+            # 核心断言 7: 正式开盘后推进至新交易日 2026-09-21，周五 09-18 数据并入历史，最老的 09-16 正常淘汰剔除
             self.assertEqual(pool._current_date_str, "2026-09-21")
             new_hist = pool.get_static_history_bars(test_code, 3)
             new_dates = [r["date"] for r in new_hist["records"]]

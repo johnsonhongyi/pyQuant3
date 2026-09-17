@@ -2352,9 +2352,9 @@ class ATSMainWindow(QMainWindow):
         self.main_splitter = QSplitter(Qt.Orientation.Horizontal)
         self.setCentralWidget(self.main_splitter)
 
-        # 1. Left panel: Universe Tree (Width: 350, 物理级最小宽度 180px 防挤压)
+        # 1. Left panel: Universe Tree (Width: 350, 物理级最小宽度 50px 支持极窄模式防挤压)
         self.universe_widget = UniverseTreeWidget()
-        self.universe_widget.setMinimumWidth(180)
+        self.universe_widget.setMinimumWidth(100)
         self.main_splitter.addWidget(self.universe_widget)
         mark_checkpoint("03.3.1 Left UniverseTreeWidget")
 
@@ -3270,10 +3270,10 @@ class ATSMainWindow(QMainWindow):
         """主看板顶部 Tab 切换事件：极速 0ms 补齐渲染，严格锁定各 Tab 统一窗口大小不能被改变，并原子持久化 Tab 索引"""
         # 1. 严格锁定统一的主分割布局尺寸，杜绝任何 Tab 切换改变窗口大小或挤压左右面板
         if hasattr(self, 'main_splitter'):
-            # 若当前处于正常物理展现状态且各栏尺寸合法，更新权威统一分割尺寸
+            # 若当前处于正常物理展现状态且各栏尺寸合法，更新权威统一分割尺寸 (左栏支持极窄模式 >= 40px)
             if self.isVisible() and not getattr(self, '_is_restoring_sizes', False):
                 cur_sizes = self.main_splitter.sizes()
-                if len(cur_sizes) == 3 and sum(cur_sizes) > 600 and cur_sizes[0] >= 150 and cur_sizes[2] >= 150:
+                if len(cur_sizes) == 3 and sum(cur_sizes) > 600 and cur_sizes[0] >= 40 and cur_sizes[2] >= 150:
                     self._unified_splitter_sizes = list(cur_sizes)
 
         target_sizes = getattr(self, '_unified_splitter_sizes', [239, 1207, 222])
@@ -4320,12 +4320,20 @@ class ATSMainWindow(QMainWindow):
         # 3. 恢复加载持久化打开的 SBC 独立分时走势图窗口 (错峰延时 1000ms)
         def _restore_sbc():
             try:
-                from ats.ui.intraday_strategy_dialog import restore_all_open_sbc_windows
+                from ats.ui.intraday_strategy_dialog import restore_all_open_sbc_windows, get_ats_closing_flag_path
                 from sys_utils import get_app_root
-                c_flag = os.path.join(get_app_root(), "config", ".ats_closing")
+                # 1. 优先清理 RamDisk 上的退出标志文件
+                c_flag = get_ats_closing_flag_path()
                 if os.path.exists(c_flag):
                     try:
                         os.remove(c_flag)
+                    except Exception:
+                        pass
+                # 2. 顺带清理可能遗留的旧物理 config/.ats_closing 标记
+                old_c_flag = os.path.join(get_app_root(), "config", ".ats_closing")
+                if os.path.exists(old_c_flag):
+                    try:
+                        os.remove(old_c_flag)
                     except Exception:
                         pass
                 logger.info("[ATSMainWindow] IPC数据就绪，自动加载打开持久化的 SBC 独立分时窗口 (ATS内部原生)...")
@@ -5458,7 +5466,7 @@ class ATSMainWindow(QMainWindow):
             return
         if hasattr(self, 'main_splitter'):
             sizes = self.main_splitter.sizes()
-            if len(sizes) == 3 and sizes[0] >= 150 and sizes[2] >= 150 and sum(sizes) > 600:
+            if len(sizes) == 3 and sizes[0] >= 40 and sizes[2] >= 150 and sum(sizes) > 600:
                 self._unified_splitter_sizes = list(sizes)
         self._request_save_layout_debounced()
 
@@ -5690,7 +5698,7 @@ class ATSMainWindow(QMainWindow):
             if hasattr(self, 'main_splitter'):
                 main_sizes = data.get("ats_main_splitter_sizes")
                 if main_sizes and isinstance(main_sizes, list) and len(main_sizes) == 3:
-                    if main_sizes[0] >= 150 and main_sizes[2] >= 150 and sum(main_sizes) >= 600:
+                    if main_sizes[0] >= 40 and main_sizes[2] >= 150 and sum(main_sizes) >= 600:
                         self._unified_splitter_sizes = list(main_sizes)
                     else:
                         self._unified_splitter_sizes = [239, 1207, 222]
@@ -5767,8 +5775,8 @@ class ATSMainWindow(QMainWindow):
             return
         if hasattr(self, 'main_splitter'):
             sizes = self.main_splitter.sizes()
-            # 严格门禁：未展示全或被挤压时严禁写盘覆盖正常物理配置
-            if len(sizes) != 3 or sum(sizes) < 600 or sizes[0] < 120 or sizes[2] < 120:
+            # 严格门禁：未展示全或被挤压时严禁写盘覆盖正常物理配置 (左栏支持极窄模式，允许低至 40px)
+            if len(sizes) != 3 or sum(sizes) < 600 or sizes[0] < 40 or sizes[2] < 120:
                 return
         try:
             from ats.ui.styles import save_config_nodes
@@ -5780,7 +5788,7 @@ class ATSMainWindow(QMainWindow):
             if hasattr(self, 'main_splitter'):
                 updates["ats_main_splitter_state"] = self.main_splitter.saveState().toHex().data().decode()
                 cur_sizes = self.main_splitter.sizes()
-                if len(cur_sizes) == 3 and cur_sizes[0] >= 150 and cur_sizes[2] >= 150:
+                if len(cur_sizes) == 3 and cur_sizes[0] >= 40 and cur_sizes[2] >= 150:
                     self._unified_splitter_sizes = list(cur_sizes)
                 updates["ats_main_splitter_sizes"] = list(getattr(self, '_unified_splitter_sizes', cur_sizes))
             if hasattr(self, 'center_splitter'):
@@ -6254,8 +6262,11 @@ class ATSMainWindow(QMainWindow):
             try:
                 os.environ["ATS_IS_CLOSING"] = "1"
                 try:
-                    from sys_utils import get_app_root
-                    c_flag = os.path.join(get_app_root(), "config", ".ats_closing")
+                    from ats.ui.intraday_strategy_dialog import get_ats_closing_flag_path
+                    c_flag = get_ats_closing_flag_path()
+                    flag_dir = os.path.dirname(c_flag)
+                    if flag_dir and not os.path.exists(flag_dir):
+                        os.makedirs(flag_dir, exist_ok=True)
                     with open(c_flag, "w", encoding="utf-8") as f_c:
                         f_c.write(str(os.getpid()))
                 except Exception:
