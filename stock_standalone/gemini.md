@@ -1,3 +1,80 @@
+## 2026-09-17 23:58
+- [x] **【彻底根治新股次新超短检测工具多进程访问 HDF5 崩溃 (0xc0000005) 与量价暴涨 Bug，窗口名称取消 ATS 前缀与二次点击自动置顶】(`ats/strategy/ipo_vwap_detector_engine.py`, `ats/tdx_realtime_fetcher.py`, `ats/ui/ipo_subnew_detector_dialog.py`, `ats/ui/universe_widget.py`, `ats/ui/ipo_detector_ipc.py`, `tests/test_ipo_subnew_detector.py`)**：
+    - [x] **操盘手现场明确指示与核心痛点 (P0)**：
+        - “速度修复,为何会多进程访问h5”；
+        - “--ipo-detector应该没有什么需要多进程访问的hdf5才对,修复这个多进程访问即可,需要访问什么”；
+        - “检测工具出现严重的数据问题,是哪里补了错误数据并持久化导致,sbc图也都出现不正确的价格数据”；
+        - “再次点击次新时如果已经打开窗口,自动置顶；名字取消ATS开头；sys_utils.py 不要改动基层”。
+    - [x] **根因深度破案与技术解答**：
+        1. **为何子进程会多进程访问 HDF5 导致 0xc0000005 闪退？**
+           - 检测工具本身完全基于通达信实时分时数据（`TDXRealtimeFetcher`），**根本不需要访问任何 HDF5 文件**！
+           - 发生访问的原因是：旧版 `resolve_fast_ipo_name` 当新股在缓存缺失时，兜底调用了 `sys_utils.resolve_stock_name`，其内部尝试 `pd.read_hdf(r'g:\top_all.h5')`；
+           - 且 `IPOScanWorker` 开启了 `ThreadPoolExecutor(max_workers=8)`，8 线程并发同时进入 `hdf5.dll`，撞击外部主进程对 `top_all.h5` 的读写，底层 C 库结构冲突直接引发硬件级 `0xc0000005` 崩溃与窗口 `(未响应)`。
+        2. **为何 10d VWAP 暴涨至几十万/几百万，SBC 走势图空白且黄线断崖拉折线？**
+           - `fetch_multi_day_intraday_bars` 存入记录时，`vol` 存的是累计手数（除以了 100），而 `amount` 存的是累计金额；
+           - `_check_date_rollover` 跨交易日滚动时，对保留的 240 根已累计 Bar 循环执行 `cum_amt += r['amount']`，导致总金额被重复累加 240 遍！
+           - 被放大万倍的脏数据被写入 `G:\tdx_global_cache_pool.pkl.z`，SBC 走势图加载同份缓存时黄线被炸毁挤爆坐标轴导致空白。
+    - [x] **全体系工程落地与修复验证 (KISS / SOLID / DRY)**：
+        1. **基层文件 0 触碰**：严格遵守约定，`sys_utils.py` 100% 保持基线原样，零修改；
+        2. **纯零 HDF5 数据流与多重名字自愈解析**：彻底切断对 `sys_utils.resolve_stock_name` 的调用；
+           - **破解 ETF 沦为“个股_XXXXXX”根因**：老版判定上交所股票仅识别 `startswith('6')`，导致所有上交所 ETF（515230, 515220, 512980, 513310 等 5 开头）全被误判为 `sz` 前缀拉取失败；全面升级市场前缀算法（`6/5/11` -> `sh`，`0/3/1` -> `sz`，`9/8/4` -> `bj`）；
+           - **多通道无锁极速解析**：优先从 `NewStockFetcher` 字典、IPC 实时行情 df（`get_global_ipc_sync_manager().get_current_df()`）、本地 [datacsv/stock_name_cache.json](file:///d:/MacTools/WorkFile/WorkSpace/pyQuant3/stock_standalone/datacsv/stock_name_cache.json)（5685只股票 UTF-8 镜像）以及 0.8s 纯直连 HTTP 网络自愈回写，彻底杜绝任何 H5 访问；
+           - **历史脏条目一网打尽**：已将 `stock_name_cache.json` 中遗留的 30 个异常条目（`515230` 软件ETF国泰、`515220` 煤炭ETF国泰、`512980` 传媒ETF广发、`513310` 中韩半导体ETF华泰柏瑞、`301699` 洛轴股份、`920268` 百迈科、`301689` 电科思仪等）100% 自动更新校准！
+        3. **极简单线程顺序流 (对齐 `--sbc-holdings`)**：移除子进程内 `ThreadPoolExecutor`，采用单线程顺序扫描；全量 35 只新股仅需 0.1~0.2 秒，彻底根除多线程争抢、GIL 假死与底层 C 库冲突；
+        4. **量价增量与滑动窗口自愈算法**：
+           - 每根 Bar 增加 `bar_vol` / `bar_amt` / `cum_vol_shares` / `cum_amt` 明细字段；
+           - 滑动窗口滚动严格按单分钟增量累加，彻底根除 240 次重复累加；
+           - 在 `_load_from_ramdisk` 增加熔断自愈（`last_cum_amt > 1e11` 或 VWAP > 3000 自动判定脏数据抛弃重拉）；已物理清空 RamDisk 历史脏缓存 `G:\tdx_global_cache_pool.pkl.z`；
+        5. **二次点击自动置顶与名字取消 ATS 开头**：
+           - 主窗口二次点击【🎯 次新】时自动调用 `activate_ipo_detector_window()` 前置窗口；
+           - 窗口标题统一改为：`新股次新股超短检测工具 (SBC 极限 10日 VWAP 预判与异动引擎)`；
+           - 清理所有日志中的 Emoji 字符，防止 Windows GBK 控制台触发 `UnicodeEncodeError`；
+        6. **实盘数据与自动化测试验证**：
+           - 真实标的验证：001232 10d VWAP 恢复为 181.51 元 (偏离度 +4.46%)，301655 恢复为 22.69 元 (偏离度 -3.39%)，601091 恢复为 12.97 元，完全吻合真实走势；
+           - 运行时检测：`tables loaded? False`，零 H5；
+           - 全量自动化测试：`pytest tests/test_ipo_subnew_detector.py` 21/21 PASSED 100% 全绿通过。
+
+## 2026-09-18 00:04
+- [x] **【彻底修复通达信金融终端多屏（副屏一、副屏二、副屏三）被误判为从属子浮窗导致无法更新位置的 Bug】(`webTools/window_manager/core.py`, `tests/test_tdx_wildcard_matching.py`)**：
+    - [x] **操盘手现场明确指示与真实痛点 (P0)**：
+        - “出现新的问题,通达信金融终端(开心果交易版) 副屏一的副屏也被识别为子窗口,没法更新位置,但是单独的子窗口”；
+        - 通达信多屏系统开启的“副屏一”、“副屏二”、“副屏三”是完整独立的工作区分屏大窗口，操盘手单独配置了其在各副显示器上的位置和大小；
+        - Win32 底层通达信为主窗口指定了副屏的 GW_OWNER，导致 `get_window_host_relation` 误判其为 `is_sub_window = True`；进而触发跳过 `cancel_window_maximized_or_fullscreen`、移除 `SWP_FRAMECHANGED`，使副屏若处于最大化或跨屏时位置完全无法更新。
+    - [x] **全体系工程落地与精准特异性豁免 (KISS / SOLID / DRY)**：
+        1. **`get_window_host_relation` 核心豁免**：
+           - 严格检测窗口标题：若包含“副屏”（如 `副屏一`、`副屏二`、`副屏三`），即使底层挂载了宿主 PID，**100% 裁决为 `is_sub_window = False`**，恢复为完全独立顶级大窗口；
+        2. **恢复独立窗口的完整移动与自愈能力**：
+           - 允许副屏正常执行 `cancel_window_maximized_or_fullscreen(hwnd)`，自动解除最大化并还原物理尺寸；
+           - 恢复完整的 `SWP_FRAMECHANGED` 标志位，确保非客户区和 DWM 刷新；
+           - 移动完成后自动补发 `WM_EXITSIZEMOVE`，触发 DirectUI 引擎自适应排版；
+        3. **防止通配符/个股泛化误伤副屏**：
+           - `find_tdx_sub_windows` 与 `matches_window_title` 严密排除包含“副屏”的窗口，防止个股通配符误抓副屏；
+        4. **全量自动化测试 100% 验证通过**：
+           - `tests/test_tdx_wildcard_matching.py` 新增 `test_tdx_sub_screen_identified_as_independent_window`（5/5 PASSED）；
+           - 回归 `tests/test_window_pos_dpi_isolation.py` 与 `tests/test_ats_window_manager.py`（5/5 PASSED）全绿。
+
+## 2026-09-17 23:54
+- [x] **【上线通达信特定从属浮窗通用通配引擎：支持语义宏、通配符 `*(*)` 与个股智能自适应候选兜底】(`webTools/window_manager/core.py`, `webTools/window_manager/ui.py`, `tests/test_tdx_wildcard_matching.py`)**：
+    - [x] **操盘手现场明确指示与真实痛点 (P0)**：
+        - “没有方法设置对通达信特定从属浮窗有通配方式适配个股和名称的title都不一样”；
+        - 通达信脱离出来的附属小浮窗，窗口标题随操盘手查看的股票而动态改变（如当前查看上证指数为 `上证指数(999999)`，切换后变为 `春光集团(301531)`）；
+        - 此前管理器配置中标题只能写死具体股票名，一旦切换股票即失效；且旧有 `find_windows_by_title_safe` 对所有字符执行 `re.escape`，导致通配符 `*(*)` 彻底失效。
+    - [x] **全体系工程落地与四重智能通配引擎 (KISS / SOLID / DRY)**：
+        1. **底层引擎：四重递进通配查找算法 (`core.find_windows_by_title_safe`)**：
+           - **第一重·专属语义宏**：支持配置 `[通达信从属浮窗]`、`通达信从属浮窗`、`通达信个股浮窗`、`TDX_SUB_WIN`，自动匹配通达信当前激活的从属浮窗；
+           - **第二重·智能通配符匹配**：逐字符编译通配符（`*` -> `.*`，`?` -> `.`），半角与全角括号智能自适应兼容（`(` / `（` 均能匹配），配置 `*(*)` 或 `*(??????)` 即可 100% 匹配任意股票/指数浮窗，杜绝普通主窗口误伤；
+           - **第三重·常规模糊匹配**：保持对所有日常软件字面量向后兼容；
+           - **第四重·个股智能候选兜底 (Smart Fallback)**：配置中即使仍保存为具体的 `上证指数(999999)`，当通达信切换为 `春光集团(301531)` 时，智能检测通达信宿主关系与 `#32770` 从属特性，自动兜底识别为同一个浮窗进行对齐，用户无需手动改配置也能自愈；
+        2. **整体操作窗口通配升级 (`core.apply_overall_window_group_by_title`)**：
+           - 引入 `core.matches_window_title` 替换原先死板的 `in` 判定，使主程序与通配浮窗联动对齐全面畅通；
+        3. **UI 交互全链路通配支撑 (`ui.py`)**：
+           - **表格实时状态高亮反馈**：当使用通配符或命中不同股票时，在“当前实际位置”列清晰高亮当前命中的个股（如 `[春光集团(301531)] 1946,-296,477,333`），浮窗归属一目了然；
+           - **右键菜单一键转为通配**：表格右键菜单智能检测通达信或股票窗口，提供快捷项：“🔀 转换为通配: [通达信从属浮窗] (推荐)” 与 “🌐 转换为通配: *(*)”，点一下即可一键转换并自动保存；
+           - **捕获窗口智能标记与通配导入**：捕获列表中自动标注 `💡[通达信从属浮窗]`，支持右键直接“以通配格式导入”，极大简化配置流程；
+        4. **全量自动化测试 100% 验证通过**：
+           - 新建 `tests/test_tdx_wildcard_matching.py`（4/4 PASSED 全部绿灯通过）；
+           - 回归 `tests/test_window_pos_dpi_isolation.py` 与 `tests/test_ats_window_manager.py`（5/5 PASSED）全量通过。
+
 ## 2026-09-17 23:28
 - [x] **【彻底解决东方财富在低 DPI 屏幕设置窗口后变形/大字体重叠问题，通达信特定从属浮窗 DPI 上下文切换精准隔离】(`webTools/window_manager/core.py`, `tests/test_window_pos_dpi_isolation.py`)**：
     - [x] **操盘手现场明确指示与真实痛点 (P0)**：

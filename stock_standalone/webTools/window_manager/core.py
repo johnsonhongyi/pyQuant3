@@ -762,27 +762,192 @@ def list_visible_windows(fuzzy_title="") -> list:
     return result
 
 
+def is_tdx_semantic_sub_title(title: str) -> bool:
+    """判断是否为通达信从属浮窗的通用语义占位标题"""
+    if not title:
+        return False
+    t = str(title).strip().lower()
+    return t in (
+        "[通达信从属浮窗]", "通达信从属浮窗", "通达信个股浮窗", "通达信联动浮窗",
+        "tdx_sub_win", "[tdx_sub_win]", "tdx_sub_window", "[tdx_sub_window]",
+        "通达信子窗口", "[通达信子窗口]", "通达信个股小窗", "[通达信个股小窗]"
+    )
+
+
+def is_stock_code_title(title: str) -> bool:
+    """判断是否为股票/指数个股标题，如 上证指数(999999) 或 春光集团(301531)"""
+    if not title:
+        return False
+    return bool(re.search(r'[\(（]\s*\d{6}\s*[\)）]', str(title)))
+
+
+def compile_wildcard_pattern(wildcard_str: str) -> re.Pattern:
+    """
+    将包含 '*' 或 '?' 的通配符字符串编译为正则 Pattern，
+    智能适配中文全角括号与半角括号。
+    例如 '*(*)' 转换为 r'^.*[\(（].*[\)）].*$'
+    """
+    parts = []
+    for ch in str(wildcard_str):
+        if ch == '*':
+            parts.append('.*')
+        elif ch == '?':
+            parts.append('.')
+        elif ch in ('(', '（'):
+            parts.append(r'[\(（]')
+        elif ch in (')', '）'):
+            parts.append(r'[\)）]')
+        else:
+            parts.append(re.escape(ch))
+    pattern_str = "".join(parts)
+    return re.compile(f"^{pattern_str}$", re.IGNORECASE)
+
+
+def find_tdx_sub_windows() -> list:
+    """
+    智能探查当前桌面上所有通达信的从属个股浮窗（如 上证指数(999999)、春光集团(301531)等）
+    返回 [(hwnd, title), ...]
+    """
+    results = []
+    try:
+        def _enum_callback(hwnd, _):
+            if user32.IsWindowVisible(hwnd):
+                title = win32gui.GetWindowText(hwnd).strip()
+                if title and "副屏" not in title:
+                    host_rel = get_window_host_relation(hwnd)
+                    if host_rel.get("is_sub_window", False):
+                        exe = str(host_rel.get("exe_path", "")).lower()
+                        h_title = str(host_rel.get("host_title", "")).lower()
+                        c_name = str(host_rel.get("class_name", "")).lower()
+                        # 宿主是通达信（tdxw.exe / 包含通达信），或者是从属对话框
+                        is_tdx = ("tdxw" in exe or "tdx" in exe or "通达信" in h_title or c_name == "#32770")
+                        if is_tdx and (is_stock_code_title(title) or "分时" in title or "k线" in title.lower()):
+                            results.append((hwnd, title))
+            return True
+
+        win32gui.EnumWindows(_enum_callback, None)
+    except Exception:
+        pass
+    return results
+
+
+def matches_window_title(cfg_title: str, actual_title: str, hwnd: int = 0) -> bool:
+    """
+    智能判定配置标题与实际窗口标题是否匹配（支持通配符、语义宏、个股智能泛化）
+    """
+    if not cfg_title or not actual_title:
+        return False
+    c_cfg = cfg_title.strip()
+    c_act = actual_title.strip()
+
+    # 1. 常规直接匹配
+    if c_cfg.lower() in c_act.lower() or c_act.lower() in c_cfg.lower():
+        return True
+
+    # 2. 语义宏匹配
+    if is_tdx_semantic_sub_title(c_cfg):
+        if "副屏" in c_act:
+            return False
+        if is_stock_code_title(c_act):
+            return True
+        if hwnd:
+            rel = get_window_host_relation(hwnd)
+            if rel.get("is_sub_window", False):
+                return True
+
+    # 3. 通配符模式匹配
+    if '*' in c_cfg or '?' in c_cfg:
+        try:
+            pat = compile_wildcard_pattern(c_cfg)
+            if pat.match(c_act):
+                return True
+        except Exception:
+            pass
+
+    # 4. 个股智能泛化匹配 (如配置写着上证指数(999999)，实际运行着春光集团(301531))
+    if is_stock_code_title(c_cfg) and is_stock_code_title(c_act):
+        if "副屏" in c_cfg or "副屏" in c_act:
+            return False
+        if hwnd:
+            rel = get_window_host_relation(hwnd)
+            if rel.get("is_sub_window", False):
+                return True
+        else:
+            return True
+
+    return False
+
+
 def find_windows_by_title_safe(target_title: str) -> list:
-    """基于正则模糊匹配，安全查找符合名称的窗口，返回 [(hwnd, title), ...]"""
+    """
+    智能安全查找符合名称的窗口，支持：
+    1. 通达信特定从属浮窗专属语义通配：'[通达信从属浮窗]', '通达信从属浮窗', '通达信个股浮窗', 'TDX_SUB_WIN' 等；
+    2. 通配符模式 (Wildcard)：支持 '*' (任意字符) 与 '?' (单字符)，如 '*(*)' 或 '*(??????)'；
+    3. 智能候选兜底：若 target_title 为个股格式（如 '上证指数(999999)'），但在桌面上未找到完全匹配，自动匹配当前桌面的通达信从属个股浮窗（如 '春光集团(301531)'）；
+    4. 常规模糊正则匹配。
+    返回 [(hwnd, title), ...]
+    """
+    target_title = str(target_title).strip()
+    if not target_title:
+        return []
+
+    # 1. 专属语义宏匹配
+    if is_tdx_semantic_sub_title(target_title):
+        tdx_wins = find_tdx_sub_windows()
+        if tdx_wins:
+            return tdx_wins
+
     found = []
+
+    # 2. 通配符模式匹配
+    if '*' in target_title or '?' in target_title:
+        try:
+            pattern = compile_wildcard_pattern(target_title)
+            def enum_wildcard_handler(hwnd, _):
+                try:
+                    if user32.IsWindowVisible(hwnd):
+                        w_title = win32gui.GetWindowText(hwnd).strip()
+                        if w_title and pattern.match(w_title):
+                            found.append((hwnd, w_title))
+                except Exception:
+                    pass
+                return True
+            win32gui.EnumWindows(enum_wildcard_handler, None)
+            if found:
+                return found
+        except Exception:
+            pass
+
+    # 3. 常规字面模糊匹配
     escaped_title = re.escape(target_title)
     pattern = re.compile(escaped_title, re.IGNORECASE)
 
     def enum_handler(hwnd, _):
         try:
             if user32.IsWindowVisible(hwnd):
-                window_title = win32gui.GetWindowText(hwnd)
-                if pattern.search(window_title):
+                window_title = win32gui.GetWindowText(hwnd).strip()
+                if window_title and pattern.search(window_title):
                     found.append((hwnd, window_title))
         except Exception:
             pass
         return True
-        
+
     try:
         win32gui.EnumWindows(enum_handler, None)
     except Exception:
         pass
-    return found
+
+    if found:
+        return found
+
+    # 4. 智能候选兜底 (Smart Fallback)：
+    # 若配置的标题本身是一个具体的个股/指数名称(含6位代码)，但桌面当前切为了别的个股(如春光集团)
+    if is_stock_code_title(target_title):
+        tdx_wins = find_tdx_sub_windows()
+        if tdx_wins:
+            return tdx_wins
+
+    return []
 
 def get_exe_path(hwnd) -> str:
     """安全提取指定窗口句柄对应的物理可执行路径"""
@@ -881,6 +1046,13 @@ def get_window_host_relation(hwnd: int) -> dict:
         res["is_dialog"] = (cls == "#32770")
         res["exe_path"] = get_exe_path(hwnd)
 
+        # 🛡️ 核心特异性识别：通达信副屏（如 副屏一、副屏二、副屏三等）是独立的分屏工作区大窗口，
+        # 虽然在 Win32 层可能被通达信主程序挂载了 GW_OWNER，但操盘手需要独立控制其位置尺寸，
+        # 必须作为独立的顶层窗口对待（拥有取消最大化、全功能 SWP_FRAMECHANGED 重绘等能力），绝不能当成附属小浮窗限制！
+        self_title = get_window_text_safe(hwnd)
+        if "副屏" in self_title:
+            return res
+
         owner = user32.GetWindow(hwnd, 4) # GW_OWNER = 4
         parent = user32.GetParent(hwnd)
         root = user32.GetAncestor(hwnd, 2) # GA_ROOT = 2
@@ -978,7 +1150,7 @@ def apply_overall_window_group_by_title(target_title: str, mapping: dict, show_c
     # 1. 首先移动主窗口 (若 mapping 中有配置)
     for cfg_title, raw_pos in mapping.items():
         pos_str = str(raw_pos).split('|')[0].strip()
-        if cfg_title in main_title or main_title in cfg_title:
+        if matches_window_title(cfg_title, main_title, hwnd=main_hwnd):
             if set_window_hwnd_pos(main_hwnd, pos_str, title=main_title):
                 moved += 1
             break
@@ -989,7 +1161,7 @@ def apply_overall_window_group_by_title(target_title: str, mapping: dict, show_c
         c_hwnd = child["hwnd"]
         for cfg_title, raw_pos in mapping.items():
             pos_str = str(raw_pos).split('|')[0].strip()
-            if cfg_title in c_title or c_title in cfg_title:
+            if matches_window_title(cfg_title, c_title, hwnd=c_hwnd):
                 if set_window_hwnd_pos(c_hwnd, pos_str, title=c_title):
                     moved += 1
                 break
