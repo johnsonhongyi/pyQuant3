@@ -260,10 +260,10 @@ class UniverseTreeWidget(QWidget):
         header_layout.addWidget(self.btn_restore_pos)
 
         self.search_input = QLineEdit()
-        self.search_input.setPlaceholderText("搜索代码/名称...")
+        self.search_input.setPlaceholderText("搜索...")
         self.search_input.setMaximumWidth(130)
         self.search_input.setMinimumWidth(0)
-        self.search_input.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        self.search_input.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         self.search_input.setStyleSheet("background-color: #1a1a22; border: 1px solid #333; border-radius: 4px; padding: 2px 5px;")
         self.search_input.textChanged.connect(self.filter_tree)
         header_layout.addWidget(self.search_input)
@@ -287,15 +287,22 @@ class UniverseTreeWidget(QWidget):
         # 2. 启用表头点击自定义排序
         self.tree.setSortingEnabled(True)
         
+        # 3. 解除极窄列宽限制，允许用户任意自由收缩各列，绝不被列名等撑大
+        if self.tree.header():
+            self.tree.header().setMinimumSectionSize(0)
+
         setup_header_persistence(
             self.tree,
             config_key="ats_universe_tree_state",
             default_widths=[75, 90, 75, 75, 200, 120]
         )
         
-        # 3. 挂载持久化方法与防抖保存
+        # 4. 挂载持久化方法与防抖保存，并将 ShowEventFilter 的恢复回调重定向为本组件权威的 restore_header_state
         self.tree.save_header_state = self.save_header_state
         self.tree.restore_header_state = self.restore_header_state
+        if hasattr(self.tree, '_show_event_filter') and self.tree._show_event_filter:
+            self.tree._show_event_filter.restore_callback = self.restore_header_state
+
         self._header_save_timer = QTimer(self)
         self._header_save_timer.setSingleShot(True)
         self._header_save_timer.setInterval(500)
@@ -313,6 +320,16 @@ class UniverseTreeWidget(QWidget):
         # 恢复先前持久化的列宽
         QTimer.singleShot(100, self.restore_header_state)
 
+    def _set_item_spanned(self, item, spanned=True):
+        """让指定的顶级节点横跨整行显示，杜绝被第0列截断或反向撑大第0列"""
+        try:
+            from PyQt6.QtCore import QModelIndex
+            idx = self.tree.indexOfTopLevelItem(item)
+            if idx >= 0:
+                self.tree.setFirstColumnSpanned(idx, QModelIndex(), spanned)
+        except Exception:
+            pass
+
     def _on_section_resized(self, logicalIndex, oldSize, newSize):
         if getattr(self, '_is_restoring_header', False):
             return
@@ -320,13 +337,19 @@ class UniverseTreeWidget(QWidget):
             self._header_save_timer.start(500)
 
     def save_header_state(self):
+        if getattr(self, '_is_restoring_header', False):
+            return
         try:
-            from ats.ui.styles import save_config_node
+            from ats.ui.styles import save_config_nodes
             col_widths = [self.tree.columnWidth(c) for c in range(self.tree.columnCount())]
-            save_config_node("ats_universe_tree_widths", col_widths)
+            state_hex = ""
             if self.tree.header():
                 state_hex = self.tree.header().saveState().toHex().data().decode("utf-8")
-                save_config_node("ats_universe_tree_state", state_hex)
+            updates = {
+                "ats_universe_tree_widths": col_widths,
+                "ats_universe_tree_state": state_hex
+            }
+            save_config_nodes(updates)
         except Exception as e:
             logger.debug(f"保存策略股票池列宽异常: {e}")
 
@@ -334,23 +357,34 @@ class UniverseTreeWidget(QWidget):
         self._is_restoring_header = True
         try:
             from ats.ui.styles import load_config_node
+            from PyQt6.QtCore import QByteArray
             widths = load_config_node("ats_universe_tree_widths")
-            # 💡 强制保底最小安全列宽 (代码>=72, 名称>=88, 现价>=68, 涨幅>=68, 彻底防止截断)
-            min_col_widths = [72, 88, 68, 68, 120, 100]
+            state_hex = load_config_node("ats_universe_tree_state")
+            
+            header = self.tree.header()
+            if header:
+                header.blockSignals(True)
+                header.setMinimumSectionSize(0)
+            
+            # 🛡️ 极窄模式支持：100% 忠实按用户调整的物理列宽恢复，绝不强加最小列宽撑大
             if widths and isinstance(widths, list):
-                self.tree.header().blockSignals(True)
                 for c, w in enumerate(widths):
                     if c < self.tree.columnCount():
-                        min_w = min_col_widths[c] if c < len(min_col_widths) else 50
-                        safe_w = max(min_w, int(w))
+                        # 仅保留 10px 极低物理防负数防崩溃兜底，完全尊重用户的极窄调整
+                        safe_w = max(10, int(w))
                         self.tree.setColumnWidth(c, safe_w)
-                self.tree.header().blockSignals(False)
+            elif state_hex and isinstance(state_hex, str) and header:
+                header.restoreState(QByteArray.fromHex(state_hex.encode("utf-8")))
+                if header:
+                    header.setMinimumSectionSize(0)
             else:
-                self.tree.header().blockSignals(True)
-                for c, min_w in enumerate(min_col_widths):
+                default_w = [70, 85, 65, 65, 120, 100]
+                for c, w in enumerate(default_w):
                     if c < self.tree.columnCount():
-                        self.tree.setColumnWidth(c, min_w)
-                self.tree.header().blockSignals(False)
+                        self.tree.setColumnWidth(c, w)
+            
+            if header:
+                header.blockSignals(False)
         except Exception as e:
             logger.debug(f"恢复策略股票池列宽异常: {e}")
         finally:
@@ -454,7 +488,8 @@ class UniverseTreeWidget(QWidget):
             ("000333", "美的集团", "62.30", "-0.40%", "大消费弱回调", "缩量回踩布林下轨")
         ]
         self.radar_root = UniverseTreeItem(self.tree)
-        self.radar_root.setText(0, f"候选雷达池 (Radar Pool) ({len(radar_items)})")
+        self._set_item_spanned(self.radar_root, True)
+        self.radar_root.setText(0, f"候选雷达池 ({len(radar_items)})")
         self.radar_root.setFont(0, QFont("Microsoft YaHei", 11, QFont.Weight.Bold))
         self.radar_root.setData(0, Qt.ItemDataRole.UserRole, "root")
         self.radar_root.setData(0, Qt.ItemDataRole.UserRole + 1, 1) # Radar Pool weight
@@ -492,7 +527,8 @@ class UniverseTreeWidget(QWidget):
             ("002594", "比亚迪", "245.00", "+2.50%", "新能源车风口", "日线收敛三角形突破")
         ]
         self.watch_root = UniverseTreeItem(self.tree)
-        self.watch_root.setText(0, f"精选观察池 (Watchlist Pool) ({len(watch_items)})")
+        self._set_item_spanned(self.watch_root, True)
+        self.watch_root.setText(0, f"精选观察池 ({len(watch_items)})")
         self.watch_root.setFont(0, QFont("Microsoft YaHei", 11, QFont.Weight.Bold))
         self.watch_root.setData(0, Qt.ItemDataRole.UserRole, "root")
         self.watch_root.setData(0, Qt.ItemDataRole.UserRole + 1, 2) # Watchlist weight
@@ -529,7 +565,8 @@ class UniverseTreeWidget(QWidget):
             ("000001", "平安银行", "10.45", "-0.95%", "持仓中 (10%)", "跌破VWAP警示 | 冷却防守")
         ]
         self.trade_root = UniverseTreeItem(self.tree)
-        self.trade_root.setText(0, f"实盘交易池 (Trading Pool) ({len(trade_items)})")
+        self._set_item_spanned(self.trade_root, True)
+        self.trade_root.setText(0, f"实盘交易池 ({len(trade_items)})")
         self.trade_root.setFont(0, QFont("Microsoft YaHei", 11, QFont.Weight.Bold))
         self.trade_root.setData(0, Qt.ItemDataRole.UserRole, "root")
         self.trade_root.setData(0, Qt.ItemDataRole.UserRole + 1, 3) # Trading Pool weight
@@ -681,25 +718,28 @@ class UniverseTreeWidget(QWidget):
             if not hasattr(self, 'radar_root') or self.radar_root is None or self.radar_root.treeWidget() is None:
                 self.tree.clear()
                 self.radar_root = UniverseTreeItem(self.tree)
+                self._set_item_spanned(self.radar_root, True)
                 self.radar_root.setFont(0, QFont("Microsoft YaHei", 11, QFont.Weight.Bold))
                 self.radar_root.setData(0, Qt.ItemDataRole.UserRole, "root")
                 self.radar_root.setData(0, Qt.ItemDataRole.UserRole + 1, 1)
 
                 self.watch_root = UniverseTreeItem(self.tree)
+                self._set_item_spanned(self.watch_root, True)
                 self.watch_root.setFont(0, QFont("Microsoft YaHei", 11, QFont.Weight.Bold))
                 self.watch_root.setData(0, Qt.ItemDataRole.UserRole, "root")
                 self.watch_root.setData(0, Qt.ItemDataRole.UserRole + 1, 2)
 
                 self.trade_root = UniverseTreeItem(self.tree)
+                self._set_item_spanned(self.trade_root, True)
                 self.trade_root.setFont(0, QFont("Microsoft YaHei", 11, QFont.Weight.Bold))
                 self.trade_root.setData(0, Qt.ItemDataRole.UserRole, "root")
                 self.trade_root.setData(0, Qt.ItemDataRole.UserRole + 1, 3)
                 is_initial = True
 
             # 增量原地更新各池数据 (In-Place Diff Sync)
-            self._sync_pool_subtree(self.radar_root, "候选雷达池 (Radar Pool)", radar_list, fav_stocks)
-            self._sync_pool_subtree(self.watch_root, "精选观察池 (Watchlist Pool)", watch_list, fav_stocks)
-            self._sync_pool_subtree(self.trade_root, "实盘交易池 (Trading Pool)", trade_list, fav_stocks)
+            self._sync_pool_subtree(self.radar_root, "候选雷达池", radar_list, fav_stocks)
+            self._sync_pool_subtree(self.watch_root, "精选观察池", watch_list, fav_stocks)
+            self._sync_pool_subtree(self.trade_root, "实盘交易池", trade_list, fav_stocks)
 
             # 仅在初次构建时展开全部；后续平滑更新绝不强行 expandAll，保持用户的折叠与浏览状态
             if is_initial:
@@ -752,11 +792,11 @@ class UniverseTreeWidget(QWidget):
         if code and code != "root":
             parent_name = item.parent().text(0) if item.parent() else "未知股票池"
             if "雷达" in parent_name:
-                pool_clean = "候选雷达池 (Radar Pool)"
-            elif "精选" in parent_name:
-                pool_clean = "精选观察池 (Watchlist Pool)"
-            elif "实盘" in parent_name:
-                pool_clean = "实盘交易池 (Trading Pool)"
+                pool_clean = "候选雷达池"
+            elif "精选" in parent_name or "观察" in parent_name:
+                pool_clean = "精选观察池"
+            elif "实盘" in parent_name or "交易" in parent_name:
+                pool_clean = "实盘交易池"
             else:
                 pool_clean = parent_name
                 

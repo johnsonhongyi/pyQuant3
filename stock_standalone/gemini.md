@@ -1,3 +1,51 @@
+## 2026-09-17 22:30
+- [x] **【彻底查清 `.ats_closing` 实际用处并迁移至 RamDisk，杜绝基层文件改动与硬盘小文件残留】(`ats/ui/intraday_strategy_dialog.py`, `ats/ui/main_window.py`, `tests/test_ats_closing_ramdisk.py`, `tests/test_sbc_ctrl_c_and_alt_exit_persistence.py`)**：
+    - [x] **操盘手现场明确指示与疑问**：
+        - “@[d:\MacTools\WorkFile\WorkSpace\pyQuant3\stock_standalone\config\.ats_closing] 现在这个是否还有实际用处?如果有改到ramdisk”；
+        - “不要改动基层文件,ats使用地方修改”。
+    - [x] **实际用处审计与机制解析 (P0)**：
+        1. **存在关键实际用处**：ATS 运行期间操盘手打开了多个独立的 SBC 持仓/分时盯盘窗口（独立子进程）；当操盘手手动单独关闭某个窗口时，SBC 需将其从 `window_config.json` 打开列表中除名；但当操盘手关闭 ATS 主程序时，ATS 会发送 `WM_CLOSE` 级联关闭所有 SBC 窗口。
+        2. **防止误除名机制**：`.ats_closing` 是 ATS 主窗口在退出时向各个 SBC 独立子进程广播的跨进程退出同步标记文件。各子进程在 `closeEvent` 中通过 `_is_ats_shutting_down()` 探测该标记，一旦确认主程序正在统一退出，子进程跳过除名操作，安全保留窗口坐标与周期；下次 ATS 启动时在 `_restore_sbc()` 中先清理该标记并完整恢复所有盯盘窗口。
+    - [x] **迁移至 RamDisk 与零污染工程实现 (KISS / SOLID / DRY)**：
+        1. **零触碰基层工具文件**：完全保持 `sys_utils.py` 等底层通用模块纯净不改动，所有逻辑严格封装在 `ats/ui/` 业务层内部；
+        2. **`get_ats_closing_flag_path` 内聚实现 (`ats/ui/intraday_strategy_dialog.py`)**：
+           - 优先通过 `cct.get_ramdisk_dir()` 探测挂载的 RamDisk（如 `G:\\.ats_closing`），对驱动器盘符自动补齐规范化（`G:` -> `G:\\`），实现微秒级跨进程检测与 0 固态硬盘小文件磨损；
+           - 若未探测到 RamDisk 优雅回退到本地 `config/.ats_closing`；支持 `ATS_CLOSING_FLAG_PATH` 环境变量覆盖；
+           - 双重保底兼容：`_is_ats_shutting_down` 优先检测 RamDisk 标记，并兜底识别旧物理路径；
+        3. **启动清理与退出写入统一改造 (`ats/ui/main_window.py`)**：
+           - 启动恢复时优先移除 RamDisk 上的标记，并顺带清除历史遗留的物理磁盘 `config/.ats_closing`；
+           - 退出保存时原子写入 RamDisk 路径；
+        4. **全量自动化测试 100% 验证通过**：
+           - 新建 `tests/test_ats_closing_ramdisk.py` 覆盖 RamDisk 路径规范化、环境变量覆盖、未配置回退以及退出感知全流程（4/4 PASSED）；
+           - 运行 `tests/test_sbc_ctrl_c_and_alt_exit_persistence.py`（5/5 PASSED）与布局相关测试全部无缝绿灯。
+
+## 2026-09-17 22:15
+- [x] **【彻底修复 ATS 终端最左侧列/表格列宽持久化恢复失效与极窄模式撑大问题】(`ats/ui/universe_widget.py`, `ats/ui/main_window.py`)**：
+    - [x] **操盘手现场明确指示与真实痛点 (P0)**：
+        - “ats的图中最左侧的列持久化始终无法恢复持久化调整的列宽度,修复这个问题”；
+        - “左侧列极窄模式不要被列名等撑大”；
+        - 审计发现：
+          1. `universe_widget.py` 中 `restore_header_state` 存在硬编码保底 `min_col_widths = [72, 88, 68, 68, 120, 100]` 与 `safe_w = max(min_w, int(w))`，用户任何收窄/极窄调整，一恢复全部被强制撑大回 516px；
+          2. `main_window.py` 中左栏物理最小宽度写死 `setMinimumWidth(180)`，且 Splitter 尺寸记忆、Tab 切换与写盘门禁硬编码了 `>= 150` 与 `< 120`，导致极窄模式（< 120px）不仅无法拖窄，且重启或切换 Tab 时被当作非法尺寸强行撑大重置回默认 239px；
+          3. 根节点（雷达池/观察池/交易池）未设置跨列，长文本挤在第 0 列截断并反向撑大列宽；表头缺少 `setMinimumSectionSize(0)` 导致无法收缩至极小。
+    - [x] **全体系工程落地与极限性能优化 (KISS / SOLID / DRY)**：
+        1. **解除表格列宽硬编码强行撑大 (`UniverseTreeWidget.restore_header_state`)**：
+           - 彻底移除 `min_col_widths = [72, 88, 68, 68, 120, 100]` 的 `max(min_w, int(w))` 强制限制，仅保留 10px 基础物理防负数防崩溃兜底，100% 忠实按用户调整的物理列宽恢复；
+           - 统一原子落盘：`save_header_state` 使用 `save_config_nodes` 合并写入 `ats_universe_tree_widths` 与 `ats_universe_tree_state`，消除竞争；
+           - 重定向 `_show_event_filter.restore_callback` 至组件自身的 `restore_header_state`，防止初次显示被通用默认宽度冲掉；
+        2. **表头极窄支持、根节点跨列平铺与冗余英文占地消除 (`UniverseTreeWidget`)**：
+           - 彻底去除分组标题中占地的英文后缀：`候选雷达池 (Radar Pool)` -> `候选雷达池`、`精选观察池 (Watchlist Pool)` -> `精选观察池`、`实盘交易池 (Trading Pool)` -> `实盘交易池`，大幅压缩横向文本长度；
+           - 启用 `tree.header().setMinimumSectionSize(0)`，各列可自由拖拽收窄至极小像素；
+           - 为 `radar_root`、`watch_root`、`trade_root` 添加 `_set_item_spanned(True)`（基于 `setFirstColumnSpanned`），分组名称横向跨整行完整展示，彻底解绑并消除对第 0 列的撑大影响；
+           - 搜索框启用 `QSizePolicy.Policy.Ignored` 与 `minimumWidth(0)`，随极窄面板弹性自适应，绝不向外顶开布局；
+        3. **解除主分割器（Splitter）极窄模式硬编码门禁 (`ATSMainWindow`)**：
+           - `self.universe_widget.setMinimumWidth(50)`：与组件自身的 `minimumSizeHint`（50px）完美统一，支持自由收窄到极窄模式；
+           - 放宽保存与恢复门禁：`_on_main_splitter_moved`、`_restore_layout_state`、`_save_layout_state`、`_on_top_tab_changed` 中的门禁统一放宽至 `>= 40px`，极窄模式下尺寸 100% 精确持久化，重启与 Tab 切换稳固锁定，绝不重置回 239px。
+    - [x] **全量自动化测试 100% 验证通过**：
+        - 验证极窄列宽 `[45, 50, 40, 40, 60, 50]` 写入配置并在新实例中 100% 原样恢复，根节点跨列生效；
+        - 验证去除英文后缀后的标题精确展示为 `候选雷达池 (X)`、`精选观察池 (X)`、`实盘交易池 (X)`；
+        - 验证主分割器左栏设为 85px 后持久化落盘，新实例启动恢复后精确为 85px，且在各个 Tab 之间循环切换（资金主线、重点关注、MA20d、新股次新股）时 100% 稳固保持 85px 不跳变。
+
 ## 2026-09-17 22:00
 - [x] **【严密补齐 A 股真实交易日裁决与盘前未开盘铁壁防御：周末节假日坚决不滚动淘汰历史、交易日开盘前 (< 09:15) 启动 0 淘汰 0 删除、0 网络极速直出】(`ats/tdx_realtime_fetcher.py`, `tests/test_ipo_subnew_detector.py`)**：
     - [x] **操盘手现场明确指示与致命隐患 (P0)**：

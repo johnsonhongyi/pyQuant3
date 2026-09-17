@@ -2615,12 +2615,42 @@ class SBCQuickCodeLineEdit(QLineEdit):
             self.code_submitted.emit(c_clean)
 
 
+def get_ats_closing_flag_path() -> str:
+    """
+    获取 ATS 退出通知标志文件 (.ats_closing) 的绝对路径。
+    优先放置于高速 RamDisk (内存盘，如 G:\\.ats_closing)，若未探测到有效 RamDisk 则回退至本地 config 目录。
+    支持 ATS_CLOSING_FLAG_PATH 环境变量覆盖。
+    """
+    env_path = os.environ.get("ATS_CLOSING_FLAG_PATH")
+    if env_path:
+        return env_path
+
+    try:
+        from JohnsonUtil import commonTips as cct
+        ram_dir = cct.get_ramdisk_dir()
+        if ram_dir:
+            # 兼容 Windows 盘符如 "G:"，自动补齐为 "G:\\" 避免相对路径歧义
+            if len(ram_dir) == 2 and ram_dir.endswith(":"):
+                ram_dir = ram_dir + os.sep
+            if os.path.isdir(ram_dir):
+                return os.path.join(ram_dir, ".ats_closing")
+    except Exception:
+        pass
+
+    from sys_utils import get_app_root
+    return os.path.join(get_app_root(), "config", ".ats_closing")
+
+
 def _is_ats_shutting_down() -> bool:
     """检查当前是否处于 ATS 主系统退出/关闭流程中 (支持标记文件、环境变量与主进程 PID 探针)"""
     try:
-        from sys_utils import get_app_root
-        closing_flag_file = os.path.join(get_app_root(), "config", ".ats_closing")
+        closing_flag_file = get_ats_closing_flag_path()
         if os.path.exists(closing_flag_file):
+            return True
+        # 兜底兼容旧物理路径
+        from sys_utils import get_app_root
+        old_flag = os.path.join(get_app_root(), "config", ".ats_closing")
+        if os.path.exists(old_flag):
             return True
     except Exception:
         pass
