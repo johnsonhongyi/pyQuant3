@@ -6488,7 +6488,16 @@ class ATSMainWindow(QMainWindow):
         except Exception as e:
             print(f"[ATSMainWindow] Error saving intraday strategy cache on close: {e}")
 
-            
+
+        # ✅ 【最后一步】主动停止日志队列监听线程，防止 atexit 阶段 QueueListener._thread.join()
+        # 在 Python 解释器关闭时永久阻塞（_monitor 线程向被替换的 sys.stdout 写日志触发死锁）。
+        # 必须在 super().closeEvent() 之前执行，确保日志系统在 Qt 清理之前干净关闭。
+        try:
+            from JohnsonUtil.LoggerFactory import stopLogger
+            stopLogger()
+        except Exception:
+            pass
+
         super().closeEvent(event)
 
         # 确保主窗口关闭后，通知 Qt 应用退出事件循环
@@ -6499,6 +6508,7 @@ class ATSMainWindow(QMainWindow):
                 app.quit()
         except Exception:
             pass
+
 
     def _on_favorites_changed(self):
         # Thread-safe trigger UI refresh on favorite changes using QTimer

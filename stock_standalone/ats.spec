@@ -110,3 +110,5 @@ exe = EXE(
     entitlements_file=None,
     icon="MonitorTK32.ico",
 )
+
+# runtime_tmpdir=r"G:\Temp\ATS_MEI",  # 固定父进程临时解压目录，避免与 SBC 子进程 _MEI* 冲突 (PYI-10032)

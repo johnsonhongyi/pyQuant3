@@ -21,6 +21,26 @@ from logger_utils import LoggerFactory
 logger = LoggerFactory.getLogger("ATS.SBCLauncher")
 
 
+def _get_sbc_log_path(name: str = "sbc") -> str:
+    """返回 SBC 子进程独立日志文件路径 (按日期区分，最多保留 3 天)"""
+    from datetime import date
+    try:
+        log_dir = os.path.join(get_app_root(), "logs", "sbc")
+        os.makedirs(log_dir, exist_ok=True)
+        return os.path.join(log_dir, f"{name}_{date.today().strftime('%Y%m%d')}.log")
+    except Exception:
+        import tempfile
+        return os.path.join(tempfile.gettempdir(), f"{name}.log")
+
+
+def _open_sbc_log(log_path: str):
+    """安全打开 SBC 子进程日志文件句柄；失败时降级为 DEVNULL，保证 Popen 始终可以启动"""
+    try:
+        return open(log_path, "a", encoding="utf-8", buffering=1)  # buffering=1 行缓冲
+    except Exception:
+        return subprocess.DEVNULL
+
+
 def _activate_window_by_title_keyword(keyword: str) -> bool:
     """尝试通过标题关键字查找并激活 Win32 窗口 (还原最小化并置顶)"""
     try:
@@ -220,6 +240,13 @@ class SBCProcessManager:
                 pass
             env["ATS_MAIN_PID"] = str(os.getpid())
 
+            # ⭐ [FIX] 将 SBC 子进程的 stdout/stderr 重定向到独立日志文件，切断与父进程共享的
+            # Windows 控制台句柄（CONOUT$/CONIN$）。若不重定向，SBC 被强杀后其 PyInstaller
+            # bootloader 仍在 C 层执行清理并写控制台，与 ATS 并发写控制台产生内核锁竞争，
+            # 导致 ATS 退出时永久卡死在控制台 WriteConsole 调用上。
+            sbc_log_path = _get_sbc_log_path("sbc_holdings")
+            sbc_log_fh = _open_sbc_log(sbc_log_path)
+
             logger.info(f"[SBCLauncher] 🚀 正在启动持仓盯盘独立多进程: {' '.join(cmd)}")
             try:
                 proc = subprocess.Popen(
@@ -227,12 +254,21 @@ class SBCProcessManager:
                     cwd=app_root,
                     env=env,
                     creationflags=flags,
-                    close_fds=True
+                    close_fds=True,
+                    stdout=sbc_log_fh,
+                    stderr=sbc_log_fh,
                 )
+                # 父进程在子进程继承句柄后立即关闭自己持有的文件句柄，防止泄漏
+                if sbc_log_fh is not subprocess.DEVNULL:
+                    try: sbc_log_fh.close()
+                    except Exception: pass
                 self._procs["__holdings_launcher__"] = proc
-                logger.info(f"[SBCLauncher] ✅ 成功调起持仓盯盘独立进程 (PID={proc.pid})")
+                logger.info(f"[SBCLauncher] ✅ 成功调起持仓盯盘独立进程 (PID={proc.pid})，日志: {sbc_log_path}")
                 return proc
             except Exception as e:
+                if sbc_log_fh is not subprocess.DEVNULL:
+                    try: sbc_log_fh.close()
+                    except Exception: pass
                 logger.warning(f"[SBCLauncher] 调起持仓盯盘子进程异常，转为内存模式降级: {e}")
 
         # 💡 【兜底降级】若无法调起独立子进程，在当前进程内打开持仓盯盘窗口
@@ -405,13 +441,16 @@ class SBCProcessManager:
                 except Exception:
                     pass
 
+            # 💡 onefile 子进程退出时 bootloader 需要删除自身 _MEI* 临时目录，必须给予足够时间，
+            #    超时过短会导致 bootloader atexit 未执行，遗留临时目录并触发父进程报
+            #    "Failed to remove temporary directory" 警告 (PYI-10032)。
             try:
-                proc.wait(timeout=1.5)
+                proc.wait(timeout=3.0)
             except subprocess.TimeoutExpired:
                 logger.warning(f"[SBCLauncher] 持仓盯盘进程 (PID={proc.pid}) 等待超时，执行 terminate")
                 proc.terminate()
                 try:
-                    proc.wait(timeout=1.0)
+                    proc.wait(timeout=2.0)
                 except subprocess.TimeoutExpired:
                     proc.kill()
                     try:
@@ -505,6 +544,10 @@ class SBCProcessManager:
             env["ATS_SBC_SUBPROCESS"] = "1"
             env["ATS_MAIN_PID"] = str(os.getpid())
 
+            # ⭐ [FIX] 同上：切断控制台句柄继承，防止 SBC bootloader 清理时与 ATS 争控制台锁
+            sbc_log_path = _get_sbc_log_path(f"sbc_{c_clean}")
+            sbc_log_fh = _open_sbc_log(sbc_log_path)
+
             logger.info(f"[SBCLauncher] 🚀 正在启动标的 {c_clean} 的独立 SBC 进程: {' '.join(cmd)}")
             try:
                 proc = subprocess.Popen(
@@ -512,12 +555,21 @@ class SBCProcessManager:
                     cwd=app_root,
                     env=env,
                     creationflags=creationflags,
-                    close_fds=True
+                    close_fds=True,
+                    stdout=sbc_log_fh,
+                    stderr=sbc_log_fh,
                 )
+                # 父进程在子进程继承句柄后立即关闭自己持有的文件句柄，防止泄漏
+                if sbc_log_fh is not subprocess.DEVNULL:
+                    try: sbc_log_fh.close()
+                    except Exception: pass
                 self._procs[c_clean] = proc
-                logger.info(f"[SBCLauncher] ✅ 标的 {c_clean} SBC 独立子进程启动成功 (PID={proc.pid})")
+                logger.info(f"[SBCLauncher] ✅ 标的 {c_clean} SBC 独立子进程启动成功 (PID={proc.pid})，日志: {sbc_log_path}")
                 return proc
             except Exception as e:
+                if sbc_log_fh is not subprocess.DEVNULL:
+                    try: sbc_log_fh.close()
+                    except Exception: pass
                 logger.warning(f"[SBCLauncher] 启动标的 {c_clean} SBC 子进程失败，转为进程内降级: {e}")
 
         # 3. 💡 【兜底降级】若无法调起独立子进程，在当前进程内打开 SBC 走势图
@@ -572,11 +624,13 @@ class SBCProcessManager:
             if proc and proc.poll() is None:
                 procs_to_wait.append((code, proc))
 
-        # 2. 给予子进程在收到 WM_CLOSE 后优雅保存退出的缓冲时间 (最多 0.8s)
+        # 2. 给予子进程在收到 WM_CLOSE 后优雅保存退出的缓冲时间
+        #    onefile 子进程需要 2~3s 完成自身 bootloader _MEI* 临时目录清理，
+        #    时间过短会导致子进程被强杀，遗留临时目录报 PYI-10032 警告。
         remaining = []
         for code, proc in procs_to_wait:
             try:
-                proc.wait(timeout=0.8)
+                proc.wait(timeout=2.0)
             except (subprocess.TimeoutExpired, Exception):
                 remaining.append((code, proc))
 
