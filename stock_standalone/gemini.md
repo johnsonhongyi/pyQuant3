@@ -1,3 +1,37 @@
+## 2026-09-17 08:35
+- [x] **【SBC 独立子进程强退安全保障：KeyboardInterrupt 捕获落盘、操作系统信号优雅拦截与多维一键退出持久化】(`run_sbc.py`, `run_ats.py`, `intraday_strategy_dialog.py`, `tests/test_sbc_packaged_env_and_fallback.py`, `tests/test_sbc_ctrl_c_and_alt_exit_persistence.py`)**：
+    - [x] **操盘手现场问题复现与根因破案 (P0)**：
+        - 现场现象：用户在终端执行 `.\ATS_Terminal.exe --sbc-holdings` 成功恢复了 1 个窗口（`600733`），但在终端按下 `Ctrl+C` 触发 `KeyboardInterrupt` 强制退出时，发现当前打开的窗口未被自动持久化保存；
+        - 根因分析：
+          1. 原 `run_sbc.py` 的持久化仅依赖 `app.aboutToQuit` 信号，而终端按下 `Ctrl+C` 触发 Python 底层 `KeyboardInterrupt`（继承自 `BaseException`），直接粗暴打破 Qt 事件循环跳出，根本不会触发 `aboutToQuit`；
+          2. `run_ats.py` 顶层分发处的异常捕获为 `except Exception`，无法捕获属于 `BaseException` 的 `KeyboardInterrupt`，导致其直接向上抛出并在未写盘的情况下暴力终止；
+          3. 原 `save_launcher_holdings_windows` 在全局退出时放宽了过滤条件，误将 `_is_closing=True` 或不可见的已关闭窗口重新保存；且在贴边隐藏时未能读取 `normal_geometry`；
+          4. 持仓盯盘模式独立子进程在单窗口关闭时错误检查了 ATS 的 `.ats_closing` 标记文件，导致受主程序残留标记干扰跳过除名。
+    - [x] **五维一体工程根治落地 (SOLID / KISS / DRY / 健壮性优先)**：
+        1. **操作系统级信号捕获器 (`_setup_signal_handlers`)**：
+           - 注册 `signal.SIGINT` (Ctrl+C)、`signal.SIGTERM` 与 Windows 特有的 `signal.SIGBREAK` (Ctrl+Break)；
+           - 收到操作系统终止信号第一时间调用 `quit_and_save_all_sbc_windows()`，完成原子落盘后再优雅退出；
+        2. **事件循环与 excepthook 铁壁兜底**：
+           - `run_sbc.py` 主事件循环 `app.exec()` 全面包裹 `KeyboardInterrupt`、`SystemExit` 与 `BaseException`，在异常跳出事件循环的第一时间执行写盘持久化；
+           - 挂载 `_sbc_excepthook`，即使在 Qt 密集定时器或槽函数（如 `_check_hover`）内爆发键盘中断也能被妥善捕获并原子写盘；
+           - 增加防重状态标记 `_has_saved_on_quit`，确保无论是信号触发、异常触发、`aboutToQuit` 还是 `finally`，持久化原子落盘严格只执行一次，干净无冗余；
+        3. **顶层分发穿透保护 (`run_ats.py`)**：
+           - `run_ats.py` 顶层增加对 `(KeyboardInterrupt, SystemExit, BaseException)` 的捕获保护，确保终端直接运行 `ATS_Terminal.exe --sbc` / `--sbc-holdings` 遇到中断时能平稳安全退出且无多余的 Python 追踪栈；
+        4. **操盘手多元化便捷退出与单窗口精确除名闭环**：
+           - **顶部工具栏专属按钮**：在持仓盯盘窗口顶部工具栏提供醒目的红色 `🚪 退出保存` 按钮；
+           - **全局极速快捷键**：支持 `Ctrl+Shift+Q` 与 `Alt+Escape` 一键退出并自动持久化当前全部打开窗口；
+           - **Alt+点击右上角 [X]**：支持按住 `Alt` 点击任意窗口右上角关闭，统一保存所有打开窗口并全部退出；
+           - **单窗口点击 [X]**：正常点击右上角关闭视为单独关闭并即时从配置中除名，解耦 ATS `.ats_closing` 干扰，保证下次打开时不再弹出；
+           - **贴边收缩精准落盘**：即便窗口处于贴边收起状态（`is_hidden_state=True`），退出时依然准确保存其 `normal_geometry`，杜绝还原时尺寸塌陷。
+        5. **架构健壮性细节修复**：
+           - `_get_launcher_layout_cfg_path` 增加对 `SBC_LAYOUT_CONFIG_PATH` 环境变量优先支持；
+           - `run_sbc.py` 导入 `QTimer` 并优化 `QApplication.instance() or QApplication(sys.argv)`，杜绝重复创建导致的死锁。
+    - [x] **自动化测试 100% 验证通过 (39/39 PASSED)**：
+        - 专项测试 `tests/test_sbc_ctrl_c_and_alt_exit_persistence.py`: 5/5 PASSED（包含 Alt 点击退出持久化、单窗口正常关闭除名、app.exec 捕获 KeyboardInterrupt 自动落盘、槽函数 excepthook 捕获落盘、贴边收起状态 normal_geometry 精准持久化）；
+        - 专项测试 `tests/test_sbc_packaged_env_and_fallback.py`: 7/7 PASSED；
+        - 专项测试 `tests/test_sbc_open_persistence_and_manual_close_isolation.py`: 2/2 PASSED；
+        - 全量核心回归测试套件: 39/39 PASSED 全部通过。
+
 ## 2026-09-17 07:52
 - [x] **【打包环境全面支持多进程独立运行 SBC 与持仓盯盘：自包含子进程调起、命令行双重拦截与 spec 打包闭环】(`sbc_launcher.py`, `run_ats.py`, `run_sbc.py`, `ats.spec`, `tests/test_sbc_packaged_env_and_fallback.py`)**：
     - [x] **操盘手明确要求**：“需要的是打包环境也可以多进程打开sbc”；

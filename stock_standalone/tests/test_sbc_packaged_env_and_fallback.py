@@ -33,10 +33,26 @@ class TestSBCPackagedEnvAndSubprocess(unittest.TestCase):
         self.mgr = SBCProcessManager.get_instance()
         self.mgr._procs.clear()
         self.mgr._in_process_holdings.clear()
+        try:
+            from ats.ui.intraday_strategy_dialog import SBCIntradayChartDialog
+            for w in list(self.app.topLevelWidgets()):
+                if isinstance(w, SBCIntradayChartDialog):
+                    w.close()
+                    w.deleteLater()
+        except Exception:
+            pass
 
     def tearDown(self):
         self.mgr._procs.clear()
         self.mgr._in_process_holdings.clear()
+        try:
+            from ats.ui.intraday_strategy_dialog import SBCIntradayChartDialog
+            for w in list(self.app.topLevelWidgets()):
+                if isinstance(w, SBCIntradayChartDialog):
+                    w.close()
+                    w.deleteLater()
+        except Exception:
+            pass
 
     def test_build_sbc_subprocess_command_packaged(self):
         """【测试】打包环境下智能构造多进程命令行：使用 exe 与 --sbc/--sbc-holdings，绝不带 run_sbc.py"""
@@ -63,22 +79,23 @@ class TestSBCPackagedEnvAndSubprocess(unittest.TestCase):
         with patch("ats.ui.sbc_launcher.is_packaged_env", return_value=True), \
              patch.object(sys, "executable", fake_exe), \
              patch("os.path.exists", return_value=True), \
+             patch.dict("ats.ui.intraday_strategy_dialog.SBCIntradayChartDialog._global_sbc_dialogs", {}, clear=True), \
              patch("subprocess.Popen", return_value=mock_proc) as mock_popen:
 
-            proc = self.mgr.launch("600733", "10d")
+            proc = self.mgr.launch("000002", "10d")
 
             # 1. 必须成功调起独立子进程
             self.assertEqual(proc, mock_proc)
             mock_popen.assert_called_once()
             call_args = mock_popen.call_args[0][0]
-            self.assertEqual(call_args, [fake_exe, "--sbc", "600733", "10d"])
+            self.assertEqual(call_args, [fake_exe, "--sbc", "000002", "10d"])
 
             # 2. 必须包含 ATS_SBC_SUBPROCESS=1 环境变量
             call_env = mock_popen.call_args[1].get("env", {})
             self.assertEqual(call_env.get("ATS_SBC_SUBPROCESS"), "1")
 
             # 3. 必须纳入 SBCProcessManager 纳管
-            self.assertIn("600733", self.mgr.get_running_codes())
+            self.assertIn("000002", self.mgr.get_running_codes())
 
     def test_packaged_env_launch_holdings_watcher_subprocess(self):
         """【测试】打包环境下点击盯盘：优先以独立子进程运行 run_sbc 盯盘模式"""
@@ -134,14 +151,54 @@ class TestSBCPackagedEnvAndSubprocess(unittest.TestCase):
 
         with patch("ats.ui.sbc_launcher.is_packaged_env", return_value=True), \
              patch.object(sys, "executable", fake_exe), \
+             patch.dict("ats.ui.intraday_strategy_dialog.SBCIntradayChartDialog._global_sbc_dialogs", {}, clear=True), \
              patch("subprocess.Popen", side_effect=OSError("Process creation blocked")), \
              patch("ats.ui.intraday_strategy_dialog.open_sbc_chart_dialog", return_value=mock_dlg) as mock_open:
 
-            res = self.mgr.launch("600733", "10d")
+            res = self.mgr.launch("000003", "10d")
             # 自动降级为进程内窗口
             self.assertEqual(res, mock_dlg)
             mock_open.assert_called_once()
             mock_dlg.show.assert_called_once()
+
+    def test_keyboard_interrupt_saves_holdings_windows(self):
+        """【测试】控制台按 Ctrl+C (KeyboardInterrupt) 强制中断退出时，必须捕获并自动持久化当前窗口"""
+        import run_sbc
+        with patch.object(sys, "argv", ["run_sbc.py", "--holdings"]), \
+             patch.dict(os.environ, {"SBC_IS_HOLDINGS_LAUNCHER": "1"}), \
+             patch("run_sbc.save_launcher_holdings_windows") as mock_save, \
+             patch("run_sbc.QApplication") as mock_qapp_cls:
+
+            mock_app = MagicMock()
+            mock_app.exec.side_effect = KeyboardInterrupt()
+            mock_qapp_cls.instance.return_value = None
+            mock_qapp_cls.return_value = mock_app
+
+            with patch("run_sbc.sys.exit") as mock_sys_exit, \
+                 patch("run_sbc._setup_signal_handlers"):
+                run_sbc.main()
+                # 断言 save_launcher_holdings_windows 被可靠触发
+                mock_save.assert_called()
+                # 断言安全退出，状态码为 0
+                mock_sys_exit.assert_called_with(0)
+
+    def test_quit_and_save_all_sbc_windows(self):
+        """【测试】一键退出并持久化：标记 is_app_exiting，持久化所有有效窗口，调用 app.quit()"""
+        import run_sbc
+        mock_app = MagicMock()
+        mock_app.property.return_value = False
+        with patch("run_sbc.QApplication.instance", return_value=mock_app), \
+             patch.dict(os.environ, {"SBC_IS_HOLDINGS_LAUNCHER": "1"}), \
+             patch("run_sbc.save_launcher_holdings_windows") as mock_save:
+
+            run_sbc.quit_and_save_all_sbc_windows()
+
+            # 断言标记了全局退出属性
+            mock_app.setProperty.assert_any_call("is_app_exiting", True)
+            # 断言执行了持久化
+            mock_save.assert_called_once()
+            # 断言调用了退出
+            mock_app.quit.assert_called_once()
 
 
 if __name__ == "__main__":

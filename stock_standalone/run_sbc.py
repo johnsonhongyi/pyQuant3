@@ -29,7 +29,7 @@ if current_dir not in sys.path:
     sys.path.insert(0, current_dir)
 
 from PyQt6.QtWidgets import QApplication
-from PyQt6.QtCore import QRect
+from PyQt6.QtCore import QRect, QTimer
 from ats.ui.intraday_strategy_dialog import (
     SBCIntradayChartDialog,
     open_sbc_chart_dialog,
@@ -40,6 +40,9 @@ from sys_utils import ensure_backend_tk_running
 
 def _get_launcher_layout_cfg_path() -> str:
     """【💾 独立持久化】SBC Launcher 专用持仓盯盘配置文件路径"""
+    custom = os.environ.get("SBC_LAYOUT_CONFIG_PATH")
+    if custom:
+        return custom
     try:
         from sys_utils import get_app_root
         cfg_dir = os.path.join(get_app_root(), "config")
@@ -79,12 +82,14 @@ def save_launcher_holdings_windows():
         is_exiting = bool(app_inst and app_inst.property("is_app_exiting"))
         for w in QApplication.topLevelWidgets():
             if isinstance(w, SBCIntradayChartDialog) and not isdeleted(w):
-                # 若非统一退出阶段（单窗口手动关闭），跳过正在关闭的实例；若为统一退出阶段，只要曾经正常显示就持久化
-                if not is_exiting and (getattr(w, '_is_closing', False) or not w.isVisible()):
+                # 已经被手动关闭或标记正在关闭的实例，无论何时均严禁持久化
+                if getattr(w, '_is_closing', False):
                     continue
-                if getattr(w, 'is_hidden_state', False):
+                # 必须为当前可见窗口，或者处于贴边收缩隐藏状态 (is_hidden_state=True)
+                if not w.isVisible() and not getattr(w, 'is_hidden_state', False):
                     continue
-                geo = w.normal_geometry if getattr(w, 'normal_geometry', None) else w.geometry()
+                # 即使处于贴边收缩隐藏状态 (is_hidden_state=True)，也精准读取其 normal_geometry
+                geo = w.normal_geometry if (getattr(w, 'is_hidden_state', False) and getattr(w, 'normal_geometry', None)) else (w.normal_geometry or w.geometry())
                 c = getattr(w, 'code', None)
                 cur_period = getattr(w, '_current_period_mode', '10d')
                 if c:
@@ -119,6 +124,104 @@ def save_launcher_holdings_windows():
         print(f"[SBC Launcher] 成功持久化保存 {len(active_list)} 个持仓盯盘窗口至 {cfg_path}")
     except Exception as err:
         print(f"[SBC Launcher] 保存持仓盯盘窗口异常: {err}")
+
+
+def quit_and_save_all_sbc_windows():
+    """【🛑 统一一键退出并持久化保存全部 SBC 窗口】
+    支持：
+    1. 操盘手按住 Alt 点击窗口右上角关闭 [X] 键；
+    2. 点击窗口顶部工具栏 [🚪 退出保存] 按钮；
+    3. 快捷键 Ctrl+Shift+Q 或 Alt+Escape；
+    4. 终端收到 Ctrl+C (KeyboardInterrupt/SIGINT) 信号或 Windows 控制台关闭事件；
+    自动判断当前是否处于持仓盯盘模式，执行精准的原子落盘并安全退出 Qt。
+    """
+    app = QApplication.instance()
+    if app:
+        app.setProperty("is_app_exiting", True)
+        if app.property("_has_saved_on_quit"):
+            try:
+                app.quit()
+            except Exception:
+                pass
+            return
+        app.setProperty("_has_saved_on_quit", True)
+
+    is_holdings_mode = (os.environ.get("SBC_IS_HOLDINGS_LAUNCHER") == "1")
+    try:
+        if is_holdings_mode:
+            save_launcher_holdings_windows()
+        else:
+            from ats.ui.intraday_strategy_dialog import save_all_open_sbc_windows
+            save_all_open_sbc_windows()
+    except Exception as e:
+        print(f"[SBC Launcher] 退出持久化异常: {e}")
+
+    if app:
+        try:
+            app.quit()
+        except Exception:
+            pass
+
+
+_win_console_ctrl_handler_ref = None
+
+def _setup_signal_handlers():
+    """💡 信号与异常处理器：双重捕获控制台 Ctrl+C (SIGINT)、SIGTERM、sys.excepthook 与 Windows 原生控制台事件，确保 100% 自动保存"""
+    def _sig_handler(sig, frame):
+        print("\n[SBC Launcher] 收到退出信号 (Ctrl+C)，正在自动保存持仓盯盘窗口...")
+        try:
+            quit_and_save_all_sbc_windows()
+        except Exception as err:
+            print(f"[SBC Launcher] 信号退出保存异常: {err}")
+        sys.exit(0)
+
+    try:
+        signal.signal(signal.SIGINT, _sig_handler)
+        signal.signal(signal.SIGTERM, _sig_handler)
+        if hasattr(signal, "SIGBREAK"):
+            signal.signal(signal.SIGBREAK, _sig_handler)
+    except Exception:
+        pass
+
+    # 💡 核心保护：自定义 sys.excepthook 拦截 Qt 槽函数（如 _check_hover、QTimer 等）中抛出的 KeyboardInterrupt
+    def _sbc_excepthook(exc_type, exc_val, exc_tb):
+        if issubclass(exc_type, (KeyboardInterrupt, SystemExit)):
+            print("\n[SBC Launcher] 捕获键盘中断/退出信号 (KeyboardInterrupt)，正在自动保存持仓盯盘窗口...")
+            try:
+                quit_and_save_all_sbc_windows()
+            except Exception as err:
+                print(f"[SBC Launcher] 异常钩子持久化保存异常: {err}")
+            sys.exit(0)
+        else:
+            try:
+                quit_and_save_all_sbc_windows()
+            except Exception:
+                pass
+            sys.__excepthook__(exc_type, exc_val, exc_tb)
+
+    sys.excepthook = _sbc_excepthook
+
+    # 💡 Windows 原生控制台事件处理器：当操盘手按 Ctrl+C 或直接点击关闭控制台黑窗口时，Windows 系统线程级回调
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            from ctypes import wintypes
+            PHANDLER_ROUTINE = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.DWORD)
+
+            def _console_ctrl_handler(ctrl_type):
+                # 0=CTRL_C_EVENT, 1=CTRL_BREAK_EVENT, 2=CTRL_CLOSE_EVENT
+                print(f"\n[SBC Launcher] 接收到 Windows 控制台事件 (type={ctrl_type})，正在紧急持久化盯盘窗口...")
+                try:
+                    quit_and_save_all_sbc_windows()
+                except Exception as err:
+                    print(f"[SBC Launcher] 控制台处理程序落盘异常: {err}")
+                return False  # 返回 False 让 Windows 继续执行默认终止流程
+
+            global _win_console_ctrl_handler_ref
+            _win_console_ctrl_handler_ref = PHANDLER_ROUTINE(_console_ctrl_handler)
+            ctypes.windll.kernel32.SetConsoleCtrlHandler(_win_console_ctrl_handler_ref, True)
+        except Exception as e:
+            print(f"[SBC Launcher] 注册 Windows 控制台处理器异常: {e}")
 
 
 def restore_launcher_holdings_windows() -> List[SBCIntradayChartDialog]:
@@ -166,6 +269,7 @@ def restore_launcher_holdings_windows() -> List[SBCIntradayChartDialog]:
 
 
 def main():
+    import signal
     # 解析命令行参数：过滤掉标志参数，提取有效的股票代码与看盘周期
     non_flag_args = []
     is_holdings_mode = False
@@ -199,18 +303,31 @@ def main():
     except Exception as e:
         print(f"[SBC Launcher] 检查行情服务警告: {e}")
 
-    app = QApplication(sys.argv)
+    app = QApplication.instance() or QApplication(sys.argv)
 
-    # 💡 核心特性：退出时自动独立持久化保存所有盯盘窗口 (仅在持仓盯盘模式生效)
+    # 💡 注册 atexit 底层兜底：无论 Python 进程以何种方式终止，退出时均尝试落盘
+    import atexit
+    atexit.register(quit_and_save_all_sbc_windows)
+
+    # 💡 核心特性：退出时自动独立持久化保存所有盯盘窗口 (双重保险: aboutToQuit + atexit)
     def _on_app_about_to_quit():
         try:
             app.setProperty("is_app_exiting", True)
             if is_holdings_mode:
                 save_launcher_holdings_windows()
+            else:
+                from ats.ui.intraday_strategy_dialog import save_all_open_sbc_windows
+                save_all_open_sbc_windows()
         except Exception as err:
             print(f"[SBC Launcher] 退出持久化警告: {err}")
 
     app.aboutToQuit.connect(_on_app_about_to_quit)
+    _setup_signal_handlers()
+
+    # 💡 心跳定时器：在 Windows 下定期让 Python 解释器获得 GIL 响应 SIGINT/Ctrl+C，避免信号仅在密集槽函数内爆发致命异常
+    _keep_alive_timer = QTimer()
+    _keep_alive_timer.timeout.connect(lambda: None)
+    _keep_alive_timer.start(200)
 
     if cli_code:
         print(f"[SBC Launcher] 启动指定 SBC 实盘分时窗口: 标的代码={cli_code}, 初始周期={period}")
@@ -232,7 +349,26 @@ def main():
             codes_str = ", ".join(getattr(d, 'code', '') for d in restored)
             print(f"[SBC Launcher] 成功自动恢复上次退出的 {len(restored)} 个持仓盯盘窗口: [{codes_str}]")
 
-    sys.exit(app.exec())
+    exit_code = 0
+    try:
+        exit_code = app.exec()
+    except KeyboardInterrupt:
+        print("\n[SBC Launcher] 捕获键盘中断 (Ctrl+C)，已自动持久化保存盯盘窗口。")
+        quit_and_save_all_sbc_windows()
+        exit_code = 0
+    except (SystemExit, BaseException) as e:
+        quit_and_save_all_sbc_windows()
+        if isinstance(e, SystemExit):
+            exit_code = e.code if isinstance(e.code, int) else 0
+        else:
+            exit_code = 0
+    finally:
+        try:
+            quit_and_save_all_sbc_windows()
+        except Exception:
+            pass
+
+    sys.exit(exit_code)
 
 
 if __name__ == "__main__":

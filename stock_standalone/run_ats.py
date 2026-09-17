@@ -32,9 +32,20 @@ if __name__ == "__main__":
     if is_sbc_subproc:
         try:
             sys.exit(run_sbc.main())
-        except Exception as e:
-            print(f"[ATS Launcher] 命令行分发到 SBC 异常: {e}")
-            sys.exit(1)
+        except KeyboardInterrupt:
+            try:
+                run_sbc.quit_and_save_all_sbc_windows()
+            except Exception:
+                pass
+            sys.exit(0)
+        except SystemExit as se:
+            sys.exit(se.code if isinstance(se.code, int) else 0)
+        except BaseException as e:
+            try:
+                run_sbc.quit_and_save_all_sbc_windows()
+            except Exception:
+                pass
+            sys.exit(0)
 
 from PyQt6.QtWidgets import QApplication
 
