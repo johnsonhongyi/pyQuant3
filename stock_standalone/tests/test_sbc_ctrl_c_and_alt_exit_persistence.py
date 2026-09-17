@@ -51,6 +51,7 @@ class TestSBCCtrlCAndAltExitPersistence(unittest.TestCase):
         self.temp_cfg = os.path.join(STOCK_STANDALONE, "config", f"test_layout_{os.getpid()}.json")
         os.environ["SBC_LAYOUT_CONFIG_PATH"] = self.temp_cfg
         os.environ["SBC_IS_HOLDINGS_LAUNCHER"] = "1"
+        run_sbc._last_save_holdings_time = 0.0
         self._cleanup_all_dialogs()
         closing_flag = os.path.join(STOCK_STANDALONE, "config", ".ats_closing")
         if os.path.exists(closing_flag):
@@ -118,7 +119,7 @@ class TestSBCCtrlCAndAltExitPersistence(unittest.TestCase):
         w2 = self._create_mock_dialog("000001", 900, 100, 800, 600)
 
         # 先保存一次
-        run_sbc.save_launcher_holdings_windows()
+        run_sbc.save_launcher_holdings_windows(force=True)
 
         with patch("PyQt6.QtWidgets.QApplication.keyboardModifiers", return_value=Qt.KeyboardModifier.NoModifier), \
              patch("ctypes.windll.user32.GetAsyncKeyState", return_value=0):

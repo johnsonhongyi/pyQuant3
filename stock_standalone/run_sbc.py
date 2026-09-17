@@ -10,7 +10,10 @@ SBC 分时图独立启动器 (专门用来盯持仓的盘)
 
 import sys
 import os
+import time
 import json
+import signal
+import atexit
 import multiprocessing
 from typing import List, Optional
 
@@ -73,8 +76,15 @@ def _get_current_holding_codes() -> List[str]:
     return []
 
 
-def save_launcher_holdings_windows():
+_last_save_holdings_time = 0.0
+
+def save_launcher_holdings_windows(force: bool = False):
     """【💾 持久化保存所有盯盘窗口】独立保存至 sbc_launcher_holdings_layout.json (支持增减，统一关闭时精准持久化未关闭窗口)"""
+    global _last_save_holdings_time
+    now = time.time()
+    if not force and (now - _last_save_holdings_time < 0.8):
+        return
+    _last_save_holdings_time = now
     try:
         from PyQt6.sip import isdeleted
         active_list = []
@@ -149,7 +159,7 @@ def quit_and_save_all_sbc_windows():
     is_holdings_mode = (os.environ.get("SBC_IS_HOLDINGS_LAUNCHER") == "1")
     try:
         if is_holdings_mode:
-            save_launcher_holdings_windows()
+            save_launcher_holdings_windows(force=True)
         else:
             from ats.ui.intraday_strategy_dialog import save_all_open_sbc_windows
             save_all_open_sbc_windows()
@@ -173,7 +183,11 @@ def _setup_signal_handlers():
             quit_and_save_all_sbc_windows()
         except Exception as err:
             print(f"[SBC Launcher] 信号退出保存异常: {err}")
-        sys.exit(0)
+        app = QApplication.instance()
+        if app:
+            app.quit()
+        else:
+            sys.exit(0)
 
     try:
         signal.signal(signal.SIGINT, _sig_handler)
@@ -265,6 +279,9 @@ def restore_launcher_holdings_windows() -> List[SBCIntradayChartDialog]:
             if restored:
                 rearrange_all_sbc_windows()
 
+    if restored:
+        save_launcher_holdings_windows(force=True)
+
     return restored
 
 
@@ -312,12 +329,7 @@ def main():
     # 💡 核心特性：退出时自动独立持久化保存所有盯盘窗口 (双重保险: aboutToQuit + atexit)
     def _on_app_about_to_quit():
         try:
-            app.setProperty("is_app_exiting", True)
-            if is_holdings_mode:
-                save_launcher_holdings_windows()
-            else:
-                from ats.ui.intraday_strategy_dialog import save_all_open_sbc_windows
-                save_all_open_sbc_windows()
+            quit_and_save_all_sbc_windows()
         except Exception as err:
             print(f"[SBC Launcher] 退出持久化警告: {err}")
 
@@ -334,6 +346,8 @@ def main():
         window = open_sbc_chart_dialog(code=cli_code, period_mode=period)
         if window:
             window.show()
+            if is_holdings_mode:
+                save_launcher_holdings_windows(force=True)
     else:
         # 💡 无参启动：专门用来盯持仓的盘
         restored = restore_launcher_holdings_windows()
@@ -345,9 +359,11 @@ def main():
             window = open_sbc_chart_dialog(code=code, period_mode=period)
             if window:
                 window.show()
+                save_launcher_holdings_windows(force=True)
         else:
             codes_str = ", ".join(getattr(d, 'code', '') for d in restored)
             print(f"[SBC Launcher] 成功自动恢复上次退出的 {len(restored)} 个持仓盯盘窗口: [{codes_str}]")
+            save_launcher_holdings_windows(force=True)
 
     exit_code = 0
     try:
