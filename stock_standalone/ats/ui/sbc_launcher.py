@@ -77,11 +77,16 @@ def _is_widget_alive(w) -> bool:
         return False
 
 
-def _build_sbc_subprocess_command(code: Optional[str] = None, period_mode: Optional[str] = "10d", is_holdings: bool = False) -> Optional[List[str]]:
+def _build_sbc_subprocess_command(
+    code: Optional[str] = None,
+    period_mode: Optional[str] = "10d",
+    is_holdings: bool = False,
+    snapshot_idx: Optional[int] = None
+) -> Optional[List[str]]:
     """
     智能构造多进程调起 SBC 的命令行 (全面支持源码开发与 PyInstaller 打包环境)
-    - 源码环境: [sys.executable, run_sbc.py, <code>, <period>] 或 [sys.executable, run_sbc.py]
-    - 打包环境: [target_exe, "--sbc", <code>, <period>] 或 [target_exe, "--sbc-holdings"]
+    - 源码环境: [sys.executable, run_sbc.py, <code>, <period>] 或 [sys.executable, run_sbc.py, --snapshot, N]
+    - 打包环境: [target_exe, "--sbc", <code>, <period>] 或 [target_exe, "--sbc-holdings", --snapshot, N]
     """
     app_root = get_app_root()
     is_frozen = is_packaged_env()
@@ -91,7 +96,10 @@ def _build_sbc_subprocess_command(code: Optional[str] = None, period_mode: Optio
     run_sbc_path = os.path.join(app_root, "run_sbc.py")
     if not is_frozen and is_py_interpreter and os.path.exists(run_sbc_path):
         if is_holdings:
-            return [sys.executable, run_sbc_path]
+            cmd = [sys.executable, run_sbc_path]
+            if snapshot_idx is not None:
+                cmd.extend(["--snapshot", str(snapshot_idx)])
+            return cmd
         else:
             cmd = [sys.executable, run_sbc_path, str(code)]
             if period_mode:
@@ -118,7 +126,10 @@ def _build_sbc_subprocess_command(code: Optional[str] = None, period_mode: Optio
 
     if target_exe and os.path.exists(target_exe):
         if is_holdings:
-            return [target_exe, "--sbc-holdings"]
+            cmd = [target_exe, "--sbc-holdings"]
+            if snapshot_idx is not None:
+                cmd.extend(["--snapshot", str(snapshot_idx)])
+            return cmd
         else:
             cmd = [target_exe, "--sbc", str(code)]
             if period_mode:
@@ -129,7 +140,10 @@ def _build_sbc_subprocess_command(code: Optional[str] = None, period_mode: Optio
     if os.path.exists(run_sbc_path):
         py_exe = sys.executable if is_py_interpreter else "python"
         if is_holdings:
-            return [py_exe, run_sbc_path]
+            cmd = [py_exe, run_sbc_path]
+            if snapshot_idx is not None:
+                cmd.extend(["--snapshot", str(snapshot_idx)])
+            return cmd
         else:
             cmd = [py_exe, run_sbc_path, str(code)]
             if period_mode:
@@ -178,15 +192,19 @@ class SBCProcessManager:
                 return True
         return False
 
-    def launch_holdings_watcher(self):
-        """【🚀 启动持仓盯盘】在开发环境与打包环境下均优先调起独立子进程运行"""
+    def launch_holdings_watcher(self, snapshot_idx: Optional[int] = None):
+        """【🚀 启动持仓盯盘】在开发环境与打包环境下均优先调起独立子进程运行 (支持指定历史快照)"""
         self.cleanup_dead_processes()
         if self.is_launcher_running():
-            logger.info("[SBCLauncher] 持仓盯盘已在运行中，尝试激活窗口...")
-            self.activate_launcher_windows()
-            return self._procs.get("__holdings_launcher__") or self._in_process_holdings
+            if snapshot_idx is not None:
+                logger.info(f"[SBCLauncher] 切换至历史快照 {snapshot_idx}，平稳关闭当前盯盘并重启...")
+                self.close_launcher_process()
+            else:
+                logger.info("[SBCLauncher] 持仓盯盘已在运行中，尝试激活窗口...")
+                self.activate_launcher_windows()
+                return self._procs.get("__holdings_launcher__") or self._in_process_holdings
 
-        cmd = _build_sbc_subprocess_command(is_holdings=True)
+        cmd = _build_sbc_subprocess_command(is_holdings=True, snapshot_idx=snapshot_idx)
         if cmd:
             app_root = get_app_root()
             flags = subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0
@@ -223,7 +241,7 @@ class SBCProcessManager:
             import run_sbc
             os.environ["SBC_LAYOUT_CONFIG_PATH"] = run_sbc._get_launcher_layout_cfg_path()
             os.environ["SBC_IS_HOLDINGS_LAUNCHER"] = "1"
-            restored = run_sbc.restore_launcher_holdings_windows()
+            restored = run_sbc.restore_launcher_holdings_windows(snapshot_index=snapshot_idx)
             if not restored:
                 from ats.ui.intraday_strategy_dialog import open_sbc_chart_dialog
                 dlg = open_sbc_chart_dialog(None, code="600733", period_mode="10d")
@@ -308,6 +326,7 @@ class SBCProcessManager:
                 # 2. 将当前仍然打开的窗口精准写盘持久化至 sbc_launcher_holdings_layout.json
                 try:
                     import json
+                    from datetime import datetime
                     from run_sbc import _get_launcher_layout_cfg_path
                     cfg_path = _get_launcher_layout_cfg_path()
                     old_data = {}
@@ -318,32 +337,56 @@ class SBCProcessManager:
                         except Exception:
                             old_data = {}
 
-                    old_period_map = old_data.get("sbc_period_modes", {})
-                    for item in active_launcher_windows:
-                        c = item["code"]
-                        if c in old_period_map:
-                            item["period_mode"] = old_period_map[c]
+                    # 💡 铁壁防冲洗守卫 (P0)：若 active_launcher_windows 为空，但历史已有有效记录，严禁覆盖写入 0 个！
+                    if len(active_launcher_windows) == 0:
+                        if old_data.get("sbc_holdings_windows") or old_data.get("recent_history_snapshots"):
+                            logger.info(f"[SBCLauncher] 🛡 Win32 未扫描到可见窗口，保留现有有效配置，严禁覆盖写 0！")
+                    else:
+                        old_period_map = old_data.get("sbc_period_modes", {})
+                        for item in active_launcher_windows:
+                            c = item["code"]
+                            if c in old_period_map:
+                                item["period_mode"] = old_period_map[c]
 
-                    save_data = {
-                        "sbc_holdings_windows": active_launcher_windows,
-                        "sbc_open_windows": active_launcher_windows,
-                        "initialized": True
-                    }
-                    if "sbc_period_modes" in old_data:
-                        save_data["sbc_period_modes"] = old_data["sbc_period_modes"]
+                        # 💡 维护最近 3 组历史快照 recent_history_snapshots
+                        recent_snapshots = old_data.get("recent_history_snapshots", [])
+                        if not isinstance(recent_snapshots, list):
+                            recent_snapshots = []
+                        current_codes = sorted([item["code"] for item in active_launcher_windows])
+                        should_add = True
+                        if recent_snapshots and isinstance(recent_snapshots[0], dict):
+                            last_codes = sorted(recent_snapshots[0].get("codes", []))
+                            if last_codes == current_codes:
+                                should_add = False
+                        if should_add and current_codes:
+                            recent_snapshots.insert(0, {
+                                "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                "codes": [item["code"] for item in active_launcher_windows],
+                                "windows": active_launcher_windows
+                            })
+                            recent_snapshots = recent_snapshots[:3]
 
-                    tmp_path = cfg_path + f".tmp_{os.getpid()}"
-                    with open(tmp_path, "w", encoding="utf-8") as f:
-                        json.dump(save_data, f, ensure_ascii=False, indent=2)
-                    try:
-                        if os.path.exists(cfg_path):
-                            os.replace(tmp_path, cfg_path)
-                        else:
-                            os.rename(tmp_path, cfg_path)
-                    except Exception:
-                        import shutil
-                        shutil.move(tmp_path, cfg_path)
-                    logger.info(f"[SBCLauncher] ✅ 统一关闭时成功精准持久化当前打开的 {len(active_launcher_windows)} 个盯盘窗口 (已手动关闭的彻底排除)")
+                        save_data = {
+                            "sbc_holdings_windows": active_launcher_windows,
+                            "sbc_open_windows": active_launcher_windows,
+                            "initialized": True,
+                            "recent_history_snapshots": recent_snapshots
+                        }
+                        if "sbc_period_modes" in old_data:
+                            save_data["sbc_period_modes"] = old_data["sbc_period_modes"]
+
+                        tmp_path = cfg_path + f".tmp_{os.getpid()}"
+                        with open(tmp_path, "w", encoding="utf-8") as f:
+                            json.dump(save_data, f, ensure_ascii=False, indent=2)
+                        try:
+                            if os.path.exists(cfg_path):
+                                os.replace(tmp_path, cfg_path)
+                            else:
+                                os.rename(tmp_path, cfg_path)
+                        except Exception:
+                            import shutil
+                            shutil.move(tmp_path, cfg_path)
+                        logger.info(f"[SBCLauncher] ✅ 统一关闭时成功精准集中持久化当前打开的 {len(active_launcher_windows)} 个盯盘窗口 (保留最近 {len(recent_snapshots)} 组历史快照)")
                 except Exception as e_save:
                     logger.error(f"[SBCLauncher] 统一关闭写盘异常: {e_save}")
 

@@ -2810,7 +2810,8 @@ class SBCWindowMemoryManager:
             active_list = []
             for c, meta in list(self._metadata.items()):
                 active_list.append(dict(meta))
-            if not active_list and not os.path.exists(cfg_path):
+            if not active_list:
+                # 💡 铁壁保护：若内存列表为空，严禁覆盖清零现有历史配置
                 return
             data = {}
             if os.path.exists(cfg_path):
@@ -2819,8 +2820,28 @@ class SBCWindowMemoryManager:
                         data = json.load(f)
                 except Exception:
                     data = {}
+
+            # 💡 维护最近 3 组历史快照 recent_history_snapshots
+            recent_snapshots = data.get("recent_history_snapshots", [])
+            if not isinstance(recent_snapshots, list):
+                recent_snapshots = []
+            current_codes = sorted([item.get("code") for item in active_list if item.get("code")])
+            should_add = True
+            if recent_snapshots and isinstance(recent_snapshots[0], dict):
+                last_codes = sorted(recent_snapshots[0].get("codes", []))
+                if last_codes == current_codes:
+                    should_add = False
+            if should_add and current_codes:
+                recent_snapshots.insert(0, {
+                    "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "codes": current_codes,
+                    "windows": active_list
+                })
+                recent_snapshots = recent_snapshots[:3]
+
             data["sbc_open_windows"] = active_list
             data["sbc_holdings_windows"] = active_list
+            data["recent_history_snapshots"] = recent_snapshots
             if active_list:
                 data["initialized"] = True
                 last_meta = active_list[-1]
@@ -3867,16 +3888,13 @@ class SBCIntradayChartDialog(QWidget):
 
         self._is_closing = True
 
-        # 若处于持仓盯盘模式，手动单独关闭某窗口时立即除名并写盘保存当前剩余有效窗口；统一退出时则保留
+        # 💡 【集中持久化核心原则】不要关闭窗口就频繁写盘持久化！
+        # 1. 手动关闭单窗口：仅在内存注册中心 (SBCWindowMemoryManager) 注销除名，绝不执行磁盘 I/O，保持操盘极速顺畅；
+        # 2. ATS 关闭：由 ATS 主程序与集中退出守护处理，窗口正常关闭不除名历史配置；
+        # 3. 盯盘集中退出：操盘手触发一键退出时，统一集中原子落盘保存当前内存中存活的窗口。
         is_holdings_mode = (os.environ.get("SBC_IS_HOLDINGS_LAUNCHER") == "1")
-        if is_holdings_mode:
-            if not is_app_exiting:
-                try:
-                    _remove_sbc_open_record(self.code)
-                except Exception:
-                    pass
-        else:
-            # 常规 ATS SBC 窗口：只有用户手动单独关闭时（非随 ATS 统一退出）才除名！
+        if not is_holdings_mode:
+            # 常规 ATS SBC 内部原生窗口：只有用户手动单独关闭时（非随 ATS 统一退出）才更新 ATS 记录
             if not is_app_exiting and not _is_ats_shutting_down():
                 try:
                     _remove_sbc_open_record(self.code)
@@ -5238,13 +5256,6 @@ def open_sbc_chart_dialog(parent_win: Optional[QWidget] = None, code: str = "688
     dlg.raise_()
     dlg.activateWindow()
     _record_sbc_open(c_clean, dlg.geometry(), period_mode=getattr(dlg, '_current_period_mode', '1m'))
-    if os.environ.get("SBC_IS_HOLDINGS_LAUNCHER") == "1":
-        try:
-            import run_sbc
-            if not getattr(run_sbc, '_is_restoring_holdings', False):
-                run_sbc.save_launcher_holdings_windows(force=False)
-        except Exception:
-            pass
     return dlg
 
 
@@ -5626,8 +5637,9 @@ def save_all_open_sbc_windows():
 
 def restore_all_open_sbc_windows(parent_win=None, as_subprocess: bool = False) -> List:
     """【🚀 启动时自动恢复所有持久化的 SBC 窗口、位置、所选周期及设置】
+    统一使用 ATS 内部原生 SBC 窗口方式打开，彻底避免跨独立子进程分组混乱导致两边无法识别与相互干扰。
     :param parent_win: 父工作台引用
-    :param as_subprocess: 是否以独立子进程方式唤起 (ATS 启动默认 True，彻底隔离主线程)
+    :param as_subprocess: 保留接口兼容，强制降级为当前进程内统一打开
     """
     restored_dialogs = []
     try:
@@ -5639,33 +5651,6 @@ def restore_all_open_sbc_windows(parent_win=None, as_subprocess: bool = False) -
         sbc_list = data.get("sbc_open_windows", [])
         if not sbc_list:
             return restored_dialogs
-
-        if as_subprocess:
-            from ats.ui.sbc_launcher import launch_sbc_process
-            for item in sbc_list:
-                code = item.get("code")
-                if not code:
-                    continue
-                saved_period = item.get("period_mode") or item.get("period") or (
-                    data.get("sbc_period_modes", {}).get(str(code).zfill(6))
-                ) or "10d"
-                res = launch_sbc_process(code, period_mode=saved_period)
-                if res:
-                    restored_dialogs.append(res)
-                    # 💡 若降级在当前进程内创建了窗口，同步恢复其几何坐标与尺寸
-                    if isinstance(res, SBCIntradayChartDialog):
-                        try:
-                            from gui_utils import clamp_window_to_screens
-                            x = item.get("x", 100)
-                            y = item.get("y", 100)
-                            w = item.get("width", 680)
-                            h = item.get("height", 420)
-                            rx, ry = clamp_window_to_screens(x, y, w, h)
-                            res.setGeometry(rx, ry, w, h)
-                        except Exception:
-                            pass
-            if restored_dialogs:
-                return restored_dialogs
 
         from gui_utils import clamp_window_to_screens
         for item in sbc_list:
@@ -5841,19 +5826,24 @@ def rearrange_all_sbc_windows(parent_win=None):
     """
     from PyQt6.QtWidgets import QApplication, QMessageBox
     from PyQt6.sip import isdeleted
+    def _safe_isdeleted(obj):
+        try:
+            return isdeleted(obj)
+        except Exception:
+            return False
 
     active_dialogs = []
 
     # 1. 优先从 parent_win 的 _sbc_dialogs 收集
     if parent_win and hasattr(parent_win, '_sbc_dialogs') and isinstance(parent_win._sbc_dialogs, dict):
         for d in parent_win._sbc_dialogs.values():
-            if d is not None and not isdeleted(d) and d.isVisible():
+            if d is not None and not _safe_isdeleted(d) and d.isVisible():
                 if d not in active_dialogs:
                     active_dialogs.append(d)
 
     # 2. 从全局 topLevelWidgets 补充收集当前进程内所有可见的 SBCIntradayChartDialog
     for w in QApplication.topLevelWidgets():
-        if isinstance(w, SBCIntradayChartDialog) and not isdeleted(w) and w.isVisible():
+        if isinstance(w, SBCIntradayChartDialog) and not _safe_isdeleted(w) and w.isVisible():
             if w not in active_dialogs:
                 active_dialogs.append(w)
 

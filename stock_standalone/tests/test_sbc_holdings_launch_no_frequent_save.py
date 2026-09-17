@@ -126,7 +126,8 @@ class TestSBCHoldingsLaunchNoFrequentSave(unittest.TestCase):
             json.dump(init_data, f, ensure_ascii=False, indent=2)
 
         # 模拟 1 个顶层窗口
-        mock_dlg = MagicMock()
+        from ats.ui.intraday_strategy_dialog import SBCIntradayChartDialog
+        mock_dlg = MagicMock(spec=SBCIntradayChartDialog)
         mock_dlg.isVisible.return_value = True
         mock_dlg._is_closing = False
         mock_dlg.code = "600733"
@@ -149,6 +150,174 @@ class TestSBCHoldingsLaunchNoFrequentSave(unittest.TestCase):
 
             mtime_2 = os.path.getmtime(self.temp_cfg)
             self.assertEqual(mtime_1, mtime_2, "磁盘文件修改时间未变，验证跳过冗余 I/O")
+
+    def test_prevent_overwriting_with_zero_windows(self):
+        """【测试】铁壁防冲洗守卫：退出时若扫描结果为 0 个窗口，绝不覆写清零历史配置"""
+        initial_data = {
+            "sbc_holdings_windows": [
+                {"code": "600733", "x": 100, "y": 100, "width": 680, "height": 420, "period_mode": "10d"}
+            ],
+            "initialized": True
+        }
+        with open(self.temp_cfg, "w", encoding="utf-8") as f:
+            json.dump(initial_data, f)
+
+        # 模拟 QApplication.topLevelWidgets() 返回空或全部为关闭状态
+        with patch("PyQt6.QtWidgets.QApplication.topLevelWidgets", return_value=[]):
+            run_sbc.save_launcher_holdings_windows(force=True, allow_empty=False)
+
+        # 断言：文件中的配置依然是 1 个标的，绝对没有被抹杀成 0！
+        with open(self.temp_cfg, "r", encoding="utf-8") as f:
+            saved = json.load(f)
+        self.assertEqual(len(saved.get("sbc_holdings_windows", [])), 1)
+        self.assertEqual(saved["sbc_holdings_windows"][0]["code"], "600733")
+
+    def test_recent_three_history_snapshots_rotation(self):
+        """【测试】维护最近 3 组历史快照，滚动更新且最多保留 3 组"""
+        from ats.ui.intraday_strategy_dialog import SBCIntradayChartDialog
+
+        def _make_mock_win(code):
+            w = MagicMock(spec=SBCIntradayChartDialog)
+            w.code = code
+            w._is_closing = False
+            w.isVisible.return_value = True
+            w.is_hidden_state = False
+            w.normal_geometry = None
+            geo_mock = MagicMock()
+            geo_mock.x.return_value = 100
+            geo_mock.y.return_value = 100
+            geo_mock.width.return_value = 680
+            geo_mock.height.return_value = 420
+            w.geometry.return_value = geo_mock
+            w._current_period_mode = "10d"
+            return w
+
+        # 批次 1: ["600733"]
+        with patch("PyQt6.QtWidgets.QApplication.topLevelWidgets", return_value=[_make_mock_win("600733")]), \
+             patch("PyQt6.sip.isdeleted", return_value=False):
+            run_sbc.save_launcher_holdings_windows(force=True)
+
+        with open(self.temp_cfg, "r", encoding="utf-8") as f:
+            d1 = json.load(f)
+        self.assertEqual(len(d1.get("recent_history_snapshots", [])), 1)
+        self.assertEqual(d1["recent_history_snapshots"][0]["codes"], ["600733"])
+
+        # 批次 2: ["600733", "603407"]
+        with patch("PyQt6.QtWidgets.QApplication.topLevelWidgets", return_value=[_make_mock_win("600733"), _make_mock_win("603407")]), \
+             patch("PyQt6.sip.isdeleted", return_value=False):
+            run_sbc.save_launcher_holdings_windows(force=True)
+
+        with open(self.temp_cfg, "r", encoding="utf-8") as f:
+            d2 = json.load(f)
+        self.assertEqual(len(d2.get("recent_history_snapshots", [])), 2)
+        self.assertEqual(d2["recent_history_snapshots"][0]["codes"], ["600733", "603407"])
+
+        # 批次 3: ["688635"]
+        with patch("PyQt6.QtWidgets.QApplication.topLevelWidgets", return_value=[_make_mock_win("688635")]), \
+             patch("PyQt6.sip.isdeleted", return_value=False):
+            run_sbc.save_launcher_holdings_windows(force=True)
+
+        with open(self.temp_cfg, "r", encoding="utf-8") as f:
+            d3 = json.load(f)
+        self.assertEqual(len(d3.get("recent_history_snapshots", [])), 3)
+        self.assertEqual(d3["recent_history_snapshots"][0]["codes"], ["688635"])
+
+        # 批次 4: ["000001"] -> 淘汰最旧一组，始终保持 3 组
+        with patch("PyQt6.QtWidgets.QApplication.topLevelWidgets", return_value=[_make_mock_win("000001")]), \
+             patch("PyQt6.sip.isdeleted", return_value=False):
+            run_sbc.save_launcher_holdings_windows(force=True)
+
+        with open(self.temp_cfg, "r", encoding="utf-8") as f:
+            d4 = json.load(f)
+        snapshots = d4.get("recent_history_snapshots", [])
+        self.assertEqual(len(snapshots), 3, "最多保留最近 3 组历史快照")
+        self.assertEqual(snapshots[0]["codes"], ["000001"])
+        self.assertEqual(snapshots[1]["codes"], ["688635"])
+        self.assertEqual(snapshots[2]["codes"], ["600733", "603407"])
+
+    def test_disaster_recovery_from_snapshots_when_current_empty(self):
+        """【测试】当当前持仓配置为空时，自动从 recent_history_snapshots[0] 灾备恢复"""
+        corrupted_data = {
+            "sbc_holdings_windows": [],
+            "sbc_open_windows": [],
+            "initialized": True,
+            "recent_history_snapshots": [
+                {
+                    "time": "2026-09-17 12:00:00",
+                    "codes": ["600733"],
+                    "windows": [{"code": "600733", "x": 100, "y": 100, "width": 680, "height": 420, "period_mode": "10d"}]
+                }
+            ]
+        }
+        with open(self.temp_cfg, "w", encoding="utf-8") as f:
+            json.dump(corrupted_data, f)
+
+        with patch("run_sbc.open_sbc_chart_dialog") as mock_open:
+            mock_dlg = MagicMock()
+            mock_dlg.code = "600733"
+            mock_open.return_value = mock_dlg
+
+            restored = run_sbc.restore_launcher_holdings_windows()
+
+        self.assertEqual(len(restored), 1)
+        mock_open.assert_called_with(None, code="600733", period_mode="10d")
+
+    def test_switch_to_history_snapshot_and_cli_selection(self):
+        """【测试】通过 snapshot_index 指定加载或运行时一键切换至历史快照组"""
+        sample_data = {
+            "sbc_holdings_windows": [
+                {"code": "600733", "x": 100, "y": 100, "width": 680, "height": 420, "period_mode": "10d"}
+            ],
+            "initialized": True,
+            "recent_history_snapshots": [
+                {
+                    "time": "2026-09-17 12:45:00",
+                    "codes": ["600733", "603407"],
+                    "windows": [
+                        {"code": "600733", "x": 100, "y": 100, "width": 680, "height": 420, "period_mode": "10d"},
+                        {"code": "603407", "x": 800, "y": 100, "width": 680, "height": 420, "period_mode": "10d"}
+                    ]
+                },
+                {
+                    "time": "2026-09-17 11:30:00",
+                    "codes": ["688635"],
+                    "windows": [
+                        {"code": "688635", "x": 100, "y": 100, "width": 680, "height": 420, "period_mode": "10d"}
+                    ]
+                }
+            ]
+        }
+        with open(self.temp_cfg, "w", encoding="utf-8") as f:
+            json.dump(sample_data, f)
+
+        # 1. 验证获取快照列表
+        snapshots = run_sbc.get_launcher_history_snapshots()
+        self.assertEqual(len(snapshots), 2)
+        self.assertEqual(snapshots[0]["codes"], ["600733", "603407"])
+        self.assertEqual(snapshots[1]["codes"], ["688635"])
+
+        # 2. 验证指定 snapshot_index=2 恢复
+        with patch("run_sbc.open_sbc_chart_dialog") as mock_open:
+            mock_dlg = MagicMock()
+            mock_dlg.code = "688635"
+            mock_open.return_value = mock_dlg
+
+            restored_snap2 = run_sbc.restore_launcher_holdings_windows(snapshot_index=2)
+            self.assertEqual(len(restored_snap2), 1)
+            mock_open.assert_called_with(None, code="688635", period_mode="10d")
+
+        # 3. 验证运行时一键切换至快照 1
+        with patch("run_sbc.open_sbc_chart_dialog") as mock_open, \
+             patch("run_sbc.rearrange_all_sbc_windows") as mock_rearrange:
+            d1 = MagicMock()
+            d1.code = "600733"
+            d2 = MagicMock()
+            d2.code = "603407"
+            mock_open.side_effect = [d1, d2]
+
+            switched = run_sbc.switch_to_history_snapshot(1)
+            self.assertEqual(len(switched), 2)
+            mock_rearrange.assert_called_once()
 
 
 if __name__ == "__main__":

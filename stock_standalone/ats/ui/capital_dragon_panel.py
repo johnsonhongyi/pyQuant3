@@ -1712,8 +1712,8 @@ class CapitalDragonPanel(QWidget):
             return
         c_clean = _clean_code(code)
         try:
-            from ats.ui.sbc_launcher import launch_sbc_process
-            launch_sbc_process(c_clean, "10d")
+            from ats.ui.intraday_strategy_dialog import open_sbc_chart_dialog
+            open_sbc_chart_dialog(parent_win=self.window(), code=c_clean, period_mode="10d")
         except Exception as e:
             logger.error(f"[CapitalDragonPanel] 打开 SBC 走势图异常: {e}")
 
