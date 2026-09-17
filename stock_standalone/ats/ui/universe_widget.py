@@ -901,6 +901,65 @@ class UniverseTreeWidget(QWidget):
                 }
             """)
 
+    def _append_snapshots_menu(self, menu):
+        """在下拉菜单中追加最近 3 组历史快照子菜单，供操盘手直选恢复与切换"""
+        try:
+            import run_sbc
+            from ats.ui.sbc_launcher import SBCProcessManager
+            mgr = SBCProcessManager.get_instance()
+
+            snapshots = run_sbc.get_launcher_history_snapshots()
+            menu_snap = menu.addMenu("📂 历史快照恢复 (最近3组)")
+            menu_snap.setStyleSheet("""
+                QMenu {
+                    background-color: #1a1a24;
+                    border: 1px solid #2e2e36;
+                    color: #e2e2e5;
+                    padding: 4px;
+                }
+                QMenu::item {
+                    padding: 6px 18px;
+                    border-radius: 4px;
+                }
+                QMenu::item:selected {
+                    background-color: #2c2c35;
+                    color: #38bdf8;
+                }
+            """)
+
+            if not snapshots:
+                act_none = menu_snap.addAction("📂 暂无历史快照数据")
+                act_none.setEnabled(False)
+                return
+
+            for i, snap in enumerate(snapshots[:3]):
+                snap_idx = i + 1
+                t_str = snap.get("time", "")
+                t_show = t_str.split(" ")[1] if " " in t_str else (t_str or "历史")
+                codes = snap.get("codes", [])
+                code_summary = ", ".join(codes[:4])
+                if len(codes) > 4:
+                    code_summary += f"... 等{len(codes)}只"
+                else:
+                    code_summary += f" ({len(codes)}只)"
+
+                label = f"📌 快照 {snap_idx} [{t_show}]: {code_summary}"
+                if snap_idx == 1:
+                    label = f"📌 快照 1 (最新 [{t_show}]): {code_summary}"
+
+                act = menu_snap.addAction(label)
+                def _make_trigger(idx, c_list):
+                    def _do_switch():
+                        logger.info(f"[UniverseWidget] 操盘手点击加载历史快照 {idx}: {c_list}")
+                        proc = mgr.launch_holdings_watcher(snapshot_idx=idx)
+                        self._update_launcher_btn_state(running=True)
+                        self._notify_status(f"📈 [SBC Launcher] 已成功恢复历史快照 {idx} ({len(c_list)} 只标的) 并平铺重排")
+                    return _do_switch
+
+                act.triggered.connect(_make_trigger(snap_idx, codes))
+        except Exception as err:
+            logger.warning(f"[UniverseWidget] 构造历史快照菜单异常: {err}")
+
     def _popup_launcher_running_menu(self):
         """二次点击已在运行的 [SBC Launcher] 时弹出统一关闭保存与操作菜单"""
         from PyQt6.QtWidgets import QMenu
@@ -943,6 +1002,9 @@ class UniverseTreeWidget(QWidget):
             self._update_launcher_btn_state(running=True)
             self._notify_status("🔄 [SBC Launcher] 已重新读取最新持仓并启动盯盘。")
         act_restart.triggered.connect(_do_restart)
+
+        menu.addSeparator()
+        self._append_snapshots_menu(menu)
 
         btn = getattr(self, "btn_run_sbc", None)
         pos = btn.mapToGlobal(QPoint(0, btn.height() + 2)) if btn else self.mapToGlobal(QPoint(0, 0))
@@ -988,6 +1050,10 @@ class UniverseTreeWidget(QWidget):
                 self._notify_status("📈 [SBC Launcher] 已成功启动持仓盯盘。")
             act_toggle.triggered.connect(_do_launch_toggle)
 
+        menu.addSeparator()
+        self._append_snapshots_menu(menu)
+        menu.addSeparator()
+
         # 2. 若有选中标的，单独打开选中标的
         cur_item = self.tree.currentItem() if hasattr(self, 'tree') and self.tree else None
         if cur_item:
@@ -1011,16 +1077,12 @@ class UniverseTreeWidget(QWidget):
         menu.exec(global_pos)
 
     def _open_sbc_chart(self, code, name):
-        """调出 SBC 实盘走势窗口 (统一独立子进程调度，避免阻塞 ATS 主进程)"""
+        """调出 SBC 实盘走势窗口 (统一 ATS 内部原生窗口，确保同源重排与管理)"""
         try:
-            from ats.ui.sbc_launcher import launch_sbc_process
-            launch_sbc_process(code, "10d")
+            from ats.ui.intraday_strategy_dialog import open_sbc_chart_dialog
+            open_sbc_chart_dialog(self.window(), code, period_mode="10d")
         except Exception as e:
-            try:
-                from ats.ui.intraday_strategy_dialog import open_sbc_chart_dialog
-                open_sbc_chart_dialog(self.window(), code, period_mode="10d")
-            except Exception as e2:
-                logger.error(f"[Universe] 调出 SBC 窗口失败: {e2}")
+            logger.error(f"[Universe] 调出 SBC 窗口失败: {e}")
 
     def _open_ladder_window(self, code, name):
         """调出分时阶梯独立盯盘主窗口"""

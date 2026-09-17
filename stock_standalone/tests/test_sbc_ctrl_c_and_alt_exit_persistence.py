@@ -36,8 +36,13 @@ class TestSBCCtrlCAndAltExitPersistence(unittest.TestCase):
     def _cleanup_all_dialogs(self):
         self.app.setProperty("is_app_exiting", False)
         self.app.setProperty("_has_saved_on_quit", False)
-        if hasattr(SBCIntradayChartDialog, "_global_sbc_dialogs"):
+        if hasattr(SBCIntradayChartDialog, '_global_sbc_dialogs'):
             SBCIntradayChartDialog._global_sbc_dialogs.clear()
+        try:
+            from ats.ui.intraday_strategy_dialog import SBCWindowMemoryManager
+            SBCWindowMemoryManager.get_instance().clear()
+        except Exception:
+            pass
         for w in list(self.app.topLevelWidgets()):
             if isinstance(w, SBCIntradayChartDialog):
                 w.setVisible(False)
@@ -126,6 +131,9 @@ class TestSBCCtrlCAndAltExitPersistence(unittest.TestCase):
             event = QCloseEvent()
             w1.closeEvent(event)
             self.app.processEvents()
+
+            # 遵循操盘手指示：单窗口关闭时不频繁写盘，在集中落盘时才精确排除已关闭的 600733
+            run_sbc.save_launcher_holdings_windows(force=True)
 
             # 检查落盘文件：600733 应该被移除，000001 依然保留
             self.assertTrue(os.path.exists(self.temp_cfg))

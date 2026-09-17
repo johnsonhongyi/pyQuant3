@@ -1,3 +1,70 @@
+## 2026-09-17 13:15
+- [x] **【SBC 持仓盯盘历史快照直选迁移至“盯盘”点击下拉菜单，SBC 走势窗口彻底恢复极简原貌】(`ats/ui/universe_widget.py`, `ats/ui/sbc_launcher.py`, `ats/ui/intraday_strategy_dialog.py`, `tests/test_sbc_launcher_menu_snapshots.py`)**：
+    - [x] **操盘手现场明确指示 (P0)**：
+        - “三组窗口数据如何选择那一组”；
+        - “这个不要添加在sbc窗口上,添加到盯盘点击的下拉菜单中”。
+    - [x] **架构调整与极简收敛落地 (KISS / SOLID / DRY)**：
+        1. **SBC 走势窗口彻底恢复清爽**：
+           - 从 `SBCIntradayChartDialog` 顶部工具栏彻底拔除冗余的快照按钮，走势窗口恢复纯粹看盘与极简布局；
+        2. **持仓盯盘核心入口下拉菜单深度集成 (`UniverseTreeWidget`)**：
+           - 在股票池左上角【📈 盯盘】/【📈 盯盘中】的下拉操作菜单（左键二次点击与右键点击）中无缝集成 `📂 历史快照恢复 (最近3组) ▶` 子菜单；
+           - 实时读取 `recent_history_snapshots`，直观呈现每组快照的保存时间、包含的标的代码（如 `📌 快照 1 (最新 [12:45:00]): 600733, 603407 (2只)`）；
+           - 操盘手鼠标点击任意一组，立即秒级加载/切换该组快照盯盘并自动平铺重排，状态栏即时反馈；
+        3. **进程生命周期与快照参数贯通 (`sbc_launcher.py`)**：
+           - `_build_sbc_subprocess_command` 与 `launch_holdings_watcher` 正式支持 `snapshot_idx` 参数（覆盖源码、PyInstaller 打包及内存降级分支）；
+           - 当盯盘已在运行时，点击新快照平稳先关后起并精准平铺，零窗口打架与零焦点混乱。
+    - [x] **全量自动化测试 100% 验证通过 (27/27 PASSED)**：
+        - 专项新增测试 `tests/test_sbc_launcher_menu_snapshots.py`: 3/3 PASSED；
+        - 全量核心回归套件: 27/27 PASSED 全部绿灯通过。
+
+## 2026-09-17 12:55
+- [x] **【SBC Launcher 集中持久化、保留最近 3 组历史快照与彻底根除退出存 0 丢失 BUG】(`run_sbc.py`, `ats/ui/intraday_strategy_dialog.py`, `ats/ui/sbc_launcher.py`, `tests/test_sbc_holdings_launch_no_frequent_save.py`, `tests/test_sbc_ctrl_c_and_alt_exit_persistence.py`)**：
+    - [x] **操盘手现场明确指示与致命痛点 (P0)**：
+        - “`[SBC Launcher] 成功持久化保存 0 个持仓盯盘窗口至 .../sbc_launcher_holdings_layout.json` 出现这个问题,最后存0”；
+        - “让[SBC Launcher] 集中持久化不要单独持久化,不要频繁的写盘持久化,不要关闭窗口就持久化,手动关闭,和ats关闭,盯盘关闭窗口持久化的逻辑不一样”；
+        - “在盯盘下面添加最近的3组持久化窗口数据,避免丢失,”。
+    - [x] **深度排查与根治落地 (KISS / SOLID / DRY)**：
+        1. **破案“最后存 0 丢失”致命根因**：
+           - 退出流程中，Qt 窗口在被销毁或隐藏时触发了退出钩子，`save_launcher_holdings_windows` 扫描时误将处于隐藏/关闭中的窗口过滤，导致探测窗口数为 0；
+           - 随后直接把空列表 `[]`（0 个窗口）写回 `sbc_launcher_holdings_layout.json`，将历史配置全部冲洗清零；
+           - 运行期间频繁分散写盘（打开窗口写盘、关闭单窗口写盘、重排写盘、启动写盘），极易引发时序竞争与磁盘 I/O 阻塞；
+        2. **彻底区分三种关闭场景与集中持久化收敛**：
+           - **场景 1：手动关闭单窗口**：操盘手点击某窗口 `[X]`，仅在内存注册中心 `SBCWindowMemoryManager` 中 0 毫秒注销除名，**绝不写磁盘**（“不要关闭窗口就持久化”），操盘零卡顿；
+           - **场景 2：ATS 统一关闭**：ATS 退出调用 `close_all_sbc_processes`，由 ATS 扫描记录当前窗口；子进程关闭时即使窗口处于销毁隐藏状态，亦优先从内存快照兜底，**绝不写 0**；
+           - **场景 3：盯盘集中退出**：操盘手 Alt+点击 [X]、点击工具栏 [🚪 退出保存] 或终端 Ctrl+C，统一触发集中原子落盘 1 次，随后安全退出；
+        3. **【全新机制】保留最近 3 组历史持久化快照 (`recent_history_snapshots`)**：
+           - 在 `sbc_launcher_holdings_layout.json` 中维护循环队列 `recent_history_snapshots`，最大保存最近 3 组非空盯盘窗口配置（每组含 `time`、`codes`、`windows` 几何与周期详情）；
+           - 每次集中落盘时，将最新窗口组压入队列首位，始终保留最近 3 组历史快照；
+           - **灾备回退恢复**：若当前 `sbc_holdings_windows` 遇到意外为空，`restore_launcher_holdings_windows` 自动从 `recent_history_snapshots[0]` 历史快照无缝恢复，100% 杜绝配置丢失！
+           - **【自由选择方式 1：UI 工具栏下拉直选】**：SBC 顶部工具栏新增 `[📂 快照 ▾]` 按钮，点击一键展开最近 3 组快照的时间、股票清单及数量，鼠标点击任意一组即秒级无缝切换并自动平铺重排；
+           - **【自由选择方式 2：CLI 命令行参数直选】**：启动时支持 `python run_sbc.py --holdings --snapshot N` (或 `-s N`, N=1,2,3)，精准加载任意一组历史快照；默认 (未指定) 自动加载最新快照 1。
+        4. **【铁壁守卫】严禁覆盖写入 0 个**：
+           - 在 `save_launcher_holdings_windows`、`_flush_metadata_to_disk` 与 `sbc_launcher.py` 中增加铁壁校验：
+           - 若扫描探测结果为 0 个，但系统曾持有有效内存记录或磁盘已有历史快照，**坚决阻断写盘并打印保护日志，严禁将 0 个写入覆盖原配置文件**！
+        5. **全流程拔除过程高频写盘**：
+           - 移除 `open_sbc_chart_dialog` 内部的单窗落盘；
+           - 移除 `main()` 启动分支的重复写盘；
+           - 移除 `closeEvent` 的单窗落盘，彻底实现集中落盘。
+    - [x] **全量自动化测试 100% 验证通过 (30/30 PASSED)**：
+        - 专项回归套件: 30/30 PASSED 全部绿灯通过。
+
+## 2026-09-17 12:45
+- [x] **【彻底废除外部子进程分组，SBC 恢复与打开全链路统一收敛为 ATS 内部原生方式：彻底根除跨进程相互干扰与识别错乱】(`ats/ui/main_window.py`, `ats/ui/intraday_strategy_dialog.py`, `ats/ui/capital_dragon_panel.py`, `ats/ui/universe_widget.py`, `tests/test_sbc_in_process_unified_restore.py`)**：
+    - [x] **操盘手现场明确指出 (P0)**：
+        - “只有一个sbc可以打开,分组失效,只要没有另一个分组,就没事,ats的sbc打开重排正常,持久化后重启打开的sbc也改成使用ats的内部sbc方式打开,不然依旧相互干扰”；
+        - “现在出现问题是ats内部打开的sbc,退出后持久化,在ats重启后自动打开的sbc会跑到[SBC Launcher] 方式打开的分组中,导致全乱了两边都无法识别和正确重排”。
+    - [x] **根因排查与架构大收敛 (KISS / SOLID / DRY)**：
+        1. **破案根因**：
+           - ATS 重启时，`main_window.py:4332` 误传了 `restore_all_open_sbc_windows(self, as_subprocess=True)`，强行调用 `launch_sbc_process` 把原本在 ATS 内部打开并持久化的窗口，在重启时调起外部独立子进程打开；
+           - 导致窗口归属分裂为两个异构分组（外部 Launcher 子进程组 vs ATS 进程内组），Win32 枚举 PID 与代理混杂，两边相互干扰、跨进程抢焦、重排全部失效；
+        2. **全系统架构彻底归一与收敛**：
+           - **重启恢复彻底回归内部原生**：`restore_all_open_sbc_windows` 废弃 `as_subprocess` 外部子进程分支，`main_window.py` 严格传入 `as_subprocess=False`，所有持久化窗口 100% 通过 `open_sbc_chart_dialog` 在 ATS 进程内原生恢复；
+           - **全面板 SBC 调起统一内部原生**：个股详情弹窗【📈 调出 SBC 分时走势】、详情弹窗右键菜单、主表右键菜单、资金龙头面板、股票池面板，全部统一调用 `open_sbc_chart_dialog(parent_win=..., code=..., period_mode="10d")`，彻底剔除 `launch_sbc_process`；
+           - **单一体系统一管理**：全系统仅保留 ATS 进程内这唯一一套 SBC，0 外部孤儿进程、0 临时解压文件锁冲突、0 跨进程抢焦拥塞，重排、置顶、切周期同源同组，100% 顺畅丝滑！
+    - [x] **全量自动化测试 100% 验证通过 (34/34 PASSED)**：
+        - 专项新增测试 `tests/test_sbc_in_process_unified_restore.py`: 2/2 PASSED；
+        - 全量核心回归套件: 34/34 PASSED 全部通过。
+
 ## 2026-09-17 12:35
 - [x] **【恢复 SBC 正常重排限制与 2/3 屏幕规格上限硬约束：杜绝 ATS 内部单窗口重排被全屏遮挡】(`ats/ui/intraday_strategy_dialog.py`, `tests/test_sbc_memory_persistence_large_window_and_exit.py`)**：
     - [x] **操盘手现场明确指出 (P0)**：

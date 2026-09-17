@@ -1128,8 +1128,8 @@ class StockDetailDialog(QDialog):
             QPushButton:hover { background-color: #244633; }
         """)
         def _on_open_sbc_clicked():
-            from ats.ui.sbc_launcher import launch_sbc_process
-            launch_sbc_process(self.code, "10d")
+            from ats.ui.intraday_strategy_dialog import open_sbc_chart_dialog
+            open_sbc_chart_dialog(parent_win=self.window(), code=self.code, period_mode="10d")
         btn_sbc.clicked.connect(_on_open_sbc_clicked)
 
         btn_close = QPushButton("关闭窗口")
@@ -1163,11 +1163,11 @@ class StockDetailDialog(QDialog):
             }
         """)
 
-        # 📈 调出 SBC 实盘分时走势 (独立子进程运行，彻底隔离主进程)
+        # 📈 调出 SBC 实盘分时走势 (ATS 内部原生窗口)
         sbc_act = menu.addAction(f"📈 调出 {self.name} SBC 实盘分时走势")
         def _open_sbc():
-            from ats.ui.sbc_launcher import launch_sbc_process
-            launch_sbc_process(self.code, "10d")
+            from ats.ui.intraday_strategy_dialog import open_sbc_chart_dialog
+            open_sbc_chart_dialog(parent_win=self.window(), code=self.code, period_mode="10d")
         sbc_act.triggered.connect(_open_sbc)
 
         # ⚡ 发送到异动联动
@@ -4328,8 +4328,8 @@ class ATSMainWindow(QMainWindow):
                         os.remove(c_flag)
                     except Exception:
                         pass
-                logger.info("[ATSMainWindow] IPC数据就绪，自动加载打开持久化的 SBC 独立分时窗口 (独立子进程)...")
-                restore_all_open_sbc_windows(self, as_subprocess=True)
+                logger.info("[ATSMainWindow] IPC数据就绪，自动加载打开持久化的 SBC 独立分时窗口 (ATS内部原生)...")
+                restore_all_open_sbc_windows(self, as_subprocess=False)
             except Exception as e:
                 logger.warning(f"[ATSMainWindow] Error auto-restoring SBC chart dialogs: {e}")
 
@@ -5904,11 +5904,11 @@ class ATSMainWindow(QMainWindow):
 
         menu.addSeparator()
 
-        # 3. SBC 独立分时走势图 (独立子进程运行，彻底隔离主进程)
+        # 3. SBC 独立分时走势图 (ATS 内部原生窗口)
         sbc_act = QAction(f"📈 调出 SBC 独立分时走势图", self)
         def _open_sbc():
-            from ats.ui.sbc_launcher import launch_sbc_process
-            launch_sbc_process(code_clean, "10d")
+            from ats.ui.intraday_strategy_dialog import open_sbc_chart_dialog
+            open_sbc_chart_dialog(parent_win=self, code=code_clean, period_mode="10d")
         sbc_act.triggered.connect(_open_sbc)
         menu.addAction(sbc_act)
 
