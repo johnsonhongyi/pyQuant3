@@ -17,6 +17,7 @@ import time
 import math
 import logging
 import warnings
+from datetime import datetime
 from collections import deque
 from typing import List, Dict, Optional, Set, Any, Tuple
 import pandas as pd
@@ -35,7 +36,7 @@ from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QLineEdit, QTableWidget, QTableWidgetItem,
     QHeaderView, QAbstractItemView, QMessageBox, QFrame,
-    QMenu, QApplication
+    QMenu, QApplication, QPlainTextEdit
 )
 from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QKeySequence, QShortcut, QAction
@@ -44,9 +45,13 @@ from tk_gui_modules.qt_table_utils import NumericTableWidgetItem
 
 
 class IPONumericTableWidgetItem(NumericTableWidgetItem):
-    """兼顾字符串显示格式 (+4, +2.33%) 与 EditRole/UserRole 高精度浮点数值的增强单元格项"""
+    """专用数值单元格，确保点击表头按真实 float/int 排序，显示带格式化文本"""
+    def __init__(self, display_text: str, raw_val: float):
+        super().__init__(display_text)
+        self.raw_val = raw_val
+
     def data(self, role: int):
-        if role == Qt.ItemDataRole.EditRole and getattr(self, "raw_val", None) is not None:
+        if role == Qt.ItemDataRole.EditRole:
             return self.raw_val
         return super().data(role)
 
@@ -64,6 +69,31 @@ from ats.ui.ipo_detector_ipc import (
 from ats.new_stock_fetcher import NewStockFetcher
 
 logger = logging.getLogger("IPODetectorUI")
+
+
+def is_stock_actually_listed(code: str) -> bool:
+    """
+    严密判定标的是否真正已在二级市场上市交易 (P0 核心拦截)
+    - 坚决杜绝未上市股票 (待上市/待申购/发行未上市) 进入超短检测池；
+    - 剔除虚拟无盘口代码 (如 920295)。
+    """
+    c_str = str(code).zfill(6)
+    if c_str == "920295" or c_str.startswith("N"):
+        return False
+    try:
+        fetcher = NewStockFetcher.get_instance()
+        ipo_dict = getattr(fetcher, "_cached_ipo_dict", {})
+        info = ipo_dict.get(c_str)
+        if info:
+            ld = str(info.get("listing_date") or "").strip()
+            today_str = datetime.now().strftime("%Y-%m-%d")
+            # 必须具有上市日期，且上市日期已到达（<= 今天）
+            if not ld or ld > today_str:
+                return False
+            return True
+    except Exception:
+        pass
+    return True
 
 
 def get_ipo_detector_extra_cols() -> List[str]:
@@ -141,6 +171,7 @@ class IPOScanWorker(QThread):
     stock_analyzed = pyqtSignal(object)           # 单只信号 (向下兼容)
     batch_analyzed = pyqtSignal(list)             # 整组信号批量输出 (List[VWAPDetectorSignal])
     scan_finished = pyqtSignal(int, float, object)# 总数, 耗时秒, 性能审计字典
+    perf_log_emitted = pyqtSignal(str)            # 实时性能审计文本信号 (逐批次实时推送 UI)
 
     def __init__(self, codes: List[str], batch_size: int = 8, perf_log_enabled: bool = False):
         super().__init__()
@@ -164,9 +195,11 @@ class IPOScanWorker(QThread):
         tot_strat_ms = 0.0
         all_stock_costs = []
 
+        start_msg = f"🚀 启动批量分组并发扫描: 共 {len(self.codes)} 只标的 | 切分 {len(batches)} 组 (每组至多 {self.batch_size} 只)"
         if self.perf_log_enabled:
-            print(f"\n[IPO-PERF] ══════════════════════════════════════════════════════════════════")
-            print(f"[IPO-PERF] 🚀 启动批量分组并发扫描: 共 {len(self.codes)} 只股票 | 切分 {len(batches)} 组 (每组至多 {self.batch_size} 只)")
+            print(f"\n[IPO-PERF] ══════════════════════════════════════════════════════════════════", flush=True)
+            print(f"[IPO-PERF] {start_msg}", flush=True)
+        self.perf_log_emitted.emit(f"[IPO-PERF] {start_msg}")
 
         for b_idx, batch_codes in enumerate(batches):
             if not self.is_running:
@@ -215,16 +248,18 @@ class IPOScanWorker(QThread):
             t_batch_total_ms = (time.perf_counter() - t_batch_start) * 1000
 
             # 方案 1: 批次性能分析器 (输出批次序号、股票列表、各阶段耗时、Top3 瓶颈标的)
+            batch_stock_costs = [item for item in all_stock_costs if item[0] in batch_codes]
+            batch_stock_costs.sort(key=lambda x: x[1], reverse=True)
+            top3 = batch_stock_costs[:3]
+            top3_str = " | ".join(f"{c}(总{t:.0f}ms/分时{b:.0f}ms)" for c, t, b, s in top3)
+            codes_summary = ",".join(batch_codes)
+            batch_log = f"⚡ 批次 {b_idx + 1}/{len(batches)} ({len(batch_codes)}只: {codes_summary}) | 日线预取: {t_day_ms:.1f}ms | 批次总耗时: {t_batch_total_ms:.1f}ms (均{t_batch_total_ms / max(1, len(batch_codes)):.1f}ms/只)"
+            if top3:
+                batch_log += f"\n   └─ 耗时 Top3 瓶颈: {top3_str}"
+
             if self.perf_log_enabled:
-                # 提取该批次耗时 Top3 瓶颈标的
-                batch_stock_costs = [item for item in all_stock_costs if item[0] in batch_codes]
-                batch_stock_costs.sort(key=lambda x: x[1], reverse=True)
-                top3 = batch_stock_costs[:3]
-                top3_str = " | ".join(f"{c}(总{t:.0f}ms/分时{b:.0f}ms)" for c, t, b, s in top3)
-                codes_summary = ",".join(batch_codes)
-                print(f"[IPO-PERF] ⚡ 批次 {b_idx + 1}/{len(batches)} ({len(batch_codes)}只: {codes_summary}) | 日线预取: {t_day_ms:.1f}ms | 批次总耗时: {t_batch_total_ms:.1f}ms (均{t_batch_total_ms / max(1, len(batch_codes)):.1f}ms/只)")
-                if top3:
-                    print(f"[IPO-PERF]    └─ 耗时 Top3 瓶颈: {top3_str}")
+                print(f"[IPO-PERF] {batch_log}", flush=True)
+            self.perf_log_emitted.emit(f"[IPO-PERF] {batch_log}")
 
             # ── 步骤 C: 整组批量交付 UI ──
             if batch_results:
@@ -243,12 +278,15 @@ class IPOScanWorker(QThread):
             "avg_ms": (cost * 1000) / max(1, count)
         }
 
+        top3_report = " | ".join(f"{c}({t:.0f}ms)" for c, t in perf_summary["top3"])
+        summary_log = f"🏁 全量扫描结束: 共 {count} 只标的 | 总耗时: {cost:.2f}s | 日线: {tot_day_ms:.0f}ms | 分时: {tot_bars_ms:.0f}ms | 策略: {tot_strat_ms:.0f}ms | 均{perf_summary['avg_ms']:.1f}ms/只"
+        if top3_report:
+            summary_log += f"\n🏆 全局瓶颈 Top3: {top3_report}"
+
         if self.perf_log_enabled:
-            top3_report = " | ".join(f"{c}({t:.0f}ms)" for c, t in perf_summary["top3"])
-            print(f"[IPO-PERF] 🏁 全量扫描结束: 共 {count} 只标的 | 总耗时: {cost:.2f}s | 日线: {tot_day_ms:.0f}ms | 分时: {tot_bars_ms:.0f}ms | 策略: {tot_strat_ms:.0f}ms | 均{perf_summary['avg_ms']:.1f}ms/只")
-            if top3_report:
-                print(f"[IPO-PERF] 🏆 全局瓶颈 Top3: {top3_report}")
-            print(f"[IPO-PERF] ══════════════════════════════════════════════════════════════════\n")
+            print(f"[IPO-PERF] {summary_log}", flush=True)
+            print(f"[IPO-PERF] ══════════════════════════════════════════════════════════════════\n", flush=True)
+        self.perf_log_emitted.emit(f"[IPO-PERF] {summary_log}")
 
         self.scan_finished.emit(count, cost, perf_summary)
 
@@ -352,10 +390,11 @@ class IPOSubnewDetectorDialog(QMainWindow):
         self.ipc_timer.timeout.connect(self._on_ipc_poll_and_heartbeat)
         self.ipc_timer.start(500)
 
-        # 2. 定期自动刷新轮询定时器 (默认 8 秒一轮)
+        # 2. 定期自动刷新机制：改为单次按需调度 (整轮任务完成后延时触发，彻底告别不停狂刷)
+        self.auto_refresh_enabled = False  # 默认不自动狂刷，单轮跑完宁静展示
         self.refresh_timer = QTimer(self)
+        self.refresh_timer.setSingleShot(True)
         self.refresh_timer.timeout.connect(self.trigger_scan)
-        self.refresh_timer.start(8000)
 
         # 立即启动首轮扫描
         QTimer.singleShot(200, self.trigger_scan)
@@ -398,6 +437,14 @@ class IPOSubnewDetectorDialog(QMainWindow):
         btn_refresh.clicked.connect(self._on_refresh_clicked)
         tb_layout.addWidget(btn_refresh)
 
+        btn_auto = QPushButton("⏳ 自动轮询: 关")
+        btn_auto.setToolTip("开启/关闭后台自动延时轮询 (默认关闭，避免不停重刷)")
+        btn_auto.setCheckable(True)
+        btn_auto.setChecked(False)
+        btn_auto.clicked.connect(self._on_toggle_auto_refresh)
+        self.btn_auto = btn_auto
+        tb_layout.addWidget(btn_auto)
+
         btn_perf = QPushButton("📊 性能日志: 关")
         btn_perf.setToolTip("开启/关闭控制台细粒度分组计算性能审计日志 (快捷键: L)")
         btn_perf.setCheckable(True)
@@ -438,6 +485,23 @@ class IPOSubnewDetectorDialog(QMainWindow):
         self.table.customContextMenuRequested.connect(self._show_context_menu)
         self.table.cellDoubleClicked.connect(self._on_table_double_clicked)
         root_layout.addWidget(self.table)
+
+        # ── 2.5 底部实时性能审计控制台 (点击【📊 性能日志: 开】展开) ──
+        self.txt_perf_console = QPlainTextEdit(self)
+        self.txt_perf_console.setReadOnly(True)
+        self.txt_perf_console.setMaximumHeight(150)
+        self.txt_perf_console.setStyleSheet("""
+            QPlainTextEdit {
+                background-color: #0b0c10;
+                color: #66fcf1;
+                font-family: 'Consolas', 'Courier New', monospace;
+                font-size: 8.5pt;
+                border: 1px solid #1f2833;
+                border-radius: 4px;
+            }
+        """)
+        self.txt_perf_console.setVisible(self.perf_log_enabled)
+        root_layout.addWidget(self.txt_perf_console)
 
         # 联动防抖机制 (20ms 防抖，支持鼠标单击行与键盘连续翻页)
         self._pending_linkage_row = -1
@@ -494,41 +558,66 @@ class IPOSubnewDetectorDialog(QMainWindow):
             except Exception as e:
                 logger.debug(f"加载持久化配置异常: {e}")
 
-        # 若无历史配置，默认加载系统新股与次新股
+        # 严格过滤历史持久化配置中的未上市/未发行脏数据 (彻底剔除 920295, 301686 等)
+        if codes:
+            codes = [c for c in codes if is_stock_actually_listed(c)]
+
+        # 若过滤后为空或无历史配置，默认加载系统真正已上市的次新股
         if not codes:
             codes = self._get_default_ipo_subnew_codes()
 
         self.monitored_codes = list(dict.fromkeys(codes))
         self._rebuild_table_rows()
+        # 清洗并写回持久化配置
+        self.save_persisted_state()
 
     def _get_default_ipo_subnew_codes(self) -> List[str]:
-        """从 NewStockFetcher 中提取最新的全市场新股与次新股代码"""
+        """
+        从 NewStockFetcher 中提取最新的全市场真正已上市的新股与次新股代码
+        - 坚决杜绝未上市股票 (待上市/待申购/发行未上市) 进入超短检测池；
+        - 按上市日期倒序排列，优先保留最新 35~40 只近期活跃次新标的。
+        """
         res = []
+        today_str = datetime.now().strftime("%Y-%m-%d")
         try:
             fetcher = NewStockFetcher.get_instance()
-            # 优先使用已缓存的 IPO 字典
             ipo_dict = getattr(fetcher, "_cached_ipo_dict", {})
-            if ipo_dict:
-                for c in ipo_dict.keys():
-                    c_str = str(c).zfill(6)
-                    if c_str not in res:
-                        res.append(c_str)
-            # 尝试提取 DataFrame
+            valid_items = []
+            for c, v in ipo_dict.items():
+                c_str = str(c).zfill(6)
+                if not is_stock_actually_listed(c_str):
+                    continue
+                ld = str(v.get("listing_date") or "").strip()
+                if ld and ld <= today_str and len(ld) >= 8:
+                    valid_items.append((c_str, ld))
+
+            # 按上市日期从最新到较早排序
+            valid_items.sort(key=lambda x: x[1], reverse=True)
+            for c_str, _ in valid_items:
+                if c_str not in res:
+                    res.append(c_str)
+
+            # 提取 DataFrame 兜底补充
             df = fetcher.get_new_stocks_summary()
             if df is not None and not df.empty and "code" in df.columns:
-                for c in df["code"]:
-                    c_str = str(c).zfill(6)
-                    if c_str not in res:
+                for idx, row in df.iterrows():
+                    c_str = str(row["code"]).zfill(6)
+                    if not is_stock_actually_listed(c_str):
+                        continue
+                    ld = str(row.get("listing_date") or "").strip()
+                    if ld and ld <= today_str and len(ld) >= 8 and c_str not in res:
                         res.append(c_str)
         except Exception as e:
             logger.debug(f"获取全市场新股列表提示: {e}")
 
-        # 兜底注入典型活跃标的 (含天海电子等)
-        fallback = ["001365", "688826", "301677", "688835", "688801", "601091", "920295"]
+        # 兜底注入典型活跃标的 (含天海电子、频准激光、沈鼓集团等已上市标的)
+        fallback = ["001365", "688826", "301677", "688835", "688801", "601091", "688837", "920298"]
         for fb in fallback:
-            if fb not in res:
+            if fb not in res and is_stock_actually_listed(fb):
                 res.append(fb)
-        return res
+
+        # 超短线聚焦：默认取最新上市的 35 只最活跃新股/次新股，极速秒级完成全表分析
+        return res[:35] if len(res) > 35 else res
 
     def save_persisted_state(self):
         """集中持久化保存当前窗口几何与监控池"""
@@ -595,7 +684,14 @@ class IPOSubnewDetectorDialog(QMainWindow):
         self.worker.batch_analyzed.connect(self._on_batch_analyzed)
         self.worker.stock_analyzed.connect(self._on_stock_analyzed)
         self.worker.scan_finished.connect(self._on_scan_finished)
+        self.worker.perf_log_emitted.connect(self._on_perf_log_received)
         self.worker.start()
+
+    def _on_perf_log_received(self, text: str):
+        """实时将后台 Worker 发送的分组性能审计日志打印并滚入内嵌控制台"""
+        if hasattr(self, "txt_perf_console"):
+            self.txt_perf_console.appendPlainText(text)
+            self.txt_perf_console.ensureCursorVisible()
 
     def _on_batch_analyzed(self, batch_signals: List[VWAPDetectorSignal]):
         """【🚀 批量分组接收】整组多只信号批量压入平滑待渲染队列，彻底消灭单只零碎调度性能损耗"""
@@ -651,6 +747,13 @@ class IPOSubnewDetectorDialog(QMainWindow):
                     self.table.setSortingEnabled(True)
             self._render_timer.stop()
 
+        # 统一任务完成集中持久化 (5-10分钟统一持久化，绝不实时写盘)
+        try:
+            from ats.tdx_realtime_fetcher import TDXGlobalCachePool
+            TDXGlobalCachePool.get_instance().flush_if_due(interval=300.0)
+        except Exception:
+            pass
+
         # 统计高价值信号
         pre_cnt = sum(1 for s in self.signals_map.values() if s.signal_type == "PRE_ORDER")
         pull_cnt = sum(1 for s in self.signals_map.values() if s.signal_type == "PULLBACK_BUY")
@@ -676,6 +779,10 @@ class IPOSubnewDetectorDialog(QMainWindow):
             if col >= 0:
                 self.table.sortItems(col, order)
 
+        # 只有在操盘手开启【⏳ 自动轮询: 开】时，才在上一轮全部完成 15 秒之后单次延时启动下一轮，绝不追尾抢跑！
+        if getattr(self, "auto_refresh_enabled", False):
+            self.refresh_timer.start(15000)
+
     def _on_refresh_clicked(self):
         """【🔄 立即刷新】清空底层全局历史静态缓存，强制全网重新同步全量最新数据"""
         try:
@@ -685,9 +792,29 @@ class IPOSubnewDetectorDialog(QMainWindow):
             pass
         self.trigger_scan()
 
+    def _on_toggle_auto_refresh(self, checked: bool):
+        """【⏳ 自动轮询开关】切换是否后台延时自动轮询 (默认关闭，避免不停重刷)"""
+        self.auto_refresh_enabled = checked
+        if checked:
+            self.btn_auto.setText("⏳ 自动轮询: 开")
+            self.btn_auto.setStyleSheet("background-color: #1a3328; border-color: #00ff88; color: #00ff88; font-weight: bold;")
+            if not (self.worker and self.worker.isRunning()):
+                QTimer.singleShot(500, self.trigger_scan)
+        else:
+            self.btn_auto.setText("⏳ 自动轮询: 关")
+            self.btn_auto.setStyleSheet("")
+            if hasattr(self, "refresh_timer"):
+                self.refresh_timer.stop()
+
     def _on_toggle_perf_log(self):
         """【📊 性能模式】切换控制台细粒度批次审计与耗时分析"""
         self.perf_log_enabled = not self.perf_log_enabled
+        if hasattr(self, "txt_perf_console"):
+            self.txt_perf_console.setVisible(self.perf_log_enabled)
+            if self.perf_log_enabled and not self.txt_perf_console.toPlainText():
+                self.txt_perf_console.appendPlainText("[IPO-PERF] 📊 性能审计日志模式已开启，等待下一批次扫描日志...")
+        if self.worker and hasattr(self.worker, "perf_log_enabled"):
+            self.worker.perf_log_enabled = self.perf_log_enabled
         if self.perf_log_enabled:
             self.btn_perf.setText("📊 性能日志: 开")
             self.btn_perf.setStyleSheet("background-color: #3d2f00; border-color: #ffd700; color: #ffd700; font-weight: bold;")

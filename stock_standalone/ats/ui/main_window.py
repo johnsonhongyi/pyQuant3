@@ -4692,14 +4692,6 @@ class ATSMainWindow(QMainWindow):
             except Exception as e_nsp:
                 logger.debug(f"[ATSMainWindow] new_stock_panel update from ipc error: {e_nsp}")
 
-        # ── 同步共享实时行情快照给新股次新超短检测工具 (IPC) ──
-        try:
-            from ats.ui.ipo_detector_ipc import save_ats_ipc_df
-            save_ats_ipc_df(self.current_df)
-        except Exception as e_sipc:
-            logger.debug(f"[ATSMainWindow] save_ats_ipc_df error: {e_sipc}")
-
-
         # ── 启动后台 Worker ─────────────────────────────────────────────────────
         import datetime
         today_str = datetime.date.today().strftime('%Y-%m-%d')

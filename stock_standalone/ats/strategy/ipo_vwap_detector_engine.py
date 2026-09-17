@@ -134,26 +134,12 @@ def batch_fetch_day_kline_fast(codes: List[str], dl: int = 60) -> Dict[str, pd.D
     work_items = [(c, dl) for c in clean_codes]
     max_workers = min(len(clean_codes), os.cpu_count() or 4, 8)
 
-    # 1. 优先尝试原生多进程 (ProcessPoolExecutor) 并发拉取
-    try:
-        from concurrent.futures import ProcessPoolExecutor, as_completed
-        with ProcessPoolExecutor(max_workers=max_workers) as p_pool:
-            futures = [p_pool.submit(_mp_fetch_single_day_ohlc_worker, item) for item in work_items]
-            for fut in as_completed(futures, timeout=3.0):
-                c, df = fut.result()
-                if df is not None and not df.empty:
-                    res_map[c] = df
-        if res_map:
-            return res_map
-    except Exception as e_mp:
-        logger.debug(f"[IPOMP] ProcessPoolExecutor 多进程调度回退多线程: {e_mp}")
-
-    # 2. 多线程高并发兜底降级 (如打包环境或子进程被限制)
+    # 采用常驻高速并发线程池读取纯净 fastohlc (单批 8 只仅需 20~30ms，彻底根除 Windows 多进程 spawn 带来的 3.6 秒进程开销)
     try:
         from concurrent.futures import ThreadPoolExecutor, as_completed
         with ThreadPoolExecutor(max_workers=max_workers) as t_pool:
             futures = [t_pool.submit(_mp_fetch_single_day_ohlc_worker, item) for item in work_items]
-            for fut in as_completed(futures, timeout=2.0):
+            for fut in as_completed(futures, timeout=1.0):
                 c, df = fut.result()
                 if df is not None and not df.empty:
                     res_map[c] = df
