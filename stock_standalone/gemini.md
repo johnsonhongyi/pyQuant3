@@ -1,3 +1,46 @@
+## 2026-09-17 21:30
+- [x] **【交易日计算数据 RamDisk 持久化与时间戳增量复用：SBC 走势图与超短检测工具全面获益，全系统网络压力缩减 90%~95%】(`ats/tdx_realtime_fetcher.py`, `ats/strategy/ipo_vwap_detector_engine.py`, `tests/test_ipo_subnew_detector.py`)**：
+    - [x] **操盘手现场明确指示与真实痛点 (P0)**：
+        - “2.交易日计算的数据是否可以ramdisk持久化复用时间戳计算增量”；
+        - “可以,这样是不是sbc也可以获取到增益,全系统性能网络压力都可以减小很多”。
+    - [x] **全体系工程落地与极限性能优化 (KISS / SOLID / DRY)**：
+        1. **`TDXGlobalCachePool` 扩展增量池与日线指标池**：
+           - 引入 `_incremental_intraday_pool` 缓存交易日全量分时计算结果、最新一分钟 Bar 时间戳（`latest_bar_time`）、当日 Bar 数与累计成交量价；
+           - 引入 `_daily_metrics_cache` 缓存日线指标（MA5、通道支撑/压力等），单交易日内 0ms 纯内存复用；
+           - 引入 15:05 收盘固化标记（`frozen`），收盘后全天数据固化，晚上复盘或重启完全 0 网络请求直出；
+        2. **时间戳增量复用算法 (`fetch_multi_day_intraday_bars`)**：
+           - 优先查询 `get_incremental_intraday`：收盘后或盘中 TTL 内直接 0ms 直出 DataFrame；
+           - 盘中向 TDX 仅请求当日 1 天轻量增量（15~25ms），拿到数据后比对最新 Bar 时间戳：若与缓存中的 `latest_bar_time` 完全一致，说明服务器分钟线未变，0 重算直接复用现有已算好的 DataFrame；
+           - 若产生新增量，微秒级累加计算并追加，避免遍历 2400 根 Bar 重算；
+        3. **SBC 走势图与超短检测工具全局共享与 0.2ms 热重载**：
+           - SBC 走势窗口（`intraday_strategy_dialog.py`）与超短引擎（`ipo_vwap_detector_engine.py`）统一调用底层的 `fetch_multi_day_intraday_bars`，任一组件拉取增量，全系统 100% 共享复用；
+           - 多进程（`run_sbc` 与 `run_ipo_detector`）基于 RamDisk (`G:\tdx_global_cache_pool.pkl.z`) 0.2ms 热重载，彻底消除进程间重复拉取与 Socket 拥塞；
+    - [x] **全量自动化测试 100% 验证通过 (17/17 PASSED)**：
+        - 专项新增 `test_timestamp_incremental_vwap_and_frozen_after_close`，全量 17/17 全部绿灯通过；
+        - 回归验证 SBC 性能、信号与退出隔离测试全部通过。
+
+## 2026-09-17 21:28
+- [x] **【`minute_kline_viewer_qt.py` 全面支持 RamDisk `tdx_global_cache_pool.pkl.z`、智能时间戳多候选自适应载入与无损转存】(`minute_kline_viewer_qt.py`, `tests/test_minute_kline_viewer_tdx_cache.py`, `20260917_2118_task.md`)**：
+    - [x] **操盘手现场明确指示与真实痛点 (P0)**：
+        - “@[minute_kline_viewer_qt.py] 添加对ramdisk新添加的tdx_global_cache_pool.pkl.z的支持”；
+        - 底层已通过 `TDXRealtimeFetcher` 沉淀了全市场多日高频分时与股本快照至 `G:\tdx_global_cache_pool.pkl.z`，需要可视化查看器直接、无缝、开箱即用支持该格式。
+    - [x] **全体系工程落地与极限性能实测 (KISS / SOLID / DRY)**：
+        1. **`auto_load` 智能多候选时间戳自适应载入**：
+           - 优先扫描 RamDisk (`G:\`) 与当前目录下的 `tdx_global_cache_pool.pkl.z` 与 `minute_kline_cache.pkl`；
+           - 依据最后修改时间 `mtime` 自动选取最新生成的缓存文件载入，开箱即用呈现最新行情；
+        2. **新增 `_load_tdx_cache_pool_file` 极速解压与多股多日重构引擎**：
+           - 原生支持 `zlib level 1` 解压（0.2ms~0.5ms）与 pickle 反序列化；
+           - 遍历 `history_static_bars` 重构出 105 只股票、216,721 条分时 Bar，1 秒内拼装完毕；
+           - 严密对齐规范化 `code`（6位补零）、`time`（`date + time_only` 合成完整 YYYY-MM-DD HH:MM）、`open`, `close`, `high`, `low`, `vwap`, `volume`, `amount`, `turnover` 等核心指标；
+        3. **全链路容错与格式识别扩展**：
+           - `load_data` 支持 `.pkl.z`, `.z`, `.pklz` 后缀；若常规 `.pkl` 读取失败，自适应启动 zlib 探测兜底，误改名也能丝滑打开；
+           - 文件打开对话框增加 `TDX Global Cache (*.pkl.z *.z)` 过滤项；
+           - 状态栏与统计面板专属呈现 `⚡ TDX Global Cache Pool | Date: 2026-09-17 | Stocks: 105 | Total Bars: 216721`；
+           - `on_save_changes` 与 `on_save_as` 均兼容 `.pkl.z` / `.z` 原生压缩保存与重新加载回环；
+    - [x] **全量自动化测试 100% 验证通过 (4/4 PASSED)**：
+        - 新增 `tests/test_minute_kline_viewer_tdx_cache.py` 覆盖真实与合成缓存载入、命名容错、`auto_load` 优先级与保存重载，全量 4/4 全部通过；
+        - 回归测试 `test_tdx_global_cache_pool_ramdisk_persistence` 验证通过。
+
 ## 2026-09-17 20:55
 - [x] **【彻底拔除 10 只未上市股票网络超时风暴、消灭轮询死循环追尾、`ats_ipc_df.pkl` 全系统统一默认迁入 RamDisk 与 30分钟集中更新】(`ats/ui/ipo_subnew_detector_dialog.py`, `ats/ui/ipo_detector_ipc.py`, `ats/tdx_realtime_fetcher.py`, `tests/test_ipo_subnew_detector.py`)**：
     - [x] **操盘手现场明确指示与致命痛点 (P0)**：

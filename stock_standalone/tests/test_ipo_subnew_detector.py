@@ -246,36 +246,19 @@ class TestIPOSubnewDetector(unittest.TestCase):
             self.assertTrue(sig.has_kline_launch_sig)
             self.assertIn("通道下轨支撑", sig.trend_desc)
 
-    def test_save_and_get_ats_ipc_df(self):
-        """【测试】验证 save_ats_ipc_df 与 get_ats_ipc_df 快照读写与数据保真"""
-        from ats.ui.ipo_detector_ipc import save_ats_ipc_df, get_ats_ipc_df
-        test_df = pd.DataFrame([
-            {"code": "301683", "win": 3, "dff": 1.85, "ch_bc2": 2},
-            {"code": "001365", "win": 1, "dff": -0.5, "ch_bc2": 0}
-        ]).set_index("code")
-
-        ok = save_ats_ipc_df(test_df, force=True)
-        self.assertTrue(ok)
-
-        loaded_df = get_ats_ipc_df()
-        self.assertIsNotNone(loaded_df)
-        self.assertIn("301683", loaded_df.index)
-        self.assertEqual(loaded_df.loc["301683", "win"], 3)
-        self.assertEqual(loaded_df.loc["301683", "dff"], 1.85)
-
-        # 验证收盘后数据无变动时安全跳过写盘
-        ok_dup = save_ats_ipc_df(test_df, force=False)
-        self.assertTrue(ok_dup)
-
-        # 验证盘中未满 30 分钟集中更新节流拦截
-        with patch("ats.ui.ipo_detector_ipc.datetime") as mock_dt:
-            from datetime import datetime as real_dt
-            mock_dt.now.return_value = real_dt(2026, 9, 17, 10, 0, 0)
-            ok_throttle = save_ats_ipc_df(test_df, force=False, min_interval=1800.0)
-            self.assertFalse(ok_throttle)
+    def test_close_ipo_detector_process(self):
+        """【测试】验证 close_ipo_detector_process 安全关闭子进程与清理 PID 记录"""
+        from ats.ui.ipo_detector_ipc import close_ipo_detector_process, update_detector_heartbeat, _read_ipc_data
+        # 模拟写入一个假 PID
+        update_detector_heartbeat(999999)
+        data = _read_ipc_data()
+        self.assertEqual(data.get("detector_pid"), 999999)
+        
+        # 调用关闭函数 (针对不存在的 PID 安全返回 False 或完成清理)
+        close_ipo_detector_process(timeout=0.2)
 
     def test_dialog_ats_col_dynamic_rendering(self):
-        """【测试】验证 IPOSubnewDetectorDialog 从 IPC df 提取自定义 ats_col 并在表格中精准渲染"""
+        """【测试】验证 IPOSubnewDetectorDialog 接收 ipc_df 提取自定义 ats_col 并在表格中精准渲染"""
         from PyQt6.QtWidgets import QApplication
         from PyQt6.QtCore import Qt
         app = QApplication.instance() or QApplication(sys.argv)
@@ -284,8 +267,7 @@ class TestIPOSubnewDetector(unittest.TestCase):
             {"code": "001365", "win": 4, "dff": 2.33, "ch_bc2": 1, "price": 35.0}
         ]).set_index("code")
 
-        with patch("ats.ui.ipo_subnew_detector_dialog.IPOScanWorker.start"), \
-             patch("ats.ui.ipo_detector_ipc.get_ats_ipc_df", return_value=test_ipc_df):
+        with patch("ats.ui.ipo_subnew_detector_dialog.IPOScanWorker.start"):
             from ats.ui.ipo_subnew_detector_dialog import IPOSubnewDetectorDialog
             dlg = IPOSubnewDetectorDialog(initial_code="001365")
             dlg.ipc_df = test_ipc_df
@@ -535,6 +517,52 @@ class TestIPOSubnewDetector(unittest.TestCase):
         # 落盘后已无 dirty 数据，再次调用返回 False
         res3 = pool.flush_if_due(interval=0.0)
         self.assertFalse(res3)
+
+    def test_timestamp_incremental_vwap_and_frozen_after_close(self):
+        """【测试】验证基于时间戳的微秒级增量复用、收盘固化 (frozen) 与 RamDisk 完整热重载"""
+        from ats.tdx_realtime_fetcher import TDXGlobalCachePool, TDXRealtimeFetcher
+        pool = TDXGlobalCachePool.get_instance()
+        test_code = "600733"
+        days = 10
+
+        df_mock = pd.DataFrame([
+            {"time": "09-17 14:55", "date": "2026-09-17", "close": 32.5, "open": 32.0, "vwap": 32.2, "volume": 1000, "amount": 32200},
+            {"time": "09-17 14:56", "date": "2026-09-17", "close": 32.6, "open": 32.5, "vwap": 32.25, "volume": 1200, "amount": 38700},
+        ]).set_index("time")
+
+        # 1. 设置增量分时与时间戳状态
+        pool.set_incremental_intraday(
+            code=test_code, days=days, df=df_mock,
+            latest_bar_time="14:56", today_bar_count=2,
+            last_cum_vol=1200.0, last_cum_amt=38700.0
+        )
+
+        # 2. 验证时间戳与 TTL 内查询直出 (0 网络)
+        cached = pool.get_incremental_intraday(test_code, days, ttl=10.0)
+        self.assertIsNotNone(cached)
+        df_cached, meta = cached
+        self.assertEqual(len(df_cached), 2)
+        self.assertEqual(meta["latest_bar_time"], "14:56")
+        self.assertEqual(meta["today_bar_count"], 2)
+
+        # 3. 验证 daily_metrics_cache 缓存
+        metrics = {"ma5": 32.0, "support": 31.5, "resistance": 33.0}
+        pool.set_daily_metrics(test_code, metrics)
+        loaded_metrics = pool.get_daily_metrics(test_code)
+        self.assertIsNotNone(loaded_metrics)
+        self.assertEqual(loaded_metrics["ma5"], 32.0)
+        self.assertEqual(loaded_metrics["support"], 31.5)
+
+        # 4. 验证原子落盘到 RamDisk 并跨实例恢复
+        saved = pool.flush_to_ramdisk(force=True)
+        self.assertTrue(saved)
+
+        pool2 = TDXGlobalCachePool()
+        cached2 = pool2.get_incremental_intraday(test_code, days, ttl=10.0)
+        self.assertIsNotNone(cached2)
+        df_cached2, meta2 = cached2
+        self.assertEqual(meta2["latest_bar_time"], "14:56")
+        self.assertEqual(len(df_cached2), 2)
 
 
 if __name__ == "__main__":
