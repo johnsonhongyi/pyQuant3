@@ -132,35 +132,86 @@ def build_ipo_detector_command(code: Optional[str] = None) -> List[str]:
     return [sys.executable, "-m", "run_ipo_detector"]
 
 
+def activate_ipo_detector_window() -> bool:
+    """尝试将已有新股次新检测工具窗口置顶激活 (对齐 SBCProcessManager.activate_launcher_windows)"""
+    if sys.platform != "win32":
+        return False
+    try:
+        import win32gui
+        import win32con
+        activated = False
+        def _enum_cb(hwnd, _):
+            nonlocal activated
+            try:
+                if win32gui.IsWindowVisible(hwnd):
+                    t = win32gui.GetWindowText(hwnd)
+                    if "新股次新股超短检测" in t or "SBC 极限 10日 VWAP" in t:
+                        if win32gui.IsIconic(hwnd):
+                            win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+                        win32gui.SetForegroundWindow(hwnd)
+                        activated = True
+            except Exception:
+                pass
+            return True
+        win32gui.EnumWindows(_enum_cb, None)
+        return activated
+    except Exception:
+        return False
+
+
 def launch_ipo_detector_process(code: Optional[str] = None) -> Optional[subprocess.Popen]:
     """
     【🚀 独立进程启动】
     以高可靠、句柄隔离 (close_fds=True)、父进程守护模式启动新股次新股超短检测工具
+    严格对齐 --sbc-holdings 独立子进程启动规范：
+    1. 若已有活跃子进程，直接置顶激活前置，绝不重复生成第二个实例；
+    2. stdout/stderr 严格重定向到独立的 logs/ipo_detector.log 文件，切断与父进程控制台句柄冲突；
+    3. 剥离 _MEIPASS2 防止 PyInstaller 锁死；
+    4. 独立进程组 CREATE_NEW_PROCESS_GROUP。
     """
+    if is_ipo_detector_alive():
+        logger.info("[IPC] 新股次新超短检测工具已在运行中，激活现有窗口...")
+        activate_ipo_detector_window()
+        return None
+
     cmd = build_ipo_detector_command(code)
     try:
         env = os.environ.copy()
-        # 剥离 PyInstaller 解压目录防止锁死
+        # 剥离 PyInstaller 解压目录防止锁死 (对齐 sbc_launcher)
         env.pop('_MEIPASS2', None)
         env["ATS_MAIN_PID"] = str(os.getpid())
         env["ATS_IPO_SUBPROCESS"] = "1"
 
         creationflags = 0
         if sys.platform == "win32":
-            # 独立进程组
             creationflags = subprocess.CREATE_NEW_PROCESS_GROUP
 
+        # 独立日志文件重定向，切断与主终端共享控制台 handle 的死锁竞争 (对齐 sbc_launcher)
+        app_root = get_app_root()
+        log_dir = os.path.join(app_root, "logs")
+        os.makedirs(log_dir, exist_ok=True)
+        log_file = os.path.join(log_dir, "ipo_detector.log")
+        log_fh = open(log_file, "a", encoding="utf-8", errors="replace")
+
+        logger.info(f"[IPC] 正在启动新股次新超短检测工具独立子进程: {' '.join(cmd)}")
         proc = subprocess.Popen(
             cmd,
-            cwd=get_app_root(),
+            cwd=app_root,
             env=env,
             creationflags=creationflags,
             close_fds=True,
-            stdout=None,
-            stderr=None,
-            stdin=None
+            stdout=log_fh,
+            stderr=log_fh,
+            stdin=subprocess.DEVNULL
         )
-        logger.info(f"[IPC] 成功拉起新股次新超短检测工具子进程 (PID={proc.pid}), 命令: {' '.join(cmd)}")
+        try:
+            log_fh.close()
+        except Exception:
+            pass
+
+        logger.info(f"[IPC] 成功拉起新股次新超短检测工具子进程 (PID={proc.pid}), 日志: {log_file}")
+        # 同步更新心跳和 PID
+        update_detector_heartbeat(proc.pid)
         return proc
     except Exception as e:
         logger.error(f"[IPC] 拉起检测工具子进程失败: {e}")
@@ -171,7 +222,7 @@ def send_stock_to_ipo_detector(code: str, name: str = "") -> bool:
     """
     【⚡ 一键发送】
     将股票代码追加到检测工具的接收队列中。
-    若工具未运行，自动后台静默拉起工具并将代码注入！
+    若工具未运行，自动后台静默拉起工具并将代码注入；若已运行，激活窗口！
     """
     clean_code = "".join(c for c in str(code) if c.isdigit()).zfill(6)
     if not clean_code or len(clean_code) != 6:
@@ -184,9 +235,11 @@ def send_stock_to_ipo_detector(code: str, name: str = "") -> bool:
         data["queue"] = q
         _write_ipc_data(data)
 
-    # 检查进程是否活跃，未活跃则立即拉起
+    # 检查进程是否活跃，未活跃则立即拉起；已活跃则激活前置
     if not is_ipo_detector_alive():
         launch_ipo_detector_process(clean_code)
+    else:
+        activate_ipo_detector_window()
     return True
 
 
@@ -209,49 +262,86 @@ def update_detector_heartbeat(pid: int):
     _write_ipc_data(data)
 
 
-def close_ipo_detector_process(timeout: float = 1.0) -> bool:
+def close_ipo_detector_process(timeout: float = 3.0) -> bool:
     """
-    【🛑 统一优雅关闭超短检测工具子进程】
-    在 ATS 主窗口退出时调用，安全退出子进程并回收句柄，杜绝孤儿进程残留
+    【🛑 统一优雅关闭超短检测工具子进程 (对齐 close_launcher_process)】
+    在 ATS 主窗口退出时调用：
+    1. 优先通过 Win32 PostMessage 发送 WM_CLOSE 消息让窗口触发 closeEvent，完成数据原子持久化；
+    2. 给予充足超时 (3s) 让 PyInstaller bootloader 安全清理 _MEI* 临时目录，杜绝 PYI-10032 警告；
+    3. 若超时再执行 terminate 与 kill 回收句柄，杜绝孤儿进程残留。
     """
     data = _read_ipc_data()
     pid = data.get("detector_pid", 0)
     if not pid or pid <= 0:
         return False
 
+    logger.info(f"[IPC] 正在优雅关闭新股次新超短检测工具子进程 (PID={pid}) 并等待持久化...")
+    closed_gracefully = False
+
+    # 1. 优先向窗口投递 WM_CLOSE 消息 (对齐 sbc_launcher)
+    if sys.platform == "win32":
+        try:
+            import win32gui
+            import win32process
+            import win32con
+
+            def _enum_close_cb(hwnd, _):
+                try:
+                    _, w_pid = win32process.GetWindowThreadProcessId(hwnd)
+                    if w_pid == pid and win32gui.IsWindow(hwnd):
+                        win32gui.PostMessage(hwnd, win32con.WM_CLOSE, 0, 0)
+                except Exception:
+                    pass
+                return True
+
+            win32gui.EnumWindows(_enum_close_cb, None)
+        except Exception:
+            pass
+
+    # 2. 等待进程安全退出
     try:
         import psutil
         if psutil.pid_exists(pid):
             proc = psutil.Process(pid)
-            proc.terminate()
             try:
                 proc.wait(timeout=timeout)
+                closed_gracefully = True
             except psutil.TimeoutExpired:
-                proc.kill()
-            logger.info(f"[IPC] 成功关闭超短检测工具子进程 (PID={pid})")
-            data["detector_pid"] = 0
-            data["heartbeat"] = 0.0
-            _write_ipc_data(data)
-            return True
-    except Exception as e:
+                logger.warning(f"[IPC] 检测工具子进程 (PID={pid}) 优雅退出等待超时，执行 terminate")
+                proc.terminate()
+                try:
+                    proc.wait(timeout=1.5)
+                    closed_gracefully = True
+                except psutil.TimeoutExpired:
+                    proc.kill()
+                    try:
+                        proc.wait(timeout=0.5)
+                    except Exception:
+                        pass
+    except Exception:
         # Win32 fallback
-        try:
-            if sys.platform == "win32":
+        if sys.platform == "win32":
+            try:
                 import ctypes
                 kernel32 = ctypes.windll.kernel32
+                SYNCHRONIZE = 0x00100000
                 PROCESS_TERMINATE = 0x0001
-                h_proc = kernel32.OpenProcess(PROCESS_TERMINATE, False, pid)
+                h_proc = kernel32.OpenProcess(SYNCHRONIZE | PROCESS_TERMINATE, False, pid)
                 if h_proc:
-                    kernel32.TerminateProcess(h_proc, 0)
+                    # 等待最多 2 秒
+                    res = kernel32.WaitForSingleObject(h_proc, 2000)
+                    if res != 0:
+                        kernel32.TerminateProcess(h_proc, 0)
                     kernel32.CloseHandle(h_proc)
-                    data["detector_pid"] = 0
-                    data["heartbeat"] = 0.0
-                    _write_ipc_data(data)
-                    return True
-        except Exception:
-            pass
-        logger.debug(f"[IPC] 关闭超短检测工具子进程异常: {e}")
-    return False
+                    closed_gracefully = True
+            except Exception:
+                pass
+
+    logger.info(f"[IPC] ✅ 新股次新超短检测工具子进程已安全退出并回收句柄 (PID={pid})")
+    data["detector_pid"] = 0
+    data["heartbeat"] = 0.0
+    _write_ipc_data(data)
+    return closed_gracefully
 
 
 

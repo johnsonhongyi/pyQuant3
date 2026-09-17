@@ -6283,6 +6283,13 @@ class ATSMainWindow(QMainWindow):
                 close_all_sbc_processes()
             except Exception as e_proc:
                 print(f"[ATSMainWindow] Error closing SBC subprocesses: {e_proc}")
+
+            # 3.2 统一安全关闭拉起的新股次新超短检测工具独立子进程 (对齐 --sbc-holdings 退出规范)
+            try:
+                from ats.ui.ipo_detector_ipc import close_ipo_detector_process
+                close_ipo_detector_process()
+            except Exception as e_ipo:
+                print(f"[ATSMainWindow] Error closing IPO detector subprocess: {e_ipo}")
         except Exception as e_persist:
             print(f"[ATSMainWindow] Error persisting active monitor dialogs on close: {e_persist}")
         

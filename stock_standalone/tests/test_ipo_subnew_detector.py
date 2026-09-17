@@ -51,6 +51,23 @@ class TestIPOSubnewDetector(unittest.TestCase):
 
     def setUp(self):
         self.engine = IPOVWAPDetectorEngine.get_instance()
+        # 🛡️ 强制沙盒隔离：重定向测试涉及的布局配置文件与 IPC 文件至临时文件，严禁污染生产环境配置！
+        self._test_tmp_cfg = os.path.join(app_root, "config", f"test_ipo_layout_tmp_{os.getpid()}.json")
+        self._test_tmp_ipc = os.path.join(app_root, "config", f"test_ipo_ipc_tmp_{os.getpid()}.json")
+        self._patch_layout = patch("ats.ui.ipo_subnew_detector_dialog.get_ipo_detector_layout_file", return_value=self._test_tmp_cfg)
+        self._patch_ipc = patch("ats.ui.ipo_detector_ipc.get_ipo_detector_ipc_file", return_value=self._test_tmp_ipc)
+        self._patch_layout.start()
+        self._patch_ipc.start()
+
+    def tearDown(self):
+        self._patch_layout.stop()
+        self._patch_ipc.stop()
+        for fpath in (self._test_tmp_cfg, self._test_tmp_ipc):
+            if os.path.exists(fpath):
+                try:
+                    os.remove(fpath)
+                except Exception:
+                    pass
 
     def test_vwap_consolidation_pre_order_detection(self):
         """【测试】验证在 VWAP 上方走平蓄势 3 天精准触发【🎯 预下单】信号 (如天海电子走势)"""
@@ -186,7 +203,9 @@ class TestIPOSubnewDetector(unittest.TestCase):
 
     def test_ipc_queue_push_and_pop(self):
         """【测试】验证跨进程通信中心队列原子压入与消费"""
-        with patch("ats.ui.ipo_detector_ipc.is_ipo_detector_alive", return_value=True):
+        with patch("ats.ui.ipo_detector_ipc.is_ipo_detector_alive", return_value=True), \
+             patch("ats.ui.ipo_detector_ipc.activate_ipo_detector_window"):
+            pop_queued_stocks()
             send_stock_to_ipo_detector("001365", "天海电子")
             send_stock_to_ipo_detector("688826", "派林激光")
 
@@ -769,6 +788,50 @@ class TestIPOSubnewDetector(unittest.TestCase):
             self.assertNotIn("2026-09-16", new_dates)
             self.assertIn("2026-09-17", new_dates)
             self.assertIn("2026-09-18", new_dates)
+
+    def test_signals_persistence_and_cold_start_instant_restore(self):
+        """【测试】验证全视图信号持久化落盘与冷启动 0 秒恢复，绝不需重新运行才能看数据"""
+        from PyQt6.QtWidgets import QApplication
+        app = QApplication.instance() or QApplication(sys.argv)
+
+        with patch("ats.ui.ipo_subnew_detector_dialog.IPOScanWorker.start"):
+            from ats.ui.ipo_subnew_detector_dialog import IPOSubnewDetectorDialog
+            dlg1 = IPOSubnewDetectorDialog()
+            dlg1.monitored_codes = ["001365", "688826"]
+            dlg1._rebuild_table_rows()
+
+            # 模拟第一轮计算产生的信号
+            sig1 = VWAPDetectorSignal(
+                code="001365", name="天海电子", price=37.51, change_pct=1.25,
+                vwap=34.59, vwap_diff_pct=8.4, structure_tag="在VWAP走平2天",
+                consolidation_days=2, pullback_no_touch=False, signal_type="PRE_ORDER",
+                signal_level="🎯 预下单", stop_loss_price=34.42, update_time="22:33:22"
+            )
+            dlg1.signals_map["001365"] = sig1
+            dlg1._update_table_row_data(sig1, target_row=0)
+
+            # 持久化落盘并关闭
+            dlg1.save_persisted_state()
+            dlg1.close()
+
+            # 模拟下次重启：实例化新窗口 dlg2
+            dlg2 = IPOSubnewDetectorDialog()
+
+            # 核心断言 1: 从持久化文件中成功恢复 signals_map，0 秒出数
+            self.assertIn("001365", dlg2.signals_map)
+            restored_sig = dlg2.signals_map["001365"]
+            self.assertEqual(restored_sig.price, 37.51)
+            self.assertEqual(restored_sig.vwap, 34.59)
+            self.assertEqual(restored_sig.signal_level, "🎯 预下单")
+
+            # 核心断言 2: 表格已在冷启动瞬间填好数据，无需等待新扫描
+            # 现价列为第 2 列
+            self.assertEqual(dlg2.table.item(0, 2).text(), "37.51")
+            # 10d VWAP 列为第 4 列
+            self.assertEqual(dlg2.table.item(0, 4).text(), "34.59")
+            # 信号评级列为第 8 列
+            self.assertEqual(dlg2.table.item(0, 8).text(), "🎯 预下单")
+            dlg2.close()
 
 
 if __name__ == "__main__":
