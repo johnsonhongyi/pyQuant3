@@ -1,3 +1,43 @@
+## 2026-09-17 13:42
+- [x] **【彻底根治打包后盯盘 SBC 未正常退出与临时目录报错 `PYI: Failed to remove temporary directory`】(`ats/ui/main_window.py`, `ats/ui/sbc_launcher.py`, `run_sbc.py`, `tests/test_sbc_exit_isolation_and_orphan_guard.py`)**：
+    - [x] **操盘手现场明确反馈与致命痛点 (P0)**：
+        - “又出现 盯盘sbc没有正常退出的异常”；
+        - “打包后很容易触发”；
+        - 控制台报错日志：`[PYI-27312:WARNING] Failed to remove temporary directory: G:\Temp\_MEI273122`。
+    - [x] **深层根因深度破案与分析**：
+        1. **ATS 主窗口 closeEvent 漏调 SBC 关闭**：ATS 退出时关闭了各类 watcher、弹窗与账本，但主流程中未显式调用 `SBCProcessManager.close_all()`，仅依赖末期的 atexit，导致主进程退出时盯盘子进程仍在运行；
+        2. **Windows 句柄继承锁死父进程临时目录**：`subprocess.Popen` 在 Windows 上原为 `close_fds=False`，导致子进程无条件继承了父进程打开的所有 DLL 与临时目录文件句柄，操作系统文件锁无法解除；
+        3. **子进程缺乏父进程存活心跳守护**：主进程若发生注销，子进程未感知父进程死亡，变成后台孤儿进程继续持有资源。
+    - [x] **三重铁壁防御体系全面落地 (KISS / SOLID / DRY)**：
+        1. **主动退出闭环 (`ATSMainWindow.closeEvent`)**：在退出主循环前显式前置调用 `SBCProcessManager.get_instance().close_all()`，先优雅通知子进程落盘退出，等待完毕后关闭操作系统管道句柄；
+        2. **句柄物理隔离 (`close_fds=True`)**：在 `launch_holdings_watcher` 与 `launch` 中显式设置 `close_fds=True`，彻底切断子进程对父进程临时目录内文件句柄的继承；
+        3. **双向孤儿守护探针 (`run_sbc.py`)**：心跳定时器中增加 500ms 原生 `OpenProcess` 探针检测 `ATS_MAIN_PID`，一旦父进程注销，子进程 0.5 秒内自动持久化并退出，绝不残留后台孤儿进程。
+    - [x] **全量自动化测试 100% 验证通过 (33/33 PASSED)**：
+        - 专项新增测试 `tests/test_sbc_exit_isolation_and_orphan_guard.py`: 3/3 PASSED；
+        - 全量核心回归套件: 33/33 PASSED 全部绿灯通过。
+
+## 2026-09-17 13:35
+- [x] **【SBC 窗口重排空间位置顺序严格锁定 & 恢复原位排布除非换行算法落地】(`ats/ui/intraday_strategy_dialog.py`, `run_sbc.py`, `tests/test_sbc_rearrange_spatial_order_and_wrap.py`)**：
+    - [x] **操盘手现场明确指示与真实痛点 (P0)**：
+        - “sbc窗口的重排不要改变原有的显示位置顺序,现在重排就找不到刚排布好的”；
+        - “恢复也是原来在什么位置排布就在什么位置排布,除非换行”。
+    - [x] **根因排查与工程落地 (KISS / SOLID / DRY)**：
+        1. **破案“重排位置乱窜换位”致命根因**：
+           - 操盘手此前点击激活或置顶过某个窗口，Qt `QApplication.topLevelWidgets()` 的 Z-order 顺序随之改变（最后点击的窗口跑到了列表首位）；
+           - 重排原本直接按此随机列表顺位分配网格 `(0, 0)`，导致刚才点过的窗口被强行扔到左上角，原有排布被彻底打乱；
+           - 此外 `count=4` 时算法误将列数算成 3 列（3+1 畸形），将第二行窗口强行塞入第一行，导致 2x2 网格直接撕裂！
+        2. **重排空间行优先稳定排序 (`_sort_proxies_by_spatial_display_order`)**：
+           - 在重排平铺分配网格前，对屏幕上的窗口按实际物理显示位置进行**行聚类分组与行内 X 轴从左到右排序**；
+           - 4 个窗口严格锁定为 `cols=2, rows=2`（标准 2x2 田字格，绝不排成 3+1）；
+           - 无论操盘手刚才点击或激活了哪个窗口，重排时原本在左上的吸附在左上、原本在右上的吸附在右上、原本在左下的吸附在左下、原本在右下的吸附在右下，**100% 保持原有显示位置顺序**！
+        3. **恢复“原位原貌排布，除非换行”智能算法 (`_calculate_safe_geometry_with_wrap`)**：
+           - 持久化保存时，窗口列表按屏幕物理空间顺序排序存储；
+           - 恢复或快照切换时，若窗口在当前屏幕可用右边缘内，**严格按照保存的原有物理几何坐标原位原貌呈现**；
+           - 若右侧空间放不下（`orig_x + w > sg.right() + 10`），自动智能换行折回下一行左边界（`target_x = sg.left() + 12, target_y = prev_bottom + 8`），完美契合操盘手“原来在什么位置排布就在什么位置排布,除非换行”的核心诉求。
+    - [x] **全量自动化测试 100% 验证通过 (30/30 PASSED)**：
+        - 专项新增测试 `tests/test_sbc_rearrange_spatial_order_and_wrap.py`: 3/3 PASSED；
+        - 全量核心回归套件: 30/30 PASSED 全部绿灯通过。
+
 ## 2026-09-17 13:15
 - [x] **【SBC 持仓盯盘历史快照直选迁移至“盯盘”点击下拉菜单，SBC 走势窗口彻底恢复极简原貌】(`ats/ui/universe_widget.py`, `ats/ui/sbc_launcher.py`, `ats/ui/intraday_strategy_dialog.py`, `tests/test_sbc_launcher_menu_snapshots.py`)**：
     - [x] **操盘手现场明确指示 (P0)**：

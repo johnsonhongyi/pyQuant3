@@ -15,7 +15,7 @@ import json
 import signal
 import atexit
 import multiprocessing
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 if __name__ == "__main__":
     multiprocessing.freeze_support()
@@ -76,6 +76,62 @@ def _get_current_holding_codes() -> List[str]:
     return []
 
 
+def _sort_holding_items_by_spatial_order(items: List[dict]) -> List[dict]:
+    """
+    【🪟 按物理屏幕原有显示顺序排序】
+    先自上而下逐行分组，同一行内自左向右（X递增），超出屏幕宽度则换行。
+    确保保存进配置与快照中的窗口顺序与操盘手排布好的视觉顺序 100% 严格一致。
+    """
+    if len(items) <= 1:
+        return items
+    s_items = sorted(items, key=lambda it: (it.get("y", 0), it.get("x", 0)))
+    rows = []
+    for it in s_items:
+        cy = it.get("y", 0) + it.get("height", 420) / 2.0
+        placed = False
+        for r in rows:
+            avg_cy = sum(x.get("y", 0) + x.get("height", 420) / 2.0 for x in r) / len(r)
+            avg_h = sum(x.get("height", 420) for x in r) / len(r)
+            if abs(cy - avg_cy) < max(100, avg_h * 0.45):
+                r.append(it)
+                placed = True
+                break
+        if not placed:
+            rows.append([it])
+    result = []
+    for r in rows:
+        r.sort(key=lambda it: it.get("x", 0))
+        result.extend(r)
+    return result
+
+
+def _calculate_safe_geometry_with_wrap(item: dict, sg, prev_bottom: int) -> Tuple[int, int, int, int, int]:
+    """
+    【🪟 原位恢复与换行排布算法】
+    原来在什么位置排布就在什么位置排布，除非右侧超出当前行可用空间则换行。
+    返回 (target_x, target_y, w, h, new_bottom)
+    """
+    w = max(640, item.get("width", 680))
+    h = max(420, item.get("height", 420))
+    orig_x = item.get("x", sg.left() + 12)
+    orig_y = item.get("y", sg.top() + 12)
+
+    target_x = orig_x
+    target_y = orig_y
+
+    # 判断是否超出当前屏幕可用右边缘 (右侧放不下，触发换行)
+    if (target_x + w) > (sg.right() + 10):
+        target_x = sg.left() + 12
+        target_y = prev_bottom + 8
+
+    # 规范化：防止超出屏幕左侧或顶部
+    target_x = max(sg.left(), target_x)
+    target_y = max(sg.top(), target_y)
+
+    new_bottom = max(prev_bottom, target_y + h)
+    return target_x, target_y, w, h, new_bottom
+
+
 _last_save_holdings_time = 0.0
 _last_saved_content_fingerprint = ""
 _is_restoring_holdings = False
@@ -127,6 +183,9 @@ def save_launcher_holdings_windows(force: bool = False, allow_empty: bool = Fals
                     active_list = [dict(item) for item in mem_wins if isinstance(item, dict) and item.get("code")]
             except Exception:
                 pass
+
+        # 💡 按屏幕物理空间显示顺序稳定排序 (先自上而下，同一行自左向右，除非换行)
+        active_list = _sort_holding_items_by_spatial_order(active_list)
 
         cfg_path = _get_launcher_layout_cfg_path()
         old_data = {}
@@ -366,8 +425,12 @@ def switch_to_history_snapshot(snapshot_idx: int) -> List[SBCIntradayChartDialog
     except Exception as e_close:
         print(f"[SBC Launcher] 关闭非快照窗口提示: {e_close}")
 
-    # 2. 打开或激活目标快照窗口
+    # 2. 打开或激活目标快照窗口 (原来在什么位置排布就在什么位置排布，除非换行)
     opened = []
+    screen_obj = QApplication.primaryScreen()
+    sg = screen_obj.availableGeometry() if screen_obj else QRect(0, 0, 1920, 1080)
+    prev_bottom = sg.top() + 12
+
     for item in win_list:
         c = item.get("code")
         if not c:
@@ -376,12 +439,11 @@ def switch_to_history_snapshot(snapshot_idx: int) -> List[SBCIntradayChartDialog
         dlg = open_sbc_chart_dialog(None, code=c, period_mode=p)
         if dlg:
             dlg.show()
-            w = max(640, item.get("width", 680))
-            h = max(420, item.get("height", 420))
-            dlg.setGeometry(item.get("x", 100), item.get("y", 100), w, h)
+            gx, gy, gw, gh, prev_bottom = _calculate_safe_geometry_with_wrap(item, sg, prev_bottom)
+            dlg.setGeometry(gx, gy, gw, gh)
             opened.append(dlg)
 
-    # 3. 自动触发平铺重排
+    # 3. 自动触发平铺重排 (保持原有显示位置顺序)
     if opened:
         rearrange_all_sbc_windows()
         print(f"[SBC Launcher] ✅ 成功切换至快照 {snapshot_idx}，已恢复并平铺 {len(opened)} 个盯盘窗口！")
@@ -393,6 +455,7 @@ def restore_launcher_holdings_windows(snapshot_index: Optional[int] = None) -> L
     """【🚀 恢复持仓盯盘窗口】
     若指定 snapshot_index (1, 2, 3)，精准加载该组历史快照；
     未指定时优先从独立配置恢复未关闭标的，为空时自动从快照 1 灾备恢复。
+    恢复位置遵循“原来在什么位置排布就在什么位置排布，除非换行”。
     """
     global _is_restoring_holdings
     _is_restoring_holdings = True
@@ -424,6 +487,10 @@ def restore_launcher_holdings_windows(snapshot_index: Optional[int] = None) -> L
                                 snap_time = snapshots[0].get("time", "历史快照")
                                 print(f"[SBC Launcher] 🛡 当前盯盘配置为空，已自动从最近历史快照 ({snap_time}) 灾备回退恢复 {len(win_list)} 个窗口！")
 
+                screen_obj = QApplication.primaryScreen()
+                sg = screen_obj.availableGeometry() if screen_obj else QRect(0, 0, 1920, 1080)
+                prev_bottom = sg.top() + 12
+
                 for item in win_list:
                     code = item.get("code")
                     if not code:
@@ -432,9 +499,8 @@ def restore_launcher_holdings_windows(snapshot_index: Optional[int] = None) -> L
                     dlg = open_sbc_chart_dialog(None, code=code, period_mode=period)
                     if dlg:
                         dlg.show()
-                        w = max(640, item.get("width", 680))
-                        h = max(420, item.get("height", 420))
-                        dlg.setGeometry(item.get("x", 100), item.get("y", 100), w, h)
+                        gx, gy, gw, gh, prev_bottom = _calculate_safe_geometry_with_wrap(item, sg, prev_bottom)
+                        dlg.setGeometry(gx, gy, gw, gh)
                         restored.append(dlg)
             except Exception as e:
                 print(f"[SBC Launcher] 读取历史盯盘配置异常: {e}")
@@ -530,10 +596,40 @@ def main():
     app.aboutToQuit.connect(_on_app_about_to_quit)
     _setup_signal_handlers()
 
-    # 💡 心跳定时器：在 Windows 下定期让 Python 解释器获得 GIL 响应 SIGINT/Ctrl+C，避免信号仅在密集槽函数内爆发致命异常
+    # 💡 心跳定时器与孤儿进程自动守护 (P0)：
+    # 1. 在 Windows 下定期让 Python 解释器获得 GIL 响应 SIGINT/Ctrl+C；
+    # 2. 定期检测父进程 (ATS_MAIN_PID) 存活性，若父进程已退出，自动持久化保存并安全退出，绝不残留后台孤儿进程！
+    parent_pid_str = os.environ.get("ATS_MAIN_PID")
+    _parent_pid = int(parent_pid_str) if (parent_pid_str and parent_pid_str.isdigit()) else None
+
+    def _on_keep_alive_and_orphan_check():
+        if _parent_pid:
+            try:
+                if sys.platform == "win32":
+                    import ctypes
+                    kernel32 = ctypes.windll.kernel32
+                    SYNCHRONIZE = 0x00100000
+                    h_proc = kernel32.OpenProcess(SYNCHRONIZE, False, _parent_pid)
+                    if h_proc:
+                        kernel32.CloseHandle(h_proc)
+                    else:
+                        print(f"\n[SBC Launcher] 探针检测到父进程 (PID={_parent_pid}) 已关闭，自动保存持仓盯盘并退出...")
+                        quit_and_save_all_sbc_windows()
+                        app_inst = QApplication.instance()
+                        if app_inst:
+                            app_inst.quit()
+                else:
+                    os.kill(_parent_pid, 0)
+            except Exception:
+                print(f"\n[SBC Launcher] 父进程已终止，自动安全保存并退出...")
+                quit_and_save_all_sbc_windows()
+                app_inst = QApplication.instance()
+                if app_inst:
+                    app_inst.quit()
+
     _keep_alive_timer = QTimer()
-    _keep_alive_timer.timeout.connect(lambda: None)
-    _keep_alive_timer.start(200)
+    _keep_alive_timer.timeout.connect(_on_keep_alive_and_orphan_check)
+    _keep_alive_timer.start(500)
 
     if cli_code:
         print(f"[SBC Launcher] 启动指定 SBC 实盘分时窗口: 标的代码={cli_code}, 初始周期={period}")

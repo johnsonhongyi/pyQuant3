@@ -227,7 +227,7 @@ class SBCProcessManager:
                     cwd=app_root,
                     env=env,
                     creationflags=flags,
-                    close_fds=(sys.platform != "win32")
+                    close_fds=True
                 )
                 self._procs["__holdings_launcher__"] = proc
                 logger.info(f"[SBCLauncher] ✅ 成功调起持仓盯盘独立进程 (PID={proc.pid})")
@@ -512,7 +512,7 @@ class SBCProcessManager:
                     cwd=app_root,
                     env=env,
                     creationflags=creationflags,
-                    close_fds=(sys.platform != "win32")
+                    close_fds=True
                 )
                 self._procs[c_clean] = proc
                 logger.info(f"[SBCLauncher] ✅ 标的 {c_clean} SBC 独立子进程启动成功 (PID={proc.pid})")
@@ -535,7 +535,13 @@ class SBCProcessManager:
             return None
 
     def close_all(self):
-        """统一终止并清理所有拉起的 SBC 独立子进程"""
+        """统一终止并清理所有拉起的 SBC 独立子进程 (包含持仓盯盘启动器)"""
+        # 💡 1. 优先触发持仓盯盘专用精准落盘与退出
+        try:
+            self.close_launcher_process()
+        except Exception as e_cl:
+            logger.error(f"[SBCLauncher] 关闭持仓盯盘进程异常: {e_cl}")
+
         self.cleanup_dead_processes()
         if not self._procs:
             return
