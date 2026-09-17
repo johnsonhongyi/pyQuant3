@@ -261,15 +261,19 @@ def test_sbc_canvas_cycle_selected_trade_and_shortcuts(qapp):
     canvas.cycle_selected_trade(1)
     assert canvas.selected_trade_id == 2
 
-    # 4. 环形轮转回到 0
+    # 4. 遍历完所有交易后再次点击，自动关闭收益卡片与高亮(None)，避免遮挡看盘
+    canvas.cycle_selected_trade(1)
+    assert canvas.selected_trade_id is None
+
+    # 5. 再次步进 -> 重新环形轮转回到 0
     canvas.cycle_selected_trade(1)
     assert canvas.selected_trade_id == 0
 
-    # 5. 向后步进 -> trade_id=2
+    # 6. 向后步进 -> 取消高亮(None) 或 反向步进
     canvas.cycle_selected_trade(-1)
-    assert canvas.selected_trade_id == 2
+    assert canvas.selected_trade_id is None
 
-    # 6. 测试按键事件: 按下 Space
+    # 7. 测试按键事件: 按下 Space
     key_ev_space = QKeyEvent(
         QKeyEvent.Type.KeyPress,
         Qt.Key.Key_Space,
@@ -290,7 +294,12 @@ def test_sbc_dialog_set_custom_backtest_trades(qapp):
 
         assert dlg.canvas.period_mode == "day"
         assert len(dlg.canvas.signals) == 6
+        # 默认不遮挡看盘，selected_trade_id 为 None
+        assert dlg.canvas.selected_trade_id is None
+        # 用户点击或快捷键后激活首笔
+        dlg.canvas.cycle_selected_trade(1)
         assert dlg.canvas.selected_trade_id == 0
+
         assert "多周期通道回测" in dlg.lbl_title.text()
         assert "胜率:66.7%" in dlg.lbl_title.text()
         assert "交易:3笔" in dlg.lbl_title.text()
@@ -311,6 +320,8 @@ def test_open_sbc_chart_dialog_with_backtest_trades(qapp):
     )
     try:
         assert dlg is not None
+        assert dlg.canvas.selected_trade_id is None
+        dlg.canvas.cycle_selected_trade(1)
         assert dlg.canvas.selected_trade_id == 0
         assert len(dlg.canvas.signals) == 6
     finally:
@@ -332,6 +343,8 @@ def test_backtester_plot_in_sbc_helper(qapp):
     dlg = bt.plot_in_sbc(mock_report, df_kline=df_kline)
     try:
         assert dlg is not None
+        assert dlg.canvas.selected_trade_id is None
+        dlg.canvas.cycle_selected_trade(1)
         assert dlg.canvas.selected_trade_id == 0
     finally:
         dlg.close()

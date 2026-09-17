@@ -198,24 +198,34 @@ def _setup_signal_handlers():
         pass
 
     # 💡 核心保护：自定义 sys.excepthook 拦截 Qt 槽函数（如 _check_hover、QTimer 等）中抛出的 KeyboardInterrupt
+    # 严格禁止在 sys.excepthook 中抛出异常或调用 sys.exit()，否则 Python 会打印 "Error in sys.excepthook"！
     def _sbc_excepthook(exc_type, exc_val, exc_tb):
-        if issubclass(exc_type, (KeyboardInterrupt, SystemExit)):
-            print("\n[SBC Launcher] 捕获键盘中断/退出信号 (KeyboardInterrupt)，正在自动保存持仓盯盘窗口...")
-            try:
-                quit_and_save_all_sbc_windows()
-            except Exception as err:
-                print(f"[SBC Launcher] 异常钩子持久化保存异常: {err}")
-            sys.exit(0)
-        else:
-            try:
-                quit_and_save_all_sbc_windows()
-            except Exception:
-                pass
-            sys.__excepthook__(exc_type, exc_val, exc_tb)
+        try:
+            if isinstance(exc_type, type) and issubclass(exc_type, (KeyboardInterrupt, SystemExit)):
+                print("\n[SBC Launcher] 捕获键盘中断/退出信号 (Ctrl+C)，已自动持久化保存持仓盯盘窗口。")
+                try:
+                    quit_and_save_all_sbc_windows()
+                except Exception as err:
+                    print(f"[SBC Launcher] 异常钩子持久化保存异常: {err}")
+                app = QApplication.instance()
+                if app:
+                    app.quit()
+                return  # 直接返回，绝不 raise / sys.exit()，彻底杜绝 "Error in sys.excepthook"
+            else:
+                try:
+                    quit_and_save_all_sbc_windows()
+                except Exception:
+                    pass
+                if sys.__excepthook__:
+                    sys.__excepthook__(exc_type, exc_val, exc_tb)
+        except Exception:
+            pass
 
     sys.excepthook = _sbc_excepthook
 
-    # 💡 Windows 原生控制台事件处理器：当操盘手按 Ctrl+C 或直接点击关闭控制台黑窗口时，Windows 系统线程级回调
+    # 💡 Windows 原生控制台事件处理器：
+    # 当操盘手按 Ctrl+C (CTRL_C_EVENT=0) 或 Ctrl+Break (CTRL_BREAK_EVENT=1) 时，返回 True，
+    # 明确告知 Windows 系统此事件已由程序接管处理，让 Python 主线程通过 SIGINT 信号和 excepthook 正常保存退出，不要提前强杀！
     if sys.platform == "win32":
         try:
             import ctypes
@@ -224,12 +234,17 @@ def _setup_signal_handlers():
 
             def _console_ctrl_handler(ctrl_type):
                 # 0=CTRL_C_EVENT, 1=CTRL_BREAK_EVENT, 2=CTRL_CLOSE_EVENT
-                print(f"\n[SBC Launcher] 接收到 Windows 控制台事件 (type={ctrl_type})，正在紧急持久化盯盘窗口...")
-                try:
-                    quit_and_save_all_sbc_windows()
-                except Exception as err:
-                    print(f"[SBC Launcher] 控制台处理程序落盘异常: {err}")
-                return False  # 返回 False 让 Windows 继续执行默认终止流程
+                if ctrl_type in (0, 1):
+                    # 返回 True：通知 Windows 不要强杀进程，由 Python 主线程正常落盘退出
+                    return True
+                elif ctrl_type == 2:
+                    # 操盘手直接点 [X] 强行关闭控制台窗口，由 atexit 紧急兜底
+                    try:
+                        quit_and_save_all_sbc_windows()
+                    except Exception:
+                        pass
+                    return True
+                return False
 
             global _win_console_ctrl_handler_ref
             _win_console_ctrl_handler_ref = PHANDLER_ROUTINE(_console_ctrl_handler)
