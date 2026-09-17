@@ -6400,6 +6400,14 @@ class ATSMainWindow(QMainWindow):
         except Exception as ex:
             print(f"[ATSMainWindow] 外盘 K 线落盘异常 (非致命): {ex}")
 
+        # 4.7 🛑 统一优雅关闭持仓盯盘及所有 SBC 独立子进程 (确保子进程安全落盘退出，彻底释放临时目录句柄，杜绝 PYI 警告)
+        try:
+            from ats.ui.sbc_launcher import SBCProcessManager
+            SBCProcessManager.get_instance().close_all()
+            print("[ATSMainWindow] 持仓盯盘及所有 SBC 子进程已统一安全退出并释放句柄!")
+        except Exception as ex_sbc:
+            print(f"[ATSMainWindow] 关闭 SBC 子进程异常: {ex_sbc}")
+
 
         # 5. 关闭散落的行情分布弹窗、搜索历史与辅助对话框
         try:

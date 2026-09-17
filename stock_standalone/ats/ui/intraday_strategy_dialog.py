@@ -5601,6 +5601,31 @@ def save_all_open_sbc_windows():
             except Exception:
                 data = {}
 
+        # 💡 按屏幕物理空间显示顺序排序（先自上而下，同一行自左向右，除非换行）
+        def _sort_items_spatial(items):
+            if len(items) <= 1:
+                return items
+            s_items = sorted(items, key=lambda it: (it.get("y", 0), it.get("x", 0)))
+            rows = []
+            for it in s_items:
+                cy = it.get("y", 0) + it.get("height", 420) / 2.0
+                placed = False
+                for r in rows:
+                    avg_cy = sum(x.get("y", 0) + x.get("height", 420) / 2.0 for x in r) / len(r)
+                    avg_h = sum(x.get("height", 420) for x in r) / len(r)
+                    if abs(cy - avg_cy) < max(100, avg_h * 0.45):
+                        r.append(it)
+                        placed = True
+                        break
+                if not placed:
+                    rows.append([it])
+            res = []
+            for r in rows:
+                r.sort(key=lambda it: it.get("x", 0))
+                res.extend(r)
+            return res
+
+        active_list = _sort_items_spatial(active_list)
         data["sbc_open_windows"] = active_list
         data["initialized"] = True
         if "sbc_period_modes" not in data:
@@ -5664,7 +5689,14 @@ def restore_all_open_sbc_windows(parent_win=None, as_subprocess: bool = False) -
             saved_period = item.get("period_mode") or item.get("period") or (
                 data.get("sbc_period_modes", {}).get(str(code).zfill(6))
             ) or "1m"
-            rx, ry = clamp_window_to_screens(x, y, w, h)
+            # 💡 原位恢复与换行保护：原来在什么位置排布就在什么位置排布，除非换行
+            screen_obj = QApplication.primaryScreen()
+            sg = screen_obj.availableGeometry() if screen_obj else QRect(0, 0, 1920, 1080)
+            target_x, target_y = x, y
+            if (target_x + w) > (sg.right() + 10):
+                target_x = sg.left() + 12
+                target_y = target_y + h + 8
+            rx, ry = clamp_window_to_screens(target_x, target_y, w, h)
             
             dlg = open_sbc_chart_dialog(parent_win, code, period_mode=saved_period)
             if dlg:
@@ -5947,8 +5979,64 @@ def rearrange_all_sbc_windows(parent_win=None):
             if pxy.is_maximized_or_minimized():
                 pxy.show_normal()
 
-        # 统一计算网格行列数与严格等大等高的窗口尺寸 (彻底消除大小不等与 Win32 压扁，严格受限不得全屏霸屏)
-        cols = 2 if count <= 2 else (3 if count <= 6 else 4)
+        # 💡 【核心：按物理屏幕上的原有显示顺序稳定排序 (从上到下、同一行从左到右，除非换行)】
+        # 彻底杜绝因点击窗口激活或改变 Z-Order 导致重排时打乱原有显示位置！
+        def _sort_proxies_by_spatial_display_order(proxies: List[_SBCWindowProxy]):
+            if len(proxies) <= 1:
+                return list(proxies), 1, 1
+            meta = []
+            for p in proxies:
+                g = p.get_geometry()
+                meta.append({
+                    "pxy": p,
+                    "x": g.x(),
+                    "y": g.y(),
+                    "w": g.width(),
+                    "h": g.height(),
+                    "cx": g.x() + g.width() / 2.0,
+                    "cy": g.y() + g.height() / 2.0,
+                })
+            # 先按 Y 升序初步排列
+            meta.sort(key=lambda m: (m["y"], m["x"]))
+            # 行聚类：垂直中心差在半行高度以内的归入同一行
+            rows_clustered: List[List[dict]] = []
+            for m in meta:
+                placed = False
+                for row in rows_clustered:
+                    avg_cy = sum(item["cy"] for item in row) / float(len(row))
+                    avg_h = sum(item["h"] for item in row) / float(len(row))
+                    if abs(m["cy"] - avg_cy) < max(100, avg_h * 0.45):
+                        row.append(m)
+                        placed = True
+                        break
+                if not placed:
+                    rows_clustered.append([m])
+            # 同一行内严格按 X 升序（从左到右）排列
+            sorted_pxys = []
+            for row in rows_clustered:
+                row.sort(key=lambda item: item["x"])
+                for item in row:
+                    sorted_pxys.append(item["pxy"])
+            orig_row_count = len(rows_clustered)
+            orig_max_col = max(len(r) for r in rows_clustered) if rows_clustered else 1
+            return sorted_pxys, orig_row_count, orig_max_col
+
+        ordered_pxys, orig_rows, orig_cols = _sort_proxies_by_spatial_display_order(pxys_on_screen)
+
+        # 统一计算网格行列数 (4个窗口严格为 2x2 田字格，绝不排成 3+1 畸形导致错位)
+        if count <= 2:
+            cols = 2
+        elif count == 3:
+            cols = 3 if orig_rows == 1 else 2
+        elif count == 4:
+            cols = 2  # 💡 4个窗口标准 2x2
+        elif count in (5, 6):
+            cols = 3  # 💡 6个窗口标准 3x2
+        elif count in (7, 8):
+            cols = 4  # 💡 8个窗口标准 4x2
+        else:
+            cols = max(orig_cols, math.ceil(math.sqrt(count)))
+
         rows = math.ceil(count / cols)
 
         margin_x = 8
@@ -5971,9 +6059,9 @@ def rearrange_all_sbc_windows(parent_win=None):
             target_h = calc_h
         target_h = max(420, min(target_h, avail_h))
 
-        logger.debug(f"[SBC重排] 统一等大等高平铺 {count} 个窗口: {target_w}x{target_h} ({cols}列 x {rows}行)")
+        logger.debug(f"[SBC重排] 保持原有显示顺序统一平铺 {count} 个窗口: {target_w}x{target_h} ({cols}列 x {rows}行)")
 
-        for idx_d, pxy in enumerate(pxys_on_screen):
+        for idx_d, pxy in enumerate(ordered_pxys):
             r = idx_d // cols
             c = idx_d % cols
 
