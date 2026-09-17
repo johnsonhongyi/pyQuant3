@@ -107,26 +107,17 @@ def _sort_holding_items_by_spatial_order(items: List[dict]) -> List[dict]:
 
 def _calculate_safe_geometry_with_wrap(item: dict, sg, prev_bottom: int) -> Tuple[int, int, int, int, int]:
     """
-    【🪟 原位恢复与换行排布算法】
-    原来在什么位置排布就在什么位置排布，除非右侧超出当前行可用空间则换行。
+    【🪟 原位恢复排布算法】
+    原来在什么位置排布就在什么位置排布，严格保留持久化的物理尺寸与所在物理屏幕，绝不强行将副屏窗口拽回主屏。
     返回 (target_x, target_y, w, h, new_bottom)
     """
-    w = max(640, item.get("width", 680))
-    h = max(420, item.get("height", 420))
+    w = max(320, item.get("width", 680))
+    h = max(180, item.get("height", 420))
     orig_x = item.get("x", sg.left() + 12)
     orig_y = item.get("y", sg.top() + 12)
 
-    target_x = orig_x
-    target_y = orig_y
-
-    # 判断是否超出当前屏幕可用右边缘 (右侧放不下，触发换行)
-    if (target_x + w) > (sg.right() + 10):
-        target_x = sg.left() + 12
-        target_y = prev_bottom + 8
-
-    # 规范化：防止超出屏幕左侧或顶部
-    target_x = max(sg.left(), target_x)
-    target_y = max(sg.top(), target_y)
+    from gui_utils import clamp_window_to_screens
+    target_x, target_y = clamp_window_to_screens(orig_x, orig_y, w, h)
 
     new_bottom = max(prev_bottom, target_y + h)
     return target_x, target_y, w, h, new_bottom
@@ -496,7 +487,7 @@ def restore_launcher_holdings_windows(snapshot_index: Optional[int] = None) -> L
                     if not code:
                         continue
                     period = item.get("period_mode", "10d")
-                    dlg = open_sbc_chart_dialog(None, code=code, period_mode=period)
+                    dlg = open_sbc_chart_dialog(None, code=code, period_mode=period, record_open=False)
                     if dlg:
                         dlg.show()
                         gx, gy, gw, gh, prev_bottom = _calculate_safe_geometry_with_wrap(item, sg, prev_bottom)
