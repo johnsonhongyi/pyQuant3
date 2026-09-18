@@ -510,22 +510,16 @@ class IPOSubnewDetectorDialog(QMainWindow):
             logger.debug(f"初始化专属 IPC 流式订阅管理器异常: {e_ipcmgr}")
             self.ipc_mgr = None
 
-        self._init_ui()
-        self._load_persisted_state()
-
-        if initial_code:
-            self.add_stock(initial_code)
-
         # 1. IPC 接收与心跳守护定时器 (500ms)
         self.ipc_timer = QTimer(self)
         self.ipc_timer.timeout.connect(self._on_ipc_poll_and_heartbeat)
         self.ipc_timer.start(500)
 
-        # 2. 定期自动刷新机制：改为单次按需调度 (整轮任务完成后延时触发，彻底告别不停狂刷)
-        self.auto_refresh_enabled = False  # 默认不自动狂刷，单轮跑完宁静展示
+        # 2. 定期自动刷新机制：改为单次按需调度 (智能交易时段守护，收盘自动休眠，盘中 15 秒平滑轮询)
+        self.auto_refresh_enabled = False  # 状态由持久化配置恢复
         self.refresh_timer = QTimer(self)
         self.refresh_timer.setSingleShot(True)
-        self.refresh_timer.timeout.connect(self.trigger_scan)
+        self.refresh_timer.timeout.connect(self._on_poll_timer_tick)
 
         # 3. 底层新股次新股全自动增量同步管道 (启动 2 秒后异步触发，之后每 15 分钟静默增量检查)
         self._auto_sync_timer = QTimer(self)
@@ -533,8 +527,17 @@ class IPOSubnewDetectorDialog(QMainWindow):
         self._auto_sync_timer.start(15 * 60 * 1000)
         QTimer.singleShot(2000, lambda: self._auto_sync_bottom_ipo_stocks(force=False))
 
-        # 立即启动首轮扫描
-        QTimer.singleShot(200, self.trigger_scan)
+        self._init_ui()
+        self._load_persisted_state()
+
+        # 首轮扫描自适应：
+        # 1. 若当前处于盘中交易时段，200ms 后自动触发首轮扫描；
+        # 2. 若当前为收盘/非交易时段：
+        #    - 若已有本地持久化信号缓存 (0秒瞬间满血直出)，保持安宁，绝不向外发起无谓网络请求重复跑！
+        #    - 仅在本地完全无缓存时才触发首轮初始化拉取。
+        is_trading, _ = self._check_is_trading_time()
+        if is_trading or not self.signals_map:
+            QTimer.singleShot(200, self.trigger_scan)
 
     def _init_ui(self):
         central = QWidget(self)
@@ -747,6 +750,16 @@ class IPOSubnewDetectorDialog(QMainWindow):
                         self.btn_perf.setText("📊 性能日志: 关")
                         self.btn_perf.setStyleSheet("")
 
+                self.auto_refresh_enabled = bool(data.get("auto_refresh_enabled", False))
+                if hasattr(self, "btn_auto"):
+                    self.btn_auto.setChecked(self.auto_refresh_enabled)
+                    if self.auto_refresh_enabled:
+                        self.btn_auto.setText("⏳ 自动轮询: 开")
+                        self.btn_auto.setStyleSheet("background-color: #1a3328; border-color: #00ff88; color: #00ff88; font-weight: bold;")
+                    else:
+                        self.btn_auto.setText("⏳ 自动轮询: 关")
+                        self.btn_auto.setStyleSheet("")
+
                 # ⚡ 冷启动核心：从持久化缓存中直接反序列化还原上次各标的的 VWAPDetectorSignal 信号全景
                 raw_sigs = data.get("cached_signals", {})
                 if isinstance(raw_sigs, dict):
@@ -812,6 +825,32 @@ class IPOSubnewDetectorDialog(QMainWindow):
         self.monitored_codes = list(dict.fromkeys(merged_codes))
         # 瞬间重建表格并填入已有的历史信号数据 (0秒直出)
         self._rebuild_table_rows()
+
+        # ⚡ 集中战情冷启动满血复原：从缓存信号瞬间激活集中交易调度中心，更新大盘情绪、领头羊与全表集中决议！
+        self._refresh_fleet_and_arbitrations_from_cached_signals()
+
+        # 启动后根据自动轮询状态与当前时段自适应决定是否休眠或调度
+        if getattr(self, "auto_refresh_enabled", False):
+            is_trading, status_text = self._check_is_trading_time()
+            if is_trading:
+                QTimer.singleShot(500, self.trigger_scan)
+            else:
+                pre_cnt = sum(1 for s in self.signals_map.values() if s.signal_type in ("PRE_ORDER", "BASE_PREORDER", "SWING_PREORDER"))
+                saved_time = data.get("saved_at", "") if (data and isinstance(data, dict)) else ""
+                saved_tip = f" (已加载存档: {saved_time})" if saved_time else ""
+                self.lbl_status.setText(
+                    f"🌙 非交易时段 ({status_text}) | 自动轮询智能休眠{saved_tip} | "
+                    f"✅ 监控中: {len(self.monitored_codes)} 只 | 🎯 预下单: {pre_cnt} 只"
+                )
+                self.refresh_timer.start(60000)
+        else:
+            saved_time = data.get("saved_at", "") if (data and isinstance(data, dict)) else ""
+            saved_tip = f" | 💾 存档时间: {saved_time}" if saved_time else ""
+            pre_cnt = sum(1 for s in self.signals_map.values() if s.signal_type in ("PRE_ORDER", "BASE_PREORDER", "SWING_PREORDER"))
+            self.lbl_status.setText(
+                f"✅ 监控中: {len(self.monitored_codes)} 只 | 🎯 预下单: {pre_cnt} 只{saved_tip}"
+            )
+
         # 清洗并写回持久化配置与双写镜像备份
         self.save_persisted_state()
 
@@ -907,6 +946,7 @@ class IPOSubnewDetectorDialog(QMainWindow):
                 "height": self.height()
             },
             "perf_log_enabled": getattr(self, "perf_log_enabled", False),
+            "auto_refresh_enabled": getattr(self, "auto_refresh_enabled", False),
             "saved_at": time.strftime("%Y-%m-%d %H:%M:%S")
         }
         tmp_file = cfg_file + f".tmp_{os.getpid()}"
@@ -1082,36 +1122,7 @@ class IPOSubnewDetectorDialog(QMainWindow):
             perf_text = f" | 批次: {batches}组 | 日线: {day_ms:.0f}ms | 分时: {bars_ms:.0f}ms"
 
         # 统一提交全池守护报告至集中交易调度中心，横向赛马冒泡排位，并刷新顶栏战情
-        try:
-            from ats.strategy.ipo_trading_center import IPOTradingCenter
-            trading_center = IPOTradingCenter.get_instance()
-            for s in self.signals_map.values():
-                trading_center.submit_stock_perception_report(s)
-            directives = trading_center.evaluate_fleet_and_generate_orders()
-            fleet_summary = trading_center.get_fleet_summary()
-            sentiment = trading_center.sentiment_engine.get_market_sentiment(list(self.signals_map.values()))
-
-            if hasattr(self, "lbl_market_sentiment"):
-                self.lbl_market_sentiment.setText(
-                    f"🌐 大盘: {sentiment.index_phase} (量比{sentiment.sh_volume_ratio:.2f}) | "
-                    f"新股梯队: {sentiment.heat_stage} (站稳率{sentiment.vwap_hold_ratio}%)"
-                )
-            if hasattr(self, "lbl_fleet_leader"):
-                self.lbl_fleet_leader.setText(
-                    f"🥇 爆款领头羊: {fleet_summary['top_leader_name']} ({fleet_summary['top_leader_score']}分)"
-                )
-            if hasattr(self, "lbl_fleet_action"):
-                if directives:
-                    top_d = directives[0]
-                    self.lbl_fleet_action.setText(f"🎯 集中决议 [{top_d.action}]: {top_d.name} {top_d.reason[:32]}...")
-                else:
-                    self.lbl_fleet_action.setText("🚢 集中交易决议: 紧盯 9:30-10:00 早鸟拔地而起 | 买错破 VWAP 立即出局")
-            
-            # 原地更新全表各行的全局仲裁与操盘决议 (消除各管一摊、不知山外有山盲区)
-            self._refresh_all_table_arbitrations()
-        except Exception as e:
-            logger.debug(f"更新集中交易调度战情异常: {e}")
-
+        self._refresh_fleet_and_arbitrations_from_cached_signals()
 
         self.lbl_status.setText(
             f"✅ 监控中: {len(self.monitored_codes)} 只 | "
@@ -1158,12 +1169,85 @@ class IPOSubnewDetectorDialog(QMainWindow):
                         self.table.setCurrentCell(r, 0)
                         break
 
-        # 只有在操盘手开启【⏳ 自动轮询: 开】时，才在上一轮全部完成 15 秒之后单次延时启动下一轮，绝不追尾抢跑！
+        # 🛡️ 智能交易时段守护：只有开启【⏳ 自动轮询: 开】时，按时段自适应启动下一轮
         if getattr(self, "auto_refresh_enabled", False):
-            self.refresh_timer.start(15000)
+            is_trading, status_text = self._check_is_trading_time()
+            if is_trading:
+                self.refresh_timer.start(15000)
+            else:
+                logger.debug(f"🌙 [收盘智能休眠] 当前非交易时段 ({status_text})，自动轮询智能休眠保活，降频至 60 秒心跳自检。")
+                self.lbl_status.setText(
+                    f"🌙 非交易时段 ({status_text}) | 自动轮询已智能休眠 (数据已持久化封存) | "
+                    f"✅ 监控中: {len(self.monitored_codes)} 只 | 🎯 预下单: {pre_cnt} 只"
+                )
+                self.refresh_timer.start(60000)
+
+    def _check_is_trading_time(self) -> Tuple[bool, str]:
+        """智能判定当前是否处于 A 股盘中交易时段"""
+        try:
+            from ats.tdx_realtime_fetcher import is_trading_time
+            return is_trading_time()
+        except Exception:
+            now = datetime.now()
+            if now.weekday() >= 5:
+                return False, "周末休市"
+            t_str = now.strftime("%H:%M:%S")
+            if ("09:15:00" <= t_str <= "11:35:00") or ("12:55:00" <= t_str <= "15:05:00"):
+                return True, "盘中连续交易"
+            return False, f"收盘休市 ({t_str})"
+
+    def _on_poll_timer_tick(self):
+        """【⏳ 自动轮询心跳分发】智能适配时段：盘中自动扫描，收盘后智能休眠节能，绝不高频重复拉取"""
+        if not getattr(self, "auto_refresh_enabled", False):
+            return
+        is_trading, status_text = self._check_is_trading_time()
+        if not is_trading:
+            pre_cnt = sum(1 for s in self.signals_map.values() if s.signal_type in ("PRE_ORDER", "BASE_PREORDER", "SWING_PREORDER"))
+            self.lbl_status.setText(
+                f"🌙 非交易时段 ({status_text}) | 自动轮询已智能休眠 (数据已持久化封存) | "
+                f"✅ 监控中: {len(self.monitored_codes)} 只 | 🎯 预下单: {pre_cnt} 只"
+            )
+            logger.debug(f"🌙 [收盘智能休眠] 非交易时段 ({status_text})，保持静默休眠，60 秒后再次心跳。")
+            self.refresh_timer.start(60000)
+            return
+        self.trigger_scan()
+
+    def _refresh_fleet_and_arbitrations_from_cached_signals(self):
+        """【⚡ 冷启动满血复原】从已有的 signals_map 瞬间推导集中调度中心战情与全表决议，0 毫秒呈现！"""
+        if not self.signals_map:
+            return
+        try:
+            from ats.strategy.ipo_trading_center import IPOTradingCenter
+            trading_center = IPOTradingCenter.get_instance()
+            for s in self.signals_map.values():
+                trading_center.submit_stock_perception_report(s)
+            directives = trading_center.evaluate_fleet_and_generate_orders()
+            fleet_summary = trading_center.get_fleet_summary()
+            sentiment = trading_center.sentiment_engine.get_market_sentiment(list(self.signals_map.values()))
+
+            if hasattr(self, "lbl_market_sentiment"):
+                self.lbl_market_sentiment.setText(
+                    f"🌐 大盘: {sentiment.index_phase} (量比{sentiment.sh_volume_ratio:.2f}) | "
+                    f"新股梯队: {sentiment.heat_stage} (站稳率{sentiment.vwap_hold_ratio}%)"
+                )
+            if hasattr(self, "lbl_fleet_leader"):
+                self.lbl_fleet_leader.setText(
+                    f"🥇 爆款领头羊: {fleet_summary['top_leader_name']} ({fleet_summary['top_leader_score']}分)"
+                )
+            if hasattr(self, "lbl_fleet_action"):
+                if directives:
+                    top_d = directives[0]
+                    self.lbl_fleet_action.setText(f"🎯 集中决议 [{top_d.action}]: {top_d.name} {top_d.reason[:32]}...")
+                else:
+                    self.lbl_fleet_action.setText("🚢 集中交易决议: 紧盯 9:30-10:00 早鸟拔地而起 | 买错破 VWAP 立即出局")
+
+            # 原地更新全表各行的全局仲裁与操盘决议 (消除各管一摊、不知山外有山盲区)
+            self._refresh_all_table_arbitrations()
+        except Exception as e:
+            logger.debug(f"满血复原集中交易战情提示: {e}")
 
     def _on_refresh_clicked(self):
-        """【🔄 立即刷新】清空底层全局历史静态缓存，强制全网重新同步全量最新数据"""
+        """【🔄 立即刷新】操盘手主动刷新：清空底层全局历史静态缓存，强制全网重新同步全量最新数据 (无论是否收盘均执行单次全量分析)"""
         try:
             from ats.tdx_realtime_fetcher import TDXRealtimeFetcher
             TDXRealtimeFetcher.get_instance().invalidate_static_history_cache()
@@ -1172,18 +1256,28 @@ class IPOSubnewDetectorDialog(QMainWindow):
         self.trigger_scan()
 
     def _on_toggle_auto_refresh(self, checked: bool):
-        """【⏳ 自动轮询开关】切换是否后台延时自动轮询 (默认关闭，避免不停重刷)"""
+        """【⏳ 自动轮询开关】切换是否后台延时自动轮询 (带持久化与收盘智能休眠)"""
         self.auto_refresh_enabled = checked
         if checked:
             self.btn_auto.setText("⏳ 自动轮询: 开")
             self.btn_auto.setStyleSheet("background-color: #1a3328; border-color: #00ff88; color: #00ff88; font-weight: bold;")
-            if not (self.worker and self.worker.isRunning()):
-                QTimer.singleShot(500, self.trigger_scan)
+            is_trading, status_text = self._check_is_trading_time()
+            if is_trading:
+                if not (self.worker and self.worker.isRunning()):
+                    QTimer.singleShot(500, self.trigger_scan)
+            else:
+                pre_cnt = sum(1 for s in self.signals_map.values() if s.signal_type in ("PRE_ORDER", "BASE_PREORDER", "SWING_PREORDER"))
+                self.lbl_status.setText(
+                    f"🌙 非交易时段 ({status_text}) | 自动轮询已智能休眠 (数据已持久化封存) | "
+                    f"✅ 监控中: {len(self.monitored_codes)} 只 | 🎯 预下单: {pre_cnt} 只"
+                )
+                self.refresh_timer.start(60000)
         else:
             self.btn_auto.setText("⏳ 自动轮询: 关")
             self.btn_auto.setStyleSheet("")
             if hasattr(self, "refresh_timer"):
                 self.refresh_timer.stop()
+        self.save_persisted_state()
 
     def _on_toggle_perf_log(self):
         """【📊 性能模式】切换控制台细粒度批次审计与耗时分析"""
