@@ -449,13 +449,12 @@ class IPOSubnewDetectorDialog(QMainWindow):
         self._render_timer = QTimer(self)
         self._render_timer.timeout.connect(self._flush_pending_renders)
 
-        # 0. 初始化全局实时行情 IPC 同步管理器 (为自定义扩展列连阳/DFF/ch_bc2等提供实时高速数据流)
+        # 0. 初始化新股次新专属实时行情 IPC 流式订阅管理器 (端口 26675，支持全量快照与增量广播实时推送)
         try:
-            from multi_period_strategy_engine import get_global_ipc_sync_manager
-            self.ipc_mgr = get_global_ipc_sync_manager()
-            if self.ipc_mgr and not getattr(self.ipc_mgr, '_listener_running', False):
-                self.ipc_mgr.start()
-        except Exception:
+            from ats.network.tk_ipc_subscriber import get_ipo_ipc_subscriber
+            self.ipc_mgr = get_ipo_ipc_subscriber(data_callback=self._on_tk_stream_data, auto_start=True)
+        except Exception as e_ipcmgr:
+            logger.debug(f"初始化专属 IPC 流式订阅管理器异常: {e_ipcmgr}")
             self.ipc_mgr = None
 
         self._init_ui()
@@ -2110,6 +2109,44 @@ class IPOSubnewDetectorDialog(QMainWindow):
                                     self._update_table_row_data(self.signals_map[cd], target_row=r, manage_sorting=False)
             except Exception as e_ipcdf:
                 logger.debug(f"从 IPC 获取实时行情异常: {e_ipcdf}")
+
+    def _on_tk_stream_data(self, df: pd.DataFrame):
+        """
+        【⚡ TK 流式数据直达回调】
+        由 TKIPCSubscriber 后台线程推流触发，支持增量合并后的最新全局行情快照。
+        0 阻塞网络请求，直通刷新监控池标的的实时行情。
+        """
+        if df is None or df.empty:
+            return
+        try:
+            self.ipc_df = df
+            def _ui_update():
+                try:
+                    if getattr(self, "_is_table_updating", False):
+                        return
+                    for r in range(self.table.rowCount()):
+                        it_c = self.table.item(r, 0)
+                        if not it_c:
+                            continue
+                        code = "".join(ch for ch in it_c.text().strip() if ch.isdigit()).zfill(6)
+                        if code in df.index:
+                            row_data = df.loc[code]
+                            sig = self.signals_map.get(code)
+                            if sig:
+                                if 'trade' in row_data and pd.notna(row_data['trade']) and float(row_data['trade']) > 0:
+                                    sig.price = float(row_data['trade'])
+                                if 'changepercent' in row_data and pd.notna(row_data['changepercent']):
+                                    sig.change_pct = float(row_data['changepercent'])
+                                if sig.vwap > 0:
+                                    sig.vwap_diff_pct = (sig.price - sig.vwap) / sig.vwap * 100.0
+                                    sig.is_above_vwap = sig.price >= sig.vwap
+                                self._update_table_row_data(sig, target_row=r, manage_sorting=False)
+                except Exception as e:
+                    logger.debug(f"UI 刷新流式数据异常: {e}")
+
+            QTimer.singleShot(0, _ui_update)
+        except Exception as e:
+            logger.debug(f"_on_tk_stream_data 异常: {e}")
 
 
 

@@ -1,3 +1,31 @@
+## 2026-09-18 21:05
+- [x] **【SBC 走势图左右方向键移动查价对齐通达信、鼠标点击 K 线/分时图锁定十字查价线与当时情况数据 HUD 浮动看板上线】(`ats/ui/intraday_strategy_dialog.py`, `tests/test_sbc_crosshair_arrow_keys_navigation.py`, `20260918_2105_task.md`)**：
+    - [x] **操盘手现场明确指示与交互痛点对齐 (P0)**：
+        - “sbc的中的左右方向键功能当点击行情视图中对齐通达信,鼠标点击k线或者分时图,左右键可以移动查看当时情况数据”；
+        - 彻底解耦左右方向键被周期轮转挤占的问题，周期轮转专归 A/D 键与数字直选；左右方向键（←/→）全面回归通达信经典查价导航。
+    - [x] **全体系工程落地与功能实现 (KISS / SOLID / DRY)**：
+        1. **查价十字线状态机与鼠标点击锁定 (`SBCChartCanvas`)**：
+           - 引入 `_crosshair_active` 与 `_crosshair_idx` 状态；
+           - 监听鼠标左键单击（位移 `<= 4px` 且未拖拽平移/框选），精准计算反推点击所处的 Bar 索引，将十字查价线锁定吸附在该点，并自动赋予画布键盘强焦点；
+           - 右键单击画布或空白区域同步重置并退出十字查价线。
+        2. **左右方向键（←/→）查价移动与边界跨屏平移 (`move_crosshair`)**：
+           - 按 ← 键向左移动一根 Bar，按 → 键向右移动一根 Bar；
+           - 智能跨屏边界处理：移动超出可视区域左边界时，若有更早历史数据，自动平移可视窗口（`_zoom_start_idx -= 1`）让历史 K 棒露出来；右边界同理；
+           - 主窗口 `keyPressEvent` 与全局 `eventFilter` 双保险穿透，焦点在子控件时也能顺畅操作。
+        3. **Esc 键阶梯防误触机制**：
+           - 处于查价锁定状态时，按下 Esc 键优先退出十字查价线，绝不误关闭窗口；
+           - 仅在未激活查价线时，Esc 才按全局配置执行关窗或清除高亮。
+        4. **通达信同款【当时情况数据 HUD 浮动看板】与智能避让**：
+           - 避让算法：十字线位于右半区时看板悬浮在左上角；位于左半区时看板悬浮在右上角，绝不遮挡当前 K 棒；
+           - K 线模式完整呈现：代码、名称、周期、时间、开盘、最高、最低、收盘、涨跌额、涨跌幅（涨红跌绿）、振幅、成交量、通道上轨/下轨；
+           - 分时模式完整呈现：分时现价、VWAP 均价、涨跌幅（涨红跌绿）、偏离均价%（正红负绿）、成交量；
+           - 暗黑微光底色，科技蓝精致圆角细边框，高对比清晰易读。
+        5. **底部状态栏提示文本同步对齐**：
+           - 更新为 `📈 [周期轮转] 当前周期: 【{mode}】 (快捷键: A/D 轮转周期, ←/→ 移动查价, 1~9 直选, S 日志, F 联动, Esc 退出光标/关闭)`。
+        6. **全量自动化测试 100% 验证通过 (42/42 PASSED)**：
+           - 专项测试 `tests/test_sbc_crosshair_arrow_keys_navigation.py` 4/4 全部通过；
+           - 关联测试集（`test_tabs_double_click_sbc_unification.py`、`test_sbc_ats_mode_alt_exit_guard_and_paste.py`、`test_sbc_zoom_and_amplitude.py`、`test_time_slice_persistence_and_sbc_two_line.py`、`test_sbc_period_switch_zero_io_and_speed.py`、`test_ipo_fleet_trading_arbitration.py`、`test_ipo_detector_column_widths_persistence.py`）等 42 项测试全部绿灯通过！
+
 ## 2026-09-18 14:25
 - [x] **【重点关注、MA20d回调、新股次新四大 Tab 看板双击全面直通 SBC 走势窗口 & 右键菜单完整对齐】(`ats/ui/favorite_panel.py`, `ats/ui/swing_table.py`, `ats/ui/new_stock_panel.py`, `ats/ui/base_table.py`, `ats/ui/main_window.py`, `tests/test_tabs_double_click_sbc_unification.py`)**：
     - [x] **操盘手现场明确指示与交互统一 (P0)**：
