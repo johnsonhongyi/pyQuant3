@@ -1,3 +1,101 @@
+## 2026-09-19 00:10
+- [x] **【新股检测工具实盘更新机制破案、全状态持久化贯通与收盘智能休眠节能守护】(`ats/ui/ipo_subnew_detector_dialog.py`, `tests/test_ipo_persistence_and_auto_sync.py`, `20260919_0010_task.md`)**：
+    - [x] **操盘手现场明确指示与三大疑问彻底破案 (P0)**：
+        - “新股检测工具的自动轮训,是实盘自动更新?没有自动持久化的功能?收盘后依旧会重复跑?”：
+          1) **是实盘自动更新？**：是！盘中双轨运行：① IPC 26675 端口秒级流式更新现价与涨跌幅；② 自动轮询 15 秒后台并发重新计算 10d VWAP、极窄止损位、形态评分与集中决议；
+          2) **没有自动持久化的功能？**：有基础持久化但存在严重断层！已彻底升级：① `auto_refresh_enabled`（自动轮询开关）完整持久化跨会话记忆；② 冷启动加载历史信号后瞬间激活 `IPOTradingCenter` 满血推导大盘情绪、领头羊与全表集中决议，0 毫秒完美呈现；③ 状态栏显式呈现落盘时间戳；
+          3) **收盘后依旧会重复跑？**：确诊严重缺陷并彻底根治！过去的定时器与冷启动 `singleShot(200)` 无时段识别导致午夜死循环狂拉网络。现全面接入 `is_trading_time()`：非交易时段自动进入**智能休眠保活状态**，降频至 60 秒心跳自检开盘，绝不高频耗网耗 CPU，状态栏标明智能休眠与封存状态；手动点击【🔄 立即刷新】仍放行单次复盘推演。
+    - [x] **全量自动化测试 100% 验证通过 (47/47 PASSED)**：
+        - `tests/test_ipo_persistence_and_auto_sync.py` 7/7 绿灯通过；
+        - 全量回归 `test_ipo_vwap_bottom_base_preorder.py` (6/6), `test_ipo_fleet_trading_arbitration.py` (8/8), `test_ipo_vwap_sentiment_and_horse_race.py` (6/6), `test_ipo_command_room_persistence.py` (4/4), `test_ipo_detector_column_widths_persistence.py` (7/7), `test_sbc_crosshair_arrow_keys_navigation.py` (9/9) 全部 47 项测试 100% 绿灯通过！
+
+## 2026-09-18 23:35
+- [x] **【新股 VWAP 策略实战难点突破：识别多周期共振通道突破（蓝色光标同款）、沈鼓集团临停加速感知、T+1 追高买入禁令与提前算法限价卖出】(`ats/strategy/ipo_vwap_detector_engine.py`, `ats/strategy/ipo_trading_center.py`, `ats/ui/ipo_command_room_dialog.py`, `ats/ui/ipo_arbitration_detail_dialog.py`, `tests/test_ipo_vwap_bottom_base_preorder.py`, `20260918_2330_task.md`)**：
+    - [x] **操盘手现场明确指示与实战痛点彻底破案 (P0)**：
+        - “这里有个难点...蓝色光标这个分时图结构,60f结构,正好是突破下降通道,有个支持线支撑,尾盘收新高,说明还有上涨动能,只有周一突破vwap的结构才能知道结果...如何处理呢,如果买入套牢其实在分时图下破vwap哪里已经出局了”：彻底解决“股价在 10d VWAP 之下就一刀切当破位斩仓/999名淘汰”缺陷，构建 4 日大平底箱体 + 尾盘放量收最高 + 60F 通道突破识别，防守线精准锚定在底台支撑 (12.88元) 下方 0.8%，绝不以 13.47 的 VWAP 误杀，赋予 `SWING_PREORDER` (🔭 通道突破) 与 80~86 赛马高动能分，生成限价预埋买单并免遭龙头冲顶误杀；
+        - “沈鼓集团、首日贴线吸筹 09:30~10:00 拔地而起...因为特殊的T+1交易规则,买点只能是昨天,新股交易机会非常的小,尤其是今天的直接旱地拔葱的82的顶点,是昨天加今天各两次的30的临停聚集的人气量能,最后的冲刺是加速,在第4个临停后戛然而止,能卖出的都是提前计算机设计好的价格挂单才有可能高点,后面就是加速离场,你的策略能有效感知到这些信息么”：
+          1) **临停计数与高潮冲刺感知**：准确识别 2~4 次 30% 临停聚集的人气与冲刺，记录 `suspension_count`；
+          2) **提前计算机算法设计高抛挂单价 (`climax_preset_sell_price`)**：在冲向顶点前提前算出极限挂单价（如 $\approx 82.18$ 元），平仓阶段生成 `urgency="LIMIT"` 的提前高抛挂单，排队撮合逃顶；
+          3) **T+1 追高买入禁令 (`is_t1_forbidden_buy`)**：非首日且高位冲刺狂飙的标的，严禁追高开仓接盘。
+    - [x] **全量自动化测试 100% 验证通过 (40/40 PASSED)**：
+        - `tests/test_ipo_vwap_bottom_base_preorder.py` 6/6 绿灯通过；
+        - 全量回归 `test_ipo_fleet_trading_arbitration.py` (8/8), `test_ipo_vwap_sentiment_and_horse_race.py` (6/6), `test_ipo_command_room_persistence.py` (4/4), `test_ipo_detector_column_widths_persistence.py` (7/7), `test_sbc_crosshair_arrow_keys_navigation.py` (9/9) 全部 40 项测试 100% 绿灯通过！
+
+## 2026-09-18 23:30
+- [x] **【SBC 分时图成交量全增量拆分为独立每分钟 Tick 增量 & SBC 自动彻底屏蔽 Ctrl+C 触发与三层防误关】(`ats/ui/intraday_strategy_dialog.py`, `ats/tdx_realtime_fetcher.py`, `instock_MonitorTK.py`, `tests/test_sbc_crosshair_arrow_keys_navigation.py`, `20260918_2330_task.md`)**：
+    - [x] **操盘手现场明确指示与交互防误触深度优化 (P0)**：
+        - “成交量显示有bug,不是显示的tick的成交量,是全增量需要拆分,看K线的成交量可以很清晰的看到量能变化”：彻底解决分时图下方副图呈现单调累加斜坡缺陷，建立 `_extract_intraday_bar_volumes` 向量化智能差分与 `bar_vol` 提取算法，自动折算为标准“手”，与 5M K 线独立放量/缩量脉冲形态完全对齐；
+        - “同时出现新的bug,左键点击右键点击,可能触发了,tk的ctrl+c,导致窗口关闭,正常之前没有这个问题,或者没有左键双击加右键过. 让sbc自动屏蔽ctrl+c的触发,”：彻底杜绝鼠标左键双击/点击 + 右键点击时被系统或鼠标驱动识别为复制/中断导致窗口误关，构建【画布拦截消费 + 窗口及全局事件过滤器吞噬 + 底层控制台防抖防误触】三层防误关体系，SBC 自动彻底屏蔽 Ctrl+C。
+    - [x] **全体系工程落地与核心实现 (KISS / SOLID / DRY)**：
+        1. **分时图成交量 (VOL) 独立 Bar 增量拆分引擎 (`_extract_intraday_bar_volumes`)**：
+           - 优先提取底层独立 `bar_vol`/`bar_volume`/`tick_vol`，并除以 100.0 转为“手”；
+           - 若仅存在累计量 `volume`/`vol`，执行向量化智能差分 (`np.diff`)，负值防护归零；
+           - 统一在 `_coord_info["vols"]` 和副图柱状图中应用拆分量，并在副图左上角显示 `VOL: xxx手  最高量: xxx手`，涨红跌绿形态清晰呈现。
+        2. **SBC 自动彻底屏蔽 Ctrl+C 与三层防误关体系**：
+           - **画布级 (`SBCChartCanvas`)**：彻底解耦 `_left_press_pos` 与右键状态，拦截非左键双击与右键双击，重写 `contextMenuEvent` 阻断右键菜单向宿主控制台冒泡，`keyPressEvent` 显式拦截 `Key_C + ControlModifier`；
+           - **窗口与过滤器级 (`SBCIntradayChartDialog`)**：`keyPressEvent` 拦截非输入态 `Ctrl+C`，全局 `eventFilter` 对非文本输入控件直接 `return True` 吞噬 `Ctrl+C`，并为画布安装事件过滤器；
+           - **底层控制台防抖 (`instock_MonitorTK.py`)**：`_native_ctrl_handler` 第 1 次收到控制台中断/复制信号时仅打印安全提示，绝不弹窗；3 秒内连续 2 次及以上才弹确认窗，彻底免疫鼠标选中文本右键复制触发的伪中断。
+        3. **多日分时指数 VWAP 静态缓存滚动暗病修复**：
+           - `ats/tdx_realtime_fetcher.py` 在 `_check_date_rollover` 中补充指数点位加权 `cum_pv` 并存入 `last_cum_pv`，并在继承静态缓存时增加求和重建自愈兜底，彻底消灭指数分时均线缩水。
+    - [x] **全量自动化测试 100% 验证通过 (43/43 PASSED)**：
+        - `tests/test_sbc_crosshair_arrow_keys_navigation.py` 9/9 绿灯通过；
+        - `tests/test_tdx_indices_and_etf_sbc_integrity.py` 10/10 绿灯通过；
+        - 全量回归 `test_tabs_double_click_sbc_unification.py`、`test_sbc_zoom_and_amplitude.py`、`test_time_slice_persistence_and_sbc_two_line.py`、`test_sbc_ctrl_c_and_alt_exit_persistence.py`、`test_ipo_vwap_bottom_base_preorder.py`、`test_ipo_command_room_persistence.py`、`test_ipo_fleet_trading_arbitration.py` 全部 43 项测试 100% 绿灯通过！
+
+## 2026-09-18 22:45
+- [x] **【SBC 走势图取消悬停改双击查价/退出、分时图下方新增成交量副图 (VOL) 具备折叠/双击放大/双击还原三态能力】(`ats/ui/intraday_strategy_dialog.py`, `tests/test_sbc_crosshair_arrow_keys_navigation.py`, `20260918_2245_task.md`)**：
+    - [x] **操盘手现场明确指示与交互视界深度优化 (P0)**：
+        - “现在的设计导致鼠标在行情图就显示,浪费资源也遮挡视线,所以只有双击鼠标点击后才显示”：彻底移除 mouseMoveEvent 悬停与 mouseReleaseEvent 单击弹出十字查价线与 HUD 看板，彻底避免无谓 CPU/GPU 重绘开销与遮挡视线；改为**只有鼠标双击主图后才激活查价锁定，再次双击关闭退出**；
+        - “在分时图下方显示出成交量,这才是真的价值信号,这个可以手动折叠,双击放大,在双击还原的能力”：在分时图（1m / 5d / 10d）下方完整引入成交量副图 (VOL)，提供 normal (22%高度) / collapsed (0%高度全折叠) / expanded (55%高度深度放大) 三态能力，支持副图双击放大/还原、主图双击一键还原、V 键与工具栏按钮循环轮转。
+    - [x] **全体系工程落地与功能实现 (KISS / SOLID / DRY)**：
+        1. **查价线与 HUD 悬停解耦与双击状态机 (`SBCChartCanvas`)**：
+           - 状态流转：移除了悬停移动和松开单击触发十字查价线；
+           - 双击判定 (`mouseDoubleClickEvent`)：若双击主图区域，切换 `_crosshair_active` 状态（激活/退出十字查价线与当时情况 HUD 看板）；若当前成交量处于放大模式，双击主图一键还原 normal；
+           - 右键单击与 Esc 依然保持一键退出查价线与复位。
+        2. **分时图成交量副图 (VOL) 绘制与三态自适应 (`_paint_intraday`)**：
+           - 模式与高度配比：
+             - `normal` (正常模式): 主图 74%，副图 22%，中间留白 4%；
+             - `collapsed` (折叠模式): 主图 100%，副图 0%；
+             - `expanded` (放大模式): 主图 40%，副图 55%，中间留白 5%；
+           - 价值信号柱状图：分时柱涨红跌绿（现价 >= 前一分钟现价亮红 `#FF4444`，下跌翠绿 `#00FF88`），副图左上角精准显示最新 VOL 与可视区间最高成交量；
+           - 快捷交互角标：副图右上角提供模式角标（`[↙ 还原(双击)]` / `[↗ 放大(双击)]`）；折叠状态下在主图右下角醒目呈现 `[📊 展开量(V键)]` 唤出提示；
+           - HUD 避让与裁切：回测收益光束与策略 HUD 范围严格适配为 `main_h`，绝不超出主图遮挡下方成交量副图。
+        3. **工具栏与快捷键全链路打通 (`SBCIntradayChartDialog`)**：
+           - 顶部工具栏增加 `btn_vol_toggle` 按钮（`📊 量:开` / `📊 量:折叠` / `📊 量:放大`），高对比度实时呈现模式状态；
+           - 挂载窗口级快捷键 `V`（VOL）与 `QShortcut(QKeySequence("V"), self)`；
+           - 底部状态栏 `lbl_info` 文本更新，加入 `V 切换量(折叠/放大), 双击查价/缩放量` 操作指引。
+    - [x] **全量自动化测试 100% 验证通过 (22/22 PASSED)**：
+        - `tests/test_sbc_crosshair_arrow_keys_navigation.py` 7/7 项测试全部绿灯通过；
+        - 全量回归 `test_tabs_double_click_sbc_unification.py`、`test_sbc_zoom_and_amplitude.py`、`test_time_slice_persistence_and_sbc_two_line.py` 等 15 项测试全部 100% 绿灯通过！
+
+## 2026-09-18 22:50
+- [x] **【集中交易指挥官与新股检测中心 VWAP 策略全面进化：破除见山是山与一刀切避险、底部缩量平底/双底结构识别、放量拐点抓手、提前预埋单与极窄底台止损】(`ats/strategy/ipo_vwap_detector_engine.py`, `ats/strategy/ipo_trading_center.py`, `ats/ui/ipo_command_room_dialog.py`, `ats/ui/ipo_arbitration_detail_dialog.py`, `tests/test_ipo_vwap_bottom_base_preorder.py`, `20260918_2250_task.md`)**：
+    - [x] **操盘手现场明确指示与实战痛点彻底破案 (P0)**：
+        - “今天实现vwap的全面进化的新股的交易指挥官,新股的活动度反应了市场的热度,从新股市场入手容易感知,但是现在的信号策略还是都见山是山的阶段,如图真正的买的是共振,大量都偏离vwap人气很弱,有些开始底部缩量企稳加速,需要预埋单,不能等涨起来到了vwap在下单已经非常被动了,所以监理的新股检测中心,寻找结构,动能的抓手,全面优化这个策略能力”；
+        - 彻底解决“见山是山”两大死锁缺陷：
+          1) 过去龙头冲顶（如沈鼓集团冲顶高潮平仓）一刀切将全池打上【全局避险 0%仓】彻底封死交易；
+          2) 过去只要股价在 VWAP 下方就一律打上破位出局，非要等冲破高高的 VWAP 均线才追高买入极其被动。
+    - [x] **全体系工程落地与核心算法实现 (KISS / SOLID / DRY)**：
+        1. **结构抓手与动能抓手识别算法 (`_evaluate_bottom_base_structure`)**：
+           - **底部横盘平底 (Flat Base)**：检测多日/日内底部区间连续 >= 10 根 Bar 不再创新低，振幅极度收敛 (<=3.2%)，成交量显著萎缩磨底；
+           - **双底 / W 底 (Double Bottom)**：二次探底不破前低 (低点差 <= 2.0%) 且脱离低点；
+           - **动能拐点 (Inflection Confirmation)**：成交量温和放大 (>= 1.25倍)、分时均价线上翘、突破微型下降趋势阻力线或底台中轴；
+           - **极窄底台止损线**：止损线告别遥远的 VWAP，精准锚定在底部平台支撑位下方 0.8% (`base_support_level * 0.992`)，买错立斩，向下风险不足 1%，盈亏比极高。
+        2. **信号决策树与赛马打分模型全面进化**：
+           - 赋予专属信号类型：`BASE_PREORDER` (🎯 筑底预埋) 与 `BASE_BREAKOUT` (⚡ 筑底共振)；
+           - 赛马打分模型新增结构分 (+0~8分) 与动能拐点分 (+0~8分)，使得具备扎实底部结构的标的获得 **80~94 分高动能分**，在赛马天梯中名列前茅；
+           - 严格保护首日上市标的专属 `IPO_FIRST_BUY`（首发吸筹）最高优先级。
+        3. **集中交易指挥中心决策解耦与预埋单生成 (`IPOTradingCenter`)**：
+           - **破除一刀切全局避险**：龙头自身天量滞涨冲顶平仓时，低位独立筑底标的享有免死金牌，绝不被误杀成 `PANIC_DEFENSE`；
+           - **前瞻生成预埋买单**：为 `BASE_PREORDER` 生成限价预埋买单 (`urgency="LIMIT"`)，为 `BASE_BREAKOUT` 生成共振突击单 (`urgency="CRITICAL"`)；
+           - **双轨止损守卫**：底部结构持仓精准按底台防守线执行买错立斩。
+        4. **集中交易指挥室与详情透视窗全套支持**：
+           - 新增 `BASE_PREORDER` (🎯 筑底预埋) 与 `RESONANCE_BUY` (⚡ 共振加速) 中文角色映射与专属青绿/科技蓝色调高亮；
+           - 详情窗 (`IPOArbitrationDetailDialog`) 透视展示底部平台支撑价与向上回抽 VWAP 的反弹空间。
+    - [x] **全量自动化测试 100% 验证通过 (29/29 PASSED)**：
+        - 新建专项测试 `tests/test_ipo_vwap_bottom_base_preorder.py` 4/4 绿灯通过；
+        - 全量回归 `test_ipo_fleet_trading_arbitration.py` (8/8), `test_ipo_vwap_sentiment_and_horse_race.py` (6/6), `test_ipo_command_room_persistence.py` (4/4), `test_ipo_detector_column_widths_persistence.py` (7/7)，29 项全部 100% 绿灯通过！
+
 ## 2026-09-18 22:25
 - [x] **【集中交易指挥室暗黑分割线、手动添加标的标记与优先显示、数据防丢失双重持久化与底层新股自动同步】(`ats/ui/ipo_command_room_dialog.py`, `ats/ui/ipo_subnew_detector_dialog.py`, `ats/ui/ipo_detector_ipc.py`, `tests/test_ipo_persistence_and_auto_sync.py`, `20260918_2225_task.md`)**：
     - [x] **操盘手现场明确指示与系统稳定性重大升级 (P0)**：

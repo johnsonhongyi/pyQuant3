@@ -1087,13 +1087,18 @@ class TDXGlobalCachePool:
                     new_records = []
                     cum_vol = 0.0
                     cum_amt = 0.0
+                    cum_pv = 0.0
+                    is_idx_code = (c_clean.startswith("999") or c_clean.startswith("399") or c_clean == "899050" or c_clean in ("000001", "000300", "000688"))
                     for d in unique_dates:
                         if d in keep_dates:
                             for r in date_dict[d]:
                                 b_vol = float(r.get("bar_vol", r.get("vol", 0.0)))
                                 b_amt = float(r.get("bar_amt", r.get("amount", 0.0)))
+                                p_cl = float(r.get("close", 0.0))
                                 cum_vol += b_vol
                                 cum_amt += b_amt
+                                if is_idx_code:
+                                    cum_pv += p_cl * b_vol
                                 r_copy = dict(r)
                                 r_copy["bar_vol"] = b_vol
                                 r_copy["bar_amt"] = b_amt
@@ -1102,7 +1107,10 @@ class TDXGlobalCachePool:
                                 r_copy["amount"] = cum_amt
                                 r_copy["cum_vol_shares"] = cum_vol
                                 r_copy["cum_amt"] = cum_amt
-                                r_copy["vwap"] = round(cum_amt / cum_vol, 2) if (cum_vol > 0 and cum_amt > 0) else float(r.get("close", 0.0))
+                                if is_idx_code:
+                                    r_copy["vwap"] = round(cum_pv / cum_vol, 2) if cum_vol > 0 else p_cl
+                                else:
+                                    r_copy["vwap"] = round(cum_amt / cum_vol, 2) if (cum_vol > 0 and cum_amt > 0) else p_cl
                                 new_records.append(r_copy)
 
                     if new_records:
@@ -1112,6 +1120,7 @@ class TDXGlobalCachePool:
                             "records": new_records,
                             "last_cum_vol": cum_vol,
                             "last_cum_amt": cum_amt,
+                            "last_cum_pv": cum_pv,
                             "updated_at": time.time()
                         }
                         rolled_stocks += 1
@@ -2848,6 +2857,8 @@ class TDXRealtimeFetcher:
                         "volume": cum_vol_shares / 100.0,
                         "vol": cum_vol_shares / 100.0,
                         "amount": cum_amt,
+                        "bar_vol": vol_shares,
+                        "bar_amt": amt,
                         "turnover": to_rate,
                         "turnover_rate": to_rate
                     })
@@ -3009,6 +3020,9 @@ class TDXRealtimeFetcher:
                     cum_vol_shares = float(hist_entry.get("last_cum_vol", 0.0))
                     cum_amt = float(hist_entry.get("last_cum_amt", 0.0))
                     cum_pv = float(hist_entry.get("last_cum_pv", 0.0))
+                    # 🌟 [自愈兜底] 若为指数且缺少 last_cum_pv，从 hist_records 的点位与量快速重建累计 pv，杜绝均线缩水
+                    if is_idx and cum_pv <= 0.0 and hist_records:
+                        cum_pv = sum(float(r.get("close", 0.0)) * float(r.get("bar_vol", 0.0)) for r in hist_records)
 
                 today_dates = sorted(df["date_str"].unique())
                 latest_date = today_dates[-1] if today_dates else today_date_str

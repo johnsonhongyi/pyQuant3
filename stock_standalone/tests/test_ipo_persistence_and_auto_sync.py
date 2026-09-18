@@ -199,3 +199,54 @@ def test_auto_sync_bottom_ipo_stocks(monkeypatch):
         assert "688837" in dlg.monitored_codes
     finally:
         dlg.close()
+
+
+def test_auto_polling_smart_sleep_and_cold_start_full_restoration(monkeypatch):
+    """测试新股检测工具收盘后智能休眠与冷启动战情满血复原"""
+    from ats.ui.ipo_subnew_detector_dialog import IPOSubnewDetectorDialog
+    from ats.strategy.ipo_vwap_detector_engine import VWAPDetectorSignal
+
+    dlg = IPOSubnewDetectorDialog()
+    try:
+        # 1. 模拟注入测试信号
+        sig = VWAPDetectorSignal(
+            code="601091",
+            name="沈鼓集团",
+            price=82.0,
+            change_pct=195.0,
+            vwap=19.64,
+            vwap_diff_pct=317.0,
+            structure_tag="[50分 09:30] 极限拔地而起",
+            signal_type="EXTREME_CLIMAX",
+            signal_level="🚨 高潮冲刺",
+            signal_desc="连续临停高潮冲刺",
+            stop_loss_price=80.0,
+            update_time="15:00:00"
+        )
+        dlg.signals_map["601091"] = sig
+
+        # 2. 测试收盘非交易时段智能休眠
+        monkeypatch.setattr(dlg, "_check_is_trading_time", lambda: (False, "收盘休市 (15:30:00)"))
+        dlg._on_toggle_auto_refresh(True)
+        assert dlg.auto_refresh_enabled is True
+        # 确认非交易时段下未启动后台 worker 狂跑，而是进入休眠
+        assert dlg.worker is None or not dlg.worker.isRunning()
+        assert "智能休眠" in dlg.lbl_status.text()
+        assert "非交易时段" in dlg.lbl_status.text()
+
+        # 3. 测试持久化与冷启动满血复原
+        dlg.save_persisted_state()
+        
+        # 模拟冷启动新建窗口
+        dlg2 = IPOSubnewDetectorDialog()
+        try:
+            assert dlg2.auto_refresh_enabled is True, "自动轮询状态应被持久化恢复"
+            assert "601091" in dlg2.signals_map, "信号应被持久化还原"
+            # 确认集中战情已满血推导
+            assert "沈鼓集团" in dlg2.lbl_fleet_leader.text() or "🥇" in dlg2.lbl_fleet_leader.text()
+            assert "集中" in dlg2.lbl_fleet_action.text() and "决议" in dlg2.lbl_fleet_action.text()
+        finally:
+            dlg2.close()
+    finally:
+        dlg.close()
+
