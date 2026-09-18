@@ -3450,6 +3450,9 @@ class SBCIntradayChartDialog(QWidget):
         self.main_workbench = parent.window() if parent else None
         super().__init__(None)
 
+        # 💡 标记当前窗口是否由 ATS 打开 (非独立 --sbc-holdings 启动器模式)
+        self._is_ats_mode = (self.main_workbench is not None) or (os.environ.get("SBC_IS_HOLDINGS_LAUNCHER") != "1")
+
         self.code = str(code).zfill(6)
         self.engine = engine if engine else IntradayStrategyEngine.get_instance()
         self._initial_period_mode = initial_period_mode
@@ -4296,16 +4299,43 @@ class SBCIntradayChartDialog(QWidget):
                     self.canvas.update()
             event.accept()
             return
-        # 💡 [NEW] 快捷键全部退出并持久化：Ctrl+Shift+Q 或 Alt+Escape
+        # 💡 [NEW] 快捷键全部退出并持久化：Ctrl+Shift+Q 或 Alt+Escape 或 Alt+X
         if (key == Qt.Key.Key_Q and (modifiers & Qt.KeyboardModifier.ControlModifier) and (modifiers & Qt.KeyboardModifier.ShiftModifier)) or \
-           (key == Qt.Key.Key_Escape and (modifiers & Qt.KeyboardModifier.AltModifier)):
-            self._exit_and_save_all()
+           (key == Qt.Key.Key_Escape and (modifiers & Qt.KeyboardModifier.AltModifier)) or \
+           (key == Qt.Key.Key_X and (modifiers & Qt.KeyboardModifier.AltModifier)):
+            if self.is_ats_sbc_mode():
+                logger.info("ℹ️ [SBC快捷键] 当前处于 ATS 模式，忽略 Alt+全部关闭功能，仅安全关闭当前窗口。")
+                self.close()
+            else:
+                self._exit_and_save_all()
             event.accept()
             return
         super().keyPressEvent(event)
 
+    def is_ats_sbc_mode(self) -> bool:
+        """
+        【🛡️ ATS 看板模式判定】判断当前 SBC 窗口是否由 ATS 打开 (非独立 --sbc-holdings 启动器模式)
+        - 只有当环境变量显式声明为 SBC_IS_HOLDINGS_LAUNCHER == "1" 且窗口无 ATS 属主时，才属于 --sbc-holdings 模式；
+        - 所有通过 ATS 打开的 SBC 走势窗口，一律认定为 ATS 模式；
+        - ATS 模式下操盘手按住 Alt 点击关闭或按 Alt+X 快捷键时，严格忽略全部退出功能，仅关闭当前窗口。
+        """
+        # 若带有父级 ATS 工作台，则 100% 属于 ATS 模式
+        if getattr(self, 'main_workbench', None) is not None:
+            return True
+        # 若环境变量未声明为独立持仓启动器模式，则 100% 属于 ATS 模式
+        if os.environ.get("SBC_IS_HOLDINGS_LAUNCHER") != "1":
+            return True
+        # 若实例显式标记了 _is_ats_mode 为 True
+        if getattr(self, '_is_ats_mode', False):
+            return True
+        return False
+
     def _exit_and_save_all(self):
         """【🛑 全部退出并持久化】持久化保存所有已打开的盯盘窗口并安全退出"""
+        if self.is_ats_sbc_mode():
+            logger.info("ℹ️ [SBC退出] 当前处于 ATS 模式，严格忽略全部退出功能，仅关闭当前窗口。")
+            self.close()
+            return
         try:
             from run_sbc import quit_and_save_all_sbc_windows
             quit_and_save_all_sbc_windows()
@@ -4592,17 +4622,20 @@ class SBCIntradayChartDialog(QWidget):
             pass
 
         if is_alt_pressed:
-            logger.info("🛑 [SBC退出] 检测到操盘手按住 Alt 点击关闭键，触发全部盯盘窗口一键退出并持久化！")
-            try:
-                from run_sbc import quit_and_save_all_sbc_windows
-                quit_and_save_all_sbc_windows()
-            except Exception as e:
-                logger.warning(f"Alt退出持久化异常: {e}")
-                app_inst = QApplication.instance()
-                if app_inst:
-                    app_inst.quit()
-            event.accept()
-            return
+            if self.is_ats_sbc_mode():
+                logger.info("ℹ️ [SBC关闭] 当前处于 ATS 模式，严格忽略 Alt+全部关闭功能，仅正常关闭当前个股窗口。")
+            else:
+                logger.info("🛑 [SBC退出] 检测到操盘手按住 Alt 点击关闭键，触发全部盯盘窗口一键退出并持久化！")
+                try:
+                    from run_sbc import quit_and_save_all_sbc_windows
+                    quit_and_save_all_sbc_windows()
+                except Exception as e:
+                    logger.warning(f"Alt退出持久化异常: {e}")
+                    app_inst = QApplication.instance()
+                    if app_inst:
+                        app_inst.quit()
+                event.accept()
+                return
 
         if hasattr(self, 'poll_timer') and self.poll_timer:
             self.poll_timer.stop()
