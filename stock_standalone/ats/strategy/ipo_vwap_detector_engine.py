@@ -13,6 +13,33 @@ ats/strategy/ipo_vwap_detector_engine.py
 
 import os
 import sys
+"""
+新股次新股 VWAP 策略与交易指挥官：【新股情绪全面感知与多周期通道突破策略 1 代】
+========================================================================================
+
+【版本背景与实战痛点】：
+传统的新股/次新股监控与交易策略往往陷入“见山是山”的教条陷阱：
+1. 股价在 VWAP 之下即一刀切认定为“破位出局”，无法识别 60F 级别底台蓄势、下降通道突破与大箱体共振；
+2. 面对先行者龙头暴涨冲顶，未能结合 A 股 T+1 交易制度，导致在次日冲高时误开仓追高成为接盘侠；
+3. 先行者龙头冲顶由多次 30% 临停推升，冲顶加速后复牌往往戛然而止剧烈跳水，事后市价抛售根本无法成交。
+
+【策略 1 代四大核心技术支柱】：
+1. 💡 多周期共振与通道突破预埋（蓝色光标 300058 同款架构）：
+   - 识别 3~4 日大平底箱体（低点收敛 <= 4.5%）；
+   - 识别 60F 突破下降通道阻力线，且尾盘放量收在当日最高价附近；
+   - 防守线从遥远的 10d VWAP 智能迁移至 60F 底台支撑位 -0.8%，向下风险不足 1.5%；
+   - 生成 SWING_PREORDER (🔭 通道突破) 限价预埋买单，享有免遭全局避险误杀特权。
+2. 🌋 临停计数与冲刺高潮感知（沈鼓集团 601091 同款架构）：
+   - 追踪日内/跨日累积 30%/60% 临停断点，记录 suspension_count (2~4次)；
+   - 感知聚集的人气量能与加速冲刺，严密防御复牌后的断崖式跳水。
+3. 💻 计算机算法提前设计高抛挂单限价 (climax_preset_sell_price)：
+   - 操盘手实战铁律：高位能够从容逃顶的筹码，均是计算机提前根据算法挂出的限价单；
+   - 提前计算顶点挂单价（如 ≈ 82.18 元），平仓阶段以 LIMIT 限价单在交易所提前排队成交。
+4. 🛑 T+1 追高买入禁令守卫 (is_t1_forbidden_buy)：
+   - 严格区分上市首日（当天有首发惜售价值）与上市次日及之后；
+   - 非首日且高位冲刺狂飙（涨幅 >= 15% 或偏离 VWAP >= 20% 或临停），严禁开新仓追高买入！
+"""
+
 import time
 import math
 import logging
@@ -57,6 +84,20 @@ class VWAPDetectorSignal:
     horse_race_score: float = 50.0    # 赛马综合动能得分 (0~100)
     horse_race_tier: str = "⚪ 观察"   # 🥇 领头羊 / 🥈 梯队前锋 / 🎯 线上蓄势 / ⏱️ 迟滞跟风 / 🚨 疯狂平仓 / ⛔ 破位出局
     horse_race_rank: int = 999        # 赛马排位 (1, 2, 3...)
+
+    # 底部结构与动能抓手 (全面进化操盘手超短哲学：底部缩量平底/双底企稳、动能拐头加速与预埋单)
+    has_bottom_base: bool = False     # 是否构筑了底部平底/双底企稳扎实结构
+    base_support_level: float = 0.0   # 底部平台核心防守支撑价
+    base_consolidation_bars: int = 0  # 底部横盘缩量蓄势 Bar 数量
+    base_inflection_confirmed: bool = False # 底部动能拐头与放量上翘是否确认
+    rebound_to_vwap_space_pct: float = 0.0  # 距 VWAP 的向上反弹盈亏比空间%
+
+    # 操盘手深度实战哲学：临停计数、计算机提前挂单卖出、T+1制度守卫与多日通道突破
+    suspension_count: int = 0         # 临停触发次数 (如沈鼓集团累计4次临停高潮)
+    climax_preset_sell_price: float = 0.0 # 计算机算法提前计算好的高抛挂单卖出价
+    is_t1_forbidden_buy: bool = False # T+1 次日+狂飙追高禁令 (只卖不买，防核按钮)
+    is_swing_channel_breakout: bool = False # 60F下降通道突破+多日平底箱体尾盘收新高 (蓝色光标同款)
+    multi_day_base_support: float = 0.0 # 多日大箱体底台支撑价 (如蓝色光标 12.88)
     
     # 大趋势 K 线特征
     trend_support_level: float = 0.0  # 大趋势通道/均线支撑价位
@@ -307,6 +348,7 @@ class IPOVWAPDetectorEngine:
             t_strat_start = time.perf_counter()
             if df_multi is not None and not df_multi.empty:
                 self._evaluate_vwap_structure(df_multi, sig, day_df=day_df)
+                self._evaluate_bottom_base_structure(df_multi, sig, day_df=day_df)
             else:
                 sig.signal_desc = "分时数据拉取中..."
 
@@ -489,8 +531,35 @@ class IPOVWAPDetectorEngine:
                 if open_chg <= -12.0 and p >= t_open and p >= vw:
                     sig.is_morning_scare_rebound = True
 
-            # 判定极端高潮放量平仓点 (类似沈鼓集团冲到 82.59 天量滞涨/长上影线跳水)
+            # 判定极端高潮放量平仓点与临停加速冲刺 (沈鼓集团同款：经历连续临停冲向82.59顶点，加速后复牌戛然而止)
             t_high = float(today_df["high"].max()) if "high" in today_df.columns else float(today_df["close"].max())
+            
+            # (1) 临停计数感知：检测跳停断点或涨幅越过临停阈值 (+30%, +60%)
+            susp_cnt = 0
+            if t_open > 0 and t_high >= t_open * 1.28:
+                susp_cnt += 1
+            if t_open > 0 and t_high >= t_open * 1.58:
+                susp_cnt += 1
+            sig.suspension_count = susp_cnt
+
+            # (2) 计算机算法提前设计高抛挂单价 (Pre-calculated Limit Sell Exit)
+            # 操盘手血泪洞见：高点能卖出的都是提前计算机算法挂单，跳水时一秒杀几十点根本卖不掉
+            if sig.vwap_diff_pct >= 20.0 or sig.suspension_count >= 1:
+                if sig.suspension_count >= 2:
+                    calc_sell_p = t_high * 0.995 if t_high > p else p * 1.02
+                elif sig.suspension_count == 1:
+                    calc_sell_p = t_open * 1.60 if t_open > 0 else vw * 1.45
+                else:
+                    calc_sell_p = t_open * 1.30 if t_open > 0 else vw * 1.35
+                sig.climax_preset_sell_price = round(calc_sell_p, 2)
+            else:
+                sig.climax_preset_sell_price = round(vw * 1.25, 2) if vw > 0 else round(p * 1.25, 2)
+
+            # (3) T+1 制度买入拦截禁令：非首日且高位冲刺狂飙，当天买入无卖出权，严禁追高接盘！
+            if not sig.is_ipo_first_day and (sig.vwap_diff_pct >= 20.0 or sig.change_pct >= 15.0 or sig.suspension_count >= 1):
+                sig.is_t1_forbidden_buy = True
+
+            # (4) 极端高潮滞涨与长上影跳水平仓判定
             if sig.vwap_diff_pct >= 25.0:
                 # 偏离 VWAP 超过 25%，且自高位回撤超过 3.5%
                 if t_high > 0 and (t_high - p) / t_high * 100.0 >= 3.5:
@@ -531,6 +600,162 @@ class IPOVWAPDetectorEngine:
 
         # 设置建议止损价位: 严格锚定在 VWAP 处 (买入打止损说明买点错了，止损极窄，买错就出局)
         sig.stop_loss_price = round(vw * 0.995, 2)
+
+    def _evaluate_bottom_base_structure(self, df: pd.DataFrame, sig: VWAPDetectorSignal, day_df: Optional[pd.DataFrame] = None):
+        """
+        【操盘手图解核心落地：寻找底部结构与动能抓手】
+        1. 适用场景：经历较大幅度下杀/远离 VWAP (负偏离或微幅波动) 的新股次新标的；
+        2. 结构抓手 (Base Structure)：
+           - 底部横盘平底 (Flat Base)：在底部区间连续多根 Bar (>=10 根) 不再创新低，振幅极度收敛 (<=3.0%)，成交量萎缩磨底；
+           - 双底 / W底 (Double Bottom)：二次探底未破前低 (低点差 <= 2.0%)，且分时价格已脱离低点；
+        3. 动能抓手 (Momentum Inflection)：
+           - 量能激活：分时成交量较筑底横盘均量温和放大 (>= 1.25 倍)；
+           - 均价/价格上翘：价格站上短均线或分时均价线，斜率由平转陡；
+           - 突破局部微型下行通道：突破下行受压斜线或平台颈线；
+        4. 极窄止损与反弹空间：
+           - 止损锚定底部平台支撑位 -0.8% (买错跌破底台即斩出局，风险极低)；
+           - 计算向上回抽 VWAP 的盈亏比空间 (rebound_to_vwap_space_pct)。
+        """
+        if df is None or df.empty:
+            return
+
+        p = sig.price
+        vw = sig.vwap
+        if p <= 0:
+            return
+
+        # 向上回抽 VWAP 的反弹空间
+        if vw > p:
+            sig.rebound_to_vwap_space_pct = round((vw - p) / p * 100.0, 1)
+        else:
+            sig.rebound_to_vwap_space_pct = 0.0
+
+        # 取今日或近期分时 Bar
+        if "date" in df.columns:
+            last_date = df["date"].iloc[-1]
+            sub_df = df[df["date"] == last_date]
+            # 如果今日 Bar 较少 (如早盘前30分钟)，结合昨日后半段
+            if len(sub_df) < 30 and len(df) >= 40:
+                sub_df = df.tail(60)
+        else:
+            sub_df = df.tail(60)
+
+        if len(sub_df) < 15:
+            return
+
+        closes = sub_df["close"].values if "close" in sub_df.columns else sub_df["price"].values
+        lows = sub_df["low"].values if "low" in sub_df.columns else closes
+        highs = sub_df["high"].values if "high" in sub_df.columns else closes
+        vols = sub_df["volume"].values if "volume" in sub_df.columns else (sub_df["vol"].values if "vol" in sub_df.columns else np.ones(len(sub_df)))
+
+        min_low = float(np.min(lows))
+        if min_low <= 0:
+            return
+
+        # 1. 结构抓手检测：
+        # A. 底部平底检测：寻找最近 12~35 根 Bar 的平稳支撑带
+        recent_window = min(35, len(sub_df))
+        rec_lows = lows[-recent_window:]
+        rec_highs = highs[-recent_window:]
+        rec_vols = vols[-recent_window:]
+        rec_min = float(np.min(rec_lows))
+        rec_max = float(np.max(rec_highs))
+
+        range_pct = (rec_max - rec_min) / rec_min * 100.0 if rec_min > 0 else 999.0
+
+        # 统计底部不创新低的 Bar 数
+        flat_bars = 0
+        for val in reversed(rec_lows):
+            if val >= rec_min * 0.995:
+                flat_bars += 1
+            else:
+                break
+
+        # B. 双底检测：寻找两次探底
+        has_double_bottom = False
+        if len(sub_df) >= 20:
+            mid = len(sub_df) // 2
+            low1 = float(np.min(lows[:mid]))
+            low2 = float(np.min(lows[mid:]))
+            if abs(low1 - low2) / max(low1, 0.01) <= 0.02 and p >= low2:
+                has_double_bottom = True
+
+        # 平底特征判定：波动区间较窄 (<= 3.2%)，且持续至少 8 根 Bar
+        is_flat_base = (range_pct <= 3.5 and flat_bars >= 8 and p >= rec_min and p <= rec_min * 1.05)
+
+        # C. 日K或大级别双底/通道下轨共振加持
+        k_support_boost = (sig.has_kline_launch_sig or (sig.trend_support_level > 0 and abs(p - sig.trend_support_level) / sig.trend_support_level <= 0.03))
+
+        has_base = (is_flat_base or has_double_bottom or (k_support_boost and flat_bars >= 6))
+
+        if has_base:
+            sig.has_bottom_base = True
+            base_supp = rec_min if rec_min > 0 else min_low
+            sig.base_support_level = round(base_supp, 2)
+            sig.base_consolidation_bars = flat_bars
+            # 极窄底台止损线：跌破平台底部 -0.8% 坚决出局斩仓
+            sig.stop_loss_price = round(base_supp * 0.992, 2)
+
+            # 2. 动能抓手与拐点检测：
+            # (1) 缩量与放量对比：
+            if len(rec_vols) >= 6:
+                base_avg_vol = float(np.mean(rec_vols[:-3])) if len(rec_vols) > 3 else float(np.mean(rec_vols))
+                latest_vol = float(np.mean(rec_vols[-3:]))
+                vol_surge = (latest_vol >= base_avg_vol * 1.25) or (latest_vol > 0 and base_avg_vol == 0)
+            else:
+                vol_surge = False
+
+            # (2) 价格/均线上翘与斜率：
+            slope_up = (sig.launch_slope_deg >= 18.0) or (p >= rec_min * 1.01 and p > closes[-2])
+            
+            # (3) 局部突破：价格脱离底部横盘中轴
+            breakout_base = (p >= (rec_min + rec_max) / 2.0 and p > closes[-2])
+
+            if (vol_surge and slope_up) or breakout_base or (sig.launch_slope_deg >= 22.0) or (is_flat_base and p > closes[-2]):
+                sig.base_inflection_confirmed = True
+
+        # D. 【多日大平底箱体与 60F 通道突破尾盘收最高检测 (蓝色光标同款结构)】
+        # 操盘手神级图解：4日大箱体平底(12.6~13.0) + 60F突破下降通道 + 尾盘放量收最高
+        if "date" in df.columns:
+            date_list = sorted(df["date"].astype(str).unique().tolist())
+            if len(date_list) >= 3:
+                recent_days = date_list[-4:]  # 最近 3~4 个交易日
+                day_lows = []
+                day_highs = []
+                for d_k in recent_days[:-1]:
+                    sub_d = df[df["date"] == d_k]
+                    if not sub_d.empty:
+                        d_l = float(sub_d["low"].min()) if "low" in sub_d.columns else float(sub_d["close"].min())
+                        d_h = float(sub_d["high"].max()) if "high" in sub_d.columns else float(sub_d["close"].max())
+                        if d_l > 0:
+                            day_lows.append(d_l)
+                            day_highs.append(d_h)
+
+                if len(day_lows) >= 2:
+                    min_box_l = min(day_lows)
+                    max_box_l = max(day_lows)
+                    # 连续多日低点波动收敛在 4.5% 以内 (大箱体筑底)
+                    is_multi_day_box = ((max_box_l - min_box_l) / min_box_l * 100.0 <= 4.5)
+                    
+                    # 尾盘收最高判定：今日收盘在当日最高价附近，且站上底台
+                    t_today_df = df[df["date"] == date_list[-1]]
+                    t_high = float(t_today_df["high"].max()) if "high" in t_today_df.columns else p
+                    is_late_high = (p >= t_high * 0.990 and p >= min_box_l * 1.015)
+                    
+                    # 60F / 日K 通道支撑或启动共振
+                    has_k_support = (sig.has_kline_launch_sig or sig.trend_support_level > 0 or sig.change_pct > 0)
+                    
+                    if is_multi_day_box and is_late_high and has_k_support:
+                        sig.is_swing_channel_breakout = True
+                        sig.has_bottom_base = True
+                        sig.base_inflection_confirmed = True
+                        
+                        # 止损线精准锚定在 60F 支撑线 (如 12.88) 或多日箱体底部
+                        supp_anchor = sig.trend_support_level if (sig.trend_support_level > 0 and abs(p - sig.trend_support_level) / p < 0.05) else min_box_l
+                        sig.base_support_level = round(supp_anchor, 2)
+                        sig.multi_day_base_support = round(supp_anchor, 2)
+                        sig.base_consolidation_bars = len(day_lows) * 240
+                        sig.stop_loss_price = round(supp_anchor * 0.992, 2)
 
     def _evaluate_kline_trend(self, code: str, sig: VWAPDetectorSignal, day_df: Optional[pd.DataFrame] = None):
         """
@@ -636,23 +861,52 @@ class IPOVWAPDetectorEngine:
             sig.signal_type = "CLIMAX_EXIT"
             sig.signal_level = "🚨 疯狂平仓"
             sig.structure_tag = "极端高潮放量"
-            sig.signal_desc = f"现价偏离VWAP达极限(+{sig.vwap_diff_pct:.1f}%)且冲高天量滞涨，主力疯狂兑现，坚决平仓保利，严禁追买!"
+            sell_guide = f"坚决平仓保利，建议提前算法挂单≈¥{sig.climax_preset_sell_price:.2f}分批止盈逃顶!" if sig.climax_preset_sell_price > 0 else "坚决平仓保利，严禁追买!"
+            sig.signal_desc = f"现价偏离VWAP达极限(+{sig.vwap_diff_pct:.1f}%)且冲高天量滞涨，主力疯狂兑现，{sell_guide}"
             return
 
-        # 2. 破位弱势股直接拦截 (买错就出局终极闭环)
-        if not sig.is_above_vwap and sig.vwap_diff_pct < -0.6:
-            sig.signal_type = "WEAK_EXIT"
-            sig.signal_level = "⛔ 破位止损点"
-            sig.structure_tag = "破位运行"
-            sig.signal_desc = f"跌破生命线VWAP({sig.vwap:.2f})达{sig.vwap_diff_pct:.1f}%，买错坚决止损出局，严禁加仓幻想!"
-            return
-
-        # 3. 首日上市吸筹黄金买点 (全天贴线惜售，丝毫不碰 VWAP，首日优先)
+        # 2. 首日上市吸筹黄金买点 (全天贴线惜售，丝毫不碰 VWAP，首日标杆最高优先)
         if sig.is_ipo_first_day and sig.is_above_vwap and sig.vwap_diff_pct <= 15.0 and sig.vwap_adhesion_ratio >= 65.0:
             sig.signal_type = "IPO_FIRST_BUY"
             sig.signal_level = "🔥 首发吸筹"
             sig.structure_tag = "首日贴线惜售"
             sig.signal_desc = f"首发上市紧贴VWAP({sig.vwap:.2f})上方爬升且回踩不碰，主力筹码高度惜售，全天黄金进击点!"
+            return
+
+        # 3. 【操盘手神级图解：60F下降通道突破 + 多日平底箱体尾盘收新高 (蓝色光标同款)】
+        if not sig.is_ipo_first_day and getattr(sig, "is_swing_channel_breakout", False):
+            sig.signal_type = "SWING_PREORDER"
+            sig.signal_level = "🔭 通道突破"
+            sig.structure_tag = "多日平底+通道突破"
+            space_str = f"博周一冲破VWAP(空间+{sig.rebound_to_vwap_space_pct:.1f}%)" if sig.rebound_to_vwap_space_pct > 0 else "大级别反转蓄势"
+            sig.signal_desc = f"60F突破下降通道+多日平底({sig.base_support_level:.2f})箱体突破，尾盘放量收最高! 虽在VWAP({sig.vwap:.2f})下但属大级别拐点，极窄止损{sig.stop_loss_price:.2f}元(60F底台)，{space_str}!"
+            return
+
+        # 4. 【操盘手核心进化：寻找结构与动能抓手，底部企稳预埋与放量共振】
+        # 大量新股超跌偏离 VWAP 人气很弱，但有些开始底部缩量企稳加速，需要预埋单，不能等涨起来到了 VWAP 再追！
+        if not sig.is_ipo_first_day and sig.has_bottom_base and sig.base_inflection_confirmed:
+            # 判断是放量加速冲锋 (共振突击)，还是横盘平底初现拐点 (预埋潜伏)
+            if sig.launch_slope_deg >= 25.0 or sig.change_pct >= 2.0 or (sig.price >= sig.base_support_level * 1.025):
+                sig.signal_type = "BASE_BREAKOUT"
+                sig.signal_level = "⚡ 筑底共振"
+                sig.structure_tag = "底部放量共振"
+                space_str = f"博反弹距VWAP+{sig.rebound_to_vwap_space_pct:.1f}%空间" if sig.rebound_to_vwap_space_pct > 0 else "主升推进"
+                sig.signal_desc = f"底部平底/双底({sig.base_support_level:.2f})缩量企稳后放量加速拐头! {space_str}，极窄止损{sig.stop_loss_price:.2f}元"
+                return
+            else:
+                sig.signal_type = "BASE_PREORDER"
+                sig.signal_level = "🎯 筑底预埋"
+                sig.structure_tag = "底部缩量平底"
+                space_str = f"向上距VWAP空间+{sig.rebound_to_vwap_space_pct:.1f}%" if sig.rebound_to_vwap_space_pct > 0 else ""
+                sig.signal_desc = f"底部({sig.base_support_level:.2f})缩量企稳横盘构筑扎实结构，动能拐头初现! 提前预埋单挂单潜伏，{space_str}，买错跌破{sig.stop_loss_price:.2f}元立斩!"
+                return
+
+        # 4. 破位弱势股直接拦截 (买错就出局终极闭环，仅对无筑底结构的破位标的一票否决)
+        if not sig.is_above_vwap and sig.vwap_diff_pct < -0.6:
+            sig.signal_type = "WEAK_EXIT"
+            sig.signal_level = "⛔ 破位止损点"
+            sig.structure_tag = "破位运行"
+            sig.signal_desc = f"跌破生命线VWAP({sig.vwap:.2f})达{sig.vwap_diff_pct:.1f}%且无筑底结构，买错坚决止损出局，严禁加仓幻想!"
             return
 
         # 4. 经典黄金买点: 回踩不碰 (回踩靠拢 VWAP 但不碰到跌破，极限买点)
@@ -724,6 +978,29 @@ def batch_evaluate_horse_race_ranking(signals: List[VWAPDetectorSignal]) -> List
             sig.horse_race_score = 99.0
             sig.horse_race_tier = "🚨 疯狂平仓"
             continue
+
+        # 【核心进化】：底部结构共振与跨日通道突破标的专属高动能赛马打分 (打破只有站上VWAP才给高分的死板逻辑)
+        if sig.signal_type in ("BASE_BREAKOUT", "BASE_PREORDER", "SWING_PREORDER"):
+            if sig.signal_type == "BASE_BREAKOUT":
+                base_score = 82.0
+            elif sig.signal_type == "SWING_PREORDER":
+                base_score = 80.0  # 跨日通道突破稳居前列(80~86分)，绝不抢早盘龙头第一，但也绝不垫底！
+            else:
+                base_score = 76.0
+            # 结构加分：横盘 Bar 数越多结构越稳 (+0~8分)
+            struct_bonus = min(8.0, sig.base_consolidation_bars * 0.4) if sig.signal_type != "SWING_PREORDER" else 4.0
+            # 动能拐点加分：斜率或反弹空间 (+0~8分)
+            slope_bonus = min(5.0, sig.launch_slope_deg * 0.15) if sig.launch_slope_deg > 0 else 2.0
+            space_bonus = min(5.0, sig.rebound_to_vwap_space_pct * 0.3) if sig.rebound_to_vwap_space_pct > 0 else 0.0
+            sig.horse_race_score = round(min(94.0, base_score + struct_bonus + slope_bonus + space_bonus), 1)
+            if sig.signal_type == "BASE_BREAKOUT":
+                sig.horse_race_tier = "⚡ 筑底共振"
+            elif sig.signal_type == "SWING_PREORDER":
+                sig.horse_race_tier = "🔭 通道突破"
+            else:
+                sig.horse_race_tier = "🎯 筑底预埋"
+            continue
+
         if not sig.is_above_vwap:
             sig.horse_race_score = max(5.0, 40.0 + sig.vwap_diff_pct * 2.0)
             sig.horse_race_tier = "⛔ 破位出局"
@@ -793,6 +1070,19 @@ def batch_evaluate_horse_race_ranking(signals: List[VWAPDetectorSignal]) -> List
             sig.horse_race_tier = "🚨 疯狂平仓"
             sig.horse_race_rank = 0
             continue
+
+        # 【核心进化】：底部结构共振、预埋与跨日通道突破标的享有正常赛马位次与专属徽章
+        if sig.signal_type in ("BASE_BREAKOUT", "BASE_PREORDER", "SWING_PREORDER"):
+            sig.horse_race_rank = normal_rank
+            if sig.signal_type == "BASE_BREAKOUT":
+                sig.horse_race_tier = "⚡ 筑底共振"
+            elif sig.signal_type == "SWING_PREORDER":
+                sig.horse_race_tier = "🔭 通道突破"
+            else:
+                sig.horse_race_tier = "🎯 筑底预埋"
+            normal_rank += 1
+            continue
+
         if not sig.is_above_vwap:
             sig.horse_race_tier = "⛔ 破位出局"
             sig.horse_race_rank = 999

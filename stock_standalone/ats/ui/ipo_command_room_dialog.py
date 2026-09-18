@@ -41,6 +41,9 @@ logger = logging.getLogger("IPOCommandRoomDialog")
 ROLE_CN_MAP = {
     "LEADER": "🥇 领头羊",
     "VANGUARD": "🥈 梯队前锋",
+    "RESONANCE_BUY": "⚡ 共振加速",
+    "BASE_PREORDER": "🎯 筑底预埋",
+    "SWING_PREORDER": "🔭 通道突破",
     "FOLLOWER": "🥉 后排跟风",
     "CLIMAX_EXIT": "🚨 高潮平仓",
     "PANIC_DEFENSE": "🛡️ 全局避险",
@@ -802,16 +805,16 @@ class IPOCommandRoomDialog(QDialog):
             # 代码 (纯数字数值比较，手工标的金色加粗高亮)
             clean_digits = "".join(ch for ch in sig.code if ch.isdigit())
             code_num = int(clean_digits) if clean_digits else 999999
-            code_it = NumericTableWidgetItem(f"📌{sig.code}" if is_manual else sig.code, raw_val=code_num)
+            code_it = NumericTableWidgetItem(sig.code, raw_val=code_num)
             if is_manual:
                 code_it.setForeground(QColor("#ffd700"))
                 f = code_it.font()
                 f.setBold(True)
                 code_it.setFont(f)
-                code_it.setToolTip(f"【📌 操盘手手工添加标的】{sig.code} {sig.name} (置顶优先监控)")
+                code_it.setToolTip(f"【📌 操盘手手工添加标的】{sig.code} {sig.name}")
             self.tbl_rank.setItem(r, 1, code_it)
-            # 名称 (手工标的同步金色高亮)
-            name_it = QTableWidgetItem(f"📌{sig.name}" if is_manual else sig.name)
+            # 名称 (标记显示在 name 上，专属 📌 标记与金色高亮)
+            name_it = QTableWidgetItem(f"📌 {sig.name}" if is_manual else sig.name)
             if is_manual:
                 name_it.setForeground(QColor("#ffd700"))
                 f = name_it.font()
@@ -835,6 +838,12 @@ class IPOCommandRoomDialog(QDialog):
                 role_it.setForeground(QColor("#ffaa00"))
             elif role_raw == "VANGUARD":
                 role_it.setForeground(QColor("#00e5ff"))
+            elif role_raw == "RESONANCE_BUY":
+                role_it.setForeground(QColor("#00ff88"))
+            elif role_raw == "BASE_PREORDER":
+                role_it.setForeground(QColor("#00e5ff"))
+            elif role_raw == "SWING_PREORDER":
+                role_it.setForeground(QColor("#00e5ff"))
             elif role_raw == "STOP_LOSS":
                 role_it.setForeground(QColor("#ff4444"))
             elif role_raw == "PANIC_DEFENSE":
@@ -850,7 +859,7 @@ class IPOCommandRoomDialog(QDialog):
             # 决议依据
             desc_str = sig.global_arbitration_desc or sig.signal_desc
             desc_it = QTableWidgetItem(desc_str)
-            if "领头羊" in desc_str or "首发吸筹" in desc_str:
+            if "领头羊" in desc_str or "首发吸筹" in desc_str or "共振加速" in desc_str or "筑底预埋" in desc_str or "通道突破" in desc_str:
                 desc_it.setForeground(QColor("#00ff88"))
             elif "买错" in desc_str or "平仓" in desc_str or "止损" in desc_str:
                 desc_it.setForeground(QColor("#ff5555"))
