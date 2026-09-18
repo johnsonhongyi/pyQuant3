@@ -1677,8 +1677,19 @@ class NewStockPanel(QWidget):
             except Exception as e:
                 logger.debug(f"link_stock 异常: {e}")
 
+    def open_sbc_chart(self, code: str, name: str = ""):
+        """【📈 打开 SBC 通道走势图】新股次新标的双击直通 SBC 通道走势图"""
+        if not code:
+            return
+        c_clean = "".join(filter(str.isdigit, str(code))).zfill(6) if any(x.isdigit() for x in str(code)) else str(code).strip()
+        try:
+            from ats.ui.intraday_strategy_dialog import open_sbc_chart_dialog
+            open_sbc_chart_dialog(parent_win=self.window(), code=c_clean, period_mode="10d")
+        except Exception as e:
+            logger.error(f"[NewStockPanel] 打开 SBC 走势图异常: {e}")
+
     def _on_cell_double_clicked(self, row: int, col: int):
-        """双击单元格：动态列定位联动选中并通知主窗口打开详情窗口（不自动调起阶梯盯盘）"""
+        """双击单元格：动态列定位联动选中并直通打开 SBC 实盘分时走势图"""
         c_code = self._get_col_by_header("代码")
         c_name = self._get_col_by_header("名称")
         item_code = self.table.item(row, c_code if c_code >= 0 else 0)
@@ -1687,6 +1698,7 @@ class NewStockPanel(QWidget):
             code = item_code.text().strip()
             name = item_name.text().replace("⭐ ", "").strip() if item_name else ""
             self._on_stock_activated(code, name)
+            self.open_sbc_chart(code, name)
             self.stock_double_clicked.emit(code, name)
 
     def _update_preview_card(self, row_data: Dict[str, Any]):
@@ -1936,11 +1948,7 @@ class NewStockPanel(QWidget):
         if not self.selected_code:
             QMessageBox.warning(self, "提示", "请先在表格中选择新股标的！")
             return
-        try:
-            from ats.ui.intraday_strategy_dialog import open_sbc_chart_dialog
-            open_sbc_chart_dialog(parent_win=self, code=self.selected_code)
-        except Exception as e:
-            QMessageBox.critical(self, "错误", f"调起 SBC 实盘窗口异常: {e}")
+        self.open_sbc_chart(self.selected_code, self.selected_name)
 
     def _on_open_ipo_detector_clicked(self):
         """调出新股次新股超短检测独立工具或发送当前选中标的"""
@@ -2011,11 +2019,18 @@ class NewStockPanel(QWidget):
             QMenu::item:selected { background-color: #1e293b; color: #38bdf8; }
         """)
 
-        act_ladder = menu.addAction(f"🚀 调出 【{self.selected_name}】 分时阶梯独立盯盘")
-        act_ladder.triggered.connect(self._on_open_ladder_clicked)
-
         act_sbc = menu.addAction(f"📈 调出 【{self.selected_name}】 SBC 实盘分时走势")
         act_sbc.triggered.connect(self._on_open_sbc_clicked)
+
+        act_detail = menu.addAction(f"🔍 查看 【{self.selected_name}】 个股详情")
+        def _open_detail():
+            main_win = self.main_window or self.window()
+            if hasattr(main_win, 'on_stock_clicked'):
+                main_win.on_stock_clicked(self.selected_code, self.selected_name, {})
+        act_detail.triggered.connect(_open_detail)
+
+        act_ladder = menu.addAction(f"🚀 调出 【{self.selected_name}】 分时阶梯独立盯盘")
+        act_ladder.triggered.connect(self._on_open_ladder_clicked)
 
         act_ipo = menu.addAction(f"🎯 发送到新股次新超短检测工具 (VWAP预下单)")
         act_ipo.triggered.connect(self._on_open_ipo_detector_clicked)

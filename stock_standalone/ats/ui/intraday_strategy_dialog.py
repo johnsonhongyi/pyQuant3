@@ -747,6 +747,216 @@ class SBCChartCanvas(QWidget):
 
         self.update()
 
+    def update_amplitude_data(self, code: str = ""):
+        """
+        【📊 标的近几日振幅与活跃度计算引擎 (极限复用·零系统压力)】
+        1. 极致复用当前 SBC 走势图内存中已加载的 self.df_intraday 数据：
+           - 若当前为日 K (day/2k/3k/week/month)，直接切片最后 6 根日 K 计算，0ms，0 网络请求；
+           - 若当前为多日分时 (2d/3d/5d/10d)，直接按本地 date 分组提取极值计算，0ms，0 网络请求；
+        2. 仅在单日分时 (1m) 或短周期分钟 K 线且本地无多日数据时，才从日 K 缓存提取；
+        3. 标的级指纹缓存保护 (_cached_amp_code)：同一标的 60 秒内直接复用缓存，杜绝轮询与切周期重复请求；
+        4. 彻底修复日期显示为 15:00 的问题，严格提取并格式化为 MM-DD。
+        """
+        c_clean = "".join(filter(str.isdigit, str(code or getattr(self, "code", "")))).zfill(6)
+        if not c_clean or c_clean == "000000":
+            return
+
+        # ⚡ 标的级内存指纹缓存：同标的在 60 秒内直接复用已有结果，0 毫秒完成，零系统开销
+        now_ts = time.time()
+        cached_info = getattr(self, "_cached_amp_info", None)
+        cached_code = getattr(self, "_cached_amp_code", None)
+        cached_ts = getattr(self, "_cached_amp_ts", 0.0)
+
+        if cached_code == c_clean and cached_info and (now_ts - cached_ts < 60.0):
+            self.amplitude_info = cached_info
+            return
+
+        try:
+            days_detail = []
+            p_mode = str(self.period_mode).lower().strip()
+
+            # ── 1. 极致复用：若当前画布就是日 K 或大周期 K 线，直接从本地 df_intraday 提取 ──
+            if p_mode in ("day", "2k", "3k", "week", "month", "d") and self.df_intraday is not None and len(self.df_intraday) >= 2:
+                df_src = self.df_intraday
+                if 'high' in df_src.columns and 'low' in df_src.columns and 'close' in df_src.columns:
+                    highs = df_src['high'].astype(float).values
+                    lows = df_src['low'].astype(float).values
+                    closes = df_src['close'].astype(float).values
+                    dates = list(df_src.index.astype(str))
+
+                    n_bars = len(df_src)
+                    start_k = max(1, n_bars - 5)
+                    for idx in range(start_k, n_bars):
+                        prev_c = closes[idx - 1]
+                        if prev_c <= 0:
+                            prev_c = df_src['open'].iloc[idx] if 'open' in df_src.columns else closes[idx]
+                        if prev_c > 0:
+                            amp = max(0.0, (highs[idx] - lows[idx]) / prev_c * 100.0)
+                            d_clean = str(dates[idx]).strip().split()[0]
+                            d_short = d_clean[-5:] if len(d_clean) >= 5 else d_clean
+                            days_detail.append((d_short, round(amp, 1)))
+
+            # ── 2. 极致复用：若当前画布为多日分时 (2d/3d/5d/10d)，直接从本地分钟数据分组提取 ──
+            if not days_detail and p_mode in ("2d", "3d", "5d", "10d") and self.df_intraday is not None and not self.df_intraday.empty:
+                df_src = self.df_intraday
+                col_d = "date" if "date" in df_src.columns else ("datetime" if "datetime" in df_src.columns else None)
+                if col_d:
+                    grp_series = df_src[col_d].astype(str).str.split().str[0].str[:10]
+                else:
+                    grp_series = df_src.index.astype(str).str.split().str[0].str[:10]
+
+                daily_stats = []
+                for d_key, grp in df_src.groupby(grp_series):
+                    if 'high' in grp.columns and 'low' in grp.columns and 'close' in grp.columns:
+                        h_v = float(grp['high'].max())
+                        l_v = float(grp['low'].min())
+                        c_v = float(grp['close'].iloc[-1])
+                        daily_stats.append((d_key, h_v, l_v, c_v))
+                if len(daily_stats) >= 2:
+                    for i in range(1, len(daily_stats)):
+                        prev_c = daily_stats[i-1][3]
+                        if prev_c > 0:
+                            amp = max(0.0, (daily_stats[i][1] - daily_stats[i][2]) / prev_c * 100.0)
+                            d_clean = str(daily_stats[i][0]).strip().split()[0]
+                            d_short = d_clean[-5:] if len(d_clean) >= 5 else d_clean
+                            days_detail.append((d_short, round(amp, 1)))
+                    days_detail = days_detail[-5:]
+
+            # ── 3. 兜底方案：仅在 1m 或短周期分钟 K 线且本地无多日数据时，才从日 K 缓存提取 ──
+            if not days_detail:
+                from ats.tdx_realtime_fetcher import TDXRealtimeFetcher
+                fetcher = TDXRealtimeFetcher.get_instance()
+                df_day = fetcher.fetch_kline_bars(c_clean, category="day", count=8)
+
+                if df_day is not None and not df_day.empty and len(df_day) >= 2:
+                    highs = df_day['high'].astype(float).values
+                    lows = df_day['low'].astype(float).values
+                    closes = df_day['close'].astype(float).values
+                    dates = list(df_day.index.astype(str))
+
+                    n_bars = len(df_day)
+                    start_k = max(1, n_bars - 5)
+                    for idx in range(start_k, n_bars):
+                        prev_c = closes[idx - 1]
+                        if prev_c <= 0:
+                            prev_c = df_day['open'].iloc[idx] if 'open' in df_day.columns else closes[idx]
+                        if prev_c > 0:
+                            amp = max(0.0, (highs[idx] - lows[idx]) / prev_c * 100.0)
+                            d_clean = str(dates[idx]).strip().split()[0]
+                            d_short = d_clean[-5:] if len(d_clean) >= 5 else d_clean
+                            days_detail.append((d_short, round(amp, 1)))
+
+            if days_detail:
+                amps = [a for _, a in days_detail]
+                avg_amp = round(float(np.mean(amps)), 1)
+                max_amp = round(float(np.max(amps)), 1)
+                min_amp = round(float(np.min(amps)), 1)
+
+                if avg_amp >= 7.0 or max_amp >= 10.0:
+                    rating = "🔥极高活跃"
+                    rating_color = "#FF4444"
+                elif avg_amp >= 4.5:
+                    rating = "⚡高度活跃"
+                    rating_color = "#FFD700"
+                elif avg_amp >= 2.5:
+                    rating = "📈温和波动"
+                    rating_color = "#38BDF8"
+                else:
+                    rating = "💤低位沉寂"
+                    rating_color = "#94A3B8"
+
+                res = {
+                    "code": c_clean,
+                    "avg_amp": avg_amp,
+                    "max_amp": max_amp,
+                    "min_amp": min_amp,
+                    "rating": rating,
+                    "rating_color": rating_color,
+                    "days": days_detail,
+                    "n_days": len(days_detail)
+                }
+                self.amplitude_info = res
+                self._cached_amp_code = c_clean
+                self._cached_amp_info = res
+                self._cached_amp_ts = now_ts
+            else:
+                self.amplitude_info = {}
+        except Exception as e:
+            logger.debug(f"[振幅活跃度] 计算异常: {e}")
+            self.amplitude_info = {}
+
+    def _draw_amplitude_hud(self, painter: QPainter, margin_left: int, margin_top: int, chart_w: int, chart_h: int):
+        """
+        【📊 绘制走势图左侧近几日振幅活跃度 HUD 卡片 (彻底释放右侧最新走势与标尺)】
+        严格排布在主图左侧内部，杜绝遮挡右侧最新 K 棒、突破点、现价浮标与 Y 轴标尺
+        """
+        info = getattr(self, 'amplitude_info', None)
+        if not info or not info.get("days"):
+            return
+
+        days = info.get("days", [])
+        avg_amp = info.get("avg_amp", 0.0)
+        max_amp = info.get("max_amp", 0.0)
+        rating = info.get("rating", "📈温和波动")
+        rating_col = QColor(info.get("rating_color", "#38BDF8"))
+        n_d = info.get("n_days", len(days))
+
+        # 紧凑双行排布，极致节省像素高度
+        card_w = 210
+        card_h = 44
+        hud_x = int(margin_left + 4)  # 👈 严格显示在左侧，腾空右侧全部最新走势
+
+        # 垂直位置：在 K 线通道模式下紧跟通道卡片下方；在分时模式下位于左上角
+        if self.period_mode in ["5m", "15m", "30m", "60m", "day", "2d", "3d", "2k", "3k", "week", "month"]:
+            ch_h = getattr(self, '_channel_box_h', 56)
+            hud_y = int(margin_top + 3 + ch_h + 4)
+        else:
+            hud_y = int(margin_top + 4)
+
+        painter.setPen(QPen(QColor("#253248"), 1.0))
+        painter.setBrush(QBrush(QColor(10, 15, 26, 215)))
+        painter.drawRoundedRect(hud_x, hud_y, card_w, card_h, 3, 3)
+
+        # 1. 第一行：标题 + 均振/极值 + 评级胶囊
+        painter.setFont(QFont("Microsoft YaHei", 8, QFont.Weight.Bold))
+        painter.setPen(QPen(QColor("#E2E8F0")))
+        painter.drawText(hud_x + 6, hud_y + 14, f"📊 活跃度(近{n_d}日)")
+
+        # 均振与极值紧凑显示
+        painter.setFont(QFont("Consolas", 7.5, QFont.Weight.Bold))
+        avg_col = QColor("#FF4444") if avg_amp >= 6.0 else (QColor("#FFD700") if avg_amp >= 4.0 else QColor("#00FF88"))
+        painter.setPen(QPen(avg_col))
+        painter.drawText(hud_x + 92, hud_y + 14, f"均{avg_amp:.1f}%")
+
+        painter.setPen(QPen(QColor("#475569")))
+        painter.drawText(hud_x + 124, hud_y + 14, "/")
+
+        max_col = QColor("#FF4444") if max_amp >= 8.0 else (QColor("#FFD700") if max_amp >= 5.0 else QColor("#38BDF8"))
+        painter.setPen(QPen(max_col))
+        painter.drawText(hud_x + 131, hud_y + 14, f"极{max_amp:.1f}%")
+
+        # 评级小胶囊
+        painter.setFont(QFont("Microsoft YaHei", 7, QFont.Weight.Bold))
+        fm_r = painter.fontMetrics()
+        rw = fm_r.horizontalAdvance(rating) + 6
+        rx = hud_x + card_w - rw - 5
+        painter.setPen(QPen(rating_col, 1.0))
+        painter.setBrush(QBrush(QColor(rating_col.red(), rating_col.green(), rating_col.blue(), 35)))
+        painter.drawRoundedRect(rx, hud_y + 3, rw, 13, 2, 2)
+        painter.setPen(QPen(rating_col))
+        painter.drawText(rx + 3, hud_y + 12, rating)
+
+        # 2. 第二行：近 3~5 日明细 (倒序展示：最新日排最左侧，格式 MM-DD:X.X%)
+        painter.setFont(QFont("Consolas", 7))
+        cur_dx = hud_x + 6
+        draw_days = list(reversed(days))[:4]
+        for d_str, a_val in draw_days:
+            col_a = QColor("#FF4444") if a_val >= 6.0 else (QColor("#FFD700") if a_val >= 4.0 else QColor("#94A3B8"))
+            item_txt = f"{d_str}:{a_val:.1f}%  "
+            painter.setPen(QPen(col_a))
+            painter.drawText(cur_dx, hud_y + 34, item_txt)
+            cur_dx += fm_r.horizontalAdvance(item_txt) + 2
+
     def wheelEvent(self, event):
         """🔍 鼠标滚轮缩放：以鼠标所在 X 坐标为锚点进行平滑缩放"""
         if self.df_intraday is None or self.df_intraday.empty:
@@ -1066,6 +1276,9 @@ class SBCChartCanvas(QWidget):
                 # 2. 分时图模式 (1m / 5d / 10d)
                 self._paint_intraday(painter, margin_left, margin_top, chart_w, chart_h)
 
+            # 2.5 📊 绘制走势图右上角近几日振幅活跃度 HUD (对齐图 2 红框位置)
+            self._draw_amplitude_hud(painter, margin_left, margin_top, chart_w, chart_h)
+
             # 3. 🔍 顶层绘制鼠标左键框选放大矩形遮罩 (Rubberband Box Zoom)
             if getattr(self, '_is_box_zooming', False) and self._box_zoom_origin and self._box_zoom_current:
                 x1 = min(self._box_zoom_origin.x(), self._box_zoom_current.x())
@@ -1203,6 +1416,7 @@ class SBCChartCanvas(QWidget):
             painter.end()
 
     def _paint_intraday(self, painter: QPainter, margin_left: int, margin_top: int, chart_w: int, chart_h: int):
+        self._channel_box_h = 0
         df_view, start_i, end_i = self._get_visible_slice()
         if df_view.empty:
             return
@@ -2737,6 +2951,7 @@ class SBCChartCanvas(QWidget):
             hud_box_h += 16
         if ch_supp_p > 0:
             hud_box_h += 16
+        self._channel_box_h = hud_box_h
         hud_box_w = max(420, min(chart_w - 20, int(len(info_header) * 8.0 + 20)))
         painter.setPen(QPen(QColor("#253248"), 1))
         painter.setBrush(QBrush(QColor(10, 15, 26, 220)))
@@ -3526,6 +3741,15 @@ class SBCIntradayChartDialog(QWidget):
         self._shortcut_d = QShortcut(QKeySequence("D"), self)
         self._shortcut_d.activated.connect(self._on_shortcut_d_activated)
 
+        # 🔍 挂载窗口级 Up、Down 快捷键，实现全场景免点击走势图缩放 (对齐通达信手感)
+        self._shortcut_up = QShortcut(QKeySequence(Qt.Key.Key_Up), self)
+        self._shortcut_up.activated.connect(self._on_shortcut_up_activated)
+        self._shortcut_down = QShortcut(QKeySequence(Qt.Key.Key_Down), self)
+        self._shortcut_down.activated.connect(self._on_shortcut_down_activated)
+
+        # 🎯 安装全局事件过滤器，穿透所有子控件捕获上下键进行走势图缩放
+        self.installEventFilter(self)
+
         # 5. 30 分钟定时物理落盘与退出刷盘策略 (交易时段 30 分钟落盘一次，关闭窗口落盘；非交易时段只落盘一次)
         self._has_saved_post_market = False
         self._save_timer = QTimer(self)
@@ -3913,13 +4137,11 @@ class SBCIntradayChartDialog(QWidget):
             self.resize(680, 420)
 
     def showEvent(self, event):
-        """窗口显示事件：自动将焦点赋予当前选中的周期按钮，便于直接键盘轮转与按键切周期"""
+        """窗口显示事件：将键盘焦点赋予走势图画布，实现免点击全局缩放"""
         super().showEvent(event)
         try:
-            if hasattr(self, 'btn_group_period') and self.btn_group_period:
-                btn = self.btn_group_period.checkedButton()
-                if btn:
-                    btn.setFocus()
+            if hasattr(self, 'canvas') and self.canvas:
+                self.canvas.setFocus()
         except Exception:
             pass
 
@@ -3937,6 +4159,8 @@ class SBCIntradayChartDialog(QWidget):
         new_idx = (idx + step) % len(period_list)
         new_mode = period_list[new_idx]
         self.set_period_mode(new_mode)
+        if hasattr(self, 'canvas') and self.canvas:
+            self.canvas.setFocus()
         if hasattr(self, 'lbl_info') and self.lbl_info:
             self.lbl_info.setText(f"📈 [周期轮转] 当前周期: 【{new_mode.upper()}】 (快捷键: A/D 或 ←/→ 键轮转, 1~9 直选, S 日志, F 联动, Esc 关闭)")
 
@@ -3946,6 +4170,8 @@ class SBCIntradayChartDialog(QWidget):
         if 0 <= index < len(period_list):
             new_mode = period_list[index]
             self.set_period_mode(new_mode)
+            if hasattr(self, 'canvas') and self.canvas:
+                self.canvas.setFocus()
             if hasattr(self, 'lbl_info') and self.lbl_info:
                 self.lbl_info.setText(f"📈 [周期直选] 当前周期: 【{new_mode.upper()}】 (快捷键: A/D 或 ←/→ 键轮转, 1~9 直选, S 日志, F 联动, Esc 关闭)")
 
@@ -3999,11 +4225,21 @@ class SBCIntradayChartDialog(QWidget):
             self._on_rearrange_windows_clicked()
             event.accept()
             return
-        elif key in (Qt.Key.Key_Left, Qt.Key.Key_Up, Qt.Key.Key_PageUp, Qt.Key.Key_Backtab):
+        elif key == Qt.Key.Key_Up:
+            if hasattr(self, 'canvas') and self.canvas:
+                self.canvas.zoom_in()
+            event.accept()
+            return
+        elif key == Qt.Key.Key_Down:
+            if hasattr(self, 'canvas') and self.canvas:
+                self.canvas.zoom_out()
+            event.accept()
+            return
+        elif key in (Qt.Key.Key_Left, Qt.Key.Key_PageUp, Qt.Key.Key_Backtab):
             self.rotate_period(-1)
             event.accept()
             return
-        elif key in (Qt.Key.Key_Right, Qt.Key.Key_Down, Qt.Key.Key_PageDown, Qt.Key.Key_Tab):
+        elif key in (Qt.Key.Key_Right, Qt.Key.Key_PageDown, Qt.Key.Key_Tab):
             self.rotate_period(1)
             event.accept()
             return
@@ -4071,6 +4307,46 @@ class SBCIntradayChartDialog(QWidget):
         from ats.ui.styles import is_editing_text
         if not is_editing_text(self):
             self.rotate_period(1)
+
+    def _is_combobox_popup_active(self) -> bool:
+        """检查是否有下拉框当前处于展开列表状态（展开时优先下拉框上下选择）"""
+        try:
+            if hasattr(self, 'combo_switch_code') and self.combo_switch_code:
+                v = self.combo_switch_code.view()
+                if v and v.isVisible():
+                    return True
+        except Exception:
+            pass
+        return False
+
+    def _on_shortcut_up_activated(self):
+        """🔍 窗口级 Up 快捷键：全局放大走势图（对齐通达信手感，防编辑误触）"""
+        from ats.ui.styles import is_editing_text
+        if not is_editing_text(self) and not self._is_combobox_popup_active():
+            if hasattr(self, 'canvas') and self.canvas:
+                self.canvas.zoom_in()
+
+    def _on_shortcut_down_activated(self):
+        """🔍 窗口级 Down 快捷键：全局缩小走势图（对齐通达信手感，防编辑误触）"""
+        from ats.ui.styles import is_editing_text
+        if not is_editing_text(self) and not self._is_combobox_popup_active():
+            if hasattr(self, 'canvas') and self.canvas:
+                self.canvas.zoom_out()
+
+    def eventFilter(self, watched, event):
+        """【🎯 全局按键事件过滤】解决子控件捕获焦点时上下键被吞噬问题，实现免点击走势图缩放"""
+        if event.type() == QEvent.Type.KeyPress:
+            k = event.key()
+            if k in (Qt.Key.Key_Up, Qt.Key.Key_Down):
+                from ats.ui.styles import is_editing_text
+                if not is_editing_text(self) and not self._is_combobox_popup_active():
+                    if hasattr(self, 'canvas') and self.canvas:
+                        if k == Qt.Key.Key_Up:
+                            self.canvas.zoom_in()
+                        else:
+                            self.canvas.zoom_out()
+                        return True
+        return super().eventFilter(watched, event)
 
     def _trigger_linkage(self):
         """⚡ 按下 F 键或点击联动按钮：触发全系统与通达信/同花顺/可视化外部行情联动"""
@@ -4253,11 +4529,7 @@ class SBCIntradayChartDialog(QWidget):
             self.hover_timer.start()
         if hasattr(self, 'canvas') and self.canvas:
             self.canvas.code = self.code
-        if hasattr(self, 'btn_group_period') and self.btn_group_period:
-            for btn in self.btn_group_period.buttons():
-                if btn.isChecked():
-                    btn.setFocus()
-                    break
+            self.canvas.setFocus()
 
     def hideEvent(self, event):
         """窗口隐藏或贴边收起时，暂停后台高频轮询定时器，杜绝隐蔽消耗与日志刷屏"""
@@ -4926,6 +5198,8 @@ class SBCIntradayChartDialog(QWidget):
             return
 
         self.set_period_mode(mode, reload=True, save=False)
+        if hasattr(self, 'canvas') and self.canvas:
+            self.canvas.setFocus()
 
     def _on_rearrange_windows_clicked(self):
         """【🪟 所在屏幕窗口重排】就地自动平铺重排当前屏幕上所有打开的 SBC 窗口 (多显示器支持，保持原尺寸不变，绝不强行移至主屏)"""
@@ -5263,6 +5537,7 @@ class SBCIntradayChartDialog(QWidget):
 
                 self._sync_daily_channel_to_canvas()
                 self.canvas.set_data(df_multi, op, vw, hi, lo, t_min, t_max, sigs, period_mode=mode)
+                self.canvas.update_amplitude_data(self.code)
                 self.lbl_title.setText(f"📊 {self.code} {resolve_stock_name(self.code)} | [{mode.upper()}多日分时] 今:{op:.2f} 现:{cl_last:.2f}")
                 self.lbl_title.setToolTip(f"【{self.code} {resolve_stock_name(self.code)}】[{mode.upper()}多日分时] 今开={op:.2f}元, 现价={cl_last:.2f}元, VWAP={vw:.2f}元, 最高={hi:.2f}元, 最低={lo:.2f}元 | 策略买卖信号数: {len(sigs)} 步")
                 self._update_unified_realtime_log(df_multi, op, cl_last, vw, hi, lo, to_rate, amt, sigs, mode=mode)
@@ -5288,6 +5563,7 @@ class SBCIntradayChartDialog(QWidget):
                     lo = float(df_kline['low'].min()) if 'low' in df_kline.columns else p
                 cl_last = float(df_kline.iloc[-1].get("close", p))
                 self.canvas.set_kline_data(df_kline, open_p=op, vwap_p=vw, high_p=hi, low_p=lo, sell_min=t_min, sell_max=t_max, signals=sigs, period_mode=mode)
+                self.canvas.update_amplitude_data(self.code)
                 if getattr(self, "custom_trades_df", None) is not None:
                     t_cnt = len(self.custom_trades_df)
                     win_cnt = len(self.custom_trades_df[self.custom_trades_df['pnl_pct'] > 0]) if not self.custom_trades_df.empty else 0
@@ -5359,6 +5635,7 @@ class SBCIntradayChartDialog(QWidget):
 
         self._sync_daily_channel_to_canvas()
         self.canvas.set_data(df_intraday, op, vw, hi, lo, t_min, t_max, sigs, period_mode="1m")
+        self.canvas.update_amplitude_data(self.code)
         self.lbl_title.setText(f"📊 {self.code} {resolve_stock_name(self.code)} | 今:{op:.2f} 现:{p:.2f}")
         self.lbl_title.setToolTip(f"【{self.code} {resolve_stock_name(self.code)}】今开={op:.2f}元, 现价={p:.2f}元, VWAP={vw:.2f}元, 最高={hi:.2f}元, 最低={lo:.2f}元 | 买卖信号数: {len(sigs)} 步")
 

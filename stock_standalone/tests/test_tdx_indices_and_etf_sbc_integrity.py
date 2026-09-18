@@ -211,6 +211,40 @@ def test_index_intraday_vwap_not_100():
         assert (dev_bj < 0.05).all(), f"北证50分时均线偏离过大: max dev={dev_bj.max()}"
 
 
+def test_multi_day_vwap_continuity():
+    """测试多日分时图 (个股与指数) 的 VWAP 在各交易日交界处保持连续平滑，绝无单日断开跳跃"""
+    fetcher = TDXRealtimeFetcher.get_instance()
+    if not fetcher._is_connected:
+        fetcher.connect()
+    if not fetcher._is_connected:
+        pytest.skip("TDX 未连接，跳过真实在线测试")
+
+    # 1. 验证个股多日分时 (华鑫股份 600621) 跨天连续性
+    fetcher.cache_pool.invalidate('600621')
+    df_stock = fetcher.fetch_multi_day_intraday_bars("600621", days=3)
+    if not df_stock.empty and 'date' in df_stock.columns:
+        dates = df_stock['date'].unique()
+        if len(dates) >= 2:
+            for i in range(len(dates) - 1):
+                vw_prev_end = df_stock[df_stock['date'] == dates[i]]['vwap'].iloc[-1]
+                vw_next_start = df_stock[df_stock['date'] == dates[i+1]]['vwap'].iloc[0]
+                # 跨天交界处 VWAP 绝对差值绝不能跳跃超过 1.0 元 (通常 < 0.1 元)
+                assert abs(vw_prev_end - vw_next_start) < 0.80, f"个股跨天 VWAP 断裂: {dates[i]} {vw_prev_end} -> {dates[i+1]} {vw_next_start}"
+
+    # 2. 验证指数多日分时 (上证指数 999999) 跨天连续性
+    fetcher.cache_pool.invalidate('999999')
+    df_idx = fetcher.fetch_multi_day_intraday_bars("999999", days=3)
+    if not df_idx.empty and 'date' in df_idx.columns:
+        dates_idx = df_idx['date'].unique()
+        if len(dates_idx) >= 2:
+            for i in range(len(dates_idx) - 1):
+                vw_prev_end = df_idx[df_idx['date'] == dates_idx[i]]['vwap'].iloc[-1]
+                vw_next_start = df_idx[df_idx['date'] == dates_idx[i+1]]['vwap'].iloc[0]
+                # 跨天交界处 VWAP 相对变化绝不能超过 2%
+                diff_pct = abs(vw_prev_end - vw_next_start) / vw_prev_end
+                assert diff_pct < 0.02, f"指数跨天 VWAP 断裂: {dates_idx[i]} {vw_prev_end} -> {dates_idx[i+1]} {vw_next_start}"
+
+
 def test_sbc_canvas_min_valid_price_defense():
     """测试 SBC 画布在遇到离群极小脏数据 (如 10.0 或 100.0) 时自动剔除，保障 Y 轴不被拉扁"""
     op_ref = 3900.0

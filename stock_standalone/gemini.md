@@ -1,3 +1,57 @@
+## 2026-09-18 14:25
+- [x] **【重点关注、MA20d回调、新股次新四大 Tab 看板双击全面直通 SBC 走势窗口 & 右键菜单完整对齐】(`ats/ui/favorite_panel.py`, `ats/ui/swing_table.py`, `ats/ui/new_stock_panel.py`, `ats/ui/base_table.py`, `ats/ui/main_window.py`, `tests/test_tabs_double_click_sbc_unification.py`)**：
+    - [x] **操盘手现场明确指示与交互统一 (P0)**：
+        - “调整重点关注,ma20d,新股次新的tab跟资金主线一样双击打开的改成sbc”；
+        - 全面打通主界面四大主力 Tab（Tab 0 资金主线、Tab 1 重点关注、Tab 2 MA20d 回调跟踪器、Tab 3 新股次新股）的双击看盘行为，消除旧版弹窗体验断层，统一调起 SBC 极限通道走势图。
+    - [x] **全体系工程落地与修复验证 (KISS / SOLID / DRY)**：
+        1. **重点关注 (FavoritePanel)**：
+           - 新增 `stock_double_clicked = pyqtSignal(str, str)` 信号；
+           - 封装 `open_sbc_chart(code, name)` 方法（默认 `period_mode="10d"` 展开）；
+           - `_on_double_clicked` 优先调用 `self.open_sbc_chart(code, name)` 并发射 `stock_double_clicked` 信号；
+           - 主窗口 `self.favorite_panel.stock_double_clicked` 统一连接至 `self.open_sbc_for_stock`。
+        2. **MA20d 回调跟踪器 (SwingStateTable)**：
+           - 封装 `open_sbc_chart(code, name)` 方法；
+           - `_on_cell_double_clicked` 直调 `self.open_sbc_chart(code, name)` 并在主窗口中重定向连接至 `self.open_sbc_for_stock`；
+           - 兼容老版本三参数信号（code, name, context_info），平滑无缝过渡。
+        3. **新股次新股 (NewStockPanel)**：
+           - 封装 `open_sbc_chart(code, name)` 方法；
+           - `_on_cell_double_clicked` 优先直调 `self.open_sbc_chart(code, name)`；
+           - 主窗口 `self.new_stock_panel.stock_double_clicked` 连接至 `self.open_sbc_for_stock`；
+           - 优化 `_on_open_sbc_clicked` 与右键菜单，补齐“🔍 查看个股详情”通道。
+        4. **公共表格 BaseATSTableWidget 升级**：
+           - 右键菜单 “📈 使用 SBC 打开独立分时图” 统一配置 `period_mode="10d"` 与 `parent_win=self.window()`；
+           - 右键菜单新增 “🔍 查看个股详情 (原版详情弹窗)” 入口，与资金主线右键菜单 100% 对齐。
+        5. **自动化测试 100% 验证通过 (30/30 PASSED)**：
+           - 专项测试 `tests/test_tabs_double_click_sbc_unification.py` 4/4 绿灯通过；
+           - 全量回归 `test_tdx_indices_and_etf_sbc_integrity.py`、`test_ats_tabs_strategy_filter.py`、`test_sbc_zoom_and_amplitude.py` 等 26 项测试全部 100% 通过。
+
+## 2026-09-18 14:05
+- [x] **【SBC 走势图全局上下键免点击缩放、标的近几日振幅活跃度极限复用内存数据与 HUD 移至左侧彻底消灭右侧走势遮挡】(`ats/ui/intraday_strategy_dialog.py`, `tests/test_sbc_zoom_and_amplitude.py`)**：
+    - [x] **操盘手现场明确指示与核心痛点 (P0)**：
+        - “上下键全局不用点击走势图才生效的缩放”；
+        - “是否造成系统压力,重复的数据请求,毕竟是批量查看扫描,为何不复用sbc显示的数据,极限优化,2,显示在左侧右侧遮挡当前的走势”；
+        - 截图中日期误显示为 `15:00:4.0%`，遮挡最新突破 K 棒、得分胶囊与右侧价格标尺。
+    - [x] **根因深度破案与底层机理 (P0)**：
+        1. **病灶 1·走势图右侧区域视觉与决策焦点冲突**：右侧区域承载了最新 K 棒实体、99分突破介入点胶囊、现价浮标及右侧 Y 轴上轨/支撑/反转/黄金分割标尺。卡片放右上角属于严重交互冲突；
+        2. **病灶 2·批量扫描下日 K 重复拉取隐患**：批量切换标的或周期时，若每次都通过 TDX 获取日 K 会引入不必要开销，而当前 SBC 内存已加载 `df_intraday`（日 K 模式、多日分时模式下已包含完整高低收）；
+        3. **病灶 3·日 K 日期切片误截时间**：通达信日 K 索引带有时分秒（如 `2026-09-18 15:00:00`），简单切片 `[-5:]` 会截出 `"15:00"`；
+        4. **病灶 4·上下键按键被周期轮转绑定且走势图未获焦点时失灵**：原先上下键绑定在 `rotate_period`，且子控件获焦时按键被吃掉。
+    - [x] **全体系工程落地与修复验证 (KISS / SOLID / DRY)**：
+        1. **全局上下键免点击缩放 (通达信同款手感)**：
+           - 将 `Up`/`Down` 键从切周期剥离，统一路由给 `canvas.zoom_in()` / `canvas.zoom_out()`；
+           - 注册窗口级 `QShortcut(Qt.Key.Key_Up)` 与 `QShortcut(Qt.Key.Key_Down)`；
+           - 在 `SBCIntradayChartDialog.eventFilter` 中全局拦截任何子控件的上下键并直通画布，周期按钮与工具栏全部设置 `NoFocus`，打开与切周期后焦点自动归还走势图；
+        2. **标的近几日振幅活跃度极限复用内存数据 (0ms，0 网络开销)**：
+           - 当前为日 K / 大周期 K 线（day/2k/3k/week/month）时，直接切片本地 `self.df_intraday` 计算，0ms，0 网络请求；
+           - 当前为多日分时（2d/3d/5d/10d）时，直接按本地 `date` 分组提取极值计算，0ms，0 网络请求；
+           - 标的级指纹缓存 `_cached_amp_code` 与 60s 有效期保护，同一标的切周期或轮询 100% 纯内存复用；
+           - 日期通过 `.split()[0][-5:]` 解析，彻底消灭 `15:00`，规范呈现 `MM-DD`（如 `09-18:4.0%`）；
+        3. **HUD 活跃度卡片严格移至左侧 (右侧最新走势 100% 毫无遮挡)**：
+           - 卡片排布在左侧内部（`hud_x = margin_left + 4`），紧凑双行排布（高 44px），K 线模式下紧随左侧通道卡片下方；
+           - 走势图右侧区域（最新 K 线、买入信号、现价浮标与右侧标尺）全部彻底释放；
+        4. **全量自动化测试 100% 验证通过 (3/3 PASSED)**：
+           - `tests/test_sbc_zoom_and_amplitude.py` 全部绿灯通过。
+
 ## 2026-09-18 13:55
 - [x] **【资金主线双击直通 SBC 走势窗口、全量恢复多日分时连续 VWAP 量价均线 & 彻底解决指数 1日/5日/10日分时均线压扁异常】(`ats/tdx_realtime_fetcher.py`, `ats/ui/capital_dragon_panel.py`, `ats/ui/main_window.py`, `ats/ui/intraday_strategy_dialog.py`, `tests/test_tdx_indices_and_etf_sbc_integrity.py`)**：
     - [x] **操盘手现场明确指示与真实痛点 (P0)**：
@@ -11384,19 +11438,6 @@ un_filter 暺䁅恕撘箏��瑟鰵��覔�祉撩��**嚗𡁜� orce_
     - [x] **�㯄�� `IPCSyncManager` �𡁶鍂銵峕��峕郊璅∪�**嚗𡁜銁 `popularity_resonance_gui.py` 摰Ｘ�蝡臬鍳�冽𧒄摰硺��硋僎撘��舫�𡁶鍂 IPC �峕郊蝞∠��剁��穃𨯬�砍𧑐 26671 蝡臬藁嚗���冽㗁�亦眏銝餌�摨𤩺綫�����鉄 `percent`, `trade`, `dff2`, `dff3`, `Rank`, `category` 蝑匧�畾萇��券�銵峕� DataFrame嚗�蝠摨閧�蝏㮖�鈭箸��望𥲤銝𦒘蜓蝔见�銵峕��梯���𠶖����
 
     - [x] **�拙� Treeview �嗆�銝� 9 �堒捐閫�藁 (Expanded Treeviews to 9 Columns)**嚗𡁻���� `create_treeview` 銝剖��冽��閗”�潘��啣��𨀣��唬遠�腈���筂ff2�腈���筂ff3�腈���晉ank�苷誑�𪙛�𡏭�銝𡁏踎�轁��5�𨰜���蝵桐��芷����堒捐銝𡡞俈�格𣏹�劐撓嚗��蝘啣� 85px嚗諹�銝𡁏踎�� 95px ��捂�劐撓嚗��雿坔𤐄摰𡁶�摰賢漲嚗㚁�撟嗅銁 `base_headers` 摮堒�銝𡒊悌憭游儐�臭葉摰峕㟲銵仿�餈� 5 銝芣鰵憓𧼮�嚗峕�蝏苷��孵稬�啣�銵典仍�鍦��嗡漣�毺� KeyError 撏拇���
-
-    - [x] **摰䂿緵�瑕鍳��/�湔鰵銝𤾸��嗅��典��啣�閫�凒�唳㦤��**嚗�
-
-        - �齿�鈭� `update_all_tables`嚗���𣇉�憿萇��𨅯�閬��嚗剹��銁擐硋��唳旿銝𤾸��嗅��𤩺��硋�嚗䔶���� `IPCSyncManager` ���摮� DataFrame �寥����啣�畾萄�潸�銵屸�靽萘�撖寥�憛怠���
-
-        - 摰䂿緵鈭� `refresh_realtime_fields` �� `on_realtime_data_updated` �噼�����嗅� TCP 撟踵偘�券��𧒄嚗𣬚眏銝餌瑪蝔见銁 `after(0)` 銝凋葡銵屸��� 5 銝芾”�潛��券�銵䕘�隞���券�蝏� values 撟嗅𢆡��凒�唳隅頝� tag嚗óp/down/flat嚗㚁�摰䂿緵鈭��銝剜��麄����芰�����⊿▼����嗉���葡�瓐��
-
-    - [x] **隡睃� `--` �羓征摮㛖泵���摨誩��潸蓮�ａ�璉埝��**嚗𡁜銁 `sort_column` ����� `try_convert` 頧祆揢�寞�銝哨�憓𧼮�鈭�笆 `val_str == '--'` ���皛斗㜃�迎�雿踹�蝏煺�鋡恍�蝥扯蓮�碶蛹 `-9999.0` ��撠𤩺㺭�澆�銝𡡞��𡜐�敶餃�靽桀�鈭�𧊋�瑕��啣��嗉����銝芾��冽�摨𤩺𧒄�𤑳��鍦�蝝𠹺僚�������
-
-    - [x] **蝘駁膄 PyInstaller 靘肽��㘾膄撟嗅��𣂼�蝟餌�蝻𤥁��穃�**嚗�
-
-        - 隞� `PopularityResonanceSync.spec` 銝剔��㘾膄�𡑒”嚗Ềxcludes嚗劐葉�娪膄鈭� `pandas` �� `numpy`嚗䔶蝙�枏���虾�扯���辣�瑕��祉��㰘蝸撟嗉圾�� pickle 摨誩��硋之 DataFrame ����䜘��
-
         - �𣂼��典��啗�銵� PyInstaller 摰峕�鈭� `dist/PopularityResonanceSync.exe` 摰Ｘ�蝡舐��𣳇��拍�蝻𤥁�嚗䔶�銝㗇䲮銝餌�摨誩�摰Ｘ�蝡� Python 璅∪��拍�蝻𤥁��券��𣳇��朞���
 
 
@@ -21131,3 +21172,21 @@ equest_dynamic_ipc_sync 中传入 orce=True 绕过防刷干扰。
   5. **自动化回归验证**:
   6. **UI 细节优化**:
      - SBC 实盘分时窗口顶部周期切换按钮名称由 `1日分时`, `2日分时`, `3日分时`, `5日分时` 精简为 **`1日`, `2日`, `3日`, `5日`**，彻底释放约 80px 横向空间，根除工具栏拥挤截断。
+
+
+## [2026-09-18 13:58:00] SBC 走势图实现上下键全局免点击缩放与右上角近几日振幅活跃度 HUD
+- **关联文件**:
+  - `stock_standalone/ats/ui/intraday_strategy_dialog.py`
+  - `stock_standalone/tests/test_sbc_zoom_and_amplitude.py`
+- **核心实现成果**:
+  1. **上下键全局免点击缩放（通达信手感对齐）**:
+     - **解除错误绑定**: 彻底修复 `SBCIntradayChartDialog.keyPressEvent` 中将 `Key_Up` 和 `Key_Down` 绑定为 `rotate_period` 切换周期的 Bug；
+     - **显式缩放分发**: `Key_Up` 直接调用 `self.canvas.zoom_in()`，`Key_Down` 直接调用 `self.canvas.zoom_out()`，最新一根 Bar 始终锚定在右侧，缩放精准平滑；
+     - **窗口级 QShortcut 拦截**: 在 Dialog 中注册窗口级 `QShortcut(Qt.Key.Key_Up)` 与 `QShortcut(Qt.Key.Key_Down)`，结合 `is_editing_text()` 文本输入保护，确保只要不在编辑框打字，按上下键 100% 触发走势图缩放；
+     - **焦点穿透与事件过滤**: 实现 `eventFilter` 捕获普通子控件捕获的按键，并将周期按钮、工具栏按钮 focusPolicy 设置为 `NoFocus`，`showEvent` 与切换周期后自动归还焦点给 `self.canvas`，彻底实现“全局不用点击走势图才生效的缩放”。
+  2. **走势图右上角近几日振幅活跃度 HUD（对齐图 2 红框位置）**:
+     - **振幅计算引擎 (`update_amplitude_data`)**: 拉取标的近 10 根日 K，计算近 3~5 个交易日日内真实振幅 $Amp_t = \frac{High_t - Low_t}{Close_{t-1}} \times 100\%$、5日平均振幅、极值振幅，并给出四级活跃度诊断评级（`🔥极高活跃` / `⚡高度活跃` / `📈温和波动` / `💤低位沉寂`）；
+     - **离线与分时保底**: 支持从多日分时（5d/10d）按日期聚合估算，绝不白屏、绝不抛出任何异常；
+     - **高对比度通透 HUD (`_draw_amplitude_hud`)**: 位于走势图右上角内部（`x = margin_left + chart_w - card_w - 6`, `y = margin_top + 6`），三行彩色排布（标题+评级胶囊、均振+极值、近 3~5 日明细），分时图与多周期 K 线图统一支持。
+  3. **自动化测试与回归验证**:
+     - 新建 `tests/test_sbc_zoom_and_amplitude.py`，全量测试用例均通过（`Ran 3 tests, OK`）。

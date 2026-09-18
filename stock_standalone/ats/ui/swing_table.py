@@ -540,12 +540,23 @@ class SwingStateTable(QWidget):
         font.setBold(True)
         return font
 
+    def open_sbc_chart(self, code: str, name: str = ""):
+        """【📈 打开 SBC 通道走势图】MA20d 回调标的双击直通 SBC 通道走势图"""
+        if not code:
+            return
+        c_clean = "".join(filter(str.isdigit, str(code))).zfill(6) if any(x.isdigit() for x in str(code)) else str(code).strip()
+        try:
+            from ats.ui.intraday_strategy_dialog import open_sbc_chart_dialog
+            open_sbc_chart_dialog(parent_win=self.window(), code=c_clean, period_mode="10d")
+        except Exception as e:
+            logger.error(f"[SwingStateTable] 打开 SBC 走势图异常: {e}")
+
     def _on_cell_double_clicked(self, row, col):
         code_item = self.table.item(row, 0)
         name_item = self.table.item(row, 1)
         if code_item and name_item:
-            code = code_item.text()
-            name = name_item.text()
+            code = code_item.text().strip()
+            name = name_item.text().strip().replace("⭐ ", "").strip()
             state = self.table.item(row, 3).text() if self.table.item(row, 3) else ""
             ma20_dist = self.table.item(row, 4).text() if self.table.item(row, 4) else ""
             limit_ups = self.table.item(row, 5).text() if self.table.item(row, 5) else ""
@@ -564,6 +575,7 @@ class SwingStateTable(QWidget):
                 'reason': reason,
                 'status': f"MA20偏离: {ma20_dist} | 连板数: {limit_ups} | 首次发现: {first_seen} | 优先级: {priority} | DFF: {dff} | Rank: {rank} | 大盘偏离: {rs} | 共振: {resonance}"
             }
+            self.open_sbc_chart(code, name)
             self.stock_double_clicked.emit(code, name, context_info)
 
     def refresh_favorites_display(self):
