@@ -3062,20 +3062,6 @@ class SBCIntradayChartDialog(QWidget):
         tb_layout.addWidget(btn_clear_cache)
         tb_layout.addWidget(self.btn_toggle_log)
 
-        self.btn_exit_all = QPushButton("🚪 退出保存")
-        self.btn_exit_all.setStyleSheet("""
-            QPushButton {
-                background-color: #3b1419; color: #ff8888; font-weight: bold; border: 1px solid #ff4444;
-                border-radius: 3px; padding: 2px 5px; font-size: 8.5pt;
-            }
-            QPushButton:hover {
-                background-color: #551922; color: #ffffff; border: 1px solid #ff6666;
-            }
-        """)
-        self.btn_exit_all.setToolTip("快捷键: 按住 Alt 点击窗口右上角关闭 [X] 键，或 Ctrl+Shift+Q。\n一键将当前所有打开的盯盘窗口与布局原样持久化保存，并安全退出。")
-        self.btn_exit_all.clicked.connect(self._exit_and_save_all)
-        tb_layout.addWidget(self.btn_exit_all)
-
         layout.addLayout(tb_layout)
 
         # 2. 实盘走势图画布

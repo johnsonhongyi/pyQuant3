@@ -569,7 +569,19 @@ class NewStockFetcher:
                 if c_k and safe_float(r.get("price", 0.0)) > 0:
                     history_map[c_k] = r.to_dict()
 
-        codes_to_query = df["code"].tolist()
+        today_str = datetime.date.today().strftime("%Y-%m-%d")
+        # 🛡️ 核心物理隔离门禁 (P0)：
+        # 待上市新股在二级市场无开盘行情，传入通达信行情服务器会导致整批 40 只标的直接被服务器丢弃返回 None！
+        # 坚决只对真正已在二级市场上市交易的标的发起 TDX 盘口拉取，未上市标的直接保持静态信息，杜绝污染行情批次！
+        if "status" in df.columns and "listing_date" in df.columns:
+            active_mask = (
+                (df["status"] != "待上市") & 
+                (df["listing_date"].fillna("").astype(str) != "-") & 
+                (df["listing_date"].fillna("").astype(str) <= today_str)
+            )
+            codes_to_query = df.loc[active_mask, "code"].tolist()
+        else:
+            codes_to_query = df["code"].tolist()
         quote_map: Dict[str, Dict[str, Any]] = {}
 
         now_ts = time.time()
@@ -578,8 +590,8 @@ class NewStockFetcher:
             from ats.tdx_realtime_fetcher import TDXRealtimeFetcher
             tdx_fetcher = TDXRealtimeFetcher.get_instance()
             
-            # 1. 批量快速获取全部标的的真实流通股本与总股本
-            shares_dict = tdx_fetcher.get_batch_finance_shares(codes_to_query)
+            # 1. 批量快速获取全部已上市标的的真实流通股本与总股本
+            shares_dict = tdx_fetcher.get_batch_finance_shares(codes_to_query) if codes_to_query else {}
 
             chunk_size = 40
             for i in range(0, len(codes_to_query), chunk_size):

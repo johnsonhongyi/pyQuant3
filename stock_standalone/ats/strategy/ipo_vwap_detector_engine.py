@@ -282,9 +282,32 @@ class IPOVWAPDetectorEngine:
                 
             t_strat_start = time.perf_counter()
             if df_multi is not None and not df_multi.empty:
-                self._evaluate_vwap_structure(df_multi, sig)
+                self._evaluate_vwap_structure(df_multi, sig, day_df=day_df)
             else:
                 sig.signal_desc = "分时数据拉取中..."
+
+            # ⚡ 早盘集合竞价与实时盘口快照融合 (09:15~09:30 时段分钟线尚未生成今日 Bar，自动融合最新盘口)
+            current_hm = time.strftime("%H:%M")
+            if "09:15" <= current_hm < "09:30" or sig.price <= 0:
+                try:
+                    snap = self.fetcher.fetch_stock_snapshot(clean_code)
+                    if snap and isinstance(snap, dict):
+                        sp_p = float(snap.get("price", 0.0))
+                        b1_p = float(snap.get("buy", snap.get("bid1", 0.0)))
+                        a1_p = float(snap.get("sell", snap.get("ask1", 0.0)))
+                        op_p = float(snap.get("open", 0.0))
+                        lc_p = float(snap.get("last_close", 0.0))
+
+                        eff_p = sp_p if sp_p > 0 else (b1_p if b1_p > 0 else (op_p if op_p > 0 else (a1_p if a1_p > 0 else 0.0)))
+                        if eff_p > 0:
+                            sig.price = eff_p
+                            if lc_p > 0:
+                                sig.change_pct = round((eff_p - lc_p) / lc_p * 100.0, 2)
+                            if sig.vwap > 0:
+                                sig.vwap_diff_pct = round((eff_p - sig.vwap) / sig.vwap * 100.0, 2)
+                            sig.is_above_vwap = (eff_p >= sig.vwap)
+                except Exception:
+                    pass
                 
             # 2. 获取大趋势 K 线通道与支撑 (日K 与 2D K线，优先复用已有的 day_df，或使用 fastohlc 极速模式)
             self._evaluate_kline_trend(clean_code, sig, day_df=day_df)
@@ -305,12 +328,13 @@ class IPOVWAPDetectorEngine:
         self._eval_cache[clean_code] = (sig, now_ts)
         return sig
 
-    def _evaluate_vwap_structure(self, df: pd.DataFrame, sig: VWAPDetectorSignal):
+    def _evaluate_vwap_structure(self, df: pd.DataFrame, sig: VWAPDetectorSignal, day_df: Optional[pd.DataFrame] = None):
         """
         评估分时多日 VWAP 结构：
         1. 计算当前现价、VWAP 均价与偏离度；
-        2. 识别是否在 VWAP 上走平 1~3 天 (振幅收敛，紧贴 VWAP)；
-        3. 识别是否在 VWAP 上方回踩不碰。
+        2. 计算真实涨跌幅 (精确对接上一交易日收盘价昨收)；
+        3. 识别是否在 VWAP 上走平 1~3 天 (振幅收敛，紧贴 VWAP)；
+        4. 识别是否在 VWAP 上方回踩不碰。
         """
         last_row = df.iloc[-1]
         p = float(last_row.get("close", last_row.get("price", 0.0)))
@@ -330,6 +354,21 @@ class IPOVWAPDetectorEngine:
         else:
             dates = ["today"]
             date_groups = [(dates[0], df)]
+
+        # ⚡ 涨跌幅精确计算：优先提取上一交易日收盘价 (昨收 last_close)
+        last_close = 0.0
+        if len(dates) >= 2:
+            prev_day_df = df[df["date"] == dates[-2]]
+            if not prev_day_df.empty:
+                last_close = float(prev_day_df.iloc[-1].get("close", 0.0))
+        if last_close <= 0 and day_df is not None and not day_df.empty:
+            if len(day_df) >= 2:
+                last_close = float(day_df.iloc[-2].get("close", 0.0))
+        if last_close <= 0:
+            last_close = float(last_row.get("last_close", last_row.get("prev_close", 0.0)))
+
+        if last_close > 0 and p > 0:
+            sig.change_pct = round((p - last_close) / last_close * 100.0, 2)
 
         n_days = len(dates)
         

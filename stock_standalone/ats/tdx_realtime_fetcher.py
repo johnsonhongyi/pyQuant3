@@ -1922,10 +1922,17 @@ class TDXRealtimeFetcher:
                         self.add_log(f"⚡ [TDX] 成功获取批次 {len(quotes)} 只标的行情 (耗时: {cost_ms:.1f}ms, 主站: {host_info})", level="INFO")
                     else:
                         self._consecutive_empty_batches += 1
-                        # 🚨 若当前主站连续 2 个批次都未返回盘口数据，极大概率为主站假死或流控拒绝，立即触发自动故障转移！
-                        # 🛡️ 守卫: 早盘服务器初始化时段 (08:45~09:15) 无盘口属于正常维护，禁止触发故障转移震荡
+                        # 🚨 判定主站是否真正假死：先发送标准健康探针 (000001/600519)
+                        is_host_dead = False
                         if self._consecutive_empty_batches >= 2 and not stage_meta.get("is_server_init", False):
-                            self.add_log(f"⚠️ [TDX故障自愈] 主站 [{host_info}] 连续批次未返回盘口数据，疑似失效或假死，立即自动故障转移！", level="WARN")
+                            # 🛡️ 守卫：若标准探针能够有效返回盘口，说明主站与网络完全健康，纯粹是业务批次内含有未上市或异常标的，绝不触发误切换！
+                            if not self._probe_host_alive(self.api):
+                                is_host_dead = True
+                            else:
+                                self._consecutive_empty_batches = 0
+
+                        if is_host_dead:
+                            self.add_log(f"⚠️ [TDX故障自愈] 主站 [{host_info}] 探针无响应，确认节点假死，立即自动故障转移！", level="WARN")
                             if self.auto_failover():
                                 try:
                                     retry_quotes = self.api.get_security_quotes(req_params)
@@ -1952,46 +1959,48 @@ class TDXRealtimeFetcher:
                         last_warn_t = self._last_batch_warn_time.get(batch_key, 0.0)
                         if now_t - last_warn_t > 60.0:
                             self._last_batch_warn_time[batch_key] = now_t
-                            self.add_log(f"⚠️ [TDX] 批次 [{codes_str[:30]}...] 未返回盘口数据，尝试单只补拉并自动冷却", level="WARN")
+                            self.add_log(f"⚠️ [TDX] 批次 [{codes_str[:30]}...] 未返回盘口数据，启动深度二分隔离探针", level="WARN")
 
-                        # 🚀 [PERF-FIX] 杜绝循环 50~80 次串行单只请求导致的网络 I/O 阻塞雪崩与主站流控！
-                        # 采用二分拆包探查 (最多 2 次批量请求即可隔离出正常标的)：
-                        if len(req_params) > 1:
-                            mid = len(req_params) // 2
-                            sub_batches = [req_params[:mid], req_params[mid:]]
-                            for sub_b in sub_batches:
-                                if not sub_b:
-                                    continue
-                                try:
-                                    sub_quotes = self.api.get_security_quotes(sub_b)
-                                    if sub_quotes and len(sub_quotes) > 0:
-                                        all_fetched_quotes.extend(sub_quotes)
-                                        for sq in sub_quotes:
-                                            sq_code = str(sq.get("code", "")).strip().zfill(6)
-                                            if sq_code:
-                                                self._off_hours_cached_quotes[sq_code] = sq
-                                                self._no_quote_counts[sq_code] = 0
-                                                self._unlisted_or_dormant_codes.discard(sq_code)
-                                                b_res = self.record_and_evaluate_bidding_surge(sq)
-                                                sq.update(b_res)
+                        # 🚀 [PERF-FIX] 递归二分拆包隔离：精准识别并剔除导致失败的单个异常/未上市代码，确保同批正常标的 100% 成功拉取！
+                        queue = collections.deque([req_params])
+                        while queue:
+                            cur_b = queue.popleft()
+                            if not cur_b:
+                                continue
+                            try:
+                                cur_q = self.api.get_security_quotes(cur_b)
+                                if cur_q and len(cur_q) > 0:
+                                    all_fetched_quotes.extend(cur_q)
+                                    for sq in cur_q:
+                                        sq_code = str(sq.get("code", "")).strip().zfill(6)
+                                        if sq_code:
+                                            self._off_hours_cached_quotes[sq_code] = sq
+                                            self._no_quote_counts[sq_code] = 0
+                                            self._unlisted_or_dormant_codes.discard(sq_code)
+                                            b_res = self.record_and_evaluate_bidding_surge(sq)
+                                            sq.update(b_res)
+                                else:
+                                    # 当前批次失败
+                                    if len(cur_b) == 1:
+                                        # 精准定位到单只未上市或无盘口异常代码，单独记录并隔离冷却
+                                        bad_mkt, bad_c = cur_b[0]
+                                        self._no_quote_counts[bad_c] = self._no_quote_counts.get(bad_c, 0) + 1
+                                        self._no_quote_last_attempt[bad_c] = now_t
+                                        self._unlisted_or_dormant_codes.add(bad_c)
                                     else:
-                                        # 该子批次包含异常代码，整批记一次未返回并自动冷却
-                                        for _, c_clean in sub_b:
-                                            self._no_quote_counts[c_clean] = self._no_quote_counts.get(c_clean, 0) + 1
-                                            self._no_quote_last_attempt[c_clean] = now_t
-                                            if self._no_quote_counts[c_clean] >= (4 if is_trading else 2):
-                                                self._unlisted_or_dormant_codes.add(c_clean)
-                                except Exception:
-                                    for _, c_clean in sub_b:
-                                        self._no_quote_counts[c_clean] = self._no_quote_counts.get(c_clean, 0) + 1
-                                        self._no_quote_last_attempt[c_clean] = now_t
-                        else:
-                            # 仅 1 只标的：直接标记冷却，绝不重复重试
-                            _, c_clean = req_params[0]
-                            self._no_quote_counts[c_clean] = self._no_quote_counts.get(c_clean, 0) + 1
-                            self._no_quote_last_attempt[c_clean] = now_t
-                            if self._no_quote_counts[c_clean] >= (4 if is_trading else 2):
-                                self._unlisted_or_dormant_codes.add(c_clean)
+                                        mid = len(cur_b) // 2
+                                        queue.append(cur_b[:mid])
+                                        queue.append(cur_b[mid:])
+                            except Exception:
+                                if len(cur_b) == 1:
+                                    bad_mkt, bad_c = cur_b[0]
+                                    self._no_quote_counts[bad_c] = self._no_quote_counts.get(bad_c, 0) + 1
+                                    self._no_quote_last_attempt[bad_c] = now_t
+                                    self._unlisted_or_dormant_codes.add(bad_c)
+                                else:
+                                    mid = len(cur_b) // 2
+                                    queue.append(cur_b[:mid])
+                                    queue.append(cur_b[mid:])
                 except Exception as e:
                     cost_ms = (time.time() - t_start) * 1000.0
                     self._record_request_feedback(cost_ms, is_error=True)
