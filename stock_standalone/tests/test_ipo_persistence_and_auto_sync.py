@@ -250,3 +250,155 @@ def test_auto_polling_smart_sleep_and_cold_start_full_restoration(monkeypatch):
     finally:
         dlg.close()
 
+
+def test_poll_interval_dropdown_and_persistence(monkeypatch):
+    """8. 验证轮询间隔下拉框、默认15秒、自动持久化及切换生效"""
+    monkeypatch.setattr("ats.ui.ipo_subnew_detector_dialog.get_ipo_detector_layout_file", lambda: TEST_TMP_CFG)
+    dlg = IPOSubnewDetectorDialog()
+    try:
+        # 1. 验证默认值为 15 秒
+        assert hasattr(dlg, "combo_interval")
+        assert dlg.poll_interval_sec == 15
+        assert dlg.combo_interval.currentText() == "15秒"
+        assert [dlg.combo_interval.itemText(i) for i in range(dlg.combo_interval.count())] == ["5秒", "10秒", "15秒", "30秒", "60秒"]
+
+        # 2. 模拟切换至 30 秒
+        idx_30 = dlg.combo_interval.findText("30秒")
+        dlg.combo_interval.setCurrentIndex(idx_30)
+        assert dlg.poll_interval_sec == 30
+
+        # 验证开启自动轮询时按钮文本保持清爽简洁，不重复显示秒数
+        dlg._on_toggle_auto_refresh(True)
+        assert dlg.auto_refresh_enabled is True
+        assert dlg.btn_auto.text() == "⏳ 自动轮询: 开"
+
+        # 3. 持久化落盘与冷启动恢复验证
+        dlg.save_persisted_state()
+
+        dlg2 = IPOSubnewDetectorDialog()
+        try:
+            assert dlg2.poll_interval_sec == 30
+            assert dlg2.combo_interval.currentText() == "30秒"
+            assert dlg2.auto_refresh_enabled is True
+            assert dlg2.btn_auto.text() == "⏳ 自动轮询: 开"
+        finally:
+            dlg2.close()
+    finally:
+        dlg.close()
+
+
+def test_fullscreen_column_width_auto_fit_no_black_gap():
+    """9. 验证全屏/大窗口下表格列宽自适应拉伸填充视口，彻底消灭右侧黑边"""
+    dlg = IPOSubnewDetectorDialog()
+    try:
+        dlg.resize(1920, 1080)
+        dlg.show()
+        dlg.resize(1920, 1080)
+        app.processEvents()
+        dlg.adjust_columns_to_viewport()
+
+        vp_w = dlg.table.viewport().width()
+        total_cols = dlg.table.columnCount()
+        action_col = total_cols - 3
+
+        # 验证操作建议列自适应伸缩为较大宽度，吃满视口
+        action_w = dlg.table.columnWidth(action_col)
+        assert action_w >= 300, f"全屏下操作建议列应自适应伸展，实际为 {action_w}px"
+
+        # 验证所有可见列的宽度之和与视口宽度对齐 (误差 <= 2px，彻底消灭黑边)
+        total_w = sum(dlg.table.columnWidth(c) for c in range(total_cols) if not dlg.table.isColumnHidden(c))
+        assert abs(total_w - vp_w) <= 2, f"总列宽 {total_w} 应与视口宽度 {vp_w} 严丝合缝对齐"
+    finally:
+        dlg.close()
+
+
+def test_manual_only_persistence_and_faithful_restoration(monkeypatch):
+    """10. 验证严格只有手动变动才持久化，冷启动100%忠实还原少数标的，绝不强塞默认股票"""
+    monkeypatch.setattr("ats.ui.ipo_subnew_detector_dialog.get_ipo_detector_layout_file", lambda: TEST_TMP_CFG)
+    
+    # 模拟用户手工只配置了两只标的
+    custom_codes = ["688801", "601091"]
+    custom_data = {
+        "monitored_codes": custom_codes,
+        "manual_codes": ["688801"],
+        "saved_at": "2026-09-18 23:00:00"
+    }
+    with open(TEST_TMP_CFG, "w", encoding="utf-8") as f:
+        json.dump(custom_data, f)
+
+    mtime_before = os.path.getmtime(TEST_TMP_CFG)
+
+    # 1. 验证冷启动读取时，严禁写入覆盖磁盘
+    dlg = IPOSubnewDetectorDialog()
+    try:
+        # 验证100%忠实还原这两只，绝不会被 <= 5 逻辑强塞 35 只默认股票！
+        assert dlg.monitored_codes == custom_codes
+        assert len(dlg.monitored_codes) == 2
+
+        # 验证加载读操作未篡改磁盘文件
+        mtime_after_load = os.path.getmtime(TEST_TMP_CFG)
+        assert mtime_before == mtime_after_load
+
+        # 2. 验证后台扫描完成回调不会触发写盘持久化
+        dlg._on_scan_finished(2, 0.5, {})
+        mtime_after_scan = os.path.getmtime(TEST_TMP_CFG)
+        assert mtime_after_scan == mtime_before, "后台扫描结束绝不能触发写盘持久化"
+
+        # 3. 验证只有用户手动添加或操作时，才真正触发持久化
+        dlg.add_stock("301689")
+        mtime_after_manual = os.path.getmtime(TEST_TMP_CFG)
+        assert mtime_after_manual > mtime_before, "用户手动添加标的必须触发持久化落盘"
+    finally:
+        dlg.close()
+
+
+def test_sbc_window_persistence_size_restoration(monkeypatch):
+    """11. 验证SBC窗口默认舒适尺寸 (800x560) 与最后关闭持久化的尺寸在重新打开时严格生效"""
+    from ats.ui.intraday_strategy_dialog import SBCIntradayChartDialog, _get_sbc_layout_cfg_path
+    from PyQt6.QtCore import QSettings
+    
+    sbc_cfg = _get_sbc_layout_cfg_path()
+    test_sbc_cfg = sbc_cfg + ".test_tmp.json"
+    monkeypatch.setattr("ats.ui.intraday_strategy_dialog._get_sbc_layout_cfg_path", lambda: test_sbc_cfg)
+
+    # 1. 验证操盘手关闭最后一个SBC保存的自定义大尺寸 (如 860x620)
+    saved_size = {"width": 860, "height": 620}
+    test_data = {
+        "sbc_window_size": saved_size,
+        "sbc_geometries": {
+            # 即使某只股票历史上有平铺留下的微小尺寸，也坚决不能篡改全局标准尺寸！
+            "688801": {"x": 50, "y": 50, "width": 522, "height": 436}
+        }
+    }
+    with open(test_sbc_cfg, "w", encoding="utf-8") as f:
+        json.dump(test_data, f)
+
+    try:
+        # 打开该股票的 SBC 窗口
+        sbc_dlg = SBCIntradayChartDialog(code="688801")
+        try:
+            # 验证其尺寸忠实采用了操盘手持久化的 860x620，彻底粉碎平铺小尺寸覆盖！
+            assert sbc_dlg.width() == 860
+            assert sbc_dlg.height() == 620
+        finally:
+            sbc_dlg.close()
+
+        # 2. 验证全新环境无持久化记录时，默认采用图2舒展舒适尺寸 (800, 560)
+        if os.path.exists(test_sbc_cfg):
+            os.remove(test_sbc_cfg)
+        SBCIntradayChartDialog._global_sbc_size = None
+        # mock QSettings 返回 None，模拟完全纯白出厂环境
+        monkeypatch.setattr(QSettings, "value", lambda self, key, defaultValue=None: None)
+        sbc_default = SBCIntradayChartDialog(code="920298")
+        try:
+            assert sbc_default.width() == 800
+            assert sbc_default.height() == 560
+        finally:
+            sbc_default.close()
+    finally:
+        if os.path.exists(test_sbc_cfg):
+            try:
+                os.remove(test_sbc_cfg)
+            except Exception:
+                pass
+
