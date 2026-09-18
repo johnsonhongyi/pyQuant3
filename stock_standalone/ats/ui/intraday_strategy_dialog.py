@@ -298,6 +298,7 @@ class SBCChartCanvas(QWidget):
         self.target_sell_max = 0.0
         self.signals = []
         self.channel_info = {}  # ⚡ 存储对齐 K 线的通道关键阶梯 (上轨、中轨、下轨、支撑、反转)
+        self.amplitude_info = {}  # 📊 存储标的近 5 日振幅高低与活跃度指标 (均振、极值、每日明细)
 
         # 🔍 缩放与平移视口状态
         self._zoom_start_idx = 0
@@ -476,12 +477,20 @@ class SBCChartCanvas(QWidget):
                 parent_win._on_rearrange_windows_clicked()
             event.accept()
             return
-        elif key in (Qt.Key.Key_Left, Qt.Key.Key_Up, Qt.Key.Key_PageUp, Qt.Key.Key_Backtab):
+        elif key == Qt.Key.Key_Up:
+            self.zoom_in()
+            event.accept()
+            return
+        elif key == Qt.Key.Key_Down:
+            self.zoom_out()
+            event.accept()
+            return
+        elif key in (Qt.Key.Key_Left, Qt.Key.Key_PageUp, Qt.Key.Key_Backtab):
             if parent_win and hasattr(parent_win, 'rotate_period'):
                 parent_win.rotate_period(-1)
             event.accept()
             return
-        elif key in (Qt.Key.Key_Right, Qt.Key.Key_Down, Qt.Key.Key_PageDown, Qt.Key.Key_Tab):
+        elif key in (Qt.Key.Key_Right, Qt.Key.Key_PageDown, Qt.Key.Key_Tab):
             if parent_win and hasattr(parent_win, 'rotate_period'):
                 parent_win.rotate_period(1)
             event.accept()
@@ -659,8 +668,21 @@ class SBCChartCanvas(QWidget):
                 }
                 self.update()
 
-    def wheelEvent(self, event):
-        """🔍 鼠标滚轮缩放：以鼠标所在 X 坐标为锚点进行平滑缩放"""
+    def zoom_in(self, factor: float = 0.80):
+        """🔍 放大视图 (对齐通达信 Up 键 / 滚轮上滚)：减少可视 Bar 数量，视野拉近，固定右侧最新数据不动"""
+        self._zoom_step(in_=True, factor=factor, anchor_rel_x=1.0)
+
+    def zoom_out(self, factor: float = 1.25):
+        """🔍 缩小视图 (对齐通达信 Down 键 / 滚轮下滚)：增加可视 Bar 数量，视野拉远，固定右侧最新数据不动"""
+        self._zoom_step(in_=False, factor=factor, anchor_rel_x=1.0)
+
+    def _zoom_step(self, in_: bool = True, factor: float = 0.80, anchor_rel_x: Optional[float] = None):
+        """
+        【🎯 通达信经典缩放核心引擎】
+        1. 若指定了 anchor_rel_x 或鼠标悬停在图表内部，则以该点为锚点中心进行视野缩放；
+        2. 若未指定且无悬停，则默认以最右侧最新 Bar 为锚点 (anchor_rel_x = 1.0)，视野向左缩放；
+        3. in_=True 为放大(Bar变大变粗，总数减少)，in_=False 为缩小(Bar变小变细，总数增加)。
+        """
         if self.df_intraday is None or self.df_intraday.empty:
             return
 
@@ -672,20 +694,25 @@ class SBCChartCanvas(QWidget):
         cur_end = min(total_n - 1, self._zoom_end_idx if self._zoom_end_idx >= 0 else total_n - 1)
         cur_count = cur_end - cur_start + 1
 
-        delta_y = event.angleDelta().y()
-        if delta_y == 0:
-            return
-
         margin_left = self.MARGIN_LEFT
         margin_right = self.MARGIN_RIGHT
         chart_w = max(10, self.width() - margin_left - margin_right)
-        mouse_pos = event.position() if hasattr(event, "position") else event.pos()
-        mouse_x = mouse_pos.x()
-        rel_x = max(0.0, min(1.0, (mouse_x - margin_left) / float(chart_w)))
 
-        if delta_y > 0:
-            # 向上滚：放大 (缩减可视数量，最少保留 8 根 K 棒)
-            new_count = max(8, int(cur_count * 0.80))
+        if anchor_rel_x is not None:
+            rel_x = max(0.0, min(1.0, float(anchor_rel_x)))
+        elif getattr(self, '_hover_pos', None) is not None:
+            hx = self._hover_pos.x()
+            if margin_left <= hx <= (margin_left + chart_w):
+                rel_x = max(0.0, min(1.0, (hx - margin_left) / float(chart_w)))
+            else:
+                rel_x = 1.0
+        else:
+            rel_x = 1.0  # 通达信经典手感：最右侧最新数据固定不动！
+
+        if in_:
+            # 向上/放大：缩减可视数量，最少保留 8 根 K 棒
+            f = factor if factor < 1.0 else (1.0 / factor)
+            new_count = max(8, int(cur_count * f))
             if new_count >= cur_count:
                 new_count = max(8, cur_count - 2)
             diff = cur_count - new_count
@@ -694,8 +721,9 @@ class SBCChartCanvas(QWidget):
             new_start = cur_start + left_diff
             new_end = cur_end - right_diff
         else:
-            # 向下滚：缩小 (增加可视数量，最大至全量 total_n)
-            new_count = min(total_n, int(cur_count * 1.25) + 2)
+            # 向下/缩小：增加可视数量，最大至全量 total_n
+            f = factor if factor > 1.0 else (1.0 / factor if factor > 0 else 1.25)
+            new_count = min(total_n, int(cur_count * f) + 2)
             diff = new_count - cur_count
             left_diff = int(round(diff * rel_x))
             right_diff = diff - left_diff
@@ -718,6 +746,27 @@ class SBCChartCanvas(QWidget):
             self._zoom_end_idx = new_end
 
         self.update()
+
+    def wheelEvent(self, event):
+        """🔍 鼠标滚轮缩放：以鼠标所在 X 坐标为锚点进行平滑缩放"""
+        if self.df_intraday is None or self.df_intraday.empty:
+            return
+
+        delta_y = event.angleDelta().y()
+        if delta_y == 0:
+            return
+
+        margin_left = self.MARGIN_LEFT
+        margin_right = self.MARGIN_RIGHT
+        chart_w = max(10, self.width() - margin_left - margin_right)
+        mouse_pos = event.position() if hasattr(event, "position") else event.pos()
+        rel_x = max(0.0, min(1.0, (mouse_pos.x() - margin_left) / float(chart_w)))
+
+        if delta_y > 0:
+            self._zoom_step(in_=True, factor=0.80, anchor_rel_x=rel_x)
+        else:
+            self._zoom_step(in_=False, factor=1.25, anchor_rel_x=rel_x)
+
         event.accept()
 
     def mousePressEvent(self, event):
@@ -1167,13 +1216,14 @@ class SBCChartCanvas(QWidget):
 
         op_ref = self.open_price if self.open_price > 1.0 else (prices[0] if len(prices) > 0 else 10.0)
         max_valid_price = (op_ref * 1.70) if op_ref > 10.0 else (op_ref * 3.0)
+        min_valid_price = (op_ref * 0.35) if op_ref > 5.0 else 0.05
 
         all_cands = []
         for p in prices:
-            if 1.0 < p <= max_valid_price:
+            if min_valid_price <= p <= max_valid_price:
                 all_cands.append(p)
         for v in vwaps:
-            if 1.0 < v <= max_valid_price:
+            if min_valid_price <= v <= max_valid_price:
                 all_cands.append(v)
         if op_ref > 0:
             all_cands.append(op_ref)

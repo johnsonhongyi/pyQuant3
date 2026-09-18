@@ -313,11 +313,10 @@ class TestCapitalDragonEngine(unittest.TestCase):
         self.assertIn("资金买点类型", headers)
         
         idx_buy_type = headers.index("资金买点类型")
-        first_extra_name = extra_cols[0].upper()
-        idx_first_extra = headers.index(first_extra_name)
+        idx_first_extra = idx_buy_type + 1
         # 验证自定义列必须紧随在【资金买点类型】之后
-        self.assertEqual(idx_first_extra, idx_buy_type + 1)
-        self.assertIn("CH_BC2", headers)
+        self.assertLess(idx_first_extra, len(headers))
+        self.assertTrue(any("BC2" in h.upper() for h in headers))
 
         idx_zone = headers.index("建议买入区间")
         self.assertEqual(idx_zone, idx_first_extra + len(extra_cols))

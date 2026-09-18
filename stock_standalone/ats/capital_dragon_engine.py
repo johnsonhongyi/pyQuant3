@@ -921,6 +921,8 @@ class CapitalDragonEngine:
                 dragon_role = "🛡️ 趋势容量中军"
                 role_priority = 90
                 supp_ref = max(ch_supp, ma20_val) if ch_supp > 0 else (ma20_val if ma20_val > 0 else round(price_val * 0.95, 2))
+                if price_val > 0 and (supp_ref > price_val * 1.05 or supp_ref < price_val * 0.75):
+                    supp_ref = round(price_val * 0.96, 2)
                 stop_loss = round(supp_ref * 0.97, 2)
                 
                 if pct_val >= 4.0:
@@ -969,6 +971,8 @@ class CapitalDragonEngine:
                 dragon_role = "🛡️ 趋势容量中军"
                 role_priority = 98
                 supp_ref = max(ch_supp, ma20_val) if ch_supp > 0 else (ma20_val if ma20_val > 0 else round(price_val * 0.95, 2))
+                if price_val > 0 and (supp_ref > price_val * 1.05 or supp_ref < price_val * 0.75):
+                    supp_ref = round(price_val * 0.96, 2)
                 stop_loss = round(supp_ref * 0.97, 2)
                 base_action = "🎯 通道支撑企稳" if pct_val < 4.0 else "🚀 主升趋势加速"
                 action_tip = "权威大盘与核心综合指数，观测全市场风向标与宏观流动性"

@@ -262,6 +262,114 @@ def get_market_code(stock_code: str) -> int:
     return 0
 
 
+def is_fund_or_etf(stock_code: str) -> bool:
+    """
+    判断标的是否属于基金/ETF (51, 56, 58, 15, 16, 50 等开头)
+    """
+    c = str(stock_code).strip().lower()
+    digits = "".join(ch for ch in c if ch.isdigit()).zfill(6)
+    return digits.startswith(("51", "56", "58", "15", "16", "50"))
+
+
+def is_index_code(stock_code: str, name: str = "") -> bool:
+    """
+    判断标的是否属于股票大盘或综合指数 (999xxx, 399xxx, 899xxx, 000001(sh), 000300(sh), 000688(sh), 000016(sh), 000905(sh)等)
+    """
+    c = str(stock_code).strip().lower()
+    digits = "".join(ch for ch in c if ch.isdigit()).zfill(6)
+    if digits.startswith(("999", "399", "899")):
+        return True
+    if c.startswith("sh") and digits in ("000001", "000300", "000016", "000905", "000852", "000688"):
+        return True
+    if digits in ("999999", "999688"):
+        return True
+    if digits == "000001" and name and any(kw in str(name) for kw in ("上证", "综指", "指数")):
+        return True
+    return False
+
+
+# 专门建立【系统业务代码 -> TDX接口参数】的权威映射表 (专为指数建立隔离分类)
+# 彻底消除 000688(科创50 vs 国新健康)、000001(上证指数 vs 平安银行) 重合碰撞！
+INDEX_LOGICAL_TO_TDX_MAP: Dict[str, Tuple[int, str, str]] = {
+    # 格式: 系统业务代码 -> (TDX market, TDX 官方接口代码, 标准显示名称)
+    "999688": (1, "000688", "科创50"),   # 科创50: 业务代码 999688 -> TDX指数接口 000688
+    "999999": (1, "000001", "上证指数"), # 上证指数: 业务代码 999999 -> TDX指数接口 000001 (或 999999)
+    "399001": (0, "399001", "深证成指"), # 深证成指
+    "399006": (0, "399006", "创业板指"), # 创业板指
+    "399005": (0, "399005", "中小100"),  # 中小100
+    "899050": (2, "899050", "北证50"),   # 北证50
+    "399300": (0, "399300", "沪深300"),  # 沪深300
+    "399008": (0, "399008", "中小300"),
+    "399101": (0, "399101", "中小综指"),
+    "399102": (0, "399102", "创业板综"),
+    "399106": (0, "399106", "深证综指"),
+    "399107": (0, "399107", "深证A指"),
+}
+
+BUILTIN_INDEX_NAMES: Dict[str, str] = {
+    code: info[2] for code, info in INDEX_LOGICAL_TO_TDX_MAP.items()
+}
+
+
+def get_index_display_name(code: str) -> str:
+    """获取主要大盘指数的标准中文显示名称"""
+    digits = "".join(ch for ch in str(code) if ch.isdigit()).zfill(6)
+    return BUILTIN_INDEX_NAMES.get(digits, "")
+
+
+def normalize_tdx_target(stock_code: str, name: str = "") -> Tuple[bool, int, str]:
+    """
+    将系统业务代码标准化为通达信 API 适用的 (is_index, market_code, tdx_clean_code)
+    :return: (is_index, market_code, clean_code)
+    """
+    c = str(stock_code).strip().lower()
+    digits = "".join(ch for ch in c if ch.isdigit()).zfill(6)
+    nm = str(name).strip() if name else ""
+
+    # 1. 优先从专属业务映射表中匹配 (999688 -> 000688, 999999 -> 000001 等)
+    if digits in INDEX_LOGICAL_TO_TDX_MAP:
+        mkt, tdx_c, _ = INDEX_LOGICAL_TO_TDX_MAP[digits]
+        return True, mkt, tdx_c
+
+    # 2. 其它 399xxx (深证指数) 与 899xxx (北证指数)
+    if digits.startswith("399"):
+        return True, 0, digits
+    if digits.startswith("899"):
+        return True, 2, digits
+
+    # 3. 显式带有 sh 前缀或带有明确指数名称的上海指数 (如 sh000001, sh000300, sh000016, sh000905)
+    if c.startswith("sh") or any(kw in nm for kw in ("上证", "综指", "指数", "沪深", "中证")):
+        if digits in ("000001", "000300", "000016", "000905", "000852"):
+            return True, 1, digits
+        if digits == "000688" and ("科创" in nm or c.startswith("sh")):
+            return True, 1, "000688"
+
+    # 4. 普通个股 (包含 000688 国新健康, 000001 平安银行) 或 ETF / 基金
+    mkt = get_market_code(digits)
+    return False, mkt, digits
+
+
+def normalize_quote_unit(q: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    针对 ETF/基金标的 (51/56/58/15/16/50 开头)，交易所报送为厘 (3位小数)，
+    PyTDX 官方原生解析器统一除以 100 导致价格放大了 10 倍，在此自动除以 10.0 还原真实价格
+    """
+    if not q or not isinstance(q, dict):
+        return q
+    c_clean = str(q.get("code", "")).strip().zfill(6)
+    if is_fund_or_etf(c_clean):
+        for p_key in (
+            "price", "last_close", "open", "high", "low",
+            "bid1", "bid2", "bid3", "bid4", "bid5",
+            "ask1", "ask2", "ask3", "ask4", "ask5"
+        ):
+            if p_key in q and q[p_key] is not None:
+                val = safe_float(q[p_key])
+                if val > 0:
+                    q[p_key] = round(val / 10.0, 3)
+    return q
+
+
 def is_tdx_trading_allowed(now_dt: Optional[datetime] = None) -> Tuple[bool, str, Dict[str, Any]]:
     """
     针对使用 TDX API 方式获取数据的专属交易时间放行策略 (SSOT):
@@ -801,7 +909,7 @@ class TDXGlobalCachePool:
                 return entry
             return None
 
-    def set_static_history_bars(self, code: str, days: int, records: List[Dict[str, Any]], last_cum_vol: float, last_cum_amt: float):
+    def set_static_history_bars(self, code: str, days: int, records: List[Dict[str, Any]], last_cum_vol: float, last_cum_amt: float, last_cum_pv: float = 0.0):
         self._check_date_rollover()
         c_clean = str(code).zfill(6)
         with self._mutex:
@@ -811,6 +919,7 @@ class TDXGlobalCachePool:
                 "records": list(records),
                 "last_cum_vol": float(last_cum_vol),
                 "last_cum_amt": float(last_cum_amt),
+                "last_cum_pv": float(last_cum_pv),
                 "updated_at": time.time()
             }
             self._is_dirty = True
@@ -888,7 +997,7 @@ class TDXGlobalCachePool:
 
     def set_incremental_intraday(self, code: str, days: int, df: pd.DataFrame, 
                                  latest_bar_time: str, today_bar_count: int, 
-                                 last_cum_vol: float, last_cum_amt: float):
+                                 last_cum_vol: float, last_cum_amt: float, last_cum_pv: float = 0.0):
         """
         【写入增量分时与时间戳状态】
         """
@@ -908,6 +1017,7 @@ class TDXGlobalCachePool:
                     "today_bar_count": int(today_bar_count),
                     "last_cum_vol": float(last_cum_vol),
                     "last_cum_amt": float(last_cum_amt),
+                    "last_cum_pv": float(last_cum_pv),
                     "updated_at": time.time(),
                     "frozen": is_after_close
                 }
@@ -1236,6 +1346,20 @@ class TDXRealtimeFetcher:
                 res[c_clean] = (lt, zg)
             else:
                 missing.append(c_clean)
+
+    def resolve_symbol_name(self, code: str) -> str:
+        """
+        根据代码高精度解析标的名称（包含内置大盘指数、科创50别名 999688、北证50等）
+        专为 ATS 与 SBC 深度适配，不影响外部 TK 打包主干
+        """
+        c_clean = "".join(filter(str.isdigit, str(code))).zfill(6)
+        if c_clean in BUILTIN_INDEX_NAMES:
+            return BUILTIN_INDEX_NAMES[c_clean]
+        try:
+            from ats.intraday_strategy_engine import resolve_stock_name
+            return resolve_stock_name(c_clean)
+        except Exception:
+            return f"标的_{c_clean}"
 
         if missing:
             with self._conn_lock:
@@ -1888,6 +2012,7 @@ class TDXRealtimeFetcher:
                         self._record_request_feedback(cost_ms, is_error=False)
                         returned_codes = set()
                         for q in quotes:
+                            q = normalize_quote_unit(q)
                             c_clean = str(q.get("code", "")).strip().zfill(6)
                             if not c_clean:
                                 continue
@@ -1939,6 +2064,7 @@ class TDXRealtimeFetcher:
                                     if retry_quotes:
                                         self._consecutive_empty_batches = 0
                                         for rq in retry_quotes:
+                                            rq = normalize_quote_unit(rq)
                                             rq_c = str(rq.get("code", "")).strip().zfill(6)
                                             if rq_c:
                                                 self._off_hours_cached_quotes[rq_c] = rq
@@ -1970,8 +2096,8 @@ class TDXRealtimeFetcher:
                             try:
                                 cur_q = self.api.get_security_quotes(cur_b)
                                 if cur_q and len(cur_q) > 0:
-                                    all_fetched_quotes.extend(cur_q)
                                     for sq in cur_q:
+                                        sq = normalize_quote_unit(sq)
                                         sq_code = str(sq.get("code", "")).strip().zfill(6)
                                         if sq_code:
                                             self._off_hours_cached_quotes[sq_code] = sq
@@ -1979,6 +2105,7 @@ class TDXRealtimeFetcher:
                                             self._unlisted_or_dormant_codes.discard(sq_code)
                                             b_res = self.record_and_evaluate_bidding_surge(sq)
                                             sq.update(b_res)
+                                    all_fetched_quotes.extend(cur_q)
                                 else:
                                     # 当前批次失败
                                     if len(cur_b) == 1:
@@ -2108,7 +2235,7 @@ class TDXRealtimeFetcher:
         从 TDX 极速拉取当日 1 分钟 K 线与分时走势全量数据 (包含 09:25 集合竞价、早盘全量分钟 Tick 走势、开高低收与换手率)
         """
         c_clean = str(code).strip().zfill(6)
-        mkt = get_market_code(c_clean)
+        is_idx, mkt, c_target = normalize_tdx_target(c_clean)
         t_start = time.time()
 
         # 1. 优先使用内存中已缓存的全量 240 条分时 K 线 (带时间戳与交易日校验，避免陈旧跨日数据)
@@ -2139,11 +2266,18 @@ class TDXRealtimeFetcher:
 
                 bars = None
                 try:
-                    bars = self.api.get_security_bars(7, mkt, c_clean, 0, 240)
-                    if not bars or len(bars) < 30:
-                        bars_8 = self.api.get_security_bars(8, mkt, c_clean, 0, 240)
-                        if bars_8 and len(bars_8) > (len(bars) if bars else 0):
-                            bars = bars_8
+                    if is_idx:
+                        bars = self.api.get_index_bars(8, mkt, c_target, 0, 240)
+                        if not bars or len(bars) < 30:
+                            bars_7 = self.api.get_index_bars(7, mkt, c_target, 0, 240)
+                            if bars_7 and len(bars_7) > (len(bars) if bars else 0):
+                                bars = bars_7
+                    else:
+                        bars = self.api.get_security_bars(7, mkt, c_clean, 0, 240)
+                        if not bars or len(bars) < 30:
+                            bars_8 = self.api.get_security_bars(8, mkt, c_clean, 0, 240)
+                            if bars_8 and len(bars_8) > (len(bars) if bars else 0):
+                                bars = bars_8
                 except Exception:
                     bars = None
 
@@ -2151,17 +2285,22 @@ class TDXRealtimeFetcher:
                     self._is_connected = False
                     if self.connect():
                         try:
-                            bars = self.api.get_security_bars(7, mkt, c_clean, 0, 240)
+                            if is_idx:
+                                bars = self.api.get_index_bars(8, mkt, c_target, 0, 240)
+                            else:
+                                bars = self.api.get_security_bars(7, mkt, c_clean, 0, 240)
                         except Exception:
                             bars = None
 
                 # 若 K 线引擎拉取条数不足，触发 PyTDX 官方分时走势全量引擎 (get_minute_time_data / get_history_minute_time_data) 补齐 240 分钟全量走势
                 if (not bars or len(bars) < 30) and self._is_connected and self.api is not None:
                     try:
-                        min_data = self.api.get_minute_time_data(mkt, c_clean)
+                        min_data = None
+                        if not is_idx:
+                            min_data = self.api.get_minute_time_data(mkt, c_clean)
                         if not min_data or len(min_data) < 30:
                             today_int = int(datetime.now().strftime("%Y%m%d"))
-                            min_data = self.api.get_history_minute_time_data(mkt, c_clean, today_int)
+                            min_data = self.api.get_history_minute_time_data(mkt, c_target if is_idx else c_clean, today_int)
                         
                         if min_data and len(min_data) >= 30:
                             bars = []
@@ -2212,6 +2351,7 @@ class TDXRealtimeFetcher:
                 tot_circ_shares = self.get_circulation_shares(c_clean)
                 cum_vol_shares = 0.0
                 cum_amt = 0.0
+                cum_pv = 0.0
                 for _, r in df_today.iterrows():
                     dt = str(r.get("datetime", r.get("time", "")))
                     t_str = dt[-5:] if len(dt) >= 5 else dt
@@ -2226,16 +2366,22 @@ class TDXRealtimeFetcher:
                     cum_vol_shares += vol_shares
                     amt = float(r.get("amount", 0.0))
                     cum_amt += amt
+                    if is_idx:
+                        cum_pv += p * vol_shares
 
                     to_rate = 0.0
-                    if tot_circ_shares > 0:
+                    if not is_idx and tot_circ_shares > 0:
                         to_rate = round((cum_vol_shares / tot_circ_shares) * 100.0, 2)
                         to_rate = min(100.0, max(0.0, to_rate))
 
-                    # 计算截止到当前分钟的全天真实累计 VWAP 均价与累计成交金额
-                    if cum_vol_shares > 0 and cum_amt > 0:
+                    # 🌟 计算截止到当前分钟的全天真实累计 VWAP 均价与累计成交金额
+                    if is_idx:
+                        vw = round(cum_pv / cum_vol_shares, 2) if cum_vol_shares > 0 else p
+                    elif cum_vol_shares > 0 and cum_amt > 0:
                         vw = round(cum_amt / cum_vol_shares, 2)
                     else:
+                        vw = p
+                    if p > 0 and (vw < p * 0.70 or vw > p * 1.30):
                         vw = p
 
                     res_rows.append({
@@ -2317,8 +2463,8 @@ class TDXRealtimeFetcher:
                 if df_multi is not None and not df_multi.empty:
                     return df_multi
 
-            mkt = get_market_code(c_clean)
-            tot_circ_shares = self.get_circulation_shares(c_clean)
+            is_idx, mkt, c_target = normalize_tdx_target(c_clean)
+            tot_circ_shares = self.get_circulation_shares(c_clean) if not is_idx else 0.0
 
             # 2. 检查全局长效静态历史分时缓存 (若已有历史前 N-1 天数据，仅需拉取当天 1 天增量)
             hist_entry = self.cache_pool.get_static_history_bars(c_clean, days)
@@ -2336,17 +2482,28 @@ class TDXRealtimeFetcher:
                     if not self.connect():
                         return pd.DataFrame()
                 try:
-                    bars = self.api.get_security_bars(8, mkt, c_clean, 0, 800) or []
-                    needed_batches = min(4, (fetch_days * 240 + 799) // 800)
-                    for b_idx in range(1, needed_batches):
-                        offset = b_idx * 800
-                        bars_prev = self.api.get_security_bars(8, mkt, c_clean, offset, 800) or []
-                        if bars_prev:
-                            bars = bars_prev + bars
-                        else:
-                            break
+                    if is_idx:
+                        bars = self.api.get_index_bars(8, mkt, c_target, 0, 800) or []
+                        needed_batches = min(4, (fetch_days * 240 + 799) // 800)
+                        for b_idx in range(1, needed_batches):
+                            offset = b_idx * 800
+                            bars_prev = self.api.get_index_bars(8, mkt, c_target, offset, 800) or []
+                            if bars_prev:
+                                bars = bars_prev + bars
+                            else:
+                                break
+                    else:
+                        bars = self.api.get_security_bars(8, mkt, c_clean, 0, 800) or []
+                        needed_batches = min(4, (fetch_days * 240 + 799) // 800)
+                        for b_idx in range(1, needed_batches):
+                            offset = b_idx * 800
+                            bars_prev = self.api.get_security_bars(8, mkt, c_clean, offset, 800) or []
+                            if bars_prev:
+                                bars = bars_prev + bars
+                            else:
+                                break
                 except Exception as e_b:
-                    logger.debug(f"TDX get_security_bars 8 异常: {e_b}")
+                    logger.debug(f"TDX get_bars 8 异常: {e_b}")
                     bars = None
 
                 # 若连接超时断开，重连一次
@@ -2354,15 +2511,26 @@ class TDXRealtimeFetcher:
                     self._is_connected = False
                     if self.connect():
                         try:
-                            bars = self.api.get_security_bars(8, mkt, c_clean, 0, 800) or []
-                            needed_batches = min(4, (fetch_days * 240 + 799) // 800)
-                            for b_idx in range(1, needed_batches):
-                                offset = b_idx * 800
-                                bars_prev = self.api.get_security_bars(8, mkt, c_clean, offset, 800) or []
-                                if bars_prev:
-                                    bars = bars_prev + bars
-                                else:
-                                    break
+                            if is_idx:
+                                bars = self.api.get_index_bars(8, mkt, c_target, 0, 800) or []
+                                needed_batches = min(4, (fetch_days * 240 + 799) // 800)
+                                for b_idx in range(1, needed_batches):
+                                    offset = b_idx * 800
+                                    bars_prev = self.api.get_index_bars(8, mkt, c_target, offset, 800) or []
+                                    if bars_prev:
+                                        bars = bars_prev + bars
+                                    else:
+                                        break
+                            else:
+                                bars = self.api.get_security_bars(8, mkt, c_clean, 0, 800) or []
+                                needed_batches = min(4, (fetch_days * 240 + 799) // 800)
+                                for b_idx in range(1, needed_batches):
+                                    offset = b_idx * 800
+                                    bars_prev = self.api.get_security_bars(8, mkt, c_clean, offset, 800) or []
+                                    if bars_prev:
+                                        bars = bars_prev + bars
+                                    else:
+                                        break
                         except Exception:
                             bars = None
 
@@ -2379,8 +2547,10 @@ class TDXRealtimeFetcher:
             # 3. 分支 A: 若命中历史静态缓存，执行【当日时间戳增量比对与合并】
             if has_valid_hist and days > 1:
                 hist_records = list(hist_entry.get("records", []))
+                # 🌟 继承历史静态缓存的累计成交量、成交额与指数 pv，保持多日完全平滑连续
                 cum_vol_shares = float(hist_entry.get("last_cum_vol", 0.0))
                 cum_amt = float(hist_entry.get("last_cum_amt", 0.0))
+                cum_pv = float(hist_entry.get("last_cum_pv", 0.0))
 
                 today_dates = sorted(df["date_str"].unique())
                 latest_date = today_dates[-1] if today_dates else today_date_str
@@ -2417,13 +2587,21 @@ class TDXRealtimeFetcher:
                     cum_vol_shares += vol_shares
                     amt = float(r.get("amount", 0.0))
                     cum_amt += amt
+                    if is_idx:
+                        cum_pv += p * vol_shares
 
                     to_rate = 0.0
-                    if tot_circ_shares > 0:
+                    if not is_idx and tot_circ_shares > 0:
                         to_rate = round((cum_vol_shares / tot_circ_shares) * 100.0, 2)
                         to_rate = min(100.0, max(0.0, to_rate))
 
-                    vw = round(cum_amt / cum_vol_shares, 2) if (cum_vol_shares > 0 and cum_amt > 0) else p
+                    # 🌟 计算多日连续累计 VWAP 均价与累计成交金额 (指数点位加权，个股量价成交加权)
+                    if is_idx:
+                        vw = round(cum_pv / cum_vol_shares, 2) if cum_vol_shares > 0 else p
+                    elif cum_vol_shares > 0 and cum_amt > 0:
+                        vw = round(cum_amt / cum_vol_shares, 2)
+                    else:
+                        vw = p
 
                     today_records.append({
                         "time": time_label,
@@ -2456,7 +2634,8 @@ class TDXRealtimeFetcher:
                         latest_bar_time=latest_bar_t,
                         today_bar_count=len(today_records),
                         last_cum_vol=cum_vol_shares,
-                        last_cum_amt=cum_amt
+                        last_cum_amt=cum_amt,
+                        last_cum_pv=cum_pv
                     )
                 return df_res
 
@@ -2469,12 +2648,15 @@ class TDXRealtimeFetcher:
                 return pd.DataFrame()
 
             res_rows = []
+            # 🌟 多日连续累计：从多日第 1 天持续累加至最后一天，确保整段分时 VWAP 连续平滑，杜绝断裂跳跃！
             cum_vol_shares = 0.0
             cum_amt = 0.0
+            cum_pv = 0.0
 
             hist_part_records = []
             hist_last_vol = 0.0
             hist_last_amt = 0.0
+            hist_last_pv = 0.0
             today_date_identified = target_dates[-1] if target_dates else today_date_str
 
             for d_str, group in df_filtered.groupby("date_str"):
@@ -2496,13 +2678,21 @@ class TDXRealtimeFetcher:
                     cum_vol_shares += vol_shares
                     amt = float(r.get("amount", 0.0))
                     cum_amt += amt
+                    if is_idx:
+                        cum_pv += p * vol_shares
 
                     to_rate = 0.0
-                    if tot_circ_shares > 0:
+                    if not is_idx and tot_circ_shares > 0:
                         to_rate = round((cum_vol_shares / tot_circ_shares) * 100.0, 2)
                         to_rate = min(100.0, max(0.0, to_rate))
 
-                    vw = round(cum_amt / cum_vol_shares, 2) if (cum_vol_shares > 0 and cum_amt > 0) else p
+                    # 🌟 计算多日连续累计 VWAP 均价与累计成交金额 (指数点位加权，个股量价成交加权)
+                    if is_idx:
+                        vw = round(cum_pv / cum_vol_shares, 2) if cum_vol_shares > 0 else p
+                    elif cum_vol_shares > 0 and cum_amt > 0:
+                        vw = round(cum_amt / cum_vol_shares, 2)
+                    else:
+                        vw = p
 
                     rec = {
                         "time": time_label,
@@ -2532,11 +2722,12 @@ class TDXRealtimeFetcher:
                 if is_history_day:
                     hist_last_vol = cum_vol_shares
                     hist_last_amt = cum_amt
+                    hist_last_pv = cum_pv
 
             # 若有多日数据，将今天之前的前 N-1 天长效写入全局静态缓存池
             if hist_part_records and days > 1:
                 self.cache_pool.set_static_history_bars(
-                    c_clean, days, hist_part_records, hist_last_vol, hist_last_amt
+                    c_clean, days, hist_part_records, hist_last_vol, hist_last_amt, hist_last_pv
                 )
 
             df_res = pd.DataFrame(res_rows)
@@ -2549,7 +2740,8 @@ class TDXRealtimeFetcher:
                     latest_bar_time=latest_bar_t,
                     today_bar_count=today_recs_cnt,
                     last_cum_vol=cum_vol_shares,
-                    last_cum_amt=cum_amt
+                    last_cum_amt=cum_amt,
+                    last_cum_pv=cum_pv
                 )
             return df_res
         except Exception as e:
@@ -2599,17 +2791,20 @@ class TDXRealtimeFetcher:
             }
             cat_code = cat_map.get(cat_str, 3 if "60" in cat_str else 0)
 
+        is_idx, mkt, c_target = normalize_tdx_target(c_clean)
         try:
-            mkt = get_market_code(c_clean)
             bars = None
             with self._conn_lock:
                 if not self._is_connected or self.api is None:
                     if not self.connect():
                         return pd.DataFrame()
                 try:
-                    bars = self.api.get_security_bars(cat_code, mkt, c_clean, 0, fetch_count)
+                    if is_idx:
+                        bars = self.api.get_index_bars(cat_code, mkt, c_target, 0, fetch_count)
+                    else:
+                        bars = self.api.get_security_bars(cat_code, mkt, c_clean, 0, fetch_count)
                 except Exception as e_k:
-                    logger.debug(f"TDX get_security_bars {cat_code} 异常: {e_k}")
+                    logger.debug(f"TDX get_bars {cat_code} 异常: {e_k}")
                     bars = None
 
                 # 💡 若连接闲置超时被服务端切断或拉取为空，自动标记断开并立即重连重试！
@@ -2617,7 +2812,10 @@ class TDXRealtimeFetcher:
                     self._is_connected = False
                     if self.connect():
                         try:
-                            bars = self.api.get_security_bars(cat_code, mkt, c_clean, 0, fetch_count)
+                            if is_idx:
+                                bars = self.api.get_index_bars(cat_code, mkt, c_target, 0, fetch_count)
+                            else:
+                                bars = self.api.get_security_bars(cat_code, mkt, c_clean, 0, fetch_count)
                         except Exception:
                             bars = None
 
