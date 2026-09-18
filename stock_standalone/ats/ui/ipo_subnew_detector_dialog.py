@@ -2141,6 +2141,14 @@ class IPOSubnewDetectorDialog(QMainWindow):
                                     sig.vwap_diff_pct = (sig.price - sig.vwap) / sig.vwap * 100.0
                                     sig.is_above_vwap = sig.price >= sig.vwap
                                 self._update_table_row_data(sig, target_row=r, manage_sorting=False)
+
+                    # 🚀 [IPC LINKAGE] 若集中交易指挥室处于展示状态，同步刷新赛马排位与持仓
+                    if hasattr(self, "_command_room_dlg") and self._command_room_dlg is not None:
+                        try:
+                            if self._command_room_dlg.isVisible():
+                                self._command_room_dlg.refresh_data()
+                        except Exception:
+                            pass
                 except Exception as e:
                     logger.debug(f"UI 刷新流式数据异常: {e}")
 

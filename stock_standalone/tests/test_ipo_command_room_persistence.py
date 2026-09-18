@@ -11,6 +11,7 @@ tests/test_ipo_command_room_persistence.py
 
 import os
 import sys
+import time
 import json
 import tempfile
 import unittest
@@ -70,7 +71,7 @@ class TestIPOCommandRoomPersistenceAndIPC(unittest.TestCase):
     def test_02_column_widths_drag_and_persistence(self):
         """测试 2: 验证手动修改列宽后，通过 setup_persistence 正确持久化并重启恢复"""
         # 1. 创建第一个测试表格并绑定持久化配置
-        test_key = "test_ipo_cmd_rank_v_test"
+        test_key = f"test_ipo_cmd_rank_{int(time.time()*1000)}"
         table1 = IPOCommandRoomTableWidget(parent_cmd_room=None)
         table1.setColumnCount(6)
         table1.setHorizontalHeaderLabels(["排名", "代码", "名称", "现价", "动能分", "启动时点"])

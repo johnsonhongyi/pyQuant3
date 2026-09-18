@@ -21450,3 +21450,36 @@ equest_dynamic_ipc_sync 中传入 orce=True 绕过防刷干扰。
      - **高对比度通透 HUD (`_draw_amplitude_hud`)**: 位于走势图右上角内部（`x = margin_left + chart_w - card_w - 6`, `y = margin_top + 6`），三行彩色排布（标题+评级胶囊、均振+极值、近 3~5 日明细），分时图与多周期 K 线图统一支持。
   3. **自动化测试与回归验证**:
      - 新建 `tests/test_sbc_zoom_and_amplitude.py`，全量测试用例均通过（`Ran 3 tests, OK`）。
+
+
+# 任务完成记录 - 2026-09-18 21:20:00
+
+## 任务目标
+为新股次新集中交易指挥室（`IPOCommandRoomDialog`）全面实现列宽自由拖拽调整与跨会话自动持久化能力，优化表格排版杜绝省略号截断，并贯通 TK 流式数据增量/全量双模推流与双窗口秒级同频联动。
+
+---
+
+## 核心落地成果
+
+### 1. 指挥室表格列宽持久化机制（全列支持拖拽与跨会话记忆）
+- **痛点根除**：根除天梯表中“动能分”和“启动时点”被压缩截断为“动能.../启动...”且无法保存的缺陷；
+- **组件标准化**：`IPOCommandRoomTableWidget` 注入 `setup_persistence(config_key, default_widths)`、`restore_column_widths()`、`save_column_widths()` 核心机制；
+- **原生表头交互**：全列设为 `QHeaderView.ResizeMode.Interactive`，解开 `stretchLastSection` 独占制约，自由拉伸无撕裂；
+- **防抖低开销写入**：监听 `sectionResized` 信号，配合 500ms 防抖定时器将配置写入 `config/ipo_command_room_layout.json`；窗口 `closeEvent` 集中同步保存；
+- **紧凑无截断预设列宽**：
+  - 天梯表 `tbl_rank`：排名 42px、代码 58px、名称 78px、现价 58px、**动能分 64px**、**启动时点 74px**、**角色 80px**、决议 Stretch；
+  - 持仓表 `tbl_pos`：代码 58px、名称 78px、股数 65px、现价 58px、成本 58px、市值 75px、盈亏比% 68px、角色 80px、止损 58px、止盈 58px、操作建议 Stretch；
+  - 指令表 `tbl_orders`：代码 58px、名称 78px、动作 72px、触发价 58px、股数 65px、目标仓位 68px、紧急度 70px、仲裁依据 Stretch。
+
+### 2. TK 流式数据全量/增量全链路贯通与双窗口即时同频联动
+- **服务端全量快照兜底加固 (`instock_MonitorTK.py`)**：在 `is_forced_port` 强制同步请求分支中强化全量打包逻辑，确保客户端 100% 获得完整全量底座；
+- **双窗口毫秒级推流同步 (`ipo_subnew_detector_dialog.py`)**：在 `_on_tk_stream_data` 回调中，在更新检测工具表格的同时，若集中交易指挥室打开且可见，毫秒级同步触发其 `refresh_data()`，实现两个看板双向实时数据同频。
+
+### 3. 自动化测试套件与全绿灯回归断言
+- `tests/test_ipo_command_room_persistence.py` (4/4 PASSED)
+- `tests/test_ipo_fleet_trading_arbitration.py` (8/8 PASSED)
+- `tests/test_ipo_detector_column_widths_persistence.py` (7/7 PASSED)
+- `tests/test_ipo_vwap_sentiment_and_horse_race.py` (6/6 PASSED)
+- `tests/test_ipo_subnew_detector.py` (22/22 PASSED)
+- **总计 47 个单元与集成测试用例全部通过，零异常，零破坏既有接口。**
+
