@@ -74,6 +74,7 @@ class FavoritePanel(QWidget):
     """⭐ 重点关注(基础重点) 专属看板页"""
     
     stock_selected = pyqtSignal(str, str, dict) # code, name, context_info
+    stock_double_clicked = pyqtSignal(str, str) # code, name (双击直通 SBC)
     dragon_monitor_requested = pyqtSignal()
 
     def minimumSizeHint(self) -> QSize:
@@ -283,6 +284,17 @@ class FavoritePanel(QWidget):
         else:
             self.count_label.setText(f"共 {total_cnt} 只标的")
 
+    def open_sbc_chart(self, code: str, name: str = ""):
+        """【📈 打开 SBC 通道走势图】重点关注标的双击直通 SBC 通道走势图"""
+        if not code:
+            return
+        c_clean = "".join(filter(str.isdigit, str(code))).zfill(6) if any(x.isdigit() for x in str(code)) else str(code).strip()
+        try:
+            from ats.ui.intraday_strategy_dialog import open_sbc_chart_dialog
+            open_sbc_chart_dialog(parent_win=self.window(), code=c_clean, period_mode="10d")
+        except Exception as e:
+            logger.error(f"[FavoritePanel] 打开 SBC 走势图异常: {e}")
+
     def _on_double_clicked(self, item):
         if not item:
             return
@@ -292,6 +304,8 @@ class FavoritePanel(QWidget):
         if code_item:
             code = code_item.text().strip()
             name = name_item.text().strip().replace("⭐ ", "") if name_item else ""
+            self.open_sbc_chart(code, name)
+            self.stock_double_clicked.emit(code, name)
             self.stock_selected.emit(code, name, {})
 
     def _on_search_changed(self, text):

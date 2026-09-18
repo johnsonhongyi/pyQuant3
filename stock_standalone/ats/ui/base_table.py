@@ -303,9 +303,18 @@ class BaseATSTableWidget(QTableWidget):
         sbc_action = QAction(f"📈 使用 SBC 打开独立分时图 ({code_clean})", self)
         def _open_sbc():
             from ats.ui.intraday_strategy_dialog import open_sbc_chart_dialog
-            open_sbc_chart_dialog(self, code_clean)
+            open_sbc_chart_dialog(parent_win=self.window(), code=code_clean, period_mode="10d")
         sbc_action.triggered.connect(_open_sbc)
         menu.addAction(sbc_action)
+
+        # 🔍 查看个股详情 (原版详情弹窗)
+        detail_action = QAction(f"🔍 查看个股详情 ({code_clean})", self)
+        def _open_detail():
+            main_win = self.window()
+            if hasattr(main_win, 'on_stock_clicked'):
+                main_win.on_stock_clicked(code_clean, name, {})
+        detail_action.triggered.connect(_open_detail)
+        menu.addAction(detail_action)
 
         # 🎯 发送到新股次新超短检测工具 (VWAP预下单)
         ipo_action = QAction(f"🎯 发送到新股次新超短检测工具 ({code_clean})", self)

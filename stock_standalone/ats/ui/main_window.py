@@ -2384,7 +2384,7 @@ class ATSMainWindow(QMainWindow):
         mark_checkpoint("03.3.2 CapitalDragonPanel (Tab 0 C-Bit)")
 
         self.favorite_panel = FavoritePanel()
-        self.favorite_panel.stock_selected.connect(self.on_stock_clicked)
+        self.favorite_panel.stock_double_clicked.connect(self.open_sbc_for_stock)
         self.top_tabs.addTab(self.favorite_panel, "⭐ 重点关注 (基础重点)")
         mark_checkpoint("03.3.3 FavoritePanel (Tab 1)")
 
@@ -2395,7 +2395,7 @@ class ATSMainWindow(QMainWindow):
 
         self.new_stock_panel = NewStockPanel(main_window=self)
         self.new_stock_panel.stock_selected.connect(self.link_stock)
-        self.new_stock_panel.stock_double_clicked.connect(self.on_stock_clicked)
+        self.new_stock_panel.stock_double_clicked.connect(self.open_sbc_for_stock)
         self.top_tabs.addTab(self.new_stock_panel, "🆕 新股次新股 (IPO & 阶梯)")
         self.top_tabs.currentChanged.connect(self._on_top_tab_changed)
         mark_checkpoint("03.3.5 NewStockPanel (Tab 3)")
@@ -2649,9 +2649,9 @@ class ATSMainWindow(QMainWindow):
         self.trade_flow_table.stock_clicked.connect(self.link_stock)
         self.kernel_trace_panel.stock_clicked.connect(self.link_stock)
         
-        # 2. 双击事件 -> 弹窗详情展示 context_info (on_stock_clicked)
+        # 2. 双击事件 -> 弹窗详情展示 context_info (on_stock_clicked) 与 统一直通 SBC 走势图
         self.universe_widget.stock_selected.connect(self.on_stock_clicked)
-        self.swing_table.stock_double_clicked.connect(self.on_stock_clicked)
+        self.swing_table.stock_double_clicked.connect(lambda code, name, ctx=None: self.open_sbc_for_stock(code, name))
         self.position_panel.stock_double_clicked.connect(self.on_stock_clicked)
         self.trade_flow_table.stock_double_clicked.connect(self.on_stock_clicked)
         self.kernel_trace_panel.stock_double_clicked.connect(self.on_stock_clicked)
@@ -3404,7 +3404,7 @@ class ATSMainWindow(QMainWindow):
         return res
 
     def open_sbc_for_stock(self, code, name=""):
-        """【📈 双击打开 SBC 走势窗口】资金主线与核心标的双击直通 SBC 通道走势图"""
+        """【📈 双击打开 SBC 走势窗口】资金主线、重点关注、MA20d、新股次新等四大核心 Tab 双击统一直通 SBC 通道走势图"""
         try:
             from ats.ui.intraday_strategy_dialog import open_sbc_chart_dialog
             c_clean = str(code).strip()
