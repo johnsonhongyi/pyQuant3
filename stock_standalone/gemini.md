@@ -1,5 +1,34 @@
+## 2026-09-18 19:35
+- [x] **【新股次新超短检测工具自动轮询后台测评与集中交易中心全局统筹（山外有山）闭环】(`ats/strategy/ipo_trading_center.py`, `ats/strategy/ipo_vwap_detector_engine.py`, `ats/ui/ipo_command_room_dialog.py`, `ats/ui/ipo_subnew_detector_dialog.py`, `tests/test_ipo_fleet_trading_arbitration.py`)**：
+    - [x] **操盘手现场明确指示与全局痛点 (P0)**：
+        - “新股检测工具的自动轮询,后台更新后会对守护的code进行测评感知,交易中心需要接受各自守护的提交的报告,根据全数据继续交易,需要全面整体的能力,不能各管一摊,自己看着自己守护的个股很好不知道山外有山”；
+        - 彻底消除单个守护标的“自己看着自己很好不知道山外有山”的局部盲区，建立集中交易调度中心统一接收体检报告、统筹掌握全数据、执行全局横向赛马仲裁与持续交易闭环。
+    - [x] **全体系工程落地与核心能力实现 (KISS / SOLID / DRY)**：
+        1. **守护者客观感知报告汇交机制 (Guardian Perception & Report Submission)**：
+           - 在 `VWAPDetectorSignal` 中扩充 `global_fleet_role`、`global_arbitration_desc`、`relative_to_leader_gap`；
+           - 守护标的后台自动轮询更新后，生成客观体检报告汇交至 `IPOTradingCenter.submit_stock_perception_report()`；
+        2. **掌握全数据横向赛马与“山外有山”全局仲裁 (`IPOTradingCenter`)**：
+           - 确立全池第 1 超级领头羊标杆（如 601091 沈鼓集团首日贴线惜售，9:31 拔地，96分）；
+           - 计算全池各标的相对差距，统筹赋予全局角色与操盘说明：
+             - `LEADER` (🥇 爆款领头羊): 集中重仓 35%~40%；
+             - `VANGUARD` (🥈 梯队前锋): 顺风跟进 15%~20%；
+             - `FOLLOWER` (🥉 后排跟风·山外有山): 明确标注落后领头羊 XX 分，资金聚焦头部，禁止分仓跟风；
+             - `STOP_LOSS` (⛔ 买错立斩): 跌破 VWAP 0.6% 坚决出局；
+             - `CLIMAX_EXIT` (🚨 高潮平仓): 偏离极限且天量冲顶滞涨，锁定翻倍胜果；
+           - 仲裁结果反哺驱动表格各行操盘决议列原地刷新；
+        3. **持续交易闭环：弃弱换马调仓与订单撮合执行**：
+           - 引入 `SWITCH_SWAP` 换马调仓指令：当持仓标的动能滞涨落后（差距 >= 20分），全池涌现出 Rank 1 超级新领头羊时，果断卖出弱势换入新领头羊；
+           - 精确维护账户资金可用余额、持仓股数、均价与浮盈回撤，提供一键批量执行与全自动跟随交易；
+        4. **集中交易总指挥室弹窗 (`IPOCommandRoomDialog`) 与主看板深度联动**：
+           - 主看板顶栏新增【🚢 集中交易指挥室】按钮；
+           - 弹窗展示全数据赛马天梯、实盘持仓追踪、待执行指令清单、一键执行决议与全自动跟随交易开关；
+        5. **全量自动化测试 100% 验证通过 (36/36 PASSED)**：
+           - `tests/test_ipo_fleet_trading_arbitration.py` 4/4 绿灯通过；
+           - 全量回归 `test_ipo_vwap_sentiment_and_horse_race.py` (6/6), `test_ipo_subnew_detector.py` (22/22), `test_ipo_detector_column_widths_persistence.py` (4/4)。
+
 ## 2026-09-18 16:15
 - [x] **【新股次新超短检测工具全面对齐全系统 BaseATSTableWidget 架构：默认极窄模式、表头与数据行原生一体化联动、彻底消灭拖拽撕裂分离】(`ats/ui/ipo_subnew_detector_dialog.py`, `tests/test_ipo_detector_column_widths_persistence.py`)**：
+
     - [x] **操盘手现场明确指示与视觉体验要求 (P0)**：
         - “调整上面不是一体的,总是分离?之前从来没有这个问题”；
         - “跟其他tab全面对齐”；

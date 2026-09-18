@@ -525,7 +525,8 @@ class TestIPOSubnewDetector(unittest.TestCase):
 
         # 3. 验证 flush_if_due 集中持久化保护机制 (默认5分钟内不重复写盘)
         pool = TDXGlobalCachePool.get_instance()
-        pool.set_static_history_bars("600733", 10, [], 100.0, 1000.0)
+        valid_rec = [{"date": "2026-09-17", "time": "2026-09-17 09:31", "price": 10.0, "volume": 100, "amount": 1000}]
+        pool.set_static_history_bars("600733", 10, valid_rec, 100.0, 1000.0)
         # 刚刚写入，未满 300 秒，flush_if_due 必须返回 False
         res1 = pool.flush_if_due(interval=300.0)
         self.assertFalse(res1)
