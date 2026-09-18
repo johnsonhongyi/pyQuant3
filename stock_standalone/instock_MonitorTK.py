@@ -8834,6 +8834,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             min_interval = 0.8  # ✅ [OPTIMIZE] 提高发送间隔到 800ms，减少 GIL 竞争
             max_jitter = 0.2    # 随机抖动
             logger.info(f"[send_df] Thread START, running={getattr(self,'_df_sync_running',False)}")
+
             # 🚀 [TK 流式常态推送订阅中心注册表]
             if not hasattr(self, '_stream_subscribers'):
                 self._stream_subscribers = {
@@ -8842,6 +8843,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     26675: {"name": "IPO_Detector", "active": False, "last_try": 0.0, "is_static": True, "fail_count": 0},
                 }
             self._cold_start = True # ⭐ [NEW] 冷启动标志
+            empty_wait_count = 0  # ⭐ [NEW] 初始/空数据重试缓冲计数器
 
             while self._df_sync_running:
                 vis_enabled = getattr(self, '_vis_enabled_cache', True)
@@ -8881,11 +8883,16 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 cur_resample = str(self.global_values.getkey("resample") or 'd').lower().strip()
                 df_to_check = self.df_all_res if (cur_resample != 'd' and hasattr(self, 'df_all_res')) else getattr(self, 'df_all', None)
                 if df_to_check is None or df_to_check.empty:
-                    logger.debug(f"[send_df] display track (resample={cur_resample}) is empty or missing, waiting...")
-                    if count < 3:
-                        count +=1
+                    if empty_wait_count < 3:
+                        empty_wait_count += 1
+                        logger.info(f"[send_df] 启动/切换周期主数据源加载中(resample={cur_resample})，缓冲等待第 {empty_wait_count}/3 次 (5s)...")
                         time.sleep(5)
-                        continue
+                    else:
+                        logger.debug(f"[send_df] display track (resample={cur_resample}) is empty or missing, waiting...")
+                        time.sleep(5)
+                    continue
+                # 数据已就绪，重置重试计数器
+                empty_wait_count = 0
                 sent = False  # ⭐ 本轮是否成功发送
                 sent_to_ats = False
                 try:
@@ -9230,9 +9237,21 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                                 sub_info["last_try"] = now_ipc
 
                                             # 🚀【极速分发】：强制请求发全量快照；日常常态变动推送发增量包 (UPDATE_DF_DIFF)
-                                            if is_forced_port and payload_daily_full is not None:
-                                                send_h = header_daily_full
-                                                send_p = payload_daily_full
+                                            if is_forced_port:
+                                                if payload_daily_full is not None:
+                                                    send_h = header_daily_full
+                                                    send_p = payload_daily_full
+                                                else:
+                                                    # 🛡️ 极端兜底：现场打包日线全量快照，确保客户端 100% 具备全量底座
+                                                    full_pkg = {
+                                                        'type': 'UPDATE_DF_ALL',
+                                                        'data': df_daily,
+                                                        'ver': sync_version_daily,
+                                                        'resample': 'd',
+                                                        'sector_data': sector_data_snap
+                                                    }
+                                                    send_p = pickle.dumps(('UPDATE_DF_DATA', full_pkg), protocol=pickle.HIGHEST_PROTOCOL)
+                                                    send_h = struct.pack("!I", len(send_p))
                                             else:
                                                 send_h = header_daily
                                                 send_p = payload_daily
