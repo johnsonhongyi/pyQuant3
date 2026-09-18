@@ -100,3 +100,64 @@ def test_auto_fit_columns_retains_interactive_and_saves(monkeypatch):
             assert hv.sectionResizeMode(c) == QHeaderView.ResizeMode.Interactive
     finally:
         dlg.close()
+
+
+def test_extended_selection_and_dark_corner_styles(monkeypatch):
+    """验证表格启用 ExtendedSelection (支持 Ctrl/Shift 多选) 且配置了深色 CornerButton 与滚动条样式"""
+    monkeypatch.setattr("ats.ui.ipo_subnew_detector_dialog.get_ipo_detector_layout_file", lambda: TEST_TMP_CFG)
+
+    dlg = IPOSubnewDetectorDialog(initial_code=None)
+    try:
+        from PyQt6.QtWidgets import QAbstractItemView
+        table = dlg.table
+        assert table.selectionMode() == QAbstractItemView.SelectionMode.ExtendedSelection
+
+        style = dlg.styleSheet()
+        # 验证彻底消灭右上角白块与滚动条白块
+        assert "QTableCornerButton::section" in style
+        assert "background-color: #1a1a26" in style
+        assert "QScrollBar:vertical" in style
+        assert "background-color: #121214" in style
+    finally:
+        dlg.close()
+
+
+def test_tile_sbc_prioritizes_selected_stocks(monkeypatch):
+    """验证【一键平铺 SBC】优先平铺操盘手在表格中选中的标的 (单选/Ctrl/Shift)，未选中时回退默认前4只"""
+    monkeypatch.setattr("ats.ui.ipo_subnew_detector_dialog.get_ipo_detector_layout_file", lambda: TEST_TMP_CFG)
+
+    dlg = IPOSubnewDetectorDialog(initial_code=None)
+    try:
+        dlg.monitored_codes = ["601091", "920298", "688837", "301689", "301699", "920065"]
+        dlg._rebuild_table_rows()
+
+        opened_codes = []
+        rearranged = []
+
+        def mock_open_sbc(code, period_mode="10d", parent_win=None):
+            opened_codes.append(code)
+            return None
+
+        def mock_rearrange():
+            rearranged.append(True)
+
+        monkeypatch.setattr("ats.ui.intraday_strategy_dialog.open_sbc_chart_dialog", mock_open_sbc)
+        monkeypatch.setattr("ats.ui.intraday_strategy_dialog.rearrange_all_sbc_windows", mock_rearrange)
+
+        # 场景 1: 未选中任何行 -> 默认取前 4 只平铺
+        dlg.table.clearSelection()
+        opened_codes.clear()
+        dlg._on_tile_sbc_clicked()
+        assert opened_codes == ["601091", "920298", "688837", "301689"]
+
+        # 场景 2: 操盘手按住 Ctrl 选了第 1 行 (920298) 和第 2 行 (688837)
+        dlg.table.clearSelection()
+        dlg.table.selectRow(1)
+        dlg.table.selectRow(2)
+        opened_codes.clear()
+        dlg._on_tile_sbc_clicked()
+        assert opened_codes == ["920298", "688837"]
+        assert "选中的 2 只标的" in dlg.lbl_status.text()
+    finally:
+        dlg.close()
+
