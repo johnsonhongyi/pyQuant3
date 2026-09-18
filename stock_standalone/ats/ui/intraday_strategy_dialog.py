@@ -4090,7 +4090,7 @@ class SBCIntradayChartDialog(QWidget):
             | Qt.WindowType.WindowCloseButtonHint
         )
         self.setWindowTitle(f"📈 【{self.code} {resolve_stock_name(self.code)}】SBC 实盘分时走势与关键阶梯基准图")
-        self.setMinimumSize(320, 180) # 💡 极度紧凑的最小窗口尺寸保护
+        self.setMinimumSize(480, 320) # 💡 合理的最小窗口尺寸保护，确保顶栏按钮与图元不被挤爆
         self.setStyleSheet("""
             SBCIntradayChartDialog, QWidget {
                 background-color: #101018;
@@ -4695,7 +4695,7 @@ class SBCIntradayChartDialog(QWidget):
             restored_period = None
             restored_auto_eval = None
 
-            # 0. 优先从类内存变量读取最新尺寸与测算状态
+            # 0. 优先从类内存变量读取最新尺寸与测算状态 (要求有效尺寸 >= 500x350)
             if SBCIntradayChartDialog._global_sbc_size:
                 gw, gh = SBCIntradayChartDialog._global_sbc_size
                 if gw >= 200 and gh >= 100:
@@ -4708,10 +4708,11 @@ class SBCIntradayChartDialog(QWidget):
                 try:
                     with open(cfg_path, "r", encoding="utf-8") as f:
                         data = json.load(f)
-                    
+
                     if "sbc_auto_eval_enabled" in data:
                         restored_auto_eval = bool(data["sbc_auto_eval_enabled"])
 
+                    # 🛡️ 核心保障：操盘手关闭最后一个SBC或手动调整保存的 sbc_window_size 拥有最高尺寸意志！
                     if "sbc_window_size" in data and isinstance(data["sbc_window_size"], dict):
                         sz = data["sbc_window_size"]
                         sw = int(sz.get("width", target_w))
@@ -4733,16 +4734,21 @@ class SBCIntradayChartDialog(QWidget):
 
                     code_geo = data.get("sbc_geometries", {}).get(self.code)
                     latest_geo = data.get("sbc_window_geometry") or data.get("sbc_geometries", {}).get("latest")
-                    
+
                     geo_dict = open_item_geo or code_geo or latest_geo
-                    if isinstance(geo_dict, dict) and "width" in geo_dict and "height" in geo_dict:
-                        gw = int(geo_dict.get("width", target_w))
-                        gh = int(geo_dict.get("height", target_h))
-                        if gw >= 200 and gh >= 100:
-                            target_w, target_h = gw, gh
-                        x = int(geo_dict.get("x", x))
-                        y = int(geo_dict.get("y", y))
-                        has_exact_pos = True
+                    if isinstance(geo_dict, dict):
+                        # 仅当 open_item_geo 明确存在且尺寸大于等于 600x450 时才采用其尺寸；
+                        # 绝不让 code_geo 历史平铺的微小尺寸 (如 320x292 或 522x436) 覆盖操盘手保存的标准尺寸！
+                        if open_item_geo and "width" in open_item_geo and "height" in open_item_geo:
+                            ow = int(open_item_geo.get("width", target_w))
+                            oh = int(open_item_geo.get("height", target_h))
+                            if ow >= 300 and oh >= 200:
+                                target_w, target_h = ow, oh
+
+                        if "x" in geo_dict and "y" in geo_dict:
+                            x = int(geo_dict.get("x", x))
+                            y = int(geo_dict.get("y", y))
+                            has_exact_pos = True
 
                     # 周期读取：优先个股历史周期 -> sbc_open_windows 记录 -> latest 周期
                     if "sbc_period_modes" in data and isinstance(data["sbc_period_modes"], dict):
@@ -4765,16 +4771,15 @@ class SBCIntradayChartDialog(QWidget):
                             restored_auto_eval = str(val_s).lower() in ("true", "1")
                     sz = settings.value("sbc_window_size")
                     if isinstance(sz, dict):
-                        target_w = int(sz.get("width", target_w))
-                        target_h = int(sz.get("height", target_h))
+                        sw = int(sz.get("width", target_w))
+                        sh = int(sz.get("height", target_h))
+                        if sw >= 300 and sh >= 250:
+                            target_w, target_h = sw, sh
                     geo = settings.value("sbc_window_geometry") or settings.value("sbc_geo_latest")
-                    if isinstance(geo, dict) and "width" in geo and "height" in geo:
-                        target_w = int(geo.get("width", target_w))
-                        target_h = int(geo.get("height", target_h))
-                        if not has_exact_pos:
-                            x = int(geo.get("x", x))
-                            y = int(geo.get("y", y))
-                            has_exact_pos = True
+                    if isinstance(geo, dict) and not has_exact_pos:
+                        x = int(geo.get("x", x))
+                        y = int(geo.get("y", y))
+                        has_exact_pos = True
                     if not restored_period:
                         restored_period = settings.value(f"sbc_period_{self.code}") or settings.value("sbc_period_latest")
                 except Exception:
@@ -7260,7 +7265,9 @@ def save_all_open_sbc_windows():
             data["sbc_period_modes"]["latest"] = latest_period
 
         if last_valid_geo:
-            data["sbc_window_size"] = {"width": last_valid_geo.width(), "height": last_valid_geo.height()}
+            # 仅当 last_valid_geo 达到正常单窗基准 (>= 500x350) 时才更新全局 sbc_window_size，杜绝平铺微小尺寸污染
+            if last_valid_geo.width() >= 300 and last_valid_geo.height() >= 200:
+                data["sbc_window_size"] = {"width": last_valid_geo.width(), "height": last_valid_geo.height()}
             data["sbc_window_geometry"] = {
                 "x": last_valid_geo.x(),
                 "y": last_valid_geo.y(),
@@ -7690,7 +7697,9 @@ def rearrange_all_sbc_windows(parent_win=None):
             # 🚀 极致性能优化：平铺过程全部静默排布 (activate=False)，彻底消除 Windows DWM 频闪与排队拥塞
             pxy.apply_geometry(pos_x, pos_y, target_w, target_h, activate=False)
 
-        SBCIntradayChartDialog._global_sbc_size = (target_w, target_h)
+        # 仅在单窗口重排时才更新全局标准尺寸，多窗口网格平铺不污染单窗标准尺寸
+        if len(ordered_pxys) <= 1 and target_w >= 300 and target_h >= 200:
+            SBCIntradayChartDialog._global_sbc_size = (target_w, target_h)
 
     # 6. 🌟 【全部平铺窗口自动触发置顶查看】
     # 遍历所有平铺代理窗口，统一执行前置置顶唤醒 (Raise & TopMost View)，让操盘手清晰一览全部标的

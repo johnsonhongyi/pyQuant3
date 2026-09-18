@@ -13,6 +13,7 @@ ats/ui/ipo_subnew_detector_dialog.py
 import os
 import sys
 import json
+import re
 import time
 import math
 import logging
@@ -36,7 +37,7 @@ from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QLineEdit, QTableWidget, QTableWidgetItem,
     QHeaderView, QAbstractItemView, QMessageBox, QFrame,
-    QMenu, QApplication, QPlainTextEdit
+    QMenu, QApplication, QPlainTextEdit, QComboBox
 )
 from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QKeySequence, QShortcut, QAction
@@ -230,6 +231,12 @@ class IPODetectorTableWidget(BaseATSTableWidget):
                 event.accept()
                 return
         super().keyPressEvent(event)
+
+    def resizeEvent(self, event):
+        """表格尺寸变动事件：通知父窗口自适应重新计算列宽，消灭全屏黑边"""
+        super().resizeEvent(event)
+        if self.dialog and hasattr(self.dialog, "adjust_columns_to_viewport"):
+            self.dialog.adjust_columns_to_viewport()
 
 
 class IPOScanWorker(QThread):
@@ -515,7 +522,8 @@ class IPOSubnewDetectorDialog(QMainWindow):
         self.ipc_timer.timeout.connect(self._on_ipc_poll_and_heartbeat)
         self.ipc_timer.start(500)
 
-        # 2. 定期自动刷新机制：改为单次按需调度 (智能交易时段守护，收盘自动休眠，盘中 15 秒平滑轮询)
+        # 2. 定期自动刷新机制：改为单次按需调度 (智能交易时段守护，收盘自动休眠，支持可配置秒数自适应轮询)
+        self.poll_interval_sec = 15  # 默认 15 秒轮询，支持下拉调节并自动持久化
         self.auto_refresh_enabled = False  # 状态由持久化配置恢复
         self.refresh_timer = QTimer(self)
         self.refresh_timer.setSingleShot(True)
@@ -591,6 +599,37 @@ class IPOSubnewDetectorDialog(QMainWindow):
         btn_auto.clicked.connect(self._on_toggle_auto_refresh)
         self.btn_auto = btn_auto
         tb_layout.addWidget(btn_auto)
+
+        combo_interval = QComboBox()
+        combo_interval.addItems(["5秒", "10秒", "15秒", "30秒", "60秒"])
+        combo_interval.setToolTip("选择后台自动轮询的间隔时间 (默认15秒，自动持久化)")
+        combo_interval.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+        combo_interval.setStyleSheet("""
+            QComboBox {
+                background-color: #1a1d2e;
+                border: 1px solid #3d4466;
+                border-radius: 3px;
+                padding: 2px 4px 2px 6px;
+                color: #e0e6ed;
+                font-size: 8.5pt;
+                font-weight: bold;
+            }
+            QComboBox::drop-down {
+                border: none;
+                width: 12px;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #1a1d2e;
+                border: 1px solid #3d4466;
+                selection-background-color: #2b3560;
+                color: #e0e6ed;
+            }
+        """)
+        combo_interval.setCurrentText("15秒")
+        combo_interval.currentIndexChanged.connect(lambda idx: self._on_interval_changed(combo_interval.currentText()))
+        combo_interval.currentTextChanged.connect(self._on_interval_changed)
+        self.combo_interval = combo_interval
+        tb_layout.addWidget(combo_interval)
 
         btn_perf = QPushButton("📊 性能日志: 关")
         btn_perf.setToolTip("开启/关闭控制台细粒度分组计算性能审计日志 (快捷键: L)")
@@ -750,6 +789,17 @@ class IPOSubnewDetectorDialog(QMainWindow):
                         self.btn_perf.setText("📊 性能日志: 关")
                         self.btn_perf.setStyleSheet("")
 
+                self.poll_interval_sec = int(data.get("poll_interval_sec", 15) or 15)
+                if hasattr(self, "combo_interval"):
+                    self.combo_interval.blockSignals(True)
+                    target_txt = f"{self.poll_interval_sec}秒"
+                    idx = self.combo_interval.findText(target_txt)
+                    if idx >= 0:
+                        self.combo_interval.setCurrentIndex(idx)
+                    else:
+                        self.combo_interval.setCurrentText(target_txt)
+                    self.combo_interval.blockSignals(False)
+
                 self.auto_refresh_enabled = bool(data.get("auto_refresh_enabled", False))
                 if hasattr(self, "btn_auto"):
                     self.btn_auto.setChecked(self.auto_refresh_enabled)
@@ -811,14 +861,8 @@ class IPOSubnewDetectorDialog(QMainWindow):
             if c not in merged_codes:
                 merged_codes.append(c)
 
-        # 🛡️ 智能自愈防护 (P0)：若本地配置中仅有 <= 2 只标的，自动融合全市场活跃新股次新股
-        if len(merged_codes) <= 2:
-            default_codes = self._get_default_ipo_subnew_codes()
-            for dc in default_codes:
-                if dc not in merged_codes:
-                    merged_codes.append(dc)
-
-        # 若过滤后为空或无历史配置，默认加载系统真正已上市的次新股
+        # 仅当本地完全无历史配置或过滤后为空时，才加载系统出厂默认次新股池；
+        # 只要持久化数据存在，100% 忠实还原用户的配置，绝不强塞默认股票篡改池子
         if not merged_codes:
             merged_codes = self._get_default_ipo_subnew_codes()
 
@@ -851,9 +895,6 @@ class IPOSubnewDetectorDialog(QMainWindow):
                 f"✅ 监控中: {len(self.monitored_codes)} 只 | 🎯 预下单: {pre_cnt} 只{saved_tip}"
             )
 
-        # 清洗并写回持久化配置与双写镜像备份
-        self.save_persisted_state()
-
     def _get_default_ipo_subnew_codes(self) -> List[str]:
         """
         从 NewStockFetcher 中提取最新的全市场真正已上市的新股与次新股代码
@@ -881,7 +922,12 @@ class IPOSubnewDetectorDialog(QMainWindow):
                     res.append(c_str)
 
             # 提取 DataFrame 兜底补充
-            df = fetcher.get_new_stocks_summary()
+            if hasattr(fetcher, "get_combined_new_stocks"):
+                df = fetcher.get_combined_new_stocks()
+            elif hasattr(fetcher, "get_new_stocks_summary"):
+                df = fetcher.get_new_stocks_summary()
+            else:
+                df = None
             if df is not None and not df.empty and "code" in df.columns:
                 for idx, row in df.iterrows():
                     c_str = str(row["code"]).zfill(6)
@@ -947,6 +993,7 @@ class IPOSubnewDetectorDialog(QMainWindow):
             },
             "perf_log_enabled": getattr(self, "perf_log_enabled", False),
             "auto_refresh_enabled": getattr(self, "auto_refresh_enabled", False),
+            "poll_interval_sec": getattr(self, "poll_interval_sec", 15),
             "saved_at": time.strftime("%Y-%m-%d %H:%M:%S")
         }
         tmp_file = cfg_file + f".tmp_{os.getpid()}"
@@ -1102,12 +1149,6 @@ class IPOSubnewDetectorDialog(QMainWindow):
         except Exception:
             pass
 
-        # 集中持久化当前监控池与全量信号计算结果，确保下次冷启动瞬间直出
-        try:
-            self.save_persisted_state()
-        except Exception:
-            pass
-
         # 统计高价值信号
         pre_cnt = sum(1 for s in self.signals_map.values() if s.signal_type == "PRE_ORDER")
         pull_cnt = sum(1 for s in self.signals_map.values() if s.signal_type == "PULLBACK_BUY")
@@ -1173,7 +1214,8 @@ class IPOSubnewDetectorDialog(QMainWindow):
         if getattr(self, "auto_refresh_enabled", False):
             is_trading, status_text = self._check_is_trading_time()
             if is_trading:
-                self.refresh_timer.start(15000)
+                intv_ms = getattr(self, "poll_interval_sec", 15) * 1000
+                self.refresh_timer.start(intv_ms)
             else:
                 logger.debug(f"🌙 [收盘智能休眠] 当前非交易时段 ({status_text})，自动轮询智能休眠保活，降频至 60 秒心跳自检。")
                 self.lbl_status.setText(
@@ -1255,6 +1297,21 @@ class IPOSubnewDetectorDialog(QMainWindow):
             pass
         self.trigger_scan()
 
+    def _on_interval_changed(self, text: str):
+        """【⏳ 自动轮询间隔切换】用户在下拉框切换 5s/10s/15s/30s/60s，即时生效并持久化"""
+        try:
+            m = re.search(r"(\d+)", text)
+            if m:
+                self.poll_interval_sec = max(3, int(m.group(1)))
+            if getattr(self, "auto_refresh_enabled", False):
+                if hasattr(self, "refresh_timer") and self.refresh_timer.isActive():
+                    is_trading, _ = self._check_is_trading_time()
+                    if is_trading:
+                        self.refresh_timer.setInterval(self.poll_interval_sec * 1000)
+            self.save_persisted_state()
+        except Exception as e:
+            logger.debug(f"切换自动轮询间隔异常: {e}")
+
     def _on_toggle_auto_refresh(self, checked: bool):
         """【⏳ 自动轮询开关】切换是否后台延时自动轮询 (带持久化与收盘智能休眠)"""
         self.auto_refresh_enabled = checked
@@ -1319,6 +1376,93 @@ class IPOSubnewDetectorDialog(QMainWindow):
             default_widths=default_widths
         )
         hv.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        try:
+            hv.sectionResized.connect(self._on_header_section_resized)
+        except Exception:
+            pass
+        QTimer.singleShot(0, self.adjust_columns_to_viewport)
+
+    def adjust_columns_to_viewport(self):
+        """
+        自适应调整表格列宽，消灭全屏/大窗口下的右侧黑边：
+        - 优先将视口多余空间补充给【操作建议 / 为什么 (预下单逻辑)】长文本列；
+        - 若视口宽度不足以容纳所有列的最小宽度，则启用水平滚动条，不压缩关键数值列；
+        - 确保右边缘永远贴合视口，彻底消灭黑边。
+        """
+        if not hasattr(self, "table") or self.table is None:
+            return
+        hv = self.table.horizontalHeader()
+        if hv is None:
+            return
+        col_cnt = self.table.columnCount()
+        if col_cnt == 0:
+            return
+
+        vp_width = self.table.viewport().width()
+        if vp_width <= 0:
+            return
+
+        # 定位【操作建议 / 为什么】列
+        action_col = -1
+        for c in range(col_cnt):
+            it = self.table.horizontalHeaderItem(c)
+            if it and ("操作建议" in it.text() or "预下单" in it.text()):
+                action_col = c
+                break
+        if action_col == -1 and col_cnt >= 3:
+            action_col = col_cnt - 3
+
+        if action_col < 0:
+            return
+
+        # 计算除了 action_col 外，其他所有可见列的宽度之和
+        other_widths = 0
+        for c in range(col_cnt):
+            if c == action_col or self.table.isColumnHidden(c):
+                continue
+            other_widths += self.table.columnWidth(c)
+
+        min_action_width = 220
+        available_for_action = vp_width - other_widths
+        target_width = max(min_action_width, available_for_action)
+
+        current_action_w = self.table.columnWidth(action_col)
+        if abs(current_action_w - target_width) > 1:
+            self._is_adjusting_viewport = True
+            try:
+                hv.blockSignals(True)
+                self.table.setColumnWidth(action_col, target_width)
+                hv.blockSignals(False)
+            finally:
+                self._is_adjusting_viewport = False
+
+    def _on_header_section_resized(self, logical_index: int, old_size: int, new_size: int):
+        """用户拖拽列宽时，操作建议列随之自适应伸缩，保持右侧严密贴合视口"""
+        if getattr(self, "_is_adjusting_viewport", False):
+            return
+        col_cnt = self.table.columnCount()
+        action_col = col_cnt - 3 if col_cnt >= 3 else -1
+        if logical_index != action_col:
+            QTimer.singleShot(10, self.adjust_columns_to_viewport)
+
+    def resizeEvent(self, event):
+        """窗口尺寸变动事件：自适应铺满视口消灭黑边"""
+        super().resizeEvent(event)
+        self.adjust_columns_to_viewport()
+
+    def changeEvent(self, event):
+        """窗口状态变更事件：最大化/还原即时自适应消灭黑边"""
+        super().changeEvent(event)
+        from PyQt6.QtCore import QEvent
+        if event.type() == QEvent.Type.WindowStateChange:
+            QTimer.singleShot(0, self.adjust_columns_to_viewport)
+            QTimer.singleShot(60, self.adjust_columns_to_viewport)
+
+    def showEvent(self, event):
+        """窗口初次展现：即时触发自适应填充"""
+        super().showEvent(event)
+        QTimer.singleShot(0, self.adjust_columns_to_viewport)
+        QTimer.singleShot(100, self.adjust_columns_to_viewport)
 
     def _on_header_section_clicked(self, logical_index: int):
         """【📊 表头点击排序】支持全表高精度数值与文本升降序切换"""
@@ -1422,6 +1566,7 @@ class IPOSubnewDetectorDialog(QMainWindow):
                 self.table.setCurrentCell(0, 0)
         finally:
             self._is_table_updating = False
+            QTimer.singleShot(0, self.adjust_columns_to_viewport)
 
     def _update_table_row_data(self, sig: VWAPDetectorSignal, target_row: Optional[int] = None, manage_sorting: bool = True):
         """【🛡️ 整行原子原地增量更新】复用已存在的单元格对象，纯原地 setText 与调色，消除全表排版与重绘风暴"""
@@ -1957,7 +2102,6 @@ class IPOSubnewDetectorDialog(QMainWindow):
                                     merged.append(c)
                             self.monitored_codes = list(dict.fromkeys(merged))
                             self._rebuild_table_rows()
-                            self.save_persisted_state()
                             if hasattr(self, "lbl_status"):
                                 self.lbl_status.setText(f"🤖 [自动同步] 已增量拉取新上市股票: 新增 {len(new_found)} 只 (全池共 {len(self.monitored_codes)} 只)")
                     except Exception as ex_m:

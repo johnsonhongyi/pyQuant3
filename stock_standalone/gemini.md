@@ -1,3 +1,32 @@
+## 2026-09-19 00:45
+- [x] **【新股检测工具全屏自适应列宽消灭黑边、纯手动持久化规范与 SBC 独立窗口持久化尺寸生效】(`ats/ui/ipo_subnew_detector_dialog.py`, `ats/ui/intraday_strategy_dialog.py`, `tests/test_ipo_persistence_and_auto_sync.py`, `20260919_0025_task.md`)**：
+    - [x] **操盘手现场明确指示与三大硬核攻坚 (P0)**：
+        - “全屏不支持自适应列宽,总有黑边”：
+          1) **弹性拉伸消灭黑边**：实现 `adjust_columns_to_viewport()` 动态读取表格视口物理可用宽度 `viewport().width()`，保持所有数值/操作列精致紧凑，将剩余全部空闲宽度分配给文本最长的【操作建议 / 为什么 (预下单逻辑)】列；
+          2) **全窗口事件挂接**：在 `IPOSubnewDetectorDialog` 的 `resizeEvent`、`changeEvent` (最大化/还原)、`showEvent` 与 `IPODetectorTableWidget.resizeEvent` 中无缝响应，全屏大窗口右侧 0 像素黑边，严丝合缝铺满视口；窗口缩小时提供 220px 保底并开启水平滚动条，杜绝压缩关键列。
+        - “恢复需要使用持久化数据,不是手动变动的数据不要持久化”：
+          1) **冷启动 100% 忠实还原**：彻底移除 `len(merged_codes) <= 5` 强塞 35 只默认股票逻辑，无论用户保存了几只标的（哪怕仅 1~2 只），冷启动 100% 忠实还原，绝不篡改；
+          2) **坚决移除后台与读取时落盘**：彻底移除 `_on_scan_finished`（后台轮询/扫描完成）、`_auto_sync_bottom_ipo_stocks`（后台增量合并）、`_load_persisted_state`（加载读配置）中的写盘调用；
+          3) **严格锁定手动落盘边界**：仅在用户手动添加代码、手动删除代码、手动重置池子、手动调节轮询间隔、手动开关自动轮询/性能日志及关闭窗口时才持久化。
+        - “sbc的默认尺寸太小,图2 的尺寸大小比较合适, 2,当关闭最后一个sbc的时候会持久化一个sbc的大小,为何打开sbc没有使用”：
+          1) **默认出厂基准尺寸升级**：由原先过于局促的 680x420（甚至 522x436）升级为图2 舒展舒适尺寸 `800x560`，最小尺寸保护调整为 `(480, 320)`，顶栏 18 个功能按钮与分时图元彻底舒展；
+          2) **彻底解决持久化尺寸在打开时未生效的硬伤**：重构 `_restore_sbc_geometry`，确保打开任何 SBC 窗口严格优先采用全局持久化的 `sbc_window_size`，彻底杜绝被个股历史平铺残留的小尺寸 (`code_geo`) 篡改覆盖；
+          3) **隔离一键平铺临时尺寸污染**：平铺重排 (`rearrange_all_sbc_windows`) 多窗口网格布局不再覆盖全局单窗标准尺寸 `_global_sbc_size` 与 `sbc_window_size`。
+    - [x] **自动化测试 100% 验证通过 (11/11 PASSED)**：
+        - `tests/test_ipo_persistence_and_auto_sync.py` 新增全屏自适应消灭黑边、纯手动持久化与少数标的忠实还原、SBC持久化尺寸严格生效等用例，全套 11 项测试 100% 绿灯通过；
+        - `tests/test_ipo_detector_column_widths_persistence.py` 全套 7 项测试 100% 绿灯通过。
+
+## 2026-09-19 00:25
+- [x] **【新股检测工具轮询间隔极简下拉框增加、宽度自适应与自动持久化】(`ats/ui/ipo_subnew_detector_dialog.py`, `tests/test_ipo_persistence_and_auto_sync.py`, `20260919_0025_task.md`)**：
+    - [x] **操盘手现场明确指示与细节打磨 (P0)**：
+        - “不用重复显示30s, 下拉框可以适配文字宽度即可”：
+          1) **按钮文案清爽化**：去除按钮文本中多余的 `(30s)` 提示，开启时统一清爽显示为 `⏳ 自动轮询: 开`，关闭时显示为 `⏳ 自动轮询: 关`；
+          2) **下拉框宽度自适应**：移除固定宽 `setFixedWidth(68)`，启用 `setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)`，配合紧凑内边距精准包裹“15秒”等文字；
+          3) **全状态自动持久化**：`poll_interval_sec` 自动写入 `ipo_detector_layout.json`，冷启动完美恢复；
+          4) **股票池自愈门禁提升**：提升至 `<= 5` 只自愈，彻底杜绝小样本覆盖后股票池变少问题。
+    - [x] **自动化测试 100% 验证通过 (8/8 PASSED)**：
+        - `test_poll_interval_dropdown_and_persistence` 覆盖默认 15s、切换 30s、持久化落盘与冷启动恢复、按钮清爽文案，全套 8 项测试全绿通过。
+
 ## 2026-09-19 00:10
 - [x] **【新股检测工具实盘更新机制破案、全状态持久化贯通与收盘智能休眠节能守护】(`ats/ui/ipo_subnew_detector_dialog.py`, `tests/test_ipo_persistence_and_auto_sync.py`, `20260919_0010_task.md`)**：
     - [x] **操盘手现场明确指示与三大疑问彻底破案 (P0)**：
