@@ -57,6 +57,15 @@ try:
 except ImportError:
     cct = None
 
+
+def _is_ats_sbc_close_enabled() -> bool:
+    """【🚪 SBC Esc 键关闭开关】读取 cct.ats_sbc_close 配置 (默认 True 开启，按 Esc 关闭窗口；False 则维持防误触仅清除高亮)"""
+    if cct is not None:
+        if hasattr(cct, "CFG") and hasattr(cct.CFG, "ats_sbc_close"):
+            return bool(cct.CFG.ats_sbc_close)
+        return bool(getattr(cct, "ats_sbc_close", True))
+    return True
+
 try:
     from ats.proactive_exit_engine import ProactiveExitEngine, ExitAction
     from ats.consensus_arbiter import ConsensusArbiter, SharedPositionState, VoteResult
@@ -514,7 +523,13 @@ class SBCChartCanvas(QWidget):
             event.accept()
             return
         elif key == Qt.Key.Key_Escape:
-            # 💡 操盘手明确指示：取消 Esc 退出窗口功能，Esc 仅用于清除选中高亮与复位
+            # 💡 ats_sbc_close 开关控制：默认开启(True)，按 Esc 直接关闭窗口；关闭时维持原样(仅清除高亮与复位)
+            if _is_ats_sbc_close_enabled():
+                w = self.window()
+                if w:
+                    w.close()
+                event.accept()
+                return
             if hasattr(self, 'selected_trade_id') and self.selected_trade_id is not None:
                 self.selected_trade_id = None
                 self.update()
@@ -4292,7 +4307,11 @@ class SBCIntradayChartDialog(QWidget):
             event.accept()
             return
         elif key == Qt.Key.Key_Escape and not (modifiers & Qt.KeyboardModifier.AltModifier):
-            # 💡 操盘手明确指示：取消 Esc 退出窗口功能，Esc 仅用于清除画布高亮与复位
+            # 💡 ats_sbc_close 开关控制：默认开启(True)，按 Esc 直接关闭窗口；关闭时维持原样(仅清除画布高亮与复位)
+            if _is_ats_sbc_close_enabled():
+                self.close()
+                event.accept()
+                return
             if hasattr(self, 'canvas') and self.canvas:
                 if hasattr(self.canvas, 'selected_trade_id') and self.canvas.selected_trade_id is not None:
                     self.canvas.selected_trade_id = None
