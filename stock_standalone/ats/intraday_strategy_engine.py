@@ -209,10 +209,19 @@ class IntradayStrategyEngine:
     def save_listing_closing_scorecard(self, code: str, eval_result: Dict[str, Any]) -> bool:
         """【收盘定盘持久化】仅应在真正收盘(15:00)或程序退出时调用，盘中轮询中绝对不调用。"""
         c_clean = str(code).zfill(6)
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        score_val = round(float(eval_result.get("total_weighted_score", 0.0) or 0.0), 2)
+
+        # 💡 [内存防重复落盘守卫] 同一标的当天已保存且分值未变，直接返回 True，杜绝重复磁盘 I/O 与日志刷屏
+        if not hasattr(self, "_closing_saved_scorecards"):
+            self._closing_saved_scorecards = set()
+        cache_key = (c_clean, today_str, score_val)
+        if cache_key in self._closing_saved_scorecards:
+            return True
+
         fp = self._get_closing_eval_filepath()
         try:
             data = self.load_listing_closing_scorecards()
-            today_str = datetime.now().strftime("%Y-%m-%d")
             data[c_clean] = {
                 "code": c_clean,
                 "date": today_str,
@@ -238,6 +247,7 @@ class IntradayStrategyEngine:
                     os.replace(tmp_fp, fp)
                 else:
                     os.rename(tmp_fp, fp)
+                self._closing_saved_scorecards.add(cache_key)
                 logger.info(f"💾 [收盘定盘] [{c_clean}] {eval_result.get('total_weighted_score')}分 ({eval_result.get('pattern')}) 已存档")
                 return True
             finally:
@@ -2184,15 +2194,9 @@ class IntradayStrategyEngine:
         }
 
         state["timeline_eval_cache"] = eval_result
-        # 💾 收盘定盘：仅在真正收盘时刻 15:00 写盘一次；盘中绝不写盘，退出由 flush_all_closing_scorecards_on_exit 兜底
-        if clean_t >= "15:00" and open_price > 1.0 and not is_daily_strategy:
-            self.save_listing_closing_scorecard(code, eval_result)
-
-        # 🕒 交易收盘后 (>=15:00) 统一持久化；盘中则启用 300 秒（5分钟）防抖低频节流持久化 (仅在 _is_dirty 时执行)
-        if clean_t >= "15:00":
+        # 🕒 若为真正收盘时刻 (>=15:00) 且有脏数据变动，统一持久化清空脏标记；盘中评估纯内存运算，绝不主动标脏与频繁写盘
+        if clean_t >= "15:00" and getattr(self, "_is_dirty", False):
             self.save_intraday_cache(force=False)
-        else:
-            self.save_intraday_cache_throttled(interval_sec=300.0)
 
         return eval_result
 

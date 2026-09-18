@@ -131,7 +131,8 @@ def save_launcher_holdings_windows(force: bool = False, allow_empty: bool = Fals
     """【💾 集中持久化保存持仓盯盘窗口】独立保存至 sbc_launcher_holdings_layout.json，支持维护最近 3 组历史快照与防清零保护"""
     global _last_save_holdings_time, _last_saved_content_fingerprint
     now = time.time()
-    if not force and (now - _last_save_holdings_time < 0.8):
+    # 💡 [长阈值节流] 默认在窗口关闭退出时集中统一持久化；若非强制退出，至少 15 分钟 (900s) 且指纹变更才写盘一次
+    if not force and (now - _last_save_holdings_time < 900.0):
         return
     _last_save_holdings_time = now
     try:
@@ -487,7 +488,7 @@ def restore_launcher_holdings_windows(snapshot_index: Optional[int] = None) -> L
                     if not code:
                         continue
                     period = item.get("period_mode", "10d")
-                    dlg = open_sbc_chart_dialog(None, code=code, period_mode=period, record_open=False)
+                    dlg = open_sbc_chart_dialog(None, code=code, period_mode=period)
                     if dlg:
                         dlg.show()
                         gx, gy, gw, gh, prev_bottom = _calculate_safe_geometry_with_wrap(item, sg, prev_bottom)

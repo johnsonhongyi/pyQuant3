@@ -3637,16 +3637,17 @@ class SBCIntradayChartDialog(QWidget):
         except Exception:
             pass
 
-        if hasattr(self, '_geo_save_timer'):
-            self._geo_save_timer.start(350)
+        # 💡 [集中持久化原则] 盘中拖拽/缩放/切周期仅维护内存状态，统一在窗口关闭与退出时集中落盘，消除频繁 I/O
+        # if hasattr(self, '_geo_save_timer'):
+        #     self._geo_save_timer.start(350)
 
-    def set_period_mode(self, mode: str, reload: bool = True, save: bool = True):
+    def set_period_mode(self, mode: str, reload: bool = True, save: bool = False):
         """【📈 设定并切换 SBC 图表看盘周期】
         
         Args:
             mode: 周期模式 ('1m' | '2d' | '3d' | '5m' | '15m' | '30m' | '60m' | 'day' | 'week' | 'month')
             reload: 是否立即刷新重载走势图 (默认 True)
-            save: 是否触发防抖持久化 (默认 True)
+            save: 是否触发防抖持久化 (默认 False，仅在内存更新，退出时集中落盘)
         """
         if not isinstance(mode, str):
             mode = "1m"
@@ -4121,11 +4122,12 @@ class SBCIntradayChartDialog(QWidget):
             self.canvas.code = self.code
             self.canvas.auto_eval_enabled = bool(self.auto_eval_enabled)
             if self.auto_eval_enabled:
-                # 🚀 防抖校验：若非手动切换 (toggle=False)，且当前图表 bar 数量与最新价无变化，跳过高开销的自适应测算
+                # 🚀 防抖校验：若非手动切换 (toggle=False)，且当前周期与图表 bar 数量/最新价无变化，跳过高开销的自适应测算
                 cur_data_fp = None
-                if hasattr(self.canvas, 'df_data') and self.canvas.df_data is not None and not self.canvas.df_data.empty:
-                    df_d = self.canvas.df_data
-                    cur_data_fp = (len(df_d), str(df_d.index[-1]), float(df_d.iloc[-1].get("close", 0.0)))
+                p_cur = getattr(self, '_current_period_mode', '1m')
+                df_d = getattr(self.canvas, 'df_intraday', None)
+                if df_d is not None and isinstance(df_d, pd.DataFrame) and not df_d.empty:
+                    cur_data_fp = (p_cur, len(df_d), str(df_d.index[-1]), float(df_d.iloc[-1].get("close", 0.0)))
                 
                 if not toggle and cur_data_fp and cur_data_fp == getattr(self, '_last_eval_r_fp', None):
                     return  # 数据未变，跳过重复测算
@@ -4873,7 +4875,7 @@ class SBCIntradayChartDialog(QWidget):
             self.lbl_info.setText(f"🌐 [批量同步] 已将全部 {count} 个已打开 SBC 窗口的周期批量同步切换至 [{mode.upper()}]！")
             return
 
-        self.set_period_mode(mode, reload=True, save=True)
+        self.set_period_mode(mode, reload=True, save=False)
 
     def _on_rearrange_windows_clicked(self):
         """【🪟 所在屏幕窗口重排】就地自动平铺重排当前屏幕上所有打开的 SBC 窗口 (多显示器支持，保持原尺寸不变，绝不强行移至主屏)"""
@@ -5165,7 +5167,7 @@ class SBCIntradayChartDialog(QWidget):
             state = self.engine._get_stock_state(self.code, op) if self.engine else {}
             sigs = state.get("signals", [])
 
-            if not sigs and self.engine is not None and op > 1.0:
+            if mode == "1m" and not sigs and self.engine is not None and op > 1.0:
                 now_t = datetime.now().strftime("%H:%M:%S")
                 eval_res = self.engine.evaluate_seven_nodes(
                     code=self.code,
@@ -5897,10 +5899,10 @@ def _save_sbc_recent_code(code: str):
 
 
 def _record_sbc_open(code: str, geo=None, period_mode: Optional[str] = None):
-    """记录新打开的 SBC 窗口 (内存注册中心瞬间直达 + 异步防抖写盘)"""
+    """记录新打开的 SBC 窗口 (0毫秒直达内存持久化注册中心，退出时统一持久化，杜绝盘中频繁写盘)"""
     try:
         c_clean = str(code).zfill(6)
-        # 💡 0毫秒直达内存持久化注册中心
+        # 💡 0毫秒直达内存持久化注册中心，杜绝每个窗口打开时频繁写盘互相覆盖
         try:
             geo_dict = None
             if geo:
@@ -5908,111 +5910,21 @@ def _record_sbc_open(code: str, geo=None, period_mode: Optional[str] = None):
             SBCWindowMemoryManager.get_instance().register(c_clean, geo_dict=geo_dict, period_mode=period_mode)
         except Exception:
             pass
-
-        cfg_path = _get_sbc_layout_cfg_path()
-        data = {}
-        if os.path.exists(cfg_path):
-            try:
-                with open(cfg_path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-            except Exception:
-                data = {}
-
-        sbc_list = data.get("sbc_open_windows", [])
-        # 查找是否存在
-        found = False
-        for item in sbc_list:
-            if item.get("code") == c_clean:
-                if geo:
-                    item["x"] = geo.x()
-                    item["y"] = geo.y()
-                    item["width"] = geo.width()
-                    item["height"] = geo.height()
-                if period_mode:
-                    item["period_mode"] = period_mode
-                found = True
-                break
-        if not found:
-            entry = {"code": c_clean}
-            if geo:
-                entry["x"] = geo.x()
-                entry["y"] = geo.y()
-                entry["width"] = geo.width()
-                entry["height"] = geo.height()
-            else:
-                entry["x"] = 100
-                entry["y"] = 100
-                entry["width"] = 680
-                entry["height"] = 420
-            if period_mode:
-                entry["period_mode"] = period_mode
-            sbc_list.append(entry)
-
-        data["sbc_open_windows"] = sbc_list
-        if period_mode:
-            if "sbc_period_modes" not in data:
-                data["sbc_period_modes"] = {}
-            data["sbc_period_modes"]["latest"] = period_mode
-            data["sbc_period_modes"][c_clean] = period_mode
-
-        if geo and geo.width() >= 200 and geo.height() >= 100:
-            data["sbc_window_size"] = {"width": geo.width(), "height": geo.height()}
-            data["sbc_window_geometry"] = {"x": geo.x(), "y": geo.y(), "width": geo.width(), "height": geo.height()}
-            if "sbc_geometries" not in data:
-                data["sbc_geometries"] = {}
-            data["sbc_geometries"]["latest"] = data["sbc_window_geometry"]
-            data["sbc_geometries"][c_clean] = data["sbc_window_geometry"]
-        tmp_path = cfg_path + f".tmp_{os.getpid()}"
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-        try:
-            if os.path.exists(cfg_path):
-                os.replace(tmp_path, cfg_path)
-            else:
-                os.rename(tmp_path, cfg_path)
-        except Exception:
-            import shutil
-            shutil.move(tmp_path, cfg_path)
     except Exception as e:
-        logger.debug(f"记录打开 SBC 窗口异常: {e}")
+        logger.debug(f"记录打开 SBC 窗口内存异常: {e}")
 
 
 def _remove_sbc_open_record(code: str):
-    """从已打开 SBC 窗口列表中移除指定个股 (同时支持 ATS 常规与 SBC Launcher 持仓盯盘配置)"""
+    """从已打开 SBC 窗口列表中移除指定个股 (0毫秒从内存注册中心注销，退出时集中落盘)"""
     try:
         c_clean = str(code).zfill(6)
-        # 💡 0毫秒直达内存持久化注册中心注销
+        # 💡 0毫秒直达内存持久化注册中心注销，不在单窗口关闭时频繁物理写盘
         try:
             SBCWindowMemoryManager.get_instance().unregister(c_clean)
         except Exception:
             pass
-
-        cfg_path = _get_sbc_layout_cfg_path()
-        if not os.path.exists(cfg_path):
-            return
-        with open(cfg_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        modified = False
-        for key in ("sbc_open_windows", "sbc_holdings_windows"):
-            if key in data and isinstance(data[key], list):
-                new_list = [item for item in data[key] if item.get("code") != c_clean]
-                if len(new_list) != len(data[key]):
-                    data[key] = new_list
-                    modified = True
-        if modified:
-            tmp_path = cfg_path + f".tmp_{os.getpid()}"
-            with open(tmp_path, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-            try:
-                if os.path.exists(cfg_path):
-                    os.replace(tmp_path, cfg_path)
-                else:
-                    os.rename(tmp_path, cfg_path)
-            except Exception:
-                import shutil
-                shutil.move(tmp_path, cfg_path)
     except Exception as e:
-        logger.debug(f"移除 SBC 窗口记录异常: {e}")
+        logger.debug(f"移除 SBC 窗口记录内存异常: {e}")
 
 
 def save_all_open_sbc_windows():
