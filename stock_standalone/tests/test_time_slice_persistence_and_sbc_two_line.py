@@ -108,27 +108,45 @@ class TestTimeSlicePersistenceAndSBCTwoLine(unittest.TestCase):
         finally:
             dlg.close()
 
-    def test_sbc_escape_key_does_not_close_window(self):
-        """测试 SBC 窗口与画布取消 Esc 退出窗口功能"""
+    def test_sbc_escape_key_toggle_behavior(self):
+        """测试 SBC 窗口与画布 Esc 键关闭开关 (cct.ats_sbc_close)"""
         from ats.ui.intraday_strategy_dialog import SBCIntradayChartDialog
         from PyQt6.QtGui import QKeyEvent
         from PyQt6.QtCore import QEvent, Qt
         from unittest.mock import MagicMock
+        from JohnsonUtil import commonTips as cct
 
+        orig_setting = getattr(cct, "ats_sbc_close", True)
         dlg = SBCIntradayChartDialog(code="600630")
         try:
             close_mock = MagicMock()
             dlg.close = close_mock
 
-            # 模拟在对话框上按 Esc 键
+            # 1. 默认或开启状态 (ats_sbc_close = True): Esc 触发窗口关闭
+            cct.ats_sbc_close = True
+            cct.CFG.ats_sbc_close = True
             esc_event = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Escape, Qt.KeyboardModifier.NoModifier)
+            dlg.keyPressEvent(esc_event)
+            close_mock.assert_called_once()
+
+            close_mock.reset_mock()
+            # 画布上按 Esc 也关闭窗口 (调用 window().close())
+            dlg.canvas.window().close = close_mock
+            dlg.canvas.keyPressEvent(esc_event)
+            close_mock.assert_called_once()
+
+            # 2. 设置关闭状态 (ats_sbc_close = False): Esc 维持原样，不关闭窗口
+            close_mock.reset_mock()
+            cct.ats_sbc_close = False
+            cct.CFG.ats_sbc_close = False
             dlg.keyPressEvent(esc_event)
             close_mock.assert_not_called()
 
-            # 模拟在画布上按 Esc 键
             dlg.canvas.keyPressEvent(esc_event)
             close_mock.assert_not_called()
         finally:
+            cct.ats_sbc_close = orig_setting
+            cct.CFG.ats_sbc_close = orig_setting
             del dlg.close
             dlg.close()
 

@@ -1,3 +1,70 @@
+## 2026-09-18 16:15
+- [x] **【新股次新超短检测工具全面对齐全系统 BaseATSTableWidget 架构：默认极窄模式、表头与数据行原生一体化联动、彻底消灭拖拽撕裂分离】(`ats/ui/ipo_subnew_detector_dialog.py`, `tests/test_ipo_detector_column_widths_persistence.py`)**：
+    - [x] **操盘手现场明确指示与视觉体验要求 (P0)**：
+        - “调整上面不是一体的,总是分离?之前从来没有这个问题”；
+        - “跟其他tab全面对齐”；
+        - “默认极窄模式的”；
+        - “调整,都是一起变动不是撕裂的,等一会儿下面才对齐”；
+        - 彻底消除自制列宽调整导致的拖拽时表头与数据行“分离/撕裂/延迟对齐”的体验断层，完全对齐全 ATS 主看板（资金主线、重点关注、MA20d、新股次新看板）的统一架构与默认极窄列宽风格。
+    - [x] **根因深度破案与底层机理 (P0)**：
+        1. **病灶 1·脱离 BaseATSTableWidget 体系导致 C++ 原生重绘链路缺失**：检测工具原表格直接继承裸 `QTableWidget`，且上一轮自制了 `sectionResized` 信号劫持并在 Python 层管理列宽字典与防抖，破坏了 Qt 底层 C++ 在鼠标拖动过程中对表头与下方表格 Viewport 的实时同步刷新机制，导致用户拖动时“上面表头在变，下面数据列不动，松手等一会儿才跳过去对齐”的撕裂感；
+        2. **病灶 2·缺乏极窄紧凑列宽设计**：缺少与主力 Tab（如 `NewStockPanel`）对齐的紧凑极窄列宽配置，各列宽度偏大，导致右侧出现空隙或排版松散。
+    - [x] **全体系工程落地与修复验证 (KISS / SOLID / DRY)**：
+        1. **IPODetectorTableWidget 全面对齐继承 BaseATSTableWidget**：
+           - 继承全 ATS 标准基类 `BaseATSTableWidget`，天然获得 `ColorPreservingItemDelegate`、深色视口擦除、键盘导航联动与全系统标准右键菜单；
+        2. **全面启用极窄列宽标准配置 (`get_ipo_detector_default_widths`)**：
+           - 对齐 `NewStockPanel` 的紧凑风格：代码 55、名称 78、现价 52、涨跌% 50、VWAP 52、偏离 52、形态 68、趋势 80、评级 62、止损 52、动态列 50，布局严丝合缝；
+        3. **采用标准 `setup_persistence` 实现原生一体化联动**：
+           - 彻底移除上一轮多余的 Python 层 `_apply_column_widths`、`_on_header_section_resized` 与独立定时器；
+           - 表格表头全列设为 `Interactive` 并接入全系统统一的标准持久化体系（`setup_persistence`），用户拖拽鼠标时 Qt 底层实时同步重绘表头与数据列，100% 一体变动，绝不撕裂；
+        4. **全量自动化测试 100% 验证通过 (30/30 PASSED)**：
+           - `tests/test_ipo_detector_column_widths_persistence.py` 4/4 绿灯通过；
+           - 全量回归 `test_ipo_subnew_detector.py` 与 `test_sbc_ats_mode_alt_exit_guard_and_paste.py`，30 项测试全部通过。
+
+## 2026-09-18 15:55
+- [x] **【新增全局配置 cct.ats_sbc_close 选项：默认开启按 Esc 关闭 SBC 窗口，关闭配置时维持防误触清除高亮】(`global.ini`, `JohnsonUtil/commonTips.py`, `ats/ui/intraday_strategy_dialog.py`, `tests/test_time_slice_persistence_and_sbc_two_line.py`)**：
+    - [x] **操盘手现场明确指示与灵活性需求 (P0)**：
+        - “在cct添加一个选项ats_sbc_close默认是打开,当设置打开时,esc关闭sbc窗口,当设置关闭时维持现在的功能”；
+        - 提供配置项让操盘手自由选择习惯：既支持经典快捷按 Esc 键关闭走势窗口，也能切换为防误触模式（仅清除高亮复位）。
+    - [x] **全体系工程落地与修复验证 (KISS / SOLID / DRY)**：
+        1. **配置文件与公共配置模块集成**：
+           - 在 `global.ini` 的 `[general]` 下新增 `ats_sbc_close = True`（默认打开）；
+           - 在 `JohnsonUtil/commonTips.py` 的 `GlobalConfig` 中增加 `self.ats_sbc_close = self.get_with_writeback("general", "ats_sbc_close", fallback=True, value_type="bool")`；
+           - 模块级别导出 `ats_sbc_close: bool = CFG.ats_sbc_close`，供外部通过 `cct.ats_sbc_close` 直接访问与动态判断。
+        2. **SBC 走势窗口与画布按键联动判断**：
+           - 在 `ats/ui/intraday_strategy_dialog.py` 中增加 `_is_ats_sbc_close_enabled()` 守卫函数，优先安全读取 `cct.ats_sbc_close` / `cct.CFG.ats_sbc_close`，缺省安全 fallback 为 True；
+           - 在 `SBCChartCanvas.keyPressEvent` 与 `SBCIntradayChartDialog.keyPressEvent` 中：
+             - 当 `ats_sbc_close` 为 True（默认打开）时：按 Esc 键直接关闭 SBC 窗口；
+             - 当 `ats_sbc_close` 为 False 时：按 Esc 键维持防误触逻辑（仅清除画布交易选中高亮与复位，不关闭窗口）。
+        3. **自动化测试 100% 验证通过 (6/6 PASSED)**：
+           - 在 `tests/test_time_slice_persistence_and_sbc_two_line.py` 中更新 `test_sbc_escape_key_toggle_behavior`，全面覆盖 `ats_sbc_close=True` 触发关闭与 `ats_sbc_close=False` 阻断关闭并清除高亮的双向验证；
+           - 回归 `tests/test_sbc_ctrl_c_and_alt_exit_persistence.py`（5/5 PASSED 全部绿灯通过）。
+
+## 2026-09-18 15:30
+- [x] **【新股次新超短检测工具列宽自由拖拽调整与跨会话 800ms 防抖自动持久化】(`ats/ui/ipo_subnew_detector_dialog.py`, `tests/test_ipo_detector_column_widths_persistence.py`)**：
+    - [x] **操盘手现场明确指示与真实痛点 (P0)**：
+        - “检测功能列无法调整,修改为可以调整并支持自动持久化列宽”；
+        - 新股次新超短检测工具表格原有列模式被锁死为 `ResizeToContents` 与 `Stretch`，导致表头边界无法用鼠标拖拽调整列宽；且缺少列宽记忆，操盘手个性化看盘视界无法跨会话保持。
+    - [x] **根因深度破案与底层机理 (P0)**：
+        1. **病灶 1·表头模式锁死拖拽手柄**：`_setup_table_headers` 中将非描述列强制设为 `QHeaderView.ResizeMode.ResizeToContents`，将描述列设为 `Stretch`。在 Qt 机制下，该两种模式完全禁用用户鼠标拖拽调整列宽，光标不呈现双向调节手柄；
+        2. **病灶 2·缺乏列名映射持久化与防抖机制**：中间由于存在动态扩展列（`ats_col` 自定义列如 `dff`, `ch_bc2`, `连阳` 等），若简单按索引持久化极易在列增减时发生列宽错位；且缺乏防抖，直接拖拽容易产生高频 I/O。
+    - [x] **全体系工程落地与修复验证 (KISS / SOLID / DRY)**：
+        1. **表头全列 Interactive 交互模式解开**：
+           - 移除 `ResizeToContents` 和 `Stretch`，表格所有列统一设为 `QHeaderView.ResizeMode.Interactive`；
+           - 操盘手可用鼠标在表头各列边界自由拖拽拉伸或缩小任意列宽（包括操作建议/逻辑列）；
+           - 建立推荐默认列宽表 `DEFAULT_IPO_DETECTOR_COL_WIDTHS`（代码 68、名称 80、现价 68、涨跌幅 72、VWAP 78、趋势 130、评级 90、操作建议 280 等）。
+        2. **列名映射记忆与 800ms 防抖自动持久化**：
+           - 建立 `self.column_widths: Dict[str, int]` 纯按列名映射的列宽内存配置，免疫动态列插入造成的索引位移；
+           - 挂载 `hv.sectionResized` 监听操盘手手动拖拽调整，触发 800ms 防抖定时器（`_col_width_save_timer`），停止拖动后原子写入持久化配置文件 `ipo_subnew_detector_layout.json`；
+           - 设置 `_is_restoring_header` 防重入保护门禁，在初始化加载和代码刷新期间屏蔽误触发写盘；
+           - 窗口关闭 `closeEvent` 时同步核对并集中保存最终列宽。
+        3. **一键自适应全列宽增强与冷启动秒级还原**：
+           - 右键菜单“↔️ 一键自适应全列宽”（`_auto_fit_columns`）调整完成后，全列保持 `Interactive` 模式并自动持久化当前宽度；
+           - `_load_persisted_state` 与 `_rebuild_table_rows` 自动恢复持久化列宽，冷启动瞬时还原。
+        4. **全量自动化测试 100% 验证通过 (30/30 PASSED)**：
+           - 新建专项测试 `tests/test_ipo_detector_column_widths_persistence.py` 4/4 绿灯通过（覆盖拖拽交互、防抖持久化、冷启动恢复、一键自适应与模式保护）；
+           - 全量回归 `test_ipo_subnew_detector.py` 与 `test_sbc_ats_mode_alt_exit_guard_and_paste.py`，30 项测试全部 100% 绿灯通过！
+
 ## 2026-09-18 14:45
 - [x] **【新股次新超短检测工具输入框右键快捷粘贴股票代码 & ATS 模式 SBC 严格忽略 Alt+关闭/Alt+X 批量退出功能】(`ats/ui/ipo_subnew_detector_dialog.py`, `ats/ui/intraday_strategy_dialog.py`, `tests/test_sbc_ats_mode_alt_exit_guard_and_paste.py`)**：
     - [x] **操盘手现场明确指示与真实痛点 (P0)**：

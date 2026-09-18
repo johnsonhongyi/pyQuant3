@@ -57,6 +57,7 @@ class IPONumericTableWidgetItem(NumericTableWidgetItem):
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+from ats.ui.base_table import BaseATSTableWidget
 from ats.strategy.ipo_vwap_detector_engine import (
     IPOVWAPDetectorEngine, VWAPDetectorSignal, resolve_fast_ipo_name
 )
@@ -136,10 +137,24 @@ def get_ipo_detector_table_headers(extra_cols: Optional[List[str]] = None) -> Li
     return base_left + extra_headers + base_right
 
 
+def get_ipo_detector_default_widths(extra_cols: Optional[List[str]] = None) -> List[int]:
+    """与其它主力 Tab 100% 对齐的默认极窄模式列宽 (紧凑规整，杜绝空隙与撕裂)"""
+    if extra_cols is None:
+        extra_cols = get_ipo_detector_extra_cols()
+    # 基础 10 列 (极窄模式):
+    # 代码(55), 名称(78), 现价(52), 涨跌%(50), 10d VWAP(52), VWAP偏离(52), VWAP形态(68), 大趋势(80), 信号评级(62), 止损位(52)
+    base_widths = [55, 78, 52, 50, 52, 52, 68, 80, 62, 52]
+    # 动态扩展列 (每个极窄 50)
+    extra_widths = [50] * len(extra_cols)
+    # 右侧: 预下单逻辑(220), 更新时间(52), 快捷操作(88)
+    right_widths = [220, 52, 88]
+    return base_widths + extra_widths + right_widths
 
-class IPODetectorTableWidget(QTableWidget):
+
+class IPODetectorTableWidget(BaseATSTableWidget):
     """
     【专用超短检测高响应表格】
+    - 统一继承 BaseATSTableWidget，拥有全 ATS 标准的丝滑列宽调整与一体化联动
     - 统一支持键盘方向键 (Up/Down) 极速逐行导航与智能联动；
     - 统一支持键盘翻页键 (PageUp/PageDown) 视口按页跨行极速翻页；
     - 统一支持回车 (Return/Enter) 强制刷新联动；
@@ -359,11 +374,14 @@ class IPOSubnewDetectorDialog(QMainWindow):
             }
         """)
 
-        # 监控代码集合 (保序)
         self.monitored_codes: List[str] = []
         self.signals_map: Dict[str, VWAPDetectorSignal] = {}
         self.extra_cols: List[str] = get_ipo_detector_extra_cols()
         self.ipc_df: Optional[pd.DataFrame] = None
+
+        # 列宽手动拖拽与跨会话自动持久化
+        self.column_widths: Dict[str, int] = {}
+        self._is_restoring_header = False
 
         # 扫描线程与性能日志控制
         self.worker: Optional[IPOScanWorker] = None
@@ -479,8 +497,10 @@ class IPOSubnewDetectorDialog(QMainWindow):
 
         root_layout.addLayout(tb_layout)
 
-        # ── 2. 中部数据表格 (支持动态 ats_col 与上下翻页联动) ──
+        # ── 2. 中部数据表格 (支持动态 ats_col 与上下翻页联动，与其他 Tab 100% 对齐) ──
         self.table = IPODetectorTableWidget(self)
+        self.table.viewport().setStyleSheet("background-color: #121218; border: none;")
+        self.table.setStyleSheet("QTableWidget { background-color: #121218; border: none; }")
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -674,6 +694,8 @@ class IPOSubnewDetectorDialog(QMainWindow):
 
     def save_persisted_state(self):
         """集中持久化保存当前窗口几何、监控池与全量信号计算结果 (支持冷启动秒出)"""
+        if hasattr(self, "table") and hasattr(self.table, "save_header_state"):
+            self.table.save_header_state()
         cfg_file = get_ipo_detector_layout_file()
         # 序列化当前已算好的全量信号
         cached_sigs = {}
@@ -929,7 +951,7 @@ class IPOSubnewDetectorDialog(QMainWindow):
         self.save_persisted_state()
 
     def _setup_table_headers(self):
-        """动态配置表格列头与列宽自适应 (支持动态 ats_col 与表头点击排序)"""
+        """动态配置表格列头与列宽 (与其他主力 Tab 100% 对齐，默认极窄模式，原生一体化丝滑拖拽)"""
         self.extra_cols = get_ipo_detector_extra_cols()
         headers = get_ipo_detector_table_headers(self.extra_cols)
         self.table.setColumnCount(len(headers))
@@ -944,12 +966,13 @@ class IPOSubnewDetectorDialog(QMainWindow):
             pass
         hv.sectionClicked.connect(self._on_header_section_clicked)
 
-        desc_col_idx = 10 + len(self.extra_cols)
-        for i in range(len(headers)):
-            if i == desc_col_idx:
-                hv.setSectionResizeMode(i, QHeaderView.ResizeMode.Stretch)
-            else:
-                hv.setSectionResizeMode(i, QHeaderView.ResizeMode.ResizeToContents)
+        # 全面对齐全系统统一的标准 setup_persistence 与极窄模式 (彻底消除拖拽撕裂与分离延时)
+        default_widths = get_ipo_detector_default_widths(self.extra_cols)
+        self.table.setup_persistence(
+            config_key="ats_ipo_subnew_detector_headers_v5",
+            default_widths=default_widths
+        )
+        hv.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
 
     def _on_header_section_clicked(self, logical_index: int):
         """【📊 表头点击排序】支持全表高精度数值与文本升降序切换"""
@@ -993,7 +1016,10 @@ class IPOSubnewDetectorDialog(QMainWindow):
         try:
             n_extra = len(self.extra_cols)
             total_cols = 13 + n_extra
-            self.table.setColumnCount(total_cols)
+            if self.table.columnCount() != total_cols:
+                self.table.setColumnCount(total_cols)
+                headers = get_ipo_detector_table_headers(self.extra_cols)
+                self.table.setHorizontalHeaderLabels(headers)
             self.table.setRowCount(len(self.monitored_codes))
 
             for row, code in enumerate(self.monitored_codes):
@@ -1686,8 +1712,13 @@ class IPOSubnewDetectorDialog(QMainWindow):
         menu.exec(self.table.viewport().mapToGlobal(pos))
 
     def _auto_fit_columns(self):
-        """自适应调整表格所有列宽"""
+        """自适应调整表格所有列宽，确保全列保持 Interactive 自由拖拽并自动持久化"""
         self.table.resizeColumnsToContents()
+        hv = self.table.horizontalHeader()
+        for i in range(self.table.columnCount()):
+            hv.setSectionResizeMode(i, QHeaderView.ResizeMode.Interactive)
+        if hasattr(self.table, "save_header_state"):
+            self.table.save_header_state()
 
     def _on_ipc_poll_and_heartbeat(self):
         """消费来自 ATS 跨进程一键发送过来的新代码，同步 IPC 数据并更新心跳"""
