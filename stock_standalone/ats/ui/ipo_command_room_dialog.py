@@ -279,6 +279,23 @@ class IPOCommandRoomDialog(QDialog):
             QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {
                 background: none;
             }
+            /* 极窄模式分割条：彻底消灭 Windows 原生亮白手柄，采用暗黑科技微光配色 */
+            QSplitter::handle {
+                background-color: #1c1e2d;
+                border: none;
+            }
+            QSplitter::handle:horizontal {
+                width: 2px;
+            }
+            QSplitter::handle:vertical {
+                height: 2px;
+            }
+            QSplitter::handle:hover {
+                background-color: #00e5ff;
+            }
+            QSplitter::handle:pressed {
+                background-color: #00b0ff;
+            }
         """)
 
         self.trading_center = IPOTradingCenter.get_instance()
@@ -341,7 +358,7 @@ class IPOCommandRoomDialog(QDialog):
 
         # ── 2. 中部主分割区 (左侧赛马天梯，右侧持仓与指令) ──
         self.splitter = QSplitter(Qt.Orientation.Horizontal)
-        self.splitter.setHandleWidth(4)
+        self.splitter.setHandleWidth(2)
 
         # 左侧：全池赛马天梯与山外有山仲裁
         grp_rank = QGroupBox("🏆 全池横向赛马排位天梯 (掌握全数据·山外有山)")
@@ -682,6 +699,7 @@ class IPOCommandRoomDialog(QDialog):
             if split_hex and isinstance(split_hex, str) and hasattr(self, "splitter"):
                 from PyQt6.QtCore import QByteArray
                 self.splitter.restoreState(QByteArray.fromHex(split_hex.encode("utf-8")))
+                self.splitter.setHandleWidth(2)
         except Exception as e:
             logger.debug(f"恢复指挥室窗口状态异常: {e}")
 
@@ -771,16 +789,36 @@ class IPOCommandRoomDialog(QDialog):
         ranked = getattr(self.trading_center, "_ranked_cache", [])
         prev_row = self.tbl_rank.currentRow()
 
+        manual_set = set()
+        if hasattr(self, "detector_dialog") and self.detector_dialog and hasattr(self.detector_dialog, "manual_codes"):
+            manual_set = set(self.detector_dialog.manual_codes)
+
         self.tbl_rank.setSortingEnabled(False)
         self.tbl_rank.setRowCount(len(ranked))
         for r, sig in enumerate(ranked):
+            is_manual = (sig.code in manual_set)
             # 排名 (数值排序)
             self.tbl_rank.setItem(r, 0, NumericTableWidgetItem(str(sig.horse_race_rank), raw_val=int(sig.horse_race_rank)))
-            # 代码 (纯数字数值比较)
-            code_num = int(sig.code) if sig.code.isdigit() else 999999
-            self.tbl_rank.setItem(r, 1, NumericTableWidgetItem(sig.code, raw_val=code_num))
-            # 名称
-            self.tbl_rank.setItem(r, 2, QTableWidgetItem(sig.name))
+            # 代码 (纯数字数值比较，手工标的金色加粗高亮)
+            clean_digits = "".join(ch for ch in sig.code if ch.isdigit())
+            code_num = int(clean_digits) if clean_digits else 999999
+            code_it = NumericTableWidgetItem(f"📌{sig.code}" if is_manual else sig.code, raw_val=code_num)
+            if is_manual:
+                code_it.setForeground(QColor("#ffd700"))
+                f = code_it.font()
+                f.setBold(True)
+                code_it.setFont(f)
+                code_it.setToolTip(f"【📌 操盘手手工添加标的】{sig.code} {sig.name} (置顶优先监控)")
+            self.tbl_rank.setItem(r, 1, code_it)
+            # 名称 (手工标的同步金色高亮)
+            name_it = QTableWidgetItem(f"📌{sig.name}" if is_manual else sig.name)
+            if is_manual:
+                name_it.setForeground(QColor("#ffd700"))
+                f = name_it.font()
+                f.setBold(True)
+                name_it.setFont(f)
+                name_it.setToolTip(f"【📌 操盘手手工添加标的】{sig.code} {sig.name} (置顶优先监控)")
+            self.tbl_rank.setItem(r, 2, name_it)
             # 现价 (高精度浮点数排序)
             price_val = float(sig.price) if sig.price > 0 else 0.0
             self.tbl_rank.setItem(r, 3, NumericTableWidgetItem(f"{sig.price:.2f}" if sig.price > 0 else "--", raw_val=price_val))

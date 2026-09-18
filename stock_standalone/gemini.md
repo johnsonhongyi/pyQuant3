@@ -1,3 +1,20 @@
+## 2026-09-18 22:25
+- [x] **【集中交易指挥室暗黑分割线、手动添加标的标记与优先显示、数据防丢失双重持久化与底层新股自动同步】(`ats/ui/ipo_command_room_dialog.py`, `ats/ui/ipo_subnew_detector_dialog.py`, `ats/ui/ipo_detector_ipc.py`, `tests/test_ipo_persistence_and_auto_sync.py`, `20260918_2225_task.md`)**：
+    - [x] **操盘手现场明确指示与系统稳定性重大升级 (P0)**：
+        - “白色的竖线配色有问题”：彻底修复指挥室左右分割手柄为极窄暗黑科技灰配色（`#1c1e2d`，hover `#00e5ff`），锁定 `handleWidth(2)` 为 2px，彻底根除 Windows 原生刺眼亮白大粗竖线；
+        - “不用优先显示，标记显示在name上，有颜色标记也可以，点击name排序优先即可”：
+          1) 代码列彻底净化，严格保持纯 6 位数字代码（如 `300058`），绝不加非数字字符，彻底杜绝 `📌 ...` 省略号截断；
+          2) 专属徽标与高亮移至名称列（`📌 蓝色光标`），代码与名称均赋予专属亮金色高亮与加粗（`#ffd700`）；
+          3) 普通列（现价、涨跌幅、VWAP等）完全自然排序；操盘手点击“名称”表头时，手工标的高权重优先置顶排列；
+        - “刚刚出现数据丢失问题，不得不重置新股池”：引入 `.bak` 镜像备份双写容灾自愈机制，主配置损毁时瞬间从备份自愈；操盘手手工代码享有最高意志免检权，修复 `is_stock_actually_listed` 缺失上市日期误杀缺陷；重置新股池时 100% 优先保留手工自选代码；
+        - “新股次新股自动同步底层新股次新股的能力”：启动 2 秒后异步后台线程触发底层 `NewStockFetcher` 增量同步，之后每 15 分钟静默感知全市场最新上市标的，自动追加合入监控池，无需每日手动敲代码维护。
+    - [x] **全量自动化测试 100% 验证通过 (31/31 PASSED)**：
+        - `tests/test_ipo_persistence_and_auto_sync.py` 6/6 绿灯通过；
+        - `tests/test_ipo_command_room_persistence.py` 4/4 绿灯通过；
+        - `tests/test_ipo_fleet_trading_arbitration.py` 8/8 绿灯通过；
+        - `tests/test_ipo_detector_column_widths_persistence.py` 7/7 绿灯通过；
+        - `tests/test_ipo_vwap_sentiment_and_horse_race.py` 6/6 绿灯通过。
+
 ## 2026-09-18 21:05
 - [x] **【集中交易指挥室列宽持久化完备化与全系统流式全量/增量同步通道升级】(`ats/ui/ipo_command_room_dialog.py`, `instock_MonitorTK.py`, `ats/network/tk_ipc_subscriber.py`, `ats/tk_ipc_subscriber.py`, `ats/ipc_bridge.py`, `ats/ui/ipo_subnew_detector_dialog.py`, `tests/test_ipo_command_room_persistence.py`, `20260918_2105_task.md`)**：
     - [x] **操盘手现场明确指示与系统性能加速落地 (P0)**：
