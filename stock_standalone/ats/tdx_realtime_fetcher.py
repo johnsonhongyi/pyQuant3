@@ -2018,6 +2018,9 @@ class TDXRealtimeFetcher:
             self._no_quote_last_attempt.pop(c_clean, None)
             self._no_quote_counts.pop(c_clean, None)
             self._unlisted_or_dormant_codes.discard(c_clean)
+            if hasattr(self, '_kline_bars_cache'):
+                for k in [k for k in self._kline_bars_cache.keys() if k[0] == c_clean]:
+                    self._kline_bars_cache.pop(k, None)
         with self._bidding_lock:
             self._bidding_history.pop(c_clean, None)
             self._bidding_locked_base.pop(c_clean, None)
@@ -2559,6 +2562,16 @@ class TDXRealtimeFetcher:
         """
         c_clean = str(code).zfill(6)
         cat_str = str(category).lower().strip()
+
+        # ⚡ [3秒TTL极速内存缓存] 操盘手快速在多个周期来回切换时 0ms 瞬间返回，彻底杜绝网络卡顿与重复计算
+        now_ts = time.time()
+        if not hasattr(self, "_kline_bars_cache"):
+            self._kline_bars_cache = {}
+        cache_key = (c_clean, cat_str, count)
+        if cache_key in self._kline_bars_cache:
+            c_ts, c_df = self._kline_bars_cache[cache_key]
+            if (now_ts - c_ts) < 3.0 and c_df is not None and not c_df.empty:
+                return c_df.copy()
         is_120m = cat_str in ("120m", "120f", "120min", "2h", "120")
         is_2d = cat_str in ("2d", "2k", "2day", "2日", "2日k")
         is_3d = cat_str in ("3d", "3k", "3day", "3日", "3日k")
@@ -2732,6 +2745,7 @@ class TDXRealtimeFetcher:
                 logger.debug(f"td_sequential_fast 神奇九转计算异常: {e_td}")
 
             df.set_index("time", inplace=True)
+            self._kline_bars_cache[cache_key] = (now_ts, df.copy())
             return df
         except Exception as e:
             logger.debug(f"拉取 {c_clean} [{category}] K 线数据异常: {e}")

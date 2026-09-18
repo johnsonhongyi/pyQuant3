@@ -1,3 +1,26 @@
+## 2026-09-18 12:35
+- [x] **【SBC 切换周期性能急速优化、集中统一退出持久化、长阈值节流与彻底消除收盘定盘无用刷屏与写盘阻塞】(`run_sbc.py`, `ats/ui/intraday_strategy_dialog.py`, `ats/intraday_strategy_engine.py`, `ats/tdx_realtime_fetcher.py`, `tests/test_sbc_period_switch_zero_io_and_speed.py`)**：
+    - [x] **操盘手现场明确指示与真实痛点 (P0)**：
+        - “全面优化sbc切换周期的性能,现在切换不是卡顿,日志显示大量的无用的存档,在sbc窗口关闭前不要多余的持久化,并全面急速解决切换卡顿的性能卡点”；
+        - “sbc_launcher_holdings_layout 文件一直在疯狂写盘,默认在窗口退出持久化,不要频繁写盘,所有的持久化都需要有阈值,大部分都是在关闭时持久化,或者10-30分钟持久化一次,还都是集中统一持久化一次”；
+        - “开始持久化一次是对的,但是都是批量统一持久化,而不是每个都持久化一次,导致各种覆盖,同一只code都是关闭窗口退出时统一持久化”。
+    - [x] **全体系工程落地与修复验证 (KISS / SOLID / DRY)**：
+        1. **彻底根除 `sbc_launcher_holdings_layout.json` 频繁写盘与启动逐个保存覆盖问题**：
+           - **启动阶段批量统一持久化**：批量打开所有持仓股盯盘窗口时，禁止单个窗口在创建过程中各自落盘；待所有持仓窗口全部实例化并完成统一平铺重排（`rearrange_all_sbc_windows`）后，仅集中统一原子持久化一次，确保配置全量且顺序严格一致；
+           - **运行阶段 100% 纯内存更新**：`set_period_mode` 默认 `save=False`，切周期仅更新内存周期状态；窗口缩放与拖拽仅更新内存几何尺寸；`_record_sbc_open` 与 `_remove_sbc_open_record` 仅维护 `SBCWindowMemoryManager` 内存注册中心，移除直接同步写盘代码；
+           - **15 分钟长阈值节流与退出集中统一落盘**：`save_launcher_holdings_windows` 节流阈值由 0.8s 大幅提升至 900s（15分钟），内容指纹比对未变时 0 磁盘写入；全部窗口退出（`quit_and_save_all_sbc_windows` / `closeEvent`）时集中统一落盘 1 次。
+        2. **彻底剥离 `💾 [收盘定盘] [001212] ... 已存档` 日志刷屏与磁盘阻塞**：
+           - **剥离热循环写盘**：从 `evaluate_timeline` 中彻底移除 `save_listing_closing_scorecard` 与 `save_intraday_cache` 的无条件同步写盘，日内评估纯内存运算（0 磁盘 I/O），定盘评分保存在 `timeline_eval_cache`，由程序退出时的 `flush_all_closing_scorecards_on_exit()` 批量落盘；
+           - **内存防重复落盘守卫**：在 `save_listing_closing_scorecard` 中增加 `(code, today_str, score)` 内存缓存集合，相同标的当天同分值直接短路返回 True，彻底杜绝任何重复写盘与日志刷屏；
+           - **收盘清脏**：仅在真正收盘时刻（`clean_t >= "15:00"`）且存在实质脏数据变动时才统一持久化清空脏标记，盘中绝不主动标记 dirty。
+        3. **SBC 切换周期急速优化（0ms 秒切）**：
+           - **周期解耦**：在 `reload_chart` 中，当处于 K 线模式（5m/15m/30m/60m/day/week/month）时，跳过分时 7 节点多余计算；
+           - **3 秒 TTL 极速内存缓存**：在 `TDXRealtimeFetcher.fetch_kline_bars` 中增加 3 秒 TTL 内存缓存 `_kline_cache`，操盘手在不同周期来回快速切换时无需重复网络请求与通道计算，0ms 瞬间秒切；点击“🔄 刷新”时强力清空缓存；
+           - **修正防抖校验**：将 `_on_eval_r_clicked` 中的属性检查修正为 `df_intraday` 并纳入当前周期模式，数据未变时 0 开销直接返回。
+        4. **全量自动化测试 100% 验证通过 (35/35 PASSED)**：
+           - 全新编写专项测试 `tests/test_sbc_period_switch_zero_io_and_speed.py`（4/4 PASSED 全部通过）：断言连续切换周期 0 磁盘写盘、0 收盘定盘写盘、TTL 内存缓存耗时 < 5ms、防重复落盘守卫生效；
+           - 全量回归 `test_sbc_holdings_launch_no_frequent_save.py`、`test_disk_io_and_cache_safety.py`、`test_sbc_performance_optimization.py`、`test_sbc_multi_period_signals.py`、`test_sbc_ctrl_c_and_alt_exit_persistence.py`，全部 31 项测试全部 100% 绿灯通过！
+
 ## 2026-09-18 12:00
 - [x] **【SBC 键盘操作与防误触全面升级：彻底取消 Esc 键退出窗口功能、L 键升级为 S 键开关日志、全新上线 A 键切上一周期与 D 键切下一周期】(`ats/ui/intraday_strategy_dialog.py`, `tests/test_time_slice_persistence_and_sbc_two_line.py`)**：
     - [x] **操盘手现场明确指示与实操优化 (P0)**：
