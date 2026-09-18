@@ -634,7 +634,7 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         self.btn_kpi_total = QPushButton("📋 总计: 0 家")
         self.lbl_kpi_total = self.btn_kpi_total
 
-        # 模式与时间片切换栏
+        # 模式与时间片切换栏 (支持自动持久化记忆最后使用的类型，如全天全时段)
         self.combo_time_slice = QComboBox()
         self.combo_time_slice.addItems([
             "⚡ 自动实盘跟随",
@@ -645,6 +645,18 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
             "🎯 午盘接力 (13:00-14:30)",
             "🏁 尾盘回封 (14:30-15:00)"
         ])
+        saved_slice = load_config_node("daily_limitup_time_slice", "")
+        if saved_slice:
+            idx = self.combo_time_slice.findText(str(saved_slice))
+            if idx >= 0:
+                self.combo_time_slice.setCurrentIndex(idx)
+            else:
+                for i in range(self.combo_time_slice.count()):
+                    txt = self.combo_time_slice.itemText(i)
+                    if str(saved_slice) in txt or txt in str(saved_slice):
+                        self.combo_time_slice.setCurrentIndex(i)
+                        break
+
         self.combo_time_slice.setStyleSheet("""
             QComboBox {
                 background-color: #1a1a24;
@@ -662,7 +674,7 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
                 selection-color: #000000;
             }
         """)
-        self.combo_time_slice.currentTextChanged.connect(self._apply_filter)
+        self.combo_time_slice.currentTextChanged.connect(self._on_time_slice_changed)
         kpi_layout.addWidget(self.combo_time_slice)
 
         self.combo_tier_filter = QComboBox()
@@ -2156,6 +2168,15 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
             logger.debug(f"[DailyLimitUp] _refresh_since_pct_columns 异常: {_e}")
 
 
+
+    def _on_time_slice_changed(self, text: str):
+        """用户切换盘中时间片生命周期选项：自动持久化并触发过滤"""
+        if text and not getattr(self, '_restoring_time_slice', False):
+            try:
+                save_config_node("daily_limitup_time_slice", str(text).strip())
+            except Exception as e:
+                logger.debug(f"持久化天梯时间片配置异常: {e}")
+        self._apply_filter()
 
     def _apply_filter(self):
         """【三维精准分拣】联合时间片生命周期、梯队分类与搜索文本进行实时原位过滤"""
