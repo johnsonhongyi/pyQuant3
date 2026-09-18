@@ -573,6 +573,28 @@ def main():
 
     app = QApplication.instance() or QApplication(sys.argv)
 
+    # 💡 设置全局暗黑调色板与 QToolTip 样式，确保独立进程中所有 ToolTip 呈现高质感暗黑金融配色
+    try:
+        from PyQt6.QtGui import QPalette, QColor
+        app_pal = app.palette()
+        app_pal.setColor(QPalette.ColorRole.ToolTipBase, QColor("#14141f"))
+        app_pal.setColor(QPalette.ColorRole.ToolTipText, QColor("#f1f5f9"))
+        app.setPalette(app_pal)
+        app.setStyleSheet((app.styleSheet() or "") + """
+            QToolTip {
+                background-color: #14141f;
+                color: #f1f5f9;
+                border: 1px solid #38bdf8;
+                border-radius: 4px;
+                padding: 6px 10px;
+                font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+                font-size: 9pt;
+                font-weight: normal;
+            }
+        """)
+    except Exception:
+        pass
+
     # 💡 注册 atexit 底层兜底：无论 Python 进程以何种方式终止，退出时均尝试落盘
     import atexit
     atexit.register(quit_and_save_all_sbc_windows)
