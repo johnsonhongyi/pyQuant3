@@ -151,9 +151,11 @@ def test_tile_sbc_prioritizes_selected_stocks(monkeypatch):
         assert opened_codes == ["601091", "920298", "688837", "301689"]
 
         # 场景 2: 操盘手按住 Ctrl 选了第 1 行 (920298) 和第 2 行 (688837)
+        from PyQt6.QtCore import QItemSelectionModel
         dlg.table.clearSelection()
-        dlg.table.selectRow(1)
-        dlg.table.selectRow(2)
+        sel_mode = QItemSelectionModel.SelectionFlag.Select | QItemSelectionModel.SelectionFlag.Rows
+        dlg.table.selectionModel().select(dlg.table.model().index(1, 0), sel_mode)
+        dlg.table.selectionModel().select(dlg.table.model().index(2, 0), sel_mode)
         opened_codes.clear()
         dlg._on_tile_sbc_clicked()
         assert opened_codes == ["920298", "688837"]

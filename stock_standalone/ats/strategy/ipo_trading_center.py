@@ -151,8 +151,8 @@ class IPOTradingCenter:
             today_str = time.strftime("%Y-%m-%d")
             directives: List[IPOOrderDirective] = []
 
-            # 1. 全局大盘量能与新股梯队情绪感知
-            sentiment = self.sentiment_engine.get_market_sentiment(all_signals)
+            # 1. 全局大盘量能与新股梯队情绪感知 (依据最新汇交的全景信号实时感知)
+            sentiment = self.sentiment_engine.get_market_sentiment(all_signals, force_refresh=True)
 
             # 2. 全池执行横向赛马冒泡排位 (“山外有山”)
             ranked_signals = batch_evaluate_horse_race_ranking(all_signals)
@@ -178,7 +178,7 @@ class IPOTradingCenter:
                 else:
                     sig.relative_to_leader_gap = 0.0
 
-                # 仲裁 A: 极端高潮冲顶天量滞涨
+                # 仲裁 A: 自身极端高潮冲顶天量滞涨 (坚决平仓逃顶)
                 if sig.is_climax_exit:
                     sig.global_fleet_role = "CLIMAX_EXIT"
                     sig.global_arbitration_desc = f"🚨【高潮平仓 0%仓】偏离VWAP达+{sig.vwap_diff_pct:.1f}%且放天量滞涨冲顶，主力疯狂兑现，锁定翻倍胜果！"
@@ -196,13 +196,7 @@ class IPOTradingCenter:
                     sig.global_arbitration_desc = f"❄️【全局冰点 0%仓】次新池站稳率仅{sentiment.vwap_hold_ratio}%，山外无山皆泥沙，全局防守禁止开仓！"
                     continue
 
-                # 仲裁 D: 领头羊崩溃全局避险
-                if leader_is_crashing and sig.code != leader_code:
-                    sig.global_fleet_role = "PANIC_DEFENSE"
-                    sig.global_arbitration_desc = f"🛡️【全局避险 0%仓】超级领头羊({leader_code})天量冲顶跳水，板块退潮泥沙俱下，严禁逆市伸手！"
-                    continue
-
-                # 仲裁 E: 🥇 爆款领头羊 (全池第 1 标杆，优先确立地位)
+                # 仲裁 D: 🥇 爆款领头羊 (全池第 1 标杆，优先确立地位)
                 if top_leader and sig.code == top_leader.code:
                     sig.global_fleet_role = "LEADER"
                     if sig.signal_type == "IPO_FIRST_BUY":
@@ -213,17 +207,23 @@ class IPOTradingCenter:
                         sig.global_arbitration_desc = f"🥇【全池领头羊 35%仓】动能分{sig.horse_race_score:.0f}全池第一，{sig.launch_time_str}拔地而起，集中重仓围猎！"
                     continue
 
-                # 仲裁 F: 市场狂热高潮期对后排与跟风只卖不买，防T+1追高被埋
-                if sentiment.heat_stage == "🌋 狂热高潮":
-                    sig.global_fleet_role = "CLIMAX_DEFENSE"
-                    sig.global_arbitration_desc = f"🌋【高潮避险 0%仓】全市场情绪极度狂热，跟风标的只卖不买，防T+1追高被埋纸面财富！"
-                    continue
-
-                # 仲裁 G: 🥈 梯队前锋
+                # 仲裁 E: 🥈 梯队前锋 (紧随领头羊，共振跟进)
                 if sig.horse_race_rank in (2, 3) and sig.horse_race_score >= 70.0 and sig.is_above_vwap:
                     sig.global_fleet_role = "VANGUARD"
                     leader_nm = top_leader.name if top_leader else "领头羊"
                     sig.global_arbitration_desc = f"🥈【梯队前锋 15%仓】动能分{sig.horse_race_score:.0f}，紧随领头羊[{leader_nm}]多头共振，顺风跟进！"
+                    continue
+
+                # 仲裁 F: 龙头高潮冲顶崩盘联动避险 (仅对第 4 名之后的跟风标的进行退潮拦截)
+                if leader_is_crashing and sig.code != leader_code:
+                    sig.global_fleet_role = "PANIC_DEFENSE"
+                    sig.global_arbitration_desc = f"🛡️【全局避险 0%仓】超级龙头({leader_code})天量冲顶跳水，板块情绪退潮，跟风标的严禁盲目接飞刀！"
+                    continue
+
+                # 仲裁 G: 市场狂热高潮期对后排与跟风只卖不买，防T+1追高被埋
+                if sentiment.heat_stage == "🌋 狂热高潮":
+                    sig.global_fleet_role = "CLIMAX_DEFENSE"
+                    sig.global_arbitration_desc = f"🌋【高潮避险 0%仓】全市场情绪极度狂热，跟风标的只卖不买，防T+1追高被埋纸面财富！"
                     continue
 
                 # 仲裁 H: 🥉 后排跟风 (山外有山)
@@ -231,6 +231,7 @@ class IPOTradingCenter:
                 leader_nm = top_leader.name if top_leader else "领头羊"
                 gap_val = sig.relative_to_leader_gap
                 sig.global_arbitration_desc = f"🥉【山外有山·观望 0%仓】动能分{sig.horse_race_score:.0f}落后领头羊[{leader_nm}]{gap_val:.0f}分，资金有限集中围猎头部，禁止分仓跟风！"
+
 
             # 4. ── 【防守端出局：何时卖 & 买错立斩出局】 ──
             for code, pos in list(self._positions.items()):

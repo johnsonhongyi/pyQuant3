@@ -39,13 +39,17 @@ from ats.strategy.ipo_market_sentiment_engine import IPOMarketSentimentEngine
 class TestIPOFleetTradingArbitration(unittest.TestCase):
 
     def setUp(self):
-        # 实例化交易中心
+        # 实例化交易中心并清理缓存
         self.center = IPOTradingCenter(total_capital=1000000.0)
         self.center._positions.clear()
         self.center._reports_cache.clear()
         self.center._order_history.clear()
         self.center._pending_directives.clear()
         self.center.available_cash = 1000000.0
+        # 重置市场情绪引擎单例缓存，确保测试隔离
+        engine = IPOMarketSentimentEngine.get_instance()
+        engine._cached_snapshot = None
+        engine._last_calc_ts = 0.0
 
     def test_guardian_report_submission_and_horse_race(self):
         """测试 1: 守护者报告汇交与横向赛马冒泡排位"""
@@ -286,6 +290,82 @@ class TestIPOFleetTradingArbitration(unittest.TestCase):
         self.assertEqual(dlg.windowTitle(), "🚢 新股次新集中交易指挥室 (山外有山·全局统筹调度中心)")
         dlg.close()
 
+    def test_command_room_dialog_linkage_to_detector(self):
+        """测试 5: 集中交易指挥室点击行与切行直接联动主检测工具聚焦 code"""
+        from PyQt6.QtWidgets import QApplication
+        app = QApplication.instance() or QApplication([])
+
+        from ats.ui.ipo_subnew_detector_dialog import IPOSubnewDetectorDialog
+        detector = IPOSubnewDetectorDialog()
+        detector.monitored_codes = ["601091", "688826", "001365"]
+        detector._rebuild_table_rows()
+
+        from ats.ui.ipo_command_room_dialog import IPOCommandRoomDialog
+        cmd_room = IPOCommandRoomDialog(parent_detector_dialog=detector)
+        
+        # 验证 select_and_focus_code 接口精确定位
+        res = detector.select_and_focus_code("688826", trigger_linkage=False)
+        self.assertTrue(res)
+        cur_row = detector.table.currentRow()
+        self.assertGreaterEqual(cur_row, 0)
+        it_code = detector.table.item(cur_row, 0)
+        self.assertIn("688826", it_code.text())
+
+        cmd_room.close()
+        detector.close()
+
+    def test_command_room_table_column_persistence_and_no_truncation(self):
+        """测试 6: 集中交易指挥室表格列宽持久化能力与防文字截断"""
+        from PyQt6.QtWidgets import QApplication, QHeaderView
+        app = QApplication.instance() or QApplication([])
+
+        from ats.ui.ipo_command_room_dialog import IPOCommandRoomDialog
+        dlg = IPOCommandRoomDialog()
+
+        # 1. 验证天梯表、持仓表、指令清单表均具备标准持久化方法
+        for tbl in (dlg.tbl_rank, dlg.tbl_pos, dlg.tbl_orders):
+            self.assertTrue(hasattr(tbl, "save_column_widths"))
+            self.assertTrue(hasattr(tbl, "restore_column_widths"))
+            self.assertTrue(hasattr(tbl, "reset_default_widths"))
+            self.assertTrue(hasattr(tbl, "auto_fit_columns"))
+
+        # 2. 验证 tbl_rank 默认列宽：动能分 >= 68px，启动时点 >= 76px，彻底消灭省略号截断
+        hv_rank = dlg.tbl_rank.horizontalHeader()
+        w_score = dlg.tbl_rank.columnWidth(4)  # 动能分
+        w_time = dlg.tbl_rank.columnWidth(5)   # 启动时点
+        self.assertGreaterEqual(w_score, 68, f"动能分列宽 {w_score} 必须 >= 68px 防止文字截断")
+        self.assertGreaterEqual(w_time, 76, f"启动时点列宽 {w_time} 必须 >= 76px 防止文字截断")
+
+        # 3. 验证所有列均设为 Interactive 自由拖拽模式
+        for c in range(dlg.tbl_rank.columnCount()):
+            self.assertEqual(
+                hv_rank.sectionResizeMode(c),
+                QHeaderView.ResizeMode.Interactive,
+                f"天梯表第 {c} 列必须为 Interactive 拖拽模式"
+            )
+
+        # 4. 模拟操盘手手动拖拽调整列宽并持久化
+        dlg.tbl_rank.setColumnWidth(4, 95)
+        dlg.tbl_rank.setColumnWidth(5, 105)
+        dlg.tbl_rank.save_column_widths()
+
+        # 模拟关闭窗口时的集中落盘
+        dlg._save_dialog_state()
+
+        # 验证恢复能够读取保存的宽度
+        dlg.tbl_rank.setColumnWidth(4, 30)  # 扰乱
+        dlg.tbl_rank.restore_column_widths()
+        self.assertEqual(dlg.tbl_rank.columnWidth(4), 95)
+        self.assertEqual(dlg.tbl_rank.columnWidth(5), 105)
+
+        # 5. 验证重置默认列宽能够正常还原
+        dlg.tbl_rank.reset_default_widths()
+        self.assertGreaterEqual(dlg.tbl_rank.columnWidth(4), 68)
+        self.assertGreaterEqual(dlg.tbl_rank.columnWidth(5), 76)
+
+        dlg.close()
+
 
 if __name__ == "__main__":
     unittest.main()
+
