@@ -71,12 +71,15 @@ from ats.new_stock_fetcher import NewStockFetcher
 logger = logging.getLogger("IPODetectorUI")
 
 
-def is_stock_actually_listed(code: str) -> bool:
+def is_stock_actually_listed(code: str, is_manual: bool = False) -> bool:
     """
     严密判定标的是否真正已在二级市场上市交易 (P0 核心拦截)
+    - 操盘手手工添加标的拥有最高意志绝对信任免检权；
     - 坚决杜绝未上市股票 (待上市/待申购/发行未上市) 进入超短检测池；
     - 剔除虚拟无盘口代码 (如 920295)。
     """
+    if is_manual:
+        return True
     c_str = str(code).zfill(6)
     if c_str == "920295" or c_str.startswith("N"):
         return False
@@ -87,8 +90,8 @@ def is_stock_actually_listed(code: str) -> bool:
         if info:
             ld = str(info.get("listing_date") or "").strip()
             today_str = datetime.now().strftime("%Y-%m-%d")
-            # 必须具有上市日期，且上市日期已到达（<= 今天）
-            if not ld or ld > today_str:
+            # 只有当上市日期明确存在且严格大于今天时，才认定为尚未上市交易
+            if ld and len(ld) >= 8 and ld > today_str:
                 return False
             return True
     except Exception:
@@ -158,11 +161,60 @@ class IPODetectorTableWidget(BaseATSTableWidget):
     - 统一支持键盘方向键 (Up/Down) 极速逐行导航与智能联动；
     - 统一支持键盘翻页键 (PageUp/PageDown) 视口按页跨行极速翻页；
     - 统一支持回车 (Return/Enter) 强制刷新联动；
-    - 与主窗口协同，彻底杜绝重复联动。
+    - 操盘手明确指示：“不用优先显示，标记显示在name上，有颜色标记也可以，点击name排序优先即可”；
+    - 点击其他列 (涨跌幅/现价等) 完全自然排序；点击名称列 (col == 1) 手工标的高权重优先排在前！
     """
     def __init__(self, parent_dialog=None):
         super().__init__(parent_dialog)
         self.dialog = parent_dialog
+
+    def sortItems(self, column: int, order: Qt.SortOrder = Qt.SortOrder.AscendingOrder):
+        """操盘手专属排序：普通列完全自然排序；点击名称列 (col == 1) 优先聚集手工标的"""
+        super().sortItems(column, order)
+        if column == 1 and self.dialog and getattr(self.dialog, "manual_codes", None):
+            self._pin_manual_to_top_for_name_column(order)
+
+    def _pin_manual_to_top_for_name_column(self, order: Qt.SortOrder):
+        """点击名称列时，手工标的高权重置顶优先排列"""
+        try:
+            manual_set = set(self.dialog.manual_codes)
+            if not manual_set:
+                return
+            row_cnt = self.rowCount()
+            if row_cnt <= 1:
+                return
+
+            current_row = self.currentRow()
+            current_code = ""
+            if current_row >= 0:
+                it = self.item(current_row, 0)
+                if it:
+                    current_code = "".join(ch for ch in it.text().strip() if ch.isdigit()).zfill(6)
+
+            sorted_codes = []
+            for r in range(row_cnt):
+                it = self.item(r, 0)
+                if it:
+                    c = "".join(ch for ch in it.text().strip() if ch.isdigit()).zfill(6)
+                    sorted_codes.append(c)
+
+            manual_sorted = [c for c in sorted_codes if c in manual_set]
+            others_sorted = [c for c in sorted_codes if c not in manual_set]
+            final_codes = manual_sorted + others_sorted
+
+            if final_codes != sorted_codes:
+                self.dialog.monitored_codes = final_codes
+                self.dialog._rebuild_table_rows()
+                if self.horizontalHeader():
+                    self.horizontalHeader().setSortIndicator(1, order)
+                if current_code:
+                    for r in range(self.rowCount()):
+                        it = self.item(r, 0)
+                        if it and "".join(ch for ch in it.text().strip() if ch.isdigit()).zfill(6) == current_code:
+                            self.setCurrentCell(r, 0)
+                            break
+        except Exception as e:
+            logger.debug(f"名称列排序手工标的置顶异常: {e}")
 
     def keyPressEvent(self, event):
         key = event.key()
@@ -426,6 +478,7 @@ class IPOSubnewDetectorDialog(QMainWindow):
         """)
 
         self.monitored_codes: List[str] = []
+        self.manual_codes: List[str] = []  # 操盘手手工添加标的池 (享有最高意志免检权，专属金色标记并置顶优先展示)
         self.signals_map: Dict[str, VWAPDetectorSignal] = {}
         self.extra_cols: List[str] = get_ipo_detector_extra_cols()
         self.ipc_df: Optional[pd.DataFrame] = None
@@ -473,6 +526,12 @@ class IPOSubnewDetectorDialog(QMainWindow):
         self.refresh_timer = QTimer(self)
         self.refresh_timer.setSingleShot(True)
         self.refresh_timer.timeout.connect(self.trigger_scan)
+
+        # 3. 底层新股次新股全自动增量同步管道 (启动 2 秒后异步触发，之后每 15 分钟静默增量检查)
+        self._auto_sync_timer = QTimer(self)
+        self._auto_sync_timer.timeout.connect(lambda: self._auto_sync_bottom_ipo_stocks(force=False))
+        self._auto_sync_timer.start(15 * 60 * 1000)
+        QTimer.singleShot(2000, lambda: self._auto_sync_bottom_ipo_stocks(force=False))
 
         # 立即启动首轮扫描
         QTimer.singleShot(200, self.trigger_scan)
@@ -641,86 +700,119 @@ class IPOSubnewDetectorDialog(QMainWindow):
         QShortcut(QKeySequence("Delete"), self, self._on_shortcut_delete)
 
     def _load_persisted_state(self):
-        """从本地磁盘恢复上次保存的监控池、已计算信号全景数据与窗口位置 (支持冷启动 0 秒瞬间直出)"""
+        """从本地磁盘恢复上次保存的监控池、手工标的池、已计算信号全景数据与窗口位置 (支持冷启动 0 秒瞬间直出与 .bak 容灾自愈)"""
         cfg_file = get_ipo_detector_layout_file()
+        bak_file = cfg_file + ".bak"
         codes = []
+        loaded_manual_codes = []
+        data = None
+
+        # 1. 优先从主持久化文件加载
         if os.path.exists(cfg_file):
             try:
                 with open(cfg_file, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                    codes = data.get("monitored_codes", [])
-                    geo = data.get("geometry")
-                    if geo and isinstance(geo, dict):
-                        self.setGeometry(
-                            geo.get("x", 100),
-                            geo.get("y", 100),
-                            geo.get("width", 1180),
-                            geo.get("height", 680)
-                        )
-                    self.perf_log_enabled = bool(data.get("perf_log_enabled", False))
-                    if hasattr(self, "btn_perf"):
-                        self.btn_perf.setChecked(self.perf_log_enabled)
-                        if self.perf_log_enabled:
-                            self.btn_perf.setText("📊 性能日志: 开")
-                            self.btn_perf.setStyleSheet("background-color: #3d2f00; border-color: #ffd700; color: #ffd700; font-weight: bold;")
-                        else:
-                            self.btn_perf.setText("📊 性能日志: 关")
-                            self.btn_perf.setStyleSheet("")
+            except Exception as e:
+                logger.warning(f"主持久化配置文件解析异常，将尝试从镜像备份 .bak 自愈恢复: {e}")
+                data = None
 
-                    # ⚡ 冷启动核心：从持久化缓存中直接反序列化还原上次各标的的 VWAPDetectorSignal 信号全景
-                    raw_sigs = data.get("cached_signals", {})
-                    if isinstance(raw_sigs, dict):
-                        for c_k, s_dict in raw_sigs.items():
-                            if isinstance(s_dict, dict) and s_dict.get("code"):
-                                try:
-                                    sig_obj = VWAPDetectorSignal(
-                                        code=str(s_dict.get("code")),
-                                        name=str(s_dict.get("name", "")),
-                                        price=float(s_dict.get("price", 0.0)),
-                                        change_pct=float(s_dict.get("change_pct", 0.0)),
-                                        vwap=float(s_dict.get("vwap", 0.0)),
-                                        vwap_diff_pct=float(s_dict.get("vwap_diff_pct", 0.0)),
-                                        structure_tag=str(s_dict.get("structure_tag", "常规")),
-                                        consolidation_days=int(s_dict.get("consolidation_days", 0)),
-                                        pullback_no_touch=bool(s_dict.get("pullback_no_touch", False)),
-                                        is_above_vwap=bool(s_dict.get("is_above_vwap", False)),
-                                        trend_support_level=float(s_dict.get("trend_support_level", 0.0)),
-                                        trend_slope_deg=float(s_dict.get("trend_slope_deg", 0.0)),
-                                        has_kline_launch_sig=bool(s_dict.get("has_kline_launch_sig", False)),
-                                        trend_desc=str(s_dict.get("trend_desc", "")),
-                                        signal_type=str(s_dict.get("signal_type", "WATCH")),
-                                        signal_level=str(s_dict.get("signal_level", "⚪")),
-                                        signal_desc=str(s_dict.get("signal_desc", "")),
-                                        stop_loss_price=float(s_dict.get("stop_loss_price", 0.0)),
-                                        update_time=str(s_dict.get("update_time", "")),
-                                        extra_data=s_dict.get("extra_data", {})
-                                    )
-                                    self.signals_map[sig_obj.code] = sig_obj
-                                except Exception:
-                                    pass
+        # 2. 🛡️ 镜像备份自愈容灾：若主文件丢失/损坏或为空，自动无缝从 .bak 恢复，彻底杜绝数据丢失
+        if (not data or not isinstance(data, dict)) and os.path.exists(bak_file):
+            try:
+                with open(bak_file, "r", encoding="utf-8") as f_bak:
+                    data = json.load(f_bak)
+                    logger.info("🛡️ [自愈成功] 检测工具已从 .bak 镜像备份文件完整恢复股票池与信号缓存！")
+            except Exception as e_bak:
+                logger.debug(f"加载 .bak 镜像备份文件异常: {e_bak}")
+
+        if data and isinstance(data, dict):
+            try:
+                codes = data.get("monitored_codes", []) or []
+                loaded_manual_codes = data.get("manual_codes", []) or []
+                geo = data.get("geometry")
+                if geo and isinstance(geo, dict):
+                    self.setGeometry(
+                        geo.get("x", 100),
+                        geo.get("y", 100),
+                        geo.get("width", 1180),
+                        geo.get("height", 680)
+                    )
+                self.perf_log_enabled = bool(data.get("perf_log_enabled", False))
+                if hasattr(self, "btn_perf"):
+                    self.btn_perf.setChecked(self.perf_log_enabled)
+                    if self.perf_log_enabled:
+                        self.btn_perf.setText("📊 性能日志: 开")
+                        self.btn_perf.setStyleSheet("background-color: #3d2f00; border-color: #ffd700; color: #ffd700; font-weight: bold;")
+                    else:
+                        self.btn_perf.setText("📊 性能日志: 关")
+                        self.btn_perf.setStyleSheet("")
+
+                # ⚡ 冷启动核心：从持久化缓存中直接反序列化还原上次各标的的 VWAPDetectorSignal 信号全景
+                raw_sigs = data.get("cached_signals", {})
+                if isinstance(raw_sigs, dict):
+                    for c_k, s_dict in raw_sigs.items():
+                        if isinstance(s_dict, dict) and s_dict.get("code"):
+                            try:
+                                sig_obj = VWAPDetectorSignal(
+                                    code=str(s_dict.get("code")),
+                                    name=str(s_dict.get("name", "")),
+                                    price=float(s_dict.get("price", 0.0)),
+                                    change_pct=float(s_dict.get("change_pct", 0.0)),
+                                    vwap=float(s_dict.get("vwap", 0.0)),
+                                    vwap_diff_pct=float(s_dict.get("vwap_diff_pct", 0.0)),
+                                    structure_tag=str(s_dict.get("structure_tag", "常规")),
+                                    consolidation_days=int(s_dict.get("consolidation_days", 0)),
+                                    pullback_no_touch=bool(s_dict.get("pullback_no_touch", False)),
+                                    is_above_vwap=bool(s_dict.get("is_above_vwap", False)),
+                                    trend_support_level=float(s_dict.get("trend_support_level", 0.0)),
+                                    trend_slope_deg=float(s_dict.get("trend_slope_deg", 0.0)),
+                                    has_kline_launch_sig=bool(s_dict.get("has_kline_launch_sig", False)),
+                                    trend_desc=str(s_dict.get("trend_desc", "")),
+                                    signal_type=str(s_dict.get("signal_type", "WATCH")),
+                                    signal_level=str(s_dict.get("signal_level", "⚪")),
+                                    signal_desc=str(s_dict.get("signal_desc", "")),
+                                    stop_loss_price=float(s_dict.get("stop_loss_price", 0.0)),
+                                    update_time=str(s_dict.get("update_time", "")),
+                                    extra_data=s_dict.get("extra_data", {})
+                                )
+                                self.signals_map[sig_obj.code] = sig_obj
+                            except Exception:
+                                pass
             except Exception as e:
                 logger.debug(f"加载持久化配置异常: {e}")
 
-        # 严格过滤历史持久化配置中的未上市/未发行脏数据 (彻底剔除 920295, 301686 等)
-        if codes:
-            codes = [c for c in codes if is_stock_actually_listed(c)]
+        # 恢复手工标的列表 (清洗格式为标准 6 位数字代码)
+        self.manual_codes = list(dict.fromkeys(
+            "".join(ch for ch in str(c) if ch.isdigit()).zfill(6)
+            for c in loaded_manual_codes if str(c).strip()
+        ))
 
-        # 🛡️ 智能自愈防护 (P0)：若本地配置中仅有 <= 2 只标的 (说明此前被未沙盒隔离的测试覆盖写入)，
-        # 自动融合全市场 35 只新股次新股，恢复完整新股池！
-        if len(codes) <= 2:
+        # 严格过滤历史持久化配置中的未上市/未发行脏数据 (剔除 920295 等)
+        # 🛡️ 操盘手手工添加标的 (manual_codes) 享有最高意志免检权，严禁被误杀！
+        if codes:
+            codes = [c for c in codes if (c in self.manual_codes or is_stock_actually_listed(c, is_manual=False))]
+
+        # 组合构建监控池：保证手工标的稳居最前列！
+        merged_codes = list(self.manual_codes)
+        for c in codes:
+            if c not in merged_codes:
+                merged_codes.append(c)
+
+        # 🛡️ 智能自愈防护 (P0)：若本地配置中仅有 <= 2 只标的，自动融合全市场活跃新股次新股
+        if len(merged_codes) <= 2:
             default_codes = self._get_default_ipo_subnew_codes()
             for dc in default_codes:
-                if dc not in codes:
-                    codes.append(dc)
+                if dc not in merged_codes:
+                    merged_codes.append(dc)
 
         # 若过滤后为空或无历史配置，默认加载系统真正已上市的次新股
-        if not codes:
-            codes = self._get_default_ipo_subnew_codes()
+        if not merged_codes:
+            merged_codes = self._get_default_ipo_subnew_codes()
 
-        self.monitored_codes = list(dict.fromkeys(codes))
+        self.monitored_codes = list(dict.fromkeys(merged_codes))
         # 瞬间重建表格并填入已有的历史信号数据 (0秒直出)
         self._rebuild_table_rows()
-        # 清洗并写回持久化配置
+        # 清洗并写回持久化配置与双写镜像备份
         self.save_persisted_state()
 
     def _get_default_ipo_subnew_codes(self) -> List[str]:
@@ -772,10 +864,11 @@ class IPOSubnewDetectorDialog(QMainWindow):
         return res[:35] if len(res) > 35 else res
 
     def save_persisted_state(self):
-        """集中持久化保存当前窗口几何、监控池与全量信号计算结果 (支持冷启动秒出)"""
+        """集中持久化保存当前窗口几何、监控池、手工代码与全量信号计算结果 (带 .bak 镜像双写容灾)"""
         if hasattr(self, "table") and hasattr(self.table, "save_header_state"):
             self.table.save_header_state()
         cfg_file = get_ipo_detector_layout_file()
+        bak_file = cfg_file + ".bak"
         # 序列化当前已算好的全量信号
         cached_sigs = {}
         for code, sig in self.signals_map.items():
@@ -805,6 +898,7 @@ class IPOSubnewDetectorDialog(QMainWindow):
 
         data = {
             "monitored_codes": self.monitored_codes,
+            "manual_codes": getattr(self, "manual_codes", []),
             "cached_signals": cached_sigs,
             "geometry": {
                 "x": self.x(),
@@ -820,7 +914,24 @@ class IPOSubnewDetectorDialog(QMainWindow):
             with open(tmp_file, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
             if os.path.exists(tmp_file):
-                os.replace(tmp_file, cfg_file)
+                # Windows 平台带 3 次重试原子替换，防止瞬时文件锁竞争
+                success = False
+                for attempt in range(3):
+                    try:
+                        os.replace(tmp_file, cfg_file)
+                        success = True
+                        break
+                    except Exception:
+                        time.sleep(0.05)
+                if not success and os.path.exists(tmp_file):
+                    os.replace(tmp_file, cfg_file)
+
+            # 🛡️ 镜像备份双写容灾：成功写入主配置后，同步更新 .bak 备份文件
+            try:
+                import shutil
+                shutil.copy2(cfg_file, bak_file)
+            except Exception:
+                pass
         except Exception as e:
             logger.debug(f"保存检测工具配置异常: {e}")
             try:
@@ -830,10 +941,14 @@ class IPOSubnewDetectorDialog(QMainWindow):
                 pass
 
     def add_stock(self, code: str):
-        """添加股票到监控池 (自动置顶于首位)"""
+        """添加股票到监控池 (记录为手工标的，赋予最高优先级并自动置顶于首位)"""
         clean_code = "".join(c for c in str(code) if c.isdigit()).zfill(6)
         if not clean_code or len(clean_code) != 6:
             return
+        if not hasattr(self, "manual_codes"):
+            self.manual_codes = []
+        if clean_code not in self.manual_codes:
+            self.manual_codes.insert(0, clean_code)
         if clean_code in self.monitored_codes:
             self.monitored_codes.remove(clean_code)
         self.monitored_codes.insert(0, clean_code)
@@ -843,8 +958,16 @@ class IPOSubnewDetectorDialog(QMainWindow):
         self._eval_single_code_now(clean_code)
 
     def remove_stock(self, code: str):
-        """从监控池移除某只股票"""
-        if code in self.monitored_codes:
+        """从监控池与手工池中移除某只股票"""
+        clean_code = "".join(c for c in str(code) if c.isdigit()).zfill(6)
+        if hasattr(self, "manual_codes") and clean_code in self.manual_codes:
+            self.manual_codes.remove(clean_code)
+        if clean_code in self.monitored_codes:
+            self.monitored_codes.remove(clean_code)
+            self.signals_map.pop(clean_code, None)
+            self._rebuild_table_rows()
+            self.save_persisted_state()
+        elif code in self.monitored_codes:
             self.monitored_codes.remove(code)
             self.signals_map.pop(code, None)
             self._rebuild_table_rows()
@@ -1151,10 +1274,31 @@ class IPOSubnewDetectorDialog(QMainWindow):
                 self.table.setHorizontalHeaderLabels(headers)
             self.table.setRowCount(len(self.monitored_codes))
 
+            manual_set = set(getattr(self, "manual_codes", []))
             for row, code in enumerate(self.monitored_codes):
                 name = resolve_fast_ipo_name(code)
-                self.table.setItem(row, 0, QTableWidgetItem(code))
-                self.table.setItem(row, 1, QTableWidgetItem(name))
+                is_manual = (code in manual_set)
+
+                # 代码列：绝不加 📌 前缀，保持纯 6 位数字代码清爽无截断，手工标的金色加粗
+                c_item = QTableWidgetItem(code)
+                if is_manual:
+                    c_item.setForeground(QColor("#ffd700"))
+                    f = c_item.font()
+                    f.setBold(True)
+                    c_item.setFont(f)
+                    c_item.setToolTip(f"【📌 操盘手手工添加标的】{code} {name}")
+                self.table.setItem(row, 0, c_item)
+
+                # 名称列：操盘手明确要求标记显示在 name 上，专属 📌 徽标与金色高亮加粗
+                name_disp = f"📌 {name}" if is_manual else name
+                n_item = QTableWidgetItem(name_disp)
+                if is_manual:
+                    n_item.setForeground(QColor("#ffd700"))
+                    f = n_item.font()
+                    f.setBold(True)
+                    n_item.setFont(f)
+                    n_item.setToolTip(f"【📌 操盘手手工添加标的】{code} {name} (点击表头【名称】可优先排序)")
+                self.table.setItem(row, 1, n_item)
                 for c in range(2, total_cols):
                     self.table.setItem(row, c, QTableWidgetItem("--"))
 
@@ -1198,17 +1342,26 @@ class IPOSubnewDetectorDialog(QMainWindow):
                 # 动态精确匹配目标行
                 for r in range(self.table.rowCount()):
                     item = self.table.item(r, 0)
-                    if item and item.text().strip() == sig.code:
-                        row = r
-                        break
+                    if item:
+                        c_clean = "".join(ch for ch in item.text().strip() if ch.isdigit()).zfill(6)
+                        if c_clean == sig.code:
+                            row = r
+                            break
             if row is None or row >= self.table.rowCount():
                 return
 
-            # 同步最新名称
+            # 同步最新名称 (手工标的在 name 上保持 📌 标记与金色高亮)
             if sig.name:
                 it_name = self.table.item(row, 1)
-                if it_name and it_name.text() != sig.name:
-                    it_name.setText(sig.name)
+                is_manual = (getattr(self, "manual_codes", None) and sig.code in self.manual_codes)
+                expected_name = f"📌 {sig.name}" if is_manual else sig.name
+                if it_name and it_name.text() != expected_name:
+                    it_name.setText(expected_name)
+                if is_manual and it_name:
+                    it_name.setForeground(QColor("#ffd700"))
+                    f = it_name.font()
+                    f.setBold(True)
+                    it_name.setFont(f)
 
             # 检查过滤
             if getattr(self, "btn_clean", None) and self.btn_clean.isChecked():
@@ -1679,9 +1832,58 @@ class IPOSubnewDetectorDialog(QMainWindow):
             self.add_stock(raw)
             self.txt_code.clear()
 
+    def _auto_sync_bottom_ipo_stocks(self, force: bool = False):
+        """
+        【🤖 底层新股次新股全自动增量同步管道】
+        - 异步增量拉取东方财富最新 IPO 上市日历 (fetch_ipo_calendar)；
+        - 自动提取真正已上市的最新标的，与当前监控池自动增量合并；
+        - 操盘手手工添加的代码 (manual_codes) 享有最高优先级，始终置顶于首部；
+        - 操盘手无需每日手动敲代码维护，系统自动追踪全市场最新上市新股并自动入池！
+        """
+        import threading
+        def _bg_task():
+            try:
+                fetcher = NewStockFetcher.get_instance()
+                fetcher.fetch_ipo_calendar(page_size=100, force=force)
+                latest_codes = self._get_default_ipo_subnew_codes()
+                if not latest_codes:
+                    return
+
+                def _main_thread_merge():
+                    try:
+                        existing_set = set(self.monitored_codes)
+                        new_found = [c for c in latest_codes if c not in existing_set]
+                        if new_found:
+                            merged = list(getattr(self, "manual_codes", []))
+                            for c in self.monitored_codes:
+                                if c not in merged:
+                                    merged.append(c)
+                            for c in latest_codes:
+                                if c not in merged:
+                                    merged.append(c)
+                            self.monitored_codes = list(dict.fromkeys(merged))
+                            self._rebuild_table_rows()
+                            self.save_persisted_state()
+                            if hasattr(self, "lbl_status"):
+                                self.lbl_status.setText(f"🤖 [自动同步] 已增量拉取新上市股票: 新增 {len(new_found)} 只 (全池共 {len(self.monitored_codes)} 只)")
+                    except Exception as ex_m:
+                        logger.debug(f"合并底层新股至监控池异常: {ex_m}")
+
+                QTimer.singleShot(0, _main_thread_merge)
+            except Exception as ex:
+                logger.debug(f"后台异步同步底层新股异常: {ex}")
+
+        t = threading.Thread(target=_bg_task, daemon=True)
+        t.start()
+
     def _on_reset_default_clicked(self):
         codes = self._get_default_ipo_subnew_codes()
-        self.monitored_codes = list(dict.fromkeys(codes))
+        # 🛡️ 核心保障：重置新股池时 100% 优先保留手工添加的代码！
+        merged = list(getattr(self, "manual_codes", []))
+        for c in codes:
+            if c not in merged:
+                merged.append(c)
+        self.monitored_codes = list(dict.fromkeys(merged))
         self._rebuild_table_rows()
         self.save_persisted_state()
         self.trigger_scan()
