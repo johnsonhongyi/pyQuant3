@@ -357,12 +357,16 @@ class IPOSubnewDetectorDialog(QMainWindow):
             }
             QTableWidget {
                 background-color: #12121c;
-                border: 1px solid #232332;
+                border: none;
                 gridline-color: #1c1c28;
                 color: #ffffff;
                 font-size: 9pt;
                 selection-background-color: #2b3145;
                 selection-color: #ffffff;
+            }
+            QHeaderView {
+                background-color: #1a1a26;
+                border: none;
             }
             QHeaderView::section {
                 background-color: #1a1a26;
@@ -371,6 +375,53 @@ class IPOSubnewDetectorDialog(QMainWindow):
                 border: 1px solid #232332;
                 font-weight: bold;
                 font-size: 9pt;
+            }
+            QTableCornerButton::section {
+                background-color: #1a1a26;
+                border: 1px solid #232332;
+            }
+            /* 垂直与水平滚动条暗黑金融质感 (彻底消除右上角与滚动条浅色白块) */
+            QScrollBar:vertical {
+                border: none;
+                background-color: #121214;
+                width: 10px;
+                margin: 0px;
+            }
+            QScrollBar::handle:vertical {
+                background-color: #2e2e36;
+                min-height: 20px;
+                border-radius: 5px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background-color: #3e3e4a;
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                height: 0px;
+                background: transparent;
+            }
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+                background: none;
+            }
+            QScrollBar:horizontal {
+                border: none;
+                background-color: #121214;
+                height: 10px;
+                margin: 0px;
+            }
+            QScrollBar::handle:horizontal {
+                background-color: #2e2e36;
+                min-width: 20px;
+                border-radius: 5px;
+            }
+            QScrollBar::handle:horizontal:hover {
+                background-color: #3e3e4a;
+            }
+            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+                width: 0px;
+                background: transparent;
+            }
+            QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {
+                background: none;
             }
         """)
 
@@ -458,7 +509,12 @@ class IPOSubnewDetectorDialog(QMainWindow):
         tb_layout.addWidget(btn_add)
 
         btn_tile_sbc = QPushButton("📈 一键平铺 SBC")
-        btn_tile_sbc.setToolTip("将当前前 4 只标的以 SBC 走势窗口在屏幕平铺盯盘 (按 Q 重排)")
+        btn_tile_sbc.setToolTip(
+            "【一键平铺 SBC 走势图】\n"
+            "• 支持在表格视图中直接点击单选，按住 Ctrl 单选/加选，按住 Shift 连续多选；\n"
+            "• 点击将选中的所有标的在屏幕网格自动平铺盯盘 (未选择时默认平铺前 4 只)；\n"
+            "• 快捷键: Q 键可随时重新平铺对齐所有已打开的 SBC 窗口。"
+        )
         btn_tile_sbc.setStyleSheet("background-color: #1a3328; border-color: #00ff88; color: #00ff88; font-weight: bold;")
         btn_tile_sbc.clicked.connect(self._on_tile_sbc_clicked)
         tb_layout.addWidget(btn_tile_sbc)
@@ -497,12 +553,11 @@ class IPOSubnewDetectorDialog(QMainWindow):
 
         root_layout.addLayout(tb_layout)
 
-        # ── 2. 中部数据表格 (支持动态 ats_col 与上下翻页联动，与其他 Tab 100% 对齐) ──
+        # ── 2. 中部数据表格 (支持动态 ats_col、Ctrl/Shift 多选与上下翻页联动，与其他主力 Tab 100% 对齐) ──
         self.table = IPODetectorTableWidget(self)
-        self.table.viewport().setStyleSheet("background-color: #121218; border: none;")
-        self.table.setStyleSheet("QTableWidget { background-color: #121218; border: none; }")
+        self.table.setCornerButtonEnabled(False)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.verticalHeader().setVisible(False)
         self.table.setShowGrid(True)
@@ -884,13 +939,22 @@ class IPOSubnewDetectorDialog(QMainWindow):
             f"🎯 预下单: {pre_cnt} 只 | 🚀 回踩启动: {pull_cnt} 只 | ⚡ 加速: {break_cnt} 只 | 耗时: {cost:.2f}s{perf_text}"
         )
 
-        # 扫描结束统一按用户当前排序列整理一次，并精准记住操盘手选中项，恢复高亮行焦点
-        selected_code = ""
+        # 扫描结束统一按用户当前排序列整理一次，并精准记住操盘手多选列表与高亮行焦点
+        selected_codes = []
+        for idx in self.table.selectedIndexes():
+            r = idx.row()
+            it_c = self.table.item(r, 0)
+            if it_c and it_c.text().strip():
+                c_clean = "".join(ch for ch in it_c.text().strip() if ch.isdigit()).zfill(6)
+                if c_clean and c_clean not in selected_codes:
+                    selected_codes.append(c_clean)
+
+        current_code = ""
         cur_r = self.table.currentRow()
         if cur_r >= 0:
             it_c = self.table.item(cur_r, 0)
             if it_c:
-                selected_code = it_c.text().strip()
+                current_code = "".join(ch for ch in it_c.text().strip() if ch.isdigit()).zfill(6)
 
         col = self.table.horizontalHeader().sortIndicatorSection()
         order = self.table.horizontalHeader().sortIndicatorOrder()
@@ -898,13 +962,22 @@ class IPOSubnewDetectorDialog(QMainWindow):
         if col >= 0:
             self.table.sortItems(col, order)
 
-        # 恢复选中高亮行
-        if selected_code:
+        # 恢复操盘手多选选区与高亮行焦点
+        if selected_codes:
             for r in range(self.table.rowCount()):
                 it_c = self.table.item(r, 0)
-                if it_c and it_c.text().strip() == selected_code:
-                    self.table.setCurrentCell(r, 0)
-                    break
+                if it_c:
+                    c_txt = "".join(ch for ch in it_c.text().strip() if ch.isdigit()).zfill(6)
+                    if c_txt in selected_codes:
+                        self.table.selectRow(r)
+        if current_code:
+            for r in range(self.table.rowCount()):
+                it_c = self.table.item(r, 0)
+                if it_c:
+                    c_txt = "".join(ch for ch in it_c.text().strip() if ch.isdigit()).zfill(6)
+                    if c_txt == current_code:
+                        self.table.setCurrentCell(r, 0)
+                        break
 
         # 只有在操盘手开启【⏳ 自动轮询: 开】时，才在上一轮全部完成 15 秒之后单次延时启动下一轮，绝不追尾抢跑！
         if getattr(self, "auto_refresh_enabled", False):
@@ -1282,17 +1355,38 @@ class IPOSubnewDetectorDialog(QMainWindow):
             logger.error(f"打开 SBC 走势图异常: {e}")
 
     def _on_tile_sbc_clicked(self):
-        """【📈 一键平铺全部关注的 SBC】"""
-        # 取排在前面有信号的最多 4 只标的
-        candidates = []
-        for c in self.monitored_codes:
-            sig = self.signals_map.get(c)
-            if sig and sig.signal_type in ("PRE_ORDER", "PULLBACK_BUY", "BREAKOUT"):
-                candidates.append(c)
-        if not candidates:
-            candidates = self.monitored_codes[:4]
+        """【📈 一键平铺 SBC】
+        - 优先平铺操盘手在表格视图中主动选择的标的 (支持鼠标点击选择、Ctrl 单选/加选、Shift 连续范围多选)；
+        - 若当前未选择任何行，自动平铺默认前 4 只标的 (信号优先，兜底前 4 只)；
+        - 自动在当前屏幕进行整齐网格平铺重排对齐。
+        """
+        # 1. 优先获取操盘手在表格视图中主动选中的标的 (单选、Ctrl加选、Shift多选)
+        selected_rows = sorted(list(set(idx.row() for idx in self.table.selectedIndexes())))
+        selected_codes = []
+        if selected_rows:
+            for r in selected_rows:
+                if not self.table.isRowHidden(r):
+                    it_c = self.table.item(r, 0)
+                    if it_c and it_c.text().strip():
+                        c_clean = "".join(ch for ch in it_c.text().strip() if ch.isdigit()).zfill(6)
+                        if c_clean and len(c_clean) == 6 and c_clean not in selected_codes:
+                            selected_codes.append(c_clean)
+
+        if selected_codes:
+            candidates = selected_codes
+            self.lbl_status.setText(f"📈 正在一键平铺操盘手选中的 {len(candidates)} 只标的 SBC 走势图...")
         else:
-            candidates = candidates[:4]
+            # 2. 未选择任何行时回退默认逻辑：优先取排在前面有信号的最多 4 只标的，兜底取前 4 只
+            candidates = []
+            for c in self.monitored_codes:
+                sig = self.signals_map.get(c)
+                if sig and sig.signal_type in ("PRE_ORDER", "PULLBACK_BUY", "BREAKOUT"):
+                    candidates.append(c)
+            if not candidates:
+                candidates = self.monitored_codes[:4]
+            else:
+                candidates = candidates[:4]
+            self.lbl_status.setText(f"📈 正在一键平铺默认关注的 {len(candidates)} 只标的 SBC 走势图...")
 
         if not candidates:
             return
@@ -1303,7 +1397,7 @@ class IPOSubnewDetectorDialog(QMainWindow):
             if dlg:
                 dlg.show()
 
-        # 短暂延时自动平铺重排
+        # 短暂延时自动在屏幕网格平铺重排
         QTimer.singleShot(250, rearrange_all_sbc_windows)
 
     def _on_filter_toggled(self, checked: bool):
@@ -1661,6 +1755,21 @@ class IPOSubnewDetectorDialog(QMainWindow):
         act_sbc = QAction(f"📈 调出 SBC 10d VWAP 走势 ({code_clean})", self)
         act_sbc.triggered.connect(lambda: self._open_sbc_for_code(code_clean))
         menu.addAction(act_sbc)
+
+        # 3.1 📈 一键平铺选中的所有 SBC (当操盘手 Ctrl/Shift 多选了多只标的时直通一键平铺)
+        selected_rows = sorted(list(set(idx.row() for idx in self.table.selectedIndexes())))
+        sel_codes = []
+        for r in selected_rows:
+            if not self.table.isRowHidden(r):
+                it = self.table.item(r, 0)
+                if it and it.text().strip():
+                    c_c = "".join(ch for ch in it.text().strip() if ch.isdigit()).zfill(6)
+                    if c_c and len(c_c) == 6 and c_c not in sel_codes:
+                        sel_codes.append(c_c)
+        if len(sel_codes) > 1:
+            act_tile_sel = QAction(f"📈 一键平铺选中的 {len(sel_codes)} 只标的 SBC 走势图", self)
+            act_tile_sel.triggered.connect(self._on_tile_sbc_clicked)
+            menu.addAction(act_tile_sel)
 
         # 4. 🎯 联动外部通达信/同花顺
         act_link = QAction(f"🎯 联动外部通达信/同花顺 ({code_clean})", self)

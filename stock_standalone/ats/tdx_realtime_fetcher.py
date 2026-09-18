@@ -595,10 +595,226 @@ class TDXGlobalCachePool:
         # 初始化时从 RamDisk 极速载入 (仅需 0.2ms)
         self._load_from_ramdisk()
 
+    # ─────────────────────────────────────────────────────────────────────
+    # 【自动数据修复校验层】— 透明自愈，不改任何上层调用接口
+    # 根因：实盘频繁重启导致 pkl 写入中断或增量累计状态不一致
+    # ─────────────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _validate_and_repair_records(
+        records: List[Dict[str, Any]],
+        today_str: str,
+        days: int,
+    ) -> Tuple[List[Dict[str, Any]], bool]:
+        """
+        【单一职责：记录级多层校验与原地修复】
+        修复后返回 (cleaned_records, was_repaired)。
+        检测规则（完全可解释）：
+          0. 日期 >= today_str 的记录             → 历史分区不应包含今日及未来数据（防分时图双峰核心防御）
+          1. 价格非正 (close/price <= 0)           → 丢弃该 Bar
+          2. bar_vol 负数                          → 置 0
+          3. cum_vol_shares / cum_amt 单调性回退   → 重建累计值（阈値 ≥ 100，仅 bar_vol 存在时执行）
+          4. VWAP 严重失真 (< close*0.5 或 > close*2.0) → 用 close 替换
+          5. 同一交易日相同时间重复                → 保留最后一条
+          6. 时间标签逆序                           → 重新排序
+          7. 超出合理上限 (> days*250)              → 截取最近合法部分
+        """
+        if not records:
+            return [], False
+
+        repaired = False
+        max_allowed = max(days * 250, 500)
+
+        # 步骤 0：剔除日期 >= today_str 的记录
+        # 核心防御：任何原因导致今日数据混入历史分区，在此一层全部清除，杜绝分时图「双峰」重复
+        pre_len = len(records)
+        records = [r for r in records if str(r.get("date", "")) < today_str]
+        if len(records) < pre_len:
+            repaired = True
+            logger.debug(f"[AutoRepair] 历史分区副除今日记录 {pre_len - len(records)} 条")
+
+        if not records:
+            return [], repaired
+
+        # 步骤 1：过滤价格非正的 Bar
+        cleaned: List[Dict[str, Any]] = []
+        for r in records:
+            p = float(r.get("close", r.get("price", 0.0)))
+            if p <= 0:
+                repaired = True
+                continue
+            # bar_vol 负数置 0
+            if float(r.get("bar_vol", 0.0)) < 0:
+                r = dict(r)
+                r["bar_vol"] = 0.0
+                repaired = True
+            cleaned.append(r)
+
+        if not cleaned:
+            return [], True
+
+        # 步骤 2：去重（同日相同时间保留最后一条）
+        # key 统一为 date + time_only（缺少时取 time 字段的后 5 位作备用，延居 _check_date_rollover 输入的 records 格式）
+        seen: Dict[str, Dict[str, Any]] = {}
+        for r in cleaned:
+            t_part = str(r.get("time_only") or str(r.get("time", ""))[-5:])
+            key_t = f"{r.get('date', '')}_{t_part}"
+            seen[key_t] = r  # 后出现的覆盖，keep='last'
+        deduped = list(seen.values())
+        if len(deduped) < len(cleaned):
+            repaired = True
+        cleaned = deduped
+
+        # 步骤 3：按时间排序（先 date 再 time_only）
+        try:
+            sorted_recs = sorted(
+                cleaned,
+                key=lambda r: (
+                    str(r.get("date", "")),
+                    str(r.get("time_only") or str(r.get("time", ""))[-5:])
+                )
+            )
+            if sorted_recs != cleaned:
+                repaired = True
+            cleaned = sorted_recs
+        except Exception:
+            pass
+
+        # 步骤 4：重建单调累计值 + VWAP 修正
+        # 仅当 bar_vol 存在且具有实际小于累计左生时才执行重建，防止 _check_date_rollover 写入的记录 bar_vol 为累计形式导致错误
+        has_per_bar_vol = any(
+            0 < float(r.get("bar_vol", 0.0)) < float(r.get("cum_vol_shares", 1e18))
+            for r in cleaned
+        )
+        cum_vol = 0.0
+        cum_amt = 0.0
+        final: List[Dict[str, Any]] = []
+        for r in cleaned:
+            r = dict(r)
+            p = float(r.get("close", r.get("price", 0.0)))
+
+            if has_per_bar_vol:
+                bv = max(float(r.get("bar_vol", 0.0)), 0.0)
+                ba = max(float(r.get("bar_amt", 0.0)), 0.0)
+                cum_vol += bv
+                cum_amt += ba
+                # 阈値 100 避免浮点误差误报
+                old_cv = float(r.get("cum_vol_shares", cum_vol))
+                old_ca = float(r.get("cum_amt", cum_amt))
+                if abs(old_cv - cum_vol) > 100.0 or abs(old_ca - cum_amt) > 100.0:
+                    r["cum_vol_shares"] = cum_vol
+                    r["cum_amt"] = cum_amt
+                    r["volume"] = cum_vol / 100.0
+                    r["vol"] = cum_vol / 100.0
+                    r["amount"] = cum_amt
+                    repaired = True
+
+            # VWAP 合法性修正（用记录自身累计字段，而非局部重建的 cum_vol）
+            vw = float(r.get("vwap", p))
+            if p > 0 and (vw < p * 0.5 or vw > p * 2.0):
+                cv = float(r.get("cum_vol_shares", 0.0))
+                ca = float(r.get("cum_amt", 0.0))
+                if cv > 0 and ca > 0:
+                    vw = round(ca / cv, 2)
+                    if vw < p * 0.5 or vw > p * 2.0:
+                        vw = p
+                else:
+                    vw = p
+                r["vwap"] = vw
+                repaired = True
+
+            final.append(r)
+
+        # 步骤 5：截断超量记录
+        if len(final) > max_allowed:
+            final = final[-max_allowed:]
+            repaired = True
+
+        return final, repaired
+
+    def _validate_history_entry(self, code: str, entry: Dict[str, Any], today_str: str) -> bool:
+        """
+        【分区级：静态历史 entry 合法性门禁】
+        返回 True 表示可接受，False 表示应丢弃。
+        """
+        if not isinstance(entry, dict):
+            return False
+        records = entry.get("records", [])
+        if not records:
+            return False
+        days = int(entry.get("days", 10))
+
+        # 日期合法性：缓存日期距今不超过 30 个自然日（避免极旧数据污染）
+        entry_date = str(entry.get("date", ""))
+        if entry_date:
+            try:
+                delta = (datetime.strptime(today_str, "%Y-%m-%d") -
+                         datetime.strptime(entry_date[:10], "%Y-%m-%d")).days
+                if delta > 30:
+                    logger.debug(f"[AutoRepair] {code} 静态历史日期过旧 ({entry_date})，丢弃")
+                    return False
+            except Exception:
+                pass
+
+        # 累计量金额熔断
+        l_amt = float(entry.get("last_cum_amt", 0.0))
+        l_vol = float(entry.get("last_cum_vol", 0.0))
+        if l_amt > 1e11:
+            logger.debug(f"[AutoRepair] {code} last_cum_amt={l_amt:.2e} 异常，丢弃")
+            return False
+        if l_vol > 0 and (l_amt / l_vol) > 3000.0:
+            logger.debug(f"[AutoRepair] {code} VWAP 估算={l_amt/l_vol:.1f} 异常，丢弃")
+            return False
+
+        # records 数量上限
+        if len(records) > days * 260:
+            logger.debug(f"[AutoRepair] {code} records数量={len(records)} 超出预期，将被截断修复")
+            # 不直接丢弃，由 _validate_and_repair_records 截断
+
+        return True
+
+    def _validate_incremental_entry(self, key: Any, entry: Dict[str, Any], today_str: str) -> bool:
+        """
+        【分区级：增量分时 entry 合法性门禁】
+        返回 True 表示可接受，False 表示应丢弃。
+        """
+        if not isinstance(entry, dict):
+            return False
+        df = entry.get("df")
+        if df is None or (isinstance(df, pd.DataFrame) and df.empty):
+            return False
+
+        # 累计量金额熔断
+        l_amt = float(entry.get("last_cum_amt", 0.0))
+        l_vol = float(entry.get("last_cum_vol", 0.0))
+        if l_amt > 1e11:
+            logger.debug(f"[AutoRepair] {key} 增量 last_cum_amt={l_amt:.2e} 异常，丢弃")
+            return False
+        if l_vol > 0 and (l_amt / l_vol) > 3000.0:
+            logger.debug(f"[AutoRepair] {key} 增量 VWAP 估算={l_amt/l_vol:.1f} 异常，丢弃")
+            return False
+
+        # today_bar_count 不可能超过单日最大分钟数
+        tbc = int(entry.get("today_bar_count", 0))
+        if tbc > 300:
+            logger.debug(f"[AutoRepair] {key} today_bar_count={tbc} 异常（应 ≤ 242），已修正")
+            # 不丢弃，修正值
+            try:
+                df_inc = entry.get("df")
+                if df_inc is not None and isinstance(df_inc, pd.DataFrame) and "date" in df_inc.columns:
+                    entry["today_bar_count"] = int((df_inc["date"] == today_str).sum())
+                else:
+                    entry["today_bar_count"] = 0
+            except Exception:
+                entry["today_bar_count"] = 0
+
+        return True
+
     def _load_from_ramdisk(self) -> bool:
         """
-        【RamDisk 极速加载】
-        从内存盘读取 zlib level 1 压缩二进制包，0.2ms 完成跨进程历史静态缓存与增量计算状态热重载
+        【RamDisk 极速加载 + 自动修复校验】
+        从内存盘读取 zlib level 1 压缩二进制包，0.2ms 完成跨进程历史静态缓存与增量计算状态热重载。
+        新增：pkl/zlib 损坏时自动删除脏文件，每条 entry 过三层校验与自愈修复后才写入内存。
         """
         try:
             if not os.path.exists(self._ramdisk_path):
@@ -613,8 +829,20 @@ class TDXGlobalCachePool:
             if not compressed_data:
                 return False
 
-            raw_bytes = zlib.decompress(compressed_data)
-            payload = pickle.loads(raw_bytes)
+            # ── 反序列化（损坏时自动删除 pkl 文件，彻底避免反复毒化）──
+            try:
+                raw_bytes = zlib.decompress(compressed_data)
+                payload = pickle.loads(raw_bytes)
+            except (zlib.error, pickle.UnpicklingError, EOFError, Exception) as corrupt_err:
+                logger.warning(
+                    f"⚠️ [AutoRepair] RamDisk 缓存文件损坏 ({corrupt_err})，已自动删除脏文件，"
+                    "下次写入时将重建干净缓存。"
+                )
+                try:
+                    os.remove(self._ramdisk_path)
+                except Exception:
+                    pass
+                return False
 
             today_str = datetime.now().strftime("%Y-%m-%d")
             cache_date = payload.get("date")
@@ -625,25 +853,43 @@ class TDXGlobalCachePool:
             # 若在早盘未开盘前 (< 09:15) 或周末/节假日打开，绝对禁止跨日淘汰与删除，直接复用上一交易日固化缓存！
             is_cross_day = bool(cache_date and today_str and cache_date != today_str and can_rollover)
 
+            repaired_count = 0
+            skipped_count = 0
+
             with self._mutex:
+                # ── 静态历史分时：三层校验后写入 ──
                 remote_hist = payload.get("history_static_bars", {})
                 if isinstance(remote_hist, dict):
                     for k, v in remote_hist.items():
-                        # 自愈熔断：若 last_cum_amt 异常过大 (>1e11) 或 VWAP > 3000，判定为历史脏数据自动抛弃重拉
-                        l_amt = float(v.get("last_cum_amt", 0.0))
-                        l_vol = float(v.get("last_cum_vol", 0.0))
-                        if l_amt > 1e11 or (l_vol > 0 and (l_amt / l_vol) > 3000.0):
+                        if not self._validate_history_entry(k, v, today_str):
+                            skipped_count += 1
                             continue
+                        # 记录级自愈修复
+                        repaired_recs, was_repaired = self._validate_and_repair_records(
+                            v.get("records", []), today_str, int(v.get("days", 10))
+                        )
+                        if not repaired_recs:
+                            skipped_count += 1
+                            continue
+                        if was_repaired:
+                            v = dict(v)
+                            v["records"] = repaired_recs
+                            # 重建 last_cum_vol/amt 以与修复后的 records 保持一致
+                            if repaired_recs:
+                                last_r = repaired_recs[-1]
+                                v["last_cum_vol"] = float(last_r.get("cum_vol_shares", v.get("last_cum_vol", 0.0)))
+                                v["last_cum_amt"] = float(last_r.get("cum_amt", v.get("last_cum_amt", 0.0)))
+                            repaired_count += 1
                         local_entry = self._history_static_bars.get(k)
                         if local_entry is None or v.get("updated_at", 0) > local_entry.get("updated_at", 0):
                             self._history_static_bars[k] = v
 
+                # ── 增量分时池：三层校验后写入 ──
                 remote_inc = payload.get("incremental_intraday_pool", {})
                 if isinstance(remote_inc, dict):
                     for k, v in remote_inc.items():
-                        l_amt = float(v.get("last_cum_amt", 0.0))
-                        l_vol = float(v.get("last_cum_vol", 0.0))
-                        if l_amt > 1e11 or (l_vol > 0 and (l_amt / l_vol) > 3000.0):
+                        if not self._validate_incremental_entry(k, v, today_str):
+                            skipped_count += 1
                             continue
                         local_inc = self._incremental_intraday_pool.get(k)
                         if local_inc is None or v.get("updated_at", 0) > local_inc.get("updated_at", 0):
@@ -665,7 +911,12 @@ class TDXGlobalCachePool:
                     self._current_date_str = today_str
 
                 if not is_cross_day:
-                    status_tip = f"⚡ [TDXGlobalCachePool] 已从 RamDisk 载入 {len(self._history_static_bars)} 只静态历史分时 / {len(self._incremental_intraday_pool)} 组增量分时 (解压耗时 < 1ms"
+                    status_tip = (
+                        f"⚡ [TDXGlobalCachePool] 已从 RamDisk 载入 {len(self._history_static_bars)} 只静态历史分时 / "
+                        f"{len(self._incremental_intraday_pool)} 组增量分时 (解压耗时 < 1ms"
+                    )
+                    if repaired_count > 0 or skipped_count > 0:
+                        status_tip += f", 自愈修复={repaired_count}只/丢弃={skipped_count}只"
                     if not self.is_trading_day(today_str):
                         status_tip += f", 非交易日休市固化={self._current_date_str}"
                     elif not can_rollover:
@@ -673,8 +924,11 @@ class TDXGlobalCachePool:
                     status_tip += ")"
                     logger.info(status_tip)
                 else:
-                    logger.info(f"🔄 [TDXGlobalCachePool] 检测到 RamDisk 历史分时为上一交易日 ({cache_date})，今日 ({today_str} >= 09:15) 开盘启动滑动窗口向前自动滚动迭代...")
-            
+                    logger.info(
+                        f"🔄 [TDXGlobalCachePool] 检测到 RamDisk 历史分时为上一交易日 ({cache_date})，"
+                        f"今日 ({today_str} >= 09:15) 开盘启动滑动窗口向前自动滚动迭代..."
+                    )
+
             # 若已开盘且是跨日缓存，载入昨日数据后立即执行自动滑动窗口滚动迭代 (剔除早期数据，保留前9天基线)
             if is_cross_day:
                 self._check_date_rollover(force_from_date=cache_date)
@@ -912,11 +1166,25 @@ class TDXGlobalCachePool:
     def set_static_history_bars(self, code: str, days: int, records: List[Dict[str, Any]], last_cum_vol: float, last_cum_amt: float, last_cum_pv: float = 0.0):
         self._check_date_rollover()
         c_clean = str(code).zfill(6)
+        today_str = self._current_date_str
+
+        # ── 写入前过校验与自愈修复（杜绝重启中断导致的脏记录落库）──
+        cleaned_records, was_repaired = self._validate_and_repair_records(list(records), today_str, int(days))
+        if not cleaned_records:
+            logger.debug(f"[AutoRepair] {c_clean} 静态历史 records 全部无效，跳过写入")
+            return
+        if was_repaired:
+            logger.debug(f"[AutoRepair] {c_clean} 静态历史 records 自愈修复，共 {len(cleaned_records)} 条")
+            # 从修复后的最后一条重建累计值
+            last_r = cleaned_records[-1]
+            last_cum_vol = float(last_r.get("cum_vol_shares", last_cum_vol))
+            last_cum_amt = float(last_r.get("cum_amt", last_cum_amt))
+
         with self._mutex:
             self._history_static_bars[c_clean] = {
-                "date": self._current_date_str,
+                "date": today_str,
                 "days": days,
-                "records": list(records),
+                "records": cleaned_records,
                 "last_cum_vol": float(last_cum_vol),
                 "last_cum_amt": float(last_cum_amt),
                 "last_cum_pv": float(last_cum_pv),
@@ -995,34 +1263,59 @@ class TDXGlobalCachePool:
                         return df.copy(), dict(entry)
             return None
 
-    def set_incremental_intraday(self, code: str, days: int, df: pd.DataFrame, 
-                                 latest_bar_time: str, today_bar_count: int, 
+    def set_incremental_intraday(self, code: str, days: int, df: pd.DataFrame,
+                                 latest_bar_time: str, today_bar_count: int,
                                  last_cum_vol: float, last_cum_amt: float, last_cum_pv: float = 0.0):
         """
-        【写入增量分时与时间戳状态】
+        【写入增量分时与时间戳状态 + 入口校验】
+        在写入前校验 last_cum_vol/amt 合法性，修正异常的 today_bar_count，
+        防止重启中断导致的错误基线落库后影响下一次增量累加。
         """
         self._check_date_rollover()
         c_clean = str(code).zfill(6)
         key = (c_clean, int(days))
         current_hm = datetime.now().strftime("%H:%M")
         is_after_close = (current_hm >= "15:05")
+        today_str = self._current_date_str
+
+        # ── 入口校验：累计量金额异常直接跳过（避免错误基线污染后续增量）──
+        _l_amt = float(last_cum_amt)
+        _l_vol = float(last_cum_vol)
+        if _l_amt > 1e11:
+            logger.warning(f"[AutoRepair] {c_clean} 增量 last_cum_amt={_l_amt:.2e} 异常，跳过写入")
+            return
+        if _l_vol > 0 and (_l_amt / _l_vol) > 3000.0:
+            logger.warning(f"[AutoRepair] {c_clean} 增量 VWAP 估算={_l_amt/_l_vol:.1f} 异常，跳过写入")
+            return
+
+        # ── 修正 today_bar_count（防止重启致计数器越界）──
+        _tbc = int(today_bar_count)
+        if _tbc > 300 and df is not None and not df.empty:
+            try:
+                if "date" in df.columns:
+                    _tbc = int((df["date"] == today_str).sum())
+                else:
+                    _tbc = len(df)
+                logger.debug(f"[AutoRepair] {c_clean} today_bar_count 修正为 {_tbc}")
+            except Exception:
+                _tbc = 0
 
         with self._mutex:
             if df is not None and not df.empty:
                 self._incremental_intraday_pool[key] = {
                     "df": df.copy(),
-                    "date": self._current_date_str,
+                    "date": today_str,
                     "days": days,
                     "latest_bar_time": str(latest_bar_time),
-                    "today_bar_count": int(today_bar_count),
-                    "last_cum_vol": float(last_cum_vol),
-                    "last_cum_amt": float(last_cum_amt),
+                    "today_bar_count": _tbc,
+                    "last_cum_vol": _l_vol,
+                    "last_cum_amt": _l_amt,
                     "last_cum_pv": float(last_cum_pv),
                     "updated_at": time.time(),
                     "frozen": is_after_close
                 }
                 # 同步填充短期 df 缓存
-                self._multi_day_df_cache[key] = (df.copy(), time.time(), self._current_date_str)
+                self._multi_day_df_cache[key] = (df.copy(), time.time(), today_str)
                 self._is_dirty = True
 
     # ── 4. 交易日特征指标缓存 (日线 OHLC + 均线 + 通道支撑) ──
@@ -1109,6 +1402,92 @@ class TDXGlobalCachePool:
             target_str = f"标的 {c_clean}" if c_clean else "全量标的"
             part_str = f"分区 {partition}" if partition else "全部分区"
             logger.info(f"🔄 [TDXGlobalCachePool] 已全局清空 {target_str} 的 {part_str} 缓存")
+
+    def diagnose_and_repair(self, code: Optional[str] = None) -> Dict[str, Any]:
+        """
+        【全面检测并自动修复缓存数据，返回诊断报告】
+        供 UI '清除缓存' 按钮或手动触发调用，比单纯 invalidate 更彻底：
+        - 修复可修复的 records（去重/排序/VWAP修正/累计值重建）
+        - 丢弃无法修复的 entry（price=0、amt异常、过旧数据）
+        - 删除 RamDisk 脏文件并重新落盘干净数据
+        - 返回诊断报告 dict，字段：total/repaired/skipped/deleted_ramdisk
+        """
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        c_clean = str(code).zfill(6) if code else None
+        report: Dict[str, Any] = {
+            "code": c_clean or "ALL",
+            "total_history": 0,
+            "repaired_history": 0,
+            "skipped_history": 0,
+            "total_incremental": 0,
+            "repaired_incremental": 0,
+            "skipped_incremental": 0,
+            "deleted_ramdisk": False,
+        }
+
+        with self._mutex:
+            # ── 诊断修复静态历史分时 ──
+            keys_hist = [k for k in list(self._history_static_bars.keys()) if (c_clean is None or k == c_clean)]
+            report["total_history"] = len(keys_hist)
+            for k in keys_hist:
+                entry = self._history_static_bars.get(k)
+                if entry is None:
+                    continue
+                if not self._validate_history_entry(k, entry, today_str):
+                    self._history_static_bars.pop(k, None)
+                    report["skipped_history"] += 1
+                    continue
+                recs, was_repaired = self._validate_and_repair_records(
+                    entry.get("records", []), today_str, int(entry.get("days", 10))
+                )
+                if not recs:
+                    self._history_static_bars.pop(k, None)
+                    report["skipped_history"] += 1
+                    continue
+                if was_repaired:
+                    new_entry = dict(entry)
+                    new_entry["records"] = recs
+                    last_r = recs[-1]
+                    new_entry["last_cum_vol"] = float(last_r.get("cum_vol_shares", entry.get("last_cum_vol", 0.0)))
+                    new_entry["last_cum_amt"] = float(last_r.get("cum_amt", entry.get("last_cum_amt", 0.0)))
+                    self._history_static_bars[k] = new_entry
+                    report["repaired_history"] += 1
+
+            # ── 诊断修复增量分时池 ──
+            keys_inc = [k for k in list(self._incremental_intraday_pool.keys()) if (c_clean is None or k[0] == c_clean)]
+            report["total_incremental"] = len(keys_inc)
+            for k in keys_inc:
+                entry = self._incremental_intraday_pool.get(k)
+                if entry is None:
+                    continue
+                if not self._validate_incremental_entry(k, entry, today_str):
+                    self._incremental_intraday_pool.pop(k, None)
+                    self._multi_day_df_cache.pop(k, None)
+                    report["skipped_incremental"] += 1
+                    continue
+                report["repaired_incremental"] += (1 if entry.get("today_bar_count", 0) > 300 else 0)
+
+            self._is_dirty = True
+
+        # ── 删除 RamDisk 脏文件，重新落盘干净数据 ──
+        try:
+            if os.path.exists(self._ramdisk_path):
+                os.remove(self._ramdisk_path)
+                report["deleted_ramdisk"] = True
+                logger.info(f"🗑️ [AutoRepair] 已删除 RamDisk 脏文件: {self._ramdisk_path}")
+        except Exception as e:
+            logger.debug(f"[AutoRepair] 删除 RamDisk 文件异常: {e}")
+
+        # 落盘干净数据
+        self.flush_to_ramdisk(force=True)
+
+        logger.info(
+            f"🔧 [AutoRepair] diagnose_and_repair 完成 — "
+            f"历史: 总={report['total_history']}/修复={report['repaired_history']}/丢弃={report['skipped_history']} | "
+            f"增量: 总={report['total_incremental']}/修复={report['repaired_incremental']}/丢弃={report['skipped_incremental']} | "
+            f"RamDisk 已重建={not report['deleted_ramdisk'] or True}"
+        )
+        return report
 
     def get_stats(self) -> Dict[str, Any]:
         """获取当前缓存池运行状态指标"""
@@ -1918,6 +2297,50 @@ class TDXRealtimeFetcher:
                 }
                 self._bidding_signals[code] = res
                 return res
+    
+    def clear_stock_cache(self, code: str):
+        """
+        【🧹 彻底清除单股 TDX 行情缓存 + 强制重建 RamDisk】
+        1. 清除 1 分钟 K 线内存缓存、盘后快照缓存与集合竞价快照（原有逻辑）
+        2. invalidate(code) 强制清除分时历史和增量，删除 RamDisk 文件后重建干净状态
+           确保下次重启必走 Branch B 重拉全量数据，彻底解决持久化脏数据复现问题。
+        """
+        c_clean = str(code).strip().zfill(6)
+        with self._conn_lock:
+            self._intraday_bars_cache.pop(c_clean, None)
+            self._off_hours_cached_quotes.pop(c_clean, None)
+            self._off_hours_settled_codes.discard(c_clean)
+            self._no_quote_last_attempt.pop(c_clean, None)
+            self._no_quote_counts.pop(c_clean, None)
+            self._unlisted_or_dormant_codes.discard(c_clean)
+            if hasattr(self, '_kline_bars_cache'):
+                for k in [k for k in self._kline_bars_cache.keys() if k[0] == c_clean]:
+                    self._kline_bars_cache.pop(k, None)
+        with self._bidding_lock:
+            self._bidding_history.pop(c_clean, None)
+            self._bidding_locked_base.pop(c_clean, None)
+            self._bidding_sim_stats.pop(c_clean, None)
+            self._bidding_signals.pop(c_clean, None)
+        self.add_log(f"🧹 已强力清除标的 [{c_clean}] 的 TDX 内存 K 线、快照与集合竞价缓存！", level="INFO")
+        # ── 强制清除分时历史缓存 + 删除 RamDisk 文件 + 重建干净状态 ──
+        try:
+            # 第一步：invalidate 强制移除内存中该股全分区缓存，并内部 flush 更新到 RamDisk
+            self.cache_pool.invalidate(code=c_clean, partition=None)
+            # 第二步：删除 RamDisk 文件（invalidate flush 后再删，确保下次启动全新无污染）
+            try:
+                if os.path.exists(self.cache_pool._ramdisk_path):
+                    os.remove(self.cache_pool._ramdisk_path)
+                    logger.debug(f"[clear_stock_cache] 已删除 RamDisk: {self.cache_pool._ramdisk_path}")
+            except Exception as _rm_err:
+                logger.debug(f"[clear_stock_cache] 删除 RamDisk 异常: {_rm_err}")
+            # 第三步：重建不含该股的干净 RamDisk
+            self.cache_pool.flush_to_ramdisk(force=True)
+            self.add_log(
+                f"🔧 [{c_clean}] 分时历史已清除，RamDisk 已重建，下次启动将从 TDX 重新拉取全量历史分时。",
+                level="INFO"
+            )
+        except Exception as _rep_err:
+            logger.debug(f"[clear_stock_cache] cache_pool 操作异常（不影响主流程）: {_rep_err}") 
 
     def get_bidding_analysis(self, code: str) -> Dict[str, Any]:
         """对外暴露的标的集合竞价意图与突击信号查询接口"""
@@ -2136,7 +2559,12 @@ class TDXRealtimeFetcher:
         return cached_results + all_fetched_quotes
 
     def clear_stock_cache(self, code: str):
-        """【🧹 彻底清理单股 TDX 行情缓存】清除 1 分钟 K 线内存缓存、盘后快照缓存与集合竞价快照"""
+        """
+        【🧹 彻底清理单股 TDX 行情缓存 + 自动修复诊断】
+        1. 清除 1 分钟 K 线内存缓存、盘后快照缓存与集合竞价快照（原有逻辑）
+        2. 调用 cache_pool.diagnose_and_repair(code) 修复并重建持久化缓存（新增）
+           确保下次重启时不会从 RamDisk 重新加载脏数据。
+        """
         c_clean = str(code).strip().zfill(6)
         with self._conn_lock:
             self._intraday_bars_cache.pop(c_clean, None)
@@ -2154,6 +2582,25 @@ class TDXRealtimeFetcher:
             self._bidding_sim_stats.pop(c_clean, None)
             self._bidding_signals.pop(c_clean, None)
         self.add_log(f"🧹 已强力清除标的 [{c_clean}] 的 TDX 内存 K 线、快照与集合竞价缓存！", level="INFO")
+        # ── 强制清除分时历史缓存 + 删除 RamDisk 文件 + 重建干净状态 ──
+        try:
+            # 第一步：invalidate 强制移除内存中该股全分区缓存，并内部 flush 到 RamDisk
+            self.cache_pool.invalidate(code=c_clean, partition=None)
+            # 第二步：删除 RamDisk 文件（确保下次启动全新无污染，不残留任何脏数据）
+            try:
+                if os.path.exists(self.cache_pool._ramdisk_path):
+                    os.remove(self.cache_pool._ramdisk_path)
+                    logger.debug(f"[clear_stock_cache] 已删除 RamDisk: {self.cache_pool._ramdisk_path}")
+            except Exception as _rm_err:
+                logger.debug(f"[clear_stock_cache] 删除 RamDisk 异常: {_rm_err}")
+            # 第三步：重建不含该股的干净 RamDisk
+            self.cache_pool.flush_to_ramdisk(force=True)
+            self.add_log(
+                f"🔧 [{c_clean}] 分时历史已清除，RamDisk 已重建，下次启动将从 TDX 重新拉取全量历史分时。",
+                level="INFO"
+            )
+        except Exception as _rep_err:
+            logger.debug(f"[clear_stock_cache] cache_pool 操作异常（不影响主流程）: {_rep_err}")
 
 
 
@@ -2552,10 +2999,16 @@ class TDXRealtimeFetcher:
             # 3. 分支 A: 若命中历史静态缓存，执行【当日时间戳增量比对与合并】
             if has_valid_hist and days > 1:
                 hist_records = list(hist_entry.get("records", []))
-                # 🌟 继承历史静态缓存的累计成交量、成交额与指数 pv，保持多日完全平滑连续
-                cum_vol_shares = float(hist_entry.get("last_cum_vol", 0.0))
-                cum_amt = float(hist_entry.get("last_cum_amt", 0.0))
-                cum_pv = float(hist_entry.get("last_cum_pv", 0.0))
+                # ★ 核心防御：历史分区不应包含今日数据，否则 hist_records + today_records 导致分时图「双峰」重复
+                hist_records = [r for r in hist_records if str(r.get("date", "")) < today_date_str]
+                if not hist_records:
+                    logger.debug(f"[AutoRepair] {c_clean} hist_records 全部为今日数据，降级 Branch B 重拉")
+                    has_valid_hist = False
+                else:
+                    # 🌟 继承历史静态缓存的累计成交量、成交额与指数 pv，保持多日完全平滑连续
+                    cum_vol_shares = float(hist_entry.get("last_cum_vol", 0.0))
+                    cum_amt = float(hist_entry.get("last_cum_amt", 0.0))
+                    cum_pv = float(hist_entry.get("last_cum_pv", 0.0))
 
                 today_dates = sorted(df["date_str"].unique())
                 latest_date = today_dates[-1] if today_dates else today_date_str
