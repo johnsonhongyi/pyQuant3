@@ -439,9 +439,26 @@ class IPOVWAPDetectorEngine:
             for idx, (_, r) in enumerate(today_df.iterrows()):
                 bar_c = float(r.get("close", 0.0))
                 bar_vw = float(r.get("vwap", bar_c))
-                t_str = str(r.get("time", ""))[-5:] if "time" in r else ""
                 if bar_c >= bar_vw and bar_c >= t_open * 1.008:
-                    sig.launch_time_str = t_str if t_str else f"09:{30+idx:02d}"
+                    # 标准分时时间换算 (杜绝 09:179 等越界)
+                    raw_t = str(r.get("time", "")).strip()
+                    calc_time = ""
+                    if len(raw_t) >= 5 and ":" in raw_t:
+                        parts = raw_t[-5:].split(":")
+                        if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+                            calc_time = f"{int(parts[0]):02d}:{int(parts[1]):02d}"
+                    if not calc_time:
+                        digits = "".join(c for c in raw_t if c.isdigit())
+                        if len(digits) >= 4:
+                            calc_time = f"{int(digits[:2]):02d}:{int(digits[2:4]):02d}"
+                    if not calc_time:
+                        if idx < 120:
+                            tot_m = 9 * 60 + 30 + idx
+                        else:
+                            tot_m = 13 * 60 + (idx - 120)
+                        calc_time = f"{tot_m // 60:02d}:{tot_m % 60:02d}"
+
+                    sig.launch_time_str = calc_time
                     # 计算拔地而起角斜率: 从开盘/低点到当前启动点的角斜率
                     elapsed_min = max(1, idx + 1)
                     rise_pct = (bar_c - m_low) / max(m_low, 0.01) * 100.0
@@ -451,6 +468,7 @@ class IPOVWAPDetectorEngine:
             if not launch_found:
                 sig.launch_time_str = "未启动"
                 sig.launch_slope_deg = 0.0
+
 
             # 判定是否为上市首日/初期 (严密基于上市日期与今日对比)
             try:

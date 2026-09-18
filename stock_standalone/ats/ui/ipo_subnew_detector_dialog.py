@@ -1484,13 +1484,50 @@ class IPOSubnewDetectorDialog(QMainWindow):
                 self.table.setSortingEnabled(True)
 
     def _on_open_command_room(self):
-        """【🚢 集中交易总指挥室】掌握全数据赛马天梯、持仓盈亏追踪、一键批量执行与全自动跟随交易"""
+        """【🚢 集中交易总指挥室】非模态独立展示，支持点击直接联动定位主看板与全系统联动"""
         try:
-            from ats.ui.ipo_command_room_dialog import IPOCommandRoomDialog
-            dlg = IPOCommandRoomDialog(self)
-            dlg.exec()
+            if not hasattr(self, "_command_room_dlg") or self._command_room_dlg is None:
+                from ats.ui.ipo_command_room_dialog import IPOCommandRoomDialog
+                self._command_room_dlg = IPOCommandRoomDialog(parent_detector_dialog=self)
+            self._command_room_dlg.show()
+            self._command_room_dlg.raise_()
+            self._command_room_dlg.activateWindow()
         except Exception as e:
             logger.error(f"打开集中交易指挥室异常: {e}")
+
+    def select_and_focus_code(self, code: str, trigger_linkage: bool = True) -> bool:
+        """
+        【从外部（如集中交易指挥室）直接联动定位到检测工具中的 code 进行直接操作】
+        - 自动寻找对应的代码行（包括排序或过滤状态下）；
+        - 自动解除隐藏（若在过滤模式下被隐藏）；
+        - 滚动至可视区域中央并高亮选中该行；
+        - 若 trigger_linkage 为 True，自动联动通达信看盘与外部行情。
+        """
+        clean_code = "".join(c for c in str(code) if c.isdigit()).zfill(6)
+        if not clean_code or len(clean_code) != 6:
+            return False
+
+        target_row = -1
+        for r in range(self.table.rowCount()):
+            it_c = self.table.item(r, 0)
+            if it_c and "".join(c for c in it_c.text().strip() if c.isdigit()).zfill(6) == clean_code:
+                target_row = r
+                break
+
+        if target_row >= 0:
+            if self.table.isRowHidden(target_row):
+                self.table.setRowHidden(target_row, False)
+            self.table.setCurrentCell(target_row, 0)
+            self.table.selectRow(target_row)
+            item = self.table.item(target_row, 0)
+            if item:
+                from PyQt6.QtWidgets import QAbstractItemView
+                self.table.scrollToItem(item, QAbstractItemView.ScrollHint.PositionAtCenter)
+            if trigger_linkage:
+                self._trigger_linkage_for_row(target_row, force=True)
+            return True
+        return False
+
 
     def _open_sbc_for_code(self, code: str):
 

@@ -1,5 +1,52 @@
+## 2026-09-18 20:10
+- [x] **【集中交易指挥室全表格列宽自由拖拽与跨会话自动持久化能力接入】(`ats/ui/ipo_command_room_dialog.py`, `tests/test_ipo_fleet_trading_arbitration.py`, `20260918_2010_task.md`)**：
+    - [x] **操盘手现场明确指示与排版痛点消除 (P0)**：
+        - “添加列持久化能力”；
+        - 彻底解决天梯表中“动能分”与“启动时点”被过窄宽度截断为“动能.../启动...”的视觉痛点；
+        - 全面对齐全系统统一标准持久化机制（`setup_persistence`），实现鼠标平滑自由拖拽、防抖原子落盘、跨会话自动恢复。
+    - [x] **全体系工程落地与细节打磨 (KISS / SOLID / DRY)**：
+        1. **接入全系统统一标准的列宽持久化体系 (`setup_persistence`)**：
+           - 在 `IPOCommandRoomTableWidget` 中增加 `setup_persistence`、`save_column_widths`、`restore_column_widths`、`reset_default_widths`、`auto_fit_columns`；
+           - 表头全列设为 `QHeaderView.ResizeMode.Interactive`，支持操盘手鼠标平滑自由拖拽；
+           - 监听 `sectionResized` 并通过 1000ms 防抖定时器原子写入 `window_config.json`；
+        2. **精调默认列宽，彻底杜绝文字省略号截断**：
+           - 天梯表 (`tbl_rank`): 动能分调整为 70px (原55px)，启动时点调整为 78px (原65px)，彻底消灭省略号截断；
+           - 实盘持仓表 (`tbl_pos`) 与 集中待执行指令表 (`tbl_orders`) 同步接入独立 key 持久化 (`ipo_cmd_pos_table_header_v1`, `ipo_cmd_orders_table_header_v1`)；
+        3. **提供一键自适应与恢复默认列宽功能**：
+           - 右键菜单增加“📐 一键自适应列宽 (当前视口)”与“🔄 恢复默认列宽布局”；
+        4. **窗口几何尺寸与 Splitter 状态集中持久化**：
+           - 实现 `_load_dialog_state()` 与 `_save_dialog_state()`，在 `closeEvent`/`hideEvent` 中集中落盘，彻底杜绝关窗时防抖延时丢失。
+        5. **全量自动化测试 100% 验证通过 (40/40 PASSED)**：
+           - `tests/test_ipo_fleet_trading_arbitration.py` 6/6 绿灯通过；
+           - `tests/test_ipo_detector_column_widths_persistence.py` 6/6 绿灯通过；
+           - `tests/test_ipo_vwap_sentiment_and_horse_race.py` 6/6 绿灯通过；
+           - `tests/test_ipo_subnew_detector.py` 22/22 绿灯通过。
+
+## 2026-09-18 20:00
+- [x] **【集中交易指挥室非模态独立伴侣窗口、点击与上下切行直接联动主看板聚焦 code 及全套右键功能对齐】(`ats/ui/ipo_command_room_dialog.py`, `ats/ui/ipo_subnew_detector_dialog.py`, `ats/strategy/ipo_vwap_detector_engine.py`, `ats/strategy/ipo_trading_center.py`, `tests/test_ipo_fleet_trading_arbitration.py`)**：
+    - [x] **操盘手现场明确指示与交互体验革新 (P0)**：
+        - “对齐检测工具的点击联动,上下联动,右键功能,或者不作为子窗口,点击直接联动到检测工具中的code直接操作”；
+        - 彻底消除模态弹窗对主界面的阻断，实现非模态独立伴侣窗口，操盘手在指挥室单击或方向键切行时，主检测工具同步定位、滚动居中、高亮目标股票，并联动通达信看盘，随时切回直接操作。
+    - [x] **全体系工程落地与功能对齐 (KISS / SOLID / DRY)**：
+        1. **非模态独立伴侣窗口 (`_on_open_command_room`)**：
+           - 废弃阻塞式 `dlg.exec()`，改为非模态 `show()`, `raise_()`, `activateWindow()`，支持自由悬浮与副屏看盘；
+        2. **点击与上下联动：直接联动检测工具中的 code 进行直接操作**：
+           - 在主检测工具中新增公开标准接口 `select_and_focus_code(code, trigger_linkage=True)`，自动滚动居中并高亮目标 code 行；
+           - 自定义 `IPOCommandRoomTableWidget` 拦截键盘 `Up/Down/PgUp/PgDn`，20ms 防抖联动主看板与通达信；鼠标单击行立即精准定位；
+        3. **快捷键与双击联动对齐**：
+           - 双击行 / 按空格键：秒级调出该标的 10d SBC VWAP 走势图；按 F / 回车：强制联动通达信；
+        4. **对齐完整右键菜单功能 (`_show_context_menu`)**：
+           - 调出 SBC 10d 走势图、在检测工具中聚焦定位、联动通达信看盘、单只执行决议、一键平仓持仓、复制股票代码与决议详情；
+        5. **细节打磨与缺陷修复**：
+           - 修复启动时点 A 股分时时间换算（`09:30~11:30` 与 `13:00~15:00`），彻底消灭 `09:179` 越界；
+           - 优化 `leader_is_crashing` 判定逻辑，确保超级领头羊和梯队前锋正常确立，仅对后排跟风标的进行退潮避险。
+        6. **全量自动化测试 100% 验证通过 (37/37 PASSED)**：
+           - `tests/test_ipo_fleet_trading_arbitration.py` 5/5 绿灯通过；
+           - 全量回归 `test_ipo_vwap_sentiment_and_horse_race.py` (6/6), `test_ipo_detector_column_widths_persistence.py` (4/4)。
+
 ## 2026-09-18 19:35
 - [x] **【新股次新超短检测工具自动轮询后台测评与集中交易中心全局统筹（山外有山）闭环】(`ats/strategy/ipo_trading_center.py`, `ats/strategy/ipo_vwap_detector_engine.py`, `ats/ui/ipo_command_room_dialog.py`, `ats/ui/ipo_subnew_detector_dialog.py`, `tests/test_ipo_fleet_trading_arbitration.py`)**：
+
     - [x] **操盘手现场明确指示与全局痛点 (P0)**：
         - “新股检测工具的自动轮询,后台更新后会对守护的code进行测评感知,交易中心需要接受各自守护的提交的报告,根据全数据继续交易,需要全面整体的能力,不能各管一摊,自己看着自己守护的个股很好不知道山外有山”；
         - 彻底消除单个守护标的“自己看着自己很好不知道山外有山”的局部盲区，建立集中交易调度中心统一接收体检报告、统筹掌握全数据、执行全局横向赛马仲裁与持续交易闭环。
