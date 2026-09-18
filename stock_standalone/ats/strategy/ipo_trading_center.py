@@ -12,11 +12,14 @@ ats/strategy/ipo_trading_center.py
    - 资金有限，只重仓全池综合动能最强 (Top 1~2 赛马领头羊)；
    - 根据全市场情绪周期动态调节总仓位 (绝望地量期 30% 潜伏 / 共振升温期 80% 进攻 / 狂热高潮期 10% 锁定)；
    - 领头羊单只顶配 35%，前锋 15%，跟风平庸标的 0 额度拦截。
-3. 【何时卖、买错就出局的终极闭环】：
-   - 铁律 1 (买错立斩)：跌破 VWAP 超过 0.6%~1.0%，立即清仓止损；
-   - 铁律 2 (高潮天量平仓)：偏离 VWAP 达极限且放天量滞涨，坚决止盈保利；
-   - 铁律 3 (全局领头羊崩盘联动)：全池领头羊高位跳水时，全舰队联动收缩防守。
-4. 【持续跟随市场切换的跟随交易 (换马调仓)】：
+3. 【何时卖、买错就出局的终极闭环与高潮逃顶算法】：
+   - 铁律 1 (买错立斩)：跌破 VWAP 超过 0.6%~1.0% 或跌破底台支撑，立即清仓止损；
+   - 铁律 2 (提前算法设计高抛挂单)：先行者经历 2~4 次临停冲顶时，算法前瞻计算极限高抛价，以 urgency="LIMIT" 挂单提前排队，防复牌戛然而止被核按钮；
+   - 铁律 3 (全局领头羊崩盘联动与豁免)：全池领头羊高位跳水时，全舰队收缩防守；但低位独立筑底 (BASE_PREORDER) 与多日通道突破 (SWING_PREORDER) 标的享有免死金牌，不被误杀；
+   - 铁律 4 (T+1 追高买入禁令)：次日及之后狂飙标的当天买入无卖出权，严禁追高开仓接盘。
+4. 【多周期通道突破预埋单 (SWING_PREORDER)】：
+   - 识别 4 日大箱体 + 60F 通道突破且尾盘收最高标的，分配 10% 试探预埋仓，防守线精准锚定 60F 底台 (12.88元)；
+5. 【持续跟随市场切换的跟随交易 (换马调仓)】：
    - 持仓走平滞涨、池中冒出超级领头羊时，果断弃弱留强、切换跟随。
 """
 
@@ -184,10 +187,31 @@ class IPOTradingCenter:
                     sig.global_arbitration_desc = f"🚨【高潮平仓 0%仓】偏离VWAP达+{sig.vwap_diff_pct:.1f}%且放天量滞涨冲顶，主力疯狂兑现，锁定翻倍胜果！"
                     continue
 
-                # 仲裁 B: 买错立斩出局 (跌破 VWAP 超过 0.6%)
+                # 仲裁 B0: 60F通道突破+多日平底尾盘蓄势 (蓝色光标同款结构)
+                if sig.signal_type == "SWING_PREORDER":
+                    sig.global_fleet_role = "SWING_PREORDER"
+                    space_str = f"博周一冲破VWAP(空间+{sig.rebound_to_vwap_space_pct:.1f}%)" if sig.rebound_to_vwap_space_pct > 0 else "跨日反转蓄势"
+                    sig.global_arbitration_desc = f"🔭【通道突破 12%仓】60F突破下降通道+多日平底({sig.base_support_level:.2f})尾盘收最高，防守线{sig.stop_loss_price:.2f}元(60F底台)，{space_str}！"
+                    continue
+
+                # 仲裁 B1: 底部放量共振加速 (动能拐点确立，主升/反抽突击)
+                if sig.signal_type == "BASE_BREAKOUT":
+                    sig.global_fleet_role = "RESONANCE_BUY"
+                    space_str = f"博回抽VWAP+{sig.rebound_to_vwap_space_pct:.1f}%空间" if sig.rebound_to_vwap_space_pct > 0 else "放量突击"
+                    sig.global_arbitration_desc = f"⚡【共振加速 20%仓】底部平底({sig.base_support_level:.2f})放量加速拐头，{space_str}，止损{sig.stop_loss_price:.2f}元！"
+                    continue
+
+                # 仲裁 B2: 底部平底缩量企稳预埋潜伏 (提前埋单，不追高)
+                if sig.signal_type == "BASE_PREORDER":
+                    sig.global_fleet_role = "BASE_PREORDER"
+                    space_str = f"向上距VWAP空间+{sig.rebound_to_vwap_space_pct:.1f}%" if sig.rebound_to_vwap_space_pct > 0 else ""
+                    sig.global_arbitration_desc = f"🎯【筑底预埋 15%仓】底部({sig.base_support_level:.2f})缩量横盘构筑扎实结构，动能拐头初现，提前预埋潜伏，{space_str}，买错跌破{sig.stop_loss_price:.2f}元立斩！"
+                    continue
+
+                # 仲裁 B3: 普通破位无结构股 (买错立斩出局)
                 if not sig.is_above_vwap and sig.vwap_diff_pct < -0.6:
                     sig.global_fleet_role = "STOP_LOSS"
-                    sig.global_arbitration_desc = f"⛔【买错立斩 0%仓】跌破VWAP({sig.vwap:.2f})达{sig.vwap_diff_pct:.1f}%，全池一票否决，买错坚决出局斩仓！"
+                    sig.global_arbitration_desc = f"⛔【买错立斩 0%仓】跌破VWAP({sig.vwap:.2f})达{sig.vwap_diff_pct:.1f}%且无筑底结构，全池一票否决，买错坚决出局斩仓！"
                     continue
 
                 # 仲裁 C: 市场冰点泥沙俱下 (全池规避)
@@ -214,11 +238,14 @@ class IPOTradingCenter:
                     sig.global_arbitration_desc = f"🥈【梯队前锋 15%仓】动能分{sig.horse_race_score:.0f}，紧随领头羊[{leader_nm}]多头共振，顺风跟进！"
                     continue
 
-                # 仲裁 F: 龙头高潮冲顶崩盘联动避险 (仅对第 4 名之后的跟风标的进行退潮拦截)
+                # 仲裁 F: 龙头高潮冲顶崩盘联动避险 (仅对第 4 名之后的跟风高位标的退潮拦截，但低位独立筑底/共振/通道突破标的除外！)
                 if leader_is_crashing and sig.code != leader_code:
-                    sig.global_fleet_role = "PANIC_DEFENSE"
-                    sig.global_arbitration_desc = f"🛡️【全局避险 0%仓】超级龙头({leader_code})天量冲顶跳水，板块情绪退潮，跟风标的严禁盲目接飞刀！"
-                    continue
+                    if sig.signal_type in ("BASE_PREORDER", "BASE_BREAKOUT", "SWING_PREORDER") or sig.has_bottom_base:
+                        pass  # 底部独立结构标的不被龙头冲顶误杀
+                    else:
+                        sig.global_fleet_role = "PANIC_DEFENSE"
+                        sig.global_arbitration_desc = f"🛡️【全局避险 0%仓】超级龙头({leader_code})天量冲顶跳水，板块情绪退潮，跟风标的严禁盲目接飞刀！"
+                        continue
 
                 # 仲裁 G: 市场狂热高潮期对后排与跟风只卖不买，防T+1追高被埋
                 if sentiment.heat_stage == "🌋 狂热高潮":
@@ -242,8 +269,20 @@ class IPOTradingCenter:
                 if not sig or sig.price <= 0:
                     continue
 
-                # 4.1 铁律 1: 买错立斩出局 (跌破 VWAP 超过 0.6%)
-                if not sig.is_above_vwap and sig.vwap_diff_pct < -0.6:
+                # 4.1 铁律 1: 买错立斩出局 (跌破止损线)
+                # 底部结构预埋标的：精准按底台防守线(-0.8%)执行；普通标的按跌破 VWAP 0.6% 执行
+                is_stop_out = False
+                stop_reason = ""
+                if sig.has_bottom_base and sig.stop_loss_price > 0:
+                    if sig.price < sig.stop_loss_price:
+                        is_stop_out = True
+                        stop_reason = f"⛔ 底台破位止损: 跌破底部平台防守线({sig.stop_loss_price:.2f})，买错立斩出局，严禁死扛！"
+                else:
+                    if not sig.is_above_vwap and sig.vwap_diff_pct < -0.6:
+                        is_stop_out = True
+                        stop_reason = f"⛔ 破位止损出局: 跌破VWAP({sig.vwap:.2f})达{sig.vwap_diff_pct:.1f}%，买错坚决出局斩仓，严禁死扛！"
+
+                if is_stop_out:
                     directives.append(IPOOrderDirective(
                         action="SELL",
                         code=code,
@@ -252,24 +291,26 @@ class IPOTradingCenter:
                         shares=pos.shares,
                         size_pct=0.0,
                         urgency="CRITICAL",
-                        reason=f"⛔ 破位止损出局: 跌破VWAP({sig.vwap:.2f})达{sig.vwap_diff_pct:.1f}%，买错坚决出局斩仓，严禁死扛！",
+                        reason=stop_reason,
                         horse_rank=sig.horse_race_rank,
                         sentiment_phase=sentiment.heat_stage,
                         timestamp=now_ts
                     ))
                     continue
 
-                # 4.2 铁律 2: 极端高潮天量平仓
-                if sig.is_climax_exit:
+                # 4.2 铁律 2: 极端高潮冲刺平仓与计算机提前算法挂单 (沈鼓集团同款高点逃顶)
+                if sig.is_climax_exit or (sig.suspension_count >= 1 and sig.vwap_diff_pct >= 20.0):
+                    sell_px = sig.climax_preset_sell_price if sig.climax_preset_sell_price > 0 else sig.price
+                    urg_type = "LIMIT" if sig.climax_preset_sell_price > sig.price else "CRITICAL"
                     directives.append(IPOOrderDirective(
                         action="SELL",
                         code=code,
                         name=pos.name,
-                        price=sig.price,
+                        price=sell_px,
                         shares=pos.shares,
                         size_pct=0.0,
-                        urgency="CRITICAL",
-                        reason=f"🚨 极端高潮平仓: 现价偏离VWAP达+{sig.vwap_diff_pct:.1f}%且放天量冲顶滞涨，主力疯狂兑现，保住翻倍胜果！",
+                        urgency=urg_type,
+                        reason=f"🚨 提前算法设计挂单高抛: 累计临停加速，提前挂单¥{sell_px:.2f}冲顶止盈，防复牌戛然而止被核按钮！",
                         horse_rank=sig.horse_race_rank,
                         sentiment_phase=sentiment.heat_stage,
                         timestamp=now_ts
@@ -354,11 +395,20 @@ class IPOTradingCenter:
                 if code in self._positions and self._positions[code].shares > 0:
                     continue
 
-                if not sig.is_above_vwap or sig.is_climax_exit:
+                if sig.is_climax_exit:
+                    continue
+
+                # T+1 实战铁律：次日及之后冲高狂飙标的，当天无法卖出，严禁追高开仓买入！
+                if getattr(sig, "is_t1_forbidden_buy", False):
+                    continue
+
+                # 若不在 VWAP 之上，但具备底部扎实结构与动能拐点 (BASE_BREAKOUT / BASE_PREORDER / SWING_PREORDER)，允许开仓与预埋！
+                if not sig.is_above_vwap and sig.signal_type not in ("BASE_BREAKOUT", "BASE_PREORDER", "SWING_PREORDER"):
                     continue
 
                 # “山外有山”铁律：第 4 名之后的跟风平庸股，坚决不分配仓位，杜绝资金稀释！
-                if sig.horse_race_rank > 3:
+                # 但底部具备独立扎实结构或跨日通道突破的标的如果跻身前列，允许开仓
+                if sig.horse_race_rank > 3 and sig.signal_type not in ("BASE_BREAKOUT", "BASE_PREORDER", "SWING_PREORDER"):
                     continue
 
                 if current_fleet_weight >= max_fleet_weight:
@@ -367,11 +417,28 @@ class IPOTradingCenter:
                 is_valid_buy = False
                 buy_reason = ""
                 assigned_weight = single_follower_weight
+                order_urgency = "CRITICAL"
 
                 if sig.signal_type == "IPO_FIRST_BUY":
                     is_valid_buy = True
                     assigned_weight = single_leader_weight
                     buy_reason = f"🔥 首发上市黄金吸筹: 全日紧贴VWAP({sig.vwap:.2f})惜售运行，丝毫不给低位筹码，锁定极低成本进击！"
+                elif sig.signal_type == "BASE_BREAKOUT":
+                    is_valid_buy = True
+                    assigned_weight = single_leader_weight if sig.horse_race_rank <= 2 else single_follower_weight
+                    buy_reason = f"⚡ 筑底放量共振突击: 底部平底({sig.base_support_level:.2f})放量突破加速共振，博回抽VWAP+{sig.rebound_to_vwap_space_pct:.1f}%空间，止损{sig.stop_loss_price:.2f}元！"
+                    order_urgency = "CRITICAL"
+                elif sig.signal_type == "BASE_PREORDER":
+                    is_valid_buy = True
+                    assigned_weight = single_follower_weight
+                    buy_reason = f"🎯 底部平底缩量企稳预埋单: 底部({sig.base_support_level:.2f})缩量横盘构筑扎实结构，动能拐头初现，提前预埋潜伏，买错跌破{sig.stop_loss_price:.2f}元立斩！"
+                    order_urgency = "LIMIT"
+                elif sig.signal_type == "SWING_PREORDER":
+                    is_valid_buy = True
+                    assigned_weight = single_follower_weight
+                    base_supp = getattr(sig, "multi_day_base_support", 0.0) or sig.base_support_level
+                    buy_reason = f"🔭 多日大平底+60F通道突破: 4日箱体底部({base_supp:.2f})蓄势，60F突破下降通道且尾盘收最高，博周一VWAP突破，止损{sig.stop_loss_price:.2f}元！"
+                    order_urgency = "LIMIT"
                 elif sig.horse_race_rank <= 2 and sig.launch_time_str <= "09:50" and sig.launch_slope_deg >= 30.0:
                     is_valid_buy = True
                     assigned_weight = single_leader_weight
@@ -380,6 +447,7 @@ class IPOTradingCenter:
                     is_valid_buy = True
                     assigned_weight = single_follower_weight
                     buy_reason = f"🚀 回踩VWAP不破极限买点: 现价在VWAP({sig.vwap:.2f})之上浅踩拉起，极窄止损线{sig.stop_loss_price:.2f}元！"
+                    order_urgency = "LIMIT"
 
                 if is_valid_buy:
                     allocated_money = self.total_capital * (assigned_weight / 100.0)
@@ -392,7 +460,7 @@ class IPOTradingCenter:
                             price=sig.price,
                             shares=buy_shares,
                             size_pct=assigned_weight,
-                            urgency="LIMIT" if sig.pullback_no_touch else "CRITICAL",
+                            urgency=order_urgency,
                             reason=buy_reason,
                             horse_rank=sig.horse_race_rank,
                             sentiment_phase=sentiment.heat_stage,

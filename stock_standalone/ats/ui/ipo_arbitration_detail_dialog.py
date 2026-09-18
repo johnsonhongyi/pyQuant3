@@ -26,6 +26,9 @@ logger = logging.getLogger("IPOArbitrationDetailDialog")
 ROLE_CN_MAP = {
     "LEADER": "🥇 领头羊",
     "VANGUARD": "🥈 梯队前锋",
+    "RESONANCE_BUY": "⚡ 共振加速",
+    "BASE_PREORDER": "🎯 筑底预埋",
+    "SWING_PREORDER": "🔭 通道突破",
     "FOLLOWER": "🥉 后排跟风",
     "CLIMAX_EXIT": "🚨 高潮平仓",
     "PANIC_DEFENSE": "🛡️ 全局避险",
@@ -36,6 +39,9 @@ ROLE_CN_MAP = {
 ROLE_COLOR_MAP = {
     "LEADER": "#ffaa00",
     "VANGUARD": "#00e5ff",
+    "RESONANCE_BUY": "#00ff88",
+    "BASE_PREORDER": "#00e5ff",
+    "SWING_PREORDER": "#00e5ff",
     "FOLLOWER": "#8f93a8",
     "CLIMAX_EXIT": "#ff3333",
     "PANIC_DEFENSE": "#ff7733",
@@ -343,8 +349,14 @@ class IPOArbitrationDetailDialog(QDialog):
             self.lbl_vwap_bias.setStyleSheet(f"color: {bias_color}; font-weight: bold;")
 
             struct_val = getattr(sig, "structure_tag", "") or getattr(sig, "vwap_structure", "") or "--"
+            if getattr(sig, "has_bottom_base", False) and sig.base_support_level > 0:
+                struct_val += f" (底台:{sig.base_support_level:.2f})"
             self.lbl_vwap_shape.setText(f"走势结构形态: {struct_val}")
-            self.lbl_launch_time.setText(f"启动时点: {sig.launch_time_str or '--'}")
+            
+            launch_info = sig.launch_time_str or "--"
+            if getattr(sig, "rebound_to_vwap_space_pct", 0.0) > 0:
+                launch_info += f" | 回抽空间:+{sig.rebound_to_vwap_space_pct:.1f}%"
+            self.lbl_launch_time.setText(f"启动/空间: {launch_info}")
 
             sl_price = getattr(sig, "stop_loss_price", 0.0)
             if sl_price > 0:
