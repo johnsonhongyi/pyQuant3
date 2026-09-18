@@ -1,3 +1,76 @@
+## 2026-09-18 12:00
+- [x] **【SBC 键盘操作与防误触全面升级：彻底取消 Esc 键退出窗口功能、L 键升级为 S 键开关日志、全新上线 A 键切上一周期与 D 键切下一周期】(`ats/ui/intraday_strategy_dialog.py`, `tests/test_time_slice_persistence_and_sbc_two_line.py`)**：
+    - [x] **操盘手现场明确指示与实操优化 (P0)**：
+        - “l快捷键改成s, 添加a切换上一个周期,d切换下一个周期”；
+        - “sbc窗口取消esc退出窗口的功能”；
+        - 彻底消除误触 Esc 键导致看盘窗口意外关闭的隐患；构建操盘手左手盲操黄金键位组合（A 往左切上一周期，D 往右切下一周期，S 开关底部数据与风控日志）。
+    - [x] **全体系工程落地与修复验证 (KISS / SOLID / DRY)**：
+        1. **彻底取消 Esc 键退出窗口功能**：
+           - 移除 `SBCChartCanvas.keyPressEvent` 与 `SBCIntradayChartDialog.keyPressEvent` 中 `key == Qt.Key.Key_Escape` 时的 `self.close()` 逻辑；
+           - Esc 键按键行为降级为安全的“清除画布交易选中高亮与复位”，绝不关闭窗口；
+           - 100% 保留明确意图的主动持久化快捷键 `Alt+Escape` 与 `Ctrl+Shift+Q`；
+        2. **日志面板快捷键由 L 改为 S**：
+           - 顶部工具栏按钮 ToolTip 与底部状态栏提示统一更新为 `快捷键: S 键`；
+           - 挂载窗口级 `QShortcut(QKeySequence("S"), self)` 与 `keyPressEvent`（`Qt.Key.Key_S`），保留 `Key_L` 作为向后兼容别名；
+        3. **全新上线 A 键（上一周期）与 D 键（下一周期）**：
+           - 挂载窗口级 `QShortcut(QKeySequence("A"), self)` -> `rotate_period(-1)`；
+           - 挂载窗口级 `QShortcut(QKeySequence("D"), self)` -> `rotate_period(1)`；
+           - 在 `keyPressEvent` 中同步拦截 `Key_A` 与 `Key_D`，严格增加 `not is_editing_text(self)` 保护，确保在代码输入框敲字时绝不误触发切周期；
+           - 环形平滑轮转：`1m <-> 5d <-> 10d <-> 5m <-> 30m <-> 60m <-> day <-> 2d <-> 3d <-> week <-> month`；
+        4. **全量自动化测试 100% 验证通过 (19/19 PASSED)**：
+           - `tests/test_time_slice_persistence_and_sbc_two_line.py` 扩充 Esc 键防关闭窗口测试（6/6 PASSED 全部绿灯通过）；
+           - 回归 `tests/test_sbc_tooltip_styling.py`、`tests/test_sbc_ctrl_c_and_alt_exit_persistence.py` 与 `tests/test_sbc_performance_optimization.py`（13/13 PASSED 全部绿灯通过）。
+
+## 2026-09-18 11:45
+- [x] **【SBC 走势图左侧涨跌幅大字加粗高对比、实时数据日志涨红跌绿重点突出呈现 & L 快捷键开关与默认不开启日志】(`ats/ui/intraday_strategy_dialog.py`, `tests/test_time_slice_persistence_and_sbc_two_line.py`)**：
+    - [x] **操盘手现场明确指示与真实痛点 (P0)**：
+        - “涨跌可以大一些清晰便于识别”；
+        - “sbc的日志中关键的价格涨红,跌绿.重点显示出来”；
+        - “现在是默认的绿色不易观看,调整合适的对比便于一眼看到”；
+        - “sbc添加l快捷键打开关闭日志,默认不开启日志”。
+    - [x] **全体系工程落地与修复验证 (KISS / SOLID / DRY)**：
+        1. **SBC 分时图左侧标尺第二行涨跌幅大字体加粗与避让升级**：
+           - `MARGIN_LEFT` 扩展至 `62px`，右侧预留 `52px`，极大提升视觉留白与呼吸感；
+           - 涨跌幅文字全面放大加粗为 **`Consolas 8pt Bold`**，告别 7pt 小字；
+           - 配色高对比鲜艳化：正涨亮红 `#FF4444`、负跌翠绿 `#00FF88`、平盘银白 `#A0AEC0`；
+           - 智能避让机制：黄金分割线（如 7.98）与开盘基准价（如 8.00）、最高/最低价绝对差值 < 0.04 或像素垂直差 < 18px 时自动剔除黄金分割线，彻底消除挤压粘连。
+        2. **SBC 实时阶段数据日志高对比富文本呈现与关键价格“涨红跌绿”**：
+           - 移除整屏纯绿色单色渲染，采用深邃金融底色 `#090a10`、文本 `#cbd5e1`、精致边框 `#1e2235`；
+           - 现价、极值、浮动盈亏根据涨跌实时动态赋予专属颜色：上涨与盈利亮红 `<span style="color:#ff4444; font-weight:bold;">`，下跌与亏损翠绿 `<span style="color:#00ff88; font-weight:bold;">`；
+           - 核心模块标签采用高对比微光科技色（`【TDX 通信通道】`科技蓝、`【实时量价基准】`金黄、`【实时策略研判】`亮橙、`【持仓与T+1风控】`紫粉、`【防重复买卖严控】`青绿），一目了然。
+        3. **L 快捷键切换日志面板与默认不开启日志 (收起隐藏)**：
+           - 初始化时严格执行 `self.log_box.setVisible(False)`，默认不开启日志，最大化分时看盘视界；
+           - 顶部工具栏按钮初始化为 `📋 日志 (关)`（暗灰未激活态），展开时高亮为 `📋 日志 (开)`（翠绿激活态）；
+           - 挂载窗口级 `QShortcut(QKeySequence("L"), self)` 与 `keyPressEvent`（`Qt.Key.Key_L`）双保险拦截，无论焦点在图表或按钮，按 `L` 键均可瞬间切换展开/收起；
+           - 展开时瞬间刷新呈现最新计算日志，收起时自适应收缩。
+        4. **全量自动化测试 100% 验证通过 (18/18 PASSED)**：
+           - `tests/test_time_slice_persistence_and_sbc_two_line.py` 扩充 5/5 PASSED 全部绿灯通过；
+           - 回归 `tests/test_sbc_tooltip_styling.py`、`tests/test_sbc_ctrl_c_and_alt_exit_persistence.py` 与 `tests/test_sbc_performance_optimization.py`（13/13 PASSED 全部绿灯通过）。
+
+## 2026-09-18 11:15
+- [x] **【SBC 分时图左侧关键标尺全面升级上下两行大字排布 & 天梯/龙头突击时段选择全自动持久化自适应记忆】(`ats/ui/intraday_strategy_dialog.py`, `ats/ui/daily_limit_up_dialog.py`, `ats/ui/hot_sector_leaderboard.py`, `tests/test_time_slice_persistence_and_sbc_two_line.py`)**：
+    - [x] **操盘手现场明确指示与真实痛点 (P0)**：
+        - “图3中添加的价格涨幅字体小了可以上下显示”；
+        - “天梯和龙头突击,自动持久化图中标记的全天全时段还是其他的选择自动持久化,自动加载最后的使用类型”。
+    - [x] **全体系工程落地与修复验证 (KISS / SOLID / DRY)**：
+        1. **SBC 分时图左侧标尺两行大字清晰排布 (`_paint_intraday`)**：
+           - **边距微调与留白扩展**：`MARGIN_LEFT` 由 56 优雅微调至 58，提供极其宽裕舒适的纵向读数空间，右对齐整齐划一；
+           - **上下两行大字体排布**：
+             - 第一行价格/名称：统一放大并加粗为 `Consolas 8pt Bold` / `Microsoft YaHei 7.5pt Bold`（如 `高:8.29`、`8.00`、`低:6.64`、`上轨:8.29`、`支撑:8.10` 等），彻底告别旧版 7pt 小字模糊挤压；
+             - 第二行涨跌幅：在价格正下方清晰呈现对应涨跌幅百分比（如 `+3.6%`、`+0.0%`、`-17.0%`），采用高对比专属涨跌配色；
+             - 垂直防重叠智能微调：设置 `min_y_gap = 18.0`，严格保证相邻上下两组标尺之间留有至少 18px 垂直缓冲，杜绝文字粘连；
+             - 右侧开盘基准线与 VWAP 均价线保持原封不动。
+        2. **涨停天梯盘中时间片自动持久化与加载 (`ats/ui/daily_limit_up_dialog.py`)**：
+           - 启动初始化时自动通过 `load_config_node("daily_limitup_time_slice", "")` 恢复最后一次选中的类型（例如 `⏱️ 全天全时段`、`⚡ 自动实盘跟随` 或各时段）；
+           - 操盘手手动切换选项时，自动调用 `save_config_node("daily_limitup_time_slice", ...)` 毫秒级写入全局配置；
+           - KPI 卡片联动时采用 `blockSignals(True)` 保护，杜绝临时状态污染用户持久化首选项。
+        3. **强势板块龙头突击时间片自动持久化与加载 (`ats/ui/hot_sector_leaderboard.py`)**：
+           - 启动时自动通过 `load_config_node("hot_leaderboard_time_slice", "")` 回显并应用上一次选中的类型；
+           - 下拉框选择变动时自动持久化并原位更新表格数据；
+        4. **全量自动化测试 100% 验证通过 (16/16 PASSED)**：
+           - 新建 `tests/test_time_slice_persistence_and_sbc_two_line.py`（3/3 PASSED 全部绿灯通过）；
+           - 回归 `tests/test_sbc_tooltip_styling.py`、`tests/test_sbc_ctrl_c_and_alt_exit_persistence.py` 与 `tests/test_sbc_performance_optimization.py`（13/13 PASSED 全部绿灯通过）。
+
 ## 2026-09-18 10:25
 - [x] **【彻底解决 SBC 实盘分时走势图周期切换等按钮鼠标悬停 ToolTip 白底白字/高光白块不可读问题，全局应用暗黑金融质感高对比配色】(`ats/ui/intraday_strategy_dialog.py`, `run_sbc.py`, `tests/test_sbc_tooltip_styling.py`)**：
     - [x] **操盘手现场明确指示与真实痛点 (P0)**：

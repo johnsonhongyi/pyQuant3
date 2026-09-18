@@ -1255,7 +1255,7 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
         self.btn_log.clicked.connect(self._open_tdx_log_dialog)
         header_lay.addWidget(self.btn_log)
 
-        # ⏱️ 盘中时间片生命周期直选 (支持实盘时间自动跟随 / 手动点选锁定)
+        # ⏱️ 盘中时间片生命周期直选 (支持实盘时间自动跟随 / 手动点选锁定 / 自动持久化记忆最后使用类型)
         self.combo_time_slice = QComboBox()
         self.combo_time_slice.addItems([
             "⚡ 自动实盘跟随",
@@ -1266,13 +1266,25 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
             "⚠️ 14:00~14:45 尾盘诱多",
             "🔒 14:45~15:00 尾盘定盘"
         ])
+        saved_slice = load_config_node("hot_leaderboard_time_slice", "")
+        if saved_slice:
+            idx = self.combo_time_slice.findText(str(saved_slice))
+            if idx >= 0:
+                self.combo_time_slice.setCurrentIndex(idx)
+            else:
+                for i in range(self.combo_time_slice.count()):
+                    txt = self.combo_time_slice.itemText(i)
+                    if str(saved_slice) in txt or txt in str(saved_slice):
+                        self.combo_time_slice.setCurrentIndex(i)
+                        break
+
         self.combo_time_slice.setMinimumWidth(155)
         self.combo_time_slice.setStyleSheet("""
             QComboBox { background-color: #241e12; color: #ffd700; border: 1px solid #ffaa00; border-radius: 3px; padding: 2px 4px; font-weight: bold; font-size: 8.5pt; min-width: 150px; }
             QComboBox::drop-down { width: 16px; }
             QComboBox QAbstractItemView { background-color: #1e1e24; color: #ffd700; selection-background-color: #3d3014; }
         """)
-        self.combo_time_slice.currentIndexChanged.connect(lambda: self._render_table_data(self.cached_results))
+        self.combo_time_slice.currentIndexChanged.connect(self._on_time_slice_changed)
         header_lay.addWidget(self.combo_time_slice)
 
         # ⏱️ 涨速交易时段分段选择器 (极窄紧凑模式，支持30分/15分/60分/开盘/60秒，自动持久化记忆)
@@ -1424,6 +1436,18 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
         layout.addWidget(self.bottom_frame)
         self.setLayout(layout)
         self._update_speed_column_header()
+
+    def _on_time_slice_changed(self, idx: int):
+        """用户切换龙头突击时间片生命周期选项：自动持久化并触发原位刷新"""
+        if hasattr(self, 'combo_time_slice'):
+            curr_txt = self.combo_time_slice.itemText(idx)
+            if curr_txt and not getattr(self, '_restoring_time_slice', False):
+                try:
+                    save_config_node("hot_leaderboard_time_slice", str(curr_txt).strip())
+                except Exception as e:
+                    logger.debug(f"持久化龙头突击时间片配置异常: {e}")
+        if hasattr(self, 'cached_results') and self.cached_results:
+            self._render_table_data(self.cached_results)
 
     def toggle_filter_state(self):
         """切换策略公式过滤状态并全局持久化"""
