@@ -1,3 +1,22 @@
+## 2026-09-18 14:45
+- [x] **【新股次新超短检测工具输入框右键快捷粘贴股票代码 & ATS 模式 SBC 严格忽略 Alt+关闭/Alt+X 批量退出功能】(`ats/ui/ipo_subnew_detector_dialog.py`, `ats/ui/intraday_strategy_dialog.py`, `tests/test_sbc_ats_mode_alt_exit_guard_and_paste.py`)**：
+    - [x] **操盘手现场明确指示与真实痛点 (P0)**：
+        - “检测工具输入框支持右键黏贴code功能”；
+        - “2.ats打开的sbc按住alt+x不要执行--sbc-holdings模式的全部关闭功能,当ats打开的sbc模式时忽略alt+关闭的功能”；
+        - 消除在 ATS 主程序查看个股 SBC 分时走势时，操盘手按住 Alt 误点击关闭键或按 Alt+X 导致触发持仓独立盯盘启动器的全部关闭与退出程序的隐患；并在超短检测工具输入框支持右键快捷粘贴股票代码与一键添加。
+    - [x] **全体系工程落地与修复验证 (KISS / SOLID / DRY)**：
+        1. **新股次新超短检测工具输入框右键粘贴强化**：
+           - 为 `self.txt_code` 启用 `CustomContextMenu`，挂载金融暗黑风格右键上下文菜单；
+           - 智能识别系统剪贴板中的股票代码：当包含 6 位有效数字时，优先呈现 `📋 粘贴股票代码 ({code})` 与 `➕ 粘贴并立即添加 ({code})` 快捷动作，一步到位填入或添加；
+           - 补齐剪切、复制、全选、清空等标准编辑菜单项。
+        2. **ATS 模式 SBC 走势窗口 Alt+关闭/Alt+X 严格防误关保护**：
+           - 建立 `is_ats_sbc_mode()` 智能环境识别机制：凡非 `--sbc-holdings` 独立启动器模式（或带有父级 ATS 属主）打开的 SBC 窗口，均严格认定为 ATS 模式；
+           - 在 `closeEvent` 中：当检测到操盘手按住 Alt 点击关闭 [X] 时，若处于 ATS 模式，直接记录日志并忽略全部退出逻辑，仅安全正常关闭当前单个个股窗口；
+           - 在 `keyPressEvent` 与 `_exit_and_save_all` 中：拦截 `Alt+X` / `Alt+Escape` / `Ctrl+Shift+Q`，在 ATS 模式下仅关闭当前单个窗口，绝不调用 `quit_and_save_all_sbc_windows()` 与 `app.quit()`。
+        3. **自动化测试 100% 验证通过 (28/28 PASSED)**：
+           - 专项测试 `tests/test_sbc_ats_mode_alt_exit_guard_and_paste.py` 4/4 绿灯通过；
+           - 全量回归 `test_tabs_double_click_sbc_unification.py`、`test_tdx_indices_and_etf_sbc_integrity.py`、`test_sbc_zoom_and_amplitude.py`、`test_sbc_ctrl_c_and_alt_exit_persistence.py` 全部通过。
+
 ## 2026-09-18 14:35
 - [x] **【彻底修复 _paint_intraday 中 NameError: max_valid_price 变量未定义、消除分时顶栏溢出 & 根除盘中分时缓存导致不自动更新漏洞】(`ats/ui/intraday_strategy_dialog.py`, `ats/tdx_realtime_fetcher.py`, `tests/test_sbc_zoom_and_amplitude.py`)**：
     - [x] **问题根因定位 (P0)**：
