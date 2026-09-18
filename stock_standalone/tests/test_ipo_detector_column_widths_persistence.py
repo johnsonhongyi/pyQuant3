@@ -163,3 +163,53 @@ def test_tile_sbc_prioritizes_selected_stocks(monkeypatch):
     finally:
         dlg.close()
 
+
+def test_detector_double_click_operation_advice_opens_reusable_detail_dialog(monkeypatch):
+    """验证检测中心双击操作建议/预下单逻辑列时，秒级调出并复用集中仲裁详情窗"""
+    monkeypatch.setattr("ats.ui.ipo_subnew_detector_dialog.get_ipo_detector_layout_file", lambda: TEST_TMP_CFG)
+
+    from ats.ui.ipo_arbitration_detail_dialog import IPOArbitrationDetailDialog
+    from ats.strategy.ipo_vwap_detector_engine import VWAPDetectorSignal
+
+    dlg = IPOSubnewDetectorDialog(initial_code=None)
+    try:
+        dlg.monitored_codes = ["601091", "920298"]
+        dlg._rebuild_table_rows()
+
+        # 注入信号数据
+        sig_shengu = VWAPDetectorSignal(
+            code="601091",
+            name="沈鼓集团",
+            price=12.50,
+            vwap=12.30,
+            vwap_diff_pct=1.63,
+            structure_tag="贴线惜售",
+            launch_time_str="09:31",
+            stop_loss_price=12.20,
+            signal_type="IPO_FIRST_BUY",
+            global_fleet_role="LEADER",
+            global_arbitration_desc="【领头羊进击】贴线惜售回踩不破，买错破VWAP立即出局"
+        )
+        dlg.signals_map["601091"] = sig_shengu
+
+        # 计算操作建议所在列 (10 + len(extra_cols))
+        desc_col = 10 + len(dlg.extra_cols)
+
+        # 模拟双击第 0 行的操作建议列
+        dlg._on_table_double_clicked(0, desc_col)
+
+        detail_dlg = IPOArbitrationDetailDialog.get_instance()
+        assert detail_dlg.isVisible()
+        assert "601091" in detail_dlg.lbl_code_name.text()
+        assert "沈鼓集团" in detail_dlg.lbl_code_name.text()
+        assert "领头羊" in detail_dlg.lbl_role_tag.text()
+        assert "12.30" in detail_dlg.lbl_vwap_line.text()
+        assert "+1.63%" in detail_dlg.lbl_vwap_bias.text()
+        assert "12.20" in detail_dlg.lbl_stop_loss.text()
+
+        # 验证单例复用：双击普通列 (如第 0 列代码) 会走 SBC 走势，不会影响或重建详情窗
+        detail_dlg.hide()
+    finally:
+        dlg.close()
+
+

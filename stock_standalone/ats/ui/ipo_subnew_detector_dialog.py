@@ -1687,10 +1687,34 @@ class IPOSubnewDetectorDialog(QMainWindow):
         self.save_persisted_state()
         self.trigger_scan()
 
-    def _on_table_double_clicked(self, row: int, col: int):
+    def _open_arbitration_detail_for_row(self, row: int):
+        """【🎯 操作建议与集中仲裁极速详情窗】：从单例复用池秒级调出/刷新详情窗"""
         it = self.table.item(row, 0)
-        if it:
-            code = it.text().strip()
+        if not it:
+            return
+        code = "".join(ch for ch in it.text().strip() if ch.isdigit()).zfill(6)
+        sig = self.signals_map.get(code)
+        try:
+            from ats.ui.ipo_arbitration_detail_dialog import IPOArbitrationDetailDialog
+            IPOArbitrationDetailDialog.show_or_update(code, signal_obj=sig, parent=self)
+            self.lbl_status.setText(f"🎯 已调出操作建议与集中仲裁详情: {code}")
+        except Exception as e:
+            logger.error(f"调出集中仲裁透视详情窗异常: {e}")
+
+    def _on_table_double_clicked(self, row: int, col: int):
+        """
+        双击单元格智能分发：
+        - 若双击“操作建议 / 为什么 (预下单逻辑)”列：秒级调出/复用集中仲裁详情窗 (极速模式)；
+        - 若双击其它列 (代码/名称/现价等)：秒级调出 SBC 10d VWAP 走势图。
+        """
+        it = self.table.item(row, 0)
+        if not it:
+            return
+        code = "".join(ch for ch in it.text().strip() if ch.isdigit()).zfill(6)
+        desc_col = 10 + len(self.extra_cols)
+        if col == desc_col:
+            self._open_arbitration_detail_for_row(row)
+        else:
             self._open_sbc_for_code(code)
 
     def _on_shortcut_space_open_sbc(self):
@@ -1908,6 +1932,12 @@ class IPOSubnewDetectorDialog(QMainWindow):
                 color: #00e5ff;
             }
         """)
+
+        # 0. 🎯 查看操作建议与集中仲裁详情 (极速复用模式)
+        act_detail = QAction(f"🎯 查看操作建议与集中仲裁详情 ({code_clean} {name})", self)
+        act_detail.triggered.connect(lambda: self._open_arbitration_detail_for_row(row))
+        menu.addAction(act_detail)
+        menu.addSeparator()
 
         # 1. 复制股票代码
         copy_label = f"📋 复制股票代码 {code_clean}"

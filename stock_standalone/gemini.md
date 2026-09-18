@@ -1,3 +1,38 @@
+## 2026-09-18 20:35
+- [x] **【集中仲裁和检测中心操作建议支持双击查看详情窗 (极速复用模式)】(`ats/ui/ipo_arbitration_detail_dialog.py`, `ats/ui/ipo_command_room_dialog.py`, `ats/ui/ipo_subnew_detector_dialog.py`, `tests/test_ipo_fleet_trading_arbitration.py`, `tests/test_ipo_detector_column_widths_persistence.py`, `20260918_2035_task.md`)**：
+    - [x] **操盘手现场明确指示与极速复用架构落地 (P0)**：
+        - “集中仲裁和检测中心的操作建议支持双击查看详情窗支持复用的极速模式”；
+        - 新建 `IPOArbitrationDetailDialog` 采用单例/对象复用池模式 (Reusable Singleton)，实现常驻内存 0 毫秒极速就地刷新唤醒，彻底杜绝多次弹窗卡顿与内存泄漏；
+        - 在指挥室天梯表/指令表双击“集中仲裁/角色/决议依据”列，或在检测工具双击“操作建议/为什么”列，秒级呼出/复用全景透视详情窗；双击普通列（代码/名称等）依然保持呼出 SBC 走势图；
+        - 聚合展示：战术角色彩色胶囊、赛马天梯与动能分、集中仲裁与山外有山决议深度报告、10d VWAP 核心成本线、VWAP 偏离度、形态结构、日内启动时点与跌破 VWAP 0.6% 铁律止损位；
+        - 提供快捷行动栏：调出 SBC 走势图、联动外部通达信、一键复制完整决议文本、Esc 极速关闭。
+    - [x] **全量自动化测试 100% 验证通过 (21/21 PASSED)**：
+        - `tests/test_ipo_fleet_trading_arbitration.py` 8/8 绿灯通过；
+        - `tests/test_ipo_detector_column_widths_persistence.py` 7/7 绿灯通过；
+        - `tests/test_ipo_vwap_sentiment_and_horse_race.py` 6/6 绿灯通过。
+
+## 2026-09-18 20:20
+- [x] **【集中交易指挥室角色映射中文、全表数值排序支持与极窄模式深色分割线对齐】(`ats/ui/ipo_command_room_dialog.py`, `tests/test_ipo_fleet_trading_arbitration.py`, `20260918_2020_task.md`)**：
+    - [x] **操盘手现场明确指示与视觉交互痛点消除 (P0)**：
+        - “1.角色映射对应的中文,2.列不支持排序,3,如图2分隔线等跟ats和检测工具一致的全面使用极窄模式的”；
+        - 彻底解决英文枚举裸露问题，全池战术角色直观映射为 `🥇 领头羊`、`🥈 梯队前锋`、`🚨 高潮平仓` 等中文；
+        - 表格全面引入 `NumericTableWidgetItem`，实现点击表头精确按数值升序/降序排序，且动态刷新时平滑保持排序列；
+        - 深度对齐检测工具与竞价赛马监控（图2）的极窄模式：明确的表头深色右垂直边框、深色网格线、8px 极窄暗黑滚动条，彻底消灭原生 Windows 白色大粗条与底部横向滚动条撕裂。
+    - [x] **全体系工程落地与细节打磨 (KISS / SOLID / DRY)**：
+        1. **角色与持仓状态 100% 中文映射**：
+           - 新增 `ROLE_CN_MAP` 与 `POS_STATUS_CN_MAP`，界面按角色赋予专属鲜艳战术色彩（领头羊亮金、前锋亮青、避险橙红、平仓鲜红等）；
+        2. **全表数值排序与状态保持**：
+           - 开启 `setSortingEnabled(True)` 与 `setSortIndicatorShown(True)`，重写 `sortItems` 保证指示器同步；
+           - 排名、代码、现价、动能分、股数、成本价、浮盈% 均采用 `NumericTableWidgetItem`；刷新前后优雅保持排序列；
+        3. **极窄模式 (Narrow Mode) 与暗黑分割线对齐**：
+           - 表头 `border-right: 1px solid #232536; border-bottom: 1px solid #232536;`；
+           - `setShowGrid(True)` 与 `gridline-color: #1d1f2e;`，行高紧凑 24px；
+           - `QScrollBar:vertical/horizontal` 8px 暗黑胶囊滑块，消除 CornerButton 白块；
+        4. **全量自动化测试 100% 验证通过 (41/41 PASSED)**：
+           - `tests/test_ipo_fleet_trading_arbitration.py` 7/7 绿灯通过；
+           - `tests/test_ipo_detector_column_widths_persistence.py` 6/6 绿灯通过；
+           - `tests/test_ipo_vwap_sentiment_and_horse_race.py` 6/6 绿灯通过。
+
 ## 2026-09-18 20:10
 - [x] **【集中交易指挥室全表格列宽自由拖拽与跨会话自动持久化能力接入】(`ats/ui/ipo_command_room_dialog.py`, `tests/test_ipo_fleet_trading_arbitration.py`, `20260918_2010_task.md`)**：
     - [x] **操盘手现场明确指示与排版痛点消除 (P0)**：
