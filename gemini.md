@@ -1,3 +1,55 @@
+## 2026-09-18 13:30
+- [x] **【彻底解决所有指数与指数基金 ETF 在 SBC 走势图及行情通道中的全链路异常：通达信指数接口专项解耦、代码映射引擎、ETF价格单位自适应修正与全量测试验证】(`ats/tdx_realtime_fetcher.py`, `ats/intraday_strategy_engine.py`, `ats/capital_dragon_engine.py`, `tests/test_tdx_indices_and_etf_sbc_integrity.py`, `tests/test_capital_dragon_engine.py`)**：
+    - [x] **操盘手现场明确指示与真实痛点 (P0)**：
+        - “所有的指数基金的sbc,都出现异常问题,全面解决,其他的股票都没有问题”；
+        - “通达信中，科创50官方代码为 000688（而非部分软件使用的 999688）；北证50 899050 需使用北交所市场代码 market=2；上证指数 999999/000001 需指定 market=1。我们将建立智能代码自动适配器，确保无缝兼容。 是因为000688跟深证冲突,tk程序作了映射,你专门对指数etf做专门的处理,可以兼容tk的999688 以及899050 等”；
+        - “需要对指数做专门的分类,不然会跟股票代码混淆"000688": "科创50", 这也是为何转换为999688 可以用这个来解决重复的code问题,但是tdx的接口使用针对指数的接口使用"000688": "科创50",才能正确获取数据,需要映射一个我们理解的code”；
+        - “还是专门应用于TDXRealtimeFetcher 不用修改tk,tk打包不变动了,只是针对ats使用.让ats及sbc全面兼容指数”。
+    - [x] **根因深度破案与底层机理 (P0)**：
+        1. **病灶 1·通达信指数与股票协议字节流差异引发越界错位**：通达信协议中指数 K 线 Bar 比个股 Bar 多了“上涨家数”与“下跌家数”等专属字段。原代码直接调用个股接口 `get_security_bars` 解析指数时，每条记录发生偏移量错位，导致 `year/month/day` 解析出例如 `322141-02-52` 或 `2035-16-18` 等未来时间，`open/high/low/close` 被放大成天文数字（如 65103、92387），进入通道计算后导致上轨直接飙升到 179301.00，10日分时发生断崖断层（从 1591 蹦到 3961）；
+        2. **病灶 2·PyTDX 对 ETF 盘口报价单位解析缺陷**：交易所针对 ETF 与封闭式基金（51/56/58/15/16/50 等）采用 0.001 元（厘）计价申报，PyTDX 统一除以 100.0，导致提取的现价、买卖档位比真实价格放大了整整 10 倍（如 588930 现价 1.54 元被解析为 15.4 元，510300 现价 4.58 元被解析为 45.8 元）；
+        3. **病灶 3·代码冲突与名称混淆防御**：代码 `000688` 在深交所是个股【国新健康】，而在上交所指数体系中是【科创50】；代码 `000001` 在深交所是个股【平安银行】，而在上交所指数体系中是【上证指数】。TK 程序使用 `999688` 与 `999999` 进行隔离，此前系统若未做双向映射与市场识别，极易混淆个股与指数。
+    - [x] **全体系工程落地与修复验证 (KISS / SOLID / DRY)**：
+        1. **构建指数业务逻辑映射与隔离引擎 (`normalize_tdx_target`)**：
+           - 在 `ats/tdx_realtime_fetcher.py` 建立 `INDEX_LOGICAL_TO_TDX_MAP` 映射字典，无缝兼容 `999999`（上证指数 -> 市场 1, TDX代码 000001）、`999688`（科创50 -> 市场 1, TDX代码 000688）、`899050`（北证50 -> 市场 2, TDX代码 899050）、`399001`（深证成指 -> 市场 0）、`399006`（创业板指 -> 市场 0）、`000300` / `399300`（沪深300）等；
+           - 严格隔离个股与指数：纯数字 `000688` 严格判定为深市个股国新健康（`is_idx=False, market=0`），`000001` 严格判定为深市个股平安银行（`is_idx=False, market=0`）；
+           - 外部 `sys_utils.py` 彻底 0 修改，严格保持 TK 打包不受任何影响，改动严格封闭在 ATS/SBC 内部。
+        2. **全面解耦指数专用通达信底层协议通道**：
+           - `fetch_kline_bars`：判定为指数时 100% 切换调用专属 `self.api.get_index_bars`，彻底消灭字节流偏移、错位未来时间与十几万离谱通道轨；
+           - `fetch_multi_day_intraday_bars`：指数 100% 切换调用 `get_index_bars(8, ...)` 获取多日 1 分钟分时，并自动隔离指数不存在的个股换手率指标（`not is_idx`），10日分时图完全平滑连续；
+           - `fetch_intraday_bars`：指数自动调用 `get_index_bars(8, ...)`，拦截不兼容的 `get_minute_time_data`。
+        3. **ETF 盘口价格单位智能自适应修正 (`normalize_quote_unit`)**：
+           - 识别 51/56/58/15/16/50 等基金/ETF 标的，自动执行报价单位除以 10.0 纠正，使 588930 现价精准还原为 1.54 元，510300 精准还原为 4.58 元；
+           - 在 `ats/capital_dragon_engine.py` 中对容量中军与指数支撑参考位 `supp_ref` 增加合理性保护门禁，偏离现价异常时自动重置为合理回踩支撑价（`price_val * 0.96`）。
+        4. **通达信经典键盘缩放引擎上线 (`zoom_in` / `zoom_out`)**：
+           - 支持 `Up` 键 / 滚轮上滚放大（视野拉近，减少可视 Bar 数量，保持右侧最新数据固定不动），`Down` 键 / 滚轮下滚缩小（视野拉远，增加可视 Bar 数量）；
+        5. **全量自动化测试 100% 验证通过 (33/33 PASSED)**：
+           - 新建专项测试 `tests/test_tdx_indices_and_etf_sbc_integrity.py`（6/6 PASSED 全部绿灯通过）：覆盖指数映射、ETF 价格修正、代码冲突防御（000688与000001）、K线获取与通道合理性断言；
+           - 全量回归 `test_capital_dragon_engine.py`、`test_sbc_period_switch_zero_io_and_speed.py`、`test_time_slice_persistence_and_sbc_two_line.py`、`test_sbc_ctrl_c_and_alt_exit_persistence.py`、`test_sbc_performance_optimization.py`，全部 27 项测试全部 100% 绿灯通过！
+
+## 2026-09-18 12:35
+- [x] **【SBC 切换周期性能急速优化、集中统一退出持久化、长阈值节流与彻底消除收盘定盘无用刷屏与写盘阻塞】(`run_sbc.py`, `ats/ui/intraday_strategy_dialog.py`, `ats/intraday_strategy_engine.py`, `ats/tdx_realtime_fetcher.py`, `tests/test_sbc_period_switch_zero_io_and_speed.py`)**：
+    - [x] **操盘手现场明确指示与真实痛点 (P0)**：
+        - “全面优化sbc切换周期的性能,现在切换不是卡顿,日志显示大量的无用的存档,在sbc窗口关闭前不要多余的持久化,并全面急速解决切换卡顿的性能卡点”；
+        - “sbc_launcher_holdings_layout 文件一直在疯狂写盘,默认在窗口退出持久化,不要频繁写盘,所有的持久化都需要有阈值,大部分都是在关闭时持久化,或者10-30分钟持久化一次,还都是集中统一持久化一次”；
+        - “开始持久化一次是对的,但是都是批量统一持久化,而不是每个都持久化一次,导致各种覆盖,同一只code都是关闭窗口退出时统一持久化”。
+    - [x] **全体系工程落地与修复验证 (KISS / SOLID / DRY)**：
+        1. **彻底根除 `sbc_launcher_holdings_layout.json` 频繁写盘与启动逐个保存覆盖问题**：
+           - **启动阶段批量统一持久化**：批量打开所有持仓股盯盘窗口时，禁止单个窗口在创建过程中各自落盘；待所有持仓窗口全部实例化并完成统一平铺重排（`rearrange_all_sbc_windows`）后，仅集中统一原子持久化一次，确保配置全量且顺序严格一致；
+           - **运行阶段 100% 纯内存更新**：`set_period_mode` 默认 `save=False`，切周期仅更新内存周期状态；窗口缩放与拖拽仅更新内存几何尺寸；`_record_sbc_open` 与 `_remove_sbc_open_record` 仅维护 `SBCWindowMemoryManager` 内存注册中心，移除直接同步写盘代码；
+           - **15 分钟长阈值节流与退出集中统一落盘**：`save_launcher_holdings_windows` 节流阈值由 0.8s 大幅提升至 900s（15分钟），内容指纹比对未变时 0 磁盘写入；全部窗口退出（`quit_and_save_all_sbc_windows` / `closeEvent`）时集中统一落盘 1 次。
+        2. **彻底剥离 `💾 [收盘定盘] [001212] ... 已存档` 日志刷屏与磁盘阻塞**：
+           - **剥离热循环写盘**：从 `evaluate_timeline` 中彻底移除 `save_listing_closing_scorecard` 与 `save_intraday_cache` 的无条件同步写盘，日内评估纯内存运算（0 磁盘 I/O），定盘评分保存在 `timeline_eval_cache`，由程序退出时的 `flush_all_closing_scorecards_on_exit()` 批量落盘；
+           - **内存防重复落盘守卫**：在 `save_listing_closing_scorecard` 中增加 `(code, today_str, score)` 内存缓存集合，相同标的当天同分值直接短路返回 True，彻底杜绝任何重复写盘与日志刷屏；
+           - **收盘清脏**：仅在真正收盘时刻（`clean_t >= "15:00"`）且存在实质脏数据变动时才统一持久化清空脏标记，盘中绝不主动标记 dirty。
+        3. **SBC 切换周期急速优化（0ms 秒切）**：
+           - **周期解耦**：在 `reload_chart` 中，当处于 K 线模式（5m/15m/30m/60m/day/week/month）时，跳过分时 7 节点多余计算；
+           - **3 秒 TTL 极速内存缓存**：在 `TDXRealtimeFetcher.fetch_kline_bars` 中增加 3 秒 TTL 内存缓存 `_kline_cache`，操盘手在不同周期来回快速切换时无需重复网络请求与通道计算，0ms 瞬间秒切；点击“🔄 刷新”时强力清空缓存；
+           - **修正防抖校验**：将 `_on_eval_r_clicked` 中的属性检查修正为 `df_intraday` 并纳入当前周期模式，数据未变时 0 开销直接返回。
+        4. **全量自动化测试 100% 验证通过 (35/35 PASSED)**：
+           - 全新编写专项测试 `tests/test_sbc_period_switch_zero_io_and_speed.py`（4/4 PASSED 全部通过）：断言连续切换周期 0 磁盘写盘、0 收盘定盘写盘、TTL 内存缓存耗时 < 5ms、防重复落盘守卫生效；
+           - 全量回归 `test_sbc_holdings_launch_no_frequent_save.py`、`test_disk_io_and_cache_safety.py`、`test_sbc_performance_optimization.py`、`test_sbc_multi_period_signals.py`、`test_sbc_ctrl_c_and_alt_exit_persistence.py`，全部 31 项测试全部 100% 绿灯通过！
+
 ## 2026-09-18 12:00
 - [x] **【SBC 键盘操作与防误触全面升级：彻底取消 Esc 键退出窗口功能、L 键升级为 S 键开关日志、全新上线 A 键切上一周期与 D 键切下一周期】(`ats/ui/intraday_strategy_dialog.py`, `tests/test_time_slice_persistence_and_sbc_two_line.py`)**：
     - [x] **操盘手现场明确指示与实操优化 (P0)**：

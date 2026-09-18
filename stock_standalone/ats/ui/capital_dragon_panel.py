@@ -1724,7 +1724,9 @@ class CapitalDragonPanel(QWidget):
         logger.info(f"先锋双击打开 SBC: {name} ({code})")
         self.open_sbc_chart(code, name)
         self.stock_double_clicked.emit(code, name)
-        if self.main_window and hasattr(self.main_window, 'on_stock_clicked'):
+        if self.main_window and hasattr(self.main_window, 'open_sbc_for_stock'):
+            self.main_window.open_sbc_for_stock(code, name)
+        elif self.main_window and hasattr(self.main_window, 'on_stock_clicked'):
             self.main_window.on_stock_clicked(code, name, {})
 
     def _on_row_double_clicked(self, item):
@@ -1743,6 +1745,7 @@ class CapitalDragonPanel(QWidget):
         if c_item and n_item:
             code = _clean_code(c_item.text().strip())
             name = n_item.text().replace("⭐", "").strip()
+            self.open_sbc_chart(code, name)
             self.stock_double_clicked.emit(code, name)
 
     def _copy_to_clipboard(self, code: str, name: str = ""):
@@ -1869,7 +1872,10 @@ class CapitalDragonPanel(QWidget):
             act_sbc.triggered.connect(lambda checked=False, c=code, n=name: self.open_sbc_chart(c, n))
 
             act_detail = menu.addAction(f"🔍 查看 {name}({code}) 个股详情")
-            act_detail.triggered.connect(lambda checked=False, c=code, n=name: self.stock_double_clicked.emit(c, n))
+            def _view_detail(c_val=code, n_val=name):
+                if self.main_window and hasattr(self.main_window, 'on_stock_clicked'):
+                    self.main_window.on_stock_clicked(c_val, n_val, {})
+            act_detail.triggered.connect(lambda checked=False: _view_detail())
 
             # 4. 🎯 发送到新股次新超短检测工具
             act_ipo = menu.addAction(f"🎯 发送到新股次新超短检测工具 ({code})")

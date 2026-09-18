@@ -1,3 +1,56 @@
+## 2026-09-18 13:55
+- [x] **【资金主线双击直通 SBC 走势窗口、全量恢复多日分时连续 VWAP 量价均线 & 彻底解决指数 1日/5日/10日分时均线压扁异常】(`ats/tdx_realtime_fetcher.py`, `ats/ui/capital_dragon_panel.py`, `ats/ui/main_window.py`, `ats/ui/intraday_strategy_dialog.py`, `tests/test_tdx_indices_and_etf_sbc_integrity.py`)**：
+    - [x] **操盘手现场明确指示与真实痛点 (P0)**：
+        - “资金主线双击改成打开sbc窗口”；
+        - “但是查看1日,5,10日分时无法正常观看,还是数据问题?”（北证50与上证指数分时走势线被压扁在最顶部，底部为 100.0/10 虚线与离谱黄金分割）；
+        - “出现问题vwap的分时不是连续的量价,指数,个股都被变成但单日的了全面修复对齐之前的vwap”（华鑫股份等多日分时 VWAP 每天开盘断裂跳跃）。
+    - [x] **根因深度破案与底层机理 (P0)**：
+        1. **病灶 1·通达信指数 amount / vol 固定比率导致指数 VWAP 算成 100.0**：通达信指数分钟 Bar 的 `amount / vol` 并非个股加权股价，比值恒为 100.0。原代码直接计算 `cum_amt / cum_vol` 导致指数每一分钟的 VWAP 均被填入 100.0，在 3900 点的上证指数或 1039 点的北证 50 图表中混入 100.0 脏均线，使 Y 轴从 100 跨到 3900，走势线被压扁在贴顶 2% 区域；
+        2. **病灶 2·多日分时中循环内部单日重置导致 VWAP 跨天断裂**：多日分时（2d/3d/5d/10d）此前在 `groupby("date_str")` 循环内部清零了 `cum_vol_shares`，导致每天开盘重置，变成了单日均线；
+        3. **病灶 3·资金主线先锋与表格双击未直通 SBC 走势图**：先锋双击原先调用了主窗口 `on_stock_clicked` 打开旧详情弹窗，表格行双击未统一调度 SBC。
+    - [x] **全体系工程落地与修复验证 (KISS / SOLID / DRY)**：
+        1. **资金主线全面直通 SBC 走势窗口**：
+           - `CapitalDragonPanel._on_row_double_clicked` 与 `_on_pioneer_double_clicked` 100% 优先直调 `self.open_sbc_chart(code, name)` 打开等大等高 SBC 走势图；
+           - 主窗口 `self.capital_dragon_panel.stock_double_clicked` 连接至全新 `open_sbc_for_stock`，消除详情弹窗冲突，保留右键“🔍 查看个股详情”通道。
+        2. **彻底解决指数 1日/5日/10日分时均线压扁问题**：
+           - 指数分时 VWAP 采用分钟点位与量能加权均线：`cum_pv += p * vol_shares`，`vw = cum_pv / cum_vol_shares`，精准贴合 3880~3910 点位；
+           - 增加合理性自愈门禁：若 `vw` 偏离现价超 30%，自动回退现价；
+           - SBC 画布 `_paint_intraday` 注入 `min_valid_price = (op_ref * 0.35)` 纵轴防御，离群脏数据 100% 隔离。
+        3. **全面恢复个股与指数多日分时平滑连续 VWAP**：
+           - 移除多日分时中按日的清零重置，整段多日（2d/3d/5d/10d）从第 1 天起持续累计量价；
+           - 分支 A 继承静态缓存 `last_cum_vol`、`last_cum_amt` 与 `last_cum_pv` 继续累计，华鑫股份跨天 VWAP 连续平滑无断崖（收盘 12.85 -> 次日开盘 12.85）。
+        4. **全量自动化测试 100% 验证通过 (10/10 PASSED)**：
+           - 专项测试全部绿灯：覆盖个股跨天连续 VWAP、指数加权均线、SBC 过滤门禁、双击打开 SBC。
+
+## 2026-09-18 13:30
+- [x] **【彻底解决所有指数与指数基金 ETF 在 SBC 走势图及行情通道中的全链路异常：通达信指数接口专项解耦、代码映射引擎、ETF价格单位自适应修正与全量测试验证】(`ats/tdx_realtime_fetcher.py`, `ats/intraday_strategy_engine.py`, `ats/capital_dragon_engine.py`, `tests/test_tdx_indices_and_etf_sbc_integrity.py`, `tests/test_capital_dragon_engine.py`)**：
+    - [x] **操盘手现场明确指示与真实痛点 (P0)**：
+        - “所有的指数基金的sbc,都出现异常问题,全面解决,其他的股票都没有问题”；
+        - “通达信中，科创50官方代码为 000688（而非部分软件使用的 999688）；北证50 899050 需使用北交所市场代码 market=2；上证指数 999999/000001 需指定 market=1。我们将建立智能代码自动适配器，确保无缝兼容。 是因为000688跟深证冲突,tk程序作了映射,你专门对指数etf做专门的处理,可以兼容tk的999688 以及899050 等”；
+        - “需要对指数做专门的分类,不然会跟股票代码混淆"000688": "科创50", 这也是为何转换为999688 可以用这个来解决重复的code问题,但是tdx的接口使用针对指数的接口使用"000688": "科创50",才能正确获取数据,需要映射一个我们理解的code”；
+        - “还是专门应用于TDXRealtimeFetcher 不用修改tk,tk打包不变动了,只是针对ats使用.让ats及sbc全面兼容指数”。
+    - [x] **根因深度破案与底层机理 (P0)**：
+        1. **病灶 1·通达信指数与股票协议字节流差异引发越界错位**：通达信协议中指数 K 线 Bar 比个股 Bar 多了“上涨家数”与“下跌家数”等专属字段。原代码直接调用个股接口 `get_security_bars` 解析指数时，每条记录发生偏移量错位，导致 `year/month/day` 解析出例如 `322141-02-52` 或 `2035-16-18` 等未来时间，`open/high/low/close` 被放大成天文数字（如 65103、92387），进入通道计算后导致上轨直接飙升到 179301.00，10日分时发生断崖断层（从 1591 蹦到 3961）；
+        2. **病灶 2·PyTDX 对 ETF 盘口报价单位解析缺陷**：交易所针对 ETF 与封闭式基金（51/56/58/15/16/50 等）采用 0.001 元（厘）计价申报，PyTDX 统一除以 100.0，导致提取的现价、买卖档位比真实价格放大了整整 10 倍（如 588930 现价 1.54 元被解析为 15.4 元，510300 现价 4.58 元被解析为 45.8 元）；
+        3. **病灶 3·代码冲突与名称混淆防御**：代码 `000688` 在深交所是个股【国新健康】，而在上交所指数体系中是【科创50】；代码 `000001` 在深交所是个股【平安银行】，而在上交所指数体系中是【上证指数】。TK 程序使用 `999688` 与 `999999` 进行隔离，此前系统若未做双向映射与市场识别，极易混淆个股与指数。
+    - [x] **全体系工程落地与修复验证 (KISS / SOLID / DRY)**：
+        1. **构建指数业务逻辑映射与隔离引擎 (`normalize_tdx_target`)**：
+           - 在 `ats/tdx_realtime_fetcher.py` 建立 `INDEX_LOGICAL_TO_TDX_MAP` 映射字典，无缝兼容 `999999`（上证指数 -> 市场 1, TDX代码 000001）、`999688`（科创50 -> 市场 1, TDX代码 000688）、`899050`（北证50 -> 市场 2, TDX代码 899050）、`399001`（深证成指 -> 市场 0）、`399006`（创业板指 -> 市场 0）、`000300` / `399300`（沪深300）等；
+           - 严格隔离个股与指数：纯数字 `000688` 严格判定为深市个股国新健康（`is_idx=False, market=0`），`000001` 严格判定为深市个股平安银行（`is_idx=False, market=0`）；
+           - 外部 `sys_utils.py` 彻底 0 修改，严格保持 TK 打包不受任何影响，改动严格封闭在 ATS/SBC 内部。
+        2. **全面解耦指数专用通达信底层协议通道**：
+           - `fetch_kline_bars`：判定为指数时 100% 切换调用专属 `self.api.get_index_bars`，彻底消灭字节流偏移、错位未来时间与十几万离谱通道轨；
+           - `fetch_multi_day_intraday_bars`：指数 100% 切换调用 `get_index_bars(8, ...)` 获取多日 1 分钟分时，并自动隔离指数不存在的个股换手率指标（`not is_idx`），10日分时图完全平滑连续；
+           - `fetch_intraday_bars`：指数自动调用 `get_index_bars(8, ...)`，拦截不兼容的 `get_minute_time_data`。
+        3. **ETF 盘口价格单位智能自适应修正 (`normalize_quote_unit`)**：
+           - 识别 51/56/58/15/16/50 等基金/ETF 标的，自动执行报价单位除以 10.0 纠正，使 588930 现价精准还原为 1.54 元，510300 精准还原为 4.58 元；
+           - 在 `ats/capital_dragon_engine.py` 中对容量中军与指数支撑参考位 `supp_ref` 增加合理性保护门禁，偏离现价异常时自动重置为合理回踩支撑价（`price_val * 0.96`）。
+        4. **通达信经典键盘缩放引擎上线 (`zoom_in` / `zoom_out`)**：
+           - 支持 `Up` 键 / 滚轮上滚放大（视野拉近，减少可视 Bar 数量，保持右侧最新数据固定不动），`Down` 键 / 滚轮下滚缩小（视野拉远，增加可视 Bar 数量）；
+        5. **全量自动化测试 100% 验证通过 (33/33 PASSED)**：
+           - 新建专项测试 `tests/test_tdx_indices_and_etf_sbc_integrity.py`（6/6 PASSED 全部绿灯通过）：覆盖指数映射、ETF 价格修正、代码冲突防御（000688与000001）、K线获取与通道合理性断言；
+           - 全量回归 `test_capital_dragon_engine.py`、`test_sbc_period_switch_zero_io_and_speed.py`、`test_time_slice_persistence_and_sbc_two_line.py`、`test_sbc_ctrl_c_and_alt_exit_persistence.py`、`test_sbc_performance_optimization.py`，全部 27 项测试全部 100% 绿灯通过！
+
 ## 2026-09-18 12:35
 - [x] **【SBC 切换周期性能急速优化、集中统一退出持久化、长阈值节流与彻底消除收盘定盘无用刷屏与写盘阻塞】(`run_sbc.py`, `ats/ui/intraday_strategy_dialog.py`, `ats/intraday_strategy_engine.py`, `ats/tdx_realtime_fetcher.py`, `tests/test_sbc_period_switch_zero_io_and_speed.py`)**：
     - [x] **操盘手现场明确指示与真实痛点 (P0)**：

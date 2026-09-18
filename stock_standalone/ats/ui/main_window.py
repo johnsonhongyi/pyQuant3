@@ -2379,7 +2379,7 @@ class ATSMainWindow(QMainWindow):
         # 🐉 Tab 0 (C 位): 资金主线与龙头中枢
         self.capital_dragon_panel = CapitalDragonPanel(main_window=self)
         self.capital_dragon_panel.stock_selected.connect(self.link_stock)
-        self.capital_dragon_panel.stock_double_clicked.connect(self.on_stock_clicked)
+        self.capital_dragon_panel.stock_double_clicked.connect(self.open_sbc_for_stock)
         self.top_tabs.addTab(self.capital_dragon_panel, "🐉 资金主线与龙头中枢")
         mark_checkpoint("03.3.2 CapitalDragonPanel (Tab 0 C-Bit)")
 
@@ -3402,6 +3402,18 @@ class ATSMainWindow(QMainWindow):
             res['status'] = f"代码: {code_clean} | 已成功对接实盘行情快照核心特征"
 
         return res
+
+    def open_sbc_for_stock(self, code, name=""):
+        """【📈 双击打开 SBC 走势窗口】资金主线与核心标的双击直通 SBC 通道走势图"""
+        try:
+            from ats.ui.intraday_strategy_dialog import open_sbc_chart_dialog
+            c_clean = str(code).strip()
+            c_digits = "".join(x for x in c_clean if x.isdigit()).zfill(6) if any(x.isdigit() for x in c_clean) else c_clean
+            open_sbc_chart_dialog(parent_win=self, code=c_digits, period_mode="10d")
+            if hasattr(self, 'status_bar') and self.status_bar:
+                self.status_bar.showMessage(f"📈 已打开【{name or c_digits}】SBC 走势图", 3000)
+        except Exception as e:
+            logger.error(f"[ATSMainWindow] 打开 SBC 走势图异常: {e}")
 
     def on_stock_clicked(self, code, name, context_info=None, batch_codes=None):
         self.status_bar.showMessage(f"双击详情: {code} {name}")
