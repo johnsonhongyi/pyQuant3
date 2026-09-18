@@ -31,10 +31,30 @@ from ats.strategy.ipo_trading_center import IPOTradingCenter, IPOOrderDirective,
 from ats.strategy.ipo_vwap_detector_engine import VWAPDetectorSignal
 from ats.ui.styles import (
     setup_header_persistence, auto_fit_columns_once,
-    load_config_node, save_config_node, save_config_nodes
+    load_config_node, save_config_node, save_config_nodes,
+    NumericTableWidgetItem
 )
 
 logger = logging.getLogger("IPOCommandRoomDialog")
+
+# 集中交易全局战术角色对应标准中文映射字典
+ROLE_CN_MAP = {
+    "LEADER": "🥇 领头羊",
+    "VANGUARD": "🥈 梯队前锋",
+    "FOLLOWER": "🥉 后排跟风",
+    "CLIMAX_EXIT": "🚨 高潮平仓",
+    "PANIC_DEFENSE": "🛡️ 全局避险",
+    "STOP_LOSS": "⛔ 买错立斩",
+    "CLIMAX_DEFENSE": "🌋 高潮避险",
+}
+
+# 实盘持仓状态对应中文映射字典
+POS_STATUS_CN_MAP = {
+    "HOLDING": "🟢 持仓中",
+    "CLOSED": "⚪ 已平仓",
+    "STOP_LOSS": "⛔ 止损清仓",
+    "PROFIT_EXIT": "💰 止盈锁定",
+}
 
 
 class IPOCommandRoomTableWidget(QTableWidget):
@@ -43,6 +63,7 @@ class IPOCommandRoomTableWidget(QTableWidget):
     - 原生拦截 Up / Down / PageUp / PageDown，切行时防抖联动主检测工具与外部通达信；
     - 支持 Space (空格) 调出 SBC 走势图；
     - 支持 F 键 / 回车联动通达信；
+    - 全面支持点击表头升序/降序数值智能排序；
     - 接入全系统统一标准的列宽自由拖拽与跨会话自动持久化体系 (setup_persistence)；
     - 支持一键自适应列宽与一键恢复默认列宽。
     """
@@ -52,8 +73,20 @@ class IPOCommandRoomTableWidget(QTableWidget):
         self.setMouseTracking(True)
         self.horizontalHeader().setHighlightSections(False)
         self.horizontalHeader().setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        self.horizontalHeader().setSortIndicatorShown(True)
+        self.setSortingEnabled(True)
+        self.setShowGrid(True)
+        self.setAlternatingRowColors(True)
+        self.verticalHeader().setVisible(False)
+        self.verticalHeader().setDefaultSectionSize(24)
         self._config_key: Optional[str] = None
         self._default_widths: Optional[List[int]] = None
+
+    def sortItems(self, column: int, order: Qt.SortOrder = Qt.SortOrder.AscendingOrder):
+        """【排序同步守卫】：执行排序前同步设置表头 Indicator，保证升降序箭头正确更新"""
+        if self.horizontalHeader() is not None:
+            self.horizontalHeader().setSortIndicator(column, order)
+        super().sortItems(column, order)
 
     def setup_persistence(self, config_key: str, default_widths: Optional[List[int]] = None, max_widths=None):
         """接入全系统统一标准持久化体系，表头全列 Interactive 自由拖拽且防抖自动落盘"""
@@ -141,53 +174,110 @@ class IPOCommandRoomDialog(QDialog):
         self.resize(1180, 720)
         self.setStyleSheet("""
             QDialog {
-                background-color: #0e0f17;
+                background-color: #0d0e15;
                 color: #ffffff;
             }
             QLabel {
                 color: #e2e2e5;
-                font-size: 9pt;
+                font-size: 8.5pt;
             }
             QGroupBox {
-                border: 1px solid #282a3a;
-                border-radius: 6px;
-                margin-top: 10px;
+                border: 1px solid #232536;
+                border-radius: 4px;
+                margin-top: 8px;
                 font-weight: bold;
                 color: #00e5ff;
-                padding-top: 12px;
+                padding-top: 8px;
             }
             QGroupBox::title {
                 subcontrol-origin: margin;
                 subcontrol-position: top left;
-                padding: 0 5px;
+                padding: 0 4px;
             }
             QPushButton {
-                background-color: #1e202f;
-                border: 1px solid #3d4158;
-                border-radius: 4px;
+                background-color: #1a1c29;
+                border: 1px solid #33374d;
+                border-radius: 3px;
                 color: #ffffff;
-                font-size: 9pt;
-                padding: 5px 14px;
+                font-size: 8.5pt;
+                padding: 3px 10px;
             }
             QPushButton:hover {
-                background-color: #2b2e44;
+                background-color: #26293d;
                 border-color: #00e5ff;
             }
+            /* 极窄模式表格：深色网格分割线、交替背景色与高对比选中态 */
             QTableWidget {
-                background-color: #12141f;
-                border: 1px solid #232636;
-                gridline-color: #1a1c29;
+                background-color: #10121d;
+                alternate-background-color: #131522;
+                border: 1px solid #232536;
+                gridline-color: #1d1f2e;
                 color: #ffffff;
                 font-size: 8.5pt;
                 selection-background-color: #26334d;
+                selection-color: #ffffff;
+            }
+            /* 极窄模式表头：明确的垂直右边框与下边框分隔线 */
+            QHeaderView {
+                background-color: #161826;
+                border: none;
             }
             QHeaderView::section {
-                background-color: #181a29;
-                color: #8f93a8;
+                background-color: #161826;
+                color: #9aa0a6;
                 border: none;
-                border-bottom: 1px solid #2a2d40;
-                padding: 4px 6px;
+                border-right: 1px solid #232536;
+                border-bottom: 1px solid #232536;
+                padding: 2px 4px;
                 font-weight: bold;
+                font-size: 8.5pt;
+            }
+            QTableCornerButton::section {
+                background-color: #161826;
+                border: 1px solid #232536;
+            }
+            /* 极窄模式滚动条：8px深色极窄滑块，彻底消除原生白色粗条与撕裂 */
+            QScrollBar:vertical {
+                border: none;
+                background-color: #0f1018;
+                width: 8px;
+                margin: 0px;
+            }
+            QScrollBar::handle:vertical {
+                background-color: #2c2e3e;
+                min-height: 20px;
+                border-radius: 4px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background-color: #404358;
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                height: 0px;
+                background: transparent;
+            }
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+                background: none;
+            }
+            QScrollBar:horizontal {
+                border: none;
+                background-color: #0f1018;
+                height: 8px;
+                margin: 0px;
+            }
+            QScrollBar::handle:horizontal {
+                background-color: #2c2e3e;
+                min-width: 20px;
+                border-radius: 4px;
+            }
+            QScrollBar::handle:horizontal:hover {
+                background-color: #404358;
+            }
+            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+                width: 0px;
+                background: transparent;
+            }
+            QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {
+                background: none;
             }
         """)
 
@@ -256,7 +346,7 @@ class IPOCommandRoomDialog(QDialog):
         # 左侧：全池赛马天梯与山外有山仲裁
         grp_rank = QGroupBox("🏆 全池横向赛马排位天梯 (掌握全数据·山外有山)")
         v_rank = QVBoxLayout(grp_rank)
-        v_rank.setContentsMargins(6, 6, 6, 6)
+        v_rank.setContentsMargins(4, 4, 4, 4)
 
         self.tbl_rank = IPOCommandRoomTableWidget(self)
         self.tbl_rank.setColumnCount(8)
@@ -265,12 +355,11 @@ class IPOCommandRoomDialog(QDialog):
         self.tbl_rank.horizontalHeader().setStretchLastSection(True)
         self.tbl_rank.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.tbl_rank.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self.tbl_rank.verticalHeader().setVisible(False)
         self._bind_table_interactions(self.tbl_rank)
-        # 接入持久化与精心调校的默认列宽 (动能分 70px, 启动时点 78px 彻底杜绝文字截断)
+        # 接入持久化与极窄模式默认列宽 (动能分 68px, 启动时点 76px 彻底杜绝文字截断，总宽紧凑防水平滚动条)
         self.tbl_rank.setup_persistence(
-            "ipo_cmd_rank_table_header_v1",
-            default_widths=[45, 58, 78, 58, 70, 78, 85, 280]
+            "ipo_cmd_rank_table_header_v2",
+            default_widths=[38, 56, 75, 56, 68, 76, 80, 260]
         )
         v_rank.addWidget(self.tbl_rank)
         self.splitter.addWidget(grp_rank)
@@ -284,7 +373,7 @@ class IPOCommandRoomDialog(QDialog):
         # 右上方：持仓组合
         grp_pos = QGroupBox("💼 舰队实盘持仓组合 (买错跌破 VWAP 0.6% 立即出局斩仓)")
         v_pos = QVBoxLayout(grp_pos)
-        v_pos.setContentsMargins(6, 6, 6, 6)
+        v_pos.setContentsMargins(4, 4, 4, 4)
 
         self.tbl_pos = IPOCommandRoomTableWidget(self)
         self.tbl_pos.setColumnCount(7)
@@ -293,11 +382,10 @@ class IPOCommandRoomDialog(QDialog):
         self.tbl_pos.horizontalHeader().setStretchLastSection(True)
         self.tbl_pos.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.tbl_pos.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self.tbl_pos.verticalHeader().setVisible(False)
         self._bind_table_interactions(self.tbl_pos)
         self.tbl_pos.setup_persistence(
-            "ipo_cmd_pos_table_header_v1",
-            default_widths=[58, 78, 60, 62, 62, 68, 85]
+            "ipo_cmd_pos_table_header_v2",
+            default_widths=[56, 75, 56, 58, 58, 65, 80]
         )
         v_pos.addWidget(self.tbl_pos)
         v_right.addWidget(grp_pos, 2)
@@ -305,7 +393,7 @@ class IPOCommandRoomDialog(QDialog):
         # 右下方：待执行指令清单
         grp_orders = QGroupBox("📋 集中交易调度待执行指令清单 (弃弱换马 / 领头羊进击 / 买错立斩)")
         v_orders = QVBoxLayout(grp_orders)
-        v_orders.setContentsMargins(6, 6, 6, 6)
+        v_orders.setContentsMargins(4, 4, 4, 4)
 
         self.tbl_orders = IPOCommandRoomTableWidget(self)
         self.tbl_orders.setColumnCount(6)
@@ -314,11 +402,10 @@ class IPOCommandRoomDialog(QDialog):
         self.tbl_orders.horizontalHeader().setStretchLastSection(True)
         self.tbl_orders.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.tbl_orders.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self.tbl_orders.verticalHeader().setVisible(False)
         self._bind_table_interactions(self.tbl_orders)
         self.tbl_orders.setup_persistence(
-            "ipo_cmd_orders_table_header_v1",
-            default_widths=[75, 58, 78, 60, 70, 240]
+            "ipo_cmd_orders_table_header_v2",
+            default_widths=[75, 56, 75, 58, 68, 220]
         )
         v_orders.addWidget(self.tbl_orders)
         v_right.addWidget(grp_orders, 3)
@@ -349,7 +436,7 @@ class IPOCommandRoomDialog(QDialog):
         table.customContextMenuRequested.connect(lambda pos: self._show_context_menu(table, pos))
         table.cellClicked.connect(lambda r, c: self._on_table_cell_clicked(table, r))
         table.currentCellChanged.connect(lambda cur_r, cur_c, prev_r, prev_c: self._on_table_current_cell_changed(table, cur_r, prev_r))
-        table.cellDoubleClicked.connect(lambda r, c: self._on_table_double_clicked(table, r))
+        table.cellDoubleClicked.connect(lambda r, c: self._on_table_double_clicked(table, r, c))
 
     def _extract_code_from_table(self, table: QTableWidget, row: int) -> str:
         """从表格行中智能提取 6 位股票代码"""
@@ -386,10 +473,49 @@ class IPOCommandRoomDialog(QDialog):
             return
         self._trigger_linkage_for_table_row(table, cur_r, force=False)
 
-    def _on_table_double_clicked(self, table: QTableWidget, row: int):
-        """双击行：秒级调出 SBC 10d VWAP 走势图"""
+    def _open_arbitration_detail_for_row(self, table: QTableWidget, row: int):
+        """【🎯 集中仲裁极速详情窗】：从单例复用池秒级调出/刷新详情窗"""
         code = self._extract_code_from_table(table, row)
-        if code:
+        if not code:
+            return
+        sig = self.trading_center._reports_cache.get(code)
+        if sig is None:
+            for s in self.trading_center._ranked_cache:
+                if s.code == code:
+                    sig = s
+                    break
+        directive = None
+        for d in self.trading_center.get_pending_directives():
+            if d.code == code:
+                directive = d
+                break
+        try:
+            from ats.ui.ipo_arbitration_detail_dialog import IPOArbitrationDetailDialog
+            IPOArbitrationDetailDialog.show_or_update(
+                code, signal_obj=sig, directive_obj=directive, parent=self
+            )
+        except Exception as e:
+            logger.error(f"调出集中仲裁透视详情窗异常: {e}")
+
+    def _on_table_double_clicked(self, table: QTableWidget, row: int, col: int = -1):
+        """
+        双击单元格智能分发：
+        - 若双击集中仲裁/决议/理由/角色列：秒级调出/复用集中仲裁详情窗 (极速模式)；
+        - 若双击其它列 (代码/名称/现价等)：秒级调出 SBC 10d VWAP 走势图。
+        """
+        code = self._extract_code_from_table(table, row)
+        if not code:
+            return
+
+        is_arbitration_col = False
+        if table is self.tbl_rank and col in (6, 7):  # 角色 或 集中仲裁与山外有山决议
+            is_arbitration_col = True
+        elif table is self.tbl_orders and col in (0, 5):  # 动作 或 决议依据理由
+            is_arbitration_col = True
+
+        if is_arbitration_col:
+            self._open_arbitration_detail_for_row(table, row)
+        else:
             self._open_sbc_for_code(code)
 
     def _trigger_linkage_for_table_row(self, table: QTableWidget, row: int, force: bool = False):
@@ -470,6 +596,11 @@ class IPOCommandRoomDialog(QDialog):
                 color: #00e5ff;
             }
         """)
+
+        # 0. 集中仲裁与决议透视详情窗 (极速复用模式)
+        act_detail = menu.addAction(f"🎯 查看集中仲裁与山外有山决议详情 ({code} {name})")
+        act_detail.triggered.connect(lambda: self._open_arbitration_detail_for_row(table, row))
+        menu.addSeparator()
 
         # 1. SBC 走势图
         act_sbc = menu.addAction(f"📈 调出 SBC 10d 走势图 (空格 / 双击)")
@@ -626,40 +757,64 @@ class IPOCommandRoomDialog(QDialog):
         self.refresh_data()
 
     def refresh_data(self):
-        """刷新指挥室全部战情数据"""
+        """刷新指挥室全部战情数据 (支持角色中文映射、数值精确排序与状态平滑保持)"""
         summary = self.trading_center.get_fleet_summary()
         self.lbl_capital.setText(f"💰 总资金: {summary['total_capital']/10000:.1f}万 | 可用: {summary['available_cash']/10000:.1f}万")
         self.lbl_positions.setText(f"📊 持仓: {summary['holding_count']} 只 ({summary['fleet_weight_pct']}%仓)")
         self.lbl_leader.setText(f"🥇 爆款领头羊: {summary['top_leader_name']} ({summary['top_leader_score']}分)")
 
-        # 1. 刷新赛马天梯 (平滑更新，记住当前选中)
+        # ── 1. 刷新赛马天梯 (角色中文映射 + 支持点击表头数值排序) ──
+        hv_rank = self.tbl_rank.horizontalHeader()
+        sort_col_rank = hv_rank.sortIndicatorSection() if hv_rank.isSortIndicatorShown() else -1
+        sort_order_rank = hv_rank.sortIndicatorOrder() if hv_rank.isSortIndicatorShown() else Qt.SortOrder.AscendingOrder
+
         ranked = getattr(self.trading_center, "_ranked_cache", [])
         prev_row = self.tbl_rank.currentRow()
+
+        self.tbl_rank.setSortingEnabled(False)
         self.tbl_rank.setRowCount(len(ranked))
         for r, sig in enumerate(ranked):
-            self.tbl_rank.setItem(r, 0, QTableWidgetItem(str(sig.horse_race_rank)))
-            self.tbl_rank.setItem(r, 1, QTableWidgetItem(sig.code))
+            # 排名 (数值排序)
+            self.tbl_rank.setItem(r, 0, NumericTableWidgetItem(str(sig.horse_race_rank), raw_val=int(sig.horse_race_rank)))
+            # 代码 (纯数字数值比较)
+            code_num = int(sig.code) if sig.code.isdigit() else 999999
+            self.tbl_rank.setItem(r, 1, NumericTableWidgetItem(sig.code, raw_val=code_num))
+            # 名称
             self.tbl_rank.setItem(r, 2, QTableWidgetItem(sig.name))
-            self.tbl_rank.setItem(r, 3, QTableWidgetItem(f"{sig.price:.2f}" if sig.price > 0 else "--"))
-            self.tbl_rank.setItem(r, 4, QTableWidgetItem(f"{sig.horse_race_score:.0f}"))
+            # 现价 (高精度浮点数排序)
+            price_val = float(sig.price) if sig.price > 0 else 0.0
+            self.tbl_rank.setItem(r, 3, NumericTableWidgetItem(f"{sig.price:.2f}" if sig.price > 0 else "--", raw_val=price_val))
+            # 动能分 (数值排序)
+            self.tbl_rank.setItem(r, 4, NumericTableWidgetItem(f"{sig.horse_race_score:.0f}", raw_val=float(sig.horse_race_score)))
+            # 启动时点 (时间文本排序)
             self.tbl_rank.setItem(r, 5, QTableWidgetItem(sig.launch_time_str or "--"))
             
-            role_it = QTableWidgetItem(sig.global_fleet_role or "--")
-            if sig.global_fleet_role == "LEADER":
+            # 角色 (精准映射为标准中文)
+            role_raw = sig.global_fleet_role or "--"
+            role_cn = ROLE_CN_MAP.get(role_raw, role_raw)
+            role_it = QTableWidgetItem(role_cn)
+            if role_raw == "LEADER":
                 role_it.setForeground(QColor("#ffaa00"))
-            elif sig.global_fleet_role == "VANGUARD":
+            elif role_raw == "VANGUARD":
                 role_it.setForeground(QColor("#00e5ff"))
-            elif sig.global_fleet_role == "STOP_LOSS":
+            elif role_raw == "STOP_LOSS":
                 role_it.setForeground(QColor("#ff4444"))
-            elif sig.global_fleet_role == "PANIC_DEFENSE":
+            elif role_raw == "PANIC_DEFENSE":
                 role_it.setForeground(QColor("#ff7733"))
+            elif role_raw == "CLIMAX_EXIT":
+                role_it.setForeground(QColor("#ff3333"))
+            elif role_raw == "CLIMAX_DEFENSE":
+                role_it.setForeground(QColor("#ffaa33"))
+            elif role_raw == "FOLLOWER":
+                role_it.setForeground(QColor("#8f93a8"))
             self.tbl_rank.setItem(r, 6, role_it)
 
+            # 决议依据
             desc_str = sig.global_arbitration_desc or sig.signal_desc
             desc_it = QTableWidgetItem(desc_str)
             if "领头羊" in desc_str or "首发吸筹" in desc_str:
                 desc_it.setForeground(QColor("#00ff88"))
-            elif "买错" in desc_str or "平仓" in desc_str:
+            elif "买错" in desc_str or "平仓" in desc_str or "止损" in desc_str:
                 desc_it.setForeground(QColor("#ff5555"))
             elif "山外有山" in desc_str:
                 desc_it.setForeground(QColor("#8f93a8"))
@@ -667,26 +822,50 @@ class IPOCommandRoomDialog(QDialog):
                 desc_it.setForeground(QColor("#ff7733"))
             self.tbl_rank.setItem(r, 7, desc_it)
 
+        self.tbl_rank.setSortingEnabled(True)
+        if sort_col_rank >= 0:
+            self.tbl_rank.sortItems(sort_col_rank, sort_order_rank)
+
         if 0 <= prev_row < self.tbl_rank.rowCount() and not self.tbl_rank.selectedItems():
             self.tbl_rank.setCurrentCell(prev_row, 0)
 
-        # 2. 刷新持仓组合
+        # ── 2. 刷新实盘持仓组合 (状态中文映射 + 收益数值排序) ──
+        hv_pos = self.tbl_pos.horizontalHeader()
+        sort_col_pos = hv_pos.sortIndicatorSection() if hv_pos.isSortIndicatorShown() else -1
+        sort_order_pos = hv_pos.sortIndicatorOrder() if hv_pos.isSortIndicatorShown() else Qt.SortOrder.AscendingOrder
+
         holdings = summary.get("holding_details", [])
+        self.tbl_pos.setSortingEnabled(False)
         self.tbl_pos.setRowCount(len(holdings))
         for r, pos in enumerate(holdings):
-            self.tbl_pos.setItem(r, 0, QTableWidgetItem(pos["code"]))
+            code_num = int(pos["code"]) if pos["code"].isdigit() else 999999
+            self.tbl_pos.setItem(r, 0, NumericTableWidgetItem(pos["code"], raw_val=code_num))
             self.tbl_pos.setItem(r, 1, QTableWidgetItem(pos["name"]))
-            self.tbl_pos.setItem(r, 2, QTableWidgetItem(str(pos["shares"])))
-            self.tbl_pos.setItem(r, 3, QTableWidgetItem(f"{pos['cost']:.2f}"))
-            self.tbl_pos.setItem(r, 4, QTableWidgetItem(f"{pos['now']:.2f}"))
+            self.tbl_pos.setItem(r, 2, NumericTableWidgetItem(str(pos["shares"]), raw_val=int(pos["shares"])))
+            self.tbl_pos.setItem(r, 3, NumericTableWidgetItem(f"{pos['cost']:.2f}", raw_val=float(pos['cost'])))
+            self.tbl_pos.setItem(r, 4, NumericTableWidgetItem(f"{pos['now']:.2f}", raw_val=float(pos['now'])))
             
-            pnl_it = QTableWidgetItem(f"{pos['pnl_pct']:+.2f}%")
-            pnl_it.setForeground(QColor("#ff4444") if pos['pnl_pct'] > 0 else QColor("#00ff88"))
+            pnl_val = float(pos['pnl_pct'])
+            pnl_it = NumericTableWidgetItem(f"{pnl_val:+.2f}%", raw_val=pnl_val)
+            pnl_it.setForeground(QColor("#ff4444") if pnl_val > 0 else QColor("#00ff88"))
             self.tbl_pos.setItem(r, 5, pnl_it)
-            self.tbl_pos.setItem(r, 6, QTableWidgetItem(pos["status"]))
+            
+            # 持仓状态中文映射
+            status_raw = pos["status"]
+            status_cn = POS_STATUS_CN_MAP.get(status_raw, status_raw)
+            self.tbl_pos.setItem(r, 6, QTableWidgetItem(status_cn))
 
-        # 3. 刷新待执行指令
+        self.tbl_pos.setSortingEnabled(True)
+        if sort_col_pos >= 0:
+            self.tbl_pos.sortItems(sort_col_pos, sort_order_pos)
+
+        # ── 3. 刷新待执行指令清单 (数值排序) ──
+        hv_orders = self.tbl_orders.horizontalHeader()
+        sort_col_orders = hv_orders.sortIndicatorSection() if hv_orders.isSortIndicatorShown() else -1
+        sort_order_orders = hv_orders.sortIndicatorOrder() if hv_orders.isSortIndicatorShown() else Qt.SortOrder.AscendingOrder
+
         directives = self.trading_center.get_pending_directives()
+        self.tbl_orders.setSortingEnabled(False)
         self.tbl_orders.setRowCount(len(directives))
         for r, d in enumerate(directives):
             act_it = QTableWidgetItem(d.action)
@@ -695,8 +874,13 @@ class IPOCommandRoomDialog(QDialog):
             elif d.action in ("SELL", "SWITCH_SWAP"):
                 act_it.setForeground(QColor("#ff5555"))
             self.tbl_orders.setItem(r, 0, act_it)
-            self.tbl_orders.setItem(r, 1, QTableWidgetItem(d.code))
+            code_num = int(d.code) if d.code.isdigit() else 999999
+            self.tbl_orders.setItem(r, 1, NumericTableWidgetItem(d.code, raw_val=code_num))
             self.tbl_orders.setItem(r, 2, QTableWidgetItem(d.name))
-            self.tbl_orders.setItem(r, 3, QTableWidgetItem(f"{d.price:.2f}"))
-            self.tbl_orders.setItem(r, 4, QTableWidgetItem(f"{d.size_pct:.0f}%"))
+            self.tbl_orders.setItem(r, 3, NumericTableWidgetItem(f"{d.price:.2f}", raw_val=float(d.price)))
+            self.tbl_orders.setItem(r, 4, NumericTableWidgetItem(f"{d.size_pct:.0f}%", raw_val=float(d.size_pct)))
             self.tbl_orders.setItem(r, 5, QTableWidgetItem(d.reason))
+
+        self.tbl_orders.setSortingEnabled(True)
+        if sort_col_orders >= 0:
+            self.tbl_orders.sortItems(sort_col_orders, sort_order_orders)

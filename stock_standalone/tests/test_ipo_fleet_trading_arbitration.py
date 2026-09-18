@@ -365,6 +365,131 @@ class TestIPOFleetTradingArbitration(unittest.TestCase):
 
         dlg.close()
 
+    def test_command_room_chinese_role_and_sorting_support_and_narrow_mode(self):
+        """测试 7: 角色中文映射、表头数值精确排序与极窄模式分割线规范"""
+        from PyQt6.QtWidgets import QApplication
+        from PyQt6.QtCore import Qt
+        app = QApplication.instance() or QApplication([])
+
+        from ats.ui.ipo_command_room_dialog import IPOCommandRoomDialog, ROLE_CN_MAP
+        from ats.strategy.ipo_vwap_detector_engine import VWAPDetectorSignal
+
+        dlg = IPOCommandRoomDialog()
+
+        # 1. 验证极窄模式样式表、垂直右边框与极窄滚动条设置
+        ss = dlg.styleSheet()
+        self.assertIn("QScrollBar:vertical", ss, "必须配置极窄模式垂直滚动条")
+        self.assertIn("QScrollBar:horizontal", ss, "必须配置极窄模式水平滚动条")
+        self.assertIn("border-right", ss, "表头必须具备明确的列间分隔线")
+        self.assertTrue(dlg.tbl_rank.showGrid(), "天梯表格必须启用网格线")
+
+        # 2. 验证三个表格全面支持排序
+        self.assertTrue(dlg.tbl_rank.isSortingEnabled(), "天梯表格必须启用排序")
+        self.assertTrue(dlg.tbl_pos.isSortingEnabled(), "持仓表格必须启用排序")
+        self.assertTrue(dlg.tbl_orders.isSortingEnabled(), "指令表格必须启用排序")
+        self.assertTrue(dlg.tbl_rank.horizontalHeader().isSortIndicatorShown())
+
+        # 3. 注入测试信号并刷新数据
+        sig1 = VWAPDetectorSignal(
+            code="601091", name="沈鼓集团", price=50.0, horse_race_score=95.0,
+            global_fleet_role="LEADER", horse_race_rank=1, is_above_vwap=True
+        )
+        sig2 = VWAPDetectorSignal(
+            code="688826", name="频准激光", price=200.0, horse_race_score=80.0,
+            global_fleet_role="VANGUARD", horse_race_rank=2, is_above_vwap=True
+        )
+        sig3 = VWAPDetectorSignal(
+            code="001365", name="鼎佳科技", price=25.0, horse_race_score=60.0,
+            global_fleet_role="FOLLOWER", horse_race_rank=3, is_above_vwap=True
+        )
+        dlg.trading_center._ranked_cache = [sig1, sig2, sig3]
+        dlg.refresh_data()
+
+        # 验证角色已 100% 映射为中文
+        role_txt_row0 = dlg.tbl_rank.item(0, 6).text()
+        role_txt_row1 = dlg.tbl_rank.item(1, 6).text()
+        role_txt_row2 = dlg.tbl_rank.item(2, 6).text()
+        self.assertEqual(role_txt_row0, "🥇 领头羊")
+        self.assertEqual(role_txt_row1, "🥈 梯队前锋")
+        self.assertEqual(role_txt_row2, "🥉 后排跟风")
+
+        # 4. 测试点击表头执行数值排序 (以现价升序排序测试)
+        # 当前价格：Row 0 是 50.0, Row 1 是 200.0, Row 2 是 25.0
+        # 现价位于第 3 列，按升序排序后，第 0 行应该是 25.0 (001365)，最后一行是 200.0 (688826)
+        dlg.tbl_rank.sortItems(3, Qt.SortOrder.AscendingOrder)
+        self.assertIn("25.00", dlg.tbl_rank.item(0, 3).text())
+        self.assertIn("200.00", dlg.tbl_rank.item(2, 3).text())
+
+        # 按现价降序排序后，第 0 行应该是 200.0 (688826)
+        dlg.tbl_rank.sortItems(3, Qt.SortOrder.DescendingOrder)
+        self.assertIn("200.00", dlg.tbl_rank.item(0, 3).text())
+        self.assertIn("25.00", dlg.tbl_rank.item(2, 3).text())
+
+        dlg.close()
+
+    def test_arbitration_detail_dialog_fast_reusable_mode(self):
+        """测试 8: 集中仲裁与操作建议透视详情窗的极速复用模式 (Reusable Singleton)"""
+        from PyQt6.QtWidgets import QApplication
+        app = QApplication.instance() or QApplication([])
+
+        from ats.ui.ipo_arbitration_detail_dialog import IPOArbitrationDetailDialog
+
+        # 1. 验证单例模式与极速复用 (保证多次调用返回同一实例)
+        dlg1 = IPOArbitrationDetailDialog.get_instance()
+        dlg2 = IPOArbitrationDetailDialog.get_instance()
+        self.assertIs(dlg1, dlg2)
+
+        # 2. 构造测试信号与指令
+        sig_test = VWAPDetectorSignal(
+            code="601091",
+            name="沈鼓集团",
+            price=56.80,
+            vwap=52.00,
+            vwap_diff_pct=9.23,
+            structure_tag="突破走强",
+            launch_time_str="09:31",
+            stop_loss_price=51.68,
+            horse_race_score=98.0,
+            horse_race_rank=1,
+            global_fleet_role="LEADER",
+            global_arbitration_desc="【高潮领头羊 15%仓】全市情绪总龙头，高潮吸筹，买错跌破 VWAP 0.6% 铁律出局"
+        )
+
+        # 3. 极速更新并展示
+        dlg_shown = IPOArbitrationDetailDialog.show_or_update("601091", signal_obj=sig_test)
+        self.assertIs(dlg_shown, dlg1)
+        self.assertTrue(dlg_shown.isVisible())
+
+        # 验证界面关键文本已秒级就地刷新
+        self.assertIn("601091", dlg_shown.lbl_code_name.text())
+        self.assertIn("沈鼓集团", dlg_shown.lbl_code_name.text())
+        self.assertIn("56.80", dlg_shown.lbl_price.text())
+        self.assertIn("🥇 领头羊", dlg_shown.lbl_role_tag.text())
+        self.assertIn("第 1 名", dlg_shown.lbl_race_info.text())
+        self.assertIn("98", dlg_shown.lbl_race_info.text())
+        self.assertIn("52.00", dlg_shown.lbl_vwap_line.text())
+        self.assertIn("+9.23%", dlg_shown.lbl_vwap_bias.text())
+        self.assertIn("51.68", dlg_shown.lbl_stop_loss.text())
+        self.assertIn("高潮领头羊", dlg_shown.txt_arbitration_desc.toPlainText())
+
+        # 4. 验证关闭拦截为隐藏 (不销毁，保证常驻内存 0 毫秒极速唤醒)
+        dlg_shown.close()
+        self.assertFalse(dlg_shown.isVisible())
+
+        # 5. 验证指挥室的双击触发分发
+        from ats.ui.ipo_command_room_dialog import IPOCommandRoomDialog
+        cmd_room = IPOCommandRoomDialog(parent_detector_dialog=None)
+        cmd_room.trading_center._ranked_cache = [sig_test]
+        cmd_room.refresh_data()
+
+        # 模拟双击第 7 列 (集中仲裁列) -> 应当唤起复用详情窗
+        cmd_room._on_table_double_clicked(cmd_room.tbl_rank, 0, col=7)
+        self.assertTrue(dlg_shown.isVisible())
+        self.assertIn("601091", dlg_shown.lbl_code_name.text())
+
+        cmd_room.close()
+        dlg_shown.hide()
+
 
 if __name__ == "__main__":
     unittest.main()
