@@ -4,6 +4,21 @@ Created At: 2026-06-26
 Description: 通用实时行情数据同步管理器 (Generic Realtime Data Sync Manager)
              封装了底层 TCP Socket 数据监听、协议包反序列化、增量/全量合并以及命名管道同步反馈。
              可跨模块、跨窗口复用，并支持在非 Pandas 环境下的安全降级。
+
+==============================================================================
+📡 系统 IPC 静态端口注册与分配总表 (SYSTEM IPC STATIC PORTS REGISTRY)
+------------------------------------------------------------------------------
+所有接入量化平台的子进程、独立窗口、分析工具，请严格遵循以下静态端口分配规范，
+严禁未经注册随意硬编码端口导致套接字冲突 (WinError 10048)！
+
+端口 (Port) | 服务标识 (Service Name) | 作用与使用程序                               | 通信机制               | 常态流订阅
+-----------+------------------------+--------------------------------------------+-----------------------+-----------
+26668      | visualizer             | 交易可视化看板 (trade_visualizer_qt6.py)     | TCP Socket + NamedPipe| 是 (TK直连/管道兜底)
+26670      | ats_terminal           | ATS 主操盘终端 (stock_live_strategy.py, v2) | TCP Socket + NamedPipe| 是 (常态增量/全量流)
+26671      | multi_period           | 多周期策略引擎 / 人气共振 (MultiPeriod)      | TCP Socket + NamedPipe| 是 (常态增量/全量流)
+26672      | stock_name_http        | 股票代码/简称本地微服务 (sys_utils.py)      | HTTP REST (GET /)     | 否 (单次查询)
+26675      | ipo_detector           | 新股次新超短检测中心 & 集中交易指挥室        | TCP Socket + NamedPipe| 是 (常态增量/全量流)
+==============================================================================
 """
 import os
 import sys
@@ -13,15 +28,40 @@ import struct
 import pickle
 import threading
 import json
+from typing import Dict, List, Optional, Any, Callable
+
+# ── 官方静态端口常量定义 ──
+PORT_VISUALIZER = 26668       # 交易可视化看板
+PORT_ATS_TERMINAL = 26670     # ATS 主操盘终端
+PORT_MULTI_PERIOD = 26671     # 多周期策略引擎 / 人气共振
+PORT_STOCK_NAME_HTTP = 26672  # 股票代码/简称本地 HTTP 基础服务
+PORT_IPO_DETECTOR = 26675     # 新股次新超短检测中心 & 集中交易指挥室
+
+# ── 备用端口段分配 ──
+FALLBACK_PORTS_MAP: Dict[str, List[int]] = {
+    "multi_period": [PORT_MULTI_PERIOD, 26679, 26680, 26681],
+    "ipo_detector": [PORT_IPO_DETECTOR, 26685, 26686, 26687],
+}
+
 
 class IPCSyncManager:
     """
     通用实时数据同步管理器，使用跟 ATS / 可视化器一致的协议与主程序通信
+    支持全量数据 (UPDATE_DF_ALL) 与增量数据 (UPDATE_DF_DIFF) 的高效原地合入
     """
-    def __init__(self, port=26671, data_callback=None, logger=None):
+    def __init__(
+        self,
+        port: int = PORT_MULTI_PERIOD,
+        service_name: str = "multi_period",
+        data_callback: Optional[Callable] = None,
+        logger: Optional[Any] = None,
+        silent_bind_fail: bool = False
+    ):
         self.port = port
+        self.service_name = service_name
         self.data_callback = data_callback
         self.logger = logger
+        self.silent_bind_fail = silent_bind_fail
         
         self.current_df = None
         self.df_lock = threading.Lock()
@@ -81,15 +121,26 @@ class IPCSyncManager:
                 return self.current_df.copy()
             return None
 
-    def request_full_sync(self, force=False, min_interval=10.0):
-        """通过 Windows 命名管道向主程序发送 REQ_FULL_SYNC，拉取全量行情快照 (带 10 秒防刷防挤占门控)"""
+    def request_full_sync(self, force=False, min_interval=10.0, subscribe=True):
+        """
+        通过 Windows 命名管道向主程序发送 REQ_FULL_SYNC，拉取全量行情快照并申请/维持常态流订阅
+        :param force: 是否强制无视 10 秒防刷门控
+        :param min_interval: 最小请求间隔秒数
+        :param subscribe: 是否向 TK 注册为常态化流式推送订阅者 (支持全量与增量变动自动推送)
+        """
         now = time.time()
         last_req = getattr(self, '_last_req_full_sync_t', 0.0)
         if not force and (now - last_req < min_interval):
             return True
         self._last_req_full_sync_t = now
 
-        cmd_dict = {"cmd": "REQ_FULL_SYNC", "port": self.port}
+        cmd_dict = {
+            "cmd": "REQ_FULL_SYNC",
+            "port": self.port,
+            "service_name": self.service_name,
+            "client_name": self.service_name,
+            "subscribe": subscribe
+        }
         payload = json.dumps(cmd_dict, ensure_ascii=False).encode("utf-8")
         
         for attempt in range(5):
@@ -105,12 +156,36 @@ class IPCSyncManager:
                 )
                 win32file.WriteFile(handle, payload)
                 win32file.CloseHandle(handle)
-                self.log_info(f"成功发送全量同步请求 REQ_FULL_SYNC (第 {attempt+1} 次尝试)")
+                self.log_info(f"成功发送同步/订阅请求 REQ_FULL_SYNC (Port={self.port}, sub={subscribe}, 第 {attempt+1} 次尝试)")
                 return True
             except Exception as e:
                 time.sleep(0.5)
         self.log_error("发送全量同步请求 REQ_FULL_SYNC 失败，主程序管道可能未准备就绪")
         return False
+
+    def subscribe_stream(self) -> bool:
+        """向 TK 主进程握手申请注册常态推送数据流 (支持全量与高频增量变动推送)"""
+        cmd_dict = {
+            "cmd": "SUBSCRIBE_STREAM",
+            "port": self.port,
+            "service_name": self.service_name,
+            "client_name": self.service_name,
+            "subscribe": True
+        }
+        payload = json.dumps(cmd_dict, ensure_ascii=False).encode("utf-8")
+        try:
+            import win32file
+            handle = win32file.CreateFile(
+                self.pipe_name, win32file.GENERIC_WRITE, 0, None,
+                win32file.OPEN_EXISTING, 0, None
+            )
+            win32file.WriteFile(handle, payload)
+            win32file.CloseHandle(handle)
+            self.log_info(f"成功向主程序握手注册常态流订阅 SUBSCRIBE_STREAM (Port={self.port}, Service={self.service_name})")
+            return True
+        except Exception as e:
+            self.log_error(f"握手注册常态流订阅失败: {e}")
+            return False
 
     def _heartbeat_loop(self):
         """自动定时心跳，在需要时（冷启动或长时间未收到更新）自动向主程序发起同步请求"""
@@ -146,7 +221,7 @@ class IPCSyncManager:
             
             if should_sync:
                 last_request_t = now
-                self.request_full_sync()
+                self.request_full_sync(subscribe=True)
             
             # 每隔 3 秒检查一次是否需要退出，避免 time.sleep(3) 引起的长退避
             for _ in range(3):
@@ -170,7 +245,11 @@ class IPCSyncManager:
             self.is_bound = True
         except Exception as e:
             self.is_bound = False
-            self.log_error(f"绑定端口 {self.port} 失败: {e}")
+            if self.silent_bind_fail:
+                if self.logger:
+                    self.logger.debug(f"[IPCSyncManager] 静默探测端口 {self.port} 暂不可用/被占用: {e}")
+            else:
+                self.log_error(f"绑定端口 {self.port} 失败: {e}")
             self._bind_event.set()
             return
         self._bind_event.set()
@@ -314,3 +393,117 @@ class IPCSyncManager:
             win32file.CloseHandle(handle)
         except Exception:
             pass
+
+
+# ==============================================================================
+# 🏭 系统统一服务单例工厂 (Service-Oriented IPC Sync Manager Factory)
+# ------------------------------------------------------------------------------
+# 业务层统一通过以下工厂函数获取专属单例，彻底杜绝端口冲突与重复绑定。
+# ==============================================================================
+
+_SERVICE_MANAGERS: Dict[str, IPCSyncManager] = {}
+_MGR_LOCK = threading.Lock()
+
+
+def get_ipc_sync_manager(
+    service_name: str = "multi_period",
+    candidate_ports: Optional[List[int]] = None,
+    data_callback: Optional[Callable] = None,
+    logger: Optional[Any] = None,
+    auto_start: bool = True
+) -> Optional[IPCSyncManager]:
+    """
+    根据服务标识 (service_name) 获取或初始化专属 IPCSyncManager 单例。
+    内部自动根据 FALLBACK_PORTS_MAP 尝试候选静态/备选端口，具备自适应静默探测防冲突能力。
+    """
+    global _SERVICE_MANAGERS
+    with _MGR_LOCK:
+        if service_name in _SERVICE_MANAGERS:
+            mgr = _SERVICE_MANAGERS[service_name]
+            if auto_start and not getattr(mgr, '_listener_running', False):
+                mgr.start()
+            return mgr
+
+        ports_to_try = candidate_ports or FALLBACK_PORTS_MAP.get(
+            service_name,
+            [PORT_IPO_DETECTOR if service_name == "ipo_detector" else PORT_MULTI_PERIOD]
+        )
+
+        for p in ports_to_try:
+            try:
+                # 候选探测时开启 silent_bind_fail，防止误报红字
+                mgr = IPCSyncManager(
+                    port=p,
+                    service_name=service_name,
+                    data_callback=data_callback,
+                    logger=logger,
+                    silent_bind_fail=True
+                )
+                if auto_start:
+                    mgr.start()
+                    if getattr(mgr, '_bind_event', None):
+                        mgr._bind_event.wait(timeout=1.5)
+                    if getattr(mgr, 'is_bound', False):
+                        _SERVICE_MANAGERS[service_name] = mgr
+                        if logger:
+                            logger.info(f"⚡ [IPC 单例] 服务 '{service_name}' 成功绑定并常态流订阅于端口 Port={p}")
+                        return mgr
+                    else:
+                        mgr.stop()
+                else:
+                    _SERVICE_MANAGERS[service_name] = mgr
+                    return mgr
+            except Exception as e:
+                if logger:
+                    logger.debug(f"[IPC 工厂] 服务 '{service_name}' 探测端口 {p} 失败: {e}")
+
+        # 所有候选端口探测失败，打出正式错误
+        err_msg = f"[IPC 工厂] 服务 '{service_name}' 所有候选端口 {ports_to_try} 均无法绑定，系统降级无 IPC 模式！"
+        if logger:
+            logger.error(err_msg)
+        else:
+            print(f"ERROR: {err_msg}")
+        return None
+
+
+def get_ipo_detector_ipc_sync_manager(
+    data_callback: Optional[Callable] = None,
+    logger: Optional[Any] = None,
+    auto_start: bool = True
+) -> Optional[IPCSyncManager]:
+    """
+    新股次新超短检测中心 & 集中交易指挥室专属 IPC 同步管理器 (默认端口 26675)
+    与多周期策略引擎 26671 彻底隔离，绝无端口冲突。
+    """
+    return get_ipc_sync_manager(
+        service_name="ipo_detector",
+        candidate_ports=FALLBACK_PORTS_MAP["ipo_detector"],
+        data_callback=data_callback,
+        logger=logger,
+        auto_start=auto_start
+    )
+
+
+def get_multi_period_ipc_sync_manager(
+    data_callback: Optional[Callable] = None,
+    logger: Optional[Any] = None,
+    auto_start: bool = True
+) -> Optional[IPCSyncManager]:
+    """
+    多周期策略引擎 / 人气共振专属 IPC 同步管理器 (默认端口 26671)
+    """
+    return get_ipc_sync_manager(
+        service_name="multi_period",
+        candidate_ports=FALLBACK_PORTS_MAP["multi_period"],
+        data_callback=data_callback,
+        logger=logger,
+        auto_start=auto_start
+    )
+
+
+def get_global_ipc_sync_manager() -> Optional[IPCSyncManager]:
+    """
+    向下兼容的全局通用接口，默认映射到多周期策略引擎专属单例
+    """
+    return get_multi_period_ipc_sync_manager()
+

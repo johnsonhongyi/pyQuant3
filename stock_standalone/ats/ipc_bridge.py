@@ -100,18 +100,72 @@ class IPCBridge:
                     if isinstance(payload, tuple) and len(payload) >= 2:
                         cmd, body = payload[0], payload[1]
                         if cmd == 'UPDATE_DF_DATA' and data_callback:
-                            # 在后台线程预先处理 DataFrame 的索引以减轻 UI 线程负担
-                            if isinstance(body, pd.DataFrame) and not body.empty:
+                            # 🚀【全量与增量双模解析】支持 dict 包装协议与裸 DataFrame
+                            df_to_deliver = None
+                            msg_type = 'UPDATE_DF_ALL'
+                            if isinstance(body, dict):
+                                msg_type = body.get('type', 'UPDATE_DF_ALL')
+                                df_payload = body.get('data')
+                            elif isinstance(body, pd.DataFrame):
+                                df_payload = body
+                            else:
+                                df_payload = None
+
+                            if isinstance(df_payload, pd.DataFrame) and not df_payload.empty:
                                 try:
-                                    body = body.copy()
-                                    if 'code' in body.columns:
-                                        body['code'] = body['code'].astype(str).str.strip()
-                                        body.set_index('code', inplace=True)
+                                    # 规范化代码索引
+                                    df_norm = df_payload.copy()
+                                    if 'code' in df_norm.columns:
+                                        df_norm['code'] = df_norm['code'].astype(str).str.strip().str.zfill(6)
+                                        df_norm.set_index('code', inplace=True)
                                     else:
-                                        body.index = body.index.astype(str).str.strip()
-                                        body.index.name = 'code'
+                                        df_norm.index = df_norm.index.astype(str).str.strip().str.zfill(6)
+                                        df_norm.index.name = 'code'
+
+                                    # 增量合并 vs 全量覆盖
+                                    if msg_type == 'UPDATE_DF_DIFF' and hasattr(self, '_cached_df') and self._cached_df is not None and not self._cached_df.empty:
+                                        try:
+                                            df_diff = df_norm
+                                            if isinstance(df_diff.columns, pd.MultiIndex):
+                                                new_cols = {}
+                                                for col in df_diff.columns:
+                                                    if isinstance(col, tuple) and len(col) >= 2:
+                                                        base_col, val_type = col[0], col[1]
+                                                        if val_type == 'self':
+                                                            new_cols[base_col] = df_diff[col]
+                                                df_diff = pd.DataFrame(new_cols, index=df_diff.index)
+
+                                            for col in df_diff.columns:
+                                                if col not in self._cached_df.columns:
+                                                    self._cached_df[col] = df_diff[col]
+
+                                            common_idx = self._cached_df.index.intersection(df_diff.index)
+                                            if len(common_idx) > 0:
+                                                for col in df_diff.columns:
+                                                    if col in self._cached_df.columns:
+                                                        try:
+                                                            col_data = df_diff.loc[common_idx, col]
+                                                            valid_mask = col_data.notna()
+                                                            valid_indices = valid_mask[valid_mask].index
+                                                            if len(valid_indices) > 0:
+                                                                self._cached_df.loc[valid_indices, col] = df_diff.loc[valid_indices, col]
+                                                        except Exception:
+                                                            pass
+
+                                            new_idx = df_diff.index.difference(self._cached_df.index)
+                                            if len(new_idx) > 0:
+                                                self._cached_df = pd.concat([self._cached_df, df_diff.loc[new_idx]])
+                                            df_to_deliver = self._cached_df.copy()
+                                        except Exception as merge_err:
+                                            self._cached_df = df_norm.copy()
+                                            df_to_deliver = self._cached_df
+                                    else:
+                                        self._cached_df = df_norm.copy()
+                                        df_to_deliver = self._cached_df
                                 except Exception as preprocess_err:
                                     print(f"[IPCBridge] Background DataFrame preprocess error: {preprocess_err}")
+                                    df_to_deliver = df_payload
+
                             # 立即在后台线程（不受 UI 渲染卡顿影响）告知 TK 停止发送，清除发送状态
                             try:
                                 import sys
@@ -124,8 +178,10 @@ class IPCBridge:
                                 local_logger = logging.getLogger("ATS_Bridge")
                                 send_code_via_pipe({"cmd": "ATS_RECEIVED", "port": 26670}, local_logger, PIPE_NAME_TK)
                             except Exception as pipe_err:
-                                print(f"[IPCBridge] Failed to send ATS_RECEIVED: {pipe_err}")
-                            data_callback(body)
+                                pass
+
+                            if df_to_deliver is not None:
+                                data_callback(df_to_deliver)
                         elif cmd == 'SIGNAL' and signal_callback:
                             signal_callback(body)
                         elif cmd == 'SIGNALS' and signal_callback:

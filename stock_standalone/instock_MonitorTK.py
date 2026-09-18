@@ -3268,21 +3268,45 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
                         # ================== 原有逻辑：完全保留 ==================
 
-                        if obj and obj.get("cmd") == "REQ_FULL_SYNC":
+                        if obj and obj.get("cmd") in ("REQ_FULL_SYNC", "SUBSCRIBE_STREAM"):
                             target_port = obj.get("port")
-                            logger.info(f'[Pipe] Feedback listener cmd REQ_FULL_SYNC (target_port={target_port})')
-                            if target_port == 26671:
-                                self._force_sync_26671 = True
-                            elif target_port == 26670:
-                                self._force_sync_26670 = True
-                            elif target_port and isinstance(target_port, int) and target_port not in (26668, 26670, 26671):
-                                if not hasattr(self, '_temp_dynamic_ports'):
-                                    self._temp_dynamic_ports = set()
-                                self._temp_dynamic_ports.add(target_port)
-                                logger.info(f'⚡ [IPC 动态适配] 接收到临时动态端口 REQ_FULL_SYNC 请求: Port={target_port}')
+                            client_name = obj.get("client_name") or obj.get("service_name") or f"Client_{target_port}"
+                            subscribe = obj.get("subscribe", False) or (obj.get("cmd") == "SUBSCRIBE_STREAM")
+                            logger.info(f'[Pipe] Feedback listener cmd {obj.get("cmd")} (target_port={target_port}, sub={subscribe}, client={client_name})')
+
+                            # 🚀 [TK 统一流式订阅中心]
+                            if not hasattr(self, '_stream_subscribers'):
+                                self._stream_subscribers = {
+                                    26670: {"name": "ATS_Terminal", "active": False, "last_try": 0.0, "is_static": True, "fail_count": 0},
+                                    26671: {"name": "Multi_Period_Engine", "active": False, "last_try": 0.0, "is_static": True, "fail_count": 0},
+                                    26675: {"name": "IPO_Detector", "active": False, "last_try": 0.0, "is_static": True, "fail_count": 0},
+                                }
+
+                            if target_port and isinstance(target_port, int):
+                                # 静态端口天生常态流订阅；动态端口若声明 subscribe 则握手加入常态流订阅
+                                if subscribe or target_port in (26670, 26671, 26675):
+                                    if target_port not in self._stream_subscribers:
+                                        self._stream_subscribers[target_port] = {
+                                            "name": client_name,
+                                            "active": True,
+                                            "last_try": 0.0,
+                                            "is_static": (target_port in (26670, 26671, 26675)),
+                                            "fail_count": 0
+                                        }
+                                        logger.info(f'⚡ [TK 订阅中心] 握手成功！注册常态推送客户端: {client_name} (Port={target_port})')
+                                    else:
+                                        self._stream_subscribers[target_port]["name"] = client_name
+                                    setattr(self, f'_force_sync_{target_port}', True)
+                                else:
+                                    # 单次拉取的临时动态端口
+                                    if not hasattr(self, '_temp_dynamic_ports'):
+                                        self._temp_dynamic_ports = set()
+                                    self._temp_dynamic_ports.add(target_port)
+                                    logger.info(f'⚡ [IPC 动态适配] 接收到临时动态端口 REQ_FULL_SYNC 请求: Port={target_port}')
                             else:
-                                self._force_sync_26670 = True
-                                self._force_sync_26671 = True
+                                for p in (26670, 26671, 26675):
+                                    setattr(self, f'_force_sync_{p}', True)
+
                             self._force_full_sync_pending = True
                             self._df_first_send_done = False
                             if hasattr(self, '_send_df_wake_event'):
@@ -3291,14 +3315,19 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         elif obj and obj.get("cmd") == "ATS_RECEIVED":
                             target_port = obj.get("port")
                             logger.info(f'[Pipe] Feedback listener cmd ATS_RECEIVED (target_port={target_port})')
-                            if target_port == 26671:
-                                self._force_sync_26671 = False
-                            elif target_port == 26670:
-                                self._force_sync_26670 = False
-                            else:
-                                self._force_sync_26670 = False
-                                self._force_sync_26671 = False
-                            self._force_full_sync_pending = getattr(self, '_force_sync_26670', False) or getattr(self, '_force_sync_26671', False)
+                            if target_port and hasattr(self, f'_force_sync_{target_port}'):
+                                setattr(self, f'_force_sync_{target_port}', False)
+                            if hasattr(self, '_stream_subscribers') and target_port in self._stream_subscribers:
+                                self._stream_subscribers[target_port]["active"] = True
+                                self._stream_subscribers[target_port]["fail_count"] = 0
+
+                            has_pending = False
+                            if hasattr(self, '_stream_subscribers'):
+                                for p in self._stream_subscribers:
+                                    if getattr(self, f'_force_sync_{p}', False):
+                                        has_pending = True
+                                        break
+                            self._force_full_sync_pending = has_pending
                             self._df_first_send_done = True
                             self._last_ats_recv_confirm_time = time.time()
 
@@ -8805,29 +8834,36 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             min_interval = 0.8  # ✅ [OPTIMIZE] 提高发送间隔到 800ms，减少 GIL 竞争
             max_jitter = 0.2    # 随机抖动
             logger.info(f"[send_df] Thread START, running={getattr(self,'_df_sync_running',False)}")
-            count = 0
-            self._ats_enabled_cache = False  # ⭐ ATS 活跃状态缓存
-            self._pr_enabled_cache = False   # ⭐ 人气共振活跃状态缓存
+            # 🚀 [TK 流式常态推送订阅中心注册表]
+            if not hasattr(self, '_stream_subscribers'):
+                self._stream_subscribers = {
+                    26670: {"name": "ATS_Terminal", "active": False, "last_try": 0.0, "is_static": True, "fail_count": 0},
+                    26671: {"name": "Multi_Period_Engine", "active": False, "last_try": 0.0, "is_static": True, "fail_count": 0},
+                    26675: {"name": "IPO_Detector", "active": False, "last_try": 0.0, "is_static": True, "fail_count": 0},
+                }
             self._cold_start = True # ⭐ [NEW] 冷启动标志
-            
+
             while self._df_sync_running:
                 vis_enabled = getattr(self, '_vis_enabled_cache', True)
                 now_sec = time.time()
                 ats_enabled = False
-                for port, key in [(26670, '_ats_enabled_cache'), (26671, '_pr_enabled_cache')]:
-                    is_active = getattr(self, key, False)
-                    last_try = getattr(self, f'_last_try_{port}', 0.0)
+                for port, sub_info in list(self._stream_subscribers.items()):
+                    is_active = sub_info.get("active", False)
+                    last_try = getattr(self, f'_last_try_{port}', sub_info.get("last_try", 0.0))
                     if is_active or (now_sec - last_try > 30.0):
                         ats_enabled = True
-                
+                        break
+
                 # ⭐ 核心判断：是否需要跳过本轮同步（没开且无强制请求）
                 if not vis_enabled and not ats_enabled and not getattr(self, '_force_full_sync_pending', False):
                     # ⭐ 小步等待 + 可中断（避免长sleep卡响应）
                     for _ in range(10):  # 最多等2秒
                         now_check = time.time()
                         has_any_ats = False
-                        for p, k in [(26670, '_ats_enabled_cache'), (26671, '_pr_enabled_cache')]:
-                            if getattr(self, k, False) or (now_check - getattr(self, f'_last_try_{p}', 0.0) > 30.0):
+                        for port, sub_info in list(self._stream_subscribers.items()):
+                            is_active = sub_info.get("active", False)
+                            last_try = getattr(self, f'_last_try_{port}', sub_info.get("last_try", 0.0))
+                            if is_active or (now_check - last_try > 30.0):
                                 has_any_ats = True
                                 break
                         if getattr(self, '_vis_enabled_cache', True) or has_any_ats:
@@ -9080,15 +9116,17 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     vis_enabled = getattr(self, '_vis_enabled_cache', True)
                     now_ipc = time.time()
                     ats_enabled = False
-                    for port, key in [(26670, '_ats_enabled_cache'), (26671, '_pr_enabled_cache')]:
-                        is_active = getattr(self, key, False)
-                        last_try = getattr(self, f'_last_try_{port}', 0.0)
-                        if is_active or (now_ipc - last_try > 30.0):
-                            ats_enabled = True
-                    
+                    if hasattr(self, '_stream_subscribers'):
+                        for port, sub_info in list(self._stream_subscribers.items()):
+                            is_active = sub_info.get("active", False)
+                            last_try = getattr(self, f'_last_try_{port}', sub_info.get("last_try", 0.0))
+                            if is_active or (now_ipc - last_try > 30.0):
+                                ats_enabled = True
+                                break
+
                     # 🚀 [THROTTLE] 失败冷却：防止频繁超时重连拖慢循环 (特别是工作时间外)
                     ipc_cooldown = getattr(self, '_viz_ipc_cooldown_until', 0)
-                    
+
                     # [NEW] 没有数据更新且不是强制全量同步请求时，直接跳过物理发送 (与可视化一致)
                     if msg_type == 'DF_DIFF_EMPTY' and not is_forced:
                         sent = True
@@ -9111,10 +9149,34 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                                 protocol=pickle.HIGHEST_PROTOCOL)
                                     header_daily = struct.pack("!I", len(payload_daily))
 
-                                # 2️⃣ socket 分发到 26668 (可视化) 以及 26670 / 26671 (外部终端)
+                                # ⚡【全量与增量智能加速】：准备专属日线全量快照 (针对冷启动 / 显式强刷订阅者)
+                                payload_daily_full = None
+                                header_daily_full = None
+                                has_forced_sub = False
+                                if hasattr(self, '_stream_subscribers'):
+                                    for p in self._stream_subscribers:
+                                        if getattr(self, f'_force_sync_{p}', False):
+                                            has_forced_sub = True
+                                            break
+                                if getattr(self, '_temp_dynamic_ports', None):
+                                    has_forced_sub = True
+
+                                if has_forced_sub or is_forced:
+                                    with timed_ctx("daily_full_IPC_pickle", warn_ms=5000):
+                                        full_pkg = {
+                                            'type': 'UPDATE_DF_ALL',
+                                            'data': df_daily,
+                                            'ver': sync_version_daily,
+                                            'resample': 'd',
+                                            'sector_data': sector_data_snap
+                                        }
+                                        payload_daily_full = pickle.dumps(('UPDATE_DF_DATA', full_pkg), protocol=pickle.HIGHEST_PROTOCOL)
+                                        header_daily_full = struct.pack("!I", len(payload_daily_full))
+
+                                # 2️⃣ socket 分发到 26668 (可视化) 以及常态订阅中心
                                 send_success_any = False
                                 sent_to_ats = False
-                                
+
                                 # 发送给 26668 (可视化窗口) —— 仅在 Pipe 没发送成功时进行 Socket 兜底
                                 if vis_enabled and not sent:
                                     with timed_ctx("viz_IPC_send", warn_ms=1000):
@@ -9128,76 +9190,87 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                         except (socket.timeout, ConnectionError, OSError):
                                             pass
 
-                                # 3️⃣ 分开独立分发给 26670 (ATS 终端) 与 26671 (人气共振/多周期引擎)
-                                # 彻底解耦按需发送：非交易时段不自动发送（除非客户端显式发起 REQ_FULL_SYNC），交易时段内且数据变动时才按端口独立推送
+                                # 3️⃣ 分开独立分发给所有常态流订阅中心客户端 (26670, 26671, 26675 及动态握手订阅者)
                                 ports_to_send = []
                                 now_ipc = time.time()
                                 is_work_time = cct.get_work_time()
 
-                                for port in (26670, 26671):
-                                    active_key = '_ats_enabled_cache' if port == 26670 else '_pr_enabled_cache'
-                                    is_port_active = getattr(self, active_key, False)
-                                    last_try = getattr(self, f'_last_try_{port}', 0.0)
-                                    is_forced_port = getattr(self, f'_force_sync_{port}', False)
-                                    
-                                    should_send = False
-                                    if is_forced_port:
-                                        # 显式请求：无论交易时段与否，精准响应请求
-                                        should_send = True
-                                    elif is_work_time:
-                                        if is_port_active:
-                                            # 交易日交易时段内：满足动态冷却间隔且数据 Hash 变动时才定时推送
-                                            if now_ipc - last_try >= dynamic_interval:
-                                                curr_hash = hash((version, len(df_daily)))
-                                                last_hash = getattr(self, f'_last_sent_hash_{port}', None)
-                                                if curr_hash != last_hash:
-                                                    should_send = True
-                                        elif (now_ipc - last_try > 60.0):
-                                            # 交易时段内未激活端口：每 60 秒轻量探测 1 次
+                                if hasattr(self, '_stream_subscribers'):
+                                    for port, sub_info in list(self._stream_subscribers.items()):
+                                        is_port_active = sub_info.get("active", False)
+                                        last_try = getattr(self, f'_last_try_{port}', sub_info.get("last_try", 0.0))
+                                        is_forced_port = getattr(self, f'_force_sync_{port}', False)
+
+                                        should_send = False
+                                        if is_forced_port:
                                             should_send = True
+                                        elif is_work_time:
+                                            if is_port_active:
+                                                if now_ipc - last_try >= dynamic_interval:
+                                                    curr_hash = hash((version, len(df_daily)))
+                                                    last_hash = getattr(self, f'_last_sent_hash_{port}', None)
+                                                    if curr_hash != last_hash:
+                                                        should_send = True
+                                            elif (now_ipc - last_try > 60.0):
+                                                should_send = True
 
-                                    if should_send:
-                                        ports_to_send.append((port, active_key, is_forced_port))
+                                        if should_send:
+                                            ports_to_send.append((port, sub_info, is_forced_port))
 
-                                # ⚡ [IPC 动态适配] 将临时请求的动态端口 (如 26679/26678 等) 纳入本次发送队列
+                                # ⚡ [IPC 动态临时端口] 单次拉取
                                 temp_dynamic_ports = list(getattr(self, '_temp_dynamic_ports', set()))
                                 for t_port in temp_dynamic_ports:
                                     ports_to_send.append((t_port, None, True))
 
                                 if ports_to_send:
                                     with timed_ctx("ats_IPC_send", warn_ms=1000):
-                                        for port, active_key, is_forced_port in ports_to_send:
+                                        for port, sub_info, is_forced_port in ports_to_send:
                                             setattr(self, f'_last_try_{port}', now_ipc)
+                                            if sub_info:
+                                                sub_info["last_try"] = now_ipc
+
+                                            # 🚀【极速分发】：强制请求发全量快照；日常常态变动推送发增量包 (UPDATE_DF_DIFF)
+                                            if is_forced_port and payload_daily_full is not None:
+                                                send_h = header_daily_full
+                                                send_p = payload_daily_full
+                                            else:
+                                                send_h = header_daily
+                                                send_p = payload_daily
+
                                             try:
                                                 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s2:
                                                     s2.settimeout(1.5)  # 1.5秒超时防止阻塞
                                                     s2.connect(('127.0.0.1', port))
-                                                    s2.sendall(b"DATA" + header_daily + payload_daily)
+                                                    s2.sendall(b"DATA" + send_h + send_p)
                                                     send_success_any = True
-                                                    if active_key:
-                                                        setattr(self, active_key, True)
-                                                    if is_forced_port and port in (26670, 26671):
+                                                    if sub_info:
+                                                        sub_info["active"] = True
+                                                        sub_info["fail_count"] = 0
+                                                    if is_forced_port:
                                                         setattr(self, f'_force_sync_{port}', False)
                                                     if port == 26670:
                                                         sent_to_ats = True
                                                     curr_hash = hash((version, len(df_daily)))
                                                     setattr(self, f'_last_sent_hash_{port}', curr_hash)
                                             except (socket.timeout, ConnectionError, OSError):
-                                                if active_key:
-                                                    setattr(self, active_key, False)
+                                                if sub_info:
+                                                    sub_info["active"] = False
+                                                    sub_info["fail_count"] = sub_info.get("fail_count", 0) + 1
+                                                    if not sub_info.get("is_static", False) and sub_info["fail_count"] >= 20 and (now_ipc - sub_info.get("last_try", now_ipc) > 600):
+                                                        self._stream_subscribers.pop(port, None)
+                                                        logger.info(f"🧹 [TK 订阅中心] 动态端口 {port} 长期无响应，已自动注销清理订阅。")
                                             finally:
-                                                # 🛡️ 临时动态端口发完（无论成功或失败）均单次完成即自动清理关闭，避免常驻无脑轮询
-                                                if port not in (26670, 26671):
-                                                    if hasattr(self, '_temp_dynamic_ports'):
-                                                        self._temp_dynamic_ports.discard(port)
-                                                        logger.info(f"✅ [IPC 动态适配] 临时动态端口 {port} 单次全量快照推送完成，已自动关闭/移除该端口订阅。")
+                                                # 🛡️ 临时动态端口发完单次清理
+                                                if hasattr(self, '_temp_dynamic_ports') and port in self._temp_dynamic_ports:
+                                                    self._temp_dynamic_ports.discard(port)
+                                                    logger.info(f"✅ [IPC 动态适配] 临时动态端口 {port} 单次全量快照推送完成，已自动关闭/移除该端口。")
 
                                 if send_success_any:
                                     logger.debug(f"[IPC] {msg_type} sent (ver={self.sync_version}, to_ats={sent_to_ats})")
                                     self._viz_ipc_fail_count = 0  # 成功清零
                                 else:
                                     # 两个通道均失败时，抛出异常以触发冷却
-                                    raise ConnectionError("All IPC connections failed (Port 26668, 26670 and 26671).")
+                                    raise ConnectionError("All IPC connections failed (Port 26668, subscribers).")
 
                                 # 再次提醒：虽然 IPC 发送成功，但如果是内部启动，本应该走 Queue
                                 if self.qt_process is not None and self.qt_process.is_alive():

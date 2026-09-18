@@ -331,6 +331,11 @@ class SBCChartCanvas(QWidget):
         self._hover_pos = None
         self._coord_info = {}
 
+        # 🎯 通达信同款十字查价光标与左右方向键移动
+        self._crosshair_active: bool = False
+        self._crosshair_idx: int = -1
+        self._mouse_press_pt = None
+
         # ⚡ 快捷键 R 自适应周期策略测算结果与标的代码
         self.code = ""
         self.strategy_eval_result = None
@@ -354,6 +359,8 @@ class SBCChartCanvas(QWidget):
         self._box_zoom_origin = None
         self._box_zoom_current = None
         self.selected_trade_id = None
+        self._crosshair_active = False
+        self._crosshair_idx = -1
         self.setCursor(Qt.CursorShape.ArrowCursor)
         self.update()
 
@@ -494,12 +501,20 @@ class SBCChartCanvas(QWidget):
             self.zoom_out()
             event.accept()
             return
-        elif key in (Qt.Key.Key_Left, Qt.Key.Key_PageUp, Qt.Key.Key_Backtab):
+        elif key == Qt.Key.Key_Left:
+            self.move_crosshair(-1)
+            event.accept()
+            return
+        elif key == Qt.Key.Key_Right:
+            self.move_crosshair(1)
+            event.accept()
+            return
+        elif key in (Qt.Key.Key_PageUp, Qt.Key.Key_Backtab):
             if parent_win and hasattr(parent_win, 'rotate_period'):
                 parent_win.rotate_period(-1)
             event.accept()
             return
-        elif key in (Qt.Key.Key_Right, Qt.Key.Key_PageDown, Qt.Key.Key_Tab):
+        elif key in (Qt.Key.Key_PageDown, Qt.Key.Key_Tab):
             if parent_win and hasattr(parent_win, 'rotate_period'):
                 parent_win.rotate_period(1)
             event.accept()
@@ -523,6 +538,12 @@ class SBCChartCanvas(QWidget):
             event.accept()
             return
         elif key == Qt.Key.Key_Escape:
+            # 🎯 优先退出十字查价线锁定状态 (对齐通达信手感，不误关窗口)
+            if getattr(self, '_crosshair_active', False):
+                self._crosshair_active = False
+                self.update()
+                event.accept()
+                return
             # 💡 ats_sbc_close 开关控制：默认开启(True)，按 Esc 直接关闭窗口；关闭时维持原样(仅清除高亮与复位)
             if _is_ats_sbc_close_enabled():
                 w = self.window()
@@ -536,6 +557,60 @@ class SBCChartCanvas(QWidget):
             event.accept()
             return
         super().keyPressEvent(event)
+
+    def move_crosshair(self, step: int = 1):
+        """⚡ 对齐通达信：左右方向键移动十字查价线查看当时情况数据，支持跨屏自动平移"""
+        if self.df_intraday is None or self.df_intraday.empty:
+            return
+        df_view, cur_s, cur_e = self._get_visible_slice()
+        vis_n = len(df_view)
+        if vis_n <= 0:
+            return
+        total_n = len(self.df_intraday)
+
+        if not getattr(self, '_crosshair_active', False) or self._crosshair_idx < 0:
+            self._crosshair_active = True
+            # 若之前鼠标有 hover 点且有效，则从该点起步；否则默认定位于当前可视区最后/最新一根
+            if self._coord_info.get("ready") and self._hover_pos:
+                hx = self._hover_pos.x()
+                ml = self._coord_info["margin_left"]
+                cw = self._coord_info["chart_w"]
+                times = self._coord_info.get("times", [])
+                b_step = self._coord_info.get("bar_step")
+                if b_step and b_step > 0:
+                    self._crosshair_idx = max(0, min(vis_n - 1, int((hx - ml) / float(b_step))))
+                else:
+                    self._crosshair_idx = max(0, min(vis_n - 1, int(round(((hx - ml) / float(cw)) * (vis_n - 1)))))
+            else:
+                self._crosshair_idx = max(0, vis_n - 1)
+        else:
+            new_idx = self._crosshair_idx + step
+            if new_idx < 0:
+                # 超出可视区左边界：如果前面有历史数据，自动平移可视窗口
+                if cur_s > 0:
+                    span = cur_e - cur_s
+                    new_s = max(0, cur_s - 1)
+                    new_e = new_s + span
+                    self._zoom_start_idx = new_s
+                    self._zoom_end_idx = new_e
+                    self._crosshair_idx = 0
+                else:
+                    self._crosshair_idx = 0
+            elif new_idx >= vis_n:
+                # 超出可视区右边界：如果后面有最新数据，自动平移可视窗口
+                if cur_e < total_n - 1:
+                    span = cur_e - cur_s
+                    new_e = min(total_n - 1, cur_e + 1)
+                    new_s = max(0, new_e - span)
+                    self._zoom_start_idx = new_s
+                    self._zoom_end_idx = new_e
+                    self._crosshair_idx = min(vis_n - 1, new_e - new_s)
+                else:
+                    self._crosshair_idx = vis_n - 1
+            else:
+                self._crosshair_idx = new_idx
+
+        self.update()
 
     def cycle_selected_trade(self, step: int = 1):
         """【💰 轮巡切换回测交易对】按快捷键 (Space 或 [ / ]) 或点击按钮切换高亮交易并展示点击收益"""
@@ -997,6 +1072,7 @@ class SBCChartCanvas(QWidget):
     def mousePressEvent(self, event):
         """鼠标按下：默认左键拖拽为平移视图，Shift+左键为框选放大，右键单击重置"""
         mouse_pos = event.position() if hasattr(event, "position") else event.pos()
+        self._mouse_press_pt = mouse_pos
 
         if event.button() == Qt.MouseButton.RightButton:
             # 记录右键按下点，若松开未移动则为一键重置，若移动则为右键平移
@@ -1144,10 +1220,14 @@ class SBCChartCanvas(QWidget):
         super().leaveEvent(event)
 
     def mouseReleaseEvent(self, event):
-        """鼠标松开：结束平移、结算 Shift 框选放大或右键单击一键重置"""
+        """鼠标松开：结束平移、结算 Shift 框选放大、单击锁定十字查价线或右键单击一键重置"""
+        mouse_pos = event.position() if hasattr(event, "position") else event.pos()
+
         if event.button() == Qt.MouseButton.RightButton:
             if not self._is_right_panning:
-                # 纯右键单击：执行一键重置 100% 全景
+                # 纯右键单击：执行一键重置 100% 全景，并退出十字查价锁定
+                self._crosshair_active = False
+                self._crosshair_idx = -1
                 self.reset_view()
             self._is_right_panning = False
             self._right_press_pos = None
@@ -1156,6 +1236,12 @@ class SBCChartCanvas(QWidget):
             return
 
         elif event.button() == Qt.MouseButton.LeftButton:
+            is_click = False
+            if self._mouse_press_pt is not None:
+                dist_sq = (mouse_pos.x() - self._mouse_press_pt.x())**2 + (mouse_pos.y() - self._mouse_press_pt.y())**2
+                if dist_sq <= 16 and not self._is_box_zooming:
+                    is_click = True
+
             if self._is_box_zooming and self._box_zoom_origin and self._box_zoom_current and self.df_intraday is not None and not self.df_intraday.empty:
                 # 结算框选放大区域
                 margin_left = self.MARGIN_LEFT
@@ -1177,6 +1263,27 @@ class SBCChartCanvas(QWidget):
                         if idx_to - idx_from >= 3:
                             self._zoom_start_idx = max(0, min(len(self.df_intraday) - 1, idx_from))
                             self._zoom_end_idx = max(0, min(len(self.df_intraday) - 1, idx_to))
+
+            elif is_click and self._coord_info.get("ready"):
+                # 🎯 操盘手单击 K 线或分时图：对齐通达信，激活并锁定十字查价线在该 K 棒/分时点
+                c_info = self._coord_info
+                ml = c_info["margin_left"]
+                mt = c_info["margin_top"]
+                cw = c_info["chart_w"]
+                times = c_info.get("times", [])
+                mx = mouse_pos.x()
+                my = mouse_pos.y()
+                # 范围覆盖图表与成交量
+                if ml <= mx <= (ml + cw) and mt <= my <= (self.height() - 8) and len(times) > 0:
+                    b_step = c_info.get("bar_step")
+                    if b_step and b_step > 0:
+                        hit_idx = max(0, min(len(times) - 1, int((mx - ml) / float(b_step))))
+                    else:
+                        hit_idx = max(0, min(len(times) - 1, int(round(((mx - ml) / float(cw)) * (len(times) - 1)))))
+                    
+                    self._crosshair_active = True
+                    self._crosshair_idx = hit_idx
+                    self.setFocus()
 
             self._is_box_zooming = False
             self._box_zoom_origin = None
@@ -1325,10 +1432,10 @@ class SBCChartCanvas(QWidget):
                 painter.drawRoundedRect(int(rx), tag_y, 130, 16, 2, 2)
                 painter.drawText(int(rx + 4), tag_y + 12, lbl_tip)
 
-            # 4. 🎯 鼠标指针悬停：十字光标、动态 Y 轴精确价格胶囊与光标跟随价格浮标
-            if getattr(self, '_hover_pos', None) and self._coord_info.get("ready"):
-                hx = self._hover_pos.x()
-                hy = self._hover_pos.y()
+            # 4. 🎯 鼠标指针悬停或十字查价锁定：十字光标、动态 Y 轴精确价格胶囊与通达信同款当时情况数据 HUD
+            is_active_cross = getattr(self, '_crosshair_active', False) and getattr(self, '_crosshair_idx', -1) >= 0
+            has_hover = getattr(self, '_hover_pos', None) is not None
+            if (is_active_cross or has_hover) and self._coord_info.get("ready"):
                 c_info = self._coord_info
                 ml = c_info["margin_left"]
                 mt = c_info["margin_top"]
@@ -1337,16 +1444,49 @@ class SBCChartCanvas(QWidget):
                 min_p = c_info["min_p"]
                 max_p = c_info["max_p"]
                 times = c_info.get("times", [])
+                total_times = len(times)
+                b_step = c_info.get("bar_step")
+                is_kline = c_info.get("is_kline", False)
 
-                if ml <= hx <= (ml + cw) and mt <= hy <= (mt + mh):
-                    # 精确反推当前指针所在 Y 坐标的价格 (与绘制完全同源)
-                    p_ratio = max(0.0, min(1.0, 1.0 - (hy - mt) / float(mh)))
-                    p_hover = min_p + (max_p - min_p) * p_ratio
+                idx_hover = -1
+                hx = -1.0
+                hy = -1.0
+                p_hover = 0.0
 
-                    # ① 十字虚线 (水平线与垂直线)
+                if is_active_cross:
+                    idx_hover = max(0, min(total_times - 1, self._crosshair_idx)) if total_times > 0 else -1
+                    if idx_hover >= 0:
+                        if b_step and b_step > 0:
+                            hx = ml + (idx_hover + 0.5) * b_step
+                        else:
+                            hx = ml + (idx_hover / max(1, total_times - 1)) * cw
+                        # 获取对应点的收盘价/现价作为 Y 轴基准
+                        closes_arr = c_info.get("closes") if is_kline else c_info.get("prices")
+                        if closes_arr is not None and 0 <= idx_hover < len(closes_arr):
+                            p_hover = float(closes_arr[idx_hover])
+                            p_ratio = (p_hover - min_p) / max(1e-4, max_p - min_p)
+                            hy = mt + mh - p_ratio * mh
+                        else:
+                            p_hover = (min_p + max_p) / 2.0
+                            hy = mt + mh / 2.0
+                elif has_hover:
+                    hx = self._hover_pos.x()
+                    hy = self._hover_pos.y()
+                    if ml <= hx <= (ml + cw) and mt <= hy <= (mt + mh):
+                        p_ratio = max(0.0, min(1.0, 1.0 - (hy - mt) / float(mh)))
+                        p_hover = min_p + (max_p - min_p) * p_ratio
+                        if total_times > 0:
+                            if b_step and b_step > 0:
+                                idx_hover = max(0, min(total_times - 1, int((hx - ml) / float(b_step))))
+                            else:
+                                idx_hover = max(0, min(total_times - 1, int(round(((hx - ml) / float(cw)) * (total_times - 1)))))
+
+                if idx_hover >= 0 and ml <= hx <= (ml + cw + 2) and mt <= hy <= (mt + mh):
+                    # ① 十字虚线 (贯穿主图与下方成交量图)
+                    cross_bottom = self.height() - self.MARGIN_BOTTOM
                     painter.setPen(QPen(QColor("#4a5578"), 1, Qt.PenStyle.DashLine))
                     painter.drawLine(int(ml), int(hy), int(ml + cw), int(hy))
-                    painter.drawLine(int(hx), int(mt), int(hx), int(mt + mh))
+                    painter.drawLine(int(hx), int(mt), int(hx), int(cross_bottom))
 
                     # ② 右侧 Y 轴动态价格高亮胶囊 (醒目青底白字)
                     tag_w = 48
@@ -1360,28 +1500,19 @@ class SBCChartCanvas(QWidget):
                     painter.setPen(QPen(QColor("#00FFFF")))
                     painter.drawText(int(ml + cw + 5), tag_y + 13, f"{p_hover:.2f}")
 
-                    # 计算当前光标所指 K 棒序号 (自适应对齐右侧预留 2 槽位)
-                    idx_hover = -1
-                    if times and len(times) > 0:
-                        b_step = c_info.get("bar_step")
-                        if b_step and b_step > 0:
-                            idx_hover = max(0, min(len(times) - 1, int((hx - ml) / float(b_step))))
-                        else:
-                            idx_hover = max(0, min(len(times) - 1, int(round(((hx - ml) / float(cw)) * (len(times) - 1)))))
-
-                    # ③ 鼠标指针右上角跟随微浮标 (指针指到哪，价格与通道大小高度跟到哪)
+                    # ③ 十字光标右上角跟随微浮标
                     tip_str = f"{p_hover:.2f}"
                     ch_up_arr = c_info.get("ch_up", [])
                     ch_mid_arr = c_info.get("ch_mid", [])
                     ch_dn_arr = c_info.get("ch_dn", [])
-                    if 0 <= idx_hover < len(ch_up_arr) and 0 <= idx_hover < len(ch_dn_arr):
+                    if isinstance(ch_up_arr, (list, np.ndarray)) and 0 <= idx_hover < len(ch_up_arr):
                         c_u = float(ch_up_arr[idx_hover])
-                        c_d = float(ch_dn_arr[idx_hover])
+                        c_d = float(ch_dn_arr[idx_hover]) if idx_hover < len(ch_dn_arr) else 0.0
                         c_m = float(ch_mid_arr[idx_hover]) if idx_hover < len(ch_mid_arr) else 0.0
                         if c_u > 0 and c_d > 0:
                             h_diff = max(0.0, c_u - c_d)
                             h_pct = (h_diff / max(1e-4, c_m)) * 100.0 if c_m > 0 else 0.0
-                            tip_str += f" | 通道:上{c_u:.2f} 中{c_m:.2f} 下{c_d:.2f} (高:{h_diff:.2f}元, {h_pct:.1f}%)"
+                            tip_str += f" | 通道:上{c_u:.2f} 中{c_m:.2f} 下{c_d:.2f}"
 
                     tip_w = max(52, len(tip_str) * 7 + 12)
                     tip_h = 16
@@ -1395,18 +1526,118 @@ class SBCChartCanvas(QWidget):
                     painter.drawText(tip_x + 6, tip_y + 12, tip_str)
 
                     # ④ 底部 X 轴时间/日期对齐标签
-                    if times and len(times) > 0:
+                    if times and 0 <= idx_hover < len(times):
                         t_str = str(times[idx_hover])
-                        if len(t_str) > 10:
-                            t_str = t_str[-8:]  # 截取 HH:MM:SS 或 HH:MM
-                        t_w = max(46, len(t_str) * 7 + 8)
+                        if len(t_str) > 12:
+                            t_str = t_str[-14:]  # 截取 MM-DD HH:MM 或 HH:MM:SS
+                        t_w = max(54, len(t_str) * 7 + 8)
                         t_x = max(ml, min(ml + cw - t_w, int(hx - t_w / 2)))
                         painter.setPen(QPen(QColor("#8899bb"), 1))
                         painter.setBrush(QBrush(QColor("#181d2a")))
-                        painter.drawRoundedRect(t_x, int(mt + mh + 2), t_w, 16, 2, 2)
+                        painter.drawRoundedRect(t_x, int(cross_bottom + 2), t_w, 16, 2, 2)
                         painter.setFont(QFont("Consolas", 7))
                         painter.setPen(QPen(QColor("#ccddee")))
-                        painter.drawText(t_x + 4, int(mt + mh + 14), t_str)
+                        painter.drawText(t_x + 4, int(cross_bottom + 14), t_str)
+
+                    # ⑤ 🌟 通达信同款【当时情况数据 HUD 看板】(智能避让当前光标所指位置)
+                    hud_w = 268
+                    hud_h = 96 if is_kline else 84
+                    # 避让算法：光标在图表右半区，看板悬浮在左上角；光标在左半区，看板悬浮在右上角
+                    if hx > (ml + cw * 0.52):
+                        hud_x = int(ml + 8)
+                    else:
+                        hud_x = int(ml + cw - hud_w - 8)
+                    hud_y = int(mt + 8)
+
+                    painter.setPen(QPen(QColor("#38bdf8"), 1.2))
+                    painter.setBrush(QBrush(QColor(11, 14, 23, 238)))
+                    painter.drawRoundedRect(hud_x, hud_y, hud_w, hud_h, 4, 4)
+
+                    cur_code = getattr(self, 'code', '') or ''
+                    cur_name = resolve_stock_name(cur_code) if cur_code else ''
+                    time_val = str(times[idx_hover]) if 0 <= idx_hover < len(times) else ''
+
+                    # 行 1: 标的代码名称与周期时间
+                    painter.setFont(QFont("Microsoft YaHei", 8, QFont.Weight.Bold))
+                    painter.setPen(QPen(QColor("#FBBF24")))
+                    painter.drawText(hud_x + 8, hud_y + 16, f"[{self.period_mode.upper()}] {cur_code} {cur_name}")
+                    painter.setFont(QFont("Consolas", 7))
+                    painter.setPen(QPen(QColor("#94A3B8")))
+                    painter.drawText(hud_x + hud_w - len(time_val) * 7 - 8, hud_y + 16, time_val)
+
+                    if is_kline:
+                        # K 线模式数据行
+                        o_val = float(c_info["opens"][idx_hover]) if 0 <= idx_hover < len(c_info.get("opens", [])) else p_hover
+                        h_val = float(c_info["highs"][idx_hover]) if 0 <= idx_hover < len(c_info.get("highs", [])) else p_hover
+                        l_val = float(c_info["lows"][idx_hover]) if 0 <= idx_hover < len(c_info.get("lows", [])) else p_hover
+                        c_val = float(c_info["closes"][idx_hover]) if 0 <= idx_hover < len(c_info.get("closes", [])) else p_hover
+                        prev_c = float(c_info["closes"][idx_hover - 1]) if (idx_hover > 0 and len(c_info.get("closes", [])) > idx_hover - 1) else o_val
+                        d_chg = c_val - prev_c
+                        p_chg = (d_chg / max(1e-4, prev_c)) * 100.0
+                        amp = ((h_val - l_val) / max(1e-4, prev_c)) * 100.0
+                        v_val = float(c_info["vols"][idx_hover]) if 0 <= idx_hover < len(c_info.get("vols", [])) else 0.0
+
+                        pct_col = QColor("#FF4444") if d_chg > 0.001 else (QColor("#00FF88") if d_chg < -0.001 else QColor("#F1F5F9"))
+                        v_str = f"{v_val / 10000.0:.2f}万手" if v_val >= 10000 else f"{int(v_val)}手"
+
+                        painter.setFont(QFont("Consolas", 8))
+                        # 行 2: 开盘与最高
+                        painter.setPen(QPen(QColor("#CBD5E1")))
+                        painter.drawText(hud_x + 8, hud_y + 35, f"开: {o_val:.2f}")
+                        painter.drawText(hud_x + 138, hud_y + 35, f"高: {h_val:.2f}")
+
+                        # 行 3: 最低与收盘
+                        painter.drawText(hud_x + 8, hud_y + 53, f"低: {l_val:.2f}")
+                        painter.setPen(QPen(pct_col))
+                        painter.drawText(hud_x + 138, hud_y + 53, f"收: {c_val:.2f}")
+
+                        # 行 4: 涨跌额/幅与振幅
+                        sign = "+" if d_chg > 0 else ""
+                        painter.drawText(hud_x + 8, hud_y + 71, f"涨跌: {sign}{d_chg:.2f} ({sign}{p_chg:.2f}%)")
+                        painter.setPen(QPen(QColor("#CBD5E1")))
+                        painter.drawText(hud_x + 185, hud_y + 71, f"振: {amp:.2f}%")
+
+                        # 行 5: 成交量与通道轨线
+                        ch_str = ""
+                        if isinstance(ch_up_arr, (list, np.ndarray)) and 0 <= idx_hover < len(ch_up_arr):
+                            c_u = float(ch_up_arr[idx_hover])
+                            c_d = float(ch_dn_arr[idx_hover]) if idx_hover < len(ch_dn_arr) else 0.0
+                            if c_u > 0 and c_d > 0:
+                                ch_str = f"上{c_u:.2f}/下{c_d:.2f}"
+                        painter.drawText(hud_x + 8, hud_y + 89, f"量: {v_str}")
+                        if ch_str:
+                            painter.setPen(QPen(QColor("#38BDF8")))
+                            painter.drawText(hud_x + 138, hud_y + 89, f"通道: {ch_str}")
+                    else:
+                        # 分时模式数据行
+                        cur_p = float(c_info["prices"][idx_hover]) if 0 <= idx_hover < len(c_info.get("prices", [])) else p_hover
+                        cur_vwap = float(c_info["vwaps"][idx_hover]) if 0 <= idx_hover < len(c_info.get("vwaps", [])) else 0.0
+                        base_op = float(c_info.get("open_price", 0.0)) or (float(c_info["prices"][0]) if c_info.get("prices") else cur_p)
+                        d_chg = cur_p - base_op
+                        p_chg = (d_chg / max(1e-4, base_op)) * 100.0
+                        disp = ((cur_p - cur_vwap) / max(1e-4, cur_vwap)) * 100.0 if cur_vwap > 0 else 0.0
+                        v_val = float(c_info["vols"][idx_hover]) if 0 <= idx_hover < len(c_info.get("vols", [])) else 0.0
+                        v_str = f"{v_val / 10000.0:.2f}万手" if v_val >= 10000 else f"{int(v_val)}手"
+
+                        pct_col = QColor("#FF4444") if d_chg > 0.001 else (QColor("#00FF88") if d_chg < -0.001 else QColor("#F1F5F9"))
+                        painter.setFont(QFont("Consolas", 8))
+                        # 行 2: 分时价与 VWAP 均价
+                        painter.setPen(QPen(pct_col))
+                        painter.drawText(hud_x + 8, hud_y + 35, f"现价: {cur_p:.2f}")
+                        painter.setPen(QPen(QColor("#FBBF24")))
+                        painter.drawText(hud_x + 138, hud_y + 35, f"均价: {cur_vwap:.2f}")
+
+                        # 行 3: 涨跌幅与偏离度
+                        sign = "+" if d_chg > 0 else ""
+                        painter.setPen(QPen(pct_col))
+                        painter.drawText(hud_x + 8, hud_y + 54, f"涨跌: {sign}{d_chg:.2f} ({sign}{p_chg:.2f}%)")
+                        disp_col = QColor("#FF4444") if disp > 0 else QColor("#00FF88")
+                        painter.setPen(QPen(disp_col))
+                        painter.drawText(hud_x + 160, hud_y + 54, f"偏离: {disp:+.2f}%")
+
+                        # 行 4: 成交量
+                        painter.setPen(QPen(QColor("#CBD5E1")))
+                        painter.drawText(hud_x + 8, hud_y + 73, f"成交量: {v_str}")
 
             # 5. 🔍 局部缩放状态提示 (默认彻底隐藏不遮挡任何内容，仅当鼠标移至右上角时展开悬浮气泡)
             if self._is_zoomed() and self._coord_info.get("ready"):
@@ -1485,6 +1716,7 @@ class SBCChartCanvas(QWidget):
 
         self._coord_info = {
             "ready": True,
+            "is_kline": False,
             "min_p": min_p,
             "max_p": max_p,
             "margin_left": margin_left,
@@ -1492,6 +1724,10 @@ class SBCChartCanvas(QWidget):
             "chart_w": chart_w,
             "main_h": chart_h,
             "times": times,
+            "prices": prices,
+            "vwaps": vwaps,
+            "vols": df_view['volume'].astype(float).values if 'volume' in df_view.columns else (df_view['vol'].astype(float).values if 'vol' in df_view.columns else []),
+            "open_price": op_ref,
             "n_items": len(prices),
         }
 
@@ -2268,6 +2504,7 @@ class SBCChartCanvas(QWidget):
 
         self._coord_info = {
             "ready": True,
+            "is_kline": True,
             "min_p": min_p,
             "max_p": max_p,
             "margin_left": margin_left,
@@ -2275,6 +2512,11 @@ class SBCChartCanvas(QWidget):
             "chart_w": chart_w,
             "main_h": main_h,
             "times": times,
+            "opens": opens,
+            "highs": highs,
+            "lows": lows,
+            "closes": closes,
+            "vols": vols,
             "n_items": n,
             "ch_up": ch_up,
             "ch_mid": ch_mid,
@@ -3698,7 +3940,7 @@ class SBCIntradayChartDialog(QWidget):
         bottom_layout.setContentsMargins(2, 0, 2, 0)
         bottom_layout.setSpacing(6)
 
-        self.lbl_info = QLabel("💡 提示: 独立窗口支持【主窗口智能磁吸吸附】与脱离自由全屏。青蓝线为分时现价，黄虚线为 VWAP 均价，红虚线为开盘价，橙虚线为最高价，绿虚线为止盈目标。")
+        self.lbl_info = QLabel("💡 提示: 快捷键 A/D 轮转周期, ←/→ 移动查价, 1~9 直选, S 开关日志, F 联动, Esc 退出光标/关闭。青蓝线为现价，黄虚线为 VWAP 均价。")
         self.lbl_info.setStyleSheet("color: #888899; font-size: 8.5pt;")
         self.lbl_info.setWordWrap(True)
         bottom_layout.addWidget(self.lbl_info, 1)
@@ -4215,7 +4457,7 @@ class SBCIntradayChartDialog(QWidget):
         if hasattr(self, 'canvas') and self.canvas:
             self.canvas.setFocus()
         if hasattr(self, 'lbl_info') and self.lbl_info:
-            self.lbl_info.setText(f"📈 [周期轮转] 当前周期: 【{new_mode.upper()}】 (快捷键: A/D 或 ←/→ 键轮转, 1~9 直选, S 日志, F 联动, Esc 关闭)")
+            self.lbl_info.setText(f"📈 [周期轮转] 当前周期: 【{new_mode.upper()}】 (快捷键: A/D 轮转周期, ←/→ 移动查价, 1~9 直选, S 日志, F 联动, Esc 退出光标/关闭)")
 
     def switch_period_by_index(self, index: int):
         """通过数字键 1~9 直接切换到指定序号的周期"""
@@ -4226,7 +4468,7 @@ class SBCIntradayChartDialog(QWidget):
             if hasattr(self, 'canvas') and self.canvas:
                 self.canvas.setFocus()
             if hasattr(self, 'lbl_info') and self.lbl_info:
-                self.lbl_info.setText(f"📈 [周期直选] 当前周期: 【{new_mode.upper()}】 (快捷键: A/D 或 ←/→ 键轮转, 1~9 直选, S 日志, F 联动, Esc 关闭)")
+                self.lbl_info.setText(f"📈 [周期直选] 当前周期: 【{new_mode.upper()}】 (快捷键: A/D 轮转周期, ←/→ 移动查价, 1~9 直选, S 日志, F 联动, Esc 退出光标/关闭)")
 
     def _toggle_stay_on_top(self):
         """切换 SBC 窗口置顶状态 (无缝 0 闪烁 0 重新刷新)"""
@@ -4288,11 +4530,21 @@ class SBCIntradayChartDialog(QWidget):
                 self.canvas.zoom_out()
             event.accept()
             return
-        elif key in (Qt.Key.Key_Left, Qt.Key.Key_PageUp, Qt.Key.Key_Backtab):
+        elif key == Qt.Key.Key_Left:
+            if hasattr(self, 'canvas') and self.canvas:
+                self.canvas.move_crosshair(-1)
+            event.accept()
+            return
+        elif key == Qt.Key.Key_Right:
+            if hasattr(self, 'canvas') and self.canvas:
+                self.canvas.move_crosshair(1)
+            event.accept()
+            return
+        elif key in (Qt.Key.Key_PageUp, Qt.Key.Key_Backtab):
             self.rotate_period(-1)
             event.accept()
             return
-        elif key in (Qt.Key.Key_Right, Qt.Key.Key_PageDown, Qt.Key.Key_Tab):
+        elif key in (Qt.Key.Key_PageDown, Qt.Key.Key_Tab):
             self.rotate_period(1)
             event.accept()
             return
@@ -4307,6 +4559,12 @@ class SBCIntradayChartDialog(QWidget):
             event.accept()
             return
         elif key == Qt.Key.Key_Escape and not (modifiers & Qt.KeyboardModifier.AltModifier):
+            # 🎯 优先退出十字查价线锁定状态 (对齐通达信手感，不误关窗口)
+            if hasattr(self, 'canvas') and self.canvas and getattr(self.canvas, '_crosshair_active', False):
+                self.canvas._crosshair_active = False
+                self.canvas.update()
+                event.accept()
+                return
             # 💡 ats_sbc_close 开关控制：默认开启(True)，按 Esc 直接关闭窗口；关闭时维持原样(仅清除画布高亮与复位)
             if _is_ats_sbc_close_enabled():
                 self.close()
@@ -4418,7 +4676,7 @@ class SBCIntradayChartDialog(QWidget):
                 self.canvas.zoom_out()
 
     def eventFilter(self, watched, event):
-        """【🎯 全局按键事件过滤】解决子控件捕获焦点时上下键被吞噬问题，实现免点击走势图缩放"""
+        """【🎯 全局按键事件过滤】解决子控件捕获焦点时上下键被吞噬问题，实现免点击走势图缩放与左右键查价移动"""
         if event.type() == QEvent.Type.KeyPress:
             k = event.key()
             if k in (Qt.Key.Key_Up, Qt.Key.Key_Down):
@@ -4429,6 +4687,13 @@ class SBCIntradayChartDialog(QWidget):
                             self.canvas.zoom_in()
                         else:
                             self.canvas.zoom_out()
+                        return True
+            elif k in (Qt.Key.Key_Left, Qt.Key.Key_Right):
+                from ats.ui.styles import is_editing_text
+                if not is_editing_text(self) and not self._is_combobox_popup_active():
+                    if hasattr(self, 'canvas') and self.canvas:
+                        step = -1 if k == Qt.Key.Key_Left else 1
+                        self.canvas.move_crosshair(step)
                         return True
         return super().eventFilter(watched, event)
 
