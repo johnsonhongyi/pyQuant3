@@ -1,0 +1,271 @@
+# -*- coding: utf-8 -*-
+"""
+tests/test_ipo_vwap_sentiment_and_horse_race.py
+------------------------------------------------
+专项自动化测试：
+新股次新股全市场情绪感知、早盘基石价启动赛马与集中交易调度中心终极闭环
+1. IPOMarketSentimentEngine 大盘地量与新股梯队情绪判定；
+2. 早盘 9:15-10:00 时间切片、开盘基石价与拔地而起斜率计算；
+3. 神股 601091 沈鼓集团极端高潮天量滞涨平仓识别 (🚨 疯狂平仓)；
+4. 首发上市首日贴线惜售黄金买点 (🔥 首发吸筹)；
+5. 买错跌破 VWAP 立即斩仓出局铁律 (⛔ 破位止损点)；
+6. 逐日赛马冒泡排位算法 (🥇 领头羊 / 🥈 梯队前锋)；
+7. IPOTradingCenter 汇交全池报告、横向比对(“山外有山”)、动态仓位与指令生成。
+"""
+
+import os
+import sys
+import unittest
+import time
+import pandas as pd
+import numpy as np
+from unittest.mock import patch, MagicMock
+
+# 确保路径
+app_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if app_root not in sys.path:
+    sys.path.insert(0, app_root)
+
+from ats.strategy.ipo_market_sentiment_engine import IPOMarketSentimentEngine, MarketSentimentSnapshot
+from ats.strategy.ipo_vwap_detector_engine import (
+    IPOVWAPDetectorEngine, VWAPDetectorSignal, batch_evaluate_horse_race_ranking
+)
+from ats.strategy.ipo_trading_center import IPOTradingCenter, IPOTradingPosition, IPOOrderDirective
+
+
+class TestIPOVWAPSentimentAndHorseRace(unittest.TestCase):
+    """新股情绪感知、赛马动能与统一交易调度中心自动化测试"""
+
+    def setUp(self):
+        self.sentiment_engine = IPOMarketSentimentEngine.get_instance()
+        self.detector_engine = IPOVWAPDetectorEngine.get_instance()
+        self.trading_center = IPOTradingCenter.get_instance()
+
+    def test_market_sentiment_low_volume_and_heat_stage(self):
+        """【测试】验证大盘绝望地量判定与新股梯队升温周期计算"""
+        # 1. 模拟大盘绝望地量 (量比 0.75)
+        mock_sh_snap = {"amount": 250000000000.0, "vol_ratio": 0.75}
+        with patch.object(self.sentiment_engine.fetcher, "fetch_stock_snapshot", return_value=mock_sh_snap):
+            snap = self.sentiment_engine.get_market_sentiment(ipo_signals=[], force_refresh=True)
+            self.assertEqual(snap.index_phase, "绝望地量")
+            self.assertIn("缩量至地量低谷", snap.index_desc)
+
+        # 2. 模拟新股样本池 80% 红盘且站上 VWAP，进入梯队升温共振
+        mock_signals = [
+            VWAPDetectorSignal(code="601091", name="沈鼓集团", price=57.77, change_pct=177.0, vwap=19.64, is_above_vwap=True),
+            VWAPDetectorSignal(code="920298", name="腾信精密", price=90.48, change_pct=40.7, vwap=67.35, is_above_vwap=True),
+            VWAPDetectorSignal(code="688837", name="信诺维", price=55.60, change_pct=34.4, vwap=45.16, is_above_vwap=True),
+            VWAPDetectorSignal(code="301689", name="电科思仪", price=63.00, change_pct=17.8, vwap=51.40, is_above_vwap=True),
+            VWAPDetectorSignal(code="301707", name="晨芯股份", price=75.40, change_pct=7.1, vwap=71.38, is_above_vwap=True),
+        ]
+        with patch.object(self.sentiment_engine.fetcher, "fetch_stock_snapshot", return_value={"vol_ratio": 1.5}):
+            snap = self.sentiment_engine.get_market_sentiment(ipo_signals=mock_signals, force_refresh=True)
+            self.assertEqual(snap.index_phase, "爆发共振")
+            self.assertEqual(snap.red_ratio, 100.0)
+            self.assertEqual(snap.vwap_hold_ratio, 100.0)
+            self.assertEqual(snap.heat_stage, "🌋 狂热高潮")
+
+    def test_shengu_extreme_climax_exit_detection(self):
+        """【测试】神股 601091 沈鼓集团：暴涨至 82.59 天量滞涨跳水精准触发【🚨 疯狂平仓】"""
+        # 构造分时：从 11.9 暴拉至 82.59，随后回落至 57.77，偏离 VWAP 达 194%
+        rows = []
+        d = "2026-09-18"
+        for m in range(40):
+            # 冲顶阶段
+            p = 11.9 + m * 1.76  # 最高达 82.59
+            rows.append({
+                "time": f"{d} 09:{30+m:02d}",
+                "date": d,
+                "open": 11.9,
+                "close": p,
+                "high": 82.59 if m == 39 else p,
+                "low": 11.9,
+                "price": p,
+                "vwap": 19.64,
+                "amount": 50000000,
+                "volume": 200000
+            })
+        # 高位砸盘回落到 57.77
+        rows.append({
+            "time": f"{d} 10:15",
+            "date": d,
+            "open": 82.59,
+            "close": 57.77,
+            "high": 82.59,
+            "low": 57.77,
+            "price": 57.77,
+            "vwap": 19.64,
+            "amount": 80000000,
+            "volume": 300000
+        })
+
+        mock_df = pd.DataFrame(rows)
+        with patch.object(self.detector_engine.fetcher, "fetch_multi_day_intraday_bars", return_value=mock_df), \
+             patch.object(self.detector_engine.fetcher, "fetch_kline_bars", return_value=pd.DataFrame()):
+            sig = self.detector_engine.analyze_stock("601091", force_refresh=True)
+
+            self.assertTrue(sig.is_climax_exit)
+            self.assertEqual(sig.signal_type, "CLIMAX_EXIT")
+            self.assertEqual(sig.signal_level, "🚨 疯狂平仓")
+            self.assertIn("极端高潮放量", sig.structure_tag)
+            self.assertIn("坚决平仓保利", sig.signal_desc)
+
+    def test_ipo_first_day_adhesion_buy_detection(self):
+        """【测试】验证上市首日贴线惜售吸筹模式精准打标【🔥 首发吸筹】"""
+        rows = []
+        d = "2026-09-17"
+        # 首日 11.0 附近微幅爬升至 11.8，VWAP=10.9，回踩丝毫不碰 VWAP
+        for m in range(30):
+            p = 11.0 + m * 0.02
+            rows.append({
+                "time": f"{d} 09:{30+m:02d}",
+                "date": d,
+                "open": 11.0,
+                "close": p,
+                "high": p + 0.05,
+                "low": 11.0,
+                "price": p,
+                "vwap": 10.9,
+                "amount": 2000000,
+                "volume": 150000
+            })
+        mock_df = pd.DataFrame(rows)
+        mock_dict = {"601091": {"name": "沈鼓集团", "listing_date": "2026-09-17"}}
+
+        with patch.object(self.detector_engine.fetcher, "fetch_multi_day_intraday_bars", return_value=mock_df), \
+             patch.object(self.detector_engine.fetcher, "fetch_kline_bars", return_value=pd.DataFrame()), \
+             patch("time.strftime", return_value="2026-09-17"), \
+             patch("ats.new_stock_fetcher.NewStockFetcher.get_instance") as mock_fetcher_cls:
+            mock_inst = MagicMock()
+            mock_inst._cached_ipo_dict = mock_dict
+            mock_fetcher_cls.return_value = mock_inst
+
+            sig = self.detector_engine.analyze_stock("601091", force_refresh=True)
+
+            self.assertTrue(sig.is_ipo_first_day)
+            self.assertTrue(sig.is_above_vwap)
+            self.assertEqual(sig.signal_type, "IPO_FIRST_BUY")
+            self.assertEqual(sig.signal_level, "🔥 首发吸筹")
+            self.assertIn("首日贴线惜售", sig.structure_tag)
+
+    def test_broken_vwap_strict_exit_discipline(self):
+        """【测试】铁律风控：跌破 VWAP 0.6% 坚决触发【⛔ 破位止损点】，买错就出局"""
+        rows = []
+        d = "2026-09-18"
+        # 现价 48.5，VWAP=50.0，跌破 3%
+        for m in range(20):
+            p = 50.0 - m * 0.1
+            rows.append({
+                "time": f"{d} 09:{30+m:02d}",
+                "date": d,
+                "open": 50.0,
+                "close": p,
+                "high": 50.0,
+                "low": p - 0.05,
+                "price": p,
+                "vwap": 50.0,
+                "amount": 1000000,
+                "volume": 20000
+            })
+        mock_df = pd.DataFrame(rows)
+        with patch.object(self.detector_engine.fetcher, "fetch_multi_day_intraday_bars", return_value=mock_df), \
+             patch.object(self.detector_engine.fetcher, "fetch_kline_bars", return_value=pd.DataFrame()):
+            sig = self.detector_engine.analyze_stock("920065", force_refresh=True)
+
+            self.assertFalse(sig.is_above_vwap)
+            self.assertEqual(sig.signal_type, "WEAK_EXIT")
+            self.assertEqual(sig.signal_level, "⛔ 破位止损点")
+            self.assertIn("买错坚决止损出局", sig.signal_desc)
+
+    def test_horse_race_ranking_and_bubble_up(self):
+        """【测试】逐日赛马冒泡排位算法：早起爆+大斜率+高站稳率标的自动置顶 🥇 领头羊"""
+        sig1 = VWAPDetectorSignal(
+            code="601091", name="沈鼓集团", price=25.0, vwap=20.0, is_above_vwap=True,
+            launch_time_str="09:33", launch_slope_deg=58.0, vwap_adhesion_ratio=95.0, sbc_activity_pct=326.5
+        )
+        sig2 = VWAPDetectorSignal(
+            code="920298", name="腾信精密", price=90.0, vwap=70.0, is_above_vwap=True,
+            launch_time_str="09:42", launch_slope_deg=42.0, vwap_adhesion_ratio=88.0, sbc_activity_pct=210.0
+        )
+        sig3 = VWAPDetectorSignal(
+            code="001232", name="跟风标的", price=50.0, vwap=48.0, is_above_vwap=True,
+            launch_time_str="10:45", launch_slope_deg=15.0, vwap_adhesion_ratio=60.0, sbc_activity_pct=35.0
+        )
+        sig4 = VWAPDetectorSignal(
+            code="920065", name="破位标的", price=32.0, vwap=35.0, is_above_vwap=False, vwap_diff_pct=-8.5
+        )
+
+        ranked = batch_evaluate_horse_race_ranking([sig3, sig4, sig1, sig2])
+
+        # 验证冒泡置顶: sig1 凭借 09:33 极速拔起与 58° 爆量斜率夺得 🥇 领头羊
+        self.assertEqual(ranked[0].code, "601091")
+        self.assertEqual(ranked[0].horse_race_tier, "🥇 领头羊")
+        self.assertEqual(ranked[0].horse_race_rank, 1)
+        self.assertGreaterEqual(ranked[0].horse_race_score, 90.0)
+
+        # sig2 为 🥈 梯队前锋
+        self.assertEqual(ranked[1].code, "920298")
+        self.assertEqual(ranked[1].horse_race_tier, "🥈 梯队前锋")
+
+        # sig3 10:45 启动被降级为 ⏱️ 迟滞跟风
+        self.assertIn("迟滞跟风", ranked[2].horse_race_tier)
+
+        # sig4 破位被拦截为 ⛔ 破位出局
+        self.assertEqual(ranked[3].horse_race_tier, "⛔ 破位出局")
+
+    def test_ipo_trading_center_fleet_coordination_and_orders(self):
+        """【测试】验证 IPOTradingCenter 全池汇交、破除各管一摊、输出精准买卖指令"""
+        tc = IPOTradingCenter(total_capital=1000000.0)
+
+        # 1. 提交 4 只股票报告
+        s_leader = VWAPDetectorSignal(
+            code="601091", name="沈鼓集团", price=25.0, vwap=20.0, is_above_vwap=True,
+            signal_type="BREAKOUT", launch_time_str="09:33", launch_slope_deg=55.0,
+            vwap_adhesion_ratio=95.0, sbc_activity_pct=320.0
+        )
+        s_weak = VWAPDetectorSignal(
+            code="920065", name="千岸科技", price=32.0, vwap=35.0, is_above_vwap=False,
+            vwap_diff_pct=-8.5, signal_type="WEAK_EXIT"
+        )
+        s_first = VWAPDetectorSignal(
+            code="688837", name="信诺维", price=45.0, vwap=44.0, is_above_vwap=True,
+            signal_type="IPO_FIRST_BUY", is_ipo_first_day=True, vwap_diff_pct=2.2, vwap_adhesion_ratio=90.0
+        )
+
+        tc.submit_stock_perception_report(s_leader)
+        tc.submit_stock_perception_report(s_weak)
+        tc.submit_stock_perception_report(s_first)
+
+        # 假设当前持有千岸科技 2000 股 (买错破位状态)
+        tc.record_order_execution(IPOOrderDirective(
+            action="BUY", code="920065", name="千岸科技", price=34.0, shares=2000, size_pct=6.8
+        ))
+        self.assertEqual(tc._positions["920065"].shares, 2000)
+
+        # 2. 全局裁决生成订单
+        with patch.object(tc.sentiment_engine, "get_market_sentiment") as mock_sent:
+            mock_sent.return_value = MarketSentimentSnapshot(heat_stage="🔥 梯队升温", index_phase="温和放量")
+            orders = tc.evaluate_fleet_and_generate_orders()
+
+            # 必须产出两类关键指令：
+            # A: 针对 920065 千岸科技发出 SELL 破位立斩清仓指令
+            sell_orders = [o for o in orders if o.action == "SELL" and o.code == "920065"]
+            self.assertEqual(len(sell_orders), 1)
+            self.assertIn("破位止损出局", sell_orders[0].reason)
+            self.assertEqual(sell_orders[0].shares, 2000)
+
+            # B: 针对 601091 领头羊与 688837 首发吸筹发出 BUY 进攻开仓指令 (分配 35% 顶级仓位)
+            buy_orders = [o for o in orders if o.action == "BUY"]
+            self.assertGreaterEqual(len(buy_orders), 1)
+            top_buy = buy_orders[0]
+            self.assertEqual(top_buy.size_pct, 35.0)
+            self.assertGreaterEqual(top_buy.shares, 100)
+
+            # 3. 验证汇总概览
+            summary = tc.get_fleet_summary()
+            self.assertEqual(summary["holding_count"], 1)
+            self.assertIn("沈鼓集团", summary["top_leader_name"])
+
+
+if __name__ == "__main__":
+    unittest.main()

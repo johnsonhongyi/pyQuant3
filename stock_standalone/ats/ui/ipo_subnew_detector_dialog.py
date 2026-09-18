@@ -551,7 +551,32 @@ class IPOSubnewDetectorDialog(QMainWindow):
         btn_reset_default.clicked.connect(self._on_reset_default_clicked)
         tb_layout.addWidget(btn_reset_default)
 
+        btn_cmd_room = QPushButton("🚢 集中交易指挥室")
+        btn_cmd_room.setToolTip("打开集中交易总指挥室：掌握全数据赛马天梯、持仓盈亏追踪、一键批量执行与全自动跟随交易")
+        btn_cmd_room.setStyleSheet("background-color: #2b1f14; border-color: #ff9900; color: #ffaa00; font-weight: bold;")
+        btn_cmd_room.clicked.connect(self._on_open_command_room)
+        tb_layout.addWidget(btn_cmd_room)
+
         root_layout.addLayout(tb_layout)
+
+        # ── 1.5 战情面板：全市场情绪风向标与集中交易调度总指挥 ──
+        self.fleet_bar = QHBoxLayout()
+        self.fleet_bar.setSpacing(6)
+
+        self.lbl_market_sentiment = QLabel("🌐 大盘量能: 正在感知... | 新股梯队: 梯队升温中")
+        self.lbl_market_sentiment.setStyleSheet("background-color: #161824; border: 1px solid #2f334d; border-radius: 4px; padding: 2px 8px; color: #ffcc00; font-weight: bold; font-size: 8.5pt;")
+        self.fleet_bar.addWidget(self.lbl_market_sentiment)
+
+        self.lbl_fleet_leader = QLabel("🥇 爆款领头羊: 计算中...")
+        self.lbl_fleet_leader.setStyleSheet("background-color: #241c14; border: 1px solid #5c3a1e; border-radius: 4px; padding: 2px 8px; color: #ffaa00; font-weight: bold; font-size: 8.5pt;")
+        self.fleet_bar.addWidget(self.lbl_fleet_leader)
+
+        self.lbl_fleet_action = QLabel("🚢 集中交易决议: 紧盯 9:30-10:00 早鸟拔地而起 | 买错破 VWAP 立即出局")
+        self.lbl_fleet_action.setStyleSheet("background-color: #122118; border: 1px solid #1e452e; border-radius: 4px; padding: 2px 8px; color: #00ff88; font-weight: bold; font-size: 8.5pt;")
+        self.fleet_bar.addWidget(self.lbl_fleet_action)
+
+        self.fleet_bar.addStretch()
+        root_layout.addLayout(self.fleet_bar)
 
         # ── 2. 中部数据表格 (支持动态 ats_col、Ctrl/Shift 多选与上下翻页联动，与其他主力 Tab 100% 对齐) ──
         self.table = IPODetectorTableWidget(self)
@@ -934,6 +959,38 @@ class IPOSubnewDetectorDialog(QMainWindow):
             batches = perf_summary.get("batches", 1)
             perf_text = f" | 批次: {batches}组 | 日线: {day_ms:.0f}ms | 分时: {bars_ms:.0f}ms"
 
+        # 统一提交全池守护报告至集中交易调度中心，横向赛马冒泡排位，并刷新顶栏战情
+        try:
+            from ats.strategy.ipo_trading_center import IPOTradingCenter
+            trading_center = IPOTradingCenter.get_instance()
+            for s in self.signals_map.values():
+                trading_center.submit_stock_perception_report(s)
+            directives = trading_center.evaluate_fleet_and_generate_orders()
+            fleet_summary = trading_center.get_fleet_summary()
+            sentiment = trading_center.sentiment_engine.get_market_sentiment(list(self.signals_map.values()))
+
+            if hasattr(self, "lbl_market_sentiment"):
+                self.lbl_market_sentiment.setText(
+                    f"🌐 大盘: {sentiment.index_phase} (量比{sentiment.sh_volume_ratio:.2f}) | "
+                    f"新股梯队: {sentiment.heat_stage} (站稳率{sentiment.vwap_hold_ratio}%)"
+                )
+            if hasattr(self, "lbl_fleet_leader"):
+                self.lbl_fleet_leader.setText(
+                    f"🥇 爆款领头羊: {fleet_summary['top_leader_name']} ({fleet_summary['top_leader_score']}分)"
+                )
+            if hasattr(self, "lbl_fleet_action"):
+                if directives:
+                    top_d = directives[0]
+                    self.lbl_fleet_action.setText(f"🎯 集中决议 [{top_d.action}]: {top_d.name} {top_d.reason[:32]}...")
+                else:
+                    self.lbl_fleet_action.setText("🚢 集中交易决议: 紧盯 9:30-10:00 早鸟拔地而起 | 买错破 VWAP 立即出局")
+            
+            # 原地更新全表各行的全局仲裁与操盘决议 (消除各管一摊、不知山外有山盲区)
+            self._refresh_all_table_arbitrations()
+        except Exception as e:
+            logger.debug(f"更新集中交易调度战情异常: {e}")
+
+
         self.lbl_status.setText(
             f"✅ 监控中: {len(self.monitored_codes)} 只 | "
             f"🎯 预下单: {pre_cnt} 只 | 🚀 回踩启动: {pull_cnt} 只 | ⚡ 加速: {break_cnt} 只 | 耗时: {cost:.2f}s{perf_text}"
@@ -1227,19 +1284,30 @@ class IPOSubnewDetectorDialog(QMainWindow):
             diff_fg = QColor("#ff8800") if sig.vwap_diff_pct > 0 else (QColor("#00bbff") if sig.vwap_diff_pct < 0 else QColor("#e2e2e5"))
             _set_numeric_cell(5, diff_str, float(sig.vwap_diff_pct) if sig.vwap > 0 else -999999.0, fg=diff_fg)
 
-            # 6. VWAP结构形态
+            # 6. VWAP结构形态 (融合赛马动能分与启动时点)
             struct_fg = QColor("#ffd700") if sig.consolidation_days >= 1 else (QColor("#00ff88") if sig.pullback_no_touch else QColor("#e2e2e5"))
             struct_font = QFont("Arial", 9, QFont.Weight.Bold) if (sig.consolidation_days >= 1 or sig.pullback_no_touch) else None
-            _set_text_cell(6, sig.structure_tag, fg=struct_fg, font=struct_font)
+            display_struct = sig.structure_tag
+            if getattr(sig, "horse_race_score", 0.0) > 0:
+                t_str = getattr(sig, "launch_time_str", "")
+                t_tag = f" {t_str}" if (t_str and t_str != "未启动") else ""
+                display_struct = f"[{sig.horse_race_score:.0f}分{t_tag}] {sig.structure_tag}"
+            _set_text_cell(6, display_struct, fg=struct_fg, font=struct_font)
 
             # 7. 大趋势K线状态
             trend_fg = QColor("#ff33aa") if sig.has_kline_launch_sig else QColor("#e2e2e5")
             _set_text_cell(7, sig.trend_desc or "--", fg=trend_fg)
 
-            # 8. 信号评级
+            # 8. 信号评级 (融合赛马排位徽章与终极闭环信号)
             sig_fg = QColor("#ffd700")
             sig_bg = QColor("#2d2400")
-            if sig.signal_type == "PULLBACK_BUY":
+            if sig.signal_type == "CLIMAX_EXIT" or getattr(sig, "is_climax_exit", False):
+                sig_fg = QColor("#ff3333")
+                sig_bg = QColor("#3d0b0b")
+            elif sig.signal_type == "IPO_FIRST_BUY":
+                sig_fg = QColor("#ff8800")
+                sig_bg = QColor("#331800")
+            elif sig.signal_type == "PULLBACK_BUY":
                 sig_fg = QColor("#00ff88")
                 sig_bg = QColor("#002d18")
             elif sig.signal_type == "BREAKOUT":
@@ -1251,7 +1319,12 @@ class IPOSubnewDetectorDialog(QMainWindow):
             elif sig.signal_type == "WATCH":
                 sig_fg = QColor("#ffffff")
                 sig_bg = QColor("#1f2430")
-            _set_text_cell(8, sig.signal_level, fg=sig_fg, bg=sig_bg, font=QFont("Arial", 9, QFont.Weight.Bold))
+
+            level_str = sig.signal_level
+            hr_tier = getattr(sig, "horse_race_tier", "")
+            if hr_tier and hr_tier not in ("⚪ 观察", "--") and hr_tier not in level_str:
+                level_str = f"{hr_tier} {sig.signal_level}"
+            _set_text_cell(8, level_str, fg=sig_fg, bg=sig_bg, font=QFont("Arial", 9, QFont.Weight.Bold))
 
             # 9. 极窄止损位
             sl_str = f"{sig.stop_loss_price:.2f}" if sig.stop_loss_price > 0 else "--"
@@ -1331,8 +1404,26 @@ class IPOSubnewDetectorDialog(QMainWindow):
                 else:
                     _set_numeric_cell(col_idx, "--", -999999.0)
 
-            # 为什么 (详细解释)
-            _set_text_cell(10 + n_extra, sig.signal_desc, tooltip=sig.signal_desc)
+            # 为什么 / 操盘决议 (优先融合交易中心基于全数据的全局仲裁与山外有山决议)
+            desc_text = getattr(sig, "global_arbitration_desc", "") or sig.signal_desc
+            desc_fg = None
+            role = getattr(sig, "global_fleet_role", "")
+            if role == "CLIMAX_EXIT" or getattr(sig, "is_climax_exit", False):
+                desc_fg = QColor("#ff4444")
+            elif role == "STOP_LOSS" or sig.signal_type == "WEAK_EXIT":
+                desc_fg = QColor("#ff5555")
+            elif role == "LEADER" or sig.signal_type == "IPO_FIRST_BUY":
+                desc_fg = QColor("#00ff88")
+            elif role == "VANGUARD":
+                desc_fg = QColor("#00e5ff")
+            elif role == "FOLLOWER":
+                desc_fg = QColor("#8f93a8")
+            elif role == "ICE_ABORT":
+                desc_fg = QColor("#66fcf1")
+            elif getattr(sig, "horse_race_rank", 999) <= 2 and sig.is_above_vwap:
+                desc_fg = QColor("#00ff88")
+            _set_text_cell(10 + n_extra, desc_text, tooltip=desc_text, fg=desc_fg)
+
 
             # 更新时间
             _set_text_cell(11 + n_extra, sig.update_time or "--")
@@ -1341,8 +1432,68 @@ class IPOSubnewDetectorDialog(QMainWindow):
                 self.table.setSortingEnabled(True)
             self._is_table_updating = prev_updating
 
+    def _refresh_all_table_arbitrations(self):
+
+        """【集中仲裁原地极速反哺】全池统筹完成后，原地极速更新全表各行操盘决议，彻底消除单股盲区"""
+        n_extra = len(self.extra_cols)
+        desc_col = 10 + n_extra
+        was_sorting = self.table.isSortingEnabled()
+        if was_sorting:
+            self.table.setSortingEnabled(False)
+        try:
+            for r in range(self.table.rowCount()):
+                it_c = self.table.item(r, 0)
+                if not it_c:
+                    continue
+                code = "".join(ch for ch in it_c.text().strip() if ch.isdigit()).zfill(6)
+                sig = self.signals_map.get(code)
+                if not sig:
+                    continue
+                desc_text = getattr(sig, "global_arbitration_desc", "") or sig.signal_desc
+                desc_fg = None
+                role = getattr(sig, "global_fleet_role", "")
+                if role == "CLIMAX_EXIT" or getattr(sig, "is_climax_exit", False):
+                    desc_fg = QColor("#ff4444")
+                elif role == "STOP_LOSS" or sig.signal_type == "WEAK_EXIT":
+                    desc_fg = QColor("#ff5555")
+                elif role == "LEADER" or sig.signal_type == "IPO_FIRST_BUY":
+                    desc_fg = QColor("#00ff88")
+                elif role == "VANGUARD":
+                    desc_fg = QColor("#00e5ff")
+                elif role == "FOLLOWER":
+                    desc_fg = QColor("#8f93a8")
+                elif role == "ICE_ABORT":
+                    desc_fg = QColor("#66fcf1")
+                elif getattr(sig, "horse_race_rank", 999) <= 2 and sig.is_above_vwap:
+                    desc_fg = QColor("#00ff88")
+                
+                it_desc = self.table.item(r, desc_col)
+                if it_desc:
+                    it_desc.setText(desc_text)
+                    it_desc.setToolTip(desc_text)
+                    if desc_fg:
+                        it_desc.setForeground(desc_fg)
+                else:
+                    it_desc = QTableWidgetItem(desc_text)
+                    it_desc.setToolTip(desc_text)
+                    if desc_fg:
+                        it_desc.setForeground(desc_fg)
+                    self.table.setItem(r, desc_col, it_desc)
+        finally:
+            if was_sorting:
+                self.table.setSortingEnabled(True)
+
+    def _on_open_command_room(self):
+        """【🚢 集中交易总指挥室】掌握全数据赛马天梯、持仓盈亏追踪、一键批量执行与全自动跟随交易"""
+        try:
+            from ats.ui.ipo_command_room_dialog import IPOCommandRoomDialog
+            dlg = IPOCommandRoomDialog(self)
+            dlg.exec()
+        except Exception as e:
+            logger.error(f"打开集中交易指挥室异常: {e}")
 
     def _open_sbc_for_code(self, code: str):
+
         """【📈 一键调出 SBC 走势】秒级打开 10d VWAP 分时图"""
         try:
             from ats.ui.intraday_strategy_dialog import open_sbc_chart_dialog
