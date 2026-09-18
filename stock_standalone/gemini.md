@@ -1,3 +1,28 @@
+## 2026-09-18 10:25
+- [x] **【彻底解决 SBC 实盘分时走势图周期切换等按钮鼠标悬停 ToolTip 白底白字/高光白块不可读问题，全局应用暗黑金融质感高对比配色】(`ats/ui/intraday_strategy_dialog.py`, `run_sbc.py`, `tests/test_sbc_tooltip_styling.py`)**：
+    - [x] **操盘手现场明确指示与真实痛点 (P0)**：
+        - “鼠标悬停显示周期信息等sbc都有配色问题”；
+        - SBC 走势窗口鼠标悬停在顶部工具栏周期按钮（1日、5日、10日、3D、日K等）、自动策略、重排等控件时，弹出的 `QToolTip` 呈现为 Windows 默认浅色/白色矩形底盒，而文字受窗口全局样式影响被渲染为白色，产生严重的“白底白字”不可读盲盒。
+    - [x] **根因深度破案与底层机理 (P0)**：
+        1. **病灶 1·无限定选择器的顶级样式污染**：
+           - `SBCIntradayChartDialog.__init__` 直接使用了 `self.setStyleSheet("background-color: #101018; color: #ffffff;")`，未显式限定选择器且未配置 `QToolTip` 样式规则；
+           - 在 Windows 平台上，Qt 渲染 QToolTip 时若无显式 QSS，系统会退回默认 ToolTip 背景画刷（浅白底），但其前景色受到父容器样式的白色文字继承污染，引发白底白字；
+        2. **病灶 2·独立进程与顶层无父级窗口未同步调色板**：
+           - SBC 窗口设置了 `super().__init__(None)` 作为完全独立的顶层桌面 Window，不继承 ATS 主界面的样式树；独立启动器 `run_sbc.py` 中亦未向 `app` 初始化暗黑金融调色板。
+    - [x] **全体系工程落地与修复验证 (KISS / SOLID / DRY)**：
+        1. **规范化暗黑金融 QToolTip 样式直达定义**：
+           - `SBCIntradayChartDialog` 与 `AllCodesStrategyEvalDialog` 显式注入暗黑金融质感 QToolTip 样式规则：
+             - 背景底色：`#14141f`（深邃微光底色，彻底杜绝浅色高光刺眼）；
+             - 文本颜色：`#f1f5f9`（高对比明亮浅白文字，清晰醒目）；
+             - 边框修饰：`1px solid #38bdf8`（科技蓝精致细边框）；
+             - 圆角与内边距：`border-radius: 4px; padding: 6px 10px; font-size: 9pt;`；
+        2. **窗口与 QApplication 调色板双重保险**：
+           - 窗口初始化同步配置 `QPalette.ColorRole.ToolTipBase` 为 `#14141f`，`ToolTipText` 为 `#f1f5f9`；
+           - `run_sbc.py` 独立启动器在 `QApplication` 初始化时一并注入暗黑调色板与全局 QToolTip 样式，确保多进程、独立持仓盯盘无论何种启动方式均 100% 具备一致的高级暗黑视觉体验；
+        3. **全量自动化测试 100% 验证通过 (13/13 PASSED)**：
+           - 新增 `tests/test_sbc_tooltip_styling.py`（4/4 PASSED 全部绿灯通过）；
+           - 回归 `tests/test_sbc_ctrl_c_and_alt_exit_persistence.py` 与 `tests/test_sbc_performance_optimization.py`（9/9 PASSED 全部绿灯通过）。
+
 ## 2026-09-18 10:15
 - [x] **【彻底移除 SBC 走势窗口顶部工具栏“🚪 退出保存”按钮防误触，100% 保留键盘快捷键与 Alt+X 退出持久化能力】(`ats/ui/intraday_strategy_dialog.py`, `tests/test_sbc_ctrl_c_and_alt_exit_persistence.py`)**：
     - [x] **操盘手现场明确指示与真实痛点 (P0)**：

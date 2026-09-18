@@ -280,8 +280,8 @@ class SBCChartCanvas(QWidget):
     - 🔄 支持鼠标右键一键重置回 100% 全景视图；
     - 🎯 通达信自动通道严格截止于最高价/最低价波段起点，杜绝左上角冗长斜线。
     """
-    # 📐 极致高屏占比四周紧凑边距 (消除巨幅黑边，走势图饱满撑满窗口)
-    MARGIN_LEFT = 42
+    # 📐 极致高屏占比四周紧凑边距 (左侧预留 56px 容纳价格与涨跌幅标尺，右侧 52px 容纳开盘/VWAP)
+    MARGIN_LEFT = 56
     MARGIN_RIGHT = 52
     MARGIN_TOP = 18
     MARGIN_BOTTOM = 22
@@ -297,6 +297,7 @@ class SBCChartCanvas(QWidget):
         self.target_sell_min = 0.0
         self.target_sell_max = 0.0
         self.signals = []
+        self.channel_info = {}  # ⚡ 存储对齐 K 线的通道关键阶梯 (上轨、中轨、下轨、支撑、反转)
 
         # 🔍 缩放与平移视口状态
         self._zoom_start_idx = 0
@@ -947,6 +948,24 @@ class SBCChartCanvas(QWidget):
         self.target_sell_min = sell_min
         self.target_sell_max = sell_max
         self.signals = signals or []
+        # ⚡ 提取并持久缓存通道核心阶梯位 (供分时图左侧无缝对齐展现)
+        try:
+            ch_up = df_kline['ch_upper'].astype(float).values if 'ch_upper' in df_kline.columns else []
+            ch_mid = df_kline['ch_mid'].astype(float).values if 'ch_mid' in df_kline.columns else []
+            ch_dn = df_kline['ch_lower'].astype(float).values if 'ch_lower' in df_kline.columns else []
+            ch_supp = float(df_kline['ch_supp_price'].iloc[-1]) if 'ch_supp_price' in df_kline.columns and len(df_kline) > 0 and pd.notna(df_kline['ch_supp_price'].iloc[-1]) else 0.0
+            rev = float(df_kline['reversal_line'].iloc[-1]) if 'reversal_line' in df_kline.columns and len(df_kline) > 0 and pd.notna(df_kline['reversal_line'].iloc[-1]) else 0.0
+            if len(ch_up) > 0 and ch_up[-1] > 0:
+                self.channel_info = {
+                    "ch_up": float(ch_up[-1]),
+                    "ch_mid": float(ch_mid[-1]) if len(ch_mid) > 0 else 0.0,
+                    "ch_dn": float(ch_dn[-1]) if len(ch_dn) > 0 else 0.0,
+                    "ch_supp": ch_supp,
+                    "rev": rev
+                }
+        except Exception:
+            pass
+
         if getattr(self, '_last_period_mode', None) != period_mode or getattr(self, '_last_code', None) != getattr(self, 'code', None):
             self._zoom_start_idx = 0
             self._zoom_end_idx = -1
@@ -1207,6 +1226,109 @@ class SBCChartCanvas(QWidget):
             painter.setPen(QPen(gp_col, 1, gp_style))
             painter.drawLine(margin_left, int(gy), margin_left + chart_w, int(gy))
 
+        # 🌟 统一收集左侧 Y 轴关键标尺 (最高点、最低点、重要涨跌幅、黄金分割、支撑、反转、通道轨线)
+        # 彻底解决分时图左侧无标尺问题，完全对齐 K 线显示在左侧，右侧开盘/VWAP保持不变
+        left_axis_labels = []
+
+        # 0. 🌟 可视区间真实【最高点】与【最低点】及精准涨跌幅 (P0 核心标尺)
+        hi_cand = float(df_view['high'].max()) if 'high' in df_view.columns else float(max(prices))
+        lo_cand = float(df_view['low'].min()) if 'low' in df_view.columns else float(min(prices))
+        hi_val = max(hi_cand, float(max(prices))) if len(prices) > 0 else hi_cand
+        lo_val = min(lo_cand, float(min(prices))) if len(prices) > 0 else lo_cand
+
+        if hi_val > 0 and min_p <= hi_val <= max_p:
+            y_hi = price_to_y(hi_val)
+            hi_pct = ((hi_val - op_ref) / op_ref * 100.0) if op_ref > 0 else 0.0
+            painter.setPen(QPen(QColor("#FF4444"), 1, Qt.PenStyle.DashLine))
+            painter.drawLine(int(margin_left), int(y_hi), int(margin_left + chart_w * 0.40), int(y_hi))
+            left_axis_labels.append((y_hi, f"高:{hi_val:.2f} {hi_pct:+.1f}%", QColor("#FF4444"), QFont("Consolas", 7, QFont.Weight.Bold)))
+
+        if lo_val > 0 and min_p <= lo_val <= max_p:
+            y_lo = price_to_y(lo_val)
+            lo_pct = ((lo_val - op_ref) / op_ref * 100.0) if op_ref > 0 else 0.0
+            painter.setPen(QPen(QColor("#00FF88"), 1, Qt.PenStyle.DashLine))
+            painter.drawLine(int(margin_left), int(y_lo), int(margin_left + chart_w * 0.40), int(y_lo))
+            left_axis_labels.append((y_lo, f"低:{lo_val:.2f} {lo_pct:+.1f}%", QColor("#00FF88"), QFont("Consolas", 7, QFont.Weight.Bold)))
+
+        # 1. 黄金分割阶梯线与精准涨跌幅 (对齐 K 线 80.9%, 61.8%, 50.0%, 38.2%, 19.1%)
+        full_high = max(all_cands)
+        full_low = min(all_cands)
+        fib_range = full_high - full_low
+        if fib_range > 1e-4:
+            fib_levels = [
+                (full_low + fib_range * 0.809, "80.9%", QColor("#FF7700")),  # 高阻位
+                (full_low + fib_range * 0.618, "61.8%", QColor("#FFD700")),  # 黄金阻力
+                (full_low + fib_range * 0.500, "50.0%", QColor("#00E5FF")),  # 中枢位
+                (full_low + fib_range * 0.382, "38.2%", QColor("#FFD700")),  # 黄金支撑
+                (full_low + fib_range * 0.191, "19.1%", QColor("#00FF88")),  # 强撑位
+            ]
+            fib_start_x = int(margin_left)
+            fib_end_x = int(margin_left + chart_w * 0.45)
+            for f_val, f_lbl, f_col in fib_levels:
+                # 若与最高点或最低点价格过于接近，则优先展示最高/最低点，防止密集挤压
+                if abs(f_val - hi_val) < 0.03 or abs(f_val - lo_val) < 0.03:
+                    continue
+                if min_p <= f_val <= max_p:
+                    y_fib = price_to_y(f_val)
+                    painter.setPen(QPen(QColor(f_col.red(), f_col.green(), f_col.blue(), 75), 1, Qt.PenStyle.DotLine))
+                    painter.drawLine(fib_start_x, int(y_fib), fib_end_x, int(y_fib))
+                    pct_val = ((f_val - op_ref) / op_ref * 100.0) if op_ref > 0 else 0.0
+                    left_axis_labels.append((y_fib, f"{f_val:.2f} {pct_val:+.1f}%", f_col, QFont("Consolas", 7)))
+
+        # 2. 对齐 K 线的通达信自动通道三轨 (上轨、中轨、下轨)
+        chan = getattr(self, 'channel_info', {}) or {}
+        ch_up_val = chan.get("ch_up", 0.0)
+        ch_mid_val = chan.get("ch_mid", 0.0)
+        ch_dn_val = chan.get("ch_dn", 0.0)
+        ch_supp_val = chan.get("ch_supp", 0.0)
+        ch_rev_val = chan.get("rev", 0.0)
+
+        if ch_up_val > 0 and min_p <= ch_up_val <= max_p:
+            left_axis_labels.append((price_to_y(ch_up_val), f"上轨:{ch_up_val:.2f}", QColor("#FFFFFF"), QFont("Microsoft YaHei", 7, QFont.Weight.Bold)))
+        if ch_mid_val > 0 and min_p <= ch_mid_val <= max_p:
+            left_axis_labels.append((price_to_y(ch_mid_val), f"中轨:{ch_mid_val:.2f}", QColor("#B0B0C0"), QFont("Microsoft YaHei", 7)))
+        if ch_dn_val > 0 and min_p <= ch_dn_val <= max_p:
+            left_axis_labels.append((price_to_y(ch_dn_val), f"下轨:{ch_dn_val:.2f}", QColor("#FFFFFF"), QFont("Microsoft YaHei", 7, QFont.Weight.Bold)))
+
+        # 3. 对齐 K 线的上涨支撑线与反转线 (左侧绘制短水平虚线与标签)
+        if ch_supp_val > 0 and min_p <= ch_supp_val <= max_p:
+            y_supp_line = price_to_y(ch_supp_val)
+            painter.setPen(QPen(QColor("#FF4444"), 1, Qt.PenStyle.DashLine))
+            painter.drawLine(int(margin_left), int(y_supp_line), int(margin_left + chart_w * 0.35), int(y_supp_line))
+            left_axis_labels.append((y_supp_line, f"支撑:{ch_supp_val:.2f}", QColor("#FF4444"), QFont("Microsoft YaHei", 7, QFont.Weight.Bold)))
+
+        if ch_rev_val > 0 and min_p <= ch_rev_val <= max_p:
+            y_rev_line = price_to_y(ch_rev_val)
+            painter.setPen(QPen(QColor("#00FF88"), 1, Qt.PenStyle.DashLine))
+            painter.drawLine(int(margin_left), int(y_rev_line), int(margin_left + chart_w * 0.35), int(y_rev_line))
+            left_axis_labels.append((y_rev_line, f"反转:{ch_rev_val:.2f}", QColor("#00FF88"), QFont("Microsoft YaHei", 7, QFont.Weight.Bold)))
+
+        # 4. 开盘基准线对应 0.0% 涨跌幅基线 (左侧清晰标注)
+        if op_ref > 0 and min_p <= op_ref <= max_p:
+            y_op_l = price_to_y(op_ref)
+            left_axis_labels.append((y_op_l, f"{op_ref:.2f} +0.0%", QColor("#8E8E93"), QFont("Consolas", 7)))
+
+        # 5. 🌟 统一渲染左侧 Y 轴标签（带垂直防重叠智能微调）
+        if left_axis_labels:
+            left_axis_labels.sort(key=lambda item: item[0])
+            adjusted_labels = []
+            min_y_gap = 12.0
+            last_drawn_y = -999.0
+            for raw_y, text, col, font in left_axis_labels:
+                target_y = max(raw_y, last_drawn_y + min_y_gap)
+                target_y = max(margin_top + 8, min(margin_top + chart_h - 2, target_y))
+                adjusted_labels.append((target_y, text, col, font))
+                last_drawn_y = target_y
+
+            for adj_y, text, col, font in adjusted_labels:
+                painter.setFont(font)
+                painter.setPen(QPen(col))
+                fm = painter.fontMetrics()
+                tw = fm.horizontalAdvance(text)
+                tx = max(2, int(margin_left - tw - 4))
+                painter.drawText(tx, int(adj_y + 3), text)
+                painter.drawLine(margin_left - 3, int(adj_y), margin_left, int(adj_y))
+
         # 📅 多日分时 (2d / 3d / 5d / 10d) 各交易日垂直虚线分割线与日期角标标注
         if self.period_mode in ["2d", "3d", "5d", "10d"] and len(times) > 1:
             dates_list = []
@@ -1256,7 +1378,7 @@ class SBCChartCanvas(QWidget):
             painter.setPen(QPen(QColor("#00b4d8"), 1.8))
             painter.drawPath(path_p)
 
-        # 🔴 开盘基准线
+        # 🔴 开盘基准线 (保持在右侧显示)
         if op_ref > 0:
             y_op = price_to_y(op_ref)
             painter.setPen(QPen(QColor("#ff4444"), 1, Qt.PenStyle.DashLine))
@@ -1265,7 +1387,7 @@ class SBCChartCanvas(QWidget):
             painter.setFont(QFont("Arial", 8, QFont.Weight.Bold))
             painter.drawText(margin_left + chart_w + 3, int(y_op + 3), f"开盘:{op_ref:.2f}")
 
-        # 🟢 目标止盈线
+        # 🟢 目标止盈线 (保持在右侧显示)
         if self.target_sell_min > 0:
             y_target = price_to_y(self.target_sell_min)
             painter.setPen(QPen(QColor("#00ff88"), 1, Qt.PenStyle.DashDotLine))
@@ -1274,7 +1396,7 @@ class SBCChartCanvas(QWidget):
             painter.setFont(QFont("Arial", 8, QFont.Weight.Bold))
             painter.drawText(margin_left + chart_w + 3, int(y_target + 3), f"目标:{self.target_sell_min:.2f}")
 
-        # 🟡 最新 VWAP 标签
+        # 🟡 最新 VWAP 标签 (保持在右侧显示)
         if len(vwaps) > 0 and vwaps[-1] > 1.0:
             y_vwap = price_to_y(vwaps[-1])
             painter.setPen(QPen(QColor("#ffd700"), 1))
@@ -2926,7 +3048,39 @@ class SBCIntradayChartDialog(QWidget):
         )
         self.setWindowTitle(f"📈 【{self.code} {resolve_stock_name(self.code)}】SBC 实盘分时走势与关键阶梯基准图")
         self.setMinimumSize(320, 180) # 💡 极度紧凑的最小窗口尺寸保护
-        self.setStyleSheet("background-color: #101018; color: #ffffff;")
+        self.setStyleSheet("""
+            SBCIntradayChartDialog, QWidget {
+                background-color: #101018;
+                color: #ffffff;
+            }
+            /* 💡 彻底修复 SBC 周期切换与按钮悬浮提示 (QToolTip) 白底白字/配色不可读问题 */
+            QToolTip {
+                background-color: #14141f;
+                color: #f1f5f9;
+                border: 1px solid #38bdf8;
+                border-radius: 4px;
+                padding: 6px 10px;
+                font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+                font-size: 9pt;
+                font-weight: normal;
+            }
+        """)
+        # 🛡️ 设置窗口级调色板与全局 QApplication 调色板，彻底防御 Windows 原生 ToolTip 浅色底渗透
+        try:
+            from PyQt6.QtGui import QPalette, QColor
+            pal = self.palette()
+            pal.setColor(QPalette.ColorRole.ToolTipBase, QColor("#14141f"))
+            pal.setColor(QPalette.ColorRole.ToolTipText, QColor("#f1f5f9"))
+            self.setPalette(pal)
+
+            app = QApplication.instance()
+            if app:
+                app_pal = app.palette()
+                app_pal.setColor(QPalette.ColorRole.ToolTipBase, QColor("#14141f"))
+                app_pal.setColor(QPalette.ColorRole.ToolTipText, QColor("#f1f5f9"))
+                app.setPalette(app_pal)
+        except Exception:
+            pass
         self._unmaximized_size = (680, 420)  # 💡 维护未最大化前的真实标准尺寸，绝不被最大化污染
 
         layout = QVBoxLayout(self)
@@ -2987,26 +3141,28 @@ class SBCIntradayChartDialog(QWidget):
             tb_layout.addWidget(btn)
 
         btn_rearrange = QPushButton("🪟 重排")
-        btn_rearrange.setStyleSheet("background-color: #1a2e22; color: #00ff88; font-weight: bold; border: 1px solid #00ff88; border-radius: 3px; padding: 2px 5px; font-size: 8.5pt;")
-        btn_rearrange.setToolTip("快捷键: Q 键，自动将所有已打开的 SBC 分时走势窗口在当前屏幕网格平铺重排")
+        btn_rearrange.setStyleSheet("QPushButton { background-color: #1a2e22; color: #00ff88; font-weight: bold; border: 1px solid #00ff88; border-radius: 3px; padding: 2px 5px; font-size: 8.5pt; } QPushButton:hover { color: #ffffff; border: 1px solid #38bdf8; }")
+        btn_rearrange.setToolTip("快捷键: Q 键\n• 自动将所有已打开的 SBC 分时走势窗口在当前屏幕网格平铺重排")
         btn_rearrange.clicked.connect(self._on_rearrange_windows_clicked)
 
         btn_refresh = QPushButton("🔄 刷新")
-        btn_refresh.setStyleSheet("background-color: #1e2638; color: #38bdf8; font-weight: bold; border: 1px solid #38bdf8; border-radius: 3px; padding: 2px 5px; font-size: 8.5pt;")
+        btn_refresh.setStyleSheet("QPushButton { background-color: #1e2638; color: #38bdf8; font-weight: bold; border: 1px solid #38bdf8; border-radius: 3px; padding: 2px 5px; font-size: 8.5pt; } QPushButton:hover { color: #ffffff; border: 1px solid #00ff88; }")
+        btn_refresh.setToolTip("快捷键: F5 键\n• 重新拉取并刷新当前标的最新行情与量化走势")
         btn_refresh.clicked.connect(self.reload_chart)
 
         btn_clear_cache = QPushButton("🧹 清缓")
-        btn_clear_cache.setStyleSheet("background-color: #3b1419; color: #ff6666; font-weight: bold; border: 1px solid #ff6666; border-radius: 3px; padding: 2px 4px; font-size: 8.5pt;")
-        btn_clear_cache.setToolTip("强力清除当前标的的内存与磁盘错误缓存")
+        btn_clear_cache.setStyleSheet("QPushButton { background-color: #3b1419; color: #ff6666; font-weight: bold; border: 1px solid #ff6666; border-radius: 3px; padding: 2px 4px; font-size: 8.5pt; } QPushButton:hover { color: #ffffff; border: 1px solid #ff4444; }")
+        btn_clear_cache.setToolTip("强力清除当前标的的内存与磁盘错误缓存并重新拉取")
         btn_clear_cache.clicked.connect(self._on_clear_cache_clicked)
 
         self.btn_toggle_log = QPushButton("📋 日志")
-        self.btn_toggle_log.setStyleSheet("background-color: #1e2638; color: #ffd700; font-weight: bold; border: 1px solid #ffd700; border-radius: 3px; padding: 2px 5px; font-size: 8.5pt;")
+        self.btn_toggle_log.setStyleSheet("QPushButton { background-color: #1e2638; color: #ffd700; font-weight: bold; border: 1px solid #ffd700; border-radius: 3px; padding: 2px 5px; font-size: 8.5pt; } QPushButton:hover { color: #ffffff; border: 1px solid #38bdf8; }")
+        self.btn_toggle_log.setToolTip("切换展开/收起底部实时交易阶段与风控日志面板")
         self.btn_toggle_log.clicked.connect(self._toggle_log_panel)
 
         self.btn_linkage = QPushButton("🔗 联动 (F)")
-        self.btn_linkage.setStyleSheet("background-color: #2a1f10; color: #ffaa44; font-weight: bold; border: 1px solid #ffaa44; border-radius: 3px; padding: 2px 6px; font-size: 8.5pt;")
-        self.btn_linkage.setToolTip("快捷键: F 键。全系统与通达信/同花顺/可视化终端物理联动当前标的")
+        self.btn_linkage.setStyleSheet("QPushButton { background-color: #2a1f10; color: #ffaa44; font-weight: bold; border: 1px solid #ffaa44; border-radius: 3px; padding: 2px 6px; font-size: 8.5pt; } QPushButton:hover { color: #ffffff; border: 1px solid #ffd700; }")
+        self.btn_linkage.setToolTip("快捷键: F 键\n• 全系统与通达信/同花顺/可视化终端物理联动当前标的")
         self.btn_linkage.clicked.connect(self._trigger_linkage)
 
         self.btn_eval_r = QPushButton("⚡ 测算 (开)")
@@ -3014,8 +3170,8 @@ class SBCIntradayChartDialog(QWidget):
         self._update_eval_btn_style()
 
         self.btn_cycle_trade = QPushButton("💰 点击收益")
-        self.btn_cycle_trade.setStyleSheet("background-color: #1a233a; color: #ffd700; font-weight: bold; border: 1px solid #ffd700; border-radius: 3px; padding: 2px 8px; font-size: 8.5pt;")
-        self.btn_cycle_trade.setToolTip("快捷键: Space 或 [ / ] 键，依次轮巡高亮回测买卖交易对并展示点击收益详情")
+        self.btn_cycle_trade.setStyleSheet("QPushButton { background-color: #1a233a; color: #ffd700; font-weight: bold; border: 1px solid #ffd700; border-radius: 3px; padding: 2px 8px; font-size: 8.5pt; } QPushButton:hover { color: #ffffff; border: 1px solid #00ff88; }")
+        self.btn_cycle_trade.setToolTip("快捷键: Space 或 [ / ] 键\n• 依次轮巡高亮回测买卖交易对并展示单笔点击收益详情")
         self.btn_cycle_trade.clicked.connect(lambda: self.canvas.cycle_selected_trade(1))
 
         # 🤖 自动策略开关按钮 (VWAP进攻 + 8层防守主动守护)
@@ -3745,8 +3901,8 @@ class SBCIntradayChartDialog(QWidget):
                 orig_ss = self.btn_linkage.styleSheet()
                 self._btn_linkage_default_ss = orig_ss
             self.btn_linkage.setStyleSheet(
-                "background-color: #7c2d12; color: #ffedd5; font-weight: bold; "
-                "border: 1px solid #f97316; border-radius: 3px; padding: 2px 6px; font-size: 8.5pt;"
+                "QPushButton { background-color: #7c2d12; color: #ffedd5; font-weight: bold; "
+                "border: 1px solid #f97316; border-radius: 3px; padding: 2px 6px; font-size: 8.5pt; }"
             )
             QTimer.singleShot(250, lambda: self.btn_linkage.setStyleSheet(self._btn_linkage_default_ss) if hasattr(self, 'btn_linkage') and self.btn_linkage else None)
 
@@ -3757,17 +3913,19 @@ class SBCIntradayChartDialog(QWidget):
         if getattr(self, 'auto_eval_enabled', True):
             self.btn_eval_r.setText("⚡ 测算 (开)")
             self.btn_eval_r.setStyleSheet(
-                "background-color: #064e3b; color: #34d399; font-weight: bold; "
-                "border: 1px solid #059669; border-radius: 3px; padding: 2px 6px; font-size: 8.5pt;"
+                "QPushButton { background-color: #064e3b; color: #34d399; font-weight: bold; "
+                "border: 1px solid #059669; border-radius: 3px; padding: 2px 6px; font-size: 8.5pt; }"
+                "QPushButton:hover { background-color: #047857; color: #ffffff; border: 1px solid #34d399; }"
             )
-            self.btn_eval_r.setToolTip("快捷键: R 键 (当前: 自动测算【已开启】)。数据刷新、切换周期、切股时全自动持续测算！点击或按 R 切换关闭")
+            self.btn_eval_r.setToolTip("快捷键: R 键 (当前: 自动测算【已开启】)\n• 数据刷新、切换周期、切股时全自动持续测算\n• 点击按钮或按键盘 R 键可开启/关闭")
         else:
             self.btn_eval_r.setText("⚡ 测算 (关)")
             self.btn_eval_r.setStyleSheet(
-                "background-color: #1e1e28; color: #888899; font-weight: normal; "
-                "border: 1px solid #333344; border-radius: 3px; padding: 2px 6px; font-size: 8.5pt;"
+                "QPushButton { background-color: #1e1e28; color: #888899; font-weight: normal; "
+                "border: 1px solid #333344; border-radius: 3px; padding: 2px 6px; font-size: 8.5pt; }"
+                "QPushButton:hover { background-color: #2a2a3c; color: #ffffff; border: 1px solid #38bdf8; }"
             )
-            self.btn_eval_r.setToolTip("快捷键: R 键 (当前: 自动测算【已关闭】)。点击或按 R 开启全自动测算与标记")
+            self.btn_eval_r.setToolTip("快捷键: R 键 (当前: 自动测算【已关闭】)\n• 点击按钮或按键盘 R 键开启全自动测算与标记")
 
     def _on_eval_r_clicked(self, toggle: bool = True):
         """⚡ 快捷键 R / 按钮切换自动测算状态并触发测算"""
@@ -4832,6 +4990,7 @@ class SBCIntradayChartDialog(QWidget):
                             win_r = (win_cnt / t_cnt * 100.0) if t_cnt > 0 else 0.0
                             self.lbl_info.setText(f"💡 🤖 [全自动策略生效] VWAP进攻 + ProactiveExit 8层防守: 共触发 {t_cnt} 笔交易，胜率 {win_r:.1f}% | 8层离场守护已拦截假反弹与破位亏损! (点击信号看收益详情)")
 
+                self._sync_daily_channel_to_canvas()
                 self.canvas.set_data(df_multi, op, vw, hi, lo, t_min, t_max, sigs, period_mode=mode)
                 self.lbl_title.setText(f"📊 {self.code} {resolve_stock_name(self.code)} | [{mode.upper()}多日分时] 今:{op:.2f} 现:{cl_last:.2f}")
                 self.lbl_title.setToolTip(f"【{self.code} {resolve_stock_name(self.code)}】[{mode.upper()}多日分时] 今开={op:.2f}元, 现价={cl_last:.2f}元, VWAP={vw:.2f}元, 最高={hi:.2f}元, 最低={lo:.2f}元 | 策略买卖信号数: {len(sigs)} 步")
@@ -4927,6 +5086,7 @@ class SBCIntradayChartDialog(QWidget):
                     win_r = (win_cnt / t_cnt * 100.0) if t_cnt > 0 else 0.0
                     self.lbl_info.setText(f"💡 🤖 [全自动策略生效] VWAP进攻 + ProactiveExit 8层防守: 今日共触发 {t_cnt} 笔交易，胜率 {win_r:.1f}% | 8层离场守护已拦截假反弹与破位亏损! (点击信号看收益详情)")
 
+        self._sync_daily_channel_to_canvas()
         self.canvas.set_data(df_intraday, op, vw, hi, lo, t_min, t_max, sigs, period_mode="1m")
         self.lbl_title.setText(f"📊 {self.code} {resolve_stock_name(self.code)} | 今:{op:.2f} 现:{p:.2f}")
         self.lbl_title.setToolTip(f"【{self.code} {resolve_stock_name(self.code)}】今开={op:.2f}元, 现价={p:.2f}元, VWAP={vw:.2f}元, 最高={hi:.2f}元, 最低={lo:.2f}元 | 买卖信号数: {len(sigs)} 步")
@@ -4936,6 +5096,43 @@ class SBCIntradayChartDialog(QWidget):
 
         if getattr(self, 'auto_eval_enabled', True):
             self._on_eval_r_clicked(toggle=False)
+
+    def _sync_daily_channel_to_canvas(self):
+        """【⚡ 通道对齐】为分时图同步对齐日线/K线通道支撑、反转与关键阶梯位"""
+        if not hasattr(self, 'canvas') or not self.canvas:
+            return
+        if getattr(self.canvas, 'channel_info', None):
+            return
+        try:
+            from ats.tdx_realtime_fetcher import TDXRealtimeFetcher
+            fetcher = TDXRealtimeFetcher.get_instance()
+            d_metrics = fetcher.get_daily_metrics(self.code)
+            if d_metrics and "ch_upper" in d_metrics:
+                self.canvas.channel_info = {
+                    "ch_up": float(d_metrics.get("ch_upper", 0.0)),
+                    "ch_mid": float(d_metrics.get("ch_mid", 0.0)),
+                    "ch_dn": float(d_metrics.get("ch_lower", 0.0)),
+                    "ch_supp": float(d_metrics.get("ch_supp_price", 0.0)),
+                    "rev": float(d_metrics.get("reversal_line", 0.0)),
+                }
+                return
+            # 极速轻量抓取日线通道
+            df_d = fetcher.fetch_kline_bars(self.code, category="day", count=30)
+            if not df_d.empty and "ch_upper" in df_d.columns:
+                ch_u = df_d['ch_upper'].iloc[-1]
+                ch_m = df_d['ch_mid'].iloc[-1]
+                ch_l = df_d['ch_lower'].iloc[-1]
+                ch_s = df_d['ch_supp_price'].iloc[-1] if 'ch_supp_price' in df_d.columns else 0.0
+                rev = df_d['reversal_line'].iloc[-1] if 'reversal_line' in df_d.columns else 0.0
+                self.canvas.channel_info = {
+                    "ch_up": float(ch_u) if pd.notna(ch_u) else 0.0,
+                    "ch_mid": float(ch_m) if pd.notna(ch_m) else 0.0,
+                    "ch_dn": float(ch_l) if pd.notna(ch_l) else 0.0,
+                    "ch_supp": float(ch_s) if pd.notna(ch_s) else 0.0,
+                    "rev": float(rev) if pd.notna(rev) else 0.0,
+                }
+        except Exception:
+            pass
 
     def _update_unified_realtime_log(
         self,
@@ -8482,6 +8679,16 @@ class AllCodesStrategyEvalDialog(QDialog):
                 background-color: #0b0f19;
                 color: #e2e8f0;
                 font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif;
+            }
+            QToolTip {
+                background-color: #14141f;
+                color: #f1f5f9;
+                border: 1px solid #38bdf8;
+                border-radius: 4px;
+                padding: 6px 10px;
+                font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+                font-size: 9pt;
+                font-weight: normal;
             }
             QScrollArea {
                 border: 1px solid #1e293b;
