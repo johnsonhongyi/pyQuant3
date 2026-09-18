@@ -2247,8 +2247,13 @@ class TDXRealtimeFetcher:
         if cached_entry is not None:
             if isinstance(cached_entry, tuple) and len(cached_entry) >= 2:
                 cached_df, cache_ts, cache_day = cached_entry[0], cached_entry[1], cached_entry[2]
-                # 在交易时段内缓存 2.5 秒，非交易时段且同一交易日内可长效复用
-                is_fresh = (cache_day == today_date_str) and ((time.time() - cache_ts < 2.5) or (len(cached_df) >= 240))
+                # 在实盘交易时段内严格缓存 2.5 秒，保证最新每分钟分时 Tick 实时更新；仅在非交易时段/盘后 (>15:05) 满 240 条才长效固化复用
+                cur_hm = datetime.now().strftime("%H:%M")
+                is_trading_active = ("09:15" <= cur_hm < "15:05")
+                if is_trading_active:
+                    is_fresh = (cache_day == today_date_str) and (time.time() - cache_ts < 2.5)
+                else:
+                    is_fresh = (cache_day == today_date_str) and ((time.time() - cache_ts < 30.0) or (len(cached_df) >= 240))
                 if is_fresh and cached_df is not None and not cached_df.empty and len(cached_df) >= 30:
                     return cached_df
             elif isinstance(cached_entry, pd.DataFrame) and not cached_entry.empty and len(cached_entry) >= 30:

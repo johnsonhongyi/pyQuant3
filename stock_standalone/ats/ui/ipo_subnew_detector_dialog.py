@@ -431,6 +431,8 @@ class IPOSubnewDetectorDialog(QMainWindow):
         self.txt_code.setPlaceholderText("输入6位代码按回车添加...")
         self.txt_code.setFixedWidth(180)
         self.txt_code.returnPressed.connect(self._on_add_code_clicked)
+        self.txt_code.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.txt_code.customContextMenuRequested.connect(self._show_code_context_menu)
         tb_layout.addWidget(self.txt_code)
 
         btn_add = QPushButton("➕ 添加")
@@ -1290,6 +1292,79 @@ class IPOSubnewDetectorDialog(QMainWindow):
                     self.table.setRowHidden(r, not is_valid)
                 else:
                     self.table.setRowHidden(r, False)
+
+    def _show_code_context_menu(self, pos):
+        """【📋 代码输入框右键快捷菜单】支持右键一键粘贴并清洗股票代码、一键粘贴并添加"""
+        menu = QMenu(self.txt_code)
+        menu.setStyleSheet("""
+            QMenu { background-color: #0f172a; color: #f8fafc; border: 1px solid #334155; padding: 4px; font-size: 9pt; }
+            QMenu::item:selected { background-color: #1e293b; color: #38bdf8; }
+            QMenu::separator { height: 1px; background-color: #334155; margin: 3px 0; }
+        """)
+
+        # 检查系统剪贴板内容
+        clipboard = QApplication.clipboard()
+        clip_text = clipboard.text().strip() if clipboard else ""
+
+        # 智能提取股票代码 (优先提取连续数字)
+        digits_only = "".join(filter(str.isdigit, clip_text))
+        extracted_code = ""
+        if len(digits_only) == 6:
+            extracted_code = digits_only
+        elif len(digits_only) > 6:
+            extracted_code = digits_only[:6]
+
+        # 1. 粘贴股票代码选项
+        if extracted_code:
+            act_paste_code = menu.addAction(f"📋 粘贴股票代码: {extracted_code}")
+            act_paste_code.triggered.connect(lambda: self._paste_code_to_input(extracted_code))
+
+            act_paste_and_add = menu.addAction(f"➕ 粘贴并立即添加 ({extracted_code})")
+            act_paste_and_add.triggered.connect(lambda: self._paste_and_add_code(extracted_code))
+            menu.addSeparator()
+        elif clip_text:
+            display_text = clip_text if len(clip_text) <= 10 else f"{clip_text[:10]}..."
+            act_paste_text = menu.addAction(f"📋 粘贴剪贴板内容 ({display_text})")
+            act_paste_text.triggered.connect(self.txt_code.paste)
+            menu.addSeparator()
+        else:
+            act_paste_empty = menu.addAction("📋 粘贴 (剪贴板为空)")
+            act_paste_empty.setEnabled(False)
+            menu.addSeparator()
+
+        # 2. 基础编辑操作 (复制/剪切/全选/清空)
+        has_selection = self.txt_code.hasSelectedText()
+        has_text = bool(self.txt_code.text().strip())
+
+        act_copy = menu.addAction("📑 复制 (Copy)")
+        act_copy.setEnabled(has_selection or has_text)
+        act_copy.triggered.connect(lambda: self.txt_code.copy() if has_selection else (clipboard.setText(self.txt_code.text()) if clipboard else None))
+
+        act_cut = menu.addAction("✂️ 剪切 (Cut)")
+        act_cut.setEnabled(has_selection)
+        act_cut.triggered.connect(self.txt_code.cut)
+
+        act_select_all = menu.addAction("🔘 全选 (Select All)")
+        act_select_all.setEnabled(has_text)
+        act_select_all.triggered.connect(self.txt_code.selectAll)
+
+        menu.addSeparator()
+        act_clear = menu.addAction("🧹 清空输入框")
+        act_clear.setEnabled(has_text)
+        act_clear.triggered.connect(self.txt_code.clear)
+
+        menu.exec(self.txt_code.mapToGlobal(pos))
+
+    def _paste_code_to_input(self, code: str):
+        """将提取的代码填入输入框并聚焦"""
+        self.txt_code.setText(code)
+        self.txt_code.setFocus()
+        self.txt_code.selectAll()
+
+    def _paste_and_add_code(self, code: str):
+        """将提取的代码填入并立即添加到监控池"""
+        self.txt_code.setText(code)
+        self._on_add_code_clicked()
 
     def _on_add_code_clicked(self):
         raw = self.txt_code.text().strip()

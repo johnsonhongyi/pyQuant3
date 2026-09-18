@@ -1,3 +1,23 @@
+## 2026-09-18 14:35
+- [x] **【彻底修复 _paint_intraday 中 NameError: max_valid_price 变量未定义、消除分时顶栏溢出 & 根除盘中分时缓存导致不自动更新漏洞】(`ats/ui/intraday_strategy_dialog.py`, `ats/tdx_realtime_fetcher.py`, `tests/test_sbc_zoom_and_amplitude.py`)**：
+    - [x] **问题根因定位 (P0)**：
+        1. **NameError 根因**：此前解除价格范围截断时移除了 `max_valid_price` 定义，但在分时买卖信号过滤循环中存在残留引用 `sig_p > max_valid_price`，触发 `NameError: name 'max_valid_price' is not defined`；
+        2. **分时走势线出界根因**：分时走势折线未设置 `setClipRect` 视口保护，且上下限计算缺乏顶部保护缓冲区；
+        3. **盘中分时图更新滞后根因**：`fetch_intraday_bars` 盘中如果缓存满了 240 条会被误判为永久 `is_fresh`，导致实盘时段分时图不自动更新最新一分钟的 Tick。
+    - [x] **全体系工程落地与修复验证 (KISS / SOLID / DRY)**：
+        1. **彻底清除未定义变量并科学计算价格极值**：
+           - 彻底移除 `max_valid_price` 与 `min_valid_price`，全量吸纳暴涨新股/次新股真实价格；
+           - 顶部预留 7% 安全缓冲区，底部预留 5% 缓冲区，走势线最高点与最低点温和舒展，绝不触顶；
+           - 买卖信号循环中精简判定为 `if sig_p <= 0: continue`；
+        2. **增加分时视口裁剪保护与最新现价浮标**：
+           - `painter.setClipRect(margin_left, margin_top, chart_w, chart_h)` 确保折线绝不溢出顶部；
+           - 增加最新现价水平虚线与右侧现价高亮胶囊，同通达信一致实时直观展示最新价；
+        3. **修复盘中 2.5s 强制更新与窗口唤醒瞬间刷新**：
+           - `ats/tdx_realtime_fetcher.py` 严格限定仅在非交易时段（盘后 >15:05）满 240 根才固化复用，实盘交易时段内强制 2.5s TTL 轮询刷新；
+           - `open_sbc_chart_dialog` 在置顶激活已有窗口时立即执行 `dlg.reload_chart()`；
+        4. **全量自动化测试 100% 验证通过 (5/5 PASSED)**：
+           - 极端暴涨分时模拟绘制测试与全部单元测试通过。
+
 ## 2026-09-18 14:25
 - [x] **【重点关注、MA20d回调、新股次新四大 Tab 看板双击全面直通 SBC 走势窗口 & 右键菜单完整对齐】(`ats/ui/favorite_panel.py`, `ats/ui/swing_table.py`, `ats/ui/new_stock_panel.py`, `ats/ui/base_table.py`, `ats/ui/main_window.py`, `tests/test_tabs_double_click_sbc_unification.py`)**：
     - [x] **操盘手现场明确指示与交互统一 (P0)**：

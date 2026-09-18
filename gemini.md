@@ -1,3 +1,30 @@
+## 2026-09-18 14:25
+- [x] **【重点关注、MA20d回调、新股次新四大 Tab 看板双击全面直通 SBC 走势窗口 & 右键菜单完整对齐】(`ats/ui/favorite_panel.py`, `ats/ui/swing_table.py`, `ats/ui/new_stock_panel.py`, `ats/ui/base_table.py`, `ats/ui/main_window.py`, `tests/test_tabs_double_click_sbc_unification.py`)**：
+    - [x] **操盘手现场明确指示与交互统一 (P0)**：
+        - “调整重点关注,ma20d,新股次新的tab跟资金主线一样双击打开的改成sbc”；
+        - 全面打通主界面四大主力 Tab（Tab 0 资金主线、Tab 1 重点关注、Tab 2 MA20d 回调跟踪器、Tab 3 新股次新股）的双击看盘行为，消除旧版弹窗体验断层，统一调起 SBC 极限通道走势图。
+    - [x] **全体系工程落地与修复验证 (KISS / SOLID / DRY)**：
+        1. **重点关注 (FavoritePanel)**：
+           - 新增 `stock_double_clicked = pyqtSignal(str, str)` 信号；
+           - 封装 `open_sbc_chart(code, name)` 方法（默认 `period_mode="10d"` 展开）；
+           - `_on_double_clicked` 优先调用 `self.open_sbc_chart(code, name)` 并发射 `stock_double_clicked` 信号；
+           - 主窗口 `self.favorite_panel.stock_double_clicked` 统一连接至 `self.open_sbc_for_stock`。
+        2. **MA20d 回调跟踪器 (SwingStateTable)**：
+           - 封装 `open_sbc_chart(code, name)` 方法；
+           - `_on_cell_double_clicked` 直调 `self.open_sbc_chart(code, name)` 并在主窗口中重定向连接至 `self.open_sbc_for_stock`；
+           - 兼容老版本三参数信号（code, name, context_info），平滑无缝过渡。
+        3. **新股次新股 (NewStockPanel)**：
+           - 封装 `open_sbc_chart(code, name)` 方法；
+           - `_on_cell_double_clicked` 优先直调 `self.open_sbc_chart(code, name)`；
+           - 主窗口 `self.new_stock_panel.stock_double_clicked` 连接至 `self.open_sbc_for_stock`；
+           - 优化 `_on_open_sbc_clicked` 与右键菜单，补齐“🔍 查看个股详情”通道。
+        4. **公共表格 BaseATSTableWidget 升级**：
+           - 右键菜单 “📈 使用 SBC 打开独立分时图” 统一配置 `period_mode="10d"` 与 `parent_win=self.window()`；
+           - 右键菜单新增 “🔍 查看个股详情 (原版详情弹窗)” 入口，与资金主线右键菜单 100% 对齐。
+        5. **自动化测试 100% 验证通过 (30/30 PASSED)**：
+           - 专项测试 `tests/test_tabs_double_click_sbc_unification.py` 4/4 绿灯通过；
+           - 全量回归 `test_tdx_indices_and_etf_sbc_integrity.py`、`test_ats_tabs_strategy_filter.py`、`test_sbc_zoom_and_amplitude.py` 等 26 项测试全部 100% 通过。
+
 ## 2026-09-18 13:30
 - [x] **【彻底解决所有指数与指数基金 ETF 在 SBC 走势图及行情通道中的全链路异常：通达信指数接口专项解耦、代码映射引擎、ETF价格单位自适应修正与全量测试验证】(`ats/tdx_realtime_fetcher.py`, `ats/intraday_strategy_engine.py`, `ats/capital_dragon_engine.py`, `tests/test_tdx_indices_and_etf_sbc_integrity.py`, `tests/test_capital_dragon_engine.py`)**：
     - [x] **操盘手现场明确指示与真实痛点 (P0)**：

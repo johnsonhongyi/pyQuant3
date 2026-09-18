@@ -283,7 +283,7 @@ class SBCChartCanvas(QWidget):
     # 📐 极致高屏占比四周紧凑边距 (左侧预留 62px 容纳上下两行加大粗体价格与涨跌幅标尺，右侧 52px 容纳开盘/VWAP)
     MARGIN_LEFT = 62
     MARGIN_RIGHT = 52
-    MARGIN_TOP = 18
+    MARGIN_TOP = 22
     MARGIN_BOTTOM = 22
 
     def __init__(self, parent=None):
@@ -1429,34 +1429,40 @@ class SBCChartCanvas(QWidget):
             return
 
         op_ref = self.open_price if self.open_price > 1.0 else (prices[0] if len(prices) > 0 else 10.0)
-        max_valid_price = (op_ref * 1.70) if op_ref > 10.0 else (op_ref * 3.0)
-        min_valid_price = (op_ref * 0.35) if op_ref > 5.0 else 0.05
 
+        # 🌟 真实全量价格候选收集：坚决不人为用 op_ref*1.70 硬截断暴涨新股/次新股/无涨跌幅标的！
         all_cands = []
         for p in prices:
-            if min_valid_price <= p <= max_valid_price:
-                all_cands.append(p)
+            if p > 0.001 and not np.isnan(p) and not np.isinf(p):
+                all_cands.append(float(p))
         for v in vwaps:
-            if min_valid_price <= v <= max_valid_price:
-                all_cands.append(v)
-        if op_ref > 0:
-            all_cands.append(op_ref)
-        if 0 < self.high_price <= max_valid_price:
-            all_cands.append(self.high_price)
-        if 0 < self.target_sell_min <= max_valid_price:
-            all_cands.append(self.target_sell_min)
+            if v > 0.001 and not np.isnan(v) and not np.isinf(v):
+                all_cands.append(float(v))
+        if op_ref > 0.001:
+            all_cands.append(float(op_ref))
+        if 0 < self.high_price:
+            all_cands.append(float(self.high_price))
+        if 0 < self.low_price:
+            all_cands.append(float(self.low_price))
+        if 0 < self.target_sell_min:
+            all_cands.append(float(self.target_sell_min))
         if self.signals:
             for sig in self.signals:
                 if self._map_signal_to_visible_index(sig, df_view, start_i, end_i) is not None:
                     sig_p = float(sig.get("price", 0.0) if isinstance(sig, dict) else getattr(sig, "price", 0.0))
-                    if 0 < sig_p <= max_valid_price:
+                    if sig_p > 0.001:
                         all_cands.append(sig_p)
 
         if not all_cands:
-            all_cands = [op_ref if op_ref > 0 else 100.0]
+            all_cands = [op_ref if op_ref > 0 else 10.0]
 
-        min_p = min(all_cands) * 0.98
-        max_p = max(all_cands) * 1.02
+        raw_min = min(all_cands)
+        raw_max = max(all_cands)
+        raw_span = max(1e-4, raw_max - raw_min)
+
+        # 💡 顶部预留 7% 安全缓冲区，底部预留 5% 缓冲区，走势线最高点与最低点永远温和舒展，绝不触顶被遮挡！
+        min_p = max(0.01, raw_min - raw_span * 0.05)
+        max_p = raw_max + raw_span * 0.07
         if max_p <= min_p:
             max_p = min_p + 1.0
 
@@ -1743,12 +1749,16 @@ class SBCChartCanvas(QWidget):
                     painter.drawText(int(margin_left + 4), int(margin_top + 14), d_short)
                 prev_d = d_cur
 
+        # 🛡️ 严格视口裁切保护：确保折线与均价线绝不出界穿透顶部工具栏
+        painter.save()
+        painter.setClipRect(int(margin_left), int(margin_top), int(chart_w), int(chart_h))
+
         # 绘制 VWAP 均价线 (金黄虚线)
         if len(vwaps) > 1:
             path_vwap = QPainterPath()
             path_vwap.moveTo(time_to_x(0), price_to_y(vwaps[0]))
             for i in range(1, len(vwaps)):
-                if vwaps[i] > 1.0:
+                if vwaps[i] > 0.01:
                     path_vwap.lineTo(time_to_x(i), price_to_y(vwaps[i]))
             painter.setPen(QPen(QColor("#ffd700"), 1.5, Qt.PenStyle.DashLine))
             painter.drawPath(path_vwap)
@@ -1758,10 +1768,35 @@ class SBCChartCanvas(QWidget):
             path_p = QPainterPath()
             path_p.moveTo(time_to_x(0), price_to_y(prices[0]))
             for i in range(1, len(prices)):
-                if prices[i] > 1.0:
+                if prices[i] > 0.01:
                     path_p.lineTo(time_to_x(i), price_to_y(prices[i]))
             painter.setPen(QPen(QColor("#00b4d8"), 1.8))
             painter.drawPath(path_p)
+
+        painter.restore()
+
+        # 🟢 最新现价水平虚线与右侧现价高亮胶囊 (对齐通达信同款核心浮标，实时动态展现最新成交价)
+        if len(prices) > 0 and prices[-1] > 0.01:
+            last_p = float(prices[-1])
+            y_last = price_to_y(last_p)
+            pct_last = ((last_p - op_ref) / op_ref * 100.0) if op_ref > 0 else 0.0
+            col_last = QColor("#FF4444") if pct_last > 0 else (QColor("#00FF88") if pct_last < 0 else QColor("#A0AEC0"))
+
+            # 跨图表水平现价虚线
+            painter.setPen(QPen(col_last, 1, Qt.PenStyle.DashLine))
+            painter.drawLine(int(margin_left), int(y_last), int(margin_left + chart_w), int(y_last))
+
+            # 右侧现价高亮标签框
+            p_box_w = 52
+            p_box_h = 16
+            p_box_y = max(margin_top, min(margin_top + chart_h - p_box_h, int(y_last - p_box_h / 2)))
+            painter.setPen(QPen(col_last, 1.2))
+            painter.setBrush(QBrush(QColor(col_last.red(), col_last.green(), col_last.blue(), 75)))
+            painter.drawRoundedRect(int(margin_left + chart_w + 2), int(p_box_y), p_box_w, p_box_h, 2, 2)
+
+            painter.setPen(QPen(QColor("#FFFFFF")))
+            painter.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
+            painter.drawText(int(margin_left + chart_w + 5), int(p_box_y + 12), f"{last_p:.2f}")
 
         # 🔴 开盘基准线 (保持在右侧显示)
         if op_ref > 0:
@@ -1797,7 +1832,7 @@ class SBCChartCanvas(QWidget):
 
             for sig in self.signals:
                 sig_p = float(sig.get("price", 0.0) if isinstance(sig, dict) else getattr(sig, "price", 0.0))
-                if sig_p <= 0 or sig_p > max_valid_price:
+                if sig_p <= 0:
                     continue
 
                 sig_t = str(sig.get("timestamp", sig.get("time", "")) if isinstance(sig, dict) else getattr(sig, "timestamp", getattr(sig, "time", ""))).strip()
@@ -6088,6 +6123,7 @@ def open_sbc_chart_dialog(parent_win: Optional[QWidget] = None, code: str = "688
             existing_dlg.set_custom_backtest_trades(trades_df, df_kline=df_kline)
         if record_open:
             _record_sbc_open(c_clean, existing_dlg.geometry(), period_mode=getattr(existing_dlg, '_current_period_mode', '1m'))
+        existing_dlg.reload_chart()
         return existing_dlg
 
     main_win = parent_win.window() if (parent_win and hasattr(parent_win, 'window')) else None
@@ -6116,6 +6152,7 @@ def open_sbc_chart_dialog(parent_win: Optional[QWidget] = None, code: str = "688
         df_kline = kwargs.get("df_kline", None)
         if trades_df is not None:
             dlg.set_custom_backtest_trades(trades_df, df_kline=df_kline)
+        dlg.reload_chart()
         return dlg
 
     trades_df = kwargs.get("trades_df", None)
