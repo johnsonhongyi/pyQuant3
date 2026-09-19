@@ -601,6 +601,74 @@ def categorize_model_label(label: str) -> str:
         return "其他模型"
 
 
+def parse_quota_summary(summary_data: dict) -> dict:
+    """
+    解析 RetrieveUserQuotaSummary 返回的双层配额体系（周限额与5小时滚动限额）：
+    官方原生两大共享池：
+    1. Gemini Models (Gemini Flash, Gemini Pro)
+    2. Claude and GPT models (Claude Opus, Claude Sonnet, GPT-OSS)
+    每个组均包含 weekly (周限额) 与 5h (5小时限额) 两个 Bucket。
+    """
+    if not summary_data or not isinstance(summary_data, dict):
+        return {}
+
+    raw_groups = summary_data.get("response", {}).get("groups", [])
+    if not raw_groups and "groups" in summary_data:
+        raw_groups = summary_data.get("groups", [])
+
+    res = {
+        "gemini": {
+            "displayName": "Gemini Models",
+            "models_desc": "Gemini Flash / Gemini Pro",
+            "weekly": {"remaining_pct": 100.0, "remaining_fraction": 1.0, "reset_time": "", "reset_desc": "已就绪", "diff_sec": 0.0},
+            "5h": {"remaining_pct": 100.0, "remaining_fraction": 1.0, "reset_time": "", "reset_desc": "已就绪", "diff_sec": 0.0},
+        },
+        "claude_gpt": {
+            "displayName": "Claude and GPT models",
+            "models_desc": "Claude Opus / Sonnet / GPT-OSS",
+            "weekly": {"remaining_pct": 100.0, "remaining_fraction": 1.0, "reset_time": "", "reset_desc": "已就绪", "diff_sec": 0.0},
+            "5h": {"remaining_pct": 100.0, "remaining_fraction": 1.0, "reset_time": "", "reset_desc": "已就绪", "diff_sec": 0.0},
+        }
+    }
+    has_valid_data = False
+    for g in raw_groups:
+        dname = (g.get("displayName") or "").lower()
+        key = None
+        if "gemini" in dname:
+            key = "gemini"
+        elif "claude" in dname or "gpt" in dname:
+            key = "claude_gpt"
+
+        if not key:
+            continue
+
+        for b in g.get("buckets", []):
+            w = (b.get("window") or "").lower()
+            rem_frac = b.get("remainingFraction")
+            rem_frac = float(rem_frac) if rem_frac is not None else 1.0
+            rem_pct = round(rem_frac * 100.0, 1)
+            reset_iso = b.get("resetTime", "")
+            diff_sec, reset_desc = format_time_until_reset(reset_iso)
+
+            b_info = {
+                "displayName": b.get("displayName", "Limit Remaining"),
+                "remaining_pct": rem_pct,
+                "remaining_fraction": rem_frac,
+                "reset_time": reset_iso,
+                "reset_desc": reset_desc,
+                "diff_sec": diff_sec,
+                "window": w
+            }
+            if "week" in w:
+                res[key]["weekly"] = b_info
+                has_valid_data = True
+            elif "5h" in w or "hour" in w:
+                res[key]["5h"] = b_info
+                has_valid_data = True
+
+    return res if has_valid_data else {}
+
+
 def fetch_antigravity_quotas(target_email: str = None, timeout: float = 0.8) -> dict:
     """
     【极速探针】：通过本地 Connect-RPC 探测运行中的 LanguageServer，
@@ -751,14 +819,89 @@ def fetch_antigravity_quotas(target_email: str = None, timeout: float = 0.8) -> 
                                     grp["reset_time"] = reset_iso
                                     grp["reset_desc"] = reset_desc
 
+                        # 4.1 尝试请求 RetrieveUserQuotaSummary 获取双层限额（周限额与5小时滚动限额）
+                        quota_summary = {}
+                        try:
+                            url_summary = f"{proto}://127.0.0.1:{port}/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary"
+                            req_summary = urllib.request.Request(
+                                url_summary,
+                                data=json.dumps({'metadata': {'ideName': 'antigravity', 'extensionName': 'antigravity', 'locale': 'en'}}).encode('utf-8'),
+                                headers={
+                                    'Content-Type': 'application/json',
+                                    'Connect-Protocol-Version': '1',
+                                    'X-Codeium-Csrf-Token': csrf
+                                }
+                            )
+                            resp_summary = urllib.request.urlopen(req_summary, context=ctx, timeout=timeout)
+                            data_summary = json.loads(resp_summary.read().decode('utf-8'))
+                            quota_summary = parse_quota_summary(data_summary)
+                        except Exception:
+                            pass
+
+                        # 4.2 若获得了官方双层限额，注入到 groups 与各模型中；若未获得，优雅推导兜底
+                        if quota_summary:
+                            gw = quota_summary.get("gemini", {}).get("weekly", {})
+                            g5 = quota_summary.get("gemini", {}).get("5h", {})
+                            cw = quota_summary.get("claude_gpt", {}).get("weekly", {})
+                            c5 = quota_summary.get("claude_gpt", {}).get("5h", {})
+                            for m_key in ["Gemini Pro", "Gemini Flash"]:
+                                if m_key in groups:
+                                    groups[m_key]["weekly"] = gw
+                                    groups[m_key]["5h"] = g5
+                            for m_key in ["Claude", "GPT-OSS"]:
+                                if m_key in groups:
+                                    groups[m_key]["weekly"] = cw
+                                    groups[m_key]["5h"] = c5
+                        else:
+                            # 兜底生成双层结构
+                            quota_summary = {
+                                "gemini": {
+                                    "displayName": "Gemini Models",
+                                    "models_desc": "Gemini Flash / Gemini Pro",
+                                    "weekly": {
+                                        "remaining_pct": groups["Gemini Pro"]["remaining_pct"],
+                                        "remaining_fraction": groups["Gemini Pro"]["remaining_fraction"],
+                                        "reset_time": groups["Gemini Pro"]["reset_time"],
+                                        "reset_desc": groups["Gemini Pro"]["reset_desc"],
+                                        "diff_sec": 0.0
+                                    },
+                                    "5h": {
+                                        "remaining_pct": groups["Gemini Pro"]["remaining_pct"],
+                                        "remaining_fraction": groups["Gemini Pro"]["remaining_fraction"],
+                                        "reset_time": groups["Gemini Pro"]["reset_time"],
+                                        "reset_desc": groups["Gemini Pro"]["reset_desc"],
+                                        "diff_sec": 0.0
+                                    }
+                                },
+                                "claude_gpt": {
+                                    "displayName": "Claude and GPT models",
+                                    "models_desc": "Claude Opus / Sonnet / GPT-OSS",
+                                    "weekly": {
+                                        "remaining_pct": groups["Claude"]["remaining_pct"],
+                                        "remaining_fraction": groups["Claude"]["remaining_fraction"],
+                                        "reset_time": groups["Claude"]["reset_time"],
+                                        "reset_desc": groups["Claude"]["reset_desc"],
+                                        "diff_sec": 0.0
+                                    },
+                                    "5h": {
+                                        "remaining_pct": groups["Claude"]["remaining_pct"],
+                                        "remaining_fraction": groups["Claude"]["remaining_fraction"],
+                                        "reset_time": groups["Claude"]["reset_time"],
+                                        "reset_desc": groups["Claude"]["reset_desc"],
+                                        "diff_sec": 0.0
+                                    }
+                                }
+                            }
+
                         # 自动持久化保存属于该账号的专属配额缓存！
                         if server_email:
-                            save_cached_quota(server_email, groups)
+                            save_cached_quota(server_email, groups, quota_summary=quota_summary)
 
                         # 如果当前账户已发现，优先保留配置更详细或更新的
                         if server_email not in discovered_accounts:
                             discovered_accounts[server_email] = {
                                 "groups": groups,
+                                "quota_summary": quota_summary,
                                 "models": parsed_models,
                                 "target_pid": pid,
                                 "target_port": port,
@@ -789,6 +932,7 @@ def fetch_antigravity_quotas(target_email: str = None, timeout: float = 0.8) -> 
             "account_email": wanted_email or curr_email,
             "latency_ms": latency_ms,
             "groups": {},
+            "quota_summary": {},
             "models": [],
             "all_accounts_quotas": discovered_accounts
         }
@@ -802,6 +946,7 @@ def fetch_antigravity_quotas(target_email: str = None, timeout: float = 0.8) -> 
         "target_port": target_match.get("target_port"),
         "latency_ms": latency_ms,
         "groups": target_match.get("groups", {}),
+        "quota_summary": target_match.get("quota_summary", {}),
         "models": target_match.get("models", []),
         "all_accounts_quotas": discovered_accounts
     }
@@ -822,19 +967,22 @@ def get_cached_quotas(cache_file: str = None) -> dict:
         return {}
 
 
-def save_cached_quota(email: str, groups: dict, cache_file: str = None):
-    """持久化缓存特定账户的配额快照"""
+def save_cached_quota(email: str, groups: dict, quota_summary: dict = None, cache_file: str = None):
+    """持久化缓存特定账户的配额快照（包含四大模型组与双层周限额）"""
     if not email:
         return
     f = cache_file or QUOTA_CACHE_FILE
     try:
         os.makedirs(os.path.dirname(f), exist_ok=True)
         cache = get_cached_quotas(f)
-        cache[email.lower()] = {
+        entry = {
             "groups": groups,
             "updated_at": time.time(),
             "updated_at_str": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         }
+        if quota_summary:
+            entry["quota_summary"] = quota_summary
+        cache[email.lower()] = entry
         temp_file = f + f".tmp_{int(time.time() * 1000)}"
         with open(temp_file, "w", encoding="utf-8") as fp:
             json.dump(cache, fp, indent=2, ensure_ascii=False)

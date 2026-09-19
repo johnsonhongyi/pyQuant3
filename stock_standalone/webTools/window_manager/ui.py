@@ -3017,7 +3017,7 @@ class AntigravityAccountManagerDialog(QDialog):
 
         layout.addLayout(btm_layout)
 
-    def _create_account_card(self, acc: dict, is_active: bool, quota_info: dict) -> QFrame:
+    def _create_account_card(self, acc: dict, is_active: bool, quota_info: dict, quota_summary: dict = None) -> QFrame:
         """
         构建对齐图2风格的独立优雅账户卡片
         包含：圆形头像、脱敏用户名/邮箱、活跃/Pro徽章、四大模型进度条、[⇋ Use] 与 [Delete 🗑️]
@@ -3095,7 +3095,57 @@ class AntigravityAccountManagerDialog(QDialog):
         sep.setStyleSheet("background-color: #273349; max-height: 1px;")
         card_vbox.addWidget(sep)
 
-        # --- 2. 卡片中部：四大模型配额胶囊条 (图2同款排布) ---
+        # --- 1.5 核心亮点：官方原生共享池周限额监控面板 (Weekly Remaining) ---
+        weekly_frame = QFrame()
+        weekly_frame.setStyleSheet("""
+            QFrame {
+                background-color: #0b1120;
+                border: 1px solid #1e293b;
+                border-radius: 8px;
+                padding: 4px 8px;
+            }
+        """)
+        weekly_vbox = QVBoxLayout(weekly_frame)
+        weekly_vbox.setContentsMargins(6, 4, 6, 4)
+        weekly_vbox.setSpacing(4)
+
+        weekly_title_box = QHBoxLayout()
+        lbl_w_title = QLabel("📅 共享池周限额 (Weekly Remaining)")
+        lbl_w_title.setStyleSheet("font-size: 11px; font-weight: bold; color: #38bdf8;")
+        weekly_title_box.addWidget(lbl_w_title)
+        weekly_title_box.addStretch()
+        weekly_vbox.addLayout(weekly_title_box)
+
+        weekly_widgets = {}
+        for w_key, w_name, w_icon in [
+            ("gemini", "Gemini 周额", "💎"),
+            ("claude_gpt", "Claude/GPT 周额", "✨")
+        ]:
+            w_row = QHBoxLayout()
+            w_row.setSpacing(6)
+
+            lbl_tag = QLabel(f"{w_icon} {w_name}:")
+            lbl_tag.setStyleSheet("font-size: 11px; color: #94a3b8; font-weight: 500;")
+            w_row.addWidget(lbl_tag)
+
+            lbl_val = QLabel("-- %")
+            lbl_val.setStyleSheet("font-size: 11px; color: #e2e8f0; font-weight: bold;")
+            w_row.addWidget(lbl_val)
+            w_row.addStretch()
+
+            w_bar = QProgressBar()
+            w_bar.setRange(0, 100)
+            w_bar.setValue(0)
+            w_bar.setFixedSize(65, 7)
+            w_bar.setTextVisible(False)
+            w_row.addWidget(w_bar)
+
+            weekly_vbox.addLayout(w_row)
+            weekly_widgets[w_key] = {"lbl": lbl_val, "bar": w_bar}
+
+        card_vbox.addWidget(weekly_frame)
+
+        # --- 2. 卡片中部：四大模型 5小时滚动配额胶囊条 (图2同款排布) ---
         model_rows = [
             ("Gemini Pro", "💎 Gemini Pro"),
             ("Claude", "✨ Claude"),
@@ -3165,18 +3215,20 @@ class AntigravityAccountManagerDialog(QDialog):
             "email": email,
             "frame": frame,
             "models": model_widgets,
+            "weekly_widgets": weekly_widgets,
             "btn_use": btn_use,
             "is_active": is_active
         }
         self.account_cards[email.lower()] = card_record
 
         # 统一应用配额数据 (有缓存展示缓存，备用无缓存展示"⚪ 切换激活")
-        self._apply_quota_to_card(card_record, quota_info or {})
+        self._apply_quota_to_card(card_record, quota_info or {}, quota_summary=quota_summary)
 
         return frame
 
-    def _apply_quota_to_card(self, card_record: dict, quota_groups: dict):
-        """将配额组数据填充至卡片的各个模型进度条与文本中"""
+    def _apply_quota_to_card(self, card_record: dict, quota_groups: dict, quota_summary: dict = None):
+        """将配额组数据与双层周限额填充至卡片的各个模型进度条与文本中"""
+        # 1. 渲染四大模型 5小时滚动配额
         models = card_record["models"]
         for m_key, w in models.items():
             grp = quota_groups.get(m_key)
@@ -3194,6 +3246,36 @@ class AntigravityAccountManagerDialog(QDialog):
                 else:
                     w["lbl"].setText("⚪ 切换激活")
                 w["bar"].setValue(0)
+
+        # 2. 渲染官方原生共享池周限额
+        weekly_w = card_record.get("weekly_widgets", {})
+        if weekly_w:
+            summary = quota_summary or {}
+            # 若未直接提供 quota_summary，尝试从 groups[model]["weekly"] 中提取
+            if not summary:
+                g_w = quota_groups.get("Gemini Pro", {}).get("weekly") or quota_groups.get("Gemini Flash", {}).get("weekly")
+                c_w = quota_groups.get("Claude", {}).get("weekly") or quota_groups.get("GPT-OSS", {}).get("weekly")
+                if g_w or c_w:
+                    summary = {
+                        "gemini": {"weekly": g_w or {}},
+                        "claude_gpt": {"weekly": c_w or {}}
+                    }
+
+            for pool_key, pw in weekly_w.items():
+                p_data = summary.get(pool_key, {}).get("weekly", {})
+                if p_data and "remaining_pct" in p_data:
+                    pct = p_data.get("remaining_pct", 0.0)
+                    desc = p_data.get("reset_desc", "")
+                    pw["lbl"].setText(f"{pct}% ({desc})")
+                    pw["bar"].setValue(int(pct))
+                    color = "#10b981" if pct >= 50 else ("#f59e0b" if pct >= 20 else "#ef4444")
+                    pw["bar"].setStyleSheet(f"QProgressBar::chunk {{ background-color: {color}; border-radius: 3px; }}")
+                else:
+                    if card_record["is_active"]:
+                        pw["lbl"].setText("-- %")
+                    else:
+                        pw["lbl"].setText("⚪ 切换激活")
+                    pw["bar"].setValue(0)
 
     @property
     def card_widgets(self):
@@ -3238,8 +3320,10 @@ class AntigravityAccountManagerDialog(QDialog):
         for idx, acc in enumerate(sorted_accs):
             email = acc.get("email", "")
             is_active = bool(curr_email and email.lower() == curr_email)
-            acc_quota = cached_quotas.get(email.lower(), {}).get("groups", {})
-            card = self._create_account_card(acc, is_active, acc_quota)
+            acc_entry = cached_quotas.get(email.lower(), {})
+            acc_quota = acc_entry.get("groups", {})
+            acc_summary = acc_entry.get("quota_summary", {})
+            card = self._create_account_card(acc, is_active, acc_quota, quota_summary=acc_summary)
 
             row = idx // cols
             col = idx % cols
@@ -3286,11 +3370,29 @@ class AntigravityAccountManagerDialog(QDialog):
             for acc_email, q_data in all_quotas.items():
                 acc_clean = acc_email.lower()
                 if acc_clean in self.account_cards:
-                    self._apply_quota_to_card(self.account_cards[acc_clean], q_data.get("groups", {}))
+                    self._apply_quota_to_card(
+                        self.account_cards[acc_clean],
+                        q_data.get("groups", {}),
+                        quota_summary=q_data.get("quota_summary", {})
+                    )
 
         # 2. 确保目标账户卡片呈现最新实时数据
-        if email in self.account_cards:
-            self._apply_quota_to_card(self.account_cards[email], res.get("groups", {}))
+        target_card = self.account_cards.get(email)
+        if not target_card and not all_quotas:
+            # 兼容单卡片测试或未指定具体邮箱时默认更新当前活跃卡片
+            for em, card in self.account_cards.items():
+                if card.get("is_active"):
+                    target_card = card
+                    break
+            if not target_card and self.account_cards:
+                target_card = list(self.account_cards.values())[0]
+
+        if target_card:
+            self._apply_quota_to_card(
+                target_card,
+                res.get("groups", {}),
+                quota_summary=res.get("quota_summary", {})
+            )
 
         # 填充子型号明细表格
         models = res.get("models", [])
@@ -4707,8 +4809,8 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
 
     def toggle_tools_expand_mode(self):
         """切换底栏工具按钮的展开平铺模式与下拉收纳模式，并自动持久化跨会话记忆"""
-        # 如果当前收纳菜单按钮可见，说明当前是收纳模式，要切为平铺模式；反之切回收纳模式
-        new_expanded = self.btn_tools_menu.isVisible()
+        curr_expanded = bool(self.config_manager.config_data.get("tools_expanded_mode", False)) if hasattr(self, 'config_manager') and self.config_manager else (not self.btn_tools_menu.isHidden())
+        new_expanded = not curr_expanded
         self._apply_tools_expand_mode(new_expanded)
         if hasattr(self, 'config_manager') and self.config_manager:
             self.config_manager.config_data["tools_expanded_mode"] = new_expanded
