@@ -3227,14 +3227,25 @@ class TDXRealtimeFetcher:
         c_clean = str(code).zfill(6)
         cat_str = str(category).lower().strip()
 
-        # ⚡ [3秒TTL极速内存缓存] 操盘手快速在多个周期来回切换时 0ms 瞬间返回，彻底杜绝网络卡顿与重复计算
+        # ⚡ [自适应分级TTL安全内存缓存] 日K(180s)、60F(30s)、15/30M(15s)、5M(5s)，毫秒级返回杜绝高频网络拥堵
         now_ts = time.time()
         if not hasattr(self, "_kline_bars_cache"):
             self._kline_bars_cache = {}
+        
+        # 计算不同周期的安全 TTL 阈值
+        if cat_str in ("day", "d", "日线", "日k", "日", "week", "w", "周线", "周k", "周", "month", "m", "月线", "月k", "月"):
+            cache_ttl = 180.0  # 日线/大周期 180 秒安全缓存
+        elif cat_str in ("60m", "60f", "60min", "1h", "120m", "120f", "120min", "2h", "2d", "3d"):
+            cache_ttl = 30.0   # 60F/120F 通道周期 30 秒安全缓存
+        elif cat_str in ("15m", "15f", "15min", "30m", "30f", "30min"):
+            cache_ttl = 15.0   # 15/30 分钟 15 秒缓存
+        else:
+            cache_ttl = 5.0    # 1M/5M 短周期 5 秒缓存
+
         cache_key = (c_clean, cat_str, count)
         if cache_key in self._kline_bars_cache:
             c_ts, c_df = self._kline_bars_cache[cache_key]
-            if (now_ts - c_ts) < 3.0 and c_df is not None and not c_df.empty:
+            if (now_ts - c_ts) < cache_ttl and c_df is not None and not c_df.empty:
                 return c_df.copy()
         is_120m = cat_str in ("120m", "120f", "120min", "2h", "120")
         is_2d = cat_str in ("2d", "2k", "2day", "2日", "2日k")

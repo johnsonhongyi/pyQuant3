@@ -141,10 +141,27 @@ class ProactiveExitEngine:
         now = current_time if current_time is not None else time.time()
         ctx = extra_ctx or {}
 
-        # 💥 [NEW] 反转结构持仓保护上下文注入与次低点止损更新
+        # 💥 [NEW] TradePlan / 反转结构持仓保护上下文注入与次低点止损更新
         if ctx.get("is_reversal_structure", False):
             pos.is_reversal_protected = True
-        hl_ctx = float(ctx.get("higher_low", 0.0))
+
+        # 更新持仓最高价与极值 (确保保本推移能够感知当前 Tick 突破)
+        if price > pos.highest_price:
+            pos.highest_price = price
+        if price < pos.lowest_price:
+            pos.lowest_price = price
+
+        tp = ctx.get("trade_plan")
+        if tp:
+            pos.is_reversal_protected = True
+            if hasattr(tp, "higher_low_stop") and tp.higher_low_stop > 0:
+                pos.higher_low_stop = max(pos.higher_low_stop, float(tp.higher_low_stop))
+            # 若曾触及通道中轴第一目标位，启动保本推移 (将防守线提升至成本线上方)
+            if hasattr(tp, "target_1_channel_mid") and tp.target_1_channel_mid > 0:
+                if pos.highest_price >= tp.target_1_channel_mid:
+                    pos.higher_low_stop = max(pos.higher_low_stop, pos.entry_price * 1.002)
+
+        hl_ctx = float(ctx.get("higher_low_stop", 0.0) or ctx.get("higher_low", 0.0))
         if hl_ctx > 0:
             pos.higher_low_stop = max(pos.higher_low_stop, hl_ctx)
 

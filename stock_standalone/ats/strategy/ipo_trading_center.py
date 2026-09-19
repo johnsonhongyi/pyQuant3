@@ -37,6 +37,14 @@ from typing import Dict, List, Optional, Any, Tuple
 
 from ats.strategy.ipo_market_sentiment_engine import IPOMarketSentimentEngine, MarketSentimentSnapshot
 from ats.strategy.ipo_vwap_detector_engine import VWAPDetectorSignal, batch_evaluate_horse_race_ranking
+from ats.strategy.channel_secondary_buy_strategy import (
+    IPOTradePlan,
+    SecondaryBuyStage,
+    TAG_CHANNEL_SECONDARY_BUY,
+    TAG_SUBNEW_PULLBACK_REENTRY,
+    TAG_IPO_VWAP_STABLE,
+    TAG_IPO_BID_SURGE,
+)
 
 logger = logging.getLogger("IPOTradingCenter")
 
@@ -70,7 +78,10 @@ class IPOTradingPosition:
     realized_pnl_amount: float = 0.0  # 实际平仓盈亏金额
     exit_reason: str = ""             # 平仓原因与复盘记录
     entry_reason: str = ""            # 买入建仓依据
-    signal_tier: str = "S"            # 触发建仓时的信号级别 (SSS / S / A)
+    signal_tier: str = "S"            # 兼容旧代码 (SSS / S / A)
+    signal_level: str = "S4"          # 规范命名: "S0" ~ "S5" (生命周期层级)
+    quality_grade: str = "S"          # 规范命名: "A" | "S" | "SS" (形态质量等级)
+    strategy_tag: str = ""            # 策略正交标签 (IPO_BID_SURGE, IPO_VWAP_STABLE, SUBNEW_PULLBACK_REENTRY, CHANNEL_SECONDARY_BUY)
 
     def to_dict(self) -> Dict[str, Any]:
         from dataclasses import asdict
@@ -94,7 +105,7 @@ class IPOTradingPosition:
 @dataclass
 class IPOOrderDirective:
     """交易中心向执行端分发的标准订单指令"""
-    action: str                       # "BUY" | "SELL" | "HOLD" | "SWITCH_SWAP" | "FULL_ROTATION_SWAP"
+    action: str                       # "BUY" | "BUY_SCOUT" | "BUY_CONFIRM" | "SELL" | "EXIT_ALL" | "HOLD" | "SWITCH_SWAP" | "FULL_ROTATION_SWAP"
     code: str
     name: str
     price: float = 0.0
@@ -105,9 +116,13 @@ class IPOOrderDirective:
     horse_rank: int = 999             # 当前在全池的赛马排名
     sentiment_phase: str = ""         # 所处全市场情绪阶段
     timestamp: float = 0.0
-    signal_tier: str = "S"            # "SSS" | "S" | "A" | "ALERT"
+    signal_tier: str = "S"            # 兼容旧代码: "SSS" | "S" | "A" | "ALERT"
+    signal_level: str = "S4"          # 规范命名: "S0" ~ "S5" (生命周期层级)
+    quality_grade: str = "S"          # 规范命名: "A" | "S" | "SS" (形态质量等级)
+    strategy_tag: str = ""            # 策略正交标签 (IPO_BID_SURGE, IPO_VWAP_STABLE, SUBNEW_PULLBACK_REENTRY, CHANNEL_SECONDARY_BUY)
     target_swap_code: str = ""        # 全仓轮动换马接力目标代码
     target_swap_name: str = ""        # 全仓轮动换马接力目标名称
+    trade_plan: Optional[IPOTradePlan] = None # 挂接的不可变 TradePlan
 
     def to_dict(self) -> Dict[str, Any]:
         from dataclasses import asdict
@@ -151,7 +166,7 @@ class IPOTradingCenter:
         self._order_history: List[IPOOrderDirective] = []
         self._notified_directive_keys: Dict[str, float] = {}
         self._today_notified_subscriptions: set = set()
-        self.trading_mode: str = "ROTATION_FULL_CAPITAL" # "ROTATION_FULL_CAPITAL" (全仓轮动单股接力) | "MULTI_POSITION" (组合分仓)
+        self.trading_mode: str = "MULTI_POSITION" # 默认组合分仓模式 ("ROTATION_FULL_CAPITAL" 全仓轮动需手动启用)
         self._lock = threading.RLock()
         
         self.sentiment_engine = IPOMarketSentimentEngine.get_instance()
@@ -159,6 +174,7 @@ class IPOTradingCenter:
         self._max_total_position_pct: float = 80.0 # 最大允许总仓位
         self.auto_follow_trading: bool = False     # 全自动跟随交易开关 (开启后自动撮合指令)
         self._pending_directives: List[IPOOrderDirective] = []
+        self._trade_plans: Dict[str, IPOTradePlan] = {} # 标的对应的不变 TradePlan 字典
 
         # ATS 外部语音报警与异动信号感知统计与优质注入池
         self._external_signal_stats: Dict[str, int] = {
@@ -168,6 +184,106 @@ class IPOTradingCenter:
             "quality_injected_count": 0
         }
         self._perceived_external_signals: List[Dict[str, Any]] = []
+
+    def get_position(self, code: str) -> Optional[IPOTradingPosition]:
+        """获取指定标的当前的持仓状态容器"""
+        clean_code = str(code).strip().zfill(6)
+        with self._lock:
+            return self._positions.get(clean_code)
+
+    def get_trade_plan(self, code: str) -> Optional[IPOTradePlan]:
+        """获取指定标的当前的不可变 TradePlan"""
+        clean_code = str(code).strip().zfill(6)
+        with self._lock:
+            return self._trade_plans.get(clean_code)
+
+    def register_trade_plan(self, plan: IPOTradePlan) -> None:
+        """注册或更新标的的不可变 TradePlan"""
+        if not plan or not plan.code:
+            return
+        clean_code = str(plan.code).strip().zfill(6)
+        with self._lock:
+            self._trade_plans[clean_code] = plan
+            logger.info(f"[IPO-TRADING] 注册 TradePlan: {plan.name}({clean_code}) Tag={plan.strategy_tag} Lv={plan.signal_level} 防守线={plan.higher_low_stop:.2f}")
+
+    def create_trade_plan_from_signal(self, sig: VWAPDetectorSignal) -> Optional[IPOTradePlan]:
+        """
+        从前置感知信号构建标准不可变 TradePlan (共用 TradePlan，4大 Tag 正交分离)
+        1. IPO_BID_SURGE: 首日早鸟竞价抢筹
+        2. IPO_VWAP_STABLE: 首日/次日 VWAP 承接
+        3. SUBNEW_PULLBACK_REENTRY: 次新缩量回踩再买点
+        4. CHANNEL_SECONDARY_BUY: 长期通道底部次级买点
+        """
+        if not sig or not sig.code or sig.price <= 0:
+            return None
+
+        clean_code = str(sig.code).strip().zfill(6)
+        now_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        plan_id = f"TP_{clean_code}_{now_str}"
+
+        # 1. 确定策略 Tag 与质量评级
+        if getattr(sig, "is_swing_channel_breakout", False) or sig.signal_type == "SWING_PREORDER":
+            tag = TAG_CHANNEL_SECONDARY_BUY
+            s_level = "S4"
+            q_grade = "SS" if sig.horse_race_score >= 85.0 else "S"
+            base_supp = getattr(sig, "multi_day_base_support", 0.0) or sig.base_support_level
+            hl_stop = sig.stop_loss_price if sig.stop_loss_price > 0 else round(sig.price * 0.985, 3)
+            base_low = base_supp if base_supp > 0 else round(sig.price * 0.97, 3)
+            t1 = round(sig.price * 1.08, 3)
+            t2 = round(sig.price * 1.15, 3)
+        elif sig.signal_type == "IPO_FIRST_BUY" or sig.is_ipo_first_day:
+            tag = TAG_IPO_BID_SURGE if sig.launch_time_str <= "09:35" else TAG_IPO_VWAP_STABLE
+            s_level = "S5" if sig.horse_race_rank <= 2 else "S4"
+            q_grade = "SS" if sig.launch_slope_deg >= 45.0 else "S"
+            hl_stop = round(sig.vwap * 0.994, 3) if sig.vwap > 0 else round(sig.price * 0.98, 3)
+            base_low = sig.open_anchor_price if sig.open_anchor_price > 0 else round(sig.price * 0.97, 3)
+            t1 = round(sig.price * 1.10, 3)
+            t2 = round(sig.price * 1.20, 3)
+        elif sig.pullback_no_touch or sig.signal_type == "PULLBACK_BUY":
+            tag = TAG_SUBNEW_PULLBACK_REENTRY
+            s_level = "S4"
+            q_grade = "S"
+            hl_stop = sig.stop_loss_price if sig.stop_loss_price > 0 else round(sig.vwap * 0.994, 3)
+            base_low = round(sig.price * 0.97, 3)
+            t1 = round(sig.price * 1.06, 3)
+            t2 = round(sig.price * 1.12, 3)
+        else:
+            # 基础底部结构
+            tag = TAG_CHANNEL_SECONDARY_BUY if sig.has_bottom_base else TAG_SUBNEW_PULLBACK_REENTRY
+            s_level = "S4"
+            q_grade = "A"
+            hl_stop = sig.stop_loss_price if sig.stop_loss_price > 0 else round(sig.price * 0.98, 3)
+            base_low = sig.base_support_level if sig.base_support_level > 0 else round(sig.price * 0.97, 3)
+            t1 = round(sig.price * 1.06, 3)
+            t2 = round(sig.price * 1.12, 3)
+
+        plan = IPOTradePlan(
+            plan_id=plan_id,
+            code=clean_code,
+            name=sig.name,
+            strategy_tag=tag,
+            signal_level=s_level,
+            quality_grade=q_grade,
+            trigger_price=sig.price,
+            buy_zone_min=round(hl_stop * 1.005, 3),
+            buy_zone_max=round(sig.price * 1.015, 3),
+            higher_low_stop=hl_stop,
+            base_low_invalid=base_low,
+            hard_stop_loss_pct=round((sig.price - hl_stop) / sig.price * 100.0, 2) if sig.price > 0 else 2.5,
+            target_1_channel_mid=t1,
+            target_2_swing_high=t2,
+            suggested_action="BUY_SCOUT",
+            position_pct=30.0,
+            expire_at="14:45:00",
+            created_time=datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            extra_info={
+                "horse_rank": sig.horse_race_rank,
+                "horse_score": sig.horse_race_score,
+                "vwap": sig.vwap
+            }
+        )
+        self.register_trade_plan(plan)
+        return plan
         self._injected_quality_stocks: Dict[str, Dict[str, Any]] = {}
 
         # 仅当明确开启或指定账本文件时才从磁盘加载 (测试创建的纯内存临时实例不被磁盘历史污染)
@@ -980,8 +1096,11 @@ class IPOTradingCenter:
                     allocated_money = self.total_capital * (assigned_weight / 100.0)
                     buy_shares = int(allocated_money / sig.price / 100.0) * 100
                     if buy_shares >= 100:
+                        # 构建不可变 TradePlan 并在指令中挂接
+                        t_plan = self.create_trade_plan_from_signal(sig)
+                        buy_act = t_plan.suggested_action if t_plan else "BUY_SCOUT"
                         # 避免 directives 中重复添加相同标的买单
-                        if not any(d.code == code and d.action == "BUY" for d in directives):
+                        if not any(d.code == code and d.action in ("BUY", "BUY_SCOUT", "BUY_CONFIRM") for d in directives):
                             directives.append(IPOOrderDirective(
                                 action="BUY",
                                 code=code,
@@ -994,7 +1113,11 @@ class IPOTradingCenter:
                                 horse_rank=sig.horse_race_rank,
                                 sentiment_phase=sentiment.heat_stage,
                                 timestamp=now_ts,
-                                signal_tier=s_tier
+                                signal_tier=s_tier,
+                                signal_level=t_plan.signal_level if t_plan else "S4",
+                                quality_grade=t_plan.quality_grade if t_plan else "S",
+                                strategy_tag=t_plan.strategy_tag if t_plan else "",
+                                trade_plan=t_plan
                             ))
                             current_fleet_weight += assigned_weight
 
@@ -1084,9 +1207,12 @@ class IPOTradingCenter:
                 logger.debug(f"广播集中交易决议异常: {ex_alert}")
 
     def _auto_execute_if_enabled(self, directives: List[IPOOrderDirective]):
-        """若开启全自动跟随交易，自动撮合执行"""
+        """若开启全自动跟随交易，自动撮合执行 (注意：FULL_ROTATION_SWAP 仅作战术建议展示，严禁自动执行)"""
         if self.auto_follow_trading and directives:
             for d in directives:
+                if d.action in ("FULL_ROTATION_SWAP", "SWITCH_SWAP"):
+                    logger.warning(f"[IPO-TRADING] 轮动换马指令 {d.action} 仅作战术建议展示，实盘保护拦截自动执行")
+                    continue
                 self.record_order_execution(d)
 
     def execute_directive(self, directive: IPOOrderDirective) -> bool:
@@ -1123,7 +1249,7 @@ class IPOTradingCenter:
             pnl_pct = 0.0
             pnl_amt = 0.0
 
-            if directive.action == "BUY":
+            if directive.action in ("BUY", "BUY_SCOUT", "BUY_CONFIRM"):
                 cost_money = directive.price * directive.shares
                 self.available_cash = max(0.0, self.available_cash - cost_money)
                 new_shares = pos.shares + directive.shares
@@ -1135,13 +1261,16 @@ class IPOTradingCenter:
                 pos.entry_date = today_str
                 pos.entry_reason = directive.reason
                 pos.signal_tier = directive.signal_tier
+                pos.signal_level = getattr(directive, "signal_level", "S4")
+                pos.quality_grade = getattr(directive, "quality_grade", "S")
+                pos.strategy_tag = getattr(directive, "strategy_tag", "")
                 pos.status = "HOLDING"
                 pos.current_price = directive.price
                 pos.highest_price = directive.price
                 pos.lowest_price = directive.price
-                pos.last_action = "BUY"
+                pos.last_action = directive.action
                 pos.last_action_time = t_str
-                logger.info(f"[IPO-TRADING] 买入成交: {pos.name}({code}) {directive.shares}股 @ {directive.price:.2f}元 | 剩余可用: {self.available_cash:.0f}元")
+                logger.info(f"[IPO-TRADING] 买入成交: {pos.name}({code}) {directive.shares}股 @ {directive.price:.2f}元 (动作: {directive.action}) | 剩余可用: {self.available_cash:.0f}元")
 
             elif directive.action == "FULL_ROTATION_SWAP":
                 # ── 全仓轮动模式：第 1 步，全额平仓老股票回笼资金 ──
@@ -1184,7 +1313,7 @@ class IPOTradingCenter:
                 self._positions[code] = new_pos
                 logger.info(f"[IPO-TRADING] 全仓轮动接力新龙头成功: {new_pos.name}({code}) 满仓买入 {new_shares}股 @ {directive.price:.2f}元")
 
-            elif directive.action in ("SELL", "SWITCH_SWAP"):
+            elif directive.action in ("SELL", "EXIT_ALL", "SWITCH_SWAP"):
                 sell_val = directive.price * pos.shares
                 self.available_cash += sell_val
                 if pos.cost_price > 0 and pos.shares > 0:

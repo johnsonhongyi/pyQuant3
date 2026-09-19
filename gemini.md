@@ -1,3 +1,18 @@
+## 2026-09-19 21:35
+- [ ] **【新股检测工具与交易决策中心：长期通道底部结构次级买点最小可跑闭环 (P0实战落地)】(`20260919_2135_task.md`, `ats/strategy/channel_secondary_buy_strategy.py`, `ats/strategy/ipo_trading_center.py`, `ats/proactive_exit_engine.py`, `ats/tdx_realtime_fetcher.py`)**：
+    - [ ] **操盘手现场实战修正与实施切片定调 (P0)**：
+        - “1. L0 100ms 偏激进 -> 收敛为 L0: 1s~3s, L1: 15s~30s, L2: 秒级(仅限5~10只强候选)”；
+        - “2. signal_tier 与 S0~S5 冲突 -> 统一 signal_level = S4|S5, quality_grade = A|S|SS”；
+        - “3. 首日新股和通道次级买点分开 -> 共用 TradePlan，Tag 严格正交隔离 (IPO_BID_SURGE, IPO_VWAP_STABLE, SUBNEW_PULLBACK_REENTRY, CHANNEL_SECONDARY_BUY)”；
+        - “4. 明天不建议直接做 FULL_ROTATION_SWAP -> 收敛为 BUY_SCOUT, BUY_CONFIRM, EXIT_ALL，轮动仅作展示建议不自动执行”；
+        - “5. 按 P0 裁剪最小可跑闭环：强信号落地 TradePlan + 退出引擎保护跑通，UI/SBC 图元放 P2”；
+        - **开始全面实施 P0 闭环**：
+          1) 新增独立策略模块 `ats/strategy/channel_secondary_buy_strategy.py`（6状态机、双层分级、标准 TradePlan、纯函数评估）；
+          2) 升级 `ats/strategy/ipo_trading_center.py`（生成不可变 TradePlan、4 大 Tag 分离、指令收敛）；
+          3) 升级 `ats/proactive_exit_engine.py`（挂接 TradePlan higher_low_stop / base_low_invalid 结构防守）；
+          4) 加固 `ats/tdx_realtime_fetcher.py`（多周期 K 线 30s/180s TTL 安全缓存）；
+          5) 构建 `tests/test_channel_secondary_buy_strategy.py` 全流程闭环测试。
+
 ## 2026-09-19 20:50
 - [x] **【AI配额探针多服务进程串号与虚假满额度彻底破案与根治：多实例全量扫描、邮箱精准过滤与多账户卡片独立精准刷新】(`webTools/window_manager/antigravity_manager.py`, `webTools/window_manager/ui.py`, `tests/test_antigravity_manager.py`)**：
     - [x] **操盘手现场明确指示与现象彻底破案 (P0)**：
