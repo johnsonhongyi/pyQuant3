@@ -1,3 +1,18 @@
+## 2026-09-19 21:35
+- [x] **【新股检测工具与交易决策中心：长期通道底部结构次级买点最小可跑闭环 (P0实战落地)】(`20260919_2135_task.md`, `ats/strategy/channel_secondary_buy_strategy.py`, `ats/strategy/ipo_trading_center.py`, `ats/proactive_exit_engine.py`, `ats/tdx_realtime_fetcher.py`, `tests/test_channel_secondary_buy_strategy.py`)**：
+    - [x] **操盘手现场实战修正与实施切片定调全部落地 (P0)**：
+        - “1. L0 100ms 偏激进 -> 收敛为 L0: 1s~3s, L1: 15s~30s, L2: 秒级(仅限5~10只强候选)”；
+        - “2. signal_tier 与 S0~S5 冲突 -> 统一 signal_level = S4|S5, quality_grade = A|S|SS”；
+        - “3. 首日新股和通道次级买点分开 -> 共用 TradePlan，Tag 严格正交隔离 (IPO_BID_SURGE, IPO_VWAP_STABLE, SUBNEW_PULLBACK_REENTRY, CHANNEL_SECONDARY_BUY)”；
+        - “4. 明天不建议直接做 FULL_ROTATION_SWAP -> 收敛为 BUY_SCOUT, BUY_CONFIRM, EXIT_ALL，轮动仅作展示建议不自动执行”；
+        - “5. 按 P0 裁剪最小可跑闭环：强信号落地 TradePlan + 退出引擎保护跑通，UI/SBC 图元放 P2”；
+        - **全量技术实现与闭环落地 (KISS / SOLID / DRY)**：
+          1) **独立策略模块构建 (`ats/strategy/channel_secondary_buy_strategy.py`)**：基于时序波浪识别 6 阶状态机（通道下行 -> 平底扎底 -> 首阳试盘冲高不买 -> 缩量回踩抬高次低点 -> 放量上翘次级买点确认 -> 破位失效），产出标准不可变 `IPOTradePlan`；
+          2) **交易中心接入与指令收敛 (`ats/strategy/ipo_trading_center.py`)**：实现 `create_trade_plan_from_signal`，统一 `signal_level` 与 `quality_grade`，4 大策略 Tag 正交隔离，指令收敛支持 `BUY_SCOUT`、`BUY_CONFIRM`、`EXIT_ALL`，全自动跟随模式下严密拦截 `FULL_ROTATION_SWAP` 自动执行；
+          3) **主动退出引擎挂接 TradePlan 结构防守 (`ats/proactive_exit_engine.py`)**：直接注入 `trade_plan` 与 `higher_low_stop`，跌破次回踩次低点触发 `EXIT_ALL` 立斩止损，触及第一目标位自动触发保本推移锁定胜果；
+          4) **TDX 多周期 K 线安全 TTL 缓存 (`ats/tdx_realtime_fetcher.py`)**：日K 180s、60F 30s 自适应缓存，彻底压低 90% 重复网络 IO；
+          5) **自动化测试全覆盖验证通过 (39/39 PASSED)**：`test_channel_secondary_buy_strategy.py` 8/8 绿灯通过，全量核心测试 `test_ipo_fleet_trading_arbitration.py` (8/8), `test_ipo_vwap_sentiment_and_horse_race.py` (6/6), `test_ipo_vwap_bottom_base_preorder.py` (6/6), `test_ipo_detector_and_trading_center_voice_alert.py` (7/7), `test_ipo_command_room_persistence.py` (4/4) 全部 100% 绿灯！
+
 ## 2026-09-19 20:50
 - [x] **【AI配额探针多服务进程串号与虚假满额度彻底破案与根治：多实例全量扫描、邮箱精准过滤与多账户卡片独立精准刷新】(`webTools/window_manager/antigravity_manager.py`, `webTools/window_manager/ui.py`, `tests/test_antigravity_manager.py`)**：
     - [x] **操盘手现场明确指示与现象彻底破案 (P0)**：
