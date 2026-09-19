@@ -417,6 +417,7 @@ def test_window_pos_manager_ui_compact_bottom_bar_and_tools_menu(monkeypatch):
     ui = WindowPosManagerUI()
     
     # 1. 验证日志控制台恢复原版协调高度 (默认 110px 比例，告别 48px 过扁问题)
+    ui.set_log_panel_height(110)
     assert ui.log_group.height() == 110
     assert hasattr(ui, "btn_log_compact")
     assert hasattr(ui, "btn_log_normal")
@@ -431,7 +432,11 @@ def test_window_pos_manager_ui_compact_bottom_bar_and_tools_menu(monkeypatch):
     assert ui.log_group.height() == 160
     assert ui.config_manager.config_data.get("log_panel_height") == 160
 
+    ui.set_log_panel_height(110) # 恢复默认协调比例110
+
     # 2. 验证底栏【🛠️ 扩展工具】下拉菜单按钮存在且文本无多余重复箭头
+    if ui.config_manager.config_data.get("tools_expanded_mode"):
+        ui.toggle_tools_expand_mode() # 确保初始处于默认收纳模式
     assert hasattr(ui, "btn_tools_menu")
     assert "扩展工具" in ui.btn_tools_menu.text()
     assert "▼" not in ui.btn_tools_menu.text() # 杜绝重复箭头
@@ -478,12 +483,17 @@ def test_window_pos_manager_ui_compact_bottom_bar_and_tools_menu(monkeypatch):
 
 def test_acer_performance_dialog_and_route_dialog_decoupling(monkeypatch):
     """验证 Acer 性能控制从路由设置中彻底独立解耦"""
-    from PyQt6.QtWidgets import QApplication
+    from PyQt6.QtWidgets import QApplication, QMessageBox
     from window_manager.ui import RouteConfigDialog, AcerPerformanceDialog
     from window_manager.core import ConfigManager
     import tempfile
 
     app = QApplication.instance() or QApplication([])
+
+    # Mock QMessageBox 避免弹窗阻塞
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **kw: QMessageBox.StandardButton.Yes)
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **kw: QMessageBox.StandardButton.Ok)
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **kw: QMessageBox.StandardButton.Ok)
 
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp_cfg_path = os.path.join(tmpdir, "test_config.json")
@@ -618,6 +628,120 @@ def test_fetch_antigravity_quotas_multi_process_exact_match(monkeypatch):
     assert "all_accounts_quotas" in res_hongyi
     assert "hongyi2008@gmail.com" in res_hongyi["all_accounts_quotas"]
     assert "johnson.hongyi@gmail.com" in res_hongyi["all_accounts_quotas"]
+
+
+def test_retrieve_user_quota_summary_weekly_and_card_rendering(monkeypatch):
+    """验证官方双层限额体系（周限额 Weekly Limit + 5小时限额）探测、解析与卡片渲染"""
+    from window_manager import antigravity_manager
+    from window_manager.ui import AntigravityAccountManagerDialog
+    from PyQt6.QtWidgets import QApplication
+    import io
+    import urllib.request
+
+    app = QApplication.instance() or QApplication([])
+
+    # 1. 验证 parse_quota_summary 解析官方原生返回结构
+    raw_summary = {
+        "response": {
+            "groups": [
+                {
+                    "displayName": "Gemini Models",
+                    "buckets": [
+                        {"window": "weekly", "remainingFraction": 0.77, "resetTime": "2026-09-23T02:00:00Z", "displayName": "Weekly Limit Remaining"},
+                        {"window": "5h", "remainingFraction": 1.0, "resetTime": "2026-09-19T17:00:00Z", "displayName": "Five Hour Limit Remaining"}
+                    ]
+                },
+                {
+                    "displayName": "Claude and GPT models",
+                    "buckets": [
+                        {"window": "weekly", "remainingFraction": 1.0, "resetTime": "2026-09-26T13:00:00Z", "displayName": "Weekly Limit Remaining"},
+                        {"window": "5h", "remainingFraction": 1.0, "resetTime": "2026-09-19T18:00:00Z", "displayName": "Five Hour Limit Remaining"}
+                    ]
+                }
+            ]
+        }
+    }
+    parsed = antigravity_manager.parse_quota_summary(raw_summary)
+    assert "gemini" in parsed
+    assert "claude_gpt" in parsed
+    assert parsed["gemini"]["weekly"]["remaining_pct"] == 77.0
+    assert parsed["gemini"]["5h"]["remaining_pct"] == 100.0
+    assert parsed["claude_gpt"]["weekly"]["remaining_pct"] == 100.0
+
+    # 2. 模拟 LanguageServer 同时响应 GetUserStatus 与 RetrieveUserQuotaSummary
+    class FakeProcess:
+        def __init__(self, pid):
+            self.info = {
+                'pid': pid,
+                'name': 'language_server.exe',
+                'cmdline': ['language_server.exe', '--csrf_token', 'test_csrf'],
+                'create_time': 100
+            }
+
+    monkeypatch.setattr('psutil.process_iter', lambda attrs: [FakeProcess(9999)])
+    monkeypatch.setattr('subprocess.check_output', lambda cmd, **kw: "  TCP 127.0.0.1:9090 0.0.0.0:0 LISTENING 9999\n")
+
+    def fake_urlopen_summary(req, context=None, timeout=None):
+        url = req.full_url
+        if "GetUserStatus" in url:
+            data = {
+                "userStatus": {
+                    "email": "weekly.trader@quant.com",
+                    "name": "周限额操盘手",
+                    "cascadeModelConfigData": {
+                        "clientModelConfigs": [
+                            {"label": "Claude Sonnet 4.6 (Thinking)", "quotaInfo": {"remainingFraction": 1.0, "resetTime": "2026-09-19T18:00:00Z"}},
+                            {"label": "Gemini 3.1 Pro (High)", "quotaInfo": {"remainingFraction": 1.0, "resetTime": "2026-09-19T17:00:00Z"}}
+                        ]
+                    }
+                }
+            }
+        elif "RetrieveUserQuotaSummary" in url:
+            data = raw_summary
+        else:
+            data = {}
+        return io.BytesIO(json.dumps(data).encode('utf-8'))
+
+    monkeypatch.setattr(urllib.request, 'urlopen', fake_urlopen_summary)
+
+    # 执行探针探测
+    res = antigravity_manager.fetch_antigravity_quotas(target_email="weekly.trader@quant.com")
+    assert res["success"] is True
+    assert "quota_summary" in res
+    assert res["quota_summary"]["gemini"]["weekly"]["remaining_pct"] == 77.0
+    # 验证反哺注入进 groups
+    assert "weekly" in res["groups"]["Gemini Pro"]
+    assert res["groups"]["Gemini Pro"]["weekly"]["remaining_pct"] == 77.0
+
+    # 3. 验证卡片渲染周限额面板
+    mock_acc = {
+        "email": "weekly.trader@quant.com",
+        "name": "周限额操盘手",
+        "masked_email": "w***r@quant.com",
+        "mtime": 1000
+    }
+    monkeypatch.setattr(antigravity_manager, "list_accounts", lambda: [mock_acc])
+    monkeypatch.setattr(antigravity_manager, "get_current_account", lambda: mock_acc)
+    monkeypatch.setattr(antigravity_manager, "get_cached_quotas", lambda: {
+        "weekly.trader@quant.com": {
+            "groups": res["groups"],
+            "quota_summary": res["quota_summary"]
+        }
+    })
+
+    dialog = AntigravityAccountManagerDialog(auto_fetch=False)
+    assert "weekly.trader@quant.com" in dialog.account_cards
+    card = dialog.account_cards["weekly.trader@quant.com"]
+    assert "weekly_widgets" in card
+    # 验证 Gemini 周限额正确显示 77.0% 与进度条 77
+    assert "77.0%" in card["weekly_widgets"]["gemini"]["lbl"].text()
+    assert card["weekly_widgets"]["gemini"]["bar"].value() == 77
+    # 验证 Claude 周限额正确显示 100.0% 与进度条 100
+    assert "100.0%" in card["weekly_widgets"]["claude_gpt"]["lbl"].text()
+    assert card["weekly_widgets"]["claude_gpt"]["bar"].value() == 100
+
+    dialog.close()
+
 
 
 
