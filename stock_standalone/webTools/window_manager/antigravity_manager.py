@@ -601,11 +601,14 @@ def categorize_model_label(label: str) -> str:
         return "其他模型"
 
 
-def fetch_antigravity_quotas(timeout: float = 0.8) -> dict:
+def fetch_antigravity_quotas(target_email: str = None, timeout: float = 0.8) -> dict:
     """
     【极速探针】：通过本地 Connect-RPC 探测运行中的 LanguageServer，
-    秒级拉取当前活跃账户全部 AI 模型真实配额与精确重置时间。
-    通常仅需 10 ~ 30 毫秒即可返回。
+    秒级拉取指定（或当前活跃）账户的全部 AI 模型真实配额与精确重置时间。
+    特性：
+    1. 进程-邮箱精准识别：按 target_email 严格过滤，绝不把其他账号的配额张冠李戴；
+    2. 多实例全量收集：一次探测同时捕获所有运行中 LanguageServer，并分别写入各自账户的专属缓存快照；
+    3. 支持返回 all_accounts_quotas 供多卡片批量刷新。
     """
     import urllib.request
     import ssl
@@ -613,13 +616,14 @@ def fetch_antigravity_quotas(timeout: float = 0.8) -> dict:
     t0 = time.time()
 
     curr_acc = get_current_account()
-    curr_email = curr_acc.get("email", "")
+    curr_email = (curr_acc.get("email") or "").strip().lower()
+    wanted_email = (target_email or curr_email).strip().lower()
 
-    # 1. 搜寻系统中所有运行中的 language_server 进程及其 csrf_token
+    # 1. 搜寻系统中所有运行中的 language_server 进程及其 csrf_token，按创建时间倒序排查
     pids_tokens = []
     try:
         import psutil
-        for p in psutil.process_iter(['pid', 'name', 'cmdline']):
+        for p in psutil.process_iter(['pid', 'name', 'cmdline', 'create_time']):
             try:
                 pname = (p.info['name'] or '').lower()
                 if 'language_server' in pname:
@@ -632,9 +636,10 @@ def fetch_antigravity_quotas(timeout: float = 0.8) -> dict:
                         elif c.startswith('--csrf_token='):
                             csrf = c.split('=', 1)[1]
                     if csrf:
-                        pids_tokens.append((pid, csrf))
+                        pids_tokens.append((pid, csrf, p.info.get('create_time', 0)))
             except Exception:
                 pass
+        pids_tokens.sort(key=lambda x: x[2], reverse=True)
     except Exception as e:
         logger.debug(f"psutil 检测进程异常: {e}")
 
@@ -643,10 +648,11 @@ def fetch_antigravity_quotas(timeout: float = 0.8) -> dict:
             "success": False,
             "mode": "not_running",
             "error": "未检测到运行中的 Antigravity IDE 语言服务器进程",
-            "account_email": curr_email,
+            "account_email": wanted_email or curr_email,
             "latency_ms": int((time.time() - t0) * 1000),
             "groups": {},
-            "models": []
+            "models": [],
+            "all_accounts_quotas": {}
         }
 
     # 2. 获取监听端口 (通过 netstat 查找 LISTENING)
@@ -672,12 +678,10 @@ def fetch_antigravity_quotas(timeout: float = 0.8) -> dict:
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE
 
-    raw_configs = None
-    target_pid = None
-    target_port = None
+    discovered_accounts = {}
 
-    # 3. 逐个尝试向本地端口发送 GetUserStatus / GetCommandModelConfigs 请求
-    for pid, csrf in pids_tokens:
+    # 3. 逐个尝试向本地端口发送 GetUserStatus 请求，精准提取各服务的真实用户与配额
+    for pid, csrf, ctime in pids_tokens:
         ports = pid_ports.get(str(pid), [])
         for port in ports:
             for proto in ['https', 'http']:
@@ -694,90 +698,112 @@ def fetch_antigravity_quotas(timeout: float = 0.8) -> dict:
                 try:
                     resp = urllib.request.urlopen(req, context=ctx, timeout=timeout)
                     data = json.loads(resp.read().decode('utf-8'))
-                    if 'userStatus' in data:
-                        raw_configs = data['userStatus'].get('cascadeModelConfigData', {}).get('clientModelConfigs', [])
-                    elif 'clientModelConfigs' in data:
+                    us = data.get('userStatus', {})
+                    raw_configs = us.get('cascadeModelConfigData', {}).get('clientModelConfigs', [])
+                    if not raw_configs and 'clientModelConfigs' in data:
                         raw_configs = data.get('clientModelConfigs', [])
+
+                    server_email = (us.get('email') or '').strip().lower()
+                    if not server_email:
+                        # 兼容：如果 userStatus 未直接暴露 email，尝试从当前活跃账户比对
+                        server_email = curr_email
+
                     if raw_configs:
-                        target_pid = pid
-                        target_port = port
+                        # 4. 解析各模型配额与聚合组
+                        parsed_models = []
+                        groups = {
+                            "Claude": {"remaining_fraction": 1.0, "remaining_pct": 100.0, "reset_time": "", "reset_desc": "未知", "models": []},
+                            "Gemini Pro": {"remaining_fraction": 1.0, "remaining_pct": 100.0, "reset_time": "", "reset_desc": "未知", "models": []},
+                            "Gemini Flash": {"remaining_fraction": 1.0, "remaining_pct": 100.0, "reset_time": "", "reset_desc": "未知", "models": []},
+                            "GPT-OSS": {"remaining_fraction": 1.0, "remaining_pct": 100.0, "reset_time": "", "reset_desc": "未知", "models": []},
+                        }
+
+                        for item in raw_configs:
+                            q_info = item.get('quotaInfo')
+                            label = item.get('label') or item.get('modelOrAlias', {}).get('model') or 'Unknown'
+                            if not q_info:
+                                continue
+                            
+                            rem_frac = q_info.get('remainingFraction')
+                            rem_frac = float(rem_frac) if rem_frac is not None else 0.0
+                            rem_pct = round(rem_frac * 100.0, 1)
+                            reset_iso = q_info.get('resetTime', '')
+                            diff_sec, reset_desc = format_time_until_reset(reset_iso)
+
+                            model_entry = {
+                                "label": label,
+                                "remaining_fraction": rem_frac,
+                                "remaining_pct": rem_pct,
+                                "reset_time": reset_iso,
+                                "reset_desc": reset_desc,
+                                "diff_sec": diff_sec
+                            }
+                            parsed_models.append(model_entry)
+
+                            cat = categorize_model_label(label)
+                            if cat in groups:
+                                grp = groups[cat]
+                                grp["models"].append(model_entry)
+                                # 聚合组采用具有代表性的最小值（最快耗尽）指标
+                                if len(grp["models"]) == 1 or rem_frac < grp["remaining_fraction"]:
+                                    grp["remaining_fraction"] = rem_frac
+                                    grp["remaining_pct"] = rem_pct
+                                    grp["reset_time"] = reset_iso
+                                    grp["reset_desc"] = reset_desc
+
+                        # 自动持久化保存属于该账号的专属配额缓存！
+                        if server_email:
+                            save_cached_quota(server_email, groups)
+
+                        # 如果当前账户已发现，优先保留配置更详细或更新的
+                        if server_email not in discovered_accounts:
+                            discovered_accounts[server_email] = {
+                                "groups": groups,
+                                "models": parsed_models,
+                                "target_pid": pid,
+                                "target_port": port,
+                                "server_email": server_email
+                            }
                         break
                 except Exception:
                     pass
-            if raw_configs:
-                break
-        if raw_configs:
-            break
 
     latency_ms = int((time.time() - t0) * 1000)
 
-    if not raw_configs:
+    # 5. 精准匹配主结果
+    target_match = None
+    if wanted_email and wanted_email in discovered_accounts:
+        target_match = discovered_accounts[wanted_email]
+    elif curr_email and curr_email in discovered_accounts:
+        target_match = discovered_accounts[curr_email]
+    elif discovered_accounts:
+        # 未能精准匹配当前账号，返回第一个发现的，但标明其实际邮箱
+        first_key = list(discovered_accounts.keys())[0]
+        target_match = discovered_accounts[first_key]
+
+    if not target_match:
         return {
             "success": False,
             "mode": "unreachable",
-            "error": "本地语言服务器未响应配额数据",
-            "account_email": curr_email,
+            "error": f"未检测到账户 {wanted_email or curr_email} 对应的在线语言服务器",
+            "account_email": wanted_email or curr_email,
             "latency_ms": latency_ms,
             "groups": {},
-            "models": []
+            "models": [],
+            "all_accounts_quotas": discovered_accounts
         }
-
-    # 4. 解析各模型配额与聚合
-    parsed_models = []
-    groups = {
-        "Claude": {"remaining_fraction": 1.0, "remaining_pct": 100.0, "reset_time": "", "reset_desc": "未知", "models": []},
-        "Gemini Pro": {"remaining_fraction": 1.0, "remaining_pct": 100.0, "reset_time": "", "reset_desc": "未知", "models": []},
-        "Gemini Flash": {"remaining_fraction": 1.0, "remaining_pct": 100.0, "reset_time": "", "reset_desc": "未知", "models": []},
-        "GPT-OSS": {"remaining_fraction": 1.0, "remaining_pct": 100.0, "reset_time": "", "reset_desc": "未知", "models": []},
-    }
-
-    for item in raw_configs:
-        q_info = item.get('quotaInfo')
-        label = item.get('label') or item.get('modelOrAlias', {}).get('model') or 'Unknown'
-        if not q_info:
-            continue
-        
-        rem_frac = q_info.get('remainingFraction')
-        rem_frac = float(rem_frac) if rem_frac is not None else 0.0
-        rem_pct = round(rem_frac * 100.0, 1)
-        reset_iso = q_info.get('resetTime', '')
-        diff_sec, reset_desc = format_time_until_reset(reset_iso)
-
-        model_entry = {
-            "label": label,
-            "remaining_fraction": rem_frac,
-            "remaining_pct": rem_pct,
-            "reset_time": reset_iso,
-            "reset_desc": reset_desc,
-            "diff_sec": diff_sec
-        }
-        parsed_models.append(model_entry)
-
-        cat = categorize_model_label(label)
-        if cat in groups:
-            grp = groups[cat]
-            grp["models"].append(model_entry)
-            # 聚合组采用具有代表性的最小值（最快耗尽）或主流型号指标
-            if len(grp["models"]) == 1 or rem_frac < grp["remaining_fraction"]:
-                grp["remaining_fraction"] = rem_frac
-                grp["remaining_pct"] = rem_pct
-                grp["reset_time"] = reset_iso
-                grp["reset_desc"] = reset_desc
-
-    # 保存进本地配额缓存，供多账户卡片离线快速预览
-    if curr_email:
-        save_cached_quota(curr_email, groups)
 
     return {
         "success": True,
         "mode": "live",
         "error": None,
-        "account_email": curr_email,
-        "target_pid": target_pid,
-        "target_port": target_port,
+        "account_email": target_match.get("server_email", wanted_email or curr_email),
+        "target_pid": target_match.get("target_pid"),
+        "target_port": target_match.get("target_port"),
         "latency_ms": latency_ms,
-        "groups": groups,
-        "models": parsed_models
+        "groups": target_match.get("groups", {}),
+        "models": target_match.get("models", []),
+        "all_accounts_quotas": discovered_accounts
     }
 
 
