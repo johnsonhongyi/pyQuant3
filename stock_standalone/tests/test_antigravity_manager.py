@@ -533,6 +533,94 @@ def test_acer_performance_dialog_and_route_dialog_decoupling(monkeypatch):
         acer_dlg.close()
 
 
+def test_fetch_antigravity_quotas_multi_process_exact_match(monkeypatch):
+    """验证多 LanguageServer 进程并存时，探针严格按目标邮箱精准过滤并避免张冠李戴"""
+    from window_manager import antigravity_manager
+    import urllib.request
+    import io
+
+    # 模拟系统中有 2 个 LanguageServer 进程：
+    # PID 1001: userStatus.email = "johnson.hongyi@gmail.com", 满额度 100%
+    # PID 2002: userStatus.email = "hongyi2008@gmail.com", 真实额度 43.9% / 13.2%
+    class FakeProcess:
+        def __init__(self, pid, create_time):
+            self.info = {
+                'pid': pid,
+                'name': 'language_server.exe',
+                'cmdline': ['language_server.exe', '--csrf_token', f'csrf_{pid}'],
+                'create_time': create_time
+            }
+
+    fake_procs = [FakeProcess(1001, 100), FakeProcess(2002, 200)]
+    monkeypatch.setattr('psutil.process_iter', lambda attrs: fake_procs)
+
+    # 模拟 netstat 端口输出
+    netstat_output = """
+  TCP    127.0.0.1:8739         0.0.0.0:0              LISTENING       1001
+  TCP    127.0.0.1:6112         0.0.0.0:0              LISTENING       2002
+"""
+    monkeypatch.setattr('subprocess.check_output', lambda cmd, **kw: netstat_output)
+
+    # 模拟 HTTP 请求返回不同账号的真实配额
+    def fake_urlopen(req, context=None, timeout=None):
+        url = req.full_url
+        if "8739" in url:
+            data = {
+                "userStatus": {
+                    "email": "johnson.hongyi@gmail.com",
+                    "name": "Johnson Zou",
+                    "cascadeModelConfigData": {
+                        "clientModelConfigs": [
+                            {"label": "Claude Sonnet 4.6 (Thinking)", "quotaInfo": {"remainingFraction": 1.0, "resetTime": "2026-09-19T17:40:00Z"}},
+                            {"label": "Gemini 3.1 Pro (High)", "quotaInfo": {"remainingFraction": 0.988, "resetTime": "2026-09-19T17:40:00Z"}}
+                        ]
+                    }
+                }
+            }
+        elif "6112" in url:
+            data = {
+                "userStatus": {
+                    "email": "hongyi2008@gmail.com",
+                    "name": "弘逸",
+                    "cascadeModelConfigData": {
+                        "clientModelConfigs": [
+                            {"label": "Claude Sonnet 4.6 (Thinking)", "quotaInfo": {"remainingFraction": 0.439, "resetTime": "2026-09-19T14:40:00Z"}},
+                            {"label": "Gemini 3.1 Pro (High)", "quotaInfo": {"remainingFraction": 0.132, "resetTime": "2026-09-23T06:30:00Z"}}
+                        ]
+                    }
+                }
+            }
+        else:
+            raise Exception("Port not matched")
+
+        resp = io.BytesIO(json.dumps(data).encode('utf-8'))
+        return resp
+
+    monkeypatch.setattr(urllib.request, 'urlopen', fake_urlopen)
+
+    # 1. 探测 hongyi2008@gmail.com，必须精准返回 6112 端口及 43.9% / 13.2%
+    res_hongyi = antigravity_manager.fetch_antigravity_quotas(target_email="hongyi2008@gmail.com")
+    assert res_hongyi["success"] is True
+    assert res_hongyi["target_port"] == 6112
+    assert res_hongyi["account_email"] == "hongyi2008@gmail.com"
+    assert res_hongyi["groups"]["Claude"]["remaining_pct"] == 43.9
+    assert res_hongyi["groups"]["Gemini Pro"]["remaining_pct"] == 13.2
+
+    # 2. 探测 johnson.hongyi@gmail.com，必须精准返回 8739 端口及 100% / 98.8%
+    res_johnson = antigravity_manager.fetch_antigravity_quotas(target_email="johnson.hongyi@gmail.com")
+    assert res_johnson["success"] is True
+    assert res_johnson["target_port"] == 8739
+    assert res_johnson["account_email"] == "johnson.hongyi@gmail.com"
+    assert res_johnson["groups"]["Claude"]["remaining_pct"] == 100.0
+    assert res_johnson["groups"]["Gemini Pro"]["remaining_pct"] == 98.8
+
+    # 3. 验证两个账号均被完整收集进 all_accounts_quotas
+    assert "all_accounts_quotas" in res_hongyi
+    assert "hongyi2008@gmail.com" in res_hongyi["all_accounts_quotas"]
+    assert "johnson.hongyi@gmail.com" in res_hongyi["all_accounts_quotas"]
+
+
+
 
 
 

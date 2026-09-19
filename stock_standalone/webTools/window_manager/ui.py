@@ -2832,10 +2832,14 @@ class QuotaFetchWorker(QtCore.QThread):
     """后台异步探针线程：极速拉取配额，绝不冻结主界面"""
     quota_ready = QtCore.pyqtSignal(dict)
 
+    def __init__(self, target_email: str = None, parent=None):
+        super().__init__(parent)
+        self.target_email = target_email
+
     def run(self):
         try:
             from . import antigravity_manager
-            res = antigravity_manager.fetch_antigravity_quotas()
+            res = antigravity_manager.fetch_antigravity_quotas(target_email=self.target_email)
             self.quota_ready.emit(res)
         except Exception as e:
             self.quota_ready.emit({
@@ -2843,7 +2847,8 @@ class QuotaFetchWorker(QtCore.QThread):
                 "mode": "error",
                 "error": str(e),
                 "groups": {},
-                "models": []
+                "models": [],
+                "all_accounts_quotas": {}
             })
 
 
@@ -3240,42 +3245,52 @@ class AntigravityAccountManagerDialog(QDialog):
             col = idx % cols
             self.grid_layout.addWidget(card, row, col)
 
-    def refresh_quotas_async(self):
+    def refresh_quotas_async(self, target_email: str = None):
         """启动后台 Worker 异步极速拉取活跃账户配额"""
         self.btn_refresh_quotas.setEnabled(False)
         self.btn_refresh_quotas.setText("⏳ 探测中...")
         self.lbl_probe_info.setText("⚡ 正在通过本地环回探针探测 LanguageServer...")
 
-        self.quota_worker = QuotaFetchWorker(self)
+        # 默认优先探测当前活跃账户
+        if not target_email:
+            for em, card in self.account_cards.items():
+                if card.get("is_active"):
+                    target_email = em
+                    break
+
+        self.quota_worker = QuotaFetchWorker(target_email=target_email, parent=self)
         self.quota_worker.quota_ready.connect(self._on_quotas_received)
         self.quota_worker.start()
 
     def _on_quotas_received(self, res: dict):
+        from .antigravity_manager import mask_email
         self.btn_refresh_quotas.setEnabled(True)
         self.btn_refresh_quotas.setText("🔄 极速刷新配额")
 
         success = res.get("success", False)
         latency = res.get("latency_ms", 0)
         port = res.get("target_port")
-        email = res.get("account_email", "").lower()
+        email = (res.get("account_email") or "").lower()
+        all_quotas = res.get("all_accounts_quotas", {})
 
         if not success:
             err = res.get("error", "获取配额失败")
             self.lbl_probe_info.setText(f"❌ 探针未连接 ({err}) · 耗时: {latency}ms")
             return
 
-        self.lbl_probe_info.setText(f"✅ 探针极速探测成功 · 耗时: {latency}ms · 本地端口: {port}")
+        masked_em = mask_email(email) if email else "已就绪"
+        self.lbl_probe_info.setText(f"✅ 探针极速探测成功 · 耗时: {latency}ms · 本地端口: {port} · 匹配账户: {masked_em}")
 
-        groups = res.get("groups", {})
-        # 更新活跃卡片
+        # 1. 批量同步刷新所有在线探测到的账户卡片（杜绝任何张冠李戴）
+        if all_quotas:
+            for acc_email, q_data in all_quotas.items():
+                acc_clean = acc_email.lower()
+                if acc_clean in self.account_cards:
+                    self._apply_quota_to_card(self.account_cards[acc_clean], q_data.get("groups", {}))
+
+        # 2. 确保目标账户卡片呈现最新实时数据
         if email in self.account_cards:
-            self._apply_quota_to_card(self.account_cards[email], groups)
-        else:
-            # 找到当前活跃卡片并应用
-            for acc_email, card in self.account_cards.items():
-                if card["is_active"]:
-                    self._apply_quota_to_card(card, groups)
-                    break
+            self._apply_quota_to_card(self.account_cards[email], res.get("groups", {}))
 
         # 填充子型号明细表格
         models = res.get("models", [])

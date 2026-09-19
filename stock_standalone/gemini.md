@@ -1,3 +1,22 @@
+## 2026-09-19 20:50
+- [x] **【AI配额探针多服务进程串号与虚假满额度彻底破案与根治：多实例全量扫描、邮箱精准过滤与多账户卡片独立精准刷新】(`webTools/window_manager/antigravity_manager.py`, `webTools/window_manager/ui.py`, `tests/test_antigravity_manager.py`)**：
+    - [x] **操盘手现场明确指示与现象彻底破案 (P0)**：
+        - “刷新配置显示满额度,但是实际是,问题在哪里,修复bug”：
+          1) **问题定位与根因破案**：
+             - 系统中同时运行着多个 `language_server` 进程：
+               - 进程 1（PID 13656，端口 8739）：属于 `johnson.hongyi@gmail.com`（官方客户端），当前配额全部是 100%（满额度）；
+               - 进程 2（PID 34256，端口 6112）：属于 `hongyi2008@gmail.com`（操盘手当前 IDE），真实配额为 Claude 17.9%~43.9%、Gemini Pro 13.2%！
+             - 原 `fetch_antigravity_quotas` 代码存在致命硬伤：遍历进程列表时盲目 break 在第一个连通的 8739 端口，完全未校验进程返回的 `userStatus.email` 是否匹配当前账户，并错误地将 `Johnson Zou` 的 100% 满配额强行写存至 `hongyi2008@gmail.com`（弘逸）的名下；
+             - 前端 UI 遇到未匹配邮箱时，存在兜底将数据强塞给活跃卡片的逻辑，导致弘逸卡片被严重串号显示为 100% 满额。
+          2) **架构升级与彻底根治 (KISS / SOLID)**：
+             - **多服务进程全量扫描与按邮箱建档**：探针一次探测扫描全部 LanguageServer 进程与端口，分别提取各服务的真实 `server_email`（如 `johnson.hongyi@gmail.com` 与 `hongyi2008@gmail.com`）；
+             - **各账户独立持久化存盘，绝无交叉污染**：针对探测到的每个在线账号，各自调用 `save_cached_quota(server_email, groups)` 正确落盘，彻底杜绝张冠李戴；
+             - **目标邮箱精准过滤**：优先将当前活跃账户（`hongyi2008@gmail.com`）与对应进程（端口 6112）精准对齐，返回真实的 13.2% 和 17.9%~43.9%，彻底消灭虚假 100%；
+             - **多账户卡片批量实时刷新**：探针在 `all_accounts_quotas` 中返回全网活跃账号数据，前端 UI 一次刷新即可同步更新所有在线账户卡片；移除了盲目塞给活跃卡片的错误兜底。
+    - [x] **全量自动化测试 100% 验证通过 (18/18 PASSED)**：
+        - `stock_standalone/tests/test_antigravity_manager.py` (13/13 PASSED，新增多进程邮箱精准匹配与各账户独立隔离专项测试)；
+        - `stock_standalone/tests/test_tdx_wildcard_matching.py` (5/5 PASSED)。
+
 ## 2026-09-19 13:50
 - [x] **【桌面窗口管理器原版协调比例复原与日志高度可调持久化、底栏平铺双向无缝切换与持久化、Acer性能控制彻底独立解耦】(`webTools/window_manager/ui.py`, `webTools/window_manager/__init__.py`, `tests/test_antigravity_manager.py`)**：
     - [x] **操盘手现场明确指示与三大功能/视觉痛点彻底攻坚 (P0)**：
