@@ -1022,6 +1022,7 @@ def batch_evaluate_horse_race_ranking(signals: List[VWAPDetectorSignal]) -> List
             continue
 
         # 2. 早盘启动时间分 (Time Decay Factor)
+        # 盘后/非实时模式：launch_time_str 为空时以 vwap_diff_pct 作代理评分，让盘后排位有实际意义
         t_str = sig.launch_time_str
         if t_str and t_str != "未启动":
             if t_str <= "09:40":
@@ -1035,9 +1036,23 @@ def batch_evaluate_horse_race_ranking(signals: List[VWAPDetectorSignal]) -> List
             else:
                 time_score = 45.0
         else:
-            time_score = 50.0
+            # 盘后代理时间分：VWAP 偏离度越高表示当日表现越强势
+            vd = sig.vwap_diff_pct
+            if vd >= 20.0:
+                time_score = 98.0   # 极度偏离 VWAP (高潮冲刺区)
+            elif vd >= 12.0:
+                time_score = 90.0   # 强势放量主升
+            elif vd >= 6.0:
+                time_score = 80.0   # VWAP 上方加速运行
+            elif vd >= 2.0:
+                time_score = 65.0   # VWAP 上方温和震荡
+            elif vd >= 0.0:
+                time_score = 50.0   # 贴近 VWAP 观察
+            else:
+                time_score = max(5.0, 30.0 + vd * 1.5)  # 破位降分
 
         # 3. 拔地而起角斜率分 (Surge Slope Score)
+        # 盘后/非实时模式：launch_slope_deg 为 0 时以 change_pct 日涨跌幅作代理斜率分
         slope = sig.launch_slope_deg
         if slope >= 50.0:
             slope_score = 98.0
@@ -1045,8 +1060,21 @@ def batch_evaluate_horse_race_ranking(signals: List[VWAPDetectorSignal]) -> List
             slope_score = 85.0
         elif slope >= 20.0:
             slope_score = 70.0
-        else:
+        elif slope > 0:
             slope_score = 55.0
+        else:
+            # 盘后代理斜率分：日涨跌幅反映当日冲击力
+            cp = sig.change_pct
+            if cp >= 15.0:
+                slope_score = 98.0
+            elif cp >= 8.0:
+                slope_score = 85.0
+            elif cp >= 3.0:
+                slope_score = 70.0
+            elif cp >= 0.0:
+                slope_score = 55.0
+            else:
+                slope_score = max(10.0, 40.0 + cp * 1.5)
 
         # 4. VWAP 站稳与贴线率分
         hold_score = min(100.0, max(20.0, sig.vwap_adhesion_ratio))

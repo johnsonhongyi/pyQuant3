@@ -24,7 +24,7 @@ from PyQt6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QHeaderView, QSplitter, QGroupBox,
     QMessageBox, QFrame, QCheckBox, QMenu, QApplication
 )
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import Qt, QTimer, QEvent
 from PyQt6.QtGui import QColor, QFont, QAction, QKeySequence
 
 from ats.strategy.ipo_trading_center import IPOTradingCenter, IPOOrderDirective, IPOTradingPosition
@@ -317,6 +317,8 @@ class IPOCommandRoomDialog(QDialog):
         self._linkage_timer.setSingleShot(True)
         self._pending_code = ""
         self._linkage_timer.timeout.connect(self._fire_debounced_linkage)
+        # 顶部领头羊标签点击联动 - 存储当前龙头代码
+        self._top_leader_code: str = ""
 
         self._init_ui()
         self._load_dialog_state()
@@ -346,6 +348,10 @@ class IPOCommandRoomDialog(QDialog):
 
         self.lbl_leader = QLabel("🥇 爆款领头羊: --")
         self.lbl_leader.setStyleSheet("background-color: #261a14; border: 1px solid #5a351e; border-radius: 4px; padding: 4px 10px; color: #ffaa00; font-weight: bold;")
+        # 【领头羊点击联动】手型指针提示可点击，installEventFilter 零侵入拦截鼠标事件
+        self.lbl_leader.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.lbl_leader.setToolTip("🖱️ 单击：定位龙头股并高亮选中 | 联动通达信")
+        self.lbl_leader.installEventFilter(self)
         top_bar.addWidget(self.lbl_leader)
 
         top_bar.addStretch()
@@ -997,6 +1003,8 @@ class IPOCommandRoomDialog(QDialog):
         self.lbl_capital.setText(f"💰 总资金: {summary['total_capital']/10000:.1f}万 | 可用: {summary['available_cash']/10000:.1f}万")
         self.lbl_positions.setText(f"📊 持仓: {summary['holding_count']} 只 ({summary['fleet_weight_pct']}%仓)")
         self.lbl_leader.setText(f"🥇 爆款领头羊: {summary['top_leader_name']} ({summary['top_leader_score']}分)")
+        # 同步存储龙头代码，供点击联动使用
+        self._top_leader_code = summary.get("top_leader", "")
 
         # 同步全仓轮动勾选状态
         if hasattr(self, "chk_rotation"):
@@ -1010,7 +1018,11 @@ class IPOCommandRoomDialog(QDialog):
         sort_order_rank = hv_rank.sortIndicatorOrder() if hv_rank.isSortIndicatorShown() else Qt.SortOrder.AscendingOrder
 
         ranked = getattr(self.trading_center, "_ranked_cache", [])
+        # 【防刷新光标润动修复】用当前选中行的代码来恢复选中，而不是行号，避免排序后行号失效导致光标乱跳
+        prev_code = ""
         prev_row = self.tbl_rank.currentRow()
+        if prev_row >= 0:
+            prev_code = self._extract_code_from_table(self.tbl_rank, prev_row)
 
         manual_set = set()
         if hasattr(self, "detector_dialog") and self.detector_dialog and hasattr(self.detector_dialog, "manual_codes"):
@@ -1093,8 +1105,17 @@ class IPOCommandRoomDialog(QDialog):
         if sort_col_rank >= 0:
             self.tbl_rank.sortItems(sort_col_rank, sort_order_rank)
 
-        if 0 <= prev_row < self.tbl_rank.rowCount() and not self.tbl_rank.selectedItems():
+        # 【防刷新光标润动】刷新后断开信号再恢复选中，防止数据刷新撤销用户的浏览选中
+        self.tbl_rank.blockSignals(True)
+        if prev_code:
+            # 按代码重新定位选中行（排序后行号可能变）
+            for r in range(self.tbl_rank.rowCount()):
+                if self._extract_code_from_table(self.tbl_rank, r) == prev_code:
+                    self.tbl_rank.setCurrentCell(r, 0)
+                    break
+        elif not self.tbl_rank.selectedItems() and 0 <= prev_row < self.tbl_rank.rowCount():
             self.tbl_rank.setCurrentCell(prev_row, 0)
+        self.tbl_rank.blockSignals(False)
 
         # ── 2. 刷新实盘持仓组合或历史平仓战绩 ──
         holdings = summary.get("holding_details", [])
@@ -1189,7 +1210,15 @@ class IPOCommandRoomDialog(QDialog):
             # 历史信号日志模式
             self.tbl_orders.setRowCount(len(self._current_signal_logs_list))
             for r, s_log in enumerate(self._current_signal_logs_list):
-                ts_str = s_log.get("timestamp", "--")
+                # 优先用 time_str（可读时间字符串），如不存在再尝试转换 timestamp float
+                ts_str = s_log.get("time_str", "")
+                if not ts_str:
+                    ts_raw = s_log.get("timestamp", "")
+                    try:
+                        import time as _time
+                        ts_str = _time.strftime("%Y-%m-%d %H:%M:%S", _time.localtime(float(ts_raw)))
+                    except Exception:
+                        ts_str = str(ts_raw)
                 if " " in ts_str:
                     ts_str = ts_str.split(" ", 1)[1]  # 仅保留时分秒更紧凑
                 self.tbl_orders.setItem(r, 0, QTableWidgetItem(ts_str))
@@ -1221,3 +1250,24 @@ class IPOCommandRoomDialog(QDialog):
         self.tbl_orders.setSortingEnabled(True)
         if sort_col_orders >= 0:
             self.tbl_orders.sortItems(sort_col_orders, sort_order_orders)
+
+    def eventFilter(self, obj, event):
+        """【领头羊标签点击联动】拦截 lbl_leader 鼠标点击，定位龙头股并联动通达信"""
+        if obj is getattr(self, "lbl_leader", None):
+            if event.type() == QEvent.Type.MouseButtonPress:
+                code = getattr(self, "_top_leader_code", "")
+                if code and code != "--":
+                    # 直接利用现有联动机制：在赛马天梯表中定位该股并触发联动
+                    self._last_linkage_code = ""  # 清除防抖去重，强制执行
+                    self._pending_code = code
+                    self._linkage_timer.start(10)
+                    # 同时在赛马天梯表中定位高亮
+                    for r in range(self.tbl_rank.rowCount()):
+                        if self._extract_code_from_table(self.tbl_rank, r) == code:
+                            self.tbl_rank.blockSignals(True)
+                            self.tbl_rank.setCurrentCell(r, 0)
+                            self.tbl_rank.scrollToItem(self.tbl_rank.item(r, 0))
+                            self.tbl_rank.blockSignals(False)
+                            break
+                return True
+        return super().eventFilter(obj, event)
