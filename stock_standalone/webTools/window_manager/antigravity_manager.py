@@ -208,8 +208,9 @@ def get_current_account(db_path: str = None) -> dict:
                 detail["source_db"] = p
                 detail["summary"] = f"{detail.get('name', '')} ({detail.get('email', '')})".strip()
                 detail["masked_email"] = mask_email(detail.get("email", ""))
+                detail["masked_summary"] = f"{detail.get('name', '')} <{detail['masked_email']}>".strip()
                 return detail
-    return {"email": "", "name": "", "summary": "未登录/无有效账户", "masked_email": "", "source_db": ""}
+    return {"email": "", "name": "", "summary": "未登录/无有效账户", "masked_email": "", "masked_summary": "未登录/无有效账户", "source_db": ""}
 
 
 def list_accounts(accounts_dir: str = ACCOUNTS_DIR) -> list:
@@ -246,6 +247,7 @@ def list_accounts(accounts_dir: str = ACCOUNTS_DIR) -> list:
                 "name": name,
                 "summary": f"{name} ({email})",
                 "masked_email": mask_email(email),
+                "masked_summary": f"{name} <{mask_email(email)}>",
                 "file_path": fpath,
                 "filename": fname,
                 "mtime": mtime,
@@ -399,7 +401,7 @@ def switch_account(target: str, accounts_dir: str = ACCOUNTS_DIR, auto_sync: boo
         if os.path.exists(backup_db):
             write_db_data(backup_db, keys_to_write)
 
-    user_summary = matched["summary"]
+    user_summary = matched.get("masked_summary") or f"{matched['name']} <{matched.get('masked_email') or mask_email(matched['email'])}>"
     logger.info(f"✅ 成功切换至账户: {user_summary} (写入项: 源={count_old}, 目标={count_new})")
 
     if auto_sync:
@@ -539,3 +541,309 @@ class AntigravitySyncWorker(threading.Thread):
                 self._stop_event.wait(2.0)
 
         logger.info("[AntigravitySyncWorker] 守护线程已退出")
+
+
+# ==========================================
+# ⚡ 额度 (Quota) 与重置时间极速探测核心引擎
+# ==========================================
+
+def format_time_until_reset(iso_time_str: str) -> tuple:
+    """
+    解析 ISO 格式重置时间，返回 (剩余秒数, 人类可读倒计时描述)
+    例如: (14400.0, "4小时0分后重置")
+    """
+    if not iso_time_str:
+        return 0.0, "未知"
+    try:
+        clean_str = iso_time_str.strip().replace("Z", "+00:00")
+        if "+" in clean_str or clean_str.count("-") >= 3:
+            dt = datetime.fromisoformat(clean_str)
+        else:
+            # 默认按 UTC
+            dt = datetime.strptime(clean_str, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=datetime.timezone.utc if hasattr(datetime, 'timezone') else None)
+        
+        # 计算距离当前的秒数
+        now_ts = datetime.now(dt.tzinfo).timestamp() if dt.tzinfo else time.time()
+        diff_sec = dt.timestamp() - now_ts
+        if diff_sec <= 0:
+            return 0.0, "已重置/已就绪"
+        
+        hours = int(diff_sec // 3600)
+        minutes = int((diff_sec % 3600) // 60)
+        seconds = int(diff_sec % 60)
+        days = int(hours // 24)
+
+        if days > 0:
+            return diff_sec, f"{days}天{hours % 24}小时后"
+        elif hours > 0:
+            return diff_sec, f"{hours}小时{minutes}分后"
+        elif minutes > 0:
+            return diff_sec, f"{minutes}分{seconds}秒后"
+        else:
+            return diff_sec, f"{seconds}秒后"
+    except Exception as e:
+        logger.debug(f"解析重置时间异常 ({iso_time_str}): {e}")
+        return 0.0, str(iso_time_str)
+
+
+def categorize_model_label(label: str) -> str:
+    """将复杂/复合模型标签标准化归入用户核心四大类"""
+    l = (label or "").lower()
+    if "claude" in l or "sonnet" in l or "opus" in l:
+        return "Claude"
+    elif "flash" in l:
+        return "Gemini Flash"
+    elif "pro" in l or "gemini" in l:
+        return "Gemini Pro"
+    elif "gpt" in l or "oss" in l:
+        return "GPT-OSS"
+    else:
+        return "其他模型"
+
+
+def fetch_antigravity_quotas(timeout: float = 0.8) -> dict:
+    """
+    【极速探针】：通过本地 Connect-RPC 探测运行中的 LanguageServer，
+    秒级拉取当前活跃账户全部 AI 模型真实配额与精确重置时间。
+    通常仅需 10 ~ 30 毫秒即可返回。
+    """
+    import urllib.request
+    import ssl
+    import subprocess
+    t0 = time.time()
+
+    curr_acc = get_current_account()
+    curr_email = curr_acc.get("email", "")
+
+    # 1. 搜寻系统中所有运行中的 language_server 进程及其 csrf_token
+    pids_tokens = []
+    try:
+        import psutil
+        for p in psutil.process_iter(['pid', 'name', 'cmdline']):
+            try:
+                pname = (p.info['name'] or '').lower()
+                if 'language_server' in pname:
+                    pid = p.info['pid']
+                    cmd = p.info['cmdline'] or []
+                    csrf = None
+                    for i, c in enumerate(cmd):
+                        if c == '--csrf_token' and i + 1 < len(cmd):
+                            csrf = cmd[i + 1]
+                        elif c.startswith('--csrf_token='):
+                            csrf = c.split('=', 1)[1]
+                    if csrf:
+                        pids_tokens.append((pid, csrf))
+            except Exception:
+                pass
+    except Exception as e:
+        logger.debug(f"psutil 检测进程异常: {e}")
+
+    if not pids_tokens:
+        return {
+            "success": False,
+            "mode": "not_running",
+            "error": "未检测到运行中的 Antigravity IDE 语言服务器进程",
+            "account_email": curr_email,
+            "latency_ms": int((time.time() - t0) * 1000),
+            "groups": {},
+            "models": []
+        }
+
+    # 2. 获取监听端口 (通过 netstat 查找 LISTENING)
+    pid_ports = {}
+    try:
+        out = subprocess.check_output('netstat -ano', shell=True, text=True, errors='ignore')
+        for line in out.splitlines():
+            if 'LISTENING' in line:
+                parts = line.strip().split()
+                if len(parts) >= 5:
+                    addr = parts[1]
+                    p_id = parts[-1]
+                    if ':' in addr:
+                        try:
+                            port = int(addr.split(':')[-1])
+                            pid_ports.setdefault(p_id, []).append(port)
+                        except ValueError:
+                            pass
+    except Exception as e:
+        logger.debug(f"netstat 端口获取异常: {e}")
+
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+
+    raw_configs = None
+    target_pid = None
+    target_port = None
+
+    # 3. 逐个尝试向本地端口发送 GetUserStatus / GetCommandModelConfigs 请求
+    for pid, csrf in pids_tokens:
+        ports = pid_ports.get(str(pid), [])
+        for port in ports:
+            for proto in ['https', 'http']:
+                url = f"{proto}://127.0.0.1:{port}/exa.language_server_pb.LanguageServerService/GetUserStatus"
+                req = urllib.request.Request(
+                    url,
+                    data=json.dumps({'metadata': {'ideName': 'antigravity', 'extensionName': 'antigravity', 'locale': 'en'}}).encode('utf-8'),
+                    headers={
+                        'Content-Type': 'application/json',
+                        'Connect-Protocol-Version': '1',
+                        'X-Codeium-Csrf-Token': csrf
+                    }
+                )
+                try:
+                    resp = urllib.request.urlopen(req, context=ctx, timeout=timeout)
+                    data = json.loads(resp.read().decode('utf-8'))
+                    if 'userStatus' in data:
+                        raw_configs = data['userStatus'].get('cascadeModelConfigData', {}).get('clientModelConfigs', [])
+                    elif 'clientModelConfigs' in data:
+                        raw_configs = data.get('clientModelConfigs', [])
+                    if raw_configs:
+                        target_pid = pid
+                        target_port = port
+                        break
+                except Exception:
+                    pass
+            if raw_configs:
+                break
+        if raw_configs:
+            break
+
+    latency_ms = int((time.time() - t0) * 1000)
+
+    if not raw_configs:
+        return {
+            "success": False,
+            "mode": "unreachable",
+            "error": "本地语言服务器未响应配额数据",
+            "account_email": curr_email,
+            "latency_ms": latency_ms,
+            "groups": {},
+            "models": []
+        }
+
+    # 4. 解析各模型配额与聚合
+    parsed_models = []
+    groups = {
+        "Claude": {"remaining_fraction": 1.0, "remaining_pct": 100.0, "reset_time": "", "reset_desc": "未知", "models": []},
+        "Gemini Pro": {"remaining_fraction": 1.0, "remaining_pct": 100.0, "reset_time": "", "reset_desc": "未知", "models": []},
+        "Gemini Flash": {"remaining_fraction": 1.0, "remaining_pct": 100.0, "reset_time": "", "reset_desc": "未知", "models": []},
+        "GPT-OSS": {"remaining_fraction": 1.0, "remaining_pct": 100.0, "reset_time": "", "reset_desc": "未知", "models": []},
+    }
+
+    for item in raw_configs:
+        q_info = item.get('quotaInfo')
+        label = item.get('label') or item.get('modelOrAlias', {}).get('model') or 'Unknown'
+        if not q_info:
+            continue
+        
+        rem_frac = q_info.get('remainingFraction')
+        rem_frac = float(rem_frac) if rem_frac is not None else 0.0
+        rem_pct = round(rem_frac * 100.0, 1)
+        reset_iso = q_info.get('resetTime', '')
+        diff_sec, reset_desc = format_time_until_reset(reset_iso)
+
+        model_entry = {
+            "label": label,
+            "remaining_fraction": rem_frac,
+            "remaining_pct": rem_pct,
+            "reset_time": reset_iso,
+            "reset_desc": reset_desc,
+            "diff_sec": diff_sec
+        }
+        parsed_models.append(model_entry)
+
+        cat = categorize_model_label(label)
+        if cat in groups:
+            grp = groups[cat]
+            grp["models"].append(model_entry)
+            # 聚合组采用具有代表性的最小值（最快耗尽）或主流型号指标
+            if len(grp["models"]) == 1 or rem_frac < grp["remaining_fraction"]:
+                grp["remaining_fraction"] = rem_frac
+                grp["remaining_pct"] = rem_pct
+                grp["reset_time"] = reset_iso
+                grp["reset_desc"] = reset_desc
+
+    # 保存进本地配额缓存，供多账户卡片离线快速预览
+    if curr_email:
+        save_cached_quota(curr_email, groups)
+
+    return {
+        "success": True,
+        "mode": "live",
+        "error": None,
+        "account_email": curr_email,
+        "target_pid": target_pid,
+        "target_port": target_port,
+        "latency_ms": latency_ms,
+        "groups": groups,
+        "models": parsed_models
+    }
+
+
+QUOTA_CACHE_FILE = os.path.join(ACCOUNTS_DIR, ".quota_cache.json")
+
+def get_cached_quotas(cache_file: str = None) -> dict:
+    """读取所有账户历史配额快照缓存"""
+    f = cache_file or QUOTA_CACHE_FILE
+    if not os.path.exists(f):
+        return {}
+    try:
+        with open(f, "r", encoding="utf-8") as fp:
+            return json.load(fp)
+    except Exception as e:
+        logger.debug(f"读取配额缓存失败: {e}")
+        return {}
+
+
+def save_cached_quota(email: str, groups: dict, cache_file: str = None):
+    """持久化缓存特定账户的配额快照"""
+    if not email:
+        return
+    f = cache_file or QUOTA_CACHE_FILE
+    try:
+        os.makedirs(os.path.dirname(f), exist_ok=True)
+        cache = get_cached_quotas(f)
+        cache[email.lower()] = {
+            "groups": groups,
+            "updated_at": time.time(),
+            "updated_at_str": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        }
+        temp_file = f + f".tmp_{int(time.time() * 1000)}"
+        with open(temp_file, "w", encoding="utf-8") as fp:
+            json.dump(cache, fp, indent=2, ensure_ascii=False)
+        os.replace(temp_file, f)
+    except Exception as e:
+        logger.debug(f"保存配额缓存异常: {e}")
+
+
+
+def delete_account(target_email_or_file: str, accounts_dir: str = ACCOUNTS_DIR) -> tuple:
+    """
+    安全删除本地账户备份文件（备份并重命名为 .bak）
+    """
+    all_accs = list_accounts(accounts_dir)
+    matched = None
+    target_clean = target_email_or_file.strip().lower()
+
+    for acc in all_accs:
+        if os.path.normpath(acc["file_path"]).lower() == os.path.normpath(target_email_or_file).lower():
+            matched = acc
+            break
+        if acc["email"].lower() == target_clean or acc["filename"].lower() == target_clean:
+            matched = acc
+            break
+
+    if not matched:
+        return False, f"未找到账户文件: {target_email_or_file}"
+
+    fpath = matched["file_path"]
+    try:
+        bak_path = fpath + ".bak"
+        if os.path.exists(bak_path):
+            os.remove(bak_path)
+        os.rename(fpath, bak_path)
+        return True, f"已安全移除账户备份: {matched['email']}"
+    except Exception as e:
+        return False, f"删除账户失败: {e}"
+

@@ -52,11 +52,18 @@ from .antigravity_manager import (
     switch_account as switch_antigravity_account,
     do_sync as sync_antigravity_ide,
     open_accounts_directory as open_antigravity_accounts_directory,
+    fetch_antigravity_quotas,
+    format_time_until_reset,
+    get_cached_quotas,
+    save_cached_quota,
+    delete_account as delete_antigravity_account,
     AntigravitySyncWorker
 )
 
 from .ui import (
     WindowPosManagerUI,
+    RouteConfigDialog,
+    AcerPerformanceDialog,
     main as run_ui
 )
 
@@ -104,6 +111,8 @@ __all__ = [
     'open_antigravity_accounts_directory',
     'AntigravitySyncWorker',
     'WindowPosManagerUI',
+    'RouteConfigDialog',
+    'AcerPerformanceDialog',
     'run_ui'
 ]
 
