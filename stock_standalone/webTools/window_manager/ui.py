@@ -19,7 +19,7 @@ from PyQt6.QtWidgets import (
     QHeaderView, QMessageBox, QInputDialog, QDialog, QListWidget,
     QListWidgetItem, QTextEdit, QGroupBox, QLineEdit, QMenu, QSystemTrayIcon,
     QSizePolicy, QTabWidget, QCheckBox, QRadioButton, QButtonGroup, QAbstractItemView,
-    QSpinBox, QDoubleSpinBox, QFileDialog
+    QSpinBox, QDoubleSpinBox, QFileDialog, QProgressBar, QGridLayout, QFrame, QScrollArea
 )
 from PyQt6.QtGui import QAction, QIcon, QColor, QBrush, QPen, QFont, QPainter, QLinearGradient
 
@@ -397,7 +397,9 @@ class FlowLayout(QtWidgets.QLayout):
                     apply_offset_to_all = False  # 确保整行偏移只在起点加一次
 
                 if not test_only:
-                    item.setGeometry(QtCore.QRect(QtCore.QPoint(curr_x, y), item.sizeHint()))
+                    item_h = item.sizeHint().height()
+                    item_y = y + max(0, (row_height - item_h) // 2)
+                    item.setGeometry(QtCore.QRect(QtCore.QPoint(curr_x, item_y), QtCore.QSize(item.sizeHint().width(), item_h)))
 
                 curr_x += item.sizeHint().width() + space_x
 
@@ -1307,129 +1309,8 @@ class RouteConfigDialog(QDialog):
         # 加载初始关键字列表
         self._load_magnetic_keywords()
 
-        # ==========================================
-        # Tab 3: 🚀 Acer 性能与风扇控制
-        # ==========================================
-        tab_acer = QWidget()
-        acer_layout = QVBoxLayout(tab_acer)
-        acer_layout.setSpacing(12)
-
-        self.acer_controller = core.AcerPerformanceController()
-        status = self.acer_controller.get_current_status()
-        is_supported = status.get("supported", False)
-
-        # 硬件支持 Badge 指示
-        lbl_badge = QLabel()
-        if is_supported:
-            lbl_badge.setText("✅ 已检测到 Acer 硬件控制驱动 (WMI 支持已就绪)")
-            lbl_badge.setStyleSheet("color: #10b981; font-weight: bold; font-size: 13px;")
-        else:
-            lbl_badge.setText("⚠️ 未检测到 Acer WMI 接口 (非 Acer 设备或缺少 PredatorSense 服务)")
-            lbl_badge.setStyleSheet("color: #f59e0b; font-weight: bold; font-size: 12px;")
-        acer_layout.addWidget(lbl_badge)
-
-        # 读取保存的配置
-        acer_cfg = self.config_manager.get_acer_performance_config()
-
-        # 1. 超频模式分组框
-        grp_oc = QGroupBox("超频模式 (Overclocking Mode)")
-        oc_layout = QHBoxLayout(grp_oc)
-        self.rad_oc_default = QtWidgets.QRadioButton("普通 / 默认 (Default)")
-        self.rad_oc_fast = QtWidgets.QRadioButton("⚡ 快速 (Fast)")
-        self.rad_oc_extreme = QtWidgets.QRadioButton("🔥 极速 (Extreme)")
-
-        oc_mode_saved = str(acer_cfg.get("overclock_mode", "Fast")).upper()
-        if oc_mode_saved in ["DEFAULT", "NORMAL", "0"]:
-            self.rad_oc_default.setChecked(True)
-        elif oc_mode_saved in ["EXTREME", "2"]:
-            self.rad_oc_extreme.setChecked(True)
-        else:
-            self.rad_oc_fast.setChecked(True)
-
-        oc_layout.addWidget(self.rad_oc_default)
-        oc_layout.addWidget(self.rad_oc_fast)
-        oc_layout.addWidget(self.rad_oc_extreme)
-        acer_layout.addWidget(grp_oc)
-
-        # 2. 风扇与 CoolBoost 分组框
-        grp_fan = QGroupBox("散热与风扇控制 (Fan & CoolBoost)")
-        fan_layout = QVBoxLayout(grp_fan)
-        
-        self.chk_coolboost = QCheckBox("开启 CoolBoost™ 动态加压散热辅助")
-        self.chk_coolboost.setChecked(acer_cfg.get("coolboost", True))
-        fan_layout.addWidget(self.chk_coolboost)
-
-        row_fan_mode = QHBoxLayout()
-        row_fan_mode.addWidget(QLabel("风扇转速模式: "))
-        self.rad_fan_auto = QtWidgets.QRadioButton("自动 (Auto)")
-        self.rad_fan_max = QtWidgets.QRadioButton("最大 (Max)")
-        self.rad_fan_custom = QtWidgets.QRadioButton("自定义 (Custom)")
-        
-        fan_mode_saved = str(acer_cfg.get("fan_mode", "Auto")).upper()
-        if fan_mode_saved in ["MAX", "1"]:
-            self.rad_fan_max.setChecked(True)
-        elif fan_mode_saved in ["CUSTOM", "2"]:
-            self.rad_fan_custom.setChecked(True)
-        else:
-            self.rad_fan_auto.setChecked(True)
-
-        row_fan_mode.addWidget(self.rad_fan_auto)
-        row_fan_mode.addWidget(self.rad_fan_max)
-        row_fan_mode.addWidget(self.rad_fan_custom)
-        row_fan_mode.addStretch()
-        fan_layout.addLayout(row_fan_mode)
-        acer_layout.addWidget(grp_fan)
-
-        # 3. 完成后的窗口处理方式 (Post Action Mode)
-        grp_post = QGroupBox("执行完成后控制面板处理方式")
-        post_layout = QHBoxLayout(grp_post)
-        self.rad_post_hide = QtWidgets.QRadioButton("🙈 静默隐藏至后台 (Hide，推荐)")
-        self.rad_post_close = QtWidgets.QRadioButton("❌ 关闭控制窗口 (Close，测试唤起)")
-        self.rad_post_kill = QtWidgets.QRadioButton("💀 彻底杀掉前台进程 (Kill，测试冷启动)")
-
-        post_action_saved = str(acer_cfg.get("post_action", "hide")).lower()
-        if post_action_saved in ["close", "关闭"]:
-            self.rad_post_close.setChecked(True)
-        elif post_action_saved in ["kill", "杀掉"]:
-            self.rad_post_kill.setChecked(True)
-        else:
-            self.rad_post_hide.setChecked(True)
-
-        post_layout.addWidget(self.rad_post_hide)
-        post_layout.addWidget(self.rad_post_close)
-        post_layout.addWidget(self.rad_post_kill)
-        post_layout.addStretch()
-        acer_layout.addWidget(grp_post)
-
-        # 4. 自动化开机/启动设置 (带秒数微调)
-        row_autostart = QHBoxLayout()
-        self.chk_acer_autostart = QCheckBox(" 开启 Windows 开机自启动 (开机登录后在后台托盘静默运行，全局唯一)")
-        self.chk_acer_autostart.setChecked(core.is_autostart_enabled_for_current_app())
-        
-        row_autostart.addWidget(self.chk_acer_autostart)
-        row_autostart.addWidget(QLabel("   ⏳ 启动延迟应用: "))
-        
-        self.spn_startup_delay = QtWidgets.QSpinBox()
-        self.spn_startup_delay.setRange(0, 120)
-        self.spn_startup_delay.setValue(int(acer_cfg.get("startup_delay_seconds", 10)))
-        self.spn_startup_delay.setSuffix(" 秒")
-        self.spn_startup_delay.setToolTip("开机启动后静默等待此秒数，待 Windows 后台驱动服务彻底到位后再自动应用设置")
-        
-        row_autostart.addWidget(self.spn_startup_delay)
-        row_autostart.addStretch()
-        acer_layout.addLayout(row_autostart)
-
-        # 5. 立即应用按钮
-        btn_apply_acer = QPushButton("⚡ 立即应用 Acer 性能设置")
-        btn_apply_acer.setObjectName("btnApplyAcer")
-        btn_apply_acer.clicked.connect(self._apply_acer_performance_now)
-        acer_layout.addWidget(btn_apply_acer)
-
-        acer_layout.addStretch()
-        
         self.tab_widget.addTab(tab_route, "🌐 静态路由")
         self.tab_widget.addTab(tab_magnetic, "🧲 磁吸窗口")
-        self.tab_widget.addTab(tab_acer, "🚀 Acer 性能控制")
         layout.addWidget(self.tab_widget)
         
         # 底部确认/取消按钮
@@ -1445,37 +1326,6 @@ class RouteConfigDialog(QDialog):
         btn_layout.addWidget(self.btn_cancel)
         btn_layout.addWidget(self.btn_confirm)
         layout.addLayout(btn_layout)
-
-    def _apply_acer_performance_now(self):
-        selected_oc = "Fast"
-        if self.rad_oc_default.isChecked():
-            selected_oc = "Default"
-        elif self.rad_oc_extreme.isChecked():
-            selected_oc = "Extreme"
-
-        selected_fan = "Auto"
-        if self.rad_fan_max.isChecked():
-            selected_fan = "Max"
-        elif self.rad_fan_custom.isChecked():
-            selected_fan = "Custom"
-
-        selected_post = "hide"
-        if self.rad_post_close.isChecked():
-            selected_post = "close"
-        elif self.rad_post_kill.isChecked():
-            selected_post = "kill"
-
-        profile = {
-            "overclock_mode": selected_oc,
-            "coolboost": self.chk_coolboost.isChecked(),
-            "fan_mode": selected_fan,
-            "post_action": selected_post
-        }
-        success, msg = self.acer_controller.apply_performance_profile(profile, force=True)
-        if success:
-            QMessageBox.information(self, "应用成功", f"Acer 性能模式配置已生效：\n{msg}")
-        else:
-            QMessageBox.warning(self, "应用提示", f"Acer 性能设置结果：\n{msg}")
 
     def _load_magnetic_keywords(self):
         """加载已保存的所有磁吸关键字到 ListWidget"""
@@ -1537,94 +1387,23 @@ class RouteConfigDialog(QDialog):
         new_kws = [self.list_kw.item(i).text() for i in range(self.list_kw.count())]
         self.config_manager.config_data["magnetic_keywords"] = new_kws
 
-        # 3. 保存 Acer 性能模式配置
-        selected_oc = "Fast"
-        if self.rad_oc_default.isChecked():
-            selected_oc = "Default"
-        elif self.rad_oc_extreme.isChecked():
-            selected_oc = "Extreme"
-
-        selected_fan = "Auto"
-        if self.rad_fan_max.isChecked():
-            selected_fan = "Max"
-        elif self.rad_fan_custom.isChecked():
-            selected_fan = "Custom"
-
-        selected_post = "hide"
-        if self.rad_post_close.isChecked():
-            selected_post = "close"
-        elif self.rad_post_kill.isChecked():
-            selected_post = "kill"
-
-        acer_cfg = {
-            "overclock_mode": selected_oc,
-            "coolboost": self.chk_coolboost.isChecked(),
-            "fan_mode": selected_fan,
-            "post_action": selected_post,
-            "auto_apply_on_startup": self.chk_acer_autostart.isChecked(),
-            "startup_delay_seconds": self.spn_startup_delay.value()
-        }
-        self.config_manager.save_acer_performance_config(acer_cfg)
-        
         if self.config_manager.save():
             # 刷新内存中的磁吸关键字缓存
             core._MAGNETIC_KEYWORDS_CACHE = None
             
-            # 1. 设置 Windows 注册表开机自启状态（全局唯一，用户显式确认与更新，严禁启动隐式添加）
-            is_autostart_checked = self.chk_acer_autostart.isChecked()
-            is_currently_autostart = core.is_autostart_enabled_for_current_app()
-            has_existing, existing_cmd = core.get_current_autostart_command()
-            expected_cmd = core.get_autostart_command()
-            
-            auto_ok = True
-            auto_msg = ""
-            if is_autostart_checked:
-                if has_existing and not is_currently_autostart:
-                    reply = QMessageBox.question(
-                        self,
-                        "更新开机自启动路径确认",
-                        f"检测到 Windows 注册表中已存在其他开机自启动路径：\n【已有路径】: {existing_cmd}\n\n"
-                        f"当前程序运行路径为：\n【当前路径】: {expected_cmd}\n\n"
-                        f"整个系统只允许一个 manage_window_layout 开机自启。\n"
-                        f"是否将开机自启动路径更新为当前程序？\n\n"
-                        f"• 点击【是 (Yes)】：覆盖更新为当前程序路径\n"
-                        f"• 点击【否 (No)】：保留原有开机自启路径不修改",
-                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                        QMessageBox.StandardButton.Yes
-                    )
-                    if reply == QMessageBox.StandardButton.Yes:
-                        auto_ok, auto_msg = core.set_autostart_enabled(True)
-                    else:
-                        auto_ok, auto_msg = True, f"保留已有注册表自启路径: {existing_cmd}"
-                else:
-                    auto_ok, auto_msg = core.set_autostart_enabled(True)
-            else:
-                # 用户未勾选当前程序开机自启：
-                # 只有当注册表里配置的确实是当前程序时，才执行删除；若为外部程序路径则保持原样不触碰
-                if is_currently_autostart:
-                    auto_ok, auto_msg = core.set_autostart_enabled(False)
-                else:
-                    auto_ok, auto_msg = True, "当前程序未开启开机自启 (保持系统设置不变)"
-            
-            # 2. 在主窗口日志文本框输出结构化通知
-            autostart_str = "已开启" if is_autostart_checked else "已关闭/已删除"
-            delay_str = f"{self.spn_startup_delay.value()} 秒"
-            
             main_win = getattr(self, 'parent_ui', None) or self.parent()
             if main_win and hasattr(main_win, 'log'):
-                main_win.log(f"🚀 Acer 性能模式配置已保存: 超频={selected_oc}, 风扇={selected_fan}, CoolBoost={self.chk_coolboost.isChecked()}, 处理方式={selected_post}")
-                main_win.log(f"⏳ [AutoStart] {auto_msg} (启动延迟应用: {delay_str})")
+                main_win.log(f"🌐 静态路由与磁吸窗口配置已成功落盘！(路由开启: {self.chk_enabled.isChecked()})")
 
             QMessageBox.information(
                 self, 
                 "保存成功", 
-                f"静态路由、磁吸关键字及 Acer 性能配置已成功落盘！\n\n"
-                f"• 超频模式: {selected_oc}\n"
-                f"• 风扇模式: {selected_fan}\n"
-                f"• 后置处理: {selected_post}\n"
-                f"• 开机后台自启: {autostart_str}\n"
-                f"• 自启路径/日志: {auto_msg}\n"
-                f"• 启动延迟应用: {delay_str}"
+                f"静态路由与磁吸关键字配置已成功落盘！\n\n"
+                f"• 静态路由开启: {'已启用' if self.chk_enabled.isChecked() else '未启用'}\n"
+                f"• 目标网段: {dest}\n"
+                f"• 子网掩码: {mask}\n"
+                f"• 默认网关: {gw}\n"
+                f"• 磁吸关键字数量: {len(new_kws)} 个"
             )
             self.accept()
         else:
@@ -1655,6 +1434,345 @@ class RouteConfigDialog(QDialog):
             QMessageBox.information(self, "检测成功", msg)
         else:
             QMessageBox.warning(self, "检测失败", msg)
+
+
+class AcerPerformanceDialog(QDialog):
+    """
+    Acer 笔记本硬件性能与风扇散热控制中心独立对话框 (免 GUI 驱动 WMI 模式)
+    支持：
+    1. 硬件支持与驱动就绪状态实时检测指示
+    2. 超频模式极速切换 (Default / Fast / Extreme)
+    3. CoolBoost 动态加压与风扇转速 (Auto / Max / Custom)
+    4. 执行完成后控制面板处理方式 (Hide / Close / Kill)
+    5. 开机自启静默应用与延迟应用秒数微调
+    6. ⚡ 立即下发应用与保存配置落盘
+    """
+    def __init__(self, config_manager, parent=None):
+        super().__init__(parent)
+        self.config_manager = config_manager
+        self.parent_ui = parent
+        self.setWindowTitle("🚀 Acer 笔记本性能与散热控制中心")
+        self.resize(520, 480)
+        self.init_ui()
+
+    def init_ui(self):
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #1e1e24;
+                color: #e0e0e0;
+                font-family: 'Segoe UI', 'Microsoft YaHei';
+            }
+            QGroupBox {
+                font-weight: bold;
+                border: 1px solid #3a3a42;
+                border-radius: 6px;
+                margin-top: 10px;
+                padding-top: 12px;
+                color: #61afef;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                subcontrol-position: top left;
+                padding: 0 6px;
+            }
+            QLabel {
+                color: #e0e0e0;
+                font-size: 13px;
+            }
+            QRadioButton {
+                color: #e0e0e0;
+                font-size: 12px;
+                spacing: 6px;
+            }
+            QCheckBox {
+                color: #e0e0e0;
+                font-size: 12px;
+                spacing: 6px;
+            }
+            QSpinBox {
+                background-color: #15151a;
+                border: 1px solid #3a3a42;
+                border-radius: 4px;
+                color: #ffffff;
+                padding: 4px 8px;
+            }
+            QPushButton {
+                background-color: #2e2e38;
+                border: 1px solid #4a4a56;
+                border-radius: 4px;
+                color: #ffffff;
+                padding: 6px 14px;
+            }
+            QPushButton:hover {
+                background-color: #3e3e4a;
+            }
+            QPushButton#btnApplyNow {
+                background-color: #d97706;
+                border: none;
+                font-weight: bold;
+                font-size: 13px;
+                padding: 8px;
+            }
+            QPushButton#btnApplyNow:hover {
+                background-color: #b45309;
+            }
+            QPushButton#btnConfirm {
+                background-color: #0ea5e9;
+                border: none;
+                font-weight: bold;
+            }
+            QPushButton#btnConfirm:hover {
+                background-color: #0284c7;
+            }
+        """)
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(12)
+
+        self.acer_controller = core.AcerPerformanceController()
+        status = self.acer_controller.get_current_status()
+        is_supported = status.get("supported", False)
+
+        # 硬件支持 Badge 指示
+        lbl_badge = QLabel()
+        if is_supported:
+            lbl_badge.setText("✅ 已检测到 Acer 硬件控制驱动 (WMI 支持已就绪)")
+            lbl_badge.setStyleSheet("color: #10b981; font-weight: bold; font-size: 13px;")
+        else:
+            lbl_badge.setText("⚠️ 未检测到 Acer WMI 接口 (非 Acer 设备或缺少 PredatorSense 服务)")
+            lbl_badge.setStyleSheet("color: #f59e0b; font-weight: bold; font-size: 12px;")
+        layout.addWidget(lbl_badge)
+
+        # 读取保存的配置
+        acer_cfg = self.config_manager.get_acer_performance_config()
+
+        # 1. 超频模式分组框
+        grp_oc = QGroupBox("超频模式 (Overclocking Mode)")
+        oc_layout = QHBoxLayout(grp_oc)
+        self.rad_oc_default = QtWidgets.QRadioButton("普通 / 默认 (Default)")
+        self.rad_oc_fast = QtWidgets.QRadioButton("⚡ 快速 (Fast)")
+        self.rad_oc_extreme = QtWidgets.QRadioButton("🔥 极速 (Extreme)")
+
+        oc_mode_saved = str(acer_cfg.get("overclock_mode", "Fast")).upper()
+        if oc_mode_saved in ["DEFAULT", "NORMAL", "0"]:
+            self.rad_oc_default.setChecked(True)
+        elif oc_mode_saved in ["EXTREME", "2"]:
+            self.rad_oc_extreme.setChecked(True)
+        else:
+            self.rad_oc_fast.setChecked(True)
+
+        oc_layout.addWidget(self.rad_oc_default)
+        oc_layout.addWidget(self.rad_oc_fast)
+        oc_layout.addWidget(self.rad_oc_extreme)
+        layout.addWidget(grp_oc)
+
+        # 2. 风扇与 CoolBoost 分组框
+        grp_fan = QGroupBox("散热与风扇控制 (Fan & CoolBoost)")
+        fan_layout = QVBoxLayout(grp_fan)
+        
+        self.chk_coolboost = QCheckBox("开启 CoolBoost™ 动态加压散热辅助")
+        self.chk_coolboost.setChecked(acer_cfg.get("coolboost", True))
+        fan_layout.addWidget(self.chk_coolboost)
+
+        row_fan_mode = QHBoxLayout()
+        row_fan_mode.addWidget(QLabel("风扇转速模式: "))
+        self.rad_fan_auto = QtWidgets.QRadioButton("自动 (Auto)")
+        self.rad_fan_max = QtWidgets.QRadioButton("最大 (Max)")
+        self.rad_fan_custom = QtWidgets.QRadioButton("自定义 (Custom)")
+        
+        fan_mode_saved = str(acer_cfg.get("fan_mode", "Auto")).upper()
+        if fan_mode_saved in ["MAX", "1"]:
+            self.rad_fan_max.setChecked(True)
+        elif fan_mode_saved in ["CUSTOM", "2"]:
+            self.rad_fan_custom.setChecked(True)
+        else:
+            self.rad_fan_auto.setChecked(True)
+
+        row_fan_mode.addWidget(self.rad_fan_auto)
+        row_fan_mode.addWidget(self.rad_fan_max)
+        row_fan_mode.addWidget(self.rad_fan_custom)
+        row_fan_mode.addStretch()
+        fan_layout.addLayout(row_fan_mode)
+        layout.addWidget(grp_fan)
+
+        # 3. 完成后的窗口处理方式 (Post Action Mode)
+        grp_post = QGroupBox("执行完成后控制面板处理方式")
+        post_layout = QHBoxLayout(grp_post)
+        self.rad_post_hide = QtWidgets.QRadioButton("🙈 静默隐藏至后台 (Hide，推荐)")
+        self.rad_post_close = QtWidgets.QRadioButton("❌ 关闭控制窗口 (Close，测试唤起)")
+        self.rad_post_kill = QtWidgets.QRadioButton("💀 彻底杀掉前台进程 (Kill，测试冷启动)")
+
+        post_action_saved = str(acer_cfg.get("post_action", "hide")).lower()
+        if post_action_saved in ["close", "关闭"]:
+            self.rad_post_close.setChecked(True)
+        elif post_action_saved in ["kill", "杀掉"]:
+            self.rad_post_kill.setChecked(True)
+        else:
+            self.rad_post_hide.setChecked(True)
+
+        post_layout.addWidget(self.rad_post_hide)
+        post_layout.addWidget(self.rad_post_close)
+        post_layout.addWidget(self.rad_post_kill)
+        post_layout.addStretch()
+        layout.addWidget(grp_post)
+
+        # 4. 自动化开机/启动设置 (带秒数微调)
+        row_autostart = QHBoxLayout()
+        self.chk_acer_autostart = QCheckBox(" 开启 Windows 开机自启动 (开机登录后在后台托盘静默运行，全局唯一)")
+        self.chk_acer_autostart.setChecked(core.is_autostart_enabled_for_current_app())
+        
+        row_autostart.addWidget(self.chk_acer_autostart)
+        row_autostart.addWidget(QLabel("   ⏳ 启动延迟应用: "))
+        
+        self.spn_startup_delay = QtWidgets.QSpinBox()
+        self.spn_startup_delay.setRange(0, 120)
+        self.spn_startup_delay.setValue(int(acer_cfg.get("startup_delay_seconds", 10)))
+        self.spn_startup_delay.setSuffix(" 秒")
+        self.spn_startup_delay.setToolTip("开机启动后静默等待此秒数，待 Windows 后台驱动服务彻底到位后再自动应用设置")
+        
+        row_autostart.addWidget(self.spn_startup_delay)
+        row_autostart.addStretch()
+        layout.addLayout(row_autostart)
+
+        # 5. 立即应用按钮
+        btn_apply_acer = QPushButton("⚡ 立即应用 Acer 性能设置")
+        btn_apply_acer.setObjectName("btnApplyNow")
+        btn_apply_acer.clicked.connect(self._apply_acer_performance_now)
+        layout.addWidget(btn_apply_acer)
+
+        layout.addStretch()
+
+        # 底部确认/取消按钮
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+        
+        self.btn_cancel = QPushButton("取消")
+        self.btn_cancel.clicked.connect(self.reject)
+        self.btn_confirm = QPushButton("💾 保存设置")
+        self.btn_confirm.setObjectName("btnConfirm")
+        self.btn_confirm.clicked.connect(self.save_settings)
+        
+        btn_layout.addWidget(self.btn_cancel)
+        btn_layout.addWidget(self.btn_confirm)
+        layout.addLayout(btn_layout)
+
+    def _apply_acer_performance_now(self):
+        selected_oc = "Fast"
+        if self.rad_oc_default.isChecked():
+            selected_oc = "Default"
+        elif self.rad_oc_extreme.isChecked():
+            selected_oc = "Extreme"
+
+        selected_fan = "Auto"
+        if self.rad_fan_max.isChecked():
+            selected_fan = "Max"
+        elif self.rad_fan_custom.isChecked():
+            selected_fan = "Custom"
+
+        selected_post = "hide"
+        if self.rad_post_close.isChecked():
+            selected_post = "close"
+        elif self.rad_post_kill.isChecked():
+            selected_post = "kill"
+
+        profile = {
+            "overclock_mode": selected_oc,
+            "coolboost": self.chk_coolboost.isChecked(),
+            "fan_mode": selected_fan,
+            "post_action": selected_post
+        }
+        success, msg = self.acer_controller.apply_performance_profile(profile, force=True)
+        if success:
+            QMessageBox.information(self, "应用成功", f"Acer 性能模式配置已生效：\n{msg}")
+        else:
+            QMessageBox.warning(self, "应用提示", f"Acer 性能设置结果：\n{msg}")
+
+    def save_settings(self):
+        selected_oc = "Fast"
+        if self.rad_oc_default.isChecked():
+            selected_oc = "Default"
+        elif self.rad_oc_extreme.isChecked():
+            selected_oc = "Extreme"
+
+        selected_fan = "Auto"
+        if self.rad_fan_max.isChecked():
+            selected_fan = "Max"
+        elif self.rad_fan_custom.isChecked():
+            selected_fan = "Custom"
+
+        selected_post = "hide"
+        if self.rad_post_close.isChecked():
+            selected_post = "close"
+        elif self.rad_post_kill.isChecked():
+            selected_post = "kill"
+
+        acer_cfg = {
+            "overclock_mode": selected_oc,
+            "coolboost": self.chk_coolboost.isChecked(),
+            "fan_mode": selected_fan,
+            "post_action": selected_post,
+            "auto_apply_on_startup": self.chk_acer_autostart.isChecked(),
+            "startup_delay_seconds": self.spn_startup_delay.value()
+        }
+        self.config_manager.save_acer_performance_config(acer_cfg)
+
+        if self.config_manager.save():
+            # 1. 设置 Windows 注册表开机自启状态（全局唯一，用户显式确认与更新，严禁启动隐式添加）
+            is_autostart_checked = self.chk_acer_autostart.isChecked()
+            is_currently_autostart = core.is_autostart_enabled_for_current_app()
+            has_existing, existing_cmd = core.get_current_autostart_command()
+            expected_cmd = core.get_autostart_command()
+            
+            auto_ok = True
+            auto_msg = ""
+            if is_autostart_checked:
+                if has_existing and not is_currently_autostart:
+                    reply = QMessageBox.question(
+                        self,
+                        "更新开机自启动路径确认",
+                        f"检测到 Windows 注册表中已存在其他开机自启动路径：\n【已有路径】: {existing_cmd}\n\n"
+                        f"当前程序运行路径为：\n【当前路径】: {expected_cmd}\n\n"
+                        f"整个系统只允许一个 manage_window_layout 开机自启。\n"
+                        f"是否将开机自启动路径更新为当前程序？\n\n"
+                        f"• 点击【是 (Yes)】：覆盖更新为当前程序路径\n"
+                        f"• 点击【否 (No)】：保留原有开机自启路径不修改",
+                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                        QMessageBox.StandardButton.Yes
+                    )
+                    if reply == QMessageBox.StandardButton.Yes:
+                        auto_ok, auto_msg = core.set_autostart_enabled(True)
+                    else:
+                        auto_ok, auto_msg = True, f"保留已有注册表自启路径: {existing_cmd}"
+                else:
+                    auto_ok, auto_msg = core.set_autostart_enabled(True)
+            else:
+                if is_currently_autostart:
+                    auto_ok, auto_msg = core.set_autostart_enabled(False)
+                else:
+                    auto_ok, auto_msg = True, "当前程序未开启开机自启 (保持系统设置不变)"
+            
+            autostart_str = "已开启" if is_autostart_checked else "已关闭/已删除"
+            delay_str = f"{self.spn_startup_delay.value()} 秒"
+            
+            main_win = getattr(self, 'parent_ui', None) or self.parent()
+            if main_win and hasattr(main_win, 'log'):
+                main_win.log(f"🚀 Acer 性能模式配置已保存: 超频={selected_oc}, 风扇={selected_fan}, CoolBoost={self.chk_coolboost.isChecked()}, 处理方式={selected_post}")
+                main_win.log(f"⏳ [AutoStart] {auto_msg} (启动延迟应用: {delay_str})")
+
+            QMessageBox.information(
+                self, 
+                "保存成功", 
+                f"Acer 硬件性能与散热配置已成功落盘！\n\n"
+                f"• 超频模式: {selected_oc}\n"
+                f"• 风扇模式: {selected_fan}\n"
+                f"• 后置处理: {selected_post}\n"
+                f"• 开机后台自启: {autostart_str}\n"
+                f"• 自启路径/日志: {auto_msg}\n"
+                f"• 启动延迟应用: {delay_str}"
+            )
+            self.accept()
+        else:
+            QMessageBox.critical(self, "错误", "配置文件写盘失败，请检查文件写权限！")
 
 
 class RamDiskSyncDialog(QDialog):
@@ -2706,6 +2824,538 @@ class ManagerHotkeyThread(threading.Thread):
         self._running = False
 
 
+# ==============================================================================
+# 🚀 Antigravity 账户极速管理与 AI 配额监控对话框 (Qt 弹窗)
+# ==============================================================================
+
+class QuotaFetchWorker(QtCore.QThread):
+    """后台异步探针线程：极速拉取配额，绝不冻结主界面"""
+    quota_ready = QtCore.pyqtSignal(dict)
+
+    def run(self):
+        try:
+            from . import antigravity_manager
+            res = antigravity_manager.fetch_antigravity_quotas()
+            self.quota_ready.emit(res)
+        except Exception as e:
+            self.quota_ready.emit({
+                "success": False,
+                "mode": "error",
+                "error": str(e),
+                "groups": {},
+                "models": []
+            })
+
+
+class AntigravityAccountManagerDialog(QDialog):
+    """
+    Antigravity 多账户网格卡片管理与 AI 配额总览弹窗 (完全对齐图2独立卡片平铺布局)
+    核心特性：
+    1. 【彻底去重与全览】：所有账户统一以优雅独立卡片并排平铺展示，无上下割裂感，全局状况一目了然
+    2. 【隐私保护】：所有卡片用户名与邮箱全面启用星号掩码脱敏
+    3. 【卡片内四大模型配额】：每个卡片内集成 Gemini Pro, Claude, Gemini Flash, GPT-OSS 胶囊进度条与重置倒计时
+    4. 【一键切换与安全删除】：卡片底栏直观提供 [⇋ Use / 切换] 与 [Delete 🗑️] 操作
+    5. 【毫秒级异步探针】：当前活跃账户毫秒级拉取真实配额，备用账户智能读取持久化快照
+    """
+    account_switched = QtCore.pyqtSignal(str)
+
+    def __init__(self, parent=None, auto_fetch: bool = True):
+        super().__init__(parent)
+        self.setWindowTitle("🚀 Antigravity 多账户极速管理与 AI 配额总览")
+        self.resize(820, 680)
+        self.setMinimumSize(700, 560)
+        self.quota_worker = None
+        self.account_cards = {} # email -> {widgets}
+        self.init_ui()
+        self.reload_accounts()
+        if auto_fetch:
+            self.refresh_quotas_async()
+
+    def closeEvent(self, event):
+        if self.quota_worker and self.quota_worker.isRunning():
+            self.quota_worker.quit()
+            self.quota_worker.wait(1500)
+        event.accept()
+
+    def init_ui(self):
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #0f172a;
+                color: #f1f5f9;
+                font-family: 'Segoe UI', 'Microsoft YaHei';
+            }
+            QScrollArea {
+                border: none;
+                background-color: transparent;
+            }
+            QWidget#scrollContent {
+                background-color: transparent;
+            }
+            QLabel {
+                color: #cbd5e1;
+            }
+            QPushButton {
+                background-color: #1e293b;
+                border: 1px solid #334155;
+                border-radius: 6px;
+                color: #f8fafc;
+                padding: 6px 14px;
+                font-size: 12px;
+                font-weight: 500;
+            }
+            QPushButton:hover {
+                background-color: #334155;
+                border-color: #38bdf8;
+            }
+            QPushButton:pressed {
+                background-color: #0f172a;
+            }
+            QProgressBar {
+                border: 1px solid #334155;
+                border-radius: 4px;
+                text-align: center;
+                background-color: #0f172a;
+                color: #ffffff;
+                font-weight: bold;
+                font-size: 10px;
+            }
+            QTableWidget {
+                background-color: #161a23;
+                border: 1px solid #2d3748;
+                gridline-color: #283141;
+                color: #f1f5f9;
+                border-radius: 6px;
+            }
+        """)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 16, 18, 14)
+        layout.setSpacing(12)
+
+        # 1. 顶部操作栏
+        top_bar = QHBoxLayout()
+        top_bar.setSpacing(10)
+
+        self.lbl_title = QLabel("👥 全部账户总览 (正在加载...)")
+        self.lbl_title.setStyleSheet("font-size: 16px; font-weight: bold; color: #ffffff;")
+        top_bar.addWidget(self.lbl_title)
+        top_bar.addStretch()
+
+        self.btn_refresh_quotas = QPushButton("🔄 极速刷新配额")
+        self.btn_refresh_quotas.setStyleSheet("background-color: #0284c7; color: white; font-weight: bold; padding: 6px 14px;")
+        self.btn_refresh_quotas.setToolTip("通过本地 127.0.0.1 探针极速拉取活跃账户最新配额与重置时间 (10~30ms)")
+        self.btn_refresh_quotas.clicked.connect(self.refresh_quotas_async)
+        top_bar.addWidget(self.btn_refresh_quotas)
+
+        self.btn_backup_curr = QPushButton("💾 备份当前")
+        self.btn_backup_curr.setStyleSheet("background-color: #0d9488; color: white;")
+        self.btn_backup_curr.setToolTip("将当前活跃认证保存为独立账户备份")
+        self.btn_backup_curr.clicked.connect(self._backup_current_account)
+        top_bar.addWidget(self.btn_backup_curr)
+
+        self.btn_sync_ide = QPushButton("🔄 同步至 IDE")
+        self.btn_sync_ide.setStyleSheet("background-color: #4f46e5; color: white;")
+        self.btn_sync_ide.setToolTip("双向对齐 Antigravity 与 Antigravity IDE 数据库")
+        self.btn_sync_ide.clicked.connect(self._sync_ide_now)
+        top_bar.addWidget(self.btn_sync_ide)
+
+        self.btn_open_dir = QPushButton("📂 账户目录")
+        self.btn_open_dir.setToolTip("打开本地账户 JSON 文件存储目录")
+        self.btn_open_dir.clicked.connect(self._open_accounts_dir)
+        top_bar.addWidget(self.btn_open_dir)
+
+        layout.addLayout(top_bar)
+
+        # 状态提示条
+        self.lbl_probe_info = QLabel("⚡ 探针待命中...")
+        self.lbl_probe_info.setStyleSheet("color: #94a3b8; font-size: 11px;")
+        layout.addWidget(self.lbl_probe_info)
+
+        # 2. 中部主体：多账户卡片网格滚动区 (完全对齐图2视觉流)
+        self.scroll_area = QScrollArea()
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_content = QWidget()
+        self.scroll_content.setObjectName("scrollContent")
+        self.grid_layout = QGridLayout(self.scroll_content)
+        self.grid_layout.setContentsMargins(4, 4, 4, 4)
+        self.grid_layout.setSpacing(14)
+        self.scroll_area.setWidget(self.scroll_content)
+
+        layout.addWidget(self.scroll_area, stretch=1)
+
+        # 兼容性子模型折叠表格 (保持轻量并支持测试)
+        self.tbl_details = QTableWidget(0, 4)
+        self.tbl_details.setHorizontalHeaderLabels(["具体子模型", "剩余额度", "重置时间 (UTC)", "倒计时"])
+        self.tbl_details.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.tbl_details.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        self.tbl_details.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        self.tbl_details.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        self.tbl_details.verticalHeader().setVisible(False)
+        self.tbl_details.setFixedHeight(120)
+        self.tbl_details.setVisible(False)
+        layout.addWidget(self.tbl_details)
+
+        # 3. 底部状态与操作栏
+        btm_layout = QHBoxLayout()
+        lbl_tip = QLabel("💡 提示：所有账户已启用隐私保护。点击任一账户卡片下的【⇋ 切换 (Use)】将瞬间完成无损切换，无需重新登录。")
+        lbl_tip.setStyleSheet("color: #64748b; font-size: 11px;")
+        btm_layout.addWidget(lbl_tip, stretch=1)
+
+        self.btn_toggle_details = QPushButton("🔍 查看明细 ▼")
+        self.btn_toggle_details.setStyleSheet("background-color: transparent; border: none; color: #38bdf8; text-decoration: underline;")
+        self.btn_toggle_details.clicked.connect(self._toggle_details_view)
+        btm_layout.addWidget(self.btn_toggle_details)
+
+        btn_close = QPushButton("关闭")
+        btn_close.clicked.connect(self.accept)
+        btm_layout.addWidget(btn_close)
+
+        layout.addLayout(btm_layout)
+
+    def _create_account_card(self, acc: dict, is_active: bool, quota_info: dict) -> QFrame:
+        """
+        构建对齐图2风格的独立优雅账户卡片
+        包含：圆形头像、脱敏用户名/邮箱、活跃/Pro徽章、四大模型进度条、[⇋ Use] 与 [Delete 🗑️]
+        """
+        frame = QFrame()
+        frame.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        frame.setMinimumWidth(320)
+
+        # 活跃账户高亮青蓝微光边框，备用账户深色精致圆角
+        if is_active:
+            border_qss = "border: 2px solid #38bdf8; background-color: #1e293b;"
+            badge_text = "🟢 活跃中"
+            badge_qss = "background-color: #065f46; color: #34d399; font-weight: bold; border-radius: 4px; padding: 2px 6px; font-size: 11px;"
+        else:
+            border_qss = "border: 1px solid #334155; background-color: #161e2e;"
+            badge_text = "👑 Pro"
+            badge_qss = "background-color: #78350f; color: #fbbf24; font-weight: bold; border-radius: 4px; padding: 2px 6px; font-size: 11px;"
+
+        frame.setStyleSheet(f"""
+            QFrame {{
+                {border_qss}
+                border-radius: 12px;
+            }}
+        """)
+
+        card_vbox = QVBoxLayout(frame)
+        card_vbox.setContentsMargins(14, 12, 14, 12)
+        card_vbox.setSpacing(10)
+
+        # --- 1. 卡片头部：头像 + 用户名 + 脱敏邮箱 + 徽章 ---
+        header_layout = QHBoxLayout()
+        header_layout.setSpacing(10)
+
+        # 圆形头像
+        avatar = QLabel()
+        avatar.setFixedSize(38, 38)
+        avatar.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        avatar.setText("👤")
+        avatar.setStyleSheet("""
+            QLabel {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #3b82f6, stop:1 #8b5cf6);
+                border-radius: 19px;
+                color: #ffffff;
+                font-size: 18px;
+            }
+        """)
+        header_layout.addWidget(avatar)
+
+        # 姓名与脱敏邮箱
+        name_vbox = QVBoxLayout()
+        name_vbox.setSpacing(2)
+
+        name = acc.get("name") or "Antigravity User"
+        email = acc.get("email", "")
+        masked_email = acc.get("masked_email", "")
+
+        lbl_name = QLabel(name)
+        lbl_name.setStyleSheet("font-size: 14px; font-weight: bold; color: #f8fafc;")
+        lbl_mail = QLabel(masked_email)
+        lbl_mail.setStyleSheet("font-size: 11px; color: #94a3b8;")
+        name_vbox.addWidget(lbl_name)
+        name_vbox.addWidget(lbl_mail)
+        header_layout.addLayout(name_vbox, stretch=1)
+
+        # 右上角徽章
+        lbl_badge = QLabel(badge_text)
+        lbl_badge.setStyleSheet(badge_qss)
+        header_layout.addWidget(lbl_badge)
+
+        card_vbox.addLayout(header_layout)
+
+        # 分割线
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setStyleSheet("background-color: #273349; max-height: 1px;")
+        card_vbox.addWidget(sep)
+
+        # --- 2. 卡片中部：四大模型配额胶囊条 (图2同款排布) ---
+        model_rows = [
+            ("Gemini Pro", "💎 Gemini Pro"),
+            ("Claude", "✨ Claude"),
+            ("Gemini Flash", "⚡ Gemini Flash"),
+            ("GPT-OSS", "🧠 GPT-OSS"),
+        ]
+
+        model_widgets = {}
+        for m_key, m_label in model_rows:
+            row_frame = QFrame()
+            row_frame.setStyleSheet("""
+                QFrame {
+                    background-color: #0f172a;
+                    border: 1px solid #1e293b;
+                    border-radius: 6px;
+                    padding: 3px 6px;
+                }
+            """)
+            row_h = QHBoxLayout(row_frame)
+            row_h.setContentsMargins(6, 4, 6, 4)
+            row_h.setSpacing(8)
+
+            lbl_m = QLabel(m_label)
+            lbl_m.setStyleSheet("font-size: 11px; color: #cbd5e1; font-weight: 500;")
+            row_h.addWidget(lbl_m)
+            row_h.addStretch()
+
+            # 配额数值与倒计时
+            lbl_quota = QLabel("-- %")
+            lbl_quota.setStyleSheet("font-size: 11px; color: #94a3b8; font-weight: bold;")
+            row_h.addWidget(lbl_quota)
+
+            # 进度条
+            bar = QProgressBar()
+            bar.setRange(0, 100)
+            bar.setValue(0)
+            bar.setFixedSize(70, 8)
+            bar.setTextVisible(False)
+            row_h.addWidget(bar)
+
+            card_vbox.addWidget(row_frame)
+            model_widgets[m_key] = {"lbl": lbl_quota, "bar": bar}
+
+        # --- 3. 卡片底部操作栏：[⇋ Use] 与 [Delete 🗑️] ---
+        action_layout = QHBoxLayout()
+        action_layout.setSpacing(8)
+
+        btn_use = QPushButton("⇋ 切换 (Use)")
+        if is_active:
+            btn_use.setText("✔ 当前生效")
+            btn_use.setEnabled(False)
+            btn_use.setStyleSheet("background-color: #064e3b; color: #6ee7b7; border: 1px solid #059669; font-weight: bold; padding: 5px 12px;")
+        else:
+            btn_use.setStyleSheet("background-color: #0ea5e9; color: white; font-weight: bold; padding: 5px 12px;")
+            btn_use.clicked.connect(lambda checked=False, target=email: self._on_switch_account(target))
+        action_layout.addWidget(btn_use, stretch=1)
+
+        btn_del = QPushButton("Delete 🗑️")
+        btn_del.setStyleSheet("background-color: #27272a; color: #f87171; border: 1px solid #3f3f46; padding: 5px 10px;")
+        btn_del.clicked.connect(lambda checked=False, target=email: self._on_delete_account(target))
+        action_layout.addWidget(btn_del)
+
+        card_vbox.addLayout(action_layout)
+
+        # 记录控件并绑定数据
+        card_record = {
+            "email": email,
+            "frame": frame,
+            "models": model_widgets,
+            "btn_use": btn_use,
+            "is_active": is_active
+        }
+        self.account_cards[email.lower()] = card_record
+
+        # 统一应用配额数据 (有缓存展示缓存，备用无缓存展示"⚪ 切换激活")
+        self._apply_quota_to_card(card_record, quota_info or {})
+
+        return frame
+
+    def _apply_quota_to_card(self, card_record: dict, quota_groups: dict):
+        """将配额组数据填充至卡片的各个模型进度条与文本中"""
+        models = card_record["models"]
+        for m_key, w in models.items():
+            grp = quota_groups.get(m_key)
+            if grp:
+                pct = grp.get("remaining_pct", 0.0)
+                desc = grp.get("reset_desc", "")
+                w["lbl"].setText(f"{pct}% ({desc})")
+                w["bar"].setValue(int(pct))
+                # 动态颜色
+                color = "#10b981" if pct >= 50 else ("#f59e0b" if pct >= 20 else "#ef4444")
+                w["bar"].setStyleSheet(f"QProgressBar::chunk {{ background-color: {color}; border-radius: 3px; }}")
+            else:
+                if card_record["is_active"]:
+                    w["lbl"].setText("-- %")
+                else:
+                    w["lbl"].setText("⚪ 切换激活")
+                w["bar"].setValue(0)
+
+    @property
+    def card_widgets(self):
+        """兼容旧测试属性访问"""
+        # 返回当前活跃卡片的模型控件，或首个卡片
+        for acc_email, card in self.account_cards.items():
+            if card.get("is_active"):
+                res = {}
+                for m_k, w in card["models"].items():
+                    res[m_k] = {"lbl_pct": w["lbl"], "bar": w["bar"], "lbl_reset": w["lbl"]}
+                return res
+        # 默认返回空结构
+        return {
+            "Claude": {"lbl_pct": QLabel(), "bar": QProgressBar(), "lbl_reset": QLabel()},
+            "Gemini Pro": {"lbl_pct": QLabel(), "bar": QProgressBar(), "lbl_reset": QLabel()},
+            "Gemini Flash": {"lbl_pct": QLabel(), "bar": QProgressBar(), "lbl_reset": QLabel()},
+            "GPT-OSS": {"lbl_pct": QLabel(), "bar": QProgressBar(), "lbl_reset": QLabel()},
+        }
+
+    def reload_accounts(self):
+        """重新扫描并重新排布全部账户卡片 (网格布局)"""
+        from . import antigravity_manager
+        curr = antigravity_manager.get_current_account()
+        curr_email = curr.get("email", "").lower()
+        accounts = antigravity_manager.list_accounts()
+        cached_quotas = antigravity_manager.get_cached_quotas()
+
+        # 清除现有卡片
+        while self.grid_layout.count():
+            item = self.grid_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        self.account_cards.clear()
+
+        # 排序：当前活跃账户优先排第一位，其余按最后使用时间排序
+        sorted_accs = sorted(accounts, key=lambda a: (0 if a.get("email", "").lower() == curr_email else 1, -a.get("mtime", 0)))
+        total_count = len(sorted_accs)
+        self.lbl_title.setText(f"👥 全部账户总览 (共 {total_count} 个账户 · 1 个当前活跃)")
+
+        # 2列网格平铺
+        cols = 2
+        for idx, acc in enumerate(sorted_accs):
+            email = acc.get("email", "")
+            is_active = bool(curr_email and email.lower() == curr_email)
+            acc_quota = cached_quotas.get(email.lower(), {}).get("groups", {})
+            card = self._create_account_card(acc, is_active, acc_quota)
+
+            row = idx // cols
+            col = idx % cols
+            self.grid_layout.addWidget(card, row, col)
+
+    def refresh_quotas_async(self):
+        """启动后台 Worker 异步极速拉取活跃账户配额"""
+        self.btn_refresh_quotas.setEnabled(False)
+        self.btn_refresh_quotas.setText("⏳ 探测中...")
+        self.lbl_probe_info.setText("⚡ 正在通过本地环回探针探测 LanguageServer...")
+
+        self.quota_worker = QuotaFetchWorker(self)
+        self.quota_worker.quota_ready.connect(self._on_quotas_received)
+        self.quota_worker.start()
+
+    def _on_quotas_received(self, res: dict):
+        self.btn_refresh_quotas.setEnabled(True)
+        self.btn_refresh_quotas.setText("🔄 极速刷新配额")
+
+        success = res.get("success", False)
+        latency = res.get("latency_ms", 0)
+        port = res.get("target_port")
+        email = res.get("account_email", "").lower()
+
+        if not success:
+            err = res.get("error", "获取配额失败")
+            self.lbl_probe_info.setText(f"❌ 探针未连接 ({err}) · 耗时: {latency}ms")
+            return
+
+        self.lbl_probe_info.setText(f"✅ 探针极速探测成功 · 耗时: {latency}ms · 本地端口: {port}")
+
+        groups = res.get("groups", {})
+        # 更新活跃卡片
+        if email in self.account_cards:
+            self._apply_quota_to_card(self.account_cards[email], groups)
+        else:
+            # 找到当前活跃卡片并应用
+            for acc_email, card in self.account_cards.items():
+                if card["is_active"]:
+                    self._apply_quota_to_card(card, groups)
+                    break
+
+        # 填充子型号明细表格
+        models = res.get("models", [])
+        self.tbl_details.setRowCount(len(models))
+        for r, m in enumerate(models):
+            lbl = m.get("label", "Unknown")
+            pct = m.get("remaining_pct", 0.0)
+            reset_t = m.get("reset_time", "")
+            desc = m.get("reset_desc", "")
+
+            self.tbl_details.setItem(r, 0, QTableWidgetItem(lbl))
+            pct_item = QTableWidgetItem(f"{pct}%")
+            pct_item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+            self.tbl_details.setItem(r, 1, pct_item)
+
+            clean_time = reset_t.replace("T", " ").replace("Z", "") if reset_t else "--"
+            t_item = QTableWidgetItem(clean_time)
+            t_item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+            self.tbl_details.setItem(r, 2, t_item)
+
+            desc_item = QTableWidgetItem(desc)
+            desc_item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+            self.tbl_details.setItem(r, 3, desc_item)
+
+    def _toggle_details_view(self):
+        vis = self.tbl_details.isHidden()
+        self.tbl_details.setVisible(vis)
+        self.btn_toggle_details.setText("🔍 收起明细 ▲" if vis else "🔍 查看明细 ▼")
+
+    def _on_switch_account(self, email: str):
+        from . import antigravity_manager
+        ok, msg = antigravity_manager.switch_account(email, auto_sync=True)
+        if ok:
+            QMessageBox.information(self, "账户切换成功", f"✅ {msg}")
+            self.reload_accounts()
+            self.refresh_quotas_async()
+            self.account_switched.emit(email)
+            if self.parent() and hasattr(self.parent(), "log"):
+                self.parent().log(f"🚀 [Antigravity] {msg}")
+        else:
+            QMessageBox.warning(self, "账户切换失败", f"❌ {msg}")
+
+    def _on_delete_account(self, email: str):
+        from . import antigravity_manager
+        ret = QMessageBox.question(
+            self,
+            "确认移除账户备份",
+            f"确定要从本地备份库中移除账户【{email}】吗？\n该操作会将配置文件备份为 .bak，不会影响您在云端的 Google 账号。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+        if ret == QMessageBox.StandardButton.Yes:
+            ok, msg = antigravity_manager.delete_account(email)
+            if ok:
+                QMessageBox.information(self, "操作成功", msg)
+                self.reload_accounts()
+            else:
+                QMessageBox.warning(self, "操作失败", msg)
+
+    def _backup_current_account(self):
+        from . import antigravity_manager
+        ok, msg, path = antigravity_manager.backup_current_account()
+        if ok:
+            QMessageBox.information(self, "备份成功", f"✅ {msg}")
+            self.reload_accounts()
+        else:
+            QMessageBox.warning(self, "备份失败", f"❌ {msg}")
+
+    def _sync_ide_now(self):
+        from . import antigravity_manager
+        changed, msg = antigravity_manager.do_sync(auto_persist_to_file=True)
+        QMessageBox.information(self, "IDE 状态同步结果", f"ℹ️ {msg}")
+        self.reload_accounts()
+
+    def _open_accounts_dir(self):
+        from . import antigravity_manager
+        antigravity_manager.open_accounts_directory()
+
+
+
 class WindowPosManagerUI(QMainWindow, WindowMixin):
     """主窗口：窗口坐标及分布管理器"""
     toggle_ui_signal = QtCore.pyqtSignal()
@@ -2909,6 +3559,10 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
                     {"overclock_mode": "Default", "coolboost": False, "fan_mode": "Auto", "post_action": _get_global_post_action()},
                     custom_msg_prefix="托盘一键切【默认模式】"
                 ))
+
+                acer_sub_menu.addSeparator()
+                act_acer_dialog = acer_sub_menu.addAction("⚙️ 打开 Acer 性能控制面板...")
+                act_acer_dialog.triggered.connect(self.open_acer_performance_settings)
         except Exception as e:
             logger.error(f"托盘图标 Acer 快捷菜单初始化异常: {e}")
 
@@ -3460,6 +4114,10 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
                 background-color: #10b981;
                 border: none;
                 font-weight: bold;
+                padding: 3px 10px;
+                font-size: 12px;
+                min-height: 24px;
+                max-height: 25px;
             }
             QPushButton#btnSave:hover {
                 background-color: #059669;
@@ -3468,6 +4126,10 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
                 background-color: #0ea5e9;
                 border: none;
                 font-weight: bold;
+                padding: 3px 10px;
+                font-size: 12px;
+                min-height: 24px;
+                max-height: 25px;
             }
             QPushButton#btnApply:hover {
                 background-color: #0284c7;
@@ -3475,6 +4137,10 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
             QPushButton#btnDeleteRes {
                 background-color: #ef4444;
                 border: none;
+                padding: 3px 10px;
+                font-size: 12px;
+                min-height: 24px;
+                max-height: 25px;
             }
             QPushButton#btnDeleteRes:hover {
                 background-color: #dc2626;
@@ -3483,9 +4149,34 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
                 background-color: #8b5cf6;
                 border: none;
                 font-weight: bold;
+                padding: 3px 8px;
+                font-size: 12px;
+                min-height: 24px;
+                max-height: 25px;
             }
             QPushButton#btnPerf:hover {
                 background-color: #7c3aed;
+            }
+            QPushButton#btnRoute, QPushButton#btnRamDisk {
+                padding: 3px 8px;
+                font-size: 12px;
+                min-height: 24px;
+                max-height: 25px;
+            }
+            QPushButton#btnToolsMenu {
+                background-color: #3b4252;
+                border: 1px solid #4c566a;
+                border-radius: 4px;
+                color: #eceff4;
+                font-size: 12px;
+                font-weight: bold;
+                padding: 3px 10px;
+                min-height: 24px;
+                max-height: 25px;
+            }
+            QPushButton#btnToolsMenu:hover {
+                background-color: #434c5e;
+                border-color: #88c0d0;
             }
             QTableWidget {
                 background-color: #16161a;
@@ -3788,62 +4479,172 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
         
         table_op_layout.addStretch()
         mid_layout.addLayout(table_op_layout, stretch=1)
-        main_layout.addLayout(mid_layout)
+        main_layout.addLayout(mid_layout, stretch=1)
+        main_layout.addSpacing(8)
 
-        # 自适应纵向弹簧，空间充足时留出 15px 间隔，空间局促时自动缩减至 0
-        spacer1 = QtWidgets.QSpacerItem(0, 15, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Maximum)
-        main_layout.addItem(spacer1)
+        # 日志控制台 (支持原版协调舒适高度与跨会话持久化记忆，默认 110px，提供微型高度调节器)
+        self.log_group = QGroupBox("执行状态日志")
+        self.log_group.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        log_layout = QVBoxLayout(self.log_group)
+        log_layout.setContentsMargins(8, 4, 8, 6)
+        log_layout.setSpacing(4)
 
-        # 日志控制台
-        log_group = QGroupBox("执行状态日志")
-        log_layout = QVBoxLayout(log_group)
-        log_layout.setContentsMargins(8, 12, 8, 8)
+        # 头部微型尺寸调节栏 (支持 65px 紧凑 / 110px 协调 / 160px 展开，点击即刻生效并持久化记忆)
+        log_head_layout = QHBoxLayout()
+        log_head_layout.setContentsMargins(0, 0, 0, 0)
+        lbl_log_tip = QLabel("系统运行与窗口布局事件日志")
+        lbl_log_tip.setStyleSheet("font-size: 11px; color: #828997;")
+        log_head_layout.addWidget(lbl_log_tip)
+        log_head_layout.addStretch()
+
+        self.btn_log_compact = QPushButton("⬇ 紧凑(65px)")
+        self.btn_log_compact.setStyleSheet("padding: 1px 6px; font-size: 11px; height: 18px; border-radius: 3px; background: #282c34; color: #abb2bf; border: 1px solid #3e4451;")
+        self.btn_log_compact.setToolTip("切换为紧凑高度 (65px)")
+        self.btn_log_compact.clicked.connect(lambda: self.set_log_panel_height(65))
+        log_head_layout.addWidget(self.btn_log_compact)
+
+        self.btn_log_normal = QPushButton("↕ 协调(110px)")
+        self.btn_log_normal.setStyleSheet("padding: 1px 6px; font-size: 11px; height: 18px; border-radius: 3px; background: #282c34; color: #61afef; border: 1px solid #3e4451;")
+        self.btn_log_normal.setToolTip("恢复原版协调舒适高度 (110px)")
+        self.btn_log_normal.clicked.connect(lambda: self.set_log_panel_height(110))
+        log_head_layout.addWidget(self.btn_log_normal)
+
+        self.btn_log_expand = QPushButton("⬆ 展开(160px)")
+        self.btn_log_expand.setStyleSheet("padding: 1px 6px; font-size: 11px; height: 18px; border-radius: 3px; background: #282c34; color: #abb2bf; border: 1px solid #3e4451;")
+        self.btn_log_expand.setToolTip("切换为深度展开高度 (160px)")
+        self.btn_log_expand.clicked.connect(lambda: self.set_log_panel_height(160))
+        log_head_layout.addWidget(self.btn_log_expand)
+
+        log_layout.addLayout(log_head_layout)
+
         self.log_output = QTextEdit()
         self.log_output.setReadOnly(True)
-        self.log_output.setMinimumHeight(110)
         log_layout.addWidget(self.log_output)
-        main_layout.addWidget(log_group)
+        main_layout.addWidget(self.log_group)
+        main_layout.addSpacing(6)
 
-        # 自适应纵向弹簧，空间充足时留出 10px 间隔，空间局促时自动缩减至 0
-        spacer2 = QtWidgets.QSpacerItem(0, 10, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Maximum)
-        main_layout.addItem(spacer2)
-
-        # 底部应用栏
-        bottom_bar = FlowLayout(hspacing=6, vspacing=6, align_right_from_index=3)
+        # 底部应用栏 (紧凑型流式布局，从索引 4 开始右对齐：0热键, 1输入框, 2绑定, 3自启复选框均在左侧并垂直居中)
+        bottom_bar = FlowLayout(hspacing=6, vspacing=4, align_right_from_index=4)
         
         # --- 全局热键配置 ---
         self.lbl_hotkey = QLabel("全局热键:")
+        self.lbl_hotkey.setStyleSheet("font-size: 12px; color: #a0a0ab;")
         bottom_bar.addWidget(self.lbl_hotkey)
         
         self.le_hotkey = HotkeyLineEdit()
+        self.le_hotkey.setFixedHeight(25)
+        self.le_hotkey.setMaximumWidth(125)
         self.le_hotkey.setText(getattr(self, 'current_bound_hotkey', ''))
         bottom_bar.addWidget(self.le_hotkey)
         
         self.btn_bind_hotkey = QPushButton("绑定")
+        self.btn_bind_hotkey.setFixedHeight(25)
+        self.btn_bind_hotkey.setStyleSheet("padding: 2px 8px; font-size: 12px;")
         self.btn_bind_hotkey.clicked.connect(self.on_bind_hotkey_clicked)
         bottom_bar.addWidget(self.btn_bind_hotkey)
         
-        # --- 开机自启复选框 ---
+        # --- 开机自启复选框 (紧随绑定按钮后，左侧常驻并由 FlowLayout 自动垂直居中) ---
         self.chk_autostart = QCheckBox("开机自启")
+        self.chk_autostart.setStyleSheet("""
+            QCheckBox {
+                font-size: 12px;
+                color: #cbd5e1;
+                spacing: 5px;
+            }
+            QCheckBox::indicator {
+                width: 14px;
+                height: 14px;
+            }
+        """)
         self.chk_autostart.setToolTip("勾选后系统开机时将通过 Windows 注册表以托盘后台隐藏不弹窗模式启动程序 (-hide)")
         self.chk_autostart.setChecked(core.is_autostart_enabled_for_current_app())
         self.chk_autostart.stateChanged.connect(self.on_autostart_changed)
         bottom_bar.addWidget(self.chk_autostart)
 
-        self.btn_open_perf = QPushButton("📐 性能分析")
+        # 5 个扩展工具按钮 (平铺模式下展现，收纳模式下收进下拉菜单)
+        self.btn_open_perf = QPushButton("📐 性能")
         self.btn_open_perf.setObjectName("btnPerf")
+        self.btn_open_perf.setToolTip("显示器与窗口布局性能分析")
         self.btn_open_perf.clicked.connect(self.open_performance_analyzer)
-        bottom_bar.addWidget(self.btn_open_perf)
-        
-        self.btn_route_settings = QPushButton("⚡ 路由设置")
+
+        self.btn_route_settings = QPushButton("⚡ 路由")
+        self.btn_route_settings.setObjectName("btnRoute")
+        self.btn_route_settings.setToolTip("静态路由与磁吸窗口配置")
         self.btn_route_settings.clicked.connect(self.open_route_settings)
-        bottom_bar.addWidget(self.btn_route_settings)
-        
-        self.btn_ramdisk_sync = QPushButton("💾 RamDisk同步")
+
+        self.btn_acer_perf = QPushButton("💻 Acer性能")
+        self.btn_acer_perf.setObjectName("btnAcerPerf")
+        self.btn_acer_perf.setToolTip("Acer 笔记本超频与风扇散热控制中心")
+        self.btn_acer_perf.clicked.connect(self.open_acer_performance_settings)
+
+        self.btn_ramdisk_sync = QPushButton("💾 RamDisk")
+        self.btn_ramdisk_sync.setObjectName("btnRamDisk")
         self.btn_ramdisk_sync.setToolTip("配置 RamDisk 实时数据自动同步与备份规则，防止死机数据丢失")
         self.btn_ramdisk_sync.clicked.connect(self.open_ramdisk_sync_settings)
-        bottom_bar.addWidget(self.btn_ramdisk_sync)
+
+        self.btn_ag_manager = QPushButton("🚀 Antigravity 账户")
+        self.btn_ag_manager.setObjectName("btnAntigravity")
+        self.btn_ag_manager.setStyleSheet("background-color: #6366f1; color: white; font-weight: bold; padding: 3px 8px; font-size: 12px; min-height: 24px; max-height: 25px;")
+        self.btn_ag_manager.setToolTip("管理 Antigravity 多账户切换、实时 AI 模型配额与重置时间监控、跨 IDE 双向同步")
+        self.btn_ag_manager.clicked.connect(self.open_antigravity_account_manager)
+
+        # 平铺模式专属【⇋ 收纳】按钮 (平铺时显示，点击瞬间切回收纳下拉菜单，并持久化状态)
+        self.btn_collapse_tools = QPushButton("⇋ 收纳")
+        self.btn_collapse_tools.setObjectName("btnCollapseTools")
+        self.btn_collapse_tools.setStyleSheet("background-color: #334155; color: #93c5fd; border: 1px solid #475569; padding: 3px 8px; font-size: 12px; min-height: 24px; max-height: 25px; border-radius: 4px;")
+        self.btn_collapse_tools.setToolTip("收纳所有扩展工具按钮为下拉菜单，节省底栏空间")
+        self.btn_collapse_tools.clicked.connect(self.toggle_tools_expand_mode)
+
+        # 构建【🛠️ 扩展工具】下拉菜单
+        self.btn_tools_menu = QPushButton("🛠️ 扩展工具")
+        self.btn_tools_menu.setObjectName("btnToolsMenu")
+        self.btn_tools_menu.setToolTip("包含 Antigravity 账户管理、Acer 硬件性能、RamDisk 同步、静态路由、性能分析")
         
+        self.tools_menu = QMenu(self)
+        self.tools_menu.setStyleSheet("""
+            QMenu {
+                background-color: #1e222a;
+                border: 1px solid #3e4451;
+                color: #abb2bf;
+                padding: 4px;
+                font-size: 12px;
+            }
+            QMenu::item {
+                padding: 6px 18px 6px 12px;
+                border-radius: 4px;
+            }
+            QMenu::item:selected {
+                background-color: #2c313a;
+                color: #61afef;
+            }
+            QMenu::separator {
+                height: 1px;
+                background: #3e4451;
+                margin: 4px 6px;
+            }
+        """)
+        act_ag = self.tools_menu.addAction("🚀 Antigravity 账户管理与 AI 配额...")
+        act_ag.triggered.connect(self.open_antigravity_account_manager)
+        act_acer = self.tools_menu.addAction("💻 Acer 笔记本性能与散热控制...")
+        act_acer.triggered.connect(self.open_acer_performance_settings)
+        act_ramdisk = self.tools_menu.addAction("💾 RamDisk 内存盘同步与备份规则...")
+        act_ramdisk.triggered.connect(self.open_ramdisk_sync_settings)
+        act_route = self.tools_menu.addAction("🌐 静态路由与磁吸窗口配置...")
+        act_route.triggered.connect(self.open_route_settings)
+        act_perf = self.tools_menu.addAction("📐 显示器与窗口布局性能分析...")
+        act_perf.triggered.connect(self.open_performance_analyzer)
+        
+        self.tools_menu.addSeparator()
+        self.act_tools_mode = self.tools_menu.addAction("⇋ 切换底栏平铺/收纳模式")
+        self.act_tools_mode.triggered.connect(self.toggle_tools_expand_mode)
+        self.btn_tools_menu.setMenu(self.tools_menu)
+        bottom_bar.addWidget(self.btn_tools_menu)
+
+        # 把平铺模式的 6 个按钮（5工具+1收纳）加入 bottom_bar
+        for b in [self.btn_open_perf, self.btn_route_settings, self.btn_acer_perf, self.btn_ramdisk_sync, self.btn_ag_manager, self.btn_collapse_tools]:
+            bottom_bar.addWidget(b)
+
+        # 核心主操作按钮 (紧凑高颜值，常驻显眼)
         self.btn_save_config = QPushButton("💾 保存配置")
         self.btn_save_config.setObjectName("btnSave")
         self.btn_save_config.clicked.connect(self.save_all_config)
@@ -3861,7 +4662,49 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
         
         main_layout.addLayout(bottom_bar)
 
+        # 应用持久化的扩展工具栏显示模式 (从配置读取)
+        init_expanded = bool(self.config_manager.config_data.get("tools_expanded_mode", False))
+        self._apply_tools_expand_mode(init_expanded)
+
+        # 应用持久化的日志框高度 (默认 110px 原版协调舒适比例)
+        saved_log_h = int(self.config_manager.config_data.get("log_panel_height", 110))
+        self.set_log_panel_height(saved_log_h, save=False)
+
         self.log("界面加载完毕。")
+
+    def set_log_panel_height(self, height: int, save: bool = True):
+        """设置执行状态日志框的高度，并支持自动持久化跨会话记忆"""
+        h = max(60, min(350, int(height)))
+        self.log_group.setFixedHeight(h)
+        self.log_output.setFixedHeight(max(32, h - 38))
+        if save and hasattr(self, 'config_manager') and self.config_manager:
+            self.config_manager.config_data["log_panel_height"] = h
+            self.config_manager.save()
+
+    def _apply_tools_expand_mode(self, expanded: bool):
+        """根据平铺/收纳状态更新界面控件可见性"""
+        self.btn_tools_menu.setVisible(not expanded)
+        if hasattr(self, 'btn_collapse_tools'):
+            self.btn_collapse_tools.setVisible(expanded)
+        for b in [self.btn_open_perf, self.btn_route_settings, getattr(self, 'btn_acer_perf', None), self.btn_ramdisk_sync, self.btn_ag_manager]:
+            if b is not None:
+                b.setVisible(expanded)
+
+    def toggle_tools_expand_mode(self):
+        """切换底栏工具按钮的展开平铺模式与下拉收纳模式，并自动持久化跨会话记忆"""
+        # 如果当前收纳菜单按钮可见，说明当前是收纳模式，要切为平铺模式；反之切回收纳模式
+        new_expanded = self.btn_tools_menu.isVisible()
+        self._apply_tools_expand_mode(new_expanded)
+        if hasattr(self, 'config_manager') and self.config_manager:
+            self.config_manager.config_data["tools_expanded_mode"] = new_expanded
+            self.config_manager.save()
+        self.log("[工具箱] 底栏扩展工具已切换为【平铺模式】" if new_expanded else "[工具箱] 底栏扩展工具已切换为【收纳模式】")
+
+    def open_acer_performance_settings(self):
+        """打开 Acer 笔记本性能与散热控制中心独立对话框"""
+        dialog = AcerPerformanceDialog(self.config_manager, self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.log("🚀 Acer 硬件性能与散热配置已保存生效！")
 
     def on_autostart_changed(self, state):
         """开机自启复选框勾选状态改变时的响应回调"""
@@ -3916,7 +4759,9 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
         except Exception:
             pass
         try:
-            logger.info(text)
+            enc = getattr(sys.stdout, 'encoding', None) or 'utf-8'
+            safe_text = text.encode(enc, errors='replace').decode(enc, errors='replace')
+            logger.info(safe_text)
         except Exception:
             pass
 
@@ -3999,6 +4844,16 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
             log_status_desc = "详细日志: 已开启" if getattr(self.ramdisk_sync_config, "log_enabled", False) else "详细日志: 已关闭"
             self.log(f"💾 RamDisk 自动同步与备份配置已更新保存！({log_status_desc} · 每 {self.ramdisk_sync_config.sync_interval_sec} 秒巡检)")
 
+    def open_antigravity_account_manager(self):
+        """打开 Antigravity 账户极速管理与 AI 配额监控弹窗"""
+        try:
+            dialog = AntigravityAccountManagerDialog(parent=self)
+            dialog.account_switched.connect(lambda acc: self._update_ag_tray_submenu() if hasattr(self, '_update_ag_tray_submenu') else None)
+            dialog.exec()
+        except Exception as e:
+            logger.error(f"打开 Antigravity 账户管理器异常: {e}")
+            QMessageBox.critical(self, "打开失败", f"打开 Antigravity 账户管理器异常: {e}")
+
     def _trigger_ramdisk_sync_from_tray(self):
         """从托盘右键一键手动触发立即同步备份"""
         if not hasattr(self, 'ramdisk_sync_worker') or not self.ramdisk_sync_worker:
@@ -4053,9 +4908,9 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
         try:
             from . import antigravity_manager
             curr = antigravity_manager.get_current_account()
-            curr_summary = curr.get('summary') or '未登录/无有效账户'
+            curr_summary = curr.get('masked_summary') or (f"{curr.get('name', 'Antigravity User')} <{curr.get('masked_email', '')}>" if curr.get('email') else '未登录/无有效账户')
             
-            # 顶部当前活跃账户展示行
+            # 顶部当前活跃账户展示行 (带脱敏隐私保护)
             curr_act = self.ag_sub_menu.addAction(f"👤 当前: {curr_summary}")
             curr_act.setEnabled(False)
             self.ag_sub_menu.addSeparator()
@@ -4068,9 +4923,10 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
                 for acc in accounts:
                     email = acc["email"]
                     name = acc["name"]
+                    masked_email = acc.get("masked_email") or antigravity_manager.mask_email(email)
                     is_curr = acc["is_current"]
                     prefix = "✔️ " if is_curr else "     "
-                    label = f"{prefix}{name} <{email}>"
+                    label = f"{prefix}{name} <{masked_email}>"
                     act = self.ag_sub_menu.addAction(label)
                     if is_curr:
                         f = act.font()
@@ -4079,6 +4935,10 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
                     act.triggered.connect(lambda checked=False, target_email=email: self._on_switch_ag_account_from_tray(target_email))
 
             self.ag_sub_menu.addSeparator()
+            manage_act = self.ag_sub_menu.addAction("🚀 打开账户与配额管理器...")
+            if hasattr(self, 'open_antigravity_account_manager'):
+                manage_act.triggered.connect(self.open_antigravity_account_manager)
+
             sync_act = self.ag_sub_menu.addAction("🔄 立即同步至 Antigravity IDE")
             sync_act.triggered.connect(self._trigger_ag_sync_from_tray)
 
@@ -4094,7 +4954,8 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
         """从托盘右键一键切换 Antigravity 账户"""
         try:
             from . import antigravity_manager
-            self.log(f"🚀 [Antigravity] 正在切换至账户: {target_email} ...")
+            masked_target = antigravity_manager.mask_email(target_email)
+            self.log(f"🚀 [Antigravity] 正在切换至账户: {masked_target} ...")
             success, msg = antigravity_manager.switch_account(target_email, auto_sync=True)
             self.log(f"🚀 [Antigravity 切换结果] {msg}")
             if hasattr(self, "tray_icon") and self.tray_icon and self.tray_icon.isVisible():
@@ -6047,6 +6908,11 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
             self.config_manager.config_data["global_hotkey"] = new_hk
             self.bind_hotkey(new_hk)
             
+        if hasattr(self, 'log_group'):
+            self.config_manager.config_data["log_panel_height"] = self.log_group.height()
+        if hasattr(self, 'btn_tools_menu'):
+            self.config_manager.config_data["tools_expanded_mode"] = self.btn_tools_menu.isHidden()
+
         if self.config_manager.save():
             QMessageBox.information(self, "成功", "配置文件已成功按分类持久化保存到磁盘！")
             self.log("配置文件已写入磁盘 window_layout_config.json。")
