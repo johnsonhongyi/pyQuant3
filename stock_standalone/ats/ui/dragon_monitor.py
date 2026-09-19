@@ -430,242 +430,262 @@ class DragonLeaderMonitorDialog(QDialog, WindowMixin):
         except Exception as e:
             logger.warning(f"Error saving window states: {e}")
 
-    def update_data(self, current_df, sh_pct):
-        """
-        盘中高频实时刷新及自动替换挖掘逻辑
-        """
-        if current_df is None or current_df.empty:
-            return
-            
-        self.current_df = current_df
-        self.last_sh_pct = sh_pct
-        self._is_updating = True
-        
-        # 0. 锁定当前选中的股票代码以防止刷新时焦点丢失
-        selected_code = None
-        curr_row = self.table.currentRow()
-        if curr_row >= 0:
-            c_item = self.table.item(curr_row, 0)
-            if c_item:
-                selected_code = c_item.text()
-        
-        # 智能匹配短、中、长周期的 DFF 列，应对带有周期后缀（如 dff_d, dff_3d, dff_3M）或动态配置列
-        def get_period_weight(col_name):
-            col_lower = str(col_name).lower()
-            if col_lower == 'dff':
-                return 1.0
-            if col_lower == 'dff2':
-                return 5.0
-            if col_lower == 'dff3':
-                return 20.0
-            if '_' in col_lower:
-                suffix = col_lower.split('_')[-1]
-            else:
-                suffix = col_lower.replace('dff', '')
-            if not suffix:
-                return 1.0
-            try:
-                import re
-                num_part = re.findall(r'\d+', suffix)
-                num = int(num_part[0]) if num_part else 1
-                if 'y' in suffix:
-                    return num * 240.0
-                elif 'm' in suffix:
-                    return num * 20.0
-                elif 'w' in suffix:
-                    return num * 5.0
-                elif 'd' in suffix:
-                    return num * 1.0
-                return float(num)
-            except Exception:
-                return 999.0
+    def update_data(self, current_df, sh_pct, force: bool = False):
 
-        # ── 一次加锁读取全部三个周期数据，避免多次竞争锁 ──
-        dff_dict = {}
-        dff2_dict = {}
-        dff3_dict = {}
-        
-        main_app = self._get_main_app()
-        if main_app and hasattr(main_app, "engine") and hasattr(main_app.engine, "_period_dfs"):
-            lock = getattr(main_app.engine, "lock", None)
-            period_snapshots = {}
-            if lock:
-                with lock:
+        now = time.time()
+        # ⚡ 增加 1.0 秒节流阀：盘中主窗口高频推送时，杜绝小于 1.0 秒的重复渲染与无谓抖动
+        if not force and hasattr(self, '_last_update_ts') and (now - self._last_update_ts < 1.0):
+            return
+        self._last_update_ts = now
+
+        if getattr(self, '_is_updating_data', False):
+            return
+        self._is_updating_data = True
+
+        try:
+            self.current_df = current_df
+            self.last_sh_pct = sh_pct
+            self._is_updating = True
+            
+            # 0. 锁定当前选中的股票代码以防止刷新时焦点丢失
+            selected_code = None
+            curr_row = self.table.currentRow()
+            if curr_row >= 0:
+                c_item = self.table.item(curr_row, 0)
+                if c_item:
+                    selected_code = c_item.text()
+            
+            # 智能匹配短、中、长周期的 DFF 列，应对带有周期后缀（如 dff_d, dff_3d, dff_3M）或动态配置列
+            def get_period_weight(col_name):
+                col_lower = str(col_name).lower()
+                if col_lower == 'dff':
+                    return 1.0
+                if col_lower == 'dff2':
+                    return 5.0
+                if col_lower == 'dff3':
+                    return 20.0
+                if '_' in col_lower:
+                    suffix = col_lower.split('_')[-1]
+                else:
+                    suffix = col_lower.replace('dff', '')
+                if not suffix:
+                    return 1.0
+                try:
+                    import re
+                    num_part = re.findall(r'\d+', suffix)
+                    num = int(num_part[0]) if num_part else 1
+                    if 'y' in suffix:
+                        return num * 240.0
+                    elif 'm' in suffix:
+                        return num * 20.0
+                    elif 'w' in suffix:
+                        return num * 5.0
+                    elif 'd' in suffix:
+                        return num * 1.0
+                    return float(num)
+                except Exception:
+                    return 999.0
+
+            # ── 一次加锁读取全部三个周期数据，避免多次竞争锁 ──
+            dff_dict = {}
+            dff2_dict = {}
+            dff3_dict = {}
+            
+            main_app = self._get_main_app()
+            if main_app and hasattr(main_app, "engine") and hasattr(main_app.engine, "_period_dfs"):
+                lock = getattr(main_app.engine, "lock", None)
+                period_snapshots = {}
+                if lock:
+                    with lock:
+                        active_periods = list(main_app.engine._period_dfs.keys())
+                        for p in active_periods:
+                            raw = main_app.engine._period_dfs.get(p)
+                            if raw is not None and not raw.empty:
+                                period_snapshots[p] = raw.copy()
+                else:
                     active_periods = list(main_app.engine._period_dfs.keys())
                     for p in active_periods:
                         raw = main_app.engine._period_dfs.get(p)
                         if raw is not None and not raw.empty:
                             period_snapshots[p] = raw.copy()
-            else:
-                active_periods = list(main_app.engine._period_dfs.keys())
-                for p in active_periods:
-                    raw = main_app.engine._period_dfs.get(p)
-                    if raw is not None and not raw.empty:
-                        period_snapshots[p] = raw.copy()
-                        
-            # 按顺序从已加载的周期中匹配：第1个周期为短周期，第2个为中周期，第3个为长周期
-            sorted_periods = list(period_snapshots.keys())
-            df_d = period_snapshots.get(sorted_periods[0]) if len(sorted_periods) > 0 else None
-            df_w = period_snapshots.get(sorted_periods[1]) if len(sorted_periods) > 1 else None
-            df_m = period_snapshots.get(sorted_periods[2]) if len(sorted_periods) > 2 else None
+                            
+                # 按顺序从已加载的周期中匹配：第1个周期为短周期，第2个为中周期，第3个为长周期
+                sorted_periods = list(period_snapshots.keys())
+                df_d = period_snapshots.get(sorted_periods[0]) if len(sorted_periods) > 0 else None
+                df_w = period_snapshots.get(sorted_periods[1]) if len(sorted_periods) > 1 else None
+                df_m = period_snapshots.get(sorted_periods[2]) if len(sorted_periods) > 2 else None
 
-            def get_dff_col(df_p, preferred):
-                if df_p is None:
+                def get_dff_col(df_p, preferred):
+                    if df_p is None:
+                        return None
+                    for col_name in preferred:
+                        if col_name in df_p.columns:
+                            return col_name
+                    # 模糊匹配
+                    for col_name in df_p.columns:
+                        if 'dff' in str(col_name).lower():
+                            return col_name
                     return None
-                for col_name in preferred:
-                    if col_name in df_p.columns:
-                        return col_name
-                # 模糊匹配
-                for col_name in df_p.columns:
-                    if 'dff' in str(col_name).lower():
-                        return col_name
-                return None
 
-            col_d = get_dff_col(df_d, ['dff', 'dff_d'])
-            if col_d and df_d is not None:
-                dff_dict = {str(k).zfill(6): v for k, v in df_d[col_d].to_dict().items() if k}
-                    
-            col_w = get_dff_col(df_w, ['dff2', 'dff', 'dff_w'])
-            if col_w and df_w is not None:
-                dff2_dict = {str(k).zfill(6): v for k, v in df_w[col_w].to_dict().items() if k}
-                    
-            col_m = get_dff_col(df_m, ['dff3', 'dff', 'dff_m'])
-            if col_m and df_m is not None:
-                dff3_dict = {str(k).zfill(6): v for k, v in df_m[col_m].to_dict().items() if k}
-        
-        # ── 降级兜底：如果无法从 engine 加载，且 current_df 自身有加速特征列，则直接提取 ──
-        if not dff_dict and not dff2_dict and not dff3_dict:
-            dff_cols = [c for c in current_df.columns if 'dff' in str(c).lower()]
-            dff_cols.sort(key=get_period_weight)
+                col_d = get_dff_col(df_d, ['dff', 'dff_d'])
+                if col_d and df_d is not None:
+                    dff_dict = {str(k).zfill(6): v for k, v in df_d[col_d].to_dict().items() if k}
+                        
+                col_w = get_dff_col(df_w, ['dff2', 'dff', 'dff_w'])
+                if col_w and df_w is not None:
+                    dff2_dict = {str(k).zfill(6): v for k, v in df_w[col_w].to_dict().items() if k}
+                        
+                col_m = get_dff_col(df_m, ['dff3', 'dff', 'dff_m'])
+                if col_m and df_m is not None:
+                    dff3_dict = {str(k).zfill(6): v for k, v in df_m[col_m].to_dict().items() if k}
             
-            dff_col = dff_cols[0] if len(dff_cols) > 0 else 'dff'
-            dff2_col = dff_cols[1] if len(dff_cols) > 1 else 'dff2'
-            dff3_col = dff_cols[2] if len(dff_cols) > 2 else 'dff3'
+            # ── 降级兜底：如果无法从 engine 加载，且 current_df 自身有加速特征列，则直接向量化提取 (0ms，杜绝 iterrows) ──
+            if not dff_dict and not dff2_dict and not dff3_dict:
+                dff_cols = [c for c in current_df.columns if 'dff' in str(c).lower()]
+                dff_cols.sort(key=get_period_weight)
+                
+                dff_col = dff_cols[0] if len(dff_cols) > 0 else 'dff'
+                dff2_col = dff_cols[1] if len(dff_cols) > 1 else 'dff2'
+                dff3_col = dff_cols[2] if len(dff_cols) > 2 else 'dff3'
+                
+                idx_clean = [str(c).zfill(6) for c in current_df.index]
+                if dff_col in current_df.columns:
+                    vals = pd.to_numeric(current_df[dff_col], errors='coerce').fillna(0.0).values
+                    dff_dict = dict(zip(idx_clean, vals))
+                if dff2_col in current_df.columns:
+                    vals2 = pd.to_numeric(current_df[dff2_col], errors='coerce').fillna(0.0).values
+                    dff2_dict = dict(zip(idx_clean, vals2))
+                if dff3_col in current_df.columns:
+                    vals3 = pd.to_numeric(current_df[dff3_col], errors='coerce').fillna(0.0).values
+                    dff3_dict = dict(zip(idx_clean, vals3))
             
-            for c, r in current_df.iterrows():
-                if isinstance(r, pd.DataFrame):
-                    r = r.iloc[0]
-                c_str = str(c).zfill(6)
-                dff_dict[c_str] = safe_float(r.get(dff_col, 0.0))
-                dff2_dict[c_str] = safe_float(r.get(dff2_col, 0.0))
-                dff3_dict[c_str] = safe_float(r.get(dff3_col, 0.0))
-        
-        # 1. 每日自动替换更新潜力股 (基于 CapitalDragonEngine 资金趋势与主线真龙 SSOT)
-        cde_report = {}
-        cde_dragons = []
-        try:
-            from ats.capital_dragon_engine import CapitalDragonEngine
-            cde = CapitalDragonEngine.get_instance()
-            cde_report = cde.analyze_capital_dragon_universe(current_df, sh_pct)
-            cde_dragons = cde_report.get("dragon_records", [])
-        except Exception as e_cde:
-            logger.debug(f"[DragonMonitor] CapitalDragonEngine error: {e_cde}")
+            # 1. 每日自动替换更新潜力股 (基于 CapitalDragonEngine 资金趋势与主线真龙 SSOT 缓存复用，杜绝在主线程重算)
+            cde_report = {}
+            cde_dragons = []
+            try:
+                from ats.capital_dragon_engine import CapitalDragonEngine
+                cde = CapitalDragonEngine.get_instance()
+                # ⚡ 极限性能复用：优先从引擎读取后台 Worker 计算好的缓存报告 (0ms 耗时，绝不在 UI 主线程同步重算全市场)
+                cde_report = cde.get_cached_report(max_age=15.0, df_check=current_df, fallback_stale=True)
+                if not cde_report and hasattr(cde, '_cached_report') and cde._cached_report:
+                    cde_report = cde._cached_report
+                if cde_report:
+                    cde_dragons = cde_report.get("dragon_records", [])
+            except Exception as e_cde:
+                logger.debug(f"[DragonMonitor] CapitalDragonEngine error: {e_cde}")
 
-        new_auto_list = []
-        cde_info_map = {}
-        for r in cde_dragons:
-            c_str = str(r["code"]).zfill(6)
-            if c_str in self.manual_codes or c_str in self.blacklist_codes:
-                continue
-            cde_info_map[c_str] = r
-            new_auto_list.append((c_str, r.get("priority", 50), r.get("amount_yi", 0.0), r.get("pct", 0.0)))
-
-        # 降级兜底：如果 cde_dragons 为空，使用原有 DFF 规则兜底
-        if not new_auto_list:
-            for code, row in current_df.iterrows():
-                if isinstance(row, pd.DataFrame):
-                    row = row.iloc[0]
-                code_str = str(code).zfill(6)
-                if code_str in self.manual_codes or code_str in self.blacklist_codes:
+            new_auto_list = []
+            cde_info_map = {}
+            for r in cde_dragons:
+                c_str = str(r.get("code", "")).zfill(6)
+                if not c_str or c_str in self.manual_codes or c_str in self.blacklist_codes:
                     continue
-                dff = safe_float(dff_dict.get(code_str, 0.0))
-                dff2 = safe_float(dff2_dict.get(code_str, 0.0))
-                dff3 = safe_float(dff3_dict.get(code_str, 0.0))
-                pct = safe_float(row.get('percent', row.get('pct', row.get('changepercent', 0.0))))
-                rs_val = pct - sh_pct
-                if dff > 0.0 and dff2 > 0.0 and dff3 > 0.0 and rs_val >= 2.0 and pct > 1.5:
-                    new_auto_list.append((code_str, 50, 0.0, rs_val))
-            new_auto_list.sort(key=lambda x: x[3], reverse=True)
-            self.auto_codes = [c[0] for c in new_auto_list[:20]]
-        else:
-            # 排序：优先按真龙优先级，再按成交额与涨幅
-            new_auto_list.sort(key=lambda x: (x[1], x[2], x[3]), reverse=True)
-            self.auto_codes = [c[0] for c in new_auto_list[:20]]
-        
-        # 2. 合并手动与自动代码列表
-        all_codes = list(self.manual_codes) + [c for c in self.auto_codes if c not in self.manual_codes]
-        
-        # 3. 收集实时指标准备填充表格
-        rows_data = []
-        for code in all_codes:
-            name = "未知个股"
-            price = 0.0
-            pct = 0.0
-            state = "平稳期"
-            dff = 0.0
-            dff2 = 0.0
-            dff3 = 0.0
-            rs_val = 0.0
-            resonance = "同步整理"
-            source = "手动添加" if code in self.manual_codes else "🔥自动挖掘"
-            
-            # 从主窗口传递的个股信息库解析
-            main_app = self._get_main_app()
-            if main_app and hasattr(main_app, 'get_stock_name'):
-                name = main_app.get_stock_name(code)
+                cde_info_map[c_str] = r
+                new_auto_list.append((c_str, r.get("priority", 50), r.get("amount_yi", 0.0), r.get("pct", 0.0)))
+
+            # 降级兜底：如果 cde_dragons 为空，使用原有 DFF 规则向量化布尔筛选 (0ms，彻底杜绝 iterrows)
+            if not new_auto_list:
+                pct_col = 'percent' if 'percent' in current_df.columns else ('pct' if 'pct' in current_df.columns else None)
+                if pct_col and dff_dict and dff2_dict and dff3_dict:
+                    pct_s = pd.to_numeric(current_df[pct_col], errors='coerce').fillna(0.0)
+                    cand_sub = current_df[pct_s > 1.5]
+                    for code_raw in cand_sub.index:
+                        code_str = str(code_raw).zfill(6)
+                        if code_str in self.manual_codes or code_str in self.blacklist_codes:
+                            continue
+                        dff = float(dff_dict.get(code_str, 0.0))
+                        if dff <= 0.0:
+                            continue
+                        dff2 = float(dff2_dict.get(code_str, 0.0))
+                        if dff2 <= 0.0:
+                            continue
+                        dff3 = float(dff3_dict.get(code_str, 0.0))
+                        if dff3 <= 0.0:
+                            continue
+                        p_val = float(pct_s.loc[code_raw])
+                        rs_val = p_val - sh_pct
+                        if rs_val >= 2.0:
+                            new_auto_list.append((code_str, 50, 0.0, rs_val))
+                new_auto_list.sort(key=lambda x: x[3], reverse=True)
+                self.auto_codes = [c[0] for c in new_auto_list[:20]]
             else:
-                from sys_utils import resolve_stock_name
-                name = resolve_stock_name(code) or "未知个股"
+                # 排序：优先按真龙优先级，再按成交额与涨幅
+                new_auto_list.sort(key=lambda x: (x[1], x[2], x[3]), reverse=True)
+                self.auto_codes = [c[0] for c in new_auto_list[:20]]
+            
+            # 2. 合并手动与自动代码列表
+            all_codes = list(self.manual_codes) + [c for c in self.auto_codes if c not in self.manual_codes]
+            
+            # 3. 收集实时指标准备填充表格
+            rows_data = []
+            get_stock_name_fn = getattr(main_app, 'get_stock_name', None) if main_app else None
+
+            for code in all_codes:
+                name = "未知个股"
+                price = 0.0
+                pct = 0.0
+                state = "平稳期"
+                dff = 0.0
+                dff2 = 0.0
+                dff3 = 0.0
+                rs_val = 0.0
+                resonance = "同步整理"
+                source = "手动添加" if code in self.manual_codes else "🔥自动挖掘"
                 
-            if code in current_df.index:
-                row = current_df.loc[code]
-                if isinstance(row, pd.DataFrame):
-                    row = row.iloc[0]
-                row_name = str(row.get('name', '') or '').strip()
-                if row_name and row_name not in ('nan', '--', '0', ''):
-                    name = row_name
-                price = safe_float(row.get('close', row.get('price', 0.0)))
-                pct = safe_float(row.get('percent', row.get('pct', row.get('changepercent', 0.0))))
-                
-                # 🐉 优先使用真龙角色与真实成交额呈现状态
-                if code in cde_info_map:
-                    c_info = cde_info_map[code]
-                    state = f"{c_info.get('role', '真龙')} ({c_info.get('amount_yi', 0.0):.1f}亿)"
-                    source = f"{c_info.get('action_type', '🔥真龙')}"
+                # 从主窗口传递的个股信息库解析 (极速内存字典匹配，杜绝外部慢速查询)
+                if get_stock_name_fn:
+                    name = get_stock_name_fn(code) or "未知个股"
                 else:
-                    state = str(row.get('state', '持股中' if pct > 0 else '回踩中'))
+                    name = "未知个股"
                     
-                dff = safe_float(dff_dict.get(code, 0.0))
-                dff2 = safe_float(dff2_dict.get(code, 0.0))
-                dff3 = safe_float(dff3_dict.get(code, 0.0))
-                rs_val = pct - sh_pct
+                if code in current_df.index:
+                    row = current_df.loc[code]
+                    if isinstance(row, pd.DataFrame):
+                        row = row.iloc[0]
+                    row_name = str(row.get('name', '') or '').strip()
+                    if row_name and row_name not in ('nan', '--', '0', ''):
+                        name = row_name
+                    price = safe_float(row.get('close', row.get('price', 0.0)))
+                    pct = safe_float(row.get('percent', row.get('pct', row.get('changepercent', 0.0))))
+                    
+                    # 🐉 优先使用真龙角色与真实成交额呈现状态
+                    if code in cde_info_map:
+                        c_info = cde_info_map[code]
+                        state = f"{c_info.get('role', '真龙')} ({c_info.get('amount_yi', 0.0):.1f}亿)"
+                        source = f"{c_info.get('action_type', '🔥真龙')}"
+                    else:
+                        state = str(row.get('state', '持股中' if pct > 0 else '回踩中'))
+                        
+                    dff = safe_float(dff_dict.get(code, 0.0))
+                    dff2 = safe_float(dff2_dict.get(code, 0.0))
+                    dff3 = safe_float(dff3_dict.get(code, 0.0))
+                    rs_val = pct - sh_pct
+                    
+                    # 共振类型判定
+                    if sh_pct < -0.5 and pct > 1.5 and rs_val > 2.0:
+                        resonance = "逆市抗跌"
+                    elif sh_pct > 0.5 and pct > 3.0 and dff > 1.0:
+                        resonance = "大盘共振"
+                    elif sh_pct < -1.0 and pct < -1.5:
+                        resonance = "同步走弱"
+                    
+                    # 提取动态自定义列数据
+                    extra_vals = []
+                    for ec in self.extra_cols:
+                        val_raw = None
+                        for k in (ec, ec.lower(), ec.upper()):
+                            if k in row:
+                                val_raw = row[k]
+                                break
+                        extra_vals.append(cct.format_col_value(ec, val_raw))
+                else:
+                    extra_vals = ['--'] * len(self.extra_cols)
                 
-                # 共振类型判定
-                if sh_pct < -0.5 and pct > 1.5 and rs_val > 2.0:
-                    resonance = "逆市抗跌"
-                elif sh_pct > 0.5 and pct > 3.0 and dff > 1.0:
-                    resonance = "大盘共振"
-                elif sh_pct < -1.0 and pct < -1.5:
-                    resonance = "同步走弱"
-                
-                # 提取动态自定义列数据
-                extra_vals = []
-                for ec in self.extra_cols:
-                    val_raw = None
-                    for k in (ec, ec.lower(), ec.upper()):
-                        if k in row:
-                            val_raw = row[k]
-                            break
-                    extra_vals.append(cct.format_col_value(ec, val_raw))
-            else:
-                extra_vals = ['--'] * len(self.extra_cols)
+                rows_data.append((
+                    code, name, price, pct, state, dff, dff2, dff3, extra_vals, rs_val, resonance, source
+                ))
             
-            rows_data.append((
-                code, name, price, pct, state, dff, dff2, dff3, extra_vals, rs_val, resonance, source
-            ))
-            
-        # 4. 刷新渲染表格 (无闪烁双缓冲就地更新)
-        try:
+            # 4. 刷新渲染表格 (无闪烁双缓冲就地更新)
             vbar = self.table.verticalScrollBar()
             scroll_pos = vbar.value() if vbar else 0
 
@@ -778,6 +798,7 @@ class DragonLeaderMonitorDialog(QDialog, WindowMixin):
                 vbar.setValue(scroll_pos)
         finally:
             self._is_updating = False
+            self._is_updating_data = False
 
     def _get_main_app(self):
         # 0. Prioritize QApplication.instance().main_window directly
