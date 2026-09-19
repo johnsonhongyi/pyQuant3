@@ -62,6 +62,9 @@ from ats.ui.base_table import BaseATSTableWidget
 from ats.strategy.ipo_vwap_detector_engine import (
     IPOVWAPDetectorEngine, VWAPDetectorSignal, resolve_fast_ipo_name
 )
+from ats.strategy.ipo_trading_center import IPOTradingCenter
+from ats.alert_notifier import AlertNotifier
+from ats.ui.styles import load_config_node, save_config_node
 from ats.ui.ipo_detector_ipc import (
     get_ipo_detector_layout_file,
     pop_queued_stocks,
@@ -535,6 +538,11 @@ class IPOSubnewDetectorDialog(QMainWindow):
         self._auto_sync_timer.start(15 * 60 * 1000)
         QTimer.singleShot(2000, lambda: self._auto_sync_bottom_ipo_stocks(force=False))
 
+        # 4. 语音告警与异动通知开关 (持久化保存，默认开启)
+        self.voice_alert_enabled = load_config_node("ipo_detector_voice_enabled", True)
+        # 启动 1 秒后自动嗅探今日新股申购并广播提醒
+        QTimer.singleShot(1000, self._check_today_ipo_subscriptions)
+
         self._init_ui()
         self._load_persisted_state()
 
@@ -645,6 +653,12 @@ class IPOSubnewDetectorDialog(QMainWindow):
         btn_clean.toggled.connect(self._on_filter_toggled)
         self.btn_clean = btn_clean
         tb_layout.addWidget(btn_clean)
+
+        btn_voice = QPushButton("🔊 语音告警: 开" if self.voice_alert_enabled else "🔈 语音告警: 关")
+        btn_voice.setToolTip("开启/关闭检测中心语音异动播报与 Toast 提醒")
+        btn_voice.clicked.connect(self._on_toggle_voice_alert)
+        self.btn_voice = btn_voice
+        tb_layout.addWidget(btn_voice)
 
         btn_reset_default = QPushButton("🔄 重置新股池")
         btn_reset_default.setToolTip("重新从全市场拉取最新的全部新股与次新股")
@@ -1210,6 +1224,10 @@ class IPOSubnewDetectorDialog(QMainWindow):
                         self.table.setCurrentCell(r, 0)
                         break
 
+        # 🔊 高价值异动与战术分级语音播报与 Toast 告警 (带去重防抖)
+        if getattr(self, "voice_alert_enabled", True):
+            self._broadcast_high_value_signals()
+
         # 🛡️ 智能交易时段守护：只有开启【⏳ 自动轮询: 开】时，按时段自适应启动下一轮
         if getattr(self, "auto_refresh_enabled", False):
             is_trading, status_text = self._check_is_trading_time()
@@ -1223,6 +1241,69 @@ class IPOSubnewDetectorDialog(QMainWindow):
                     f"✅ 监控中: {len(self.monitored_codes)} 只 | 🎯 预下单: {pre_cnt} 只"
                 )
                 self.refresh_timer.start(60000)
+
+    def _on_toggle_voice_alert(self):
+        """开启/关闭检测中心语音与 Toast 提示"""
+        self.voice_alert_enabled = not self.voice_alert_enabled
+        save_config_node("ipo_detector_voice_enabled", self.voice_alert_enabled)
+        AlertNotifier.get_instance().voice_enabled = self.voice_alert_enabled
+        if hasattr(self, "btn_voice"):
+            self.btn_voice.setText("🔊 语音告警: 开" if self.voice_alert_enabled else "🔈 语音告警: 关")
+
+    def _check_today_ipo_subscriptions(self):
+        """嗅探今日新股申购并广播语音与 Toast 提醒"""
+        try:
+            trading_center = IPOTradingCenter.get_instance()
+            trading_center.check_today_ipo_subscriptions()
+        except Exception as e:
+            logger.debug(f"检查今日新股申购异常: {e}")
+
+    def _broadcast_high_value_signals(self):
+        """对全池高价值/高分级异动形态触发即时语音播报与 Toast 提醒 (自带 60 秒防抖去重)"""
+        try:
+            notifier = AlertNotifier.get_instance()
+            for sig in list(self.signals_map.values()):
+                tier = getattr(sig, "signal_tier", "WATCH")
+                stype = getattr(sig, "signal_type", "")
+                # 只有 SSS 绝杀级、S 级接力、或警报级才触发即时语音
+                if tier in ("SSS", "S", "ALERT") or stype in ("IPO_FIRST_BUY", "CLIMAX_EXIT"):
+                    action = "BUY"
+                    if "平仓" in sig.signal_desc or "止损" in sig.signal_desc or stype == "CLIMAX_EXIT":
+                        action = "SELL"
+                    notifier.notify_trading_signal(
+                        code=sig.code,
+                        name=sig.name,
+                        signal_type=stype or "IPO_VWAP_SIGNAL",
+                        price=sig.price,
+                        action=action,
+                        reason=f"[{tier}级] {sig.signal_desc}",
+                        target_window_title="新股次新股超短检测工具"
+                    )
+        except Exception as e:
+            logger.debug(f"广播高价值信号异常: {e}")
+
+    def locate_stock_in_table(self, code: str, auto_popup: bool = True, reason: str = ""):
+        """
+        【🎯 直达定位响应机制】：当点击通知 Toast 或外部直达请求时，唤醒置顶并滚动聚焦选中该行
+        """
+        if auto_popup:
+            self.show()
+            self.raise_()
+            self.activateWindow()
+
+        clean_code = "".join(ch for ch in str(code) if ch.isdigit()).zfill(6)
+        if not clean_code:
+            return
+
+        for r in range(self.table.rowCount()):
+            it = self.table.item(r, 0)
+            if it and it.text().strip():
+                c = "".join(ch for ch in it.text().strip() if ch.isdigit()).zfill(6)
+                if c == clean_code:
+                    self.table.setCurrentCell(r, 0)
+                    self.table.scrollToItem(it, QAbstractItemView.ScrollHint.PositionAtCenter)
+                    self._trigger_linkage_for_row(r, force=True)
+                    return
 
     def _check_is_trading_time(self) -> Tuple[bool, str]:
         """智能判定当前是否处于 A 股盘中交易时段"""

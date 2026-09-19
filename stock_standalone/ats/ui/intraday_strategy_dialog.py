@@ -4124,7 +4124,7 @@ class SBCIntradayChartDialog(QWidget):
                 app.setPalette(app_pal)
         except Exception:
             pass
-        self._unmaximized_size = (680, 420)  # 💡 维护未最大化前的真实标准尺寸，绝不被最大化污染
+        self._unmaximized_size = (800, 560)  # 💡 维护未最大化前的真实标准尺寸，绝不被最大化污染
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
@@ -4514,7 +4514,7 @@ class SBCIntradayChartDialog(QWidget):
 
         if self.isMaximized() or self.isFullScreen():
             # 💡 最大化或全屏状态下，严格提取未最大化前的真实尺寸 _unmaximized_size
-            uw, uh = 680, 420
+            uw, uh = 800, 560
             if hasattr(self, "_unmaximized_size") and isinstance(self._unmaximized_size, (tuple, list)):
                 uw, uh = self._unmaximized_size
             elif SBCIntradayChartDialog._global_sbc_size:
@@ -4689,7 +4689,7 @@ class SBCIntradayChartDialog(QWidget):
     def _restore_sbc_geometry(self):
         """【💾 物理恢复】从内存/JSON/QSettings 还原 SBC 全局统一窗口尺寸、坐标、看盘周期与自动测算状态 (含越界与2/3屏幕规格保护)"""
         try:
-            target_w, target_h = 680, 420
+            target_w, target_h = 800, 560
             x, y = 100, 100
             has_exact_pos = False
             restored_period = None
@@ -4762,7 +4762,7 @@ class SBCIntradayChartDialog(QWidget):
                     pass
 
             # 2. 回退读取 QSettings
-            if target_w == 680 and target_h == 420:
+            if target_w == 800 and target_h == 560:
                 try:
                     settings = QSettings("pyQuant3", "IntradayWorkbench")
                     if restored_auto_eval is None:
@@ -4806,7 +4806,7 @@ class SBCIntradayChartDialog(QWidget):
             SBCIntradayChartDialog._global_sbc_size = (target_w, target_h)
         except Exception as e:
             logger.debug(f"还原 SBC 窗口布局坐标异常: {e}")
-            self.resize(680, 420)
+            self.resize(800, 560)
 
     def showEvent(self, event):
         """窗口显示事件：将键盘焦点赋予走势图画布，实现免点击全局缩放"""

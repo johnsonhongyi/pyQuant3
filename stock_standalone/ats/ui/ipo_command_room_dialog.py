@@ -29,6 +29,7 @@ from PyQt6.QtGui import QColor, QFont, QAction, QKeySequence
 
 from ats.strategy.ipo_trading_center import IPOTradingCenter, IPOOrderDirective, IPOTradingPosition
 from ats.strategy.ipo_vwap_detector_engine import VWAPDetectorSignal
+from ats.alert_notifier import AlertNotifier
 from ats.ui.styles import (
     setup_header_persistence, auto_fit_columns_once,
     load_config_node, save_config_node, save_config_nodes,
@@ -304,6 +305,13 @@ class IPOCommandRoomDialog(QDialog):
         self.trading_center = IPOTradingCenter.get_instance()
         self._last_linkage_code = ""
 
+        # 视图模式控制：持仓（ACTIVE / CLOSED），指令（PENDING / HISTORY）
+        self._pos_view_mode = "ACTIVE"
+        self._orders_view_mode = "PENDING"
+        self._current_closed_positions_list: List[Dict[str, Any]] = []
+        self._current_signal_logs_list: List[Dict[str, Any]] = []
+        self._voice_enabled = load_config_node("ipo_cmd_voice_enabled", True)
+
         # 联动防抖定时器 (20ms)
         self._linkage_timer = QTimer(self)
         self._linkage_timer.setSingleShot(True)
@@ -342,6 +350,20 @@ class IPOCommandRoomDialog(QDialog):
 
         top_bar.addStretch()
 
+        # 全仓轮动模式开关
+        self.chk_rotation = QCheckBox("🔄 全仓轮动模式")
+        self.chk_rotation.setStyleSheet("color: #ffd700; font-weight: bold;")
+        self.chk_rotation.setToolTip("开启全仓轮动模式 (100% 仓位动态腾挪接力新龙头，弃弱留强高效轮转)")
+        self.chk_rotation.setChecked(self.trading_center.enable_full_rotation)
+        self.chk_rotation.toggled.connect(self._on_rotation_toggled)
+        top_bar.addWidget(self.chk_rotation)
+
+        # 语音报警状态开关
+        self.btn_voice = QPushButton("🔊 语音告警: 开" if self._voice_enabled else "🔈 语音告警: 关")
+        self.btn_voice.setToolTip("开启或关闭语音播报与异动通知")
+        self.btn_voice.clicked.connect(self._on_toggle_voice)
+        top_bar.addWidget(self.btn_voice)
+
         self.chk_auto_trade = QCheckBox("🤖 全自动跟随交易")
         self.chk_auto_trade.setStyleSheet("color: #00ff88; font-weight: bold;")
         self.chk_auto_trade.setChecked(self.trading_center.auto_follow_trading)
@@ -376,7 +398,6 @@ class IPOCommandRoomDialog(QDialog):
         self.tbl_rank.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.tbl_rank.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._bind_table_interactions(self.tbl_rank)
-        # 接入持久化与极窄模式默认列宽 (动能分 68px, 启动时点 76px 彻底杜绝文字截断，总宽紧凑防水平滚动条)
         self.tbl_rank.setup_persistence(
             "ipo_cmd_rank_table_header_v2",
             default_widths=[38, 56, 75, 56, 68, 76, 80, 260]
@@ -390,10 +411,30 @@ class IPOCommandRoomDialog(QDialog):
         v_right.setContentsMargins(0, 0, 0, 0)
         v_right.setSpacing(6)
 
-        # 右上方：持仓组合
-        grp_pos = QGroupBox("💼 舰队实盘持仓组合 (买错跌破 VWAP 0.6% 立即出局斩仓)")
-        v_pos = QVBoxLayout(grp_pos)
+        # 右上方：持仓组合与历史战绩
+        self.grp_pos = QGroupBox("💼 实盘持仓组合与复盘 (买错跌破 VWAP 0.6% 立即出局斩仓)")
+        v_pos = QVBoxLayout(self.grp_pos)
         v_pos.setContentsMargins(4, 4, 4, 4)
+        v_pos.setSpacing(4)
+
+        # 持仓卡片切换栏 (🟢 活跃持仓 vs 📜 历史平仓战绩)
+        h_pos_tabs = QHBoxLayout()
+        h_pos_tabs.setSpacing(4)
+        self.btn_pos_active = QPushButton("🟢 活跃持仓 (0)")
+        self.btn_pos_active.setCheckable(True)
+        self.btn_pos_active.setChecked(True)
+        self.btn_pos_active.setStyleSheet("font-weight: bold; color: #00ff88; background-color: #1a2a22; border-color: #00ff88;")
+        self.btn_pos_active.clicked.connect(lambda: self._set_pos_view_mode("ACTIVE"))
+        h_pos_tabs.addWidget(self.btn_pos_active)
+
+        self.btn_pos_closed = QPushButton("📜 历史平仓战绩 (0)")
+        self.btn_pos_closed.setCheckable(True)
+        self.btn_pos_closed.setChecked(False)
+        self.btn_pos_closed.setStyleSheet("font-weight: bold; color: #9aa0a6; background-color: #141620; border-color: #2b2e42;")
+        self.btn_pos_closed.clicked.connect(lambda: self._set_pos_view_mode("CLOSED"))
+        h_pos_tabs.addWidget(self.btn_pos_closed)
+        h_pos_tabs.addStretch()
+        v_pos.addLayout(h_pos_tabs)
 
         self.tbl_pos = IPOCommandRoomTableWidget(self)
         self.tbl_pos.setColumnCount(7)
@@ -408,12 +449,32 @@ class IPOCommandRoomDialog(QDialog):
             default_widths=[56, 75, 56, 58, 58, 65, 80]
         )
         v_pos.addWidget(self.tbl_pos)
-        v_right.addWidget(grp_pos, 2)
+        v_right.addWidget(self.grp_pos, 2)
 
-        # 右下方：待执行指令清单
-        grp_orders = QGroupBox("📋 集中交易调度待执行指令清单 (弃弱换马 / 领头羊进击 / 买错立斩)")
-        v_orders = QVBoxLayout(grp_orders)
+        # 右下方：待执行指令与信号迭代日志
+        self.grp_orders = QGroupBox("📋 集中交易调度与信号迭代日志 (弃弱换马 / 领头羊进击 / 买错立斩)")
+        v_orders = QVBoxLayout(self.grp_orders)
         v_orders.setContentsMargins(4, 4, 4, 4)
+        v_orders.setSpacing(4)
+
+        # 指令卡片切换栏 (⏳ 待执行指令 vs 📋 历史信号日志)
+        h_orders_tabs = QHBoxLayout()
+        h_orders_tabs.setSpacing(4)
+        self.btn_orders_pending = QPushButton("⏳ 待执行指令 (0)")
+        self.btn_orders_pending.setCheckable(True)
+        self.btn_orders_pending.setChecked(True)
+        self.btn_orders_pending.setStyleSheet("font-weight: bold; color: #00e5ff; background-color: #14242e; border-color: #00e5ff;")
+        self.btn_orders_pending.clicked.connect(lambda: self._set_orders_view_mode("PENDING"))
+        h_orders_tabs.addWidget(self.btn_orders_pending)
+
+        self.btn_orders_history = QPushButton("📋 历史信号日志 (0)")
+        self.btn_orders_history.setCheckable(True)
+        self.btn_orders_history.setChecked(False)
+        self.btn_orders_history.setStyleSheet("font-weight: bold; color: #9aa0a6; background-color: #141620; border-color: #2b2e42;")
+        self.btn_orders_history.clicked.connect(lambda: self._set_orders_view_mode("HISTORY"))
+        h_orders_tabs.addWidget(self.btn_orders_history)
+        h_orders_tabs.addStretch()
+        v_orders.addLayout(h_orders_tabs)
 
         self.tbl_orders = IPOCommandRoomTableWidget(self)
         self.tbl_orders.setColumnCount(6)
@@ -428,7 +489,7 @@ class IPOCommandRoomDialog(QDialog):
             default_widths=[75, 56, 75, 58, 68, 220]
         )
         v_orders.addWidget(self.tbl_orders)
-        v_right.addWidget(grp_orders, 3)
+        v_right.addWidget(self.grp_orders, 3)
 
         self.splitter.addWidget(right_panel)
         self.splitter.setStretchFactor(0, 3)
@@ -462,12 +523,24 @@ class IPOCommandRoomDialog(QDialog):
         """从表格行中智能提取 6 位股票代码"""
         if row < 0 or row >= table.rowCount():
             return ""
-        # 寻找包含 6 位连续数字的单元格 (通常在第 0 或第 1 列)
-        for c in (1, 0, 2):
+        # 1. 优先根据表头精确查找 "代码" 列
+        for c in range(table.columnCount()):
+            h_item = table.horizontalHeaderItem(c)
+            if h_item and "代码" in h_item.text():
+                it = table.item(row, c)
+                if it and it.text().strip():
+                    clean = "".join(ch for ch in it.text().strip() if ch.isdigit()).zfill(6)
+                    if len(clean) == 6:
+                        return clean
+        # 2. 兜底策略：遍历所有列，排除含 ":" 的时间戳，寻找 6 位数字代码
+        for c in range(table.columnCount()):
             it = table.item(row, c)
             if it and it.text().strip():
-                clean = "".join(ch for ch in it.text().strip() if ch.isdigit()).zfill(6)
-                if len(clean) == 6:
+                txt = it.text().strip()
+                if ":" in txt:
+                    continue
+                clean = "".join(ch for ch in txt if ch.isdigit()).zfill(6)
+                if len(clean) == 6 and clean.startswith(("0", "3", "6", "8", "4", "9")):
                     return clean
         return ""
 
@@ -475,11 +548,21 @@ class IPOCommandRoomDialog(QDialog):
         """从表格行中智能提取股票名称"""
         if row < 0 or row >= table.rowCount():
             return ""
-        for c in (2, 1):
+        # 1. 优先根据表头查找 "名称" 或 "标的" 列
+        for c in range(table.columnCount()):
+            h_item = table.horizontalHeaderItem(c)
+            if h_item and ("名称" in h_item.text() or "标的" in h_item.text()):
+                it = table.item(row, c)
+                if it and it.text().strip():
+                    txt = it.text().strip()
+                    if not txt.isdigit():
+                        return txt
+        # 2. 兜底策略
+        for c in range(table.columnCount()):
             it = table.item(row, c)
             if it and it.text().strip():
                 txt = it.text().strip()
-                if not txt.isdigit():
+                if not txt.isdigit() and ":" not in txt and len(txt) <= 10:
                     return txt
         return ""
 
@@ -494,10 +577,22 @@ class IPOCommandRoomDialog(QDialog):
         self._trigger_linkage_for_table_row(table, cur_r, force=False)
 
     def _open_arbitration_detail_for_row(self, table: QTableWidget, row: int):
-        """【🎯 集中仲裁极速详情窗】：从单例复用池秒级调出/刷新详情窗"""
+        """【🎯 集中仲裁极速详情窗】：从单例复用池秒级调出/刷新详情窗 (支持平仓战绩与信号迭代日志)"""
         code = self._extract_code_from_table(table, row)
         if not code:
             return
+
+        closed_pos_item = None
+        signal_log_item = None
+
+        if table is self.tbl_pos and self._pos_view_mode == "CLOSED":
+            if 0 <= row < len(self._current_closed_positions_list):
+                closed_pos_item = self._current_closed_positions_list[row]
+
+        if table is self.tbl_orders and self._orders_view_mode == "HISTORY":
+            if 0 <= row < len(self._current_signal_logs_list):
+                signal_log_item = self._current_signal_logs_list[row]
+
         sig = self.trading_center._reports_cache.get(code)
         if sig is None:
             for s in self.trading_center._ranked_cache:
@@ -512,7 +607,9 @@ class IPOCommandRoomDialog(QDialog):
         try:
             from ats.ui.ipo_arbitration_detail_dialog import IPOArbitrationDetailDialog
             IPOArbitrationDetailDialog.show_or_update(
-                code, signal_obj=sig, directive_obj=directive, parent=self
+                code, signal_obj=sig, directive_obj=directive,
+                closed_pos=closed_pos_item, log_item=signal_log_item,
+                parent=self
             )
         except Exception as e:
             logger.error(f"调出集中仲裁透视详情窗异常: {e}")
@@ -520,11 +617,21 @@ class IPOCommandRoomDialog(QDialog):
     def _on_table_double_clicked(self, table: QTableWidget, row: int, col: int = -1):
         """
         双击单元格智能分发：
+        - 若处于历史平仓战绩模式或历史信号日志模式：直接秒级调出全流程复盘详情窗；
         - 若双击集中仲裁/决议/理由/角色列：秒级调出/复用集中仲裁详情窗 (极速模式)；
         - 若双击其它列 (代码/名称/现价等)：秒级调出 SBC 10d VWAP 走势图。
         """
         code = self._extract_code_from_table(table, row)
         if not code:
+            return
+
+        # 操盘手复盘诉求：在历史平仓战绩或信号迭代日志模式下，双击整行任意列直接看详细复盘
+        if table is self.tbl_pos and self._pos_view_mode == "CLOSED":
+            self._open_arbitration_detail_for_row(table, row)
+            return
+
+        if table is self.tbl_orders and self._orders_view_mode == "HISTORY":
+            self._open_arbitration_detail_for_row(table, row)
             return
 
         is_arbitration_col = False
@@ -769,6 +876,113 @@ class IPOCommandRoomDialog(QDialog):
     def _on_auto_trade_toggled(self, checked: bool):
         self.trading_center.set_auto_follow_trading(checked)
 
+    def _on_rotation_toggled(self, checked: bool):
+        """切换全仓轮动模式 (100% 动态接力换马)"""
+        self.trading_center.set_full_rotation_enabled(checked)
+        msg = "已开启【全仓轮动模式】！优先 100% 满仓动态换马接力新龙头。" if checked else "已恢复常规阶梯仓位模式。"
+        self.chk_rotation.setToolTip(msg)
+        self.refresh_data()
+
+    def _on_toggle_voice(self):
+        """开启/关闭语音与 Toast 提示"""
+        self._voice_enabled = not self._voice_enabled
+        save_config_node("ipo_cmd_voice_enabled", self._voice_enabled)
+        AlertNotifier.get_instance().voice_enabled = self._voice_enabled
+        self.btn_voice.setText("🔊 语音告警: 开" if self._voice_enabled else "🔈 语音告警: 关")
+
+    def _set_pos_view_mode(self, mode: str):
+        """切换持仓面板视图：ACTIVE (活跃持仓) / CLOSED (历史平仓战绩)"""
+        self._user_selected_pos_mode = True
+        if self._pos_view_mode == mode:
+            return
+        self._pos_view_mode = mode
+        if mode == "ACTIVE":
+            self.btn_pos_active.setChecked(True)
+            self.btn_pos_active.setStyleSheet("font-weight: bold; color: #00ff88; background-color: #1a2a22; border-color: #00ff88;")
+            self.btn_pos_closed.setChecked(False)
+            self.btn_pos_closed.setStyleSheet("font-weight: bold; color: #9aa0a6; background-color: #141620; border-color: #2b2e42;")
+            self.tbl_pos.setColumnCount(7)
+            self.tbl_pos.setHorizontalHeaderLabels(["代码", "名称", "股数", "成本价", "现价", "浮盈%", "状态"])
+            self.grp_pos.setTitle("💼 舰队实盘持仓组合 (买错跌破 VWAP 0.6% 立即出局斩仓)")
+        else:
+            self.btn_pos_closed.setChecked(True)
+            self.btn_pos_closed.setStyleSheet("font-weight: bold; color: #ffd700; background-color: #2a2614; border-color: #ffd700;")
+            self.btn_pos_active.setChecked(False)
+            self.btn_pos_active.setStyleSheet("font-weight: bold; color: #9aa0a6; background-color: #141620; border-color: #2b2e42;")
+            self.tbl_pos.setColumnCount(7)
+            self.tbl_pos.setHorizontalHeaderLabels(["代码", "名称", "平仓日", "成本价", "平仓价", "实际盈亏%", "离场原因与复盘"])
+            self.grp_pos.setTitle("📜 舰队历史平仓战绩回溯 (双击行调出完整迭代复盘)")
+        self.refresh_data()
+
+    def _set_orders_view_mode(self, mode: str):
+        """切换指令面板视图：PENDING (待执行指令) / HISTORY (历史信号日志)"""
+        if self._orders_view_mode == mode:
+            return
+        self._orders_view_mode = mode
+        if mode == "PENDING":
+            self.btn_orders_pending.setChecked(True)
+            self.btn_orders_pending.setStyleSheet("font-weight: bold; color: #00e5ff; background-color: #14242e; border-color: #00e5ff;")
+            self.btn_orders_history.setChecked(False)
+            self.btn_orders_history.setStyleSheet("font-weight: bold; color: #9aa0a6; background-color: #141620; border-color: #2b2e42;")
+            self.tbl_orders.setColumnCount(6)
+            self.tbl_orders.setHorizontalHeaderLabels(["动作", "代码", "标的", "价格", "建议仓位", "决议依据理由"])
+            self.grp_orders.setTitle("📋 集中交易调度待执行指令清单 (弃弱换马 / 领头羊进击 / 买错立斩)")
+        else:
+            self.btn_orders_history.setChecked(True)
+            self.btn_orders_history.setStyleSheet("font-weight: bold; color: #ffaa00; background-color: #2a2014; border-color: #ffaa00;")
+            self.btn_orders_pending.setChecked(False)
+            self.btn_orders_pending.setStyleSheet("font-weight: bold; color: #9aa0a6; background-color: #141620; border-color: #2b2e42;")
+            self.tbl_orders.setColumnCount(6)
+            self.tbl_orders.setHorizontalHeaderLabels(["时间", "级别", "动作", "代码", "标的", "迭代说明与决议依据"])
+            self.grp_orders.setTitle("📋 集中交易历史信号与迭代日志 (双击行调出产生快照)")
+        self.refresh_data()
+
+    def locate_stock_in_table(self, code: str, auto_popup: bool = True, reason: str = ""):
+        """
+        【🎯 直达定位响应机制】：当点击通知 Toast 或外部直达请求时，唤醒置顶并高亮聚焦该行
+        """
+        if auto_popup:
+            self.show()
+            self.raise_()
+            self.activateWindow()
+
+        clean_code = "".join(ch for ch in str(code) if ch.isdigit()).zfill(6)
+        if not clean_code:
+            return
+
+        # 1. 先在赛马天梯表里找
+        for r in range(self.tbl_rank.rowCount()):
+            c = self._extract_code_from_table(self.tbl_rank, r)
+            if c == clean_code:
+                self.tbl_rank.setCurrentCell(r, 0)
+                it = self.tbl_rank.item(r, 0)
+                if it:
+                    self.tbl_rank.scrollToItem(it)
+                self._trigger_linkage_for_table_row(self.tbl_rank, r, force=True)
+                return
+
+        # 2. 再在持仓表里找
+        for r in range(self.tbl_pos.rowCount()):
+            c = self._extract_code_from_table(self.tbl_pos, r)
+            if c == clean_code:
+                self.tbl_pos.setCurrentCell(r, 0)
+                it = self.tbl_pos.item(r, 0)
+                if it:
+                    self.tbl_pos.scrollToItem(it)
+                self._trigger_linkage_for_table_row(self.tbl_pos, r, force=True)
+                return
+
+        # 3. 在待执行指令 / 日志表里找
+        for r in range(self.tbl_orders.rowCount()):
+            c = self._extract_code_from_table(self.tbl_orders, r)
+            if c == clean_code:
+                self.tbl_orders.setCurrentCell(r, 0)
+                it = self.tbl_orders.item(r, 0)
+                if it:
+                    self.tbl_orders.scrollToItem(it)
+                self._trigger_linkage_for_table_row(self.tbl_orders, r, force=True)
+                return
+
     def _on_exec_all_clicked(self):
         count = self.trading_center.execute_all_pending_directives()
         if count > 0:
@@ -778,11 +992,17 @@ class IPOCommandRoomDialog(QDialog):
         self.refresh_data()
 
     def refresh_data(self):
-        """刷新指挥室全部战情数据 (支持角色中文映射、数值精确排序与状态平滑保持)"""
+        """刷新指挥室全部战情数据 (支持角色中文映射、双模式切换与数值精确排序)"""
         summary = self.trading_center.get_fleet_summary()
         self.lbl_capital.setText(f"💰 总资金: {summary['total_capital']/10000:.1f}万 | 可用: {summary['available_cash']/10000:.1f}万")
         self.lbl_positions.setText(f"📊 持仓: {summary['holding_count']} 只 ({summary['fleet_weight_pct']}%仓)")
         self.lbl_leader.setText(f"🥇 爆款领头羊: {summary['top_leader_name']} ({summary['top_leader_score']}分)")
+
+        # 同步全仓轮动勾选状态
+        if hasattr(self, "chk_rotation"):
+            self.chk_rotation.blockSignals(True)
+            self.chk_rotation.setChecked(self.trading_center.enable_full_rotation)
+            self.chk_rotation.blockSignals(False)
 
         # ── 1. 刷新赛马天梯 (角色中文映射 + 支持点击表头数值排序) ──
         hv_rank = self.tbl_rank.horizontalHeader()
@@ -876,57 +1096,127 @@ class IPOCommandRoomDialog(QDialog):
         if 0 <= prev_row < self.tbl_rank.rowCount() and not self.tbl_rank.selectedItems():
             self.tbl_rank.setCurrentCell(prev_row, 0)
 
-        # ── 2. 刷新实盘持仓组合 (状态中文映射 + 收益数值排序) ──
+        # ── 2. 刷新实盘持仓组合或历史平仓战绩 ──
+        holdings = summary.get("holding_details", [])
+        closed_positions = self.trading_center.get_closed_positions()
+        self._current_closed_positions_list = list(reversed(closed_positions))
+
+        self.btn_pos_active.setText(f"🟢 活跃持仓 ({len(holdings)})")
+        self.btn_pos_closed.setText(f"📜 历史平仓战绩 ({len(self._current_closed_positions_list)})")
+
+        # 智能避免空白：若当前无活跃持仓但有历史战绩，且用户未主动切换，自适应切换展示历史战绩
+        if len(holdings) == 0 and len(self._current_closed_positions_list) > 0 and self._pos_view_mode == "ACTIVE" and not getattr(self, "_user_selected_pos_mode", False):
+            self._set_pos_view_mode("CLOSED")
+            self._user_selected_pos_mode = False  # 保持自适应标记
+            return
+
         hv_pos = self.tbl_pos.horizontalHeader()
         sort_col_pos = hv_pos.sortIndicatorSection() if hv_pos.isSortIndicatorShown() else -1
         sort_order_pos = hv_pos.sortIndicatorOrder() if hv_pos.isSortIndicatorShown() else Qt.SortOrder.AscendingOrder
 
-        holdings = summary.get("holding_details", [])
         self.tbl_pos.setSortingEnabled(False)
-        self.tbl_pos.setRowCount(len(holdings))
-        for r, pos in enumerate(holdings):
-            code_num = int(pos["code"]) if pos["code"].isdigit() else 999999
-            self.tbl_pos.setItem(r, 0, NumericTableWidgetItem(pos["code"], raw_val=code_num))
-            self.tbl_pos.setItem(r, 1, QTableWidgetItem(pos["name"]))
-            self.tbl_pos.setItem(r, 2, NumericTableWidgetItem(str(pos["shares"]), raw_val=int(pos["shares"])))
-            self.tbl_pos.setItem(r, 3, NumericTableWidgetItem(f"{pos['cost']:.2f}", raw_val=float(pos['cost'])))
-            self.tbl_pos.setItem(r, 4, NumericTableWidgetItem(f"{pos['now']:.2f}", raw_val=float(pos['now'])))
-            
-            pnl_val = float(pos['pnl_pct'])
-            pnl_it = NumericTableWidgetItem(f"{pnl_val:+.2f}%", raw_val=pnl_val)
-            pnl_it.setForeground(QColor("#ff4444") if pnl_val > 0 else QColor("#00ff88"))
-            self.tbl_pos.setItem(r, 5, pnl_it)
-            
-            # 持仓状态中文映射
-            status_raw = pos["status"]
-            status_cn = POS_STATUS_CN_MAP.get(status_raw, status_raw)
-            self.tbl_pos.setItem(r, 6, QTableWidgetItem(status_cn))
+        if self._pos_view_mode == "ACTIVE":
+            self.tbl_pos.setRowCount(len(holdings))
+            for r, pos in enumerate(holdings):
+                code_num = int(pos["code"]) if pos["code"].isdigit() else 999999
+                self.tbl_pos.setItem(r, 0, NumericTableWidgetItem(pos["code"], raw_val=code_num))
+                self.tbl_pos.setItem(r, 1, QTableWidgetItem(pos["name"]))
+                self.tbl_pos.setItem(r, 2, NumericTableWidgetItem(str(pos["shares"]), raw_val=int(pos["shares"])))
+                self.tbl_pos.setItem(r, 3, NumericTableWidgetItem(f"{pos['cost']:.2f}", raw_val=float(pos['cost'])))
+                self.tbl_pos.setItem(r, 4, NumericTableWidgetItem(f"{pos['now']:.2f}", raw_val=float(pos['now'])))
+                
+                pnl_val = float(pos['pnl_pct'])
+                pnl_it = NumericTableWidgetItem(f"{pnl_val:+.2f}%", raw_val=pnl_val)
+                pnl_it.setForeground(QColor("#ff4444") if pnl_val > 0 else QColor("#00ff88"))
+                self.tbl_pos.setItem(r, 5, pnl_it)
+                
+                status_raw = pos["status"]
+                status_cn = POS_STATUS_CN_MAP.get(status_raw, status_raw)
+                self.tbl_pos.setItem(r, 6, QTableWidgetItem(status_cn))
+        else:
+            # 历史平仓战绩模式
+            self.tbl_pos.setRowCount(len(self._current_closed_positions_list))
+            for r, c_pos in enumerate(self._current_closed_positions_list):
+                c_code = c_pos.get("code", "")
+                code_num = int(c_code) if c_code.isdigit() else 999999
+                self.tbl_pos.setItem(r, 0, NumericTableWidgetItem(c_code, raw_val=code_num))
+                self.tbl_pos.setItem(r, 1, QTableWidgetItem(c_pos.get("name", "--")))
+                self.tbl_pos.setItem(r, 2, QTableWidgetItem(c_pos.get("exit_date", "--")))
+                cost_p = float(c_pos.get("cost_price", 0.0))
+                exit_p = float(c_pos.get("exit_price", 0.0))
+                self.tbl_pos.setItem(r, 3, NumericTableWidgetItem(f"{cost_p:.2f}", raw_val=cost_p))
+                self.tbl_pos.setItem(r, 4, NumericTableWidgetItem(f"{exit_p:.2f}", raw_val=exit_p))
+                
+                realized_pnl = float(c_pos.get("realized_pnl_pct", 0.0))
+                pnl_it = NumericTableWidgetItem(f"{realized_pnl:+.2f}%", raw_val=realized_pnl)
+                pnl_it.setForeground(QColor("#ff4444") if realized_pnl > 0 else QColor("#00ff88"))
+                self.tbl_pos.setItem(r, 5, pnl_it)
+                self.tbl_pos.setItem(r, 6, QTableWidgetItem(c_pos.get("exit_reason", "--")))
 
         self.tbl_pos.setSortingEnabled(True)
         if sort_col_pos >= 0:
             self.tbl_pos.sortItems(sort_col_pos, sort_order_pos)
 
-        # ── 3. 刷新待执行指令清单 (数值排序) ──
+        # ── 3. 刷新待执行指令清单或历史信号日志 ──
+        directives = self.trading_center.get_pending_directives()
+        signal_logs = self.trading_center.get_signal_iteration_log()
+        self._current_signal_logs_list = list(reversed(signal_logs))
+
+        self.btn_orders_pending.setText(f"⏳ 待执行指令 ({len(directives)})")
+        self.btn_orders_history.setText(f"📋 历史信号日志 ({len(self._current_signal_logs_list)})")
+
         hv_orders = self.tbl_orders.horizontalHeader()
         sort_col_orders = hv_orders.sortIndicatorSection() if hv_orders.isSortIndicatorShown() else -1
         sort_order_orders = hv_orders.sortIndicatorOrder() if hv_orders.isSortIndicatorShown() else Qt.SortOrder.AscendingOrder
 
-        directives = self.trading_center.get_pending_directives()
         self.tbl_orders.setSortingEnabled(False)
-        self.tbl_orders.setRowCount(len(directives))
-        for r, d in enumerate(directives):
-            act_it = QTableWidgetItem(d.action)
-            if d.action == "BUY":
-                act_it.setForeground(QColor("#00ff88"))
-            elif d.action in ("SELL", "SWITCH_SWAP"):
-                act_it.setForeground(QColor("#ff5555"))
-            self.tbl_orders.setItem(r, 0, act_it)
-            code_num = int(d.code) if d.code.isdigit() else 999999
-            self.tbl_orders.setItem(r, 1, NumericTableWidgetItem(d.code, raw_val=code_num))
-            self.tbl_orders.setItem(r, 2, QTableWidgetItem(d.name))
-            self.tbl_orders.setItem(r, 3, NumericTableWidgetItem(f"{d.price:.2f}", raw_val=float(d.price)))
-            self.tbl_orders.setItem(r, 4, NumericTableWidgetItem(f"{d.size_pct:.0f}%", raw_val=float(d.size_pct)))
-            self.tbl_orders.setItem(r, 5, QTableWidgetItem(d.reason))
+        if self._orders_view_mode == "PENDING":
+            self.tbl_orders.setRowCount(len(directives))
+            for r, d in enumerate(directives):
+                act_it = QTableWidgetItem(d.action)
+                if d.action in ("BUY", "FULL_ROTATION_SWAP"):
+                    act_it.setForeground(QColor("#00ff88"))
+                elif d.action in ("SELL", "SWITCH_SWAP"):
+                    act_it.setForeground(QColor("#ff5555"))
+                self.tbl_orders.setItem(r, 0, act_it)
+                code_num = int(d.code) if d.code.isdigit() else 999999
+                self.tbl_orders.setItem(r, 1, NumericTableWidgetItem(d.code, raw_val=code_num))
+                self.tbl_orders.setItem(r, 2, QTableWidgetItem(d.name))
+                self.tbl_orders.setItem(r, 3, NumericTableWidgetItem(f"{d.price:.2f}", raw_val=float(d.price)))
+                self.tbl_orders.setItem(r, 4, NumericTableWidgetItem(f"{d.size_pct:.0f}%", raw_val=float(d.size_pct)))
+                self.tbl_orders.setItem(r, 5, QTableWidgetItem(d.reason))
+        else:
+            # 历史信号日志模式
+            self.tbl_orders.setRowCount(len(self._current_signal_logs_list))
+            for r, s_log in enumerate(self._current_signal_logs_list):
+                ts_str = s_log.get("timestamp", "--")
+                if " " in ts_str:
+                    ts_str = ts_str.split(" ", 1)[1]  # 仅保留时分秒更紧凑
+                self.tbl_orders.setItem(r, 0, QTableWidgetItem(ts_str))
+                tier_str = s_log.get("signal_tier", "S")
+                tier_it = QTableWidgetItem(tier_str)
+                if "SSS" in tier_str:
+                    tier_it.setForeground(QColor("#ffd700"))
+                elif "S" in tier_str:
+                    tier_it.setForeground(QColor("#00ff88"))
+                elif "A" in tier_str:
+                    tier_it.setForeground(QColor("#00e5ff"))
+                else:
+                    tier_it.setForeground(QColor("#ff5555"))
+                self.tbl_orders.setItem(r, 1, tier_it)
+
+                act_it = QTableWidgetItem(s_log.get("action", "--"))
+                if s_log.get("action") in ("BUY", "FULL_ROTATION_SWAP"):
+                    act_it.setForeground(QColor("#00ff88"))
+                elif s_log.get("action") in ("SELL", "STOP_LOSS"):
+                    act_it.setForeground(QColor("#ff5555"))
+                self.tbl_orders.setItem(r, 2, act_it)
+
+                s_code = s_log.get("code", "")
+                code_num = int(s_code) if s_code.isdigit() else 999999
+                self.tbl_orders.setItem(r, 3, NumericTableWidgetItem(s_code, raw_val=code_num))
+                self.tbl_orders.setItem(r, 4, QTableWidgetItem(s_log.get("name", "--")))
+                self.tbl_orders.setItem(r, 5, QTableWidgetItem(s_log.get("reason", "--")))
 
         self.tbl_orders.setSortingEnabled(True)
         if sort_col_orders >= 0:
