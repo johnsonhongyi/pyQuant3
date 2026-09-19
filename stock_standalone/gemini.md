@@ -1,3 +1,28 @@
+## 2026-09-19 03:15
+- [x] **【新股检测中心与集中交易中心接入系统语音告警（全仓轮动换股、新股申购、开盘首日高级信号与全生命周期信号复盘迭代日志）】(`ats/alert_notifier.py`, `ats/strategy/ipo_trading_center.py`, `ats/strategy/ipo_vwap_detector_engine.py`, `ats/ui/ipo_subnew_detector_dialog.py`, `ats/ui/ipo_command_room_dialog.py`, `ats/ui/ipo_arbitration_detail_dialog.py`, `tests/test_ipo_detector_and_trading_center_voice_alert.py`, `20260919_0315_task.md`)**：
+    - [x] **操盘手现场明确指示与三大攻坚需求 (P0)**：
+        - 1) “检测中心,集中交易调度室资金的轮转交易需要全仓轮动的换股切换持续每日操作的能力,全面接入ats的报警api中,还需要更高级的信号方式”；
+        - 2) “新股次新股的申购,开盘首日的高级信号通知能力”；
+        - 3) “交易中心有信号日志,点击详情查看,迭代日志,不是今天卖了就没下文了”；
+    - [x] **系统核心设计与实施落地**：
+        - 1) **全仓轮动换股机制与持续每日操作 (`ats/strategy/ipo_trading_center.py`)**：集中交易调度室建立全仓轮动模式（`ROTATION_FULL_CAPITAL`，100% 仓位集中围猎），当持仓标的动能明显衰竭且全池涌现超级领头羊时，生成原子 `FULL_ROTATION_SWAP` 指令（坚决平仓旧标的回笼资金并沉淀战绩，腾挪 100% 资金全速接力新龙头），支持持续每日操作接力；
+        - 2) **彻底根治“今天卖了就没下文”：账本持久化与全生命周期复盘迭代日志 (`ats/strategy/ipo_trading_center.py`, `ats/ui/ipo_command_room_dialog.py`, `ats/ui/ipo_arbitration_detail_dialog.py`)**：
+          - 持仓卡片支持 `[🟢 活跃持仓 (N)]` 与 `[📜 历史平仓战绩 (M)]` 自由切换；
+          - 指令卡片支持 `[⏳ 待执行指令 (N)]` 与 `[📋 历史信号日志 (M)]` 自由切换；
+          - 双击或点击任一行呼出 `IPOArbitrationDetailDialog` 集中仲裁详情窗，对已平仓股票提供买卖点、盈亏比、胜负手全流程复盘，对历史信号提供迭代说明与调仓换马追踪；
+          - 本地 `ipo_trading_ledger.json` 原子落盘与冷启动恢复，隔离纯内存测试实例不污染磁盘；
+        - 3) **更高级的分级战术信号体系 (`ats/strategy/ipo_vwap_detector_engine.py`)**：打破单一扁平文本，构建分级体系（👑 `SSS 绝杀级`、🥇 `S 级接力`、🎯 `A 级潜伏`、🚨 `ALERT 警报`），包含全仓轮动建议、换股对、盈亏比空间与极窄止损防守位；
+        - 4) **今日新股申购即时提醒 (`ats/strategy/ipo_trading_center.py`, `ats/ui/ipo_subnew_detector_dialog.py`)**：直连权威日历（`NewStockFetcher`），早盘/盘中自动嗅探今日可申购新股（代码、名称、申购代码、发行价、顶格申购股数），通过 ATS 报警 API 广播语音与 Toast 弹窗并单日去重；
+        - 5) **开盘首日四大高级信号引擎 (`ats/strategy/ipo_vwap_detector_engine.py`)**：深度识别首日无涨跌幅特征：👑 首日早鸟惜售吸筹（SSS级）、⚡ 首日低开恐吓放量反包（SSS级）、🚨 首日临停冲高算法挂单高抛（ALERT级）与 🚨 首日阴跌破位避险（ALERT级）；
+        - 6) **升级系统通知告警中心 (`ats/alert_notifier.py`)**：扩充实战专用语音字典（全仓轮动换马、首日绝杀吸筹、首日恐吓反包、首日临停高抛、筑底预埋单、共振突破、新股申购提醒等）；多屏幕 Toast 识别窗口中纳入检测中心与指挥室，实现 `locate_stock_in_table(code)` 点击 Toast 物理还原并秒级高亮定位股票；
+        - 7) **界面交互与状态联动 (`ats/ui/ipo_subnew_detector_dialog.py`, `ats/ui/ipo_command_room_dialog.py`)**：顶栏增加“全仓轮动模式”与“🔊 语音告警”切换控制；
+        - 8) **自动化测试全覆盖 100% 验证通过 (38/38 PASSED)**：
+          - `tests/test_ipo_detector_and_trading_center_voice_alert.py` (7/7 PASSED)
+          - `tests/test_ipo_persistence_and_auto_sync.py` (11/11 PASSED)
+          - `tests/test_ipo_fleet_trading_arbitration.py` (8/8 PASSED)
+          - `tests/test_ipo_vwap_bottom_base_preorder.py` (6/6 PASSED)
+          - `tests/test_ipo_vwap_sentiment_and_horse_race.py` (6/6 PASSED)
+
 ## 2026-09-19 00:45
 - [x] **【新股检测工具全屏自适应列宽消灭黑边、纯手动持久化规范与 SBC 独立窗口持久化尺寸生效】(`ats/ui/ipo_subnew_detector_dialog.py`, `ats/ui/intraday_strategy_dialog.py`, `tests/test_ipo_persistence_and_auto_sync.py`, `20260919_0025_task.md`)**：
     - [x] **操盘手现场明确指示与三大硬核攻坚 (P0)**：

@@ -108,6 +108,7 @@ class VWAPDetectorSignal:
     # 最终决策信号 (买错就出局终极闭环)
     signal_type: str = "WATCH"        # PRE_ORDER / PULLBACK_BUY / BREAKOUT / WEAK_EXIT / CLIMAX_EXIT / IPO_FIRST_BUY / WATCH
     signal_level: str = "⚪"          # 🎯 预下单 / 🚀 回踩启动 / 🔥 首发吸筹 / ⚡ 放量加速 / 🚨 疯狂平仓 / ⛔ 破位出局 / ⏱️ 观察
+    signal_tier: str = "WATCH"        # 👑 SSS 绝杀级 / 🥇 S 级接力 / 🎯 A 级潜伏 / 🚨 ALERT 警报 / ⏱️ WATCH
     signal_desc: str = ""             # 详细解释说明
     stop_loss_price: float = 0.0      # 极窄建议止损位 (通常紧贴 VWAP 或次低点，买错就出局)
     is_climax_exit: bool = False      # 是否触发极端高潮平仓 (天量滞涨/过山车预警)
@@ -860,23 +861,26 @@ class IPOVWAPDetectorEngine:
         if sig.is_climax_exit:
             sig.signal_type = "CLIMAX_EXIT"
             sig.signal_level = "🚨 疯狂平仓"
+            sig.signal_tier = "ALERT"
             sig.structure_tag = "极端高潮放量"
             sell_guide = f"坚决平仓保利，建议提前算法挂单≈¥{sig.climax_preset_sell_price:.2f}分批止盈逃顶!" if sig.climax_preset_sell_price > 0 else "坚决平仓保利，严禁追买!"
             sig.signal_desc = f"现价偏离VWAP达极限(+{sig.vwap_diff_pct:.1f}%)且冲高天量滞涨，主力疯狂兑现，{sell_guide}"
             return
 
-        # 2. 首日上市吸筹黄金买点 (全天贴线惜售，丝毫不碰 VWAP，首日标杆最高优先)
+        # 2. 首日上市吸筹黄金买点 (全天贴线惜售，丝毫不碰 VWAP，首日标杆最高优先 👑 SSS级)
         if sig.is_ipo_first_day and sig.is_above_vwap and sig.vwap_diff_pct <= 15.0 and sig.vwap_adhesion_ratio >= 65.0:
             sig.signal_type = "IPO_FIRST_BUY"
             sig.signal_level = "🔥 首发吸筹"
+            sig.signal_tier = "SSS"
             sig.structure_tag = "首日贴线惜售"
             sig.signal_desc = f"首发上市紧贴VWAP({sig.vwap:.2f})上方爬升且回踩不碰，主力筹码高度惜售，全天黄金进击点!"
             return
 
-        # 3. 【操盘手神级图解：60F下降通道突破 + 多日平底箱体尾盘收新高 (蓝色光标同款)】
+        # 3. 【操盘手神级图解：60F下降通道突破 + 多日平底箱体尾盘收新高 (蓝色光标同款 🎯 A级)】
         if not sig.is_ipo_first_day and getattr(sig, "is_swing_channel_breakout", False):
             sig.signal_type = "SWING_PREORDER"
             sig.signal_level = "🔭 通道突破"
+            sig.signal_tier = "A"
             sig.structure_tag = "多日平底+通道突破"
             space_str = f"博周一冲破VWAP(空间+{sig.rebound_to_vwap_space_pct:.1f}%)" if sig.rebound_to_vwap_space_pct > 0 else "大级别反转蓄势"
             sig.signal_desc = f"60F突破下降通道+多日平底({sig.base_support_level:.2f})箱体突破，尾盘放量收最高! 虽在VWAP({sig.vwap:.2f})下但属大级别拐点，极窄止损{sig.stop_loss_price:.2f}元(60F底台)，{space_str}!"
@@ -885,10 +889,11 @@ class IPOVWAPDetectorEngine:
         # 4. 【操盘手核心进化：寻找结构与动能抓手，底部企稳预埋与放量共振】
         # 大量新股超跌偏离 VWAP 人气很弱，但有些开始底部缩量企稳加速，需要预埋单，不能等涨起来到了 VWAP 再追！
         if not sig.is_ipo_first_day and sig.has_bottom_base and sig.base_inflection_confirmed:
-            # 判断是放量加速冲锋 (共振突击)，还是横盘平底初现拐点 (预埋潜伏)
+            # 判断是放量加速冲锋 (共振突击 🥇 S级)，还是横盘平底初现拐点 (预埋潜伏 🎯 A级)
             if sig.launch_slope_deg >= 25.0 or sig.change_pct >= 2.0 or (sig.price >= sig.base_support_level * 1.025):
                 sig.signal_type = "BASE_BREAKOUT"
                 sig.signal_level = "⚡ 筑底共振"
+                sig.signal_tier = "S"
                 sig.structure_tag = "底部放量共振"
                 space_str = f"博反弹距VWAP+{sig.rebound_to_vwap_space_pct:.1f}%空间" if sig.rebound_to_vwap_space_pct > 0 else "主升推进"
                 sig.signal_desc = f"底部平底/双底({sig.base_support_level:.2f})缩量企稳后放量加速拐头! {space_str}，极窄止损{sig.stop_loss_price:.2f}元"
@@ -896,49 +901,57 @@ class IPOVWAPDetectorEngine:
             else:
                 sig.signal_type = "BASE_PREORDER"
                 sig.signal_level = "🎯 筑底预埋"
+                sig.signal_tier = "A"
                 sig.structure_tag = "底部缩量平底"
                 space_str = f"向上距VWAP空间+{sig.rebound_to_vwap_space_pct:.1f}%" if sig.rebound_to_vwap_space_pct > 0 else ""
                 sig.signal_desc = f"底部({sig.base_support_level:.2f})缩量企稳横盘构筑扎实结构，动能拐头初现! 提前预埋单挂单潜伏，{space_str}，买错跌破{sig.stop_loss_price:.2f}元立斩!"
                 return
 
-        # 4. 破位弱势股直接拦截 (买错就出局终极闭环，仅对无筑底结构的破位标的一票否决)
+        # 4. 破位弱势股直接拦截 (买错就出局终极闭环，仅对无筑底结构的破位标的一票否决 🚨 ALERT级)
         if not sig.is_above_vwap and sig.vwap_diff_pct < -0.6:
             sig.signal_type = "WEAK_EXIT"
             sig.signal_level = "⛔ 破位止损点"
+            sig.signal_tier = "ALERT"
             sig.structure_tag = "破位运行"
-            sig.signal_desc = f"跌破生命线VWAP({sig.vwap:.2f})达{sig.vwap_diff_pct:.1f}%且无筑底结构，买错坚决止损出局，严禁加仓幻想!"
+            first_day_hint = "【首日破位避险】" if sig.is_ipo_first_day else ""
+            sig.signal_desc = f"{first_day_hint}跌破生命线VWAP({sig.vwap:.2f})达{sig.vwap_diff_pct:.1f}%且无筑底结构，买错坚决止损出局，严禁加仓幻想接飞刀!"
             return
 
-        # 4. 经典黄金买点: 回踩不碰 (回踩靠拢 VWAP 但不碰到跌破，极限买点)
+        # 4. 经典黄金买点: 回踩不碰 (回踩靠拢 VWAP 但不碰到跌破，极限买点 🥇 S级)
         if sig.pullback_no_touch:
             sig.signal_type = "PULLBACK_BUY"
             sig.signal_level = "🚀 回踩启动"
+            sig.signal_tier = "S"
             sig.structure_tag = "回踩不碰"
             sig.signal_desc = f"价格在 VWAP({sig.vwap:.2f}) 之上强势回踩不碰! 极限买点确立，建议止损价 {sig.stop_loss_price:.2f}元"
             return
 
-        # 5. 早盘恐吓洗盘反包买点
+        # 5. 早盘恐吓洗盘反包买点 (首日为 👑 SSS级，常规次新为 🥇 S级)
         if sig.is_morning_scare_rebound and sig.is_above_vwap:
             sig.signal_type = "SCARE_REBOUND"
             sig.signal_level = "⚡ 恐吓反包"
+            sig.signal_tier = "SSS" if sig.is_ipo_first_day else "S"
             sig.structure_tag = "低开恐吓反包"
-            sig.signal_desc = f"早盘竞价低开恐吓洗盘完毕，放量站上VWAP({sig.vwap:.2f})拔地而起，主力反向点火进击!"
+            prefix_txt = "【首日恐吓反包】" if sig.is_ipo_first_day else ""
+            sig.signal_desc = f"{prefix_txt}早盘竞价低开恐吓洗盘完毕，放量站上VWAP({sig.vwap:.2f})拔地而起，主力反向点火进击!"
             return
 
-        # 6. 预判潜伏结构: 在 VWAP 走平 1~3 天 (博反弹/加速预下单)
+        # 6. 预判潜伏结构: 在 VWAP 走平 1~3 天 (博反弹/加速预下单 🎯 A级)
         if sig.consolidation_days >= 1:
             sig.signal_type = "PRE_ORDER"
             day_str = f"{sig.consolidation_days}天" if sig.consolidation_days < 3 else "3天+"
             sig.signal_level = "🎯 预下单"
+            sig.signal_tier = "A"
             sig.structure_tag = f"在VWAP走平{day_str}"
             k_desc = f" ({sig.trend_desc})" if sig.trend_desc else ""
             sig.signal_desc = f"在 VWAP 上方已走平蓄势 {day_str}{k_desc}，可预挂单潜伏，博加速拉升! 破 VWAP({sig.vwap:.2f}) 即止损"
             return
 
-        # 7. 放量突破 / 强势上攻
+        # 7. 放量突破 / 强势上攻 (🥇 S级)
         if sig.is_above_vwap and sig.vwap_diff_pct >= 2.0:
             sig.signal_type = "BREAKOUT"
             sig.signal_level = "⚡ 放量加速"
+            sig.signal_tier = "S"
             sig.structure_tag = "强势主升"
             sig.signal_desc = f"现价站上 VWAP 上方 +{sig.vwap_diff_pct:.1f}%，分时多头推升加速中"
             return
@@ -947,12 +960,14 @@ class IPOVWAPDetectorEngine:
         if sig.is_above_vwap:
             sig.signal_type = "WATCH"
             sig.signal_level = "⏱️ 站稳VWAP"
+            sig.signal_tier = "WATCH"
             sig.structure_tag = "线上震荡"
             sig.signal_desc = f"处于 VWAP({sig.vwap:.2f}) 之上震荡观察，等待回踩不碰或走平确认"
             return
 
         # 9. 默认观望
         sig.signal_type = "WATCH"
+        sig.signal_tier = "WATCH"
         sig.signal_level = "⚪ 观望"
         sig.structure_tag = "常规震荡"
         sig.signal_desc = "多空平衡，暂无极限预下单结构"

@@ -29,6 +29,9 @@ import time
 import math
 import logging
 import threading
+import json
+import copy
+import datetime
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Any, Tuple
 
@@ -37,10 +40,12 @@ from ats.strategy.ipo_vwap_detector_engine import VWAPDetectorSignal, batch_eval
 
 logger = logging.getLogger("IPOTradingCenter")
 
+TRADING_LEDGER_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "config", "ipo_trading_ledger.json")
+
 
 @dataclass
 class IPOTradingPosition:
-    """新股次新统一持仓状态容器"""
+    """新股次新统一持仓状态容器 (全生命周期追踪与复盘迭代)"""
     code: str
     name: str
     shares: int = 0
@@ -58,12 +63,38 @@ class IPOTradingPosition:
     max_drawdown_from_peak: float = 0.0 # 从最高点回撤%
     last_action: str = ""
     last_action_time: str = ""
+    exit_price: float = 0.0           # 平仓卖出价
+    exit_time: str = ""               # 平仓时间
+    exit_date: str = ""               # 平仓日期
+    realized_pnl_pct: float = 0.0     # 实际平仓盈亏%
+    realized_pnl_amount: float = 0.0  # 实际平仓盈亏金额
+    exit_reason: str = ""             # 平仓原因与复盘记录
+    entry_reason: str = ""            # 买入建仓依据
+    signal_tier: str = "S"            # 触发建仓时的信号级别 (SSS / S / A)
+
+    def to_dict(self) -> Dict[str, Any]:
+        from dataclasses import asdict
+        return asdict(self)
+
+    def __getitem__(self, item: str) -> Any:
+        if hasattr(self, item):
+            return getattr(self, item)
+        raise KeyError(item)
+
+    def __setitem__(self, key: str, value: Any) -> None:
+        setattr(self, key, value)
+
+    def __contains__(self, item: str) -> bool:
+        return hasattr(self, item)
+
+    def get(self, item: str, default: Any = None) -> Any:
+        return getattr(self, item, default)
 
 
 @dataclass
 class IPOOrderDirective:
     """交易中心向执行端分发的标准订单指令"""
-    action: str                       # "BUY" | "SELL" | "HOLD" | "SWITCH_SWAP"
+    action: str                       # "BUY" | "SELL" | "HOLD" | "SWITCH_SWAP" | "FULL_ROTATION_SWAP"
     code: str
     name: str
     price: float = 0.0
@@ -74,6 +105,27 @@ class IPOOrderDirective:
     horse_rank: int = 999             # 当前在全池的赛马排名
     sentiment_phase: str = ""         # 所处全市场情绪阶段
     timestamp: float = 0.0
+    signal_tier: str = "S"            # "SSS" | "S" | "A" | "ALERT"
+    target_swap_code: str = ""        # 全仓轮动换马接力目标代码
+    target_swap_name: str = ""        # 全仓轮动换马接力目标名称
+
+    def to_dict(self) -> Dict[str, Any]:
+        from dataclasses import asdict
+        return asdict(self)
+
+    def __getitem__(self, item: str) -> Any:
+        if hasattr(self, item):
+            return getattr(self, item)
+        raise KeyError(item)
+
+    def __setitem__(self, key: str, value: Any) -> None:
+        setattr(self, key, value)
+
+    def __contains__(self, item: str) -> bool:
+        return hasattr(self, item)
+
+    def get(self, item: str, default: Any = None) -> Any:
+        return getattr(self, item, default)
 
 
 class IPOTradingCenter:
@@ -83,16 +135,23 @@ class IPOTradingCenter:
     @classmethod
     def get_instance(cls):
         if cls._instance is None:
-            cls._instance = cls()
+            cls._instance = cls(auto_load_ledger=True)
         return cls._instance
 
-    def __init__(self, total_capital: float = 1000000.0):
+    def __init__(self, total_capital: float = 1000000.0, auto_load_ledger: bool = False, ledger_file: Optional[str] = None):
         self.total_capital = total_capital       # 虚拟/实盘总资金池 (默认 100 万基准)
         self.available_cash = total_capital
+        self._ledger_file = ledger_file
+        self._auto_load_ledger = auto_load_ledger
         self._positions: Dict[str, IPOTradingPosition] = {}
+        self._closed_positions: List[IPOTradingPosition] = []
+        self._signal_iteration_log: List[Dict[str, Any]] = []
         self._reports_cache: Dict[str, VWAPDetectorSignal] = {}
         self._ranked_cache: List[VWAPDetectorSignal] = []
         self._order_history: List[IPOOrderDirective] = []
+        self._notified_directive_keys: Dict[str, float] = {}
+        self._today_notified_subscriptions: set = set()
+        self.trading_mode: str = "ROTATION_FULL_CAPITAL" # "ROTATION_FULL_CAPITAL" (全仓轮动单股接力) | "MULTI_POSITION" (组合分仓)
         self._lock = threading.RLock()
         
         self.sentiment_engine = IPOMarketSentimentEngine.get_instance()
@@ -100,6 +159,42 @@ class IPOTradingCenter:
         self._max_total_position_pct: float = 80.0 # 最大允许总仓位
         self.auto_follow_trading: bool = False     # 全自动跟随交易开关 (开启后自动撮合指令)
         self._pending_directives: List[IPOOrderDirective] = []
+
+        # ATS 外部语音报警与异动信号感知统计与优质注入池
+        self._external_signal_stats: Dict[str, int] = {
+            "ladder_count": 0,
+            "dragon_count": 0,
+            "other_count": 0,
+            "quality_injected_count": 0
+        }
+        self._perceived_external_signals: List[Dict[str, Any]] = []
+        self._injected_quality_stocks: Dict[str, Dict[str, Any]] = {}
+
+        # 仅当明确开启或指定账本文件时才从磁盘加载 (测试创建的纯内存临时实例不被磁盘历史污染)
+        if auto_load_ledger or ledger_file:
+            self._load_persisted_ledger()
+
+    @property
+    def enable_full_rotation(self) -> bool:
+        """是否处于全仓轮动模式 (ROTATION_FULL_CAPITAL)"""
+        return self.trading_mode == "ROTATION_FULL_CAPITAL"
+
+    @enable_full_rotation.setter
+    def enable_full_rotation(self, val: bool) -> None:
+        self.set_full_rotation_enabled(val)
+
+    def set_full_rotation_enabled(self, enabled: bool) -> None:
+        """开启或关闭全仓轮动模式"""
+        mode = "ROTATION_FULL_CAPITAL" if enabled else "MULTI_POSITION"
+        self.set_trading_mode(mode)
+
+    def set_trading_mode(self, mode: str) -> None:
+        """切换交易模式: ROTATION_FULL_CAPITAL (全仓轮动换马接力) 或 MULTI_POSITION (组合分仓)"""
+        with self._lock:
+            if mode in ("ROTATION_FULL_CAPITAL", "MULTI_POSITION"):
+                self.trading_mode = mode
+                logger.info(f"🔄 [IPO-TRADING] 资金模式切换为: {self.trading_mode}")
+                self._save_persisted_ledger()
 
     def set_auto_follow_trading(self, enabled: bool) -> None:
         """开启/关闭全自动跟随交易"""
@@ -111,6 +206,183 @@ class IPOTradingCenter:
         """获取当前待执行的最新交易指令"""
         with self._lock:
             return list(self._pending_directives)
+
+    def get_closed_positions(self) -> List[IPOTradingPosition]:
+        """获取历史已平仓/出局持仓列表 (支持复盘回溯与迭代详情查看)"""
+        with self._lock:
+            return list(self._closed_positions)
+
+    def get_signal_iteration_log(self) -> List[Dict[str, Any]]:
+        """获取全生命周期信号决策与迭代历史日志 (杜绝今天卖了就没下文)"""
+        with self._lock:
+            return list(self._signal_iteration_log)
+
+    def _load_persisted_ledger(self):
+        """【💾 持久化账本加载】冷启动瞬间恢复历史持仓、平仓记录、指令历史与信号迭代日志"""
+        target_file = getattr(self, "_ledger_file", None)
+        if not target_file and getattr(self, "_auto_load_ledger", False):
+            target_file = TRADING_LEDGER_FILE
+        if not target_file or not os.path.exists(target_file):
+            return
+        try:
+            with open(target_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if not isinstance(data, dict):
+                    return
+                self.trading_mode = data.get("trading_mode", "ROTATION_FULL_CAPITAL")
+                self.total_capital = float(data.get("total_capital", self.total_capital))
+                self.available_cash = float(data.get("available_cash", self.available_cash))
+                
+                # 恢复活跃持仓
+                pos_list = data.get("active_positions", [])
+                for p_dict in pos_list:
+                    if isinstance(p_dict, dict) and p_dict.get("code"):
+                        field_names = set(IPOTradingPosition.__dataclass_fields__.keys())
+                        safe_kwargs = {k: v for k, v in p_dict.items() if k in field_names}
+                        p = IPOTradingPosition(**safe_kwargs)
+                        if p.shares > 0:
+                            self._positions[p.code] = p
+
+                # 恢复已平仓历史记录
+                closed_list = data.get("closed_positions", [])
+                for c_item in closed_list:
+                    if isinstance(c_item, dict) and c_item.get("code"):
+                        self._closed_positions.append(c_item)
+
+                # 恢复信号迭代日志
+                raw_logs = data.get("signal_iteration_log", [])
+                if isinstance(raw_logs, list):
+                    self._signal_iteration_log = raw_logs
+                logger.info(f"💾 [IPO-LEDGER] 成功从本地恢复交易账本: 活跃持仓 {len(self._positions)} 只 | 已平仓历史 {len(self._closed_positions)} 只 | 信号日志 {len(self._signal_iteration_log)} 条")
+        except Exception as e:
+            logger.debug(f"加载 IPO 交易账本异常: {e}")
+
+    _load_ledger = _load_persisted_ledger
+
+    def _save_persisted_ledger(self):
+        """【💾 原子写盘】将活跃持仓、已平仓战绩、指令历史与信号迭代日志持久化落盘"""
+        target_file = getattr(self, "_ledger_file", None)
+        if not target_file and getattr(self, "_auto_load_ledger", False):
+            target_file = TRADING_LEDGER_FILE
+        if not target_file:
+            return
+        try:
+            os.makedirs(os.path.dirname(target_file), exist_ok=True)
+            active_list = []
+            for p in self._positions.values():
+                if p.shares > 0:
+                    active_list.append(p.to_dict() if hasattr(p, "to_dict") else p.__dict__.copy())
+
+            closed_list = []
+            for p in self._closed_positions[:100]:
+                if isinstance(p, dict):
+                    closed_list.append(p.copy())
+                elif hasattr(p, "to_dict"):
+                    closed_list.append(p.to_dict())
+                else:
+                    closed_list.append(p.__dict__.copy())
+
+            order_list = [d.__dict__.copy() for d in self._order_history[-100:]]
+            
+            payload = {
+                "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "trading_mode": self.trading_mode,
+                "total_capital": self.total_capital,
+                "available_cash": self.available_cash,
+                "active_positions": active_list,
+                "closed_positions": closed_list,
+                "order_history": order_list,
+                "signal_iteration_log": self._signal_iteration_log[:200]
+            }
+            tmp_f = f"{target_file}.tmp_{os.getpid()}"
+            with open(tmp_f, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+            if os.path.exists(target_file):
+                os.replace(tmp_f, target_file)
+            else:
+                os.rename(tmp_f, target_file)
+        except Exception as e:
+            logger.debug(f"持久化保存 IPO 交易账本异常: {e}")
+
+    _save_ledger = _save_persisted_ledger
+
+    def check_today_ipo_subscriptions(self) -> List[Dict[str, Any]]:
+        """
+        【📢 今日新股申购即时嗅探与语音弹窗通知】
+        - 直连 NewStockFetcher 权威 IPO 日历；
+        - 识别 apply_date == today 的可申购标的；
+        - 每日安全去重，通过 AlertNotifier 广播语音与屏幕卡片。
+        """
+        try:
+            from ats.new_stock_fetcher import NewStockFetcher
+            fetcher = NewStockFetcher.get_instance()
+            ipo_dict = {}
+            if hasattr(fetcher, "fetch_ipo_calendar"):
+                try:
+                    ipo_dict = fetcher.fetch_ipo_calendar() or {}
+                except Exception:
+                    ipo_dict = {}
+            if not ipo_dict and hasattr(fetcher, "_cached_ipo_dict"):
+                ipo_dict = fetcher._cached_ipo_dict or {}
+        except Exception:
+            ipo_dict = {}
+
+        today_str = time.strftime("%Y-%m-%d")
+        new_subscriptions = []
+
+        with self._lock:
+            for c, info in (ipo_dict or {}).items():
+                if not isinstance(info, dict):
+                    continue
+                apply_d = str(info.get("apply_date", "") or "").strip()
+                if apply_d == today_str:
+                    sub_key = f"{today_str}_{c}"
+                    if sub_key not in self._today_notified_subscriptions:
+                        self._today_notified_subscriptions.add(sub_key)
+                        info_copy = dict(info)
+                        if "code" not in info_copy:
+                            info_copy["code"] = str(c)
+                        new_subscriptions.append(info_copy)
+
+        if new_subscriptions:
+            for sub in new_subscriptions:
+                c = sub.get("code", "")
+                nm = sub.get("name", f"新股{c}")
+                apply_c = sub.get("apply_code", c)
+                px = sub.get("issue_price", 0.0)
+                px_str = f"{px:.2f}" if px > 0 else "待定"
+                online_num = sub.get("online_issue_num")
+                num_str = f" | 顶格申购: {online_num}股" if online_num else ""
+
+                reason_text = f"今日新股申购: 代码{c} | 申购代码:{apply_c} | 发行价:¥{px_str}{num_str}"
+                logger.info(f"📢 [IPO-SUBSCRIPTION] 发现今日新股申购标的: {nm}({c}) 发行价:¥{px_str}")
+
+                try:
+                    from ats.alert_notifier import AlertNotifier
+                    AlertNotifier.get_instance().notify_special_signal(
+                        code=c,
+                        name=nm,
+                        reason=reason_text,
+                        score=99.0,
+                        is_force=True,
+                        source="新股申购"
+                    )
+                except Exception as ex_sub:
+                    logger.debug(f"新股申购通知异常: {ex_sub}")
+
+        return new_subscriptions
+
+    def submit_batch_reports(self, signals: List[VWAPDetectorSignal]) -> None:
+        """批量提交各标的感知报告并统一触发统筹评估"""
+        if not signals:
+            return
+        for s in signals:
+            self.submit_stock_perception_report(s)
+        self.evaluate_fleet_and_generate_orders()
+
+    def evaluate_fleet_and_arbitrate(self, force_immediate: bool = True) -> List[IPOOrderDirective]:
+        """统筹仲裁接口，兼容 evaluate_fleet_and_generate_orders"""
+        return self.evaluate_fleet_and_generate_orders()
 
     def submit_stock_perception_report(self, signal: VWAPDetectorSignal) -> None:
         """
@@ -335,35 +607,58 @@ class IPOTradingCenter:
                         ))
                         continue
 
-            # 5. ── 【调仓换马：弃弱留强 (SWITCH_SWAP)】 ──
+            # 5. ── 【调仓换马：弃弱留强与全仓轮动 (FULL_ROTATION_SWAP / SWITCH_SWAP)】 ──
             # 持续跟随市场切换：持仓股动能滞涨落后，全池涌现出更强的 Rank 1 领头羊时果断换马
             if top_leader and top_leader.code not in self._positions:
                 for code, pos in list(self._positions.items()):
                     if pos.shares <= 0 or code == top_leader.code:
                         continue
                     p_sig = self._reports_cache.get(code)
-                    if p_sig and (p_sig.relative_to_leader_gap >= 20.0 or p_sig.horse_race_rank > 2):
+                    if p_sig and (p_sig.relative_to_leader_gap >= 15.0 or p_sig.horse_race_rank > 2):
                         # 检查新领头羊是否具备进击买点
-                        if top_leader.signal_type in ("IPO_FIRST_BUY", "PULLBACK_BUY", "BREAKOUT") or (top_leader.launch_time_str <= "09:50" and top_leader.launch_slope_deg >= 30.0):
-                            directives.append(IPOOrderDirective(
-                                action="SWITCH_SWAP",
-                                code=code,
-                                name=pos.name,
-                                price=p_sig.price,
-                                shares=pos.shares,
-                                size_pct=0.0,
-                                urgency="CRITICAL",
-                                reason=f"🔄 弃弱换强·换马调仓: 持仓动能落后领头羊{p_sig.relative_to_leader_gap:.0f}分，坚决卖出，腾出资金切换全速围猎超级领头羊[{top_leader.name}({top_leader.horse_race_score:.0f}分)]！",
-                                horse_rank=p_sig.horse_race_rank,
-                                sentiment_phase=sentiment.heat_stage,
-                                timestamp=now_ts
-                            ))
+                        if top_leader.signal_type in ("IPO_FIRST_BUY", "PULLBACK_BUY", "BREAKOUT", "BASE_BREAKOUT") or (top_leader.launch_time_str <= "09:50" and top_leader.launch_slope_deg >= 30.0):
+                            if self.trading_mode == "ROTATION_FULL_CAPITAL":
+                                # 👑 【全仓轮动接力模式】：生成原子换马决议 (100%全仓资金腾挪接力新龙头)
+                                leader_buy_shares = int(self.total_capital / top_leader.price / 100.0) * 100 if top_leader.price > 0 else 0
+                                directives.append(IPOOrderDirective(
+                                    action="FULL_ROTATION_SWAP",
+                                    code=top_leader.code,
+                                    name=top_leader.name,
+                                    price=top_leader.price,
+                                    shares=leader_buy_shares,
+                                    size_pct=100.0,
+                                    urgency="CRITICAL",
+                                    reason=f"🔄 全仓轮动换马: 坚决清仓[{pos.name}]，腾出100%全仓资金全速接力超级领头羊[{top_leader.name}({top_leader.horse_race_score:.0f}分)]！",
+                                    horse_rank=top_leader.horse_race_rank,
+                                    sentiment_phase=sentiment.heat_stage,
+                                    timestamp=now_ts,
+                                    signal_tier="SSS",
+                                    target_swap_code=code,
+                                    target_swap_name=pos.name
+                                ))
+                            else:
+                                # 普通分仓换马模式
+                                directives.append(IPOOrderDirective(
+                                    action="SWITCH_SWAP",
+                                    code=code,
+                                    name=pos.name,
+                                    price=p_sig.price,
+                                    shares=pos.shares,
+                                    size_pct=0.0,
+                                    urgency="CRITICAL",
+                                    reason=f"🔄 弃弱换强·换马调仓: 持仓动能落后领头羊{p_sig.relative_to_leader_gap:.0f}分，坚决卖出，腾出资金切换全速围猎超级领头羊[{top_leader.name}({top_leader.horse_race_score:.0f}分)]！",
+                                    horse_rank=p_sig.horse_race_rank,
+                                    sentiment_phase=sentiment.heat_stage,
+                                    timestamp=now_ts,
+                                    signal_tier="S"
+                                ))
 
             # 6. ── 【进攻端开仓：什么时候买 & 买多少买】 ──
             # 狂热高潮期：常规次新严禁新开仓防 T+1 追高被埋，但首发上市首日黄金吸筹 (IPO_FIRST_BUY) 例外允许锁定极低成本筹码！
             if sentiment.heat_stage == "🌋 狂热高潮":
                 if not (top_leader and top_leader.signal_type == "IPO_FIRST_BUY"):
                     self._pending_directives = directives
+                    self._broadcast_directives_to_alert_notifier(directives)
                     self._auto_execute_if_enabled(directives)
                     return directives
                 max_fleet_weight = 40.0
@@ -382,6 +677,12 @@ class IPOTradingCenter:
                 single_leader_weight = 20.0
                 single_follower_weight = 10.0
 
+            # ⚡ 若处于全仓轮动模式且当前全池无持仓，首选领头羊分配 100% 仓位
+            if self.trading_mode == "ROTATION_FULL_CAPITAL":
+                active_pos_count = sum(1 for p in self._positions.values() if p.shares > 0)
+                if active_pos_count == 0:
+                    single_leader_weight = 100.0
+                    max_fleet_weight = 100.0
 
             current_total_shares_val = sum(p.shares * p.current_price for p in self._positions.values() if p.shares > 0)
             current_fleet_weight = (current_total_shares_val / self.total_capital) * 100.0 if self.total_capital > 0 else 0.0
@@ -418,59 +719,112 @@ class IPOTradingCenter:
                 buy_reason = ""
                 assigned_weight = single_follower_weight
                 order_urgency = "CRITICAL"
+                s_tier = "S"
 
                 if sig.signal_type == "IPO_FIRST_BUY":
                     is_valid_buy = True
                     assigned_weight = single_leader_weight
                     buy_reason = f"🔥 首发上市黄金吸筹: 全日紧贴VWAP({sig.vwap:.2f})惜售运行，丝毫不给低位筹码，锁定极低成本进击！"
+                    s_tier = "SSS"
                 elif sig.signal_type == "BASE_BREAKOUT":
                     is_valid_buy = True
                     assigned_weight = single_leader_weight if sig.horse_race_rank <= 2 else single_follower_weight
                     buy_reason = f"⚡ 筑底放量共振突击: 底部平底({sig.base_support_level:.2f})放量突破加速共振，博回抽VWAP+{sig.rebound_to_vwap_space_pct:.1f}%空间，止损{sig.stop_loss_price:.2f}元！"
                     order_urgency = "CRITICAL"
+                    s_tier = "S"
                 elif sig.signal_type == "BASE_PREORDER":
                     is_valid_buy = True
                     assigned_weight = single_follower_weight
                     buy_reason = f"🎯 底部平底缩量企稳预埋单: 底部({sig.base_support_level:.2f})缩量横盘构筑扎实结构，动能拐头初现，提前预埋潜伏，买错跌破{sig.stop_loss_price:.2f}元立斩！"
                     order_urgency = "LIMIT"
+                    s_tier = "A"
                 elif sig.signal_type == "SWING_PREORDER":
                     is_valid_buy = True
                     assigned_weight = single_follower_weight
                     base_supp = getattr(sig, "multi_day_base_support", 0.0) or sig.base_support_level
                     buy_reason = f"🔭 多日大平底+60F通道突破: 4日箱体底部({base_supp:.2f})蓄势，60F突破下降通道且尾盘收最高，博周一VWAP突破，止损{sig.stop_loss_price:.2f}元！"
                     order_urgency = "LIMIT"
+                    s_tier = "A"
                 elif sig.horse_race_rank <= 2 and sig.launch_time_str <= "09:50" and sig.launch_slope_deg >= 30.0:
                     is_valid_buy = True
                     assigned_weight = single_leader_weight
                     buy_reason = f"🥇 赛马超级领头羊: 开盘早鸟时段({sig.launch_time_str})拔地而起，斜率{sig.launch_slope_deg}°，全池动能分最高({sig.horse_race_score})！"
+                    s_tier = "SSS"
                 elif sig.pullback_no_touch:
                     is_valid_buy = True
                     assigned_weight = single_follower_weight
                     buy_reason = f"🚀 回踩VWAP不破极限买点: 现价在VWAP({sig.vwap:.2f})之上浅踩拉起，极窄止损线{sig.stop_loss_price:.2f}元！"
                     order_urgency = "LIMIT"
+                    s_tier = "S"
 
                 if is_valid_buy:
+                    # 全仓模式下确保至少有 100 股
                     allocated_money = self.total_capital * (assigned_weight / 100.0)
                     buy_shares = int(allocated_money / sig.price / 100.0) * 100
                     if buy_shares >= 100:
-                        directives.append(IPOOrderDirective(
-                            action="BUY",
-                            code=code,
-                            name=sig.name,
-                            price=sig.price,
-                            shares=buy_shares,
-                            size_pct=assigned_weight,
-                            urgency=order_urgency,
-                            reason=buy_reason,
-                            horse_rank=sig.horse_race_rank,
-                            sentiment_phase=sentiment.heat_stage,
-                            timestamp=now_ts
-                        ))
-                        current_fleet_weight += assigned_weight
+                        # 避免 directives 中重复添加相同标的买单
+                        if not any(d.code == code and d.action == "BUY" for d in directives):
+                            directives.append(IPOOrderDirective(
+                                action="BUY",
+                                code=code,
+                                name=sig.name,
+                                price=sig.price,
+                                shares=buy_shares,
+                                size_pct=assigned_weight,
+                                urgency=order_urgency,
+                                reason=buy_reason,
+                                horse_rank=sig.horse_race_rank,
+                                sentiment_phase=sentiment.heat_stage,
+                                timestamp=now_ts,
+                                signal_tier=s_tier
+                            ))
+                            current_fleet_weight += assigned_weight
 
             self._pending_directives = directives
+            self._broadcast_directives_to_alert_notifier(directives)
             self._auto_execute_if_enabled(directives)
             return directives
+
+    def _broadcast_directives_to_alert_notifier(self, directives: List[IPOOrderDirective]):
+        """【📢 集中交易指令广播至 ATS 报警中心】"""
+        if not directives:
+            return
+        now_ts = time.time()
+        for d in directives:
+            if d.action not in ("BUY", "FULL_ROTATION_SWAP", "SWITCH_SWAP", "SELL"):
+                continue
+            d_key = f"{d.action}_{d.code}_{d.urgency}"
+            last_ts = self._notified_directive_keys.get(d_key, 0.0)
+            if (now_ts - last_ts) < 180.0:  # 3分钟内相同指令不重复轰炸
+                continue
+
+            self._notified_directive_keys[d_key] = now_ts
+
+            if d.action == "FULL_ROTATION_SWAP":
+                reason_text = f"【全仓轮动换马】清仓[{d.name}]，100%全仓接力超级领头羊[{d.target_swap_name}]！"
+                voice_p = 99.0
+            elif d.action == "BUY":
+                reason_text = f"【集中买入指令】买入[{d.name}] 仓位{d.size_pct:.0f}%：{d.reason}"
+                voice_p = 98.0
+            elif d.action == "SELL":
+                reason_text = f"【集中平仓警报】卖出[{d.name}]：{d.reason}"
+                voice_p = 96.0
+            else:
+                reason_text = f"【集中交易指令】{d.action} [{d.name}]：{d.reason}"
+                voice_p = 90.0
+
+            try:
+                from ats.alert_notifier import AlertNotifier
+                AlertNotifier.get_instance().notify_special_signal(
+                    code=d.code,
+                    name=d.name,
+                    reason=reason_text,
+                    score=voice_p,
+                    is_force=True,
+                    source="集中交易"
+                )
+            except Exception as ex_alert:
+                logger.debug(f"广播集中交易决议异常: {ex_alert}")
 
     def _auto_execute_if_enabled(self, directives: List[IPOOrderDirective]):
         """若开启全自动跟随交易，自动撮合执行"""
@@ -495,7 +849,13 @@ class IPOTradingCenter:
             return count
 
     def record_order_execution(self, directive: IPOOrderDirective) -> None:
-        """同步订单撮合成交状态并更新资金账户与持仓"""
+        """
+        【同步撮合成交与全生命周期复盘追踪】
+        - 彻底根治“今天卖了就没下文了”的断层痛点；
+        - 平仓时将持仓完整快照、收益率、平仓理由压入 _closed_positions；
+        - 将每次决议与撮合事件记录进 _signal_iteration_log；
+        - 原子写盘持久化到本地账本。
+        """
         with self._lock:
             code = directive.code
             if code not in self._positions:
@@ -503,6 +863,8 @@ class IPOTradingCenter:
             pos = self._positions[code]
             t_str = time.strftime("%H:%M:%S")
             today_str = time.strftime("%Y-%m-%d")
+            pnl_pct = 0.0
+            pnl_amt = 0.0
 
             if directive.action == "BUY":
                 cost_money = directive.price * directive.shares
@@ -514,6 +876,8 @@ class IPOTradingCenter:
                     pos.available_shares = pos.shares
                 pos.entry_time = t_str
                 pos.entry_date = today_str
+                pos.entry_reason = directive.reason
+                pos.signal_tier = directive.signal_tier
                 pos.status = "HOLDING"
                 pos.current_price = directive.price
                 pos.highest_price = directive.price
@@ -522,17 +886,130 @@ class IPOTradingCenter:
                 pos.last_action_time = t_str
                 logger.info(f"[IPO-TRADING] 买入成交: {pos.name}({code}) {directive.shares}股 @ {directive.price:.2f}元 | 剩余可用: {self.available_cash:.0f}元")
 
+            elif directive.action == "FULL_ROTATION_SWAP":
+                # ── 全仓轮动模式：第 1 步，全额平仓老股票回笼资金 ──
+                old_code = directive.target_swap_code
+                if old_code and old_code in self._positions:
+                    old_pos = self._positions[old_code]
+                    if old_pos.shares > 0:
+                        sell_px = old_pos.current_price if old_pos.current_price > 0 else old_pos.cost_price
+                        sell_val = sell_px * old_pos.shares
+                        self.available_cash += sell_val
+                        pnl_amt = (sell_px - old_pos.cost_price) * old_pos.shares if old_pos.cost_price > 0 else 0.0
+                        pnl_pct = round((sell_px - old_pos.cost_price) / old_pos.cost_price * 100.0, 2) if old_pos.cost_price > 0 else 0.0
+                        old_pos.exit_price = sell_px
+                        old_pos.exit_time = t_str
+                        old_pos.exit_date = today_str
+                        old_pos.realized_pnl_pct = pnl_pct
+                        old_pos.realized_pnl_amount = round(pnl_amt, 2)
+                        old_pos.exit_reason = f"全仓轮动换马接力新龙头 [{directive.name}({code})]"
+                        old_pos.status = "CLOSED"
+                        self._closed_positions.insert(0, copy.deepcopy(old_pos))
+                        old_pos.shares = 0
+                        old_pos.available_shares = 0
+                        del self._positions[old_code]
+                        logger.info(f"[IPO-TRADING] 全仓轮动平出老标的: {old_pos.name}({old_code}) 回笼资金: {sell_val:.0f}元 | 盈亏: {pnl_pct:+.2f}%")
+
+                # ── 全仓轮动模式：第 2 步，100% 满仓腾挪接力新龙头 ──
+                new_shares = int(self.available_cash / (directive.price * 100)) * 100 if directive.price > 0 else 0
+                if new_shares == 0 and directive.shares > 0:
+                    new_shares = directive.shares
+                cost_money = directive.price * new_shares
+                self.available_cash = max(0.0, self.available_cash - cost_money)
+
+                new_pos = IPOTradingPosition(
+                    code=code, name=directive.name, shares=new_shares, available_shares=new_shares,
+                    cost_price=directive.price, current_price=directive.price, highest_price=directive.price,
+                    lowest_price=directive.price, entry_time=t_str, entry_date=today_str,
+                    entry_reason=directive.reason, signal_tier=directive.signal_tier, status="HOLDING",
+                    last_action="FULL_ROTATION_SWAP", last_action_time=t_str
+                )
+                self._positions[code] = new_pos
+                logger.info(f"[IPO-TRADING] 全仓轮动接力新龙头成功: {new_pos.name}({code}) 满仓买入 {new_shares}股 @ {directive.price:.2f}元")
+
             elif directive.action in ("SELL", "SWITCH_SWAP"):
                 sell_val = directive.price * pos.shares
                 self.available_cash += sell_val
-                logger.info(f"[IPO-TRADING] 卖出平仓: {pos.name}({code}) {pos.shares}股 @ {directive.price:.2f}元 | 浮动盈亏: {pos.unrealized_pnl_pct}% | 回笼资金: {sell_val:.0f}元")
-                pos.shares = 0
-                pos.available_shares = 0
+                if pos.cost_price > 0 and pos.shares > 0:
+                    pnl_amt = (directive.price - pos.cost_price) * pos.shares
+                    pnl_pct = round((directive.price - pos.cost_price) / pos.cost_price * 100.0, 2)
+
+                pos.exit_price = directive.price
+                pos.exit_time = t_str
+                pos.exit_date = today_str
+                pos.realized_pnl_pct = pnl_pct
+                pos.realized_pnl_amount = round(pnl_amt, 2)
+                pos.exit_reason = directive.reason
                 pos.status = "CLOSED"
                 pos.last_action = directive.action
                 pos.last_action_time = t_str
 
+                # 记录到历史已平仓持久化列表 (最新排最前)
+                closed_snapshot = copy.deepcopy(pos)
+                self._closed_positions.insert(0, closed_snapshot)
+                if len(self._closed_positions) > 200:
+                    self._closed_positions = self._closed_positions[:200]
+
+                logger.info(f"[IPO-TRADING] 卖出平仓归档: {pos.name}({code}) {pos.shares}股 @ {directive.price:.2f}元 | 平仓收益: {pnl_pct:+.2f}% ({pnl_amt:+.0f}元) | 回笼: {sell_val:.0f}元")
+                pos.shares = 0
+                pos.available_shares = 0
+
             self._order_history.append(directive)
+
+            # 写入信号与决议迭代日志 (供操盘手点击详情回溯)
+            log_item = {
+                "timestamp": directive.timestamp or time.time(),
+                "time_str": f"{today_str} {t_str}",
+                "action": directive.action,
+                "code": directive.code,
+                "name": directive.name,
+                "price": directive.price,
+                "shares": directive.shares,
+                "size_pct": directive.size_pct,
+                "urgency": directive.urgency,
+                "reason": directive.reason,
+                "horse_rank": directive.horse_rank,
+                "sentiment_phase": directive.sentiment_phase,
+                "signal_tier": directive.signal_tier,
+                "realized_pnl_pct": pnl_pct if directive.action != "BUY" else 0.0,
+                "realized_pnl_amount": round(pnl_amt, 2) if directive.action != "BUY" else 0.0
+            }
+            self._signal_iteration_log.insert(0, log_item)
+            if len(self._signal_iteration_log) > 300:
+                self._signal_iteration_log = self._signal_iteration_log[:300]
+
+            # 立即物理原子写盘落盘
+            self._save_persisted_ledger()
+
+    def _append_signal_iteration_log(
+        self, action: str, code: str, name: str, price: float,
+        size_pct: float, reason: str, signal_tier: str = "S"
+    ) -> None:
+        """追加一条信号产生与迭代日志记录并原子持久化"""
+        with self._lock:
+            today_str = time.strftime("%Y-%m-%d")
+            t_str = time.strftime("%H:%M:%S")
+            item = {
+                "timestamp": time.time(),
+                "time_str": f"{today_str} {t_str}",
+                "action": action,
+                "code": code,
+                "name": name,
+                "price": price,
+                "shares": 0,
+                "size_pct": size_pct,
+                "urgency": "NORMAL",
+                "reason": reason,
+                "horse_rank": 1,
+                "sentiment_phase": "活跃",
+                "signal_tier": signal_tier,
+                "realized_pnl_pct": 0.0,
+                "realized_pnl_amount": 0.0
+            }
+            self._signal_iteration_log.insert(0, item)
+            if len(self._signal_iteration_log) > 300:
+                self._signal_iteration_log = self._signal_iteration_log[:300]
+            self._save_persisted_ledger()
 
     def get_fleet_summary(self) -> Dict[str, Any]:
         """获取整个舰队统一交易与持仓概览快照 (供 UI 实时展示)"""
@@ -541,12 +1018,22 @@ class IPOTradingCenter:
             tot_val = sum(p.shares * p.current_price for p in holding_list)
             weight = round((tot_val / self.total_capital) * 100.0, 1) if self.total_capital > 0 else 0.0
             top_leader_sig = self._ranked_cache[0] if self._ranked_cache else None
+
+            # 计算累计已实现盈亏总额
+            total_realized_pnl = sum(
+                (p.get("realized_pnl_amount", 0.0) if isinstance(p, dict) else getattr(p, "realized_pnl_amount", 0.0))
+                for p in self._closed_positions
+            )
+
             return {
                 "total_capital": self.total_capital,
                 "available_cash": round(self.available_cash, 2),
                 "holding_count": len(holding_list),
+                "closed_count": len(self._closed_positions),
                 "total_holding_value": round(tot_val, 2),
+                "total_realized_pnl": round(total_realized_pnl, 2),
                 "fleet_weight_pct": weight,
+                "trading_mode": self.trading_mode,
                 "auto_follow_trading": self.auto_follow_trading,
                 "pending_directive_count": len(self._pending_directives),
                 "top_leader": top_leader_sig.code if top_leader_sig else "--",
@@ -560,8 +1047,30 @@ class IPOTradingCenter:
                         "cost": p.cost_price,
                         "now": p.current_price,
                         "pnl_pct": p.unrealized_pnl_pct,
-                        "status": p.status
+                        "status": p.status,
+                        "entry_date": p.entry_date,
+                        "entry_time": p.entry_time,
+                        "entry_reason": p.entry_reason,
+                        "signal_tier": p.signal_tier
                     } for p in holding_list
-                ]
+                ],
+                "closed_details": [
+                    {
+                        "code": p.get("code", "") if isinstance(p, dict) else p.code,
+                        "name": p.get("name", "") if isinstance(p, dict) else p.name,
+                        "shares": p.get("shares", 0) if isinstance(p, dict) else p.shares,
+                        "cost": p.get("cost_price", 0.0) if isinstance(p, dict) else p.cost_price,
+                        "exit_price": p.get("exit_price", 0.0) if isinstance(p, dict) else p.exit_price,
+                        "pnl_pct": p.get("realized_pnl_pct", 0.0) if isinstance(p, dict) else p.realized_pnl_pct,
+                        "pnl_amt": p.get("realized_pnl_amount", 0.0) if isinstance(p, dict) else p.realized_pnl_amount,
+                        "status": p.get("status", "CLOSED") if isinstance(p, dict) else p.status,
+                        "entry_date": p.get("entry_date", "") if isinstance(p, dict) else p.entry_date,
+                        "exit_date": p.get("exit_date", "") if isinstance(p, dict) else p.exit_date,
+                        "exit_time": p.get("exit_time", "") if isinstance(p, dict) else p.exit_time,
+                        "exit_reason": p.get("exit_reason", "") if isinstance(p, dict) else p.exit_reason,
+                        "signal_tier": p.get("signal_tier", "S") if isinstance(p, dict) else p.signal_tier
+                    } for p in self._closed_positions
+                ],
+                "signal_iteration_log": list(self._signal_iteration_log)
             }
 

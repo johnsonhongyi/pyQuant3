@@ -69,13 +69,21 @@ class IPOArbitrationDetailDialog(QDialog):
         code: str,
         signal_obj: Optional[VWAPDetectorSignal] = None,
         directive_obj: Optional[IPOOrderDirective] = None,
+        closed_pos: Optional[Dict[str, Any]] = None,
+        log_item: Optional[Dict[str, Any]] = None,
         parent=None
     ) -> 'IPOArbitrationDetailDialog':
         """
-        【极速复用入口】：单例模式秒级刷新并带到前台，无需重新销毁重建窗口
+        【极速复用入口】：单例模式秒级刷新并带到前台，支持实时仲裁、历史平仓战绩与信号迭代日志
         """
         dlg = cls.get_instance(parent)
-        dlg.update_content(code, signal_obj=signal_obj, directive_obj=directive_obj)
+        dlg.update_content(
+            code,
+            signal_obj=signal_obj,
+            directive_obj=directive_obj,
+            closed_pos=closed_pos,
+            log_item=log_item
+        )
         if not dlg.isVisible():
             dlg.show()
         dlg.raise_()
@@ -258,16 +266,122 @@ class IPOArbitrationDetailDialog(QDialog):
         self,
         code: str,
         signal_obj: Optional[VWAPDetectorSignal] = None,
-        directive_obj: Optional[IPOOrderDirective] = None
+        directive_obj: Optional[IPOOrderDirective] = None,
+        closed_pos: Optional[Dict[str, Any]] = None,
+        log_item: Optional[Dict[str, Any]] = None
     ):
         """
         【极速就地刷新】：毫秒级更新卡片全部数据，杜绝窗口重建
+        支持：实时仲裁、历史平仓战绩回溯、信号迭代日志回溯
         """
         clean_code = "".join(ch for ch in str(code) if ch.isdigit()).zfill(6)
         self.current_code = clean_code
         self.current_signal = signal_obj
         self.current_directive = directive_obj
 
+        # ── 分支 1: 历史平仓战绩详情 ──
+        if closed_pos:
+            name = closed_pos.get("name", clean_code) or clean_code
+            self.current_name = name
+            cost = float(closed_pos.get("cost_price", 0.0) or 0.0)
+            exit_p = float(closed_pos.get("exit_price", 0.0) or 0.0)
+            pnl_pct = float(closed_pos.get("realized_pnl_pct", 0.0) or 0.0)
+            pnl_amt = float(closed_pos.get("realized_pnl_amount", 0.0) or 0.0)
+            exit_reason = closed_pos.get("exit_reason", "平仓清仓")
+            entry_reason = closed_pos.get("entry_reason", "策略买入信号")
+            exit_date = closed_pos.get("exit_date", "--")
+            exit_time = closed_pos.get("exit_time", "--")
+            tier = closed_pos.get("signal_tier", "S")
+
+            self.lbl_code_name.setText(f"代码: {clean_code} | 名称: {name} (📜 历史平仓战绩)")
+            self.lbl_price.setText(f"买入: ¥{cost:.2f} ➔ 平仓: ¥{exit_p:.2f}")
+            pnl_color = "#ff4444" if pnl_pct > 0 else ("#00ff88" if pnl_pct < 0 else "#ffffff")
+            self.lbl_role_tag.setText(f"战绩: {pnl_pct:+.2f}% ({pnl_amt:+.0f}元)")
+            self.lbl_role_tag.setStyleSheet(
+                f"background-color: #1c1a24; border: 1px solid {pnl_color}; "
+                f"border-radius: 4px; padding: 3px 8px; color: {pnl_color}; font-weight: bold;"
+            )
+            self.lbl_race_info.setText(f"平仓日期: {exit_date} {exit_time} | 信号级别: {tier}")
+            self.lbl_action_badge.setText(f"📜 平仓纪律执行: {exit_reason}")
+
+            html_content = f"""
+            <div style="font-family: 'Segoe UI', Arial, sans-serif; font-size: 10pt; color: #e2e2e5;">
+                <p style="margin-top: 0px; font-size: 11pt; color: #ffd700; font-weight: bold;">
+                    📜 【历史平仓全流程复盘与信号迭代回溯】
+                </p>
+                <div style="background-color: #121522; padding: 10px 14px; border-left: 4px solid {pnl_color}; border-radius: 4px; line-height: 1.6;">
+                    <p style="margin: 2px 0;"><b>🎯 入场逻辑：</b>{entry_reason}</p>
+                    <p style="margin: 2px 0;"><b>⛔ 离场原因：</b>{exit_reason}</p>
+                    <p style="margin: 2px 0;"><b>💰 成本价：</b>¥{cost:.2f} | <b>平仓价：</b>¥{exit_p:.2f}</p>
+                    <p style="margin: 2px 0;"><b>📊 实现盈亏：</b><span style="color: {pnl_color}; font-weight: bold;">{pnl_pct:+.2f}%</span> (金额: {pnl_amt:+.2f} 元)</p>
+                    <p style="margin: 2px 0;"><b>⏱️ 平仓时间：</b>{exit_date} {exit_time}</p>
+                </div>
+                <p style="color: #9aa0a6; font-size: 8.5pt; margin-top: 8px;">
+                    * 战绩数据永久沉淀于本地交易账本，支持持续迭代回溯，告别“今天卖了就没下文”。
+                </p>
+            </div>
+            """
+            self.txt_arbitration_desc.setHtml(html_content)
+            self.lbl_vwap_line.setText(f"入场成本线: ¥{cost:.2f}")
+            self.lbl_vwap_bias.setText(f"平仓收益率: {pnl_pct:+.2f}%")
+            self.lbl_vwap_bias.setStyleSheet(f"color: {pnl_color}; font-weight: bold;")
+            self.lbl_vwap_shape.setText(f"战术分级: {tier} 级")
+            self.lbl_launch_time.setText(f"平仓时点: {exit_time}")
+            self.lbl_stop_loss.setText("平仓状态: 已结清出局")
+            return
+
+        # ── 分支 2: 历史信号迭代日志详情 ──
+        if log_item:
+            name = log_item.get("name", clean_code) or clean_code
+            self.current_name = name
+            action = log_item.get("action", "--")
+            price = float(log_item.get("price", 0.0) or 0.0)
+            size_pct = float(log_item.get("size_pct", 0.0) or 0.0)
+            tier = log_item.get("signal_tier", "WATCH")
+            reason = log_item.get("reason", "--")
+            ts = log_item.get("timestamp", "--")
+            swap_code = log_item.get("target_swap_code", "")
+            swap_name = log_item.get("target_swap_name", "")
+
+            tier_color = "#ffd700" if "SSS" in tier else ("#00ff88" if "S" in tier else ("#00e5ff" if "A" in tier else "#ff3333"))
+            self.lbl_code_name.setText(f"代码: {clean_code} | 名称: {name} (📋 信号迭代日志)")
+            self.lbl_price.setText(f"信号价: ¥{price:.2f}" if price > 0 else "信号价: --")
+            self.lbl_role_tag.setText(f"级别: {tier} | 动作: {action}")
+            self.lbl_role_tag.setStyleSheet(
+                f"background-color: #1c1a24; border: 1px solid {tier_color}; "
+                f"border-radius: 4px; padding: 3px 8px; color: {tier_color}; font-weight: bold;"
+            )
+            self.lbl_race_info.setText(f"触发时间: {ts} | 仓位建议: {size_pct:.0f}%")
+            self.lbl_action_badge.setText(f"📋 信号快照: [{tier}] {action} {size_pct:.0f}% 仓位")
+
+            swap_info = f"<p style='margin: 2px 0; color: #ffaa00;'><b>🔄 全仓轮动换马目标：</b>{swap_code} {swap_name}</p>" if swap_code else ""
+
+            html_content = f"""
+            <div style="font-family: 'Segoe UI', Arial, sans-serif; font-size: 10pt; color: #e2e2e5;">
+                <p style="margin-top: 0px; font-size: 11pt; color: #66fcf1; font-weight: bold;">
+                    📋 【集中交易信号产生与迭代快照】
+                </p>
+                <div style="background-color: #121522; padding: 10px 14px; border-left: 4px solid {tier_color}; border-radius: 4px; line-height: 1.6;">
+                    <p style="margin: 2px 0;"><b>⏱️ 记录时点：</b>{ts}</p>
+                    <p style="margin: 2px 0;"><b>🎯 信号动作：</b><span style="color: {tier_color}; font-weight: bold;">{action}</span> ({tier} 级)</p>
+                    <p style="margin: 2px 0;"><b>💰 触发价格：</b>¥{price:.2f} | <b>建议仓位：</b>{size_pct:.0f}%</p>
+                    {swap_info}
+                    <p style="margin: 4px 0 2px 0;"><b>📌 决策依据：</b>{reason}</p>
+                </div>
+                <p style="color: #9aa0a6; font-size: 8.5pt; margin-top: 8px;">
+                    * 信号日志忠实记录全池赛马天梯与集中仲裁演进全过程，可随时对比验证。
+                </p>
+            </div>
+            """
+            self.txt_arbitration_desc.setHtml(html_content)
+            self.lbl_vwap_line.setText(f"参考价格: ¥{price:.2f}")
+            self.lbl_vwap_bias.setText(f"建议仓位: {size_pct:.0f}%")
+            self.lbl_vwap_shape.setText(f"信号评级: {tier}")
+            self.lbl_launch_time.setText(f"记录时间: {ts}")
+            self.lbl_stop_loss.setText("防守纪律: 跌破 0.6% 坚决立斩")
+            return
+
+        # ── 分支 3: 实时仲裁与赛马决议 ──
         # 1. 尝试从 IPOTradingCenter 获取最新信号与标的上下文
         trading_center = IPOTradingCenter.get_instance()
         if self.current_signal is None:

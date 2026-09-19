@@ -174,7 +174,10 @@ def activate_and_locate_target_window(parent: Optional[Any], code: str = "", rea
             target_p = active_w
         else:
             for w in app.topLevelWidgets():
-                if w.isVisible() and getattr(w, '__class__', None).__name__ in ("DailyLimitUpDialog", "HotSectorLeaderboard", "MultiPeriodDialog", "ATSMainWindow"):
+                if w.isVisible() and getattr(w, '__class__', None).__name__ in (
+                    "DailyLimitUpDialog", "HotSectorLeaderboard", "MultiPeriodDialog", "ATSMainWindow",
+                    "IPOSubnewDetectorDialog", "IPOCommandRoomDialog"
+                ):
                     target_p = w
                     break
 
@@ -874,6 +877,36 @@ class AlertNotifier(QObject if HAS_PYQT else object):
         reason = str(message).strip()
         return self.notify_special_signal(code=code, name=name, reason=reason, score=score, parent=parent, source=source)
 
+    def notify_trading_signal(
+        self,
+        code: str,
+        name: str,
+        signal_type: str = "",
+        price: float = 0.0,
+        action: str = "BUY",
+        reason: str = "",
+        score: float = 90.0,
+        parent=None,
+        target_window_title: str = "",
+        is_force: bool = False
+    ):
+        """
+        集中交易调度室与超短检测中心专属信号播报入口
+        无缝连接语音播报、Toast 桌面弹窗与点击直达唤醒定位
+        """
+        display_reason = reason
+        if price > 0:
+            display_reason = f"[{action} ¥{price:.2f}] {reason}"
+        return self.notify_special_signal(
+            code=code,
+            name=name,
+            reason=display_reason,
+            score=score,
+            parent=parent,
+            is_force=is_force,
+            source="集中交易指挥室" if "集中" in target_window_title else "新股次新超短检测"
+        )
+
     def notify_special_signal(self, code, name, reason, score=90.0, win_rate="85.0%", parent=None, is_force=False, source: str = ""):
         """推送信信号弹窗与语音 (具备跨线程投递、全自动限频与去重保护、单股冷却与异动突变即时放行)
         
@@ -963,6 +996,27 @@ class AlertNotifier(QObject if HAS_PYQT else object):
             get_signal_ledger().mark_notified_today(code_str, norm_reason or reason_str)
         except Exception:
             pass
+
+        # 🔗 集中交易调度中枢即时感知与质量策略评估 (天梯/龙头突击等全信号统一理解价值 & 优质标的自动入池)
+        try:
+            from ats.strategy.ipo_trading_center import IPOTradingCenter
+            trading_center = IPOTradingCenter.get_instance()
+            if trading_center:
+                trading_center.ingest_external_alarm_signal(
+                    source=source or "ATS特异信号",
+                    code=code_str,
+                    name=name,
+                    reason=reason_str,
+                    score=score,
+                    extra={
+                        'win_rate': win_rate,
+                        'norm_reason': norm_reason,
+                        'source': source,
+                        'ts': now
+                    }
+                )
+        except Exception as ex_tc:
+            logger.debug(f"向集中交易指挥室推送外部警报信号异常: {ex_tc}")
 
         item = {
             'code': code_str,
@@ -1096,7 +1150,33 @@ class AlertNotifier(QObject if HAS_PYQT else object):
                 logger.warning(f"ShowMessage failed: {e}")
 
         # 3. 触发语音播报 (受 is_voice_enabled 控制)
-        if "双加速" in reason:
+        if "全仓轮动" in reason:
+            voice_text = f"全仓轮动换马指令，{name}，100%全仓接力超级领头羊"
+        elif "首发吸筹" in reason or "首发上市" in reason:
+            voice_text = f"首日上市绝杀买点，{name}，均线惜售全天黄金吸筹点"
+        elif "恐吓反包" in reason:
+            voice_text = f"首日恐吓反包买点，{name}，早盘恐吓洗盘完毕放量反包"
+        elif "临停" in reason:
+            voice_text = f"首日临停高潮警报，{name}，提前算法挂单分批止盈逃顶"
+        elif "新股申购" in reason:
+            voice_text = f"今日新股申购提醒，{name}，请及时打新"
+        elif "筑底预埋" in reason:
+            voice_text = f"新股筑底预埋机会，{name}，缩量平底企稳拐点"
+        elif "筑底共振" in reason or "共振加速" in reason or "共振突破" in reason:
+            voice_text = f"新股放量共振突破，{name}，底部启动加速"
+        elif "领头羊" in reason:
+            voice_text = f"集中买入指令，{name}，全池爆款领头羊"
+        elif "换马" in reason or "换强" in reason:
+            voice_text = f"调仓换马指令，卖出{name}，切换领头羊"
+        elif "通道突破" in reason:
+            voice_text = f"新股通道突破买点，{name}，尾盘放量收最高"
+        elif "回踩启动" in reason or "回踩VWAP" in reason:
+            voice_text = f"新股回踩启动买点，{name}，均线支撑不破"
+        elif "高潮平仓" in reason:
+            voice_text = f"极端高潮平仓警报，{name}，天量滞涨冲顶锁定胜果"
+        elif "破位止损" in reason or "买错立斩" in reason:
+            voice_text = f"破位止损警报，{name}，跌破生命线买错立斩"
+        elif "双加速" in reason:
             voice_text = f"双加速买点，{name}，跳空光脚加速"
         elif "光脚加速" in reason:
             voice_text = f"光脚加速买点，{name}，开盘即最低"
