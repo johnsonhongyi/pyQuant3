@@ -1,3 +1,96 @@
+## 2026-09-19 13:50
+- [x] **【桌面窗口管理器原版协调比例复原与日志高度可调持久化、底栏平铺双向无缝切换与持久化、Acer性能控制彻底独立解耦】(`webTools/window_manager/ui.py`, `webTools/window_manager/__init__.py`, `tests/test_antigravity_manager.py`)**：
+    - [x] **操盘手现场明确指示与三大功能/视觉痛点彻底攻坚 (P0)**：
+        - “执行之日太小了,跟之前的设计对齐,是否有可调节的持久化功能? 2,[09-19 13:38:25] INFO:ui.py(log:4571): [工具箱] 底栏扩展工具已切换为【平铺模式】没有切回去的方式,这个设置也支持持久化状态, 3.原来的比例比较协调. 2. acer性能控制从路由设置中独立出来”：
+          1) **执行日志恢复原版舒适协调比例 + 动态可调持久化 (`set_log_panel_height`)**：
+             - 恢复操盘手图1原版舒适协调比例：默认日志框高度调整为 `110px`（舒适容纳 6~8 行执行日志，不再有被压缩挤压感）；
+             - 增加头部微型快速调节工具条：提供 `[⬇ 紧凑(65px)]`、`[↕ 协调(110px)]`、`[⬆ 展开(160px)]` 快捷切换按钮；
+             - 跨会话高度记忆持久化：从 `log_panel_height` 配置字段读取，调节时立即更新并自动落盘保存，重启后忠实记忆操盘手偏好高度！
+          2) **底栏平铺模式增设 [⇋ 收纳] 按钮 + 平铺/收纳模式持久化 (`toggle_tools_expand_mode`)**：
+             - 根治痛点：平铺模式下缺少切回入口；
+             - 修复：在平铺模式中增设专属 `[⇋ 收纳]` 紧凑胶囊按钮（`self.btn_collapse_tools`），操盘手在平铺状态下随时一键切回下拉收纳菜单；
+             - 状态持久化：将当前模式自动写入 `tools_expanded_mode` 并在保存配置时持久化，冷启动时忠实恢复上次选择的平铺或收纳状态！
+          3) **Acer 笔记本性能与散热控制彻底从路由设置中独立解耦 (`AcerPerformanceDialog`)**：
+             - 单一职责重构：将原属于 `RouteConfigDialog` 的 Tab 3（超频模式 Default/Fast/Extreme、CoolBoost、风扇转速 Auto/Max/Custom、完成后窗口处理方式、开机延迟微调及立即应用）彻底抽离，构建独立的 `AcerPerformanceDialog(QDialog)`；
+             - `RouteConfigDialog` 精简回归纯粹：只保留【🌐 静态路由】与【🧲 磁吸窗口】2 个 Tab；
+             - 多维独立入口：在底栏平铺模式提供专属 `[💻 Acer性能]` 按钮、在扩展工具下拉菜单中提供 `💻 Acer 笔记本性能与散热控制...` 入口、在系统托盘右键 Acer 菜单中增加 `⚙️ 打开 Acer 性能控制面板...`，随处一键直达！
+    - [x] **全量自动化测试 100% 验证通过 (17/17 PASSED)**：
+        - `stock_standalone/tests/test_antigravity_manager.py` (12/12 PASSED，新增 Acer 性能独立解耦与路由设置精简专项测试，以及日志高度动态可调与底栏双向平铺收纳持久化测试)；
+        - `stock_standalone/tests/test_tdx_wildcard_matching.py` (5/5 PASSED)。
+
+## 2026-09-19 13:35
+- [x] **【桌面窗口管理器底部三大视觉细节精细化攻坚：消灭日志框纵向拉伸空洞与挤压、开机自启复选框水平居中归队、剔除下拉重复箭头】(`webTools/window_manager/ui.py`, `tests/test_antigravity_manager.py`)**：
+    - [x] **操盘手现场明确指示与三大视觉瑕疵彻底破案 (P0)**：
+        - “1图的日志部分设置有问题及在一起,2.开机自启的位置不水平跟其他的不协调,3,下拉框多了下拉箭头”：
+          1) **问题 1 破案与根治：日志框挤压上层与被拉伸空洞**：
+             - 根因：`mid_layout` 与 `log_group` 之间缺乏间距，且 `log_group` 未设置尺寸策略，在窗口纵向拉大时被错误分配拉伸空间，而内部 `log_output` 却写死了高度，形成一个巨大的黑色空框，内容挤成一窄条；
+             - 修复：`main_layout.addLayout(mid_layout, stretch=1)` 确保主表格独占窗口拉伸空间；添加 `main_layout.addSpacing(8)` 留出呼吸间距彻底杜绝标题重叠；`log_group` 设置 `setSizePolicy(Fixed)` 并固定高度为 `78px`（内部文本框 `50px`），无论窗口多大始终保持紧凑工整，绝不出现空洞！
+          2) **问题 2 破案与根治：开机自启跑到右侧且垂直不水平居中**：
+             - 根因：`FlowLayout` 原分水岭为 `align_right_from_index=3`，索引 3 恰好是 `chk_autostart`，导致其被硬生生推到右侧贴着扩展工具；且 `FlowLayout._do_layout` 采用顶端对齐，复选框与输入框/按钮高度不同产生高低差错位；
+             - 修复：升级 `FlowLayout._do_layout` 支持行内控件**垂直居中对齐**（`item_y = y + (row_height - item_h) // 2`）；调整分水岭为 `align_right_from_index=4`，让 `chk_autostart` 紧随左侧热键输入框和绑定按钮之后，复选框与输入框完美在同一水平线居中齐平！
+          3) **问题 3 破案与根治：扩展工具按钮重复下拉双箭头**：
+             - 根因：按钮文本中手动包含了“▼”，而 Qt 的 `QPushButton.setMenu` 在渲染菜单按钮时会自动在右侧绘制原生系统下拉倒三角，导致两个箭头叠在右侧；
+             - 修复：文本精简为 `self.btn_tools_menu = QPushButton("🛠️ 扩展工具")`，由 Qt 原生渲染唯一下拉指示器，美观标准！
+    - [x] **全量自动化测试 100% 验证通过 (16/16 PASSED)**：
+        - `stock_standalone/tests/test_antigravity_manager.py` (11/11 PASSED)；
+        - `stock_standalone/tests/test_tdx_wildcard_matching.py` (5/5 PASSED)。
+
+## 2026-09-19 13:25
+- [x] **【桌面窗口管理器底部功能区全面瘦身减负：日志紧凑化释放垂直空间、底栏工具下拉菜单收纳与平铺模式无缝切换】(`webTools/window_manager/ui.py`, `tests/test_antigravity_manager.py`)**：
+    - [x] **操盘手现场明确指示与痛点破案 (P0)**：
+        - “底部功能区需要优化太占位置”：
+          1) **痛点根因深度破案**：原底栏平铺了 7 个大尺寸按钮（包含性能分析、路由设置、RamDisk、Antigravity账户、保存配置、应用布局、退出），横向总宽达 850px+ 且高达 36px，导致窗口稍窄即被强迫折行（高度暴增至 80px）；加上日志控制台强制 `setMinimumHeight(110)` 与两个冗余弹簧（15px + 10px），底部总计吞噬了 **245+ 像素** 垂直空间，严重挤压上层核心窗口规则表格！
+          2) **底栏扩展工具下拉菜单收纳 (`self.btn_tools_menu`)**：
+             - 将四大辅助配置工具（🚀 Antigravity 账户、💾 RamDisk 同步、⚡ 路由设置、📐 性能分析）统一优雅收纳进 `[🛠️ 扩展工具 ▼]` 下拉菜单；
+             - 底栏常驻按钮从 7 个锐减为 4 个（`[🛠️ 扩展工具 ▼] [💾 保存配置] [🚀 应用布局] [❌ 退出]`），横向宽度减少 60%，绝不再发生折行；
+             - 菜单底部支持 `[⇋ 切换底栏平铺/收纳模式]`，操盘手可一键在紧凑胶囊平铺与极简收纳之间自由切换；
+          3) **底栏控件与按钮全员 Slim 紧凑化 (高度由 36px 降至 24px)**：
+             - 专属紧凑 QSS：`padding: 3px 10px; font-size: 12px; min-height: 24px; max-height: 25px; border-radius: 4px;`；
+             - 全局热键输入框、绑定按钮、开机自启复选框同步紧凑化（高度 25px）；
+          4) **日志控制台高度减负 (腾出 95+ 像素)**：
+             - 移除 `spacer1` (15px) 与 `spacer2` (10px) 冗余空白；
+             - 日志文本框高度由 110px 优化为紧凑的 46px（展示 2~3 行精炼状态，支持鼠标滚轮滚动查看历史）；
+             - 整体垂直方向瞬间**腾出 120 ~ 150 像素** 给上方核心窗口规则表格！
+          5) **Windows 控制台 GBK 编码安全加固**：
+             - `ui.py` 的 `log()` 方法在向 `logger.info` 传递文本时增加自动安全编码转换，彻底免疫 Windows GBK 控制台下 Unicode Emoji 引发的任何 Logging Error。
+    - [x] **全量自动化测试 100% 验证通过 (16/16 PASSED)**：
+        - `stock_standalone/tests/test_antigravity_manager.py` (11/11 PASSED，新增底栏紧凑化与扩展工具收纳模式专项测试)；
+        - `stock_standalone/tests/test_tdx_wildcard_matching.py` (5/5 PASSED)。
+
+## 2026-09-19 13:10
+- [x] **【Antigravity 账户极速管理重构为多账户卡片平铺网格流、彻底去重与四大模型全览】(`webTools/window_manager/antigravity_manager.py`, `webTools/window_manager/ui.py`, `tests/test_antigravity_manager.py`)**：
+    - [x] **操盘手现场明确指示与重构落地 (P0)**：
+        - “还是简洁方式可以直观看到所有账户的主要状况,现在的详情模式,如图2的直观效果,去重效果比较好”：
+          1) **重构为图2同款独立卡片平铺网格流 (`QScrollArea` + 2列自适应 `QGridLayout`)**：
+             - 彻底消灭原先“上方活跃卡片 + 下方备份账户表格”的上下割裂模式，将所有账户统一抽象为自适应独立卡片，彻底去重且一览无余；
+             - 卡片头部：圆形渐变头像、脱敏用户名、星号掩码邮箱（如 `l***i@gmail.com`）、右上角身份徽章（当前生效卡片带青蓝高亮边框和 `🟢 活跃中`，备用账户带 `👑 Pro`）；
+             - 卡片中部：四大核心 AI 模型（Gemini Pro, Claude, Gemini Flash, GPT-OSS）独立胶囊行，实时显示微型自适应彩色进度条与重置倒计时（备用账户支持持久化历史快照呈现，未激活显示 `⚪ 切换激活`）；
+             - 卡片底部：直观提供 `⇋ 切换 (Use)`（活跃账户显示 `✔ 当前生效`，备用账户点击瞬间无损切换并自动刷新配额）与 `Delete 🗑️`（二次确认后重命名为 `.bak` 安全删除）；
+          2) **配额本地快照持久化缓存 (`.quota_cache.json`)**：
+             - 解决备用账户离线无法拉取配额的问题，切换或探测成功时自动持久化配额快照，冷启动瞬间呈现所有账户的最新配额；
+          3) **全量自动化测试 100% 验证通过 (15/15 PASSED)**：
+             - `stock_standalone/tests/test_antigravity_manager.py` (10/10 PASSED，新增卡片网格去重、卡片模型组件与缓存注入专项测试)；
+             - `stock_standalone/tests/test_tdx_wildcard_matching.py` (5/5 PASSED)。
+
+## 2026-09-19 12:47
+- [x] **【管理器集成 Antigravity 账户极速管理面板与 AI 模型配额/重置时间毫秒级探针】(`webTools/window_manager/antigravity_manager.py`, `webTools/window_manager/ui.py`, `tests/test_antigravity_manager.py`)**：
+    - [x] **操盘手现场明确指示与实操破案 (P0)**：
+        - “管理器中添加@[antigravity_manager.py] ,分析添加账户当前的额度及重置时间是否可以极速完成,需要多久”：
+          1) **添加管理器可视化控制**：在主窗口底栏新增【🚀 Antigravity 账户】专属入口按钮，并在系统托盘菜单中无缝增加【🚀 打开账户与配额管理器...】入口，直达独立管理面板；
+          2) **深度破案第三方工具 `? Unknown` 根因**：确诊第三方 Tauri 工具（Antigravity Agent）因硬编码旧版模型名称（未适配新版复合标签如 `Claude Sonnet 4.6 (Thinking)`、`Gemini 3.1 Pro (High)`）导致匹配断层；
+          3) **AI 配额与重置时间毫秒级极速探针 (`fetch_antigravity_quotas`)**：
+             - 建立本地 Connect-RPC 探针，直连本地环回 127.0.0.1 端口，请求 `/GetUserStatus`，**实测仅需 10 ~ 30 毫秒即可极速拿到全部模型的精准剩余额度与精确重置时间戳**；
+             - 建立四大类聚合卡片（Claude、Gemini Pro、Gemini Flash、GPT-OSS）以及子模型明细折叠表格，带彩色自适应进度条与人类可读倒计时（如 `剩余 96.6% · 4小时18分后重置`），彻底消灭 `? Unknown`；
+          4) **本地账户一键无损切换与安全删除**：
+             - 弹窗内集成账户列表，支持一键无损切换（瞬间生效无需重新登录或扫码，并自动触发配额刷新）；
+             - 支持安全删除本地账户（重命名为 `.bak`）与备份当前活跃账户。
+          5) **系统托盘右键菜单与操作日志全面隐私保护**：
+             - 托盘右键“当前活跃账户”行与所有待切换账户列表项，全面启用邮箱星号掩码脱敏（如 `✔️ li li <l***i@gmail.com>`）；
+             - 账户切换日志与系统通知气泡同步脱敏，彻底杜绝任何明文泄露。
+    - [x] **全量自动化测试 100% 验证通过 (14/14 PASSED)**：
+        - `stock_standalone/tests/test_antigravity_manager.py` (9/9 PASSED)；
+        - `stock_standalone/tests/test_tdx_wildcard_matching.py` (5/5 PASSED)。
+
 ## 2026-09-19 00:10
 - [x] **【新股检测工具实盘更新机制破案、全状态持久化贯通与收盘智能休眠节能守护】(`ats/ui/ipo_subnew_detector_dialog.py`, `tests/test_ipo_persistence_and_auto_sync.py`, `20260919_0010_task.md`)**：
     - [x] **操盘手现场明确指示与三大疑问彻底破案 (P0)**：

@@ -2400,31 +2400,32 @@ class ATSMainWindow(QMainWindow):
         self.top_tabs.currentChanged.connect(self._on_top_tab_changed)
         mark_checkpoint("03.3.5 NewStockPanel (Tab 3)")
         
-        # 顶部主看板 Tab 右上角添加【🔥 涨停天梯】、【🎯 60f通道测算】与【🪟 SBC 重排】组合入口
+        # 顶部主看板 Tab 右上角添加【🐉 龙头追踪器】、【🎯 60f通道测算】与【🪟 SBC 重排】组合入口
         top_corner_container = QWidget()
         top_corner_layout = QHBoxLayout(top_corner_container)
         top_corner_layout.setContentsMargins(0, 0, 0, 0)
         top_corner_layout.setSpacing(6)
 
-        self.btn_top_limit_up = QPushButton("🔥 涨停天梯")
-        self.btn_top_limit_up.setToolTip("打开每日涨停分析、封单比/量能比统计与多日强势股天梯看板")
-        self.btn_top_limit_up.setStyleSheet("""
+        self.btn_top_dragon_monitor = QPushButton("🐉 龙头追踪器")
+        self.btn_top_dragon_monitor.setToolTip("打开 2D/3D 加速龙头追踪器独立监控看板 (DragonLeaderMonitorDialog)")
+        self.btn_top_dragon_monitor.setStyleSheet("""
             QPushButton {
-                background-color: #3d1414;
-                color: #ff5555;
+                background-color: #381e2e;
+                color: #ffaa44;
                 font-weight: bold;
-                border: 1px solid #ff4444;
+                border: 1px solid #ff9900;
                 border-radius: 3px;
                 padding: 2px 8px;
                 font-size: 9pt;
             }
             QPushButton:hover {
-                background-color: #ff4444;
+                background-color: #ff9900;
                 color: #000000;
             }
         """)
-        self.btn_top_limit_up.clicked.connect(self.open_daily_limit_up_analyzer)
-        top_corner_layout.addWidget(self.btn_top_limit_up)
+        self.btn_top_dragon_monitor.clicked.connect(self.open_dragon_monitor)
+        self.btn_top_limit_up = self.btn_top_dragon_monitor
+        top_corner_layout.addWidget(self.btn_top_dragon_monitor)
 
         self.channel_scan_period = getattr(self, "channel_scan_period", "60f")
         self.btn_top_scan_channel = QPushButton(f"🎯 {self.channel_scan_period}通道测算 ▾")
@@ -6712,7 +6713,12 @@ class ATSMainWindow(QMainWindow):
                 if 'percent' in self.current_df.columns:
                     sh_pct = float(self.current_df['percent'].mean())
             try:
-                self.dragon_monitor_dialog.update_data(self.current_df, sh_pct)
+                _df_snap = self.current_df
+                _sh_pct_snap = sh_pct
+                QTimer.singleShot(10, lambda: (
+                    not isdeleted(self.dragon_monitor_dialog) and 
+                    self.dragon_monitor_dialog.update_data(_df_snap, _sh_pct_snap, force=True)
+                ))
             except Exception as e:
                 print(f"[ATSMainWindow] Error updating dragon monitor on open: {e}")
 

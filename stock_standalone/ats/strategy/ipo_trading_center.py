@@ -372,6 +372,224 @@ class IPOTradingCenter:
 
         return new_subscriptions
 
+    # ── 外部信号感知、质量策略评估与自更新优质池注入 ──
+
+    def is_ipo_or_subnew_stock(self, code: str) -> bool:
+        """
+        判断标的是否属于新股/次新股范畴
+        - 创业板 301xxx、科创板 688xxx、北交所 920xxx/43xxxx/83xxxx/87xxxx 天然属于次新/新股主战场；
+        - 查询 NewStockFetcher 日历，近 1 年 (250交易日) 内上市的新标的亦符合次新特征。
+        """
+        clean_code = "".join(c for c in str(code) if c.isdigit()).zfill(6)
+        if clean_code.startswith(("301", "688", "920", "43", "83", "87")):
+            return True
+        try:
+            from ats.new_stock_fetcher import NewStockFetcher
+            fetcher = NewStockFetcher.get_instance()
+            ipo_dict = getattr(fetcher, "_cached_ipo_dict", None)
+            if ipo_dict and clean_code in ipo_dict:
+                return True
+        except Exception:
+            pass
+        return False
+
+    def evaluate_external_signal_quality(
+        self, source: str, code: str, name: str, reason: str, score: float = 0.0,
+        extra: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """
+        【质量策略即时价值评估引擎】
+        - 统一理解每日天梯语音报警信号与强势板块龙头突击跟单信号；
+        - 即时评估信号质地、加速能力、VWAP均线结构与次新股属性；
+        - 坚决过滤劣质信号 (如破位暴跌、天量冲顶跳水、炸板未回、大阴线退潮)；
+        - 授予规范的战术评级 (👑 SSS / 🥇 S / 🎯 A / ❌ REJECT) 与专属来源标签。
+        """
+        clean_code = "".join(c for c in str(code) if c.isdigit()).zfill(6)
+        reason_str = str(reason or "").strip()
+
+        # 1. 来源标识标准化
+        source_str = str(source or "").strip()
+        if "天梯" in source_str:
+            source_tag = "⚡ 天梯报警"
+        elif "龙头" in source_str:
+            source_tag = "🚀 龙头突击"
+        else:
+            source_tag = f"🏷️ {source_str}" if source_str else "🏷️ 外部信号"
+
+        is_subnew = self.is_ipo_or_subnew_stock(clean_code)
+
+        # 2. 劣质/负面恶性形态一票否决拦截
+        NEGATIVE_KEYWORDS = ["破位", "大跌", "炸板未回", "雪崩", "跳水", "坚决出局", "跌停", "闪崩", "泥沙俱下", "退潮雪崩"]
+        if any(neg in reason_str for neg in NEGATIVE_KEYWORDS):
+            return {
+                "is_quality": False,
+                "decision": "REJECT_NEGATIVE",
+                "code": clean_code,
+                "name": name,
+                "source": source_str,
+                "source_tag": source_tag,
+                "signal_tier": "REJECT",
+                "quality_score": 0.0,
+                "is_subnew": is_subnew,
+                "reason": f"拦截淘汰: 包含负面破位/退潮特征 ({reason_str})",
+                "evaluated_at": time.strftime("%Y-%m-%d %H:%M:%S")
+            }
+
+        # 分数极低门槛过滤 (< 78分且无加速/龙头字眼)
+        if score < 78.0 and not any(kw in reason_str for kw in ["双加速", "龙头", "加速", "首发", "涨停"]):
+            return {
+                "is_quality": False,
+                "decision": "REJECT_LOW_SCORE",
+                "code": clean_code,
+                "name": name,
+                "source": source_str,
+                "source_tag": source_tag,
+                "signal_tier": "REJECT",
+                "quality_score": float(score),
+                "is_subnew": is_subnew,
+                "reason": f"拦截淘汰: 评分低于78分基础门槛({score:.1f})",
+                "evaluated_at": time.strftime("%Y-%m-%d %H:%M:%S")
+            }
+
+        # 3. 正向加速形态量化加权与质量评分
+        base_quality = max(float(score), 76.0)
+        bonus = 0.0
+
+        # 次新股溢价加分 (轻装上阵，无历史套牢盘)
+        if is_subnew:
+            bonus += 5.0
+
+        # 核心加速形态提权
+        if "双加速" in reason_str:
+            bonus += 8.0
+        if "光脚加速" in reason_str or "缺口加速" in reason_str:
+            bonus += 5.0
+        if "首板突破" in reason_str or "放量反包" in reason_str or "主动扫买" in reason_str:
+            bonus += 6.0
+        if "领涨龙头" in reason_str or "板块龙头" in reason_str or "爆款领头羊" in reason_str:
+            bonus += 6.0
+        if "首发吸筹" in reason_str or "早鸟" in reason_str or "首发上市" in reason_str:
+            bonus += 8.0
+
+        final_quality = min(100.0, base_quality + bonus)
+
+        # 4. 战术级别判定 (SSS / S / A)
+        if final_quality >= 93.0 or "双加速" in reason_str or "首发吸筹" in reason_str:
+            signal_tier = "SSS"
+        elif final_quality >= 85.0 or "龙头" in reason_str or "光脚" in reason_str or "缺口" in reason_str:
+            signal_tier = "S"
+        else:
+            signal_tier = "A"
+
+        # 5. 准入资格判定 (是否判定为优质标的以注入自更新优质池)
+        # 次新股只需达到 80 分即可准入；主板标的需具备顶级龙头质地 (>= 88 分或明确龙头/加速) 即可作为全市场标杆准入
+        if is_subnew:
+            is_quality = (final_quality >= 80.0)
+        else:
+            is_quality = (final_quality >= 88.0 or "龙头" in reason_str or "双加速" in reason_str)
+
+        return {
+            "is_quality": is_quality,
+            "decision": "ACCEPT" if is_quality else "REJECT",
+            "code": clean_code,
+            "name": name,
+            "source": source_str,
+            "source_tag": source_tag,
+            "signal_tier": signal_tier,
+            "quality_score": round(final_quality, 1),
+            "is_subnew": is_subnew,
+            "reason": reason_str,
+            "evaluated_at": time.strftime("%Y-%m-%d %H:%M:%S")
+        }
+
+    def ingest_external_alarm_signal(
+        self, source: str, code: str, name: str, reason: str, score: float = 0.0,
+        extra: Optional[Dict[str, Any]] = None
+    ) -> Optional[Dict[str, Any]]:
+        """
+        【外部语音报警与突击信号统一汇聚感知接口】
+        - 接收来自每日天梯、龙头突击等模块的实时异动；
+        - 即时执行质量策略评估；
+        - 优质标的自动注入新股次新股检查中心并赋予专属来源标签；
+        - 沉淀感知流水与统计，反哺指挥室与检查中心保持自更新优质池能力。
+        """
+        clean_code = "".join(c for c in str(code) if c.isdigit()).zfill(6)
+        if not clean_code or len(clean_code) != 6:
+            return None
+
+        # 统计计数
+        with self._lock:
+            s_str = str(source or "")
+            if "天梯" in s_str:
+                self._external_signal_stats["ladder_count"] = self._external_signal_stats.get("ladder_count", 0) + 1
+            elif "龙头" in s_str:
+                self._external_signal_stats["dragon_count"] = self._external_signal_stats.get("dragon_count", 0) + 1
+            else:
+                self._external_signal_stats["other_count"] = self._external_signal_stats.get("other_count", 0) + 1
+
+        eval_res = self.evaluate_external_signal_quality(source, clean_code, name, reason, score, extra)
+
+        with self._lock:
+            self._perceived_external_signals.insert(0, eval_res)
+            if len(self._perceived_external_signals) > 100:
+                self._perceived_external_signals = self._perceived_external_signals[:100]
+
+            if eval_res.get("is_quality", False):
+                self._external_signal_stats["quality_injected_count"] = self._external_signal_stats.get("quality_injected_count", 0) + 1
+                self._injected_quality_stocks[clean_code] = eval_res
+
+                # 沉淀到信号决策迭代日志 (让操盘手有迹可循)
+                tier = eval_res.get("signal_tier", "S")
+                stag = eval_res.get("source_tag", "🏷️ 外部信号")
+                q_score = eval_res.get("quality_score", 90.0)
+                price_val = 0.0
+                if extra and isinstance(extra, dict):
+                    price_val = float(extra.get("price", 0.0) or 0.0)
+
+                self._append_signal_iteration_log(
+                    action="SIGNAL_INJECT",
+                    code=clean_code,
+                    name=name,
+                    price=price_val,
+                    size_pct=100.0 if tier == "SSS" else 50.0,
+                    reason=f"[{stag}·{q_score:.0f}分] 质量策略评估通过，转入新股次新检查中心: {reason}",
+                    signal_tier=tier
+                )
+
+        # 若新股次新股检查中心正在运行，立即向其注入优质标的
+        if eval_res.get("is_quality", False):
+            try:
+                from ats.ui.ipo_subnew_detector_dialog import IPOSubnewDetectorDialog
+                active_detector = IPOSubnewDetectorDialog.get_active_instance()
+                if active_detector:
+                    active_detector.inject_quality_signal_stock(
+                        code=clean_code,
+                        name=name,
+                        source_tag=eval_res.get("source_tag", "🏷️ 优质信号"),
+                        reason=eval_res.get("reason", reason),
+                        signal_tier=eval_res.get("signal_tier", "S"),
+                        quality_score=eval_res.get("quality_score", 90.0)
+                    )
+            except Exception as ex_det:
+                logger.debug(f"向次新检查中心注入优质信号异常: {ex_det}")
+
+        return eval_res
+
+    def get_external_signal_stats(self) -> Dict[str, int]:
+        """获取外部信号感知统计 (天梯、龙头突击、优质转入等)"""
+        with self._lock:
+            return dict(self._external_signal_stats)
+
+    def get_perceived_external_signals(self) -> List[Dict[str, Any]]:
+        """获取最近感知的外部信号流水"""
+        with self._lock:
+            return list(self._perceived_external_signals)
+
+    def get_injected_quality_stocks(self) -> Dict[str, Dict[str, Any]]:
+        """获取已被质量策略纳准的全部优质信号标的映射"""
+        with self._lock:
+            return dict(self._injected_quality_stocks)
+
     def submit_batch_reports(self, signals: List[VWAPDetectorSignal]) -> None:
         """批量提交各标的感知报告并统一触发统筹评估"""
         if not signals:
