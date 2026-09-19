@@ -1001,6 +1001,45 @@ class IPOTradingCenter:
             self._pending_directives = directives
             self._broadcast_directives_to_alert_notifier(directives)
             self._auto_execute_if_enabled(directives)
+
+            # ── 无条件追加全池赛马扫描快照日志 (盘后/收盘后历史信号日志面板不空白) ──
+            pre_order_cnt = sum(1 for s in all_signals if getattr(s, "signal_type", "") in (
+                "PRE_ORDER", "BASE_PREORDER", "SWING_PREORDER"
+            ))
+            leader_name = top_leader.name if top_leader else "暂无领头羊"
+            leader_score = f"{top_leader.horse_race_score:.0f}" if top_leader else "0"
+            leader_code = top_leader.code if top_leader else "--"
+            scan_reason = (
+                f"📊 全池赛马快照 | 情绪:{sentiment.heat_stage} | "
+                f"领头羊:{leader_name}({leader_score}分) | "
+                f"全池:{len(all_signals)}只 | 🎯预埋:{pre_order_cnt}只 | 指令:{len(directives)}条"
+            )
+            scan_log_item = {
+                "timestamp": now_ts,
+                "time_str": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "action": "SCAN_SUMMARY",
+                "code": leader_code,
+                "name": leader_name,
+                "price": top_leader.price if top_leader else 0.0,
+                "shares": 0,
+                "size_pct": 0.0,
+                "urgency": "NORMAL",
+                "reason": scan_reason,
+                "horse_rank": 1,
+                "sentiment_phase": sentiment.heat_stage,
+                "signal_tier": "A",
+                "realized_pnl_pct": 0.0,
+                "realized_pnl_amount": 0.0
+            }
+            self._signal_iteration_log.insert(0, scan_log_item)
+            if len(self._signal_iteration_log) > 300:
+                self._signal_iteration_log = self._signal_iteration_log[:300]
+            # 异步落盘（不阻塞决策返回）
+            try:
+                self._save_persisted_ledger()
+            except Exception:
+                pass
+
             return directives
 
     def _broadcast_directives_to_alert_notifier(self, directives: List[IPOOrderDirective]):

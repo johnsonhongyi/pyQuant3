@@ -39,7 +39,7 @@ from PyQt6.QtWidgets import (
     QHeaderView, QAbstractItemView, QMessageBox, QFrame,
     QMenu, QApplication, QPlainTextEdit, QComboBox
 )
-from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal
+from PyQt6.QtCore import Qt, QTimer, QThread, QEvent, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QKeySequence, QShortcut, QAction
 
 from tk_gui_modules.qt_table_utils import NumericTableWidgetItem
@@ -506,6 +506,11 @@ class IPOSubnewDetectorDialog(QMainWindow):
         self._last_linkage_code = ""
         self._current_sort_col = -1
         self._current_sort_order = Qt.SortOrder.DescendingOrder
+        # 龙头点击联动：存储当前龙头代码，由 _update_fleet_and_arbitrations 同步刷新
+        self._top_leader_code: str = ""
+        # 盘后对齐：记录今日已触发盘后对齐扫描的日期，防止重复触发
+        self._after_close_synced_date: str = ""
+
 
         # 待渲染平滑队列与 30ms 分帧渲染定时器 (彻底消除多线程并发冲刷 UI 导致的掉帧、全表重排与顿卡)
         self._pending_render_queue = deque()
@@ -683,6 +688,10 @@ class IPOSubnewDetectorDialog(QMainWindow):
 
         self.lbl_fleet_leader = QLabel("🥇 爆款领头羊: 计算中...")
         self.lbl_fleet_leader.setStyleSheet("background-color: #241c14; border: 1px solid #5c3a1e; border-radius: 4px; padding: 2px 8px; color: #ffaa00; font-weight: bold; font-size: 8.5pt;")
+        # 【龙头点击联动】：手型指针提示可点击，installEventFilter 零侵入拦截鼠标事件
+        self.lbl_fleet_leader.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.lbl_fleet_leader.setToolTip("🖱️ 单击：定位龙头股并高亮选中 | F/回车 联动通达信")
+        self.lbl_fleet_leader.installEventFilter(self)
         self.fleet_bar.addWidget(self.lbl_fleet_leader)
 
         self.lbl_fleet_action = QLabel("🚢 集中交易决议: 紧盯 9:30-10:00 早鸟拔地而起 | 买错破 VWAP 立即出局")
@@ -886,6 +895,23 @@ class IPOSubnewDetectorDialog(QMainWindow):
 
         # ⚡ 集中战情冷启动满血复原：从缓存信号瞬间激活集中交易调度中心，更新大盘情绪、领头羊与全表集中决议！
         self._refresh_fleet_and_arbitrations_from_cached_signals()
+
+        # 【跨日账本检测】：若账本是昨日或更早，清除盘后对齐标记，冷启动后自动触发一次信号重算
+        ledger_date = ""
+        try:
+            saved_at_str = data.get("saved_at", "") if (data and isinstance(data, dict)) else ""
+            if saved_at_str and len(saved_at_str) >= 10:
+                ledger_date = saved_at_str[:10]
+        except Exception:
+            pass
+        today_str_check = datetime.now().strftime("%Y-%m-%d")
+        if ledger_date and ledger_date < today_str_check:
+            # 账本是昨日或更早 → 清除对齐标记，下次心跳 tick 将自动触发今日盘后对齐扫描
+            self._after_close_synced_date = ""
+            logger.info(f"📅 [跨日检测] 账本日期({ledger_date}) < 今日({today_str_check})，将自动触发信号对齐扫描")
+        else:
+            # 当日账本或无账本，保持默认（今日未对齐标记由 _on_poll_timer_tick 按需设置）
+            self._after_close_synced_date = getattr(self, "_after_close_synced_date", "")
 
         # 启动后根据自动轮询状态与当前时段自适应决定是否休眠或调度
         if getattr(self, "auto_refresh_enabled", False):
@@ -1242,6 +1268,32 @@ class IPOSubnewDetectorDialog(QMainWindow):
                 )
                 self.refresh_timer.start(60000)
 
+    def eventFilter(self, obj, event):
+        """【龙头标签点击联动】拦截 lbl_fleet_leader 鼠标点击，定位龙头股并联动通达信"""
+        if obj is getattr(self, "lbl_fleet_leader", None):
+            if event.type() == QEvent.Type.MouseButtonPress:
+                code = getattr(self, "_top_leader_code", "")
+                if code and code != "--":
+                    self._trigger_linkage_for_leader(code)
+                return True
+        return super().eventFilter(obj, event)
+
+    def _trigger_linkage_for_leader(self, code: str):
+        """点击顶部龙头标签：定位表格高亮选中该股，并联动通达信/同花顺"""
+        clean_code = "".join(ch for ch in str(code) if ch.isdigit()).zfill(6)
+        if not clean_code:
+            return
+        # 1. 定位表格并滚动居中高亮
+        self.locate_stock_in_table(clean_code, auto_popup=False)
+        # 2. 联动通达信/同花顺
+        try:
+            from linkage_service import get_link_manager
+            lm = get_link_manager()
+            if lm:
+                lm.push(clean_code, flags={"tdx": True, "ths": True, "dfcf": False}, auto=False)
+        except Exception:
+            pass
+
     def _on_toggle_voice_alert(self):
         """开启/关闭检测中心语音与 Toast 提示"""
         self.voice_alert_enabled = not self.voice_alert_enabled
@@ -1249,6 +1301,7 @@ class IPOSubnewDetectorDialog(QMainWindow):
         AlertNotifier.get_instance().voice_enabled = self.voice_alert_enabled
         if hasattr(self, "btn_voice"):
             self.btn_voice.setText("🔊 语音告警: 开" if self.voice_alert_enabled else "🔈 语音告警: 关")
+
 
     def _check_today_ipo_subscriptions(self):
         """嗅探今日新股申购并广播语音与 Toast 提醒"""
@@ -1320,11 +1373,23 @@ class IPOSubnewDetectorDialog(QMainWindow):
             return False, f"收盘休市 ({t_str})"
 
     def _on_poll_timer_tick(self):
-        """【⏳ 自动轮询心跳分发】智能适配时段：盘中自动扫描，收盘后智能休眠节能，绝不高频重复拉取"""
+        """【⏳ 自动轮询心跳分发】智能适配时段：盘中自动扫描，收盘后智能休眠节能，首次收盘触发一次历史数据对齐"""
         if not getattr(self, "auto_refresh_enabled", False):
             return
         is_trading, status_text = self._check_is_trading_time()
         if not is_trading:
+            # 【盘后单次对齐扫描】：每交易日收盘后仅触发一次，用历史K线数据重建信号，让次日开盘前预埋单就绪
+            today_str_tick = datetime.now().strftime("%Y-%m-%d")
+            if getattr(self, "_after_close_synced_date", "") != today_str_tick and self.signals_map:
+                self._after_close_synced_date = today_str_tick
+                logger.info(f"🌙 [盘后对齐] 触发今日({today_str_tick})首次收盘后历史数据全量对齐扫描，重建预埋信号...")
+                self.lbl_status.setText(
+                    f"🌙 盘后信号对齐中 ({status_text}) | 用收盘历史数据重建次日预埋信号 | "
+                    f"✅ 监控中: {len(self.monitored_codes)} 只"
+                )
+                QTimer.singleShot(800, self.trigger_scan)  # 800ms 后触发避免启动抖动
+                return
+            # 常规非交易时段休眠
             pre_cnt = sum(1 for s in self.signals_map.values() if s.signal_type in ("PRE_ORDER", "BASE_PREORDER", "SWING_PREORDER"))
             self.lbl_status.setText(
                 f"🌙 非交易时段 ({status_text}) | 自动轮询已智能休眠 (数据已持久化封存) | "
@@ -1357,6 +1422,8 @@ class IPOSubnewDetectorDialog(QMainWindow):
                 self.lbl_fleet_leader.setText(
                     f"🥇 爆款领头羊: {fleet_summary['top_leader_name']} ({fleet_summary['top_leader_score']}分)"
                 )
+                # 同步存储龙头代码，供点击联动使用
+                self._top_leader_code = fleet_summary.get("top_leader", "")
             if hasattr(self, "lbl_fleet_action"):
                 if directives:
                     top_d = directives[0]
