@@ -2914,11 +2914,14 @@ class TDXRealtimeFetcher:
                 _base_intv = 3.0
             _cache_ttl = 86400.0 if not can_rollover else max(1.5, _base_intv * 0.8)
 
+            cached_inc_df = None
             cached_inc = self.cache_pool.get_incremental_intraday(c_clean, days, ttl=_cache_ttl)
             if cached_inc is not None:
                 df_inc, _ = cached_inc
                 if df_inc is not None and not df_inc.empty:
-                    return df_inc
+                    if can_rollover:
+                        return df_inc
+                    cached_inc_df = df_inc.copy()
 
             # 若未开盘 (< 09:15) 或为非交易日，且多日缓存有值，直接返回，避免盘前向 TDX 发起无效请求
             if not can_rollover:
@@ -2936,6 +2939,35 @@ class TDXRealtimeFetcher:
                 and bool(hist_entry.get("records"))
             )
 
+            def _static_history_frame() -> pd.DataFrame:
+                if not has_valid_hist:
+                    return pd.DataFrame()
+                history_df = pd.DataFrame(list(hist_entry.get("records", [])))
+                if history_df.empty:
+                    return history_df
+                if cached_inc_df is not None and not cached_inc_df.empty:
+                    inc_df = cached_inc_df.reset_index(drop=False)
+                    if "time" not in inc_df.columns and "index" in inc_df.columns:
+                        inc_df.rename(columns={"index": "time"}, inplace=True)
+                    history_df = pd.concat([history_df, inc_df], ignore_index=True, sort=False)
+                dedupe_cols = [col for col in ("date", "time_only") if col in history_df.columns]
+                if len(dedupe_cols) == 2:
+                    history_df.drop_duplicates(subset=dedupe_cols, keep="last", inplace=True)
+                elif "time" in history_df.columns:
+                    history_df.drop_duplicates(subset=["time"], keep="last", inplace=True)
+                if "time" in history_df.columns:
+                    history_df.set_index("time", inplace=True)
+                if "date" in history_df.columns and "time_only" in history_df.columns:
+                    history_df.sort_values(["date", "time_only"], inplace=True)
+                self.cache_pool.set_multi_day_df(c_clean, days, history_df)
+                return history_df
+
+            # 休市/盘前没有“今日增量”可拉取时，静态 N-1 日历史本身就是权威回放数据。
+            if has_valid_hist and not can_rollover:
+                static_df = _static_history_frame()
+                if not static_df.empty:
+                    return static_df
+
             # 若有历史静态缓存，仅拉取 1 天 (240 根，单次极速 API 请求，15~25ms)
             fetch_days = 1 if (has_valid_hist and days > 1) else days
 
@@ -2943,7 +2975,7 @@ class TDXRealtimeFetcher:
             with self._conn_lock:
                 if not self._is_connected or self.api is None:
                     if not self.connect():
-                        return pd.DataFrame()
+                        return _static_history_frame()
                 try:
                     if is_idx:
                         bars = self.api.get_index_bars(8, mkt, c_target, 0, 800) or []
@@ -2998,7 +3030,7 @@ class TDXRealtimeFetcher:
                             bars = None
 
             if not bars:
-                return pd.DataFrame()
+                return _static_history_frame()
 
             df = pd.DataFrame(bars)
             if df.empty or "datetime" not in df.columns:
