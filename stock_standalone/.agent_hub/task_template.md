@@ -8,6 +8,7 @@
 - Owner: unassigned
 - Priority: P1
 - Risk: LOW
+- Permission-Profile: P2_CODE_LOW
 - Depends-On: none
 - Created-By: codex
 - Created-At: YYYY-MM-DD
@@ -55,3 +56,4 @@ python -m pytest tests/test_file.py -q
 - `walkthrough.md`
 - `test_result.md`
 - `changed_files.txt`
+- `agent_report.json`

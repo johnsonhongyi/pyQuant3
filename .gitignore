@@ -180,5 +180,8 @@ stock_standalone/datacsv/*
 !stock_standalone/config/multi_period_strategies.json
 !stock_standalone/config/indicator_help_custom.json
 .agent_hub/
+!stock_standalone/.agent_hub/
+stock_standalone/.agent_hub/*
+!stock_standalone/.agent_hub/PROMPT_PROTOCOL.md
 .pytest_temp
 tests/

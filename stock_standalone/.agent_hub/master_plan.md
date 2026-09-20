@@ -28,6 +28,13 @@ GPT/Codex总体设计与任务拆解
 - Antigravity实现结果未经Codex审查、测试闸门和版本决策，不得归档、合并或进入下一交易阶段。
 - 每个批准节点必须有任务编号、测试证据、审查结论、详细中文Git提交说明和版本报告记录。
 - 事件情绪、潮汐状态机和实时总控接线等已由Codex直接实现的节点，必须通过已创建的独立审计任务补齐Antigravity第二视角复核。
+- `.agent_hub/PROMPT_PROTOCOL.md` 是本闭环的工程级 prompt 协议，固定主控输出、Worker JSON 报告、发布门禁和冲突仲裁格式。
+
+## 权限智能细分
+
+- 权限同时按任务风险、工具类别和文件范围三维判定；任一维度越界都必须降级为人工确认或直接拒绝。
+- P0_READONLY 用于审计复核，P1_DOCS_SAFE 用于文档和 Agent Hub 规则，P2_CODE_LOW 用于低风险实现，P3_CODE_MEDIUM 用于受控跨模块实现，P4_RELEASE_GATE 用于只读发布门禁，P5_FORBIDDEN 覆盖真实交易、密钥、自动发布和券商接口。
+- `--dangerously-skip-permissions` 只允许在 P2/P3 且不高于 `max_auto_approve_risk` 的任务中由编排器注入；注入后仍必须执行 sandbox、范围检查、验证命令和 Codex 审查。
 
 ## Antigravity异常恢复规则
 
