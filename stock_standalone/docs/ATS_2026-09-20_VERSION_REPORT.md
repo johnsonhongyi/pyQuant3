@@ -106,8 +106,10 @@
 
 - GPT/Codex负责总体架构、任务拆解、代码审查、测试闸门和版本决策。
 - Agent Hub任务001/002已执行过Antigravity Worker与Codex审查闭环。
-- 本报告后半段的事件情绪、潮汐状态机和实时总控接线由GPT/Codex直接实现并验证。
-- 这些新节点尚需通过Antigravity独立回测任务进行第二视角复核，不能把单Agent测试等同于双Agent交叉验收。
+- 历史事实：本报告后半段的事件情绪、潮汐状态机和实时总控接线由GPT/Codex直接实现并验证；这属于Antigravity连接和权限异常期间形成的未闭环节点，不作为后续开发范例。
+- 当前状态：这些节点只能标记为“Codex实现并自测通过、待Antigravity独立复核”，不能把单Agent测试等同于双Agent交叉验收，也不能标记为最终闭环完成。
+- 强制规则：后续业务开发必须执行“GPT/Codex设计与拆解 -> Agent Hub任务 -> Antigravity实施或独立审计 -> 自动测试闸门 -> GPT/Codex审查与版本决策 -> 中文版本报告和Git提交”。
+- Antigravity出现连接、代理、认证、权限、CLI或沙箱异常时，必须先修复CLI执行能力并恢复原任务；除有原始日志证明的配额或账户限额外，不得跳过Antigravity改为Codex单Agent代做。
 
 ## 后续任务
 
