@@ -45,6 +45,8 @@ class RunReport:
 
 
 class AgentOrchestrator:
+    RISK_RANK = {"LOW": 1, "MEDIUM": 2, "HIGH": 3}
+
     def __init__(self, project_root: Path, runner: Runner = subprocess.run) -> None:
         self.root = project_root.resolve()
         self.hub = AgentHub(self.root)
@@ -226,9 +228,11 @@ class AgentOrchestrator:
         auto_approve = bool(self.config.get("worker_auto_approve_permissions", False))
         allowed_risk = self.config.get("max_auto_approve_risk", "LOW").upper()
         if auto_approve:
-            if task_risk != allowed_risk:
+            task_rank = self.RISK_RANK.get(task_risk)
+            allowed_rank = self.RISK_RANK.get(allowed_risk)
+            if task_rank is None or allowed_rank is None or task_rank > allowed_rank:
                 raise OrchestratorError(
-                    f"Automatic permission approval is restricted to {allowed_risk} tasks; "
+                    f"Automatic permission approval is restricted to <= {allowed_risk} tasks; "
                     f"task risk is {task_risk}"
                 )
         primary = self.config.get("worker_model", "").strip()

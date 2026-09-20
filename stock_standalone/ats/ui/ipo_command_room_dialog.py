@@ -1077,6 +1077,8 @@ class IPOCommandRoomDialog(QDialog):
                 role_it.setForeground(QColor("#00e5ff"))
             elif role_raw == "SWING_PREORDER":
                 role_it.setForeground(QColor("#00e5ff"))
+            elif role_raw == "SECONDARY_BUY":
+                role_it.setForeground(QColor("#ffd700"))
             elif role_raw == "STOP_LOSS":
                 role_it.setForeground(QColor("#ff4444"))
             elif role_raw == "PANIC_DEFENSE":
@@ -1092,7 +1094,7 @@ class IPOCommandRoomDialog(QDialog):
             # 决议依据
             desc_str = sig.global_arbitration_desc or sig.signal_desc
             desc_it = QTableWidgetItem(desc_str)
-            if "领头羊" in desc_str or "首发吸筹" in desc_str or "共振加速" in desc_str or "筑底预埋" in desc_str or "通道突破" in desc_str:
+            if "领头羊" in desc_str or "首发吸筹" in desc_str or "共振加速" in desc_str or "筑底预埋" in desc_str or "通道突破" in desc_str or "次级买点" in desc_str:
                 desc_it.setForeground(QColor("#00ff88"))
             elif "买错" in desc_str or "平仓" in desc_str or "止损" in desc_str:
                 desc_it.setForeground(QColor("#ff5555"))
@@ -1260,9 +1262,11 @@ class IPOCommandRoomDialog(QDialog):
                 self.tbl_orders.setItem(r, 1, tier_it)
 
                 act_it = QTableWidgetItem(s_log.get("action", "--"))
-                if s_log.get("action") in ("BUY", "FULL_ROTATION_SWAP"):
+                if s_log.get("action") in ("BUY", "BUY_CONFIRM", "FULL_ROTATION_SWAP"):
                     act_it.setForeground(QColor("#00ff88"))
-                elif s_log.get("action") in ("SELL", "STOP_LOSS"):
+                elif s_log.get("action") in ("BUY_SCOUT",):
+                    act_it.setForeground(QColor("#00e5ff"))
+                elif s_log.get("action") in ("SELL", "STOP_LOSS", "EXIT_ALL"):
                     act_it.setForeground(QColor("#ff5555"))
                 self.tbl_orders.setItem(r, 2, act_it)
 

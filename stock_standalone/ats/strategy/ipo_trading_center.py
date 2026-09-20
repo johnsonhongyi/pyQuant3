@@ -175,6 +175,8 @@ class IPOTradingCenter:
         self.auto_follow_trading: bool = False     # 全自动跟随交易开关 (开启后自动撮合指令)
         self._pending_directives: List[IPOOrderDirective] = []
         self._trade_plans: Dict[str, IPOTradePlan] = {} # 标的对应的不变 TradePlan 字典
+        self._emitted_plan_ids: set = set()            # 已生成指令的 TradePlan ID 集合 (刷新幂等防重)
+        self._emitted_signal_ids: set = set()          # 已生成指令的 Signal ID 集合
 
         # ATS 外部语音报警与异动信号感知统计与优质注入池
         self._external_signal_stats: Dict[str, int] = {
@@ -216,6 +218,11 @@ class IPOTradingCenter:
         """
         if not sig or not sig.code or sig.price <= 0:
             return None
+
+        # 若信号已携带有效且不可变的 IPOTradePlan，直接复用注册，绝不重复生成新对象覆盖破坏
+        if getattr(sig, "trade_plan", None) and isinstance(sig.trade_plan, IPOTradePlan):
+            self.register_trade_plan(sig.trade_plan)
+            return sig.trade_plan
 
         clean_code = str(sig.code).strip().zfill(6)
         now_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -814,6 +821,24 @@ class IPOTradingCenter:
                     sig.global_arbitration_desc = f"🎯【筑底预埋 15%仓】底部({sig.base_support_level:.2f})缩量横盘构筑扎实结构，动能拐头初现，提前预埋潜伏，{space_str}，买错跌破{sig.stop_loss_price:.2f}元立斩！"
                     continue
 
+                # 仲裁 B_SEC: 长期通道企稳底部结构次级买点 (SECONDARY_BUY 独立战术角色，坚决避免被普通 FOLLOWER 和 VWAP 破位误杀)
+                is_sec_buy_stage = (
+                    sig.signal_type == "SECONDARY_BUY"
+                    or getattr(sig, "channel_stage", "") in (SecondaryBuyStage.SECONDARY_BUY, "SECONDARY_BUY")
+                )
+                if is_sec_buy_stage:
+                    sig.global_fleet_role = "SECONDARY_BUY"
+                    plan = getattr(sig, "trade_plan", None)
+                    hl_stop = getattr(sig, "higher_low_stop", 0.0) or (plan.higher_low_stop if plan else sig.stop_loss_price)
+                    base_low = getattr(sig, "base_low_invalid", 0.0) or (plan.base_low_invalid if plan else sig.base_support_level)
+                    buy_zone_max = plan.buy_zone_max if (plan and plan.buy_zone_max > 0) else round(sig.price * 1.015, 3)
+                    q_g = getattr(plan, "quality_grade", "") or getattr(sig, "quality_grade", "S")
+                    sig.global_arbitration_desc = (
+                        f"👑【次级买点 {q_g}级】长期通道企稳，回踩抬高底放量确认，"
+                        f"防守线{hl_stop:.2f}元(失效底{base_low:.2f})，买入网格上限{buy_zone_max:.2f}元，拒绝追高！"
+                    )
+                    continue
+
                 # 仲裁 B3: 普通破位无结构股 (买错立斩出局)
                 if not sig.is_above_vwap and sig.vwap_diff_pct < -0.6:
                     sig.global_fleet_role = "STOP_LOSS"
@@ -844,10 +869,12 @@ class IPOTradingCenter:
                     sig.global_arbitration_desc = f"🥈【梯队前锋 15%仓】动能分{sig.horse_race_score:.0f}，紧随领头羊[{leader_nm}]多头共振，顺风跟进！"
                     continue
 
-                # 仲裁 F: 龙头高潮冲顶崩盘联动避险 (仅对第 4 名之后的跟风高位标的退潮拦截，但低位独立筑底/共振/通道突破标的除外！)
+                # 仲裁 F: 龙头高潮冲顶崩盘联动避险 (仅对第 4 名之后的跟风高位标的退潮拦截，但低位独立筑底/共振/通道突破/次级买点标的除外！)
                 if leader_is_crashing and sig.code != leader_code:
-                    if sig.signal_type in ("BASE_PREORDER", "BASE_BREAKOUT", "SWING_PREORDER") or sig.has_bottom_base:
-                        pass  # 底部独立结构标的不被龙头冲顶误杀
+                    if (sig.signal_type in ("BASE_PREORDER", "BASE_BREAKOUT", "SWING_PREORDER", "SECONDARY_BUY")
+                            or getattr(sig, "channel_stage", "") in (SecondaryBuyStage.SECONDARY_BUY, "SECONDARY_BUY")
+                            or sig.has_bottom_base):
+                        pass  # 底部独立结构与次级买点标的不被龙头冲顶误杀
                     else:
                         sig.global_fleet_role = "PANIC_DEFENSE"
                         sig.global_arbitration_desc = f"🛡️【全局避险 0%仓】超级龙头({leader_code})天量冲顶跳水，板块情绪退潮，跟风标的严禁盲目接飞刀！"
@@ -1037,17 +1064,121 @@ class IPOTradingCenter:
                 if getattr(sig, "is_t1_forbidden_buy", False):
                     continue
 
-                # 若不在 VWAP 之上，但具备底部扎实结构与动能拐点 (BASE_BREAKOUT / BASE_PREORDER / SWING_PREORDER)，允许开仓与预埋！
-                if not sig.is_above_vwap and sig.signal_type not in ("BASE_BREAKOUT", "BASE_PREORDER", "SWING_PREORDER"):
+                # 若不在 VWAP 之上，但具备底部扎实结构与动能拐点 (BASE_BREAKOUT / BASE_PREORDER / SWING_PREORDER / SECONDARY_BUY)，允许开仓与预埋！
+                is_sec_buy_sig = (
+                    sig.signal_type == "SECONDARY_BUY"
+                    or getattr(sig, "channel_stage", "") in (SecondaryBuyStage.SECONDARY_BUY, "SECONDARY_BUY")
+                )
+                if not sig.is_above_vwap and sig.signal_type not in ("BASE_BREAKOUT", "BASE_PREORDER", "SWING_PREORDER") and not is_sec_buy_sig:
                     continue
 
                 # “山外有山”铁律：第 4 名之后的跟风平庸股，坚决不分配仓位，杜绝资金稀释！
-                # 但底部具备独立扎实结构或跨日通道突破的标的如果跻身前列，允许开仓
-                if sig.horse_race_rank > 3 and sig.signal_type not in ("BASE_BREAKOUT", "BASE_PREORDER", "SWING_PREORDER"):
+                # 但底部具备独立扎实结构、跨日通道突破或次级买点的标的允许开仓
+                if sig.horse_race_rank > 3 and sig.signal_type not in ("BASE_BREAKOUT", "BASE_PREORDER", "SWING_PREORDER") and not is_sec_buy_sig:
                     continue
 
                 if current_fleet_weight >= max_fleet_weight:
                     break
+
+                if is_sec_buy_sig:
+                    # ── 【SECONDARY_BUY 专属开仓闭环】 ──
+                    plan = getattr(sig, "trade_plan", None)
+                    # 1. 严格校验 TradePlan 存在性与有效性
+                    if plan is None or not isinstance(plan, IPOTradePlan):
+                        logger.info(f"[IPO-TRADING] 拒绝次级买点开仓 {code}: 缺失有效 IPOTradePlan")
+                        continue
+
+                    # 2. 严格校验信号等级必须为 S4 或 S5
+                    raw_level = str(getattr(plan, "signal_level", "") or getattr(sig, "signal_level", "")).strip()
+                    if "S5" in raw_level:
+                        s_level = "S5"
+                    elif "S4" in raw_level or "次级买点" in raw_level:
+                        s_level = "S4"
+                    elif "S3" in raw_level:
+                        s_level = "S3"
+                    elif "S2" in raw_level:
+                        s_level = "S2"
+                    elif "S1" in raw_level:
+                        s_level = "S1"
+                    elif "S0" in raw_level:
+                        s_level = "S0"
+                    else:
+                        s_level = raw_level
+
+                    if s_level not in ("S4", "S5"):
+                        logger.info(f"[IPO-TRADING] 拒绝次级买点开仓 {code}: 信号等级 {s_level} 低于 S4 门槛")
+                        continue
+
+                    # 3. 严格校验现价不得超过买入区上沿 (buy_zone_max)
+                    buy_max = plan.buy_zone_max if plan.buy_zone_max > 0 else getattr(plan, "buy_zone_upper", 0.0)
+                    if buy_max > 0 and sig.price > buy_max:
+                        logger.info(f"[IPO-TRADING] 拒绝次级买点开仓 {code}: 现价 {sig.price:.2f} 超过买入区上沿 {buy_max:.2f}")
+                        continue
+
+                    # 4. 刷新循环幂等守卫：同一 plan_id / signal_id 不得重复生成买入指令
+                    plan_id = getattr(plan, "plan_id", "")
+                    signal_id = getattr(sig, "signal_id", "") or (sig.extra_data.get("signal_id", "") if hasattr(sig, "extra_data") and isinstance(sig.extra_data, dict) else "")
+                    if plan_id and plan_id in self._emitted_plan_ids:
+                        logger.debug(f"[IPO-TRADING] 幂等拦截 {code}: 计划 {plan_id} 已生成过指令")
+                        continue
+                    if signal_id and signal_id in self._emitted_signal_ids:
+                        logger.debug(f"[IPO-TRADING] 幂等拦截 {code}: 信号 {signal_id} 已生成过指令")
+                        continue
+
+                    # 5. 动作与受控仓位计算 (S4=BUY_SCOUT 试探仓; S5=BUY_CONFIRM 确认仓，不得直接满仓)
+                    remaining_fleet_weight = max(0.0, max_fleet_weight - current_fleet_weight)
+                    plan_weight = float(getattr(plan, "position_pct", 30.0) or 30.0)
+                    if s_level == "S4":
+                        buy_action = "BUY_SCOUT"
+                        max_allowed = min(plan_weight, 30.0)
+                    else:  # S5
+                        buy_action = "BUY_CONFIRM"
+                        max_allowed = min(plan_weight, 35.0)  # 严格限制上限，不得直接满仓 (如100%)
+
+                    assigned_weight = min(max_allowed, remaining_fleet_weight)
+                    if assigned_weight <= 0:
+                        logger.info(f"[IPO-TRADING] 次级买点仓位受限 {code}: 剩余可用仓位 {remaining_fleet_weight:.1f}%")
+                        continue
+
+                    allocated_money = self.total_capital * (assigned_weight / 100.0)
+                    buy_shares = int(allocated_money / sig.price / 100.0) * 100
+                    if buy_shares < 100:
+                        continue
+
+                    q_grade = getattr(plan, "quality_grade", "") or getattr(sig, "quality_grade", "S")
+                    strat_tag = getattr(plan, "strategy_tag", "") or getattr(sig, "strategy_tag", TAG_CHANNEL_SECONDARY_BUY) or TAG_CHANNEL_SECONDARY_BUY
+
+                    # 6. 生成指令并完整携带原始不可变 trade_plan 与规范属性
+                    directive = IPOOrderDirective(
+                        action=buy_action,
+                        code=code,
+                        name=sig.name,
+                        price=sig.price,
+                        shares=buy_shares,
+                        size_pct=assigned_weight,
+                        urgency="LIMIT" if sig.price < plan.buy_zone_min else "NORMAL",
+                        reason=(
+                            f"👑 次级买点确认[{s_level}·{q_grade}级]: 长期通道企稳，回踩抬高底突破，"
+                            f"买入网格¥{plan.buy_zone_min:.2f}~¥{plan.buy_zone_max:.2f}，次低防守止损¥{plan.higher_low_stop:.2f}"
+                        ),
+                        horse_rank=sig.horse_race_rank,
+                        sentiment_phase=sentiment.heat_stage,
+                        timestamp=now_ts,
+                        signal_tier=q_grade,
+                        signal_level=s_level,
+                        quality_grade=q_grade,
+                        strategy_tag=strat_tag,
+                        trade_plan=plan
+                    )
+
+                    if not any(d.code == code and d.action in ("BUY", "BUY_SCOUT", "BUY_CONFIRM") for d in directives):
+                        directives.append(directive)
+                        current_fleet_weight += assigned_weight
+                        if plan_id:
+                            self._emitted_plan_ids.add(plan_id)
+                        if signal_id:
+                            self._emitted_signal_ids.add(signal_id)
+                    continue
 
                 is_valid_buy = False
                 buy_reason = ""
@@ -1171,7 +1302,7 @@ class IPOTradingCenter:
             return
         now_ts = time.time()
         for d in directives:
-            if d.action not in ("BUY", "FULL_ROTATION_SWAP", "SWITCH_SWAP", "SELL"):
+            if d.action not in ("BUY", "BUY_SCOUT", "BUY_CONFIRM", "FULL_ROTATION_SWAP", "SWITCH_SWAP", "SELL"):
                 continue
             d_key = f"{d.action}_{d.code}_{d.urgency}"
             last_ts = self._notified_directive_keys.get(d_key, 0.0)
@@ -1183,8 +1314,9 @@ class IPOTradingCenter:
             if d.action == "FULL_ROTATION_SWAP":
                 reason_text = f"【全仓轮动换马】清仓[{d.name}]，100%全仓接力超级领头羊[{d.target_swap_name}]！"
                 voice_p = 99.0
-            elif d.action == "BUY":
-                reason_text = f"【集中买入指令】买入[{d.name}] 仓位{d.size_pct:.0f}%：{d.reason}"
+            elif d.action in ("BUY", "BUY_SCOUT", "BUY_CONFIRM"):
+                act_label = "次级买点试探仓" if d.action == "BUY_SCOUT" else ("次级买点确认仓" if d.action == "BUY_CONFIRM" else "集中买入")
+                reason_text = f"【集中{act_label}指令】{d.action} [{d.name}] 仓位{d.size_pct:.0f}%：{d.reason}"
                 voice_p = 98.0
             elif d.action == "SELL":
                 reason_text = f"【集中平仓警报】卖出[{d.name}]：{d.reason}"
@@ -1341,6 +1473,12 @@ class IPOTradingCenter:
                 pos.available_shares = 0
 
             self._order_history.append(directive)
+
+            # 撮合执行后从待执行指令清单中移除匹配项
+            self._pending_directives = [
+                d for d in self._pending_directives
+                if not (d.code == directive.code and d.action == directive.action)
+            ]
 
             # 写入信号与决议迭代日志 (供操盘手点击详情回溯)
             log_item = {

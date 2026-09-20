@@ -87,7 +87,7 @@ python tools/agent_orchestrator.py run --task 001 --execute
 
 - Antigravity 非交互模式连 `ListDir` 也要求确认。`worker_auto_approve_permissions` 默认关闭；启用它会批准该 Agent 的全部工具请求，必须由用户明确授权。
 - 即使用户明确开启，编排器也仅允许任务书标记为 `Risk: LOW` 的任务使用，并继续强制 CLI `--sandbox`、范围检查和测试闸门。
-- `MEDIUM/HIGH` 任务禁止自动批准，必须人工执行或先拆成 LOW 风险原子任务。
+- 用户已批准研发流水线连续推进至 `MEDIUM` 风险；`HIGH`、真实下单、密钥、自动合并和实盘开关仍禁止自动执行。
 - 不自动归档，不自动合并，不自动实盘。
 - Worker 失败时任务保留在 `running/` 等待诊断，不继续下一任务。
 - 测试或越界检查失败时强制 `REWORK`。
