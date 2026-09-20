@@ -1,3 +1,10 @@
+## 2026-09-19 23:37
+- [x] **【长期通道底部结构次级买点 P1 界面呈现与交易指挥室卡片升级】(`20260919_2337_task.md`, `ats/strategy/ipo_vwap_detector_engine.py`, `ats/ui/ipo_subnew_detector_dialog.py`, `ats/ui/ipo_command_room_dialog.py`, `tests/test_channel_secondary_buy_ui_and_engine.py`)**：
+    - [x] 1. 在 `VWAPDetectorSignal` 增加 `channel_stage`, `higher_low_stop`, `trade_plan` 等字段，在 `analyze_stock` 中无缝接入 `evaluate_channel_secondary_buy` 并加入逐日赛马梯队；
+    - [x] 2. 在检测中心表格【形态】列直观展示【形态阶段】彩色徽章（`👑 次级买点` / `⏳ 缩量回踩` / `🚀 首次试盘` / `📦 平底箱体` / `📉 通道寻底`），【评级】列展示 `S4 | SS`，【止损位】对齐 `higher_low_stop` 并在操作建议呈现不可变 TradePlan 网格 Tooltip；
+    - [x] 3. 集中交易指挥室待执行指令表格支持 `BUY_SCOUT` / `BUY_CONFIRM` 彩色动作，并直观呈现不可变 `TradePlan` 网格与防守线；
+    - [x] 4. 构建自动化测试套件与全量回归 (54/54 核心测试全部 100% 绿灯通过)。
+
 ## 2026-09-19 21:35
 - [x] **【新股检测工具与交易决策中心：长期通道底部结构次级买点最小可跑闭环 (P0实战落地)】(`20260919_2135_task.md`, `ats/strategy/channel_secondary_buy_strategy.py`, `ats/strategy/ipo_trading_center.py`, `ats/proactive_exit_engine.py`, `ats/tdx_realtime_fetcher.py`, `tests/test_channel_secondary_buy_strategy.py`)**：
     - [x] **操盘手现场实战修正与实施切片定调全部落地 (P0)**：

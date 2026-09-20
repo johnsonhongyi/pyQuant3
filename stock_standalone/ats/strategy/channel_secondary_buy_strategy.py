@@ -56,9 +56,9 @@ TAG_IPO_BID_SURGE           = "IPO_BID_SURGE"
 @dataclass
 class IPOTradePlan:
     """标准不可变交易计划容器 (实盘买卖点绑定与全生命周期保护基石)"""
-    plan_id: str                              # 唯一计划编号，如 TP_688826_20260919_093201
-    code: str                                 # 标的代码
-    name: str                                 # 标的名称
+    code: str = ""                            # 标的代码
+    name: str = ""                            # 标的名称
+    plan_id: str = ""                         # 唯一计划编号，如 TP_688826_20260919_093201
     strategy_tag: str = TAG_CHANNEL_SECONDARY_BUY # 策略正交标签
     signal_level: str = "S4"                  # "S0" ~ "S5" (生命周期层级)
     quality_grade: str = "S"                  # "A" | "S" | "SS" (形态质量等级)
@@ -83,6 +83,23 @@ class IPOTradePlan:
     expire_at: str = "14:45:00"               # 计划失效截止时间 (当日有效)
     created_time: str = ""
     extra_info: Dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self):
+        if not self.plan_id and self.code:
+            now_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            self.plan_id = f"TP_{self.code}_{now_str}"
+
+    @property
+    def buy_zone_lower(self) -> float:
+        return self.buy_zone_min
+
+    @property
+    def buy_zone_upper(self) -> float:
+        return self.buy_zone_max
+
+    @property
+    def target_2_breakout_high(self) -> float:
+        return self.target_2_swing_high
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -137,7 +154,52 @@ def evaluate_channel_secondary_buy(
     【长期通道后企稳与底部结构次级买点评估纯函数】
     输入：60F K线 (必须), 日K线 (可选), 实时盘口/现价 (可选)
     输出：标准化结构判断结果与不可变 TradePlan (若达到 S4/S5)
+    严格遵守主流程安全原则，绝不抛出未捕获异常
     """
+    try:
+        return _evaluate_channel_secondary_buy_impl(
+            df_60m=df_60m,
+            df_day=df_day,
+            current_quote=current_quote,
+            min_bars=min_bars,
+            code=code,
+            name=name
+        )
+    except Exception as e:
+        logger.error(f"[{code}] 通道次级买点评估异常: {e}", exc_info=True)
+        return {
+            "code": code,
+            "name": name,
+            "strategy_tag": TAG_CHANNEL_SECONDARY_BUY,
+            "is_valid": False,
+            "stage": SecondaryBuyStage.DESCENDING_CHANNEL,
+            "signal_level": "S0",
+            "quality_grade": "A",
+            "base_low": 0.0,
+            "higher_low": 0.0,
+            "base_high": 0.0,
+            "first_break_price": 0.0,
+            "secondary_entry": 0.0,
+            "invalid_price": 0.0,
+            "hard_stop": 0.0,
+            "target_1": 0.0,
+            "target_2": 0.0,
+            "slope_deg": 0.0,
+            "vol_shrink_ratio": 1.0,
+            "score": 0.0,
+            "reason": f"通道次级买点计算异常: {e}",
+            "trade_plan": None
+        }
+
+
+def _evaluate_channel_secondary_buy_impl(
+    df_60m: pd.DataFrame,
+    df_day: Optional[pd.DataFrame] = None,
+    current_quote: Optional[Dict[str, Any]] = None,
+    min_bars: int = 20,
+    code: str = "",
+    name: str = ""
+) -> Dict[str, Any]:
     res = {
         "code": code,
         "name": name,
