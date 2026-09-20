@@ -222,6 +222,17 @@ class AgentOrchestrator:
         match = re.search(r"^- Risk:\s*(\w+)\s*$", task_text, re.MULTILINE | re.IGNORECASE)
         return match.group(1).upper() if match else "UNKNOWN"
 
+    @staticmethod
+    def _is_transient_auth_failure(result: subprocess.CompletedProcess[str]) -> bool:
+        combined = f"{result.stdout}\n{result.stderr}".lower()
+        markers = (
+            "you are not logged into antigravity",
+            "authentication timed out",
+            "authentication failed or timed out",
+            "silent auth failed",
+        )
+        return result.returncode != 0 and any(marker in combined for marker in markers)
+
     def _invoke_worker(
         self, prompt: str, artifact_dir: Path, task_risk: str
     ) -> subprocess.CompletedProcess[str]:
@@ -283,11 +294,27 @@ class AgentOrchestrator:
             self._write(
                 artifact_dir / f"worker_attempt_{index}_{safe_model}.stderr", result.stderr
             )
+            if self._is_transient_auth_failure(result):
+                retry = self._run(
+                    args,
+                    timeout=int(self.config.get("worker_timeout_seconds", 1800)) + 30,
+                    env=worker_env,
+                )
+                attempts.append(retry)
+                self._write(
+                    artifact_dir / f"worker_attempt_{index}_{safe_model}_auth_retry.stdout",
+                    retry.stdout,
+                )
+                self._write(
+                    artifact_dir / f"worker_attempt_{index}_{safe_model}_auth_retry.stderr",
+                    retry.stderr,
+                )
+                result = retry
             if result.returncode == 0:
                 return result
         last = attempts[-1]
         combined_error = "\n\n".join(
-            f"Attempt {index} ({models[index - 1] or 'default'}):\n{item.stderr}"
+            f"Attempt {index} ({models[min(index - 1, len(models) - 1)] or 'default'}):\n{item.stderr}"
             for index, item in enumerate(attempts, start=1)
         )
         return subprocess.CompletedProcess(last.args, last.returncode, last.stdout, combined_error)
