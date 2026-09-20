@@ -61,9 +61,10 @@ def teardown_module():
             pass
 
 
-def test_full_rotation_swap_generation_and_execution():
+def test_full_rotation_swap_generation_and_t1_guarded_execution():
     """1. 验证全仓轮动模式：满仓 100% 换马新龙头与历史平仓记录沉淀"""
-    center = IPOTradingCenter.get_instance()
+    center = IPOTradingCenter(total_capital=1000000.0)
+    center._ledger_file = TEST_LEDGER_FILE
 
     # 开启全仓轮动模式
     center.set_full_rotation_enabled(True)
@@ -106,7 +107,16 @@ def test_full_rotation_swap_generation_and_execution():
     assert "全仓轮动" in swap_directive.reason
 
     # 3. 执行全仓轮动决议
-    center.execute_directive(swap_directive)
+    # Same-day holdings are physically locked by A-share T+1 rules.
+    assert center.execute_directive(swap_directive) is False
+    assert "300001" in center._positions
+    assert "300002" not in center._positions
+    assert center.available_cash == 0.0
+    assert center.get_closed_positions() == []
+
+    # The identical tactical directive becomes executable on the next day.
+    center._positions["300001"].entry_date = "2026-09-19"
+    assert center.execute_directive(swap_directive) is True
 
     # 验证老持仓已结清平仓，新龙头成为唯一持仓
     assert "300001" not in center._positions
