@@ -46,6 +46,18 @@ class RunReport:
 
 class AgentOrchestrator:
     RISK_RANK = {"LOW": 1, "MEDIUM": 2, "HIGH": 3}
+    DEFAULT_PERMISSION_PROFILES = {
+        "P0_READONLY": {"worker_mode": "plan", "auto_approve": False},
+        "P1_DOCS_SAFE": {"worker_mode": "accept-edits", "auto_approve": True},
+        "P2_CODE_LOW": {
+            "worker_mode": "accept-edits", "auto_approve": True, "max_risk": "LOW"
+        },
+        "P3_CODE_MEDIUM": {
+            "worker_mode": "accept-edits", "auto_approve": True, "max_risk": "MEDIUM"
+        },
+        "P4_RELEASE_GATE": {"worker_mode": "plan", "auto_approve": False},
+        "P5_FORBIDDEN": {"worker_mode": "forbidden", "auto_approve": False},
+    }
 
     def __init__(self, project_root: Path, runner: Runner = subprocess.run) -> None:
         self.root = project_root.resolve()
@@ -220,7 +232,71 @@ class AgentOrchestrator:
     @staticmethod
     def _task_risk(task_text: str) -> str:
         match = re.search(r"^- Risk:\s*(\w+)\s*$", task_text, re.MULTILINE | re.IGNORECASE)
-        return match.group(1).upper() if match else "UNKNOWN"
+        return match.group(1).upper() if match else "LOW"
+
+    @staticmethod
+    def _metadata_value(task_text: str, key: str) -> str | None:
+        match = re.search(
+            rf"^-\s*{re.escape(key)}:\s*(.+?)\s*$",
+            task_text,
+            re.MULTILINE | re.IGNORECASE,
+        )
+        return match.group(1).strip() if match else None
+
+    def _permission_profile(self, task_text: str) -> str:
+        return (self._metadata_value(task_text, "Permission-Profile") or "P2_CODE_LOW").upper()
+
+    def _permission_profiles(self) -> dict[str, dict[str, object]]:
+        profiles = {name: dict(values) for name, values in self.DEFAULT_PERMISSION_PROFILES.items()}
+        for name, overrides in self.config.get("permission_profiles", {}).items():
+            profiles.setdefault(name, {}).update(overrides)
+        return profiles
+
+    def _permission_profile_config(self, task_text: str) -> tuple[str, dict[str, object]]:
+        profile_name = self._permission_profile(task_text)
+        profile = self._permission_profiles().get(profile_name)
+        if profile is None:
+            raise OrchestratorError(f"Unknown Permission-Profile: {profile_name}")
+        return profile_name, profile
+
+    def _validate_permission_profile(self, task_text: str) -> None:
+        profile_name, profile = self._permission_profile_config(task_text)
+        worker_mode = str(profile.get("worker_mode", "forbidden"))
+        if worker_mode == "forbidden":
+            raise OrchestratorError(f"Permission-Profile {profile_name} cannot be automated")
+        if worker_mode not in {"plan", "accept-edits"}:
+            raise OrchestratorError(
+                f"Permission-Profile {profile_name} has invalid worker_mode: {worker_mode}"
+            )
+
+        task_risk = self._task_risk(task_text)
+        task_rank = self.RISK_RANK.get(task_risk)
+        if task_rank is None:
+            raise OrchestratorError(f"Unknown task risk: {task_risk}")
+        max_risk_value = profile.get("max_risk")
+        max_risk = str(max_risk_value).upper() if max_risk_value else None
+        max_rank = self.RISK_RANK.get(max_risk) if max_risk else None
+        if max_risk and max_rank is None:
+            raise OrchestratorError(
+                f"Permission-Profile {profile_name} has invalid max_risk: {max_risk}"
+            )
+        if max_rank is not None and task_rank > max_rank:
+            raise OrchestratorError(
+                f"Permission-Profile {profile_name} allows <= {max_risk}; task risk is {task_risk}"
+            )
+
+        allowed = self._section_items(task_text, "Files Allowed")
+        if profile_name == "P1_DOCS_SAFE":
+            doc_patterns = (".md", ".txt", ".rst", ".adoc")
+            invalid_docs_path = next((
+                pattern for pattern in allowed
+                if not pattern.startswith(".agent_hub/") and not pattern.endswith(doc_patterns)
+            ), None)
+            if invalid_docs_path:
+                raise OrchestratorError(
+                    f"Permission-Profile {profile_name} only allows documentation or "
+                    f".agent_hub paths: {invalid_docs_path}"
+                )
 
     @staticmethod
     def _is_transient_auth_failure(result: subprocess.CompletedProcess[str]) -> bool:
@@ -234,9 +310,18 @@ class AgentOrchestrator:
         return result.returncode != 0 and any(marker in combined for marker in markers)
 
     def _invoke_worker(
-        self, prompt: str, artifact_dir: Path, task_risk: str
+        self, prompt: str, artifact_dir: Path, task_risk: str, profile_name: str = "P2_CODE_LOW"
     ) -> subprocess.CompletedProcess[str]:
-        auto_approve = bool(self.config.get("worker_auto_approve_permissions", False))
+        profile = self._permission_profiles().get(profile_name)
+        if profile is None:
+            raise OrchestratorError(f"Unknown Permission-Profile: {profile_name}")
+        worker_mode = str(profile.get("worker_mode", "forbidden"))
+        if worker_mode == "forbidden":
+            raise OrchestratorError(f"Permission-Profile {profile_name} cannot be automated")
+        auto_approve = (
+            bool(self.config.get("worker_auto_approve_permissions", False))
+            and bool(profile.get("auto_approve", False))
+        )
         allowed_risk = self.config.get("max_auto_approve_risk", "LOW").upper()
         if auto_approve:
             task_rank = self.RISK_RANK.get(task_risk)
@@ -267,7 +352,7 @@ class AgentOrchestrator:
                 "--output-format",
                 "json",
                 "--mode",
-                "accept-edits",
+                worker_mode,
                 "--sandbox",
                 "--print-timeout",
                 f"{int(self.config.get('worker_timeout_seconds', 1800))}s",
@@ -356,7 +441,9 @@ class AgentOrchestrator:
     def preview(self, task_id: str | None = None) -> RunReport:
         selected = self.select_task(task_id)
         task = self.hub.locate(selected, ("inbox",))
-        commands = self._verification_commands(task.path.read_text(encoding="utf-8"))
+        task_text = task.path.read_text(encoding="utf-8")
+        self._validate_permission_profile(task_text)
+        commands = self._verification_commands(task_text)
         message = (
             f"Would run task {selected} with Antigravity, then execute "
             f"{len(commands)} allow-listed verification command(s) and request Codex review."
@@ -371,6 +458,9 @@ class AgentOrchestrator:
         if errors:
             raise OrchestratorError("Preflight failed:\n- " + "\n- ".join(errors))
         selected = self.select_task(task_id)
+        inbox_task = self.hub.locate(selected, ("inbox",))
+        task_text = inbox_task.path.read_text(encoding="utf-8")
+        self._validate_permission_profile(task_text)
         running_path = self.hub.claim(selected, "orchestrator/antigravity")
         task_text = running_path.read_text(encoding="utf-8")
         artifact_dir = self.hub.hub / "artifacts" / selected
@@ -378,7 +468,10 @@ class AgentOrchestrator:
         before = self._inventory()
 
         worker = self._invoke_worker(
-            self._worker_prompt(running_path), artifact_dir, self._task_risk(task_text)
+            self._worker_prompt(running_path),
+            artifact_dir,
+            self._task_risk(task_text),
+            self._permission_profile(task_text),
         )
         self._write(artifact_dir / "worker_stdout.json", worker.stdout)
         self._write(artifact_dir / "worker_stderr.log", worker.stderr)

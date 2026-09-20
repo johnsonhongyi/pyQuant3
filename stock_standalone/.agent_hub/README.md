@@ -54,6 +54,7 @@ python tools/agent_hub.py review 001 --decision rework --reviewer codex --summar
 6. GPT/Codex负责总体架构、任务拆解、代码审查、测试闸门和版本决策；Antigravity负责按任务实施或独立审计并提交证据，双方不得互相冒充验收角色。
 7. 业务节点必须完成“Antigravity Worker交付 -> 自动测试与范围检查 -> Codex审查 -> 中文版本报告与Git提交”的闭环后，才能标记为完成。
 8. Codex直接实现的业务代码必须标记为“待Antigravity独立复核”，不能仅凭Codex自测宣称双Agent验收通过。
+9. 主控、执行端、权限分层和输出格式统一遵守 `.agent_hub/PROMPT_PROTOCOL.md`；该文件是工程协议，不是写作建议。
 
 ## Worker异常处理
 
@@ -100,7 +101,8 @@ python tools/agent_orchestrator.py run --task 001 --execute
 安全默认值：
 
 - Antigravity 非交互模式连 `ListDir` 也要求确认。`worker_auto_approve_permissions` 默认关闭；启用它会批准该 Agent 的全部工具请求，必须由用户明确授权。
-- 即使用户明确开启，编排器也仅允许任务书标记为 `Risk: LOW` 的任务使用，并继续强制 CLI `--sandbox`、范围检查和测试闸门。
+- 权限按 `.agent_hub/PROMPT_PROTOCOL.md` 的 P0_READONLY、P1_DOCS_SAFE、P2_CODE_LOW、P3_CODE_MEDIUM、P4_RELEASE_GATE、P5_FORBIDDEN 分层判定；任务风险、工具类别和文件范围任一越界都降级为人工确认或拒绝。
+- 即使用户明确开启自动权限，编排器也仅允许不高于 `max_auto_approve_risk` 的任务使用，并继续强制 CLI `--sandbox`、范围检查和测试闸门。
 - 用户已批准研发流水线连续推进至 `MEDIUM` 风险；`HIGH`、真实下单、密钥、自动合并和实盘开关仍禁止自动执行。
 - 不自动归档，不自动合并，不自动实盘。
 - Worker 失败时任务保留在 `running/` 等待诊断，不继续下一任务。

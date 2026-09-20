@@ -4,6 +4,8 @@ import json
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from tools.agent_orchestrator import AgentOrchestrator
 
 
@@ -127,3 +129,68 @@ def test_worker_does_not_retry_proxy_eligibility_error(tmp_path: Path) -> None:
     result = orchestrator._invoke_worker("test", root / ".agent_hub" / "artifacts" / "001", "LOW")
     assert result.returncode == 1
     assert len(calls) == 1
+
+
+def test_readonly_profile_uses_plan_mode_without_auto_approval(tmp_path: Path) -> None:
+    root = _project(tmp_path)
+    calls = []
+
+    def runner(args, **kwargs):
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0, '{"status":"SUCCESS"}', "")
+
+    orchestrator = AgentOrchestrator(root, runner=runner)
+    orchestrator.config.update({
+        "worker_model": "gemini-test",
+        "worker_fallback_models": [],
+        "worker_timeout_seconds": 5,
+        "worker_auto_approve_permissions": True,
+    })
+    orchestrator._invoke_worker(
+        "audit", root / ".agent_hub" / "artifacts" / "001", "LOW", "P0_READONLY"
+    )
+    assert calls[0][calls[0].index("--mode") + 1] == "plan"
+    assert "--dangerously-skip-permissions" not in calls[0]
+
+
+def test_release_gate_allows_high_risk_readonly_review(tmp_path: Path) -> None:
+    root = _project(tmp_path)
+    task = root / ".agent_hub" / "inbox" / "001_preview.md"
+    task.write_text(
+        task.read_text(encoding="utf-8").replace(
+            "- Task-ID: 001",
+            "- Task-ID: 001\n- Risk: HIGH\n- Permission-Profile: P4_RELEASE_GATE",
+        ),
+        encoding="utf-8",
+    )
+    report = AgentOrchestrator(root).preview()
+    assert report.status == "DRY_RUN"
+
+
+def test_forbidden_profile_is_rejected_before_claim(tmp_path: Path) -> None:
+    root = _project(tmp_path)
+    task = root / ".agent_hub" / "inbox" / "001_preview.md"
+    task.write_text(
+        task.read_text(encoding="utf-8").replace(
+            "- Task-ID: 001", "- Task-ID: 001\n- Permission-Profile: P5_FORBIDDEN"
+        ),
+        encoding="utf-8",
+    )
+    orchestrator = AgentOrchestrator(root)
+    with pytest.raises(Exception, match="cannot be automated"):
+        orchestrator.preview()
+    assert task.exists()
+
+
+def test_docs_profile_rejects_business_config(tmp_path: Path) -> None:
+    root = _project(tmp_path)
+    task = root / ".agent_hub" / "inbox" / "001_preview.md"
+    task.write_text(
+        task.read_text(encoding="utf-8")
+        .replace("- Task-ID: 001", "- Task-ID: 001\n- Permission-Profile: P1_DOCS_SAFE")
+        .replace("- `ats/example.py`", "- `config/trading.json`"),
+        encoding="utf-8",
+    )
+    orchestrator = AgentOrchestrator(root)
+    with pytest.raises(Exception, match="only allows documentation"):
+        orchestrator.preview()
