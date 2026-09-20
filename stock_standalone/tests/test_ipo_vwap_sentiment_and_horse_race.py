@@ -65,6 +65,69 @@ class TestIPOVWAPSentimentAndHorseRace(unittest.TestCase):
             self.assertEqual(snap.vwap_hold_ratio, 100.0)
             self.assertEqual(snap.heat_stage, "🌋 狂热高潮")
 
+    def test_market_context_snapshot_marks_climax_and_round_trips(self):
+        signals = [
+            VWAPDetectorSignal(
+                code="688001", name="context", price=10.0, change_pct=8.0,
+                vwap=9.5, is_above_vwap=True,
+            )
+        ]
+        with patch.object(
+            self.sentiment_engine.fetcher,
+            "fetch_stock_snapshot",
+            return_value={"amount": 300000000000.0, "vol_ratio": 2.3},
+        ):
+            snap = self.sentiment_engine.get_market_sentiment(signals, force_refresh=True)
+
+        self.assertEqual(snap.index_phase, "天量高潮")
+        self.assertEqual(snap.risk_mode, "CAUTION")
+        self.assertEqual(snap.position_multiplier, 0.25)
+        self.assertEqual(len(snap.snapshot_id), 16)
+        restored = MarketSentimentSnapshot.from_dict(snap.to_dict())
+        self.assertEqual(restored.to_dict(), snap.to_dict())
+
+    def test_market_context_snapshot_degrades_when_index_source_is_missing(self):
+        with patch.object(
+            self.sentiment_engine.fetcher,
+            "fetch_stock_snapshot",
+            return_value={},
+        ):
+            snap = self.sentiment_engine.get_market_sentiment([], force_refresh=True)
+
+        self.assertEqual(snap.data_quality, "DEGRADED")
+        self.assertEqual(snap.risk_mode, "CAUTION")
+        self.assertEqual(snap.position_multiplier, 0.5)
+        self.assertIn("INDEX_SNAPSHOT_UNAVAILABLE", snap.source_errors)
+
+    def test_market_context_risk_budget_limits_generated_buy(self):
+        center = IPOTradingCenter(total_capital=1000000.0)
+        signal = VWAPDetectorSignal(
+            code="688002", name="budget", price=100.0, change_pct=3.0,
+            vwap=98.0, is_above_vwap=True, signal_type="IPO_FIRST_BUY",
+            is_ipo_first_day=True, horse_race_rank=1, horse_race_score=95.0,
+            launch_time_str="09:31", launch_slope_deg=45.0,
+        )
+        center.submit_stock_perception_report(signal)
+        context = MarketSentimentSnapshot(
+            heat_stage="🔥 梯队升温", index_phase="温和放量",
+            risk_mode="CAUTION", position_multiplier=0.5,
+        ).finalize()
+        with patch.object(center.sentiment_engine, "get_market_sentiment", return_value=context):
+            orders = center.evaluate_fleet_and_generate_orders()
+
+        buys = [order for order in orders if order.action == "BUY"]
+        self.assertEqual(len(buys), 1)
+        self.assertEqual(buys[0].size_pct, 17.5)
+        self.assertEqual(center._last_market_context.snapshot_id, context.snapshot_id)
+
+        blocked = MarketSentimentSnapshot(
+            heat_stage="❄️ 冰点极寒", risk_mode="BLOCK_NEW_BUYS",
+            position_multiplier=0.0,
+        ).finalize()
+        center._pending_directives.clear()
+        with patch.object(center.sentiment_engine, "get_market_sentiment", return_value=blocked):
+            self.assertEqual(center.evaluate_fleet_and_generate_orders(), [])
+
     def test_shengu_extreme_climax_exit_detection(self):
         """【测试】神股 601091 沈鼓集团：暴涨至 82.59 天量滞涨跳水精准触发【🚨 疯狂平仓】"""
         # 构造分时：从 11.9 暴拉至 82.59，随后回落至 57.77，偏离 VWAP 达 194%

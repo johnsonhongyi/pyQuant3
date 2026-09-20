@@ -179,6 +179,7 @@ class IPOTradingCenter:
         self._lock = threading.RLock()
         
         self.sentiment_engine = IPOMarketSentimentEngine.get_instance()
+        self._last_market_context: Optional[MarketSentimentSnapshot] = None
         self._last_fleet_eval_ts: float = 0.0
         self._max_total_position_pct: float = 80.0 # 最大允许总仓位
         self.auto_follow_trading: bool = False     # 全自动跟随交易开关 (开启后自动撮合指令)
@@ -840,6 +841,7 @@ class IPOTradingCenter:
 
             # 1. 全局大盘量能与新股梯队情绪感知 (依据最新汇交的全景信号实时感知)
             sentiment = self.sentiment_engine.get_market_sentiment(all_signals, force_refresh=True)
+            self._last_market_context = sentiment
 
             # 2. 全池执行横向赛马冒泡排位 (“山外有山”)
             ranked_signals = batch_evaluate_horse_race_ranking(all_signals)
@@ -1115,6 +1117,18 @@ class IPOTradingCenter:
                 if active_pos_count == 0:
                     single_leader_weight = 100.0
                     max_fleet_weight = 100.0
+
+            # Market context is the final budget gate and cannot be bypassed by
+            # strategy rank or full-capital rotation mode. Exit orders remain free.
+            risk_mode = getattr(sentiment, "risk_mode", "NORMAL")
+            risk_multiplier = max(0.0, min(1.0, float(
+                getattr(sentiment, "position_multiplier", 1.0) or 0.0
+            )))
+            if risk_mode == "BLOCK_NEW_BUYS":
+                risk_multiplier = 0.0
+            max_fleet_weight *= risk_multiplier
+            single_leader_weight *= risk_multiplier
+            single_follower_weight *= risk_multiplier
 
             current_total_shares_val = sum(p.shares * p.current_price for p in self._positions.values() if p.shares > 0)
             current_fleet_weight = (current_total_shares_val / self.total_capital) * 100.0 if self.total_capital > 0 else 0.0
