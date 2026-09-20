@@ -1,0 +1,165 @@
+# -*- coding: utf-8 -*-
+"""Online, point-in-time tide state machine for IPO and subnew-stock breadth."""
+
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Iterable, List, Optional
+
+
+@dataclass(frozen=True)
+class TideObservation:
+    observed_at: str
+    sample_count: int
+    completeness: float
+    advance_ratio: float
+    above_vwap_ratio: float
+    median_return_pct: float
+    amount_yi: float
+    top20_return_pct: float
+    bottom20_return_pct: float
+
+
+@dataclass
+class TideDecision:
+    observed_at: str
+    state: str
+    confidence: float
+    position_cap_pct: float
+    allow_probe: bool
+    requires_price_confirmation: bool
+    target_action: str
+    transition_reasons: List[str] = field(default_factory=list)
+    revision_count: int = 0
+
+
+_POLICY = {
+    "T0_INSUFFICIENT": (0.0, False, "WAIT"),
+    "T1_CLIMAX_DISTRIBUTION": (0.0, False, "EXIT_RISK"),
+    "T2_EBB_EARLY": (10.0, False, "REDUCE"),
+    "T3_EBB_SPREAD": (5.0, False, "DEFEND"),
+    "T4_PANIC_ACCEL": (0.0, False, "WAIT_FOR_DIVERGENCE"),
+    "T5_ICE": (5.0, True, "PROBE_ONLY"),
+    "T6_ICE_DIVERGENCE": (15.0, True, "PROBE_LEADERS"),
+    "T7_WEAK_REPAIR": (25.0, True, "HOLD_PROBES"),
+    "T8_REFLOW_CONFIRM": (40.0, True, "ROTATE_TO_LEADERS"),
+    "T9_FLOOD_SPREAD": (70.0, True, "EXPAND"),
+    "T10_MAIN_UP": (80.0, True, "HOLD_LEADERS"),
+    "T11_OVERHEATED": (15.0, False, "TAKE_PROFIT"),
+}
+
+_DIRECTION = {
+    "T0_INSUFFICIENT": 0,
+    "T1_CLIMAX_DISTRIBUTION": -1,
+    "T2_EBB_EARLY": -1,
+    "T3_EBB_SPREAD": -1,
+    "T4_PANIC_ACCEL": -1,
+    "T5_ICE": 0,
+    "T6_ICE_DIVERGENCE": 1,
+    "T7_WEAK_REPAIR": 1,
+    "T8_REFLOW_CONFIRM": 1,
+    "T9_FLOOD_SPREAD": 1,
+    "T10_MAIN_UP": 1,
+    "T11_OVERHEATED": -1,
+}
+
+
+class SubnewTideStateMachine:
+    """Classify each observation using only current and previously seen records."""
+
+    def __init__(self):
+        self._previous_observation: Optional[TideObservation] = None
+        self._previous_decision: Optional[TideDecision] = None
+        self._last_timestamp: Optional[datetime] = None
+        self._revision_count = 0
+
+    def reset(self) -> None:
+        self.__init__()
+
+    def replay(self, observations: Iterable[TideObservation]) -> List[TideDecision]:
+        self.reset()
+        return [self.update(observation) for observation in observations]
+
+    def update(self, observation: TideObservation) -> TideDecision:
+        timestamp = datetime.fromisoformat(observation.observed_at)
+        if self._last_timestamp is not None and timestamp <= self._last_timestamp:
+            raise ValueError("observations must be strictly increasing")
+
+        state, reasons = self._classify(observation, self._previous_observation)
+        previous_state = self._previous_decision.state if self._previous_decision else None
+        if previous_state:
+            previous_direction = _DIRECTION[previous_state]
+            current_direction = _DIRECTION[state]
+            if previous_direction and current_direction and previous_direction != current_direction:
+                self._revision_count += 1
+                if previous_direction > 0:
+                    reasons.append("failed_follow_through")
+                else:
+                    reasons.append("risk_recovery_confirmed")
+
+        cap, allow_probe, action = _POLICY[state]
+        confidence = self._confidence(observation, state)
+        decision = TideDecision(
+            observed_at=observation.observed_at,
+            state=state,
+            confidence=confidence,
+            position_cap_pct=cap,
+            allow_probe=allow_probe,
+            requires_price_confirmation=allow_probe,
+            target_action=action,
+            transition_reasons=reasons,
+            revision_count=self._revision_count,
+        )
+        self._previous_observation = observation
+        self._previous_decision = decision
+        self._last_timestamp = timestamp
+        return decision
+
+    def _classify(
+        self,
+        current: TideObservation,
+        previous: Optional[TideObservation],
+    ):
+        if current.sample_count < 10 or current.completeness < 0.8:
+            return "T0_INSUFFICIENT", ["insufficient_cross_section"]
+
+        prior_state = self._previous_decision.state if self._previous_decision else ""
+        if (prior_state in ("T9_FLOOD_SPREAD", "T10_MAIN_UP")
+                and current.advance_ratio < 0.30 and current.above_vwap_ratio < 0.20):
+            return "T2_EBB_EARLY", ["breadth_collapse", "vwap_support_lost"]
+
+        if current.advance_ratio >= 0.90 and current.median_return_pct >= 5.0:
+            return "T11_OVERHEATED", ["extreme_breadth", "extreme_median_return"]
+        if current.advance_ratio >= 0.75 and current.above_vwap_ratio >= 0.70:
+            return "T9_FLOOD_SPREAD", ["broad_advance", "broad_vwap_acceptance"]
+        if (prior_state in ("T1_CLIMAX_DISTRIBUTION", "T2_EBB_EARLY", "T3_EBB_SPREAD", "T4_PANIC_ACCEL", "T5_ICE", "T6_ICE_DIVERGENCE")
+                and current.advance_ratio >= 0.55 and current.above_vwap_ratio >= 0.65
+                and current.median_return_pct > 0):
+            return "T8_REFLOW_CONFIRM", ["breadth_recovered", "vwap_reclaimed"]
+
+        if previous is not None:
+            amount_ratio = current.amount_yi / previous.amount_yi if previous.amount_yi > 0 else 1.0
+            vwap_improvement = current.above_vwap_ratio - previous.above_vwap_ratio
+            if (current.median_return_pct < -1.5 and amount_ratio >= 1.35
+                    and vwap_improvement >= 0.15 and current.top20_return_pct >= 6.0):
+                return "T6_ICE_DIVERGENCE", [
+                    "volume_returned_before_breadth",
+                    "leader_resilience",
+                    "vwap_acceptance_improved",
+                ]
+
+        if current.advance_ratio <= 0.20 and current.median_return_pct <= -2.20:
+            return "T4_PANIC_ACCEL", ["breadth_panic", "median_loss_accelerating"]
+        if current.above_vwap_ratio <= 0.15 and current.advance_ratio <= 0.25:
+            return "T5_ICE", ["vwap_acceptance_floor", "selling_pressure_decelerating"]
+        if current.advance_ratio <= 0.25 and current.median_return_pct <= -1.50:
+            return "T3_EBB_SPREAD", ["weak_breadth", "losses_spreading"]
+        if current.advance_ratio >= 0.55 and current.above_vwap_ratio >= 0.55:
+            return "T7_WEAK_REPAIR", ["breadth_repair", "vwap_repair"]
+        return "T2_EBB_EARLY", ["mixed_or_deteriorating_structure"]
+
+    @staticmethod
+    def _confidence(observation: TideObservation, state: str) -> float:
+        sample_score = min(1.0, observation.sample_count / 25.0)
+        completeness = max(0.0, min(1.0, observation.completeness))
+        structural = 0.9 if state not in ("T0_INSUFFICIENT", "T2_EBB_EARLY") else 0.65
+        return round(sample_score * completeness * structural, 3)
