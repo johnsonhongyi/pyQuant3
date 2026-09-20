@@ -342,3 +342,30 @@ class TestPRTDXRealtimeIntegration(unittest.TestCase):
 if __name__ == "__main__":
     unittest.main()
 
+def test_non_trading_session_rebuilds_static_history_without_network():
+    from ats.tdx_realtime_fetcher import TDXRealtimeFetcher
+
+    records = [
+        {
+            "time": f"09-18 09:{31 + i:02d}", "date": "2026-09-18",
+            "time_only": f"09:{31 + i:02d}", "open": 10.0,
+            "high": 10.2, "low": 9.9, "close": 10.1, "bar_vol": 100.0,
+        }
+        for i in range(5)
+    ]
+
+    class FakePool:
+        def can_trigger_date_rollover(self, _): return False
+        def get_incremental_intraday(self, *args, **kwargs): return None
+        def get_multi_day_df(self, *args, **kwargs): return None
+        def get_static_history_bars(self, *args, **kwargs):
+            return {"records": records, "days": 10}
+        def set_multi_day_df(self, code, days, df): self.saved = df.copy()
+
+    fetcher = object.__new__(TDXRealtimeFetcher)
+    fetcher.cache_pool = FakePool()
+    fetcher.get_circulation_shares = lambda code: 0.0
+    result = fetcher.fetch_multi_day_intraday_bars("688826", days=10)
+    assert len(result) == 5
+    assert result.index[0] == "09-18 09:31"
+    assert len(fetcher.cache_pool.saved) == 5
