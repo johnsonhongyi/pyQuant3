@@ -42,6 +42,7 @@ logger = logging.getLogger("IPOCommandRoomDialog")
 ROLE_CN_MAP = {
     "LEADER": "🥇 领头羊",
     "VANGUARD": "🥈 梯队前锋",
+    "SECONDARY_BUY": "👑 次级买点",
     "RESONANCE_BUY": "⚡ 共振加速",
     "BASE_PREORDER": "🎯 筑底预埋",
     "SWING_PREORDER": "🔭 通道突破",
@@ -1194,10 +1195,16 @@ class IPOCommandRoomDialog(QDialog):
         if self._orders_view_mode == "PENDING":
             self.tbl_orders.setRowCount(len(directives))
             for r, d in enumerate(directives):
-                act_it = QTableWidgetItem(d.action)
-                if d.action in ("BUY", "FULL_ROTATION_SWAP"):
+                act_str = d.action
+                plan = getattr(d, "trade_plan", None)
+                if plan and getattr(plan, "suggested_action", ""):
+                    act_str = plan.suggested_action
+                act_it = QTableWidgetItem(act_str)
+                if act_str in ("BUY", "BUY_CONFIRM", "FULL_ROTATION_SWAP"):
                     act_it.setForeground(QColor("#00ff88"))
-                elif d.action in ("SELL", "SWITCH_SWAP"):
+                elif act_str in ("BUY_SCOUT",):
+                    act_it.setForeground(QColor("#00e5ff"))
+                elif act_str in ("SELL", "EXIT_ALL", "SWITCH_SWAP"):
                     act_it.setForeground(QColor("#ff5555"))
                 self.tbl_orders.setItem(r, 0, act_it)
                 code_num = int(d.code) if d.code.isdigit() else 999999
@@ -1205,7 +1212,25 @@ class IPOCommandRoomDialog(QDialog):
                 self.tbl_orders.setItem(r, 2, QTableWidgetItem(d.name))
                 self.tbl_orders.setItem(r, 3, NumericTableWidgetItem(f"{d.price:.2f}", raw_val=float(d.price)))
                 self.tbl_orders.setItem(r, 4, NumericTableWidgetItem(f"{d.size_pct:.0f}%", raw_val=float(d.size_pct)))
-                self.tbl_orders.setItem(r, 5, QTableWidgetItem(d.reason))
+
+                reason_disp = d.reason
+                if plan:
+                    qg = getattr(d, "quality_grade", "") or "S"
+                    reason_disp = f"[{qg}级 {plan.strategy_tag}] 网格:{plan.buy_zone_lower:.2f}~{plan.buy_zone_upper:.2f} 止损:{plan.higher_low_stop:.2f} | {d.reason}"
+                it_reason = QTableWidgetItem(reason_disp)
+                if plan:
+                    it_reason.setToolTip(
+                        f"【TradePlan 不可变交易计划】\n"
+                        f"• 建议动作: {act_str}\n"
+                        f"• 触发价: {plan.trigger_price:.2f}元\n"
+                        f"• 买入网格: {plan.buy_zone_lower:.2f} ~ {plan.buy_zone_upper:.2f}元\n"
+                        f"• 抬高底防守止损: {plan.higher_low_stop:.2f}元\n"
+                        f"• 大底失效作废: {plan.base_low_invalid:.2f}元\n"
+                        f"• 目标1(中轨): {plan.target_1_channel_mid:.2f}元 | 目标2: {plan.target_2_breakout_high:.2f}元\n"
+                        f"----------------------------------------\n"
+                        f"{d.reason}"
+                    )
+                self.tbl_orders.setItem(r, 5, it_reason)
         else:
             # 历史信号日志模式
             self.tbl_orders.setRowCount(len(self._current_signal_logs_list))

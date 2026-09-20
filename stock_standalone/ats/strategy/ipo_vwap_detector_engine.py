@@ -49,6 +49,11 @@ import pandas as pd
 import numpy as np
 
 from ats.tdx_realtime_fetcher import TDXRealtimeFetcher
+from ats.strategy.channel_secondary_buy_strategy import (
+    evaluate_channel_secondary_buy,
+    SecondaryBuyStage,
+    IPOTradePlan,
+)
 from sys_utils import resolve_stock_name
 
 logger = logging.getLogger("IPOVWAPDetector")
@@ -118,6 +123,15 @@ class VWAPDetectorSignal:
     global_arbitration_desc: str = "" # 全局仲裁决议说明 (例如: "🥇【全池领头羊】96分 09:31启动，集中重仓 35%！")
     relative_to_leader_gap: float = 0.0 # 与全池第一领头羊的动能得分差值
     
+    # 长期通道企稳与底部结构次级买点 (688826/300058同款架构)
+    channel_stage: str = ""           # SECONDARY_BUY / PULLBACK_STABLE / FIRST_BREAKOUT / BASE_DRYUP / DESCENDING_CHANNEL / INVALIDATED
+    channel_stage_cn: str = ""        # 👑 次级买点 / ⏳ 缩量回踩 / 🚀 首次试盘 / 📦 平底箱体 / 📉 通道寻底 / ⛔ 破位失效
+    higher_low_stop: float = 0.0      # 次级买点抬高底防守止损位
+    base_low_invalid: float = 0.0     # 大底极限防守位 (跌破彻底作废)
+    quality_grade: str = ""           # 形态评级: SS / S / A
+    strategy_tag: str = ""            # 策略 Tag: CHANNEL_SECONDARY_BUY / IPO_BID_SURGE / IPO_VWAP_STABLE / SUBNEW_PULLBACK_REENTRY
+    trade_plan: Optional[Any] = None  # 不可变 IPOTradePlan 对象
+
     update_time: str = ""             # 更新时间戳
     extra_data: Dict[str, Any] = field(default_factory=dict)  # 后台预提取的日线指标与自定义列数据 (0ms内存供UI读取)
 
@@ -843,8 +857,50 @@ class IPOVWAPDetectorEngine:
                     sig.extra_data = last_k.to_dict()
                 except Exception:
                     pass
+
+                # 长期通道底部结构次级买点评估 (688826/300058同款架构)
+                self._evaluate_channel_secondary_buy_structure(clean_code, sig, df_day)
         except Exception as e:
             logger.debug(f"评估标的 {code} K线趋势异常: {e}")
+
+    def _evaluate_channel_secondary_buy_structure(self, clean_code: str, sig: VWAPDetectorSignal, df_day: Optional[pd.DataFrame]):
+        """长期通道企稳与底部结构次级买点评估"""
+        if df_day is None or df_day.empty or len(df_day) < 15:
+            return
+        try:
+            curr_quote = {"price": sig.price} if sig.price > 0 else None
+            sec_eval = evaluate_channel_secondary_buy(
+                df_60m=df_day,
+                df_day=df_day,
+                current_quote=curr_quote,
+                code=clean_code,
+                name=sig.name
+            )
+            stage_val = sec_eval.get("stage", SecondaryBuyStage.DESCENDING_CHANNEL)
+            sig.channel_stage = stage_val
+            stage_cn_map = {
+                SecondaryBuyStage.SECONDARY_BUY: "👑 次级买点",
+                SecondaryBuyStage.PULLBACK_STABLE: "⏳ 缩量回踩",
+                SecondaryBuyStage.FIRST_BREAKOUT: "🚀 首次试盘",
+                SecondaryBuyStage.BASE_DRYUP: "📦 平底箱体",
+                SecondaryBuyStage.DESCENDING_CHANNEL: "📉 通道寻底",
+                SecondaryBuyStage.INVALIDATED: "⛔ 破位失效",
+            }
+            sig.channel_stage_cn = stage_cn_map.get(stage_val, "")
+            sig.higher_low_stop = float(sec_eval.get("hard_stop", 0.0))
+            sig.base_low_invalid = float(sec_eval.get("invalid_price", 0.0))
+            sig.quality_grade = str(sec_eval.get("quality_grade", "A"))
+            sig.strategy_tag = str(sec_eval.get("strategy_tag", ""))
+            sig.trade_plan = sec_eval.get("trade_plan", None)
+
+            # 若触发次级买点确认
+            if stage_val == SecondaryBuyStage.SECONDARY_BUY:
+                sig.has_bottom_base = True
+                sig.base_inflection_confirmed = True
+                if sig.higher_low_stop > 0:
+                    sig.stop_loss_price = sig.higher_low_stop
+        except Exception as e:
+            logger.debug(f"评估标的 {clean_code} 通道次级买点异常: {e}")
 
     def _synthesize_final_decision(self, sig: VWAPDetectorSignal):
         """
@@ -884,6 +940,20 @@ class IPOVWAPDetectorEngine:
             sig.structure_tag = "多日平底+通道突破"
             space_str = f"博周一冲破VWAP(空间+{sig.rebound_to_vwap_space_pct:.1f}%)" if sig.rebound_to_vwap_space_pct > 0 else "大级别反转蓄势"
             sig.signal_desc = f"60F突破下降通道+多日平底({sig.base_support_level:.2f})箱体突破，尾盘放量收最高! 虽在VWAP({sig.vwap:.2f})下但属大级别拐点，极窄止损{sig.stop_loss_price:.2f}元(60F底台)，{space_str}!"
+            return
+
+        # 3.5 【操盘手实战定调：长期通道底部结构次级买点 (688826/300058同款 👑 S4/S5级)】
+        if not sig.is_ipo_first_day and sig.channel_stage == "SECONDARY_BUY":
+            sig.signal_type = "SECONDARY_BUY"
+            sig.signal_level = "👑 次级买点"
+            sig.signal_tier = sig.quality_grade or "S"
+            sig.structure_tag = f"通道次级买点({sig.quality_grade or 'S'})"
+            plan = getattr(sig, "trade_plan", None)
+            if plan:
+                plan_hint = f"买区[{plan.buy_zone_lower:.2f}~{plan.buy_zone_upper:.2f}], 止损{plan.higher_low_stop:.2f}元, 目标1:{plan.target_1_channel_mid:.2f}元"
+            else:
+                plan_hint = f"止损{sig.higher_low_stop:.2f}元"
+            sig.signal_desc = f"长期下降通道企稳，回踩抬高底放量确认次级买点! {plan_hint}"
             return
 
         # 4. 【操盘手核心进化：寻找结构与动能抓手，底部企稳预埋与放量共振】
@@ -994,6 +1064,14 @@ def batch_evaluate_horse_race_ranking(signals: List[VWAPDetectorSignal]) -> List
             sig.horse_race_tier = "🚨 疯狂平仓"
             continue
 
+        # 【核心进化】：长期通道次级买点专属高动能赛马打分 (88~95分，第一梯队前锋)
+        if sig.signal_type == "SECONDARY_BUY" or sig.channel_stage == "SECONDARY_BUY":
+            base_score = 88.0
+            grade_bonus = 5.0 if sig.quality_grade == "SS" else (3.0 if sig.quality_grade == "S" else 0.0)
+            sig.horse_race_score = round(min(95.0, base_score + grade_bonus), 1)
+            sig.horse_race_tier = "👑 次级买点"
+            continue
+
         # 【核心进化】：底部结构共振与跨日通道突破标的专属高动能赛马打分 (打破只有站上VWAP才给高分的死板逻辑)
         if sig.signal_type in ("BASE_BREAKOUT", "BASE_PREORDER", "SWING_PREORDER"):
             if sig.signal_type == "BASE_BREAKOUT":
@@ -1101,7 +1179,10 @@ def batch_evaluate_horse_race_ranking(signals: List[VWAPDetectorSignal]) -> List
             act_score * 0.15 +
             k_score * 0.10
         )
-        sig.horse_race_score = round(max(0.0, min(100.0, raw_score)), 1)
+        if getattr(sig, "horse_race_score", 50.0) != 50.0 and (not t_str or t_str == "未启动"):
+            sig.horse_race_score = max(sig.horse_race_score, round(max(0.0, min(100.0, raw_score)), 1))
+        else:
+            sig.horse_race_score = round(max(0.0, min(100.0, raw_score)), 1)
 
     # 冒泡降序排序
     ranked_signals = sorted(signals, key=lambda s: getattr(s, "horse_race_score", 0.0), reverse=True)
@@ -1112,6 +1193,13 @@ def batch_evaluate_horse_race_ranking(signals: List[VWAPDetectorSignal]) -> List
         if sig.is_climax_exit:
             sig.horse_race_tier = "🚨 疯狂平仓"
             sig.horse_race_rank = 0
+            continue
+
+        # 【核心进化】：长期通道次级买点标的享有正常赛马位次与专属徽章 (哪怕股价在 10d VWAP 下方也不被误判为破位出局)
+        if sig.signal_type == "SECONDARY_BUY" or sig.channel_stage == "SECONDARY_BUY":
+            sig.horse_race_rank = normal_rank
+            sig.horse_race_tier = "👑 次级买点"
+            normal_rank += 1
             continue
 
         # 【核心进化】：底部结构共振、预埋与跨日通道突破标的享有正常赛马位次与专属徽章

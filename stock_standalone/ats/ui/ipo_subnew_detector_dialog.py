@@ -1823,29 +1823,50 @@ class IPOSubnewDetectorDialog(QMainWindow):
             diff_fg = QColor("#ff8800") if sig.vwap_diff_pct > 0 else (QColor("#00bbff") if sig.vwap_diff_pct < 0 else QColor("#e2e2e5"))
             _set_numeric_cell(5, diff_str, float(sig.vwap_diff_pct) if sig.vwap > 0 else -999999.0, fg=diff_fg)
 
-            # 6. VWAP结构形态 (融合赛马动能分与启动时点)
-            struct_fg = QColor("#ffd700") if sig.consolidation_days >= 1 else (QColor("#00ff88") if sig.pullback_no_touch else QColor("#e2e2e5"))
-            struct_font = QFont("Arial", 9, QFont.Weight.Bold) if (sig.consolidation_days >= 1 or sig.pullback_no_touch) else None
+            # 6. VWAP结构形态 (融合通道形态阶段徽章、赛马动能分与启动时点)
+            ch_stage_cn = getattr(sig, "channel_stage_cn", "")
+            if ch_stage_cn == "👑 次级买点":
+                struct_fg = QColor("#ffd700")
+                struct_font = QFont("Arial", 9, QFont.Weight.Bold)
+            elif ch_stage_cn in ("⏳ 缩量回踩", "🚀 首次试盘"):
+                struct_fg = QColor("#00ff88")
+                struct_font = QFont("Arial", 9, QFont.Weight.Bold)
+            elif sig.consolidation_days >= 1:
+                struct_fg = QColor("#ffd700")
+                struct_font = QFont("Arial", 9, QFont.Weight.Bold)
+            elif sig.pullback_no_touch:
+                struct_fg = QColor("#00ff88")
+                struct_font = QFont("Arial", 9, QFont.Weight.Bold)
+            else:
+                struct_fg = QColor("#e2e2e5")
+                struct_font = None
+
             display_struct = sig.structure_tag
-            if getattr(sig, "horse_race_score", 0.0) > 0:
+            if ch_stage_cn:
+                display_struct = f"[{ch_stage_cn}] {display_struct}"
+            elif getattr(sig, "horse_race_score", 0.0) > 0:
                 t_str = getattr(sig, "launch_time_str", "")
                 t_tag = f" {t_str}" if (t_str and t_str != "未启动") else ""
                 display_struct = f"[{sig.horse_race_score:.0f}分{t_tag}] {sig.structure_tag}"
-            _set_text_cell(6, display_struct, fg=struct_fg, font=struct_font)
+            
+            struct_tt = f"【形态】{display_struct}"
+            if ch_stage_cn:
+                struct_tt += f"\n通道阶段: {sig.channel_stage} ({ch_stage_cn})"
+            _set_text_cell(6, display_struct, fg=struct_fg, font=struct_font, tooltip=struct_tt)
 
             # 7. 大趋势K线状态
             trend_fg = QColor("#ff33aa") if sig.has_kline_launch_sig else QColor("#e2e2e5")
             _set_text_cell(7, sig.trend_desc or "--", fg=trend_fg)
 
-            # 8. 信号评级 (融合赛马排位徽章与终极闭环信号)
+            # 8. 信号评级 (融合生命周期S0~S5、形态质量SS/S/A与终极闭环信号)
             sig_fg = QColor("#ffd700")
             sig_bg = QColor("#2d2400")
             if sig.signal_type == "CLIMAX_EXIT" or getattr(sig, "is_climax_exit", False):
                 sig_fg = QColor("#ff3333")
                 sig_bg = QColor("#3d0b0b")
-            elif sig.signal_type == "IPO_FIRST_BUY":
-                sig_fg = QColor("#ff8800")
-                sig_bg = QColor("#331800")
+            elif sig.signal_type in ("SECONDARY_BUY", "IPO_FIRST_BUY"):
+                sig_fg = QColor("#ffd700")
+                sig_bg = QColor("#1f2c18")
             elif sig.signal_type == "PULLBACK_BUY":
                 sig_fg = QColor("#00ff88")
                 sig_bg = QColor("#002d18")
@@ -1860,14 +1881,30 @@ class IPOSubnewDetectorDialog(QMainWindow):
                 sig_bg = QColor("#1f2430")
 
             level_str = sig.signal_level
+            q_grade = getattr(sig, "quality_grade", "")
+            if q_grade and q_grade not in level_str:
+                level_str = f"{level_str} | {q_grade}"
             hr_tier = getattr(sig, "horse_race_tier", "")
-            if hr_tier and hr_tier not in ("⚪ 观察", "--") and hr_tier not in level_str:
-                level_str = f"{hr_tier} {sig.signal_level}"
+            if hr_tier and hr_tier not in ("⚪ 观察", "--") and hr_tier not in level_str and hr_tier != ch_stage_cn:
+                level_str = f"{hr_tier} {level_str}"
             _set_text_cell(8, level_str, fg=sig_fg, bg=sig_bg, font=QFont("Arial", 9, QFont.Weight.Bold))
 
-            # 9. 极窄止损位
-            sl_str = f"{sig.stop_loss_price:.2f}" if sig.stop_loss_price > 0 else "--"
-            _set_numeric_cell(9, sl_str, float(sig.stop_loss_price) if sig.stop_loss_price > 0 else -999999.0, fg=QColor("#ff5555"))
+            # 9. 极窄止损位 (支持抬高底 higher_low_stop 专属防守提示)
+            sl_price = sig.stop_loss_price
+            if getattr(sig, "higher_low_stop", 0.0) > 0 and getattr(sig, "channel_stage", "") == "SECONDARY_BUY":
+                sl_price = sig.higher_low_stop
+            sl_str = f"{sl_price:.2f}" if sl_price > 0 else "--"
+            sl_tt = f"建议止损位: {sl_price:.2f}" if sl_price > 0 else ""
+            if getattr(sig, "higher_low_stop", 0.0) > 0:
+                sl_tt = (
+                    f"【抬高底次级防守位】: {sig.higher_low_stop:.2f}元\n"
+                    f"• 跌破 0.99 立即斩仓止损出局\n"
+                    f"• 大底报废失效位: {getattr(sig, 'base_low_invalid', 0.0):.2f}元"
+                )
+            _set_numeric_cell(9, sl_str, float(sl_price) if sl_price > 0 else -999999.0, fg=QColor("#ff5555"))
+            it_sl = self.table.item(row, 9)
+            if it_sl and sl_tt:
+                it_sl.setToolTip(sl_tt)
 
             # ── 动态自定义列 (ats_col, 优先从 ATS 的 IPC df 提取，tdd 兜底) ──
             ipc_row = None
@@ -1951,6 +1988,8 @@ class IPOSubnewDetectorDialog(QMainWindow):
                 desc_fg = QColor("#ff4444")
             elif role == "STOP_LOSS" or sig.signal_type == "WEAK_EXIT":
                 desc_fg = QColor("#ff5555")
+            elif role == "SECONDARY_BUY" or sig.signal_type == "SECONDARY_BUY" or getattr(sig, "channel_stage", "") == "SECONDARY_BUY":
+                desc_fg = QColor("#ffd700")
             elif role == "LEADER" or sig.signal_type == "IPO_FIRST_BUY":
                 desc_fg = QColor("#00ff88")
             elif role == "VANGUARD":
@@ -1961,7 +2000,23 @@ class IPOSubnewDetectorDialog(QMainWindow):
                 desc_fg = QColor("#66fcf1")
             elif getattr(sig, "horse_race_rank", 999) <= 2 and sig.is_above_vwap:
                 desc_fg = QColor("#00ff88")
-            _set_text_cell(10 + n_extra, desc_text, tooltip=desc_text, fg=desc_fg)
+
+            desc_tt = desc_text
+            plan = getattr(sig, "trade_plan", None)
+            if plan:
+                desc_tt = (
+                    f"【TradePlan 不可变交易计划】\n"
+                    f"• 标的: {sig.name} ({sig.code}) | 策略: {plan.strategy_tag}\n"
+                    f"• 建议动作: {plan.suggested_action} | 建议仓位: {plan.position_pct:.0f}%\n"
+                    f"• 买入网格: {plan.buy_zone_lower:.2f} ~ {plan.buy_zone_upper:.2f} (触发: {plan.trigger_price:.2f})\n"
+                    f"• 抬高底防守止损: {plan.higher_low_stop:.2f}元\n"
+                    f"• 大底失效位: {plan.base_low_invalid:.2f}元\n"
+                    f"• 目标位1(通道中轨): {plan.target_1_channel_mid:.2f}元\n"
+                    f"• 目标位2(突破前高): {plan.target_2_breakout_high:.2f}元\n"
+                    f"-----------------------------------------\n"
+                    f"{desc_text}"
+                )
+            _set_text_cell(10 + n_extra, desc_text, tooltip=desc_tt, fg=desc_fg)
 
 
             # 更新时间
