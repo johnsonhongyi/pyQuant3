@@ -1,7 +1,15 @@
 # -*- coding: utf-8 -*-
-"""Offline review-contract tests. Samples are deterministic, not claimed as market history."""
+"""Offline TradePlan review and provenance-backed TDX historical replay tests."""
 
-from ats.strategy.channel_secondary_buy_strategy import IPOTradePlan, TAG_CHANNEL_SECONDARY_BUY
+import json
+from pathlib import Path
+
+import pandas as pd
+
+from ats.strategy.channel_secondary_buy_strategy import (
+    IPOTradePlan, SecondaryBuyStage, TAG_CHANNEL_SECONDARY_BUY,
+    evaluate_channel_secondary_buy,
+)
 from ats.strategy.ipo_trading_center import IPOOrderDirective, IPOTradingCenter
 
 
@@ -51,3 +59,38 @@ def test_review_supports_cold_start_dictionary_snapshot() -> None:
     assert review["plan_id"] == "TP_LOADED"
     assert review["planned_risk_pct"] == 5.0
     assert review["actual_return_pct"] == -5.0
+
+
+def _tdx_fixture():
+    path = Path(__file__).parents[1] / "test_data_hub" / "ipo_historical_fixtures" / "tdx_20260918_60m.json"
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def test_real_tdx_fixture_has_provenance_and_valid_ohlcv() -> None:
+    fixture = _tdx_fixture()
+    assert fixture["source"] == "G:/tdx_global_cache_pool.pkl.z"
+    assert fixture["cache_date"] == "2026-09-18"
+    assert fixture["symbols"]["688826"]["source_records"] == 1920
+    assert fixture["symbols"]["601091"]["source_records"] == 240
+    for symbol in fixture["symbols"].values():
+        for bar in symbol["bars_60m"]:
+            assert bar["low"] <= min(bar["open"], bar["close"])
+            assert bar["high"] >= max(bar["open"], bar["close"])
+            assert bar["vol"] >= 0
+
+
+def test_688826_real_60m_replay_reaches_pullback_stable() -> None:
+    bars = pd.DataFrame(_tdx_fixture()["symbols"]["688826"]["bars_60m"])
+    result = evaluate_channel_secondary_buy(bars, code="688826", name="fixture")
+    assert len(bars) == 32
+    assert result["stage"] == SecondaryBuyStage.PULLBACK_STABLE
+    assert result["hard_stop"] > 0
+    assert result["invalid_price"] > 0
+
+
+def test_601091_real_first_day_replay_is_explicitly_insufficient() -> None:
+    bars = pd.DataFrame(_tdx_fixture()["symbols"]["601091"]["bars_60m"])
+    result = evaluate_channel_secondary_buy(bars, code="601091", name="fixture")
+    assert len(bars) == 4
+    assert result["stage"] == SecondaryBuyStage.DESCENDING_CHANNEL
+    assert "不足 20 根" in result["reason"]
