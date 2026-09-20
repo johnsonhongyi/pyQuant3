@@ -120,3 +120,36 @@ def test_live_signal_cross_section_builds_tide_observation():
     assert observation.amount_yi == 14.5
     assert observation.top20_return_pct == 5.5
     assert observation.bottom20_return_pct == -2.5
+
+
+def test_microsecond_intraday_updates_maintain_causality_and_no_revision_inflation():
+    machine = SubnewTideStateMachine()
+    base_obs = _obs("2026-09-14", .821, .821, 2.34, 135.66, 11.60, -4.60)
+    machine.update(base_obs)
+
+    # 同一交易日高频微秒推进：模拟极速刷新
+    for us in range(10):
+        obs = TideObservation(
+            observed_at=f"2026-09-15 09:30:00.{us:06d}",
+            sample_count=28,
+            completeness=1.0,
+            advance_ratio=0.65,
+            above_vwap_ratio=0.62,
+            median_return_pct=0.60,
+            amount_yi=35.0,
+            top20_return_pct=3.0,
+            bottom20_return_pct=-2.0,
+        )
+        dec = machine.update(obs)
+        assert dec.state == "T7_WEAK_REPAIR"
+        assert dec.revision_count == 0
+
+
+def test_subnew_tide_state_machine_causal_check_rejects_non_increasing():
+    machine = SubnewTideStateMachine()
+    machine.update(_obs("2026-09-14", .821, .821, 2.34, 135.66, 11.60, -4.60))
+
+    import pytest
+    with pytest.raises(ValueError, match="observations must be strictly increasing"):
+        machine.update(_obs("2026-09-14", .821, .821, 2.34, 135.66, 11.60, -4.60))
+

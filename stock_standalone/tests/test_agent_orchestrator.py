@@ -9,6 +9,22 @@ import pytest
 from tools.agent_orchestrator import AgentOrchestrator
 
 
+def _report(summary: str = "done") -> str:
+    return json.dumps({
+        "task_id": "001",
+        "status": "SUCCESS",
+        "diff_files": ["ats/example.py"],
+        "test_result": {
+            "lint": "not_applicable",
+            "typecheck": "not_applicable",
+            "unit_tests": "pass",
+            "failed_cases": [],
+        },
+        "risk_points": [],
+        "summary": summary,
+    })
+
+
 def _project(tmp_path: Path) -> Path:
     hub = tmp_path / ".agent_hub"
     for name in ("inbox", "running", "done", "review", "archive", "events", "dashboard", "artifacts"):
@@ -95,7 +111,7 @@ def test_worker_retries_once_after_transient_auth_failure(tmp_path: Path) -> Non
             return subprocess.CompletedProcess(
                 args, 1, "", "You are not logged into Antigravity. authentication timed out."
             )
-        return subprocess.CompletedProcess(args, 0, '{"status":"SUCCESS"}', "")
+        return subprocess.CompletedProcess(args, 0, _report(), "")
 
     orchestrator = AgentOrchestrator(root, runner=runner)
     orchestrator.config.update({
@@ -137,7 +153,7 @@ def test_readonly_profile_uses_plan_mode_without_auto_approval(tmp_path: Path) -
 
     def runner(args, **kwargs):
         calls.append(args)
-        return subprocess.CompletedProcess(args, 0, '{"status":"SUCCESS"}', "")
+        return subprocess.CompletedProcess(args, 0, _report(), "")
 
     orchestrator = AgentOrchestrator(root, runner=runner)
     orchestrator.config.update({
@@ -151,6 +167,76 @@ def test_readonly_profile_uses_plan_mode_without_auto_approval(tmp_path: Path) -
     )
     assert calls[0][calls[0].index("--mode") + 1] == "plan"
     assert "--dangerously-skip-permissions" not in calls[0]
+
+
+def test_worker_enforces_json_schema_and_compacts_output(tmp_path: Path) -> None:
+    root = _project(tmp_path)
+
+    def runner(args, **kwargs):
+        return subprocess.CompletedProcess(args, 0, _report("完成"), "")
+
+    orchestrator = AgentOrchestrator(root, runner=runner)
+    orchestrator.config.update({
+        "worker_model": "gemini-test",
+        "worker_fallback_models": [],
+        "worker_timeout_seconds": 5,
+        "worker_auto_approve_permissions": False,
+    })
+    result = orchestrator._invoke_worker(
+        "test", root / ".agent_hub" / "artifacts" / "001", "LOW"
+    )
+    assert result.returncode == 0
+    assert "\n" not in result.stdout
+    assert json.loads(result.stdout)["summary"] == "完成"
+
+
+def test_worker_discards_antigravity_json_envelope(tmp_path: Path) -> None:
+    root = _project(tmp_path)
+    envelope = json.dumps({
+        "conversation_id": "do-not-forward",
+        "response": "duplicated verbose response",
+        "usage": {"input_tokens": 20000, "output_tokens": 100},
+        "json_schema": {"echoed": True},
+        "structured_output": json.loads(_report("精简完成")),
+    })
+
+    def runner(args, **kwargs):
+        return subprocess.CompletedProcess(args, 0, envelope, "")
+
+    orchestrator = AgentOrchestrator(root, runner=runner)
+    orchestrator.config.update({
+        "worker_model": "gemini-test",
+        "worker_fallback_models": [],
+        "worker_timeout_seconds": 5,
+        "worker_auto_approve_permissions": False,
+    })
+    result = orchestrator._invoke_worker(
+        "test", root / ".agent_hub" / "artifacts" / "001", "LOW"
+    )
+    compact = json.loads(result.stdout)
+    assert compact["summary"] == "精简完成"
+    assert "conversation_id" not in compact
+    assert "usage" not in compact
+
+
+def test_worker_rejects_verbose_or_non_contract_output(tmp_path: Path) -> None:
+    root = _project(tmp_path)
+
+    def runner(args, **kwargs):
+        return subprocess.CompletedProcess(args, 0, "analysis first\n" + _report(), "")
+
+    orchestrator = AgentOrchestrator(root, runner=runner)
+    orchestrator.config.update({
+        "worker_model": "gemini-test",
+        "worker_fallback_models": [],
+        "worker_timeout_seconds": 5,
+        "worker_auto_approve_permissions": False,
+    })
+    result = orchestrator._invoke_worker(
+        "test", root / ".agent_hub" / "artifacts" / "001", "LOW"
+    )
+    assert result.returncode == 2
+    assert "Compact report rejected" in result.stderr
 
 
 def test_release_gate_allows_high_risk_readonly_review(tmp_path: Path) -> None:
