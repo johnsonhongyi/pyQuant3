@@ -679,6 +679,35 @@ class TestTradingCenterProactiveExitWiring(unittest.TestCase):
             self.assertEqual(watch.shares, 1000)
             self.assertEqual(watch.higher_low_stop, 78.0)
 
+    def test_19_t1_bypass_flag_requires_catastrophic_rule(self):
+        self.center.record_order_execution(self.buy)
+        forged = IPOOrderDirective(
+            action="EXIT_ALL", code="688826", name="碳脉冲",
+            price=79.0, shares=1000, bypass_t1_lock=True,
+            exit_rule_id="exit_time_decay",
+        )
+        self.assertFalse(self.center.record_order_execution(forged))
+        self.assertEqual(self.center.get_position("688826").shares, 1000)
+
+    def test_20_pending_exit_prevents_repeated_engine_evaluation(self):
+        self.center.record_order_execution(self.buy)
+        pos = self.center.get_position("688826")
+        pos.entry_date = "2026-09-19"
+        calls = []
+
+        def evaluate(**kwargs):
+            calls.append(kwargs)
+            return ExitAction(
+                code="688826", rule_id="exit_time_decay", rule_name="时间衰减",
+                layer=1, action_type="REDUCE_HALF", size_pct=0.5,
+                trigger_price=79.5, reason="normal reduce", timestamp=1100.0,
+            )
+
+        self.exit_engine.evaluate_tick = evaluate
+        self.assertIsNotNone(self.center.evaluate_position_exit("688826", 79.5, 80.0, 100.0))
+        self.assertIsNone(self.center.evaluate_position_exit("688826", 79.4, 80.0, 100.0))
+        self.assertEqual(len(calls), 1)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

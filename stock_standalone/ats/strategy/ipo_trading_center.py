@@ -1407,6 +1407,12 @@ class IPOTradingCenter:
             pos = self._positions.get(clean_code)
             if not pos or pos.shares <= 0:
                 return None
+            if any(
+                pending.code == clean_code
+                and pending.action in ("REDUCE_30", "REDUCE_HALF", "EXIT_ALL", "SELL")
+                for pending in self._pending_directives
+            ):
+                return None
             plan = pos.trade_plan or self._trade_plans.get(clean_code)
             ctx = dict(extra_ctx or {})
             if plan is not None:
@@ -1511,8 +1517,17 @@ class IPOTradingCenter:
             pnl_amt = 0.0
 
             sell_actions = {"SELL", "EXIT_ALL", "REDUCE_30", "REDUCE_HALF", "SWITCH_SWAP"}
+            catastrophic_rules = {
+                "exit_higher_low_broken",
+                "exit_base_low_broken",
+                "exit_hard_stop",
+            }
+            can_bypass_t1 = (
+                getattr(directive, "bypass_t1_lock", False)
+                and directive.exit_rule_id in catastrophic_rules
+            )
             if (directive.action in sell_actions and pos.entry_date == today_str
-                    and not getattr(directive, "bypass_t1_lock", False)):
+                    and not can_bypass_t1):
                 logger.warning(
                     "[IPO-TRADING] T+1 hard lock rejected execution: %s %s",
                     directive.action, code,
