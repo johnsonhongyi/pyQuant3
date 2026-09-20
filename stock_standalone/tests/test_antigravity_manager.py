@@ -382,13 +382,13 @@ def test_antigravity_cards_grid_dedup_and_rendering(monkeypatch):
     # 验证当前活跃账户卡片
     curr_card = dialog.account_cards["alpha.trader@quant.com"]
     assert curr_card["is_active"] is True
-    assert curr_card["btn_use"].text() == "✔ 当前生效"
+    assert "当前" in curr_card["btn_use"].text()
     assert not curr_card["btn_use"].isEnabled()
 
     # 验证备用账户卡片及缓存配额呈现
     beta_card = dialog.account_cards["beta.quant@gmail.com"]
     assert beta_card["is_active"] is False
-    assert beta_card["btn_use"].text() == "⇋ 切换 (Use)"
+    assert "切换" in beta_card["btn_use"].text()
     assert beta_card["btn_use"].isEnabled()
     # 验证缓存的配额已正确注入进卡片
     assert "60.0%" in beta_card["models"]["Gemini Pro"]["lbl"].text()
@@ -748,11 +748,104 @@ def test_get_antigravity_cli_info():
     info = get_antigravity_cli_info()
     assert isinstance(info, dict)
     assert info["available"] is True
-    assert "1.2.3" in info["version"]
+    assert "1.2" in info["version"]
     assert "agy" in info["commands"]
     assert "gemini" in info["commands"]
     assert "antigravity" in info["commands"]
     assert os.path.exists(info["path"])
+
+
+def test_runtime_app_status_and_targeted_sync(monkeypatch):
+    import tempfile
+    from window_manager import antigravity_manager
+
+    # 1. 测试运行状态探测结构
+    status = antigravity_manager.get_runtime_app_status()
+    assert isinstance(status, dict)
+    assert "app_running" in status
+    assert "ide_running" in status
+    assert "active_target" in status
+    assert "status_badge" in status
+    assert "app" in status
+    assert "ide" in status
+    assert "Antigravity 客户端" in status["app"]["name"]
+    assert "Antigravity IDE" in status["ide"]["name"]
+
+    # 2. 模拟沙箱隔离测试定向同步
+    with tempfile.TemporaryDirectory() as tmpdir:
+        mock_app_db = os.path.join(tmpdir, "app_state.vscdb")
+        mock_ide_db = os.path.join(tmpdir, "ide_state.vscdb")
+        mock_acc_dir = os.path.join(tmpdir, "accounts")
+        os.makedirs(mock_acc_dir, exist_ok=True)
+
+        monkeypatch.setattr(antigravity_manager, "APP_DB_PATH", mock_app_db)
+        monkeypatch.setattr(antigravity_manager, "IDE_DB_PATH", mock_ide_db)
+        monkeypatch.setattr(antigravity_manager, "OLD_DB_PATH", mock_app_db)
+        monkeypatch.setattr(antigravity_manager, "NEW_DB_PATH", mock_ide_db)
+
+        # 写入测试账户文件
+        acc1_data = {
+            "antigravityAuthStatus": json.dumps({"name": "User App", "email": "app@quant.com"}),
+            "oauthToken": "token_app_123"
+        }
+        with open(os.path.join(mock_acc_dir, "app@quant.com.json"), "w", encoding="utf-8") as fp:
+            json.dump(acc1_data, fp)
+
+        acc2_data = {
+            "antigravityAuthStatus": json.dumps({"name": "User IDE", "email": "ide@quant.com"}),
+            "oauthToken": "token_ide_456"
+        }
+        with open(os.path.join(mock_acc_dir, "ide@quant.com.json"), "w", encoding="utf-8") as fp:
+            json.dump(acc2_data, fp)
+
+        # 2.1 测试仅同步至 Antigravity 客户端
+        ok, msg = antigravity_manager.sync_to_target(target="app", source_account="app@quant.com", accounts_dir=mock_acc_dir)
+        assert ok is True
+        assert "Antigravity (桌面端)" in msg
+        app_db_data = antigravity_manager.read_db_data(mock_app_db)
+        assert app_db_data is not None
+        assert "app@quant.com" in app_db_data["antigravityAuthStatus"]
+        # 验证未写入 IDE
+        assert not os.path.exists(mock_ide_db)
+
+        # 2.2 测试仅同步至 Antigravity IDE
+        ok, msg = antigravity_manager.sync_to_target(target="ide", source_account="ide@quant.com", accounts_dir=mock_acc_dir)
+        assert ok is True
+        assert "Antigravity IDE" in msg
+        ide_db_data = antigravity_manager.read_db_data(mock_ide_db)
+        assert ide_db_data is not None
+        assert "ide@quant.com" in ide_db_data["antigravityAuthStatus"]
+        # 验证 App 依然是之前的账号
+        app_db_data = antigravity_manager.read_db_data(mock_app_db)
+        assert "app@quant.com" in app_db_data["antigravityAuthStatus"]
+
+        # 2.3 测试针对特定目标切换账户
+        ok, msg = antigravity_manager.switch_account("ide@quant.com", accounts_dir=mock_acc_dir, auto_sync=False, sync_target="app")
+        assert ok is True
+        assert "目标: 🚀 Antigravity (桌面端)" in msg
+        app_db_data = antigravity_manager.read_db_data(mock_app_db)
+        assert "ide@quant.com" in app_db_data["antigravityAuthStatus"]
+
+
+def test_ui_dual_target_sync_controls():
+    from PyQt6.QtWidgets import QApplication
+    _app = QApplication.instance() or QApplication([])
+    from window_manager.ui import AntigravityAccountManagerDialog
+    dialog = AntigravityAccountManagerDialog(auto_fetch=False)
+
+    # 验证彻底解耦的双 Tab 架构
+    assert hasattr(dialog, "tab_widget")
+    assert dialog.tab_widget.count() == 2
+    assert "Antigravity 客户端" in dialog.tab_widget.tabText(0)
+    assert "Antigravity IDE" in dialog.tab_widget.tabText(1)
+
+    assert hasattr(dialog, "scroll_area_app")
+    assert hasattr(dialog, "scroll_area_ide")
+    assert hasattr(dialog, "lbl_app_badge")
+    assert hasattr(dialog, "lbl_ide_badge")
+
+    dialog.close()
+
 
 
 

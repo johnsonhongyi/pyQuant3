@@ -21,8 +21,21 @@ from datetime import datetime
 
 logger = logging.getLogger("window_manager.antigravity")
 
-OLD_DB_PATH = os.path.expandvars(r"%APPDATA%\Antigravity\User\globalStorage\state.vscdb")
-NEW_DB_PATH = os.path.expandvars(r"%APPDATA%\Antigravity IDE\User\globalStorage\state.vscdb")
+# 1. 桌面独立客户端 Antigravity (App)
+APP_DB_PATH = os.path.expandvars(r"%APPDATA%\Antigravity\User\globalStorage\state.vscdb")
+APP_EXE_PATH = os.path.expandvars(r"%LOCALAPPDATA%\Programs\antigravity\Antigravity.exe")
+APP_NAME = "Antigravity 客户端"
+APP_TITLE = "🚀 Antigravity (桌面端)"
+
+# 2. 编辑器集成环境 Antigravity IDE
+IDE_DB_PATH = os.path.expandvars(r"%APPDATA%\Antigravity IDE\User\globalStorage\state.vscdb")
+IDE_EXE_PATH = r"D:\JohnsonProgram\AntigravityIDE\Antigravity IDE.exe"
+IDE_NAME = "Antigravity IDE"
+IDE_TITLE = "💻 Antigravity IDE (开发环境)"
+
+# 兼容既有全局常量引用
+OLD_DB_PATH = APP_DB_PATH
+NEW_DB_PATH = IDE_DB_PATH
 ACCOUNTS_DIR = os.path.expandvars(r"%USERPROFILE%\.antigravity-agent\antigravity-accounts")
 
 SYNC_KEYS = [
@@ -213,8 +226,35 @@ def get_current_account(db_path: str = None) -> dict:
     return {"email": "", "name": "", "summary": "未登录/无有效账户", "masked_email": "", "masked_summary": "未登录/无有效账户", "source_db": ""}
 
 
+def get_dual_target_active_accounts() -> tuple:
+    """
+    独立获取 Antigravity 独立客户端与 Antigravity IDE 当前分别在使用的账户邮箱。
+    返回: (app_active_email, ide_active_email)
+    """
+    app_email = ""
+    ide_email = ""
+
+    # 1. 独立客户端当前账户
+    target_app_db = OLD_DB_PATH
+    if os.path.exists(target_app_db):
+        app_d = read_db_data(target_app_db)
+        if app_d and app_d.get("antigravityAuthStatus"):
+            app_acc = parse_account_detail(app_d["antigravityAuthStatus"])
+            app_email = (app_acc.get("email") or "").strip().lower()
+
+    # 2. IDE 当前账户
+    target_ide_db = NEW_DB_PATH
+    if os.path.exists(target_ide_db):
+        ide_d = read_db_data(target_ide_db)
+        if ide_d and ide_d.get("antigravityAuthStatus"):
+            ide_acc = parse_account_detail(ide_d["antigravityAuthStatus"])
+            ide_email = (ide_acc.get("email") or "").strip().lower()
+
+    return app_email, ide_email
+
+
 def list_accounts(accounts_dir: str = ACCOUNTS_DIR) -> list:
-    """扫描并列出所有已配置/备份的账户（包含自动自愈新账户能力）"""
+    """扫描并列出所有已配置/备份的账户（包含自动自愈新账户能力与双端独立使用感知）"""
     # 前置自动自愈：若目录不存在或数据库有未备份新账户，全自动建档
     auto_backup_new_accounts_from_databases(accounts_dir)
 
@@ -222,8 +262,7 @@ def list_accounts(accounts_dir: str = ACCOUNTS_DIR) -> list:
         return []
 
     account_files = glob.glob(os.path.join(accounts_dir, "*.json"))
-    curr = get_current_account()
-    curr_email = curr.get("email", "").lower()
+    app_active_email, ide_active_email = get_dual_target_active_accounts()
 
     results = []
     for fpath in account_files:
@@ -240,7 +279,23 @@ def list_accounts(accounts_dir: str = ACCOUNTS_DIR) -> list:
             mtime = os.path.getmtime(fpath)
             mtime_str = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M:%S")
 
-            is_current = bool(curr_email and email.lower() == curr_email)
+            email_clean = email.lower()
+            is_app_active = bool(app_active_email and email_clean == app_active_email)
+            is_ide_active = bool(ide_active_email and email_clean == ide_active_email)
+            is_current = is_app_active or is_ide_active
+
+            if is_app_active and is_ide_active:
+                active_role = "both"
+                active_role_desc = "🟢 双端均在使用"
+            elif is_app_active:
+                active_role = "app"
+                active_role_desc = "🚀 客户端使用中"
+            elif is_ide_active:
+                active_role = "ide"
+                active_role_desc = "💻 IDE 使用中"
+            else:
+                active_role = "none"
+                active_role_desc = "⚪ 备用账户"
 
             results.append({
                 "email": email,
@@ -253,6 +308,10 @@ def list_accounts(accounts_dir: str = ACCOUNTS_DIR) -> list:
                 "mtime": mtime,
                 "mtime_str": mtime_str,
                 "is_current": is_current,
+                "is_app_active": is_app_active,
+                "is_ide_active": is_ide_active,
+                "active_role": active_role,
+                "active_role_desc": active_role_desc,
                 "data": data,
             })
         except Exception as e:
@@ -348,8 +407,192 @@ def backup_current_account(accounts_dir: str = ACCOUNTS_DIR) -> tuple:
     return persist_active_account_to_file(accounts_dir=accounts_dir, force=True)
 
 
-def switch_account(target: str, accounts_dir: str = ACCOUNTS_DIR, auto_sync: bool = True) -> tuple:
-    """切换到指定账户并在切换时执行一次完整的自检、保鲜与同步"""
+def get_runtime_app_status() -> dict:
+    """
+    实时检测当前系统正在运行的是 Antigravity 客户端 还是 Antigravity IDE。
+    返回两端运行状态、活跃标识、数据库账户等全景信息。
+    """
+    app_running = False
+    ide_running = False
+
+    try:
+        import psutil
+        for p in psutil.process_iter(['name', 'exe']):
+            try:
+                name = (p.info.get('name') or "").lower()
+                exe = (p.info.get('exe') or "").lower()
+                if "antigravity ide" in name or "antigravityide" in exe:
+                    ide_running = True
+                elif "antigravity" in name:
+                    if "antigravity ide" not in name:
+                        app_running = True
+            except Exception:
+                pass
+    except Exception as e:
+        logger.debug(f"探测运行时进程异常: {e}")
+
+    # 读取两端数据库信息
+    app_acc = None
+    app_mtime = 0
+    if os.path.exists(APP_DB_PATH):
+        app_mtime = os.path.getmtime(APP_DB_PATH)
+        d = read_db_data(APP_DB_PATH)
+        if d and d.get("antigravityAuthStatus"):
+            app_acc = parse_account_detail(d["antigravityAuthStatus"])
+
+    ide_acc = None
+    ide_mtime = 0
+    if os.path.exists(IDE_DB_PATH):
+        ide_mtime = os.path.getmtime(IDE_DB_PATH)
+        d = read_db_data(IDE_DB_PATH)
+        if d and d.get("antigravityAuthStatus"):
+            ide_acc = parse_account_detail(d["antigravityAuthStatus"])
+
+    # 确定主要活跃目标
+    if app_running and not ide_running:
+        active_target = "app"
+        status_text = "🚀 Antigravity 客户端运行中"
+        status_badge = "🟢 正在使用: Antigravity 客户端"
+    elif ide_running and not app_running:
+        active_target = "ide"
+        status_text = "💻 Antigravity IDE 运行中"
+        status_badge = "🟢 正在使用: Antigravity IDE"
+    elif app_running and ide_running:
+        active_target = "both"
+        status_text = "🚀 Antigravity 与 💻 IDE 均在运行"
+        status_badge = "🟢 正在使用: 两者同时运行"
+    else:
+        if app_mtime >= ide_mtime:
+            active_target = "app"
+            status_badge = "⚪ 离线 (上次使用: Antigravity 客户端)"
+        else:
+            active_target = "ide"
+            status_badge = "⚪ 离线 (上次使用: Antigravity IDE)"
+        status_text = "⚪ 两端均未运行"
+
+    return {
+        "app_running": app_running,
+        "ide_running": ide_running,
+        "active_target": active_target,
+        "status_text": status_text,
+        "status_badge": status_badge,
+        "app": {
+            "name": APP_NAME,
+            "title": APP_TITLE,
+            "db_path": APP_DB_PATH,
+            "exe_path": APP_EXE_PATH,
+            "running": app_running,
+            "mtime": app_mtime,
+            "account": app_acc
+        },
+        "ide": {
+            "name": IDE_NAME,
+            "title": IDE_TITLE,
+            "db_path": IDE_DB_PATH,
+            "exe_path": IDE_EXE_PATH,
+            "running": ide_running,
+            "mtime": ide_mtime,
+            "account": ide_acc
+        }
+    }
+
+
+def sync_to_target(target: str = "app", source_account: str = None, accounts_dir: str = ACCOUNTS_DIR) -> tuple:
+    """
+    定向同步核心函数：
+    target: "app" -> 明确同步至 Antigravity 桌面客户端 (APP_DB_PATH)
+            "ide" -> 明确同步至 Antigravity IDE (IDE_DB_PATH)
+            "both" -> 智能双向对齐同步至两者
+    source_account: 可选指定的邮箱/文件，默认从最新活跃配置或最新文件提取
+    """
+    os.makedirs(accounts_dir, exist_ok=True)
+    auto_backup_new_accounts_from_databases(accounts_dir=accounts_dir)
+
+    target = (target or "app").strip().lower()
+
+    if target == "both":
+        return do_sync(auto_persist_to_file=True)
+
+    # 确定目标数据库与名称 (兼容既有测试与新调用)
+    if target == "app":
+        dest_db = OLD_DB_PATH
+        dest_title = APP_TITLE
+        peer_db = NEW_DB_PATH
+        peer_title = IDE_TITLE
+    elif target == "ide":
+        dest_db = NEW_DB_PATH
+        dest_title = IDE_TITLE
+        peer_db = OLD_DB_PATH
+        peer_title = APP_TITLE
+    else:
+        return False, f"未知的同步目标: {target} (仅支持 'app', 'ide', 'both')"
+
+    keys_to_write = {}
+    source_desc = ""
+
+    if source_account:
+        all_accs = list_accounts(accounts_dir)
+        matched = None
+        s_clean = source_account.strip().lower()
+        for a in all_accs:
+            if a["email"].lower() == s_clean or s_clean in a["name"].lower() or s_clean == os.path.normpath(a["file_path"]).lower():
+                matched = a
+                break
+        if matched and matched.get("data"):
+            for k in SYNC_KEYS:
+                if k in matched["data"] and matched["data"][k] is not None:
+                    keys_to_write[k] = matched["data"][k]
+            source_desc = matched.get("masked_summary") or matched["email"]
+
+    if not keys_to_write:
+        curr = get_current_account()
+        curr_email = curr.get("email")
+        if curr_email:
+            acc_file = os.path.join(accounts_dir, f"{curr_email}.json")
+            if os.path.exists(acc_file):
+                try:
+                    with open(acc_file, "r", encoding="utf-8") as fp:
+                        adata = json.load(fp)
+                    for k in SYNC_KEYS:
+                        if k in adata and adata[k] is not None:
+                            keys_to_write[k] = adata[k]
+                    source_desc = curr.get("masked_summary") or curr_email
+                except Exception:
+                    pass
+
+        if not keys_to_write and os.path.exists(peer_db):
+            peer_data = read_db_data(peer_db)
+            if peer_data and peer_data.get("antigravityAuthStatus"):
+                for k in SYNC_KEYS:
+                    if k in peer_data and peer_data[k] is not None:
+                        keys_to_write[k] = peer_data[k]
+                source_desc = f"来自 {peer_title} 最新状态"
+
+    if not keys_to_write:
+        return False, "未获取到可用于同步的有效账户认证数据"
+
+    if 'antigravityOnboarding' not in keys_to_write:
+        keys_to_write['antigravityOnboarding'] = 'true'
+
+    count = write_db_data(dest_db, keys_to_write)
+    backup_db = dest_db + ".backup"
+    if os.path.exists(backup_db):
+        write_db_data(backup_db, keys_to_write)
+
+    persist_active_account_to_file(accounts_dir)
+
+    msg = f"✅ 成功将配置同步至 [{dest_title}] (写入 {count} 项)！当前生效: {source_desc}"
+    logger.info(msg)
+    return True, msg
+
+
+def switch_account(target: str, accounts_dir: str = ACCOUNTS_DIR, auto_sync: bool = True, sync_target: str = "both") -> tuple:
+    """
+    切换到指定账户：
+    sync_target: "both" (同时更新客户端与IDE)
+                 "app" (仅更新 Antigravity 客户端)
+                 "ide" (仅更新 Antigravity IDE)
+    """
     persist_active_account_to_file(accounts_dir=accounts_dir)
     auto_backup_new_accounts_from_databases(accounts_dir=accounts_dir)
 
@@ -393,21 +636,34 @@ def switch_account(target: str, accounts_dir: str = ACCOUNTS_DIR, auto_sync: boo
     if 'antigravityOnboarding' not in keys_to_write:
         keys_to_write['antigravityOnboarding'] = 'true'
 
-    count_old = write_db_data(OLD_DB_PATH, keys_to_write)
-    count_new = write_db_data(NEW_DB_PATH, keys_to_write)
+    sync_target = (sync_target or "both").lower()
+    targets_written = []
 
-    for p in [OLD_DB_PATH, NEW_DB_PATH]:
-        backup_db = p + ".backup"
-        if os.path.exists(backup_db):
-            write_db_data(backup_db, keys_to_write)
+    target_app_db = OLD_DB_PATH
+    target_ide_db = NEW_DB_PATH
+
+    if sync_target in ("both", "app"):
+        count_app = write_db_data(target_app_db, keys_to_write)
+        backup_app = target_app_db + ".backup"
+        if os.path.exists(backup_app):
+            write_db_data(backup_app, keys_to_write)
+        targets_written.append(f"客户端({count_app}项)")
+
+    if sync_target in ("both", "ide"):
+        count_ide = write_db_data(target_ide_db, keys_to_write)
+        backup_ide = target_ide_db + ".backup"
+        if os.path.exists(backup_ide):
+            write_db_data(backup_ide, keys_to_write)
+        targets_written.append(f"IDE({count_ide}项)")
 
     user_summary = matched.get("masked_summary") or f"{matched['name']} <{matched.get('masked_email') or mask_email(matched['email'])}>"
-    logger.info(f"✅ 成功切换至账户: {user_summary} (写入项: 源={count_old}, 目标={count_new})")
+    logger.info(f"✅ 成功切换至账户: {user_summary} (目标: {', '.join(targets_written)})")
 
-    if auto_sync:
+    if auto_sync and sync_target == "both":
         do_sync(auto_persist_to_file=True)
 
-    return True, f"已成功切换账户至 {user_summary}"
+    dest_name = APP_TITLE if sync_target == "app" else (IDE_TITLE if sync_target == "ide" else "两端应用(客户端 & IDE)")
+    return True, f"已成功切换账户至 {user_summary} [目标: {dest_name}]"
 
 
 def do_sync(auto_persist_to_file: bool = True) -> tuple:
@@ -574,7 +830,7 @@ def format_time_until_reset(iso_time_str: str) -> tuple:
         days = int(hours // 24)
 
         if days > 0:
-            return diff_sec, f"{days}天{hours % 24}小时后"
+            return diff_sec, f"{days}天{hours % 24}小时{minutes}分后"
         elif hours > 0:
             return diff_sec, f"{hours}小时{minutes}分后"
         elif minutes > 0:
