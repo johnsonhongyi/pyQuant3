@@ -1,0 +1,4 @@
+{"action": "claimed", "actor": "antigravity", "from_state": "inbox", "task_id": "001", "timestamp": "2026-09-20T02:28:42.916259+00:00", "to_state": "running"}
+{"action": "submitted", "actor": "antigravity", "from_state": "running", "task_id": "001", "timestamp": "2026-09-20T02:28:42.921281+00:00", "to_state": "done"}
+{"action": "reviewed_approved", "actor": "codex", "state": "done", "task_id": "001", "timestamp": "2026-09-20T02:28:42.926267+00:00"}
+{"action": "archived", "actor": "orchestrator", "from_state": "done", "task_id": "001", "timestamp": "2026-09-20T02:28:42.932251+00:00", "to_state": "archive"}
