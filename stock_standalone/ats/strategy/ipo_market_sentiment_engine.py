@@ -21,8 +21,10 @@ import sys
 import time
 import math
 import logging
+import hashlib
+import json
 from typing import Dict, List, Optional, Any, Tuple
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 
 from ats.tdx_realtime_fetcher import TDXRealtimeFetcher
 
@@ -50,6 +52,30 @@ class MarketSentimentSnapshot:
     # 策略执行指引
     strategy_guide: str = ""           # 综合操盘指引
     update_time: str = ""              # 更新时间戳
+    generated_at: float = 0.0
+    snapshot_id: str = ""
+    data_quality: str = "GOOD"          # GOOD / DEGRADED
+    risk_mode: str = "NORMAL"           # NORMAL / CAUTION / BLOCK_NEW_BUYS
+    position_multiplier: float = 1.0
+    source_errors: List[str] = field(default_factory=list)
+
+    def finalize(self) -> "MarketSentimentSnapshot":
+        """Create a stable identity after every source and policy field is set."""
+        if self.generated_at <= 0:
+            self.generated_at = time.time()
+        payload = asdict(self)
+        payload["snapshot_id"] = ""
+        encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+        self.snapshot_id = hashlib.sha256(encoded).hexdigest()[:16]
+        return self
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, payload: Dict[str, Any]) -> "MarketSentimentSnapshot":
+        allowed = cls.__dataclass_fields__
+        return cls(**{key: value for key, value in payload.items() if key in allowed})
 
 
 class IPOMarketSentimentEngine:
@@ -75,7 +101,10 @@ class IPOMarketSentimentEngine:
             if now_ts - self._last_calc_ts < self._cache_ttl:
                 return self._cached_snapshot
 
-        snap = MarketSentimentSnapshot(update_time=time.strftime("%H:%M:%S"))
+        snap = MarketSentimentSnapshot(
+            update_time=time.strftime("%H:%M:%S"),
+            generated_at=now_ts,
+        )
 
         # 1. 评估大盘指数成交量与量能阶段
         self._evaluate_index_volume(snap)
@@ -85,6 +114,8 @@ class IPOMarketSentimentEngine:
 
         # 3. 综合生成战略执行指引
         self._synthesize_strategy_guide(snap)
+        self._apply_risk_policy(snap)
+        snap.finalize()
 
         self._cached_snapshot = snap
         self._last_calc_ts = now_ts
@@ -113,15 +144,18 @@ class IPOMarketSentimentEngine:
 
             # 判定大盘所处量能周期
             # 绝望地量: 量比 < 0.82 或 成交量极度萎缩
+            if not sh_snap:
+                snap.data_quality = "DEGRADED"
+                snap.source_errors.append("INDEX_SNAPSHOT_UNAVAILABLE")
             if vol_ratio <= 0.82:
                 snap.index_phase = "绝望地量"
                 snap.index_desc = f"大盘缩量至地量低谷(量比{vol_ratio:.2f})，绝望孕育期，主力逆市建仓新股"
-            elif vol_ratio >= 1.45:
-                snap.index_phase = "爆发共振"
-                snap.index_desc = f"大盘放量中阳爆发(量比{vol_ratio:.2f})，情绪主升顶峰共振"
             elif vol_ratio >= 2.2:
                 snap.index_phase = "天量高潮"
                 snap.index_desc = f"大盘放天量冲顶(量比{vol_ratio:.2f})，警惕尾盘或次日获利兑现"
+            elif vol_ratio >= 1.45:
+                snap.index_phase = "爆发共振"
+                snap.index_desc = f"大盘放量中阳爆发(量比{vol_ratio:.2f})，情绪主升顶峰共振"
             else:
                 snap.index_phase = "温和放量"
                 snap.index_desc = f"大盘温和放量运行(量比{vol_ratio:.2f})，多头赛马博弈"
@@ -129,6 +163,8 @@ class IPOMarketSentimentEngine:
             logger.debug(f"评估大盘指数成交量异常: {e}")
             snap.index_phase = "温和放量"
             snap.index_desc = "大盘运行平稳"
+            snap.data_quality = "DEGRADED"
+            snap.source_errors.append("INDEX_SNAPSHOT_ERROR")
 
     def _evaluate_ipo_ladder_heat(self, snap: MarketSentimentSnapshot, ipo_signals: Optional[List[Any]]):
         """评估新股次新梯队热度 (红盘率、VWAP站稳率、活跃度)"""
@@ -186,3 +222,15 @@ class IPOMarketSentimentEngine:
             snap.strategy_guide = "市场处于绝望地量潜伏期！跟随主力暗中建仓，在 VWAP 走平 1~3 天回踩不破处预下单潜伏！"
         else:
             snap.strategy_guide = "市场震荡轮动，严格执行买在 VWAP 之上、买错破 VWAP 立即出局的极窄风控！"
+
+    def _apply_risk_policy(self, snap: MarketSentimentSnapshot) -> None:
+        """Map observable context to an explicit, replayable execution risk mode."""
+        if snap.data_quality != "GOOD":
+            snap.risk_mode = "CAUTION"
+            snap.position_multiplier = 0.5
+        if snap.heat_stage == "❄️ 冰点极寒" and snap.ipo_count >= 5:
+            snap.risk_mode = "BLOCK_NEW_BUYS"
+            snap.position_multiplier = 0.0
+        elif snap.heat_stage == "🌋 狂热高潮" or snap.index_phase == "天量高潮":
+            snap.risk_mode = "CAUTION"
+            snap.position_multiplier = min(snap.position_multiplier, 0.25)
