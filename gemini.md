@@ -1,3 +1,25 @@
+## 2026-09-20 10:33
+- [x] **【系统 Gemini CLI 废弃拦截破案与 Antigravity CLI (agy) 全面升级及多别名透明桥接】(`stock_standalone/20260920_1033_task.md`, `webTools/window_manager/antigravity_manager.py`, `tests/test_antigravity_manager.py`)**：
+    - [x] **操盘手现场明确指示与官方废弃拦截彻底破案 (P0)**：
+        - “修复系统gemini cli功能被废弃,更新Antigravity cli功能”：
+          1) **问题定位与根因剖析**：
+             - 系统旧版 `gemini` cli 基于 npm 全局包 `@google/gemini-cli@0.60.0`，调用 Google API 时被云端正式拦截废弃，报 `IneligibleTierError: This client is no longer supported for Gemini Code Assist for individuals. To continue using Gemini, please migrate to the Antigravity suite of products: https://antigravity.google` (reasonCode: `UNSUPPORTED_CLIENT`)；
+             - Google 官方全新统一的 Agentic 命令行客户端为 **Antigravity CLI**（二进制可执行文件为 `agy.exe`，版本 1.2.3）；
+             - 机器本地 `C:\Users\Johnson\.gemini\bin\agy.exe` 已就绪并支持全量 14 大最新顶级模型（Gemini 3.8 Flash, Gemini 3.1 Pro, Claude Sonnet 4.6 Thinking, Claude Opus 4.6 Thinking, GPT-OSS 120B），但用户的 Windows User PATH 中错误配置了失效的 `D:\JohnsonProgram\Antigravity\bin`，缺少了正确的 bin 路径，且缺少全局 `agy` / `antigravity` 命令入口。
+          2) **工程级根治方案与全面升级 (KISS / SOLID / DRY)**：
+             - **PATH 环境变量彻底修正**：将 `C:\Users\Johnson\AppData\Local\agy\bin` 和 `C:\Users\Johnson\.gemini\bin` 纳入系统 User PATH，剔除无效的 D 盘路径；
+             - **官方环境部署与配置迁移**：执行 `agy install` 配置环境，并将二进制同步至官方规范安装路径 `C:\Users\Johnson\AppData\Local\agy\bin\agy.exe`；执行 `agy plugin import gemini` 验证插件与设置迁移；
+             - **多别名与双向无损桥接层部署**：
+               - 在全局路径提供 `agy.cmd` / `agy.ps1`；
+               - 提供 `antigravity.cmd` / `antigravity.ps1` 支持全称直接调用；
+               - 备份并改造原有 `gemini.cmd` / `gemini.ps1`，将所有参数无损转发给 `agy.exe`，保证操盘手习惯敲 `gemini` 或历史脚本调用时同样 100% 透明工作，彻底消灭废弃拦截；
+             - **桌面管理器集成 CLI 探针 (`get_antigravity_cli_info`)**：在 `antigravity_manager.py` 增设 CLI 状态探针，支持自动探测版本、路径与模型状态；
+          3) **全量自动化与功能验证 100% 绿灯通过**：
+             - `agy --version`、`antigravity --version`、`gemini --version` 统一精准输出 `1.2.3`；
+             - `agy models` 秒级拉取 14 大顶级 AI 模型；
+             - `gemini -p 'reply test_ok' --model gemini-3.8-flash-medium` 桥接运行秒回 `test_ok`；
+             - `pytest stock_standalone/tests/test_antigravity_manager.py` 15/15 绿灯通过。
+
 ## 2026-09-19 23:37
 - [x] **【长期通道底部结构次级买点 P1 界面呈现与交易指挥室卡片升级】(`20260919_2337_task.md`, `ats/strategy/ipo_vwap_detector_engine.py`, `ats/ui/ipo_subnew_detector_dialog.py`, `ats/ui/ipo_command_room_dialog.py`, `tests/test_channel_secondary_buy_ui_and_engine.py`)**：
     - [x] 1. 在 `VWAPDetectorSignal` 增加 `channel_stage`, `higher_low_stop`, `trade_plan` 等字段，在 `analyze_stock` 中无缝接入 `evaluate_channel_secondary_buy` 并加入逐日赛马梯队；
