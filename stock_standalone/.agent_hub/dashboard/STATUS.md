@@ -1,10 +1,10 @@
 # Agent Hub Status
 
-Updated: 2026-09-20T02:27:56.444564+00:00
+Updated: 2026-09-20T04:04:53.459595+00:00
 
 ## Inbox (1)
 
-- `001_existing_signal_chain_audit.md`: Task
+- `002_secondary_buy_decision_wiring.md`: Task
 
 ## Running (0)
 
@@ -14,6 +14,6 @@ Updated: 2026-09-20T02:27:56.444564+00:00
 
 - None
 
-## Archive (0)
+## Archive (1)
 
-- None
+- `001_existing_signal_chain_audit.md`: Task

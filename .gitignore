@@ -179,3 +179,6 @@ stock_standalone/datacsv/*
 # Allow multi_period_strategies.json to be tracked
 !stock_standalone/config/multi_period_strategies.json
 !stock_standalone/config/indicator_help_custom.json
+.agent_hub/
+.pytest_temp
+tests/

@@ -151,6 +151,21 @@ class AgentHub:
         self.write_dashboard()
         return result
 
+    def retry(self, task_id: str, actor: str, reason: str) -> Path:
+        item = self.locate(task_id, ("running",))
+        target = self.hub / "inbox" / item.path.name
+        os.replace(item.path, target)
+        self._event(
+            item.task_id,
+            "returned_for_retry",
+            actor,
+            from_state="running",
+            to_state="inbox",
+            reason=reason,
+        )
+        self.write_dashboard()
+        return target
+
     def review(self, task_id: str, decision: str, reviewer: str, summary: str) -> Path:
         item = self.locate(task_id, ("done",))
         decision = decision.lower()
@@ -233,6 +248,11 @@ def build_parser() -> argparse.ArgumentParser:
     submit.add_argument("--agent", required=True)
     submit.add_argument("--summary", required=True)
 
+    retry = sub.add_parser("retry")
+    retry.add_argument("task_id")
+    retry.add_argument("--actor", required=True)
+    retry.add_argument("--reason", required=True)
+
     review = sub.add_parser("review")
     review.add_argument("task_id")
     review.add_argument("--decision", choices=("approved", "rework"), required=True)
@@ -266,6 +286,8 @@ def main(argv: list[str] | None = None) -> int:
             print(hub.claim(args.task_id, args.agent))
         elif args.command == "submit":
             print(hub.submit(args.task_id, args.agent, args.summary))
+        elif args.command == "retry":
+            print(hub.retry(args.task_id, args.actor, args.reason))
         elif args.command == "review":
             print(hub.review(args.task_id, args.decision, args.reviewer, args.summary))
         elif args.command == "archive":

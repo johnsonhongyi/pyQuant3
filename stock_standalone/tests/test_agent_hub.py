@@ -86,3 +86,13 @@ def test_archive_requires_approved_review(tmp_path: Path) -> None:
     hub.submit("001", "antigravity", "done")
     with pytest.raises(HubError, match="no approved review"):
         hub.archive("001")
+
+
+def test_retry_returns_running_task_to_inbox(tmp_path: Path) -> None:
+    hub = _build_hub(tmp_path)
+    hub.claim("001", "antigravity")
+    target = hub.retry("001", "orchestrator", "permission denied")
+    assert target.parent.name == "inbox"
+    event = json.loads((hub.hub / "events" / "events.jsonl").read_text(encoding="utf-8").splitlines()[-1])
+    assert event["action"] == "returned_for_retry"
+    assert event["reason"] == "permission denied"

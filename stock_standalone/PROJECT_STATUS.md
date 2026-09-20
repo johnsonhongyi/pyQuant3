@@ -6,6 +6,10 @@
 ---
 
 ## Completed Work
+- [x] 完成任务 `001` 全自动真实演练：Gemini Worker、12 项关联测试、范围检查、Codex 复审全部通过并归档。
+- [x] 为 Antigravity Worker 独立注入 Clash 代理，保持 ATS/TDX 网络路径不受影响。
+- [x] 部署方式 C/C1 全自动编排器，接入 Antigravity worker、Codex 主脑审查、测试白名单、文件越界检查、认证探针和 merge report。
+- [x] Agent Hub 与 Orchestrator 自动化测试共 7/7 通过，任务 `001` dry-run 成功。
 - [x] 建立 `.agent_hub` 文件驱动多 Agent 控制面，支持任务校验、原子领取、提交、审查退回、批准归档、事件审计和状态看板。
 - [x] 增加多 Agent 生命周期自动化测试，并在项目内临时目录完成 4/4 测试。
 - [x] Initial project status created
@@ -49,6 +53,8 @@
 
 ## Known Risks / Notes
 - Antigravity 是否支持原生目录监控尚未确认；当前采用固定提示加 CLI 领取，后续仅在确认其 CLI/API 后增加 adapter。
+- 已确认本机 `agy.exe 1.2.3` 与 `codex.exe` CLI；Codex 沙箱内无法访问 Antigravity 用户登录态，真实执行需从正常桌面终端启动。
+- 用户已明确授权仅对 `Risk: LOW` 任务启用 Antigravity 全工具自动批准；sandbox、范围检查、测试闸门、自动合并关闭和实盘关闭继续强制执行。
 - 本机 pytest 默认临时目录可能指向失效的 `G:\Temp`，Agent Hub 测试使用 `--basetemp=.pytest_temp\...`。
 - Avoid raising unhandled exceptions in data reload/refresh pump threads; maintain fallback values or short-circuits.
 - Treeview updates require iid mapping to preserve selection correctly across resets.
@@ -56,4 +62,4 @@
 ---
 
 ## Next Step (ONLY ONE)
-1. 在 Antigravity 中执行 `.agent_hub/AGENT_PROMPT.md`，领取并完成任务 `001` 的现有信号链只读审计。
+1. 审批并执行 `MEDIUM` 风险任务 `002`，接通 `SECONDARY_BUY` 决策指令与全局仲裁闭环。
