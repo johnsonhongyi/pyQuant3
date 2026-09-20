@@ -743,6 +743,19 @@ def test_retrieve_user_quota_summary_weekly_and_card_rendering(monkeypatch):
     dialog.close()
 
 
+def test_get_antigravity_cli_info():
+    from window_manager.antigravity_manager import get_antigravity_cli_info
+    info = get_antigravity_cli_info()
+    assert isinstance(info, dict)
+    assert info["available"] is True
+    assert "1.2.3" in info["version"]
+    assert "agy" in info["commands"]
+    assert "gemini" in info["commands"]
+    assert "antigravity" in info["commands"]
+    assert os.path.exists(info["path"])
+
+
+
 
 
 
