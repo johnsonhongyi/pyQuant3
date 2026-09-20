@@ -45,6 +45,7 @@ from ats.strategy.channel_secondary_buy_strategy import (
     TAG_IPO_VWAP_STABLE,
     TAG_IPO_BID_SURGE,
 )
+from ats.proactive_exit_engine import ProactiveExitEngine
 
 logger = logging.getLogger("IPOTradingCenter")
 
@@ -82,6 +83,9 @@ class IPOTradingPosition:
     signal_level: str = "S4"          # 规范命名: "S0" ~ "S5" (生命周期层级)
     quality_grade: str = "S"          # 规范命名: "A" | "S" | "SS" (形态质量等级)
     strategy_tag: str = ""            # 策略正交标签 (IPO_BID_SURGE, IPO_VWAP_STABLE, SUBNEW_PULLBACK_REENTRY, CHANNEL_SECONDARY_BUY)
+    trade_plan: Optional[IPOTradePlan] = None
+    exit_rule_id: str = ""
+    exit_rule_layer: int = 0
 
     def to_dict(self) -> Dict[str, Any]:
         from dataclasses import asdict
@@ -123,6 +127,9 @@ class IPOOrderDirective:
     target_swap_code: str = ""        # 全仓轮动换马接力目标代码
     target_swap_name: str = ""        # 全仓轮动换马接力目标名称
     trade_plan: Optional[IPOTradePlan] = None # 挂接的不可变 TradePlan
+    exit_rule_id: str = ""
+    exit_rule_layer: int = 0
+    bypass_t1_lock: bool = False       # 仅灾难性硬止损可置 True
 
     def to_dict(self) -> Dict[str, Any]:
         from dataclasses import asdict
@@ -153,7 +160,9 @@ class IPOTradingCenter:
             cls._instance = cls(auto_load_ledger=True)
         return cls._instance
 
-    def __init__(self, total_capital: float = 1000000.0, auto_load_ledger: bool = False, ledger_file: Optional[str] = None):
+    def __init__(self, total_capital: float = 1000000.0, auto_load_ledger: bool = False,
+                 ledger_file: Optional[str] = None,
+                 exit_engine: Optional[ProactiveExitEngine] = None):
         self.total_capital = total_capital       # 虚拟/实盘总资金池 (默认 100 万基准)
         self.available_cash = total_capital
         self._ledger_file = ledger_file
@@ -177,6 +186,7 @@ class IPOTradingCenter:
         self._trade_plans: Dict[str, IPOTradePlan] = {} # 标的对应的不变 TradePlan 字典
         self._emitted_plan_ids: set = set()            # 已生成指令的 TradePlan ID 集合 (刷新幂等防重)
         self._emitted_signal_ids: set = set()          # 已生成指令的 Signal ID 集合
+        self.exit_engine = exit_engine or ProactiveExitEngine()
 
         # ATS 外部语音报警与异动信号感知统计与优质注入池
         self._external_signal_stats: Dict[str, int] = {
@@ -186,6 +196,11 @@ class IPOTradingCenter:
             "quality_injected_count": 0
         }
         self._perceived_external_signals: List[Dict[str, Any]] = []
+        self._injected_quality_stocks: Dict[str, Dict[str, Any]] = {}
+
+        # Only explicit persistent instances restore the on-disk ledger.
+        if auto_load_ledger or ledger_file:
+            self._load_persisted_ledger()
 
     def get_position(self, code: str) -> Optional[IPOTradingPosition]:
         """获取指定标的当前的持仓状态容器"""
@@ -291,11 +306,6 @@ class IPOTradingCenter:
         )
         self.register_trade_plan(plan)
         return plan
-        self._injected_quality_stocks: Dict[str, Dict[str, Any]] = {}
-
-        # 仅当明确开启或指定账本文件时才从磁盘加载 (测试创建的纯内存临时实例不被磁盘历史污染)
-        if auto_load_ledger or ledger_file:
-            self._load_persisted_ledger()
 
     @property
     def enable_full_rotation(self) -> bool:
@@ -362,9 +372,25 @@ class IPOTradingCenter:
                     if isinstance(p_dict, dict) and p_dict.get("code"):
                         field_names = set(IPOTradingPosition.__dataclass_fields__.keys())
                         safe_kwargs = {k: v for k, v in p_dict.items() if k in field_names}
+                        raw_plan = safe_kwargs.get("trade_plan")
+                        if isinstance(raw_plan, dict):
+                            plan_fields = set(IPOTradePlan.__dataclass_fields__.keys())
+                            safe_kwargs["trade_plan"] = IPOTradePlan(**{
+                                k: v for k, v in raw_plan.items() if k in plan_fields
+                            })
                         p = IPOTradingPosition(**safe_kwargs)
                         if p.shares > 0:
                             self._positions[p.code] = p
+                            if p.trade_plan is not None:
+                                self._trade_plans[p.code] = p.trade_plan
+                            watch = self.exit_engine.register_position(
+                                code=p.code,
+                                entry_price=p.cost_price,
+                                shares=p.shares,
+                            )
+                            if p.trade_plan is not None:
+                                watch.is_reversal_protected = True
+                                watch.higher_low_stop = p.trade_plan.higher_low_stop
 
                 # 恢复已平仓历史记录
                 closed_list = data.get("closed_positions", [])
@@ -405,7 +431,10 @@ class IPOTradingCenter:
                 else:
                     closed_list.append(p.__dict__.copy())
 
-            order_list = [d.__dict__.copy() for d in self._order_history[-100:]]
+            order_list = [
+                d.to_dict() if hasattr(d, "to_dict") else d.__dict__.copy()
+                for d in self._order_history[-100:]
+            ]
             
             payload = {
                 "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -1351,19 +1380,111 @@ class IPOTradingCenter:
         """【继续交易：执行单条决议】"""
         if not directive:
             return False
-        self.record_order_execution(directive)
-        return True
+        return self.record_order_execution(directive)
 
     def execute_all_pending_directives(self) -> int:
         """【继续交易：一键执行全部待执行指令】"""
         with self._lock:
-            count = len(self._pending_directives)
+            count = 0
             for d in list(self._pending_directives):
-                self.record_order_execution(d)
-            self._pending_directives.clear()
+                if self.record_order_execution(d):
+                    count += 1
             return count
 
-    def record_order_execution(self, directive: IPOOrderDirective) -> None:
+    def evaluate_position_exit(
+        self,
+        code: str,
+        price: float,
+        vwap_today: float,
+        volume: float,
+        volume_ratio: float = 1.0,
+        current_time: Optional[float] = None,
+        extra_ctx: Optional[Dict[str, Any]] = None,
+    ) -> Optional[IPOOrderDirective]:
+        """Evaluate one holding and translate the defensive action into an order directive."""
+        clean_code = str(code).strip().zfill(6)
+        with self._lock:
+            pos = self._positions.get(clean_code)
+            if not pos or pos.shares <= 0:
+                return None
+            plan = pos.trade_plan or self._trade_plans.get(clean_code)
+            ctx = dict(extra_ctx or {})
+            if plan is not None:
+                ctx.setdefault("trade_plan", plan)
+                ctx.setdefault("higher_low_stop", plan.higher_low_stop)
+
+            watch = self.exit_engine.get_position(clean_code)
+            reduce_count_before = watch.reduce_count if watch is not None else 0
+            last_reduce_before = watch.last_reduce_time if watch is not None else None
+            action = self.exit_engine.evaluate_tick(
+                code=clean_code,
+                price=price,
+                vwap_today=vwap_today,
+                volume=volume,
+                volume_ratio=volume_ratio,
+                current_time=current_time,
+                extra_ctx=ctx,
+            )
+            if action is None:
+                return None
+
+            catastrophic_rules = {
+                "exit_higher_low_broken",
+                "exit_base_low_broken",
+                "exit_hard_stop",
+            }
+            is_catastrophic = action.rule_id in catastrophic_rules
+            today_str = time.strftime("%Y-%m-%d")
+            if pos.entry_date == today_str and not is_catastrophic:
+                if watch is not None:
+                    watch.reduce_count = reduce_count_before
+                    watch.last_reduce_time = last_reduce_before
+                logger.warning(
+                    "[IPO-TRADING] T+1 hard lock blocked %s for %s (rule=%s)",
+                    action.action_type, clean_code, action.rule_id,
+                )
+                return None
+
+            if action.action_type == "REDUCE_30":
+                shares = int(pos.shares * 0.3 / 100) * 100
+            elif action.action_type == "REDUCE_HALF":
+                shares = int(pos.shares * 0.5 / 100) * 100
+            else:
+                shares = pos.shares
+            shares = min(pos.available_shares, max(0, shares))
+            if shares <= 0:
+                return None
+
+            directive = IPOOrderDirective(
+                action=action.action_type,
+                code=clean_code,
+                name=pos.name,
+                price=action.trigger_price,
+                shares=shares,
+                size_pct=action.size_pct * 100.0,
+                urgency="CRITICAL" if is_catastrophic else "NORMAL",
+                reason=action.reason,
+                timestamp=action.timestamp,
+                signal_tier=pos.signal_tier,
+                signal_level=pos.signal_level,
+                quality_grade=pos.quality_grade,
+                strategy_tag=pos.strategy_tag,
+                trade_plan=plan,
+                exit_rule_id=action.rule_id,
+                exit_rule_layer=action.layer,
+                bypass_t1_lock=is_catastrophic,
+            )
+            if any(
+                pending.code == clean_code
+                and pending.action == directive.action
+                and pending.exit_rule_id == directive.exit_rule_id
+                for pending in self._pending_directives
+            ):
+                return None
+            self._pending_directives.append(directive)
+            return directive
+
+    def record_order_execution(self, directive: IPOOrderDirective) -> bool:
         """
         【同步撮合成交与全生命周期复盘追踪】
         - 彻底根治“今天卖了就没下文了”的断层痛点；
@@ -1373,13 +1494,30 @@ class IPOTradingCenter:
         """
         with self._lock:
             code = directive.code
+            today_str = time.strftime("%Y-%m-%d")
+            if directive.action == "FULL_ROTATION_SWAP":
+                old_pos = self._positions.get(directive.target_swap_code)
+                if old_pos is not None and old_pos.entry_date == today_str:
+                    logger.warning(
+                        "[IPO-TRADING] T+1 hard lock rejected rotation sell: %s",
+                        directive.target_swap_code,
+                    )
+                    return False
             if code not in self._positions:
                 self._positions[code] = IPOTradingPosition(code=code, name=directive.name)
             pos = self._positions[code]
             t_str = time.strftime("%H:%M:%S")
-            today_str = time.strftime("%Y-%m-%d")
             pnl_pct = 0.0
             pnl_amt = 0.0
+
+            sell_actions = {"SELL", "EXIT_ALL", "REDUCE_30", "REDUCE_HALF", "SWITCH_SWAP"}
+            if (directive.action in sell_actions and pos.entry_date == today_str
+                    and not getattr(directive, "bypass_t1_lock", False)):
+                logger.warning(
+                    "[IPO-TRADING] T+1 hard lock rejected execution: %s %s",
+                    directive.action, code,
+                )
+                return False
 
             if directive.action in ("BUY", "BUY_SCOUT", "BUY_CONFIRM"):
                 cost_money = directive.price * directive.shares
@@ -1396,12 +1534,29 @@ class IPOTradingCenter:
                 pos.signal_level = getattr(directive, "signal_level", "S4")
                 pos.quality_grade = getattr(directive, "quality_grade", "S")
                 pos.strategy_tag = getattr(directive, "strategy_tag", "")
+                if directive.trade_plan is not None:
+                    pos.trade_plan = directive.trade_plan
+                    self.register_trade_plan(directive.trade_plan)
                 pos.status = "HOLDING"
                 pos.current_price = directive.price
                 pos.highest_price = directive.price
                 pos.lowest_price = directive.price
                 pos.last_action = directive.action
                 pos.last_action_time = t_str
+                watch = self.exit_engine.get_position(code)
+                if watch is None:
+                    watch = self.exit_engine.register_position(
+                        code=code,
+                        entry_price=pos.cost_price,
+                        shares=pos.shares,
+                        entry_time=directive.timestamp or time.time(),
+                    )
+                else:
+                    watch.entry_price = pos.cost_price
+                    watch.shares = pos.shares
+                if pos.trade_plan is not None:
+                    watch.is_reversal_protected = True
+                    watch.higher_low_stop = max(watch.higher_low_stop, pos.trade_plan.higher_low_stop)
                 logger.info(f"[IPO-TRADING] 买入成交: {pos.name}({code}) {directive.shares}股 @ {directive.price:.2f}元 (动作: {directive.action}) | 剩余可用: {self.available_cash:.0f}元")
 
             elif directive.action == "FULL_ROTATION_SWAP":
@@ -1445,11 +1600,15 @@ class IPOTradingCenter:
                 self._positions[code] = new_pos
                 logger.info(f"[IPO-TRADING] 全仓轮动接力新龙头成功: {new_pos.name}({code}) 满仓买入 {new_shares}股 @ {directive.price:.2f}元")
 
-            elif directive.action in ("SELL", "EXIT_ALL", "SWITCH_SWAP"):
-                sell_val = directive.price * pos.shares
+            elif directive.action in ("SELL", "EXIT_ALL", "REDUCE_30", "REDUCE_HALF", "SWITCH_SWAP"):
+                is_partial = directive.action in ("REDUCE_30", "REDUCE_HALF")
+                sell_shares = min(pos.available_shares, directive.shares if is_partial else pos.shares)
+                if sell_shares <= 0:
+                    return False
+                sell_val = directive.price * sell_shares
                 self.available_cash += sell_val
-                if pos.cost_price > 0 and pos.shares > 0:
-                    pnl_amt = (directive.price - pos.cost_price) * pos.shares
+                if pos.cost_price > 0:
+                    pnl_amt = (directive.price - pos.cost_price) * sell_shares
                     pnl_pct = round((directive.price - pos.cost_price) / pos.cost_price * 100.0, 2)
 
                 pos.exit_price = directive.price
@@ -1458,19 +1617,39 @@ class IPOTradingCenter:
                 pos.realized_pnl_pct = pnl_pct
                 pos.realized_pnl_amount = round(pnl_amt, 2)
                 pos.exit_reason = directive.reason
-                pos.status = "CLOSED"
+                pos.exit_rule_id = directive.exit_rule_id
+                pos.exit_rule_layer = directive.exit_rule_layer
                 pos.last_action = directive.action
                 pos.last_action_time = t_str
+                pre_sell_snapshot = copy.deepcopy(pos)
+                pos.shares -= sell_shares
+                pos.available_shares = min(pos.available_shares - sell_shares, pos.shares)
+                watch = self.exit_engine.get_position(code)
+                if watch is not None:
+                    watch.shares = pos.shares
 
-                # 记录到历史已平仓持久化列表 (最新排最前)
-                closed_snapshot = copy.deepcopy(pos)
-                self._closed_positions.insert(0, closed_snapshot)
-                if len(self._closed_positions) > 200:
-                    self._closed_positions = self._closed_positions[:200]
+                if pos.shares == 0:
+                    pos.status = "CLOSED"
+                    closed_snapshot = pre_sell_snapshot
+                    closed_snapshot.exit_price = directive.price
+                    closed_snapshot.exit_time = t_str
+                    closed_snapshot.exit_date = today_str
+                    closed_snapshot.realized_pnl_pct = pnl_pct
+                    closed_snapshot.realized_pnl_amount = round(pnl_amt, 2)
+                    closed_snapshot.exit_reason = directive.reason
+                    closed_snapshot.exit_rule_id = directive.exit_rule_id
+                    closed_snapshot.exit_rule_layer = directive.exit_rule_layer
+                    closed_snapshot.last_action = directive.action
+                    closed_snapshot.last_action_time = t_str
+                    closed_snapshot.status = "CLOSED"
+                    self._closed_positions.insert(0, closed_snapshot)
+                    if len(self._closed_positions) > 200:
+                        self._closed_positions = self._closed_positions[:200]
+                    self.exit_engine.unregister_position(code)
+                else:
+                    pos.status = "HOLDING"
 
-                logger.info(f"[IPO-TRADING] 卖出平仓归档: {pos.name}({code}) {pos.shares}股 @ {directive.price:.2f}元 | 平仓收益: {pnl_pct:+.2f}% ({pnl_amt:+.0f}元) | 回笼: {sell_val:.0f}元")
-                pos.shares = 0
-                pos.available_shares = 0
+                logger.info(f"[IPO-TRADING] 卖出成交: {pos.name}({code}) {sell_shares}股 @ {directive.price:.2f}元 | 剩余: {pos.shares}股 | 盈亏: {pnl_pct:+.2f}% ({pnl_amt:+.0f}元)")
 
             self._order_history.append(directive)
 
@@ -1504,6 +1683,7 @@ class IPOTradingCenter:
 
             # 立即物理原子写盘落盘
             self._save_persisted_ledger()
+            return True
 
     def _append_signal_iteration_log(
         self, action: str, code: str, name: str, price: float,
@@ -1597,4 +1777,3 @@ class IPOTradingCenter:
                 ],
                 "signal_iteration_log": list(self._signal_iteration_log)
             }
-

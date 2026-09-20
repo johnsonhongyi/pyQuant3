@@ -13,6 +13,7 @@ tests/test_channel_secondary_buy_strategy.py
 
 import os
 import sys
+import tempfile
 import unittest
 import pandas as pd
 import numpy as np
@@ -35,7 +36,7 @@ from ats.strategy.ipo_trading_center import (
     IPOTradingPosition,
 )
 from ats.strategy.ipo_vwap_detector_engine import VWAPDetectorSignal
-from ats.proactive_exit_engine import ProactiveExitEngine, PositionWatchItem
+from ats.proactive_exit_engine import ProactiveExitEngine, PositionWatchItem, ExitAction
 
 
 class TestChannelSecondaryBuyStrategy(unittest.TestCase):
@@ -203,7 +204,8 @@ class TestIPOTradingCenterTradePlanIntegration(unittest.TestCase):
         self.assertEqual(pos.strategy_tag, TAG_CHANNEL_SECONDARY_BUY)
         self.assertEqual(pos.signal_level, "S4")
 
-        # 触发 EXIT_ALL 平仓
+        # 隔日触发 EXIT_ALL 平仓；当天新仓由 T+1 硬锁保护。
+        pos.entry_date = "2026-09-19"
         exit_dir = IPOOrderDirective(
             action="EXIT_ALL",
             code="688826",
@@ -570,6 +572,112 @@ class TestProactiveExitLinkage(unittest.TestCase):
         )
         # 验证防守线已被自动上移至成本线之上 (保本锁定)
         self.assertGreater(pos.higher_low_stop, 80.0)
+
+
+class TestTradingCenterProactiveExitWiring(unittest.TestCase):
+    def setUp(self):
+        self.exit_engine = ProactiveExitEngine()
+        self.center = IPOTradingCenter(total_capital=100000.0, exit_engine=self.exit_engine)
+        self.plan = IPOTradePlan(
+            plan_id="TP_EXIT_001", code="688826", name="碳脉冲",
+            strategy_tag=TAG_CHANNEL_SECONDARY_BUY, signal_level="S4",
+            quality_grade="S", higher_low_stop=78.0,
+            target_1_channel_mid=86.0,
+        )
+        self.buy = IPOOrderDirective(
+            action="BUY_SCOUT", code="688826", name="碳脉冲",
+            price=80.0, shares=1000, size_pct=20.0,
+            timestamp=1000.0, trade_plan=self.plan,
+            strategy_tag=TAG_CHANNEL_SECONDARY_BUY,
+        )
+
+    def test_13_buy_registers_exit_watch_and_trade_plan(self):
+        self.assertTrue(self.center.record_order_execution(self.buy))
+        watch = self.exit_engine.get_position("688826")
+        self.assertIsNotNone(watch)
+        self.assertEqual(watch.shares, 1000)
+        self.assertEqual(watch.higher_low_stop, 78.0)
+        self.assertIs(self.center.get_position("688826").trade_plan, self.plan)
+
+    def test_14_t1_blocks_normal_reduce_at_generation_and_execution(self):
+        self.center.record_order_execution(self.buy)
+        self.exit_engine.evaluate_tick = lambda **kwargs: ExitAction(
+            code="688826", rule_id="exit_time_decay", rule_name="时间衰减",
+            layer=1, action_type="REDUCE_HALF", size_pct=0.5,
+            trigger_price=79.5, reason="normal reduce", timestamp=1100.0,
+        )
+        self.assertIsNone(self.center.evaluate_position_exit("688826", 79.5, 80.0, 100.0))
+        self.assertEqual(self.exit_engine.get_position("688826").reduce_count, 0)
+        direct = IPOOrderDirective(
+            action="REDUCE_HALF", code="688826", name="碳脉冲",
+            price=79.5, shares=500, exit_rule_id="exit_time_decay",
+        )
+        self.assertFalse(self.center.record_order_execution(direct))
+        self.assertEqual(self.center.get_position("688826").shares, 1000)
+
+    def test_15_catastrophic_exit_bypasses_t1_and_archives_plan(self):
+        self.center.record_order_execution(self.buy)
+        self.exit_engine.evaluate_tick = lambda **kwargs: ExitAction(
+            code="688826", rule_id="exit_higher_low_broken", rule_name="结构破坏",
+            layer=8, action_type="EXIT_ALL", size_pct=1.0,
+            trigger_price=77.0, reason="hard stop", timestamp=1100.0,
+        )
+        directive = self.center.evaluate_position_exit("688826", 77.0, 78.0, 500.0)
+        self.assertIsNotNone(directive)
+        self.assertTrue(directive.bypass_t1_lock)
+        self.assertTrue(self.center.record_order_execution(directive))
+        self.assertEqual(self.center.get_position("688826").shares, 0)
+        closed = self.center._closed_positions[0]
+        self.assertEqual(closed.shares, 1000)
+        self.assertEqual(closed.trade_plan, self.plan)
+        self.assertEqual(closed.exit_rule_id, "exit_higher_low_broken")
+        self.assertEqual(closed.exit_rule_layer, 8)
+
+    def test_16_t1_eligible_partial_reduce_updates_remaining_shares(self):
+        self.center.record_order_execution(self.buy)
+        pos = self.center.get_position("688826")
+        pos.entry_date = "2026-09-19"
+        directive = IPOOrderDirective(
+            action="REDUCE_30", code="688826", name="碳脉冲",
+            price=82.0, shares=300, exit_rule_id="exit_distribution",
+            exit_rule_layer=4, trade_plan=self.plan,
+        )
+        self.assertTrue(self.center.record_order_execution(directive))
+        self.assertEqual(pos.shares, 700)
+        self.assertEqual(pos.available_shares, 700)
+        self.assertEqual(self.exit_engine.get_position("688826").shares, 700)
+
+    def test_17_t1_blocks_full_rotation_without_creating_target_position(self):
+        self.center.record_order_execution(self.buy)
+        rotation = IPOOrderDirective(
+            action="FULL_ROTATION_SWAP", code="688999", name="新目标",
+            price=50.0, target_swap_code="688826", target_swap_name="碳脉冲",
+        )
+        self.assertFalse(self.center.record_order_execution(rotation))
+        self.assertEqual(self.center.get_position("688826").shares, 1000)
+        self.assertIsNone(self.center.get_position("688999"))
+
+    def test_18_ledger_reload_restores_trade_plan_and_exit_watch(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            ledger = os.path.join(tmp_dir, "ledger.json")
+            center = IPOTradingCenter(
+                total_capital=100000.0, ledger_file=ledger,
+                exit_engine=ProactiveExitEngine(),
+            )
+            center.record_order_execution(self.buy)
+
+            restored = IPOTradingCenter(
+                total_capital=100000.0, auto_load_ledger=True,
+                ledger_file=ledger, exit_engine=ProactiveExitEngine(),
+            )
+            pos = restored.get_position("688826")
+            self.assertIsNotNone(pos)
+            self.assertIsInstance(pos.trade_plan, IPOTradePlan)
+            self.assertEqual(pos.trade_plan.plan_id, "TP_EXIT_001")
+            watch = restored.exit_engine.get_position("688826")
+            self.assertIsNotNone(watch)
+            self.assertEqual(watch.shares, 1000)
+            self.assertEqual(watch.higher_low_stop, 78.0)
 
 
 if __name__ == "__main__":

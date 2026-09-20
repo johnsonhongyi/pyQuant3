@@ -6,6 +6,7 @@
 ---
 
 ## Completed Work
+- [x] 完成任务 `003`：`ProactiveExitEngine` 接入交易中心，支持递进减仓/清仓、T+1 双层硬锁、TradePlan 平仓归档及冷启动守护恢复；31 项综合测试通过并审查归档。
 - [x] 完成任务 `002`：长期通道次级买点 `SECONDARY_BUY` 接通 `IPOTradingCenter` 买入指令（S4 生成 `BUY_SCOUT`，S5 生成确认仓）与全局仲裁闭环，16 项关联测试 100% 绿灯，经人工核验批准归档。
 - [x] 完成任务 `001` 全自动真实演练：Gemini Worker、12 项关联测试、范围检查、Codex 复审全部通过并归档。
 - [x] 为 Antigravity Worker 独立注入 Clash 代理，保持 ATS/TDX 网络路径不受影响。
@@ -28,27 +29,26 @@
 ---
 
 ## Current Focus
-- Files: `.agent_hub/`, `tools/agent_hub.py`, `tests/test_agent_hub.py`
-- Goal: 以 GPT/Codex 为主脑、Antigravity 为执行 Agent，完成 ATS 交易系统的可审计迭代。
+- Files: `.agent_hub/inbox/003_proactive_exit_engine_wiring.md`, `ats/strategy/ipo_trading_center.py`, `ats/proactive_exit_engine.py`
+- Goal: 以 GPT/Codex 为主脑、Antigravity 为执行 Agent，完成 ATS 交易系统的出局与风控闭环。
 - Tasks:
   - [x] 部署 P0 文件驱动编排协议和安全策略
-  - [x] 创建首个只读信号链审计任务 `001`
-  - [ ] 由 Antigravity 领取并完成任务 `001`，再由 GPT/Codex 审查
+  - [x] 完成任务 `001`：信号链五维缺口审计并归档
+  - [x] 完成任务 `002`：次级买点决策指令与仲裁闭环并归档
+  - [x] 完成任务 `003`：风控防守引擎全面接线与 A 股 T+1 卖出防守硬锁
+  - [ ] 启动任务 `004`：真实 60F K 线数据流接入次级买点检测
 - Constraints:
   - 同时最多一个执行任务
   - 自动合并和自动实盘买卖保持关闭
 
 ### Previous Focus
-- Files: `standalone_multi_period_tester.py`, `ats/ui/dragon_monitor.py`
-- Goal: Maintain stability, performance, and robustness of the stock analysis and real-time monitoring terminals.
+- Files: `ats/strategy/ipo_trading_center.py`, `ats/ui/ipo_command_room_dialog.py`
+- Goal: 次级买点 SECONDARY_BUY 接通交易中心指令与全局仲裁闭环。
 - Tasks:
-  - [x] Optimize 2D/3D multi-period relative strength mining filter (Daily: rs_d > 0.0 + Cumulative: rs_sum >= 5.0)
-  - [x] Fix `AttributeError` by redirecting name lookup to `self.get_stock_name`
-  - [x] Implement selection preservation during Treeview refresh ticks
-  - [x] Verify atomic cross-session persistence via tempfile/replace for leaders config
-- Constraints:
-  - Behavior neutral on core strategy decisions, focus on reliability, latency reduction, and seamless UI response
-  - Multi-process and file locking protection under Windows
+  - [x] S4/S5 等级受控生成 BUY_SCOUT / 确认仓指令
+  - [x] 全局仲裁独立战术角色与退潮避险豁免
+  - [x] 刷新幂等去重与防追高 buy_zone_max 校验
+  - [x] 16 项自动化测试 100% 绿灯验证
 
 ---
 
@@ -64,4 +64,4 @@
 ---
 
 ## Next Step (ONLY ONE)
-1. 准备并下发 P0 任务 `003`：风控防守引擎与交易中心全面接线（接入 `ProactiveExitEngine` 与 A 股 T+1 防守硬锁）。
+1. 执行 P1 任务 `004`：将真实 60F K 线注入 `SECONDARY_BUY` 检测，消除用日 K 模拟 60F 的周期失真。
