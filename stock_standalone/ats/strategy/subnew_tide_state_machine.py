@@ -3,6 +3,8 @@
 
 from dataclasses import dataclass, field
 from datetime import datetime
+import math
+import statistics
 from typing import Iterable, List, Optional
 
 
@@ -30,6 +32,40 @@ class TideDecision:
     target_action: str
     transition_reasons: List[str] = field(default_factory=list)
     revision_count: int = 0
+
+
+def build_tide_observation(
+    signals,
+    observed_at: str,
+    expected_count: Optional[int] = None,
+) -> TideObservation:
+    """Build one cross-section from already computed in-memory stock signals."""
+    valid = [signal for signal in signals if signal is not None and float(getattr(signal, "price", 0.0) or 0.0) > 0]
+    changes = [float(getattr(signal, "change_pct", 0.0) or 0.0) for signal in valid]
+    sample_count = len(valid)
+    denominator = max(sample_count, int(expected_count or sample_count or 1))
+    completeness = sample_count / denominator
+    quintile_count = max(1, int(math.ceil(sample_count * 0.2))) if sample_count else 1
+
+    amounts = []
+    for signal in valid:
+        extra = getattr(signal, "extra_data", {})
+        extra = extra if isinstance(extra, dict) else {}
+        amount = getattr(signal, "amount", 0.0) or extra.get("amount", 0.0) or extra.get("turnover_amount", 0.0)
+        amounts.append(max(0.0, float(amount or 0.0)))
+
+    ordered = sorted(changes)
+    return TideObservation(
+        observed_at=observed_at,
+        sample_count=sample_count,
+        completeness=round(completeness, 4),
+        advance_ratio=(sum(change > 0 for change in changes) / sample_count) if sample_count else 0.0,
+        above_vwap_ratio=(sum(bool(getattr(signal, "is_above_vwap", False)) for signal in valid) / sample_count) if sample_count else 0.0,
+        median_return_pct=statistics.median(changes) if changes else 0.0,
+        amount_yi=sum(amounts) / 100000000.0,
+        top20_return_pct=statistics.mean(ordered[-quintile_count:]) if ordered else 0.0,
+        bottom20_return_pct=statistics.mean(ordered[:quintile_count]) if ordered else 0.0,
+    )
 
 
 _POLICY = {
@@ -71,6 +107,10 @@ class SubnewTideStateMachine:
         self._previous_decision: Optional[TideDecision] = None
         self._last_timestamp: Optional[datetime] = None
         self._revision_count = 0
+        self._session_date = None
+        self._session_base_observation: Optional[TideObservation] = None
+        self._session_base_decision: Optional[TideDecision] = None
+        self._session_base_revision_count = 0
 
     def reset(self) -> None:
         self.__init__()
@@ -83,6 +123,19 @@ class SubnewTideStateMachine:
         timestamp = datetime.fromisoformat(observation.observed_at)
         if self._last_timestamp is not None and timestamp <= self._last_timestamp:
             raise ValueError("observations must be strictly increasing")
+
+        session_date = timestamp.date()
+        if self._session_date != session_date:
+            self._session_date = session_date
+            self._session_base_observation = self._previous_observation
+            self._session_base_decision = self._previous_decision
+            self._session_base_revision_count = self._revision_count
+        else:
+            # Re-evaluate the live session against the last finalized session.
+            # This prevents 3-second refreshes from masquerading as new days.
+            self._previous_observation = self._session_base_observation
+            self._previous_decision = self._session_base_decision
+            self._revision_count = self._session_base_revision_count
 
         state, reasons = self._classify(observation, self._previous_observation)
         previous_state = self._previous_decision.state if self._previous_decision else None
