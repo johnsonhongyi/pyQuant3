@@ -1,0 +1,2 @@
+{"action": "claimed", "actor": "antigravity", "from_state": "inbox", "task_id": "001", "timestamp": "2026-09-20T02:28:43.009072+00:00", "to_state": "running"}
+{"action": "submitted", "actor": "antigravity", "from_state": "running", "task_id": "001", "timestamp": "2026-09-20T02:28:43.013223+00:00", "to_state": "done"}
