@@ -62,3 +62,34 @@ python tools/agent_hub.py review 001 --decision rework --reviewer codex --summar
 ```
 
 如果 Antigravity 后续提供 CLI/API，只需实现一个 adapter 调用上述命令，不需要改变目录协议。
+
+## 全自动编排（方式 C / C1）
+
+本机已接入 `agy.exe` 执行 Agent 和 `codex.exe` 主脑审查。先预演，再显式执行：
+
+```powershell
+python tools/agent_orchestrator.py preflight
+python tools/agent_orchestrator.py run --task 001
+python tools/agent_orchestrator.py preflight --require-auth
+python tools/agent_orchestrator.py run --task 001 --execute
+```
+
+认证探针应在启动批次前运行一次；批次内每个任务只执行本地二进制与 Hub 检查，避免重复消耗模型调用和受短暂认证波动影响。
+
+执行链为：
+
+```text
+选择任务 -> 原子领取 -> Antigravity sandbox 实施 -> 白名单测试
+        -> 文件越界检查 -> Codex 只读审查 -> merge report
+```
+
+安全默认值：
+
+- Antigravity 非交互模式连 `ListDir` 也要求确认。`worker_auto_approve_permissions` 默认关闭；启用它会批准该 Agent 的全部工具请求，必须由用户明确授权。
+- 即使用户明确开启，编排器也仅允许任务书标记为 `Risk: LOW` 的任务使用，并继续强制 CLI `--sandbox`、范围检查和测试闸门。
+- `MEDIUM/HIGH` 任务禁止自动批准，必须人工执行或先拆成 LOW 风险原子任务。
+- 不自动归档，不自动合并，不自动实盘。
+- Worker 失败时任务保留在 `running/` 等待诊断，不继续下一任务。
+- 测试或越界检查失败时强制 `REWORK`。
+
+配置位于 `orchestrator.json`。Worker 使用已验证的 `gemini-3.8-flash-high`，并仅为 Antigravity 子进程注入 Clash `127.0.0.1:7897`；ATS、TDX 和其他交易进程不受影响。Codex 继续负责最终只读审查。
