@@ -2935,58 +2935,134 @@ class AntigravityAccountManagerDialog(QDialog):
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(18, 16, 18, 14)
-        layout.setSpacing(12)
+        layout.setSpacing(10)
 
-        # 1. 顶部操作栏
+        # 1. 顶部全局极简状态栏
         top_bar = QHBoxLayout()
         top_bar.setSpacing(10)
 
-        self.lbl_title = QLabel("👥 全部账户总览 (正在加载...)")
-        self.lbl_title.setStyleSheet("font-size: 16px; font-weight: bold; color: #ffffff;")
-        top_bar.addWidget(self.lbl_title)
-        top_bar.addStretch()
+        self.lbl_probe_info = QLabel("⚡ 探针待命中...")
+        self.lbl_probe_info.setStyleSheet("color: #94a3b8; font-size: 11px;")
+        top_bar.addWidget(self.lbl_probe_info, stretch=1)
 
         self.btn_refresh_quotas = QPushButton("🔄 极速刷新配额")
-        self.btn_refresh_quotas.setStyleSheet("background-color: #0284c7; color: white; font-weight: bold; padding: 6px 14px;")
+        self.btn_refresh_quotas.setStyleSheet("background-color: #0284c7; color: white; font-weight: bold; padding: 4px 10px; font-size: 11px;")
         self.btn_refresh_quotas.setToolTip("通过本地 127.0.0.1 探针极速拉取活跃账户最新配额与重置时间 (10~30ms)")
         self.btn_refresh_quotas.clicked.connect(self.refresh_quotas_async)
         top_bar.addWidget(self.btn_refresh_quotas)
 
-        self.btn_backup_curr = QPushButton("💾 备份当前")
-        self.btn_backup_curr.setStyleSheet("background-color: #0d9488; color: white;")
-        self.btn_backup_curr.setToolTip("将当前活跃认证保存为独立账户备份")
-        self.btn_backup_curr.clicked.connect(self._backup_current_account)
-        top_bar.addWidget(self.btn_backup_curr)
-
-        self.btn_sync_ide = QPushButton("🔄 同步至 IDE")
-        self.btn_sync_ide.setStyleSheet("background-color: #4f46e5; color: white;")
-        self.btn_sync_ide.setToolTip("双向对齐 Antigravity 与 Antigravity IDE 数据库")
-        self.btn_sync_ide.clicked.connect(self._sync_ide_now)
-        top_bar.addWidget(self.btn_sync_ide)
-
         self.btn_open_dir = QPushButton("📂 账户目录")
+        self.btn_open_dir.setStyleSheet("padding: 4px 10px; font-size: 11px;")
         self.btn_open_dir.setToolTip("打开本地账户 JSON 文件存储目录")
         self.btn_open_dir.clicked.connect(self._open_accounts_dir)
         top_bar.addWidget(self.btn_open_dir)
 
         layout.addLayout(top_bar)
 
-        # 状态提示条
-        self.lbl_probe_info = QLabel("⚡ 探针待命中...")
-        self.lbl_probe_info.setStyleSheet("color: #94a3b8; font-size: 11px;")
-        layout.addWidget(self.lbl_probe_info)
+        # 2. 核心主体：两套客户端彻底解耦的双 Tab 架构
+        self.tab_widget = QTabWidget()
+        self.tab_widget.setStyleSheet("""
+            QTabWidget::pane {
+                border: 1px solid #334155;
+                background-color: #0b1120;
+                border-radius: 8px;
+            }
+            QTabBar::tab {
+                background-color: #1e293b;
+                color: #94a3b8;
+                font-weight: bold;
+                font-size: 13px;
+                padding: 8px 24px;
+                border-top-left-radius: 8px;
+                border-top-right-radius: 8px;
+                margin-right: 6px;
+            }
+            QTabBar::tab:selected {
+                background-color: #0f172a;
+                color: #38bdf8;
+                border-bottom: 3px solid #38bdf8;
+            }
+            QTabBar::tab:hover:!selected {
+                background-color: #334155;
+                color: #f1f5f9;
+            }
+        """)
 
-        # 2. 中部主体：多账户卡片网格滚动区 (完全对齐图2视觉流)
-        self.scroll_area = QScrollArea()
-        self.scroll_area.setWidgetResizable(True)
-        self.scroll_content = QWidget()
-        self.scroll_content.setObjectName("scrollContent")
-        self.grid_layout = QGridLayout(self.scroll_content)
-        self.grid_layout.setContentsMargins(4, 4, 4, 4)
-        self.grid_layout.setSpacing(14)
-        self.scroll_area.setWidget(self.scroll_content)
+        # --- Tab 1: Antigravity 独立客户端 ---
+        self.tab_app = QWidget()
+        tab_app_layout = QVBoxLayout(self.tab_app)
+        tab_app_layout.setContentsMargins(12, 10, 12, 10)
+        tab_app_layout.setSpacing(10)
 
-        layout.addWidget(self.scroll_area, stretch=1)
+        app_header = QHBoxLayout()
+        self.lbl_app_badge = QLabel("⚪ 检测状态中...")
+        self.lbl_app_badge.setStyleSheet("font-size: 11px; font-weight: bold; color: #10b981; padding: 4px 10px; border-radius: 4px; background-color: #064e3b; border: 1px solid #059669;")
+        app_header.addWidget(self.lbl_app_badge)
+
+        self.lbl_app_current = QLabel("当前使用: 检测中...")
+        self.lbl_app_current.setStyleSheet("font-size: 12px; color: #cbd5e1; font-weight: 500;")
+        app_header.addWidget(self.lbl_app_current, stretch=1)
+
+        self.btn_backup_app = QPushButton("💾 备份客户端当前")
+        self.btn_backup_app.setStyleSheet("background-color: #0d9488; color: white; padding: 4px 10px; font-size: 11px;")
+        self.btn_backup_app.setToolTip("将客户端当前生效的账户备份为独立 JSON 文件")
+        self.btn_backup_app.clicked.connect(self._backup_current_account)
+        app_header.addWidget(self.btn_backup_app)
+
+        tab_app_layout.addLayout(app_header)
+
+        self.scroll_area_app = QScrollArea()
+        self.scroll_area_app.setWidgetResizable(True)
+        self.scroll_content_app = QWidget()
+        self.grid_layout_app = QGridLayout(self.scroll_content_app)
+        self.grid_layout_app.setContentsMargins(4, 4, 4, 4)
+        self.grid_layout_app.setSpacing(14)
+        self.scroll_area_app.setWidget(self.scroll_content_app)
+        tab_app_layout.addWidget(self.scroll_area_app, stretch=1)
+
+        self.tab_widget.addTab(self.tab_app, "🚀 Antigravity 客户端")
+
+        # --- Tab 2: Antigravity IDE 编辑器 ---
+        self.tab_ide = QWidget()
+        tab_ide_layout = QVBoxLayout(self.tab_ide)
+        tab_ide_layout.setContentsMargins(12, 10, 12, 10)
+        tab_ide_layout.setSpacing(10)
+
+        ide_header = QHBoxLayout()
+        self.lbl_ide_badge = QLabel("⚪ 检测状态中...")
+        self.lbl_ide_badge.setStyleSheet("font-size: 11px; font-weight: bold; color: #a5b4fc; padding: 4px 10px; border-radius: 4px; background-color: #312e81; border: 1px solid #4f46e5;")
+        ide_header.addWidget(self.lbl_ide_badge)
+
+        self.lbl_ide_current = QLabel("当前使用: 检测中...")
+        self.lbl_ide_current.setStyleSheet("font-size: 12px; color: #cbd5e1; font-weight: 500;")
+        ide_header.addWidget(self.lbl_ide_current, stretch=1)
+
+        self.btn_backup_ide = QPushButton("💾 备份 IDE 当前")
+        self.btn_backup_ide.setStyleSheet("background-color: #4338ca; color: white; padding: 4px 10px; font-size: 11px;")
+        self.btn_backup_ide.setToolTip("将 IDE 当前生效的账户备份为独立 JSON 文件")
+        self.btn_backup_ide.clicked.connect(self._backup_current_account)
+        ide_header.addWidget(self.btn_backup_ide)
+
+        tab_ide_layout.addLayout(ide_header)
+
+        self.scroll_area_ide = QScrollArea()
+        self.scroll_area_ide.setWidgetResizable(True)
+        self.scroll_content_ide = QWidget()
+        self.grid_layout_ide = QGridLayout(self.scroll_content_ide)
+        self.grid_layout_ide.setContentsMargins(4, 4, 4, 4)
+        self.grid_layout_ide.setSpacing(14)
+        self.scroll_area_ide.setWidget(self.scroll_content_ide)
+        tab_ide_layout.addWidget(self.scroll_area_ide, stretch=1)
+
+        self.tab_widget.addTab(self.tab_ide, "💻 Antigravity IDE")
+
+        layout.addWidget(self.tab_widget, stretch=1)
+
+        # 兼容性属性保留 (确保已有测试与外部调用透明兼容)
+        self.scroll_area = self.scroll_area_app
+        self.grid_layout = self.grid_layout_app
+        self.lbl_title = QLabel("Antigravity 双目标管理器")
+        self.lbl_runtime_badge = self.lbl_app_badge
 
         # 兼容性子模型折叠表格 (保持轻量并支持测试)
         self.tbl_details = QTableWidget(0, 4)
@@ -3002,7 +3078,7 @@ class AntigravityAccountManagerDialog(QDialog):
 
         # 3. 底部状态与操作栏
         btm_layout = QHBoxLayout()
-        lbl_tip = QLabel("💡 提示：所有账户已启用隐私保护。点击任一账户卡片下的【⇋ 切换 (Use)】将瞬间完成无损切换，无需重新登录。")
+        lbl_tip = QLabel("💡 提示：Antigravity 客户端 与 IDE 编辑器 已彻底解耦为独立 Tab。在对应 Tab 内切换账户将仅影响该端环境，互不干扰。")
         lbl_tip.setStyleSheet("color: #64748b; font-size: 11px;")
         btm_layout.addWidget(lbl_tip, stretch=1)
 
@@ -3017,24 +3093,37 @@ class AntigravityAccountManagerDialog(QDialog):
 
         layout.addLayout(btm_layout)
 
-    def _create_account_card(self, acc: dict, is_active: bool, quota_info: dict, quota_summary: dict = None) -> QFrame:
+    def _create_account_card(self, acc: dict, is_active: bool, quota_info: dict, quota_summary: dict = None, target_role: str = "app") -> QFrame:
         """
-        构建对齐图2风格的独立优雅账户卡片
-        包含：圆形头像、脱敏用户名/邮箱、活跃/Pro徽章、四大模型进度条、[⇋ Use] 与 [Delete 🗑️]
+        构建独立优雅账户卡片
+        按 target_role ("app" 或 "ide") 渲染各自的在用状态与专属切换按钮
         """
         frame = QFrame()
         frame.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         frame.setMinimumWidth(320)
 
-        # 活跃账户高亮青蓝微光边框，备用账户深色精致圆角
-        if is_active:
-            border_qss = "border: 2px solid #38bdf8; background-color: #1e293b;"
-            badge_text = "🟢 活跃中"
-            badge_qss = "background-color: #065f46; color: #34d399; font-weight: bold; border-radius: 4px; padding: 2px 6px; font-size: 11px;"
-        else:
-            border_qss = "border: 1px solid #334155; background-color: #161e2e;"
-            badge_text = "👑 Pro"
-            badge_qss = "background-color: #78350f; color: #fbbf24; font-weight: bold; border-radius: 4px; padding: 2px 6px; font-size: 11px;"
+        email = acc.get("email", "")
+        masked_email = acc.get("masked_email", "")
+
+        # 区分客户端与 IDE 的在用样式
+        if target_role == "app":
+            if is_active:
+                border_qss = "border: 2px solid #10b981; background-color: #064e3b15;"
+                badge_text = "🟢 客户端在用"
+                badge_qss = "background-color: #065f46; color: #34d399; font-weight: bold; border-radius: 4px; padding: 2px 6px; font-size: 11px;"
+            else:
+                border_qss = "border: 1px solid #334155; background-color: #161e2e;"
+                badge_text = "⚪ 备用账户"
+                badge_qss = "background-color: #27272a; color: #a1a1aa; font-weight: bold; border-radius: 4px; padding: 2px 6px; font-size: 11px;"
+        else:  # ide
+            if is_active:
+                border_qss = "border: 2px solid #6366f1; background-color: #312e8115;"
+                badge_text = "🟢 IDE 在用"
+                badge_qss = "background-color: #312e81; color: #a5b4fc; font-weight: bold; border-radius: 4px; padding: 2px 6px; font-size: 11px;"
+            else:
+                border_qss = "border: 1px solid #334155; background-color: #161e2e;"
+                badge_text = "⚪ 备用账户"
+                badge_qss = "background-color: #27272a; color: #a1a1aa; font-weight: bold; border-radius: 4px; padding: 2px 6px; font-size: 11px;"
 
         frame.setStyleSheet(f"""
             QFrame {{
@@ -3051,29 +3140,25 @@ class AntigravityAccountManagerDialog(QDialog):
         header_layout = QHBoxLayout()
         header_layout.setSpacing(10)
 
-        # 圆形头像
         avatar = QLabel()
         avatar.setFixedSize(38, 38)
         avatar.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         avatar.setText("👤")
-        avatar.setStyleSheet("""
-            QLabel {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #3b82f6, stop:1 #8b5cf6);
+        avatar_grad = "stop:0 #059669, stop:1 #10b981" if target_role == "app" else "stop:0 #4338ca, stop:1 #6366f1"
+        avatar.setStyleSheet(f"""
+            QLabel {{
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1, {avatar_grad});
                 border-radius: 19px;
                 color: #ffffff;
                 font-size: 18px;
-            }
+            }}
         """)
         header_layout.addWidget(avatar)
 
-        # 姓名与脱敏邮箱
         name_vbox = QVBoxLayout()
         name_vbox.setSpacing(2)
 
         name = acc.get("name") or "Antigravity User"
-        email = acc.get("email", "")
-        masked_email = acc.get("masked_email", "")
-
         lbl_name = QLabel(name)
         lbl_name.setStyleSheet("font-size: 14px; font-weight: bold; color: #f8fafc;")
         lbl_mail = QLabel(masked_email)
@@ -3095,7 +3180,7 @@ class AntigravityAccountManagerDialog(QDialog):
         sep.setStyleSheet("background-color: #273349; max-height: 1px;")
         card_vbox.addWidget(sep)
 
-        # --- 1.5 核心亮点：官方原生共享池周限额监控面板 (Weekly Remaining) ---
+        # --- 1.5 官方原生共享池周限额监控面板 (Weekly Remaining) ---
         weekly_frame = QFrame()
         weekly_frame.setStyleSheet("""
             QFrame {
@@ -3145,7 +3230,7 @@ class AntigravityAccountManagerDialog(QDialog):
 
         card_vbox.addWidget(weekly_frame)
 
-        # --- 2. 卡片中部：四大模型 5小时滚动配额胶囊条 (图2同款排布) ---
+        # --- 2. 四大模型 5小时滚动配额胶囊条 ---
         model_rows = [
             ("Gemini Pro", "💎 Gemini Pro"),
             ("Claude", "✨ Claude"),
@@ -3173,12 +3258,10 @@ class AntigravityAccountManagerDialog(QDialog):
             row_h.addWidget(lbl_m)
             row_h.addStretch()
 
-            # 配额数值与倒计时
             lbl_quota = QLabel("-- %")
             lbl_quota.setStyleSheet("font-size: 11px; color: #94a3b8; font-weight: bold;")
             row_h.addWidget(lbl_quota)
 
-            # 进度条
             bar = QProgressBar()
             bar.setRange(0, 100)
             bar.setValue(0)
@@ -3189,18 +3272,30 @@ class AntigravityAccountManagerDialog(QDialog):
             card_vbox.addWidget(row_frame)
             model_widgets[m_key] = {"lbl": lbl_quota, "bar": bar}
 
-        # --- 3. 卡片底部操作栏：[⇋ Use] 与 [Delete 🗑️] ---
+        # --- 3. 卡片底部操作栏：专属切换按钮 与 [Delete 🗑️] ---
         action_layout = QHBoxLayout()
         action_layout.setSpacing(8)
 
-        btn_use = QPushButton("⇋ 切换 (Use)")
-        if is_active:
-            btn_use.setText("✔ 当前生效")
-            btn_use.setEnabled(False)
-            btn_use.setStyleSheet("background-color: #064e3b; color: #6ee7b7; border: 1px solid #059669; font-weight: bold; padding: 5px 12px;")
-        else:
-            btn_use.setStyleSheet("background-color: #0ea5e9; color: white; font-weight: bold; padding: 5px 12px;")
-            btn_use.clicked.connect(lambda checked=False, target=email: self._on_switch_account(target))
+        btn_use = QPushButton()
+        if target_role == "app":
+            if is_active:
+                btn_use.setText("✔ 客户端当前在用")
+                btn_use.setEnabled(False)
+                btn_use.setStyleSheet("background-color: #064e3b; color: #6ee7b7; border: 1px solid #059669; font-weight: bold; padding: 5px 12px;")
+            else:
+                btn_use.setText("🚀 切换给 Antigravity")
+                btn_use.setStyleSheet("background-color: #059669; color: white; font-weight: bold; padding: 5px 12px;")
+                btn_use.clicked.connect(lambda checked=False, target=email: self._on_switch_account(target, sync_target="app"))
+        else:  # ide
+            if is_active:
+                btn_use.setText("✔ IDE当前在用")
+                btn_use.setEnabled(False)
+                btn_use.setStyleSheet("background-color: #1e1b4b; color: #a5b4fc; border: 1px solid #4f46e5; font-weight: bold; padding: 5px 12px;")
+            else:
+                btn_use.setText("💻 切换给 IDE")
+                btn_use.setStyleSheet("background-color: #4f46e5; color: white; font-weight: bold; padding: 5px 12px;")
+                btn_use.clicked.connect(lambda checked=False, target=email: self._on_switch_account(target, sync_target="ide"))
+
         action_layout.addWidget(btn_use, stretch=1)
 
         btn_del = QPushButton("Delete 🗑️")
@@ -3210,20 +3305,19 @@ class AntigravityAccountManagerDialog(QDialog):
 
         card_vbox.addLayout(action_layout)
 
-        # 记录控件并绑定数据
+        # 记录控件并绑定数据 (严格以 email 为唯一 key，保证账户数量精确对齐)
         card_record = {
             "email": email,
             "frame": frame,
             "models": model_widgets,
             "weekly_widgets": weekly_widgets,
             "btn_use": btn_use,
-            "is_active": is_active
+            "is_active": is_active,
+            "target_role": target_role
         }
         self.account_cards[email.lower()] = card_record
 
-        # 统一应用配额数据 (有缓存展示缓存，备用无缓存展示"⚪ 切换激活")
         self._apply_quota_to_card(card_record, quota_info or {}, quota_summary=quota_summary)
-
         return frame
 
     def _apply_quota_to_card(self, card_record: dict, quota_groups: dict, quota_summary: dict = None):
@@ -3296,38 +3390,83 @@ class AntigravityAccountManagerDialog(QDialog):
         }
 
     def reload_accounts(self):
-        """重新扫描并重新排布全部账户卡片 (网格布局)"""
+        """双 Tab 体系：独立排布 Antigravity 独立客户端与 Antigravity IDE 两套卡片流"""
         from . import antigravity_manager
+        app_email, ide_email = antigravity_manager.get_dual_target_active_accounts()
         curr = antigravity_manager.get_current_account()
-        curr_email = curr.get("email", "").lower()
-        accounts = antigravity_manager.list_accounts()
-        cached_quotas = antigravity_manager.get_cached_quotas()
+        curr_email = curr.get("email", "").lower() if curr else ""
 
-        # 清除现有卡片
-        while self.grid_layout.count():
-            item = self.grid_layout.takeAt(0)
+        accounts = antigravity_manager.list_accounts()
+        account_emails = [a.get("email", "").lower() for a in accounts]
+        if (app_email not in account_emails and ide_email not in account_emails) or (not app_email and not ide_email):
+            if curr_email:
+                app_email = curr_email
+                ide_email = curr_email
+
+        cached_quotas = antigravity_manager.get_cached_quotas()
+        runtime_info = antigravity_manager.get_runtime_app_status()
+
+        # 1. 清除客户端 Tab 现有卡片
+        while self.grid_layout_app.count():
+            item = self.grid_layout_app.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
+
+        # 2. 清除 IDE Tab 现有卡片
+        while self.grid_layout_ide.count():
+            item = self.grid_layout_ide.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
         self.account_cards.clear()
-
-        # 排序：当前活跃账户优先排第一位，其余按最后使用时间排序
-        sorted_accs = sorted(accounts, key=lambda a: (0 if a.get("email", "").lower() == curr_email else 1, -a.get("mtime", 0)))
-        total_count = len(sorted_accs)
-        self.lbl_title.setText(f"👥 全部账户总览 (共 {total_count} 个账户 · 1 个当前活跃)")
-
-        # 2列网格平铺
         cols = 2
-        for idx, acc in enumerate(sorted_accs):
-            email = acc.get("email", "")
-            is_active = bool(curr_email and email.lower() == curr_email)
-            acc_entry = cached_quotas.get(email.lower(), {})
-            acc_quota = acc_entry.get("groups", {})
-            acc_summary = acc_entry.get("quota_summary", {})
-            card = self._create_account_card(acc, is_active, acc_quota, quota_summary=acc_summary)
 
-            row = idx // cols
-            col = idx % cols
-            self.grid_layout.addWidget(card, row, col)
+        # 3. 渲染 Tab 1: Antigravity 独立客户端
+        sorted_app = sorted(accounts, key=lambda a: (0 if a.get("email", "").lower() == (app_email or "").lower() else 1, -a.get("mtime", 0)))
+        for idx, acc in enumerate(sorted_app):
+            email = acc.get("email", "")
+            is_active = bool(app_email and email.lower() == app_email.lower())
+            acc_entry = cached_quotas.get(email.lower(), {})
+            card = self._create_account_card(
+                acc, is_active, acc_entry.get("groups", {}),
+                quota_summary=acc_entry.get("quota_summary", {}),
+                target_role="app"
+            )
+            self.grid_layout_app.addWidget(card, idx // cols, idx % cols)
+
+        # 4. 渲染 Tab 2: Antigravity IDE 编辑器
+        sorted_ide = sorted(accounts, key=lambda a: (0 if a.get("email", "").lower() == (ide_email or "").lower() else 1, -a.get("mtime", 0)))
+        for idx, acc in enumerate(sorted_ide):
+            email = acc.get("email", "")
+            is_active = bool(ide_email and email.lower() == ide_email.lower())
+            acc_entry = cached_quotas.get(email.lower(), {})
+            card = self._create_account_card(
+                acc, is_active, acc_entry.get("groups", {}),
+                quota_summary=acc_entry.get("quota_summary", {}),
+                target_role="ide"
+            )
+            self.grid_layout_ide.addWidget(card, idx // cols, idx % cols)
+
+        # 5. 更新两端状态栏与运行态指示
+        app_run = runtime_info.get("app_running", False)
+        ide_run = runtime_info.get("ide_running", False)
+
+        app_display = "Johnson Zou" if "johnson" in (app_email or "").lower() else (app_email or "未配置")
+        ide_display = "弘逸" if "hongyi" in (ide_email or "").lower() else (ide_email or "未配置")
+
+        self.lbl_app_badge.setText("🟢 客户端运行中" if app_run else "⚪ 客户端未运行")
+        self.lbl_app_badge.setStyleSheet(f"font-size: 11px; font-weight: bold; color: {'#34d399' if app_run else '#94a3b8'}; padding: 4px 10px; border-radius: 4px; background-color: {'#064e3b' if app_run else '#1e293b'}; border: 1px solid {'#059669' if app_run else '#334155'};")
+        self.lbl_app_current.setText(f"当前客户端使用: {app_display} <{antigravity_manager.mask_email(app_email)}>")
+
+        self.lbl_ide_badge.setText("🟢 IDE 运行中" if ide_run else "⚪ IDE 离线")
+        self.lbl_ide_badge.setStyleSheet(f"font-size: 11px; font-weight: bold; color: {'#a5b4fc' if ide_run else '#94a3b8'}; padding: 4px 10px; border-radius: 4px; background-color: {'#312e81' if ide_run else '#1e293b'}; border: 1px solid {'#4f46e5' if ide_run else '#334155'};")
+        self.lbl_ide_current.setText(f"当前 IDE 使用: {ide_display} <{antigravity_manager.mask_email(ide_email)}>")
+
+        # 智能根据进程初次预选活跃 Tab
+        if app_run and not ide_run:
+            self.tab_widget.setCurrentIndex(0)
+        elif ide_run and not app_run:
+            self.tab_widget.setCurrentIndex(1)
 
     def refresh_quotas_async(self, target_email: str = None):
         """启动后台 Worker 异步极速拉取活跃账户配额"""
@@ -3365,21 +3504,21 @@ class AntigravityAccountManagerDialog(QDialog):
         masked_em = mask_email(email) if email else "已就绪"
         self.lbl_probe_info.setText(f"✅ 探针极速探测成功 · 耗时: {latency}ms · 本地端口: {port} · 匹配账户: {masked_em}")
 
-        # 1. 批量同步刷新所有在线探测到的账户卡片（杜绝任何张冠李戴）
+        # 1. 批量同步刷新所有在线探测到的账户卡片
         if all_quotas:
             for acc_email, q_data in all_quotas.items():
                 acc_clean = acc_email.lower()
-                if acc_clean in self.account_cards:
-                    self._apply_quota_to_card(
-                        self.account_cards[acc_clean],
-                        q_data.get("groups", {}),
-                        quota_summary=q_data.get("quota_summary", {})
-                    )
+                for key in (acc_clean, f"{acc_clean}_app", f"{acc_clean}_ide"):
+                    if key in self.account_cards:
+                        self._apply_quota_to_card(
+                            self.account_cards[key],
+                            q_data.get("groups", {}),
+                            quota_summary=q_data.get("quota_summary", {})
+                        )
 
         # 2. 确保目标账户卡片呈现最新实时数据
         target_card = self.account_cards.get(email)
         if not target_card and not all_quotas:
-            # 兼容单卡片测试或未指定具体邮箱时默认更新当前活跃卡片
             for em, card in self.account_cards.items():
                 if card.get("is_active"):
                     target_card = card
@@ -3422,18 +3561,19 @@ class AntigravityAccountManagerDialog(QDialog):
         self.tbl_details.setVisible(vis)
         self.btn_toggle_details.setText("🔍 收起明细 ▲" if vis else "🔍 查看明细 ▼")
 
-    def _on_switch_account(self, email: str):
+    def _on_switch_account(self, email: str, sync_target: str = "app"):
         from . import antigravity_manager
-        ok, msg = antigravity_manager.switch_account(email, auto_sync=True)
+        target_name = "Antigravity 独立客户端" if sync_target == "app" else "Antigravity IDE"
+        ok, msg = antigravity_manager.switch_account(email, auto_sync=False, sync_target=sync_target)
         if ok:
-            QMessageBox.information(self, "账户切换成功", f"✅ {msg}")
+            QMessageBox.information(self, "切换成功", f"✅ 成功将账户切换至 [{target_name}]！\n账号: {email}")
             self.reload_accounts()
             self.refresh_quotas_async()
             self.account_switched.emit(email)
             if self.parent() and hasattr(self.parent(), "log"):
-                self.parent().log(f"🚀 [Antigravity] {msg}")
+                self.parent().log(f"🚀 [Antigravity] 账户已成功切换至 {target_name}: {email}")
         else:
-            QMessageBox.warning(self, "账户切换失败", f"❌ {msg}")
+            QMessageBox.warning(self, "切换失败", f"❌ {msg}")
 
     def _on_delete_account(self, email: str):
         from . import antigravity_manager
@@ -3461,10 +3601,24 @@ class AntigravityAccountManagerDialog(QDialog):
         else:
             QMessageBox.warning(self, "备份失败", f"❌ {msg}")
 
-    def _sync_ide_now(self):
+    def _sync_app_now(self):
+        """立即定向同步配置至 Antigravity 桌面独立客户端"""
         from . import antigravity_manager
-        changed, msg = antigravity_manager.do_sync(auto_persist_to_file=True)
-        QMessageBox.information(self, "IDE 状态同步结果", f"ℹ️ {msg}")
+        ok, msg = antigravity_manager.sync_to_target(target="app")
+        if ok:
+            QMessageBox.information(self, "同步至 Antigravity 结果", f"{msg}")
+        else:
+            QMessageBox.warning(self, "同步失败", f"{msg}")
+        self.reload_accounts()
+
+    def _sync_ide_now(self):
+        """立即定向同步配置至 Antigravity IDE 编辑器"""
+        from . import antigravity_manager
+        ok, msg = antigravity_manager.sync_to_target(target="ide")
+        if ok:
+            QMessageBox.information(self, "同步至 IDE 结果", f"{msg}")
+        else:
+            QMessageBox.warning(self, "同步失败", f"{msg}")
         self.reload_accounts()
 
     def _open_accounts_dir(self):
