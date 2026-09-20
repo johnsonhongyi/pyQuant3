@@ -274,6 +274,7 @@ class IPOScanWorker(QThread):
         # 1. 将全量代码切分成若干批次 (批量分组计算，杜绝单只零碎调度浪费性能)
         batches = [self.codes[i:i + self.batch_size] for i in range(0, len(self.codes), self.batch_size)]
         tot_day_ms = 0.0
+        tot_60f_ms = 0.0
         tot_bars_ms = 0.0
         tot_strat_ms = 0.0
         all_stock_costs = []
@@ -301,6 +302,17 @@ class IPOScanWorker(QThread):
             t_day_ms = (time.perf_counter() - t_day_start) * 1000
             tot_day_ms += t_day_ms
 
+            # ── 步骤 A2: 复用 TDXRealtimeFetcher 30秒缓存，顺序预取真实 60F ──
+            t_60f_start = time.perf_counter()
+            kline_60m_map = {}
+            try:
+                from ats.strategy.ipo_vwap_detector_engine import batch_fetch_60m_kline_fast
+                kline_60m_map = batch_fetch_60m_kline_fast(batch_codes, count=160)
+            except Exception as exc_60f:
+                logger.debug(f"批量预取批次 {b_idx} 真实60F异常: {exc_60f}")
+            t_60f_ms = (time.perf_counter() - t_60f_start) * 1000
+            tot_60f_ms += t_60f_ms
+
             # ── 步骤 B: 纯单线程顺序跑策略计算 (对齐 --sbc-holdings，零线程池竞争，安全稳定) ──
             t_strat_start = time.perf_counter()
             batch_results = []
@@ -308,7 +320,9 @@ class IPOScanWorker(QThread):
                 if not self.is_running:
                     break
                 try:
-                    sig = self._analyze_one(c, day_df_map.get(c))
+                    sig = self._analyze_one(
+                        c, day_df_map.get(c), kline_60m_map.get(c)
+                    )
                     if sig:
                         batch_results.append(sig)
                         count += 1
@@ -329,7 +343,7 @@ class IPOScanWorker(QThread):
             top3 = batch_stock_costs[:3]
             top3_str = " | ".join(f"{c}(总{t:.0f}ms/分时{b:.0f}ms)" for c, t, b, s in top3)
             codes_summary = ",".join(batch_codes)
-            batch_log = f"[IPO-SCAN] 批次 {b_idx + 1}/{len(batches)} ({len(batch_codes)}只: {codes_summary}) | 日线预取: {t_day_ms:.1f}ms | 批次总耗时: {t_batch_total_ms:.1f}ms (均{t_batch_total_ms / max(1, len(batch_codes)):.1f}ms/只)"
+            batch_log = f"[IPO-SCAN] 批次 {b_idx + 1}/{len(batches)} ({len(batch_codes)}只: {codes_summary}) | 日线预取: {t_day_ms:.1f}ms | 60F预取: {t_60f_ms:.1f}ms | 批次总耗时: {t_batch_total_ms:.1f}ms (均{t_batch_total_ms / max(1, len(batch_codes)):.1f}ms/只)"
             if top3:
                 batch_log += f"\n   └─ 耗时 Top3: {top3_str}"
 
@@ -347,6 +361,7 @@ class IPOScanWorker(QThread):
 
         perf_summary = {
             "day_ms": tot_day_ms,
+            "60f_ms": tot_60f_ms,
             "bars_ms": tot_bars_ms,
             "strat_ms": tot_strat_ms,
             "batches": len(batches),
@@ -355,7 +370,7 @@ class IPOScanWorker(QThread):
         }
 
         top3_report = " | ".join(f"{c}({t:.0f}ms)" for c, t in perf_summary["top3"])
-        summary_log = f"🏁 全量扫描结束: 共 {count} 只标的 | 总耗时: {cost:.2f}s | 日线: {tot_day_ms:.0f}ms | 分时: {tot_bars_ms:.0f}ms | 策略: {tot_strat_ms:.0f}ms | 均{perf_summary['avg_ms']:.1f}ms/只"
+        summary_log = f"🏁 全量扫描结束: 共 {count} 只标的 | 总耗时: {cost:.2f}s | 日线: {tot_day_ms:.0f}ms | 60F: {tot_60f_ms:.0f}ms | 分时: {tot_bars_ms:.0f}ms | 策略: {tot_strat_ms:.0f}ms | 均{perf_summary['avg_ms']:.1f}ms/只"
         if top3_report:
             summary_log += f"\n🏆 全局瓶颈 Top3: {top3_report}"
 
@@ -366,10 +381,11 @@ class IPOScanWorker(QThread):
 
         self.scan_finished.emit(count, cost, perf_summary)
 
-    def _analyze_one(self, code: str, day_df: Optional[pd.DataFrame] = None) -> Optional[VWAPDetectorSignal]:
+    def _analyze_one(self, code: str, day_df: Optional[pd.DataFrame] = None,
+                     df_60m: Optional[pd.DataFrame] = None) -> Optional[VWAPDetectorSignal]:
         if not self.is_running:
             return None
-        return self.engine.analyze_stock(code, day_df=day_df)
+        return self.engine.analyze_stock(code, day_df=day_df, df_60m=df_60m)
 
     def stop(self):
         self.is_running = False

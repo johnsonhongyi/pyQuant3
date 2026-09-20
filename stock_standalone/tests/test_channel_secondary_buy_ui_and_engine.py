@@ -27,10 +27,12 @@ from ats.strategy.ipo_vwap_detector_engine import (
     IPOVWAPDetectorEngine,
     VWAPDetectorSignal,
     batch_evaluate_horse_race_ranking,
+    batch_fetch_60m_kline_fast,
 )
 from ats.ui.ipo_subnew_detector_dialog import (
     IPOSubnewDetectorDialog,
     IPODetectorTableWidget,
+    IPOScanWorker,
 )
 from ats.ui.ipo_command_room_dialog import (
     IPOCommandRoomDialog,
@@ -87,7 +89,9 @@ class TestChannelSecondaryBuyUIAndEngine(unittest.TestCase):
         clean_code = "688826"
 
         sig = VWAPDetectorSignal(code=clean_code, name="复洁科技", price=11.6, vwap=10.8)
-        engine._evaluate_channel_secondary_buy_structure(clean_code, sig, df_day)
+        engine._evaluate_channel_secondary_buy_structure(
+            clean_code, sig, df_day, df_60m=df_day
+        )
 
         self.assertEqual(sig.channel_stage, SecondaryBuyStage.SECONDARY_BUY)
         self.assertEqual(sig.channel_stage_cn, "👑 次级买点")
@@ -236,6 +240,58 @@ class TestChannelSecondaryBuyUIAndEngine(unittest.TestCase):
         self.assertIn("11.45~11.65", it_reason.text())
         self.assertIn("TradePlan 不可变交易计划", it_reason.toolTip())
         self.assertIn("目标1(中轨): 13.50", it_reason.toolTip())
+
+    def test_05_batch_fetch_60m_uses_real_period_and_deduplicates(self):
+        calls = []
+
+        class FakeFetcher:
+            def fetch_kline_bars(self, code, category, count):
+                calls.append((code, category, count))
+                return pd.DataFrame({"close": [10.0], "vol": [100.0]})
+
+        result = batch_fetch_60m_kline_fast(
+            ["688826", "688826", "300058"], count=120, fetcher=FakeFetcher()
+        )
+        self.assertEqual(set(result), {"688826", "300058"})
+        self.assertEqual(calls, [
+            ("688826", "60m", 120),
+            ("300058", "60m", 120),
+        ])
+
+    def test_06_day_kline_is_not_used_as_60m_fallback(self):
+        engine = IPOVWAPDetectorEngine.get_instance()
+        day_df = self._build_secondary_buy_day_kline()
+        sig = VWAPDetectorSignal(code="688826", name="复洁科技", price=11.6, vwap=10.8)
+        engine._evaluate_channel_secondary_buy_structure("688826", sig, day_df)
+        self.assertEqual(sig.channel_stage, "")
+        self.assertIsNone(sig.trade_plan)
+
+    def test_07_worker_forwards_distinct_day_and_60m_frames(self):
+        worker = IPOScanWorker(["688826"])
+        day_df = pd.DataFrame({"close": [1.0]})
+        frame_60m = pd.DataFrame({"close": [2.0]})
+        captured = {}
+
+        class FakeEngine:
+            def analyze_stock(self, code, day_df=None, df_60m=None):
+                captured.update(code=code, day_df=day_df, df_60m=df_60m)
+                return VWAPDetectorSignal(code=code, name="测试")
+
+        worker.engine = FakeEngine()
+        worker._analyze_one("688826", day_df, frame_60m)
+        self.assertIs(captured["day_df"], day_df)
+        self.assertIs(captured["df_60m"], frame_60m)
+        self.assertIsNot(captured["day_df"], captured["df_60m"])
+
+    def test_08_real_60m_can_drive_stage_without_day_frame(self):
+        engine = IPOVWAPDetectorEngine.get_instance()
+        frame_60m = self._build_secondary_buy_day_kline()
+        sig = VWAPDetectorSignal(code="688826", name="复洁科技", price=11.6, vwap=10.8)
+        engine._evaluate_channel_secondary_buy_structure(
+            "688826", sig, None, df_60m=frame_60m
+        )
+        self.assertEqual(sig.channel_stage, SecondaryBuyStage.SECONDARY_BUY)
+        self.assertIsInstance(sig.trade_plan, IPOTradePlan)
 
 
 if __name__ == "__main__":

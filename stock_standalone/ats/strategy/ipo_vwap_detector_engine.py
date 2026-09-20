@@ -288,6 +288,31 @@ def batch_fetch_day_kline_fast(codes: List[str], dl: int = 60) -> Dict[str, pd.D
     return res_map
 
 
+def batch_fetch_60m_kline_fast(
+    codes: List[str],
+    count: int = 160,
+    fetcher: Optional[TDXRealtimeFetcher] = None,
+) -> Dict[str, pd.DataFrame]:
+    """Sequentially reuse the shared TDX cache to fetch genuine 60-minute bars."""
+    clean_codes = list(dict.fromkeys(
+        "".join(c for c in str(code) if c.isdigit()).zfill(6) for code in codes
+    ))
+    if not clean_codes:
+        return {}
+    shared_fetcher = fetcher or TDXRealtimeFetcher.get_instance()
+    result: Dict[str, pd.DataFrame] = {}
+    for clean_code in clean_codes:
+        try:
+            df_60m = shared_fetcher.fetch_kline_bars(
+                clean_code, category="60m", count=count
+            )
+            if df_60m is not None and not df_60m.empty:
+                result[clean_code] = df_60m.copy()
+        except Exception as exc:
+            logger.debug("获取标的 %s 真实60F异常: %s", clean_code, exc)
+    return result
+
+
 class IPOVWAPDetectorEngine:
     """新股次新股 VWAP 预判结构与异动检测引擎"""
     
@@ -338,7 +363,9 @@ class IPOVWAPDetectorEngine:
         cost_ms = (time.perf_counter() - t0) * 1000
         return df_multi, cost_ms
 
-    def analyze_stock(self, code: str, force_refresh: bool = False, day_df: Optional[pd.DataFrame] = None) -> VWAPDetectorSignal:
+    def analyze_stock(self, code: str, force_refresh: bool = False,
+                      day_df: Optional[pd.DataFrame] = None,
+                      df_60m: Optional[pd.DataFrame] = None) -> VWAPDetectorSignal:
         """
         全面分析一只标的的 10日 VWAP 结构、走平蓄势天数、回踩不碰特征及大趋势 K 线支撑
         """
@@ -346,7 +373,7 @@ class IPOVWAPDetectorEngine:
         clean_code = "".join(c for c in str(code) if c.isdigit()).zfill(6)
         now_ts = time.time()
         
-        if not force_refresh and clean_code in self._eval_cache and day_df is None:
+        if not force_refresh and clean_code in self._eval_cache and day_df is None and df_60m is None:
             cached_sig, cache_time = self._eval_cache[clean_code]
             if now_ts - cache_time < self._cache_ttl:
                 return cached_sig
@@ -391,7 +418,7 @@ class IPOVWAPDetectorEngine:
                     pass
                 
             # 2. 获取大趋势 K 线通道与支撑 (日K 与 2D K线，优先复用已有的 day_df，或使用 fastohlc 极速模式)
-            self._evaluate_kline_trend(clean_code, sig, day_df=day_df)
+            self._evaluate_kline_trend(clean_code, sig, day_df=day_df, df_60m=df_60m)
 
             # 3. 综合裁决预下单与异动信号 (操盘手核心逻辑)
             self._synthesize_final_decision(sig)
@@ -772,7 +799,9 @@ class IPOVWAPDetectorEngine:
                         sig.base_consolidation_bars = len(day_lows) * 240
                         sig.stop_loss_price = round(supp_anchor * 0.992, 2)
 
-    def _evaluate_kline_trend(self, code: str, sig: VWAPDetectorSignal, day_df: Optional[pd.DataFrame] = None):
+    def _evaluate_kline_trend(self, code: str, sig: VWAPDetectorSignal,
+                              day_df: Optional[pd.DataFrame] = None,
+                              df_60m: Optional[pd.DataFrame] = None):
         """
         评估大趋势 K 线 (日K/2D 通道支撑与启动信号):
         优先使用外部预取的 day_df 或通过 tdd fastohlc=True 极速读取本地通达信原始日线 (单股仅 8ms，跳过繁复指标与内存碎片)
@@ -858,19 +887,24 @@ class IPOVWAPDetectorEngine:
                 except Exception:
                     pass
 
-                # 长期通道底部结构次级买点评估 (688826/300058同款架构)
-                self._evaluate_channel_secondary_buy_structure(clean_code, sig, df_day)
+            # 真实 60F 独立驱动次级买点评估；日线缺失时仍可形成 60F 阶段结果。
+            self._evaluate_channel_secondary_buy_structure(
+                clean_code, sig, df_day, df_60m=df_60m
+            )
         except Exception as e:
             logger.debug(f"评估标的 {code} K线趋势异常: {e}")
 
-    def _evaluate_channel_secondary_buy_structure(self, clean_code: str, sig: VWAPDetectorSignal, df_day: Optional[pd.DataFrame]):
+    def _evaluate_channel_secondary_buy_structure(
+        self, clean_code: str, sig: VWAPDetectorSignal,
+        df_day: Optional[pd.DataFrame], df_60m: Optional[pd.DataFrame] = None,
+    ):
         """长期通道企稳与底部结构次级买点评估"""
-        if df_day is None or df_day.empty or len(df_day) < 15:
+        if df_60m is None or df_60m.empty or len(df_60m) < 15:
             return
         try:
             curr_quote = {"price": sig.price} if sig.price > 0 else None
             sec_eval = evaluate_channel_secondary_buy(
-                df_60m=df_day,
+                df_60m=df_60m,
                 df_day=df_day,
                 current_quote=curr_quote,
                 code=clean_code,
