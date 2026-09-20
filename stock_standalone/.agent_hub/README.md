@@ -51,6 +51,20 @@ python tools/agent_hub.py review 001 --decision rework --reviewer codex --summar
 3. 每个任务必须附测试命令、测试结果、变更摘要和已知风险。
 4. 未经人工批准，不允许自动合并、自动发布或自动实盘下单。
 5. `trade_gateway.py`、券商接口、密钥配置和真实下单开关默认属于禁止范围。
+6. GPT/Codex负责总体架构、任务拆解、代码审查、测试闸门和版本决策；Antigravity负责按任务实施或独立审计并提交证据，双方不得互相冒充验收角色。
+7. 业务节点必须完成“Antigravity Worker交付 -> 自动测试与范围检查 -> Codex审查 -> 中文版本报告与Git提交”的闭环后，才能标记为完成。
+8. Codex直接实现的业务代码必须标记为“待Antigravity独立复核”，不能仅凭Codex自测宣称双Agent验收通过。
+
+## Worker异常处理
+
+Antigravity发生连接、代理、认证、权限、CLI参数、沙箱或配置异常时，必须按以下顺序处理：
+
+1. 保留任务状态、CLI原始日志和失败类型，不归档、不跳过。
+2. 修复Clash路由、OAuth登录、非交互权限、CLI配置或Orchestrator适配问题。
+3. 依次运行 `preflight --require-auth`、最小只回复回声测试和原任务预演。
+4. 恢复后继续执行原任务，再进入测试闸门和Codex审查。
+
+短暂故障不允许改成Codex单Agent长期代做。只有CLI或服务明确返回配额耗尽、速率限额或账户额度不可用，并保存错误日志作为证据时，任务才可标记为“限额阻塞”；额度恢复后继续原闭环。限额期间Codex可继续设计、拆解、审查和准备测试，但任何直接业务实现仍须补做Antigravity独立复核。
 
 ## Antigravity 接入
 
@@ -90,6 +104,7 @@ python tools/agent_orchestrator.py run --task 001 --execute
 - 用户已批准研发流水线连续推进至 `MEDIUM` 风险；`HIGH`、真实下单、密钥、自动合并和实盘开关仍禁止自动执行。
 - 不自动归档，不自动合并，不自动实盘。
 - Worker 失败时任务保留在 `running/` 等待诊断，不继续下一任务。
+- Worker因连接、代理、认证、权限或CLI故障失败时，先修复Antigravity执行能力并重试原任务；除有日志证明的限额耗尽外，不得跳过Worker闭环。
 - 测试或越界检查失败时强制 `REWORK`。
 
 配置位于 `orchestrator.json`。Worker 使用已验证的 `gemini-3.8-flash-high`，并仅为 Antigravity 子进程注入 Clash `127.0.0.1:7897`；ATS、TDX 和其他交易进程不受影响。Codex 继续负责最终只读审查。
