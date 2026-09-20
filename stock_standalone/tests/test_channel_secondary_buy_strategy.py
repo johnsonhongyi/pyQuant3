@@ -217,6 +217,282 @@ class TestIPOTradingCenterTradePlanIntegration(unittest.TestCase):
         self.assertEqual(pos.status, "CLOSED")
         self.assertEqual(pos.realized_pnl_pct, 5.0)
 
+    def test_09_secondary_buy_decision_scout_and_confirm_orders(self):
+        """测试 09: 次级买点 S4 生成 BUY_SCOUT 试探仓指令，S5 生成 BUY_CONFIRM 确认仓指令，且仓位受控不得满仓"""
+        # 1. 构造 S4 信号与标准不可变 TradePlan
+        plan_s4 = IPOTradePlan(
+            plan_id="TP_688826_S4",
+            code="688826",
+            name="实战标的",
+            strategy_tag=TAG_CHANNEL_SECONDARY_BUY,
+            signal_level="S4",
+            quality_grade="SS",
+            trigger_price=80.0,
+            buy_zone_min=79.0,
+            buy_zone_max=81.0,
+            higher_low_stop=77.5,
+            base_low_invalid=75.0,
+            position_pct=25.0,
+            suggested_action="BUY_SCOUT"
+        )
+        sig_s4 = VWAPDetectorSignal(
+            code="688826",
+            name="实战标的",
+            price=80.0,
+            vwap=79.5,
+            is_above_vwap=True,
+            signal_type="SECONDARY_BUY",
+            channel_stage=SecondaryBuyStage.SECONDARY_BUY,
+            quality_grade="SS",
+            signal_level="S4",
+            trade_plan=plan_s4
+        )
+
+        self.center.submit_stock_perception_report(sig_s4)
+        directives_s4 = self.center.evaluate_fleet_and_generate_orders()
+
+        # 校验生成的买入指令
+        buy_dirs_s4 = [d for d in directives_s4 if d.code == "688826" and d.action in ("BUY_SCOUT", "BUY_CONFIRM", "BUY")]
+        self.assertEqual(len(buy_dirs_s4), 1)
+        dir_s4 = buy_dirs_s4[0]
+        self.assertEqual(dir_s4.action, "BUY_SCOUT")
+        self.assertEqual(dir_s4.signal_level, "S4")
+        self.assertEqual(dir_s4.quality_grade, "SS")
+        self.assertEqual(dir_s4.strategy_tag, TAG_CHANNEL_SECONDARY_BUY)
+        self.assertIs(dir_s4.trade_plan, plan_s4)
+        self.assertEqual(dir_s4.size_pct, 25.0)  # 受 TradePlan 约束
+        self.assertGreater(dir_s4.shares, 0)
+
+        # 2. 构造 S5 信号，校验生成 BUY_CONFIRM 且仓位受限不直接满仓
+        self.center._positions.clear()
+        self.center._reports_cache.clear()
+        self.center._emitted_plan_ids.clear()
+        self.center.set_trading_mode("ROTATION_FULL_CAPITAL")  # 即使在全仓轮动模式下
+
+        plan_s5 = IPOTradePlan(
+            plan_id="TP_300058_S5",
+            code="300058",
+            name="确认标的",
+            strategy_tag=TAG_CHANNEL_SECONDARY_BUY,
+            signal_level="S5",
+            quality_grade="S",
+            trigger_price=30.0,
+            buy_zone_min=29.5,
+            buy_zone_max=30.5,
+            higher_low_stop=28.8,
+            base_low_invalid=27.5,
+            position_pct=30.0,
+            suggested_action="BUY_CONFIRM"
+        )
+        sig_s5 = VWAPDetectorSignal(
+            code="300058",
+            name="确认标的",
+            price=30.0,
+            vwap=30.2,
+            is_above_vwap=False,
+            signal_type="SECONDARY_BUY",
+            channel_stage=SecondaryBuyStage.SECONDARY_BUY,
+            quality_grade="S",
+            signal_level="S5",
+            trade_plan=plan_s5
+        )
+
+        self.center.submit_stock_perception_report(sig_s5)
+        directives_s5 = self.center.evaluate_fleet_and_generate_orders()
+
+        buy_dirs_s5 = [d for d in directives_s5 if d.code == "300058"]
+        self.assertEqual(len(buy_dirs_s5), 1)
+        dir_s5 = buy_dirs_s5[0]
+        self.assertEqual(dir_s5.action, "BUY_CONFIRM")
+        self.assertEqual(dir_s5.signal_level, "S5")
+        self.assertLessEqual(dir_s5.size_pct, 35.0)  # 严格受控，绝不给 100% 满仓！
+        self.assertIs(dir_s5.trade_plan, plan_s5)
+
+    def test_10_secondary_buy_rejection_conditions(self):
+        """测试 10: 超过 buy_zone_max、缺失 TradePlan、低于 S4 时明确拒绝生成指令"""
+        # 条件 A: 现价 82.5 超过买入区上沿 buy_zone_max 81.0 -> 拒绝开仓追高
+        plan_over = IPOTradePlan(
+            plan_id="TP_OVER",
+            code="688826",
+            name="超买标的",
+            strategy_tag=TAG_CHANNEL_SECONDARY_BUY,
+            signal_level="S4",
+            trigger_price=80.0,
+            buy_zone_min=79.0,
+            buy_zone_max=81.0,
+            higher_low_stop=77.5,
+            base_low_invalid=75.0
+        )
+        sig_over = VWAPDetectorSignal(
+            code="688826",
+            name="超买标的",
+            price=82.5,  # 82.5 > 81.0 超过买入上限
+            vwap=80.0,
+            signal_type="SECONDARY_BUY",
+            channel_stage=SecondaryBuyStage.SECONDARY_BUY,
+            trade_plan=plan_over
+        )
+        self.center.submit_stock_perception_report(sig_over)
+        dirs_over = self.center.evaluate_fleet_and_generate_orders()
+        buy_over = [d for d in dirs_over if d.code == "688826" and d.action in ("BUY", "BUY_SCOUT", "BUY_CONFIRM")]
+        self.assertEqual(len(buy_over), 0)
+
+        # 条件 B: 缺失 TradePlan (trade_plan is None) -> 拒绝
+        self.center._reports_cache.clear()
+        sig_noplan = VWAPDetectorSignal(
+            code="688827",
+            name="无计划标的",
+            price=50.0,
+            vwap=50.0,
+            signal_type="SECONDARY_BUY",
+            channel_stage=SecondaryBuyStage.SECONDARY_BUY,
+            trade_plan=None  # 缺失 TradePlan
+        )
+        self.center.submit_stock_perception_report(sig_noplan)
+        dirs_noplan = self.center.evaluate_fleet_and_generate_orders()
+        buy_noplan = [d for d in dirs_noplan if d.code == "688827" and d.action in ("BUY", "BUY_SCOUT", "BUY_CONFIRM")]
+        self.assertEqual(len(buy_noplan), 0)
+
+        # 条件 C: 等级低于 S4 (如 S3/S2/S0) -> 拒绝
+        self.center._reports_cache.clear()
+        plan_s3 = IPOTradePlan(
+            plan_id="TP_S3",
+            code="688828",
+            name="回踩中标的",
+            strategy_tag=TAG_CHANNEL_SECONDARY_BUY,
+            signal_level="S3",  # 低于 S4 门槛
+            trigger_price=40.0,
+            buy_zone_min=39.0,
+            buy_zone_max=41.0,
+            higher_low_stop=38.0
+        )
+        sig_s3 = VWAPDetectorSignal(
+            code="688828",
+            name="回踩中标的",
+            price=40.0,
+            vwap=40.0,
+            signal_type="SECONDARY_BUY",
+            channel_stage=SecondaryBuyStage.SECONDARY_BUY,
+            signal_level="S3",
+            trade_plan=plan_s3
+        )
+        self.center.submit_stock_perception_report(sig_s3)
+        dirs_s3 = self.center.evaluate_fleet_and_generate_orders()
+        buy_s3 = [d for d in dirs_s3 if d.code == "688828" and d.action in ("BUY", "BUY_SCOUT", "BUY_CONFIRM")]
+        self.assertEqual(len(buy_s3), 0)
+
+    def test_11_secondary_buy_not_misjudged_as_follower_or_stop_loss(self):
+        """测试 11: 全局仲裁独立战术角色，不被普通 FOLLOWER 或 VWAP 破位分支误杀"""
+        self.center._reports_cache.clear()
+        # 1. 现价在 VWAP 下方较多 (-2.5%) 的次级买点标的，止损位仍安全守在 higher_low_stop 之上
+        plan_deep = IPOTradePlan(
+            plan_id="TP_DEEP",
+            code="688826",
+            name="底抬高标的",
+            strategy_tag=TAG_CHANNEL_SECONDARY_BUY,
+            signal_level="S4",
+            quality_grade="S",
+            trigger_price=78.0,
+            buy_zone_min=77.0,
+            buy_zone_max=79.0,
+            higher_low_stop=75.5,
+            base_low_invalid=73.0,
+            position_pct=20.0
+        )
+        sig_deep = VWAPDetectorSignal(
+            code="688826",
+            name="底抬高标的",
+            price=78.0,
+            vwap=80.0,
+            vwap_diff_pct=-2.5,  # 偏离 VWAP -2.5% (若按普通分支会被当成 STOP_LOSS 误杀)
+            is_above_vwap=False,
+            signal_type="SECONDARY_BUY",
+            channel_stage=SecondaryBuyStage.SECONDARY_BUY,
+            quality_grade="S",
+            signal_level="S4",
+            stop_loss_price=75.5,
+            trade_plan=plan_deep
+        )
+
+        # 2. 同时池中存在更强的领头羊 (动能 95 分) 和梯队前锋，使次级买点排名在第 4 名之后
+        sig_leader = VWAPDetectorSignal(
+            code="600001", name="大龙头", price=10.0, vwap=9.8,
+            is_above_vwap=True, horse_race_score=95.0, horse_race_rank=1,
+            signal_type="IPO_FIRST_BUY", is_ipo_first_day=True, launch_time_str="09:31"
+        )
+        sig_vanguard1 = VWAPDetectorSignal(
+            code="600002", name="前锋一", price=15.0, vwap=14.5,
+            is_above_vwap=True, horse_race_score=85.0, horse_race_rank=2
+        )
+        sig_vanguard2 = VWAPDetectorSignal(
+            code="600003", name="前锋二", price=20.0, vwap=19.5,
+            is_above_vwap=True, horse_race_score=80.0, horse_race_rank=3
+        )
+        sig_deep.horse_race_score = 75.0
+        sig_deep.horse_race_rank = 4
+
+        self.center.submit_stock_perception_report(sig_leader)
+        self.center.submit_stock_perception_report(sig_vanguard1)
+        self.center.submit_stock_perception_report(sig_vanguard2)
+        self.center.submit_stock_perception_report(sig_deep)
+
+        directives = self.center.evaluate_fleet_and_generate_orders()
+
+        # 核心断言 1: 全局仲裁确认为 SECONDARY_BUY 独立角色，绝不被判为 STOP_LOSS 或 FOLLOWER
+        self.assertEqual(sig_deep.global_fleet_role, "SECONDARY_BUY")
+        self.assertIn("次级买点", sig_deep.global_arbitration_desc)
+        self.assertNotIn("买错立斩", sig_deep.global_arbitration_desc)
+        self.assertNotIn("山外有山·观望", sig_deep.global_arbitration_desc)
+
+        # 核心断言 2: 虽然排名第 4 且在 VWAP 之下，但次级买点独立战术角色允许生成受控买入指令
+        sec_dirs = [d for d in directives if d.code == "688826" and d.action == "BUY_SCOUT"]
+        self.assertEqual(len(sec_dirs), 1)
+
+    def test_12_secondary_buy_idempotent_refresh_loop(self):
+        """测试 12: 刷新循环幂等守卫，同一 plan_id 不重复生成买入指令"""
+        self.center._reports_cache.clear()
+        self.center._emitted_plan_ids.clear()
+
+        plan = IPOTradePlan(
+            plan_id="TP_IDEMPOTENT_001",
+            code="688826",
+            name="幂等标的",
+            strategy_tag=TAG_CHANNEL_SECONDARY_BUY,
+            signal_level="S4",
+            quality_grade="SS",
+            trigger_price=50.0,
+            buy_zone_min=49.0,
+            buy_zone_max=51.0,
+            higher_low_stop=47.5,
+            base_low_invalid=45.0,
+            position_pct=20.0
+        )
+        sig = VWAPDetectorSignal(
+            code="688826",
+            name="幂等标的",
+            price=50.0,
+            vwap=49.8,
+            is_above_vwap=True,
+            signal_type="SECONDARY_BUY",
+            channel_stage=SecondaryBuyStage.SECONDARY_BUY,
+            quality_grade="SS",
+            signal_level="S4",
+            trade_plan=plan
+        )
+
+        self.center.submit_stock_perception_report(sig)
+
+        # 第一次评估：生成买入指令
+        dirs_1 = self.center.evaluate_fleet_and_generate_orders()
+        buy_1 = [d for d in dirs_1 if d.code == "688826" and d.action == "BUY_SCOUT"]
+        self.assertEqual(len(buy_1), 1)
+        self.assertIn("TP_IDEMPOTENT_001", self.center._emitted_plan_ids)
+
+        # 第二次刷新循环评估 (同一 plan_id 未改变)：不得重复生成新的买入指令
+        dirs_2 = self.center.evaluate_fleet_and_generate_orders()
+        buy_2 = [d for d in dirs_2 if d.code == "688826" and d.action == "BUY_SCOUT"]
+        self.assertEqual(len(buy_2), 0)
+
 
 class TestProactiveExitLinkage(unittest.TestCase):
     """ProactiveExitEngine 挂接 TradePlan 结构防守联动测试"""

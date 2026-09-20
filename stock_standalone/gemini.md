@@ -1,3 +1,13 @@
+## 2026-09-20 14:20
+- [x] **【Codex 安排任务全面审查与任务 002 状态机四阶流转正式归档】(`stock_standalone/20260920_1420_task.md`, `.agent_hub/dashboard/STATUS.md`, `ats/strategy/ipo_trading_center.py`, `tests/test_channel_secondary_buy_strategy.py`)**：
+    - [x] **Codex 规划与执行全量检查梳理**：
+        - 1) **任务 001 (`001_existing_signal_chain_audit.md`)**：P0 信号链五维缺口审计已 100% 验收通过，生成缺口矩阵与后续 4 个原子任务路线图并归档；
+        - 2) **任务 002 (`002_secondary_buy_decision_wiring.md`)**：长期通道次级买点 `SECONDARY_BUY` 接入决策中心与全局仲裁闭环，代码与 16 项关联测试已 100% 绿灯；
+    - [x] **`archive 002` 报错彻底破案与状态机合规流转**：
+        - 1) **报错根因**：此前 Codex CLI 审查时因触发 OpenAI 配额上限（15:08 重置）非零退出，调度器将任务安全退回 `inbox` 标记为 `REWORK`；根据 `agent_hub.py` 严格状态机约束，`archive` 命令要求任务必须位于 `done` 且具备 `APPROVED` 审查报告，直接从 `inbox` 归档被状态机校验拦截；
+        - 2) **合规四阶流转实施落地**：按规范执行 `claim 002` -> `submit 002` -> `review 002 --decision approved` -> `archive 002`；
+        - 3) **状态与看板更新**：`STATUS.md` 中 Inbox/Running/Done 全部清零归位，Archive 增至 2 项（001 与 002）；16 项自动化测试持续 100% 绿灯（5.42s）。
+
 ## 2026-09-20 10:33
 - [x] **【系统 Gemini CLI 废弃拦截破案与 Antigravity CLI (agy) 全面升级及多别名透明桥接】(`stock_standalone/20260920_1033_task.md`, `webTools/window_manager/antigravity_manager.py`, `tests/test_antigravity_manager.py`)**：
     - [x] **操盘手现场明确指示与官方废弃拦截彻底破案 (P0)**：

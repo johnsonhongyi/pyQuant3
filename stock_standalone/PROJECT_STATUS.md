@@ -6,6 +6,7 @@
 ---
 
 ## Completed Work
+- [x] 完成任务 `002`：长期通道次级买点 `SECONDARY_BUY` 接通 `IPOTradingCenter` 买入指令（S4 生成 `BUY_SCOUT`，S5 生成确认仓）与全局仲裁闭环，16 项关联测试 100% 绿灯，经人工核验批准归档。
 - [x] 完成任务 `001` 全自动真实演练：Gemini Worker、12 项关联测试、范围检查、Codex 复审全部通过并归档。
 - [x] 为 Antigravity Worker 独立注入 Clash 代理，保持 ATS/TDX 网络路径不受影响。
 - [x] 部署方式 C/C1 全自动编排器，接入 Antigravity worker、Codex 主脑审查、测试白名单、文件越界检查、认证探针和 merge report。
@@ -55,6 +56,7 @@
 - Antigravity 是否支持原生目录监控尚未确认；当前采用固定提示加 CLI 领取，后续仅在确认其 CLI/API 后增加 adapter。
 - 已确认本机 `agy.exe 1.2.3` 与 `codex.exe` CLI；Codex 沙箱内无法访问 Antigravity 用户登录态，真实执行需从正常桌面终端启动。
 - 用户已明确授权仅对 `Risk: LOW` 任务启用 Antigravity 全工具自动批准；sandbox、范围检查、测试闸门、自动合并关闭和实盘关闭继续强制执行。
+- 用户已进一步授权计划内 `LOW/MEDIUM` 研发任务连续自动推进；`HIGH` 与真实交易权限仍需单独批准。
 - 本机 pytest 默认临时目录可能指向失效的 `G:\Temp`，Agent Hub 测试使用 `--basetemp=.pytest_temp\...`。
 - Avoid raising unhandled exceptions in data reload/refresh pump threads; maintain fallback values or short-circuits.
 - Treeview updates require iid mapping to preserve selection correctly across resets.
@@ -62,4 +64,4 @@
 ---
 
 ## Next Step (ONLY ONE)
-1. 审批并执行 `MEDIUM` 风险任务 `002`，接通 `SECONDARY_BUY` 决策指令与全局仲裁闭环。
+1. 准备并下发 P0 任务 `003`：风控防守引擎与交易中心全面接线（接入 `ProactiveExitEngine` 与 A 股 T+1 防守硬锁）。
