@@ -350,6 +350,48 @@ class IPOTradingCenter:
         with self._lock:
             return list(self._signal_iteration_log)
 
+    def get_closed_trade_reviews(self) -> List[Dict[str, Any]]:
+        """Return stable TradePlan-versus-execution metrics for offline review."""
+        reviews: List[Dict[str, Any]] = []
+        with self._lock:
+            closed_items = list(self._closed_positions)
+        for item in closed_items:
+            value = item.get if isinstance(item, dict) else lambda key, default=None: getattr(item, key, default)
+            raw_plan = value("trade_plan")
+            plan_get = (
+                raw_plan.get if isinstance(raw_plan, dict)
+                else (lambda key, default=None: getattr(raw_plan, key, default))
+                if raw_plan is not None else lambda key, default=None: default
+            )
+            entry = float(value("cost_price", 0.0) or 0.0)
+            exit_price = float(value("exit_price", 0.0) or 0.0)
+            stop = float(plan_get("higher_low_stop", 0.0) or 0.0)
+            target_1 = float(plan_get("target_1_channel_mid", 0.0) or 0.0)
+            actual_pct = float(value("realized_pnl_pct", 0.0) or 0.0)
+            planned_risk_pct = ((entry - stop) / entry * 100.0) if entry > 0 and stop > 0 else 0.0
+            planned_reward_pct = ((target_1 - entry) / entry * 100.0) if entry > 0 and target_1 > 0 else 0.0
+            reviews.append({
+                "code": value("code", ""),
+                "name": value("name", ""),
+                "plan_id": plan_get("plan_id", ""),
+                "strategy_tag": plan_get("strategy_tag", value("strategy_tag", "")),
+                "signal_level": plan_get("signal_level", value("signal_level", "")),
+                "quality_grade": plan_get("quality_grade", value("quality_grade", "")),
+                "entry_price": entry,
+                "exit_price": exit_price,
+                "planned_stop": stop,
+                "planned_target_1": target_1,
+                "planned_risk_pct": round(planned_risk_pct, 3),
+                "planned_reward_pct": round(planned_reward_pct, 3),
+                "planned_reward_risk": round(planned_reward_pct / planned_risk_pct, 3) if planned_risk_pct > 0 else 0.0,
+                "actual_return_pct": actual_pct,
+                "target_1_deviation_pct": round(actual_pct - planned_reward_pct, 3),
+                "exit_rule_id": value("exit_rule_id", ""),
+                "exit_rule_layer": int(value("exit_rule_layer", 0) or 0),
+                "exit_reason": value("exit_reason", ""),
+            })
+        return reviews
+
     def _load_persisted_ledger(self):
         """【💾 持久化账本加载】冷启动瞬间恢复历史持仓、平仓记录、指令历史与信号迭代日志"""
         target_file = getattr(self, "_ledger_file", None)
