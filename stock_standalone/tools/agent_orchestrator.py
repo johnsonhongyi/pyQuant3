@@ -46,6 +46,29 @@ class RunReport:
 
 class AgentOrchestrator:
     RISK_RANK = {"LOW": 1, "MEDIUM": 2, "HIGH": 3}
+    WORKER_REPORT_SCHEMA = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["task_id", "status", "diff_files", "test_result", "risk_points", "summary"],
+        "properties": {
+            "task_id": {"type": "string"},
+            "status": {"enum": ["SUCCESS", "PARTIAL", "FAIL", "BLOCKED"]},
+            "diff_files": {"type": "array", "items": {"type": "string"}},
+            "test_result": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["lint", "typecheck", "unit_tests", "failed_cases"],
+                "properties": {
+                    "lint": {"enum": ["pass", "fail", "not_applicable"]},
+                    "typecheck": {"enum": ["pass", "fail", "not_applicable"]},
+                    "unit_tests": {"enum": ["pass", "fail", "not_applicable"]},
+                    "failed_cases": {"type": "array", "items": {"type": "string"}},
+                },
+            },
+            "risk_points": {"type": "array", "items": {"type": "string"}},
+            "summary": {"type": "string", "maxLength": 200},
+        },
+    }
     DEFAULT_PERMISSION_PROFILES = {
         "P0_READONLY": {"worker_mode": "plan", "auto_approve": False},
         "P1_DOCS_SAFE": {"worker_mode": "accept-edits", "auto_approve": True},
@@ -226,8 +249,48 @@ class AgentOrchestrator:
             "Implement only this task and write its Output Contract artifacts. "
             "Do not use RunCommand, terminal, shell, or process tools; the orchestrator runs all "
             "verification commands after you finish. Use built-in file search/read/edit tools only.\n\n"
+            "Return exactly one compact JSON object matching the required report schema. Do not "
+            "echo this prompt, the task, file contents, diffs, reasoning, or logs.\n\n"
             f"{task}"
         )
+
+    def _validate_worker_report(self, stdout: str) -> str:
+        max_stdout = int(self.config.get("worker_stdout_max_chars", 4000))
+        if len(stdout) > max_stdout:
+            raise OrchestratorError(
+                f"Antigravity report exceeds {max_stdout} characters; verbose output is rejected"
+            )
+        try:
+            report = json.loads(stdout)
+        except json.JSONDecodeError as exc:
+            raise OrchestratorError("Antigravity stdout must contain only one JSON object") from exc
+        # Antigravity `--output-format json` wraps the schema-constrained answer
+        # with conversation, usage, echoed schema and a duplicate response. Only
+        # the validated `structured_output` is allowed past this boundary.
+        if isinstance(report, dict) and "structured_output" in report:
+            report = report["structured_output"]
+        required = set(self.WORKER_REPORT_SCHEMA["required"])
+        if not isinstance(report, dict) or set(report) != required:
+            raise OrchestratorError("Antigravity report fields do not match the compact contract")
+        if report["status"] not in {"SUCCESS", "PARTIAL", "FAIL", "BLOCKED"}:
+            raise OrchestratorError("Antigravity report has an invalid status")
+        test_result = report["test_result"]
+        required_tests = {"lint", "typecheck", "unit_tests", "failed_cases"}
+        if not isinstance(test_result, dict) or set(test_result) != required_tests:
+            raise OrchestratorError("Antigravity test_result fields do not match the compact contract")
+        outcomes = {"pass", "fail", "not_applicable"}
+        if any(test_result[key] not in outcomes for key in ("lint", "typecheck", "unit_tests")):
+            raise OrchestratorError("Antigravity report has an invalid test outcome")
+        if not all(isinstance(report[key], list) for key in ("diff_files", "risk_points")):
+            raise OrchestratorError("Antigravity report path and risk fields must be arrays")
+        if not isinstance(test_result["failed_cases"], list):
+            raise OrchestratorError("Antigravity failed_cases must be an array")
+        max_summary = int(self.config.get("worker_summary_max_chars", 200))
+        if not isinstance(report["summary"], str) or len(report["summary"]) > max_summary:
+            raise OrchestratorError(
+                f"Antigravity summary exceeds {max_summary} Unicode characters"
+            )
+        return json.dumps(report, ensure_ascii=False, separators=(",", ":"))
 
     @staticmethod
     def _task_risk(task_text: str) -> str:
@@ -347,10 +410,12 @@ class AgentOrchestrator:
             safe_model = re.sub(r"[^a-zA-Z0-9_.-]+", "_", model or "default")
             args = [
                 self.config["antigravity_executable"],
-                "--print",
-                prompt,
+                f"--print={prompt}",
                 "--output-format",
                 "json",
+                "--json-schema",
+                json.dumps(self.WORKER_REPORT_SCHEMA, ensure_ascii=False, separators=(",", ":")),
+                "--disable-slash-commands",
                 "--mode",
                 worker_mode,
                 "--sandbox",
@@ -396,7 +461,15 @@ class AgentOrchestrator:
                 )
                 result = retry
             if result.returncode == 0:
-                return result
+                try:
+                    compact = self._validate_worker_report(result.stdout.strip())
+                except OrchestratorError as exc:
+                    result = subprocess.CompletedProcess(
+                        result.args, 2, "", f"Compact report rejected: {exc}"
+                    )
+                    attempts[-1] = result
+                else:
+                    return subprocess.CompletedProcess(result.args, 0, compact, result.stderr)
         last = attempts[-1]
         combined_error = "\n\n".join(
             f"Attempt {index} ({models[min(index - 1, len(models) - 1)] or 'default'}):\n{item.stderr}"

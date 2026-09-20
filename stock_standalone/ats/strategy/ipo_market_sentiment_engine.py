@@ -23,8 +23,8 @@ import math
 import logging
 import hashlib
 import json
-from datetime import datetime
-from typing import Dict, List, Optional, Any, Tuple
+from datetime import datetime, timedelta
+from typing import Dict, List, Optional, Any, Tuple, Union
 from dataclasses import asdict, dataclass, field
 
 from ats.tdx_realtime_fetcher import TDXRealtimeFetcher
@@ -104,18 +104,50 @@ class IPOMarketSentimentEngine:
         self._cached_snapshot: Optional[MarketSentimentSnapshot] = None
         self._last_calc_ts: float = 0.0
         self.tide_machine = SubnewTideStateMachine()
+        self._last_tide_dt: Optional[datetime] = None
         self._last_tide_ts: float = 0.0
         self._cache_ttl: float = 3.0  # 3 秒内存缓存
 
-    def get_market_sentiment(self, ipo_signals: Optional[List[Any]] = None, force_refresh: bool = False) -> MarketSentimentSnapshot:
-        """获取最新市场情绪感知快照 (带 3s 内存防抖缓存)"""
-        now_ts = time.time()
-        if not force_refresh and self._cached_snapshot is not None:
+    def reset(self) -> None:
+        """重置引擎状态（用于测试隔离或历史回测重置）"""
+        self._cached_snapshot = None
+        self._last_calc_ts = 0.0
+        self._last_tide_dt = None
+        self._last_tide_ts = 0.0
+        self.tide_machine.reset()
+
+    def get_market_sentiment(
+        self,
+        ipo_signals: Optional[List[Any]] = None,
+        force_refresh: bool = False,
+        current_time: Optional[Union[float, str, datetime]] = None,
+        as_of: Optional[Union[float, str, datetime]] = None,
+    ) -> MarketSentimentSnapshot:
+        """获取最新市场情绪感知快照 (带 3s 内存防抖缓存，支持显式回放时点)"""
+        is_explicit = as_of is not None
+        req_time = as_of if as_of is not None else current_time
+        if req_time is None:
+            now_ts = time.time()
+            now_dt = datetime.fromtimestamp(now_ts)
+        elif isinstance(req_time, datetime):
+            now_dt = req_time
+            now_ts = now_dt.timestamp()
+        elif isinstance(req_time, (int, float)):
+            now_ts = float(req_time)
+            now_dt = datetime.fromtimestamp(now_ts)
+        elif isinstance(req_time, str):
+            now_dt = datetime.fromisoformat(req_time)
+            now_ts = now_dt.timestamp()
+        else:
+            now_ts = time.time()
+            now_dt = datetime.fromtimestamp(now_ts)
+
+        if not force_refresh and self._cached_snapshot is not None and req_time is None:
             if now_ts - self._last_calc_ts < self._cache_ttl:
                 return self._cached_snapshot
 
         snap = MarketSentimentSnapshot(
-            update_time=time.strftime("%H:%M:%S"),
+            update_time=now_dt.strftime("%H:%M:%S"),
             generated_at=now_ts,
         )
 
@@ -124,7 +156,7 @@ class IPOMarketSentimentEngine:
 
         # 2. 评估新股次新梯队热度
         self._evaluate_ipo_ladder_heat(snap, ipo_signals)
-        self._evaluate_tide_context(snap, ipo_signals, now_ts)
+        self._evaluate_tide_context(snap, ipo_signals, now_dt, is_explicit=is_explicit)
 
         # 3. 综合生成战略执行指引
         self._synthesize_strategy_guide(snap)
@@ -135,16 +167,67 @@ class IPOMarketSentimentEngine:
         self._last_calc_ts = now_ts
         return snap
 
-    def _evaluate_tide_context(self, snap, ipo_signals, now_ts: float) -> None:
+    def _evaluate_tide_context(
+        self,
+        snap: MarketSentimentSnapshot,
+        ipo_signals: Optional[List[Any]],
+        now_dt: datetime,
+        is_explicit: bool = False,
+    ) -> None:
         signals = list(ipo_signals or [])
-        monotonic_tide_ts = max(float(now_ts), self._last_tide_ts + 0.000001)
-        self._last_tide_ts = monotonic_tide_ts
+        last_machine_ts = getattr(self.tide_machine, "_last_timestamp", None)
+        baseline_dt = last_machine_ts if last_machine_ts is not None else self._last_tide_dt
+
+        if is_explicit:
+            # ── 显式历史回放模式 ──
+            # 严格保留显式时点，不推进至未来，不读取未来数据
+            if baseline_dt is not None and now_dt < baseline_dt:
+                # 显式回溯历史时点：状态机重置至初始状态，从该历史时点干净计算
+                self.tide_machine.reset()
+                self._last_tide_dt = None
+                self._last_tide_ts = 0.0
+                baseline_dt = None
+            elif baseline_dt is not None and now_dt == baseline_dt:
+                # 显式历史时点严格保持，绝不改写至未来（不得推进1微秒，不读取未来数据）
+                if self.tide_machine._previous_decision is not None:
+                    self._apply_tide_decision(snap, self.tide_machine._previous_decision)
+                    self._last_tide_dt = now_dt
+                    self._last_tide_ts = now_dt.timestamp()
+                    return
+                # 极端边缘情况：尚无先前决议但存在 baseline_dt，重置状态机以该历史时点干净计算
+                self.tide_machine.reset()
+                self._last_tide_dt = None
+                self._last_tide_ts = 0.0
+                baseline_dt = None
+        else:
+            # ── 实时高频监控与时钟回退模式 ──
+            if baseline_dt is not None and now_dt <= baseline_dt:
+                candidate = baseline_dt + timedelta(microseconds=1)
+                # 午夜边界守卫：不得跨交易日推进，防止生成虚假交易日与纠错通胀
+                if candidate.date() != baseline_dt.date() and now_dt.date() <= baseline_dt.date():
+                    if self.tide_machine._previous_decision is not None:
+                        self._apply_tide_decision(snap, self.tide_machine._previous_decision)
+                        return
+                elif now_dt.date() < baseline_dt.date():
+                    # 真实时钟倒退跨日：重置状态机
+                    self.tide_machine.reset()
+                    self._last_tide_dt = None
+                    self._last_tide_ts = 0.0
+                    baseline_dt = None
+                else:
+                    now_dt = candidate
+
+        self._last_tide_dt = now_dt
+        self._last_tide_ts = now_dt.timestamp()
         observation = build_tide_observation(
             signals,
-            observed_at=datetime.fromtimestamp(monotonic_tide_ts).isoformat(sep=" ", timespec="microseconds"),
+            observed_at=now_dt.isoformat(sep=" ", timespec="microseconds"),
             expected_count=max(10, len(signals)),
         )
         decision = self.tide_machine.update(observation)
+        self._apply_tide_decision(snap, decision)
+
+    def _apply_tide_decision(self, snap: MarketSentimentSnapshot, decision: Any) -> None:
         snap.tide_state = decision.state
         snap.tide_confidence = decision.confidence
         snap.tide_position_cap_pct = decision.position_cap_pct

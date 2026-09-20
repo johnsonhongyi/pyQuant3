@@ -1,10 +1,11 @@
 # Agent Hub Status
 
-Updated: 2026-09-20T08:33:41.980071+00:00
+Updated: 2026-09-20T15:12:29.813551+00:00
 
-## Inbox (0)
+## Inbox (2)
 
-- None
+- `007_tide_controller_independent_audit.md`: Task
+- `008_tide_cap_and_clock_guard_hardening.md`: Task
 
 ## Running (0)
 

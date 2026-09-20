@@ -355,6 +355,82 @@ class TestIPOVWAPSentimentAndHorseRace(unittest.TestCase):
             self.assertEqual(summary["holding_count"], 1)
             self.assertIn("沈鼓集团", summary["top_leader_name"])
 
+    def test_continuous_force_refresh_no_crash_and_no_revision_inflation(self):
+        """【回归测试】连续强制刷新不抛异常且不增加虚假交易日/纠错次数"""
+        mock_signals = [
+            VWAPDetectorSignal(code="601091", name="沈鼓集团", price=57.77, change_pct=177.0, vwap=19.64, is_above_vwap=True),
+            VWAPDetectorSignal(code="920298", name="腾信精密", price=90.48, change_pct=40.7, vwap=67.35, is_above_vwap=True),
+            VWAPDetectorSignal(code="688837", name="信诺维", price=55.60, change_pct=34.4, vwap=45.16, is_above_vwap=True),
+            VWAPDetectorSignal(code="301689", name="电科思仪", price=63.00, change_pct=17.8, vwap=51.40, is_above_vwap=True),
+            VWAPDetectorSignal(code="301707", name="晨芯股份", price=75.40, change_pct=7.1, vwap=71.38, is_above_vwap=True),
+        ]
+        self.sentiment_engine.reset()
+        initial_revisions = None
+        for i in range(25):
+            with patch.object(self.sentiment_engine.fetcher, "fetch_stock_snapshot", return_value={"vol_ratio": 1.5}):
+                snap = self.sentiment_engine.get_market_sentiment(ipo_signals=mock_signals, force_refresh=True)
+                if initial_revisions is None:
+                    initial_revisions = snap.tide_revision_count
+                self.assertEqual(snap.tide_revision_count, initial_revisions)
+                self.assertIsNotNone(snap.tide_state)
+
+    def test_clock_rollback_handled_gracefully(self):
+        """【回归测试】Windows时钟回退或NTP对时产生非递增时点，适配层保证严格递增微秒不崩溃"""
+        self.sentiment_engine.reset()
+        now = time.time()
+        # 第一次调用：正常时点
+        snap1 = self.sentiment_engine.get_market_sentiment(ipo_signals=[], force_refresh=True, current_time=now)
+        # 第二次调用：模拟时钟倒退 10 秒
+        snap2 = self.sentiment_engine.get_market_sentiment(ipo_signals=[], force_refresh=True, current_time=now - 10.0)
+        self.assertIsNotNone(snap2)
+        self.assertEqual(snap2.tide_state, "T0_INSUFFICIENT")
+
+    def test_explicit_historical_replay_point_in_time_and_no_future_leakage(self):
+        """【回归测试】显式历史回放时点严格保持，不跨日推进，不向后泄漏未来数据"""
+        self.sentiment_engine.reset()
+        # 1. 显式时点 2026-09-15 15:00:00
+        snap1 = self.sentiment_engine.get_market_sentiment(
+            ipo_signals=[], force_refresh=True, as_of="2026-09-15 15:00:00"
+        )
+        self.assertEqual(snap1.update_time, "15:00:00")
+        self.assertEqual(self.sentiment_engine._last_tide_dt.date().isoformat(), "2026-09-15")
+
+        # 2. 显式回放回溯到历史时点 2026-09-14 10:00:00：绝不能被改写为 2026-09-15 之后
+        snap2 = self.sentiment_engine.get_market_sentiment(
+            ipo_signals=[], force_refresh=True, as_of="2026-09-14 10:00:00"
+        )
+        self.assertEqual(snap2.update_time, "10:00:00")
+        self.assertEqual(self.sentiment_engine._last_tide_dt.date().isoformat(), "2026-09-14")
+        self.assertEqual(self.sentiment_engine._last_tide_dt.hour, 10)
+        self.assertEqual(self.sentiment_engine._last_tide_dt.microsecond, 0)
+
+        # 3. 显式回放相同历史时点 2026-09-14 10:00:00 重复查询：严格保持显式历史时点，绝不得推进 1 微秒改写至未来
+        snap3 = self.sentiment_engine.get_market_sentiment(
+            ipo_signals=[], force_refresh=True, as_of="2026-09-14 10:00:00"
+        )
+        self.assertEqual(snap3.update_time, "10:00:00")
+        self.assertEqual(self.sentiment_engine._last_tide_dt.microsecond, 0, "显式历史时点重复请求绝不得推进1微秒！")
+        self.assertEqual(snap3.tide_state, snap2.tide_state)
+
+    def test_midnight_boundary_guard_prevents_fake_trading_day_and_revision_inflation(self):
+        """【回归测试】日终午夜边界高频刷新不跨交易日推进，不生成虚假交易日与纠错通胀"""
+        self.sentiment_engine.reset()
+        from datetime import datetime as pydt
+        dt_end = pydt(2026, 9, 15, 23, 59, 59, 999999)
+        # 初始化在当日最后一微秒
+        snap1 = self.sentiment_engine.get_market_sentiment(
+            ipo_signals=[], force_refresh=True, current_time=dt_end
+        )
+        initial_revisions = snap1.tide_revision_count
+        # 相同日期内再次调用，不得跨入 2026-09-16
+        snap2 = self.sentiment_engine.get_market_sentiment(
+            ipo_signals=[], force_refresh=True, current_time=dt_end
+        )
+        self.assertIsNotNone(snap2)
+        self.assertEqual(snap2.tide_revision_count, initial_revisions)
+        self.assertEqual(self.sentiment_engine._last_tide_dt.date().isoformat(), "2026-09-15")
+
 
 if __name__ == "__main__":
     unittest.main()
+

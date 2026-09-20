@@ -708,6 +708,247 @@ class TestTradingCenterProactiveExitWiring(unittest.TestCase):
         self.assertIsNone(self.center.evaluate_position_exit("688826", 79.4, 80.0, 100.0))
         self.assertEqual(len(calls), 1)
 
+    def test_21_fleet_weight_budget_truncation_10_plus_10_limited_to_15(self):
+        """【回归测试】常规买入多标的累加严格截断，10%+10%绝不突破15%潮汐上限"""
+        from unittest.mock import patch
+        from ats.strategy.ipo_market_sentiment_engine import MarketSentimentSnapshot
+
+        center = IPOTradingCenter(total_capital=100000.0)
+        # 构造3只符合条件的买入标的，常规跟风默认请求 10%
+        sig1 = VWAPDetectorSignal(
+            code="688001", name="标的1", price=10.0, vwap=9.8, is_above_vwap=True,
+            pullback_no_touch=True, stop_loss_price=9.5, horse_race_rank=2, horse_race_score=80.0
+        )
+        sig2 = VWAPDetectorSignal(
+            code="688002", name="标的2", price=10.0, vwap=9.8, is_above_vwap=True,
+            pullback_no_touch=True, stop_loss_price=9.5, horse_race_rank=3, horse_race_score=75.0
+        )
+        sig3 = VWAPDetectorSignal(
+            code="688003", name="标的3", price=10.0, vwap=9.8, is_above_vwap=True,
+            pullback_no_touch=True, stop_loss_price=9.5, horse_race_rank=3, horse_race_score=70.0
+        )
+        center.submit_batch_reports([sig1, sig2, sig3])
+
+        # 模拟 T6_ICE_DIVERGENCE 潮汐上限 15%
+        context = MarketSentimentSnapshot(
+            heat_stage="🔥 梯队升温", index_phase="温和放量",
+            tide_state="T6_ICE_DIVERGENCE", tide_position_cap_pct=15.0,
+            risk_mode="NORMAL", position_multiplier=1.0,
+        ).finalize()
+
+        with patch.object(center.sentiment_engine, "get_market_sentiment", return_value=context):
+            orders = center.evaluate_fleet_and_generate_orders()
+
+        buy_orders = [o for o in orders if o.action in ("BUY", "BUY_SCOUT", "BUY_CONFIRM")]
+        # 标的1分配 10%，标的2截断为 15% - 10% = 5%，标的3无法分配
+        self.assertEqual(len(buy_orders), 2)
+        self.assertEqual(buy_orders[0].size_pct, 10.0)
+        self.assertEqual(buy_orders[1].size_pct, 5.0)
+        total_assigned = sum(o.size_pct for o in buy_orders)
+        self.assertEqual(total_assigned, 15.0)
+        self.assertLessEqual(total_assigned, 15.0)
+
+    def test_22_full_rotation_swap_generation_under_t4_and_t5(self):
+        """【回归测试】全仓轮动换马生成端：T4禁止生成换入，T5最多5%"""
+        from unittest.mock import patch
+        from ats.strategy.ipo_market_sentiment_engine import MarketSentimentSnapshot
+
+        center = IPOTradingCenter(total_capital=100000.0)
+        center.set_trading_mode("ROTATION_FULL_CAPITAL")
+        # 老股票持仓
+        center._positions["600001"] = IPOTradingPosition(
+            code="600001", name="老滞涨", shares=1000, cost_price=10.0,
+            current_price=10.0, entry_date="2026-09-19", status="HOLDING"
+        )
+
+        sig_leader = VWAPDetectorSignal(
+            code="688999", name="超级龙头", price=50.0, vwap=48.0,
+            is_above_vwap=True, signal_type="BREAKOUT", horse_race_rank=1,
+            horse_race_score=95.0, launch_time_str="09:35", launch_slope_deg=45.0
+        )
+        sig_old = VWAPDetectorSignal(
+            code="600001", name="老滞涨", price=10.0, vwap=10.5,
+            is_above_vwap=False, signal_type="PULLBACK_BUY", horse_race_rank=8,
+            horse_race_score=40.0, relative_to_leader_gap=55.0
+        )
+        center.submit_batch_reports([sig_leader, sig_old])
+
+        # Case A: T4 状态 (panic accel, 0% cap) -> 绝不生成 FULL_ROTATION_SWAP
+        ctx_t4 = MarketSentimentSnapshot(
+            heat_stage="❄️ 冰点极寒", index_phase="绝望地量",
+            tide_state="T4_PANIC_ACCEL", tide_position_cap_pct=0.0,
+            risk_mode="BLOCK_NEW_BUYS", position_multiplier=0.0,
+        ).finalize()
+        with patch.object(center.sentiment_engine, "get_market_sentiment", return_value=ctx_t4):
+            orders_t4 = center.evaluate_fleet_and_generate_orders()
+        rotations_t4 = [o for o in orders_t4 if o.action == "FULL_ROTATION_SWAP"]
+        self.assertEqual(len(rotations_t4), 0)
+
+        # Case B: T5 状态 (ice, 5% cap) -> FULL_ROTATION_SWAP 受限最多 5%
+        center._pending_directives.clear()
+        ctx_t5 = MarketSentimentSnapshot(
+            heat_stage="🌱 绝望孕育", index_phase="绝望地量",
+            tide_state="T5_ICE", tide_position_cap_pct=5.0,
+            risk_mode="NORMAL", position_multiplier=1.0,
+        ).finalize()
+        with patch.object(center.sentiment_engine, "get_market_sentiment", return_value=ctx_t5):
+            orders_t5 = center.evaluate_fleet_and_generate_orders()
+        rotations_t5 = [o for o in orders_t5 if o.action == "FULL_ROTATION_SWAP"]
+        self.assertEqual(len(rotations_t5), 1)
+        self.assertEqual(rotations_t5[0].size_pct, 5.0)
+        self.assertEqual(rotations_t5[0].shares, 100)  # 100000 * 5% / 50 = 100 股
+
+    def test_23_full_rotation_swap_execution_budget_enforcement_and_anti_bypass(self):
+        """【回归测试】全仓轮动执行端：受限指令不扩大为100%，手工伪造100%指令被可信风控拦截"""
+        from ats.strategy.ipo_market_sentiment_engine import MarketSentimentSnapshot
+
+        center = IPOTradingCenter(total_capital=100000.0)
+        center.set_trading_mode("ROTATION_FULL_CAPITAL")
+        center._positions["600001"] = IPOTradingPosition(
+            code="600001", name="老股票", shares=1000, cost_price=10.0,
+            current_price=10.0, entry_date="2026-09-19", status="HOLDING"
+        )
+        center.available_cash = 90000.0  # 90% 闲置现金
+
+        # Case A: 合法 5% 受限换马指令（携带有效时间戳并与新鲜快照同日关联），执行端仅买入 5% (100股 @ 50元 = 5000元)，绝不把剩余 9.5 万全额打入
+        import time as pytime
+        now_ts = pytime.time()
+        snap_t5 = MarketSentimentSnapshot(
+            tide_state="T5_ICE", tide_position_cap_pct=5.0,
+            risk_mode="NORMAL", position_multiplier=1.0,
+        ).finalize()
+        snap_t5.generated_at = now_ts
+        center._last_market_context = snap_t5
+
+        dir_t5 = IPOOrderDirective(
+            action="FULL_ROTATION_SWAP", code="688999", name="新龙头",
+            price=50.0, shares=100, size_pct=5.0, timestamp=now_ts,
+            target_swap_code="600001", target_swap_name="老股票"
+        )
+
+        self.assertTrue(center.record_order_execution(dir_t5))
+        self.assertNotIn("600001", center._positions)
+        self.assertIn("688999", center._positions)
+        new_pos = center._positions["688999"]
+        self.assertEqual(new_pos.shares, 100)  # 仅 5000 元，占 5%
+        self.assertEqual(center.available_cash, 95000.0)  # 90000 + 10000(平老仓) - 5000(买新仓)
+
+        # Case B: 攻击尝试：手工构造 size_pct=100% 指令试图穿透 T5 风控（带当前时间戳）
+        center._positions["688999"].entry_date = "2026-09-19"  # 解除次日硬锁
+        attack_dir = IPOOrderDirective(
+            action="FULL_ROTATION_SWAP", code="688888", name="伪造标的",
+            price=20.0, shares=5000, size_pct=100.0, timestamp=now_ts,
+            target_swap_code="688999", target_swap_name="新龙头"
+        )
+        # 潮汐上限依然为 5%
+        center._last_market_context = snap_t5
+
+        self.assertTrue(center.record_order_execution(attack_dir))
+        self.assertNotIn("688999", center._positions)
+        self.assertIn("688888", center._positions)
+        forged_pos = center._positions["688888"]
+        # 执行端拦截伪造：强制截断至 5% 预算 (5000 元 / 20 元 = 200 股)，绝不买入 5000 股
+        self.assertEqual(forged_pos.shares, 200)
+
+        # Case B2: 攻击尝试：无时间戳指令（timestamp=0.0）试图利用系统新鲜快照扩大仓位
+        center._positions["688888"].entry_date = "2026-09-19"
+        # 构造零时间戳指令，size_pct=50%
+        zero_ts_dir = IPOOrderDirective(
+            action="FULL_ROTATION_SWAP", code="688889", name="零时间戳渗透",
+            price=20.0, shares=2500, size_pct=50.0, timestamp=0.0,
+            target_swap_code="688888", target_swap_name="伪造标的"
+        )
+        # 虽有 5% 的新鲜快照，但因无关联时间戳，快照不可信，只能降级为老仓位 (200股*20元=4000元，占4%)
+        self.assertTrue(center.record_order_execution(zero_ts_dir))
+        self.assertNotIn("688888", center._positions)
+        self.assertIn("688889", center._positions)
+        pos_zero_ts = center._positions["688889"]
+        self.assertEqual(pos_zero_ts.shares, 200)  # 仅 4000 元，占 4%，未扩大仓位
+
+        # Case C: 攻击尝试：在丢失快照时试图满仓扩大仓位，执行端按原持仓拒绝扩大
+        center._positions["688889"].entry_date = "2026-09-19"
+        center._last_market_context = None
+        center.sentiment_engine._cached_snapshot = None
+        bypass_dir = IPOOrderDirective(
+            action="FULL_ROTATION_SWAP", code="688777", name="无快照渗透",
+            price=10.0, shares=10000, size_pct=100.0,
+            target_swap_code="688889", target_swap_name="零时间戳渗透"
+        )
+        self.assertTrue(center.record_order_execution(bypass_dir))
+        pos_nobudget = center._positions["688777"]
+        # 原老仓位为 4000 元 (200股 * 20元 = 4000元，占 4%)，无快照时拒绝扩大仓位，最多按老仓位 4% (400股 @ 10元 = 4000元)
+        self.assertLessEqual(pos_nobudget.shares * 10.0, 5000.0)
+        self.assertNotEqual(pos_nobudget.shares, 10000)
+
+        # Case D: 攻击尝试：在持有陈旧快照(>300s)时试图满仓扩大仓位，执行端拒绝扩大
+        center._positions["688777"].entry_date = "2026-09-19"
+        old_snap = MarketSentimentSnapshot(
+            tide_state="T5_ICE", tide_position_cap_pct=5.0,
+            risk_mode="NORMAL", position_multiplier=1.0,
+        ).finalize()
+        old_snap.generated_at = pytime.time() - 600.0  # 10 分钟前陈旧快照
+        center._last_market_context = old_snap
+        stale_dir = IPOOrderDirective(
+            action="FULL_ROTATION_SWAP", code="688666", name="陈旧快照渗透",
+            price=10.0, shares=10000, size_pct=100.0,
+            target_swap_code="688777", target_swap_name="无快照渗透"
+        )
+        self.assertTrue(center.record_order_execution(stale_dir))
+        pos_stale = center._positions["688666"]
+        # 原老仓位为 4000 元 (400股 * 10元 = 4000元，占 4%)，陈旧快照拒绝扩大仓位
+        self.assertLessEqual(pos_stale.shares * 10.0, 5000.0)
+        self.assertNotEqual(pos_stale.shares, 10000)
+
+        # Case E: 攻击尝试：T0_INSUFFICIENT/NORMAL 快照试图手工满仓，执行端检测T0不足拒绝扩大
+        center._positions["688666"].entry_date = "2026-09-19"
+        t0_snap = MarketSentimentSnapshot(
+            tide_state="T0_INSUFFICIENT", tide_position_cap_pct=100.0,
+            risk_mode="NORMAL", position_multiplier=1.0,
+        ).finalize()
+        center._last_market_context = t0_snap
+        t0_dir = IPOOrderDirective(
+            action="FULL_ROTATION_SWAP", code="688555", name="T0渗透",
+            price=10.0, shares=10000, size_pct=100.0,
+            target_swap_code="688666", target_swap_name="陈旧快照渗透"
+        )
+        self.assertTrue(center.record_order_execution(t0_dir))
+        pos_t0 = center._positions["688555"]
+        self.assertLessEqual(pos_t0.shares * 10.0, 5000.0)
+        self.assertNotEqual(pos_t0.shares, 10000)
+
+        # Case F: 【防幽灵持仓专项验证】风控拒绝或失败分支绝不遗留空持仓对象
+        center._positions["688555"].entry_date = "2026-09-19"
+        # F1: T4 状态下换马指令被执行端预算拒绝（allowed_pct=0%）
+        t4_snap = MarketSentimentSnapshot(
+            tide_state="T4_PANIC_ACCEL", tide_position_cap_pct=0.0,
+            risk_mode="BLOCK_NEW_BUYS", position_multiplier=0.0,
+        ).finalize()
+        t4_snap.generated_at = pytime.time()
+        center._last_market_context = t4_snap
+        rejected_dir = IPOOrderDirective(
+            action="FULL_ROTATION_SWAP", code="688000", name="被拒标的",
+            price=10.0, shares=1000, size_pct=10.0, timestamp=t4_snap.generated_at,
+            target_swap_code="688555", target_swap_name="T0渗透"
+        )
+        self.assertFalse(center.record_order_execution(rejected_dir))
+        self.assertNotIn("688000", center._positions, "风控拒绝换马绝不得留下幽灵持仓！")
+
+        # F2: 对未持有标的执行 SELL，校验不通过返回 False，绝不得产生空持仓
+        unheld_sell = IPOOrderDirective(
+            action="SELL", code="688001", name="从未持有标的", price=10.0, shares=500
+        )
+        self.assertFalse(center.record_order_execution(unheld_sell))
+        self.assertNotIn("688001", center._positions, "卖出不存在标的绝不得留下幽灵持仓！")
+
+        # F3: 当日买入标的 T+1 硬锁拦截卖出，原持仓状态完整保持，不产生多余持仓
+        center._positions["688555"].entry_date = pytime.strftime("%Y-%m-%d")
+        t1_sell = IPOOrderDirective(
+            action="SELL", code="688555", name="T0渗透", price=10.0, shares=100
+        )
+        self.assertFalse(center.record_order_execution(t1_sell))
+        self.assertEqual(center._positions["688555"].shares, pos_t0.shares)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
