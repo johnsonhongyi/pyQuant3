@@ -1129,6 +1129,14 @@ class IPOTradingCenter:
             max_fleet_weight *= risk_multiplier
             single_leader_weight *= risk_multiplier
             single_follower_weight *= risk_multiplier
+            tide_state = getattr(sentiment, "tide_state", "T0_INSUFFICIENT")
+            if tide_state != "T0_INSUFFICIENT":
+                tide_cap = max(0.0, min(100.0, float(
+                    getattr(sentiment, "tide_position_cap_pct", 100.0)
+                )))
+                max_fleet_weight = min(max_fleet_weight, tide_cap)
+                single_leader_weight = min(single_leader_weight, tide_cap)
+                single_follower_weight = min(single_follower_weight, tide_cap)
 
             current_total_shares_val = sum(p.shares * p.current_price for p in self._positions.values() if p.shares > 0)
             current_fleet_weight = (current_total_shares_val / self.total_capital) * 100.0 if self.total_capital > 0 else 0.0
@@ -1814,6 +1822,14 @@ class IPOTradingCenter:
                 "top_leader": top_leader_sig.code if top_leader_sig else "--",
                 "top_leader_name": top_leader_sig.name if top_leader_sig else "--",
                 "top_leader_score": top_leader_sig.horse_race_score if top_leader_sig else 0.0,
+                "tide_state": getattr(self._last_market_context, "tide_state", "T0_INSUFFICIENT"),
+                "tide_confidence": getattr(self._last_market_context, "tide_confidence", 0.0),
+                "tide_position_cap_pct": getattr(self._last_market_context, "tide_position_cap_pct", 0.0),
+                "tide_action": getattr(self._last_market_context, "tide_action", "WAIT"),
+                "tide_transition_reasons": list(getattr(
+                    self._last_market_context, "tide_transition_reasons", []
+                )),
+                "tide_revision_count": getattr(self._last_market_context, "tide_revision_count", 0),
                 "holding_details": [
                     {
                         "code": p.code,

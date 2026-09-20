@@ -23,10 +23,15 @@ import math
 import logging
 import hashlib
 import json
+from datetime import datetime
 from typing import Dict, List, Optional, Any, Tuple
 from dataclasses import asdict, dataclass, field
 
 from ats.tdx_realtime_fetcher import TDXRealtimeFetcher
+from ats.strategy.subnew_tide_state_machine import (
+    SubnewTideStateMachine,
+    build_tide_observation,
+)
 
 logger = logging.getLogger("IPOMarketSentiment")
 
@@ -58,6 +63,12 @@ class MarketSentimentSnapshot:
     risk_mode: str = "NORMAL"           # NORMAL / CAUTION / BLOCK_NEW_BUYS
     position_multiplier: float = 1.0
     source_errors: List[str] = field(default_factory=list)
+    tide_state: str = "T0_INSUFFICIENT"
+    tide_confidence: float = 0.0
+    tide_position_cap_pct: float = 100.0
+    tide_action: str = "WAIT"
+    tide_transition_reasons: List[str] = field(default_factory=list)
+    tide_revision_count: int = 0
 
     def finalize(self) -> "MarketSentimentSnapshot":
         """Create a stable identity after every source and policy field is set."""
@@ -92,6 +103,8 @@ class IPOMarketSentimentEngine:
         self.fetcher = TDXRealtimeFetcher.get_instance()
         self._cached_snapshot: Optional[MarketSentimentSnapshot] = None
         self._last_calc_ts: float = 0.0
+        self.tide_machine = SubnewTideStateMachine()
+        self._last_tide_ts: float = 0.0
         self._cache_ttl: float = 3.0  # 3 秒内存缓存
 
     def get_market_sentiment(self, ipo_signals: Optional[List[Any]] = None, force_refresh: bool = False) -> MarketSentimentSnapshot:
@@ -111,6 +124,7 @@ class IPOMarketSentimentEngine:
 
         # 2. 评估新股次新梯队热度
         self._evaluate_ipo_ladder_heat(snap, ipo_signals)
+        self._evaluate_tide_context(snap, ipo_signals, now_ts)
 
         # 3. 综合生成战略执行指引
         self._synthesize_strategy_guide(snap)
@@ -120,6 +134,26 @@ class IPOMarketSentimentEngine:
         self._cached_snapshot = snap
         self._last_calc_ts = now_ts
         return snap
+
+    def _evaluate_tide_context(self, snap, ipo_signals, now_ts: float) -> None:
+        signals = list(ipo_signals or [])
+        monotonic_tide_ts = max(float(now_ts), self._last_tide_ts + 0.000001)
+        self._last_tide_ts = monotonic_tide_ts
+        observation = build_tide_observation(
+            signals,
+            observed_at=datetime.fromtimestamp(monotonic_tide_ts).isoformat(sep=" ", timespec="microseconds"),
+            expected_count=max(10, len(signals)),
+        )
+        decision = self.tide_machine.update(observation)
+        snap.tide_state = decision.state
+        snap.tide_confidence = decision.confidence
+        snap.tide_position_cap_pct = decision.position_cap_pct
+        snap.tide_action = decision.target_action
+        snap.tide_transition_reasons = list(decision.transition_reasons)
+        snap.tide_revision_count = decision.revision_count
+        if decision.state == "T0_INSUFFICIENT":
+            if "TIDE_CROSS_SECTION_INSUFFICIENT" not in snap.source_errors:
+                snap.source_errors.append("TIDE_CROSS_SECTION_INSUFFICIENT")
 
     def _evaluate_index_volume(self, snap: MarketSentimentSnapshot):
         """评估上证/创业板成交量与地量/放量周期"""

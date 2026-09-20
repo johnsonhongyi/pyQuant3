@@ -1,9 +1,12 @@
 # -*- coding: utf-8 -*-
 """Point-in-time tests for the subnew-stock tide state machine."""
 
+from types import SimpleNamespace
+
 from ats.strategy.subnew_tide_state_machine import (
     SubnewTideStateMachine,
     TideObservation,
+    build_tide_observation,
 )
 
 
@@ -74,3 +77,46 @@ def test_wrong_repair_hypothesis_self_corrects_and_rotates_position_down():
     assert reflow.position_cap_pct == 40.0
     assert reflow.target_action == "ROTATE_TO_LEADERS"
     assert reflow.revision_count == 2
+
+
+def test_intraday_refresh_replaces_same_session_without_revision_inflation():
+    machine = SubnewTideStateMachine()
+    machine.update(_obs("2026-09-14", .821, .821, 2.34, 135.66, 11.60, -4.60))
+
+    morning = _obs("2026-09-15", .650, .620, .60, 35.0, 3.0, -2.0)
+    morning = TideObservation(**{**morning.__dict__, "observed_at": "2026-09-15 09:40:00"})
+    noon = _obs("2026-09-15", .300, .180, -1.10, 78.0, 2.0, -4.0)
+    noon = TideObservation(**{**noon.__dict__, "observed_at": "2026-09-15 11:20:00"})
+    close = _obs("2026-09-15", .179, .000, -1.45, 122.07, 2.47, -5.95)
+
+    assert machine.update(morning).state == "T7_WEAK_REPAIR"
+    assert machine.update(noon).state == "T2_EBB_EARLY"
+    final = machine.update(close)
+    assert final.state == "T2_EBB_EARLY"
+    assert final.revision_count == 1
+
+
+def test_live_signal_cross_section_builds_tide_observation():
+    signals = []
+    for index in range(10):
+        change = float(index - 3)
+        signals.append(SimpleNamespace(
+            price=10.0 + index,
+            change_pct=change,
+            is_above_vwap=index < 8,
+            extra_data={"amount": 100000000.0 + index * 10000000.0},
+        ))
+
+    observation = build_tide_observation(
+        signals,
+        observed_at="2026-09-20 10:30:00",
+        expected_count=10,
+    )
+    assert observation.sample_count == 10
+    assert observation.completeness == 1.0
+    assert observation.advance_ratio == 0.6
+    assert observation.above_vwap_ratio == 0.8
+    assert observation.median_return_pct == 1.5
+    assert observation.amount_yi == 14.5
+    assert observation.top20_return_pct == 5.5
+    assert observation.bottom20_return_pct == -2.5

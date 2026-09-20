@@ -128,6 +128,32 @@ class TestIPOVWAPSentimentAndHorseRace(unittest.TestCase):
         with patch.object(center.sentiment_engine, "get_market_sentiment", return_value=blocked):
             self.assertEqual(center.evaluate_fleet_and_generate_orders(), [])
 
+    def test_tide_position_cap_is_final_budget_and_visible_in_summary(self):
+        center = IPOTradingCenter(total_capital=1000000.0)
+        signal = VWAPDetectorSignal(
+            code="688003", name="tide-budget", price=100.0, change_pct=2.0,
+            vwap=99.0, is_above_vwap=True, signal_type="IPO_FIRST_BUY",
+            is_ipo_first_day=True, horse_race_rank=1, horse_race_score=96.0,
+            launch_time_str="09:31", launch_slope_deg=45.0,
+        )
+        center.submit_stock_perception_report(signal)
+        context = MarketSentimentSnapshot(
+            heat_stage="🔥 梯队升温", index_phase="温和放量",
+            tide_state="T5_ICE", tide_confidence=0.9,
+            tide_position_cap_pct=5.0, tide_action="PROBE_ONLY",
+            tide_transition_reasons=["selling_pressure_decelerating"],
+        ).finalize()
+        with patch.object(center.sentiment_engine, "get_market_sentiment", return_value=context):
+            orders = center.evaluate_fleet_and_generate_orders()
+
+        buys = [order for order in orders if order.action == "BUY"]
+        self.assertEqual(len(buys), 1)
+        self.assertEqual(buys[0].size_pct, 5.0)
+        summary = center.get_fleet_summary()
+        self.assertEqual(summary["tide_state"], "T5_ICE")
+        self.assertEqual(summary["tide_position_cap_pct"], 5.0)
+        self.assertEqual(summary["tide_action"], "PROBE_ONLY")
+
     def test_shengu_extreme_climax_exit_detection(self):
         """【测试】神股 601091 沈鼓集团：暴涨至 82.59 天量滞涨跳水精准触发【🚨 疯狂平仓】"""
         # 构造分时：从 11.9 暴拉至 82.59，随后回落至 57.77，偏离 VWAP 达 194%
