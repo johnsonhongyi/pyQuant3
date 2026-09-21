@@ -575,8 +575,6 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
                 else:
                     self.setGeometry(rx, ry, rw, rh)
                     self.setWindowOpacity(1.0)
-                    if self.anchor_edge and hasattr(self, 'hover_timer') and self.hover_timer and not self.hover_timer.isActive():
-                        self.hover_timer.start()
 
             self.current_mode = state.get("current_mode", "TODAY")
             self.is_narrow_mode = state.get("is_narrow_mode", False)
@@ -1574,9 +1572,12 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         self.last_sh_pct = sh_pct
         self._pending_sh_pct = sh_pct
 
-        # 如果窗口未显示且未隐藏贴边，仅缓存数据，跳过耗时计算与 UI 渲染
+        # 如果窗口未显示且未隐藏贴边，仅缓存数据并标记脏挂起，跳过耗时计算与 UI 渲染
         if not self.isVisible() and not getattr(self, 'is_hidden_state', False):
+            self._needs_render = True
             return
+
+        self._needs_render = False
 
         # 如果用户正在拖拽窗口，暂缓计算重绘，避免拖动掉帧卡顿
         if getattr(self, '_is_dragging', False):
@@ -1594,6 +1595,17 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
             remaining_ms = max(50, int((1.5 - elapsed) * 1000))
             if not self._refresh_throttle_timer.isActive():
                 self._refresh_throttle_timer.start(remaining_ms)
+
+    def ensure_rendered(self):
+        """当外部恢复显示、Tab 切换或激活面板时调用，确保挂起的数据瞬间补齐渲染"""
+        if getattr(self, '_needs_render', False) or not getattr(self, 'current_records', None):
+            self._needs_render = False
+            self._last_refresh_time = 0.0
+            self._refresh_data_for_mode()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.ensure_rendered()
 
     def _on_throttle_refresh(self):
         """节流定时器到期回调：合并高频推送后执行单次完整计算与渲染"""
@@ -1652,6 +1664,15 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
                 self._update_kpi_display(summary)
                 self._apply_filter()
                 return
+            # ⚡ 乐观先行首帧渲染：若当前列表尚空，先基于内存纯量价 0ms 瞬间渲染首帧底板，消除白屏等待
+            if not getattr(self, 'current_records', None):
+                fast_recs = self.engine.update_live_snapshot(df, fetch_l2_quotes=False, min_interval_sec=0.0)
+                if fast_recs:
+                    self.current_records = fast_recs
+                    summary = self.engine.get_market_limit_up_summary(effective_trade_date, current_df=df)
+                    self._update_kpi_display(summary)
+                    self._apply_filter()
+
             self._scan_worker_busy = True
             _df_snap = df
             _engine = self.engine
@@ -2277,32 +2298,34 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
             # 3. ⏱️ 盘中时间片生命周期过滤 (全天全时段、多日模式或激活 KPI 过滤时跳过过滤，确保天梯与 KPI 标的 100% 完整展示)
             if "全天全时段" in time_slice or self.active_kpi_filters or getattr(self, "current_mode", "TODAY") in ("3D", "5D", "10D", "LADDER"):
                 pass
-            elif "黄金定龙" in time_slice:
-
+            elif "黄金定龙" in time_slice or "早盘进攻" in time_slice:
                 # 09:30~10:00 黄金定龙期标的
                 t_phase = str(r.get("time_phase", ""))
                 is_zt = r.get("is_limit_up", False)
                 pct = _safe_float(r.get("pct", 0.0))
-                if "黄金定龙" not in t_phase and not is_zt and pct < 7.0:
+                if "黄金定龙" not in t_phase and "早盘进攻" not in t_phase and not is_zt and pct < 7.0:
                     continue
-            elif "分歧低吸" in time_slice:
-                # 10:00~11:30 分歧回踩低吸标的
+            elif "分歧低吸" in time_slice or "盘中定型" in time_slice:
+                # 10:00~11:30 分歧回踩低吸标的 (真实涨停标的与大涨标的直接放行展示)
+                is_zt = bool(r.get("is_limit_up", False)) or (_safe_float(r.get("pct", 0.0)) >= 9.5)
                 stage = str(r.get("entry_stage", ""))
                 is_supp = r.get("is_support_bounce", False)
-                if "低吸" not in stage and "潜伏" not in stage and not is_supp:
+                if not is_zt and "低吸" not in stage and "潜伏" not in stage and not is_supp:
                     continue
-            elif "午后助攻" in time_slice:
+            elif "午后助攻" in time_slice or "午盘接力" in time_slice:
+                is_zt = bool(r.get("is_limit_up", False)) or (_safe_float(r.get("pct", 0.0)) >= 9.5)
                 t_phase = str(r.get("time_phase", ""))
                 stage = str(r.get("entry_stage", ""))
-                if "午后" not in t_phase and "点火" not in stage and "先锋" not in stage:
+                if not is_zt and "午后" not in t_phase and "午盘" not in t_phase and "点火" not in stage and "先锋" not in stage:
                     continue
             elif "尾盘诱多" in time_slice:
                 # 尾盘脉冲高危标的
+                is_zt = bool(r.get("is_limit_up", False)) or (_safe_float(r.get("pct", 0.0)) >= 9.5)
                 stage = str(r.get("entry_stage", ""))
                 tier = str(r.get("tier_tag", ""))
-                if "尾盘" not in stage and "尾盘" not in tier and not r.get("is_broken", False):
+                if not is_zt and "尾盘" not in stage and "尾盘" not in tier and not r.get("is_broken", False):
                     continue
-            elif "尾盘定盘" in time_slice:
+            elif "尾盘定盘" in time_slice or "尾盘回封" in time_slice:
                 if not r.get("is_limit_up", False):
                     continue
 
