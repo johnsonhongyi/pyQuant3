@@ -1049,6 +1049,7 @@ class LimitUpEngine:
                 r["tier_jumps"] = 0
                 r["bubble_alpha_score"] = 50.0
 
+            desc_tag = f"📋 观察({round(pct, 1)}%)"
             # ── 💡 核心量化打分：结合多日强势底蕴与启动加速的分层梯度体系 (Gradient Tier) ──
             if is_limit_up:
                 # 1. 封单质量加成 (0.0 ~ 2.2分)
@@ -1225,6 +1226,9 @@ class LimitUpEngine:
                 elif is_bullish_engulfing:
                     r["tier_tag"] = "📈 阳包阴跟涨"
                     desc_tag = f"📈 阳包阴({momentum_score:.0f}分)"
+                else:
+                    r["tier_tag"] = r.get("tier_tag", entry_stage)
+                    desc_tag = f"📋 蓄势观察({momentum_score:.0f}分)"
             # ── 💡 注入全网人气热搜与大盘逆势共振感知 ──
             try:
                 from popularity_resonance_service import LadderResonanceBridge, DynamicFeatureEngine
