@@ -3315,7 +3315,9 @@ class AntigravityAccountManagerDialog(QDialog):
             "is_active": is_active,
             "target_role": target_role
         }
-        self.account_cards[email.lower()] = card_record
+        # 使用 email_target_role 复合键，避免双 Tab 同账户覆盖卡片引用
+        card_key = f"{email.lower()}_{target_role}" if target_role else email.lower()
+        self.account_cards[card_key] = card_record
 
         self._apply_quota_to_card(card_record, quota_info or {}, quota_summary=quota_summary)
         return frame
@@ -3516,8 +3518,13 @@ class AntigravityAccountManagerDialog(QDialog):
                             quota_summary=q_data.get("quota_summary", {})
                         )
 
-        # 2. 确保目标账户卡片呈现最新实时数据
-        target_card = self.account_cards.get(email)
+        # 2. 确保目标账户卡片呈现最新实时数据（对齐复合键 email_app/email_ide）
+        target_card = None
+        if email:
+            for sfx in ("_app", "_ide", ""):
+                target_card = self.account_cards.get(f"{email}{sfx}")
+                if target_card:
+                    break
         if not target_card and not all_quotas:
             for em, card in self.account_cards.items():
                 if card.get("is_active"):

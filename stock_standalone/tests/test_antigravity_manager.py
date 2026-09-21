@@ -373,20 +373,20 @@ def test_antigravity_cards_grid_dedup_and_rendering(monkeypatch):
 
     dialog = AntigravityAccountManagerDialog(auto_fetch=False)
     
-    # 验证去重后的卡片数量完全匹配账户数量
-    assert len(dialog.account_cards) == 3
-    assert "alpha.trader@quant.com" in dialog.account_cards
-    assert "beta.quant@gmail.com" in dialog.account_cards
-    assert "gamma.ai@deepmind.com" in dialog.account_cards
+    # 双 Tab 体系：每个账户生成 app + ide 两张卡，总计 3*2=6
+    assert len(dialog.account_cards) == 6
+    assert "alpha.trader@quant.com_app" in dialog.account_cards
+    assert "beta.quant@gmail.com_app" in dialog.account_cards
+    assert "gamma.ai@deepmind.com_app" in dialog.account_cards
 
-    # 验证当前活跃账户卡片
-    curr_card = dialog.account_cards["alpha.trader@quant.com"]
+    # 验证当前活跃账户卡片（以 app Tab 为准）
+    curr_card = dialog.account_cards["alpha.trader@quant.com_app"]
     assert curr_card["is_active"] is True
     assert "当前" in curr_card["btn_use"].text()
     assert not curr_card["btn_use"].isEnabled()
 
     # 验证备用账户卡片及缓存配额呈现
-    beta_card = dialog.account_cards["beta.quant@gmail.com"]
+    beta_card = dialog.account_cards["beta.quant@gmail.com_app"]
     assert beta_card["is_active"] is False
     assert "切换" in beta_card["btn_use"].text()
     assert beta_card["btn_use"].isEnabled()
@@ -396,7 +396,7 @@ def test_antigravity_cards_grid_dedup_and_rendering(monkeypatch):
     assert beta_card["models"]["Gemini Pro"]["bar"].value() == 60
 
     # 验证无缓存备用账户显示提示
-    gamma_card = dialog.account_cards["gamma.ai@deepmind.com"]
+    gamma_card = dialog.account_cards["gamma.ai@deepmind.com_app"]
     assert "⚪ 切换激活" in gamma_card["models"]["Claude"]["lbl"].text()
 
     dialog.close()
@@ -730,8 +730,8 @@ def test_retrieve_user_quota_summary_weekly_and_card_rendering(monkeypatch):
     })
 
     dialog = AntigravityAccountManagerDialog(auto_fetch=False)
-    assert "weekly.trader@quant.com" in dialog.account_cards
-    card = dialog.account_cards["weekly.trader@quant.com"]
+    assert "weekly.trader@quant.com_app" in dialog.account_cards
+    card = dialog.account_cards["weekly.trader@quant.com_app"]
     assert "weekly_widgets" in card
     # 验证 Gemini 周限额正确显示 77.0% 与进度条 77
     assert "77.0%" in card["weekly_widgets"]["gemini"]["lbl"].text()
