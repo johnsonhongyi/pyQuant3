@@ -908,18 +908,18 @@ def _publish_mining_and_trade_alerts(signal: StrategySignal, intent: Any, ctx: d
 def decide(signal: StrategySignal, state: str) -> DecisionIntent:
     # ── 1. 手工干预或强制平仓与买入逻辑，直接走绿色通道无条件执行 ──
     raw_action = str(signal.features.get("action", "")).upper()
-    is_manual_sell = (raw_action == "SELL" or signal.signal_type == "手工平仓" or "手工平仓" in str(signal.features.get("raw_reason", "")))
+    is_manual_sell = (raw_action in {"SELL", "REDUCE"} or signal.signal_type in {"手工平仓", "手工减仓"} or "手工平仓" in str(signal.features.get("raw_reason", "")))
     is_manual_buy = (raw_action in {"BUY", "ADD"} and (signal.signal_type == "手动买入" or "手动买入" in str(signal.features.get("raw_reason", "")) or "Confirm:" in str(signal.features.get("raw_reason", ""))))
     
     if is_manual_sell or is_manual_buy:
-        action = "BUY" if is_manual_buy else "SELL"
+        action = "BUY" if is_manual_buy else ("REDUCE" if raw_action == "REDUCE" else "SELL")
         requested_size = _num(signal, "requested_size_pct", 0.0)
         if requested_size <= 0.0:
             requested_size = 0.30 if action == "BUY" else 1.0
         requested_size = max(0.01, min(1.0, requested_size))
         reason = DecisionReason(
             regime="MANUAL_OVERRIDE",
-            setup="手动交易" if is_manual_buy else "手工平仓",
+            setup="手动交易" if is_manual_buy else ("手工减仓" if action == "REDUCE" else "手工平仓"),
             sector_heat=0.0,
             sector_rank=None,
             is_leader=False,
