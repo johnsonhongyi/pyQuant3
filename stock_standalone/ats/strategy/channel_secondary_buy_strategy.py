@@ -148,7 +148,8 @@ def evaluate_channel_secondary_buy(
     current_quote: Optional[Dict[str, Any]] = None,
     min_bars: int = 20,
     code: str = "",
-    name: str = ""
+    name: str = "",
+    trade_plan_config: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """
     【长期通道后企稳与底部结构次级买点评估纯函数】
@@ -163,7 +164,8 @@ def evaluate_channel_secondary_buy(
             current_quote=current_quote,
             min_bars=min_bars,
             code=code,
-            name=name
+            name=name,
+            trade_plan_config=trade_plan_config,
         )
     except Exception as e:
         logger.error(f"[{code}] 通道次级买点评估异常: {e}", exc_info=True)
@@ -198,7 +200,8 @@ def _evaluate_channel_secondary_buy_impl(
     current_quote: Optional[Dict[str, Any]] = None,
     min_bars: int = 20,
     code: str = "",
-    name: str = ""
+    name: str = "",
+    trade_plan_config: Optional[Any] = None,
 ) -> Dict[str, Any]:
     res = {
         "code": code,
@@ -322,8 +325,11 @@ def _evaluate_channel_secondary_buy_impl(
         higher_low = base_low
         higher_low_idx = base_low_idx
 
+    tp_cfg = trade_plan_config
+    hl_stop_ratio = getattr(tp_cfg, "higher_low_stop_ratio", 0.992) if tp_cfg else 0.992
+
     res["higher_low"] = round(higher_low, 3)
-    res["hard_stop"] = round(higher_low * 0.992, 3)
+    res["hard_stop"] = round(higher_low * hl_stop_ratio, 3)
 
     # 核心几何校验：次低点必须抬高 (Higher Low > Base Low)
     if higher_low <= base_low * 1.002:
@@ -390,6 +396,9 @@ def _evaluate_channel_secondary_buy_impl(
         # 构建标准不可变 TradePlan
         today_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         plan_id = f"TP_{code}_{today_str}"
+        def_pos_pct = float(getattr(tp_cfg, "default_position_pct", 30.0)) if tp_cfg else 30.0
+        def_exp_at = str(getattr(tp_cfg, "default_expire_at", "14:45:00")) if tp_cfg else "14:45:00"
+
         trade_plan = IPOTradePlan(
             plan_id=plan_id,
             code=code,
@@ -400,14 +409,14 @@ def _evaluate_channel_secondary_buy_impl(
             trigger_price=round(curr_price, 3),
             buy_zone_min=round(higher_low * 1.005, 3),
             buy_zone_max=round(curr_price * 1.015, 3),
-            higher_low_stop=round(higher_low * 0.992, 3),
+            higher_low_stop=round(higher_low * hl_stop_ratio, 3),
             base_low_invalid=round(base_low * 0.99, 3),
             hard_stop_loss_pct=round(min(3.0, max(1.5, downside_risk_pct)), 2),
             target_1_channel_mid=target_1,
             target_2_swing_high=target_2,
             suggested_action="BUY_SCOUT",
-            position_pct=30.0,
-            expire_at="14:45:00",
+            position_pct=def_pos_pct,
+            expire_at=def_exp_at,
             created_time=datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             extra_info={
                 "base_low": base_low,

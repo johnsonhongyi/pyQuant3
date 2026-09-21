@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 import math
 import statistics
-from typing import Iterable, List, Optional
+from typing import Iterable, List, Optional, Any
 
 
 @dataclass(frozen=True)
@@ -102,7 +102,8 @@ _DIRECTION = {
 class SubnewTideStateMachine:
     """Classify each observation using only current and previously seen records."""
 
-    def __init__(self):
+    def __init__(self, config: Optional[Any] = None):
+        self._config = config
         self._previous_observation: Optional[TideObservation] = None
         self._previous_decision: Optional[TideDecision] = None
         self._last_timestamp: Optional[datetime] = None
@@ -113,7 +114,7 @@ class SubnewTideStateMachine:
         self._session_base_revision_count = 0
 
     def reset(self) -> None:
-        self.__init__()
+        self.__init__(config=self._config)
 
     def replay(self, observations: Iterable[TideObservation]) -> List[TideDecision]:
         self.reset()
@@ -172,12 +173,19 @@ class SubnewTideStateMachine:
         current: TideObservation,
         previous: Optional[TideObservation],
     ):
-        if current.sample_count < 10 or current.completeness < 0.8:
+        cfg = self._config
+        min_samples = getattr(cfg, "min_sample_count", 10) if cfg else 10
+        min_comp = getattr(cfg, "min_completeness", 0.8) if cfg else 0.8
+
+        if current.sample_count < min_samples or current.completeness < min_comp:
             return "T0_INSUFFICIENT", ["insufficient_cross_section"]
+
+        t2_adv_collapse = getattr(cfg, "t2_advance_ratio_collapse", 0.30) if cfg else 0.30
+        t2_vwap_collapse = getattr(cfg, "t2_above_vwap_ratio_collapse", 0.20) if cfg else 0.20
 
         prior_state = self._previous_decision.state if self._previous_decision else ""
         if (prior_state in ("T9_FLOOD_SPREAD", "T10_MAIN_UP")
-                and current.advance_ratio < 0.30 and current.above_vwap_ratio < 0.20):
+                and current.advance_ratio < t2_adv_collapse and current.above_vwap_ratio < t2_vwap_collapse):
             return "T2_EBB_EARLY", ["breadth_collapse", "vwap_support_lost"]
 
         if previous is not None:
@@ -186,12 +194,19 @@ class SubnewTideStateMachine:
             # A mature advance must persist beyond one broad-up session before it
             # earns the larger T10 allocation.  This deliberately sits below T11
             # so an extreme blow-off is still classified as over-heated.
+            t10_adv_min = getattr(cfg, "t10_advance_ratio_min", 0.75) if cfg else 0.75
+            t10_vwap_min = getattr(cfg, "t10_above_vwap_ratio_min", 0.70) if cfg else 0.70
+            t10_med_min = getattr(cfg, "t10_median_return_min", 2.0) if cfg else 2.0
+            t10_med_max = getattr(cfg, "t10_median_return_max", 5.0) if cfg else 5.0
+            t10_top_min = getattr(cfg, "t10_top20_return_min", 6.0) if cfg else 6.0
+            t10_amt_min = getattr(cfg, "t10_amount_ratio_min", 0.90) if cfg else 0.90
+
             if (prior_state in ("T9_FLOOD_SPREAD", "T10_MAIN_UP")
-                    and current.advance_ratio >= 0.75
-                    and current.above_vwap_ratio >= 0.70
-                    and 2.0 <= current.median_return_pct < 5.0
-                    and current.top20_return_pct >= 6.0
-                    and amount_ratio >= 0.90):
+                    and current.advance_ratio >= t10_adv_min
+                    and current.above_vwap_ratio >= t10_vwap_min
+                    and t10_med_min <= current.median_return_pct < t10_med_max
+                    and current.top20_return_pct >= t10_top_min
+                    and amount_ratio >= t10_amt_min):
                 return "T10_MAIN_UP", [
                     "broad_advance_persisted",
                     "leader_strength_persisted",
@@ -201,22 +216,34 @@ class SubnewTideStateMachine:
             # After a broad advance, turnover expansion accompanied by fading
             # breadth/VWAP acceptance is distribution, not a normal pullback.
             # A deeper collapse remains T2 via the hard guard above.
+            t1_adv_max = getattr(cfg, "t1_advance_ratio_max", 0.55) if cfg else 0.55
+            t1_vwap_max = getattr(cfg, "t1_above_vwap_ratio_max", 0.50) if cfg else 0.50
+            t1_med_max = getattr(cfg, "t1_median_return_max", 1.0) if cfg else 1.0
+            t1_top_min = getattr(cfg, "t1_top20_return_min", 3.0) if cfg else 3.0
+            t1_amt_min = getattr(cfg, "t1_amount_ratio_min", 1.20) if cfg else 1.20
+
             if (prior_state in ("T9_FLOOD_SPREAD", "T10_MAIN_UP", "T11_OVERHEATED")
-                    and current.advance_ratio <= 0.55
-                    and current.above_vwap_ratio <= 0.50
-                    and current.median_return_pct <= 1.0
-                    and current.top20_return_pct >= 3.0
-                    and amount_ratio >= 1.20):
+                    and current.advance_ratio <= t1_adv_max
+                    and current.above_vwap_ratio <= t1_vwap_max
+                    and current.median_return_pct <= t1_med_max
+                    and current.top20_return_pct >= t1_top_min
+                    and amount_ratio >= t1_amt_min):
                 return "T1_CLIMAX_DISTRIBUTION", [
                     "high_turnover_distribution",
                     "breadth_faded_after_advance",
                     "vwap_acceptance_lost",
                 ]
 
-        if current.advance_ratio >= 0.90 and current.median_return_pct >= 5.0:
+        t11_adv_min = getattr(cfg, "t11_advance_ratio_min", 0.90) if cfg else 0.90
+        t11_med_min = getattr(cfg, "t11_median_return_min", 5.0) if cfg else 5.0
+        if current.advance_ratio >= t11_adv_min and current.median_return_pct >= t11_med_min:
             return "T11_OVERHEATED", ["extreme_breadth", "extreme_median_return"]
-        if current.advance_ratio >= 0.75 and current.above_vwap_ratio >= 0.70:
+
+        t9_adv_min = getattr(cfg, "t9_advance_ratio_min", 0.75) if cfg else 0.75
+        t9_vwap_min = getattr(cfg, "t9_above_vwap_ratio_min", 0.70) if cfg else 0.70
+        if current.advance_ratio >= t9_adv_min and current.above_vwap_ratio >= t9_vwap_min:
             return "T9_FLOOD_SPREAD", ["broad_advance", "broad_vwap_acceptance"]
+
         if (prior_state in ("T1_CLIMAX_DISTRIBUTION", "T2_EBB_EARLY", "T3_EBB_SPREAD", "T4_PANIC_ACCEL", "T5_ICE", "T6_ICE_DIVERGENCE")
                 and current.advance_ratio >= 0.55 and current.above_vwap_ratio >= 0.65
                 and current.median_return_pct > 0):
@@ -232,13 +259,24 @@ class SubnewTideStateMachine:
                     "vwap_acceptance_improved",
                 ]
 
-        if current.advance_ratio <= 0.20 and current.median_return_pct <= -2.20:
+        t4_adv_max = getattr(cfg, "t4_advance_ratio_max", 0.20) if cfg else 0.20
+        t4_med_max = getattr(cfg, "t4_median_return_max", -2.20) if cfg else -2.20
+        if current.advance_ratio <= t4_adv_max and current.median_return_pct <= t4_med_max:
             return "T4_PANIC_ACCEL", ["breadth_panic", "median_loss_accelerating"]
-        if current.above_vwap_ratio <= 0.15 and current.advance_ratio <= 0.25:
+
+        t5_vwap_max = getattr(cfg, "t5_above_vwap_ratio_max", 0.15) if cfg else 0.15
+        t5_adv_max = getattr(cfg, "t5_advance_ratio_max", 0.25) if cfg else 0.25
+        if current.above_vwap_ratio <= t5_vwap_max and current.advance_ratio <= t5_adv_max:
             return "T5_ICE", ["vwap_acceptance_floor", "selling_pressure_decelerating"]
-        if current.advance_ratio <= 0.25 and current.median_return_pct <= -1.50:
+
+        t3_adv_max = getattr(cfg, "t3_advance_ratio_max", 0.25) if cfg else 0.25
+        t3_med_max = getattr(cfg, "t3_median_return_max", -1.50) if cfg else -1.50
+        if current.advance_ratio <= t3_adv_max and current.median_return_pct <= t3_med_max:
             return "T3_EBB_SPREAD", ["weak_breadth", "losses_spreading"]
-        if current.advance_ratio >= 0.55 and current.above_vwap_ratio >= 0.55:
+
+        t7_adv_min = getattr(cfg, "t7_advance_ratio_min", 0.55) if cfg else 0.55
+        t7_vwap_min = getattr(cfg, "t7_above_vwap_ratio_min", 0.55) if cfg else 0.55
+        if current.advance_ratio >= t7_adv_min and current.above_vwap_ratio >= t7_vwap_min:
             return "T7_WEAK_REPAIR", ["breadth_repair", "vwap_repair"]
         return "T2_EBB_EARLY", ["mixed_or_deteriorating_structure"]
 

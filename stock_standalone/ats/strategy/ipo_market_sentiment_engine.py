@@ -103,7 +103,15 @@ class IPOMarketSentimentEngine:
         self.fetcher = TDXRealtimeFetcher.get_instance()
         self._cached_snapshot: Optional[MarketSentimentSnapshot] = None
         self._last_calc_ts: float = 0.0
-        self.tide_machine = SubnewTideStateMachine()
+        try:
+            from ats.vwap_rule_model import VWAPRuleModel
+            self.rule_model = VWAPRuleModel()
+            tide_cfg = self.rule_model.tide_config
+        except Exception:
+            self.rule_model = None
+            tide_cfg = None
+
+        self.tide_machine = SubnewTideStateMachine(config=tide_cfg)
         self._last_tide_dt: Optional[datetime] = None
         self._last_tide_ts: float = 0.0
         self._cache_ttl: float = 3.0  # 3 秒内存缓存
