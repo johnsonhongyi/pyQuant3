@@ -214,6 +214,8 @@ set MAIN_SCRIPT=instock_MonitorTK.py
 set OUTPUT_NAME=instock_MonitorTK_Nuita.exe
 set OUTPUT_DIR=build
 set ICON_FILE=MonitorTK.ico
+set TK_API_VERSION=1.0
+set TK_KERNEL_VERSION=2026.05.23.01
 set PATH=C:\JohnsonProgram\SetDisplayMode\init\upx;%PATH%
 
 echo Checking Python environment...
@@ -238,6 +240,7 @@ if not exist "%CSV_PATH%" (
     exit /b
 )
 echo [SUCCESS] Dynamically retrieved CSV path: %CSV_PATH%
+echo [INFO] Trading Kernel API: %TK_API_VERSION%  Kernel: %TK_KERNEL_VERSION%
 echo.
 
 :: ===== Create output directory =====
@@ -255,8 +258,8 @@ set CMD="%PYTHON_EXEC%" -m nuitka !NUITKA_MODE_OPT! "%MAIN_SCRIPT%" ^
     --windows-icon-from-ico="%ICON_FILE%" ^
     --windows-company-name="Johnson QuantLab" ^
     --windows-product-name="instock_MonitorTK" ^
-    --windows-file-version="1.0.0" ^
-    --windows-product-version="1.0.0" ^
+    --windows-file-version="%TK_API_VERSION%.0" ^
+    --windows-product-version="%TK_API_VERSION%.0" ^
     --output-dir="%OUTPUT_DIR%" ^
     --lto=no ^
     --no-pyi-file ^
@@ -326,6 +329,10 @@ set CMD="%PYTHON_EXEC%" -m nuitka !NUITKA_MODE_OPT! "%MAIN_SCRIPT%" ^
     --include-package=pyttsx3 ^
     --include-package=tables ^
     --include-package=tk_gui_modules ^
+    --include-package=trading_kernel ^
+    --include-module=trading_kernel.contracts ^
+    --include-module=trading_kernel.gateway ^
+    --include-module=trading_kernel.kernel_service ^
     --include-module=JSONData.tdx_hdf5_api ^
     --include-module=JSONData.wencaiData ^
     --include-module=JSONData.sina_data ^
