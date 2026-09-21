@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, fields
+from datetime import date
 import hashlib
 import json
 import threading
@@ -23,6 +24,8 @@ from trading_kernel.contracts import (
 class KernelGateway:
     """Public API boundary; hides kernel implementation details from callers."""
 
+    REQUEST_CACHE_MAX = 10000
+
     def __init__(self, service: Any = None):
         if service is None:
             from trading_kernel.kernel_service import get_kernel_service
@@ -30,11 +33,23 @@ class KernelGateway:
         self._service = service
         self._request_cache: dict[str, tuple[str, DecisionResponse]] = {}
         self._request_cache_lock = threading.RLock()
+        self._request_cache_day = date.today().isoformat()
 
     @staticmethod
     def _request_fingerprint(request: DecisionRequest) -> str:
         payload = json.dumps(asdict(request), ensure_ascii=False, sort_keys=True, default=str)
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def _rollover_request_cache_if_needed(self) -> None:
+        today = date.today().isoformat()
+        if self._request_cache_day != today:
+            self._request_cache.clear()
+            self._request_cache_day = today
+
+    def _trim_request_cache_for_insert(self) -> None:
+        while len(self._request_cache) >= self.REQUEST_CACHE_MAX:
+            oldest_key = next(iter(self._request_cache))
+            self._request_cache.pop(oldest_key, None)
 
     def _evaluate_request(
         self,
@@ -78,6 +93,7 @@ class KernelGateway:
 
         fingerprint = self._request_fingerprint(request)
         with self._request_cache_lock:
+            self._rollover_request_cache_if_needed()
             cached = self._request_cache.get(request_id)
             if cached is not None:
                 cached_fingerprint, cached_response = cached
@@ -88,6 +104,7 @@ class KernelGateway:
                     trace_id="", order_id="", reject_code="IDEMPOTENCY_CONFLICT",
                     request_id=request_id,
                 )
+            self._trim_request_cache_for_insert()
             response = self._evaluate_request(
                 request, write_journal=write_journal, request_id=request_id
             )
