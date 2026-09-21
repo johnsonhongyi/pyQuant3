@@ -41,44 +41,34 @@ class PaperExecutionResult:
     size_pct: float = 0.0
 
 
-def get_paper_adapter():
-    """Return the singleton kernel PaperAdapter (the paper-account SSOT)."""
-    from trading_kernel.kernel_service import get_kernel_service
-
-    return get_kernel_service().paper_adapter
-
-
 def get_orders() -> List[Dict[str, Any]]:
-    adapter = get_paper_adapter()
-    return [dict(item) for item in getattr(adapter, "orders", []) if isinstance(item, dict)]
+    from trading_kernel.gateway import KernelGateway
+
+    return KernelGateway().get_order_history()
 
 
 def get_positions() -> Dict[str, Dict[str, Any]]:
-    adapter = get_paper_adapter()
-    positions = adapter.get_positions()
+    from trading_kernel.gateway import KernelGateway
+
+    positions = KernelGateway().get_positions()
     _align_state_manager(set(positions))
     return positions
 
 
 def get_account_snapshot() -> Dict[str, Any]:
-    adapter = get_paper_adapter()
-    snap = dict(adapter.get_account_snapshot())
-    snap["initial_capital"] = _number(getattr(adapter, "initial_capital", 0.0))
-    snap["position_count"] = len(getattr(adapter.account, "positions", {}))
+    from trading_kernel.gateway import KernelGateway
+
+    gateway = KernelGateway()
+    snap = dict(gateway.get_account_snapshot())
     return snap
 
 
 def _align_state_manager(held_codes: set[str]) -> None:
     """Keep the kernel state machine physically aligned with paper holdings."""
     try:
-        from trading_kernel.kernel_service import get_kernel_service
+        from trading_kernel.gateway import KernelGateway
 
-        service = get_kernel_service()
-        known = set(service.state_manager.snapshot()) | held_codes
-        for code in known:
-            target = "IN_TRADE" if code in held_codes else "FLAT"
-            if service.state_manager.get(code) != target:
-                service.state_manager.set(code, target)
+        KernelGateway().reconcile_state()
     except Exception:
         pass
 
@@ -183,36 +173,37 @@ def execute_command_directive(directive: Any) -> PaperExecutionResult:
     if price <= 0:
         return PaperExecutionResult(False, action=kernel_action, reject_code="INVALID_PRICE")
 
-    from trading_kernel.kernel_service import get_kernel_service
+    from trading_kernel.contracts import DecisionRequest
+    from trading_kernel.gateway import KernelGateway
 
-    service = get_kernel_service()
-    if service.mode != "PAPER":
-        if not service.set_trading_mode("PAPER"):
+    gateway = KernelGateway()
+    if gateway.get_mode() != "PAPER":
+        if not gateway.set_mode("PAPER"):
             return PaperExecutionResult(False, action=kernel_action, reject_code="PAPER_MODE_UNAVAILABLE")
 
-    before_count = len(getattr(service.paper_adapter, "orders", []))
-    result = service.evaluate_decision_item(
-        {
-            "code": str(getattr(directive, "code", "") or "").zfill(6),
-            "name": str(getattr(directive, "name", "") or ""),
-            "action": kernel_action,
-            "signal_type": signal_type,
-            "current_price": price,
-            "suggest_price": price,
-            "requested_size_pct": requested_pct,
-            "priority": 100.0,
-            "reason": f"交易指挥室统一PAPER执行: {getattr(directive, 'reason', '')}",
-        },
+    before_count = len(gateway.get_order_history())
+    response = gateway.submit(
+        DecisionRequest(
+            code=str(getattr(directive, "code", "") or "").zfill(6),
+            name=str(getattr(directive, "name", "") or ""),
+            action=kernel_action,
+            signal_type=signal_type,
+            price=price,
+            requested_size_pct=requested_pct,
+            reason=f"交易指挥室统一PAPER执行: {getattr(directive, 'reason', '')}",
+            source="IPO_COMMAND_ROOM",
+            features={"priority": 100.0},
+        ),
         write_journal=True,
     )
-    orders = getattr(service.paper_adapter, "orders", [])
+    orders = gateway.get_order_history()
     last_order = orders[-1] if len(orders) > before_count and isinstance(orders[-1], dict) else {}
     return PaperExecutionResult(
-        executed=bool(result.get("kernel_executed")),
-        order_id=str(result.get("kernel_order_id") or last_order.get("order_id") or ""),
-        trace_id=str(result.get("kernel_trace_id") or ""),
-        action=str(result.get("kernel_action") or kernel_action),
-        reject_code=str(result.get("kernel_reject_code") or ""),
+        executed=response.executed,
+        order_id=response.order_id or str(last_order.get("order_id") or ""),
+        trace_id=response.trace_id,
+        action=response.action or kernel_action,
+        reject_code=response.reject_code,
         volume=_number(last_order.get("volume")),
         size_pct=_number(last_order.get("size_pct"), requested_pct),
     )
