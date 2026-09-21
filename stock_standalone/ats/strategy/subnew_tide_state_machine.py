@@ -180,6 +180,39 @@ class SubnewTideStateMachine:
                 and current.advance_ratio < 0.30 and current.above_vwap_ratio < 0.20):
             return "T2_EBB_EARLY", ["breadth_collapse", "vwap_support_lost"]
 
+        if previous is not None:
+            amount_ratio = current.amount_yi / previous.amount_yi if previous.amount_yi > 0 else 1.0
+
+            # A mature advance must persist beyond one broad-up session before it
+            # earns the larger T10 allocation.  This deliberately sits below T11
+            # so an extreme blow-off is still classified as over-heated.
+            if (prior_state in ("T9_FLOOD_SPREAD", "T10_MAIN_UP")
+                    and current.advance_ratio >= 0.75
+                    and current.above_vwap_ratio >= 0.70
+                    and 2.0 <= current.median_return_pct < 5.0
+                    and current.top20_return_pct >= 6.0
+                    and amount_ratio >= 0.90):
+                return "T10_MAIN_UP", [
+                    "broad_advance_persisted",
+                    "leader_strength_persisted",
+                    "turnover_held",
+                ]
+
+            # After a broad advance, turnover expansion accompanied by fading
+            # breadth/VWAP acceptance is distribution, not a normal pullback.
+            # A deeper collapse remains T2 via the hard guard above.
+            if (prior_state in ("T9_FLOOD_SPREAD", "T10_MAIN_UP", "T11_OVERHEATED")
+                    and current.advance_ratio <= 0.55
+                    and current.above_vwap_ratio <= 0.50
+                    and current.median_return_pct <= 1.0
+                    and current.top20_return_pct >= 3.0
+                    and amount_ratio >= 1.20):
+                return "T1_CLIMAX_DISTRIBUTION", [
+                    "high_turnover_distribution",
+                    "breadth_faded_after_advance",
+                    "vwap_acceptance_lost",
+                ]
+
         if current.advance_ratio >= 0.90 and current.median_return_pct >= 5.0:
             return "T11_OVERHEATED", ["extreme_breadth", "extreme_median_return"]
         if current.advance_ratio >= 0.75 and current.above_vwap_ratio >= 0.70:
@@ -190,7 +223,6 @@ class SubnewTideStateMachine:
             return "T8_REFLOW_CONFIRM", ["breadth_recovered", "vwap_reclaimed"]
 
         if previous is not None:
-            amount_ratio = current.amount_yi / previous.amount_yi if previous.amount_yi > 0 else 1.0
             vwap_improvement = current.above_vwap_ratio - previous.above_vwap_ratio
             if (current.median_return_pct < -1.5 and amount_ratio >= 1.35
                     and vwap_improvement >= 0.15 and current.top20_return_pct >= 6.0):
