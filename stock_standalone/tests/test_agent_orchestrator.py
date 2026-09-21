@@ -360,6 +360,133 @@ def test_compact_verification_text() -> None:
     assert "[ 50%]" not in compact
 
 
+def test_verification_requires_every_recorded_command_to_pass() -> None:
+    assert AgentOrchestrator._verification_succeeded("$ first\nexit=0\n")
+    assert not AgentOrchestrator._verification_succeeded(
+        "$ first\nexit=0\n\n$ second\nexit=1\n"
+    )
+    assert not AgentOrchestrator._verification_succeeded("no exit evidence")
+
+
+def test_scope_requires_explicit_pass_marker() -> None:
+    assert AgentOrchestrator._scope_succeeded("Scope: PASS\n\nChanged paths:\na.py\n")
+    assert not AgentOrchestrator._scope_succeeded("Changed paths:\n")
+    assert not AgentOrchestrator._scope_succeeded(
+        "Scope: PASS\n\nChanged paths:\na.py\n\nViolations:\na.py\n"
+    )
+
+
+def test_worker_tool_activity_tracks_consecutive_reads_after_write() -> None:
+    log = "\n".join([
+        'auto-approving tool confirmation "ViewFile" at step 1',
+        'auto-approving tool confirmation "GrepSearch" at step 2',
+        'file write "WriteToFile" at step 3',
+        'auto-approving tool confirmation "ListDir" at step 4',
+    ])
+    assert AgentOrchestrator._tool_activity_counts(log) == (3, 1, 1)
+
+
+def test_worker_monitor_hard_stops_at_read_budget(tmp_path: Path) -> None:
+    root = _project(tmp_path)
+    artifact_dir = root / ".agent_hub" / "artifacts" / "001"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    log_path = artifact_dir / "antigravity.log"
+
+    class FakeProcess:
+        returncode = None
+
+        def poll(self):
+            return self.returncode
+
+        def terminate(self):
+            self.returncode = 0
+
+        def kill(self):
+            self.returncode = -9
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+    def popen_factory(args, **kwargs):
+        log_path.write_text(
+            "\n".join(
+                f'auto-approving tool confirmation "ViewFile" at step {index}'
+                for index in range(3)
+            ),
+            encoding="utf-8",
+        )
+        return FakeProcess()
+
+    orchestrator = AgentOrchestrator(root, popen_factory=popen_factory)
+    orchestrator.config.update({
+        "worker_max_readonly_tool_calls": 3,
+        "worker_timeout_seconds": 30,
+        "worker_no_activity_timeout_seconds": 30,
+        "worker_monitor_interval_seconds": 0.05,
+    })
+    result = orchestrator._run_worker_monitored(
+        ["fake-antigravity"], log_path, artifact_dir, os.environ.copy()
+    )
+    assert result.returncode == 124
+    assert "readonly tool budget exceeded" in result.stderr
+    heartbeat = json.loads((artifact_dir / "worker_heartbeat.json").read_text(encoding="utf-8"))
+    assert heartbeat["status"] == "ABORTED"
+    assert heartbeat["readonly_calls_since_write"] == 3
+
+
+def test_reviewer_uses_supported_codex_exec_flags(tmp_path: Path) -> None:
+    root = _project(tmp_path)
+    calls = []
+
+    def runner(args, **kwargs):
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    orchestrator = AgentOrchestrator(root, runner=runner)
+    orchestrator.config.update({"review_model": "gpt-test", "review_effort": "low"})
+    orchestrator._invoke_reviewer(
+        "task", root / ".agent_hub" / "artifacts" / "001", "", ""
+    )
+    command = calls[0]
+    assert command[1] == "exec"
+    assert "--ask-for-approval" not in command
+    assert "--effort" not in command
+    assert 'approval_policy="never"' in command
+    assert 'model_reasoning_effort="low"' in command
+
+
+def test_stale_reviewer_artifact_is_not_reused(tmp_path: Path) -> None:
+    root = _project(tmp_path)
+    artifact_dir = root / ".agent_hub" / "artifacts" / "001"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    review_file = artifact_dir / "codex_review.md"
+    review_file.write_text("DECISION: APPROVED\n", encoding="utf-8")
+
+    def runner(args, **kwargs):
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    orchestrator = AgentOrchestrator(root, runner=runner)
+    result, review = orchestrator._run_reviewer_fresh("task", artifact_dir, "", "", "")
+    assert result.returncode == 2
+    assert review == ""
+    assert not review_file.exists()
+
+
+def test_compact_diff_has_character_cap(tmp_path: Path) -> None:
+    root = _project(tmp_path)
+
+    def runner(args, **kwargs):
+        if "--stat" in args:
+            return subprocess.CompletedProcess(args, 0, "a.py | 1 +\n", "")
+        return subprocess.CompletedProcess(args, 0, "+" + ("x" * 500), "")
+
+    orchestrator = AgentOrchestrator(root, runner=runner)
+    orchestrator.config.update({"max_review_diff_lines": 150, "max_review_diff_chars": 100})
+    compact = orchestrator._compact_diff(["a.py"])
+    assert len(compact) < 150
+    assert "truncated" in compact
+
+
 def test_get_rework_count_and_rework_limit_blocking(tmp_path: Path) -> None:
     root = _project(tmp_path)
     hub = AgentHub(root)
@@ -392,7 +519,9 @@ def test_get_rework_count_and_rework_limit_blocking(tmp_path: Path) -> None:
     artifact_dir.mkdir(parents=True, exist_ok=True)
     (artifact_dir / "codex_review.md").write_text("DECISION: REWORK\n", encoding="utf-8")
     (artifact_dir / "verification.log").write_text("$ pytest\nexit=0\n", encoding="utf-8")
-    (artifact_dir / "scope_check.md").write_text("Changed paths:\n", encoding="utf-8")
+    (artifact_dir / "scope_check.md").write_text(
+        "Scope: PASS\n\nChanged paths:\nats/example.py\n", encoding="utf-8"
+    )
 
     report = orchestrator.review_existing("001")
     assert report.status == "REWORK_BLOCKED_FOR_HUMAN"

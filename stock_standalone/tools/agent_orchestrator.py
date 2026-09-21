@@ -12,6 +12,8 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -24,6 +26,7 @@ except ModuleNotFoundError:  # Direct execution: python tools/agent_orchestrator
 
 
 Runner = Callable[..., subprocess.CompletedProcess[str]]
+PopenFactory = Callable[..., subprocess.Popen[str]]
 VERIFY_BLOCK_RE = re.compile(r"```(?:powershell|bash|text)?\s*\n(.*?)```", re.DOTALL | re.IGNORECASE)
 
 
@@ -83,13 +86,19 @@ class AgentOrchestrator:
         "P5_FORBIDDEN": {"worker_mode": "forbidden", "auto_approve": False},
     }
 
-    def __init__(self, project_root: Path, runner: Runner = subprocess.run) -> None:
+    def __init__(
+        self,
+        project_root: Path,
+        runner: Runner = subprocess.run,
+        popen_factory: PopenFactory = subprocess.Popen,
+    ) -> None:
         self.root = project_root.resolve()
         self.hub = AgentHub(self.root)
         self.config = json.loads(
             (self.hub.hub / "orchestrator.json").read_text(encoding="utf-8")
         )
         self.runner = runner
+        self.popen_factory = popen_factory
 
     def _run(self, args: Sequence[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         return self.runner(
@@ -138,13 +147,13 @@ class AgentOrchestrator:
             codex_probe = self._run(
                 [
                     self.config["codex_executable"],
+                    "exec",
                     "--sandbox",
                     "read-only",
-                    "--ask-for-approval",
-                    "never",
+                    "--config",
+                    'approval_policy="never"',
                     "--cd",
                     str(self.root),
-                    "exec",
                     "--ephemeral",
                     "-",
                 ],
@@ -424,6 +433,167 @@ class AgentOrchestrator:
             worker_env["HOME"] = str(profile_dir)
         return worker_env
 
+    @staticmethod
+    def _tool_activity_counts(log_text: str) -> tuple[int, int, int]:
+        """Return total reads, writes, and consecutive reads since the last write."""
+        read_pattern = re.compile(
+            r'(?:tool confirmation|tool call).*?"?'
+            r'(ViewFile|ReadFile|ListDir|FindFiles|GrepSearch|Search)' r'"?',
+            re.IGNORECASE,
+        )
+        write_pattern = re.compile(
+            r'(?:file write|tool confirmation|tool call).*?"?'
+            r'(WriteToFile|Replace|Edit|MultiReplace)' r'"?',
+            re.IGNORECASE,
+        )
+        events = [(match.start(), "read") for match in read_pattern.finditer(log_text)]
+        events.extend((match.start(), "write") for match in write_pattern.finditer(log_text))
+        reads = writes = reads_since_write = 0
+        for _, kind in sorted(events):
+            if kind == "write":
+                writes += 1
+                reads_since_write = 0
+            else:
+                reads += 1
+                reads_since_write += 1
+        return reads, writes, reads_since_write
+
+    def _write_worker_heartbeat(
+        self,
+        artifact_dir: Path,
+        *,
+        status: str,
+        elapsed: float,
+        reads: int,
+        writes: int,
+        reads_since_write: int,
+        detail: str = "",
+    ) -> None:
+        payload = {
+            "status": status,
+            "elapsed_seconds": round(elapsed, 1),
+            "readonly_tool_calls": reads,
+            "write_tool_calls": writes,
+            "readonly_calls_since_write": reads_since_write,
+            "detail": detail[:300],
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        self._write(
+            artifact_dir / "worker_heartbeat.json",
+            json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+        )
+
+    @staticmethod
+    def _stop_worker(process: subprocess.Popen[str]) -> None:
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
+
+    def _run_worker_monitored(
+        self,
+        args: Sequence[str],
+        log_path: Path,
+        artifact_dir: Path,
+        worker_env: dict[str, str],
+    ) -> subprocess.CompletedProcess[str]:
+        """Run Antigravity with enforceable timeout/read-budget/no-activity gates."""
+        log_path.unlink(missing_ok=True)
+        timeout_seconds = int(self.config.get("worker_timeout_seconds", 240))
+        read_budget = int(self.config.get("worker_max_readonly_tool_calls", 12))
+        idle_timeout = int(self.config.get("worker_no_activity_timeout_seconds", 60))
+        poll_seconds = max(float(self.config.get("worker_monitor_interval_seconds", 1.0)), 0.05)
+        started = time.monotonic()
+        last_activity = started
+        last_log_size = -1
+        reason = ""
+        reads = writes = reads_since_write = 0
+
+        with tempfile.TemporaryFile(mode="w+", encoding="utf-8") as stdout_file, tempfile.TemporaryFile(
+            mode="w+", encoding="utf-8"
+        ) as stderr_file:
+            process = self.popen_factory(
+                list(args),
+                cwd=self.root,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                stdout=stdout_file,
+                stderr=stderr_file,
+                env=worker_env,
+            )
+            while process.poll() is None:
+                now = time.monotonic()
+                if log_path.exists():
+                    log_size = log_path.stat().st_size
+                    if log_size != last_log_size:
+                        last_log_size = log_size
+                        last_activity = now
+                    log_text = log_path.read_text(encoding="utf-8", errors="replace")
+                    reads, writes, reads_since_write = self._tool_activity_counts(log_text)
+                elapsed = now - started
+                self._write_worker_heartbeat(
+                    artifact_dir,
+                    status="RUNNING",
+                    elapsed=elapsed,
+                    reads=reads,
+                    writes=writes,
+                    reads_since_write=reads_since_write,
+                )
+                if read_budget > 0 and reads_since_write >= read_budget:
+                    reason = (
+                        f"readonly tool budget exceeded: {reads_since_write}/{read_budget} "
+                        "consecutive reads without a write"
+                    )
+                elif timeout_seconds > 0 and elapsed >= timeout_seconds:
+                    reason = f"hard timeout reached: {timeout_seconds}s"
+                elif idle_timeout > 0 and now - last_activity >= idle_timeout:
+                    reason = f"no Antigravity log activity for {idle_timeout}s"
+                if reason:
+                    self._stop_worker(process)
+                    break
+                time.sleep(poll_seconds)
+
+            returncode = process.wait()
+            stdout_file.seek(0)
+            stderr_file.seek(0)
+            stdout = stdout_file.read()
+            stderr = stderr_file.read()
+
+        elapsed = time.monotonic() - started
+        status = "ABORTED" if reason else ("SUCCESS" if returncode == 0 else "FAILED")
+        self._write_worker_heartbeat(
+            artifact_dir,
+            status=status,
+            elapsed=elapsed,
+            reads=reads,
+            writes=writes,
+            reads_since_write=reads_since_write,
+            detail=reason,
+        )
+        if reason:
+            returncode = 124
+            stderr = (stderr.rstrip() + f"\nWorker aborted: {reason}\n").lstrip("\n")
+        return subprocess.CompletedProcess(list(args), returncode, stdout, stderr)
+
+    def _run_worker_attempt(
+        self,
+        args: Sequence[str],
+        log_path: Path,
+        artifact_dir: Path,
+        worker_env: dict[str, str],
+    ) -> subprocess.CompletedProcess[str]:
+        # Injected runners keep unit tests deterministic; production uses the hard monitor.
+        if self.runner is not subprocess.run:
+            return self._run(
+                args,
+                timeout=int(self.config.get("worker_timeout_seconds", 240)) + 30,
+                env=worker_env,
+            )
+        return self._run_worker_monitored(args, log_path, artifact_dir, worker_env)
+
     def _invoke_worker(
         self, prompt: str, artifact_dir: Path, task_risk: str, profile_name: str = "P2_CODE_LOW"
     ) -> subprocess.CompletedProcess[str]:
@@ -453,6 +623,7 @@ class AgentOrchestrator:
         worker_env = self._setup_worker_environment()
         for index, model in enumerate(models, start=1):
             safe_model = re.sub(r"[^a-zA-Z0-9_.-]+", "_", model or "default")
+            log_path = artifact_dir / f"antigravity_{index}_{safe_model}.log"
             args = [
                 self.config["antigravity_executable"],
                 f"--print={prompt}",
@@ -467,7 +638,7 @@ class AgentOrchestrator:
                 "--print-timeout",
                 f"{int(self.config.get('worker_timeout_seconds', 1800))}s",
                 "--log-file",
-                str(artifact_dir / f"antigravity_{index}_{safe_model}.log"),
+                str(log_path),
             ]
             if model:
                 args.extend(("--model", model))
@@ -477,11 +648,7 @@ class AgentOrchestrator:
                 # Antigravity requires this even for ListDir in print mode. The
                 # terminal sandbox and post-run scope enforcement remain mandatory.
                 args.append("--dangerously-skip-permissions")
-            result = self._run(
-                args,
-                timeout=int(self.config.get("worker_timeout_seconds", 1800)) + 30,
-                env=worker_env,
-            )
+            result = self._run_worker_attempt(args, log_path, artifact_dir, worker_env)
             attempts.append(result)
             self._write(
                 artifact_dir / f"worker_attempt_{index}_{safe_model}.stdout", result.stdout
@@ -490,11 +657,7 @@ class AgentOrchestrator:
                 artifact_dir / f"worker_attempt_{index}_{safe_model}.stderr", result.stderr
             )
             if self._is_transient_auth_failure(result):
-                retry = self._run(
-                    args,
-                    timeout=int(self.config.get("worker_timeout_seconds", 1800)) + 30,
-                    env=worker_env,
-                )
+                retry = self._run_worker_attempt(args, log_path, artifact_dir, worker_env)
                 attempts.append(retry)
                 self._write(
                     artifact_dir / f"worker_attempt_{index}_{safe_model}_auth_retry.stdout",
@@ -542,6 +705,7 @@ class AgentOrchestrator:
 
     def _compact_diff(self, changed_paths: Iterable[str]) -> str:
         max_lines = int(self.config.get("max_review_diff_lines", 150))
+        max_chars = int(self.config.get("max_review_diff_chars", 12000))
         code_paths = [
             p for p in changed_paths
             if not p.startswith(".agent_hub/artifacts/") and not p.endswith(".log")
@@ -562,7 +726,11 @@ class AgentOrchestrator:
             diff_body = "\n".join(truncated)
         else:
             diff_body = "\n".join(diff_lines)
-        return (stat_text + "\n\n" + diff_body).strip()
+        compact = (stat_text + "\n\n" + diff_body).strip()
+        if max_chars > 0 and len(compact) > max_chars:
+            omitted = len(compact) - max_chars
+            compact = compact[:max_chars].rstrip() + f"\n... truncated {omitted} characters ..."
+        return compact
 
     def _invoke_reviewer(
         self,
@@ -590,13 +758,13 @@ class AgentOrchestrator:
 
         cmd = [
             self.config["codex_executable"],
+            "exec",
             "--sandbox",
             "read-only",
-            "--ask-for-approval",
-            "never",
+            "--config",
+            'approval_policy="never"',
             "--cd",
             str(self.root),
-            "exec",
             "--ephemeral",
         ]
         review_model = str(self.config.get("review_model", "")).strip()
@@ -604,7 +772,7 @@ class AgentOrchestrator:
             cmd.extend(["--model", review_model])
         review_effort = str(self.config.get("review_effort", "")).strip()
         if review_effort:
-            cmd.extend(["--effort", review_effort])
+            cmd.extend(["--config", f'model_reasoning_effort="{review_effort}"'])
 
         cmd.extend([
             "--output-last-message",
@@ -615,6 +783,47 @@ class AgentOrchestrator:
             cmd,
             input=prompt,
             timeout=int(self.config.get("review_timeout_seconds", 900)),
+        )
+
+    def _run_reviewer_fresh(
+        self,
+        task_text: str,
+        artifact_dir: Path,
+        verification: str,
+        scope: str,
+        compact_diff: str,
+    ) -> tuple[subprocess.CompletedProcess[str], str]:
+        """Run a reviewer and never accept a review artifact from an older run."""
+        review_file = artifact_dir / "codex_review.md"
+        review_file.unlink(missing_ok=True)
+        started_ns = time.time_ns()
+        reviewer = self._invoke_reviewer(
+            task_text, artifact_dir, verification, scope, compact_diff
+        )
+        is_fresh = (
+            review_file.exists()
+            and review_file.stat().st_mtime_ns >= started_ns
+        )
+        if reviewer.returncode == 0 and is_fresh:
+            return reviewer, review_file.read_text(encoding="utf-8")
+        if reviewer.returncode == 0:
+            reviewer = subprocess.CompletedProcess(
+                reviewer.args,
+                2,
+                reviewer.stdout,
+                (reviewer.stderr.rstrip() + "\nReviewer did not create a fresh codex_review.md\n").lstrip(),
+            )
+        return reviewer, reviewer.stdout
+
+    @staticmethod
+    def _verification_succeeded(verification_text: str) -> bool:
+        exit_codes = re.findall(r"(?m)^exit=(-?\d+)\s*$", verification_text)
+        return bool(exit_codes) and all(code == "0" for code in exit_codes)
+
+    @staticmethod
+    def _scope_succeeded(scope_text: str) -> bool:
+        return bool(re.search(r"(?m)^Scope: PASS\s*$", scope_text)) and not bool(
+            re.search(r"(?m)^Violations:\s*$", scope_text)
         )
 
     @staticmethod
@@ -678,7 +887,7 @@ class AgentOrchestrator:
 
         changed = self._changed_paths(before, self._inventory())
         violations = self._scope_violations(task_text, changed)
-        scope_text = "Changed paths:\n" + "\n".join(sorted(changed))
+        scope_text = f"Scope: {'PASS' if not violations else 'FAIL'}\n\nChanged paths:\n" + "\n".join(sorted(changed))
         if violations:
             scope_text += "\n\nViolations:\n" + "\n".join(violations)
         self._write(artifact_dir / "scope_check.md", scope_text)
@@ -693,9 +902,9 @@ class AgentOrchestrator:
         decision = "REWORK"
         review_text = "Automated Codex review was not run."
         if self.config.get("auto_review", True):
-            reviewer = self._invoke_reviewer(task_text, artifact_dir, verification_text, scope_text, compact_diff)
-            review_file = artifact_dir / "codex_review.md"
-            review_text = review_file.read_text(encoding="utf-8") if review_file.exists() else reviewer.stdout
+            reviewer, review_text = self._run_reviewer_fresh(
+                task_text, artifact_dir, verification_text, scope_text, compact_diff
+            )
             self._write(artifact_dir / "codex_review_stderr.log", reviewer.stderr)
             if reviewer.returncode == 0 and re.search(r"^DECISION: APPROVED\s*$", review_text, re.MULTILINE):
                 decision = "APPROVED"
@@ -748,8 +957,8 @@ class AgentOrchestrator:
         task_text = task_path.read_text(encoding="utf-8")
         verification_text = verification_path.read_text(encoding="utf-8")
         scope_text = scope_path.read_text(encoding="utf-8")
-        verification_ok = "exit=0" in verification_text
-        scope_ok = "Violations:" not in scope_text
+        verification_ok = self._verification_succeeded(verification_text)
+        scope_ok = self._scope_succeeded(scope_text)
         self.hub.submit(
             selected,
             "orchestrator/re-review",
@@ -758,9 +967,9 @@ class AgentOrchestrator:
         )
         task_files = self._section_items(task_text, "Files Allowed")
         compact_diff = self._compact_diff(task_files)
-        reviewer = self._invoke_reviewer(task_text, artifact_dir, verification_text, scope_text, compact_diff)
-        review_file = artifact_dir / "codex_review.md"
-        review_text = review_file.read_text(encoding="utf-8") if review_file.exists() else reviewer.stdout
+        reviewer, review_text = self._run_reviewer_fresh(
+            task_text, artifact_dir, verification_text, scope_text, compact_diff
+        )
         self._write(artifact_dir / "codex_review_stderr.log", reviewer.stderr)
         approved = (
             reviewer.returncode == 0
