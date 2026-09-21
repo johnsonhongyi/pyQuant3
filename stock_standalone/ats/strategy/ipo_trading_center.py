@@ -46,6 +46,7 @@ from ats.strategy.channel_secondary_buy_strategy import (
     TAG_IPO_BID_SURGE,
 )
 from ats.proactive_exit_engine import ProactiveExitEngine
+from ats.strategy.signal_convergence import SignalConvergenceResult, converge_directives
 
 logger = logging.getLogger("IPOTradingCenter")
 
@@ -184,6 +185,7 @@ class IPOTradingCenter:
         self._max_total_position_pct: float = 80.0 # 最大允许总仓位
         self.auto_follow_trading: bool = False     # 全自动跟随交易开关 (开启后自动撮合指令)
         self._pending_directives: List[IPOOrderDirective] = []
+        self._signal_convergence_summary: Dict[str, Any] = {}
         self._trade_plans: Dict[str, IPOTradePlan] = {} # 标的对应的不变 TradePlan 字典
         self._emitted_plan_ids: set = set()            # 已生成指令的 TradePlan ID 集合 (刷新幂等防重)
         self._emitted_signal_ids: set = set()          # 已生成指令的 Signal ID 集合
@@ -393,9 +395,27 @@ class IPOTradingCenter:
             logger.info(f"[IPO-TRADING] 全自动跟随交易状态变更: {self.auto_follow_trading}")
 
     def get_pending_directives(self) -> List[IPOOrderDirective]:
-        """获取当前待执行的最新交易指令"""
+        """Return the single converged directive view used by UI and execution."""
         with self._lock:
-            return list(self._pending_directives)
+            result: SignalConvergenceResult = converge_directives(self._pending_directives)
+            self._signal_convergence_summary = result.summary()
+            return list(result.directives)
+
+    def get_signal_convergence_summary(self) -> Dict[str, Any]:
+        """Read-only count and suppression reasons for the command-room signal view."""
+        with self._lock:
+            return dict(self._signal_convergence_summary)
+
+    def _publish_converged_directives(
+        self, directives: List[IPOOrderDirective]
+    ) -> List[IPOOrderDirective]:
+        """Publish one clear, non-conflicting directive set without altering decisions."""
+        result: SignalConvergenceResult = converge_directives(directives)
+        self._pending_directives = list(result.directives)
+        self._signal_convergence_summary = result.summary()
+        self._broadcast_directives_to_alert_notifier(self._pending_directives)
+        self._auto_execute_if_enabled()
+        return self.get_pending_directives()
 
     def get_closed_positions(self) -> List[IPOTradingPosition]:
         """获取历史已平仓/出局持仓列表 (支持复盘回溯与迭代详情查看)"""
@@ -986,6 +1006,7 @@ class IPOTradingCenter:
             all_signals = list(self._reports_cache.values())
             if not all_signals:
                 self._pending_directives = []
+                self._signal_convergence_summary = converge_directives([]).summary()
                 return []
 
             now_ts = time.time()
@@ -1352,10 +1373,7 @@ class IPOTradingCenter:
             # 狂热高潮期：常规次新严禁新开仓防 T+1 追高被埋，但首发上市首日黄金吸筹 (IPO_FIRST_BUY) 例外允许锁定极低成本筹码！
             if sentiment.heat_stage == "🌋 狂热高潮":
                 if not (top_leader and top_leader.signal_type == "IPO_FIRST_BUY"):
-                    self._pending_directives = directives
-                    self._broadcast_directives_to_alert_notifier(directives)
-                    self._auto_execute_if_enabled(directives)
-                    return directives
+                    return self._publish_converged_directives(directives)
                 max_fleet_weight = 40.0
                 single_leader_weight = 35.0
                 single_follower_weight = 0.0
@@ -1619,9 +1637,7 @@ class IPOTradingCenter:
                             ))
                             current_fleet_weight = round(current_fleet_weight + assigned_weight, 4)
 
-            self._pending_directives = directives
-            self._broadcast_directives_to_alert_notifier(directives)
-            self._auto_execute_if_enabled(directives)
+            directives = self._publish_converged_directives(directives)
 
             # ── 无条件追加全池赛马扫描快照日志 (盘后/收盘后历史信号日志面板不空白) ──
             pre_order_cnt = sum(1 for s in all_signals if getattr(s, "signal_type", "") in (
@@ -1705,8 +1721,9 @@ class IPOTradingCenter:
             except Exception as ex_alert:
                 logger.debug(f"广播集中交易决议异常: {ex_alert}")
 
-    def _auto_execute_if_enabled(self, directives: List[IPOOrderDirective]):
+    def _auto_execute_if_enabled(self):
         """若开启全自动跟随交易，自动撮合执行 (注意：FULL_ROTATION_SWAP 仅作战术建议展示，严禁自动执行)"""
+        directives = self.get_pending_directives()
         if self.auto_follow_trading and directives:
             for d in directives:
                 if d.action in ("FULL_ROTATION_SWAP", "SWITCH_SWAP"):
@@ -1722,9 +1739,10 @@ class IPOTradingCenter:
 
     def execute_all_pending_directives(self) -> int:
         """【继续交易：一键执行全部待执行指令】"""
+        directives = self.get_pending_directives()
         with self._lock:
             count = 0
-            for d in list(self._pending_directives):
+            for d in directives:
                 if self.record_order_execution(d):
                     count += 1
             return count

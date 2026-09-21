@@ -84,7 +84,9 @@ class TradingKernelService:
 
     def __init__(self, journal_path: str = "logs/trading_kernel_trace.jsonl",
                  strategy_provider: Any = None, state_store: Any = None,
-                 event_sink: Any = None, reconciliation_dir: str | None = None):
+                 event_sink: Any = None, reconciliation_dir: str | None = None,
+                 reconciliation_archive_after_days: int = 30,
+                 reconciliation_archive_retention_days: int | None = 365):
         self.state_manager = state_store or StateManager()
         self.journal = event_sink or JsonlJournal(journal_path)
         self.strategy_provider = strategy_provider
@@ -92,6 +94,12 @@ class TradingKernelService:
         self._reconciliation_dir = reconciliation_dir
         self._last_reconciliation_persist_monotonic = 0.0
         self._reconciliation_interval_seconds = 60.0
+        self._reconciliation_rotation_day = ""
+        from trading_kernel.observability.reconciliation_rotation import ReconciliationLogRotator
+        self._reconciliation_rotator = ReconciliationLogRotator(
+            archive_after_days=reconciliation_archive_after_days,
+            archive_retention_days=reconciliation_archive_retention_days,
+        )
         
         # 从 global.ini 加载静态强路由配置并注入策略决策大脑 StrategyRouter
         try:
@@ -351,6 +359,7 @@ class TradingKernelService:
             },
         }
         os.makedirs(target_dir, exist_ok=True)
+        self._rotate_reconciliation_history(target_dir)
         latest_path = os.path.join(target_dir, "latest.json")
         temp_path = latest_path + ".tmp"
         with open(temp_path, "w", encoding="utf-8") as fh:
@@ -365,6 +374,19 @@ class TradingKernelService:
             fh.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
         self._last_reconciliation_persist_monotonic = now_mono
         return payload
+
+    def _rotate_reconciliation_history(self, target_dir: str) -> None:
+        """Run daily retention work once; never delay the normal 60-second audit."""
+        today = datetime.now().strftime("%Y-%m-%d")
+        if self._reconciliation_rotation_day == today:
+            return
+        result = self._reconciliation_rotator.rotate(target_dir)
+        self._reconciliation_rotation_day = today
+        if result.archived or result.removed:
+            logger.info(
+                "[TK-Reconciliation] archived=%s removed=%s",
+                len(result.archived), len(result.removed),
+            )
 
     def get_account_read_model(self) -> dict[str, Any]:
         """Single read-only SSOT view for ATS/UI consumers."""
