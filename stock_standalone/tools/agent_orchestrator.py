@@ -6,6 +6,8 @@ from __future__ import annotations
 import argparse
 import fnmatch
 import json
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import os
 import re
 import shlex
@@ -99,6 +101,7 @@ class AgentOrchestrator:
         )
         self.runner = runner
         self.popen_factory = popen_factory
+        self._claim_lock = threading.Lock()
 
     def _run(self, args: Sequence[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         return self.runner(
@@ -217,16 +220,35 @@ class AgentOrchestrator:
             if before.get(path) != after.get(path)
         }
 
-    def _scope_violations(self, task_text: str, changed: set[str]) -> list[str]:
+    def _scope_violations(
+        self,
+        task_text: str,
+        changed: set[str],
+        parallel_owned: Sequence[str] = (),
+    ) -> list[str]:
         allowed = self._section_items(task_text, "Files Allowed")
         ignored = self.config.get("scope_ignore_prefixes", [])
         violations = []
         for path in sorted(changed):
             if any(path.startswith(prefix) for prefix in ignored):
                 continue
-            if not any(fnmatch.fnmatch(path, pattern) for pattern in allowed):
-                violations.append(path)
+            if any(fnmatch.fnmatch(path, pattern) for pattern in allowed):
+                continue
+            if any(fnmatch.fnmatch(path, pattern) for pattern in parallel_owned):
+                continue
+            violations.append(path)
         return violations
+
+    def _parallel_owned_patterns(self, exclude_task_id: str) -> list[str]:
+        patterns: list[str] = []
+        for path in self.hub._task_files("running"):
+            match = re.match(r"(\d{3,})_", path.name)
+            if match and match.group(1) == exclude_task_id.zfill(3):
+                continue
+            patterns.extend(
+                self._section_items(path.read_text(encoding="utf-8"), "Files Allowed")
+            )
+        return patterns
 
     def _verification_commands(self, task_text: str) -> list[list[str]]:
         section = re.search(
@@ -732,6 +754,20 @@ class AgentOrchestrator:
             compact = compact[:max_chars].rstrip() + f"\n... truncated {omitted} characters ..."
         return compact
 
+    def _review_profile(self, stage: str) -> dict[str, str]:
+        profiles = self.config.get("review_profiles", {})
+        defaults = {
+            "task_review": {"model": "", "effort": "low"},
+            "p_checkpoint_review": {"model": "", "effort": "medium"},
+            "release_gate": {"model": "", "effort": "high"},
+        }
+        profile = dict(defaults.get(stage, defaults["task_review"]))
+        profile.update(profiles.get(stage, {}))
+        if stage == "task_review" and str(profile.get("effort", "")).lower() == "high":
+            if self.config.get("review_quota_policy", {}).get("forbid_high_for_task_review", True):
+                raise OrchestratorError("High reasoning is forbidden for ordinary task_review")
+        return {k: str(v) for k, v in profile.items()}
+
     def _invoke_reviewer(
         self,
         task_text: str,
@@ -739,12 +775,17 @@ class AgentOrchestrator:
         verification: str,
         scope: str,
         compact_diff: str = "",
+        stage: str = "task_review",
+        output_name: str = "codex_review.md",
+        extra_rules: str = "",
     ) -> subprocess.CompletedProcess[str]:
         review_rules = (self.hub.hub / "review_prompt.md").read_text(encoding="utf-8")
         compact_verification = self._compact_verification_text(verification)
         prompt_parts = [
             review_rules,
-            f"## TASK\n{task_text}",
+            f"## REVIEW STAGE\n{stage}",
+            extra_rules.strip(),
+            f"## TASK / CHECKPOINT CONTEXT\n{task_text}",
             f"## ORCHESTRATOR VERIFICATION\n{compact_verification}",
             f"## SCOPE CHECK\n{scope}",
         ]
@@ -754,7 +795,7 @@ class AgentOrchestrator:
                 f"> [!NOTE] Orchestrator provided compact diff evidence. Avoid running redundant unconstrained git diff.\n"
                 f"{compact_diff.strip()}"
             )
-        prompt = "\n\n".join(prompt_parts)
+        prompt = "\n\n".join(part for part in prompt_parts if part)
 
         cmd = [
             self.config["codex_executable"],
@@ -767,16 +808,15 @@ class AgentOrchestrator:
             str(self.root),
             "--ephemeral",
         ]
-        review_model = str(self.config.get("review_model", "")).strip()
-        if review_model:
-            cmd.extend(["--model", review_model])
-        review_effort = str(self.config.get("review_effort", "")).strip()
-        if review_effort:
-            cmd.extend(["--config", f'model_reasoning_effort="{review_effort}"'])
+        profile = self._review_profile(stage)
+        if profile.get("model"):
+            cmd.extend(["--model", profile["model"]])
+        if profile.get("effort"):
+            cmd.extend(["--config", f'model_reasoning_effort="{profile["effort"]}"'])
 
         cmd.extend([
             "--output-last-message",
-            str(artifact_dir / "codex_review.md"),
+            str(artifact_dir / output_name),
             "-",
         ])
         return self._run(
@@ -798,7 +838,8 @@ class AgentOrchestrator:
         review_file.unlink(missing_ok=True)
         started_ns = time.time_ns()
         reviewer = self._invoke_reviewer(
-            task_text, artifact_dir, verification, scope, compact_diff
+            task_text, artifact_dir, verification, scope, compact_diff,
+            stage="task_review", output_name="codex_review.md"
         )
         is_fresh = (
             review_file.exists()
@@ -855,7 +896,8 @@ class AgentOrchestrator:
         inbox_task = self.hub.locate(selected, ("inbox",))
         task_text = inbox_task.path.read_text(encoding="utf-8")
         self._validate_permission_profile(task_text)
-        running_path = self.hub.claim(selected, "orchestrator/antigravity")
+        with self._claim_lock:
+            running_path = self.hub.claim(selected, "orchestrator/antigravity")
         task_text = running_path.read_text(encoding="utf-8")
         artifact_dir = self.hub.hub / "artifacts" / selected
         artifact_dir.mkdir(parents=True, exist_ok=True)
@@ -886,7 +928,9 @@ class AgentOrchestrator:
         self._write(artifact_dir / "verification.log", verification_text)
 
         changed = self._changed_paths(before, self._inventory())
-        violations = self._scope_violations(task_text, changed)
+        violations = self._scope_violations(
+            task_text, changed, self._parallel_owned_patterns(selected)
+        )
         scope_text = f"Scope: {'PASS' if not violations else 'FAIL'}\n\nChanged paths:\n" + "\n".join(sorted(changed))
         if violations:
             scope_text += "\n\nViolations:\n" + "\n".join(violations)
@@ -945,6 +989,175 @@ class AgentOrchestrator:
         )
         self._write(self.hub.hub / "decisions" / f"{selected}_merge_report.md", merge_report)
         return RunReport(selected, decision, artifact_dir, summary)
+
+    def _task_approved(self, task_id: str) -> bool:
+        normalized = task_id.zfill(3)
+        review = self.hub.hub / "review" / f"{normalized}_review.md"
+        if not review.exists():
+            return False
+        return "- Decision: APPROVED" in review.read_text(encoding="utf-8")
+
+    def runnable_tasks(self, limit: int | None = None) -> list[str]:
+        limit = limit or int(self.config.get("batch_default_workers", 2))
+        candidates: list[str] = []
+        owned: list[str] = []
+        for path in self.hub._task_files("inbox"):
+            match = re.match(r"(\d{3,})_", path.name)
+            if not match:
+                continue
+            task_id = match.group(1)
+            blockers = self.hub.claim_blockers(task_id)
+            blockers = [item for item in blockers if not item.startswith("running-limit:")]
+            if blockers:
+                continue
+            text = path.read_text(encoding="utf-8")
+            files = self._section_items(text, "Files Allowed")
+            if any(
+                self.hub._patterns_overlap(candidate, current)
+                for candidate in files for current in owned
+            ):
+                continue
+            candidates.append(task_id)
+            owned.extend(files)
+            if len(candidates) >= limit:
+                break
+        return candidates
+
+    def execute_batch(self, max_workers: int | None = None) -> list[RunReport]:
+        configured_max = int(self.config.get("batch_max_workers", 3))
+        workers = max_workers or int(self.config.get("batch_default_workers", 2))
+        workers = max(1, min(workers, configured_max))
+        selected = self.runnable_tasks(workers)
+        if not selected:
+            return []
+        reports: list[RunReport] = []
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="agent-hub") as pool:
+            futures = {pool.submit(self.execute, task_id): task_id for task_id in selected}
+            for future in as_completed(futures):
+                reports.append(future.result())
+        return sorted(reports, key=lambda item: item.task_id)
+
+    def _checkpoint_evidence(self, task_ids: Sequence[str]) -> tuple[str, list[str]]:
+        blocks: list[str] = []
+        missing: list[str] = []
+        for task_id in task_ids:
+            normalized = task_id.zfill(3)
+            if not self._task_approved(normalized):
+                missing.append(normalized)
+                continue
+            merge = self.hub.hub / "decisions" / f"{normalized}_merge_report.md"
+            review = self.hub.hub / "review" / f"{normalized}_review.md"
+            blocks.append(
+                f"### Task {normalized}\n"
+                + (merge.read_text(encoding="utf-8") if merge.exists() else "merge report missing")
+                + "\n"
+                + review.read_text(encoding="utf-8")
+            )
+        return "\n\n".join(blocks), missing
+
+    def checkpoint_review(self, node: str, task_ids: Sequence[str]) -> RunReport:
+        node = re.sub(r"[^A-Za-z0-9_.-]+", "_", node)
+        evidence, missing = self._checkpoint_evidence(task_ids)
+        artifact_dir = self.hub.hub / "checkpoints" / node
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        if missing:
+            hold = "未进入 Medium 审查：以下任务尚未 APPROVED：" + ", ".join(missing)
+            self._write(artifact_dir / "P_CHECKPOINT_REVIEW.md", hold + "\n")
+            return RunReport(node, "CHECKPOINT_HOLD", artifact_dir, hold)
+        rules = (
+            "这是 P 节点 Final Review，不是普通任务审查。请用中文综合所有已批准任务，"
+            "检查跨任务契约、回归证据、风险和回滚边界。不要重新实现代码。"
+            "结尾必须是 DECISION: APPROVED 或 DECISION: REWORK。"
+        )
+        reviewer = self._invoke_reviewer(
+            f"P节点: {node}\n任务: {', '.join(task_ids)}",
+            artifact_dir,
+            evidence,
+            "Scope: PASS",
+            stage="p_checkpoint_review",
+            output_name="P_CHECKPOINT_REVIEW.md",
+            extra_rules=rules,
+        )
+        review_path = artifact_dir / "P_CHECKPOINT_REVIEW.md"
+        review_text = review_path.read_text(encoding="utf-8") if review_path.exists() else reviewer.stdout
+        approved = reviewer.returncode == 0 and bool(
+            re.search(r"^DECISION: APPROVED\s*$", review_text, re.MULTILINE)
+        )
+        status = "CHECKPOINT_APPROVED" if approved else "CHECKPOINT_REWORK"
+        commit_message = (
+            f"checkpoint({node}): 完成P节点复核与版本冻结准备\n\n"
+            f"- tasks: {', '.join(task_ids)}\n"
+            f"- review: {status}\n"
+            "- 自动合并: OFF\n- 自动实盘: OFF\n"
+        )
+        self._write(artifact_dir / "COMMIT_MESSAGE_ZH.txt", commit_message)
+        version = (
+            f"# {node} 中文版本报告\n\n"
+            f"## 1. 节点目标\n完成 {node} 所含任务的工程级收敛、测试证据汇总与独立复核。\n\n"
+            f"## 2. 纳入任务\n{', '.join(task_ids)}\n\n"
+            f"## 3. 修改前问题与背景\n由各任务 Context 与本节点 Final Review 共同定义，禁止脱离任务书扩大范围。\n\n"
+            f"## 4. 关键变化\n汇总节点内已 APPROVED 的实现；具体行为变化以各任务 merge report、review 和 compact diff 为准。\n\n"
+            f"## 5. 行为影响\n仅接受已经通过任务级验证的行为变化；跨任务契约冲突由本次 Medium Final Review 仲裁。\n\n"
+            f"## 6. 风控边界\n不自动合并、不自动发布、不打开真实交易权限；P5_FORBIDDEN 仍需人工批准。\n\n"
+            f"## 7. 测试与范围证据\n所有进入本节点的任务必须先独立 APPROVED；详细证据见 verification、scope_check、merge report。\n\n"
+            f"## 8. 修改文件\n以各任务 changed_files 与 Files Allowed 的并集为准；同一文件并发写已由 Hub 文件所有权门阻断。\n\n"
+            f"## 9. 回滚方案\n按各任务 Rollback 逆序执行；禁止覆盖其他 Agent 或用户已存在改动。\n\n"
+            f"## 10. 已知风险\n由任务 risk_points 与 P节点 Final Review 汇总；未解决 P0/P1 问题时不得进入 Release Gate。\n\n"
+            f"## 11. P节点 Final Review\n{review_text.strip()}\n\n"
+            f"## 12. Git 版本记录\n见 COMMIT_MESSAGE_ZH.txt；真实 commit/tag 必须显式执行，自动提交保持关闭。\n"
+        )
+        self._write(artifact_dir / "VERSION_REPORT_ZH.md", version)
+        return RunReport(node, status, artifact_dir, f"{node} checkpoint review completed")
+
+    def release_gate(self, release: str, checkpoints: Sequence[str]) -> RunReport:
+        release = re.sub(r"[^A-Za-z0-9_.-]+", "_", release)
+        artifact_dir = self.hub.hub / "releases" / release
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        evidence: list[str] = []
+        missing: list[str] = []
+        for node in checkpoints:
+            path = self.hub.hub / "checkpoints" / node / "P_CHECKPOINT_REVIEW.md"
+            if not path.exists():
+                missing.append(node)
+                continue
+            text = path.read_text(encoding="utf-8")
+            if not re.search(r"^DECISION: APPROVED\s*$", text, re.MULTILINE):
+                missing.append(node)
+                continue
+            evidence.append(f"## {node}\n{text}")
+        if missing:
+            msg = "Release Gate HOLD：P节点未全部通过：" + ", ".join(missing)
+            self._write(artifact_dir / "RELEASE_GATE.md", msg + "\n")
+            return RunReport(release, "RELEASE_HOLD", artifact_dir, msg)
+        rules = (
+            "这是最终 Release Gate。仅做发布门禁与跨P节点风险仲裁，使用中文。"
+            "检查证据完整性、回滚、禁止项和是否存在阻断项；不要修改代码。"
+            "结尾必须是 DECISION: APPROVED 或 DECISION: REWORK。"
+        )
+        reviewer = self._invoke_reviewer(
+            f"Release: {release}\nCheckpoints: {', '.join(checkpoints)}",
+            artifact_dir,
+            "\n\n".join(evidence),
+            "Scope: PASS",
+            stage="release_gate",
+            output_name="RELEASE_GATE.md",
+            extra_rules=rules,
+        )
+        gate_path = artifact_dir / "RELEASE_GATE.md"
+        gate_text = gate_path.read_text(encoding="utf-8") if gate_path.exists() else reviewer.stdout
+        approved = reviewer.returncode == 0 and bool(
+            re.search(r"^DECISION: APPROVED\s*$", gate_text, re.MULTILINE)
+        )
+        status = "RELEASE_GO" if approved else "RELEASE_NO_GO"
+        self._write(
+            artifact_dir / "RELEASE_RECORD_ZH.md",
+            f"# {release} 发布门禁记录\n\n"
+            f"- 状态: {status}\n"
+            f"- P节点: {', '.join(checkpoints)}\n"
+            "- 自动合并: OFF\n- 自动 Tag: OFF\n- 真实交易权限: 未变更\n\n"
+            + gate_text,
+        )
+        return RunReport(release, status, artifact_dir, "Release gate completed")
 
     def review_existing(self, task_id: str) -> RunReport:
         selected = self.select_task(task_id)
@@ -1013,6 +1226,15 @@ def build_parser() -> argparse.ArgumentParser:
     run = sub.add_parser("run")
     run.add_argument("--task")
     run.add_argument("--execute", action="store_true")
+    batch = sub.add_parser("run-batch")
+    batch.add_argument("--execute", action="store_true")
+    batch.add_argument("--max-workers", type=int)
+    checkpoint = sub.add_parser("checkpoint-review")
+    checkpoint.add_argument("--node", required=True)
+    checkpoint.add_argument("--tasks", nargs="+", required=True)
+    release = sub.add_parser("release-gate")
+    release.add_argument("--release", required=True)
+    release.add_argument("--checkpoints", nargs="+", required=True)
     rereview = sub.add_parser("review-existing")
     rereview.add_argument("--task", required=True)
     return parser
@@ -1032,6 +1254,23 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "review-existing":
             report = orchestrator.review_existing(args.task)
+        elif args.command == "checkpoint-review":
+            report = orchestrator.checkpoint_review(args.node, args.tasks)
+        elif args.command == "release-gate":
+            report = orchestrator.release_gate(args.release, args.checkpoints)
+        elif args.command == "run-batch":
+            if not args.execute:
+                selected = orchestrator.runnable_tasks(args.max_workers)
+                print(json.dumps({"runnable_tasks": selected}, ensure_ascii=False, indent=2))
+                return 0
+            reports = orchestrator.execute_batch(args.max_workers)
+            print(json.dumps([{
+                "task_id": item.task_id,
+                "status": item.status,
+                "artifact_dir": str(item.artifact_dir),
+                "message": item.message,
+            } for item in reports], ensure_ascii=False, indent=2))
+            return 0
         else:
             report = orchestrator.execute(args.task) if args.execute else orchestrator.preview(args.task)
         print(json.dumps({

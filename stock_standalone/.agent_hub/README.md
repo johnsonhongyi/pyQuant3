@@ -110,3 +110,27 @@ python tools/agent_orchestrator.py run --task 001 --execute
 - 测试或越界检查失败时强制 `REWORK`。
 
 配置位于 `orchestrator.json`。Worker 使用已验证的 `gemini-3.8-flash-high`，并仅为 Antigravity 子进程注入 Clash `127.0.0.1:7897`；ATS、TDX 和其他交易进程不受影响。Codex 继续负责最终只读审查。
+
+
+## 2026-09-21 并行执行与三层审查升级
+
+Agent Hub 不再以“全局单 running 任务”为默认瓶颈。控制面现在允许最多 3 个 running 任务，但只有同时满足以下条件才可并行：
+- `Depends-On` 已全部完成并通过审查；
+- `Files Allowed` 与其他 running 任务无重叠；
+- Orchestrator 批处理默认 2 个 Worker，上限 3 个；
+- 并行期间 scope check 会识别其他已授权任务拥有的文件，避免把合法并发改动误判为当前任务越界。
+
+推荐入口：
+```powershell
+python tools/agent_orchestrator.py run-batch
+python tools/agent_orchestrator.py run-batch --execute --max-workers 2
+python tools/agent_orchestrator.py checkpoint-review --node P1 --tasks 010 011
+python tools/agent_orchestrator.py release-gate --release v2026.09.22 --checkpoints P1 P2 P3
+```
+
+审查额度分层固定为：
+- `task_review`：fast/light，仅做单任务正确性与范围审查；
+- `p_checkpoint_review`：Medium，仅在节点内所有任务已 APPROVED 后调用一次；
+- `release_gate`：High，仅在全部指定 P 节点通过后调用一次。
+
+P 节点自动生成 `VERSION_REPORT_ZH.md` 与 `COMMIT_MESSAGE_ZH.txt`。自动合并、自动 Git commit/tag、真实交易权限仍保持关闭。

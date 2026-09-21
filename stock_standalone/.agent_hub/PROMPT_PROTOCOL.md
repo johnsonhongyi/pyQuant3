@@ -190,3 +190,29 @@ Antigravity 报告矛盾
   -> 要求补充证据（日志 / 最小复现 / 失败用例）
   -> 输出 REVIEW_VERDICT
 ```
+
+
+## 6. P节点与Release Gate分层审查协议
+
+三层审查不得混用：
+
+```text
+task_review          -> fast/light
+P_checkpoint_review  -> medium
+release_gate         -> high
+```
+
+额度纪律：
+- 普通 task review 禁止使用 High；
+- P 节点 Medium 只在节点任务全部通过后调用一次，未通过时直接 HOLD，不浪费模型额度；
+- Release High 只在所有指定 P 节点均 APPROVED 后调用一次；
+- REWORK 仍受 `max_rework_cycles=1` 限制。
+
+并行纪律：
+- 默认并行度 2，上限 3；
+- `Depends-On` 未完成不得领取；
+- `Files Allowed` 有重叠不得并发；
+- 同一业务文件同一时刻只能有一个写所有者；
+- 并行不是放宽 scope，任何未被当前任务或其他已授权并发任务拥有的修改仍判定越界。
+
+P节点交付必须生成中文版本报告，至少覆盖：节点目标、纳入任务、修改前问题、关键变化、行为影响、风控边界、测试证据、修改文件、回滚、已知风险、P节点审查结论、Git提交建议。

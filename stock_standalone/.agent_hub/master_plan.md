@@ -92,3 +92,18 @@ GPT/Codex总体设计与任务拆解
 - `AUTO_REAL_SELL=OFF`（结构止损自动化需单独批准）
 - 任何 Agent 不得读取、输出或修改券商密钥。
 - 同一业务文件同时只能属于一个 `running` 任务。
+
+
+## 控制面升级：Parallel DAG + Review Tiers（2026-09-21）
+
+- [x] Hub 最大 running 从 1 解锁到 3；
+- [x] `Depends-On` 依赖未满足时禁止 claim；
+- [x] `Files Allowed` 重叠时禁止并发 claim；
+- [x] Orchestrator 增加 `run-batch`，默认 2 Worker、上限 3；
+- [x] 并发 scope check 识别其他已授权任务的文件所有权；
+- [x] 普通任务审查固定 fast/light；
+- [x] P checkpoint 独立 Medium Final Review；
+- [x] Release Gate 独立 High Review，仅在所有 P 节点通过后触发；
+- [x] P 节点自动生成中文 `VERSION_REPORT_ZH.md` 与 `COMMIT_MESSAGE_ZH.txt`；
+- [x] 未满足前置条件时 checkpoint/release 直接 HOLD，避免浪费高级推理额度；
+- [x] 自动 merge、自动 commit/tag、真实交易开关继续保持 OFF。

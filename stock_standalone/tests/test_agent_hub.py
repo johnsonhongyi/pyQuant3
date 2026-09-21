@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -96,3 +97,52 @@ def test_retry_returns_running_task_to_inbox(tmp_path: Path) -> None:
     event = json.loads((hub.hub / "events" / "events.jsonl").read_text(encoding="utf-8").splitlines()[-1])
     assert event["action"] == "returned_for_retry"
     assert event["reason"] == "permission denied"
+
+
+def _add_task(hub: AgentHub, task_id: str, filename: str, allowed: str, depends: str = "none") -> None:
+    source = hub.hub / "inbox" / "001_test_task.md"
+    text = source.read_text(encoding="utf-8")
+    text = text.replace("Task-ID: 001", f"Task-ID: {task_id}\n- Depends-On: {depends}")
+    text = re.sub(r"(?ms)^## Files Allowed\s*$.*?(?=^## |\\Z)", f"## Files Allowed\\n\\n- `{allowed}`\\n\\n", text)
+    (hub.hub / "inbox" / filename).write_text(text, encoding="utf-8")
+
+
+def test_parallel_claim_allows_disjoint_file_ownership(tmp_path: Path) -> None:
+    hub = _build_hub(tmp_path)
+    hub.policy["max_running_tasks"] = 3
+    first = hub.hub / "inbox" / "001_test_task.md"
+    text = first.read_text(encoding="utf-8").replace(
+        "## Files Allowed\n\n- value", "## Files Allowed\n\n- `src/a.py`"
+    )
+    first.write_text(text, encoding="utf-8")
+    _add_task(hub, "002", "002_other.md", "src/b.py")
+    hub.claim("001", "worker-a")
+    hub.claim("002", "worker-b")
+    assert len(hub._task_files("running")) == 2
+
+
+def test_parallel_claim_blocks_overlapping_files(tmp_path: Path) -> None:
+    hub = _build_hub(tmp_path)
+    hub.policy["max_running_tasks"] = 3
+    first = hub.hub / "inbox" / "001_test_task.md"
+    text = first.read_text(encoding="utf-8").replace(
+        "## Files Allowed\n\n- value", "## Files Allowed\n\n- `src/shared.py`"
+    )
+    first.write_text(text, encoding="utf-8")
+    _add_task(hub, "002", "002_conflict.md", "src/shared.py")
+    hub.claim("001", "worker-a")
+    with pytest.raises(HubError, match="file-conflict"):
+        hub.claim("002", "worker-b")
+
+
+def test_dependency_blocks_until_upstream_is_approved(tmp_path: Path) -> None:
+    hub = _build_hub(tmp_path)
+    hub.policy["max_running_tasks"] = 3
+    _add_task(hub, "002", "002_dependent.md", "src/b.py", depends="001")
+    with pytest.raises(HubError, match="dependency:001"):
+        hub.claim("002", "worker-b")
+    hub.claim("001", "worker-a")
+    hub.submit("001", "worker-a", "done")
+    hub.review("001", "approved", "codex", "ok")
+    hub.claim("002", "worker-b")
+    assert hub.locate("002").state == "running"

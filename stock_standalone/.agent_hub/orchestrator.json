@@ -53,8 +53,6 @@
   },
   "review_timeout_seconds": 900,
   "max_rework_cycles": 1,
-  "review_model": "gpt-5.6-luna",
-  "review_effort": "low",
   "max_review_diff_lines": 150,
   "max_review_diff_chars": 12000,
   "worker_max_readonly_tool_calls": 12,
@@ -81,5 +79,30 @@
     "gemini.md",
     "design/antigravity_historical_tasks_archive.md",
     ".agent_hub/.worker_profile/"
-  ]
+  ],
+  "review_profiles": {
+    "task_review": {
+      "model": "gpt-5.6-luna",
+      "effort": "low"
+    },
+    "p_checkpoint_review": {
+      "model": "gpt-5.6-sol",
+      "effort": "medium"
+    },
+    "release_gate": {
+      "model": "gpt-5.6-sol",
+      "effort": "high"
+    }
+  },
+  "review_quota_policy": {
+    "task_review": "每个任务一次，失败仅按 max_rework_cycles 规则复审",
+    "p_checkpoint_review": "仅在节点所有任务均 APPROVED 后调用一次 Medium",
+    "release_gate": "仅在全部指定 P 节点通过后调用一次 High",
+    "forbid_high_for_task_review": true
+  },
+  "hub_max_running_tasks": 3,
+  "batch_default_workers": 2,
+  "batch_max_workers": 3,
+  "auto_checkpoint_commit": false,
+  "auto_release_tag": false
 }

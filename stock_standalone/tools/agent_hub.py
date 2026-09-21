@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import json
 import os
 import re
@@ -40,7 +41,17 @@ class AgentHub:
         policy_path = self.hub / "policy.json"
         if not policy_path.exists():
             raise HubError(f"Missing policy: {policy_path}")
-        return json.loads(policy_path.read_text(encoding="utf-8"))
+        policy = json.loads(policy_path.read_text(encoding="utf-8"))
+        orchestrator_path = self.hub / "orchestrator.json"
+        if orchestrator_path.exists():
+            try:
+                orchestrator = json.loads(orchestrator_path.read_text(encoding="utf-8"))
+                override = orchestrator.get("hub_max_running_tasks")
+                if override is not None:
+                    policy["max_running_tasks"] = int(override)
+            except (OSError, ValueError, json.JSONDecodeError):
+                pass
+        return policy
 
     def _task_files(self, state: str) -> list[Path]:
         directory = self.hub / state
@@ -120,13 +131,88 @@ class AgentHub:
             errors.append(f"running task count {running_count} exceeds limit {max_running}")
         return errors
 
+    @staticmethod
+    def _metadata_value(text: str, key: str) -> str | None:
+        match = re.search(
+            rf"^-\s*{re.escape(key)}:\s*(.+?)\s*$",
+            text,
+            re.MULTILINE | re.IGNORECASE,
+        )
+        return match.group(1).strip() if match else None
+
+    @staticmethod
+    def _section_items(text: str, heading: str) -> list[str]:
+        match = re.search(
+            rf"^## {re.escape(heading)}\s*$\n(?P<body>.*?)(?=^## |\Z)",
+            text,
+            re.MULTILINE | re.DOTALL,
+        )
+        if not match:
+            return []
+        return [
+            item.strip().strip(chr(96))
+            for item in re.findall(r"^-\s+(.+?)\s*$", match.group("body"), re.MULTILINE)
+        ]
+
+    @staticmethod
+    def _patterns_overlap(left: str, right: str) -> bool:
+        left = left.replace("\\", "/")
+        right = right.replace("\\", "/")
+        if left == right or fnmatch.fnmatch(left, right) or fnmatch.fnmatch(right, left):
+            return True
+        left_prefix = re.split(r"[*?[]", left, maxsplit=1)[0]
+        right_prefix = re.split(r"[*?[]", right, maxsplit=1)[0]
+        return bool(left_prefix and right_prefix and (
+            left_prefix.startswith(right_prefix) or right_prefix.startswith(left_prefix)
+        ))
+
+    def _dependencies(self, task_path: Path) -> list[str]:
+        value = self._metadata_value(task_path.read_text(encoding="utf-8"), "Depends-On")
+        if not value or value.lower() in {"none", "-", "n/a"}:
+            return []
+        return [item.strip().zfill(3) for item in re.split(r"[,;\s]+", value) if item.strip()]
+
+    def _dependency_satisfied(self, task_id: str) -> bool:
+        try:
+            location = self.locate(task_id, ("archive", "done"))
+        except HubError:
+            return False
+        if location.state == "archive":
+            return True
+        review = self.hub / "review" / f"{task_id.zfill(3)}_review.md"
+        return review.exists() and "- Decision: APPROVED" in review.read_text(encoding="utf-8")
+
+    def claim_blockers(self, task_id: str) -> list[str]:
+        item = self.locate(task_id, ("inbox",))
+        blockers: list[str] = []
+        max_running = int(self.policy.get("max_running_tasks", 1))
+        running = self._task_files("running")
+        if len(running) >= max_running:
+            blockers.append(f"running-limit:{max_running}")
+        for dep in self._dependencies(item.path):
+            if not self._dependency_satisfied(dep):
+                blockers.append(f"dependency:{dep}")
+        candidate_files = self._section_items(
+            item.path.read_text(encoding="utf-8"), "Files Allowed"
+        )
+        for running_path in running:
+            running_files = self._section_items(
+                running_path.read_text(encoding="utf-8"), "Files Allowed"
+            )
+            for candidate in candidate_files:
+                if any(self._patterns_overlap(candidate, current) for current in running_files):
+                    running_id = TASK_NAME_RE.match(running_path.name).group("id")
+                    blockers.append(f"file-conflict:{running_id}:{candidate}")
+                    break
+        return blockers
+
     def claim(self, task_id: str, agent: str) -> Path:
         errors = self.validate()
         if errors:
             raise HubError("Hub validation failed:\n- " + "\n- ".join(errors))
-        max_running = int(self.policy.get("max_running_tasks", 1))
-        if len(self._task_files("running")) >= max_running:
-            raise HubError(f"Running task limit reached ({max_running})")
+        blockers = self.claim_blockers(task_id)
+        if blockers:
+            raise HubError("Task cannot be claimed: " + ", ".join(blockers))
         item = self.locate(task_id, ("inbox",))
         target = self.hub / "running" / item.path.name
         os.replace(item.path, target)
