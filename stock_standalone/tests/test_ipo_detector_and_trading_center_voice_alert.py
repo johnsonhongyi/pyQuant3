@@ -29,6 +29,7 @@ app = QApplication.instance() or QApplication(sys.argv)
 from ats.strategy.ipo_trading_center import (
     IPOTradingCenter, IPOOrderDirective, IPOTradingPosition
 )
+from ats.strategy.ipo_market_sentiment_engine import MarketSentimentSnapshot
 from ats.strategy.ipo_vwap_detector_engine import (
     IPOVWAPDetectorEngine, VWAPDetectorSignal
 )
@@ -44,16 +45,22 @@ def setup_function():
     """每个测试前重置 IPOTradingCenter 单例状态"""
     center = IPOTradingCenter.get_instance()
     center._positions.clear()
-    center._pending_directives.clear()
     center._closed_positions.clear()
     center._signal_iteration_log.clear()
+    center._pending_directives.clear()
+    center._last_market_context = None
     center.total_capital = 1000000.0
     center.available_cash = 1000000.0
     center.enable_full_rotation = False
     center._ledger_file = TEST_LEDGER_FILE
+    if os.path.exists(TEST_LEDGER_FILE):
+        try:
+            os.remove(TEST_LEDGER_FILE)
+        except Exception:
+            pass
 
 
-def teardown_module():
+def teardown_function():
     if os.path.exists(TEST_LEDGER_FILE):
         try:
             os.remove(TEST_LEDGER_FILE)
@@ -70,10 +77,22 @@ def test_full_rotation_swap_generation_and_t1_guarded_execution():
     center.set_full_rotation_enabled(True)
     assert center.enable_full_rotation is True
 
+    # 注入合法风控快照以通过生产级风控闸门
+    now_ts = time.time()
+    snap = MarketSentimentSnapshot(
+        tide_state="T7_WARMING",
+        tide_position_cap_pct=100.0,
+        risk_mode="NORMAL",
+        position_multiplier=1.0,
+    ).finalize()
+    snap.generated_at = now_ts
+    center._last_market_context = snap
+
     # 1. 初始买入老股票 300001 (成本 50.0，满仓 20000 股，耗资 100 万)
     d_buy_old = IPOOrderDirective(
         action="BUY", code="300001", name="老标的", price=50.0,
-        shares=20000, size_pct=100.0, urgency="NORMAL", reason="初始全仓买入"
+        shares=20000, size_pct=100.0, urgency="NORMAL", reason="初始全仓买入",
+        timestamp=now_ts
     )
     center.execute_directive(d_buy_old)
     assert "300001" in center._positions
@@ -268,9 +287,13 @@ def test_command_room_dual_mode_views_and_detail_popup():
         assert dlg._pos_view_mode == "ACTIVE"
         assert dlg.tbl_pos.rowCount() == 0
 
-        # 切换到历史信号日志模式
+        # 切换到历史信号日志模式 (默认 TODAY 过滤器生效，因只有 2026-09-18 陈旧日志，今日显示为 0)
         dlg._set_orders_view_mode("HISTORY")
         assert dlg._orders_view_mode == "HISTORY"
+        assert dlg.tbl_orders.rowCount() == 0
+
+        # 切换日期过滤器为全部历史 ALL，展示 1 条
+        dlg._set_history_date_filter("ALL")
         assert dlg.tbl_orders.rowCount() == 1
 
         # 测试直达定位能力

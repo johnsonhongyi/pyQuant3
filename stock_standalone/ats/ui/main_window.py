@@ -4205,6 +4205,14 @@ class ATSMainWindow(QMainWindow):
                     pass
             QTimer.singleShot(0, _push_ladder)
 
+        # 🛡️ 无论是否打开天梯窗口，后台自动驱动天梯底层逻辑 (对齐龙头突击与资金主线)
+        if self.current_df is not None and not self.current_df.empty:
+            try:
+                from ats.limit_up_engine import LimitUpEngine
+                LimitUpEngine.get_instance().update_live_snapshot(self.current_df, fetch_l2_quotes=False)
+            except Exception as _e_lue:
+                logger.debug(f"[ATSMainWindow] IPC 后台自动运行天梯底层引擎异常: {_e_lue}")
+
         # 🛡️ 实时推送到独立每日涨停看板 — 改为 QTimer.singleShot(0) 异步（自身已有 1.5s 节流）
         from PyQt6.sip import isdeleted
         if hasattr(self, 'daily_limit_up_dialog') and self.daily_limit_up_dialog and not isdeleted(self.daily_limit_up_dialog):
@@ -4771,6 +4779,14 @@ class ATSMainWindow(QMainWindow):
             if swing_rows:
                 self.swing_table.update_data_list(swing_rows)
 
+        # 🛡️ 无论当前处于哪个 Tab，后台自动运行天梯底层引擎逻辑 (解除 Tab 0 单点依赖，对齐龙头突击)
+        if self.current_df is not None and not self.current_df.empty:
+            try:
+                from ats.limit_up_engine import LimitUpEngine
+                LimitUpEngine.get_instance().update_live_snapshot(self.current_df, fetch_l2_quotes=False)
+            except Exception as _e_lue:
+                logger.debug(f"[ATSMainWindow] 后台自动运行天梯底层引擎异常: {_e_lue}")
+
         # 更新左侧三级池 tree
         radar_list, watch_list, trade_list = self.universe_manager.get_pools()
         self.universe_widget.update_pools(radar_list, watch_list, trade_list)
@@ -4850,6 +4866,17 @@ class ATSMainWindow(QMainWindow):
                 except Exception as e:
                     logger.debug(f"[ATSMainWindow] Error updating sector detail dialog: {e}")
             QTimer.singleShot(60, _upd_sector)
+
+        # ⚡ 每日涨停与强势股天梯看板 (错峰 90ms 后，对齐龙头突击与监控)
+        _dld = getattr(self, 'daily_limit_up_dialog', None)
+        if _dld is not None and not isdeleted(_dld) and (_dld.isVisible() or getattr(_dld, 'is_hidden_state', False)):
+            def _upd_ladder():
+                try:
+                    if not isdeleted(_dld) and (_dld.isVisible() or getattr(_dld, 'is_hidden_state', False)):
+                        _dld.update_data_payload(_df, sh_pct)
+                except Exception as e:
+                    logger.debug(f"[ATSMainWindow] Error updating daily limit-up dialog: {e}")
+            QTimer.singleShot(90, _upd_ladder)
 
 
 
@@ -6752,6 +6779,8 @@ class ATSMainWindow(QMainWindow):
                 sh_pct = float(self.current_df['percent'].mean())
         if hasattr(self.daily_limit_up_dialog, 'update_data_payload'):
             self.daily_limit_up_dialog.update_data_payload(self.current_df, sh_pct)
+        if hasattr(self.daily_limit_up_dialog, 'ensure_rendered'):
+            self.daily_limit_up_dialog.ensure_rendered()
 
     def open_hot_sector_leaderboard(self, restore_state=None, cold_start=False):
         """调起 Top 3 强势板块龙头突击跟单榜独立窗口（非模态独立运行，完全不阻塞主界面）"""

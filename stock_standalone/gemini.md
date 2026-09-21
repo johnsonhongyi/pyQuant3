@@ -1,5 +1,30 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-09-21 12:35
+- [x] **【集中交易指挥室历史日志隔离归集、标的时间线持久力透视与12级潮汐动能重构】(`ats/ui/ipo_command_room_dialog.py`, `ats/strategy/ipo_trading_center.py`, `ats/strategy/ipo_vwap_detector_engine.py`, `tests/test_command_room_features_and_12tide.py`)**：
+    - [x] **完整日期补齐与今日/陈旧彻底物理隔离**：
+        - 彻底根除原代码硬编码切除日期的 Bug，保留并优先使用纳秒/秒级真实时间戳，格式化为 `今日 HH:MM:SS` 与 `YY-MM-DD HH:MM:SS`，彻底消除今日与陈旧数据时间混淆；
+        - 新增日期范围筛选下拉框（`📅 仅看今日` / `📅 全部历史` / `📅 历史陈旧`），默认激活 `仅看今日`，让当日看盘清爽专注，同时支持回溯历史。
+    - [x] **日志原子清理归集与同标的异动时间线/连续持久力评估**：
+        - 后端新增 `clear_signal_iteration_logs(keep_today: bool)`，支持原子刷盘持久化，界面提供一键清理菜单；
+        - 指令面板增加 `[📜 流水]` 与 `[📊 标的归集]` 双子视图，标的归集视图自动聚合异动频次、首次/最新时间、最高级别，并输出连续持久力标签（`🔥 极强持久`、`⚡ 持续异动`、`⏱️ 单次脉冲`、`📉 动能衰减`）；
+        - 全新开发 `IPOSignalTimelineDialog` 时间线弹窗，支持双击/右键秒级调出该标的全天多次异动的脉冲时序、VWAP 偏离走势与策略演化轨迹。
+    - [x] **动能评分全面接入底层 12 阶潮汐状态机**：
+        - 废除原动能分根据盘后涨幅无脑给 98~100 虚高分及外部信号无脑加分的漏洞；
+        - 全面打通 `subnew_tide_state_machine.py` 的 12 级潮汐能力（`T0_INSUFFICIENT` ~ `T11_OVERHEATED`）；在退潮/高潮期折减追高冲高，在背离/冰点期强化次级买点（`SECONDARY_BUY`）与平底结构，构建 70~95 分严密阶梯。
+    - [x] **全量自动化验证 100% 绿灯**：
+        - 新增 5 项指挥室与 12 级潮汐专项测试全部通过（5 passed）；
+        - 关联 65 项业务、回放、账本持久化与风控闸门测试 100% 绿灯（65 passed in 6.04s）；
+        - compileall exit=0 无任何语法与导入错误。
+
+## 2026-09-21 12:30
+- [x] **【天梯底层逻辑后台自动运行与流水线驱动重构落地】(`ats/limit_up_engine.py`, `ats/ui/main_window.py`, `ats/ui/daily_limit_up_dialog.py`, `tests/test_ladder_background_auto_update.py`)**：
+    - [x] **数据驱动与解除 Tab 0 单点依赖**：在 `ats/limit_up_engine.py` 中新增 `update_live_snapshot`，内置 1.5s 智能节流与纯内存向量化计算；`_on_ipc_data_received` 与 `_on_ledger_worker_done` 中无论当前停留在哪个 Tab 均在后台自动运行天梯底层引擎，彻底消除因 Tab 0（资金主线）休眠导致天梯底座饥渴的死锁；
+    - [x] **挂载主窗口 Tier 3 异步错峰流水线**：在 `main_window.py` 的 `_async_refresh_tier3` 中挂载 `daily_limit_up_dialog`（错峰 90ms 调度），让天梯看板与龙头监控、板块明细同等享受主时钟轮询持续推送，消除“等很久”；
+    - [x] **多日天梯聚合就地初筛与首帧乐观先行出表**：`aggregate_multi_day_strong_stocks` 在今日记录为空时就地基于 `current_df` 补齐涨停扫描，确保新晋连板股绝不漏算；天梯看板在启动时采用纯内存首帧秒级渲染，避免后台 TDX L2 盘口网络 I/O 阻塞界面；
+    - [x] **盘中时间片涨停豁免与贴边启停修复**：修复分歧低吸等时间片对真实涨停个股的误杀逻辑，修正 hover_timer 仅在贴边隐藏时启动；
+    - [x] **全量自动化验证 100% 绿灯**：16 项天梯、多日归档与性能节流测试全部通过（16 passed），compileall exit=0，git diff --check 格式验证通过。
+
 ## 2026-09-21 12:10
 - [x] **【编排器防拉锯熔断、上下文瘦身与 Codex 限额保护规则落地】(`tools/agent_hub.py`, `tools/agent_orchestrator.py`, `.agent_hub/PROMPT_PROTOCOL.md`, `tests/test_agent_orchestrator.py`)**：
     - [x] **打回次数硬熔断 (Max Rework = 1)**：新增 `get_rework_count` 与 `rework_blocked` 状态；当任务第 2 次审查仍未通过时，立即熔断自动化循环，标记为 `REWORK_BLOCKED_FOR_HUMAN` 留在 done 状态，等待人工仲裁，彻底杜绝 5 轮拉锯打爆 5 小时配额；

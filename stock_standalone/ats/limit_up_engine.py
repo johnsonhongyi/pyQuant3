@@ -485,6 +485,31 @@ class LimitUpEngine:
 
             threading.Thread(target=_persist_worker, daemon=True, name="LimitUpPersistWorker").start()
 
+    def update_live_snapshot(
+        self,
+        current_df: Optional[pd.DataFrame],
+        fetch_l2_quotes: bool = False,
+        min_interval_sec: float = 1.5
+    ) -> List[Dict[str, Any]]:
+        """
+        【⚡ 后台实时行情快照自动驱动入口 (对齐龙头突击与资金主线)】
+        在数据后台更新后自动运行底层逻辑，填充内存权威天梯数据底座 _current_live_records：
+        1. 内置 1.5s 智能节流防抖，避免高频 IPC 广播重复全量扫描；
+        2. 默认 fetch_l2_quotes=False，纯向量化内存计算 (<5ms)，零主线程阻塞与零网络 IO 依赖；
+        3. 确保无论前台切换到哪个 Tab，天梯底层逻辑始终时刻保持最新。
+        """
+        if current_df is None or current_df.empty:
+            with self._cache_lock:
+                return list(self._current_live_records)
+
+        now = time.time()
+        with self._cache_lock:
+            # 节流判断：若距离上次扫描不足 min_interval_sec 且已有最新缓存，直接复用
+            if (now - getattr(self, '_last_scan_time', 0.0) < min_interval_sec) and self._current_live_records:
+                return list(self._current_live_records)
+
+        return self.scan_limit_up_records_from_df(current_df, fetch_l2_quotes=fetch_l2_quotes)
+
     def scan_limit_up_records_from_df(
         self,
         current_df: pd.DataFrame,
@@ -1453,6 +1478,14 @@ class LimitUpEngine:
         # 获取最近 N 日的日期子集
         target_dates = sorted_dates[-days:] if len(sorted_dates) >= days else sorted_dates
         today_str = time.strftime("%Y-%m-%d")
+
+        # 🛡️ 关键自愈与就地初筛：若今日实时记录为空且传入了有效的 current_df，自动就地补齐扫描
+        if not self._current_live_records and current_df is not None and not current_df.empty:
+            try:
+                self.update_live_snapshot(current_df, fetch_l2_quotes=False, min_interval_sec=0.0)
+            except Exception as _e_fill:
+                logger.debug(f"[LimitUpEngine] 就地补齐实时涨停扫描异常: {_e_fill}")
+
         if today_str not in target_dates and self._current_live_records:
             target_dates.append(today_str)
 
