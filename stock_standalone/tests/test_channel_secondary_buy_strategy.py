@@ -191,6 +191,29 @@ class TestIPOTradingCenterTradePlanIntegration(unittest.TestCase):
         self.assertEqual([d.action for d in pending], ["EXIT_ALL"])
         self.assertEqual(self.center.get_signal_convergence_summary()["suppressed_count"], 1)
 
+    def test_05c_directive_lifts_trade_plan_execution_fields(self):
+        plan = IPOTradePlan(
+            code="688826",
+            name="测试标的",
+            trigger_price=101.2,
+            higher_low_stop=97.8,
+            target_1_channel_mid=108.5,
+            target_2_swing_high=115.0,
+            expire_at="14:45:00",
+        )
+        directive = IPOOrderDirective(
+            action="BUY_SCOUT",
+            code="688826",
+            name="测试标的",
+            trade_plan=plan,
+        )
+
+        self.assertAlmostEqual(directive.price, 101.2)
+        self.assertAlmostEqual(directive.stop_loss_price, 97.8)
+        self.assertAlmostEqual(directive.target_price, 108.5)
+        self.assertAlmostEqual(directive.target_2_price, 115.0)
+        self.assertEqual(directive.expire_at, "14:45:00")
+
     def test_06_record_order_execution_scout_and_exit(self):
         """测试 BUY_SCOUT 建仓与 EXIT_ALL 平仓全生命周期流转"""
         sig = VWAPDetectorSignal(
