@@ -47,6 +47,7 @@ from ats.strategy.channel_secondary_buy_strategy import (
 )
 from ats.proactive_exit_engine import ProactiveExitEngine
 from ats.strategy.signal_convergence import SignalConvergenceResult, converge_directives
+from ats.strategy.directive_execution_guard import validate_directive
 
 logger = logging.getLogger("IPOTradingCenter")
 
@@ -131,6 +132,45 @@ class IPOOrderDirective:
     exit_rule_id: str = ""
     exit_rule_layer: int = 0
     bypass_t1_lock: bool = False       # 仅灾难性硬止损可置 True
+    stop_loss_price: float = 0.0       # 直接买卖点显式止损/结构失效价
+    target_price: float = 0.0          # 第一目标价
+    target_2_price: float = 0.0        # 第二目标价
+    expire_at: str = ""                # 当日执行失效时间 HH:MM:SS
+    signal_state: str = ""              # OBSERVE/CANDIDATE/ACTIONABLE/EXIT/BLOCKED
+    reject_code: str = ""
+    reject_reason: str = ""
+    validated_at: float = 0.0
+    validation_price: float = 0.0
+
+    def __post_init__(self) -> None:
+        """Lift immutable TradePlan execution fields onto the directive surface."""
+        action = str(self.action or "").upper()
+        if not self.signal_state:
+            if action in ("SELL", "EXIT_ALL", "REDUCE", "REDUCE_30", "REDUCE_HALF"):
+                self.signal_state = "EXIT"
+            elif action in ("BUY", "BUY_SCOUT", "BUY_CONFIRM"):
+                self.signal_state = "ACTIONABLE"
+            elif action in ("SWITCH_SWAP", "FULL_ROTATION_SWAP"):
+                self.signal_state = "CANDIDATE"
+            else:
+                self.signal_state = "OBSERVE"
+        plan = self.trade_plan
+        if plan is None:
+            return
+        if self.price <= 0 and getattr(plan, "trigger_price", 0.0):
+            self.price = float(plan.trigger_price)
+        if self.stop_loss_price <= 0:
+            self.stop_loss_price = float(
+                getattr(plan, "higher_low_stop", 0.0)
+                or getattr(plan, "base_low_invalid", 0.0)
+                or 0.0
+            )
+        if self.target_price <= 0:
+            self.target_price = float(getattr(plan, "target_1_channel_mid", 0.0) or 0.0)
+        if self.target_2_price <= 0:
+            self.target_2_price = float(getattr(plan, "target_2_swing_high", 0.0) or 0.0)
+        if not self.expire_at:
+            self.expire_at = str(getattr(plan, "expire_at", "") or "")
 
     def to_dict(self) -> Dict[str, Any]:
         from dataclasses import asdict
@@ -186,6 +226,8 @@ class IPOTradingCenter:
         self.auto_follow_trading: bool = False     # 全自动跟随交易开关 (开启后自动撮合指令)
         self._pending_directives: List[IPOOrderDirective] = []
         self._signal_convergence_summary: Dict[str, Any] = {}
+        self._recent_directive_fingerprints: Dict[str, float] = {}
+        self._directive_dedupe_window_sec: float = 120.0
         self._trade_plans: Dict[str, IPOTradePlan] = {} # 标的对应的不变 TradePlan 字典
         self._emitted_plan_ids: set = set()            # 已生成指令的 TradePlan ID 集合 (刷新幂等防重)
         self._emitted_signal_ids: set = set()          # 已生成指令的 Signal ID 集合
@@ -398,7 +440,11 @@ class IPOTradingCenter:
         """Return the single converged directive view used by UI and execution."""
         with self._lock:
             result: SignalConvergenceResult = converge_directives(self._pending_directives)
-            self._signal_convergence_summary = result.summary()
+            summary = result.summary()
+            summary["time_window_suppressed_count"] = int(
+                self._signal_convergence_summary.get("time_window_suppressed_count", 0) or 0
+            )
+            self._signal_convergence_summary = summary
             return list(result.directives)
 
     def get_signal_convergence_summary(self) -> Dict[str, Any]:
@@ -406,13 +452,94 @@ class IPOTradingCenter:
         with self._lock:
             return dict(self._signal_convergence_summary)
 
+    def _directive_fingerprint(self, directive: IPOOrderDirective) -> str:
+        action = str(getattr(directive, "action", "") or "").upper()
+        code = str(getattr(directive, "code", "") or "").zfill(6)
+        reason = str(getattr(directive, "reason", "") or "")[:80]
+        price = round(float(getattr(directive, "price", 0.0) or 0.0), 2)
+        size_pct = round(float(getattr(directive, "size_pct", 0.0) or 0.0), 2)
+        stop_price = round(float(getattr(directive, "stop_loss_price", 0.0) or 0.0), 2)
+        expire_at = str(getattr(directive, "expire_at", "") or "")
+        return (
+            f"{code}|{action}|{price:.2f}|{size_pct:.2f}|"
+            f"{stop_price:.2f}|{expire_at}|{reason}"
+        )
+
+    def _log_directive_event(
+        self, directive: IPOOrderDirective, *, status: str,
+        reject_code: str = "", reject_reason: str = "",
+    ) -> None:
+        now_ts = time.time()
+        item = {
+            "timestamp": now_ts,
+            "time_str": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now_ts)),
+            "action": directive.action,
+            "code": directive.code,
+            "name": directive.name,
+            "price": directive.price,
+            "size_pct": directive.size_pct,
+            "reason": directive.reason,
+            "signal_tier": directive.signal_tier,
+            "signal_state": getattr(directive, "signal_state", ""),
+            "execution_status": status,
+            "reject_code": reject_code,
+            "reject_reason": reject_reason,
+        }
+        self._signal_iteration_log.insert(0, item)
+        self._signal_iteration_log = self._signal_iteration_log[:300]
+
+    def _reject_directive(self, directive: IPOOrderDirective, code: str, reason: str) -> bool:
+        directive.signal_state = "BLOCKED"
+        directive.reject_code = code
+        directive.reject_reason = reason
+        self._log_directive_event(
+            directive, status="REJECTED", reject_code=code, reject_reason=reason
+        )
+        logger.warning("[IPO-TRADING] rejected %s %s [%s] %s",
+                       directive.action, directive.code, code, reason)
+        self._save_persisted_ledger()
+        return False
+
     def _publish_converged_directives(
         self, directives: List[IPOOrderDirective]
     ) -> List[IPOOrderDirective]:
         """Publish one clear, non-conflicting directive set without altering decisions."""
         result: SignalConvergenceResult = converge_directives(directives)
-        self._pending_directives = list(result.directives)
-        self._signal_convergence_summary = result.summary()
+        now_ts = time.time()
+        previous_by_fp = {
+            self._directive_fingerprint(item): item for item in self._pending_directives
+        }
+        deduped: List[IPOOrderDirective] = []
+        duplicate_window_count = 0
+        exit_actions = {"SELL", "EXIT_ALL", "REDUCE", "REDUCE_30", "REDUCE_HALF"}
+        for directive in result.directives:
+            action = str(directive.action or "").upper()
+            fingerprint = self._directive_fingerprint(directive)
+            last_ts = float(self._recent_directive_fingerprints.get(fingerprint, 0.0) or 0.0)
+            if action not in exit_actions and last_ts > 0 and now_ts - last_ts < self._directive_dedupe_window_sec:
+                duplicate_window_count += 1
+                self._log_directive_event(
+                    directive, status="FILTERED",
+                    reject_code="TIME_WINDOW_DUPLICATE",
+                    reject_reason=f"{self._directive_dedupe_window_sec:.0f}s 时间窗内重复信号",
+                )
+                retained = previous_by_fp.get(fingerprint)
+                if retained is not None and retained not in deduped:
+                    deduped.append(retained)
+                continue
+            self._recent_directive_fingerprints[fingerprint] = now_ts
+            deduped.append(directive)
+        cutoff = now_ts - max(self._directive_dedupe_window_sec * 4.0, 600.0)
+        self._recent_directive_fingerprints = {
+            key: ts for key, ts in self._recent_directive_fingerprints.items() if ts >= cutoff
+        }
+        self._pending_directives = deduped
+        summary = result.summary()
+        summary["time_window_suppressed_count"] = duplicate_window_count
+        summary["actionable_count"] = len([
+            d for d in deduped if getattr(d, "signal_state", "") not in ("OBSERVE", "BLOCKED")
+        ])
+        self._signal_convergence_summary = summary
         self._broadcast_directives_to_alert_notifier(self._pending_directives)
         self._auto_execute_if_enabled()
         return self.get_pending_directives()
@@ -426,6 +553,36 @@ class IPOTradingCenter:
         """获取全生命周期信号决策与迭代历史日志 (杜绝今天卖了就没下文)"""
         with self._lock:
             return list(self._signal_iteration_log)
+
+    def get_directive_quality_stats(self) -> Dict[str, Any]:
+        """Separate BUY/ADD/REDUCE/SELL quality counters for the current day."""
+        today = time.strftime("%Y-%m-%d")
+        groups = {
+            "BUY": {"BUY", "BUY_SCOUT", "BUY_CONFIRM"},
+            "ADD": {"ADD", "BUY_ADD"},
+            "REDUCE": {"REDUCE", "REDUCE_30", "REDUCE_HALF"},
+            "SELL": {"SELL", "EXIT_ALL", "SWITCH_SWAP"},
+        }
+        stats = {name: {"total": 0, "executed": 0, "rejected": 0, "filtered": 0}
+                 for name in groups}
+        with self._lock:
+            for item in self._signal_iteration_log:
+                if not str(item.get("time_str", "")).startswith(today):
+                    continue
+                action = str(item.get("action", "") or "").upper()
+                status = str(item.get("execution_status", "EXECUTED") or "EXECUTED").upper()
+                for name, actions in groups.items():
+                    if action not in actions:
+                        continue
+                    stats[name]["total"] += 1
+                    if status == "REJECTED":
+                        stats[name]["rejected"] += 1
+                    elif status == "FILTERED":
+                        stats[name]["filtered"] += 1
+                    else:
+                        stats[name]["executed"] += 1
+                    break
+        return {"date": today, "actions": stats}
 
     def clear_signal_iteration_logs(self, keep_today: bool = False) -> int:
         """
@@ -1872,6 +2029,18 @@ class IPOTradingCenter:
         - 将每次决议与撮合事件记录进 _signal_iteration_log；
         - 原子写盘持久化到本地账本。
         """
+        # Persistent command-room execution must revalidate the latest stock
+        # snapshot before any order reaches TK PAPER/LIVE adapters.
+        if self._auto_load_ledger and not getattr(directive, "_kernel_routed", False):
+            report = self._reports_cache.get(str(directive.code).strip().zfill(6))
+            validation = validate_directive(directive, report)
+            directive.validated_at = time.time()
+            directive.validation_price = float(validation.live_price or 0.0)
+            if not validation.allowed:
+                return self._reject_directive(directive, validation.code, validation.reason)
+            if validation.live_price > 0:
+                directive.price = float(validation.live_price)
+
         # The persistent singleton used by the command room must execute through
         # the TK Paper kernel first.  Ephemeral instances used by unit tests and
         # offline strategy evaluation keep their isolated in-memory behavior.
@@ -1880,11 +2049,11 @@ class IPOTradingCenter:
                 from ats.unified_paper_account import execute_command_directive
                 kernel_result = execute_command_directive(directive)
                 if not kernel_result.executed:
-                    logger.warning(
-                        "[IPO-TRADING] TK PAPER rejected %s %s: %s",
-                        directive.action, directive.code, kernel_result.reject_code,
+                    return self._reject_directive(
+                        directive,
+                        str(kernel_result.reject_code or "TK_PAPER_REJECTED"),
+                        str(getattr(kernel_result, "message", "") or kernel_result.reject_code or "TK PAPER rejected"),
                     )
-                    return False
                 setattr(directive, "_kernel_routed", True)
                 if kernel_result.volume > 0:
                     directive.shares = int(kernel_result.volume)
@@ -1892,7 +2061,9 @@ class IPOTradingCenter:
                     directive.size_pct = round(kernel_result.size_pct * 100.0, 2)
             except Exception as exc:
                 logger.exception("[IPO-TRADING] Unified TK PAPER routing failed: %s", exc)
-                return False
+                return self._reject_directive(
+                    directive, "TK_ROUTING_EXCEPTION", str(exc)
+                )
 
         with self._lock:
             code = directive.code
@@ -1900,11 +2071,10 @@ class IPOTradingCenter:
             if directive.action == "FULL_ROTATION_SWAP":
                 old_pos = self._positions.get(directive.target_swap_code)
                 if old_pos is not None and old_pos.entry_date == today_str:
-                    logger.warning(
-                        "[IPO-TRADING] T+1 hard lock rejected rotation sell: %s",
-                        directive.target_swap_code,
+                    return self._reject_directive(
+                        directive, "T1_ROTATION_LOCK",
+                        f"T+1 锁定，轮动卖出腿不可执行: {directive.target_swap_code}",
                     )
-                    return False
             t_str = time.strftime("%H:%M:%S")
             pnl_pct = 0.0
             pnl_amt = 0.0
@@ -1913,11 +2083,10 @@ class IPOTradingCenter:
             if directive.action in sell_actions:
                 pos = self._positions.get(code)
                 if pos is None or pos.shares <= 0:
-                    logger.warning(
-                        "[IPO-TRADING] Sell action rejected: no holding position for %s (%s)",
-                        code, directive.action,
+                    return self._reject_directive(
+                        directive, "NO_POSITION",
+                        f"无可卖持仓: {code} ({directive.action})",
                     )
-                    return False
                 catastrophic_rules = {
                     "exit_higher_low_broken",
                     "exit_base_low_broken",
@@ -1928,16 +2097,17 @@ class IPOTradingCenter:
                     and directive.exit_rule_id in catastrophic_rules
                 )
                 if pos.entry_date == today_str and not can_bypass_t1:
-                    logger.warning(
-                        "[IPO-TRADING] T+1 hard lock rejected execution: %s %s",
-                        directive.action, code,
+                    return self._reject_directive(
+                        directive, "T1_SELL_LOCK",
+                        f"T+1 锁定，当日新仓不可执行 {directive.action}",
                     )
-                    return False
 
             if directive.action in ("BUY", "BUY_SCOUT", "BUY_CONFIRM"):
                 if directive.price <= 0:
-                    logger.warning("[IPO-TRADING] Buy action rejected: non-positive price %s", directive.price)
-                    return False
+                    return self._reject_directive(
+                        directive, "INVALID_PRICE",
+                        f"买入价格无效: {directive.price}",
+                    )
 
                 # ── 普通买入执行端最终风控闸门校验 ──
                 # 1. 取得可信预算快照（无可信快照坚决拒绝扩大仓位）
@@ -1946,8 +2116,10 @@ class IPOTradingCenter:
                     ctx = getattr(self.sentiment_engine, "_cached_snapshot", None)
 
                 if ctx is None:
-                    logger.warning("[IPO-TRADING] Buy action rejected: missing market context snapshot")
-                    return False
+                    return self._reject_directive(
+                        directive, "MISSING_MARKET_CONTEXT",
+                        "缺少市场潮汐/风险上下文快照",
+                    )
 
                 directive_size_pct = float(getattr(directive, "size_pct", 0.0) or 0.0)
                 if directive_size_pct <= 0.0 and directive.shares > 0 and directive.price > 0 and self.total_capital > 0:
@@ -1963,11 +2135,10 @@ class IPOTradingCenter:
 
                 # 铁律: T1/T4 或 BLOCK_NEW_BUYS 必须坚决拒绝普通买入，且不创建幽灵持仓、不扣减现金
                 if ctx_tide_state in ("T1_CLIMAX_DISTRIBUTION", "T4_PANIC_ACCEL") or ctx_risk_mode == "BLOCK_NEW_BUYS" or ctx_risk_mult <= 0.0:
-                    logger.warning(
-                        "[IPO-TRADING] Buy action rejected: T1/T4/BLOCK_NEW_BUYS gate active (tide=%s, risk=%s, mult=%.2f)",
-                        ctx_tide_state, ctx_risk_mode, ctx_risk_mult
+                    return self._reject_directive(
+                        directive, "MARKET_RISK_BLOCK",
+                        f"市场风险门禁: tide={ctx_tide_state}, risk={ctx_risk_mode}, mult={ctx_risk_mult:.2f}",
                     )
-                    return False
 
                 is_fresh = True
                 if ctx_gen_ts <= 0 or exec_ts <= 0 or abs(exec_ts - ctx_gen_ts) > 300.0:
@@ -1990,11 +2161,10 @@ class IPOTradingCenter:
 
                 # 仅当快照新鲜、指令与快照紧密因果关联、且非T0数据不足时，才属于可信快照关联指令
                 if not (is_fresh and has_directive_link and ctx_tide_state != "T0_INSUFFICIENT"):
-                    logger.warning(
-                        "[IPO-TRADING] Buy action rejected: untrusted snapshot (fresh=%s, link=%s, tide=%s)",
-                        is_fresh, has_directive_link, ctx_tide_state
+                    return self._reject_directive(
+                        directive, "UNTRUSTED_MARKET_SNAPSHOT",
+                        f"市场快照不可信: fresh={is_fresh}, link={has_directive_link}, tide={ctx_tide_state}",
                     )
-                    return False
 
                 tide_cap_val = float(getattr(ctx, "tide_position_cap_pct", 100.0) or 100.0)
                 tide_cap = max(0.0, min(100.0, tide_cap_val))
@@ -2013,33 +2183,30 @@ class IPOTradingCenter:
                 allowed_pct = min(directive_size_pct, remaining_cap)
 
                 if allowed_pct <= 0.0:
-                    logger.warning(
-                        "[IPO-TRADING] Buy action rejected: allowed budget is 0.0%% (dir=%.1f%%, remaining=%.1f%%, current_holding=%.1f%%)",
-                        directive_size_pct, remaining_cap, current_portfolio_weight
+                    return self._reject_directive(
+                        directive, "NO_POSITION_BUDGET",
+                        f"无可用仓位预算: dir={directive_size_pct:.1f}%, remaining={remaining_cap:.1f}%, holding={current_portfolio_weight:.1f}%",
                     )
-                    return False
 
                 allowed_money = self.total_capital * (allowed_pct / 100.0)
                 calc_shares = int(allowed_money / directive.price / 100.0) * 100
                 target_shares = min(calc_shares, directive.shares) if directive.shares > 0 else calc_shares
 
                 if target_shares < 100:
-                    logger.warning(
-                        "[IPO-TRADING] Buy action rejected: target shares after budget limit %d < 100",
-                        target_shares
+                    return self._reject_directive(
+                        directive, "MIN_LOT_BLOCK",
+                        f"预算限制后目标股数不足 100 股: {target_shares}",
                     )
-                    return False
 
                 # 现金硬约束与最小成交手数核验 (原子性守卫：不足 100 股坚决不成交)
                 max_cash_shares = int(self.available_cash / directive.price / 100.0) * 100
                 exec_shares = min(target_shares, max_cash_shares)
 
                 if exec_shares < 100:
-                    logger.warning(
-                        "[IPO-TRADING] Buy action rejected: executable shares %d < 100 (target=%d, max_cash_shares=%d, px=%.2f, cash=%.1f)",
-                        exec_shares, target_shares, max_cash_shares, directive.price, self.available_cash
+                    return self._reject_directive(
+                        directive, "INSUFFICIENT_CASH_LOT",
+                        f"现金不足最小 100 股: executable={exec_shares}, target={target_shares}, cash_shares={max_cash_shares}",
                     )
-                    return False
 
                 # ── 校验完全通过，执行状态变更 ──
                 cost_money = directive.price * exec_shares
@@ -2126,11 +2293,10 @@ class IPOTradingCenter:
                 # 降级到“按老仓位换入”；这两个状态只允许风险退出。
                 known_tide_state = getattr(ctx, "tide_state", "T0_INSUFFICIENT") if ctx is not None else "T0_INSUFFICIENT"
                 if known_tide_state in ("T1_CLIMAX_DISTRIBUTION", "T4_PANIC_ACCEL"):
-                    logger.warning(
-                        "[IPO-TRADING] FULL_ROTATION_SWAP rejected: absolute tide exit gate active (%s)",
-                        known_tide_state,
+                    return self._reject_directive(
+                        directive, "ROTATION_MARKET_RISK_BLOCK",
+                        f"轮动被绝对风险潮汐拦截: {known_tide_state}",
                     )
-                    return False
 
                 # 老股票持仓快照与仓位权重
                 old_code = directive.target_swap_code
@@ -2204,11 +2370,10 @@ class IPOTradingCenter:
                     allowed_pct = min(directive_size_pct, old_weight)
 
                 if allowed_pct <= 0.0 or directive.price <= 0:
-                    logger.warning(
-                        "[IPO-TRADING] FULL_ROTATION_SWAP rejected: allowed budget is 0.0%% (dir=%.1f%%, old=%.1f%%, other=%.1f%%)",
-                        directive_size_pct, old_weight, other_weight
+                    return self._reject_directive(
+                        directive, "ROTATION_NO_BUDGET",
+                        f"轮动无可执行预算: dir={directive_size_pct:.1f}%, old={old_weight:.1f}%, other={other_weight:.1f}%",
                     )
-                    return False
 
                 # 3. 计算受限买入预算与目标股数
                 allowed_money = self.total_capital * (allowed_pct / 100.0)
@@ -2221,11 +2386,10 @@ class IPOTradingCenter:
                 new_shares = min(target_shares, max_cash_shares)
 
                 if new_shares < 100:
-                    logger.warning(
-                        "[IPO-TRADING] FULL_ROTATION_SWAP rejected: executable shares %d < 100 (budget_shares=%d, cash_shares=%d, px=%.2f)",
-                        new_shares, target_shares, max_cash_shares, directive.price
+                    return self._reject_directive(
+                        directive, "ROTATION_MIN_LOT_BLOCK",
+                        f"轮动目标不足 100 股: executable={new_shares}, budget={target_shares}, cash={max_cash_shares}",
                     )
-                    return False
 
                 # 5. 校验完全通过，执行原子换马第 1 步：平仓老股票回笼资金
                 if old_pos is not None and old_pos.shares > 0:
@@ -2273,7 +2437,10 @@ class IPOTradingCenter:
                 is_partial = directive.action in ("REDUCE_30", "REDUCE_HALF")
                 sell_shares = min(pos.available_shares, directive.shares if is_partial else pos.shares)
                 if sell_shares <= 0:
-                    return False
+                    return self._reject_directive(
+                        directive, "NO_AVAILABLE_SHARES",
+                        "无可用卖出股数",
+                    )
                 sell_val = directive.price * sell_shares
                 self.available_cash += sell_val
                 if pos.cost_price > 0:
@@ -2343,6 +2510,12 @@ class IPOTradingCenter:
                 "horse_rank": directive.horse_rank,
                 "sentiment_phase": directive.sentiment_phase,
                 "signal_tier": directive.signal_tier,
+                "signal_state": getattr(directive, "signal_state", ""),
+                "execution_status": "EXECUTED",
+                "reject_code": "",
+                "reject_reason": "",
+                "validated_at": getattr(directive, "validated_at", 0.0),
+                "validation_price": getattr(directive, "validation_price", 0.0),
                 "realized_pnl_pct": pnl_pct if directive.action not in ("BUY", "BUY_SCOUT", "BUY_CONFIRM") else 0.0,
                 "realized_pnl_amount": round(pnl_amt, 2) if directive.action not in ("BUY", "BUY_SCOUT", "BUY_CONFIRM") else 0.0
             }
@@ -2455,4 +2628,5 @@ class IPOTradingCenter:
                 ],
                 "signal_iteration_log": list(self._signal_iteration_log),
                 "paper_reconciliation": dict(getattr(self, "_paper_reconciliation", {})),
+                "directive_quality_daily": self.get_directive_quality_stats(),
             }

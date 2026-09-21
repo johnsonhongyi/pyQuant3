@@ -1,5 +1,20 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-09-21 21:00
+- [x] **【TK阶段二/三统一收敛闭环 & 明日次新实战开盘部署计划书落地】(`docs/SUBNEW_REAL_MARKET_DEPLOYMENT_PLAN_2026-09-22.md`, `ats/strategy/signal_convergence.py`, `ats/strategy/ipo_trading_center.py`)**：
+    - [x] **代码级统一收敛强制入口完全闭环**：
+        - `get_pending_directives()` 成为唯一收敛只读入口，内部强制经过 `converge_directives()`；
+        - UI 渲染、手工一键全部执行、自动跟随撮合三端强制统一步调，封死任何通过入参注入未过滤私货的漏洞；
+        - 新增 `test_05b_pending_view_converges_before_execution` 验证同标的 BUY/EXIT 冲突绝对收敛为单一 EXIT；全套 77 项联合测试 100% 绿灯。
+    - [x] **制定《明日开盘实战部署计划书》**：
+        - 明确 2026-09-22 实战作战时间表（08:45 盘前自检 $\to$ 09:15 集合竞价 $\to$ 09:30 早盘抗噪 $\to$ 10:00 黄金确认 $\to$ 14:30 尾盘结算）；
+        - 今晚精准落地两大核心防噪声切片：P1-01（早盘成交额分时归一化，消灭假阳性突破）与 S4/S5 强门限（盈亏比 $\ge 2.5:1$ 才进入直接买卖点，低级别信号静默于监控大表）；
+        - 明确保持 PAPER/CONFIRM 运行态，严禁开启实盘券商网关。
+    - [ ] **后续推进路线 (Next Steps - 明日开盘前实战切片实施)**：
+        - 1) **切片 1 (P1-01)**：分时累计成交额时段投影归一化（早盘放量衰减折减）；
+        - 2) **切片 2**：待执行买点门限硬卡 S4（盈亏比 $\ge 2.5:1$），S0~S3 留在检测中心大表；
+        - 3) **开盘前自检**：运行全量回归，检查对账快照与构建指纹。
+
 ## 2026-09-21 17:00
 - [x] **【P1-00：现有退出与潮汐参数统一配置化与SSOT对齐落地】(`ats/vwap_rule_model.py`, `ats/proactive_exit_engine.py`, `ats/strategy/subnew_tide_state_machine.py`, `config/vwap_trading_rules.json`, `tests/test_p1_00_unified_config.py`)**：
     - [x] **严格对齐代码事实源（SSOT）**：

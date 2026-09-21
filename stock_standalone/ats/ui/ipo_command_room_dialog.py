@@ -1025,7 +1025,7 @@ class IPOCommandRoomDialog(QDialog):
         is_arbitration_col = False
         if table is self.tbl_rank and col in (6, 7):  # 角色 或 集中仲裁与山外有山决议
             is_arbitration_col = True
-        elif table is self.tbl_orders and col in (0, 5):  # 动作 或 决议依据理由
+        elif table is self.tbl_orders and col in (0, 8):  # 动作 或 决议依据理由
             is_arbitration_col = True
 
         if is_arbitration_col:
@@ -1310,8 +1310,11 @@ class IPOCommandRoomDialog(QDialog):
     def _apply_orders_table_mode(self, mode: str):
         """统一应用指令表格模式（PENDING / STREAM / AGGREGATED），自动适配列数、表头与专属列宽持久化"""
         if mode == "PENDING":
-            self.tbl_orders.setColumnCount(6)
-            self.tbl_orders.setHorizontalHeaderLabels(["动作", "代码", "标的", "价格", "建议仓位", "决议依据理由"])
+            self.tbl_orders.setColumnCount(9)
+            self.tbl_orders.setHorizontalHeaderLabels([
+                "动作", "代码", "标的", "触发价", "建议仓位",
+                "止损/失效价", "目标1/2", "失效时间", "决议依据理由",
+            ])
             self.tbl_orders.switch_persistence_mode("PENDING")
             self.grp_orders.setTitle("📋 集中交易调度待执行指令清单 (弃弱换马 / 领头羊进击 / 买错立斩)")
         elif mode == "STREAM":
@@ -1786,6 +1789,27 @@ class IPOCommandRoomDialog(QDialog):
                 self.tbl_orders.setItem(r, 3, NumericTableWidgetItem(f"{d.price:.2f}", raw_val=float(d.price)))
                 self.tbl_orders.setItem(r, 4, NumericTableWidgetItem(f"{d.size_pct:.0f}%", raw_val=float(d.size_pct)))
 
+                stop_price = float(getattr(d, "stop_loss_price", 0.0) or 0.0)
+                target_1 = float(getattr(d, "target_price", 0.0) or 0.0)
+                target_2 = float(getattr(d, "target_2_price", 0.0) or 0.0)
+                expire_at = str(getattr(d, "expire_at", "") or "--")
+                self.tbl_orders.setItem(
+                    r, 5,
+                    NumericTableWidgetItem(
+                        f"{stop_price:.2f}" if stop_price > 0 else "--",
+                        raw_val=stop_price,
+                    ),
+                )
+                target_text = "--"
+                if target_1 > 0 or target_2 > 0:
+                    target_text = (
+                        f"{target_1:.2f}/{target_2:.2f}"
+                        if target_1 > 0 and target_2 > 0
+                        else f"{max(target_1, target_2):.2f}"
+                    )
+                self.tbl_orders.setItem(r, 6, QTableWidgetItem(target_text))
+                self.tbl_orders.setItem(r, 7, QTableWidgetItem(expire_at))
+
                 reason_disp = d.reason
                 if plan:
                     qg = getattr(d, "quality_grade", "") or "S"
@@ -1803,7 +1827,7 @@ class IPOCommandRoomDialog(QDialog):
                         f"----------------------------------------\n"
                         f"{d.reason}"
                     )
-                self.tbl_orders.setItem(r, 5, it_reason)
+                self.tbl_orders.setItem(r, 8, it_reason)
         else:
             # 历史信号日志模式
             if self._history_sub_mode == "STREAM":
@@ -1868,7 +1892,13 @@ class IPOCommandRoomDialog(QDialog):
                     code_num = int(s_code) if s_code.isdigit() else 999999
                     self.tbl_orders.setItem(r, 3, NumericTableWidgetItem(s_code, raw_val=code_num))
                     self.tbl_orders.setItem(r, 4, QTableWidgetItem(s_log.get("name", "--")))
-                    self.tbl_orders.setItem(r, 5, QTableWidgetItem(s_log.get("reason", "--")))
+                    status = str(s_log.get("execution_status", "") or "").upper()
+                    reject_code = str(s_log.get("reject_code", "") or "")
+                    reject_reason = str(s_log.get("reject_reason", "") or "")
+                    reason_text = str(s_log.get("reason", "--") or "--")
+                    if status in ("REJECTED", "FILTERED"):
+                        reason_text = f"[{status}:{reject_code}] {reject_reason} | {reason_text}"
+                    self.tbl_orders.setItem(r, 5, QTableWidgetItem(reason_text))
             else:
                 # ── 2. 标的归集与连续持久力视图 ──
                 from collections import OrderedDict

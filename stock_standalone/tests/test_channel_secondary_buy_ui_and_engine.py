@@ -231,11 +231,17 @@ class TestChannelSecondaryBuyUIAndEngine(unittest.TestCase):
         self.assertEqual(cmd_room.tbl_orders.rowCount(), 1)
         it_act = cmd_room.tbl_orders.item(0, 0)
         self.assertIsNotNone(it_act)
-        # 动作显示为 BUY_SCOUT
-        self.assertEqual(it_act.text(), "BUY_SCOUT")
+        # 动作使用统一的人类可读显示名
+        self.assertIn("试仓买入", it_act.text())
 
-        # 理由列包含网格与防守线
-        it_reason = cmd_room.tbl_orders.item(0, 5)
+        # 直接买卖点显式展示止损、目标与失效时间
+        self.assertEqual(cmd_room.tbl_orders.columnCount(), 9)
+        self.assertEqual(cmd_room.tbl_orders.item(0, 5).text(), "10.35")
+        self.assertEqual(cmd_room.tbl_orders.item(0, 6).text(), "13.50/15.20")
+        self.assertEqual(cmd_room.tbl_orders.item(0, 7).text(), "14:45:00")
+
+        # 理由列继续保留完整 TradePlan 解释
+        it_reason = cmd_room.tbl_orders.item(0, 8)
         self.assertIsNotNone(it_reason)
         self.assertIn("11.45~11.65", it_reason.text())
         self.assertIn("TradePlan 不可变交易计划", it_reason.toolTip())
