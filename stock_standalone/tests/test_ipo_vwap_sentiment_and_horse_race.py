@@ -325,9 +325,21 @@ class TestIPOVWAPSentimentAndHorseRace(unittest.TestCase):
         tc.submit_stock_perception_report(s_weak)
         tc.submit_stock_perception_report(s_first)
 
+        now_ts = time.time()
+        init_snap = MarketSentimentSnapshot(
+            heat_stage="🔥 梯队升温",
+            index_phase="温和放量",
+            tide_state="T7_WARMING",
+            tide_position_cap_pct=30.0,
+            risk_mode="NORMAL",
+            position_multiplier=1.0,
+        ).finalize()
+        init_snap.generated_at = now_ts
+        tc._last_market_context = init_snap
+
         # 假设当前持有千岸科技 2000 股 (买错破位状态)
         tc.record_order_execution(IPOOrderDirective(
-            action="BUY", code="920065", name="千岸科技", price=34.0, shares=2000, size_pct=6.8
+            action="BUY", code="920065", name="千岸科技", price=34.0, shares=2000, size_pct=6.8, timestamp=now_ts
         ))
         self.assertEqual(tc._positions["920065"].shares, 2000)
 

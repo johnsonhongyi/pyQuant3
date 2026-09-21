@@ -2,6 +2,7 @@
 """Offline TradePlan review and provenance-backed TDX historical replay tests."""
 
 import json
+import time
 from pathlib import Path
 
 import pandas as pd
@@ -10,11 +11,22 @@ from ats.strategy.channel_secondary_buy_strategy import (
     IPOTradePlan, SecondaryBuyStage, TAG_CHANNEL_SECONDARY_BUY,
     evaluate_channel_secondary_buy,
 )
+from ats.strategy.ipo_market_sentiment_engine import MarketSentimentSnapshot
 from ats.strategy.ipo_trading_center import IPOOrderDirective, IPOTradingCenter
 
 
 def test_closed_trade_review_links_plan_and_execution() -> None:
     center = IPOTradingCenter(total_capital=100000.0)
+    now_ts = time.time()
+    snap = MarketSentimentSnapshot(
+        tide_state="T7_WARMING",
+        tide_position_cap_pct=100.0,
+        risk_mode="NORMAL",
+        position_multiplier=1.0,
+    ).finalize()
+    snap.generated_at = now_ts
+    center._last_market_context = snap
+
     plan = IPOTradePlan(
         code="TEST01", name="review sample", plan_id="TP_REPLAY_001",
         strategy_tag=TAG_CHANNEL_SECONDARY_BUY, signal_level="S4",
@@ -23,7 +35,8 @@ def test_closed_trade_review_links_plan_and_execution() -> None:
     )
     center.record_order_execution(IPOOrderDirective(
         action="BUY_SCOUT", code="TEST01", name="review sample",
-        price=100.0, shares=1000, trade_plan=plan,
+        price=100.0, shares=1000, size_pct=100.0, trade_plan=plan,
+        timestamp=now_ts,
     ))
     center.get_position("TEST01").entry_date = "2026-09-19"
     center.record_order_execution(IPOOrderDirective(

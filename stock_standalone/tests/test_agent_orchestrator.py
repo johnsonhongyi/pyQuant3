@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -190,6 +191,19 @@ def test_worker_enforces_json_schema_and_compacts_output(tmp_path: Path) -> None
     assert json.loads(result.stdout)["summary"] == "完成"
 
 
+def test_worker_prompt_has_a_bounded_file_read_allowlist(tmp_path: Path) -> None:
+    root = _project(tmp_path)
+    (root / ".agent_hub" / "AGENT_PROMPT.md").write_text(
+        "conflicting legacy rule: submit the task", encoding="utf-8"
+    )
+    orchestrator = AgentOrchestrator(root)
+    prompt = orchestrator._worker_prompt(root / ".agent_hub" / "inbox" / "001_preview.md")
+    assert "AUTHORITATIVE INVOCATION RULES" in prompt
+    assert "read/search budget is 12 tool calls total" in prompt
+    assert 'READ ALLOWLIST: ["ats/example.py"]' in prompt
+    assert "conflicting legacy rule" not in prompt
+
+
 def test_worker_discards_antigravity_json_envelope(tmp_path: Path) -> None:
     root = _project(tmp_path)
     envelope = json.dumps({
@@ -217,6 +231,31 @@ def test_worker_discards_antigravity_json_envelope(tmp_path: Path) -> None:
     assert compact["summary"] == "精简完成"
     assert "conversation_id" not in compact
     assert "usage" not in compact
+
+
+def test_worker_accepts_valid_structured_output_from_verbose_transport_error(tmp_path: Path) -> None:
+    root = _project(tmp_path)
+    envelope = json.dumps({
+        "status": "ERROR",
+        "error": "x" * 5000,
+        "structured_output": json.loads(_report("传输收尾失败但结果有效")),
+    })
+
+    def runner(args, **kwargs):
+        return subprocess.CompletedProcess(args, 0, envelope, "")
+
+    orchestrator = AgentOrchestrator(root, runner=runner)
+    orchestrator.config.update({
+        "worker_model": "gemini-test",
+        "worker_fallback_models": [],
+        "worker_timeout_seconds": 5,
+        "worker_auto_approve_permissions": False,
+    })
+    result = orchestrator._invoke_worker(
+        "test", root / ".agent_hub" / "artifacts" / "001", "LOW"
+    )
+    assert result.returncode == 0
+    assert json.loads(result.stdout)["summary"] == "传输收尾失败但结果有效"
 
 
 def test_worker_rejects_verbose_or_non_contract_output(tmp_path: Path) -> None:
@@ -280,3 +319,21 @@ def test_docs_profile_rejects_business_config(tmp_path: Path) -> None:
     orchestrator = AgentOrchestrator(root)
     with pytest.raises(Exception, match="only allows documentation"):
         orchestrator.preview()
+
+
+def test_headless_lean_worker_environment_switch(tmp_path: Path) -> None:
+    root = _project(tmp_path)
+    orchestrator = AgentOrchestrator(root)
+
+    # 1. 验证默认/设置 standard 时不隔离环境
+    orchestrator.config["worker_profile"] = "standard"
+    env_std = orchestrator._setup_worker_environment()
+    assert env_std.get("USERPROFILE") == os.environ.get("USERPROFILE")
+
+    # 2. 验证设置 headless_lean 时自动隔离至 .worker_profile 目录
+    orchestrator.config["worker_profile"] = "headless_lean"
+    env_lean = orchestrator._setup_worker_environment()
+    expected_profile = str(root / ".agent_hub" / ".worker_profile")
+    assert env_lean.get("USERPROFILE") == expected_profile
+    assert env_lean.get("HOME") == expected_profile
+    assert (root / ".agent_hub" / ".worker_profile" / ".gemini").is_dir()

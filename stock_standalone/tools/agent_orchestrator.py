@@ -9,6 +9,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -241,34 +242,42 @@ class AgentOrchestrator:
         return commands
 
     def _worker_prompt(self, task_path: Path) -> str:
-        protocol = (self.hub.hub / "AGENT_PROMPT.md").read_text(encoding="utf-8")
         task = task_path.read_text(encoding="utf-8")
+        allowed_files = self._section_items(task, "Files Allowed")
         return (
-            f"{protocol}\n\n"
+            "AUTHORITATIVE INVOCATION RULES: "
             "The orchestrator has already claimed this task. Do not call claim or submit. "
             "Implement only this task and write its Output Contract artifacts. "
             "Do not use RunCommand, terminal, shell, or process tools; the orchestrator runs all "
-            "verification commands after you finish. Use built-in file search/read/edit tools only.\n\n"
+            "verification commands after you finish. Use built-in file search/read/edit tools only. "
+            "Read only the listed files and directly imported contracts needed to edit them; never "
+            "browse directories, repository history, unrelated tests, or task archives. Your read/search "
+            "budget is 12 tool calls total. If the task cannot be completed inside that budget, stop and "
+            "return BLOCKED with the missing file path in risk_points.\n"
+            f"READ ALLOWLIST: {json.dumps(allowed_files, ensure_ascii=False)}\n\n"
             "Return exactly one compact JSON object matching the required report schema. Do not "
             "echo this prompt, the task, file contents, diffs, reasoning, or logs.\n\n"
             f"{task}"
         )
 
     def _validate_worker_report(self, stdout: str) -> str:
-        max_stdout = int(self.config.get("worker_stdout_max_chars", 4000))
-        if len(stdout) > max_stdout:
-            raise OrchestratorError(
-                f"Antigravity report exceeds {max_stdout} characters; verbose output is rejected"
-            )
         try:
-            report = json.loads(stdout)
+            envelope = json.loads(stdout)
         except json.JSONDecodeError as exc:
             raise OrchestratorError("Antigravity stdout must contain only one JSON object") from exc
         # Antigravity `--output-format json` wraps the schema-constrained answer
         # with conversation, usage, echoed schema and a duplicate response. Only
         # the validated `structured_output` is allowed past this boundary.
-        if isinstance(report, dict) and "structured_output" in report:
-            report = report["structured_output"]
+        # A completed model turn can still have a verbose transport error while
+        # closing the request; a valid structured_output is authoritative.
+        report = envelope.get("structured_output") if isinstance(envelope, dict) else None
+        if report is None:
+            max_stdout = int(self.config.get("worker_stdout_max_chars", 4000))
+            if len(stdout) > max_stdout:
+                raise OrchestratorError(
+                    f"Antigravity report exceeds {max_stdout} characters; verbose output is rejected"
+                )
+            report = envelope
         required = set(self.WORKER_REPORT_SCHEMA["required"])
         if not isinstance(report, dict) or set(report) != required:
             raise OrchestratorError("Antigravity report fields do not match the compact contract")
@@ -290,7 +299,13 @@ class AgentOrchestrator:
             raise OrchestratorError(
                 f"Antigravity summary exceeds {max_summary} Unicode characters"
             )
-        return json.dumps(report, ensure_ascii=False, separators=(",", ":"))
+        compact = json.dumps(report, ensure_ascii=False, separators=(",", ":"))
+        max_stdout = int(self.config.get("worker_stdout_max_chars", 4000))
+        if len(compact) > max_stdout:
+            raise OrchestratorError(
+                f"Antigravity compact report exceeds {max_stdout} characters"
+            )
+        return compact
 
     @staticmethod
     def _task_risk(task_text: str) -> str:
@@ -372,6 +387,42 @@ class AgentOrchestrator:
         )
         return result.returncode != 0 and any(marker in combined for marker in markers)
 
+    def _setup_worker_environment(self) -> dict[str, str]:
+        worker_env = os.environ.copy()
+        proxy = self.config.get("worker_proxy", "").strip()
+        if proxy:
+            worker_env.update({
+                "HTTP_PROXY": proxy,
+                "HTTPS_PROXY": proxy,
+                "ALL_PROXY": proxy,
+            })
+
+        # 专职 Headless Worker 特殊模式（通过配置开关 worker_profile 自由切换，日常终端完全不影响）
+        if self.config.get("worker_profile") == "headless_lean":
+            profile_dir = self.hub.hub / ".worker_profile"
+            gemini_dir = profile_dir / ".gemini"
+            gemini_dir.mkdir(parents=True, exist_ok=True)
+            real_home_str = os.environ.get("USERPROFILE") or os.environ.get("HOME", "")
+            if real_home_str:
+                real_gemini = Path(real_home_str) / ".gemini"
+                if real_gemini.is_dir():
+                    auth_files = [
+                        "oauth_creds.json", "google_accounts.json", "installation_id",
+                        "state.json", "settings.json"
+                    ]
+                    for filename in auth_files:
+                        src = real_gemini / filename
+                        dst = gemini_dir / filename
+                        if src.is_file():
+                            try:
+                                if not dst.exists() or src.stat().st_mtime > dst.stat().st_mtime:
+                                    shutil.copy2(src, dst)
+                            except Exception:
+                                pass
+            worker_env["USERPROFILE"] = str(profile_dir)
+            worker_env["HOME"] = str(profile_dir)
+        return worker_env
+
     def _invoke_worker(
         self, prompt: str, artifact_dir: Path, task_risk: str, profile_name: str = "P2_CODE_LOW"
     ) -> subprocess.CompletedProcess[str]:
@@ -398,14 +449,7 @@ class AgentOrchestrator:
         models = [primary] if primary else [""]
         models.extend(self.config.get("worker_fallback_models", []))
         attempts: list[subprocess.CompletedProcess[str]] = []
-        worker_env = os.environ.copy()
-        proxy = self.config.get("worker_proxy", "").strip()
-        if proxy:
-            worker_env.update({
-                "HTTP_PROXY": proxy,
-                "HTTPS_PROXY": proxy,
-                "ALL_PROXY": proxy,
-            })
+        worker_env = self._setup_worker_environment()
         for index, model in enumerate(models, start=1):
             safe_model = re.sub(r"[^a-zA-Z0-9_.-]+", "_", model or "default")
             args = [
