@@ -1,5 +1,17 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-09-21 22:38
+- [x] **【修复 TK 打包后 sync_with_legacy_gateway 模块导入路径与 Windows 原子替换并发锁死】(`trading_kernel/kernel_service.py`)**：
+    - [x] **根因定位与修复**：
+        - `sync_with_legacy_gateway` 中存在一处错误导入路径 `from trading_kernel.core.model import Position as PaperPosition`（真实位置为 `trading_kernel.execution.paper_adapter`），由于本地开发环境中通常已被缓存或 PyInstaller 静态打散，导致打包运行和后台定时对账时持续每 15 秒报 `WARNING: Error in sync_with_legacy_gateway: No module named 'trading_kernel.core.model'`；
+        - 正式修正导入源为 `from trading_kernel.execution.paper_adapter import Position as PaperPosition`，立即打通持仓对账自愈通道；
+    - [x] **Windows 下原子写状态快照防御加固**：
+        - `_persist_reconciliation_snapshot` 中写入 `latest.json` 引入按 PID 分离的临时文件名和 `PermissionError` 智能重试机制，彻底防御 Windows 杀毒软件或多进程瞬时读句柄导致原子替换（`os.replace`）崩溃；
+    - [x] **全量自动化验证 100% 绿灯**：
+        - 直接实测 `s.sync_with_legacy_gateway()` 成功无报警执行：`{'restored_to_gw': 9, 'synced_from_gw': 0, 'evicted': 0}`；
+        - `trading_kernel` 全量 61 项单元与流程测试全部绿灯通过（61 passed in 12.35s）；
+        - `compileall` 编译零错误。
+
 ## 2026-09-21 21:35
 - [x] **【TK 后台自动交易脱耦自愈、手工平仓绿色通道穿透与流水归档清理全面修复】(`trading_kernel/kernel_service.py`, `instock_MonitorTK.py`, `tk_gui_modules/decision_flow_panel.py`, `trading_kernel/engine/risk_gate.py`, `trading_kernel/execution/paper_adapter.py`)**：
     - [x] **后台自动交易与对账脱耦（消灭 UI 寄生）**：
@@ -22,14 +34,19 @@
         - `get_pending_directives()` 成为唯一收敛只读入口，内部强制经过 `converge_directives()`；
         - UI 渲染、手工一键全部执行、自动跟随撮合三端强制统一步调，封死任何通过入参注入未过滤私货的漏洞；
         - 新增 `test_05b_pending_view_converges_before_execution` 验证同标的 BUY/EXIT 冲突绝对收敛为单一 EXIT；全套 77 项联合测试 100% 绿灯。
-    - [x] **制定《明日开盘实战部署计划书》**：
-        - 明确 2026-09-22 实战作战时间表（08:45 盘前自检 $\to$ 09:15 集合竞价 $\to$ 09:30 早盘抗噪 $\to$ 10:00 黄金确认 $\to$ 14:30 尾盘结算）；
-        - 今晚精准落地两大核心防噪声切片：P1-01（早盘成交额分时归一化，消灭假阳性突破）与 S4/S5 强门限（盈亏比 $\ge 2.5:1$ 才进入直接买卖点，低级别信号静默于监控大表）；
-        - 明确保持 PAPER/CONFIRM 运行态，严禁开启实盘券商网关。
-    - [ ] **后续推进路线 (Next Steps - 明日开盘前实战切片实施)**：
-        - 1) **切片 1 (P1-01)**：分时累计成交额时段投影归一化（早盘放量衰减折减）；
-        - 2) **切片 2**：待执行买点门限硬卡 S4（盈亏比 $\ge 2.5:1$），S0~S3 留在检测中心大表；
-        - 3) **开盘前自检**：运行全量回归，检查对账快照与构建指纹。
+    - [x] **制定《明日开盘实战部署计划书 (实战严控优化版)》**：
+        - 明确 2026-09-22 实战作战时间表（08:45 盘前自检 $\to$ 09:15 Gate 1 $\to$ 09:25 Gate 2 GO/NO-GO $\to$ 09:30 早盘抗噪 $\to$ 10:00 黄金确认 $\to$ 11:30 午盘轻量对账 $\to$ 15:00 日终对账）；
+        - **流水线顺序倒置**：基线快照 $\to$ P1-01 极简折减(带开关) $\to$ S4 三层可执行门 $\to$ 契约与风控测试 $\to$ 全量回归 $\to$ 最终 commit/tag 冻结（22:00 后严禁继续调参）；
+        - **P1-01 极简折减与封顶**：不做复杂全天成交预测，采用 $\text{Clamp}(\text{Signal}/\text{Ratio}, 1.0, 3.5)$，并引入配置开关随时可退回原逻辑；
+        - **S4 三层可执行门**：不仅看 S4 形态，必须满足 $S4 \cap \text{结构回踩确认} \cap \text{现价在买区内} \cap \text{动态RR}\ge 2.5:1 \cap \text{未超时}$，将全天买入直接候选强力收敛至 1~3 只；
+        - **EXIT > BUY 阻断与 T+1 物理锁**：作为部署上线阻断测试项，今买严禁进今卖，底仓平后杜绝幽灵持仓；
+        - **09:25 GO/NO-GO 终审门**：8 项准入指标任一失败直接降级为 `MONITOR_ONLY`，确保首日实战零意外。
+    - [ ] **后续推进路线 (Next Steps - 今晚按序实施与冻结)**：
+        - 1) **Step 1**：P1-01 早盘极简成交额归一化（带上限 Clamp 与 Feature Flag 开关）；
+        - 2) **Step 2**：S4 可执行门（`structure_confirmed` + `executable_now` 买区校验 + 动态 RR 重算 + 计划 TTL）；
+        - 3) **Step 3**：EXIT > BUY 阻断专项测试、T+1 可卖校验专项测试；
+        - 4) **Step 4**：全套关键契约测试 + 全量测试回归通过；
+        - 5) **Step 5**：生成 `BUILD_FINGERPRINT.json`，打 Tag 并正式冻结，严禁继续微调。
 
 ## 2026-09-21 17:00
 - [x] **【P1-00：现有退出与潮汐参数统一配置化与SSOT对齐落地】(`ats/vwap_rule_model.py`, `ats/proactive_exit_engine.py`, `ats/strategy/subnew_tide_state_machine.py`, `config/vwap_trading_rules.json`, `tests/test_p1_00_unified_config.py`)**：
