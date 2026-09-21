@@ -528,3 +528,55 @@ def test_get_rework_count_and_rework_limit_blocking(tmp_path: Path) -> None:
     # 任务被熔断，停留在 done，未被移回 inbox，阻断死循环
     assert not (root / ".agent_hub" / "inbox" / "001_preview.md").exists()
     assert (root / ".agent_hub" / "done" / "001_preview.md").exists()
+
+
+def test_review_profiles_split_task_checkpoint_and_release(tmp_path: Path) -> None:
+    root = _project(tmp_path)
+    orchestrator = AgentOrchestrator(root)
+    orchestrator.config["review_profiles"] = {
+        "task_review": {"model": "fast-model", "effort": "low"},
+        "p_checkpoint_review": {"model": "medium-model", "effort": "medium"},
+        "release_gate": {"model": "high-model", "effort": "high"},
+    }
+    assert orchestrator._review_profile("task_review")["effort"] == "low"
+    assert orchestrator._review_profile("p_checkpoint_review")["effort"] == "medium"
+    assert orchestrator._review_profile("release_gate")["effort"] == "high"
+
+
+def test_task_review_rejects_high_effort_when_quota_policy_forbids_it(tmp_path: Path) -> None:
+    root = _project(tmp_path)
+    orchestrator = AgentOrchestrator(root)
+    orchestrator.config["review_profiles"] = {
+        "task_review": {"model": "expensive", "effort": "high"}
+    }
+    orchestrator.config["review_quota_policy"] = {"forbid_high_for_task_review": True}
+    with pytest.raises(Exception, match="forbidden"):
+        orchestrator._review_profile("task_review")
+
+
+def test_checkpoint_review_holds_before_all_tasks_are_approved(tmp_path: Path) -> None:
+    root = _project(tmp_path)
+    orchestrator = AgentOrchestrator(root)
+    report = orchestrator.checkpoint_review("P1", ["001"])
+    assert report.status == "CHECKPOINT_HOLD"
+    assert (report.artifact_dir / "P_CHECKPOINT_REVIEW.md").exists()
+
+
+def test_release_gate_holds_without_approved_checkpoints(tmp_path: Path) -> None:
+    root = _project(tmp_path)
+    orchestrator = AgentOrchestrator(root)
+    report = orchestrator.release_gate("r1", ["P1"])
+    assert report.status == "RELEASE_HOLD"
+    assert (report.artifact_dir / "RELEASE_GATE.md").exists()
+
+
+def test_parallel_scope_ignores_only_other_owned_paths(tmp_path: Path) -> None:
+    root = _project(tmp_path)
+    orchestrator = AgentOrchestrator(root)
+    task_text = (root / ".agent_hub" / "inbox" / "001_preview.md").read_text(encoding="utf-8")
+    violations = orchestrator._scope_violations(
+        task_text,
+        {"ats/example.py", "ats/other.py", "trade_gateway.py"},
+        parallel_owned=["ats/other.py"],
+    )
+    assert violations == ["trade_gateway.py"]

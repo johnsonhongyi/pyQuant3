@@ -57,3 +57,12 @@ python -m pytest tests/test_file.py -q
 - `test_result.md`
 - `changed_files.txt`
 - `agent_report.json`
+
+
+## 并行与P节点建议元数据
+
+任务创建时应明确：
+- `Depends-On`: 上游任务编号，多个编号以空格/逗号分隔；无依赖写 `none`。
+- `Files Allowed`: 既是 Worker 修改白名单，也是并行文件所有权声明。
+- 相互独立且文件集合不重叠的任务才允许进入同一并行批次。
+- 属于同一 P 节点的任务完成后，由 `checkpoint-review` 做一次 Medium 级综合审查，而不是逐任务重复提高推理档位。
