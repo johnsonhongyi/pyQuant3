@@ -997,8 +997,13 @@ class AgentOrchestrator:
             return False
         return "- Decision: APPROVED" in review.read_text(encoding="utf-8")
 
-    def runnable_tasks(self, limit: int | None = None) -> list[str]:
+    def runnable_tasks(
+        self,
+        limit: int | None = None,
+        task_ids: Sequence[str] | None = None,
+    ) -> list[str]:
         limit = limit or int(self.config.get("batch_default_workers", 2))
+        requested = {str(item).zfill(3) for item in (task_ids or [])}
         candidates: list[str] = []
         owned: list[str] = []
         for path in self.hub._task_files("inbox"):
@@ -1006,6 +1011,8 @@ class AgentOrchestrator:
             if not match:
                 continue
             task_id = match.group(1)
+            if requested and task_id not in requested:
+                continue
             blockers = self.hub.claim_blockers(task_id)
             blockers = [item for item in blockers if not item.startswith("running-limit:")]
             if blockers:
@@ -1023,11 +1030,15 @@ class AgentOrchestrator:
                 break
         return candidates
 
-    def execute_batch(self, max_workers: int | None = None) -> list[RunReport]:
+    def execute_batch(
+        self,
+        max_workers: int | None = None,
+        task_ids: Sequence[str] | None = None,
+    ) -> list[RunReport]:
         configured_max = int(self.config.get("batch_max_workers", 3))
         workers = max_workers or int(self.config.get("batch_default_workers", 2))
         workers = max(1, min(workers, configured_max))
-        selected = self.runnable_tasks(workers)
+        selected = self.runnable_tasks(workers, task_ids=task_ids)
         if not selected:
             return []
         reports: list[RunReport] = []
@@ -1229,6 +1240,7 @@ def build_parser() -> argparse.ArgumentParser:
     batch = sub.add_parser("run-batch")
     batch.add_argument("--execute", action="store_true")
     batch.add_argument("--max-workers", type=int)
+    batch.add_argument("--tasks", nargs="+")
     checkpoint = sub.add_parser("checkpoint-review")
     checkpoint.add_argument("--node", required=True)
     checkpoint.add_argument("--tasks", nargs="+", required=True)
@@ -1260,10 +1272,10 @@ def main(argv: list[str] | None = None) -> int:
             report = orchestrator.release_gate(args.release, args.checkpoints)
         elif args.command == "run-batch":
             if not args.execute:
-                selected = orchestrator.runnable_tasks(args.max_workers)
+                selected = orchestrator.runnable_tasks(args.max_workers, task_ids=args.tasks)
                 print(json.dumps({"runnable_tasks": selected}, ensure_ascii=False, indent=2))
                 return 0
-            reports = orchestrator.execute_batch(args.max_workers)
+            reports = orchestrator.execute_batch(args.max_workers, task_ids=args.tasks)
             print(json.dumps([{
                 "task_id": item.task_id,
                 "status": item.status,
