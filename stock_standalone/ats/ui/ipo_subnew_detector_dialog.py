@@ -1337,9 +1337,21 @@ class IPOSubnewDetectorDialog(QMainWindow):
                 stype = getattr(sig, "signal_type", "")
                 # 只有 SSS 绝杀级、S 级接力、或警报级才触发即时语音
                 if tier in ("SSS", "S", "ALERT") or stype in ("IPO_FIRST_BUY", "CLIMAX_EXIT"):
-                    action = "BUY"
-                    if "平仓" in sig.signal_desc or "止损" in sig.signal_desc or stype == "CLIMAX_EXIT":
+                    # Direction is structured data.  Buy descriptions commonly
+                    # contain a stop-loss price, so inferring SELL from the word
+                    # "止损" reverses valid entry signals.
+                    sell_types = {"WEAK_EXIT", "CLIMAX_EXIT", "STOP_LOSS", "EXIT_ALL", "SELL"}
+                    buy_types = {
+                        "IPO_FIRST_BUY", "PULLBACK_BUY", "BREAKOUT", "PRE_ORDER",
+                        "BASE_BREAKOUT", "BASE_PREORDER", "SWING_PREORDER",
+                        "SECONDARY_BUY", "SCARE_REBOUND",
+                    }
+                    if stype in sell_types:
                         action = "SELL"
+                    elif stype in buy_types:
+                        action = "BUY"
+                    else:
+                        action = "OBSERVE"
                     notifier.notify_trading_signal(
                         code=sig.code,
                         name=sig.name,

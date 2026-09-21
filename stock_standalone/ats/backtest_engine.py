@@ -23,6 +23,17 @@ class BacktestEngine:
         Calculates trading metrics based on closed positions in the SQLite database.
         Returns a dictionary of formatted strings ready for UI cards.
         """
+        # The TK PaperAdapter is the authoritative paper-trading account.  Prefer
+        # it whenever it contains completed trades so ATS, TK and the command
+        # room report the same outcome.
+        try:
+            from ats.unified_paper_account import calculate_metrics
+            unified = calculate_metrics()
+            if unified.get("data_status") == "OK":
+                return unified
+        except Exception as exc:
+            print(f"[BacktestEngine] Unified paper metrics unavailable: {exc}")
+
         if not self.bridge:
             return self.get_fallback_metrics()
 
@@ -117,10 +128,11 @@ class BacktestEngine:
         Default metrics if database is empty or error occurs.
         """
         return {
-            "总交易次数": "420",
-            "策略胜率": "62.4%",
-            "平均盈利/亏损": "1.82",
-            "最大回撤": "-5.2%",
-            "凯利建议仓位": "15.0%",
-            "持有期衰减": "4 天"
+            "总交易次数": "0",
+            "策略胜率": "--",
+            "平均盈利/亏损": "--",
+            "最大回撤": "--",
+            "凯利建议仓位": "--",
+            "持有期衰减": "--",
+            "data_status": "NO_VERIFIABLE_CLOSED_TRADES",
         }

@@ -913,6 +913,10 @@ def decide(signal: StrategySignal, state: str) -> DecisionIntent:
     
     if is_manual_sell or is_manual_buy:
         action = "BUY" if is_manual_buy else "SELL"
+        requested_size = _num(signal, "requested_size_pct", 0.0)
+        if requested_size <= 0.0:
+            requested_size = 0.30 if action == "BUY" else 1.0
+        requested_size = max(0.01, min(1.0, requested_size))
         reason = DecisionReason(
             regime="MANUAL_OVERRIDE",
             setup="手动交易" if is_manual_buy else "手工平仓",
@@ -929,7 +933,7 @@ def decide(signal: StrategySignal, state: str) -> DecisionIntent:
         return DecisionIntent(
             code=signal.code,
             action=action,
-            size_pct=0.30 if action == "BUY" else 1.0,
+            size_pct=requested_size,
             stop_price=round(signal.price * 0.98, 3) if action == "BUY" and signal.price > 0 else None,
             confidence=1.0,
             reason=reason,
@@ -1247,4 +1251,3 @@ def decide(signal: StrategySignal, state: str) -> DecisionIntent:
     return intent
 
     return intent
-

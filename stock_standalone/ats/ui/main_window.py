@@ -4015,8 +4015,12 @@ class ATSMainWindow(QMainWindow):
             engine = BacktestEngine(self.bridge)
             metrics = engine.calculate_performance_metrics()
             self.backtest_panel.update_stats(metrics)
-            self.backtest_panel.lbl_status.setText("状态: 回测已完成 (数据已刷新)")
-            self.status_bar.showMessage("历史回测计算完成，已更新全部绩效指标。")
+            if str(metrics.get("data_status", "OK")) == "OK":
+                self.backtest_panel.lbl_status.setText("状态: TK PAPER闭环绩效已刷新")
+                self.status_bar.showMessage("统一PAPER成交绩效计算完成，已更新全部可审计指标。")
+            else:
+                self.backtest_panel.lbl_status.setText("状态: 暂无可验证的完整平仓交易")
+                self.status_bar.showMessage("暂无完整PAPER买卖闭环；未生成演示收益数据。")
         except Exception as e:
             self.backtest_panel.lbl_status.setText("状态: 计算失败")
             self.status_bar.showMessage(f"❌ 回测计算失败: {e}")
