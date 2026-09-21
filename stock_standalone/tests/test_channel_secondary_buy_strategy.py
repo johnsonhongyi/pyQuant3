@@ -1519,7 +1519,163 @@ class TestOrdinaryBuyExecutionRiskGate(unittest.TestCase):
         total_pos = sum(p.shares * p.current_price for p in self.center._positions.values())
         self.assertEqual(total_pos, 500 * 10.0 + 200 * 20.0 + 300 * 15.0)
 
+    def test_35_t1_absolute_gate_rejects_buy_and_manual_rotation(self):
+        """T1 高潮派发必须在执行端同时封死普通买入和手工换马注入。"""
+        now_ts = time.time()
+        t1 = MarketSentimentSnapshot(
+            tide_state="T1_CLIMAX_DISTRIBUTION",
+            tide_position_cap_pct=0.0,
+            tide_action="EXIT_RISK",
+            risk_mode="NORMAL",
+            position_multiplier=1.0,
+        ).finalize()
+        t1.generated_at = now_ts
+        self.center._last_market_context = t1
+        self.center._positions["600001"] = IPOTradingPosition(
+            code="600001", name="老持仓", shares=1000, available_shares=1000,
+            cost_price=10.0, current_price=10.0, entry_date="2026-09-19", status="HOLDING",
+        )
+        initial_cash = self.center.available_cash
+
+        buy = IPOOrderDirective(
+            action="BUY", code="688999", name="T1注入买单", price=10.0,
+            shares=1000, size_pct=10.0, timestamp=now_ts,
+        )
+        rotation = IPOOrderDirective(
+            action="FULL_ROTATION_SWAP", code="688998", name="T1注入换马",
+            price=10.0, shares=1000, size_pct=10.0, timestamp=now_ts,
+            target_swap_code="600001", target_swap_name="老持仓",
+        )
+
+        self.assertFalse(self.center.record_order_execution(buy))
+        self.assertFalse(self.center.record_order_execution(rotation))
+        self.assertNotIn("688999", self.center._positions)
+        self.assertNotIn("688998", self.center._positions)
+        self.assertEqual(self.center._positions["600001"].shares, 1000)
+        self.assertEqual(self.center.available_cash, initial_cash)
+
+    def test_36_t1_generates_portfolio_exit_and_leader_defense(self):
+        """T1 宏观风控清退非龙头，并将唯一 SSS 龙头减半转防守。"""
+        from unittest.mock import patch
+
+        leader = VWAPDetectorSignal(
+            code="688001", name="核心龙头", price=20.0, vwap=18.0,
+            is_above_vwap=True, signal_type="BREAKOUT", signal_tier="SSS",
+            horse_race_score=96.0, horse_race_rank=1,
+        )
+        follower = VWAPDetectorSignal(
+            code="688002", name="后排杂毛", price=10.0, vwap=9.5,
+            is_above_vwap=True, signal_type="WATCH", signal_tier="S",
+            horse_race_score=65.0, horse_race_rank=4,
+        )
+        self.center._reports_cache = {leader.code: leader, follower.code: follower}
+        self.center._positions[leader.code] = IPOTradingPosition(
+            code=leader.code, name=leader.name, shares=1000, available_shares=1000,
+            cost_price=18.0, current_price=20.0, entry_date="2026-09-19",
+            signal_tier="SSS", status="HOLDING",
+        )
+        self.center._positions[follower.code] = IPOTradingPosition(
+            code=follower.code, name=follower.name, shares=1000, available_shares=1000,
+            cost_price=9.0, current_price=10.0, entry_date="2026-09-19",
+            signal_tier="S", status="HOLDING",
+        )
+        t1 = MarketSentimentSnapshot(
+            tide_state="T1_CLIMAX_DISTRIBUTION", tide_position_cap_pct=0.0,
+            tide_action="EXIT_RISK", heat_stage="🔥 梯队升温",
+        ).finalize()
+
+        with patch.object(self.center.sentiment_engine, "get_market_sentiment", return_value=t1), \
+                patch("ats.strategy.ipo_trading_center.batch_evaluate_horse_race_ranking", return_value=[leader, follower]):
+            directives = self.center.evaluate_fleet_and_generate_orders()
+
+        leader_exit = next(d for d in directives if d.code == leader.code)
+        follower_exit = next(d for d in directives if d.code == follower.code)
+        self.assertEqual(leader_exit.action, "REDUCE_HALF")
+        self.assertEqual(leader_exit.shares, 500)
+        self.assertEqual(follower_exit.action, "EXIT_ALL")
+        self.assertEqual(follower_exit.shares, 1000)
+        self.assertTrue(all(d.action not in ("BUY", "BUY_SCOUT", "BUY_CONFIRM", "FULL_ROTATION_SWAP") for d in directives))
+        self.assertEqual(leader_exit.exit_rule_id, "exit_tide_climax_distribution")
+
+    def test_37_t10_sss_leader_exempts_time_decay_only_with_authoritative_context(self):
+        """T10 仅保护经交易中心确认的 SSS 第一龙头，普通持仓仍执行 L1。"""
+        now_ts = time.time()
+        code = "688010"
+        signal = VWAPDetectorSignal(
+            code=code, name="主升龙头", price=9.9, vwap=9.8,
+            is_above_vwap=True, signal_tier="SSS", horse_race_rank=1,
+            global_fleet_role="LEADER",
+        )
+        self.center._reports_cache[code] = signal
+        self.center._positions[code] = IPOTradingPosition(
+            code=code, name=signal.name, shares=1000, available_shares=1000,
+            cost_price=10.0, current_price=9.9, entry_date="2026-09-19",
+            signal_tier="SSS", status="HOLDING",
+        )
+        self.center.exit_engine.register_position(
+            code=code, entry_price=10.0, shares=1000, entry_time=now_ts - 31 * 60,
+        )
+        t10 = MarketSentimentSnapshot(
+            tide_state="T10_MAIN_UP", tide_position_cap_pct=80.0,
+            tide_action="HOLD_LEADERS",
+        ).finalize()
+        t10.generated_at = now_ts
+        self.center._last_market_context = t10
+
+        protected = self.center.evaluate_position_exit(
+            code, price=9.9, vwap_today=9.8, volume=100.0,
+            current_time=now_ts,
+            extra_ctx={"tide_state": "T1_CLIMAX_DISTRIBUTION", "is_tide_leader": False},
+        )
+        self.assertIsNone(protected, "权威 T10 龙头上下文应豁免 L1 时间衰减误杀")
+
+        signal.horse_race_rank = 2
+        signal.global_fleet_role = "VANGUARD"
+        unprotected = self.center.evaluate_position_exit(
+            code, price=9.9, vwap_today=9.8, volume=100.0, current_time=now_ts + 1,
+        )
+        self.assertIsNotNone(unprotected)
+        self.assertEqual(unprotected.exit_rule_id, "exit_time_decay")
+
+    def test_38_t10_rotation_requires_absolute_leader_and_wider_gap(self):
+        """T10 换马只允许 90+ 分 SSS 绝对龙头，且旧仓必须落后至少 25 分。"""
+        from unittest.mock import patch
+
+        self.center.trading_mode = "ROTATION_FULL_CAPITAL"
+        self.center._positions["600001"] = IPOTradingPosition(
+            code="600001", name="旧仓", shares=1000, available_shares=1000,
+            cost_price=10.0, current_price=10.0, entry_date="2026-09-19", status="HOLDING",
+        )
+        old_signal = VWAPDetectorSignal(
+            code="600001", name="旧仓", price=10.0, vwap=9.8,
+            is_above_vwap=True, signal_type="WATCH", horse_race_rank=4,
+            horse_race_score=65.0, signal_tier="S",
+        )
+        leader = VWAPDetectorSignal(
+            code="688099", name="候选龙头", price=20.0, vwap=18.0,
+            is_above_vwap=True, signal_type="BREAKOUT", horse_race_rank=1,
+            horse_race_score=89.0, signal_tier="SSS",
+        )
+        self.center._reports_cache = {old_signal.code: old_signal, leader.code: leader}
+        t10 = MarketSentimentSnapshot(
+            tide_state="T10_MAIN_UP", tide_position_cap_pct=80.0,
+            tide_action="HOLD_LEADERS", heat_stage="🔥 梯队升温",
+        ).finalize()
+
+        with patch.object(self.center.sentiment_engine, "get_market_sentiment", return_value=t10), \
+                patch("ats.strategy.ipo_trading_center.batch_evaluate_horse_race_ranking", return_value=[leader, old_signal]):
+            below_threshold = self.center.evaluate_fleet_and_generate_orders()
+        self.assertFalse(any(d.action == "FULL_ROTATION_SWAP" for d in below_threshold))
+
+        leader.horse_race_score = 96.0
+        with patch.object(self.center.sentiment_engine, "get_market_sentiment", return_value=t10), \
+                patch("ats.strategy.ipo_trading_center.batch_evaluate_horse_race_ranking", return_value=[leader, old_signal]):
+            absolute_leader = self.center.evaluate_fleet_and_generate_orders()
+        rotations = [d for d in absolute_leader if d.action == "FULL_ROTATION_SWAP"]
+        self.assertEqual(len(rotations), 1)
+        self.assertEqual(rotations[0].code, leader.code)
+        self.assertLessEqual(rotations[0].size_pct, 80.0)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
-

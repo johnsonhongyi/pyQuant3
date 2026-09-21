@@ -1,5 +1,23 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-09-21 15:30
+- [x] **【潮汐状态机 T1/T10 全链路风控与主升锁仓闭环落地】(`ats/strategy/ipo_trading_center.py`, `ats/proactive_exit_engine.py`, `tests/test_channel_secondary_buy_strategy.py`, `design/新股检测中心和集中交易指挥室升级交易方案2.md`)**：
+    - [x] **T1 高潮派发端到端绝对防御与风险出局**：
+        - `_can_execute_buy` 将 `T1_CLIMAX_DISTRIBUTION` 提升为与 `T4_PANIC_ACCEL` 同级的首要绝对门禁，拒绝普通买入与手工/外部信号注入；
+        - 全仓轮动在生成端与撮合执行端双层阻断买入，严防借轮动买入新标的；
+        - 自上而下组合级风险降维：非核心持仓一律发出 `EXIT_ALL`（100% 清仓）；Rank 1 且 SSS 核心龙头发出 `REDUCE_HALF`（减半锁盈）；
+        - A 股 T+1 物理锁合规：严格校验 `available_shares` 与成交日期，绝不非法卖出当日新仓。
+    - [x] **T10 主升浪核心龙头锁仓与严苛换马**：
+        - 在 `ProactiveExitEngine` 注入潮汐状态与龙头身份；经新鲜快照确认的 SSS 唯一龙头豁免 Layer 1（时间衰减）与 Layer 5（盘中震荡不创高）洗盘误杀，同时保持结构止损（`higher_low_stop`）等硬底线 100% 坚挺；
+        - 全仓轮动设置严苛换马门槛：新标的必须满足 Rank 1、SSS 梯队、动能分 $\ge 90$ 且超越旧仓 $\ge 25$ 分。
+    - [x] **全量自动化验证 100% 绿灯 (86/86 PASSED)**：
+        - 专项回归测试全部通过，覆盖 T1 阻断买入/自上而下减仓、T10 龙头锁仓豁免与硬防线；
+        - compileall exit=0 无语法与导入错误。
+    - [ ] **后续推进路线 (Next Steps - P1/P2)**：
+        - 1) **P1-01**：新股检测表格增加【形态阶段】与【结构防守】列展示；
+        - 2) **P1-02**：指挥室待执行指令卡片直观呈现不可变 TradePlan 网格；
+        - 3) **P1-03**：`signal_id` 跨周期幂等去重与当日状态原子落盘。
+
 ## 2026-09-21 15:05
 - [x] **【天梯引擎未封板标的 pattern_desc 变量未绑定 Bug 修复与多重兜底】(`ats/limit_up_engine.py`, `tests/test_ladder_background_auto_update.py`)**：
     - [x] **根因定位与修复**：在 `scan_limit_up_records_from_df` 针对未封板且未命中特定上车点（如大盘普通冲高或蓄势观察）的个股计算时，`desc_tag` 仅在部分条件分支中被赋值，当股票不符合任何预设条件分支时，后续直接使用导致 Python 抛出 `UnboundLocalError: local variable 'desc_tag' referenced before assignment`，进而导致天梯后台扫描 Worker 异常；

@@ -1046,6 +1046,59 @@ class IPOTradingCenter:
                     continue
 
                 sig = self._reports_cache.get(code)
+
+                # 4.0 潮汐总控铁律：T1 高潮派发不是单纯的“停止买入”，而是
+                # 自上而下主动降风险。非龙头全退，唯一 SSS 龙头先减半进入防守。
+                # 当日新仓仍受 record_order_execution 的 T+1 物理锁约束。
+                if getattr(sentiment, "tide_state", "") == "T1_CLIMAX_DISTRIBUTION":
+                    exit_price = (
+                        sig.price if sig is not None and sig.price > 0
+                        else (pos.current_price if pos.current_price > 0 else pos.cost_price)
+                    )
+                    is_protected_leader = bool(
+                        sig is not None
+                        and pos.signal_tier == "SSS"
+                        and (sig.global_fleet_role == "LEADER" or sig.horse_race_rank == 1)
+                    )
+                    tradable_shares = min(
+                        pos.shares,
+                        pos.available_shares if pos.available_shares > 0 else pos.shares,
+                    )
+                    action = "REDUCE_HALF" if is_protected_leader else "EXIT_ALL"
+                    shares = (
+                        int(tradable_shares * 0.5 / 100) * 100
+                        if is_protected_leader else tradable_shares
+                    )
+                    if is_protected_leader and shares < 100:
+                        action = "EXIT_ALL"
+                        shares = tradable_shares
+                    if exit_price > 0 and shares > 0:
+                        directives.append(IPOOrderDirective(
+                            action=action,
+                            code=code,
+                            name=pos.name,
+                            price=exit_price,
+                            shares=shares,
+                            size_pct=50.0 if action == "REDUCE_HALF" else 100.0,
+                            urgency="CRITICAL",
+                            reason=(
+                                "🚨 T1高潮派发组合风控: SSS核心龙头先减半锁盈并转入防守警戒。"
+                                if action == "REDUCE_HALF" else
+                                "🚨 T1高潮派发组合风控: 市场放量分化且VWAP承接衰退，非核心持仓立即退出。"
+                            ),
+                            horse_rank=sig.horse_race_rank if sig is not None else 999,
+                            sentiment_phase=sentiment.heat_stage,
+                            timestamp=now_ts,
+                            signal_tier=pos.signal_tier,
+                            signal_level=pos.signal_level,
+                            quality_grade=pos.quality_grade,
+                            strategy_tag=pos.strategy_tag,
+                            trade_plan=pos.trade_plan,
+                            exit_rule_id="exit_tide_climax_distribution",
+                            exit_rule_layer=0,
+                        ))
+                    continue
+
                 if not sig or sig.price <= 0:
                     continue
 
@@ -1117,12 +1170,24 @@ class IPOTradingCenter:
 
             # 5. ── 【调仓换马：弃弱留强与全仓轮动 (FULL_ROTATION_SWAP / SWITCH_SWAP)】 ──
             # 持续跟随市场切换：持仓股动能滞涨落后，全池涌现出更强的 Rank 1 领头羊时果断换马
-            if top_leader and top_leader.code not in self._positions:
+            rotation_tide_state = getattr(sentiment, "tide_state", "T0_INSUFFICIENT")
+            t10_absolute_leader = bool(
+                top_leader
+                and top_leader.horse_race_rank == 1
+                and top_leader.signal_tier == "SSS"
+                and top_leader.horse_race_score >= 90.0
+            )
+            rotation_entry_allowed = (
+                rotation_tide_state != "T1_CLIMAX_DISTRIBUTION"
+                and (rotation_tide_state != "T10_MAIN_UP" or t10_absolute_leader)
+            )
+            if rotation_entry_allowed and top_leader and top_leader.code not in self._positions:
                 for code, pos in list(self._positions.items()):
                     if pos.shares <= 0 or code == top_leader.code:
                         continue
                     p_sig = self._reports_cache.get(code)
-                    if p_sig and (p_sig.relative_to_leader_gap >= 15.0 or p_sig.horse_race_rank > 2):
+                    required_rotation_gap = 25.0 if rotation_tide_state == "T10_MAIN_UP" else 15.0
+                    if p_sig and (p_sig.relative_to_leader_gap >= required_rotation_gap or p_sig.horse_race_rank > 2):
                         # 检查新领头羊是否具备进击买点
                         if top_leader.signal_type in ("IPO_FIRST_BUY", "PULLBACK_BUY", "BREAKOUT", "BASE_BREAKOUT") or (top_leader.launch_time_str <= "09:50" and top_leader.launch_slope_deg >= 30.0):
                             if self.trading_mode == "ROTATION_FULL_CAPITAL":
@@ -1135,7 +1200,7 @@ class IPOTradingCenter:
                                     risk_mult = 0.0
 
                                 tide_state = getattr(sentiment, "tide_state", "T0_INSUFFICIENT")
-                                if tide_state == "T4_PANIC_ACCEL":
+                                if tide_state in ("T1_CLIMAX_DISTRIBUTION", "T4_PANIC_ACCEL"):
                                     swap_cap = 0.0
                                 elif tide_state != "T0_INSUFFICIENT":
                                     swap_cap = max(0.0, min(100.0, float(
@@ -1145,8 +1210,8 @@ class IPOTradingCenter:
                                     swap_cap = 100.0
 
                                 effective_swap_cap = min(100.0 * risk_mult, swap_cap)
-                                if risk_mode == "BLOCK_NEW_BUYS" or tide_state == "T4_PANIC_ACCEL" or effective_swap_cap <= 0.0:
-                                    # 风控闸门：T4、BLOCK_NEW_BUYS 或受限上限为 0 时禁止生成换入决议
+                                if risk_mode == "BLOCK_NEW_BUYS" or tide_state in ("T1_CLIMAX_DISTRIBUTION", "T4_PANIC_ACCEL") or effective_swap_cap <= 0.0:
+                                    # 风控闸门：T1/T4、BLOCK_NEW_BUYS 或受限上限为 0 时禁止生成换入决议
                                     continue
 
                                 # 计算除被替换老标的以外的其他保留持仓市值与权重
@@ -1610,6 +1675,24 @@ class IPOTradingCenter:
                 ctx.setdefault("trade_plan", plan)
                 ctx.setdefault("higher_low_stop", plan.higher_low_stop)
 
+            # 只有交易中心持有的、新鲜的实时快照可以赋予 T10 龙头锁仓保护；
+            # 调用方传入的 extra_ctx 不能自行伪造宏观豁免。
+            market_ctx = self._last_market_context
+            market_ctx_fresh = False
+            if market_ctx is not None:
+                generated_at = float(getattr(market_ctx, "generated_at", 0.0) or 0.0)
+                reference_ts = float(current_time if current_time is not None else time.time())
+                market_ctx_fresh = generated_at > 0 and abs(reference_ts - generated_at) <= 300.0
+            report = self._reports_cache.get(clean_code)
+            ctx["tide_state"] = getattr(market_ctx, "tide_state", "") if market_ctx_fresh else ""
+            ctx["is_tide_leader"] = bool(
+                market_ctx_fresh
+                and ctx["tide_state"] == "T10_MAIN_UP"
+                and pos.signal_tier == "SSS"
+                and report is not None
+                and (report.global_fleet_role == "LEADER" or report.horse_race_rank == 1)
+            )
+
             watch = self.exit_engine.get_position(clean_code)
             reduce_count_before = watch.reduce_count if watch is not None else 0
             last_reduce_before = watch.last_reduce_time if watch is not None else None
@@ -1756,10 +1839,10 @@ class IPOTradingCenter:
                 if ctx_risk_mode == "BLOCK_NEW_BUYS":
                     ctx_risk_mult = 0.0
 
-                # 铁律: T4_PANIC_ACCEL 或 BLOCK_NEW_BUYS 必须坚决拒绝普通买入，且不创建幽灵持仓、不扣减现金
-                if ctx_tide_state == "T4_PANIC_ACCEL" or ctx_risk_mode == "BLOCK_NEW_BUYS" or ctx_risk_mult <= 0.0:
+                # 铁律: T1/T4 或 BLOCK_NEW_BUYS 必须坚决拒绝普通买入，且不创建幽灵持仓、不扣减现金
+                if ctx_tide_state in ("T1_CLIMAX_DISTRIBUTION", "T4_PANIC_ACCEL") or ctx_risk_mode == "BLOCK_NEW_BUYS" or ctx_risk_mult <= 0.0:
                     logger.warning(
-                        "[IPO-TRADING] Buy action rejected: T4/BLOCK_NEW_BUYS gate active (tide=%s, risk=%s, mult=%.2f)",
+                        "[IPO-TRADING] Buy action rejected: T1/T4/BLOCK_NEW_BUYS gate active (tide=%s, risk=%s, mult=%.2f)",
                         ctx_tide_state, ctx_risk_mode, ctx_risk_mult
                     )
                     return False
@@ -1917,6 +2000,16 @@ class IPOTradingCenter:
                 if ctx is None and self.sentiment_engine is not None:
                     ctx = getattr(self.sentiment_engine, "_cached_snapshot", None)
 
+                # 即使是手工构造指令或快照已过期，已知的 T1/T4 也绝不能
+                # 降级到“按老仓位换入”；这两个状态只允许风险退出。
+                known_tide_state = getattr(ctx, "tide_state", "T0_INSUFFICIENT") if ctx is not None else "T0_INSUFFICIENT"
+                if known_tide_state in ("T1_CLIMAX_DISTRIBUTION", "T4_PANIC_ACCEL"):
+                    logger.warning(
+                        "[IPO-TRADING] FULL_ROTATION_SWAP rejected: absolute tide exit gate active (%s)",
+                        known_tide_state,
+                    )
+                    return False
+
                 # 老股票持仓快照与仓位权重
                 old_code = directive.target_swap_code
                 old_pos = self._positions.get(old_code) if old_code else None
@@ -1966,7 +2059,7 @@ class IPOTradingCenter:
                     # 仅当快照新鲜、指令与快照紧密因果关联、且非T0数据不足时，才属于可信快照关联指令
                     if is_fresh and has_directive_link and ctx_tide_state != "T0_INSUFFICIENT":
                         is_trusted_snapshot = True
-                        if ctx_tide_state == "T4_PANIC_ACCEL":
+                        if ctx_tide_state in ("T1_CLIMAX_DISTRIBUTION", "T4_PANIC_ACCEL"):
                             trusted_cap = 0.0
                         else:
                             tide_cap_val = float(getattr(ctx, "tide_position_cap_pct", 100.0) or 100.0)
