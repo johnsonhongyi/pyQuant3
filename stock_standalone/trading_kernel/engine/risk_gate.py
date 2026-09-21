@@ -96,13 +96,13 @@ def evaluate(
         request_id = str(signal.features.get("request_id", "") or "")
         order_key = (request_id, signal.code, signal.ts, action, final_size) if request_id else (signal.code, signal.ts, action, final_size)
         order = ApprovedOrder(
-            order_id=stable_hash(order_key)[:24],
+            order_id=f"MANUAL_{stable_hash(order_key)[:20]}",
             code=signal.code,
             action=action,
             size_pct=round(final_size, 4),
             price=signal.price,
             stop_price=intent.stop_price,
-            request_id=request_id,
+            request_id=request_id or f"MANUAL_{signal.code}_{signal.ts}",
         )
         return RiskDecision(
             allowed=True,
