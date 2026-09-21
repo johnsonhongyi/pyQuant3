@@ -41,48 +41,52 @@ class PaperExecutionResult:
     size_pct: float = 0.0
 
 
-def get_orders() -> List[Dict[str, Any]]:
+def get_ssot_read_model() -> Dict[str, Any]:
+    """Return one coherent TK-owned read model for ATS presentation."""
     from trading_kernel.gateway import KernelGateway
 
-    return KernelGateway().get_order_history()
+    return dict(KernelGateway().get_account_read_model())
+
+
+def get_orders() -> List[Dict[str, Any]]:
+    return [
+        dict(item)
+        for item in get_ssot_read_model().get("orders", [])
+        if isinstance(item, dict)
+    ]
 
 
 def get_positions() -> Dict[str, Dict[str, Any]]:
-    from trading_kernel.gateway import KernelGateway
-
-    positions = KernelGateway().get_positions()
-    _align_state_manager(set(positions))
-    return positions
+    return {
+        str(code): dict(raw)
+        for code, raw in get_ssot_read_model().get("positions", {}).items()
+        if isinstance(raw, dict)
+    }
 
 
 def get_account_snapshot() -> Dict[str, Any]:
-    from trading_kernel.gateway import KernelGateway
-
-    gateway = KernelGateway()
-    snap = dict(gateway.get_account_snapshot())
-    return snap
+    return dict(get_ssot_read_model().get("account", {}))
 
 
-def _align_state_manager(held_codes: set[str]) -> None:
-    """Keep the kernel state machine physically aligned with paper holdings."""
-    try:
-        from trading_kernel.gateway import KernelGateway
+def reconcile_account(read_model: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Audit orders versus holdings without creating a second financial ledger.
 
-        KernelGateway().reconcile_state()
-    except Exception:
-        pass
-
-
-def reconcile_account() -> Dict[str, Any]:
-    """Audit orders versus holdings and auto-align all runtime state consumers.
-
-    The persisted position snapshot remains authoritative for *current* holdings;
-    historical orders remain authoritative for closed-trade performance.  Legacy
-    gaps are reported instead of silently rewriting historical transactions.
+    Current holdings/cash/orders come only from the TK read model. Legacy
+    inconsistencies are reported, never repaired by ATS-side bookkeeping.
     """
-    positions = get_positions()
+    read_model = dict(read_model or get_ssot_read_model())
+    positions = {
+        str(code): dict(raw)
+        for code, raw in read_model.get("positions", {}).items()
+        if isinstance(raw, dict)
+    }
+    orders = [
+        dict(item)
+        for item in read_model.get("orders", [])
+        if isinstance(item, dict)
+    ]
     open_volume: Dict[str, float] = {}
-    for order in sorted(get_orders(), key=lambda item: str(item.get("timestamp") or "")):
+    for order in sorted(orders, key=lambda item: str(item.get("timestamp") or "")):
         code = str(order.get("code") or "").strip().zfill(6)
         action = str(order.get("action") or "").upper()
         volume = _number(order.get("volume"))

@@ -11,8 +11,11 @@ state manager directly.
 - `submit_mapping(payload)` is the JSON/IPC-friendly endpoint. Unknown fields
   are ignored so additive upgrades remain compatible.
 - `get_positions()`, `get_account_snapshot()`, `get_order_history()` and
-  `get_state_snapshot()` expose read models.
-- `reconcile_state()` aligns position and strategy state data.
+  `get_state_snapshot()` expose narrow read models.
+- `get_account_read_model()` exposes one coherent read-only SSOT snapshot for
+  ATS/UI consumers: account, positions, orders, states, reconciliation and mode.
+- `reconcile_state()` aligns position and strategy state data and persists an
+  auditable reconciliation snapshot by default.
 
 ## Reserved extension ports
 
@@ -25,6 +28,11 @@ state manager directly.
 - Audit: `register_event_sink(sink)`; sink implements `append(record)`.
 
 The built-in PAPER adapter remains the account authority during validation.
+ATS must treat the aggregated account read model as read-only and must not keep
+an independent cash/position/order ledger. Reconciliation snapshots are written
+at startup, after executed orders, and periodically while the kernel is active;
+legacy order differences are reported rather than rewriting historical rows.
+
 CONFIRM and LIVE_AUTO are reserved execution modes; registering a broker adapter
 does not bypass the kernel risk gate, state machine, idempotency or audit path.
 

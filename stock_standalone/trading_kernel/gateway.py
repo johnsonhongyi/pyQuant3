@@ -160,8 +160,17 @@ class KernelGateway:
     def get_order_history(self) -> list[dict[str, Any]]:
         return self._service.get_order_history()
 
+    def get_account_read_model(self) -> dict[str, Any]:
+        return self._service.get_account_read_model()
+
     def get_state_snapshot(self) -> dict[str, str]:
         return self._service.state_manager.snapshot()
 
-    def reconcile_state(self) -> dict[str, Any]:
-        return self._service.reconcile_runtime_state()
+    def reconcile_state(self, *, persist: bool = True) -> dict[str, Any]:
+        report = self._service.reconcile_runtime_state()
+        if persist:
+            self._service._persist_reconciliation_snapshot(
+                force=True,
+                reason="MANUAL_RECONCILE",
+            )
+        return report
