@@ -1,5 +1,15 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-09-21 15:05
+- [x] **【天梯引擎未封板标的 pattern_desc 变量未绑定 Bug 修复与多重兜底】(`ats/limit_up_engine.py`, `tests/test_ladder_background_auto_update.py`)**：
+    - [x] **根因定位与修复**：在 `scan_limit_up_records_from_df` 针对未封板且未命中特定上车点（如大盘普通冲高或蓄势观察）的个股计算时，`desc_tag` 仅在部分条件分支中被赋值，当股票不符合任何预设条件分支时，后续直接使用导致 Python 抛出 `UnboundLocalError: local variable 'desc_tag' referenced before assignment`，进而导致天梯后台扫描 Worker 异常；
+    - [x] **双重防御加固**：
+        1. 在量化打分判定入口前预置 `desc_tag = f"📋 观察({round(pct, 1)}%)"`，消除任何分支遗漏的可能；
+        2. 在未封板的 `if/elif` 判定链末尾增加 `else` 兜底分支，规范填充 `tier_tag` 与 `desc_tag = f"📋 蓄势观察({momentum_score:.0f}分)"`；
+    - [x] **全量自动化验证 100% 绿灯**：
+        - 针对普通非涨停、非特征股票进行极限边界扫描测试通过；
+        - `test_ladder_background_auto_update.py`、`test_command_room_features_and_12tide.py` 及 `test_subnew_tide_state_machine.py` 共 20 项测试全部通过（20 passed）。
+
 ## 2026-09-21 12:55
 - [x] **【集中仲裁详情窗时间友好显示到分、价格多级动态补齐与观察信号仓位纠偏】(`ats/ui/ipo_arbitration_detail_dialog.py`, `ats/strategy/ipo_trading_center.py`, `ats/ui/ipo_command_room_dialog.py`, `tests/test_command_room_features_and_12tide.py`)**：
     - [x] **全链路时间友好显示模式（精确到分）**：
