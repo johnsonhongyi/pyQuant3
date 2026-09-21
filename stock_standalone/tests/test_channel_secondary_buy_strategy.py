@@ -173,10 +173,23 @@ class TestIPOTradingCenterTradePlanIntegration(unittest.TestCase):
             target_swap_code="600000",
             target_swap_name="老股票"
         )
-        # 触发自动撮合
-        self.center._auto_execute_if_enabled([swap_dir])
+        # 自动撮合必须统一消费 get_pending_directives() 的收敛视图
+        self.center._pending_directives = [swap_dir]
+        self.center._auto_execute_if_enabled()
         # 验证：新股票未被自动建仓！
         self.assertNotIn("688826", self.center._positions)
+
+    def test_05b_pending_view_converges_before_execution(self):
+        """内部候选即使出现 BUY/EXIT 冲突，对外和自动执行也只能看到 EXIT。"""
+        self.center._pending_directives = [
+            IPOOrderDirective(action="BUY", code="688826", name="测试标的", horse_rank=1),
+            IPOOrderDirective(action="EXIT_ALL", code="688826", name="测试标的", urgency="CRITICAL"),
+        ]
+
+        pending = self.center.get_pending_directives()
+
+        self.assertEqual([d.action for d in pending], ["EXIT_ALL"])
+        self.assertEqual(self.center.get_signal_convergence_summary()["suppressed_count"], 1)
 
     def test_06_record_order_execution_scout_and_exit(self):
         """测试 BUY_SCOUT 建仓与 EXIT_ALL 平仓全生命周期流转"""

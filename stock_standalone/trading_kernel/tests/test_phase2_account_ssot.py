@@ -84,3 +84,29 @@ def test_production_ipo_ledger_does_not_persist_financial_facts(tmp_path, monkey
     assert "total_capital" not in payload
     assert "available_cash" not in payload
     assert "active_positions" not in payload
+
+
+def test_explicit_custom_ipo_ledger_keeps_test_compatibility(tmp_path):
+    from ats.strategy.ipo_trading_center import IPOTradingCenter, IPOTradingPosition
+
+    target = tmp_path / "isolated_ipo_ledger.json"
+    center = IPOTradingCenter(
+        total_capital=123456.0,
+        auto_load_ledger=False,
+        ledger_file=str(target),
+    )
+    center.available_cash = 65432.0
+    center._positions["000001"] = IPOTradingPosition(
+        code="000001", name="test", shares=100, cost_price=10.0, current_price=10.5,
+    )
+    center._save_persisted_ledger()
+
+    restored = IPOTradingCenter(
+        total_capital=1.0,
+        auto_load_ledger=False,
+        ledger_file=str(target),
+    )
+
+    assert restored.total_capital == 123456.0
+    assert restored.available_cash == 65432.0
+    assert restored.get_position("000001").shares == 100

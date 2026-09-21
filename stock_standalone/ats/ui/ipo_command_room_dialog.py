@@ -1741,7 +1741,21 @@ class IPOCommandRoomDialog(QDialog):
         else:
             filtered_logs = list(self._current_signal_logs_list)
 
-        self.btn_orders_pending.setText(f"⏳ 待执行指令 ({len(directives)})")
+        convergence = self.trading_center.get_signal_convergence_summary()
+        actionable_count = int(convergence.get("actionable_count", len(directives)) or 0)
+        suppressed_count = int(convergence.get("suppressed_count", 0) or 0)
+        self.btn_orders_pending.setText(
+            f"⏳ 直接买卖点 ({actionable_count}) | 已过滤 {suppressed_count}"
+        )
+        self.btn_orders_pending.setToolTip(
+            "阶段三信号收敛结果：同代码同方向仅保留最高优先级决议；"
+            "退出/止损决议优先于同轮买入。\n"
+            f"原始指令: {convergence.get('raw_count', len(directives))} | "
+            f"开仓: {convergence.get('entry_count', 0)} | "
+            f"退出: {convergence.get('exit_count', 0)} | "
+            f"轮动: {convergence.get('rotation_count', 0)} | "
+            f"过滤: {suppressed_count}"
+        )
         self.btn_orders_history.setText(f"📋 历史日志 ({len(filtered_logs)}/{len(self._current_signal_logs_list)})")
 
         hv_orders = self.tbl_orders.horizontalHeader()
