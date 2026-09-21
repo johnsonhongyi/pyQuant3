@@ -412,7 +412,8 @@ class PaperExecutionAdapter(ExecutionAdapter):
             equity = 1000000.0
 
         import sys_utils
-        bypass = self._is_test or self._is_simulation
+        is_manual_order = "MANUAL" in str(order.order_id).upper() or "MANUAL" in request_id.upper()
+        bypass = self._is_test or self._is_simulation or is_manual_order
         if action in {"BUY", "ADD"}:
             # 校验是否为交易日交易时间（测试环境/模拟模式豁免）
             if not sys_utils.is_active_trading_hours(bypass=bypass):

@@ -1869,6 +1869,16 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 trade_gw.update_prices(price_map)
             trade_gw.check_stop_loss()
 
+            # 🛡️ [DECOUPLE-UI] 主动在后台驱动统一内核与老网关的双向对账自愈同步
+            # 彻底杜绝“只有手动打开交易流水窗口(DecisionFlowPanel)才能继续交易”的缺陷！
+            try:
+                from trading_kernel.kernel_service import get_kernel_service
+                _kernel_srv = get_kernel_service()
+                if _kernel_srv:
+                    _kernel_srv.sync_with_legacy_gateway(trade_gw=trade_gw, df_rt=getattr(self, 'df_all', None))
+            except Exception as _sync_err:
+                logger.debug(f"[BgKernel] Background sync_with_legacy_gateway skipped: {_sync_err}")
+
             import sys_utils
             is_active_trading = sys_utils.is_active_trading_hours(bypass=False)
 

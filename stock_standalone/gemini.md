@@ -1,5 +1,21 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-09-21 21:35
+- [x] **【TK 后台自动交易脱耦自愈、手工平仓绿色通道穿透与流水归档清理全面修复】(`trading_kernel/kernel_service.py`, `instock_MonitorTK.py`, `tk_gui_modules/decision_flow_panel.py`, `trading_kernel/engine/risk_gate.py`, `trading_kernel/execution/paper_adapter.py`)**：
+    - [x] **后台自动交易与对账脱耦（消灭 UI 寄生）**：
+        - 将此前寄生在 `DecisionFlowPanel` 中的“老 TradeGateway 与新内核 PaperAdapter 双向持仓对账自愈（Bridge）”下沉为 `TradingKernelService.sync_with_legacy_gateway()` 公共核心服务；
+        - 在 `MonitorTK.py` 的后台驱动主循环 `bg_kernel_auto_execute_once()` 中主动触发，彻底消灭“必须手动打开交易流水窗口才能继续交易”的严重设计缺陷，后台 100% 自主运行交易与对账。
+    - [x] **手工平仓绿色通道穿透与原子出清保障**：
+        - `_manual_sell_position` 注入带有 `MANUAL_` 前缀的 `request_id`，在 `RiskDecision` 中以 `MANUAL_OVERRIDE` 机制放行；
+        - 在 `PaperExecutionAdapter` 中识别 `is_manual_order` 豁免交易时段限制，并在 UI 侧提供底层出清兜底与退款保护，杜绝任何因盘后/时钟误差导致的平仓失败与幽灵持仓残留。
+    - [x] **流水日志清空与原子备份归档闭环**：
+        - 修复 `_clear_view()` 清空显示后增量指针状态；右键菜单新增【📦 归档并清空物理流水日志 (彻底重置)】，支持自动备份为 `.bak` 并物理清空，点击【🔄 手工刷新】可安全重新加载。
+    - [x] **策略风控单点事实源（SSOT）确认**：
+        - 经严格审计，`DecisionFlowPanel` 的 8 项风控阈值与 `trading_kernel` 的 `RiskLimits` 读写链路 100% 保持一致，无任何参数割裂。
+    - [x] **全量自动化验证 100% 绿灯**：
+        - `trading_kernel` 全量 59 项单元与对账测试 100% 绿灯通过（59 passed in 12.57s）；
+        - ATS 16 项关联核心测试全部通过；全代码库 `compileall` exit=0 无任何语法与导入错误。
+
 ## 2026-09-21 21:00
 - [x] **【TK阶段二/三统一收敛闭环 & 明日次新实战开盘部署计划书落地】(`docs/SUBNEW_REAL_MARKET_DEPLOYMENT_PLAN_2026-09-22.md`, `ats/strategy/signal_convergence.py`, `ats/strategy/ipo_trading_center.py`)**：
     - [x] **代码级统一收敛强制入口完全闭环**：

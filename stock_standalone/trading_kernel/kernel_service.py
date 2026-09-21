@@ -423,6 +423,158 @@ class TradingKernelService:
             orders = getattr(self.paper_adapter, "orders", [])
         return [dict(item) for item in (orders or []) if isinstance(item, dict)]
 
+    def sync_with_legacy_gateway(self, trade_gw: Any = None, df_rt: Any = None) -> dict[str, Any]:
+        """
+        [SSOT] 与原有 Legacy TradeGateway 执行双向对账与自愈同步。
+        彻底消除此前“必须打开交易流水监测器(DecisionFlowPanel)才能驱动对账与交易”的严重缺陷。
+        确保即使 UI 窗口关闭，后台循环 (MonitorTK) 也能 100% 自主对齐持仓、浮盈与可用现金。
+        """
+        if trade_gw is None:
+            try:
+                from trade_gateway import get_trade_gateway
+                trade_gw = get_trade_gateway()
+            except Exception:
+                return {}
+        if not trade_gw or not hasattr(self, "paper_adapter") or not self.paper_adapter:
+            return {}
+
+        result = {"restored_to_gw": 0, "synced_from_gw": 0, "evicted": 0}
+        try:
+            from trading_kernel.core.model import Position as PaperPosition
+            from trade_gateway import Position as LegacyPosition
+
+            # 1) 内核持仓反哺/自愈恢复至老网关（防老网关崩溃或清空）
+            with self.paper_adapter.account._lock if hasattr(self.paper_adapter.account, "_lock") else self._noop_context():
+                for p_code, pos_obj in list(self.paper_adapter.account.positions.items()):
+                    p_code_pure = "".join(filter(str.isdigit, str(p_code)))[:6]
+                    if len(p_code_pure) == 6 and p_code_pure not in trade_gw._positions:
+                        vol = float(pos_obj.volume)
+                        if vol > 0:
+                            name_val = "内核持仓"
+                            sector_val = ""
+                            try:
+                                if df_rt is not None and not getattr(df_rt, "empty", True):
+                                    idx_val = p_code_pure if p_code_pure in df_rt.index else (int(p_code_pure) if int(p_code_pure) in df_rt.index else None)
+                                    if idx_val is not None:
+                                        row = df_rt.loc[idx_val]
+                                        if hasattr(row, "ndim") and row.ndim > 1:
+                                            row = row.iloc[0]
+                                        name_val = row.get("name", "内核持仓")
+                                        sector_val = row.get("sector", row.get("sector_name", ""))
+                            except Exception:
+                                pass
+                            entry_p = float(pos_obj.entry_price)
+                            curr_p = float(pos_obj.current_price or entry_p)
+
+                            entry_time_dt = datetime.now()
+                            p_entry_time = getattr(pos_obj, "entry_time", "N/A")
+                            if p_entry_time and p_entry_time != "N/A":
+                                for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):
+                                    try:
+                                        entry_time_dt = datetime.strptime(p_entry_time, fmt)
+                                        break
+                                    except Exception:
+                                        continue
+
+                            leg_pos = LegacyPosition(
+                                code=p_code_pure,
+                                name=name_val,
+                                sector=sector_val,
+                                entry_price=entry_p,
+                                entry_time=entry_time_dt,
+                                shares=int(vol),
+                                position_value=entry_p * vol,
+                                strategy_tag="内核反哺",
+                                stop_loss=entry_p * 0.98,
+                                current_price=curr_p if curr_p > 0 else entry_p,
+                                pnl_pct=getattr(pos_obj, "pnl_pct", 0.0),
+                                pnl_value=getattr(pos_obj, "pnl", 0.0),
+                                day_high=curr_p if curr_p > 0 else entry_p,
+                            )
+                            trade_gw._positions[p_code_pure] = leg_pos
+                            result["restored_to_gw"] += 1
+
+            # 2) 老网关持仓双向对账至新内核
+            old_positions = trade_gw.get_positions()
+            old_code_set = set()
+            for old_pos in old_positions:
+                o_code = old_pos.get("code")
+                if o_code:
+                    o_code_pure = "".join(filter(str.isdigit, str(o_code)))[:6]
+                    if len(o_code_pure) == 6:
+                        old_code_set.add(o_code_pure)
+                        vol = float(old_pos.get("shares", 0))
+                        entry_p = float(old_pos.get("entry_price", 0.0))
+                        curr_p = float(old_pos.get("current_price", entry_p))
+                        if o_code_pure not in self.paper_adapter.account.positions:
+                            sync_entry_time = "N/A"
+                            with trade_gw._lock:
+                                for old_key, leg_pos_obj in trade_gw._positions.items():
+                                    old_pure = "".join(filter(str.isdigit, str(old_key)))[:6]
+                                    if old_pure == o_code_pure and leg_pos_obj.entry_time:
+                                        if isinstance(leg_pos_obj.entry_time, datetime):
+                                            sync_entry_time = leg_pos_obj.entry_time.strftime("%Y-%m-%d %H:%M:%S")
+                                        else:
+                                            sync_entry_time = str(leg_pos_obj.entry_time)
+                                        break
+                            if sync_entry_time == "N/A" or not sync_entry_time:
+                                sync_entry_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+                            self.paper_adapter.account.positions[o_code_pure] = PaperPosition(
+                                code=o_code_pure,
+                                entry_price=entry_p,
+                                volume=vol,
+                                current_price=curr_p,
+                                entry_time=sync_entry_time,
+                            )
+                            self.paper_adapter.account.cash -= entry_p * vol
+                            result["synced_from_gw"] += 1
+                        else:
+                            pos_obj = self.paper_adapter.account.positions[o_code_pure]
+                            if pos_obj.entry_time == "N/A" or not pos_obj.entry_time:
+                                with trade_gw._lock:
+                                    for old_key, leg_pos_obj in trade_gw._positions.items():
+                                        old_pure = "".join(filter(str.isdigit, str(old_key)))[:6]
+                                        if old_pure == o_code_pure and leg_pos_obj.entry_time:
+                                            if isinstance(leg_pos_obj.entry_time, datetime):
+                                                pos_obj.entry_time = leg_pos_obj.entry_time.strftime("%Y-%m-%d %H:%M:%S")
+                                            else:
+                                                pos_obj.entry_time = str(leg_pos_obj.entry_time)
+                                            break
+                            diff_vol = vol - pos_obj.volume
+                            if diff_vol != 0:
+                                self.paper_adapter.account.cash -= diff_vol * entry_p
+                            pos_obj.volume = vol
+                            pos_obj.entry_price = entry_p
+                            if curr_p > 0:
+                                pos_obj.current_price = curr_p
+
+            # 3) 清洗新内核中多出的已平仓个股
+            for active_c in list(self.paper_adapter.account.positions.keys()):
+                if active_c not in old_code_set:
+                    pos_obj = self.paper_adapter.account.positions[active_c]
+                    return_p = pos_obj.current_price if pos_obj.current_price > 0 else pos_obj.entry_price
+                    self.paper_adapter.account.cash += return_p * pos_obj.volume
+                    self.paper_adapter.account.positions.pop(active_c, None)
+                    result["evicted"] += 1
+
+            # 4) 同步初始本金
+            total_cap = getattr(getattr(trade_gw, "risk_manager", None), "total_capital", 1000000.0)
+            self.paper_adapter.initial_capital = total_cap
+            self.paper_adapter.account.initial_capital = total_cap
+
+            if hasattr(self.paper_adapter, "_save_state"):
+                self.paper_adapter._save_state()
+        except Exception as e_bridge:
+            logger.warning(f"Error in sync_with_legacy_gateway: {e_bridge}")
+
+        return result
+
+    @staticmethod
+    def _noop_context():
+        import contextlib
+        return contextlib.nullcontext()
+
     def update_df_all(self, df_all):
         """
         供外部实时/准实时将最新的 df_all 注入到内核单例中，供 O(1) 内存指标极速反查与缓存热身使用。
