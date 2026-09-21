@@ -140,6 +140,10 @@ class ProactiveExitEngine:
 
         now = current_time if current_time is not None else time.time()
         ctx = extra_ctx or {}
+        t10_leader_hold = (
+            ctx.get("tide_state") == "T10_MAIN_UP"
+            and bool(ctx.get("is_tide_leader", False))
+        )
 
         # 💥 [NEW] TradePlan / 反转结构持仓保护上下文注入与次低点止损更新
         if ctx.get("is_reversal_structure", False):
@@ -202,9 +206,10 @@ class ProactiveExitEngine:
 
             # 2. 依次按优先级评估 8 层守护
             # Layer 1: 时间衰减
-            action = self._eval_layer1_time_decay(pos, price, now)
-            if action:
-                return self._record_action(pos, action)
+            if not t10_leader_hold:
+                action = self._eval_layer1_time_decay(pos, price, now)
+                if action:
+                    return self._record_action(pos, action)
 
             # Layer 2: 无量不涨
             action = self._eval_layer2_no_volume_no_rise(pos, price, volume, volume_ratio, now)
@@ -222,9 +227,10 @@ class ProactiveExitEngine:
                 return self._record_action(pos, action)
 
             # Layer 5: 震荡不创高
-            action = self._eval_layer5_oscillation(pos, price, vwap_today, now)
-            if action:
-                return self._record_action(pos, action)
+            if not t10_leader_hold:
+                action = self._eval_layer5_oscillation(pos, price, vwap_today, now)
+                if action:
+                    return self._record_action(pos, action)
 
             # Layer 6: 量价背离
             action = self._eval_layer6_volume_divergence(pos, price, ctx, now)
