@@ -64,7 +64,7 @@ from ats.strategy.ipo_vwap_detector_engine import (
 )
 from ats.strategy.ipo_trading_center import IPOTradingCenter
 from ats.alert_notifier import AlertNotifier
-from ats.ui.styles import load_config_node, save_config_node
+from ats.ui.styles import load_config_node, save_config_node, TOOLTIP_STYLE, apply_dark_tooltip_palette
 from ats.ui.ipo_detector_ipc import (
     get_ipo_detector_layout_file,
     pop_queued_stocks,
@@ -501,7 +501,8 @@ class IPOSubnewDetectorDialog(QMainWindow):
             QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {
                 background: none;
             }
-        """)
+        """ + TOOLTIP_STYLE)
+        apply_dark_tooltip_palette(self)
 
         self.monitored_codes: List[str] = []
         self.manual_codes: List[str] = []  # 操盘手手工添加标的池 (享有最高意志免检权，专属金色标记并置顶优先展示)

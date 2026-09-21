@@ -44,7 +44,7 @@ from ats.ui.styles import (
     COLOR_UP, COLOR_DOWN, COLOR_INFO, COLOR_ACCENT, COLOR_WARN, 
     auto_fit_columns_once, setup_header_persistence, save_config_node, save_config_nodes, load_config_node,
     apply_dark_theme, ColorPreservingItemDelegate, bind_top_shortcut, set_seamless_stay_on_top,
-    parse_bool_config
+    parse_bool_config, TOOLTIP_STYLE, apply_dark_tooltip_palette
 )
 from ats.ui.favorite_panel import get_ats_extra_cols
 from ats.limit_up_engine import LimitUpEngine, get_ats_custom_extra_cols
@@ -281,6 +281,7 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         self.setMinimumWidth(360)
         self.setMinimumHeight(240)
         apply_dark_theme(self)
+        apply_dark_tooltip_palette(self)
 
         # ⚡ 跨线程信号绑定（保障后台扫描结果 100% 安全切回 Qt 主线程渲染）
         self.scan_done_signal.connect(self._on_scan_done)
@@ -897,7 +898,7 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
                 border: 1px solid #282830;
                 padding: 4px 6px;
             }
-        """)
+        """ + TOOLTIP_STYLE)
 
         # 键盘上下键与鼠标点击统一驱动实时防抖联动
         self.table.currentCellChanged.connect(self._on_current_cell_changed)

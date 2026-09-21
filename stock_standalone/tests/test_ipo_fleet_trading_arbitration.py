@@ -264,6 +264,18 @@ class TestIPOFleetTradingArbitration(unittest.TestCase):
         self.assertIn("弃弱换强·换马调仓", swap_dirs[0].reason)
         self.assertIn("沈鼓集团", swap_dirs[0].reason)
 
+        # 注入合法潮汐市场快照以通过风控闸门
+        from ats.strategy.ipo_market_sentiment_engine import MarketSentimentSnapshot
+        snap = MarketSentimentSnapshot(
+            tide_state="T6_ICE_DIVERGENCE",
+            tide_position_cap=0.8,
+            risk_multiplier=1.0,
+            generated_at=time.time(),
+            trading_day=time.strftime("%Y%m%d")
+        )
+        self.center.sentiment_engine._cached_snapshot = snap
+        self.center._last_market_context = snap
+
         # 测试一键批量执行决议
         executed_cnt = self.center.execute_all_pending_directives()
         self.assertGreater(executed_cnt, 0)
