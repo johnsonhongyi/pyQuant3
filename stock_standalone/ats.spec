@@ -1,10 +1,12 @@
 # -*- mode: python ; coding: utf-8 -*-
 import os
 import a_trade_calendar
+from PyInstaller.utils.hooks import collect_submodules
 
 csv_path = os.path.join(os.path.dirname(a_trade_calendar.__file__), "a_trade_calendar.csv")
 
 block_cipher = None
+tk_hiddenimports = collect_submodules('trading_kernel')
 
 # --- 关键：定义需要剔除的冗余库和 DLL 关键词 ---
 # 这些库通常是 PyQt6 自动带入但金融监控工具很少用到的，剔除它们能有效降低启动负载
@@ -39,7 +41,7 @@ a = Analysis(
                     'JSONData.tdxbk', 'JohnsonUtil.johnson_cons', 'tushare', 'pandas_ta',
                     'JohnsonUtil.commonTips','talib.stream', 'talib.abstract', 'run_sbc',
                     'run_ipo_detector', 'ats.ui.ipo_subnew_detector_dialog', 'ats.ui.ipo_detector_ipc',
-                    'ats.strategy.ipo_vwap_detector_engine', 'ats.new_stock_fetcher'],
+                    'ats.strategy.ipo_vwap_detector_engine', 'ats.new_stock_fetcher'] + tk_hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

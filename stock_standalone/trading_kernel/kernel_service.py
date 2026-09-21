@@ -82,9 +82,12 @@ class TradingKernelService:
     def _log_cooldown(self) -> dict[str, float]:
         return _HEAL_LOG_COOLDOWN
 
-    def __init__(self, journal_path: str = "logs/trading_kernel_trace.jsonl"):
-        self.state_manager = StateManager()
-        self.journal = JsonlJournal(journal_path)
+    def __init__(self, journal_path: str = "logs/trading_kernel_trace.jsonl",
+                 strategy_provider: Any = None, state_store: Any = None,
+                 event_sink: Any = None):
+        self.state_manager = state_store or StateManager()
+        self.journal = event_sink or JsonlJournal(journal_path)
+        self.strategy_provider = strategy_provider
         self.limits = load_risk_limits_from_config()
         
         # 从 global.ini 加载静态强路由配置并注入策略决策大脑 StrategyRouter
@@ -154,6 +157,85 @@ class TradingKernelService:
         self._indicator_cache = {}
         self._df_all = None
         self._auto_warm_up_from_preprocessed_hdf5()
+
+    def register_strategy_provider(self, provider: Any) -> None:
+        """Install an external strategy provider through the stable port."""
+        if provider is not None and not callable(getattr(provider, "decide", None)):
+            raise TypeError("strategy provider must implement decide(signal, state)")
+        self.strategy_provider = provider
+
+    def register_state_store(self, store: Any, *, migrate: bool = True) -> None:
+        """Replace state persistence while preserving the current snapshot."""
+        required = ("get", "set", "snapshot")
+        if any(not callable(getattr(store, name, None)) for name in required):
+            raise TypeError("state store does not satisfy StateStore contract")
+        previous = self.state_manager.snapshot() if migrate else {}
+        self.state_manager = store
+        for code, state in previous.items():
+            self.state_manager.set(code, state)
+        self.reconcile_runtime_state()
+
+    def register_event_sink(self, sink: Any) -> None:
+        """Replace the audit sink used by kernel and wrapped executors."""
+        if not callable(getattr(sink, "append", None)):
+            raise TypeError("event sink does not satisfy EventSink contract")
+        self.journal = sink
+        if hasattr(self.confirm_adapter, "journal"):
+            self.confirm_adapter.journal = sink
+        if hasattr(self.broker_adapter, "journal"):
+            self.broker_adapter.journal = sink
+
+    def register_execution_adapter(self, mode: str, adapter: Any) -> None:
+        """Replace a mode executor without changing the packaged kernel."""
+        mode_key = str(mode or "").upper()
+        required = ("submit_order", "cancel_order", "get_positions", "get_account_snapshot")
+        if any(not callable(getattr(adapter, name, None)) for name in required):
+            raise TypeError("execution adapter does not satisfy ExecutionAdapter contract")
+        if mode_key == "PAPER":
+            self.paper_adapter = adapter
+        elif mode_key == "CONFIRM":
+            self.confirm_adapter = adapter
+        elif mode_key == "LIVE_AUTO":
+            self.broker_adapter = adapter
+        else:
+            raise ValueError(f"unsupported execution mode: {mode_key}")
+        if self._mode == mode_key:
+            self.executor = adapter
+
+    def get_execution_adapter(self, mode: str | None = None):
+        """Return the public execution port for a mode or the active paper view."""
+        mode_key = str(mode or self._mode or "OBSERVE").upper()
+        if mode_key == "CONFIRM":
+            return self.confirm_adapter
+        if mode_key == "LIVE_AUTO":
+            return self.broker_adapter
+        return self.paper_adapter
+
+    def reconcile_runtime_state(self) -> dict[str, Any]:
+        """Align state storage with the current execution-account snapshot."""
+        adapter = self.get_execution_adapter()
+        positions = adapter.get_positions() if adapter is not None else {}
+        held = {str(code) for code in positions}
+        before = self.state_manager.snapshot()
+        for code in set(before) | held:
+            target = "IN_TRADE" if code in held else "FLAT"
+            if self.state_manager.get(code) != target:
+                self.state_manager.set(code, target)
+        after = self.state_manager.snapshot()
+        return {
+            "status": "ALIGNED",
+            "position_count": len(held),
+            "changed_codes": sorted(code for code in set(before) | set(after) if before.get(code, "FLAT") != after.get(code, "FLAT")),
+            "states": after,
+        }
+
+    def get_order_history(self) -> list[dict[str, Any]]:
+        """Stable read port for executed orders across UI and analytics."""
+        adapter = self.get_execution_adapter()
+        orders = getattr(adapter, "orders", None)
+        if orders is None and adapter is not self.paper_adapter:
+            orders = getattr(self.paper_adapter, "orders", [])
+        return [dict(item) for item in (orders or []) if isinstance(item, dict)]
 
     def update_df_all(self, df_all):
         """
@@ -837,7 +919,11 @@ class TradingKernelService:
 
         signal = canonicalize_decision_queue_item(item_dict)
         state = self.state_manager.get(signal.code)
-        intent = decide(signal, state)
+        intent = (
+            self.strategy_provider.decide(signal, state)
+            if self.strategy_provider is not None
+            else decide(signal, state)
+        )
         # [FIX] 传入真实持仓字典，确保 ALREADY_IN_TRADE 检查基于物理持仓，而非仅依赖 state_manager
         _active_exec = self.executor or self.paper_adapter
         _held_codes = {}

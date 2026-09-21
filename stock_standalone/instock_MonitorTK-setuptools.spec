@@ -9,8 +9,10 @@ block_cipher = None
 # --- 关键：定义需要剔除的冗余库和 DLL 关键词 ---
 # 这些库通常是 PyQt6 自动带入但金融监控工具很少用到的，剔除它们能有效降低启动负载
 from PyInstaller.utils.hooks import collect_all
+from PyInstaller.utils.hooks import collect_submodules
 
 datas_st, binaries_st, hiddenimports_st = collect_all('setuptools')
+tk_hiddenimports = collect_submodules('trading_kernel')
 
 trash_list = [
     'Qt6WebEngineCore', 'Qt6WebEngineWidgets', 'Qt6Pdf', 
@@ -40,7 +42,7 @@ a = Analysis(
          ] + datas_st,
     hiddenimports=['a_trade_calendar','JSONData.sina_data','JSONData.tdx_hdf5_api',  'JSONData.realdatajson',
                     'JSONData.wencaiData',  'JSONData.tdxbk', 'pandas','JohnsonUtil.johnson_cons', 'configobj',
-                    'numpy', 'tushare',  'pandas_ta','talib.stream', 'talib.abstract', 'sys_performance_analyzer'] + hiddenimports_st,
+                    'numpy', 'tushare',  'pandas_ta','talib.stream', 'talib.abstract', 'sys_performance_analyzer'] + hiddenimports_st + tk_hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
