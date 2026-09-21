@@ -187,6 +187,42 @@ COLOR_ACCENT = "#00ff88"   # Cyber Green / Active
 COLOR_WARN = "#ff9900"     # Warning (Orange)
 COLOR_INFO = "#aad4ff"     # Light Blue / Cyan
 
+TOOLTIP_STYLE = """
+/* ToolTip Styling (高对比暗黑金融质感，彻底消除 Windows 原生白底或黑字看不清) */
+QToolTip {
+    background-color: #1a1a24;
+    color: #f1f5f9;
+    border: 1px solid #3e3e4a;
+    border-radius: 4px;
+    padding: 6px 8px;
+    font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+    font-size: 9pt;
+}
+"""
+
+
+def apply_dark_tooltip_palette(widget_or_app=None):
+    """
+    底层彻底固化 QToolTip 的调色板与配色，确保即便没有继承到父级 QSS，
+    系统底层调色板也能强制为深灰黑背景 (#1a1a24) + 高对比亮白前景色 (#f1f5f9)。
+    """
+    try:
+        from PyQt6.QtWidgets import QApplication
+        from PyQt6.QtGui import QPalette, QColor
+        app = widget_or_app if isinstance(widget_or_app, QApplication) else QApplication.instance()
+        if app:
+            pal = app.palette()
+            pal.setColor(QPalette.ColorRole.ToolTipBase, QColor("#1a1a24"))
+            pal.setColor(QPalette.ColorRole.ToolTipText, QColor("#f1f5f9"))
+            app.setPalette(pal)
+        if widget_or_app and hasattr(widget_or_app, "setPalette") and widget_or_app != app:
+            w_pal = widget_or_app.palette()
+            w_pal.setColor(QPalette.ColorRole.ToolTipBase, QColor("#1a1a24"))
+            w_pal.setColor(QPalette.ColorRole.ToolTipText, QColor("#f1f5f9"))
+            widget_or_app.setPalette(w_pal)
+    except Exception:
+        pass
+
 
 import math
 import re

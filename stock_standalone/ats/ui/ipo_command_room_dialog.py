@@ -33,7 +33,7 @@ from ats.alert_notifier import AlertNotifier
 from ats.ui.styles import (
     setup_header_persistence, auto_fit_columns_once,
     load_config_node, save_config_node, save_config_nodes,
-    NumericTableWidgetItem
+    NumericTableWidgetItem, TOOLTIP_STYLE, apply_dark_tooltip_palette
 )
 
 logger = logging.getLogger("IPOCommandRoomDialog")
@@ -61,6 +61,47 @@ POS_STATUS_CN_MAP = {
     "PROFIT_EXIT": "💰 止盈锁定",
 }
 
+# 集中交易动作全链路标准中文映射字典
+ACTION_CN_MAP = {
+    "SIGNAL_INJECT": "📡 雷达入池",
+    "BUY": "🟢 主动买入",
+    "BUY_SCOUT": "🔭 试仓买入",
+    "BUY_CONFIRM": "🎯 确认加仓",
+    "SELL": "🔴 卖出平仓",
+    "REDUCE": "📉 减仓防守",
+    "STOP_LOSS": "🛑 止损平仓",
+    "TAKE_PROFIT": "💰 止盈了结",
+    "FULL_ROTATION_SWAP": "🔄 全仓轮动",
+    "SWITCH_SWAP": "🔄 调仓轮动",
+    "EXIT_ALL": "🚨 全清离场",
+    "OBSERVE": "👀 观察监控",
+    "HOLD": "🛡️ 持仓观望",
+    "CANCEL": "⚪ 撤销指令",
+}
+
+
+def get_action_display_name(action: Any) -> str:
+    """标准化获取动作中文展示名称"""
+    if not action:
+        return "👀 观察监控"
+    act_str = str(action).strip()
+    if not act_str or act_str == "--":
+        return "--"
+    clean_action = act_str.upper()
+    return ACTION_CN_MAP.get(clean_action, act_str)
+
+
+# 指令表格三种模式持久化配置键与默认列宽
+ORDER_TABLE_CFG_PENDING = "ipo_cmd_orders_pending_header_v3"
+ORDER_TABLE_CFG_STREAM = "ipo_cmd_orders_stream_header_v1"
+ORDER_TABLE_CFG_AGG = "ipo_cmd_orders_agg_header_v1"
+
+ORDER_TABLE_DEFAULT_WIDTHS = {
+    "PENDING": [85, 60, 80, 65, 75, 240],
+    "STREAM": [80, 80, 85, 60, 80, 240],
+    "AGGREGATED": [60, 80, 70, 75, 75, 75, 85, 120],
+}
+
 
 class IPOCommandRoomTableWidget(QTableWidget):
     """
@@ -69,7 +110,7 @@ class IPOCommandRoomTableWidget(QTableWidget):
     - 支持 Space (空格) 调出 SBC 走势图；
     - 支持 F 键 / 回车联动通达信；
     - 全面支持点击表头升序/降序数值智能排序；
-    - 接入全系统统一标准的列宽自由拖拽与跨会话自动持久化体系 (setup_persistence)；
+    - 接入全系统统一标准的列宽自由拖拽与跨会话自动持久化体系，支持多模式无缝切换与专属持久化；
     - 支持一键自适应列宽与一键恢复默认列宽。
     """
     def __init__(self, parent_cmd_room=None):
@@ -84,8 +125,21 @@ class IPOCommandRoomTableWidget(QTableWidget):
         self.setAlternatingRowColors(True)
         self.verticalHeader().setVisible(False)
         self.verticalHeader().setDefaultSectionSize(24)
+        
+        self._mode_configs: Dict[str, Dict[str, Any]] = {}
+        self._current_mode: Optional[str] = None
         self._config_key: Optional[str] = None
         self._default_widths: Optional[List[int]] = None
+        self._is_restoring: bool = False
+
+        # 列宽手动拖拽防抖保存定时器 (500ms)
+        self._resize_timer = QTimer(self)
+        self._resize_timer.setSingleShot(True)
+        self._resize_timer.setInterval(500)
+        self._resize_timer.timeout.connect(self.save_column_widths)
+
+        # 监听表头列宽变动
+        self.horizontalHeader().sectionResized.connect(self._on_section_resized)
 
     def sortItems(self, column: int, order: Qt.SortOrder = Qt.SortOrder.AscendingOrder):
         """【排序同步守卫】：执行排序前同步设置表头 Indicator，保证升降序箭头正确更新"""
@@ -93,29 +147,90 @@ class IPOCommandRoomTableWidget(QTableWidget):
             self.horizontalHeader().setSortIndicator(column, order)
         super().sortItems(column, order)
 
+    def register_persistence_mode(self, mode: str, config_key: str, default_widths: Optional[List[int]] = None, max_widths=None):
+        """注册特定模式的列宽持久化配置"""
+        self._mode_configs[mode] = {
+            "config_key": config_key,
+            "default_widths": default_widths,
+            "max_widths": max_widths
+        }
+
+    def switch_persistence_mode(self, mode: str):
+        """切换表格持久化模式：保存旧模式列宽并恢复新模式专属列宽"""
+        if self._current_mode and self._current_mode in self._mode_configs:
+            self.save_column_widths()
+        self._current_mode = mode
+        cfg = self._mode_configs.get(mode, {})
+        self._config_key = cfg.get("config_key")
+        self._default_widths = cfg.get("default_widths")
+        self.restore_column_widths()
+
     def setup_persistence(self, config_key: str, default_widths: Optional[List[int]] = None, max_widths=None):
-        """接入全系统统一标准持久化体系，表头全列 Interactive 自由拖拽且防抖自动落盘"""
-        self._config_key = config_key
-        self._default_widths = default_widths
-        setup_header_persistence(
-            self,
-            config_key=config_key,
-            default_widths=default_widths,
-            max_widths=max_widths
-        )
+        """单模式兼容入口：接入全系统统一标准持久化体系"""
+        self.register_persistence_mode("DEFAULT", config_key, default_widths, max_widths)
+        self.switch_persistence_mode("DEFAULT")
 
     def save_column_widths(self):
-        """显式触发列宽状态落盘"""
-        if hasattr(self, "save_header_state"):
-            self.save_header_state()
+        """显式触发当前模式列宽状态落盘"""
+        if getattr(self, "_is_restoring", False):
+            return
+        if not self._config_key:
+            return
+        header = self.horizontalHeader()
+        if not header:
+            return
+        try:
+            state_hex = header.saveState().toHex().data().decode("utf-8")
+            save_config_node(self._config_key, state_hex)
+        except Exception as e:
+            logger.debug("Failed to save header state for %s: %s", self._config_key, e)
 
     def restore_column_widths(self):
-        """显式触发列宽状态恢复"""
-        if hasattr(self, "restore_header_state"):
-            self.restore_header_state()
+        """恢复当前模式的列宽状态"""
+        if not self._config_key:
+            return
+        from PyQt6.QtCore import QByteArray
+        header = self.horizontalHeader()
+        if not header:
+            return
+        col_count = self.columnCount()
+        self._is_restoring = True
+        restored = False
+        try:
+            state_hex = load_config_node(self._config_key)
+            if state_hex and isinstance(state_hex, str):
+                header.blockSignals(True)
+                header.restoreState(QByteArray.fromHex(state_hex.encode("utf-8")))
+                header.blockSignals(False)
+                restored = True
+        except Exception as e:
+            logger.debug("Failed to restore header state for %s: %s", self._config_key, e)
+
+        header.blockSignals(True)
+        for col in range(col_count):
+            header.setSectionResizeMode(col, QHeaderView.ResizeMode.Interactive)
+        header.blockSignals(False)
+
+        if not restored and self._default_widths:
+            header.blockSignals(True)
+            for col, width in enumerate(self._default_widths):
+                if col < col_count:
+                    self.setColumnWidth(col, width)
+            header.blockSignals(False)
+
+        cfg = self._mode_configs.get(self._current_mode or "", {})
+        max_widths = cfg.get("max_widths")
+        if max_widths:
+            header.blockSignals(True)
+            for col, max_w in max_widths.items():
+                if col < col_count and self.columnWidth(col) > max_w:
+                    self.setColumnWidth(col, max_w)
+            header.blockSignals(False)
+
+        self._is_restoring = False
 
     def reset_default_widths(self):
-        """重置为默认列宽并持久化"""
+        """重置为当前模式的默认列宽并持久化"""
         if not self._default_widths:
             return
         header = self.horizontalHeader()
@@ -139,6 +254,14 @@ class IPOCommandRoomTableWidget(QTableWidget):
             header.setSectionResizeMode(col, QHeaderView.ResizeMode.Interactive)
         header.blockSignals(False)
         self.save_column_widths()
+
+    def _on_section_resized(self, logical_index, old_size, new_size):
+        """列宽手动拖拽后防抖落盘"""
+        if getattr(self, "_is_restoring", False):
+            return
+        if not self._config_key:
+            return
+        self._resize_timer.start(500)
 
     def keyPressEvent(self, event):
         key = event.key()
@@ -221,7 +344,8 @@ class IPOSignalTimelineDialog(QDialog):
                 background-color: #26293d;
                 border-color: #00e5ff;
             }
-        """)
+        """ + TOOLTIP_STYLE)
+        apply_dark_tooltip_palette(self)
         self._init_ui()
 
     def _init_ui(self):
@@ -318,10 +442,14 @@ class IPOSignalTimelineDialog(QDialog):
             self.table.setItem(r, 2, it_tier)
 
             act = rec.get("action", "--")
-            it_act = QTableWidgetItem(act)
-            if "BUY" in act:
+            act_disp = get_action_display_name(act)
+            it_act = QTableWidgetItem(act_disp)
+            act_u = str(act).upper()
+            if any(k in act_u for k in ("BUY", "买入", "加仓", "轮动", "SWAP")):
                 it_act.setForeground(QColor("#00ff88"))
-            elif "SELL" in act or "EXIT" in act or "STOP" in act:
+            elif any(k in act_u for k in ("SCOUT", "试仓", "入池", "INJECT", "OBSERVE")):
+                it_act.setForeground(QColor("#00e5ff"))
+            elif any(k in act_u for k in ("SELL", "EXIT", "STOP", "卖出", "止损", "减仓")):
                 it_act.setForeground(QColor("#ff5555"))
             self.table.setItem(r, 3, it_act)
 
@@ -489,7 +617,8 @@ class IPOCommandRoomDialog(QDialog):
             QSplitter::handle:pressed {
                 background-color: #00b0ff;
             }
-        """)
+        """ + TOOLTIP_STYLE)
+        apply_dark_tooltip_palette(self)
 
         self.trading_center = IPOTradingCenter.get_instance()
         self._last_linkage_code = ""
@@ -729,17 +858,21 @@ class IPOCommandRoomDialog(QDialog):
         v_orders.addLayout(h_orders_tabs)
 
         self.tbl_orders = IPOCommandRoomTableWidget(self)
-        self.tbl_orders.setColumnCount(6)
-        self.tbl_orders.setHorizontalHeaderLabels(["动作", "代码", "标的", "价格", "建议仓位", "决议依据理由"])
         self.tbl_orders.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         self.tbl_orders.horizontalHeader().setStretchLastSection(True)
         self.tbl_orders.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.tbl_orders.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._bind_table_interactions(self.tbl_orders)
-        self.tbl_orders.setup_persistence(
-            "ipo_cmd_orders_table_header_v2",
-            default_widths=[75, 56, 75, 58, 68, 220]
+        self.tbl_orders.register_persistence_mode(
+            "PENDING", ORDER_TABLE_CFG_PENDING, default_widths=ORDER_TABLE_DEFAULT_WIDTHS["PENDING"]
         )
+        self.tbl_orders.register_persistence_mode(
+            "STREAM", ORDER_TABLE_CFG_STREAM, default_widths=ORDER_TABLE_DEFAULT_WIDTHS["STREAM"]
+        )
+        self.tbl_orders.register_persistence_mode(
+            "AGGREGATED", ORDER_TABLE_CFG_AGG, default_widths=ORDER_TABLE_DEFAULT_WIDTHS["AGGREGATED"]
+        )
+        self._apply_orders_table_mode("PENDING")
         v_orders.addWidget(self.tbl_orders)
         v_right.addWidget(self.grp_orders, 3)
 
@@ -1011,7 +1144,8 @@ class IPOCommandRoomDialog(QDialog):
                 break
 
         if target_directive:
-            act_exec_single = menu.addAction(f"⚡ 立即执行该股决议: [{target_directive.action}] {target_directive.name}")
+            act_disp = get_action_display_name(target_directive.action)
+            act_exec_single = menu.addAction(f"⚡ 立即执行该股决议: [{act_disp}] {target_directive.name}")
             act_exec_single.triggered.connect(lambda: self._execute_single_directive(target_directive))
         else:
             # 若已持仓，提供一键平仓选项
@@ -1173,6 +1307,24 @@ class IPOCommandRoomDialog(QDialog):
             self.grp_pos.setTitle("📜 舰队历史平仓战绩回溯 (双击行调出完整迭代复盘)")
         self.refresh_data()
 
+    def _apply_orders_table_mode(self, mode: str):
+        """统一应用指令表格模式（PENDING / STREAM / AGGREGATED），自动适配列数、表头与专属列宽持久化"""
+        if mode == "PENDING":
+            self.tbl_orders.setColumnCount(6)
+            self.tbl_orders.setHorizontalHeaderLabels(["动作", "代码", "标的", "价格", "建议仓位", "决议依据理由"])
+            self.tbl_orders.switch_persistence_mode("PENDING")
+            self.grp_orders.setTitle("📋 集中交易调度待执行指令清单 (弃弱换马 / 领头羊进击 / 买错立斩)")
+        elif mode == "STREAM":
+            self.tbl_orders.setColumnCount(6)
+            self.tbl_orders.setHorizontalHeaderLabels(["时间", "级别", "动作", "代码", "标的", "迭代说明与决议依据"])
+            self.tbl_orders.switch_persistence_mode("STREAM")
+            self.grp_orders.setTitle("📋 集中交易历史信号与迭代日志 (双击行调出产生快照)")
+        elif mode == "AGGREGATED":
+            self.tbl_orders.setColumnCount(8)
+            self.tbl_orders.setHorizontalHeaderLabels(["代码", "标的", "异动频次", "首次时间", "最新时间", "最高级别", "最新动作", "连续持久力"])
+            self.tbl_orders.switch_persistence_mode("AGGREGATED")
+            self.grp_orders.setTitle("📋 集中交易历史信号与迭代日志 (标的归集与连续持久力统计·双击看时间线)")
+
     def _set_orders_view_mode(self, mode: str):
         """切换指令面板视图：PENDING (待执行指令) / HISTORY (历史信号日志)"""
         if self._orders_view_mode == mode:
@@ -1190,9 +1342,7 @@ class IPOCommandRoomDialog(QDialog):
             self.cmb_date_filter.hide()
             self.btn_clear_logs.hide()
 
-            self.tbl_orders.setColumnCount(6)
-            self.tbl_orders.setHorizontalHeaderLabels(["动作", "代码", "标的", "价格", "建议仓位", "决议依据理由"])
-            self.grp_orders.setTitle("📋 集中交易调度待执行指令清单 (弃弱换马 / 领头羊进击 / 买错立斩)")
+            self._apply_orders_table_mode("PENDING")
         else:
             self.btn_orders_history.setChecked(True)
             self.btn_orders_history.setStyleSheet("font-weight: bold; color: #ffaa00; background-color: #2a2014; border-color: #ffaa00;")
@@ -1205,14 +1355,7 @@ class IPOCommandRoomDialog(QDialog):
             self.cmb_date_filter.show()
             self.btn_clear_logs.show()
 
-            if self._history_sub_mode == "STREAM":
-                self.tbl_orders.setColumnCount(6)
-                self.tbl_orders.setHorizontalHeaderLabels(["时间", "级别", "动作", "代码", "标的", "迭代说明与决议依据"])
-                self.grp_orders.setTitle("📋 集中交易历史信号与迭代日志 (双击行调出产生快照)")
-            else:
-                self.tbl_orders.setColumnCount(8)
-                self.tbl_orders.setHorizontalHeaderLabels(["代码", "标的", "异动频次", "首次时间", "最新时间", "最高级别", "最新动作", "连续持久力"])
-                self.grp_orders.setTitle("📋 集中交易历史信号与迭代日志 (标的归集与连续持久力统计·双击看时间线)")
+            self._apply_orders_table_mode(self._history_sub_mode)
         self.refresh_data()
 
     def _set_history_sub_mode(self, sub_mode: str):
@@ -1223,17 +1366,14 @@ class IPOCommandRoomDialog(QDialog):
             self.btn_hist_stream.setStyleSheet("font-weight: bold; color: #00ff88; background-color: #1a2a22; border-color: #00ff88;")
             self.btn_hist_agg.setChecked(False)
             self.btn_hist_agg.setStyleSheet("font-weight: bold; color: #9aa0a6; background-color: #141620; border-color: #2b2e42;")
-            self.tbl_orders.setColumnCount(6)
-            self.tbl_orders.setHorizontalHeaderLabels(["时间", "级别", "动作", "代码", "标的", "迭代说明与决议依据"])
-            self.grp_orders.setTitle("📋 集中交易历史信号与迭代日志 (双击行调出产生快照)")
         else:
             self.btn_hist_agg.setChecked(True)
             self.btn_hist_agg.setStyleSheet("font-weight: bold; color: #ffd700; background-color: #2a2614; border-color: #ffd700;")
             self.btn_hist_stream.setChecked(False)
             self.btn_hist_stream.setStyleSheet("font-weight: bold; color: #9aa0a6; background-color: #141620; border-color: #2b2e42;")
-            self.tbl_orders.setColumnCount(8)
-            self.tbl_orders.setHorizontalHeaderLabels(["代码", "标的", "异动频次", "首次时间", "最新时间", "最高级别", "最新动作", "连续持久力"])
-            self.grp_orders.setTitle("📋 集中交易历史信号与迭代日志 (标的归集与连续持久力统计·双击看时间线)")
+        
+        if self._orders_view_mode == "HISTORY":
+            self._apply_orders_table_mode(sub_mode)
         self.refresh_data()
 
     def _set_history_date_filter(self, filter_mode: str):
@@ -1605,12 +1745,14 @@ class IPOCommandRoomDialog(QDialog):
                 plan = getattr(d, "trade_plan", None)
                 if plan and getattr(plan, "suggested_action", ""):
                     act_str = plan.suggested_action
-                act_it = QTableWidgetItem(act_str)
-                if act_str in ("BUY", "BUY_CONFIRM", "FULL_ROTATION_SWAP"):
+                act_disp = get_action_display_name(act_str)
+                act_it = QTableWidgetItem(act_disp)
+                act_u = str(act_str).upper()
+                if any(k in act_u for k in ("BUY", "买入", "加仓", "轮动", "SWAP")):
                     act_it.setForeground(QColor("#00ff88"))
-                elif act_str in ("BUY_SCOUT",):
+                elif any(k in act_u for k in ("SCOUT", "试仓", "入池", "INJECT", "OBSERVE")):
                     act_it.setForeground(QColor("#00e5ff"))
-                elif act_str in ("SELL", "EXIT_ALL", "SWITCH_SWAP"):
+                elif any(k in act_u for k in ("SELL", "EXIT", "STOP", "SWITCH", "卖出", "止损", "减仓")):
                     act_it.setForeground(QColor("#ff5555"))
                 self.tbl_orders.setItem(r, 0, act_it)
                 code_num = int(d.code) if d.code.isdigit() else 999999
@@ -1627,7 +1769,7 @@ class IPOCommandRoomDialog(QDialog):
                 if plan:
                     it_reason.setToolTip(
                         f"【TradePlan 不可变交易计划】\n"
-                        f"• 建议动作: {act_str}\n"
+                        f"• 建议动作: {act_disp}\n"
                         f"• 触发价: {plan.trigger_price:.2f}元\n"
                         f"• 买入网格: {plan.buy_zone_lower:.2f} ~ {plan.buy_zone_upper:.2f}元\n"
                         f"• 抬高底防守止损: {plan.higher_low_stop:.2f}元\n"
@@ -1685,12 +1827,15 @@ class IPOCommandRoomDialog(QDialog):
                         tier_it.setForeground(QColor("#ff5555"))
                     self.tbl_orders.setItem(r, 1, tier_it)
 
-                    act_it = QTableWidgetItem(s_log.get("action", "--"))
-                    if s_log.get("action") in ("BUY", "BUY_CONFIRM", "FULL_ROTATION_SWAP"):
+                    raw_act = s_log.get("action", "--")
+                    act_disp = get_action_display_name(raw_act)
+                    act_it = QTableWidgetItem(act_disp)
+                    act_u = str(raw_act).upper()
+                    if any(k in act_u for k in ("BUY", "买入", "加仓", "轮动", "SWAP")):
                         act_it.setForeground(QColor("#00ff88"))
-                    elif s_log.get("action") in ("BUY_SCOUT",):
+                    elif any(k in act_u for k in ("SCOUT", "试仓", "入池", "INJECT", "OBSERVE")):
                         act_it.setForeground(QColor("#00e5ff"))
-                    elif s_log.get("action") in ("SELL", "STOP_LOSS", "EXIT_ALL"):
+                    elif any(k in act_u for k in ("SELL", "STOP", "EXIT", "卖出", "止损", "减仓")):
                         act_it.setForeground(QColor("#ff5555"))
                     self.tbl_orders.setItem(r, 2, act_it)
 
@@ -1773,10 +1918,15 @@ class IPOCommandRoomDialog(QDialog):
                         tier_it.setForeground(QColor("#00ff88"))
                     self.tbl_orders.setItem(r, 5, tier_it)
 
-                    act_it = QTableWidgetItem(ag["last_action"])
-                    if "BUY" in ag["last_action"]:
+                    raw_act = ag["last_action"]
+                    act_disp = get_action_display_name(raw_act)
+                    act_it = QTableWidgetItem(act_disp)
+                    act_u = str(raw_act).upper()
+                    if any(k in act_u for k in ("BUY", "买入", "加仓", "轮动", "SWAP")):
                         act_it.setForeground(QColor("#00ff88"))
-                    elif "SELL" in ag["last_action"] or "STOP" in ag["last_action"]:
+                    elif any(k in act_u for k in ("SCOUT", "试仓", "入池", "INJECT", "OBSERVE")):
+                        act_it.setForeground(QColor("#00e5ff"))
+                    elif any(k in act_u for k in ("SELL", "STOP", "EXIT", "卖出", "止损", "减仓")):
                         act_it.setForeground(QColor("#ff5555"))
                     self.tbl_orders.setItem(r, 6, act_it)
 
@@ -1794,7 +1944,7 @@ class IPOCommandRoomDialog(QDialog):
                         p_tag = "⏱️ 单次脉冲"
                         p_col = QColor("#8f93a8")
 
-                    if any(a in ag["last_action"] for a in ["SELL", "STOP_LOSS", "EXIT"]):
+                    if any(a in str(ag["last_action"]).upper() for a in ["SELL", "STOP_LOSS", "EXIT", "卖出", "止损", "减仓"]):
                         p_tag = f"📉 动能衰减 ({ag['count']}次)"
                         p_col = QColor("#ff4444")
 
