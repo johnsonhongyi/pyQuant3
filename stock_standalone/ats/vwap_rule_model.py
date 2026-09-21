@@ -244,6 +244,54 @@ class ExitLayerConfig:
     params: Dict[str, Any]
 
 
+@dataclass
+class TradePlanDefaultsConfig:
+    """标准不可变交易计划与关键防守参数配置 (统一管理 SSOT)"""
+    version: str = "1.0"
+    higher_low_stop_ratio: float = 0.992          # Higher-Low 次低点生成系数 (0.992)
+    higher_low_stop_break_ratio: float = 0.99    # 跌破次低点防守线乘数 (0.99)
+    breakeven_trigger_ratio: float = 1.002        # 触及通道中轴后保本推移上浮比例 (1.002)
+    reversal_exempt_ratio: float = 0.992          # 时间衰减底抬高反转豁免阈值 (0.992)
+    default_position_pct: float = 30.0            # 建议单笔默认仓位
+    default_expire_at: str = "14:45:00"           # 默认挂单失效截止时间
+
+
+@dataclass
+class SubnewTideThresholdsConfig:
+    """12阶潮汐状态机参数配置 (统一管理 SSOT)"""
+    version: str = "1.0"
+    min_sample_count: int = 10
+    min_completeness: float = 0.8
+    # T10 主升浪
+    t10_advance_ratio_min: float = 0.75
+    t10_above_vwap_ratio_min: float = 0.70
+    t10_median_return_min: float = 2.0
+    t10_median_return_max: float = 5.0
+    t10_top20_return_min: float = 6.0
+    t10_amount_ratio_min: float = 0.90
+    # T1 高潮派发
+    t1_advance_ratio_max: float = 0.55
+    t1_above_vwap_ratio_max: float = 0.50
+    t1_median_return_max: float = 1.0
+    t1_top20_return_min: float = 3.0
+    t1_amount_ratio_min: float = 1.20
+    # 其余关键门限
+    t11_advance_ratio_min: float = 0.90
+    t11_median_return_min: float = 5.0
+    t9_advance_ratio_min: float = 0.75
+    t9_above_vwap_ratio_min: float = 0.70
+    t4_advance_ratio_max: float = 0.20
+    t4_median_return_max: float = -2.20
+    t5_above_vwap_ratio_max: float = 0.15
+    t5_advance_ratio_max: float = 0.25
+    t3_advance_ratio_max: float = 0.25
+    t3_median_return_max: float = -1.50
+    t7_advance_ratio_min: float = 0.55
+    t7_above_vwap_ratio_min: float = 0.55
+    t2_advance_ratio_collapse: float = 0.30
+    t2_above_vwap_ratio_collapse: float = 0.20
+
+
 class VWAPRuleModel:
     """
     分时均价策略规则模型（线程安全单例或实例）
@@ -260,6 +308,8 @@ class VWAPRuleModel:
         self.conservative_config: Optional[ConservativeOversightConfig] = None
         self.exit_layers: Dict[str, ExitLayerConfig] = {}
         self.guardian_rules: Dict[str, Any] = {}
+        self.trade_plan_config: TradePlanDefaultsConfig = TradePlanDefaultsConfig()
+        self.tide_config: SubnewTideThresholdsConfig = SubnewTideThresholdsConfig()
         
         self.reload()
 
@@ -375,6 +425,62 @@ class VWAPRuleModel:
         # 4. 宏观守护规则
         self.guardian_rules = data.get("market_guardian_rules", {})
 
+        # 5. [SSOT] 标准不可变交易计划与防守参数 (TradePlan Defaults)
+        tp_data = data.get("trade_plan_defaults", {})
+        hl_stop_ratio = float(tp_data.get("higher_low_stop_ratio", 0.992))
+        hl_break_ratio = float(tp_data.get("higher_low_stop_break_ratio", 0.99))
+        be_trigger_ratio = float(tp_data.get("breakeven_trigger_ratio", 1.002))
+        rev_exempt_ratio = float(tp_data.get("reversal_exempt_ratio", 0.992))
+        
+        # 参数边界安全校验：防止误填穿透风控
+        hl_stop_ratio = hl_stop_ratio if 0.90 <= hl_stop_ratio <= 1.0 else 0.992
+        hl_break_ratio = hl_break_ratio if 0.90 <= hl_break_ratio <= 1.0 else 0.99
+        be_trigger_ratio = be_trigger_ratio if 1.0 <= be_trigger_ratio <= 1.10 else 1.002
+        rev_exempt_ratio = rev_exempt_ratio if 0.90 <= rev_exempt_ratio <= 1.0 else 0.992
+
+        self.trade_plan_config = TradePlanDefaultsConfig(
+            version=str(tp_data.get("version", "1.0")),
+            higher_low_stop_ratio=hl_stop_ratio,
+            higher_low_stop_break_ratio=hl_break_ratio,
+            breakeven_trigger_ratio=be_trigger_ratio,
+            reversal_exempt_ratio=rev_exempt_ratio,
+            default_position_pct=float(tp_data.get("default_position_pct", 30.0)),
+            default_expire_at=str(tp_data.get("default_expire_at", "14:45:00")),
+        )
+
+        # 6. [SSOT] 12阶潮汐状态机参数 (Subnew Tide Thresholds)
+        tide_data = data.get("subnew_tide_thresholds", {})
+        self.tide_config = SubnewTideThresholdsConfig(
+            version=str(tide_data.get("version", "1.0")),
+            min_sample_count=int(tide_data.get("min_sample_count", 10)),
+            min_completeness=float(tide_data.get("min_completeness", 0.8)),
+            t10_advance_ratio_min=float(tide_data.get("t10_advance_ratio_min", 0.75)),
+            t10_above_vwap_ratio_min=float(tide_data.get("t10_above_vwap_ratio_min", 0.70)),
+            t10_median_return_min=float(tide_data.get("t10_median_return_min", 2.0)),
+            t10_median_return_max=float(tide_data.get("t10_median_return_max", 5.0)),
+            t10_top20_return_min=float(tide_data.get("t10_top20_return_min", 6.0)),
+            t10_amount_ratio_min=float(tide_data.get("t10_amount_ratio_min", 0.90)),
+            t1_advance_ratio_max=float(tide_data.get("t1_advance_ratio_max", 0.55)),
+            t1_above_vwap_ratio_max=float(tide_data.get("t1_above_vwap_ratio_max", 0.50)),
+            t1_median_return_max=float(tide_data.get("t1_median_return_max", 1.0)),
+            t1_top20_return_min=float(tide_data.get("t1_top20_return_min", 3.0)),
+            t1_amount_ratio_min=float(tide_data.get("t1_amount_ratio_min", 1.20)),
+            t11_advance_ratio_min=float(tide_data.get("t11_advance_ratio_min", 0.90)),
+            t11_median_return_min=float(tide_data.get("t11_median_return_min", 5.0)),
+            t9_advance_ratio_min=float(tide_data.get("t9_advance_ratio_min", 0.75)),
+            t9_above_vwap_ratio_min=float(tide_data.get("t9_above_vwap_ratio_min", 0.70)),
+            t4_advance_ratio_max=float(tide_data.get("t4_advance_ratio_max", 0.20)),
+            t4_median_return_max=float(tide_data.get("t4_median_return_max", -2.20)),
+            t5_above_vwap_ratio_max=float(tide_data.get("t5_above_vwap_ratio_max", 0.15)),
+            t5_advance_ratio_max=float(tide_data.get("t5_advance_ratio_max", 0.25)),
+            t3_advance_ratio_max=float(tide_data.get("t3_advance_ratio_max", 0.25)),
+            t3_median_return_max=float(tide_data.get("t3_median_return_max", -1.50)),
+            t7_advance_ratio_min=float(tide_data.get("t7_advance_ratio_min", 0.55)),
+            t7_above_vwap_ratio_min=float(tide_data.get("t7_above_vwap_ratio_min", 0.55)),
+            t2_advance_ratio_collapse=float(tide_data.get("t2_advance_ratio_collapse", 0.30)),
+            t2_above_vwap_ratio_collapse=float(tide_data.get("t2_above_vwap_ratio_collapse", 0.20)),
+        )
+
     def _apply_fallback_config(self) -> None:
         """兜底配置，避免文件缺失导致崩溃"""
         self.aggressive_rules = [
@@ -405,6 +511,8 @@ class VWAPRuleModel:
             "exit_vwap_breakdown": ExitLayerConfig("exit_vwap_breakdown", "VWAP破位兜底", True, 60, {}),
         }
         self.guardian_rules = {"enabled": True}
+        self.trade_plan_config = TradePlanDefaultsConfig()
+        self.tide_config = SubnewTideThresholdsConfig()
 
     def get_exit_layer_param(self, layer_id: str, param_name: str, default: Any = None) -> Any:
         """安全读取某层出局参数"""
@@ -413,3 +521,26 @@ class VWAPRuleModel:
             if layer and layer.enabled:
                 return layer.params.get(param_name, default)
             return default
+
+    def get_config_snapshot(self) -> Dict[str, Any]:
+        """获取当前内存生效配置的完整快照 (用于审计日志与多进程同步)"""
+        with self._lock:
+            return {
+                "version": self._raw_config.get("version", "unknown"),
+                "last_mtime": self._last_mtime,
+                "trade_plan_config": {
+                    "higher_low_stop_ratio": self.trade_plan_config.higher_low_stop_ratio,
+                    "higher_low_stop_break_ratio": self.trade_plan_config.higher_low_stop_break_ratio,
+                    "breakeven_trigger_ratio": self.trade_plan_config.breakeven_trigger_ratio,
+                    "reversal_exempt_ratio": self.trade_plan_config.reversal_exempt_ratio,
+                    "default_position_pct": self.trade_plan_config.default_position_pct,
+                },
+                "tide_config": {
+                    "version": self.tide_config.version,
+                    "t10_advance_ratio_min": self.tide_config.t10_advance_ratio_min,
+                    "t10_amount_ratio_min": self.tide_config.t10_amount_ratio_min,
+                    "t1_advance_ratio_max": self.tide_config.t1_advance_ratio_max,
+                    "t1_amount_ratio_min": self.tide_config.t1_amount_ratio_min,
+                }
+            }
+

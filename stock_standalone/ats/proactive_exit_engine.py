@@ -161,9 +161,11 @@ class ProactiveExitEngine:
             if hasattr(tp, "higher_low_stop") and tp.higher_low_stop > 0:
                 pos.higher_low_stop = max(pos.higher_low_stop, float(tp.higher_low_stop))
             # 若曾触及通道中轴第一目标位，启动保本推移 (将防守线提升至成本线上方)
+            tp_cfg = getattr(self.rule_model, "trade_plan_config", None)
+            be_ratio = getattr(tp_cfg, "breakeven_trigger_ratio", 1.002) if tp_cfg else 1.002
             if hasattr(tp, "target_1_channel_mid") and tp.target_1_channel_mid > 0:
                 if pos.highest_price >= tp.target_1_channel_mid:
-                    pos.higher_low_stop = max(pos.higher_low_stop, pos.entry_price * 1.002)
+                    pos.higher_low_stop = max(pos.higher_low_stop, pos.entry_price * be_ratio)
 
         hl_ctx = float(ctx.get("higher_low_stop", 0.0) or ctx.get("higher_low", 0.0))
         if hl_ctx > 0:
@@ -191,7 +193,9 @@ class ProactiveExitEngine:
                 pos.minutes_below_vwap = 0
 
             # 💥 [NEW] 阶梯次低点硬止损保护：若跌破关键底抬高防守线，直接全清离场
-            if pos.higher_low_stop > 0 and price < pos.higher_low_stop * 0.99:
+            tp_cfg = getattr(self.rule_model, "trade_plan_config", None)
+            break_ratio = getattr(tp_cfg, "higher_low_stop_break_ratio", 0.99) if tp_cfg else 0.99
+            if pos.higher_low_stop > 0 and price < pos.higher_low_stop * break_ratio:
                 return self._record_action(pos, ExitAction(
                     code=pos.code,
                     rule_id="exit_higher_low_broken",
@@ -269,7 +273,9 @@ class ProactiveExitEngine:
         self, pos: PositionWatchItem, current_price: float, now: float
     ) -> Optional[ExitAction]:
         # 💥 [NEW] 底抬高企稳与VWAP位移反转结构生效时，若价格在次低点或成本线上方，豁免时间衰减止损
-        if pos.is_reversal_protected and current_price >= pos.entry_price * 0.992:
+        tp_cfg = getattr(self.rule_model, "trade_plan_config", None)
+        rev_exempt = getattr(tp_cfg, "reversal_exempt_ratio", 0.992) if tp_cfg else 0.992
+        if pos.is_reversal_protected and current_price >= pos.entry_price * rev_exempt:
             return None
 
         minutes_held = (now - pos.entry_time) / 60.0
