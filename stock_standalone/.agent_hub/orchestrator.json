@@ -56,6 +56,7 @@
   "max_review_diff_lines": 150,
   "max_review_diff_chars": 12000,
   "worker_max_readonly_tool_calls": 12,
+  "worker_max_readonly_tool_calls_hard_cap": 24,
   "auto_execute": false,
   "auto_review": true,
   "auto_archive": false,

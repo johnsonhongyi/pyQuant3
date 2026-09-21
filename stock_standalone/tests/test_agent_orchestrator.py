@@ -616,3 +616,17 @@ def test_execute_batch_preserves_sibling_file_ownership_after_peer_finishes(tmp_
     assert [item.task_id for item in reports] == ["001", "002"]
     assert "ats/other.py" in captured["001"]
     assert "ats/example.py" in captured["002"]
+
+
+def test_task_specific_read_budget_is_bounded_by_hard_cap(tmp_path: Path) -> None:
+    root = _project(tmp_path)
+    orchestrator = AgentOrchestrator(root)
+    orchestrator.config["worker_max_readonly_tool_calls"] = 12
+    orchestrator.config["worker_max_readonly_tool_calls_hard_cap"] = 24
+    task_text = (root / ".agent_hub" / "inbox" / "001_preview.md").read_text(encoding="utf-8")
+    assert orchestrator._worker_read_budget(task_text) == 12
+    task_text = task_text.replace("- Task-ID: 001", "- Task-ID: 001\n- Readonly-Tool-Budget: 24")
+    assert orchestrator._worker_read_budget(task_text) == 24
+    too_high = task_text.replace("Readonly-Tool-Budget: 24", "Readonly-Tool-Budget: 25")
+    with pytest.raises(Exception, match="between 1 and 24"):
+        orchestrator._worker_read_budget(too_high)

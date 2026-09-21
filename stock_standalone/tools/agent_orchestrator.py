@@ -275,7 +275,7 @@ class AgentOrchestrator:
     def _worker_prompt(self, task_path: Path) -> str:
         task = task_path.read_text(encoding="utf-8")
         allowed_files = self._section_items(task, "Files Allowed")
-        budget = int(self.config.get("worker_max_readonly_tool_calls", 12))
+        budget = self._worker_read_budget(task)
         return (
             "AUTHORITATIVE INVOCATION RULES: "
             "The orchestrator has already claimed this task. Do not call claim or submit. "
@@ -352,6 +352,22 @@ class AgentOrchestrator:
             re.MULTILINE | re.IGNORECASE,
         )
         return match.group(1).strip() if match else None
+
+    def _worker_read_budget(self, task_text: str) -> int:
+        default = int(self.config.get("worker_max_readonly_tool_calls", 12))
+        raw = self._metadata_value(task_text, "Readonly-Tool-Budget")
+        if raw is None:
+            return default
+        try:
+            requested = int(raw)
+        except (TypeError, ValueError):
+            raise OrchestratorError(f"Invalid Readonly-Tool-Budget: {raw}")
+        hard_cap = int(self.config.get("worker_max_readonly_tool_calls_hard_cap", 24))
+        if requested < 1 or requested > hard_cap:
+            raise OrchestratorError(
+                f"Readonly-Tool-Budget must be between 1 and {hard_cap}; got {requested}"
+            )
+        return requested
 
     def _permission_profile(self, task_text: str) -> str:
         return (self._metadata_value(task_text, "Permission-Profile") or "P2_CODE_LOW").upper()
@@ -520,11 +536,12 @@ class AgentOrchestrator:
         log_path: Path,
         artifact_dir: Path,
         worker_env: dict[str, str],
+        read_budget: int | None = None,
     ) -> subprocess.CompletedProcess[str]:
         """Run Antigravity with enforceable timeout/read-budget/no-activity gates."""
         log_path.unlink(missing_ok=True)
         timeout_seconds = int(self.config.get("worker_timeout_seconds", 240))
-        read_budget = int(self.config.get("worker_max_readonly_tool_calls", 12))
+        read_budget = int(read_budget if read_budget is not None else self.config.get("worker_max_readonly_tool_calls", 12))
         idle_timeout = int(self.config.get("worker_no_activity_timeout_seconds", 60))
         poll_seconds = max(float(self.config.get("worker_monitor_interval_seconds", 1.0)), 0.05)
         started = time.monotonic()
@@ -606,6 +623,7 @@ class AgentOrchestrator:
         log_path: Path,
         artifact_dir: Path,
         worker_env: dict[str, str],
+        read_budget: int | None = None,
     ) -> subprocess.CompletedProcess[str]:
         # Injected runners keep unit tests deterministic; production uses the hard monitor.
         if self.runner is not subprocess.run:
@@ -614,10 +632,11 @@ class AgentOrchestrator:
                 timeout=int(self.config.get("worker_timeout_seconds", 240)) + 30,
                 env=worker_env,
             )
-        return self._run_worker_monitored(args, log_path, artifact_dir, worker_env)
+        return self._run_worker_monitored(args, log_path, artifact_dir, worker_env, read_budget=read_budget)
 
     def _invoke_worker(
-        self, prompt: str, artifact_dir: Path, task_risk: str, profile_name: str = "P2_CODE_LOW"
+        self, prompt: str, artifact_dir: Path, task_risk: str,
+        profile_name: str = "P2_CODE_LOW", read_budget: int | None = None,
     ) -> subprocess.CompletedProcess[str]:
         profile = self._permission_profiles().get(profile_name)
         if profile is None:
@@ -670,7 +689,7 @@ class AgentOrchestrator:
                 # Antigravity requires this even for ListDir in print mode. The
                 # terminal sandbox and post-run scope enforcement remain mandatory.
                 args.append("--dangerously-skip-permissions")
-            result = self._run_worker_attempt(args, log_path, artifact_dir, worker_env)
+            result = self._run_worker_attempt(args, log_path, artifact_dir, worker_env, read_budget=read_budget)
             attempts.append(result)
             self._write(
                 artifact_dir / f"worker_attempt_{index}_{safe_model}.stdout", result.stdout
@@ -679,7 +698,7 @@ class AgentOrchestrator:
                 artifact_dir / f"worker_attempt_{index}_{safe_model}.stderr", result.stderr
             )
             if self._is_transient_auth_failure(result):
-                retry = self._run_worker_attempt(args, log_path, artifact_dir, worker_env)
+                retry = self._run_worker_attempt(args, log_path, artifact_dir, worker_env, read_budget=read_budget)
                 attempts.append(retry)
                 self._write(
                     artifact_dir / f"worker_attempt_{index}_{safe_model}_auth_retry.stdout",
@@ -912,6 +931,7 @@ class AgentOrchestrator:
             artifact_dir,
             self._task_risk(task_text),
             self._permission_profile(task_text),
+            read_budget=self._worker_read_budget(task_text),
         )
         self._write(artifact_dir / "worker_stdout.json", worker.stdout)
         self._write(artifact_dir / "worker_stderr.log", worker.stderr)
