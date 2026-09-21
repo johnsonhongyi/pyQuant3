@@ -166,11 +166,30 @@ class AgentHub:
         self.write_dashboard()
         return target
 
+    def get_rework_count(self, task_id: str) -> int:
+        norm_id = task_id.zfill(3)
+        event_path = self.hub / "events" / "events.jsonl"
+        if not event_path.is_file():
+            return 0
+        count = 0
+        with event_path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    data = json.loads(line)
+                    if data.get("task_id") == norm_id and data.get("action") == "reviewed_rework":
+                        count += 1
+                except json.JSONDecodeError:
+                    continue
+        return count
+
     def review(self, task_id: str, decision: str, reviewer: str, summary: str) -> Path:
         item = self.locate(task_id, ("done",))
         decision = decision.lower()
-        if decision not in {"approved", "rework"}:
-            raise HubError("Decision must be approved or rework")
+        if decision not in {"approved", "rework", "rework_blocked"}:
+            raise HubError("Decision must be approved, rework, or rework_blocked")
         report = self.hub / "review" / f"{item.task_id}_review.md"
         content = (
             f"# Review {item.task_id}\n\n"
@@ -187,6 +206,9 @@ class AgentHub:
             if result.exists():
                 result.replace(self.hub / "review" / f"{item.task_id}_result_rework.md")
             self._event(item.task_id, "reviewed_rework", reviewer, from_state="done", to_state="inbox")
+        elif decision == "rework_blocked":
+            # 达到打回熔断上限，任务留在 done 状态，不移回 inbox，等待人工仲裁，阻断无限死循环
+            self._event(item.task_id, "reviewed_rework_blocked", reviewer, state="done")
         else:
             self._event(item.task_id, "reviewed_approved", reviewer, state="done")
         self.write_dashboard()
