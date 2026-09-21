@@ -354,7 +354,8 @@ class PaperExecutionAdapter(ExecutionAdapter):
                         "price": safe_json_float(o.get("price")),
                         "size_pct": safe_json_float(o.get("size_pct")),
                         "volume": safe_json_float(o.get("volume")),
-                        "timestamp": str(o.get("timestamp") or "")
+                        "timestamp": str(o.get("timestamp") or ""),
+                        "request_id": str(o.get("request_id") or "")
                     })
 
             data = {
@@ -378,6 +379,16 @@ class PaperExecutionAdapter(ExecutionAdapter):
     def submit_order(self, order: ApprovedOrder) -> bool:
         if order.size_pct <= 0 or order.price <= 0:
             return False
+
+        # Idempotency gate: retries must not mutate cash/positions twice.
+        request_id = str(getattr(order, "request_id", "") or "")
+        for existing in self.orders:
+            if not isinstance(existing, dict):
+                continue
+            if str(existing.get("order_id") or "") == str(order.order_id):
+                return True
+            if request_id and str(existing.get("request_id") or "") == request_id:
+                return True
 
         # 如果开启了模拟模式，直接短路返回 True 绕过所有账户状态修改及风控校验
         if self._is_simulation:
@@ -535,6 +546,7 @@ class PaperExecutionAdapter(ExecutionAdapter):
             "size_pct": round(order.size_pct, 4),
             "volume": round(sell_volume if action in {"SELL", "REDUCE"} else volume, 4),
             "timestamp": datetime.now().isoformat(timespec="seconds"),
+            "request_id": request_id,
         })
         self._save_state()
         return True

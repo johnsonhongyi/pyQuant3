@@ -4,9 +4,20 @@
 from __future__ import annotations
 
 from dataclasses import asdict, fields
+import hashlib
+import json
+import threading
 from typing import Any, Mapping
 
-from trading_kernel.contracts import DecisionRequest, DecisionResponse, KERNEL_API_VERSION
+from trading_kernel.contracts import (
+    DECISION_ACTIONS,
+    KERNEL_API_VERSION,
+    REJECT_CODES,
+    TRADE_STATES,
+    TRADING_MODES,
+    DecisionRequest,
+    DecisionResponse,
+)
 
 
 class KernelGateway:
@@ -17,6 +28,35 @@ class KernelGateway:
             from trading_kernel.kernel_service import get_kernel_service
             service = get_kernel_service()
         self._service = service
+        self._request_cache: dict[str, tuple[str, DecisionResponse]] = {}
+        self._request_cache_lock = threading.RLock()
+
+    @staticmethod
+    def _request_fingerprint(request: DecisionRequest) -> str:
+        payload = json.dumps(asdict(request), ensure_ascii=False, sort_keys=True, default=str)
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def _evaluate_request(
+        self,
+        request: DecisionRequest,
+        *,
+        write_journal: bool,
+        request_id: str,
+    ) -> DecisionResponse:
+        result = self._service.evaluate_decision_item(
+            request.to_kernel_item(), write_journal=write_journal
+        )
+        return DecisionResponse(
+            accepted=bool(result.get("kernel_allowed")),
+            executed=bool(result.get("kernel_executed")),
+            action=str(result.get("kernel_action") or "HOLD"),
+            size_pct=float(result.get("kernel_size_pct") or 0.0),
+            trace_id=str(result.get("kernel_trace_id") or ""),
+            order_id=str(result.get("kernel_order_id") or ""),
+            reject_code=str(result.get("kernel_reject_code") or ""),
+            state=str(result.get("kernel_state") or "FLAT"),
+            request_id=request_id,
+        )
 
     @property
     def api_version(self) -> str:
@@ -27,21 +67,32 @@ class KernelGateway:
             return DecisionResponse(
                 accepted=False, executed=False, action="BLOCK", size_pct=0.0,
                 trace_id="", order_id="", reject_code="INCOMPATIBLE_API_VERSION",
+                request_id=request.request_id,
             )
-        result = self._service.evaluate_decision_item(
-            request.to_kernel_item(), write_journal=write_journal
-        )
-        action = str(result.get("kernel_action") or "HOLD")
-        return DecisionResponse(
-            accepted=bool(result.get("kernel_allowed")),
-            executed=bool(result.get("kernel_executed")),
-            action=action,
-            size_pct=float(result.get("kernel_size_pct") or 0.0),
-            trace_id=str(result.get("kernel_trace_id") or ""),
-            order_id=str(result.get("kernel_order_id") or ""),
-            reject_code=str(result.get("kernel_reject_code") or ""),
-            state=str(result.get("kernel_state") or "FLAT"),
-        )
+
+        request_id = str(request.request_id or "").strip()
+        if not request_id:
+            return self._evaluate_request(
+                request, write_journal=write_journal, request_id=""
+            )
+
+        fingerprint = self._request_fingerprint(request)
+        with self._request_cache_lock:
+            cached = self._request_cache.get(request_id)
+            if cached is not None:
+                cached_fingerprint, cached_response = cached
+                if cached_fingerprint == fingerprint:
+                    return cached_response
+                return DecisionResponse(
+                    accepted=False, executed=False, action="BLOCK", size_pct=0.0,
+                    trace_id="", order_id="", reject_code="IDEMPOTENCY_CONFLICT",
+                    request_id=request_id,
+                )
+            response = self._evaluate_request(
+                request, write_journal=write_journal, request_id=request_id
+            )
+            self._request_cache[request_id] = (fingerprint, response)
+            return response
 
     def submit_mapping(self, payload: Mapping[str, Any], *, write_journal: bool = True) -> dict[str, Any]:
         """JSON/IPC-friendly decision endpoint with the same version contract."""
@@ -54,8 +105,10 @@ class KernelGateway:
         return {
             "api_version": KERNEL_API_VERSION,
             "kernel_version": str(getattr(self._service, "KERNEL_VERSION", "")),
-            "modes": ["OBSERVE", "PAPER", "CONFIRM", "LIVE_AUTO"],
-            "decision_actions": ["BUY", "ADD", "REDUCE", "SELL", "HOLD", "BLOCK"],
+            "modes": list(TRADING_MODES),
+            "decision_actions": list(DECISION_ACTIONS),
+            "trade_states": list(TRADE_STATES),
+            "reject_codes": list(REJECT_CODES),
             "extension_ports": ["strategy_provider", "execution_adapter", "state_store", "event_sink"],
         }
 

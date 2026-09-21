@@ -93,13 +93,16 @@ def evaluate(
     # 手动交易绿色通道：直接放行并构造 ApprovedOrder，绕过所有风控硬性卡口与开仓限制
     if intent.reason and intent.reason.regime == "MANUAL_OVERRIDE" and action in {"BUY", "ADD", "SELL", "REDUCE"}:
         final_size = intent.size_pct
+        request_id = str(signal.features.get("request_id", "") or "")
+        order_key = (request_id, signal.code, signal.ts, action, final_size) if request_id else (signal.code, signal.ts, action, final_size)
         order = ApprovedOrder(
-            order_id=stable_hash((signal.code, signal.ts, action, final_size))[:24],
+            order_id=stable_hash(order_key)[:24],
             code=signal.code,
             action=action,
             size_pct=round(final_size, 4),
             price=signal.price,
             stop_price=intent.stop_price,
+            request_id=request_id,
         )
         return RiskDecision(
             allowed=True,
@@ -281,14 +284,18 @@ def evaluate(
 
     order = None
     if action in {"BUY", "ADD", "SELL", "REDUCE"} and final_size > 0:
+        request_id = str(signal.features.get("request_id", "") or "")
+        order_key = (request_id, signal.code, signal.ts, action, final_size) if request_id else (signal.code, signal.ts, action, final_size)
         order = ApprovedOrder(
-            # 10. Single trade stop loss is incorporated into order stop_price
-            order_id=stable_hash((signal.code, signal.ts, action, final_size))[:24],
+            # 10. Single trade stop loss is incorporated into order stop_price.
+            # request_id participates when present so retries map to one physical order.
+            order_id=stable_hash(order_key)[:24],
             code=signal.code,
             action=action,
             size_pct=round(final_size, 4),
             price=signal.price,
             stop_price=intent.stop_price,
+            request_id=request_id,
         )
 
     return RiskDecision(

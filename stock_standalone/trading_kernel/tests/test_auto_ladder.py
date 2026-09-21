@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import pytest
 from datetime import datetime
+from trading_kernel.core.intent import DecisionIntent, DecisionReason
 from trading_kernel.core.risk import ApprovedOrder
 from trading_kernel.kernel_service import TradingKernelService
 
@@ -58,7 +59,36 @@ def test_live_auto_preconditions_validation():
 def test_kernel_service_order_routing_by_mode(tmp_path):
     """测试在不同交易天梯模式下下单指令的安全分发与路由机制"""
     log_file = os.path.join(tmp_path, "ladder_routing.jsonl")
-    service = TradingKernelService(journal_path=log_file)
+    class DeterministicBuyStrategy:
+        provider_id = "test.auto_ladder.buy.v1"
+
+        def decide(self, signal, state):
+            return DecisionIntent(
+                code=signal.code,
+                action="BUY",
+                size_pct=0.10,
+                stop_price=signal.price * 0.95,
+                confidence=1.0,
+                reason=DecisionReason(
+                    regime="TEST_ROUTING",
+                    setup="deterministic_buy",
+                    sector_heat=0.0,
+                    sector_rank=None,
+                    is_leader=False,
+                    breakout=True,
+                    volume_ratio=1.0,
+                    dff=0.0,
+                    dff_positive=False,
+                    price_above_vwap=True,
+                    confidence_inputs=(),
+                ),
+                expires_at=signal.ts,
+            )
+
+    service = TradingKernelService(
+        journal_path=log_file,
+        strategy_provider=DeterministicBuyStrategy(),
+    )
     # 重置状态防前面的测试用例干扰
     service.state_manager.set("600519", "FLAT")
 
