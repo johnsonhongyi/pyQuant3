@@ -1,5 +1,24 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](stock_standalone/design/antigravity_historical_tasks_archive.md)
 
+## 2026-09-21 11:00
+- [x] **【ATS 2026-09-21 版本：普通买入风控闸门、全仓轮动硬约束与编排器瘦回传加固】(`ats/strategy/ipo_trading_center.py`, `tools/agent_orchestrator.py`, `docs/ATS_2026-09-21_VERSION_REPORT.md`, `tests/`)**：
+    - [x] **任务 008：全仓轮动仓位上限、时间戳关联与原子换马保护**：
+        - 全仓轮动在生成与执行阶段均严格扣除保留持仓，杜绝换入后组合仓位穿透潮汐上限；
+        - 无可信快照时，轮动仅可使用被平旧仓对应预算；买入前完成现金与整手预检查，失败时不平旧仓、不扣现金、不写平仓记录。
+    - [x] **任务 009：普通买入最终风控闸门与零状态变更防御**：
+        - `BUY`、`BUY_SCOUT`、`BUY_CONFIRM` 成交前强制复核市场快照（新鲜、同交易日、非 `T0_INSUFFICIENT`、300s 关联）；
+        - `T4_PANIC_ACCEL`、`BLOCK_NEW_BUYS`、零风险乘数、仓位满额、现金不足一手等全部拒绝成交且绝不创建幽灵持仓。
+    - [x] **编排器协议与回传架构收敛**：
+        - Worker 结果强制收敛为紧凑结构化 JSON，剥离冗余对话与传输日志；
+        - 设定 240s 硬性超时兜底，移除要求 worker 自行 `claim/submit` 的旧协议冲突。
+    - [x] **全量验证 100% 绿灯**：
+        - 56 + 7 项业务与回放测试、16 项编排器测试、compileall exit=0、git diff --check 均通过。
+    - [ ] **后续推进路线 (Next Steps)**：
+        - 1) 实现本地心跳监控与空转早停；
+        - 2) 固化任务级范围基线（脏工作区范围隔离）；
+        - 3) 完成任务 007 独立审计闭环；
+        - 4) 保持真实交易与券商接口关闭。
+
 ## 2026-09-20 23:30
 - [x] **【Task 008 潮汐仓位上限穿透与时钟守卫加固全面完成并闭环验证】(`ats/strategy/ipo_trading_center.py`, `ats/strategy/ipo_market_sentiment_engine.py`, `tests/test_channel_secondary_buy_strategy.py`, `tests/test_ipo_vwap_sentiment_and_horse_race.py`)**：
     - [x] **四项关键漏洞与风控隐患彻底解决 (P0)**：

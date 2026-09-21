@@ -14,6 +14,7 @@ tests/test_channel_secondary_buy_strategy.py
 import os
 import sys
 import tempfile
+import time
 import unittest
 import pandas as pd
 import numpy as np
@@ -35,6 +36,7 @@ from ats.strategy.ipo_trading_center import (
     IPOOrderDirective,
     IPOTradingPosition,
 )
+from ats.strategy.ipo_market_sentiment_engine import MarketSentimentSnapshot
 from ats.strategy.ipo_vwap_detector_engine import VWAPDetectorSignal
 from ats.proactive_exit_engine import ProactiveExitEngine, PositionWatchItem, ExitAction
 
@@ -184,6 +186,16 @@ class TestIPOTradingCenterTradePlanIntegration(unittest.TestCase):
         )
         plan = self.center.create_trade_plan_from_signal(sig)
         
+        now_ts = time.time()
+        snap = MarketSentimentSnapshot(
+            tide_state="T7_WARMING",
+            tide_position_cap_pct=50.0,
+            risk_mode="NORMAL",
+            position_multiplier=1.0,
+        ).finalize()
+        snap.generated_at = now_ts
+        self.center._last_market_context = snap
+
         buy_dir = IPOOrderDirective(
             action="BUY_SCOUT",
             code="688826",
@@ -194,7 +206,8 @@ class TestIPOTradingCenterTradePlanIntegration(unittest.TestCase):
             signal_level="S4",
             quality_grade="S",
             strategy_tag=TAG_CHANNEL_SECONDARY_BUY,
-            trade_plan=plan
+            trade_plan=plan,
+            timestamp=now_ts,
         )
         self.center.record_order_execution(buy_dir)
         pos = self.center.get_position("688826")
@@ -584,10 +597,20 @@ class TestTradingCenterProactiveExitWiring(unittest.TestCase):
             quality_grade="S", higher_low_stop=78.0,
             target_1_channel_mid=86.0,
         )
+        now_ts = time.time()
+        snap = MarketSentimentSnapshot(
+            tide_state="T7_WARMING",
+            tide_position_cap_pct=100.0,
+            risk_mode="NORMAL",
+            position_multiplier=1.0,
+        ).finalize()
+        snap.generated_at = now_ts
+        self.center._last_market_context = snap
+
         self.buy = IPOOrderDirective(
             action="BUY_SCOUT", code="688826", name="碳脉冲",
-            price=80.0, shares=1000, size_pct=20.0,
-            timestamp=1000.0, trade_plan=self.plan,
+            price=80.0, shares=1000, size_pct=80.0,
+            timestamp=now_ts, trade_plan=self.plan,
             strategy_tag=TAG_CHANNEL_SECONDARY_BUY,
         )
 
@@ -664,6 +687,7 @@ class TestTradingCenterProactiveExitWiring(unittest.TestCase):
                 total_capital=100000.0, ledger_file=ledger,
                 exit_engine=ProactiveExitEngine(),
             )
+            center._last_market_context = self.center._last_market_context
             center.record_order_execution(self.buy)
 
             restored = IPOTradingCenter(
@@ -947,6 +971,553 @@ class TestTradingCenterProactiveExitWiring(unittest.TestCase):
         )
         self.assertFalse(center.record_order_execution(t1_sell))
         self.assertEqual(center._positions["688555"].shares, pos_t0.shares)
+
+    def test_24_full_rotation_swap_combined_fleet_cap_with_other_positions(self):
+        """【回归测试】全仓轮动组合仓位上限：其他保留持仓+换入仓位绝不能超过潮汐上限(如T5=5%)"""
+        from unittest.mock import patch
+        import time as pytime
+        from ats.strategy.ipo_market_sentiment_engine import MarketSentimentSnapshot
+
+        center = IPOTradingCenter(total_capital=100000.0)
+        center.set_trading_mode("ROTATION_FULL_CAPITAL")
+
+        # 初始持仓：旧滞涨股 600001 (2000元，占2%)，以及其他保留持仓 600002 (4000元，占4%)
+        center._positions["600001"] = IPOTradingPosition(
+            code="600001", name="老滞涨", shares=200, cost_price=10.0,
+            current_price=10.0, entry_date="2026-09-19", status="HOLDING"
+        )
+        center._positions["600002"] = IPOTradingPosition(
+            code="600002", name="其他持仓", shares=400, cost_price=10.0,
+            current_price=10.0, entry_date="2026-09-19", status="HOLDING"
+        )
+        center.available_cash = 94000.0
+
+        # 信号：超级龙头 688999 (现价10.0元) 与老滞涨
+        sig_leader = VWAPDetectorSignal(
+            code="688999", name="超级龙头", price=10.0, vwap=9.8,
+            is_above_vwap=True, signal_type="BREAKOUT", horse_race_rank=1,
+            horse_race_score=95.0, launch_time_str="09:35", launch_slope_deg=45.0
+        )
+        sig_old = VWAPDetectorSignal(
+            code="600001", name="老滞涨", price=10.0, vwap=10.5,
+            is_above_vwap=False, signal_type="PULLBACK_BUY", horse_race_rank=8,
+            horse_race_score=40.0, relative_to_leader_gap=55.0
+        )
+        center.submit_batch_reports([sig_leader, sig_old])
+
+        # 1. 生成端验证：T5 潮汐上限 5.0%，扣除保留持仓 600002 (4%) 后，仅剩 1% 额度 (1000元 / 10元 = 100股)
+        now_ts = pytime.time()
+        ctx_t5 = MarketSentimentSnapshot(
+            heat_stage="🌱 绝望孕育", index_phase="绝望地量",
+            tide_state="T5_ICE", tide_position_cap_pct=5.0,
+            risk_mode="NORMAL", position_multiplier=1.0,
+        ).finalize()
+        ctx_t5.generated_at = now_ts
+
+        with patch.object(center.sentiment_engine, "get_market_sentiment", return_value=ctx_t5):
+            orders_t5 = center.evaluate_fleet_and_generate_orders()
+
+        rotations_t5 = [o for o in orders_t5 if o.action == "FULL_ROTATION_SWAP"]
+        self.assertEqual(len(rotations_t5), 1)
+        # 换入指令受限为 1.0%，绝不能超过 5.0% - 4.0% = 1.0%
+        self.assertEqual(rotations_t5[0].size_pct, 1.0)
+        self.assertEqual(rotations_t5[0].shares, 100)
+
+        # 1b. 若其他持仓已达 5.0% (5000元)，生成端必须拒绝生成换入指令 (剩余额度 0.0%)
+        center._positions["600002"].shares = 500  # 5000元，占 5.0%
+        with patch.object(center.sentiment_engine, "get_market_sentiment", return_value=ctx_t5):
+            orders_t5_full = center.evaluate_fleet_and_generate_orders()
+        self.assertEqual(len([o for o in orders_t5_full if o.action == "FULL_ROTATION_SWAP"]), 0)
+        center._positions["600002"].shares = 400  # 恢复为 4000元 (4.0%)
+
+        # 2. 执行端验证：手工伪造 5.0% (或100%) 指令换入，执行端必须再次扣除其他保留持仓(4%)，强制截断为 1.0% (100股)
+        center._last_market_context = ctx_t5
+        forged_swap = IPOOrderDirective(
+            action="FULL_ROTATION_SWAP", code="688999", name="超级龙头",
+            price=10.0, shares=500, size_pct=5.0, timestamp=now_ts,
+            target_swap_code="600001", target_swap_name="老滞涨"
+        )
+        self.assertTrue(center.record_order_execution(forged_swap))
+        self.assertNotIn("600001", center._positions)
+        self.assertIn("600002", center._positions)
+        self.assertIn("688999", center._positions)
+        # 600002(400股*10=4000元) + 688999(100股*10=1000元) = 5000元 (5.0%)
+        self.assertEqual(center._positions["688999"].shares, 100)
+        total_fleet_val = sum(p.shares * p.current_price for p in center._positions.values())
+        self.assertEqual(total_fleet_val, 5000.0)
+        self.assertEqual(total_fleet_val / center.total_capital * 100.0, 5.0)
+
+        # 2b. 执行端验证：若其他持仓已达 5.0%，执行端再次收到换马指令必须拒绝执行，老仓位完全不变
+        center._positions["688999"].shares = 500  # 5000元，已占满 5% 潮汐上限
+        center._positions["600003"] = IPOTradingPosition(
+            code="600003", name="第二只老股", shares=100, cost_price=10.0,
+            current_price=10.0, entry_date="2026-09-19", status="HOLDING"
+        )
+        overflow_dir = IPOOrderDirective(
+            action="FULL_ROTATION_SWAP", code="688888", name="溢出目标",
+            price=10.0, shares=100, size_pct=1.0, timestamp=now_ts,
+            target_swap_code="600003", target_swap_name="第二只老股"
+        )
+        self.assertFalse(center.record_order_execution(overflow_dir))
+        self.assertIn("600003", center._positions)
+        self.assertNotIn("688888", center._positions)
+        self.assertEqual(center._positions["600003"].shares, 100)
+
+    def test_25_full_rotation_swap_atomicity_failure_preserves_state(self):
+        """【回归测试】全仓轮动原子性守卫：买入预算或现金不足100股时拒绝换马且完全无状态变更"""
+        import time as pytime
+        from ats.strategy.ipo_market_sentiment_engine import MarketSentimentSnapshot
+
+        center = IPOTradingCenter(total_capital=100000.0)
+        center.set_trading_mode("ROTATION_FULL_CAPITAL")
+        center._positions["600001"] = IPOTradingPosition(
+            code="600001", name="老滞涨", shares=100, cost_price=10.0,
+            current_price=10.0, entry_date="2026-09-19", status="HOLDING"
+        )
+        center.available_cash = 200.0  # 极低现金 200 元
+        initial_cash = center.available_cash
+        initial_closed_count = len(center._closed_positions)
+
+        now_ts = pytime.time()
+        # Case A: 目标买入单价过高 (50.0元/股，100股需要5000元)，即使卖出老股票(1000元)回笼现金共 1200 元，仍不足以购买 100 股
+        ctx_normal = MarketSentimentSnapshot(
+            tide_state="T6_ICE_DIVERGENCE", tide_position_cap_pct=15.0,
+            risk_mode="NORMAL", position_multiplier=1.0,
+        ).finalize()
+        ctx_normal.generated_at = now_ts
+        center._last_market_context = ctx_normal
+
+        expensive_dir = IPOOrderDirective(
+            action="FULL_ROTATION_SWAP", code="688999", name="高价龙头",
+            price=50.0, shares=100, size_pct=10.0, timestamp=now_ts,
+            target_swap_code="600001", target_swap_name="老滞涨"
+        )
+
+        # 执行端校验现金不足，必须返回 False，且绝不能单边平掉 600001
+        self.assertFalse(center.record_order_execution(expensive_dir))
+        self.assertIn("600001", center._positions, "原子换马失败必须保留老持仓！")
+        self.assertNotIn("688999", center._positions)
+        self.assertEqual(center._positions["600001"].shares, 100)
+        self.assertEqual(center._positions["600001"].status, "HOLDING")
+        self.assertEqual(center.available_cash, initial_cash, "原子换马失败现金绝不得改变！")
+        self.assertEqual(len(center._closed_positions), initial_closed_count, "原子换马失败绝不能产生平仓记录！")
+
+        # Case B: 受限预算不足以买入 100 股 (如 T5 上限5%，其他保留持仓占 4.5%，剩余预算 0.5% = 500元，目标单价10元需1000元)
+        center._positions["600002"] = IPOTradingPosition(
+            code="600002", name="保留持仓", shares=450, cost_price=10.0,
+            current_price=10.0, entry_date="2026-09-19", status="HOLDING"
+        )
+        ctx_t5 = MarketSentimentSnapshot(
+            tide_state="T5_ICE", tide_position_cap_pct=5.0,
+            risk_mode="NORMAL", position_multiplier=1.0,
+        ).finalize()
+        ctx_t5.generated_at = now_ts
+        center._last_market_context = ctx_t5
+
+        tiny_budget_dir = IPOOrderDirective(
+            action="FULL_ROTATION_SWAP", code="688888", name="受限标的",
+            price=10.0, shares=100, size_pct=5.0, timestamp=now_ts,
+            target_swap_code="600001", target_swap_name="老滞涨"
+        )
+        self.assertFalse(center.record_order_execution(tiny_budget_dir))
+        self.assertIn("600001", center._positions)
+        self.assertNotIn("688888", center._positions)
+        self.assertEqual(center._positions["600001"].shares, 100)
+        self.assertEqual(center.available_cash, initial_cash)
+        self.assertEqual(len(center._closed_positions), initial_closed_count)
+
+
+class TestOrdinaryBuyExecutionRiskGate(unittest.TestCase):
+    """【Task 009】普通 BUY、BUY_SCOUT、BUY_CONFIRM 执行端最终潮汐仓位与现金硬门禁测试"""
+
+    def setUp(self):
+        self.center = IPOTradingCenter(total_capital=100000.0)
+
+    def test_26_manual_100pct_buy_injection_clamped_to_tide_cap(self):
+        """【回归测试】手工注入 100% BUY 指令受限截断：执行端坚决限制在潮汐上限(如T6=15%)内"""
+        import time as pytime
+        from ats.strategy.ipo_market_sentiment_engine import MarketSentimentSnapshot
+
+        now_ts = pytime.time()
+        ctx_t6 = MarketSentimentSnapshot(
+            tide_state="T6_ICE_DIVERGENCE", tide_position_cap_pct=15.0,
+            risk_mode="NORMAL", position_multiplier=1.0,
+        ).finalize()
+        ctx_t6.generated_at = now_ts
+        self.center._last_market_context = ctx_t6
+
+        # 手工注入 100% BUY 指令 (现价10.0元，试图买入10000股=10万元满仓)
+        forged_buy = IPOOrderDirective(
+            action="BUY", code="688111", name="手动满仓",
+            price=10.0, shares=10000, size_pct=100.0, timestamp=now_ts
+        )
+        self.assertTrue(self.center.record_order_execution(forged_buy))
+        self.assertIn("688111", self.center._positions)
+        pos = self.center._positions["688111"]
+        # 执行端硬拦截：100% 必须被截断至 15% 预算 (15000元 / 10元 = 1500股)
+        self.assertEqual(pos.shares, 1500)
+        self.assertEqual(pos.shares * 10.0, 15000.0)
+        self.assertEqual(self.center.available_cash, 85000.0)
+
+        # 再次测试 BUY_CONFIRM 试图注入超额指令
+        forged_confirm = IPOOrderDirective(
+            action="BUY_CONFIRM", code="688112", name="确认超额",
+            price=10.0, shares=5000, size_pct=50.0, timestamp=now_ts
+        )
+        # 此时已有 688111 占用 15% (15000元)，剩余额度为 0%，必须被拒绝
+        self.assertFalse(self.center.record_order_execution(forged_confirm))
+        self.assertNotIn("688112", self.center._positions)
+        self.assertEqual(self.center.available_cash, 85000.0)
+
+    def test_27_t4_and_block_new_buys_strictly_rejects_ordinary_buy(self):
+        """【回归测试】T4_PANIC_ACCEL 与 BLOCK_NEW_BUYS 坚决阻断普通买入，且不产生幽灵持仓、不扣现金"""
+        import time as pytime
+        from ats.strategy.ipo_market_sentiment_engine import MarketSentimentSnapshot
+
+        now_ts = pytime.time()
+        initial_cash = self.center.available_cash
+        initial_closed_count = len(self.center._closed_positions)
+
+        # Case A: T4_PANIC_ACCEL 恐慌加速禁买
+        t4_snap = MarketSentimentSnapshot(
+            tide_state="T4_PANIC_ACCEL", tide_position_cap_pct=0.0,
+            risk_mode="BLOCK_NEW_BUYS", position_multiplier=0.0,
+        ).finalize()
+        t4_snap.generated_at = now_ts
+        self.center._last_market_context = t4_snap
+
+        dir_buy = IPOOrderDirective(
+            action="BUY", code="688222", name="T4恐慌买入",
+            price=10.0, shares=500, size_pct=5.0, timestamp=now_ts
+        )
+        self.assertFalse(self.center.record_order_execution(dir_buy))
+        self.assertNotIn("688222", self.center._positions, "T4禁买绝不得留下幽灵持仓！")
+        self.assertEqual(self.center.available_cash, initial_cash, "T4禁买现金绝不得扣减！")
+        self.assertEqual(len(self.center._closed_positions), initial_closed_count)
+
+        # Case B: risk_mode == BLOCK_NEW_BUYS (即便状态为其他状态)
+        block_snap = MarketSentimentSnapshot(
+            tide_state="T7_WARMING", tide_position_cap_pct=30.0,
+            risk_mode="BLOCK_NEW_BUYS", position_multiplier=0.0,
+        ).finalize()
+        block_snap.generated_at = now_ts
+        self.center._last_market_context = block_snap
+
+        dir_scout = IPOOrderDirective(
+            action="BUY_SCOUT", code="688333", name="禁买试探",
+            price=10.0, shares=500, size_pct=5.0, timestamp=now_ts
+        )
+        self.assertFalse(self.center.record_order_execution(dir_scout))
+        self.assertNotIn("688333", self.center._positions, "BLOCK_NEW_BUYS绝不得留下幽灵持仓！")
+        self.assertEqual(self.center.available_cash, initial_cash)
+        self.assertEqual(len(self.center._closed_positions), initial_closed_count)
+
+        # Case C: position_multiplier == 0.0
+        zero_snap = MarketSentimentSnapshot(
+            tide_state="T5_ICE", tide_position_cap_pct=5.0,
+            risk_mode="NORMAL", position_multiplier=0.0,
+        ).finalize()
+        zero_snap.generated_at = now_ts
+        self.center._last_market_context = zero_snap
+
+        dir_confirm = IPOOrderDirective(
+            action="BUY_CONFIRM", code="688444", name="零乘数确认",
+            price=10.0, shares=500, size_pct=5.0, timestamp=now_ts
+        )
+        self.assertFalse(self.center.record_order_execution(dir_confirm))
+        self.assertNotIn("688444", self.center._positions)
+        self.assertEqual(self.center.available_cash, initial_cash)
+
+    def test_28_other_positions_reach_cap_rejects_new_buy(self):
+        """【回归测试】组合多持仓已达潮汐上限时拒绝新买入指令"""
+        import time as pytime
+        from ats.strategy.ipo_market_sentiment_engine import MarketSentimentSnapshot
+
+        # 初始持仓：已有 688001 占用 10.0% (1000股 * 10元 = 10000元)
+        self.center._positions["688001"] = IPOTradingPosition(
+            code="688001", name="已有持仓", shares=1000, cost_price=10.0,
+            current_price=10.0, entry_date="2026-09-19", status="HOLDING"
+        )
+        self.center.available_cash = 90000.0
+
+        now_ts = pytime.time()
+        ctx_t5 = MarketSentimentSnapshot(
+            tide_state="T5_ICE", tide_position_cap_pct=10.0,
+            risk_mode="NORMAL", position_multiplier=1.0,
+        ).finalize()
+        ctx_t5.generated_at = now_ts
+        self.center._last_market_context = ctx_t5
+
+        # 试图买入 688999 (5%)，但组合上限为 10%，已有持仓已占满 10%
+        overflow_dir = IPOOrderDirective(
+            action="BUY", code="688999", name="溢出标的",
+            price=10.0, shares=500, size_pct=5.0, timestamp=now_ts
+        )
+        self.assertFalse(self.center.record_order_execution(overflow_dir))
+        self.assertNotIn("688999", self.center._positions, "超额买入必须被阻断，不得留下幽灵持仓！")
+        self.assertEqual(self.center.available_cash, 90000.0)
+        self.assertEqual(self.center._positions["688001"].shares, 1000)
+
+    def test_29_insufficient_cash_rejects_and_preserves_state(self):
+        """【回归测试】现金不足 100 股时拒绝买入且严格保持状态不变"""
+        import time as pytime
+        from ats.strategy.ipo_market_sentiment_engine import MarketSentimentSnapshot
+
+        self.center.available_cash = 500.0  # 仅剩 500 元现金
+        initial_cash = self.center.available_cash
+        initial_closed_count = len(self.center._closed_positions)
+
+        now_ts = pytime.time()
+        ctx = MarketSentimentSnapshot(
+            tide_state="T6_ICE_DIVERGENCE", tide_position_cap_pct=15.0,
+            risk_mode="NORMAL", position_multiplier=1.0,
+        ).finalize()
+        ctx.generated_at = now_ts
+        self.center._last_market_context = ctx
+
+        # 标的单价 10.0 元，100股需要 1000 元，现金 500 元不足 100 股
+        expensive_dir = IPOOrderDirective(
+            action="BUY", code="688555", name="现金不足标的",
+            price=10.0, shares=100, size_pct=1.0, timestamp=now_ts
+        )
+        self.assertFalse(self.center.record_order_execution(expensive_dir))
+        self.assertNotIn("688555", self.center._positions, "现金不足绝不得产生幽灵持仓！")
+        self.assertEqual(self.center.available_cash, initial_cash, "现金不足现金绝不得改变！")
+        self.assertEqual(len(self.center._closed_positions), initial_closed_count)
+
+    def test_30_legal_restricted_buy_executes_within_tide_cap(self):
+        """【回归测试】合法买入在潮汐剩余额度内正常按受限股数成交"""
+        import time as pytime
+        from ats.strategy.ipo_market_sentiment_engine import MarketSentimentSnapshot
+
+        # 初始持仓：已有 688001 占用 8.0% (800股 * 10元 = 8000元)
+        self.center._positions["688001"] = IPOTradingPosition(
+            code="688001", name="已有持仓", shares=800, cost_price=10.0,
+            current_price=10.0, entry_date="2026-09-19", status="HOLDING"
+        )
+        self.center.available_cash = 92000.0
+
+        now_ts = pytime.time()
+        # 潮汐上限 15%，扣除已有的 8% 后，剩余 7% (7000元 = 700股 @ 10元)
+        ctx = MarketSentimentSnapshot(
+            tide_state="T6_ICE_DIVERGENCE", tide_position_cap_pct=15.0,
+            risk_mode="NORMAL", position_multiplier=1.0,
+        ).finalize()
+        ctx.generated_at = now_ts
+        self.center._last_market_context = ctx
+
+        # 指令申请 10% (1000股 @ 10元 = 10000元)
+        legal_scout = IPOOrderDirective(
+            action="BUY_SCOUT", code="688666", name="受限试探",
+            price=10.0, shares=1000, size_pct=10.0, timestamp=now_ts
+        )
+        self.assertTrue(self.center.record_order_execution(legal_scout))
+        self.assertIn("688666", self.center._positions)
+        pos = self.center._positions["688666"]
+        # 执行端按剩余 7% 截断为 700 股
+        self.assertEqual(pos.shares, 700)
+        self.assertEqual(pos.shares * 10.0, 7000.0)
+        # 组合总市值: 8000 + 7000 = 15000 (恰好 15.0% 潮汐上限)
+        total_fleet_val = sum(p.shares * p.current_price for p in self.center._positions.values())
+        self.assertEqual(total_fleet_val, 15000.0)
+        self.assertEqual(self.center.available_cash, 85000.0)
+
+    def test_31_stale_or_t0_snapshot_rejects_position_expansion(self):
+        """【回归测试】陈旧快照、T0不足快照或未关联指令坚决拒绝扩大仓位"""
+        import time as pytime
+        from ats.strategy.ipo_market_sentiment_engine import MarketSentimentSnapshot
+
+        now_ts = pytime.time()
+        initial_cash = self.center.available_cash
+
+        # Case A: 陈旧快照 (>300s)
+        stale_snap = MarketSentimentSnapshot(
+            tide_state="T6_ICE_DIVERGENCE", tide_position_cap_pct=15.0,
+            risk_mode="NORMAL", position_multiplier=1.0,
+        ).finalize()
+        stale_snap.generated_at = now_ts - 600.0  # 10 分钟前
+        self.center._last_market_context = stale_snap
+
+        dir_stale = IPOOrderDirective(
+            action="BUY", code="688777", name="陈旧快照标的",
+            price=10.0, shares=500, size_pct=5.0, timestamp=now_ts
+        )
+        self.assertFalse(self.center.record_order_execution(dir_stale))
+        self.assertNotIn("688777", self.center._positions)
+        self.assertEqual(self.center.available_cash, initial_cash)
+
+        # Case B: T0_INSUFFICIENT 样本不足快照
+        t0_snap = MarketSentimentSnapshot(
+            tide_state="T0_INSUFFICIENT", tide_position_cap_pct=100.0,
+            risk_mode="NORMAL", position_multiplier=1.0,
+        ).finalize()
+        t0_snap.generated_at = now_ts
+        self.center._last_market_context = t0_snap
+
+        dir_t0 = IPOOrderDirective(
+            action="BUY_CONFIRM", code="688888", name="T0不足标的",
+            price=10.0, shares=500, size_pct=5.0, timestamp=now_ts
+        )
+        self.assertFalse(self.center.record_order_execution(dir_t0))
+        self.assertNotIn("688888", self.center._positions)
+        self.assertEqual(self.center.available_cash, initial_cash)
+
+        # Case C: 指令缺少时间戳 (未与新鲜快照紧密关联)
+        fresh_snap = MarketSentimentSnapshot(
+            tide_state="T6_ICE_DIVERGENCE", tide_position_cap_pct=15.0,
+            risk_mode="NORMAL", position_multiplier=1.0,
+        ).finalize()
+        fresh_snap.generated_at = now_ts
+        self.center._last_market_context = fresh_snap
+
+        dir_zero_ts = IPOOrderDirective(
+            action="BUY", code="688990", name="无关联时间戳",
+            price=10.0, shares=500, size_pct=5.0, timestamp=0.0
+        )
+        self.assertFalse(self.center.record_order_execution(dir_zero_ts))
+        self.assertNotIn("688990", self.center._positions)
+        self.assertEqual(self.center.available_cash, initial_cash)
+
+    def test_32_cross_day_snapshot_strictly_rejects_all_buy_actions(self):
+        """Execution gate rejects a previous-day snapshot for every ordinary BUY action."""
+        import time as pytime
+        from ats.strategy.ipo_market_sentiment_engine import MarketSentimentSnapshot
+
+        now_ts = pytime.time()
+        initial_cash = self.center.available_cash
+        initial_closed_count = len(self.center._closed_positions)
+        previous_day_snapshot = MarketSentimentSnapshot(
+            tide_state="T6_ICE_DIVERGENCE", tide_position_cap_pct=15.0,
+            risk_mode="NORMAL", position_multiplier=1.0,
+        ).finalize()
+        previous_day_snapshot.generated_at = now_ts - 86400.0
+        self.center._last_market_context = previous_day_snapshot
+
+        for index, action in enumerate(("BUY", "BUY_SCOUT", "BUY_CONFIRM"), start=1):
+            code = f"6889{index:02d}"
+            directive = IPOOrderDirective(
+                action=action, code=code, name="cross-day snapshot",
+                price=10.0, shares=500, size_pct=5.0, timestamp=now_ts,
+            )
+            self.assertFalse(self.center.record_order_execution(directive))
+            self.assertNotIn(code, self.center._positions)
+            self.assertEqual(self.center.available_cash, initial_cash)
+            self.assertEqual(len(self.center._closed_positions), initial_closed_count)
+
+    def test_33_missing_snapshot_strictly_rejects_without_state_change(self):
+        """【回归测试】无快照缺失时坚决拒绝扩大仓位，且绝不产生幽灵持仓、不扣现金、无平仓记录"""
+        initial_cash = self.center.available_cash
+        initial_closed_count = len(self.center._closed_positions)
+
+        # 确保无任何内存快照
+        self.center._last_market_context = None
+        if self.center.sentiment_engine is not None:
+            self.center.sentiment_engine._cached_snapshot = None
+
+        # 尝试执行 BUY, BUY_SCOUT, BUY_CONFIRM
+        for action in ("BUY", "BUY_SCOUT", "BUY_CONFIRM"):
+            dir_no_ctx = IPOOrderDirective(
+                action=action, code="688991", name="无快照渗透标的",
+                price=10.0, shares=500, size_pct=5.0, timestamp=time.time()
+            )
+            self.assertFalse(self.center.record_order_execution(dir_no_ctx))
+            self.assertNotIn("688991", self.center._positions)
+            self.assertEqual(self.center.available_cash, initial_cash)
+            self.assertEqual(len(self.center._closed_positions), initial_closed_count)
+
+    def test_33_same_stock_additional_buy_truncated_and_overflow_rejected(self):
+        """【回归测试】同标的追加买入：组合计算必须包含同代码现有持仓，受限截断且溢出坚决拒绝"""
+        import time as pytime
+        from ats.strategy.ipo_market_sentiment_engine import MarketSentimentSnapshot
+
+        now_ts = pytime.time()
+        ctx_t6 = MarketSentimentSnapshot(
+            tide_state="T6_ICE_DIVERGENCE", tide_position_cap_pct=15.0,
+            risk_mode="NORMAL", position_multiplier=1.0,
+        ).finalize()
+        ctx_t6.generated_at = now_ts
+        self.center._last_market_context = ctx_t6
+
+        # 初始持仓：已持有 688111 共 1000 股 @ 10.0元 (市值 10,000元，占总资金 100,000 的 10.0%)
+        self.center._positions["688111"] = IPOTradingPosition(
+            code="688111", name="同标的持仓", shares=1000, cost_price=10.0,
+            current_price=10.0, entry_date="2026-09-19", status="HOLDING"
+        )
+        self.center.available_cash = 90000.0
+
+        # 阶段 1: 同标的追加申请 10% (1000股)，潮汐上限 15%，扣除已有 10% 后剩余额度仅 5%
+        # 执行端应截断为 500 股 (5%)，使得持仓增至 1500 股 (15,000元，恰好 15.0%)
+        add_dir = IPOOrderDirective(
+            action="BUY", code="688111", name="同标的持仓",
+            price=10.0, shares=1000, size_pct=10.0, timestamp=now_ts
+        )
+        self.assertTrue(self.center.record_order_execution(add_dir))
+        pos = self.center._positions["688111"]
+        self.assertEqual(pos.shares, 1500)
+        self.assertEqual(pos.shares * 10.0, 15000.0)
+        self.assertEqual(self.center.available_cash, 85000.0)
+
+        # 阶段 2: 同标的已占满 15.0% 潮汐上限，再次追加买入无论多小均应被拒绝
+        overflow_dir = IPOOrderDirective(
+            action="BUY_CONFIRM", code="688111", name="同标的持仓",
+            price=10.0, shares=100, size_pct=1.0, timestamp=now_ts
+        )
+        self.assertFalse(self.center.record_order_execution(overflow_dir))
+        self.assertEqual(pos.shares, 1500)
+        self.assertEqual(self.center.available_cash, 85000.0)
+
+        # 阶段 3: 构造剩余额度不足 100 股场景（如持有 1450 股，剩余 500元 = 50 股 < 100 股）
+        pos.shares = 1450
+        tiny_overflow_dir = IPOOrderDirective(
+            action="BUY_SCOUT", code="688111", name="同标的持仓",
+            price=10.0, shares=100, size_pct=1.0, timestamp=now_ts
+        )
+        self.assertFalse(self.center.record_order_execution(tiny_overflow_dir))
+        self.assertEqual(pos.shares, 1450)
+        self.assertEqual(self.center.available_cash, 85000.0)
+
+    def test_34_legal_snapshot_normal_buy_compatibility(self):
+        """【回归测试】合法同日关联快照下普通买入兼容性：BUY/BUY_SCOUT/BUY_CONFIRM 均正常成交"""
+        import time as pytime
+        from ats.strategy.ipo_market_sentiment_engine import MarketSentimentSnapshot
+
+        now_ts = pytime.time()
+        ctx_normal = MarketSentimentSnapshot(
+            tide_state="T7_WARMING", tide_position_cap_pct=30.0,
+            risk_mode="NORMAL", position_multiplier=1.0,
+        ).finalize()
+        ctx_normal.generated_at = now_ts
+        self.center._last_market_context = ctx_normal
+
+        # 1. 测试 BUY_SCOUT 试探建仓
+        scout_dir = IPOOrderDirective(
+            action="BUY_SCOUT", code="688701", name="兼容试探",
+            price=10.0, shares=500, size_pct=5.0, timestamp=now_ts
+        )
+        self.assertTrue(self.center.record_order_execution(scout_dir))
+        self.assertIn("688701", self.center._positions)
+        self.assertEqual(self.center._positions["688701"].shares, 500)
+
+        # 2. 测试 BUY 普通买入
+        buy_dir = IPOOrderDirective(
+            action="BUY", code="688702", name="兼容普通",
+            price=20.0, shares=200, size_pct=4.0, timestamp=now_ts
+        )
+        self.assertTrue(self.center.record_order_execution(buy_dir))
+        self.assertIn("688702", self.center._positions)
+        self.assertEqual(self.center._positions["688702"].shares, 200)
+
+        # 3. 测试 BUY_CONFIRM 确认加仓
+        confirm_dir = IPOOrderDirective(
+            action="BUY_CONFIRM", code="688703", name="兼容确认",
+            price=15.0, shares=300, size_pct=4.5, timestamp=now_ts
+        )
+        self.assertTrue(self.center.record_order_execution(confirm_dir))
+        self.assertIn("688703", self.center._positions)
+        self.assertEqual(self.center._positions["688703"].shares, 300)
+
+        total_pos = sum(p.shares * p.current_price for p in self.center._positions.values())
+        self.assertEqual(total_pos, 500 * 10.0 + 200 * 20.0 + 300 * 15.0)
 
 
 if __name__ == "__main__":

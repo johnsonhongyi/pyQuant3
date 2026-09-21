@@ -1075,19 +1075,31 @@ class IPOTradingCenter:
                                     # 风控闸门：T4、BLOCK_NEW_BUYS 或受限上限为 0 时禁止生成换入决议
                                     continue
 
-                                leader_buy_budget = self.total_capital * (effective_swap_cap / 100.0)
+                                # 计算除被替换老标的以外的其他保留持仓市值与权重
+                                other_pos_val = sum(
+                                    p.shares * (p.current_price if p.current_price > 0 else p.cost_price)
+                                    for p_code, p in self._positions.items()
+                                    if p_code != code and p.shares > 0
+                                )
+                                other_weight = (other_pos_val / self.total_capital * 100.0) if self.total_capital > 0 else 0.0
+                                remaining_swap_cap = max(0.0, round(effective_swap_cap - other_weight, 4))
+                                if remaining_swap_cap <= 0.0:
+                                    # 保留持仓已达或超过最终上限，禁止生成换入决议
+                                    continue
+
+                                leader_buy_budget = self.total_capital * (remaining_swap_cap / 100.0)
                                 leader_buy_shares = int(leader_buy_budget / top_leader.price / 100.0) * 100 if top_leader.price > 0 else 0
                                 if leader_buy_shares < 100:
                                     continue
 
-                                reason_pct_str = "100%全仓" if effective_swap_cap >= 99.9 else f"{effective_swap_cap:.1f}%受限"
+                                reason_pct_str = "100%全仓" if remaining_swap_cap >= 99.9 else f"{remaining_swap_cap:.1f}%受限"
                                 directives.append(IPOOrderDirective(
                                     action="FULL_ROTATION_SWAP",
                                     code=top_leader.code,
                                     name=top_leader.name,
                                     price=top_leader.price,
                                     shares=leader_buy_shares,
-                                    size_pct=round(effective_swap_cap, 2),
+                                    size_pct=round(remaining_swap_cap, 2),
                                     urgency="CRITICAL",
                                     reason=f"🔄 全仓轮动换马: 坚决清仓[{pos.name}]，腾出{reason_pct_str}资金全速接力超级领头羊[{top_leader.name}({top_leader.horse_race_score:.0f}分)]！",
                                     horse_rank=top_leader.horse_race_rank,
@@ -1097,6 +1109,7 @@ class IPOTradingCenter:
                                     target_swap_code=code,
                                     target_swap_name=pos.name
                                 ))
+                                break
                             else:
                                 # 普通分仓换马模式
                                 directives.append(IPOOrderDirective(
@@ -1165,16 +1178,17 @@ class IPOTradingCenter:
                 single_leader_weight = min(single_leader_weight, tide_cap)
                 single_follower_weight = min(single_follower_weight, tide_cap)
 
-            current_total_shares_val = sum(p.shares * p.current_price for p in self._positions.values() if p.shares > 0)
+            current_total_shares_val = sum(p.shares * (p.current_price if p.current_price > 0 else p.cost_price) for p in self._positions.values() if p.shares > 0)
             current_fleet_weight = (current_total_shares_val / self.total_capital) * 100.0 if self.total_capital > 0 else 0.0
             for d in directives:
                 if d.action == "FULL_ROTATION_SWAP":
                     old_val = 0.0
                     if d.target_swap_code in self._positions:
                         old_p = self._positions[d.target_swap_code]
-                        old_val = old_p.shares * old_p.current_price
+                        old_val = old_p.shares * (old_p.current_price if old_p.current_price > 0 else old_p.cost_price)
                     old_wt = (old_val / self.total_capital * 100.0) if self.total_capital > 0 else 0.0
                     current_fleet_weight = max(0.0, current_fleet_weight - old_wt) + d.size_pct
+            current_fleet_weight = round(current_fleet_weight, 4)
 
             # 遍历赛马排名前列标的，只重仓 Top 1~2 领头羊与优质前锋
             for rank_idx, sig in enumerate(ranked_signals):
@@ -1301,7 +1315,7 @@ class IPOTradingCenter:
 
                     if not any(d.code == code and d.action in ("BUY", "BUY_SCOUT", "BUY_CONFIRM") for d in directives):
                         directives.append(directive)
-                        current_fleet_weight += assigned_weight
+                        current_fleet_weight = round(current_fleet_weight + assigned_weight, 4)
                         if plan_id:
                             self._emitted_plan_ids.add(plan_id)
                         if signal_id:
@@ -1382,7 +1396,7 @@ class IPOTradingCenter:
                                 strategy_tag=t_plan.strategy_tag if t_plan else "",
                                 trade_plan=t_plan
                             ))
-                            current_fleet_weight += assigned_weight
+                            current_fleet_weight = round(current_fleet_weight + assigned_weight, 4)
 
             self._pending_directives = directives
             self._broadcast_directives_to_alert_notifier(directives)
@@ -1642,32 +1656,162 @@ class IPOTradingCenter:
                     return False
 
             if directive.action in ("BUY", "BUY_SCOUT", "BUY_CONFIRM"):
-                if code not in self._positions:
-                    self._positions[code] = IPOTradingPosition(code=code, name=directive.name)
-                pos = self._positions[code]
-                cost_money = directive.price * directive.shares
+                if directive.price <= 0:
+                    logger.warning("[IPO-TRADING] Buy action rejected: non-positive price %s", directive.price)
+                    return False
+
+                # ── 普通买入执行端最终风控闸门校验 ──
+                # 1. 取得可信预算快照（无可信快照坚决拒绝扩大仓位）
+                ctx = self._last_market_context
+                if ctx is None and self.sentiment_engine is not None:
+                    ctx = getattr(self.sentiment_engine, "_cached_snapshot", None)
+
+                if ctx is None:
+                    logger.warning("[IPO-TRADING] Buy action rejected: missing market context snapshot")
+                    return False
+
+                directive_size_pct = float(getattr(directive, "size_pct", 0.0) or 0.0)
+                if directive_size_pct <= 0.0 and directive.shares > 0 and directive.price > 0 and self.total_capital > 0:
+                    directive_size_pct = (directive.shares * directive.price / self.total_capital) * 100.0
+
+                exec_ts = time.time()
+                ctx_gen_ts = float(getattr(ctx, "generated_at", 0.0) or 0.0)
+                ctx_tide_state = getattr(ctx, "tide_state", "T0_INSUFFICIENT")
+                ctx_risk_mode = getattr(ctx, "risk_mode", "NORMAL")
+                ctx_risk_mult = max(0.0, min(1.0, float(getattr(ctx, "position_multiplier", 1.0) or 0.0)))
+                if ctx_risk_mode == "BLOCK_NEW_BUYS":
+                    ctx_risk_mult = 0.0
+
+                # 铁律: T4_PANIC_ACCEL 或 BLOCK_NEW_BUYS 必须坚决拒绝普通买入，且不创建幽灵持仓、不扣减现金
+                if ctx_tide_state == "T4_PANIC_ACCEL" or ctx_risk_mode == "BLOCK_NEW_BUYS" or ctx_risk_mult <= 0.0:
+                    logger.warning(
+                        "[IPO-TRADING] Buy action rejected: T4/BLOCK_NEW_BUYS gate active (tide=%s, risk=%s, mult=%.2f)",
+                        ctx_tide_state, ctx_risk_mode, ctx_risk_mult
+                    )
+                    return False
+
+                is_fresh = True
+                if ctx_gen_ts <= 0 or exec_ts <= 0 or abs(exec_ts - ctx_gen_ts) > 300.0:
+                    is_fresh = False
+                try:
+                    if datetime.datetime.fromtimestamp(ctx_gen_ts).date() != datetime.datetime.fromtimestamp(exec_ts).date():
+                        is_fresh = False
+                except Exception:
+                    is_fresh = False
+
+                # 指令必须携带合法时间戳且与快照在同一有效时限内（<=300s）同日关联
+                dir_ts = float(getattr(directive, "timestamp", 0.0) or 0.0)
+                has_directive_link = False
+                if dir_ts > 0 and ctx_gen_ts > 0 and abs(dir_ts - ctx_gen_ts) <= 300.0:
+                    try:
+                        if datetime.datetime.fromtimestamp(dir_ts).date() == datetime.datetime.fromtimestamp(ctx_gen_ts).date():
+                            has_directive_link = True
+                    except Exception:
+                        has_directive_link = False
+
+                # 仅当快照新鲜、指令与快照紧密因果关联、且非T0数据不足时，才属于可信快照关联指令
+                if not (is_fresh and has_directive_link and ctx_tide_state != "T0_INSUFFICIENT"):
+                    logger.warning(
+                        "[IPO-TRADING] Buy action rejected: untrusted snapshot (fresh=%s, link=%s, tide=%s)",
+                        is_fresh, has_directive_link, ctx_tide_state
+                    )
+                    return False
+
+                tide_cap_val = float(getattr(ctx, "tide_position_cap_pct", 100.0) or 100.0)
+                tide_cap = max(0.0, min(100.0, tide_cap_val))
+                risk_cap = max(0.0, min(100.0, 100.0 * ctx_risk_mult))
+                trusted_cap = min(risk_cap, tide_cap)
+
+                # 最终组合计算必须包含当前全部持仓（包括同代码现有持仓，追加 BUY 也不能突破潮汐上限）
+                total_pos_val = sum(
+                    p.shares * (p.current_price if p.current_price > 0 else p.cost_price)
+                    for p in self._positions.values()
+                    if p.shares > 0
+                )
+                current_portfolio_weight = (total_pos_val / self.total_capital * 100.0) if self.total_capital > 0 else 0.0
+
+                remaining_cap = max(0.0, round(trusted_cap - current_portfolio_weight, 4))
+                allowed_pct = min(directive_size_pct, remaining_cap)
+
+                if allowed_pct <= 0.0:
+                    logger.warning(
+                        "[IPO-TRADING] Buy action rejected: allowed budget is 0.0%% (dir=%.1f%%, remaining=%.1f%%, current_holding=%.1f%%)",
+                        directive_size_pct, remaining_cap, current_portfolio_weight
+                    )
+                    return False
+
+                allowed_money = self.total_capital * (allowed_pct / 100.0)
+                calc_shares = int(allowed_money / directive.price / 100.0) * 100
+                target_shares = min(calc_shares, directive.shares) if directive.shares > 0 else calc_shares
+
+                if target_shares < 100:
+                    logger.warning(
+                        "[IPO-TRADING] Buy action rejected: target shares after budget limit %d < 100",
+                        target_shares
+                    )
+                    return False
+
+                # 现金硬约束与最小成交手数核验 (原子性守卫：不足 100 股坚决不成交)
+                max_cash_shares = int(self.available_cash / directive.price / 100.0) * 100
+                exec_shares = min(target_shares, max_cash_shares)
+
+                if exec_shares < 100:
+                    logger.warning(
+                        "[IPO-TRADING] Buy action rejected: executable shares %d < 100 (target=%d, max_cash_shares=%d, px=%.2f, cash=%.1f)",
+                        exec_shares, target_shares, max_cash_shares, directive.price, self.available_cash
+                    )
+                    return False
+
+                # ── 校验完全通过，执行状态变更 ──
+                cost_money = directive.price * exec_shares
                 self.available_cash = max(0.0, self.available_cash - cost_money)
-                new_shares = pos.shares + directive.shares
-                if new_shares > 0:
-                    pos.cost_price = (pos.cost_price * pos.shares + directive.price * directive.shares) / new_shares
+
+                if code not in self._positions:
+                    pos = IPOTradingPosition(
+                        code=code,
+                        name=directive.name,
+                        shares=exec_shares,
+                        available_shares=exec_shares,
+                        cost_price=directive.price,
+                        current_price=directive.price,
+                        highest_price=directive.price,
+                        lowest_price=directive.price,
+                        entry_time=t_str,
+                        entry_date=today_str,
+                        entry_reason=directive.reason,
+                        signal_tier=directive.signal_tier,
+                        signal_level=getattr(directive, "signal_level", "S4"),
+                        quality_grade=getattr(directive, "quality_grade", "S"),
+                        strategy_tag=getattr(directive, "strategy_tag", ""),
+                        status="HOLDING",
+                        last_action=directive.action,
+                        last_action_time=t_str,
+                    )
+                    self._positions[code] = pos
+                else:
+                    pos = self._positions[code]
+                    new_shares = pos.shares + exec_shares
+                    pos.cost_price = (pos.cost_price * pos.shares + directive.price * exec_shares) / new_shares
                     pos.shares = new_shares
                     pos.available_shares = pos.shares
-                pos.entry_time = t_str
-                pos.entry_date = today_str
-                pos.entry_reason = directive.reason
-                pos.signal_tier = directive.signal_tier
-                pos.signal_level = getattr(directive, "signal_level", "S4")
-                pos.quality_grade = getattr(directive, "quality_grade", "S")
-                pos.strategy_tag = getattr(directive, "strategy_tag", "")
+                    pos.entry_time = t_str
+                    pos.entry_date = today_str
+                    pos.entry_reason = directive.reason
+                    pos.signal_tier = directive.signal_tier
+                    pos.signal_level = getattr(directive, "signal_level", "S4")
+                    pos.quality_grade = getattr(directive, "quality_grade", "S")
+                    pos.strategy_tag = getattr(directive, "strategy_tag", "")
+                    pos.status = "HOLDING"
+                    pos.current_price = directive.price
+                    pos.highest_price = max(pos.highest_price, directive.price)
+                    pos.lowest_price = min(pos.lowest_price, directive.price) if pos.lowest_price > 0 else directive.price
+                    pos.last_action = directive.action
+                    pos.last_action_time = t_str
+
                 if directive.trade_plan is not None:
                     pos.trade_plan = directive.trade_plan
                     self.register_trade_plan(directive.trade_plan)
-                pos.status = "HOLDING"
-                pos.current_price = directive.price
-                pos.highest_price = directive.price
-                pos.lowest_price = directive.price
-                pos.last_action = directive.action
-                pos.last_action_time = t_str
+
                 watch = self.exit_engine.get_position(code)
                 if watch is None:
                     watch = self.exit_engine.register_position(
@@ -1679,10 +1823,18 @@ class IPOTradingCenter:
                 else:
                     watch.entry_price = pos.cost_price
                     watch.shares = pos.shares
+
                 if pos.trade_plan is not None:
                     watch.is_reversal_protected = True
                     watch.higher_low_stop = max(watch.higher_low_stop, pos.trade_plan.higher_low_stop)
-                logger.info(f"[IPO-TRADING] 买入成交: {pos.name}({code}) {directive.shares}股 @ {directive.price:.2f}元 (动作: {directive.action}) | 剩余可用: {self.available_cash:.0f}元")
+
+                directive.shares = exec_shares
+                directive.size_pct = round((exec_shares * directive.price / self.total_capital * 100.0), 2) if self.total_capital > 0 else allowed_pct
+
+                logger.info(
+                    f"[IPO-TRADING] 买入成交: {pos.name}({code}) {exec_shares}股 @ {directive.price:.2f}元 "
+                    f"(动作: {directive.action}, 仓位: {directive.size_pct:.1f}%) | 剩余可用: {self.available_cash:.0f}元"
+                )
 
             elif directive.action == "FULL_ROTATION_SWAP":
                 # ── 全仓轮动模式：执行端双重风控校验 ──
@@ -1747,31 +1899,46 @@ class IPOTradingCenter:
                             trusted_cap = max(0.0, min(100.0, tide_cap_val))
                         trusted_cap *= ctx_risk_mult
 
+                # 计算除被平老仓以外的其他保留持仓市值与权重
+                other_pos_val = sum(
+                    p.shares * (p.current_price if p.current_price > 0 else p.cost_price)
+                    for p_code, p in self._positions.items()
+                    if p_code != old_code and p.shares > 0
+                )
+                other_weight = (other_pos_val / self.total_capital * 100.0) if self.total_capital > 0 else 0.0
+
                 if is_trusted_snapshot:
-                    allowed_pct = min(directive_size_pct, trusted_cap)
+                    remaining_cap = max(0.0, round(trusted_cap - other_weight, 4))
+                    allowed_pct = min(directive_size_pct, remaining_cap)
                 else:
                     # 快照缺失、陈旧、跨日或T0不足：执行端防穿透降级，拒绝扩大仓位
                     allowed_pct = min(directive_size_pct, old_weight)
 
                 if allowed_pct <= 0.0 or directive.price <= 0:
                     logger.warning(
-                        "[IPO-TRADING] FULL_ROTATION_SWAP rejected: allowed budget is 0.0%% (dir=%.1f%%, old=%.1f%%)",
-                        directive_size_pct, old_weight
+                        "[IPO-TRADING] FULL_ROTATION_SWAP rejected: allowed budget is 0.0%% (dir=%.1f%%, old=%.1f%%, other=%.1f%%)",
+                        directive_size_pct, old_weight, other_weight
                     )
                     return False
 
-                # 3. 计算受限买入预算与股数
+                # 3. 计算受限买入预算与目标股数
                 allowed_money = self.total_capital * (allowed_pct / 100.0)
                 calc_shares = int(allowed_money / directive.price / 100.0) * 100
                 target_shares = min(calc_shares, directive.shares) if directive.shares > 0 else calc_shares
-                if target_shares < 100:
+
+                # 4. 原子性守卫：在变动旧持仓、现金、closed_positions或日志前，必须先验证目标买入预算与预期可用现金均可成交至少 100 股
+                anticipated_cash = self.available_cash + (old_val if (old_pos is not None and old_pos.shares > 0) else 0.0)
+                max_cash_shares = int(anticipated_cash / directive.price / 100.0) * 100
+                new_shares = min(target_shares, max_cash_shares)
+
+                if new_shares < 100:
                     logger.warning(
-                        "[IPO-TRADING] FULL_ROTATION_SWAP rejected: allowed shares %d < 100 (budget=%.1f, px=%.2f)",
-                        target_shares, allowed_money, directive.price
+                        "[IPO-TRADING] FULL_ROTATION_SWAP rejected: executable shares %d < 100 (budget_shares=%d, cash_shares=%d, px=%.2f)",
+                        new_shares, target_shares, max_cash_shares, directive.price
                     )
                     return False
 
-                # 4. 校验通过，执行原子换马第 1 步：平仓老股票回笼资金
+                # 5. 校验完全通过，执行原子换马第 1 步：平仓老股票回笼资金
                 if old_pos is not None and old_pos.shares > 0:
                     sell_px = old_pos.current_price if old_pos.current_price > 0 else old_pos.cost_price
                     sell_val = sell_px * old_pos.shares
@@ -1786,18 +1953,15 @@ class IPOTradingCenter:
                     old_pos.exit_reason = f"全仓轮动换马接力新龙头 [{directive.name}({code})]"
                     old_pos.status = "CLOSED"
                     self._closed_positions.insert(0, copy.deepcopy(old_pos))
+                    if len(self._closed_positions) > 200:
+                        self._closed_positions = self._closed_positions[:200]
                     old_pos.shares = 0
                     old_pos.available_shares = 0
                     del self._positions[old_code]
+                    self.exit_engine.unregister_position(old_code)
                     logger.info(f"[IPO-TRADING] 全仓轮动平出老标的: {old_pos.name}({old_code}) 回笼资金: {sell_val:.0f}元 | 盈亏: {pnl_pct:+.2f}%")
 
-                # 5. 执行原子换马第 2 步：按受限预算买入新龙头（绝不直接使用全部 available_cash）
-                max_cash_shares = int(self.available_cash / directive.price / 100.0) * 100
-                new_shares = min(target_shares, max_cash_shares)
-                if new_shares < 100:
-                    logger.warning("[IPO-TRADING] FULL_ROTATION_SWAP buy failed: available cash insufficient for 100 shares")
-                    return False
-
+                # 6. 执行原子换马第 2 步：按受限预算买入新龙头（绝不直接使用全部 available_cash）
                 cost_money = directive.price * new_shares
                 self.available_cash = max(0.0, self.available_cash - cost_money)
 
@@ -1890,8 +2054,8 @@ class IPOTradingCenter:
                 "horse_rank": directive.horse_rank,
                 "sentiment_phase": directive.sentiment_phase,
                 "signal_tier": directive.signal_tier,
-                "realized_pnl_pct": pnl_pct if directive.action != "BUY" else 0.0,
-                "realized_pnl_amount": round(pnl_amt, 2) if directive.action != "BUY" else 0.0
+                "realized_pnl_pct": pnl_pct if directive.action not in ("BUY", "BUY_SCOUT", "BUY_CONFIRM") else 0.0,
+                "realized_pnl_amount": round(pnl_amt, 2) if directive.action not in ("BUY", "BUY_SCOUT", "BUY_CONFIRM") else 0.0
             }
             self._signal_iteration_log.insert(0, log_item)
             if len(self._signal_iteration_log) > 300:
