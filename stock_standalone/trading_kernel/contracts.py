@@ -15,6 +15,13 @@ from trading_kernel.core.signal import StrategySignal
 
 
 KERNEL_API_VERSION = "1.0"
+DECISION_ACTIONS = ("BUY", "ADD", "REDUCE", "SELL", "HOLD", "BLOCK")
+TRADE_STATES = ("FLAT", "ARMED", "IN_TRADE", "EXITING", "COOLDOWN")
+TRADING_MODES = ("OBSERVE", "PAPER", "CONFIRM", "LIVE_AUTO")
+REJECT_CODES = (
+    "INCOMPATIBLE_API_VERSION",
+    "IDEMPOTENCY_CONFLICT",
+)
 
 
 @dataclass(frozen=True)
@@ -62,6 +69,7 @@ class DecisionResponse:
     order_id: str
     reject_code: str = ""
     state: str = "FLAT"
+    request_id: str = ""
     api_version: str = KERNEL_API_VERSION
 
 

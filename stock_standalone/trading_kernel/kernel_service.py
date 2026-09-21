@@ -222,10 +222,29 @@ class TradingKernelService:
             if self.state_manager.get(code) != target:
                 self.state_manager.set(code, target)
         after = self.state_manager.snapshot()
+        changed_codes = sorted(
+            code for code in set(before) | set(after)
+            if before.get(code, "FLAT") != after.get(code, "FLAT")
+        )
+        differences = [
+            {
+                "code": code,
+                "before": before.get(code, "FLAT"),
+                "after": after.get(code, "FLAT"),
+                "has_position": code in held,
+                "classification": "AUTO_FIXED_POSITION_STATE",
+            }
+            for code in changed_codes
+        ]
         return {
-            "status": "ALIGNED",
+            "status": "ALIGNED" if not changed_codes else "ALIGNED_WITH_CHANGES",
+            "mode": str(self._mode),
+            "generated_at": datetime.now().isoformat(timespec="seconds"),
             "position_count": len(held),
-            "changed_codes": sorted(code for code in set(before) | set(after) if before.get(code, "FLAT") != after.get(code, "FLAT")),
+            "state_count": len(after),
+            "changed_count": len(changed_codes),
+            "changed_codes": changed_codes,
+            "differences": differences,
             "states": after,
         }
 
@@ -1006,6 +1025,7 @@ class TradingKernelService:
         if write_journal:
             self.journal.append(
                 {
+                    "request_id": str(item_dict.get("request_id", "") or ""),
                     "trace": trace,
                     "signal": signal,
                     "intent": intent,

@@ -12,6 +12,7 @@ class ApprovedOrder:
     size_pct: float
     price: float
     stop_price: float | None
+    request_id: str = ""
 
 
 @dataclass(frozen=True)
