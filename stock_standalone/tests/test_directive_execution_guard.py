@@ -54,3 +54,19 @@ def test_guard_allows_exit_without_live_snapshot():
     )
     assert result.allowed is True
     assert result.live_price == 99.0
+
+
+
+def test_guard_rejects_expired_clock_time():
+    now = time.time()
+    expired = time.strftime("%H:%M:%S", time.localtime(now - 60))
+    result = validate_directive(_directive(expire_at=expired), _report(), now_ts=now)
+    assert result.allowed is False
+    assert result.code == "DIRECTIVE_EXPIRED"
+
+
+def test_guard_rejects_stale_live_snapshot():
+    stale = time.strftime("%H:%M:%S", time.localtime(time.time() - 181))
+    result = validate_directive(_directive(), _report(update_time=stale))
+    assert result.allowed is False
+    assert result.code == "STALE_LIVE_SNAPSHOT"

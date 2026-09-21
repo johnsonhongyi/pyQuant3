@@ -1747,8 +1747,10 @@ class IPOCommandRoomDialog(QDialog):
         convergence = self.trading_center.get_signal_convergence_summary()
         actionable_count = int(convergence.get("actionable_count", len(directives)) or 0)
         suppressed_count = int(convergence.get("suppressed_count", 0) or 0)
+        window_suppressed = int(convergence.get("time_window_suppressed_count", 0) or 0)
+        quality_stats = self.trading_center.get_directive_quality_stats()
         self.btn_orders_pending.setText(
-            f"⏳ 直接买卖点 ({actionable_count}) | 已过滤 {suppressed_count}"
+            f"⏳ 直接买卖点 ({actionable_count}) | 已过滤 {suppressed_count + window_suppressed}"
         )
         self.btn_orders_pending.setToolTip(
             "阶段三信号收敛结果：同代码同方向仅保留最高优先级决议；"
@@ -1757,7 +1759,8 @@ class IPOCommandRoomDialog(QDialog):
             f"开仓: {convergence.get('entry_count', 0)} | "
             f"退出: {convergence.get('exit_count', 0)} | "
             f"轮动: {convergence.get('rotation_count', 0)} | "
-            f"过滤: {suppressed_count}"
+            f"收敛过滤: {suppressed_count} | 时间窗去重: {window_suppressed}\n"
+            f"今日分动作统计: {quality_stats.get('actions', {})}"
         )
         self.btn_orders_history.setText(f"📋 历史日志 ({len(filtered_logs)}/{len(self._current_signal_logs_list)})")
 

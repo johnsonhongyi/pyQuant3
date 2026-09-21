@@ -2365,6 +2365,9 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
         menu.addSeparator()
         action_delete = menu.addAction(f"❌ 清理选中记录 ({len(selected_rows)}条)")
         action_delete.triggered.connect(lambda: self._delete_selected_rows(selected_rows))
+
+        action_archive_clear = menu.addAction("📦 归档并清空物理流水日志 (彻底重置)")
+        action_archive_clear.triggered.connect(self._archive_and_clear_journal_logs)
             
         menu.exec(self.table.viewport().mapToGlobal(pos))
         
@@ -2395,18 +2398,47 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
         self._load_initial_records()
         toast_message(self.parent_app, "决策流水已强制重载")
 
+    def _archive_and_clear_journal_logs(self):
+        """物理原子归档并清理旧的流水日志文件 (仅保留今日记录或清空)"""
+        if not os.path.exists(self.journal_path):
+            toast_message(self.parent_app, "暂无物理流水日志文件")
+            return
+
+        reply = QtWidgets.QMessageBox.question(
+            self,
+            "归档与清理流水",
+            "是否物理归档当前流水日志？\n\n【是】：将旧流水备份归档为 .bak 并清空原文件\n【否】：仅取消操作",
+            QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No
+        )
+        if reply != QtWidgets.QMessageBox.StandardButton.Yes:
+            return
+
+        try:
+            bak_path = f"{self.journal_path}.{datetime.now().strftime('%Y%m%d_%H%M%S')}.bak"
+            import shutil
+            shutil.copy2(self.journal_path, bak_path)
+            # 物理清空原文件
+            with open(self.journal_path, "w", encoding="utf-8") as f:
+                pass
+            self._last_file_size = 0
+            self._last_modified_time = 0.0
+            self._clear_view()
+            toast_message(self.parent_app, "流水日志已原子备份归档并物理清空")
+            logger.info(f"Journal logs archived to {bak_path} and cleared successfully.")
+        except Exception as ex:
+            logger.error(f"Failed to archive journal logs: {ex}")
+            QtWidgets.QMessageBox.critical(self, "错误", f"归档物理日志失败: {ex}")
+
     def _clear_view(self):
-        """清空当前表格显示 (不删除物理文件)"""
+        """清空当前表格显示 (不删除物理文件，但重置指针以支持后续增量感知)"""
         self.table.blockSignals(True)
         try:
-            # 显式在 Python 持有 GIL 的控制范围内，逐行清空 UserRole 绑定的字典数据，
-            # 避免在 setRowCount(0) 批量销毁时底层 C++ 析构导致多线程 GC 冲突。
             for row in range(self.table.rowCount()):
                 item = self.table.item(row, 0)
                 if item:
                     item.setData(QtCore.Qt.ItemDataRole.UserRole, None)
             self.table.setRowCount(0)
-            self.status_label.setText("显示已清空。等待新增决策流水信号...")
+            self.status_label.setText("显示已清空。等待新增决策流水信号... (可点击【🔄 手工刷新】重新载入)")
         finally:
             self.table.blockSignals(False)
         toast_message(self.parent_app, "表格显示已清空")
@@ -3157,6 +3189,7 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
                     trade_gw.submit_sell(code, price, reason="内核面板上手工平仓")
 
                     # 3. 构造虚拟 SELL 信号，物理写入交易流水，并同步让新交易内核 paper_adapter 执行平仓！
+                    req_id = f"MANUAL_SELL_{code}_{int(time.time()*1000)}"
                     sig_sell = {
                         "code": code,
                         "name": name,
@@ -3166,6 +3199,7 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
                         "current_price": price,
                         "suggest_price": price,
                         "reason": "内核面板上手工平仓",
+                        "request_id": req_id,
                         "journal_ts": datetime.now().isoformat(),
                         "created_at": datetime.now().isoformat(),
                     }
@@ -3175,15 +3209,21 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
                     except Exception as e_journal:
                         logger.warning(f"Error enriching sell journal: {e_journal}")
 
-                    # 4. 强制物理保存 paper_adapter 最新空状态
+                    # 4. 彻底自愈：若 paper_adapter 中仍有残留未出清持仓，执行原子出清与退款保障
                     try:
                         from trading_kernel.kernel_service import get_kernel_service
                         service = get_kernel_service()
-                        if service and service.paper_adapter:
+                        if service and service.paper_adapter and service.paper_adapter.account:
+                            if code in service.paper_adapter.account.positions:
+                                pos_rem = service.paper_adapter.account.positions.pop(code, None)
+                                if pos_rem is not None:
+                                    service.paper_adapter.account.cash += float(pos_rem.volume) * price
+                            if hasattr(service.state_manager, "set"):
+                                service.state_manager.set(code, "FLAT")
                             if hasattr(service.paper_adapter, "_save_state"):
                                 service.paper_adapter._save_state()
-                    except Exception:
-                        pass
+                    except Exception as e_clean:
+                        logger.warning(f"Error cleaning paper position residual: {e_clean}")
 
                     # 5. 回到 UI 线程刷新
                     def _on_sell_finished_ui():

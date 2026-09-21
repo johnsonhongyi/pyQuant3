@@ -134,10 +134,17 @@
 6. 在交易指挥室只突出最高优先级候选，其他信号进入可折叠历史区。
 7. 对 `BUY`、`ADD`、`REDUCE`、`SELL` 分别建立统计，不混合计算命中率。
 
-当前实施进度（2026-09-21）：
-- 已完成指令收敛、同代码冲突消解，以及 UI/PAPER 自动执行统一消费 `get_pending_directives()` 的单一收敛视图。
-- 已完成任务 3：直接买卖点显式展示触发价、仓位、止损/结构失效价、目标 1/2、失效时间和决议依据；`IPOOrderDirective` 会从不可变 `IPOTradePlan` 自动补齐执行字段。
-- 下一步：任务 4，执行前重新获取实时快照并进行价格/指标新鲜度校验，过期指令不得进入 PAPER 执行。
+当前实施进度（2026-09-21）：阶段三已完成。
+- 任务 1 已完成：`IPOOrderDirective.signal_state` 统一为 OBSERVE / CANDIDATE / ACTIONABLE / EXIT / BLOCKED。
+- 任务 2 已完成：同代码同方向先做收敛，再执行 120 秒时间窗去重；仓位、止损、失效时间变化会形成新指令，不会被误吞。
+- 任务 3 已完成：直接买卖点显式展示触发价、仓位、止损/结构失效价、目标 1/2、失效时间和决议依据。
+- 任务 4 已完成：进入 TK PAPER/LIVE 适配器前重新读取最新个股快照，校验指令年龄、快照新鲜度、价格漂移和结构失效；不合格指令不得进入执行内核。
+- 任务 5 已完成：拒绝原因结构化为 `reject_code / reject_reason / execution_status`，并写入历史流水。
+- 任务 6 已完成：交易指挥室只消费 `get_pending_directives()` 的最高优先级收敛视图；被过滤信号记录到历史流水。
+- 任务 7 已完成：BUY / ADD / REDUCE / SELL 分别统计执行、拒绝和过滤次数，并提供 `get_buy_sell_quality_daily_report()` 日报接口。
+- PAPER 与未来 LIVE 共用同一执行前门禁；当前未自动开启 LIVE。
+- 明日实盘准备新增只读 `KernelGateway.get_live_readiness()`，可在不切模式、不自愈持仓、不下单的前提下检查柜台、KillSwitch、账户快照、持仓一致性和内核版本。
+- LIVE 安全硬门禁已补强：默认 `BrokerExecutionAdapter` 基类仅允许接口/内存仿真，禁止升格 `LIVE_AUTO`，必须注册真实物理券商适配器后才能通过；当前仓库尚未发现 QMT/MiniQMT/XTQuant 实盘适配器，因此真钱实盘仍处于 BLOCKED 状态。
 
 ### 产出物
 
