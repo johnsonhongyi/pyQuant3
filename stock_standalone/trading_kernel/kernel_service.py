@@ -1018,6 +1018,65 @@ class TradingKernelService:
         self._mode = target
         return True
 
+    def preview_live_readiness(self) -> dict[str, Any]:
+        """Read-only LIVE readiness preview. Never switches mode or heals state."""
+        from trading_kernel.execution.broker_adapter import BrokerExecutionAdapter
+        reasons: list[str] = []
+        details: dict[str, Any] = {
+            "current_mode": self._mode,
+            "broker_adapter_class": type(self.broker_adapter).__name__,
+            "broker_connected": bool(getattr(self.broker_adapter, "_connected", False)),
+            "kill_switch_active": bool(self.kill_switch.is_killed()),
+            "kernel_version": self.KERNEL_VERSION,
+        }
+
+        if not details["broker_connected"]:
+            reasons.append("BROKER_DISCONNECTED")
+        if type(self.broker_adapter) is BrokerExecutionAdapter:
+            reasons.append("PHYSICAL_BROKER_ADAPTER_REQUIRED")
+        if details["kill_switch_active"]:
+            reasons.append("KILL_SWITCH_ACTIVE")
+        if not self.KERNEL_VERSION.startswith("2026.05.23"):
+            reasons.append("KERNEL_VERSION_MISMATCH")
+
+        try:
+            snap = dict(self.broker_adapter.get_account_snapshot())
+            details["broker_account_snapshot_available"] = True
+            details["broker_total_asset"] = float(snap.get("total_asset", 0.0) or 0.0)
+        except Exception as exc:
+            details["broker_account_snapshot_available"] = False
+            details["broker_snapshot_error"] = str(exc)
+            reasons.append("ACCOUNT_SNAPSHOT_UNAVAILABLE")
+
+        try:
+            local_pos = dict(self.paper_adapter.get_positions())
+            broker_pos = dict(self.broker_adapter.get_positions())
+            local_codes = {str(code) for code in local_pos}
+            broker_codes = {str(code) for code in broker_pos}
+            details["position_codes_aligned"] = local_codes == broker_codes
+            details["local_position_codes"] = sorted(local_codes)
+            details["broker_position_codes"] = sorted(broker_codes)
+            if local_codes != broker_codes:
+                reasons.append("ACCOUNT_OUT_OF_SYNC")
+        except Exception as exc:
+            details["position_codes_aligned"] = False
+            details["position_check_error"] = str(exc)
+            reasons.append("POSITION_SYNC_EXCEPTION")
+
+        try:
+            import sys_utils
+            details["trading_session_active"] = bool(
+                sys_utils.is_active_trading_hours(bypass=False)
+            )
+        except Exception:
+            details["trading_session_active"] = False
+
+        return {
+            "ready": not reasons,
+            "reasons": list(dict.fromkeys(reasons)),
+            "details": details,
+        }
+
     def evaluate_decision_item(self, item: Mapping[str, Any], write_journal: bool = True, limits_override: RiskLimits | None = None) -> dict[str, Any]:
         self._persist_reconciliation_snapshot(reason="PERIODIC")
         # 处于回测模拟模式下，直接短路返回，无需响应策略交易流以避免资源浪费
@@ -1380,6 +1439,12 @@ class TradingKernelService:
         # 2. 柜台连接卡口
         if not self.broker_adapter._connected:
             reasons.append("BROKER_DISCONNECTED")
+
+        # 2B. 真实物理券商适配器卡口：基类仅用于接口/内存仿真，
+        # 绝不允许被误认为真实 QMT/MiniQMT/券商柜台。
+        from trading_kernel.execution.broker_adapter import BrokerExecutionAdapter
+        if type(self.broker_adapter) is BrokerExecutionAdapter:
+            reasons.append("PHYSICAL_BROKER_ADAPTER_REQUIRED")
 
         # 3. 物理紧急切断开关 (KillSwitch Off)
         if self.kill_switch.is_killed():

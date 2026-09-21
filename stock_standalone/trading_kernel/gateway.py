@@ -147,6 +147,10 @@ class KernelGateway:
     def get_mode(self) -> str:
         return str(self._service.mode)
 
+    def get_live_readiness(self) -> dict[str, Any]:
+        """Read-only LIVE readiness preview; never changes execution mode."""
+        return dict(self._service.preview_live_readiness())
+
     def get_positions(self) -> dict[str, Any]:
         return self._service.get_execution_adapter().get_positions()
 

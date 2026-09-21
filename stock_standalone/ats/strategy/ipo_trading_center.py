@@ -584,6 +584,29 @@ class IPOTradingCenter:
                     break
         return {"date": today, "actions": stats}
 
+    def get_buy_sell_quality_daily_report(self) -> Dict[str, Any]:
+        """Phase-3 daily execution-quality report with separated action stats."""
+        from collections import Counter
+
+        quality = self.get_directive_quality_stats()
+        today = quality["date"]
+        reject_codes = Counter()
+        with self._lock:
+            for item in self._signal_iteration_log:
+                if not str(item.get("time_str", "")).startswith(today):
+                    continue
+                code = str(item.get("reject_code", "") or "")
+                if code:
+                    reject_codes[code] += 1
+            convergence = dict(self._signal_convergence_summary)
+        return {
+            "date": today,
+            "action_stats": quality["actions"],
+            "top_reject_reasons": dict(reject_codes.most_common(10)),
+            "convergence": convergence,
+            "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+
     def clear_signal_iteration_logs(self, keep_today: bool = False) -> int:
         """
         清理信号决策与迭代历史日志
@@ -2629,4 +2652,5 @@ class IPOTradingCenter:
                 "signal_iteration_log": list(self._signal_iteration_log),
                 "paper_reconciliation": dict(getattr(self, "_paper_reconciliation", {})),
                 "directive_quality_daily": self.get_directive_quality_stats(),
+                "buy_sell_point_daily_report": self.get_buy_sell_quality_daily_report(),
             }

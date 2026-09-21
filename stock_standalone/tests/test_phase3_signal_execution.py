@@ -72,3 +72,26 @@ def test_structured_reject_marks_directive_and_history(monkeypatch):
     assert item["execution_status"] == "REJECTED"
     assert item["reject_code"] == "TEST_BLOCK"
     assert item["reject_reason"] == "测试拒绝"
+
+
+
+def test_daily_quality_report_contains_reject_reasons():
+    center = IPOTradingCenter()
+    today = time.strftime("%Y-%m-%d")
+    center._signal_iteration_log = [
+        {
+            "time_str": f"{today} 10:00:00",
+            "action": "BUY",
+            "execution_status": "REJECTED",
+            "reject_code": "PRICE_DRIFT_EXCEEDED",
+        },
+        {
+            "time_str": f"{today} 10:01:00",
+            "action": "BUY",
+            "execution_status": "REJECTED",
+            "reject_code": "PRICE_DRIFT_EXCEEDED",
+        },
+    ]
+    report = center.get_buy_sell_quality_daily_report()
+    assert report["action_stats"]["BUY"]["rejected"] == 2
+    assert report["top_reject_reasons"]["PRICE_DRIFT_EXCEEDED"] == 2
