@@ -6,6 +6,7 @@
 - 聚合展示：战术角色分工、山外有山比对结果、集中仲裁深度决议、10d VWAP 动能偏离与买错立斩纪律
 """
 
+import time
 import logging
 from typing import Optional, Dict, Any
 
@@ -21,6 +22,75 @@ from ats.strategy.ipo_vwap_detector_engine import VWAPDetectorSignal
 from ats.ui.styles import load_config_node, save_config_node
 
 logger = logging.getLogger("IPOArbitrationDetailDialog")
+
+
+def format_time_to_minute(ts: Any, time_str: Optional[str] = None) -> str:
+    """将时间戳或时间字符串格式化为便于查看的易读格式 (精确显示到分钟 YYYY-MM-DD HH:MM)"""
+    if ts is not None and str(ts) not in ("", "--", "None"):
+        try:
+            num = float(ts)
+            if num > 100000000:  # 合法秒级时间戳
+                return time.strftime("%Y-%m-%d %H:%M", time.localtime(num))
+        except (ValueError, TypeError, OverflowError):
+            pass
+        s_ts = str(ts).strip()
+        if len(s_ts) >= 16 and (s_ts[4] in ("-", "/") or s_ts[2] in ("-", "/")):
+            return s_ts[:16]
+
+    if time_str and str(time_str) not in ("", "--", "None"):
+        s_t = str(time_str).strip()
+        if len(s_t) >= 16:
+            return s_t[:16]
+        elif len(s_t) >= 5 and ":" in s_t:
+            today_prefix = time.strftime("%Y-%m-%d")
+            return f"{today_prefix} {s_t[:5]}"
+        return s_t
+
+    return "--"
+
+def resolve_current_price(code: str) -> float:
+    """多级降级安全获取标的现价"""
+    clean_code = "".join(c for c in str(code) if c.isdigit()).zfill(6)
+    if not clean_code:
+        return 0.0
+    try:
+        from ats.strategy.ipo_trading_center import IPOTradingCenter
+        tc = IPOTradingCenter.get_instance()
+        if tc:
+            if clean_code in tc._reports_cache:
+                sig = tc._reports_cache[clean_code]
+                if getattr(sig, "price", 0.0) > 0:
+                    return float(sig.price)
+            for r_sig in tc._ranked_cache:
+                if r_sig.code == clean_code and getattr(r_sig, "price", 0.0) > 0:
+                    return float(r_sig.price)
+            pos = tc._positions.get(clean_code)
+            if pos and getattr(pos, "current_price", 0.0) > 0:
+                return float(pos.current_price)
+    except Exception:
+        pass
+
+    try:
+        from PyQt6.QtWidgets import QApplication
+        app = QApplication.instance()
+        if app:
+            for widget in app.topLevelWidgets():
+                if hasattr(widget, "current_df") and widget.current_df is not None and not widget.current_df.empty:
+                    df = widget.current_df
+                    row = None
+                    if hasattr(widget, "get_df_row_safe"):
+                        row = widget.get_df_row_safe(df, clean_code)
+                    elif clean_code in df.index:
+                        row = df.loc[clean_code]
+                    if row is not None:
+                        for col in ("close", "price", "current_price", "现价", "收盘价"):
+                            if col in row and float(row[col] or 0.0) > 0:
+                                return float(row[col])
+    except Exception:
+        pass
+
+    return 0.0
+
 
 # 角色中文映射
 ROLE_CN_MAP = {
@@ -290,7 +360,8 @@ class IPOArbitrationDetailDialog(QDialog):
             exit_reason = closed_pos.get("exit_reason", "平仓清仓")
             entry_reason = closed_pos.get("entry_reason", "策略买入信号")
             exit_date = closed_pos.get("exit_date", "--")
-            exit_time = closed_pos.get("exit_time", "--")
+            exit_time_raw = str(closed_pos.get("exit_time", "--") or "--")
+            exit_time = exit_time_raw[:5] if len(exit_time_raw) >= 5 and ":" in exit_time_raw else exit_time_raw
             tier = closed_pos.get("signal_tier", "S")
 
             self.lbl_code_name.setText(f"代码: {clean_code} | 名称: {name} (📜 历史平仓战绩)")
@@ -301,7 +372,7 @@ class IPOArbitrationDetailDialog(QDialog):
                 f"background-color: #1c1a24; border: 1px solid {pnl_color}; "
                 f"border-radius: 4px; padding: 3px 8px; color: {pnl_color}; font-weight: bold;"
             )
-            self.lbl_race_info.setText(f"平仓日期: {exit_date} {exit_time} | 信号级别: {tier}")
+            self.lbl_race_info.setText(f"平仓时间: {exit_date} {exit_time} | 信号级别: {tier}")
             self.lbl_action_badge.setText(f"📜 平仓纪律执行: {exit_reason}")
 
             html_content = f"""
@@ -336,23 +407,55 @@ class IPOArbitrationDetailDialog(QDialog):
             self.current_name = name
             action = log_item.get("action", "--")
             price = float(log_item.get("price", 0.0) or 0.0)
+            if price <= 0.0:
+                price = resolve_current_price(clean_code)
+
             size_pct = float(log_item.get("size_pct", 0.0) or 0.0)
             tier = log_item.get("signal_tier", "WATCH")
             reason = log_item.get("reason", "--")
-            ts = log_item.get("timestamp", "--")
+            ts = format_time_to_minute(log_item.get("timestamp"), log_item.get("time_str"))
             swap_code = log_item.get("target_swap_code", "")
             swap_name = log_item.get("target_swap_name", "")
 
+            is_inject = (action == "SIGNAL_INJECT")
+
+            # 价格友好显示 (杜绝冷冰冰的 ¥0.00)
+            if price > 0:
+                price_top = f"现价: ¥{price:.2f}"
+                price_html = f"¥{price:.2f}"
+                price_grid = f"¥{price:.2f}"
+            else:
+                price_top = "信号价: --"
+                price_html = '<span style="color: #8f93a8;">市价跟踪 (待买点确认)</span>'
+                price_grid = "市价跟踪"
+
+            # 仓位建议友好显示 (外部入池信号不预设满仓，仅观察待命)
+            if is_inject:
+                size_top = "状态: 雷达锁定"
+                size_html = '<span style="color: #00e5ff;">雷达锁定·入池监控 (待次新买点确认)</span>'
+                size_grid = "待触发买点"
+                badge_text = f"📋 信号快照: [{tier}] 外部信号入池·雷达锁定"
+            elif size_pct > 0:
+                size_top = f"仓位建议: {size_pct:.0f}%"
+                size_html = f'<span style="color: #00ff88; font-weight: bold;">{size_pct:.0f}%</span>'
+                size_grid = f"{size_pct:.0f}%"
+                badge_text = f"📋 信号快照: [{tier}] {action} {size_pct:.0f}% 仓位"
+            else:
+                size_top = "仓位建议: 待定"
+                size_html = '<span style="color: #8f93a8;">待定</span>'
+                size_grid = "--"
+                badge_text = f"📋 信号快照: [{tier}] {action}"
+
             tier_color = "#ffd700" if "SSS" in tier else ("#00ff88" if "S" in tier else ("#00e5ff" if "A" in tier else "#ff3333"))
             self.lbl_code_name.setText(f"代码: {clean_code} | 名称: {name} (📋 信号迭代日志)")
-            self.lbl_price.setText(f"信号价: ¥{price:.2f}" if price > 0 else "信号价: --")
+            self.lbl_price.setText(price_top)
             self.lbl_role_tag.setText(f"级别: {tier} | 动作: {action}")
             self.lbl_role_tag.setStyleSheet(
                 f"background-color: #1c1a24; border: 1px solid {tier_color}; "
                 f"border-radius: 4px; padding: 3px 8px; color: {tier_color}; font-weight: bold;"
             )
-            self.lbl_race_info.setText(f"触发时间: {ts} | 仓位建议: {size_pct:.0f}%")
-            self.lbl_action_badge.setText(f"📋 信号快照: [{tier}] {action} {size_pct:.0f}% 仓位")
+            self.lbl_race_info.setText(f"触发时间: {ts} | {size_top}")
+            self.lbl_action_badge.setText(badge_text)
 
             swap_info = f"<p style='margin: 2px 0; color: #ffaa00;'><b>🔄 全仓轮动换马目标：</b>{swap_code} {swap_name}</p>" if swap_code else ""
 
@@ -364,7 +467,7 @@ class IPOArbitrationDetailDialog(QDialog):
                 <div style="background-color: #121522; padding: 10px 14px; border-left: 4px solid {tier_color}; border-radius: 4px; line-height: 1.6;">
                     <p style="margin: 2px 0;"><b>⏱️ 记录时点：</b>{ts}</p>
                     <p style="margin: 2px 0;"><b>🎯 信号动作：</b><span style="color: {tier_color}; font-weight: bold;">{action}</span> ({tier} 级)</p>
-                    <p style="margin: 2px 0;"><b>💰 触发价格：</b>¥{price:.2f} | <b>建议仓位：</b>{size_pct:.0f}%</p>
+                    <p style="margin: 2px 0;"><b>💰 触发价格：</b>{price_html} | <b>建议仓位：</b>{size_html}</p>
                     {swap_info}
                     <p style="margin: 4px 0 2px 0;"><b>📌 决策依据：</b>{reason}</p>
                 </div>
@@ -374,8 +477,8 @@ class IPOArbitrationDetailDialog(QDialog):
             </div>
             """
             self.txt_arbitration_desc.setHtml(html_content)
-            self.lbl_vwap_line.setText(f"参考价格: ¥{price:.2f}")
-            self.lbl_vwap_bias.setText(f"建议仓位: {size_pct:.0f}%")
+            self.lbl_vwap_line.setText(f"参考价格: {price_grid}")
+            self.lbl_vwap_bias.setText(f"建议仓位: {size_grid}")
             self.lbl_vwap_shape.setText(f"信号评级: {tier}")
             self.lbl_launch_time.setText(f"记录时间: {ts}")
             self.lbl_stop_loss.setText("防守纪律: 跌破 0.6% 坚决立斩")

@@ -351,6 +351,28 @@ class IPOTradingCenter:
         with self._lock:
             return list(self._signal_iteration_log)
 
+    def clear_signal_iteration_logs(self, keep_today: bool = False) -> int:
+        """
+        清理信号决策与迭代历史日志
+        :param keep_today: 若为 True，仅清理历史陈旧日志（保留今日记录）；若为 False，彻底清空全部记录。
+        :return: 被清理的记录条数
+        """
+        with self._lock:
+            old_count = len(self._signal_iteration_log)
+            if not keep_today:
+                self._signal_iteration_log.clear()
+            else:
+                today_str = time.strftime("%Y-%m-%d")
+                self._signal_iteration_log = [
+                    item for item in self._signal_iteration_log
+                    if str(item.get("time_str", "")).startswith(today_str)
+                    or (item.get("timestamp") and time.strftime("%Y-%m-%d", time.localtime(float(item["timestamp"]))) == today_str)
+                ]
+            removed_count = old_count - len(self._signal_iteration_log)
+            self._save_persisted_ledger()
+            logger.info(f"🧹 [IPO-TRADING] 信号迭代历史日志清理完毕: 移除了 {removed_count} 条记录, 剩余 {len(self._signal_iteration_log)} 条 (keep_today={keep_today})")
+            return removed_count
+
     def get_closed_trade_reviews(self) -> List[Dict[str, Any]]:
         """Return stable TradePlan-versus-execution metrics for offline review."""
         reviews: List[Dict[str, Any]] = []
@@ -646,42 +668,82 @@ class IPOTradingCenter:
                 "evaluated_at": time.strftime("%Y-%m-%d %H:%M:%S")
             }
 
-        # 3. 正向加速形态量化加权与质量评分
-        base_quality = max(float(score), 76.0)
+        # 3. 正向加速形态量化加权与底层12级潮汐适配 (杜绝无脑打100满分)
+        raw_score = float(score) if score > 0 else 75.0
+        if raw_score >= 90.0:
+            base_quality = 80.0 + (raw_score - 90.0) * 0.4
+        elif raw_score >= 80.0:
+            base_quality = 75.0 + (raw_score - 80.0) * 0.5
+        else:
+            base_quality = max(65.0, raw_score)
+
         bonus = 0.0
 
         # 次新股溢价加分 (轻装上阵，无历史套牢盘)
         if is_subnew:
-            bonus += 5.0
+            bonus += 3.0
 
         # 核心加速形态提权
         if "双加速" in reason_str:
-            bonus += 8.0
-        if "光脚加速" in reason_str or "缺口加速" in reason_str:
             bonus += 5.0
+        if "光脚加速" in reason_str or "缺口加速" in reason_str:
+            bonus += 3.0
         if "首板突破" in reason_str or "放量反包" in reason_str or "主动扫买" in reason_str:
-            bonus += 6.0
+            bonus += 4.0
         if "领涨龙头" in reason_str or "板块龙头" in reason_str or "爆款领头羊" in reason_str:
-            bonus += 6.0
+            bonus += 5.0
         if "首发吸筹" in reason_str or "早鸟" in reason_str or "首发上市" in reason_str:
-            bonus += 8.0
+            bonus += 6.0
 
-        final_quality = min(100.0, base_quality + bonus)
+        # 结合底层 12 级潮汐状态机 (T0~T11) 自适应调节
+        current_tide = "T0_INSUFFICIENT"
+        try:
+            if getattr(self, "_last_market_context", None):
+                current_tide = getattr(self._last_market_context, "tide_state", "T0_INSUFFICIENT")
+            elif hasattr(self, "sentiment_engine"):
+                snap = self.sentiment_engine.get_latest_snapshot()
+                if snap:
+                    current_tide = getattr(snap, "tide_state", "T0_INSUFFICIENT")
+        except Exception:
+            pass
+
+        tide_adj = 0.0
+        if current_tide in ("T1_CLIMAX_DISTRIBUTION", "T11_OVERHEATED"):
+            # 高潮派发与过热期：严厉惩罚追高，动能分折减
+            tide_adj = -8.0
+        elif current_tide in ("T2_EBB_EARLY", "T3_EBB_SPREAD", "T4_PANIC_ACCEL"):
+            # 退潮与恐慌期：对纯追高施加风控扣分，防接飞刀；若有平底防守则不扣
+            if not any(kw in reason_str for kw in ["平底", "次级买点", "筑底", "缩量"]):
+                tide_adj = -6.0
+        elif current_tide in ("T5_ICE", "T6_ICE_DIVERGENCE"):
+            # 冰点与背离期：对率先逆势放量突破/首发吸筹的先锋给予溢价
+            if any(kw in reason_str for kw in ["首发吸筹", "反包", "突破", "龙头", "次级买点"]):
+                tide_adj = +4.0
+        elif current_tide in ("T8_REFLOW_CONFIRM", "T9_FLOOD_SPREAD", "T10_MAIN_UP"):
+            # 回流与主升浪：顺风共振
+            if "龙头" in reason_str or "双加速" in reason_str:
+                tide_adj = +3.0
+
+        final_quality = max(40.0, min(95.0, base_quality + bonus + tide_adj))
 
         # 4. 战术级别判定 (SSS / S / A)
-        if final_quality >= 93.0 or "双加速" in reason_str or "首发吸筹" in reason_str:
+        if final_quality >= 90.0:
             signal_tier = "SSS"
-        elif final_quality >= 85.0 or "龙头" in reason_str or "光脚" in reason_str or "缺口" in reason_str:
+        elif final_quality >= 82.0:
             signal_tier = "S"
         else:
             signal_tier = "A"
 
+        # 恐慌与高潮派发期降级保护
+        if current_tide in ("T1_CLIMAX_DISTRIBUTION", "T4_PANIC_ACCEL") and signal_tier == "SSS":
+            signal_tier = "S"
+
         # 5. 准入资格判定 (是否判定为优质标的以注入自更新优质池)
-        # 次新股只需达到 80 分即可准入；主板标的需具备顶级龙头质地 (>= 88 分或明确龙头/加速) 即可作为全市场标杆准入
+        # 次新股只需达到 78 分即可准入；主板标的需具备顶级龙头质地 (>= 85 分或明确龙头/加速) 即可作为全市场标杆准入
         if is_subnew:
-            is_quality = (final_quality >= 80.0)
+            is_quality = (final_quality >= 78.0)
         else:
-            is_quality = (final_quality >= 88.0 or "龙头" in reason_str or "双加速" in reason_str)
+            is_quality = (final_quality >= 85.0 or "龙头" in reason_str or "双加速" in reason_str)
 
         return {
             "is_quality": is_quality,
@@ -733,20 +795,29 @@ class IPOTradingCenter:
                 self._external_signal_stats["quality_injected_count"] = self._external_signal_stats.get("quality_injected_count", 0) + 1
                 self._injected_quality_stocks[clean_code] = eval_res
 
-                # 沉淀到信号决策迭代日志 (让操盘手有迹可循)
                 tier = eval_res.get("signal_tier", "S")
                 stag = eval_res.get("source_tag", "🏷️ 外部信号")
                 q_score = eval_res.get("quality_score", 90.0)
                 price_val = 0.0
                 if extra and isinstance(extra, dict):
-                    price_val = float(extra.get("price", 0.0) or 0.0)
+                    price_val = float(extra.get("price") or extra.get("current_price") or extra.get("close") or 0.0)
+                if price_val <= 0.0:
+                    cached_sig = self._reports_cache.get(clean_code)
+                    if cached_sig and getattr(cached_sig, "price", 0.0) > 0:
+                        price_val = float(cached_sig.price)
+                    else:
+                        for r_sig in self._ranked_cache:
+                            if r_sig.code == clean_code and getattr(r_sig, "price", 0.0) > 0:
+                                price_val = float(r_sig.price)
+                                break
 
+                # 外部信号注入属于雷达感知并转入次新股重点监控池，不预设买入满仓，待次新策略产生明确买点
                 self._append_signal_iteration_log(
                     action="SIGNAL_INJECT",
                     code=clean_code,
                     name=name,
                     price=price_val,
-                    size_pct=100.0 if tier == "SSS" else 50.0,
+                    size_pct=0.0,
                     reason=f"[{stag}·{q_score:.0f}分] 质量策略评估通过，转入新股次新检查中心: {reason}",
                     signal_tier=tier
                 )
@@ -843,8 +914,11 @@ class IPOTradingCenter:
             sentiment = self.sentiment_engine.get_market_sentiment(all_signals, force_refresh=True)
             self._last_market_context = sentiment
 
-            # 2. 全池执行横向赛马冒泡排位 (“山外有山”)
-            ranked_signals = batch_evaluate_horse_race_ranking(all_signals)
+            # 2. 全池执行横向赛马冒泡排位 (“山外有山”·结合12级潮汐适配)
+            ranked_signals = batch_evaluate_horse_race_ranking(
+                all_signals,
+                tide_state=getattr(sentiment, "tide_state", None)
+            )
             self._ranked_cache = ranked_signals
 
             # 找出全池 Top 1 真实领头羊标杆 (未破位且非高潮狂热)

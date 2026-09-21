@@ -1077,49 +1077,64 @@ class IPOVWAPDetectorEngine:
         sig.signal_desc = "多空平衡，暂无极限预下单结构"
 
 
-def batch_evaluate_horse_race_ranking(signals: List[VWAPDetectorSignal]) -> List[VWAPDetectorSignal]:
+def batch_evaluate_horse_race_ranking(
+    signals: List[VWAPDetectorSignal],
+    tide_state: Optional[str] = None
+) -> List[VWAPDetectorSignal]:
     """
     【逐日赛马冒泡排位引擎 (Horse Race Momentum Engine)】
+    - 深度结合底层 12 级潮汐状态机 (T0~T11)；
     - 结合早盘启动时效 (30%) + 拔地而起斜率 (25%) + VWAP站稳率 (20%) + SBC活跃度 (15%) + 日K趋势 (10%)；
-    - 实时对检测池内所有标的进行冒泡打分排位；
-    - 动态授予 🥇 赛马领头羊 / 🥈 梯队前锋 / 🎯 线上蓄势 / ⏱️ 迟滞跟风 / 🚨 疯狂平仓 / ⛔ 破位出局 梯队标签；
+    - 彻底消除“涨了就给高分、全是99/100分”的单薄结构，在退潮/高潮期折减追高冲高，在冰点/背离期赋权次级买点与底部结构；
     - 返回按 horse_race_score 降序冒泡排列的信号列表。
     """
     if not signals:
         return []
 
+    # 自动感知底层 12 级潮汐状态
+    if not tide_state:
+        try:
+            from ats.strategy.ipo_market_sentiment_engine import IPOMarketSentimentEngine
+            snap = IPOMarketSentimentEngine.get_instance().get_latest_snapshot()
+            if snap and getattr(snap, "tide_state", None):
+                tide_state = snap.tide_state
+        except Exception:
+            pass
+    tide_state = tide_state or "T0_INSUFFICIENT"
+
     for sig in signals:
         if not sig or sig.price <= 0:
             continue
 
-        # 1. 极端高潮或破位股处理
+        # 1. 极端高潮平仓股处理 (作为卖出预警，给予真实风险动能分而非虚高99分)
         if sig.is_climax_exit:
-            sig.horse_race_score = 99.0
+            sig.horse_race_score = 60.0
             sig.horse_race_tier = "🚨 疯狂平仓"
             continue
 
-        # 【核心进化】：长期通道次级买点专属高动能赛马打分 (88~95分，第一梯队前锋)
+        # 【核心进化】：长期通道次级买点专属高动能赛马打分 (85~94分，在冰点/背离期享有优先主权)
         if sig.signal_type == "SECONDARY_BUY" or sig.channel_stage == "SECONDARY_BUY":
-            base_score = 88.0
-            grade_bonus = 5.0 if sig.quality_grade == "SS" else (3.0 if sig.quality_grade == "S" else 0.0)
-            sig.horse_race_score = round(min(95.0, base_score + grade_bonus), 1)
+            base_score = 86.0
+            grade_bonus = 4.0 if sig.quality_grade == "SS" else (2.0 if sig.quality_grade == "S" else 0.0)
+            # 底层 12 级潮汐赋权：冰点背离与回流期是次级买点爆发黄金窗口
+            tide_bonus = 4.0 if tide_state in ("T5_ICE", "T6_ICE_DIVERGENCE", "T7_WEAK_REPAIR") else 0.0
+            sig.horse_race_score = round(min(94.0, base_score + grade_bonus + tide_bonus), 1)
             sig.horse_race_tier = "👑 次级买点"
             continue
 
-        # 【核心进化】：底部结构共振与跨日通道突破标的专属高动能赛马打分 (打破只有站上VWAP才给高分的死板逻辑)
+        # 【核心进化】：底部结构共振与跨日通道突破标的专属高动能赛马打分
         if sig.signal_type in ("BASE_BREAKOUT", "BASE_PREORDER", "SWING_PREORDER"):
             if sig.signal_type == "BASE_BREAKOUT":
                 base_score = 82.0
             elif sig.signal_type == "SWING_PREORDER":
-                base_score = 80.0  # 跨日通道突破稳居前列(80~86分)，绝不抢早盘龙头第一，但也绝不垫底！
+                base_score = 80.0
             else:
                 base_score = 76.0
-            # 结构加分：横盘 Bar 数越多结构越稳 (+0~8分)
-            struct_bonus = min(8.0, sig.base_consolidation_bars * 0.4) if sig.signal_type != "SWING_PREORDER" else 4.0
-            # 动能拐点加分：斜率或反弹空间 (+0~8分)
-            slope_bonus = min(5.0, sig.launch_slope_deg * 0.15) if sig.launch_slope_deg > 0 else 2.0
-            space_bonus = min(5.0, sig.rebound_to_vwap_space_pct * 0.3) if sig.rebound_to_vwap_space_pct > 0 else 0.0
-            sig.horse_race_score = round(min(94.0, base_score + struct_bonus + slope_bonus + space_bonus), 1)
+            struct_bonus = min(6.0, sig.base_consolidation_bars * 0.3) if sig.signal_type != "SWING_PREORDER" else 3.0
+            slope_bonus = min(4.0, sig.launch_slope_deg * 0.12) if sig.launch_slope_deg > 0 else 1.5
+            space_bonus = min(4.0, sig.rebound_to_vwap_space_pct * 0.25) if sig.rebound_to_vwap_space_pct > 0 else 0.0
+            tide_bonus = 3.0 if tide_state in ("T5_ICE", "T6_ICE_DIVERGENCE") else 0.0
+            sig.horse_race_score = round(min(92.0, base_score + struct_bonus + slope_bonus + space_bonus + tide_bonus), 1)
             if sig.signal_type == "BASE_BREAKOUT":
                 sig.horse_race_tier = "⚡ 筑底共振"
             elif sig.signal_type == "SWING_PREORDER":
@@ -1129,12 +1144,11 @@ def batch_evaluate_horse_race_ranking(signals: List[VWAPDetectorSignal]) -> List
             continue
 
         if not sig.is_above_vwap:
-            sig.horse_race_score = max(5.0, 40.0 + sig.vwap_diff_pct * 2.0)
+            sig.horse_race_score = max(5.0, 40.0 + sig.vwap_diff_pct * 1.8)
             sig.horse_race_tier = "⛔ 破位出局"
             continue
 
         # 2. 早盘启动时间分 (Time Decay Factor)
-        # 盘后/非实时模式：launch_time_str 为空时以 vwap_diff_pct 作代理评分，让盘后排位有实际意义
         t_str = sig.launch_time_str
         if t_str and t_str != "未启动":
             if t_str <= "09:40":
@@ -1148,45 +1162,83 @@ def batch_evaluate_horse_race_ranking(signals: List[VWAPDetectorSignal]) -> List
             else:
                 time_score = 45.0
         else:
-            # 盘后代理时间分：VWAP 偏离度越高表示当日表现越强势
+            # 盘后/非实时代理时间分：结合 12 级潮汐调节，杜绝天量偏离无脑给 98 分
             vd = sig.vwap_diff_pct
-            if vd >= 20.0:
-                time_score = 98.0   # 极度偏离 VWAP (高潮冲刺区)
-            elif vd >= 12.0:
-                time_score = 90.0   # 强势放量主升
-            elif vd >= 6.0:
-                time_score = 80.0   # VWAP 上方加速运行
-            elif vd >= 2.0:
-                time_score = 65.0   # VWAP 上方温和震荡
-            elif vd >= 0.0:
-                time_score = 50.0   # 贴近 VWAP 观察
+            if tide_state in ("T1_CLIMAX_DISTRIBUTION", "T11_OVERHEATED"):
+                # 高潮派发与过热期：偏离过大是兑现陷阱，严打追高
+                if vd >= 15.0:
+                    time_score = max(40.0, 70.0 - (vd - 15.0) * 1.5)
+                elif vd >= 6.0:
+                    time_score = 72.0
+                elif vd >= 1.0:
+                    time_score = 78.0  # 贴线相对安全
+                else:
+                    time_score = 60.0
+            elif tide_state in ("T2_EBB_EARLY", "T3_EBB_SPREAD", "T4_PANIC_ACCEL"):
+                # 退潮与恐慌期：偏离过大极度危险
+                if vd >= 10.0:
+                    time_score = 55.0
+                elif vd >= 2.0:
+                    time_score = 70.0
+                elif vd >= 0.0:
+                    time_score = 75.0
+                else:
+                    time_score = max(5.0, 30.0 + vd * 1.5)
             else:
-                time_score = max(5.0, 30.0 + vd * 1.5)  # 破位降分
+                # 正常与主升期：平滑评分区间
+                if vd >= 20.0:
+                    time_score = 88.0   # 不再盲目给 98
+                elif vd >= 12.0:
+                    time_score = 85.0
+                elif vd >= 6.0:
+                    time_score = 80.0
+                elif vd >= 2.0:
+                    time_score = 70.0
+                elif vd >= 0.0:
+                    time_score = 58.0
+                else:
+                    time_score = max(5.0, 30.0 + vd * 1.5)
 
         # 3. 拔地而起角斜率分 (Surge Slope Score)
-        # 盘后/非实时模式：launch_slope_deg 为 0 时以 change_pct 日涨跌幅作代理斜率分
         slope = sig.launch_slope_deg
         if slope >= 50.0:
-            slope_score = 98.0
+            slope_score = 92.0
         elif slope >= 35.0:
-            slope_score = 85.0
+            slope_score = 82.0
         elif slope >= 20.0:
             slope_score = 70.0
         elif slope > 0:
             slope_score = 55.0
         else:
-            # 盘后代理斜率分：日涨跌幅反映当日冲击力
             cp = sig.change_pct
-            if cp >= 15.0:
-                slope_score = 98.0
-            elif cp >= 8.0:
-                slope_score = 85.0
-            elif cp >= 3.0:
-                slope_score = 70.0
-            elif cp >= 0.0:
-                slope_score = 55.0
+            if tide_state in ("T1_CLIMAX_DISTRIBUTION", "T11_OVERHEATED"):
+                # 高潮派发期：涨停或涨幅过大往往面临次日低开闷杀
+                if cp >= 15.0:
+                    slope_score = 65.0
+                elif cp >= 8.0:
+                    slope_score = 72.0
+                elif cp >= 2.0:
+                    slope_score = 76.0
+                else:
+                    slope_score = 55.0
+            elif tide_state in ("T2_EBB_EARLY", "T3_EBB_SPREAD", "T4_PANIC_ACCEL"):
+                if cp >= 10.0:
+                    slope_score = 60.0
+                elif cp >= 2.0:
+                    slope_score = 72.0
+                else:
+                    slope_score = max(20.0, 50.0 + cp * 1.2)
             else:
-                slope_score = max(10.0, 40.0 + cp * 1.5)
+                if cp >= 15.0:
+                    slope_score = 90.0
+                elif cp >= 8.0:
+                    slope_score = 82.0
+                elif cp >= 3.0:
+                    slope_score = 72.0
+                elif cp >= 0.0:
+                    slope_score = 60.0
+                else:
+                    slope_score = max(10.0, 45.0 + cp * 1.5)
 
         # 4. VWAP 站稳与贴线率分
         hold_score = min(100.0, max(20.0, sig.vwap_adhesion_ratio))
@@ -1194,11 +1246,11 @@ def batch_evaluate_horse_race_ranking(signals: List[VWAPDetectorSignal]) -> List
         # 5. SBC 活跃度分
         act = sig.sbc_activity_pct
         if act >= 200.0:
-            act_score = 98.0
+            act_score = 92.0
         elif act >= 100.0:
-            act_score = 88.0
+            act_score = 82.0
         elif act >= 40.0:
-            act_score = 75.0
+            act_score = 72.0
         else:
             act_score = 55.0
 
@@ -1214,9 +1266,9 @@ def batch_evaluate_horse_race_ranking(signals: List[VWAPDetectorSignal]) -> List
             k_score * 0.10
         )
         if getattr(sig, "horse_race_score", 50.0) != 50.0 and (not t_str or t_str == "未启动"):
-            sig.horse_race_score = max(sig.horse_race_score, round(max(0.0, min(100.0, raw_score)), 1))
+            sig.horse_race_score = max(sig.horse_race_score, round(max(0.0, min(95.0, raw_score)), 1))
         else:
-            sig.horse_race_score = round(max(0.0, min(100.0, raw_score)), 1)
+            sig.horse_race_score = round(max(0.0, min(95.0, raw_score)), 1)
 
     # 冒泡降序排序
     ranked_signals = sorted(signals, key=lambda s: getattr(s, "horse_race_score", 0.0), reverse=True)

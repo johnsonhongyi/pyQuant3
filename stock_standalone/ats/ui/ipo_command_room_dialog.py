@@ -22,7 +22,7 @@ from typing import Dict, List, Optional, Any
 from PyQt6.QtWidgets import (
     QDialog, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QTableWidget, QTableWidgetItem, QHeaderView, QSplitter, QGroupBox,
-    QMessageBox, QFrame, QCheckBox, QMenu, QApplication
+    QMessageBox, QFrame, QCheckBox, QMenu, QApplication, QComboBox
 )
 from PyQt6.QtCore import Qt, QTimer, QEvent
 from PyQt6.QtGui import QColor, QFont, QAction, QKeySequence
@@ -164,6 +164,194 @@ class IPOCommandRoomTableWidget(QTableWidget):
             event.accept()
             return
         super().keyPressEvent(event)
+
+
+class IPOSignalTimelineDialog(QDialog):
+    """标的异动时间线与连续持久力透视窗"""
+
+    def __init__(self, code: str, name: str, records: List[Dict[str, Any]], parent=None):
+        super().__init__(parent)
+        self.code = code
+        self.name = name
+        # 按时间正序排列以便回溯生命周期
+        self.records = sorted(
+            records or [],
+            key=lambda x: float(x.get("timestamp", 0.0) or 0.0)
+        )
+        self.setWindowTitle(f"⏱️ 异动时间线与连续持久力透视 - {name} ({code})")
+        self.setMinimumSize(840, 480)
+        self.resize(900, 520)
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #0e1017;
+                color: #ffffff;
+            }
+            QLabel {
+                color: #e2e2e5;
+                font-size: 8.5pt;
+            }
+            QTableWidget {
+                background-color: #12141f;
+                alternate-background-color: #151724;
+                border: 1px solid #232536;
+                gridline-color: #1d1f2e;
+                color: #ffffff;
+                font-size: 8.5pt;
+                selection-background-color: #26334d;
+                selection-color: #ffffff;
+            }
+            QHeaderView::section {
+                background-color: #181a26;
+                color: #9aa0a6;
+                border: none;
+                border-right: 1px solid #232536;
+                border-bottom: 1px solid #232536;
+                padding: 3px 6px;
+                font-weight: bold;
+                font-size: 8.5pt;
+            }
+            QPushButton {
+                background-color: #1a1c29;
+                border: 1px solid #33374d;
+                border-radius: 3px;
+                color: #ffffff;
+                padding: 4px 14px;
+            }
+            QPushButton:hover {
+                background-color: #26293d;
+                border-color: #00e5ff;
+            }
+        """)
+        self._init_ui()
+
+    def _init_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(8)
+
+        # 头部概览卡片
+        hdr_bar = QHBoxLayout()
+        count = len(self.records)
+
+        def _fmt_time_minute(rec):
+            if not rec:
+                return "--"
+            ts_v = rec.get("timestamp")
+            t_s = rec.get("time_str")
+            if ts_v is not None:
+                try:
+                    num = float(ts_v)
+                    if num > 100000000:
+                        return time.strftime("%Y-%m-%d %H:%M", time.localtime(num))
+                except Exception:
+                    pass
+            if t_s:
+                s_t = str(t_s).strip()
+                if len(s_t) >= 16:
+                    return s_t[:16]
+                elif len(s_t) >= 5 and ":" in s_t:
+                    return f"{time.strftime('%Y-%m-%d')} {s_t[:5]}"
+                return s_t
+            return "--"
+
+        first_time = _fmt_time_minute(self.records[0]) if self.records else "--"
+        last_time = _fmt_time_minute(self.records[-1]) if self.records else "--"
+
+        span_min = 0
+        if count >= 2:
+            t_first = float(self.records[0].get("timestamp", 0) or 0)
+            t_last = float(self.records[-1].get("timestamp", 0) or 0)
+            if t_last > t_first > 0:
+                span_min = int((t_last - t_first) // 60)
+
+        # 评估连续持久力
+        if count >= 4 or (count >= 3 and span_min >= 20):
+            p_text = f"🔥 极强持久 ({count}次异动 / 持续跨度{span_min}分钟)"
+            p_color = "#ffd700"
+        elif count >= 2:
+            p_text = f"⚡ 持续异动 ({count}次异动 / 持续跨度{span_min}分钟)"
+            p_color = "#00ff88"
+        else:
+            p_text = "⏱️ 单次脉冲 (1次异动)"
+            p_color = "#8f93a8"
+
+        lbl_summary = QLabel(
+            f"<b>标的:</b> <font color='#00e5ff'>{self.name} ({self.code})</font> | "
+            f"<b>异动频次:</b> <font color='#ffd700'>{count} 次</font> | "
+            f"<b>时间跨度:</b> {first_time} ~ {last_time} ({span_min}分) | "
+            f"<b>连续持久力:</b> <font color='{p_color}'><b>{p_text}</b></font>"
+        )
+        hdr_bar.addWidget(lbl_summary)
+        hdr_bar.addStretch()
+        layout.addLayout(hdr_bar)
+
+        # 时间线明细表
+        self.table = QTableWidget(self)
+        self.table.setColumnCount(6)
+        self.table.setHorizontalHeaderLabels(["序号", "时间", "级别", "动作", "触发价格", "决议依据与迭代详情"])
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.setAlternatingRowColors(True)
+        self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+
+        # 显示为倒序（最新在顶部，便于一眼看到当前状态）
+        display_records = list(reversed(self.records))
+        self.table.setRowCount(len(display_records))
+        for r, rec in enumerate(display_records):
+            seq_num = len(display_records) - r
+            self.table.setItem(r, 0, NumericTableWidgetItem(str(seq_num), raw_val=seq_num))
+
+            t_str = _fmt_time_minute(rec)
+            self.table.setItem(r, 1, QTableWidgetItem(t_str))
+
+            tier = rec.get("signal_tier", "S")
+            it_tier = QTableWidgetItem(tier)
+            if "SSS" in tier:
+                it_tier.setForeground(QColor("#ffd700"))
+            elif "S" in tier:
+                it_tier.setForeground(QColor("#00ff88"))
+            elif "A" in tier:
+                it_tier.setForeground(QColor("#00e5ff"))
+            else:
+                it_tier.setForeground(QColor("#ff5555"))
+            self.table.setItem(r, 2, it_tier)
+
+            act = rec.get("action", "--")
+            it_act = QTableWidgetItem(act)
+            if "BUY" in act:
+                it_act.setForeground(QColor("#00ff88"))
+            elif "SELL" in act or "EXIT" in act or "STOP" in act:
+                it_act.setForeground(QColor("#ff5555"))
+            self.table.setItem(r, 3, it_act)
+
+            px = float(rec.get("price", 0.0) or 0.0)
+            if px <= 0:
+                try:
+                    from ats.ui.ipo_arbitration_detail_dialog import resolve_current_price
+                    px = resolve_current_price(self.code)
+                except Exception:
+                    pass
+            self.table.setItem(r, 4, NumericTableWidgetItem(f"{px:.2f}" if px > 0 else "市价跟踪", raw_val=px if px > 0 else 0.0))
+            self.table.setItem(r, 5, QTableWidgetItem(rec.get("reason", "--")))
+
+        self.table.setColumnWidth(0, 48)
+        self.table.setColumnWidth(1, 150)
+        self.table.setColumnWidth(2, 65)
+        self.table.setColumnWidth(3, 110)
+        self.table.setColumnWidth(4, 75)
+        layout.addWidget(self.table)
+
+        # 底部控制栏
+        b_bar = QHBoxLayout()
+        lbl_tip = QLabel("💡 提示：时间线按时序沉淀该标的自首次触发至最新的全部感知、决策与执行记录")
+        lbl_tip.setStyleSheet("color: #8f93a8;")
+        b_bar.addWidget(lbl_tip)
+        b_bar.addStretch()
+        btn_close = QPushButton("关闭")
+        btn_close.clicked.connect(self.accept)
+        b_bar.addWidget(btn_close)
+        layout.addLayout(b_bar)
 
 
 class IPOCommandRoomDialog(QDialog):
@@ -309,8 +497,13 @@ class IPOCommandRoomDialog(QDialog):
         # 视图模式控制：持仓（ACTIVE / CLOSED），指令（PENDING / HISTORY）
         self._pos_view_mode = "ACTIVE"
         self._orders_view_mode = "PENDING"
+        # 历史信号日志子模式控制：流水日志 (STREAM) vs 标的归集 (AGGREGATED)
+        self._history_sub_mode = "STREAM"
+        # 历史信号日期筛选：TODAY (仅看今日) / ALL (全部历史) / OLD (历史陈旧)
+        self._history_date_filter = "TODAY"
         self._current_closed_positions_list: List[Dict[str, Any]] = []
         self._current_signal_logs_list: List[Dict[str, Any]] = []
+        self._current_aggregated_logs_list: List[Dict[str, Any]] = []
         self._voice_enabled = load_config_node("ipo_cmd_voice_enabled", True)
 
         # 联动防抖定时器 (20ms)
@@ -480,6 +673,58 @@ class IPOCommandRoomDialog(QDialog):
         self.btn_orders_history.setStyleSheet("font-weight: bold; color: #9aa0a6; background-color: #141620; border-color: #2b2e42;")
         self.btn_orders_history.clicked.connect(lambda: self._set_orders_view_mode("HISTORY"))
         h_orders_tabs.addWidget(self.btn_orders_history)
+
+        # ── 历史日志专属子工具栏 (归集/流水切换、日期过滤、一键清理) ──
+        self.btn_hist_stream = QPushButton("📜 流水")
+        self.btn_hist_stream.setCheckable(True)
+        self.btn_hist_stream.setChecked(True)
+        self.btn_hist_stream.setToolTip("切换为逐笔信号流水日志视图")
+        self.btn_hist_stream.setStyleSheet("font-weight: bold; color: #00ff88; background-color: #1a2a22; border-color: #00ff88;")
+        self.btn_hist_stream.clicked.connect(lambda: self._set_history_sub_mode("STREAM"))
+        self.btn_hist_stream.hide()
+        h_orders_tabs.addWidget(self.btn_hist_stream)
+
+        self.btn_hist_agg = QPushButton("📊 标的归集")
+        self.btn_hist_agg.setCheckable(True)
+        self.btn_hist_agg.setChecked(False)
+        self.btn_hist_agg.setToolTip("按标的代码归集异动频次、时间跨度并评估连续持久力")
+        self.btn_hist_agg.setStyleSheet("font-weight: bold; color: #9aa0a6; background-color: #141620; border-color: #2b2e42;")
+        self.btn_hist_agg.clicked.connect(lambda: self._set_history_sub_mode("AGGREGATED"))
+        self.btn_hist_agg.hide()
+        h_orders_tabs.addWidget(self.btn_hist_agg)
+
+        # 日期筛选下拉框
+        self.cmb_date_filter = QComboBox()
+        self.cmb_date_filter.addItems(["📅 仅看今日", "📅 全部历史", "📅 历史陈旧"])
+        self.cmb_date_filter.setStyleSheet("""
+            QComboBox {
+                background-color: #161826;
+                color: #00e5ff;
+                border: 1px solid #2f344d;
+                border-radius: 3px;
+                padding: 2px 6px;
+                font-size: 8.5pt;
+                font-weight: bold;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #161826;
+                color: #ffffff;
+                selection-background-color: #26334d;
+            }
+        """)
+        self.cmb_date_filter.setToolTip("选择历史信号日志日期范围，隔离陈旧历史数据")
+        self.cmb_date_filter.currentIndexChanged.connect(self._on_date_filter_changed)
+        self.cmb_date_filter.hide()
+        h_orders_tabs.addWidget(self.cmb_date_filter)
+
+        # 清理日志操作按钮
+        self.btn_clear_logs = QPushButton("🧹 清理")
+        self.btn_clear_logs.setToolTip("清理历史陈旧日志或清空全部日志")
+        self.btn_clear_logs.setStyleSheet("color: #ffaa00; background-color: #201a14; border-color: #553311;")
+        self.btn_clear_logs.clicked.connect(self._show_clear_logs_menu)
+        self.btn_clear_logs.hide()
+        h_orders_tabs.addWidget(self.btn_clear_logs)
+
         h_orders_tabs.addStretch()
         v_orders.addLayout(h_orders_tabs)
 
@@ -638,7 +883,10 @@ class IPOCommandRoomDialog(QDialog):
             return
 
         if table is self.tbl_orders and self._orders_view_mode == "HISTORY":
-            self._open_arbitration_detail_for_row(table, row)
+            if self._history_sub_mode == "AGGREGATED":
+                self._open_signal_timeline_for_row(table, row)
+            else:
+                self._open_arbitration_detail_for_row(table, row)
             return
 
         is_arbitration_col = False
@@ -734,6 +982,10 @@ class IPOCommandRoomDialog(QDialog):
         # 0. 集中仲裁与决议透视详情窗 (极速复用模式)
         act_detail = menu.addAction(f"🎯 查看集中仲裁与山外有山决议详情 ({code} {name})")
         act_detail.triggered.connect(lambda: self._open_arbitration_detail_for_row(table, row))
+
+        # 0.5 异动时间线与连续持久力透视
+        act_timeline = menu.addAction(f"⏱️ 查看全天异动时间线与连续持久力 ({code} {name})")
+        act_timeline.triggered.connect(lambda: self._open_signal_timeline_for_code(code, name))
         menu.addSeparator()
 
         # 1. SBC 走势图
@@ -757,7 +1009,7 @@ class IPOCommandRoomDialog(QDialog):
             if d.code == code:
                 target_directive = d
                 break
-        
+
         if target_directive:
             act_exec_single = menu.addAction(f"⚡ 立即执行该股决议: [{target_directive.action}] {target_directive.name}")
             act_exec_single.triggered.connect(lambda: self._execute_single_directive(target_directive))
@@ -931,6 +1183,13 @@ class IPOCommandRoomDialog(QDialog):
             self.btn_orders_pending.setStyleSheet("font-weight: bold; color: #00e5ff; background-color: #14242e; border-color: #00e5ff;")
             self.btn_orders_history.setChecked(False)
             self.btn_orders_history.setStyleSheet("font-weight: bold; color: #9aa0a6; background-color: #141620; border-color: #2b2e42;")
+
+            # 隐藏历史日志专属子工具栏
+            self.btn_hist_stream.hide()
+            self.btn_hist_agg.hide()
+            self.cmb_date_filter.hide()
+            self.btn_clear_logs.hide()
+
             self.tbl_orders.setColumnCount(6)
             self.tbl_orders.setHorizontalHeaderLabels(["动作", "代码", "标的", "价格", "建议仓位", "决议依据理由"])
             self.grp_orders.setTitle("📋 集中交易调度待执行指令清单 (弃弱换马 / 领头羊进击 / 买错立斩)")
@@ -939,10 +1198,114 @@ class IPOCommandRoomDialog(QDialog):
             self.btn_orders_history.setStyleSheet("font-weight: bold; color: #ffaa00; background-color: #2a2014; border-color: #ffaa00;")
             self.btn_orders_pending.setChecked(False)
             self.btn_orders_pending.setStyleSheet("font-weight: bold; color: #9aa0a6; background-color: #141620; border-color: #2b2e42;")
+
+            # 显示历史日志专属子工具栏
+            self.btn_hist_stream.show()
+            self.btn_hist_agg.show()
+            self.cmb_date_filter.show()
+            self.btn_clear_logs.show()
+
+            if self._history_sub_mode == "STREAM":
+                self.tbl_orders.setColumnCount(6)
+                self.tbl_orders.setHorizontalHeaderLabels(["时间", "级别", "动作", "代码", "标的", "迭代说明与决议依据"])
+                self.grp_orders.setTitle("📋 集中交易历史信号与迭代日志 (双击行调出产生快照)")
+            else:
+                self.tbl_orders.setColumnCount(8)
+                self.tbl_orders.setHorizontalHeaderLabels(["代码", "标的", "异动频次", "首次时间", "最新时间", "最高级别", "最新动作", "连续持久力"])
+                self.grp_orders.setTitle("📋 集中交易历史信号与迭代日志 (标的归集与连续持久力统计·双击看时间线)")
+        self.refresh_data()
+
+    def _set_history_sub_mode(self, sub_mode: str):
+        """切换历史信号日志子模式：STREAM (流水日志) / AGGREGATED (标的归集)"""
+        self._history_sub_mode = sub_mode
+        if sub_mode == "STREAM":
+            self.btn_hist_stream.setChecked(True)
+            self.btn_hist_stream.setStyleSheet("font-weight: bold; color: #00ff88; background-color: #1a2a22; border-color: #00ff88;")
+            self.btn_hist_agg.setChecked(False)
+            self.btn_hist_agg.setStyleSheet("font-weight: bold; color: #9aa0a6; background-color: #141620; border-color: #2b2e42;")
             self.tbl_orders.setColumnCount(6)
             self.tbl_orders.setHorizontalHeaderLabels(["时间", "级别", "动作", "代码", "标的", "迭代说明与决议依据"])
             self.grp_orders.setTitle("📋 集中交易历史信号与迭代日志 (双击行调出产生快照)")
+        else:
+            self.btn_hist_agg.setChecked(True)
+            self.btn_hist_agg.setStyleSheet("font-weight: bold; color: #ffd700; background-color: #2a2614; border-color: #ffd700;")
+            self.btn_hist_stream.setChecked(False)
+            self.btn_hist_stream.setStyleSheet("font-weight: bold; color: #9aa0a6; background-color: #141620; border-color: #2b2e42;")
+            self.tbl_orders.setColumnCount(8)
+            self.tbl_orders.setHorizontalHeaderLabels(["代码", "标的", "异动频次", "首次时间", "最新时间", "最高级别", "最新动作", "连续持久力"])
+            self.grp_orders.setTitle("📋 集中交易历史信号与迭代日志 (标的归集与连续持久力统计·双击看时间线)")
         self.refresh_data()
+
+    def _set_history_date_filter(self, filter_mode: str):
+        """显式设置日期过滤模式：TODAY / ALL / OLD"""
+        mode_map = {"TODAY": 0, "ALL": 1, "OLD": 2}
+        idx = mode_map.get(str(filter_mode).upper(), 0)
+        self.cmb_date_filter.setCurrentIndex(idx)
+        self._history_date_filter = str(filter_mode).upper()
+        self.refresh_data()
+
+    def _on_date_filter_changed(self, idx: int):
+        """日期筛选下拉改变"""
+        mapping = {0: "TODAY", 1: "ALL", 2: "OLD"}
+        self._history_date_filter = mapping.get(idx, "TODAY")
+        self.refresh_data()
+
+    def _show_clear_logs_menu(self):
+        """弹出清理历史日志菜单"""
+        menu = QMenu(self)
+        menu.setStyleSheet("""
+            QMenu {
+                background-color: #1a1a24;
+                border: 1px solid #2e2e36;
+                color: #e2e2e5;
+                padding: 4px;
+            }
+            QMenu::item {
+                padding: 6px 20px;
+                border-radius: 4px;
+            }
+            QMenu::item:selected {
+                background-color: #2c2c35;
+                color: #00e5ff;
+            }
+        """)
+        act_keep_today = menu.addAction("🧹 清理历史陈旧日志 (仅保留今日)")
+        act_keep_today.triggered.connect(lambda: self._do_clear_logs(keep_today=True))
+        act_clear_all = menu.addAction("⚠️ 彻底清空全部历史日志")
+        act_clear_all.triggered.connect(lambda: self._do_clear_logs(keep_today=False))
+        menu.exec(self.btn_clear_logs.mapToGlobal(self.btn_clear_logs.rect().bottomLeft()))
+
+    def _do_clear_logs(self, keep_today: bool):
+        title = "清理历史陈旧日志" if keep_today else "清空全部历史日志"
+        msg = "确定要清理历史日期的陈旧日志，仅保留今日产生的数据吗？" if keep_today else "确定要彻底清空全部历史信号日志吗？此操作将清除持久化记录！"
+        ret = QMessageBox.question(self, title, msg, QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        if ret == QMessageBox.StandardButton.Yes:
+            removed = self.trading_center.clear_signal_iteration_logs(keep_today=keep_today)
+            QMessageBox.information(self, "清理成功", f"成功清理 {removed} 条日志记录！")
+            self.refresh_data()
+
+    def _open_signal_timeline_for_code(self, code: str, name: str = ""):
+        """打开指定标的的全部历史异动时间线弹窗"""
+        clean_code = "".join(ch for ch in str(code) if ch.isdigit()).zfill(6)
+        if not clean_code:
+            return
+        all_logs = self.trading_center.get_signal_iteration_log()
+        target_records = [
+            item for item in all_logs
+            if "".join(ch for ch in str(item.get("code", "")) if ch.isdigit()).zfill(6) == clean_code
+        ]
+        if not target_records:
+            QMessageBox.information(self, "提示", f"标的 {name}({clean_code}) 暂无历史信号异动记录。")
+            return
+        dlg_name = name or target_records[0].get("name", clean_code)
+        dlg = IPOSignalTimelineDialog(clean_code, dlg_name, target_records, parent=self)
+        dlg.exec()
+
+    def _open_signal_timeline_for_row(self, table: QTableWidget, row: int):
+        code = self._extract_code_from_table(table, row)
+        name = self._extract_name_from_table(table, row)
+        if code:
+            self._open_signal_timeline_for_code(code, name)
 
     def locate_stock_in_table(self, code: str, auto_popup: bool = True, reason: str = ""):
         """
@@ -1062,7 +1425,7 @@ class IPOCommandRoomDialog(QDialog):
             self.tbl_rank.setItem(r, 4, NumericTableWidgetItem(f"{sig.horse_race_score:.0f}", raw_val=float(sig.horse_race_score)))
             # 启动时点 (时间文本排序)
             self.tbl_rank.setItem(r, 5, QTableWidgetItem(sig.launch_time_str or "--"))
-            
+
             # 角色 (精准映射为标准中文)
             role_raw = sig.global_fleet_role or "--"
             role_cn = ROLE_CN_MAP.get(role_raw, role_raw)
@@ -1148,12 +1511,12 @@ class IPOCommandRoomDialog(QDialog):
                 self.tbl_pos.setItem(r, 2, NumericTableWidgetItem(str(pos["shares"]), raw_val=int(pos["shares"])))
                 self.tbl_pos.setItem(r, 3, NumericTableWidgetItem(f"{pos['cost']:.2f}", raw_val=float(pos['cost'])))
                 self.tbl_pos.setItem(r, 4, NumericTableWidgetItem(f"{pos['now']:.2f}", raw_val=float(pos['now'])))
-                
+
                 pnl_val = float(pos['pnl_pct'])
                 pnl_it = NumericTableWidgetItem(f"{pnl_val:+.2f}%", raw_val=pnl_val)
                 pnl_it.setForeground(QColor("#ff4444") if pnl_val > 0 else QColor("#00ff88"))
                 self.tbl_pos.setItem(r, 5, pnl_it)
-                
+
                 status_raw = pos["status"]
                 status_cn = POS_STATUS_CN_MAP.get(status_raw, status_raw)
                 self.tbl_pos.setItem(r, 6, QTableWidgetItem(status_cn))
@@ -1170,7 +1533,7 @@ class IPOCommandRoomDialog(QDialog):
                 exit_p = float(c_pos.get("exit_price", 0.0))
                 self.tbl_pos.setItem(r, 3, NumericTableWidgetItem(f"{cost_p:.2f}", raw_val=cost_p))
                 self.tbl_pos.setItem(r, 4, NumericTableWidgetItem(f"{exit_p:.2f}", raw_val=exit_p))
-                
+
                 realized_pnl = float(c_pos.get("realized_pnl_pct", 0.0))
                 pnl_it = NumericTableWidgetItem(f"{realized_pnl:+.2f}%", raw_val=realized_pnl)
                 pnl_it.setForeground(QColor("#ff4444") if realized_pnl > 0 else QColor("#00ff88"))
@@ -1186,8 +1549,49 @@ class IPOCommandRoomDialog(QDialog):
         signal_logs = self.trading_center.get_signal_iteration_log()
         self._current_signal_logs_list = list(reversed(signal_logs))
 
+        # 日期范围过滤
+        today_prefix = time.strftime("%Y-%m-%d")
+
+        def _safe_float_ts(item):
+            ts_v = item.get("timestamp")
+            if ts_v is not None:
+                try:
+                    return float(ts_v)
+                except Exception:
+                    pass
+            t_text = str(item.get("time_str", "") or "")
+            if t_text:
+                for fmt in ("%Y-%m-%d %H:%M:%S", "%Y/%m/%d %H:%M:%S", "%Y-%m-%d %H:%M", "%H:%M:%S"):
+                    try:
+                        return time.mktime(time.strptime(t_text, fmt))
+                    except Exception:
+                        pass
+            return 0.0
+
+        def _is_log_today(s_item):
+            t_text = str(s_item.get("time_str", "") or "")
+            if t_text.startswith(today_prefix):
+                return True
+            ts_v = s_item.get("timestamp")
+            if isinstance(ts_v, str) and ts_v.startswith(today_prefix):
+                return True
+            ts_num = _safe_float_ts(s_item)
+            if ts_num > 0:
+                try:
+                    return time.strftime("%Y-%m-%d", time.localtime(ts_num)) == today_prefix
+                except Exception:
+                    pass
+            return False
+
+        if self._history_date_filter == "TODAY":
+            filtered_logs = [s for s in self._current_signal_logs_list if _is_log_today(s)]
+        elif self._history_date_filter == "OLD":
+            filtered_logs = [s for s in self._current_signal_logs_list if not _is_log_today(s)]
+        else:
+            filtered_logs = list(self._current_signal_logs_list)
+
         self.btn_orders_pending.setText(f"⏳ 待执行指令 ({len(directives)})")
-        self.btn_orders_history.setText(f"📋 历史信号日志 ({len(self._current_signal_logs_list)})")
+        self.btn_orders_history.setText(f"📋 历史日志 ({len(filtered_logs)}/{len(self._current_signal_logs_list)})")
 
         hv_orders = self.tbl_orders.horizontalHeader()
         sort_col_orders = hv_orders.sortIndicatorSection() if hv_orders.isSortIndicatorShown() else -1
@@ -1235,46 +1639,169 @@ class IPOCommandRoomDialog(QDialog):
                 self.tbl_orders.setItem(r, 5, it_reason)
         else:
             # 历史信号日志模式
-            self.tbl_orders.setRowCount(len(self._current_signal_logs_list))
-            for r, s_log in enumerate(self._current_signal_logs_list):
-                # 优先用 time_str（可读时间字符串），如不存在再尝试转换 timestamp float
-                ts_str = s_log.get("time_str", "")
-                if not ts_str:
-                    ts_raw = s_log.get("timestamp", "")
-                    try:
-                        import time as _time
-                        ts_str = _time.strftime("%Y-%m-%d %H:%M:%S", _time.localtime(float(ts_raw)))
-                    except Exception:
-                        ts_str = str(ts_raw)
-                if " " in ts_str:
-                    ts_str = ts_str.split(" ", 1)[1]  # 仅保留时分秒更紧凑
-                self.tbl_orders.setItem(r, 0, QTableWidgetItem(ts_str))
-                tier_str = s_log.get("signal_tier", "S")
-                tier_it = QTableWidgetItem(tier_str)
-                if "SSS" in tier_str:
-                    tier_it.setForeground(QColor("#ffd700"))
-                elif "S" in tier_str:
-                    tier_it.setForeground(QColor("#00ff88"))
-                elif "A" in tier_str:
-                    tier_it.setForeground(QColor("#00e5ff"))
-                else:
-                    tier_it.setForeground(QColor("#ff5555"))
-                self.tbl_orders.setItem(r, 1, tier_it)
+            if self._history_sub_mode == "STREAM":
+                # ── 1. 逐笔流水视图 ──
+                self.tbl_orders.setRowCount(len(filtered_logs))
+                for r, s_log in enumerate(filtered_logs):
+                    ts_str = s_log.get("time_str", "")
+                    ts_val = _safe_float_ts(s_log)
 
-                act_it = QTableWidgetItem(s_log.get("action", "--"))
-                if s_log.get("action") in ("BUY", "BUY_CONFIRM", "FULL_ROTATION_SWAP"):
-                    act_it.setForeground(QColor("#00ff88"))
-                elif s_log.get("action") in ("BUY_SCOUT",):
-                    act_it.setForeground(QColor("#00e5ff"))
-                elif s_log.get("action") in ("SELL", "STOP_LOSS", "EXIT_ALL"):
-                    act_it.setForeground(QColor("#ff5555"))
-                self.tbl_orders.setItem(r, 2, act_it)
+                    if not ts_str:
+                        if ts_val > 0:
+                            try:
+                                ts_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts_val))
+                            except Exception:
+                                ts_str = ""
+                        elif isinstance(s_log.get("timestamp"), str):
+                            ts_str = str(s_log.get("timestamp"))
 
-                s_code = s_log.get("code", "")
-                code_num = int(s_code) if s_code.isdigit() else 999999
-                self.tbl_orders.setItem(r, 3, NumericTableWidgetItem(s_code, raw_val=code_num))
-                self.tbl_orders.setItem(r, 4, QTableWidgetItem(s_log.get("name", "--")))
-                self.tbl_orders.setItem(r, 5, QTableWidgetItem(s_log.get("reason", "--")))
+                    if ts_str and " " not in ts_str and ts_val > 0:
+                        try:
+                            ts_str = time.strftime("%Y-%m-%d ", time.localtime(ts_val)) + ts_str
+                        except Exception:
+                            pass
+
+                    is_today = _is_log_today(s_log)
+                    if is_today:
+                        hms = ts_str.split(" ", 1)[1] if " " in ts_str else ts_str
+                        disp_time = f"今日 {hms}"
+                        time_it = NumericTableWidgetItem(disp_time, raw_val=ts_val if ts_val > 0 else 9999999999.0)
+                        time_it.setForeground(QColor("#00ff88"))
+                    else:
+                        disp_time = ts_str[2:] if ts_str.startswith("20") else ts_str
+                        time_it = NumericTableWidgetItem(disp_time, raw_val=ts_val if ts_val > 0 else 0.0)
+                        time_it.setForeground(QColor("#ffaa00"))
+                    self.tbl_orders.setItem(r, 0, time_it)
+
+                    tier_str = s_log.get("signal_tier", "S")
+                    tier_it = QTableWidgetItem(tier_str)
+                    if "SSS" in tier_str:
+                        tier_it.setForeground(QColor("#ffd700"))
+                    elif "S" in tier_str:
+                        tier_it.setForeground(QColor("#00ff88"))
+                    elif "A" in tier_str:
+                        tier_it.setForeground(QColor("#00e5ff"))
+                    else:
+                        tier_it.setForeground(QColor("#ff5555"))
+                    self.tbl_orders.setItem(r, 1, tier_it)
+
+                    act_it = QTableWidgetItem(s_log.get("action", "--"))
+                    if s_log.get("action") in ("BUY", "BUY_CONFIRM", "FULL_ROTATION_SWAP"):
+                        act_it.setForeground(QColor("#00ff88"))
+                    elif s_log.get("action") in ("BUY_SCOUT",):
+                        act_it.setForeground(QColor("#00e5ff"))
+                    elif s_log.get("action") in ("SELL", "STOP_LOSS", "EXIT_ALL"):
+                        act_it.setForeground(QColor("#ff5555"))
+                    self.tbl_orders.setItem(r, 2, act_it)
+
+                    s_code = s_log.get("code", "")
+                    code_num = int(s_code) if s_code.isdigit() else 999999
+                    self.tbl_orders.setItem(r, 3, NumericTableWidgetItem(s_code, raw_val=code_num))
+                    self.tbl_orders.setItem(r, 4, QTableWidgetItem(s_log.get("name", "--")))
+                    self.tbl_orders.setItem(r, 5, QTableWidgetItem(s_log.get("reason", "--")))
+            else:
+                # ── 2. 标的归集与连续持久力视图 ──
+                from collections import OrderedDict
+                agg_dict = OrderedDict()
+                for item in filtered_logs:
+                    c = item.get("code", "")
+                    if not c:
+                        continue
+                    i_ts = _safe_float_ts(item)
+                    if c not in agg_dict:
+                        agg_dict[c] = {
+                            "code": c,
+                            "name": item.get("name", "--"),
+                            "records": [],
+                            "count": 0,
+                            "first_time": item.get("time_str", "--"),
+                            "last_time": item.get("time_str", "--"),
+                            "first_ts": i_ts,
+                            "last_ts": i_ts,
+                            "max_tier": item.get("signal_tier", "A"),
+                            "last_action": item.get("action", "--"),
+                            "latest_reason": item.get("reason", "--")
+                        }
+                    ag = agg_dict[c]
+                    ag["records"].append(item)
+                    ag["count"] += 1
+                    curr_ts = i_ts
+                    if curr_ts > 0:
+                        if ag["first_ts"] == 0 or curr_ts < ag["first_ts"]:
+                            ag["first_ts"] = curr_ts
+                            ag["first_time"] = item.get("time_str", "--")
+                        if curr_ts >= ag["last_ts"]:
+                            ag["last_ts"] = curr_ts
+                            ag["last_time"] = item.get("time_str", "--")
+                            ag["last_action"] = item.get("action", "--")
+                            ag["latest_reason"] = item.get("reason", "--")
+                    tier = item.get("signal_tier", "A")
+                    if "SSS" in tier:
+                        ag["max_tier"] = "SSS"
+                    elif "SS" in tier and ag["max_tier"] != "SSS":
+                        ag["max_tier"] = "SS"
+                    elif "S" in tier and ag["max_tier"] not in ("SSS", "SS"):
+                        ag["max_tier"] = "S"
+
+                agg_list = list(agg_dict.values())
+                self._current_aggregated_logs_list = agg_list
+                self.tbl_orders.setRowCount(len(agg_list))
+
+                for r, ag in enumerate(agg_list):
+                    c_num = int(ag["code"]) if ag["code"].isdigit() else 999999
+                    self.tbl_orders.setItem(r, 0, NumericTableWidgetItem(ag["code"], raw_val=c_num))
+                    self.tbl_orders.setItem(r, 1, QTableWidgetItem(ag["name"]))
+
+                    cnt_it = NumericTableWidgetItem(f"{ag['count']}次", raw_val=ag["count"])
+                    if ag["count"] >= 3:
+                        cnt_it.setForeground(QColor("#ffd700"))
+                    elif ag["count"] >= 2:
+                        cnt_it.setForeground(QColor("#00ff88"))
+                    self.tbl_orders.setItem(r, 2, cnt_it)
+
+                    t1 = ag["first_time"]
+                    t2 = ag["last_time"]
+                    t1_disp = t1.split(" ", 1)[1] if " " in t1 and t1.startswith(today_prefix) else (t1[2:] if t1.startswith("20") else t1)
+                    t2_disp = t2.split(" ", 1)[1] if " " in t2 and t2.startswith(today_prefix) else (t2[2:] if t2.startswith("20") else t2)
+                    self.tbl_orders.setItem(r, 3, NumericTableWidgetItem(t1_disp, raw_val=ag["first_ts"]))
+                    self.tbl_orders.setItem(r, 4, NumericTableWidgetItem(t2_disp, raw_val=ag["last_ts"]))
+
+                    tier_it = QTableWidgetItem(ag["max_tier"])
+                    if "SSS" in ag["max_tier"]:
+                        tier_it.setForeground(QColor("#ffd700"))
+                    elif "S" in ag["max_tier"]:
+                        tier_it.setForeground(QColor("#00ff88"))
+                    self.tbl_orders.setItem(r, 5, tier_it)
+
+                    act_it = QTableWidgetItem(ag["last_action"])
+                    if "BUY" in ag["last_action"]:
+                        act_it.setForeground(QColor("#00ff88"))
+                    elif "SELL" in ag["last_action"] or "STOP" in ag["last_action"]:
+                        act_it.setForeground(QColor("#ff5555"))
+                    self.tbl_orders.setItem(r, 6, act_it)
+
+                    span_min = int(max(0.0, ag["last_ts"] - ag["first_ts"]) // 60)
+                    if ag["count"] >= 4 or (ag["count"] >= 3 and span_min >= 20):
+                        p_tag = f"🔥 极强持久 ({ag['count']}次/{span_min}分)"
+                        p_col = QColor("#ffd700")
+                    elif ag["count"] >= 2 and span_min >= 5:
+                        p_tag = f"⚡ 持续异动 ({ag['count']}次/{span_min}分)"
+                        p_col = QColor("#00ff88")
+                    elif ag["count"] >= 2:
+                        p_tag = f"⚡ 密集连击 ({ag['count']}次)"
+                        p_col = QColor("#00e5ff")
+                    else:
+                        p_tag = "⏱️ 单次脉冲"
+                        p_col = QColor("#8f93a8")
+
+                    if any(a in ag["last_action"] for a in ["SELL", "STOP_LOSS", "EXIT"]):
+                        p_tag = f"📉 动能衰减 ({ag['count']}次)"
+                        p_col = QColor("#ff4444")
+
+                    p_it = QTableWidgetItem(p_tag)
+                    p_it.setForeground(p_col)
+                    p_it.setToolTip(f"双击调出 {ag['name']} 的全部 {ag['count']} 次异动时间线轨迹")
+                    self.tbl_orders.setItem(r, 7, p_it)
 
         self.tbl_orders.setSortingEnabled(True)
         if sort_col_orders >= 0:
