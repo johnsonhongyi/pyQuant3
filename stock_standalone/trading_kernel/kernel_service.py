@@ -361,17 +361,45 @@ class TradingKernelService:
         os.makedirs(target_dir, exist_ok=True)
         self._rotate_reconciliation_history(target_dir)
         latest_path = os.path.join(target_dir, "latest.json")
-        temp_path = latest_path + ".tmp"
-        with open(temp_path, "w", encoding="utf-8") as fh:
-            json.dump(payload, fh, ensure_ascii=False, indent=2, sort_keys=True)
-        os.replace(temp_path, latest_path)
+        temp_path = latest_path + f".{os.getpid()}.tmp"
+        try:
+            with open(temp_path, "w", encoding="utf-8") as fh:
+                json.dump(payload, fh, ensure_ascii=False, indent=2, sort_keys=True)
+            replaced = False
+            for _retry in range(3):
+                try:
+                    os.replace(temp_path, latest_path)
+                    replaced = True
+                    break
+                except PermissionError:
+                    import time
+                    time.sleep(0.05)
+            if not replaced:
+                # Windows 读句柄占用防御：若重命名因文件被占用拒绝访问，直接覆盖写入目标文件
+                with open(latest_path, "w", encoding="utf-8") as fh:
+                    json.dump(payload, fh, ensure_ascii=False, indent=2, sort_keys=True)
+                if os.path.exists(temp_path):
+                    try:
+                        os.remove(temp_path)
+                    except Exception:
+                        pass
+        except Exception as e_replace:
+            logger.debug(f"[TK-Reconciliation] Write latest.json skipped: {e_replace}")
+            try:
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+            except Exception:
+                pass
 
         history_path = os.path.join(
             target_dir,
             f"reconciliation_{datetime.now().strftime('%Y%m%d')}.jsonl",
         )
-        with open(history_path, "a", encoding="utf-8") as fh:
-            fh.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
+        try:
+            with open(history_path, "a", encoding="utf-8") as fh:
+                fh.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
+        except Exception as e_hist:
+            logger.debug(f"[TK-Reconciliation] Append history failed: {e_hist}")
         self._last_reconciliation_persist_monotonic = now_mono
         return payload
 
@@ -440,7 +468,7 @@ class TradingKernelService:
 
         result = {"restored_to_gw": 0, "synced_from_gw": 0, "evicted": 0}
         try:
-            from trading_kernel.core.model import Position as PaperPosition
+            from trading_kernel.execution.paper_adapter import Position as PaperPosition
             from trade_gateway import Position as LegacyPosition
 
             # 1) 内核持仓反哺/自愈恢复至老网关（防老网关崩溃或清空）
