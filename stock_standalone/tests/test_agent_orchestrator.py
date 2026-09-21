@@ -580,3 +580,15 @@ def test_parallel_scope_ignores_only_other_owned_paths(tmp_path: Path) -> None:
         parallel_owned=["ats/other.py"],
     )
     assert violations == ["trade_gateway.py"]
+
+
+def test_runnable_tasks_can_be_scoped_to_explicit_task_set(tmp_path: Path) -> None:
+    root = _project(tmp_path)
+    hub = root / ".agent_hub"
+    source = (hub / "inbox" / "001_preview.md").read_text(encoding="utf-8")
+    second = source.replace("- Task-ID: 001", "- Task-ID: 002").replace(
+        "- `ats/example.py`", "- `ats/other.py`"
+    )
+    (hub / "inbox" / "002_scoped.md").write_text(second, encoding="utf-8")
+    orchestrator = AgentOrchestrator(root)
+    assert orchestrator.runnable_tasks(2, task_ids=["002"]) == ["002"]
