@@ -43,3 +43,16 @@ def test_command_room_requested_position_reaches_manual_kernel_intent():
     intent = decide(signal, "FLAT")
     assert intent.action == "BUY"
     assert intent.size_pct == 0.12
+
+
+def test_manual_reduce_preserves_partial_size():
+    signal = canonicalize_decision_queue_item({
+        "code": "000001",
+        "action": "REDUCE",
+        "signal_type": "手工减仓",
+        "current_price": 11.0,
+        "requested_size_pct": 0.30,
+    })
+    intent = decide(signal, "IN_TRADE")
+    assert intent.action == "REDUCE"
+    assert intent.size_pct == 0.30

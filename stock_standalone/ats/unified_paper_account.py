@@ -55,7 +55,9 @@ def get_orders() -> List[Dict[str, Any]]:
 
 def get_positions() -> Dict[str, Dict[str, Any]]:
     adapter = get_paper_adapter()
-    return adapter.get_positions()
+    positions = adapter.get_positions()
+    _align_state_manager(set(positions))
+    return positions
 
 
 def get_account_snapshot() -> Dict[str, Any]:
@@ -66,15 +68,103 @@ def get_account_snapshot() -> Dict[str, Any]:
     return snap
 
 
+def _align_state_manager(held_codes: set[str]) -> None:
+    """Keep the kernel state machine physically aligned with paper holdings."""
+    try:
+        from trading_kernel.kernel_service import get_kernel_service
+
+        service = get_kernel_service()
+        known = set(service.state_manager.snapshot()) | held_codes
+        for code in known:
+            target = "IN_TRADE" if code in held_codes else "FLAT"
+            if service.state_manager.get(code) != target:
+                service.state_manager.set(code, target)
+    except Exception:
+        pass
+
+
+def reconcile_account() -> Dict[str, Any]:
+    """Audit orders versus holdings and auto-align all runtime state consumers.
+
+    The persisted position snapshot remains authoritative for *current* holdings;
+    historical orders remain authoritative for closed-trade performance.  Legacy
+    gaps are reported instead of silently rewriting historical transactions.
+    """
+    positions = get_positions()
+    open_volume: Dict[str, float] = {}
+    for order in sorted(get_orders(), key=lambda item: str(item.get("timestamp") or "")):
+        code = str(order.get("code") or "").strip().zfill(6)
+        action = str(order.get("action") or "").upper()
+        volume = _number(order.get("volume"))
+        if not code or volume <= 0:
+            continue
+        if action in {"BUY", "ADD"}:
+            open_volume[code] = open_volume.get(code, 0.0) + volume
+        elif action == "SELL":
+            # PaperAdapter semantics: SELL always closes the full position even
+            # when an old ledger row carries a stale/partial volume value.
+            open_volume[code] = 0.0
+        elif action == "REDUCE":
+            open_volume[code] = max(0.0, open_volume.get(code, 0.0) - volume)
+    derived_codes = {code for code, volume in open_volume.items() if volume > 1e-9}
+    snapshot_codes = set(positions)
+    return {
+        "status": "ALIGNED" if snapshot_codes == derived_codes else "LEGACY_MISMATCH",
+        "snapshot_position_count": len(snapshot_codes),
+        "order_derived_position_count": len(derived_codes),
+        "snapshot_only_codes": sorted(snapshot_codes - derived_codes),
+        "order_only_codes": sorted(derived_codes - snapshot_codes),
+        "authoritative_current_source": "paper_account_snapshot",
+        "authoritative_performance_source": "paper_orders_fifo",
+    }
+
+
 def execute_command_directive(directive: Any) -> PaperExecutionResult:
     """Route one command-room directive through the authoritative TK kernel."""
     raw_action = str(getattr(directive, "action", "") or "").upper()
+    if raw_action == "FULL_ROTATION_SWAP":
+        from types import SimpleNamespace
+
+        old_code = str(getattr(directive, "target_swap_code", "") or "").zfill(6)
+        old_position = get_positions().get(old_code)
+        if not old_position:
+            return PaperExecutionResult(False, action=raw_action, reject_code="ROTATION_SOURCE_NOT_HELD")
+        sell_leg = SimpleNamespace(
+            action="SELL",
+            code=old_code,
+            name=str(getattr(directive, "target_swap_name", "") or old_code),
+            price=_number(old_position.get("current_price") or old_position.get("entry_price")),
+            size_pct=100.0,
+            reason=f"全仓轮动卖出腿: {getattr(directive, 'reason', '')}",
+        )
+        sold = execute_command_directive(sell_leg)
+        if not sold.executed:
+            return PaperExecutionResult(False, action=raw_action, reject_code=f"ROTATION_SELL_REJECTED:{sold.reject_code}")
+        buy_leg = SimpleNamespace(
+            action="BUY",
+            code=getattr(directive, "code", ""),
+            name=getattr(directive, "name", ""),
+            price=getattr(directive, "price", 0.0),
+            size_pct=getattr(directive, "size_pct", 0.0),
+            reason=f"全仓轮动买入腿: {getattr(directive, 'reason', '')}",
+        )
+        bought = execute_command_directive(buy_leg)
+        if not bought.executed:
+            return PaperExecutionResult(False, action=raw_action, reject_code=f"ROTATION_BUY_FAILED_AFTER_SELL:{bought.reject_code}")
+        return PaperExecutionResult(
+            True, bought.order_id, bought.trace_id, raw_action, "",
+            bought.volume, bought.size_pct,
+        )
+
     if raw_action in {"BUY", "BUY_SCOUT", "BUY_CONFIRM"}:
         kernel_action = "BUY"
         signal_type = "手动买入"
-    elif raw_action in {"SELL", "EXIT_ALL"}:
+    elif raw_action in {"SELL", "EXIT_ALL", "SWITCH_SWAP"}:
         kernel_action = "SELL"
         signal_type = "手工平仓"
+    elif raw_action in {"REDUCE_30", "REDUCE_HALF"}:
+        kernel_action = "REDUCE"
+        signal_type = "手工减仓"
     else:
         return PaperExecutionResult(
             executed=False,
@@ -86,6 +176,10 @@ def execute_command_directive(directive: Any) -> PaperExecutionResult:
     requested_pct = _number(getattr(directive, "size_pct", 0.0)) / 100.0
     if kernel_action == "SELL":
         requested_pct = 1.0
+    elif raw_action == "REDUCE_30":
+        requested_pct = 0.30
+    elif raw_action == "REDUCE_HALF":
+        requested_pct = 0.50
     if price <= 0:
         return PaperExecutionResult(False, action=kernel_action, reject_code="INVALID_PRICE")
 

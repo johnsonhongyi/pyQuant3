@@ -899,8 +899,14 @@ class TradingKernelService:
                             elif risk.final_action == "ADD":
                                 pos.tp_triggered = False
                             self.paper_adapter._save_state()
-                elif risk.final_action == "SELL":
-                    if risk.final_size_pct >= 0.95:
+                elif risk.final_action in {"SELL", "REDUCE"}:
+                    still_held = bool(
+                        hasattr(self, "paper_adapter")
+                        and self.paper_adapter
+                        and self.paper_adapter.account
+                        and signal.code in self.paper_adapter.account.positions
+                    )
+                    if not still_held:
                         self.state_manager.set(signal.code, "FLAT")
                     else:
                         self.state_manager.set(signal.code, "IN_TRADE")

@@ -214,7 +214,7 @@ class IPOTradingCenter:
         if not self._auto_load_ledger:
             return
         try:
-            from ats.unified_paper_account import get_account_snapshot, get_positions
+            from ats.unified_paper_account import get_account_snapshot, get_positions, reconcile_account
 
             kernel_positions = get_positions()
             account = get_account_snapshot()
@@ -258,6 +258,7 @@ class IPOTradingCenter:
             self._positions = synced
             self.total_capital = unified_capital
             self.available_cash = float(account.get("cash", self.available_cash) or 0.0)
+            self._paper_reconciliation = reconcile_account()
         except Exception as exc:
             logger.debug("TK PAPER position sync unavailable: %s", exc)
 
@@ -2406,5 +2407,6 @@ class IPOTradingCenter:
                         "signal_tier": p.get("signal_tier", "S") if isinstance(p, dict) else p.signal_tier
                     } for p in self._closed_positions
                 ],
-                "signal_iteration_log": list(self._signal_iteration_log)
+                "signal_iteration_log": list(self._signal_iteration_log),
+                "paper_reconciliation": dict(getattr(self, "_paper_reconciliation", {})),
             }

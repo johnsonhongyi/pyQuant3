@@ -1505,6 +1505,17 @@ class IPOCommandRoomDialog(QDialog):
         """刷新指挥室全部战情数据 (支持角色中文映射、双模式切换与数值精确排序)"""
         summary = self.trading_center.get_fleet_summary()
         self.lbl_capital.setText(f"💰 总资金: {summary['total_capital']/10000:.1f}万 | 可用: {summary['available_cash']/10000:.1f}万")
+        reconcile = summary.get("paper_reconciliation", {})
+        if reconcile:
+            status = reconcile.get("status", "UNKNOWN")
+            self.lbl_capital.setToolTip(
+                "TK PAPER统一账户对账\n"
+                f"状态: {status}\n"
+                f"当前持仓快照: {reconcile.get('snapshot_position_count', 0)}只\n"
+                f"订单推导持仓: {reconcile.get('order_derived_position_count', 0)}只\n"
+                f"仅快照存在: {', '.join(reconcile.get('snapshot_only_codes', [])) or '--'}\n"
+                f"仅订单存在: {', '.join(reconcile.get('order_only_codes', [])) or '--'}"
+            )
         self.lbl_positions.setText(f"📊 持仓: {summary['holding_count']} 只 ({summary['fleet_weight_pct']}%仓)")
         self.lbl_leader.setText(f"🥇 爆款领头羊: {summary['top_leader_name']} ({summary['top_leader_score']}分)")
         # 同步存储龙头代码，供点击联动使用
