@@ -79,6 +79,31 @@ def test_wrong_repair_hypothesis_self_corrects_and_rotates_position_down():
     assert reflow.revision_count == 2
 
 
+def test_main_up_requires_persistent_breadth_after_flood_spread():
+    machine = SubnewTideStateMachine()
+    flood = machine.update(_obs("2026-09-14", .82, .78, 2.8, 100.0, 7.0, -2.0))
+    main_up = machine.update(_obs("2026-09-15", .80, .74, 3.1, 105.0, 7.5, -1.0))
+
+    assert flood.state == "T9_FLOOD_SPREAD"
+    assert main_up.state == "T10_MAIN_UP"
+    assert main_up.position_cap_pct == 80.0
+    assert main_up.target_action == "HOLD_LEADERS"
+    assert "broad_advance_persisted" in main_up.transition_reasons
+
+
+def test_climax_distribution_requires_high_turnover_and_fading_breadth():
+    machine = SubnewTideStateMachine()
+    machine.update(_obs("2026-09-14", .82, .78, 2.8, 100.0, 7.0, -2.0))
+    machine.update(_obs("2026-09-15", .80, .74, 3.1, 105.0, 7.5, -1.0))
+    distribution = machine.update(_obs("2026-09-16", .48, .45, .6, 140.0, 4.0, -4.0))
+
+    assert distribution.state == "T1_CLIMAX_DISTRIBUTION"
+    assert distribution.position_cap_pct == 0.0
+    assert distribution.allow_probe is False
+    assert distribution.target_action == "EXIT_RISK"
+    assert "high_turnover_distribution" in distribution.transition_reasons
+
+
 def test_intraday_refresh_replaces_same_session_without_revision_inflation():
     machine = SubnewTideStateMachine()
     machine.update(_obs("2026-09-14", .821, .821, 2.34, 135.66, 11.60, -4.60))
@@ -152,4 +177,3 @@ def test_subnew_tide_state_machine_causal_check_rejects_non_increasing():
     import pytest
     with pytest.raises(ValueError, match="observations must be strictly increasing"):
         machine.update(_obs("2026-09-14", .821, .821, 2.34, 135.66, 11.60, -4.60))
-
