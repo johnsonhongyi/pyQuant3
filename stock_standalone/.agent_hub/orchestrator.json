@@ -10,7 +10,7 @@
   "worker_default_count": 2,
   "worker_max_count": 3,
   "worker_timeout_seconds": 240,
-  "worker_no_activity_timeout_seconds": 60,
+  "worker_no_activity_timeout_seconds": 120,
   "worker_monitor_interval_seconds": 1.0,
   "worker_summary_max_chars": 200,
   "project_state_max_tokens": 500,

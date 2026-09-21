@@ -592,3 +592,27 @@ def test_runnable_tasks_can_be_scoped_to_explicit_task_set(tmp_path: Path) -> No
     (hub / "inbox" / "002_scoped.md").write_text(second, encoding="utf-8")
     orchestrator = AgentOrchestrator(root)
     assert orchestrator.runnable_tasks(2, task_ids=["002"]) == ["002"]
+
+
+def test_execute_batch_preserves_sibling_file_ownership_after_peer_finishes(tmp_path: Path) -> None:
+    from types import SimpleNamespace
+
+    root = _project(tmp_path)
+    hub = root / ".agent_hub"
+    source = (hub / "inbox" / "001_preview.md").read_text(encoding="utf-8")
+    second = source.replace("- Task-ID: 001", "- Task-ID: 002").replace(
+        "- `ats/example.py`", "- `ats/other.py`"
+    )
+    (hub / "inbox" / "002_parallel.md").write_text(second, encoding="utf-8")
+    orchestrator = AgentOrchestrator(root)
+    captured = {}
+
+    def fake_execute(task_id, parallel_owned_patterns=()):
+        captured[task_id] = set(parallel_owned_patterns)
+        return SimpleNamespace(task_id=task_id)
+
+    orchestrator.execute = fake_execute
+    reports = orchestrator.execute_batch(2, task_ids=["001", "002"])
+    assert [item.task_id for item in reports] == ["001", "002"]
+    assert "ats/other.py" in captured["001"]
+    assert "ats/example.py" in captured["002"]

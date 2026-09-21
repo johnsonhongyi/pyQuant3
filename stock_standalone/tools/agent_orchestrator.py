@@ -885,7 +885,11 @@ class AgentOrchestrator:
         )
         return RunReport(selected, "DRY_RUN", self.hub.hub / "artifacts" / selected, message)
 
-    def execute(self, task_id: str | None = None) -> RunReport:
+    def execute(
+        self,
+        task_id: str | None = None,
+        parallel_owned_patterns: Sequence[str] = (),
+    ) -> RunReport:
         # Authentication is checked explicitly by `preflight --require-auth` before a run.
         # Repeating two model probes for every task wastes quota and introduces a transient
         # dependency before the task is even claimed; the worker still reports auth errors.
@@ -928,9 +932,8 @@ class AgentOrchestrator:
         self._write(artifact_dir / "verification.log", verification_text)
 
         changed = self._changed_paths(before, self._inventory())
-        violations = self._scope_violations(
-            task_text, changed, self._parallel_owned_patterns(selected)
-        )
+        active_parallel = list(parallel_owned_patterns) + self._parallel_owned_patterns(selected)
+        violations = self._scope_violations(task_text, changed, active_parallel)
         scope_text = f"Scope: {'PASS' if not violations else 'FAIL'}\n\nChanged paths:\n" + "\n".join(sorted(changed))
         if violations:
             scope_text += "\n\nViolations:\n" + "\n".join(violations)
@@ -1041,9 +1044,23 @@ class AgentOrchestrator:
         selected = self.runnable_tasks(workers, task_ids=task_ids)
         if not selected:
             return []
+        owned_by_task: dict[str, list[str]] = {}
+        for task_id in selected:
+            task_path = self.hub.locate(task_id, ("inbox",)).path
+            owned_by_task[task_id] = self._section_items(
+                task_path.read_text(encoding="utf-8"), "Files Allowed"
+            )
         reports: list[RunReport] = []
         with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="agent-hub") as pool:
-            futures = {pool.submit(self.execute, task_id): task_id for task_id in selected}
+            futures = {}
+            for task_id in selected:
+                sibling_owned = [
+                    pattern
+                    for other_id, patterns in owned_by_task.items()
+                    if other_id != task_id
+                    for pattern in patterns
+                ]
+                futures[pool.submit(self.execute, task_id, sibling_owned)] = task_id
             for future in as_completed(futures):
                 reports.append(future.result())
         return sorted(reports, key=lambda item: item.task_id)
