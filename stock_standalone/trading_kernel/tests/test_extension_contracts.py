@@ -220,3 +220,67 @@ def test_gateway_request_id_is_atomic_under_concurrency():
         responses = list(pool.map(lambda _: gateway.submit(request), range(8)))
     assert service.calls == 1
     assert len({response.trace_id for response in responses}) == 1
+
+
+def test_gateway_request_cache_is_fifo_bounded():
+    class Service:
+        KERNEL_VERSION = "test"
+
+        def __init__(self):
+            self.calls = 0
+
+        def evaluate_decision_item(self, item, **kwargs):
+            self.calls += 1
+            return {
+                "kernel_allowed": True, "kernel_executed": False,
+                "kernel_action": "HOLD", "kernel_size_pct": 0.0,
+                "kernel_trace_id": f"trace-{self.calls}",
+                "kernel_order_id": "", "kernel_reject_code": "",
+                "kernel_state": "FLAT",
+            }
+
+    service = Service()
+    gateway = KernelGateway(service)
+    gateway.REQUEST_CACHE_MAX = 3
+    requests = [
+        DecisionRequest(code=f"00000{i}", price=10.0, request_id=f"req-{i}")
+        for i in range(1, 5)
+    ]
+    first = gateway.submit(requests[0])
+    gateway.submit(requests[1])
+    gateway.submit(requests[2])
+
+    assert len(gateway._request_cache) == 3
+    assert gateway.submit(requests[0]) == first
+    assert service.calls == 3
+
+    gateway.submit(requests[3])
+    assert len(gateway._request_cache) == 3
+    assert "req-1" not in gateway._request_cache
+
+
+def test_gateway_request_cache_resets_on_new_day():
+    class Service:
+        KERNEL_VERSION = "test"
+        def __init__(self):
+            self.calls = 0
+
+        def evaluate_decision_item(self, item, **kwargs):
+            self.calls += 1
+            return {
+                "kernel_allowed": True, "kernel_executed": False,
+                "kernel_action": "HOLD", "kernel_size_pct": 0.0,
+                "kernel_trace_id": f"trace-{self.calls}",
+                "kernel_order_id": "", "kernel_reject_code": "",
+                "kernel_state": "FLAT",
+            }
+
+    service = Service()
+    gateway = KernelGateway(service)
+    request = DecisionRequest(code="000001", price=10.0, request_id="req-day")
+    gateway.submit(request)
+    gateway._request_cache_day = "1900-01-01"
+    gateway.submit(request)
+
+    assert service.calls == 2
+    assert len(gateway._request_cache) == 1
