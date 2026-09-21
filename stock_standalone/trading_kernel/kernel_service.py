@@ -84,11 +84,14 @@ class TradingKernelService:
 
     def __init__(self, journal_path: str = "logs/trading_kernel_trace.jsonl",
                  strategy_provider: Any = None, state_store: Any = None,
-                 event_sink: Any = None):
+                 event_sink: Any = None, reconciliation_dir: str | None = None):
         self.state_manager = state_store or StateManager()
         self.journal = event_sink or JsonlJournal(journal_path)
         self.strategy_provider = strategy_provider
         self.limits = load_risk_limits_from_config()
+        self._reconciliation_dir = reconciliation_dir
+        self._last_reconciliation_persist_monotonic = 0.0
+        self._reconciliation_interval_seconds = 60.0
         
         # 从 global.ini 加载静态强路由配置并注入策略决策大脑 StrategyRouter
         try:
@@ -157,6 +160,7 @@ class TradingKernelService:
         self._indicator_cache = {}
         self._df_all = None
         self._auto_warm_up_from_preprocessed_hdf5()
+        self._persist_reconciliation_snapshot(force=True, reason="STARTUP")
 
     def register_strategy_provider(self, provider: Any) -> None:
         """Install an external strategy provider through the stable port."""
@@ -236,16 +240,157 @@ class TradingKernelService:
             }
             for code in changed_codes
         ]
+
+        orders = self.get_order_history()
+        open_volume: dict[str, float] = {}
+        for order in sorted(orders, key=lambda row: str(row.get("timestamp") or "")):
+            order_code = str(order.get("code") or "").strip()
+            action = str(order.get("action") or "").upper()
+            try:
+                volume = float(order.get("volume") or 0.0)
+            except (TypeError, ValueError):
+                volume = 0.0
+            if not order_code or volume <= 0:
+                continue
+            if action in {"BUY", "ADD"}:
+                open_volume[order_code] = open_volume.get(order_code, 0.0) + volume
+            elif action == "SELL":
+                open_volume[order_code] = 0.0
+            elif action == "REDUCE":
+                open_volume[order_code] = max(
+                    0.0,
+                    open_volume.get(order_code, 0.0) - volume,
+                )
+        order_derived_held = {
+            code for code, volume in open_volume.items() if volume > 1e-9
+        }
+        snapshot_only_codes = sorted(held - order_derived_held)
+        order_only_codes = sorted(order_derived_held - held)
+
+        account = dict(adapter.get_account_snapshot()) if adapter is not None else {}
+        account.setdefault(
+            "initial_capital",
+            float(getattr(adapter, "initial_capital", 0.0) or 0.0),
+        )
+        account.setdefault("position_count", len(held))
         return {
             "status": "ALIGNED" if not changed_codes else "ALIGNED_WITH_CHANGES",
+            "ledger_status": (
+                "ALIGNED"
+                if not snapshot_only_codes and not order_only_codes
+                else "LEGACY_MISMATCH"
+            ),
             "mode": str(self._mode),
             "generated_at": datetime.now().isoformat(timespec="seconds"),
             "position_count": len(held),
+            "order_count": len(orders),
+            "cash": float(account.get("cash", 0.0) or 0.0),
             "state_count": len(after),
             "changed_count": len(changed_codes),
             "changed_codes": changed_codes,
+            "snapshot_only_codes": snapshot_only_codes,
+            "order_only_codes": order_only_codes,
             "differences": differences,
             "states": after,
+        }
+
+    def _resolve_reconciliation_dir(self):
+        import os
+
+        if self._reconciliation_dir:
+            return os.path.abspath(self._reconciliation_dir)
+        if "PYTEST_CURRENT_TEST" in os.environ:
+            return None
+        return os.path.join(get_app_root(), "logs", "tk_reconciliation")
+
+    def _persist_reconciliation_snapshot(
+        self,
+        *,
+        force: bool = False,
+        reason: str = "PERIODIC",
+    ) -> dict[str, Any] | None:
+        import json
+        import os
+        import time
+
+        target_dir = self._resolve_reconciliation_dir()
+        if not target_dir:
+            return None
+        now_mono = time.monotonic()
+        if not force and (
+            now_mono - self._last_reconciliation_persist_monotonic
+            < self._reconciliation_interval_seconds
+        ):
+            return None
+
+        report = self.reconcile_runtime_state()
+        adapter = self.get_execution_adapter()
+        account = dict(adapter.get_account_snapshot()) if adapter is not None else {}
+        positions = dict(adapter.get_positions()) if adapter is not None else {}
+        account.setdefault(
+            "initial_capital",
+            float(getattr(adapter, "initial_capital", 0.0) or 0.0),
+        )
+        account.setdefault("position_count", len(positions))
+        orders = self.get_order_history()
+        payload = {
+            "snapshot_version": "1.0",
+            "reason": str(reason or "PERIODIC"),
+            "generated_at": datetime.now().isoformat(timespec="seconds"),
+            "mode": str(self._mode),
+            "account": account,
+            "positions": positions,
+            "orders": orders,
+            "states": self.state_manager.snapshot(),
+            "reconciliation": report,
+            "ssot": {
+                "account": "trading_kernel.execution.paper_adapter",
+                "positions": "trading_kernel.execution.paper_adapter",
+                "orders": "trading_kernel.execution.paper_adapter",
+                "states": "trading_kernel.state_store",
+            },
+        }
+        os.makedirs(target_dir, exist_ok=True)
+        latest_path = os.path.join(target_dir, "latest.json")
+        temp_path = latest_path + ".tmp"
+        with open(temp_path, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, ensure_ascii=False, indent=2, sort_keys=True)
+        os.replace(temp_path, latest_path)
+
+        history_path = os.path.join(
+            target_dir,
+            f"reconciliation_{datetime.now().strftime('%Y%m%d')}.jsonl",
+        )
+        with open(history_path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
+        self._last_reconciliation_persist_monotonic = now_mono
+        return payload
+
+    def get_account_read_model(self) -> dict[str, Any]:
+        """Single read-only SSOT view for ATS/UI consumers."""
+        report = self.reconcile_runtime_state()
+        self._persist_reconciliation_snapshot(reason="READ_MODEL")
+        adapter = self.get_execution_adapter()
+        account = dict(adapter.get_account_snapshot()) if adapter is not None else {}
+        positions = dict(adapter.get_positions()) if adapter is not None else {}
+        account.setdefault(
+            "initial_capital",
+            float(getattr(adapter, "initial_capital", 0.0) or 0.0),
+        )
+        account.setdefault("position_count", len(positions))
+        return {
+            "account": account,
+            "positions": positions,
+            "orders": self.get_order_history(),
+            "states": self.state_manager.snapshot(),
+            "reconciliation": report,
+            "mode": str(self._mode),
+            "ssot": {
+                "account": "trading_kernel.execution.paper_adapter",
+                "positions": "trading_kernel.execution.paper_adapter",
+                "orders": "trading_kernel.execution.paper_adapter",
+                "states": "trading_kernel.state_store",
+            },
         }
 
     def get_order_history(self) -> list[dict[str, Any]]:
@@ -700,6 +845,7 @@ class TradingKernelService:
         return True
 
     def evaluate_decision_item(self, item: Mapping[str, Any], write_journal: bool = True, limits_override: RiskLimits | None = None) -> dict[str, Any]:
+        self._persist_reconciliation_snapshot(reason="PERIODIC")
         # 处于回测模拟模式下，直接短路返回，无需响应策略交易流以避免资源浪费
         if hasattr(self, "paper_adapter") and self.paper_adapter and getattr(self.paper_adapter, "_is_simulation", False):
             return {
@@ -1033,6 +1179,8 @@ class TradingKernelService:
                     "kernel_result": result,
                 }
             )
+        if result.get("kernel_executed"):
+            self._persist_reconciliation_snapshot(force=True, reason="ORDER_EXECUTED")
         return result
 
     def _verify_live_preconditions(self) -> tuple[bool, list[str]]:

@@ -199,9 +199,11 @@ class IPOTradingCenter:
         self._perceived_external_signals: List[Dict[str, Any]] = []
         self._injected_quality_stocks: Dict[str, Dict[str, Any]] = {}
 
-        # Only explicit persistent instances restore the on-disk ledger.
+        # Only explicit persistent instances restore non-financial metadata.
         if auto_load_ledger or ledger_file:
             self._load_persisted_ledger()
+        if auto_load_ledger and not ledger_file:
+            self._sync_from_unified_paper_account()
 
     def get_position(self, code: str) -> Optional[IPOTradingPosition]:
         """获取指定标的当前的持仓状态容器"""
@@ -214,10 +216,11 @@ class IPOTradingCenter:
         if not self._auto_load_ledger:
             return
         try:
-            from ats.unified_paper_account import get_account_snapshot, get_positions, reconcile_account
+            from ats.unified_paper_account import get_ssot_read_model, reconcile_account
 
-            kernel_positions = get_positions()
-            account = get_account_snapshot()
+            read_model = get_ssot_read_model()
+            kernel_positions = read_model.get("positions", {})
+            account = read_model.get("account", {})
             unified_capital = float(account.get("initial_capital", self.total_capital) or self.total_capital)
             synced: Dict[str, IPOTradingPosition] = {}
             for code, raw in kernel_positions.items():
@@ -258,7 +261,7 @@ class IPOTradingCenter:
             self._positions = synced
             self.total_capital = unified_capital
             self.available_cash = float(account.get("cash", self.available_cash) or 0.0)
-            self._paper_reconciliation = reconcile_account()
+            self._paper_reconciliation = reconcile_account(read_model)
         except Exception as exc:
             logger.debug("TK PAPER position sync unavailable: %s", exc)
 
@@ -481,11 +484,14 @@ class IPOTradingCenter:
                 if not isinstance(data, dict):
                     return
                 self.trading_mode = data.get("trading_mode", "ROTATION_FULL_CAPITAL")
-                self.total_capital = float(data.get("total_capital", self.total_capital))
-                self.available_cash = float(data.get("available_cash", self.available_cash))
-                
-                # 恢复活跃持仓
-                pos_list = data.get("active_positions", [])
+                restore_financial_snapshot = bool(getattr(self, "_ledger_file", None))
+                if restore_financial_snapshot:
+                    self.total_capital = float(data.get("total_capital", self.total_capital))
+                    self.available_cash = float(data.get("available_cash", self.available_cash))
+
+                # Only explicit legacy/custom ledgers may restore financial facts.
+                # Production ATS gets current positions/cash from TK SSOT immediately after load.
+                pos_list = data.get("active_positions", []) if restore_financial_snapshot else []
                 for p_dict in pos_list:
                     if isinstance(p_dict, dict) and p_dict.get("code"):
                         field_names = set(IPOTradingPosition.__dataclass_fields__.keys())
@@ -509,6 +515,13 @@ class IPOTradingCenter:
                             if p.trade_plan is not None:
                                 watch.is_reversal_protected = True
                                 watch.higher_low_stop = p.trade_plan.higher_low_stop
+
+                # Restore strategy plans independently from current financial positions.
+                for raw_plan in data.get("trade_plans", []):
+                    if isinstance(raw_plan, dict) and raw_plan.get("code"):
+                        plan_fields = set(IPOTradePlan.__dataclass_fields__.keys())
+                        plan = IPOTradePlan(**{k: v for k, v in raw_plan.items() if k in plan_fields})
+                        self._trade_plans[str(plan.code).strip().zfill(6)] = plan
 
                 # 恢复已平仓历史记录
                 closed_list = data.get("closed_positions", [])
@@ -554,16 +567,31 @@ class IPOTradingCenter:
                 for d in self._order_history[-100:]
             ]
             
+            production_ssot = bool(
+                getattr(self, "_auto_load_ledger", False)
+                and not getattr(self, "_ledger_file", None)
+            )
+            trade_plans = [
+                plan.to_dict() if hasattr(plan, "to_dict") else plan.__dict__.copy()
+                for plan in self._trade_plans.values()
+            ]
             payload = {
                 "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
                 "trading_mode": self.trading_mode,
-                "total_capital": self.total_capital,
-                "available_cash": self.available_cash,
-                "active_positions": active_list,
+                "financial_ssot": "KernelGateway.get_account_read_model",
+                "trade_plans": trade_plans,
                 "closed_positions": closed_list,
-                "order_history": order_list,
-                "signal_iteration_log": self._signal_iteration_log[:200]
+                "directive_history": order_list,
+                "signal_iteration_log": self._signal_iteration_log[:200],
             }
+            if not production_ssot:
+                # Explicit legacy/custom ledgers remain backwards compatible for tests/tools.
+                payload.update({
+                    "total_capital": self.total_capital,
+                    "available_cash": self.available_cash,
+                    "active_positions": active_list,
+                    "order_history": order_list,
+                })
             tmp_f = f"{target_file}.tmp_{os.getpid()}"
             with open(tmp_f, "w", encoding="utf-8") as f:
                 json.dump(payload, f, ensure_ascii=False, indent=2)
