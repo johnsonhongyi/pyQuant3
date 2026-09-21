@@ -15,7 +15,7 @@ import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Sequence
+from typing import Callable, Iterable, Sequence
 
 try:
     from tools.agent_hub import AgentHub, HubError
@@ -244,6 +244,7 @@ class AgentOrchestrator:
     def _worker_prompt(self, task_path: Path) -> str:
         task = task_path.read_text(encoding="utf-8")
         allowed_files = self._section_items(task, "Files Allowed")
+        budget = int(self.config.get("worker_max_readonly_tool_calls", 12))
         return (
             "AUTHORITATIVE INVOCATION RULES: "
             "The orchestrator has already claimed this task. Do not call claim or submit. "
@@ -252,7 +253,7 @@ class AgentOrchestrator:
             "verification commands after you finish. Use built-in file search/read/edit tools only. "
             "Read only the listed files and directly imported contracts needed to edit them; never "
             "browse directories, repository history, unrelated tests, or task archives. Your read/search "
-            "budget is 12 tool calls total. If the task cannot be completed inside that budget, stop and "
+            f"budget is {budget} tool calls total. If the task cannot be completed inside that budget, stop and "
             "return BLOCKED with the missing file path in risk_points.\n"
             f"READ ALLOWLIST: {json.dumps(allowed_files, ensure_ascii=False)}\n\n"
             "Return exactly one compact JSON object matching the required report schema. Do not "
@@ -521,30 +522,97 @@ class AgentOrchestrator:
         )
         return subprocess.CompletedProcess(last.args, last.returncode, last.stdout, combined_error)
 
+    @staticmethod
+    def _compact_verification_text(raw_text: str, max_lines_per_command: int = 15) -> str:
+        blocks: list[str] = []
+        for block in raw_text.split("\n\n"):
+            lines = [line for line in block.splitlines() if line.strip()]
+            if not lines:
+                continue
+            cmd_lines = [l for l in lines if l.startswith("$ ") or l.startswith("exit=")]
+            summary_lines = [
+                l for l in lines
+                if not l.startswith("$ ")
+                and not l.startswith("exit=")
+                and not re.match(r"^[\.sFExX]+(\s+\[\s*\d+%\])?$", l.strip())
+            ]
+            trimmed = cmd_lines + summary_lines[-max_lines_per_command:]
+            blocks.append("\n".join(trimmed))
+        return "\n\n".join(blocks)
+
+    def _compact_diff(self, changed_paths: Iterable[str]) -> str:
+        max_lines = int(self.config.get("max_review_diff_lines", 150))
+        code_paths = [
+            p for p in changed_paths
+            if not p.startswith(".agent_hub/artifacts/") and not p.endswith(".log")
+        ]
+        if not code_paths:
+            return ""
+        cmd = ["git", "diff", "--stat", "--"] + code_paths
+        stat_res = self._run(cmd, timeout=30)
+        stat_text = stat_res.stdout.strip() if stat_res.returncode == 0 else ""
+
+        diff_cmd = ["git", "diff", "--no-color", "--"] + code_paths
+        diff_res = self._run(diff_cmd, timeout=30)
+        if diff_res.returncode != 0 or not diff_res.stdout.strip():
+            return stat_text
+        diff_lines = diff_res.stdout.splitlines()
+        if len(diff_lines) > max_lines:
+            truncated = diff_lines[:max_lines] + [f"... truncated {len(diff_lines) - max_lines} lines ..."]
+            diff_body = "\n".join(truncated)
+        else:
+            diff_body = "\n".join(diff_lines)
+        return (stat_text + "\n\n" + diff_body).strip()
+
     def _invoke_reviewer(
-        self, task_text: str, artifact_dir: Path, verification: str, scope: str
+        self,
+        task_text: str,
+        artifact_dir: Path,
+        verification: str,
+        scope: str,
+        compact_diff: str = "",
     ) -> subprocess.CompletedProcess[str]:
         review_rules = (self.hub.hub / "review_prompt.md").read_text(encoding="utf-8")
-        prompt = (
-            f"{review_rules}\n\n## TASK\n{task_text}\n\n"
-            f"## ORCHESTRATOR VERIFICATION\n{verification}\n\n"
-            f"## SCOPE CHECK\n{scope}\n"
-        )
+        compact_verification = self._compact_verification_text(verification)
+        prompt_parts = [
+            review_rules,
+            f"## TASK\n{task_text}",
+            f"## ORCHESTRATOR VERIFICATION\n{compact_verification}",
+            f"## SCOPE CHECK\n{scope}",
+        ]
+        if compact_diff.strip():
+            prompt_parts.append(
+                f"## COMPACT DIFF EVIDENCE\n"
+                f"> [!NOTE] Orchestrator provided compact diff evidence. Avoid running redundant unconstrained git diff.\n"
+                f"{compact_diff.strip()}"
+            )
+        prompt = "\n\n".join(prompt_parts)
+
+        cmd = [
+            self.config["codex_executable"],
+            "--sandbox",
+            "read-only",
+            "--ask-for-approval",
+            "never",
+            "--cd",
+            str(self.root),
+            "exec",
+            "--ephemeral",
+        ]
+        review_model = str(self.config.get("review_model", "")).strip()
+        if review_model:
+            cmd.extend(["--model", review_model])
+        review_effort = str(self.config.get("review_effort", "")).strip()
+        if review_effort:
+            cmd.extend(["--effort", review_effort])
+
+        cmd.extend([
+            "--output-last-message",
+            str(artifact_dir / "codex_review.md"),
+            "-",
+        ])
         return self._run(
-            [
-                self.config["codex_executable"],
-                "--sandbox",
-                "read-only",
-                "--ask-for-approval",
-                "never",
-                "--cd",
-                str(self.root),
-                "exec",
-                "--ephemeral",
-                "--output-last-message",
-                str(artifact_dir / "codex_review.md"),
-                "-",
-            ],
+            cmd,
             input=prompt,
             timeout=int(self.config.get("review_timeout_seconds", 900)),
         )
@@ -615,6 +683,7 @@ class AgentOrchestrator:
             scope_text += "\n\nViolations:\n" + "\n".join(violations)
         self._write(artifact_dir / "scope_check.md", scope_text)
 
+        compact_diff = self._compact_diff(changed)
         summary = (
             f"Worker exit=0; verification={'PASS' if verification_ok else 'FAIL'}; "
             f"scope={'PASS' if not violations else 'FAIL'}"
@@ -624,7 +693,7 @@ class AgentOrchestrator:
         decision = "REWORK"
         review_text = "Automated Codex review was not run."
         if self.config.get("auto_review", True):
-            reviewer = self._invoke_reviewer(task_text, artifact_dir, verification_text, scope_text)
+            reviewer = self._invoke_reviewer(task_text, artifact_dir, verification_text, scope_text, compact_diff)
             review_file = artifact_dir / "codex_review.md"
             review_text = review_file.read_text(encoding="utf-8") if review_file.exists() else reviewer.stdout
             self._write(artifact_dir / "codex_review_stderr.log", reviewer.stderr)
@@ -633,12 +702,28 @@ class AgentOrchestrator:
         if not verification_ok or violations:
             decision = "REWORK"
 
-        self.hub.review(
-            selected,
-            decision.lower(),
-            "codex/orchestrator",
-            review_text or summary,
-        )
+        max_rework = int(self.config.get("max_rework_cycles", 1))
+        rework_count = self.hub.get_rework_count(selected)
+        if decision == "REWORK" and rework_count >= max_rework:
+            decision = "REWORK_BLOCKED_FOR_HUMAN"
+            hub_decision = "rework_blocked"
+            rework_msg = (
+                f"Rework limit reached ({rework_count}/{max_rework}); automated rework blocked for human intervention.\n\n"
+                + (review_text or summary)
+            )
+            self.hub.review(
+                selected,
+                hub_decision,
+                "codex/orchestrator",
+                rework_msg,
+            )
+        else:
+            self.hub.review(
+                selected,
+                decision.lower(),
+                "codex/orchestrator",
+                review_text or summary,
+            )
         merge_report = (
             f"# Merge Report {selected}\n\n"
             f"- Generated-At: {datetime.now(timezone.utc).isoformat()}\n"
@@ -671,7 +756,9 @@ class AgentOrchestrator:
             f"Reused evidence; verification={'PASS' if verification_ok else 'FAIL'}; "
             f"scope={'PASS' if scope_ok else 'FAIL'}",
         )
-        reviewer = self._invoke_reviewer(task_text, artifact_dir, verification_text, scope_text)
+        task_files = self._section_items(task_text, "Files Allowed")
+        compact_diff = self._compact_diff(task_files)
+        reviewer = self._invoke_reviewer(task_text, artifact_dir, verification_text, scope_text, compact_diff)
         review_file = artifact_dir / "codex_review.md"
         review_text = review_file.read_text(encoding="utf-8") if review_file.exists() else reviewer.stdout
         self._write(artifact_dir / "codex_review_stderr.log", reviewer.stderr)
@@ -682,7 +769,18 @@ class AgentOrchestrator:
             and bool(re.search(r"^DECISION: APPROVED\s*$", review_text, re.MULTILINE))
         )
         decision = "APPROVED" if approved else "REWORK"
-        self.hub.review(selected, decision.lower(), "codex/orchestrator", review_text)
+        max_rework = int(self.config.get("max_rework_cycles", 1))
+        rework_count = self.hub.get_rework_count(selected)
+        if decision == "REWORK" and rework_count >= max_rework:
+            decision = "REWORK_BLOCKED_FOR_HUMAN"
+            hub_decision = "rework_blocked"
+            rework_msg = (
+                f"Rework limit reached ({rework_count}/{max_rework}); automated rework blocked for human intervention.\n\n"
+                + review_text
+            )
+            self.hub.review(selected, hub_decision, "codex/orchestrator", rework_msg)
+        else:
+            self.hub.review(selected, decision.lower(), "codex/orchestrator", review_text)
         merge_report = (
             f"# Merge Report {selected}\n\n"
             f"- Generated-At: {datetime.now(timezone.utc).isoformat()}\n"

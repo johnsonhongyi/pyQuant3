@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from tools.agent_hub import AgentHub
 from tools.agent_orchestrator import AgentOrchestrator
 
 
@@ -337,3 +338,64 @@ def test_headless_lean_worker_environment_switch(tmp_path: Path) -> None:
     assert env_lean.get("USERPROFILE") == expected_profile
     assert env_lean.get("HOME") == expected_profile
     assert (root / ".agent_hub" / ".worker_profile" / ".gemini").is_dir()
+
+
+def test_compact_verification_text() -> None:
+    raw = (
+        "$ python -m pytest tests/test_demo.py\n"
+        "exit=0\n"
+        "................. [ 50%]\n"
+        "................. [100%]\n"
+        "warning: unused import ignored\n"
+        "56 passed in 4.97s\n\n"
+        "$ python -m compileall -q ats\n"
+        "exit=0\n"
+    )
+    compact = AgentOrchestrator._compact_verification_text(raw, max_lines_per_command=5)
+    assert "$ python -m pytest tests/test_demo.py" in compact
+    assert "exit=0" in compact
+    assert "56 passed in 4.97s" in compact
+    assert "$ python -m compileall -q ats" in compact
+    # 进度点行应当被过滤
+    assert "[ 50%]" not in compact
+
+
+def test_get_rework_count_and_rework_limit_blocking(tmp_path: Path) -> None:
+    root = _project(tmp_path)
+    hub = AgentHub(root)
+
+    # 1. 验证初始 rework_count 为 0
+    assert hub.get_rework_count("001") == 0
+
+    # 2. 模拟认领、提交和一次打回
+    hub.claim("001", "orchestrator/antigravity")
+    hub.submit("001", "orchestrator/antigravity", "first attempt")
+    hub.review("001", "rework", "codex/orchestrator", "first rework request")
+
+    # 验证打回计数递增为 1 且任务回到 inbox
+    assert hub.get_rework_count("001") == 1
+    assert (root / ".agent_hub" / "inbox" / "001_preview.md").exists()
+
+    # 3. 测试当已达最大重做限制 (max_rework_cycles = 1) 时的熔断
+    def reviewer_runner(args, **kwargs):
+        # 模拟 Reviewer 依然返回 REWORK
+        return subprocess.CompletedProcess(
+            args, 0, "", "Codex reviewed with issues."
+        )
+
+    orchestrator = AgentOrchestrator(root, runner=reviewer_runner)
+    orchestrator.config["max_rework_cycles"] = 1
+    orchestrator.config["auto_review"] = True
+
+    # 构造 codex_review.md 内容为 REWORK
+    artifact_dir = root / ".agent_hub" / "artifacts" / "001"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    (artifact_dir / "codex_review.md").write_text("DECISION: REWORK\n", encoding="utf-8")
+    (artifact_dir / "verification.log").write_text("$ pytest\nexit=0\n", encoding="utf-8")
+    (artifact_dir / "scope_check.md").write_text("Changed paths:\n", encoding="utf-8")
+
+    report = orchestrator.review_existing("001")
+    assert report.status == "REWORK_BLOCKED_FOR_HUMAN"
+    # 任务被熔断，停留在 done，未被移回 inbox，阻断死循环
+    assert not (root / ".agent_hub" / "inbox" / "001_preview.md").exists()
+    assert (root / ".agent_hub" / "done" / "001_preview.md").exists()
