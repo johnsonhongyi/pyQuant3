@@ -34,6 +34,7 @@ def canonicalize_decision_queue_item(item: Mapping[str, Any]) -> StrategySignal:
         "leader_code": str(item.get("leader_code", "") or ""),
         "raw_reason": str(item.get("reason", "") or ""),
         "status": str(item.get("status", "") or ""),
+        "requested_size_pct": _float(item.get("requested_size_pct")),
         "hits": _float(item.get("hits", 1), 1.0),
         "volume": _float(item.get("volume"), 1.0),
         
@@ -85,4 +86,3 @@ def canonicalize_decision_queue_item(item: Mapping[str, Any]) -> StrategySignal:
         price=price,
         features=features,
     )
-

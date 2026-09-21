@@ -209,6 +209,58 @@ class IPOTradingCenter:
         with self._lock:
             return self._positions.get(clean_code)
 
+    def _sync_from_unified_paper_account(self) -> None:
+        """Mirror the TK paper SSOT into the command-room portfolio view."""
+        if not self._auto_load_ledger:
+            return
+        try:
+            from ats.unified_paper_account import get_account_snapshot, get_positions
+
+            kernel_positions = get_positions()
+            account = get_account_snapshot()
+            unified_capital = float(account.get("initial_capital", self.total_capital) or self.total_capital)
+            synced: Dict[str, IPOTradingPosition] = {}
+            for code, raw in kernel_positions.items():
+                clean_code = str(code).strip().zfill(6)
+                old = self._positions.get(clean_code)
+                shares = int(float(raw.get("volume", 0.0) or 0.0))
+                cost = float(raw.get("entry_price", 0.0) or 0.0)
+                current = float(raw.get("current_price", cost) or cost)
+                entry_stamp = str(raw.get("entry_time", "") or "")
+                entry_date = entry_stamp.replace("T", " ").split(" ", 1)[0] if entry_stamp else ""
+                entry_time = entry_stamp.replace("T", " ").split(" ", 1)[1] if " " in entry_stamp.replace("T", " ") else ""
+                name = (
+                    getattr(self._reports_cache.get(clean_code), "name", "")
+                    or (old.name if old is not None else clean_code)
+                )
+                pnl_pct = ((current - cost) / cost * 100.0) if cost > 0 else 0.0
+                synced[clean_code] = IPOTradingPosition(
+                    code=clean_code,
+                    name=name,
+                    shares=shares,
+                    available_shares=shares,
+                    cost_price=cost,
+                    current_price=current,
+                    highest_price=float(raw.get("max_high", current) or current),
+                    lowest_price=min(cost, current) if cost > 0 and current > 0 else current,
+                    entry_time=entry_time,
+                    entry_date=entry_date,
+                    current_weight_pct=(shares * current / unified_capital * 100.0) if unified_capital > 0 else 0.0,
+                    status="HOLDING",
+                    unrealized_pnl_pct=round(pnl_pct, 2),
+                    entry_reason=old.entry_reason if old is not None else "TK内核PAPER统一持仓",
+                    signal_tier=old.signal_tier if old is not None else "S",
+                    signal_level=old.signal_level if old is not None else "S4",
+                    quality_grade=old.quality_grade if old is not None else "S",
+                    strategy_tag=old.strategy_tag if old is not None else str(raw.get("regime", "")),
+                    trade_plan=old.trade_plan if old is not None else None,
+                )
+            self._positions = synced
+            self.total_capital = unified_capital
+            self.available_cash = float(account.get("cash", self.available_cash) or 0.0)
+        except Exception as exc:
+            logger.debug("TK PAPER position sync unavailable: %s", exc)
+
     def get_trade_plan(self, code: str) -> Optional[IPOTradePlan]:
         """获取指定标的当前的不可变 TradePlan"""
         clean_code = str(code).strip().zfill(6)
@@ -900,6 +952,7 @@ class IPOTradingCenter:
         - 全局仲裁结果直接回写到每个 signal 的 global_fleet_role 与 global_arbitration_desc；
         - 支持弃弱留强·换马调仓 (SWITCH_SWAP) 与买错立斩 (STOP_LOSS)。
         """
+        self._sync_from_unified_paper_account()
         with self._lock:
             all_signals = list(self._reports_cache.values())
             if not all_signals:
@@ -1772,6 +1825,28 @@ class IPOTradingCenter:
         - 将每次决议与撮合事件记录进 _signal_iteration_log；
         - 原子写盘持久化到本地账本。
         """
+        # The persistent singleton used by the command room must execute through
+        # the TK Paper kernel first.  Ephemeral instances used by unit tests and
+        # offline strategy evaluation keep their isolated in-memory behavior.
+        if self._auto_load_ledger and not getattr(directive, "_kernel_routed", False):
+            try:
+                from ats.unified_paper_account import execute_command_directive
+                kernel_result = execute_command_directive(directive)
+                if not kernel_result.executed:
+                    logger.warning(
+                        "[IPO-TRADING] TK PAPER rejected %s %s: %s",
+                        directive.action, directive.code, kernel_result.reject_code,
+                    )
+                    return False
+                setattr(directive, "_kernel_routed", True)
+                if kernel_result.volume > 0:
+                    directive.shares = int(kernel_result.volume)
+                if kernel_result.size_pct > 0:
+                    directive.size_pct = round(kernel_result.size_pct * 100.0, 2)
+            except Exception as exc:
+                logger.exception("[IPO-TRADING] Unified TK PAPER routing failed: %s", exc)
+                return False
+
         with self._lock:
             code = directive.code
             today_str = time.strftime("%Y-%m-%d")
@@ -2264,6 +2339,7 @@ class IPOTradingCenter:
 
     def get_fleet_summary(self) -> Dict[str, Any]:
         """获取整个舰队统一交易与持仓概览快照 (供 UI 实时展示)"""
+        self._sync_from_unified_paper_account()
         with self._lock:
             holding_list = [p for p in self._positions.values() if p.shares > 0]
             tot_val = sum(p.shares * p.current_price for p in holding_list)

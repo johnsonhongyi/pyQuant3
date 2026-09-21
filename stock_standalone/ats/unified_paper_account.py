@@ -1,0 +1,232 @@
+# -*- coding: utf-8 -*-
+"""Read-only views and performance metrics for the authoritative TK paper account.
+
+All ATS presentation layers should consume this module instead of inventing their
+own paper ledgers.  Order execution remains owned by ``TradingKernelService``.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any, Dict, Iterable, List, Optional
+
+
+def _number(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+@dataclass(frozen=True)
+class ClosedPaperTrade:
+    code: str
+    entry_time: str
+    exit_time: str
+    entry_price: float
+    exit_price: float
+    volume: float
+    profit: float
+    pnl_pct: float
+
+
+@dataclass(frozen=True)
+class PaperExecutionResult:
+    executed: bool
+    order_id: str = ""
+    trace_id: str = ""
+    action: str = "HOLD"
+    reject_code: str = ""
+    volume: float = 0.0
+    size_pct: float = 0.0
+
+
+def get_paper_adapter():
+    """Return the singleton kernel PaperAdapter (the paper-account SSOT)."""
+    from trading_kernel.kernel_service import get_kernel_service
+
+    return get_kernel_service().paper_adapter
+
+
+def get_orders() -> List[Dict[str, Any]]:
+    adapter = get_paper_adapter()
+    return [dict(item) for item in getattr(adapter, "orders", []) if isinstance(item, dict)]
+
+
+def get_positions() -> Dict[str, Dict[str, Any]]:
+    adapter = get_paper_adapter()
+    return adapter.get_positions()
+
+
+def get_account_snapshot() -> Dict[str, Any]:
+    adapter = get_paper_adapter()
+    snap = dict(adapter.get_account_snapshot())
+    snap["initial_capital"] = _number(getattr(adapter, "initial_capital", 0.0))
+    snap["position_count"] = len(getattr(adapter.account, "positions", {}))
+    return snap
+
+
+def execute_command_directive(directive: Any) -> PaperExecutionResult:
+    """Route one command-room directive through the authoritative TK kernel."""
+    raw_action = str(getattr(directive, "action", "") or "").upper()
+    if raw_action in {"BUY", "BUY_SCOUT", "BUY_CONFIRM"}:
+        kernel_action = "BUY"
+        signal_type = "手动买入"
+    elif raw_action in {"SELL", "EXIT_ALL"}:
+        kernel_action = "SELL"
+        signal_type = "手工平仓"
+    else:
+        return PaperExecutionResult(
+            executed=False,
+            action=raw_action or "HOLD",
+            reject_code="UNSUPPORTED_COMMAND_ACTION",
+        )
+
+    price = _number(getattr(directive, "price", 0.0))
+    requested_pct = _number(getattr(directive, "size_pct", 0.0)) / 100.0
+    if kernel_action == "SELL":
+        requested_pct = 1.0
+    if price <= 0:
+        return PaperExecutionResult(False, action=kernel_action, reject_code="INVALID_PRICE")
+
+    from trading_kernel.kernel_service import get_kernel_service
+
+    service = get_kernel_service()
+    if service.mode != "PAPER":
+        if not service.set_trading_mode("PAPER"):
+            return PaperExecutionResult(False, action=kernel_action, reject_code="PAPER_MODE_UNAVAILABLE")
+
+    before_count = len(getattr(service.paper_adapter, "orders", []))
+    result = service.evaluate_decision_item(
+        {
+            "code": str(getattr(directive, "code", "") or "").zfill(6),
+            "name": str(getattr(directive, "name", "") or ""),
+            "action": kernel_action,
+            "signal_type": signal_type,
+            "current_price": price,
+            "suggest_price": price,
+            "requested_size_pct": requested_pct,
+            "priority": 100.0,
+            "reason": f"交易指挥室统一PAPER执行: {getattr(directive, 'reason', '')}",
+        },
+        write_journal=True,
+    )
+    orders = getattr(service.paper_adapter, "orders", [])
+    last_order = orders[-1] if len(orders) > before_count and isinstance(orders[-1], dict) else {}
+    return PaperExecutionResult(
+        executed=bool(result.get("kernel_executed")),
+        order_id=str(result.get("kernel_order_id") or last_order.get("order_id") or ""),
+        trace_id=str(result.get("kernel_trace_id") or ""),
+        action=str(result.get("kernel_action") or kernel_action),
+        reject_code=str(result.get("kernel_reject_code") or ""),
+        volume=_number(last_order.get("volume")),
+        size_pct=_number(last_order.get("size_pct"), requested_pct),
+    )
+
+
+def pair_closed_trades(orders: Optional[Iterable[Dict[str, Any]]] = None) -> List[ClosedPaperTrade]:
+    """FIFO-pair BUY/ADD with SELL/REDUCE without using future information."""
+    lots: Dict[str, List[Dict[str, Any]]] = {}
+    closed: List[ClosedPaperTrade] = []
+    ordered = sorted(
+        [dict(item) for item in (orders if orders is not None else get_orders()) if isinstance(item, dict)],
+        key=lambda item: str(item.get("timestamp") or ""),
+    )
+
+    for order in ordered:
+        code = str(order.get("code") or "").strip().zfill(6)
+        action = str(order.get("action") or "").upper()
+        price = _number(order.get("price"))
+        volume = _number(order.get("volume"))
+        timestamp = str(order.get("timestamp") or "")
+        if not code or price <= 0 or volume <= 0:
+            continue
+        if action in {"BUY", "ADD"}:
+            lots.setdefault(code, []).append(
+                {"price": price, "remaining": volume, "timestamp": timestamp}
+            )
+            continue
+        if action not in {"SELL", "REDUCE"}:
+            continue
+
+        remaining_sell = volume
+        code_lots = lots.setdefault(code, [])
+        while remaining_sell > 1e-9 and code_lots:
+            lot = code_lots[0]
+            matched = min(remaining_sell, _number(lot.get("remaining")))
+            entry_price = _number(lot.get("price"))
+            if matched <= 0 or entry_price <= 0:
+                code_lots.pop(0)
+                continue
+            profit = (price - entry_price) * matched
+            closed.append(
+                ClosedPaperTrade(
+                    code=code,
+                    entry_time=str(lot.get("timestamp") or ""),
+                    exit_time=timestamp,
+                    entry_price=entry_price,
+                    exit_price=price,
+                    volume=matched,
+                    profit=profit,
+                    pnl_pct=(price - entry_price) / entry_price * 100.0,
+                )
+            )
+            lot["remaining"] = _number(lot.get("remaining")) - matched
+            remaining_sell -= matched
+            if lot["remaining"] <= 1e-9:
+                code_lots.pop(0)
+    return closed
+
+
+def calculate_metrics() -> Dict[str, Any]:
+    """Calculate auditable paper metrics; never return demonstration values."""
+    trades = pair_closed_trades()
+    if not trades:
+        return {
+            "总交易次数": "0",
+            "策略胜率": "--",
+            "平均盈利/亏损": "--",
+            "最大回撤": "--",
+            "凯利建议仓位": "--",
+            "持有期衰减": "--",
+            "累计收益": "--",
+            "data_status": "NO_CLOSED_PAPER_TRADES",
+        }
+
+    profits = [trade.profit for trade in trades]
+    wins = [trade for trade in trades if trade.profit > 0]
+    losses = [trade for trade in trades if trade.profit <= 0]
+    gross_profit = sum(trade.profit for trade in wins)
+    gross_loss = abs(sum(trade.profit for trade in losses))
+    profit_factor = gross_profit / gross_loss if gross_loss > 0 else float("inf")
+
+    initial = _number(get_account_snapshot().get("initial_capital"), 1_000_000.0)
+    equity = initial
+    peak = initial
+    max_drawdown = 0.0
+    for profit in profits:
+        equity += profit
+        peak = max(peak, equity)
+        if peak > 0:
+            max_drawdown = min(max_drawdown, (equity - peak) / peak)
+
+    win_rate = len(wins) / len(trades)
+    avg_win = sum(t.pnl_pct for t in wins) / len(wins) if wins else 0.0
+    avg_loss = abs(sum(t.pnl_pct for t in losses) / len(losses)) if losses else 0.0
+    if avg_loss > 0 and avg_win > 0:
+        payoff = avg_win / avg_loss
+        kelly = max(0.0, min(0.30, win_rate - (1.0 - win_rate) / payoff))
+        kelly_text = f"{kelly * 100:.1f}%"
+    else:
+        kelly_text = "--"
+
+    return {
+        "总交易次数": str(len(trades)),
+        "策略胜率": f"{win_rate * 100:.1f}%",
+        "平均盈利/亏损": "∞" if profit_factor == float("inf") else f"{profit_factor:.2f}",
+        "最大回撤": f"{max_drawdown * 100:.1f}%",
+        "凯利建议仓位": kelly_text,
+        "持有期衰减": "待按交易日历计算",
+        "累计收益": f"{sum(profits):+.2f}",
+        "data_status": "OK",
+    }

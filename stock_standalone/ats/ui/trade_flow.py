@@ -34,8 +34,34 @@ class TradeFlowTable(QWidget):
         self.load_real_trades()
 
     def load_real_trades(self):
-        """从 TradeGateway 与 SQLite (signal_strategy.db) 实时加载真实的交易与一键挂单流水"""
+        """加载统一 TK Paper 成交流水；旧 TradeGateway 仅作迁移期回退。"""
         try:
+            from ats.unified_paper_account import get_orders
+            kernel_orders = get_orders()
+            if kernel_orders:
+                self._all_flow_list = []
+                for item in reversed(kernel_orders):
+                    action = str(item.get("action") or "").upper()
+                    price = float(item.get("price") or 0.0)
+                    volume = float(item.get("volume") or 0.0)
+                    timestamp = str(item.get("timestamp") or "").replace("T", " ")
+                    self._all_flow_list.append([
+                        timestamp,
+                        str(item.get("code") or "").zfill(6),
+                        str(item.get("name") or item.get("code") or "--"),
+                        "买入" if action in ("BUY", "ADD") else "卖出",
+                        f"{price:.2f}",
+                        f"{int(volume):,}" if volume.is_integer() else f"{volume:,.2f}",
+                        f"{price * volume:.2f}",
+                        "0.00%",
+                        f"TK内核PAPER · {str(item.get('order_id') or '')[:12]}",
+                    ])
+                self._sort_flow_list()
+                self.table.horizontalHeader().setSortIndicator(self._sort_col, self._sort_order)
+                self._update_pagination_ui()
+                self._render_current_page()
+                return
+
             from trade_gateway import TradeGateway, DB_FILE
             from db_utils import SQLiteConnectionManager
             mgr = SQLiteConnectionManager.get_instance(DB_FILE)
@@ -97,9 +123,9 @@ class TradeFlowTable(QWidget):
                             item.get('reason', '👑 空间真龙·一键挂单')
                         ])
                 else:
-                    self.load_mock_flow()
+                    self.update_flow_list([])
         except Exception:
-            self.load_mock_flow()
+            self.update_flow_list([])
 
         self._sort_flow_list()
         self.table.horizontalHeader().setSortIndicator(self._sort_col, self._sort_order)
@@ -798,7 +824,7 @@ class TradeFlowDialog(QDialog):
 
         # 顶部工具栏
         top_bar = QHBoxLayout()
-        lbl_title = QLabel("⚡ 今日实盘/模拟一键挂单与委托流水明细 (点击表头可多字段排序)")
+        lbl_title = QLabel("⚡ TK内核统一 PAPER 成交流水 (点击表头可多字段排序)")
         lbl_title.setStyleSheet("font-size: 10pt; font-weight: bold; color: #00ffcc;")
         top_bar.addWidget(lbl_title)
         top_bar.addStretch()
