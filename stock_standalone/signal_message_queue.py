@@ -49,6 +49,7 @@ class SignalMessageQueue:
     """
     _instance = None
     _lock = Lock()
+    _init_lock = Lock()
     
     MAX_SIZE = 120 # [OPTIMIZED] 提升缓存容量，防止高频行情下信号在 UI 列表中被过快挤掉
     FOLLOW_LIMIT = 5
@@ -61,25 +62,26 @@ class SignalMessageQueue:
         return cls._instance
 
     def __init__(self):
-        if self._initialized:
-            return
-        
-        self._queue = PriorityQueue()
-        # 内存缓存，用于快速 UI 展示 (已排序列表)
-        self._cached_top: List[SignalMessage] = []
-        
-        # 使用统一的 DB Manager
-        self.db_manager = SQLiteConnectionManager.get_instance(DB_FILE)
-        
-        self._init_db()
-        
-        self._init_db()
-        self._load_from_db() # 启动时从 DB 加载最近的数据
-        
-        self.trading_logger = TradingLogger() # [NEW] 用于全量历史记录
-        
-        self._initialized = True
-        logger.info("SignalMessageQueue initialized.")
+        # __new__ 只能保证对象单例，不能阻止多个首次调用者
+        # 并发进入 __init__。初始化锁避免队列被反复清空和重复加载。
+        with self._init_lock:
+            if self._initialized:
+                return
+
+            self._queue = PriorityQueue()
+            # 内存缓存，用于快速 UI 展示 (已排序列表)
+            self._cached_top: List[SignalMessage] = []
+
+            # 使用统一的 DB Manager
+            self.db_manager = SQLiteConnectionManager.get_instance(DB_FILE)
+
+            self._init_db()
+            self._load_from_db() # 启动时从 DB 加载最近的数据
+
+            self.trading_logger = TradingLogger() # [NEW] 用于全量历史记录
+
+            self._initialized = True
+            logger.info("SignalMessageQueue initialized.")
 
     def _init_db(self):
         """初始化独立数据库"""
@@ -147,6 +149,34 @@ class SignalMessageQueue:
             try:
                 c.execute("ALTER TABLE signal_message ADD COLUMN grade TEXT")
             except sqlite3.OperationalError: pass
+
+            # 兼容旧版本：为历史行补齐稳定事件键。历史库可能已经有同
+            # 日/代码/类型/来源的重复行，不能让迁移因唯一约束失败；保留
+            # 全部历史记录，并给冲突的旧行加 legacy-id 后缀，后续新写入
+            # 则会命中无后缀的规范键并原子合并。
+            try:
+                c.execute("ALTER TABLE signal_message ADD COLUMN event_key TEXT")
+            except sqlite3.OperationalError: pass
+            used_keys = set()
+            c.execute("SELECT event_key FROM signal_message WHERE event_key IS NOT NULL AND event_key <> ''")
+            used_keys.update(row[0] for row in c.fetchall())
+            c.execute("""
+                SELECT id, timestamp, code, signal_type, source, created_date
+                FROM signal_message WHERE event_key IS NULL OR event_key = ''
+                ORDER BY id
+            """)
+            for row_id, timestamp, code, signal_type, source, created_date in c.fetchall():
+                date_value = created_date or str(timestamp or '').split(' ')[0]
+                base_key = self._build_event_key(date_value, code, signal_type, source)
+                event_key = base_key
+                if event_key in used_keys:
+                    event_key = f"{base_key}|legacy|{row_id}"
+                used_keys.add(event_key)
+                c.execute("UPDATE signal_message SET event_key=? WHERE id=?", (event_key, row_id))
+            c.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS uq_signal_message_event_key
+                ON signal_message (event_key)
+            """)
             
             conn.commit()
             # Cursor closed by connection reuse or garbage collection, but explicit close is better if not using context manager everywhere
@@ -200,17 +230,24 @@ class SignalMessageQueue:
 
     def push(self, msg: SignalMessage) -> None:
         """推送新信号 (严格去重: 同股票+同策略只保留一条)"""
-        # [NEW] 记录到全量历史 (DB)
+        # push 的主职责是维护 signal_message。只有上游显式携带有效
+        # 价格时才兼容记录 live history；缺省 extra.price 不再伪造 0 价。
+        explicit_price = msg.extra.get('price')
         try:
-            self.trading_logger.log_live_signal(
-                msg.code, msg.name, 
-                price=msg.extra.get('price', 0.0), 
-                action=msg.signal_type, 
-                reason=msg.reason,
-                indicators=msg.extra
-            )
-        except Exception as e:
-            logger.error(f"Failed to log live history in push: {e}")
+            explicit_price = float(explicit_price)
+        except (TypeError, ValueError):
+            explicit_price = 0.0
+        if explicit_price > 0:
+            try:
+                self.trading_logger.log_live_signal(
+                    msg.code, msg.name,
+                    price=explicit_price,
+                    action=msg.signal_type,
+                    reason=msg.reason,
+                    indicators=msg.extra
+                )
+            except Exception as e:
+                logger.error(f"Failed to log live history in push: {e}")
 
         with self._lock:
             # 1. 提取当前所有 items
@@ -305,7 +342,7 @@ class SignalMessageQueue:
         self._cached_top = kept_items
 
     def _persist_signal(self, msg: SignalMessage):
-        """持久化到数据库 (Insert)"""
+        """持久化到数据库（以日+代码+类型+来源原子 UPSERT）。"""
         try:
             # --- [交易日和交易时段检查] ---
             try:
@@ -319,43 +356,45 @@ class SignalMessageQueue:
                 pass  # 检查失败则允许写入
             
             created_date = msg.timestamp.split(" ")[0] if " " in msg.timestamp else msg.timestamp
+            event_key = self._build_event_key(created_date, msg.code, msg.signal_type, msg.source)
             self.db_manager.execute_update("""
                 INSERT INTO signal_message (
                     timestamp, code, name, signal_type, source, 
-                    priority, score, reason, evaluated, count, consecutive_days, rank, grade, created_date
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    priority, score, reason, evaluated, count, consecutive_days, rank, grade,
+                    created_date, event_key
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(event_key) DO UPDATE SET
+                    timestamp = excluded.timestamp,
+                    name = excluded.name,
+                    priority = MIN(signal_message.priority, excluded.priority),
+                    score = excluded.score,
+                    reason = excluded.reason,
+                    evaluated = excluded.evaluated,
+                    count = signal_message.count + 1,
+                    consecutive_days = MAX(signal_message.consecutive_days, excluded.consecutive_days),
+                    rank = excluded.rank,
+                    grade = excluded.grade
             """, (
                 msg.timestamp, msg.code, msg.name, msg.signal_type, msg.source,
-                msg.priority, msg.score, msg.reason, int(msg.evaluated), msg.count, msg.consecutive_days, msg.rank, msg.grade, created_date
+                msg.priority, msg.score, msg.reason, int(msg.evaluated), 1,
+                msg.consecutive_days, msg.rank, msg.grade, created_date, event_key
             ))
         except Exception as e:
             logger.error(f"Failed to persist signal: {e}")
 
     def _update_db_signal(self, msg: SignalMessage):
         """更新数据库中的信号 (Count, Timestamp等)"""
-        try:
-            # --- [交易日和交易时段检查] ---
-            try:
-                from JohnsonUtil import commonTips as cct
-                is_trade_day = cct.get_trade_date_status()
-                now_time_int = cct.get_now_time_int()
-                is_trading_time = (930 <= now_time_int <= 1130) or (1300 <= now_time_int <= 1500)
-                if not is_trade_day or not is_trading_time:
-                    return
-            except Exception:
-                pass  # 检查失败则允许写入
-            
-            created_date = msg.timestamp.split(" ")[0] if " " in msg.timestamp else msg.timestamp
-            self.db_manager.execute_update("""
-                UPDATE signal_message
-                SET timestamp = ?, score = ?, reason = ?, priority = ?, count = ?, consecutive_days = ?, rank = ?, grade = ?, created_date = ?
-                WHERE code = ? AND signal_type = ?
-            """, (
-                msg.timestamp, msg.score, msg.reason, msg.priority, msg.count, msg.consecutive_days, msg.rank, msg.grade, created_date,
-                msg.code, msg.signal_type
-            ))
-        except Exception as e:
-            logger.error(f"Failed to update db signal: {e}")
+        self._persist_signal(msg)
+
+    @staticmethod
+    def _build_event_key(created_date: str, code: str, signal_type: str, source: str) -> str:
+        """生成稳定的当日状态键，不包含可变的时间戳和理由文本。"""
+        return "|".join((
+            str(created_date).strip(),
+            str(code).strip().zfill(6),
+            str(signal_type).strip(),
+            str(source or '').strip(),
+        ))
 
     def update_signal_rank(self, code: str, signal_type: str, rank: int):
         """更新信号的 Rank (用于补全)"""
@@ -517,16 +556,13 @@ class SignalMessageQueue:
             now_timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             now_date = datetime.now().strftime('%Y-%m-%d')
             priority_value = 100 if is_high_priority else 50
+            event_key = self._build_event_key(now_date, code, pattern, 'live_strategy')
             
             conn = self.db_manager.get_connection()
             c = conn.cursor()
             
             # 检查是否已存在同日同股同信号类型
-            c.execute("""
-                SELECT id, count FROM signal_message 
-                WHERE code = ? AND signal_type = ? AND source = 'live_strategy' AND created_date = ?
-                LIMIT 1
-            """, (code, pattern, now_date))
+            c.execute("SELECT id, count FROM signal_message WHERE event_key = ? LIMIT 1", (event_key,))
             existing = c.fetchone()
             
             if existing:
@@ -541,9 +577,9 @@ class SignalMessageQueue:
             else:
                 # 不存在：插入新记录
                 c.execute("""
-                    INSERT INTO signal_message (timestamp, code, name, signal_type, source, priority, score, reason, evaluated, created_date, count, consecutive_days, grade)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (now_timestamp, code, name, pattern, 'live_strategy', priority_value, score, msg, 0, now_date, 1, 1, ''))
+                    INSERT INTO signal_message (timestamp, code, name, signal_type, source, priority, score, reason, evaluated, created_date, count, consecutive_days, grade, event_key)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (now_timestamp, code, name, pattern, 'live_strategy', priority_value, score, msg, 0, now_date, 1, 1, '', event_key))
                 # logger.debug(f"✅ Live signal saved to DB: {code} - {pattern}")
             
             conn.commit()

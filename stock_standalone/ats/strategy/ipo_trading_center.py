@@ -47,7 +47,7 @@ from ats.strategy.channel_secondary_buy_strategy import (
     TAG_IPO_BID_SURGE,
 )
 from ats.proactive_exit_engine import ProactiveExitEngine
-from ats.strategy.signal_convergence import SignalConvergenceResult, converge_directives, EXIT_ACTIONS, ENTRY_ACTIONS
+from ats.strategy.signal_convergence import SignalConvergenceResult, converge_directives, get_directive_arbitrator, EXIT_ACTIONS, ENTRY_ACTIONS
 from ats.strategy.directive_execution_guard import validate_directive, _parse_expire_today
 from ats.strategy.subnew_executable_gate import (
     evaluate_s5_executable as _approved_pure_gate,
@@ -144,15 +144,15 @@ def calculate_rr_now(plan: Optional[IPOTradePlan], current_price: float) -> floa
     """
     使用 Task 017 固定结构锚点与实时 P_now 计算动态盈亏比 RR_now。
     锚点固定：
-    - 结构止损锚点: plan.higher_low_stop (不允许动态移动)
-    - 结构第一目标锚点: plan.target_1_channel_mid (不允许动态移动)
-    RR_now = (target_1 - P_now) / (P_now - stop)
+    - 结构止损锚点: plan.higher_low_stop (只读别名 structural_stop，不允许动态移动)
+    - 结构第一目标锚点: plan.target_1_channel_mid (只读别名 structural_target，不允许动态移动)
+    RR_now = (structural_target - P_now) / (P_now - structural_stop)
     """
     if not plan or current_price <= 0:
         return 0.0
-    stop = float(getattr(plan, "higher_low_stop", 0.0) or 0.0)
-    target = float(getattr(plan, "target_1_channel_mid", 0.0) or 0.0)
-    if stop <= 0 or target <= 0:
+    stop = float(getattr(plan, "structural_stop", 0.0) or getattr(plan, "higher_low_stop", 0.0) or 0.0)
+    target = float(getattr(plan, "structural_target", 0.0) or getattr(plan, "target_1_channel_mid", 0.0) or 0.0)
+    if stop <= 0 or target <= 0 or target <= stop:
         return 0.0
     risk = current_price - stop
     reward = target - current_price
@@ -612,7 +612,33 @@ class IPOTradingCenter:
             from ats.unified_paper_account import get_ssot_read_model, reconcile_account
 
             read_model = get_ssot_read_model()
-            kernel_positions = read_model.get("positions", {})
+            # An unavailable/incomplete SSOT snapshot is not evidence that every
+            # position was closed.  In particular, replacing a non-empty local
+            # view with an empty/missing snapshot would silently erase the T+1
+            # sellable state before the next reconciliation cycle.
+            if not isinstance(read_model, dict) or "positions" not in read_model:
+                self._paper_reconciliation = {
+                    "status": "SSOT_POSITIONS_MISSING",
+                    "authoritative_current_source": "paper_account_snapshot",
+                }
+                logger.warning("[IPO-TRADING] TK PAPER SSOT missing positions; preserving local view")
+                return
+            kernel_positions = read_model.get("positions")
+            if not isinstance(kernel_positions, dict):
+                self._paper_reconciliation = {
+                    "status": "SSOT_POSITIONS_INVALID",
+                    "authoritative_current_source": "paper_account_snapshot",
+                }
+                logger.warning("[IPO-TRADING] TK PAPER SSOT positions invalid; preserving local view")
+                return
+            if not kernel_positions and any(p.shares > 0 for p in self._positions.values()):
+                self._paper_reconciliation = {
+                    "status": "SSOT_EMPTY_LOCAL_NONEMPTY",
+                    "authoritative_current_source": "paper_account_snapshot",
+                    "local_position_count": sum(1 for p in self._positions.values() if p.shares > 0),
+                }
+                logger.warning("[IPO-TRADING] TK PAPER SSOT empty while local holdings exist; preserving local view")
+                return
             account = read_model.get("account", {})
             unified_capital = float(account.get("initial_capital", self.total_capital) or self.total_capital)
             synced: Dict[str, IPOTradingPosition] = {}
@@ -625,6 +651,23 @@ class IPOTradingCenter:
                 entry_stamp = str(raw.get("entry_time", "") or "")
                 entry_date = entry_stamp.replace("T", " ").split(" ", 1)[0] if entry_stamp else ""
                 entry_time = entry_stamp.replace("T", " ").split(" ", 1)[1] if " " in entry_stamp.replace("T", " ") else ""
+                raw_sellable = raw.get("sellable_qty", raw.get("available_shares"))
+                if raw_sellable is not None:
+                    try:
+                        sellable_qty = max(0, min(int(float(raw_sellable)), shares))
+                    except (TypeError, ValueError):
+                        sellable_qty = 0
+                elif old is not None:
+                    # The current kernel snapshot does not yet guarantee a
+                    # sellable_qty field. Preserve the already reconciled local
+                    # quantity; never promote available=0 (or a partial value)
+                    # to the full holding.  A missing authoritative field is
+                    # an incomplete snapshot, not evidence that T+1 settled.
+                    sellable_qty = max(0, min(int(old.available_shares), shares))
+                else:
+                    # With no prior reconciled state, only an unambiguous dated
+                    # lot may establish T/T+1 availability.
+                    sellable_qty = shares if entry_date and entry_date < time.strftime("%Y-%m-%d") else 0
                 # 多级名称解析：优先实时报告缓存 → 旧持仓对象 → 持久化名称快照 → 离线本地查询 → 代码兜底
                 _cache_name = getattr(self._reports_cache.get(clean_code), "name", "") or ""
                 _old_name = (old.name if old is not None else "") or ""
@@ -650,7 +693,7 @@ class IPOTradingCenter:
                     code=clean_code,
                     name=name,
                     shares=shares,
-                    available_shares=shares,
+                    available_shares=sellable_qty,
                     cost_price=cost,
                     current_price=current,
                     highest_price=float(raw.get("max_high", current) or current),
@@ -1033,7 +1076,15 @@ class IPOTradingCenter:
         self, directives: List[IPOOrderDirective]
     ) -> List[IPOOrderDirective]:
         """Publish one clear, non-conflicting directive set without altering decisions."""
-        result: SignalConvergenceResult = converge_directives(directives)
+        # Carry forward only unresolved EXITs from the prior view. This makes
+        # EXIT > BUY authoritative across refresh boundaries without retaining
+        # stale BUY/OBSERVE directives indefinitely.
+        carry_exits = [
+            item for item in self._pending_directives
+            if str(getattr(item, "action", "") or "").upper() in EXIT_ACTIONS
+        ]
+        arbitration_input = carry_exits + list(directives or [])
+        result: SignalConvergenceResult = get_directive_arbitrator().arbitrate(arbitration_input)
         now_ts = time.time()
         previous_by_fp = {
             self._directive_fingerprint(item): item for item in self._pending_directives
@@ -1887,10 +1938,7 @@ class IPOTradingCenter:
                         and pos.signal_tier == "SSS"
                         and (sig.global_fleet_role == "LEADER" or sig.horse_race_rank == 1)
                     )
-                    tradable_shares = min(
-                        pos.shares,
-                        pos.available_shares if pos.available_shares > 0 else pos.shares,
-                    )
+                    tradable_shares = min(pos.shares, max(0, pos.available_shares))
                     action = "REDUCE_HALF" if is_protected_leader else "EXIT_ALL"
                     shares = (
                         int(tradable_shares * 0.5 / 100) * 100
@@ -1943,12 +1991,15 @@ class IPOTradingCenter:
                         stop_reason = f"⛔ 破位止损出局: 跌破VWAP({sig.vwap:.2f})达{sig.vwap_diff_pct:.1f}%，买错坚决出局斩仓，严禁死扛！"
 
                 if is_stop_out:
+                    tradable_shares = min(pos.shares, max(0, pos.available_shares))
+                    if tradable_shares <= 0:
+                        continue
                     directives.append(IPOOrderDirective(
                         action="SELL",
                         code=code,
                         name=pos.name,
                         price=sig.price,
-                        shares=pos.shares,
+                        shares=tradable_shares,
                         size_pct=0.0,
                         urgency="CRITICAL",
                         reason=stop_reason,
@@ -1960,6 +2011,9 @@ class IPOTradingCenter:
 
                 # 4.2 铁律 2: 极端高潮冲刺平仓与计算机提前算法挂单 (沈鼓集团同款高点逃顶)
                 if sig.is_climax_exit or (sig.suspension_count >= 1 and sig.vwap_diff_pct >= 20.0):
+                    tradable_shares = min(pos.shares, max(0, pos.available_shares))
+                    if tradable_shares <= 0:
+                        continue
                     sell_px = sig.climax_preset_sell_price if sig.climax_preset_sell_price > 0 else sig.price
                     urg_type = "LIMIT" if sig.climax_preset_sell_price > sig.price else "CRITICAL"
                     directives.append(IPOOrderDirective(
@@ -1967,7 +2021,7 @@ class IPOTradingCenter:
                         code=code,
                         name=pos.name,
                         price=sell_px,
-                        shares=pos.shares,
+                        shares=tradable_shares,
                         size_pct=0.0,
                         urgency=urg_type,
                         reason=f"🚨 提前算法设计挂单高抛: 累计临停加速，提前挂单¥{sell_px:.2f}冲顶止盈，防复牌戛然而止被核按钮！",
@@ -2510,6 +2564,13 @@ class IPOTradingCenter:
         """【继续交易：执行单条决议】"""
         if not directive:
             return False
+        if str(directive.action or "").upper() in ENTRY_ACTIONS:
+            if getattr(directive, "signal_level", "") != "S5" or getattr(directive, "signal_state", "") in ("OBSERVE", "BLOCKED"):
+                logger.warning(
+                    f"[IPO-TRADING] execute_directive 拒绝执行非 S5 或观察状态买入: {directive.code} "
+                    f"({directive.action}, level={getattr(directive, 'signal_level', '')}, state={getattr(directive, 'signal_state', '')})"
+                )
+                return False
         return self.record_order_execution(directive)
 
     def execute_all_pending_directives(self) -> int:
@@ -2685,7 +2746,18 @@ class IPOTradingCenter:
                     f"EXIT>BUY 阻塞合同: 同代码同一周期存在 EXIT 指令，禁止执行 BUY: {clean_code}",
                 )
 
-        # 4. PAPER/LIVE adapter 前置物理硬门：任何不可逆外部撮合之前，必须先完成
+        # 4. 时间有效性属于确定性指令事实，必须先于环境上下文检查。
+        # 已过期 BUY 无论市场上下文是否存在，都应稳定返回 STALE/EXPIRED，
+        # 便于回放、审计和幂等重试得到一致拒绝原因。
+        if self._auto_load_ledger and action_upper in ENTRY_ACTIONS and not getattr(directive, "_kernel_routed", False):
+            temporal = validate_directive(directive, None)
+            if temporal.code in ("DIRECTIVE_EXPIRED", "STALE_DIRECTIVE"):
+                directive.validated_at = time.time()
+                return self._reject_directive(
+                    directive, temporal.code, temporal.reason
+                )
+
+        # 5. PAPER/LIVE adapter 前置物理硬门：任何不可逆外部撮合之前，必须先完成
         #    本地持仓/T+1/绝对市场风险校验。后续锁内校验继续保留为第二道防线。
         with self._lock:
             pre_sell_actions = {"SELL", "EXIT_ALL", "REDUCE_30", "REDUCE_HALF", "SWITCH_SWAP"}

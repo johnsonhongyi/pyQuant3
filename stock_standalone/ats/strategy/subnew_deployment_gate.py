@@ -412,6 +412,28 @@ class SubnewDeploymentGate:
             if not contract_ok:
                 eval_details["exit_buy_contract_violations"] = violations
 
+        # Frozen replay/release gate is a hard veto on the execution path.
+        # It never upgrades a RED gate; it can only force risk/build checks false.
+        replay_result = kwargs.get("replay_release_result")
+        if replay_result is not None:
+            replay_dict = (
+                replay_result.to_dict()
+                if callable(getattr(replay_result, "to_dict", None))
+                else dict(replay_result) if isinstance(replay_result, dict) else {}
+            )
+            replay_passed = bool(replay_dict.get("passed", False))
+            replay_checks = dict(replay_dict.get("checks") or {})
+            normalized_checks["risk_execution_path"] = (
+                bool(normalized_checks.get("risk_execution_path", True))
+                and replay_passed
+            )
+            if "build_identity" in replay_checks:
+                normalized_checks["build_identity"] = (
+                    bool(normalized_checks.get("build_identity", True))
+                    and bool(replay_checks.get("build_identity"))
+                )
+            eval_details["replay_release_gate"] = replay_dict
+
         # If trading_center is provided, auto-inspect state for missing checks
         tc = kwargs.get("trading_center")
         if tc is not None:

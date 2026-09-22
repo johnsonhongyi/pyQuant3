@@ -3237,6 +3237,40 @@ class StockLiveStrategy:
                 else:
                     trend_suffix += " | 站稳均线"
 
+        # 跨日 VWAP 结构：跌破今日 VWAP 后回踩昨日 VWAP，只是弱势观察，
+        # 对 T+1 新开仓尤其危险，不能继续把旧 price_up/change_up 规则解释成突破。
+        yesterday_vwap = 0.0
+        for _vwap_key in ('last_nclose1d', 'nclose1d', 'last_vwap', 'yesterday_vwap'):
+            try:
+                _vwap_value = float(row.get(_vwap_key, 0.0) or 0.0)
+            except (TypeError, ValueError):
+                _vwap_value = 0.0
+            if _vwap_value > 0:
+                yesterday_vwap = _vwap_value
+                break
+
+        below_today_vwap = (
+            current_price > 0 and current_nclose > 0
+            and current_price < current_nclose * 0.998
+        )
+        testing_yesterday_vwap = (
+            below_today_vwap and yesterday_vwap > 0
+            and current_price <= yesterday_vwap * 1.008
+        )
+        below_both_vwaps = (
+            testing_yesterday_vwap and current_price < yesterday_vwap * 0.998
+        )
+
+        if testing_yesterday_vwap:
+            cross_day_desc = (
+                f"跌破今日VWAP {current_nclose:.2f}，"
+                f"{'并跌破' if below_both_vwaps else '回踩'}昨日VWAP {yesterday_vwap:.2f}"
+            )
+            messages.append((
+                "RISK",
+                f"{'禁止新买/等待止跌' if is_t1_restricted else '走弱观察/禁止追高'}：{cross_day_desc}"
+            ))
+
         # 4. 昨高突破 (关键多头信号)
         lasthigh = float(row.get('lasthigh', 0.0))
         if lasthigh > 0:
@@ -3249,6 +3283,11 @@ class StockLiveStrategy:
         for rule in data.get('rules', []):
             rtype, rval = rule['type'], rule['value']
             if (rtype == 'price_up' and current_price >= rval) or (rtype == 'price_down' and current_price <= rval) or (rtype == 'change_up' and current_change >= rval):
+                # 多头规则触发价属于历史阈值。当前结构已跌破今日 VWAP 并回踩/跌破
+                # 昨日 VWAP 时，该阈值不再代表可买突破；保留风险消息，但不生成
+                # MOMENTUM/价格突破，避免 T+1 下买入后无法当日纠错。
+                if rtype in ('price_up', 'change_up') and testing_yesterday_vwap:
+                    continue
                 # [Optimization] 动态修正动作描述
                 action_str = "价格突破"
                 if rtype == 'price_up':

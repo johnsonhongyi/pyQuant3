@@ -84,6 +84,34 @@ class IPOTradePlan:
     created_time: str = ""
     extra_info: Dict[str, Any] = field(default_factory=dict)
 
+    def __setattr__(self, key: str, value: Any) -> None:
+        if key == "signal_level":
+            strat = getattr(self, "strategy_tag", TAG_CHANNEL_SECONDARY_BUY)
+            if strat == TAG_CHANNEL_SECONDARY_BUY:
+                super().__setattr__(key, "S4")
+                return
+        elif key == "buy_zone_max" and value is not None:
+            tp = getattr(self, "trigger_price", 0.0) or 0.0
+            if tp > 0:
+                limit = round(tp * 1.015, 3)
+                try:
+                    v_flt = float(value)
+                    if v_flt > limit:
+                        value = limit
+                except (ValueError, TypeError):
+                    pass
+        elif key == "trigger_price" and value is not None:
+            super().__setattr__(key, value)
+            try:
+                tp = float(value)
+                bzm = getattr(self, "buy_zone_max", 0.0) or 0.0
+                if tp > 0 and bzm > round(tp * 1.015, 3):
+                    super().__setattr__("buy_zone_max", round(tp * 1.015, 3))
+            except (ValueError, TypeError):
+                pass
+            return
+        super().__setattr__(key, value)
+
     def __post_init__(self):
         if not self.plan_id and self.code:
             now_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -91,9 +119,9 @@ class IPOTradePlan:
         if self.strategy_tag == TAG_CHANNEL_SECONDARY_BUY:
             self.signal_level = "S4"
         if self.trigger_price > 0 and self.buy_zone_max > 0:
-            limit = self.trigger_price * 1.015
+            limit = round(self.trigger_price * 1.015, 3)
             if self.buy_zone_max > limit:
-                self.buy_zone_max = round(limit, 3)
+                self.buy_zone_max = limit
 
     @property
     def structural_stop(self) -> float:

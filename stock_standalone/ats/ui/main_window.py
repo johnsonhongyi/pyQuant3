@@ -50,6 +50,7 @@ from ats.swing_tracker import SwingTracker
 from ats.signal_ledger import SignalLedger
 from ats.volume_profiler import VolumeProfiler
 from ats.session_snapshot import SessionSnapshot
+from ats.ledger_update_service import LedgerUpdateService
 from ats.ui.ats_window_manager import ATSWindowManager
 from JohnsonUtil import commonTips as cct
 
@@ -71,13 +72,14 @@ class LedgerUpdateWorker(QThread):
     def __init__(self, df_all, signal_ledger, volume_profiler,
                  session_snapshot, swing_tracker, stock_history_cache,
                  price_pct_cache, name_cache, fav_stocks, universe_manager,
-                 today_str):
+                 today_str, ledger_update_service=None):
         super().__init__()
         # 浅拷贝 DataFrame：仅复制 index/columns 结构元数据，数据块共享内存
         # 在 Worker 只读访问 df 的场景下足够安全，避免 ~80ms 的深拷贝开销
         import pandas as pd
         self._df = df_all.copy(deep=False)
         self._signal_ledger = signal_ledger
+        self._ledger_update_service = ledger_update_service or LedgerUpdateService(signal_ledger)
         self._volume_profiler = volume_profiler
         self._session_snapshot = session_snapshot
         self._swing_tracker = swing_tracker
@@ -212,9 +214,10 @@ class LedgerUpdateWorker(QThread):
                         elif is_c_swing:
                             s_tag = '📈 上升通道'
 
-                        self._signal_ledger.record_signal(
+                        self._ledger_update_service.update_candidate(
                             code=code_str, name=name, price=price, pct=pct,
                             deviation=deviation, row=row, volume_score=vol_score,
+                            source='FAVORITE' if is_fav else 'ATS',
                             signal_tag=s_tag,
                             dragon_role=d_role, dragon_buy_type=d_buy,
                             dragon_reason=d_reason, dragon_amount_yi=d_amt,
@@ -240,8 +243,8 @@ class LedgerUpdateWorker(QThread):
 
             # ── 阶段 B: 计算 swing_rows (原 refresh_realtime_ui 中的 for code in all_codes) ──
             # 从信号账本同步三级池
-            self._universe_manager.sync_from_ledger(
-                self._signal_ledger,
+            self._ledger_update_service.sync_projection(
+                self._universe_manager,
                 df_realtime=df_all,
                 price_pct_cache=self._price_pct_cache
             )
@@ -1867,6 +1870,7 @@ class ATSMainWindow(QMainWindow):
         self.swing_tracker = SwingTracker()
         from ats.signal_ledger import get_signal_ledger
         self.signal_ledger = get_signal_ledger()
+        self.ledger_update_service = LedgerUpdateService(self.signal_ledger)
         self.volume_profiler = VolumeProfiler()
         self.session_snapshot = SessionSnapshot()
         self.window_manager = ATSWindowManager.get_instance()
@@ -4713,7 +4717,7 @@ class ATSMainWindow(QMainWindow):
 
         if not has_df:
             # 无行情数据时仅同步 universe tree
-            self.universe_manager.sync_from_ledger(self.signal_ledger, price_pct_cache=self.price_pct_cache)
+            self.ledger_update_service.sync_projection(self.universe_manager, price_pct_cache=self.price_pct_cache)
             radar_list, watch_list, trade_list = self.universe_manager.get_pools()
             self.universe_widget.update_pools(radar_list, watch_list, trade_list)
             return
@@ -4740,6 +4744,7 @@ class ATSMainWindow(QMainWindow):
             fav_stocks=fav_stocks,
             universe_manager=self.universe_manager,
             today_str=today_str,
+            ledger_update_service=self.ledger_update_service,
         )
         worker.results_ready.connect(self._on_ledger_results)
         worker.finished.connect(worker.deleteLater)
@@ -5032,7 +5037,7 @@ class ATSMainWindow(QMainWindow):
                     s_tag = '📈 上升通道'
 
                 # 写入信号账本（新信号锁定首次发现时间，已有信号仅更新最新数据）
-                self.signal_ledger.record_signal(
+                self.ledger_update_service.update_candidate(
                     code=code_str,
                     name=name,
                     price=price,
@@ -5040,6 +5045,7 @@ class ATSMainWindow(QMainWindow):
                     deviation=deviation,
                     row=row,
                     volume_score=vol_score,
+                    source='FAVORITE' if is_fav else 'ATS',
                     signal_tag=s_tag,
                     dragon_role=d_role,
                     dragon_buy_type=d_buy,
@@ -6224,8 +6230,13 @@ class ATSMainWindow(QMainWindow):
 
         sig_dict['name'] = name
 
-        # 2. 写入 SignalLedger 并自动提权置顶
-        if hasattr(self, 'signal_ledger'):
+        # 2. 所有 TDX/OrderMon 输入统一经过 LedgerUpdateService。
+        # 盘前/竞价阶段只写 Candidate seed，不污染正式 SignalLedger。
+        entry = None
+        if hasattr(self, 'ledger_update_service'):
+            entry = self.ledger_update_service.update_tdx(sig_dict, row=df_row).entry
+        elif hasattr(self, 'signal_ledger'):
+            # 仅保留兼容旧实例；新主窗口不会走到该分支。
             entry = self.signal_ledger.record_tdx_signal(sig_dict, row=df_row)
 
         # 3. 将新捕获的通达信信号直接注册到 _last_batch_signal_codes 顶部
@@ -6691,7 +6702,7 @@ class ATSMainWindow(QMainWindow):
                     self.universe_widget.load_mock_data()
                 else:
                     try:
-                        self.universe_manager.sync_from_ledger()
+                        self.ledger_update_service.sync_projection(self.universe_manager, df_realtime=self.current_df, price_pct_cache=self.price_pct_cache)
                         radar_list, watch_list, trade_list = self.universe_manager.get_pools()
                         self.universe_widget.update_pools(radar_list, watch_list, trade_list)
                     except Exception as e_um:
