@@ -1,3 +1,0 @@
-{"action": "claimed", "actor": "antigravity", "from_state": "inbox", "task_id": "001", "timestamp": "2026-09-20T02:28:42.954193+00:00", "to_state": "running"}
-{"action": "submitted", "actor": "antigravity", "from_state": "running", "task_id": "001", "timestamp": "2026-09-20T02:28:42.963207+00:00", "to_state": "done"}
-{"action": "reviewed_rework", "actor": "codex", "from_state": "done", "task_id": "001", "timestamp": "2026-09-20T02:28:42.970478+00:00", "to_state": "inbox"}
