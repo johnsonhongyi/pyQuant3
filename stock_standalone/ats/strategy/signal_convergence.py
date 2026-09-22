@@ -9,16 +9,18 @@ PAPER execution.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Iterable
+from typing import Any, Iterable, List, Tuple
 
 
-EXIT_ACTIONS = frozenset({"SELL", "EXIT_ALL", "REDUCE", "REDUCE_30", "REDUCE_HALF"})
+EXIT_ACTIONS = frozenset({"SELL", "EXIT_ALL", "REDUCE", "REDUCE_30", "REDUCE_HALF", "EXIT", "STOP_LOSS"})
 ENTRY_ACTIONS = frozenset({"BUY", "BUY_SCOUT", "BUY_CONFIRM"})
 ROTATION_ACTIONS = frozenset({"SWITCH_SWAP", "FULL_ROTATION_SWAP"})
 
 _EXIT_PRIORITY = {
     "EXIT_ALL": 100,
     "SELL": 100,
+    "EXIT": 100,
+    "STOP_LOSS": 100,
     "REDUCE": 80,
     "REDUCE_HALF": 70,
     "REDUCE_30": 60,
@@ -83,6 +85,31 @@ def _priority(directive: Any) -> tuple[int, int, float]:
     return action_priority, urgency_priority, rank_priority
 
 
+def check_exit_buy_contract(directives: Iterable[Any]) -> Tuple[bool, List[str]]:
+    """
+    Independent Blocking Contract: EXIT > BUY
+    Verifies that no code has both an EXIT action and an ENTRY action in the given directive set.
+    Returns (is_compliant, violation_reasons).
+    """
+    code_actions: dict[str, set[str]] = {}
+    for d in directives or []:
+        c = _code(d)
+        a = _action(d)
+        if c and a:
+            code_actions.setdefault(c, set()).add(a)
+
+    violations: list[str] = []
+    for c, acts in code_actions.items():
+        has_exit = any(a in EXIT_ACTIONS for a in acts)
+        has_entry = any(a in ENTRY_ACTIONS for a in acts)
+        if has_exit and has_entry:
+            violations.append(
+                f"Code {c} violates EXIT>BUY contract: coexisting EXIT ({acts & EXIT_ACTIONS}) and ENTRY ({acts & ENTRY_ACTIONS})"
+            )
+
+    return len(violations) == 0, violations
+
+
 def converge_directives(directives: Iterable[Any]) -> SignalConvergenceResult:
     """Keep the highest-priority directive for each code/bucket.
 
@@ -93,12 +120,23 @@ def converge_directives(directives: Iterable[Any]) -> SignalConvergenceResult:
     raw = list(directives or [])
     selected: dict[tuple[str, str], Any] = {}
     suppressed: list[str] = []
+
+    # First collect all codes that have an EXIT directive in this refresh cycle
+    exit_codes = {_code(d) for d in raw if _bucket(_action(d)) == "EXIT" and _code(d)}
+
     for directive in raw:
         code, action = _code(directive), _action(directive)
         if not code or not action:
             suppressed.append("INVALID_DIRECTIVE")
             continue
         bucket = _bucket(action)
+
+        # EXIT > BUY independent blocking contract:
+        # If code has an EXIT in the same refresh, any ENTRY is physically suppressed immediately.
+        if bucket == "ENTRY" and code in exit_codes:
+            suppressed.append("EXIT_OVERRIDES_ENTRY")
+            continue
+
         key = (code, bucket)
         prior = selected.get(key)
         if prior is None or _priority(directive) > _priority(prior):
@@ -108,7 +146,7 @@ def converge_directives(directives: Iterable[Any]) -> SignalConvergenceResult:
         else:
             suppressed.append("DUPLICATE_LOWER_PRIORITY")
 
-    exit_codes = {code for code, bucket in selected if bucket == "EXIT"}
+    # Safety check: ensure no ENTRY remains if an EXIT exists
     for key in [item for item in selected if item[1] == "ENTRY" and item[0] in exit_codes]:
         selected.pop(key)
         suppressed.append("EXIT_OVERRIDES_ENTRY")
