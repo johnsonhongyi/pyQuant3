@@ -1,5 +1,22 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-09-23 00:58
+- [x] **【UI 决策透出与影子实盘压测长周期守护全面落地】(`ats/universe_manager.py`, `ats/ui/swing_table.py`, `ats/ui/ipo_command_room_dialog.py`, `tools/run_shadow_live_test.py`, `tests/test_ui_decision_badges_and_shadow_runner.py`)**：
+    - [x] **监控表与池子决策透出与高位回撤视觉徽章（全简短中文）**：
+        - `UniverseManager` 从 `SignalLedger` 自动提取 `weak_since_ts`、`tier == INACTIVE`、`peak_drawdown`（峰值回撤）与状态流转历史；
+        - 直观生成并注入全简短中文徽章：`⚠️ 回撤-X.X%` / `⚠️ 动能走弱` 与 `⛔ 破位失效`；
+        - `SwingStateTable` 表格渲染增强：首次发现列与决议原因列自动识别徽章，走弱标的高亮橙黄色粗体，失效标的高亮暗红色粗体，鼠标悬停单元格浮动呈现完整高位回撤历史（如 `高位回撤-4.5% (峰值+5.0%->+0.5%)`）；
+    - [x] **集中交易指挥室赛马天梯与指令表决策联动（全简短中文）**：
+        - 赛马排位表 `tbl_rank` 角色列与决议依据列自动对齐账本生命周期，直观标注 `[⚠️动能走弱]` / `[⚠️回撤-X.X%]` / `[⛔破位失效]`；
+        - 消除操盘手买点误判盲区，对高位走弱与跌破双 VWAP 标的实施前端醒目阻断预警；
+    - [x] **影子实盘压测全天候无报单长周期守护启动器 (`tools/run_shadow_live_test.py`)**：
+        - 强制锁定环境为影子/纸面撮合模式（`PAPER_TRADING_ONLY = 1`），物理隔离真实报单接口；
+        - 支持全天候 2~3 个交易日长周期压测，集成内存占用（RSS MB）、CPU、Tick 延迟、快照持久化率与指令流转统计；
+        - 支持 `--dry-run` 极速自检，自动按交易日输出体检快照 `logs/shadow_test_report_YYYYMMDD.json`；
+    - [x] **全量自动化验证 100% 绿灯**：
+        - 专项测试 `test_ui_decision_badges_and_shadow_runner.py` 3 项测试秒级纯绿通过；
+        - 核心测试集 20/20 纯绿，全模块 `compileall` 编译零错误。
+
 ## 2026-09-23 00:45
 - [x] **【P1 主干物理收敛：废除 SignalLedger.record_signal 旁路直写，主数据流强制统一接入 LedgerUpdateService 单一入口】(`ats/signal_ledger.py`, `ats/ledger_update_service.py`, `ats/candidate_cache.py`, `ats/ui/main_window.py`, `stock_standalone/pytest.ini`, `tests/test_p1_ledger_single_entry_hardening.py`)**：
     - [x] **彻底物理封死旁路直写与内部安全写入收敛**：

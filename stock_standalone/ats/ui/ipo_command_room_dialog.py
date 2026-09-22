@@ -1590,11 +1590,48 @@ class IPOCommandRoomDialog(QDialog):
             # 启动时点 (时间文本排序)
             self.tbl_rank.setItem(r, 5, QTableWidgetItem(sig.launch_time_str or "--"))
 
-            # 角色 (精准映射为标准中文)
+            # 决策生命周期与高位回撤透出 (SSOT)
+            ledger_entry = None
+            if hasattr(self, 'signal_ledger') and hasattr(self.signal_ledger, 'entries'):
+                ledger_entry = self.signal_ledger.entries.get(sig.code)
+
+            drawdown_pct = 0.0
+            is_invalidated = (
+                getattr(sig, 'channel_stage', '') == 'INVALIDATED'
+                or getattr(sig, 'signal_type', '') in ('WEAK_EXIT', 'STOP_LOSS')
+                or (ledger_entry and (getattr(ledger_entry, 'tier', '') == 'INACTIVE' or '双VWAP' in getattr(ledger_entry, 'signal_tag', '')))
+            )
+            is_weakened = False
+            if ledger_entry:
+                p_val = float(getattr(ledger_entry, 'latest_pct', 0.0) or 0.0)
+                peak_val = float(getattr(ledger_entry, 'peak_pct', p_val) or p_val)
+                drawdown_pct = max(0.0, peak_val - p_val)
+                is_weakened = (getattr(ledger_entry, 'weak_since_ts', 0.0) > 0 or drawdown_pct >= 3.0 or '走弱' in getattr(ledger_entry, 'signal_tag', ''))
+            elif getattr(sig, 'relative_to_leader_gap', 0.0) >= 25.0:
+                is_weakened = True
+
+            # 角色 (精准映射为标准中文 + 简短中文决策徽章透出)
             role_raw = sig.global_fleet_role or "--"
             role_cn = ROLE_CN_MAP.get(role_raw, role_raw)
-            role_it = QTableWidgetItem(role_cn)
-            if role_raw == "LEADER":
+            if is_invalidated:
+                role_prefix = "⛔[破位失效] "
+            elif is_weakened and drawdown_pct >= 3.0:
+                role_prefix = f"⚠️[回撤-{drawdown_pct:.1f}%] "
+            elif is_weakened:
+                role_prefix = "⚠️[动能走弱] "
+            else:
+                role_prefix = ""
+
+            role_it = QTableWidgetItem(f"{role_prefix}{role_cn}")
+            if is_invalidated:
+                role_it.setForeground(QColor("#ff3333"))
+                role_it.setFont(QFont("Microsoft YaHei", -1, QFont.Weight.Bold))
+                role_it.setToolTip(f"【⛔ 破位失效】\n已跌破关键防守位或双VWAP破位，禁止新增买入！")
+            elif is_weakened:
+                role_it.setForeground(QColor("#ffaa00"))
+                role_it.setFont(QFont("Microsoft YaHei", -1, QFont.Weight.Bold))
+                role_it.setToolTip(f"【⚠️ 动能走弱】\n高位回撤 {drawdown_pct:.1f}% 或动能转负，优先防守！")
+            elif role_raw == "LEADER":
                 role_it.setForeground(QColor("#ffaa00"))
             elif role_raw == "VANGUARD":
                 role_it.setForeground(QColor("#00e5ff"))
@@ -1618,10 +1655,22 @@ class IPOCommandRoomDialog(QDialog):
                 role_it.setForeground(QColor("#8f93a8"))
             self.tbl_rank.setItem(r, 6, role_it)
 
-            # 决议依据
+            # 决议依据 (融入高位回撤与失效原因，简短中文)
             desc_str = sig.global_arbitration_desc or sig.signal_desc
+            if is_invalidated and "破位" not in desc_str and "失效" not in desc_str:
+                desc_str = f"⛔[破位失效] {desc_str}"
+            elif is_weakened and "走弱" not in desc_str and "回撤" not in desc_str:
+                dd_info = f"回撤-{drawdown_pct:.1f}%" if drawdown_pct >= 3.0 else "动能走弱"
+                desc_str = f"⚠️[{dd_info}] {desc_str}"
+
             desc_it = QTableWidgetItem(desc_str)
-            if "领头羊" in desc_str or "首发吸筹" in desc_str or "共振加速" in desc_str or "筑底预埋" in desc_str or "通道突破" in desc_str or "次级买点" in desc_str:
+            if is_invalidated:
+                desc_it.setForeground(QColor("#ff4444"))
+                desc_it.setToolTip(f"【⛔ 破位失效】\n{desc_str}")
+            elif is_weakened:
+                desc_it.setForeground(QColor("#ffaa00"))
+                desc_it.setToolTip(f"【⚠️ 动能走弱】\n{desc_str}")
+            elif "领头羊" in desc_str or "首发吸筹" in desc_str or "共振加速" in desc_str or "筑底预埋" in desc_str or "通道突破" in desc_str or "次级买点" in desc_str:
                 desc_it.setForeground(QColor("#00ff88"))
             elif "买错" in desc_str or "平仓" in desc_str or "止损" in desc_str:
                 desc_it.setForeground(QColor("#ff5555"))
