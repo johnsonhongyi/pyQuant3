@@ -362,36 +362,70 @@ def _get_app_processes() -> list:
         return []
 
 
+def _is_antigravity_app_running() -> bool:
+    """快速判断桌面 Antigravity App 是否仍有主进程存活。"""
+    return bool(_get_antigravity_running_flags()[0])
+
+
+def _wait_for_antigravity_app_stopped(timeout: float = 7.0) -> bool:
+    """等待旧 App 完全退出；切换账户时禁止旧实例未退净就启动新实例。"""
+    deadline = time.monotonic() + max(0.5, float(timeout))
+    while time.monotonic() < deadline:
+        if not _is_antigravity_app_running():
+            # Electron/文件锁释放留一个很短的稳定窗口。
+            time.sleep(0.12)
+            return not _is_antigravity_app_running()
+        time.sleep(0.10)
+    return not _is_antigravity_app_running()
+
+
 def _stop_antigravity_app(timeout: float = 5.0) -> bool:
-    """仅关闭桌面 App 进程树，绝不关闭 Antigravity IDE。"""
+    """仅关闭桌面 App 进程树，并确认 Antigravity.exe 已完全退出。"""
     try:
         import psutil
         roots = _get_app_processes()
-        if not roots:
-            return True
-        targets = {}
-        for root in roots:
-            targets[root.pid] = root
+
+        # 正常路径：按已识别的 Electron 根进程及其子树优雅结束。
+        if roots:
+            targets = {}
+            for root in roots:
+                targets[root.pid] = root
+                try:
+                    for child in root.children(recursive=True):
+                        targets[child.pid] = child
+                except Exception:
+                    pass
+            procs = list(targets.values())
+            for proc in reversed(procs):
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
+            _, alive = psutil.wait_procs(procs, timeout=max(0.5, timeout))
+            for proc in alive:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+            if alive:
+                psutil.wait_procs(alive, timeout=2.0)
+
+        # 容灾路径：原生检测仍显示 App 存活，但 psutil 没拿到对象时，
+        # 用精确镜像名强制结束 Antigravity.exe；不会匹配 Antigravity IDE.exe。
+        if _is_antigravity_app_running():
             try:
-                for child in root.children(recursive=True):
-                    targets[child.pid] = child
+                import subprocess
+                subprocess.run(
+                    ["taskkill", "/IM", "Antigravity.exe", "/T", "/F"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=3.0,
+                    check=False,
+                )
             except Exception:
                 pass
-        procs = list(targets.values())
-        for proc in reversed(procs):
-            try:
-                proc.terminate()
-            except Exception:
-                pass
-        _, alive = psutil.wait_procs(procs, timeout=timeout)
-        for proc in alive:
-            try:
-                proc.kill()
-            except Exception:
-                pass
-        if alive:
-            psutil.wait_procs(alive, timeout=2.0)
-        return not _get_app_processes()
+
+        return _wait_for_antigravity_app_stopped(timeout=max(2.0, timeout))
     except Exception as e:
         logger.error(f"关闭 Antigravity App 失败: {type(e).__name__}")
         return False
@@ -630,7 +664,7 @@ def get_current_account(db_path: str = None) -> dict:
     return {"email": "", "name": "", "summary": "未登录/无有效账户", "masked_email": "", "masked_summary": "未登录/无有效账户", "source_db": ""}
 
 
-def get_dual_target_active_accounts() -> tuple:
+def get_dual_target_active_accounts(probe_live: bool = True) -> tuple:
     """
     独立获取 Antigravity 独立客户端与 Antigravity IDE 当前分别在使用的账户邮箱。
     返回: (app_active_email, ide_active_email)
@@ -641,7 +675,7 @@ def get_dual_target_active_accounts() -> tuple:
     # 1. 独立客户端当前账户：运行时以 LanguageServer 回读为最高权威。
     # app_storage / state.vscdb 只用于 App 离线时显示“上次配置”，不能证明切换成功。
     app_email = ""
-    if _get_app_processes():
+    if probe_live and _get_app_processes():
         app_email = _probe_app_live_email(timeout=0.35)
     if not app_email:
         app_email = _get_app_login_username()
@@ -664,8 +698,12 @@ def get_dual_target_active_accounts() -> tuple:
     return app_email, ide_email
 
 
-def list_accounts(accounts_dir: str = ACCOUNTS_DIR, auto_discover: bool = True) -> list:
-    """扫描账户；legacy 默认保留自动自愈，App/双 Tab UI 可显式只读。"""
+def list_accounts(
+    accounts_dir: str = ACCOUNTS_DIR,
+    auto_discover: bool = True,
+    active_accounts: tuple = None,
+) -> list:
+    """扫描账户；可复用调用方已取得的活跃账户快照，避免重复在线探针。"""
     if auto_discover:
         auto_backup_new_accounts_from_databases(accounts_dir)
 
@@ -673,7 +711,10 @@ def list_accounts(accounts_dir: str = ACCOUNTS_DIR, auto_discover: bool = True) 
         return []
 
     account_files = glob.glob(os.path.join(accounts_dir, "*.json"))
-    app_active_email, ide_active_email = get_dual_target_active_accounts()
+    if active_accounts is None:
+        app_active_email, ide_active_email = get_dual_target_active_accounts()
+    else:
+        app_active_email, ide_active_email = active_accounts
 
     results = []
     for fpath in account_files:
@@ -897,29 +938,95 @@ def backup_current_app_account(accounts_dir: str = ACCOUNTS_DIR) -> tuple:
         return False, f"备份 Antigravity 客户端账户失败: {e}", None
 
 
-def get_runtime_app_status() -> dict:
+def _get_antigravity_running_flags() -> tuple:
+    """轻量检测 App/IDE 是否运行；Windows 主路径避免 psutil 全进程枚举开销。"""
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            TH32CS_SNAPPROCESS = 0x00000002
+            INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+
+            class PROCESSENTRY32W(ctypes.Structure):
+                _fields_ = [
+                    ("dwSize", wintypes.DWORD),
+                    ("cntUsage", wintypes.DWORD),
+                    ("th32ProcessID", wintypes.DWORD),
+                    ("th32DefaultHeapID", ctypes.c_void_p),
+                    ("th32ModuleID", wintypes.DWORD),
+                    ("cntThreads", wintypes.DWORD),
+                    ("th32ParentProcessID", wintypes.DWORD),
+                    ("pcPriClassBase", ctypes.c_long),
+                    ("dwFlags", wintypes.DWORD),
+                    ("szExeFile", wintypes.WCHAR * 260),
+                ]
+
+            kernel32 = ctypes.WinDLL("kernel32.dll", use_last_error=True)
+            kernel32.CreateToolhelp32Snapshot.argtypes = [
+                wintypes.DWORD, wintypes.DWORD
+            ]
+            kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+            kernel32.Process32FirstW.argtypes = [
+                wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32W)
+            ]
+            kernel32.Process32FirstW.restype = wintypes.BOOL
+            kernel32.Process32NextW.argtypes = [
+                wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32W)
+            ]
+            kernel32.Process32NextW.restype = wintypes.BOOL
+            kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+
+            handle = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+            if handle == INVALID_HANDLE_VALUE:
+                raise OSError(ctypes.get_last_error())
+
+            app_running = False
+            ide_running = False
+            entry = PROCESSENTRY32W()
+            entry.dwSize = ctypes.sizeof(PROCESSENTRY32W)
+            try:
+                ok = kernel32.Process32FirstW(handle, ctypes.byref(entry))
+                while ok:
+                    name = (entry.szExeFile or "").lower()
+                    if "antigravity ide" in name:
+                        ide_running = True
+                    elif name == "antigravity.exe":
+                        app_running = True
+                    if app_running and ide_running:
+                        break
+                    ok = kernel32.Process32NextW(handle, ctypes.byref(entry))
+            finally:
+                kernel32.CloseHandle(handle)
+            return app_running, ide_running
+        except Exception as e:
+            logger.debug(f"Toolhelp 运行态探测失败，回退 psutil: {e}")
+
+    try:
+        import psutil
+        app_running = False
+        ide_running = False
+        for p in psutil.process_iter(["name"]):
+            try:
+                name = (p.info.get("name") or "").lower()
+                if "antigravity ide" in name:
+                    ide_running = True
+                elif name == "antigravity.exe":
+                    app_running = True
+            except Exception:
+                pass
+        return app_running, ide_running
+    except Exception as e:
+        logger.debug(f"运行态进程探测失败: {e}")
+        return False, False
+
+
+def get_runtime_app_status(probe_live: bool = True) -> dict:
     """
     实时检测当前系统正在运行的是 Antigravity 客户端 还是 Antigravity IDE。
     返回两端运行状态、活跃标识、数据库账户等全景信息。
     """
-    app_running = False
-    ide_running = False
-
-    try:
-        import psutil
-        for p in psutil.process_iter(['name', 'exe']):
-            try:
-                name = (p.info.get('name') or "").lower()
-                exe = (p.info.get('exe') or "").lower()
-                if "antigravity ide" in name or "antigravityide" in exe:
-                    ide_running = True
-                elif "antigravity" in name:
-                    if "antigravity ide" not in name:
-                        app_running = True
-            except Exception:
-                pass
-    except Exception as e:
-        logger.debug(f"探测运行时进程异常: {e}")
+    app_running, ide_running = _get_antigravity_running_flags()
 
     # 读取两端数据库信息
     app_acc = None
@@ -930,7 +1037,11 @@ def get_runtime_app_status() -> dict:
         if d and d.get("antigravityAuthStatus"):
             app_acc = parse_account_detail(d["antigravityAuthStatus"])
 
-    live_app_email = _probe_app_live_email(timeout=0.35) if app_running else ""
+    live_app_email = (
+        _probe_app_live_email(timeout=0.35)
+        if (probe_live and app_running)
+        else ""
+    )
     app_login = _get_app_login_username()
     app_db_email = ((app_acc or {}).get("email") or "").strip().lower()
     if live_app_email:
@@ -1124,7 +1235,12 @@ def _switch_app_account(target: str, accounts_dir: str = ACCOUNTS_DIR) -> tuple:
     if not email:
         return False, "目标账户缺少有效邮箱"
 
-    live_before = _probe_app_live_email(timeout=0.45) if _get_app_processes() else ""
+    app_running_before = _is_antigravity_app_running()
+    live_before = (
+        _probe_app_live_email(timeout=0.45)
+        if app_running_before
+        else ""
+    )
     profile = _load_app_profile(email, accounts_dir)
 
     # 当前真实在线账户可以就地补建 App Profile；其它账户必须已有安全凭据快照。
@@ -1166,9 +1282,16 @@ def _switch_app_account(target: str, accounts_dir: str = ACCOUNTS_DIR) -> tuple:
             "未对 App 或 IDE 做任何修改。"
         )
 
-    was_running = bool(_get_app_processes())
-    if not _stop_antigravity_app():
-        return False, "无法安全关闭 Antigravity App，已取消切换"
+    # 切换前重新确认运行态：已打开则必须先完整退出；未打开则直接准备新状态。
+    was_running = _is_antigravity_app_running()
+    if was_running:
+        logger.info("检测到 Antigravity App 已运行，切换账户前先完整关闭旧实例")
+        if not _stop_antigravity_app():
+            return False, "检测到 Antigravity App 已打开，但无法完整关闭旧实例，已取消切换"
+        if not _wait_for_antigravity_app_stopped(timeout=5.0):
+            return False, "Antigravity App 旧实例未完全退出，已取消启动新账户实例"
+    else:
+        logger.info("Antigravity App 当前未运行，直接准备目标账户后启动")
 
     import shutil
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
@@ -1205,6 +1328,10 @@ def _switch_app_account(target: str, accounts_dir: str = ACCOUNTS_DIR) -> tuple:
             raise RuntimeError("app_storage 登录身份写入失败")
         if not _restore_app_credential_snapshot(profile):
             raise RuntimeError("Windows Credential Manager 凭据恢复失败")
+
+        # 启动前最后一道硬门：旧 Antigravity.exe 必须已经完全退出。
+        if _is_antigravity_app_running():
+            raise RuntimeError("旧 Antigravity App 实例仍在运行，拒绝启动第二个实例")
 
         if not _launch_antigravity_app():
             raise RuntimeError("Antigravity App 启动失败")
@@ -1642,6 +1769,7 @@ def fetch_antigravity_quotas(target_email: str = None, timeout: float = 0.8) -> 
 
     curr_acc = get_current_account()
     curr_email = (curr_acc.get("email") or "").strip().lower()
+    explicit_target = bool(str(target_email or "").strip())
     wanted_email = (target_email or curr_email).strip().lower()
 
     # 1. 搜寻系统中所有运行中的 language_server 进程及其 csrf_token，按创建时间倒序排查
@@ -1870,14 +1998,14 @@ def fetch_antigravity_quotas(target_email: str = None, timeout: float = 0.8) -> 
 
     latency_ms = int((time.time() - t0) * 1000)
 
-    # 5. 精准匹配主结果
+    # 5. 精准匹配主结果。显式请求某个邮箱时必须严格命中；
+    # 禁止退回旧账号/第一个 LanguageServer，否则切换后刷新会重新识别成旧账户。
     target_match = None
     if wanted_email and wanted_email in discovered_accounts:
         target_match = discovered_accounts[wanted_email]
-    elif curr_email and curr_email in discovered_accounts:
+    elif not explicit_target and curr_email and curr_email in discovered_accounts:
         target_match = discovered_accounts[curr_email]
-    elif discovered_accounts:
-        # 未能精准匹配当前账号，返回第一个发现的，但标明其实际邮箱
+    elif not explicit_target and discovered_accounts:
         first_key = list(discovered_accounts.keys())[0]
         target_match = discovered_accounts[first_key]
 

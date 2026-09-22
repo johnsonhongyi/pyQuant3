@@ -630,6 +630,15 @@ def test_fetch_antigravity_quotas_multi_process_exact_match(monkeypatch):
     assert "hongyi2008@gmail.com" in res_hongyi["all_accounts_quotas"]
     assert "johnson.hongyi@gmail.com" in res_hongyi["all_accounts_quotas"]
 
+    # 4. 显式请求不存在的邮箱必须失败，禁止回退到旧账号/第一个服务。
+    missing = antigravity_manager.fetch_antigravity_quotas(
+        target_email="missing@example.com"
+    )
+    assert missing["success"] is False
+    assert missing["account_email"] == "missing@example.com"
+    assert "hongyi2008@gmail.com" in missing["all_accounts_quotas"]
+    assert "johnson.hongyi@gmail.com" in missing["all_accounts_quotas"]
+
 
 def test_retrieve_user_quota_summary_weekly_and_card_rendering(monkeypatch):
     """验证官方双层限额体系（周限额 Weekly Limit + 5小时限额）探测、解析与卡片渲染"""
@@ -803,6 +812,11 @@ def test_runtime_app_status_and_targeted_sync(monkeypatch):
             lambda profile: bool(profile.get(antigravity_manager.APP_PROFILE_CRED_BLOB_KEY)),
         )
         monkeypatch.setattr(antigravity_manager, "_get_app_processes", lambda: [])
+        monkeypatch.setattr(antigravity_manager, "_is_antigravity_app_running", lambda: False)
+        monkeypatch.setattr(
+            antigravity_manager, "_wait_for_antigravity_app_stopped",
+            lambda timeout=7.0: True,
+        )
         monkeypatch.setattr(antigravity_manager, "_stop_antigravity_app", lambda timeout=5.0: True)
         monkeypatch.setattr(antigravity_manager, "_launch_antigravity_app", lambda: True)
         monkeypatch.setattr(
@@ -1040,3 +1054,162 @@ def test_app_backup_prefers_app_storage_identity_when_state_db_is_stale(monkeypa
         assert saved["oauthToken"] == "current-token"
         assert "antigravity.profileUrl" not in saved
         assert not os.path.exists(ide_db)
+
+
+def test_quota_refresh_generation_and_app_rebind(monkeypatch):
+    from PyQt6.QtWidgets import QApplication
+    from window_manager.ui import AntigravityAccountManagerDialog
+    from window_manager import antigravity_manager
+
+    _app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(antigravity_manager, "get_current_account", lambda: {
+        "email": "old@example.com", "name": "Old"
+    })
+    monkeypatch.setattr(
+        antigravity_manager,
+        "get_dual_target_active_accounts",
+        lambda *args, **kwargs: ("old@example.com", ""),
+    )
+    monkeypatch.setattr(antigravity_manager, "get_cached_quotas", lambda: {})
+    monkeypatch.setattr(
+        antigravity_manager,
+        "get_runtime_app_status",
+        lambda *args, **kwargs: {
+            "app_running": True, "ide_running": False
+        },
+    )
+    monkeypatch.setattr(
+        antigravity_manager,
+        "list_accounts",
+        lambda *args, **kwargs: [
+            {"email": "old@example.com", "name": "Old", "mtime": 2},
+            {"email": "new@example.com", "name": "New", "mtime": 1},
+        ],
+    )
+
+    dialog = AntigravityAccountManagerDialog(auto_fetch=False)
+    dialog._quota_request_id = 2
+    dialog.lbl_probe_info.setText("sentinel")
+
+    dialog._on_quotas_received({
+        "_request_id": 1,
+        "_target_role": "app",
+        "_requested_email": "old@example.com",
+        "success": True,
+        "account_email": "old@example.com",
+        "latency_ms": 1,
+        "groups": {},
+        "models": [],
+        "all_accounts_quotas": {},
+    })
+    assert dialog.lbl_probe_info.text() == "sentinel"
+
+    calls = []
+    monkeypatch.setattr(
+        dialog,
+        "reload_accounts",
+        lambda **kwargs: calls.append(kwargs),
+    )
+    dialog._on_quotas_received({
+        "_request_id": 2,
+        "_target_role": "app",
+        "_requested_email": "new@example.com",
+        "success": True,
+        "account_email": "new@example.com",
+        "latency_ms": 1,
+        "target_port": 9999,
+        "groups": {},
+        "models": [],
+        "all_accounts_quotas": {},
+    })
+    assert calls == [{"preferred_app_email": "new@example.com"}]
+    assert "new@example.com" not in dialog.lbl_probe_info.text()
+    assert "n***w@example.com" in dialog.lbl_probe_info.text()
+    dialog.close()
+
+
+def test_app_switch_closes_running_instance_before_launch(monkeypatch):
+    import window_manager.antigravity_manager as agm
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        app_db = os.path.join(tmpdir, "app_state.vscdb")
+        ide_db = os.path.join(tmpdir, "ide_state.vscdb")
+        app_storage = os.path.join(tmpdir, "app_storage.json")
+        acc_dir = os.path.join(tmpdir, "accounts")
+        os.makedirs(os.path.join(acc_dir, "app_profiles"), exist_ok=True)
+
+        target = "target@example.com"
+        current = "current@example.com"
+        target_auth = json.dumps({"name": "Target", "email": target})
+        write_db_data(app_db, {
+            "antigravityAuthStatus": json.dumps({"name": "Current", "email": current}),
+            "oauthToken": "current-token",
+        })
+        with open(app_storage, "w", encoding="utf-8") as fp:
+            json.dump({"jetski.onboarding.lastLoginUsername": current}, fp)
+        with open(os.path.join(acc_dir, f"{target}.json"), "w", encoding="utf-8") as fp:
+            json.dump({"antigravityAuthStatus": target_auth, "oauthToken": "target-token"}, fp)
+
+        fake_cred = {
+            agm.APP_PROFILE_CRED_BLOB_KEY: "dpapi-test",
+            agm.APP_PROFILE_CRED_USER_KEY: "antigravity",
+            agm.APP_PROFILE_CRED_PERSIST_KEY: 2,
+            agm.APP_PROFILE_VERIFIED_KEY: True,
+        }
+        profile = dict(fake_cred)
+        profile["antigravityAuthStatus"] = target_auth
+        profile["oauthToken"] = "target-token"
+        profile[agm.APP_PROFILE_LOGIN_KEY] = target
+        with open(
+            os.path.join(acc_dir, "app_profiles", f"{target}.json"),
+            "w", encoding="utf-8"
+        ) as fp:
+            json.dump(profile, fp)
+
+        monkeypatch.setattr(agm, "OLD_DB_PATH", app_db)
+        monkeypatch.setattr(agm, "NEW_DB_PATH", ide_db)
+        monkeypatch.setattr(agm, "APP_STORAGE_PATH", app_storage)
+
+        events = []
+        running = {"value": True}
+        monkeypatch.setattr(agm, "_capture_app_credential_snapshot", lambda: dict(fake_cred))
+        monkeypatch.setattr(agm, "_probe_app_live_email", lambda timeout=0.45: current)
+        monkeypatch.setattr(agm, "_is_antigravity_app_running", lambda: running["value"])
+
+        def fake_stop(timeout=5.0):
+            events.append("stop")
+            running["value"] = False
+            return True
+
+        def fake_wait_stopped(timeout=7.0):
+            events.append("wait_stopped")
+            return not running["value"]
+
+        def fake_restore(profile_data):
+            events.append("restore")
+            return True
+
+        def fake_launch():
+            assert running["value"] is False
+            events.append("launch")
+            running["value"] = True
+            return True
+        monkeypatch.setattr(agm, "_stop_antigravity_app", fake_stop)
+        monkeypatch.setattr(agm, "_wait_for_antigravity_app_stopped", fake_wait_stopped)
+        monkeypatch.setattr(agm, "_restore_app_credential_snapshot", fake_restore)
+        monkeypatch.setattr(agm, "_launch_antigravity_app", fake_launch)
+        monkeypatch.setattr(
+            agm, "_wait_for_app_live_email",
+            lambda expected_email, timeout=10.0: expected_email,
+        )
+
+        ok, msg = agm.switch_account(
+            target,
+            accounts_dir=acc_dir,
+            auto_sync=False,
+            sync_target="app",
+        )
+
+        assert ok is True
+        assert "LanguageServer 在线回读验证通过" in msg
+        assert events == ["stop", "wait_stopped", "restore", "launch"]
