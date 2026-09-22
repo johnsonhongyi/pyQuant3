@@ -28,7 +28,11 @@ def ensure_plan_tasks(root: Path, task_ids=None) -> dict:
     for tid in ids:
         slug = plan_tasks.get(tid, f'plan_task_{tid}')
         path = inbox/f'{tid}_{slug}.md'
-        if path.exists(): existing.append(tid); continue
+        # Existing filename may use an older slug; identify by Task-ID before
+        # creating anything, otherwise self-healing would create duplicates.
+        prior = list(inbox.glob(f'{tid}_*.md'))
+        if prior:
+            existing.append(tid); continue
         try:
             text = (template.read_text(encoding='utf-8') if template.exists() else '# Task\n')
             text = text.replace('Task-ID: 000',f'Task-ID: {tid}').replace('P1','P0',1)
