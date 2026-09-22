@@ -109,6 +109,6 @@
   "hub_max_running_tasks": 3,
   "batch_default_workers": 2,
   "batch_max_workers": 3,
-  "auto_checkpoint_commit": false,
+  "auto_checkpoint_commit": true,
   "auto_release_tag": false
 }

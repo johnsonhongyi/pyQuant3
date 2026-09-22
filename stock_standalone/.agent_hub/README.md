@@ -133,4 +133,4 @@ python tools/agent_orchestrator.py release-gate --release v2026.09.22 --checkpoi
 - `p_checkpoint_review`：Medium，仅在节点内所有任务已 APPROVED 后调用一次；
 - `release_gate`：High，仅在全部指定 P 节点通过后调用一次。
 
-P 节点自动生成 `VERSION_REPORT_ZH.md` 与 `COMMIT_MESSAGE_ZH.txt`。自动合并、自动 Git commit/tag、真实交易权限仍保持关闭。
+P 节点在复核通过后生成中文版本报告、已完成功能与下一步任务；`auto_checkpoint_commit=true` 时仅暂存节点 `changed_files` 和版本报告创建检查点提交。检测到其他运行任务或用户改动即进入 `CHECKPOINT_COMMIT_HOLD`，绝不混入提交。自动合并、自动 Tag、真实交易权限仍保持关闭。
