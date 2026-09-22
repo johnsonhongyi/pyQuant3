@@ -107,3 +107,25 @@ GPT/Codex总体设计与任务拆解
 - [x] P 节点自动生成中文 `VERSION_REPORT_ZH.md` 与 `COMMIT_MESSAGE_ZH.txt`；
 - [x] 未满足前置条件时 checkpoint/release 直接 HOLD，避免浪费高级推理额度；
 - [x] 自动 merge、自动 commit/tag、真实交易开关继续保持 OFF。
+
+
+## 2026-09-22 信号账本、实时结构与 T+1 修复执行计划状态
+
+> **状态声明**：【核心 P0 修复已完成，完整计划仍有未落地项】（坚决不标记为全部完成）
+
+### 1. 已完成项 (Done / Verified)
+- [x] **Task 026**：消息幂等、零价拦截、历史重复兼容、数据库唯一索引与原子写保护；
+- [x] **Task 029**：T+1 交易中心退出链与 SSOT 安全（Available fallback 清除与可卖隔离）；
+- [x] **Task 030**：账本弱化、VWAP 破位、正转负治理、峰值回撤检测与软降级；
+- [x] **部分 Task 025**：生命周期契约与核心状态迁移模块；
+- [x] **部分 Task 027**：会话阶段门禁核心模块；
+- [x] **测试验证**：Batch 1 / 核心回归 157 项全绿通过，T+1 专项 25 项全绿通过。
+
+### 2. 尚未完整落地项 (Pending / Next Iterations)
+- [ ] **Task 027 剩余**：`CandidateCache`、单独的 `PREMARKET seed` 账本隔离、连续帧确认；
+- [ ] **Task 028**：Kernel 原生 `total_qty / sellable_qty / today_buy_qty / lots` 事实源；
+- [ ] **Task 031**：UI、TDX、ATS、favorite 统一由 `LedgerUpdateService` 单一扫描与更新入口；
+- [ ] **Task 032**：完整快照 v2、旧快照平滑迁移与 fail-closed 防御；
+- [ ] **Task 033**：统一退出仲裁器，确保 `EXIT > BUY` 绝对阻断；
+- [ ] **Task 034**：冻结上午数据回放、重复率/零价/对账/构建指纹发布门禁。
+

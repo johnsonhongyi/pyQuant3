@@ -1,5 +1,32 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-09-22 12:45
+- [x] **【高性能多Agent运行状态与任务实施进度全景UI指挥监控大屏落地（含自动刷新与配置持久化）】(`webTools/window_manager/agent_hub_ui.py`, `webTools/window_manager/ui.py`, `manage_window_layout.spec`, `tests/test_agent_hub_ui.py`)**：
+    - [x] **高性能纯后台脏检查与无锁缓存数据引擎 (`AgentHubDataEngine`)**：
+        - 针对 `.agent_hub/` 下的 `inbox/running/done/archive` 任务流、`events.jsonl` 事件流、`worker_heartbeat.json` 与决策报告建立 mtime/size 轻量文件指纹检测；
+        - 无变动时纯内存零磁盘 I/O 返回，彻底消除高频轮询对 PyQt 界面主线程的卡顿影响；
+        - 完整提取任务元数据、打回轮数统计、Worker 实时工具调用预算（只读/写调用）、耗时及状态；
+    - [x] **现代化全景大屏与多维管道实施看板 (`AgentHubMonitorDialog`)**：
+        - **顶部集群卡片**：实时呈现 Antigravity Worker（运行态/模型/工具调用水位）、Codex Reviewer（模型/effort/自动审查开关/熔断阈值）及 Orchestrator 核心调度配置（并发上限/管道任务总览）；
+        - **自动刷新与参数持久化保存**：
+            - Header 增加【自动刷新】复选框与【刷新间隔】下拉框（支持 1.0s / 2.5s / 5.0s / 10s / 30s）；
+            - 切换或勾选即时调整 QTimer 定时器，并通过 `_save_ui_settings()` / `_load_ui_settings()` 自动持久化至 `.agent_hub/monitor_ui_settings.json`，下次启动自动恢复；
+        - **中部多维看板**：支持按 Inbox / Running / Done / Archive 分类筛选、按风险等级（LOW/MEDIUM/HIGH）过滤，并提供 Task ID、标题、负责人、摘要全局毫秒级模糊搜索；
+        - **底部双栏深度下钻**：
+            - 左侧：结构化解析 `events.jsonl`，还原任务生命周期完整流转轨迹（认领 $\to$ 提交 $\to$ 审查 $\to$ 打回 $\to$ 熔断 $\to$ 批准）；
+            - 右侧：Tab 分页快速预览任务书源文件（带文件名头）、结构化 Agent 报告 / Walkthrough、Codex 审查报告、合并决策以及【🗺️ 总实施计划】；
+            - 联动功能：一键在资源管理器打开当前任务专属产物目录（Artifacts），一键触发双轨极速配置备份；
+    - [x] **独立端口/独立子进程启动解耦（完全不影响主管理器）**：
+        - 在 `ui.py` 中将 `open_agent_hub_monitor` 改造为通过独立子进程（`subprocess.Popen`）拉起监控窗口，与桌面窗口管理器主进程完全物理隔离，绝不发生阻塞或抢占主事件循环；
+    - [x] **总计划书统一一致化（事实对齐）**：
+        - 统一当前计划与 UI 展现事实：在 `docs/MULTI_AGENT_SIGNAL_T1_REMEDIATION_EXECUTION_PLAN_2026-09-22.md` 与 `.agent_hub/master_plan.md` 中严肃确立当前状态为【核心 P0 修复已完成，完整计划仍有未落地项】，拒绝错误标记为“全部完成”；
+        - 明确已完成项（Task 026/029/030、部分 025/027、157+25 项全绿）与后续未落地项（Task 027 剩余/028/031/032/033/034）；并在监控查看器中直观呈现。
+    - [x] **全量自动化验证 100% 绿灯**：
+        - 专项测试 `tests/test_agent_hub_ui.py` 2 项测试全部通过（涵盖数据引擎解析、缓存复用、UI 初始化、表格过滤搜索、详情联动、自动刷新勾选与配置持久化）；
+        - 关联测试（`test_backup_agent_tasks.py`, `test_agent_hub.py`）12 项全绿（12 passed）；
+        - 全模块 `compileall` 编译零错误。
+
+
 ## 2026-09-22 11:20
 - [x] **【多任务多Agent配置与编排策略自动化备份与秒级灾难恢复工具落地】(`tools/backup_agent_tasks.py`, `tools/restore_agent_configs.py`, `tests/test_backup_agent_tasks.py`)**：
     - [x] **纯粹性隔离（坚决不夹带业务代码）**：

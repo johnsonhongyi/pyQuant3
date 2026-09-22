@@ -3864,6 +3864,13 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
         except Exception as e:
             logger.error(f"托盘图标 Antigravity 快捷菜单初始化异常: {e}")
 
+        # 🤖 Agent Hub 多 Agent 协同运行与任务进度监控快捷入口
+        try:
+            hub_action = self.tray_menu.addAction("🤖 Agent Hub 协同与任务监控...")
+            hub_action.triggered.connect(self.open_agent_hub_monitor)
+        except Exception as e:
+            logger.error(f"托盘图标 Agent Hub 快捷菜单初始化异常: {e}")
+
         self.tray_menu.addSeparator()
         quit_action = self.tray_menu.addAction("❌ 完全退出")
         quit_action.triggered.connect(self.force_quit)
@@ -4866,6 +4873,12 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
         self.btn_ag_manager.setToolTip("管理 Antigravity 多账户切换、实时 AI 模型配额与重置时间监控、跨 IDE 双向同步")
         self.btn_ag_manager.clicked.connect(self.open_antigravity_account_manager)
 
+        self.btn_agent_hub = QPushButton("🤖 Agent监控")
+        self.btn_agent_hub.setObjectName("btnAgentHub")
+        self.btn_agent_hub.setStyleSheet("background-color: #0284c7; color: white; font-weight: bold; padding: 3px 8px; font-size: 12px; min-height: 24px; max-height: 25px;")
+        self.btn_agent_hub.setToolTip("查看多 Agent 协同运行状态、任务实施流转进度、执行心跳与审查决策大屏")
+        self.btn_agent_hub.clicked.connect(self.open_agent_hub_monitor)
+
         # 平铺模式专属【⇋ 收纳】按钮 (平铺时显示，点击瞬间切回收纳下拉菜单，并持久化状态)
         self.btn_collapse_tools = QPushButton("⇋ 收纳")
         self.btn_collapse_tools.setObjectName("btnCollapseTools")
@@ -4903,6 +4916,8 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
         """)
         act_ag = self.tools_menu.addAction("🚀 Antigravity 账户管理与 AI 配额...")
         act_ag.triggered.connect(self.open_antigravity_account_manager)
+        act_hub = self.tools_menu.addAction("🤖 Agent Hub 多Agent运行与任务进度监控...")
+        act_hub.triggered.connect(self.open_agent_hub_monitor)
         act_acer = self.tools_menu.addAction("💻 Acer 笔记本性能与散热控制...")
         act_acer.triggered.connect(self.open_acer_performance_settings)
         act_ramdisk = self.tools_menu.addAction("💾 RamDisk 内存盘同步与备份规则...")
@@ -4918,8 +4933,8 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
         self.btn_tools_menu.setMenu(self.tools_menu)
         bottom_bar.addWidget(self.btn_tools_menu)
 
-        # 把平铺模式的 6 个按钮（5工具+1收纳）加入 bottom_bar
-        for b in [self.btn_open_perf, self.btn_route_settings, self.btn_acer_perf, self.btn_ramdisk_sync, self.btn_ag_manager, self.btn_collapse_tools]:
+        # 把平铺模式的 7 个按钮（6工具+1收纳）加入 bottom_bar
+        for b in [self.btn_open_perf, self.btn_route_settings, self.btn_acer_perf, self.btn_ramdisk_sync, self.btn_ag_manager, self.btn_agent_hub, self.btn_collapse_tools]:
             bottom_bar.addWidget(b)
 
         # 核心主操作按钮 (紧凑高颜值，常驻显眼)
@@ -4964,7 +4979,7 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
         self.btn_tools_menu.setVisible(not expanded)
         if hasattr(self, 'btn_collapse_tools'):
             self.btn_collapse_tools.setVisible(expanded)
-        for b in [self.btn_open_perf, self.btn_route_settings, getattr(self, 'btn_acer_perf', None), self.btn_ramdisk_sync, self.btn_ag_manager]:
+        for b in [self.btn_open_perf, self.btn_route_settings, getattr(self, 'btn_acer_perf', None), self.btn_ramdisk_sync, self.btn_ag_manager, getattr(self, 'btn_agent_hub', None)]:
             if b is not None:
                 b.setVisible(expanded)
 
@@ -5123,14 +5138,86 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
             self.log(f"💾 RamDisk 自动同步与备份配置已更新保存！({log_status_desc} · 每 {self.ramdisk_sync_config.sync_interval_sec} 秒巡检)")
 
     def open_antigravity_account_manager(self):
-        """打开 Antigravity 账户极速管理与 AI 配额监控弹窗"""
+        """打开 Antigravity 账户极速管理与 AI 配额监控弹窗 (单实例守护，杜绝重复弹窗堆叠)"""
         try:
-            dialog = AntigravityAccountManagerDialog(parent=self)
-            dialog.account_switched.connect(lambda acc: self._update_ag_tray_submenu() if hasattr(self, '_update_ag_tray_submenu') else None)
-            dialog.exec()
+            # 1. 若当前弹窗实例已存在且可见，直接激活并置顶到最前
+            if hasattr(self, '_ag_account_dialog') and self._ag_account_dialog is not None:
+                try:
+                    if self._ag_account_dialog.isVisible():
+                        if self._ag_account_dialog.isMinimized():
+                            self._ag_account_dialog.showNormal()
+                        self._ag_account_dialog.show()
+                        self._ag_account_dialog.raise_()
+                        self._ag_account_dialog.activateWindow()
+                        hwnd = int(self._ag_account_dialog.winId()) if hasattr(self._ag_account_dialog, 'winId') else 0
+                        if hwnd:
+                            core.force_topmost_activate_hwnd(hwnd)
+                        return
+                except RuntimeError:
+                    # 原 Qt 窗口可能已被 C++ 底层释放
+                    self._ag_account_dialog = None
+
+            # 2. 否则创建单例窗口并以非阻塞模式 show()，允许用户边看行情边管理
+            self._ag_account_dialog = AntigravityAccountManagerDialog(parent=self)
+            self._ag_account_dialog.account_switched.connect(
+                lambda acc: self._update_ag_tray_submenu() if hasattr(self, '_update_ag_tray_submenu') else None
+            )
+            # 对话框关闭后清理引用
+            self._ag_account_dialog.finished.connect(lambda result: setattr(self, '_ag_account_dialog', None))
+            self._ag_account_dialog.show()
+            self._ag_account_dialog.raise_()
+            self._ag_account_dialog.activateWindow()
         except Exception as e:
             logger.error(f"打开 Antigravity 账户管理器异常: {e}")
             QMessageBox.critical(self, "打开失败", f"打开 Antigravity 账户管理器异常: {e}")
+
+    def open_agent_hub_monitor(self):
+        """以独立进程启动 Agent Hub 监控指挥中心 (内置单实例探测与 IPC 唤醒，绝不重复生成多窗口)"""
+        try:
+            # 1. 优先通过 Qt IPC 管道检测是否已有独立进程在运行；若有，直接唤醒并返回
+            from .agent_hub_ui import activate_existing_agent_hub_instance
+            if activate_existing_agent_hub_instance(timeout_ms=350):
+                self.log("🔔 检测到已有 [Agent Hub 监控指挥中心] 正在运行，已直接唤醒并置顶至前台！")
+                return
+
+            # 2. 检查主进程内是否存在弹窗实例
+            if hasattr(self, '_agent_hub_dialog') and self._agent_hub_dialog is not None:
+                try:
+                    if self._agent_hub_dialog.isVisible():
+                        self._agent_hub_dialog.activate_and_raise()
+                        self.log("🔔 [Agent Hub 监控指挥中心] 界面已激活置顶。")
+                        return
+                except RuntimeError:
+                    self._agent_hub_dialog = None
+
+            # 3. 若无任何现有实例，以独立进程拉起
+            import subprocess
+            hub_script = os.path.join(os.path.dirname(__file__), "agent_hub_ui.py")
+            is_frozen = getattr(sys, "frozen", False)
+            if is_frozen:
+                # 生产打包模式：通过自身主程序传入 --agent-hub 独立参数启动
+                cmd = [sys.executable, "--agent-hub"]
+            else:
+                # 源码开发调试模式：通过当前 Python 解释器独立执行 agent_hub_ui.py
+                cmd = [sys.executable, hub_script]
+            
+            subprocess.Popen(
+                cmd,
+                cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == 'nt' else 0
+            )
+            self.log("🚀 已成功在独立进程拉起 [Agent Hub 监控指挥中心]！")
+        except Exception as e:
+            logger.warning(f"独立进程启动 Agent Hub 监控失败，回退至窗口内单例弹窗: {e}")
+            try:
+                from .agent_hub_ui import AgentHubMonitorDialog
+                if not hasattr(self, '_agent_hub_dialog') or not self._agent_hub_dialog:
+                    self._agent_hub_dialog = AgentHubMonitorDialog(parent=None)
+                    self._agent_hub_dialog.finished.connect(lambda res: setattr(self, '_agent_hub_dialog', None))
+                self._agent_hub_dialog.activate_and_raise()
+            except Exception as e2:
+                logger.error(f"打开 Agent Hub 监控中心异常: {e2}")
+                QMessageBox.critical(self, "打开失败", f"打开 Agent Hub 监控中心异常: {e2}")
 
     def _trigger_ramdisk_sync_from_tray(self):
         """从托盘右键一键手动触发立即同步备份"""
