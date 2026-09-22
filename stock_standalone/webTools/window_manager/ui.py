@@ -2829,17 +2829,30 @@ class ManagerHotkeyThread(threading.Thread):
 # ==============================================================================
 
 class QuotaFetchWorker(QtCore.QThread):
-    """后台异步探针线程：极速拉取配额，绝不冻结主界面"""
+    """后台异步探针线程：极速拉取配额；每次请求携带 generation 与目标端。"""
     quota_ready = QtCore.pyqtSignal(dict)
 
-    def __init__(self, target_email: str = None, parent=None):
+    def __init__(
+        self,
+        target_email: str = None,
+        target_role: str = None,
+        request_id: int = 0,
+        parent=None,
+    ):
         super().__init__(parent)
         self.target_email = target_email
+        self.target_role = target_role
+        self.request_id = int(request_id or 0)
 
     def run(self):
         try:
             from . import antigravity_manager
-            res = antigravity_manager.fetch_antigravity_quotas(target_email=self.target_email)
+            res = antigravity_manager.fetch_antigravity_quotas(
+                target_email=self.target_email
+            )
+            res["_request_id"] = self.request_id
+            res["_target_role"] = self.target_role
+            res["_requested_email"] = (self.target_email or "").lower()
             self.quota_ready.emit(res)
         except Exception as e:
             self.quota_ready.emit({
@@ -2848,7 +2861,10 @@ class QuotaFetchWorker(QtCore.QThread):
                 "error": str(e),
                 "groups": {},
                 "models": [],
-                "all_accounts_quotas": {}
+                "all_accounts_quotas": {},
+                "_request_id": self.request_id,
+                "_target_role": self.target_role,
+                "_requested_email": (self.target_email or "").lower(),
             })
 
 
@@ -2870,6 +2886,7 @@ class AntigravityAccountManagerDialog(QDialog):
         self.resize(820, 680)
         self.setMinimumSize(700, 560)
         self.quota_worker = None
+        self._quota_request_id = 0
         self.account_cards = {} # email -> {widgets}
         self.init_ui()
         self.reload_accounts()
@@ -2877,10 +2894,11 @@ class AntigravityAccountManagerDialog(QDialog):
             self.refresh_quotas_async()
 
     def closeEvent(self, event):
-        if self.quota_worker and self.quota_worker.isRunning():
-            self.quota_worker.quit()
-            self.quota_worker.wait(1500)
-        event.accept()
+        # 账户管理器采用常驻单实例：关闭仅隐藏，避免下次重新构建整套 Qt 卡片。
+        # 正在运行的旧探针无需阻塞等待；generation 失效后其结果会自动丢弃。
+        self._quota_request_id += 1
+        self.hide()
+        event.ignore()
 
     def init_ui(self):
         self.setStyleSheet("""
@@ -3397,23 +3415,42 @@ class AntigravityAccountManagerDialog(QDialog):
             "GPT-OSS": {"lbl_pct": QLabel(), "bar": QProgressBar(), "lbl_reset": QLabel()},
         }
 
-    def reload_accounts(self):
-        """双 Tab 体系：独立排布 Antigravity 独立客户端与 Antigravity IDE 两套卡片流"""
+    def reload_accounts(
+        self,
+        preferred_app_email: str = None,
+        preferred_ide_email: str = None,
+    ):
+        """双 Tab 账户重载；可用已验证的端点邮箱覆盖瞬时旧缓存。"""
         from . import antigravity_manager
-        app_email, ide_email = antigravity_manager.get_dual_target_active_accounts()
+
+        # 打开/重载窗口走快速本地快照：不在 Qt 主线程执行 LanguageServer/netstat。
+        # 真正在线身份由后续 refresh_quotas_async() 在后台探针确认并原地纠正。
+        app_email, ide_email = antigravity_manager.get_dual_target_active_accounts(
+            probe_live=False
+        )
         curr = antigravity_manager.get_current_account()
         curr_email = curr.get("email", "").lower() if curr else ""
 
-        # 双 Tab 管理器只读展示账户库，禁止打开界面时触发 legacy 跨库自愈。
-        accounts = antigravity_manager.list_accounts(auto_discover=False)
+        # 双 Tab 管理器只读展示账户库，并复用上面的活跃账户快照，避免第二次探针。
+        accounts = antigravity_manager.list_accounts(
+            auto_discover=False,
+            active_accounts=(app_email, ide_email),
+        )
         account_emails = [a.get("email", "").lower() for a in accounts]
+
+        preferred_app = (preferred_app_email or "").strip().lower()
+        preferred_ide = (preferred_ide_email or "").strip().lower()
+        if preferred_app and preferred_app in account_emails:
+            app_email = preferred_app
+        if preferred_ide and preferred_ide in account_emails:
+            ide_email = preferred_ide
         if (app_email not in account_emails and ide_email not in account_emails) or (not app_email and not ide_email):
             if curr_email:
                 app_email = curr_email
                 ide_email = curr_email
 
         cached_quotas = antigravity_manager.get_cached_quotas()
-        runtime_info = antigravity_manager.get_runtime_app_status()
+        runtime_info = antigravity_manager.get_runtime_app_status(probe_live=False)
 
         # 1. 清除客户端 Tab 现有卡片
         while self.grid_layout_app.count():
@@ -3477,38 +3514,107 @@ class AntigravityAccountManagerDialog(QDialog):
         elif ide_run and not app_run:
             self.tab_widget.setCurrentIndex(1)
 
-    def refresh_quotas_async(self, target_email: str = None):
-        """启动后台 Worker 异步极速拉取活跃账户配额"""
-        self.btn_refresh_quotas.setEnabled(False)
-        self.btn_refresh_quotas.setText("⏳ 探测中...")
-        self.lbl_probe_info.setText("⚡ 正在通过本地环回探针探测 LanguageServer...")
+    def refresh_quotas_async(
+        self,
+        target_email: str = None,
+        target_role: str = None,
+    ):
+        """启动最新 generation 的极速探针；旧 Worker 返回结果自动丢弃。"""
+        from . import antigravity_manager
 
-        # 默认优先探测当前活跃账户
+        self._quota_request_id += 1
+        request_id = self._quota_request_id
+
+        role = (target_role or "").strip().lower()
+        if role not in ("app", "ide"):
+            role = "app" if self.tab_widget.currentIndex() == 0 else "ide"
+
+        # 只从指定端点寻找活跃账号，避免 App/IDE 两套卡片互相抢目标。
         if not target_email:
-            for em, card in self.account_cards.items():
-                if card.get("is_active"):
-                    target_email = em
+            for card in self.account_cards.values():
+                if card.get("target_role") == role and card.get("is_active"):
+                    target_email = card.get("email")
                     break
 
-        self.quota_worker = QuotaFetchWorker(target_email=target_email, parent=self)
-        self.quota_worker.quota_ready.connect(self._on_quotas_received)
-        self.quota_worker.start()
+        if not target_email:
+            from . import antigravity_manager
+            app_email, ide_email = antigravity_manager.get_dual_target_active_accounts()
+            target_email = app_email if role == "app" else ide_email
+
+        target_email = (target_email or "").strip().lower()
+
+        self.btn_refresh_quotas.setEnabled(False)
+        self.btn_refresh_quotas.setText("⏳ 探测中...")
+        target_desc = antigravity_manager.mask_email(target_email) if target_email else role
+        self.lbl_probe_info.setText(
+            f"⚡ 正在探测 {role.upper()} 当前账户: {target_desc} ..."
+        )
+
+        worker = QuotaFetchWorker(
+            target_email=target_email,
+            target_role=role,
+            request_id=request_id,
+            parent=self,
+        )
+        self.quota_worker = worker
+        worker.quota_ready.connect(self._on_quotas_received)
+        worker.start()
 
     def _on_quotas_received(self, res: dict):
         from .antigravity_manager import mask_email
+
+        request_id = int(res.get("_request_id") or 0)
+        if request_id and request_id != self._quota_request_id:
+            # 已被更新请求取代的旧 Worker 返回结果必须彻底丢弃。
+            return
+
         self.btn_refresh_quotas.setEnabled(True)
         self.btn_refresh_quotas.setText("🔄 极速刷新配额")
 
         success = res.get("success", False)
         latency = res.get("latency_ms", 0)
         port = res.get("target_port")
-        email = (res.get("account_email") or "").lower()
+        email = (res.get("account_email") or "").strip().lower()
         all_quotas = res.get("all_accounts_quotas", {})
+        target_role = (res.get("_target_role") or "").strip().lower()
+        requested_email = (res.get("_requested_email") or "").strip().lower()
 
         if not success:
             err = res.get("error", "获取配额失败")
             self.lbl_probe_info.setText(f"❌ 探针未连接 ({err}) · 耗时: {latency}ms")
             return
+
+        if requested_email and email and requested_email != email:
+            self.lbl_probe_info.setText(
+                f"❌ 探针账户不一致：请求 {mask_email(requested_email)}，"
+                f"实际 {mask_email(email)}"
+            )
+            return
+
+        # 在线探针结果是当前窗口内最高权威。若卡片仍标记旧账号，立即原地重载，
+        # 无需关闭并重新打开管理器。
+        if target_role == "app" and email:
+            current_app = next(
+                (
+                    (card.get("email") or "").lower()
+                    for card in self.account_cards.values()
+                    if card.get("target_role") == "app" and card.get("is_active")
+                ),
+                "",
+            )
+            if current_app != email:
+                self.reload_accounts(preferred_app_email=email)
+        elif target_role == "ide" and email:
+            current_ide = next(
+                (
+                    (card.get("email") or "").lower()
+                    for card in self.account_cards.values()
+                    if card.get("target_role") == "ide" and card.get("is_active")
+                ),
+                "",
+            )
+            if current_ide != email:
+                self.reload_accounts(preferred_ide_email=email)
 
         masked_em = mask_email(email) if email else "已就绪"
         self.lbl_probe_info.setText(f"✅ 探针极速探测成功 · 耗时: {latency}ms · 本地端口: {port} · 匹配账户: {masked_em}")
@@ -3581,8 +3687,17 @@ class AntigravityAccountManagerDialog(QDialog):
         ok, msg = antigravity_manager.switch_account(email, auto_sync=False, sync_target=sync_target)
         if ok:
             QMessageBox.information(self, "切换成功", f"✅ 成功将账户切换至 [{target_name}]！\n账号: {email}")
-            self.reload_accounts()
-            self.refresh_quotas_async()
+            if sync_target == "app":
+                self.reload_accounts(preferred_app_email=email)
+            else:
+                self.reload_accounts(preferred_ide_email=email)
+
+            # 切换后刷新必须锁定刚刚在线验证过的端点与邮箱；
+            # 不能再从旧卡片/旧 Worker 推断当前账户。
+            self.refresh_quotas_async(
+                target_email=email,
+                target_role=sync_target,
+            )
             self.account_switched.emit(email)
             if self.parent() and hasattr(self.parent(), "log"):
                 self.parent().log(f"🚀 [Antigravity] 账户已成功切换至 {target_name}: {email}")
@@ -5157,24 +5272,29 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
     def open_antigravity_account_manager(self):
         """打开 Antigravity 账户极速管理与 AI 配额监控弹窗 (单实例守护，杜绝重复弹窗堆叠)"""
         try:
-            # 1. 若当前弹窗实例已存在且可见，直接激活并置顶到最前
+            # 1. 若单例已经创建（即使当前隐藏），直接复用并快速刷新。
             if hasattr(self, '_ag_account_dialog') and self._ag_account_dialog is not None:
                 try:
-                    if self._ag_account_dialog.isVisible():
-                        if self._ag_account_dialog.isMinimized():
-                            self._ag_account_dialog.showNormal()
-                        self._ag_account_dialog.show()
-                        self._ag_account_dialog.raise_()
-                        self._ag_account_dialog.activateWindow()
-                        hwnd = int(self._ag_account_dialog.winId()) if hasattr(self._ag_account_dialog, 'winId') else 0
-                        if hwnd:
-                            core.force_topmost_activate_hwnd(hwnd)
-                        return
+                    dlg = self._ag_account_dialog
+                    was_hidden = not dlg.isVisible()
+                    if dlg.isMinimized():
+                        dlg.showNormal()
+                    dlg.show()
+                    dlg.raise_()
+                    dlg.activateWindow()
+                    if was_hidden:
+                        # 先显示已有窗口，避免把卡片重建放在 show() 前阻塞用户。
+                        # 在线身份与配额由后台探针异步校正；需要时再原地 reload。
+                        QtCore.QTimer.singleShot(0, dlg.refresh_quotas_async)
+                    hwnd = int(dlg.winId()) if hasattr(dlg, 'winId') else 0
+                    if hwnd:
+                        core.force_topmost_activate_hwnd(hwnd)
+                    return
                 except RuntimeError:
                     # 原 Qt 窗口可能已被 C++ 底层释放
                     self._ag_account_dialog = None
 
-            # 2. 否则创建单例窗口并以非阻塞模式 show()，允许用户边看行情边管理
+            # 2. 首次才创建单例窗口并以非阻塞模式 show()
             self._ag_account_dialog = AntigravityAccountManagerDialog(parent=self)
             self._ag_account_dialog.account_switched.connect(
                 lambda acc: self._update_ag_tray_submenu() if hasattr(self, '_update_ag_tray_submenu') else None
