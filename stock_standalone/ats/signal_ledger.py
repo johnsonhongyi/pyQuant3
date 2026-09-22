@@ -108,6 +108,7 @@ class SignalEntry:
         'code', 'name',
         'first_seen_ts', 'first_seen_price', 'first_seen_pct', 'first_seen_phase',
         'latest_price', 'latest_pct', 'latest_deviation',
+        'peak_price', 'peak_pct', 'weak_since_ts',
         'volume_score', 'priority_score',
         'tier', 'is_locked',
         'state_history',
@@ -133,6 +134,9 @@ class SignalEntry:
         self.latest_price = price
         self.latest_pct = pct
         self.latest_deviation = deviation
+        self.peak_price = price
+        self.peak_pct = pct
+        self.weak_since_ts = 0.0
 
         # 评分
         self.volume_score = 0.0
@@ -181,6 +185,8 @@ class SignalEntry:
         self.latest_price = price
         self.latest_pct = pct
         self.latest_deviation = deviation
+        self.peak_price = max(self.peak_price, price)
+        self.peak_pct = max(self.peak_pct, pct)
 
     def promote(self, new_tier, reason=''):
         """晋级到更高层级
@@ -217,6 +223,9 @@ class SignalEntry:
             'latest_price': self.latest_price,
             'latest_pct': self.latest_pct,
             'latest_deviation': self.latest_deviation,
+            'peak_price': self.peak_price,
+            'peak_pct': self.peak_pct,
+            'weak_since_ts': self.weak_since_ts,
             'volume_score': self.volume_score,
             'priority_score': self.priority_score,
             'tier': self.tier,
@@ -271,6 +280,23 @@ class SignalLedger:
     WATCH_PCT_DIRECT = 1.5
     WATCH_DFF_DIRECT = 1.0
 
+    @staticmethod
+    def canonicalize_code(code):
+        """将常见纯数字代码归一为六位；带市场前缀的代码保持兼容。"""
+        raw = str(code).strip()
+        return raw.zfill(6) if raw.isdigit() and len(raw) <= 6 else raw
+
+    @staticmethod
+    def _clear_bullish_state(entry, tag):
+        """原子撤销已经失效的买入语义和历史置顶加分。"""
+        entry.signal_tag = tag
+        entry.early_launch_boost = 0.0
+        entry.tdx_boost = 0.0
+        entry.is_channel_swing = False
+        entry.ch_slope_deg = 0.0
+        entry.supp_price = 0.0
+        entry.ch_height_pct = 0.0
+
     def __init__(self):
         self.entries = {}       # {code: SignalEntry}
         self._today_str = None
@@ -295,7 +321,9 @@ class SignalLedger:
     def is_notified_today(self, code: str, signal_tag: str = '') -> bool:
         """检查指定股票或信号在今天是否已经进行过桌面/语音通知，防止多周期与 ATS 两个界面重复播报"""
         self._ensure_daily_reset()
-        code_clean = str(code).strip().zfill(6)
+        code_clean = self.canonicalize_code(code)
+        raw_code = str(code).strip()
+        entry_key = code_clean if code_clean in self.entries else raw_code
         if not signal_tag:
             return any(k.startswith(f"{code_clean}_") for k in self._notified_keys)
         tag_clean = str(signal_tag).strip()
@@ -350,7 +378,9 @@ class SignalLedger:
         loaded_count = 0
         now = time.time()
         for code, data in prev_signals_dict.items():
-            if code in self.entries:
+            code_clean = self.canonicalize_code(code)
+            # 快照可能混用 ``1``/``000001``，统一键后再判断，避免跨日恢复重复条目。
+            if code_clean in self.entries:
                 continue
 
             name = data.get('name', '未知')
@@ -360,7 +390,7 @@ class SignalLedger:
 
             # 跨日继承载入为 RADAR 层级重新观察，时间戳重置为当前盘前时间
             entry = SignalEntry(
-                code=code,
+                code=code_clean,
                 name=name,
                 price=price,
                 pct=pct,
@@ -375,7 +405,7 @@ class SignalLedger:
                 'reason': f"从昨日快照继承 ({data.get('tier', 'WATCH')}级别)",
             })
             entry.priority_score = self._compute_priority(entry)
-            self.entries[code] = entry
+            self.entries[code_clean] = entry
             loaded_count += 1
 
         if loaded_count > 0:
@@ -417,7 +447,8 @@ class SignalLedger:
 
         # ⚡ 高效获取重点关注集合 (利用缓存, 0ms)
         fav_stocks = self.get_favorite_stocks_set()
-        code_clean = str(code).strip().zfill(6)
+        code_clean = self.canonicalize_code(code)
+        entry_key = code_clean if code_clean in self.entries else str(code).strip()
         is_fav = str(code).strip() in fav_stocks or code_clean in fav_stocks
 
         # 🐉 真龙判定 (空间龙/容量中军/主线先锋不受 MA20 偏离度上限限制)
@@ -472,15 +503,16 @@ class SignalLedger:
         # 偏离度筛选（重点关注、真龙、通道上涨支撑企稳不受原狭隘偏离度上限限制）
         if not is_fav and not is_dragon and not is_channel_swing and (deviation < dev_min or deviation > dev_max):
             # 已存在的非关注信号如果严重破位，标记为 INACTIVE
-            if code in self.entries and deviation < self.DEVIATION_EVICT:
-                entry = self.entries[code]
+            if entry_key in self.entries and deviation < self.DEVIATION_EVICT:
+                entry = self.entries[entry_key]
                 if entry.tier not in ('TRADE',):  # TRADE 级别不自动降级
                     entry.promote('INACTIVE', reason=f'偏离度 {deviation:.2f}% 严重破位')
             return None
 
-        if code in self.entries:
+        if entry_key in self.entries:
             # 已存在 → 仅更新最新数据，不改变首次发现时间和层级
-            entry = self.entries[code]
+            entry = self.entries[entry_key]
+            previous_peak_pct = max(entry.peak_pct, entry.latest_pct)
             entry.update_latest(price, pct, deviation)
             entry.volume_score = volume_score
             entry.signal_source = signal_source or entry.signal_source
@@ -500,8 +532,82 @@ class SignalLedger:
                 if not entry.signal_tag and entry.dragon_role:
                     entry.signal_tag = entry.dragon_role
 
+            # 结构失效优先于历史标签和早盘加分。盘中跌破今日 VWAP 后回踩
+            # 昨日 VWAP，说明此前的起爆/强持有标签已经过期；若连昨日 VWAP
+            # 也跌破，则进入双 VWAP 破位状态。这里只撤销买入语义，不影响
+            # 风险/退出链继续处理。
+            weak_cross_day_vwap = False
+            if row is not None and not is_fav and not is_dragon:
+                try:
+                    today_vwap = float(row.get(
+                        'vwap', row.get('nclose', row.get('avprice', row.get('avg_p', 0.0)))
+                    ) or 0.0)
+                    yesterday_vwap = 0.0
+                    for key in ('last_nclose1d', 'nclose1d', 'last_vwap', 'yesterday_vwap'):
+                        value = float(row.get(key, 0.0) or 0.0)
+                        if value > 0:
+                            yesterday_vwap = value
+                            break
+                    weak_cross_day_vwap = (
+                        today_vwap > 0 and yesterday_vwap > 0
+                        and price < today_vwap * 0.998
+                        and price <= yesterday_vwap * 1.008
+                    )
+                    if weak_cross_day_vwap:
+                        broke_yesterday = price < yesterday_vwap * 0.998
+                        weak_tag = (
+                            '⛔ 双VWAP破位'
+                            if broke_yesterday else '⚠️ 今日VWAP下·回踩昨日VWAP'
+                        )
+                        self._clear_bullish_state(entry, weak_tag)
+                        entry.weak_since_ts = entry.weak_since_ts or time.time()
+                        target_tier = 'INACTIVE' if broke_yesterday else 'RADAR'
+                        if entry.tier != target_tier:
+                            old_tier = entry.tier
+                            entry.tier = target_tier
+                            entry.state_history.append({
+                                'ts': time.time(),
+                                'action': 'INVALIDATED_BY_CROSS_DAY_VWAP',
+                                'reason': (
+                                    f'跌破今日VWAP({today_vwap:.2f})后'
+                                    f'{"跌破" if broke_yesterday else "回踩"}'
+                                    f'昨日VWAP({yesterday_vwap:.2f})，{old_tier}->{target_tier}'
+                                ),
+                            })
+                except (TypeError, ValueError):
+                    weak_cross_day_vwap = False
+
+            # 首次正涨幅转负或从当日峰值回撤至少 3 个百分点，均视为动能走弱。
+            # 本轮必须阻止量比、旧形态等条件将其立即重新晋级。
+            lifecycle_weakened = False
+            if entry.tier != 'TRADE':
+                positive_to_negative = entry.first_seen_pct > 0.0 and pct < 0.0
+                peak_drawdown = previous_peak_pct - pct
+                if positive_to_negative or peak_drawdown >= 3.0:
+                    lifecycle_weakened = True
+                    reasons = []
+                    if positive_to_negative:
+                        reasons.append(f'首次{entry.first_seen_pct:+.2f}%转负{pct:+.2f}%')
+                    if peak_drawdown >= 3.0:
+                        reasons.append(f'峰值回撤{peak_drawdown:.2f}个百分点')
+                    if not weak_cross_day_vwap:
+                        self._clear_bullish_state(entry, '⚠️ 动能走弱')
+                    entry.weak_since_ts = entry.weak_since_ts or time.time()
+                    old_tier = entry.tier
+                    if entry.tier == 'WATCH':
+                        entry.tier = 'RADAR'
+                    entry.state_history.append({
+                        'ts': time.time(),
+                        'action': 'WEAKENED_BY_MOMENTUM_REVERSAL',
+                        'reason': ' | '.join(reasons),
+                        'price': price,
+                        'pct': pct,
+                        'from_tier': old_tier,
+                        'to_tier': entry.tier,
+                    })
+
             # 如果之前是 INACTIVE 但现在回到范围内，或被设为重点关注/真龙，恢复为 RADAR/WATCH
-            if entry.tier == 'INACTIVE':
+            if entry.tier == 'INACTIVE' and not weak_cross_day_vwap:
                 entry.tier = 'WATCH' if (is_fav or is_dragon) else 'RADAR'
                 entry.state_history.append({
                     'ts': time.time(),
@@ -515,6 +621,8 @@ class SignalLedger:
             entry.priority_score = self._compute_priority(entry, row)
             if is_dragon:
                 entry.priority_score = max(entry.priority_score, 88.0) # 真龙保底优先级
+            if weak_cross_day_vwap or lifecycle_weakened:
+                entry.priority_score = min(entry.priority_score, 25.0)
 
             # 检查假异动掉队降级 (跌破 VWAP 且高点回落掉队，真龙与重点关注保护)
             if row is not None and entry.tier == 'WATCH' and not is_fav and not is_dragon:
@@ -536,14 +644,14 @@ class SignalLedger:
                     pass
 
             # 检查自动晋级
-            if entry.tier == 'RADAR':
+            if entry.tier == 'RADAR' and not weak_cross_day_vwap and not lifecycle_weakened:
                 self._check_auto_promote(entry, row)
 
             return entry
         else:
             # 新信号 → 写入账本
             phase = _detect_phase()
-            entry = SignalEntry(code, name, price, pct, deviation, phase)
+            entry = SignalEntry(code_clean, name, price, pct, deviation, phase)
             entry.signal_source = signal_source
             entry.signal_tag = signal_tag or (dragon_role if is_dragon else '')
             entry.dragon_role = dragon_role
@@ -564,7 +672,9 @@ class SignalLedger:
             if is_dragon:
                 entry.priority_score = max(entry.priority_score, 88.0)
 
-            self.entries[code] = entry
+            # 新写入统一使用标准化代码键，避免首次以 ``1`` 写入、后续以
+            # ``000001`` 更新时被误判为新信号，导致弱化/降级生命周期丢失。
+            self.entries[code_clean] = entry
             self._signal_count += 1
 
             # 检查自动晋级

@@ -23,6 +23,8 @@ class SessionSnapshot:
     SNAPSHOT_INTERVAL_SEC = 600   # 10 分钟快照间隔
     MAX_HISTORY_DAYS = 5          # 保留最近 5 天的快照
     SIGNAL_RETAIN_DAYS = 3        # 信号保留 3 个交易日
+    SNAPSHOT_VERSION = 2
+    SNAPSHOT_SCHEMA = "ats.signal_ledger"
     
     def __init__(self, log_dir=None):
         if log_dir is None:
@@ -117,21 +119,28 @@ class SessionSnapshot:
                 except Exception:
                     pass
 
+            entries_data = {
+                code: entry.to_dict()
+                for code, entry in signal_ledger.entries.items()
+            }
             snapshot_data = {
+                'snapshot_version': self.SNAPSHOT_VERSION,
+                'schema': self.SNAPSHOT_SCHEMA,
                 'timestamp': now.isoformat(),
                 'date': now.strftime('%Y-%m-%d'),
                 'time': now.strftime('%H:%M:%S'),
-                'total_signals': len(signal_ledger.entries),
+                'total_signals': len(entries_data),
                 'tier_counts': {
                     'RADAR': sum(1 for e in signal_ledger.entries.values() if e.tier == 'RADAR'),
                     'WATCH': sum(1 for e in signal_ledger.entries.values() if e.tier == 'WATCH'),
                     'TRADE': sum(1 for e in signal_ledger.entries.values() if e.tier == 'TRADE'),
                     'INACTIVE': sum(1 for e in signal_ledger.entries.values() if e.tier == 'INACTIVE'),
                 },
-                'entries': {
-                    code: entry.to_dict() 
-                    for code, entry in signal_ledger.entries.items()
-                }
+                'entries': entries_data,
+                'integrity': {
+                    'entry_count': len(entries_data),
+                    'fail_closed': True,
+                },
             }
             
             # 数据变动智能比对: 数据完全未变时跳过写盘，避免无谓磁盘读写与 IO 开销
@@ -139,9 +148,12 @@ class SessionSnapshot:
             if not force and current_hash and current_hash == self._last_snapshot_hash:
                 return True
 
-            with open(filepath, 'w', encoding='utf-8') as f:
+            # v2 使用同目录临时文件 + os.replace 原子覆盖，避免进程中断留下半截 JSON。
+            temp_path = filepath + '.tmp'
+            with open(temp_path, 'w', encoding='utf-8') as f:
                 json.dump(snapshot_data, f, ensure_ascii=False, indent=2)
-            
+            os.replace(temp_path, filepath)
+
             self._last_snapshot_hash = current_hash
             self._last_snapshot_ts = time.time()
             return True
@@ -149,7 +161,81 @@ class SessionSnapshot:
         except Exception as e:
             print(f"[SessionSnapshot] Error saving snapshot: {e}")
             return False
-    
+
+    def migrate_snapshot_v2(self, data):
+        """将旧 signal_ledger 快照迁移到 v2；未知/损坏数据一律 fail-closed。"""
+        if not isinstance(data, dict):
+            return None
+        raw_version = data.get('snapshot_version', 1)
+        try:
+            version = int(float(raw_version))
+        except (TypeError, ValueError):
+            return None
+        if version not in (1, self.SNAPSHOT_VERSION):
+            return None
+
+        entries = data.get('entries', {})
+        if not isinstance(entries, dict):
+            return None
+        for code, entry in entries.items():
+            if not isinstance(entry, dict):
+                return None
+            if not str(code).strip():
+                return None
+
+        # v2 自身必须严格满足 schema / integrity；已写出的损坏快照禁止“自愈”
+        # 后继续加载，避免半截文件或错误版本被误认为有效交易事实。
+        if version == self.SNAPSHOT_VERSION:
+            if data.get('schema') != self.SNAPSHOT_SCHEMA:
+                return None
+            integrity = data.get('integrity')
+            if not isinstance(integrity, dict):
+                return None
+            try:
+                declared_count = int(integrity.get('entry_count', -1))
+            except (TypeError, ValueError):
+                return None
+            if declared_count != len(entries) or integrity.get('fail_closed') is not True:
+                return None
+
+        migrated = dict(data)
+        migrated['snapshot_version'] = self.SNAPSHOT_VERSION
+        migrated['schema'] = self.SNAPSHOT_SCHEMA
+        migrated['entries'] = dict(entries)
+        migrated['total_signals'] = len(entries)
+        migrated['integrity'] = {
+            'entry_count': len(entries),
+            'fail_closed': True,
+        }
+        if version == 1:
+            migrated['migration'] = {
+                'migrated_from': 1,
+                'mode': 'FAIL_CLOSED',
+            }
+        return migrated
+
+    def load_latest_snapshot(self):
+        """读取唯一最新快照并执行 v1->v2 迁移；任何结构异常返回 None。"""
+        filepath = os.path.join(self.log_dir, 'signal_ledger_latest.json')
+        if not os.path.exists(filepath):
+            return None
+        try:
+            with open(filepath, 'r', encoding='utf-8') as f:
+                raw = json.load(f)
+            migrated = self.migrate_snapshot_v2(raw)
+            if migrated is None:
+                return None
+            if migrated.get('schema') != self.SNAPSHOT_SCHEMA:
+                return None
+            integrity = migrated.get('integrity', {})
+            if not isinstance(integrity, dict):
+                return None
+            if int(integrity.get('entry_count', -1)) != len(migrated.get('entries', {})):
+                return None
+            return migrated
+        except Exception:
+            return None
+
     def save_daily_summary(self, signal_ledger, force=False):
         """生成当日信号总结报告 (收盘后调用，自动覆盖更新为最新终盘总结)
         

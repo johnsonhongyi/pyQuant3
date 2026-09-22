@@ -468,6 +468,16 @@ class TradingLogger:
         用于盘后精细化分析
         """
         try:
+            # 0 价通常来自缺少 extra.price 的二次消息，同一真实信号随后还会以
+            # 正常价格写入。拒绝零价可避免一条信号在数据库形成真假两行，且
+            # 不影响风险/退出决策本身。
+            try:
+                price = float(price)
+            except (TypeError, ValueError):
+                return
+            if price <= 0:
+                return
+
             # --- [交易日和交易时段检查] ---
             try:
                 from JohnsonUtil import commonTips as cct

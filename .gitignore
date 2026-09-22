@@ -185,3 +185,5 @@ stock_standalone/.agent_hub/*
 !stock_standalone/.agent_hub/PROMPT_PROTOCOL.md
 .pytest_temp
 /tests/
+stock_standalone/.agent_hub_runtime/*
+stock_standalone/.pytest_tmp/*

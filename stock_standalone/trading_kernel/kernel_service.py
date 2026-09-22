@@ -341,8 +341,16 @@ class TradingKernelService:
         )
         account.setdefault("position_count", len(positions))
         orders = self.get_order_history()
+        from trading_kernel.t1_position_facts import build_t1_position_facts
+        t1_facts = build_t1_position_facts(positions, orders)
+        positions = {
+            str(code): dict(raw, **t1_facts.get(str(code).strip().zfill(6), {}))
+            for code, raw in positions.items()
+            if isinstance(raw, dict)
+        }
         payload = {
-            "snapshot_version": "1.0",
+            "snapshot_version": "2.0",
+            "t1_facts_version": "1.0",
             "reason": str(reason or "PERIODIC"),
             "generated_at": datetime.now().isoformat(timespec="seconds"),
             "mode": str(self._mode),
@@ -423,15 +431,25 @@ class TradingKernelService:
         adapter = self.get_execution_adapter()
         account = dict(adapter.get_account_snapshot()) if adapter is not None else {}
         positions = dict(adapter.get_positions()) if adapter is not None else {}
+        orders = self.get_order_history()
+        from trading_kernel.t1_position_facts import build_t1_position_facts
+        t1_facts = build_t1_position_facts(positions, orders)
+        positions = {
+            str(code): dict(raw, **t1_facts.get(str(code).strip().zfill(6), {}))
+            for code, raw in positions.items()
+            if isinstance(raw, dict)
+        }
         account.setdefault(
             "initial_capital",
             float(getattr(adapter, "initial_capital", 0.0) or 0.0),
         )
         account.setdefault("position_count", len(positions))
         return {
+            "snapshot_version": "2.0",
+            "t1_facts_version": "1.0",
             "account": account,
             "positions": positions,
-            "orders": self.get_order_history(),
+            "orders": orders,
             "states": self.state_manager.snapshot(),
             "reconciliation": report,
             "mode": str(self._mode),

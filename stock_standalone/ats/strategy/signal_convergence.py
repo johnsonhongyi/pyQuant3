@@ -110,7 +110,7 @@ def check_exit_buy_contract(directives: Iterable[Any]) -> Tuple[bool, List[str]]
     return len(violations) == 0, violations
 
 
-def converge_directives(directives: Iterable[Any]) -> SignalConvergenceResult:
+def _converge_directives_impl(directives: Iterable[Any]) -> SignalConvergenceResult:
     """Keep the highest-priority directive for each code/bucket.
 
     Exit directives suppress an entry for the same code in the same refresh.
@@ -171,3 +171,22 @@ def converge_directives(directives: Iterable[Any]) -> SignalConvergenceResult:
         suppressed_count=len(suppressed),
         suppressed_reasons=tuple(suppressed),
     )
+
+
+class DirectiveArbitrator:
+    """Unique final arbitration authority for command-room directives."""
+
+    def arbitrate(self, directives: Iterable[Any]) -> SignalConvergenceResult:
+        return _converge_directives_impl(directives)
+
+
+_DIRECTIVE_ARBITRATOR = DirectiveArbitrator()
+
+
+def get_directive_arbitrator() -> DirectiveArbitrator:
+    return _DIRECTIVE_ARBITRATOR
+
+
+def converge_directives(directives: Iterable[Any]) -> SignalConvergenceResult:
+    """Compatibility facade routed through the unique arbitrator."""
+    return _DIRECTIVE_ARBITRATOR.arbitrate(directives)
