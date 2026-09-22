@@ -17,7 +17,8 @@ def test_startup_reconciliation_snapshot_is_persisted(tmp_path):
     payload = json.loads(latest.read_text(encoding="utf-8"))
 
     assert payload["reason"] == "STARTUP"
-    assert payload["snapshot_version"] == "1.0"
+    assert payload["snapshot_version"] == "2.0"
+    assert payload["t1_facts_version"] == "1.0"
     assert payload["account"]["initial_capital"] > 0
     assert payload["account"]["position_count"] == len(payload["positions"])
     assert payload["ssot"]["account"] == "trading_kernel.execution.paper_adapter"
