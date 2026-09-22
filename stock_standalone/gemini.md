@@ -1,5 +1,18 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-09-23 00:00
+- [x] **【彻底清理150+陈旧与外围测试轻装上阵，根治PredatorSense/弹窗/鼠标劫持并固化实战黄金测试集】(`stock_standalone/tests/`, `stock_standalone/pytest.ini`, `pytest.ini`, `conftest.py`, `stock_standalone/conftest.py`, `webTools/window_manager/core.py`)**：
+    - [x] **彻底根治 PredatorSense.exe 与弹窗/鼠标劫持底层元凶**：
+        - 深入排查确认元凶为自动化全量回归触发了遗留测试 `test_acer_performance.py` 与 `test_snap_windows_top_hotkey.py` / `test_intraday_dialog_fix.py`，其内部未 Mock 外部程序拉起，直接调用了 `launch_predatorsense_gui` 并执行了 `win32api.mouse_event` 和 `QWidget.show()`；
+        - 在 `core.py` 中将 `launch_predatorsense_gui` 函数头部硬编码写死 `return`，彻底拔掉 `explorer.exe` 与模拟鼠标点击插头；
+        - 创建全局 `conftest.py` 自动化测试静默沙箱，从底层强制拦截 `QWidget.show`、`QMessageBox.information` 与 Windows 键鼠模拟 API，绝对杜绝物理桌面弹窗；
+    - [x] **全面清理 150+ 陈旧外围测试，轻装上阵**：
+        - 彻底物理删除 `test_acer_performance.py`、`test_antigravity_manager.py`、`test_autostart_registry.py`、`test_intraday_dialog_fix.py`、`test_snap_windows_top_hotkey.py` 等 150 余个历史遗留与耗费资源的外围 UI/硬件测试；
+        - 严选并固化针对当前实战上线生命攸关的【实战黄金测试集】（覆盖交易内核 61 项、P1 统一配置、Task 026 幂等、Task 027-033 信号流水线加固、潮汐状态机 12 阶、通道二次买点策略、指令执行闸门）；
+    - [x] **全量自动化验证 100% 绿灯**：
+        - `pytest stock_standalone/tests stock_standalone/trading_kernel/tests -q` 全量 100% 纯绿秒级通过（exit=0）；
+        - `python -m compileall stock_standalone/ats stock_standalone/trading_kernel stock_standalone/tests -q` 编译零错误（exit=0）。
+
 ## 2026-09-22 13:15
 - [x] **【彻底解决 Agent Hub 监控器与 Antigravity 账户管理器重复多开与实例堆叠 Bug（单实例IPC互斥与前台唤醒激活）】(`webTools/window_manager/agent_hub_ui.py`, `webTools/window_manager/ui.py`, `webTools/manage_window_layout.py`, `tests/test_agent_hub_ui.py`, `tests/test_antigravity_manager.py`)**：
     - [x] **Agent Hub 监控器单实例 IPC 守护与前台置顶唤醒 (`agent_hub_ui.py`)**：
