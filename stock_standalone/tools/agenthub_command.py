@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from tools.agenthub_supervisor import start as start_supervisor
 
-CONFIRM = re.compile(r"(?:^|\s)/confirm\s+agenthub(?:\s|$)", re.I)
+CONFIRM = re.compile(r"(?:^|\s)(?:/confirm\s+agenthub|@agenthub\s+confirm)(?:\s|$)", re.I)
 TRIGGER = re.compile(r"(?:^|\s)(?:@agenthub|/agenthub)(?:\s|$)", re.I)
 
 def parse_request(text: str) -> dict:
@@ -17,7 +17,7 @@ def parse_request(text: str) -> dict:
     return {
         'triggered': bool(TRIGGER.search(text)),
         'confirmed': bool(CONFIRM.search(text)),
-        'mode': 'run' if re.search(r"(?:^|[\s/])run(?:\s|$)", text, re.I) else 'plan',
+        'mode': 'run' if (re.search(r"(?:^|[\s/])run(?:\s|$)", text, re.I) or re.search(r"@agenthub\s+confirm", text, re.I)) else 'plan',
         'text': text,
     }
 
