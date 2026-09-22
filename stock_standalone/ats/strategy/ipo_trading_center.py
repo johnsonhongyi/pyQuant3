@@ -625,10 +625,26 @@ class IPOTradingCenter:
                 entry_stamp = str(raw.get("entry_time", "") or "")
                 entry_date = entry_stamp.replace("T", " ").split(" ", 1)[0] if entry_stamp else ""
                 entry_time = entry_stamp.replace("T", " ").split(" ", 1)[1] if " " in entry_stamp.replace("T", " ") else ""
-                name = (
-                    getattr(self._reports_cache.get(clean_code), "name", "")
-                    or (old.name if old is not None else clean_code)
-                )
+                # 多级名称解析：优先实时报告缓存 → 旧持仓对象 → 持久化名称快照 → 离线本地查询 → 代码兜底
+                _cache_name = getattr(self._reports_cache.get(clean_code), "name", "") or ""
+                _old_name = (old.name if old is not None else "") or ""
+                _snapshot_name = getattr(self, "_persisted_name_snapshot", {}).get(clean_code, "") or ""
+
+                def _is_valid_name(n):
+                    return bool(n) and not n.isdigit() and not n.startswith("个股_")
+
+                if _is_valid_name(_cache_name):
+                    name = _cache_name
+                elif _is_valid_name(_old_name):
+                    name = _old_name
+                elif _is_valid_name(_snapshot_name):
+                    name = _snapshot_name
+                else:
+                    try:
+                        from sys_utils import resolve_stock_name as _rsn
+                        name = _rsn(clean_code) or clean_code
+                    except Exception:
+                        name = clean_code
                 pnl_pct = ((current - cost) / cost * 100.0) if cost > 0 else 0.0
                 synced[clean_code] = IPOTradingPosition(
                     code=clean_code,
@@ -1246,6 +1262,13 @@ class IPOTradingCenter:
                 raw_logs = data.get("signal_iteration_log", [])
                 if isinstance(raw_logs, list):
                     self._signal_iteration_log = raw_logs
+
+                # 恢复名称快照（供 TK SSOT 冷启动场景中文名称解析使用）
+                name_snap = data.get("name_snapshot", {})
+                if isinstance(name_snap, dict) and name_snap:
+                    self._persisted_name_snapshot = name_snap
+                    logger.debug(f"💾 [IPO-LEDGER] 恢复名称快照 {len(name_snap)} 条")
+
                 logger.info(f"💾 [IPO-LEDGER] 成功从本地恢复交易账本: 活跃持仓 {len(self._positions)} 只 | 已平仓历史 {len(self._closed_positions)} 只 | 信号日志 {len(self._signal_iteration_log)} 条")
         except Exception as e:
             logger.debug(f"加载 IPO 交易账本异常: {e}")
@@ -1288,6 +1311,12 @@ class IPOTradingCenter:
                 plan.to_dict() if hasattr(plan, "to_dict") else plan.__dict__.copy()
                 for plan in self._trade_plans.values()
             ]
+            # 持久化名称映射，供冷启动时 _sync_from_unified_paper_account 恢复中文名称
+            name_snapshot = {
+                p.code: p.name
+                for p in self._positions.values()
+                if p.shares > 0 and p.name and not p.name.isdigit() and not p.name.startswith("个股_")
+            }
             payload = {
                 "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
                 "trading_mode": self.trading_mode,
@@ -1296,6 +1325,7 @@ class IPOTradingCenter:
                 "closed_positions": closed_list,
                 "directive_history": order_list,
                 "signal_iteration_log": self._signal_iteration_log[:200],
+                "name_snapshot": name_snapshot,
             }
             if not production_ssot:
                 # Explicit legacy/custom ledgers remain backwards compatible for tests/tools.
@@ -1305,6 +1335,7 @@ class IPOTradingCenter:
                     "active_positions": active_list,
                     "order_history": order_list,
                 })
+
             tmp_f = f"{target_file}.tmp_{os.getpid()}"
             with open(tmp_f, "w", encoding="utf-8") as f:
                 json.dump(payload, f, ensure_ascii=False, indent=2)
