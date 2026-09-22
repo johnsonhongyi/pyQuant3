@@ -104,6 +104,17 @@ class AgentOrchestrator:
         self._claim_lock = threading.Lock()
 
     def _run(self, args: Sequence[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        """Run a child with a project-local temporary directory for reproducible tests."""
+        if "env" not in kwargs:
+            runtime_temp = self.root / ".pytest_temp" / "agent_hub_runtime"
+            runtime_temp.mkdir(parents=True, exist_ok=True)
+            runtime_env = os.environ.copy()
+            runtime_env.update({
+                "TEMP": str(runtime_temp),
+                "TMP": str(runtime_temp),
+                "TMPDIR": str(runtime_temp),
+            })
+            kwargs["env"] = runtime_env
         return self.runner(
             list(args),
             cwd=self.root,
@@ -276,6 +287,18 @@ class AgentOrchestrator:
         task = task_path.read_text(encoding="utf-8")
         allowed_files = self._section_items(task, "Files Allowed")
         budget = self._worker_read_budget(task)
+        task_id = self._metadata_value(task, "Task-ID")
+        review_note = ""
+        if task_id:
+            review_path = self.hub.hub / "review" / f"{task_id.zfill(3)}_review.md"
+            if review_path.exists():
+                review_text = review_path.read_text(encoding="utf-8")
+                if "- Decision: REWORK" in review_text:
+                    review_note = (
+                        "\n\nSCOPED REWORK EVIDENCE (authoritative):\n"
+                        "Fix these findings before claiming SUCCESS. Do not repeat completed work or expand scope.\n"
+                        + review_text
+                    )
         return (
             "AUTHORITATIVE INVOCATION RULES: "
             "The orchestrator has already claimed this task. Do not call claim or submit. "
@@ -289,7 +312,7 @@ class AgentOrchestrator:
             f"READ ALLOWLIST: {json.dumps(allowed_files, ensure_ascii=False)}\n\n"
             "Return exactly one compact JSON object matching the required report schema. Do not "
             "echo this prompt, the task, file contents, diffs, reasoning, or logs.\n\n"
-            f"{task}"
+            f"{task}{review_note}"
         )
 
     def _validate_worker_report(self, stdout: str) -> str:
@@ -538,15 +561,22 @@ class AgentOrchestrator:
         worker_env: dict[str, str],
         read_budget: int | None = None,
     ) -> subprocess.CompletedProcess[str]:
-        """Run Antigravity with enforceable timeout/read-budget/no-activity gates."""
+        """Run a worker with diagnostic liveness states; silence is never a kill signal."""
         log_path.unlink(missing_ok=True)
-        timeout_seconds = int(self.config.get("worker_timeout_seconds", 240))
+        timeout_seconds = int(self.config.get("worker_timeout_seconds", 1800))
         read_budget = int(read_budget if read_budget is not None else self.config.get("worker_max_readonly_tool_calls", 12))
-        idle_timeout = int(self.config.get("worker_no_activity_timeout_seconds", 60))
-        poll_seconds = max(float(self.config.get("worker_monitor_interval_seconds", 1.0)), 0.05)
+        suspect_timeout = int(self.config.get("worker_suspect_timeout_seconds", self.config.get("worker_no_activity_timeout_seconds", 300)))
+        probe_timeout = int(self.config.get("worker_probe_timeout_seconds", 600))
+        terminate_on_liveness_loss = bool(self.config.get("worker_terminate_on_liveness_loss", False))
+        poll_seconds = max(float(self.config.get("worker_monitor_interval_seconds", 5.0)), 0.05)
+        heartbeat_flush = max(float(self.config.get("worker_heartbeat_flush_seconds", 60.0)), poll_seconds)
+        log_scan_interval = max(float(self.config.get("worker_log_scan_interval_seconds", 15.0)), poll_seconds)
         started = time.monotonic()
         last_activity = started
         last_log_size = -1
+        last_log_scan = started - log_scan_interval
+        last_heartbeat_flush = started - heartbeat_flush
+        last_heartbeat_snapshot: tuple[str, int, int, int, str] | None = None
         reason = ""
         reads = writes = reads_since_write = 0
 
@@ -565,32 +595,38 @@ class AgentOrchestrator:
             )
             while process.poll() is None:
                 now = time.monotonic()
-                if log_path.exists():
+                if log_path.exists() and now - last_log_scan >= log_scan_interval:
+                    last_log_scan = now
                     log_size = log_path.stat().st_size
                     if log_size != last_log_size:
                         last_log_size = log_size
                         last_activity = now
-                    log_text = log_path.read_text(encoding="utf-8", errors="replace")
-                    reads, writes, reads_since_write = self._tool_activity_counts(log_text)
+                        log_text = log_path.read_text(encoding="utf-8", errors="replace")
+                        reads, writes, reads_since_write = self._tool_activity_counts(log_text)
                 elapsed = now - started
-                self._write_worker_heartbeat(
-                    artifact_dir,
-                    status="RUNNING",
-                    elapsed=elapsed,
-                    reads=reads,
-                    writes=writes,
-                    reads_since_write=reads_since_write,
-                )
+                idle_for = now - last_activity
+                status, detail = "RUNNING", ""
                 if read_budget > 0 and reads_since_write >= read_budget:
-                    reason = (
-                        f"readonly tool budget exceeded: {reads_since_write}/{read_budget} "
-                        "consecutive reads without a write"
-                    )
+                    status = "BLOCKED_BUDGET"
+                    detail = f"readonly budget exhausted: {reads_since_write}/{read_budget}; worker retained for report"
+                elif probe_timeout > 0 and idle_for >= probe_timeout:
+                    status = "PROBING"
+                    detail = f"no new log for {idle_for:.0f}s; process is still alive, do not restart"
+                elif suspect_timeout > 0 and idle_for >= suspect_timeout:
+                    status = "SUSPECT"
+                    detail = f"no new log for {idle_for:.0f}s; awaiting worker/tool completion"
                 elif timeout_seconds > 0 and elapsed >= timeout_seconds:
-                    reason = f"hard timeout reached: {timeout_seconds}s"
-                elif idle_timeout > 0 and now - last_activity >= idle_timeout:
-                    reason = f"no Antigravity log activity for {idle_timeout}s"
-                if reason:
+                    status = "TIMEBOX_EXCEEDED"
+                    detail = f"runtime exceeded {timeout_seconds}s; process retained until it exits"
+                snapshot = (status, reads, writes, reads_since_write, detail)
+                if snapshot != last_heartbeat_snapshot or now - last_heartbeat_flush >= heartbeat_flush:
+                    self._write_worker_heartbeat(
+                        artifact_dir, status=status, elapsed=elapsed, reads=reads,
+                        writes=writes, reads_since_write=reads_since_write, detail=detail,
+                    )
+                    last_heartbeat_snapshot = snapshot
+                    last_heartbeat_flush = now
+                if reason and terminate_on_liveness_loss:
                     self._stop_worker(process)
                     break
                 time.sleep(poll_seconds)

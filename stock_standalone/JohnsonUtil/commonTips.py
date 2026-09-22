@@ -2486,11 +2486,17 @@ def get_ramdisk_dir() -> str:
             continue
         basedir = root.replace('/', path_sep).replace('\\', path_sep)
         if os.path.exists(basedir):
+            # 规范化 Windows 盘符: 'G:' -> 'G:\'，保证外部无论使用 os.path.join 还是字符串拼接均安全指向根目录
+            if os.name == 'nt' and len(basedir) == 2 and basedir[1] == ':':
+                basedir += os.sep
             if is_main_process() and not _RAMDISK_LOGGED and log.isEnabledFor(10):
                 log.debug("%s : path:%s", os_platform, basedir)
                 _RAMDISK_LOGGED = True
             return basedir
-    return _local_get_app_root()
+    fallback = _local_get_app_root()
+    if os.name == 'nt' and len(fallback) == 2 and fallback[1] == ':':
+        fallback += os.sep
+    return fallback
 
 RamBaseDir = get_ramdisk_dir()
 
