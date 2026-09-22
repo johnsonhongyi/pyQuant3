@@ -62,6 +62,19 @@ def _project(tmp_path: Path) -> Path:
     return tmp_path
 
 
+def test_runner_uses_project_local_temp_directory(tmp_path: Path) -> None:
+    root = _project(tmp_path)
+    captured = {}
+
+    def runner(args, **kwargs):
+        captured.update(kwargs["env"])
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    AgentOrchestrator(root, runner=runner)._run(["fake-command"])
+    assert captured["TEMP"] == str(root / ".pytest_temp" / "agent_hub_runtime")
+    assert captured["TMP"] == captured["TEMP"]
+
+
 def test_preview_does_not_claim_task(tmp_path: Path) -> None:
     root = _project(tmp_path)
     orchestrator = AgentOrchestrator(root)
@@ -203,6 +216,18 @@ def test_worker_prompt_has_a_bounded_file_read_allowlist(tmp_path: Path) -> None
     assert "read/search budget is 12 tool calls total" in prompt
     assert 'READ ALLOWLIST: ["ats/example.py"]' in prompt
     assert "conflicting legacy rule" not in prompt
+
+
+def test_worker_prompt_includes_authoritative_rework_findings(tmp_path: Path) -> None:
+    root = _project(tmp_path)
+    (root / ".agent_hub" / "review").mkdir(exist_ok=True)
+    (root / ".agent_hub" / "review" / "001_review.md").write_text(
+        "# Review 001\n\n- Decision: REWORK\n\n## Findings\n- fix threshold boundary",
+        encoding="utf-8",
+    )
+    prompt = AgentOrchestrator(root)._worker_prompt(root / ".agent_hub" / "inbox" / "001_preview.md")
+    assert "SCOPED REWORK EVIDENCE (authoritative)" in prompt
+    assert "fix threshold boundary" in prompt
 
 
 def test_worker_discards_antigravity_json_envelope(tmp_path: Path) -> None:
@@ -386,26 +411,36 @@ def test_worker_tool_activity_tracks_consecutive_reads_after_write() -> None:
     assert AgentOrchestrator._tool_activity_counts(log) == (3, 1, 1)
 
 
-def test_worker_monitor_hard_stops_at_read_budget(tmp_path: Path) -> None:
+def test_worker_monitor_marks_budget_but_does_not_force_terminate(tmp_path: Path) -> None:
     root = _project(tmp_path)
     artifact_dir = root / ".agent_hub" / "artifacts" / "001"
     artifact_dir.mkdir(parents=True, exist_ok=True)
     log_path = artifact_dir / "antigravity.log"
 
     class FakeProcess:
-        returncode = None
+        def __init__(self):
+            self.returncode = None
+            self.poll_count = 0
+            self.terminated = False
 
         def poll(self):
+            self.poll_count += 1
+            if self.poll_count >= 3:
+                self.returncode = 0
             return self.returncode
 
         def terminate(self):
+            self.terminated = True
             self.returncode = 0
 
         def kill(self):
+            self.terminated = True
             self.returncode = -9
 
         def wait(self, timeout=None):
             return self.returncode
+
+    process = FakeProcess()
 
     def popen_factory(args, **kwargs):
         log_path.write_text(
@@ -415,7 +450,7 @@ def test_worker_monitor_hard_stops_at_read_budget(tmp_path: Path) -> None:
             ),
             encoding="utf-8",
         )
-        return FakeProcess()
+        return process
 
     orchestrator = AgentOrchestrator(root, popen_factory=popen_factory)
     orchestrator.config.update({
@@ -427,10 +462,10 @@ def test_worker_monitor_hard_stops_at_read_budget(tmp_path: Path) -> None:
     result = orchestrator._run_worker_monitored(
         ["fake-antigravity"], log_path, artifact_dir, os.environ.copy()
     )
-    assert result.returncode == 124
-    assert "readonly tool budget exceeded" in result.stderr
+    assert result.returncode == 0
+    assert not process.terminated
     heartbeat = json.loads((artifact_dir / "worker_heartbeat.json").read_text(encoding="utf-8"))
-    assert heartbeat["status"] == "ABORTED"
+    assert heartbeat["status"] == "SUCCESS"
     assert heartbeat["readonly_calls_since_write"] == 3
 
 
