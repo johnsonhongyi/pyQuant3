@@ -1,5 +1,16 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-09-22 02:05
+- [x] **【RamDisk Windows 单字符裸盘符根因修复与最优解全面固化】(`JohnsonUtil/commonTips.py`, `tests/test_ats_closing_ramdisk.py`)**：
+    - [x] **根因定位与修复**：
+        - 针对 Windows 环境下配置裸盘符（如 `win10_ramdisk_triton = 'G:'`）时，`cct.get_ramdisk_dir()` 返回裸盘符 `'G:'`（相对路径语义）；
+        - 当外部模块使用 `os.path.join(ram_dir, file)` 或直接拼接时，拼成 `'G:file'` 而非 `'G:\file'`，导致底层 C 扩展、PyTables/HDF5 或多进程读写偶发找不到路径并错误回退到本地 SSD；
+        - 在 `get_ramdisk_dir()` 返回前实施绝对盘符根规范化保护：当检测为 Windows 且盘符长度为 2 时，统一强制补全 `os.sep`（`'G:'` $\to$ `'G:\'`），彻底杜绝拼接断裂；
+    - [x] **全量自动化验证 100% 绿灯**：
+        - 验证实测 `cct.get_ramdisk_dir()` 输出规范为 `'G:\'`，`cct.get_ramdisk_path('minute_kline_cache.pkl')` 输出规范为 `'G:\minute_kline_cache.pkl'`；
+        - `test_ats_closing_ramdisk.py` 与 `test_minute_kline_viewer_tdx_cache.py` 8 项测试全绿通过（8 passed in 18.48s）；
+        - `compileall` 编译零错误。
+
 ## 2026-09-21 22:38
 - [x] **【修复 TK 打包后 sync_with_legacy_gateway 模块导入路径与 Windows 原子替换并发锁死】(`trading_kernel/kernel_service.py`)**：
     - [x] **根因定位与修复**：
