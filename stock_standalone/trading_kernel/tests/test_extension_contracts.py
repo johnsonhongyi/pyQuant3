@@ -190,6 +190,8 @@ def test_build_fingerprint_contains_release_identity():
     assert payload["kernel_version"]
     assert "git_commit" in payload
     assert "git_dirty" in payload
+    assert "release_ready" in payload
+    assert payload["release_ready"] is (not payload["git_dirty"] and payload["git_commit"] != "unknown")
     assert payload["generated_at_utc"]
 
 

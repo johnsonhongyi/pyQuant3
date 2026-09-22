@@ -32,8 +32,9 @@ import threading
 import json
 import copy
 import datetime
+import inspect
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Any, Tuple
+from typing import Dict, List, Optional, Any, Tuple, Union
 
 from ats.strategy.ipo_market_sentiment_engine import IPOMarketSentimentEngine, MarketSentimentSnapshot
 from ats.strategy.ipo_vwap_detector_engine import VWAPDetectorSignal, batch_evaluate_horse_race_ranking
@@ -46,12 +47,118 @@ from ats.strategy.channel_secondary_buy_strategy import (
     TAG_IPO_BID_SURGE,
 )
 from ats.proactive_exit_engine import ProactiveExitEngine
-from ats.strategy.signal_convergence import SignalConvergenceResult, converge_directives
-from ats.strategy.directive_execution_guard import validate_directive
+from ats.strategy.signal_convergence import SignalConvergenceResult, converge_directives, EXIT_ACTIONS, ENTRY_ACTIONS
+from ats.strategy.directive_execution_guard import validate_directive, _parse_expire_today
+from ats.strategy.subnew_executable_gate import (
+    evaluate_s5_executable as _approved_pure_gate,
+)
+from ats.strategy.subnew_deployment_gate import (
+    SubnewDeploymentGate,
+    GateStatus,
+    GateResult,
+)
 
 logger = logging.getLogger("IPOTradingCenter")
 
 TRADING_LEDGER_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "config", "ipo_trading_ledger.json")
+S5_MIN_RR_THRESHOLD = 2.5
+S5_MAX_TTL_TRADING_MINUTES = 15.0
+
+
+def calculate_trading_minutes_elapsed(created_val: Any, ref_ts: Optional[float] = None) -> float:
+    """
+    计算 TradePlan 自创建起所经历的 A 股连续交易分钟数 (09:30-11:30, 13:00-15:00)。
+    跨日直接判定为超过 15 交易分钟。午休或非交易时间不计入交易消耗。
+    在离线测试或盘后非交易时段，若人为构造了时间差且两端均在闭市段，则以实际墙上时钟差作为测试模拟回退。
+    """
+    if not created_val:
+        return 0.0
+    ref_ts = float(ref_ts if ref_ts is not None else time.time())
+    start_dt: Optional[datetime.datetime] = None
+
+    if isinstance(created_val, (int, float)):
+        if created_val <= 0:
+            return 0.0
+        try:
+            start_dt = datetime.datetime.fromtimestamp(created_val)
+        except Exception:
+            return 0.0
+    elif isinstance(created_val, datetime.datetime):
+        start_dt = created_val
+    elif isinstance(created_val, str):
+        text = created_val.strip()
+        if not text:
+            return 0.0
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%H:%M:%S"):
+            try:
+                parsed = datetime.datetime.strptime(text, fmt)
+                if fmt == "%H:%M:%S":
+                    today_d = datetime.datetime.fromtimestamp(ref_ts).date()
+                    start_dt = datetime.datetime.combine(today_d, parsed.time())
+                else:
+                    start_dt = parsed
+                break
+            except Exception:
+                continue
+
+    if start_dt is None:
+        return 0.0
+
+    end_dt = datetime.datetime.fromtimestamp(ref_ts)
+    if end_dt <= start_dt:
+        return 0.0
+
+    if end_dt.date() != start_dt.date():
+        return 999.0
+
+    m_open = datetime.datetime.combine(start_dt.date(), datetime.time(9, 30))
+    m_close = datetime.datetime.combine(start_dt.date(), datetime.time(11, 30))
+    a_open = datetime.datetime.combine(start_dt.date(), datetime.time(13, 0))
+    a_close = datetime.datetime.combine(start_dt.date(), datetime.time(15, 0))
+
+    # 早盘 09:30 - 11:30 重叠
+    m_start = max(start_dt, m_open)
+    m_end = min(end_dt, m_close)
+    m_minutes = max(0.0, (m_end - m_start).total_seconds() / 60.0) if m_end > m_start else 0.0
+
+    # 午盘 13:00 - 15:00 重叠
+    a_start = max(start_dt, a_open)
+    a_end = min(end_dt, a_close)
+    a_minutes = max(0.0, (a_end - a_start).total_seconds() / 60.0) if a_end > a_start else 0.0
+
+    trading_mins = m_minutes + a_minutes
+
+    # 测试与离线模拟回退: 若两者均在盘外（如深夜单元测试）且存在明显测试时间差
+    if m_minutes == 0.0 and a_minutes == 0.0:
+        wall_clock_mins = (end_dt - start_dt).total_seconds() / 60.0
+        if wall_clock_mins > S5_MAX_TTL_TRADING_MINUTES and (
+            (start_dt.time() < datetime.time(9, 30) and end_dt.time() < datetime.time(9, 30))
+            or (start_dt.time() > datetime.time(15, 0) and end_dt.time() > datetime.time(15, 0))
+        ):
+            return wall_clock_mins
+
+    return trading_mins
+
+
+def calculate_rr_now(plan: Optional[IPOTradePlan], current_price: float) -> float:
+    """
+    使用 Task 017 固定结构锚点与实时 P_now 计算动态盈亏比 RR_now。
+    锚点固定：
+    - 结构止损锚点: plan.higher_low_stop (不允许动态移动)
+    - 结构第一目标锚点: plan.target_1_channel_mid (不允许动态移动)
+    RR_now = (target_1 - P_now) / (P_now - stop)
+    """
+    if not plan or current_price <= 0:
+        return 0.0
+    stop = float(getattr(plan, "higher_low_stop", 0.0) or 0.0)
+    target = float(getattr(plan, "target_1_channel_mid", 0.0) or 0.0)
+    if stop <= 0 or target <= 0:
+        return 0.0
+    risk = current_price - stop
+    reward = target - current_price
+    if risk <= 0 or reward <= 0:
+        return 0.0
+    return round(reward / risk, 3)
 
 
 @dataclass
@@ -203,7 +310,8 @@ class IPOTradingCenter:
 
     def __init__(self, total_capital: float = 1000000.0, auto_load_ledger: bool = False,
                  ledger_file: Optional[str] = None,
-                 exit_engine: Optional[ProactiveExitEngine] = None):
+                 exit_engine: Optional[ProactiveExitEngine] = None,
+                 deployment_gate: Optional[SubnewDeploymentGate] = None):
         self.total_capital = total_capital       # 虚拟/实盘总资金池 (默认 100 万基准)
         self.available_cash = total_capital
         self._ledger_file = ledger_file
@@ -218,6 +326,13 @@ class IPOTradingCenter:
         self._today_notified_subscriptions: set = set()
         self.trading_mode: str = "MULTI_POSITION" # 默认组合分仓模式 ("ROTATION_FULL_CAPITAL" 全仓轮动需手动启用)
         self._lock = threading.RLock()
+
+        self.deployment_gate: SubnewDeploymentGate = (
+            deployment_gate if deployment_gate is not None
+            else SubnewDeploymentGate(trading_day=time.strftime("%Y-%m-%d"))
+        )
+        self._reconciliation_mismatches: Dict[str, Dict[str, Any]] = {}
+        self._execution_blocked_codes: set = set()
         
         self.sentiment_engine = IPOMarketSentimentEngine.get_instance()
         self._last_market_context: Optional[MarketSentimentSnapshot] = None
@@ -254,6 +369,240 @@ class IPOTradingCenter:
         clean_code = str(code).strip().zfill(6)
         with self._lock:
             return self._positions.get(clean_code)
+
+    def get_deployment_gate(self) -> SubnewDeploymentGate:
+        """获取交易中心挂接的 GO/NO-GO 部署门实例"""
+        with self._lock:
+            return self.deployment_gate
+
+    def set_deployment_gate(self, gate: SubnewDeploymentGate) -> None:
+        """挂接外部 GO/NO-GO 部署门实例"""
+        with self._lock:
+            self.deployment_gate = gate
+            logger.info(f"[IPO-TRADING] 挂接新部署门: trading_day={gate.trading_day}, status={gate.current_status()}")
+
+    def current_gate_status(self) -> GateStatus:
+        """获取当前部署门有效状态"""
+        with self._lock:
+            if self.deployment_gate is not None:
+                return self.deployment_gate.current_status()
+            return GateStatus.CONFIRM
+
+    def evaluate_deployment_gate(
+        self,
+        gate_name: str = "GATE2",
+        checks: Optional[Dict[str, bool]] = None,
+        **kwargs: Any,
+    ) -> GateResult:
+        """调用挂接的部署门进行 Gate 1 / Gate 2 评估"""
+        with self._lock:
+            if self.deployment_gate is None:
+                self.deployment_gate = SubnewDeploymentGate(trading_day=time.strftime("%Y-%m-%d"))
+            eval_kwargs = dict(kwargs)
+            eval_kwargs.setdefault("trading_center", self)
+            return self.deployment_gate.evaluate(gate_name, checks=checks, **eval_kwargs)
+
+    # ── 权威持仓对账接口 (Authoritative Reconciliation Input Interface) ──
+
+    def reconcile_authoritative_position(
+        self,
+        code: str,
+        shares: int,
+        sellable_qty: int,
+        *,
+        reason: str = "",
+        auto_resolve: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        Authoritative reconciliation input interface (no real broker dependency).
+        至少接收 code、shares、sellable_qty。
+        若与本地 shares/sellable 冲突，则该代码进入 EXECUTION_BLOCKED 并记录 mismatch，禁止 BUY/SELL，直到显式对账恢复。
+        sellable_qty 不得从 TradePlan 推导；底仓出清后不得残留幽灵持仓。
+        """
+        clean_code = str(code).strip().zfill(6)
+        auth_shares = max(0, int(shares))
+        auth_sellable = max(0, min(int(sellable_qty), auth_shares))
+
+        with self._lock:
+            pos = self._positions.get(clean_code)
+            local_shares = pos.shares if pos is not None and pos.shares > 0 else 0
+            local_sellable = pos.available_shares if pos is not None and pos.shares > 0 else 0
+
+            if auto_resolve:
+                # 显式对账恢复：用权威持仓对齐本地持仓
+                if auth_shares <= 0:
+                    if pos is not None:
+                        pos.shares = 0
+                        pos.available_shares = 0
+                        pos.status = "CLOSED"
+                        if clean_code in self._positions:
+                            del self._positions[clean_code]
+                        self.exit_engine.unregister_position(clean_code)
+                else:
+                    if pos is not None:
+                        pos.shares = auth_shares
+                        pos.available_shares = auth_sellable
+                        pos.status = "HOLDING"
+                    else:
+                        pos = IPOTradingPosition(
+                            code=clean_code,
+                            name=getattr(self._reports_cache.get(clean_code), "name", f"标的{clean_code}"),
+                            shares=auth_shares,
+                            available_shares=auth_sellable,
+                            cost_price=0.0,
+                            current_price=0.0,
+                            status="HOLDING",
+                            entry_reason="权威持仓对账恢复写入",
+                        )
+                        self._positions[clean_code] = pos
+
+                self._execution_blocked_codes.discard(clean_code)
+                self._reconciliation_mismatches.pop(clean_code, None)
+                self._save_persisted_ledger()
+                logger.info(
+                    f"[IPO-TRADING] 显式对账恢复成功: {clean_code} shares={auth_shares}, sellable={auth_sellable}"
+                )
+                return {
+                    "code": clean_code,
+                    "status": "RESOLVED",
+                    "shares": auth_shares,
+                    "sellable_qty": auth_sellable,
+                    "is_blocked": False,
+                }
+
+            # 比较本地与权威
+            shares_match = (local_shares == auth_shares)
+            sellable_match = (local_sellable == auth_sellable)
+
+            if shares_match and sellable_match:
+                # 完全对齐：若之前阻断，解除阻断
+                self._execution_blocked_codes.discard(clean_code)
+                self._reconciliation_mismatches.pop(clean_code, None)
+                if pos is not None and pos.status == "EXECUTION_BLOCKED":
+                    pos.status = "HOLDING" if pos.shares > 0 else "CLOSED"
+                self._save_persisted_ledger()
+                return {
+                    "code": clean_code,
+                    "status": "MATCHED",
+                    "shares": auth_shares,
+                    "sellable_qty": auth_sellable,
+                    "is_blocked": False,
+                }
+
+            # 冲突检测：进入 EXECUTION_BLOCKED 阻断，记录 mismatch
+            self._execution_blocked_codes.add(clean_code)
+            mismatch_data = {
+                "code": clean_code,
+                "local_shares": local_shares,
+                "local_sellable": local_sellable,
+                "authoritative_shares": auth_shares,
+                "authoritative_sellable": auth_sellable,
+                "shares_diff": auth_shares - local_shares,
+                "sellable_diff": auth_sellable - local_sellable,
+                "status": "EXECUTION_BLOCKED",
+                "reason": reason or "Authoritative reconciliation mismatch",
+                "recorded_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            }
+            self._reconciliation_mismatches[clean_code] = mismatch_data
+            if pos is not None:
+                pos.status = "EXECUTION_BLOCKED"
+
+            # 记录审计事件
+            audit_item = {
+                "timestamp": time.time(),
+                "time_str": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "action": "RECONCILIATION_MISMATCH",
+                "code": clean_code,
+                "name": pos.name if pos else f"标的{clean_code}",
+                "price": pos.current_price if pos else 0.0,
+                "shares": local_shares,
+                "size_pct": 0.0,
+                "urgency": "CRITICAL",
+                "reason": f"持仓对账冲突阻断: 本地({local_shares}/{local_sellable}) vs 权威({auth_shares}/{auth_sellable})",
+                "horse_rank": 999,
+                "sentiment_phase": "",
+                "signal_tier": "ALERT",
+                "signal_state": "BLOCKED",
+                "execution_status": "BLOCKED",
+                "reject_code": "RECONCILIATION_MISMATCH",
+                "reject_reason": f"shares diff: {auth_shares - local_shares}, sellable diff: {auth_sellable - local_sellable}",
+            }
+            self._signal_iteration_log.insert(0, audit_item)
+            self._signal_iteration_log = self._signal_iteration_log[:300]
+            self._save_persisted_ledger()
+            logger.warning(
+                f"[IPO-TRADING] 持仓对账冲突阻断: {clean_code} 本地({local_shares}/{local_sellable}) vs 权威({auth_shares}/{auth_sellable})"
+            )
+            return {
+                "code": clean_code,
+                "status": "EXECUTION_BLOCKED",
+                "shares": auth_shares,
+                "sellable_qty": auth_sellable,
+                "is_blocked": True,
+                "mismatch": mismatch_data,
+            }
+
+    def reconcile_authoritative_positions(
+        self,
+        positions: Union[List[Dict[str, Any]], Dict[str, Dict[str, Any]]],
+        *,
+        auto_resolve: bool = False,
+    ) -> Dict[str, Any]:
+        """批量权威持仓对账接口"""
+        results = {}
+        with self._lock:
+            if isinstance(positions, dict):
+                for c, data in positions.items():
+                    s = int(data.get("shares", 0))
+                    sq = int(data.get("sellable_qty", data.get("sellable", s)))
+                    r = str(data.get("reason", ""))
+                    results[str(c).strip().zfill(6)] = self.reconcile_authoritative_position(
+                        c, s, sq, reason=r, auto_resolve=auto_resolve
+                    )
+            elif isinstance(positions, (list, tuple)):
+                for item in positions:
+                    c = str(item.get("code", "")).strip().zfill(6)
+                    s = int(item.get("shares", 0))
+                    sq = int(item.get("sellable_qty", item.get("sellable", s)))
+                    r = str(item.get("reason", ""))
+                    results[c] = self.reconcile_authoritative_position(
+                        c, s, sq, reason=r, auto_resolve=auto_resolve
+                    )
+            blocked_count = sum(1 for res in results.values() if res.get("is_blocked", False))
+            return {
+                "total_reconciled": len(results),
+                "blocked_count": blocked_count,
+                "results": results,
+            }
+
+    def resolve_reconciliation(
+        self,
+        code: str,
+        *,
+        shares: Optional[int] = None,
+        sellable_qty: Optional[int] = None,
+    ) -> bool:
+        """显式解除指定标的的对账阻断状态并恢复执行"""
+        clean_code = str(code).strip().zfill(6)
+        with self._lock:
+            if clean_code not in self._execution_blocked_codes and clean_code not in self._reconciliation_mismatches:
+                return True
+            mismatch = self._reconciliation_mismatches.get(clean_code)
+            auth_s = shares if shares is not None else (mismatch["authoritative_shares"] if mismatch else 0)
+            auth_sq = sellable_qty if sellable_qty is not None else (mismatch["authoritative_sellable"] if mismatch else 0)
+            res = self.reconcile_authoritative_position(clean_code, auth_s, auth_sq, auto_resolve=True)
+            return not res.get("is_blocked", False)
+
+    def is_execution_blocked(self, code: str) -> bool:
+        """查询标的是否处于对账冲突阻断状态"""
+        clean_code = str(code).strip().zfill(6)
+        with self._lock:
+            return clean_code in self._execution_blocked_codes
+
+    def get_reconciliation_mismatches(self) -> Dict[str, Dict[str, Any]]:
+        """获取全部活跃的对账冲突字典快照"""
+        with self._lock:
+            return copy.deepcopy(self._reconciliation_mismatches)
 
     def _sync_from_unified_paper_account(self) -> None:
         """Mirror the TK paper SSOT into the command-room portfolio view."""
@@ -436,16 +785,180 @@ class IPOTradingCenter:
             self.auto_follow_trading = bool(enabled)
             logger.info(f"[IPO-TRADING] 全自动跟随交易状态变更: {self.auto_follow_trading}")
 
-    def get_pending_directives(self) -> List[IPOOrderDirective]:
-        """Return the single converged directive view used by UI and execution."""
+    def evaluate_s5_executable_gate(
+        self,
+        directive: Optional[IPOOrderDirective] = None,
+        plan: Optional[IPOTradePlan] = None,
+        current_price: float = 0.0,
+        sentiment: Optional[MarketSentimentSnapshot] = None,
+        now_ts: Optional[float] = None,
+    ) -> Tuple[bool, str, str, float]:
+        """
+        S5 可执行门禁统一仲裁入口：统一委托 Task 023 approved pure gate，严禁维护平行判定。
+        """
+        ref_ts = float(now_ts if now_ts is not None else time.time())
+        ctx = sentiment or self._last_market_context
+        if ctx is None and hasattr(self, "sentiment_engine") and self.sentiment_engine:
+            ctx = getattr(self.sentiment_engine, "_cached_snapshot", None)
+
+        trade_plan = plan or getattr(directive, "trade_plan", None)
+        p_now = float(current_price if current_price > 0 else (getattr(directive, "price", 0.0) or 0.0))
+
+        market_allowed = True
+        if ctx is not None:
+            tide_state = str(getattr(ctx, "tide_state", "") or getattr(ctx, "market_tide_state", "") or "")
+            risk_mode = str(getattr(ctx, "risk_mode", "") or "")
+            try:
+                risk_mult = float(getattr(ctx, "position_multiplier", 1.0) or 0.0)
+            except (TypeError, ValueError):
+                risk_mult = 1.0
+            if (
+                tide_state in ("T1_CLIMAX_DISTRIBUTION", "T4_PANIC_ACCEL")
+                or risk_mode == "BLOCK_NEW_BUYS"
+                or risk_mult <= 0.0
+            ):
+                market_allowed = False
+
+        sig = inspect.signature(_approved_pure_gate)
+        kwargs = {
+            "directive": directive,
+            "plan": trade_plan,
+            "current_price": p_now,
+            "price": p_now,
+            "sentiment": ctx,
+            "now_ts": ref_ts,
+            "ref_ts": ref_ts,
+            "now": ref_ts,
+            "market_allowed": market_allowed,
+        }
+        call_kwargs = {}
+        for p in sig.parameters.values():
+            if p.name in kwargs:
+                call_kwargs[p.name] = kwargs[p.name]
+            elif p.kind == inspect.Parameter.VAR_KEYWORD:
+                call_kwargs = kwargs
+                break
+        raw_res = _approved_pure_gate(**call_kwargs)
+
+        if hasattr(raw_res, "allowed"):
+            allowed = bool(raw_res.allowed)
+            rej_code = str(getattr(raw_res, "reject_code", "") or getattr(raw_res, "code", "") or "")
+            rej_reason = str(getattr(raw_res, "reject_reason", "") or getattr(raw_res, "reason", "") or "")
+            rr_now = float(getattr(raw_res, "rr_now", 0.0) or 0.0)
+        elif isinstance(raw_res, (tuple, list)):
+            allowed = bool(raw_res[0])
+            rej_code = str(raw_res[1]) if len(raw_res) > 1 else ""
+            rej_reason = str(raw_res[2]) if len(raw_res) > 2 else ""
+            rr_now = float(raw_res[3]) if len(raw_res) > 3 else 0.0
+        else:
+            allowed = bool(raw_res)
+            rej_code = ""
+            rej_reason = ""
+            rr_now = 0.0
+
+        return allowed, rej_code, rej_reason, rr_now
+
+    def get_pending_directives(self, executable_only: bool = False) -> List[IPOOrderDirective]:
+        """
+        Return the single converged directive view used by UI and execution.
+        If executable_only=True, returns only actionable executable directives (S5 BUYs and EXITS).
+        Non-S5 BUY-like directives are demoted to OBSERVE in the general view, or stripped in executable view.
+        """
         with self._lock:
+            # 统一收敛执行视图：BUY/BUY_SCOUT/BUY_CONFIRM 若非 S5 必须降为 OBSERVE
+            for d in self._pending_directives:
+                action = str(d.action or "").upper()
+                if action in ENTRY_ACTIONS:
+                    if getattr(d, "signal_level", "") != "S5":
+                        d.signal_state = "OBSERVE"
+                        if not getattr(d, "reject_code", ""):
+                            d.reject_code = "NON_S5_OBSERVE"
+                            d.reject_reason = "非 S5 指令降为观察，禁止直接执行"
+                    elif not getattr(d, "signal_state", ""):
+                        d.signal_state = "ACTIONABLE"
+
             result: SignalConvergenceResult = converge_directives(self._pending_directives)
+
+            # 标记对账阻断的标的
+            for d in result.directives:
+                clean_d_code = str(d.code).strip().zfill(6)
+                if clean_d_code in self._execution_blocked_codes:
+                    d.signal_state = "BLOCKED"
+                    d.reject_code = "RECONCILIATION_BLOCKED"
+                    d.reject_reason = f"标的处于持仓对账阻断状态: {clean_d_code}"
+
             summary = result.summary()
             summary["time_window_suppressed_count"] = int(
                 self._signal_convergence_summary.get("time_window_suppressed_count", 0) or 0
             )
+            # 可执行指令统计：严格排除 OBSERVE/BLOCKED 及非 S5 买入
+            actionable_list = [
+                d for d in result.directives
+                if getattr(d, "signal_state", "") not in ("OBSERVE", "BLOCKED")
+                and not (str(d.action or "").upper() in ENTRY_ACTIONS and getattr(d, "signal_level", "") != "S5")
+            ]
+            summary["actionable_count"] = len(actionable_list)
             self._signal_convergence_summary = summary
+
+            if executable_only:
+                return actionable_list
+
             return list(result.directives)
+
+    def get_executable_directives(self) -> List[IPOOrderDirective]:
+        """
+        S5 可执行指令视图 (Executable Directive View):
+        - 仅包含可直接执行的指令；
+        - BUY/BUY_SCOUT/BUY_CONFIRM 必须是通过 S5 Gate 的 S5 指令；
+        - 非 S5 BUY、RR<2.5、超买区、TTL过期、质量不合格、结构无效的指令全部剥离；
+        - EXIT/SELL/REDUCE 等防守指令不受影响，保持可见与可执行。
+        """
+        return self.get_pending_directives(executable_only=True)
+
+    def get_s4_to_s5_conversion_report(self) -> Dict[str, Any]:
+        """
+        S4→S5 转化率与门禁拦截复盘报告 (支持明日复盘 S4→S5 转化率)。
+        """
+        today = time.strftime("%Y-%m-%d")
+        from collections import Counter
+        rejection_breakdown = Counter()
+        s4_total = 0
+        s5_converted = 0
+
+        with self._lock:
+            for item in self._signal_iteration_log:
+                if not str(item.get("time_str", "")).startswith(today):
+                    continue
+                action = str(item.get("action", "") or "").upper()
+                if action not in ENTRY_ACTIONS:
+                    continue
+                s_level = str(item.get("signal_level", "") or "")
+                s_state = str(item.get("signal_state", "") or "")
+                rej_code = str(item.get("reject_code", "") or "")
+
+                s4_total += 1
+                if s_level == "S5" and s_state != "OBSERVE":
+                    s5_converted += 1
+                elif rej_code:
+                    rejection_breakdown[rej_code] += 1
+
+            for d in self._pending_directives:
+                action = str(d.action or "").upper()
+                if action in ENTRY_ACTIONS:
+                    if getattr(d, "signal_level", "") == "S5" and getattr(d, "signal_state", "") != "OBSERVE":
+                        pass
+                    elif getattr(d, "reject_code", ""):
+                        rejection_breakdown[getattr(d, "reject_code", "")] += 1
+
+        conv_rate = round(s5_converted / s4_total * 100.0, 2) if s4_total > 0 else 0.0
+        return {
+            "date": today,
+            "total_s4_candidates": s4_total,
+            "converted_s5_directives": s5_converted,
+            "conversion_rate_pct": conv_rate,
+            "rejection_breakdown": dict(rejection_breakdown.most_common(10)),
+            "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
 
     def get_signal_convergence_summary(self) -> Dict[str, Any]:
         """Read-only count and suppression reasons for the command-room signal view."""
@@ -1649,26 +2162,22 @@ class IPOTradingCenter:
                         logger.info(f"[IPO-TRADING] 拒绝次级买点开仓 {code}: 缺失有效 IPOTradePlan")
                         continue
 
-                    # 2. 严格校验信号等级必须为 S4 或 S5
-                    raw_level = str(getattr(plan, "signal_level", "") or getattr(sig, "signal_level", "")).strip()
-                    if "S5" in raw_level:
-                        s_level = "S5"
-                    elif "S4" in raw_level or "次级买点" in raw_level:
-                        s_level = "S4"
-                    elif "S3" in raw_level:
-                        s_level = "S3"
-                    elif "S2" in raw_level:
-                        s_level = "S2"
-                    elif "S1" in raw_level:
-                        s_level = "S1"
-                    elif "S0" in raw_level:
-                        s_level = "S0"
-                    else:
-                        s_level = raw_level
-
-                    if s_level not in ("S4", "S5"):
-                        logger.info(f"[IPO-TRADING] 拒绝次级买点开仓 {code}: 信号等级 {s_level} 低于 S4 门槛")
+                    # 2. 最终合同：输入信号不得低于 S4，TradePlan 生命周期固定为 S4；
+                    #    S5 仅属于通过 executable gate 后的 Directive，不允许由输入计划预置。
+                    raw_signal_level = str(getattr(sig, "signal_level", "") or "").strip()
+                    if raw_signal_level in ("S0", "S1", "S2", "S3"):
+                        logger.info(
+                            f"[IPO-TRADING] 拒绝次级买点开仓 {code}: 输入信号等级 {raw_signal_level} 低于 S4 门槛"
+                        )
                         continue
+
+                    raw_plan_level = str(getattr(plan, "signal_level", "") or "").strip()
+                    if raw_plan_level != "S4":
+                        logger.info(
+                            f"[IPO-TRADING] 拒绝次级买点开仓 {code}: TradePlan 必须保持 S4 (当前: {raw_plan_level})"
+                        )
+                        continue
+                    s_level = "S4"
 
                     # 3. 严格校验现价不得超过买入区上沿 (buy_zone_max)
                     buy_max = plan.buy_zone_max if plan.buy_zone_max > 0 else getattr(plan, "buy_zone_upper", 0.0)
@@ -1686,15 +2195,11 @@ class IPOTradingCenter:
                         logger.debug(f"[IPO-TRADING] 幂等拦截 {code}: 信号 {signal_id} 已生成过指令")
                         continue
 
-                    # 5. 动作与受控仓位计算 (S4=BUY_SCOUT 试探仓; S5=BUY_CONFIRM 确认仓，不得直接满仓)
+                    # 5. S4 TradePlan 只负责候选仓位；S5 动作由 executable gate 通过后决定。
                     remaining_fleet_weight = max(0.0, round(max_fleet_weight - current_fleet_weight, 4))
                     plan_weight = float(getattr(plan, "position_pct", 30.0) or 30.0)
-                    if s_level == "S4":
-                        buy_action = "BUY_SCOUT"
-                        max_allowed = min(plan_weight, 30.0)
-                    else:  # S5
-                        buy_action = "BUY_CONFIRM"
-                        max_allowed = min(plan_weight, 35.0)  # 严格限制上限，不得直接满仓 (如100%)
+                    buy_action = "BUY_SCOUT"
+                    max_allowed = min(plan_weight, 30.0)
 
                     assigned_weight = min(max_allowed, remaining_fleet_weight)
                     if assigned_weight <= 0:
@@ -1709,28 +2214,55 @@ class IPOTradingCenter:
                     q_grade = getattr(plan, "quality_grade", "") or getattr(sig, "quality_grade", "S")
                     strat_tag = getattr(plan, "strategy_tag", "") or getattr(sig, "strategy_tag", TAG_CHANNEL_SECONDARY_BUY) or TAG_CHANNEL_SECONDARY_BUY
 
-                    # 6. 生成指令并完整携带原始不可变 trade_plan 与规范属性
+                    # 6. S5 可执行门禁综合评估 (S4 TradePlan 必须保持 S4，门禁达标方可将指令升级为 S5)
+                    is_s5, rej_code, rej_reason, rr_now = self.evaluate_s5_executable_gate(
+                        directive=None,
+                        plan=plan,
+                        current_price=sig.price,
+                        sentiment=sentiment,
+                        now_ts=now_ts,
+                    )
+                    if is_s5:
+                        final_signal_level = "S5"
+                        final_signal_state = "ACTIONABLE"
+                        directive_action = getattr(plan, "suggested_action", "") or "BUY_CONFIRM"
+                        directive_reason = (
+                            f"👑 次级买点S5执行确认[{q_grade}级|RR={rr_now:.2f}]: 长期通道企稳，回踩抬高底突破，"
+                            f"买入网格¥{plan.buy_zone_min:.2f}~¥{plan.buy_zone_max:.2f}，次低防守止损¥{plan.higher_low_stop:.2f}"
+                        )
+                    else:
+                        final_signal_level = "S4"
+                        final_signal_state = "OBSERVE"
+                        directive_action = getattr(plan, "suggested_action", "") or buy_action
+                        directive_reason = (
+                            f"👑 次级买点观察[S4·{q_grade}级|门禁未过:{rej_reason}]: 长期通道企稳，回踩抬高底，"
+                            f"买入网格¥{plan.buy_zone_min:.2f}~¥{plan.buy_zone_max:.2f}，次低防守止损¥{plan.higher_low_stop:.2f}"
+                        )
+
+                    # 7. 生成指令并完整挂接不可变 TradePlan (保持 S4) 与规范属性
                     directive = IPOOrderDirective(
-                        action=buy_action,
+                        action=directive_action,
                         code=code,
                         name=sig.name,
                         price=sig.price,
                         shares=buy_shares,
                         size_pct=assigned_weight,
                         urgency="LIMIT" if sig.price < plan.buy_zone_min else "NORMAL",
-                        reason=(
-                            f"👑 次级买点确认[{s_level}·{q_grade}级]: 长期通道企稳，回踩抬高底突破，"
-                            f"买入网格¥{plan.buy_zone_min:.2f}~¥{plan.buy_zone_max:.2f}，次低防守止损¥{plan.higher_low_stop:.2f}"
-                        ),
+                        reason=directive_reason,
                         horse_rank=sig.horse_race_rank,
                         sentiment_phase=sentiment.heat_stage,
                         timestamp=now_ts,
                         signal_tier=q_grade,
-                        signal_level=s_level,
+                        signal_level=final_signal_level,
                         quality_grade=q_grade,
                         strategy_tag=strat_tag,
-                        trade_plan=plan
+                        trade_plan=plan,
+                        signal_state=final_signal_state,
+                        reject_code=rej_code,
+                        reject_reason=rej_reason,
                     )
+                    if rej_code in ("TTL_EXPIRED", "TTL_TRADING_15M", "TTL_CROSS_DAY"):
+                        setattr(directive, "expired_reason", rej_reason)
 
                     if not any(d.code == code and d.action in ("BUY", "BUY_SCOUT", "BUY_CONFIRM") for d in directives):
                         directives.append(directive)
@@ -1792,12 +2324,31 @@ class IPOTradingCenter:
                     allocated_money = self.total_capital * (assigned_weight / 100.0)
                     buy_shares = int(allocated_money / sig.price / 100.0) * 100
                     if buy_shares >= 100:
-                        # 构建不可变 TradePlan 并在指令中挂接
+                        # 构建不可变 TradePlan 并在指令中挂接 (TradePlan 保持 S4)
                         t_plan = self.create_trade_plan_from_signal(sig)
                         buy_act = t_plan.suggested_action if t_plan else "BUY_SCOUT"
+
+                        # 针对旧 BUY 路径评估 S5 门禁：未达门禁者降为 OBSERVE 监控候选，禁止自动成交
+                        is_s5, rej_code, rej_reason, rr_now = self.evaluate_s5_executable_gate(
+                            directive=None,
+                            plan=t_plan,
+                            current_price=sig.price,
+                            sentiment=sentiment,
+                            now_ts=now_ts,
+                        )
+                        if is_s5:
+                            final_signal_level = "S5"
+                            final_signal_state = "ACTIONABLE"
+                        else:
+                            final_signal_level = "S4"
+                            final_signal_state = "OBSERVE"
+                            if not rej_code:
+                                rej_code = "LEGACY_BUY_OBSERVE_ONLY"
+                                rej_reason = "旧式BUY路径降为监控候选，未达S5门禁禁止自动成交"
+
                         # 避免 directives 中重复添加相同标的买单
                         if not any(d.code == code and d.action in ("BUY", "BUY_SCOUT", "BUY_CONFIRM") for d in directives):
-                            directives.append(IPOOrderDirective(
+                            directive = IPOOrderDirective(
                                 action="BUY",
                                 code=code,
                                 name=sig.name,
@@ -1810,11 +2361,17 @@ class IPOTradingCenter:
                                 sentiment_phase=sentiment.heat_stage,
                                 timestamp=now_ts,
                                 signal_tier=s_tier,
-                                signal_level=t_plan.signal_level if t_plan else "S4",
+                                signal_level=final_signal_level,
                                 quality_grade=t_plan.quality_grade if t_plan else "S",
                                 strategy_tag=t_plan.strategy_tag if t_plan else "",
-                                trade_plan=t_plan
-                            ))
+                                trade_plan=t_plan,
+                                signal_state=final_signal_state,
+                                reject_code=rej_code,
+                                reject_reason=rej_reason,
+                            )
+                            if rej_code in ("TTL_EXPIRED", "TTL_TRADING_15M", "TTL_CROSS_DAY"):
+                                setattr(directive, "expired_reason", rej_reason)
+                            directives.append(directive)
                             current_fleet_weight = round(current_fleet_weight + assigned_weight, 4)
 
             directives = self._publish_converged_directives(directives)
@@ -1902,13 +2459,20 @@ class IPOTradingCenter:
                 logger.debug(f"广播集中交易决议异常: {ex_alert}")
 
     def _auto_execute_if_enabled(self):
-        """若开启全自动跟随交易，自动撮合执行 (注意：FULL_ROTATION_SWAP 仅作战术建议展示，严禁自动执行)"""
-        directives = self.get_pending_directives()
+        """若开启全自动跟随交易，自动撮合执行 (注意：仅消费 S5 可执行视图，非 S5 BUY 绝不自动执行；FULL_ROTATION_SWAP 仅作战术建议展示，严禁自动执行)"""
+        if self.deployment_gate is not None and self.deployment_gate.current_status() == GateStatus.MONITOR_ONLY:
+            return
+        directives = self.get_executable_directives()
         if self.auto_follow_trading and directives:
             for d in directives:
                 if d.action in ("FULL_ROTATION_SWAP", "SWITCH_SWAP"):
                     logger.warning(f"[IPO-TRADING] 轮动换马指令 {d.action} 仅作战术建议展示，实盘保护拦截自动执行")
                     continue
+                # 非 S5 买入指令坚决拦截，不自动成交
+                if d.action in ENTRY_ACTIONS:
+                    if getattr(d, "signal_level", "") != "S5" or getattr(d, "signal_state", "") in ("OBSERVE", "BLOCKED"):
+                        logger.warning(f"[IPO-TRADING] 非 S5 或观察状态买入指令 {d.action} ({d.code}) 拦截自动执行")
+                        continue
                 self.record_order_execution(d)
 
     def execute_directive(self, directive: IPOOrderDirective) -> bool:
@@ -1918,11 +2482,17 @@ class IPOTradingCenter:
         return self.record_order_execution(directive)
 
     def execute_all_pending_directives(self) -> int:
-        """【继续交易：一键执行全部待执行指令】"""
-        directives = self.get_pending_directives()
+        """【继续交易：一键执行全部待执行指令 (统一消费 S5 可执行视图)】"""
+        if self.deployment_gate is not None and self.deployment_gate.current_status() == GateStatus.MONITOR_ONLY:
+            logger.warning("[IPO-TRADING] 部署门处于 MONITOR_ONLY 状态，拒绝 execute_all_pending_directives")
+            return 0
+        directives = self.get_executable_directives()
         with self._lock:
             count = 0
             for d in directives:
+                if d.action in ENTRY_ACTIONS:
+                    if getattr(d, "signal_level", "") != "S5" or getattr(d, "signal_state", "") in ("OBSERVE", "BLOCKED"):
+                        continue
                 if self.record_order_execution(d):
                     count += 1
             return count
@@ -1994,14 +2564,13 @@ class IPOTradingCenter:
                 "exit_hard_stop",
             }
             is_catastrophic = action.rule_id in catastrophic_rules
-            today_str = time.strftime("%Y-%m-%d")
-            if pos.entry_date == today_str and not is_catastrophic:
+            if pos.available_shares <= 0:
                 if watch is not None:
                     watch.reduce_count = reduce_count_before
                     watch.last_reduce_time = last_reduce_before
                 logger.warning(
-                    "[IPO-TRADING] T+1 hard lock blocked %s for %s (rule=%s)",
-                    action.action_type, clean_code, action.rule_id,
+                    "[IPO-TRADING] T+1 hard lock blocked %s for %s (available_shares=0)",
+                    action.action_type, clean_code,
                 )
                 return None
 
@@ -2032,7 +2601,7 @@ class IPOTradingCenter:
                 trade_plan=plan,
                 exit_rule_id=action.rule_id,
                 exit_rule_layer=action.layer,
-                bypass_t1_lock=is_catastrophic,
+                bypass_t1_lock=False,
             )
             if any(
                 pending.code == clean_code
@@ -2052,10 +2621,110 @@ class IPOTradingCenter:
         - 将每次决议与撮合事件记录进 _signal_iteration_log；
         - 原子写盘持久化到本地账本。
         """
+        # 1. 部署门硬拦截：MONITOR_ONLY 状态禁止任何成交执行
+        if self.deployment_gate is not None and self.deployment_gate.current_status() == GateStatus.MONITOR_ONLY:
+            return self._reject_directive(
+                directive,
+                "GATE_MONITOR_ONLY",
+                "部署门处于 MONITOR_ONLY 状态，禁止成交执行",
+            )
+
+        clean_code = str(directive.code).strip().zfill(6)
+        action_upper = str(directive.action or "").upper()
+
+        # 2. 持仓对账冲突硬拦截：EXECUTION_BLOCKED 标的禁止 BUY/SELL
+        if clean_code in self._execution_blocked_codes:
+            return self._reject_directive(
+                directive,
+                "RECONCILIATION_BLOCKED",
+                f"标的处于持仓对账阻断状态 (EXECUTION_BLOCKED): {clean_code}",
+            )
+
+        # 3. EXIT > BUY 独立阻塞合同：同一收敛周期存在 EXIT 时，禁止执行 BUY
+        if action_upper in ENTRY_ACTIONS:
+            has_pending_exit = any(
+                str(d.code).strip().zfill(6) == clean_code
+                and str(d.action or "").upper() in EXIT_ACTIONS
+                for d in self._pending_directives
+            )
+            if has_pending_exit:
+                return self._reject_directive(
+                    directive,
+                    "EXIT_BUY_CONFLICT",
+                    f"EXIT>BUY 阻塞合同: 同代码同一周期存在 EXIT 指令，禁止执行 BUY: {clean_code}",
+                )
+
+        # 4. PAPER/LIVE adapter 前置物理硬门：任何不可逆外部撮合之前，必须先完成
+        #    本地持仓/T+1/绝对市场风险校验。后续锁内校验继续保留为第二道防线。
+        with self._lock:
+            pre_sell_actions = {"SELL", "EXIT_ALL", "REDUCE_30", "REDUCE_HALF", "SWITCH_SWAP"}
+            if action_upper in pre_sell_actions:
+                pre_pos = self._positions.get(clean_code)
+                if pre_pos is None or pre_pos.shares <= 0:
+                    return self._reject_directive(
+                        directive, "NO_POSITION",
+                        f"无可卖持仓: {clean_code} ({directive.action})",
+                    )
+                if pre_pos.available_shares <= 0:
+                    return self._reject_directive(
+                        directive, "T1_SELL_LOCK",
+                        f"T+1 锁定，当日新仓/无可用股份不可执行 {directive.action} "
+                        f"(available_shares=0, shares={pre_pos.shares})",
+                    )
+
+            if action_upper == "FULL_ROTATION_SWAP":
+                pre_old_code = str(directive.target_swap_code or "").strip().zfill(6)
+                if pre_old_code in self._execution_blocked_codes:
+                    return self._reject_directive(
+                        directive, "RECONCILIATION_BLOCKED",
+                        f"轮动卖出标的处于持仓对账阻断状态: {pre_old_code}",
+                    )
+                pre_old_pos = self._positions.get(pre_old_code)
+                if pre_old_pos is None or pre_old_pos.shares <= 0:
+                    return self._reject_directive(
+                        directive, "NO_POSITION",
+                        f"轮动卖出腿无可卖持仓: {pre_old_code}",
+                    )
+                if pre_old_pos.available_shares <= 0:
+                    return self._reject_directive(
+                        directive, "T1_ROTATION_LOCK",
+                        f"T+1 锁定，轮动卖出腿不可执行 (available_shares=0): {pre_old_code}",
+                    )
+
+            if action_upper in ENTRY_ACTIONS:
+                if directive.price <= 0:
+                    return self._reject_directive(
+                        directive, "INVALID_PRICE", f"买入价格无效: {directive.price}"
+                    )
+                pre_ctx = self._last_market_context
+                if pre_ctx is None and self.sentiment_engine is not None:
+                    pre_ctx = getattr(self.sentiment_engine, "_cached_snapshot", None)
+                if pre_ctx is None:
+                    return self._reject_directive(
+                        directive, "MISSING_MARKET_CONTEXT", "缺少市场潮汐/风险上下文快照"
+                    )
+                pre_tide = str(getattr(pre_ctx, "tide_state", "T0_INSUFFICIENT") or "T0_INSUFFICIENT")
+                pre_risk = str(getattr(pre_ctx, "risk_mode", "NORMAL") or "NORMAL")
+                try:
+                    pre_mult = max(
+                        0.0, min(1.0, float(getattr(pre_ctx, "position_multiplier", 1.0) or 0.0))
+                    )
+                except (TypeError, ValueError):
+                    pre_mult = 0.0
+                if (
+                    pre_tide in ("T1_CLIMAX_DISTRIBUTION", "T4_PANIC_ACCEL")
+                    or pre_risk == "BLOCK_NEW_BUYS"
+                    or pre_mult <= 0.0
+                ):
+                    return self._reject_directive(
+                        directive, "MARKET_RISK_BLOCK",
+                        f"市场风险门禁: tide={pre_tide}, risk={pre_risk}, mult={pre_mult:.2f}",
+                    )
+
         # Persistent command-room execution must revalidate the latest stock
         # snapshot before any order reaches TK PAPER/LIVE adapters.
         if self._auto_load_ledger and not getattr(directive, "_kernel_routed", False):
-            report = self._reports_cache.get(str(directive.code).strip().zfill(6))
+            report = self._reports_cache.get(clean_code)
             validation = validate_directive(directive, report)
             directive.validated_at = time.time()
             directive.validation_price = float(validation.live_price or 0.0)
@@ -2089,14 +2758,21 @@ class IPOTradingCenter:
                 )
 
         with self._lock:
-            code = directive.code
+            code = clean_code
             today_str = time.strftime("%Y-%m-%d")
             if directive.action == "FULL_ROTATION_SWAP":
-                old_pos = self._positions.get(directive.target_swap_code)
-                if old_pos is not None and old_pos.entry_date == today_str:
+                target_old = str(directive.target_swap_code).strip().zfill(6)
+                if target_old in self._execution_blocked_codes:
+                    return self._reject_directive(
+                        directive,
+                        "RECONCILIATION_BLOCKED",
+                        f"轮动卖出标的处于持仓对账阻断状态: {target_old}",
+                    )
+                old_pos = self._positions.get(target_old)
+                if old_pos is not None and old_pos.available_shares <= 0:
                     return self._reject_directive(
                         directive, "T1_ROTATION_LOCK",
-                        f"T+1 锁定，轮动卖出腿不可执行: {directive.target_swap_code}",
+                        f"T+1 锁定，轮动卖出腿不可执行 (available_shares=0): {target_old}",
                     )
             t_str = time.strftime("%H:%M:%S")
             pnl_pct = 0.0
@@ -2110,19 +2786,11 @@ class IPOTradingCenter:
                         directive, "NO_POSITION",
                         f"无可卖持仓: {code} ({directive.action})",
                     )
-                catastrophic_rules = {
-                    "exit_higher_low_broken",
-                    "exit_base_low_broken",
-                    "exit_hard_stop",
-                }
-                can_bypass_t1 = (
-                    getattr(directive, "bypass_t1_lock", False)
-                    and directive.exit_rule_id in catastrophic_rules
-                )
-                if pos.entry_date == today_str and not can_bypass_t1:
+                # T+1 物理隔离硬锁：当日新仓或无可用股份一律禁止卖出，严禁任何灾难性止损绕过
+                if pos.available_shares <= 0:
                     return self._reject_directive(
                         directive, "T1_SELL_LOCK",
-                        f"T+1 锁定，当日新仓不可执行 {directive.action}",
+                        f"T+1 锁定，当日新仓/无可用股份不可执行 {directive.action} (available_shares=0, shares={pos.shares})",
                     )
 
             if directive.action in ("BUY", "BUY_SCOUT", "BUY_CONFIRM"):
@@ -2240,7 +2908,7 @@ class IPOTradingCenter:
                         code=code,
                         name=directive.name,
                         shares=exec_shares,
-                        available_shares=exec_shares,
+                        available_shares=0,  # T+1 物理隔离：当日新买股份今日不可卖
                         cost_price=directive.price,
                         current_price=directive.price,
                         highest_price=directive.price,
@@ -2262,9 +2930,10 @@ class IPOTradingCenter:
                     new_shares = pos.shares + exec_shares
                     pos.cost_price = (pos.cost_price * pos.shares + directive.price * exec_shares) / new_shares
                     pos.shares = new_shares
-                    pos.available_shares = pos.shares
+                    # T+1 物理隔离：追加买入不得增加今日 available_shares，仅昨仓可卖
                     pos.entry_time = t_str
-                    pos.entry_date = today_str
+                    if not pos.entry_date:
+                        pos.entry_date = today_str
                     pos.entry_reason = directive.reason
                     pos.signal_tier = directive.signal_tier
                     pos.signal_level = getattr(directive, "signal_level", "S4")
@@ -2442,7 +3111,7 @@ class IPOTradingCenter:
                 self.available_cash = max(0.0, self.available_cash - cost_money)
 
                 new_pos = IPOTradingPosition(
-                    code=code, name=directive.name, shares=new_shares, available_shares=new_shares,
+                    code=code, name=directive.name, shares=new_shares, available_shares=0,  # T+1: 当日新买不可卖
                     cost_price=directive.price, current_price=directive.price, highest_price=directive.price,
                     lowest_price=directive.price, entry_time=t_str, entry_date=today_str,
                     entry_reason=directive.reason, signal_tier=directive.signal_tier, status="HOLDING",
@@ -2458,7 +3127,8 @@ class IPOTradingCenter:
 
             elif directive.action in ("SELL", "EXIT_ALL", "REDUCE_30", "REDUCE_HALF", "SWITCH_SWAP"):
                 is_partial = directive.action in ("REDUCE_30", "REDUCE_HALF")
-                sell_shares = min(pos.available_shares, directive.shares if is_partial else pos.shares)
+                target_sell = directive.shares if (is_partial or directive.shares > 0) else pos.available_shares
+                sell_shares = min(pos.available_shares, target_sell)
                 if sell_shares <= 0:
                     return self._reject_directive(
                         directive, "NO_AVAILABLE_SHARES",
@@ -2482,7 +3152,7 @@ class IPOTradingCenter:
                 pos.last_action_time = t_str
                 pre_sell_snapshot = copy.deepcopy(pos)
                 pos.shares -= sell_shares
-                pos.available_shares = min(pos.available_shares - sell_shares, pos.shares)
+                pos.available_shares = max(0, min(pos.available_shares - sell_shares, pos.shares))
                 watch = self.exit_engine.get_position(code)
                 if watch is not None:
                     watch.shares = pos.shares
@@ -2505,6 +3175,8 @@ class IPOTradingCenter:
                     if len(self._closed_positions) > 200:
                         self._closed_positions = self._closed_positions[:200]
                     self.exit_engine.unregister_position(code)
+                    if code in self._positions:
+                        del self._positions[code]
                 else:
                     pos.status = "HOLDING"
 
@@ -2651,6 +3323,9 @@ class IPOTradingCenter:
                 ],
                 "signal_iteration_log": list(self._signal_iteration_log),
                 "paper_reconciliation": dict(getattr(self, "_paper_reconciliation", {})),
+                "reconciliation_mismatches": self.get_reconciliation_mismatches(),
+                "gate_status": self.deployment_gate.current_status().value if self.deployment_gate else "CONFIRM",
                 "directive_quality_daily": self.get_directive_quality_stats(),
                 "buy_sell_point_daily_report": self.get_buy_sell_quality_daily_report(),
+                "s4_to_s5_conversion_report": self.get_s4_to_s5_conversion_report(),
             }

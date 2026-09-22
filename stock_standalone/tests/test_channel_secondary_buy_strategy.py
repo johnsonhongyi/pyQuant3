@@ -15,6 +15,7 @@ import os
 import sys
 import tempfile
 import time
+import datetime
 import unittest
 import pandas as pd
 import numpy as np
@@ -255,6 +256,7 @@ class TestIPOTradingCenterTradePlanIntegration(unittest.TestCase):
 
         # 隔日触发 EXIT_ALL 平仓；当天新仓由 T+1 硬锁保护。
         pos.entry_date = "2026-09-19"
+        pos.available_shares = pos.shares
         exit_dir = IPOOrderDirective(
             action="EXIT_ALL",
             code="688826",
@@ -325,15 +327,17 @@ class TestIPOTradingCenterTradePlanIntegration(unittest.TestCase):
             code="300058",
             name="确认标的",
             strategy_tag=TAG_CHANNEL_SECONDARY_BUY,
-            signal_level="S5",
+            signal_level="S4",
             quality_grade="S",
             trigger_price=30.0,
             buy_zone_min=29.5,
-            buy_zone_max=30.5,
+            buy_zone_max=30.45,
             higher_low_stop=28.8,
             base_low_invalid=27.5,
+            target_1_channel_mid=34.0,
             position_pct=30.0,
-            suggested_action="BUY_CONFIRM"
+            suggested_action="BUY_CONFIRM",
+            created_time=datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         )
         sig_s5 = VWAPDetectorSignal(
             code="300058",
@@ -344,7 +348,7 @@ class TestIPOTradingCenterTradePlanIntegration(unittest.TestCase):
             signal_type="SECONDARY_BUY",
             channel_stage=SecondaryBuyStage.SECONDARY_BUY,
             quality_grade="S",
-            signal_level="S5",
+            signal_level="S4",
             trade_plan=plan_s5
         )
 
@@ -356,6 +360,7 @@ class TestIPOTradingCenterTradePlanIntegration(unittest.TestCase):
         dir_s5 = buy_dirs_s5[0]
         self.assertEqual(dir_s5.action, "BUY_CONFIRM")
         self.assertEqual(dir_s5.signal_level, "S5")
+        self.assertEqual(plan_s5.signal_level, "S4")
         self.assertLessEqual(dir_s5.size_pct, 35.0)  # 严格受控，绝不给 100% 满仓！
         self.assertIs(dir_s5.trade_plan, plan_s5)
 
@@ -674,7 +679,7 @@ class TestTradingCenterProactiveExitWiring(unittest.TestCase):
         self.assertFalse(self.center.record_order_execution(direct))
         self.assertEqual(self.center.get_position("688826").shares, 1000)
 
-    def test_15_catastrophic_exit_bypasses_t1_and_archives_plan(self):
+    def test_15_catastrophic_exit_cannot_bypass_t1_physical_lock(self):
         self.center.record_order_execution(self.buy)
         self.exit_engine.evaluate_tick = lambda **kwargs: ExitAction(
             code="688826", rule_id="exit_higher_low_broken", rule_name="结构破坏",
@@ -682,20 +687,18 @@ class TestTradingCenterProactiveExitWiring(unittest.TestCase):
             trigger_price=77.0, reason="hard stop", timestamp=1100.0,
         )
         directive = self.center.evaluate_position_exit("688826", 77.0, 78.0, 500.0)
-        self.assertIsNotNone(directive)
-        self.assertTrue(directive.bypass_t1_lock)
-        self.assertTrue(self.center.record_order_execution(directive))
-        self.assertEqual(self.center.get_position("688826").shares, 0)
-        closed = self.center._closed_positions[0]
-        self.assertEqual(closed.shares, 1000)
-        self.assertEqual(closed.trade_plan, self.plan)
-        self.assertEqual(closed.exit_rule_id, "exit_higher_low_broken")
-        self.assertEqual(closed.exit_rule_layer, 8)
+        self.assertIsNone(directive)
+        pos = self.center.get_position("688826")
+        self.assertIsNotNone(pos)
+        self.assertEqual(pos.shares, 1000)
+        self.assertEqual(pos.available_shares, 0)
+        self.assertEqual(len(self.center._closed_positions), 0)
 
     def test_16_t1_eligible_partial_reduce_updates_remaining_shares(self):
         self.center.record_order_execution(self.buy)
         pos = self.center.get_position("688826")
         pos.entry_date = "2026-09-19"
+        pos.available_shares = pos.shares
         directive = IPOOrderDirective(
             action="REDUCE_30", code="688826", name="碳脉冲",
             price=82.0, shares=300, exit_rule_id="exit_distribution",
@@ -753,6 +756,7 @@ class TestTradingCenterProactiveExitWiring(unittest.TestCase):
         self.center.record_order_execution(self.buy)
         pos = self.center.get_position("688826")
         pos.entry_date = "2026-09-19"
+        pos.available_shares = pos.shares
         calls = []
 
         def evaluate(**kwargs):
@@ -865,7 +869,7 @@ class TestTradingCenterProactiveExitWiring(unittest.TestCase):
         center = IPOTradingCenter(total_capital=100000.0)
         center.set_trading_mode("ROTATION_FULL_CAPITAL")
         center._positions["600001"] = IPOTradingPosition(
-            code="600001", name="老股票", shares=1000, cost_price=10.0,
+            code="600001", name="老股票", shares=1000, available_shares=1000, cost_price=10.0,
             current_price=10.0, entry_date="2026-09-19", status="HOLDING"
         )
         center.available_cash = 90000.0  # 90% 闲置现金
@@ -894,7 +898,8 @@ class TestTradingCenterProactiveExitWiring(unittest.TestCase):
         self.assertEqual(center.available_cash, 95000.0)  # 90000 + 10000(平老仓) - 5000(买新仓)
 
         # Case B: 攻击尝试：手工构造 size_pct=100% 指令试图穿透 T5 风控（带当前时间戳）
-        center._positions["688999"].entry_date = "2026-09-19"  # 解除次日硬锁
+        center._positions["688999"].entry_date = "2026-09-19"
+        center._positions["688999"].available_shares = center._positions["688999"].shares
         attack_dir = IPOOrderDirective(
             action="FULL_ROTATION_SWAP", code="688888", name="伪造标的",
             price=20.0, shares=5000, size_pct=100.0, timestamp=now_ts,
@@ -912,6 +917,7 @@ class TestTradingCenterProactiveExitWiring(unittest.TestCase):
 
         # Case B2: 攻击尝试：无时间戳指令（timestamp=0.0）试图利用系统新鲜快照扩大仓位
         center._positions["688888"].entry_date = "2026-09-19"
+        center._positions["688888"].available_shares = center._positions["688888"].shares
         # 构造零时间戳指令，size_pct=50%
         zero_ts_dir = IPOOrderDirective(
             action="FULL_ROTATION_SWAP", code="688889", name="零时间戳渗透",
@@ -927,6 +933,7 @@ class TestTradingCenterProactiveExitWiring(unittest.TestCase):
 
         # Case C: 攻击尝试：在丢失快照时试图满仓扩大仓位，执行端按原持仓拒绝扩大
         center._positions["688889"].entry_date = "2026-09-19"
+        center._positions["688889"].available_shares = center._positions["688889"].shares
         center._last_market_context = None
         center.sentiment_engine._cached_snapshot = None
         bypass_dir = IPOOrderDirective(
@@ -942,6 +949,7 @@ class TestTradingCenterProactiveExitWiring(unittest.TestCase):
 
         # Case D: 攻击尝试：在持有陈旧快照(>300s)时试图满仓扩大仓位，执行端拒绝扩大
         center._positions["688777"].entry_date = "2026-09-19"
+        center._positions["688777"].available_shares = center._positions["688777"].shares
         old_snap = MarketSentimentSnapshot(
             tide_state="T5_ICE", tide_position_cap_pct=5.0,
             risk_mode="NORMAL", position_multiplier=1.0,
@@ -961,6 +969,7 @@ class TestTradingCenterProactiveExitWiring(unittest.TestCase):
 
         # Case E: 攻击尝试：T0_INSUFFICIENT/NORMAL 快照试图手工满仓，执行端检测T0不足拒绝扩大
         center._positions["688666"].entry_date = "2026-09-19"
+        center._positions["688666"].available_shares = center._positions["688666"].shares
         t0_snap = MarketSentimentSnapshot(
             tide_state="T0_INSUFFICIENT", tide_position_cap_pct=100.0,
             risk_mode="NORMAL", position_multiplier=1.0,
@@ -978,6 +987,7 @@ class TestTradingCenterProactiveExitWiring(unittest.TestCase):
 
         # Case F: 【防幽灵持仓专项验证】风控拒绝或失败分支绝不遗留空持仓对象
         center._positions["688555"].entry_date = "2026-09-19"
+        center._positions["688555"].available_shares = center._positions["688555"].shares
         # F1: T4 状态下换马指令被执行端预算拒绝（allowed_pct=0%）
         t4_snap = MarketSentimentSnapshot(
             tide_state="T4_PANIC_ACCEL", tide_position_cap_pct=0.0,
@@ -1002,6 +1012,7 @@ class TestTradingCenterProactiveExitWiring(unittest.TestCase):
 
         # F3: 当日买入标的 T+1 硬锁拦截卖出，原持仓状态完整保持，不产生多余持仓
         center._positions["688555"].entry_date = pytime.strftime("%Y-%m-%d")
+        center._positions["688555"].available_shares = 0
         t1_sell = IPOOrderDirective(
             action="SELL", code="688555", name="T0渗透", price=10.0, shares=100
         )
@@ -1019,11 +1030,11 @@ class TestTradingCenterProactiveExitWiring(unittest.TestCase):
 
         # 初始持仓：旧滞涨股 600001 (2000元，占2%)，以及其他保留持仓 600002 (4000元，占4%)
         center._positions["600001"] = IPOTradingPosition(
-            code="600001", name="老滞涨", shares=200, cost_price=10.0,
+            code="600001", name="老滞涨", shares=200, available_shares=200, cost_price=10.0,
             current_price=10.0, entry_date="2026-09-19", status="HOLDING"
         )
         center._positions["600002"] = IPOTradingPosition(
-            code="600002", name="其他持仓", shares=400, cost_price=10.0,
+            code="600002", name="其他持仓", shares=400, available_shares=400, cost_price=10.0,
             current_price=10.0, entry_date="2026-09-19", status="HOLDING"
         )
         center.available_cash = 94000.0
@@ -1086,7 +1097,7 @@ class TestTradingCenterProactiveExitWiring(unittest.TestCase):
         # 2b. 执行端验证：若其他持仓已达 5.0%，执行端再次收到换马指令必须拒绝执行，老仓位完全不变
         center._positions["688999"].shares = 500  # 5000元，已占满 5% 潮汐上限
         center._positions["600003"] = IPOTradingPosition(
-            code="600003", name="第二只老股", shares=100, cost_price=10.0,
+            code="600003", name="第二只老股", shares=100, available_shares=100, cost_price=10.0,
             current_price=10.0, entry_date="2026-09-19", status="HOLDING"
         )
         overflow_dir = IPOOrderDirective(
@@ -1711,6 +1722,366 @@ class TestOrdinaryBuyExecutionRiskGate(unittest.TestCase):
         self.assertEqual(len(rotations), 1)
         self.assertEqual(rotations[0].code, leader.code)
         self.assertLessEqual(rotations[0].size_pct, 80.0)
+
+
+class TestTask018S5ExecutableDirectiveView(unittest.TestCase):
+    """【Task 018】集中交易中心 S5 可执行 Directive 视图与旧 BUY 路径收敛测试"""
+
+    def setUp(self):
+        self.center = IPOTradingCenter(total_capital=1000000.0, auto_load_ledger=False)
+        self.now_ts = time.time()
+        self.normal_context = MarketSentimentSnapshot(
+            heat_stage="🔥 梯队升温",
+            index_phase="温和放量",
+            tide_state="T7_WARMING",
+            tide_position_cap_pct=50.0,
+            risk_mode="NORMAL",
+            position_multiplier=1.0,
+        ).finalize()
+        self.normal_context.generated_at = self.now_ts
+        self.center._last_market_context = self.normal_context
+
+    def test_39_s4_to_s5_directive_when_all_gate_criteria_met(self):
+        """满足全部门槛时 S4 TradePlan -> 生成 S5 Directive，TradePlan 保持 S4"""
+        from unittest.mock import patch
+
+        plan_s4 = IPOTradePlan(
+            plan_id="TP_GATE_PASS_01",
+            code="688826",
+            name="实战标的",
+            strategy_tag=TAG_CHANNEL_SECONDARY_BUY,
+            signal_level="S4",
+            quality_grade="SS",
+            trigger_price=80.0,
+            buy_zone_min=79.0,
+            buy_zone_max=81.0,
+            higher_low_stop=77.5,
+            base_low_invalid=75.0,
+            target_1_channel_mid=87.5,  # risk=2.5, reward=7.5, RR=3.0 >= 2.5
+            position_pct=25.0,
+            suggested_action="BUY_CONFIRM",
+            created_time=datetime.datetime.fromtimestamp(self.now_ts).strftime("%Y-%m-%d %H:%M:%S")
+        )
+        sig = VWAPDetectorSignal(
+            code="688826",
+            name="实战标的",
+            price=80.0,
+            vwap=79.5,
+            is_above_vwap=True,
+            signal_type="SECONDARY_BUY",
+            channel_stage=SecondaryBuyStage.SECONDARY_BUY,
+            quality_grade="SS",
+            signal_level="S4",
+            trade_plan=plan_s4
+        )
+
+        with patch.object(self.center.sentiment_engine, "get_market_sentiment", return_value=self.normal_context):
+            self.center.submit_stock_perception_report(sig)
+            orders = self.center.evaluate_fleet_and_generate_orders()
+
+        # 校验 Directive: 成功通过 S5 门禁并标记暴露为 S5
+        s5_dirs = [d for d in orders if d.code == "688826" and d.action in ("BUY_SCOUT", "BUY_CONFIRM", "BUY")]
+        self.assertEqual(len(s5_dirs), 1)
+        dir_s5 = s5_dirs[0]
+        self.assertEqual(dir_s5.signal_level, "S5")
+        self.assertEqual(dir_s5.signal_state, "ACTIONABLE")
+        self.assertEqual(dir_s5.quality_grade, "SS")
+
+        # 校验 TradePlan 本身保持 S4，绝不得被改写为 S5
+        self.assertEqual(plan_s4.signal_level, "S4")
+        self.assertEqual(dir_s5.trade_plan.signal_level, "S4")
+
+        # 校验进入可执行视图
+        exec_dirs = self.center.get_executable_directives()
+        self.assertIn(dir_s5, exec_dirs)
+
+    def test_40_rr_below_threshold_demoted_to_observe_and_blocked_from_execution(self):
+        """RR < 2.5 门禁拦截：降为 OBSERVE，不得进入可执行视图，自动撮合不成交"""
+        from unittest.mock import patch
+
+        plan_low_rr = IPOTradePlan(
+            plan_id="TP_LOW_RR",
+            code="688826",
+            name="低盈亏比",
+            strategy_tag=TAG_CHANNEL_SECONDARY_BUY,
+            signal_level="S4",
+            quality_grade="SS",
+            trigger_price=80.0,
+            buy_zone_min=79.0,
+            buy_zone_max=81.0,
+            higher_low_stop=77.5,
+            base_low_invalid=75.0,
+            target_1_channel_mid=82.0,  # risk=2.5, reward=2.0, RR=0.8 < 2.5 门槛
+            position_pct=25.0,
+            suggested_action="BUY_SCOUT",
+            created_time=datetime.datetime.fromtimestamp(self.now_ts).strftime("%Y-%m-%d %H:%M:%S")
+        )
+        sig = VWAPDetectorSignal(
+            code="688826",
+            name="低盈亏比",
+            price=80.0,
+            vwap=79.5,
+            signal_type="SECONDARY_BUY",
+            channel_stage=SecondaryBuyStage.SECONDARY_BUY,
+            quality_grade="SS",
+            signal_level="S4",
+            trade_plan=plan_low_rr
+        )
+
+        with patch.object(self.center.sentiment_engine, "get_market_sentiment", return_value=self.normal_context):
+            self.center.submit_stock_perception_report(sig)
+            orders = self.center.evaluate_fleet_and_generate_orders()
+
+        # 校验指令未能成为 S5，且降为 OBSERVE
+        dirs = [d for d in orders if d.code == "688826"]
+        self.assertEqual(len(dirs), 1)
+        d_obs = dirs[0]
+        self.assertEqual(d_obs.signal_level, "S4")
+        self.assertEqual(d_obs.signal_state, "OBSERVE")
+        self.assertEqual(d_obs.reject_code, "RR_BELOW_THRESHOLD")
+
+        # 校验绝不进入可执行视图
+        exec_dirs = self.center.get_executable_directives()
+        self.assertNotIn(d_obs, exec_dirs)
+
+        # 开启自动交易，验证自动撮合绝不成交
+        self.center.auto_follow_trading = True
+        self.center._auto_execute_if_enabled()
+        self.assertNotIn("688826", self.center._positions)
+
+    def test_41_price_above_buy_zone_rejected_from_actionable(self):
+        """现价超过 buy_zone_max (超买区)：坚决不进入可执行视图"""
+        from unittest.mock import patch
+
+        plan_over = IPOTradePlan(
+            plan_id="TP_OVER_ZONE",
+            code="688826",
+            name="超买标的",
+            strategy_tag=TAG_CHANNEL_SECONDARY_BUY,
+            signal_level="S4",
+            quality_grade="S",
+            trigger_price=80.0,
+            buy_zone_min=79.0,
+            buy_zone_max=81.0,
+            higher_low_stop=77.5,
+            target_1_channel_mid=88.0,
+        )
+        sig_over = VWAPDetectorSignal(
+            code="688826",
+            name="超买标的",
+            price=82.5,  # 82.5 > 81.0 超买区
+            vwap=80.0,
+            signal_type="SECONDARY_BUY",
+            channel_stage=SecondaryBuyStage.SECONDARY_BUY,
+            trade_plan=plan_over
+        )
+
+        with patch.object(self.center.sentiment_engine, "get_market_sentiment", return_value=self.normal_context):
+            self.center.submit_stock_perception_report(sig_over)
+            orders = self.center.evaluate_fleet_and_generate_orders()
+
+        exec_dirs = self.center.get_executable_directives()
+        self.assertEqual(len([d for d in exec_dirs if d.code == "688826"]), 0)
+
+    def test_42_ttl_expired_records_reject_code_and_expired_reason(self):
+        """TTL 超过 15 交易分钟：记录稳定 reject_code 与 expired_reason，降为 OBSERVE"""
+        from unittest.mock import patch
+
+        fixed_now = datetime.datetime(2026, 9, 22, 10, 0, 0)
+        fixed_now_ts = fixed_now.timestamp()
+        plan_expired = IPOTradePlan(
+            plan_id="TP_TTL_EXP",
+            code="688826",
+            name="TTL超期标的",
+            strategy_tag=TAG_CHANNEL_SECONDARY_BUY,
+            signal_level="S4",
+            quality_grade="SS",
+            trigger_price=80.0,
+            buy_zone_min=79.0,
+            buy_zone_max=81.0,
+            higher_low_stop=77.5,
+            base_low_invalid=75.0,
+            target_1_channel_mid=88.0,
+            created_time="2026-09-22 09:40:00",
+            extra_info={}  # runtime expiry state must not mutate the S4 TradePlan
+        )
+        sig = VWAPDetectorSignal(
+            code="688826",
+            name="TTL超期标的",
+            price=80.0,
+            vwap=79.5,
+            signal_type="SECONDARY_BUY",
+            channel_stage=SecondaryBuyStage.SECONDARY_BUY,
+            trade_plan=plan_expired
+        )
+
+        with patch("ats.strategy.ipo_trading_center.time.time", return_value=fixed_now_ts), \
+             patch.object(self.center.sentiment_engine, "get_market_sentiment", return_value=self.normal_context):
+            self.center.submit_stock_perception_report(sig)
+            orders = self.center.evaluate_fleet_and_generate_orders()
+
+        d_exp = next(d for d in orders if d.code == "688826")
+        self.assertEqual(d_exp.signal_level, "S4")
+        self.assertEqual(d_exp.signal_state, "OBSERVE")
+        self.assertEqual(d_exp.reject_code, "TTL_TRADING_15M")
+        self.assertTrue(len(getattr(d_exp, "expired_reason", "")) > 0)
+        self.assertEqual(plan_expired.extra_info, {})
+
+        # 绝不进入可执行视图
+        exec_dirs = self.center.get_executable_directives()
+        self.assertNotIn(d_exp, exec_dirs)
+
+    def test_43_quality_grade_ineligible_blocked(self):
+        """质量评级非 A/S/SS (如 B/C/REJECT)：坚决阻断升级 S5"""
+        from unittest.mock import patch
+
+        plan_bad_q = IPOTradePlan(
+            plan_id="TP_BAD_Q",
+            code="688826",
+            name="劣质形态",
+            strategy_tag=TAG_CHANNEL_SECONDARY_BUY,
+            signal_level="S4",
+            quality_grade="B",  # 不及格
+            trigger_price=80.0,
+            buy_zone_min=79.0,
+            buy_zone_max=81.0,
+            higher_low_stop=77.5,
+            base_low_invalid=75.0,
+            target_1_channel_mid=88.0,
+        )
+        sig = VWAPDetectorSignal(
+            code="688826",
+            name="劣质形态",
+            price=80.0,
+            vwap=79.5,
+            signal_type="SECONDARY_BUY",
+            channel_stage=SecondaryBuyStage.SECONDARY_BUY,
+            trade_plan=plan_bad_q
+        )
+
+        with patch.object(self.center.sentiment_engine, "get_market_sentiment", return_value=self.normal_context):
+            self.center.submit_stock_perception_report(sig)
+            orders = self.center.evaluate_fleet_and_generate_orders()
+
+        d = next(d for d in orders if d.code == "688826")
+        self.assertEqual(d.signal_level, "S4")
+        self.assertEqual(d.signal_state, "OBSERVE")
+        self.assertEqual(d.reject_code, "INVALID_QUALITY_GRADE")
+        self.assertNotIn(d, self.center.get_executable_directives())
+
+    def test_44_structure_invalid_blocked(self):
+        """Higher-Low 结构失效 (破位或次低未抬高)：无法进入 S5 可执行视图"""
+        from unittest.mock import patch
+
+        # Case A: 现价跌破 higher_low_stop (破位)
+        plan_broken = IPOTradePlan(
+            plan_id="TP_BROKEN",
+            code="688826",
+            name="破位标的",
+            strategy_tag=TAG_CHANNEL_SECONDARY_BUY,
+            signal_level="S4",
+            quality_grade="S",
+            trigger_price=80.0,
+            buy_zone_min=75.0,
+            buy_zone_max=81.0,
+            higher_low_stop=77.5,
+            base_low_invalid=75.0,
+            target_1_channel_mid=88.0,
+        )
+        sig = VWAPDetectorSignal(
+            code="688826",
+            name="破位标的",
+            price=76.0,  # 76.0 < 77.5 破位
+            vwap=78.0,
+            signal_type="SECONDARY_BUY",
+            channel_stage=SecondaryBuyStage.SECONDARY_BUY,
+            trade_plan=plan_broken
+        )
+
+        with patch.object(self.center.sentiment_engine, "get_market_sentiment", return_value=self.normal_context):
+            self.center.submit_stock_perception_report(sig)
+            orders = self.center.evaluate_fleet_and_generate_orders()
+
+        d = next(d for d in orders if d.code == "688826")
+        self.assertEqual(d.signal_level, "S4")
+        self.assertEqual(d.signal_state, "OBSERVE")
+        self.assertEqual(d.reject_code, "STRUCTURAL_INVALID")
+        self.assertNotIn(d, self.center.get_executable_directives())
+
+    def test_45_legacy_buy_paths_produce_observe_candidates_and_not_auto_executed(self):
+        """旧 BUY 路径 (IPO_FIRST_BUY/BASE_BREAKOUT/SWING_PREORDER) 产生监控候选，不得绕过 S5 门禁自动成交"""
+        from unittest.mock import patch
+
+        sig_ipo = VWAPDetectorSignal(
+            code="301666", name="首发标的", price=35.0, vwap=34.8,
+            is_ipo_first_day=True, signal_type="IPO_FIRST_BUY",
+            launch_time_str="09:32", launch_slope_deg=50.0, horse_race_rank=1
+        )
+        sig_base = VWAPDetectorSignal(
+            code="688001", name="突破标的", price=20.0, vwap=19.5,
+            signal_type="BASE_BREAKOUT", base_support_level=19.0,
+            stop_loss_price=18.8, horse_race_rank=2
+        )
+
+        with patch.object(self.center.sentiment_engine, "get_market_sentiment", return_value=self.normal_context):
+            self.center.submit_batch_reports([sig_ipo, sig_base])
+            orders = self.center.evaluate_fleet_and_generate_orders()
+
+        # 旧路径产生候选指令，但若未满足 S5 门禁，均保持 S4/OBSERVE 状态
+        for o in orders:
+            if o.code in ("301666", "688001") and o.action in ("BUY", "BUY_SCOUT", "BUY_CONFIRM"):
+                if o.signal_level != "S5":
+                    self.assertEqual(o.signal_state, "OBSERVE")
+
+        # 开启自动撮合：旧式非 S5 BUY 绝不成交
+        self.center.auto_follow_trading = True
+        self.center._auto_execute_if_enabled()
+        self.assertNotIn("301666", self.center._positions)
+        self.assertNotIn("688001", self.center._positions)
+
+    def test_46_exit_directives_remain_actionable_and_auto_executed(self):
+        """EXIT/SELL/REDUCE 等防守指令保持可见和可执行，不受非 S5 买入收敛影响"""
+        # 建立历史持仓
+        self.center._positions["688826"] = IPOTradingPosition(
+            code="688826", name="测试持仓", shares=1000, available_shares=1000,
+            cost_price=80.0, current_price=75.0, entry_date="2026-09-19",
+            status="HOLDING"
+        )
+        exit_dir = IPOOrderDirective(
+            action="EXIT_ALL",
+            code="688826",
+            name="测试持仓",
+            price=75.0,
+            shares=1000,
+            urgency="CRITICAL",
+            reason="硬止损出局"
+        )
+        self.center._pending_directives = [exit_dir]
+
+        # 校验可执行视图完整包含 EXIT_ALL
+        exec_dirs = self.center.get_executable_directives()
+        self.assertEqual(len(exec_dirs), 1)
+        self.assertEqual(exec_dirs[0].action, "EXIT_ALL")
+        self.assertEqual(exec_dirs[0].signal_state, "EXIT")
+
+        # 开启自动撮合，EXIT_ALL 正常执行成交
+        self.center.auto_follow_trading = True
+        self.center._auto_execute_if_enabled()
+        self.assertNotIn("688826", self.center._positions)
+        self.assertTrue(any(p.code == "688826" for p in self.center._closed_positions))
+
+    def test_47_conversion_report_metrics(self):
+        """复盘报告统计 S4->S5 转化率与门禁拦截原因明细"""
+        report = self.center.get_s4_to_s5_conversion_report()
+        self.assertIn("date", report)
+        self.assertIn("total_s4_candidates", report)
+        self.assertIn("converted_s5_directives", report)
+        self.assertIn("conversion_rate_pct", report)
+        self.assertIn("rejection_breakdown", report)
+
+        # 校验 fleet_summary 包含了 conversion_report
+        summary = self.center.get_fleet_summary()
+        self.assertIn("s4_to_s5_conversion_report", summary)
 
 
 if __name__ == "__main__":

@@ -43,7 +43,9 @@ import sys
 import time
 import math
 import logging
-from typing import Dict, List, Optional, Any, Tuple
+import json
+import datetime
+from typing import Dict, List, Optional, Any, Tuple, Union
 from dataclasses import dataclass, field
 import pandas as pd
 import numpy as np
@@ -57,6 +59,172 @@ from ats.strategy.channel_secondary_buy_strategy import (
 from sys_utils import resolve_stock_name
 
 logger = logging.getLogger("IPOVWAPDetector")
+
+
+def compute_intraday_volume_attenuation_factor(explicit_time: Any = None) -> float:
+    """
+    根据显式时点计算早盘成交量信号衰减归一化因子 (纯函数)。
+
+    目标公式：
+    attenuation_factor = Clamp(elapsed_minutes / 30.0, 0.20, 1.0)
+
+    规则：
+    - 09:30 前按 09:30 算 (因子 0.20)
+    - 09:30~10:00 线性衰减：09:30、09:31、09:35 为 0.20，09:45 为 0.50，09:59:59 逼近 1.0
+    - 10:00 以后恒为 1.0，下午 13:00 绝不能重新开始衰减
+    - 不预测全天成交额，不允许任何接近 0 的分母
+    """
+    try:
+        h, m, s = None, None, 0.0
+        if explicit_time is None:
+            now = datetime.datetime.now()
+            h, m, s = now.hour, now.minute, float(now.second) + now.microsecond / 1e6
+        elif isinstance(explicit_time, datetime.datetime):
+            h, m, s = explicit_time.hour, explicit_time.minute, float(explicit_time.second) + explicit_time.microsecond / 1e6
+        elif isinstance(explicit_time, datetime.time):
+            h, m, s = explicit_time.hour, explicit_time.minute, float(explicit_time.second) + explicit_time.microsecond / 1e6
+        elif isinstance(explicit_time, (int, float)):
+            if explicit_time > 86400:
+                dt = datetime.datetime.fromtimestamp(explicit_time)
+                h, m, s = dt.hour, dt.minute, float(dt.second)
+            else:
+                total_s = float(explicit_time)
+                h = int(total_s // 3600)
+                m = int((total_s % 3600) // 60)
+                s = total_s % 60
+        elif isinstance(explicit_time, str):
+            clean_t = explicit_time.strip()
+            if " " in clean_t:
+                clean_t = clean_t.split()[-1]
+            if "T" in clean_t:
+                clean_t = clean_t.split("T")[-1]
+            if ":" in clean_t:
+                parts = clean_t.split(":")
+                h = int(parts[0])
+                m = int(parts[1])
+                s = float(parts[2]) if len(parts) > 2 else 0.0
+            elif clean_t.isdigit():
+                if len(clean_t) == 4:
+                    h = int(clean_t[:2])
+                    m = int(clean_t[2:4])
+                    s = 0.0
+                elif len(clean_t) >= 6:
+                    h = int(clean_t[:2])
+                    m = int(clean_t[2:4])
+                    s = float(clean_t[4:6])
+
+        if h is None or m is None:
+            return 1.0
+
+        # 10:00 以后恒为 1.0 (含 10:00, 11:30, 13:00 等)，下午 13:00 绝不重新衰减
+        if h > 10 or (h == 10 and (m > 0 or s > 0)) or (h == 10 and m == 0 and s == 0):
+            return 1.0
+
+        # 早盘 09:30 之前
+        if h < 9 or (h == 9 and m < 30):
+            return 0.20
+
+        # 早盘 09:30 ~ 10:00 之间
+        # elapsed_minutes 从 09:30:00 起算
+        elapsed_minutes = (h - 9) * 60.0 + (m - 30.0) + (s / 60.0)
+        factor = elapsed_minutes / 30.0
+        if factor < 0.20:
+            return 0.20
+        elif factor > 1.0:
+            return 1.0
+        return factor
+    except Exception as exc:
+        logger.warning(f"计算成交量归一化衰减因子异常，采用安全值 1.0: {exc}")
+        return 1.0
+
+
+# 纯函数别名
+get_intraday_volume_attenuation_factor = compute_intraday_volume_attenuation_factor
+
+
+def parse_feature_flag_value(val: Any) -> bool:
+    """
+    解析 Feature Flag 语义值：
+    - bool: 按原值解析
+    - str: 仅接受明确 true/false 语义 (true/1/yes -> True, false/0/no -> False)；
+           其他任意字符串必须安全回退 True，并记录 warning
+    - 数字: 仅允许 0/1 作为明确布尔语义 (1/1.0 -> True, 0/0.0 -> False)；
+           其他数字必须安全回退 True，并记录 warning
+    - 配置缺失、类型异常、None 等均保持 True
+    """
+    if val is None:
+        return True
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, str):
+        s = val.strip().lower()
+        if s in ("true", "1", "yes"):
+            return True
+        if s in ("false", "0", "no"):
+            return False
+        logger.warning(
+            f"enable_intraday_volume_normalization 收到非法字符串配置 '{val}'，安全回退默认值 True"
+        )
+        return True
+    if isinstance(val, (int, float)):
+        if val == 1:
+            return True
+        if val == 0:
+            return False
+        logger.warning(
+            f"enable_intraday_volume_normalization 收到非法数字配置 {val}，安全回退默认值 True"
+        )
+        return True
+    logger.warning(
+        f"enable_intraday_volume_normalization 收到异常类型配置 {type(val).__name__}: {val}，安全回退默认值 True"
+    )
+    return True
+
+
+def normalize_intraday_volume(
+    raw_volume_signal: float,
+    explicit_time: Any = None,
+    enabled: Any = True,
+) -> float:
+    """
+    根据目标公式折减归一化成交量信号：
+    attenuation_factor = Clamp(elapsed_minutes / 30.0, 0.20, 1.0)
+    normalized_volume = raw_volume_signal * attenuation_factor (当 enabled 为 True 时)
+    当 enabled 为 False 时保持原始值。
+    """
+    is_enabled = parse_feature_flag_value(enabled) if not isinstance(enabled, bool) else enabled
+    if not is_enabled:
+        return float(raw_volume_signal)
+    factor = compute_intraday_volume_attenuation_factor(explicit_time)
+    return float(raw_volume_signal) * factor
+
+
+# 纯函数别名
+normalize_volume_signal = normalize_intraday_volume
+
+
+def load_deployment_config() -> dict:
+    """读取部署配置，解析失败时安全回退为空字典"""
+    candidates = []
+    try:
+        from sys_utils import get_app_root
+        candidates.append(os.path.join(get_app_root(), "config", "subnew_real_market_deployment.json"))
+    except Exception:
+        pass
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    candidates.append(os.path.join(root, "config", "subnew_real_market_deployment.json"))
+    candidates.append(os.path.join(os.getcwd(), "config", "subnew_real_market_deployment.json"))
+
+    for path in candidates:
+        if os.path.exists(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    cfg = json.load(f)
+                    if isinstance(cfg, dict):
+                        return cfg
+            except Exception as exc:
+                logger.warning(f"解析部署配置文件 {path} 异常: {exc}")
+    return {}
 
 
 @dataclass
@@ -324,7 +492,7 @@ class IPOVWAPDetectorEngine:
             cls._instance = cls()
         return cls._instance
 
-    def __init__(self):
+    def __init__(self, enable_intraday_volume_normalization: Optional[bool] = None):
         self.fetcher = TDXRealtimeFetcher.get_instance()
         # 短期内存评估缓存 (避免高频轮询重复计算相同周期的 K 线)
         self._eval_cache: Dict[str, Tuple[VWAPDetectorSignal, float]] = {}
@@ -332,6 +500,48 @@ class IPOVWAPDetectorEngine:
         # 盘中历史前 9 天分时长效缓存 (标的代码 -> (日期YYYY-MM-DD, 历史DataFrame))
         # 彻底攻克“现在还是慢”：首次拉取 10 天分时并缓存前 9 天；高频轮询仅拉取当天 1 天(20ms)，内存拼接极速重算 VWAP
         self._history_multi_day_cache: Dict[str, Tuple[str, pd.DataFrame]] = {}
+
+        # Feature Flag: enable_intraday_volume_normalization
+        # 默认 True，从配置文件在进程初始化时读取；不实现也不宣称热重载。
+        # 配置解析失败时采用安全默认 True，不允许异常击穿检测主循环。
+        if enable_intraday_volume_normalization is not None:
+            self.enable_intraday_volume_normalization = parse_feature_flag_value(enable_intraday_volume_normalization)
+        else:
+            self.enable_intraday_volume_normalization = self._resolve_normalization_flag()
+
+    @classmethod
+    def parse_feature_flag_value(cls, val: Any) -> bool:
+        """解析 Feature Flag 语义值，语义解析失败时安全默认 True"""
+        return parse_feature_flag_value(val)
+
+    _parse_normalization_flag_value = parse_feature_flag_value
+
+    @classmethod
+    def _resolve_normalization_flag(cls) -> bool:
+        """从部署配置文件读取 Feature Flag，失败时安全默认 True"""
+        try:
+            cfg = load_deployment_config()
+            if isinstance(cfg, dict) and "enable_intraday_volume_normalization" in cfg:
+                val = cfg["enable_intraday_volume_normalization"]
+                return parse_feature_flag_value(val)
+        except Exception as exc:
+            logger.warning(f"读取 enable_intraday_volume_normalization 异常，安全默认 True: {exc}")
+        return True
+
+    @staticmethod
+    def compute_intraday_volume_attenuation_factor(explicit_time: Any = None) -> float:
+        return compute_intraday_volume_attenuation_factor(explicit_time)
+
+    @staticmethod
+    def get_intraday_volume_attenuation_factor(explicit_time: Any = None) -> float:
+        return compute_intraday_volume_attenuation_factor(explicit_time)
+
+    @staticmethod
+    def normalize_intraday_volume(raw_volume_signal: float, explicit_time: Any = None, enabled: Any = True) -> float:
+        return normalize_intraday_volume(raw_volume_signal, explicit_time, enabled)
+
+    def normalize_volume(self, raw_volume_signal: float, explicit_time: Any = None) -> float:
+        return normalize_intraday_volume(raw_volume_signal, explicit_time, self.enable_intraday_volume_normalization)
 
     def _fetch_multi_day_bars_fast(self, clean_code: str, days: int = 10) -> Tuple[Optional[pd.DataFrame], float]:
         """
@@ -365,7 +575,8 @@ class IPOVWAPDetectorEngine:
 
     def analyze_stock(self, code: str, force_refresh: bool = False,
                       day_df: Optional[pd.DataFrame] = None,
-                      df_60m: Optional[pd.DataFrame] = None) -> VWAPDetectorSignal:
+                      df_60m: Optional[pd.DataFrame] = None,
+                      eval_time: Optional[Any] = None) -> VWAPDetectorSignal:
         """
         全面分析一只标的的 10日 VWAP 结构、走平蓄势天数、回踩不碰特征及大趋势 K 线支撑
         """
@@ -373,13 +584,25 @@ class IPOVWAPDetectorEngine:
         clean_code = "".join(c for c in str(code) if c.isdigit()).zfill(6)
         now_ts = time.time()
         
-        if not force_refresh and clean_code in self._eval_cache and day_df is None and df_60m is None:
+        if not force_refresh and clean_code in self._eval_cache and day_df is None and df_60m is None and eval_time is None:
             cached_sig, cache_time = self._eval_cache[clean_code]
             if now_ts - cache_time < self._cache_ttl:
                 return cached_sig
 
         name = resolve_fast_ipo_name(clean_code)
         sig = VWAPDetectorSignal(code=clean_code, name=name, update_time=time.strftime("%H:%M:%S"))
+
+        # 初始化量能归一化审计可观测字段
+        cur_audit_factor = compute_intraday_volume_attenuation_factor(eval_time) if self.enable_intraday_volume_normalization else 1.0
+        sig.extra_data["volume_attenuation_factor"] = cur_audit_factor
+        sig.extra_data["attenuation_factor"] = cur_audit_factor
+        sig.extra_data["raw_volume_signal"] = 0.0
+        sig.extra_data["raw_volume"] = 0.0
+        sig.extra_data["raw_volume_surge_ratio"] = 0.0
+        sig.extra_data["normalized_volume_signal"] = 0.0
+        sig.extra_data["normalized_volume"] = 0.0
+        sig.extra_data["normalized_volume_surge_ratio"] = 0.0
+        sig.extra_data["enable_intraday_volume_normalization"] = self.enable_intraday_volume_normalization
 
         bars_ms = 0.0
         strat_ms = 0.0
@@ -390,7 +613,7 @@ class IPOVWAPDetectorEngine:
             t_strat_start = time.perf_counter()
             if df_multi is not None and not df_multi.empty:
                 self._evaluate_vwap_structure(df_multi, sig, day_df=day_df)
-                self._evaluate_bottom_base_structure(df_multi, sig, day_df=day_df)
+                self._evaluate_bottom_base_structure(df_multi, sig, day_df=day_df, eval_time=eval_time)
             else:
                 sig.signal_desc = "分时数据拉取中..."
 
@@ -643,7 +866,9 @@ class IPOVWAPDetectorEngine:
         # 设置建议止损价位: 严格锚定在 VWAP 处 (买入打止损说明买点错了，止损极窄，买错就出局)
         sig.stop_loss_price = round(vw * 0.995, 2)
 
-    def _evaluate_bottom_base_structure(self, df: pd.DataFrame, sig: VWAPDetectorSignal, day_df: Optional[pd.DataFrame] = None):
+    def _evaluate_bottom_base_structure(self, df: pd.DataFrame, sig: VWAPDetectorSignal,
+                                        day_df: Optional[pd.DataFrame] = None,
+                                        eval_time: Optional[Any] = None):
         """
         【操盘手图解核心落地：寻找底部结构与动能抓手】
         1. 适用场景：经历较大幅度下杀/远离 VWAP (负偏离或微幅波动) 的新股次新标的；
@@ -743,7 +968,40 @@ class IPOVWAPDetectorEngine:
             if len(rec_vols) >= 6:
                 base_avg_vol = float(np.mean(rec_vols[:-3])) if len(rec_vols) > 3 else float(np.mean(rec_vols))
                 latest_vol = float(np.mean(rec_vols[-3:]))
-                vol_surge = (latest_vol >= base_avg_vol * 1.25) or (latest_vol > 0 and base_avg_vol == 0)
+
+                # 原始放量倍数与量能信号 (诊断可审计)
+                raw_vol_ratio = (latest_vol / base_avg_vol) if base_avg_vol > 0 else (latest_vol if latest_vol > 0 else 0.0)
+                raw_volume_signal = raw_vol_ratio
+
+                # 确定时点：优先使用显式 eval_time，其次分时最后一根 Bar 的 time 字段，兜底当前时钟
+                bar_time = eval_time
+                if not bar_time and "time" in sub_df.columns and len(sub_df) > 0:
+                    raw_bar_t = str(sub_df.iloc[-1].get("time", "")).strip()
+                    if raw_bar_t:
+                        bar_time = raw_bar_t
+                if not bar_time:
+                    bar_time = time.strftime("%H:%M:%S")
+
+                # 计算衰减因子 (仅在 Feature Flag 开启时衰减，10:00 以后恒为 1.0)
+                attenuation_factor = compute_intraday_volume_attenuation_factor(bar_time) if self.enable_intraday_volume_normalization else 1.0
+
+                # 归一化量能：同一数据不得重复折减
+                norm_volume_signal = raw_volume_signal * attenuation_factor
+                norm_latest_vol = latest_vol * attenuation_factor
+
+                # 仅压制 BUY-like 早盘量能确认，判定入口使用 normalized 值；原始量能保留用于诊断
+                vol_surge = (norm_latest_vol >= base_avg_vol * 1.25) or (norm_latest_vol > 0 and base_avg_vol == 0)
+
+                # 在 signal.extra_data 中记录 raw、normalized、attenuation factor 或等价可审计字段
+                sig.extra_data["volume_attenuation_factor"] = attenuation_factor
+                sig.extra_data["attenuation_factor"] = attenuation_factor
+                sig.extra_data["raw_volume_signal"] = raw_volume_signal
+                sig.extra_data["raw_volume"] = latest_vol
+                sig.extra_data["raw_volume_surge_ratio"] = raw_vol_ratio
+                sig.extra_data["normalized_volume_signal"] = norm_volume_signal
+                sig.extra_data["normalized_volume"] = norm_latest_vol
+                sig.extra_data["normalized_volume_surge_ratio"] = norm_volume_signal
+                sig.extra_data["enable_intraday_volume_normalization"] = self.enable_intraday_volume_normalization
             else:
                 vol_surge = False
 
@@ -883,7 +1141,7 @@ class IPOVWAPDetectorEngine:
                         sig.trend_slope_deg = round(math.degrees(math.atan(slope / 5.0)), 1)
 
                 try:
-                    sig.extra_data = last_k.to_dict()
+                    sig.extra_data.update(last_k.to_dict())
                 except Exception:
                     pass
 

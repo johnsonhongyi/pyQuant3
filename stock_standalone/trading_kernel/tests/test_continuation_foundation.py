@@ -1,6 +1,14 @@
 from pathlib import Path
 
-from trading_kernel.build_fingerprint import write_build_fingerprint
+import pytest
+
+from trading_kernel.build_fingerprint import (
+    DEFAULT_OUTPUT_PATH,
+    DirtyWorkingTreeError,
+    build_fingerprint,
+    main,
+    write_build_fingerprint,
+)
 from trading_kernel.core.risk import ApprovedOrder
 from trading_kernel.engine.signal_canonicalizer import canonicalize_decision_queue_item
 from trading_kernel.execution.paper_adapter import AccountSnapshot, PaperExecutionAdapter
@@ -56,4 +64,66 @@ def test_build_fingerprint_contains_version_and_git_fields(tmp_path):
     assert payload["kernel_version"]
     assert "git_commit" in payload
     assert "git_dirty" in payload
+    assert "release_ready" in payload
     assert payload["generated_at_utc"]
+
+
+def test_build_fingerprint_clean_tree_is_release_ready(tmp_path):
+    output = tmp_path / "clean_fingerprint.json"
+    payload = write_build_fingerprint(
+        output,
+        repo_root=Path(__file__).resolve().parents[2],
+        git_commit="abcdef1234567890",
+        git_dirty=False,
+        require_clean=True,
+    )
+    assert output.exists()
+    assert payload["release_ready"] is True
+    assert payload["git_dirty"] is False
+    assert payload["git_commit"] == "abcdef1234567890"
+
+
+def test_build_fingerprint_dirty_tree_blocks_release_mode(tmp_path):
+    output = tmp_path / "dirty_fingerprint.json"
+    with pytest.raises(DirtyWorkingTreeError):
+        write_build_fingerprint(
+            output,
+            repo_root=Path(__file__).resolve().parents[2],
+            git_commit="abcdef1234567890",
+            git_dirty=True,
+            require_clean=True,
+        )
+    assert not output.exists()
+
+
+def test_build_fingerprint_default_output_path_in_agent_hub(tmp_path):
+    assert DEFAULT_OUTPUT_PATH == Path(".agent_hub") / "artifacts" / "BUILD_FINGERPRINT.json"
+    payload = write_build_fingerprint(
+        repo_root=tmp_path,
+        git_commit="fedcba0987654321",
+        git_dirty=False,
+    )
+    expected_file = tmp_path / ".agent_hub" / "artifacts" / "BUILD_FINGERPRINT.json"
+    assert expected_file.exists()
+    assert payload["release_ready"] is True
+
+
+def test_build_fingerprint_cli_dirty_release_returns_nonzero(capsys):
+    ret = main(["--release", "--git-dirty", "true", "--git-commit", "deadbeef"])
+    assert ret == 1
+    captured = capsys.readouterr()
+    assert "Cannot generate release build fingerprint" in captured.err
+
+
+def test_build_fingerprint_cli_clean_release_succeeds(tmp_path, capsys):
+    target = tmp_path / "cli_clean.json"
+    ret = main([
+        "--output", str(target),
+        "--release",
+        "--git-dirty", "false",
+        "--git-commit", "c0ffee123456",
+    ])
+    assert ret == 0
+    assert target.exists()
+    captured = capsys.readouterr()
+    assert "c0ffee123456" in captured.out

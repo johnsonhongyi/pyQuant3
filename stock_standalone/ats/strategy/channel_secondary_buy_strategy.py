@@ -88,6 +88,26 @@ class IPOTradePlan:
         if not self.plan_id and self.code:
             now_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
             self.plan_id = f"TP_{self.code}_{now_str}"
+        if self.strategy_tag == TAG_CHANNEL_SECONDARY_BUY:
+            self.signal_level = "S4"
+        if self.trigger_price > 0 and self.buy_zone_max > 0:
+            limit = self.trigger_price * 1.015
+            if self.buy_zone_max > limit:
+                self.buy_zone_max = round(limit, 3)
+
+    @property
+    def structural_stop(self) -> float:
+        """只读结构防守锚点：映射至 higher_low_stop"""
+        return float(self.higher_low_stop)
+
+    @property
+    def structural_target(self) -> float:
+        """只读结构目标锚点：映射至 target_1_channel_mid"""
+        return float(self.target_1_channel_mid)
+
+    def calculate_rr_now(self, price: Any) -> Optional[float]:
+        """计算给定实时价格下的动态盈亏比 RR"""
+        return calculate_rr_now(price, self)
 
     @property
     def buy_zone_lower(self) -> float:
@@ -114,6 +134,84 @@ class IPOTradePlan:
 
     def get(self, item: str, default: Any = None) -> Any:
         return getattr(self, item, default)
+
+
+def _extract_numeric(val: Any) -> Optional[float]:
+    """安全解析数值，拒绝 bool、None、非数字字符串、NaN、Inf"""
+    if val is None or isinstance(val, bool):
+        return None
+    if isinstance(val, (int, float, np.number)):
+        v = float(val)
+        if math.isnan(v) or math.isinf(v):
+            return None
+        return v
+    return None
+
+
+def calculate_rr_now(price: Any, plan: Any) -> Optional[float]:
+    """
+    计算给定实时价格下的动态盈亏比 (Reward-to-Risk Ratio) 小型纯函数。
+    公式: RR = (structural_target - price) / (price - structural_stop)
+
+    约束与边界说明：
+    - 不修改 stop/target，不为了达标移动锚点。
+    - price <= stop: 明确不可执行，返回 None。
+    - target <= price: 明确不可执行，返回 None。
+    - target <= stop: 明确不可执行，返回 None。
+    - 非数值输入 (如 None, 字符串, 布尔值, NaN, Inf, 缺失锚点等): 返回 None。
+    """
+    try:
+        # 支持参数位置逆序容错: calculate_rr_now(plan, price)
+        if isinstance(price, (IPOTradePlan, dict)) and not isinstance(plan, (IPOTradePlan, dict)):
+            price, plan = plan, price
+
+        p_num = _extract_numeric(price)
+        if p_num is None or plan is None:
+            return None
+
+        # 提取 structural_stop 锚点 (优先 structural_stop，回退 higher_low_stop)
+        stop_raw = None
+        if hasattr(plan, "structural_stop"):
+            stop_raw = getattr(plan, "structural_stop")
+        elif hasattr(plan, "higher_low_stop"):
+            stop_raw = getattr(plan, "higher_low_stop")
+        elif isinstance(plan, dict):
+            stop_raw = plan.get("structural_stop", plan.get("higher_low_stop"))
+
+        # 提取 structural_target 锚点 (优先 structural_target，回退 target_1_channel_mid)
+        target_raw = None
+        if hasattr(plan, "structural_target"):
+            target_raw = getattr(plan, "structural_target")
+        elif hasattr(plan, "target_1_channel_mid"):
+            target_raw = getattr(plan, "target_1_channel_mid")
+        elif isinstance(plan, dict):
+            target_raw = plan.get("structural_target", plan.get("target_1_channel_mid"))
+
+        stop_num = _extract_numeric(stop_raw)
+        target_num = _extract_numeric(target_raw)
+
+        if stop_num is None or target_num is None:
+            return None
+
+        # 边界校验
+        # 1. 结构目标必须严格高于结构止损 (target > stop)
+        if target_num <= stop_num:
+            return None
+        # 2. 现价必须严格高于结构止损 (price > stop)
+        if p_num <= stop_num:
+            return None
+        # 3. 现价必须严格低于结构目标 (price < target)
+        if target_num <= p_num:
+            return None
+
+        risk = p_num - stop_num
+        reward = target_num - p_num
+        if risk <= 0:
+            return None
+
+        return float(reward / risk)
+    except Exception:
+        return None
 
 
 # ==============================================================================
@@ -399,6 +497,9 @@ def _evaluate_channel_secondary_buy_impl(
         def_pos_pct = float(getattr(tp_cfg, "default_position_pct", 30.0)) if tp_cfg else 30.0
         def_exp_at = str(getattr(tp_cfg, "default_expire_at", "14:45:00")) if tp_cfg else "14:45:00"
 
+        trigger_price_val = round(curr_price, 3)
+        buy_max_val = round(curr_price * 1.015, 3)
+
         trade_plan = IPOTradePlan(
             plan_id=plan_id,
             code=code,
@@ -406,9 +507,9 @@ def _evaluate_channel_secondary_buy_impl(
             strategy_tag=TAG_CHANNEL_SECONDARY_BUY,
             signal_level="S4",
             quality_grade=quality_grade,
-            trigger_price=round(curr_price, 3),
+            trigger_price=trigger_price_val,
             buy_zone_min=round(higher_low * 1.005, 3),
-            buy_zone_max=round(curr_price * 1.015, 3),
+            buy_zone_max=buy_max_val,
             higher_low_stop=round(higher_low * hl_stop_ratio, 3),
             base_low_invalid=round(base_low * 0.99, 3),
             hard_stop_loss_pct=round(min(3.0, max(1.5, downside_risk_pct)), 2),
