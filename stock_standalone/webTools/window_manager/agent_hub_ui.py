@@ -106,6 +106,7 @@ class AgentHubDataEngine:
     """
 
     def __init__(self, project_root: Path | str | None = None):
+        prefer_explicit = project_root is not None
         if project_root is None:
             # 源码运行时从模块位置推导工程根目录；打包运行时 __file__ 位于
             # PyInstaller 的临时 _MEI 目录，不能作为用户工程目录，也可能在
@@ -116,13 +117,15 @@ class AgentHubDataEngine:
                 # webTools/window_manager -> stock_standalone
                 project_root = Path(__file__).parent.parent.parent
 
-        self.project_root = self._select_project_root(project_root)
+        self.project_root = self._select_project_root(project_root, prefer_explicit=prefer_explicit)
         self.hub_dir = self.project_root / ".agent_hub"
         self._fingerprints: Dict[str, Tuple[int, int]] = {}
         self._cached_snapshot: Optional[AgentHubSnapshot] = None
 
     @staticmethod
-    def _select_project_root(project_root: Path | str | None) -> Path:
+    def _select_project_root(
+        project_root: Path | str | None, *, prefer_explicit: bool = False
+    ) -> Path:
         """选择真正含有 Agent Hub 数据的根目录。
 
         打包版 EXE 可能放在 dist、webTools 或单独的 tools 目录，EXE 目录
@@ -131,13 +134,16 @@ class AgentHubDataEngine:
         """
         explicit = Path(project_root).absolute() if project_root else None
         candidates: List[Path] = []
+        # 调用方显式传入的 workspace 是强约束；global.ini 仅作为默认发现路径。
+        if prefer_explicit and explicit:
+            candidates.append(explicit)
         if cct is not None:
             configured = str(getattr(cct, "agent_hub_path", "") or "").strip()
             if configured:
                 candidates.append(Path(configured).expanduser().absolute())
         if os.environ.get("INSTOCK_APP_ROOT"):
             candidates.append(Path(os.environ["INSTOCK_APP_ROOT"]).absolute())
-        if explicit:
+        if explicit and not prefer_explicit:
             candidates.append(explicit)
         # 源码开发环境：即使从快捷方式/其他 CWD 启动，也能稳定回到
         # stock_standalone 根目录。agent_hub_path 为空时使用此 fallback。

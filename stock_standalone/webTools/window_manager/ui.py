@@ -3892,7 +3892,7 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
         except Exception as e:
             self.log(f"[SingleInstance] 管道数据解析异常: {e}")
 
-    def apply_acer_performance_async(self, profile: dict = None, custom_msg_prefix: str = ""):
+    def apply_acer_performance_async(self, profile: dict = None, custom_msg_prefix: str = "", force: bool = False):
         """在后台守护线程中异步应用 Acer 性能配置 (用于托盘右键极速响应与全流程详细打点)"""
         def _bg_worker():
             try:
@@ -3902,7 +3902,8 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
                     def _log_cb(msg):
                         self.log_signal.emit(f"[Acer Hardware] {msg}")
 
-                    ok, acer_msg = controller.apply_performance_profile(target_profile, log_cb=_log_cb)
+                    # force=True 时无条件程序化应用，跳过硬件状态一致拦截
+                    ok, acer_msg = controller.apply_performance_profile(target_profile, log_cb=_log_cb, force=force)
                     prefix = custom_msg_prefix or "应用 Acer 性能模式"
                     msg_str = f"[Acer Hardware] {prefix}: {acer_msg}"
                 else:
@@ -3918,6 +3919,7 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
         """初始化系统托盘图标及右键快捷控制菜单"""
         self.tray_icon = QtWidgets.QSystemTrayIcon(QApplication.instance())
         self.tray_icon.setIcon(self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_ComputerIcon))
+        self.tray_icon.setToolTip("ATS 交易窗口与多屏协同布局管理器")
         
         self.tray_menu = QtWidgets.QMenu(self)
         show_action = self.tray_menu.addAction("🖥️ 显示主界面")
@@ -3941,7 +3943,8 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
             if controller.is_supported():
                 self.tray_menu.addSeparator()
                 apply_preset_action = self.tray_menu.addAction("⚡ 应用当前 Acer 性能预设")
-                apply_preset_action.triggered.connect(lambda: self.apply_acer_performance_async(custom_msg_prefix="右键托盘极速应用"))
+                # 🛡️ 操盘手特权：右键托盘极速应用时不用判断状态一致性，无条件强制下发 (force=True)
+                apply_preset_action.triggered.connect(lambda: self.apply_acer_performance_async(custom_msg_prefix="右键托盘极速应用", force=True))
                 
                 acer_sub_menu = self.tray_menu.addMenu("🚀 Acer 性能极速切换")
                 
