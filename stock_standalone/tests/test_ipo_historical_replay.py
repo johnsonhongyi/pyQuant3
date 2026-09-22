@@ -38,7 +38,9 @@ def test_closed_trade_review_links_plan_and_execution() -> None:
         price=100.0, shares=1000, size_pct=100.0, trade_plan=plan,
         timestamp=now_ts,
     ))
+    # 模拟跨日结算后的原生 T+1 事实：隔夜仓在下一交易日转为可卖。
     center.get_position("TEST01").entry_date = "2026-09-19"
+    center.get_position("TEST01").available_shares = 1000
     center.record_order_execution(IPOOrderDirective(
         action="EXIT_ALL", code="TEST01", name="review sample",
         price=104.0, shares=1000, trade_plan=plan,

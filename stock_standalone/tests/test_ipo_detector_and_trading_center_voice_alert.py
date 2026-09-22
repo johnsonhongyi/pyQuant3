@@ -89,12 +89,21 @@ def test_full_rotation_swap_generation_and_t1_guarded_execution():
     center._last_market_context = snap
 
     # 1. 初始买入老股票 300001 (成本 50.0，满仓 20000 股，耗资 100 万)
+    # 执行入口只接受 S5 BUY；S4 必须保持观察/拒绝，不得绕过正式门禁。
+    d_buy_s4 = IPOOrderDirective(
+        action="BUY", code="300009", name="S4观察标的", price=10.0,
+        shares=100, size_pct=1.0, urgency="NORMAL", reason="S4安全门测试",
+        timestamp=now_ts, signal_level="S4"
+    )
+    assert center.execute_directive(d_buy_s4) is False
+    assert "300009" not in center._positions
+
     d_buy_old = IPOOrderDirective(
         action="BUY", code="300001", name="老标的", price=50.0,
         shares=20000, size_pct=100.0, urgency="NORMAL", reason="初始全仓买入",
-        timestamp=now_ts
+        timestamp=now_ts, signal_level="S5"
     )
-    center.execute_directive(d_buy_old)
+    assert center.execute_directive(d_buy_old) is True
     assert "300001" in center._positions
     assert center._positions["300001"].shares == 20000
     assert center.available_cash == 0.0
@@ -133,8 +142,10 @@ def test_full_rotation_swap_generation_and_t1_guarded_execution():
     assert center.available_cash == 0.0
     assert center.get_closed_positions() == []
 
-    # The identical tactical directive becomes executable on the next day.
+    # The identical tactical directive becomes executable only after next-day
+    # settlement exposes native sellable shares; entry_date alone is not authority.
     center._positions["300001"].entry_date = "2026-09-19"
+    center._positions["300001"].available_shares = center._positions["300001"].shares
     assert center.execute_directive(swap_directive) is True
 
     # 验证老持仓已结清平仓，新龙头成为唯一持仓

@@ -6233,11 +6233,13 @@ class ATSMainWindow(QMainWindow):
         # 2. 所有 TDX/OrderMon 输入统一经过 LedgerUpdateService。
         # 盘前/竞价阶段只写 Candidate seed，不污染正式 SignalLedger。
         entry = None
-        if hasattr(self, 'ledger_update_service'):
-            entry = self.ledger_update_service.update_tdx(sig_dict, row=df_row).entry
-        elif hasattr(self, 'signal_ledger'):
-            # 仅保留兼容旧实例；新主窗口不会走到该分支。
-            entry = self.signal_ledger.record_tdx_signal(sig_dict, row=df_row)
+        service = getattr(self, 'ledger_update_service', None)
+        if service is None and hasattr(self, 'signal_ledger'):
+            # 旧实例也必须补建统一入口，禁止绕过 CandidateCache/Session gating 直接写账本。
+            service = LedgerUpdateService(self.signal_ledger)
+            self.ledger_update_service = service
+        if service is not None:
+            entry = service.update_tdx(sig_dict, row=df_row).entry
 
         # 3. 将新捕获的通达信信号直接注册到 _last_batch_signal_codes 顶部
         if not hasattr(self, "_last_batch_signal_codes") or self._last_batch_signal_codes is None:

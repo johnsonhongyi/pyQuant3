@@ -107,6 +107,16 @@ class ReplayReleaseGate:
                 t1_violations.append("%s:SELLABLE_GT_TOTAL" % code)
             if today > total + 1e-9:
                 t1_violations.append("%s:TODAY_BUY_GT_TOTAL" % code)
+            if sellable + today > total + 1e-9:
+                t1_violations.append("%s:T1_FACTS_OVERALLOCATED" % code)
+            if "unresolved_qty" in raw:
+                try:
+                    unresolved = max(0.0, float(raw.get("unresolved_qty", 0.0) or 0.0))
+                except (TypeError, ValueError):
+                    t1_violations.append("%s:INVALID_UNRESOLVED_QTY" % code)
+                else:
+                    if sellable + today + unresolved > total + 1e-9:
+                        t1_violations.append("%s:T1_FACTS_OVERALLOCATED" % code)
 
         build_ok = True
         if expected_build:

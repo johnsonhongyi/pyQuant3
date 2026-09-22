@@ -29,7 +29,11 @@ def migrate_reconciliation_snapshot(payload: Any) -> Tuple[Optional[Dict[str, An
         return None, "INVALID_RECONCILIATION"
 
     data["snapshot_version"] = SNAPSHOT_VERSION
-    data.setdefault("migration", {})
+    migration = data.get("migration")
+    if migration is None:
+        data["migration"] = {}
+    elif not isinstance(migration, dict):
+        return None, "INVALID_MIGRATION"
     if version == "1.0":
         data["migration"].update({
             "migrated_from": "1.0",
@@ -48,14 +52,21 @@ def migrate_reconciliation_snapshot(payload: Any) -> Tuple[Optional[Dict[str, An
             raw.setdefault("t1_fact_status", "MIGRATED_V1_FAIL_CLOSED")
 
     for code, raw in data.get("positions", {}).items():
+        if not isinstance(raw, dict):
+            return None, "INVALID_POSITION:%s" % code
         try:
             total = max(0.0, float(raw.get("total_qty", 0.0) or 0.0))
             sellable = max(0.0, float(raw.get("sellable_qty", 0.0) or 0.0))
             today = max(0.0, float(raw.get("today_buy_qty", 0.0) or 0.0))
+            unresolved = max(0.0, float(raw.get("unresolved_qty", 0.0) or 0.0))
         except (TypeError, ValueError):
             return None, "INVALID_T1_FACTS:%s" % code
         if sellable > total + 1e-9 or today > total + 1e-9:
             return None, "T1_FACTS_EXCEED_TOTAL:%s" % code
+        if sellable + today > total + 1e-9:
+            return None, "T1_FACTS_OVERALLOCATED:%s" % code
+        if "unresolved_qty" in raw and sellable + today + unresolved > total + 1e-9:
+            return None, "T1_FACTS_OVERALLOCATED:%s" % code
         if not isinstance(raw.get("lots", []), list):
             return None, "INVALID_LOTS:%s" % code
 
