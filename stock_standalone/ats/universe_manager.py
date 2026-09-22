@@ -236,6 +236,52 @@ class UniverseManager:
         else:
             radar_entries, watch_entries, trade_entries = [], [], []
 
+        # 提取 WEAKENED / INVALIDATED 决策徽章与高位回撤原因
+        def _get_entry_badges_and_reason(entry):
+            badge = ""
+            badge_type = "NORMAL"
+            p_val = float(getattr(entry, 'latest_pct', 0.0) or 0.0)
+            peak_val = float(getattr(entry, 'peak_pct', p_val) or p_val)
+            drawdown_pct = max(0.0, peak_val - p_val)
+            detail_reasons = []
+
+            hist_reasons = []
+            if hasattr(entry, 'state_history') and entry.state_history:
+                for h in reversed(entry.state_history):
+                    act = str(h.get('action', ''))
+                    rsn = str(h.get('reason', ''))
+                    if 'INVALIDATED' in act or '破位' in rsn or '跌破' in rsn:
+                        hist_reasons.append(rsn)
+                    elif 'WEAKENED' in act or '走弱' in rsn or '回撤' in rsn:
+                        hist_reasons.append(rsn)
+
+            tier_val = getattr(entry, 'tier', '')
+            sig_tag = str(getattr(entry, 'signal_tag', '') or '')
+
+            # 1. 结构失效判定 (破位失效)
+            if tier_val == 'INACTIVE' or '双VWAP破位' in sig_tag or any('INVALIDATED' in str(h.get('action', '')) for h in getattr(entry, 'state_history', [])):
+                badge = "⛔ 破位失效"
+                badge_type = "INVALIDATED"
+                inv_desc = hist_reasons[0] if hist_reasons else ("双VWAP破位" if "双VWAP" in sig_tag else "破位失效")
+                detail_reasons.append(inv_desc)
+            # 2. 动能走弱与高位回撤判定 (高位走弱)
+            elif getattr(entry, 'weak_since_ts', 0.0) > 0 or '走弱' in sig_tag or drawdown_pct >= 3.0 or (getattr(entry, 'first_seen_pct', 0.0) > 0 and p_val < 0):
+                if drawdown_pct >= 3.0:
+                    badge = f"⚠️ 回撤-{drawdown_pct:.1f}%"
+                    detail_reasons.append(f"高位回撤-{drawdown_pct:.1f}% (峰值+{peak_val:.1f}%)")
+                else:
+                    badge = "⚠️ 动能走弱"
+                    if getattr(entry, 'first_seen_pct', 0.0) > 0 and p_val < 0:
+                        detail_reasons.append(f"首次正转负 ({entry.first_seen_pct:+.1f}%->{p_val:+.1f}%)")
+                    elif hist_reasons:
+                        detail_reasons.append(hist_reasons[0])
+                    else:
+                        detail_reasons.append("动能减速")
+                badge_type = "WEAKENED"
+
+            reason_str = " | ".join(detail_reasons) if detail_reasons else ""
+            return badge, badge_type, drawdown_pct, reason_str
+
         # 重建 radar_pool
         new_radar = {}
         for entry in radar_entries:
@@ -245,14 +291,23 @@ class UniverseManager:
             phase_label = PHASE_LABELS.get(entry.first_seen_phase, '⏳')
             first_time = datetime.datetime.fromtimestamp(entry.first_seen_ts).strftime('%H:%M')
             p_val, pct_val = _get_price_pct(entry.code, entry.latest_price, entry.latest_pct)
+            badge, b_type, dd_pct, dd_reason = _get_entry_badges_and_reason(entry)
+            strategy_str = f"{phase_label} [{first_time}]"
+            if badge:
+                strategy_str = f"{strategy_str} {badge}"
+            reason_disp = f"[{badge}] {dd_reason}" if (badge and dd_reason) else (dd_reason or f"优先级: {entry.priority_score:.0f} | 偏离: {entry.latest_deviation:+.1f}%")
             new_radar[entry.code] = {
                 'name': real_name,
                 'price': p_val,
                 'pct': pct_val,
                 'deviation': entry.latest_deviation,
-                'strategy': f'{phase_label} [{first_time}]',
-                'reason': f'优先级: {entry.priority_score:.0f} | 偏离: {entry.latest_deviation:+.1f}%',
+                'strategy': strategy_str,
+                'reason': reason_disp,
                 'timestamp': entry.first_seen_ts,
+                'lifecycle_badge': badge,
+                'lifecycle_type': b_type,
+                'drawdown_pct': dd_pct,
+                'drawdown_reason': dd_reason,
                 '_from_ledger': True,
             }
         self.radar_pool = new_radar
@@ -271,14 +326,23 @@ class UniverseManager:
                     promote_reason = hist.get('reason', '')
                     break
             p_val, pct_val = _get_price_pct(entry.code, entry.latest_price, entry.latest_pct)
+            badge, b_type, dd_pct, dd_reason = _get_entry_badges_and_reason(entry)
+            strategy_str = f"{phase_label} [{first_time}]"
+            if badge:
+                strategy_str = f"{strategy_str} {badge}"
+            reason_disp = f"[{badge}] {dd_reason}" if (badge and dd_reason) else (dd_reason or promote_reason or f"优先级: {entry.priority_score:.0f}")
             new_watch[entry.code] = {
                 'name': real_name,
                 'price': p_val,
                 'pct': pct_val,
                 'deviation': entry.latest_deviation,
-                'strategy': f'{phase_label} [{first_time}]',
-                'reason': promote_reason or f'优先级: {entry.priority_score:.0f}',
+                'strategy': strategy_str,
+                'reason': reason_disp,
                 'timestamp': entry.first_seen_ts,
+                'lifecycle_badge': badge,
+                'lifecycle_type': b_type,
+                'drawdown_pct': dd_pct,
+                'drawdown_reason': dd_reason,
                 '_from_ledger': True,
             }
 

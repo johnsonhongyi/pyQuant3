@@ -397,7 +397,15 @@ class SwingStateTable(QWidget):
                         item.setFont(FONT_BOLD)
                 elif col_idx == 7: # 首次发现
                     strategy_str = str(text)
-                    if '🔔' in strategy_str or '竞价' in strategy_str:
+                    if '⛔' in strategy_str or '破位失效' in strategy_str or 'INVALIDATED' in strategy_str:
+                        item.setForeground(QColor("#FF4444"))
+                        item.setFont(FONT_BOLD)
+                        item.setToolTip(f"【⛔ 破位失效】\n{strategy_str}\n(跌破关键均线/双VWAP/底台，坚决不盲目开仓)")
+                    elif '⚠️' in strategy_str or '回撤' in strategy_str or '走弱' in strategy_str or 'WEAKENED' in strategy_str:
+                        item.setForeground(QColor("#FFAA00"))
+                        item.setFont(FONT_BOLD)
+                        item.setToolTip(f"【⚠️ 动能走弱】\n{strategy_str}\n(高位回撤或动能转负，注意防守)")
+                    elif '🔔' in strategy_str or '竞价' in strategy_str:
                         item.setForeground(COLOR_BRIGHT_RED)
                         item.setFont(FONT_BOLD)
                     elif '🥇' in strategy_str or '黄金' in strategy_str:
@@ -447,6 +455,18 @@ class SwingStateTable(QWidget):
                         item.setForeground(COLOR_UP_Q)
                     elif str(text).startswith("-"):
                         item.setForeground(COLOR_DOWN_Q)
+                    else:
+                        item.setForeground(COLOR_GRAY)
+                elif col_idx == self.table.columnCount() - 1:  # 决议原因与依据列
+                    reason_str = str(text)
+                    if '破位失效' in reason_str or 'INVALIDATED' in reason_str or '破位' in reason_str or '跌破' in reason_str:
+                        item.setForeground(QColor("#FF4444"))
+                        item.setFont(FONT_BOLD)
+                        item.setToolTip(f"【⛔ 破位失效】\n{reason_str}")
+                    elif '回撤' in reason_str or '走弱' in reason_str or 'WEAKENED' in reason_str:
+                        item.setForeground(QColor("#FFAA00"))
+                        item.setFont(FONT_BOLD)
+                        item.setToolTip(f"【⚠️ 动能走弱】\n{reason_str}")
                     else:
                         item.setForeground(COLOR_GRAY)
                 else:
