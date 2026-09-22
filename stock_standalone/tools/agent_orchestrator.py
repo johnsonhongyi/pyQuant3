@@ -1139,6 +1139,47 @@ class AgentOrchestrator:
             )
         return "\n\n".join(blocks), missing
 
+    def _checkpoint_task_details(self, ids: Sequence[str]) -> tuple[str, set[str]]:
+        blocks, paths = [], set()
+        for raw in ids:
+            task_id = str(raw).zfill(3); loc = self.hub.locate(task_id, ("done", "archive")); artifact = self.hub.hub / "artifacts" / task_id
+            rp = artifact / "agent_report.json"
+            try: report = json.loads(rp.read_text(encoding="utf-8")) if rp.exists() else {}
+            except json.JSONDecodeError: report = {}
+            items = report.get("diff_files", []) if isinstance(report, dict) else []
+            items = [str(x).replace("\\", "/") for x in items] if isinstance(items, list) else []; paths.update(items)
+            vp = artifact / "verification.log"; verify = self._compact_verification_text(vp.read_text(encoding="utf-8")) if vp.exists() else "未找到测试证据"
+            summary = str(report.get("summary", "任务证据未提供摘要")) if isinstance(report, dict) else "任务证据未提供摘要"
+            blocks.append(f"### 任务 {task_id}：{loc.path.stem}\n\n- 完成功能：{summary}\n- 修改文件：{', '.join(items) or '未记录'}\n- 测试证据：\n\n```text\n{verify}\n```")
+        return "\n\n".join(blocks), paths
+
+    def _checkpoint_next_tasks(self, ids: Sequence[str]) -> list[str]:
+        done={str(x).zfill(3) for x in ids}; out=[]
+        for path in self.hub._task_files("inbox"):
+            m=re.match(r"(\d{3,})_", path.name)
+            if m and done.intersection(self.hub._dependencies(path)): out.append(f"- {m.group(1)}：{path.stem}")
+        return out or ["- 暂无直接依赖本节点的待执行任务；由主计划补充下一节点任务书。"]
+
+    def _commit_checkpoint(self, artifact: Path, paths: set[str], record: Path, message: str) -> str:
+        allowed=set(paths)|{record.relative_to(self.root).as_posix()}; changed=set()
+        for cmd in (["git","diff","--name-only"],["git","diff","--cached","--name-only"],["git","ls-files","--others","--exclude-standard"]):
+            res=self._run(cmd,timeout=30)
+            if res.returncode: raise OrchestratorError(f"Cannot inspect Git changes: {res.stderr.strip()}")
+            prefix = f"{self.root.name}/"
+            changed.update(
+                path[len(prefix):] if path.startswith(prefix) else path
+                for path in (x.strip().replace("\\", "/") for x in res.stdout.splitlines() if x.strip())
+            )
+        foreign=sorted(x for x in changed if x not in allowed and not x.startswith(".agent_hub/"))
+        if foreign: raise OrchestratorError("节点提交被阻断：发现不属于该节点的工作区改动："+", ".join(foreign))
+        stage=sorted(x for x in changed if x in allowed)
+        if not stage: raise OrchestratorError("节点提交被阻断：没有可提交的节点代码或版本记录")
+        msg=artifact/'COMMIT_MESSAGE_ZH.txt';self._write(msg,message);res=self._run(["git","add","--",*stage],timeout=60)
+        if res.returncode: raise OrchestratorError(f"节点提交暂存失败：{res.stderr.strip()}")
+        res=self._run(["git","commit","-F",str(msg)],timeout=120);self._write(artifact/'git_commit.log',res.stdout+'\n'+res.stderr)
+        if res.returncode: raise OrchestratorError(f"节点提交失败：{res.stderr.strip() or res.stdout.strip()}")
+        return self._run(["git","rev-parse","HEAD"],timeout=30).stdout.strip()
+
     def checkpoint_review(self, node: str, task_ids: Sequence[str]) -> RunReport:
         node = re.sub(r"[^A-Za-z0-9_.-]+", "_", node)
         evidence, missing = self._checkpoint_evidence(task_ids)
@@ -1168,19 +1209,16 @@ class AgentOrchestrator:
             re.search(r"^DECISION: APPROVED\s*$", review_text, re.MULTILINE)
         )
         status = "CHECKPOINT_APPROVED" if approved else "CHECKPOINT_REWORK"
-        commit_message = (
-            f"checkpoint({node}): 完成P节点复核与版本冻结准备\n\n"
-            f"- tasks: {', '.join(task_ids)}\n"
-            f"- review: {status}\n"
-            "- 自动合并: OFF\n- 自动实盘: OFF\n"
-        )
+        task_details, task_paths = self._checkpoint_task_details(task_ids)
+        next_tasks = "\n".join(self._checkpoint_next_tasks(task_ids))
+        commit_message = f"checkpoint({node}): 完成节点功能并通过复核\n\n完成任务：{', '.join(str(x).zfill(3) for x in task_ids)}\n复核状态：{status}\n安全边界：PAPER/人工确认保持不变；不启用真实交易、自动合并或自动发布。\n"
         self._write(artifact_dir / "COMMIT_MESSAGE_ZH.txt", commit_message)
         version = (
             f"# {node} 中文版本报告\n\n"
             f"## 1. 节点目标\n完成 {node} 所含任务的工程级收敛、测试证据汇总与独立复核。\n\n"
             f"## 2. 纳入任务\n{', '.join(task_ids)}\n\n"
             f"## 3. 修改前问题与背景\n由各任务 Context 与本节点 Final Review 共同定义，禁止脱离任务书扩大范围。\n\n"
-            f"## 4. 关键变化\n汇总节点内已 APPROVED 的实现；具体行为变化以各任务 merge report、review 和 compact diff 为准。\n\n"
+            f"## 4. 已完成的功能任务\n\n{task_details}\n\n"
             f"## 5. 行为影响\n仅接受已经通过任务级验证的行为变化；跨任务契约冲突由本次 Medium Final Review 仲裁。\n\n"
             f"## 6. 风控边界\n不自动合并、不自动发布、不打开真实交易权限；P5_FORBIDDEN 仍需人工批准。\n\n"
             f"## 7. 测试与范围证据\n所有进入本节点的任务必须先独立 APPROVED；详细证据见 verification、scope_check、merge report。\n\n"
@@ -1191,6 +1229,12 @@ class AgentOrchestrator:
             f"## 12. Git 版本记录\n见 COMMIT_MESSAGE_ZH.txt；真实 commit/tag 必须显式执行，自动提交保持关闭。\n"
         )
         self._write(artifact_dir / "VERSION_REPORT_ZH.md", version)
+        record = self.root / "docs" / "agent_hub_versions" / f"{node}_VERSION_REPORT_ZH.md"; self._write(record, version + "\n## 下一步任务\n" + next_tasks + "\n")
+        if approved and self.config.get("auto_checkpoint_commit", False):
+            try: revision = self._commit_checkpoint(artifact_dir, task_paths, record, commit_message)
+            except OrchestratorError as exc:
+                self._write(artifact_dir / "CHECKPOINT_COMMIT_HOLD.md", str(exc) + "\n"); return RunReport(node, "CHECKPOINT_COMMIT_HOLD", artifact_dir, str(exc))
+            self._write(artifact_dir / "GIT_CHECKPOINT.md", f"提交号：{revision}\n"); return RunReport(node, "CHECKPOINT_COMMITTED", artifact_dir, f"{node} checkpoint committed: {revision}")
         return RunReport(node, status, artifact_dir, f"{node} checkpoint review completed")
 
     def release_gate(self, release: str, checkpoints: Sequence[str]) -> RunReport:
