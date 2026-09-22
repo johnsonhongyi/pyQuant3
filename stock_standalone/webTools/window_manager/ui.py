@@ -3006,7 +3006,7 @@ class AntigravityAccountManagerDialog(QDialog):
         self.btn_backup_app = QPushButton("💾 备份客户端当前")
         self.btn_backup_app.setStyleSheet("background-color: #0d9488; color: white; padding: 4px 10px; font-size: 11px;")
         self.btn_backup_app.setToolTip("将客户端当前生效的账户备份为独立 JSON 文件")
-        self.btn_backup_app.clicked.connect(self._backup_current_account)
+        self.btn_backup_app.clicked.connect(self._backup_current_app_account)
         app_header.addWidget(self.btn_backup_app)
 
         tab_app_layout.addLayout(app_header)
@@ -3278,10 +3278,16 @@ class AntigravityAccountManagerDialog(QDialog):
 
         btn_use = QPushButton()
         if target_role == "app":
+            app_ready = bool(acc.get("app_ready", True))
             if is_active:
                 btn_use.setText("✔ 客户端当前在用")
                 btn_use.setEnabled(False)
                 btn_use.setStyleSheet("background-color: #064e3b; color: #6ee7b7; border: 1px solid #059669; font-weight: bold; padding: 5px 12px;")
+            elif not app_ready:
+                btn_use.setText("🔐 需先登录 App 并备份")
+                btn_use.setEnabled(False)
+                btn_use.setToolTip("该账户只有历史/IDE 配置，尚未备份 Antigravity App 的 Windows 安全凭据")
+                btn_use.setStyleSheet("background-color: #3f3f46; color: #fbbf24; border: 1px solid #52525b; font-weight: bold; padding: 5px 12px;")
             else:
                 btn_use.setText("🚀 切换给 Antigravity")
                 btn_use.setStyleSheet("background-color: #059669; color: white; font-weight: bold; padding: 5px 12px;")
@@ -3398,7 +3404,8 @@ class AntigravityAccountManagerDialog(QDialog):
         curr = antigravity_manager.get_current_account()
         curr_email = curr.get("email", "").lower() if curr else ""
 
-        accounts = antigravity_manager.list_accounts()
+        # 双 Tab 管理器只读展示账户库，禁止打开界面时触发 legacy 跨库自愈。
+        accounts = antigravity_manager.list_accounts(auto_discover=False)
         account_emails = [a.get("email", "").lower() for a in accounts]
         if (app_email not in account_emails and ide_email not in account_emails) or (not app_email and not ide_email):
             if curr_email:
@@ -3598,6 +3605,16 @@ class AntigravityAccountManagerDialog(QDialog):
                 self.reload_accounts()
             else:
                 QMessageBox.warning(self, "操作失败", msg)
+
+    def _backup_current_app_account(self):
+        """仅备份 Antigravity 客户端；不经过 IDE legacy 备份路径。"""
+        from . import antigravity_manager
+        ok, msg, path = antigravity_manager.backup_current_app_account()
+        if ok:
+            QMessageBox.information(self, "备份成功", f"✅ {msg}")
+            self.reload_accounts()
+        else:
+            QMessageBox.warning(self, "备份失败", f"❌ {msg}")
 
     def _backup_current_account(self):
         from . import antigravity_manager
