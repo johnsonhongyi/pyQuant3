@@ -1848,6 +1848,7 @@ class TestTask018S5ExecutableDirectiveView(unittest.TestCase):
         self.center.auto_follow_trading = True
         self.center._auto_execute_if_enabled()
         self.assertNotIn("688826", self.center._positions)
+        self.assertEqual(plan_low_rr.signal_level, "S4")
 
     def test_41_price_above_buy_zone_rejected_from_actionable(self):
         """现价超过 buy_zone_max (超买区)：坚决不进入可执行视图"""
@@ -1882,6 +1883,7 @@ class TestTask018S5ExecutableDirectiveView(unittest.TestCase):
 
         exec_dirs = self.center.get_executable_directives()
         self.assertEqual(len([d for d in exec_dirs if d.code == "688826"]), 0)
+        self.assertEqual(plan_over.signal_level, "S4")
 
     def test_42_ttl_expired_records_reject_code_and_expired_reason(self):
         """TTL 超过 15 交易分钟：记录稳定 reject_code 与 expired_reason，降为 OBSERVE"""
@@ -1926,6 +1928,7 @@ class TestTask018S5ExecutableDirectiveView(unittest.TestCase):
         self.assertEqual(d_exp.reject_code, "TTL_TRADING_15M")
         self.assertTrue(len(getattr(d_exp, "expired_reason", "")) > 0)
         self.assertEqual(plan_expired.extra_info, {})
+        self.assertEqual(plan_expired.signal_level, "S4")
 
         # 绝不进入可执行视图
         exec_dirs = self.center.get_executable_directives()
@@ -1968,6 +1971,42 @@ class TestTask018S5ExecutableDirectiveView(unittest.TestCase):
         self.assertEqual(d.signal_state, "OBSERVE")
         self.assertEqual(d.reject_code, "INVALID_QUALITY_GRADE")
         self.assertNotIn(d, self.center.get_executable_directives())
+        self.assertEqual(plan_bad_q.signal_level, "S4")
+
+        # 针对 C 级质量形态同样必须坚决阻断
+        plan_bad_c = IPOTradePlan(
+            plan_id="TP_BAD_C",
+            code="688827",
+            name="C级形态",
+            strategy_tag=TAG_CHANNEL_SECONDARY_BUY,
+            signal_level="S4",
+            quality_grade="C",  # 不及格
+            trigger_price=80.0,
+            buy_zone_min=79.0,
+            buy_zone_max=81.0,
+            higher_low_stop=77.5,
+            base_low_invalid=75.0,
+            target_1_channel_mid=88.0,
+        )
+        sig_c = VWAPDetectorSignal(
+            code="688827",
+            name="C级形态",
+            price=80.0,
+            vwap=79.5,
+            signal_type="SECONDARY_BUY",
+            channel_stage=SecondaryBuyStage.SECONDARY_BUY,
+            trade_plan=plan_bad_c
+        )
+        with patch.object(self.center.sentiment_engine, "get_market_sentiment", return_value=self.normal_context):
+            self.center.submit_stock_perception_report(sig_c)
+            orders_c = self.center.evaluate_fleet_and_generate_orders()
+
+        d_c = next(d for d in orders_c if d.code == "688827")
+        self.assertEqual(d_c.signal_level, "S4")
+        self.assertEqual(d_c.signal_state, "OBSERVE")
+        self.assertEqual(d_c.reject_code, "INVALID_QUALITY_GRADE")
+        self.assertNotIn(d_c, self.center.get_executable_directives())
+        self.assertEqual(plan_bad_c.signal_level, "S4")
 
     def test_44_structure_invalid_blocked(self):
         """Higher-Low 结构失效 (破位或次低未抬高)：无法进入 S5 可执行视图"""
@@ -2082,6 +2121,77 @@ class TestTask018S5ExecutableDirectiveView(unittest.TestCase):
         # 校验 fleet_summary 包含了 conversion_report
         summary = self.center.get_fleet_summary()
         self.assertIn("s4_to_s5_conversion_report", summary)
+
+    def test_48_trading_minutes_lunch_break_exclusion(self):
+        """11:27 创建计划到 13:00 只消耗 3 个交易分钟 (11:30~13:00 不计时)"""
+        from ats.strategy.ipo_trading_center import calculate_trading_minutes_elapsed
+
+        start_time_str = "2026-09-22 11:27:00"
+        ref_dt_1300 = datetime.datetime(2026, 9, 22, 13, 0, 0)
+        ref_ts_1300 = ref_dt_1300.timestamp()
+
+        # 11:27 到 13:00 经历：早盘 11:27~11:30 (3分钟) + 午休 11:30~13:00 (0分钟) = 3 分钟
+        elapsed = calculate_trading_minutes_elapsed(start_time_str, ref_ts=ref_ts_1300)
+        self.assertAlmostEqual(elapsed, 3.0, places=2)
+
+        # 11:30~13:00 午休区间内创建与查询均不计入交易时间消耗
+        lunch_start = "2026-09-22 11:35:00"
+        lunch_ref_ts = datetime.datetime(2026, 9, 22, 12, 55, 0).timestamp()
+        elapsed_lunch = calculate_trading_minutes_elapsed(lunch_start, ref_ts=lunch_ref_ts)
+        self.assertAlmostEqual(elapsed_lunch, 0.0, places=2)
+
+        # 到 13:12: 3 + 12 = 15 分钟，刚好达到 15 分钟 TTL 临界
+        ref_ts_1312 = datetime.datetime(2026, 9, 22, 13, 12, 0).timestamp()
+        elapsed_1312 = calculate_trading_minutes_elapsed(start_time_str, ref_ts=ref_ts_1312)
+        self.assertAlmostEqual(elapsed_1312, 15.0, places=2)
+
+        # 到 13:13: 3 + 13 = 16 分钟，严格超过 15 交易分钟
+        ref_ts_1313 = datetime.datetime(2026, 9, 22, 13, 13, 0).timestamp()
+        elapsed_1313 = calculate_trading_minutes_elapsed(start_time_str, ref_ts=ref_ts_1313)
+        self.assertAlmostEqual(elapsed_1313, 16.0, places=2)
+
+    def test_49_s4_trade_plan_immutability_and_directive_gate(self):
+        """S4 TradePlan 不可被改写为 S5，buy_zone_max 不得突破 1.5%，execute_directive 阻断非 S5 买入"""
+        plan = IPOTradePlan(
+            plan_id="TP_IMMUTABLE",
+            code="688826",
+            name="不可变测试",
+            strategy_tag=TAG_CHANNEL_SECONDARY_BUY,
+            signal_level="S4",
+            trigger_price=100.0,
+            buy_zone_min=98.0,
+            buy_zone_max=101.5,
+            higher_low_stop=95.0,
+            target_1_channel_mid=110.0,
+        )
+        self.assertEqual(plan.signal_level, "S4")
+
+        # 试图篡改为 S5：坚决拦截并保持 S4
+        plan.signal_level = "S5"
+        self.assertEqual(plan.signal_level, "S4")
+
+        # 结构锚点只读别名验证
+        self.assertEqual(plan.structural_stop, 95.0)
+        self.assertEqual(plan.structural_target, 110.0)
+
+        # 试图抬高 buy_zone_max 超出 trigger_price * 1.015：上限强制截断为 101.5
+        plan.buy_zone_max = 108.0
+        self.assertAlmostEqual(plan.buy_zone_max, 101.5, places=2)
+
+        # execute_directive 阻断非 S5 买入
+        dir_s4 = IPOOrderDirective(
+            action="BUY_SCOUT",
+            code="688826",
+            name="不可变测试",
+            price=100.0,
+            shares=1000,
+            signal_level="S4",
+            signal_state="OBSERVE",
+            trade_plan=plan,
+        )
+        executed = self.center.execute_directive(dir_s4)
+        self.assertFalse(executed)
+        self.assertNotIn("688826", self.center._positions)
 
 
 if __name__ == "__main__":

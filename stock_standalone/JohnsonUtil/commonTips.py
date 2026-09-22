@@ -730,6 +730,14 @@ class GlobalConfig:
         self.co2int = self.get_with_writeback("general", "co2int", fallback=["ch_tc2", "ch_bc2", "ch_nod", "pdays","pbreak","obs_d"], value_type="list")
         self.ats_col = self.get_with_writeback("general", "ats_col", fallback=['ch_bc2'], value_type="list")
         self.ats_tdx_interval = self.get_with_writeback("general", "ats_tdx_interval", fallback=5.0, value_type="float")
+        # Agent Hub 数据根目录：开发环境可指向独立工作区的 .agent_hub 所在目录。
+        # fallback=""；为空时由 AgentHubDataEngine 自动识别源码根目录
+        # （当前开发环境等价于 D:\\MacTools\\WorkFile\\WorkSpace\\pyQuant3\\stock_standalone）。
+        self.agent_hub_path = self.get_with_writeback(
+            "general", "agent_hub_path",
+            fallback=r"D:\MacTools\WorkFile\WorkSpace\pyQuant3\stock_standalone",
+            value_type="str",
+        )
         # [NEW] 鼠标左键选择右键粘贴功能开关：是否存储在系统剪贴板中 (True=保留供粘贴, False=默认不保存在剪贴板)
         self.copy_paste_save = self.get_with_writeback("general", "copy_paste_save", fallback=False, value_type="bool")
         # [NEW] SBC 分时盯盘窗口 Esc 键退出功能开关 (默认 True 开启，按 Esc 关闭窗口；False 则维持清除高亮防误触)
@@ -1055,6 +1063,10 @@ co2float: List[str] = CFG.co2float
 co2int: List[str] = CFG.co2int
 ats_col: List[str] = CFG.ats_col
 ats_tdx_interval: float = float(getattr(CFG, 'ats_tdx_interval', 5.0) or 5.0)
+agent_hub_path: str = str(
+    getattr(CFG, 'agent_hub_path', r'D:\MacTools\WorkFile\WorkSpace\pyQuant3\stock_standalone')
+    or r'D:\MacTools\WorkFile\WorkSpace\pyQuant3\stock_standalone'
+).strip()
 delisted_codes: List[str] = CFG.delisted_codes
 
 

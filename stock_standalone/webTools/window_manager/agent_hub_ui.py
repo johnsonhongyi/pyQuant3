@@ -39,6 +39,11 @@ from PyQt6.QtWidgets import (
     QFileDialog, QCheckBox
 )
 
+try:
+    from JohnsonUtil import commonTips as cct
+except Exception:
+    cct = None
+
 AGENT_HUB_SINGLE_INSTANCE_SERVER = "ATS_AgentHubMonitor_SingleInstance_IPC"
 
 
@@ -102,14 +107,62 @@ class AgentHubDataEngine:
 
     def __init__(self, project_root: Path | str | None = None):
         if project_root is None:
-            # 默认指向当前工程的根目录
-            current_dir = Path(__file__).resolve().parent
-            # webTools/window_manager -> stock_standalone
-            project_root = current_dir.parent.parent
-        self.project_root = Path(project_root).resolve()
+            # 源码运行时从模块位置推导工程根目录；打包运行时 __file__ 位于
+            # PyInstaller 的临时 _MEI 目录，不能作为用户工程目录，也可能在
+            # 启动清理阶段已失效。manage_window_layout.py 已将真实根目录设为 CWD。
+            if getattr(sys, "frozen", False) or hasattr(sys, "_MEIPASS"):
+                project_root = os.environ.get("INSTOCK_APP_ROOT") or os.getcwd()
+            else:
+                # webTools/window_manager -> stock_standalone
+                project_root = Path(__file__).parent.parent.parent
+
+        self.project_root = self._select_project_root(project_root)
         self.hub_dir = self.project_root / ".agent_hub"
         self._fingerprints: Dict[str, Tuple[int, int]] = {}
         self._cached_snapshot: Optional[AgentHubSnapshot] = None
+
+    @staticmethod
+    def _select_project_root(project_root: Path | str | None) -> Path:
+        """选择真正含有 Agent Hub 数据的根目录。
+
+        打包版 EXE 可能放在 dist、webTools 或单独的 tools 目录，EXE 目录
+        本身通常没有 .agent_hub。旧逻辑会因此正常打开空窗口。候选目录按
+        显式配置、当前目录、EXE 目录及其父级逐级检查。
+        """
+        explicit = Path(project_root).absolute() if project_root else None
+        candidates: List[Path] = []
+        if cct is not None:
+            configured = str(getattr(cct, "agent_hub_path", "") or "").strip()
+            if configured:
+                candidates.append(Path(configured).expanduser().absolute())
+        if os.environ.get("INSTOCK_APP_ROOT"):
+            candidates.append(Path(os.environ["INSTOCK_APP_ROOT"]).absolute())
+        if explicit:
+            candidates.append(explicit)
+        # 源码开发环境：即使从快捷方式/其他 CWD 启动，也能稳定回到
+        # stock_standalone 根目录。agent_hub_path 为空时使用此 fallback。
+        if not getattr(sys, "frozen", False) and not hasattr(sys, "_MEIPASS"):
+            # 默认开发路径（动态等价于）：
+            # D:\\MacTools\\WorkFile\\WorkSpace\\pyQuant3\\stock_standalone
+            # 这里不写死盘符，换机器/换工作区后仍可正确识别。
+            candidates.append(Path(__file__).parent.parent.parent.absolute())
+        for raw in (os.getcwd(), os.path.dirname(os.path.abspath(sys.executable))):
+            p = Path(raw).absolute()
+            candidates.extend([p, *list(p.parents)[:4]])
+
+        seen: Set[str] = set()
+        for candidate in candidates:
+            key = os.path.normcase(os.path.normpath(str(candidate)))
+            if key in seen:
+                continue
+            seen.add(key)
+            hub = candidate / ".agent_hub"
+            if hub.is_dir() and (
+                (hub / "orchestrator.json").exists()
+                or any(hub.iterdir())
+            ):
+                return candidate
+        return explicit or Path(os.getcwd()).absolute()
 
     def _get_file_fp(self, path: Path) -> Tuple[int, int]:
         try:
@@ -1185,7 +1238,7 @@ class AgentHubMonitorDialog(QDialog):
             QMessageBox.critical(self, "备份失败", str(e))
 
 
-def main():
+def main(project_root: Path | str | None = None):
     """独立测试/子进程启动入口（支持单实例互斥与已有实例前台置顶激活）"""
     app = QtWidgets.QApplication.instance()
     if app is None:
@@ -1195,7 +1248,7 @@ def main():
     if activate_existing_agent_hub_instance(timeout_ms=350):
         sys.exit(0)
 
-    dialog = AgentHubMonitorDialog()
+    dialog = AgentHubMonitorDialog(project_root=project_root)
     dialog.show()
     sys.exit(app.exec())
 
