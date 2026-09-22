@@ -64,6 +64,7 @@ def test_db_read_write_and_sync():
         acc_file_2 = os.path.join(acc_dir, 'two@example.com.json')
         with open(acc_file_2, 'w', encoding='utf-8') as f:
             json.dump({
+                'antigravity.profileUrl': 'https://accounts.google.com/profile/two',
                 'antigravityAuthStatus': test_auth_2,
                 'antigravityUnifiedStateSync.oauthToken': 'token_2',
                 'antigravityUnifiedStateSync.userStatus': 'status_2'
@@ -368,7 +369,7 @@ def test_antigravity_cards_grid_dedup_and_rendering(monkeypatch):
     }
 
     monkeypatch.setattr(antigravity_manager, "get_current_account", lambda: mock_curr)
-    monkeypatch.setattr(antigravity_manager, "list_accounts", lambda: mock_accounts)
+    monkeypatch.setattr(antigravity_manager, "list_accounts", lambda *args, **kwargs: mock_accounts)
     monkeypatch.setattr(antigravity_manager, "get_cached_quotas", lambda: mock_cached)
 
     dialog = AntigravityAccountManagerDialog(auto_fetch=False)
@@ -720,7 +721,7 @@ def test_retrieve_user_quota_summary_weekly_and_card_rendering(monkeypatch):
         "masked_email": "w***r@quant.com",
         "mtime": 1000
     }
-    monkeypatch.setattr(antigravity_manager, "list_accounts", lambda: [mock_acc])
+    monkeypatch.setattr(antigravity_manager, "list_accounts", lambda *args, **kwargs: [mock_acc])
     monkeypatch.setattr(antigravity_manager, "get_current_account", lambda: mock_acc)
     monkeypatch.setattr(antigravity_manager, "get_cached_quotas", lambda: {
         "weekly.trader@quant.com": {
@@ -778,13 +779,40 @@ def test_runtime_app_status_and_targeted_sync(monkeypatch):
         mock_acc_dir = os.path.join(tmpdir, "accounts")
         os.makedirs(mock_acc_dir, exist_ok=True)
 
+        mock_app_storage = os.path.join(tmpdir, "app_storage.json")
+        with open(mock_app_storage, "w", encoding="utf-8") as fp:
+            json.dump({}, fp)
+
         monkeypatch.setattr(antigravity_manager, "APP_DB_PATH", mock_app_db)
         monkeypatch.setattr(antigravity_manager, "IDE_DB_PATH", mock_ide_db)
         monkeypatch.setattr(antigravity_manager, "OLD_DB_PATH", mock_app_db)
         monkeypatch.setattr(antigravity_manager, "NEW_DB_PATH", mock_ide_db)
+        monkeypatch.setattr(antigravity_manager, "APP_STORAGE_PATH", mock_app_storage)
+
+        fake_cred = {
+            antigravity_manager.APP_PROFILE_CRED_BLOB_KEY: "dpapi-test",
+            antigravity_manager.APP_PROFILE_CRED_USER_KEY: "antigravity",
+            antigravity_manager.APP_PROFILE_CRED_PERSIST_KEY: 2,
+        }
+        monkeypatch.setattr(
+            antigravity_manager, "_capture_app_credential_snapshot",
+            lambda: dict(fake_cred),
+        )
+        monkeypatch.setattr(
+            antigravity_manager, "_restore_app_credential_snapshot",
+            lambda profile: bool(profile.get(antigravity_manager.APP_PROFILE_CRED_BLOB_KEY)),
+        )
+        monkeypatch.setattr(antigravity_manager, "_get_app_processes", lambda: [])
+        monkeypatch.setattr(antigravity_manager, "_stop_antigravity_app", lambda timeout=5.0: True)
+        monkeypatch.setattr(antigravity_manager, "_launch_antigravity_app", lambda: True)
+        monkeypatch.setattr(
+            antigravity_manager, "_wait_for_app_live_email",
+            lambda expected_email, timeout=10.0: expected_email,
+        )
 
         # 写入测试账户文件
         acc1_data = {
+            "antigravity.profileUrl": "https://accounts.google.com/profile/app",
             "antigravityAuthStatus": json.dumps({"name": "User App", "email": "app@quant.com"}),
             "oauthToken": "token_app_123"
         }
@@ -792,19 +820,35 @@ def test_runtime_app_status_and_targeted_sync(monkeypatch):
             json.dump(acc1_data, fp)
 
         acc2_data = {
+            "antigravity.profileUrl": "https://accounts.google.com/profile/ide",
             "antigravityAuthStatus": json.dumps({"name": "User IDE", "email": "ide@quant.com"}),
             "oauthToken": "token_ide_456"
         }
         with open(os.path.join(mock_acc_dir, "ide@quant.com.json"), "w", encoding="utf-8") as fp:
             json.dump(acc2_data, fp)
 
+        # App Profile 使用独立 sidecar；只有带安全凭据且在线验证过才允许切换。
+        app_profiles_dir = os.path.join(mock_acc_dir, "app_profiles")
+        os.makedirs(app_profiles_dir, exist_ok=True)
+        for email, source in (
+            ("app@quant.com", acc1_data),
+            ("ide@quant.com", acc2_data),
+        ):
+            profile = dict(source)
+            profile.update(fake_cred)
+            profile[antigravity_manager.APP_PROFILE_LOGIN_KEY] = email
+            profile[antigravity_manager.APP_PROFILE_VERIFIED_KEY] = True
+            with open(os.path.join(app_profiles_dir, f"{email}.json"), "w", encoding="utf-8") as fp:
+                json.dump(profile, fp)
+
         # 2.1 测试仅同步至 Antigravity 客户端
         ok, msg = antigravity_manager.sync_to_target(target="app", source_account="app@quant.com", accounts_dir=mock_acc_dir)
         assert ok is True
-        assert "Antigravity (桌面端)" in msg
+        assert "LanguageServer" in msg
         app_db_data = antigravity_manager.read_db_data(mock_app_db)
         assert app_db_data is not None
         assert "app@quant.com" in app_db_data["antigravityAuthStatus"]
+        assert app_db_data["antigravity.profileUrl"] == "https://accounts.google.com/profile/app"
         # 验证未写入 IDE
         assert not os.path.exists(mock_ide_db)
 
@@ -815,6 +859,7 @@ def test_runtime_app_status_and_targeted_sync(monkeypatch):
         ide_db_data = antigravity_manager.read_db_data(mock_ide_db)
         assert ide_db_data is not None
         assert "ide@quant.com" in ide_db_data["antigravityAuthStatus"]
+        assert "antigravity.profileUrl" not in ide_db_data
         # 验证 App 依然是之前的账号
         app_db_data = antigravity_manager.read_db_data(mock_app_db)
         assert "app@quant.com" in app_db_data["antigravityAuthStatus"]
@@ -822,9 +867,12 @@ def test_runtime_app_status_and_targeted_sync(monkeypatch):
         # 2.3 测试针对特定目标切换账户
         ok, msg = antigravity_manager.switch_account("ide@quant.com", accounts_dir=mock_acc_dir, auto_sync=False, sync_target="app")
         assert ok is True
-        assert "目标: 🚀 Antigravity (桌面端)" in msg
+        assert "LanguageServer 在线回读验证通过" in msg
         app_db_data = antigravity_manager.read_db_data(mock_app_db)
         assert "ide@quant.com" in app_db_data["antigravityAuthStatus"]
+        assert app_db_data["antigravity.profileUrl"] == "https://accounts.google.com/profile/ide"
+        ide_db_data = antigravity_manager.read_db_data(mock_ide_db)
+        assert "antigravity.profileUrl" not in ide_db_data
 
 
 def test_ui_dual_target_sync_controls():
@@ -854,3 +902,141 @@ def test_ui_dual_target_sync_controls():
 
 
 
+
+
+def test_app_backup_isolated_from_newer_ide(monkeypatch):
+    import window_manager.antigravity_manager as agm
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        app_db = os.path.join(tmpdir, "app_state.vscdb")
+        ide_db = os.path.join(tmpdir, "ide_state.vscdb")
+        acc_dir = os.path.join(tmpdir, "accounts")
+        os.makedirs(acc_dir, exist_ok=True)
+
+        write_db_data(app_db, {
+            "antigravity.profileUrl": "profile://app-only",
+            "antigravityAuthStatus": json.dumps({"name": "App User", "email": "app-only@example.com"}),
+            "oauthToken": "app-token",
+        })
+        write_db_data(ide_db, {
+            "antigravityAuthStatus": json.dumps({"name": "IDE User", "email": "ide-only@example.com"}),
+            "oauthToken": "ide-token",
+        })
+        os.utime(ide_db, None)
+
+        app_storage = os.path.join(tmpdir, "app_storage.json")
+        with open(app_storage, "w", encoding="utf-8") as fp:
+            json.dump({"jetski.onboarding.lastLoginUsername": "app-only@example.com"}, fp)
+
+        monkeypatch.setattr(agm, "OLD_DB_PATH", app_db)
+        monkeypatch.setattr(agm, "NEW_DB_PATH", ide_db)
+
+        monkeypatch.setattr(agm, "APP_STORAGE_PATH", app_storage)
+        monkeypatch.setattr(
+            agm, "_probe_app_live_email",
+            lambda timeout=0.5: "app-only@example.com",
+        )
+        monkeypatch.setattr(
+            agm, "_capture_app_credential_snapshot",
+            lambda: {
+                agm.APP_PROFILE_CRED_BLOB_KEY: "dpapi-app-only",
+                agm.APP_PROFILE_CRED_USER_KEY: "antigravity",
+                agm.APP_PROFILE_CRED_PERSIST_KEY: 2,
+            },
+        )
+        ok, _, path = agm.backup_current_app_account(acc_dir)
+        assert ok is True
+        assert path.endswith("app-only@example.com.json")
+        with open(path, encoding="utf-8") as fp:
+            saved = json.load(fp)
+        assert "app-only@example.com" in saved["antigravityAuthStatus"]
+        assert saved["antigravity.profileUrl"] == "profile://app-only"
+        assert saved[agm.APP_PROFILE_CRED_BLOB_KEY] == "dpapi-app-only"
+        assert saved[agm.APP_PROFILE_VERIFIED_KEY] is True
+        assert not os.path.exists(os.path.join(acc_dir, "ide-only@example.com.json"))
+
+
+def test_app_switch_rejects_legacy_snapshot_without_app_credential_and_keeps_ide(monkeypatch):
+    import window_manager.antigravity_manager as agm
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        app_db = os.path.join(tmpdir, "app_state.vscdb")
+        ide_db = os.path.join(tmpdir, "ide_state.vscdb")
+        acc_dir = os.path.join(tmpdir, "accounts")
+        os.makedirs(acc_dir, exist_ok=True)
+
+        ide_auth = json.dumps({"name": "IDE User", "email": "ide-safe@example.com"})
+        write_db_data(ide_db, {"antigravityAuthStatus": ide_auth, "oauthToken": "ide-safe-token"})
+        before_ide = read_db_data(ide_db)
+
+        with open(os.path.join(acc_dir, "legacy@example.com.json"), "w", encoding="utf-8") as fp:
+            json.dump({
+                "antigravityAuthStatus": json.dumps({"name": "Legacy", "email": "legacy@example.com"}),
+                "oauthToken": "legacy-token",
+            }, fp)
+
+        app_storage = os.path.join(tmpdir, "app_storage.json")
+        with open(app_storage, "w", encoding="utf-8") as fp:
+            json.dump({}, fp)
+
+        monkeypatch.setattr(agm, "OLD_DB_PATH", app_db)
+        monkeypatch.setattr(agm, "NEW_DB_PATH", ide_db)
+        monkeypatch.setattr(agm, "APP_STORAGE_PATH", app_storage)
+
+        ok, msg = agm.switch_account("legacy@example.com", acc_dir, auto_sync=False, sync_target="app")
+        assert ok is False
+        assert "真实登录一次" in msg
+        assert "安全凭据" in msg
+        assert read_db_data(ide_db) == before_ide
+        assert not os.path.exists(app_db)
+        with open(app_storage, encoding="utf-8") as fp:
+            assert json.load(fp) == {}
+
+
+def test_app_backup_prefers_app_storage_identity_when_state_db_is_stale(monkeypatch):
+    import window_manager.antigravity_manager as agm
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        app_db = os.path.join(tmpdir, "app_state.vscdb")
+        ide_db = os.path.join(tmpdir, "ide_state.vscdb")
+        app_storage = os.path.join(tmpdir, "app_storage.json")
+        acc_dir = os.path.join(tmpdir, "accounts")
+        os.makedirs(acc_dir, exist_ok=True)
+
+        write_db_data(app_db, {
+            "antigravityAuthStatus": json.dumps({"name": "Stale", "email": "stale@example.com"}),
+            "oauthToken": "stale-token",
+        })
+        with open(os.path.join(acc_dir, "current@example.com.json"), "w", encoding="utf-8") as fp:
+            json.dump({
+                "antigravityAuthStatus": json.dumps({"name": "Current", "email": "current@example.com"}),
+                "oauthToken": "current-token",
+            }, fp)
+        with open(app_storage, "w", encoding="utf-8") as fp:
+            json.dump({"jetski.onboarding.lastLoginUsername": "current@example.com"}, fp)
+
+        monkeypatch.setattr(agm, "OLD_DB_PATH", app_db)
+        monkeypatch.setattr(agm, "NEW_DB_PATH", ide_db)
+        monkeypatch.setattr(agm, "APP_STORAGE_PATH", app_storage)
+        monkeypatch.setattr(
+            agm, "_probe_app_live_email",
+            lambda timeout=0.7: "current@example.com",
+        )
+        monkeypatch.setattr(
+            agm, "_capture_app_credential_snapshot",
+            lambda: {
+                agm.APP_PROFILE_CRED_BLOB_KEY: "dpapi-test",
+                agm.APP_PROFILE_CRED_USER_KEY: "antigravity",
+                agm.APP_PROFILE_CRED_PERSIST_KEY: 2,
+            },
+        )
+
+        ok, msg, path = agm.backup_current_app_account(acc_dir)
+        assert ok is True
+        assert "在线验证" in msg
+        with open(path, encoding="utf-8") as fp:
+            saved = json.load(fp)
+        assert "current@example.com" in saved["antigravityAuthStatus"]
+        assert saved["oauthToken"] == "current-token"
+        assert "antigravity.profileUrl" not in saved
+        assert not os.path.exists(ide_db)

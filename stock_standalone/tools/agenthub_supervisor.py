@@ -37,6 +37,11 @@ def ensure_plan_tasks(root: Path, task_ids=None) -> dict:
             text = (template.read_text(encoding='utf-8') if template.exists() else '# Task\n')
             text = text.replace('Task-ID: 000',f'Task-ID: {tid}').replace('P1','P0',1)
             text = text.replace('一句话说明唯一交付目标。',f'执行当前计划 Task {tid}: {slug.replace("_", " ")}。')
+            text = text.replace('YYYY-MM-DD', time.strftime('%Y-%m-%d'))
+            text = re.sub(r'(?m)^- `path/to/file\.py`\s*$', '- `ats/`\n- `tests/`', text)
+            text = re.sub(r'(?m)^- `tests/test_file\.py`\s*$', '- `tests/`', text)
+            text = re.sub(r'(?ms)(## Verification\s*\n\n```powershell\n).*?(\n```)', r'\1python -m compileall -q ats tools tests\2', text)
+            text = text.replace('在 `.agent_hub/artifacts/000/`', f'在 `.agent_hub/artifacts/{tid}/`')
             path.write_text(text, encoding='utf-8'); created.append(tid)
         except OSError as exc: errors.append(f'{tid}: {exc}')
     return {'created':created,'existing':existing,'errors':errors,'registered':not errors}
@@ -47,15 +52,18 @@ def start(root: Path, tasks=None, workers=None) -> dict:
     if registration['errors']:
         return {'status':'BLOCKED_REGISTRATION','registration':registration,
                 'message':'无法写入 Agent Hub inbox，未启动任何 Worker'}
+    # Never fall back to an unrelated legacy inbox: execute exactly the
+    # dynamically discovered plan tasks that were just registered/validated.
+    selected_tasks = list(tasks or discover_plan_tasks(root))
     run_dir = root / '.agent_hub_runtime'; run_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
     run_id = f'run_{stamp}'
-    manifest = {'run_id':run_id,'started_at':_now(),'status':'RUNNING','tasks':tasks or [],'pid':None}
+    manifest = {'run_id':run_id,'started_at':_now(),'status':'RUNNING','tasks':selected_tasks,'pid':None}
     mpath = run_dir / f'{run_id}.json'; mpath.write_text(json.dumps(manifest,ensure_ascii=False,indent=2),encoding='utf-8')
     log = run_dir / f'{run_id}.log'
     cmd=[sys.executable,'-m','tools.agent_orchestrator','--root',str(root),'run-batch','--execute']
     if workers: cmd += ['--max-workers',str(workers)]
-    if tasks: cmd += ['--tasks',*tasks]
+    if selected_tasks: cmd += ['--tasks',*selected_tasks]
     # CREATE_NEW_PROCESS_GROUP keeps the worker independent without the
     # Windows DETACHED_PROCESS handle invalidation seen in GUI-launched shells.
     flags = getattr(subprocess,'CREATE_NEW_PROCESS_GROUP',0)

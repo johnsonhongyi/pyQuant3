@@ -26,6 +26,17 @@ APP_DB_PATH = os.path.expandvars(r"%APPDATA%\Antigravity\User\globalStorage\stat
 APP_EXE_PATH = os.path.expandvars(r"%LOCALAPPDATA%\Programs\antigravity\Antigravity.exe")
 APP_NAME = "Antigravity 客户端"
 APP_TITLE = "🚀 Antigravity (桌面端)"
+APP_STORAGE_PATH = os.path.expandvars(r"%APPDATA%\Antigravity\app_storage.json")
+APP_LOGIN_STORAGE_KEY = "jetski.onboarding.lastLoginUsername"
+APP_PROFILE_LOGIN_KEY = "__app_last_login_username"
+
+# Antigravity App 的真实 OAuth 会话由 Windows Credential Manager 提供给
+# LanguageServer。JSON / state.vscdb 只是辅助状态，不能单独代表切换成功。
+APP_CREDENTIAL_TARGET = "gemini:antigravity"
+APP_PROFILE_CRED_BLOB_KEY = "__app_credential_dpapi_b64"
+APP_PROFILE_CRED_USER_KEY = "__app_credential_username"
+APP_PROFILE_CRED_PERSIST_KEY = "__app_credential_persist"
+APP_PROFILE_VERIFIED_KEY = "__app_live_verified"
 
 # 2. 编辑器集成环境 Antigravity IDE
 IDE_DB_PATH = os.path.expandvars(r"%APPDATA%\Antigravity IDE\User\globalStorage\state.vscdb")
@@ -46,6 +57,373 @@ SYNC_KEYS = [
     'antigravityUnifiedStateSync.oauthToken',
     'antigravityUnifiedStateSync.userStatus',
 ]
+
+# Antigravity 桌面客户端额外依赖 profileUrl；Antigravity IDE 继续严格使用
+# 上面的 legacy SYNC_KEYS，不共享这个字段，避免两套实现互相污染。
+APP_SYNC_KEYS = [
+    'antigravity.profileUrl',
+    *SYNC_KEYS,
+    'antigravityUnifiedStateSync.modelCredits',
+]
+
+
+def _collect_sync_data(data: dict, keys) -> dict:
+    if not data:
+        return {}
+    return {k: data[k] for k in keys if k in data and data[k] is not None}
+
+
+def _read_app_storage() -> dict:
+    if not os.path.exists(APP_STORAGE_PATH):
+        return {}
+    try:
+        with open(APP_STORAGE_PATH, "r", encoding="utf-8") as fp:
+            data = json.load(fp)
+        return data if isinstance(data, dict) else {}
+    except Exception as e:
+        logger.warning(f"读取 Antigravity app_storage.json 失败: {e}")
+        return {}
+
+
+def _get_app_login_username() -> str:
+    value = _read_app_storage().get(APP_LOGIN_STORAGE_KEY, "")
+    return str(value or "").strip().lower()
+
+
+def _write_app_login_username(email: str) -> bool:
+    email = str(email or "").strip()
+    if not email:
+        return False
+    data = _read_app_storage()
+    data[APP_LOGIN_STORAGE_KEY] = email
+    try:
+        ensure_db_dir(APP_STORAGE_PATH)
+        temp = APP_STORAGE_PATH + f".tmp_{int(time.time() * 1000)}"
+        with open(temp, "w", encoding="utf-8") as fp:
+            json.dump(data, fp, indent=2, ensure_ascii=False)
+        os.replace(temp, APP_STORAGE_PATH)
+        return True
+    except Exception as e:
+        logger.error(f"写入 Antigravity app_storage.json 登录账号失败: {e}")
+        return False
+
+
+def _capture_app_credential_snapshot() -> dict:
+    """读取当前 App 系统凭据并用当前 Windows 用户的 DPAPI 再加密保存。"""
+    if sys.platform != "win32":
+        return {}
+    try:
+        import base64
+        import win32cred
+        import win32crypt
+        cred = win32cred.CredRead(
+            APP_CREDENTIAL_TARGET, win32cred.CRED_TYPE_GENERIC, 0
+        )
+        blob = cred.get("CredentialBlob")
+        if isinstance(blob, str):
+            blob = blob.encode("utf-16-le")
+        elif isinstance(blob, memoryview):
+            blob = blob.tobytes()
+        if not blob:
+            return {}
+        protected = win32crypt.CryptProtectData(
+            bytes(blob),
+            "Antigravity App account credential backup",
+            None, None, None, 0,
+        )
+        return {
+            APP_PROFILE_CRED_BLOB_KEY: base64.b64encode(protected).decode("ascii"),
+            APP_PROFILE_CRED_USER_KEY: str(cred.get("UserName") or ""),
+            APP_PROFILE_CRED_PERSIST_KEY: int(cred.get("Persist") or 2),
+        }
+    except Exception as e:
+        logger.warning(f"读取 Antigravity Windows 安全凭据失败: {type(e).__name__}")
+        return {}
+
+
+def _write_generic_credential_blob(target: str, username: str, blob: bytes, persist: int = 2) -> bool:
+    """通过 Win32 CredWriteW 写回不透明凭据 blob；不解析、不输出凭据内容。"""
+    if sys.platform != "win32" or not target or not blob:
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class CREDENTIALW(ctypes.Structure):
+            _fields_ = [
+                ("Flags", wintypes.DWORD),
+                ("Type", wintypes.DWORD),
+                ("TargetName", wintypes.LPWSTR),
+                ("Comment", wintypes.LPWSTR),
+                ("LastWritten", wintypes.FILETIME),
+                ("CredentialBlobSize", wintypes.DWORD),
+                ("CredentialBlob", ctypes.POINTER(ctypes.c_ubyte)),
+                ("Persist", wintypes.DWORD),
+                ("AttributeCount", wintypes.DWORD),
+                ("Attributes", ctypes.c_void_p),
+                ("TargetAlias", wintypes.LPWSTR),
+                ("UserName", wintypes.LPWSTR),
+            ]
+
+        blob_buffer = (ctypes.c_ubyte * len(blob)).from_buffer_copy(blob)
+        credential = CREDENTIALW()
+        credential.Flags = 0
+        credential.Type = 1  # CRED_TYPE_GENERIC
+        credential.TargetName = target
+        credential.Comment = None
+        credential.LastWritten = wintypes.FILETIME(0, 0)
+        credential.CredentialBlobSize = len(blob)
+        credential.CredentialBlob = ctypes.cast(
+            blob_buffer, ctypes.POINTER(ctypes.c_ubyte)
+        )
+        credential.Persist = int(persist or 2)
+        credential.AttributeCount = 0
+        credential.Attributes = None
+        credential.TargetAlias = None
+        credential.UserName = str(username or "")
+
+        advapi32 = ctypes.WinDLL("Advapi32.dll", use_last_error=True)
+        advapi32.CredWriteW.argtypes = [ctypes.POINTER(CREDENTIALW), wintypes.DWORD]
+        advapi32.CredWriteW.restype = wintypes.BOOL
+        return bool(advapi32.CredWriteW(ctypes.byref(credential), 0))
+    except Exception as e:
+        logger.error(f"恢复 Antigravity Windows 安全凭据失败: {type(e).__name__}")
+        return False
+
+
+def _restore_app_credential_snapshot(profile: dict) -> bool:
+    if not profile or not profile.get(APP_PROFILE_CRED_BLOB_KEY):
+        return False
+    try:
+        import base64
+        import win32crypt
+        protected = base64.b64decode(profile[APP_PROFILE_CRED_BLOB_KEY])
+        _, blob = win32crypt.CryptUnprotectData(
+            protected, None, None, None, 0
+        )
+        return _write_generic_credential_blob(
+            APP_CREDENTIAL_TARGET,
+            profile.get(APP_PROFILE_CRED_USER_KEY, ""),
+            blob,
+            int(profile.get(APP_PROFILE_CRED_PERSIST_KEY, 2) or 2),
+        )
+    except Exception as e:
+        logger.error(f"解密 Antigravity App 安全凭据失败: {type(e).__name__}")
+        return False
+
+
+def _has_app_credential_snapshot(profile: dict) -> bool:
+    return bool(
+        profile
+        and profile.get(APP_PROFILE_VERIFIED_KEY)
+        and profile.get(APP_PROFILE_CRED_BLOB_KEY)
+    )
+
+
+APP_PROFILES_DIRNAME = "app_profiles"
+
+
+def _app_profile_path(email: str, accounts_dir: str = ACCOUNTS_DIR) -> str:
+    return os.path.join(accounts_dir, APP_PROFILES_DIRNAME, f"{email}.json")
+
+
+def _load_app_profile(email: str, accounts_dir: str = ACCOUNTS_DIR) -> dict:
+    path = _app_profile_path(email, accounts_dir)
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as fp:
+            return json.load(fp)
+    except Exception:
+        return {}
+
+
+def _save_app_profile(
+    email: str,
+    data: dict,
+    accounts_dir: str = ACCOUNTS_DIR,
+    credential_snapshot: dict = None,
+    live_verified: bool = None,
+) -> str:
+    profile_dir = os.path.join(accounts_dir, APP_PROFILES_DIRNAME)
+    os.makedirs(profile_dir, exist_ok=True)
+    path = _app_profile_path(email, accounts_dir)
+    temp = path + f".tmp_{int(time.time() * 1000)}"
+
+    # 保留已有安全凭据快照；普通状态刷新不能把它覆盖掉。
+    snapshot = _load_app_profile(email, accounts_dir)
+    for key, value in _collect_sync_data(data, APP_SYNC_KEYS).items():
+        snapshot[key] = value
+    snapshot[APP_PROFILE_LOGIN_KEY] = str(email or "").strip().lower()
+
+    if credential_snapshot:
+        snapshot.update(credential_snapshot)
+    if live_verified is not None:
+        snapshot[APP_PROFILE_VERIFIED_KEY] = bool(live_verified)
+
+    with open(temp, "w", encoding="utf-8") as fp:
+        json.dump(snapshot, fp, indent=2, ensure_ascii=False)
+    os.replace(temp, path)
+    return path
+
+
+def _find_saved_account_without_autosync(target: str, accounts_dir: str = ACCOUNTS_DIR):
+    """App 专用账户查找：只读共享 JSON，绝不触发 list_accounts() 的跨库自愈。"""
+    target_clean = (target or "").strip().lower()
+    for fpath in glob.glob(os.path.join(accounts_dir, "*.json")):
+        try:
+            with open(fpath, "r", encoding="utf-8") as fp:
+                data = json.load(fp)
+            detail = parse_account_detail(data.get("antigravityAuthStatus"))
+            email = (detail.get("email") or "").strip()
+            name = (detail.get("name") or "").strip()
+            if (
+                os.path.normpath(fpath).lower() == os.path.normpath(target).lower()
+                or email.lower() == target_clean
+                or target_clean in email.lower()
+                or target_clean in name.lower()
+            ):
+                return {
+                    "email": email,
+                    "name": name,
+                    "file_path": fpath,
+                    "filename": os.path.basename(fpath),
+                    "data": data,
+                    "masked_summary": f"{name} <{mask_email(email)}>".strip(),
+                }
+        except Exception:
+            continue
+    return None
+
+
+def _pid_belongs_to_app(pid: int) -> bool:
+    """判断 LanguageServer/子进程是否属于桌面 App，而不是 Antigravity IDE。"""
+    try:
+        import psutil
+        proc = psutil.Process(int(pid))
+        app_exe = os.path.normcase(os.path.normpath(APP_EXE_PATH))
+        ide_exe = os.path.normcase(os.path.normpath(IDE_EXE_PATH))
+        for _ in range(12):
+            try:
+                name = (proc.name() or "").lower()
+                exe = proc.exe() or ""
+            except Exception:
+                name, exe = "", ""
+            exe_norm = os.path.normcase(os.path.normpath(exe)) if exe else ""
+            if exe_norm == ide_exe or "antigravity ide" in name:
+                return False
+            if exe_norm == app_exe or name == "antigravity.exe":
+                return True
+            parent = proc.parent()
+            if parent is None:
+                break
+            proc = parent
+    except Exception:
+        pass
+    return False
+
+
+def _probe_app_live_email(timeout: float = 0.5) -> str:
+    """从 App 自己的 LanguageServer GetUserStatus 回读真实在线邮箱。"""
+    try:
+        result = fetch_antigravity_quotas(target_email="", timeout=timeout)
+        discovered = result.get("all_accounts_quotas") or {}
+        for email, info in discovered.items():
+            pid = info.get("target_pid")
+            if pid and _pid_belongs_to_app(pid):
+                return str(email or "").strip().lower()
+        pid = result.get("target_pid")
+        if result.get("success") and pid and _pid_belongs_to_app(pid):
+            return str(result.get("account_email") or "").strip().lower()
+    except Exception as e:
+        logger.debug(f"App 在线账户探针失败: {type(e).__name__}")
+    return ""
+
+
+def _get_app_processes() -> list:
+    try:
+        import psutil
+        result = []
+        app_exe = os.path.normcase(os.path.normpath(APP_EXE_PATH))
+        ide_exe = os.path.normcase(os.path.normpath(IDE_EXE_PATH))
+        for proc in psutil.process_iter(["pid", "name", "exe"]):
+            try:
+                name = (proc.info.get("name") or "").lower()
+                exe = proc.info.get("exe") or ""
+                exe_norm = os.path.normcase(os.path.normpath(exe)) if exe else ""
+                if exe_norm == ide_exe or "antigravity ide" in name:
+                    continue
+                if exe_norm == app_exe or name == "antigravity.exe":
+                    result.append(proc)
+            except Exception:
+                continue
+        return result
+    except Exception:
+        return []
+
+
+def _stop_antigravity_app(timeout: float = 5.0) -> bool:
+    """仅关闭桌面 App 进程树，绝不关闭 Antigravity IDE。"""
+    try:
+        import psutil
+        roots = _get_app_processes()
+        if not roots:
+            return True
+        targets = {}
+        for root in roots:
+            targets[root.pid] = root
+            try:
+                for child in root.children(recursive=True):
+                    targets[child.pid] = child
+            except Exception:
+                pass
+        procs = list(targets.values())
+        for proc in reversed(procs):
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+        _, alive = psutil.wait_procs(procs, timeout=timeout)
+        for proc in alive:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+        if alive:
+            psutil.wait_procs(alive, timeout=2.0)
+        return not _get_app_processes()
+    except Exception as e:
+        logger.error(f"关闭 Antigravity App 失败: {type(e).__name__}")
+        return False
+
+
+def _launch_antigravity_app() -> bool:
+    if not os.path.exists(APP_EXE_PATH):
+        logger.error(f"未找到 Antigravity App: {APP_EXE_PATH}")
+        return False
+    try:
+        import subprocess
+        subprocess.Popen(
+            [APP_EXE_PATH],
+            cwd=os.path.dirname(APP_EXE_PATH) or None,
+            close_fds=True,
+        )
+        return True
+    except Exception as e:
+        logger.error(f"启动 Antigravity App 失败: {type(e).__name__}")
+        return False
+
+
+def _wait_for_app_live_email(expected_email: str, timeout: float = 10.0) -> str:
+    expected = str(expected_email or "").strip().lower()
+    deadline = time.monotonic() + max(1.0, timeout)
+    last_email = ""
+    while time.monotonic() < deadline:
+        last_email = _probe_app_live_email(timeout=0.45)
+        if last_email and (not expected or last_email == expected):
+            return last_email
+        time.sleep(0.4)
+    return last_email
 
 
 def mask_email(email: str) -> str:
@@ -102,6 +480,32 @@ def write_db_data(db_path: str, data_dict: dict) -> int:
         return updated
     except Exception as e:
         logger.error(f"写入数据库失败 ({db_path}): {e}")
+        return 0
+
+
+def _replace_app_sync_state(db_path: str, data_dict: dict) -> int:
+    """仅替换 App 固定账户字段；不碰 IDE，也不清理其它命名空间。"""
+    state = _collect_sync_data(data_dict, APP_SYNC_KEYS)
+    ensure_db_dir(db_path)
+    try:
+        conn = sqlite3.connect(db_path, timeout=5)
+        cur = conn.cursor()
+        cur.execute("CREATE TABLE IF NOT EXISTS ItemTable (key TEXT PRIMARY KEY, value TEXT)")
+        placeholders = ",".join("?" for _ in APP_SYNC_KEYS)
+        cur.execute(
+            f"DELETE FROM ItemTable WHERE key IN ({placeholders})",
+            tuple(APP_SYNC_KEYS),
+        )
+        for k, v in state.items():
+            cur.execute(
+                "INSERT OR REPLACE INTO ItemTable (key, value) VALUES (?, ?)",
+                (k, v),
+            )
+        conn.commit()
+        conn.close()
+        return len(state)
+    except Exception as e:
+        logger.error(f"替换 Antigravity App 账户状态失败 ({db_path}): {e}")
         return 0
 
 
@@ -234,13 +638,20 @@ def get_dual_target_active_accounts() -> tuple:
     app_email = ""
     ide_email = ""
 
-    # 1. 独立客户端当前账户
-    target_app_db = OLD_DB_PATH
-    if os.path.exists(target_app_db):
-        app_d = read_db_data(target_app_db)
-        if app_d and app_d.get("antigravityAuthStatus"):
-            app_acc = parse_account_detail(app_d["antigravityAuthStatus"])
-            app_email = (app_acc.get("email") or "").strip().lower()
+    # 1. 独立客户端当前账户：运行时以 LanguageServer 回读为最高权威。
+    # app_storage / state.vscdb 只用于 App 离线时显示“上次配置”，不能证明切换成功。
+    app_email = ""
+    if _get_app_processes():
+        app_email = _probe_app_live_email(timeout=0.35)
+    if not app_email:
+        app_email = _get_app_login_username()
+    if not app_email:
+        target_app_db = OLD_DB_PATH
+        if os.path.exists(target_app_db):
+            app_d = read_db_data(target_app_db)
+            if app_d and app_d.get("antigravityAuthStatus"):
+                app_acc = parse_account_detail(app_d["antigravityAuthStatus"])
+                app_email = (app_acc.get("email") or "").strip().lower()
 
     # 2. IDE 当前账户
     target_ide_db = NEW_DB_PATH
@@ -253,10 +664,10 @@ def get_dual_target_active_accounts() -> tuple:
     return app_email, ide_email
 
 
-def list_accounts(accounts_dir: str = ACCOUNTS_DIR) -> list:
-    """扫描并列出所有已配置/备份的账户（包含自动自愈新账户能力与双端独立使用感知）"""
-    # 前置自动自愈：若目录不存在或数据库有未备份新账户，全自动建档
-    auto_backup_new_accounts_from_databases(accounts_dir)
+def list_accounts(accounts_dir: str = ACCOUNTS_DIR, auto_discover: bool = True) -> list:
+    """扫描账户；legacy 默认保留自动自愈，App/双 Tab UI 可显式只读。"""
+    if auto_discover:
+        auto_backup_new_accounts_from_databases(accounts_dir)
 
     if not os.path.exists(accounts_dir):
         return []
@@ -284,6 +695,9 @@ def list_accounts(accounts_dir: str = ACCOUNTS_DIR) -> list:
             is_ide_active = bool(ide_active_email and email_clean == ide_active_email)
             is_current = is_app_active or is_ide_active
 
+            app_profile = _load_app_profile(email, accounts_dir)
+            app_ready = _has_app_credential_snapshot(app_profile)
+
             if is_app_active and is_ide_active:
                 active_role = "both"
                 active_role_desc = "🟢 双端均在使用"
@@ -310,6 +724,8 @@ def list_accounts(accounts_dir: str = ACCOUNTS_DIR) -> list:
                 "is_current": is_current,
                 "is_app_active": is_app_active,
                 "is_ide_active": is_ide_active,
+                "app_ready": app_ready,
+                "app_profile_verified": bool(app_profile.get(APP_PROFILE_VERIFIED_KEY)),
                 "active_role": active_role,
                 "active_role_desc": active_role_desc,
                 "data": data,
@@ -403,8 +819,82 @@ def persist_active_account_to_file(accounts_dir: str = ACCOUNTS_DIR, force: bool
 
 
 def backup_current_account(accounts_dir: str = ACCOUNTS_DIR) -> tuple:
-    """手动备份当前活跃账户"""
+    """手动备份当前活跃账户（legacy：保持 IDE 原业务逻辑不变）。"""
     return persist_active_account_to_file(accounts_dir=accounts_dir, force=True)
+
+
+def backup_current_app_account(accounts_dir: str = ACCOUNTS_DIR) -> tuple:
+    """备份真实在线 App 账户，并绑定 Windows Credential Manager 安全凭据。"""
+    os.makedirs(accounts_dir, exist_ok=True)
+
+    live_email = _probe_app_live_email(timeout=0.7)
+    if not live_email:
+        return False, (
+            "未检测到 Antigravity App 的真实在线账户。请先启动 App、确认已登录，"
+            "再执行“备份客户端当前”；离线 JSON 不再作为成功依据。"
+        ), None
+
+    email = live_email.strip().lower()
+    app_login_email = _get_app_login_username()
+    db_data = read_db_data(OLD_DB_PATH) if os.path.exists(OLD_DB_PATH) else {}
+    db_detail = parse_account_detail(db_data.get("antigravityAuthStatus"))
+    db_email = (db_detail.get("email") or "").strip().lower()
+
+    source_data = {}
+    if db_email == email and db_data.get("antigravityAuthStatus"):
+        source_data = dict(db_data)
+    else:
+        matched = _find_saved_account_without_autosync(email, accounts_dir)
+        if matched and matched.get("data", {}).get("antigravityAuthStatus"):
+            source_data = dict(matched["data"])
+        existing_profile = _load_app_profile(email, accounts_dir)
+        for key, value in existing_profile.items():
+            if key in APP_SYNC_KEYS and value is not None:
+                source_data[key] = value
+
+    if not source_data.get("antigravityAuthStatus"):
+        return False, (
+            f"已在线确认 App 当前账户为 {mask_email(email)}，但缺少该账户基础认证快照；"
+            "请保持登录后刷新一次账户状态。"
+        ), None
+
+    credential_snapshot = _capture_app_credential_snapshot()
+    if not credential_snapshot:
+        return False, (
+            f"已在线确认 {mask_email(email)}，但未能读取系统安全凭据 "
+            f"{APP_CREDENTIAL_TARGET}，因此不能建立可恢复的 App Profile。"
+        ), None
+
+    try:
+        # 只在真实在线邮箱已确认后修正 app_storage，避免历史假切换污染。
+        if app_login_email != email:
+            _write_app_login_username(email)
+
+        profile_path = _save_app_profile(
+            email,
+            source_data,
+            accounts_dir,
+            credential_snapshot=credential_snapshot,
+            live_verified=True,
+        )
+
+        # 共享 JSON 仍保持 IDE legacy 结构，不写入 App 的系统凭据。
+        legacy_file = os.path.join(accounts_dir, f"{email}.json")
+        if not os.path.exists(legacy_file):
+            temp_file = legacy_file + f".tmp_{int(time.time() * 1000)}"
+            with open(temp_file, "w", encoding="utf-8") as fp:
+                json.dump(_collect_sync_data(source_data, SYNC_KEYS), fp, indent=2, ensure_ascii=False)
+            os.replace(temp_file, legacy_file)
+
+        msg = (
+            f"成功备份并在线验证 Antigravity App 账户 {mask_email(email)}；"
+            "Windows 安全凭据已使用 DPAPI 加密绑定到该 App Profile。"
+        )
+        logger.info(msg)
+        return True, msg, profile_path
+    except Exception as e:
+        logger.error(f"备份 Antigravity 客户端账户失败 ({email}): {e}")
+        return False, f"备份 Antigravity 客户端账户失败: {e}", None
 
 
 def get_runtime_app_status() -> dict:
@@ -439,6 +929,24 @@ def get_runtime_app_status() -> dict:
         d = read_db_data(APP_DB_PATH)
         if d and d.get("antigravityAuthStatus"):
             app_acc = parse_account_detail(d["antigravityAuthStatus"])
+
+    live_app_email = _probe_app_live_email(timeout=0.35) if app_running else ""
+    app_login = _get_app_login_username()
+    app_db_email = ((app_acc or {}).get("email") or "").strip().lower()
+    if live_app_email:
+        matched = _find_saved_account_without_autosync(live_app_email, ACCOUNTS_DIR)
+        app_acc = {
+            "email": live_app_email,
+            "name": (matched or {}).get("name", ""),
+            "source": "language_server",
+        }
+    elif app_login and app_login != app_db_email:
+        matched = _find_saved_account_without_autosync(app_login, ACCOUNTS_DIR)
+        app_acc = {
+            "email": app_login,
+            "name": (matched or {}).get("name", ""),
+            "source": "app_storage_offline",
+        }
 
     ide_acc = None
     ide_mtime = 0
@@ -497,7 +1005,28 @@ def get_runtime_app_status() -> dict:
     }
 
 
+def _sync_to_app(source_account: str = None, accounts_dir: str = ACCOUNTS_DIR) -> tuple:
+    """App 入口：当前账号只做真实备份；指定账号统一走事务式切换。"""
+    if source_account:
+        return _switch_app_account(source_account, accounts_dir=accounts_dir)
+
+    ok, msg, _ = backup_current_app_account(accounts_dir=accounts_dir)
+    return ok, msg
+
+
 def sync_to_target(target: str = "app", source_account: str = None, accounts_dir: str = ACCOUNTS_DIR) -> tuple:
+    """App 使用独立实现；IDE/both 精确委托修复前 legacy 实现。"""
+    target_norm = (target or "app").strip().lower()
+    if target_norm == "app":
+        return _sync_to_app(source_account=source_account, accounts_dir=accounts_dir)
+    return _legacy_sync_to_target(
+        target=target_norm,
+        source_account=source_account,
+        accounts_dir=accounts_dir,
+    )
+
+
+def _legacy_sync_to_target(target: str = "app", source_account: str = None, accounts_dir: str = ACCOUNTS_DIR) -> tuple:
     """
     定向同步核心函数：
     target: "app" -> 明确同步至 Antigravity 桌面客户端 (APP_DB_PATH)
@@ -585,8 +1114,181 @@ def sync_to_target(target: str = "app", source_account: str = None, accounts_dir
     logger.info(msg)
     return True, msg
 
+def _switch_app_account(target: str, accounts_dir: str = ACCOUNTS_DIR) -> tuple:
+    """事务式切换 App：恢复状态+系统凭据，重启后必须在线回读目标邮箱。"""
+    matched = _find_saved_account_without_autosync(target, accounts_dir)
+    if not matched:
+        return False, f"未匹配到 Antigravity 客户端账户 '{target}'"
+
+    email = (matched.get("email") or "").strip().lower()
+    if not email:
+        return False, "目标账户缺少有效邮箱"
+
+    live_before = _probe_app_live_email(timeout=0.45) if _get_app_processes() else ""
+    profile = _load_app_profile(email, accounts_dir)
+
+    # 当前真实在线账户可以就地补建 App Profile；其它账户必须已有安全凭据快照。
+    if live_before == email and not _has_app_credential_snapshot(profile):
+        ok, msg, _ = backup_current_app_account(accounts_dir=accounts_dir)
+        return ok, msg
+    if live_before == email and _has_app_credential_snapshot(profile):
+        return True, f"{mask_email(email)} 已是 Antigravity App 当前真实在线账户"
+
+    if not _has_app_credential_snapshot(profile):
+        return False, (
+            f"{mask_email(email)} 尚未建立可恢复的 Antigravity App 安全凭据。"
+            "该账号需要先在 Antigravity App 中真实登录一次，然后点击“备份客户端当前”。"
+            "仅有 IDE/历史 JSON 不能完成 App 切换。"
+        )
+
+    merged = dict(matched.get("data") or {})
+    for key, value in profile.items():
+        if key in APP_SYNC_KEYS and value is not None:
+            merged[key] = value
+    app_keys = _collect_sync_data(merged, APP_SYNC_KEYS)
+    if not app_keys.get("antigravityAuthStatus"):
+        return False, f"{mask_email(email)} 的 App Profile 缺少基础认证状态"
+
+    auth_email = (
+        parse_account_detail(app_keys.get("antigravityAuthStatus")).get("email") or ""
+    ).strip().lower()
+    if auth_email and auth_email != email:
+        return False, (
+            f"App Profile 账户身份不一致：目标 {mask_email(email)}，"
+            f"认证快照属于 {mask_email(auth_email)}"
+        )
+
+    # 回滚必须也能恢复当前 Windows 凭据，否则不执行风险切换。
+    previous_credential = _capture_app_credential_snapshot()
+    if not previous_credential:
+        return False, (
+            "当前 gemini:antigravity 系统凭据无法安全备份，已取消切换；"
+            "未对 App 或 IDE 做任何修改。"
+        )
+
+    was_running = bool(_get_app_processes())
+    if not _stop_antigravity_app():
+        return False, "无法安全关闭 Antigravity App，已取消切换"
+
+    import shutil
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    db_existed = os.path.exists(OLD_DB_PATH)
+    storage_existed = os.path.exists(APP_STORAGE_PATH)
+    db_rescue = OLD_DB_PATH + f".switch_rescue_{stamp}"
+    storage_rescue = APP_STORAGE_PATH + f".switch_rescue_{stamp}"
+    rescue_meta = os.path.join(
+        accounts_dir, APP_PROFILES_DIRNAME, f".switch_rescue_{stamp}.json"
+    )
+    os.makedirs(os.path.dirname(rescue_meta), exist_ok=True)
+
+    try:
+        if db_existed:
+            shutil.copy2(OLD_DB_PATH, db_rescue)
+        if storage_existed:
+            shutil.copy2(APP_STORAGE_PATH, storage_rescue)
+        with open(rescue_meta, "w", encoding="utf-8") as fp:
+            json.dump(
+                {
+                    "previous_credential": previous_credential,
+                    "previous_login": _get_app_login_username(),
+                    "was_running": was_running,
+                },
+                fp,
+                indent=2,
+                ensure_ascii=False,
+            )
+
+        count = _replace_app_sync_state(OLD_DB_PATH, app_keys)
+        if count <= 0:
+            raise RuntimeError("App state.vscdb 写入失败")
+        if not _write_app_login_username(email):
+            raise RuntimeError("app_storage 登录身份写入失败")
+        if not _restore_app_credential_snapshot(profile):
+            raise RuntimeError("Windows Credential Manager 凭据恢复失败")
+
+        if not _launch_antigravity_app():
+            raise RuntimeError("Antigravity App 启动失败")
+
+        live_after = _wait_for_app_live_email(email, timeout=10.0)
+        if live_after != email:
+            actual = mask_email(live_after) if live_after else "未检测到在线账户"
+            raise RuntimeError(
+                f"LanguageServer 在线校验未通过，实际: {actual}"
+            )
+
+        written = read_db_data(OLD_DB_PATH) or {}
+        _save_app_profile(email, written, accounts_dir, live_verified=True)
+
+        for rescue in (db_rescue, storage_rescue, rescue_meta):
+            try:
+                if os.path.exists(rescue):
+                    os.remove(rescue)
+            except Exception:
+                pass
+
+        user_summary = matched.get("masked_summary") or mask_email(email)
+        msg = (
+            f"已真实切换 Antigravity App 至 {user_summary}；"
+            f"LanguageServer 在线回读验证通过（写入 {count} 项 App 状态）。"
+        )
+        logger.info(f"✅ {msg}")
+        return True, msg
+
+    except Exception as e:
+        logger.error(f"Antigravity App 切换失败，开始自动回滚: {e}")
+        _stop_antigravity_app()
+
+        rollback_ok = True
+        try:
+            if db_existed and os.path.exists(db_rescue):
+                shutil.copy2(db_rescue, OLD_DB_PATH)
+            elif not db_existed and os.path.exists(OLD_DB_PATH):
+                os.remove(OLD_DB_PATH)
+        except Exception:
+            rollback_ok = False
+
+        try:
+            if storage_existed and os.path.exists(storage_rescue):
+                shutil.copy2(storage_rescue, APP_STORAGE_PATH)
+            elif not storage_existed and os.path.exists(APP_STORAGE_PATH):
+                os.remove(APP_STORAGE_PATH)
+        except Exception:
+            rollback_ok = False
+
+        if not _restore_app_credential_snapshot(previous_credential):
+            rollback_ok = False
+
+        if was_running:
+            _launch_antigravity_app()
+
+        if rollback_ok:
+            for rescue in (db_rescue, storage_rescue, rescue_meta):
+                try:
+                    if os.path.exists(rescue):
+                        os.remove(rescue)
+                except Exception:
+                    pass
+
+        suffix = "已自动恢复原账户状态。" if rollback_ok else (
+            f"自动回滚未完全成功，请保留救援文件: {rescue_meta}"
+        )
+        return False, f"Antigravity App 实际切换失败：{e}；{suffix}"
+
 
 def switch_account(target: str, accounts_dir: str = ACCOUNTS_DIR, auto_sync: bool = True, sync_target: str = "both") -> tuple:
+    """App 使用独立实现；IDE/both 精确委托修复前 legacy 实现。"""
+    target_norm = (sync_target or "both").lower()
+    if target_norm == "app":
+        return _switch_app_account(target, accounts_dir=accounts_dir)
+    return _legacy_switch_account(
+        target,
+        accounts_dir=accounts_dir,
+        auto_sync=auto_sync,
+        sync_target=target_norm,
+    )
+
+
+def _legacy_switch_account(target: str, accounts_dir: str = ACCOUNTS_DIR, auto_sync: bool = True, sync_target: str = "both") -> tuple:
     """
     切换到指定账户：
     sync_target: "both" (同时更新客户端与IDE)
@@ -664,7 +1366,6 @@ def switch_account(target: str, accounts_dir: str = ACCOUNTS_DIR, auto_sync: boo
 
     dest_name = APP_TITLE if sync_target == "app" else (IDE_TITLE if sync_target == "ide" else "两端应用(客户端 & IDE)")
     return True, f"已成功切换账户至 {user_summary} [目标: {dest_name}]"
-
 
 def do_sync(auto_persist_to_file: bool = True) -> tuple:
     """
