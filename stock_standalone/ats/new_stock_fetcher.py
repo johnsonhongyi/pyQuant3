@@ -96,6 +96,9 @@ class NewStockFetcher:
         self._last_calendar_fetch_time: float = 0.0
         self._last_lift_fetch_time: float = 0.0
         self._cache_ttl_seconds: float = float(getattr(cct, 'ats_tdx_interval', 5.0) or 5.0)  # 动态对齐 ATS 全局 TDX 间隔
+        # IPO 日历不能沿用行情的长缓存：上市日当天可能在盘前/盘中才被接口补齐。
+        # 5 分钟只用于限制自动轮询频率，跨日时即使缓存刚写入也必须重新拉取。
+        self._ipo_calendar_ttl_seconds: float = 5 * 60
 
         # 启动时自动从本地磁盘持久化文件加载恢复
         self._load_persisted_data()
@@ -355,8 +358,20 @@ class NewStockFetcher:
         now = time.time()
         today_str = datetime.date.today().strftime("%Y-%m-%d")
 
-        # 6 小时防频控：非强制刷新且本地缓存已有数据时直接复用，杜绝高频请求被封 IP
-        if not force and self._cached_ipo_dict and (now - self._last_calendar_fetch_time < 6 * 3600):
+        # 自动刷新使用短 TTL，避免把“当天刚上市的新股”锁在旧的 6 小时缓存里。
+        # 若缓存来自昨天（或更早），必须立刻请求一次；否则 ATS 启动后整天都不会发现新股。
+        cache_day = ""
+        if self._last_calendar_fetch_time > 0:
+            try:
+                cache_day = datetime.datetime.fromtimestamp(self._last_calendar_fetch_time).strftime("%Y-%m-%d")
+            except (ValueError, OSError, OverflowError):
+                cache_day = ""
+        if (
+            not force
+            and self._cached_ipo_dict
+            and cache_day == today_str
+            and (now - self._last_calendar_fetch_time < self._ipo_calendar_ttl_seconds)
+        ):
             return self._cached_ipo_dict
 
         url = (

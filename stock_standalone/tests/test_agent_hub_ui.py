@@ -223,3 +223,27 @@ def test_agent_hub_monitor_dialog_ui(qapp, mock_agent_workspace):
     dialog2.close()
 
 
+def test_agent_hub_single_instance_activation(qapp, mock_agent_workspace):
+    """验证 Agent Hub 监控器单实例互斥与已有实例前台置顶激活机制"""
+    from webTools.window_manager.agent_hub_ui import (
+        AgentHubMonitorDialog, activate_existing_agent_hub_instance
+    )
+
+    # 1. 初始状态下没有运行中的实例，探测应返回 False
+    assert activate_existing_agent_hub_instance(timeout_ms=100) is False
+
+    # 2. 启动首个实例 (开启 QLocalServer 监听)
+    dialog = AgentHubMonitorDialog(project_root=mock_agent_workspace)
+    dialog.show()
+
+    # 3. 此时探测应成功连接并发送 WAKEUP，返回 True
+    assert activate_existing_agent_hub_instance(timeout_ms=500) is True
+
+    # 4. 关闭实例，资源释放
+    dialog.close()
+
+    # 5. 关闭后再探测应返回 False
+    assert activate_existing_agent_hub_instance(timeout_ms=100) is False
+
+
+

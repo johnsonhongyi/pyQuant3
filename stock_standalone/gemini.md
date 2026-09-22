@@ -1,5 +1,24 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-09-22 13:15
+- [x] **【彻底解决 Agent Hub 监控器与 Antigravity 账户管理器重复多开与实例堆叠 Bug（单实例IPC互斥与前台唤醒激活）】(`webTools/window_manager/agent_hub_ui.py`, `webTools/window_manager/ui.py`, `webTools/manage_window_layout.py`, `tests/test_agent_hub_ui.py`, `tests/test_antigravity_manager.py`)**：
+    - [x] **Agent Hub 监控器单实例 IPC 守护与前台置顶唤醒 (`agent_hub_ui.py`)**：
+        - 建立专属单实例本地命名管道 `AGENT_HUB_SINGLE_INSTANCE_SERVER = "ATS_AgentHubMonitor_SingleInstance_IPC"`；
+        - `AgentHubMonitorDialog` 启动时自动开启 `QLocalServer` 监听 `WAKEUP` 消息；
+        - 独立进程入口 `main()` 以及主程序 `open_agent_hub_monitor()` 中，启动前先通过 `QLocalSocket` 进行 `activate_existing_agent_hub_instance(timeout_ms=350)` 探测；
+        - 若已有实例运行，发送 `WAKEUP` 消息让现有窗口执行 `activate_and_raise()`（恢复最小化、置顶激活并获取焦点），当前新请求直接退出，彻底杜绝桌面上重复弹出多个监控窗口；
+    - [x] **Antigravity 账户管理器弹窗单实例守护与非模态解耦 (`ui.py`)**：
+        - 在 `WindowPosManagerUI.open_antigravity_account_manager()` 中维护单例引用 `self._ag_account_dialog`；
+        - 点击时若弹窗已打开且可见，直接置顶激活并拉至前台，绝不重复创建或堆叠弹窗；
+        - 将阻塞式的 `dialog.exec()` 改造为非模态的 `show()`，并在关闭后自动清理实例句柄，操作流畅不阻塞操盘手看盘；
+    - [x] **打包入口 `--agent-hub` 命令行支持补齐 (`manage_window_layout.py`)**：
+        - 在 `manage_window_layout.py` 中补齐对 `--agent-hub` / `-agent-hub` 参数的处理，无缝桥接独立子进程模式；
+    - [x] **全量自动化测试 100% 绿灯**：
+        - 专项测试 `test_agent_hub_single_instance_activation` 验证单实例探测、唤醒与生命周期管理全部通过；
+        - `test_agent_hub_ui.py` 3 项测试全部通过（3 passed in 1.94s）；
+        - `test_antigravity_manager.py` 17 项测试全部通过（17 passed in 11.89s）；
+        - 全模块 `compileall` 编译零错误。
+
 ## 2026-09-22 12:45
 - [x] **【高性能多Agent运行状态与任务实施进度全景UI指挥监控大屏落地（含自动刷新与配置持久化）】(`webTools/window_manager/agent_hub_ui.py`, `webTools/window_manager/ui.py`, `manage_window_layout.spec`, `tests/test_agent_hub_ui.py`)**：
     - [x] **高性能纯后台脏检查与无锁缓存数据引擎 (`AgentHubDataEngine`)**：
