@@ -324,7 +324,9 @@ if __name__ == '__main__':
 
         elif ag_action == 'hub':
             from window_manager.agent_hub_ui import main as run_agent_hub
-            run_agent_hub()
+            # 打包后模块 __file__ 位于 _MEI 临时目录，必须把启动器已经解析的
+            # 实际工程根目录显式传入 Agent Hub，避免 Path.resolve() 访问失效路径。
+            run_agent_hub(project_root=app_root)
             sys.exit(0)
 
     # 7. 关键隔离：只有在启动 UI 模式时才去检查单实例并唤醒已有 UI 视窗；
