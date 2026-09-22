@@ -1869,8 +1869,9 @@ class ATSMainWindow(QMainWindow):
         self.universe_manager = UniverseManager()
         self.swing_tracker = SwingTracker()
         from ats.signal_ledger import get_signal_ledger
+        from ats.ledger_update_service import get_ledger_update_service
         self.signal_ledger = get_signal_ledger()
-        self.ledger_update_service = LedgerUpdateService(self.signal_ledger)
+        self.ledger_update_service = get_ledger_update_service(self.signal_ledger)
         self.volume_profiler = VolumeProfiler()
         self.session_snapshot = SessionSnapshot()
         self.window_manager = ATSWindowManager.get_instance()

@@ -53,14 +53,39 @@ class CandidateCache:
         if isinstance(value, datetime):
             return value
         if isinstance(value, (int, float)):
-            return datetime.fromtimestamp(float(value))
+            # Support millisecond timestamps
+            ts = float(value)
+            if ts > 1e11:
+                ts /= 1000.0
+            return datetime.fromtimestamp(ts)
         if isinstance(value, str):
             text = value.strip().replace("Z", "+00:00")
             try:
                 return datetime.fromisoformat(text)
             except ValueError:
                 pass
-        raise ValueError("unsupported observation timestamp: %r" % (value,))
+            # Support "YYYY-MM-DD HH:MM:SS" or "YYYY/MM/DD HH:MM:SS"
+            for fmt in ("%Y-%m-%d %H:%M:%S", "%Y/%m/%d %H:%M:%S", "%Y%m%d %H:%M:%S"):
+                try:
+                    return datetime.strptime(text, fmt)
+                except ValueError:
+                    pass
+            # Support "HH:MM:SS" or "HH:MM:SS.fff" by attaching current date
+            for fmt in ("%H:%M:%S", "%H:%M:%S.%f", "%H:%M"):
+                try:
+                    t_val = datetime.strptime(text, fmt).time()
+                    return datetime.combine(datetime.now().date(), t_val)
+                except ValueError:
+                    pass
+            try:
+                # If numeric string timestamp
+                ts_num = float(text)
+                if ts_num > 1e11:
+                    ts_num /= 1000.0
+                return datetime.fromtimestamp(ts_num)
+            except ValueError:
+                pass
+        return datetime.now()
 
     def _roll_day(self, day: str) -> None:
         if self._trading_day and self._trading_day != day:
