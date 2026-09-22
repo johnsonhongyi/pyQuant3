@@ -146,6 +146,9 @@ if __name__ == '__main__':
         elif arg_lower in ['--ag-daemon', '-ag-daemon']:
             ag_action = 'daemon'
             use_ui = False
+        elif arg_lower in ['--agent-hub', '-agent-hub', '--agenthub', '-agenthub']:
+            ag_action = 'hub'
+            use_ui = False
         elif arg_lower == '-log':
             debug_mode = True
             if i + 1 < len(sys.argv):
@@ -317,6 +320,11 @@ if __name__ == '__main__':
             except KeyboardInterrupt:
                 print("\n[Antigravity Daemon] 收到终止信号，正在退出...")
                 worker.stop()
+            sys.exit(0)
+
+        elif ag_action == 'hub':
+            from window_manager.agent_hub_ui import main as run_agent_hub
+            run_agent_hub()
             sys.exit(0)
 
     # 7. 关键隔离：只有在启动 UI 模式时才去检查单实例并唤醒已有 UI 视窗；

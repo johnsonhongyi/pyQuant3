@@ -26,6 +26,7 @@ a = Analysis(
         'webTools.window_manager.core', 
         'webTools.window_manager.ui',
         'webTools.window_manager.antigravity_manager',
+        'webTools.window_manager.agent_hub_ui',
         'sqlite3',
         'screeninfo', 
         'win32gui', 

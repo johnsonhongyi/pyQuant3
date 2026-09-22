@@ -265,23 +265,54 @@ def run_restore(archive_path: Optional[str] = None, target_workspace: str = STOC
                     shutil.copy2(s, d)
             logger.info("   - [.agent_hub] 配置、调度规则与任务流已完整恢复")
 
-        # 3. 覆盖还原 tools 目录下的编排脚本
+        # 3. 覆盖还原 tools 目录下的自定义功能脚本与配置
         extracted_tools = os.path.join(temp_extract, "tools")
         target_tools = os.path.join(target_workspace, "tools")
         if os.path.exists(extracted_tools):
             os.makedirs(target_tools, exist_ok=True)
+            restored_tools = []
             for item in os.listdir(extracted_tools):
                 s = os.path.join(extracted_tools, item)
                 d = os.path.join(target_tools, item)
                 shutil.copy2(s, d)
-            logger.info("   - [tools] agent_orchestrator / agent_hub 调度脚本已还原")
+                restored_tools.append(item)
+            logger.info(f"   - [tools] 动态自适应还原了 {len(restored_tools)} 个自定义脚本与工具配置")
 
-        # 4. 清理临时解压区
+        # 4. 覆盖还原 docs 目录下的门禁与编排规范文档
+        extracted_docs = os.path.join(temp_extract, "docs")
+        target_docs = os.path.join(target_workspace, "docs")
+        if os.path.exists(extracted_docs):
+            os.makedirs(target_docs, exist_ok=True)
+            for item in os.listdir(extracted_docs):
+                s = os.path.join(extracted_docs, item)
+                d = os.path.join(target_docs, item)
+                shutil.copy2(s, d)
+            logger.info("   - [docs] Agent Hub 显式执行门禁规范文档已还原")
+
+        # 5. 覆盖还原后台自主守护运行态 (.agent_hub_runtime/)
+        extracted_runtime = os.path.join(temp_extract, ".agent_hub_runtime")
+        target_runtime = os.path.join(target_workspace, ".agent_hub_runtime")
+        if os.path.exists(extracted_runtime):
+            os.makedirs(target_runtime, exist_ok=True)
+            for item in os.listdir(extracted_runtime):
+                s = os.path.join(extracted_runtime, item)
+                d = os.path.join(target_runtime, item)
+                shutil.copy2(s, d)
+            logger.info("   - [.agent_hub_runtime] 后台自主守护运行态已同步还原")
+
+        # 6. 还原根目录独立门禁状态快照
+        gate_fallback = os.path.join(temp_extract, ".agent_hub_command_gate.json")
+        if os.path.exists(gate_fallback):
+            shutil.copy2(gate_fallback, os.path.join(target_workspace, ".agent_hub_command_gate.json"))
+
+        # 7. 清理临时解压区
         shutil.rmtree(temp_extract, ignore_errors=True)
 
-        # 5. 自动运行多Agent自检 (Health Check)
+        # 8. 自动运行多Agent自检 (Health Check)
         orch_cfg = os.path.join(target_hub, "orchestrator.json")
         status_md = os.path.join(target_hub, "dashboard", "STATUS.md")
+        cmd_gate = os.path.join(target_tools, "agenthub_command.py")
+        supervisor_script = os.path.join(target_tools, "agenthub_supervisor.py")
         if not os.path.exists(orch_cfg) or not os.path.exists(status_md):
             logger.error("恢复后健康体检未通过: 关键配置文件缺失！")
             return False

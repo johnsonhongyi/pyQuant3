@@ -77,6 +77,98 @@ class TestSignalLedger(unittest.TestCase):
         self.assertEqual(entry2.first_seen_ts, first_seen_ts)
         # 验证: 最新价格得到更新
         self.assertEqual(entry2.latest_price, 12.80)
+
+    def test_cross_day_vwap_weakness_invalidates_stale_bullish_tag(self):
+        """跌破今日 VWAP 回踩昨日 VWAP 后，旧强势标签不得继续晋级。"""
+        code = "300058"
+        entry = self.ledger.record_signal(
+            code, "蓝色光标", 13.20, 2.8, 0.5,
+            row={
+                'vwap': 13.10,
+                'last_nclose1d': 12.90,
+                'vol_ratio': 2.0,
+            },
+            signal_tag='🎯 极早起爆',
+        )
+        entry.tier = 'WATCH'
+        entry.early_launch_boost = 120.0
+
+        weakened = self.ledger.record_signal(
+            code, "蓝色光标", 12.95, -0.3, -0.5,
+            row={
+                'vwap': 13.08,
+                'last_nclose1d': 12.90,
+                'vol_ratio': 2.5,
+                'sig_launch': 1,
+            },
+        )
+
+        self.assertEqual(weakened.tier, 'RADAR')
+        self.assertEqual(weakened.signal_tag, '⚠️ 今日VWAP下·回踩昨日VWAP')
+        self.assertEqual(weakened.early_launch_boost, 0.0)
+        self.assertLessEqual(weakened.priority_score, 25.0)
+        self.assertTrue(any(
+            state.get('action') == 'INVALIDATED_BY_CROSS_DAY_VWAP'
+            for state in weakened.state_history
+        ))
+
+    def test_break_both_vwaps_becomes_inactive(self):
+        """今日与昨日 VWAP 均失守时应直接失效，不能靠旧特征复活。"""
+        code = "600000"
+        entry = self.ledger.record_signal(
+            code, "测试股份", 10.30, 2.0, 0.2,
+            row={'vwap': 10.20, 'last_nclose1d': 10.00, 'vol_ratio': 1.8},
+            signal_tag='🏆 完美双结构',
+        )
+        entry.tier = 'WATCH'
+
+        weakened = self.ledger.record_signal(
+            code, "测试股份", 9.95, -1.5, -0.8,
+            row={'vwap': 10.18, 'last_nclose1d': 10.00, 'vol_ratio': 3.0, 'sig_launch': 1},
+        )
+
+        self.assertEqual(weakened.tier, 'INACTIVE')
+        self.assertEqual(weakened.signal_tag, '⛔ 双VWAP破位')
+
+    def test_positive_to_negative_demotes_and_clears_bullish_state(self):
+        entry = self.ledger.record_signal('1', '测试', 10.0, 2.0, 0.2)
+        entry.tier = 'WATCH'
+        entry.signal_tag = '🏆 完美双结构'
+        entry.early_launch_boost = 120.0
+        entry.tdx_boost = 150.0
+        entry.is_channel_swing = True
+        entry.ch_slope_deg = 3.0
+
+        weakened = self.ledger.record_signal(
+            '000001', '测试', 9.8, -0.2, -0.3,
+            row={'vol_ratio': 9.0, 'sig_launch': 1},
+        )
+
+        self.assertEqual(weakened.tier, 'RADAR')
+        self.assertEqual(weakened.signal_tag, '⚠️ 动能走弱')
+        self.assertEqual(weakened.early_launch_boost, 0.0)
+        self.assertEqual(weakened.tdx_boost, 0.0)
+        self.assertFalse(weakened.is_channel_swing)
+        self.assertLessEqual(weakened.priority_score, 25.0)
+        self.assertEqual(len(self.ledger.entries), 1)
+
+    def test_peak_drawdown_three_points_cannot_repromote_same_tick(self):
+        entry = self.ledger.record_signal('600001', '测试', 10.0, 1.0, 0.2)
+        entry.tier = 'WATCH'
+        self.ledger.record_signal('600001', '测试', 10.5, 5.0, 0.3)
+
+        weakened = self.ledger.record_signal(
+            '600001', '测试', 10.1, 1.9, 0.1,
+            row={'vol_ratio': 10.0, 'dff': 5.0, 'sig_launch': 1},
+        )
+
+        self.assertEqual(weakened.tier, 'RADAR')
+        self.assertEqual(weakened.signal_tag, '⚠️ 动能走弱')
+        self.assertLessEqual(weakened.priority_score, 25.0)
+        self.assertTrue(any(
+            state.get('action') == 'WEAKENED_BY_MOMENTUM_REVERSAL'
+            for state in weakened.state_history
+        ))
         
     def test_consecutive_shrink_days(self):
         """测试个股连续缩量逻辑"""

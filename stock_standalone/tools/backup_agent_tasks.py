@@ -106,36 +106,92 @@ def collect_agent_configs(staging_dir: str) -> None:
             return ignored
         shutil.copytree(agent_hub_src, agent_hub_dst, ignore=_ignore_locks_and_temps)
 
-    # 2. 复制编排执行脚本 (只收敛 agent 调度器本身)
+    # 2. 动态自适应收集 tools/ 目录下所有自定义功能脚本与配置文件
+    tools_src = os.path.join(STOCK_STANDALONE, "tools")
     tools_dst = os.path.join(staging_dir, "tools")
     os.makedirs(tools_dst, exist_ok=True)
-    orchestrator_scripts = ["agent_orchestrator.py", "agent_hub.py", "backup_agent_tasks.py"]
-    for s_name in orchestrator_scripts:
-        s_path = os.path.join(STOCK_STANDALONE, "tools", s_name)
-        if os.path.exists(s_path):
-            shutil.copy2(s_path, tools_dst)
+    if os.path.exists(tools_src):
+        for entry in os.listdir(tools_src):
+            s_path = os.path.join(tools_src, entry)
+            # 排除缓存和临时文件，动态纳入所有自定义功能 py 脚本与工具配置 (json/yaml/ini/bat/sh/md)
+            if entry == "__pycache__" or entry.endswith(".lock") or entry.endswith(".tmp"):
+                continue
+            if os.path.isfile(s_path):
+                ext = os.path.splitext(entry)[1].lower()
+                if ext in (".py", ".json", ".yaml", ".yml", ".ini", ".bat", ".cmd", ".sh", ".md", ".toml"):
+                    shutil.copy2(s_path, tools_dst)
+                    logger.debug(f"已动态自适应纳入 tools 自定义功能: {entry}")
+        logger.info(f"   - [tools] 动态纳入 {len(os.listdir(tools_dst))} 个自定义脚本与配置文件")
 
-    # 3. 复制工作区根目录下与多任务编排相关的专用规范
-    root_agent_files = [
-        "20260920_2228_task.md",
-    ]
-    for rf in root_agent_files:
-        src_f = os.path.join(STOCK_STANDALONE, rf)
-        if os.path.exists(src_f):
-            shutil.copy2(src_f, staging_dir)
+    # 3. 动态自适应收集 docs/ 目录下所有与 Agent / 门禁 / 编排相关的策略与规范文档
+    docs_src = os.path.join(STOCK_STANDALONE, "docs")
+    docs_dst = os.path.join(staging_dir, "docs")
+    os.makedirs(docs_dst, exist_ok=True)
+    if os.path.exists(docs_src):
+        for entry in os.listdir(docs_src):
+            s_path = os.path.join(docs_src, entry)
+            if os.path.isfile(s_path):
+                name_upper = entry.upper()
+                if "AGENT" in name_upper or "ORCHESTRAT" in name_upper or "GATE" in name_upper or "POLICY" in name_upper:
+                    shutil.copy2(s_path, docs_dst)
 
-    # 4. 生成一键还原多Agent配置脚本 (Restore Script)
+    # 4. 动态自适应收集工作区根目录下与多任务编排/Agent相关的规则、任务书与门禁回退文件
+    for rf in os.listdir(STOCK_STANDALONE):
+        s_path = os.path.join(STOCK_STANDALONE, rf)
+        if os.path.isfile(s_path):
+            name_upper = rf.upper()
+            if (rf.endswith("_task.md") or rf.startswith("task_") or
+                "AGENT" in name_upper or rf == ".agent_hub_command_gate.json"):
+                shutil.copy2(s_path, staging_dir)
+
+    # 5. 动态收集后台自主守护与脱离会话运行态 (.agent_hub_runtime/)
+    runtime_src = os.path.join(STOCK_STANDALONE, ".agent_hub_runtime")
+    runtime_dst = os.path.join(staging_dir, ".agent_hub_runtime")
+    if os.path.exists(runtime_src):
+        os.makedirs(runtime_dst, exist_ok=True)
+        for r_entry in os.listdir(runtime_src):
+            rs_path = os.path.join(runtime_src, r_entry)
+            if os.path.isfile(rs_path) and not r_entry.endswith(".lock"):
+                shutil.copy2(rs_path, runtime_dst)
+        logger.info(f"   - [.agent_hub_runtime] 已纳入后台自主守护运行态 ({len(os.listdir(runtime_dst))} 个状态与报告文件)")
+
+    # 6. 生成一键还原多Agent配置脚本 (Restore Script)
     restore_bat = os.path.join(staging_dir, "一键还原多Agent配置.bat")
     with open(restore_bat, "w", encoding="gbk", errors="ignore") as f:
         f.write('''@echo off
 chcp 936 >nul
-echo 正在将备份的多Agent配置与编排规则还原至工作区...
+echo ========================================================
+echo       多Agent配置与编排策略一键灾难恢复工具
+echo ========================================================
+echo 目标工作区: D:\\MacTools\\WorkFile\\WorkSpace\\pyQuant3\\stock_standalone
+echo 注意: 还原操作将用当前备份覆盖 .agent_hub 配置、守护运行态与 tools/ 脚本！
+echo.
+set /p CONFIRM="是否确认执行还原恢复？[Y/N, 默认N]: "
+if /i not "%CONFIRM%"=="Y" (
+    echo [已取消] 操盘手取消了配置还原操作。
+    pause
+    exit /b 0
+)
+
+echo 正在还原多Agent配置与编排规则至工作区...
 set "TARGET_WS=D:\\MacTools\\WorkFile\\WorkSpace\\pyQuant3\\stock_standalone"
 
 xcopy /E /Y /I "%~dp0.agent_hub" "%TARGET_WS%\\.agent_hub"
+if exist "%~dp0.agent_hub_runtime" (
+    xcopy /E /Y /I "%~dp0.agent_hub_runtime" "%TARGET_WS%\\.agent_hub_runtime"
+)
+if exist "%~dp0.agent_hub_command_gate.json" (
+    copy /Y "%~dp0.agent_hub_command_gate.json" "%TARGET_WS%\\"
+)
 xcopy /Y "%~dp0tools\\*.*" "%TARGET_WS%\\tools\\"
+if exist "%~dp0docs" (
+    xcopy /E /Y /I "%~dp0docs" "%TARGET_WS%\\docs\\"
+)
 
-echo 多Agent配置还原完毕！
+echo.
+echo ========================================================
+echo 多Agent配置与自主守护工具还原完毕！系统已就绪。
+echo ========================================================
 pause
 ''')
 
