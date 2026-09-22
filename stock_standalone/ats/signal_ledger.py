@@ -304,6 +304,18 @@ class SignalLedger:
         self._notified_keys = set()  # 当日已提醒通知的信号 key 集合，防止多周期/ATS/TDX重复播报
         self._fav_version = -1
         self._fav_stocks_cache = set()
+        self._update_service = None
+
+    def get_update_service(self):
+        """获取或创建与此 SignalLedger 绑定的 LedgerUpdateService 实例 (SSOT 门禁入口)"""
+        if getattr(self, '_update_service', None) is None:
+            from ats.ledger_update_service import LedgerUpdateService
+            self._update_service = LedgerUpdateService(self)
+        return self._update_service
+
+    def set_update_service(self, service):
+        """显式绑定 LedgerUpdateService 实例"""
+        self._update_service = service
 
     def get_favorite_stocks_set(self) -> set:
         """[PERF] 极速提取重点关注集合（基于 GlobalFavoriteManager 版本号 0ms 高速缓存）"""
@@ -415,8 +427,65 @@ class SignalLedger:
                       signal_source='ATS', signal_tag='', dragon_role='',
                       dragon_buy_type='', dragon_reason='', dragon_amount_yi=0.0,
                       ch_slope_deg=None, supp_price=None, ch_height_pct=None,
-                      amplitude_pct=None, is_channel_swing=False):
-        """发现新信号或更新已有信号
+                      amplitude_pct=None, is_channel_swing=False,
+                      observed_at=None, _from_service=False, **kwargs):
+        """发现新信号或更新已有信号入口。
+
+        [P1 主干物理收敛]:
+        严禁任何外部旁路直写 entries！
+        若非来自 LedgerUpdateService 的内部调用，自动透明重定向至绑定的 LedgerUpdateService，
+        强制经过 CandidateCache 会话门禁（盘前种子隔离）与连续帧防抖确认。
+        """
+        if _from_service:
+            return self._record_signal_internal(
+                code=code, name=name, price=price, pct=pct, deviation=deviation,
+                row=row, volume_score=volume_score, signal_source=signal_source,
+                signal_tag=signal_tag, dragon_role=dragon_role,
+                dragon_buy_type=dragon_buy_type, dragon_reason=dragon_reason,
+                dragon_amount_yi=dragon_amount_yi, ch_slope_deg=ch_slope_deg,
+                supp_price=supp_price, ch_height_pct=ch_height_pct,
+                amplitude_pct=amplitude_pct, is_channel_swing=is_channel_swing,
+                **kwargs
+            )
+
+        # 外部旁路直写尝试 -> 拦截并自动委托至 LedgerUpdateService
+        service = self.get_update_service()
+        try:
+            print(f"[SignalLedger][BYPASS_PREVENTED] record_signal 旁路直写已自动收敛至 LedgerUpdateService (code={code})")
+        except Exception:
+            pass
+
+        result = service.update_candidate(
+            code=code,
+            name=name,
+            price=price,
+            pct=pct,
+            deviation=deviation,
+            row=row,
+            volume_score=volume_score,
+            source=signal_source or "ATS",
+            observed_at=observed_at,
+            signal_tag=signal_tag,
+            dragon_role=dragon_role,
+            dragon_buy_type=dragon_buy_type,
+            dragon_reason=dragon_reason,
+            dragon_amount_yi=dragon_amount_yi,
+            ch_slope_deg=ch_slope_deg,
+            supp_price=supp_price,
+            ch_height_pct=ch_height_pct,
+            amplitude_pct=amplitude_pct,
+            is_channel_swing=is_channel_swing,
+            **kwargs
+        )
+        return result.entry
+
+    def _record_signal_internal(self, code, name, price, pct, deviation, row=None, volume_score=0.0,
+                                signal_source='ATS', signal_tag='', dragon_role='',
+                                dragon_buy_type='', dragon_reason='', dragon_amount_yi=0.0,
+                                ch_slope_deg=None, supp_price=None, ch_height_pct=None,
+                                amplitude_pct=None, is_channel_swing=False, _from_service=False,
+                                **kwargs):
+        """发现新信号或更新已有信号 (内部核心实现)
 
         核心逻辑:
         - 新信号 → 写入账本，锁定首次发现时间并打上特殊分类标记
@@ -908,59 +977,21 @@ class SignalLedger:
 
         return round(priority, 2)
 
-    def record_tdx_signal(self, sig_dict: dict, row=None):
+    def record_tdx_signal(self, sig_dict: dict, row=None, observed_at=None):
         """记录来自通达信 / OrderMon 的外部实时信号
-        
-        - 自动赋予 +150 分提权，在 WATCH / RADAR 池中自动靠前置顶
-        - 自动赋予 TDX 标签 (如 🔔 TDX 5上10)
-        - 自动提升至 WATCH 监控池
+
+        [P1 主干物理收敛]:
+        废除内部旁路直写，自动委托至绑定的 LedgerUpdateService.update_tdx 单一入口。
         """
         if not sig_dict or not isinstance(sig_dict, dict):
             return None
-
-        code = sig_dict.get('code')
-        if not code:
-            return None
-
-        name = sig_dict.get('name', code)
-        price = sig_dict.get('price', 0.0)
-        flag_label = sig_dict.get('flag_label', 'TDX信号')
-        direction_cn = sig_dict.get('direction_cn', '买入')
-
-        # 偏离度回退计算
-        dev = 0.0
-        pct = 0.0
-        if row is not None:
-            pct = float(row.get('percent', 0.0)) if 'percent' in row else 0.0
-            dev = float(row.get('dff', 0.0)) if 'dff' in row else 0.0
-
-        period_cn = sig_dict.get('period_cn', '')
-        period_str = f"[{period_cn}] " if period_cn else ""
-        
-        tag_str = f"🔔 TDX {period_str}{flag_label}"
-        entry = self.record_signal(
-            code=code,
-            name=name,
-            price=price,
-            pct=pct,
-            deviation=dev,
-            row=row,
-            signal_source='TDX',
-            signal_tag='🔔'
-        )
-        if entry:
-            entry.tdx_label = tag_str
-            entry.tdx_price = price
-            entry.tdx_time_str = sig_dict.get('time_str', '')
-            entry.signal_tag = '🔔'
-            entry.tdx_boost = 150.0  # 通达信实盘信号提权 150 分
-            entry.promote('WATCH', reason=f'通达信实盘信号: {period_str}{flag_label} ({direction_cn})')
-            try:
-                print(f"[SignalLedger] 已锁定通达信信号: {code} ({name}) {entry.tdx_label} 提权至 {entry.priority_score:.1f}分")
-            except Exception:
-                pass
-
-        return entry
+        service = self.get_update_service()
+        try:
+            print(f"[SignalLedger][BYPASS_PREVENTED] record_tdx_signal 旁路已收敛至 LedgerUpdateService.update_tdx (code={sig_dict.get('code')})")
+        except Exception:
+            pass
+        result = service.update_tdx(sig_dict, row=row, observed_at=observed_at)
+        return result.entry
 
     def _check_auto_promote(self, entry, row):
         """检查是否满足从 RADAR 自动晋级到 WATCH 的条件

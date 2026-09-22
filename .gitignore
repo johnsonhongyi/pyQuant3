@@ -187,3 +187,5 @@ stock_standalone/.agent_hub/*
 /tests/
 stock_standalone/.agent_hub_runtime/*
 stock_standalone/.pytest_tmp/*
+stock_standalone/tests/*
+!stock_standalone/tests/test_*.py
