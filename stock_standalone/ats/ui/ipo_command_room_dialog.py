@@ -163,7 +163,11 @@ class IPOCommandRoomTableWidget(QTableWidget):
         cfg = self._mode_configs.get(mode, {})
         self._config_key = cfg.get("config_key")
         self._default_widths = cfg.get("default_widths")
+        # 表格通常在父布局尚未完成时注册持久化。立即恢复会被后续布局（尤其是
+        # stretch/viewport 计算）覆盖，因此同步恢复一次后，在事件循环空闲时再
+        # 应用一次，确保用户保存的列宽成为最终状态。
         self.restore_column_widths()
+        QTimer.singleShot(0, self.restore_column_widths)
 
     def setup_persistence(self, config_key: str, default_widths: Optional[List[int]] = None, max_widths=None):
         """单模式兼容入口：接入全系统统一标准持久化体系"""
@@ -723,7 +727,9 @@ class IPOCommandRoomDialog(QDialog):
         self.tbl_rank.setColumnCount(8)
         self.tbl_rank.setHorizontalHeaderLabels(["排名", "代码", "名称", "现价", "动能分", "启动时点", "角色", "集中仲裁与山外有山决议"])
         self.tbl_rank.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        self.tbl_rank.horizontalHeader().setStretchLastSection(True)
+        # 持久化列宽必须由 Interactive 模式完全控制；stretchLastSection 会在
+        # 布局和刷新时重新计算最后一列宽度，导致保存的布局看起来没有生效。
+        self.tbl_rank.horizontalHeader().setStretchLastSection(False)
         self.tbl_rank.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.tbl_rank.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._bind_table_interactions(self.tbl_rank)
@@ -769,7 +775,8 @@ class IPOCommandRoomDialog(QDialog):
         self.tbl_pos.setColumnCount(7)
         self.tbl_pos.setHorizontalHeaderLabels(["代码", "名称", "股数", "成本价", "现价", "浮盈%", "状态"])
         self.tbl_pos.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        self.tbl_pos.horizontalHeader().setStretchLastSection(True)
+        # 同上：活跃持仓的列宽由持久化状态控制，不能让最后一列自动拉伸覆盖它。
+        self.tbl_pos.horizontalHeader().setStretchLastSection(False)
         self.tbl_pos.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.tbl_pos.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._bind_table_interactions(self.tbl_pos)
@@ -1305,6 +1312,9 @@ class IPOCommandRoomDialog(QDialog):
             self.tbl_pos.setColumnCount(7)
             self.tbl_pos.setHorizontalHeaderLabels(["代码", "名称", "平仓日", "成本价", "平仓价", "实际盈亏%", "离场原因与复盘"])
             self.grp_pos.setTitle("📜 舰队历史平仓战绩回溯 (双击行调出完整迭代复盘)")
+        # 切换视图会重新设置表头；再次延迟恢复，避免 QTableWidget 重建列后
+        # 把已保存的活跃持仓布局覆盖掉。
+        QTimer.singleShot(0, self.tbl_pos.restore_column_widths)
         self.refresh_data()
 
     def _apply_orders_table_mode(self, mode: str):
@@ -1655,6 +1665,13 @@ class IPOCommandRoomDialog(QDialog):
         sort_col_pos = hv_pos.sortIndicatorSection() if hv_pos.isSortIndicatorShown() else -1
         sort_order_pos = hv_pos.sortIndicatorOrder() if hv_pos.isSortIndicatorShown() else Qt.SortOrder.AscendingOrder
 
+        # 防光标跳动：保存当前滚动位置与选中代码
+        _pos_prev_scroll = self.tbl_pos.verticalScrollBar().value()
+        _pos_prev_row = self.tbl_pos.currentRow()
+        _pos_prev_code = ""
+        if _pos_prev_row >= 0:
+            _pos_prev_code = self._extract_code_from_table(self.tbl_pos, _pos_prev_row)
+
         self.tbl_pos.setSortingEnabled(False)
         if self._pos_view_mode == "ACTIVE":
             self.tbl_pos.setRowCount(len(holdings))
@@ -1697,6 +1714,18 @@ class IPOCommandRoomDialog(QDialog):
         self.tbl_pos.setSortingEnabled(True)
         if sort_col_pos >= 0:
             self.tbl_pos.sortItems(sort_col_pos, sort_order_pos)
+
+        # 防光标跳动：排序后恢复选中行与滚动位置
+        self.tbl_pos.blockSignals(True)
+        if _pos_prev_code:
+            for r in range(self.tbl_pos.rowCount()):
+                if self._extract_code_from_table(self.tbl_pos, r) == _pos_prev_code:
+                    self.tbl_pos.setCurrentCell(r, 0)
+                    break
+        elif 0 <= _pos_prev_row < self.tbl_pos.rowCount():
+            self.tbl_pos.setCurrentCell(_pos_prev_row, 0)
+        self.tbl_pos.verticalScrollBar().setValue(_pos_prev_scroll)
+        self.tbl_pos.blockSignals(False)
 
         # ── 3. 刷新待执行指令清单或历史信号日志 ──
         directives = self.trading_center.get_pending_directives()
@@ -1768,7 +1797,15 @@ class IPOCommandRoomDialog(QDialog):
         sort_col_orders = hv_orders.sortIndicatorSection() if hv_orders.isSortIndicatorShown() else -1
         sort_order_orders = hv_orders.sortIndicatorOrder() if hv_orders.isSortIndicatorShown() else Qt.SortOrder.AscendingOrder
 
+        # 防光标跳动：保存当前滚动位置与选中代码
+        _ord_prev_scroll = self.tbl_orders.verticalScrollBar().value()
+        _ord_prev_row = self.tbl_orders.currentRow()
+        _ord_prev_code = ""
+        if _ord_prev_row >= 0:
+            _ord_prev_code = self._extract_code_from_table(self.tbl_orders, _ord_prev_row)
+
         self.tbl_orders.setSortingEnabled(False)
+
         if self._orders_view_mode == "PENDING":
             self.tbl_orders.setRowCount(len(directives))
             for r, d in enumerate(directives):
@@ -2014,6 +2051,18 @@ class IPOCommandRoomDialog(QDialog):
         self.tbl_orders.setSortingEnabled(True)
         if sort_col_orders >= 0:
             self.tbl_orders.sortItems(sort_col_orders, sort_order_orders)
+
+        # 防光标跳动：排序后恢复选中行与滚动位置
+        self.tbl_orders.blockSignals(True)
+        if _ord_prev_code:
+            for r in range(self.tbl_orders.rowCount()):
+                if self._extract_code_from_table(self.tbl_orders, r) == _ord_prev_code:
+                    self.tbl_orders.setCurrentCell(r, 0)
+                    break
+        elif 0 <= _ord_prev_row < self.tbl_orders.rowCount():
+            self.tbl_orders.setCurrentCell(_ord_prev_row, 0)
+        self.tbl_orders.verticalScrollBar().setValue(_ord_prev_scroll)
+        self.tbl_orders.blockSignals(False)
 
     def eventFilter(self, obj, event):
         """【领头羊标签点击联动】拦截 lbl_leader 鼠标点击，定位龙头股并联动通达信"""
