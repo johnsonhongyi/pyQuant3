@@ -214,7 +214,7 @@ class LedgerUpdateWorker(QThread):
                         elif is_c_swing:
                             s_tag = '📈 上升通道'
 
-                        self._ledger_update_service.update_candidate(
+                        self._ledger_update_service.update_snapshot(
                             code=code_str, name=name, price=price, pct=pct,
                             deviation=deviation, row=row, volume_score=vol_score,
                             source='FAVORITE' if is_fav else 'ATS',
@@ -5038,7 +5038,7 @@ class ATSMainWindow(QMainWindow):
                     s_tag = '📈 上升通道'
 
                 # 写入信号账本（新信号锁定首次发现时间，已有信号仅更新最新数据）
-                self.ledger_update_service.update_candidate(
+                self.ledger_update_service.update_snapshot(
                     code=code_str,
                     name=name,
                     price=price,
