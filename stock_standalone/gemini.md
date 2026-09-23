@@ -1,4 +1,17 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
+## 2026-09-23 16:30
+- [x] **【SBC 底部提示单双行抖动根治、重点数字涨红跌绿高亮与 Alt 切换新窗屏幕亲和度落地】(`ats/ui/intraday_strategy_dialog.py`, `tests/test_sbc_screen_affinity_and_lbl_fixes.py`, `20260923_1630_task.md`)**：
+    - [x] **底部提示信息单双行抖动彻底根治**：禁用 `lbl_info` 的 `wordWrap`，设置固定高度 `setFixedHeight(22)`（与快速切码下拉框严格对齐），设置尺寸策略 `Expanding, Fixed` 与居中偏左对齐；长提示全量写入 `setToolTip`，彻底消除折行撑高与窗口尺寸/图表上下跳动；
+    - [x] **重点数字涨红跌绿高亮与高区分度呈现**：
+        - 全自动策略回测提示：交易笔数以醒目青蓝 `<font color='#38bdf8'><b>{t_cnt}</b></font>` 高亮；胜率按 A 股规则区分：$\ge 50\%$ 显示亮红 `<font color='#ef4444'><b>{win_r:.1f}%</b></font>`，$< 50\%$ 显示亮绿 `<font color='#22c55e'><b>{win_r:.1f}%</b></font>`；
+        - R 键自动测算：得分按梯级着色，介入价亮红、动态止损亮绿、目标价1琥珀金；
+        - 通道回测与周期轮转：标的代码与周期模式青蓝加粗高亮，置顶状态醒目翠绿高亮；
+    - [x] **Alt 切换新窗口屏幕感知与就地平铺重排**：
+        - 在 `_open_new_sbc_and_rearrange` 中通过 `self.screen()`、相交检测与几何中心点精准提取当前 SBC 所在物理显示器；
+        - 向 `open_sbc_chart_dialog` 与 `SBCIntradayChartDialog.__init__` 传递 `target_screen`，并在 `_restore_sbc_geometry` 中实施屏幕亲和对齐，新窗口 100% 诞生在操盘手当前注视的屏幕中；
+        - 遇到已打开标的，若在其他屏幕，自动拉入当前屏幕并激活；随后在当前屏幕触发 `rearrange_all_sbc_windows`，新旧窗口在当前屏幕就地平铺重排，绝不盲目跳回主屏幕；
+    - [x] **全量自动化验证 100% 绿灯**：专项测试 3/3 纯绿通过，核心回归测试 15/15 全部通过，compileall 编译零错误。
+
 ## 2026-09-23 14:35
 - [x] **【打包旧版 EXE 自动归档与最近 7 天生命周期管理落地（支持 .spec 自适应）】(`C:\Users\Johnson\instock-pyinstall-ats-exe.cmd`, `C:\Users\Johnson\instock-pyinstall-to-exe.cmd`, `tools/archive_build_exe.py`, `tests/test_archive_build_exe.py`, `20260923_1435_task.md`)**：
     - [x] **.spec 配置文件全自动自适应推导 (`resolve_target_from_spec`)**：命令行支持 `--spec <spec_file>` 或向 `--target` 传入 `.spec`，工具自动解析 `EXE(..., name='...')` 获取真实 exe 名字（如 `ats.spec` -> `ATS_Terminal.exe`、`instock_MonitorTK.spec` -> `instock_MonitorTK.exe`），未指定时安全回退 spec 文件主干，彻底免除硬编码；
