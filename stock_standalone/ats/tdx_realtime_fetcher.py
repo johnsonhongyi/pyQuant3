@@ -598,6 +598,7 @@ class TDXGlobalCachePool:
         records: List[Dict[str, Any]],
         today_str: str,
         days: int,
+        code: str = "",
     ) -> Tuple[List[Dict[str, Any]], bool]:
         """
         【单一职责：记录级多层校验与原地修复】
@@ -719,6 +720,7 @@ class TDXGlobalCachePool:
             0 < float(r.get("bar_vol", 0.0)) < float(r.get("cum_vol_shares", 1e18))
             for r in cleaned
         )
+        is_index = normalize_tdx_target(code)[0] if code else False
         cum_vol = 0.0
         cum_amt = 0.0
         final: List[Dict[str, Any]] = []
@@ -744,9 +746,15 @@ class TDXGlobalCachePool:
 
             # VWAP 合法性修正（用记录自身累计字段，而非局部重建的 cum_vol）
             vw = float(r.get("vwap", p))
+            cv = float(r.get("cum_vol_shares", 0.0))
+            ca = float(r.get("cum_amt", 0.0))
+            if not is_index and cv > 0 and ca > 0:
+                expected_vwap = ca / cv
+                if p * 0.5 <= expected_vwap <= p * 2.0 and abs(vw - expected_vwap) > max(0.02, expected_vwap * 0.001):
+                    vw = round(expected_vwap, 2)
+                    r["vwap"] = vw
+                    repaired = True
             if p > 0 and (vw < p * 0.5 or vw > p * 2.0):
-                cv = float(r.get("cum_vol_shares", 0.0))
-                ca = float(r.get("cum_amt", 0.0))
                 if cv > 0 and ca > 0:
                     vw = round(ca / cv, 2)
                     if vw < p * 0.5 or vw > p * 2.0:
@@ -765,6 +773,61 @@ class TDXGlobalCachePool:
 
         return final, repaired
 
+    @staticmethod
+    def _has_complete_sessions(records: List[Dict[str, Any]], expected_days: int) -> bool:
+        """Only complete minute sessions may form a multi-day VWAP baseline."""
+        sessions: Dict[str, set] = {}
+        for row in records:
+            day = str(row.get("date", ""))
+            minute = str(row.get("time_only", ""))
+            if len(day) != 10 or not re.fullmatch(r"\d{2}:\d{2}", minute):
+                return False
+            sessions.setdefault(day, set()).add(minute)
+        if len(sessions) != expected_days:
+            return False
+        for minutes in sessions.values():
+            ordered = sorted(minutes)
+            if len(ordered) < 220 or ordered[0] > "09:40" or ordered[-1] < "14:50":
+                return False
+            morning = [int(t[:2]) * 60 + int(t[3:]) for t in ordered if "09:30" <= t <= "11:30"]
+            afternoon = [int(t[:2]) * 60 + int(t[3:]) for t in ordered if "13:00" <= t <= "15:00"]
+            if (not morning or not afternoon or
+                any(b - a > 5 for segment in (morning, afternoon)
+                    for a, b in zip(segment, segment[1:]))):
+                return False
+        return True
+
+    @classmethod
+    def _has_complete_frame(cls, df: pd.DataFrame, days: int, today_str: str,
+                            require_today: bool = False, code: str = "") -> bool:
+        required = {"date", "time_only", "vwap", "close", "cum_vol_shares", "cum_amt"}
+        if not isinstance(df, pd.DataFrame) or df.empty or not required.issubset(df.columns):
+            return False
+        dates = df["date"].astype(str)
+        history = df.loc[dates < today_str, ["date", "time_only"]].to_dict("records")
+        if days > 1 and not cls._has_complete_sessions(history, days - 1):
+            return False
+        if require_today and today_str not in set(dates):
+            return False
+        price = pd.to_numeric(df["close"], errors="coerce")
+        vwap = pd.to_numeric(df["vwap"], errors="coerce")
+        volume = pd.to_numeric(df["cum_vol_shares"], errors="coerce")
+        amount = pd.to_numeric(df["cum_amt"], errors="coerce")
+        is_index = normalize_tdx_target(code)[0] if code else False
+        if (not np.isfinite(price.to_numpy()).all() or not np.isfinite(vwap.to_numpy()).all()
+            or not np.isfinite(volume.to_numpy()).all() or not np.isfinite(amount.to_numpy()).all()
+            or (price <= 0).any() or (vwap < price * 0.5).any() or (vwap > price * 2).any()
+            or (volume < 0).any() or (amount < 0).any()
+            or volume.iloc[-1] <= 0 or (not is_index and amount.iloc[-1] <= 0)
+            or (volume.diff().dropna() < -0.01).any() or (amount.diff().dropna() < -0.01).any()):
+            return False
+        if code and not is_index:
+            expected_vwap = amount / volume.replace(0, np.nan)
+            valid = (volume > 0) & (amount > 0)
+            if (valid & ((vwap - expected_vwap).abs() > np.maximum(0.03, expected_vwap * 0.005))).any():
+                return False
+        return True
+
     def _validate_history_entry(self, code: str, entry: Dict[str, Any], today_str: str) -> bool:
         """
         【分区级：静态历史 entry 合法性门禁】
@@ -776,6 +839,14 @@ class TDXGlobalCachePool:
         if not records:
             return False
         days = int(entry.get("days", 10))
+        if not self._has_complete_sessions(records, max(1, days - 1)):
+            logger.debug(f"[AutoRepair] {code} 历史分时交易日/分钟缺失，丢弃并重新拉取")
+            return False
+        last = records[-1]
+        if (safe_float(last.get("cum_vol_shares")) <= 0 or
+            (not normalize_tdx_target(code)[0] and safe_float(last.get("cum_amt")) <= 0)):
+            logger.debug(f"[AutoRepair] {code} 历史累计成交量/金额缺失，丢弃并重新拉取")
+            return False
 
         # 日期合法性：缓存日期距今不超过 30 个自然日（避免极旧数据污染）
         entry_date = str(entry.get("date", ""))
@@ -816,6 +887,18 @@ class TDXGlobalCachePool:
         df = entry.get("df")
         if df is None or (isinstance(df, pd.DataFrame) and df.empty):
             return False
+        days = int(entry.get("days", key[1] if isinstance(key, tuple) else 1))
+        cache_day = str(entry.get("date") or today_str)
+        code = key[0] if isinstance(key, tuple) else str(key)
+        if not self._has_complete_frame(df, days, cache_day, code=code):
+            logger.debug(f"[AutoRepair] {key} 增量分时历史覆盖不完整，丢弃并重新拉取")
+            return False
+        if (entry.get("frozen") or cache_day < today_str or
+            (cache_day == today_str and datetime.now().strftime("%H:%M") >= "15:05")):
+            closed = df.loc[df["date"].astype(str) == cache_day, ["date", "time_only"]].to_dict("records")
+            if not self._has_complete_sessions(closed, 1):
+                logger.debug(f"[AutoRepair] {key} 收盘快照缺失，丢弃并重新拉取")
+                return False
 
         # 累计量金额熔断
         l_amt = float(entry.get("last_cum_amt", 0.0))
@@ -914,13 +997,17 @@ class TDXGlobalCachePool:
                 remote_hist = payload.get("history_static_bars", {})
                 if isinstance(remote_hist, dict):
                     for k, v in remote_hist.items():
-                        if not self._validate_history_entry(k, v, today_str):
+                        if not isinstance(v, dict) or not isinstance(v.get("records"), list):
                             skipped_count += 1
                             continue
                         # 记录级自愈修复
-                        repaired_recs, was_repaired = self._validate_and_repair_records(
-                            v.get("records", []), today_str, int(v.get("days", 10))
-                        )
+                        try:
+                            repaired_recs, was_repaired = self._validate_and_repair_records(
+                                v["records"], today_str, int(v.get("days", 10)), k
+                            )
+                        except (TypeError, ValueError, AttributeError):
+                            skipped_count += 1
+                            continue
                         if not repaired_recs:
                             skipped_count += 1
                             continue
@@ -932,7 +1019,13 @@ class TDXGlobalCachePool:
                                 last_r = repaired_recs[-1]
                                 v["last_cum_vol"] = float(last_r.get("cum_vol_shares", v.get("last_cum_vol", 0.0)))
                                 v["last_cum_amt"] = float(last_r.get("cum_amt", v.get("last_cum_amt", 0.0)))
+                                if normalize_tdx_target(k)[0]:
+                                    v["last_cum_pv"] = sum(safe_float(r.get("close")) * safe_float(r.get("bar_vol")) for r in repaired_recs)
                             repaired_count += 1
+                        if not self._validate_history_entry(k, v, today_str):
+                            skipped_count += 1
+                            continue
+                        v["_quality_len"] = len(v["records"])
                         local_entry = self._history_static_bars.get(k)
                         if local_entry is None or v.get("updated_at", 0) > local_entry.get("updated_at", 0):
                             self._history_static_bars[k] = v
@@ -944,6 +1037,7 @@ class TDXGlobalCachePool:
                         if not self._validate_incremental_entry(k, v, today_str):
                             skipped_count += 1
                             continue
+                        v["_quality_len"] = len(v["df"])
                         local_inc = self._incremental_intraday_pool.get(k)
                         if local_inc is None or v.get("updated_at", 0) > local_inc.get("updated_at", 0):
                             self._incremental_intraday_pool[k] = v
@@ -1211,6 +1305,14 @@ class TDXGlobalCachePool:
                 and entry.get("date") == self._current_date_str 
                 and entry.get("days") == days
                 and bool(entry.get("records"))):
+                if entry.get("_quality_len") != len(entry["records"]):
+                    if not self._validate_history_entry(c_clean, entry, self._current_date_str):
+                        self._history_static_bars.pop(c_clean, None)
+                        self._incremental_intraday_pool.pop((c_clean, days), None)
+                        self._multi_day_df_cache.pop((c_clean, days), None)
+                        self._is_dirty = True
+                        return None
+                    entry["_quality_len"] = len(entry["records"])
                 self.stats["cache_hits"] += 1
                 # 命中前 9 天静态数据，意味着省去了 2 次拉取历史数据的网络请求
                 self.stats["saved_network_calls"] += max(1, min(3, (days * 240 + 799) // 800 - 1))
@@ -1224,6 +1326,14 @@ class TDXGlobalCachePool:
                 and entry.get("date") == self._current_date_str 
                 and entry.get("days") == days
                 and bool(entry.get("records"))):
+                if entry.get("_quality_len") != len(entry["records"]):
+                    if not self._validate_history_entry(c_clean, entry, self._current_date_str):
+                        self._history_static_bars.pop(c_clean, None)
+                        self._incremental_intraday_pool.pop((c_clean, days), None)
+                        self._multi_day_df_cache.pop((c_clean, days), None)
+                        self._is_dirty = True
+                        return None
+                    entry["_quality_len"] = len(entry["records"])
                 self.stats["cache_hits"] += 1
                 self.stats["saved_network_calls"] += max(1, min(3, (days * 240 + 799) // 800 - 1))
                 return entry
@@ -1235,9 +1345,13 @@ class TDXGlobalCachePool:
         today_str = self._current_date_str
 
         # ── 写入前过校验与自愈修复（杜绝重启中断导致的脏记录落库）──
-        cleaned_records, was_repaired = self._validate_and_repair_records(list(records), today_str, int(days))
+        cleaned_records, was_repaired = self._validate_and_repair_records(list(records), today_str, int(days), c_clean)
         if not cleaned_records:
             logger.debug(f"[AutoRepair] {c_clean} 静态历史 records 全部无效，跳过写入")
+            return
+        if not self._validate_history_entry(c_clean, {"date": today_str, "days": days,
+                                                       "records": cleaned_records}, today_str):
+            logger.warning(f"[AutoRepair] {c_clean} 历史分时不完整，跳过持久化并等待全量重拉")
             return
         if was_repaired:
             logger.debug(f"[AutoRepair] {c_clean} 静态历史 records 自愈修复，共 {len(cleaned_records)} 条")
@@ -1245,12 +1359,15 @@ class TDXGlobalCachePool:
             last_r = cleaned_records[-1]
             last_cum_vol = float(last_r.get("cum_vol_shares", last_cum_vol))
             last_cum_amt = float(last_r.get("cum_amt", last_cum_amt))
+            if normalize_tdx_target(c_clean)[0]:
+                last_cum_pv = sum(safe_float(r.get("close")) * safe_float(r.get("bar_vol")) for r in cleaned_records)
 
         with self._mutex:
             self._history_static_bars[c_clean] = {
                 "date": today_str,
                 "days": days,
                 "records": cleaned_records,
+                "_quality_len": len(cleaned_records),
                 "last_cum_vol": float(last_cum_vol),
                 "last_cum_amt": float(last_cum_amt),
                 "last_cum_pv": float(last_cum_pv),
@@ -1306,6 +1423,21 @@ class TDXGlobalCachePool:
                 ts = entry.get("updated_at", 0.0)
                 is_frozen = entry.get("frozen", False) or is_after_close
                 if df is not None and not df.empty:
+                    if entry.get("_quality_len") != len(df):
+                        if not self._validate_incremental_entry(key, entry, self._current_date_str):
+                            self._incremental_intraday_pool.pop(key, None)
+                            self._multi_day_df_cache.pop(key, None)
+                            self._is_dirty = True
+                            return None
+                        entry["_quality_len"] = len(entry["df"])
+                        df = entry["df"]
+                    if is_frozen and entry.get("_closed_quality_len") != len(df):
+                        if not self._validate_incremental_entry(key, entry, self._current_date_str):
+                            self._incremental_intraday_pool.pop(key, None)
+                            self._multi_day_df_cache.pop(key, None)
+                            self._is_dirty = True
+                            return None
+                        entry["_closed_quality_len"] = len(df)
                     # 收盘后或在 TTL 内直接 0ms 纯内存命中
                     if is_frozen or (time.time() - ts < ttl):
                         self.stats["total_queries"] += 1
@@ -1322,6 +1454,21 @@ class TDXGlobalCachePool:
                 ts = entry.get("updated_at", 0.0)
                 is_frozen = entry.get("frozen", False) or is_after_close
                 if df is not None and not df.empty:
+                    if entry.get("_quality_len") != len(df):
+                        if not self._validate_incremental_entry(key, entry, self._current_date_str):
+                            self._incremental_intraday_pool.pop(key, None)
+                            self._multi_day_df_cache.pop(key, None)
+                            self._is_dirty = True
+                            return None
+                        entry["_quality_len"] = len(entry["df"])
+                        df = entry["df"]
+                    if is_frozen and entry.get("_closed_quality_len") != len(df):
+                        if not self._validate_incremental_entry(key, entry, self._current_date_str):
+                            self._incremental_intraday_pool.pop(key, None)
+                            self._multi_day_df_cache.pop(key, None)
+                            self._is_dirty = True
+                            return None
+                        entry["_closed_quality_len"] = len(df)
                     if is_frozen or (time.time() - ts < ttl):
                         self.stats["total_queries"] += 1
                         self.stats["cache_hits"] += 1
@@ -1343,6 +1490,16 @@ class TDXGlobalCachePool:
         current_hm = datetime.now().strftime("%H:%M")
         is_after_close = (current_hm >= "15:05")
         today_str = self._current_date_str
+
+        if not self._has_complete_frame(df, int(days), today_str,
+                                        require_today=("09:30" <= current_hm <= "15:05"), code=c_clean):
+            logger.warning(f"[AutoRepair] {c_clean} 增量分时覆盖不完整，跳过持久化")
+            return
+        if is_after_close:
+            closed = df.loc[df["date"].astype(str) == today_str, ["date", "time_only"]].to_dict("records")
+            if not self._has_complete_sessions(closed, 1):
+                logger.warning(f"[AutoRepair] {c_clean} 收盘分时不完整，跳过持久化")
+                return
 
         # ── 入口校验：累计量金额异常直接跳过（避免错误基线污染后续增量）──
         _l_amt = float(last_cum_amt)
@@ -1370,6 +1527,7 @@ class TDXGlobalCachePool:
             if df is not None and not df.empty:
                 self._incremental_intraday_pool[key] = {
                     "df": df.copy(),
+                    "_quality_len": len(df),
                     "date": today_str,
                     "days": days,
                     "latest_bar_time": str(latest_bar_time),
@@ -1504,7 +1662,7 @@ class TDXGlobalCachePool:
                     report["skipped_history"] += 1
                     continue
                 recs, was_repaired = self._validate_and_repair_records(
-                    entry.get("records", []), today_str, int(entry.get("days", 10))
+                    entry.get("records", []), today_str, int(entry.get("days", 10)), k
                 )
                 if not recs:
                     self._history_static_bars.pop(k, None)
@@ -1516,6 +1674,8 @@ class TDXGlobalCachePool:
                     last_r = recs[-1]
                     new_entry["last_cum_vol"] = float(last_r.get("cum_vol_shares", entry.get("last_cum_vol", 0.0)))
                     new_entry["last_cum_amt"] = float(last_r.get("cum_amt", entry.get("last_cum_amt", 0.0)))
+                    if normalize_tdx_target(k)[0]:
+                        new_entry["last_cum_pv"] = sum(safe_float(r.get("close")) * safe_float(r.get("bar_vol")) for r in recs)
                     self._history_static_bars[k] = new_entry
                     report["repaired_history"] += 1
 
@@ -3103,7 +3263,7 @@ class TDXRealtimeFetcher:
             with self._conn_lock:
                 if not self._is_connected or self.api is None:
                     if not self.connect():
-                        return _static_history_frame()
+                        return pd.DataFrame() if can_rollover else _static_history_frame()
                 try:
                     if is_idx:
                         bars = self.api.get_index_bars(8, mkt, c_target, 0, 800) or []
@@ -3158,7 +3318,7 @@ class TDXRealtimeFetcher:
                             bars = None
 
             if not bars:
-                return _static_history_frame()
+                return pd.DataFrame() if can_rollover else _static_history_frame()
 
             df = pd.DataFrame(bars)
             if df.empty or "datetime" not in df.columns:
@@ -3166,6 +3326,34 @@ class TDXRealtimeFetcher:
 
             df["date_str"] = df["datetime"].astype(str).str[:10]
             df["time_str"] = df["datetime"].astype(str).str[11:16]
+
+            # TDX may return a successful but truncated page. Never turn that page
+            # into a long-lived VWAP baseline or a frozen close snapshot.
+            if can_rollover:
+                history_days = sorted(d for d in df["date_str"].unique() if d < today_date_str)
+                needed_history = 0 if has_valid_hist else max(0, days - 1)
+                history_rows = df[df["date_str"].isin(history_days[-needed_history:])].copy() if needed_history else pd.DataFrame()
+                if needed_history:
+                    history_rows.rename(columns={"date_str": "date", "time_str": "time_only"}, inplace=True)
+                if (today_date_str not in set(df["date_str"]) or
+                    (needed_history and not self.cache_pool._has_complete_sessions(
+                        history_rows[["date", "time_only"]].to_dict("records"), needed_history))):
+                    logger.warning(f"[AutoRepair] {c_clean} TDX 分时分页缺失，拒绝缓存并等待重拉")
+                    return pd.DataFrame()
+                now_hm = datetime.now().strftime("%H:%M")
+                today_minutes = df.loc[df["date_str"] == today_date_str, "time_str"]
+                if now_hm >= "15:05" and not self.cache_pool._has_complete_sessions(
+                    df.loc[df["date_str"] == today_date_str, ["date_str", "time_str"]]
+                    .rename(columns={"date_str": "date", "time_str": "time_only"}).to_dict("records"), 1):
+                    logger.warning(f"[AutoRepair] {c_clean} 收盘分时不完整，等待重拉")
+                    return pd.DataFrame()
+                if ("09:45" <= now_hm <= "11:30" or "13:15" <= now_hm <= "15:00") and not today_minutes.empty:
+                    last_minute = max(today_minutes)
+                    now_minute = int(now_hm[:2]) * 60 + int(now_hm[3:])
+                    bar_minute = int(last_minute[:2]) * 60 + int(last_minute[3:])
+                    if now_minute - bar_minute > 15:
+                        logger.warning(f"[AutoRepair] {c_clean} TDX 当日分钟数据滞后，等待重拉")
+                        return pd.DataFrame()
 
             # 3. 分支 A: 若命中历史静态缓存，执行【当日时间戳增量比对与合并】
             if has_valid_hist and days > 1:

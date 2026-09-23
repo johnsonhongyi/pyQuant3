@@ -169,10 +169,6 @@ def _voice_worker(q: Queue, stop_event: threading.Event, interrupt_event: thread
             if current_state is not None:
                 current_state['key'] = str(key) if key else ""
 
-            if pythoncom:
-                try: pythoncom.CoInitialize()
-                except: pass
-            
             # ⭐ Final JIT Check before Engine Start
             while not cancel_q.empty():
                 try: cancelled_set.add(cancel_q.get_nowait())
@@ -211,9 +207,6 @@ def _voice_worker(q: Queue, stop_event: threading.Event, interrupt_event: thread
                 if is_voice_on:
                     try:
                         import win32com.client
-                        if pythoncom:
-                            try: pythoncom.CoInitialize()
-                            except: pass
                         
                         # [CORE] 直接使用 SAPI.SpVoice 直连，避免 pyttsx3 的 Event 触发 GIL/thread state NULL 崩溃
                         speaker = win32com.client.Dispatch("SAPI.SpVoice")
@@ -650,8 +643,24 @@ class AlertManager:
         if self.voice_enabled and self.process and self.process.is_alive():
             try:
                 q_size = self.voice_queue.qsize()
-                if q_size > 50 and not is_high:
-                    return
+                if q_size >= 50:
+                    # 丢弃较旧的同级/低优先级待播报项，给新报警留出位置。
+                    # 旧项优先级更高时保留旧项，避免普通信号挤掉风险报警。
+                    try:
+                        dropped = self.voice_queue.get_nowait()
+                    except Empty:
+                        dropped = None
+
+                    dropped_priority = dropped.get('priority', 2) if isinstance(dropped, dict) else 2
+                    if dropped is not None and dropped_priority < priority:
+                        self.voice_queue.put_nowait(dropped)
+                        logger.warning(
+                            f"Voice queue full; kept higher-priority queued alert and skipped new alert: {key}"
+                        )
+                        return
+                    logger.warning(
+                        f"Voice queue full; replaced queued alert (priority={dropped_priority}) with new alert: {key}"
+                    )
 
                 item = {
                     'priority': priority,
