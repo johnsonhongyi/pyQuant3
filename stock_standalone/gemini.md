@@ -1,5 +1,20 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-09-23 10:20
+- [x] **【Antigravity 切换系统凭据打包环境零依赖加固与 EXE 重新打包构建】(`webTools/window_manager/antigravity_manager.py`, `manage_window_layout.spec`, `tests/test_antigravity_manager.py`, `dist/manage_window_layout.exe`)**：
+    - [x] **根因定位与排查确证**：
+        - 现场抓取运行进程发现用户实机运行的 `D:\JohnsonProgram\instockMonitorTK\manage_window_layout.exe` 创建时间为 `0:23`（早于我们底层的 ctypes 改造时间）；
+        - 旧版本严重依赖 `win32cred` / `win32crypt` 导致打包运行缺少 pywin32 C 扩展而抛异常，触发“未能读取系统安全凭据 gemini:antigravity”；
+    - [x] **纯 Windows 原生 API 零外部依赖全面加固**：
+        - `_capture_app_credential_snapshot` 采用 `ctypes.WinDLL("Advapi32.dll")` 的 `CredReadW` 搭配 `ctypes.string_at` 内存安全指针复制，彻底免除第三方 pywin32 丢失风险；
+        - DPAPI 保护采用原生 `Crypt32.dll` (`CryptProtectData` / `CryptUnprotectData`) + `Kernel32.dll` (`LocalFree`)，实现内存与打包层面的双重安全；
+        - `_write_generic_credential_blob` 增加 `CredWriteW` 与 `win32cred.CredWrite` 双向 fallback，记录完整 `GetLastError`；
+    - [x] **专项测试与全量回归**：
+        - 编写 `tests/test_antigravity_manager.py`（Mock pywin32 彻底移除环境下验证纯 ctypes 路径 100% 健全）；3/3 纯绿通过；全量测试集与 compileall 100% 纯绿通过；
+    - [x] **PyInstaller 重新打包构建与实操验证**：
+        - 运行 `pyinstaller manage_window_layout.spec --clean` 成功在 `stock_standalone\dist\` 构建生成最新的 `manage_window_layout.exe`（42MB）；
+        - 通过 CLI 参数 `--ag-list` 实机调用验证，打包 exe 成功加载所有账户并正常读取系统凭据。
+
 ## 2026-09-23 00:58
 - [x] **【UI 决策透出与影子实盘压测长周期守护全面落地】(`ats/universe_manager.py`, `ats/ui/swing_table.py`, `ats/ui/ipo_command_room_dialog.py`, `tools/run_shadow_live_test.py`, `tests/test_ui_decision_badges_and_shadow_runner.py`)**：
     - [x] **监控表与池子决策透出与高位回撤视觉徽章（全简短中文）**：

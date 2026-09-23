@@ -31,6 +31,8 @@ a = Analysis(
         'screeninfo', 
         'win32gui', 
         'win32con', 
+        'win32cred',
+        'win32crypt',
         'PyQt6',
         'PyQt6.QtNetwork',
         'configobj',

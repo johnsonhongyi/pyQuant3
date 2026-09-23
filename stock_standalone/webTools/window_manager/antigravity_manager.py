@@ -112,33 +112,125 @@ def _capture_app_credential_snapshot() -> dict:
     """读取当前 App 系统凭据并用当前 Windows 用户的 DPAPI 再加密保存。"""
     if sys.platform != "win32":
         return {}
+    import base64
+    import ctypes
+    from ctypes import wintypes
+
+    raw_bytes = None
+    username = ""
+    persist = 2
+
+    # 1. 优先使用 Windows 原生 Advapi32.dll CredReadW (对 PyInstaller 打包环境 100% 免疫，无需任何外部依赖)
     try:
-        import base64
-        import win32cred
-        import win32crypt
-        cred = win32cred.CredRead(
-            APP_CREDENTIAL_TARGET, win32cred.CRED_TYPE_GENERIC, 0
-        )
-        blob = cred.get("CredentialBlob")
-        if isinstance(blob, str):
-            blob = blob.encode("utf-16-le")
-        elif isinstance(blob, memoryview):
-            blob = blob.tobytes()
-        if not blob:
-            return {}
-        protected = win32crypt.CryptProtectData(
-            bytes(blob),
+        advapi32 = ctypes.WinDLL("Advapi32.dll", use_last_error=True)
+
+        class CREDENTIALW_READ(ctypes.Structure):
+            _fields_ = [
+                ("Flags", wintypes.DWORD),
+                ("Type", wintypes.DWORD),
+                ("TargetName", wintypes.LPWSTR),
+                ("Comment", wintypes.LPWSTR),
+                ("LastWritten", wintypes.FILETIME),
+                ("CredentialBlobSize", wintypes.DWORD),
+                ("CredentialBlob", ctypes.POINTER(ctypes.c_ubyte)),
+                ("Persist", wintypes.DWORD),
+                ("AttributeCount", wintypes.DWORD),
+                ("Attributes", ctypes.c_void_p),
+                ("TargetAlias", wintypes.LPWSTR),
+                ("UserName", wintypes.LPWSTR),
+            ]
+
+        advapi32.CredReadW.argtypes = [
+            wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+            ctypes.POINTER(ctypes.POINTER(CREDENTIALW_READ))
+        ]
+        advapi32.CredReadW.restype = wintypes.BOOL
+        advapi32.CredFree.argtypes = [ctypes.c_void_p]
+
+        pcred = ctypes.POINTER(CREDENTIALW_READ)()
+        if advapi32.CredReadW(APP_CREDENTIAL_TARGET, 1, 0, ctypes.byref(pcred)):
+            cred = pcred.contents
+            raw_bytes = ctypes.string_at(cred.CredentialBlob, cred.CredentialBlobSize)
+            username = str(cred.UserName or "")
+            persist = int(cred.Persist or 2)
+            advapi32.CredFree(pcred)
+        else:
+            last_err = ctypes.get_last_error()
+            logger.debug(f"Advapi32.CredReadW 返回 False (GetLastError={last_err})")
+    except Exception as e:
+        logger.debug(f"Advapi32.CredReadW 读取凭据异常: {e}")
+
+    # 2. 备用路径：如果 ctypes 读取失败，尝试通过 win32cred 读取
+    if not raw_bytes:
+        try:
+            import win32cred
+            cred = win32cred.CredRead(
+                APP_CREDENTIAL_TARGET, win32cred.CRED_TYPE_GENERIC, 0
+            )
+            blob = cred.get("CredentialBlob")
+            if isinstance(blob, str):
+                raw_bytes = blob.encode("utf-16-le")
+            elif isinstance(blob, memoryview):
+                raw_bytes = blob.tobytes()
+            elif blob:
+                raw_bytes = bytes(blob)
+            username = str(cred.get("UserName") or "")
+            persist = int(cred.get("Persist") or 2)
+        except Exception as e:
+            logger.debug(f"win32cred.CredRead 备用读取失败: {e}")
+
+    if not raw_bytes:
+        logger.warning(f"读取 Antigravity Windows 安全凭据失败: 未能从系统凭据管理器读取到 {APP_CREDENTIAL_TARGET}")
+        return {}
+
+    # 3. 使用 Windows 原生 Crypt32.dll CryptProtectData 进行 DPAPI 加密 (打包安全且无需 pywin32 模块依赖)
+    protected_bytes = None
+    try:
+        crypt32 = ctypes.WinDLL("Crypt32.dll", use_last_error=True)
+        kernel32 = ctypes.WinDLL("Kernel32.dll", use_last_error=True)
+
+        class DATA_BLOB(ctypes.Structure):
+            _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_byte))]
+
+        in_buf = (ctypes.c_byte * len(raw_bytes)).from_buffer_copy(raw_bytes)
+        in_blob = DATA_BLOB(len(raw_bytes), ctypes.cast(in_buf, ctypes.POINTER(ctypes.c_byte)))
+        out_blob = DATA_BLOB()
+
+        if crypt32.CryptProtectData(
+            ctypes.byref(in_blob),
             "Antigravity App account credential backup",
             None, None, None, 0,
-        )
-        return {
-            APP_PROFILE_CRED_BLOB_KEY: base64.b64encode(protected).decode("ascii"),
-            APP_PROFILE_CRED_USER_KEY: str(cred.get("UserName") or ""),
-            APP_PROFILE_CRED_PERSIST_KEY: int(cred.get("Persist") or 2),
-        }
+            ctypes.byref(out_blob)
+        ):
+            protected_bytes = ctypes.string_at(out_blob.pbData, out_blob.cbData)
+            kernel32.LocalFree(out_blob.pbData)
+        else:
+            last_err = ctypes.get_last_error()
+            logger.debug(f"Crypt32.CryptProtectData 返回 False (GetLastError={last_err})")
     except Exception as e:
-        logger.warning(f"读取 Antigravity Windows 安全凭据失败: {type(e).__name__}")
+        logger.debug(f"Crypt32.CryptProtectData 异常: {e}")
+
+    # 4. 备用 DPAPI 加密：win32crypt
+    if not protected_bytes:
+        try:
+            import win32crypt
+            protected_bytes = win32crypt.CryptProtectData(
+                raw_bytes,
+                "Antigravity App account credential backup",
+                None, None, None, 0,
+            )
+        except Exception as e:
+            logger.debug(f"win32crypt.CryptProtectData 备用加密失败: {e}")
+
+    if not protected_bytes:
+        logger.warning("对 Antigravity 安全凭据执行 DPAPI 加密失败")
         return {}
+
+    return {
+        APP_PROFILE_CRED_BLOB_KEY: base64.b64encode(protected_bytes).decode("ascii"),
+        APP_PROFILE_CRED_USER_KEY: username,
+        APP_PROFILE_CRED_PERSIST_KEY: persist,
+    }
 
 
 def _write_generic_credential_blob(target: str, username: str, blob: bytes, persist: int = 2) -> bool:
@@ -185,31 +277,86 @@ def _write_generic_credential_blob(target: str, username: str, blob: bytes, pers
         advapi32 = ctypes.WinDLL("Advapi32.dll", use_last_error=True)
         advapi32.CredWriteW.argtypes = [ctypes.POINTER(CREDENTIALW), wintypes.DWORD]
         advapi32.CredWriteW.restype = wintypes.BOOL
-        return bool(advapi32.CredWriteW(ctypes.byref(credential), 0))
+        if advapi32.CredWriteW(ctypes.byref(credential), 0):
+            return True
+        last_err = ctypes.get_last_error()
+        logger.warning(f"Advapi32.CredWriteW 返回 False (GetLastError={last_err})")
     except Exception as e:
-        logger.error(f"恢复 Antigravity Windows 安全凭据失败: {type(e).__name__}")
+        logger.debug(f"Advapi32.CredWriteW 写回异常: {e}")
+
+    # 备用路径：win32cred
+    try:
+        import win32cred
+        cred_dict = {
+            "Type": win32cred.CRED_TYPE_GENERIC,
+            "TargetName": target,
+            "UserName": str(username or ""),
+            "CredentialBlob": blob,
+            "Persist": int(persist or win32cred.CRED_PERSIST_LOCAL_MACHINE),
+        }
+        win32cred.CredWrite(cred_dict, 0)
+        return True
+    except Exception as e:
+        logger.error(f"恢复 Antigravity Windows 安全凭据失败: {e}")
         return False
 
 
 def _restore_app_credential_snapshot(profile: dict) -> bool:
     if not profile or not profile.get(APP_PROFILE_CRED_BLOB_KEY):
         return False
+    import base64
     try:
-        import base64
-        import win32crypt
         protected = base64.b64decode(profile[APP_PROFILE_CRED_BLOB_KEY])
-        _, blob = win32crypt.CryptUnprotectData(
-            protected, None, None, None, 0
-        )
-        return _write_generic_credential_blob(
-            APP_CREDENTIAL_TARGET,
-            profile.get(APP_PROFILE_CRED_USER_KEY, ""),
-            blob,
-            int(profile.get(APP_PROFILE_CRED_PERSIST_KEY, 2) or 2),
-        )
     except Exception as e:
-        logger.error(f"解密 Antigravity App 安全凭据失败: {type(e).__name__}")
+        logger.error(f"Base64 解码安全凭据快照失败: {e}")
         return False
+
+    blob = None
+
+    # 1. 优先使用 Windows 原生 Crypt32.dll CryptUnprotectData (零外部模块依赖，打包最稳)
+    try:
+        import ctypes
+        from ctypes import wintypes
+        crypt32 = ctypes.WinDLL("Crypt32.dll", use_last_error=True)
+        kernel32 = ctypes.WinDLL("Kernel32.dll", use_last_error=True)
+
+        class DATA_BLOB(ctypes.Structure):
+            _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_byte))]
+
+        in_buf = (ctypes.c_byte * len(protected)).from_buffer_copy(protected)
+        in_blob = DATA_BLOB(len(protected), ctypes.cast(in_buf, ctypes.POINTER(ctypes.c_byte)))
+        out_blob = DATA_BLOB()
+
+        if crypt32.CryptUnprotectData(
+            ctypes.byref(in_blob),
+            None, None, None, None, 0,
+            ctypes.byref(out_blob)
+        ):
+            blob = ctypes.string_at(out_blob.pbData, out_blob.cbData)
+            kernel32.LocalFree(out_blob.pbData)
+    except Exception as e:
+        logger.debug(f"Crypt32.CryptUnprotectData 解密异常: {e}")
+
+    # 2. 备用解密路径：win32crypt
+    if not blob:
+        try:
+            import win32crypt
+            _, blob = win32crypt.CryptUnprotectData(
+                protected, None, None, None, 0
+            )
+        except Exception as e:
+            logger.debug(f"win32crypt.CryptUnprotectData 备用解密失败: {e}")
+
+    if not blob:
+        logger.error("解密 Antigravity App 安全凭据失败: DPAPI 未能解密数据")
+        return False
+
+    return _write_generic_credential_blob(
+        APP_CREDENTIAL_TARGET,
+        profile.get(APP_PROFILE_CRED_USER_KEY, ""),
+        blob,
+        int(profile.get(APP_PROFILE_CRED_PERSIST_KEY, 2) or 2),
+    )
 
 
 def _has_app_credential_snapshot(profile: dict) -> bool:
