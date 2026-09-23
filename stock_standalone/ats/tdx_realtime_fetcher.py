@@ -1076,6 +1076,13 @@ class TDXGlobalCachePool:
                         f"今日 ({today_str} >= 09:15) 开盘启动滑动窗口向前自动滚动迭代..."
                     )
 
+            # VWAP 工厂仅持久化有界摘要和当前日分钟状态，不把 DataFrame 放进快照分区。
+            try:
+                from ats.vwap_factory import VWAPFactory
+                VWAPFactory.get_instance().restore_states(payload.get("vwap_states", {}))
+            except Exception as e_vwap_restore:
+                logger.debug(f"[TDXGlobalCachePool] VWAP 摘要恢复降级: {e_vwap_restore}")
+
             # 若已开盘且是跨日缓存，载入昨日数据后立即执行自动滑动窗口滚动迭代 (剔除早期数据，保留前9天基线)
             if is_cross_day:
                 self._check_date_rollover(force_from_date=cache_date)
@@ -1105,11 +1112,16 @@ class TDXGlobalCachePool:
         包含静态历史分时、时间戳增量分时、日线指标与收盘固化标记 (frozen)，写入仅需 1~2ms
         """
         now = time.time()
+        try:
+            from ats.vwap_factory import VWAPFactory
+            vwap_states = VWAPFactory.get_instance().export_states()
+        except Exception:
+            vwap_states = {}
         with self._mutex:
             if not force and (now - self._last_flush_ts < 300.0):
                 return False
 
-            if not self._history_static_bars and not self._incremental_intraday_pool and not self._shares_cache:
+            if not self._history_static_bars and not self._incremental_intraday_pool and not self._shares_cache and not vwap_states:
                 return False
 
             today_str = self._current_date_str
@@ -1120,12 +1132,13 @@ class TDXGlobalCachePool:
 
             payload = {
                 "date": today_str,
-                "version": 2,
+                "version": 3,
                 "frozen": is_after_close,
                 "history_static_bars": dict(self._history_static_bars),
                 "incremental_intraday_pool": dict(self._incremental_intraday_pool),
                 "daily_metrics_cache": dict(self._daily_metrics_cache),
                 "shares_cache": dict(self._shares_cache),
+                "vwap_states": vwap_states,
                 "updated_at": now
             }
 
@@ -1620,12 +1633,19 @@ class TDXGlobalCachePool:
                 else:
                     self._shares_cache.clear()
 
-            if partition in (None, "history", "incremental"):
-                self.flush_to_ramdisk(force=True)
+        if partition in (None, "history", "incremental"):
+            try:
+                from ats.vwap_factory import VWAPFactory
+                VWAPFactory.get_instance().clear(c_clean)
+            except Exception as e_vwap_clear:
+                logger.debug(f"[TDXGlobalCachePool] VWAP 状态清理降级: {e_vwap_clear}")
 
-            target_str = f"标的 {c_clean}" if c_clean else "全量标的"
-            part_str = f"分区 {partition}" if partition else "全部分区"
-            logger.info(f"🔄 [TDXGlobalCachePool] 已全局清空 {target_str} 的 {part_str} 缓存")
+        if partition in (None, "history", "incremental"):
+            self.flush_to_ramdisk(force=True)
+
+        target_str = f"标的 {c_clean}" if c_clean else "全量标的"
+        part_str = f"分区 {partition}" if partition else "全部分区"
+        logger.info(f"🔄 [TDXGlobalCachePool] 已全局清空 {target_str} 的 {part_str} 缓存")
 
     def diagnose_and_repair(self, code: Optional[str] = None) -> Dict[str, Any]:
         """
@@ -3567,6 +3587,18 @@ class TDXRealtimeFetcher:
         except Exception as e:
             logger.debug(f"拉取 {c_clean} 多日分时数据异常: {e}")
             return pd.DataFrame()
+
+    def fetch_multi_horizon_vwap(self, code: str) -> Tuple[pd.DataFrame, Any]:
+        """Return the shared 10-day frame and the process-wide 1/5/10-day VWAP snapshot."""
+        from ats.vwap_factory import VWAPFactory
+
+        clean_code = str(code).zfill(6)
+        frame = self.fetch_multi_day_intraday_bars(clean_code, days=10)
+        if frame is None or frame.empty:
+            return pd.DataFrame(), VWAPFactory.get_instance().get_snapshot(clean_code)
+        is_index = normalize_tdx_target(clean_code)[0]
+        snapshot = VWAPFactory.get_instance().sync_frame(clean_code, frame, is_index=is_index)
+        return frame, snapshot
 
     def fetch_kline_bars(self, code: str, category: str = "5m", count: int = 150) -> pd.DataFrame:
         """
