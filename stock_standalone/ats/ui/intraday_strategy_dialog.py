@@ -2390,6 +2390,9 @@ class SBCChartCanvas(QWidget):
 
         painter.restore()
 
+        right_axis_labels = []
+        reserved_right_y = []
+
         # 🟢 最新现价水平虚线与右侧现价高亮胶囊 (对齐通达信同款核心浮标，实时动态展现最新成交价)
         if len(prices) > 0 and prices[-1] > 0.01:
             last_p = float(prices[-1])
@@ -2405,6 +2408,7 @@ class SBCChartCanvas(QWidget):
             p_box_w = 52
             p_box_h = 16
             p_box_y = max(margin_top, min(margin_top + chart_h - p_box_h, int(y_last - p_box_h / 2)))
+            reserved_right_y.append(p_box_y + p_box_h / 2)
             painter.setPen(QPen(col_last, 1.2))
             painter.setBrush(QBrush(QColor(col_last.red(), col_last.green(), col_last.blue(), 75)))
             painter.drawRoundedRect(int(margin_left + chart_w + 2), int(p_box_y), p_box_w, p_box_h, 2, 2)
@@ -2418,46 +2422,50 @@ class SBCChartCanvas(QWidget):
             y_op = price_to_y(op_ref)
             painter.setPen(QPen(QColor("#ff4444"), 1, Qt.PenStyle.DashLine))
             painter.drawLine(margin_left, int(y_op), margin_left + chart_w, int(y_op))
-            painter.setPen(QPen(QColor("#ff4444"), 1))
-            painter.setFont(QFont("Arial", 8, QFont.Weight.Bold))
-            # 🌟 智能垂直避让：当开盘价与最新现价极度接近时，微调开盘文字 Y 坐标，避免与现价高亮胶囊文字发生重合
-            y_op_text = int(y_op + 3)
-            if len(prices) > 0 and abs(y_op - y_last) < 16:
-                if y_op >= y_last:
-                    y_op_text = int(p_box_y + p_box_h + 10)
-                else:
-                    y_op_text = int(p_box_y - 4)
-            painter.drawText(margin_left + chart_w + 3, y_op_text, f"开盘:{op_ref:.2f}")
+            right_axis_labels.append((y_op, f"开盘:{op_ref:.2f}", QColor("#ff4444")))
 
         # 🟢 目标止盈线 (保持在右侧显示)
         if self.target_sell_min > 0:
             y_target = price_to_y(self.target_sell_min)
             painter.setPen(QPen(QColor("#00ff88"), 1, Qt.PenStyle.DashDotLine))
             painter.drawLine(margin_left, int(y_target), margin_left + chart_w, int(y_target))
-            painter.setPen(QPen(QColor("#00ff88"), 1))
-            painter.setFont(QFont("Arial", 8, QFont.Weight.Bold))
-            painter.drawText(margin_left + chart_w + 3, int(y_target + 3), f"目标:{self.target_sell_min:.2f}")
+            right_axis_labels.append((y_target, f"目标:{self.target_sell_min:.2f}", QColor("#00ff88")))
 
         # 🟡 最新 VWAP 标签 (保持在右侧显示)
         if len(vwaps) > 0 and vwaps[-1] > 1.0:
             y_vwap = price_to_y(vwaps[-1])
-            painter.setPen(QPen(QColor("#ffd700"), 1))
-            painter.setFont(QFont("Arial", 8, QFont.Weight.Bold))
-            painter.drawText(margin_left + chart_w + 3, int(y_vwap + 3), f"VWAP:{vwaps[-1]:.2f}")
+            right_axis_labels.append((y_vwap, f"VWAP:{vwaps[-1]:.2f}", QColor("#ffd700")))
 
         if multi_vwap is not None:
+            current_ref = {"1m": "1D", "5d": "5D", "10d": "10D"}.get(str(self.period_mode).lower())
             refs = (("1D", multi_vwap.vwap_1d, "#ffb000"),
                     ("5D", multi_vwap.vwap_5d if multi_vwap.complete_5d else None, "#ff4fd8"),
-                    ("10D", multi_vwap.vwap_10d if multi_vwap.complete_10d else None, "#8b7bff"))
+                    ("10D", multi_vwap.vwap_10d if multi_vwap.complete_10d else None, "#B7FF3C"))
             for label, value, color in refs:
-                if value is None or value <= 0:
+                if label == current_ref or value is None or value <= 0:
                     continue
                 y_ref = price_to_y(float(value))
                 painter.setPen(QPen(QColor(color), 1, Qt.PenStyle.DotLine))
                 painter.drawLine(int(margin_left), int(y_ref), int(margin_left + chart_w), int(y_ref))
-                painter.setPen(QPen(QColor(color), 1))
-                painter.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
-                painter.drawText(int(margin_left + chart_w + 3), int(y_ref + 3), f"{label}:{value:.2f}")
+                right_axis_labels.append((y_ref, f"{label}:{value:.2f}", QColor(color)))
+
+        # 右侧价格标签按目标价位就近排布，避让现价胶囊与彼此，水平线仍留在真实价格位置。
+        placed_right_y = list(reserved_right_y)
+        right_top = float(margin_top + 7)
+        right_bottom = float(margin_top + chart_h - 5)
+        min_right_gap = 15.0
+        for wanted_y, label_text, label_color in sorted(right_axis_labels, key=lambda item: item[0]):
+            wanted_y = max(right_top, min(right_bottom, float(wanted_y)))
+            candidates = [wanted_y]
+            for step in range(1, int(chart_h // min_right_gap) + 1):
+                candidates.extend((wanted_y - step * min_right_gap, wanted_y + step * min_right_gap))
+            label_y = next((candidate for candidate in candidates
+                            if right_top <= candidate <= right_bottom
+                            and all(abs(candidate - other_y) >= min_right_gap for other_y in placed_right_y)), wanted_y)
+            placed_right_y.append(label_y)
+            painter.setPen(QPen(label_color, 1))
+            painter.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
+            painter.drawText(int(margin_left + chart_w + 3), int(label_y + 3), label_text)
 
         # 🌟 绘制分时图上的买卖信号点与悬浮 Tag (自适应简略显示 + 2D真实碰撞避让 + 半透明毛玻璃 + 高对比度设计)
         if self.signals:
@@ -5501,8 +5509,10 @@ class SBCIntradayChartDialog(QWidget):
         lock_until = getattr(self, '_esc_mouse_lock_until', 0.0)
         if hasattr(self, 'canvas') and self.canvas:
             lock_until = max(lock_until, getattr(self.canvas, '_esc_mouse_lock_until', 0.0))
+        app_inst = QApplication.instance()
+        is_app_exiting = bool(app_inst and app_inst.property("is_app_exiting"))
         # 🛡️ 若处于鼠标双击/右键派生锁定期内，且当前鼠标并非悬停在窗口右上角关闭按钮区域，坚决拦截误关
-        if (now < lock_until) or (QApplication.mouseButtons() != Qt.MouseButton.NoButton):
+        if not is_app_exiting and ((now < lock_until) or (QApplication.mouseButtons() != Qt.MouseButton.NoButton)):
             cursor_pos = self.mapFromGlobal(QCursor.pos())
             in_close_btn = (cursor_pos.x() >= self.width() - 45) and (cursor_pos.y() <= 35)
             if not in_close_btn:
@@ -5523,11 +5533,12 @@ class SBCIntradayChartDialog(QWidget):
         except Exception:
             pass
 
-        if is_alt_pressed:
+        if is_alt_pressed and not is_app_exiting:
             if self.is_ats_sbc_mode():
                 logger.info("ℹ️ [SBC关闭] 当前处于 ATS 模式，严格忽略 Alt+全部关闭功能，仅正常关闭当前个股窗口。")
             else:
                 logger.info("🛑 [SBC退出] 检测到操盘手按住 Alt 点击关闭键，触发全部盯盘窗口一键退出并持久化！")
+                self._sbc_alt_close_in_progress = True
                 try:
                     from run_sbc import quit_and_save_all_sbc_windows
                     quit_and_save_all_sbc_windows()
@@ -6536,6 +6547,23 @@ class SBCIntradayChartDialog(QWidget):
         t_min = op * 1.03 if op > 1.0 else 0.0
         t_max = op * 1.05 if op > 1.0 else 0.0
         self.canvas.multi_vwap_snapshot = None
+        multi_vwap_snapshot = None
+
+        # 1日分时图也消费同一份全局多日快照，绘制今日、5日、10日 VWAP 联动参考线。
+        if mode == "1m":
+            try:
+                now_mono = time.monotonic()
+                multi_vwap_snapshot = getattr(self, "_multi_vwap_snapshot", None)
+                last_refresh = getattr(self, "_multi_vwap_snapshot_refresh_ts", 0.0)
+                if multi_vwap_snapshot is None or now_mono - last_refresh >= 5.0:
+                    _, refreshed_snapshot = fetcher.fetch_multi_horizon_vwap(self.code)
+                    if refreshed_snapshot is not None:
+                        multi_vwap_snapshot = refreshed_snapshot
+                        self._multi_vwap_snapshot = refreshed_snapshot
+                        self._multi_vwap_snapshot_refresh_ts = now_mono
+                self.canvas.multi_vwap_snapshot = multi_vwap_snapshot
+            except Exception:
+                logger.exception("刷新 %s 的多周期 VWAP 快照失败", self.code)
 
         if mode in ["5d", "10d"]:
             days = 5 if mode == "5d" else 10
@@ -6713,10 +6741,18 @@ class SBCIntradayChartDialog(QWidget):
                     )
 
         self._sync_daily_channel_to_canvas()
+        self.canvas.multi_vwap_snapshot = multi_vwap_snapshot
         self.canvas.set_data(df_intraday, op, vw, hi, lo, t_min, t_max, sigs, period_mode="1m")
         self.canvas.update_amplitude_data(self.code)
         self.lbl_title.setText(f"📊 {self.code} {resolve_stock_name(self.code)} | 今:{op:.2f} 现:{p:.2f}")
-        self.lbl_title.setToolTip(f"【{self.code} {resolve_stock_name(self.code)}】今开={op:.2f}元, 现价={p:.2f}元, VWAP={vw:.2f}元, 最高={hi:.2f}元, 最低={lo:.2f}元 | 买卖信号数: {len(sigs)} 步")
+        vwap_linkage = ""
+        if multi_vwap_snapshot:
+            vwap_linkage = f" | 多周期结构={multi_vwap_snapshot.structure}"
+            if multi_vwap_snapshot.vwap_5d and multi_vwap_snapshot.complete_5d:
+                vwap_linkage += f" | 5日VWAP={multi_vwap_snapshot.vwap_5d:.2f}元"
+            if multi_vwap_snapshot.vwap_10d and multi_vwap_snapshot.complete_10d:
+                vwap_linkage += f" | 10日VWAP={multi_vwap_snapshot.vwap_10d:.2f}元"
+        self.lbl_title.setToolTip(f"【{self.code} {resolve_stock_name(self.code)}】今开={op:.2f}元, 现价={p:.2f}元, VWAP={vw:.2f}元, 最高={hi:.2f}元, 最低={lo:.2f}元 | 买卖信号数: {len(sigs)} 步{vwap_linkage}")
 
         # 📋 呈现 TDX 行情与策略风控合一的当前实时阶段日志
         self._update_unified_realtime_log(df_intraday, op, p, vw, hi, lo, to_rate, amt, sigs, mode="1m")

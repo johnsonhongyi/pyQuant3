@@ -283,6 +283,17 @@ def quit_and_save_all_sbc_windows():
 
     if app:
         try:
+            # app.quit() 只结束事件循环，不保证派发每个窗口的 closeEvent；
+            # 逐个关闭，确保后台轮询器和窗口资源都完成清理。
+            for window in list(app.topLevelWidgets()):
+                if not isinstance(window, SBCIntradayChartDialog):
+                    continue
+                if getattr(window, "_sbc_alt_close_in_progress", False):
+                    continue
+                try:
+                    window.close()
+                except Exception as close_exc:
+                    print(f"[SBC Launcher] 关闭窗口 {getattr(window, 'code', '--')} 异常: {close_exc}")
             app.quit()
         except Exception:
             pass
@@ -522,41 +533,30 @@ def restore_launcher_holdings_windows(snapshot_index: Optional[int] = None) -> L
 
 def main():
     import signal
-    # 解析命令行参数：过滤掉标志参数，提取有效的股票代码、看盘周期与历史快照索引
-    non_flag_args = []
-    is_holdings_mode = False
-    snapshot_idx = None
+    import argparse
+    parser = argparse.ArgumentParser(
+        description="SBC 实盘分时看盘工具（独立窗口模式）",
+        epilog=(
+            "示例: python run_sbc.py --sbc 600000 10d\n"
+            "      python run_sbc.py --sbc-holdings\n"
+            "      python run_ats.py --sbc 600000 1d"
+        ),
+    )
+    parser.add_argument("--sbc", action="store_true", help="单独启动 SBC 指定股票窗口")
+    parser.add_argument(
+        "--sbc-holdings", "--holdings-sbc", "--holdings",
+        dest="holdings", action="store_true", help="单独启动 SBC 持仓窗口组",
+    )
+    parser.add_argument("--snapshot", "-s", type=int, help="持仓模式下加载指定历史快照组")
+    parser.add_argument("--code", "-c", dest="code", help="指定 6 位股票代码")
+    parser.add_argument("stock_code", nargs="?", help="指定 6 位股票代码（兼容位置参数）")
+    parser.add_argument("period", nargs="?", default="10d", help="初始周期，例如 1d、5d、10d（默认 10d）")
+    args = parser.parse_args(sys.argv[1:])
 
-    args = sys.argv[1:]
-    idx = 0
-    while idx < len(args):
-        arg = args[idx].strip()
-        if arg in ("--holdings", "--sbc-holdings", "--holdings-sbc"):
-            is_holdings_mode = True
-        elif arg in ("--snapshot", "-s"):
-            if idx + 1 < len(args):
-                try:
-                    snapshot_idx = int(args[idx + 1])
-                    idx += 1
-                except Exception:
-                    pass
-        elif arg.startswith("--snapshot="):
-            try:
-                snapshot_idx = int(arg.split("=")[1])
-            except Exception:
-                pass
-        elif arg == "--sbc":
-            pass
-        elif not arg.startswith("-"):
-            non_flag_args.append(arg)
-        idx += 1
-
-    cli_code = None
-    period = "10d"
-    if non_flag_args:
-        cli_code = non_flag_args[0]
-        if len(non_flag_args) > 1:
-            period = non_flag_args[1]
+    cli_code = args.code or args.stock_code
+    period = args.period
+    is_holdings_mode = args.holdings
+    snapshot_idx = args.snapshot
 
     if not cli_code:
         is_holdings_mode = True
@@ -572,7 +572,8 @@ def main():
     except Exception as e:
         print(f"[SBC Launcher] 检查行情服务警告: {e}")
 
-    app = QApplication.instance() or QApplication(sys.argv)
+    # --sbc 等 ATS 专用启动参数已解析，Qt 仅接收程序名，避免把它们误作 Qt 选项。
+    app = QApplication.instance() or QApplication([sys.argv[0]])
 
     # 💡 设置全局暗黑调色板与 QToolTip 样式，确保独立进程中所有 ToolTip 呈现高质感暗黑金融配色
     try:
