@@ -407,15 +407,8 @@ def is_tdx_trading_allowed(now_dt: Optional[datetime] = None) -> Tuple[bool, str
             "is_server_init": True
         }
 
-    # 0-2. 早盘集合竞价准备期: 09:15:00 ~ 09:15:59 (准备进入竞价试撮合)
-    elif dtime(9, 15, 0) <= t < dtime(9, 16, 0):
-        return False, f"早盘集合竞价准备期 ({t_str})", {
-            "stage": "AUCTION_PREPARING", "is_bidding": False, "is_locked": False, "can_cancel": False,
-            "is_server_init": False
-        }
-
-    # A. 早盘集合竞价: 09:16:00 ~ 09:19:59 (试撮合拟合阶段, 可撤单)
-    elif dtime(9, 16, 0) <= t < dtime(9, 20, 0):
+    # A. 早盘集合竞价: 09:15:00 ~ 09:19:59 (试撮合拟合阶段, 可撤单)
+    elif dtime(9, 15, 0) <= t < dtime(9, 20, 0):
         return True, f"早盘试撮合意图拟合 ({t_str})", {
             "stage": "BIDDING_SIMULATION", "is_bidding": True, "is_locked": False, "can_cancel": True
         }
@@ -2207,10 +2200,66 @@ class TDXRealtimeFetcher:
             self.api = None
             self._is_connected = False
 
+    @staticmethod
+    def _summarize_bidding_sentiment(history, stage: str) -> Dict[str, Any]:
+        """以同阶段最近快照识别持续买卖盘优势与撮合价方向。"""
+        samples = [item for item in history if item.get("stage") == stage]
+        samples = samples[-8:]
+        result = {
+            "bidding_sentiment": "采样中",
+            "bidding_pressure": 0.0,
+            "bidding_price_trend": "横盘",
+            "bidding_sample_count": len(samples),
+        }
+        if len(samples) < 3 or samples[-1]["t"] - samples[0]["t"] < 8.0:
+            return result
+
+        depth_samples = [s for s in samples if s["bid_depth"] + s["ask_depth"] > 0]
+        if not depth_samples:
+            return result
+
+        imbalances = [
+            (s["bid_depth"] - s["ask_depth"]) / (s["bid_depth"] + s["ask_depth"])
+            for s in depth_samples
+        ]
+        avg_imbalance = sum(imbalances) / len(imbalances)
+        buy_dominant = sum(v >= 0.15 for v in imbalances) / len(imbalances) >= 0.7
+        sell_dominant = sum(v <= -0.15 for v in imbalances) / len(imbalances) >= 0.7
+
+        price_samples = [s for s in samples if float(s.get("price", 0.0)) > 0]
+        if len(price_samples) < 3:
+            return result
+        prices = [float(s["pct"]) for s in price_samples]
+        net_move = prices[-1] - prices[0]
+        steps = [b - a for a, b in zip(prices, prices[1:])]
+        rising_consistently = sum(step >= 0 for step in steps) / len(steps) >= 0.7
+        falling_consistently = sum(step <= 0 for step in steps) / len(steps) >= 0.7
+        rising = net_move >= 0.2 and rising_consistently
+        falling = net_move <= -0.2 and falling_consistently
+        result["bidding_pressure"] = round(avg_imbalance * 100.0, 1)
+        result["bidding_price_trend"] = "上行" if rising else ("下行" if falling else "震荡")
+
+        phase = "可撤单" if stage == "SIMULATION" else "不可撤单"
+        if buy_dominant and rising:
+            result["bidding_sentiment"] = f"{phase}｜买强·价升"
+        elif sell_dominant and falling:
+            result["bidding_sentiment"] = f"{phase}｜卖强·价跌"
+        elif buy_dominant:
+            result["bidding_sentiment"] = f"{phase}｜买强·价未升"
+        elif sell_dominant:
+            result["bidding_sentiment"] = f"{phase}｜卖强·价未跌"
+        elif rising:
+            result["bidding_sentiment"] = f"{phase}｜价升·买方不强"
+        elif falling:
+            result["bidding_sentiment"] = f"{phase}｜价跌·卖方不强"
+        else:
+            result["bidding_sentiment"] = f"{phase}｜多空拉锯"
+        return result
+
     def record_and_evaluate_bidding_surge(self, quote: Dict[str, Any], now_dt: Optional[datetime] = None) -> Dict[str, Any]:
         """
         【🎯 集合竞价意图拟合与不可撤单突击加速监控核心算法】
-        - 09:16 ~ 09:19:59 (试撮合拟合阶段): 记录最高/最低拟合涨幅，提炼试盘测试意图 (可撤单，测跟风或诱空)
+        - 09:15 ~ 09:19:59 (试撮合拟合阶段): 记录最高/最低拟合涨幅，提炼试盘测试意图 (可撤单，测跟风或诱空)
         - 09:20 ~ 09:24:59 (不可撤单真实意图阶段): 锁定 09:20 基准，跟踪突击加速幅度与速度，捕获极强抢筹或突击下杀信号
         - 09:25:00 之后: 保留早盘竞价关键特征，供盘中各策略模块消费回溯
         """
@@ -2234,6 +2283,13 @@ class TDXRealtimeFetcher:
         curr_pct = round((p - last_c) / last_c * 100.0, 2) if p > 0 else 0.0
         bid1_v = int(safe_float(quote.get("bid_vol1", quote.get("bid1_volume", 0))))
         ask1_v = int(safe_float(quote.get("ask_vol1", quote.get("ask1_volume", 0))))
+        stage_key = "SIMULATION" if dtime(9, 15, 0) <= t < dtime(9, 20, 0) else (
+            "LOCKED" if dtime(9, 20, 0) <= t < dtime(9, 25, 0) else "OUTSIDE"
+        )
+        bid_depth = sum(safe_float(quote.get(f"bid_vol{i}", 0.0)) for i in range(1, 6))
+        ask_depth = sum(safe_float(quote.get(f"ask_vol{i}", 0.0)) for i in range(1, 6))
+        if bid_depth + ask_depth <= 0:
+            bid_depth, ask_depth = float(bid1_v), float(ask1_v)
 
         with self._bidding_lock:
             # 🛡️ 跨日自动重置缓存：支持客户端 7x24 小时长期挂机稳定运行，每日早盘重置基准
@@ -2252,13 +2308,17 @@ class TDXRealtimeFetcher:
                 "price": p,
                 "pct": curr_pct,
                 "b1_v": bid1_v,
-                "a1_v": ask1_v
+                "a1_v": ask1_v,
+                "bid_depth": bid_depth,
+                "ask_depth": ask_depth,
+                "stage": stage_key,
             })
 
             # 判断阶段
             # A. 09:16:00 ~ 09:19:59: 试撮合拟合阶段
-            if dtime(9, 16, 0) <= t < dtime(9, 20, 0):
+            if dtime(9, 15, 0) <= t < dtime(9, 20, 0):
                 stage = "SIMULATION"
+                sentiment = self._summarize_bidding_sentiment(self._bidding_history[code], stage)
                 if code not in self._bidding_sim_stats:
                     self._bidding_sim_stats[code] = {
                         "max_pct": curr_pct,
@@ -2291,7 +2351,8 @@ class TDXRealtimeFetcher:
                     "bidding_stage": stage,
                     "bidding_surge_pct": 0.0,
                     "bidding_signal": f"试盘拟合:{intent}",
-                    "bidding_desc": f"试撮合拟合涨幅 {curr_pct:+.2f}% (区间: {stats['min_pct']:+.2f}%~{stats['max_pct']:+.2f}%)"
+                    "bidding_desc": f"试盘 {curr_pct:+.2f}%（{stats['min_pct']:+.2f}~{stats['max_pct']:+.2f}%）｜{sentiment['bidding_sentiment']}",
+                    **sentiment,
                 }
                 self._bidding_signals[code] = res
                 return res
@@ -2299,6 +2360,7 @@ class TDXRealtimeFetcher:
             # B. 09:20:00 ~ 09:25:00: 不可撤单申报阶段 (真实意图，突击加速极强信号)
             elif dtime(9, 20, 0) <= t < dtime(9, 25, 0):
                 stage = "LOCKED"
+                sentiment = self._summarize_bidding_sentiment(self._bidding_history[code], stage)
                 if code not in self._bidding_locked_base:
                     # 锚定 09:20:00 进入不可撤单时刻的基准涨幅与价格
                     self._bidding_locked_base[code] = {
@@ -2315,7 +2377,7 @@ class TDXRealtimeFetcher:
                 sim_stats = self._bidding_sim_stats.get(code, {})
 
                 signal = "竞价申报正常"
-                desc = f"不可撤单申报中，涨幅 {curr_pct:+.2f}% (较09:20基准变动 {surge_pct:+.2f}%)"
+                desc = f"竞价 {curr_pct:+.2f}%｜较09:20 {surge_pct:+.2f}%｜{sentiment['bidding_sentiment']}"
 
                 # ⚡ 核心极强信号判定规则：
                 # 1. 突击抢筹爆拉 (极强买入信号): 09:20后不可撤单突然拉升 >= 1.8%
@@ -2350,7 +2412,8 @@ class TDXRealtimeFetcher:
                     "bidding_stage": stage,
                     "bidding_surge_pct": surge_pct,
                     "bidding_signal": signal,
-                    "bidding_desc": desc
+                    "bidding_desc": desc,
+                    **sentiment,
                 }
                 self._bidding_signals[code] = res
                 return res
@@ -2528,7 +2591,7 @@ class TDXRealtimeFetcher:
                                     if self._off_hours_success_counts[c_clean] >= 3:
                                         self._off_hours_settled_codes.add(c_clean)
 
-                                # 🎯 集合竞价早盘意图拟合与不可撤单突击加速分析 (09:16 ~ 09:25)
+                                # 🎯 集合竞价早盘意图拟合与不可撤单突击加速分析 (09:15 ~ 09:25)
                                 b_res = self.record_and_evaluate_bidding_surge(q)
                                 q.update(b_res)
                         all_fetched_quotes.extend(quotes)

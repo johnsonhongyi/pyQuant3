@@ -41,7 +41,7 @@ from PyQt6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QHeaderView, QSplitter, QGroupBox,
     QTextEdit, QPlainTextEdit, QLineEdit, QComboBox, QMessageBox, QFrame, QGridLayout, QProgressBar,
     QScrollArea, QTabWidget, QDoubleSpinBox, QRadioButton, QButtonGroup,
-    QCheckBox, QSlider, QToolBar, QStackedWidget
+    QCheckBox, QSlider, QToolBar, QStackedWidget, QSizePolicy
 )
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QSettings, QParallelAnimationGroup, QPropertyAnimation, QEasingCurve, QRect, QRectF, QEvent, QPoint, QPointF
 from PyQt6.QtGui import QColor, QFont, QBrush, QIcon, QPainter, QPen, QPainterPath, QCursor, QPolygon, QPolygonF
@@ -4134,7 +4134,7 @@ class SBCIntradayChartDialog(QWidget):
     _global_sbc_geo: Optional[dict] = None
     _global_auto_eval: bool = True  # 💡 全局维护自动测算状态开关
 
-    def __init__(self, parent=None, code: str = "688826", engine: Optional[IntradayStrategyEngine] = None, initial_period_mode: Optional[str] = None):
+    def __init__(self, parent=None, code: str = "688826", engine: Optional[IntradayStrategyEngine] = None, initial_period_mode: Optional[str] = None, target_screen: Optional[Any] = None):
         # 💡 保存主工作台引用用于边缘磁吸对齐，但向 Qt 构造函数传递 None
         # 彻底切断 Windows 属主窗口层级约束，使其表现为 100% 独立的桌面顶级 Window，绝不上浮置顶或遮挡主窗口！
         self.main_workbench = parent.window() if parent else None
@@ -4146,6 +4146,7 @@ class SBCIntradayChartDialog(QWidget):
         self.code = str(code).zfill(6)
         self.engine = engine if engine else IntradayStrategyEngine.get_instance()
         self._initial_period_mode = initial_period_mode
+        self._target_screen = target_screen
         self.auto_eval_enabled: bool = SBCIntradayChartDialog._global_auto_eval
 
         # 🤖 挂载全自动分时多周期交易执行系统 (VWAP进攻端 + ProactiveExit 8层防守端守护 + ConsensusArbiter 双组共识)
@@ -4379,9 +4380,13 @@ class SBCIntradayChartDialog(QWidget):
         bottom_layout.setContentsMargins(2, 0, 2, 0)
         bottom_layout.setSpacing(6)
 
-        self.lbl_info = QLabel("💡 提示: 快捷键 A/D 轮转周期, ←/→ 移动查价, 1~9 直选, V 切换量(折叠/放大), 双击查价/缩放量, S 开关日志, F 联动, Esc 退出光标/关闭。青蓝线为现价，黄虚线为 VWAP 均价。")
+        self.lbl_info = QLabel("💡 提示: A/D 轮转周期, ←/→ 移动查价, 1~9 直选, V 切换量, 双击查价/缩放量, S 开关日志, F 联动, Esc 退出光标/关闭。青蓝线现价, 黄虚线VWAP。")
         self.lbl_info.setStyleSheet("color: #888899; font-size: 8.5pt;")
-        self.lbl_info.setWordWrap(True)
+        self.lbl_info.setWordWrap(False)
+        self.lbl_info.setFixedHeight(22)
+        self.lbl_info.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.lbl_info.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+        self.lbl_info.setToolTip("💡 快捷键提示:\nA/D: 轮转切换看盘周期\n←/→: 微调查价光标\n1~9: 直选指定周期\nV: 切换成交量副图(折叠/放大)\n双击: 快速查价或在副图双击缩放成交量\nS: 开关底部实时阶段与风控日志\nF: 跨窗口/跨系统联动\nEsc: 退出十字查价光标或关闭\n图例: 青蓝线为现价，黄虚线为 VWAP 均价")
         bottom_layout.addWidget(self.lbl_info, 1)
 
         # 快速切换代码下拉组合框 (支持手动输入/回车切换/右键自动粘贴/下拉历史回测标的)
@@ -4873,6 +4878,18 @@ class SBCIntradayChartDialog(QWidget):
             from gui_utils import clamp_window_to_screens
             rx, ry = clamp_window_to_screens(x, y, target_w, target_h)
 
+            # 💡 【核心：目标物理屏幕亲和度保障】
+            # 若显式指定了 target_screen (例如 Alt 切换开新窗)，确保新窗口诞生在指定物理屏幕的工作区内
+            tgt_scr = getattr(self, "_target_screen", None)
+            if tgt_scr is not None:
+                try:
+                    s_avail = tgt_scr.availableGeometry()
+                    if not s_avail.contains(rx + target_w // 2, ry + target_h // 2):
+                        rx = max(s_avail.left() + 20, min(s_avail.left() + 60, s_avail.right() - target_w))
+                        ry = max(s_avail.top() + 20, min(s_avail.top() + 60, s_avail.bottom() - target_h))
+                except Exception:
+                    pass
+
             self.setGeometry(rx, ry, target_w, target_h)
             SBCIntradayChartDialog._global_sbc_size = (target_w, target_h)
         except Exception as e:
@@ -4905,7 +4922,8 @@ class SBCIntradayChartDialog(QWidget):
         if hasattr(self, 'canvas') and self.canvas:
             self.canvas.setFocus()
         if hasattr(self, 'lbl_info') and self.lbl_info:
-            self.lbl_info.setText(f"📈 [周期轮转] 当前周期: 【{new_mode.upper()}】 (快捷键: A/D 轮转周期, ←/→ 移动查价, 1~9 直选, S 日志, F 联动, Esc 退出光标/关闭)")
+            self.lbl_info.setText(f"📈 [周期轮转] 当前: <font color='#38bdf8'><b>【{new_mode.upper()}】</b></font> (A/D 轮转, ←/→ 查价, 1~9 直选, S 日志, Esc 关闭)")
+            self.lbl_info.setToolTip(f"📈 [周期轮转] 当前周期: 【{new_mode.upper()}】\n快捷键: A/D 轮转周期, ←/→ 移动查价, 1~9 直选, S 开关日志, F 联动, Esc 退出光标/关闭")
 
     def switch_period_by_index(self, index: int):
         """通过数字键 1~9 直接切换到指定序号的周期"""
@@ -4916,7 +4934,8 @@ class SBCIntradayChartDialog(QWidget):
             if hasattr(self, 'canvas') and self.canvas:
                 self.canvas.setFocus()
             if hasattr(self, 'lbl_info') and self.lbl_info:
-                self.lbl_info.setText(f"📈 [周期直选] 当前周期: 【{new_mode.upper()}】 (快捷键: A/D 轮转周期, ←/→ 移动查价, 1~9 直选, S 日志, F 联动, Esc 退出光标/关闭)")
+                self.lbl_info.setText(f"📈 [周期直选] 当前: <font color='#38bdf8'><b>【{new_mode.upper()}】</b></font> (A/D 轮转, ←/→ 查价, 1~9 直选, S 日志, Esc 关闭)")
+                self.lbl_info.setToolTip(f"📈 [周期直选] 当前周期: 【{new_mode.upper()}】\n快捷键: A/D 轮转周期, ←/→ 移动查价, 1~9 直选, S 开关日志, F 联动, Esc 退出光标/关闭")
 
     def _toggle_stay_on_top(self):
         """切换 SBC 窗口置顶状态 (无缝 0 闪烁 0 重新刷新)"""
@@ -4924,7 +4943,9 @@ class SBCIntradayChartDialog(QWidget):
         set_seamless_stay_on_top(self, self._is_stay_on_top)
         if hasattr(self, 'lbl_info') and self.lbl_info:
             txt = "开启" if self._is_stay_on_top else "关闭"
-            self.lbl_info.setText(f"📌 [窗口置顶: {txt}] 当前标的: 【{self.code}】 (快捷键: T 开启/关闭置顶)")
+            top_color = "#00ff88" if self._is_stay_on_top else "#888899"
+            self.lbl_info.setText(f"📌 [窗口置顶: <font color='{top_color}'><b>{txt}</b></font>] 标的: <font color='#38bdf8'><b>【{self.code}】</b></font> (快捷键: T 置顶/取消)")
+            self.lbl_info.setToolTip(f"📌 [窗口置顶: {txt}] 当前标的: 【{self.code}】\n快捷键: T 键可随时开启或关闭置顶")
 
     def keyPressEvent(self, event):
         """⚡ 窗口级快捷键：支持 T 置顶切换、R 测算、F 联动、方向键/Tab 轮转、1~9 直选、0 重置、Esc 关闭"""
@@ -5352,17 +5373,38 @@ class SBCIntradayChartDialog(QWidget):
                 self.canvas.run_adaptive_strategy_eval()
                 res = getattr(self.canvas, 'strategy_eval_result', None)
                 if res and res.get("is_matched", False):
+                    score_val = res.get('score', 0)
+                    try:
+                        score_num = float(score_val)
+                    except Exception:
+                        score_num = 0.0
+                    score_color = "#ef4444" if score_num >= 80 else ("#f59e0b" if score_num >= 60 else "#94a3b8")
+                    entry_p = float(res.get('entry_price', 0.0) or 0.0)
+                    sl_p = float(res.get('stop_loss', 0.0) or 0.0)
+                    tp_1 = float(res.get('target_price_1', 0.0) or 0.0)
+                    p_str = res.get('period', '').upper()
+
                     self.lbl_info.setText(
-                        f"🎉 [{res.get('period', '').upper()}] 自动测算开启: 得分={res.get('score')}分 | "
-                        f"介入价={res.get('entry_price', 0.0):.2f}元 | 止损={res.get('stop_loss', 0.0):.2f}元 | "
-                        f"目标1={res.get('target_price_1', 0.0):.2f}元"
+                        f"🎉 <b>[{p_str}]</b> 测算: 得分=<font color='{score_color}'><b>{score_val}</b></font>分 | "
+                        f"介入=<font color='#ef4444'><b>{entry_p:.2f}</b></font>元 | "
+                        f"止损=<font color='#22c55e'><b>{sl_p:.2f}</b></font>元 | "
+                        f"目标1=<font color='#f59e0b'><b>{tp_1:.2f}</b></font>元"
+                    )
+                    self.lbl_info.setToolTip(
+                        f"🎉 [{p_str}] 自动测算详情:\n"
+                        f"综合评分: {score_val} 分\n"
+                        f"建议介入价: {entry_p:.2f} 元\n"
+                        f"动态止损位: {sl_p:.2f} 元\n"
+                        f"第一目标位: {tp_1:.2f} 元"
                     )
                 elif res:
                     self.lbl_info.setText(f"⚠️ [{res.get('period', '').upper()}] 自动测算: {res.get('reason', '当前周期未触发反转突破')}")
+                    self.lbl_info.setToolTip(f"⚠️ [{res.get('period', '').upper()}] 自动测算: {res.get('reason', '当前周期未触发反转突破')}")
             else:
                 self.canvas.strategy_eval_result = None
                 self.canvas.update()
                 self.lbl_info.setText("💡 [测算已关闭] 已清除图上测算介入标记。按 R 键可重新开启自动测算。")
+                self.lbl_info.setToolTip("💡 [测算已关闭] 已清除图上测算介入标记。按 R 键可重新开启自动测算。")
 
     def _update_log_btn_style(self):
         """更新日志按钮样式与高亮状态反馈"""
@@ -6157,9 +6199,14 @@ class SBCIntradayChartDialog(QWidget):
         self.set_period_mode("day", reload=True, save=False)
         t_cnt = len(trades_df) if trades_df is not None else 0
         win_cnt = len(trades_df[trades_df['pnl_pct'] > 0]) if trades_df is not None and not trades_df.empty else 0
-        win_r = (win_cnt / t_cnt * 100.0) if t_cnt > 0 else 0.0
+        win_color = "#ef4444" if win_r >= 50.0 else "#22c55e"
         self.lbl_title.setText(f"📊 {self.code} {resolve_stock_name(self.code)} | [多周期通道回测] 交易:{t_cnt}笔 胜率:{win_r:.1f}% (点击标记看收益)")
-        self.lbl_info.setText("💡 【点击收益交互提示】: 鼠标直接点击任意 🟢买 / 🔴卖 信号标签，即可高亮持仓区间并展开单笔盈亏卡片；按 [ 与 ] 键或 Space 键可快速轮巡切换各笔交易。")
+        self.lbl_info.setText(
+            f"💡 <b>【通道回测收益】</b> 交易 <font color='#38bdf8'><b>{t_cnt}</b></font> 笔, "
+            f"胜率 <font color='{win_color}'><b>{win_r:.1f}%</b></font> | "
+            f"点击 🟢买 / 🔴卖 标签查看盈亏卡片 (快捷键: [ / ] / Space)"
+        )
+        self.lbl_info.setToolTip("💡 【点击收益交互提示】: 鼠标直接点击任意 🟢买 / 🔴卖 信号标签，即可高亮持仓区间并展开单笔盈亏卡片；按 [ 与 ] 键或 Space 键可快速轮巡切换各笔交易。")
 
         # 注入回测记录时同步持久化记录最近回测标的 (保留最新 10 个)
         try:
@@ -6293,7 +6340,7 @@ class SBCIntradayChartDialog(QWidget):
                 self.switch_code(code)
 
     def _open_new_sbc_and_rearrange(self, code: str):
-        """【🪟 Alt 开新窗回测并自动重排】按住 Alt 键切换标的时，开新独立 SBC 窗口回测并自动平铺重排"""
+        """【🪟 Alt 开新窗回测并自动重排】按住 Alt 键切换标的时，根据当前 SBC 所在的物理屏幕开新独立窗口并自动平铺重排"""
         c_clean = "".join(filter(str.isdigit, str(code))).zfill(6)
         if not c_clean or c_clean == "000000":
             return
@@ -6304,24 +6351,67 @@ class SBCIntradayChartDialog(QWidget):
         except Exception:
             pass
 
-        # 💡 若该标的已在某个窗口中打开，不要重复创建，直接置顶激活它并自动平铺
+        # 💡 精确获取当前窗口所在的物理显示器屏幕 (优先 screen()，其次屏幕相交检测，再次几何中心检测)
+        cur_screen = None
+        try:
+            cur_screen = self.screen()
+        except Exception:
+            pass
+        if not cur_screen:
+            try:
+                cur_screen = QApplication.screenAt(self.geometry().center())
+            except Exception:
+                pass
+        if not cur_screen and hasattr(QApplication, "screens"):
+            for s in QApplication.screens():
+                if s.geometry().intersects(self.geometry()):
+                    cur_screen = s
+                    break
+        if not cur_screen:
+            cur_screen = QApplication.primaryScreen()
+
+        # 💡 若该标的已在某个窗口中打开，不要重复创建，直接将其拉到当前屏幕置顶激活它并自动平铺
         existing = find_existing_sbc_window_by_code(c_clean)
         if existing:
+            if cur_screen:
+                try:
+                    s_geo = cur_screen.availableGeometry()
+                    if not s_geo.contains(existing.geometry().center()):
+                        ew = max(320, min(existing.width(), s_geo.width() - 20))
+                        eh = max(200, min(existing.height(), s_geo.height() - 20))
+                        ex = max(s_geo.left() + 20, min(self.geometry().x() + 30, s_geo.right() - ew))
+                        ey = max(s_geo.top() + 20, min(self.geometry().y() + 30, s_geo.bottom() - eh))
+                        existing.setGeometry(ex, ey, ew, eh)
+                except Exception:
+                    pass
             activate_and_raise_sbc_window(existing)
             st_name = resolve_stock_name(c_clean)
-            self.lbl_info.setText(f"📌 标的 [{c_clean} {st_name}] 已经处于打开状态，已自动置顶激活！")
+            self.lbl_info.setText(f"📌 标的 <font color='#38bdf8'><b>[{c_clean} {st_name}]</b></font> 已经处于打开状态，已就地置顶激活！")
+            self.lbl_info.setToolTip(f"📌 标的 [{c_clean} {st_name}] 已经处于打开状态，已就地置顶激活并在当前屏幕自动重排！")
             QTimer.singleShot(80, lambda: rearrange_all_sbc_windows(parent_win=existing))
             return
 
         cur_period = getattr(self, '_current_period_mode', '1m')
         main_win = getattr(self, "main_workbench", None) or (self.parent().window() if (self.parent() and hasattr(self.parent(), 'window')) else None)
-        new_dlg = open_sbc_chart_dialog(parent_win=main_win, code=c_clean, period_mode=cur_period)
+        new_dlg = open_sbc_chart_dialog(parent_win=main_win, code=c_clean, period_mode=cur_period, target_screen=cur_screen)
         if new_dlg:
+            if cur_screen:
+                try:
+                    s_geo = cur_screen.availableGeometry()
+                    if not s_geo.contains(new_dlg.geometry().center()):
+                        nw = max(320, min(new_dlg.width(), s_geo.width() - 20))
+                        nh = max(200, min(new_dlg.height(), s_geo.height() - 20))
+                        nx = max(s_geo.left() + 20, min(self.geometry().x() + 30, s_geo.right() - nw))
+                        ny = max(s_geo.top() + 20, min(self.geometry().y() + 30, s_geo.bottom() - nh))
+                        new_dlg.setGeometry(nx, ny, nw, nh)
+                except Exception:
+                    pass
             new_dlg.show()
             new_dlg.raise_()
             new_dlg.activateWindow()
             st_name = resolve_stock_name(c_clean)
-            self.lbl_info.setText(f"🚀 已在独立窗口打开标的 [{c_clean} {st_name}] 回测并自动重排！")
+            self.lbl_info.setText(f"🚀 已在当前屏幕打开标的 <font color='#38bdf8'><b>[{c_clean} {st_name}]</b></font> 并自动重排！")
+            self.lbl_info.setToolTip(f"🚀 已在当前屏幕以独立窗口打开标的 [{c_clean} {st_name}] 回测并自动平铺重排！")
             QTimer.singleShot(80, lambda: rearrange_all_sbc_windows(parent_win=new_dlg))
 
     def _refresh_recent_codes_combo(self):
@@ -6450,7 +6540,18 @@ class SBCIntradayChartDialog(QWidget):
                             t_cnt = len(s_trades)
                             win_cnt = sum(1 for s in s_trades if s.get("pnl_pct", 0) > 0)
                             win_r = (win_cnt / t_cnt * 100.0) if t_cnt > 0 else 0.0
-                            self.lbl_info.setText(f"💡 🤖 [全自动策略生效] VWAP进攻 + ProactiveExit 8层防守: 共触发 {t_cnt} 笔交易，胜率 {win_r:.1f}% | 8层离场守护已拦截假反弹与破位亏损! (点击信号看收益详情)")
+                            win_color = "#ef4444" if win_r >= 50.0 else "#22c55e"
+                            self.lbl_info.setText(
+                                f"💡 🤖 <b>[全自动策略]</b> VWAP进攻+8层防守: "
+                                f"共触发 <font color='#38bdf8'><b>{t_cnt}</b></font> 笔交易, "
+                                f"胜率 <font color='{win_color}'><b>{win_r:.1f}%</b></font> | "
+                                f"8层离场守护已拦截假反弹 (点击标记看详情)"
+                            )
+                            self.lbl_info.setToolTip(
+                                f"💡 🤖 [全自动策略生效] VWAP进攻 + ProactiveExit 8层防守:\n"
+                                f"共触发 {t_cnt} 笔交易，回测胜率 {win_r:.1f}%\n"
+                                f"8层离场守护已拦截假反弹与破位亏损！点击图上买卖标记可查看单笔收益详情与持仓光束。"
+                            )
 
                 self._sync_daily_channel_to_canvas()
                 self.canvas.set_data(df_multi, op, vw, hi, lo, t_min, t_max, sigs, period_mode=mode)
@@ -6548,7 +6649,18 @@ class SBCIntradayChartDialog(QWidget):
                     t_cnt = len(s_trades)
                     win_cnt = sum(1 for s in s_trades if s.get("pnl_pct", 0) > 0)
                     win_r = (win_cnt / t_cnt * 100.0) if t_cnt > 0 else 0.0
-                    self.lbl_info.setText(f"💡 🤖 [全自动策略生效] VWAP进攻 + ProactiveExit 8层防守: 今日共触发 {t_cnt} 笔交易，胜率 {win_r:.1f}% | 8层离场守护已拦截假反弹与破位亏损! (点击信号看收益详情)")
+                    win_color = "#ef4444" if win_r >= 50.0 else "#22c55e"
+                    self.lbl_info.setText(
+                        f"💡 🤖 <b>[全自动策略]</b> VWAP进攻+8层防守: "
+                        f"今日共触发 <font color='#38bdf8'><b>{t_cnt}</b></font> 笔交易, "
+                        f"胜率 <font color='{win_color}'><b>{win_r:.1f}%</b></font> | "
+                        f"8层防守守护拦截破位 (点击标记看详情)"
+                    )
+                    self.lbl_info.setToolTip(
+                        f"💡 🤖 [全自动策略生效] VWAP进攻 + ProactiveExit 8层防守:\n"
+                        f"今日共触发 {t_cnt} 笔交易，胜率 {win_r:.1f}%\n"
+                        f"8层离场守护已拦截假反弹与破位亏损！点击图上买卖标记可查看单笔收益详情与持仓光束。"
+                    )
 
         self._sync_daily_channel_to_canvas()
         self.canvas.set_data(df_intraday, op, vw, hi, lo, t_min, t_max, sigs, period_mode="1m")
@@ -6974,13 +7086,17 @@ def _get_screen_for_geometry(x: int, y: int, w: int, h: int):
     return best_scr
 
 
-def open_sbc_chart_dialog(parent_win: Optional[QWidget] = None, code: str = "688826", period_mode: Optional[str] = None, record_open: bool = True, *args, **kwargs) -> Optional[SBCIntradayChartDialog]:
+def open_sbc_chart_dialog(parent_win: Optional[QWidget] = None, code: str = "688826", period_mode: Optional[str] = None, record_open: bool = True, target_screen: Optional[Any] = None, *args, **kwargs) -> Optional[SBCIntradayChartDialog]:
     """
     【📈 全局通用 SBC 独立分时走势图调起入口】支持在 ATS 任意表格/面板右键菜单中一键唤醒调起分时图
     - 💡 核心防重：若该标的已打开过，严禁重复创建新窗口，而是将其置顶并激活到最前台；
     - 若尚未打开，则创建新独立窗口并展示。
     - :param record_open: 是否触发写入磁盘记录 (启动恢复批量创建时设为 False，杜绝过程写盘覆盖历史持久化配置)
+    - :param target_screen: 指定调起的物理显示器屏幕 (QScreen)，确保多屏幕看盘时不盲目跳回主屏幕
     """
+    if target_screen is None and "target_screen" in kwargs:
+        target_screen = kwargs.pop("target_screen")
+
     # 兼容各种调用形式 (code, parent=self / parent_win, code)
     if "parent" in kwargs and parent_win is None:
         parent_win = kwargs.get("parent")
@@ -6998,6 +7114,18 @@ def open_sbc_chart_dialog(parent_win: Optional[QWidget] = None, code: str = "688
     # 💡 【核心：防重复打开】优先在当前所有存活顶层窗口中查找该标的，若已存在直接置顶激活返回
     existing_dlg = find_existing_sbc_window_by_code(c_clean)
     if existing_dlg is not None:
+        if target_screen is not None:
+            try:
+                s_avail = target_screen.availableGeometry()
+                dlg_g = existing_dlg.geometry()
+                if not s_avail.contains(dlg_g.center()):
+                    dw = max(320, min(dlg_g.width(), s_avail.width() - 20))
+                    dh = max(200, min(dlg_g.height(), s_avail.height() - 20))
+                    dx = max(s_avail.left() + 20, min(s_avail.left() + 60, s_avail.right() - dw))
+                    dy = max(s_avail.top() + 20, min(s_avail.top() + 60, s_avail.bottom() - dh))
+                    existing_dlg.setGeometry(dx, dy, dw, dh)
+            except Exception:
+                pass
         activate_and_raise_sbc_window(existing_dlg, period_mode=period_mode)
         trades_df = kwargs.get("trades_df", None)
         df_kline = kwargs.get("df_kline", None)
@@ -7025,10 +7153,22 @@ def open_sbc_chart_dialog(parent_win: Optional[QWidget] = None, code: str = "688
 
     from PyQt6.sip import isdeleted
     if dlg is None or isdeleted(dlg) or getattr(dlg, '_is_closing', False):
-        dlg = SBCIntradayChartDialog(parent=target_win, code=c_clean, engine=engine, initial_period_mode=period_mode)
+        dlg = SBCIntradayChartDialog(parent=target_win, code=c_clean, engine=engine, initial_period_mode=period_mode, target_screen=target_screen)
         sbc_dict[c_clean] = dlg
     else:
         # 已有实例但此前未在 topLevelWidgets 中命中，置顶激活它
+        if target_screen is not None:
+            try:
+                s_avail = target_screen.availableGeometry()
+                dlg_g = dlg.geometry()
+                if not s_avail.contains(dlg_g.center()):
+                    dw = max(320, min(dlg_g.width(), s_avail.width() - 20))
+                    dh = max(200, min(dlg_g.height(), s_avail.height() - 20))
+                    dx = max(s_avail.left() + 20, min(s_avail.left() + 60, s_avail.right() - dw))
+                    dy = max(s_avail.top() + 20, min(s_avail.top() + 60, s_avail.bottom() - dh))
+                    dlg.setGeometry(dx, dy, dw, dh)
+            except Exception:
+                pass
         activate_and_raise_sbc_window(dlg, period_mode=period_mode)
         trades_df = kwargs.get("trades_df", None)
         df_kline = kwargs.get("df_kline", None)
@@ -7041,6 +7181,19 @@ def open_sbc_chart_dialog(parent_win: Optional[QWidget] = None, code: str = "688
     df_kline = kwargs.get("df_kline", None)
     if trades_df is not None:
         dlg.set_custom_backtest_trades(trades_df, df_kline=df_kline)
+
+    if target_screen is not None:
+        try:
+            s_avail = target_screen.availableGeometry()
+            dlg_g = dlg.geometry()
+            if not s_avail.contains(dlg_g.center()):
+                dw = max(320, min(dlg_g.width(), s_avail.width() - 20))
+                dh = max(200, min(dlg_g.height(), s_avail.height() - 20))
+                dx = max(s_avail.left() + 20, min(s_avail.left() + 60, s_avail.right() - dw))
+                dy = max(s_avail.top() + 20, min(s_avail.top() + 60, s_avail.bottom() - dh))
+                dlg.setGeometry(dx, dy, dw, dh)
+        except Exception:
+            pass
 
     dlg.show()
     dlg.raise_()
