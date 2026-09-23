@@ -636,13 +636,38 @@ class TDXGlobalCachePool:
         if not records:
             return [], repaired
 
-        # 步骤 1：过滤价格非正的 Bar
+        # 步骤 1：过滤价格非正的 Bar、无效时间戳与极端离群突刺脏数据
         cleaned: List[Dict[str, Any]] = []
         for r in records:
             p = float(r.get("close", r.get("price", 0.0)))
-            if p <= 0:
+            if p <= 0 or np.isnan(p) or np.isinf(p):
                 repaired = True
                 continue
+
+            # 🛡️ 严格时间戳校验：分钟记录必须包含有效的 HH:MM 时间标签 (如 09:30~15:00)
+            t_only = str(r.get("time_only", "") or "").strip()
+            t_full = str(r.get("time", "") or "").strip()
+            if (not t_only or t_only.lower() == "nan") and t_full and t_full.lower() != "nan":
+                m_t = re.search(r"\b\d{2}:\d{2}\b", t_full)
+                if m_t:
+                    t_only = m_t.group(0)
+                    r = dict(r)
+                    r["time_only"] = t_only
+                    repaired = True
+
+            # 若仍然无法获得有效的 HH:MM 格式，坚决视为脏记录丢弃！
+            if not t_only or t_only.lower() == "nan" or not re.match(r"^\d{2}:\d{2}$", t_only):
+                repaired = True
+                continue
+
+            # 🛡️ 自动补齐缺失或为 NaN 的 'time' 字段 (格式形如 "09-17 09:31")，杜绝 df.set_index('time') 产生 NaN index
+            if not r.get("time") or str(r.get("time")).lower() == "nan":
+                d_p = str(r.get("date", ""))
+                d_s = d_p[5:] if len(d_p) >= 10 else d_p
+                r = dict(r)
+                r["time"] = f"{d_s} {t_only}".strip()
+                repaired = True
+
             # bar_vol 负数置 0
             if float(r.get("bar_vol", 0.0)) < 0:
                 r = dict(r)
@@ -652,6 +677,21 @@ class TDXGlobalCachePool:
 
         if not cleaned:
             return [], True
+
+        # 步骤 1.5：离群极端突刺价格过滤 (防御错列/跨标的写入的极端脏点，如 4.5 元股票突刺至 32.60)
+        if len(cleaned) >= 5:
+            all_prices = [float(r.get("close", r.get("price", 0.0))) for r in cleaned]
+            med_price = float(np.median(all_prices))
+            if med_price > 0.1:
+                valid_recs = []
+                for r in cleaned:
+                    p = float(r.get("close", r.get("price", 0.0)))
+                    if p > med_price * 3.5 or p < med_price * 0.25:
+                        repaired = True
+                        continue
+                    valid_recs.append(r)
+                if valid_recs:
+                    cleaned = valid_recs
 
         # 步骤 2：去重（同日相同时间保留最后一条）
         # key 统一为 date + time_only（缺少时取 time 字段的后 5 位作备用，延居 _check_date_rollover 输入的 records 格式）
@@ -807,6 +847,26 @@ class TDXGlobalCachePool:
                     entry["today_bar_count"] = 0
             except Exception:
                 entry["today_bar_count"] = 0
+
+        # 🛡️ 校验 df 中是否含有无效索引或者严重突刺偏离的脏数据
+        if isinstance(df, pd.DataFrame) and not df.empty:
+            try:
+                # 剔除 index 为 NaN 或 'nan' 的行
+                if df.index.isna().any() or (df.index.astype(str) == "nan").any():
+                    valid_idx = df.index.notna() & (df.index.astype(str) != "nan") & (df.index.astype(str).str.strip() != "")
+                    df = df[valid_idx]
+                    entry["df"] = df
+                # 价格极端离群点清洗
+                if "close" in df.columns:
+                    cl_vals = df["close"].dropna().values
+                    if len(cl_vals) >= 5:
+                        med_p = float(np.median(cl_vals))
+                        if med_p > 0.1 and ((cl_vals > med_p * 3.5).any() or (cl_vals < med_p * 0.25).any()):
+                            valid_p_mask = (df["close"] <= med_p * 3.5) & (df["close"] >= med_p * 0.25)
+                            df = df[valid_p_mask]
+                            entry["df"] = df
+            except Exception:
+                pass
 
         return True
 
@@ -1111,6 +1171,10 @@ class TDXGlobalCachePool:
                                     r_copy["vwap"] = round(cum_pv / cum_vol, 2) if cum_vol > 0 else p_cl
                                 else:
                                     r_copy["vwap"] = round(cum_amt / cum_vol, 2) if (cum_vol > 0 and cum_amt > 0) else p_cl
+                                if "time" not in r_copy or not r_copy["time"] or str(r_copy["time"]).lower() == "nan":
+                                    d_s = d[5:] if len(d) >= 10 else d
+                                    t_o = str(r_copy.get("time_only", ""))
+                                    r_copy["time"] = f"{d_s} {t_o}".strip()
                                 new_records.append(r_copy)
 
                     if new_records:

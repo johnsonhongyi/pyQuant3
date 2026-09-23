@@ -1,5 +1,24 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-09-23 11:55
+- [x] **【SBC 10日分时异常修复、右侧让开防遮挡与右键长按 0.3 秒菜单状态机落地】(`ats/tdx_realtime_fetcher.py`, `ats/ui/intraday_strategy_dialog.py`, `tests/test_sbc_chart_fixes.py`, `20260923_1155_task.md`)**：
+    - [x] **600733 北汽蓝谷 10日分时 32.60 脏数据剔除与多层自愈**：
+        - 深入排查确证 600733 在 2026-09-17 的历史分时缓存中混入了一条 `time/time_only` 为 NaN、价格为 32.60 的异常脏记录，导致全量数据中黄金分割线最高点被拉升至 32.60，正常 4.5~4.9 元的分时走势被死死压扁在最底部；5日分时不含该日所以正常，而右键还原仅重置索引无法剔除脏数据；
+        - 在 `_validate_and_repair_records` 中增加严格的 `time_only` 正则格式校验与极端突刺离群价格统计学防御（偏离中位数 3.5 倍以上自动剔除）；自动补齐缺失的 `time` 标签，杜绝 `df.set_index('time')` 产生 NaN 索引；
+        - 画布 `_paint_intraday` 增加空索引过滤与 `all_cands` 统计学防御，并同步清洗净化 RamDisk 缓存文件，600733 10日分时恢复至 4.40~4.97 元纯净真实区间；
+    - [x] **分时走势图右侧预留空白让位 (对齐 K 线图 RIGHT_PAD) 与开盘文本垂直避让**：
+        - 参照 K 线图设计引入 `RIGHT_PAD_RATIO = 0.05`，计算 `active_chart_w = chart_w - right_pad_px`（预留 26~48px 空白区）；
+        - 分时折线、VWAP 线、成交量柱的最新数据点停止在 `active_chart_w`，与右侧边框保留宽裕间距，形态冲顶回落清晰舒展；十字查价光标与双击反查全链路对齐；
+        - 开盘基准线与现价水平虚线保持平滑延伸至右轴；增加开盘价与现价垂直距离 `< 16px` 时的上下错开避让，彻底消除开盘文字与现价高亮胶囊重叠；
+    - [x] **右键菜单长按 0.3 秒受控弹出与短按快速重置 (彻底根治闪退)**：
+        - 拦截 Qt 原生 `contextMenuEvent` 冒泡，避免右键单击松开自动弹出菜单打断看盘流程与引发闪退；
+        - 在 `SBCChartCanvas` 中集成 `_long_press_timer`（300ms 单次定时器）：
+          - 右键短按 (<0.3秒)：停止计时器，执行视图重置与退出查价十字线，绝不弹窗；
+          - 右键拖拽移动 (>3px)：判定为平移，立即停止计时器；
+          - 右键长按 (>=0.3秒)：触发 `_on_right_long_press_timeout` 呼出自定义功能菜单；
+    - [x] **全量自动化验证 100% 绿灯**：
+        - 专项测试 `tests/test_sbc_chart_fixes.py` 4/4 纯绿秒级通过；核心测试集 26 项秒级全部通过；全模块 `compileall` 编译零错误。
+
 ## 2026-09-23 10:35
 - [x] **【脱机/无连接刷新时配额倒计时系统时钟动态重算与本地 QTimer 实时递减落地】(`webTools/window_manager/antigravity_manager.py`, `webTools/window_manager/ui.py`, `tests/test_antigravity_manager.py`, `dist/manage_window_layout.exe`)**：
     - [x] **根因定位与排查确证**：

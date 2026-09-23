@@ -1,0 +1,3820 @@
+import os
+import time
+import datetime
+import gc
+import traceback
+from typing import Any, Optional, Union, Dict, List, Callable
+from JohnsonUtil import johnson_cons as ct
+from JohnsonUtil import commonTips as cct
+pd = cct.LazyModule('pandas')
+np = cct.LazyModule('numpy')
+from JohnsonUtil.commonTips import timed_ctx
+from JohnsonUtil import LoggerFactory
+from JSONData import tdx_data_Day as tdd
+from JSONData import stockFilter as stf
+from tdx_utils import clean_bad_columns, sanitize, clean_expired_tdx_file
+from db_utils import get_indb_df
+import re
+winlimit = cct.winlimit
+loop_counter_limit = cct.loop_counter_limit
+START_INIT = 0
+PIPE_NAME = r"\\.\pipe\my_named_pipe"
+PIPE_NAME_TK = r"\\.\pipe\instock_tk_pipe"
+logger = LoggerFactory.getLogger()
+
+def calc_cycle_stage_vect(df: pd.DataFrame) -> pd.Series:
+    """
+    矢量化计算个股所处的周期阶段 (增强版)
+    1: 筑底/启动 (Bottom/Start) - 站上中长线，初次走强
+    2: 主升/健康 (Rising/Healthy) - 均线顺排，斜率向上，量能配合
+    3: 脉冲/扩张 (Exhaustion/Overextended) - 乖离过大或破上轨 (风险区)
+    4: 见顶/回落 (Top/Falling) - 均线死叉或价格走弱 (减仓/退出区)
+    """
+    n = len(df)
+    if n == 0: return pd.Series([], dtype=int)
+
+    # 提取必要数据
+    close = df['close'].values.astype('float32')
+    ma5 = df['ma5d'].values.astype('float32') if 'ma5d' in df.columns else np.zeros(n)
+    ma10 = df['ma10d'].values.astype('float32') if 'ma10d' in df.columns else np.zeros(n)
+    ma20 = df['ma20d'].values.astype('float32') if 'ma20d' in df.columns else np.zeros(n)
+    ma60 = df['ma60d'].values.astype('float32') if 'ma60d' in df.columns else np.zeros(n)
+    upper = df['upper1'].values.astype('float32') if 'upper1' in df.columns else np.zeros(n)
+    
+    # [NEW] 引入量能确认与多日趋势 (cct.compute_lastdays)
+    lookback = getattr(cct, 'compute_lastdays', 5)
+    
+    # [FIX] 优先使用原始成交量 vol，因为 volume 可能会被转换为虚拟量比信号
+    volume = df['vol'].values.astype('float32') if 'vol' in df.columns else df['volume'].values.astype('float32')
+    
+    # 计算多日成交量均值 (如果 df 是历史序列)
+    # [OPTIMIZE] 如果 df 中已经有 last6vol (或类似预计算列)，则直接使用
+    if 'last6vol' in df.columns:
+        vol_ma = df['last6vol'].values.astype('float32')
+        vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
+    elif n >= lookback:
+        vol_ma = pd.Series(volume).rolling(window=lookback, min_periods=1).mean().values
+        vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
+    elif 'lastv1d' in df.columns:
+        # [WIDE-FORMAT] 处理单行数据，包含历史量列 lastv1d, lastv2d...
+        # 尝试计算多日均量
+        vol_cols = [f'lastv{i}d' for i in range(1, lookback + 1) if f'lastv{i}d' in df.columns]
+        if vol_cols:
+            vol_ma = df[vol_cols].mean(axis=1).values.astype('float32')
+            vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
+        else:
+            lastv1 = df['lastv1d'].values.astype('float32')
+            vol_ratio = volume / np.where(lastv1 > 0, lastv1, 1)
+    else:
+        vol_ratio = np.ones(n)
+
+    # 计算 MA20 斜率
+    ma20_slope = np.zeros(n)
+    if n >= lookback:
+        ma20_series = pd.Series(ma20)
+        ma20_slope = (ma20_series - ma20_series.shift(lookback)).replace(np.nan, 0).values
+    elif f'ma20{lookback}d' in df.columns:
+        # [WIDE-FORMAT] 使用历史 MA20 列计算斜率
+        ma20_slope = (ma20 - df[f'ma20{lookback}d'].values.astype('float32'))
+    elif 'ma201d' in df.columns:
+        ma20_slope = (ma20 - df['ma201d'].values.astype('float32'))
+
+    stages = np.full(n, 2, dtype=int) # 默认设为 Stage 2
+
+    # 1. Stage 3: 脉冲扩张 (最高优先级 - 风险拦截)
+    bias5 = (close - ma5) / np.where(ma5 > 0, ma5, 1)
+    mask_stage3 = (upper > 0) & (close > upper * 1.005) # 突破布林上轨
+    mask_stage3 |= (bias5 > 0.08) # 5日乖离率 > 8%
+    stages[mask_stage3] = 3
+
+    # 2. Stage 4: 见顶回落 (次高优先级)
+    # 条件：跌破 MA5 且 MA5 下降，或 破 MA10
+    mask_stage4 = (ma5 > 0) & (close < ma5 * 0.992)
+    mask_stage4 |= (ma10 > 0) & (close < ma10 * 0.985)
+    # 如果 MA20 斜率为负且价格在 MA20 下方，也是 Stage 4
+    mask_stage4 |= (ma20 > 0) & (ma20_slope < 0) & (close < ma20)
+    stages[mask_stage4] = 4
+
+    # 3. Stage 1: 筑底启动
+    # 条件：靠近 MA60 且 站上 MA20，且成交量有放大迹象 (vol_ratio > 1.1)
+    is_near_ma60 = (ma60 > 0) & (np.abs(close - ma60) / ma60 < 0.03)
+    is_initial_cross = (ma20 > 0) & (close > ma20) & (ma5 < ma20 * 1.02)
+    mask_stage1 = (is_near_ma60 | is_initial_cross) & (vol_ratio > 1.1) & (stages != 4) & (stages != 3)
+    stages[mask_stage1] = 1
+
+    # 额外检查：空头排列
+    # 如果均线系统整体向下，即使价格暂时没破位也要警惕
+    mask_short_trend = (ma5 > 0) & (ma10 > ma5) & (ma20 > ma10)
+    stages[mask_short_trend & (stages != 3)] = 4
+
+    return pd.Series(stages, index=df.index)
+
+def calc_compute_volume(top_all: pd.DataFrame, logger: Any, resample: str = 'd', virtual: bool = True) -> pd.Series:
+    """计算成交量（量比或原始量）"""
+    # 逻辑置换：优先使用 'vol'(镜像原始量) 进行计算。
+
+    vol_data = top_all['vol'] if 'vol' in top_all.columns else top_all['volume']
+    
+    ratio_t = cct.get_work_time_ratio(resample=resample)
+    # logger.info(f'ratio_t: {round(ratio_t, 2)}')
+
+    if virtual:
+        # 为了防止盘后数据 (vol == lastv1d) 在开盘初期由于 ratio_t 极小而导致虚拟成交量暴涨
+        # 对 stale 数据不应用 ratio_t 除法
+        if 'last6vol' not in top_all.columns:
+            top_all['last6vol'] = vol_data.rolling(window=6, min_periods=1).mean()
+        l6vol = top_all['last6vol'].replace(0, np.nan)
+        v_ratio = vol_data / l6vol
+        
+        if 'lastv1d' in top_all.columns and ratio_t < 1.0:
+            # 只有当 vol 不同于昨日全天量时，才认定为今日有实时变动的数据
+            mask_active = (vol_data != top_all['lastv1d']) & (vol_data > 0)
+            
+            # 使用 pandas 矢量化操作，避免 np.where 转换成 ndarray
+            v_ratio = v_ratio.copy()
+            # 活跃股票进行虚拟量比放大
+            v_ratio[mask_active] = v_ratio[mask_active] / ratio_t
+        else:
+            # 盘后或缺少对比列时，按照当前时间比例正常缩放
+            v_ratio = v_ratio / (ratio_t if ratio_t > 0 else 1.0)
+            
+        return v_ratio.fillna(0).round(1)
+    else:
+        # 原始量还原 = 虚拟量比 * last6vol * ratio_t
+        return (top_all['volume'] * top_all.get('last6vol', 1) * ratio_t).round(1)
+
+
+def build_hma_and_trendscore(
+    df,
+    close_col='close',
+    ma_map=None,
+    strong_cols=None,
+    win_col='win',
+    max_days=cct.compute_lastdays,          # 最近多少天成交量参与
+    lastv_prefix='lastv',# 成交量列前缀，如 lastv1d,lastv2d...
+    invalid_val=-101.0,
+    status_callback=None
+    ):
+    """
+    极限向量化生成：
+    - Hma5/10/20/60
+    - TrendS (0~100)
+    - Volume factor from last N days (max_days)
+    - Rank 排序，避免一堆满分100
+    """
+
+    # ---------- 1️⃣ 读取状态 ----------
+    # status = None
+    # if callable(status_callback):
+    #     try:
+    #         status = status_callback()
+    #     except Exception as e:
+    #         logger.warning(f"status_callback error: {e}")
+
+    n = len(df)
+
+    if ma_map is None:
+        ma_map = {5:'ma5d',10:'ma10d',20:'ma20d',60:'ma60d'}
+    if strong_cols is None:
+        strong_cols = ['sum_perc','slope','vol_ratio','power_idx']
+
+    # ---------- 1️⃣ HMA & TrendS ----------
+    close = df[close_col].values.astype('float32')
+    score = np.zeros(n, dtype='float32')
+    weight_sum = 0.0
+    weights = {5:0.35,10:0.30,20:0.20,60:0.15}
+
+    for period, ma_col in ma_map.items():
+        hma_col = f'Hma{period}d'
+        if ma_col not in df.columns:
+            df[hma_col] = invalid_val
+            continue
+
+        ma = df[ma_col].values.astype('float32')
+        valid = ma > 0
+        hma = np.full(n, invalid_val, dtype='float32')
+        hma[valid] = (close[valid] - ma[valid]) / (ma[valid]+0.01) * 100
+        df[hma_col] = np.round(hma, 1)
+
+        w = weights.get(period, 0)
+        if w > 0:
+            score[valid] += np.clip(hma[valid], -10, 10) * w
+            weight_sum += w
+
+    if weight_sum > 0:
+        trend = (score / weight_sum + 10) * 5
+        df['TrendS'] = np.clip(trend, 0, 100).round(1)
+    else:
+        df['TrendS'] = 0.0
+
+    # ---------- 2️⃣ 强势因子 ----------
+    strong_score = np.zeros(n, dtype='float32')
+    for col in strong_cols:
+        if col in df.columns:
+            arr = df[col].fillna(0).values.astype('float32')
+            arr = (arr - arr.min()) / (arr.ptp() + 1e-6)
+            strong_score += arr
+    strong_score /= max(1, len([c for c in strong_cols if c in df.columns]))
+
+    # ---------- 3️⃣ 连阳加权 ----------
+    if win_col in df.columns:
+        win_vals = df[win_col].fillna(0).astype('float32')
+    else:
+        win_vals = np.zeros(n, dtype='float32')
+
+
+    if get_status(status_callback):
+        # ---------- 4️⃣ 最近 N 天成交量因子 ----------
+        vol_cols = [f'{lastv_prefix}{i}d' for i in range(1, max_days+1)]
+        vol_cols = [c for c in vol_cols if c in df.columns]
+
+        if vol_cols:
+            vol_arr = df[vol_cols].fillna(0).values.astype('float32')
+            # 绝对量级压缩
+            vol_max = np.log1p(vol_arr.max(axis=1))
+            # 相对放量
+            vol_mean = vol_arr.mean(axis=1)
+            vol_ratio = np.clip(vol_arr[:,0] / (vol_mean+1e-6), 0.5, 5.0)
+            # 连续放量天数占比
+            vol_continuity = (vol_arr > vol_mean[:,None]).sum(axis=1) / vol_arr.shape[1]
+            volume_factor = vol_max * vol_ratio * (1 + vol_continuity)
+        else:
+            volume_factor = np.zeros(n, dtype='float32')
+
+    # ---------- 5️⃣ 最终排序 Rank ----------
+        sort_score = df['TrendS'].values * 1000 + strong_score*10 + win_vals*1.0 + volume_factor*50
+    else:
+        sort_score = df['TrendS'].values * 1000 + strong_score*10 + win_vals*1.0
+
+    df['Rank'] = (-sort_score).argsort().argsort() + 1
+
+    # ---------- 6️⃣ 最后统一格式化 .1f ----------
+    # for col in [f'Hma{p}d' for p in ma_map.keys()] + ['TrendS']:
+    #     if col in df.columns:
+    #         df[col] = np.round(df[col].values, 1)
+    for col in ['Hma5d','Hma10d','Hma20d','Hma60d']:
+        if col in df.columns:
+            df[col] = df[col].apply(lambda x: f"{x:.1f}")
+    if 'TrendS' in df.columns:
+        df['TrendS'] = pd.to_numeric(df['TrendS'], errors='coerce').fillna(60).round(0).astype(int)
+
+    return df
+
+
+def complete_indicators_pipeline(
+    top_all: pd.DataFrame, 
+    logger: Any, 
+    resample: str, 
+    status_callback: Callable[[], Any] = None
+) -> pd.DataFrame:
+    """
+    对已加载的 top_all (大/小周期) 数据执行一致的指标计算与补齐管道，
+    计算包括 calc_indicators, process_merged_sina_with_history, 注入 0d 实时列,
+    strong_momentum_large_cycle_vect (动量/win), consecutive_above 系列,
+    scoring 系列, 以及 build_hma_and_trendscore。
+    """
+    if top_all is None or top_all.empty:
+        return top_all
+
+    if 'name' not in top_all.columns:
+        top_all['name'] = top_all.index
+
+    time_sum = time.time()
+    
+    # 0. 针对非日线大周期 (w, m, 3d, 45d, 3M) 执行实盘数据对齐与 Ghost Bar 合并
+    # 无论是盘中、盘后、夜间还是周末，只要数据包含当前最新行情，均执行一致的大周期平移与对齐
+    if resample != 'd' and 'close' in top_all.columns:
+        import numpy as np
+        
+        valid_mask = (top_all['close'] > 0) & (top_all['close'].notna())
+        if valid_mask.any():
+            # 🛡️ 非交易日 (周末/节假日) 及 交易日开盘前 (09:20 竞价不可撤盘前) 静态数据归一化：
+            # 基准日期锁定为最新已完结交易日 (last_trade_date)，
+            # 彻底根治 Sunday (周日) 时 floor('2D'/'3D') 误切新 bucket 以及 交易日开盘前数据动态变化导致的 is_same 误判为 False 和平移失效缺陷！
+            is_trade_day = cct.get_trade_date_status()
+            now_dt = datetime.datetime.now()
+            # 盘前判定：如果今天是交易日，但当前时间在 09:20 盘前不可撤单竞价前 (hour*100 + minute < 920)，亦视为盘前未开盘静态状态！
+            is_before_market = (now_dt.hour * 100 + now_dt.minute < 920) if is_trade_day else True
+            today = cct.get_today() if (is_trade_day and not is_before_market) else (cct.get_last_trade_date() or cct.get_today())
+            is_same = False
+            try:
+                today_ts = pd.to_datetime(today)
+                # ─── 优先路径：resdate 是 Ghost Bar 的周期截止日（如本周五 2026-07-03）
+                # 若 resdate >= today，说明当前未完结周期的 Ghost Bar 已经写入 top_all，
+                # 直接判定 is_same = True，无需做额外的周期归属运算。
+                if 'resdate' in top_all.columns:
+                    valid_resdates = top_all['resdate'].dropna()
+                    if not valid_resdates.empty:
+                        last_resdate_ts = pd.to_datetime(valid_resdates.max())
+                        if last_resdate_ts >= today_ts:
+                            is_same = True
+                
+                # ─── 兜底路径：resdate 不可用时，用上一个交易日与今日做周期归属判断
+                if not is_same:
+                    last_dt = cct.get_trade_day_before(1)
+                    if last_dt == today:
+                        last_dt = cct.get_trade_day_before(2)
+                    if last_dt and last_dt < today:
+                        _RESAMPLE_PERIOD_MAP = {
+                            'w':  'W', 'm':  'M', '3M': 'Q', '3m': 'Q',
+                        }
+                        _RESAMPLE_N_DAYS_MAP = {
+                            '2d': 2, '3d': 3, '5d': 5, '45d': 45,
+                        }
+                        last_ts = pd.to_datetime(last_dt)
+                        if resample in _RESAMPLE_PERIOD_MAP:
+                            freq = _RESAMPLE_PERIOD_MAP[resample]
+                            is_same = (today_ts.to_period(freq) == last_ts.to_period(freq))
+                        elif resample in _RESAMPLE_N_DAYS_MAP:
+                            n = _RESAMPLE_N_DAYS_MAP[resample]
+                            try:
+                                is_same = (today_ts.floor(f'{n}D') == last_ts.floor(f'{n}D'))
+                            except Exception:
+                                window_start = last_ts - pd.Timedelta(days=n - 1)
+                                is_same = (window_start <= today_ts <= last_ts)
+                        else:
+                            is_same = True
+            except Exception:
+                is_same = True
+            
+            # 过滤出有有效实时报价的股票
+            valid_mask = (top_all['close'] > 0) & (top_all['close'].notna())
+            if valid_mask.any():
+                if is_same:
+                    # (0) 跨周期历史特征原地动态移位：既然是同一周期且未收盘，
+                    # 那么数据库在初始化加载时，最近一期的数据 (last1d) 实际包含了当前的未完结周期数据。
+                    # 我们需要先将当前未完结周期的 OHLV 特征暂存为 ghost 列以备后用。
+                    # 然后将全部历史特征向后平移 1 期，使 last1d 指向上一周期已完结的数据，
+                    # last2d 指向上上周期，依此类推。这样在 data_utils 后续的实时均线/涨跌幅重算中，
+                    # 昨收价 lastp1d 就能精确匹配已收盘历史周，而不会受到盘中未完结周的污染。
+                    
+                    # 检查缓存中的 DataFrame 是否已经平移过，避免因为高频刷新重复平移导致数据退化
+                    if '_is_shifted' not in top_all.columns:
+                        top_all['_is_shifted'] = False
+                        
+                    mask_to_shift = ~top_all['_is_shifted'].fillna(False)
+                    # 仅针对有效股票且尚未移位的个股进行平移
+                    mask_to_shift = mask_to_shift & valid_mask
+                    
+                    if mask_to_shift.any():
+                        if 'lasto1d' in top_all.columns: 
+                            top_all.loc[mask_to_shift, 'lasto_ghost'] = top_all.loc[mask_to_shift, 'lasto1d']
+                        if 'lasth1d' in top_all.columns: 
+                            top_all.loc[mask_to_shift, 'lasth_ghost'] = top_all.loc[mask_to_shift, 'lasth1d']
+                        if 'lastl1d' in top_all.columns: 
+                            top_all.loc[mask_to_shift, 'lastl_ghost'] = top_all.loc[mask_to_shift, 'lastl1d']
+                        if 'lastv1d' in top_all.columns: 
+                            top_all.loc[mask_to_shift, 'lastv_ghost'] = top_all.loc[mask_to_shift, 'lastv1d']
+                        if 'lastp1d' in top_all.columns: 
+                            top_all.loc[mask_to_shift, 'lastp_ghost'] = top_all.loc[mask_to_shift, 'lastp1d']
+                        
+                        import re
+                        pattern = re.compile(r'^([a-zA-Z_]+?)(\d+)(d)?$')
+                        
+                        feature_cols = {}
+                        for col in top_all.columns:
+                            if col.endswith('_ghost') or col == '_is_shifted':
+                                continue
+                            match = pattern.match(col)
+                            if match:
+                                prefix, num_str, d_suffix = match.groups()
+                                num = int(num_str)
+                                d_suffix = d_suffix if d_suffix else ''
+                                feature_cols.setdefault(prefix, []).append((num, d_suffix, col))
+                                
+                        for prefix, cols_info in feature_cols.items():
+                            cols_info.sort(key=lambda x: x[0])
+                            for num, d_suffix, col in cols_info:
+                                prev_num = num - 1
+                                if prev_num > 0:
+                                    prev_col = f"{prefix}{prev_num}{d_suffix}"
+                                    if prev_col in top_all.columns:
+                                        top_all.loc[mask_to_shift, prev_col] = top_all.loc[mask_to_shift, col]
+                        
+                        top_all.loc[mask_to_shift, '_is_shifted'] = True
+
+                    # (1) 同一周期：将今日实时行情合并到当前的周期 OHLC 中
+                    if 'lopen' in top_all.columns:
+                        top_all.loc[valid_mask, 'open'] = np.where(
+                            top_all.loc[valid_mask, 'lopen'] > 0,
+                            top_all.loc[valid_mask, 'lopen'],
+                            top_all.loc[valid_mask, 'open']
+                        )
+                    if 'lhigh' in top_all.columns:
+                        top_all.loc[valid_mask, 'high'] = np.maximum(
+                            top_all.loc[valid_mask, 'lhigh'].fillna(0),
+                            top_all.loc[valid_mask, 'high'].fillna(0)
+                        )
+                    if 'llow' in top_all.columns:
+                        top_all.loc[valid_mask, 'low'] = np.where(
+                            (top_all.loc[valid_mask, 'llow'] > 0) & (top_all.loc[valid_mask, 'low'] > 0),
+                            np.minimum(top_all.loc[valid_mask, 'llow'], top_all.loc[valid_mask, 'low']),
+                            np.where(top_all.loc[valid_mask, 'low'] > 0, top_all.loc[valid_mask, 'low'], top_all.loc[valid_mask, 'llow'])
+                        )
+                    if 'lvol' in top_all.columns:
+                        if 'vol' in top_all.columns:
+                            top_all.loc[valid_mask, 'vol'] = top_all.loc[valid_mask, 'lvol'].fillna(0) + top_all.loc[valid_mask, 'vol'].fillna(0)
+                        if 'volume' in top_all.columns:
+                            top_all.loc[valid_mask, 'volume'] = top_all.loc[valid_mask, 'lvol'].fillna(0) + top_all.loc[valid_mask, 'volume'].fillna(0)
+                else:
+                    # (2) 全新周期：不需要合并历史，OHLC 已经是今日的实时行情
+                    # 新周期开始，重置平移标记，以便后续进入“同一周期”时能够再次进行平移
+                    top_all.loc[valid_mask, '_is_shifted'] = False
+                
+    # # 1. 基础指标计算
+    # with timed_ctx("calc_indicators", warn_ms=1000):
+    #     top_all = calc_indicators(top_all, logger, resample)
+    
+    # # 2. 补齐历史/实时成交量
+    # with timed_ctx("sina_with_history", warn_ms=1000):
+    #     top_all = process_merged_sina_with_history(top_all)
+    # 1. 重新根据最新 close 实时计算当日涨跌幅及 MA5/MA10 均线覆写 (对所有时间周期 resample 生效)
+    # 提前计算以保障后续基础指标计算 (calc_indicators) 和信号判定 (process_merged_sina_with_history) 的依赖就绪
+    import numpy as np
+    valid_mask = (top_all['close'] > 0) & (top_all['close'].notna())
+    if valid_mask.any():
+
+        if 'lastp1d' in top_all.columns:
+            raw_pct = (
+                top_all.loc[valid_mask, 'close'] - top_all.loc[valid_mask, 'lastp1d']
+            ) / top_all.loc[valid_mask, 'lastp1d'].replace(0, np.nan) * 100
+            top_all.loc[valid_mask, 'percent'] = raw_pct.round(2)
+            # 🛡️ [BUG FIX] 严禁将当日涨跌幅 percent 覆盖赋给 per1d！
+            # per1d 代表上一交易日(昨日/上一周期)涨跌幅，由 TDX/HDF5 原生计算或通过 (lastp1d - lastp2d) 取得。
+            # 若此处盲目覆盖，将导致 UI 与选股逻辑中 per1d 与 percent 100% 相同，彻底丢失昨日真实涨跌幅！
+            if 'per1d' not in top_all.columns and 'lastp2d' in top_all.columns:
+                last_raw_pct = (
+                    top_all.loc[valid_mask, 'lastp1d'] - top_all.loc[valid_mask, 'lastp2d']
+                ) / top_all.loc[valid_mask, 'lastp2d'].replace(0, np.nan) * 100
+                top_all.loc[valid_mask, 'per1d'] = last_raw_pct.round(2)
+
+        # # 确定参考昨收列：在大周期(resample != 'd')中，未平移前 lastp1d 代表本周期未收盘的数据，真正的上期收盘昨收存放在 lastp2d
+        # ref_lastp_col = 'lastp2d' if (resample != 'd' and 'lastp2d' in top_all.columns) else 'lastp1d'
+        
+        # if ref_lastp_col in top_all.columns:
+        #     raw_pct = (
+        #         top_all.loc[valid_mask, 'close'] - top_all.loc[valid_mask, ref_lastp_col]
+        #     ) / top_all.loc[valid_mask, ref_lastp_col].replace(0, np.nan) * 100
+        #     top_all.loc[valid_mask, 'percent'] = raw_pct.round(2)
+        #     top_all.loc[valid_mask, 'per1d'] = top_all.loc[valid_mask, 'percent']
+        
+        # 计算 MA5
+        ma5_cols = ['close'] + [f'lastp{i}d' for i in range(1, 5)]
+        available_ma5 = [c for c in ma5_cols if c in top_all.columns]
+        if len(available_ma5) > 1:
+            ma5_sum = sum(top_all[c].fillna(0) for c in available_ma5)
+            non_zero_count = sum((top_all[c] > 0).astype(int) for c in available_ma5)
+            top_all.loc[valid_mask, 'ma5d'] = (ma5_sum / non_zero_count.replace(0, 1)).loc[valid_mask].round(2)
+            top_all.loc[valid_mask, 'ma51d'] = top_all.loc[valid_mask, 'ma5d']
+            
+        # 计算 MA10
+        ma10_cols = ['close'] + [f'lastp{i}d' for i in range(1, 10)]
+        available_ma10 = [c for c in ma10_cols if c in top_all.columns]
+        if len(available_ma10) > 1:
+            ma10_sum = sum(top_all[c].fillna(0) for c in available_ma10)
+            non_zero_count = sum((top_all[c] > 0).astype(int) for c in available_ma10)
+            top_all.loc[valid_mask, 'ma10d'] = (ma10_sum / non_zero_count.replace(0, 1)).loc[valid_mask].round(2)
+
+    # 2. 基础指标计算
+    with timed_ctx("calc_indicators", warn_ms=1000):
+        top_all = calc_indicators(top_all, logger, resample)
+    
+    # 3. 补齐历史/实时成交量
+    with timed_ctx("sina_with_history", warn_ms=1000):
+        top_all = process_merged_sina_with_history(top_all)
+    
+    # 3. 注入 0d 数据列，使 consecutive_above 生效 (只有在盘中且有实时行情时注入)
+    if 'now' in top_all.columns:
+        top_all['lastp0d'] = top_all['now']
+        
+        curr_open = top_all['open']
+        curr_high = top_all['high']
+        curr_low = top_all['low']
+        curr_vol = top_all['vol'] if 'vol' in top_all.columns else top_all['volume']
+        
+        # 优先使用 lopen/lhigh/llow/lvol 进行实时合并，或者使用 lasto_ghost 等作为大周期 Ghost Bar 兜底
+        if 'lasto_ghost' in top_all.columns:
+            top_all['lasto0d'] = np.where(top_all['lasto_ghost'] > 0, top_all['lasto_ghost'], curr_open)
+            top_all['lasth0d'] = np.maximum(top_all['lasth_ghost'].fillna(0), curr_high.fillna(0))
+            
+            ghost_low = top_all['lastl_ghost']
+            top_all['lastl0d'] = np.where(
+                (ghost_low > 0) & (curr_low > 0),
+                np.minimum(ghost_low, curr_low),
+                np.where(ghost_low > 0, ghost_low, curr_low)
+            )
+            top_all['lastv0d'] = top_all['lastv_ghost'].fillna(0) + curr_vol.fillna(0)
+        else:
+            top_all['lasto0d'] = curr_open
+            top_all['lasth0d'] = curr_high
+            top_all['lastl0d'] = curr_low
+            top_all['lastv0d'] = curr_vol
+            
+        # 🛡️ 动态成交量比例换算：仅在盘中交易时间内 (交易日 09:15-15:00) 才按照进度做全天量能折算
+        # 非交易日 (如周末/节假日) 或盘后收盘状态下，数据为未变动的静态已完结数据，比例强制固定为 1.0！
+        try:
+            is_trading_hours = cct.get_trade_date_status() and (915 <= cct.get_now_time_int() <= 1500)
+            if is_trading_hours:
+                ratio_t = cct.get_work_time_ratio(resample=resample)
+                ratio_t = max(ratio_t if (isinstance(ratio_t, (int, float)) and ratio_t > 0) else 1.0, 0.01)
+            else:
+                ratio_t = 1.0
+
+            raw_v0d = top_all['lastv0d']
+            top_all['lastv0d'] = (raw_v0d / ratio_t).round(1)
+            top_all['virtual_vol'] = top_all['lastv0d']
+        except Exception as ex_ratio:
+            logger.warning(f"cct.get_work_time_ratio scaling failed: {ex_ratio}")
+
+        if 'upper1' in top_all.columns: top_all['upper0'] = top_all['upper1']
+        if 'ma51d' in top_all.columns: top_all['ma50d'] = top_all['ma51d']
+        if 'high41' in top_all.columns: top_all['high40'] = top_all['high41']
+
+    # 4. 动量与 win 属性计算
+    with timed_ctx("plus_history_sum_opt", warn_ms=1000):
+        if resample == 'd':
+            result_opt = strong_momentum_large_cycle_vect(top_all, max_days=cct.compute_lastdays, winlimit=1)
+        else:
+            # 统一使用 shift_intraday=True 自动将当前活跃行情 (close 等) 无缝链接至动量评估序列的最前端 (lastp1d)
+            # 并固定从 win_start_idx=1 开始计算动量，确保大周期实盘的当前周期涨跌被正确纳入连阳(win)与斜率(slope)计算
+            result_opt = strong_momentum_large_cycle_vect_new(
+                top_all, max_days=cct.compute_lastdays, winlimit=1,
+                shift_intraday=True, win_start_idx=1)
+        
+    with timed_ctx("merge_strong_momentum_results_opt", warn_ms=1000):
+        clean_sum = merge_strong_momentum_results(result_opt, min_days=winlimit)
+        top_all = align_sum_percent(top_all, clean_sum)
+
+    # 5. consecutive_above 系列支撑/破位计数
+    with timed_ctx("consecutive_above_win_upper", warn_ms=1000):
+        top_all = strong_momentum_large_cycle_vect_consecutive_above(top_all, price_col='lastp', upper_col='upper', max_days=cct.compute_lastdays)
+    with timed_ctx("consecutive_above_single_w_upper", warn_ms=1000):
+        top_all = strong_momentum_large_cycle_vect_consecutive_above_single(top_all, price_col='lastp', upper_col='upper', max_days=cct.compute_lastdays)
+    with timed_ctx("consecutive_above_wm5_upper", warn_ms=1000):
+        top_all = strong_momentum_large_cycle_vect_consecutive_above_m5(top_all, price_col='lastp', upper_col='upper', max_days=cct.compute_lastdays)
+    
+    # 6. scoring 系列
+    with timed_ctx("scoring_momentum_pullback_system_base", warn_ms=1000):
+        top_all = scoring_momentum_pullback_system_base(top_all, max_days=cct.compute_lastdays)
+    with timed_ctx("scoring_momentum_pullback_system_top", warn_ms=1000):
+        top_all = scoring_momentum_pullback_system_top(top_all, max_days=cct.compute_lastdays)
+    with timed_ctx("buy_sell_score_momentum_vect", warn_ms=1000):
+        top_all = buy_sell_score_momentum_vect(top_all, max_days=cct.compute_lastdays)
+    
+    # 7. build_hma_and_trendscore (生成 Rank / TrendS 等)
+    with timed_ctx("build_hma_and_trendscore", warn_ms=1000):
+        top_all = build_hma_and_trendscore(top_all, status_callback=status_callback)
+    
+    if logger:
+        logger.debug(f'[complete_indicators_pipeline] resample={resample} elapsed={time.time() - time_sum:.2f}s')
+    return top_all
+
+
+def build_hma_and_trendscore_noVol(
+    df,
+    close_col='close',
+    ma_map=None,
+    invalid_val=-101.0,
+    strong_cols=None,
+    win_col='win',
+):
+    """
+    极限向量化生成：
+    - Hma5/10/20/60
+    - TrendS (0~100)
+    - Rank 排队，避免一堆满分100
+
+    df 已包含 close 和 maXd
+    最终输出列统一保留 .1f 字符串格式
+    """
+
+    if ma_map is None:
+        ma_map = {5:'ma5d',10:'ma10d',20:'ma20d',60:'ma60d'}
+    if strong_cols is None:
+        strong_cols = ['sum_perc','slope','vol_ratio','power_idx']
+
+    weights = {5:0.35,10:0.30,20:0.20,60:0.15}
+    n = len(df)
+    close = df[close_col].values.astype('float32')
+    score = np.zeros(n, dtype='float32')
+    weight_sum = 0.0
+
+    # -------------------------
+    # 1️⃣ 计算 Hma 并累加 TrendS
+    # -------------------------
+    for period, ma_col in ma_map.items():
+        hma_col = f'Hma{period}d'
+        if ma_col not in df.columns:
+            df[hma_col] = invalid_val
+            continue
+
+        ma = df[ma_col].values.astype('float32')
+        valid = ma > 0
+        hma = np.full(n, invalid_val, dtype='float32')
+        hma[valid] = (close[valid] - ma[valid]) / (ma[valid] + 0.01) * 100
+
+        # 不转字符串，保持浮点
+        df[hma_col] = np.round(hma, 1)
+
+        # TrendScore 累加
+        w = weights.get(period)
+        if w is not None:
+            score[valid] += np.clip(hma[valid], -10, 10) * w
+            weight_sum += w
+
+    # -------------------------
+    # 2️⃣ TrendS归一化
+    # -------------------------
+    if weight_sum > 0:
+        trend = (score / weight_sum + 10) * 5
+        df['TrendS'] = np.clip(trend, 0, 100)
+    else:
+        df['TrendS'] = 0.0
+
+    # -------------------------
+    # 3️⃣ 强势因子辅助打散满分
+    # -------------------------
+    strong_score = np.zeros(n, dtype='float32')
+    valid_cols = [c for c in strong_cols if c in df.columns]
+    for col in valid_cols:
+        arr = df[col].fillna(0).values.astype('float32')
+        arr = (arr - arr.min()) / (arr.ptp() + 1e-6)
+        strong_score += arr
+    if valid_cols:
+        strong_score /= len(valid_cols)
+
+    # -------------------------
+    # 4️⃣ 连阳加权
+    # -------------------------
+    if win_col in df.columns:
+        win_vals = df[win_col].fillna(0).astype('float32')
+    else:
+        win_vals = np.zeros(n, dtype='float32')
+
+    # -------------------------
+    # 5️⃣ 排序 Rank（整数/浮点，保持性能）
+    # -------------------------
+    sort_score = df['TrendS'].values * 1000 + strong_score*10 + win_vals*1.0
+    df['Rank'] = (-sort_score).argsort().argsort() + 1
+
+    # -------------------------
+    # 6️⃣ 最终输出格式化 .1f（展示用）
+    # -------------------------
+    for col in ['Hma5d','Hma10d','Hma20d','Hma60d']:
+        if col in df.columns:
+            df[col] = df[col].apply(lambda x: f"{x:.1f}")
+    if 'TrendS' in df.columns:
+        df['TrendS'] = pd.to_numeric(df['TrendS'], errors='coerce').fillna(60).round(0).astype(int)
+
+    return df
+
+# def format_floats(df):
+#     """
+#     [PERF-OPTIMIZED] 批量格式化浮点列
+#     使用 batch .loc 赋值代替逐列循环，提升 2x-8x 效率。
+#     """
+#     float_cols = df.select_dtypes(include='float').columns
+#     if len(float_cols) == 0:
+#         return df
+
+#     df_out = df.copy(deep=False)
+#     # ⭐ [FIX] 使用 Plan A：批量 loc 覆盖，避免 BlockManager 重复合并开销
+#     df_out.loc[:, float_cols] = df_out.loc[:, float_cols].round(2)
+
+#     return df_out
+
+def format_floats(df):
+    float_cols = df.select_dtypes(include='float').columns
+    if len(float_cols) == 0:
+        return df
+
+    df.loc[:, float_cols] = np.round(
+        df.loc[:, float_cols].to_numpy(),
+        2
+    )
+    return df
+
+def format_floats_slow(df):
+    # 找出 float 列
+    float_cols = df.select_dtypes(include='float').columns
+    # 仅对 float 列 apply 格式化，其他列保持不变
+    df_copy = df.copy()
+    # df_copy[float_cols] = df_copy[float_cols].applymap(lambda x: f"{x:.2f}")
+    df_copy[float_cols] = df_copy[float_cols].round(2)
+    return df_copy
+
+
+def calc_current_td_setup_vect(df: pd.DataFrame) -> pd.Series:
+    """
+    Vectorized calculation of the TD Setup count for the current day (index 0).
+    Returns a Series with:
+      positive integers for TD Sell Setup count (1 to 9+)
+      negative integers for TD Buy Setup count (-1 to -9+)
+      0 if no setup is active
+    """
+    n_rows = len(df)
+    up_count = np.zeros(n_rows, dtype=int)
+    down_count = np.zeros(n_rows, dtype=int)
+    
+    up_active = np.ones(n_rows, dtype=bool)
+    down_active = np.ones(n_rows, dtype=bool)
+    
+    # We trace backwards up to 15 bars to get the current consecutive count
+    for j in range(15):
+        c_col = 'close' if j == 0 else f'lastp{j}d'
+        ref_col = f'lastp{j+4}d'
+        
+        if c_col in df.columns and ref_col in df.columns:
+            c_val = df[c_col].fillna(0).values
+            ref_val = df[ref_col].fillna(0).values
+            
+            # Check up (Sell Setup)
+            up_cond = (c_val > ref_val) & (c_val > 0) & (ref_val > 0)
+            up_active = up_active & up_cond
+            up_count[up_active] += 1
+            
+            # Check down (Buy Setup)
+            down_cond = (c_val < ref_val) & (c_val > 0) & (ref_val > 0)
+            down_active = down_active & down_cond
+            down_count[down_active] += 1
+        else:
+            break
+            
+    # Combine up and down counts
+    td_setup = np.zeros(n_rows, dtype=int)
+    td_setup[up_count > 0] = up_count[up_count > 0]
+    td_setup[down_count > 0] = -down_count[down_count > 0]
+    
+    return pd.Series(td_setup, index=df.index)
+
+def calc_strong_rebound_score_vect(df: pd.DataFrame, resample: str) -> pd.Series:
+    """
+    Calculate the Node Strength Score for the "Strong Trend Pullback TD1/TD2 Reversal" pattern.
+    Returns a Series of scores from 0.0 to 100.0.
+    """
+    n_rows = len(df)
+    score = np.zeros(n_rows, dtype=float)
+    
+    # 1. 检查必要的基础列
+    required_cols = ['close', 'open', 'high', 'low', 'td_setup', 'percent']
+    for c in required_cols:
+        if c not in df.columns:
+            return pd.Series(score, index=df.index)
+            
+    # 特别对均线做兼容判断：如果没有 ma5d/ma20d 则无法计算强度，直接返回 0
+    if 'ma5d' not in df.columns or 'ma20d' not in df.columns:
+        return pd.Series(score, index=df.index)
+        
+    close = df['close'].fillna(0).values
+    open_val = df['open'].fillna(0).values
+    high = df['high'].fillna(0).values
+    low = df['low'].fillna(0).values
+    ma5 = df['ma5d'].fillna(0).values
+    ma20 = df['ma20d'].fillna(0).values
+    td_setup = df['td_setup'].fillna(0).values
+    pct = df['percent'].fillna(0).values
+    
+    # 计算均线的前序历史，用 values 规避 pandas 对齐开销
+    # 昨天的 MA20 / MA5
+    ma20_cols_last1 = [f'lastp{i}d' for i in range(1, 21)]
+    available_ma20_last1 = [c for c in ma20_cols_last1 if c in df.columns]
+    if len(available_ma20_last1) >= 10:
+        ma20_last1 = (sum(df[c].fillna(0) for c in available_ma20_last1) / len(available_ma20_last1)).values
+    else:
+        ma20_last1 = ma20
+        
+    ma20_cols_last2 = [f'lastp{i}d' for i in range(2, 22)]
+    available_ma20_last2 = [c for c in ma20_cols_last2 if c in df.columns]
+    if len(available_ma20_last2) >= 10:
+        ma20_last2 = (sum(df[c].fillna(0) for c in available_ma20_last2) / len(available_ma20_last2)).values
+    else:
+        ma20_last2 = ma20_last1
+
+    # 大周期 ma5 的昨值与前值
+    ma5_cols_last1 = [f'lastp{i}d' for i in range(1, 6)]
+    available_ma5_last1 = [c for c in ma5_cols_last1 if c in df.columns]
+    if len(available_ma5_last1) >= 3:
+        ma5_last1 = (sum(df[c].fillna(0) for c in available_ma5_last1) / len(available_ma5_last1)).values
+    else:
+        ma5_last1 = ma5
+        
+    ma5_cols_last2 = [f'lastp{i}d' for i in range(2, 7)]
+    available_ma5_last2 = [c for c in ma5_cols_last2 if c in df.columns]
+    if len(available_ma5_last2) >= 3:
+        ma5_last2 = (sum(df[c].fillna(0) for c in available_ma5_last2) / len(available_ma5_last2)).values
+    else:
+        ma5_last2 = ma5_last1
+
+    # 动态且精确计算指定历史位移 S (S=0为今天，S=1为昨天) 的均线
+    def get_ma_shift(L, S):
+        if S == 0:
+            if L == 5: return ma5
+            if L == 20: return ma20
+            if L == 60: return df['ma60d'].fillna(0).values if 'ma60d' in df.columns else ma20
+            
+        cols_m = [f'lastp{i}d' for i in range(S, S + L)]
+        available_m = [c for c in cols_m if c in df.columns]
+        if len(available_m) >= max(3, L // 2):
+            return (sum(df[c].fillna(0) for c in available_m) / len(available_m)).values
+        else:
+            if L == 5: return ma5
+            if L == 20: return ma20
+            return df['ma60d'].fillna(0).values if 'ma60d' in df.columns else ma20
+
+    # 生命健康周期维持校验 (当天不能大跌，且股价不能大幅破位)
+    # 使用今日的参考均线
+    ma_ref_today = ma20 if resample == 'd' else ma5
+    keep_alive = (close >= ma_ref_today * 0.965) & (pct > -5.0)
+    if resample == 'd' and 'ma60d' in df.columns:
+        keep_alive = keep_alive & (close > df['ma60d'].fillna(0).values * 0.965)
+
+    # ma5d 的主升结构：ma5d 不能处于严重大跌趋势中 (允许正常的波动与回踩)
+    ma5_decay_threshold = 0.95 if resample == 'd' else 0.96
+    ma5_rising = ma5 >= ma5_last1 * ma5_decay_threshold
+    keep_alive = keep_alive & ma5_rising
+
+    # OBV 约束：白线在黄线附近或之上运行
+    if 'obv_val' in df.columns and 'maobv' in df.columns:
+        keep_alive = keep_alive & (df['obv_val'].fillna(0).values >= df['maobv'].fillna(0).values * 0.97)
+
+    final_score = np.zeros(n_rows, dtype=float)
+    
+    # 循环评估 d = 0 (今天) 到 4 (4天前) 的反弹启动特征，并取衰减后的最大值
+    for d in range(5):
+        # 提取第 d 天的输入价格和指标
+        if d == 0:
+            c_d = close
+            o_d = open_val
+            h_d = high
+            l_d = low
+            pct_d = pct
+            
+            ma5_d = ma5
+            ma10_d = df['ma10d'].fillna(0).values if 'ma10d' in df.columns else ma5
+            ma20_d = ma20
+            ma60_d = df['ma60d'].fillna(0).values if 'ma60d' in df.columns else ma20
+            
+            ma5_d_last1 = ma5_last1
+            ma20_d_last1 = ma20_last1
+            
+            # 今天是否为九转触发日
+            td_ok_d = (td_setup == 1) | (td_setup == 2) | (td_setup == -1) | (td_setup == -2) | (td_setup == -8) | (td_setup == -9)
+        else:
+            c_d = df[f'lastp{d}d'].fillna(0).values if f'lastp{d}d' in df.columns else close
+            o_d = df[f'lasto{d}d'].fillna(0).values if f'lasto{d}d' in df.columns else open_val
+            h_d = df[f'lasth{d}d'].fillna(0).values if f'lasth{d}d' in df.columns else high
+            l_d = df[f'lastl{d}d'].fillna(0).values if f'lastl{d}d' in df.columns else low
+            pct_d = df[f'per{d}d'].fillna(0).values if f'per{d}d' in df.columns else pct
+            
+            ma5_d = get_ma_shift(5, d)
+            ma10_d = get_ma_shift(10, d)
+            ma20_d = get_ma_shift(20, d)
+            ma60_d = get_ma_shift(60, d)
+            
+            ma5_d_last1 = get_ma_shift(5, d + 1)
+            ma20_d_last1 = get_ma_shift(20, d + 1)
+            
+            # 计算第 d 天的 td_setup 状态是否匹配 (即今天 td_setup 是 S，则 d 天前为 S - d)
+            td_val_d = td_setup - d
+            td_ok_d = (td_val_d == 1) | (td_val_d == 2) | (td_val_d == -1) | (td_val_d == -2) | (td_val_d == -8) | (td_val_d == -9)
+            
+        # 评估第 d 天的趋势是否符合强势排列 (排除低位补涨无价值股票)
+        if resample == 'd':
+            ma_ref_d = ma20_d
+            ma_ref_d_last1 = ma20_d_last1
+            ma_trend_d = ma60_d
+            
+            ma60_d_last1 = get_ma_shift(60, d + 1)
+            strong_trend_align_d = (ma_ref_d >= ma_trend_d * 0.98) & (ma_trend_d >= ma60_d_last1 * 0.996)
+            trend_ok_d = (ma_ref_d > ma_ref_d_last1 * 0.997) & (c_d >= ma_ref_d * 0.97) & (ma5_d > ma_ref_d * 0.95) & (c_d > ma_trend_d * 0.97) & strong_trend_align_d
+        else:
+            ma_ref_d = ma5_d
+            ma_ref_d_last1 = ma5_d_last1
+            
+            if resample in ('2d', '3d', '4d', '5d'):
+                trend_ok_d = (ma_ref_d > ma_ref_d_last1 * 0.995) & (c_d >= ma_ref_d * 0.965)
+            else:
+                trend_ok_d = (ma_ref_d > ma_ref_d_last1 * 0.997) & (c_d >= ma_ref_d * 0.97)
+                
+            ma_trend_d = ma20_d
+            ma_trend_d_last1 = get_ma_shift(20, d + 1)
+            strong_trend_align_d = (ma_ref_d >= ma_trend_d * 0.98) & (ma_trend_d >= ma_trend_d_last1 * 0.996)
+            
+            trend_ok_d = trend_ok_d & (c_d >= ma_trend_d * 0.98) & strong_trend_align_d
+            
+        # 评估第 d 天的健康回踩 (第 d, d+1, d+2 天的低点接近或低于参考均线，且当天没有大破位)
+        low_d0 = l_d
+        low_d1 = df[f'lastl{d+1}d'].fillna(0).values if f'lastl{d+1}d' in df.columns else l_d
+        low_d2 = df[f'lastl{d+2}d'].fillna(0).values if f'lastl{d+2}d' in df.columns else low_d1
+        
+        pullback_near_ma_d = (low_d0 <= ma_ref_d * 1.035) | (low_d1 <= ma_ref_d_last1 * 1.035) | (low_d2 <= ma_ref_d_last1 * 1.035)
+        not_breakdown_d = (c_d >= ma_ref_d * 0.965)
+        pullback_ok_d = pullback_near_ma_d & not_breakdown_d
+        
+        # 评估第 d 天的阳线和反包启动条件
+        is_yang_d = (c_d > o_d) & (pct_d > 0.5)
+        
+        # 强势上升通道/突破：价格在5日线之上，且5日线呈向上趋势，且价格在20日线之上，且当天收阳上涨
+        # 这样即使没有回踩或九转触发，也能识别并给予客观评分
+        strong_up_d = (c_d > ma5_d * 0.99) & (ma5_d > ma5_d_last1 * 0.998) & (c_d > ma20_d * 1.0)
+        breakout_ok_d = strong_up_d
+        
+        eligible_d = (trend_ok_d & pullback_ok_d & is_yang_d & td_ok_d) | (trend_ok_d & breakout_ok_d & is_yang_d)
+        
+        # 提取第 d 天的 OBV 和量能指标
+        if 'obv_val' in df.columns and 'maobv' in df.columns:
+            if d == 0:
+                obv_val_d = df['obv_val'].fillna(0).values
+                maobv_d = df['maobv'].fillna(0).values
+                bs_d = df['bs'].fillna(1.0).values if 'bs' in df.columns else np.ones(n_rows)
+                vol_ratio_d_val = df['vol_ratio'].fillna(1.0).values if 'vol_ratio' in df.columns else np.ones(n_rows)
+            else:
+                obv_val_d = df[f'obv_val{d}d'].fillna(0).values if f'obv_val{d}d' in df.columns else np.zeros(n_rows)
+                maobv_d = df[f'maobv{d}d'].fillna(0).values if f'maobv{d}d' in df.columns else np.zeros(n_rows)
+                bs_d = df[f'bs{d}d'].fillna(1.0).values if f'bs{d}d' in df.columns else np.ones(n_rows)
+                vol_ratio_d_val = df[f'vol_ratio{d}d'].fillna(1.0).values if f'vol_ratio{d}d' in df.columns else np.ones(n_rows)
+            
+            # Rebound start node must also satisfy OBV above MAOBV
+            obv_ok_d = (obv_val_d >= maobv_d * 0.99)
+            eligible_d = eligible_d & obv_ok_d
+        else:
+            vol_ratio_d_val = np.ones(n_rows)
+            bs_d = np.ones(n_rows)
+
+        if not eligible_d.any():
+            continue
+            
+        score_d = np.zeros(n_rows, dtype=float)
+        score_d[eligible_d] = 50.0
+        
+        # A. 弹性涨幅加分 (最高 20 分)
+        score_d[eligible_d] += np.minimum(20.0, np.maximum(0.0, pct_d[eligible_d] * 2.0))
+        
+        # B. 成交量配合加分 (最高 15 分)
+        vol_d0 = df[f'lastv{d}d'].fillna(0).values if f'lastv{d}d' in df.columns else (df['vol'].fillna(0).values if 'vol' in df.columns else np.ones(n_rows))
+        vol_d1 = df[f'lastv{d+1}d'].fillna(0).values if f'lastv{d+1}d' in df.columns else np.ones(n_rows)
+        vol_d1 = np.where(vol_d1 > 0, vol_d1, 1.0)
+        vol_ratio_d = vol_d0 / vol_d1
+        score_d[eligible_d] += np.minimum(15.0, np.maximum(0.0, (vol_ratio_d[eligible_d] - 1.0) * 7.5))
+        
+        # F. OBV / Sustained Volume (BS) / Volume Doubling Additional Bonuses
+        if 'obv_val' in df.columns and 'maobv' in df.columns:
+            # 1. OBV Acceleration Bonus: OBV >= MAOBV * 1.05 -> +10 points
+            score_d[eligible_d] += np.where(obv_val_d[eligible_d] > maobv_d[eligible_d] * 1.05, 10.0, 0.0)
+        
+        if 'bs' in df.columns:
+            # 2. BS Sustained Volume: bs_d >= 0.7 -> +10 points
+            # 3. BS Shrunken Volume Penalty: bs_d < 0.4 -> -15 points (low-volume trap prevention)
+            score_d[eligible_d] += np.where(bs_d[eligible_d] >= 0.7, 10.0, np.where(bs_d[eligible_d] < 0.4, -15.0, 0.0))
+            
+        # 4. Volume Doubling Day Bonus: vol_ratio_d_val >= 1.9 -> +10 points
+        if 'vol_ratio' in df.columns:
+            score_d[eligible_d] += np.where(vol_ratio_d_val[eligible_d] >= 1.9, 10.0, 0.0)
+
+        # C. 反包范围加分 (最高 10 分)
+        high_d1 = df[f'lasth{d+1}d'].fillna(0).values if f'lasth{d+1}d' in df.columns else c_d
+        close_d1 = df[f'lastp{d+1}d'].fillna(0).values if f'lastp{d+1}d' in df.columns else c_d
+        open_d1 = df[f'lasto{d+1}d'].fillna(0).values if f'lasto{d+1}d' in df.columns else o_d
+        body_high_d1 = np.maximum(close_d1, open_d1)
+        engulf_high_d = c_d > high_d1
+        engulf_body_d = c_d > body_high_d1
+        score_d[eligible_d] += np.where(engulf_high_d[eligible_d], 10.0, np.where(engulf_body_d[eligible_d], 5.0, 0.0))
+        
+        # D. 结构时效与趋势加分
+        td_val_eligible = td_val_d[eligible_d] if d > 0 else td_setup[eligible_d]
+        bonus_td = np.zeros_like(td_val_eligible, dtype=float)
+        bonus_td[(td_val_eligible == 1) | (td_val_eligible == -1)] = 15.0
+        bonus_td[(td_val_eligible == 2) | (td_val_eligible == -2)] = 10.0
+        bonus_td[(td_val_eligible == -8) | (td_val_eligible == -9)] = 5.0
+        
+        # 对于突破/强势上升个股，如果其 td 计数不在特定反弹位，也应给予客观的趋势分保护 (不为0)
+        is_breakout_case = breakout_ok_d[eligible_d]
+        bonus_td[is_breakout_case] = np.maximum(bonus_td[is_breakout_case], 10.0)
+        
+        score_d[eligible_d] += bonus_td
+
+        
+        # E. 趋势评级加分
+        if 'TrendS' in df.columns:
+            try:
+                trends_float = df['TrendS'].astype(float).values
+                score_d[eligible_d] += np.where(trends_float[eligible_d] >= 80, 10.0, 0.0)
+            except Exception:
+                pass
+                
+        # 每日衰减 3 分
+        decayed_score_d = np.maximum(0.0, score_d - (d * 3.0))
+        final_score = np.maximum(final_score, decayed_score_d)
+        
+    final_score[~keep_alive] = 0.0
+    final_score = np.round(final_score, 1)
+    return pd.Series(final_score, index=df.index)
+
+
+def calc_indicators(top_all: pd.DataFrame, logger: Any, resample: str) -> pd.DataFrame:
+    """指标计算"""
+    # 确保 vol 列镜像原始成交量。
+    # 判定准则：如果 vol 列不存在，或者 volume 列显示出明显的原始成交量特征（通常远大于100）
+
+    if 'vol' not in top_all.columns:
+        if 'volume' in top_all.columns:
+            top_all['vol'] = top_all['volume']
+    elif 'volume' in top_all.columns and (top_all['volume'] > 5000).any():
+        top_all['vol'] = top_all['volume']
+        
+    top_all['amount'] = top_all['vol'] * top_all['close']
+    # 这里的 volume 将被更新为虚拟量比信号强度
+    top_all['volume'] = calc_compute_volume(top_all, logger, resample=resample, virtual=True)
+    
+    # --- [NEW] 注入 win_upper 实时指标 (针对压力位1和2) ---
+    max_days = cct.compute_lastdays
+    N_count = len(top_all)
+    
+    # 初始化默认值，避免后续引用报 KeyError
+    if 'win_upper1' not in top_all.columns:
+        top_all['win_upper1'] = 0
+    if 'win_upper2' not in top_all.columns:
+        top_all['win_upper2'] = 0
+    
+    # --- [NEW] 注入 cycle_stage (周期阶段) ---
+    try:
+        top_all['cycle_stage'] = calc_cycle_stage_vect(top_all)
+    except Exception as e:
+        logger.warning(f"calc_cycle_stage_vect failed: {e}")
+
+    if N_count > 0:
+        try:
+            # 这里的 ma51d, high41 已经在 process_merged_sina_with_history 后存在
+            if 'upper1' in top_all.columns:
+                top_all = strong_momentum_large_cycle_vect_consecutive_above(
+                    top_all, 'close', 'upper1', 'ma51d', 'high41', max_days
+                )
+            if 'upper2' in top_all.columns:
+                top_all = strong_momentum_large_cycle_vect_consecutive_above(
+                    top_all, 'close', 'upper2', 'ma51d', 'high41', max_days
+                )
+        except Exception as e:
+            logger.warning(f"calc_indicators win_upper failed: {e}")
+
+    # 同步到 ratio 列，确保兼容性 是换手率,不能同步Volume
+    # top_all['ratio'] = top_all['volume']
+    if 'llastp' not in top_all.columns:
+        if 'lastp1d' in top_all.columns:
+            top_all['llastp'] = top_all['lastp1d']
+        else:
+            top_all['llastp'] = top_all['close']
+            
+    if 'lastbuy' not in top_all.columns:
+        top_all['lastbuy'] = top_all['llastp']
+
+    if 'buy' not in top_all.columns:
+        top_all['buy'] = top_all['close']
+
+    if 'minclose' not in top_all.columns:
+        top_all['minclose'] = top_all['llastp']
+
+    if 'llow' not in top_all.columns:
+        if 'low' in top_all.columns:
+            top_all['llow'] = top_all['low']
+        else:
+            top_all['llow'] = top_all['close']
+
+    now_time = cct.get_now_time_int()
+    lastbuy_safe = top_all['lastbuy'].mask(top_all['lastbuy'] == 0, top_all['llastp'])
+    
+    if cct.get_trade_date_status():
+        if logger:
+            logger.info(f'lastbuy :{"lastbuy" in top_all.columns}')
+        if 'lastbuy' in top_all.columns:
+            if 915 < now_time < 930:
+                top_all['dff'] = ((top_all['buy'] - top_all['llastp']) / top_all['llastp'] * 100).round(1)
+                # top_all['dff3'] = ((top_all['buy'] - top_all['lastp']) / top_all['lastp'] * 100).round(1)
+                top_all['dff3'] = ((top_all['buy'] - top_all['minclose']) / top_all['minclose'] * 100).round(1)
+                top_all['dff2'] = ((top_all['buy'] - top_all['llow']) / top_all['llow'] * 100).round(1)
+
+            elif 926 < now_time < 1455:
+                # top_all['dff'] = ((top_all['buy'] - top_all['lastbuy']) / top_all['lastbuy'] * 100).round(1)
+
+                top_all['dff'] = ((top_all['buy'] - lastbuy_safe) / lastbuy_safe * 100).round(1)
+                top_all['dff3'] = ((top_all['buy'] - top_all['minclose']) / top_all['minclose'] * 100).round(1)
+                top_all['dff2'] = ((top_all['buy'] - top_all['llow']) / top_all['llow'] * 100).round(1)
+            else:
+                # top_all['dff'] = ((top_all['buy'] - top_all['lastp']) / top_all['lastp'] * 100).round(1)
+                # top_all['dff2'] = ((top_all['buy'] - top_all['lastbuy']) / top_all['lastbuy'] * 100).round(1)
+
+                # top_all['dff'] = ((top_all['buy'] - top_all['lastbuy']) / top_all['lastbuy'] * 100).round(1)
+                top_all['dff'] = ((top_all['buy'] - lastbuy_safe) / lastbuy_safe * 100).round(1)
+                top_all['dff3'] = ((top_all['buy'] - top_all['minclose']) / top_all['minclose'] * 100).round(1)
+                top_all['dff2'] = ((top_all['buy'] - top_all['llow']) / top_all['llow'] * 100).round(1)
+        else:
+            top_all['dff'] = ((top_all['buy'] - top_all['llastp']) / top_all['llastp'] * 100).round(1)
+            top_all['dff3'] = ((top_all['buy'] - top_all['minclose']) / top_all['minclose'] * 100).round(1)
+            top_all['dff2'] = ((top_all['buy'] - top_all['llow']) / top_all['llow'] * 100).round(1)
+    else:
+        top_all['dff'] = ((top_all['buy'] - top_all['llastp']) / top_all['llastp'] * 100).round(1)
+        top_all['dff3'] = ((top_all['buy'] - top_all['minclose']) / top_all['minclose'] * 100).round(1)
+        top_all['dff2'] = ((top_all['buy'] - top_all['llow']) / top_all['llow'] * 100).round(1)
+    
+    top_all['dff'].replace([np.inf, -np.inf], np.nan, inplace=True)
+    top_all['dff'].fillna(0, inplace=True)
+
+    # 计算 TD 序列当前计数
+    try:
+        top_all['td_setup'] = calc_current_td_setup_vect(top_all)
+        top_all['td_sell_setup'] = np.maximum(0, top_all['td_setup'])
+        top_all['td_buy_setup'] = np.maximum(0, -top_all['td_setup'])
+    except Exception as e:
+        logger.warning(f"calc_current_td_setup_vect failed: {e}")
+
+    # 计算 强势结构回踩反包 评分
+    try:
+        top_all['strong_rebound_score'] = calc_strong_rebound_score_vect(top_all, resample)
+        top_all['strong_structure_score'] = top_all['strong_rebound_score']
+        top_all['strong_node_score'] = top_all['strong_rebound_score']
+    except Exception as e:
+        logger.warning(f"calc_strong_rebound_score_vect failed: {e}")
+
+    if 'td_setup' not in top_all.columns:
+        top_all['td_setup'] = 0
+    if 'td_sell_setup' not in top_all.columns:
+        top_all['td_sell_setup'] = 0
+    if 'td_buy_setup' not in top_all.columns:
+        top_all['td_buy_setup'] = 0
+    if 'strong_rebound_score' not in top_all.columns:
+        top_all['strong_rebound_score'] = 0.0
+        top_all['strong_structure_score'] = 0.0
+        top_all['strong_node_score'] = 0.0
+
+    for col in ['dff', 'percent', 'volume', 'ratio', 'couts']:
+        if col not in top_all.columns:
+            top_all[col] = 0.0
+
+    return top_all.sort_values(by=['dff','percent','volume','ratio','couts'], ascending=[0,0,0,1,1])
+
+def evaluate_realtime_signal_tick(rt_tick, daily_feat, mode='A'):
+    """
+    实时计算单个标的的交易信号
+    :param rt_tick: 字典，包含当前实时行情 {'open', 'close', 'high', 'low', 'amount'}
+    :param daily_feat: 字典，generate_df_vect_daily_features 返回的 1d 特征 (list中的第一个元素)
+    :param mode: 'A' 强势优先, 'B' 风控优先
+    :return: (current_state, trade_signal)
+    """
+        
+    """
+    自适应版本：自动处理数据类型
+    """
+    # --- 1. 类型自适应处理 ---
+    # 如果 rt_tick 是 DataFrame 或 Series，提取标量值
+    def get_val(obj, key):
+        val = obj[key]
+        # 如果是 Series 或数组，取第一个值 (.item() 或 .iloc[0])
+        return val.iloc[0] if hasattr(val, 'iloc') else val
+
+    # 映射字段（适配你的 sina 结构）
+    curr_o = float(get_val(rt_tick, 'open'))
+    curr_c = float(get_val(rt_tick, 'now'))   # 对应你 sina 里的 now
+    curr_l = float(get_val(rt_tick, 'low'))
+    # 优先取 amount，没有则取 volume
+    curr_a = float(get_val(rt_tick, 'volume'))
+
+
+    # 1. 数据映射 (实时数据与历史特征)
+
+    # curr_o = rt_tick['open']
+    # curr_c = rt_tick['close']
+    # curr_l = rt_tick['low']
+    # curr_a = rt_tick['volume']
+    
+    # 历史特征 (1d 代表昨天)
+    upper_1d = daily_feat['upper1']
+    close_1d = daily_feat['lastp1d']
+    amount_1d = daily_feat['lastv1d']
+    eval_val = daily_feat['eval1d']
+    eval_1d = int(eval_val) if not pd.isna(eval_val) else 9
+    ma10d_curr = daily_feat['ma51d'] # 假设实时判断的生命线使用昨日MA5作为参考
+
+    if upper_1d <= 0:
+        return 9, 5
+
+    # 计算虚拟估算成交量 (将当前累积量映射到全天)
+    ratio_t = cct.get_work_time_ratio()
+    virtual_a = curr_a / ratio_t if ratio_t > 0 else curr_a
+
+    # 2. 条件判定 (基于实时 Tick)
+    # 使用估算的全天成交量与昨日全天量进行对比
+    cond_trend_start = (curr_c > upper_1d) and (close_1d <= upper_1d) and (virtual_a > amount_1d * 1.1)
+    cond_trend_continue = (curr_c > upper_1d) and (close_1d > upper_1d)
+    cond_pullback = (curr_c < close_1d) and (curr_l >= ma10d_curr) and (virtual_a < amount_1d)
+    cond_bear = (curr_c < ma10d_curr)
+
+    # 3. 状态转移逻辑 (EVAL_STATE)
+    curr_state = 9 # 默认值
+    
+    if mode == 'A': # 强势优先逻辑
+        if cond_trend_start:
+            curr_state = 1
+        elif cond_bear:
+            curr_state = 9
+        elif cond_trend_continue:
+            curr_state = 2
+        elif cond_pullback and eval_1d in [2, 3]:
+            curr_state = 3
+        elif eval_1d == 3 and curr_l >= ma10d_curr:
+            curr_state = 2
+        else:
+            curr_state = eval_1d # 维持昨日状态
+            
+    elif mode == 'B': # 风控优先逻辑
+        if cond_bear:
+            curr_state = 9
+        elif cond_trend_start:
+            curr_state = 1
+        elif cond_trend_continue:
+            curr_state = 2
+        elif cond_pullback and eval_1d in [2, 3]:
+            curr_state = 3
+        elif eval_1d == 3 and curr_l >= ma10d_curr:
+            curr_state = 2
+        else:
+            curr_state = eval_1d
+
+    # 4. 交易信号推演 (trade_signal)
+    # EVAL_STATE: 9=空头, 1=启动, 2=主升, 3=回撤
+    # trade_signal: 5=HOLD, 1=买一, 2=买二, -1=卖出
+    trade_signal = 5
+    
+    # 买一：从启动(1)确认转入主升(2)，且开盘未大幅跳空
+    if eval_1d == 1 and curr_state == 2 and curr_o <= close_1d * 1.03:
+        trade_signal = 1
+    # 买二：从主升(2)进入缩量回撤(3)
+    elif eval_1d == 2 and curr_state == 3:
+        trade_signal = 2
+    # 卖出：持有状态(1,2,3)下触发破位(9)
+    elif eval_1d in [1, 2, 3] and curr_state == 9:
+        trade_signal = -1
+
+    return curr_state, trade_signal
+
+def generate_simple_vect_features(df):
+    """
+    极简矢量化版本
+    仅提取最新日的: open, close, high, low, nlow, nhigh 和 过去6日均量 last6vol
+    """
+    # 确保索引排序正确
+    df = df.sort_index(level=[0, 1])
+    
+    # 1. 提取最新一行的原始数据
+    # last() 会自动按第一个索引(code)分组并取每个代码的最后一行
+    feat_df = df.groupby(level=0)[['open', 'close', 'high', 'low', 'nlow', 'nhigh']].last()
+    # 2. 计算过去6日均量 (包含当日)
+    # rolling(6) 计算滚动均值，然后再取最后一行
+    vol_col = 'vol' if 'vol' in df.columns else 'volume'
+    last6vol = df.groupby(level=0)[vol_col].rolling(window=6, min_periods=1).mean()
+    
+    # 因为 rolling 会增加一层索引，我们需要对齐后提取最后一行
+    feat_df['last6vol'] = last6vol.groupby(level=0).last()
+
+    # 3. 转换为你需要的字典列表格式
+    # reset_index() 将 code 变成一列，to_dict('records') 转为字典列表
+    return feat_df.reset_index().to_dict('records')
+    
+
+
+def send_code_via_pipe(code: Union[str, Dict[str, Any]], logger: Any,pipe_name: str=PIPE_NAME) -> bool:
+    """通过命名管道发送股票代码 (带 busy/not_found 重试机制)"""
+    import win32file
+    import win32pipe
+    import winerror
+    import pywintypes
+    import json
+    import time
+    if isinstance(code, dict):
+        code = json.dumps(code, ensure_ascii=False)
+    payload = code.encode("utf-8")
+    for attempt in range(5):
+        try:
+            handle = win32file.CreateFile(
+                pipe_name, win32file.GENERIC_WRITE, 0, None,
+                win32file.OPEN_EXISTING, 0, None
+            )
+            win32file.WriteFile(handle, payload)
+            win32file.CloseHandle(handle)
+            return True
+        except pywintypes.error as e:
+            if e.winerror == winerror.ERROR_PIPE_BUSY:
+                try:
+                    win32pipe.WaitNamedPipe(pipe_name, 1000)
+                    continue
+                except Exception:
+                    pass
+            elif e.winerror == winerror.ERROR_FILE_NOT_FOUND:
+                time.sleep(0.5)
+                continue
+            logger.info(f"发送数据到管道失败 (尝试 {attempt+1}): {e}")
+            break
+        except Exception as e:
+            logger.info(f"发送数据到管道未知失败 (尝试 {attempt+1}): {e}")
+            break
+    return False
+
+
+def process_merged_sina_signal_eval(df, mode='A'):
+    """
+    直接处理已经合并了历史特征和实时行情的 DataFrame
+    df 包含: 
+      实时列: open, now, high, low, volume
+      历史列: upper, lastp1d (昨日收), lastv1d (昨日量), ma5d (或ma10d), EVAL_STATE (昨日状态)
+    """
+    # 逻辑置换：vol 是累积原始成交量，volume 此时可能是已经计算好的量比
+    curr_vol_raw = df['vol'] if 'vol' in df.columns else df['volume']
+    ratio_t = cct.get_work_time_ratio()
+    virtual_a = curr_vol_raw / ratio_t if ratio_t > 0 else curr_vol_raw
+    
+    # 历史参考值
+    upper_1d = df['upper']
+    close_1d = df['lastp1d']
+    amount_1d = df['lastv1d']
+    eval_1d = df['EVAL_STATE'].fillna(9).astype(int)
+    # 1. 提取当前价格
+    curr_c = df['now'] if 'now' in df.columns else df['trade']
+    curr_l = df['low']
+    curr_o = df['open']
+    ma_ref = df['ma5d'] # 假设 ma5d 是你的生命线
+
+    # 2. 判定条件 (矢量化)
+    cond_trend_start = (curr_c > upper_1d) & (close_1d <= upper_1d) & (virtual_a > amount_1d * 1.1)
+    cond_trend_continue = (curr_c > upper_1d) & (close_1d > upper_1d)
+    cond_pullback = (curr_c < close_1d) & (curr_l >= ma_ref) & (virtual_a < amount_1d)
+    cond_bear = (curr_c < ma_ref)
+
+    # 3. 状态转移逻辑 (EVAL_STATE)
+    curr_state = eval_1d.copy()
+
+    if mode == 'A':
+        # 强势优先：先判启动，再判趋势，最后判破位
+        curr_state = np.where(cond_trend_start, 1, curr_state)
+        curr_state = np.where((curr_state != 1) & cond_trend_continue, 2, curr_state)
+        
+        # 回撤逻辑：昨日是2或3，且今日缩量回调不破位
+        mask_pb = (eval_1d.isin([2, 3])) & cond_pullback
+        curr_state = np.where(mask_pb, 3, curr_state)
+        
+        # 修复逻辑：昨日是3，今日回升不破位
+        mask_fix = (eval_1d == 3) & (curr_l >= ma_ref) & (~cond_pullback)
+        curr_state = np.where(mask_fix, 2, curr_state)
+        
+        # 破位逻辑：最后判定，具有最高优先级（风控）
+        curr_state = np.where(cond_bear, 9, curr_state)
+
+    # 4. 交易信号推演 (trade_signal)
+    df['trade_signal'] = 5  # 默认 HOLD
+    
+    # 买一：启动转主升 (1 -> 2)
+    df.loc[(eval_1d == 1) & (curr_state == 2) & (curr_o <= close_1d * 1.03), 'trade_signal'] = 1
+    # 买二：主升转回撤 (2 -> 3)
+    df.loc[(eval_1d == 2) & (curr_state == 3), 'trade_signal'] = 2
+    # 卖出：持仓转空头 (1,2,3 -> 9)
+    df.loc[(eval_1d.isin([1, 2, 3])) & (curr_state == 9), 'trade_signal'] = -1
+
+    df['curr_eval'] = curr_state
+    
+    return df
+    # return df[['name', 'now', 'curr_eval', 'trade_signal']]
+
+
+def process_merged_sina_with_history(df, mode='A'):
+    """
+    结合多日历史背景（eval1d, eval2d, signal1d等）给出精准实时信号
+    (已重构：抛弃布林线上轨，使用均线系统判定大阳线启动，修复状态机死锁)
+    """
+    # 1. 提取基础数据
+    curr_c = df['now'] if 'now' in df.columns else df['close']
+    curr_o = df['open']
+    curr_l = df['low']
+    
+    # 兼容实时行情与历史回测的成交量列
+    curr_a = df['vol'] if 'vol' in df.columns else df['volume']
+    
+    # 2. 提取历史特征
+    close_1d = df['lastp1d'] if 'lastp1d' in df.columns else curr_c
+    amount_1d = df['lastv1d'] if 'lastv1d' in df.columns else curr_a
+    eval_1d   = df['eval1d'].fillna(9).astype(int) if 'eval1d' in df.columns else pd.Series(9, index=df.index)
+    eval_2d   = df['eval2d'].fillna(9).astype(int) if 'eval2d' in df.columns else pd.Series(9, index=df.index)
+    signal_1d = df['signal1d'].fillna(5).astype(int) if 'signal1d' in df.columns else pd.Series(5, index=df.index)
+    
+    # 提取多条均线作为参考
+    ma5_curr = df['ma51d'] if 'ma51d' in df.columns else df['ma5d']
+    ma10_curr = df['ma10d'] if 'ma10d' in df.columns else df['ma5d']
+    ma20_curr = df['ma20d'] if 'ma20d' in df.columns else df['ma5d']
+    ma60_curr = df['ma60d'] if 'ma60d' in df.columns else ma20_curr
+
+    # 3. 核心条件判定 (基于均线的大阳线启动)
+    # 计算涨幅
+    pct = (curr_c - close_1d) / close_1d * 100
+    is_big_yang = (pct >= 4.0) & (curr_c > curr_o)
+    
+    # 启动：今日开盘在均线之下，且收出一根大阳线站上MA5，同时放量
+    started_under_ma = (curr_o < ma5_curr) | (curr_o < ma10_curr) | (curr_o < ma20_curr) | (curr_o < ma60_curr)
+    # 只有不在主升期时，大阳线才叫启动。否则叫延续或反包
+    cond_trend_start = is_big_yang & started_under_ma & (curr_c > ma5_curr) & (curr_a > amount_1d * 1.1) & (~eval_1d.isin([1, 2, 3]))
+    
+    # 持续：只要站在 MA20 之上，就认定为主升延续
+    cond_trend_continue = (curr_c >= ma20_curr)
+    
+    # 回撤：缩量且守住生命线 MA60
+    cond_pullback = (curr_c < close_1d) & (curr_l >= ma60_curr) & (curr_a < amount_1d)
+    
+    # 破位：跌破大结构生命线 MA60，或【有效跌破 MA20】(连续两日收盘低于MA20)
+    # 因为很多强势股盘中或单日会刺穿 MA20 骗线，所以增加两日确认机制
+    ma20_1d = df['ma20d'].shift(1).fillna(ma20_curr) if 'ma20d' in df.columns else ma20_curr
+    effective_break_ma20 = (curr_c < ma20_curr) & (close_1d < ma20_1d)
+    cond_bear = (curr_c < ma60_curr) | effective_break_ma20
+
+    # 4. 实时状态推演 (EVAL_STATE)
+    curr_eval = eval_1d.copy()
+    
+    # 【修复死锁Bug】：如果昨日是启动(1)，今日延续，必须允许其切换到主升(2)
+    curr_eval = np.where((eval_1d == 1) & cond_trend_continue, 2, curr_eval)
+    
+    # 常规状态流转
+    curr_eval = np.where(cond_trend_start, 1, curr_eval)
+    curr_eval = np.where((eval_1d == 9) & cond_trend_continue & (~cond_trend_start), 2, curr_eval) # 从空头直接跳入主升
+    curr_eval = np.where((eval_1d.isin([2, 3])) & cond_pullback, 3, curr_eval)
+    
+    # 修复：昨日回撤，今日企稳
+    curr_eval = np.where((eval_1d == 3) & (curr_l >= ma60_curr) & (curr_c >= close_1d), 2, curr_eval)
+    
+    # 风控破位最高优先级
+    curr_eval = np.where(cond_bear, 9, curr_eval)
+
+    # 5. 结合历史深度给出交易信号 (trade_signal)
+    df['trade_signal'] = 5 
+
+    # --- 买一逻辑：昨日启动(1) + 今日确认主升(2) + 过滤极端高开(>3%) ---
+    mask_buy1 = (eval_1d == 1) & (curr_eval == 2) & (curr_o <= close_1d * 1.03)
+    df.loc[mask_buy1, 'trade_signal'] = 1
+
+    # --- 买二逻辑：趋势中的均线回踩反包 (最低价曾靠近MA20/MA60 5%以内，且今日大阳线反包) ---
+    near_support = (curr_l <= ma20_curr * 1.05) | (curr_l <= ma60_curr * 1.05)
+    mask_buy2 = eval_1d.isin([1, 2, 3]) & near_support & is_big_yang
+    df.loc[mask_buy2, 'trade_signal'] = 2
+
+    # --- 卖出逻辑：有持仓(1,2,3) + 今日转空头(9) ---
+    mask_sell = (eval_1d.isin([1, 2, 3])) & (curr_eval == 9)
+    df.loc[mask_sell, 'trade_signal'] = -1
+    
+    # --- 修正：避免重复发信号 ---
+    mask_already_in = (signal_1d == 1) & (curr_eval == 2)
+    df.loc[mask_already_in, 'trade_signal'] = 5
+
+    df['curr_eval'] = curr_eval
+    return df
+    # return df[['name', 'now', 'curr_eval', 'trade_signal']]
+
+def is_strict_consecutive_up(row, window):
+    for i in range(1, window):
+        if not (
+            row[f'lastp{i}d'] > row[f'lastp{i+1}d'] and
+            row[f'lasth{i}d'] > row[f'lasth{i+1}d'] and
+            row[f'lastl{i}d'] > row[f'lastl{i+1}d']
+        ):
+            return False
+    return True
+
+
+def check_real_time(df, codes):
+    """
+    df: vect_daily_t 转成 DataFrame
+    codes: 要检查的股票列表
+    """
+    df_check = df.loc[df['code'].isin(codes)].copy()
+    
+    for _, row in df_check.iterrows():
+        ohlc_same_as_last1d = (
+            row['open'] == row.get('lasto1d', row['open']) and
+            row['low'] == row.get('lastl1d', row['low']) and
+            row['high'] == row.get('lasth1d', row['high']) and
+            row['close'] == row.get('lastp1d', row['close'])
+        )
+        logger.debug(f"{row['code']} - 实盘模式: {not ohlc_same_as_last1d}, ohlc_same_as_last1d={ohlc_same_as_last1d}")
+
+
+
+
+def scoring_momentum_pullback_system_top(df: pd.DataFrame, max_days: int = 9):
+    N = len(df)
+    if N == 0: return df
+
+    def get_mat(prefix):
+        if prefix in ['upper', 'high4', 'ma5', 'ma10']:
+            cols = [f"{prefix}{i}" for i in range(0, max_days + 1)]
+        else:
+            cols = [f"{prefix}{i}d" for i in range(0, max_days + 1)]
+        mat = np.zeros((N, max_days + 1))
+        for idx, col in enumerate(cols):
+            if col in df.columns:
+                mat[:, idx] = df[col].values
+        return mat
+
+    C, O, L, H, U = get_mat('lastp'), get_mat('lasto'), get_mat('lastl'), get_mat('lasth'), get_mat('upper')
+    P, M5, M10, H4 = get_mat('per'), get_mat('ma5'), get_mat('ma10'), get_mat('high4')
+
+    scores = np.zeros(N)
+
+    # --- 1. 大阳动力衰减 (拉开天数梯度) ---
+    is_big_up = P[:, 1:9] >= 5.0
+    # 衰减权重：1d=1.0, 2d=0.88, 3d=0.76... 逐级减少
+    decay_weights = np.linspace(1.0, 0.2, 8) 
+    
+    big_up_bonus = np.zeros(N)
+    for i in range(1, 9):
+        has_big_up = is_big_up[:, i-1]
+        support_price = C[:, i]
+        is_stable = np.min(C[:, 0:i], axis=1) >= support_price
+        
+        # 基础分随天数递减
+        base_val = 40 * decay_weights[i-1]
+        
+        # 2. 增加【强度梯度】：站上 Upper 多少？
+        # 站上 1% 给 2分，最高 10分
+        upper_dist = (C[:, 0] - U[:, 0]) / U[:, 0] * 100
+        upper_linear_bonus = np.clip(upper_dist * 2, 0, 10)
+        
+        day_score = np.where(has_big_up & is_stable, base_val + upper_linear_bonus, 0)
+        big_up_bonus = np.maximum(big_up_bonus, day_score)
+
+    scores += big_up_bonus
+
+    # --- 3. 维度三：形态连续化 (不再是 0/1) ---
+    # (1) Open==Low 的精准度：差值越小分越高
+    ol_dist = np.abs(O[:, 0] - L[:, 0]) / O[:, 0] * 100
+    ol_bonus = np.where((ol_dist < 0.2) & (C[:, 0] > O[:, 0]), 15 * (1 - ol_dist*5), 0)
+    scores += ol_bonus
+
+    # (2) 均线回踩精准度 (越贴合 MA 分越高)
+    dist_ma5 = np.abs(C[:, 0] - M5[:, 0]) / M5[:, 0] * 100
+    ma_bonus = np.where(dist_ma5 < 1.5, 10 * (1 - dist_ma5/1.5), 0)
+    scores += ma_bonus
+
+    # (3) 实时涨幅线性分 (每涨 1% 给 1.5分)
+    scores += np.clip(P[:, 0] * 1.5, -5, 12)
+
+    # (4) 突破 High4 的厚度
+    h4_dist = (C[:, 0] - H4[:, 0]) / H4[:, 0] * 100
+    scores += np.where(h4_dist > 0, 8 + np.clip(h4_dist, 0, 5), 0)
+
+    # --- 4. 动力枯竭与负反馈 ---
+    # 冲高回落惩罚：高位回落每 1% 扣 5分
+    retreat = (H[:, 0] - C[:, 0]) / H[:, 0] * 100
+    scores -= np.clip(retreat * 5, 0, 30)
+
+    # --- 5. 结果输出 ---
+    res = df.copy()
+    res['gem_tops'] = np.round(scores, 2)
+    return res.sort_values(by='gem_tops', ascending=False)
+
+
+
+# def scoring_momentum_pullback_system_last(df: pd.DataFrame, max_days: int = 9):
+#     N = len(df)
+#     if N == 0: return df
+
+#     def get_mat(prefix, suffix='d'):
+#         if prefix in ['upper', 'high4']:
+#             cols = [f"{prefix}{i}" for i in range(1, max_days + 1)]
+#         else:
+#             cols = [f"{prefix}{i}{suffix}" for i in range(1, max_days + 1)]
+#         valid = [c for c in cols if c in df.columns]
+#         mat = np.zeros((N, max_days))
+#         if valid:
+#             mat[:, :len(valid)] = df[valid].values
+#         return mat
+
+#     # --- 1. 构建基础矩阵 ---
+#     C = get_mat('lastp')   # Close (0=今日, 1=昨日...)
+#     O = get_mat('lasto')   # Open
+#     L = get_mat('lastl')   # Low
+#     H = get_mat('lasth')   # High
+#     U = get_mat('upper')   # Upper Band
+#     M5 = get_mat('ma5')
+#     M10 = get_mat('ma10')
+#     H4 = get_mat('high4')
+#     P = get_mat('per')     # 涨跌幅
+
+#     # 初始化总分
+#     scores = np.zeros(N)
+
+#     # --- 2. 【核心维度】大阳启动与不破支撑 (权重最高: 40+) ---
+#     # 定义大阳线标准：涨幅 > 5%
+#     BIG_UP_THRESHOLD = 5.0
+#     is_big_up = P[:, 1:9] >= BIG_UP_THRESHOLD  # 过去8天的大阳线位置
+    
+#     big_up_bonus = np.zeros(N)
+#     for i in range(1, 8):  # 回溯 1-7 天
+#         # 条件 A: i天前是大阳线
+#         has_big_up = is_big_up[:, i-1]
+        
+#         # 条件 B: 从今天到大阳线之后，所有收盘价 >= 大阳线收盘价 (不破收盘)
+#         # support_price 是 i 天前的收盘价
+#         support_price = C[:, i:i+1] 
+#         is_stable = np.all(C[:, 0:i] >= support_price, axis=1)
+        
+#         # 条件 C: 今日站上 Upper 线 (代表启动强度)
+#         above_upper = C[:, 0] > U[:, 0]
+        
+#         # 基础分：只要有大阳支撑且不破，给 25 分
+#         # 增强分：如果同时站上 Upper，再加 20 分
+#         # 衰减：距离越近，权重略高 (1.0 -> 0.8)
+#         decay = (1.0 - (i * 0.03))
+#         round_score = np.where(has_big_up & is_stable, 25 * decay, 0)
+#         round_score += np.where(has_big_up & is_stable & above_upper, 20, 0)
+        
+#         # 取回溯周期内最强的一次信号
+#         big_up_bonus = np.maximum(big_up_bonus, round_score)
+
+#     scores += big_up_bonus
+
+#     # --- 3. 维度二：前期强势基因 (权重: 15) ---
+#     # 之前 30 分过高，现降低以突出大阳启动
+#     early_strong = np.any(C[:, 6:9] > U[:, 6:9], axis=1)
+#     scores += np.where(early_strong, 15, 0)
+
+#     # --- 4. 维度三：回踩均线企稳 (权重: 15) ---
+#     near_ma = (np.abs(C[:, 0:2] - M10[:, 0:2]) / M10[:, 0:2] < 0.015) | \
+#               (np.abs(C[:, 0:2] - M5[:, 0:2]) / M5[:, 0:2] < 0.015)
+#     scores += np.where(np.any(near_ma, axis=1), 15, 0)
+
+#     # --- 5. 维度四：形态细节突破 ---
+#     # (1) Open == Low 且收阳 (权重: 15)
+#     open_eq_low = (O[:, 0] == L[:, 0]) & (C[:, 0] > O[:, 0])
+#     scores += np.where(open_eq_low, 15, 0)
+
+#     # (2) High4 突破奖励 (基础10 + 溢出)
+#     break_ratio = (C[:, 0] - H4[:, 0]) / H4[:, 0]
+#     breaking_out = (C[:, 0] >= H4[:, 0])
+#     break_bonus = np.clip(break_ratio * 100 * 0.5, 0, 5)
+#     scores += np.where(breaking_out, 10 + break_bonus, 0)
+
+#     # (3) 最近两日重心 (Micro-Rhythm)
+#     rhythm_score = np.where(C[:, 0] > C[:, 1], 2, 0) + \
+#                    np.where(L[:, 0] > L[:, 1], 1, 0)
+#     scores += rhythm_score
+
+#     # --- 6. 异常风险扣分 (大幅扣分确保排队顺序) ---
+#     # 3日累计跌幅过大
+#     three_day_ret = np.sum(P[:, 0:3], axis=1)
+#     scores += np.where(three_day_ret < -15, -60, 0)
+    
+#     # 破位扣分：如果今日收盘跌破 5日线 且 跌幅 > 3%
+#     drop_below_ma5 = (C[:, 0] < M5[:, 0]) & (P[:, 0] < -3)
+#     scores += np.where(drop_below_ma5, -30, 0)
+
+#     # --- 7. 结果输出 ---
+#     res = df.copy()
+#     res['gem_score'] = np.round(scores, 2)
+#     # 按高分排队，确保大阳启动且站稳 Upper 的排在最前面
+#     return res.sort_values(by='gem_score', ascending=False)
+
+
+
+def scoring_momentum_pullback_system_base_realtime(df: pd.DataFrame, max_days: int = 9):
+    N = len(df)
+    if N == 0: return df
+
+    # --- 0. 升级 get_mat 以支持 0d 数据 ---
+    def get_mat(prefix):
+        # 实时数据注入后，potential_cols 包含 0d/0
+        if prefix in ['upper', 'high4', 'ma5', 'ma10']:
+            cols = [f"{prefix}{i}" for i in range(0, max_days + 1)]
+        else:
+            cols = [f"{prefix}{i}d" for i in range(0, max_days + 1)]
+        
+        mat = np.zeros((N, max_days + 1))
+        for idx, col in enumerate(cols):
+            if col in df.columns:
+                mat[:, idx] = df[col].values
+        return mat
+
+    # --- 1. 构建基础矩阵 (索引 0 为今日实时) ---
+    C = get_mat('lastp')   # Close
+    O = get_mat('lasto')   # Open
+    L = get_mat('lastl')   # Low
+    H = get_mat('lasth')   # High
+    U = get_mat('upper')   # Upper Band
+    M5 = get_mat('ma5')
+    M10 = get_mat('ma10')
+    H4 = get_mat('high4')
+    P = get_mat('per')     # 涨跌幅
+
+    scores = np.zeros(N)
+
+    # --- 2. 维度一：前期强势基因 (逻辑保持不变，回溯 6-9 日) ---
+    early_strong = np.any(C[:, 6:9] > U[:, 6:9], axis=1)
+    scores += np.where(early_strong, 30, 0)
+
+    # --- 3. 维度二：回踩企稳判定 (逻辑保持不变，覆盖今日 0d 和昨日 1d) ---
+    # 使用 0:2 包含今日实时和昨日数据
+    near_ma = (np.abs(C[:, 0:2] - M10[:, 0:2]) / M10[:, 0:2] < 0.015) | \
+              (np.abs(C[:, 0:2] - M5[:, 0:2]) / M5[:, 0:2] < 0.015)
+    scores += np.where(np.any(near_ma, axis=1), 20, 0)
+
+    # --- 4. 维度三：K线形态与突破细化 (逻辑保持不变) ---
+    # (1) Open == Low 信号 (今日 0d)
+    open_eq_low = (O[:, 0] == L[:, 0]) & (C[:, 0] > O[:, 0])
+    scores += np.where(open_eq_low, 25, 0)
+
+    # (2) High4 突破精度优化 (今日 0d)
+    break_ratio = (C[:, 0] - H4[:, 0]) / H4[:, 0]
+    breaking_out = (C[:, 0] >= H4[:, 0])
+    break_bonus = np.clip(break_ratio * 100 * 0.5, 0, 3)
+    scores += np.where(breaking_out, 15 + break_bonus, 0)
+
+    # (3) 最近两日走势节奏 (今日 0d vs 昨日 1d)
+    rhythm_score = np.where(C[:, 0] > C[:, 1], 1.2, 0) + \
+                   np.where(L[:, 0] > L[:, 1], 0.8, 0)
+    scores += rhythm_score
+
+    # (4) 十字星企稳 (今日 0d)
+    body_pct = np.abs(C[:, 0] - O[:, 0]) / O[:, 0]
+    doji = (body_pct < 0.005) & (H[:, 0] > L[:, 0])
+    scores += np.where(doji, 10, 0)
+
+    # --- 5. 维度四：异常风险扣分 (包含今日 0d 在内的 3 日累计) ---
+    three_day_ret = np.sum(P[:, 0:3], axis=1)
+    scores += np.where(three_day_ret < -15, -50, 0)
+
+    # --- 6. 结果输出 ---
+    res = df.copy()
+    res['gem_score'] = np.round(scores, 2)
+    return res.sort_values(by='gem_score', ascending=False)
+
+def buy_sell_score_momentum_vect(df: pd.DataFrame, max_days: int = 9):
+    """
+    急速矢量化评分系统 (buy_sell_score_momentum_vect)
+    ---------------------------------------------
+    集成趋势加速、OHLC 结构演变与趋势评分加权。
+    旨在捕捉从下跌/盘整结构到上涨结构的演变，并给出趋势加速分。
+    同步支持 0d 迭代行情与历史回溯判定。
+    """
+    N = len(df)
+    if N == 0: return df
+
+    # --- 0. 升级内部 get_mat 以支持 0d 动态迭代 ---
+    def get_mat(prefix):
+        # 实时数据注入后，potential_cols 包含 0d/0
+        if prefix in ['upper', 'high4', 'ma5', 'ma10']:
+            cols = [f"{prefix}{i}" for i in range(0, max_days + 1)]
+        else:
+            cols = [f"{prefix}{i}d" for i in range(0, max_days + 1)]
+        
+        mat = np.zeros((N, max_days + 1))
+        for idx, col in enumerate(cols):
+            if col in df.columns:
+                mat[:, idx] = df[col].values
+            elif idx > 0:
+                # 填充缺失值，确保矢量计算不因为 NaN 崩掉
+                mat[:, idx] = mat[:, idx-1]
+        return mat
+
+    # --- 1. 构建基础矩阵 ---
+    C = get_mat('lastp')   # Close (0=今日现价, 1=昨日...)
+    O = get_mat('lasto')   # Open
+    L = get_mat('lastl')   # Low
+    H = get_mat('lasth')   # High
+    U = get_mat('upper')   # Upper Band (压力位)
+    M5 = get_mat('ma5')    # 5日线
+    M10 = get_mat('ma10')  # 10日线
+    M20 = get_mat('ma20')  # 20日线
+    H4 = get_mat('high4')  # 前高
+    P = get_mat('per')     # 涨跌幅
+
+    # --- [NEW] 1.5 结构与活跃度预处理 (Base Score) ---
+    # 活跃度基础分 (Base Activity)
+    power = df['power_idx'].values if 'power_idx' in df.columns else np.zeros(N)
+    win_days = df['win'].values if 'win' in df.columns else np.zeros(N)
+    
+    # 活跃度底分起步 40，最高加到 70 左右
+    base_activity = 40.0 + np.clip(power * 2.0, 0, 20) + np.clip(win_days * 3.0, 0, 15)
+    
+    # 结构性突破分 (Structural Breakouts)
+    # 1. 突破2日高点
+    break_2d_high = (C[:, 0] > np.maximum(H[:, 1], H[:, 2])).astype(float) * 10.0
+    
+    # 2. 一阳穿多线 (破 M5, M10, M20)
+    # 收盘站上3条线，且昨日（或今日开盘）在至少一条线之下
+    break_multi_ma = (C[:, 0] > M5[:, 0]) & (C[:, 0] > M10[:, 0]) & (C[:, 0] > M20[:, 0]) & \
+                     ((C[:, 1] < M5[:, 1]) | (C[:, 1] < M10[:, 1]) | (C[:, 1] < M20[:, 1]))
+    break_ma_bonus = break_multi_ma.astype(float) * 20.0
+    
+    # 3. 突破 hmax (前期60日新高或特定大周期新高)
+    hmax_val = df['hmax'].values if 'hmax' in df.columns else np.full(N, 1e9)
+    # 排除 hmax <= 0 的情况
+    break_hmax = ((C[:, 0] >= hmax_val) & (hmax_val > 0)).astype(float) * 15.0
+    
+    # 4. 连续小阴，高点下移惩罚 (Continuous small yin, lowering highs)
+    lowering_highs = (H[:, 1] < H[:, 2]) & (H[:, 2] < H[:, 3]) & (C[:, 1] <= O[:, 1]) & (C[:, 2] <= O[:, 2])
+    lowering_penalty = lowering_highs.astype(float) * -15.0
+    
+    # 综合结构底分 (Structure Base Score，供盘中引擎和基线使用)
+    structure_base_score = np.clip(
+        base_activity + break_2d_high + break_ma_bonus + break_hmax + lowering_penalty,
+        10, 100
+    )
+
+    # --- 2. 核心量化指标：动量 (Momentum) 与 加速度 (Acceleration) ---
+    # 动量：当前价格相对于昨日的斜率百分比
+    mom0 = (C[:, 0] - C[:, 1]) / np.maximum(C[:, 1], 1e-9) * 100
+    # 动量：昨日相对于前日的斜率
+    mom1 = (C[:, 1] - C[:, 2]) / np.maximum(C[:, 2], 1e-9) * 100
+    # 加速度：斜率的变化率 (动力是否在加强)
+    accel = mom0 - mom1
+
+    # --- 3. 结构化演变：从下跌/横盘 转为 上涨 ---
+    # 结构一：上穿关键均线 (由空转多)
+    was_bear = (C[:, 1] < M5[:, 1]) | (C[:, 1] < M10[:, 1])
+    is_bull = (C[:, 0] >= M5[:, 0]) & (C[:, 0] >= M10[:, 0])
+    pivot_reverse = (was_bear & is_bull).astype(float) * 20.0
+    
+    # 结构二：突围关键压力 (Upper / High4)
+    out_upper = (C[:, 0] > U[:, 0]) & (C[:, 1] <= U[:, 1])
+    out_h4 = (C[:, 0] > H4[:, 0]) & (C[:, 1] <= H4[:, 1])
+    break_bonus = (out_upper.astype(float) * 15.0) + (out_h4.astype(float) * 10.0)
+
+    # --- 4. 实时 K 线形态形态评分 (OHLC 每日走势叠加) ---
+    # 计算日内强度位置：收盘价在日内高低点中的相对位置
+    day_range = np.maximum(H[:, 0] - L[:, 0], 1e-9)
+    day_pos = (C[:, 0] - L[:, 0]) / day_range
+    # 收盘靠近最高点，给予额外走势分
+    ohlc_shape_score = day_pos * 12.0
+    
+    # 开报低走 vs 低开高走
+    low_start = (O[:, 0] <= L[:, 0] * 1.002).astype(float) * 8.0 
+
+    # --- 5. 综合买卖评分计算 ---
+    # 买入分 (buyscore)：动量爆发 + 加速溢价 + 结构反转 + 形态承接 + [NEW]结构底分溢价权重
+    # 将结构底分中超出 50 的部分转化为附加动量
+    structure_momentum_bonus = np.maximum(structure_base_score - 50.0, 0.0) * 0.4
+    
+    buy_scores = (
+        np.clip(mom0 * 3.5, -10, 30) +   # 基础爆发力
+        np.clip(accel * 5.0, -15, 25) +  # 趋势加速强度 (核心权重)
+        pivot_reverse +                   # 结构性转折奖励
+        break_bonus +                     # 压力突破奖励
+        ohlc_shape_score +                # 形态走势对齐
+        low_start +                       # 底部开盘承接
+        structure_momentum_bonus          # 结合结构基底分
+    )
+    
+    # 趋势保持权重：如果 5/10/20 多头排列，给一个 10 分的基础护航分
+    strong_trend = (M5[:, 0] > M10[:, 0]) & (C[:, 0] > M5[:, 0])
+    buy_scores += strong_trend.astype(float) * 10.0
+
+    # 卖出分 (sellscore)：冲高回落 + 加速衰减 + 破位结构
+    # 冲高回落幅度
+    retreat = (H[:, 0] - C[:, 0]) / np.maximum(H[:, 0], 1e-9) * 100
+    sell_scores = (
+        np.clip(retreat * 6.0, 0, 40) +    # 冲高回落权重最高
+        np.clip(-accel * 4.0, 0, 20) +     # 动力衰减权重
+        ((C[:, 0] < M5[:, 0]) & (C[:, 1] >= M5[:, 1])).astype(float) * 30.0 # 瞬间破位
+    )
+
+    # --- 6. 结果注入与性能自检 ---
+    res = df.copy()
+    res['buyscore'] = np.round(np.clip(buy_scores, 0, 100), 2)
+    res['sellscore'] = np.round(np.clip(sell_scores, 0, 100), 2)
+    res['structure_base_score'] = np.round(structure_base_score, 2)  # [NEW] 输出供后续决策引擎使用
+    
+    # 统计信息用于自检
+    if N > 0:
+        avg_buy = res['buyscore'].mean()
+        max_buy = res['buyscore'].max()
+        logger.debug(f"[QuantScore-Vect] N={N}, AvgBuy={avg_buy:.2f}, MaxBuy={max_buy:.2f}, Transitions={pivot_reverse.sum()}")
+
+    return res
+    
+def scoring_momentum_pullback_system_base(df: pd.DataFrame, max_days: int = 9):
+    N = len(df)
+    if N == 0: return df
+
+    def get_mat(prefix, suffix='d'):
+        if prefix in ['upper', 'high4']:
+            cols = [f"{prefix}{i}" for i in range(1, max_days + 1)]
+        else:
+            cols = [f"{prefix}{i}{suffix}" for i in range(1, max_days + 1)]
+        valid = [c for c in cols if c in df.columns]
+        mat = np.zeros((N, max_days))
+        if valid:
+            mat[:, :len(valid)] = df[valid].values
+        return mat
+
+    # --- 1. 构建基础矩阵 ---
+    C = get_mat('lastp')   # Close (0=今日, 1=昨日...)
+    O = get_mat('lasto')   # Open
+    L = get_mat('lastl')   # Low
+    H = get_mat('lasth')   # High
+    U = get_mat('upper')   # Upper Band
+    M5 = get_mat('ma5')
+    M10 = get_mat('ma10')
+    H4 = get_mat('high4')
+    P = get_mat('per')     # 涨跌幅
+
+    scores = np.zeros(N)
+
+    # --- 2. 维度一：前期强势基因 (权重: 30) ---
+    early_strong = np.any(C[:, 6:9] > U[:, 6:9], axis=1)
+    scores += np.where(early_strong, 30, 0)
+
+    # --- 3. 维度二：回踩企稳判定 (权重: 20) ---
+    near_ma = (np.abs(C[:, 0:2] - M10[:, 0:2]) / M10[:, 0:2] < 0.015) | \
+              (np.abs(C[:, 0:2] - M5[:, 0:2]) / M5[:, 0:2] < 0.015)
+    scores += np.where(np.any(near_ma, axis=1), 20, 0)
+
+    # --- 4. 维度三：K线形态与突破细化 ---
+    # (1) Open == Low 信号 (权重: 25)
+    open_eq_low = (O[:, 0] == L[:, 0]) & (C[:, 0] > O[:, 0])
+    scores += np.where(open_eq_low, 25, 0)
+
+    # (2) High4 突破精度优化 (基础15 + 溢出奖励)
+    # 计算今日收盘超过 High4 的百分比
+    break_ratio = (C[:, 0] - H4[:, 0]) / H4[:, 0]
+    breaking_out = (C[:, 0] >= H4[:, 0])
+    # 溢出分：每超过 1% 加 0.5 分，最高封顶 3 分 (即超过 6% 就不再额外加分)
+    break_bonus = np.clip(break_ratio * 100 * 0.5, 0, 3)
+    scores += np.where(breaking_out, 15 + break_bonus, 0)
+
+    # (3) 最近两日走势节奏 (Micro-Rhythm)
+    # 节奏 A: 今日重心抬高 (收盘价 > 昨日收盘) -> 加 1.2 分
+    # 节奏 B: 今日承接力强 (最低价 > 昨日最低) -> 加 0.8 分
+    rhythm_score = np.where(C[:, 0] > C[:, 1], 1.2, 0) + \
+                   np.where(L[:, 0] > L[:, 1], 0.8, 0)
+    scores += rhythm_score
+
+    # (4) 十字星企稳 (权重: 10)
+    body_pct = np.abs(C[:, 0] - O[:, 0]) / O[:, 0]
+    doji = (body_pct < 0.005) & (H[:, 0] > L[:, 0])
+    scores += np.where(doji, 10, 0)
+
+    # --- 5. 维度四：异常风险扣分 ---
+    three_day_ret = np.sum(P[:, 0:3], axis=1)
+    scores += np.where(three_day_ret < -15, -50, 0)
+
+    # --- 6. 结果输出 ---
+    res = df.copy()
+    res['gem_score'] = np.round(scores, 2) # 保留两位小数拉开区分度
+    return res.sort_values(by='gem_score', ascending=False)
+
+
+
+# def scoring_momentum_pullback_system_first(df: pd.DataFrame, max_days: int = 9):
+#     N = len(df)
+#     if N == 0: return df
+
+#     def get_mat(prefix, suffix='d'):
+#         # 兼容不同列名格式
+#         if prefix in ['upper', 'high4']:
+#             cols = [f"{prefix}{i}" for i in range(1, max_days + 1)]
+#         else:
+#             cols = [f"{prefix}{i}{suffix}" for i in range(1, max_days + 1)]
+#         valid = [c for c in cols if c in df.columns]
+#         mat = np.zeros((N, max_days))
+#         if valid:
+#             mat[:, :len(valid)] = df[valid].values
+#         return mat
+
+#     # --- 1. 构建基础矩阵 (0=1d, 1=2d, ..., 8=9d) ---
+#     C = get_mat('lastp')   # Close
+#     O = get_mat('lasto')   # Open
+#     L = get_mat('lastl')   # Low
+#     H = get_mat('lasth')   # High
+#     U = get_mat('upper')   # Upper Band
+#     M5 = get_mat('ma5')
+#     M10 = get_mat('ma10')
+#     H4 = get_mat('high4')
+#     P = get_mat('per')     # 涨跌幅
+
+#     scores = np.zeros(N)
+
+#     # --- 2. 维度一：前期强势基因 (7-9日前上过轨) ---
+#     # 检查 7d, 8d, 9d 是否有 P > U
+#     early_strong = np.any(C[:, 6:9] > U[:, 6:9], axis=1)
+#     scores += np.where(early_strong, 30, 0)
+
+#     # --- 3. 维度二：回踩企稳判定 (最近1-3天) ---
+#     # 最近 1-2 天收盘价在 MA5 或 MA10 附近 (波动率 < 1.5%)
+#     near_ma = (np.abs(C[:, 0:2] - M10[:, 0:2]) / M10[:, 0:2] < 0.015) | \
+#               (np.abs(C[:, 0:2] - M5[:, 0:2]) / M5[:, 0:2] < 0.015)
+#     scores += np.where(np.any(near_ma, axis=1), 20, 0)
+
+#     # --- 4. 维度三：K线形态打分 (1d/今天) ---
+#     # (1) Open == Low 信号
+#     open_eq_low = (O[:, 0] == L[:, 0]) & (C[:, 0] > O[:, 0])
+#     scores += np.where(open_eq_low, 25, 0)
+
+#     # (2) Close > High4 蓄势信号
+#     breaking_out = (C[:, 0] >= H4[:, 0])
+#     scores += np.where(breaking_out, 15, 0)
+
+#     # (3) 十字星企稳 (实体长度 < 0.5% 且 有上下影线)
+#     body_pct = np.abs(C[:, 0] - O[:, 0]) / O[:, 0]
+#     doji = (body_pct < 0.005) & (H[:, 0] > L[:, 0])
+#     scores += np.where(doji, 10, 0)
+
+#     # --- 5. 维度四：涨跌幅扣分/加分 (防止阴跌) ---
+#     # 如果最近3天跌幅过大 (<-15%)，判定为走坏，大幅扣分
+#     three_day_ret = np.sum(P[:, 0:3], axis=1)
+#     scores += np.where(three_day_ret < -15, -50, 0)
+
+#     # --- 6. 结果输出 ---
+#     res = df.copy()
+#     res['gem_score'] = scores
+#     # 过滤出有基本得分的个股并排序
+#     return res.sort_values(by='gem_score', ascending=False)
+
+# 调用示例
+# top_potential = scoring_momentum_pullback_system(top_all)
+
+def get_vect_col(upper='upper',max_days=cct.compute_lastdays):
+    cols = []
+    # 构建 lastp, lasth, lastl, lastv 等列
+    for prefix in ['lastp', 'lasth', 'lasto','lastl', 'lastv', upper, 'high4', 'ma5']:
+        for i in range(1, max_days + 1):
+            cols.append(f"{prefix}{i}d" if prefix not in ['upper', 'high4'] else f"{prefix}{i}")
+
+    # 最终再加上计算列 win_upper
+    cols.append('win_upper')
+    return cols
+
+
+def strong_momentum_large_cycle_vect_consecutive_above(
+    df: pd.DataFrame,
+    price_col: str = 'lastp',
+    upper_col: str = 'upper',
+    ma_col: str = 'ma5',
+    high4_col: str = 'high4',
+    max_days: int = 9
+):
+    N = len(df)
+    if N == 0:
+        return df.assign(**{f'win_{upper_col}': np.zeros(N, dtype=int)})
+
+    # ---------- 构建矩阵 (0轴代表行, 1轴代表天数 0d, 1d, 2d... ) ----------
+    def get_mat(prefix):
+        # 统一输出形状为 (N, max_days + 1)
+        mat = np.zeros((N, max_days + 1))
+        
+        if prefix in ['upper', 'high4']:
+            potential_cols = [f"{prefix}{i}" for i in range(0, max_days + 1)]
+        else:
+            potential_cols = [f"{prefix}{i}d" for i in range(0, max_days + 1)]
+        
+        valid = [c for c in potential_cols if c in df.columns]
+        
+        if valid:
+            def extra_num(s):
+                m = re.search(r'\d+', s)
+                return int(m.group()) if m else 99
+            
+            # 按天数排序并填充到矩阵对应位置
+            for c in valid:
+                day_idx = extra_num(c)
+                if day_idx <= max_days:
+                    mat[:, day_idx] = df[c].values
+            return mat, max_days + 1
+        else:
+            # 兼容性回退
+            if prefix == 'lasto': use_col = 'open'
+            elif prefix == 'lastp': use_col = 'close'
+            elif prefix == 'lasth': use_col = 'high'
+            elif prefix == 'lastl': use_col = 'low'
+            elif prefix == 'lastv': use_col = 'volume'
+            else: use_col = prefix
+            
+            if use_col in df.columns:
+                mat = np.tile(df[[use_col]].values, (1, max_days + 1))
+            return mat, max_days + 1
+
+    P, plen = get_mat(price_col)
+    U, ulen = get_mat(upper_col)
+    L, _    = get_mat('lastl')
+    Ma, _   = get_mat(ma_col)
+    H4, _   = get_mat(high4_col)
+
+    usable = min(plen, ulen)
+    win_upper = np.zeros(N, dtype=int)
+
+    # ---------- 核心计算 ----------
+    # start_cond[i, j] 表示第 i 行第 j+1 天是否满足启动条件
+    start_cond = (L[:, :usable] <= Ma[:, :usable]) & (P[:, :usable] > H4[:, :usable])
+    # above_upper[i, j] 表示第 i 行第 j+1 天是否站稳压力位
+    above_upper = (P[:, :usable] > U[:, :usable])
+
+    for i in range(N):
+        # 找到最近的启动点索引 (1d=0, 2d=1...)
+        # 使用 np.where 找到所有启动点，取第一个 [0] 即为最近的启动点
+        hits = np.where(start_cond[i])[0]
+        if len(hits) == 0:
+            continue
+        
+        start_idx = hits[0] 
+        
+        # 启动当天必须满足 P > U 才能开始计天数
+        if not above_upper[i, start_idx]:
+            win_upper[i] = 0
+            continue
+        
+        # 从启动点开始向“现在”(索引减小的方向) 检查连续性
+        # 例如 start_idx = 2 (3d), 检查顺序为 2 -> 1 -> 0
+        count = 0
+        for j in range(start_idx, -1, -1):
+            if above_upper[i, j]:
+                count += 1
+            else:
+                break # 一旦断掉就停止
+        
+        win_upper[i] = count
+
+    res = df.copy()
+    res[f'win_{upper_col}'] = win_upper
+    return res
+
+
+
+def strong_momentum_large_cycle_vect_consecutive_above_m5(
+    df: pd.DataFrame,
+    price_col: str = 'lastp',
+    upper_col: str = 'upper',
+    ma_col: str = 'ma5',
+    max_days: int = 20,
+):
+    """
+    修正版逻辑：
+    1. 找到离现在最近的一个满足 L <= Ma 的交易日作为“启动点”。
+    2. 启动点当天计 1 天。
+    3. 从启动点向“现在”的方向（即 1d 方向）检查，如果连续满足 P > U 且 C > O，则累加天数。
+    """
+    N = len(df)
+    if N == 0:
+        return df.assign(**{f'wm5_{upper_col}': np.zeros(N, dtype=int)})
+
+    # ---------- 构建矩阵 (0d 在 index 0, 1d 在 index 1...) ----------
+    def get_mat(prefix, use_col=None):
+        mat = np.zeros((N, max_days + 1))
+        if prefix == upper_col:
+            potential_cols = [f"{prefix}{i}" for i in range(0, max_days+1)]
+        else:
+            potential_cols = [f"{prefix}{i}d" for i in range(0, max_days+1)]
+        
+        valid = [c for c in potential_cols if c in df.columns]
+        if valid:
+            def extra_num(s):
+                m = re.search(r'\d+', s)
+                return int(m.group()) if m else 99
+            
+            for c in valid:
+                day_idx = extra_num(c)
+                if day_idx <= max_days:
+                    mat[:, day_idx] = df[c].values
+            return mat
+        else:
+            # 兼容性处理：若无滚动列则重复当前列
+            if use_col is None:
+                if prefix == 'lasto': use_col = 'open'
+                elif prefix == 'lastp': use_col = 'close'
+                elif prefix == 'lasth': use_col = 'high'
+                elif prefix == 'lastl': use_col = 'low'
+                elif prefix == 'lastv': use_col = 'volume'
+                else: use_col = prefix
+            
+            if use_col in df.columns:
+                return np.tile(df[[use_col]].values, (1, max_days + 1))
+            else:
+                return mat
+
+    P  = get_mat(price_col)
+    U  = get_mat(upper_col)
+    L  = get_mat('lastl')
+    Ma = get_mat(ma_col)
+    O  = get_mat('lasto')
+    C  = P  # 阳线判断通常使用收盘价/现价
+
+    win_upper = np.zeros(N, dtype=int)
+    has_0d = f'{price_col}0d' in df.columns or f'{upper_col}0' in df.columns
+    stop_idx = 0 if has_0d else 1
+
+    # ---------- 条件矩阵 ----------
+    # 注意：矩阵的列索引 0=0d, 1=1d, 2=2d...
+    cond_touch = (L <= Ma)
+    cond_strong = (P > U) & (C > O)
+
+    # ---------- 遍历每行计算 ----------
+    for i in range(N):
+        # 1. 找到最近的一次启动点 (即最小的列索引)
+        idxs = np.where(cond_touch[i])[0]
+        # 过滤 0d 屏蔽位
+        idxs = [idx for idx in idxs if idx >= stop_idx]
+        
+        if len(idxs) == 0:
+            continue
+        
+        start_idx = idxs[0]
+        length = 1
+        
+        # 3. 从启动点向“现在”方向遍历 (索引减小的方向)
+        for j in range(start_idx - 1, stop_idx - 1, -1):
+            if cond_strong[i, j]:
+                length += 1
+            else:
+                break
+        
+        win_upper[i] = length
+
+    res = df.copy()
+    res[f'wm5_{upper_col}'] = win_upper
+    return res
+
+def strong_momentum_large_cycle_vect_consecutive_above_single(
+    df: pd.DataFrame,
+    price_col: str = 'lastp',     # 'lastp' or 'lasth'
+    upper_col: str = 'upper',     # 'upper', 'ma5', 'ma10', ...
+    max_days: int = 20,
+):
+    """
+    统计从 1d 开始向过去方向，price_col > upper_col 连续成立的天数。
+    如果 1d 就不满足，则返回 0。
+    """
+    N = len(df)
+    if N == 0:
+        return df
+
+    # ---------- 构建矩阵 (0d=idx 0, 1d=idx 1...) ----------
+    def get_val_matrix(prefix):
+        if prefix == 'upper':
+            potential_cols = [f"{prefix}{i}" for i in range(0, max_days + 1)]
+        else:
+            potential_cols = [f"{prefix}{i}d" for i in range(0, max_days + 1)]
+        
+        valid_cols = [c for c in potential_cols if c in df.columns]
+        if not valid_cols:
+            return None, 0
+            
+        def extra_num(s):
+            m = re.search(r'\d+', s)
+            return int(m.group()) if m else 99
+        valid_cols = sorted(valid_cols, key=extra_num)
+        
+        return df[valid_cols].values, len(valid_cols)
+
+    P, p_len = get_val_matrix(price_col)
+    U, u_len = get_val_matrix(upper_col)
+
+    usable_days = min(p_len, u_len)
+    if usable_days == 0:
+        df[f'w_{upper_col}'] = 0
+        return df
+
+    # 判定是否存在 0d 实时数据
+    has_0d = f'{price_col}0d' in df.columns or f'{upper_col}0' in df.columns
+    start_offset = 0 if has_0d else 1
+
+    # ---------- 核心向量化逻辑 ----------
+    # cond 矩阵: True 代表 P > U
+    # 截取有效范围，跳过可能的 0d 占位符
+    effective_cond = P[:, start_offset:usable_days] > U[:, start_offset:usable_days]
+    
+    # 寻找每一行第一个出现 False 的位置
+    first_false = np.argmax(~effective_cond, axis=1)
+
+    # 特殊情况处理
+    all_true = np.all(effective_cond, axis=1)
+    win_upper = np.where(all_true, usable_days - start_offset, first_false)
+
+    # ---------- 输出 ----------
+    res_df = df.copy()
+    res_df[f'w_{upper_col}'] = win_upper
+
+    return res_df
+
+# def strong_momentum_large_cycle_vect_other_noapp(
+#     df,
+#     max_days=10,
+#     winlimit=1,
+#     upper_prefix='upper',          # e.g. 'upper', 'ma10', 'ma20'
+#     upper_mode='P',             # 'P' | 'PH' | 'custom'
+#     debug=False
+# ):
+#     N = len(df)
+#     if N == 0:
+#         return {}
+
+#     # ========= 1. 构建矩阵 =========
+#     def get_val_matrix_other(prefix):
+#         if prefix == 'upper':
+#             cols = [f"{prefix}{i}" for i in range(1, max_days + 2)]
+#         else:
+#             cols = [f"{prefix}{i}d" for i in range(1, max_days + 2)]
+#         valid_cols = [c for c in cols if c in df.columns]
+#         mat = np.zeros((N, max_days + 2))
+#         if valid_cols:
+#             mat[:, 1:len(valid_cols) + 1] = df[valid_cols].values
+#         return mat
+
+#     P = get_val_matrix_other('lastp')
+#     H = get_val_matrix_other('lasth')
+#     L = get_val_matrix_other('lastl')
+#     V = get_val_matrix_other('lastv')
+
+#     U = None
+#     if upper_prefix is not None:
+#         U = get_val_matrix_other(upper_prefix)
+
+#     # ========= 2. 趋势判定 =========
+#     yesterday_up = P[:, 1] > P[:, 2]
+#     max_win = np.zeros(N, dtype=int)
+
+#     for w in range(2, max_days):
+#         c_a, p_a = np.arange(1, w), np.arange(2, w + 1)
+#         c_b, p_b = np.arange(2, w + 1), np.arange(3, w + 2)
+
+#         # ---------- 原始结构 ----------
+#         m_a = (
+#             np.all(P[:, c_a] >= P[:, p_a], axis=1) &
+#             np.all(H[:, c_a] >= P[:, c_a], axis=1) &
+#             np.all((L[:, c_a] >= L[:, p_a]) | (V[:, c_a] >= V[:, p_a]), axis=1)
+#         )
+
+#         m_b = (
+#             np.all(P[:, c_b] >= P[:, p_b], axis=1) &
+#             np.all(H[:, c_b] >= H[:, p_b], axis=1) &
+#             np.all((L[:, c_b] >= L[:, p_b]) | (V[:, c_b] >= V[:, p_b]), axis=1)
+#         )
+
+#         # ---------- upper / MA 结构约束 ----------
+#         if U is not None:
+#             if upper_mode == 'P':
+#                 m_a &= np.all(P[:, c_a] > U[:, c_a], axis=1)
+#                 m_b &= np.all(P[:, c_b] > U[:, c_b], axis=1)
+
+#             elif upper_mode == 'PH':
+#                 m_a &= (
+#                     np.all(P[:, c_a] > U[:, c_a], axis=1) &
+#                     np.all(H[:, c_a] > U[:, c_a], axis=1)
+#                 )
+#                 m_b &= (
+#                     np.all(P[:, c_b] > U[:, c_b], axis=1) &
+#                     np.all(H[:, c_b] > U[:, c_b], axis=1)
+#                 )
+
+#             elif upper_mode == 'custom':
+#                 # 预留：你可以在这里插入更复杂的逻辑
+#                 pass
+
+#         combined = (yesterday_up & m_a) | (~yesterday_up & m_b)
+#         if not np.any(combined):
+#             break
+
+#         max_win[combined] = w
+
+#     # ========= 3. 筛选 =========
+#     keep_idx = np.where(max_win >= winlimit)[0]
+#     if len(keep_idx) == 0:
+#         return {}
+
+#     # ========= 4. 斜率 =========
+#     start_d = np.where(yesterday_up[keep_idx], 1, 2)
+#     end_d = start_d + max_win[keep_idx] - 1
+
+#     p_start = P[keep_idx, start_d]
+#     p_end = P[keep_idx, end_d]
+
+#     slopes = (p_start - p_end) / p_end / (max_win[keep_idx] - 1) * 100
+
+#     # ========= 5. 爆发力 =========
+#     v_sub = V[keep_idx].copy()
+#     col_range = np.arange(V.shape[1])
+#     mask = (col_range >= start_d[:, None]) & (col_range <= end_d[:, None])
+#     v_sub[~mask] = 0
+
+#     avg_vols = np.sum(v_sub, axis=1) / max_win[keep_idx]
+#     vol_ratio = V[keep_idx, 1] / (avg_vols + 1e-9)
+
+#     power_idx = slopes * vol_ratio
+
+#     # ========= 6. 输出 =========
+#     res_df = df.iloc[keep_idx].copy()
+#     res_df['max_win'] = max_win[keep_idx]
+#     res_df['slope'] = np.round(slopes, 2)
+#     res_df['vol_ratio'] = np.round(vol_ratio, 2)
+#     res_df['power_idx'] = np.round(power_idx, 2)
+#     res_df['sum_perc'] = np.round((p_start - p_end) / p_end * 100, 2)
+
+#     return {
+#         int(w): g.sort_values('power_idx', ascending=False)
+#         for w, g in res_df.groupby('max_win')
+#     }
+
+# 使用示例：
+# df = pd.DataFrame(vect_daily_t)
+# check_real_time(df, ['688239', '601360'])
+
+def strong_momentum_large_cycle_vect_new(df, max_days=10, winlimit=6, debug=False, shift_intraday=True, win_start_idx=1):
+    N = len(df)
+    if N == 0:
+        return {}
+
+    # === 0. 仅在 shift_intraday=True 且满足条件时，构造临时 shifted DataFrame 使得动量计算包含当期/当日实时 bar ===
+    if shift_intraday and 'close' in df.columns and 'lastp1d' in df.columns:
+        max_d = 1
+        for col in df.columns:
+            if col.startswith('lastp') and col.endswith('d'):
+                try:
+                    d_num = int(col[5:-1])
+                    if d_num > max_d:
+                        max_d = d_num
+                except ValueError:
+                    pass
+        
+        df_shifted = df.copy()
+        valid_mask = (df['close'] > 0) & (df['close'].notna())
+        
+        p0 = df['lastp0d'] if 'lastp0d' in df.columns else df['close']
+        h0 = df['lasth0d'] if 'lasth0d' in df.columns else df['high']
+        l0 = df['lastl0d'] if 'lastl0d' in df.columns else df['low']
+        v0 = df['lastv0d'] if 'lastv0d' in df.columns else (df['vol'] if 'vol' in df.columns else df['volume'])
+        
+        for i in range(max_d, 0, -1):
+            if i == 1:
+                df_shifted.loc[valid_mask, 'lastp1d'] = p0.loc[valid_mask]
+                df_shifted.loc[valid_mask, 'lasth1d'] = h0.loc[valid_mask]
+                df_shifted.loc[valid_mask, 'lastl1d'] = l0.loc[valid_mask]
+                df_shifted.loc[valid_mask, 'lastv1d'] = v0.loc[valid_mask]
+            else:
+                for prefix in ['lastp', 'lasth', 'lastl', 'lastv']:
+                    dest_col = f"{prefix}{i}d"
+                    src_col = f"{prefix}{i-1}d"
+                    if src_col in df.columns:
+                        df_shifted.loc[valid_mask, dest_col] = df.loc[valid_mask, src_col]
+        df = df_shifted
+
+    import numpy as np
+
+    # === 1. 构造价格/量能矩阵 ===
+    # 增加列生成深度至 max_days + 4 以防路径B（平移 +2）访问越界
+    def get_val_matrix(prefix):
+        cols = [f"{prefix}{i}d" for i in range(1, max_days + 4)]
+        valid_cols = [c for c in cols if c in df.columns]
+        mat = np.zeros((N, max_days + 4))
+        if valid_cols:
+            mat[:, 1:len(valid_cols)+1] = df[valid_cols].values
+        return mat
+
+    P = get_val_matrix('lastp')
+    H = get_val_matrix('lasth')
+    L = get_val_matrix('lastl')
+    V = get_val_matrix('lastv')
+
+    # === 2. 主升结构窗口识别 (双路径: 趋势延续 + 回踩反包) ===
+    yesterday_up = P[:, win_start_idx] > P[:, win_start_idx + 1] * 0.995
+    max_win = np.zeros(N, dtype=int)
+
+    # --- 路径A: 严格连阳主升结构 ---
+    # 采用与日线一致的双轨制判定，即便当前周期 (本周) 微跌，也能回退并正确输出之前的历史连阳计数
+    for w in range(win_start_idx + 1, max_days + 1):
+        # 路径 A: 包含当前周期 (从 win_start_idx 开始)
+        c_a = np.arange(win_start_idx, w)
+        p_a = np.arange(win_start_idx + 1, w + 1)
+        cond_trend_a = np.all(P[:, c_a] > P[:, p_a] * 0.995, axis=1)
+        high_ok_a = H[:, c_a] >= H[:, p_a] * 0.99
+        cond_high_a = np.sum(high_ok_a, axis=1) >= max(1, high_ok_a.shape[1] - 1)
+        combined_a = cond_trend_a & cond_high_a
+
+        # 路径 B: 排除当前周期 (向后偏移一位，从 win_start_idx + 1 开始)
+        c_b = np.arange(win_start_idx + 1, w + 1)
+        p_b = np.arange(win_start_idx + 2, w + 2)
+        cond_trend_b = np.all(P[:, c_b] > P[:, p_b] * 0.995, axis=1)
+        high_ok_b = H[:, c_b] >= H[:, p_b] * 0.99
+        cond_high_b = np.sum(high_ok_b, axis=1) >= max(1, high_ok_b.shape[1] - 1)
+        combined_b = cond_trend_b & cond_high_b
+
+        # 归并判定
+        combined = (yesterday_up & combined_a) | (~yesterday_up & combined_b)
+        max_win[combined] = np.maximum(max_win[combined], w - win_start_idx + 1)
+
+    # === 3. 过滤有效窗口 ===
+    keep_idx = np.where(max_win >= winlimit)[0]
+    if len(keep_idx) == 0:
+        return {}
+
+    # === 4. 结构斜率（每日平均涨幅 %）与起终点计算 ===
+    # 动态确定连阳的起点 start_d 与终点 end_d
+    start_d = np.where(yesterday_up[keep_idx], win_start_idx, win_start_idx + 1)
+    end_d = start_d + max_win[keep_idx] - 1
+
+    p_start = P[keep_idx, start_d]
+    p_end = P[keep_idx, end_d]
+
+    slopes = (p_start - p_end) / p_end / (np.maximum(1.0, max_win[keep_idx] - 1)) * 100
+
+    # === 5. 量能爆发系数 ===
+    v_sub = V[keep_idx].copy()
+    col_range = np.arange(V.shape[1])
+
+    # 范围自适应对齐
+    range_mask = (col_range >= start_d[:, None]) & (col_range <= end_d[:, None])
+    v_sub[~range_mask] = 0
+
+    avg_vols = np.sum(v_sub, axis=1) / max_win[keep_idx]
+    
+    # 提取起点量能用于比例计算
+    v_start = V[keep_idx, start_d]
+    vol_ratio = v_start / (avg_vols + 1e-9)
+
+    power_idx = slopes * vol_ratio
+
+    # === 6. 结果整理 ===
+    res_df = df.iloc[keep_idx].copy()
+    res_df['max_win'] = max_win[keep_idx]
+    res_df['slope'] = np.round(slopes, 2)
+    res_df['vol_ratio'] = np.round(vol_ratio, 2)
+    res_df['power_idx'] = np.round(power_idx, 2)
+    res_df['sum_perc'] = np.round((p_start - p_end) / p_end * 100, 2)
+
+    return {
+        int(w): group.sort_values('power_idx', ascending=False)
+        for w, group in res_df.groupby('max_win')
+    }
+
+
+def strong_momentum_large_cycle_vect(df, max_days=10, winlimit=2,debug=False, shift_intraday=True):
+    N = len(df)
+    if N == 0: return {}
+
+    # === 0. 仅在 shift_intraday=True 且满足条件时，构造临时 shifted DataFrame 使得动量计算包含当期/当日实时 bar ===
+    if shift_intraday and 'close' in df.columns and 'lastp1d' in df.columns:
+        max_d = 1
+        for col in df.columns:
+            if col.startswith('lastp') and col.endswith('d'):
+                try:
+                    d_num = int(col[5:-1])
+                    if d_num > max_d:
+                        max_d = d_num
+                except ValueError:
+                    pass
+        
+        df_shifted = df.copy()
+        valid_mask = (df['close'] > 0) & (df['close'].notna())
+        
+        p0 = df['lastp0d'] if 'lastp0d' in df.columns else df['close']
+        h0 = df['lasth0d'] if 'lasth0d' in df.columns else df['high']
+        l0 = df['lastl0d'] if 'lastl0d' in df.columns else df['low']
+        v0 = df['lastv0d'] if 'lastv0d' in df.columns else (df['vol'] if 'vol' in df.columns else df['volume'])
+        
+        for i in range(max_d, 0, -1):
+            if i == 1:
+                df_shifted.loc[valid_mask, 'lastp1d'] = p0.loc[valid_mask]
+                df_shifted.loc[valid_mask, 'lasth1d'] = h0.loc[valid_mask]
+                df_shifted.loc[valid_mask, 'lastl1d'] = l0.loc[valid_mask]
+                df_shifted.loc[valid_mask, 'lastv1d'] = v0.loc[valid_mask]
+            else:
+                for prefix in ['lastp', 'lasth', 'lastl', 'lastv']:
+                    dest_col = f"{prefix}{i}d"
+                    src_col = f"{prefix}{i-1}d"
+                    if src_col in df.columns:
+                        df_shifted.loc[valid_mask, dest_col] = df.loc[valid_mask, src_col]
+        df = df_shifted
+
+    # 1. 快速提取矩阵 (P, H, L, V)
+    def get_val_matrix(prefix):
+        cols = [f"{prefix}{i}d" for i in range(1, max_days + 2)]
+        valid_cols = [c for c in cols if c in df.columns]
+        mat = np.zeros((N, max_days + 2))
+        if valid_cols:
+            mat[:, 1:len(valid_cols)+1] = df[valid_cols].values
+        return mat
+
+    P = get_val_matrix('lastp')
+    H = get_val_matrix('lasth')
+    L = get_val_matrix('lastl')
+    V = get_val_matrix('lastv')
+    
+    # 2. 趋势判定逻辑 (保持你的双轨制)
+    yesterday_up = P[:, 1] > P[:, 2]
+    max_win = np.zeros(N, dtype=int)
+
+    for w in range(2, max_days):
+        c_a, p_a = np.arange(1, w), np.arange(2, w + 1)
+        # 加速态优化：H1d 只要不低于 P1d 且收盘创新高即可
+        m_a = np.all(P[:, c_a] >= P[:, p_a], axis=1) & \
+              np.all(H[:, c_a] >= P[:, c_a], axis=1) & \
+              np.all((L[:, c_a] >= L[:, p_a]) | (V[:, c_a] >= V[:, p_a]), axis=1)
+        
+        c_b, p_b = np.arange(2, w + 1), np.arange(3, w + 2)
+        m_b = np.all(P[:, c_b] >= P[:, p_b], axis=1) & \
+              np.all(H[:, c_b] >= H[:, p_b], axis=1) & \
+              np.all((L[:, c_b] >= L[:, p_b]) | (V[:, c_b] >= V[:, p_b]), axis=1)
+
+        combined = (yesterday_up & m_a) | (~yesterday_up & m_b)
+        if not np.any(combined): break
+        max_win[combined] = w
+
+    # 3. 结果筛选
+    keep_idx = np.where(max_win >= winlimit)[0]
+    if len(keep_idx) == 0: return {}
+
+    # 4. 矢量化斜率计算 (Slope)
+    # 计算公式: (P1d - Pwd) / (w-1) / Pwd * 100 (百分比斜率)
+    # 我们需要根据每只票的 max_win 找到对应的起始价格 Pwd
+    row_idx = np.arange(len(keep_idx))
+    start_d = np.where(yesterday_up[keep_idx], 1, 2)
+    end_d = start_offset = start_d + max_win[keep_idx] - 1
+    
+    # 获取周期起点价格 (Pwd)
+    p_start = P[keep_idx, start_d]
+    p_end = np.zeros(len(keep_idx))
+    for i, idx_in_keep in enumerate(keep_idx):
+        p_end[i] = P[idx_in_keep, end_d[i]]
+    
+    # 标准化斜率: 每日平均涨幅百分比
+    slopes = (p_start - p_end) / p_end / (max_win[keep_idx] - 1) * 100
+    
+    # 5. 爆发力评分 (Power Index)
+    # 逻辑: 斜率 * (1d量 / 周期平均量)
+    v_sub = V[keep_idx].copy()
+    # 动态掩码算平均量
+    col_range = np.arange(V.shape[1])
+    range_mask = (col_range >= start_d[:, None]) & (col_range <= end_d[:, None])
+    v_sub[~range_mask] = 0
+    avg_vols = np.sum(v_sub, axis=1) / max_win[keep_idx]
+    vol_ratio = V[keep_idx, 1] / (avg_vols + 1e-9)
+    
+    power_idx= slopes * vol_ratio
+
+    # 6. 组装输出
+    res_df = df.iloc[keep_idx].copy()
+    res_df['max_win'] = max_win[keep_idx]
+    res_df['slope'] = np.round(slopes, 2)
+    res_df['vol_ratio'] = np.round(vol_ratio, 2)
+    res_df['power_idx'] = np.round(power_idx, 2)
+    res_df['sum_perc'] = np.round((p_start - p_end) / p_end * 100, 2)
+
+    return {int(w): group.sort_values('power_idx', ascending=False) 
+            for w, group in res_df.groupby('max_win')}
+
+
+# def strong_momentum_today_plus_history_sum_opt(df, max_days=cct.compute_lastdays, winlimit=winlimit,debug=False):
+#     """
+#     完全向量化版本，用 NumPy 计算严格连续上涨和 sum_percent 25ms
+#     """
+#     result_dict = {}
+
+#     # ===== 0️⃣ 判断今天状态，只做一次 =====
+#     is_trade_day = cct.get_trade_date_status()
+#     in_market_hours = 915 < cct.get_now_time_int() < 1500
+#     real_time_mode = is_trade_day and in_market_hours
+
+#     ohlc_same_as_last1d = (
+#         (df['open'] == df.get('lasto1d', df['open'])) &
+#         (df['low'] == df.get('lastl1d', df['low'])) &
+#         (df['high'] == df.get('lasth1d', df['high'])) &
+#         (df['close'] == df.get('lastp1d', df['close']))
+#     )
+#     use_real_ohlc = real_time_mode & (~ohlc_same_as_last1d)
+
+#     # ===== 1️⃣ 今天数据列 =====
+#     today_open  = df['open'].where(use_real_ohlc, df['lasto1d']).to_numpy()
+#     today_high  = df['high'].where(use_real_ohlc, df['lasth1d']).to_numpy()
+#     today_low   = df['low'].where(use_real_ohlc, df['lastl1d']).to_numpy()
+#     today_close = df['close'].where(use_real_ohlc, df['lastp1d']).to_numpy()
+#     # today_vol = df['volume'].where(use_real_ohlc, df['lastv1d']).to_numpy()
+
+#     codes = df.index.to_numpy()
+
+#     # ===== 2️⃣ 历史收盘/高/低 =====
+#     # 构建 N x max_days 的 NumPy array
+#     lastp = np.zeros((len(df), max_days))
+#     lasth = np.zeros((len(df), max_days))
+#     lastl = np.zeros((len(df), max_days))
+#     lastv = np.zeros((len(df), max_days))
+
+#     for i in range(1, max_days+1):
+#         lastp[:, i-1] = df.get(f'lastp{i}d', 0).to_numpy()
+#         lasth[:, i-1] = df.get(f'lasth{i}d', 0).to_numpy()
+#         lastl[:, i-1] = df.get(f'lastl{i}d', 0).to_numpy()
+#         lastv[:, i-1] = df.get(f'lastv{i}d', 0).to_numpy()
+
+#     # ===== 3️⃣ 遍历窗口 =====
+#     start_window = winlimit
+
+#     # 盘后：today == last1d，window=1 没有策略意义
+#     if not use_real_ohlc.any():
+#         start_window = max(2, winlimit)
+
+#     # ===== 3️⃣ 遍历窗口 =====
+#     for window in range(start_window, max_days+1):
+#         if window == 1:
+#             # window=1 特殊处理
+#             # mask = (today_high > lastp[:, 0]) & (today_close > lastp[:, 0])
+#             # window=1 特殊处理：实时 vs 收盘后
+#             mask = np.where(
+#                 use_real_ohlc.to_numpy(),
+#                 (today_high > lastp[:, 0]) & (today_close > lastp[:, 0]),  # 实时 vs 昨天
+#                 (lastp[:, 0] > df.get('lastp2d', lastp[:, 0]).to_numpy()) &
+#                 (lasth[:, 0] > df.get('lasth2d', lasth[:, 0]).to_numpy())  # 收盘后 vs 前天
+#             )
+#             if debug:
+#                 # logger.debug(f"use_real_ohlc: {use_real_ohlc.all()} window={window}, mask_close={mask}")
+#                 print(f"use_real_ohlc: {use_real_ohlc.all()} window={window}, mask_close={mask}")
+
+#         else:
+#             # 严格连续上涨
+#             # lastp[:, 0:window-1] > lastp[:, 1:window] for close
+#             mask_close = np.all(lastp[:, :window-1] > lastp[:, 1:window], axis=1)
+#             mask_high  = np.all(lasth[:, :window-1] > lasth[:, 1:window], axis=1)
+#             # mask_low   = np.all(lastl[:, :window-1] > lastl[:, 1:window], axis=1)
+#             cond_low = lastl[:, :window-1] > lastl[:, 1:window]
+#             cond_vol = lastv[:, :window-1] > lastv[:, 1:window]
+#             mask_low_or_vol = np.all(cond_low | cond_vol, axis=1)
+#             mask = mask_close & mask_high & mask_low_or_vol
+#             if debug:
+#                 # logger.debug(f"use_real_ohlc: {use_real_ohlc.all()} 对比{window-1} vs {window} window={window}, mask_close={mask_close},mask_high={mask_high}, mask_low={mask_low_or_vol} cond_low:{np.all(cond_low)} cond_vol:{np.all(cond_vol)}")
+#                 # print(f"use_real_ohlc: {use_real_ohlc.all()} 对比{window-1} vs {window} window={window}, mask_close={mask_close},mask_high={mask_high}, mask_low={mask_low_or_vol} cond_low:{cond_low[0, i]} cond_vol:{cond_vol[0, i]}")
+#                 print(f"use_real_ohlc: {use_real_ohlc.all()} 对比{window-1} vs {window} window={window}, mask_close={mask_close},mask_high={mask_high}, mask_low={mask_low_or_vol}")
+
+#         if not mask.any():
+#             continue
+
+#         # ===== 4️⃣ sum_percent =====
+#         compare_low = lastl[:, window-1].copy()
+#         compare_low[compare_low==0] = today_low[compare_low==0]  # 避免0
+#         sum_percent = ((today_high - compare_low) / compare_low * 100).round(2)
+#         sum_percent = sum_percent[mask]
+
+#         # ===== 5️⃣ 构建 df 矩阵 =====
+#         df_window = df.iloc[mask].copy()
+#         df_window['sum_perc'] = sum_percent
+#         df_window = df_window.sort_values('sum_perc', ascending=False)
+#         # result_dict[window] = df_window
+#         # ===== 修正 window 输出 =====
+#         effective_window = window - (0 if use_real_ohlc.any() else 1)
+#         result_dict[effective_window] = df_window
+
+#     return result_dict
+
+# def merge_strong_momentum_results(results, min_days=2, columns=['name','lastp1d','lasth1d','lastl1d','sum_percent']):
+def merge_strong_momentum_results(results, min_days=winlimit, columns=['sum_perc','slope','vol_ratio','power_idx']):
+    """
+    将 strong_momentum_strict_single_percent 的结果合并为一个 DataFrame
+    - 只保留连续天数 >= min_days
+    - 添加一列 'window' 表示连续天数
+    - 按 window 从大到小去重，避免重复显示
+    """
+    merged_list = []
+    seen = set()  # 已加入的股票 name
+
+    for window in sorted(results.keys(), reverse=True):  # 大到小
+        if window < min_days:
+            continue
+        df_window = results[window].copy()
+        # 过滤已经出现过的股票
+        df_window = df_window[~df_window['name'].isin(seen)]
+        if df_window.empty:
+            continue
+        df_window['win'] = window
+        merged_list.append(df_window)
+        seen.update(df_window['name'].tolist())
+
+    if merged_list:
+        merged_df = pd.concat(merged_list, ignore_index=False)
+        merged_df = merged_df.sort_values(['win','sum_perc'], ascending=[False, False])
+        return merged_df[columns + ['win']]
+    else:
+        return pd.DataFrame(columns=columns + ['win'])
+
+def get_top_20(top_all):
+    # 精选 Top 20
+    top_20 = top_all.query('power_idx > 1.5 and win_upper >= 1').copy()
+    top_20['final_score'] = top_20['TrendS'].astype(float) * 0.4 + top_20['power_idx'] * 30 + top_20['gem_score'] * 0.3
+    top_20 = top_20.sort_values('final_score', ascending=False).head(20)
+    return top_20
+    
+def save_top_all_to_hdf(top_all, file_path=r'g:\top_all.h5'):
+    # 如果 top_all 是字典，先合并成一个大的 DataFrame，或者逐个处理
+    if isinstance(top_all, dict):
+        # 推荐：先合并，方便后续统一管理
+        df_to_save = pd.concat(top_all.values(), keys=top_all.keys())
+    else:
+        df_to_save = top_all.copy()
+
+    # --- 核心修复逻辑 ---
+    # 找到所有 object 类型的列（包括那个报错的 'kind'）
+    for col in df_to_save.select_dtypes(include=['object']).columns:
+        # 强制转换为字符串，并将 NaN 填充为空字符串，确保类型纯净
+        df_to_save[col] = df_to_save[col].astype(str).replace('nan', '')
+
+    try:
+        # 使用 blosc 压缩可以大幅减小体积，complevel=9 是最高压缩率
+        df_to_save.to_hdf(file_path, key='top_all', mode='w', format='table', complib='blosc', complevel=9)
+        print(f"Successfully saved to {file_path} 读取: pd.read_hdf(r'g:\top_all.h5', 'top_all')")
+    except Exception as e:
+        print(f"Table format failed: {e}. Trying fixed format... 读取: pd.read_hdf(r'g:\top_all.h5', 'top_all') ")
+        # 如果 table 格式依然报错，使用 fixed 格式（兼容性最强，但不开启搜索索引）
+        df_to_save.to_hdf(file_path, key='top_all', mode='w', format='fixed')
+
+def align_sum_percent(df, merged_df):
+    """
+    将 merged_df 的 sum_percent 和 window 对齐到原始 df
+    - df: 原始 DataFrame，index 为 code 或包含 'code' 列
+    - merged_df: merged strong momentum DataFrame，index 为 code
+    - 对缺失的 sum_percent 填 0，window 填 NaN
+    """
+    df_copy = df.copy()
+    
+    # 如果 df 没有 code 作为索引，则设为索引
+    if 'code' in df_copy.columns and df_copy.index.name != 'code':
+        df_copy = df_copy.set_index('code')
+
+    # # 对齐 sum_percent 和 window
+    # df_copy['sum_perc'] = merged_df['sum_perc'].reindex(df_copy.index).fillna(0)
+    # df_copy['win'] = merged_df['win'].reindex(df_copy.index).replace([np.inf, -np.inf], 0).fillna(0).astype(int)
+    # 需要对齐的列
+    cols_to_align = ['sum_perc', 'slope', 'vol_ratio', 'power_idx', 'win']
+
+    if not merged_df.index.is_unique:
+        # dup = merged_df.index[merged_df.index.duplicated()]
+        # merged_df = (
+        #         merged_df
+        #         .sort_values(['win', 'sum_perc'], ascending=[True, False])
+        #         .drop_duplicates(subset='code', keep='first')
+        #     )
+        merged_df = merged_df.sort_values(['win', 'sum_perc'], ascending=[False, False])
+        merged_df = merged_df[~merged_df.index.duplicated(keep='first')]
+        logger.warning(
+            f"align_sum_percent: merged_df duplicate code detected: "
+            f"{merged_df[:3]} ..."
+        )
+
+    for col in cols_to_align:
+        if col in merged_df.columns:
+            df_copy[col] = merged_df[col].reindex(df_copy.index) \
+                                        .replace([np.inf, -np.inf], 0) \
+                                        .fillna(0)
+            if col == 'win':
+                df_copy[col] = df_copy[col].astype(int)  # win 需要整数
+            else:
+                df_copy[col] = df_copy[col].round(2)    # 其他列保留两位小数
+    
+    return df_copy
+
+def _prepare_runtime_state(
+    logger, g_values, flag,
+    resample, market, st_key_sort,
+    marketInit, marketblk
+):
+    if not flag.value:
+        # Check if we should wait or exit
+        for _ in range(3): # Reduced from 5 to 3 for faster response
+            if flag.value:
+                break
+            time.sleep(1)
+        
+        if not flag.value:
+            # If still False after wait, return EXIT to break the main loop
+            return None, None, None, "EXIT"
+        return None, None, None, "PAUSE"
+
+    new_resample = g_values.getkey("resample") or "d"
+    new_market = g_values.getkey("market", marketInit)
+    new_sort = g_values.getkey("st_key_sort", st_key_sort)
+
+    if new_resample != resample or new_market != market:
+        logger.info(
+            f"runtime changed reset: market {market}->{new_market}, "
+            f"resample {resample}->{new_resample}"
+        )
+        return new_resample, new_market, new_sort, "RESET"
+
+    if new_sort != st_key_sort:
+        return resample, market, new_sort, "SORT_ONLY"
+
+    return resample, market, st_key_sort, "RUN"
+
+def _handle_init_tdx(
+    logger, g_values, market, resample,
+    flag, duration_sleep_time, ramdisk_dir
+):
+    today = cct.get_today()
+    now_time = cct.get_now_time_int()
+
+    if (
+        g_values.getkey("tdx.init.done") is True
+        and g_values.getkey("tdx.init.date") == today
+    ):
+        return False
+
+    if not clean_expired_tdx_file(
+        logger, g_values,
+        cct.get_trade_date_status,
+        cct.get_today,
+        cct.get_now_time_int,
+        cct.get_ramdisk_path,
+        ramdisk_dir
+    ):
+        logger.info(f"{today} 清理未完成，跳过 init_tdx")
+        for _ in range(30):
+            if not flag.value:
+                break
+            time.sleep(1)
+        return False
+
+    with timed_ctx("init_tdx_total", warn_ms=1000):
+
+        top_now = tdd.getSinaAlldf(
+            market=market,
+            vol=ct.json_countVol,
+            vtype=ct.json_countType,
+            readonly=False
+        )
+
+        resamples =  ['d','2d', '3d', 'w', 'm','45d','3M'] if now_time <= 900 else ['3d']
+
+        for res_m in resamples:
+            if res_m == resample:
+                continue
+            if cct.get_now_time_int() > 905:
+                break
+            with timed_ctx(f"init_tdx_{res_m}", warn_ms=1000):
+                tdd.get_append_lastp_to_df(
+                    top_now,
+                    dl=ct.Resample_LABELS_Days[res_m],
+                    resample=res_m
+                )
+
+    g_values.setkey("tdx.init.done", True)
+    g_values.setkey("tdx.init.date", today)
+    logger.info(f"{today} init_tdx 完成")
+
+    for _ in range(duration_sleep_time):
+        if not flag.value:
+            break
+        time.sleep(1)
+
+    return True
+
+def print_strong_stocks_by_window(results, columns=['name','lastp1d','lasth1d','lastl1d','sum_perc'], top_n=None):
+    """
+    按连续天数从大到小去重显示股票，避免重复显示
+    
+    参数：
+    - results: dict, key=连续天数, value=对应DataFrame
+    - columns: list, 要显示的列
+    - top_n: int 或 None, 每个窗口显示前 N 条股票，None 显示全部
+    """
+
+    logger = LoggerFactory.getLogger()
+    seen = set()  # 已加入的股票
+
+    for window in sorted(results.keys(), reverse=True):  # 从大到小
+        df_window = results[window].copy()
+        # 过滤已经出现过的股票
+        df_window = df_window[~df_window['name'].isin(seen)]
+        if df_window.empty:
+            continue
+        total_count = len(df_window)
+        logger.info(f"\n连续 {window} 天高低收盘升高的股票，总数：{total_count}")
+        if top_n is not None:
+            logger.info(df_window[columns].head(top_n))
+        else:
+            logger.info(df_window[columns])
+
+        # 添加到已见集合，避免重复
+        seen.update(df_window['name'].tolist())
+    return seen
+
+def check_code_vect_sum_opt(code,top_all,resample='d'):
+    if not isinstance(code,list):
+        code_list = [code]
+    else:
+        code_list = code
+
+    # for co in code_list:
+    #     # data_tw = get_vect_daily_data(top_all,code_list)
+    #     print(f'code: {co}  ---------------------------')
+    # 
+    #     vect_daily_t = tdd.generate_df_vect_daily_features(top_all.loc[[co]])
+    #     data_tw  = pd.DataFrame(vect_daily_t)
+    #     print(f'dump_vect_daily_ohlcv: {tdd.dump_vect_daily_ohlcv(vect_daily_t, max_days=cct.compute_lastdays)}')
+    #     # data_tw = get_vect_daily_data(top_all,[co])
+    #     if resample == 'd':
+    #         results_tw = strong_momentum_today_plus_history_sum_opt(data_tw, max_days=cct.compute_lastdays,debug=True)
+    #     else:
+    #         # results_tw = strong_momentum_large_cycle(data_tw, max_days=cct.compute_lastdays,debug=True)
+    #         results_tw = strong_momentum_large_cycle_vect(data_tw, max_days=cct.compute_lastdays,debug=True)
+    #     print_strong_stocks_by_window(results_tw, top_n=10)
+    #     print(f'data: resample: {resample} \n')
+    #     print(f'code: {co}  ---------------------------')
+
+    print(f'code: {code_list}  ---------------------------')
+
+    vect_daily_t = tdd.generate_df_vect_daily_features(top_all.loc[code_list])
+    data_tw  = pd.DataFrame(vect_daily_t)
+    print(f'dump_vect_daily_ohlcv: {tdd.dump_vect_daily_ohlcv(vect_daily_t, max_days=cct.compute_lastdays)}')
+    # data_tw = get_vect_daily_data(top_all,[co])
+    if resample == 'd':
+        results_tw = strong_momentum_today_plus_history_sum_opt(data_tw, max_days=cct.compute_lastdays,debug=True)
+    else:
+        # results_tw = strong_momentum_large_cycle(data_tw, max_days=cct.compute_lastdays,debug=True)
+        results_tw = strong_momentum_large_cycle_vect(data_tw, max_days=cct.compute_lastdays,debug=True)
+    print_strong_stocks_by_window(results_tw, top_n=10)
+    print(f'data: resample: {resample} \n')
+    print(f'code: {code_list}  ---------------------------')
+
+    # import ipdb;ipdb.set_trace()
+
+
+def get_vect_daily_data(top_all,code_list):
+
+    vect_daily_t = tdd.generate_df_vect_daily_features(top_all.loc[code_list])
+    data_tw  = pd.DataFrame(vect_daily_t)
+    return  data_tw
+
+def test_opt(top_all,resample='d',code=None):
+    # code_list = ['002151','601360']
+    # code_list = ['002151']
+    if code is None:
+        code_list = ['002151','002796']
+    else:
+        code_list = [code]
+    print(f'resample: {resample} check_code_vect_sum_opt({code_list},top_all,"d")')
+    check_code_vect_sum_opt(code_list,top_all,resample)
+    # import ipdb;ipdb.set_trace()
+    print(f'resample: {resample} ------------------------')
+    # data_tw = get_vect_daily_data(top_all,code_list)
+
+    vect_daily_t = tdd.generate_df_vect_daily_features(top_all.loc[code_list])
+    # data_t = top_all.loc[code_list]
+    data_tw  = pd.DataFrame(vect_daily_t)
+    if resample == 'd':
+        result_opt = strong_momentum_today_plus_history_sum_opt(data_tw, max_days=cct.compute_lastdays,debug=True)
+    else:
+        result_opt = strong_momentum_large_cycle_vect(data_tw, max_days=cct.compute_lastdays,debug=True)
+    print_strong_stocks_by_window(result_opt, top_n=10)
+
+    print(f'data:\n {tdd.dump_vect_daily_ohlcv(vect_daily_t, max_days=cct.compute_lastdays)}')
+    with timed_ctx("plus_history_sum_opt", warn_ms=3000):
+        results_t = strong_momentum_today_plus_history_sum_opt(top_all, max_days=cct.compute_lastdays)
+    print_strong_stocks_by_window(results_t, top_n=10)
+
+def _run_main_pipeline(
+    logger, g_values, queue,
+    market, resample, st_key_sort,
+    lastpTDX_DF, top_all,
+    detect_calc_support_var
+):
+    with timed_ctx("fetch_market", warn_ms=800):
+    
+        if market == 'indb':
+            indf = get_indb_df()
+            top_now = tdd.getSinaAlldf(
+                market=indf.code.tolist(),
+                vol=ct.json_countVol,
+                vtype=ct.json_countType,
+                readonly=False
+            )
+        else:
+            top_now = tdd.getSinaAlldf(
+                market=market,
+                vol=ct.json_countVol,
+                vtype=ct.json_countType,
+                readonly=False
+            )
+
+    if top_now.empty:
+        return top_all, lastpTDX_DF
+
+    detect_val = (
+        detect_calc_support_var.value
+        if hasattr(detect_calc_support_var, "value")
+        else False
+    )
+
+    if top_all.empty:
+        if lastpTDX_DF.empty:
+            with timed_ctx("get_append_lastp_to_df empty", warn_ms=1000):
+                top_all, lastpTDX_DF = tdd.get_append_lastp_to_df(
+                    top_now,
+                    dl=ct.Resample_LABELS_Days[resample],
+                    resample=resample,
+                    detect_calc_support=detect_val
+                )
+        else:
+            with timed_ctx("get_append_lastp_to_df", warn_ms=1000):
+                top_all = tdd.get_append_lastp_to_df(
+                    top_now,
+                    lastpTDX_DF,
+                    detect_calc_support=detect_val
+                )
+    else:
+        with timed_ctx("get_append combine_dataFrame", warn_ms=1000):
+            if resample != 'd':
+                core_cols = ['open', 'high', 'low', 'close', 'vol', 'volume', 'amount', 'name']
+                top_now_filtered = top_now[[c for c in core_cols if c in top_now.columns]].copy()
+            else:
+                top_now_filtered = top_now
+            top_all = cct.combine_dataFrame(
+                top_all, top_now_filtered, col="couts", compare="dff"
+            )
+
+    with timed_ctx("calc_pipeline", warn_ms=1000):
+        top_all = process_merged_sina_with_history(top_all)
+
+        with timed_ctx("plus_history_sum_opt", warn_ms=3000):
+            if resample == 'd':
+                # result_opt = strong_momentum_today_plus_history_sum_opt(top_all,max_days=cct.compute_lastdays)
+                result_opt = strong_momentum_large_cycle_vect(top_all, max_days=cct.compute_lastdays)
+            else:
+                result_opt = strong_momentum_large_cycle_vect(top_all,max_days=cct.compute_lastdays)
+        clean_sum = merge_strong_momentum_results(result_opt, min_days=winlimit)
+        top_all = align_sum_percent(top_all, clean_sum)
+        top_all = calc_indicators(top_all, logger, resample)
+
+    sort_cols, sort_keys = ct.get_market_sort_value_key(
+        st_key_sort, top_all
+    )
+
+    with timed_ctx("getBollFilter", warn_ms=800):
+        df_out = (
+            stf.getBollFilter(top_all.copy(), resample=resample, down=False)
+            .sort_values(by=sort_cols, ascending=sort_keys)
+        )
+    with timed_ctx("sanitize", warn_ms=800):
+
+        df_out = sanitize(clean_bad_columns(df_out))
+        try:
+            queue.put(df_out, block=True, timeout=10)
+        except Exception as e:
+            logger.warning(f"Queue put failed: {e}")
+
+    return top_all, lastpTDX_DF
+
+def get_all_fetch_df(market = 'all', resample= 'd',detect_val = False,status_callback: Callable[[], Any] = None):
+    with timed_ctx(f"fetch_market:{market} {resample}", warn_ms=800):
+    
+        top_now = tdd.getSinaAlldf(market=market,vol=ct.json_countVol, vtype=ct.json_countType)
+
+        top_all, lastpTDX_DF = tdd.get_append_lastp_to_df(top_now, dl=ct.Resample_LABELS_Days[resample], 
+                                                   resample=resample, detect_calc_support=detect_val)
+
+    with timed_ctx("sina_with_history", warn_ms=1000):
+        top_all = process_merged_sina_with_history(top_all)
+    time_sum = time.time()
+    with timed_ctx("calc_indicators", warn_ms=1000):
+        top_all = calc_indicators(top_all, logger, resample)
+    with timed_ctx("plus_history_sum_opt", warn_ms=1000):
+        if resample == 'd':
+            # result_opt = strong_momentum_today_plus_history_sum_opt(top_all,max_days=cct.compute_lastdays)
+            result_opt = strong_momentum_large_cycle_vect(top_all,max_days=cct.compute_lastdays)
+        else:
+            result_opt = strong_momentum_large_cycle_vect(top_all,max_days=cct.compute_lastdays)
+    with timed_ctx("merge_strong_momentum_results_opt", warn_ms=1000):
+        clean_sum = merge_strong_momentum_results(result_opt,min_days=winlimit)
+        top_all = align_sum_percent(top_all,clean_sum)
+    logger.info(f'clean_sum: {time.time() - time_sum:.2f}')
+    with timed_ctx("build_hma_and_trendscore", warn_ms=1000):
+        top_all = build_hma_and_trendscore(top_all,status_callback=status_callback)
+    top_temp = top_all.copy()
+    df_all = clean_bad_columns(top_temp)
+    df_all = sanitize(df_all)
+
+    # # inside update_tree() to eliminate cross-process proxy overhead.
+    # with timed_ctx("format_floats", warn_ms=800):
+    #     df_all = format_floats(df_all)
+    return df_all
+    
+# def fetch_and_process_timed_ctx(shared_dict: Dict[str, Any], queue: Any, blkname: str = "boll", 
+# # def fetch_and_process(shared_dict: Dict[str, Any], queue: Any, blkname: str = "boll", 
+#                       flag: Any = None, log_level: Any = None, detect_calc_support_var: Any = None,
+#                       marketInit: str = "all", marketblk: str = "boll",
+#                       duration_sleep_time: int = 120, ramdisk_dir: str = cct.get_ramdisk_dir()) -> None:
+#     logger = LoggerFactory.getLogger()
+#     if log_level:
+#         logger.setLevel(log_level.value)
+
+#     g_values = cct.GlobalValues(shared_dict)
+#     resample = g_values.getkey("resample") or "d"
+#     market = g_values.getkey("market", marketInit)
+#     st_key_sort = g_values.getkey("st_key_sort", "3 0")
+
+#     top_all = pd.DataFrame()
+#     lastpTDX_DF = pd.DataFrame()
+#     START_INIT = 0
+
+#     while True:
+#         try:
+#             time_s = time.time()
+
+#             resample, market, st_key_sort, state = _prepare_runtime_state(
+#                 logger, g_values, flag,
+#                 resample, market, st_key_sort,
+#                 marketInit, marketblk
+#             )
+
+#             if state == "EXIT":
+#                 logger.info("Background Process: EXIT signal received, stopping loop.")
+#                 break
+
+#             if state in ("PAUSE", "RESET"):
+#                 top_all = pd.DataFrame()
+#                 lastpTDX_DF = pd.DataFrame()
+#                 START_INIT = 0
+#                 continue
+
+#             if (
+#                 cct.get_trade_date_status()
+#                 and START_INIT > 0
+#                 and 830 <= cct.get_now_time_int() <= 915
+#             ):
+#                 if _handle_init_tdx(
+#                     logger, g_values, market, resample,
+#                     flag, duration_sleep_time, ramdisk_dir
+#                 ):
+#                     top_all = pd.DataFrame()
+#                     lastpTDX_DF = pd.DataFrame()
+#                     START_INIT = 0
+#                 continue
+
+#             if START_INIT > 0 and not cct.get_work_time():
+#                 time.sleep(5)
+#                 continue
+
+#             top_all, lastpTDX_DF = _run_main_pipeline(
+#                 logger, g_values, queue,
+#                 market, resample, st_key_sort,
+#                 lastpTDX_DF, top_all,
+#                 detect_calc_support_var
+#             )
+
+#             START_INIT = 1
+#             cct.print_timing_summary()
+#             cct.df_memory_usage(top_all)
+#             logger.info(
+#                     f"init_tdx 总用时: {time.time() - time_s:.2f}s tdx.init.done:{g_values.getkey('tdx.init.done')} tdx.init.date:{g_values.getkey('tdx.init.date')} "
+#                 )
+#             time.sleep(1)
+
+#         except Exception as e:
+#             logger.error(f"[fetch_and_process:init_loop] 初始化阶段异常: {type(e).__name__}: {e}")
+#             logger.error(f"完整堆栈:\n{traceback.format_exc()}")
+#             time.sleep(duration_sleep_time)
+
+def get_status(status_callback):
+    """
+    统一读取 status：
+    - None        → 0
+    - mp.Value    → value
+    - callable    → callable()
+    - 其他        → bool 转 int
+    """
+    if status_callback is None:
+        return 0
+
+    # multiprocessing.Value / Manager.Value
+    if hasattr(status_callback, "value"):
+        return int(status_callback.value)
+
+    # callable（不推荐，但兼容）
+    if callable(status_callback):
+        try:
+            return int(status_callback())
+        except Exception:
+            return 0
+
+    return int(bool(status_callback))
+
+
+
+# def fetch_and_process(shared_dict: Dict[str, Any], queue: Any, blkname: str = "boll", 
+#                       flag: Any = None, log_level: Any = None, detect_calc_support_var: Any = None,
+#                       marketInit: str = "all", marketblk: str = "boll",
+#                       duration_sleep_time: int = 120, ramdisk_dir: str = cct.get_ramdisk_dir()) -> None:
+def fetch_and_process(
+    shared_dict: Dict[str, Any],
+    queue: Any,
+    blkname: str = "boll", 
+    flag: Any = None,
+    log_level: Any = None,
+    detect_calc_support_var: Any = None,
+    marketInit: str = "all",
+    marketblk: str = "boll",
+    duration_sleep_time: int = 120,
+    ramdisk_dir: str = cct.get_ramdisk_dir(),
+    status_callback: Callable[[], Any] = None,  # 新增回调参数
+    single = False
+) -> None:
+    """
+    fetch_and_process 任务函数
+
+    status_callback: 可选函数，返回状态信息，例如 self.tip_var.get()
+    """
+    """后台数据获取与处理进程"""
+    logger = LoggerFactory.getLogger()
+    if log_level is not None:
+        logger.setLevel(log_level.value)
+
+    # -------------------------------------------------------------
+    # 强力加固：忽略子进程中的 KeyboardInterrupt (SIGINT/SIGBREAK) 信号
+    # 防止前台按下诊断热键或发生控制台中断事件时，此核心后台子进程被连带强退
+    # -------------------------------------------------------------
+    try:
+        import signal
+        import sys
+        
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        if hasattr(signal, "SIGBREAK"):
+            signal.signal(signal.SIGBREAK, signal.SIG_IGN)
+            
+        if sys.platform.startswith("win"):
+            import ctypes
+            try:
+                ctypes.windll.kernel32.SetConsoleCtrlHandler(None, True)
+            except Exception:
+                pass
+    except Exception as e_sig:
+        logger.warning(f"⚠️ Failed to ignore Ctrl signals in child process: {e_sig}")
+    
+    logger.info(f"子进程开始，日志等级: {log_level.value if hasattr(log_level, 'value') else log_level} duration_sleep_time:{duration_sleep_time}")
+    print(f'single:{single}')
+    START_INIT = 0
+    g_values = cct.GlobalValues(shared_dict)
+    resample = g_values.getkey("resample") or "d"
+    market = g_values.getkey("market", marketInit)
+    blkname = g_values.getkey("blkname", marketblk)
+    st_key_sort = g_values.getkey("st_key_sort", "3 0")
+    logger.info(f"当前选择市场: {market}, blkname={blkname} st_key_sort:{st_key_sort}")
+    
+    df_allDF = {}
+    lastpTDX_DF_Dict = {}
+    last_resample_ui = g_values.getkey("resample") or "d"
+    lastpTDX_DF, top_all = pd.DataFrame(), pd.DataFrame()
+    detect_calc_support_val = detect_calc_support_var.value if hasattr(detect_calc_support_var, 'value') else False
+    
+    # RealtimeDataService is now handled by the Main UI process to save memory
+    logger.info("ℹ️ fetch_and_process running in data-only mode (IPC via Queue)")
+
+    logger.info(f"init resample: {resample} flag: {flag.value if flag else 'None'} detect_calc_support: {detect_calc_support_val}")
+    last_status = get_status(status_callback)
+    loop_counter = 0  # 循环计数
+    df_all = None
+    force_init_latch = False  # ⭐ [Cut 2] 跨 loop 锁存信号，防止被中间的 continue 吞掉
+    while True:
+        loop_counter += 1
+        try:
+            time_s = time.time()
+            now_int = cct.get_now_time_int()
+            today = cct.get_today()
+
+            # 🚀 [统一状态守卫] 归一化判定，避免分布式逻辑
+            init_done = (
+                g_values.getkey("tdx.init.done") is True
+                and g_values.getkey("tdx.init.date") == today
+            )
+
+            # --- [INIT CHECK] 诊断日志 ---
+            if loop_counter % 20 == 0:
+                logger.debug(
+                    f"[INIT CHECK] now={now_int} START_INIT={START_INIT} "
+                    f"done={g_values.getkey('tdx.init.done')} "
+                    f"date={g_values.getkey('tdx.init.date')}"
+                )
+
+            # ⭐ [Cut 1] force_init 触发器 (确保不被前面的 elif 吞掉)
+            force_init = False
+            if (
+                cct.get_trade_date_status()
+                and START_INIT > 0
+                and cct.start_init_tdx_time <= now_int <= 900
+                and not init_done
+            ):
+                logger.info(f"[INIT-FORCE] 兜底触发 init now={now_int}")
+                force_init = True
+                force_init_latch = True  # 开启锁存，由 elif 消费
+            if not flag.value:   # 停止刷新
+                if g_values.getkey('state') == 'EXIT':
+                    logger.info("Background Process: EXIT state detected, breaking loop.")
+                    break
+                for _ in range(5):
+                    if flag.value: break
+                    time.sleep(1)
+                continue
+            elif g_values.getkey("resample") and  g_values.getkey("resample") !=  last_resample_ui:
+                last_resample_ui = g_values.getkey("resample")
+                top_now = pd.DataFrame()
+                if last_resample_ui not in df_allDF:
+                    df_allDF[last_resample_ui] = pd.DataFrame()
+                top_all = df_allDF[last_resample_ui]
+                lastpTDX_DF = pd.DataFrame()
+                lastpTDX_DF_Dict[last_resample_ui] = pd.DataFrame()
+                logger.info(f'resample : new resample : {last_resample_ui} top_now:{len(top_now)} top_all:{len(top_all)} lastpTDX_DF:{len(lastpTDX_DF)}')
+            elif g_values.getkey("market") and  g_values.getkey("market") !=  market:
+                # logger.info(f'market : new : {g_values.getkey("market")} last : {market} ')
+                top_now = pd.DataFrame()
+                top_all = pd.DataFrame()
+                lastpTDX_DF = pd.DataFrame()
+                df_allDF.clear() # 市场改变时清空缓存字典
+                lastpTDX_DF_Dict.clear() # 市场改变时清空 lastpTDX_DF 缓存字典
+                logger.info(f'market : new resample: {g_values.getkey("market")} last resample: {resample} top_now:{len(top_now)} top_all:{len(top_all)} lastpTDX_DF:{len(lastpTDX_DF)}')
+            elif g_values.getkey("st_key_sort") and  g_values.getkey("st_key_sort") !=  st_key_sort:
+                # logger.info(f'st_key_sort : new : {g_values.getkey("st_key_sort")} last : {st_key_sort} ')
+                st_key_sort = g_values.getkey("st_key_sort")
+            elif get_status(status_callback) != last_status:
+                last_status = get_status(status_callback)
+            elif (
+                (force_init or force_init_latch or (
+                    cct.get_trade_date_status()
+                    and START_INIT > 0
+                    and cct.start_init_tdx_time <= cct.get_now_time_int() <= 900
+                ))
+                and not init_done
+            ):
+                # 🚀 [消费语义] 立即释放锁存信号，确保边沿触发
+                force_init_latch = False 
+                
+                today = cct.get_today()
+                # 0️⃣ init 今天已经完成 → 直接跳过
+                # 1️⃣ 清理（未完成 → 不允许 init）
+                # if not clean_expired_tdx_file(logger, g_values):
+                if not clean_expired_tdx_file(logger, g_values, cct.get_trade_date_status, cct.get_today, cct.get_now_time_int, cct.get_ramdisk_path, ramdisk_dir):
+                    logger.info(f"{today} 清理尚未完成，跳过 init_tdx")
+                    # 5️⃣ 节流
+                    for _ in range(duration_sleep_time):
+                        if not flag.value:
+                            break
+                        time.sleep(1)
+                    continue
+                else:
+                    logger.debug(f"{today} 清理已完成，进入init_tdx")
+                    for _ in range(5):
+                        if not flag.value: break
+                        time.sleep(1)
+                    
+                if init_done:
+                    continue
+
+                # 2️⃣ 再次确认时间（防止跨 09:15）
+                now_time = cct.get_now_time_int()
+                if now_time > 900:
+                    logger.info(
+                        f"{today} 已超过初始化截止时间 {now_time}"
+                    )
+                    continue
+
+                # 3️⃣ 正式 init（只会执行一次）
+                time_init = time.time()
+                START_INIT = 0
+
+                top_now = tdd.getSinaAlldf(
+                    market=market,
+                    vol=ct.json_countVol,
+                    vtype=ct.json_countType,
+                    readonly=False
+                )
+                
+                init_res_m = resample
+
+                if now_time <= 835:
+                    base_resamples = ['2d', '3d', 'w', 'm','45d','3M', 'd']
+                else:
+                    base_resamples = ['3d', 'w', 'd']
+
+                # 保证 init_res_m 永远最后一个，且不重复
+                resamples = [x for x in base_resamples if x != init_res_m]
+                resamples.append(init_res_m)
+
+                for res_m in resamples:
+                    time_init_m = time.time()
+                    # if res_m != g_values.getkey("resample"):
+                    now_time = cct.get_now_time_int()
+                    if now_time <= 905:
+                        init_res_m = resample
+                        logger.info(f"start init_tdx resample: {res_m}")
+                        tdd.get_append_lastp_to_df(
+                            top_now,
+                            dl=ct.Resample_LABELS_Days[res_m],
+                            resample=res_m)
+                    else:
+                        init_res_m = resample
+                        logger.info(f'resample:{res_m} now_time:{now_time} > 905 终止初始化 init_tdx 用时:{time.time()-time_init_m:.2f}')
+                        break
+                    logger.info(f'resample:{res_m} init_tdx 用时:{time.time()-time_init_m:.2f}')
+                #还原最后的初始化的init_res_m
+                resample = init_res_m
+                # 4️⃣ 关键：只有关键周期表真实落盘且仍存在，才能提交 init.done。
+                # 防止某个周期写盘失败/被 sibling-table 覆盖后仍误标“初始化完成”。
+                verify_resamples = list(dict.fromkeys(resamples))
+                missing_tables = []
+                try:
+                    from JSONData import tdx_hdf5_api as _h5a
+                    _h5_path = cct.get_ramdisk_path("tdx_last_df")
+                    with _h5a.SafeHDFStore("tdx_last_df", mode='r') as _verify_store:
+                        _keys = set(_verify_store.keys()) if _verify_store is not None else set()
+                    for _res_m in verify_resamples:
+                        _table = f"low_{_res_m}_{ct.Resample_LABELS_Days[_res_m]}_y_all"
+                        if '/' + _table not in _keys:
+                            missing_tables.append(_table)
+                except Exception as _verify_err:
+                    logger.error(f"[INIT-VERIFY] tdx_last_df verification failed: {_verify_err}")
+                    missing_tables = [f"verify_error:{_verify_err}"]
+
+                if missing_tables:
+                    g_values.setkey("tdx.init.done", False)
+                    g_values.setkey("tdx.init.date", today)
+                    START_INIT = 1
+                    logger.error(f"[INIT-VERIFY-FAIL] missing tables after init: {missing_tables}; init.done remains False")
+                else:
+                    g_values.setkey("tdx.init.done", True)
+                    g_values.setkey("tdx.init.date", today)
+                    START_INIT = 0
+                    logger.info(f"[INIT-VERIFY-OK] tdx_last_df tables complete: {verify_resamples}")
+                force_init_latch = False  # ⭐ [Cut 6] 初始化完成，释放锁存器
+                top_all = pd.DataFrame()
+                lastpTDX_DF = pd.DataFrame()
+                df_allDF.clear()
+                lastpTDX_DF_Dict.clear()
+                logger.info(
+                    f"init_tdx 总用时: {time.time() - time_init:.2f}s tdx.init.done:{g_values.getkey('tdx.init.done')} tdx.init.date:{g_values.getkey('tdx.init.date')} "
+                )
+
+                # 5️⃣ 节流
+                for _ in range(duration_sleep_time):
+                    if not flag.value:
+                        break
+                    time.sleep(1)
+                continue
+
+            elif START_INIT > 0 and not cct.get_work_time():
+                for _ in range(5):
+                    if not flag.value or get_status(status_callback) != last_status:
+                        break
+                    time.sleep(1)
+                print(".", end=' ')
+                continue
+            else:
+                logger.info(f'start work : {cct.get_now_time()} get_work_time: {cct.get_work_time()} , START_INIT :{START_INIT} ')
+
+            resample_ui = g_values.getkey("resample") or "d"
+            resample = 'd'
+            market = g_values.getkey("market", marketInit)        # all / sh / cyb / kcb / bj
+            blkname = g_values.getkey("blkname", marketblk)  # 对应的 blk 文件
+            st_key_sort = g_values.getkey("st_key_sort", st_key_sort)  # 对应的 blk 文件
+            logger.info(f"\n resample Main  market : {market} resample_ui: {resample_ui} flag.value : {flag.value} blkname :{blkname} st_key_sort:{st_key_sort}")
+            if market == 'indb':
+                with timed_ctx(f"fetch_market:{market} {resample}", warn_ms=800):
+                    indf = get_indb_df()
+                    stock_code_list = indf.code.tolist()
+                
+                    top_now = tdd.getSinaAlldf(market=stock_code_list,vol=ct.json_countVol, vtype=ct.json_countType, readonly=False)
+            else:
+                with timed_ctx(f"fetch_market:{market} {resample}", warn_ms=800):
+                
+                    top_now = tdd.getSinaAlldf(market=market,vol=ct.json_countVol, vtype=ct.json_countType, readonly=False)
+            if top_now.empty:
+                logger.info("top_now.empty no data fetched")
+                time.sleep(duration_sleep_time)
+                continue
+            logger.info(f"resample Main  top_now:{len(top_now)} market : {market}  resample: {resample} flag.value : {flag.value} blkname :{blkname} st_key_sort:{st_key_sort}")
+            # 合并与计算
+            detect_val = detect_calc_support_var.value if hasattr(detect_calc_support_var, 'value') else False
+
+            # 用 resample 作为 key 读取 top_all
+            top_all = df_allDF.get(resample, pd.DataFrame())
+            lastpTDX_DF = lastpTDX_DF_Dict.get(resample, pd.DataFrame())
+
+            if resample not in df_allDF or df_allDF[resample].empty:
+                if lastpTDX_DF.empty:
+                    with timed_ctx("get_append_lastp_to_df empty", warn_ms=1000):
+                        top_all, lastpTDX_DF = tdd.get_append_lastp_to_df(top_now, dl=ct.Resample_LABELS_Days[resample], 
+                                                                   resample=resample, detect_calc_support=detect_val)
+                else:
+                    with timed_ctx("get_append combine_dataFrame", warn_ms=1000):
+                        top_all = tdd.get_append_lastp_to_df(top_now, lastpTDX_DF, detect_calc_support=detect_val)
+                df_allDF[resample] = top_all
+                lastpTDX_DF_Dict[resample] = lastpTDX_DF
+            else:
+                with timed_ctx("get_append combine_dataFrame", warn_ms=1000):
+                    if resample != 'd':
+                        core_cols = ['open', 'high', 'low', 'close', 'vol', 'volume', 'amount', 'name']
+                        top_now_filtered = top_now[[c for c in core_cols if c in top_now.columns]].copy()
+                    else:
+                        top_now_filtered = top_now
+                    top_all = cct.combine_dataFrame(top_all, top_now_filtered, col="couts", compare="dff")
+                    df_allDF[resample] = top_all
+
+
+            with timed_ctx("complete_indicators_pipeline", warn_ms=3000):
+                top_all = complete_indicators_pipeline(top_all, logger, resample, status_callback)
+            df_allDF[resample] = top_all
+
+            if top_all is not None and not top_all.empty:
+                sort_cols, sort_keys = ct.get_market_sort_value_key(st_key_sort, top_all)
+            else:
+                sort_cols, sort_keys = ct.get_market_sort_value_key(st_key_sort)
+
+            top_temp = top_all.copy()
+            with timed_ctx("getBollFilter", warn_ms=800):
+                top_temp=stf.getBollFilter(df=top_temp, resample=resample, down=False)
+            top_temp = top_temp.sort_values(by=sort_cols, ascending=sort_keys)
+            
+            df_all = clean_bad_columns(top_temp)
+            df_all = sanitize(df_all)
+            
+            # 🛡️ 动态列裁剪 (Dynamic Column Trimming)
+            # 使用 GlobalValues 进行安全、零侵入、不刷错的属性提取
+            keep_all = g_values.getkey('keep_all_columns', True)
+            if not keep_all:
+                required_cols = g_values.getkey('required_cols', [])
+                    
+                if required_cols:
+                    # 获取 df_all 中存在的列
+                    actual_keep = [c for c in required_cols if c in df_all.columns]
+                    # 如果结果集包含基本的 'name' 列，确保裁剪是安全的
+                    if 'name' in actual_keep or 'code' in actual_keep:
+                        df_all = df_all[actual_keep]
+                    else:
+                        logger.debug("Dynamic Trimming: required_cols missing core columns, skipping trim.")
+            else:
+                logger.debug("Dynamic Trimming: 'keep_all_columns' active, skipping trim.")
+
+            # --- Now process UI display resampled track if resample_ui != 'd' ---
+            if resample_ui != 'd':
+                resample_res = resample_ui
+                
+                # 从缓存获取大周期的 top_all 和 lastpTDX_DF
+                top_all_res = df_allDF.get(resample_res, pd.DataFrame())
+                lastpTDX_DF_res = lastpTDX_DF_Dict.get(resample_res, pd.DataFrame())
+                
+                if resample_res not in df_allDF or df_allDF[resample_res].empty:
+                    if lastpTDX_DF_res.empty:
+                        with timed_ctx("get_append_lastp_to_df empty", warn_ms=1000):
+                            top_all_res, lastpTDX_DF_res = tdd.get_append_lastp_to_df(top_now, dl=ct.Resample_LABELS_Days[resample_res], 
+                                                                    resample=resample_res, detect_calc_support=detect_val)
+                    else:
+                        with timed_ctx("get_append combine_dataFrame", warn_ms=1000):
+                            top_all_res = tdd.get_append_lastp_to_df(top_now, lastpTDX_DF_res, detect_calc_support=detect_val)
+                    df_allDF[resample_res] = top_all_res
+                    lastpTDX_DF_Dict[resample_res] = lastpTDX_DF_res
+                else:
+                    with timed_ctx("get_append combine_dataFrame", warn_ms=1000):
+                        if resample_res != 'd':
+                            core_cols = ['open', 'high', 'low', 'close', 'vol', 'volume', 'amount', 'name']
+                            top_now_filtered = top_now[[c for c in core_cols if c in top_now.columns]].copy()
+                        else:
+                            top_now_filtered = top_now
+                        top_all_res = cct.combine_dataFrame(top_all_res, top_now_filtered, col="couts", compare="dff")
+                        df_allDF[resample_res] = top_all_res
+
+                # Save raw combined snapshot for resampled UI display calculations
+                # top_all_res_raw = top_all_res_raw.copy() if not top_all_res.empty else pd.DataFrame()
+
+                with timed_ctx("complete_indicators_pipeline", warn_ms=3000):
+                    top_all_res = complete_indicators_pipeline(top_all_res, logger, resample_res, status_callback)
+                df_allDF[resample_res] = top_all_res
+
+                if top_all_res is not None and not top_all_res.empty:
+                    sort_cols_res, sort_keys_res = ct.get_market_sort_value_key(st_key_sort, top_all_res)
+                else:
+                    sort_cols_res, sort_keys_res = ct.get_market_sort_value_key(st_key_sort)
+
+                top_temp_res = top_all_res.copy()
+                with timed_ctx("getBollFilter", warn_ms=800):
+                    top_temp_res = stf.getBollFilter(df=top_temp_res, resample=resample_res, down=False)
+                top_temp_res = top_temp_res.sort_values(by=sort_cols_res, ascending=sort_keys_res)
+                
+                df_all_res = clean_bad_columns(top_temp_res)
+                df_all_res = sanitize(df_all_res)
+                
+                # 🛡️ 动态列裁剪 (Dynamic Column Trimming)
+                keep_all = g_values.getkey('keep_all_columns', True)
+                if not keep_all:
+                    required_cols = g_values.getkey('required_cols', [])
+                    if required_cols:
+                        actual_keep = [c for c in required_cols if c in df_all_res.columns]
+                        if 'name' in actual_keep or 'code' in actual_keep:
+                            df_all_res = df_all_res[actual_keep]
+                        else:
+                            logger.debug("Dynamic Trimming: required_cols missing core columns, skipping trim.")
+                # else:
+                #     logger.debug("Dynamic Trimming: 'keep_all_columns' active, skipping trim.")
+            else:
+                top_all_res = top_all
+                df_all_res = df_all
+
+            # Send dual snapshots (Full & Filtered for both daily decision track and resampled display track)
+            data_packet = {
+                'full_snapshot': top_all,
+                'filtered_ui_data': df_all,
+                'full_snapshot_res': top_all_res,
+                'filtered_ui_data_res': df_all_res,
+                'resample_ui': resample_ui
+            }
+            try:
+                queue.put(data_packet, block=True, timeout=10)
+            except Exception as e:
+                logger.warning(f"Queue put failed: {e}")
+            gc.collect(0)
+            # cct.print_timing_summary()
+            cct.df_memory_usage(df_all)
+
+            logger.debug(f"code: 920427 : {top_all.loc['920427',['win_upper','win_upper1','win_upper2','w_upper','wm5_upper','gem_score','gem_tops','w_upper']]}")
+            logger.info(f"gem_score: {top_all.sort_values(by='gem_score', ascending=False).loc[:,['name','gem_tops','gem_score','w_upper']][:5]}")
+            logger.info(f"gem_tops: {top_all.sort_values(by='gem_tops', ascending=False).loc[:,['name','gem_tops','gem_score','w_upper']][:5]}")
+
+            extra_cols = ['win','sum_perc', 'slope', 'vol_ratio', 'power_idx']
+            df_show = top_temp.loc[:, ["name"] + sort_cols[:7] + extra_cols].head(10)
+         
+            # --- 智能频率自适应 (Intelligent Frequency Adaptation) ---
+            # 1. 动态获取配置
+            sina_limit_val = g_values.getkey("sina_limit_time")
+            if sina_limit_val is None:
+                sina_limit_val = cct.sina_limit_time if hasattr(cct, 'sina_limit_time') else 30
+            sina_limit = int(sina_limit_val) if not pd.isna(sina_limit_val) else 30
+
+            cfg_sleep_val = g_values.getkey("duration_sleep_time")
+            if cfg_sleep_val is None:
+                cfg_sleep_val = duration_sleep_time
+            cfg_sleep = int(cfg_sleep_val) if not pd.isna(cfg_sleep_val) else 120
+
+            # 2. 判断是否为交易时段 (9:15 - 15:00)
+            now_int = cct.get_now_time_int()
+            is_trading_time = cct.get_trade_date_status() and (915 <= now_int <= 1505)
+
+
+            loop_sleep_time = cfg_sleep
+
+            if logger.level <= LoggerFactory.INFO:
+               logger.info(f"[FreqAdapt] Trading:{is_trading_time} SinaLimit:{sina_limit}s CfgSleep:{cfg_sleep}s -> ActualSleep:{loop_sleep_time}s")
+
+            # 4. 执行分段 Sleep (保持灵敏度)
+            if 918 < cct.get_now_time_int() < 926 or 929 < cct.get_now_time_int() < 945:
+                loop_sleep_time = int(loop_sleep_time/2)
+                sleep_step = 1
+            else:
+                sleep_step = 1
+            # print(f'loop_sleep_time: {loop_sleep_time} sleep_step:{sleep_step} looptime: {loop_sleep_time / sleep_step}')
+            stop_conditions = [
+                lambda: not flag.value,
+                lambda: not cct.get_work_time(),
+                lambda: get_status(status_callback) != last_status,
+                lambda: g_values.getkey("resample") and g_values.getkey("resample") != resample_ui,
+                lambda: g_values.getkey("market") and g_values.getkey("market") != market,
+                lambda: g_values.getkey("st_key_sort") and g_values.getkey("st_key_sort") != st_key_sort
+            ]
+
+            # 周期性心跳日志 - 每 10 秒输出一次状态
+            heartbeat_interval = 10  # 秒
+            sleep_elapsed = 0
+            START_INIT = 1
+
+            if logger.level <= LoggerFactory.INFO:
+                logger.debug(f'sort_cols : {sort_cols[:3]} sort_keys : {sort_keys[:3]}  st_key_sort : {st_key_sort[:3]}')
+                logger.info(f'resample: {resample} top_temp :  {df_show.to_string()} shape : {top_temp.shape} detect_calc_support:{detect_val}')
+                logger.info(f'process now: {cct.get_now_time_int()} resample_ui:{resample_ui} Main:{len(df_all)} looptime: {loop_sleep_time / sleep_step} keep_all:{keep_all}  sleep_time:{duration_sleep_time}  用时: {round(time.time() - time_s,1)/(len(df_all)+1):.2f} elapsed time: {round(time.time() - time_s,1)}s  START_INIT : {START_INIT} {cct.get_now_time()} fetch_and_process sleep:{duration_sleep_time} resample:{resample}')
+            else:
+                print(f"gem_score: {top_all.sort_values(by='gem_score', ascending=False).loc[:,['name','gem_tops','gem_score','w_upper']][:5]}")
+                print(f"gem_tops: {top_all.sort_values(by='gem_tops', ascending=False).loc[:,['name','gem_tops','gem_score','w_upper']][:5]}")
+                print(f'sort_cols : {sort_cols[:3]} sort_keys : {sort_keys[:3]}  st_key_sort : {st_key_sort[:3]}')
+                # print(f'resample: {resample} top_temp :  {top_temp.loc[:,["name"] + sort_cols[:7]][:10]} shape : {top_temp.shape} detect_calc_support:{detect_val}')
+                print(
+                    f"resample: {resample}\n"
+                    f"top_temp:\n{df_show.to_string()}\n"
+                    f"shape: {top_temp.shape}\n"
+                    f"detect_calc_support: {detect_val}"
+                )
+                print(f'process now: {cct.get_now_time_int()} resample_ui:{resample_ui} Main:{len(df_all)} looptime: {loop_sleep_time / sleep_step} keep_all:{keep_all} sleep_time:{duration_sleep_time}  用时: {round(time.time() - time_s,1)/(len(df_all)+1):.2f} elapsed time: {round(time.time() - time_s,1)}s  START_INIT : {START_INIT} {cct.get_now_time()} fetch_and_process sleep:{duration_sleep_time} resample:{resample}')
+
+            if single:
+                cct.print_timing_summary()
+                break   
+
+            for _ in range(int(loop_sleep_time / sleep_step)):
+                # ⭐ [Cut 4] 防止在长时间 sleep 中错过 init 窗口
+                _now = cct.get_now_time_int()
+                if cct.get_trade_date_status() and cct.start_init_tdx_time <= _now <= 900:
+                    logger.debug(f"[SLEEP BREAK] 命中 init 窗口 now={_now}")
+                    break
+
+                if any(cond() for cond in stop_conditions):
+                    break
+                time.sleep(sleep_step)
+                sleep_elapsed += sleep_step
+                # 每 heartbeat_interval 秒输出一次心跳
+                if sleep_elapsed % heartbeat_interval == 0:
+                    print("*", end=' ')
+                    logger.debug(f"[心跳] resample={resample} 等待中... {sleep_elapsed}/{int(loop_sleep_time)}s flag={flag.value}")
+        except KeyboardInterrupt:
+            logger.info("⚡ [Subprocess] KeyboardInterrupt 信号已被子进程成功捕获，在没有卡死时优雅忽略，保持正常轮询工作...")
+            time.sleep(1)
+            continue
+        except Exception as e:
+            logger.error(f"[fetch_and_process:main_loop] resample={resample} 主循环异常: {type(e).__name__}: {e}")
+            logger.exception(f"完整堆栈:\n{traceback.format_exc()}")
+            time.sleep(duration_sleep_time)
+
+    return df_all
