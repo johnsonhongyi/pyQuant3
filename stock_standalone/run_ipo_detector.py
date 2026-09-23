@@ -14,6 +14,7 @@ import time
 import signal
 import atexit
 import multiprocessing
+import argparse
 from typing import Optional
 
 if __name__ == "__main__":
@@ -63,20 +64,22 @@ def quit_and_save_detector():
 
 def main():
     global _active_window
-    # 解析命令行参数
-    initial_code = None
-    args = sys.argv[1:]
-    idx = 0
-    while idx < len(args):
-        arg = args[idx].strip()
-        if arg in ("--code", "-c") and idx + 1 < len(args):
-            initial_code = args[idx + 1].strip()
-            idx += 1
-        elif arg.startswith("--code="):
-            initial_code = arg.split("=")[1].strip()
-        elif not arg.startswith("-") and len(arg) == 6 and arg.isdigit():
-            initial_code = arg
-        idx += 1
+    parser = argparse.ArgumentParser(
+        description="新股次新股超短检测工具（独立窗口模式）",
+        epilog=(
+            "示例: python run_ipo_detector.py\n"
+            "      python run_ipo_detector.py --code 301689\n"
+            "      python run_ats.py --ipo-detector --code 301689"
+        ),
+    )
+    parser.add_argument(
+        "--ipo-detector", "--subnew-detector", "--ipo", "--subnew",
+        dest="standalone", action="store_true", help="单独启动新股次新检测器，不启动 ATS 主界面",
+    )
+    parser.add_argument("--code", "-c", dest="code", help="启动时预选的 6 位股票代码")
+    parser.add_argument("stock_code", nargs="?", help="可选的 6 位股票代码（兼容位置参数）")
+    args = parser.parse_args(sys.argv[1:])
+    initial_code = args.code or args.stock_code
 
     # 自动检查并后台静默拉起主 Tk 行情进程
     try:
@@ -84,7 +87,8 @@ def main():
     except Exception as e:
         print(f"[IPO Detector] 检查行情服务警告: {e}")
 
-    app = QApplication.instance() or QApplication(sys.argv)
+    # 子模式标记与 --code 已由本启动器解析，避免 Qt 把 ATS 专用参数当作未知选项。
+    app = QApplication.instance() or QApplication([sys.argv[0]])
 
     window = IPOSubnewDetectorDialog(initial_code=initial_code)
     _active_window = window
