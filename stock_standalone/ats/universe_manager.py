@@ -173,27 +173,33 @@ class UniverseManager:
             except Exception:
                 pct = 0.0
 
-            if p > 0.01:
-                return p, pct
+            # UI 投影必须以当前 IPC 行情为 SSOT。Ledger 中的 latest_price/latest_pct
+            # 可能来自昨日跨日快照，只能作为实时行情缺失时的 fallback。
             if df_realtime is not None and not df_realtime.empty and code_str in df_realtime.index:
                 row = df_realtime.loc[code_str]
                 import pandas as pd
                 if isinstance(row, pd.DataFrame):
                     row = row.iloc[0]
+                realtime_seen = False
+                for price_key in ('trade', 'close', 'price', 'now'):
+                    try:
+                        p_cand = float(row.get(price_key, 0.0))
+                        if not math.isnan(p_cand) and p_cand > 0.01:
+                            p = p_cand
+                            realtime_seen = True
+                            break
+                    except Exception:
+                        pass
                 try:
-                    p_cand = float(row.get('close', row.get('price', 0.0)))
-                    if not math.isnan(p_cand):
-                        p = p_cand
-                except Exception:
-                    pass
-                try:
-                    pct_cand = float(row.get('percent', 0.0))
+                    pct_cand = float(row.get('percent', pct))
                     if not math.isnan(pct_cand):
                         pct = pct_cand
+                        realtime_seen = True
                 except Exception:
                     pass
-                if p > 0.01:
+                if realtime_seen:
                     return p, pct
+
             if price_pct_cache and code_str in price_pct_cache:
                 p_c, pct_c = price_pct_cache[code_str]
                 try:
