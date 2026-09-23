@@ -1420,11 +1420,23 @@ def start_stock_name_server():
             return
         _server_started = True
 
-    from http.server import BaseHTTPRequestHandler, HTTPServer
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
     import json
     import os
     
     class StockNameHandler(BaseHTTPRequestHandler):
+        def _safe_write(self, payload):
+            """客户端超时/主动取消时静默结束响应，避免本机 HTTP 10053/10054 traceback 刷屏。"""
+            try:
+                self.wfile.write(payload)
+                return True
+            except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
+                return False
+            except OSError as e:
+                if getattr(e, 'winerror', None) in (10053, 10054):
+                    return False
+                raise
+
         def do_GET(self):
             if self.path == '/stock_names':
                 self.send_response(200)
@@ -1433,7 +1445,7 @@ def start_stock_name_server():
                 self.send_header('Access-Control-Allow-Methods', 'GET, OPTIONS')
                 self.send_header('Access-Control-Allow-Headers', 'X-Requested-With, Content-Type')
                 self.end_headers()
-                self.wfile.write(get_cached_stock_names())
+                self._safe_write(get_cached_stock_names())
             elif self.path.startswith('/link'):
                 from urllib.parse import urlparse, parse_qs, unquote
                 query = urlparse(self.path).query
@@ -1455,13 +1467,13 @@ def start_stock_name_server():
                     if _link_callback is not None:
                         try:
                             _link_callback(code)
-                            self.wfile.write(f'{{"status": "ok", "message": "linked", "code": "{code}"}}'.encode('utf-8'))
+                            self._safe_write(f'{{"status": "ok", "message": "linked", "code": "{code}"}}'.encode('utf-8'))
                         except Exception as e:
-                            self.wfile.write(f'{{"status": "error", "message": "{str(e)}"}}'.encode('utf-8'))
+                            self._safe_write(f'{{"status": "error", "message": "{str(e)}"}}'.encode('utf-8'))
                     else:
-                        self.wfile.write(b'{"status": "error", "message": "no callback registered"}')
+                        self._safe_write(b'{"status": "error", "message": "no callback registered"}')
                 else:
-                    self.wfile.write(b'{"status": "error", "message": "invalid code or name"}')
+                    self._safe_write(b'{"status": "error", "message": "invalid code or name"}')
             else:
                 self.send_error(404)
                 
@@ -1477,7 +1489,7 @@ def start_stock_name_server():
 
     def run_server():
         try:
-            server = HTTPServer(('127.0.0.1', 26672), StockNameHandler)
+            server = ThreadingHTTPServer(('127.0.0.1', 26672), StockNameHandler)
             try:
                 server.socket.set_inheritable(False)
             except Exception:
