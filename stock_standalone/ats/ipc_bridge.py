@@ -123,7 +123,34 @@ class IPCBridge:
                                         df_norm.index.name = 'code'
 
                                     # 增量合并 vs 全量覆盖
-                                    if msg_type == 'UPDATE_DF_DIFF' and hasattr(self, '_cached_df') and self._cached_df is not None and not self._cached_df.empty:
+                                    # 冷启动/重连没有全量基线时，绝不能把 diff 当成完整行情。
+                                    # 否则 ma20d/ma60d/category 等未变化列会直接缺失，评分层随之退化。
+                                    if msg_type == 'UPDATE_DF_DIFF' and (
+                                        not hasattr(self, '_cached_df')
+                                        or self._cached_df is None
+                                        or self._cached_df.empty
+                                    ):
+                                        try:
+                                            import sys
+                                            from sys_utils import get_app_root
+                                            root = get_app_root()
+                                            if root not in sys.path:
+                                                sys.path.insert(0, root)
+                                            from data_utils import send_code_via_pipe, PIPE_NAME_TK
+                                            import logging
+                                            local_logger = logging.getLogger("ATS_Bridge")
+                                            send_code_via_pipe({
+                                                "cmd": "REQ_FULL_SYNC",
+                                                "port": 26670,
+                                                "service_name": "ats_terminal",
+                                                "client_name": "ats_terminal",
+                                                "subscribe": True,
+                                            }, local_logger, PIPE_NAME_TK)
+                                            print("[IPCBridge] Cold-start diff rejected; requested UPDATE_DF_ALL baseline")
+                                        except Exception:
+                                            pass
+                                        return
+                                    elif msg_type == 'UPDATE_DF_DIFF':
                                         try:
                                             df_diff = df_norm
                                             if isinstance(df_diff.columns, pd.MultiIndex):

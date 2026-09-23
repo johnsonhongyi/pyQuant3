@@ -9246,8 +9246,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                             if sub_info:
                                                 sub_info["last_try"] = now_ipc
 
-                                            # 🚀【极速分发】：强制请求发全量快照；日常常态变动推送发增量包 (UPDATE_DF_DIFF)
-                                            if is_forced_port:
+                                            # 🚀【极速分发】：强制请求或 inactive→重连的首包必须发全量；
+                                            # 只有已经建立过全量基线的 active 订阅端才允许接收 UPDATE_DF_DIFF。
+                                            force_full_for_port = bool(
+                                                is_forced_port
+                                                or (sub_info is not None and not sub_info.get("active", False))
+                                            )
+                                            if force_full_for_port:
                                                 if payload_daily_full is not None:
                                                     send_h = header_daily_full
                                                     send_p = payload_daily_full

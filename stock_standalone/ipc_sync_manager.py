@@ -327,8 +327,14 @@ class IPCSyncManager:
             df_payload.index.name = 'code'
 
         # 2. 合并更新 (全量/增量)
+        # 冷启动/重连时绝不能把 UPDATE_DF_DIFF 当作全量底座。
+        # 否则未变化的慢字段（如 ma20d/ma60d/category 等）会永久缺失，
+        # 上层评分会退化为默认值，直到下一次真正的 UPDATE_DF_ALL。
+        need_full_sync = False
         with self.df_lock:
-            if msg_type == 'UPDATE_DF_DIFF' and self.current_df is not None and not self.current_df.empty:
+            if msg_type == 'UPDATE_DF_DIFF' and (self.current_df is None or self.current_df.empty):
+                need_full_sync = True
+            elif msg_type == 'UPDATE_DF_DIFF':
                 try:
                     df_diff = df_payload
                     # 💥 支持 MultiIndex 格式列 (如由 df.compare 产出)
@@ -368,6 +374,13 @@ class IPCSyncManager:
                     self.current_df = df_payload
             else:
                 self.current_df = df_payload
+
+        if need_full_sync:
+            self.log_info(
+                "检测到无全量基线的 UPDATE_DF_DIFF，拒绝以残缺 diff 初始化缓存；立即请求 UPDATE_DF_ALL"
+            )
+            self.request_full_sync(force=True, min_interval=0.0, subscribe=True)
+            return
 
         # 3. 及时通知主进程确认已接收，防止主进程重试造成带宽挤占
         self._send_received_feedback()
