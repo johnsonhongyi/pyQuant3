@@ -17,7 +17,7 @@ import glob
 import sqlite3
 import logging
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
 
 logger = logging.getLogger("window_manager.antigravity")
 
@@ -1781,20 +1781,55 @@ class AntigravitySyncWorker(threading.Thread):
 def format_time_until_reset(iso_time_str: str) -> tuple:
     """
     解析 ISO 格式重置时间，返回 (剩余秒数, 人类可读倒计时描述)
-    例如: (14400.0, "4小时0分后重置")
+    根据真实系统当前时钟实时动态计算，绝不死板使用缓存旧时间。
+    例如: (14400.0, "4小时0分后") 或 (0.0, "已重置/已就绪")
     """
     if not iso_time_str:
-        return 0.0, "未知"
+        return 0.0, "已就绪"
     try:
-        clean_str = iso_time_str.strip().replace("Z", "+00:00")
-        if "+" in clean_str or clean_str.count("-") >= 3:
-            dt = datetime.fromisoformat(clean_str)
-        else:
-            # 默认按 UTC
-            dt = datetime.strptime(clean_str, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=datetime.timezone.utc if hasattr(datetime, 'timezone') else None)
+        clean_str = str(iso_time_str).strip()
+        if not clean_str:
+            return 0.0, "已就绪"
+        # 统一处理 Z 为 +00:00 (UTC)
+        clean_str = clean_str.replace("Z", "+00:00")
         
-        # 计算距离当前的秒数
-        now_ts = datetime.now(dt.tzinfo).timestamp() if dt.tzinfo else time.time()
+        # 兼容纳秒：若小数秒部分超过 6 位，安全截断至 6 位 (微秒)
+        if "." in clean_str:
+            base, rest = clean_str.split(".", 1)
+            tz_part = ""
+            if "+" in rest:
+                sub_sec, tz_part = rest.split("+", 1)
+                tz_part = "+" + tz_part
+            elif "-" in rest and rest.count("-") == 1:
+                sub_sec, tz_part = rest.split("-", 1)
+                tz_part = "-" + tz_part
+            else:
+                sub_sec = rest
+            sub_sec = sub_sec[:6]
+            clean_str = f"{base}.{sub_sec}{tz_part}"
+
+        dt = None
+        try:
+            dt = datetime.fromisoformat(clean_str)
+        except Exception:
+            pass
+
+        if dt is None:
+            for fmt in ("%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S"):
+                try:
+                    dt = datetime.strptime(clean_str, fmt)
+                    break
+                except Exception:
+                    pass
+
+        if dt is None:
+            return 0.0, str(iso_time_str)
+
+        # 统一转换为 UTC 时间戳计算当前剩余秒数
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        
+        now_ts = datetime.now(timezone.utc).timestamp()
         diff_sec = dt.timestamp() - now_ts
         if diff_sec <= 0:
             return 0.0, "已重置/已就绪"
@@ -1815,6 +1850,55 @@ def format_time_until_reset(iso_time_str: str) -> tuple:
     except Exception as e:
         logger.debug(f"解析重置时间异常 ({iso_time_str}): {e}")
         return 0.0, str(iso_time_str)
+
+
+def resolve_quota_reset_desc(quota_entry: dict, fallback_updated_at: float = None) -> tuple:
+    """
+    动态解析特定配额项当前的真实剩余倒计时：
+    优先基于绝对 reset_time 结合当前系统时钟进行实时计算；
+    若缺少 reset_time 但有旧 diff_sec 与更新时间戳，则根据时间流逝衰减计算；
+    返回值: (diff_sec: float, reset_desc: str)
+    """
+    if not quota_entry or not isinstance(quota_entry, dict):
+        return 0.0, "已就绪"
+    
+    reset_time = quota_entry.get("reset_time")
+    if reset_time:
+        diff_sec, desc = format_time_until_reset(reset_time)
+        return diff_sec, desc
+    
+    # 备用方案：基于 diff_sec 与更新时间流逝递减
+    orig_diff = quota_entry.get("diff_sec")
+    if orig_diff is not None:
+        try:
+            orig_diff = float(orig_diff)
+            ref_time = fallback_updated_at or quota_entry.get("updated_at")
+            if ref_time:
+                elapsed = max(0.0, time.time() - float(ref_time))
+                cur_diff = max(0.0, orig_diff - elapsed)
+            else:
+                cur_diff = orig_diff
+            
+            if cur_diff <= 0:
+                return 0.0, "已重置/已就绪"
+            hours = int(cur_diff // 3600)
+            minutes = int((cur_diff % 3600) // 60)
+            seconds = int(cur_diff % 60)
+            days = int(hours // 24)
+            if days > 0:
+                return cur_diff, f"{days}天{hours % 24}小时{minutes}分后"
+            elif hours > 0:
+                return cur_diff, f"{hours}小时{minutes}分后"
+            elif minutes > 0:
+                return cur_diff, f"{minutes}分{seconds}秒后"
+            else:
+                return cur_diff, f"{seconds}秒后"
+        except Exception:
+            pass
+
+    desc = quota_entry.get("reset_desc", "")
+    return 0.0, desc or "已就绪"
+
 
 
 def categorize_model_label(label: str) -> str:
