@@ -327,6 +327,15 @@ class SBCChartCanvas(QWidget):
         self._is_right_panning = False
         self._right_pan_start_indices = (0, -1)
 
+        # ⏱️ 操盘手实操优化：右键长按 0.3 秒弹出菜单状态机 (防短按闪退与打断操作流程)
+        self._long_press_timer = QTimer(self)
+        self._long_press_timer.setSingleShot(True)
+        self._long_press_timer.setInterval(300)  # 300ms (0.3秒)
+        self._long_press_timer.timeout.connect(self._on_right_long_press_timeout)
+        self._right_press_time = 0.0
+        self._right_press_global_pos = None
+        self._context_menu_shown = False
+
         # 🎯 鼠标指针悬停与实时价格坐标
         self._hover_pos = None
         self._coord_info = {}
@@ -659,7 +668,8 @@ class SBCChartCanvas(QWidget):
                 if b_step and b_step > 0:
                     self._crosshair_idx = max(0, min(vis_n - 1, int((hx - ml) / float(b_step))))
                 else:
-                    self._crosshair_idx = max(0, min(vis_n - 1, int(round(((hx - ml) / float(cw)) * (vis_n - 1)))))
+                    cw_use = float(self._coord_info.get("active_chart_w", cw))
+                    self._crosshair_idx = max(0, min(vis_n - 1, int(round(((hx - ml) / cw_use) * (vis_n - 1)))))
             else:
                 self._crosshair_idx = max(0, vis_n - 1)
         else:
@@ -1149,13 +1159,21 @@ class SBCChartCanvas(QWidget):
         event.accept()
 
     def mousePressEvent(self, event):
-        """鼠标按下：默认左键拖拽为平移视图，Shift+左键为框选放大，右键单击重置"""
+        """鼠标按下：默认左键拖拽为平移视图，Shift+左键为框选放大，右键短按重置/退出查价，右键长按>0.3秒弹菜单"""
         mouse_pos = event.position() if hasattr(event, "position") else event.pos()
 
         if event.button() == Qt.MouseButton.RightButton:
-            # 记录右键按下点，若松开未移动则为一键重置，若移动则为右键平移
+            # 记录右键按下点与时间
             self._right_press_pos = mouse_pos
+            self._right_press_time = time.time()
+            self._right_press_global_pos = event.globalPosition().toPoint() if hasattr(event, "globalPosition") else event.globalPos()
             self._is_right_panning = False
+            self._context_menu_shown = False
+
+            # ⏱️ 启动 300ms (0.3秒) 长按检测定时器，只有长按超过0.3秒才弹出菜单
+            if hasattr(self, '_long_press_timer'):
+                self._long_press_timer.start(300)
+
             if self.df_intraday is not None and not self.df_intraday.empty:
                 total_n = len(self.df_intraday)
                 cur_start = max(0, self._zoom_start_idx)
@@ -1244,7 +1262,11 @@ class SBCChartCanvas(QWidget):
         # 2. 🖐️ 右键按住拖拽平移
         if (event.buttons() & Qt.MouseButton.RightButton) and self._right_press_pos is not None:
             dx = mouse_pos.x() - self._right_press_pos.x()
-            if abs(dx) > 3 or self._is_right_panning:
+            dy = mouse_pos.y() - self._right_press_pos.y()
+            if abs(dx) > 3 or abs(dy) > 3 or self._is_right_panning:
+                # 发生明显移动，取消长按弹出菜单
+                if hasattr(self, '_long_press_timer') and self._long_press_timer.isActive():
+                    self._long_press_timer.stop()
                 self._is_right_panning = True
                 self.setCursor(Qt.CursorShape.ClosedHandCursor)
                 if self.df_intraday is not None and not self.df_intraday.empty:
@@ -1300,23 +1322,31 @@ class SBCChartCanvas(QWidget):
         super().leaveEvent(event)
 
     def mouseReleaseEvent(self, event):
-        """鼠标松开：结束平移、结算 Shift 框选放大、点击成交量角标或右键单击一键重置"""
+        """鼠标松开：结束平移、结算 Shift 框选放大、点击成交量角标或右键短按一键重置 (长按>0.3秒才弹菜单)"""
         mouse_pos = event.position() if hasattr(event, "position") else event.pos()
 
         if event.button() == Qt.MouseButton.RightButton:
+            # 立即停止长按计时器
+            if hasattr(self, '_long_press_timer') and self._long_press_timer.isActive():
+                self._long_press_timer.stop()
+
             now = time.time()
             self._esc_mouse_lock_until = now + 0.8
             parent_win = self.window()
             if parent_win and hasattr(parent_win, '_esc_mouse_lock_until'):
                 parent_win._esc_mouse_lock_until = now + 0.8
-            if not self._is_right_panning:
-                # 纯右键单击：若处于查价或缩放状态，执行重置与退出查价
+
+            # 🛡️ 操盘手实操优化：若未触发 0.3 秒长按菜单且未发生拖拽平移，则认定为纯右键单击短按
+            if not getattr(self, '_context_menu_shown', False) and not self._is_right_panning:
+                # 纯右键短按：若处于查价或缩放状态，执行重置与退出查价；绝不弹出菜单打断看盘流程，彻底杜绝闪退！
                 if getattr(self, '_crosshair_active', False) or self._is_zoomed():
                     self._crosshair_active = False
                     self._crosshair_idx = -1
                     self.reset_view()
+
             self._is_right_panning = False
             self._right_press_pos = None
+            self._context_menu_shown = False
             self.setCursor(Qt.CursorShape.ArrowCursor)
             event.accept()
             return
@@ -1467,7 +1497,8 @@ class SBCChartCanvas(QWidget):
                     if b_step and b_step > 0:
                         hit_idx = max(0, min(len(times) - 1, int((mx - ml) / float(b_step))))
                     else:
-                        hit_idx = max(0, min(len(times) - 1, int(round(((mx - ml) / float(cw)) * (len(times) - 1)))))
+                        cw_use = float(c_info.get("active_chart_w", cw))
+                        hit_idx = max(0, min(len(times) - 1, int(round(((mx - ml) / cw_use) * (len(times) - 1)))))
                     self._crosshair_active = True
                     self._crosshair_idx = hit_idx
                     self.setFocus()
@@ -1478,7 +1509,19 @@ class SBCChartCanvas(QWidget):
         super().mouseDoubleClickEvent(event)
 
     def contextMenuEvent(self, event):
-        """⚡ 绑定专业右键功能菜单：对齐系统标准右键体系，彻底避免 TK 回退触发 Esc 误关闭"""
+        """🛡️ 拦截 Qt 原生右键自动冒泡菜单：绝不弹窗打断操作流程，严格由 0.3 秒长按状态机受控弹出，彻底杜绝闪退"""
+        event.accept()
+
+    def _on_right_long_press_timeout(self):
+        """⏱️ 右键长按超过 0.3 秒受控触发功能菜单弹出"""
+        if getattr(self, '_is_right_panning', False):
+            return
+        self._context_menu_shown = True
+        g_pos = getattr(self, '_right_press_global_pos', None) or QCursor.pos()
+        self._show_custom_context_menu(g_pos)
+
+    def _show_custom_context_menu(self, pos=None):
+        """⚡ 绑定专业右键功能菜单：长按超过 0.3 秒安全弹出，彻底避免 TK 回退触发 Esc 误关闭与闪退"""
         from PyQt6.QtWidgets import QMenu
         from PyQt6.QtGui import QAction
 
@@ -1584,12 +1627,11 @@ class SBCChartCanvas(QWidget):
             act_clear.triggered.connect(parent_win._on_clear_cache_clicked)
             menu.addAction(act_clear)
 
-        pos = event.globalPos() if hasattr(event, 'globalPos') else QCursor.pos()
+        if pos is None:
+            pos = QCursor.pos()
         if os.environ.get("PYTEST_CURRENT_TEST"):
-            event.accept()
             return
         menu.exec(pos)
-        event.accept()
 
     def set_data(self, df_intraday: pd.DataFrame, open_p: float, vwap_p: float, high_p: float, low_p: float, sell_min: float, sell_max: float, signals: list, period_mode: str = "1m"):
         self.df_intraday = df_intraday
@@ -1745,7 +1787,8 @@ class SBCChartCanvas(QWidget):
                     if b_step and b_step > 0:
                         hx = ml + (idx_hover + 0.5) * b_step
                     else:
-                        hx = ml + (idx_hover / max(1, total_times - 1)) * cw
+                        cw_use = float(c_info.get("active_chart_w", cw))
+                        hx = ml + (idx_hover / max(1, total_times - 1)) * cw_use
                     # 获取对应点的收盘价/现价作为 Y 轴基准
                     closes_arr = c_info.get("closes") if is_kline else c_info.get("prices")
                     if closes_arr is not None and 0 <= idx_hover < len(closes_arr):
@@ -1942,6 +1985,13 @@ class SBCChartCanvas(QWidget):
         if df_view.empty:
             return
 
+        # 🛡️ 过滤无效时间戳与 NaN index 脏行
+        if df_view.index.isna().any() or (df_view.index.astype(str) == "nan").any():
+            valid_idx_mask = df_view.index.notna() & (df_view.index.astype(str) != "nan") & (df_view.index.astype(str).str.strip() != "")
+            df_view = df_view[valid_idx_mask]
+            if df_view.empty:
+                return
+
         prices = df_view['close'].astype(float).values if 'close' in df_view.columns else []
         vwaps = df_view['vwap'].astype(float).values if 'vwap' in df_view.columns else []
         times = list(df_view.index.astype(str))
@@ -1977,6 +2027,14 @@ class SBCChartCanvas(QWidget):
         if not all_cands:
             all_cands = [op_ref if op_ref > 0 else 10.0]
 
+        # 🛡️ 极端离群毛刺价格统计学防御 (防止极个别错位 32.60 脏数据撑爆 Y 轴坐标系)
+        if len(all_cands) >= 5:
+            med_cands = float(np.median(all_cands))
+            if med_cands > 0.1:
+                filtered_cands = [c for c in all_cands if med_cands * 0.25 <= c <= med_cands * 3.5]
+                if filtered_cands:
+                    all_cands = filtered_cands
+
         raw_min = min(all_cands)
         raw_max = max(all_cands)
         raw_span = max(1e-4, raw_max - raw_min)
@@ -2005,6 +2063,11 @@ class SBCChartCanvas(QWidget):
             vol_top = margin_top + main_h + gap
             vol_h = chart_h - main_h - gap
 
+        # 🌟 操盘手实操优化：分时走势图右侧预留空白 (对齐 K 线图 RIGHT_PAD)，避免走势线末端与右侧开盘/现价标签重叠
+        RIGHT_PAD_RATIO = 0.05
+        right_pad_px = max(26, min(48, int(chart_w * RIGHT_PAD_RATIO)))
+        active_chart_w = max(10, chart_w - right_pad_px)
+
         self._coord_info = {
             "ready": True,
             "is_kline": False,
@@ -2013,6 +2076,7 @@ class SBCChartCanvas(QWidget):
             "margin_left": margin_left,
             "margin_top": margin_top,
             "chart_w": chart_w,
+            "active_chart_w": active_chart_w,
             "main_h": main_h,
             "vol_h": vol_h,
             "vol_top": vol_top,
@@ -2030,7 +2094,7 @@ class SBCChartCanvas(QWidget):
 
         def time_to_x(idx_val: int) -> float:
             total_n = max(240 if self.period_mode == "1m" and not self._is_zoomed() else len(prices), len(prices))
-            return margin_left + (idx_val / max(1, total_n - 1)) * chart_w
+            return margin_left + (idx_val / max(1, total_n - 1)) * active_chart_w
 
         # 绘制背景水平网格线
         grid_pens = [
@@ -2350,7 +2414,14 @@ class SBCChartCanvas(QWidget):
             painter.drawLine(margin_left, int(y_op), margin_left + chart_w, int(y_op))
             painter.setPen(QPen(QColor("#ff4444"), 1))
             painter.setFont(QFont("Arial", 8, QFont.Weight.Bold))
-            painter.drawText(margin_left + chart_w + 3, int(y_op + 3), f"开盘:{op_ref:.2f}")
+            # 🌟 智能垂直避让：当开盘价与最新现价极度接近时，微调开盘文字 Y 坐标，避免与现价高亮胶囊文字发生重合
+            y_op_text = int(y_op + 3)
+            if len(prices) > 0 and abs(y_op - y_last) < 16:
+                if y_op >= y_last:
+                    y_op_text = int(p_box_y + p_box_h + 10)
+                else:
+                    y_op_text = int(p_box_y - 4)
+            painter.drawText(margin_left + chart_w + 3, y_op_text, f"开盘:{op_ref:.2f}")
 
         # 🟢 目标止盈线 (保持在右侧显示)
         if self.target_sell_min > 0:

@@ -1,5 +1,12 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](stock_standalone/design/antigravity_historical_tasks_archive.md)
 
+## 2026-09-23 11:55
+- [x] **【SBC 10日分时异常修复、右侧让开防遮挡与右键长按 0.3 秒菜单状态机落地】(`ats/tdx_realtime_fetcher.py`, `ats/ui/intraday_strategy_dialog.py`, `tests/test_sbc_chart_fixes.py`, `20260923_1155_task.md`)**：
+    - [x] **600733 北汽蓝谷 10日分时 32.60 脏数据剔除与多层自愈**：彻底剔除 2026-09-17 脏数据，加固正则与统计学防离群，净化 RamDisk 缓存，10日分时完全恢复正常；
+    - [x] **分时走势图右侧预留空白让位 (对齐 K 线图 RIGHT_PAD) 与开盘文本垂直避让**：右侧留白 26~48px，走势折线不再贴死右边框，开盘文字与现价标签智能错开；
+    - [x] **右键菜单长按 0.3 秒受控弹出与短按快速重置 (彻底根治闪退)**：阻断原生 contextMenuEvent，短按快速重置视图/退出查价绝不弹窗，长按 >=0.3 秒安全弹出菜单；
+    - [x] **全量自动化验证 100% 绿灯**：专项测试 4/4 通过，核心回归测试 26/26 通过，compileall 编译零错误。
+
 ## 2026-09-23 10:20
 - [x] **【Antigravity 切换系统凭据打包环境零依赖加固与 EXE 重新打包构建】(`webTools/window_manager/antigravity_manager.py`, `manage_window_layout.spec`, `tests/test_antigravity_manager.py`, `dist/manage_window_layout.exe`)**：
     - [x] **根因定位与排查确证**：
