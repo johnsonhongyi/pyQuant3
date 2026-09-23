@@ -1,19 +1,11 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 ## 2026-09-23 14:35
-- [x] **【ATS 打包旧版 EXE 自动归档与最近 7 天生命周期管理落地】(`C:\Users\Johnson\instock-pyinstall-ats-exe.cmd`, `tools/archive_build_exe.py`, `tests/test_archive_build_exe.py`, `20260923_1435_task.md`)**：
-    - [x] **构建前自动归档旧版 EXE (防范新版 Bug 无法排查与回退)**：
-        - 编写专有构建归档与生命周期清理工具 `tools/archive_build_exe.py`，纯 Python 标准库零外部依赖，对跨平台及 Windows 控制台重定向输出全面适配 UTF-8 中文显示；
-        - 在 `instock-pyinstall-ats-exe.cmd` 中集成 `pre-build` 阶段：打包前若目标 `dist\ATS_Terminal.exe` 已存在，自动提取其最后修改时间戳（如 `20260923_140302`）并安全归档至 `dist\archive\ATS_Terminal_YYYYMMDD_HHMMSS.exe`；
-        - 内置同尺寸同修改时间去重保护，避免重复构建产生无谓冗余；
-    - [x] **7 天生命周期滚动淘汰 (保留最近 7 天，自动释放空间)**：
-        - 智能解析文件名时间戳与文件系统 `mtime`，凡超过 7 天的历史版本自动清理；
-        - 捕获 `PermissionError` 等文件占用异常，遇到被锁文件友好跳过，坚决不中断 PyInstaller 主流程；
-    - [x] **构建后快照汇总与错误引导 (post-build)**：
-        - 打包完成后自动记录本次新构建快照归档，并在控制台以列表形式直观呈现当前归档库中最近 7 天的所有可用版本；
-        - 若 PyInstaller 编译报错，自动阻断并给出清晰提示引导操盘手前往 `dist\archive\` 提取可用版本回退；
-    - [x] **全量自动化验证 100% 绿灯**：
-        - 专项测试 `tests/test_archive_build_exe.py` 7/7 纯绿秒级通过（覆盖时间解析、大小格式化、旧文件归档、防重复去重、7天过期清理、全阶段流转、文件不存在容错等）；
-        - 实机调用直接成功将现有 `dist\ATS_Terminal.exe`（64.94 MB）归档至 `dist\archive\ATS_Terminal_20260923_140302.exe`，`compileall` 编译零错误。
+- [x] **【打包旧版 EXE 自动归档与最近 7 天生命周期管理落地（支持 .spec 自适应）】(`C:\Users\Johnson\instock-pyinstall-ats-exe.cmd`, `C:\Users\Johnson\instock-pyinstall-to-exe.cmd`, `tools/archive_build_exe.py`, `tests/test_archive_build_exe.py`, `20260923_1435_task.md`)**：
+    - [x] **.spec 配置文件全自动自适应推导 (`resolve_target_from_spec`)**：命令行支持 `--spec <spec_file>` 或向 `--target` 传入 `.spec`，工具自动解析 `EXE(..., name='...')` 获取真实 exe 名字（如 `ats.spec` -> `ATS_Terminal.exe`、`instock_MonitorTK.spec` -> `instock_MonitorTK.exe`），未指定时安全回退 spec 文件主干，彻底免除硬编码；
+    - [x] **构建前自动归档旧版 EXE (防范新版 Bug 无法排查与回退)**：编写专有构建归档与生命周期清理工具 `tools/archive_build_exe.py`，打包前自动提取目标旧版 EXE 修改时间戳并归档至 `dist\archive\{stem}_YYYYMMDD_HHMMSS.exe`，内置同版本去重；
+    - [x] **7 天生命周期滚动淘汰 (保留最近 7 天，自动释放空间)**：智能解析文件名时间戳与 `mtime`，自动安全清除超过 7 天的历史版本，容错文件占用不中断主流程；
+    - [x] **构建后快照汇总与错误引导 (post-build)**：构建成功自动归档新版本快照并列表输出最近 7 天所有版本；构建失败给出引导操盘手前往 `dist\archive\` 提取旧版本回退；
+    - [x] **多打包脚本全量接入与验证**：`ats-exe`、`to-exe`、`QT_multi_period_dialog`、`pop-exe`、`manage-exe` 全部 5 个打包脚本统一接入自适应归档；专项测试 9/9 纯绿通过，全部 spec 自适应实机归档验证通过，compileall 编译零错误。
 
 ## 2026-09-23 11:55
 - [x] **【SBC 10日分时异常修复、右侧让开防遮挡与右键长按 0.3 秒菜单状态机落地】(`ats/tdx_realtime_fetcher.py`, `ats/ui/intraday_strategy_dialog.py`, `tests/test_sbc_chart_fixes.py`, `20260923_1155_task.md`)**：
