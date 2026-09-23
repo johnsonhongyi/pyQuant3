@@ -600,6 +600,7 @@ class NewStockFetcher:
         quote_map: Dict[str, Dict[str, Any]] = {}
 
         now_ts = time.time()
+        tdx_fetcher = None
         # ── 通道 1: TDXRealtimeFetcher 权威直连 (现价、昨收、成交量、成交额、流通市值、总市值、换手率、分段涨速、VWAP) ──
         try:
             from ats.tdx_realtime_fetcher import TDXRealtimeFetcher
@@ -634,7 +635,7 @@ class NewStockFetcher:
                         # ⚡ 集合竞价 (09:15~09:25) 及连续交易有效参考价与委托量推导
                         effective_p = p if p > 0 else (bid1_p if bid1_p > 0 else (ask1_p if ask1_p > 0 else (op_p if op_p > 0 else 0.0)))
                         effective_vol = vol if vol > 0 else (bid1_v if bid1_v > 0 else ask1_v)
-                        effective_amt = amt if amt > 0 else (round(effective_p * effective_vol * 100.0, 2) if (effective_p > 0 and effective_vol > 0) else 0.0)
+                        effective_amt = amt if amt > 0 else 0.0
 
                         bid_vol_sum = 0.0
                         ask_vol_sum = 0.0
@@ -644,8 +645,9 @@ class NewStockFetcher:
                         total_d = bid_vol_sum + ask_vol_sum
                         bid_p = round((bid_vol_sum / total_d) * 100.0, 1) if total_d > 0 else 50.0
 
-                        # 竞价单量与金额 (万元)
-                        b_vol = vol if vol > 0 else (bid1_v if bid1_v > 0 else ask1_v)
+                        # 竞价量只在竞价窗口读取；盘中累计成交量不能当作竞价量。
+                        in_auction = datetime.datetime.fromtimestamp(now_ts).strftime("%H:%M") < "09:30" and datetime.datetime.fromtimestamp(now_ts).strftime("%H:%M") >= "09:15"
+                        b_vol = (vol if vol > 0 else (bid1_v if bid1_v > 0 else ask1_v)) if in_auction else 0.0
                         b_amt = b_vol * 100.0 * effective_p if (b_vol > 0 and effective_p > 0) else 0.0
                         b_amt_wan = round(b_amt / 10000.0, 1)
 
@@ -694,6 +696,8 @@ class NewStockFetcher:
                             quote_map[c_clean]["bid_pressure"] = bid_p
                             quote_map[c_clean]["bidding_amt_wan"] = b_amt_wan
                             quote_map[c_clean]["bidding_vol"] = b_vol
+                            if in_auction:
+                                quote_map[c_clean]["bidding_date"] = today_str
 
                             # 分段涨速与 VWAP 写入 quote_map
                             quote_map[c_clean]["velocity_pct"] = seg_res.get("velocity_pct", 0.0)
@@ -780,12 +784,48 @@ class NewStockFetcher:
                                         quote_map[c_raw]["float_mv_yi"] = p_fmv
                                     if "total_mv_yi" not in quote_map[c_raw] and p_tmv > 0:
                                         quote_map[c_raw]["total_mv_yi"] = p_tmv
-                                    if "vwap" not in quote_map[c_raw] and eff_p_tx > 0:
-                                        quote_map[c_raw]["vwap"] = eff_p_tx
-                                        quote_map[c_raw]["vwap_dev_pct"] = 0.0
-                                        quote_map[c_raw]["velocity_pct"] = 0.0
         except Exception as e:
             logger.debug(f"腾讯行情备用补齐异常: {e}")
+
+        # 报价缺少累计量额时，用 TDX 当日 K 线恢复 VWAP 和所选时段涨速。
+        if tdx_fetcher is not None:
+            for code in codes_to_query:
+                q = quote_map.get(str(code).zfill(6))
+                if not q or safe_float(q.get("price", 0.0)) <= 0:
+                    continue
+                try:
+                    price = safe_float(q["price"])
+                    if q.get("bidding_date") != today_str or safe_float(q.get("open", 0.0)) <= 0:
+                        opening = tdx_fetcher.get_opening_snapshot_from_tdx(code, now_ts)
+                        if safe_float(q.get("open", 0.0)) <= 0 and opening.get("open_price", 0.0) > 0:
+                            q["open"] = opening["open_price"]
+                        if q.get("bidding_date") != today_str and opening.get("auction_amount", 0.0) > 0:
+                            q["bidding_date"] = today_str
+                            q["bidding_source"] = "tdx_0925"
+                            q["auction_price"] = opening.get("auction_price", 0.0)
+                            q["bidding_amt_wan"] = round(opening["auction_amount"] / 10000.0, 1)
+                            q["bid_pressure"] = 50.0
+                    if safe_float(q.get("vwap", 0.0)) <= 0 or (
+                        safe_float(q.get("vwap_dev_pct", 0.0)) == 0.0
+                        and safe_float(q.get("amount", 0.0)) <= 0
+                    ):
+                        vwap = tdx_fetcher.get_intraday_vwap_from_tdx(code, price, now_ts)
+                        if vwap > 0:
+                            q["vwap"] = round(vwap, 2)
+                            q["vwap_dev_pct"] = round((price - vwap) / vwap * 100.0, 2)
+                    if "velocity_pct" not in q:
+                        seg = tdx_fetcher.calculate_segmented_velocity(
+                            code=code, price=price,
+                            open_price=safe_float(q.get("open", price)),
+                            last_close=safe_float(q.get("last_close", price)),
+                            vol=0.0, amount=0.0, now_ts=now_ts, segment_mode=segment_mode,
+                        )
+                        q.update({key: seg[key] for key in (
+                            "velocity_pct", "velocity_tag", "segment_label",
+                            "segment_base_price", "segment_amount_wan", "is_midway_init",
+                        )})
+                except Exception as exc:
+                    logger.debug(f"TDX {code} 分时指标补齐失败: {exc}")
 
         # ── 3. 权威回填更新到 DataFrame (带历史有效无损继承) ──
         for idx, row in df.iterrows():
@@ -877,15 +917,62 @@ class NewStockFetcher:
                 vwap_dev_val = round((p - vwap_val) / vwap_val * 100.0, 2)
             df.at[idx, "vwap_dev_pct"] = vwap_dev_val
 
+            if "待上市" in st or "今日申购" in st or "申购" in st:
+                df.at[idx, "price"] = 0.0
+                df.at[idx, "pct"] = 0.0
+                df.at[idx, "amount_yi"] = 0.0
+                df.at[idx, "turnover"] = 0.0
+                df.at[idx, "velocity_pct"] = 0.0
+                df.at[idx, "vwap_dev_pct"] = 0.0
+                df.at[idx, "bidding_tag"] = "--"
+                df.at[idx, "bidding_advice"] = "尚未上市交易"
+                continue
+
             # 💡 集合竞价策略信号判定与关键信息同步
             b_amt_wan = safe_float(q.get("bidding_amt_wan", 0.0))
             bid_p = safe_float(q.get("bid_pressure", 50.0))
             pct_curr = safe_float(df.at[idx, "pct"]) if "pct" in df.columns else 0.0
+            auction_p = safe_float(q.get("auction_price", 0.0))
+            auction_ref = issue_p if is_first_day else last_c
+            if auction_p > 0 and auction_ref > 0:
+                pct_curr = round((auction_p - auction_ref) / auction_ref * 100.0, 2)
+
+            # 收盘后只保留当日竞价窗口实际捕获的信号。
+            captured_today = q.get("bidding_date") == today_s
+            old = history_map.get(c, {})
+            if not captured_today and old.get("bidding_date") == today_s:
+                df.at[idx, "bidding_tag"] = old.get("bidding_tag", "--")
+                df.at[idx, "bidding_advice"] = old.get("bidding_advice", "")
+                df.at[idx, "bidding_amt_wan"] = safe_float(old.get("bidding_amt_wan", 0.0))
+                df.at[idx, "bidding_date"] = today_s
+                continue
+            if not captured_today:
+                open_p = safe_float(q.get("open", 0.0))
+                ref_p = issue_p if is_first_day else last_c
+                if open_p > 0 and ref_p > 0:
+                    opening_pct = round((open_p - ref_p) / ref_p * 100.0, 2)
+                    if is_first_day:
+                        opening_tag = "🌟 首日竞价高开" if opening_pct > 0.5 else ("🔻 首日竞价低开" if opening_pct < -0.5 else "⏱️ 首日竞价平开")
+                    elif opening_pct >= 0.5:
+                        opening_tag = "🚀 竞价高开"
+                    elif opening_pct <= -0.5:
+                        opening_tag = "🔻 竞价低开"
+                    else:
+                        opening_tag = "⏱️ 竞价平开"
+                    df.at[idx, "bidding_tag"] = opening_tag
+                    df.at[idx, "bidding_advice"] = f"开盘价相对基准 {opening_pct:+.2f}%；无竞价量能快照"
+                    df.at[idx, "bidding_date"] = today_s
+                else:
+                    df.at[idx, "bidding_tag"] = "--"
+                    df.at[idx, "bidding_advice"] = "缺少当日开盘价"
+                df.at[idx, "bidding_amt_wan"] = 0.0
+                continue
+            df.at[idx, "bidding_date"] = today_s
 
             # 首日估值健康度
             is_healthy_ipo = True
-            if is_first_day and issue_p > 0 and p > 0:
-                ipo_pct = round((p - issue_p) / issue_p * 100.0, 1)
+            if is_first_day and issue_p > 0 and (auction_p > 0 or p > 0):
+                ipo_pct = round(((auction_p if auction_p > 0 else p) - issue_p) / issue_p * 100.0, 1)
                 is_healthy_ipo = (ipo_pct <= 220.0)
 
             if is_first_day and (b_amt_wan >= 500.0 or b_amt_wan >= 80.0) and is_healthy_ipo:
@@ -911,16 +998,6 @@ class NewStockFetcher:
             df.at[idx, "bidding_advice"] = bidding_advice
             df.at[idx, "bidding_amt_wan"] = b_amt_wan
 
-            # 🛡️ 严格状态守卫：未上市/今日申购标的严禁被赋予二级市场非零现价、涨跌幅、换手与成交额
-            if "待上市" in st or "今日申购" in st or "申购" in st:
-                df.at[idx, "price"] = 0.0
-                df.at[idx, "pct"] = 0.0
-                df.at[idx, "amount_yi"] = 0.0
-                df.at[idx, "turnover"] = 0.0
-                df.at[idx, "velocity_pct"] = 0.0
-                df.at[idx, "vwap_dev_pct"] = 0.0
-                df.at[idx, "bidding_tag"] = "--"
-                df.at[idx, "bidding_advice"] = "尚未上市交易"
 
         return df
 

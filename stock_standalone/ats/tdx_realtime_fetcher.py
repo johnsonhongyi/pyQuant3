@@ -102,7 +102,7 @@ def get_trading_segment_info(now_ts: float, segment_mode: str = "30m") -> Tuple[
                 sh, sm = map(int, s_hm.split(":"))
                 eh, em = map(int, e_hm.split(":"))
                 return k, lab, make_epoch(sh, sm), make_epoch(eh, em)
-        return "15:00+", "⏱️ 15:00+ 盘后总结", make_epoch(15, 0), make_epoch(15, 30)
+        return "14:45~15:00", "⏱️ 14:45~15:00 收盘段", make_epoch(14, 45), make_epoch(15, 0)
 
     elif segment_mode == "60m":
         slots_60m = [
@@ -118,7 +118,7 @@ def get_trading_segment_info(now_ts: float, segment_mode: str = "30m") -> Tuple[
                 sh, sm = map(int, s_hm.split(":"))
                 eh, em = map(int, e_hm.split(":"))
                 return k, lab, make_epoch(sh, sm), make_epoch(eh, em)
-        return "15:00+", "⏱️ 15:00+ 盘后总结", make_epoch(15, 0), make_epoch(15, 30)
+        return "14:00~15:00", "⏱️ 14:00~15:00 收盘段", make_epoch(14, 0), make_epoch(15, 0)
 
     else:
         # 默认 30m 黄金分段体系
@@ -139,7 +139,7 @@ def get_trading_segment_info(now_ts: float, segment_mode: str = "30m") -> Tuple[
                 sh, sm = map(int, s_hm.split(":"))
                 eh, em = map(int, e_hm.split(":"))
                 return k, lab, make_epoch(sh, sm), make_epoch(eh, em)
-        return "15:00+", "⏱️ 15:00+ 盘后总结", make_epoch(15, 0), make_epoch(15, 30)
+        return "14:30~15:00", "⏱️ 14:30~15:00 收盘段", make_epoch(14, 30), make_epoch(15, 0)
 
 
 def get_local_tdx_config_paths() -> List[str]:
@@ -1655,6 +1655,7 @@ class TDXRealtimeFetcher:
 
         # ⏱️ 交易时段分段基准缓存 {code: {segment_key: {'base_price': float, 'base_vol': float, 'base_amount': float, 'first_seen_time': float, 'date': str}}}
         self._segment_stock_cache: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        self._intraday_5m_cache: Dict[str, Tuple[str, float, List[Dict[str, Any]]]] = {}
 
         # 标的真实流通股本与总股本永久缓存 (股数)
         self._finance_shares_cache: Dict[str, float] = {}
@@ -3687,6 +3688,64 @@ class TDXRealtimeFetcher:
         self._velocity_tags[c_clean] = tag
         return final_vel, tag
 
+    def _get_intraday_5m_bars(self, code: str, now_ts: float) -> List[Dict[str, Any]]:
+        """TDX 五分钟原始 K 线；同一标的短期共用，收盘后固定一次。"""
+        day = datetime.fromtimestamp(now_ts).strftime("%Y-%m-%d")
+        cached = self._intraday_5m_cache.get(code)
+        ttl = 86400.0 if datetime.fromtimestamp(now_ts).hour >= 15 else 60.0
+        if cached and cached[0] == day and now_ts - cached[1] < ttl:
+            return cached[2]
+        _, market, target = normalize_tdx_target(code)
+        try:
+            with self._conn_lock:
+                if (not self._is_connected or self.api is None) and not self.connect():
+                    return []
+                bars = self.api.get_security_bars(0, market, target, 0, 60) or []
+            today_bars = [b for b in bars if str(b.get("datetime", "")).startswith(day)]
+            self._intraday_5m_cache[code] = (day, now_ts, today_bars)
+            return today_bars
+        except Exception as exc:
+            logger.debug(f"TDX {code} 五分钟 K 线读取失败: {exc}")
+            return []
+
+    def _get_segment_open_from_tdx(self, code: str, start_epoch: float, end_epoch: float,
+                                   now_ts: float) -> float:
+        """冷启动或切换周期时，从当前交易日的 TDX K 线恢复时段首价。"""
+        for bar in self._get_intraday_5m_bars(code, now_ts):
+            try:
+                bar_ts = datetime.strptime(str(bar["datetime"])[:16], "%Y-%m-%d %H:%M").timestamp()
+                if start_epoch <= bar_ts < end_epoch:
+                    return float(bar.get("open", 0.0) or 0.0)
+            except (KeyError, TypeError, ValueError):
+                continue
+        return 0.0
+
+    def get_intraday_vwap_from_tdx(self, code: str, price: float, now_ts: float) -> float:
+        """报价缺少累计成交量/额时，用 TDX 当日五分钟成交量额补齐均价。"""
+        bars = self._get_intraday_5m_bars(str(code).zfill(6), now_ts)
+        amount = sum(float(b.get("amount", 0.0) or 0.0) for b in bars)
+        volume = sum(float(b.get("vol", 0.0) or 0.0) for b in bars)
+        if amount <= 0 or volume <= 0 or price <= 0:
+            return 0.0
+        for scale in (100.0, 1.0):
+            vwap = amount / volume / scale
+            if price * 0.7 <= vwap <= price * 1.3:
+                return vwap
+        return 0.0
+
+    def get_opening_snapshot_from_tdx(self, code: str, now_ts: float) -> Dict[str, float]:
+        """返回当日开盘价；仅 09:25 原始 K 线可作为竞价量额。"""
+        result: Dict[str, float] = {}
+        for bar in self._get_intraday_5m_bars(str(code).zfill(6), now_ts):
+            hm = str(bar.get("datetime", ""))[11:16]
+            if "09:25" <= hm <= "09:35" and "open_price" not in result:
+                result["open_price"] = float(bar.get("open", 0.0) or 0.0)
+            if hm == "09:25":
+                result["auction_price"] = float(bar.get("close", bar.get("open", 0.0)) or 0.0)
+                result["auction_amount"] = float(bar.get("amount", 0.0) or 0.0)
+                break
+        return result
+
     def calculate_segmented_velocity(
         self,
         code: str,
@@ -3752,16 +3811,19 @@ class TDXRealtimeFetcher:
                 del code_cache[k]
 
         # 确定本时段的基准数据 (第一笔有效数据)
-        if seg_key not in code_cache:
+        cache_key = f"{segment_mode}:{seg_key}"
+        if cache_key not in code_cache:
             if (seg_key.startswith("09:30") or segment_mode == "day_open") and open_price > 0:
                 base_p = open_price
             else:
-                base_p = price
+                base_p = self._get_segment_open_from_tdx(c_clean, seg_s_epoch, seg_e_epoch, now_ts)
+                if base_p <= 0:
+                    base_p = price
 
             base_v = vol if vol > 0 else 0.0
             base_amt = amount if amount > 0 else 0.0
 
-            code_cache[seg_key] = {
+            code_cache[cache_key] = {
                 "base_price": base_p,
                 "base_vol": base_v,
                 "base_amount": base_amt,
@@ -3770,7 +3832,7 @@ class TDXRealtimeFetcher:
                 "is_midway_init": (now_ts - seg_s_epoch > 60.0) if seg_s_epoch > 0 else False
             }
 
-        seg_base = code_cache[seg_key]
+        seg_base = code_cache[cache_key]
         base_price = float(seg_base["base_price"])
         base_vol = float(seg_base["base_vol"])
         base_amt = float(seg_base["base_amount"])
