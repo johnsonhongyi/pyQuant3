@@ -138,10 +138,11 @@ def get_ipo_detector_table_headers(extra_cols: Optional[List[str]] = None) -> Li
         "VWAP结构形态", "大趋势K线状态", "信号评级", "极窄止损位"
     ]
     extra_headers = [col_map.get(c, col_map.get(c.lower(), c)) for c in extra_cols]
+    velocity_headers = ["时段涨速%", "区间换手%", "区间量比", "多周期情绪", "趋势攻角"]
     base_right = [
         "操作建议 / 为什么 (预下单逻辑)", "更新时间", "快捷操作"
     ]
-    return base_left + extra_headers + base_right
+    return base_left + extra_headers + velocity_headers + base_right
 
 
 def get_ipo_detector_default_widths(extra_cols: Optional[List[str]] = None) -> List[int]:
@@ -153,9 +154,11 @@ def get_ipo_detector_default_widths(extra_cols: Optional[List[str]] = None) -> L
     base_widths = [55, 78, 52, 50, 52, 52, 68, 80, 62, 52]
     # 动态扩展列 (每个极窄 50)
     extra_widths = [50] * len(extra_cols)
+    # 新股检测器10日VWAP窗口指标: 区间涨速、区间换手、区间量比、多周期情绪、趋势攻角
+    velocity_widths = [58, 52, 48, 72, 62]
     # 右侧: 预下单逻辑(220), 更新时间(52), 快捷操作(88)
     right_widths = [220, 52, 88]
-    return base_widths + extra_widths + right_widths
+    return base_widths + extra_widths + velocity_widths + right_widths
 
 
 class IPODetectorTableWidget(BaseATSTableWidget):
@@ -249,11 +252,13 @@ class IPOScanWorker(QThread):
     scan_finished = pyqtSignal(int, float, object)# 总数, 耗时秒, 性能审计字典
     perf_log_emitted = pyqtSignal(str)            # 实时性能审计文本信号 (逐批次实时推送 UI)
 
-    def __init__(self, codes: List[str], batch_size: int = 8, perf_log_enabled: bool = False):
+    def __init__(self, codes: List[str], batch_size: int = 8, perf_log_enabled: bool = False,
+                 segment_mode: str = "15m"):
         super().__init__()
         self.codes = list(codes)
         self.batch_size = max(1, min(batch_size, 32))
         self.perf_log_enabled = perf_log_enabled
+        self.segment_mode = segment_mode
         self.is_running = True
         self.engine = IPOVWAPDetectorEngine.get_instance()
 
@@ -320,9 +325,7 @@ class IPOScanWorker(QThread):
                 if not self.is_running:
                     break
                 try:
-                    sig = self._analyze_one(
-                        c, day_df_map.get(c), kline_60m_map.get(c)
-                    )
+                    sig = self._analyze_one(c, day_df_map.get(c), kline_60m_map.get(c))
                     if sig:
                         batch_results.append(sig)
                         count += 1
@@ -385,7 +388,9 @@ class IPOScanWorker(QThread):
                      df_60m: Optional[pd.DataFrame] = None) -> Optional[VWAPDetectorSignal]:
         if not self.is_running:
             return None
-        return self.engine.analyze_stock(code, day_df=day_df, df_60m=df_60m)
+        return self.engine.analyze_stock(
+            code, day_df=day_df, df_60m=df_60m, segment_mode=self.segment_mode
+        )
 
     def stop(self):
         self.is_running = False
@@ -660,6 +665,22 @@ class IPOSubnewDetectorDialog(QMainWindow):
         combo_interval.currentTextChanged.connect(self._on_interval_changed)
         self.combo_interval = combo_interval
         tb_layout.addWidget(combo_interval)
+
+        self.combo_segment_mode = QComboBox()
+        self.combo_segment_mode.addItems(["⏱️ 30分", "⏱️ 60分", "⏱️ 120分", "⏱️ 240分", "📅 5日"])
+        try:
+            saved_seg_idx = int(load_config_node("ats_ipo_velocity_segment_mode", 1))
+            if 0 <= saved_seg_idx < self.combo_segment_mode.count():
+                self.combo_segment_mode.setCurrentIndex(saved_seg_idx)
+        except Exception:
+            pass
+        self.combo_segment_mode.setToolTip("基于10日VWAP历史计算：30/60/120/240分钟滚动窗口，或最近5个交易日对比前5日；量比/换手同步按窗口统计")
+        self.combo_segment_mode.setStyleSheet(
+            "QComboBox { background-color: #162536; color: #66ccff; border: 1px solid #336699; "
+            "border-radius: 3px; padding: 1px 2px; font-weight: bold; font-size: 8.5pt; min-width: 54px; max-width: 66px; }"
+        )
+        self.combo_segment_mode.currentIndexChanged.connect(self._on_segment_mode_changed)
+        tb_layout.addWidget(self.combo_segment_mode)
 
         btn_perf = QPushButton("📊 性能日志: 关")
         btn_perf.setToolTip("开启/关闭控制台细粒度分组计算性能审计日志 (快捷键: L)")
@@ -1121,7 +1142,9 @@ class IPOSubnewDetectorDialog(QMainWindow):
         """单只立即优先评估"""
         def _task():
             try:
-                sig = IPOVWAPDetectorEngine.get_instance().analyze_stock(code, force_refresh=True)
+                sig = IPOVWAPDetectorEngine.get_instance().analyze_stock(
+                    code, force_refresh=True, segment_mode=self._get_current_segment_mode_key()
+                )
                 self.signals_map[code] = sig
                 self._update_table_row_data(sig)
             except Exception:
@@ -1140,7 +1163,10 @@ class IPOSubnewDetectorDialog(QMainWindow):
         # 扫描期间全程保持表格物理行静止稳定，绝不打乱排序
         if self.table.isSortingEnabled():
             self.table.setSortingEnabled(False)
-        self.worker = IPOScanWorker(self.monitored_codes, batch_size=8, perf_log_enabled=self.perf_log_enabled)
+        self.worker = IPOScanWorker(
+            self.monitored_codes, batch_size=8, perf_log_enabled=self.perf_log_enabled,
+            segment_mode=self._get_current_segment_mode_key()
+        )
         self.worker.batch_analyzed.connect(self._on_batch_analyzed)
         self.worker.stock_analyzed.connect(self._on_stock_analyzed)
         self.worker.scan_finished.connect(self._on_scan_finished)
@@ -1226,6 +1252,9 @@ class IPOSubnewDetectorDialog(QMainWindow):
             f"✅ 监控中: {len(self.monitored_codes)} 只 | "
             f"🎯 预下单: {pre_cnt} 只 | 🚀 回踩启动: {pull_cnt} 只 | ⚡ 加速: {break_cnt} 只 | 耗时: {cost:.2f}s{perf_text}"
         )
+
+        if self.worker and getattr(self.worker, "segment_mode", None) != self._get_current_segment_mode_key():
+            QTimer.singleShot(500, self.trigger_scan)
 
         # 扫描结束统一按用户当前排序列整理一次，并精准记住操盘手多选列表与高亮行焦点
         selected_codes = []
@@ -1549,7 +1578,7 @@ class IPOSubnewDetectorDialog(QMainWindow):
         # 全面对齐全系统统一的标准 setup_persistence 与极窄模式 (彻底消除拖拽撕裂与分离延时)
         default_widths = get_ipo_detector_default_widths(self.extra_cols)
         self.table.setup_persistence(
-            config_key="ats_ipo_subnew_detector_headers_v5",
+            config_key="ats_ipo_subnew_detector_headers_v6",
             default_widths=default_widths
         )
         hv.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
@@ -1557,7 +1586,31 @@ class IPOSubnewDetectorDialog(QMainWindow):
             hv.sectionResized.connect(self._on_header_section_resized)
         except Exception:
             pass
+        self._update_velocity_header()
         QTimer.singleShot(0, self.adjust_columns_to_viewport)
+
+    def _get_current_segment_mode_key(self) -> str:
+        modes = ["30m", "60m", "120m", "240m", "1d"]
+        index = self.combo_segment_mode.currentIndex() if hasattr(self, "combo_segment_mode") else 1
+        return modes[index] if 0 <= index < len(modes) else "60m"
+
+    def _on_segment_mode_changed(self, index: int):
+        try:
+            save_config_node("ats_ipo_velocity_segment_mode", int(index))
+        except Exception as exc:
+            logger.debug(f"保存涨速周期配置异常: {exc}")
+        self._update_velocity_header()
+        self.trigger_scan()
+
+    def _update_velocity_header(self):
+        if not hasattr(self, "table") or not hasattr(self, "extra_cols"):
+            return
+        labels = {"30m": "30分涨速%", "60m": "60分涨速%", "120m": "120分涨速%",
+                  "240m": "240分涨速%", "1d": "5日涨速%"}
+        col = 10 + len(self.extra_cols)
+        item = self.table.horizontalHeaderItem(col)
+        if item:
+            item.setText(labels.get(self._get_current_segment_mode_key(), "时段涨速%"))
 
     def adjust_columns_to_viewport(self):
         """
@@ -1682,7 +1735,7 @@ class IPOSubnewDetectorDialog(QMainWindow):
         self.table.setSortingEnabled(False)
         try:
             n_extra = len(self.extra_cols)
-            total_cols = 13 + n_extra
+            total_cols = 18 + n_extra
             if self.table.columnCount() != total_cols:
                 self.table.setColumnCount(total_cols)
                 headers = get_ipo_detector_table_headers(self.extra_cols)
@@ -1732,7 +1785,7 @@ class IPOSubnewDetectorDialog(QMainWindow):
                 btn_del.clicked.connect(lambda _, c=code: self.remove_stock(c))
                 btn_l.addWidget(btn_sbc)
                 btn_l.addWidget(btn_del)
-                self.table.setCellWidget(row, 12 + n_extra, btn_box)
+                self.table.setCellWidget(row, 17 + n_extra, btn_box)
 
                 # 若已有信号数据，立即填充
                 if code in self.signals_map:
@@ -1846,6 +1899,13 @@ class IPOSubnewDetectorDialog(QMainWindow):
             # 4. 10d VWAP
             vw_str = f"{sig.vwap:.2f}" if sig.vwap > 0 else "--"
             _set_numeric_cell(4, vw_str, float(sig.vwap) if sig.vwap > 0 else -999999.0, fg=QColor("#ffcc00"))
+            vwap_item = self.table.item(row, 4)
+            if vwap_item:
+                sessions = int((sig.extra_data or {}).get("ipo_vwap_sessions", 0) or 0)
+                vwap_item.setToolTip(
+                    f"10日VWAP分钟链路；当前有效覆盖 {sessions} 个交易日"
+                    if sessions else "10日VWAP分钟数据暂不可用"
+                )
 
             # 5. VWAP偏离
             diff_str = f"{sig.vwap_diff_pct:+.1f}%" if sig.vwap > 0 else "--"
@@ -2009,6 +2069,45 @@ class IPOSubnewDetectorDialog(QMainWindow):
                 else:
                     _set_numeric_cell(col_idx, "--", -999999.0)
 
+            # 新股检测中心专用：以上一轮10日VWAP分钟数据计算，流式价格只更新涨速和攻角。
+            velocity_col = 10 + n_extra
+            metrics = sig.extra_data or {}
+            velocity = metrics.get("ipo_velocity_pct")
+            if velocity is not None:
+                try:
+                    velocity = float(velocity)
+                    velocity_fg = QColor("#ff4444") if velocity > 0 else (QColor("#00ff88") if velocity < 0 else QColor("#8f939d"))
+                    _set_numeric_cell(velocity_col, f"{velocity:+.2f}%", velocity, fg=velocity_fg)
+                    velocity_item = self.table.item(row, velocity_col)
+                    if velocity_item:
+                        velocity_item.setToolTip(
+                            f"{metrics.get('ipo_segment_label') or '窗口'}涨速；"
+                            f"基准价 {float(metrics.get('ipo_velocity_base_price') or 0):.2f}\n"
+                            "来源：新股次新检测器10日VWAP分钟数据"
+                        )
+                except (TypeError, ValueError):
+                    _set_numeric_cell(velocity_col, "--", -999999.0)
+            else:
+                _set_numeric_cell(velocity_col, "--", -999999.0)
+
+            for offset, key in ((1, "ipo_turnover"), (2, "ipo_vol_ratio"), (4, "ipo_slope_angle")):
+                try:
+                    raw = metrics.get(key)
+                    if raw is None:
+                        raise ValueError("无可用值")
+                    number = float(raw)
+                    suffix = "%" if offset == 1 else ""
+                    suffix = "°" if offset == 4 else suffix
+                    _set_numeric_cell(velocity_col + offset, f"{number:.2f}{suffix}", number)
+                except (TypeError, ValueError):
+                    _set_numeric_cell(velocity_col + offset, "--", -999999.0)
+
+            intent = str(metrics.get("ipo_order_intent") or "--")
+            _set_text_cell(
+                velocity_col + 3, intent, fg=QColor("#66ccff"),
+                tooltip=f"量价结构意图: {intent}\n{metrics.get('ipo_order_intent_source', '')}"
+            )
+
             # 为什么 / 操盘决议 (优先融合交易中心基于全数据的全局仲裁与山外有山决议)
             desc_text = getattr(sig, "global_arbitration_desc", "") or sig.signal_desc
             desc_fg = None
@@ -2045,11 +2144,11 @@ class IPOSubnewDetectorDialog(QMainWindow):
                     f"-----------------------------------------\n"
                     f"{desc_text}"
                 )
-            _set_text_cell(10 + n_extra, desc_text, tooltip=desc_tt, fg=desc_fg)
+            _set_text_cell(15 + n_extra, desc_text, tooltip=desc_tt, fg=desc_fg)
 
 
             # 更新时间
-            _set_text_cell(11 + n_extra, sig.update_time or "--")
+            _set_text_cell(16 + n_extra, sig.update_time or "--")
         finally:
             if was_sorting:
                 self.table.setSortingEnabled(True)
@@ -2059,7 +2158,7 @@ class IPOSubnewDetectorDialog(QMainWindow):
 
         """【集中仲裁原地极速反哺】全池统筹完成后，原地极速更新全表各行操盘决议，彻底消除单股盲区"""
         n_extra = len(self.extra_cols)
-        desc_col = 10 + n_extra
+        desc_col = 15 + n_extra
         was_sorting = self.table.isSortingEnabled()
         if was_sorting:
             self.table.setSortingEnabled(False)
@@ -2382,7 +2481,7 @@ class IPOSubnewDetectorDialog(QMainWindow):
         if not it:
             return
         code = "".join(ch for ch in it.text().strip() if ch.isdigit()).zfill(6)
-        desc_col = 10 + len(self.extra_cols)
+        desc_col = 15 + len(self.extra_cols)
         if col == desc_col:
             self._open_arbitration_detail_for_row(row)
         else:
@@ -2812,6 +2911,23 @@ class IPOSubnewDetectorDialog(QMainWindow):
                                 if sig.vwap > 0:
                                     sig.vwap_diff_pct = (sig.price - sig.vwap) / sig.vwap * 100.0
                                     sig.is_above_vwap = sig.price >= sig.vwap
+                                metrics = sig.extra_data or {}
+                                base = float(metrics.get("ipo_velocity_base_price") or 0.0)
+                                if base > 0 and sig.price > 0:
+                                    velocity = (sig.price / base - 1.0) * 100.0
+                                    metrics["ipo_velocity_pct"] = round(velocity, 2)
+                                    minutes = max(1, int(metrics.get("ipo_velocity_minutes") or 1))
+                                    metrics["ipo_slope_angle"] = round(math.degrees(math.atan(velocity * 60.0 / minutes)), 1)
+                                    bias = metrics.get("ipo_multi_day_bias", "多周期结构分化")
+                                    if velocity >= 0.3 and bias in ("多日动能增强", "多日趋势偏强") and sig.is_above_vwap:
+                                        metrics["ipo_order_intent"] = "短长趋势共振"
+                                    elif velocity <= -0.3 and bias in ("多日动能走弱", "多日趋势承压"):
+                                        metrics["ipo_order_intent"] = "短长周期同步承压"
+                                    elif velocity <= -0.3 and bias in ("多日动能增强", "多日趋势偏强"):
+                                        metrics["ipo_order_intent"] = "短线回落、长周期偏强"
+                                    else:
+                                        metrics["ipo_order_intent"] = bias
+                                    sig.extra_data = metrics
                                 self._update_table_row_data(sig, target_row=r, manage_sorting=False)
 
                     # 🚀 [IPC LINKAGE] 若集中交易指挥室处于展示状态，同步刷新赛马排位与持仓

@@ -553,18 +553,70 @@ class IPOVWAPDetectorEngine:
         """
         t0 = time.perf_counter()
         today_date_str = time.strftime("%Y-%m-%d")
+        requested_days = max(1, min(days, len(day_df))) if day_df is not None and not day_df.empty else days
+        listing_date = ""
+        try:
+            from ats.new_stock_fetcher import NewStockFetcher
+            ipo_info = getattr(NewStockFetcher.get_instance(), "_cached_ipo_dict", {}).get(clean_code, {})
+            listing_date = str(ipo_info.get("listing_date") or "").strip()[:10]
+        except Exception:
+            pass
+
+        def _available_sessions(frame: Optional[pd.DataFrame]) -> int:
+            if frame is None or frame.empty:
+                return 0
+            if listing_date and listing_date != "-":
+                try:
+                    raw_dates = next((frame[col] for col in ("date", "datetime", "日期")
+                                      if col in frame.columns), frame.index)
+                    raw_text = pd.Series(raw_dates, dtype="object").astype(str)
+                    compact = pd.to_datetime(
+                        raw_text.str.extract(r"(\d{8})", expand=False),
+                        format="%Y%m%d", errors="coerce",
+                    )
+                    parsed = compact.fillna(pd.to_datetime(raw_dates, errors="coerce"))
+                    valid_dates = parsed[parsed.notna()].strftime("%Y-%m-%d")
+                    count = int((valid_dates >= listing_date).sum())
+                    if count > 0:
+                        return min(days, count)
+                except Exception:
+                    pass
+            return min(days, len(frame))
+
+        fetch_horizon = callable(getattr(type(self.fetcher), "fetch_multi_horizon_vwap", None))
+
+        if listing_date and listing_date != "-":
+            # 日线缓存可能保留上市前占位/补齐行，只计算上市日及之后的真实交易日。
+            actual_sessions = _available_sessions(day_df)
+            if actual_sessions > 0:
+                requested_days = min(requested_days, actual_sessions)
 
         # 优先使用底层统一的多日分时获取接口 (自带静态缓存 + 时间戳增量复用 + RamDisk 持久化)
-        if days >= 10 and hasattr(self.fetcher, "fetch_multi_horizon_vwap"):
-            df_multi, _vwap_snapshot = self.fetcher.fetch_multi_horizon_vwap(clean_code)
+        if days >= 10 and fetch_horizon:
+            df_multi, _vwap_snapshot = self.fetcher.fetch_multi_horizon_vwap(
+                clean_code, days=requested_days
+            )
         else:
-            df_multi = self.fetcher.fetch_multi_day_intraday_bars(clean_code, days=days)
+            df_multi = self.fetcher.fetch_multi_day_intraday_bars(clean_code, days=requested_days)
         if (df_multi is None or df_multi.empty) and days > 1:
             listing_days = day_df
-            if listing_days is None:
+            if listing_days is None or listing_days.empty:
                 listing_days = batch_fetch_day_kline_fast([clean_code], dl=days).get(clean_code)
-            if listing_days is not None and 0 < len(listing_days) < days:
-                df_multi = self.fetcher.fetch_multi_day_intraday_bars(clean_code, days=1)
+            if listing_days is not None and not listing_days.empty:
+                available_days = max(1, _available_sessions(listing_days))
+                # 上市初期只有 1~2 根日线时，允许以今日分时结果恢复基础展示，
+                # 多日结构仍由实际返回的分时日期数标识，不伪造为 10 日数据。
+                if requested_days <= 2 and available_days == requested_days:
+                    available_days = 1
+                if available_days < requested_days:
+                    if fetch_horizon:
+                        df_multi, _vwap_snapshot = self.fetcher.fetch_multi_horizon_vwap(
+                            clean_code, days=available_days
+                        )
+                    else:
+                        df_multi = self.fetcher.fetch_multi_day_intraday_bars(
+                            clean_code, days=available_days
+                        )
 
         # 维护 _history_multi_day_cache 兼容性
         if df_multi is not None and not df_multi.empty and "date" in df_multi.columns:
@@ -584,7 +636,8 @@ class IPOVWAPDetectorEngine:
     def analyze_stock(self, code: str, force_refresh: bool = False,
                       day_df: Optional[pd.DataFrame] = None,
                       df_60m: Optional[pd.DataFrame] = None,
-                      eval_time: Optional[Any] = None) -> VWAPDetectorSignal:
+                      eval_time: Optional[Any] = None,
+                      segment_mode: str = "60m") -> VWAPDetectorSignal:
         """
         全面分析一只标的的 10日 VWAP 结构、走平蓄势天数、回踩不碰特征及大趋势 K 线支撑
         """
@@ -594,7 +647,7 @@ class IPOVWAPDetectorEngine:
         
         if not force_refresh and clean_code in self._eval_cache and day_df is None and df_60m is None and eval_time is None:
             cached_sig, cache_time = self._eval_cache[clean_code]
-            if now_ts - cache_time < self._cache_ttl:
+            if now_ts - cache_time < self._cache_ttl and (cached_sig.extra_data or {}).get("ipo_segment_mode") == segment_mode:
                 return cached_sig
 
         name = resolve_fast_ipo_name(clean_code)
@@ -622,6 +675,7 @@ class IPOVWAPDetectorEngine:
             if df_multi is not None and not df_multi.empty:
                 self._evaluate_vwap_structure(df_multi, sig, day_df=day_df)
                 self._evaluate_bottom_base_structure(df_multi, sig, day_df=day_df, eval_time=eval_time)
+                self._compute_ipo_intraday_metrics(df_multi, sig, segment_mode)
             else:
                 sig.signal_desc = "10日分时数据不完整，自动重拉中；VWAP策略暂停"
 
@@ -667,6 +721,120 @@ class IPOVWAPDetectorEngine:
 
         self._eval_cache[clean_code] = (sig, now_ts)
         return sig
+
+    def _compute_ipo_intraday_metrics(self, df: pd.DataFrame, sig: VWAPDetectorSignal,
+                                      segment_mode: str = "60m") -> None:
+        """从本次10日VWAP分钟数据一次性衍生新股检测器的日内指标。"""
+        try:
+            if df is None or df.empty or "date" not in df or "time_only" not in df:
+                return
+            modes = {"30m": 30, "60m": 60, "120m": 120, "240m": 240}
+            latest_date = str(df.iloc[-1].get("date", ""))
+            today = df[df["date"].astype(str) == latest_date].copy()
+            if today.empty:
+                return
+            today["_minute"] = today["time_only"].astype(str).map(
+                lambda value: int(value[:2]) * 60 + int(value[3:5]) if len(value) >= 5 else -1
+            )
+            today = today[today["_minute"] >= 0]
+            if today.empty:
+                return
+            latest = today.iloc[-1]
+            price = float(sig.price or latest.get("close", 0.0) or 0.0)
+            minute = int(latest["_minute"])
+            daily = df.assign(_date=df["date"].astype(str)).groupby("_date", sort=True).agg(
+                open=("open", "first"), close=("close", "last"), volume=("bar_vol", "sum")
+            )
+            sig.extra_data["ipo_vwap_sessions"] = int(len(daily))
+            prior_five_day_price = float(daily.iloc[-6]["close"] or 0.0) if len(daily) >= 6 else 0.0
+            older_five_day_base = float(daily.iloc[0]["open"] or 0.0) if len(daily) >= 10 else 0.0
+            mode = segment_mode if segment_mode in modes or segment_mode == "1d" else "60m"
+            window = modes.get(mode)
+            if mode == "1d":
+                base = float(daily.iloc[-6]["close"] or 0.0) if len(daily) >= 6 else 0.0
+                current_window_vol = float(daily.iloc[-5:]["volume"].sum()) if len(daily) >= 5 else 0.0
+                previous_window_vol = float(daily.iloc[-10:-5]["volume"].sum()) if len(daily) >= 10 else 0.0
+                elapsed = 5 * 240
+                label = "5日"
+            else:
+                all_bars = df.copy()
+                all_bars["_date"] = all_bars["date"].astype(str)
+                all_bars["_minute"] = all_bars["time_only"].astype(str).map(
+                    lambda value: int(value[:2]) * 60 + int(value[3:5]) if len(value) >= 5 else -1
+                )
+                all_bars = all_bars[all_bars["_minute"] >= 0]
+                all_bars = all_bars.sort_values(["_date", "_minute"])
+                latest_pos = len(all_bars) - 1
+                prior_pos = latest_pos - int(window)
+                base = float(all_bars.iloc[prior_pos].get("close", 0.0) or 0.0) if prior_pos >= 0 else 0.0
+                elapsed = int(window)
+                label = f"{window}分"
+                current_start = max(0, latest_pos - int(window) + 1)
+                previous_start = current_start - int(window)
+                current_window_vol = float(all_bars.iloc[current_start:latest_pos + 1]["bar_vol"].sum()) if "bar_vol" in all_bars else 0.0
+                previous_window_vol = float(all_bars.iloc[previous_start:current_start]["bar_vol"].sum()) if previous_start >= 0 and "bar_vol" in all_bars else 0.0
+            speed = round((price / base - 1.0) * 100.0, 2) if base > 0 and price > 0 else None
+
+            try:
+                circulation_shares = float(self.fetcher.get_circulation_shares(sig.code) or 0.0)
+            except Exception:
+                circulation_shares = 0.0
+            turnover = round(current_window_vol / circulation_shares * 100.0, 2) if circulation_shares > 0 else None
+            vol_ratio = round(current_window_vol / previous_window_vol, 2) if previous_window_vol > 0 else None
+
+            recent_five_day_return = round((price / prior_five_day_price - 1.0) * 100.0, 2) if prior_five_day_price > 0 else None
+            older_five_day_return = round((prior_five_day_price / older_five_day_base - 1.0) * 100.0, 2) if older_five_day_base > 0 else None
+            if recent_five_day_return is not None and older_five_day_return is not None:
+                if recent_five_day_return > 0 and older_five_day_return > 0 and recent_five_day_return > older_five_day_return:
+                    multi_day_bias = "多日动能增强"
+                elif recent_five_day_return < 0 and older_five_day_return < 0 and recent_five_day_return < older_five_day_return:
+                    multi_day_bias = "多日动能走弱"
+                elif recent_five_day_return * older_five_day_return < 0:
+                    multi_day_bias = "多日趋势反转"
+                else:
+                    multi_day_bias = "多日趋势整理"
+            elif recent_five_day_return is not None and recent_five_day_return > 0:
+                multi_day_bias = "多日趋势偏强"
+            elif recent_five_day_return is not None and recent_five_day_return < 0:
+                multi_day_bias = "多日趋势承压"
+            else:
+                multi_day_bias = "10日历史不足"
+
+            if speed is not None and price > 0:
+                angle = round(math.degrees(math.atan(speed * 60.0 / max(1, elapsed))), 1)
+            else:
+                angle = None
+            above_vwap = price >= float(latest.get("vwap", sig.vwap) or sig.vwap or 0.0)
+            if speed is None:
+                intent = "10日历史窗口不足"
+            elif speed >= 0.3 and multi_day_bias in ("多日动能增强", "多日趋势偏强") and above_vwap:
+                intent = "短长共振放量" if vol_ratio is not None and vol_ratio >= 1.2 else "短长趋势共振"
+            elif speed <= -0.3 and multi_day_bias in ("多日动能走弱", "多日趋势承压"):
+                intent = "短长周期同步承压"
+            elif speed <= -0.3 and multi_day_bias in ("多日动能增强", "多日趋势偏强"):
+                intent = "短线回落、长周期偏强"
+            elif not above_vwap and multi_day_bias in ("多日动能增强", "多日趋势偏强"):
+                intent = "趋势增强但仍在10日VWAP下"
+            else:
+                intent = multi_day_bias
+
+            sig.extra_data.update({
+                "ipo_segment_mode": mode,
+                "ipo_velocity_pct": speed,
+                "ipo_velocity_base_price": base,
+                "ipo_velocity_minutes": elapsed,
+                "ipo_segment_label": label,
+                "ipo_recent_5d_return": recent_five_day_return,
+                "ipo_previous_5d_return": older_five_day_return,
+                "ipo_multi_day_bias": multi_day_bias,
+                "ipo_turnover": turnover if turnover is not None and turnover > 0 else None,
+                "ipo_vol_ratio": vol_ratio,
+                "ipo_order_intent": intent,
+                "ipo_slope_angle": angle,
+                "ipo_order_intent_source": "10日VWAP分钟历史中的相邻窗口量价变化 + 5日趋势及10日VWAP位置；非买卖一盘口",
+            })
+        except Exception as exc:
+            logger.debug("新股VWAP日内指标计算异常 %s: %s", sig.code, exc)
 
     def _evaluate_vwap_structure(self, df: pd.DataFrame, sig: VWAPDetectorSignal, day_df: Optional[pd.DataFrame] = None):
         """

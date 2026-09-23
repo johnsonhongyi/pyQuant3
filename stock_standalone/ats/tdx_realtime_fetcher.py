@@ -17,7 +17,7 @@ import threading
 import concurrent.futures
 import collections
 import datetime
-from datetime import datetime, date, time as dtime
+from datetime import datetime, date, time as dtime, timedelta
 import pandas as pd
 import numpy as np
 from typing import Dict, List, Tuple, Optional, Any, Callable
@@ -31,6 +31,7 @@ from ats.reentry_tracker import get_reentry_tracker
 import math
 import pickle
 import zlib
+from contextlib import contextmanager
 
 logger = LoggerFactory.getLogger("TDXRealtimeFetcher")
 
@@ -569,6 +570,8 @@ class TDXGlobalCachePool:
 
         # 分区 7: 真实流通股本与总股本缓存 {clean_code: float}
         self._shares_cache: Dict[str, float] = {}
+        # 单股缓存代际：清理后旧进程的快照不得再次写回。
+        self._cache_generations: Dict[str, int] = {}
 
         # 监控统计指标
         self.stats = {
@@ -587,6 +590,30 @@ class TDXGlobalCachePool:
 
         # 初始化时从 RamDisk 极速载入 (仅需 0.2ms)
         self._load_from_ramdisk()
+
+    @contextmanager
+    def _ramdisk_file_lock(self):
+        """Serialize cache snapshot read/modify/write across app processes."""
+        lock_path = self._ramdisk_path + ".lock"
+        os.makedirs(os.path.dirname(lock_path), exist_ok=True)
+        with open(lock_path, "a+b") as lock_file:
+            lock_file.seek(0, os.SEEK_END)
+            if lock_file.tell() == 0:
+                lock_file.write(b"\0")
+                lock_file.flush()
+            lock_file.seek(0)
+            try:
+                import msvcrt
+            except ImportError:
+                # Non-Windows development fallback; production runs on Windows.
+                yield
+                return
+            msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+            try:
+                yield
+            finally:
+                lock_file.seek(0)
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
 
     # ─────────────────────────────────────────────────────────────────────
     # 【自动数据修复校验层】— 透明自愈，不改任何上层调用接口
@@ -774,7 +801,9 @@ class TDXGlobalCachePool:
         return final, repaired
 
     @staticmethod
-    def _has_complete_sessions(records: List[Dict[str, Any]], expected_days: int) -> bool:
+    def _has_complete_sessions(records: List[Dict[str, Any]], expected_days: int,
+                               min_bars: int = 220,
+                               max_gap_minutes: Optional[int] = 5) -> bool:
         """Only complete minute sessions may form a multi-day VWAP baseline."""
         sessions: Dict[str, set] = {}
         for row in records:
@@ -787,25 +816,30 @@ class TDXGlobalCachePool:
             return False
         for minutes in sessions.values():
             ordered = sorted(minutes)
-            if len(ordered) < 220 or ordered[0] > "09:40" or ordered[-1] < "14:50":
+            if len(ordered) < min_bars or ordered[0] > "09:40" or ordered[-1] < "14:50":
                 return False
             morning = [int(t[:2]) * 60 + int(t[3:]) for t in ordered if "09:30" <= t <= "11:30"]
             afternoon = [int(t[:2]) * 60 + int(t[3:]) for t in ordered if "13:00" <= t <= "15:00"]
             if (not morning or not afternoon or
-                any(b - a > 5 for segment in (morning, afternoon)
-                    for a, b in zip(segment, segment[1:]))):
+                (max_gap_minutes is not None and
+                 any(b - a > max_gap_minutes for segment in (morning, afternoon)
+                     for a, b in zip(segment, segment[1:])))):
                 return False
         return True
 
     @classmethod
     def _has_complete_frame(cls, df: pd.DataFrame, days: int, today_str: str,
-                            require_today: bool = False, code: str = "") -> bool:
+                            require_today: bool = False, code: str = "",
+                            ipo_history: bool = False) -> bool:
         required = {"date", "time_only", "vwap", "close", "cum_vol_shares", "cum_amt"}
         if not isinstance(df, pd.DataFrame) or df.empty or not required.issubset(df.columns):
             return False
         dates = df["date"].astype(str)
         history = df.loc[dates < today_str, ["date", "time_only"]].to_dict("records")
-        if days > 1 and not cls._has_complete_sessions(history, days - 1):
+        if days > 1 and not cls._has_complete_sessions(
+            history, days - 1, min_bars=1 if ipo_history else 220,
+            max_gap_minutes=None if ipo_history else 5,
+        ):
             return False
         if require_today and today_str not in set(dates):
             return False
@@ -827,6 +861,48 @@ class TDXGlobalCachePool:
             if (valid & ((vwap - expected_vwap).abs() > np.maximum(0.03, expected_vwap * 0.005))).any():
                 return False
         return True
+
+    @staticmethod
+    def _ipo_frame_alignment_issue(df: pd.DataFrame, expected_dates: List[str]) -> Optional[str]:
+        """Allow IPO history with sparse bars when every listed session is represented."""
+        required = {"date", "time_only"}
+        if not isinstance(df, pd.DataFrame) or df.empty or not required.issubset(df.columns):
+            return "缺少必要列或数据为空"
+        dates = df["date"].astype(str)
+        if sorted(set(dates)) != expected_dates:
+            return f"交易日不匹配(上市日历={expected_dates}, 实得={sorted(set(dates))})"
+        seen = set()
+        sessions: Dict[str, set] = {}
+        for day, minute in zip(dates, df["time_only"].astype(str)):
+            if len(day) != 10 or not re.fullmatch(r"\d{2}:\d{2}", minute):
+                return f"时间戳格式错误({day} {minute})"
+            key = (day, minute)
+            if key in seen:
+                return f"分钟重复({day} {minute})"
+            seen.add(key)
+            sessions.setdefault(day, set()).add(minute)
+        for minutes in sessions.values():
+            if (not minutes or min(minutes) > "09:40" or max(minutes) < "14:50"
+                    or not any("09:30" <= minute <= "11:30" for minute in minutes)
+                    or not any("13:00" <= minute <= "15:00" for minute in minutes)):
+                return "分时未覆盖开盘/收盘或午前/午后时段"
+        return None
+
+    @classmethod
+    def _listing_session_dates(cls, listing_date: str, today_str: str) -> List[str]:
+        """Return exchange sessions from listing through today using the shared calendar."""
+        try:
+            first = datetime.strptime(str(listing_date)[:10], "%Y-%m-%d").date()
+            last = datetime.strptime(str(today_str)[:10], "%Y-%m-%d").date()
+        except (TypeError, ValueError):
+            return []
+        if first > last:
+            return []
+        return [
+            (first + timedelta(days=offset)).isoformat()
+            for offset in range((last - first).days + 1)
+            if cls.is_trading_day((first + timedelta(days=offset)).isoformat())
+        ]
 
     def _validate_history_entry(self, code: str, entry: Dict[str, Any], today_str: str) -> bool:
         """
@@ -890,13 +966,19 @@ class TDXGlobalCachePool:
         days = int(entry.get("days", key[1] if isinstance(key, tuple) else 1))
         cache_day = str(entry.get("date") or today_str)
         code = key[0] if isinstance(key, tuple) else str(key)
-        if not self._has_complete_frame(df, days, cache_day, code=code):
+        ipo_dates = entry.get("ipo_dates", [])
+        ipo_aligned = bool(ipo_dates and self._ipo_frame_alignment_issue(df, ipo_dates) is None)
+        if (not self._has_complete_frame(df, days, cache_day, code=code, ipo_history=ipo_aligned)
+                and not ipo_aligned):
             logger.debug(f"[AutoRepair] {key} 增量分时历史覆盖不完整，丢弃并重新拉取")
             return False
         if (entry.get("frozen") or cache_day < today_str or
             (cache_day == today_str and datetime.now().strftime("%H:%M") >= "15:05")):
             closed = df.loc[df["date"].astype(str) == cache_day, ["date", "time_only"]].to_dict("records")
-            if not self._has_complete_sessions(closed, 1):
+            if not self._has_complete_sessions(
+                closed, 1, min_bars=1 if ipo_aligned else 220,
+                max_gap_minutes=None if ipo_aligned else 5,
+            ):
                 logger.debug(f"[AutoRepair] {key} 收盘快照缺失，丢弃并重新拉取")
                 return False
 
@@ -946,7 +1028,8 @@ class TDXGlobalCachePool:
 
         return True
 
-    def _load_from_ramdisk(self) -> bool:
+    def _load_from_ramdisk(self, force: bool = False, sync_rollover: bool = True,
+                           restore_vwap: bool = True) -> bool:
         """
         【RamDisk 极速加载 + 自动修复校验】
         从内存盘读取 zlib level 1 压缩二进制包，0.2ms 完成跨进程历史静态缓存与增量计算状态热重载。
@@ -956,7 +1039,7 @@ class TDXGlobalCachePool:
             if not os.path.exists(self._ramdisk_path):
                 return False
             mtime = os.path.getmtime(self._ramdisk_path)
-            if mtime <= self._last_ramdisk_mtime and self._last_ramdisk_mtime > 0:
+            if not force and mtime <= self._last_ramdisk_mtime and self._last_ramdisk_mtime > 0:
                 return False
 
             with open(self._ramdisk_path, "rb") as f:
@@ -971,13 +1054,9 @@ class TDXGlobalCachePool:
                 payload = pickle.loads(raw_bytes)
             except (zlib.error, pickle.UnpicklingError, EOFError, Exception) as corrupt_err:
                 logger.warning(
-                    f"⚠️ [AutoRepair] RamDisk 缓存文件损坏 ({corrupt_err})，已自动删除脏文件，"
-                    "下次写入时将重建干净缓存。"
+                    f"⚠️ [AutoRepair] RamDisk 缓存文件损坏 ({corrupt_err})，"
+                    "下次持锁写入时将重建干净缓存。"
                 )
-                try:
-                    os.remove(self._ramdisk_path)
-                except Exception:
-                    pass
                 return False
 
             today_str = datetime.now().strftime("%Y-%m-%d")
@@ -993,12 +1072,44 @@ class TDXGlobalCachePool:
             skipped_count = 0
 
             with self._mutex:
+                def _cache_generation(entry: Dict[str, Any]) -> int:
+                    try:
+                        return int(entry.get("_cache_generation", 0))
+                    except (TypeError, ValueError):
+                        return 0
+
+                remote_generations = payload.get("cache_generations", {})
+                if isinstance(remote_generations, dict):
+                    for code, generation in remote_generations.items():
+                        c_clean = str(code).zfill(6)
+                        try:
+                            self._cache_generations[c_clean] = max(
+                                self._cache_generations.get(c_clean, 0), int(generation)
+                            )
+                        except (TypeError, ValueError):
+                            continue
+
+                # Drop this process's pre-clear copies before merging remote records.
+                for code, entry in list(self._history_static_bars.items()):
+                    if _cache_generation(entry) < self._cache_generations.get(code, 0):
+                        self._history_static_bars.pop(code, None)
+                for key, entry in list(self._incremental_intraday_pool.items()):
+                    if _cache_generation(entry) < self._cache_generations.get(key[0], 0):
+                        self._incremental_intraday_pool.pop(key, None)
+                        self._multi_day_df_cache.pop(key, None)
+                for key in list(self._multi_day_df_cache):
+                    if key[0] in self._cache_generations and self._cache_generations[key[0]] > 0:
+                        if key not in self._incremental_intraday_pool:
+                            self._multi_day_df_cache.pop(key, None)
+
                 # ── 静态历史分时：三层校验后写入 ──
                 remote_hist = payload.get("history_static_bars", {})
                 if isinstance(remote_hist, dict):
                     for k, v in remote_hist.items():
                         if not isinstance(v, dict) or not isinstance(v.get("records"), list):
                             skipped_count += 1
+                            continue
+                        if _cache_generation(v) < self._cache_generations.get(str(k).zfill(6), 0):
                             continue
                         # 记录级自愈修复
                         try:
@@ -1034,6 +1145,11 @@ class TDXGlobalCachePool:
                 remote_inc = payload.get("incremental_intraday_pool", {})
                 if isinstance(remote_inc, dict):
                     for k, v in remote_inc.items():
+                        if not isinstance(k, tuple) or not k or not isinstance(v, dict):
+                            skipped_count += 1
+                            continue
+                        if _cache_generation(v) < self._cache_generations.get(str(k[0]).zfill(6), 0):
+                            continue
                         if not self._validate_incremental_entry(k, v, today_str):
                             skipped_count += 1
                             continue
@@ -1077,14 +1193,15 @@ class TDXGlobalCachePool:
                     )
 
             # VWAP 工厂仅持久化有界摘要和当前日分钟状态，不把 DataFrame 放进快照分区。
-            try:
-                from ats.vwap_factory import VWAPFactory
-                VWAPFactory.get_instance().restore_states(payload.get("vwap_states", {}))
-            except Exception as e_vwap_restore:
-                logger.debug(f"[TDXGlobalCachePool] VWAP 摘要恢复降级: {e_vwap_restore}")
+            if restore_vwap:
+                try:
+                    from ats.vwap_factory import VWAPFactory
+                    VWAPFactory.get_instance().restore_states(payload.get("vwap_states", {}))
+                except Exception as e_vwap_restore:
+                    logger.debug(f"[TDXGlobalCachePool] VWAP 摘要恢复降级: {e_vwap_restore}")
 
             # 若已开盘且是跨日缓存，载入昨日数据后立即执行自动滑动窗口滚动迭代 (剔除早期数据，保留前9天基线)
-            if is_cross_day:
+            if is_cross_day and sync_rollover:
                 self._check_date_rollover(force_from_date=cache_date)
 
             return True
@@ -1117,40 +1234,47 @@ class TDXGlobalCachePool:
             vwap_states = VWAPFactory.get_instance().export_states()
         except Exception:
             vwap_states = {}
-        with self._mutex:
-            if not force and (now - self._last_flush_ts < 300.0):
-                return False
-
-            if not self._history_static_bars and not self._incremental_intraday_pool and not self._shares_cache and not vwap_states:
-                return False
-
-            today_str = self._current_date_str
-            # 判断是否盘中活跃期 (交易日 09:15 ~ 15:05 为盘中活跃期；开盘前 <09:15 或收盘后 >=15:05 均为固化状态)
-            current_hm = datetime.now().strftime("%H:%M")
-            is_trading_active = self.is_trading_day(today_str) and ("09:15" <= current_hm < "15:05")
-            is_after_close = not is_trading_active
-
-            payload = {
-                "date": today_str,
-                "version": 3,
-                "frozen": is_after_close,
-                "history_static_bars": dict(self._history_static_bars),
-                "incremental_intraday_pool": dict(self._incremental_intraday_pool),
-                "daily_metrics_cache": dict(self._daily_metrics_cache),
-                "shares_cache": dict(self._shares_cache),
-                "vwap_states": vwap_states,
-                "updated_at": now
-            }
-
         try:
-            raw_bytes = pickle.dumps(payload, protocol=pickle.HIGHEST_PROTOCOL)
-            compressed = zlib.compress(raw_bytes, 1)
+            with self._ramdisk_file_lock():
+                # Merge the latest cross-process snapshot while holding the file lock;
+                # persisted generations evict copies created before a cache clear.
+                self._load_from_ramdisk(force=True, sync_rollover=False, restore_vwap=False)
+                with self._mutex:
+                    if not force and (now - self._last_flush_ts < 300.0):
+                        return False
 
-            tmp_path = self._ramdisk_path + f".{os.getpid()}.tmp"
-            with open(tmp_path, "wb") as f:
-                f.write(compressed)
+                    for code, entry in list(self._history_static_bars.items()):
+                        if int(entry.get("_cache_generation", 0)) < self._cache_generations.get(code, 0):
+                            self._history_static_bars.pop(code, None)
+                    for key, entry in list(self._incremental_intraday_pool.items()):
+                        if int(entry.get("_cache_generation", 0)) < self._cache_generations.get(key[0], 0):
+                            self._incremental_intraday_pool.pop(key, None)
+                            self._multi_day_df_cache.pop(key, None)
 
-            os.replace(tmp_path, self._ramdisk_path)
+                    today_str = self._current_date_str
+                    current_hm = datetime.now().strftime("%H:%M")
+                    is_trading_active = self.is_trading_day(today_str) and ("09:15" <= current_hm < "15:05")
+                    is_after_close = not is_trading_active
+                    payload = {
+                        "date": today_str,
+                        "version": 4,
+                        "frozen": is_after_close,
+                        "history_static_bars": dict(self._history_static_bars),
+                        "incremental_intraday_pool": dict(self._incremental_intraday_pool),
+                        "cache_generations": dict(self._cache_generations),
+                        "daily_metrics_cache": dict(self._daily_metrics_cache),
+                        "shares_cache": dict(self._shares_cache),
+                        "vwap_states": vwap_states,
+                        "updated_at": now
+                    }
+
+                raw_bytes = pickle.dumps(payload, protocol=pickle.HIGHEST_PROTOCOL)
+                compressed = zlib.compress(raw_bytes, 1)
+                tmp_path = self._ramdisk_path + f".{os.getpid()}.tmp"
+                with open(tmp_path, "wb") as f:
+                    f.write(compressed)
+                os.replace(tmp_path, self._ramdisk_path)
+
             self._last_flush_ts = now
             try:
                 self._last_ramdisk_mtime = os.path.getmtime(self._ramdisk_path)
@@ -1164,17 +1288,17 @@ class TDXGlobalCachePool:
             logger.debug(f"[TDXGlobalCachePool] 写入 RamDisk 异常: {e}")
             return False
 
-    def _maybe_sync_from_ramdisk(self):
+    def _maybe_sync_from_ramdisk(self, force: bool = False):
         """轻量微秒级探测 RamDisk mtime，外部进程有新数据时自动热重载"""
         now = time.time()
-        if now - self._last_mtime_check_ts < 1.0:
+        if not force and now - self._last_mtime_check_ts < 1.0:
             return
         self._last_mtime_check_ts = now
         try:
             if os.path.exists(self._ramdisk_path):
                 mtime = os.path.getmtime(self._ramdisk_path)
-                if mtime > self._last_ramdisk_mtime:
-                    self._load_from_ramdisk()
+                if force or mtime > self._last_ramdisk_mtime:
+                    self._load_from_ramdisk(force=force)
         except Exception:
             pass
 
@@ -1207,17 +1331,49 @@ class TDXGlobalCachePool:
                 try:
                     hist_entry = self._history_static_bars.get(c_clean)
                     existing_records = list(hist_entry.get("records", [])) if hist_entry else []
-                    days = hist_entry.get("days", 10) if hist_entry else 10
+                    inc_candidates = [
+                        (key, entry) for key, entry in self._incremental_intraday_pool.items()
+                        if key[0] == c_clean and isinstance(entry, dict)
+                        and isinstance(entry.get("df"), pd.DataFrame) and not entry["df"].empty
+                    ]
+                    inc_entry = None
+                    if hist_entry:
+                        inc_entry = next((entry for key, entry in inc_candidates
+                                          if key[1] == hist_entry.get("days")), None)
+                    if inc_entry is None and inc_candidates:
+                        _, inc_entry = max(inc_candidates,
+                                           key=lambda item: item[1].get("updated_at", 0.0))
+                    base_days = int(hist_entry.get("days", 10)) if hist_entry else (
+                        int(next((key[1] for key, entry in inc_candidates if entry is inc_entry), 10))
+                        if inc_entry else 10
+                    )
+                    requested_days = int(
+                        (inc_entry or {}).get("requested_days")
+                        or (hist_entry or {}).get("requested_days")
+                        or base_days
+                    )
+                    adaptive_history = bool(
+                        (inc_entry or {}).get("adaptive_history")
+                        or (hist_entry or {}).get("adaptive_history")
+                    )
+                    # IPO 的历史窗口随实际上市天数增长，避免第一天 key=(code,1)
+                    # 在次日按默认 10 日查找而被漏掉。
+                    days = min(10, max(2, base_days + 1)) if base_days < 10 else 10
 
-                    # 尝试从昨日增量池中提取昨日分时
-                    inc_key = (c_clean, days)
-                    inc_entry = self._incremental_intraday_pool.get(inc_key)
+                    # 从该标的最新的增量分时提取前一交易日数据；IPO 会使用实际可用天数对应的 key。
                     yesterday_records = []
                     if inc_entry:
                         df_yesterday = inc_entry.get("df")
                         if df_yesterday is not None and not df_yesterday.empty and "date" in df_yesterday.columns:
-                            yesterday_records = df_yesterday[df_yesterday["date"] == effective_old_date].to_dict('records')
-                            if not yesterday_records:
+                            if hist_entry:
+                                yesterday_records = df_yesterday[df_yesterday["date"] == effective_old_date].to_dict('records')
+                            else:
+                                # IPO 静态基线可能因不足完整 10 日而不存在；保留增量帧中
+                                # 已有的全部历史日，跨日后再追加昨日，保证短窗口逐日增长。
+                                yesterday_records = df_yesterday[
+                                    df_yesterday["date"].astype(str) <= effective_old_date
+                                ].to_dict('records')
+                            if not yesterday_records and hist_entry:
                                 u_d = sorted(df_yesterday["date"].unique())
                                 if u_d:
                                     yesterday_records = df_yesterday[df_yesterday["date"] == u_d[-1]].to_dict('records')
@@ -1281,6 +1437,8 @@ class TDXGlobalCachePool:
                         self._history_static_bars[c_clean] = {
                             "date": today_str,
                             "days": days,
+                            "requested_days": requested_days,
+                            "adaptive_history": adaptive_history,
                             "records": new_records,
                             "last_cum_vol": cum_vol,
                             "last_cum_amt": cum_amt,
@@ -1308,12 +1466,18 @@ class TDXGlobalCachePool:
             pass
 
     # ── 1. 静态历史分时长效缓存 ──
-    def get_static_history_bars(self, code: str, days: int) -> Optional[Dict[str, Any]]:
+    def get_static_history_bars(self, code: str, days: int,
+                                requested_days: Optional[int] = None) -> Optional[Dict[str, Any]]:
+        self._maybe_sync_from_ramdisk(force=True)
         self._check_date_rollover()
         c_clean = str(code).zfill(6)
         with self._mutex:
             self.stats["total_queries"] += 1
             entry = self._history_static_bars.get(c_clean)
+            if (entry is not None and requested_days and entry.get("adaptive_history")
+                and entry.get("requested_days") == int(requested_days)
+                and entry.get("date") == self._current_date_str):
+                days = int(entry.get("days", days))
             if (entry is not None 
                 and entry.get("date") == self._current_date_str 
                 and entry.get("days") == days
@@ -1335,6 +1499,10 @@ class TDXGlobalCachePool:
         self._maybe_sync_from_ramdisk()
         with self._mutex:
             entry = self._history_static_bars.get(c_clean)
+            if (entry is not None and requested_days and entry.get("adaptive_history")
+                and entry.get("requested_days") == int(requested_days)
+                and entry.get("date") == self._current_date_str):
+                days = int(entry.get("days", days))
             if (entry is not None 
                 and entry.get("date") == self._current_date_str 
                 and entry.get("days") == days
@@ -1352,7 +1520,10 @@ class TDXGlobalCachePool:
                 return entry
             return None
 
-    def set_static_history_bars(self, code: str, days: int, records: List[Dict[str, Any]], last_cum_vol: float, last_cum_amt: float, last_cum_pv: float = 0.0):
+    def set_static_history_bars(self, code: str, days: int, records: List[Dict[str, Any]],
+                                last_cum_vol: float, last_cum_amt: float, last_cum_pv: float = 0.0,
+                                requested_days: Optional[int] = None):
+        self._maybe_sync_from_ramdisk(force=True)
         self._check_date_rollover()
         c_clean = str(code).zfill(6)
         today_str = self._current_date_str
@@ -1379,6 +1550,9 @@ class TDXGlobalCachePool:
             self._history_static_bars[c_clean] = {
                 "date": today_str,
                 "days": days,
+                "requested_days": int(requested_days or days),
+                "adaptive_history": int(requested_days or days) > int(days),
+                "_cache_generation": self._cache_generations.get(c_clean, 0),
                 "records": cleaned_records,
                 "_quality_len": len(cleaned_records),
                 "last_cum_vol": float(last_cum_vol),
@@ -1391,6 +1565,7 @@ class TDXGlobalCachePool:
 
     # ── 2. 多日分时最终结果短效缓存 ──
     def get_multi_day_df(self, code: str, days: int, ttl: float = 2.4) -> Optional[pd.DataFrame]:
+        self._maybe_sync_from_ramdisk(force=True)
         self._check_date_rollover()
         c_clean = str(code).zfill(6)
         key = (c_clean, int(days))
@@ -1415,7 +1590,8 @@ class TDXGlobalCachePool:
                 self._multi_day_df_cache[key] = (df.copy(), time.time(), self._current_date_str)
 
     # ── 3. 交易日计算增量分时与时间戳复用 ──
-    def get_incremental_intraday(self, code: str, days: int, ttl: float = 2.4) -> Optional[Tuple[pd.DataFrame, Dict[str, Any]]]:
+    def get_incremental_intraday(self, code: str, days: int, ttl: float = 2.4,
+                                 requested_days: Optional[int] = None) -> Optional[Tuple[pd.DataFrame, Dict[str, Any]]]:
         """
         【时间戳增量复用 & 收盘固化直出】
         - 若当前处于收盘后 (15:05 后) 或非交易日，且包含今日数据或打上了 frozen，直接 0 网络直出
@@ -1425,12 +1601,24 @@ class TDXGlobalCachePool:
         self._check_date_rollover()
         c_clean = str(code).zfill(6)
         key = (c_clean, int(days))
+        lookup_days = int(requested_days or days)
         current_hm = datetime.now().strftime("%H:%M")
         is_trading_active = self.is_trading_day(self._current_date_str) and ("09:15" <= current_hm < "15:05")
         is_after_close = not is_trading_active
 
         with self._mutex:
             entry = self._incremental_intraday_pool.get(key)
+            if entry is None:
+                adaptive = [
+                    candidate for cache_key, candidate in self._incremental_intraday_pool.items()
+                    if cache_key[0] == c_clean and candidate.get("adaptive_history")
+                    and candidate.get("requested_days") == lookup_days
+                    and candidate.get("date") == self._current_date_str
+                    and isinstance(candidate.get("df"), pd.DataFrame)
+                ]
+                if adaptive:
+                    entry = max(adaptive, key=lambda candidate: candidate.get("updated_at", 0.0))
+                    key = (c_clean, int(entry.get("days", days)))
             if entry is not None:
                 df = entry.get("df")
                 ts = entry.get("updated_at", 0.0)
@@ -1462,6 +1650,17 @@ class TDXGlobalCachePool:
         self._maybe_sync_from_ramdisk()
         with self._mutex:
             entry = self._incremental_intraday_pool.get(key)
+            if entry is None:
+                adaptive = [
+                    candidate for cache_key, candidate in self._incremental_intraday_pool.items()
+                    if cache_key[0] == c_clean and candidate.get("adaptive_history")
+                    and candidate.get("requested_days") == lookup_days
+                    and candidate.get("date") == self._current_date_str
+                    and isinstance(candidate.get("df"), pd.DataFrame)
+                ]
+                if adaptive:
+                    entry = max(adaptive, key=lambda candidate: candidate.get("updated_at", 0.0))
+                    key = (c_clean, int(entry.get("days", days)))
             if entry is not None:
                 df = entry.get("df")
                 ts = entry.get("updated_at", 0.0)
@@ -1491,26 +1690,67 @@ class TDXGlobalCachePool:
 
     def set_incremental_intraday(self, code: str, days: int, df: pd.DataFrame,
                                  latest_bar_time: str, today_bar_count: int,
-                                 last_cum_vol: float, last_cum_amt: float, last_cum_pv: float = 0.0):
+                                 last_cum_vol: float, last_cum_amt: float, last_cum_pv: float = 0.0,
+                                 requested_days: Optional[int] = None):
         """
         【写入增量分时与时间戳状态 + 入口校验】
         在写入前校验 last_cum_vol/amt 合法性，修正异常的 today_bar_count，
         防止重启中断导致的错误基线落库后影响下一次增量累加。
         """
+        self._maybe_sync_from_ramdisk(force=True)
         self._check_date_rollover()
         c_clean = str(code).zfill(6)
-        key = (c_clean, int(days))
+        requested_days = max(1, int(requested_days or days))
+        effective_days = int(days)
         current_hm = datetime.now().strftime("%H:%M")
         is_after_close = (current_hm >= "15:05")
         today_str = self._current_date_str
 
-        if not self._has_complete_frame(df, int(days), today_str,
-                                        require_today=("09:30" <= current_hm <= "15:05"), code=c_clean):
-            logger.warning(f"[AutoRepair] {c_clean} 增量分时覆盖不完整，跳过持久化")
+        # Confirmed IPOs may legitimately have fewer sessions than the requested VWAP horizon.
+        # Adapt the cache horizon to the bars actually returned; each included closed session is validated.
+        listing_date = ""
+        try:
+            from ats.new_stock_fetcher import NewStockFetcher
+            ipo_info = getattr(NewStockFetcher.get_instance(), "_cached_ipo_dict", {}).get(c_clean, {})
+            listing_date = str(ipo_info.get("listing_date") or "").strip()[:10]
+        except Exception:
+            pass
+        expected_listing_dates = self._listing_session_dates(listing_date, today_str) if listing_date else []
+        actual_dates = sorted(set(df["date"].astype(str))) if isinstance(df, pd.DataFrame) and "date" in df else []
+        # IPO 拉到的实际上市交易日数就是当前可用 VWAP 窗口；不因尚未积累满请求周期而拒绝落盘。
+        # 后续交易日到来后，该窗口自然从 1、2、3... 日增长。完整性仍逐日校验已有历史日。
+        ipo_dates_match = bool(expected_listing_dates and actual_dates == expected_listing_dates)
+        adaptive_history = bool(expected_listing_dates and requested_days > len(actual_dates))
+        if expected_listing_dates:
+            effective_days = min(requested_days, max(1, len(actual_dates)))
+
+        key = (c_clean, effective_days)
+
+        frame_complete = self._has_complete_frame(
+            df, effective_days, today_str,
+            require_today=("09:30" <= current_hm <= "15:05"), code=c_clean,
+            ipo_history=ipo_dates_match,
+        )
+        ipo_timeline_issue = (
+            self._ipo_frame_alignment_issue(df, expected_listing_dates)
+            if expected_listing_dates else "未取得有效上市交易日历"
+        )
+        ipo_timeline_aligned = ipo_dates_match and ipo_timeline_issue is None
+        if not frame_complete and not ipo_timeline_aligned:
+            logger.warning(
+                f"[AutoRepair] {c_clean} 增量分时覆盖不完整，跳过持久化 "
+                f"(窗口={effective_days}/{requested_days}日, 历史应有={max(0, effective_days - 1)}日, "
+                f"实得日期={actual_dates}, 上市日={listing_date or '未知'}, "
+                f"日期匹配={ipo_dates_match}, 入口完整校验={frame_complete}, "
+                f"IPO校验原因={ipo_timeline_issue})"
+            )
             return
         if is_after_close:
             closed = df.loc[df["date"].astype(str) == today_str, ["date", "time_only"]].to_dict("records")
-            if not self._has_complete_sessions(closed, 1):
+            if not self._has_complete_sessions(
+                closed, 1, min_bars=1 if ipo_timeline_aligned else 220,
+                max_gap_minutes=None if ipo_timeline_aligned else 5,
+            ):
                 logger.warning(f"[AutoRepair] {c_clean} 收盘分时不完整，跳过持久化")
                 return
 
@@ -1542,7 +1782,11 @@ class TDXGlobalCachePool:
                     "df": df.copy(),
                     "_quality_len": len(df),
                     "date": today_str,
-                    "days": days,
+                    "days": effective_days,
+                    "requested_days": requested_days,
+                    "adaptive_history": adaptive_history,
+                    "ipo_dates": expected_listing_dates if ipo_timeline_aligned else [],
+                    "_cache_generation": self._cache_generations.get(c_clean, 0),
                     "latest_bar_time": str(latest_bar_time),
                     "today_bar_count": _tbc,
                     "last_cum_vol": _l_vol,
@@ -1583,8 +1827,19 @@ class TDXGlobalCachePool:
         :param code: None 表示全量标的，否则针对指定股票代码
         :param partition: None 表示全部分区，否则可选 'history', 'df', 'incremental', 'metrics', 'quotes', 'kline', 'shares'
         """
+        self._maybe_sync_from_ramdisk(force=True)
         with self._mutex:
             c_clean = str(code).zfill(6) if code else None
+            if partition in (None, "history", "incremental"):
+                affected_codes = {c_clean} if c_clean else (
+                    set(self._history_static_bars)
+                    | {key[0] for key in self._incremental_intraday_pool}
+                    | {key[0] for key in self._multi_day_df_cache}
+                )
+                for affected_code in affected_codes:
+                    if affected_code:
+                        self._cache_generations[affected_code] = self._cache_generations.get(affected_code, 0) + 1
+
             if partition in (None, "history"):
                 if c_clean:
                     self._history_static_bars.pop(c_clean, None)
@@ -1632,6 +1887,10 @@ class TDXGlobalCachePool:
                     self._shares_cache.pop(c_clean, None)
                 else:
                     self._shares_cache.clear()
+
+            if partition in (None, "history", "incremental"):
+                # 即使清理后所有分区为空，也要将空状态写入磁盘覆盖旧快照。
+                self._is_dirty = True
 
         if partition in (None, "history", "incremental"):
             try:
@@ -1715,16 +1974,7 @@ class TDXGlobalCachePool:
 
             self._is_dirty = True
 
-        # ── 删除 RamDisk 脏文件，重新落盘干净数据 ──
-        try:
-            if os.path.exists(self._ramdisk_path):
-                os.remove(self._ramdisk_path)
-                report["deleted_ramdisk"] = True
-                logger.info(f"🗑️ [AutoRepair] 已删除 RamDisk 脏文件: {self._ramdisk_path}")
-        except Exception as e:
-            logger.debug(f"[AutoRepair] 删除 RamDisk 文件异常: {e}")
-
-        # 落盘干净数据
+        # 由持锁原子写入替换旧快照，不能直接删共享文件，否则其他进程可趁空窗写回旧数据。
         self.flush_to_ramdisk(force=True)
 
         logger.info(
@@ -1848,6 +2098,7 @@ class TDXRealtimeFetcher:
 
         # 1 分钟分时 K 线缓存
         self._intraday_bars_cache: Dict[str, Tuple[pd.DataFrame, float, str]] = {}
+        self._ipo_listing_date_cache: Dict[str, str] = {}
 
         self.add_log("🚀 TDX 高频行情引擎初始化完成，准备测速与连接最优主站 (基准周期: 3.0s)", level="INFO")
 
@@ -2639,19 +2890,9 @@ class TDXRealtimeFetcher:
             self._bidding_sim_stats.pop(c_clean, None)
             self._bidding_signals.pop(c_clean, None)
         self.add_log(f"🧹 已强力清除标的 [{c_clean}] 的 TDX 内存 K 线、快照与集合竞价缓存！", level="INFO")
-        # ── 强制清除分时历史缓存 + 删除 RamDisk 文件 + 重建干净状态 ──
+        # ── 通过跨进程代际标记清除分时缓存，避免其他进程把旧快照写回 ──
         try:
-            # 第一步：invalidate 强制移除内存中该股全分区缓存，并内部 flush 更新到 RamDisk
             self.cache_pool.invalidate(code=c_clean, partition=None)
-            # 第二步：删除 RamDisk 文件（invalidate flush 后再删，确保下次启动全新无污染）
-            try:
-                if os.path.exists(self.cache_pool._ramdisk_path):
-                    os.remove(self.cache_pool._ramdisk_path)
-                    logger.debug(f"[clear_stock_cache] 已删除 RamDisk: {self.cache_pool._ramdisk_path}")
-            except Exception as _rm_err:
-                logger.debug(f"[clear_stock_cache] 删除 RamDisk 异常: {_rm_err}")
-            # 第三步：重建不含该股的干净 RamDisk
-            self.cache_pool.flush_to_ramdisk(force=True)
             self.add_log(
                 f"🔧 [{c_clean}] 分时历史已清除，RamDisk 已重建，下次启动将从 TDX 重新拉取全量历史分时。",
                 level="INFO"
@@ -2899,19 +3140,9 @@ class TDXRealtimeFetcher:
             self._bidding_sim_stats.pop(c_clean, None)
             self._bidding_signals.pop(c_clean, None)
         self.add_log(f"🧹 已强力清除标的 [{c_clean}] 的 TDX 内存 K 线、快照与集合竞价缓存！", level="INFO")
-        # ── 强制清除分时历史缓存 + 删除 RamDisk 文件 + 重建干净状态 ──
+        # ── 通过跨进程代际标记清除分时缓存，避免其他进程把旧快照写回 ──
         try:
-            # 第一步：invalidate 强制移除内存中该股全分区缓存，并内部 flush 到 RamDisk
             self.cache_pool.invalidate(code=c_clean, partition=None)
-            # 第二步：删除 RamDisk 文件（确保下次启动全新无污染，不残留任何脏数据）
-            try:
-                if os.path.exists(self.cache_pool._ramdisk_path):
-                    os.remove(self.cache_pool._ramdisk_path)
-                    logger.debug(f"[clear_stock_cache] 已删除 RamDisk: {self.cache_pool._ramdisk_path}")
-            except Exception as _rm_err:
-                logger.debug(f"[clear_stock_cache] 删除 RamDisk 异常: {_rm_err}")
-            # 第三步：重建不含该股的干净 RamDisk
-            self.cache_pool.flush_to_ramdisk(force=True)
             self.add_log(
                 f"🔧 [{c_clean}] 分时历史已清除，RamDisk 已重建，下次启动将从 TDX 重新拉取全量历史分时。",
                 level="INFO"
@@ -3211,8 +3442,33 @@ class TDXRealtimeFetcher:
         - 增量累加成交量与成交额极速重算 VWAP，20 只股票网络耗时从 6 秒骤降到 300 毫秒以内，全系统全局复用！
         """
         c_clean = str(code).zfill(6)
+        requested_days = max(1, int(days))
+        listing_date = ""
+        expected_listing_dates = []
         try:
             today_date_str = datetime.now().strftime("%Y-%m-%d")
+            # IPO 日期由 NewStockFetcher 维护；按上市后的交易日上限取数，避免新股
+            # 被当作已有 10 日历史而重复请求不存在的 TDX 分页。
+            try:
+                listing_cache = getattr(self, "_ipo_listing_date_cache", None)
+                if listing_cache is None:
+                    listing_cache = self._ipo_listing_date_cache = {}
+                listing_date = listing_cache.get(c_clean, "")
+                if not listing_date:
+                    from ats.new_stock_fetcher import NewStockFetcher
+                    ipo_info = getattr(NewStockFetcher.get_instance(), "_cached_ipo_dict", {}).get(c_clean, {})
+                    listing_date = str(ipo_info.get("listing_date") or "").strip()[:10]
+                    if listing_date and listing_date != "-":
+                        listing_cache[c_clean] = listing_date
+                listed = datetime.strptime(listing_date, "%Y-%m-%d").date() if listing_date else None
+                today = datetime.strptime(today_date_str, "%Y-%m-%d").date()
+                if listed is not None and listed <= today:
+                    expected_listing_dates = self.cache_pool._listing_session_dates(listing_date, today_date_str)
+                    calendar_sessions = len(expected_listing_dates)
+                    if 0 < calendar_sessions < days:
+                        days = calendar_sessions
+            except Exception:
+                pass
             can_rollover = self.cache_pool.can_trigger_date_rollover(today_date_str)
 
             # 1. 优先从全局缓存池提取增量/收盘固化缓存 (收盘后、非交易日或开盘前 <09:15 均 0 网络直出；盘中在 TTL 内 0 网络直出)
@@ -3223,7 +3479,9 @@ class TDXRealtimeFetcher:
             _cache_ttl = 86400.0 if not can_rollover else max(1.5, _base_intv * 0.8)
 
             cached_inc_df = None
-            cached_inc = self.cache_pool.get_incremental_intraday(c_clean, days, ttl=_cache_ttl)
+            cached_inc = self.cache_pool.get_incremental_intraday(
+                c_clean, days, ttl=_cache_ttl, requested_days=requested_days
+            )
             if cached_inc is not None:
                 df_inc, _ = cached_inc
                 if df_inc is not None and not df_inc.empty:
@@ -3241,7 +3499,11 @@ class TDXRealtimeFetcher:
             tot_circ_shares = self.get_circulation_shares(c_clean) if not is_idx else 0.0
 
             # 2. 检查全局长效静态历史分时缓存 (若已有历史前 N-1 天数据，仅需拉取当天 1 天增量)
-            hist_entry = self.cache_pool.get_static_history_bars(c_clean, days)
+            hist_entry = self.cache_pool.get_static_history_bars(
+                c_clean, days, requested_days=requested_days
+            )
+            if hist_entry is not None:
+                days = int(hist_entry.get("days", days))
             has_valid_hist = (
                 hist_entry is not None 
                 and bool(hist_entry.get("records"))
@@ -3346,18 +3608,35 @@ class TDXRealtimeFetcher:
 
             df["date_str"] = df["datetime"].astype(str).str[:10]
             df["time_str"] = df["datetime"].astype(str).str[11:16]
+            # TDX 分页存在边界重复/返回顺序差异；先按时间稳定排序并去重，
+            # 避免累计量价在重复分钟上形成 VWAP 竖刺。
+            df.sort_values(["date_str", "time_str"], kind="stable", inplace=True)
+            df.drop_duplicates(subset=["date_str", "time_str"], keep="last", inplace=True)
 
             # TDX may return a successful but truncated page. Never turn that page
             # into a long-lived VWAP baseline or a frozen close snapshot.
             if can_rollover:
                 history_days = sorted(d for d in df["date_str"].unique() if d < today_date_str)
-                needed_history = 0 if has_valid_hist else max(0, days - 1)
+                ipo_dates_match = bool(
+                    expected_listing_dates
+                    and sorted(df["date_str"].unique()) == expected_listing_dates
+                )
+                if has_valid_hist:
+                    needed_history = 0
+                elif listing_date and expected_listing_dates:
+                    # IPO 尚未积累满请求周期时，验证 API 实际返回的每个历史交易日，
+                    # 不把上市前不存在的分页当成缺页。
+                    needed_history = min(max(0, days - 1), len(history_days))
+                else:
+                    needed_history = max(0, days - 1)
                 history_rows = df[df["date_str"].isin(history_days[-needed_history:])].copy() if needed_history else pd.DataFrame()
                 if needed_history:
                     history_rows.rename(columns={"date_str": "date", "time_str": "time_only"}, inplace=True)
                 if (today_date_str not in set(df["date_str"]) or
                     (needed_history and not self.cache_pool._has_complete_sessions(
-                        history_rows[["date", "time_only"]].to_dict("records"), needed_history))):
+                        history_rows[["date", "time_only"]].to_dict("records"), needed_history,
+                        min_bars=1 if ipo_dates_match else 220,
+                        max_gap_minutes=None if ipo_dates_match else 5))):
                     logger.warning(f"[AutoRepair] {c_clean} TDX 分时分页缺失，拒绝缓存并等待重拉")
                     return pd.DataFrame()
                 now_hm = datetime.now().strftime("%H:%M")
@@ -3475,13 +3754,17 @@ class TDXRealtimeFetcher:
                         today_bar_count=len(today_records),
                         last_cum_vol=cum_vol_shares,
                         last_cum_amt=cum_amt,
-                        last_cum_pv=cum_pv
+                        last_cum_pv=cum_pv,
+                        requested_days=requested_days
                     )
                 return df_res
 
             # 4. 分支 B: 首次拉取或未命中静态缓存，全量计算并长效写入全局静态缓存
             unique_dates = sorted(df["date_str"].unique())
             target_dates = unique_dates[-days:] if len(unique_dates) >= days else unique_dates
+            if listing_date and expected_listing_dates:
+                days = min(days, max(1, len(target_dates)))
+                target_dates = target_dates[-days:]
 
             df_filtered = df[df["date_str"].isin(target_dates)].copy()
             if df_filtered.empty:
@@ -3567,7 +3850,8 @@ class TDXRealtimeFetcher:
             # 若有多日数据，将今天之前的前 N-1 天长效写入全局静态缓存池
             if hist_part_records and days > 1:
                 self.cache_pool.set_static_history_bars(
-                    c_clean, days, hist_part_records, hist_last_vol, hist_last_amt, hist_last_pv
+                    c_clean, days, hist_part_records, hist_last_vol, hist_last_amt, hist_last_pv,
+                    requested_days=requested_days
                 )
 
             df_res = pd.DataFrame(res_rows)
@@ -3581,19 +3865,21 @@ class TDXRealtimeFetcher:
                     today_bar_count=today_recs_cnt,
                     last_cum_vol=cum_vol_shares,
                     last_cum_amt=cum_amt,
-                    last_cum_pv=cum_pv
+                    last_cum_pv=cum_pv,
+                    requested_days=requested_days
                 )
             return df_res
         except Exception as e:
             logger.debug(f"拉取 {c_clean} 多日分时数据异常: {e}")
             return pd.DataFrame()
 
-    def fetch_multi_horizon_vwap(self, code: str) -> Tuple[pd.DataFrame, Any]:
-        """Return the shared 10-day frame and the process-wide 1/5/10-day VWAP snapshot."""
+    def fetch_multi_horizon_vwap(self, code: str, days: int = 10) -> Tuple[pd.DataFrame, Any]:
+        """Return a shared multi-day frame and the process-wide 1/5/10-day VWAP snapshot."""
         from ats.vwap_factory import VWAPFactory
 
         clean_code = str(code).zfill(6)
-        frame = self.fetch_multi_day_intraday_bars(clean_code, days=10)
+        days = max(1, min(10, int(days)))
+        frame = self.fetch_multi_day_intraday_bars(clean_code, days=days)
         if frame is None or frame.empty:
             return pd.DataFrame(), VWAPFactory.get_instance().get_snapshot(clean_code)
         is_index = normalize_tdx_target(clean_code)[0]
