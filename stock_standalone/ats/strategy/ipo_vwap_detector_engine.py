@@ -555,7 +555,10 @@ class IPOVWAPDetectorEngine:
         today_date_str = time.strftime("%Y-%m-%d")
 
         # 优先使用底层统一的多日分时获取接口 (自带静态缓存 + 时间戳增量复用 + RamDisk 持久化)
-        df_multi = self.fetcher.fetch_multi_day_intraday_bars(clean_code, days=days)
+        if days >= 10 and hasattr(self.fetcher, "fetch_multi_horizon_vwap"):
+            df_multi, _vwap_snapshot = self.fetcher.fetch_multi_horizon_vwap(clean_code)
+        else:
+            df_multi = self.fetcher.fetch_multi_day_intraday_bars(clean_code, days=days)
         if (df_multi is None or df_multi.empty) and days > 1:
             listing_days = day_df
             if listing_days is None:

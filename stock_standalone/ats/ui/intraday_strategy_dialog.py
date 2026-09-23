@@ -48,7 +48,7 @@ from PyQt6.QtGui import QColor, QFont, QBrush, QIcon, QPainter, QPen, QPainterPa
 
 from sys_utils import resolve_stock_name
 from ats.intraday_strategy_engine import IntradayStrategyEngine
-from ats.tdx_realtime_fetcher import TDXRealtimeFetcher
+from ats.tdx_realtime_fetcher import TDXRealtimeFetcher, normalize_tdx_target
 from ats.ui.styles import apply_dark_theme, DARK_THEME_QSS, bind_top_shortcut, set_seamless_stay_on_top
 from signal_types import SignalPoint, SignalType, SignalSource
 
@@ -2009,6 +2009,12 @@ class SBCChartCanvas(QWidget):
         for v in vwaps:
             if v > 0.001 and not np.isnan(v) and not np.isinf(v):
                 all_cands.append(float(v))
+        multi_vwap = getattr(self, "multi_vwap_snapshot", None)
+        if multi_vwap is not None:
+            for name in ("vwap_1d", "vwap_5d", "vwap_10d"):
+                value = getattr(multi_vwap, name, None)
+                if value is not None and value > 0.001:
+                    all_cands.append(float(value))
         if op_ref > 0.001:
             all_cands.append(float(op_ref))
         if 0 < self.high_price:
@@ -2438,6 +2444,20 @@ class SBCChartCanvas(QWidget):
             painter.setPen(QPen(QColor("#ffd700"), 1))
             painter.setFont(QFont("Arial", 8, QFont.Weight.Bold))
             painter.drawText(margin_left + chart_w + 3, int(y_vwap + 3), f"VWAP:{vwaps[-1]:.2f}")
+
+        if multi_vwap is not None:
+            refs = (("1D", multi_vwap.vwap_1d, "#ffb000"),
+                    ("5D", multi_vwap.vwap_5d if multi_vwap.complete_5d else None, "#ff4fd8"),
+                    ("10D", multi_vwap.vwap_10d if multi_vwap.complete_10d else None, "#8b7bff"))
+            for label, value, color in refs:
+                if value is None or value <= 0:
+                    continue
+                y_ref = price_to_y(float(value))
+                painter.setPen(QPen(QColor(color), 1, Qt.PenStyle.DotLine))
+                painter.drawLine(int(margin_left), int(y_ref), int(margin_left + chart_w), int(y_ref))
+                painter.setPen(QPen(QColor(color), 1))
+                painter.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
+                painter.drawText(int(margin_left + chart_w + 3), int(y_ref + 3), f"{label}:{value:.2f}")
 
         # 🌟 绘制分时图上的买卖信号点与悬浮 Tag (自适应简略显示 + 2D真实碰撞避让 + 半透明毛玻璃 + 高对比度设计)
         if self.signals:
@@ -6515,10 +6535,30 @@ class SBCIntradayChartDialog(QWidget):
 
         t_min = op * 1.03 if op > 1.0 else 0.0
         t_max = op * 1.05 if op > 1.0 else 0.0
+        self.canvas.multi_vwap_snapshot = None
 
         if mode in ["5d", "10d"]:
             days = 5 if mode == "5d" else 10
-            df_multi = fetcher.fetch_multi_day_intraday_bars(self.code, days=days)
+            df_multi, multi_vwap_snapshot = fetcher.fetch_multi_horizon_vwap(self.code)
+            if not df_multi.empty and days < 10 and "date" in df_multi.columns:
+                available_dates = sorted(df_multi["date"].astype(str).unique())
+                visible_dates = available_dates[-days:]
+                df_multi = df_multi[df_multi["date"].astype(str).isin(visible_dates)].copy()
+                if "bar_amt" in df_multi.columns and "bar_vol" in df_multi.columns:
+                    amounts = pd.to_numeric(df_multi["bar_amt"], errors="coerce").fillna(0.0)
+                    volumes = pd.to_numeric(df_multi["bar_vol"], errors="coerce").fillna(0.0)
+                    if normalize_tdx_target(self.code)[0] and "close" in df_multi.columns:
+                        amounts = pd.to_numeric(df_multi["close"], errors="coerce").fillna(0.0) * volumes
+                    # Preserve the legacy line: cumulative from the selected window's first day.
+                    running_amount = []
+                    running_volume = []
+                    base_amount = base_volume = 0.0
+                    for _, group in df_multi.groupby("date", sort=True):
+                        running_amount.extend((base_amount + amounts.loc[group.index].cumsum()).tolist())
+                        running_volume.extend((base_volume + volumes.loc[group.index].cumsum()).tolist())
+                        base_amount += float(amounts.loc[group.index].sum())
+                        base_volume += float(volumes.loc[group.index].sum())
+                    df_multi["vwap"] = [a / v if v > 0 else 0.0 for a, v in zip(running_amount, running_volume)]
             if not df_multi.empty:
                 if op <= 1.0:
                     op = float(df_multi.iloc[-1].get("open", p))
@@ -6554,10 +6594,16 @@ class SBCIntradayChartDialog(QWidget):
                             )
 
                 self._sync_daily_channel_to_canvas()
+                self.canvas.multi_vwap_snapshot = multi_vwap_snapshot
                 self.canvas.set_data(df_multi, op, vw, hi, lo, t_min, t_max, sigs, period_mode=mode)
                 self.canvas.update_amplitude_data(self.code)
                 self.lbl_title.setText(f"📊 {self.code} {resolve_stock_name(self.code)} | [{mode.upper()}多日分时] 今:{op:.2f} 现:{cl_last:.2f}")
-                self.lbl_title.setToolTip(f"【{self.code} {resolve_stock_name(self.code)}】[{mode.upper()}多日分时] 今开={op:.2f}元, 现价={cl_last:.2f}元, VWAP={vw:.2f}元, 最高={hi:.2f}元, 最低={lo:.2f}元 | 策略买卖信号数: {len(sigs)} 步")
+                vwap_linkage = f" | 多周期结构: {multi_vwap_snapshot.structure} | 今日VWAP={multi_vwap_snapshot.vwap_1d:.2f}" if multi_vwap_snapshot and multi_vwap_snapshot.vwap_1d else ""
+                if multi_vwap_snapshot and multi_vwap_snapshot.vwap_5d and multi_vwap_snapshot.complete_5d:
+                    vwap_linkage += f" | 5日VWAP={multi_vwap_snapshot.vwap_5d:.2f}"
+                if multi_vwap_snapshot and multi_vwap_snapshot.vwap_10d and multi_vwap_snapshot.complete_10d:
+                    vwap_linkage += f" | 10日VWAP={multi_vwap_snapshot.vwap_10d:.2f}"
+                self.lbl_title.setToolTip(f"【{self.code} {resolve_stock_name(self.code)}】[{mode.upper()}多日分时] 今开={op:.2f}元, 现价={cl_last:.2f}元, VWAP={vw:.2f}元, 最高={hi:.2f}元, 最低={lo:.2f}元 | 策略买卖信号数: {len(sigs)} 步{vwap_linkage}")
                 self._update_unified_realtime_log(df_multi, op, cl_last, vw, hi, lo, to_rate, amt, sigs, mode=mode)
                 if getattr(self, 'auto_eval_enabled', True):
                     self._on_eval_r_clicked(toggle=False)

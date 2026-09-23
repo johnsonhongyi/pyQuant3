@@ -334,7 +334,7 @@ class SectorETFEngine:
             return res
 
         except Exception as ex:
-            logger.warning(f"Failed to evaluate ETF trend for {etf_code}: {ex}")
+            logger.exception(f"Failed to evaluate ETF trend for {etf_code}: {ex}")
             self._etf_cache[etf_code] = {"cached_time": now, "data": default_res}
             return default_res
 
