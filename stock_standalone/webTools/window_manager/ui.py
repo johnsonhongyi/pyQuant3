@@ -2888,17 +2888,28 @@ class AntigravityAccountManagerDialog(QDialog):
         self.quota_worker = None
         self._quota_request_id = 0
         self.account_cards = {} # email -> {widgets}
+        self._countdown_timer = QtCore.QTimer(self)
+        self._countdown_timer.timeout.connect(self._update_all_card_countdowns)
         self.init_ui()
         self.reload_accounts()
         if auto_fetch:
             self.refresh_quotas_async()
+        self._countdown_timer.start(15000)
 
     def closeEvent(self, event):
         # 账户管理器采用常驻单实例：关闭仅隐藏，避免下次重新构建整套 Qt 卡片。
         # 正在运行的旧探针无需阻塞等待；generation 失效后其结果会自动丢弃。
         self._quota_request_id += 1
+        if hasattr(self, '_countdown_timer') and self._countdown_timer.isActive():
+            self._countdown_timer.stop()
         self.hide()
         event.ignore()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._update_all_card_countdowns()
+        if hasattr(self, '_countdown_timer') and not self._countdown_timer.isActive():
+            self._countdown_timer.start(15000)
 
     def init_ui(self):
         self.setStyleSheet("""
@@ -3347,14 +3358,19 @@ class AntigravityAccountManagerDialog(QDialog):
         return frame
 
     def _apply_quota_to_card(self, card_record: dict, quota_groups: dict, quota_summary: dict = None):
-        """将配额组数据与双层周限额填充至卡片的各个模型进度条与文本中"""
+        """将配额组数据与双层周限额填充至卡片的各个模型进度条与文本中（动态计算实时倒计时）"""
+        from . import antigravity_manager
+
+        card_record["quota_groups"] = quota_groups or {}
+        card_record["quota_summary"] = quota_summary or {}
+
         # 1. 渲染四大模型 5小时滚动配额
         models = card_record["models"]
         for m_key, w in models.items():
-            grp = quota_groups.get(m_key)
+            grp = quota_groups.get(m_key) if quota_groups else None
             if grp:
                 pct = grp.get("remaining_pct", 0.0)
-                desc = grp.get("reset_desc", "")
+                _, desc = antigravity_manager.resolve_quota_reset_desc(grp)
                 w["lbl"].setText(f"{pct}% ({desc})")
                 w["bar"].setValue(int(pct))
                 # 动态颜色
@@ -3372,7 +3388,7 @@ class AntigravityAccountManagerDialog(QDialog):
         if weekly_w:
             summary = quota_summary or {}
             # 若未直接提供 quota_summary，尝试从 groups[model]["weekly"] 中提取
-            if not summary:
+            if not summary and quota_groups:
                 g_w = quota_groups.get("Gemini Pro", {}).get("weekly") or quota_groups.get("Gemini Flash", {}).get("weekly")
                 c_w = quota_groups.get("Claude", {}).get("weekly") or quota_groups.get("GPT-OSS", {}).get("weekly")
                 if g_w or c_w:
@@ -3385,7 +3401,7 @@ class AntigravityAccountManagerDialog(QDialog):
                 p_data = summary.get(pool_key, {}).get("weekly", {})
                 if p_data and "remaining_pct" in p_data:
                     pct = p_data.get("remaining_pct", 0.0)
-                    desc = p_data.get("reset_desc", "")
+                    _, desc = antigravity_manager.resolve_quota_reset_desc(p_data)
                     pw["lbl"].setText(f"{pct}% ({desc})")
                     pw["bar"].setValue(int(pct))
                     color = "#10b981" if pct >= 50 else ("#f59e0b" if pct >= 20 else "#ef4444")
@@ -3396,6 +3412,41 @@ class AntigravityAccountManagerDialog(QDialog):
                     else:
                         pw["lbl"].setText("⚪ 切换激活")
                     pw["bar"].setValue(0)
+
+    def _update_all_card_countdowns(self):
+        """本地时钟计时器槽函数：根据当前实际时钟实时递减所有卡片上的倒计时文本，无需走网络探针"""
+        from . import antigravity_manager
+        if not self.isVisible() or not self.account_cards:
+            return
+
+        for card_record in self.account_cards.values():
+            quota_groups = card_record.get("quota_groups") or {}
+            models = card_record.get("models") or {}
+            for m_key, w in models.items():
+                grp = quota_groups.get(m_key)
+                if grp and "remaining_pct" in grp:
+                    pct = grp.get("remaining_pct", 0.0)
+                    _, desc = antigravity_manager.resolve_quota_reset_desc(grp)
+                    w["lbl"].setText(f"{pct}% ({desc})")
+
+            weekly_w = card_record.get("weekly_widgets") or {}
+            summary = card_record.get("quota_summary") or {}
+            if not summary and quota_groups:
+                g_w = quota_groups.get("Gemini Pro", {}).get("weekly") or quota_groups.get("Gemini Flash", {}).get("weekly")
+                c_w = quota_groups.get("Claude", {}).get("weekly") or quota_groups.get("GPT-OSS", {}).get("weekly")
+                if g_w or c_w:
+                    summary = {
+                        "gemini": {"weekly": g_w or {}},
+                        "claude_gpt": {"weekly": c_w or {}}
+                    }
+
+            for pool_key, pw in weekly_w.items():
+                p_data = summary.get(pool_key, {}).get("weekly", {})
+                if p_data and "remaining_pct" in p_data:
+                    pct = p_data.get("remaining_pct", 0.0)
+                    _, desc = antigravity_manager.resolve_quota_reset_desc(p_data)
+                    pw["lbl"].setText(f"{pct}% ({desc})")
+
 
     @property
     def card_widgets(self):

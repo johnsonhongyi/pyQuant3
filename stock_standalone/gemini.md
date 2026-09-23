@@ -1,5 +1,21 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-09-23 10:35
+- [x] **【脱机/无连接刷新时配额倒计时系统时钟动态重算与本地 QTimer 实时递减落地】(`webTools/window_manager/antigravity_manager.py`, `webTools/window_manager/ui.py`, `tests/test_antigravity_manager.py`, `dist/manage_window_layout.exe`)**：
+    - [x] **根因定位与排查确证**：
+        - 缓存文件 `.quota_cache.json` 中保存的 `reset_desc` 属于历史静态快照字符串（如昨日生成的 `20小时48分后`）；
+        - UI 卡片渲染时直接读取旧 `reset_desc`，导致脱机/备用账户无连接刷新时，剩余倒计时始终不变；
+    - [x] **基于真实系统时钟的动态重算机制 (`resolve_quota_reset_desc`)**：
+        - 无论是四大模型 5小时滚动配额还是共享池周限额，统一基于绝对时间戳 `reset_time` (ISO 格式) 结合系统当前真实 UTC 时钟进行毫秒级重算；
+        - 过期时间（如历史已过去的重置点）自动显示 `已重置/已就绪`；未来时间准确显示此时此刻真实的 `X小时Y分后`；
+        - 支持纳秒截断、时区偏移容错与无绝对时间戳时的 `diff_sec` 相对时间衰减兜底；
+    - [x] **弹窗本地轻量时钟计时器 (`QTimer`) 实时平滑递减**：
+        - `AntigravityAccountManagerDialog` 集成 15 秒轻量本地计时器 `_countdown_timer`，在无网络、无外部探针连接时自主驱动卡片 Label 倒计时平滑递减；
+        - `showEvent` 与 `closeEvent`/`hide` 自动启停定时器，零磁盘与网络 I/O 开销，兼顾节能与实时看盘体验；
+    - [x] **专项测试与重新打包**：
+        - 编写 7 项完备单元测试（覆盖时钟动态计算、到期自动就绪、更新衰减、UI Label 实时重算），7/7 纯绿通过；
+        - 全量重新打包生成最新 `stock_standalone/dist/manage_window_layout.exe`（42MB）。
+
 ## 2026-09-23 10:20
 - [x] **【Antigravity 切换系统凭据打包环境零依赖加固与 EXE 重新打包构建】(`webTools/window_manager/antigravity_manager.py`, `manage_window_layout.spec`, `tests/test_antigravity_manager.py`, `dist/manage_window_layout.exe`)**：
     - [x] **根因定位与排查确证**：
