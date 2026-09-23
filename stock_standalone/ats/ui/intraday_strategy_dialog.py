@@ -6561,6 +6561,10 @@ class SBCIntradayChartDialog(QWidget):
                 self._update_unified_realtime_log(df_multi, op, cl_last, vw, hi, lo, to_rate, amt, sigs, mode=mode)
                 if getattr(self, 'auto_eval_enabled', True):
                     self._on_eval_r_clicked(toggle=False)
+            else:
+                self.canvas.set_data(pd.DataFrame(), op, 0.0, hi, lo, t_min, t_max, [], period_mode=mode)
+                self.lbl_title.setText(f"📊 {self.code} | [{mode.upper()}多日分时] 数据不完整，正在自动重拉")
+                self.lbl_info.setText("分时缓存校验未通过，VWAP策略暂停，等待自动重拉")
             return
 
         if mode in ["5m", "15m", "30m", "60m", "day", "2d", "3d", "2k", "3k", "week", "month"]:

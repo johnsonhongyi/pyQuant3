@@ -543,7 +543,8 @@ class IPOVWAPDetectorEngine:
     def normalize_volume(self, raw_volume_signal: float, explicit_time: Any = None) -> float:
         return normalize_intraday_volume(raw_volume_signal, explicit_time, self.enable_intraday_volume_normalization)
 
-    def _fetch_multi_day_bars_fast(self, clean_code: str, days: int = 10) -> Tuple[Optional[pd.DataFrame], float]:
+    def _fetch_multi_day_bars_fast(self, clean_code: str, days: int = 10,
+                                   day_df: Optional[pd.DataFrame] = None) -> Tuple[Optional[pd.DataFrame], float]:
         """
         【增量极速分时引擎】盘中长效缓存前 N-1 天历史分时 + 当日时间戳增量复用
         - 优先利用底层 TDXGlobalCachePool 的 RamDisk 与时间戳增量；
@@ -555,8 +556,12 @@ class IPOVWAPDetectorEngine:
 
         # 优先使用底层统一的多日分时获取接口 (自带静态缓存 + 时间戳增量复用 + RamDisk 持久化)
         df_multi = self.fetcher.fetch_multi_day_intraday_bars(clean_code, days=days)
-        if df_multi is None or df_multi.empty:
-            df_multi = self.fetcher.fetch_multi_day_intraday_bars(clean_code, days=1)
+        if (df_multi is None or df_multi.empty) and days > 1:
+            listing_days = day_df
+            if listing_days is None:
+                listing_days = batch_fetch_day_kline_fast([clean_code], dl=days).get(clean_code)
+            if listing_days is not None and 0 < len(listing_days) < days:
+                df_multi = self.fetcher.fetch_multi_day_intraday_bars(clean_code, days=1)
 
         # 维护 _history_multi_day_cache 兼容性
         if df_multi is not None and not df_multi.empty and "date" in df_multi.columns:
@@ -608,14 +613,14 @@ class IPOVWAPDetectorEngine:
         strat_ms = 0.0
         try:
             # 1. 增量极速获取 10 日多日分时与 VWAP 数据
-            df_multi, bars_ms = self._fetch_multi_day_bars_fast(clean_code, days=10)
+            df_multi, bars_ms = self._fetch_multi_day_bars_fast(clean_code, days=10, day_df=day_df)
                 
             t_strat_start = time.perf_counter()
             if df_multi is not None and not df_multi.empty:
                 self._evaluate_vwap_structure(df_multi, sig, day_df=day_df)
                 self._evaluate_bottom_base_structure(df_multi, sig, day_df=day_df, eval_time=eval_time)
             else:
-                sig.signal_desc = "分时数据拉取中..."
+                sig.signal_desc = "10日分时数据不完整，自动重拉中；VWAP策略暂停"
 
             # ⚡ 早盘集合竞价与实时盘口快照融合 (09:15~09:30 时段分钟线尚未生成今日 Bar，自动融合最新盘口)
             current_hm = time.strftime("%H:%M")
@@ -644,7 +649,8 @@ class IPOVWAPDetectorEngine:
             self._evaluate_kline_trend(clean_code, sig, day_df=day_df, df_60m=df_60m)
 
             # 3. 综合裁决预下单与异动信号 (操盘手核心逻辑)
-            self._synthesize_final_decision(sig)
+            if df_multi is not None and not df_multi.empty:
+                self._synthesize_final_decision(sig)
             strat_ms = (time.perf_counter() - t_strat_start) * 1000
 
         except Exception as e:
