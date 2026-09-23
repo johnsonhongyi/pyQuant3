@@ -2458,9 +2458,20 @@ def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount
                                 merged_df = merged_df[~merged_df.index.duplicated(keep='last')]
                             else:
                                 merged_df = df
-                            with pd.HDFStore(temp_fname, mode='w', complib=complib) as tmp_h5:
+
+                            # [CRITICAL] tdx_last_df contains many resample tables.
+                            # Schema self-heal must preserve sibling tables; mode='w' on a fresh temp
+                            # would replace the whole HDF with only the repaired table.
+                            if os.path.exists(fname_path):
+                                shutil.copy2(fname_path, temp_fname)
+                                schema_mode = 'a'
+                            else:
+                                schema_mode = 'w'
+                            with pd.HDFStore(temp_fname, mode=schema_mode, complib=complib) as tmp_h5:
+                                if '/' + table in tmp_h5.keys():
+                                    tmp_h5.remove(table)
                                 put_table_safe(tmp_h5, table, merged_df, MultiIndex=MultiIndex, rewrite=True, complib=complib)
-                            log.warning(f"✅ [SCHEMA-FIX] {fname}[{table}] rebuilt with {len(merged_df)} rows (hist={len(hist_df)}, new={len(df)}), schema restored.")
+                            log.warning(f"✅ [SCHEMA-FIX] {fname}[{table}] rebuilt with {len(merged_df)} rows (hist={len(hist_df)}, new={len(df)}), sibling tables preserved.")
                             del hist_df, merged_df
                         else:
                             raise

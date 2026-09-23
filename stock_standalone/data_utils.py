@@ -3480,9 +3480,9 @@ def fetch_and_process(
                 init_res_m = resample
 
                 if now_time <= 835:
-                    base_resamples = ['2d', '3d', 'w', 'm','45d','3M', 'd']
+                    base_resamples = ['d','2d', '3d', 'w', 'm','45d','3M']
                 else:
-                    base_resamples = ['3d', 'w', 'd']
+                    base_resamples = ['d','3d', 'w']
 
                 # 保证 init_res_m 永远最后一个，且不重复
                 resamples = [x for x in base_resamples if x != init_res_m]
