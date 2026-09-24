@@ -38,7 +38,7 @@ import pandas as pd
 pd.set_option('display.float_format', '{:.2f}'.format)
 from tk_frame_fingerprint import (
     frame_fingerprint, same_fingerprint, needs_full_for_null_or_rows, full_ack_matches,
-    is_new_trade_snapshot,
+    is_new_trade_snapshot, has_sync_consumer, content_requires_send, send_content_fingerprint,
 )
 import numpy as np
 import win32api
@@ -3300,18 +3300,23 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                             # 🚀 [TK 统一流式订阅中心]
                             if not hasattr(self, '_stream_subscribers'):
                                 self._stream_subscribers = {
-                                    26670: {"name": "ATS_Terminal", "active": False, "last_try": 0.0, "is_static": True, "fail_count": 0},
-                                    26671: {"name": "Multi_Period_Engine", "active": False, "last_try": 0.0, "is_static": True, "fail_count": 0},
-                                    26675: {"name": "IPO_Detector", "active": False, "last_try": 0.0, "is_static": True, "fail_count": 0},
+                                    26670: {"name": "ATS_Terminal", "active": False, "subscribed": False, "last_try": 0.0, "is_static": True, "fail_count": 0},
+                                    26671: {"name": "Multi_Period_Engine", "active": False, "subscribed": False, "last_try": 0.0, "is_static": True, "fail_count": 0},
+                                    26675: {"name": "IPO_Detector", "active": False, "subscribed": False, "last_try": 0.0, "is_static": True, "fail_count": 0},
                                 }
 
-                            if target_port and isinstance(target_port, int):
+                            if target_port == 26668:
+                                # 可视化使用专属显示轨；不得作为日线临时端口再发送一次。
+                                if hasattr(self, '_temp_dynamic_ports'):
+                                    self._temp_dynamic_ports.discard(26668)
+                            elif target_port and isinstance(target_port, int):
                                 # 静态端口天生常态流订阅；动态端口若声明 subscribe 则握手加入常态流订阅
                                 if subscribe or target_port in (26670, 26671, 26675):
                                     if target_port not in self._stream_subscribers:
                                         self._stream_subscribers[target_port] = {
                                             "name": client_name,
                                             "active": True,
+                                            "subscribed": True,
                                             "last_try": 0.0,
                                             "is_static": (target_port in (26670, 26671, 26675)),
                                             "fail_count": 0
@@ -3319,6 +3324,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                         logger.info(f'⚡ [TK 订阅中心] 握手成功！注册常态推送客户端: {client_name} (Port={target_port})')
                                     else:
                                         self._stream_subscribers[target_port]["name"] = client_name
+                                        self._stream_subscribers[target_port]["subscribed"] = True
                                     setattr(self, f'_force_sync_{target_port}', True)
                                 else:
                                     # 单次拉取的临时动态端口
@@ -3328,6 +3334,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                     logger.info(f'⚡ [IPC 动态适配] 接收到临时动态端口 REQ_FULL_SYNC 请求: Port={target_port}')
                             else:
                                 for p in (26670, 26671, 26675):
+                                    self._stream_subscribers[p]["subscribed"] = True
                                     setattr(self, f'_force_sync_{p}', True)
 
                             self._force_full_sync_pending = True
@@ -8821,6 +8828,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             
             if hasattr(self, '_df_first_send_done'):
                 self._df_first_send_done = False
+            # 新可视化进程需要同版本全量首包。
+            self._cold_start = True
+            self._last_attempt_content_fingerprint = None
                 
             # 启动/确认同步线程
             thread_start = time.time()
@@ -8855,25 +8865,31 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             # 🚀 [TK 流式常态推送订阅中心注册表]
             if not hasattr(self, '_stream_subscribers'):
                 self._stream_subscribers = {
-                    26670: {"name": "ATS_Terminal", "active": False, "last_try": 0.0, "is_static": True, "fail_count": 0},
-                    26671: {"name": "Multi_Period_Engine", "active": False, "last_try": 0.0, "is_static": True, "fail_count": 0},
-                    26675: {"name": "IPO_Detector", "active": False, "last_try": 0.0, "is_static": True, "fail_count": 0},
+                    26670: {"name": "ATS_Terminal", "active": False, "subscribed": False, "last_try": 0.0, "is_static": True, "fail_count": 0},
+                    26671: {"name": "Multi_Period_Engine", "active": False, "subscribed": False, "last_try": 0.0, "is_static": True, "fail_count": 0},
+                    26675: {"name": "IPO_Detector", "active": False, "subscribed": False, "last_try": 0.0, "is_static": True, "fail_count": 0},
                 }
             self._cold_start = True # ⭐ [NEW] 冷启动标志
             self._sync_session = uuid.uuid4().hex
+            self._last_attempt_content_fingerprint = None
             empty_wait_count = 0  # ⭐ [NEW] 初始/空数据重试缓冲计数器
 
             while self._df_sync_running:
                 vis_enabled = getattr(self, '_vis_enabled_cache', True)
                 pending_port_sync = any(
-                    getattr(self, f'_force_sync_{port}', False)
-                    for port in list(self._stream_subscribers)
+                    info.get('subscribed', False) and getattr(self, f'_force_sync_{port}', False)
+                    for port, info in list(self._stream_subscribers.items())
                 ) or bool(getattr(self, '_temp_dynamic_ports', None))
                 pending_full_sync = (
                     getattr(self, '_force_full_sync_pending', False)
                     or getattr(self, '_cold_start', False)
                     or pending_port_sync
                 )
+                if not has_sync_consumer(vis_enabled, self._stream_subscribers,
+                                         getattr(self, '_temp_dynamic_ports', None)):
+                    self._send_df_wake_event.wait(timeout=2.0)
+                    self._send_df_wake_event.clear()
+                    continue
                 today = cct.get_today()
                 trade_day = bool(cct.get_trade_date_status()) if getattr(self, '_last_send_trade_date', None) != today else False
                 rollover_preview = None
@@ -8910,6 +8926,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 now_sec = time.time()
                 ats_enabled = False
                 for port, sub_info in list(self._stream_subscribers.items()):
+                    if not sub_info.get('subscribed', False):
+                        continue
                     is_active = sub_info.get("active", False)
                     last_try = getattr(self, f'_last_try_{port}', sub_info.get("last_try", 0.0))
                     if is_active or (now_sec - last_try > 30.0):
@@ -8923,6 +8941,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         now_check = time.time()
                         has_any_ats = False
                         for port, sub_info in list(self._stream_subscribers.items()):
+                            if not sub_info.get('subscribed', False):
+                                continue
                             is_active = sub_info.get("active", False)
                             last_try = getattr(self, f'_last_try_{port}', sub_info.get("last_try", 0.0))
                             if is_active or (now_check - last_try > 30.0):
@@ -9003,8 +9023,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         time.sleep(0.5)
                         continue
 
-                    last_send_time = time.time()
-
                     version, df_bus_all, _, snap_time, df_bus_all_res, _ = bus_data
                     self._last_vis_bus_version = version
                     
@@ -9028,8 +9046,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                             if hasattr(self, attr):
                                 delattr(self, attr)
                         for p in self._stream_subscribers:
-                            setattr(self, f'_force_sync_{p}', True)
-                            setattr(self, f'_awaiting_full_ack_{p}', None)
+                            if self._stream_subscribers[p].get('subscribed', False):
+                                setattr(self, f'_force_sync_{p}', True)
+                                setattr(self, f'_awaiting_full_ack_{p}', None)
                         pending_full_sync = True
 
                     # ⚡ [CORE FIX] 借读契约与不可变边界 (方案阶段 2):
@@ -9059,14 +9078,21 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         df_ui = df_bus_all_res
                     else:
                         df_ui = df_bus_all
+                    display_fp = send_content_fingerprint(df_ui)
+                    daily_fp = send_content_fingerprint(df_bus_all)
+                    content_fp = ((cur_resample, display_fp, daily_fp)
+                                  if display_fp is not None and daily_fp is not None else None)
+                    if not content_requires_send(
+                        getattr(self, '_last_attempt_content_fingerprint', None), content_fp,
+                        getattr(self, '_force_full_sync_pending', False)
+                    ):
+                        continue
+                    # 失败标记仅决定下一帧需全量，不应自行重发相同内容。
+                    self._last_attempt_content_fingerprint = content_fp
+                    last_send_time = time.time()
                     df_hash = hash(version) # 使用总线版本作为哈希
 
                     
-                    # 🚀 [FIX 2] 哈希门控：命中直接跳出昂贵的 compare 逻辑
-                    if getattr(self, "_df_first_send_done", False) and getattr(self, "_last_send_df_hash", None) == df_hash and not pending_full_sync:
-                        # logger.debug("[send_df] Data fingerprint unchanged. Skip sync.")
-                        continue
-
                     # ⚡ [FIX] 处理强制全量同步请求
                     if getattr(self, '_force_full_sync_pending', False):
                         logger.info("[send_df] Executing pending FULL SYNC request")
@@ -9293,6 +9319,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     ats_enabled = False
                     if hasattr(self, '_stream_subscribers'):
                         for port, sub_info in list(self._stream_subscribers.items()):
+                            if not sub_info.get('subscribed', False):
+                                continue
                             is_active = sub_info.get("active", False)
                             last_try = getattr(self, f'_last_try_{port}', sub_info.get("last_try", 0.0))
                             if is_active or (now_ipc - last_try > 30.0):
@@ -9341,7 +9369,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                 has_forced_sub = False
                                 if hasattr(self, '_stream_subscribers'):
                                     for p in self._stream_subscribers:
-                                        if getattr(self, f'_force_sync_{p}', False):
+                                        if self._stream_subscribers[p].get('subscribed', False) and getattr(self, f'_force_sync_{p}', False):
                                             has_forced_sub = True
                                             break
                                 if getattr(self, '_temp_dynamic_ports', None):
@@ -9396,6 +9424,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
                                 if hasattr(self, '_stream_subscribers'):
                                     for port, sub_info in list(self._stream_subscribers.items()):
+                                        if not sub_info.get('subscribed', False):
+                                            continue
                                         is_port_active = sub_info.get("active", False)
                                         last_try = getattr(self, f'_last_try_{port}', sub_info.get("last_try", 0.0))
                                         is_forced_port = getattr(self, f'_force_sync_{port}', False)
@@ -9539,7 +9569,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 # ⭐ 6️⃣ 状态更新（只在这里）
                 # ======================================================
                 prev = getattr(self, "_df_first_send_done", False)
-                self._df_first_send_done = sent
+                self._df_first_send_done = bool(sent or send_success_any)
                 if (sent or send_success_any) and source_fp is not None:
                     previous_source_fp = getattr(self, '_last_send_source_fingerprint', None)
                     self._last_send_source_fingerprint = source_fp

@@ -431,8 +431,8 @@ class StockSelector:
         
         if 'amount' in df.columns:
             amt = pd.to_numeric(df['amount'], errors='coerce').fillna(0)
-            pct_col = pd.to_numeric(df.get('per1d', df.get('percent', df.get('pct', df.get('change_pct', 0)))), errors='coerce').fillna(0)
-            ratio_col = pd.to_numeric(df.get('ratio', df.get('volume_ratio', 1.0)), errors='coerce').fillna(1.0)
+            pct_col = pd.to_numeric(df.get('per1d', df.get('percent', df.get('pct', df.get('change_pct', pd.Series(0, index=df.index))))), errors='coerce').fillna(0)
+            ratio_col = pd.to_numeric(df.get('ratio', df.get('volume_ratio', pd.Series(1.0, index=df.index))), errors='coerce').fillna(1.0)
             
             # 特权豁免条件：涨停、大阳抢跑、高量比异动
             is_limit_up = (pct_col >= 9.2) | (pct_col >= 19.0) # 主板或创业/科创板涨停
@@ -1036,8 +1036,8 @@ class StockSelector:
         df = self.calculate_indicators(df)
         try:
             # 基础流动性与非停牌过滤
-            vol = pd.to_numeric(df.get('volume', df.get('vol', 0)), errors='coerce').fillna(0)
-            cur_p = pd.to_numeric(df.get('close', df.get('trade', 0)), errors='coerce').fillna(0)
+            vol = pd.to_numeric(df.get('volume', df.get('vol', pd.Series(0, index=df.index))), errors='coerce').fillna(0)
+            cur_p = pd.to_numeric(df.get('close', df.get('trade', pd.Series(0, index=df.index))), errors='coerce').fillna(0)
             valid_mask = (vol > 0) & (cur_p > 0)
             sub_df = df[valid_mask].copy()
 
@@ -1060,8 +1060,8 @@ class StockSelector:
                 sub_df = sub_df[sub_df['ma_spread'] <= 0.05]
 
             # 2. 涨跌幅与放量启动条件 (当日涨幅 >= 2.5%, 且放量)
-            pct = pd.to_numeric(sub_df.get('percent', sub_df.get('per1d', 0)), errors='coerce').fillna(0)
-            vol_r = pd.to_numeric(sub_df.get('ratio', sub_df.get('vol_ratio', sub_df.get('volume_ratio', 1.0))), errors='coerce').fillna(1.0)
+            pct = pd.to_numeric(sub_df.get('percent', sub_df.get('per1d', pd.Series(0, index=sub_df.index))), errors='coerce').fillna(0)
+            vol_r = pd.to_numeric(sub_df.get('ratio', sub_df.get('vol_ratio', sub_df.get('volume_ratio', pd.Series(1.0, index=sub_df.index)))), errors='coerce').fillna(1.0)
             
             # 启动过滤: 涨幅 >= 2.5% 且量比 >= 1.3
             pioneer_mask = (pct >= 2.5) & (vol_r >= 1.3)

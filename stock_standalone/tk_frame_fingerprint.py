@@ -4,6 +4,8 @@ None means the frame cannot be hashed safely and must be processed.
 """
 
 import pandas as pd
+import hashlib
+import pickle
 from datetime import datetime
 
 
@@ -18,8 +20,31 @@ def frame_fingerprint(df):
         return None
 
 
+def send_content_fingerprint(df):
+    """Hash even object columns that pandas cannot hash, for send deduplication."""
+    result = frame_fingerprint(df)
+    if result is not None:
+        return result
+    try:
+        return hashlib.blake2b(pickle.dumps(df, protocol=5), digest_size=16).digest()
+    except Exception:
+        return None
+
+
 def same_fingerprint(previous, current):
     return current is not None and previous == current
+
+
+def has_sync_consumer(vis_enabled, subscribers, temporary_ports):
+    """Static port configuration alone does not constitute a subscription."""
+    return bool(vis_enabled or temporary_ports or any(
+        info.get('subscribed', False) for info in subscribers.values()
+    ))
+
+
+def content_requires_send(previous, current, explicit_request=False):
+    """Only changed content or a new request can enter serialization."""
+    return bool(explicit_request or current is None or previous != current)
 
 
 def is_new_trade_snapshot(last_trade_date, today, is_trade_day, snapshot_time,
