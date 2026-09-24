@@ -17,7 +17,7 @@ from typing import Iterable
 
 
 STATE_DIRS = ("inbox", "running", "done", "archive")
-TASK_NAME_RE = re.compile(r"^(?P<id>\d{3,})_(?!result\.md$).+\.md$")
+TASK_NAME_RE = re.compile(r"^(?P<id>(?:\d{3,}|G\d{2}))_(?!result\.md$).+\.md$", re.IGNORECASE)
 
 
 class HubError(RuntimeError):
@@ -122,8 +122,9 @@ class AgentHub:
                 for section in required:
                     if not re.search(rf"^#{{1,2}} {re.escape(section)}\s*$", text, re.MULTILINE):
                         errors.append(f"{path}: missing section '{section}'")
-                declared = re.search(r"^- Task-ID:\s*(\d+)\s*$", text, re.MULTILINE)
-                if not declared or declared.group(1).zfill(3) != task_id:
+                declared = re.search(r"^- Task-ID:\s*((?:\d{3,}|G\d{2}))\s*$", text, re.MULTILINE | re.IGNORECASE)
+                declared_id = declared.group(1).upper() if declared and declared.group(1).upper().startswith("G") else (declared.group(1).zfill(3) if declared else "")
+                if not declared or declared_id != task_id.upper():
                     errors.append(f"{path}: Task-ID does not match filename")
         max_running = int(self.policy.get("max_running_tasks", 1))
         running_count = len(self._task_files("running"))
@@ -170,7 +171,7 @@ class AgentHub:
         value = self._metadata_value(task_path.read_text(encoding="utf-8"), "Depends-On")
         if not value or value.lower() in {"none", "-", "n/a"}:
             return []
-        return [item.strip().zfill(3) for item in re.split(r"[,;\s]+", value) if item.strip()]
+        return [item.strip().upper() for item in re.split(r"[,;/\s]+", value) if item.strip()]
 
     def _dependency_satisfied(self, task_id: str) -> bool:
         try:

@@ -2947,11 +2947,31 @@ class IPOSubnewDetectorDialog(QMainWindow):
 
 
     def closeEvent(self, event):
-        """窗口关闭时集中保存配置"""
-        if hasattr(self, "_render_timer") and self._render_timer.isActive():
-            self._render_timer.stop()
+        """窗口关闭时集中保存配置并安全清理全部定时器与后台任务"""
+        for timer_name in ("_render_timer", "ipc_timer", "refresh_timer", "_auto_sync_timer", "_linkage_timer"):
+            if hasattr(self, timer_name):
+                t = getattr(self, timer_name)
+                if t and hasattr(t, "isActive") and t.isActive():
+                    try:
+                        t.stop()
+                    except Exception:
+                        pass
         if self.worker and self.worker.isRunning():
             self.worker.stop()
             self.worker.wait(500)
         self.save_persisted_state()
+
+        # 关联子窗口清理
+        if hasattr(self, "_command_room_dlg") and self._command_room_dlg:
+            try:
+                self._command_room_dlg.close()
+            except Exception:
+                pass
+
         super().closeEvent(event)
+
+        # 🛡️ 独立运行模式安全退出保护：若主窗口关闭，停止进程事件循环安全退出
+        if os.environ.get("ATS_IS_IPO_DETECTOR_PROCESS") == "1" or self.parent() is None:
+            app_inst = QApplication.instance()
+            if app_inst:
+                app_inst.quit()

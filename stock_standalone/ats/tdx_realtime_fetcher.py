@@ -1470,7 +1470,7 @@ class TDXGlobalCachePool:
     # ── 1. 静态历史分时长效缓存 ──
     def get_static_history_bars(self, code: str, days: int,
                                 requested_days: Optional[int] = None) -> Optional[Dict[str, Any]]:
-        self._maybe_sync_from_ramdisk(force=True)
+        self._maybe_sync_from_ramdisk(force=False)
         self._check_date_rollover()
         c_clean = str(code).zfill(6)
         with self._mutex:
@@ -1525,7 +1525,7 @@ class TDXGlobalCachePool:
     def set_static_history_bars(self, code: str, days: int, records: List[Dict[str, Any]],
                                 last_cum_vol: float, last_cum_amt: float, last_cum_pv: float = 0.0,
                                 requested_days: Optional[int] = None):
-        self._maybe_sync_from_ramdisk(force=True)
+        self._maybe_sync_from_ramdisk(force=False)
         self._check_date_rollover()
         c_clean = str(code).zfill(6)
         today_str = self._current_date_str
@@ -1567,7 +1567,7 @@ class TDXGlobalCachePool:
 
     # ── 2. 多日分时最终结果短效缓存 ──
     def get_multi_day_df(self, code: str, days: int, ttl: float = 2.4) -> Optional[pd.DataFrame]:
-        self._maybe_sync_from_ramdisk(force=True)
+        self._maybe_sync_from_ramdisk(force=False)
         self._check_date_rollover()
         c_clean = str(code).zfill(6)
         key = (c_clean, int(days))
@@ -1684,7 +1684,7 @@ class TDXGlobalCachePool:
         在写入前校验 last_cum_vol/amt 合法性，修正异常的 today_bar_count，
         防止重启中断导致的错误基线落库后影响下一次增量累加。
         """
-        self._maybe_sync_from_ramdisk(force=True)
+        self._maybe_sync_from_ramdisk(force=False)
         self._check_date_rollover()
         c_clean = str(code).zfill(6)
         requested_days = max(1, int(requested_days or days))
@@ -3139,20 +3139,13 @@ class TDXRealtimeFetcher:
 
 
 
-    def fetch_stock_snapshot(
+    def _normalize_quote_to_snapshot(
         self,
-        code: str,
+        q: Dict[str, Any],
         circulation_shares_wan: Optional[float] = None
     ) -> Dict[str, Any]:
-        """
-        拉取单只股票的高精度秒级快照字典（包含开高低收、五档盘口、换手率、成交额、VWAP）
-        """
-        c_clean = str(code).strip().zfill(6)
-        quotes = self.get_security_quotes_safe([c_clean])
-        if not quotes:
-            return {}
-
-        q = quotes[0]
+        """【标准行情快照转换 SSOT】标准化单只标的行情快照字典（包含VWAP均价修正与换手率计算）"""
+        c_clean = str(q.get("code", "")).strip().zfill(6)
         trade_price = float(q.get("price", 0.0))
         open_price = float(q.get("open", trade_price))
         high_price = float(q.get("high", trade_price))
@@ -3211,6 +3204,44 @@ class TDXRealtimeFetcher:
             "ask1_vol": ask1_v,
             "server_time": time.strftime("%H:%M:%S")
         }
+
+    def fetch_stock_snapshot(
+        self,
+        code: str,
+        circulation_shares_wan: Optional[float] = None
+    ) -> Dict[str, Any]:
+        """
+        拉取单只股票的高精度秒级快照字典（包含开高低收、五档盘口、换手率、成交额、VWAP）
+        """
+        c_clean = str(code).strip().zfill(6)
+        quotes = self.get_security_quotes_safe([c_clean])
+        if not quotes:
+            return {}
+        return self._normalize_quote_to_snapshot(quotes[0], circulation_shares_wan)
+
+    def fetch_batch_stock_snapshots(
+        self,
+        codes: List[str],
+        circulation_shares_map: Optional[Dict[str, float]] = None
+    ) -> Dict[str, Dict[str, Any]]:
+        """
+        【⚡ 集中批量拉取行情快照】严格遵守 TDX 40 只安全批次限制，复用标准 VWAP 与换手率转换
+        """
+        if not codes:
+            return {}
+        clean_codes = [str(c).strip().zfill(6) for c in codes if str(c).strip()]
+        quotes = self.get_security_quotes_safe(clean_codes)
+        if not quotes:
+            return {}
+        result: Dict[str, Dict[str, Any]] = {}
+        circ_map = circulation_shares_map or {}
+        for q in quotes:
+            c = str(q.get("code", "")).strip().zfill(6)
+            if not c:
+                continue
+            circ_wan = circ_map.get(c)
+            result[c] = self._normalize_quote_to_snapshot(q, circ_wan)
+        return result
 
     def fetch_intraday_bars(self, code: str) -> pd.DataFrame:
         """

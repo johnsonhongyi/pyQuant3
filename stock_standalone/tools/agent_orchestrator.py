@@ -186,7 +186,7 @@ class AgentOrchestrator:
         tasks = self.hub._task_files("inbox")
         if not tasks:
             raise OrchestratorError("No task is available in inbox")
-        match = re.match(r"(\d{3,})_", tasks[0].name)
+        match = re.match(r"((?:\d{3,}|G\d{2}))_", tasks[0].name)
         if not match:
             raise OrchestratorError(f"Invalid task filename: {tasks[0].name}")
         return match.group(1)
@@ -253,7 +253,7 @@ class AgentOrchestrator:
     def _parallel_owned_patterns(self, exclude_task_id: str) -> list[str]:
         patterns: list[str] = []
         for path in self.hub._task_files("running"):
-            match = re.match(r"(\d{3,})_", path.name)
+            match = re.match(r"((?:\d{3,}|G\d{2}))_", path.name)
             if match and match.group(1) == exclude_task_id.zfill(3):
                 continue
             patterns.extend(
@@ -1062,11 +1062,11 @@ class AgentOrchestrator:
         task_ids: Sequence[str] | None = None,
     ) -> list[str]:
         limit = limit or int(self.config.get("batch_default_workers", 2))
-        requested = {str(item).zfill(3) for item in (task_ids or [])}
+        requested = {str(item).upper() if str(item).upper().startswith("G") else str(item).zfill(3) for item in (task_ids or [])}
         candidates: list[str] = []
         owned: list[str] = []
         for path in self.hub._task_files("inbox"):
-            match = re.match(r"(\d{3,})_", path.name)
+            match = re.match(r"((?:\d{3,}|G\d{2}))_", path.name)
             if not match:
                 continue
             task_id = match.group(1)
@@ -1156,7 +1156,7 @@ class AgentOrchestrator:
     def _checkpoint_next_tasks(self, ids: Sequence[str]) -> list[str]:
         done={str(x).zfill(3) for x in ids}; out=[]
         for path in self.hub._task_files("inbox"):
-            m=re.match(r"(\d{3,})_", path.name)
+            m=re.match(r"((?:\d{3,}|G\d{2}))_", path.name)
             if m and done.intersection(self.hub._dependencies(path)): out.append(f"- {m.group(1)}：{path.stem}")
         return out or ["- 暂无直接依赖本节点的待执行任务；由主计划补充下一节点任务书。"]
 
