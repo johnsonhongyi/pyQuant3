@@ -7787,8 +7787,13 @@ class MainWindow(QMainWindow, WindowMixin):
     def apply_df_diff(self, df_diff, skip_table_request=False):
         """安全地应用增量更新到 df_all"""
         try:
-            if df_diff is None or df_diff.empty or self.df_all is None or self.df_all.empty:
-                return
+            if df_diff is None or df_diff.empty:
+                return False
+            if self.df_all is None or self.df_all.empty:
+                self.df_all = pd.DataFrame()
+                self.df_cache = self.df_all
+                threading.Thread(target=self._request_full_sync, daemon=True).start()
+                return False
             
             # 💥 支持 MultiIndex 格式列 (如由 df.compare 产出)
             if isinstance(df_diff.columns, pd.MultiIndex):
@@ -7800,15 +7805,23 @@ class MainWindow(QMainWindow, WindowMixin):
                             new_cols[base_col] = df_diff[col]
                 df_diff = pd.DataFrame(new_cols, index=df_diff.index)
 
+            # 增删行列由全量包重建；差分不能安全补齐新行的慢字段。
+            if (not df_diff.index.isin(self.df_all.index).all()
+                    or not df_diff.columns.isin(self.df_all.columns).all()):
+                self.df_all = pd.DataFrame()
+                self.df_cache = self.df_all
+                threading.Thread(target=self._request_full_sync, daemon=True).start()
+                return False
+
             # 获取两个 DataFrame 共有的索引
             common_idx = self.df_all.index.intersection(df_diff.index)
             if len(common_idx) == 0:
-                logger.debug("[apply_df_diff] No common indices between df_diff and df_all")
-                return
+                self.df_all = pd.DataFrame()
+                self.df_cache = self.df_all
+                threading.Thread(target=self._request_full_sync, daemon=True).start()
+                return False
             
             for col in df_diff.columns:
-                if col not in self.df_all.columns:
-                    continue  # 跳过 df_all 中不存在的列
                 try:
                     # 只处理共有索引上的有效值
                     col_data = df_diff.loc[common_idx, col]
@@ -7818,7 +7831,7 @@ class MainWindow(QMainWindow, WindowMixin):
                     if len(valid_indices) > 0:
                         self.df_all.loc[valid_indices, col] = df_diff.loc[valid_indices, col]
                 except Exception as e:
-                    logger.debug(f"[apply_df_diff] Column {col} update failed: {e}")
+                    raise ValueError(f"Column {col} update failed") from e
                     
             # ⚡ [OPTIMIZATION] 记录变更代码，交给节流器异步刷新
             changed_codes = set(df_diff.index.tolist())
@@ -7832,8 +7845,13 @@ class MainWindow(QMainWindow, WindowMixin):
             # ⚡ [NEW] 推送数据给 Hotlist 后台线程 (Worker)
             if hasattr(self, 'hotlist_panel') and self.hotlist_panel:
                 self.hotlist_panel.push_market_data(self.df_all)
+            return True
         except Exception as e:
             logger.error(f"[apply_df_diff] Error: {e}")
+            self.df_all = pd.DataFrame()
+            self.df_cache = self.df_all
+            threading.Thread(target=self._request_full_sync, daemon=True).start()
+            return False
 
     def _poll_command_queue(self):
         """轮询内部指令 Pipe (优化版：合并同轮重复切换)"""
@@ -7892,9 +7910,8 @@ class MainWindow(QMainWindow, WindowMixin):
                     elif p_type == 'UPDATE_DF_DIFF':
                         diff_data = payload.get('data')
                         if diff_data is not None and not diff_data.empty:
-                            self.apply_df_diff(diff_data, skip_table_request=True)
-                            self._pending_table_refresh = True
-                            data_updated = True
+                            data_updated = self.apply_df_diff(diff_data, skip_table_request=True)
+                            self._pending_table_refresh = data_updated
                     elif 'code' in payload and 'data' in payload:
                         self._handle_update_df_data(payload)
                         data_updated = True

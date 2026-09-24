@@ -28,6 +28,7 @@ import struct
 import pickle
 import threading
 import json
+from datetime import datetime
 from typing import Dict, List, Optional, Any, Callable
 
 # ── 官方静态端口常量定义 ──
@@ -327,13 +328,20 @@ class IPCSyncManager:
             df_payload.index.name = 'code'
 
         # 2. 合并更新 (全量/增量)
-        # 冷启动/重连时绝不能把 UPDATE_DF_DIFF 当作全量底座。
+        # 冷启动/重连/次日跨日时绝不能把 UPDATE_DF_DIFF 当作全量底座。
         # 否则未变化的慢字段（如 ma20d/ma60d/category 等）会永久缺失，
         # 上层评分会退化为默认值，直到下一次真正的 UPDATE_DF_ALL。
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        last_cache_date = getattr(self, '_last_cache_date', None)
+        is_date_rollover = bool(last_cache_date is not None and last_cache_date != today_str)
+
         need_full_sync = False
+        added_rows = False
         with self.df_lock:
-            if msg_type == 'UPDATE_DF_DIFF' and (self.current_df is None or self.current_df.empty):
+            if msg_type == 'UPDATE_DF_DIFF' and (self.current_df is None or self.current_df.empty or is_date_rollover):
                 need_full_sync = True
+                if is_date_rollover:
+                    self.current_df = None  # 跨日清空昨日旧底座
             elif msg_type == 'UPDATE_DF_DIFF':
                 try:
                     df_diff = df_payload
@@ -362,25 +370,30 @@ class IPCSyncManager:
                                     valid_indices = valid_mask[valid_mask].index
                                     if len(valid_indices) > 0:
                                         self.current_df.loc[valid_indices, col] = df_diff.loc[valid_indices, col]
-                                except Exception:
-                                    pass
+                                except Exception as column_err:
+                                    raise ValueError(f"增量列 {col} 合并失败") from column_err
                     # 合并新增的个股并触发全量拉取
                     new_idx = df_diff.index.difference(self.current_df.index)
                     if len(new_idx) > 0:
                         self.current_df = pd.concat([self.current_df, df_diff.loc[new_idx]])
-                        self.request_full_sync(force=False)
+                        added_rows = True
                 except Exception as merge_err:
-                    self.log_error(f"合并增量数据失败，降级为全量覆盖: {merge_err}")
-                    self.current_df = df_payload
+                    self.log_error(f"合并增量数据失败，丢弃差分并请求全量: {merge_err}")
+                    self.current_df = None
+                    need_full_sync = True
             else:
                 self.current_df = df_payload
+                self._last_cache_date = today_str
 
         if need_full_sync:
+            reason = "跨日交易日变更" if is_date_rollover else "无全量基线或合并失败"
             self.log_info(
-                "检测到无全量基线的 UPDATE_DF_DIFF，拒绝以残缺 diff 初始化缓存；立即请求 UPDATE_DF_ALL"
+                f"检测到 {reason} 的 UPDATE_DF_DIFF，拒绝以残缺 diff 初始化缓存；立即请求 UPDATE_DF_ALL"
             )
             self.request_full_sync(force=True, min_interval=0.0, subscribe=True)
             return
+        if added_rows:
+            self.request_full_sync(force=False)
 
         # 3. 及时通知主进程确认已接收，防止主进程重试造成带宽挤占
         if isinstance(data_pkg, dict) and data_pkg.get('source_version') is not None \
