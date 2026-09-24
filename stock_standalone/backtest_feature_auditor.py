@@ -88,11 +88,12 @@ def preheat_names(codes):
     if not missing_codes: return
     
     try:
+        from JSONData.tdx_hdf5_api import SafeHDFStore
         import glob
         h5_files = glob.glob("g:/shared_df_all-*.h5")
         if h5_files:
             latest_h5 = sorted(h5_files)[-1]
-            with pd.HDFStore(latest_h5, mode='r') as store:
+            with SafeHDFStore(latest_h5, mode='r') as store:
                 target_key = None
                 if '/df' in store.keys(): target_key = '/df'
                 elif '/all' in store.keys(): target_key = '/all'
@@ -1091,7 +1092,8 @@ def main():
                 latest_h5 = sorted(h5_files)[-1]
                 print(f"[*] 正在从最新池加载数据: {os.path.basename(latest_h5)}")
                 try:
-                    with pd.HDFStore(latest_h5, mode='r') as store:
+                    from JSONData.tdx_hdf5_api import SafeHDFStore
+                    with SafeHDFStore(latest_h5, mode='r') as store:
                         key = store.keys()[0]
                         df_all = store.select(key)
                         

@@ -320,6 +320,7 @@ def cleanup_temp_dir_old_dir(base_dir: str, temp_name: str = "Temp") -> None:
 # ⚡ [CORE-LOCK] 全局 HDF5 线程安全锁：保护所有 PyTables/HDF5 的底层 IO 与初始化
 # 由于 Windows 下的 HDF5 库通常非线程安全，必须确保同一时间只有一个线程在执行 open/read/write 操作。
 # [FIX] 使用 RLock (可重入锁) 防止 write_hdf_db 等内部嵌套调用 SafeHDFStore 时产生死锁。
+# Nuitka explicitly embeds this package-qualified module; keep application imports as JSONData.tdx_hdf5_api.
 _HDF_GLOBAL_LOCK = threading.RLock()
 _HDF_PROCESS_LOCK_COUNTS = {}
 
@@ -347,7 +348,7 @@ class SafeHDFStore(pd.HDFStore):
         self.fname_o = fname
         self.mode = mode
         self.probe_interval = kwargs.pop("probe_interval", 0.05)  
-        self.lock_timeout = kwargs.pop("lock_timeout", 20)  
+        self.lock_timeout = kwargs.pop("lock_timeout", 20)  # compatibility; live-owner locks are never expired by age
         self.max_wait = 30
         self.multiIndexsize = False
         self.log = log
@@ -670,7 +671,7 @@ class SafeHDFStore(pd.HDFStore):
             'is_busy': bool,      # 正在被其他进程创建/写入/持句柄（3秒内），不可视作僵尸锁！
             'is_me': bool,        # 是否由本进程持有
             'is_alive': bool,     # 持有者进程是否存活
-            'is_stale': bool,     # 是否为超时或已死进程的僵尸锁（可安全清理）
+            'is_stale': bool,     # 持有进程已退出或确认残留的无效锁（可安全清理）
             'pid': int,
             'elapsed': float
         }
