@@ -385,31 +385,51 @@ class SBCChartCanvas(QWidget):
                         return np.maximum(0.0, arr / 100.0)
                     return np.maximum(0.0, arr)
 
-        # 2. 备用：对现有 'volume' / 'vol' 进行差分拆分
-        raw_vols = None
+        # 2. 备用：对现有 'volume' / 'vol' 进行差分拆分 (支持按交易日分组差分)
+        vol_col = None
         for col in ("volume", "vol"):
             if col in df_view.columns:
-                raw_vols = df_view[col].fillna(0.0).astype(float).values
+                vol_col = col
                 break
 
-        if raw_vols is None or len(raw_vols) == 0:
+        if vol_col is None:
             return np.array([], dtype=float)
 
-        n = len(raw_vols)
-        # 检查原始数据是否已经是独立增量（如果存在较多下降点，说明原本就是增量）
-        if n >= 5:
-            dec_count = np.sum(np.diff(raw_vols) < 0)
-            if dec_count > n * 0.15:
-                return np.maximum(0.0, raw_vols)
+        # 若存在 date 列，按交易日切片独立差分，彻底防止跨日大底数撑爆副图
+        if "date" in df_view.columns:
+            diff_list = []
+            for _, grp in df_view.groupby("date", sort=False):
+                g_vols = grp[vol_col].fillna(0.0).astype(float).values
+                gn = len(g_vols)
+                if gn == 0:
+                    continue
+                # 若已有较多下降点，说明原本就是独立增量
+                if gn >= 5 and np.sum(np.diff(g_vols) < 0) > gn * 0.15:
+                    diff_list.extend(np.maximum(0.0, g_vols).tolist())
+                    continue
+                g_diff = np.zeros(gn, dtype=float)
+                g_diff[0] = max(0.0, g_vols[0])
+                if gn > 1:
+                    d = np.maximum(0.0, np.diff(g_vols))
+                    g_diff[1:] = d
+                    # 若首根量异常大于第2根 50 倍以上，说明首根包含了跨日累计底数，安全平滑修正
+                    if g_diff[0] > max(1.0, g_diff[1]) * 50:
+                        g_diff[0] = g_diff[1]
+                diff_list.extend(g_diff.tolist())
+            return np.array(diff_list, dtype=float)
 
-        # 否则对单调累加量执行差分拆分
+        raw_vols = df_view[vol_col].fillna(0.0).astype(float).values
+        n = len(raw_vols)
+        if n == 0:
+            return np.array([], dtype=float)
+        if n >= 5 and np.sum(np.diff(raw_vols) < 0) > n * 0.15:
+            return np.maximum(0.0, raw_vols)
+
         diff_vols = np.zeros(n, dtype=float)
         diff_vols[0] = max(0.0, raw_vols[0])
         if n > 1:
-            diffs = np.diff(raw_vols)
-            diffs = np.maximum(0.0, diffs)
+            diffs = np.maximum(0.0, np.diff(raw_vols))
             diff_vols[1:] = diffs
-
         return diff_vols
 
     def cycle_vol_mode(self, target_mode: Optional[str] = None) -> str:
@@ -749,8 +769,8 @@ class SBCChartCanvas(QWidget):
             self.update()
             return
 
-        # 2. K 线多周期形态测算 (5m / 15m / 30m / 60m / day / 2d / 3d / week / month)
-        if p_mode in ("5m", "15m", "30m", "60m", "day", "2d", "3d", "2k", "3k", "week", "month"):
+        # 2. K 线多周期形态测算 (5m / 15m / 30m / 60m / day / 2d / week / month)
+        if p_mode in ("5m", "15m", "30m", "60m", "day", "2d", "2k", "3k", "week", "month"):
             try:
                 from ats.channel_bottom_reversal_strategy import ChannelBottomReversalStrategy
                 strategy = ChannelBottomReversalStrategy()
@@ -1086,7 +1106,7 @@ class SBCChartCanvas(QWidget):
         hud_x = int(margin_left + 4)  # 👈 严格显示在左侧，腾空右侧全部最新走势
 
         # 垂直位置：在 K 线通道模式下紧跟通道卡片下方；在分时模式下位于左上角
-        if self.period_mode in ["5m", "15m", "30m", "60m", "day", "2d", "3d", "2k", "3k", "week", "month"]:
+        if self.period_mode in ["5m", "15m", "30m", "60m", "day", "2d", "2k", "3k", "week", "month"]:
             ch_h = getattr(self, '_channel_box_h', 56)
             hud_y = int(margin_top + 3 + ch_h + 4)
         else:
@@ -1722,11 +1742,11 @@ class SBCChartCanvas(QWidget):
                 painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, f"⏳ 正在加载 [{self.period_mode}] 行情走势图...")
                 return
 
-            # 1. K 线图模式 (5m / 15m / 30m / 60m / day / 2d / 3d / week / month)
-            if self.period_mode in ["5m", "15m", "30m", "60m", "day", "2d", "3d", "2k", "3k", "week", "month"]:
+            # 1. K 线图模式 (5m / 15m / 30m / 60m / day / 2d / week / month)
+            if self.period_mode in ["5m", "15m", "30m", "60m", "day", "2d", "2k", "3k", "week", "month"]:
                 self._paint_kline(painter, margin_left, margin_top, chart_w, chart_h)
             else:
-                # 2. 分时图模式 (1m / 5d / 10d)
+                # 2. 分时图模式 (1m / 3d / 5d / 10d)
                 self._paint_intraday(painter, margin_left, margin_top, chart_w, chart_h)
 
             # 2.5 📊 绘制走势图右上角近几日振幅活跃度 HUD (对齐图 2 红框位置)
@@ -3484,7 +3504,7 @@ class SBCChartCanvas(QWidget):
 
                 idx_k = self._map_signal_to_visible_index(sig, df_view, start_i, end_i)
                 if idx_k is None:
-                    if self.period_mode in ["day", "2d", "3d", "2k", "3k", "week", "month"]:
+                    if self.period_mode in ["day", "2d", "2k", "3k", "week", "month"]:
                         for ki, tk in enumerate(times_k):
                             if str(tk).startswith(sig_d):
                                 idx_k = ki
@@ -4243,6 +4263,7 @@ class SBCIntradayChartDialog(QWidget):
         self.btn_group_period = QButtonGroup(self)
         periods = [
             ("1日", "1m"),
+            ("3日", "3d"),
             ("5日", "5d"),
             ("10日", "10d"),
             ("5分K", "5m"),
@@ -4250,7 +4271,6 @@ class SBCIntradayChartDialog(QWidget):
             ("60分K", "60m"),
             ("日K", "day"),
             ("2D", "2d"),
-            ("3D", "3d"),
             ("周K", "week"),
             ("月K", "month")
         ]
@@ -4935,7 +4955,7 @@ class SBCIntradayChartDialog(QWidget):
 
     def rotate_period(self, step: int = 1):
         """环形顺时针/逆时针轮转切换 SBC 周期"""
-        period_list = ["1m", "5d", "10d", "5m", "30m", "60m", "day", "2d", "3d", "week", "month"]
+        period_list = ["1m", "3d", "5d", "10d", "5m", "30m", "60m", "day", "2d", "week", "month"]
         curr = getattr(self, "_current_period_mode", "1m").lower()
         if curr in ("2k",):
             curr = "2d"
@@ -4955,7 +4975,7 @@ class SBCIntradayChartDialog(QWidget):
 
     def switch_period_by_index(self, index: int):
         """通过数字键 1~9 直接切换到指定序号的周期"""
-        period_list = ["1m", "5d", "10d", "5m", "30m", "60m", "day", "2d", "3d", "week", "month"]
+        period_list = ["1m", "3d", "5d", "10d", "5m", "30m", "60m", "day", "2d", "week", "month"]
         if 0 <= index < len(period_list):
             new_mode = period_list[index]
             self.set_period_mode(new_mode)
@@ -6565,8 +6585,8 @@ class SBCIntradayChartDialog(QWidget):
             except Exception:
                 logger.exception("刷新 %s 的多周期 VWAP 快照失败", self.code)
 
-        if mode in ["5d", "10d"]:
-            days = 5 if mode == "5d" else 10
+        if mode in ["3d", "5d", "10d"]:
+            days = 3 if mode == "3d" else (5 if mode == "5d" else 10)
             df_multi, multi_vwap_snapshot = fetcher.fetch_multi_horizon_vwap(self.code)
             if not df_multi.empty and days < 10 and "date" in df_multi.columns:
                 available_dates = sorted(df_multi["date"].astype(str).unique())
@@ -6587,6 +6607,10 @@ class SBCIntradayChartDialog(QWidget):
                         base_amount += float(amounts.loc[group.index].sum())
                         base_volume += float(volumes.loc[group.index].sum())
                     df_multi["vwap"] = [a / v if v > 0 else 0.0 for a, v in zip(running_amount, running_volume)]
+                    df_multi["cum_vol_shares"] = running_volume
+                    df_multi["cum_amt"] = running_amount
+                    df_multi["vol"] = [v / 100.0 for v in running_volume]
+                    df_multi["volume"] = [v / 100.0 for v in running_volume]
             if not df_multi.empty:
                 if op <= 1.0:
                     op = float(df_multi.iloc[-1].get("open", p))
@@ -6641,7 +6665,7 @@ class SBCIntradayChartDialog(QWidget):
                 self.lbl_info.setText("分时缓存校验未通过，VWAP策略暂停，等待自动重拉")
             return
 
-        if mode in ["5m", "15m", "30m", "60m", "day", "2d", "3d", "2k", "3k", "week", "month"]:
+        if mode in ["5m", "15m", "30m", "60m", "day", "2d", "2k", "3k", "week", "month"]:
             if getattr(self, "custom_kline_df", None) is not None and not self.custom_kline_df.empty:
                 df_kline = self.custom_kline_df
             else:

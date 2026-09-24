@@ -81,6 +81,9 @@ def main():
     args = parser.parse_args(sys.argv[1:])
     initial_code = args.code or args.stock_code
 
+    os.environ["ATS_IS_IPO_DETECTOR_PROCESS"] = "1"
+    _keep_alive_timer = None
+
     # 自动检查并后台静默拉起主 Tk 行情进程
     try:
         ensure_backend_tk_running()
@@ -89,6 +92,7 @@ def main():
 
     # 子模式标记与 --code 已由本启动器解析，避免 Qt 把 ATS 专用参数当作未知选项。
     app = QApplication.instance() or QApplication([sys.argv[0]])
+    app.setQuitOnLastWindowClosed(True)
 
     window = IPOSubnewDetectorDialog(initial_code=initial_code)
     _active_window = window
@@ -97,10 +101,27 @@ def main():
     # 退出集中持久化双重保险
     def _on_exit():
         try:
+            if hasattr(_keep_alive_timer, "stop") and _keep_alive_timer.isActive():
+                _keep_alive_timer.stop()
+        except Exception:
+            pass
+        try:
             window.save_persisted_state()
         except Exception:
             pass
 
+    def _on_window_closed(*args):
+        try:
+            if hasattr(_keep_alive_timer, "stop") and _keep_alive_timer.isActive():
+                _keep_alive_timer.stop()
+        except Exception:
+            pass
+        _on_exit()
+        app_inst = QApplication.instance()
+        if app_inst:
+            app_inst.quit()
+
+    window.destroyed.connect(_on_window_closed)
     app.aboutToQuit.connect(_on_exit)
     atexit.register(_on_exit)
 
