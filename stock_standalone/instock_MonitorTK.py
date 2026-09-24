@@ -21,6 +21,7 @@ import shutil
 import traceback
 import threading
 import multiprocessing as mp
+import math
 # 🛡️ [PERF] 全局阻断：彻底封杀子进程导入 keyboard 模块，杜绝底层 Hook 线程
 if mp.current_process().name != "MainProcess":
     import sys
@@ -685,6 +686,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.viz_lifecycle_flag = mp.Value('b', True) # [FIX] 重命名为 viz_lifecycle_flag 确保唯一性
         self._vis_enabled_cache = False  # 🛡️ [NEW] 线程安全的 vis_var 影子变量
         self._send_sync_lock = threading.Lock() # ⭐ [NEW] 实例级执行锁，确保全生命周期只有一个同步循环在跑
+        self._latency_samples_lock = threading.Lock()
+        self._latency_samples = deque(maxlen=4096)
         self._df_sync_running = False  # ⭐ [FIX] 初始化同步运行状态位，防止 send_df AttributeError
         self._df_first_send_done = False # ⭐ [FIX] 初始化首发标志
         self._force_full_sync_pending = False # ⭐ [FIX] 初始化强制全量同步标志
@@ -1291,7 +1294,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                             for t_type in list(latest_tasks.keys()):
                                 payload = latest_tasks.pop(t_type)
                                 try:
+                                    ipc_start = time.perf_counter()
                                     conn.send((t_type, payload))
+                                    self._record_latency_sample(f"ipc_send:{t_type}", (time.perf_counter() - ipc_start) * 1000.0)
                                 except Exception as e:
                                     logger.error(f"Pipe send error [{t_type}]: {e}")
                                     break # 管道可能已断开
@@ -2546,6 +2551,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     
                     # 限制长度
                     t_name = t_name[:60]
+                    self._record_latency_sample(f"ui_task:{t_name}", task_dur)
                     
                     # 持久化统计 (跨多次 dispatch 累加)
                     if not hasattr(self, '_cycle_audit'):
@@ -2578,6 +2584,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
         finally:
             total_time = (time.perf_counter() - start_t) * 1000
+            self._record_latency_sample("ui_dispatch_cycle", total_time)
 
             self._dispatch_running = False
             self._last_task_finish_time = time.time()
@@ -8945,7 +8952,16 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
                     # 🔄 [PERF] 架构重构：send_df 改为从 MarketStateBus 拉取最新全量快照 (支持显示轨对齐)
                     # 彻底消除 send_df 线程在 Queue 上的竞争与主线程锁 (_df_lock) 竞争
-                    bus_data = self.market_bus.get_latest_dual(since_version=getattr(self, '_last_vis_bus_version', 0))
+                    market_read_start = time.perf_counter()
+                    try:
+                        bus_data = self.market_bus.get_latest_dual(
+                            since_version=getattr(self, '_last_vis_bus_version', 0)
+                        )
+                    finally:
+                        self._record_latency_sample(
+                            "market_state_snapshot_read",
+                            (time.perf_counter() - market_read_start) * 1000.0,
+                        )
                     
                     if bus_data is None:
                         # 检查是否有强制同步请求，如果没有则继续休眠
@@ -9006,9 +9022,16 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     is_cold = self._cold_start
                     if hasattr(self, 'df_ui_prev') and not is_cold:
                         try:
-                            with timed_ctx("viz_df_compare", warn_ms=10000):
-                                # 仅在已有缓存且不是冷启动时才 compare
-                                df_diff = df_ui.compare(self.df_ui_prev, keep_shape=False, keep_equal=False)
+                            compare_start = time.perf_counter()
+                            try:
+                                with timed_ctx("viz_df_compare", warn_ms=10000):
+                                    # 仅在已有缓存且不是冷启动时才 compare
+                                    df_diff = df_ui.compare(self.df_ui_prev, keep_shape=False, keep_equal=False)
+                            finally:
+                                self._record_latency_sample(
+                                    "send_df_dataframe_diff:display",
+                                    (time.perf_counter() - compare_start) * 1000.0,
+                                )
                             payload_to_send = df_diff
                             if df_diff.empty:
                                 # logger.debug("[send_df] df_diff empty, skip sending this cycle")
@@ -9031,21 +9054,44 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         self._cold_start = False # 重置冷启动标志
 
                     # 更新缓存
-                    self.df_ui_prev = df_ui.copy()
+                    snapshot_copy_start = time.perf_counter()
+                    try:
+                        self.df_ui_prev = df_ui.copy()
+                    finally:
+                        self._record_latency_sample(
+                            "send_df_dataframe_copy:display",
+                            (time.perf_counter() - snapshot_copy_start) * 1000.0,
+                        )
 
                     # --- 🚀 [ATS/PR DAILY FIX] 独立计算 26670/26671 日线数据包 ---
                     df_daily = df_bus_all
                     if cur_resample == 'd':
                         msg_type_daily = msg_type
                         payload_daily_to_send = payload_to_send
-                        self.df_daily_prev = df_ui.copy()
+                        daily_copy_start = time.perf_counter()
+                        try:
+                            self.df_daily_prev = df_ui.copy()
+                        finally:
+                            self._record_latency_sample(
+                                "send_df_dataframe_copy:daily_display_resample",
+                                (time.perf_counter() - daily_copy_start) * 1000.0,
+                            )
                         sync_version_daily = self.sync_version
                     else:
                         # 非日线周期下，计算日线的增量/全量
                         if hasattr(self, 'df_daily_prev') and self.df_daily_prev is not None and not is_cold:
                             try:
-                                with timed_ctx("daily_df_compare", warn_ms=5000):
-                                    df_diff_daily = df_daily.compare(self.df_daily_prev, keep_shape=False, keep_equal=False)
+                                compare_daily_start = time.perf_counter()
+                                try:
+                                    with timed_ctx("daily_df_compare", warn_ms=5000):
+                                        df_diff_daily = df_daily.compare(
+                                            self.df_daily_prev, keep_shape=False, keep_equal=False
+                                        )
+                                finally:
+                                    self._record_latency_sample(
+                                        "send_df_dataframe_diff:daily",
+                                        (time.perf_counter() - compare_daily_start) * 1000.0,
+                                    )
                                 payload_daily_to_send = df_diff_daily
                                 if df_diff_daily.empty:
                                     msg_type_daily = 'DF_DIFF_EMPTY'
@@ -9058,7 +9104,14 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                             msg_type_daily = 'UPDATE_DF_ALL'
                             payload_daily_to_send = df_daily
                         
-                        self.df_daily_prev = df_daily.copy()
+                        daily_copy_start = time.perf_counter()
+                        try:
+                            self.df_daily_prev = df_daily.copy()
+                        finally:
+                            self._record_latency_sample(
+                                "send_df_dataframe_copy:daily",
+                                (time.perf_counter() - daily_copy_start) * 1000.0,
+                            )
                         
                         if msg_type_daily == 'UPDATE_DF_ALL':
                             self.sync_version_daily = 0
@@ -9108,6 +9161,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
                     # ======================================================
                     if self.viz_conn is not None and self.qt_process is not None and self.qt_process.is_alive() and not sent:
+                        pipe_send_start = time.perf_counter()
                         try:
                             # ⭐ [STABILITY] Pipe 发送前检查，防止缓冲区满导致此线程永久阻塞
                             # Pipe 并没有直接的 is_full 检查，我们通过非阻塞发送（如果支持）或简单的 conn.poll() 辅助判断
@@ -9122,6 +9176,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                             self.viz_conn = None
                         except Exception as e:
                             logger.error(f"[Pipe] send failed: {e}")
+                        finally:
+                            self._record_latency_sample(
+                                "ipc_send:pipe_display",
+                                (time.perf_counter() - pipe_send_start) * 1000.0,
+                            )
 
                     # 诊断：如果有内部进程但没走 Pipe
                     if not sent and self.qt_process is not None and self.qt_process.is_alive():
@@ -9151,9 +9210,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         if is_forced or ((vis_enabled or ats_enabled) and now_ipc > ipc_cooldown):
                             try:
                                 # 1️⃣ pickle 单独计时
+                                pickle_start = time.perf_counter()
                                 with timed_ctx("viz_IPC_pickle", warn_ms=10000):
                                     payload = pickle.dumps(('UPDATE_DF_DATA', sync_package),
                                             protocol=pickle.HIGHEST_PROTOCOL)
+                                self._record_latency_sample(
+                                    "ipc_serialize:display", (time.perf_counter() - pickle_start) * 1000.0
+                                )
 
                                 header = struct.pack("!I", len(payload))
 
@@ -9161,9 +9224,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                     payload_daily = payload
                                     header_daily = header
                                 else:
+                                    pickle_daily_start = time.perf_counter()
                                     with timed_ctx("daily_IPC_pickle", warn_ms=5000):
                                         payload_daily = pickle.dumps(('UPDATE_DF_DATA', sync_package_daily),
                                                 protocol=pickle.HIGHEST_PROTOCOL)
+                                    self._record_latency_sample(
+                                        "ipc_serialize:daily", (time.perf_counter() - pickle_daily_start) * 1000.0
+                                    )
                                     header_daily = struct.pack("!I", len(payload_daily))
 
                                 # ⚡【全量与增量智能加速】：准备专属日线全量快照 (针对冷启动 / 显式强刷订阅者)
@@ -9179,6 +9246,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                     has_forced_sub = True
 
                                 if has_forced_sub or is_forced:
+                                    pickle_full_start = time.perf_counter()
                                     with timed_ctx("daily_full_IPC_pickle", warn_ms=5000):
                                         full_pkg = {
                                             'type': 'UPDATE_DF_ALL',
@@ -9189,6 +9257,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                         }
                                         payload_daily_full = pickle.dumps(('UPDATE_DF_DATA', full_pkg), protocol=pickle.HIGHEST_PROTOCOL)
                                         header_daily_full = struct.pack("!I", len(payload_daily_full))
+                                    self._record_latency_sample(
+                                        "ipc_serialize:daily_full",
+                                        (time.perf_counter() - pickle_full_start) * 1000.0,
+                                    )
 
                                 # 2️⃣ socket 分发到 26668 (可视化) 以及常态订阅中心
                                 send_success_any = False
@@ -9196,6 +9268,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
                                 # 发送给 26668 (可视化窗口) —— 仅在 Pipe 没发送成功时进行 Socket 兜底
                                 if vis_enabled and not sent:
+                                    ipc_send_start = time.perf_counter()
                                     with timed_ctx("viz_IPC_send", warn_ms=1000):
                                         try:
                                             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -9206,6 +9279,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                                 sent = True
                                         except (socket.timeout, ConnectionError, OSError):
                                             pass
+                                        finally:
+                                            self._record_latency_sample(
+                                                "ipc_send:display",
+                                                (time.perf_counter() - ipc_send_start) * 1000.0,
+                                            )
 
                                 # 3️⃣ 分开独立分发给所有常态流订阅中心客户端 (26670, 26671, 26675 及动态握手订阅者)
                                 ports_to_send = []
@@ -9271,6 +9349,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                                 send_h = header_daily
                                                 send_p = payload_daily
 
+                                            ipc_port_send_start = time.perf_counter()
                                             try:
                                                 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s2:
                                                     s2.settimeout(1.5)  # 1.5秒超时防止阻塞
@@ -9294,6 +9373,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                                         self._stream_subscribers.pop(port, None)
                                                         logger.info(f"🧹 [TK 订阅中心] 动态端口 {port} 长期无响应，已自动注销清理订阅。")
                                             finally:
+                                                self._record_latency_sample(
+                                                    f"ipc_send:port_{port}",
+                                                    (time.perf_counter() - ipc_port_send_start) * 1000.0,
+                                                )
                                                 # 🛡️ 临时动态端口发完单次清理
                                                 if hasattr(self, '_temp_dynamic_ports') and port in self._temp_dynamic_ports:
                                                     self._temp_dynamic_ports.discard(port)
@@ -21550,33 +21633,69 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         analysis_win.bind("<Escape>", lambda e: on_analysis_close())
         refresh_analysis()
 
-    def show_ui_performance_audit(self, reset=True):
-        """展示 UI 线程性能审计排行 (由监控窗口手动触发)"""
+    def _record_latency_sample(self, component, duration_ms):
+        """Keep bounded component latency samples for manual percentile reports."""
         try:
-            if not hasattr(self, '_cycle_audit') or not self._cycle_audit['times']:
-                logger.info("ℹ️ 尚无活跃的 UI 性能统计数据。")
-                return
-            
+            sample = (str(component), max(0.0, float(duration_ms)))
+            with self._latency_samples_lock:
+                self._latency_samples.append(sample)
+        except Exception:
+            pass
+
+    def show_ui_performance_audit(self, reset=True):
+        """展示 UI、IPC 和 dispatch P50/P95/P99 (由监控窗口手动触发)"""
+        try:
             now_t = time.time()
-            elapsed = now_t - self._cycle_audit['start']
-            
-            # 对耗时进行排行 (手动查看时展示前 10 名)
-            top_tasks = sorted(self._cycle_audit['times'].items(), key=lambda x: x[1], reverse=True)[:10]
-            if not top_tasks:
-                logger.info(f"ℹ️ 过去 {elapsed:.1f}s 内无 UI 任务记录。")
+            cycle_audit = getattr(self, '_cycle_audit', {})
+            cycle_times = cycle_audit.get('times', {})
+            elapsed = now_t - cycle_audit.get('start', now_t)
+            top_tasks = sorted(cycle_times.items(), key=lambda x: x[1], reverse=True)[:10]
+            with self._latency_samples_lock:
+                sample_rows = list(self._latency_samples)
+            if not top_tasks and not sample_rows:
+                logger.info("ℹ️ 尚无活跃的 UI/IPC 性能统计数据。")
                 return
 
             lines = [f"📊 [UI 线程画像回顾] 统计周期: {elapsed:.1f}s (Top 10)"]
             for name, dur in top_tasks:
-                count = self._cycle_audit['counts'].get(name, 1)
+                count = cycle_audit.get('counts', {}).get(name, 1)
                 avg = dur / count
                 lines.append(f"  - {name:<40} : {dur:>7.1f}ms / {count:>4d}次 (均值 {avg:>5.1f}ms)")
             
+            by_component = {}
+            for component, value in sample_rows:
+                by_component.setdefault(component, []).append(value)
+            def _percentile(values, pct):
+                ordered = sorted(values)
+                if not ordered:
+                    return 0.0
+                index = max(0, min(len(ordered) - 1, math.ceil(len(ordered) * pct) - 1))
+                return ordered[index]
+            ranked_components = sorted(
+                by_component.items(), key=lambda item: max(item[1]), reverse=True
+            )
+            non_ui_components = [
+                item for item in ranked_components
+                if not item[0].startswith("ui_task:")
+            ]
+            top_ui_components = [
+                item for item in ranked_components
+                if item[0].startswith("ui_task:")
+            ][:10]
+            for component, values in non_ui_components + top_ui_components:
+                lines.append(
+                    f"  - latency {component}: n={len(values)} "
+                    f"P50={_percentile(values, .50):.1f}ms "
+                    f"P95={_percentile(values, .95):.1f}ms "
+                    f"P99={_percentile(values, .99):.1f}ms"
+                )
             logger.warning("\n".join(lines))
             
             if reset:
                 # 重置计数器，开始新一轮画像
                 self._cycle_audit = {'times': {}, 'counts': {}, 'start': now_t}
+                with self._latency_samples_lock:
+                    self._latency_samples.clear()
                 logger.info("✅ 性能统计数据已重置。")
         except Exception as e:
             logger.error(f"❌ 性能审计展示失败: {e}")

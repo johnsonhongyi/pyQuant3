@@ -10,10 +10,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+import math
 from threading import RLock
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
-from ats.session_clock import SessionPhase, is_fresh_signal_allowed, is_seed_only, phase_at
+from ats.session_clock import (
+    MARKET_TIMEZONE, SessionPhase, is_fresh_signal_allowed, is_seed_only,
+    market_datetime, market_now, phase_at,
+)
 
 
 @dataclass(frozen=True)
@@ -33,9 +37,11 @@ class CandidateDecision:
 class CandidateCache:
     """Thread-safe, date-scoped candidate confirmation cache."""
 
-    def __init__(self, required_frames: int = 2, max_gap_seconds: float = 8.0) -> None:
+    def __init__(self, required_frames: int = 2, max_gap_seconds: float = 8.0,
+                 clock: Optional[Callable[[], datetime]] = None) -> None:
         self.required_frames = max(1, int(required_frames))
         self.max_gap_seconds = max(0.1, float(max_gap_seconds))
+        self._clock = clock or market_now
         self._lock = RLock()
         self._trading_day = ""
         self._seeds: Dict[Tuple[str, str], Dict[str, Any]] = {}
@@ -46,22 +52,23 @@ class CandidateCache:
         raw = str(code or "").strip()
         return raw.zfill(6) if raw.isdigit() and len(raw) <= 6 else raw
 
-    @staticmethod
-    def _coerce_datetime(value: Optional[Any]) -> datetime:
+    def _coerce_datetime(self, value: Optional[Any]) -> datetime:
         if value is None:
-            return datetime.now()
+            return market_datetime(self._clock())
         if isinstance(value, datetime):
-            return value
+            return market_datetime(value)
         if isinstance(value, (int, float)):
             # Support millisecond timestamps
             ts = float(value)
+            if not math.isfinite(ts):
+                raise ValueError("invalid observation timestamp")
             if ts > 1e11:
                 ts /= 1000.0
-            return datetime.fromtimestamp(ts)
+            return datetime.fromtimestamp(ts, MARKET_TIMEZONE).replace(tzinfo=None)
         if isinstance(value, str):
             text = value.strip().replace("Z", "+00:00")
             try:
-                return datetime.fromisoformat(text)
+                return market_datetime(datetime.fromisoformat(text))
             except ValueError:
                 pass
             # Support "YYYY-MM-DD HH:MM:SS" or "YYYY/MM/DD HH:MM:SS"
@@ -74,18 +81,20 @@ class CandidateCache:
             for fmt in ("%H:%M:%S", "%H:%M:%S.%f", "%H:%M"):
                 try:
                     t_val = datetime.strptime(text, fmt).time()
-                    return datetime.combine(datetime.now().date(), t_val)
+                    return datetime.combine(market_datetime(self._clock()).date(), t_val)
                 except ValueError:
                     pass
             try:
                 # If numeric string timestamp
                 ts_num = float(text)
+                if not math.isfinite(ts_num):
+                    raise ValueError("invalid observation timestamp")
                 if ts_num > 1e11:
                     ts_num /= 1000.0
-                return datetime.fromtimestamp(ts_num)
+                return datetime.fromtimestamp(ts_num, MARKET_TIMEZONE).replace(tzinfo=None)
             except ValueError:
                 pass
-        return datetime.now()
+        raise ValueError("invalid observation timestamp: %r" % (value,))
 
     def _roll_day(self, day: str) -> None:
         if self._trading_day and self._trading_day != day:
@@ -103,13 +112,27 @@ class CandidateCache:
         phase: Optional[Any] = None,
         required_frames: Optional[int] = None,
     ) -> CandidateDecision:
-        dt = self._coerce_datetime(observed_at)
-        phase_value = SessionPhase(phase) if phase is not None else phase_at(dt)
         normalized_code = self._normalize_code(code)
         normalized_source = str(source or "ATS").strip().upper()
         key = (normalized_source, normalized_code)
         frame_target = max(1, int(required_frames or self.required_frames))
         current_payload = dict(payload or {})
+        try:
+            dt = self._coerce_datetime(observed_at)
+            phase_value = SessionPhase(phase) if phase is not None else phase_at(dt)
+        except (TypeError, ValueError, OverflowError):
+            return CandidateDecision(
+                code=normalized_code,
+                source=normalized_source,
+                phase=SessionPhase.CLOSED,
+                consecutive_frames=0,
+                required_frames=frame_target,
+                eligible=False,
+                seed_only=False,
+                reason="INVALID_OBSERVATION_CONTEXT",
+                payload=current_payload,
+                seed_payload={},
+            )
         day = dt.date().isoformat()
 
         with self._lock:
@@ -160,9 +183,35 @@ class CandidateCache:
             if prior is not None:
                 try:
                     last_seen = self._coerce_datetime(prior.get("last_seen"))
-                    gap = abs((dt - last_seen).total_seconds())
+                    gap = (dt - last_seen).total_seconds()
                 except Exception:
                     gap = self.max_gap_seconds + 1.0
+                if gap == 0:
+                    return CandidateDecision(
+                        code=normalized_code,
+                        source=normalized_source,
+                        phase=phase_value,
+                        consecutive_frames=int(prior.get("frames", 0)),
+                        required_frames=frame_target,
+                        eligible=False,
+                        seed_only=False,
+                        reason="DUPLICATE_FRAME_IGNORED",
+                        payload=dict(prior.get("payload", {})),
+                        seed_payload=dict(self._seeds.get(key, {}).get("payload", {})),
+                    )
+                if gap < 0:
+                    return CandidateDecision(
+                        code=normalized_code,
+                        source=normalized_source,
+                        phase=phase_value,
+                        consecutive_frames=int(prior.get("frames", 0)),
+                        required_frames=frame_target,
+                        eligible=False,
+                        seed_only=False,
+                        reason="OUT_OF_ORDER_FRAME_IGNORED",
+                        payload=dict(prior.get("payload", {})),
+                        seed_payload=dict(self._seeds.get(key, {}).get("payload", {})),
+                    )
                 if gap <= self.max_gap_seconds:
                     consecutive = int(prior.get("frames", 0)) + 1
 

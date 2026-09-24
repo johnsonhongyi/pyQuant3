@@ -1,5 +1,6 @@
 """Deterministic signal lifecycle contract used by scanners and replay tools."""
 from dataclasses import dataclass
+from datetime import datetime
 from enum import Enum
 
 class LifecycleState(str, Enum):
@@ -15,7 +16,7 @@ class LifecycleEvent(str, Enum):
 @dataclass(frozen=True)
 class Transition:
     revision: int; from_state: LifecycleState; to_state: LifecycleState
-    event: LifecycleEvent; reason: str; snapshot_id: str = ''
+    event: LifecycleEvent; reason: str; snapshot_id: str = ''; event_time: str = ''
 
 _ALLOWED = {
     LifecycleState.DISCOVERED:{LifecycleState.QUALIFYING, LifecycleState.EXPIRED},
@@ -28,14 +29,20 @@ _ALLOWED = {
 }
 
 class SignalLifecycle:
-    def __init__(self, state=LifecycleState.DISCOVERED):
-        self.state = LifecycleState(state); self.revision = 0; self.history=[]
-    def transition(self, event, to_state, reason='', snapshot_id=''):
+    def __init__(self, state=LifecycleState.DISCOVERED, revision=0, history=None):
+        self.state = LifecycleState(state)
+        self.revision = max(0, int(revision or 0))
+        self.history = list(history or [])
+    def transition(self, event, to_state, reason='', snapshot_id='', event_time=None):
         event, to_state = LifecycleEvent(event), LifecycleState(to_state)
         if to_state == LifecycleState.WATCH and self.state == LifecycleState.WEAKENED:
             raise ValueError('same-tick weakened signal cannot revive directly to WATCH')
         if to_state not in _ALLOWED[self.state]:
             raise ValueError(f'illegal lifecycle transition {self.state}->{to_state}')
         self.revision += 1
-        item=Transition(self.revision,self.state,to_state,event,str(reason),str(snapshot_id))
+        timestamp = event_time or datetime.now().isoformat(timespec='seconds')
+        item=Transition(
+            self.revision, self.state, to_state, event, str(reason),
+            str(snapshot_id), str(timestamp),
+        )
         self.history.append(item); self.state=to_state; return item

@@ -86,7 +86,9 @@ class TradingKernelService:
                  strategy_provider: Any = None, state_store: Any = None,
                  event_sink: Any = None, reconciliation_dir: str | None = None,
                  reconciliation_archive_after_days: int = 30,
-                 reconciliation_archive_retention_days: int | None = 365):
+                 reconciliation_archive_retention_days: int | None = 365,
+                 paper_adapter: Any = None,
+                 initial_mode: str | None = None):
         self.state_manager = state_store or StateManager()
         self.journal = event_sink or JsonlJournal(journal_path)
         self.strategy_provider = strategy_provider
@@ -127,7 +129,7 @@ class TradingKernelService:
         from trading_kernel.execution.confirm_adapter import ConfirmExecutionAdapter
         from trading_kernel.execution.broker_adapter import BrokerExecutionAdapter, KillSwitch
         
-        self.paper_adapter = PaperExecutionAdapter()
+        self.paper_adapter = paper_adapter or PaperExecutionAdapter()
         
         # 确认模式适配器 (包装模拟盘适配器，弹出 UI)
         self.confirm_adapter = ConfirmExecutionAdapter(
@@ -160,7 +162,7 @@ class TradingKernelService:
         self.executor: Any = None
         
         # 从本地配置文件中安全加载保存的交易模式并初始化生效
-        saved_mode = load_trading_mode_from_config()
+        saved_mode = initial_mode or load_trading_mode_from_config()
         self._mode = "OBSERVE"
         self.set_trading_mode(saved_mode)
         

@@ -2,6 +2,7 @@ from logger_utils import LoggerFactory
 import sqlite3
 import json
 import logging
+import math
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
 from queue import PriorityQueue
@@ -174,6 +175,27 @@ class SignalMessageQueue:
                 used_keys.add(event_key)
                 c.execute("UPDATE signal_message SET event_key=? WHERE id=?", (event_key, row_id))
             c.execute("""
+                SELECT event_key FROM signal_message
+                WHERE event_key IS NOT NULL AND event_key <> ''
+                GROUP BY event_key HAVING COUNT(*) > 1
+            """)
+            for (duplicate_key,) in c.fetchall():
+                c.execute(
+                    "SELECT id FROM signal_message WHERE event_key=? ORDER BY id",
+                    (duplicate_key,),
+                )
+                for (row_id,) in c.fetchall()[1:]:
+                    legacy_key = f"{duplicate_key}|legacy|{row_id}"
+                    suffix = 1
+                    while legacy_key in used_keys:
+                        suffix += 1
+                        legacy_key = f"{duplicate_key}|legacy|{row_id}|{suffix}"
+                    c.execute(
+                        "UPDATE signal_message SET event_key=? WHERE id=?",
+                        (legacy_key, row_id),
+                    )
+                    used_keys.add(legacy_key)
+            c.execute("""
                 CREATE UNIQUE INDEX IF NOT EXISTS uq_signal_message_event_key
                 ON signal_message (event_key)
             """)
@@ -237,7 +259,7 @@ class SignalMessageQueue:
             explicit_price = float(explicit_price)
         except (TypeError, ValueError):
             explicit_price = 0.0
-        if explicit_price > 0:
+        if math.isfinite(explicit_price) and explicit_price > 0:
             try:
                 self.trading_logger.log_live_signal(
                     msg.code, msg.name,
@@ -261,8 +283,11 @@ class SignalMessageQueue:
             found_idx = -1
             
             for i, item in enumerate(items):
-                if (item.code == msg.code and 
-                    item.signal_type == msg.signal_type):
+                if (
+                    item.code == msg.code
+                    and item.signal_type == msg.signal_type
+                    and item.source == msg.source
+                ):
                     found_idx = i
                     break
             
@@ -369,7 +394,7 @@ class SignalMessageQueue:
                     priority = MIN(signal_message.priority, excluded.priority),
                     score = excluded.score,
                     reason = excluded.reason,
-                    evaluated = excluded.evaluated,
+                    evaluated = MAX(signal_message.evaluated, excluded.evaluated),
                     count = signal_message.count + 1,
                     consecutive_days = MAX(signal_message.consecutive_days, excluded.consecutive_days),
                     rank = excluded.rank,
@@ -561,26 +586,24 @@ class SignalMessageQueue:
             conn = self.db_manager.get_connection()
             c = conn.cursor()
             
-            # 检查是否已存在同日同股同信号类型
-            c.execute("SELECT id, count FROM signal_message WHERE event_key = ? LIMIT 1", (event_key,))
-            existing = c.fetchone()
-            
-            if existing:
-                # 已存在：更新计数和时间戳
-                new_count = existing[1] + 1
-                c.execute("""
-                    UPDATE signal_message 
-                    SET timestamp = ?, count = ?, priority = ?, reason = ?
-                    WHERE id = ?
-                """, (now_timestamp, new_count, priority_value, msg, existing[0]))
-                # logger.debug(f"✅ Live signal updated in DB: {code} - {pattern} (count={new_count})")
-            else:
-                # 不存在：插入新记录
-                c.execute("""
-                    INSERT INTO signal_message (timestamp, code, name, signal_type, source, priority, score, reason, evaluated, created_date, count, consecutive_days, grade, event_key)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (now_timestamp, code, name, pattern, 'live_strategy', priority_value, score, msg, 0, now_date, 1, 1, '', event_key))
-                # logger.debug(f"✅ Live signal saved to DB: {code} - {pattern}")
+            c.execute("""
+                INSERT INTO signal_message (
+                    timestamp, code, name, signal_type, source, priority, score,
+                    reason, evaluated, created_date, count, consecutive_days,
+                    grade, event_key
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, 1, 1, '', ?)
+                ON CONFLICT(event_key) DO UPDATE SET
+                    timestamp = excluded.timestamp,
+                    name = excluded.name,
+                    priority = MIN(signal_message.priority, excluded.priority),
+                    score = excluded.score,
+                    reason = excluded.reason,
+                    evaluated = MAX(signal_message.evaluated, excluded.evaluated),
+                    count = signal_message.count + 1
+            """, (
+                now_timestamp, code, name, pattern, 'live_strategy',
+                priority_value, score, msg, now_date, event_key,
+            ))
             
             conn.commit()
             c.close()

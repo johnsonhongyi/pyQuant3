@@ -1,0 +1,7 @@
+# G13 ATS PAPER 只读日报
+
+状态：工具已适配 ATS/TK 序列化形状并完成真实源只读抽样；样本可解析但闭环质量不合格，发布门应阻断。工具只读用户指定的 UTF-8 JSONL/JSON 快照；不打开数据库，也不更改来源文件。ATS 快照优先读取 `signal_iteration_log`，为空时再读取 `directive_history`，避免把同一 directive 的两种投影重复计数；TK JSONL 会展开 `signal`、`kernel_result`、`request_id` 与嵌套执行字段；SignalEntry 快照会展开 lifecycle history。SignalDecisionEvent 必须完整包含 event/candidate/snapshot ID、state、action、reason code、event time 和 source。`HEALTHY` 仅表示解析无错误；`closed_loop_quality.eligible` 要求全量 event_id、无重复、来源/策略/潮汐/跨日维度完整、存在 directive/order 关联；具备 directive_id 的记录必须有 action、candidate_id 和 plan_id；EXIT/SELL 还必须有 exit_rule_id。报告同时输出身份字段覆盖率、身份缺项数和 SignalDecisionEvent 字段覆盖/缺项数，不能以解析成功代替闭环证据。输出按来源/策略/潮汐/跨日路径分组，给出字段覆盖与新鲜度完整度、信号阶段漏斗、重复事件、directive/order 关联、拒绝原因、MFE/MAE、滑点和 T+1 延迟退出损失，并按相同代码/动作/60 秒窗口统计潜在跨来源/策略重叠率。该重叠指标仅是诊断基线，不自动去重或将重叠判为噪声；任何非对象记录会显式降级。重复事件仍仅按 `event_id` 判定；缺失数据保留空值和样本数；空快照或无有效事件时报告降级。
+
+字段缺失时报告样本数/空值，不伪造结果；无法解析或无法读取输入会输出 DEGRADED 与错误明细。命令：`python tools/ats_paper_daily_report.py <ATS审计.jsonl> <TK流水.jsonl> --output <日报.json>`。
+
+专项测试 `python -m pytest tests/test_g13_ats_paper_daily_report.py -q`：13 passed，覆盖重复 event_id、生命周期事件展开、SignalDecisionEvent 字段契约、ATS JSON 快照、TK 嵌套 JSONL、跨日路径分组/拒绝原因/字段覆盖、身份缺项阻断、空/无效输入降级、非对象记录降级及潜在跨源/策略重叠率。真实源只读样本：1219 事件，解析 HEALTHY；从 TK `trace.trace_id` 提取事件身份 1019 条（覆盖 1019/1219），其中 1 个重复；source 覆盖 1013/1219，strategy/tide/cross-day 均为 0；directive 0、order 1009、关联 0，`closed_loop_quality.eligible=false`。样本 artifact 为 `G13_runtime_source_sample_2026-09-24.json`；来源日志与账本只读，未改动。该证据确认运行数据尚不能证明逐笔闭环。

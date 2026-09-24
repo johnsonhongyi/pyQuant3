@@ -4,12 +4,14 @@
 from __future__ import annotations
 
 from datetime import date, datetime
+import math
 from typing import Any, Dict, Iterable, List, Optional
 
 
 def _number(value: Any) -> float:
     try:
-        return max(0.0, float(value))
+        number = float(value)
+        return max(0.0, number) if math.isfinite(number) else 0.0
     except (TypeError, ValueError):
         return 0.0
 
@@ -24,9 +26,10 @@ def _date_from_timestamp(value: Any) -> str:
     if not text:
         return ""
     try:
-        return datetime.fromisoformat(text.replace("Z", "+00:00")).date().isoformat()
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        return parsed.date().isoformat()
     except Exception:
-        return text[:10] if len(text) >= 10 else ""
+        return ""
 
 
 def build_t1_position_facts(
@@ -97,23 +100,24 @@ def build_t1_position_facts(
             derived_lots.append({
                 "qty": missing,
                 "price": _number(position.get("entry_price")),
-                "buy_date": entry_day,
+                # Position-level entry_time cannot establish the acquisition
+                # date of an unexplained quantity delta.
+                "buy_date": "",
                 "timestamp": str(position.get("entry_time") or ""),
                 "source": "POSITION_FALLBACK",
             })
-            status = "DERIVED_WITH_POSITION_FALLBACK" if entry_day else "INCOMPLETE_FAIL_CLOSED"
+            status = "POSITION_FALLBACK_FAIL_CLOSED" if entry_day else "INCOMPLETE_FAIL_CLOSED"
         elif derived_qty > total_qty + 1e-9:
-            # Current position snapshot is authoritative. Trim newest lots first
-            # until lot quantity matches the actual current holding.
-            overflow = derived_qty - total_qty
-            for lot in reversed(derived_lots):
-                if overflow <= 1e-9:
-                    break
-                cut = min(overflow, _number(lot.get("qty")))
-                lot["qty"] = _number(lot.get("qty")) - cut
-                overflow -= cut
-            derived_lots = [lot for lot in derived_lots if _number(lot.get("qty")) > 1e-9]
-            status = "TRIMMED_TO_POSITION_SNAPSHOT"
+            # The missing sell/update record makes the surviving lot ages
+            # ambiguous. Do not guess which lots remain or unlock T+1 shares.
+            derived_lots = [{
+                "qty": total_qty,
+                "price": 0.0,
+                "buy_date": "",
+                "timestamp": "",
+                "source": "RECONCILIATION_MISMATCH",
+            }]
+            status = "LEDGER_POSITION_MISMATCH_FAIL_CLOSED"
 
         sellable_qty = 0.0
         today_buy_qty = 0.0
@@ -137,6 +141,9 @@ def build_t1_position_facts(
         today_buy_qty = min(total_qty, today_buy_qty)
         unresolved_qty = max(0.0, total_qty - sellable_qty - today_buy_qty)
         result[code] = {
+            "code": code,
+            "trade_date": day,
+            "snapshot_version": "2.0",
             "total_qty": round(total_qty, 4),
             "sellable_qty": round(sellable_qty, 4),
             "today_buy_qty": round(today_buy_qty, 4),
