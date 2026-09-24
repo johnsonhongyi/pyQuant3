@@ -20,6 +20,7 @@ import time
 import math
 import logging
 import threading
+import weakref
 import pandas as pd
 import numpy as np
 from datetime import datetime
@@ -44,7 +45,7 @@ from PyQt6.QtWidgets import (
     QScrollArea, QTabWidget, QDoubleSpinBox, QRadioButton, QButtonGroup,
     QCheckBox, QSlider, QToolBar, QStackedWidget, QSizePolicy
 )
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QSettings, QParallelAnimationGroup, QPropertyAnimation, QEasingCurve, QRect, QRectF, QEvent, QPoint, QPointF
+from PyQt6.QtCore import Qt, QObject, QTimer, pyqtSignal, QSettings, QParallelAnimationGroup, QPropertyAnimation, QEasingCurve, QRect, QRectF, QEvent, QPoint, QPointF
 from PyQt6.QtGui import QColor, QFont, QBrush, QIcon, QPainter, QPen, QPainterPath, QCursor, QPolygon, QPolygonF
 
 from sys_utils import resolve_stock_name
@@ -4175,7 +4176,7 @@ class SBCWindowMemoryManager:
             logger.debug(f"[SBCMemoryManager] 异步刷盘提示: {e}")
 
 
-class SBCGlobalDispatcher:
+class SBCGlobalDispatcher(QObject):
     """
     【⚡ SBC 全局集中行情调度中枢 (P0 彻底终结多窗口各自网络阻塞争抢)】
     1. 集中轮询：单一后台守护线程统一以全局间隔驱动，无活跃窗口时自动休眠；
@@ -4184,11 +4185,16 @@ class SBCGlobalDispatcher:
     4. 集中分发：通过 Qt 事件队列安全分发至主线程各已打开的 SBC 窗口。
     """
     _instance: Optional["SBCGlobalDispatcher"] = None
+    batch_ready = pyqtSignal(object)
 
     def __init__(self):
+        super().__init__()
         self._running = False
         self._thread: Optional[Any] = None
         self._lock = threading.Lock()
+        self._stop_event = threading.Event()
+        self._subscribers = {}
+        self.batch_ready.connect(self._deliver_batch, Qt.ConnectionType.QueuedConnection)
 
     @classmethod
     def get_instance(cls) -> "SBCGlobalDispatcher":
@@ -4201,25 +4207,45 @@ class SBCGlobalDispatcher:
             if self._running:
                 return
             self._running = True
-            import threading
-            self._thread = threading.Thread(target=self._run_loop, daemon=True, name="SBCGlobalDispatcherThread")
+            self._stop_event = threading.Event()
+            self._thread = threading.Thread(target=self._run_loop, args=(self._stop_event,), daemon=True,
+                                            name="SBCGlobalDispatcherThread")
             self._thread.start()
 
     def stop(self):
         with self._lock:
             self._running = False
+            self._stop_event.set()
 
-    def _run_loop(self):
-        while self._running:
+    def subscribe(self, dlg):
+        # Called only on the UI thread. The worker sees plain code/mode values.
+        with self._lock:
+            self._subscribers[id(dlg)] = (weakref.ref(dlg), str(dlg.code), str(dlg._current_period_mode))
+
+    def unsubscribe(self, dlg):
+        with self._lock:
+            self._subscribers.pop(id(dlg), None)
+
+    def _deliver_batch(self, batch):
+        with self._lock:
+            subscribers = list(self._subscribers.values())
+        for ref, code, mode in subscribers:
+            dlg = ref()
+            if dlg is None or getattr(dlg, "_is_closing", False) or not dlg.isVisible():
+                continue
+            if dlg.code != code or dlg._current_period_mode != mode:
+                continue
+            data = batch.get(code)
+            if data is not None and mode in data.get("modes", ()):
+                dlg.reload_chart(is_timer_tick=True, preloaded=data)
+
+    def _run_loop(self, stop_event):
+        while not stop_event.is_set():
             try:
-                mem = SBCWindowMemoryManager.get_instance()
-                active_dialogs = []
-                for c, dlg in list(mem._dialogs.items()):
-                    if dlg and hasattr(dlg, 'isVisible') and dlg.isVisible():
-                        active_dialogs.append(dlg)
-
-                if not active_dialogs:
-                    time.sleep(1.0)
+                with self._lock:
+                    subscriptions = [(code, mode) for _, code, mode in self._subscribers.values()]
+                if not subscriptions:
+                    stop_event.wait(1.0)
                     continue
 
                 is_trading = False
@@ -4234,42 +4260,51 @@ class SBCGlobalDispatcher:
                     interval_sec = 5.0
 
                 if not is_trading:
-                    time.sleep(30.0)
+                    stop_event.wait(30.0)
                     continue
 
-                codes = list(set([dlg.code for dlg in active_dialogs if getattr(dlg, 'code', None)]))
+                codes = list({code for code, _ in subscriptions if code})
                 if not codes:
-                    time.sleep(1.0)
+                    stop_event.wait(1.0)
                     continue
 
                 # 1. 批量拉取快照 (40 只批次限制与标准化转换)
                 fetcher = TDXRealtimeFetcher.get_instance()
                 snapshots = fetcher.fetch_batch_stock_snapshots(codes)
 
-                # 2. 按标的逐一调度分钟 Bar 增量 (避免并发争抢)
-                for dlg in active_dialogs:
-                    if not self._running:
+                # Fetch each code once, then distribute immutable references on the UI thread.
+                batch = {code: {"snapshot": snapshots.get(code, {})} for code in codes}
+                modes_by_code = {code: {mode for c, mode in subscriptions if c == code} for code in codes}
+                for code in codes:
+                    batch[code]["modes"] = modes_by_code[code]
+                for code in codes:
+                    if stop_event.is_set():
                         break
-                    code = getattr(dlg, 'code', '')
-                    mode = getattr(dlg, '_current_period_mode', '1m')
-                    if mode in ["1m", "3d", "5d", "10d"] and code:
+                    modes = modes_by_code[code]
+                    if modes.intersection({"1m", "3d", "5d", "10d"}):
                         try:
-                            fetcher.fetch_multi_horizon_vwap(code)
+                            batch[code]["multi"] = fetcher.fetch_multi_horizon_vwap(code)
                         except Exception:
-                            pass
-
-                # 3. 集中分发至各窗口 (结合阶段4入口脏检查)
-                for dlg in active_dialogs:
-                    if hasattr(dlg, 'reload_chart'):
+                            batch[code]["multi"] = (pd.DataFrame(), None)
+                        frame, _ = batch[code]["multi"]
+                        if "1m" in modes and (frame is None or frame.empty):
+                            try:
+                                batch[code]["intraday"] = fetcher.fetch_intraday_bars(code)
+                            except Exception:
+                                batch[code]["intraday"] = pd.DataFrame()
+                    for mode in modes - {"1m", "3d", "5d", "10d"}:
                         try:
-                            QTimer.singleShot(0, lambda d=dlg: d.reload_chart(is_timer_tick=True) if d and hasattr(d, 'isVisible') and d.isVisible() else None)
+                            batch[code].setdefault("kline", {})[mode] = fetcher.fetch_kline_bars(code, category=mode, count=150)
                         except Exception:
-                            pass
+                            batch[code].setdefault("kline", {})[mode] = pd.DataFrame()
 
-                time.sleep(max(1.0, interval_sec))
+                if not stop_event.is_set():
+                    self.batch_ready.emit(batch)
+
+                stop_event.wait(max(1.0, interval_sec))
 
             except Exception:
-                time.sleep(2.0)
+                stop_event.wait(2.0)
 
 
 class SBCIntradayChartDialog(QWidget):
@@ -4305,6 +4340,8 @@ class SBCIntradayChartDialog(QWidget):
         # ⚡ 阶段2 两阶段秒开异步加载控制与 Epoch 防旧数据覆写门禁
         self.async_load_enabled: bool = True
         self._load_epoch: int = 0
+        self._load_inflight = False
+        self._pending_load = None
         self._async_chart_data_ready.connect(self._on_async_chart_data_arrived)
 
         # 设置为彻底独立的顶层 Window (非模态，不置顶，不妨碍用户与其他窗口重叠与切换)
@@ -4652,16 +4689,19 @@ class SBCIntradayChartDialog(QWidget):
         self._save_timer.timeout.connect(self._do_save_sbc_geometry)
         self._save_timer.start()
 
-        # 6. 统一由集中调度器 SBCGlobalDispatcher 集中批量驱动；poll_timer 作为单窗降级备份
+        # 6. 统一由集中调度器驱动；定时器仅在调度器不可用时启用。
+        self._dispatcher_enabled = False
         try:
             SBCGlobalDispatcher.get_instance().start()
+            self._dispatcher_enabled = True
         except Exception:
             pass
         _tdx_intv_ms = int(float(getattr(cct, 'ats_tdx_interval', 5.0) or 5.0) * 1000) if cct else 5000
         self.poll_timer = QTimer(self)
         self.poll_timer.setInterval(max(15000, _tdx_intv_ms * 3))
         self.poll_timer.timeout.connect(self._on_poll_timer_tick)
-        self.poll_timer.start()
+        if not self._dispatcher_enabled:
+            self.poll_timer.start()
 
         # 7. 磁吸贴边、自动隐藏与滑出动画系统 (与 ATS 加速龙头监视器完全统一)
         self.anchor_edge = None
@@ -4703,7 +4743,8 @@ class SBCIntradayChartDialog(QWidget):
         # 8. 窗口瞬间秒开直出 (0 阻塞)：首帧骨架/轻量预排版，真实数据获取委托给事件循环下一微秒异步拉取
         self._restore_sbc_geometry()
         self._render_skeleton_or_cached_frame()
-        QTimer.singleShot(0, lambda: self.reload_chart() if not getattr(self, '_is_closing', False) else None)
+        if not self._dispatcher_enabled:
+            QTimer.singleShot(0, lambda: self.reload_chart() if not getattr(self, '_is_closing', False) else None)
         bind_top_shortcut(self, self._toggle_stay_on_top)
 
         # 9. 加载并持久化最近访问标的代码 (保留最新 10 个)
@@ -4845,6 +4886,8 @@ class SBCIntradayChartDialog(QWidget):
             SBCWindowMemoryManager.get_instance().update_period(self.code, mode_clean)
         except Exception:
             pass
+        if getattr(self, '_dispatcher_enabled', False) and self.isVisible():
+            SBCGlobalDispatcher.get_instance().subscribe(self)
 
         # 同步更新顶部按钮组的 checked 高亮状态并使当前按钮获得焦点
         if hasattr(self, 'btn_group_period') and self.btn_group_period:
@@ -5622,7 +5665,19 @@ class SBCIntradayChartDialog(QWidget):
             SBCWindowMemoryManager.get_instance().register(self)
         except Exception:
             pass
-        if hasattr(self, 'poll_timer') and self.poll_timer and not self.poll_timer.isActive():
+        if self._dispatcher_enabled:
+            SBCGlobalDispatcher.get_instance().subscribe(self)
+            # The dispatcher pauses live polling outside market hours; load the
+            # last available frame once so a newly opened window is not blank.
+            if not getattr(self, '_has_initial_loaded', False):
+                try:
+                    from JohnsonUtil import commonTips as cct
+                    market_open = bool(cct.get_work_time())
+                except Exception:
+                    market_open = False
+                if not market_open:
+                    QTimer.singleShot(0, self.reload_chart)
+        elif hasattr(self, 'poll_timer') and self.poll_timer and not self.poll_timer.isActive():
             self.poll_timer.start()
         if hasattr(self, 'hover_timer') and self.hover_timer and not self.hover_timer.isActive():
             self.hover_timer.start()
@@ -5632,6 +5687,8 @@ class SBCIntradayChartDialog(QWidget):
 
     def hideEvent(self, event):
         """窗口隐藏或贴边收起时，暂停后台高频轮询定时器，杜绝隐蔽消耗与日志刷屏"""
+        if getattr(self, '_dispatcher_enabled', False):
+            SBCGlobalDispatcher.get_instance().unsubscribe(self)
         if hasattr(self, 'poll_timer') and self.poll_timer:
             self.poll_timer.stop()
         if hasattr(self, 'hover_timer') and self.hover_timer:
@@ -5691,6 +5748,8 @@ class SBCIntradayChartDialog(QWidget):
 
         if hasattr(self, 'poll_timer') and self.poll_timer:
             self.poll_timer.stop()
+        if getattr(self, '_dispatcher_enabled', False):
+            SBCGlobalDispatcher.get_instance().unsubscribe(self)
         if hasattr(self, '_save_timer') and self._save_timer:
             self._save_timer.stop()
         if hasattr(self, 'hover_timer') and self.hover_timer:
@@ -6071,7 +6130,9 @@ class SBCIntradayChartDialog(QWidget):
         last_idx = str(df_bars.index[-1])
 
         # 🚀 指纹缓存判定 (P0 核心瓶颈突破)：若数据行数与最新价未变，直接复用上轮计算结果，0 毫秒极速返回
-        strat_fp = (self.code, period_mode, n_bars, last_idx, last_close, last_vol)
+        strat_fp = (self.code, period_mode, n_bars, last_idx, last_close, last_vol,
+                    last_row.get("high"), last_row.get("low"), last_row.get("vwap"),
+                    last_row.get("bar_amt", last_row.get("amount")))
         if getattr(self, '_cached_strat_fp', None) == strat_fp and hasattr(self, '_cached_vwap_signals'):
             return self._cached_vwap_signals
 
@@ -6439,6 +6500,8 @@ class SBCIntradayChartDialog(QWidget):
             SBCWindowMemoryManager.get_instance().update_code(old_code, c_clean, self)
         except Exception:
             pass
+        if getattr(self, '_dispatcher_enabled', False) and self.isVisible():
+            SBCGlobalDispatcher.get_instance().subscribe(self)
 
         # 记录新窗口配置
         try:
@@ -6652,13 +6715,14 @@ class SBCIntradayChartDialog(QWidget):
         vwap_auto_strategy_enabled: bool = True,
         channel_info: Optional[Dict[str, float]] = None,
         is_cancelled_func: Optional[Any] = None,
+        preloaded: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """【⚡ 阶段2 后台异步取数与策略运算核心】主线程0阻塞，网络IO与复杂回测运算在工作线程执行"""
         if is_cancelled_func and is_cancelled_func():
             return {"is_cancelled": True}
 
         fetcher = TDXRealtimeFetcher.get_instance()
-        snap = fetcher.fetch_stock_snapshot(code)
+        snap = preloaded.get("snapshot", {}) if preloaded is not None else fetcher.fetch_stock_snapshot(code)
         if is_cancelled_func and is_cancelled_func():
             return {"is_cancelled": True}
 
@@ -6707,7 +6771,8 @@ class SBCIntradayChartDialog(QWidget):
 
         if mode in ["3d", "5d", "10d"]:
             days = 3 if mode == "3d" else (5 if mode == "5d" else 10)
-            df_multi, multi_vwap_snapshot = fetcher.fetch_multi_horizon_vwap(code)
+            df_multi, multi_vwap_snapshot = (preloaded["multi"] if preloaded is not None and "multi" in preloaded
+                                             else fetcher.fetch_multi_horizon_vwap(code))
             if not df_multi.empty and days < 10 and "date" in df_multi.columns:
                 available_dates = sorted(df_multi["date"].astype(str).unique())
                 visible_dates = available_dates[-days:]
@@ -6751,7 +6816,9 @@ class SBCIntradayChartDialog(QWidget):
                 df_kline = custom_kline_df
             else:
                 fetch_c = min(800, max(250, len(custom_signals) * 5)) if custom_signals else 150
-                df_kline = fetcher.fetch_kline_bars(code, category=mode, count=fetch_c)
+                kline_frames = preloaded.get("kline", {}) if preloaded is not None else {}
+                df_kline = (kline_frames[mode] if mode in kline_frames and not custom_signals
+                            else fetcher.fetch_kline_bars(code, category=mode, count=fetch_c))
 
             if not df_kline.empty:
                 if op <= 1.0:
@@ -6767,7 +6834,8 @@ class SBCIntradayChartDialog(QWidget):
         else:
             # 默认为 1日分时 (1m)
             # 1. 优先获取多周期 VWAP 快照
-            df_multi, multi_vwap_snapshot = fetcher.fetch_multi_horizon_vwap(code)
+            df_multi, multi_vwap_snapshot = (preloaded["multi"] if preloaded is not None and "multi" in preloaded
+                                             else fetcher.fetch_multi_horizon_vwap(code))
 
             # 2. 🚀 [阶段4 口径对齐与数据复用] 若 df_multi 中已经包含今日最新分时分钟 Bar，直接切出复用！
             df_intraday = None
@@ -6782,7 +6850,8 @@ class SBCIntradayChartDialog(QWidget):
                         df_intraday = df_today
 
             if df_intraday is None or df_intraday.empty:
-                df_intraday = fetcher.fetch_intraday_bars(code)
+                df_intraday = (preloaded["intraday"] if preloaded is not None and "intraday" in preloaded
+                               else fetcher.fetch_intraday_bars(code))
 
             if (df_intraday is None or df_intraday.empty) and state:
                 snaps = state.get("time_snapshots", {})
@@ -6830,7 +6899,10 @@ class SBCIntradayChartDialog(QWidget):
         last_idx = str(df_target.index[-1]) if n_bars > 0 else ""
         last_close = float(df_target.iloc[-1].get("close", p)) if n_bars > 0 else p
         last_vol = float(df_target.iloc[-1].get("vol", df_target.iloc[-1].get("volume", 0.0))) if n_bars > 0 else 0.0
-        data_fp = (code, mode, n_bars, last_idx, round(last_close, 3), round(last_vol, 1), round(p, 3), round(vw, 3))
+        data_fp = (code, mode, n_bars, last_idx, round(last_close, 3), round(last_vol, 1),
+                   round(p, 3), round(vw, 3), round(hi, 3), round(lo, 3),
+                   round(amt, 2), round(to_rate, 3), repr(sigs),
+                   repr(channel_info), repr(multi_vwap_snapshot))
 
         return {
             "is_cancelled": False,
@@ -6987,7 +7059,8 @@ class SBCIntradayChartDialog(QWidget):
             if getattr(self, 'auto_eval_enabled', True):
                 self._on_eval_r_clicked(toggle=False)
 
-    def reload_chart(self, is_timer_tick: bool = False, force_sync: bool = False):
+    def reload_chart(self, is_timer_tick: bool = False, force_sync: bool = False,
+                     preloaded: Optional[Dict[str, Any]] = None):
         # 保持输入框与当前标的代码+名称同步 (非编辑输入状态下)
         if hasattr(self, 'txt_switch_code') and self.txt_switch_code and not self.txt_switch_code.hasFocus():
             expected_display = self._format_code_with_name(self.code)
@@ -7026,6 +7099,10 @@ class SBCIntradayChartDialog(QWidget):
         self._has_initial_loaded = True
 
         mode = getattr(self, '_current_period_mode', '1m')
+        if not force_sync and getattr(self, 'async_load_enabled', True) and self._load_inflight:
+            self._load_epoch += 1
+            self._pending_load = (is_timer_tick, preloaded)
+            return
         self._load_epoch += 1
         cur_epoch = self._load_epoch
         cur_code = self.code
@@ -7040,42 +7117,60 @@ class SBCIntradayChartDialog(QWidget):
                 custom_trades_df=getattr(self, "custom_trades_df", None),
                 vwap_auto_strategy_enabled=getattr(self, "vwap_auto_strategy_enabled", True),
                 channel_info=getattr(self.canvas, "channel_info", None) if hasattr(self, 'canvas') else None,
+                preloaded=preloaded,
             )
             self._apply_chart_payload(payload, is_timer_tick=is_timer_tick)
             return
 
         # 异步工作线程分支 (阶段2 彻底剥离主线程网络阻塞)
+        self._load_inflight = True
+        custom_signals = getattr(self, "custom_signals", None)
+        custom_kline_df = getattr(self, "custom_kline_df", None)
+        custom_trades_df = getattr(self, "custom_trades_df", None)
+        auto_strategy = getattr(self, "vwap_auto_strategy_enabled", True)
+        channel_info = getattr(self.canvas, "channel_info", None) if hasattr(self, 'canvas') else None
         def _bg_fetch_worker():
+            payload = {"is_cancelled": True}
             try:
                 payload = self._do_fetch_chart_data(
                     code=cur_code,
                     mode=mode,
-                    custom_signals=getattr(self, "custom_signals", None),
-                    custom_kline_df=getattr(self, "custom_kline_df", None),
-                    custom_trades_df=getattr(self, "custom_trades_df", None),
-                    vwap_auto_strategy_enabled=getattr(self, "vwap_auto_strategy_enabled", True),
-                    channel_info=getattr(self.canvas, "channel_info", None) if hasattr(self, 'canvas') else None,
-                    is_cancelled_func=lambda: cur_epoch != self._load_epoch or cur_code != self.code
+                    custom_signals=custom_signals,
+                    custom_kline_df=custom_kline_df,
+                    custom_trades_df=custom_trades_df,
+                    vwap_auto_strategy_enabled=auto_strategy,
+                    channel_info=channel_info,
+                    is_cancelled_func=lambda: cur_epoch != self._load_epoch,
+                    preloaded=preloaded,
                 )
-                if not payload or payload.get("is_cancelled"):
-                    return
-                payload["is_timer_tick"] = is_timer_tick
-                self._async_chart_data_ready.emit(cur_epoch, cur_code, mode, payload)
             except Exception as e:
                 logger.debug(f"[SBC] 异步取数提示: {e}")
+            finally:
+                if not isinstance(payload, dict):
+                    payload = {"is_cancelled": True}
+                payload["is_timer_tick"] = is_timer_tick
+                try:
+                    self._async_chart_data_ready.emit(cur_epoch, cur_code, mode, payload)
+                except RuntimeError:
+                    pass
 
-        import threading
         threading.Thread(target=_bg_fetch_worker, daemon=True).start()
 
     def _on_async_chart_data_arrived(self, epoch: int, code: str, mode: str, payload: object):
         """【🛡️ 阶段2 Epoch Guard 门禁】槽函数接收异步工作线程传回数据，严格防串屏"""
+        self._load_inflight = False
+        pending = self._pending_load
+        self._pending_load = None
+        if pending is not None and not getattr(self, "_is_closing", False):
+            self.reload_chart(is_timer_tick=pending[0], preloaded=pending[1])
+            return
+        if getattr(self, "_is_closing", False) or not isinstance(payload, dict) or payload.get("is_cancelled"):
+            return
         if epoch != getattr(self, '_load_epoch', 0):
             return
         if code != self.code:
             return
         if mode != getattr(self, '_current_period_mode', '1m'):
-            return
-        if not isinstance(payload, dict):
             return
         is_timer_tick = payload.get("is_timer_tick", False)
         self._apply_chart_payload(payload, is_timer_tick=is_timer_tick)
