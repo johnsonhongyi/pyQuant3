@@ -1,4 +1,47 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
+## 2026-09-24 11:10
+- [x] **【SBC 3日分时成交量差分对齐底层与分时图绘制路由彻底修复】(`ats/ui/intraday_strategy_dialog.py`, `tests/test_multi_day_realtime_updating.py`, `20260924_1110_task.md`)**：
+    - [x] **彻底根治 3日误入 K 线模式与大斜坡顶格满格成交量**：
+        - 致命路由误判修复：`SBCChartCanvas.paintEvent` 中将 `"3d"` 从 K 线列表中移出，分时模式严格执行 `_paint_intraday`，消除误打出的 `[3D] 通达信自动通道` 与九转序列；
+        - 全面剥离周期遗留：策略测算、振幅 HUD 定位与买卖点映射中的 `"3d"` 全面移出，统一对齐分时图模式；
+    - [x] **成交量副图全面对齐底层 TDXRealtimeFetcher 差分量**：
+        - 优先读取底层原始单分钟差分量 `bar_vol`（由 `TDXRealtimeFetcher` 原生提供）；
+        - `_extract_intraday_bar_volumes` 备用差分增强：按交易日（`date`）切片分组独立差分，杜绝跨日累计大底数撑爆副图，首根异常自动平滑；
+        - `reload_chart` 3日切片同步对齐 `cum_vol_shares`、`cum_amt`、`vol` 和 `volume`，完整保留分钟单根量 `bar_vol`；
+    - [x] **全量自动化验证 100% 绿灯**：
+        - 专项测试 6/6 全部通过（验证 3日分时成交量差分与分时路由）；核心回归测试集 58/58 纯绿通过，全模块 `compileall` 编译零错误。
+
+## 2026-09-24 10:45
+- [x] **【IPO/SBC 窗口关闭后进程悬挂不退出根治 & SBC 5日前新增 3日分时全面对齐 5日/10日底层逻辑】(`run_ipo_detector.py`, `ats/ui/ipo_subnew_detector_dialog.py`, `ats/ui/intraday_strategy_dialog.py`, `tests/test_multi_day_realtime_updating.py`, `20260924_1045_task.md`)**：
+    - [x] **IPO 检测工具窗口关闭后进程悬挂不退出彻底根治**：
+        - 彻底清理后台挂死定时器：`IPOSubnewDetectorDialog.closeEvent` 中全面停止 `ipc_timer`, `refresh_timer`, `_auto_sync_timer`, `_linkage_timer`, `_render_timer`，避免 `_on_ipc_poll_and_heartbeat` 孤儿定时器每 500ms 持续挂死；
+        - 独立模式生命周期主动退出闭环：`run_ipo_detector.py` 开启 `setQuitOnLastWindowClosed(True)`，监听主窗口 `destroyed` 信号，窗口关闭或销毁时立即主动调用 `app.quit()` 退出 Qt 事件循环，彻底告别必须按 Ctrl+C 强退；
+        - 级联子窗口安全销毁：关闭 IPO 窗口时自动级联关闭指挥室等关联子窗口，释放全部系统资源；
+    - [x] **SBC 在 5日前添加【3日】分时并全面对齐 5日/10日底层逻辑**：
+        - 顶部周期工具栏精炼重排：多日分时统一为 `[1日] [3日] [5日] [10日]`，原 `("3D", "3d")` 彻底升级为真实多日分时；
+        - 底层 3日连续累积与 VWAP 计算对齐：`reload_chart` 中接入 `mode in ["3d", "5d", "10d"]`，自适应切出最近 3 个完整交易日，按日计算累加成交额与成交量生成连续平滑 3日 VWAP 均价线，自动标注 `[3D多日分时]`；
+        - 快捷键与周期轮转完全对齐：A/D 环形轮转与 1~9 数字键直选支持无缝切换至 3日分时；
+    - [x] **全量自动化验证 100% 绿灯**：
+        - 专项测试 5/5 全部秒级通过（覆盖 3日分时切片与 VWAP 累加、IPO 定时器停机与独立模式安全退出）；
+        - 核心回归测试集 19/19 纯绿通过，全模块 `compileall` 编译零错误。
+
+## 2026-09-24 10:20
+- [x] **【SBC 5日/10日多日分时跨日实时数据不更新根治与增量缓存全生命周期门禁加固】(`ats/tdx_realtime_fetcher.py`, `tests/test_multi_day_realtime_updating.py`, `20260924_1020_task.md`)**：
+    - [x] **增量分时缓存跨日冻结永久锁死彻底根治 (`get_incremental_intraday`)**：
+        - 实盘交易期（09:15~15:05）动态解除 `frozen` 锁死：实盘时段数据分秒变动，`is_frozen` 强制为 False，仅在盘后/非交易日允许 frozen，彻底消除昨日收盘 `frozen=True` 绑架今日盘中时效检查的致命缺陷；
+        - 跨日旧增量毫秒级物理淘汰：强校验 `entry.get("date") == today_str` 与 `today_str in df['date'].values`，昨日残留增量条目进入实盘期自动失效并从内存池中清理；
+        - 消除 80 行 DRY 冗余代码：重构抽取 `_check_and_return_entry()` 闭包，统一本地与 RamDisk 同步后的双重门禁；
+    - [x] **开盘跨日滑动窗口滚动检测修复 (`_check_date_rollover`)**：
+        - 消除 `__init__` 初始化自满短路（旧代码 `today_str == self._current_date_str` 导致开盘后误判为已滚动而直接跳过）；
+        - 引入 `_last_rolled_date` 记录真实完成滚动的交易日，开盘交易时段跨日自动触发滑动窗口向前滚动（淘汰最老 1 天，昨日并入静态历史不可变序列）；
+    - [x] **RamDisk 跨进程载入防护与今日实时分时短路拦截 (`fetch_multi_day_intraday_bars`)**：
+        - `_load_from_ramdisk` 增加开盘交易期门禁：开盘后（`can_rollover=True`）丢弃昨日的跨日旧增量条目，绝不载入今日增量池；
+        - `fetch_multi_day_intraday_bars` 增加 `inc_has_today` 校验，未包含今日数据的增量缓存坚决不直接 return，穿透至 TDX 实时增量合并分支；
+        - 分钟滞后检查软降级：交易稀疏或停牌股不再粗暴返回空 DataFrame 导致画幅白屏，保留最新数据平滑呈现；
+    - [x] **实盘数据与全量自动化验证 100% 绿灯**：
+        - 实盘 688766 验证：10日分时与 5日分时均包含今日 2026-09-24 截至 10:13 最新的分时分钟 Bar（416.38 元），多周期 VWAP 平滑计算；
+        - 专项测试 `test_multi_day_realtime_updating.py` 3/3 纯绿秒级通过，核心回归测试 17/17 纯绿通过，全模块 `compileall` 编译零错误。
+
 ## 2026-09-23 16:30
 - [x] **【SBC 底部提示单双行抖动根治、重点数字涨红跌绿高亮与 Alt 切换新窗屏幕亲和度落地】(`ats/ui/intraday_strategy_dialog.py`, `tests/test_sbc_screen_affinity_and_lbl_fixes.py`, `20260923_1630_task.md`)**：
     - [x] **底部提示信息单双行抖动彻底根治**：禁用 `lbl_info` 的 `wordWrap`，设置固定高度 `setFixedHeight(22)`（与快速切码下拉框严格对齐），设置尺寸策略 `Expanding, Fixed` 与居中偏左对齐；长提示全量写入 `setToolTip`，彻底消除折行撑高与窗口尺寸/图表上下跳动；

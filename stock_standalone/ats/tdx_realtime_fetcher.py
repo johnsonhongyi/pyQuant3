@@ -549,6 +549,7 @@ class TDXGlobalCachePool:
         self._mutex = threading.RLock()
         today_str = datetime.now().strftime("%Y-%m-%d")
         self._current_date_str = today_str
+        self._last_rolled_date: Optional[str] = None
 
         # 分区 1: 静态历史多日分时长效缓存 {clean_code: {'date': str, 'days': int, 'records': list, 'last_cum_vol': float, 'last_cum_amt': float}}
         self._history_static_bars: Dict[str, Dict[str, Any]] = {}
@@ -1150,7 +1151,7 @@ class TDXGlobalCachePool:
                             continue
                         if _cache_generation(v) < self._cache_generations.get(str(k[0]).zfill(6), 0):
                             continue
-                        if not self._validate_incremental_entry(k, v, today_str):
+                        if not self._validate_incremental_entry(k, v, today_str) or (can_rollover and str(v.get("date") or "") < today_str):
                             skipped_count += 1
                             continue
                         v["_quality_len"] = len(v["df"])
@@ -1319,7 +1320,7 @@ class TDXGlobalCachePool:
         if not force_from_date:
             if not self.can_trigger_date_rollover(today_str):
                 return
-            if today_str == self._current_date_str:
+            if getattr(self, "_last_rolled_date", None) == today_str and today_str == self._current_date_str:
                 return
 
         with self._mutex:
@@ -1456,6 +1457,7 @@ class TDXGlobalCachePool:
             self._quotes_cache.clear()
             self._kline_cache.clear()
             self._is_dirty = True
+            self._last_rolled_date = today_str
 
             logger.info(f"🔄 [TDXGlobalCachePool] 次日交易日自动滚动迭代完成: 已将 {rolled_stocks} 只股票的历史分时向前平移 (剔除最老1天，保留前9天基线)，新交易日 {today_str}")
 
@@ -1605,8 +1607,8 @@ class TDXGlobalCachePool:
         current_hm = datetime.now().strftime("%H:%M")
         is_trading_active = self.is_trading_day(self._current_date_str) and ("09:15" <= current_hm < "15:05")
         is_after_close = not is_trading_active
-
-        with self._mutex:
+        def _check_and_return_entry():
+            nonlocal key
             entry = self._incremental_intraday_pool.get(key)
             if entry is None:
                 adaptive = [
@@ -1620,10 +1622,26 @@ class TDXGlobalCachePool:
                     entry = max(adaptive, key=lambda candidate: candidate.get("updated_at", 0.0))
                     key = (c_clean, int(entry.get("days", days)))
             if entry is not None:
+                entry_date = str(entry.get("date") or "")
+                # 🛡️ 核心防御 1：交易时段内，昨日跨日旧增量必须物理淘汰，绝不误判命中
+                if is_trading_active and entry_date < self._current_date_str:
+                    self._incremental_intraday_pool.pop(key, None)
+                    self._multi_day_df_cache.pop(key, None)
+                    self._is_dirty = True
+                    return None
+
                 df = entry.get("df")
                 ts = entry.get("updated_at", 0.0)
-                is_frozen = entry.get("frozen", False) or is_after_close
+                # 🛡️ 核心防御 2：实盘交易期数据每分每秒在变，绝对禁止 frozen 锁死！
+                is_frozen = (bool(entry.get("frozen", False)) and not is_trading_active) or is_after_close
                 if df is not None and not df.empty:
+                    # 🛡️ 核心防御 3：实盘交易期增量分时必须包含今日数据
+                    if is_trading_active and "date" in df.columns and self._current_date_str not in df["date"].values:
+                        self._incremental_intraday_pool.pop(key, None)
+                        self._multi_day_df_cache.pop(key, None)
+                        self._is_dirty = True
+                        return None
+
                     if entry.get("_quality_len") != len(df):
                         if not self._validate_incremental_entry(key, entry, self._current_date_str):
                             self._incremental_intraday_pool.pop(key, None)
@@ -1645,48 +1663,17 @@ class TDXGlobalCachePool:
                         self.stats["cache_hits"] += 1
                         self.stats["saved_network_calls"] += 1
                         return df.copy(), dict(entry)
+            return None
+
+        with self._mutex:
+            res = _check_and_return_entry()
+            if res is not None:
+                return res
 
         # 本地未命中，尝试从 RamDisk 探测同步 (如外部 ATS/SBC 刚更新了)
         self._maybe_sync_from_ramdisk()
         with self._mutex:
-            entry = self._incremental_intraday_pool.get(key)
-            if entry is None:
-                adaptive = [
-                    candidate for cache_key, candidate in self._incremental_intraday_pool.items()
-                    if cache_key[0] == c_clean and candidate.get("adaptive_history")
-                    and candidate.get("requested_days") == lookup_days
-                    and candidate.get("date") == self._current_date_str
-                    and isinstance(candidate.get("df"), pd.DataFrame)
-                ]
-                if adaptive:
-                    entry = max(adaptive, key=lambda candidate: candidate.get("updated_at", 0.0))
-                    key = (c_clean, int(entry.get("days", days)))
-            if entry is not None:
-                df = entry.get("df")
-                ts = entry.get("updated_at", 0.0)
-                is_frozen = entry.get("frozen", False) or is_after_close
-                if df is not None and not df.empty:
-                    if entry.get("_quality_len") != len(df):
-                        if not self._validate_incremental_entry(key, entry, self._current_date_str):
-                            self._incremental_intraday_pool.pop(key, None)
-                            self._multi_day_df_cache.pop(key, None)
-                            self._is_dirty = True
-                            return None
-                        entry["_quality_len"] = len(entry["df"])
-                        df = entry["df"]
-                    if is_frozen and entry.get("_closed_quality_len") != len(df):
-                        if not self._validate_incremental_entry(key, entry, self._current_date_str):
-                            self._incremental_intraday_pool.pop(key, None)
-                            self._multi_day_df_cache.pop(key, None)
-                            self._is_dirty = True
-                            return None
-                        entry["_closed_quality_len"] = len(df)
-                    if is_frozen or (time.time() - ts < ttl):
-                        self.stats["total_queries"] += 1
-                        self.stats["cache_hits"] += 1
-                        self.stats["saved_network_calls"] += 1
-                        return df.copy(), dict(entry)
-            return None
+            return _check_and_return_entry()
 
     def set_incremental_intraday(self, code: str, days: int, df: pd.DataFrame,
                                  latest_bar_time: str, today_bar_count: int,
@@ -3485,9 +3472,12 @@ class TDXRealtimeFetcher:
             if cached_inc is not None:
                 df_inc, _ = cached_inc
                 if df_inc is not None and not df_inc.empty:
+                    inc_has_today = ("date" in df_inc.columns and today_date_str in df_inc["date"].values)
                     if can_rollover:
-                        return df_inc
-                    cached_inc_df = df_inc.copy()
+                        if inc_has_today:
+                            return df_inc
+                    else:
+                        cached_inc_df = df_inc.copy()
 
             # 若未开盘 (< 09:15) 或为非交易日，且多日缓存有值，直接返回，避免盘前向 TDX 发起无效请求
             if not can_rollover:
@@ -3651,8 +3641,7 @@ class TDXRealtimeFetcher:
                     now_minute = int(now_hm[:2]) * 60 + int(now_hm[3:])
                     bar_minute = int(last_minute[:2]) * 60 + int(last_minute[3:])
                     if now_minute - bar_minute > 15:
-                        logger.warning(f"[AutoRepair] {c_clean} TDX 当日分钟数据滞后，等待重拉")
-                        return pd.DataFrame()
+                        logger.debug(f"[AutoRepair] {c_clean} TDX 当日分钟数据滞后 {now_minute - bar_minute} 分钟 (可能交易稀疏或停牌)，保留当前最新数据呈现")
 
             # 3. 分支 A: 若命中历史静态缓存，执行【当日时间戳增量比对与合并】
             if has_valid_hist and days > 1:
