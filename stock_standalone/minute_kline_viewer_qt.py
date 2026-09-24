@@ -1427,6 +1427,7 @@ class KlineBackupViewer(QMainWindow, WindowMixin):
 
     def load_data(self, file_path):
         from PyQt6.QtWidgets import QInputDialog
+        from JSONData.tdx_hdf5_api import SafeHDFStore, read_hdf_safe
         try:
             self.current_file = file_path
             self.is_memory_mode = False
@@ -1638,7 +1639,7 @@ class KlineBackupViewer(QMainWindow, WindowMixin):
 
             elif ext == ".h5":
                 # 获取所有 key
-                with pd.HDFStore(file_path, "r") as store:
+                with SafeHDFStore(file_path, "r") as store:
                     keys = store.keys()  # 返回 ['/data1', '/data2', ...]
                     keys = list(map(lambda k: k.strip("/"), keys))  # 去掉前导斜杠
 
@@ -1668,7 +1669,7 @@ class KlineBackupViewer(QMainWindow, WindowMixin):
                         self.statusBar().showMessage("HDF5 load cancelled.")
                         return
 
-                df = pd.read_hdf(file_path, key=key)
+                df = read_hdf_safe(file_path, key)
                 self.current_key = key
 
             elif ext in (".json", ".gz"):
@@ -2723,10 +2724,11 @@ class KlineBackupViewer(QMainWindow, WindowMixin):
             self.statusBar().showMessage("Only HDF5 files support table deletion.")
             return
 
+        from JSONData.tdx_hdf5_api import SafeHDFStore
         file_path = self.current_file
         try:
             # 1. 获取所有 Key (不直接加载数据，只读 metadata)
-            with pd.HDFStore(file_path, "r") as store:
+            with SafeHDFStore(file_path, "r") as store:
                 keys = [k.strip("/") for k in store.keys()]
             
             if not keys:
@@ -2759,7 +2761,7 @@ class KlineBackupViewer(QMainWindow, WindowMixin):
 
             # 4. 执行删除操作
             self.statusBar().showMessage(f"Deleting table '{key}'...")
-            with pd.HDFStore(file_path, "a") as store:
+            with SafeHDFStore(file_path, "a") as store:
                 if "/" + key in store.keys():
                     del store[key]
             
@@ -3203,6 +3205,7 @@ class H5MergeRepairDialog(QDialog):
                 pass
 
     def detect_new_file_dates(self):
+        from JSONData.tdx_hdf5_api import SafeHDFStore
         new_path = self.new_edit.text().strip()
         h5_key = self.key_edit.text().strip()
         if not new_path or not os.path.exists(new_path):
@@ -3218,7 +3221,7 @@ class H5MergeRepairDialog(QDialog):
         
         try:
             # 使用只读模式加载索引，避免引起多进程死锁或大内存分配
-            with pd.HDFStore(new_path, mode='r') as store:
+            with SafeHDFStore(new_path, mode='r') as store:
                 if h5_key not in store:
                     QMessageBox.warning(self, "警告", f"新数据文件中不存在 Key: {h5_key}")
                     return
@@ -3271,6 +3274,7 @@ class H5MergeRepairDialog(QDialog):
     def run_merge(self):
         import time
         import shutil
+        from JSONData.tdx_hdf5_api import SafeHDFStore, read_hdf_safe
         
         base_path = self.base_edit.text().strip()
         new_path = self.new_edit.text().strip()
@@ -3307,7 +3311,7 @@ class H5MergeRepairDialog(QDialog):
             # Step 1: 读取基础文件
             self.append_log(f"1. 正在读取基础历史文件: {base_path} ...")
             t0 = time.time()
-            df_base = pd.read_hdf(base_path, key=h5_key)
+            df_base = read_hdf_safe(base_path, h5_key)
             self.append_log(f"   读取成功: {len(df_base)} 行, 耗时 {time.time()-t0:.1f} 秒")
             
             times_base = pd.to_datetime(df_base.index.get_level_values('ticktime'))
@@ -3316,7 +3320,7 @@ class H5MergeRepairDialog(QDialog):
             # Step 2: 读取新追加文件
             self.append_log(f"\n2. 正在读取新追加文件: {new_path} ...")
             t0 = time.time()
-            df_new = pd.read_hdf(new_path, key=h5_key)
+            df_new = read_hdf_safe(new_path, h5_key)
             self.append_log(f"   读取成功: {len(df_new)} 行, 耗时 {time.time()-t0:.1f} 秒")
 
             # Step 3: 进行过滤
@@ -3357,7 +3361,7 @@ class H5MergeRepairDialog(QDialog):
 
             # Step 6: 验证物理写入
             self.append_log("\n6. 正在验证写入的 HDF5 文件 ...")
-            with pd.HDFStore(temp_target, mode='r') as store:
+            with SafeHDFStore(temp_target, mode='r') as store:
                 nrows = store.get_storer(h5_key).nrows
                 self.append_log(f"   已验证 Key '{h5_key}' 包含: {nrows} 行")
 
