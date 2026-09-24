@@ -4,47 +4,144 @@ import argparse, json, os, re, subprocess, sys, time
 from datetime import datetime, timezone
 from pathlib import Path
 
-def discover_plan_tasks(root: Path) -> dict[str, str]:
-    """Discover task IDs/titles from the newest executable plan, not code constants."""
+def discover_plan_specs(root: Path) -> dict[str, dict]:
+    """Read the newest execution plan and preserve its task IDs, scopes and dependencies."""
     candidates = sorted((root/'docs').glob('*EXECUTION*PLAN*.md'), key=lambda p: p.stat().st_mtime, reverse=True)
-    tasks = {}
-    for plan in candidates:
-        try: text = plan.read_text(encoding='utf-8')
-        except OSError: continue
-        for match in re.finditer(r'(?m)^##.*?Task\s+(\d{3})(?:/(\d{3}))?\s*[:：]?\s*(.*?)\s*$', text):
-            task_id, second_id, title = match.group(1), match.group(2), match.group(3)
-            title = re.sub(r'[（(]\s*P\d\s*[）)]\s*$', '', title).strip()
-            slug = re.sub(r'[^a-z0-9]+','_',title.lower()).strip('_')[:48] or 'plan_task'
-            tasks.setdefault(task_id, slug)
-            if second_id: tasks.setdefault(second_id, slug)
-    return tasks
+    if not candidates:
+        return {}
+    try:
+        lines = candidates[0].read_text(encoding='utf-8').splitlines()
+    except OSError:
+        return {}
+    specs: dict[str, dict] = {}
+    for line in lines:
+        cells = [part.strip() for part in line.strip().strip('|').split('|')]
+        if len(cells) < 3:
+            continue
+        match = re.match(r'\*\*(G\d{2})\s+(.+?)\*\*\s*(.*?)\s*$', cells[0], re.I)
+        if not match:
+            continue
+        task_id = match.group(1).upper()
+        title_and_priority = match.group(2)
+        title = re.sub(r'[\uFF0C,]\s*P\d\s*$', '', title_and_priority).strip()
+        dep_text = match.group(3).strip().lstrip('\uFF1B;').strip()
+        deps: list[str] = []
+        for first, last in re.findall(r'(G\d{2})\s*[\u2013-]\s*(G\d{2})', dep_text, re.I):
+            deps.extend(f'G{n:02d}' for n in range(int(first[1:]), int(last[1:]) + 1))
+        dep_text = re.sub(r'G\d{2}\s*[\u2013-]\s*G\d{2}', ' ', dep_text, flags=re.I)
+        deps.extend(x.upper() for x in re.findall(r'G\d{2}', dep_text, re.I))
+        deps = list(dict.fromkeys(deps))
+        files = re.findall(r'`([^`]+)`', cells[1])
+        requirement = cells[2]
+        if task_id not in {'G00', 'G12', 'G13', 'G14', 'G15'}:
+            files.append(f'tests/ats_closed_loop/test_{task_id.lower()}.py')
+        priority_match = re.search(r'\b(P[01])\b', title_and_priority)
+        specs[task_id] = {'title': title, 'priority': priority_match.group(1) if priority_match else 'P1', 'deps': deps, 'files': list(dict.fromkeys(files)), 'requirement': requirement}
+    if specs:
+        return specs
+    legacy = {}
+    content = '\n'.join(lines)
+    for match in re.finditer(r'(?m)^##.*?Task\s+(\d{3})(?:/(\d{3}))?\s*[:\uFF1A]?\s*(.*?)\s*$', content):
+        task_id, second_id, title = match.group(1), match.group(2), match.group(3)
+        legacy[task_id] = {'title': title, 'priority': 'P1', 'deps': [], 'files': ['ats/', 'tests/'], 'requirement': title}
+        if second_id:
+            legacy[second_id] = legacy[task_id]
+    return legacy
+
+
+def discover_plan_tasks(root: Path) -> dict[str, str]:
+    return {task_id: re.sub(r'[^a-z0-9]+', '_', spec['title'].lower()).strip('_')[:48] or task_id.lower() for task_id, spec in discover_plan_specs(root).items()}
+
 
 def ensure_plan_tasks(root: Path, task_ids=None) -> dict:
-    """Self-heal missing task registrations from the current execution plan."""
-    plan_tasks = discover_plan_tasks(root)
-    ids = task_ids or list(plan_tasks)
+    """Register exact task cards from the newest execution plan."""
+    specs = discover_plan_specs(root)
+    ids = task_ids or list(specs)
     inbox = root/'.agent_hub'/'inbox'; created=[]; existing=[]; errors=[]
-    template = root/'.agent_hub'/'task_template.md'
     for tid in ids:
-        slug = plan_tasks.get(tid, f'plan_task_{tid}')
+        spec = specs.get(tid)
+        if not spec:
+            errors.append(f'{tid}: task ID is absent from the newest execution plan')
+            continue
+        slug = re.sub(r'[^a-z0-9]+', '_', spec['title'].lower()).strip('_')[:48] or tid.lower()
         path = inbox/f'{tid}_{slug}.md'
-        # Existing filename may use an older slug; identify by Task-ID before
-        # creating anything, otherwise self-healing would create duplicates.
         prior = list(inbox.glob(f'{tid}_*.md'))
         if prior:
+            card_path = prior[0]
+            prior_text = card_path.read_text(encoding='utf-8')
+            if prior_text.startswith('# Task\n\nImplement planned work for '):
+                prior_text = prior_text.replace('# Task\n\n', f'# {tid}: {spec["title"]}\n\n## Task\n\n', 1)
+                with card_path.open('w', encoding='utf-8', newline='\n') as handle:
+                    handle.write(prior_text)
             existing.append(tid); continue
+        tests = [x for x in spec['files'] if x.startswith('tests/')]
+        verification = f'python -m pytest {tests[0]} -q' if tests else 'python -m compileall -q tools'
+        profile = 'P1_DOCS_SAFE' if tid == 'G00' else ('P0_READONLY' if tid == 'G15' else ('P4_RELEASE_GATE' if tid == 'G14' else 'P3_CODE_MEDIUM'))
+        risk = 'LOW' if tid in {'G00', 'G15'} else ('HIGH' if tid == 'G14' else 'MEDIUM')
+        deps = ' '.join(spec['deps']) or 'none'
+        allowed = '\n'.join(f'- `{item}`' for item in spec['files']) or '- `docs/ats_closed_loop/`'
+        card = f"""# Task
+
+Implement planned work for {tid}: {spec['title']}.
+
+## Metadata
+
+- Task-ID: {tid}
+- Owner: unassigned
+- Priority: {spec['priority']}
+- Risk: {risk}
+- Permission-Profile: {profile}
+- Depends-On: {deps}
+- Created-By: agenthub
+- Created-At: {time.strftime('%Y-%m-%d')}
+
+## Context
+
+Follow `docs/ATS_SIGNAL_T1_PAPER_CLOSED_LOOP_EXECUTION_PLAN_2026-09-24.md`, including its interface contracts, file ownership, PAPER-only boundary, and read-only production-data rule. {spec['requirement']}
+
+## Files Allowed
+
+{allowed}
+
+## Files Forbidden
+
+- `trade_gateway.py`
+- Broker APIs, credentials, production database writes, and real-trading switches
+
+## Requirements
+
+- {spec['requirement']}
+- Record verification evidence, risks, and rollback point; do not modify files outside this task's allowlist.
+
+## Definition of Done
+
+- [ ] Planned deliverable is complete and interfaces remain compatible
+- [ ] Verification result is recorded
+- [ ] No out-of-scope files were modified
+- [ ] Risks, rollback point, and evidence are recorded
+
+## Verification
+
+```powershell
+{verification}
+```
+
+## Rollback
+
+Revert only changes made by this task. Preserve production data and other task artifacts. Stop and report account discrepancies or any real-trading risk.
+
+## Output Contract
+
+Write walkthrough, verification result, changed-file list, and `agent_report.json` under `.agent_hub/artifacts/{tid}/`.
+"""
         try:
-            text = (template.read_text(encoding='utf-8') if template.exists() else '# Task\n')
-            text = text.replace('Task-ID: 000',f'Task-ID: {tid}').replace('P1','P0',1)
-            text = text.replace('一句话说明唯一交付目标。',f'执行当前计划 Task {tid}: {slug.replace("_", " ")}。')
-            text = text.replace('YYYY-MM-DD', time.strftime('%Y-%m-%d'))
-            text = re.sub(r'(?m)^- `path/to/file\.py`\s*$', '- `ats/`\n- `tests/`', text)
-            text = re.sub(r'(?m)^- `tests/test_file\.py`\s*$', '- `tests/`', text)
-            text = re.sub(r'(?ms)(## Verification\s*\n\n```powershell\n).*?(\n```)', r'\1python -m compileall -q ats tools tests\2', text)
-            text = text.replace('在 `.agent_hub/artifacts/000/`', f'在 `.agent_hub/artifacts/{tid}/`')
-            path.write_text(text, encoding='utf-8'); created.append(tid)
-        except OSError as exc: errors.append(f'{tid}: {exc}')
-    return {'created':created,'existing':existing,'errors':errors,'registered':not errors}
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open('w', encoding='utf-8', newline='\n') as handle:
+                handle.write(card)
+            created.append(tid)
+        except OSError as exc:
+            errors.append(f'{tid}: {exc}')
+    return {'created': created, 'existing': existing, 'errors': errors, 'registered': not errors}
 
 def _now(): return datetime.now(timezone.utc).isoformat()
 def start(root: Path, tasks=None, workers=None) -> dict:

@@ -65,7 +65,7 @@ def activate_existing_agent_hub_instance(timeout_ms: int = 350) -> bool:
         pass
     return False
 
-TASK_NAME_RE = re.compile(r"^(?P<id>\d{3,})_(?!result\.md$).+\.md$")
+TASK_NAME_RE = re.compile(r"^(?P<id>(?:\d{3,}|G\d{2}))_(?!result\.md$).+\.md$", re.IGNORECASE)
 
 
 @dataclass

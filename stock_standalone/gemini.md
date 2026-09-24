@@ -1,4 +1,29 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
+## 2026-09-24 12:45
+- [x] **【SBC 性能塌陷深度审计分析与五阶段高性能重构落地】(`ats/tdx_realtime_fetcher.py`, `ats/ui/intraday_strategy_dialog.py`, `tests/test_sbc_async_load_dispatcher_and_dirty_check.py`, `tests/test_tdx_cache_deforcing_and_invalidation.py`, `20260924_1138_task.md`)**：
+    - [x] **阶段 0 基线实测物理铁证**：
+        - 优化前（`force=True` 反序列化解压风暴）：`get_static_history_bars` 10 次耗时 **21,745.14 ms**（单次 2.17 秒），磁盘重载率 100%（11次）；
+        - 优化后（恢复版本探测与 1.5s 节流）：`get_static_history_bars` 10 次耗时 **11.04 ms**（单次 1.10 ms），内存命中率 100%，**单次读取速度暴增 1,969 倍**！
+    - [x] **阶段 1 缓存热路径全面止血并保全跨进程清除语义**：
+        - `ats/tdx_realtime_fetcher.py` 4 处热路径（`get_static_history_bars`, `set_static_history_bars`, `get_multi_day_df`, `set_incremental_intraday`）的 `force=True` 成功降级为 `force=False`；
+        - 严格保留 `invalidate`（line 1817）的 `force=True` 与代际递增跨进程广播清除语义；
+    - [x] **阶段 2 构造解耦、异步秒开与 Epoch Guard 门禁**：
+        - 首帧骨架屏瞬间直出：`__init__` 中骨架屏 `_render_skeleton_or_cached_frame()` 微秒级直出，主线程 0 阻塞，鼠标键盘彻底告别迟滞；
+        - 取数与计算彻底剥离：后台工作线程执行 `_do_fetch_chart_data`（含快照拉取、通道计算、策略回测），通过 Qt 信号安全回传；
+        - Epoch 门禁丢弃机制：`_load_epoch` 守卫严格校验代际、代码与周期，快速轮转周期或切码时旧数据直接丢弃，彻底杜绝串屏；
+        - 同步降级兼容：保留 `force_sync=True` 与 `async_load_enabled`，单元测试稳定运行；
+    - [x] **阶段 3 进程内集中订阅调度中枢（SBCGlobalDispatcher）**：
+        - TDX 40 只安全批次支持：`TDXRealtimeFetcher` 增加 `fetch_batch_stock_snapshots`，严格按 40 只切块拉取并 100% DRY 复用标准化 VWAP 与换手率计算；
+        - 集中守护调度：`SBCGlobalDispatcher` 单一后台守护线程按全局周期统一拉取所有活跃可见窗口报价并逐一调度分钟 Bar 增量；
+        - 独立定时器治理：各窗口独立的 `poll_timer` 退出高频网络争抢，转为 15s 降级备份保活；
+    - [x] **阶段 4 入口级脏检查与分时数据源复用**：
+        - 刷新链入口脏检查：`_apply_chart_payload` 依据 `(code, mode, n_bars, last_idx, last_close, last_vol, p, vw)` 状态指纹实施门禁，稳定横盘或定时刷新未变时，100% 阻断图元重排、Canvas 重绘、QTextEdit 文本更新与策略重算；
+        - 1m 与多日分时口径对齐复用：`1m` 模式直接裁剪复用多日数据中的今日切片，彻底消除对 TDX 重复发起 `fetch_intraday_bars`；
+        - 日志框收起短路：`_update_unified_realtime_log` 在日志框不可见时直接保存参数并返回，免除大量字符串拼接与 HTML 渲染；
+    - [x] **全量自动化验证 100% 绿灯**：
+        - 专项测试集（`test_tdx_cache_deforcing_and_invalidation.py` 3/3、`test_multi_day_realtime_updating.py` 6/6、`test_sbc_async_load_dispatcher_and_dirty_check.py` 5/5）全部纯绿秒级通过；
+        - 全模块 `python -m compileall ats tests trading_kernel -q` 编译零错误。
+
 ## 2026-09-24 11:10
 - [x] **【SBC 3日分时成交量差分对齐底层与分时图绘制路由彻底修复】(`ats/ui/intraday_strategy_dialog.py`, `tests/test_multi_day_realtime_updating.py`, `20260924_1110_task.md`)**：
     - [x] **彻底根治 3日误入 K 线模式与大斜坡顶格满格成交量**：

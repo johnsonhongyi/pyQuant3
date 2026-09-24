@@ -19,6 +19,7 @@ import shutil
 import time
 import math
 import logging
+import threading
 import pandas as pd
 import numpy as np
 from datetime import datetime
@@ -4174,6 +4175,103 @@ class SBCWindowMemoryManager:
             logger.debug(f"[SBCMemoryManager] 异步刷盘提示: {e}")
 
 
+class SBCGlobalDispatcher:
+    """
+    【⚡ SBC 全局集中行情调度中枢 (P0 彻底终结多窗口各自网络阻塞争抢)】
+    1. 集中轮询：单一后台守护线程统一以全局间隔驱动，无活跃窗口时自动休眠；
+    2. 安全批次：严格遵守 TDX 40 只安全批次限制批量拉取快照，复用标准化 VWAP/换手率；
+    3. 顺序增量：对分时模式标的，有序逐一增量对账分钟 Bar，避免并发争用与锁争夺；
+    4. 集中分发：通过 Qt 事件队列安全分发至主线程各已打开的 SBC 窗口。
+    """
+    _instance: Optional["SBCGlobalDispatcher"] = None
+
+    def __init__(self):
+        self._running = False
+        self._thread: Optional[Any] = None
+        self._lock = threading.Lock()
+
+    @classmethod
+    def get_instance(cls) -> "SBCGlobalDispatcher":
+        if cls._instance is None:
+            cls._instance = SBCGlobalDispatcher()
+        return cls._instance
+
+    def start(self):
+        with self._lock:
+            if self._running:
+                return
+            self._running = True
+            import threading
+            self._thread = threading.Thread(target=self._run_loop, daemon=True, name="SBCGlobalDispatcherThread")
+            self._thread.start()
+
+    def stop(self):
+        with self._lock:
+            self._running = False
+
+    def _run_loop(self):
+        while self._running:
+            try:
+                mem = SBCWindowMemoryManager.get_instance()
+                active_dialogs = []
+                for c, dlg in list(mem._dialogs.items()):
+                    if dlg and hasattr(dlg, 'isVisible') and dlg.isVisible():
+                        active_dialogs.append(dlg)
+
+                if not active_dialogs:
+                    time.sleep(1.0)
+                    continue
+
+                is_trading = False
+                interval_sec = 5.0
+                try:
+                    from JohnsonUtil import commonTips as cct
+                    is_trading = bool(cct.get_work_time())
+                    interval_sec = float(getattr(cct, 'ats_tdx_interval', 5.0) or 5.0)
+                except Exception:
+                    now = datetime.now()
+                    is_trading = (now.weekday() < 5) and ((9, 15) <= (now.hour, now.minute) <= (11, 30) or (13, 0) <= (now.hour, now.minute) <= (15, 5))
+                    interval_sec = 5.0
+
+                if not is_trading:
+                    time.sleep(30.0)
+                    continue
+
+                codes = list(set([dlg.code for dlg in active_dialogs if getattr(dlg, 'code', None)]))
+                if not codes:
+                    time.sleep(1.0)
+                    continue
+
+                # 1. 批量拉取快照 (40 只批次限制与标准化转换)
+                fetcher = TDXRealtimeFetcher.get_instance()
+                snapshots = fetcher.fetch_batch_stock_snapshots(codes)
+
+                # 2. 按标的逐一调度分钟 Bar 增量 (避免并发争抢)
+                for dlg in active_dialogs:
+                    if not self._running:
+                        break
+                    code = getattr(dlg, 'code', '')
+                    mode = getattr(dlg, '_current_period_mode', '1m')
+                    if mode in ["1m", "3d", "5d", "10d"] and code:
+                        try:
+                            fetcher.fetch_multi_horizon_vwap(code)
+                        except Exception:
+                            pass
+
+                # 3. 集中分发至各窗口 (结合阶段4入口脏检查)
+                for dlg in active_dialogs:
+                    if hasattr(dlg, 'reload_chart'):
+                        try:
+                            QTimer.singleShot(0, lambda d=dlg: d.reload_chart(is_timer_tick=True) if d and hasattr(d, 'isVisible') and d.isVisible() else None)
+                        except Exception:
+                            pass
+
+                time.sleep(max(1.0, interval_sec))
+
+            except Exception:
+                time.sleep(2.0)
+
+
 class SBCIntradayChartDialog(QWidget):
     """
     SBC 实盘分时走势与关键阶梯基准图 彻底独立实时观察窗口 (100% 非模态、非置顶、自由层级覆盖与多屏拉伸)
@@ -4181,6 +4279,7 @@ class SBCIntradayChartDialog(QWidget):
     _global_sbc_size: Optional[tuple] = None
     _global_sbc_geo: Optional[dict] = None
     _global_auto_eval: bool = True  # 💡 全局维护自动测算状态开关
+    _async_chart_data_ready = pyqtSignal(int, str, str, object)  # epoch, code, mode, payload
 
     def __init__(self, parent=None, code: str = "688826", engine: Optional[IntradayStrategyEngine] = None, initial_period_mode: Optional[str] = None, target_screen: Optional[Any] = None):
         # 💡 保存主工作台引用用于边缘磁吸对齐，但向 Qt 构造函数传递 None
@@ -4202,6 +4301,11 @@ class SBCIntradayChartDialog(QWidget):
         self.vwap_engine = VWAPTradingEngine() if VWAPTradingEngine else None
         self.exit_engine = ProactiveExitEngine() if ProactiveExitEngine else None
         self.arbiter = ConsensusArbiter() if ConsensusArbiter else None
+
+        # ⚡ 阶段2 两阶段秒开异步加载控制与 Epoch 防旧数据覆写门禁
+        self.async_load_enabled: bool = True
+        self._load_epoch: int = 0
+        self._async_chart_data_ready.connect(self._on_async_chart_data_arrived)
 
         # 设置为彻底独立的顶层 Window (非模态，不置顶，不妨碍用户与其他窗口重叠与切换)
         self.setWindowFlags(
@@ -4548,10 +4652,14 @@ class SBCIntradayChartDialog(QWidget):
         self._save_timer.timeout.connect(self._do_save_sbc_geometry)
         self._save_timer.start()
 
-        # 6. 实盘交易期数据自动刷新定时器 (对齐 cct.ats_tdx_interval 全局基准)
+        # 6. 统一由集中调度器 SBCGlobalDispatcher 集中批量驱动；poll_timer 作为单窗降级备份
+        try:
+            SBCGlobalDispatcher.get_instance().start()
+        except Exception:
+            pass
         _tdx_intv_ms = int(float(getattr(cct, 'ats_tdx_interval', 5.0) or 5.0) * 1000) if cct else 5000
         self.poll_timer = QTimer(self)
-        self.poll_timer.setInterval(max(1000, _tdx_intv_ms))
+        self.poll_timer.setInterval(max(15000, _tdx_intv_ms * 3))
         self.poll_timer.timeout.connect(self._on_poll_timer_tick)
         self.poll_timer.start()
 
@@ -4592,9 +4700,10 @@ class SBCIntradayChartDialog(QWidget):
         self._cached_rev_fp = None
         self._cached_reversal_info = {}
 
-        # 8. 从 QSettings 与 config/intraday_ui_layout.json 强力物理恢复尺寸与屏显坐标
+        # 8. 窗口瞬间秒开直出 (0 阻塞)：首帧骨架/轻量预排版，真实数据获取委托给事件循环下一微秒异步拉取
         self._restore_sbc_geometry()
-        self.reload_chart()
+        self._render_skeleton_or_cached_frame()
+        QTimer.singleShot(0, lambda: self.reload_chart() if not getattr(self, '_is_closing', False) else None)
         bind_top_shortcut(self, self._toggle_stay_on_top)
 
         # 9. 加载并持久化最近访问标的代码 (保留最新 10 个)
@@ -4609,6 +4718,16 @@ class SBCIntradayChartDialog(QWidget):
             SBCWindowMemoryManager.get_instance().register(self)
         except Exception:
             pass
+
+    def _render_skeleton_or_cached_frame(self):
+        """【⚡ 阶段2 两阶段秒开】第一阶段：微秒级轻量骨架直出，主线程 0 阻塞呈现"""
+        name = resolve_stock_name(self.code)
+        mode = getattr(self, '_current_period_mode', '1m')
+        if hasattr(self, 'lbl_title') and self.lbl_title:
+            self.lbl_title.setText(f"📊 {self.code} {name} | [{mode.upper()}] 正在直连...")
+            self.lbl_title.setToolTip(f"【{self.code} {name}】正在通过独立高速通道载入数据...")
+        if hasattr(self, 'lbl_info') and self.lbl_info:
+            self.lbl_info.setText("💡 正在通过独立高速通道载入数据...")
 
     def _on_poll_timer_tick(self):
         """定时器心跳周期检查与刷新：窗口隐藏或非交易期自动抑制"""
@@ -6492,7 +6611,383 @@ class SBCIntradayChartDialog(QWidget):
             self.txt_switch_code.selectAll()
         combo.blockSignals(False)
 
-    def reload_chart(self, is_timer_tick: bool = False):
+    @staticmethod
+    def _fetch_channel_info_static(fetcher: TDXRealtimeFetcher, code: str) -> Optional[Dict[str, float]]:
+        """静态无锁安全获取日线通道关键价位（供后台取数线程使用，免除主线程阻塞）"""
+        try:
+            d_metrics = fetcher.get_daily_metrics(code)
+            if d_metrics and "ch_upper" in d_metrics:
+                return {
+                    "ch_up": float(d_metrics.get("ch_upper", 0.0)),
+                    "ch_mid": float(d_metrics.get("ch_mid", 0.0)),
+                    "ch_dn": float(d_metrics.get("ch_lower", 0.0)),
+                    "ch_supp": float(d_metrics.get("ch_supp_price", 0.0)),
+                    "rev": float(d_metrics.get("reversal_line", 0.0)),
+                }
+            df_d = fetcher.fetch_kline_bars(code, category="day", count=30)
+            if not df_d.empty and "ch_upper" in df_d.columns:
+                ch_u = df_d['ch_upper'].iloc[-1]
+                ch_m = df_d['ch_mid'].iloc[-1]
+                ch_l = df_d['ch_lower'].iloc[-1]
+                ch_s = df_d['ch_supp_price'].iloc[-1] if 'ch_supp_price' in df_d.columns else 0.0
+                rev = df_d['reversal_line'].iloc[-1] if 'reversal_line' in df_d.columns else 0.0
+                return {
+                    "ch_up": float(ch_u) if pd.notna(ch_u) else 0.0,
+                    "ch_mid": float(ch_m) if pd.notna(ch_m) else 0.0,
+                    "ch_dn": float(ch_l) if pd.notna(ch_l) else 0.0,
+                    "ch_supp": float(ch_s) if pd.notna(ch_s) else 0.0,
+                    "rev": float(rev) if pd.notna(rev) else 0.0,
+                }
+        except Exception:
+            pass
+        return None
+
+    def _do_fetch_chart_data(
+        self,
+        code: str,
+        mode: str,
+        custom_signals: Optional[List[Dict[str, Any]]] = None,
+        custom_kline_df: Optional[pd.DataFrame] = None,
+        custom_trades_df: Optional[pd.DataFrame] = None,
+        vwap_auto_strategy_enabled: bool = True,
+        channel_info: Optional[Dict[str, float]] = None,
+        is_cancelled_func: Optional[Any] = None,
+    ) -> Dict[str, Any]:
+        """【⚡ 阶段2 后台异步取数与策略运算核心】主线程0阻塞，网络IO与复杂回测运算在工作线程执行"""
+        if is_cancelled_func and is_cancelled_func():
+            return {"is_cancelled": True}
+
+        fetcher = TDXRealtimeFetcher.get_instance()
+        snap = fetcher.fetch_stock_snapshot(code)
+        if is_cancelled_func and is_cancelled_func():
+            return {"is_cancelled": True}
+
+        op = float(snap.get("open_price", 0.0))
+        p = float(snap.get("price", 0.0))
+        vw = float(snap.get("vwap", p))
+        hi = float(snap.get("high_price", p))
+        lo = float(snap.get("low_price", p))
+        amt = float(snap.get("amount", 0.0))
+        to_rate = float(snap.get("turnover_rate", 0.0))
+
+        # 信号提取
+        if custom_signals:
+            sigs = custom_signals
+        else:
+            state = self.engine._get_stock_state(code, op) if self.engine else {}
+            sigs = state.get("signals", [])
+            if mode == "1m" and not sigs and self.engine is not None and op > 1.0:
+                now_t = datetime.now().strftime("%H:%M:%S")
+                eval_res = self.engine.evaluate_seven_nodes(
+                    code=code,
+                    current_time_str=now_t,
+                    open_price=op,
+                    price=p,
+                    high_price=hi,
+                    low_price=lo,
+                    vwap=vw,
+                    turnover_rate=to_rate,
+                    amount=amt
+                )
+                sigs = state.get("signals", []) or eval_res.get("signals", [])
+
+        t_min = op * 1.03 if op > 1.0 else 0.0
+        t_max = op * 1.05 if op > 1.0 else 0.0
+
+        # 通道提取 (后台执行，免除主线程首帧等待)
+        if not channel_info:
+            channel_info = self._fetch_channel_info_static(fetcher, code)
+
+        if is_cancelled_func and is_cancelled_func():
+            return {"is_cancelled": True}
+
+        multi_vwap_snapshot = None
+        df_target = pd.DataFrame()
+        auto_sigs = []
+
+        if mode in ["3d", "5d", "10d"]:
+            days = 3 if mode == "3d" else (5 if mode == "5d" else 10)
+            df_multi, multi_vwap_snapshot = fetcher.fetch_multi_horizon_vwap(code)
+            if not df_multi.empty and days < 10 and "date" in df_multi.columns:
+                available_dates = sorted(df_multi["date"].astype(str).unique())
+                visible_dates = available_dates[-days:]
+                df_multi = df_multi[df_multi["date"].astype(str).isin(visible_dates)].copy()
+                if "bar_amt" in df_multi.columns and "bar_vol" in df_multi.columns:
+                    amounts = pd.to_numeric(df_multi["bar_amt"], errors="coerce").fillna(0.0)
+                    volumes = pd.to_numeric(df_multi["bar_vol"], errors="coerce").fillna(0.0)
+                    if normalize_tdx_target(code)[0] and "close" in df_multi.columns:
+                        amounts = pd.to_numeric(df_multi["close"], errors="coerce").fillna(0.0) * volumes
+                    running_amount = []
+                    running_volume = []
+                    base_amount = base_volume = 0.0
+                    for _, group in df_multi.groupby("date", sort=True):
+                        running_amount.extend((base_amount + amounts.loc[group.index].cumsum()).tolist())
+                        running_volume.extend((base_volume + volumes.loc[group.index].cumsum()).tolist())
+                        base_amount += float(amounts.loc[group.index].sum())
+                        base_volume += float(volumes.loc[group.index].sum())
+                    df_multi["vwap"] = [a / v if v > 0 else 0.0 for a, v in zip(running_amount, running_volume)]
+                    df_multi["cum_vol_shares"] = running_volume
+                    df_multi["cum_amt"] = running_amount
+                    df_multi["vol"] = [v / 100.0 for v in running_volume]
+                    df_multi["volume"] = [v / 100.0 for v in running_volume]
+
+            if not df_multi.empty:
+                if op <= 1.0:
+                    op = float(df_multi.iloc[-1].get("open", p))
+                if vw <= 1.0:
+                    vw = float(df_multi.iloc[-1].get("vwap", p))
+                if hi <= 1.0:
+                    hi = float(df_multi['high'].max()) if 'high' in df_multi.columns else p
+                if lo <= 1.0:
+                    lo = float(df_multi['low'].min()) if 'low' in df_multi.columns else p
+                if vwap_auto_strategy_enabled and not custom_signals:
+                    auto_sigs = self._eval_vwap_proactive_strategy(df_multi, period_mode=mode)
+                    if auto_sigs:
+                        sigs = auto_sigs
+            df_target = df_multi
+
+        elif mode in ["5m", "15m", "30m", "60m", "day", "2d", "2k", "3k", "week", "month"]:
+            if custom_kline_df is not None and not custom_kline_df.empty:
+                df_kline = custom_kline_df
+            else:
+                fetch_c = min(800, max(250, len(custom_signals) * 5)) if custom_signals else 150
+                df_kline = fetcher.fetch_kline_bars(code, category=mode, count=fetch_c)
+
+            if not df_kline.empty:
+                if op <= 1.0:
+                    op = float(df_kline.iloc[-1].get("open", p))
+                if vw <= 1.0:
+                    vw = float(df_kline.iloc[-1].get("close", p))
+                if hi <= 1.0:
+                    hi = float(df_kline['high'].max()) if 'high' in df_kline.columns else p
+                if lo <= 1.0:
+                    lo = float(df_kline['low'].min()) if 'low' in df_kline.columns else p
+            df_target = df_kline
+
+        else:
+            # 默认为 1日分时 (1m)
+            # 1. 优先获取多周期 VWAP 快照
+            df_multi, multi_vwap_snapshot = fetcher.fetch_multi_horizon_vwap(code)
+
+            # 2. 🚀 [阶段4 口径对齐与数据复用] 若 df_multi 中已经包含今日最新分时分钟 Bar，直接切出复用！
+            df_intraday = None
+            if df_multi is not None and not df_multi.empty and "date" in df_multi.columns:
+                today_str = datetime.now().strftime("%Y-%m-%d")
+                multi_dates = df_multi["date"].astype(str).unique()
+                if today_str in multi_dates:
+                    df_today = df_multi[df_multi["date"].astype(str) == today_str].copy()
+                    if not df_today.empty and len(df_today) >= 2:
+                        if "time" in df_today.columns and df_today.index.name != "time":
+                            df_today = df_today.set_index("time")
+                        df_intraday = df_today
+
+            if df_intraday is None or df_intraday.empty:
+                df_intraday = fetcher.fetch_intraday_bars(code)
+
+            if (df_intraday is None or df_intraday.empty) and state:
+                snaps = state.get("time_snapshots", {})
+                if snaps:
+                    rows = []
+                    for t_str, s_dict in sorted(snaps.items()):
+                        rows.append({
+                            "time": t_str,
+                            "close": float(s_dict.get("price", op if op > 0 else 1.0)),
+                            "open": op if op > 0 else float(s_dict.get("price", 1.0)),
+                            "high": float(s_dict.get("high", op)),
+                            "low": float(s_dict.get("low", op)),
+                            "vwap": float(s_dict.get("vwap", op)),
+                            "turnover_rate": float(s_dict.get("turnover_rate", 0.0)),
+                            "amount": float(s_dict.get("amount", 0.0))
+                        })
+                    if rows:
+                        df_intraday = pd.DataFrame(rows).set_index("time")
+
+            if df_intraday is not None and not df_intraday.empty:
+                if (op <= 1.0 or p <= 1.0):
+                    if op <= 1.0:
+                        op = float(df_intraday.iloc[0].get("open", p))
+                    if p <= 1.0:
+                        p = float(df_intraday.iloc[-1].get("close", op))
+                    if hi <= 1.0:
+                        hi = float(df_intraday['high'].max()) if 'high' in df_intraday.columns else p
+                    if lo <= 1.0:
+                        lo = float(df_intraday['low'].min()) if 'low' in df_intraday.columns else p
+                    if vw <= 1.0:
+                        vw = float(df_intraday.iloc[-1].get("vwap", p))
+                    if amt <= 0:
+                        amt = float(df_intraday.iloc[-1].get("amount", 0.0))
+                    if to_rate <= 0:
+                        to_rate = float(df_intraday.iloc[-1].get("turnover_rate", 0.0))
+
+                if vwap_auto_strategy_enabled and not custom_signals:
+                    auto_sigs = self._eval_vwap_proactive_strategy(df_intraday, period_mode="1m")
+                    if auto_sigs:
+                        sigs = auto_sigs
+            df_target = df_intraday
+
+        # 计算状态指纹 (用于阶段 4 入口级脏检查)
+        n_bars = len(df_target) if df_target is not None and not df_target.empty else 0
+        last_idx = str(df_target.index[-1]) if n_bars > 0 else ""
+        last_close = float(df_target.iloc[-1].get("close", p)) if n_bars > 0 else p
+        last_vol = float(df_target.iloc[-1].get("vol", df_target.iloc[-1].get("volume", 0.0))) if n_bars > 0 else 0.0
+        data_fp = (code, mode, n_bars, last_idx, round(last_close, 3), round(last_vol, 1), round(p, 3), round(vw, 3))
+
+        return {
+            "is_cancelled": False,
+            "code": code,
+            "mode": mode,
+            "op": op,
+            "p": p,
+            "vw": vw,
+            "hi": hi,
+            "lo": lo,
+            "amt": amt,
+            "to_rate": to_rate,
+            "t_min": t_min,
+            "t_max": t_max,
+            "df_target": df_target,
+            "sigs": sigs,
+            "multi_vwap_snapshot": multi_vwap_snapshot,
+            "channel_info": channel_info,
+            "data_fp": data_fp,
+        }
+
+    def _apply_chart_payload(self, payload: Dict[str, Any], is_timer_tick: bool = False):
+        """【🎨 阶段2 主线程安全渲染】根据已准备好的图表载荷渲染 UI，内置入口级脏检查阻断"""
+        if not payload or payload.get("is_cancelled"):
+            return
+        code = payload.get("code", "")
+        if code != self.code:
+            return
+
+        mode = payload.get("mode", "1m")
+        data_fp = payload.get("data_fp")
+
+        # 🚀 [阶段4 入口级脏检查] 若为定时心跳刷新，且数据与盘面指纹完全一致，短路跳过后续全部重排与重绘！
+        if is_timer_tick and getattr(self, '_last_rendered_fp', None) == data_fp:
+            return
+        self._last_rendered_fp = data_fp
+
+        op = payload.get("op", 0.0)
+        p = payload.get("p", 0.0)
+        vw = payload.get("vw", p)
+        hi = payload.get("hi", p)
+        lo = payload.get("lo", p)
+        amt = payload.get("amt", 0.0)
+        to_rate = payload.get("to_rate", 0.0)
+        t_min = payload.get("t_min", 0.0)
+        t_max = payload.get("t_max", 0.0)
+        df_target = payload.get("df_target")
+        sigs = payload.get("sigs", [])
+        multi_vwap_snapshot = payload.get("multi_vwap_snapshot")
+        channel_info = payload.get("channel_info")
+
+        if channel_info and hasattr(self, 'canvas') and self.canvas and not getattr(self.canvas, 'channel_info', None):
+            self.canvas.channel_info = channel_info
+
+        if mode in ["3d", "5d", "10d"]:
+            df_multi = df_target
+            if df_multi is not None and not df_multi.empty:
+                cl_last = float(df_multi.iloc[-1].get("close", p))
+                s_trades = [s for s in sigs if s.get("action") == "sell"]
+                if s_trades:
+                    t_cnt = len(s_trades)
+                    win_cnt = sum(1 for s in s_trades if s.get("pnl_pct", 0) > 0)
+                    win_r = (win_cnt / t_cnt * 100.0) if t_cnt > 0 else 0.0
+                    win_color = "#ef4444" if win_r >= 50.0 else "#22c55e"
+                    self.lbl_info.setText(
+                        f"💡 🤖 <b>[全自动策略]</b> VWAP进攻+8层防守: "
+                        f"共触发 <font color='#38bdf8'><b>{t_cnt}</b></font> 笔交易, "
+                        f"胜率 <font color='{win_color}'><b>{win_r:.1f}%</b></font> | "
+                        f"8层离场守护已拦截假反弹 (点击标记看详情)"
+                    )
+                    self.lbl_info.setToolTip(
+                        f"💡 🤖 [全自动策略生效] VWAP进攻 + ProactiveExit 8层防守:\n"
+                        f"共触发 {t_cnt} 笔交易，回测胜率 {win_r:.1f}%\n"
+                        f"8层离场守护已拦截假反弹与破位亏损！点击图上买卖标记可查看单笔收益详情与持仓光束。"
+                    )
+
+                self._sync_daily_channel_to_canvas()
+                self.canvas.multi_vwap_snapshot = multi_vwap_snapshot
+                self.canvas.set_data(df_multi, op, vw, hi, lo, t_min, t_max, sigs, period_mode=mode)
+                self.canvas.update_amplitude_data(self.code)
+                self.lbl_title.setText(f"📊 {self.code} {resolve_stock_name(self.code)} | [{mode.upper()}多日分时] 今:{op:.2f} 现:{cl_last:.2f}")
+                vwap_linkage = f" | 多周期结构: {multi_vwap_snapshot.structure} | 今日VWAP={multi_vwap_snapshot.vwap_1d:.2f}" if multi_vwap_snapshot and multi_vwap_snapshot.vwap_1d else ""
+                if multi_vwap_snapshot and multi_vwap_snapshot.vwap_5d and multi_vwap_snapshot.complete_5d:
+                    vwap_linkage += f" | 5日VWAP={multi_vwap_snapshot.vwap_5d:.2f}"
+                if multi_vwap_snapshot and multi_vwap_snapshot.vwap_10d and multi_vwap_snapshot.complete_10d:
+                    vwap_linkage += f" | 10日VWAP={multi_vwap_snapshot.vwap_10d:.2f}"
+                self.lbl_title.setToolTip(f"【{self.code} {resolve_stock_name(self.code)}】[{mode.upper()}多日分时] 今开={op:.2f}元, 现价={cl_last:.2f}元, VWAP={vw:.2f}元, 最高={hi:.2f}元, 最低={lo:.2f}元 | 策略买卖信号数: {len(sigs)} 步{vwap_linkage}")
+                self._update_unified_realtime_log(df_multi, op, cl_last, vw, hi, lo, to_rate, amt, sigs, mode=mode)
+                if getattr(self, 'auto_eval_enabled', True):
+                    self._on_eval_r_clicked(toggle=False)
+            else:
+                self.canvas.set_data(pd.DataFrame(), op, 0.0, hi, lo, t_min, t_max, [], period_mode=mode)
+                self.lbl_title.setText(f"📊 {self.code} | [{mode.upper()}多日分时] 数据不完整，正在自动重拉")
+                self.lbl_info.setText("分时缓存校验未通过，VWAP策略暂停，等待自动重拉")
+
+        elif mode in ["5m", "15m", "30m", "60m", "day", "2d", "2k", "3k", "week", "month"]:
+            df_kline = df_target
+            if df_kline is not None and not df_kline.empty:
+                cl_last = float(df_kline.iloc[-1].get("close", p))
+                self.canvas.set_kline_data(df_kline, open_p=op, vwap_p=vw, high_p=hi, low_p=lo, sell_min=t_min, sell_max=t_max, signals=sigs, period_mode=mode)
+                self.canvas.update_amplitude_data(self.code)
+                if getattr(self, "custom_trades_df", None) is not None:
+                    t_cnt = len(self.custom_trades_df)
+                    win_cnt = len(self.custom_trades_df[self.custom_trades_df['pnl_pct'] > 0]) if not self.custom_trades_df.empty else 0
+                    win_r = (win_cnt / t_cnt * 100.0) if t_cnt > 0 else 0.0
+                    self.lbl_title.setText(f"📊 {self.code} {resolve_stock_name(self.code)} | [多周期通道回测] 交易:{t_cnt}笔 胜率:{win_r:.1f}% (点击标记看收益)")
+                    self.lbl_title.setToolTip(f"【{self.code} {resolve_stock_name(self.code)}】多周期通道量化回测走势图 | 共 {t_cnt} 笔交易，胜率 {win_r:.1f}% | 点击任意买卖信号标记或按 Space/[/] 键查看单笔收益与持仓光束")
+                else:
+                    p_disp = "2D" if mode.lower() in ("2d", "2k") else ("3D" if mode.lower() in ("3d", "3k") else mode.upper())
+                    self.lbl_title.setText(f"📊 {self.code} {resolve_stock_name(self.code)} | [{p_disp}GG通道] 今:{op:.2f} 现:{cl_last:.2f}")
+                    self.lbl_title.setToolTip(f"【{self.code} {resolve_stock_name(self.code)}】[{p_disp}K线通道] 今开={op:.2f}元, 现价={cl_last:.2f}元, VWAP={vw:.2f}元, 最高={hi:.2f}元, 最低={lo:.2f}元 | 买卖信号数: {len(sigs)} 步")
+                self._update_unified_realtime_log(df_kline, op, cl_last, vw, hi, lo, to_rate, amt, sigs, mode=mode)
+                if getattr(self, 'auto_eval_enabled', True):
+                    self._on_eval_r_clicked(toggle=False)
+
+        else:
+            # 默认为 1日分时 (1m)
+            df_intraday = df_target
+            if df_intraday is None or df_intraday.empty:
+                return
+
+            s_trades = [s for s in sigs if s.get("action") == "sell"]
+            if s_trades:
+                t_cnt = len(s_trades)
+                win_cnt = sum(1 for s in s_trades if s.get("pnl_pct", 0) > 0)
+                win_r = (win_cnt / t_cnt * 100.0) if t_cnt > 0 else 0.0
+                win_color = "#ef4444" if win_r >= 50.0 else "#22c55e"
+                self.lbl_info.setText(
+                    f"💡 🤖 <b>[全自动策略]</b> VWAP进攻+8层防守: "
+                    f"今日共触发 <font color='#38bdf8'><b>{t_cnt}</b></font> 笔交易, "
+                    f"胜率 <font color='{win_color}'><b>{win_r:.1f}%</b></font> | "
+                    f"8层防守守护拦截破位 (点击标记看详情)"
+                )
+                self.lbl_info.setToolTip(
+                    f"💡 🤖 [全自动策略生效] VWAP进攻 + ProactiveExit 8层防守:\n"
+                    f"今日共触发 {t_cnt} 笔交易，胜率 {win_r:.1f}%\n"
+                    f"8层离场守护已拦截假反弹与破位亏损！点击图上买卖标记可查看单笔收益详情与持仓光束。"
+                )
+
+            self._sync_daily_channel_to_canvas()
+            self.canvas.multi_vwap_snapshot = multi_vwap_snapshot
+            self.canvas.set_data(df_intraday, op, vw, hi, lo, t_min, t_max, sigs, period_mode="1m")
+            self.canvas.update_amplitude_data(self.code)
+            self.lbl_title.setText(f"📊 {self.code} {resolve_stock_name(self.code)} | 今:{op:.2f} 现:{p:.2f}")
+            vwap_linkage = ""
+            if multi_vwap_snapshot:
+                vwap_linkage = f" | 多周期结构={multi_vwap_snapshot.structure}"
+                if multi_vwap_snapshot.vwap_5d and multi_vwap_snapshot.complete_5d:
+                    vwap_linkage += f" | 5日VWAP={multi_vwap_snapshot.vwap_5d:.2f}元"
+                if multi_vwap_snapshot.vwap_10d and multi_vwap_snapshot.complete_10d:
+                    vwap_linkage += f" | 10日VWAP={multi_vwap_snapshot.vwap_10d:.2f}元"
+            self.lbl_title.setToolTip(f"【{self.code} {resolve_stock_name(self.code)}】今开={op:.2f}元, 现价={p:.2f}元, VWAP={vw:.2f}元, 最高={hi:.2f}元, 最低={lo:.2f}元 | 买卖信号数: {len(sigs)} 步{vwap_linkage}")
+            self._update_unified_realtime_log(df_intraday, op, p, vw, hi, lo, to_rate, amt, sigs, mode="1m")
+            if getattr(self, 'auto_eval_enabled', True):
+                self._on_eval_r_clicked(toggle=False)
+
+    def reload_chart(self, is_timer_tick: bool = False, force_sync: bool = False):
         # 保持输入框与当前标的代码+名称同步 (非编辑输入状态下)
         if hasattr(self, 'txt_switch_code') and self.txt_switch_code and not self.txt_switch_code.hasFocus():
             expected_display = self._format_code_with_name(self.code)
@@ -6531,258 +7026,59 @@ class SBCIntradayChartDialog(QWidget):
         self._has_initial_loaded = True
 
         mode = getattr(self, '_current_period_mode', '1m')
-        fetcher = TDXRealtimeFetcher.get_instance()
+        self._load_epoch += 1
+        cur_epoch = self._load_epoch
+        cur_code = self.code
 
-        snap = fetcher.fetch_stock_snapshot(self.code)
+        # 同步模式分支 (兼容单测与离线强制执行)
+        if force_sync or not getattr(self, 'async_load_enabled', True):
+            payload = self._do_fetch_chart_data(
+                code=cur_code,
+                mode=mode,
+                custom_signals=getattr(self, "custom_signals", None),
+                custom_kline_df=getattr(self, "custom_kline_df", None),
+                custom_trades_df=getattr(self, "custom_trades_df", None),
+                vwap_auto_strategy_enabled=getattr(self, "vwap_auto_strategy_enabled", True),
+                channel_info=getattr(self.canvas, "channel_info", None) if hasattr(self, 'canvas') else None,
+            )
+            self._apply_chart_payload(payload, is_timer_tick=is_timer_tick)
+            return
 
-        op = float(snap.get("open_price", 0.0))
-        p = float(snap.get("price", 0.0))
-        vw = float(snap.get("vwap", p))
-        hi = float(snap.get("high_price", p))
-        lo = float(snap.get("low_price", p))
-        amt = float(snap.get("amount", 0.0))
-        to_rate = float(snap.get("turnover_rate", 0.0))
-
-        if getattr(self, "custom_signals", None):
-            sigs = self.custom_signals
-        else:
-            state = self.engine._get_stock_state(self.code, op) if self.engine else {}
-            sigs = state.get("signals", [])
-
-            if mode == "1m" and not sigs and self.engine is not None and op > 1.0:
-                now_t = datetime.now().strftime("%H:%M:%S")
-                eval_res = self.engine.evaluate_seven_nodes(
-                    code=self.code,
-                    current_time_str=now_t,
-                    open_price=op,
-                    price=p,
-                    high_price=hi,
-                    low_price=lo,
-                    vwap=vw,
-                    turnover_rate=to_rate,
-                    amount=amt
-                )
-                sigs = state.get("signals", []) or eval_res.get("signals", [])
-
-        t_min = op * 1.03 if op > 1.0 else 0.0
-        t_max = op * 1.05 if op > 1.0 else 0.0
-        self.canvas.multi_vwap_snapshot = None
-        multi_vwap_snapshot = None
-
-        # 1日分时图也消费同一份全局多日快照，绘制今日、5日、10日 VWAP 联动参考线。
-        if mode == "1m":
+        # 异步工作线程分支 (阶段2 彻底剥离主线程网络阻塞)
+        def _bg_fetch_worker():
             try:
-                now_mono = time.monotonic()
-                multi_vwap_snapshot = getattr(self, "_multi_vwap_snapshot", None)
-                last_refresh = getattr(self, "_multi_vwap_snapshot_refresh_ts", 0.0)
-                if multi_vwap_snapshot is None or now_mono - last_refresh >= 5.0:
-                    _, refreshed_snapshot = fetcher.fetch_multi_horizon_vwap(self.code)
-                    if refreshed_snapshot is not None:
-                        multi_vwap_snapshot = refreshed_snapshot
-                        self._multi_vwap_snapshot = refreshed_snapshot
-                        self._multi_vwap_snapshot_refresh_ts = now_mono
-                self.canvas.multi_vwap_snapshot = multi_vwap_snapshot
-            except Exception:
-                logger.exception("刷新 %s 的多周期 VWAP 快照失败", self.code)
+                payload = self._do_fetch_chart_data(
+                    code=cur_code,
+                    mode=mode,
+                    custom_signals=getattr(self, "custom_signals", None),
+                    custom_kline_df=getattr(self, "custom_kline_df", None),
+                    custom_trades_df=getattr(self, "custom_trades_df", None),
+                    vwap_auto_strategy_enabled=getattr(self, "vwap_auto_strategy_enabled", True),
+                    channel_info=getattr(self.canvas, "channel_info", None) if hasattr(self, 'canvas') else None,
+                    is_cancelled_func=lambda: cur_epoch != self._load_epoch or cur_code != self.code
+                )
+                if not payload or payload.get("is_cancelled"):
+                    return
+                payload["is_timer_tick"] = is_timer_tick
+                self._async_chart_data_ready.emit(cur_epoch, cur_code, mode, payload)
+            except Exception as e:
+                logger.debug(f"[SBC] 异步取数提示: {e}")
 
-        if mode in ["3d", "5d", "10d"]:
-            days = 3 if mode == "3d" else (5 if mode == "5d" else 10)
-            df_multi, multi_vwap_snapshot = fetcher.fetch_multi_horizon_vwap(self.code)
-            if not df_multi.empty and days < 10 and "date" in df_multi.columns:
-                available_dates = sorted(df_multi["date"].astype(str).unique())
-                visible_dates = available_dates[-days:]
-                df_multi = df_multi[df_multi["date"].astype(str).isin(visible_dates)].copy()
-                if "bar_amt" in df_multi.columns and "bar_vol" in df_multi.columns:
-                    amounts = pd.to_numeric(df_multi["bar_amt"], errors="coerce").fillna(0.0)
-                    volumes = pd.to_numeric(df_multi["bar_vol"], errors="coerce").fillna(0.0)
-                    if normalize_tdx_target(self.code)[0] and "close" in df_multi.columns:
-                        amounts = pd.to_numeric(df_multi["close"], errors="coerce").fillna(0.0) * volumes
-                    # Preserve the legacy line: cumulative from the selected window's first day.
-                    running_amount = []
-                    running_volume = []
-                    base_amount = base_volume = 0.0
-                    for _, group in df_multi.groupby("date", sort=True):
-                        running_amount.extend((base_amount + amounts.loc[group.index].cumsum()).tolist())
-                        running_volume.extend((base_volume + volumes.loc[group.index].cumsum()).tolist())
-                        base_amount += float(amounts.loc[group.index].sum())
-                        base_volume += float(volumes.loc[group.index].sum())
-                    df_multi["vwap"] = [a / v if v > 0 else 0.0 for a, v in zip(running_amount, running_volume)]
-                    df_multi["cum_vol_shares"] = running_volume
-                    df_multi["cum_amt"] = running_amount
-                    df_multi["vol"] = [v / 100.0 for v in running_volume]
-                    df_multi["volume"] = [v / 100.0 for v in running_volume]
-            if not df_multi.empty:
-                if op <= 1.0:
-                    op = float(df_multi.iloc[-1].get("open", p))
-                if vw <= 1.0:
-                    vw = float(df_multi.iloc[-1].get("vwap", p))
-                if hi <= 1.0:
-                    hi = float(df_multi['high'].max()) if 'high' in df_multi.columns else p
-                if lo <= 1.0:
-                    lo = float(df_multi['low'].min()) if 'low' in df_multi.columns else p
-                cl_last = float(df_multi.iloc[-1].get("close", p))
+        import threading
+        threading.Thread(target=_bg_fetch_worker, daemon=True).start()
 
-                # 🤖 自动交易策略执行与买卖标记注入 (VWAP突破 + 8层主动防守)
-                if getattr(self, "vwap_auto_strategy_enabled", True) and not getattr(self, "custom_signals", None):
-                    auto_sigs = self._eval_vwap_proactive_strategy(df_multi, period_mode=mode)
-                    if auto_sigs:
-                        sigs = auto_sigs
-                        s_trades = [s for s in auto_sigs if s.get("action") == "sell"]
-                        if s_trades:
-                            t_cnt = len(s_trades)
-                            win_cnt = sum(1 for s in s_trades if s.get("pnl_pct", 0) > 0)
-                            win_r = (win_cnt / t_cnt * 100.0) if t_cnt > 0 else 0.0
-                            win_color = "#ef4444" if win_r >= 50.0 else "#22c55e"
-                            self.lbl_info.setText(
-                                f"💡 🤖 <b>[全自动策略]</b> VWAP进攻+8层防守: "
-                                f"共触发 <font color='#38bdf8'><b>{t_cnt}</b></font> 笔交易, "
-                                f"胜率 <font color='{win_color}'><b>{win_r:.1f}%</b></font> | "
-                                f"8层离场守护已拦截假反弹 (点击标记看详情)"
-                            )
-                            self.lbl_info.setToolTip(
-                                f"💡 🤖 [全自动策略生效] VWAP进攻 + ProactiveExit 8层防守:\n"
-                                f"共触发 {t_cnt} 笔交易，回测胜率 {win_r:.1f}%\n"
-                                f"8层离场守护已拦截假反弹与破位亏损！点击图上买卖标记可查看单笔收益详情与持仓光束。"
-                            )
-
-                self._sync_daily_channel_to_canvas()
-                self.canvas.multi_vwap_snapshot = multi_vwap_snapshot
-                self.canvas.set_data(df_multi, op, vw, hi, lo, t_min, t_max, sigs, period_mode=mode)
-                self.canvas.update_amplitude_data(self.code)
-                self.lbl_title.setText(f"📊 {self.code} {resolve_stock_name(self.code)} | [{mode.upper()}多日分时] 今:{op:.2f} 现:{cl_last:.2f}")
-                vwap_linkage = f" | 多周期结构: {multi_vwap_snapshot.structure} | 今日VWAP={multi_vwap_snapshot.vwap_1d:.2f}" if multi_vwap_snapshot and multi_vwap_snapshot.vwap_1d else ""
-                if multi_vwap_snapshot and multi_vwap_snapshot.vwap_5d and multi_vwap_snapshot.complete_5d:
-                    vwap_linkage += f" | 5日VWAP={multi_vwap_snapshot.vwap_5d:.2f}"
-                if multi_vwap_snapshot and multi_vwap_snapshot.vwap_10d and multi_vwap_snapshot.complete_10d:
-                    vwap_linkage += f" | 10日VWAP={multi_vwap_snapshot.vwap_10d:.2f}"
-                self.lbl_title.setToolTip(f"【{self.code} {resolve_stock_name(self.code)}】[{mode.upper()}多日分时] 今开={op:.2f}元, 现价={cl_last:.2f}元, VWAP={vw:.2f}元, 最高={hi:.2f}元, 最低={lo:.2f}元 | 策略买卖信号数: {len(sigs)} 步{vwap_linkage}")
-                self._update_unified_realtime_log(df_multi, op, cl_last, vw, hi, lo, to_rate, amt, sigs, mode=mode)
-                if getattr(self, 'auto_eval_enabled', True):
-                    self._on_eval_r_clicked(toggle=False)
-            else:
-                self.canvas.set_data(pd.DataFrame(), op, 0.0, hi, lo, t_min, t_max, [], period_mode=mode)
-                self.lbl_title.setText(f"📊 {self.code} | [{mode.upper()}多日分时] 数据不完整，正在自动重拉")
-                self.lbl_info.setText("分时缓存校验未通过，VWAP策略暂停，等待自动重拉")
+    def _on_async_chart_data_arrived(self, epoch: int, code: str, mode: str, payload: object):
+        """【🛡️ 阶段2 Epoch Guard 门禁】槽函数接收异步工作线程传回数据，严格防串屏"""
+        if epoch != getattr(self, '_load_epoch', 0):
             return
-
-        if mode in ["5m", "15m", "30m", "60m", "day", "2d", "2k", "3k", "week", "month"]:
-            if getattr(self, "custom_kline_df", None) is not None and not self.custom_kline_df.empty:
-                df_kline = self.custom_kline_df
-            else:
-                fetch_c = min(800, max(250, len(self.custom_signals) * 5)) if getattr(self, "custom_signals", None) else 150
-                df_kline = fetcher.fetch_kline_bars(self.code, category=mode, count=fetch_c)
-
-            if not df_kline.empty:
-                if op <= 1.0:
-                    op = float(df_kline.iloc[-1].get("open", p))
-                if vw <= 1.0:
-                    vw = float(df_kline.iloc[-1].get("close", p))
-                if hi <= 1.0:
-                    hi = float(df_kline['high'].max()) if 'high' in df_kline.columns else p
-                if lo <= 1.0:
-                    lo = float(df_kline['low'].min()) if 'low' in df_kline.columns else p
-                cl_last = float(df_kline.iloc[-1].get("close", p))
-                self.canvas.set_kline_data(df_kline, open_p=op, vwap_p=vw, high_p=hi, low_p=lo, sell_min=t_min, sell_max=t_max, signals=sigs, period_mode=mode)
-                self.canvas.update_amplitude_data(self.code)
-                if getattr(self, "custom_trades_df", None) is not None:
-                    t_cnt = len(self.custom_trades_df)
-                    win_cnt = len(self.custom_trades_df[self.custom_trades_df['pnl_pct'] > 0]) if not self.custom_trades_df.empty else 0
-                    win_r = (win_cnt / t_cnt * 100.0) if t_cnt > 0 else 0.0
-                    self.lbl_title.setText(f"📊 {self.code} {resolve_stock_name(self.code)} | [多周期通道回测] 交易:{t_cnt}笔 胜率:{win_r:.1f}% (点击标记看收益)")
-                    self.lbl_title.setToolTip(f"【{self.code} {resolve_stock_name(self.code)}】多周期通道量化回测走势图 | 共 {t_cnt} 笔交易，胜率 {win_r:.1f}% | 点击任意买卖信号标记或按 Space/[/] 键查看单笔收益与持仓光束")
-                else:
-                    p_disp = "2D" if mode.lower() in ("2d", "2k") else ("3D" if mode.lower() in ("3d", "3k") else mode.upper())
-                    self.lbl_title.setText(f"📊 {self.code} {resolve_stock_name(self.code)} | [{p_disp}GG通道] 今:{op:.2f} 现:{cl_last:.2f}")
-                    self.lbl_title.setToolTip(f"【{self.code} {resolve_stock_name(self.code)}】[{p_disp}K线通道] 今开={op:.2f}元, 现价={cl_last:.2f}元, VWAP={vw:.2f}元, 最高={hi:.2f}元, 最低={lo:.2f}元 | 买卖信号数: {len(sigs)} 步")
-                self._update_unified_realtime_log(df_kline, op, cl_last, vw, hi, lo, to_rate, amt, sigs, mode=mode)
-                if getattr(self, 'auto_eval_enabled', True):
-                    self._on_eval_r_clicked(toggle=False)
+        if code != self.code:
             return
-
-        # 默认为 1日分时 (1m)
-        df_intraday = fetcher.fetch_intraday_bars(self.code)
-
-        # 2. 三重物理兜底：若仍为空，利用 state["time_snapshots"] 物理构造全量 DataFrame
-        if (df_intraday is None or df_intraday.empty) and state:
-            snaps = state.get("time_snapshots", {})
-            if snaps:
-                rows = []
-                for t_str, s_dict in sorted(snaps.items()):
-                    rows.append({
-                        "time": t_str,
-                        "close": float(s_dict.get("price", op if op > 0 else 1.0)),
-                        "open": op if op > 0 else float(s_dict.get("price", 1.0)),
-                        "high": float(s_dict.get("high", op)),
-                        "low": float(s_dict.get("low", op)),
-                        "vwap": float(s_dict.get("vwap", op)),
-                        "turnover_rate": float(s_dict.get("turnover_rate", 0.0)),
-                        "amount": float(s_dict.get("amount", 0.0))
-                    })
-                if rows:
-                    df_intraday = pd.DataFrame(rows).set_index("time")
-
-        # 💡 [数据隔离防污染强校验] 若当前标的数据获取为空/异常，绝对不上溯抓取主工作台其他标的数据，维持当前有效画幅不变
-        if df_intraday is None or df_intraday.empty:
+        if mode != getattr(self, '_current_period_mode', '1m'):
             return
-
-        if (op <= 1.0 or p <= 1.0) and not df_intraday.empty:
-            if op <= 1.0:
-                op = float(df_intraday.iloc[0].get("open", p))
-            if p <= 1.0:
-                p = float(df_intraday.iloc[-1].get("close", op))
-            if hi <= 1.0:
-                hi = float(df_intraday['high'].max()) if 'high' in df_intraday.columns else p
-            if lo <= 1.0:
-                lo = float(df_intraday['low'].min()) if 'low' in df_intraday.columns else p
-            if vw <= 1.0:
-                vw = float(df_intraday.iloc[-1].get("vwap", p))
-            if amt <= 0:
-                amt = float(df_intraday.iloc[-1].get("amount", 0.0))
-            if to_rate <= 0:
-                to_rate = float(df_intraday.iloc[-1].get("turnover_rate", 0.0))
-
-        # 🤖 自动交易策略执行与买卖标记注入 (VWAP突破 + 8层主动防守)
-        if getattr(self, "vwap_auto_strategy_enabled", True) and not getattr(self, "custom_signals", None):
-            auto_sigs = self._eval_vwap_proactive_strategy(df_intraday, period_mode="1m")
-            if auto_sigs:
-                sigs = auto_sigs
-                s_trades = [s for s in auto_sigs if s.get("action") == "sell"]
-                if s_trades:
-                    t_cnt = len(s_trades)
-                    win_cnt = sum(1 for s in s_trades if s.get("pnl_pct", 0) > 0)
-                    win_r = (win_cnt / t_cnt * 100.0) if t_cnt > 0 else 0.0
-                    win_color = "#ef4444" if win_r >= 50.0 else "#22c55e"
-                    self.lbl_info.setText(
-                        f"💡 🤖 <b>[全自动策略]</b> VWAP进攻+8层防守: "
-                        f"今日共触发 <font color='#38bdf8'><b>{t_cnt}</b></font> 笔交易, "
-                        f"胜率 <font color='{win_color}'><b>{win_r:.1f}%</b></font> | "
-                        f"8层防守守护拦截破位 (点击标记看详情)"
-                    )
-                    self.lbl_info.setToolTip(
-                        f"💡 🤖 [全自动策略生效] VWAP进攻 + ProactiveExit 8层防守:\n"
-                        f"今日共触发 {t_cnt} 笔交易，胜率 {win_r:.1f}%\n"
-                        f"8层离场守护已拦截假反弹与破位亏损！点击图上买卖标记可查看单笔收益详情与持仓光束。"
-                    )
-
-        self._sync_daily_channel_to_canvas()
-        self.canvas.multi_vwap_snapshot = multi_vwap_snapshot
-        self.canvas.set_data(df_intraday, op, vw, hi, lo, t_min, t_max, sigs, period_mode="1m")
-        self.canvas.update_amplitude_data(self.code)
-        self.lbl_title.setText(f"📊 {self.code} {resolve_stock_name(self.code)} | 今:{op:.2f} 现:{p:.2f}")
-        vwap_linkage = ""
-        if multi_vwap_snapshot:
-            vwap_linkage = f" | 多周期结构={multi_vwap_snapshot.structure}"
-            if multi_vwap_snapshot.vwap_5d and multi_vwap_snapshot.complete_5d:
-                vwap_linkage += f" | 5日VWAP={multi_vwap_snapshot.vwap_5d:.2f}元"
-            if multi_vwap_snapshot.vwap_10d and multi_vwap_snapshot.complete_10d:
-                vwap_linkage += f" | 10日VWAP={multi_vwap_snapshot.vwap_10d:.2f}元"
-        self.lbl_title.setToolTip(f"【{self.code} {resolve_stock_name(self.code)}】今开={op:.2f}元, 现价={p:.2f}元, VWAP={vw:.2f}元, 最高={hi:.2f}元, 最低={lo:.2f}元 | 买卖信号数: {len(sigs)} 步{vwap_linkage}")
-
-        # 📋 呈现 TDX 行情与策略风控合一的当前实时阶段日志
-        self._update_unified_realtime_log(df_intraday, op, p, vw, hi, lo, to_rate, amt, sigs, mode="1m")
-
-        if getattr(self, 'auto_eval_enabled', True):
-            self._on_eval_r_clicked(toggle=False)
+        if not isinstance(payload, dict):
+            return
+        is_timer_tick = payload.get("is_timer_tick", False)
+        self._apply_chart_payload(payload, is_timer_tick=is_timer_tick)
 
     def _sync_daily_channel_to_canvas(self):
         """【⚡ 通道对齐】为分时图同步对齐日线/K线通道支撑、反转与关键阶梯位"""
@@ -6844,6 +7140,8 @@ class SBCIntradayChartDialog(QWidget):
         """
         try:
             self._last_log_args = ((df_bars, op, p, vw, hi, lo, to_rate, amt, sigs), {"mode": mode})
+            if hasattr(self, 'log_box') and self.log_box and not self.log_box.isVisible():
+                return
             now_str = datetime.now().strftime("%H:%M:%S")
             st_name = resolve_stock_name(self.code)
 
