@@ -705,6 +705,7 @@ class TradingKernelService:
         """
         import os
         import pandas as pd
+        from JSONData.tdx_hdf5_api import get_hdf_keys_safe, read_hdf_safe
         base_dir = get_app_root()
         today_date_str = datetime.now().strftime("%Y%m%d")
         h5_paths = [
@@ -725,10 +726,9 @@ class TradingKernelService:
                     # 智能探测 HDF5 key，自适应 'df_all' 还是 'top_all'
                     key_to_read = None
                     try:
-                        with pd.HDFStore(path, mode='r') as store:
-                            keys = store.keys()
-                            if keys:
-                                key_to_read = keys[0].lstrip('/')
+                        keys = get_hdf_keys_safe(path)
+                        if keys:
+                            key_to_read = keys[0].lstrip('/')
                     except Exception:
                         pass
                     
@@ -736,12 +736,12 @@ class TradingKernelService:
                         key_to_read = 'top_all'
                         
                     try:
-                        df_top = pd.read_hdf(path, key_to_read)
+                        df_top = read_hdf_safe(path, key_to_read)
                     except Exception:
                         try:
-                            df_top = pd.read_hdf(path, 'df_all')
+                            df_top = read_hdf_safe(path, 'df_all')
                         except Exception:
-                            df_top = pd.read_hdf(path, 'top_all')
+                            df_top = read_hdf_safe(path, 'top_all')
                     
                     if df_top is not None and not df_top.empty:
                         # 字段映射
@@ -1261,6 +1261,7 @@ class TradingKernelService:
                     try:
                         import os
                         import pandas as pd
+                        from JSONData.tdx_hdf5_api import get_hdf_keys_safe, read_hdf_safe
                         base_dir = get_app_root()
                         today_date_str = datetime.now().strftime("%Y%m%d")
                         for path in [fr'G:\shared_df_all-{today_date_str}.h5', r'G:\shared_df_all.h5', r'g:\top_all.h5', os.path.join(base_dir, 'top_all.h5'), os.path.join(get_app_root(), 'top_all.h5'), 'top_all.h5']:
@@ -1268,22 +1269,21 @@ class TradingKernelService:
                                 # 智能探测 HDF5 key，自适应 'df_all' 还是 'top_all'
                                 key_to_read = None
                                 try:
-                                    with pd.HDFStore(path, mode='r') as store:
-                                        keys = store.keys()
-                                        if keys:
-                                            key_to_read = keys[0].lstrip('/')
+                                    keys = get_hdf_keys_safe(path)
+                                    if keys:
+                                        key_to_read = keys[0].lstrip('/')
                                 except Exception:
                                     pass
                                 if not key_to_read:
                                     key_to_read = 'top_all'
                                 
                                 try:
-                                    df_top = pd.read_hdf(path, key_to_read)
+                                    df_top = read_hdf_safe(path, key_to_read)
                                 except Exception:
                                     try:
-                                        df_top = pd.read_hdf(path, 'df_all')
+                                        df_top = read_hdf_safe(path, 'df_all')
                                     except Exception:
-                                        df_top = pd.read_hdf(path, 'top_all')
+                                        df_top = read_hdf_safe(path, 'top_all')
                                 
                                 if df_top is not None and not df_top.empty:
                                     import re

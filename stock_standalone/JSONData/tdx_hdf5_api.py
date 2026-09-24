@@ -321,6 +321,17 @@ def cleanup_temp_dir_old_dir(base_dir: str, temp_name: str = "Temp") -> None:
 # 由于 Windows 下的 HDF5 库通常非线程安全，必须确保同一时间只有一个线程在执行 open/read/write 操作。
 # [FIX] 使用 RLock (可重入锁) 防止 write_hdf_db 等内部嵌套调用 SafeHDFStore 时产生死锁。
 _HDF_GLOBAL_LOCK = threading.RLock()
+_HDF_PROCESS_LOCK_COUNTS = {}
+
+def read_hdf_safe(path, key):
+    """Read one HDF key through the shared store and its process/file locks."""
+    with SafeHDFStore(path, mode='r') as store:
+        return store.get(key)
+
+def get_hdf_keys_safe(path):
+    """Read HDF5 keys through the shared store and its process/file locks."""
+    with SafeHDFStore(path, mode='r') as store:
+        return store.keys()
 
 class SafeHDFStore(pd.HDFStore):
     def __init__(self, fname, mode='a', **kwargs):
@@ -393,29 +404,24 @@ class SafeHDFStore(pd.HDFStore):
 
         self._lock = self.fname + ".lock"
         self._flock = None
+        self._lock_acquired = False
         self.write_status = os.path.exists(self.fname)
         self.my_pid = os.getpid()
         self.log.debug(f"self.fname: {self.fname} self.basedir:{self.basedir}")
-
-        # 确保 HDF5 文件存在
-        with timed_ctx("ensure_hdf_file"):
-            self.ensure_hdf_file() 
 
         opened = False
         need_repair = False
         last_exception = None
 
-        # [🚀 CROSS-PROCESS LOCK] 必须在打开 HDF5 文件之前先获取/等待文件锁
-        # 否则 super().__init__ 在 Windows 下会因为共享冲突直接触发 PermissionError 或 HDF5ExtError
-        if self.mode != 'r':
-            with _HDF_GLOBAL_LOCK:
-                self._acquire_lock()
-        else:
-            with _HDF_GLOBAL_LOCK:
-                # 读模式只需要确认没有写者正在操作
-                self._wait_for_lock()
-
         try:
+            # [CROSS-PROCESS LOCK] Readers and writers hold the same file lock
+            # for the full store lifetime; checking only before open leaves a race.
+            self._acquire_lock()
+
+            # File creation is an HDF5 write too, so it must happen after lock acquisition.
+            with timed_ctx("ensure_hdf_file"):
+                self.ensure_hdf_file()
+
             # ========= 核心：只在这里判断是否损坏 =========
             retry_count = 5
             for attempt in range(retry_count):
@@ -437,17 +443,14 @@ class SafeHDFStore(pd.HDFStore):
                                 super().close()
                         except Exception: pass
                         
-                        # 如果打开失败，可能需要临时释放锁给竞争者，避免死锁
-                        if self.mode != 'r':
+                        # 释放并重取锁，让其他进程有机会完成其 HDF 操作。
+                        if self._lock_acquired:
                             self._release_lock()
                         
                         time.sleep(3)
                         
-                        # 重新获取锁
-                        if self.mode != 'r':
-                            self._acquire_lock()
-                        else:
-                            self._wait_for_lock()
+                        # 重新获取读写共用的进程锁。
+                        self._acquire_lock()
                     else:
                         self.log.error(f"[HDF] Final open failed after {retry_count} attempts")
                         need_repair = True
@@ -472,12 +475,14 @@ class SafeHDFStore(pd.HDFStore):
                         raise OSError(f"Failed to open HDF5 file {self.fname} due to lock/permission.")
                 
                 with timed_ctx("check_corrupt_keys"):
-                    self._check_and_clean_corrupt_keys()
+                    with _HDF_GLOBAL_LOCK:
+                        self._check_and_clean_corrupt_keys()
                 with timed_ctx("reopen_hdf"):
-                    super().__init__(self.fname, mode=self.mode, **kwargs)
+                    with _HDF_GLOBAL_LOCK:
+                        super().__init__(self.fname, mode=self.mode, **kwargs)
         except Exception:
-            # 🛡️ 权威防护：若 __init__ 在获锁后遭遇任何致命异常向外抛出，写模式必须确保清理释放锁！
-            if self.mode != 'r':
+            # Constructor failures must not strand either a reader or writer lock.
+            if self._lock_acquired:
                 try:
                     self._release_lock()
                 except Exception:
@@ -487,8 +492,7 @@ class SafeHDFStore(pd.HDFStore):
     def close(self, release_lock=None):
         """关闭 HDFStore 并释放锁"""
         if release_lock is None:
-            # 读模式默认不释放锁，写模式默认释放锁
-            release_lock = (self.mode != 'r')
+            release_lock = True
         with _HDF_GLOBAL_LOCK:
             try:
                 # 🛡️ 检测底层状态，避免重复关闭或已销毁对象的访问错误
@@ -497,15 +501,54 @@ class SafeHDFStore(pd.HDFStore):
             except Exception as e:
                 self.log.error(f"[{self.my_pid}] super().close() failed: {e}")
             finally:
-                if release_lock and self.mode != 'r':
+                if release_lock and self._lock_acquired:
                     self._release_lock()
+
+    # PyTables/HDF5 builds on Windows may not be thread-safe. Protect each
+    # operation that touches an open store, not only its construction/close.
+    def keys(self, *args, **kwargs):
+        with _HDF_GLOBAL_LOCK:
+            return super().keys(*args, **kwargs)
+
+    def get(self, *args, **kwargs):
+        with _HDF_GLOBAL_LOCK:
+            return super().get(*args, **kwargs)
+
+    def select(self, *args, **kwargs):
+        with _HDF_GLOBAL_LOCK:
+            return super().select(*args, **kwargs)
+
+    def __getitem__(self, key):
+        with _HDF_GLOBAL_LOCK:
+            return super().__getitem__(key)
+
+    def get_storer(self, *args, **kwargs):
+        with _HDF_GLOBAL_LOCK:
+            return super().get_storer(*args, **kwargs)
+
+    def put(self, *args, **kwargs):
+        with _HDF_GLOBAL_LOCK:
+            return super().put(*args, **kwargs)
+
+    def append(self, *args, **kwargs):
+        with _HDF_GLOBAL_LOCK:
+            return super().append(*args, **kwargs)
+
+    def remove(self, *args, **kwargs):
+        with _HDF_GLOBAL_LOCK:
+            return super().remove(*args, **kwargs)
+
+    def flush(self, *args, **kwargs):
+        with _HDF_GLOBAL_LOCK:
+            return super().flush(*args, **kwargs)
 
     def ensure_hdf_file(self):
         """确保 HDF5 文件存在"""
-        if not os.path.exists(self.fname):
-            # 使用 'w' 创建空文件
-            with timed_ctx("ensure_hdf_file"):
-                pd.HDFStore(self.fname, mode='w').close()
+        with _HDF_GLOBAL_LOCK:
+            if not os.path.exists(self.fname):
+                # 使用 'w' 创建空文件
+                with timed_ctx("ensure_hdf_file"):
+                    pd.HDFStore(self.fname, mode='w').close()
 
     def _check_and_clean_corrupt_keys(self, keys=None):
         """
@@ -679,7 +722,9 @@ class SafeHDFStore(pd.HDFStore):
         elapsed = max(0.0, time.time() - ts)
         is_me = (pid == self.my_pid)
         is_alive = psutil.pid_exists(pid) if pid > 0 else False
-        is_stale = (not is_alive) or (elapsed > self.lock_timeout)
+        # A live process may legitimately hold a long HDF operation. Age alone
+        # must never let a contender remove its lock and overlap HDF5 access.
+        is_stale = not is_alive
 
         return {
             'exists': True,
@@ -693,8 +738,18 @@ class SafeHDFStore(pd.HDFStore):
 
     def _acquire_lock(self):
         my_pid = self.my_pid
+        lock_key = os.path.normcase(os.path.abspath(self._lock))
         retries = 0
         try:
+            # Same-process nested stores share one lock file. Keep a reference
+            # count so closing an inner store cannot unlock its active parent.
+            with _HDF_GLOBAL_LOCK:
+                held_count = _HDF_PROCESS_LOCK_COUNTS.get(lock_key, 0)
+                if held_count:
+                    _HDF_PROCESS_LOCK_COUNTS[lock_key] = held_count + 1
+                    self._lock_acquired = True
+                    return True
+
             while True:
                 with timed_ctx("_acquire_lock"):
                     lock_info = self._parse_lock_info()
@@ -707,6 +762,9 @@ class SafeHDFStore(pd.HDFStore):
                                     f.flush()
                             except Exception:
                                 pass
+                            with _HDF_GLOBAL_LOCK:
+                                _HDF_PROCESS_LOCK_COUNTS[lock_key] = _HDF_PROCESS_LOCK_COUNTS.get(lock_key, 0) + 1
+                                self._lock_acquired = True
                             return True
 
                         total_wait = time.time() - self.start_time
@@ -717,8 +775,8 @@ class SafeHDFStore(pd.HDFStore):
                             time.sleep(self.probe_interval)
                             continue
 
-                        # 3. 判定是否为僵尸锁或已严重超时
-                        if lock_info['is_stale'] or total_wait > self.max_wait:
+                        # 3. 只清理持有进程已退出的锁；等待超时不能证明锁已失效。
+                        if lock_info['is_stale']:
                             self.log.warning(
                                 f"[Lock] 安全清理超时/僵尸锁 pid={lock_info['pid']} "
                                 f"(my_pid:{my_pid}, alive={lock_info['is_alive']}, "
@@ -748,6 +806,9 @@ class SafeHDFStore(pd.HDFStore):
                             with open(self._lock, "x") as f:
                                 f.write(f"{my_pid}|{time.time()}\n")
                                 f.flush()
+                            with _HDF_GLOBAL_LOCK:
+                                _HDF_PROCESS_LOCK_COUNTS[lock_key] = _HDF_PROCESS_LOCK_COUNTS.get(lock_key, 0) + 1
+                                self._lock_acquired = True
                             self.log.debug(f"[Lock] 创建锁文件 {self._lock} by pid={my_pid}")
                             return True
                         except (FileExistsError, OSError) as e:
@@ -784,7 +845,7 @@ class SafeHDFStore(pd.HDFStore):
                     continue
 
                 total_wait = time.time() - self.start_time
-                if lock_info['is_stale'] or total_wait > self.max_wait:
+                if lock_info['is_stale']:
                     self.log.warning(f"[Lock] 强制解超时锁 pid={lock_info['pid']} (my_pid:{my_pid}), removing {self._lock}")
                     try:
                         os.remove(self._lock)
@@ -818,7 +879,7 @@ class SafeHDFStore(pd.HDFStore):
                     continue
 
                 total_wait = time.time() - self.start_time
-                if lock_info['is_stale'] or total_wait > self.max_wait:
+                if lock_info['is_stale']:
                     self.log.warning(
                         f"[Lock] 读模式检测到僵尸锁/超时锁 pid={lock_info['pid']} "
                         f"(alive={lock_info['is_alive']}, elapsed={lock_info['elapsed']:.1f}s, wait={total_wait:.1f}s)，执行安全清理"
@@ -836,6 +897,20 @@ class SafeHDFStore(pd.HDFStore):
                 time.sleep(self.probe_interval)
 
     def _release_lock(self):
+        lock_key = os.path.normcase(os.path.abspath(self._lock))
+        with _HDF_GLOBAL_LOCK:
+            if not self._lock_acquired:
+                return
+            held_count = _HDF_PROCESS_LOCK_COUNTS.get(lock_key, 1)
+            if held_count > 1:
+                _HDF_PROCESS_LOCK_COUNTS[lock_key] = held_count - 1
+                self._lock_acquired = False
+                return
+            _HDF_PROCESS_LOCK_COUNTS.pop(lock_key, None)
+            self._lock_acquired = False
+            self._release_lock_file()
+
+    def _release_lock_file(self):
         if os.path.exists(self._lock):
             my_pid = self.my_pid
             # 🛡️ Windows 高并发防占用微重试删除（重试 5 次，彻底杜绝 WinError 32 僵尸锁残留）
@@ -965,9 +1040,9 @@ class SafeHDFStore(pd.HDFStore):
                     self._release_lock()
                 self.log.debug(f'clean:{self.fname}')
         else:
-            # 🛡️ 读模式：只关闭句柄释放 Windows 句柄锁，绝不触碰写锁，绝不 sleep 0.1s 阻塞主线程
+            # Read locks remain held until the underlying HDF5 handle is closed.
             with timed_ctx("exit close"):
-                self.close(release_lock=False)
+                self.close(release_lock=True)
 
 
 # class SafeHDFStore_no_timed_ctx(pd.HDFStore):
@@ -2324,13 +2399,8 @@ def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount
                 if needs_prune:
                     log.warning(f"⚡ [HDF-TRUNCATE] Memory-side pruning triggered for {fname} (Size: {os.path.getsize(fname_path)/1024/1024:.1f}MB)")
                     try:
-                        # [FIX] ⚡ 规避 0xc0000374 Heap Corruption：
-                        # 在读取超大 HDF5 前，清理所有残留句柄并执行垃圾回收
-                        try:
-                            tables.file._open_files.close_all()
-                        except Exception:
-                            pass
-                        
+                        # Do not close_all(): it can invalidate HDFStore handles owned by
+                        # other threads. The global HDF lock serializes their actual I/O.
                         gc.collect()
 
                         # 使用 read_hdf 直接读取，减少句柄持有时间

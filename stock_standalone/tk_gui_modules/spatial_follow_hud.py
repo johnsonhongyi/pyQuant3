@@ -505,7 +505,8 @@ class SpatialFollowHUD(QtWidgets.QDialog, WindowMixin):
             base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
             for path in [r'g:\top_all.h5', os.path.join(base_dir, 'top_all.h5'), os.path.join(get_app_root(), 'top_all.h5')]:
                 if os.path.exists(path):
-                    df_top = pd.read_hdf(path, 'top_all')
+                    from JSONData.tdx_hdf5_api import read_hdf_safe
+                    df_top = read_hdf_safe(path, 'top_all')
                     if not df_top.empty and 'name' in df_top.columns:
                         if df_top.index.name == 'code' and code_clean in df_top.index:
                             v = str(df_top.loc[code_clean, 'name'])
