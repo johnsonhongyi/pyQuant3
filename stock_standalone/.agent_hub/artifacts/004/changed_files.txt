@@ -1,8 +1,0 @@
-ats/strategy/ipo_vwap_detector_engine.py
-ats/ui/ipo_subnew_detector_dialog.py
-tests/test_channel_secondary_buy_ui_and_engine.py
-.agent_hub/inbox/004_real_60f_kline_stream.md
-.agent_hub/artifacts/004/implementation_plan.md
-.agent_hub/artifacts/004/walkthrough.md
-.agent_hub/artifacts/004/test_result.md
-.agent_hub/artifacts/004/changed_files.txt

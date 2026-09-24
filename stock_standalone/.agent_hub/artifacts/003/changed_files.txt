@@ -1,7 +1,0 @@
-ats/strategy/ipo_trading_center.py
-tests/test_channel_secondary_buy_strategy.py
-.agent_hub/inbox/003_proactive_exit_engine_wiring.md
-.agent_hub/artifacts/003/implementation_plan.md
-.agent_hub/artifacts/003/walkthrough.md
-.agent_hub/artifacts/003/test_result.md
-.agent_hub/artifacts/003/changed_files.txt
