@@ -1,7 +1,0 @@
-ats/strategy/ipo_trading_center.py
-tests/test_channel_secondary_buy_strategy.py
-.agent_hub/inbox/006_exit_guard_audit_hardening.md
-.agent_hub/artifacts/006/implementation_plan.md
-.agent_hub/artifacts/006/walkthrough.md
-.agent_hub/artifacts/006/test_result.md
-.agent_hub/artifacts/006/changed_files.txt
