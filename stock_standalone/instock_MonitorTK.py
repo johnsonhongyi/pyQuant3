@@ -38,6 +38,7 @@ import pandas as pd
 pd.set_option('display.float_format', '{:.2f}'.format)
 from tk_frame_fingerprint import (
     frame_fingerprint, same_fingerprint, needs_full_for_null_or_rows, full_ack_matches,
+    is_new_trade_snapshot,
 )
 import numpy as np
 import win32api
@@ -8873,6 +8874,21 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     or getattr(self, '_cold_start', False)
                     or pending_port_sync
                 )
+                today = cct.get_today()
+                trade_day = bool(cct.get_trade_date_status()) if getattr(self, '_last_send_trade_date', None) != today else False
+                rollover_preview = None
+                if trade_day and getattr(self, '_last_send_trade_date', None):
+                    rollover_preview = self.market_bus.get_latest_dual(
+                        since_version=getattr(self, '_last_vis_bus_version', 0)
+                    )
+                    if rollover_preview is not None:
+                        preview_version, preview_df, _, preview_time, _, _ = rollover_preview
+                        pending_full_sync = pending_full_sync or is_new_trade_snapshot(
+                            self._last_send_trade_date, today, trade_day, preview_time,
+                            preview_version, getattr(self, '_last_vis_bus_version', 0),
+                            getattr(self, '_last_send_source_fingerprint', None),
+                            frame_fingerprint(preview_df),
+                        )
                 if not pending_full_sync:
                     try:
                         preview = self.market_bus.get_latest_dual(
@@ -8939,6 +8955,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 empty_wait_count = 0
                 sent = False  # ⭐ 本轮是否成功发送
                 sent_to_ats = False
+                send_success_any = False
+                source_fp = None
+                source_current_day = False
                 try:
                     now = time.time()
                     
@@ -8992,6 +9011,26 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     if df_bus_all is None or df_bus_all.empty:
                         time.sleep(0.5)
                         continue
+
+                    source_fp = frame_fingerprint(df_bus_all)
+                    source_current_day = datetime.fromtimestamp(snap_time).strftime('%Y-%m-%d') == today
+                    if is_new_trade_snapshot(
+                        getattr(self, '_last_send_trade_date', None), today, trade_day, snap_time,
+                        version, getattr(self, '_last_sent_source_version', 0),
+                        getattr(self, '_last_send_source_fingerprint', None), source_fp,
+                    ):
+                        logger.info('[send_df] 新交易日行情快照已变化，重置双轨差分基线并全量重发')
+                        self._df_first_send_done = False
+                        self._cold_start = True
+                        self.sync_version = 0
+                        self.sync_version_daily = 0
+                        for attr in ('df_ui_prev', 'df_daily_prev'):
+                            if hasattr(self, attr):
+                                delattr(self, attr)
+                        for p in self._stream_subscribers:
+                            setattr(self, f'_force_sync_{p}', True)
+                            setattr(self, f'_awaiting_full_ack_{p}', None)
+                        pending_full_sync = True
 
                     # ⚡ [CORE FIX] 借读契约与不可变边界 (方案阶段 2):
                     # send_df 仅作为总线借读者，在注入 TWAP 等派生列前必须显式执行隔离拷贝，严禁原位修改总线内部快照
@@ -9501,6 +9540,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 # ======================================================
                 prev = getattr(self, "_df_first_send_done", False)
                 self._df_first_send_done = sent
+                if (sent or send_success_any) and source_fp is not None:
+                    previous_source_fp = getattr(self, '_last_send_source_fingerprint', None)
+                    self._last_send_source_fingerprint = source_fp
+                    self._last_sent_source_version = version
+                    if source_current_day and (getattr(self, '_last_send_trade_date', None) is None
+                                               or previous_source_fp != source_fp):
+                        self._last_send_trade_date = today
 
                 # 状态刚从 False → True：立即进入慢速周期
                 vis_enabled = getattr(self, '_vis_enabled_cache', True)

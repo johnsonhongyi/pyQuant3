@@ -12,11 +12,22 @@ import socket
 import threading
 import pickle
 import struct
+from datetime import datetime
 import pandas as pd
 from sys_utils import get_app_root
 from db_utils import SQLiteConnectionManager
 
 class IPCBridge:
+    @staticmethod
+    def _request_full_baseline():
+        from data_utils import send_code_via_pipe, PIPE_NAME_TK
+        import logging
+        return send_code_via_pipe({
+            "cmd": "REQ_FULL_SYNC", "port": 26670,
+            "service_name": "ats_terminal", "client_name": "ats_terminal",
+            "subscribe": True,
+        }, logging.getLogger("ATS_Bridge"), PIPE_NAME_TK)
+
     def __init__(self):
         # Locate the default trading_signals.db
         self.db_path = os.path.join(get_app_root(), "trading_signals.db")
@@ -123,30 +134,23 @@ class IPCBridge:
                                         df_norm.index.name = 'code'
 
                                     # 增量合并 vs 全量覆盖
-                                    # 冷启动/重连没有全量基线时，绝不能把 diff 当成完整行情。
+                                    # 冷启动/重连/次日跨日没有全量基线时，绝不能把 diff 当成完整行情。
                                     # 否则 ma20d/ma60d/category 等未变化列会直接缺失，评分层随之退化。
+                                    today_str = datetime.now().strftime("%Y-%m-%d")
+                                    last_cache_date = getattr(self, '_last_cache_date', None)
+                                    is_date_rollover = bool(last_cache_date is not None and last_cache_date != today_str)
+
                                     if msg_type == 'UPDATE_DF_DIFF' and (
                                         not hasattr(self, '_cached_df')
                                         or self._cached_df is None
                                         or self._cached_df.empty
+                                        or is_date_rollover
                                     ):
+                                        if is_date_rollover:
+                                            self._cached_df = None
                                         try:
-                                            import sys
-                                            from sys_utils import get_app_root
-                                            root = get_app_root()
-                                            if root not in sys.path:
-                                                sys.path.insert(0, root)
-                                            from data_utils import send_code_via_pipe, PIPE_NAME_TK
-                                            import logging
-                                            local_logger = logging.getLogger("ATS_Bridge")
-                                            send_code_via_pipe({
-                                                "cmd": "REQ_FULL_SYNC",
-                                                "port": 26670,
-                                                "service_name": "ats_terminal",
-                                                "client_name": "ats_terminal",
-                                                "subscribe": True,
-                                            }, local_logger, PIPE_NAME_TK)
-                                            print("[IPCBridge] Cold-start diff rejected; requested UPDATE_DF_ALL baseline")
+                                            self._request_full_baseline()
+                                            print(f"[IPCBridge] {'Date rollover' if is_date_rollover else 'Cold-start'} diff rejected; requested UPDATE_DF_ALL baseline")
                                         except Exception:
                                             pass
                                         return
@@ -176,22 +180,27 @@ class IPCBridge:
                                                             valid_indices = valid_mask[valid_mask].index
                                                             if len(valid_indices) > 0:
                                                                 self._cached_df.loc[valid_indices, col] = df_diff.loc[valid_indices, col]
-                                                        except Exception:
-                                                            pass
+                                                        except Exception as column_err:
+                                                            raise ValueError(f"增量列 {col} 合并失败") from column_err
 
                                             new_idx = df_diff.index.difference(self._cached_df.index)
                                             if len(new_idx) > 0:
                                                 self._cached_df = pd.concat([self._cached_df, df_diff.loc[new_idx]])
                                             df_to_deliver = self._cached_df.copy()
                                         except Exception as merge_err:
-                                            self._cached_df = df_norm.copy()
-                                            df_to_deliver = self._cached_df
+                                            print(f"[IPCBridge] Diff merge failed; requesting full baseline: {merge_err}")
+                                            self._cached_df = None
+                                            self._request_full_baseline()
+                                            return
                                     else:
                                         self._cached_df = df_norm.copy()
+                                        self._last_cache_date = today_str
                                         df_to_deliver = self._cached_df
                                 except Exception as preprocess_err:
                                     print(f"[IPCBridge] Background DataFrame preprocess error: {preprocess_err}")
-                                    df_to_deliver = df_payload
+                                    self._cached_df = None
+                                    self._request_full_baseline()
+                                    return
 
                             # 立即在后台线程（不受 UI 渲染卡顿影响）告知 TK 停止发送，清除发送状态
                             try:

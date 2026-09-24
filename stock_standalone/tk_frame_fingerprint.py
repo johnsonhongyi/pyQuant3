@@ -4,6 +4,7 @@ None means the frame cannot be hashed safely and must be processed.
 """
 
 import pandas as pd
+from datetime import datetime
 
 
 def frame_fingerprint(df):
@@ -19,6 +20,18 @@ def frame_fingerprint(df):
 
 def same_fingerprint(previous, current):
     return current is not None and previous == current
+
+
+def is_new_trade_snapshot(last_trade_date, today, is_trade_day, snapshot_time,
+                          version, last_version, previous_fingerprint, current_fingerprint):
+    """Only a fresh, changed market frame on a new trading day rolls the baseline."""
+    if not last_trade_date or last_trade_date == today or not is_trade_day:
+        return False
+    if not snapshot_time or datetime.fromtimestamp(snapshot_time).strftime('%Y-%m-%d') != today:
+        return False
+    if version <= last_version or previous_fingerprint is None or current_fingerprint is None:
+        return False
+    return previous_fingerprint != current_fingerprint
 
 
 def needs_full_for_null_or_rows(previous, current):

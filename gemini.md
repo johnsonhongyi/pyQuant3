@@ -1,5 +1,18 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](stock_standalone/design/antigravity_historical_tasks_archive.md)
 
+## 2026-09-24 21:35
+- [x] **【跨日行情有效帧判定、可视化端增量契约收敛与合并异常全量自愈闭环落地】(`stock_standalone/tk_frame_fingerprint.py`, `stock_standalone/instock_MonitorTK.py`, `stock_standalone/ipc_sync_manager.py`, `stock_standalone/ats/ipc_bridge.py`, `stock_standalone/trade_visualizer_qt6.py`, `stock_standalone/tests/test_ipc_trade_rollover.py`)**：
+    - [x] **P1 发送端杜绝午夜重放昨日旧快照 (`is_new_trade_snapshot`)**：
+        - 彻底消除仅依赖系统日历翻页导致的“旧数据包装成今日首发全量包”缺陷；
+        - 构建四重严格门禁：① 必须为法定交易日（`is_trade_day`）；② 总线快照发布时间戳属于今日（`snapshot_time` 匹配 `today`）；③ 总线版本递增；④ 行情指纹发生真实变动（`previous_fp != current_fp`）；四者齐备才重置差分基线并广播首发全量，非交易日与未更新数据绝对不重复重发；
+    - [x] **P1 可视化端增量合并契约安全收敛 (`apply_df_diff`)**：
+        - 纠偏“所有客户端都能完整重建”断言，确立安全失效契约：无基线、出现基线未包含的新增股票/新增列、或无共有索引时，立即清空底座并通过后台线程异步触发 `_request_full_sync()` 重建全量表，彻底杜绝跳过新列和漏并新股；
+    - [x] **P1 增量合并异常彻底废除“差分误作全量”覆盖**：
+        - `IPCSyncManager` 与 `ATS Bridge` 彻底废除 `except: self.current_df = df_payload` 错误覆盖；增量合并遇异常一律清空底座、使基线彻底失效，立即主动发起全量同步强刷请求（`request_full_sync(force=True)`）；
+    - [x] **P2 跨日、异常与重连回放专项测试 100% 覆盖**：
+        - 新增 `tests/test_ipc_trade_rollover.py`，完整覆盖快照四重门禁判定、合并异常全量自愈、可视化结构变化全量回退；
+        - 全量 26/26 专项测试纯绿秒级通过，`compileall` exit=0，`git diff --check` 零违规。
+
 ## 2026-09-24 17:55
 - [x] **【全客户端（ATS、多周期、人气共振、新股指挥室、可视化）IPC 适配审计与老版打包 EXE 双向向前兼容落地】(`stock_standalone/tk_frame_fingerprint.py`, `stock_standalone/tests/test_tk_frame_fingerprint.py`, `stock_standalone/instock_MonitorTK.py`, `stock_standalone/ipc_sync_manager.py`, `stock_standalone/ats/ipc_bridge.py`)**：
     - [x] **全客户端 IPC 接入拓扑与通信机制全景排查**：
