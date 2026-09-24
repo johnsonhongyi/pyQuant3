@@ -1192,7 +1192,7 @@ class PRServiceGUI:
         self._ipc_sync_in_progress = True
 
         dyn_port = self._find_available_port()
-        service_logger.info(f"[IPC 动态端口] 自动开启临时动态端口 Port={dyn_port} 获取行情数据...")
+        service_logger.warning(f"[IPC 动态端口] 自动开启临时动态端口 Port={dyn_port} 获取行情数据...")
 
         received_container = []
         def _dynamic_cb(df):
@@ -1205,14 +1205,26 @@ class PRServiceGUI:
                 except Exception as e:
                     service_logger.debug(f"实时数据更新回调异常: {e}")
 
-        temp_mgr = IPCSyncManager(port=dyn_port, data_callback=_dynamic_cb, logger=service_logger)
+        temp_mgr = IPCSyncManager(
+            port=dyn_port,
+            service_name="Popularity_Resonance",
+            data_callback=_dynamic_cb,
+            logger=service_logger,
+        )
         try:
             temp_mgr.start()
             if getattr(temp_mgr, '_bind_event', None):
                 temp_mgr._bind_event.wait(timeout=0.5)
+            if getattr(temp_mgr, 'is_bound', False):
+                service_logger.warning(f"[IPC 动态端口] Socket 监听已就绪 Port={dyn_port}")
+            else:
+                service_logger.warning(f"[IPC 动态端口] Socket 监听未就绪 Port={dyn_port}")
 
             # 通过命名管道向 TK 发送包含动态端口的 REQ_FULL_SYNC 指令 (强行发包，避免被防刷冷却逻辑误拦截)
-            temp_mgr.request_full_sync(force=True)
+            if temp_mgr.request_full_sync(force=True):
+                service_logger.warning(f"[IPC 动态端口] 已向后台 Pipe 发送 REQ_FULL_SYNC (Port={dyn_port})")
+            else:
+                service_logger.warning(f"[IPC 动态端口] REQ_FULL_SYNC 发送失败 (Port={dyn_port})")
 
             start_t = time.time()
             while time.time() - start_t < timeout:
@@ -1221,9 +1233,12 @@ class PRServiceGUI:
                     if df_got is not None and not df_got.empty:
                         with self.df_lock:
                             self.current_df = df_got
-                        service_logger.info(f"[IPC 动态端口] 成功通过 Port={dyn_port} 接收 {len(df_got)} 行最新数据 (耗时 {time.time()-start_t:.2f}s)，即刻释放端口")
+                        service_logger.warning(f"[IPC 动态端口] 成功通过 Port={dyn_port} 接收 {len(df_got)} 行最新数据 (耗时 {time.time()-start_t:.2f}s)，即刻释放端口")
                         break
                 time.sleep(0.1)
+            current_df = temp_mgr.get_current_df()
+            if not received_container and (current_df is None or current_df.empty):
+                service_logger.warning(f"[IPC 动态端口] 等待 {timeout:.1f}s 未收到行情数据 (Port={dyn_port})")
         except Exception as e:
             service_logger.error(f"动态端口获取 IPC 数据异常: {e}")
         finally:

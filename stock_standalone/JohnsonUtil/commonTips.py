@@ -154,6 +154,11 @@ class timed_ctx:
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         cost_ms = (time.perf_counter() - self.start) * 1000
+        self.record_elapsed(cost_ms)
+
+    def record_elapsed(self, cost_ms):
+        """Record a measured duration when timing starts outside this context manager."""
+        cost_ms = max(0.0, float(cost_ms))
 
         # 1️⃣ 汇总统计（一定保留）
         _TIMING_STATS[self.name].append(cost_ms)

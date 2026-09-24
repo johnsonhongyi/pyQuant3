@@ -3295,7 +3295,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                             target_port = obj.get("port")
                             client_name = obj.get("client_name") or obj.get("service_name") or f"Client_{target_port}"
                             subscribe = obj.get("subscribe", False) or (obj.get("cmd") == "SUBSCRIBE_STREAM")
-                            logger.info(f'[Pipe] Feedback listener cmd {obj.get("cmd")} (target_port={target_port}, sub={subscribe}, client={client_name})')
+                            logger.warning(f'[Pipe] Feedback listener cmd {obj.get("cmd")} (target_port={target_port}, sub={subscribe}, client={client_name})')
 
                             # 🚀 [TK 统一流式订阅中心]
                             if not hasattr(self, '_stream_subscribers'):
@@ -3331,7 +3331,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                     if not hasattr(self, '_temp_dynamic_ports'):
                                         self._temp_dynamic_ports = set()
                                     self._temp_dynamic_ports.add(target_port)
-                                    logger.info(f'⚡ [IPC 动态适配] 接收到临时动态端口 REQ_FULL_SYNC 请求: Port={target_port}')
+                                    if not hasattr(self, '_temp_dynamic_port_names'):
+                                        self._temp_dynamic_port_names = {}
+                                    self._temp_dynamic_port_names[target_port] = client_name
+                                    logger.warning(f'⚡ [IPC 动态适配] 接收到临时动态端口 REQ_FULL_SYNC: service={client_name}, Port={target_port}')
                             else:
                                 for p in (26670, 26671, 26675):
                                     self._stream_subscribers[p]["subscribed"] = True
@@ -3347,9 +3350,12 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                             target_port = obj.get("port")
                             logger.info(f'[Pipe] Feedback listener cmd ATS_RECEIVED (target_port={target_port})')
                             expected = getattr(self, f'_awaiting_full_ack_{target_port}', None)
-                            if full_ack_matches(obj, expected, getattr(self, '_last_vis_bus_version', None)):
+                            ack_matched = full_ack_matches(obj, expected, getattr(self, '_last_vis_bus_version', None))
+                            if ack_matched:
                                 setattr(self, f'_force_sync_{target_port}', False)
                                 setattr(self, f'_awaiting_full_ack_{target_port}', None)
+                                if expected is not None:
+                                    logger.warning(f'[IPC ACK] Port={target_port} 已确认全量行情基线 (version={obj.get("source_version")})')
                             if hasattr(self, '_stream_subscribers') and target_port in self._stream_subscribers:
                                 self._stream_subscribers[target_port]["active"] = True
                                 self._stream_subscribers[target_port]["fail_count"] = 0
@@ -8976,6 +8982,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 sent = False  # ⭐ 本轮是否成功发送
                 sent_to_ats = False
                 send_success_any = False
+                port_ipc_attempted = False
                 source_fp = None
                 source_current_day = False
                 try:
@@ -9459,6 +9466,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                 if ports_to_send:
                                     with timed_ctx("ats_IPC_send", warn_ms=1000):
                                         for port, sub_info, is_forced_port in ports_to_send:
+                                            port_ipc_attempted = True
                                             setattr(self, f'_last_try_{port}', now_ipc)
                                             if sub_info:
                                                 sub_info["last_try"] = now_ipc
@@ -9490,7 +9498,15 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                                 send_h = header_daily
                                                 send_p = payload_daily
 
+                                            service_name = (
+                                                sub_info.get('name') if sub_info is not None
+                                                else getattr(self, '_temp_dynamic_port_names', {}).get(port, 'dynamic')
+                                            ) or f'Client_{port}'
+                                            service_key = str(service_name).strip().replace(' ', '_')[:20] or 'unknown'
+                                            stats_port = str(port) if sub_info is not None else 'dynamic'
+                                            sent_msg_type = 'UPDATE_DF_ALL' if force_full_for_port else msg_type_daily
                                             ipc_port_send_start = time.perf_counter()
+                                            send_ok = False
                                             if force_full_for_port or msg_type_daily == 'UPDATE_DF_ALL':
                                                 setattr(self, f'_force_sync_{port}', True)
                                                 setattr(self, f'_awaiting_full_ack_{port}', (self._sync_session, version))
@@ -9500,6 +9516,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                                     s2.settimeout(1.5)  # 1.5秒超时防止阻塞
                                                     s2.connect(('127.0.0.1', port))
                                                     s2.sendall(b"DATA" + send_h + send_p)
+                                                    send_ok = True
                                                     send_success_any = True
                                                     if sub_info:
                                                         sub_info["active"] = True
@@ -9509,11 +9526,12 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                                         if sub_info is None:
                                                             setattr(self, f'_force_sync_{port}', False)
                                                             setattr(self, f'_awaiting_full_ack_{port}', None)
+                                                            getattr(self, '_temp_dynamic_port_names', {}).pop(port, None)
                                                     if port == 26670:
                                                         sent_to_ats = True
                                                     curr_hash = hash((version, len(df_daily)))
                                                     setattr(self, f'_last_sent_hash_{port}', curr_hash)
-                                            except (socket.timeout, ConnectionError, OSError):
+                                            except (socket.timeout, ConnectionError, OSError) as send_err:
                                                 if sub_info:
                                                     sub_info["active"] = False
                                                     sub_info["fail_count"] = sub_info.get("fail_count", 0) + 1
@@ -9522,11 +9540,32 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                                     if not sub_info.get("is_static", False) and sub_info["fail_count"] >= 20 and (now_ipc - sub_info.get("last_try", now_ipc) > 600):
                                                         self._stream_subscribers.pop(port, None)
                                                         logger.info(f"🧹 [TK 订阅中心] 动态端口 {port} 长期无响应，已自动注销清理订阅。")
+                                                last_error_log = getattr(self, f'_last_ipc_error_log_{port}', 0.0)
+                                                if (sub_info is None or force_full_for_port or now_ipc - last_error_log >= 30.0):
+                                                    logger.warning(f"[IPC发送] 服务={service_name} Port={port} Socket 连接/发送失败: {send_err}")
+                                                    setattr(self, f'_last_ipc_error_log_{port}', now_ipc)
                                             finally:
+                                                port_send_ms = (time.perf_counter() - ipc_port_send_start) * 1000.0
                                                 self._record_latency_sample(
-                                                    f"ipc_send:port_{port}",
-                                                    (time.perf_counter() - ipc_port_send_start) * 1000.0,
+                                                    f"ipc_send:{service_key}:port_{port}",
+                                                    port_send_ms,
                                                 )
+                                                timing_names = [f"ats_IPC_{service_key}_p{stats_port}"]
+                                                if stats_port != str(port):
+                                                    timing_names.append(f"ats_IPC_{service_key}_p{port}")
+                                                for timing_index, timing_name in enumerate(timing_names):
+                                                    timed_ctx(
+                                                        timing_name,
+                                                        warn_ms=1000 if timing_index == 0 else None,
+                                                        log_debug=False,
+                                                    ).record_elapsed(port_send_ms)
+                                                if send_ok:
+                                                    logger.warning(
+                                                        f"[IPC发送] 服务={service_name} Port={port} 已发送 {sent_msg_type} "
+                                                        f"(rows={len(df_daily)}, payload_bytes={len(send_p)}, "
+                                                        f"wire_bytes={len(send_p) + len(send_h) + 4}, ver={version}, "
+                                                        f"connect_send_ms={port_send_ms:.1f})"
+                                                    )
 
                                 if send_success_any:
                                     logger.debug(f"[IPC] {msg_type} sent (ver={self.sync_version}, to_ats={sent_to_ats})")
@@ -9563,8 +9602,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 finally:
                     if sent:
                         cct.print_timing_summary_filter(include_prefix="viz_", top_n=10)
-                    if sent_to_ats:
-                        cct.print_timing_summary_filter(include_prefix="ats_", top_n=10)
+                    if sent_to_ats or port_ipc_attempted:
+                        cct.print_timing_summary_filter(include_prefix="ats_", top_n=20)
                 # ======================================================
                 # ⭐ 6️⃣ 状态更新（只在这里）
                 # ======================================================
