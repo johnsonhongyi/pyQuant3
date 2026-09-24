@@ -98,6 +98,45 @@ def _format_cell_text(val) -> str:
     return str(val)
 
 
+def is_alt_modifier_active(event=None) -> bool:
+    """⚡ 判断操盘手当前是否激活/按下了 Alt 键
+    (三层严密防护：
+     1. Qt 事件自带 modifiers() (若存在)
+     2. Qt 应用程序全局 keyboardModifiers()
+     3. 🛡️ Windows 原生物理按键穿透 GetAsyncKeyState / GetKeyState，彻底根治 Windows 下鼠标滚轮/系统菜单模式下丢失 AltModifier 的物理缺陷)
+    """
+    # 1. 优先检查当前事件自带的修饰符
+    if event is not None:
+        try:
+            mods = getattr(event, "modifiers", None)
+            if callable(mods):
+                mods = mods()
+            if mods is not None and bool(mods & Qt.KeyboardModifier.AltModifier):
+                return True
+        except Exception:
+            pass
+
+    # 2. 检查 Qt 全局应用修饰符
+    try:
+        if bool(QApplication.keyboardModifiers() & Qt.KeyboardModifier.AltModifier):
+            return True
+    except Exception:
+        pass
+
+    # 3. 🛡️ Windows 原生物理穿透 (0x12: VK_MENU, 0xA4: VK_LMENU 左Alt, 0xA5: VK_RMENU 右Alt)
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            u32 = ctypes.windll.user32
+            for vk in (0x12, 0xA4, 0xA5):
+                if bool(u32.GetAsyncKeyState(vk) & 0x8000) or bool(u32.GetKeyState(vk) & 0x8000):
+                    return True
+        except Exception:
+            pass
+
+    return False
+
+
 def save_ui_layout_state(key: str, val: Any):
     """【💾 布局落盘】保存 UI 布局、窗口大小、QSplitter 与表格列宽到 config/intraday_ui_layout.json"""
     try:
@@ -613,7 +652,7 @@ class SBCChartCanvas(QWidget):
             event.accept()
             return
         elif key == Qt.Key.Key_Up:
-            is_alt = bool(event.modifiers() & Qt.KeyboardModifier.AltModifier) or bool(QApplication.keyboardModifiers() & Qt.KeyboardModifier.AltModifier)
+            is_alt = is_alt_modifier_active(event)
             if is_alt:
                 parent_win = self.window()
                 sync_all_open_sbc_zoom(in_=True, trigger_dlg=parent_win if isinstance(parent_win, SBCIntradayChartDialog) else None)
@@ -622,7 +661,7 @@ class SBCChartCanvas(QWidget):
             event.accept()
             return
         elif key == Qt.Key.Key_Down:
-            is_alt = bool(event.modifiers() & Qt.KeyboardModifier.AltModifier) or bool(QApplication.keyboardModifiers() & Qt.KeyboardModifier.AltModifier)
+            is_alt = is_alt_modifier_active(event)
             if is_alt:
                 parent_win = self.window()
                 sync_all_open_sbc_zoom(in_=False, trigger_dlg=parent_win if isinstance(parent_win, SBCIntradayChartDialog) else None)
@@ -1536,8 +1575,12 @@ class SBCChartCanvas(QWidget):
         """⚡ 鼠标滚轮缩放走势图 (100% 对齐通达信手感)：向前滚放大，向后滚缩小，按住 Alt 同步同组窗口"""
         delta = event.angleDelta().y()
         if delta == 0:
+            delta = event.angleDelta().x()
+        if delta == 0:
             delta = event.pixelDelta().y()
-        is_alt = bool(event.modifiers() & Qt.KeyboardModifier.AltModifier) or bool(QApplication.keyboardModifiers() & Qt.KeyboardModifier.AltModifier)
+        if delta == 0:
+            delta = event.pixelDelta().x()
+        is_alt = is_alt_modifier_active(event)
         if delta > 0:
             if is_alt:
                 parent_win = self.window()
@@ -5293,8 +5336,7 @@ class SBCIntradayChartDialog(QWidget):
         new_idx = (idx + step) % len(period_list)
         new_mode = period_list[new_idx]
 
-        modifiers = QApplication.keyboardModifiers()
-        if bool(modifiers & Qt.KeyboardModifier.AltModifier):
+        if is_alt_modifier_active():
             count = sync_all_open_sbc_period(new_mode, trigger_dlg=self)
             if hasattr(self, 'lbl_info') and self.lbl_info:
                 self.lbl_info.setText(f"🌐 [同组同步周期] 已将全部 {count} 个已打开 SBC 窗口批量切换至 【{new_mode.upper()}】！")
@@ -5312,8 +5354,7 @@ class SBCIntradayChartDialog(QWidget):
         period_list = ["1m", "3d", "5d", "10d", "5m", "30m", "60m", "day", "2d", "week", "month"]
         if 0 <= index < len(period_list):
             new_mode = period_list[index]
-            modifiers = QApplication.keyboardModifiers()
-            if bool(modifiers & Qt.KeyboardModifier.AltModifier):
+            if is_alt_modifier_active():
                 count = sync_all_open_sbc_period(new_mode, trigger_dlg=self)
                 if hasattr(self, 'lbl_info') and self.lbl_info:
                     self.lbl_info.setText(f"🌐 [同组同步周期] 已将全部 {count} 个已打开 SBC 窗口批量切换至 【{new_mode.upper()}】！")
@@ -5384,7 +5425,7 @@ class SBCIntradayChartDialog(QWidget):
             event.accept()
             return
         elif key == Qt.Key.Key_Up:
-            is_alt = bool(modifiers & Qt.KeyboardModifier.AltModifier) or bool(QApplication.keyboardModifiers() & Qt.KeyboardModifier.AltModifier)
+            is_alt = is_alt_modifier_active(event)
             if is_alt:
                 sync_all_open_sbc_zoom(in_=True, trigger_dlg=self)
             elif hasattr(self, 'canvas') and self.canvas:
@@ -5392,7 +5433,7 @@ class SBCIntradayChartDialog(QWidget):
             event.accept()
             return
         elif key == Qt.Key.Key_Down:
-            is_alt = bool(modifiers & Qt.KeyboardModifier.AltModifier) or bool(QApplication.keyboardModifiers() & Qt.KeyboardModifier.AltModifier)
+            is_alt = is_alt_modifier_active(event)
             if is_alt:
                 sync_all_open_sbc_zoom(in_=False, trigger_dlg=self)
             elif hasattr(self, 'canvas') and self.canvas:
@@ -5615,7 +5656,7 @@ class SBCIntradayChartDialog(QWidget):
             if k in (Qt.Key.Key_Up, Qt.Key.Key_Down):
                 from ats.ui.styles import is_editing_text
                 if not is_editing_text(self) and not self._is_combobox_popup_active():
-                    is_alt = bool(event.modifiers() & Qt.KeyboardModifier.AltModifier) or bool(QApplication.keyboardModifiers() & Qt.KeyboardModifier.AltModifier)
+                    is_alt = is_alt_modifier_active(event)
                     if k == Qt.Key.Key_Up:
                         if is_alt:
                             sync_all_open_sbc_zoom(in_=True, trigger_dlg=self)
@@ -5652,8 +5693,12 @@ class SBCIntradayChartDialog(QWidget):
             if not is_editing_text(self) and not self._is_combobox_popup_active():
                 delta = event.angleDelta().y()
                 if delta == 0:
+                    delta = event.angleDelta().x()
+                if delta == 0:
                     delta = event.pixelDelta().y()
-                is_alt = bool(event.modifiers() & Qt.KeyboardModifier.AltModifier) or bool(QApplication.keyboardModifiers() & Qt.KeyboardModifier.AltModifier)
+                if delta == 0:
+                    delta = event.pixelDelta().x()
+                is_alt = is_alt_modifier_active(event)
                 if delta > 0:
                     if is_alt:
                         sync_all_open_sbc_zoom(in_=True, trigger_dlg=self)
@@ -5926,17 +5971,7 @@ class SBCIntradayChartDialog(QWidget):
                 return
 
         # 💡 [NEW] 操盘手快捷交互：按住 Alt 键点击右上角关闭 [X] 键，触发全部退出并持久化！
-        is_alt_pressed = False
-        try:
-            if bool(QApplication.keyboardModifiers() & Qt.KeyboardModifier.AltModifier):
-                is_alt_pressed = True
-            elif sys.platform == "win32":
-                import ctypes
-                # 0x12 为 VK_MENU (Alt 键物理状态，最高位为 1 表示按下)
-                if bool(ctypes.windll.user32.GetAsyncKeyState(0x12) & 0x8000):
-                    is_alt_pressed = True
-        except Exception:
-            pass
+        is_alt_pressed = is_alt_modifier_active()
 
         if is_alt_pressed and not is_app_exiting:
             if self.is_ats_sbc_mode():
