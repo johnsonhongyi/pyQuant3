@@ -20,6 +20,7 @@ import argparse
 import shutil
 import traceback
 import threading
+import uuid
 import multiprocessing as mp
 import math
 # 🛡️ [PERF] 全局阻断：彻底封杀子进程导入 keyboard 模块，杜绝底层 Hook 线程
@@ -35,6 +36,9 @@ from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any, Union, Callable
 import pandas as pd
 pd.set_option('display.float_format', '{:.2f}'.format)
+from tk_frame_fingerprint import (
+    frame_fingerprint, same_fingerprint, needs_full_for_null_or_rows, full_ack_matches,
+)
 import numpy as np
 import win32api
 import win32file
@@ -691,6 +695,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self._df_sync_running = False  # ⭐ [FIX] 初始化同步运行状态位，防止 send_df AttributeError
         self._df_first_send_done = False # ⭐ [FIX] 初始化首发标志
         self._force_full_sync_pending = False # ⭐ [FIX] 初始化强制全量同步标志
+        self._force_ui_refresh_pending = False
         self.sync_version = 0          # ⭐ 数据同步序列号
         self.last_vis_var_status = None 
         self._feedback_listener_thread = None  # 🛡️ [NEW] 线程守卫：防止重复启动监听器
@@ -3325,6 +3330,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                     setattr(self, f'_force_sync_{p}', True)
 
                             self._force_full_sync_pending = True
+                            self._force_ui_refresh_pending = True
                             self._df_first_send_done = False
                             if hasattr(self, '_send_df_wake_event'):
                                 self._send_df_wake_event.set()
@@ -3332,20 +3338,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         elif obj and obj.get("cmd") == "ATS_RECEIVED":
                             target_port = obj.get("port")
                             logger.info(f'[Pipe] Feedback listener cmd ATS_RECEIVED (target_port={target_port})')
-                            if target_port and hasattr(self, f'_force_sync_{target_port}'):
+                            expected = getattr(self, f'_awaiting_full_ack_{target_port}', None)
+                            if full_ack_matches(obj, expected, getattr(self, '_last_vis_bus_version', None)):
                                 setattr(self, f'_force_sync_{target_port}', False)
+                                setattr(self, f'_awaiting_full_ack_{target_port}', None)
                             if hasattr(self, '_stream_subscribers') and target_port in self._stream_subscribers:
                                 self._stream_subscribers[target_port]["active"] = True
                                 self._stream_subscribers[target_port]["fail_count"] = 0
-
-                            has_pending = False
-                            if hasattr(self, '_stream_subscribers'):
-                                for p in self._stream_subscribers:
-                                    if getattr(self, f'_force_sync_{p}', False):
-                                        has_pending = True
-                                        break
-                            self._force_full_sync_pending = has_pending
-                            self._df_first_send_done = True
                             self._last_ats_recv_confirm_time = time.time()
 
                         elif obj and obj.get("cmd") == "VIZ_EXIT":
@@ -3366,6 +3365,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                         logger.info(f"✅ Added {code} to extra_monitor_codes")
                                         # 同时也触发一次强制全量同步
                                         self._force_full_sync_pending = True
+                                        self._force_ui_refresh_pending = True
                                 except Exception as e:
                                     logger.error(f"Failed to update extra_monitor_codes: {e}")
                         
@@ -6281,8 +6281,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     
                     # 提交最新的包到 pump_executor (1线程串行，保证快照顺序一致性)
                     # [OPTIMIZE] 检查是否需要强制全量刷新 (例如搜索条件变化或手动触发)
-                    force_val = getattr(self, '_force_full_sync_pending', False)
-                    if force_val: self._force_full_sync_pending = False # 消费掉
+                    force_val = getattr(self, '_force_ui_refresh_pending', False)
+                    if force_val: self._force_ui_refresh_pending = False
                     
                     self.pump_executor.submit(self._process_tree_data_async, latest_pkg, sync_ui=True, query=combined_query, force=force_val)
                 else:
@@ -6388,49 +6388,21 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             if full_df is None or full_df.empty:
                 return
 
-            # 3. 源数据脏检查 (方案阶段 0: 高性能向量级全表指纹，彻底消灭 50 点抽样漏更与求和/异或正负抵消)
-            # 采用带列名的有序乘法哈希 (FNV/加权移位)，100% 杜绝多列相同数据异或归零 (XOR cancellation)
-            n = len(full_df)
-            df_hash = 0
-            if n > 0:
-                combined = hash(n)
-                # 价格列 (trade, now, price, close)
-                for col in ['trade', 'now', 'price', 'close']:
-                    if col in full_df.columns:
-                        try:
-                            c_bytes = full_df[col].to_numpy().tobytes()
-                            combined = (combined * 31 + hash((col, hash(c_bytes)))) & 0xFFFFFFFFFFFFFFFF
-                        except Exception:
-                            pass
-
-                # 成交量与金额列 (volume, amount)
-                for col in ['volume', 'amount']:
-                    if col in full_df.columns:
-                        try:
-                            c_bytes = full_df[col].to_numpy().tobytes()
-                            combined = (combined * 31 + hash((col, hash(c_bytes)))) & 0xFFFFFFFFFFFFFFFF
-                        except Exception:
-                            pass
-
-                # 关键状态与衍生列 (name, signal, percent)
-                for col in ['name', 'signal', 'percent']:
-                    if col in full_df.columns:
-                        try:
-                            s = full_df[col]
-                            if s.dtype == 'object' or s.dtype == 'string':
-                                c_h = hash(tuple(s.values))
-                            else:
-                                c_h = hash(s.to_numpy().tobytes())
-                            combined = (combined * 31 + hash((col, c_h))) & 0xFFFFFFFFFFFFFFFF
-                        except Exception:
-                            pass
-
-                time_hash = hash(snap_time) if snap_time is not None else 0
-                df_hash = (combined * 31 + time_hash) & 0xFFFFFFFFFFFFFFFF
-
-            if not query and not force and getattr(self, '_last_processed_df_hash', -1) == df_hash:
+            # 所有计算输入按内容判定；无法安全哈希时保守执行本帧。
+            source_frames = (full_df, full_df_res, df_raw, df_raw_res)
+            source_hashes = tuple(
+                frame_fingerprint(frame) if frame is not None else 'absent'
+                for frame in source_frames
+            )
+            df_hash = None if None in source_hashes else hash((
+                source_hashes, snap_time,
+                str(self.global_values.getkey('resample')),
+                str(getattr(self, 'sortby_col', None)),
+                bool(getattr(self, 'sortby_col_ascend', False)),
+                repr(getattr(self, 'feature_marker', None)),
+            ))
+            if not query and not force and same_fingerprint(getattr(self, '_last_processed_df_hash', None), df_hash):
                 return
-            self._last_processed_df_hash = df_hash
 
             t_hash = time.time()
 
@@ -6504,6 +6476,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             )
             # callback 在 compute 线程执行 — 严禁直接触 UI，必须回流 pump
             fut.add_done_callback(lambda f, v=version, frc=force: self._on_compute_done(f, v, frc))
+            self._last_processed_df_hash = df_hash
 
         except Exception as e:
             logger.exception(f"[Pump] Error in _process_tree_data_async: {e}")
@@ -6646,10 +6619,12 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             result = fut.result()
         except Exception as e:
             logger.error(f"[Compute] Future failed v{version}: {e}")
+            self._last_processed_df_hash = None
             self._compute_inflight = max(0, getattr(self, '_compute_inflight', 1) - 1)
             return
 
         if result is None:
+            self._last_processed_df_hash = None
             self._compute_inflight = max(0, getattr(self, '_compute_inflight', 1) - 1)
             return
 
@@ -8884,10 +8859,38 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     26675: {"name": "IPO_Detector", "active": False, "last_try": 0.0, "is_static": True, "fail_count": 0},
                 }
             self._cold_start = True # ⭐ [NEW] 冷启动标志
+            self._sync_session = uuid.uuid4().hex
             empty_wait_count = 0  # ⭐ [NEW] 初始/空数据重试缓冲计数器
 
             while self._df_sync_running:
                 vis_enabled = getattr(self, '_vis_enabled_cache', True)
+                pending_port_sync = any(
+                    getattr(self, f'_force_sync_{port}', False)
+                    for port in list(self._stream_subscribers)
+                ) or bool(getattr(self, '_temp_dynamic_ports', None))
+                pending_full_sync = (
+                    getattr(self, '_force_full_sync_pending', False)
+                    or getattr(self, '_cold_start', False)
+                    or pending_port_sync
+                )
+                if not pending_full_sync:
+                    try:
+                        preview = self.market_bus.get_latest_dual(
+                            since_version=getattr(self, '_last_vis_bus_version', 0)
+                        )
+                        if preview is not None:
+                            _, daily_preview, _, _, res_preview, _ = preview
+                            display_preview = res_preview if (
+                                str(self.global_values.getkey('resample') or 'd').lower().strip() != 'd'
+                                and res_preview is not None and not res_preview.empty
+                            ) else daily_preview
+                            pending_full_sync = (
+                                needs_full_for_null_or_rows(getattr(self, 'df_daily_prev', None), daily_preview)
+                                or needs_full_for_null_or_rows(getattr(self, 'df_ui_prev', None), display_preview)
+                            )
+                    except Exception:
+                        logger.exception('[send_df] Full-sync preflight failed; processing conservatively')
+                        pending_full_sync = True
                 now_sec = time.time()
                 ats_enabled = False
                 for port, sub_info in list(self._stream_subscribers.items()):
@@ -8898,7 +8901,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         break
 
                 # ⭐ 核心判断：是否需要跳过本轮同步（没开且无强制请求）
-                if not vis_enabled and not ats_enabled and not getattr(self, '_force_full_sync_pending', False):
+                if not vis_enabled and not ats_enabled and not pending_full_sync:
                     # ⭐ 小步等待 + 可中断（避免长sleep卡响应）
                     for _ in range(10):  # 最多等2秒
                         now_check = time.time()
@@ -8917,7 +8920,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
                 # 📥 [OPTIMIZE] 非工作时间且已完成初始同步，且没有强制同步请求时，则停止自动发送
                 if not cct.get_work_time() and getattr(self, '_df_first_send_done', False) \
-                and not getattr(self, '_force_full_sync_pending', False):
+                and not pending_full_sync:
                     time.sleep(10)
                     continue
 
@@ -8954,32 +8957,22 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     else:
                         dynamic_interval = max(300.0, base_interval * 3.0)
                     
-                    # ⭐ 限流 + 抖动 (如果是强制全量同步请求，则无视冷却时间直接发送)
+                    # 显式请求保留到发送循环实际取到数据；短时重复请求延后，不丢弃。
                     is_forced = getattr(self, '_force_full_sync_pending', False)
-                    if is_forced:
-                        # 强制同步请求增加 5.0 秒冷却保护，并且如果 10 秒内已收到 ATS 确认，则不再重复发送
-                        last_confirm = getattr(self, '_last_ats_recv_confirm_time', 0.0)
-                        if now - last_confirm < 10.0:
-                            self._force_full_sync_pending = False
-                            is_forced = False
-                        elif now - getattr(self, '_last_forced_sync_time', 0.0) < 5.0:
-                            self._force_full_sync_pending = False
-                            is_forced = False
-                        else:
-                            self._last_forced_sync_time = now
+                    if is_forced and now - getattr(self, '_last_forced_sync_time', 0.0) < 5.0:
+                        time.sleep(1.0)
+                        continue
                             
-                    if not is_forced and now - last_send_time < dynamic_interval:
+                    if not pending_full_sync and now - last_send_time < dynamic_interval:
                         time.sleep(1.0) # 小碎步休眠防止 CPU 100%
                         continue
-                    
-                    last_send_time = time.time()
 
                     # 🔄 [PERF] 架构重构：send_df 改为从 MarketStateBus 拉取最新全量快照 (支持显示轨对齐)
                     # 彻底消除 send_df 线程在 Queue 上的竞争与主线程锁 (_df_lock) 竞争
                     market_read_start = time.perf_counter()
                     try:
                         bus_data = self.market_bus.get_latest_dual(
-                            since_version=getattr(self, '_last_vis_bus_version', 0)
+                            since_version=-1 if pending_full_sync else getattr(self, '_last_vis_bus_version', 0)
                         )
                     finally:
                         self._record_latency_sample(
@@ -8988,12 +8981,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         )
                     
                     if bus_data is None:
-                        # 检查是否有强制同步请求，如果没有则继续休眠
-                        if not getattr(self, '_force_full_sync_pending', False):
-                            time.sleep(0.5)
-                            continue
-                        # 如果有强制同步请求，拉取当前总线最新数据（无论版本）
-                        bus_data = (self.market_bus._version, self.market_bus._df_all, self.market_bus._df_filtered, self.market_bus._timestamp, self.market_bus._df_all_res, self.market_bus._df_filtered_res)
+                        time.sleep(0.5)
+                        continue
+
+                    last_send_time = time.time()
 
                     version, df_bus_all, _, snap_time, df_bus_all_res, _ = bus_data
                     self._last_vis_bus_version = version
@@ -9033,13 +9024,14 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
                     
                     # 🚀 [FIX 2] 哈希门控：命中直接跳出昂贵的 compare 逻辑
-                    if getattr(self, "_df_first_send_done", False) and getattr(self, "_last_send_df_hash", None) == df_hash and not getattr(self, '_force_full_sync_pending', False):
+                    if getattr(self, "_df_first_send_done", False) and getattr(self, "_last_send_df_hash", None) == df_hash and not pending_full_sync:
                         # logger.debug("[send_df] Data fingerprint unchanged. Skip sync.")
                         continue
 
                     # ⚡ [FIX] 处理强制全量同步请求
                     if getattr(self, '_force_full_sync_pending', False):
                         logger.info("[send_df] Executing pending FULL SYNC request")
+                        self._last_forced_sync_time = now
                         if hasattr(self, 'df_ui_prev'):
                             del self.df_ui_prev
                         self.sync_version = 0
@@ -9208,6 +9200,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         'type': msg_type,
                         'data': payload_to_send,
                         'ver': self.sync_version,
+                        'source_version': version,
+                        'sync_session': self._sync_session,
                         'resample': cur_resample,
                         'sector_data': sector_data_snap
                     }
@@ -9217,6 +9211,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         'type': msg_type_daily,
                         'data': payload_daily_to_send,
                         'ver': sync_version_daily,
+                        'source_version': version,
+                        'sync_session': self._sync_session,
                         'resample': 'd',
                         'sector_data': sector_data_snap
                     }
@@ -9271,10 +9267,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     has_daily_update = (msg_type_daily != 'DF_DIFF_EMPTY')
 
                     # 仅当显示轨与日线轨均无数据更新且非强制全量同步请求时，直接跳过物理发送
-                    if not has_display_update and not has_daily_update and not is_forced:
+                    if not has_display_update and not has_daily_update and not is_forced and not pending_port_sync:
                         sent = True
                     else:
-                        if is_forced or ((vis_enabled or ats_enabled) and now_ipc > ipc_cooldown):
+                        if pending_full_sync or ((vis_enabled or ats_enabled) and now_ipc > ipc_cooldown):
                             try:
                                 # 1️⃣ pickle 单独计时
                                 pickle_start = time.perf_counter()
@@ -9319,6 +9315,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                             'type': 'UPDATE_DF_ALL',
                                             'data': df_daily,
                                             'ver': sync_version_daily,
+                                            'source_version': version,
+                                            'sync_session': self._sync_session,
                                             'resample': 'd',
                                             'sector_data': sector_data_snap
                                         }
@@ -9330,7 +9328,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                     )
 
                                 # 2️⃣ socket 分发到 26668 (可视化) 以及常态订阅中心
-                                send_success_any = False
+                                send_success_any = bool(sent and has_display_update)
                                 sent_to_ats = False
 
                                 # 发送给 26668 (可视化窗口) —— 仅在显示轨有数据更新且 Pipe 没发送成功时进行 Socket 兜底
@@ -9365,7 +9363,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
                                         should_send = False
                                         if is_forced_port:
-                                            should_send = True
+                                            should_send = now_ipc - getattr(self, f'_last_full_try_{port}', 0.0) >= 10.0
                                         elif msg_type_daily == 'UPDATE_DF_ALL':
                                             # 🛡️【全量回退高优先通行】：若当前帧触发了全量回退 (非空变空等)，
                                             # 为防止后续增量建立在订阅端未接收的基线上，必须立即放行发送全量包！
@@ -9380,8 +9378,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
                                         if should_send:
                                             ports_to_send.append((port, sub_info, is_forced_port))
-                                        elif msg_type_daily == 'UPDATE_DF_ALL':
-                                            # 若因离线等极端原因未能加入本轮发送队列，给该端口置上 force_sync 标记，确保其恢复时必须先发全量包
+                                        elif has_daily_update:
+                                            # 差分或全量只要未物理发送，下一次必须先重建该端口的全量基线。
                                             setattr(self, f'_force_sync_{port}', True)
 
                                 # ⚡ [IPC 动态临时端口] 单次拉取
@@ -9412,6 +9410,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                                         'type': 'UPDATE_DF_ALL',
                                                         'data': df_daily,
                                                         'ver': sync_version_daily,
+                                                        'source_version': version,
+                                                        'sync_session': self._sync_session,
                                                         'resample': 'd',
                                                         'sector_data': sector_data_snap
                                                     }
@@ -9422,6 +9422,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                                 send_p = payload_daily
 
                                             ipc_port_send_start = time.perf_counter()
+                                            if force_full_for_port or msg_type_daily == 'UPDATE_DF_ALL':
+                                                setattr(self, f'_force_sync_{port}', True)
+                                                setattr(self, f'_awaiting_full_ack_{port}', (self._sync_session, version))
+                                                setattr(self, f'_last_full_try_{port}', now_ipc)
                                             try:
                                                 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s2:
                                                     s2.settimeout(1.5)  # 1.5秒超时防止阻塞
@@ -9431,8 +9435,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                                     if sub_info:
                                                         sub_info["active"] = True
                                                         sub_info["fail_count"] = 0
-                                                    if is_forced_port:
-                                                        setattr(self, f'_force_sync_{port}', False)
+                                                    if hasattr(self, '_temp_dynamic_ports'):
+                                                        self._temp_dynamic_ports.discard(port)
+                                                        if sub_info is None:
+                                                            setattr(self, f'_force_sync_{port}', False)
+                                                            setattr(self, f'_awaiting_full_ack_{port}', None)
                                                     if port == 26670:
                                                         sent_to_ats = True
                                                     curr_hash = hash((version, len(df_daily)))
@@ -9451,15 +9458,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                                     f"ipc_send:port_{port}",
                                                     (time.perf_counter() - ipc_port_send_start) * 1000.0,
                                                 )
-                                                # 🛡️ 临时动态端口发完单次清理
-                                                if hasattr(self, '_temp_dynamic_ports') and port in self._temp_dynamic_ports:
-                                                    self._temp_dynamic_ports.discard(port)
-                                                    logger.info(f"✅ [IPC 动态适配] 临时动态端口 {port} 单次全量快照推送完成，已自动关闭/移除该端口。")
 
                                 if send_success_any:
                                     logger.debug(f"[IPC] {msg_type} sent (ver={self.sync_version}, to_ats={sent_to_ats})")
                                     self._viz_ipc_fail_count = 0  # 成功清零
-                                else:
+                                elif ports_to_send or (vis_enabled and has_display_update and not sent):
                                     # 两个通道均失败时，抛出异常以触发冷却
                                     raise ConnectionError("All IPC connections failed (Port 26668, subscribers).")
 
@@ -9468,6 +9471,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                     logger.info("[send_df] Used IPC fallback for distinct internal process (Queue might be full or broken).")
 
                             except (socket.timeout, ConnectionError, OSError) as e:
+                                self._cold_start = True
                                 # 只有当真正失败时才记录
                                 fail_count = getattr(self, '_viz_ipc_fail_count', 0) + 1
                                 self._viz_ipc_fail_count = fail_count
@@ -9480,6 +9484,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                 
                                 if not vis_enabled and not ats_enabled:
                                     sent = True
+                        else:
+                            # 冷却跳过发送时，前帧缓存已推进；保留全量待发状态。
+                            if vis_enabled or ats_enabled:
+                                self._cold_start = True
 
                 except Exception:
                     logger.exception("[send_df] unexpected error")
@@ -17127,41 +17135,16 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             return
 
         # ⚡ UI 渲染指纹防抖 (方案阶段 0: 高性能向量级 Golden 指纹防抖)
-        # 包含代码列表、列配置以及全表核心数值的乘法加权 Hash，消灭 5 点抽样盲区与同值双列 XOR 抵消
-        code_hash = hash(tuple(df['code'].astype(str).values)) if 'code' in df.columns else hash(len(df))
-        cols_hash = hash(tuple(self.current_cols))
-        
-        # 数值与状态 Hash: 乘法有序加权覆盖全部核心列与当前展示列
-        df_val_hash = 0
-        if len(df) > 0:
-            combined = 0
-            cols_to_check = []
-            for c in ['trade', 'now', 'price', 'close', 'percent', 'signal', 'name']:
-                if c in df.columns and c not in cols_to_check:
-                    cols_to_check.append(c)
-            # 纳入当前用户表格配置的全部展示列 (当前可见视图所有列发生变更均能灵敏触发刷新)
-            for c in self.current_cols:
-                if c in df.columns and c not in cols_to_check:
-                    cols_to_check.append(c)
-
-            for col in cols_to_check:
-                try:
-                    s = df[col]
-                    if s.dtype == 'object' or s.dtype == 'string':
-                        c_h = hash(tuple(s.values))
-                    else:
-                        c_h = hash(s.to_numpy().tobytes())
-                    combined = (combined * 31 + hash((col, c_h))) & 0xFFFFFFFFFFFFFFFF
-                except Exception:
-                    # 发生异常时不静默跳过导致假阴性，强制加入扰动触发更新
-                    combined = (combined * 31 + hash(col) + 1) & 0xFFFFFFFFFFFFFFFF
-            df_val_hash = combined
-            
-        current_fingerprint = (code_hash, cols_hash, df_val_hash)
+        cols_to_check = list(dict.fromkeys(
+            c for c in ['code', 'trade', 'now', 'price', 'close', 'percent', 'signal', 'name', *self.current_cols]
+            if c in df.columns
+        ))
+        content_hash = frame_fingerprint(df[cols_to_check])
+        current_fingerprint = None if content_hash is None else (tuple(self.current_cols), content_hash)
 
         # 触发判断：非强制刷新时，如果指纹一致则跳过
         if not force:
-            if hasattr(self, '_last_refresh_fingerprint') and self._last_refresh_fingerprint == current_fingerprint:
+            if same_fingerprint(getattr(self, '_last_refresh_fingerprint', None), current_fingerprint):
                 # 盘中通过 _apply_tree_data_sync 的 30s 兜底，此处指纹一致直接返回
                 return
         

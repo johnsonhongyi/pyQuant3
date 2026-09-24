@@ -1,5 +1,25 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-09-24 17:55
+- [x] **【全客户端（ATS、多周期、人气共振、新股指挥室、可视化）IPC 适配审计与老版打包 EXE 双向向前兼容落地】(`tk_frame_fingerprint.py`, `tests/test_tk_frame_fingerprint.py`, `instock_MonitorTK.py`, `ipc_sync_manager.py`, `ats/ipc_bridge.py`)**：
+    - [x] **全客户端 IPC 接入拓扑与通信机制全景排查**：
+        - 1) ATS 操盘终端（端口 26670，常态双轨流式推送 + MultiIndex 增量合并，Pipe 管道控制与确认）；
+        - 2) 多周期策略引擎 / MultiPeriodTester（端口 26671，候选池 26679 扫频，`IPCSyncManager` 统一合入）；
+        - 3) 人气共振（`popularity_resonance_gui`，临时动态端口单发即焚单次拉取，无需长连接订阅）；
+        - 4) 新股次新超短中心 & 集中交易指挥室（端口 26675，`TKIPCSubscriber` 继承自 `IPCSyncManager`）；
+        - 5) 交易可视化终端（端口 26668，显示轨数据与 `CODE|...` / `TIME_LINK` 联动命令）；
+    - [x] **根除老版打包 EXE 死锁重推风险与主线推进竞态 (`full_ack_matches`)**：
+        - 致命死锁根因消除：旧版已打包客户端（如 9-18 打包的 `MultiPeriodTester.exe`、9-19 打包的 `人气共振2.22.exe`、前版 `ATS_Terminal.exe`）发送的 ACK 未携带 `source_version`，旧逻辑直接判定失败，导致 TK 认为全量同步从未完成，每 10 秒向老客户端强推全量包；
+        - 向前兼容平滑放行：`full_ack_matches` 改造为双轨判定：新客户端严格核对 `(sync_session, source_version)` 过滤陈旧延迟 ACK；老客户端优雅放行并清除 `_force_sync`，老版本打包 EXE 绝不卡死、绝不被反复轰炸；
+        - 消除盘中行情跳价竞态：去除 `source_version == current_version` 这一错误苛刻条件，只要客户端回传版本等于期望版本，即使主线总线版本在此期间推进，依然合法确认；
+    - [x] **已打包关联 IPC 接口重新打包必要性明确评估与定性**：
+        - **定性结论**：所有旧版已打包 EXE **无需强行重新打包**即可立即安全运行；
+        - **推荐打包项**：建议重新打包 `ATS_Terminal.exe`（享用近期 SBC 硬件穿透滚轮缩放与版本化 ACK）、`MultiPeriodTester.exe`（最新 `ipc_sync_manager`）；
+        - **无需打包项**：`人气共振2.22.exe`（动态端口即用即毁）、`manage_window_layout.exe`（无行情 IPC）、`DeliveryOrderAnalyzer.exe`（无行情 IPC）。
+    - [x] **自动化测试 100% 纯绿覆盖**：
+        - `test_tk_frame_fingerprint.py` (7/7)、阶段全套 (16/16)、核心回归 (19/19) 全量秒级通过；
+        - `compileall` exit=0，`git diff --check` 零违规。
+
 ## 2026-09-24 14:10
 - [x] **【TK 系统极限性能优化方案落地与审查深度闭环（P1 指纹 XOR 抵消与未覆盖列根除、P1 日线全量发送门禁解耦、P1 借读契约与发送基线闭环、P2 阶段 0/1 客观定性）】(`instock_MonitorTK.py`, `tests/test_tk_perf_stage0_telemetry_and_golden_samples.py`, `tests/test_tk_perf_diff_null_fidelity.py`, `tests/test_tk_perf_stage1_sort_strategy.py`, `20260924_1410_task.md`)**：
     - [x] **P1 指纹漏更根除：消灭同值双列 XOR 归零抵消与未覆盖列**：

@@ -203,7 +203,13 @@ class IPCBridge:
                                 from data_utils import send_code_via_pipe, PIPE_NAME_TK
                                 import logging
                                 local_logger = logging.getLogger("ATS_Bridge")
-                                send_code_via_pipe({"cmd": "ATS_RECEIVED", "port": 26670}, local_logger, PIPE_NAME_TK)
+                                feedback = {"cmd": "ATS_RECEIVED", "port": 26670}
+                                if isinstance(body, dict):
+                                    feedback.update(
+                                        source_version=body.get('source_version'),
+                                        sync_session=body.get('sync_session'),
+                                    )
+                                send_code_via_pipe(feedback, local_logger, PIPE_NAME_TK)
                             except Exception as pipe_err:
                                 pass
 

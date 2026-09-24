@@ -383,7 +383,11 @@ class IPCSyncManager:
             return
 
         # 3. 及时通知主进程确认已接收，防止主进程重试造成带宽挤占
-        self._send_received_feedback()
+        if isinstance(data_pkg, dict) and data_pkg.get('source_version') is not None \
+                and data_pkg.get('sync_session') is not None:
+            self._send_received_feedback(data_pkg['source_version'], data_pkg['sync_session'])
+        else:
+            self._send_received_feedback()
 
         # 4. 触发外部 UI 渲染或业务处理回调
         if self.data_callback:
@@ -392,9 +396,11 @@ class IPCSyncManager:
             except Exception as cb_err:
                 self.log_error(f"执行数据回调失败: {cb_err}")
 
-    def _send_received_feedback(self):
+    def _send_received_feedback(self, source_version=None, sync_session=None):
         """通过管道发送确认指令"""
         cmd_dict = {"cmd": "ATS_RECEIVED", "port": self.port}
+        if source_version is not None and sync_session is not None:
+            cmd_dict.update(source_version=source_version, sync_session=sync_session)
         payload = json.dumps(cmd_dict, ensure_ascii=False).encode("utf-8")
         try:
             import win32file
@@ -519,4 +525,3 @@ def get_global_ipc_sync_manager() -> Optional[IPCSyncManager]:
     向下兼容的全局通用接口，默认映射到多周期策略引擎专属单例
     """
     return get_multi_period_ipc_sync_manager()
-
