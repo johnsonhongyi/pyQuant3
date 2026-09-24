@@ -1,5 +1,59 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
-## 2026-09-24 12:45
+## 2026-09-24 13:15
+- [ ] **【TK 系统逻辑性能数据更新极限优化全景方案（深度闭环版·纯规划·不实施）】(`instock_MonitorTK.py`, `data_utils.py`, `performance_optimizer.py`, `market_state_bus.py`, `20260924_1315_task.md`)**：
+    - [x] **审核意见全面纠偏与逻辑闭环确证**：
+        - 1) **采样指纹丢帧排查前置**：阶段 0 纳入 50 点/5 点抽样漏更基线检测，Golden Samples 从原始输入生成并核查各层丢帧；
+        - 2) **主表排序策略比较与评估**：客观比较现有全量重建、增量最小移动及分块重排的实际耗时与行序/焦点保真度，不预设“误判”；
+        - 3) **全列差分接收端空值契约闭环**：兼顾 `ipc_sync_manager` 的 `notna()` 边界，定义非空转空回退全量或双端版本化升级协议；
+        - 4) **数据所有权与原位写检测规则**：建立独占写、密封只读发布点、借读契约与开发期只读检测，确保安全去拷贝；
+        - 5) **信号迁移自愈与撤销虚假承诺**：规划状态快照原子化、损坏回退与缺帧重放，撤销未经验证的“10ms”与“100%释放GIL”；
+        - 6) **四项热点实事求是**：`update_idletasks` 测量耗时、概念统计基于前 50 行区分主窗与详情、自选股集合批次复用、字符串格式化精度一致性；
+    - [ ] **准入驱动的稳妥演进路线（只规划不实施）**：
+        - **阶段 0**：基线遥测与 Golden Samples 建立（含采样指纹丢帧排查与端到端完成时间）；
+        - **阶段 1**：主表排序策略实测对比与局部评估（以行序、选中、焦点与快捷键为门禁）；
+        - **阶段 2**：总线所有权界定与只读快照防拷贝（建立单写多读契约，按路径安全去拷贝）；
+        - **阶段 3（候选）**：全列差分发送/接收端闭环升级（差分构成主要瓶颈时启动）；
+        - **阶段 4（候选）**：视口虚拟化架构灰度（主表仍为主线程瓶颈时启动，以逻辑主键映射保证不串股）；
+        - **阶段 5（候选）**：信号检测状态化迁移与自愈（信号计算证实为主要瓶颈且净收益为正时启动）；
+        - **实验探索项**：共享内存 mmap 防撕裂、GC 阈值动态拟合、数值类型逐列安全降型。
+
+
+
+## 2026-09-24 13:55
+- [x] **【SBC 支持 Alt+放大/缩小 与 Alt+快捷键切换周期 全局同组窗口毫秒级同步】(`ats/ui/intraday_strategy_dialog.py`, `tests/test_sbc_zoom_right_anchor.py`)**：
+    - [x] **同组窗口同步缩放核心引擎 (`sync_all_open_sbc_zoom`)**：
+        - 0 毫秒从 `SBCWindowMemoryManager` 获取当前打开的所有同组 SBC 窗口；
+        - 由触发窗口精准计算缩放后的目标可视 Bar 数量 `_visible_bar_count` 与右侧最新锚定状态；
+        - 将缩放状态原子广播同步至同组所有其他 SBC 窗口，立即触发纯内存图元局部 `update()` 重绘，0 网络请求，0 阻塞；
+        - 触发窗口信息栏即时呈现翠绿高亮反馈（如 `🌐 [同组同步放大] 已同步全部 3 个同组窗口至 【40 根 Bar】 (右侧最新始终保持)！`）；
+    - [x] **Alt + 滚轮 / 键盘全交互通道无缝支持**：
+        - `SBCChartCanvas.wheelEvent` 与 `eventFilter` 识别 `AltModifier`，支持按住 `Alt + 鼠标滚轮` 瞬间批量同步同组缩放；
+        - `Key_Up` / `Key_Down` 支持按住 `Alt + Up` / `Alt + Down` 键盘快捷键批量同步同组缩放；
+    - [x] **Alt + 快捷键切换周期同组同步补全**：
+        - 键盘 `Alt + A`（上一个周期）、`Alt + D`（下一个周期）、`Alt + 1~9`（直选周期）全面放行并接入 `sync_all_open_sbc_period`，与顶部周期按钮的 Alt+点击批量切换高度对齐；
+    - [x] **全量自动化验证 100% 绿灯**：
+        - 专项测试 `test_sbc_zoom_right_anchor.py` 8/8 纯绿通过；
+        - `python -m compileall ats tests -q` 编译零错误，`git diff --check` 零违规。
+
+## 2026-09-24 13:40
+- [x] **【SBC 全周期缩放功能对齐日K与通达信、右侧最新行情数据与价格始终锚定保持落地】(`ats/ui/intraday_strategy_dialog.py`, `tests/test_sbc_zoom_right_anchor.py`)**：
+    - [x] **全周期一致的通达信缩放引擎与右侧最新锚定状态机**：
+        - 引入显式右侧吸附状态 `_is_right_anchored: bool = True` 与动态可视条数 `_visible_bar_count: Optional[int]`；
+        - 在 1日/3日/5日/10日分时、30分/60分/5分/15分K线以及日K/周K/月K下，缩放（Up/Down 或鼠标滚轮）始终将末尾索引 `end_i` 物理绑定在 `total_n - 1`，向左展开或收缩历史数据；
+        - 盘中实时推送新数据（追加分钟 Bar）时，视口自动顺延推进，最新一根 Bar 永远吸附在最右侧，最新行情与现价绝不丢失；
+    - [x] **K线模式补充最新现价水平虚线与右轴价格高亮胶囊**：
+        - 在 `_paint_kline` 中全面对齐分时图与通达信核心浮标，绘制贯穿右侧的水平现价虚线（涨红跌绿）及右轴半透明高亮圆角价格胶囊（`f"{last_p:.2f}"`）；
+        - 无论是 30分/60分还是日K，缩放时最新价格标签始终清晰醒目可见，消除价格盲区；
+    - [x] **鼠标滚轮 (wheelEvent) 丝滑缩放与全局转派**：
+        - 在 `SBCChartCanvas` 中实现原生 `wheelEvent`（向前滚放大，向后滚缩小）；
+        - 在 `SBCIntradayChartDialog.eventFilter` 中对 `Wheel` 事件统一转派消费，无论光标在窗口何处均可丝滑缩放；
+        - 鼠标平移拖拽支持自动脱离（查看历史）与拖回最右端自动重吸附，0 键/右键短按一键还原 100% 全景；
+    - [x] **全量自动化验证 100% 绿灯**：
+        - 专项测试 `test_sbc_zoom_right_anchor.py` 7/7 纯绿通过；
+        - 核心回归测试 18/18 纯绿通过；
+        - 全模块 `python -m compileall ats tests -q` 编译零错误，git diff 格式检验无任何冲突。
+
+## 2026-09-24 13:15
 - [x] **【SBC 性能塌陷深度审计分析与五阶段高性能重构落地】(`ats/tdx_realtime_fetcher.py`, `ats/ui/intraday_strategy_dialog.py`, `tests/test_sbc_async_load_dispatcher_and_dirty_check.py`, `tests/test_tdx_cache_deforcing_and_invalidation.py`, `20260924_1138_task.md`)**：
     - [x] **阶段 0 基线实测物理铁证**：
         - 优化前（`force=True` 反序列化解压风暴）：`get_static_history_bars` 10 次耗时 **21,745.14 ms**（单次 2.17 秒），磁盘重载率 100%（11次）；

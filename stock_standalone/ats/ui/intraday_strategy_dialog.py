@@ -317,6 +317,8 @@ class SBCChartCanvas(QWidget):
         self._is_panning = False
         self._pan_start_x = 0
         self._pan_start_indices = (0, -1)
+        self._is_right_anchored: bool = True  # 🌟 始终保持锚定最右侧最新数据
+        self._visible_bar_count: Optional[int] = None  # 缩放时的可视 Bar 数量 (None 表示 100% 全景)
         self._last_period_mode = "1m"
 
         # 🔍 框选放大 (Rubberband Box Zoom) 状态
@@ -445,9 +447,11 @@ class SBCChartCanvas(QWidget):
         return self._vol_mode
 
     def reset_view(self):
-        """🔄 重置视口至 100% 全景显示"""
+        """🔄 重置视口至 100% 全景显示，并重新吸附到最右侧最新数据"""
         self._zoom_start_idx = 0
         self._zoom_end_idx = -1
+        self._is_right_anchored = True
+        self._visible_bar_count = None
         self._is_panning = False
         self._is_box_zooming = False
         self._box_zoom_origin = None
@@ -463,15 +467,36 @@ class SBCChartCanvas(QWidget):
         if self.df_intraday is None or self.df_intraday.empty:
             return False
         total_n = len(self.df_intraday)
+        if getattr(self, '_visible_bar_count', None) is not None:
+            return self._visible_bar_count < total_n
+        if not getattr(self, '_is_right_anchored', True):
+            return True
         cur_start = max(0, self._zoom_start_idx)
         cur_end = min(total_n - 1, self._zoom_end_idx if self._zoom_end_idx >= 0 else total_n - 1)
         return (cur_start > 0 or cur_end < total_n - 1) and (cur_end - cur_start + 1 < total_n)
 
     def _get_visible_slice(self):
-        """获取当前可视切片 DataFrame 以及切片起止索引"""
+        """
+        获取当前可视切片 DataFrame 以及切片起止索引
+        🌟 核心原则：只要处于右侧锚定模式，最右端 end_i 永远强制等于 total_n - 1，
+        新数据到达时视口自动顺延推进，最右侧最新行情与价格永远不丢失！
+        """
         if self.df_intraday is None or self.df_intraday.empty:
             return pd.DataFrame(), 0, 0
         total_n = len(self.df_intraday)
+
+        if getattr(self, '_is_right_anchored', True):
+            vis_c = getattr(self, '_visible_bar_count', None)
+            if vis_c is not None and vis_c < total_n:
+                start_i = max(0, total_n - vis_c)
+            else:
+                start_i = 0
+            end_i = total_n - 1
+            self._zoom_start_idx = start_i
+            self._zoom_end_idx = -1
+            return self.df_intraday.iloc[start_i:end_i + 1], start_i, end_i
+
+        # 历史查阅模式 (用户手动拖拽 Panning 查看历史)
         start_i = max(0, self._zoom_start_idx)
         end_i = min(total_n - 1, self._zoom_end_idx if self._zoom_end_idx >= 0 else total_n - 1)
         if start_i > end_i:
@@ -588,11 +613,21 @@ class SBCChartCanvas(QWidget):
             event.accept()
             return
         elif key == Qt.Key.Key_Up:
-            self.zoom_in()
+            is_alt = bool(event.modifiers() & Qt.KeyboardModifier.AltModifier) or bool(QApplication.keyboardModifiers() & Qt.KeyboardModifier.AltModifier)
+            if is_alt:
+                parent_win = self.window()
+                sync_all_open_sbc_zoom(in_=True, trigger_dlg=parent_win if isinstance(parent_win, SBCIntradayChartDialog) else None)
+            else:
+                self.zoom_in()
             event.accept()
             return
         elif key == Qt.Key.Key_Down:
-            self.zoom_out()
+            is_alt = bool(event.modifiers() & Qt.KeyboardModifier.AltModifier) or bool(QApplication.keyboardModifiers() & Qt.KeyboardModifier.AltModifier)
+            if is_alt:
+                parent_win = self.window()
+                sync_all_open_sbc_zoom(in_=False, trigger_dlg=parent_win if isinstance(parent_win, SBCIntradayChartDialog) else None)
+            else:
+                self.zoom_out()
             event.accept()
             return
         elif key == Qt.Key.Key_Left:
@@ -880,9 +915,11 @@ class SBCChartCanvas(QWidget):
     def _zoom_step(self, in_: bool = True, factor: float = 0.80, anchor_rel_x: Optional[float] = None):
         """
         【🎯 通达信经典缩放核心引擎】
-        1. 若指定了 anchor_rel_x 或鼠标悬停在图表内部，则以该点为锚点中心进行视野缩放；
-        2. 若未指定且无悬停，则默认以最右侧最新 Bar 为锚点 (anchor_rel_x = 1.0)，视野向左缩放；
-        3. in_=True 为放大(Bar变大变粗，总数减少)，in_=False 为缩小(Bar变小变细，总数增加)。
+        1. 默认及右侧锚定模式：最右侧最新 Bar 牢牢固定不动 (anchor_rel_x = 1.0)，视野向左缩放；
+           放大时减少可视数量 (最少 8 根)，缩小时增加可视数量 (最大全量 total_n)；
+           右侧始终保持是最新的行情数据与现价！
+        2. 历史查阅模式 (用户手动向左拖动了画布)：以指定 anchor_rel_x 或悬停点为锚点进行缩放；
+           若向右缩小使 end_i 触及最新端点，自动重新吸附为右侧锚定模式！
         """
         if self.df_intraday is None or self.df_intraday.empty:
             return
@@ -891,6 +928,39 @@ class SBCChartCanvas(QWidget):
         if total_n < 5:
             return
 
+        # ── 1. 右侧最新锚定模式 (默认与经典看盘手感) ──
+        if getattr(self, '_is_right_anchored', True):
+            vis_c = getattr(self, '_visible_bar_count', None)
+            cur_count = vis_c if (vis_c is not None and vis_c < total_n) else total_n
+
+            if in_:
+                # 放大：减少可视 Bar 数量，拉近细节，最少 8 根
+                f = factor if factor < 1.0 else (1.0 / factor)
+                new_count = max(8, int(cur_count * f))
+                if new_count >= cur_count:
+                    new_count = max(8, cur_count - 2)
+                self._visible_bar_count = new_count
+                self._zoom_start_idx = max(0, total_n - new_count)
+                self._zoom_end_idx = -1
+                self._is_right_anchored = True
+            else:
+                # 缩小：增加可视 Bar 数量，展开宏观，最大至全景 total_n
+                f = factor if factor > 1.0 else (1.0 / factor if factor > 0 else 1.25)
+                new_count = min(total_n, int(cur_count * f) + 2)
+                if new_count >= total_n:
+                    self._visible_bar_count = None  # 恢复 100% 全景
+                    self._zoom_start_idx = 0
+                    self._zoom_end_idx = -1
+                else:
+                    self._visible_bar_count = new_count
+                    self._zoom_start_idx = max(0, total_n - new_count)
+                    self._zoom_end_idx = -1
+                self._is_right_anchored = True
+
+            self.update()
+            return
+
+        # ── 2. 历史查阅模式 (用户手动拖拽画布查看历史走势) ──
         cur_start = max(0, self._zoom_start_idx)
         cur_end = min(total_n - 1, self._zoom_end_idx if self._zoom_end_idx >= 0 else total_n - 1)
         cur_count = cur_end - cur_start + 1
@@ -906,12 +976,11 @@ class SBCChartCanvas(QWidget):
             if margin_left <= hx <= (margin_left + chart_w):
                 rel_x = max(0.0, min(1.0, (hx - margin_left) / float(chart_w)))
             else:
-                rel_x = 1.0
+                rel_x = 0.5
         else:
-            rel_x = 1.0  # 通达信经典手感：最右侧最新数据固定不动！
+            rel_x = 0.5
 
         if in_:
-            # 向上/放大：缩减可视数量，最少保留 8 根 K 棒
             f = factor if factor < 1.0 else (1.0 / factor)
             new_count = max(8, int(cur_count * f))
             if new_count >= cur_count:
@@ -922,7 +991,6 @@ class SBCChartCanvas(QWidget):
             new_start = cur_start + left_diff
             new_end = cur_end - right_diff
         else:
-            # 向下/缩小：增加可视数量，最大至全量 total_n
             f = factor if factor > 1.0 else (1.0 / factor if factor > 0 else 1.25)
             new_count = min(total_n, int(cur_count * f) + 2)
             diff = new_count - cur_count
@@ -931,16 +999,15 @@ class SBCChartCanvas(QWidget):
             new_start = max(0, cur_start - left_diff)
             new_end = min(total_n - 1, cur_end + right_diff)
 
-        # 越界防溢出修正
+        # 边界修正
         if new_start < 0:
             new_end = min(total_n - 1, new_end - new_start)
             new_start = 0
-        if new_end >= total_n:
-            new_start = max(0, new_start - (new_end - (total_n - 1)))
-            new_end = total_n - 1
-
-        if new_start == 0 and new_end == total_n - 1:
-            self._zoom_start_idx = 0
+        if new_end >= total_n - 1:
+            # 重新触碰或超过最新端点：自动恢复右侧最新吸附！
+            self._is_right_anchored = True
+            self._visible_bar_count = new_end - new_start + 1 if (new_start > 0 or new_end < total_n - 1) else None
+            self._zoom_start_idx = new_start
             self._zoom_end_idx = -1
         else:
             self._zoom_start_idx = new_start
@@ -1275,8 +1342,16 @@ class SBCChartCanvas(QWidget):
 
             new_start = max(0, min(total_n - 1, orig_start - shift_bars))
             new_end = max(0, min(total_n - 1, orig_end - shift_bars))
-            self._zoom_start_idx = new_start
-            self._zoom_end_idx = new_end
+            if new_end >= total_n - 1:
+                self._is_right_anchored = True
+                self._zoom_start_idx = new_start
+                self._zoom_end_idx = -1
+                self._visible_bar_count = (new_end - new_start + 1) if new_start > 0 else None
+            else:
+                self._is_right_anchored = False
+                self._visible_bar_count = None
+                self._zoom_start_idx = new_start
+                self._zoom_end_idx = new_end
             self.update()
             event.accept()
             return
@@ -1307,8 +1382,16 @@ class SBCChartCanvas(QWidget):
 
                     new_start = max(0, min(total_n - 1, orig_start - shift_bars))
                     new_end = max(0, min(total_n - 1, orig_end - shift_bars))
-                    self._zoom_start_idx = new_start
-                    self._zoom_end_idx = new_end
+                    if new_end >= total_n - 1:
+                        self._is_right_anchored = True
+                        self._zoom_start_idx = new_start
+                        self._zoom_end_idx = -1
+                        self._visible_bar_count = (new_end - new_start + 1) if new_start > 0 else None
+                    else:
+                        self._is_right_anchored = False
+                        self._visible_bar_count = None
+                        self._zoom_start_idx = new_start
+                        self._zoom_end_idx = new_end
                     self.update()
                 event.accept()
                 return
@@ -1448,6 +1531,29 @@ class SBCChartCanvas(QWidget):
             return
 
         super().mouseReleaseEvent(event)
+
+    def wheelEvent(self, event):
+        """⚡ 鼠标滚轮缩放走势图 (100% 对齐通达信手感)：向前滚放大，向后滚缩小，按住 Alt 同步同组窗口"""
+        delta = event.angleDelta().y()
+        if delta == 0:
+            delta = event.pixelDelta().y()
+        is_alt = bool(event.modifiers() & Qt.KeyboardModifier.AltModifier) or bool(QApplication.keyboardModifiers() & Qt.KeyboardModifier.AltModifier)
+        if delta > 0:
+            if is_alt:
+                parent_win = self.window()
+                sync_all_open_sbc_zoom(in_=True, trigger_dlg=parent_win if isinstance(parent_win, SBCIntradayChartDialog) else None)
+            else:
+                self.zoom_in()
+            event.accept()
+        elif delta < 0:
+            if is_alt:
+                parent_win = self.window()
+                sync_all_open_sbc_zoom(in_=False, trigger_dlg=parent_win if isinstance(parent_win, SBCIntradayChartDialog) else None)
+            else:
+                self.zoom_out()
+            event.accept()
+        else:
+            super().wheelEvent(event)
 
     def mouseDoubleClickEvent(self, event):
         """⚡ 鼠标双击事件：
@@ -1655,7 +1761,7 @@ class SBCChartCanvas(QWidget):
             return
         menu.exec(pos)
 
-    def set_data(self, df_intraday: pd.DataFrame, open_p: float, vwap_p: float, high_p: float, low_p: float, sell_min: float, sell_max: float, signals: list, period_mode: str = "1m"):
+    def set_data(self, df_intraday: pd.DataFrame, open_p: float = 0.0, vwap_p: float = 0.0, high_p: float = 0.0, low_p: float = 0.0, sell_min: float = 0.0, sell_max: float = 0.0, signals: list = None, period_mode: str = "1m"):
         self.df_intraday = df_intraday
         self.open_price = open_p
         self.vwap = vwap_p
@@ -1667,6 +1773,8 @@ class SBCChartCanvas(QWidget):
         if getattr(self, '_last_period_mode', None) != period_mode or getattr(self, '_last_code', None) != getattr(self, 'code', None):
             self._zoom_start_idx = 0
             self._zoom_end_idx = -1
+            self._is_right_anchored = True
+            self._visible_bar_count = None
             self._last_period_mode = period_mode
             self._last_code = getattr(self, 'code', None)
             self.strategy_eval_result = None  # 切换周期或标的时重置策略测算结果
@@ -1705,6 +1813,8 @@ class SBCChartCanvas(QWidget):
         if getattr(self, '_last_period_mode', None) != period_mode or getattr(self, '_last_code', None) != getattr(self, 'code', None):
             self._zoom_start_idx = 0
             self._zoom_end_idx = -1
+            self._is_right_anchored = True
+            self._visible_bar_count = None
             self._last_period_mode = period_mode
             self._last_code = getattr(self, 'code', None)
             self.strategy_eval_result = None  # 切换周期或标的时重置策略测算结果
@@ -3711,6 +3821,31 @@ class SBCChartCanvas(QWidget):
                 # 未命中时的浮动提示条 (位置调低靠左)
                 self._draw_compact_strategy_hud(painter, margin_left, margin_top, chart_w, main_h, res_strat)
 
+        # 🟢 最新现价水平虚线与右侧现价高亮胶囊 (对齐通达信与分时图同款核心浮标，实时动态展现最新成交价)
+        if len(closes) > 0 and closes[-1] > 0.01:
+            last_p = float(closes[-1])
+            y_last = k_to_y(last_p)
+            op_base = self.open_price if self.open_price > 1.0 else (opens[0] if len(opens) > 0 else last_p)
+            pct_last = ((last_p - op_base) / op_base * 100.0) if op_base > 0 else 0.0
+            col_last = QColor("#FF4444") if pct_last > 0 else (QColor("#00FF88") if pct_last < 0 else QColor("#A0AEC0"))
+
+            # 跨图表水平现价虚线 (从最新 K 棒延伸至右边界)
+            x_last_bar = k_to_x(n - 1)
+            painter.setPen(QPen(col_last, 1, Qt.PenStyle.DashLine))
+            painter.drawLine(int(x_last_bar), int(y_last), int(margin_left + chart_w), int(y_last))
+
+            # 右侧现价高亮标签框
+            p_box_w = 52
+            p_box_h = 16
+            p_box_y = max(margin_top, min(margin_top + main_h - p_box_h, int(y_last - p_box_h / 2)))
+            painter.setPen(QPen(col_last, 1.2))
+            painter.setBrush(QBrush(QColor(col_last.red(), col_last.green(), col_last.blue(), 75)))
+            painter.drawRoundedRect(int(margin_left + chart_w + 2), int(p_box_y), p_box_w, p_box_h, 2, 2)
+
+            painter.setPen(QPen(QColor("#FFFFFF")))
+            painter.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
+            painter.drawText(int(margin_left + chart_w + 5), int(p_box_y + 12), f"{last_p:.2f}")
+
         # 12. 🌟 顶层绘制通道标题与三轨大小高度 HUD 卡片 (置于最顶层，彻底杜绝任何被底层图元遮挡)
         p_disp = "2D" if str(self.period_mode).lower() in ("2d", "2k") else ("3D" if str(self.period_mode).lower() in ("3d", "3k") else self.period_mode.upper())
         info_header = f"📊 [{p_disp}] 通达信自动通道 (斜率:{ch_slope_deg:.1f}°)"
@@ -5145,7 +5280,7 @@ class SBCIntradayChartDialog(QWidget):
             pass
 
     def rotate_period(self, step: int = 1):
-        """环形顺时针/逆时针轮转切换 SBC 周期"""
+        """环形顺时针/逆时针轮转切换 SBC 周期 (按住 Alt 同步同组所有窗口)"""
         period_list = ["1m", "3d", "5d", "10d", "5m", "30m", "60m", "day", "2d", "week", "month"]
         curr = getattr(self, "_current_period_mode", "1m").lower()
         if curr in ("2k",):
@@ -5157,24 +5292,38 @@ class SBCIntradayChartDialog(QWidget):
         idx = period_list.index(curr)
         new_idx = (idx + step) % len(period_list)
         new_mode = period_list[new_idx]
+
+        modifiers = QApplication.keyboardModifiers()
+        if bool(modifiers & Qt.KeyboardModifier.AltModifier):
+            count = sync_all_open_sbc_period(new_mode, trigger_dlg=self)
+            if hasattr(self, 'lbl_info') and self.lbl_info:
+                self.lbl_info.setText(f"🌐 [同组同步周期] 已将全部 {count} 个已打开 SBC 窗口批量切换至 【{new_mode.upper()}】！")
+            return
+
         self.set_period_mode(new_mode)
         if hasattr(self, 'canvas') and self.canvas:
             self.canvas.setFocus()
         if hasattr(self, 'lbl_info') and self.lbl_info:
-            self.lbl_info.setText(f"📈 [周期轮转] 当前: <font color='#38bdf8'><b>【{new_mode.upper()}】</b></font> (A/D 轮转, ←/→ 查价, 1~9 直选, S 日志, Esc 关闭)")
-            self.lbl_info.setToolTip(f"📈 [周期轮转] 当前周期: 【{new_mode.upper()}】\n快捷键: A/D 轮转周期, ←/→ 移动查价, 1~9 直选, S 开关日志, F 联动, Esc 退出光标/关闭")
+            self.lbl_info.setText(f"📈 [周期轮转] 当前: <font color='#38bdf8'><b>【{new_mode.upper()}】</b></font> (A/D 轮转, ←/→ 查价, 1~9 直选, Alt 同步同组, S 日志, Esc 关闭)")
+            self.lbl_info.setToolTip(f"📈 [周期轮转] 当前周期: 【{new_mode.upper()}】\n快捷键: A/D 轮转周期 (按住 Alt 同步同组), ←/→ 移动查价, 1~9 直选, S 开关日志, F 联动, Esc 退出光标/关闭")
 
     def switch_period_by_index(self, index: int):
-        """通过数字键 1~9 直接切换到指定序号的周期"""
+        """通过数字键 1~9 直接切换到指定序号的周期 (按住 Alt 同步同组所有窗口)"""
         period_list = ["1m", "3d", "5d", "10d", "5m", "30m", "60m", "day", "2d", "week", "month"]
         if 0 <= index < len(period_list):
             new_mode = period_list[index]
+            modifiers = QApplication.keyboardModifiers()
+            if bool(modifiers & Qt.KeyboardModifier.AltModifier):
+                count = sync_all_open_sbc_period(new_mode, trigger_dlg=self)
+                if hasattr(self, 'lbl_info') and self.lbl_info:
+                    self.lbl_info.setText(f"🌐 [同组同步周期] 已将全部 {count} 个已打开 SBC 窗口批量切换至 【{new_mode.upper()}】！")
+                return
             self.set_period_mode(new_mode)
             if hasattr(self, 'canvas') and self.canvas:
                 self.canvas.setFocus()
             if hasattr(self, 'lbl_info') and self.lbl_info:
-                self.lbl_info.setText(f"📈 [周期直选] 当前: <font color='#38bdf8'><b>【{new_mode.upper()}】</b></font> (A/D 轮转, ←/→ 查价, 1~9 直选, S 日志, Esc 关闭)")
-                self.lbl_info.setToolTip(f"📈 [周期直选] 当前周期: 【{new_mode.upper()}】\n快捷键: A/D 轮转周期, ←/→ 移动查价, 1~9 直选, S 开关日志, F 联动, Esc 退出光标/关闭")
+                self.lbl_info.setText(f"📈 [周期直选] 当前: <font color='#38bdf8'><b>【{new_mode.upper()}】</b></font> (A/D 轮转, ←/→ 查价, 1~9 直选, Alt 同步同组, S 日志, Esc 关闭)")
+                self.lbl_info.setToolTip(f"📈 [周期直选] 当前周期: 【{new_mode.upper()}】\n快捷键: A/D 轮转周期 (按住 Alt 同步同组), ←/→ 移动查价, 1~9 直选, S 开关日志, F 联动, Esc 退出光标/关闭")
 
     def _toggle_stay_on_top(self):
         """切换 SBC 窗口置顶状态 (无缝 0 闪烁 0 重新刷新)"""
@@ -5212,13 +5361,13 @@ class SBCIntradayChartDialog(QWidget):
                 self._toggle_log_panel()
                 event.accept()
                 return
-        elif key == Qt.Key.Key_A and not (modifiers & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier)):
+        elif key == Qt.Key.Key_A and not (modifiers & Qt.KeyboardModifier.ControlModifier):
             from ats.ui.styles import is_editing_text
             if not is_editing_text(self):
                 self.rotate_period(-1)
                 event.accept()
                 return
-        elif key == Qt.Key.Key_D and not (modifiers & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier)):
+        elif key == Qt.Key.Key_D and not (modifiers & Qt.KeyboardModifier.ControlModifier):
             from ats.ui.styles import is_editing_text
             if not is_editing_text(self):
                 self.rotate_period(1)
@@ -5235,12 +5384,18 @@ class SBCIntradayChartDialog(QWidget):
             event.accept()
             return
         elif key == Qt.Key.Key_Up:
-            if hasattr(self, 'canvas') and self.canvas:
+            is_alt = bool(modifiers & Qt.KeyboardModifier.AltModifier) or bool(QApplication.keyboardModifiers() & Qt.KeyboardModifier.AltModifier)
+            if is_alt:
+                sync_all_open_sbc_zoom(in_=True, trigger_dlg=self)
+            elif hasattr(self, 'canvas') and self.canvas:
                 self.canvas.zoom_in()
             event.accept()
             return
         elif key == Qt.Key.Key_Down:
-            if hasattr(self, 'canvas') and self.canvas:
+            is_alt = bool(modifiers & Qt.KeyboardModifier.AltModifier) or bool(QApplication.keyboardModifiers() & Qt.KeyboardModifier.AltModifier)
+            if is_alt:
+                sync_all_open_sbc_zoom(in_=False, trigger_dlg=self)
+            elif hasattr(self, 'canvas') and self.canvas:
                 self.canvas.zoom_out()
             event.accept()
             return
@@ -5460,12 +5615,18 @@ class SBCIntradayChartDialog(QWidget):
             if k in (Qt.Key.Key_Up, Qt.Key.Key_Down):
                 from ats.ui.styles import is_editing_text
                 if not is_editing_text(self) and not self._is_combobox_popup_active():
-                    if hasattr(self, 'canvas') and self.canvas:
-                        if k == Qt.Key.Key_Up:
+                    is_alt = bool(event.modifiers() & Qt.KeyboardModifier.AltModifier) or bool(QApplication.keyboardModifiers() & Qt.KeyboardModifier.AltModifier)
+                    if k == Qt.Key.Key_Up:
+                        if is_alt:
+                            sync_all_open_sbc_zoom(in_=True, trigger_dlg=self)
+                        elif hasattr(self, 'canvas') and self.canvas:
                             self.canvas.zoom_in()
-                        else:
+                    else:
+                        if is_alt:
+                            sync_all_open_sbc_zoom(in_=False, trigger_dlg=self)
+                        elif hasattr(self, 'canvas') and self.canvas:
                             self.canvas.zoom_out()
-                        return True
+                    return True
             elif k in (Qt.Key.Key_Left, Qt.Key.Key_Right):
                 from ats.ui.styles import is_editing_text
                 if not is_editing_text(self) and not self._is_combobox_popup_active():
@@ -5485,6 +5646,25 @@ class SBCIntradayChartDialog(QWidget):
                     lock_until = max(lock_until, getattr(self.canvas, '_esc_mouse_lock_until', 0.0))
                 if (now < lock_until) or (QApplication.mouseButtons() != Qt.MouseButton.NoButton):
                     # 🛡️ 鼠标双击/右键点击派生的 Esc 信号：彻底吞噬，严禁向子控件或窗口关闭逻辑冒泡
+                    return True
+        elif e_type == QEvent.Type.Wheel:
+            from ats.ui.styles import is_editing_text
+            if not is_editing_text(self) and not self._is_combobox_popup_active():
+                delta = event.angleDelta().y()
+                if delta == 0:
+                    delta = event.pixelDelta().y()
+                is_alt = bool(event.modifiers() & Qt.KeyboardModifier.AltModifier) or bool(QApplication.keyboardModifiers() & Qt.KeyboardModifier.AltModifier)
+                if delta > 0:
+                    if is_alt:
+                        sync_all_open_sbc_zoom(in_=True, trigger_dlg=self)
+                    elif hasattr(self, 'canvas') and self.canvas:
+                        self.canvas.zoom_in()
+                    return True
+                elif delta < 0:
+                    if is_alt:
+                        sync_all_open_sbc_zoom(in_=False, trigger_dlg=self)
+                    elif hasattr(self, 'canvas') and self.canvas:
+                        self.canvas.zoom_out()
                     return True
         elif e_type in (QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonRelease, QEvent.Type.MouseButtonDblClick):
             btn = getattr(event, 'button', lambda: Qt.MouseButton.NoButton)()
@@ -7578,6 +7758,80 @@ def sync_all_open_sbc_period(target_mode: str, trigger_dlg: Optional[SBCIntraday
     mgr.trigger_debounced_save(delay_ms=350)
 
     return count
+
+def sync_all_open_sbc_zoom(in_: bool, factor: float = 0.80, trigger_dlg: Optional[SBCIntradayChartDialog] = None) -> int:
+    """【🌐 全局同步所有同组已打开 SBC 窗口的缩放视图 (对齐通达信手感·保持最右侧最新)】
+    当操盘手按住 Alt 键缩放 (Alt+Up / Alt+Down / Alt+鼠标滚轮) 时调用：
+    1. 0 毫秒从 SBCWindowMemoryManager 检索当前所有已打开的活跃同组 SBC 窗口；
+    2. 若触发窗口存在，由触发窗口先执行精准缩放，获取最终设定的 _visible_bar_count 与全景状态；
+    3. 将该缩放条数与右侧锚定状态 100% 同步赋予其他所有同组 SBC 窗口；
+    4. 各窗口立即触发 update() 重绘 (0 毫秒纯内存图元刷新，0 网络请求，0 阻塞)；
+    5. 返回同步的窗口总数。
+    """
+    mgr = SBCWindowMemoryManager.get_instance()
+    active_dialogs = mgr.get_active_dialogs()
+    if not active_dialogs:
+        try:
+            from PyQt6.QtWidgets import QApplication
+            from PyQt6.sip import isdeleted
+            for w in QApplication.topLevelWidgets():
+                if isinstance(w, SBCIntradayChartDialog) and not isdeleted(w) and not getattr(w, '_is_closing', False):
+                    mgr.register(w)
+                    if w not in active_dialogs:
+                        active_dialogs.append(w)
+        except Exception:
+            pass
+
+    if not active_dialogs:
+        return 0
+
+    # 1. 确定基准窗口并执行缩放
+    current_focus_win = trigger_dlg or next((w for w in active_dialogs if w.isActiveWindow()), active_dialogs[0])
+    target_vis_count = None
+    if hasattr(current_focus_win, 'canvas') and current_focus_win.canvas:
+        if in_:
+            current_focus_win.canvas.zoom_in(factor=factor)
+        else:
+            current_focus_win.canvas.zoom_out(factor=factor)
+        target_vis_count = current_focus_win.canvas._visible_bar_count
+
+    # 2. 同步给同组其他所有 SBC 窗口
+    count = 0
+    for w in active_dialogs:
+        if not hasattr(w, 'canvas') or not w.canvas:
+            continue
+        try:
+            cv = w.canvas
+            if w is not current_focus_win:
+                if target_vis_count is None:
+                    # 恢复全景
+                    cv.reset_view()
+                else:
+                    cv._is_right_anchored = True
+                    cv._visible_bar_count = target_vis_count
+                    total_n = len(cv.df_intraday) if cv.df_intraday is not None else 0
+                    cv._zoom_start_idx = max(0, total_n - target_vis_count) if total_n > 0 else 0
+                    cv._zoom_end_idx = -1
+                    cv.update()
+            count += 1
+        except Exception as e_sync:
+            logger.debug(f"[SBC同步缩放] 同步单窗异常: {e_sync}")
+
+    # 3. 实时交互反馈
+    if hasattr(current_focus_win, 'lbl_info') and current_focus_win.lbl_info:
+        act_desc = "放大" if in_ else "缩小"
+        vis_desc = f"{target_vis_count} 根 Bar" if target_vis_count is not None else "100% 全景"
+        current_focus_win.lbl_info.setText(
+            f"🌐 [同组同步{act_desc}] 已同步全部 <font color='#38bdf8'><b>{count}</b></font> 个同组窗口至 <font color='#ffd700'><b>【{vis_desc}】</b></font> (右侧最新始终保持)！"
+        )
+        current_focus_win.lbl_info.setToolTip(
+            f"""🌐 [同组同步{act_desc}]
+当前已将同组全部 {count} 个已打开 SBC 独立盯盘窗口同步{act_desc}至: {vis_desc}
+右侧最新行情数据与价格始终锚定保持。"""
+        )
+
+    return count
+
 
 
 def _get_screen_for_geometry(x: int, y: int, w: int, h: int):
