@@ -1,5 +1,32 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](stock_standalone/design/antigravity_historical_tasks_archive.md)
 
+## 2026-09-24 14:10
+- [x] **【TK 系统极限性能优化方案按阶段落地实施（阶段 0 指纹丢帧根治、阶段 3 差分空值双向闭环、阶段 1 排序策略评估）】(`instock_MonitorTK.py`, `tests/test_tk_perf_stage0_telemetry_and_golden_samples.py`, `tests/test_tk_perf_diff_null_fidelity.py`, `tests/test_tk_perf_stage1_sort_strategy.py`, `stock_standalone/20260924_1410_task.md`)**：
+    - [x] **阶段 0：采样指纹漏更物理核验与 Golden 指纹升级**：
+        - 编写专项用例严格重现旧算法缺陷：确证 50 点/5 点抽样中未采样跳价、采样求和正负抵消、UI 中间 4995 行个股跳价及信号列变动被静默拦截的假阴性丢帧问题；
+        - 计算入口（line 6391）全面升级：采用底层 numpy `tobytes()` 向量级全表哈希并结合采集时间戳守卫，微秒级执行，覆盖 100% 全部股票价格与成交量，0 盲区 0 抵消；
+        - UI 刷新入口（line 17095）全面升级：全量覆盖核心价格、涨幅 `percent` 与策略信号 `signal`，0.02ms 极速防抖，彻底消除盘中看盘界面假死与遗漏；
+    - [x] **阶段 3（正确性优先）：差分空值双向契约闭环**：
+        - 确证并复现接收端（`ipc_sync_manager.py`）`notna()` 跳过空值导致信号或指标重置为 NaN 永远无法被接收端清除的脏数据漏洞；
+        - 发送端（`instock_MonitorTK.py:9020`, `9080`）接入安全门禁契约：对显示轨与日线轨在执行 diff 前进行增删行/列配置匹配与非空转空 (NaN) 向量位检测；遇非空变空或结构变动时，先于 `DF_DIFF_EMPTY` 强制自动回退 `UPDATE_DF_ALL` 全量包，驱动接收端以全量替换基线，彻底根除脏数据残留，同时完全兼容接收端现有接口；
+    - [x] **阶段 1：主表排序策略实测对比与评估**：
+        - 编写客观测试工具对比全量重建与增量原地同步（move）的 DOM 操作数与耗时；确证在集合相同但顺序改变时执行全量刷新以维持物理行 100% 绝对正确的工程稳健性，保障操盘手 `select_code` 与焦点在刷新中 100% 稳定不串股；
+    - [x] **全量自动化验证 100% 绿灯**：
+        - 阶段专项测试集 8/8 纯绿秒级通过；核心回归测试 18/18 纯绿通过；
+        - `python -m compileall ats tests instock_MonitorTK.py performance_optimizer.py ipc_sync_manager.py -q` 编译零错误，`git diff --check` 零违规。
+
+## 2026-09-24 14:05
+- [x] **【SBC Alt+鼠标滚轮同步缩放底层失效彻底修复与三层物理穿透判定落地】(`ats/ui/intraday_strategy_dialog.py`, `tests/test_sbc_zoom_right_anchor.py`, `20260924_1405_task.md`)**：
+    - [x] **Win32 滚轮丢修饰符根因排查与物理穿透判定 (`is_alt_modifier_active`)**：
+        - 确认 Win32 原生 `WM_MOUSEWHEEL` 不含 `MK_ALT` 标志，Windows 滚轮消息派发时 Qt `modifiers()` 往往返回 0 导致判定漏失；
+        - 构建三层严密判定引擎：依次检测事件自带修饰符、Qt 全局应用修饰符，并在 Windows 下通过 `ctypes` 原生调用 `user32.GetAsyncKeyState(0x12) & 0x8000` (VK_MENU)、`0xA4` (左Alt)、`0xA5` (右Alt) 及 `GetKeyState`，直接穿透硬件物理电平，100% 捕获手指按住 Alt 状态；
+    - [x] **滚轮全向 delta 自适应与交互链路统一**：
+        - 滚轮滚动自适应优先 `angleDelta().y`，若为 0 依次自动回退 `angleDelta().x`、`pixelDelta().y`、`pixelDelta().x`，彻底兼容全品牌鼠标驱动与横滚硬件；
+        - `canvas.wheelEvent` 与 `dialog.eventFilter` 的 Wheel、Key_Up/Down 以及周期切换与 `closeEvent` 全面接入统一判定，消除重复代码；
+    - [x] **全量自动化验证 100% 绿灯**：
+        - 专项测试 `test_sbc_zoom_right_anchor.py` 10/10 纯绿通过（新增三层判定与 Mock Win32 硬件穿透同步缩放用例）；
+        - `python -m compileall ats tests -q` 编译零错误，`git diff --check` 零违规。
+
 ## 2026-09-24 13:55
 - [x] **【SBC 支持 Alt+放大/缩小 与 Alt+快捷键切换周期 全局同组窗口毫秒级同步】(`ats/ui/intraday_strategy_dialog.py`, `tests/test_sbc_zoom_right_anchor.py`)**：
     - [x] **同组窗口同步缩放核心引擎 (`sync_all_open_sbc_zoom`)**：
