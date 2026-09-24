@@ -22,20 +22,30 @@ except Exception:
 if current_dir not in sys.path:
     sys.path.insert(0, current_dir)
 
+# Static import keeps the isolated shadow entry point available in the frozen ATS EXE.
+import tools.run_shadow_live_test as _shadow_runner
+
 _ipo_flags = ("--ipo-detector", "--subnew-detector", "--ipo", "--subnew")
 _sbc_flags = ("--sbc", "--sbc-holdings", "--holdings-sbc", "--holdings")
+_shadow_flags = ("--shadow-live",)
+
+if __name__ == "__main__" and any(arg in sys.argv[1:] for arg in _shadow_flags):
+    sys.argv = [sys.argv[0]] + [arg for arg in sys.argv[1:] if arg not in _shadow_flags]
+    sys.exit(_shadow_runner.main())
 
 # 根入口帮助不应初始化 GUI 或行情后端；指定子模式时由对应启动器处理自己的 -h。
 if __name__ == "__main__" and any(arg in sys.argv[1:] for arg in ("-h", "--help")):
     wants_ipo = os.environ.get("ATS_IPO_SUBPROCESS") == "1" or any(arg in sys.argv for arg in _ipo_flags)
     wants_sbc = os.environ.get("ATS_SBC_SUBPROCESS") == "1" or any(arg in sys.argv for arg in _sbc_flags)
-    if not wants_ipo and not wants_sbc:
+    wants_shadow = any(arg in sys.argv for arg in _shadow_flags)
+    if not wants_ipo and not wants_sbc and not wants_shadow:
         parser = argparse.ArgumentParser(description="ATS 主程序与独立工具启动器")
         parser.add_argument("--ipo-detector", "--subnew-detector", "--ipo", "--subnew",
                             action="store_true", help="只启动新股次新股检测器")
         parser.add_argument("--sbc-holdings", "--holdings-sbc", "--holdings",
                             action="store_true", help="只启动 SBC 持仓独立看板")
         parser.add_argument("--sbc", metavar="CODE", help="只启动 SBC 指定股票窗口（可接周期参数）")
+        parser.add_argument("--shadow-live", action="store_true", help="启动隔离 PAPER 影子运行器；参数转交给运行器")
         parser.print_help()
         sys.exit(0)
 

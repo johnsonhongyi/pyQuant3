@@ -883,6 +883,45 @@ class IPOVWAPDetectorEngine:
         n_days = len(dates)
         today_df = df[df["date"] == dates[-1]] if "date" in df.columns else df
 
+        # Preserve the prior-session VWAP context and reject a failed gap-up
+        # when yesterday stayed below VWAP and today's opening strength fades.
+        if len(dates) >= 2 and not today_df.empty:
+            previous_df = df[df["date"] == dates[-2]]
+            if not previous_df.empty:
+                prev_close = float(previous_df.iloc[-1].get("close", 0.0) or 0.0)
+                prev_vwap = float(previous_df.iloc[-1].get("vwap", 0.0) or 0.0)
+                prev_high = float(previous_df["high"].max()) if "high" in previous_df else float(previous_df["close"].max())
+                prev_low = float(previous_df["low"].min()) if "low" in previous_df else float(previous_df["close"].min())
+                tail = previous_df.tail(3)
+                stayed_below_vwap = bool(
+                    prev_vwap > 0 and prev_close <= prev_vwap
+                    and len(tail) >= 3 and all(
+                        float(row.get("close", 0.0) or 0.0) < float(row.get("vwap", prev_vwap) or prev_vwap)
+                        for _, row in tail.iterrows()
+                    )
+                )
+                prior_range_pct = (prev_high - prev_low) / prev_low * 100.0 if prev_low > 0 else 999.0
+                today_open = float(today_df.iloc[0].get("open", 0.0) or 0.0)
+                today_high = float(today_df["high"].max()) if "high" in today_df else float(today_df["close"].max())
+                gap_pct = (today_open / prev_close - 1.0) * 100.0 if prev_close > 0 else 0.0
+                fade_pct = (today_high - p) / today_high * 100.0 if today_high > 0 else 0.0
+                failed_gap_fade = bool(
+                    stayed_below_vwap and prior_range_pct <= 5.0
+                    and gap_pct >= 2.0 and fade_pct >= 1.5
+                    and p < today_open and p < vw
+                )
+                sig.extra_data.update({
+                    "cross_day_previous_close": prev_close,
+                    "cross_day_previous_vwap": prev_vwap,
+                    "cross_day_previous_range_pct": round(prior_range_pct, 2),
+                    "cross_day_open_gap_pct": round(gap_pct, 2),
+                    "cross_day_high_fade_pct": round(fade_pct, 2),
+                    "cross_day_previous_below_vwap": stayed_below_vwap,
+                    "cross_day_failed_gap_fade": failed_gap_fade,
+                    "cross_day_state": "FAILED_GAP_FADE" if failed_gap_fade else "CLEAR",
+                    "cross_day_filter_version": "1",
+                })
+
         # ── 核心特征 1: 计算 SBC 多日综合活跃度 (对齐 SBC 走势图均活跃度) ──
         try:
             day_amps = []
@@ -1390,6 +1429,17 @@ class IPOVWAPDetectorEngine:
             sig.structure_tag = "极端高潮放量"
             sell_guide = f"坚决平仓保利，建议提前算法挂单≈¥{sig.climax_preset_sell_price:.2f}分批止盈逃顶!" if sig.climax_preset_sell_price > 0 else "坚决平仓保利，严禁追买!"
             sig.signal_desc = f"现价偏离VWAP达极限(+{sig.vwap_diff_pct:.1f}%)且冲高天量滞涨，主力疯狂兑现，{sell_guide}"
+            return
+
+        if sig.extra_data.get("cross_day_failed_gap_fade"):
+            sig.signal_type = "WATCH"
+            sig.signal_level = "⏱️ 跨日冲高回落过滤"
+            sig.signal_tier = "WATCH"
+            sig.structure_tag = "昨弱今高开回落"
+            sig.signal_desc = (
+                "昨收及尾盘持续位于 VWAP 下方，今高开后冲高回落并失守开盘价/VWAP；"
+                "记录原始跨日特征，禁止生成 BUY 候选"
+            )
             return
 
         # 2. 首日上市吸筹黄金买点 (全天贴线惜售，丝毫不碰 VWAP，首日标杆最高优先 👑 SSS级)

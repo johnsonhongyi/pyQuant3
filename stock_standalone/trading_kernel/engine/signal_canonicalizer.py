@@ -36,6 +36,13 @@ def canonicalize_decision_queue_item(item: Mapping[str, Any]) -> StrategySignal:
         "status": str(item.get("status", "") or ""),
         "requested_size_pct": _float(item.get("requested_size_pct")),
         "request_id": str(item.get("request_id", "") or ""),
+        "directive_id": str(item.get("directive_id", "") or ""),
+        "candidate_id": str(item.get("candidate_id", "") or ""),
+        "plan_id": str(item.get("plan_id", "") or ""),
+        "exit_rule_id": str(item.get("exit_rule_id", "") or ""),
+        "strategy_tag": str(item.get("strategy_tag", "") or ""),
+        "tide_state": str(item.get("tide_state", "") or ""),
+        "cross_day_state": str(item.get("cross_day_state", "") or ""),
         "hits": _float(item.get("hits", 1), 1.0),
         "volume": _float(item.get("volume"), 1.0),
         

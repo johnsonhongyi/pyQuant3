@@ -6,6 +6,7 @@ logger = LoggerFactory.getLogger("PaperExecutionAdapter")
 
 from dataclasses import dataclass, field
 from datetime import datetime
+import math
 from typing import Any
 
 from trading_kernel.core.risk import ApprovedOrder
@@ -94,17 +95,27 @@ class AccountSnapshot:
 class PaperExecutionAdapter(ExecutionAdapter):
     """Paper Trading 确定性模拟执行适配器"""
 
-    def __init__(self, initial_capital: float = 1000000.0) -> None:
+    def __init__(
+        self,
+        initial_capital: float = 1000000.0,
+        *,
+        state_file_path: str | None = None,
+    ) -> None:
         self.initial_capital = initial_capital
         self.account = AccountSnapshot(cash=initial_capital, initial_capital=initial_capital)
         self.orders: list[dict[str, Any]] = []
+        self._execution_block_reason = ""
         self._last_saved_fingerprint = ""
         self._is_simulation = False  # 是否为模拟/回测模式
         
         # 探测测试环境与物理持久化路径
         import os
         self._is_test = "PYTEST_CURRENT_TEST" in os.environ
-        self._state_file = os.path.join(get_app_root(), "logs", "paper_account_state.json")
+        self._state_file = (
+            os.path.abspath(state_file_path)
+            if state_file_path
+            else os.path.join(get_app_root(), "logs", "paper_account_state.json")
+        )
         
         self._load_state()
         self._last_saved_fingerprint = self._get_trade_fingerprint()
@@ -144,6 +155,80 @@ class PaperExecutionAdapter(ExecutionAdapter):
         except Exception:
             return str(fingerprint_data)
 
+    @staticmethod
+    def _canonical_code(value: Any) -> str:
+        code = str(value or "").strip().upper()
+        if code.isdigit() and len(code) <= 6:
+            return code.zfill(6)
+        return code
+
+    @classmethod
+    def _replay_order_ledger(cls, orders: Any, initial_capital: float):
+        """Replay confirmed fills and report malformed or impossible ledger rows."""
+        if not isinstance(orders, list):
+            return {}, float(initial_capital), ["ORDERS_NOT_LIST"]
+        positions: dict[str, dict[str, float]] = {}
+        cash = float(initial_capital)
+        problems: list[str] = []
+        valid_orders = [item for item in orders if isinstance(item, dict)]
+        if len(valid_orders) != len(orders):
+            problems.append("INVALID_ORDER_ROW")
+        valid_orders.sort(key=lambda item: str(item.get("timestamp") or ""))
+        for index, order in enumerate(valid_orders):
+            code = cls._canonical_code(order.get("code"))
+            action = str(order.get("action") or "").strip().upper()
+            try:
+                price = float(order.get("price"))
+                quantity = float(order.get("volume"))
+            except (TypeError, ValueError, OverflowError):
+                problems.append(f"INVALID_ORDER_NUMERIC:{index}")
+                continue
+            if not code or not math.isfinite(price) or not math.isfinite(quantity) or price <= 0 or quantity <= 0:
+                problems.append(f"INVALID_ORDER_VALUES:{index}")
+                continue
+            if action in {"BUY", "ADD"}:
+                old = positions.get(code)
+                old_qty = old["volume"] if old else 0.0
+                new_qty = old_qty + quantity
+                old_cost = old["entry_price"] * old_qty if old else 0.0
+                positions[code] = {"volume": new_qty, "entry_price": (old_cost + price * quantity) / new_qty}
+                cash -= price * quantity
+            elif action in {"SELL", "REDUCE"}:
+                old = positions.get(code)
+                if old is None or quantity > old["volume"] + 1e-6:
+                    problems.append(f"SELL_EXCEEDS_LEDGER_POSITION:{code}:{index}")
+                    continue
+                remaining = max(0.0, old["volume"] - quantity)
+                if remaining <= 1e-6:
+                    positions.pop(code, None)
+                else:
+                    old["volume"] = remaining
+                cash += price * quantity
+            else:
+                problems.append(f"UNKNOWN_ORDER_ACTION:{index}")
+        return positions, cash, problems
+
+    @classmethod
+    def _compare_snapshot_to_ledger(cls, positions: dict[str, Position], cash: float,
+                                    replayed: dict[str, dict[str, float]], replay_cash: float,
+                                    replay_problems: list[str]) -> list[str]:
+        problems = list(replay_problems)
+        snapshot = {cls._canonical_code(code): pos for code, pos in positions.items()}
+        if set(snapshot) != set(replayed):
+            problems.append("POSITION_CODES_MISMATCH")
+        for code in sorted(set(snapshot) | set(replayed)):
+            pos = snapshot.get(code)
+            replay = replayed.get(code)
+            if pos is None or replay is None:
+                continue
+            if abs(float(pos.volume) - replay["volume"]) > 0.1:
+                problems.append(f"POSITION_QTY_MISMATCH:{code}")
+            if abs(float(pos.entry_price) - replay["entry_price"]) > 0.01:
+                problems.append(f"POSITION_COST_MISMATCH:{code}")
+        if abs(float(cash) - replay_cash) > 0.01:
+            problems.append("CASH_MISMATCH")
+        return problems
+
     def _load_state(self) -> None:
         import os
         if self._is_test or "PYTEST_CURRENT_TEST" in os.environ:
@@ -154,23 +239,69 @@ class PaperExecutionAdapter(ExecutionAdapter):
             if val is None:
                 return default
             try:
-                return float(val)
-            except (ValueError, TypeError):
+                number = float(val)
+                return number if math.isfinite(number) else default
+            except (ValueError, TypeError, OverflowError):
                 return default
 
-        if os.path.exists(self._state_file) and os.path.getsize(self._state_file) > 0:
+        try:
+            state_exists = os.path.exists(self._state_file)
+            state_size = os.path.getsize(self._state_file) if state_exists else 0
+        except OSError as exc:
+            self._execution_block_reason = f"RESTORE_STATE_IO_ERROR:{type(exc).__name__}"
+            logger.error("[State-Loading] PAPER execution blocked: %s", self._execution_block_reason)
+            return
+
+        if state_exists and state_size == 0:
+            self._execution_block_reason = "RESTORE_EMPTY_STATE_FILE"
+            logger.error("[State-Loading] PAPER execution blocked: %s", self._execution_block_reason)
+
+        if state_exists and state_size > 0:
             try:
                 with open(self._state_file, "r", encoding="utf-8") as f:
                     data = json.load(f)
+                if not isinstance(data, dict):
+                    raise ValueError("state payload must be an object")
+                from trading_kernel.snapshot_v2 import migrate_reconciliation_snapshot
+                migration_input = dict(data)
+                if not migration_input.get("snapshot_version"):
+                    migration_input["snapshot_version"] = "1.0"
+                    migration_input.setdefault("account", {
+                        "cash": data.get("cash"),
+                        "initial_capital": data.get("initial_capital"),
+                    })
+                    migration_input.setdefault("reconciliation", {})
+                    migration_input.setdefault("generated_at", datetime.now().isoformat(timespec="seconds"))
+                migrated, migration_status = migrate_reconciliation_snapshot(migration_input)
+                if migrated is None:
+                    raise ValueError(f"snapshot migration failed: {migration_status}")
+                data["positions"] = migrated["positions"]
+
+                def account_float(key: str, default: float) -> float:
+                    if key not in data:
+                        return default
+                    try:
+                        value = float(data[key])
+                    except (TypeError, ValueError, OverflowError):
+                        raise ValueError(f"invalid account field: {key}")
+                    if not math.isfinite(value) or value < 0:
+                        raise ValueError(f"invalid account field: {key}")
+                    return value
                 
-                self.initial_capital = safe_float(data.get("initial_capital"), self.initial_capital)
-                cash = safe_float(data.get("cash"), self.initial_capital)
+                self.initial_capital = account_float("initial_capital", self.initial_capital)
+                cash = account_float("cash", self.initial_capital)
                 
                 positions = {}
-                for code, pos_data in data.get("positions", {}).items():
+                raw_positions = data.get("positions", {})
+                if not isinstance(raw_positions, dict):
+                    raise ValueError("positions must be an object")
+                for code, pos_data in raw_positions.items():
                     if not isinstance(pos_data, dict):
-                        continue
+                        raise ValueError(f"invalid position row: {code}")
                     entry_p = safe_float(pos_data.get("entry_price"), 0.0)
+                    volume = safe_float(pos_data.get("volume"), 0.0)
+                    if entry_p <= 0 or volume <= 0:
+                        raise ValueError(f"invalid position quantity/cost: {code}")
                     
                     e_time_raw = str(pos_data.get("entry_time") or "N/A")
                     if e_time_raw != "N/A" and " " in e_time_raw:
@@ -181,14 +312,16 @@ class PaperExecutionAdapter(ExecutionAdapter):
                     positions[code] = Position(
                         code=str(pos_data.get("code") or code),
                         entry_price=entry_p,
-                        volume=safe_float(pos_data.get("volume"), 0.0),
+                        volume=volume,
                         current_price=safe_float(pos_data.get("current_price"), entry_p),
                         entry_time=e_time_raw,
                         regime=str(pos_data.get("regime") or "BREAKOUT_ALLOWED"),
                         tp_triggered=bool(pos_data.get("tp_triggered", False)),
                         max_high=safe_float(pos_data.get("max_high"), entry_p)
                     )
-                self.orders = list(data.get("orders", []))
+                self.orders = data.get("orders", [])
+                if not isinstance(self.orders, list):
+                    raise ValueError("orders must be a list")
                 
                 # 自愈与热启动机制：从 orders 历史流水中干跑还原出一份“理论持仓”
                 recon_positions = {}
@@ -270,21 +403,22 @@ class PaperExecutionAdapter(ExecutionAdapter):
                             f"[State-Check] Loaded positions ({len(positions)} holdings) differ from order ledger derivation ({len(recon_positions)} holdings). "
                             f"Preserving persistent snapshot to prevent accidental reset. Use manual self-heal if necessary."
                         )
-                # 智能自愈：若持久化持仓中的 entry_time 为 "N/A"，尝试从流水推导的 recon_positions 中修复补齐
-                for code_c, pos_obj in positions.items():
-                    if pos_obj.entry_time == "N/A" and code_c in recon_positions:
-                        if recon_positions[code_c].entry_time and recon_positions[code_c].entry_time != "N/A":
-                            pos_obj.entry_time = recon_positions[code_c].entry_time
-                            logger.info(f"[State-Healing] Healed entry_time for {code_c} from orders ledger: {pos_obj.entry_time}")
+                replayed, replay_cash, replay_problems = self._replay_order_ledger(
+                    self.orders, self.initial_capital
+                )
+                reconciliation_problems = self._compare_snapshot_to_ledger(
+                    positions, cash, replayed, replay_cash, replay_problems
+                )
+                if reconciliation_problems:
+                    self._execution_block_reason = (
+                        "RESTORE_RECONCILIATION_FAILED:" + ",".join(reconciliation_problems)
+                    )
+                    logger.error("[State-Check] PAPER execution blocked: %s", self._execution_block_reason)
 
                 self.account = AccountSnapshot(cash=cash, initial_capital=self.initial_capital, positions=positions)
             except Exception as e:
-                logger.error(f"[State-Loading] Critical error loading state: {e}. Fallback to default state.")
-                if 'positions' not in locals():
-                    positions = {}
-                if 'cash' not in locals():
-                    cash = self.initial_capital
-                self.account = AccountSnapshot(cash=cash, initial_capital=self.initial_capital, positions=positions)
+                self._execution_block_reason = f"RESTORE_INVALID_STATE:{type(e).__name__}:{e}"
+                logger.error("[State-Loading] PAPER execution blocked: %s", self._execution_block_reason)
 
     def _save_state(self) -> None:
         import os
@@ -358,11 +492,23 @@ class PaperExecutionAdapter(ExecutionAdapter):
                         "request_id": str(o.get("request_id") or "")
                     })
 
+            from trading_kernel.t1_position_facts import build_t1_position_facts
+            t1_facts = build_t1_position_facts(positions_data, clean_orders)
+            for code, position in positions_data.items():
+                position.update(t1_facts.get(self._canonical_code(code), {}))
+
             data = {
+                "snapshot_version": "2.0",
+                "trade_date": datetime.now().date().isoformat(),
                 "initial_capital": safe_json_float(self.initial_capital),
                 "cash": safe_json_float(self.account.cash),
+                "account": self.account.to_dict(),
                 "positions": positions_data,
-                "orders": clean_orders
+                "orders": clean_orders,
+                "reconciliation": {
+                    "paper_execution_ready": not bool(self._execution_block_reason),
+                    "block_reason": self._execution_block_reason,
+                },
             }
             
             json_str = json.dumps(data, ensure_ascii=False, indent=4)
@@ -377,6 +523,9 @@ class PaperExecutionAdapter(ExecutionAdapter):
             logger.error(f"[State-Saving] Critical error saving state: {e}")
 
     def submit_order(self, order: ApprovedOrder) -> bool:
+        if self._execution_block_reason:
+            logger.error("[Trade Gate] PAPER order rejected: %s", self._execution_block_reason)
+            return False
         if order.size_pct <= 0 or order.price <= 0:
             return False
 
@@ -487,34 +636,17 @@ class PaperExecutionAdapter(ExecutionAdapter):
 
             # 校验 T+1 规则：当日买不能当日卖（开仓时间间隔需大于等于一天，测试环境/模拟模式豁免）
             if not (self._is_test or self._is_simulation):
-                is_today_bought = False
-                if pos.entry_time and pos.entry_time != "N/A":
-                    try:
-                        time_part = pos.entry_time.replace("T", " ")
-                        date_str = time_part.split()[0]
-                        today_md = datetime.now().strftime("%m-%d")
-                        today_ymd = datetime.now().strftime("%Y-%m-%d")
-                        if date_str == today_ymd or date_str == today_md:
-                            is_today_bought = True
-                    except Exception:
-                        pass
-
-                today_str = datetime.now().strftime("%Y-%m-%d")
-                bought_today_vol = 0.0
-                for o in self.orders:
-                    o_ts = o.get("timestamp", "")
-                    if o_ts.startswith(today_str) and o.get("code") == code and o.get("action") in {"BUY", "ADD"}:
-                        bought_today_vol += float(o.get("volume", 0.0))
-                
-                if is_today_bought:
-                    available_vol = 0.0
-                else:
-                    available_vol = max(0.0, pos.volume - bought_today_vol)
-
+                from trading_kernel.t1_position_facts import build_t1_position_facts
+                position_rows = {key: value.to_dict() for key, value in self.account.positions.items()}
+                facts = build_t1_position_facts(
+                    position_rows, self.orders, trading_day=datetime.now().date().isoformat()
+                ).get(self._canonical_code(code), {})
+                available_vol = float(facts.get("sellable_qty", 0.0) or 0.0)
+                bought_today_vol = float(facts.get("today_buy_qty", 0.0) or 0.0)
                 if sell_volume > available_vol:
                     logger.warning(
                         f"[T+1 Rule Gate] Rejected {action} order for {code}. "
-                        f"Entry time: {pos.entry_time}, total volume: {pos.volume:.4f}, "
+                        f"Facts status: {facts.get('t1_fact_status', 'MISSING')}, total volume: {pos.volume:.4f}, "
                         f"bought today: {bought_today_vol:.4f}, available to sell: {available_vol:.4f}, requested: {sell_volume:.4f}."
                     )
                     return False
@@ -573,7 +705,21 @@ class PaperExecutionAdapter(ExecutionAdapter):
             pass
 
     def get_positions(self) -> dict[str, dict[str, Any]]:
-        return {code: pos.to_dict() for code, pos in self.account.positions.items()}
+        positions = {code: pos.to_dict() for code, pos in self.account.positions.items()}
+        from trading_kernel.t1_position_facts import build_t1_position_facts
+        facts = build_t1_position_facts(positions, self.orders)
+        for code, position in positions.items():
+            position.update(facts.get(self._canonical_code(code), {}))
+        return positions
+
+    def get_restore_status(self) -> dict[str, Any]:
+        return {
+            "ready": not bool(self._execution_block_reason),
+            "block_reason": self._execution_block_reason,
+        }
 
     def get_account_snapshot(self) -> dict[str, Any]:
-        return self.account.to_dict()
+        snapshot = self.account.to_dict()
+        snapshot["paper_execution_ready"] = not bool(self._execution_block_reason)
+        snapshot["paper_execution_block_reason"] = self._execution_block_reason
+        return snapshot

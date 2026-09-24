@@ -28,7 +28,9 @@ from PyQt6.QtCore import Qt, QTimer, QEvent
 from PyQt6.QtGui import QColor, QFont, QAction, QKeySequence
 
 from ats.strategy.ipo_trading_center import IPOTradingCenter, IPOOrderDirective, IPOTradingPosition
+from ats.strategy.directive_execution_guard import ENTRY_ACTIONS, validate_directive
 from ats.strategy.ipo_vwap_detector_engine import VWAPDetectorSignal
+from ats.universe_manager import derive_lifecycle_audit_ref, derive_lifecycle_flags
 from ats.alert_notifier import AlertNotifier
 from ats.ui.styles import (
     setup_header_persistence, auto_fit_columns_once,
@@ -1153,6 +1155,10 @@ class IPOCommandRoomDialog(QDialog):
         if target_directive:
             act_disp = get_action_display_name(target_directive.action)
             act_exec_single = menu.addAction(f"⚡ 立即执行该股决议: [{act_disp}] {target_directive.name}")
+            block_reason = self._directive_ui_block_reason(target_directive)
+            if block_reason:
+                act_exec_single.setEnabled(False)
+                act_exec_single.setToolTip(block_reason)
             act_exec_single.triggered.connect(lambda: self._execute_single_directive(target_directive))
         else:
             # 若已持仓，提供一键平仓选项
@@ -1255,10 +1261,41 @@ class IPOCommandRoomDialog(QDialog):
 
     def _execute_single_directive(self, directive: IPOOrderDirective):
         """执行单只决议"""
+        block_reason = self._directive_ui_block_reason(directive)
+        if block_reason:
+            QMessageBox.warning(self, "指令不可执行", block_reason)
+            return
         success = self.trading_center.execute_directive(directive)
         if success:
             QMessageBox.information(self, "执行成功", f"标的 [{directive.name}({directive.code})] 决议已成功执行！")
             self.refresh_data()
+
+    def _directive_ui_block_reason(self, directive: IPOOrderDirective) -> str:
+        action = str(getattr(directive, "action", "") or "").upper()
+        if action not in ENTRY_ACTIONS:
+            return ""
+        code = str(getattr(directive, "code", "") or "").strip().zfill(6)
+        signal_state = str(getattr(directive, "signal_state", "") or "").upper()
+        ledger = getattr(self, "signal_ledger", None)
+        entry = getattr(ledger, "entries", {}).get(code) if ledger is not None else None
+        lifecycle = getattr(entry, "lifecycle", None) if entry is not None else None
+        lifecycle_state = str(getattr(getattr(lifecycle, "state", None), "value", getattr(lifecycle, "state", ""))).upper()
+        if signal_state == "INVALIDATED" or lifecycle_state == "INVALIDATED" or (
+            entry is not None and (
+                str(getattr(entry, "tier", "")).upper() == "INACTIVE"
+                or any("INVALIDATED" in str(item.get("action", "")).upper()
+                       for item in getattr(entry, "state_history", []) if isinstance(item, dict))
+            )
+        ):
+            return "信号生命周期已失效，禁止从指挥室执行买入。"
+        report = getattr(self.trading_center, "_reports_cache", {}).get(code)
+        validation = validate_directive(directive, report)
+        if not validation.allowed and validation.code in {
+            "DIRECTIVE_EXPIRED", "STALE_DIRECTIVE", "STALE_LIVE_SNAPSHOT",
+            "STRUCTURE_INVALIDATED", "MISSING_LIVE_SNAPSHOT", "INVALID_LIVE_PRICE",
+        }:
+            return validation.reason
+        return ""
 
     def _close_single_position(self, code: str, name: str):
         """平仓单只持仓"""
@@ -1524,6 +1561,8 @@ class IPOCommandRoomDialog(QDialog):
             self.lbl_capital.setToolTip(
                 "TK PAPER统一账户对账\n"
                 f"状态: {status}\n"
+                f"内核对账: {reconcile.get('kernel_status', 'UNKNOWN')} / 流水: {reconcile.get('ledger_status', 'UNKNOWN')}\n"
+                f"PAPER可执行: {reconcile.get('paper_execution_ready', False)} {reconcile.get('paper_execution_block_reason', '')}\n"
                 f"当前持仓快照: {reconcile.get('snapshot_position_count', 0)}只\n"
                 f"订单推导持仓: {reconcile.get('order_derived_position_count', 0)}只\n"
                 f"仅快照存在: {', '.join(reconcile.get('snapshot_only_codes', [])) or '--'}\n"
@@ -1594,21 +1633,17 @@ class IPOCommandRoomDialog(QDialog):
             ledger_entry = None
             if hasattr(self, 'signal_ledger') and hasattr(self.signal_ledger, 'entries'):
                 ledger_entry = self.signal_ledger.entries.get(sig.code)
-
-            drawdown_pct = 0.0
+            lifecycle_audit_ref = derive_lifecycle_audit_ref(ledger_entry)
+            ledger_invalidated, ledger_weakened, drawdown_pct = derive_lifecycle_flags(ledger_entry)
             is_invalidated = (
                 getattr(sig, 'channel_stage', '') == 'INVALIDATED'
                 or getattr(sig, 'signal_type', '') in ('WEAK_EXIT', 'STOP_LOSS')
+                or ledger_invalidated
                 or (ledger_entry and (getattr(ledger_entry, 'tier', '') == 'INACTIVE' or '双VWAP' in getattr(ledger_entry, 'signal_tag', '')))
             )
-            is_weakened = False
-            if ledger_entry:
-                p_val = float(getattr(ledger_entry, 'latest_pct', 0.0) or 0.0)
-                peak_val = float(getattr(ledger_entry, 'peak_pct', p_val) or p_val)
-                drawdown_pct = max(0.0, peak_val - p_val)
-                is_weakened = (getattr(ledger_entry, 'weak_since_ts', 0.0) > 0 or drawdown_pct >= 3.0 or '走弱' in getattr(ledger_entry, 'signal_tag', ''))
-            elif getattr(sig, 'relative_to_leader_gap', 0.0) >= 25.0:
-                is_weakened = True
+            is_weakened = ledger_weakened or (
+                ledger_entry is None and getattr(sig, 'relative_to_leader_gap', 0.0) >= 25.0
+            )
 
             # 角色 (精准映射为标准中文 + 简短中文决策徽章透出)
             role_raw = sig.global_fleet_role or "--"
@@ -1626,11 +1661,17 @@ class IPOCommandRoomDialog(QDialog):
             if is_invalidated:
                 role_it.setForeground(QColor("#ff3333"))
                 role_it.setFont(QFont("Microsoft YaHei", -1, QFont.Weight.Bold))
-                role_it.setToolTip(f"【⛔ 破位失效】\n已跌破关键防守位或双VWAP破位，禁止新增买入！")
+                role_it.setToolTip(
+                    f"【⛔ 破位失效】\n已跌破关键防守位或双VWAP破位，禁止新增买入！"
+                    + (f"\n审计追溯: {lifecycle_audit_ref}" if lifecycle_audit_ref else "")
+                )
             elif is_weakened:
                 role_it.setForeground(QColor("#ffaa00"))
                 role_it.setFont(QFont("Microsoft YaHei", -1, QFont.Weight.Bold))
-                role_it.setToolTip(f"【⚠️ 动能走弱】\n高位回撤 {drawdown_pct:.1f}% 或动能转负，优先防守！")
+                role_it.setToolTip(
+                    f"【⚠️ 动能走弱】\n高位回撤 {drawdown_pct:.1f}% 或动能转负，优先防守！"
+                    + (f"\n审计追溯: {lifecycle_audit_ref}" if lifecycle_audit_ref else "")
+                )
             elif role_raw == "LEADER":
                 role_it.setForeground(QColor("#ffaa00"))
             elif role_raw == "VANGUARD":
@@ -1662,6 +1703,8 @@ class IPOCommandRoomDialog(QDialog):
             elif is_weakened and "走弱" not in desc_str and "回撤" not in desc_str:
                 dd_info = f"回撤-{drawdown_pct:.1f}%" if drawdown_pct >= 3.0 else "动能走弱"
                 desc_str = f"⚠️[{dd_info}] {desc_str}"
+            if lifecycle_audit_ref:
+                desc_str = f"{desc_str} | {lifecycle_audit_ref}"
 
             desc_it = QTableWidgetItem(desc_str)
             if is_invalidated:
@@ -1903,9 +1946,28 @@ class IPOCommandRoomDialog(QDialog):
                 if plan:
                     qg = getattr(d, "quality_grade", "") or "S"
                     reason_disp = f"[{qg}级 {plan.strategy_tag}] 网格:{plan.buy_zone_lower:.2f}~{plan.buy_zone_upper:.2f} 止损:{plan.higher_low_stop:.2f} | {d.reason}"
+                audit_envelope = getattr(d, "audit_envelope", None) or {}
+                if not isinstance(audit_envelope, dict):
+                    audit_envelope = {}
+                reject_reason = str(
+                    getattr(d, "reject_reason", "") or audit_envelope.get("gate_reason", "") or ""
+                ).strip()
+                if reject_reason and reject_reason not in reason_disp:
+                    reason_disp = f"{reason_disp} | 阻断: {reject_reason}"
                 it_reason = QTableWidgetItem(reason_disp)
+                audit_fields = (
+                    ("directive", getattr(d, "directive_id", "")),
+                    ("candidate", audit_envelope.get("candidate_id", "")),
+                    ("plan", audit_envelope.get("plan_id", "")),
+                    ("snapshot", audit_envelope.get("snapshot_id", "")),
+                )
+                audit_text = " | ".join(
+                    f"{label}={value}" for label, value in audit_fields if value
+                )
+                if audit_text:
+                    it_reason.setToolTip(f"审计追溯: {audit_text}\n{reason_disp}")
                 if plan:
-                    it_reason.setToolTip(
+                    plan_tooltip = (
                         f"【TradePlan 不可变交易计划】\n"
                         f"• 建议动作: {act_disp}\n"
                         f"• 触发价: {plan.trigger_price:.2f}元\n"
@@ -1915,6 +1977,9 @@ class IPOCommandRoomDialog(QDialog):
                         f"• 目标1(中轨): {plan.target_1_channel_mid:.2f}元 | 目标2: {plan.target_2_breakout_high:.2f}元\n"
                         f"----------------------------------------\n"
                         f"{d.reason}"
+                    )
+                    it_reason.setToolTip(
+                        f"{plan_tooltip}\n审计追溯: {audit_text}" if audit_text else plan_tooltip
                     )
                 self.tbl_orders.setItem(r, 8, it_reason)
         else:

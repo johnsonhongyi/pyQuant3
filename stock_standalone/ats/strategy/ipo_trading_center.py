@@ -33,8 +33,9 @@ import json
 import copy
 import datetime
 import inspect
+import hashlib
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Any, Tuple, Union
+from typing import Callable, Dict, List, Optional, Any, Tuple, Union
 
 from ats.strategy.ipo_market_sentiment_engine import IPOMarketSentimentEngine, MarketSentimentSnapshot
 from ats.strategy.ipo_vwap_detector_engine import VWAPDetectorSignal, batch_evaluate_horse_race_ranking
@@ -195,6 +196,12 @@ class IPOTradingPosition:
     trade_plan: Optional[IPOTradePlan] = None
     exit_rule_id: str = ""
     exit_rule_layer: int = 0
+    exit_status: str = ""
+    exit_action: str = ""
+    exit_requested_shares: int = 0
+    exit_requested_at: float = 0.0
+    exit_gate_reason: str = ""
+    pending_exit_directive_id: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         from dataclasses import asdict
@@ -248,10 +255,34 @@ class IPOOrderDirective:
     reject_reason: str = ""
     validated_at: float = 0.0
     validation_price: float = 0.0
+    directive_id: str = ""
+    audit_envelope: Optional[Dict[str, Any]] = None
 
     def __post_init__(self) -> None:
         """Lift immutable TradePlan execution fields onto the directive surface."""
         action = str(self.action or "").upper()
+        if not self.directive_id:
+            material = "|".join((
+                str(self.code or "").strip().zfill(6), action,
+                str(self.exit_rule_id or ""), str(self.timestamp or 0.0),
+                str(getattr(self.trade_plan, "plan_id", "") or ""),
+            ))
+            self.directive_id = hashlib.sha256(material.encode("utf-8")).hexdigest()[:24]
+        if self.audit_envelope is None:
+            self.audit_envelope = {
+                "directive_id": self.directive_id,
+                "candidate_id": "",
+                "plan_id": str(getattr(self.trade_plan, "plan_id", "") or ""),
+                "code": str(self.code or "").strip().zfill(6),
+                "action": action,
+                "qty": int(self.shares or 0),
+                "price": float(self.price or 0.0),
+                "expires_at": str(self.expire_at or ""),
+                "gate_reason": "",
+                "status": "CREATED",
+                "execution_id": "",
+                "order_id": "",
+            }
         if not self.signal_state:
             if action in ("SELL", "EXIT_ALL", "REDUCE", "REDUCE_30", "REDUCE_HALF"):
                 self.signal_state = "EXIT"
@@ -278,6 +309,15 @@ class IPOOrderDirective:
             self.target_2_price = float(getattr(plan, "target_2_swing_high", 0.0) or 0.0)
         if not self.expire_at:
             self.expire_at = str(getattr(plan, "expire_at", "") or "")
+        if self.audit_envelope is not None:
+            self.audit_envelope.update({
+                "plan_id": str(getattr(self.trade_plan, "plan_id", "") or ""),
+                "code": str(self.code or "").strip().zfill(6),
+                "action": action,
+                "qty": int(self.shares or 0),
+                "price": float(self.price or 0.0),
+                "expires_at": str(self.expire_at or ""),
+            })
 
     def to_dict(self) -> Dict[str, Any]:
         from dataclasses import asdict
@@ -311,11 +351,13 @@ class IPOTradingCenter:
     def __init__(self, total_capital: float = 1000000.0, auto_load_ledger: bool = False,
                  ledger_file: Optional[str] = None,
                  exit_engine: Optional[ProactiveExitEngine] = None,
-                 deployment_gate: Optional[SubnewDeploymentGate] = None):
+                 deployment_gate: Optional[SubnewDeploymentGate] = None,
+                 directive_executor: Optional[Callable[[Any], Any]] = None):
         self.total_capital = total_capital       # 虚拟/实盘总资金池 (默认 100 万基准)
         self.available_cash = total_capital
         self._ledger_file = ledger_file
         self._auto_load_ledger = auto_load_ledger
+        self._directive_executor = directive_executor
         self._positions: Dict[str, IPOTradingPosition] = {}
         self._closed_positions: List[IPOTradingPosition] = []
         self._signal_iteration_log: List[Dict[str, Any]] = []
@@ -344,6 +386,7 @@ class IPOTradingCenter:
         self._recent_directive_fingerprints: Dict[str, float] = {}
         self._directive_dedupe_window_sec: float = 120.0
         self._trade_plans: Dict[str, IPOTradePlan] = {} # 标的对应的不变 TradePlan 字典
+        self._pending_exit_intents: Dict[str, Dict[str, Any]] = {}
         self._emitted_plan_ids: set = set()            # 已生成指令的 TradePlan ID 集合 (刷新幂等防重)
         self._emitted_signal_ids: set = set()          # 已生成指令的 Signal ID 集合
         self.exit_engine = exit_engine or ProactiveExitEngine()
@@ -599,10 +642,101 @@ class IPOTradingCenter:
         with self._lock:
             return clean_code in self._execution_blocked_codes
 
+    def _defer_exit_for_next_session(
+        self, pos: IPOTradingPosition, *, action: str, shares: int, reason: str,
+        rule_id: str, rule_layer: int = 0, requested_at: Optional[float] = None,
+    ) -> None:
+        """Persist an exit intent that is blocked only by the T+1 sell lock."""
+        now_ts = float(requested_at or time.time())
+        if pos.exit_status in ("EXIT_DEFERRED_T1", "NEXT_DAY_EXIT_READY", "SUBMITTED"):
+            return
+        pos.exit_status = "EXIT_DEFERRED_T1"
+        pos.exit_action = str(action or "EXIT_ALL").upper()
+        pos.exit_requested_shares = max(0, int(shares or 0))
+        pos.exit_requested_at = now_ts
+        pos.exit_gate_reason = "T1_SELL_LOCK"
+        pos.exit_reason = str(reason or "")
+        pos.exit_rule_id = str(rule_id or "")
+        pos.exit_rule_layer = int(rule_layer or 0)
+        identity = "|".join((
+            pos.code.strip().zfill(6), pos.exit_action, pos.exit_rule_id,
+            str(pos.exit_requested_at), str(getattr(pos.trade_plan, "plan_id", "") or ""),
+        ))
+        pos.pending_exit_directive_id = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]
+        self._append_signal_iteration_log(
+            "EXIT_DEFERRED_T1", pos.code, pos.name, pos.current_price, 0.0,
+            f"{pos.exit_reason} | 延期原因: T+1 当日无可卖持仓",
+            signal_tier=pos.signal_tier, directive_id=pos.pending_exit_directive_id,
+        )
+        self._save_persisted_ledger()
+
+    def _recover_deferred_exit_directives(self) -> None:
+        """Promote deferred exits when authoritative sellable shares become available."""
+        existing_ids = {getattr(item, "directive_id", "") for item in self._pending_directives}
+        today = time.strftime("%Y-%m-%d")
+        changed = False
+        for pos in self._positions.values():
+            if pos.exit_status == "EXIT_DEFERRED_T1":
+                if not pos.entry_date or pos.entry_date >= today or pos.available_shares <= 0:
+                    continue
+                pos.exit_status = "NEXT_DAY_EXIT_READY"
+                changed = True
+            if pos.exit_status != "NEXT_DAY_EXIT_READY" and pos.exit_status != "SUBMITTED":
+                continue
+            if pos.available_shares <= 0 or pos.shares <= 0 or pos.current_price <= 0:
+                continue
+            was_ready = pos.exit_status == "NEXT_DAY_EXIT_READY"
+            if pos.pending_exit_directive_id and pos.pending_exit_directive_id in existing_ids:
+                continue
+            action = pos.exit_action or "EXIT_ALL"
+            requested_shares = int(pos.exit_requested_shares or 0)
+            if requested_shares <= 0 and action in ("REDUCE_30", "REDUCE_HALF"):
+                continue
+            shares = min(pos.available_shares, requested_shares or pos.available_shares)
+            if shares <= 0:
+                continue
+            directive = IPOOrderDirective(
+                action=action, code=pos.code, name=pos.name, price=pos.current_price,
+                shares=shares, urgency="CRITICAL", reason=pos.exit_reason,
+                directive_id=pos.pending_exit_directive_id,
+                timestamp=pos.exit_requested_at or time.time(), signal_tier=pos.signal_tier,
+                signal_level=pos.signal_level, quality_grade=pos.quality_grade,
+                strategy_tag=pos.strategy_tag, trade_plan=pos.trade_plan,
+                exit_rule_id=pos.exit_rule_id, exit_rule_layer=pos.exit_rule_layer,
+            )
+            pos.pending_exit_directive_id = directive.directive_id
+            pos.exit_status = "SUBMITTED"
+            if directive.audit_envelope is not None:
+                directive.audit_envelope["status"] = "SUBMITTED"
+                directive.audit_envelope["gate_reason"] = pos.exit_gate_reason
+            self._pending_directives.append(directive)
+            existing_ids.add(directive.directive_id)
+            if was_ready:
+                self._append_signal_iteration_log(
+                    "NEXT_DAY_EXIT_READY", pos.code, pos.name, pos.current_price, 0.0,
+                    f"{pos.exit_reason} | 次日可卖数量 {pos.available_shares}",
+                    signal_tier=pos.signal_tier,
+                )
+            changed = True
+        if changed:
+            self._save_persisted_ledger()
+
     def get_reconciliation_mismatches(self) -> Dict[str, Dict[str, Any]]:
-        """获取全部活跃的对账冲突字典快照"""
+        """获取逐代码冲突及 TK PAPER 账户级对账阻断快照。"""
         with self._lock:
-            return copy.deepcopy(self._reconciliation_mismatches)
+            mismatches = copy.deepcopy(self._reconciliation_mismatches)
+            paper_report = getattr(self, "_paper_reconciliation", None)
+            if self._auto_load_ledger and (
+                not isinstance(paper_report, dict)
+                or paper_report.get("status") != "ALIGNED"
+            ):
+                paper_report = paper_report if isinstance(paper_report, dict) else {}
+                mismatches["__PAPER_ACCOUNT__"] = {
+                    "status": str(paper_report.get("status") or "SSOT_NOT_RECONCILED"),
+                    "reason": str(paper_report.get("paper_execution_block_reason") or ""),
+                    "differences": list(paper_report.get("differences") or []),
+                }
+            return mismatches
 
     def _sync_from_unified_paper_account(self) -> None:
         """Mirror the TK paper SSOT into the command-room portfolio view."""
@@ -645,6 +779,7 @@ class IPOTradingCenter:
             for code, raw in kernel_positions.items():
                 clean_code = str(code).strip().zfill(6)
                 old = self._positions.get(clean_code)
+                saved_exit = self._pending_exit_intents.get(clean_code, {})
                 shares = int(float(raw.get("volume", 0.0) or 0.0))
                 cost = float(raw.get("entry_price", 0.0) or 0.0)
                 current = float(raw.get("current_price", cost) or cost)
@@ -709,7 +844,24 @@ class IPOTradingCenter:
                     quality_grade=old.quality_grade if old is not None else "S",
                     strategy_tag=old.strategy_tag if old is not None else str(raw.get("regime", "")),
                     trade_plan=old.trade_plan if old is not None else None,
+                    exit_status=old.exit_status if old is not None else saved_exit.get("exit_status", ""),
+                    exit_action=old.exit_action if old is not None else saved_exit.get("exit_action", ""),
+                    exit_requested_shares=old.exit_requested_shares if old is not None else int(saved_exit.get("exit_requested_shares", 0) or 0),
+                    exit_requested_at=old.exit_requested_at if old is not None else float(saved_exit.get("exit_requested_at", 0.0) or 0.0),
+                    exit_gate_reason=old.exit_gate_reason if old is not None else saved_exit.get("exit_gate_reason", ""),
+                    pending_exit_directive_id=old.pending_exit_directive_id if old is not None else saved_exit.get("pending_exit_directive_id", ""),
+                    exit_reason=old.exit_reason if old is not None else saved_exit.get("exit_reason", ""),
+                    exit_rule_id=old.exit_rule_id if old is not None else saved_exit.get("exit_rule_id", ""),
+                    exit_rule_layer=old.exit_rule_layer if old is not None else int(saved_exit.get("exit_rule_layer", 0) or 0),
                 )
+                if (old is not None and old.exit_status == "EXIT_DEFERRED_T1"
+                        and entry_date and entry_date < time.strftime("%Y-%m-%d")
+                        and sellable_qty > 0):
+                    synced[clean_code].exit_status = "NEXT_DAY_EXIT_READY"
+                elif (old is None and saved_exit.get("exit_status") == "EXIT_DEFERRED_T1"
+                      and entry_date and entry_date < time.strftime("%Y-%m-%d")
+                      and sellable_qty > 0):
+                    synced[clean_code].exit_status = "NEXT_DAY_EXIT_READY"
             self._positions = synced
             self.total_capital = unified_capital
             self.available_cash = float(account.get("cash", self.available_cash) or 0.0)
@@ -810,7 +962,9 @@ class IPOTradingCenter:
             extra_info={
                 "horse_rank": sig.horse_race_rank,
                 "horse_score": sig.horse_race_score,
-                "vwap": sig.vwap
+                "vwap": sig.vwap,
+                "cross_day_state": str((getattr(sig, "extra_data", {}) or {}).get("cross_day_state") or ""),
+                "cross_day_filter_version": str((getattr(sig, "extra_data", {}) or {}).get("cross_day_filter_version") or ""),
             }
         )
         self.register_trade_plan(plan)
@@ -924,6 +1078,7 @@ class IPOTradingCenter:
         Non-S5 BUY-like directives are demoted to OBSERVE in the general view, or stripped in executable view.
         """
         with self._lock:
+            self._recover_deferred_exit_directives()
             # 统一收敛执行视图：BUY/BUY_SCOUT/BUY_CONFIRM 若非 S5 必须降为 OBSERVE
             for d in self._pending_directives:
                 action = str(d.action or "").upper()
@@ -1046,6 +1201,8 @@ class IPOTradingCenter:
             "timestamp": now_ts,
             "time_str": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now_ts)),
             "action": directive.action,
+            "directive_id": directive.directive_id,
+            "audit_envelope": copy.deepcopy(directive.audit_envelope),
             "code": directive.code,
             "name": directive.name,
             "price": directive.price,
@@ -1060,12 +1217,75 @@ class IPOTradingCenter:
         self._signal_iteration_log.insert(0, item)
         self._signal_iteration_log = self._signal_iteration_log[:300]
 
-    def _reject_directive(self, directive: IPOOrderDirective, code: str, reason: str) -> bool:
+    def _stamp_execution_context(self, directives, signals, sentiment) -> None:
+        """Capture the market context used to generate this directive batch."""
+        signals_by_code = {
+            str(getattr(signal, "code", "") or "").strip().zfill(6): signal
+            for signal in (signals or []) if getattr(signal, "code", None)
+        }
+        tide_state = str(getattr(sentiment, "tide_state", "") or "")
+        for directive in directives or []:
+            audit = getattr(directive, "audit_envelope", None)
+            if not isinstance(audit, dict):
+                continue
+            code = str(getattr(directive, "code", "") or "").strip().zfill(6)
+            signal = signals_by_code.get(code)
+            plan = getattr(directive, "trade_plan", None)
+            extra = getattr(signal, "extra_data", {})
+            extra = extra if isinstance(extra, dict) else {}
+            if not audit.get("candidate_id"):
+                audit["candidate_id"] = str(
+                    getattr(signal, "candidate_id", "")
+                    or extra.get("candidate_id")
+                    or getattr(signal, "signal_id", "")
+                    or extra.get("signal_id")
+                    or ""
+                )
+            if not audit.get("plan_id"):
+                audit["plan_id"] = str(getattr(plan, "plan_id", "") or "")
+            if not audit.get("exit_rule_id"):
+                audit["exit_rule_id"] = str(getattr(directive, "exit_rule_id", "") or "")
+            if not audit.get("strategy_tag"):
+                audit["strategy_tag"] = str(
+                    getattr(directive, "strategy_tag", "")
+                    or getattr(plan, "strategy_tag", "")
+                    or getattr(signal, "strategy_tag", "")
+                    or ""
+                )
+            if tide_state and not audit.get("tide_state"):
+                audit["tide_state"] = tide_state
+            if audit.get("cross_day_state"):
+                continue
+            plan_info = getattr(plan, "extra_info", {})
+            plan_info = plan_info if isinstance(plan_info, dict) else {}
+            state = str(plan_info.get("cross_day_state") or "")
+            state = state or str(extra.get("cross_day_state") or "")
+            if not state and extra.get("cross_day_filter_version"):
+                state = (
+                    "FAILED_GAP_FADE" if extra.get("cross_day_failed_gap_fade")
+                    else "CLEAR"
+                )
+            if not state and str(getattr(directive, "action", "") or "").upper() in EXIT_ACTIONS:
+                state = "NOT_APPLICABLE_EXIT"
+            if state:
+                audit["cross_day_state"] = state
+    def _reject_directive(
+        self, directive: IPOOrderDirective, code: str, reason: str,
+        *, audit_status: str = "REJECTED",
+    ) -> bool:
         directive.signal_state = "BLOCKED"
         directive.reject_code = code
         directive.reject_reason = reason
+        if directive.audit_envelope is not None:
+            directive.audit_envelope["status"] = str(audit_status or "REJECTED")
+            directive.audit_envelope["gate_reason"] = str(code)
+        pos = self._positions.get(str(directive.code).strip().zfill(6))
+        if pos is not None and pos.pending_exit_directive_id == directive.directive_id:
+            pos.exit_status = str(audit_status or "REJECTED")
+            pos.exit_gate_reason = str(code)
         self._log_directive_event(
-            directive, status="REJECTED", reject_code=code, reject_reason=reason
+            directive, status=str(audit_status or "REJECTED"),
+            reject_code=code, reject_reason=reason
         )
         logger.warning("[IPO-TRADING] rejected %s %s [%s] %s",
                        directive.action, directive.code, code, reason)
@@ -1076,6 +1296,22 @@ class IPOTradingCenter:
         self, directives: List[IPOOrderDirective]
     ) -> List[IPOOrderDirective]:
         """Publish one clear, non-conflicting directive set without altering decisions."""
+        eligible_directives: List[IPOOrderDirective] = []
+        for item in directives or []:
+            action = str(getattr(item, "action", "") or "").upper()
+            if action in EXIT_ACTIONS:
+                pos = self._positions.get(str(item.code).strip().zfill(6))
+                if pos is not None and pos.shares > 0:
+                    if pos.available_shares <= 0:
+                        self._defer_exit_for_next_session(
+                            pos, action=action, shares=item.shares or pos.shares,
+                            reason=item.reason, rule_id=item.exit_rule_id,
+                            rule_layer=item.exit_rule_layer, requested_at=item.timestamp,
+                        )
+                        continue
+            eligible_directives.append(item)
+        directives = eligible_directives
+        self._save_persisted_ledger()
         # Carry forward only unresolved EXITs from the prior view. This makes
         # EXIT > BUY authoritative across refresh boundaries without retaining
         # stale BUY/OBSERVE directives indefinitely.
@@ -1114,6 +1350,25 @@ class IPOTradingCenter:
             key: ts for key, ts in self._recent_directive_fingerprints.items() if ts >= cutoff
         }
         self._pending_directives = deduped
+        for directive in deduped:
+            if str(directive.action or "").upper() not in EXIT_ACTIONS:
+                continue
+            pos = self._positions.get(str(directive.code).strip().zfill(6))
+            if pos is None or pos.shares <= 0 or pos.available_shares <= 0:
+                continue
+            pos.exit_status = "SUBMITTED"
+            pos.exit_action = str(directive.action or "").upper()
+            pos.exit_requested_shares = min(
+                pos.available_shares, directive.shares or pos.available_shares
+            )
+            pos.exit_requested_at = directive.timestamp or time.time()
+            pos.exit_gate_reason = ""
+            pos.exit_reason = directive.reason
+            pos.exit_rule_id = directive.exit_rule_id
+            pos.exit_rule_layer = directive.exit_rule_layer
+            pos.pending_exit_directive_id = directive.directive_id
+            if directive.audit_envelope is not None:
+                directive.audit_envelope["status"] = "SUBMITTED"
         summary = result.summary()
         summary["time_window_suppressed_count"] = duplicate_window_count
         summary["actionable_count"] = len([
@@ -1313,6 +1568,13 @@ class IPOTradingCenter:
                 raw_logs = data.get("signal_iteration_log", [])
                 if isinstance(raw_logs, list):
                     self._signal_iteration_log = raw_logs
+                raw_exit_intents = data.get("pending_exit_intents", [])
+                if isinstance(raw_exit_intents, list):
+                    self._pending_exit_intents = {
+                        str(item.get("code", "")).strip().zfill(6): dict(item)
+                        for item in raw_exit_intents
+                        if isinstance(item, dict) and item.get("code")
+                    }
 
                 # 恢复名称快照（供 TK SSOT 冷启动场景中文名称解析使用）
                 name_snap = data.get("name_snapshot", {})
@@ -1368,6 +1630,22 @@ class IPOTradingCenter:
                 for p in self._positions.values()
                 if p.shares > 0 and p.name and not p.name.isdigit() and not p.name.startswith("个股_")
             }
+            pending_exit_intents = [
+                {
+                    "code": p.code,
+                    "exit_status": p.exit_status,
+                    "exit_action": p.exit_action,
+                    "exit_requested_shares": p.exit_requested_shares,
+                    "exit_requested_at": p.exit_requested_at,
+                    "exit_gate_reason": p.exit_gate_reason,
+                    "pending_exit_directive_id": p.pending_exit_directive_id,
+                    "exit_reason": p.exit_reason,
+                    "exit_rule_id": p.exit_rule_id,
+                    "exit_rule_layer": p.exit_rule_layer,
+                }
+                for p in self._positions.values()
+                if p.exit_status in ("EXIT_DEFERRED_T1", "NEXT_DAY_EXIT_READY", "SUBMITTED")
+            ]
             payload = {
                 "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
                 "trading_mode": self.trading_mode,
@@ -1377,6 +1655,7 @@ class IPOTradingCenter:
                 "directive_history": order_list,
                 "signal_iteration_log": self._signal_iteration_log[:200],
                 "name_snapshot": name_snapshot,
+                "pending_exit_intents": pending_exit_intents,
             }
             if not production_ssot:
                 # Explicit legacy/custom ledgers remain backwards compatible for tests/tools.
@@ -1972,6 +2251,18 @@ class IPOTradingCenter:
                             exit_rule_id="exit_tide_climax_distribution",
                             exit_rule_layer=0,
                         ))
+                    elif exit_price > 0:
+                        reason = (
+                            "T1 高潮派发退出: SSS 龙头先减半"
+                            if is_protected_leader else "T1 高潮派发退出: 非核心持仓清退"
+                        )
+                        pos.current_price = exit_price
+                        self._defer_exit_for_next_session(
+                            pos, action=action, shares=(int(pos.shares * 0.5 / 100) * 100
+                                                        if action == "REDUCE_HALF" else pos.shares),
+                            reason=reason, rule_id="exit_tide_climax_distribution",
+                            requested_at=now_ts,
+                        )
                     continue
 
                 if not sig or sig.price <= 0:
@@ -1993,6 +2284,12 @@ class IPOTradingCenter:
                 if is_stop_out:
                     tradable_shares = min(pos.shares, max(0, pos.available_shares))
                     if tradable_shares <= 0:
+                        pos.current_price = sig.price
+                        self._defer_exit_for_next_session(
+                            pos, action="SELL", shares=pos.shares, reason=stop_reason,
+                            rule_id="exit_base_low_broken" if sig.has_bottom_base else "exit_vwap_breakdown",
+                            rule_layer=8, requested_at=now_ts,
+                        )
                         continue
                     directives.append(IPOOrderDirective(
                         action="SELL",
@@ -2005,7 +2302,9 @@ class IPOTradingCenter:
                         reason=stop_reason,
                         horse_rank=sig.horse_race_rank,
                         sentiment_phase=sentiment.heat_stage,
-                        timestamp=now_ts
+                        timestamp=now_ts,
+                        exit_rule_id=("exit_base_low_broken" if sig.has_bottom_base else "exit_vwap_breakdown"),
+                        exit_rule_layer=8,
                     ))
                     continue
 
@@ -2013,6 +2312,13 @@ class IPOTradingCenter:
                 if sig.is_climax_exit or (sig.suspension_count >= 1 and sig.vwap_diff_pct >= 20.0):
                     tradable_shares = min(pos.shares, max(0, pos.available_shares))
                     if tradable_shares <= 0:
+                        pos.current_price = sig.climax_preset_sell_price if sig.climax_preset_sell_price > 0 else sig.price
+                        self._defer_exit_for_next_session(
+                            pos, action="SELL", shares=pos.shares,
+                            reason="高潮冲顶退出：临停加速，持仓锁定待次日可卖后退出",
+                            rule_id="exit_climax_distribution", rule_layer=4,
+                            requested_at=now_ts,
+                        )
                         continue
                     sell_px = sig.climax_preset_sell_price if sig.climax_preset_sell_price > 0 else sig.price
                     urg_type = "LIMIT" if sig.climax_preset_sell_price > sig.price else "CRITICAL"
@@ -2027,7 +2333,9 @@ class IPOTradingCenter:
                         reason=f"🚨 提前算法设计挂单高抛: 累计临停加速，提前挂单¥{sell_px:.2f}冲顶止盈，防复牌戛然而止被核按钮！",
                         horse_rank=sig.horse_race_rank,
                         sentiment_phase=sentiment.heat_stage,
-                        timestamp=now_ts
+                        timestamp=now_ts,
+                        exit_rule_id="exit_climax_distribution",
+                        exit_rule_layer=4,
                     ))
                     continue
 
@@ -2151,6 +2459,7 @@ class IPOTradingCenter:
             # 狂热高潮期：常规次新严禁新开仓防 T+1 追高被埋，但首发上市首日黄金吸筹 (IPO_FIRST_BUY) 例外允许锁定极低成本筹码！
             if sentiment.heat_stage == "🌋 狂热高潮":
                 if not (top_leader and top_leader.signal_type == "IPO_FIRST_BUY"):
+                    self._stamp_execution_context(directives, all_signals, sentiment)
                     return self._publish_converged_directives(directives)
                 max_fleet_weight = 40.0
                 single_leader_weight = 35.0
@@ -2459,6 +2768,7 @@ class IPOTradingCenter:
                             directives.append(directive)
                             current_fleet_weight = round(current_fleet_weight + assigned_weight, 4)
 
+            self._stamp_execution_context(directives, all_signals, sentiment)
             directives = self._publish_converged_directives(directives)
 
             # ── 无条件追加全池赛马扫描快照日志 (盘后/收盘后历史信号日志面板不空白) ──
@@ -2656,23 +2966,28 @@ class IPOTradingCenter:
                 "exit_hard_stop",
             }
             is_catastrophic = action.rule_id in catastrophic_rules
+            if action.action_type == "REDUCE_30":
+                requested_shares = int(pos.shares * 0.3 / 100) * 100
+            elif action.action_type == "REDUCE_HALF":
+                requested_shares = int(pos.shares * 0.5 / 100) * 100
+            else:
+                requested_shares = pos.shares
             if pos.available_shares <= 0:
                 if watch is not None:
                     watch.reduce_count = reduce_count_before
                     watch.last_reduce_time = last_reduce_before
+                self._defer_exit_for_next_session(
+                    pos, action=action.action_type, shares=requested_shares,
+                    reason=action.reason, rule_id=action.rule_id,
+                    rule_layer=action.layer, requested_at=action.timestamp,
+                )
                 logger.warning(
-                    "[IPO-TRADING] T+1 hard lock blocked %s for %s (available_shares=0)",
+                    "[IPO-TRADING] T+1 hard lock deferred %s for %s (available_shares=0)",
                     action.action_type, clean_code,
                 )
                 return None
 
-            if action.action_type == "REDUCE_30":
-                shares = int(pos.shares * 0.3 / 100) * 100
-            elif action.action_type == "REDUCE_HALF":
-                shares = int(pos.shares * 0.5 / 100) * 100
-            else:
-                shares = pos.shares
-            shares = min(pos.available_shares, max(0, shares))
+            shares = min(pos.available_shares, max(0, requested_shares))
             if shares <= 0:
                 return None
 
@@ -2702,7 +3017,19 @@ class IPOTradingCenter:
                 for pending in self._pending_directives
             ):
                 return None
+            pos.exit_status = "SUBMITTED"
+            pos.exit_action = directive.action
+            pos.exit_requested_shares = shares
+            pos.exit_requested_at = directive.timestamp or time.time()
+            pos.exit_gate_reason = ""
+            pos.exit_reason = directive.reason
+            pos.exit_rule_id = directive.exit_rule_id
+            pos.exit_rule_layer = directive.exit_rule_layer
+            pos.pending_exit_directive_id = directive.directive_id
+            if directive.audit_envelope is not None:
+                directive.audit_envelope["status"] = "SUBMITTED"
             self._pending_directives.append(directive)
+            self._save_persisted_ledger()
             return directive
 
     def record_order_execution(self, directive: IPOOrderDirective) -> bool:
@@ -2723,6 +3050,17 @@ class IPOTradingCenter:
 
         clean_code = str(directive.code).strip().zfill(6)
         action_upper = str(directive.action or "").upper()
+        paper_report = getattr(self, "_paper_reconciliation", None)
+        if self._auto_load_ledger and (
+            not isinstance(paper_report, dict)
+            or paper_report.get("status") != "ALIGNED"
+        ):
+            status = str(paper_report.get("status") or "SSOT_NOT_RECONCILED") if isinstance(paper_report, dict) else "SSOT_NOT_RECONCILED"
+            return self._reject_directive(
+                directive,
+                "PAPER_ACCOUNT_RECONCILIATION_BLOCKED",
+                f"TK PAPER 账户对账未通过 ({status})，禁止执行指令",
+            )
 
         # 2. 持仓对账冲突硬拦截：EXECUTION_BLOCKED 标的禁止 BUY/SELL
         if clean_code in self._execution_blocked_codes:
@@ -2839,17 +3177,44 @@ class IPOTradingCenter:
         # The persistent singleton used by the command room must execute through
         # the TK Paper kernel first.  Ephemeral instances used by unit tests and
         # offline strategy evaluation keep their isolated in-memory behavior.
-        if self._auto_load_ledger and not getattr(directive, "_kernel_routed", False):
+        if (self._auto_load_ledger or self._directive_executor is not None) and not getattr(directive, "_kernel_routed", False):
             try:
-                from ats.unified_paper_account import execute_command_directive
-                kernel_result = execute_command_directive(directive)
+                if self._directive_executor is not None:
+                    kernel_result = self._directive_executor(directive)
+                else:
+                    from ats.unified_paper_account import execute_command_directive
+                    kernel_result = execute_command_directive(directive)
                 if not kernel_result.executed:
+                    audit_status = (
+                        "PARTIAL"
+                        if str(getattr(kernel_result, "status", "") or "").upper() == "PARTIAL"
+                        else "REJECTED"
+                    )
+                    if directive.audit_envelope is not None:
+                        directive.audit_envelope.update({
+                            "status": audit_status,
+                            "request_id": str(getattr(kernel_result, "request_id", "") or directive.directive_id),
+                            "order_id": str(getattr(kernel_result, "order_id", "") or ""),
+                            "execution_id": str(getattr(kernel_result, "execution_id", "") or ""),
+                            "related_orders": list(getattr(kernel_result, "related_orders", ()) or ()),
+                            "gate_reason": str(kernel_result.reject_code or "TK_PAPER_REJECTED"),
+                        })
                     return self._reject_directive(
                         directive,
                         str(kernel_result.reject_code or "TK_PAPER_REJECTED"),
                         str(getattr(kernel_result, "message", "") or kernel_result.reject_code or "TK PAPER rejected"),
+                        audit_status=audit_status,
                     )
                 setattr(directive, "_kernel_routed", True)
+                if directive.audit_envelope is not None:
+                    directive.audit_envelope.update({
+                        "status": str(getattr(kernel_result, "status", "EXECUTED") or "EXECUTED"),
+                        "request_id": str(getattr(kernel_result, "request_id", "") or directive.directive_id),
+                        "order_id": str(getattr(kernel_result, "order_id", "") or ""),
+                        "execution_id": str(getattr(kernel_result, "execution_id", "") or ""),
+                        "related_orders": list(getattr(kernel_result, "related_orders", ()) or ()),
+                        "qty": int(kernel_result.volume) if kernel_result.volume > 0 else int(directive.shares or 0),
+                    })
                 if kernel_result.volume > 0:
                     directive.shares = int(kernel_result.volume)
                 if kernel_result.size_pct > 0:
@@ -3251,6 +3616,13 @@ class IPOTradingCenter:
                 pos.exit_reason = directive.reason
                 pos.exit_rule_id = directive.exit_rule_id
                 pos.exit_rule_layer = directive.exit_rule_layer
+                remaining_shares = max(0, pos.shares - sell_shares)
+                pos.exit_status = "PARTIAL" if remaining_shares > 0 else "FILLED"
+                pos.exit_gate_reason = ""
+                pos.pending_exit_directive_id = ""
+                if directive.audit_envelope is not None:
+                    directive.audit_envelope["status"] = pos.exit_status
+                    directive.audit_envelope["qty"] = sell_shares
                 pos.last_action = directive.action
                 pos.last_action_time = t_str
                 pre_sell_snapshot = copy.deepcopy(pos)
@@ -3298,6 +3670,8 @@ class IPOTradingCenter:
                 "timestamp": directive.timestamp or time.time(),
                 "time_str": f"{today_str} {t_str}",
                 "action": directive.action,
+                "directive_id": directive.directive_id,
+                "audit_envelope": copy.deepcopy(directive.audit_envelope),
                 "code": directive.code,
                 "name": directive.name,
                 "price": directive.price,
@@ -3327,7 +3701,8 @@ class IPOTradingCenter:
 
     def _append_signal_iteration_log(
         self, action: str, code: str, name: str, price: float,
-        size_pct: float, reason: str, signal_tier: str = "S"
+        size_pct: float, reason: str, signal_tier: str = "S",
+        directive_id: str = "",
     ) -> None:
         """追加一条信号产生与迭代日志记录并原子持久化"""
         with self._lock:
@@ -3344,6 +3719,9 @@ class IPOTradingCenter:
                 "size_pct": size_pct,
                 "urgency": "NORMAL",
                 "reason": reason,
+                "directive_id": directive_id,
+                "execution_status": action if action in {
+                    "EXIT_DEFERRED_T1", "NEXT_DAY_EXIT_READY"} else "",
                 "horse_rank": 1,
                 "sentiment_phase": "活跃",
                 "signal_tier": signal_tier,

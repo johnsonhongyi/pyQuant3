@@ -21,6 +21,59 @@ import pandas as pd
 from JohnsonUtil import commonTips as cct
 
 
+def derive_lifecycle_flags(entry):
+    """Return lifecycle invalid/weakened flags and peak drawdown for shared ATS views."""
+    if entry is None:
+        return False, False, 0.0
+    current_pct = float(getattr(entry, "latest_pct", 0.0) or 0.0)
+    peak_pct = float(getattr(entry, "peak_pct", current_pct) or current_pct)
+    drawdown_pct = max(0.0, peak_pct - current_pct)
+    lifecycle = getattr(entry, "lifecycle", None)
+    lifecycle_state = str(
+        getattr(getattr(lifecycle, "state", None), "value", getattr(lifecycle, "state", ""))
+    ).upper()
+    signal_tag = str(getattr(entry, "signal_tag", "") or "")
+    history = getattr(entry, "state_history", []) or []
+    invalidated = (
+        lifecycle_state == "INVALIDATED"
+        or str(getattr(entry, "tier", "")).upper() == "INACTIVE"
+        or "双VWAP破位" in signal_tag
+        or any(
+            isinstance(item, dict)
+            and "INVALIDATED" in str(item.get("action", "")).upper()
+            for item in history
+        )
+    )
+    weakened = (
+        lifecycle_state == "WEAKENED"
+        or getattr(entry, "weak_since_ts", 0.0) > 0
+        or "走弱" in signal_tag
+        or drawdown_pct >= 3.0
+        or (getattr(entry, "first_seen_pct", 0.0) > 0 and current_pct < 0)
+    )
+    return invalidated, weakened, drawdown_pct
+
+
+def derive_lifecycle_audit_ref(entry):
+    """Return the latest lifecycle event identity for UI traceability."""
+    history = getattr(entry, "state_history", []) or []
+    event = next(
+        (
+            item for item in reversed(history)
+            if isinstance(item, dict) and item.get("snapshot_id")
+        ),
+        None,
+    )
+    if event is None:
+        return ""
+    fields = (
+        ("snapshot", event.get("snapshot_id")),
+        ("event", event.get("event_id")),
+        ("candidate", event.get("candidate_id")),
+    )
+    return " | ".join(f"{label}={value}" for label, value in fields if value)
+
+
 class UniverseManager:
     def __init__(self):
         # Store items as dictionaries mapping code -> metadata dict
@@ -248,7 +301,7 @@ class UniverseManager:
             badge_type = "NORMAL"
             p_val = float(getattr(entry, 'latest_pct', 0.0) or 0.0)
             peak_val = float(getattr(entry, 'peak_pct', p_val) or p_val)
-            drawdown_pct = max(0.0, peak_val - p_val)
+            invalidated, weakened, drawdown_pct = derive_lifecycle_flags(entry)
             detail_reasons = []
 
             hist_reasons = []
@@ -261,17 +314,16 @@ class UniverseManager:
                     elif 'WEAKENED' in act or '走弱' in rsn or '回撤' in rsn:
                         hist_reasons.append(rsn)
 
-            tier_val = getattr(entry, 'tier', '')
             sig_tag = str(getattr(entry, 'signal_tag', '') or '')
 
             # 1. 结构失效判定 (破位失效)
-            if tier_val == 'INACTIVE' or '双VWAP破位' in sig_tag or any('INVALIDATED' in str(h.get('action', '')) for h in getattr(entry, 'state_history', [])):
+            if invalidated:
                 badge = "⛔ 破位失效"
                 badge_type = "INVALIDATED"
                 inv_desc = hist_reasons[0] if hist_reasons else ("双VWAP破位" if "双VWAP" in sig_tag else "破位失效")
                 detail_reasons.append(inv_desc)
             # 2. 动能走弱与高位回撤判定 (高位走弱)
-            elif getattr(entry, 'weak_since_ts', 0.0) > 0 or '走弱' in sig_tag or drawdown_pct >= 3.0 or (getattr(entry, 'first_seen_pct', 0.0) > 0 and p_val < 0):
+            elif weakened:
                 if drawdown_pct >= 3.0:
                     badge = f"⚠️ 回撤-{drawdown_pct:.1f}%"
                     detail_reasons.append(f"高位回撤-{drawdown_pct:.1f}% (峰值+{peak_val:.1f}%)")
@@ -286,6 +338,9 @@ class UniverseManager:
                 badge_type = "WEAKENED"
 
             reason_str = " | ".join(detail_reasons) if detail_reasons else ""
+            audit_ref = derive_lifecycle_audit_ref(entry)
+            if audit_ref:
+                reason_str = f"{reason_str} | {audit_ref}" if reason_str else audit_ref
             return badge, badge_type, drawdown_pct, reason_str
 
         # 重建 radar_pool
@@ -354,7 +409,31 @@ class UniverseManager:
 
         # 重建 trade_pool（合并 ledger 信号与真实持仓）
         new_trade = dict(real_positions)  # 保留真实持仓
+        for code, meta in list(new_trade.items()):
+            entry = getattr(signal_ledger, 'entries', {}).get(code)
+            if entry is None:
+                continue
+            badge, b_type, dd_pct, dd_reason = _get_entry_badges_and_reason(entry)
+            if not badge:
+                continue
+            position = dict(meta)
+            strategy = str(position.get('strategy', '') or '')
+            if badge not in strategy:
+                position['strategy'] = f"{strategy} {badge}".strip()
+            reason = str(position.get('reason', '') or '')
+            if dd_reason and dd_reason not in reason:
+                position['reason'] = f"{reason} | {dd_reason}" if reason else dd_reason
+            position.update({
+                'lifecycle_badge': badge,
+                'lifecycle_type': b_type,
+                'drawdown_pct': dd_pct,
+                'drawdown_reason': dd_reason,
+            })
+            new_trade[code] = position
         for entry in trade_entries:
+            badge, b_type, dd_pct, dd_reason = _get_entry_badges_and_reason(entry)
+            if entry.code in new_trade:
+                continue
             if entry.code not in new_trade:
                 real_name = _get_name(entry.code, entry.name)
                 if cct.is_delisted_stock(code=entry.code, name=real_name):
@@ -362,13 +441,20 @@ class UniverseManager:
                 phase_label = PHASE_LABELS.get(entry.first_seen_phase, '⏳')
                 first_time = datetime.datetime.fromtimestamp(entry.first_seen_ts).strftime('%H:%M')
                 p_val, pct_val = _get_price_pct(entry.code, entry.latest_price, entry.latest_pct)
+                strategy_str = f'{phase_label} [{first_time}]'
+                if badge:
+                    strategy_str = f"{strategy_str} {badge}"
                 new_trade[entry.code] = {
                     'name': real_name,
                     'price': p_val,
                     'pct': pct_val,
-                    'strategy': f'{phase_label} [{first_time}]',
-                    'reason': f'优先级: {entry.priority_score:.0f} | 持仓追踪',
+                    'strategy': strategy_str,
+                    'reason': dd_reason or f'优先级: {entry.priority_score:.0f} | 持仓追踪',
                     'timestamp': entry.first_seen_ts,
+                    'lifecycle_badge': badge,
+                    'lifecycle_type': b_type,
+                    'drawdown_pct': dd_pct,
+                    'drawdown_reason': dd_reason,
                     '_from_ledger': True,
                 }
         self.trade_pool = new_trade

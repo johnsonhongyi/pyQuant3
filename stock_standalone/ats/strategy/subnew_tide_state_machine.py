@@ -2,7 +2,7 @@
 """Online, point-in-time tide state machine for IPO and subnew-stock breadth."""
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 import math
 import statistics
 from typing import Iterable, List, Optional, Any
@@ -112,6 +112,8 @@ class SubnewTideStateMachine:
         self._session_base_observation: Optional[TideObservation] = None
         self._session_base_decision: Optional[TideDecision] = None
         self._session_base_revision_count = 0
+        self._live_decision: Optional[TideDecision] = None
+        self._live_state_since: Optional[datetime] = None
 
     def reset(self) -> None:
         self.__init__(config=self._config)
@@ -139,6 +141,14 @@ class SubnewTideStateMachine:
             self._revision_count = self._session_base_revision_count
 
         state, reasons = self._classify(observation, self._previous_observation)
+        previous_live_state = self._live_decision.state if self._live_decision else None
+        min_hold_minutes = max(0.0, float(getattr(self._config, "min_state_hold_minutes", 10.0) if self._config else 10.0))
+        emergency_states = {"T0_INSUFFICIENT", "T1_CLIMAX_DISTRIBUTION", "T2_EBB_EARLY", "T4_PANIC_ACCEL", "T11_OVERHEATED"}
+        if previous_live_state and state != previous_live_state and state not in emergency_states:
+            live_since = self._live_state_since or timestamp
+            if timestamp - live_since < timedelta(minutes=min_hold_minutes):
+                reasons.append(f"minimum_hold:{previous_live_state}")
+                state = previous_live_state
         previous_state = self._previous_decision.state if self._previous_decision else None
         if previous_state:
             previous_direction = _DIRECTION[previous_state]
@@ -165,6 +175,9 @@ class SubnewTideStateMachine:
         )
         self._previous_observation = observation
         self._previous_decision = decision
+        if previous_live_state != state:
+            self._live_state_since = timestamp
+        self._live_decision = decision
         self._last_timestamp = timestamp
         return decision
 

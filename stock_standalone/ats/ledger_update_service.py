@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from typing import Any, Dict, Optional
 
 from ats.candidate_cache import CandidateCache, CandidateDecision
@@ -76,21 +77,23 @@ class LedgerUpdateService:
     def update_snapshot(self, *, code: Any, name: str, price: float, pct: float,
                         deviation: float, row: Any = None, volume_score: float = 0.0,
                         source: str = "ATS", signal_tag: str = "", **ledger_kwargs: Any) -> Any:
-        """Update ATS display ledger from a TK snapshot without event confirmation gating."""
-        record_fn = getattr(self.signal_ledger, "_record_signal_internal", None)
-        internal = record_fn is not None
-        if record_fn is None:
-            record_fn = getattr(self.signal_ledger, "record_signal", None)
-        if record_fn is None:
+        """Project a TK snapshot onto an existing display entry; never admit a signal."""
+        entries = getattr(self.signal_ledger, "entries", None)
+        if not isinstance(entries, dict):
             return None
-        arguments = dict(
-            code=code, name=name, price=price, pct=pct, deviation=deviation,
-            row=row, volume_score=volume_score, signal_source=str(source or "ATS").upper(),
-            signal_tag=signal_tag, **ledger_kwargs,
-        )
-        if internal:
-            arguments["_from_service"] = True
-        return record_fn(**arguments)
+        canonicalize = getattr(self.signal_ledger, "canonicalize_code", None)
+        normalized = canonicalize(code) if callable(canonicalize) else str(code or "").strip().zfill(6)
+        entry = entries.get(normalized)
+        if entry is None:
+            return None
+        try:
+            projected = (float(price), float(pct), float(deviation))
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if not all(math.isfinite(value) for value in projected):
+            return None
+        entry.update_latest(*projected)
+        return entry
 
     def update_candidate(
         self,
@@ -138,6 +141,7 @@ class LedgerUpdateService:
                     volume_score=volume_score,
                     signal_source=str(source or "ATS").upper(),
                     signal_tag=signal_tag,
+                    observed_at=observed_at,
                     _from_service=True,
                     **ledger_kwargs
                 )
@@ -152,6 +156,7 @@ class LedgerUpdateService:
                     volume_score=volume_score,
                     signal_source=str(source or "ATS").upper(),
                     signal_tag=signal_tag,
+                    observed_at=observed_at,
                     **ledger_kwargs
                 )
 
@@ -197,6 +202,12 @@ class LedgerUpdateService:
                 "WATCH",
                 reason="通达信实盘信号: %s%s (%s)" % (period_str, flag_label, direction_cn),
             )
+            sync_lifecycle = getattr(entry, "sync_lifecycle", None)
+            if callable(sync_lifecycle):
+                sync_lifecycle(
+                    observed_at=observed_at,
+                    reason="通达信信号确认: %s%s" % (period_str, flag_label),
+                )
         return result
 
     def sync_projection(

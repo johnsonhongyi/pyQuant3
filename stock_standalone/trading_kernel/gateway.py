@@ -40,6 +40,11 @@ class KernelGateway:
         payload = json.dumps(asdict(request), ensure_ascii=False, sort_keys=True, default=str)
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
+    @staticmethod
+    def _is_cacheable_response(response: DecisionResponse) -> bool:
+        """Cache accepted decisions and executions; rejected requests may be retried."""
+        return bool(response.accepted or response.executed or response.order_id)
+
     def _rollover_request_cache_if_needed(self) -> None:
         today = date.today().isoformat()
         if self._request_cache_day != today:
@@ -98,13 +103,16 @@ class KernelGateway:
             if cached is not None:
                 cached_fingerprint, cached_response = cached
                 if cached_fingerprint == fingerprint:
-                    return cached_response
-                return DecisionResponse(
-                    accepted=False, executed=False, action="BLOCK", size_pct=0.0,
-                    trace_id="", order_id="", reject_code="IDEMPOTENCY_CONFLICT",
-                    request_id=request_id,
-                )
-            self._trim_request_cache_for_insert()
+                    if self._is_cacheable_response(cached_response):
+                        return cached_response
+                else:
+                    return DecisionResponse(
+                        accepted=False, executed=False, action="BLOCK", size_pct=0.0,
+                        trace_id="", order_id="", reject_code="IDEMPOTENCY_CONFLICT",
+                        request_id=request_id,
+                    )
+            else:
+                self._trim_request_cache_for_insert()
             response = self._evaluate_request(
                 request, write_journal=write_journal, request_id=request_id
             )

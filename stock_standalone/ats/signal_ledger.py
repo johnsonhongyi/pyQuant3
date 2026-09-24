@@ -13,6 +13,10 @@ ATS Signal Ledger
 
 import time
 import datetime
+import hashlib
+from dataclasses import asdict
+
+from ats.signal_lifecycle import LifecycleEvent, LifecycleState, SignalLifecycle
 
 
 # ======================================================================
@@ -112,6 +116,7 @@ class SignalEntry:
         'volume_score', 'priority_score',
         'tier', 'is_locked',
         'state_history',
+        'lifecycle',
         'tdx_label', 'tdx_boost', 'early_launch_boost',
         'tdx_price', 'tdx_time_str', 'promote_reason',
         'signal_source', 'signal_tag',
@@ -177,6 +182,7 @@ class SignalEntry:
             'price': price,
             'pct': pct,
         }]
+        self.lifecycle = SignalLifecycle()
 
         self._date_str = datetime.date.today().strftime('%Y-%m-%d')
 
@@ -187,6 +193,109 @@ class SignalEntry:
         self.latest_deviation = deviation
         self.peak_price = max(self.peak_price, price)
         self.peak_pct = max(self.peak_pct, pct)
+
+    def sync_lifecycle(self, observed_at=None, snapshot_id='', reason=''):
+        """Mirror the established ledger decision into the auditable lifecycle."""
+        invalidated = any(
+            isinstance(item, dict) and item.get('action') == 'INVALIDATED_BY_CROSS_DAY_VWAP'
+            for item in self.state_history
+        )
+        weakened = any(
+            isinstance(item, dict) and item.get('action') in {
+                'WEAKENED_BY_MOMENTUM_REVERSAL',
+                'WEAKENED_BY_CROSS_DAY_VWAP_RETEST',
+                'DEMOTED_DUE_TO_VWAP_BREAK',
+                'DAILY_RESET_DEMOTED',
+            }
+            for item in self.state_history[-4:]
+        )
+        desired = (LifecycleState.INVALIDATED if invalidated or self.tier == 'INACTIVE'
+                   else LifecycleState.WEAKENED if weakened
+                   else LifecycleState.TRADE if self.tier == 'TRADE'
+                   else LifecycleState.WATCH if self.tier == 'WATCH'
+                   else LifecycleState.QUALIFYING)
+        lifecycle = self.lifecycle
+        if lifecycle.state == LifecycleState.INVALIDATED:
+            self.tier = 'INACTIVE'
+            return
+        if lifecycle.state == desired:
+            return
+
+        paths = {
+            LifecycleState.QUALIFYING: {
+                LifecycleState.DISCOVERED: [LifecycleState.QUALIFYING],
+                LifecycleState.QUALIFYING: [],
+                LifecycleState.WATCH: [LifecycleState.WEAKENED],
+                LifecycleState.ARMED: [LifecycleState.WEAKENED],
+                LifecycleState.TRADE: [LifecycleState.WEAKENED],
+                LifecycleState.WEAKENED: [],
+            },
+            LifecycleState.WATCH: {
+                LifecycleState.DISCOVERED: [LifecycleState.QUALIFYING, LifecycleState.WATCH],
+                LifecycleState.QUALIFYING: [LifecycleState.WATCH],
+                LifecycleState.WATCH: [],
+                LifecycleState.ARMED: [LifecycleState.WATCH],
+                LifecycleState.WEAKENED: [LifecycleState.ARMED, LifecycleState.WATCH],
+            },
+            LifecycleState.WEAKENED: {
+                LifecycleState.DISCOVERED: [LifecycleState.QUALIFYING, LifecycleState.WATCH, LifecycleState.WEAKENED],
+                LifecycleState.QUALIFYING: [LifecycleState.WATCH, LifecycleState.WEAKENED],
+                LifecycleState.WATCH: [LifecycleState.WEAKENED],
+                LifecycleState.ARMED: [LifecycleState.WEAKENED],
+                LifecycleState.TRADE: [LifecycleState.WEAKENED],
+                LifecycleState.WEAKENED: [],
+            },
+            LifecycleState.TRADE: {
+                LifecycleState.DISCOVERED: [LifecycleState.QUALIFYING, LifecycleState.WATCH, LifecycleState.ARMED, LifecycleState.TRADE],
+                LifecycleState.QUALIFYING: [LifecycleState.WATCH, LifecycleState.ARMED, LifecycleState.TRADE],
+                LifecycleState.WATCH: [LifecycleState.ARMED, LifecycleState.TRADE],
+                LifecycleState.ARMED: [LifecycleState.TRADE],
+                LifecycleState.WEAKENED: [LifecycleState.ARMED, LifecycleState.TRADE],
+                LifecycleState.TRADE: [],
+            },
+            LifecycleState.INVALIDATED: {
+                LifecycleState.DISCOVERED: [LifecycleState.QUALIFYING, LifecycleState.WATCH, LifecycleState.INVALIDATED],
+                LifecycleState.QUALIFYING: [LifecycleState.WATCH, LifecycleState.INVALIDATED],
+                LifecycleState.WATCH: [LifecycleState.INVALIDATED],
+                LifecycleState.ARMED: [LifecycleState.INVALIDATED],
+                LifecycleState.TRADE: [LifecycleState.INVALIDATED],
+                LifecycleState.WEAKENED: [LifecycleState.INVALIDATED],
+            },
+        }
+        route = paths.get(desired, {}).get(lifecycle.state, [])
+        event = (LifecycleEvent.VWAP_BREAK if desired == LifecycleState.INVALIDATED
+                 else LifecycleEvent.STRUCTURE_LOST if desired == LifecycleState.WEAKENED
+                 else LifecycleEvent.FILL if desired == LifecycleState.TRADE
+                 else LifecycleEvent.STRUCTURE_GAINED)
+        timestamp = observed_at
+        if timestamp is not None and not isinstance(timestamp, str):
+            try:
+                timestamp = datetime.datetime.fromtimestamp(float(timestamp)).isoformat(timespec='seconds')
+            except (TypeError, ValueError, OSError):
+                timestamp = None
+        for next_state in route:
+            transition = lifecycle.transition(
+                event, next_state, reason=reason or f'ledger tier={self.tier}',
+                snapshot_id=snapshot_id, event_time=timestamp,
+            )
+            candidate_id = self._candidate_id()
+            decision_event_id = hashlib.sha256(
+                f"{candidate_id}|{transition.revision}|{transition.event.value}|{transition.to_state.value}".encode("utf-8")
+            ).hexdigest()[:24]
+            self.state_history.append({
+                'ts': time.time(), 'action': f'LIFECYCLE_{transition.from_state.value}_TO_{transition.to_state.value}',
+                'reason': transition.reason, 'event_time': transition.event_time,
+                'snapshot_id': transition.snapshot_id, 'revision': transition.revision,
+                'event_id': decision_event_id, 'candidate_id': candidate_id,
+                'state': transition.to_state.value, 'decision_action': transition.event.value,
+                'reason_code': transition.event.value,
+                'source': str(getattr(self, 'signal_source', '') or ''),
+            })
+
+    def _candidate_id(self):
+        """Stable per-code, per-session candidate identity for audit events."""
+        material = f"{str(self._date_str or '')}|{str(self.code or '').strip().zfill(6)}"
+        return hashlib.sha256(material.encode("utf-8")).hexdigest()[:24]
 
     def promote(self, new_tier, reason=''):
         """晋级到更高层级
@@ -229,6 +338,25 @@ class SignalEntry:
             'volume_score': self.volume_score,
             'priority_score': self.priority_score,
             'tier': self.tier,
+            'candidate_id': self._candidate_id(),
+            'lifecycle': {
+                'state': self.lifecycle.state.value,
+                'revision': self.lifecycle.revision,
+                'history': [
+                    {
+                        **asdict(item),
+                        'event_id': hashlib.sha256(
+                            f"{self._candidate_id()}|{item.revision}|{item.event.value}|{item.to_state.value}".encode("utf-8")
+                        ).hexdigest()[:24],
+                        'candidate_id': self._candidate_id(),
+                        'state': item.to_state.value,
+                        'action': item.event.value,
+                        'reason_code': item.event.value,
+                        'source': str(getattr(self, 'signal_source', '') or ''),
+                    }
+                    for item in self.lifecycle.history
+                ],
+            },
             'is_locked': self.is_locked,
             'signal_source': getattr(self, 'signal_source', 'ATS'),
             'signal_tag': getattr(self, 'signal_tag', ''),
@@ -436,18 +564,6 @@ class SignalLedger:
         若非来自 LedgerUpdateService 的内部调用，自动透明重定向至绑定的 LedgerUpdateService，
         强制经过 CandidateCache 会话门禁（盘前种子隔离）与连续帧防抖确认。
         """
-        if _from_service:
-            return self._record_signal_internal(
-                code=code, name=name, price=price, pct=pct, deviation=deviation,
-                row=row, volume_score=volume_score, signal_source=signal_source,
-                signal_tag=signal_tag, dragon_role=dragon_role,
-                dragon_buy_type=dragon_buy_type, dragon_reason=dragon_reason,
-                dragon_amount_yi=dragon_amount_yi, ch_slope_deg=ch_slope_deg,
-                supp_price=supp_price, ch_height_pct=ch_height_pct,
-                amplitude_pct=amplitude_pct, is_channel_swing=is_channel_swing,
-                **kwargs
-            )
-
         # 外部旁路直写尝试 -> 拦截并自动委托至 LedgerUpdateService
         service = self.get_update_service()
         try:
@@ -484,6 +600,7 @@ class SignalLedger:
                                 dragon_buy_type='', dragon_reason='', dragon_amount_yi=0.0,
                                 ch_slope_deg=None, supp_price=None, ch_height_pct=None,
                                 amplitude_pct=None, is_channel_swing=False, _from_service=False,
+                                observed_at=None,
                                 **kwargs):
         """发现新信号或更新已有信号 (内部核心实现)
 
@@ -576,6 +693,7 @@ class SignalLedger:
                 entry = self.entries[entry_key]
                 if entry.tier not in ('TRADE',):  # TRADE 级别不自动降级
                     entry.promote('INACTIVE', reason=f'偏离度 {deviation:.2f}% 严重破位')
+                    entry.sync_lifecycle(observed_at=observed_at, reason=entry.promote_reason)
             return None
 
         if entry_key in self.entries:
@@ -631,12 +749,24 @@ class SignalLedger:
                         self._clear_bullish_state(entry, weak_tag)
                         entry.weak_since_ts = entry.weak_since_ts or time.time()
                         target_tier = 'INACTIVE' if broke_yesterday else 'RADAR'
-                        if entry.tier != target_tier:
+                        already_invalidated = any(
+                            isinstance(item, dict)
+                            and item.get('action') == 'INVALIDATED_BY_CROSS_DAY_VWAP'
+                            for item in entry.state_history
+                        )
+                        tier_changed = entry.tier != target_tier
+                        if tier_changed:
                             old_tier = entry.tier
                             entry.tier = target_tier
+                        else:
+                            old_tier = entry.tier
+                        if tier_changed or (broke_yesterday and not already_invalidated):
                             entry.state_history.append({
                                 'ts': time.time(),
-                                'action': 'INVALIDATED_BY_CROSS_DAY_VWAP',
+                                'action': (
+                                    'INVALIDATED_BY_CROSS_DAY_VWAP'
+                                    if broke_yesterday else 'WEAKENED_BY_CROSS_DAY_VWAP_RETEST'
+                                ),
                                 'reason': (
                                     f'跌破今日VWAP({today_vwap:.2f})后'
                                     f'{"跌破" if broke_yesterday else "回踩"}'
@@ -675,15 +805,21 @@ class SignalLedger:
                         'to_tier': entry.tier,
                     })
 
-            # 如果之前是 INACTIVE 但现在回到范围内，或被设为重点关注/真龙，恢复为 RADAR/WATCH
-            if entry.tier == 'INACTIVE' and not weak_cross_day_vwap:
+            cross_day_invalidated = any(
+                item.get('action') == 'INVALIDATED_BY_CROSS_DAY_VWAP'
+                for item in entry.state_history
+                if isinstance(item, dict)
+            )
+
+            # 双 VWAP 破位后，本交易日不允许旧信号因范围恢复或关注标签重新激活。
+            if entry.tier == 'INACTIVE' and not weak_cross_day_vwap and not cross_day_invalidated:
                 entry.tier = 'WATCH' if (is_fav or is_dragon) else 'RADAR'
                 entry.state_history.append({
                     'ts': time.time(),
                     'action': 'REACTIVATED',
                     'reason': f'重点关注/真龙或偏离度回到范围: {deviation:.2f}%',
                 })
-            elif (is_fav or is_dragon) and entry.tier == 'RADAR':
+            elif (is_fav or is_dragon) and entry.tier == 'RADAR' and not cross_day_invalidated:
                 entry.promote('WATCH', reason=f'⭐ 设为重点关注或真龙自动晋级 ({dragon_role or "重点标的"})')
 
             # 重新计算优先级评分（使用首次发现时间，确保早期信号优先级不变）
@@ -713,8 +849,16 @@ class SignalLedger:
                     pass
 
             # 检查自动晋级
-            if entry.tier == 'RADAR' and not weak_cross_day_vwap and not lifecycle_weakened:
+            if (entry.tier == 'RADAR' and not weak_cross_day_vwap and not lifecycle_weakened
+                    and not cross_day_invalidated):
                 self._check_auto_promote(entry, row)
+
+            last_event = entry.state_history[-1] if entry.state_history else {}
+            entry.sync_lifecycle(
+                observed_at=observed_at,
+                snapshot_id=str(row.get('snapshot_id', '')) if hasattr(row, 'get') else '',
+                reason=str(last_event.get('reason', last_event.get('action', 'quote update'))),
+            )
 
             return entry
         else:
@@ -749,6 +893,13 @@ class SignalLedger:
             # 检查自动晋级
             if row is not None and entry.tier == 'RADAR':
                 self._check_auto_promote(entry, row)
+
+            last_event = entry.state_history[-1] if entry.state_history else {}
+            entry.sync_lifecycle(
+                observed_at=observed_at,
+                snapshot_id=str(row.get('snapshot_id', '')) if hasattr(row, 'get') else '',
+                reason=str(last_event.get('reason', last_event.get('action', 'signal discovered'))),
+            )
 
             return entry
 
@@ -1167,4 +1318,3 @@ class SignalValidityTracker:
         close_pnl = (t1_close - buy_price) / buy_price * 100.0
         is_win = max_pnl >= 2.5 or close_pnl >= 1.5
         return round(max_pnl, 2), is_win
-
