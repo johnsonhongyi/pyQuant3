@@ -6026,7 +6026,8 @@ def _refresh_guidance_tab(self):
             for path in [r'g:\top_all.h5', os.path.join(base_dir, 'top_all.h5'), os.path.join(get_app_root(), 'top_all.h5')]:
                 if os.path.exists(path):
                     import pandas as pd
-                    df_top = pd.read_hdf(path, 'top_all')
+                    from JSONData.tdx_hdf5_api import read_hdf_safe
+                    df_top = read_hdf_safe(path, 'top_all')
                     if not df_top.empty:
                         col_to_check = 'category' if 'category' in df_top.columns else ('industry' if 'industry' in df_top.columns else None)
                         if col_to_check:

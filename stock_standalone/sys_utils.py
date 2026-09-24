@@ -920,7 +920,8 @@ def _load_name_cache():
                 import pandas as pd
                 for path in [r'g:\top_all.h5', os.path.join(base_dir, 'top_all.h5'), os.path.join(os.getcwd(), 'top_all.h5')]:
                     if os.path.exists(path):
-                        df_top = pd.read_hdf(path, 'top_all')
+                        from JSONData.tdx_hdf5_api import read_hdf_safe
+                        df_top = read_hdf_safe(path, 'top_all')
                         if not df_top.empty and 'name' in df_top.columns:
                             name_map = {}
                             if df_top.index.name == 'code':
@@ -1053,7 +1054,8 @@ def resolve_stock_name(code_clean: str) -> str:
     for path in [r'g:\top_all.h5', os.path.join(base_dir, 'top_all.h5'), os.path.join(os.getcwd(), 'top_all.h5')]:
         if os.path.exists(path):
             try:
-                df_top = pd.read_hdf(path, 'top_all')
+                from JSONData.tdx_hdf5_api import read_hdf_safe
+                df_top = read_hdf_safe(path, 'top_all')
                 if not df_top.empty:
                     if 'name' in df_top.columns:
                         if df_top.index.name == 'code':

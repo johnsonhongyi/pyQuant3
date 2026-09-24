@@ -90,7 +90,8 @@ class StockSelector:
         base_df = pd.DataFrame()
         try:
             if os.path.exists(self.data_path):
-                base_df = pd.read_hdf(self.data_path, 'top_all')
+                from JSONData.tdx_hdf5_api import read_hdf_safe
+                base_df = read_hdf_safe(self.data_path, 'top_all')
         except Exception as e:
             self.logger.error(f"加载基础 HDF5 数据失败: {e}")
 
