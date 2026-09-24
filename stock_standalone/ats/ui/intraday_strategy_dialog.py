@@ -4193,6 +4193,8 @@ class SBCGlobalDispatcher(QObject):
         self._thread: Optional[Any] = None
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
+        self._wake_event = threading.Event()
+        self._subscription_revision = 0
         self._subscribers = {}
         self.batch_ready.connect(self._deliver_batch, Qt.ConnectionType.QueuedConnection)
 
@@ -4208,7 +4210,8 @@ class SBCGlobalDispatcher(QObject):
                 return
             self._running = True
             self._stop_event = threading.Event()
-            self._thread = threading.Thread(target=self._run_loop, args=(self._stop_event,), daemon=True,
+            self._wake_event = threading.Event()
+            self._thread = threading.Thread(target=self._run_loop, args=(self._stop_event, self._wake_event), daemon=True,
                                             name="SBCGlobalDispatcherThread")
             self._thread.start()
 
@@ -4216,15 +4219,34 @@ class SBCGlobalDispatcher(QObject):
         with self._lock:
             self._running = False
             self._stop_event.set()
+            self._wake_event.set()
+
+    def wake_up(self):
+        """Interrupt the current poll delay after a subscription changes."""
+        self._wake_event.set()
+
+    def _wait_or_wake(self, timeout, wake_event):
+        wake_event.wait(timeout)
+        with self._lock:
+            wake_event.clear()
 
     def subscribe(self, dlg):
         # Called only on the UI thread. The worker sees plain code/mode values.
         with self._lock:
-            self._subscribers[id(dlg)] = (weakref.ref(dlg), str(dlg.code), str(dlg._current_period_mode))
+            key = id(dlg)
+            code, mode = str(dlg.code), str(dlg._current_period_mode)
+            old = self._subscribers.get(key)
+            if old is not None and old[0]() is dlg and old[1:] == (code, mode):
+                return
+            self._subscribers[key] = (weakref.ref(dlg), code, mode)
+            self._subscription_revision += 1
+            self.wake_up()
 
     def unsubscribe(self, dlg):
         with self._lock:
-            self._subscribers.pop(id(dlg), None)
+            if self._subscribers.pop(id(dlg), None) is not None:
+                self._subscription_revision += 1
+                self.wake_up()
 
     def _deliver_batch(self, batch):
         with self._lock:
@@ -4239,13 +4261,14 @@ class SBCGlobalDispatcher(QObject):
             if data is not None and mode in data.get("modes", ()):
                 dlg.reload_chart(is_timer_tick=True, preloaded=data)
 
-    def _run_loop(self, stop_event):
+    def _run_loop(self, stop_event, wake_event):
         while not stop_event.is_set():
             try:
                 with self._lock:
                     subscriptions = [(code, mode) for _, code, mode in self._subscribers.values()]
+                    revision = self._subscription_revision
                 if not subscriptions:
-                    stop_event.wait(1.0)
+                    self._wait_or_wake(1.0, wake_event)
                     continue
 
                 is_trading = False
@@ -4260,12 +4283,12 @@ class SBCGlobalDispatcher(QObject):
                     interval_sec = 5.0
 
                 if not is_trading:
-                    stop_event.wait(30.0)
+                    self._wait_or_wake(30.0, wake_event)
                     continue
 
                 codes = list({code for code, _ in subscriptions if code})
                 if not codes:
-                    stop_event.wait(1.0)
+                    self._wait_or_wake(1.0, wake_event)
                     continue
 
                 # 1. 批量拉取快照 (40 只批次限制与标准化转换)
@@ -4301,10 +4324,16 @@ class SBCGlobalDispatcher(QObject):
                 if not stop_event.is_set():
                     self.batch_ready.emit(batch)
 
-                stop_event.wait(max(1.0, interval_sec))
+                with self._lock:
+                    subscriptions_changed = self._subscription_revision != revision
+                    if subscriptions_changed:
+                        wake_event.clear()
+                if subscriptions_changed:
+                    continue
+                self._wait_or_wake(max(1.0, interval_sec), wake_event)
 
             except Exception:
-                stop_event.wait(2.0)
+                self._wait_or_wake(2.0, wake_event)
 
 
 class SBCIntradayChartDialog(QWidget):
