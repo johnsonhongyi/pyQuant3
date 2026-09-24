@@ -1,18 +1,21 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](stock_standalone/design/antigravity_historical_tasks_archive.md)
 
 ## 2026-09-24 14:10
-- [x] **【TK 系统极限性能优化方案按阶段落地实施（阶段 0 指纹丢帧根治、阶段 3 差分空值双向闭环、阶段 1 排序策略评估）】(`instock_MonitorTK.py`, `tests/test_tk_perf_stage0_telemetry_and_golden_samples.py`, `tests/test_tk_perf_diff_null_fidelity.py`, `tests/test_tk_perf_stage1_sort_strategy.py`, `stock_standalone/20260924_1410_task.md`)**：
-    - [x] **阶段 0：采样指纹漏更物理核验与 Golden 指纹升级**：
-        - 编写专项用例严格重现旧算法缺陷：确证 50 点/5 点抽样中未采样跳价、采样求和正负抵消、UI 中间 4995 行个股跳价及信号列变动被静默拦截的假阴性丢帧问题；
-        - 计算入口（line 6391）全面升级：采用底层 numpy `tobytes()` 向量级全表哈希并结合采集时间戳守卫，微秒级执行，覆盖 100% 全部股票价格与成交量，0 盲区 0 抵消；
-        - UI 刷新入口（line 17095）全面升级：全量覆盖核心价格、涨幅 `percent` 与策略信号 `signal`，0.02ms 极速防抖，彻底消除盘中看盘界面假死与遗漏；
-    - [x] **阶段 3（正确性优先）：差分空值双向契约闭环**：
-        - 确证并复现接收端（`ipc_sync_manager.py`）`notna()` 跳过空值导致信号或指标重置为 NaN 永远无法被接收端清除的脏数据漏洞；
-        - 发送端（`instock_MonitorTK.py:9020`, `9080`）接入安全门禁契约：对显示轨与日线轨在执行 diff 前进行增删行/列配置匹配与非空转空 (NaN) 向量位检测；遇非空变空或结构变动时，先于 `DF_DIFF_EMPTY` 强制自动回退 `UPDATE_DF_ALL` 全量包，驱动接收端以全量替换基线，彻底根除脏数据残留，同时完全兼容接收端现有接口；
-    - [x] **阶段 1：主表排序策略实测对比与评估**：
-        - 编写客观测试工具对比全量重建与增量原地同步（move）的 DOM 操作数与耗时；确证在集合相同但顺序改变时执行全量刷新以维持物理行 100% 绝对正确的工程稳健性，保障操盘手 `select_code` 与焦点在刷新中 100% 稳定不串股；
+- [x] **【TK 系统极限性能优化方案落地与审查深度闭环（P1 指纹 XOR 抵消与未覆盖列根除、P1 日线全量发送门禁解耦、P1 借读契约与发送基线闭环、P2 阶段 0/1 客观定性）】(`instock_MonitorTK.py`, `tests/test_tk_perf_stage0_telemetry_and_golden_samples.py`, `tests/test_tk_perf_diff_null_fidelity.py`, `tests/test_tk_perf_stage1_sort_strategy.py`, `stock_standalone/20260924_1410_task.md`)**：
+    - [x] **P1 指纹漏更根除：消灭同值双列 XOR 归零抵消与未覆盖列**：
+        - 编写专项用例严格重现旧算法与简单 XOR 合并缺陷：确证同值双列（`trade` 与 `price`）同步跳价时，无防护异或导致哈希永远抵消归零并静默丢帧；
+        - 计算入口（line 6391）全面升级：采用带列名的有序乘法哈希（`h * 31 + hash((col, bytes))`），彻底消灭多列异或抵消，并有序覆盖价格、成交量、`name`、`signal`、`percent` 及采集时间戳；
+        - UI 刷新入口（line 17095）全面升级：升级为有序乘法加权哈希，覆盖全表核心价格、涨跌幅、信号、名称及当前表格展示列，确保任何展示列更新即刻放行刷新；
+    - [x] **P1 日线全量回退发送门禁解耦（显示轨为空时日线不被拦截）**：
+        - 审查确证并根除旧代码在 `instock_MonitorTK.py:9265` 仅依显示轨 `if msg_type == 'DF_DIFF_EMPTY': sent = True` 粗暴跳过物理发送，导致分时等非日线周期下显示轨为空时，日线轨因非空变空触发的 `UPDATE_DF_ALL` 全量回退包被整体静默抛弃的致命缺陷；
+        - 发送门禁解耦（line 9265, 9335, 9365）：重构为双轨正交门禁 `if not has_display_update and not has_daily_update and not is_forced: sent = True`；只要日线轨有数据更新，必定进入分发循环，向 26670/26671/26675 订阅端正常发送日线数据包，彻底消除日线全量丢失隐患；
+    - [x] **P1 借读契约与发送基线闭环**：
+        - 总线借读者防污染（line 9005）：严格履行阶段 2 借读契约，`send_df` 从总线取出快照后，附加 TWAP 等派生列前显式执行 `df_bus_all = df_bus_all.copy()` 隔离拷贝（Copy-on-Write），严禁原位修改总线内部快照；
+        - 异常与重连全量自愈：Pipe 断开或 Socket 发送失败时强制设置 `_cold_start = True`，重连后首包强制发送全量包重置基线；
+    - [x] **P2 阶段 0 与阶段 1 实测定位客观化**：
+        - 阶段 1 实测定性校准：将测试结论明确标定为“保留现有全量刷新基线策略的实测依据”，客观量化了物理行索引位移的复杂性，不以模拟测试夸大替代真实 GUI 耗时；
     - [x] **全量自动化验证 100% 绿灯**：
-        - 阶段专项测试集 8/8 纯绿秒级通过；核心回归测试 18/18 纯绿通过；
+        - 阶段专项测试集 9/9 纯绿秒级通过；核心回归测试 18/18 纯绿通过；
         - `python -m compileall ats tests instock_MonitorTK.py performance_optimizer.py ipc_sync_manager.py -q` 编译零错误，`git diff --check` 零违规。
 
 ## 2026-09-24 14:05

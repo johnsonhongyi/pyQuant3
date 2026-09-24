@@ -6388,29 +6388,45 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             if full_df is None or full_df.empty:
                 return
 
-            # 3. 源数据脏检查 (方案阶段 0: 高性能向量级全表指纹，彻底消灭 50 点抽样漏更与求和正负抵消)
-            # 优先使用底层 numpy tobytes 纳秒级哈希，覆盖 100% 全部股票，0 采样盲区
+            # 3. 源数据脏检查 (方案阶段 0: 高性能向量级全表指纹，彻底消灭 50 点抽样漏更与求和/异或正负抵消)
+            # 采用带列名的有序乘法哈希 (FNV/加权移位)，100% 杜绝多列相同数据异或归零 (XOR cancellation)
             n = len(full_df)
             df_hash = 0
             if n > 0:
-                p_cols = [c for c in ['trade', 'now', 'price', 'close'] if c in full_df.columns]
-                p_hash = 0
-                for c in p_cols:
-                    try:
-                        p_hash ^= hash(full_df[c].to_numpy().tobytes())
-                    except Exception:
-                        pass
+                combined = hash(n)
+                # 价格列 (trade, now, price, close)
+                for col in ['trade', 'now', 'price', 'close']:
+                    if col in full_df.columns:
+                        try:
+                            c_bytes = full_df[col].to_numpy().tobytes()
+                            combined = (combined * 31 + hash((col, hash(c_bytes)))) & 0xFFFFFFFFFFFFFFFF
+                        except Exception:
+                            pass
 
-                vol_cols = [c for c in ['volume', 'amount'] if c in full_df.columns]
-                vol_hash = 0
-                for c in vol_cols:
-                    try:
-                        vol_hash ^= hash(full_df[c].to_numpy().tobytes())
-                    except Exception:
-                        pass
+                # 成交量与金额列 (volume, amount)
+                for col in ['volume', 'amount']:
+                    if col in full_df.columns:
+                        try:
+                            c_bytes = full_df[col].to_numpy().tobytes()
+                            combined = (combined * 31 + hash((col, hash(c_bytes)))) & 0xFFFFFFFFFFFFFFFF
+                        except Exception:
+                            pass
+
+                # 关键状态与衍生列 (name, signal, percent)
+                for col in ['name', 'signal', 'percent']:
+                    if col in full_df.columns:
+                        try:
+                            s = full_df[col]
+                            if s.dtype == 'object' or s.dtype == 'string':
+                                c_h = hash(tuple(s.values))
+                            else:
+                                c_h = hash(s.to_numpy().tobytes())
+                            combined = (combined * 31 + hash((col, c_h))) & 0xFFFFFFFFFFFFFFFF
+                        except Exception:
+                            pass
 
                 time_hash = hash(snap_time) if snap_time is not None else 0
-                df_hash = hash(n) ^ p_hash ^ vol_hash ^ time_hash
+                df_hash = (combined * 31 + time_hash) & 0xFFFFFFFFFFFFFFFF
 
             if not query and not force and getattr(self, '_last_processed_df_hash', -1) == df_hash:
                 return
@@ -8986,7 +9002,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         time.sleep(0.5)
                         continue
 
-                    # ⚡ [CORE FIX] 确保推送给 26670 (ATS) 与 26671 (多周期引擎) 的全量快照包含算齐的 vwap_cum_2d 等衍生 col
+                    # ⚡ [CORE FIX] 借读契约与不可变边界 (方案阶段 2):
+                    # send_df 仅作为总线借读者，在注入 TWAP 等派生列前必须显式执行隔离拷贝，严禁原位修改总线内部快照
+                    if df_bus_all is not None and not df_bus_all.empty:
+                        df_bus_all = df_bus_all.copy()
+                    if df_bus_all_res is not None and not df_bus_all_res.empty and df_bus_all_res is not df_bus_all:
+                        df_bus_all_res = df_bus_all_res.copy()
+
                     try:
                         from realtime_data_service import get_global_kline_cache
                         kline_cache = get_global_kline_cache()
@@ -8997,7 +9019,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         try:
                             if df_bus_all is not None and not df_bus_all.empty:
                                 kline_cache.attach_multiday_twap_to_df(df_bus_all)
-                            if df_bus_all_res is not None and not df_bus_all_res.empty and df_bus_all_res is not df_bus_all:
+                            if df_bus_all_res is not None and not df_bus_all_res.empty:
                                 kline_cache.attach_multiday_twap_to_df(df_bus_all_res)
                         except Exception as ex_twap:
                             logger.error(f"[send_df] Failed to attach dynamic twap: {ex_twap}")
@@ -9214,8 +9236,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         except (EOFError, BrokenPipeError, ConnectionResetError):
                             logger.warning("[Pipe] connection lost, fallback to Socket")
                             self.viz_conn = None
+                            self._cold_start = True  # 🛡️ Pipe 断开，强制下次全量包重置基线
                         except Exception as e:
                             logger.error(f"[Pipe] send failed: {e}")
+                            self._cold_start = True
                         finally:
                             self._record_latency_sample(
                                 "ipc_send:pipe_display",
@@ -9243,8 +9267,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     # 🚀 [THROTTLE] 失败冷却：防止频繁超时重连拖慢循环 (特别是工作时间外)
                     ipc_cooldown = getattr(self, '_viz_ipc_cooldown_until', 0)
 
-                    # [NEW] 没有数据更新且不是强制全量同步请求时，直接跳过物理发送 (与可视化一致)
-                    if msg_type == 'DF_DIFF_EMPTY' and not is_forced:
+                    has_display_update = (msg_type != 'DF_DIFF_EMPTY')
+                    has_daily_update = (msg_type_daily != 'DF_DIFF_EMPTY')
+
+                    # 仅当显示轨与日线轨均无数据更新且非强制全量同步请求时，直接跳过物理发送
+                    if not has_display_update and not has_daily_update and not is_forced:
                         sent = True
                     else:
                         if is_forced or ((vis_enabled or ats_enabled) and now_ipc > ipc_cooldown):
@@ -9306,8 +9333,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                 send_success_any = False
                                 sent_to_ats = False
 
-                                # 发送给 26668 (可视化窗口) —— 仅在 Pipe 没发送成功时进行 Socket 兜底
-                                if vis_enabled and not sent:
+                                # 发送给 26668 (可视化窗口) —— 仅在显示轨有数据更新且 Pipe 没发送成功时进行 Socket 兜底
+                                if vis_enabled and not sent and (has_display_update or is_forced):
                                     ipc_send_start = time.perf_counter()
                                     with timed_ctx("viz_IPC_send", warn_ms=1000):
                                         try:
@@ -9318,7 +9345,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                                 send_success_any = True
                                                 sent = True
                                         except (socket.timeout, ConnectionError, OSError):
-                                            pass
+                                            self._cold_start = True  # 🛡️ 显示轨 Socket 发送失败，下次强制发全量包
                                         finally:
                                             self._record_latency_sample(
                                                 "ipc_send:display",
@@ -9339,18 +9366,23 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                         should_send = False
                                         if is_forced_port:
                                             should_send = True
+                                        elif msg_type_daily == 'UPDATE_DF_ALL':
+                                            # 🛡️【全量回退高优先通行】：若当前帧触发了全量回退 (非空变空等)，
+                                            # 为防止后续增量建立在订阅端未接收的基线上，必须立即放行发送全量包！
+                                            should_send = True
                                         elif is_work_time:
                                             if is_port_active:
                                                 if now_ipc - last_try >= dynamic_interval:
-                                                    curr_hash = hash((version, len(df_daily)))
-                                                    last_hash = getattr(self, f'_last_sent_hash_{port}', None)
-                                                    if curr_hash != last_hash:
+                                                    if has_daily_update or is_forced:
                                                         should_send = True
                                             elif (now_ipc - last_try > 60.0):
                                                 should_send = True
 
                                         if should_send:
                                             ports_to_send.append((port, sub_info, is_forced_port))
+                                        elif msg_type_daily == 'UPDATE_DF_ALL':
+                                            # 若因离线等极端原因未能加入本轮发送队列，给该端口置上 force_sync 标记，确保其恢复时必须先发全量包
+                                            setattr(self, f'_force_sync_{port}', True)
 
                                 # ⚡ [IPC 动态临时端口] 单次拉取
                                 temp_dynamic_ports = list(getattr(self, '_temp_dynamic_ports', set()))
@@ -9409,6 +9441,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                                 if sub_info:
                                                     sub_info["active"] = False
                                                     sub_info["fail_count"] = sub_info.get("fail_count", 0) + 1
+                                                    # 🛡️ 发送失败时标记下次恢复必须发全量包重置基线
+                                                    setattr(self, f'_force_sync_{port}', True)
                                                     if not sub_info.get("is_static", False) and sub_info["fail_count"] >= 20 and (now_ipc - sub_info.get("last_try", now_ipc) > 600):
                                                         self._stream_subscribers.pop(port, None)
                                                         logger.info(f"🧹 [TK 订阅中心] 动态端口 {port} 长期无响应，已自动注销清理订阅。")
@@ -17093,33 +17127,35 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             return
 
         # ⚡ UI 渲染指纹防抖 (方案阶段 0: 高性能向量级 Golden 指纹防抖)
-        # 包含代码列表、列配置以及全表核心数值的向量级 Hash (0.02ms)，消灭 5 点抽样盲区
+        # 包含代码列表、列配置以及全表核心数值的乘法加权 Hash，消灭 5 点抽样盲区与同值双列 XOR 抵消
         code_hash = hash(tuple(df['code'].astype(str).values)) if 'code' in df.columns else hash(len(df))
         cols_hash = hash(tuple(self.current_cols))
         
-        # 数值与信号 Hash: 全量覆盖 100% 个股价格、涨幅与策略信号
+        # 数值与状态 Hash: 乘法有序加权覆盖全部核心列与当前展示列
         df_val_hash = 0
         if len(df) > 0:
-            p_cols = [c for c in ['trade', 'now', 'price', 'close'] if c in df.columns]
-            p_hash = 0
-            for c in p_cols[:2]:
-                try:
-                    p_hash ^= hash(df[c].to_numpy().tobytes())
-                except Exception:
-                    pass
+            combined = 0
+            cols_to_check = []
+            for c in ['trade', 'now', 'price', 'close', 'percent', 'signal', 'name']:
+                if c in df.columns and c not in cols_to_check:
+                    cols_to_check.append(c)
+            # 纳入当前用户表格配置的全部展示列 (当前可见视图所有列发生变更均能灵敏触发刷新)
+            for c in self.current_cols:
+                if c in df.columns and c not in cols_to_check:
+                    cols_to_check.append(c)
 
-            extra_hash = 0
-            if 'percent' in df.columns:
+            for col in cols_to_check:
                 try:
-                    extra_hash ^= hash(df['percent'].to_numpy().tobytes())
+                    s = df[col]
+                    if s.dtype == 'object' or s.dtype == 'string':
+                        c_h = hash(tuple(s.values))
+                    else:
+                        c_h = hash(s.to_numpy().tobytes())
+                    combined = (combined * 31 + hash((col, c_h))) & 0xFFFFFFFFFFFFFFFF
                 except Exception:
-                    pass
-            if 'signal' in df.columns:
-                try:
-                    extra_hash ^= hash(tuple(df['signal'].astype(str).values))
-                except Exception:
-                    pass
-            df_val_hash = p_hash ^ extra_hash
+                    # 发生异常时不静默跳过导致假阴性，强制加入扰动触发更新
+                    combined = (combined * 31 + hash(col) + 1) & 0xFFFFFFFFFFFFFFFF
+            df_val_hash = combined
             
         current_fingerprint = (code_hash, cols_hash, df_val_hash)
 
