@@ -1,5 +1,20 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-09-25 21:55
+- [ ] **【次日异动候选池 UI 及 JSON 配置管理功能实施计划（四维全景看板·双向联动配置引擎·底座P0/P1协同治理）】(`next_day_anomaly_watch.py`, `config/next_day_watch_strategies.json`, `ats/ui/next_day_watch_dialog.py`, `ats/strategy/next_day_watch_config_manager.py`, `ats/ui/main_window.py`, `instock_MonitorTK.py`, `run_next_day_watch.py`, `20260925_2155_task.md`)**：
+    - [ ] **Phase 1: 底层契约与配置兑现加固 (M1)**：修复 `required_fields` 拦截与计数漏洞；修复 `proof_any` 动态生效分支；加固 TDX VWAP 防伪（无效时不填现价）与两帧报价证据（量额/行情时间递增），消除重复重放误确认；加固盘前冻结门禁，成功才落盘，失败允许重试。
+    - [ ] **Phase 2: 配置管理引擎与数据模型 SSOT (M2)**：新增 `NextDayWatchConfigManager`，实现 Schema 严格校验、表单与 JSON 源码双向转换、版本自增克隆机制（升级版本防篡改历史考核）、原子落盘与配置哈希生成。
+    - [ ] **Phase 3: 候选池四维多功能 UI 界面开发 (M3)**：新建 `ats/ui/next_day_watch_dialog.py`，实现经典 4-Tab 架构：① 盘前候选总览（按日期切片、分层 Badge、特征卡片、右键多维联动）；② 盘中实时后验（TDX 轮询状态、两帧确认证据链钻取、检查点时序微图、未交付事件跟踪）；③ 跨日顺延跟踪看板（多版本成效对比、DELAYED 顺延走强兑现明细）；④ 策略配置管理（可视表单 + 高亮 JSON 源码双向联动）。
+    - [ ] **Phase 4: 双端入口接入与系统联动 (M4)**：在 ATS 顶部主看板右上角新增 `[📋 次日候选池]` 快捷按钮与菜单；在 TK 主控制栏挂接 `[次日候选]` 按钮；提供独立启动脚本 `run_next_day_watch.py`；全线支持与外部行情软件及 ATS SBC 分时走势秒级联动。
+    - [ ] **Phase 5: 全链路回放验证与工程归档 (M5)**：端到端模拟测试（配置修改升级 -> 盘前冻结 -> 盘中确认 -> 跨日顺延 -> UI 呈现与编辑），测试覆盖率 100% 秒级纯绿通过，输出完整技术报告与操作指南。
+
+
+## 2026-09-25 ATS 性能方案二次校准（仅文档）
+- 正式方案：[ATS系统全流程性能优化分析与实施方案规划.md](design/ATS系统全流程性能优化分析与实施方案规划.md)。新增协议/所有权、有界队列、业务事件保序、共享指标、缓存失效、启动退出、容量模型及回退验证矩阵，均未实施。
+- 修正下方 09:38 历史报告：正常 Bridge 回调为完整 DataFrame，不能认定每帧二次 diff 合并；30~80ms、CPU 降幅和包体等没有实测支撑，不能作为已取得的性能成果。
+- 单写者、零拷贝、统一调度均有正确性前提；单连接仍排队，CoW 不替代线程同步，展示丢帧不能丢账本/信号事件。优先复用现有 SBC Dispatcher、epoch/pending、隐藏页脏标记与 TDX 缓存。
+- 本轮仅更新正式方案与相关历史记录，未运行生产系统/压测、未修改生产代码或暂存区；后续落地以正式方案的准入门槛为准。
+
 ## 2026-09-25 09:38
 - [x] **【ATS 系统全流程性能优化分析与实施方案制定（深度剖析·分段优化·纯规划·不实施）】(`ats/main_ats.py`, `ats/ui/main_window.py`, `ats/tdx_realtime_fetcher.py`, `ats/ipc_bridge.py`, `ats/ui/swing_table.py`, `ats/ui/capital_dragon_panel.py`, `ats/ui/ipo_command_room_dialog.py`, `20260925_0938_task.md`)**：
     - [x] **ATS 系统现状全面深度剖析与五大性能瓶颈诊断**：
