@@ -5409,6 +5409,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.top_multi_period_btn.pack(side="left", padx=2)
         self.top_sector_miner_btn = tk.Button(ctrl_frame, text="轮动🔄", command=lambda: self.open_sector_rotation_miner(), font=self.default_font_bold, fg="#0066cc", pady=2)
         self.top_sector_miner_btn.pack(side="left", padx=2)
+        self.top_next_day_watch_btn = tk.Button(ctrl_frame, text="次日候选📋", command=lambda: self.open_next_day_watch_dialog(), font=self.default_font_bold, fg="#9333ea", pady=2)
+        self.top_next_day_watch_btn.pack(side="left", padx=2)
 
         # 绑定操作说明快捷键 Alt+t (原 Alt-T 选股已禁用，原 Alt-G 操作说明替换为 Alt-T)
         self.bind_all("<Alt-t>", lambda e: self.open_guidance_window())
@@ -6725,9 +6727,16 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 asof_date=asof_date, target_date=target_date, sector_snapshot=sector_snapshot,
                 source_version=source_version, observe=False,
             )
-            if result.get("status") not in ("disabled", "empty"):
-                logger.info("[NextDayWatch] %s asof=%s target=%s candidates=%s",
-                            result.get("status"), asof_date, target_date, result.get("candidate_count", 0))
+            status = result.get("status")
+            if status in ("ok", "manifest_ready"):
+                frozen_targets = getattr(self, "_next_day_watch_frozen_targets", set())
+                frozen_targets.add(target_date)
+                self._next_day_watch_frozen_targets = frozen_targets
+                logger.info("[NextDayWatch] %s asof=%s target=%s candidates=%s (frozen successfully)",
+                            status, asof_date, target_date, result.get("candidate_count", 0))
+            elif status not in ("disabled", "empty"):
+                logger.info("[NextDayWatch] %s asof=%s target=%s candidates=%s (will retry in window)",
+                            status, asof_date, target_date, result.get("candidate_count", 0))
         except Exception as exc:
             logger.warning("[NextDayWatch] cycle failed without affecting market feed: %s", exc)
 
@@ -6820,8 +6829,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         frozen_targets = getattr(self, "_next_day_watch_frozen_targets", set())
                         prior_future = getattr(self, "_next_day_watch_future", None)
                         if target_date not in frozen_targets and (prior_future is None or prior_future.done()):
-                            frozen_targets.add(target_date)
-                            self._next_day_watch_frozen_targets = frozen_targets
                             asof_date = str(cct.get_last_trade_date(target_date))[:10]
                             self._next_day_watch_future = self.compute_executor.submit(
                                 self._run_next_day_watch_cycle, full_df, asof_date, target_date,
@@ -16557,6 +16564,58 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             toast_message(self, "轮动深挖已启动")
         except Exception as e:
             logger.error(f"Failed to open sector rotation miner internally: {e}")
+
+    def open_next_day_watch_dialog(self):
+        """打开/切换次日异动候选池综合管理中心对话框"""
+        import time, subprocess, sys
+        now = time.time()
+        starting_t = getattr(self, "_next_day_watch_dialog_t", 0.0)
+        if now - starting_t < 0.5:
+            return
+        self._next_day_watch_dialog_t = now
+
+        internal_win = getattr(self, '_next_day_watch_dlg', None)
+        if is_qt_win_alive(internal_win):
+            try:
+                if internal_win.isVisible() and not internal_win.isMinimized():
+                    internal_win.hide()
+                    toast_message(self, "次日候选池已隐藏")
+                else:
+                    if internal_win.isMinimized():
+                        internal_win.showNormal()
+                    else:
+                        internal_win.show()
+                    internal_win.raise_()
+                    internal_win.activateWindow()
+                    toast_message(self, "次日候选池已置顶")
+                return
+            except Exception as e:
+                logger.error(f"Toggle next day watch dlg failed: {e}")
+                self._next_day_watch_dlg = None
+
+        # 检查是否已有外部独立窗口
+        try:
+            import ctypes
+            hwnd = ctypes.windll.user32.FindWindowW(None, "📋 次日异动候选池综合管理中心 (Next-Day Watch Center)")
+            if hwnd and ctypes.windll.user32.IsWindow(hwnd):
+                if ctypes.windll.user32.IsIconic(hwnd):
+                    ctypes.windll.user32.ShowWindow(hwnd, 9)
+                else:
+                    ctypes.windll.user32.ShowWindow(hwnd, 5)
+                ctypes.windll.user32.SetForegroundWindow(hwnd)
+                toast_message(self, "次日候选池已置顶")
+                return
+        except Exception:
+            pass
+
+        # 异步启动独立伴侣进程
+        try:
+            from sys_utils import get_app_root
+            script = os.path.join(get_app_root(), "run_next_day_watch.py")
+            subprocess.Popen([sys.executable, script], cwd=get_app_root(), shell=False)
+            toast_message(self, "次日候选池中心正在启动...")
+        except Exception as exc:
+            logger.error(f"Launch run_next_day_watch.py failed: {exc}")
 
     def open_guidance_window(self):
         """直接打开每日操作指南选项卡"""

@@ -220,6 +220,35 @@ class UniverseTreeWidget(QWidget):
         self.btn_run_ipo.clicked.connect(self._on_launch_ipo_detector_clicked)
         header_layout.addWidget(self.btn_run_ipo)
 
+        # 📋 次日异动候选池快捷调起按钮
+        self.btn_run_next_day = QPushButton("📋 候选")
+        self.btn_run_next_day.setStyleSheet("""
+            QPushButton {
+                background-color: #261f38;
+                border: 1px solid #a855f7;
+                border-radius: 4px;
+                color: #c084fc;
+                font-weight: bold;
+                font-size: 8.5pt;
+                min-width: 44px;
+                max-width: 52px;
+                min-height: 23px;
+                max-height: 23px;
+                padding: 1px 3px;
+            }
+            QPushButton:hover {
+                background-color: #3b2d54;
+                border-color: #c084fc;
+                color: #ffffff;
+            }
+            QPushButton:pressed {
+                background-color: #171224;
+            }
+        """)
+        self.btn_run_next_day.setToolTip("📋 切换/打开次日异动候选池 (盘前候选、盘中两帧后验、跨日顺延及策略配置)")
+        self.btn_run_next_day.clicked.connect(self._on_launch_next_day_clicked)
+        header_layout.addWidget(self.btn_run_next_day)
+
         header_layout.addStretch()
         
         # --- 窗口位置手动快照（提供3个保存位置，全面持久化所有打开关联窗口，防多屏覆盖）---
@@ -1293,5 +1322,23 @@ class UniverseTreeWidget(QWidget):
                 self._notify_status(f"⚡ 已发送【{name} ({clean_code})】至新股次新超短检测工具！")
         except Exception as e:
             logger.error(f"[Universe] 发送标的至检测工具异常: {e}")
+
+    def _on_launch_next_day_clicked(self):
+        """【次日候选】优先在主窗口切换到次日候选池Tab，或调起管理中心"""
+        try:
+            parent = self.parent()
+            while parent is not None:
+                if hasattr(parent, "open_next_day_watch_dialog"):
+                    parent.open_next_day_watch_dialog()
+                    return
+                parent = parent.parent() if hasattr(parent, "parent") else None
+
+            from ats.ui.next_day_watch_dialog import NextDayAnomalyWatchDialog
+            dlg = NextDayAnomalyWatchDialog.get_instance()
+            dlg.show()
+            dlg.raise_()
+            dlg.activateWindow()
+        except Exception as exc:
+            logger.error(f"[Universe] 调起次日候选池异常: {exc}")
 
 

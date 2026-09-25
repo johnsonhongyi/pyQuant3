@@ -184,7 +184,8 @@ def _row_dict(row: Any) -> Dict[str, Any]:
 def _candidate_row_lookup(df: Any, candidates: List[Dict[str, Any]], vwap_field: Optional[str]) -> Dict[str, Dict[str, Any]]:
     if "code" not in getattr(df, "columns", ()) or not candidates:
         return {}
-    columns = [name for name in ("code", "name", "high", "trade", "close", "percent", "dff", "category", vwap_field)
+    columns = [name for name in ("code", "name", "high", "trade", "close", "percent", "dff", "category",
+                                 "vol", "volume", "amount", "server_time", "time", vwap_field)
                if name and name in df.columns]
     frame = df[columns].copy()
     frame["_watch_code"] = frame["code"].map(_normalize_code)
@@ -214,7 +215,8 @@ def _sector_evidence(category: Any, snapshot: Any) -> Dict[str, Any]:
 def run_cycle(df: Any, *, config_path: str, data_dir: str, asof_date: str,
               target_date: str, observed_at: Optional[str] = None,
               vwap_field: Optional[str] = None, sector_snapshot: Any = None,
-              source_version: Any = None, observe: bool = True) -> Dict[str, Any]:
+              source_version: Any = None, observe: bool = True,
+              force_freeze: bool = False) -> Dict[str, Any]:
     """Create the frozen next-session list and append candidate outcome facts."""
     if df is None or getattr(df, "empty", True):
         return {"status": "empty"}
@@ -234,7 +236,7 @@ def run_cycle(df: Any, *, config_path: str, data_dir: str, asof_date: str,
         now = datetime.fromisoformat(observed_at)
         watch = _read_json(watch_path, None)
         if watch is None:
-            if now.date().isoformat() != target_date or (now.hour, now.minute) > (9, 15):
+            if not force_freeze and (now.date().isoformat() != target_date or (now.hour, now.minute) > (9, 15)):
                 return {"status": "not_frozen", "candidate_count": 0, "events": []}
             records = []
             invalid_by_strategy = {}
@@ -257,11 +259,17 @@ def run_cycle(df: Any, *, config_path: str, data_dir: str, asof_date: str,
                     excluded_prefixes = tuple(str(prefix) for prefix in universe.get("exclude_code_prefixes", []))
                     if (included_prefixes and not code.startswith(included_prefixes)) or (excluded_prefixes and code.startswith(excluded_prefixes)):
                         continue
-                    required = ("ch_dir", "ch_slope_deg", "ch_pos", "lastp1d", "ch_lower", "td_sell",
-                                "lasth1d", "lasth2d", "lasth3d", "lastl1d", "lastl2d", "lastl3d", "lastl4d", "lastl5d",
-                                "lastv1d", "lastv2d", "lastv3d") if strategy.get("template") == "channel_stepup" else ()
-                    if match is None or any(_number(row.get(field)) is None for field in required):
+                    req_fields = strategy.get("required_fields")
+                    if req_fields is not None and isinstance(req_fields, list):
+                        required = tuple(req_fields)
+                    else:
+                        required = ("ch_dir", "ch_slope_deg", "ch_pos", "lastp1d", "ch_lower", "td_sell",
+                                    "lasth1d", "lasth2d", "lasth3d", "lastl1d", "lastl2d", "lastl3d", "lastl4d", "lastl5d",
+                                    "lastv1d", "lastv2d", "lastv3d") if strategy.get("template") == "channel_stepup" else ()
+                    missing_required = any(_number(row.get(field)) is None for field in required)
+                    if match is None or missing_required:
                         invalid_by_strategy[str(strategy["strategy_id"])] = invalid_by_strategy.get(str(strategy["strategy_id"]), 0) + 1
+                        continue
                     # No unknown/missing feature may silently become a passing result.
                     if match is True and tier:
                         records.append({"code": code, "name": str(row.get("name", code)), "category": str(row.get("category", "")),
@@ -272,7 +280,8 @@ def run_cycle(df: Any, *, config_path: str, data_dir: str, asof_date: str,
                             "feature_values": {k: row.get(k) for k in sorted(_FEATURES) if _number(row.get(k)) is not None},
                             "first_selected_date": target_date, "status": "WATCHING",
                             "phase": {"A": "STABILIZING", "B": "RISING", "C": "PRE_ACCELERATION"}[tier],
-                            "followup_trading_days": int(strategy.get("followup", {}).get("trading_days", 3))})
+                            "followup_trading_days": int(strategy.get("followup", {}).get("trading_days", 3)),
+                            "followup_proof_any": list(strategy.get("followup", {}).get("proof_any", ["daily_high_break", "verified_vwap_rise"]))})
             records.sort(key=lambda x: (-x["score"], x["code"], x["strategy_id"]))
             limited = []
             for strategy in config["strategies"]:
@@ -323,11 +332,19 @@ def run_cycle(df: Any, *, config_path: str, data_dir: str, asof_date: str,
                               and prior_checkpoint.get("vwap_source") == vwap_field
                               and _number(prior_checkpoint.get("vwap")) is not None
                               and real_vwap > float(prior_checkpoint["vwap"]))
+            cur_vol = _number(row.get("volume", row.get("vol")))
+            cur_amt = _number(row.get("amount"))
+            cur_time = str(row.get("server_time") or row.get("time") or "")
+            proof_rules = candidate.get("followup_proof_any") or ["daily_high_break", "verified_vwap_rise"]
+            proof_high = sustained_high if "daily_high_break" in proof_rules else False
+            proof_vw = proof_vwap if "verified_vwap_rise" in proof_rules else False
+            proof = proof_high or proof_vw
+
             item["checkpoints"].append({"observed_at": observed_at, "phase": "market" if now.hour < 15 else "close",
                 "high": daily_high, "close": close, "vwap": real_vwap, "vwap_source": vwap_field if real_vwap is not None else None,
+                "volume": cur_vol, "amount": cur_amt, "server_time": cur_time,
                 "sustained_high": sustained_high, "verified_vwap_rise": proof_vwap, "sector": str(row.get("category", "")),
                 "sector_evidence": _sector_evidence(row.get("category"), sector_snapshot)})
-            proof = sustained_high or proof_vwap
             previous_phase = tracked_candidate.get("phase", "STABILIZING")
             if sustained_high and proof_vwap and real_vwap is not None and close is not None and close >= real_vwap:
                 next_phase = "ACCELERATING"
@@ -342,13 +359,36 @@ def run_cycle(df: Any, *, config_path: str, data_dir: str, asof_date: str,
                 tracked_candidate["phase"] = next_phase
             in_continuous_session = (now.hour, now.minute) >= (9, 30) and (now.hour, now.minute) <= (15, 0)
             prior_age = None
+            has_quote_progress = True
             if prior_checkpoint:
                 try:
                     prior_age = (now - datetime.fromisoformat(prior_checkpoint["observed_at"])).total_seconds()
                 except (KeyError, TypeError, ValueError):
                     prior_age = None
-            if (in_continuous_session and proof and prior_age is not None and 0 < prior_age <= 8
-                    and (prior_checkpoint.get("sustained_high") or prior_checkpoint.get("verified_vwap_rise"))):
+                prior_vol = _number(prior_checkpoint.get("volume"))
+                prior_amt = _number(prior_checkpoint.get("amount"))
+                prior_time = str(prior_checkpoint.get("server_time") or "")
+                # 必须有真实的量额递增或时间戳推进，同一报价重复重放不得视作新帧
+                if cur_vol is not None and prior_vol is not None:
+                    has_quote_progress = (cur_vol > prior_vol)
+                elif cur_amt is not None and prior_amt is not None:
+                    has_quote_progress = (cur_amt > prior_amt)
+                elif cur_time and prior_time:
+                    has_quote_progress = (cur_time > prior_time)
+                else:
+                    # 无量额和时间时，若价格完全未变，不允许触发
+                    p_curr = (daily_high, close, real_vwap)
+                    p_prior = (_number(prior_checkpoint.get("high")), _number(prior_checkpoint.get("close")), _number(prior_checkpoint.get("vwap")))
+                    if p_curr == p_prior:
+                        has_quote_progress = False
+
+            prior_matched = bool(prior_checkpoint and (
+                (proof_high and prior_checkpoint.get("sustained_high")) or
+                (proof_vw and prior_checkpoint.get("verified_vwap_rise"))
+            ))
+
+            if (in_continuous_session and proof and has_quote_progress and prior_age is not None and 0 < prior_age <= 8
+                    and prior_matched):
                 if not any(e.get("type") == "NEXT_DAY_WATCH_CONFIRM" for e in item["events"]):
                     event = {"type": "NEXT_DAY_WATCH_CONFIRM", "event_id": "%s:%s:%s:first_confirm" %
                              (target_date, code, candidate["strategy_id"]), "target_trade_date": target_date,
@@ -362,8 +402,11 @@ def run_cycle(df: Any, *, config_path: str, data_dir: str, asof_date: str,
                                           "vwap": real_vwap, "vwap_source": vwap_field if real_vwap is not None else None,
                                           "confirm_frames": 2, "first_observed_at": prior_checkpoint["observed_at"]}}
                     item["events"].append(event)
+            has_confirmed = any(e.get("type") == "NEXT_DAY_WATCH_CONFIRM" for e in item["events"])
             has_vwap_observation = any(point.get("vwap") is not None for point in item["checkpoints"])
-            if now.hour >= 15 and not proof and (daily_high is None or close is None or not has_vwap_observation):
+            if has_confirmed:
+                tracked_candidate["status"] = "EARLY_VALID"
+            elif now.hour >= 15 and not proof and (daily_high is None or close is None or not has_vwap_observation):
                 if not any(e.get("type") == "UNVERIFIABLE" for e in item["events"]):
                     item["events"].append({"type": "UNVERIFIABLE", "date": target_date, "observed_at": observed_at,
                                            "reason": "missing_price_or_verified_vwap_observation"})
