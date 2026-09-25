@@ -1,5 +1,29 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-09-25 09:38
+- [x] **【ATS 系统全流程性能优化分析与实施方案制定（深度剖析·分段优化·纯规划·不实施）】(`ats/main_ats.py`, `ats/ui/main_window.py`, `ats/tdx_realtime_fetcher.py`, `ats/ipc_bridge.py`, `ats/ui/swing_table.py`, `ats/ui/capital_dragon_panel.py`, `ats/ui/ipo_command_room_dialog.py`, `20260925_0938_task.md`)**：
+    - [x] **ATS 系统现状全面深度剖析与五大性能瓶颈诊断**：
+        - 1) 瓶颈一：IPC 链路多重深拷贝与双重差分合并（`IPCBridge` 解包深拷贝合并后，主线程 `_handle_realtime_data` 又执行一次深拷贝与差分合并，单秒产生数十 MB 垃圾对象引发 Minor GC 冻结 30~80ms）；
+        - 2) 瓶颈二：通达信 pytdx 单一长连接与全局互斥锁 `_conn_lock` 串行争抢（各监控面板/新股/天梯直接并发争抢，偶发网络波动导致全系统假死）；
+        - 3) 瓶颈三：Qt 表格全量单元格操作与 DOM 重构风暴（`SwingStateTable`、`FavoritePanel`、`IPOCommandRoomDialog` 遍历全量数百行×数十列频繁赋值，且批量调用 `setRowHidden` 引发频繁几何重排）；
+        - 4) 瓶颈四：计算密集型策略对 Python GIL 的挤占（`LedgerUpdateWorker` 高负荷占用 CPU 核导致主线程 Qt 事件循环调度延迟，拖拽/缩放界面粘滞）；
+        - 5) 瓶颈五：散弹式历史/价格补齐与磁盘锁争抢（零散创建 OS 原生线程，争抢 HDF5 锁超时丢弃）；
+    - [x] **加载异步化与多线程/进程隔离重构蓝图**：
+        - 主线程极限降载与 0 毫秒阻塞门禁（绝对禁止磁盘/网络 IO，取消二次合并，主线程单次事件响应降至 <2ms）；
+        - 独立计算进程/线程池方案评估（共享内存零拷贝交换，100% 释放主线程 GIL）；
+        - 统一线程池与任务优先级调度，引入代际守卫（Epoch Guard）与高频丢帧防雪崩；
+    - [x] **数据读取全流程与零拷贝借读闭环**：
+        - IPC 借读契约（单一写者 Single-Writer 收敛至 `IPCBridge` 后台线程，发布只读密封快照，主线程与 Worker 借读零拷贝）；
+        - 全系统统一通达信调度中枢升级（`ATSUnifiedDataDispatcher`，根据窗口可见性实施 P0/P1/P2 错峰分级调度，彻底终结网络锁争抢）；
+        - 多级分层持久化缓存（L1 内存热缓存 -> L2 RamDisk 快速共享层 -> L3 本地磁盘冷归档）；
+    - [x] **分段式优化架构方案（渲染分段、计算分段、传输分段）**：
+        - 渲染分段：Qt 视口虚拟化（仅为可视区域 25~35 行动态分配单元格，废除 `setRowHidden`，改用内存逻辑行索引映射表）；
+        - 计算分段：三级梯度错峰计算（Tier 1 瞬时行情脉冲层 <3ms -> Tier 2 核心持仓/精选通道层 <15ms -> Tier 3 全景天梯/板块层 <80ms）；
+        - 传输分段：IPC 双轨分流（高频极简快轨 Ticker Track <15KB + 低频全量慢轨 Indicator Track）；
+    - [x] **准入驱动的演进路线图（Stage 0 至 Stage 5）**：
+        - 明确界定 Stage 0 (基线与 Golden Samples) -> Stage 1 (零拷贝借读) -> Stage 2 (统一调度中枢) -> Stage 3 (分段计算) -> Stage 4 (视口虚拟化) -> Stage 5 (长周期压测与容灾降级)；
+        - 恪守纯规划原则，不执行任何既有代码修改，为未来平稳演进提供工程级指导蓝图。
+
 ## 2026-09-25 01:00
 - [x] **【PyInstaller 模块批量打包调度中心编排与非侵入式组合调用闭环落地】(`C:\Users\Johnson\instock-pyinstall-batch.cmd`, `stock_standalone/instock-pyinstall-batch.cmd`, `20260925_0100_task.md`)**：
     - [x] **100% 保持原有批处理零修改、零侵入**：

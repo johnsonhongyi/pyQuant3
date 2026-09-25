@@ -6707,6 +6707,30 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             self._put_deduped_task("main_ui_sync", _do_mem_sync)
 
 
+    def _run_next_day_watch_cycle(self, full_df, asof_date, target_date, source_version):
+        """Freeze the opt-in premarket candidate snapshot away from the Tk UI thread."""
+        try:
+            import os
+            from next_day_anomaly_watch import run_cycle
+            from sys_utils import get_app_root, get_conf_path
+            app_root = get_app_root()
+            config_path = get_conf_path("next_day_watch_strategies.json", app_root)
+            data_dir = os.path.join(app_root, "datacsv")
+            sector_snapshot = None
+            detector = getattr(self, "racing_detector", None)
+            if detector is not None and hasattr(detector, "get_active_sectors_snapshot"):
+                sector_snapshot = detector.get_active_sectors_snapshot()
+            result = run_cycle(
+                full_df, config_path=config_path, data_dir=data_dir,
+                asof_date=asof_date, target_date=target_date, sector_snapshot=sector_snapshot,
+                source_version=source_version, observe=False,
+            )
+            if result.get("status") not in ("disabled", "empty"):
+                logger.info("[NextDayWatch] %s asof=%s target=%s candidates=%s",
+                            result.get("status"), asof_date, target_date, result.get("candidate_count", 0))
+        except Exception as exc:
+            logger.warning("[NextDayWatch] cycle failed without affecting market feed: %s", exc)
+
     def _apply_tree_data_sync(self, full_df, ui_df=None, cur_res='d', force=False, full_df_res=None):
         """
         Sync step: update internal state and Tkinter UI on the main thread.
@@ -6786,6 +6810,25 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     self._racing_panel_win.df_all = full_df
                 
                 self._data_update_version = getattr(self, "_data_update_version", 0) + 1
+
+                # TK only freezes the premarket candidate cohort; ATS owns intraday TDX confirmation.
+                try:
+                    now_hm = cct.get_now_time_int()
+                    if 830 <= now_hm <= 915:
+                        today = str(cct.get_today())[:10]
+                        target_date = today
+                        frozen_targets = getattr(self, "_next_day_watch_frozen_targets", set())
+                        prior_future = getattr(self, "_next_day_watch_future", None)
+                        if target_date not in frozen_targets and (prior_future is None or prior_future.done()):
+                            frozen_targets.add(target_date)
+                            self._next_day_watch_frozen_targets = frozen_targets
+                            asof_date = str(cct.get_last_trade_date(target_date))[:10]
+                            self._next_day_watch_future = self.compute_executor.submit(
+                                self._run_next_day_watch_cycle, full_df, asof_date, target_date,
+                                getattr(self, "_data_update_version", 0),
+                            )
+                except Exception as watch_err:
+                    logger.debug("[NextDayWatch] scheduling skipped: %s", watch_err)
                 
                 # -------------------------------------------------------------
                 # 🛡️ 后台数据驱动任务 (不受 UI 过滤与 Hash 变动限制，确保交易内核高频顺畅 tick)

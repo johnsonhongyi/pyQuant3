@@ -2821,6 +2821,7 @@ class IPOSubnewDetectorDialog(QMainWindow):
         """消费来自 ATS 跨进程一键发送过来的新代码，同步 IPC 数据并更新心跳"""
         # 1. 维护心跳
         update_detector_heartbeat(os.getpid())
+        self._sync_next_day_watch_events()
 
         # 2. 🛡️【父进程存活心跳守护】：检测 ATS_MAIN_PID，若主进程已退出，本子进程 0.5s 安全退出
         main_pid_str = os.environ.get("ATS_MAIN_PID", "")
@@ -2880,6 +2881,70 @@ class IPOSubnewDetectorDialog(QMainWindow):
                                     self._update_table_row_data(self.signals_map[cd], target_row=r, manage_sorting=False)
             except Exception as e_ipcdf:
                 logger.debug(f"从 IPC 获取实时行情异常: {e_ipcdf}")
+
+    def _sync_next_day_watch_events(self):
+        """将 ATS 已确认的次日候选异动同步进检测中心监控表。"""
+        try:
+            import time
+            from sys_utils import get_app_root
+            from next_day_anomaly_watch import _read_json
+            today = time.strftime("%Y-%m-%d")
+            root = get_app_root()
+            data_dir = os.path.join(root, "datacsv")
+            eval_path = os.path.join(data_dir, "next_day_anomaly_eval_%s.json" % today)
+            watch_path = os.path.join(data_dir, "next_day_anomaly_watch_%s.json" % today)
+            mtime = os.path.getmtime(eval_path) if os.path.exists(eval_path) else 0
+            if mtime <= getattr(self, "_next_day_watch_eval_mtime", 0):
+                return
+            evaluation = _read_json(eval_path, {})
+            watch = _read_json(watch_path, {})
+            if not evaluation:
+                return
+            self._next_day_watch_eval_mtime = mtime
+            candidates = {item.get("code"): item for item in watch.get("candidates", [])}
+            from ats.strategy.ipo_vwap_detector_engine import VWAPDetectorSignal
+            updated = False
+            for item in evaluation.get("candidates", {}).values():
+                confirm = next((event for event in reversed(item.get("events", []))
+                                if event.get("type") == "NEXT_DAY_WATCH_CONFIRM"), None)
+                if not confirm:
+                    continue
+                event_id = str(confirm.get("event_id", ""))
+                seen = getattr(self, "_next_day_watch_event_ids", set())
+                if not event_id or event_id in seen:
+                    continue
+                seen.add(event_id)
+                self._next_day_watch_event_ids = seen
+                code = str(confirm.get("code", "")).zfill(6)
+                if code not in self.monitored_codes:
+                    self.monitored_codes.insert(0, code)
+                    self._rebuild_table_rows()
+                candidate = item.get("candidate", candidates.get(code, {}))
+                price = float(confirm.get("price", 0) or 0)
+                vwap = float((confirm.get("evidence") or {}).get("vwap", 0) or 0)
+                sig = self.signals_map.get(code) or VWAPDetectorSignal(code=code, name=confirm.get("name", code))
+                sig.name = str(confirm.get("name") or candidate.get("name") or code)
+                sig.price = price
+                sig.change_pct = float(confirm.get("pct", 0) or 0)
+                sig.vwap = vwap
+                sig.vwap_diff_pct = (price - vwap) / vwap * 100.0 if vwap > 0 else 0.0
+                sig.is_above_vwap = bool(vwap > 0 and price >= vwap)
+                sig.signal_desc = "次日候选池确认：%s | 策略 %s v%s" % (
+                    confirm.get("reason", "企稳抬升确认"), confirm.get("strategy_id", ""), confirm.get("version", ""))
+                metrics = dict(sig.extra_data or {})
+                metrics["next_day_watch"] = {"event_id": event_id, "tier": candidate.get("tier"),
+                    "phase": candidate.get("phase"), "strategy_id": confirm.get("strategy_id"),
+                    "version": confirm.get("version"), "target_trade_date": today}
+                sig.extra_data = metrics
+                self.signals_map[code] = sig
+                self._pending_render_queue.append(sig)
+                updated = True
+            if updated and not self._render_timer.isActive():
+                self._render_timer.start(40)
+            if updated and hasattr(self, "_command_room_dlg") and self._command_room_dlg and self._command_room_dlg.isVisible():
+                self._command_room_dlg.refresh_data()
+        except Exception as exc:
+            logger.debug("同步 ATS 次日候选异动到检测中心失败: %s", exc)
 
     def _on_tk_stream_data(self, df: pd.DataFrame):
         """

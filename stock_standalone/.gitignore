@@ -1,2 +1,3 @@
 .pytest_temp/
 .pytest_cache/
+!config/next_day_watch_strategies.json

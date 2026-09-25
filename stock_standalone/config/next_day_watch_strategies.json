@@ -1,0 +1,103 @@
+{
+  "schema_version": 1,
+  "enabled": true,
+  "vwap_field": null,
+  "strategies": [
+    {
+      "strategy_id": "channel_stepup",
+      "version": 1,
+      "enabled": true,
+      "template": "channel_stepup",
+      "required_fields": [
+        "ch_dir",
+        "ch_slope_deg",
+        "ch_pos",
+        "ch_lower",
+        "td_sell",
+        "lastp1d",
+        "lasth1d",
+        "lasth2d",
+        "lasth3d",
+        "lastl1d",
+        "lastl2d",
+        "lastl3d",
+        "lastl4d",
+        "lastl5d",
+        "lastv1d",
+        "lastv2d",
+        "lastv3d"
+      ],
+      "universe": {
+        "include_code_prefixes": [],
+        "exclude_code_prefixes": []
+      },
+      "tiers": [
+        {
+          "id": "A",
+          "rule": "support_stable"
+        },
+        {
+          "id": "B",
+          "rule": "higher_highs_lows"
+        },
+        {
+          "id": "C",
+          "rule": "gentle_volume_growth"
+        }
+      ],
+      "rank_weights": {
+        "A": 1,
+        "B": 2,
+        "C": 3
+      },
+      "thresholds": {
+        "slope_min": 1.5,
+        "ch_pos_min": 5,
+        "ch_pos_max": 60,
+        "support_tolerance": 0.015,
+        "td_sell_max": 5,
+        "low_stability_tolerance": 0.01,
+        "low_stability_count": 2,
+        "volume_ratio_min": 1.1,
+        "volume_ratio_max": 2.5,
+        "daily_volume_floor": 0.9,
+        "volume_growth_days": 2,
+        "volume_spike_max": 3.2
+      },
+      "pre_filter": {
+        "all": [
+          {
+            "field": "ch_dir",
+            "op": "==",
+            "value": 1
+          },
+          {
+            "field": "ch_slope_deg",
+            "op": ">",
+            "value": 1.5
+          },
+          {
+            "field": "ch_pos",
+            "op": "between",
+            "value": [
+              5,
+              60
+            ]
+          }
+        ]
+      },
+      "capacity": {
+        "A": 100,
+        "B": 60,
+        "C": 40
+      },
+      "followup": {
+        "trading_days": 3,
+        "proof_any": [
+          "daily_high_break",
+          "verified_vwap_rise"
+        ]
+      }
+    }
+  ]
+}

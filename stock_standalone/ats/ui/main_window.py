@@ -1934,6 +1934,13 @@ class ATSMainWindow(QMainWindow):
         # Connect thread-safe PyQt signals
         self.realtime_data_signal.connect(self._handle_realtime_data)
         self.realtime_signal_signal.connect(self._handle_realtime_signal)
+
+        # Candidate confirmation uses ATS TDX quotes (not TK's slower market snapshot cadence).
+        self._next_day_watch_poll_busy = False
+        self._next_day_watch_timer = QTimer(self)
+        self._next_day_watch_timer.setInterval(4000)
+        self._next_day_watch_timer.timeout.connect(self._poll_next_day_watch_tdx)
+        self._next_day_watch_timer.start()
         
         # Initialize favorites version-tracking and start polling loop
         try:
@@ -5437,11 +5444,146 @@ class ATSMainWindow(QMainWindow):
     def _handle_realtime_signal(self, signal):
         if not signal:
             return
+        if isinstance(signal, dict) and signal.get("type") == "NEXT_DAY_WATCH_CONFIRM":
+            try:
+                import datetime
+                import math
+                from ats.ledger_update_service import LedgerUpdateService
+                event_id = str(signal.get("event_id", ""))
+                code = "".join(ch for ch in str(signal.get("code", "")) if ch.isdigit())[-6:].zfill(6)
+                target_date = str(signal.get("target_trade_date", ""))[:10]
+                evidence = signal.get("evidence") or {}
+                observed_at = datetime.datetime.fromisoformat(str(signal.get("observed_at", "")))
+                first_observed_at = datetime.datetime.fromisoformat(str(evidence.get("first_observed_at", "")))
+                price = float(signal.get("price", 0) or 0)
+                pct = float(signal.get("pct", 0) or 0)
+                deviation = float(signal.get("deviation", 0) or 0)
+                if (not event_id or len(code) != 6 or not code.strip("0") or
+                        signal.get("service") != "ATS_TDXRealtimeFetcher" or
+                        target_date != datetime.date.today().isoformat() or
+                        observed_at.date().isoformat() != target_date or
+                        not signal.get("strategy_id") or not signal.get("version") or len(str(signal.get("config_hash", ""))) != 64 or
+                        evidence.get("confirm_frames") != 2 or not (0 < (observed_at - first_observed_at).total_seconds() <= 8) or
+                        not (evidence.get("sustained_high") or evidence.get("verified_vwap_rise")) or
+                        not all(math.isfinite(v) for v in (price, pct, deviation)) or price <= 0):
+                    return
+                seen = getattr(self, "_next_day_watch_event_ids", None)
+                if seen is None:
+                    seen = set()
+                    self._next_day_watch_event_ids = seen
+                last_observed = getattr(self, "_next_day_watch_last_observed", {})
+                if observed_at.timestamp() < last_observed.get(code, 0):
+                    return
+                if event_id in seen:
+                    return
+                seen.add(event_id)
+                last_observed[code] = observed_at.timestamp()
+                self._next_day_watch_last_observed = last_observed
+                service = getattr(self, "ledger_update_service", None)
+                if service is None and hasattr(self, "signal_ledger"):
+                    service = LedgerUpdateService(self.signal_ledger)
+                    self.ledger_update_service = service
+                if service is not None:
+                    service.update_candidate(code=code, name=str(signal.get("name") or code), price=price,
+                        pct=pct, deviation=deviation, source="NEXT_DAY_WATCH", observed_at=signal.get("observed_at"),
+                        required_frames=1, signal_tag="次日候选池确认", strategy_id=signal.get("strategy_id"),
+                        strategy_version=signal.get("version"), target_trade_date=target_date,
+                        event_id=event_id, reason=str(signal.get("reason", "")))
+                reason = signal.get("reason") or "次日候选池两帧确认"
+                self.status_bar.showMessage("🔔 [次日候选池] %s %s -> ATS观察 (%s)" %
+                    (code, signal.get("name", ""), reason), 10000)
+                return
+            except Exception as exc:
+                print("[ATSMainWindow] next-day candidate event rejected: %s" % exc)
+                return
         code = signal.get('code')
         name = signal.get('name')
         action = signal.get('action')
         reason = signal.get('reason') or '实时指标共振'
         self.status_bar.showMessage(f"🔔 [实时信号广播] {code} {name} -> 建议: {action} ({reason})")
+
+    def _poll_next_day_watch_tdx(self):
+        """Poll the frozen cohort through TDX and evaluate on ATS's live quote cadence."""
+        if getattr(self, "_next_day_watch_poll_busy", False):
+            return
+        now = time.localtime()
+        if now.tm_wday >= 5 or not (93000 <= now.tm_hour * 10000 + now.tm_min * 100 + now.tm_sec <= 150500):
+            return
+        today = time.strftime("%Y-%m-%d", now)
+        try:
+            from sys_utils import get_app_root, get_conf_path
+            from next_day_anomaly_watch import _read_json, mark_events_delivered, run_cycle
+            import glob
+            root = get_app_root()
+            data_dir = os.path.join(root, "datacsv")
+            watch_path = os.path.join(data_dir, "next_day_anomaly_watch_%s.json" % today)
+            config_path = get_conf_path("next_day_watch_strategies.json", root)
+            config = _read_json(config_path, {})
+            watch = _read_json(watch_path, {})
+            candidates = watch.get("candidates", [])
+            if not config.get("enabled"):
+                return
+            followup_candidates = []
+            for prior_watch_path in glob.glob(os.path.join(data_dir, "next_day_anomaly_watch_*.json")):
+                prior_watch = _read_json(prior_watch_path, {})
+                prior_date = str(prior_watch.get("target_trade_date", ""))
+                if not prior_date or prior_date >= today:
+                    continue
+                prior_eval = _read_json(os.path.join(data_dir, "next_day_anomaly_eval_%s.json" % prior_date), {})
+                for item in prior_eval.get("candidates", {}).values():
+                    types = {event.get("type") for event in item.get("events", [])}
+                    if types.intersection({"DAY_MISS", "UNVERIFIABLE"}) and not types.intersection({"DELAYED", "MISSED"}):
+                        followup_candidates.append(item.get("candidate", {}))
+            if not candidates and not followup_candidates:
+                return
+        except Exception as exc:
+            logger.debug("[NextDayWatch][ATS_TDX] manifest check skipped: %s", exc)
+            return
+
+        self._next_day_watch_poll_busy = True
+        import threading
+
+        def _worker():
+            started = time.perf_counter()
+            try:
+                from ats.tdx_realtime_fetcher import TDXRealtimeFetcher
+                fetcher = TDXRealtimeFetcher.get_instance()
+                all_candidates = candidates + followup_candidates
+                meta = {str(item.get("code", "")).zfill(6): item for item in all_candidates if item.get("code")}
+                codes = sorted(meta)
+                quotes = fetcher.get_security_quotes_safe(codes, force=False)
+                frame = fetcher.convert_quotes_to_df(quotes)
+                import pandas as pd
+                if frame is None:
+                    frame = pd.DataFrame()
+                for code in codes:
+                    if code not in frame.index:
+                        frame.loc[code, "code"] = code
+                endpoint = getattr(fetcher, "current_host", None) or ("TDX", "?", "?")
+                for code in frame.index:
+                    candidate = meta.get(str(code).zfill(6), {})
+                    frame.loc[code, "name"] = candidate.get("name", str(code))
+                    frame.loc[code, "category"] = candidate.get("category", "")
+                frame["percent"] = frame.get("change_pct", 0.0)
+                from datetime import datetime
+                observed_at = datetime.now().astimezone().isoformat(timespec="milliseconds")
+                result = run_cycle(frame, config_path=config_path, data_dir=data_dir,
+                    asof_date=str(watch.get("source_asof_trade_date", today)), target_date=today,
+                    observed_at=observed_at, vwap_field="vwap")
+                event_ids = []
+                for signal in result.get("events", []):
+                    signal["service"] = "ATS_TDXRealtimeFetcher"
+                    self.realtime_signal_signal.emit(signal)
+                    event_ids.append(signal.get("event_id"))
+                mark_events_delivered(data_dir, today, event_ids)
+                logger.info("[NextDayWatch][ATS_TDX] service=TDXRealtimeFetcher node=%s endpoint=%s:%s candidates=%d quotes=%d confirmed=%d elapsed=%.0fms",
+                            endpoint[0], endpoint[1], endpoint[2], len(codes), len(frame), len(event_ids), (time.perf_counter() - started) * 1000)
+            except Exception as exc:
+                logger.warning("[NextDayWatch][ATS_TDX] realtime evaluation failed: %s", exc)
+            finally:
+                self._next_day_watch_poll_busy = False
+
+        threading.Thread(target=_worker, daemon=True, name="ATS_NextDayWatch_TDX").start()
 
     def load_font_size(self) -> int:
         try:
@@ -6290,6 +6432,8 @@ class ATSMainWindow(QMainWindow):
         """主窗口关闭退出时，自动跟随关闭所有独立的 TopLevel 子窗口、对话框、保存全量布局配置及安全回收后台线程"""
         self._is_closing = True
         self._is_exiting = True
+        if hasattr(self, "_next_day_watch_timer"):
+            self._next_day_watch_timer.stop()
 
         # 0. 🚀【原子持久化打开的磁吸/监控窗口状态】：在子窗口被 close() 前优先保存 is_open: True
         try:
@@ -6940,6 +7084,3 @@ class ATSMainWindow(QMainWindow):
                 self.status_bar.showMessage(msg, 6000)
             return count, restored
         return 0, []
-
-
-
