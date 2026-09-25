@@ -1,9 +1,27 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-09-26 05:50 ATS 新股次新股 Tab 与次日异动候选池列持久化冲突彻底修复
+- [ ] **【新股次新股 Tab 与次日异动候选池列持久化冲突彻底修复】(`ats/ui/styles.py`, `ats/ui/new_stock_panel.py`, `ats/ui/next_day_watch_dialog.py`, `ats/ui/main_window.py`, `20260926_0550_task.md`)**：
+    - [ ] **Phase 1: 编写重现测试用例 (TDD)**：构建后台 Tab 填充/排序写盘拦截、`restoreState` 优先免覆盖、多 Tab 并发列调整隔离测试。
+    - [ ] **Phase 2: `setup_header_persistence` 底座彻底重构加固**：根除假冒 visible 状态越权写盘；解耦 `sectionCountChanged` 与 `sortIndicatorChanged` 信号风暴；加固 `restore_action()` 优雅回退与默认值保护。
+    - [ ] **Phase 3: 新股次新股与次日异动专有配置彻底解耦与脏数据自愈**：为 `NewStockPanel` 设立独立 `config/new_stock_columns.json`；无感迁移已有合法配置并清理 100 宽度脏数据。
+    - [ ] **Phase 4: ATS 主窗口生命周期与 Tab 切换闭环治理**：`main_window.closeEvent` 补齐各核心面板表头显式保存；`_on_top_tab_changed` 补齐次日异动 Tab 激活与按需刷新。
+    - [ ] **Phase 5: 全链路自动化验证与工程归档**：测试用例 100% 纯绿通过，全模块编译零违规。
+
+## 2026-09-26 05:30 ATS 性能优化方案全流程深度审查与工程级闭环升级（仅方案文档）
+- [x] **【ATS 系统全流程性能优化方案深度审查与工程级闭环升级（纯规划·不实施）】(`design/ATS系统全流程性能优化分析与实施方案规划.md`, `20260926_0530_task.md`)**：
+    - [x] **候选池历史追踪与行查找微观性能瓶颈彻底闭环**：单次字典投影（Single-Pass Dict Projection）彻底淘汰 `iterrows()`；历史扫描有效交易日窗口剪枝（Trade-Day Window Pruning）；无变化脏检查跳写阻断（Dirty Flag Skip-Write）。
+    - [x] **Qt 表格渲染重构风暴与列宽性能灾难治理**：刷新路径彻底清除 `resizeColumnsToContents()` 避免字体包围盒重排与用户列宽破坏；自动刷新后台化并增加视口/最小化/非今日三重守卫。
+    - [x] **Windows 平台并发文件锁竞争与原子替换健壮性**：针对 `os.replace` 在读锁下抛出 `WinError 32` 风险，设计跨进程文件级互斥、有限指数退避重试与临时文件保护自愈模式。
+    - [x] **配置系统只读快照化与主线程无感知写入**：建立只读不可变配置单例快照（热路径零读写），自修复逻辑剥离为独立维护任务；`save_config_nodes` 异步队列消除主线程最高 450ms 同步 `time.sleep`。
+    - [x] **业务事件两阶段持久化确认协议 (Two-Phase Delivery Ack)**：彻底废除 `emit` 后立即标记 delivered 的伪交付缺陷，设计 `PENDING_DELIVERY` -> 消费者事务持久落盘 -> `EVENT_ACK` -> 原子翻转 `DELIVERED` 的闭环确认与幂等安全重发机制。
+    - [x] **休市板块确定性负缓存、容量模型与验证矩阵全面升级**：期限负缓存消除无意义 glob/解压；容量模型补充单次字典投影复杂度降阶推导；验证矩阵增加 WinError 32 锁争抢注入与无自适应列宽门禁。
+
 ## 2026-09-26 ATS 功能更新后性能方案复核（仅文档）
 - 更新正式方案：[ATS系统全流程性能优化分析与实施方案规划.md](design/ATS系统全流程性能优化分析与实施方案规划.md)，基于 HEAD `3bdb65b6` 及当时工作区修改；新增候选池文件加载/历史评估/事件确认、配置修复、休市板块、动态布局及账户基线投影分析，重排 Stage 0–5 与验收矩阵。
 - 校正下方“0 磁盘 I/O 阻塞 Qt UI 主线程”结论：已有 Loader/FreezeWorker，但自动刷新、统计回调、补算前 HDF 读取、轮询前文件扫描和部分配置读写仍同步；emit 后标 delivered 也不等于消费者持久提交。
 - 本轮只改方案和本条记录，未改生产代码、配置、数据或暂存区，未运行系统、测试和压测；既有测试通过记录不代表新增性能门禁通过。
+
 
 ## 2026-09-25 21:55
 - [x] **【次日异动候选池 UI 及 JSON 配置管理功能落地闭环（四维全景看板·双向联动配置引擎·底座P0/P1协同治理）】(`next_day_anomaly_watch.py`, `config/next_day_watch_strategies.json`, `ats/ui/next_day_watch_dialog.py`, `ats/strategy/next_day_watch_config_manager.py`, `ats/ui/main_window.py`, `instock_MonitorTK.py`, `run_next_day_watch.py`, `20260925_2155_task.md`)**：

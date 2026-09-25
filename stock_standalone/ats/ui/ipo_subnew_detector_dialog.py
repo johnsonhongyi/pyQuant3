@@ -515,9 +515,11 @@ class IPOSubnewDetectorDialog(QMainWindow):
         self.extra_cols: List[str] = get_ipo_detector_extra_cols()
         self.ipc_df: Optional[pd.DataFrame] = None
 
-        # 列宽手动拖拽与跨会话自动持久化
-        self.column_widths: Dict[str, int] = {}
-        self._is_restoring_header = False
+        # 列布局由 BaseATSTableWidget 的统一持久化器管理。
+        self._header_persistence_initialized = False
+        self._header_resize_callback_connected = False
+        self._initial_header_layout_restored = False
+        self._initial_header_layout_restore_scheduled = False
 
         # 扫描线程与性能日志控制
         self.worker: Optional[IPOScanWorker] = None
@@ -1575,17 +1577,26 @@ class IPOSubnewDetectorDialog(QMainWindow):
             pass
         hv.sectionClicked.connect(self._on_header_section_clicked)
 
-        # 全面对齐全系统统一的标准 setup_persistence 与极窄模式 (彻底消除拖拽撕裂与分离延时)
-        default_widths = get_ipo_detector_default_widths(self.extra_cols)
-        self.table.setup_persistence(
-            config_key="ats_ipo_subnew_detector_headers_v6",
-            default_widths=default_widths
-        )
+        # ATS 与检测器子进程会并发写 window_config.json；列布局单独落盘，
+        # 避免被其他 Tab 的窗口状态覆盖，并从旧配置节点兼容迁移。
+        if not self._header_persistence_initialized:
+            default_widths = get_ipo_detector_default_widths(self.extra_cols)
+            self.table.setup_persistence(
+                config_key="ats_ipo_subnew_detector_headers_v6",
+                default_widths=default_widths,
+                storage_path=os.path.join(
+                    os.path.dirname(get_ipo_detector_layout_file()),
+                    "ipo_detector_columns.json",
+                ),
+            )
+            self._header_persistence_initialized = True
+        else:
+            # ats_col 热更新后按列名恢复仍然存在的列，不重复安装持久化回调。
+            QTimer.singleShot(250, self.table.restore_header_state)
         hv.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        try:
+        if not self._header_resize_callback_connected:
             hv.sectionResized.connect(self._on_header_section_resized)
-        except Exception:
-            pass
+            self._header_resize_callback_connected = True
         self._update_velocity_header()
         QTimer.singleShot(0, self.adjust_columns_to_viewport)
 
@@ -1689,10 +1700,21 @@ class IPOSubnewDetectorDialog(QMainWindow):
             QTimer.singleShot(60, self.adjust_columns_to_viewport)
 
     def showEvent(self, event):
-        """窗口初次展现：即时触发自适应填充"""
+        """窗口初次展现：先做视口自适应，再应用用户保存的列布局。"""
         super().showEvent(event)
         QTimer.singleShot(0, self.adjust_columns_to_viewport)
         QTimer.singleShot(100, self.adjust_columns_to_viewport)
+        if not self._initial_header_layout_restored and not self._initial_header_layout_restore_scheduled:
+            self._initial_header_layout_restore_scheduled = True
+            QTimer.singleShot(250, self._restore_initial_header_layout)
+
+    def _restore_initial_header_layout(self):
+        self._initial_header_layout_restore_scheduled = False
+        if self._initial_header_layout_restored:
+            return
+        self._initial_header_layout_restored = True
+        if hasattr(self.table, "restore_header_state"):
+            self.table.restore_header_state()
 
     def _on_header_section_clicked(self, logical_index: int):
         """【📊 表头点击排序】支持全表高精度数值与文本升降序切换"""
