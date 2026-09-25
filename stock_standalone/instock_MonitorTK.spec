@@ -27,6 +27,7 @@ a = Analysis(
         ("config/multi_period_strategies.json", "config"),
         ("config/indicator_help_custom.json", "config"),
         ("config/vwap_trading_rules.json", "config"),
+        ("config/next_day_watch_strategies.json", "config"),
         ("window_config.json", "."),
         ("scale2_window_config.json", "."),
         ("monitor_category_list.json", "."),

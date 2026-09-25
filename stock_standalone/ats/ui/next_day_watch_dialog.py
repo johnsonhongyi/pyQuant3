@@ -19,7 +19,7 @@ import time
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
-from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
+from PyQt6.QtCore import QByteArray, Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QAction, QColor, QFont, QKeySequence
 from PyQt6.QtWidgets import (
     QApplication,
@@ -54,12 +54,23 @@ from PyQt6.QtWidgets import (
 
 from ats.strategy.next_day_watch_config_manager import NextDayWatchConfigManager
 from ats.ui.base_table import BaseATSTableWidget, send_to_linkage
-from ats.ui.styles import NumericTableWidgetItem
+from ats.ui.styles import NumericTableWidgetItem, load_config_node, save_config_nodes
 from JohnsonUtil import LoggerFactory
 from next_day_anomaly_watch import _read_json, run_cycle
 from sys_utils import get_app_root, get_conf_path
 
 logger = LoggerFactory.getLogger()
+
+_PHASE_DISPLAY = {
+    "STABILIZING": "企稳观察",
+    "PRE_ACCELERATION": "启动蓄势",
+    "RISING": "趋势上行",
+    "ACCELERATING": "加速上行",
+}
+_STATUS_DISPLAY = {
+    "WATCHING": "观察中",
+    "EARLY_VALID": "早期有效",
+}
 
 
 class NextDayWatchDataLoaderWorker(QThread):
@@ -126,6 +137,11 @@ class NextDayAnomalyWatchWidget(QWidget):
         self.current_config: Dict[str, Any] = {}
         self.active_worker: Optional[NextDayWatchDataLoaderWorker] = None
 
+        self._layout_save_timer = QTimer(self)
+        self._layout_save_timer.setSingleShot(True)
+        self._layout_save_timer.setInterval(450)
+        self._layout_save_timer.timeout.connect(self.save_splitter_layouts)
+
         self.auto_refresh_timer = QTimer(self)
         self.auto_refresh_timer.setInterval(3000)
         self.auto_refresh_timer.timeout.connect(self._on_auto_refresh_tick)
@@ -146,6 +162,40 @@ class NextDayAnomalyWatchWidget(QWidget):
         self._build_eval_tab()
         self._build_stats_tab()
         self._build_config_tab()
+        self._restore_splitter_layouts()
+
+    def _splitters(self):
+        return (self.manifest_splitter, self.eval_splitter, self.stats_splitter)
+
+    def _restore_splitter_layouts(self):
+        defaults = {
+            "next_day_watch_manifest_splitter": [3, 2],
+            "next_day_watch_eval_splitter": [3, 2],
+            "next_day_watch_stats_splitter": [2, 1],
+        }
+        for splitter in self._splitters():
+            state = load_config_node(f"{splitter.objectName()}_state", "")
+            restored = False
+            if state:
+                try:
+                    restored = splitter.restoreState(QByteArray.fromHex(str(state).encode("ascii")))
+                except Exception as exc:
+                    logger.debug("Restore %s failed: %s", splitter.objectName(), exc)
+            if not restored:
+                splitter.setSizes(defaults[splitter.objectName()])
+            splitter.splitterMoved.connect(lambda _pos, _index: self._schedule_layout_save())
+
+    def _schedule_layout_save(self):
+        timer = getattr(self, "_layout_save_timer", None)
+        if timer is not None:
+            timer.start()
+
+    def save_splitter_layouts(self):
+        values = {
+            f"{splitter.objectName()}_state": splitter.saveState().toHex().data().decode("ascii")
+            for splitter in self._splitters()
+        }
+        save_config_nodes(values)
 
     # =========================================================================
     # Tab 1: 盘前候选清单 (Premarket Manifest Viewer)
@@ -223,6 +273,8 @@ class NextDayAnomalyWatchWidget(QWidget):
         layout.addWidget(self.lbl_manifest_summary)
 
         splitter = QSplitter(Qt.Orientation.Vertical)
+        splitter.setObjectName("next_day_watch_manifest_splitter")
+        self.manifest_splitter = splitter
         layout.addWidget(splitter)
 
         self.table_manifest = QTableWidget()
@@ -230,8 +282,12 @@ class NextDayAnomalyWatchWidget(QWidget):
         self.table_manifest.setHorizontalHeaderLabels([
             "代码", "名称", "分层", "阶段", "综合分", "所属板块", "策略版本", "关键特征摘要", "板块共振证据", "状态"
         ])
-        self.table_manifest.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        self._configure_stock_table(self.table_manifest)
+        header = self.table_manifest.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         self.table_manifest.horizontalHeader().setStretchLastSection(True)
+        for col, width in {0: 78, 1: 110, 2: 78, 3: 145, 4: 78, 5: 150, 6: 130, 7: 270, 8: 150}.items():
+            self.table_manifest.setColumnWidth(col, width)
         self.table_manifest.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.table_manifest.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
         self.table_manifest.setAlternatingRowColors(True)
@@ -250,12 +306,12 @@ class NextDayAnomalyWatchWidget(QWidget):
 
         self.text_feature_detail = QPlainTextEdit()
         self.text_feature_detail.setReadOnly(True)
-        self.text_feature_detail.setMaximumHeight(150)
+        self.text_feature_detail.setPlaceholderText("选择候选后查看特征与入池依据；此区域会随窗口高度自动伸缩。")
         bottom_layout.addWidget(self.text_feature_detail)
         splitter.addWidget(bottom_widget)
 
-        splitter.setStretchFactor(0, 4)
-        splitter.setStretchFactor(1, 1)
+        splitter.setStretchFactor(0, 3)
+        splitter.setStretchFactor(1, 2)
 
         self.tab_widget.addTab(tab, "📋 盘前候选清单 (Premarket)")
 
@@ -286,6 +342,8 @@ class NextDayAnomalyWatchWidget(QWidget):
         layout.addLayout(top_bar)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.setObjectName("next_day_watch_eval_splitter")
+        self.eval_splitter = splitter
         layout.addWidget(splitter)
 
         left_box = QGroupBox("🔔 盘中确认与阶段跃迁事件流 (Events Stream)")
@@ -298,10 +356,13 @@ class NextDayAnomalyWatchWidget(QWidget):
             "触发时间", "代码", "名称", "事件类型", "现价", "涨跌幅%", "交付状态"
         ])
         self.table_events.horizontalHeader().setStretchLastSection(True)
+        self._configure_stock_table(self.table_events)
         self.table_events.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.table_events.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
         self.table_events.itemSelectionChanged.connect(self._on_event_row_selected)
         self.table_events.itemDoubleClicked.connect(self._on_event_double_clicked)
+        self.table_events.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.table_events.customContextMenuRequested.connect(lambda pos: self._show_stock_context_menu(self.table_events, pos))
         left_layout.addWidget(self.table_events)
 
         self.lbl_event_proof = QLabel("两帧证据链: 请在上方选择确认事件")
@@ -326,6 +387,7 @@ class NextDayAnomalyWatchWidget(QWidget):
         self.table_checkpoints.setHorizontalHeaderLabels([
             "采样时间", "阶段", "最高价", "现价", "真实VWAP", "成交量", "突破证据"
         ])
+        self._configure_stock_table(self.table_checkpoints)
         self.table_checkpoints.horizontalHeader().setStretchLastSection(True)
         right_layout.addWidget(self.table_checkpoints)
         splitter.addWidget(right_box)
@@ -345,6 +407,8 @@ class NextDayAnomalyWatchWidget(QWidget):
         layout.setSpacing(6)
 
         splitter = QSplitter(Qt.Orientation.Vertical)
+        splitter.setObjectName("next_day_watch_stats_splitter")
+        self.stats_splitter = splitter
         layout.addWidget(splitter)
 
         top_box = QGroupBox("📊 历史各交易日策略版本表现矩阵 (Strategy Performance Matrix)")
@@ -357,6 +421,7 @@ class NextDayAnomalyWatchWidget(QWidget):
             "目标交易日", "策略ID", "版本", "候选数", "即日确认 (EARLY_VALID)",
             "顺延命中 (DELAYED)", "未命中 (DAY_MISS)", "彻底失效 (MISSED)", "即日确认率"
         ])
+        self._configure_stock_table(self.table_stats)
         self.table_stats.horizontalHeader().setStretchLastSection(True)
         self.table_stats.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         top_layout.addWidget(self.table_stats)
@@ -372,10 +437,13 @@ class NextDayAnomalyWatchWidget(QWidget):
             "代码", "名称", "初选目标日", "顺延兑现日", "初选高点", "最新状态"
         ])
         self.table_delayed_winners.horizontalHeader().setStretchLastSection(True)
+        self._configure_stock_table(self.table_delayed_winners)
+        self.table_delayed_winners.itemSelectionChanged.connect(lambda: self._link_current_stock(self.table_delayed_winners, 0, 1))
         self.table_delayed_winners.itemDoubleClicked.connect(self._on_delayed_double_clicked)
+        self.table_delayed_winners.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.table_delayed_winners.customContextMenuRequested.connect(lambda pos: self._show_stock_context_menu(self.table_delayed_winners, pos))
         bottom_layout.addWidget(self.table_delayed_winners)
         splitter.addWidget(bottom_box)
-
         splitter.setStretchFactor(0, 2)
         splitter.setStretchFactor(1, 1)
 
@@ -680,8 +748,9 @@ class NextDayAnomalyWatchWidget(QWidget):
             item_name = QTableWidgetItem(name)
             item_name.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
 
-            item_tier = QTableWidgetItem(f"Tier {tier}")
+            item_tier = QTableWidgetItem(f"{tier}层")
             item_tier.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            item_tier.setToolTip(f"Tier {tier}")
             if tier == "A":
                 item_tier.setForeground(QColor("#7ee787"))
             elif tier == "B":
@@ -689,8 +758,9 @@ class NextDayAnomalyWatchWidget(QWidget):
             elif tier == "C":
                 item_tier.setForeground(QColor("#79c0ff"))
 
-            item_phase = QTableWidgetItem(phase)
+            item_phase = QTableWidgetItem(_PHASE_DISPLAY.get(phase, phase))
             item_phase.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            item_phase.setToolTip(phase)
             item_score = NumericTableWidgetItem(f"{score:.1f}")
             item_score.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
 
@@ -699,8 +769,9 @@ class NextDayAnomalyWatchWidget(QWidget):
             item_strat.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             item_feats = QTableWidgetItem(feat_summary)
             item_sec = QTableWidgetItem(sec_summary)
-            item_status = QTableWidgetItem(status)
+            item_status = QTableWidgetItem(_STATUS_DISPLAY.get(status, status))
             item_status.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            item_status.setToolTip(status)
 
             self.table_manifest.setItem(row, 0, item_code)
             self.table_manifest.setItem(row, 1, item_name)
@@ -713,7 +784,137 @@ class NextDayAnomalyWatchWidget(QWidget):
             self.table_manifest.setItem(row, 8, item_sec)
             self.table_manifest.setItem(row, 9, item_status)
 
-        self.table_manifest.resizeColumnsToContents()
+        self.table_manifest.horizontalHeader().setStretchLastSection(True)
+
+    def _configure_stock_table(self, table: QTableWidget):
+        """Keep stock-bearing tables consistent with the ATS watchlist tables."""
+        table.verticalHeader().setVisible(False)
+        table.verticalHeader().setFixedWidth(0)
+        table.setCornerButtonEnabled(False)
+        table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        table.setAlternatingRowColors(True)
+        table.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        table.horizontalHeader().setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+
+    def _main_window(self):
+        node = self.parentWidget()
+        while node is not None:
+            if hasattr(node, "link_stock") and hasattr(node, "top_tabs"):
+                return node
+            node = node.parentWidget() if hasattr(node, "parentWidget") else None
+        return None
+
+    def _link_current_stock(self, table: QTableWidget, code_col: int, name_col: int):
+        row = table.currentRow()
+        if row < 0:
+            return
+        code_item, name_item = table.item(row, code_col), table.item(row, name_col)
+        if not code_item:
+            return
+        code = "".join(ch for ch in code_item.text() if ch.isdigit()).zfill(6)
+        if code == "000000":
+            return
+        name = name_item.text().strip() if name_item else code
+        if not code:
+            return
+
+        main = self._main_window()
+        if main is None:
+            # TK launches this companion in a separate process, so route directly through
+            # the shared physical-terminal service and keep the visualizer IPC in sync.
+            try:
+                from linkage_service import get_link_manager
+                get_link_manager().push(code, flags={"tdx": True, "ths": True, "dfcf": False}, auto=False)
+            except Exception as exc:
+                logger.warning("[NextDayWatchWidget] Terminal linkage failed for %s: %s", code, exc)
+            send_to_linkage(code, name, self)
+            return
+
+        main.link_stock(code, name)
+        # Mirror selection in the ATS focus tabs without changing the active tab.
+        for attr in ("capital_dragon_panel", "favorite_panel", "swing_table", "new_stock_panel"):
+            panel = getattr(main, attr, None)
+            target = getattr(panel, "table", None)
+            if target is None or not hasattr(target, "rowCount"):
+                continue
+            for target_row in range(target.rowCount()):
+                item = target.item(target_row, 0)
+                if item and "".join(ch for ch in item.text() if ch.isdigit()).zfill(6) == code:
+                    target.setCurrentCell(target_row, 0)
+                    target.scrollToItem(item)
+                    break
+
+    def _show_stock_context_menu(self, table: QTableWidget, pos):
+        item = table.itemAt(pos)
+        if not item:
+            return
+        row = item.row()
+        table.setCurrentCell(row, item.column())
+        if table is self.table_manifest and item.column() == 5:
+            code_item = table.item(row, 0)
+            code = code_item.text().strip() if code_item else ""
+            candidate = next(
+                (c for c in self.manifest_data.get("candidates", [])
+                 if str(c.get("code", "")).zfill(6) == code),
+                None,
+            )
+            sectors = self._candidate_sector_names(candidate, "category")
+            if sectors:
+                menu = QMenu(self)
+                actions = [(menu.addAction(f"🔍 查看 {sector} 板块详情"), sector) for sector in sectors]
+                chosen = menu.exec(table.viewport().mapToGlobal(pos))
+                for action, sector in actions:
+                    if chosen == action:
+                        self._open_sector_detail(sector)
+                        break
+            return
+        code_col, name_col = (1, 2) if table is self.table_events else (0, 1)
+        code_item, name_item = table.item(row, code_col), table.item(row, name_col)
+        if not code_item:
+            return
+        code = "".join(ch for ch in code_item.text() if ch.isdigit()).zfill(6)
+        if code == "000000":
+            return
+        name = name_item.text().strip() if name_item else code
+        menu = QMenu(self)
+        act_copy = menu.addAction(f"📋 复制代码 {code}")
+        act_sbc = menu.addAction(f"📈 打开 {name} ({code}) SBC 分时图")
+        act_detail = menu.addAction("🔍 打开个股详情")
+        act_link = menu.addAction("📡 联动重点关注/资金主线及外部终端")
+        act_pipe = menu.addAction("⚡ 发送到异动联动")
+        menu.addSeparator()
+        try:
+            from global_favorites import GlobalFavoriteManager
+            is_favorite = code in GlobalFavoriteManager().get_favorite_stocks()
+        except Exception:
+            is_favorite = False
+        act_favorite = menu.addAction(("❌ 取消重点关注 " if is_favorite else "⭐ 设为重点关注 ") + code)
+        action = menu.exec(table.viewport().mapToGlobal(pos))
+        if action == act_copy:
+            QApplication.clipboard().setText(code)
+        elif action == act_sbc:
+            self._open_sbc_for_code(code, name)
+        elif action == act_detail:
+            main = self._main_window()
+            if main is not None:
+                main.on_stock_clicked(code, name, {})
+            else:
+                self._open_sbc_for_code(code, name)
+        elif action == act_link:
+            self._link_current_stock(table, code_col, name_col)
+        elif action == act_pipe:
+            send_to_linkage(code, name, self)
+        elif action == act_favorite:
+            try:
+                from global_favorites import GlobalFavoriteManager
+                GlobalFavoriteManager().toggle_favorite_stock(code)
+                main = self._main_window()
+                if main is not None and hasattr(main, "_safe_favorites_changed"):
+                    main._safe_favorites_changed()
+                self.status_message_changed.emit(f"已更新重点关注: {name} ({code})")
+            except Exception as exc:
+                logger.warning("[NextDayWatchWidget] Favorite update failed: %s", exc)
 
     def _on_manifest_row_selected(self):
         row = self.table_manifest.currentRow()
@@ -727,9 +928,11 @@ class NextDayAnomalyWatchWidget(QWidget):
         if not candidate:
             return
 
+        self._link_current_stock(self.table_manifest, 0, 1)
+
         feats = candidate.get("feature_values", {})
         detail_lines = [
-            f"【标的信息】: {code} {candidate.get('name')} | 分层: Tier {candidate.get('tier')} | 阶段: {candidate.get('phase')} | 综合得分: {candidate.get('score')}",
+            f"【标的信息】: {code} {candidate.get('name')} | 分层: {candidate.get('tier')}层 | 阶段: {_PHASE_DISPLAY.get(candidate.get('phase'), candidate.get('phase'))} | 综合得分: {candidate.get('score')}",
             f"【所属板块】: {candidate.get('category')} | 策略: {candidate.get('strategy_id')} v{candidate.get('version')}",
             f"【入池依据】: {', '.join(candidate.get('reason_codes', []))}",
             "【核心特征特征值清单】:",
@@ -741,40 +944,112 @@ class NextDayAnomalyWatchWidget(QWidget):
         self.text_feature_detail.setPlainText("\n".join(detail_lines))
 
     def _on_manifest_context_menu(self, pos):
-        item = self.table_manifest.itemAt(pos)
-        if not item:
-            return
-        row = item.row()
-        code = self.table_manifest.item(row, 0).text().strip()
-        name = self.table_manifest.item(row, 1).text().strip()
-
-        menu = QMenu(self)
-        act_sbc = menu.addAction(f"📈 打开 {name} ({code}) SBC 分时策略图")
-        act_link = menu.addAction(f"🔍 联动外部看盘软件 ({code})")
-        menu.addSeparator()
-        act_copy = menu.addAction("📋 复制股票代码")
-
-        action = menu.exec(self.table_manifest.viewport().mapToGlobal(pos))
-        if action == act_sbc:
-            self._open_sbc_for_code(code, name)
-        elif action == act_link:
-            send_to_linkage(code, name, self)
-        elif action == act_copy:
-            QApplication.clipboard().setText(code)
+        self._show_stock_context_menu(self.table_manifest, pos)
 
     def _on_candidate_double_clicked(self, item: QTableWidgetItem):
         row = item.row()
+        if item.column() == 8:
+            code_item = self.table_manifest.item(row, 0)
+            code = code_item.text().strip() if code_item else ""
+            candidate = next(
+                (c for c in self.manifest_data.get("candidates", [])
+                 if str(c.get("code", "")).zfill(6) == code),
+                None,
+            )
+            sectors = self._candidate_sector_names(candidate, "sector_evidence")
+            if len(sectors) == 1:
+                self._open_sector_detail(sectors[0])
+            elif sectors:
+                menu = QMenu(self)
+                actions = [(menu.addAction(f"🔍 查看 {sector} 板块详情"), sector) for sector in sectors]
+                item_rect = self.table_manifest.visualItemRect(item)
+                chosen = menu.exec(self.table_manifest.viewport().mapToGlobal(item_rect.center()))
+                for action, sector in actions:
+                    if chosen == action:
+                        self._open_sector_detail(sector)
+                        break
+            return
         code = self.table_manifest.item(row, 0).text().strip()
         name = self.table_manifest.item(row, 1).text().strip()
         self._open_sbc_for_code(code, name)
 
+    @staticmethod
+    def _candidate_sector_names(candidate, source: str) -> List[str]:
+        if not candidate:
+            return []
+        if source == "sector_evidence":
+            evidence = candidate.get("sector_evidence") or {}
+            matches = evidence.get("matches", []) if isinstance(evidence, dict) else []
+            raw_names = [match.get("name", "") for match in matches if isinstance(match, dict)]
+        else:
+            categories = str(candidate.get("category", ""))
+            for separator in ("；", "、", "，", ",", "|"):
+                categories = categories.replace(separator, ";")
+            raw_names = categories.split(";")
+        result = []
+        for value in raw_names:
+            name = str(value).strip()
+            if name and name != "--" and name not in result:
+                result.append(name)
+        return result
+
+    def _open_sector_detail(self, sector_name: str):
+        name = str(sector_name or "").strip()
+        if not name:
+            return
+        main = self._main_window()
+        if main is not None and hasattr(main, "on_sector_clicked"):
+            main.on_sector_clicked(name)
+            return
+        try:
+            from ats.ui.sector_detail_dialog import ATSSectorDetailDialog
+            dialog = getattr(self, "_next_day_sector_detail_dialog", None)
+            if dialog is not None:
+                try:
+                    from PyQt6.sip import isdeleted
+                    if isdeleted(dialog):
+                        dialog = None
+                except Exception:
+                    pass
+            if dialog is not None:
+                dialog.sector_name = name
+                dialog.member_codes = []
+                dialog._orig_member_codes = None
+                dialog.update_data(None)
+            else:
+                dialog = ATSSectorDetailDialog(
+                    name,
+                    linkage_cb=self._link_sector_stock,
+                    double_click_cb=self._open_sbc_for_code,
+                    parent=self,
+                )
+                self._next_day_sector_detail_dialog = dialog
+            dialog.show()
+            dialog.raise_()
+            dialog.activateWindow()
+        except Exception as exc:
+            logger.warning("[NextDayWatchWidget] Open sector detail failed for %s: %s", name, exc)
+
+    def _link_sector_stock(self, code: str, name: str = ""):
+        code = "".join(ch for ch in str(code) if ch.isdigit()).zfill(6)
+        if code == "000000":
+            return
+        stock_name = str(name or code)
+        main = self._main_window()
+        if main is not None:
+            main.link_stock(code, stock_name)
+            return
+        try:
+            from linkage_service import get_link_manager
+            get_link_manager().push(code, flags={"tdx": True, "ths": True, "dfcf": False}, auto=False)
+        except Exception as exc:
+            logger.warning("[NextDayWatchWidget] Sector member linkage failed for %s: %s", code, exc)
+        send_to_linkage(code, stock_name, self)
+
     def _open_sbc_for_code(self, code: str, name: str):
         try:
-            from ats.ui.intraday_strategy_dialog import SBCIntradayChartDialog
-            dlg = SBCIntradayChartDialog.get_instance(code=code, name=name, parent=self)
-            dlg.show()
-            dlg.raise_()
-            dlg.activateWindow()
+            from ats.ui.intraday_strategy_dialog import open_sbc_chart_dialog
+            open_sbc_chart_dialog(parent_win=self.window(), code=code, period_mode="10d")
         except Exception as exc:
             logger.warning("[NextDayWatchWidget] Open SBC dialog failed: %s", exc)
 
@@ -916,6 +1191,7 @@ class NextDayAnomalyWatchWidget(QWidget):
         if not code_item:
             return
         code = code_item.text().strip()
+        self._link_current_stock(self.table_events, 1, 2)
 
         entry = next((item for k, item in self.eval_data.get("candidates", {}).items() if k.startswith(code + ":")), None)
         if not entry:
@@ -1244,6 +1520,10 @@ class NextDayAnomalyWatchDialog(QMainWindow):
         self.setWindowTitle("📋 次日异动候选池综合管理中心 (Next-Day Watch Center)")
         self.resize(1320, 850)
         self.setMinimumSize(960, 600)
+        self._layout_save_timer = QTimer(self)
+        self._layout_save_timer.setSingleShot(True)
+        self._layout_save_timer.setInterval(500)
+        self._layout_save_timer.timeout.connect(self._save_window_layout)
 
         # 全局深色样式
         self.setStyleSheet("""
@@ -1255,6 +1535,22 @@ class NextDayAnomalyWatchDialog(QMainWindow):
             QTabBar::tab:hover { color: #f0f6fc; }
             QTableWidget { background-color: #121417; alternate-background-color: #181b20; border: 1px solid #282c34; gridline-color: #21262d; color: #d1d5db; selection-background-color: #264f78; selection-color: #ffffff; }
             QHeaderView::section { background-color: #1a1e24; color: #9ca3af; padding: 5px; border: 1px solid #282c34; font-weight: bold; }
+            QTableCornerButton::section { background-color: #1a1e24; border: 1px solid #282c34; }
+            QHeaderView::vertical { width: 0px; }
+            QSplitter::handle { background-color: #252a33; }
+            QSplitter::handle:vertical { height: 7px; }
+            QSplitter::handle:horizontal { width: 7px; }
+            QSplitter::handle:hover { background-color: #3b82f6; }
+            QScrollBar:vertical { background: #121417; width: 8px; margin: 0; border: none; }
+            QScrollBar::handle:vertical { background: #3a414d; min-height: 24px; border-radius: 4px; }
+            QScrollBar::handle:vertical:hover { background: #58a6ff; }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; border: none; background: none; }
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: #121417; }
+            QScrollBar:horizontal { background: #121417; height: 8px; margin: 0; border: none; }
+            QScrollBar::handle:horizontal { background: #3a414d; min-width: 24px; border-radius: 4px; }
+            QScrollBar::handle:horizontal:hover { background: #58a6ff; }
+            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; border: none; background: none; }
+            QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background: #121417; }
             QPushButton { background-color: #21262d; color: #c9d1d9; border: 1px solid #30363d; border-radius: 4px; padding: 5px 12px; font-weight: 500; }
             QPushButton:hover { background-color: #30363d; color: #ffffff; border-color: #8b949e; }
             QPushButton:pressed { background-color: #161b22; }
@@ -1273,8 +1569,40 @@ class NextDayAnomalyWatchDialog(QMainWindow):
         self.setStatusBar(self.status_bar)
         self.status_bar.showMessage("就绪 | 次日候选池多维监控体系已连接")
         self.widget.status_message_changed.connect(self.status_bar.showMessage)
+        self._restore_window_layout()
+
+    def _restore_window_layout(self):
+        state = load_config_node("next_day_watch_window_geometry", "")
+        if state:
+            try:
+                self.restoreGeometry(QByteArray.fromHex(str(state).encode("ascii")))
+            except Exception as exc:
+                logger.debug("Restore next-day watch window geometry failed: %s", exc)
+
+    def _schedule_window_layout_save(self):
+        timer = getattr(self, "_layout_save_timer", None)
+        if timer is not None:
+            timer.start()
+
+    def _save_window_layout(self):
+        try:
+            save_config_nodes({
+                "next_day_watch_window_geometry": self.saveGeometry().toHex().data().decode("ascii")
+            })
+        except Exception as exc:
+            logger.debug("Save next-day watch window geometry failed: %s", exc)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._schedule_window_layout_save()
+
+    def moveEvent(self, event):
+        super().moveEvent(event)
+        self._schedule_window_layout_save()
 
     def closeEvent(self, event):
         if hasattr(self.widget, "auto_refresh_timer") and self.widget.auto_refresh_timer.isActive():
             self.widget.auto_refresh_timer.stop()
+        self._save_window_layout()
+        self.widget.save_splitter_layouts()
         event.accept()
