@@ -1,5 +1,10 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-09-26 ATS 功能更新后性能方案复核（仅文档）
+- 更新正式方案：[ATS系统全流程性能优化分析与实施方案规划.md](design/ATS系统全流程性能优化分析与实施方案规划.md)，基于 HEAD `3bdb65b6` 及当时工作区修改；新增候选池文件加载/历史评估/事件确认、配置修复、休市板块、动态布局及账户基线投影分析，重排 Stage 0–5 与验收矩阵。
+- 校正下方“0 磁盘 I/O 阻塞 Qt UI 主线程”结论：已有 Loader/FreezeWorker，但自动刷新、统计回调、补算前 HDF 读取、轮询前文件扫描和部分配置读写仍同步；emit 后标 delivered 也不等于消费者持久提交。
+- 本轮只改方案和本条记录，未改生产代码、配置、数据或暂存区，未运行系统、测试和压测；既有测试通过记录不代表新增性能门禁通过。
+
 ## 2026-09-25 21:55
 - [x] **【次日异动候选池 UI 及 JSON 配置管理功能落地闭环（四维全景看板·双向联动配置引擎·底座P0/P1协同治理）】(`next_day_anomaly_watch.py`, `config/next_day_watch_strategies.json`, `ats/ui/next_day_watch_dialog.py`, `ats/strategy/next_day_watch_config_manager.py`, `ats/ui/main_window.py`, `instock_MonitorTK.py`, `run_next_day_watch.py`, `20260925_2155_task.md`)**：
     - [x] **Phase 1: 底层契约与配置兑现加固 (M1)**：

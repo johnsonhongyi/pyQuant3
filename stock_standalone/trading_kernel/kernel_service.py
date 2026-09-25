@@ -252,8 +252,24 @@ class TradingKernelService:
         ]
 
         orders = self.get_order_history()
+        account = dict(adapter.get_account_snapshot()) if adapter is not None else {}
+        baseline = account.get("ledger_baseline")
         open_volume: dict[str, float] = {}
-        for order in sorted(orders, key=lambda row: str(row.get("timestamp") or "")):
+        replay_orders = orders
+        if isinstance(baseline, dict):
+            try:
+                order_count = int(baseline.get("order_count"))
+                if 0 <= order_count <= len(orders):
+                    replay_orders = orders[order_count:]
+                    for code, position in baseline.get("positions", {}).items():
+                        if isinstance(position, dict):
+                            volume = float(position.get("volume") or 0.0)
+                            if volume > 0:
+                                open_volume[str(code).strip()] = volume
+            except (TypeError, ValueError, OverflowError):
+                replay_orders = orders
+                open_volume.clear()
+        for order in sorted(replay_orders, key=lambda row: str(row.get("timestamp") or "")):
             order_code = str(order.get("code") or "").strip()
             action = str(order.get("action") or "").upper()
             try:
@@ -277,7 +293,6 @@ class TradingKernelService:
         snapshot_only_codes = sorted(held - order_derived_held)
         order_only_codes = sorted(order_derived_held - held)
 
-        account = dict(adapter.get_account_snapshot()) if adapter is not None else {}
         account.setdefault(
             "initial_capital",
             float(getattr(adapter, "initial_capital", 0.0) or 0.0),

@@ -104,6 +104,7 @@ class PaperExecutionAdapter(ExecutionAdapter):
         self.initial_capital = initial_capital
         self.account = AccountSnapshot(cash=initial_capital, initial_capital=initial_capital)
         self.orders: list[dict[str, Any]] = []
+        self.ledger_baseline: dict[str, Any] | None = None
         self._execution_block_reason = ""
         self._last_saved_fingerprint = ""
         self._is_simulation = False  # 是否为模拟/回测模式
@@ -148,7 +149,8 @@ class PaperExecutionAdapter(ExecutionAdapter):
             "initial_capital": round(float(getattr(self, "initial_capital", 1000000.0) or 0.0), 4),
             "cash": round(float((self.account.cash if (hasattr(self, "account") and self.account) else 1000000.0) or 0.0), 4),
             "positions": positions_data,
-            "orders": orders_list
+            "orders": orders_list,
+            "ledger_baseline": getattr(self, "ledger_baseline", None),
         }
         try:
             return json.dumps(fingerprint_data, sort_keys=True)
@@ -162,17 +164,78 @@ class PaperExecutionAdapter(ExecutionAdapter):
             return code.zfill(6)
         return code
 
+    @staticmethod
+    def _ledger_history_digest(orders: list[Any]) -> str:
+        import hashlib
+        import json
+
+        canonical = []
+        for order in orders:
+            if not isinstance(order, dict):
+                canonical.append(order)
+                continue
+            row = {}
+            for key in ("price", "size_pct", "volume"):
+                try:
+                    row[key] = float(order.get(key) or 0.0)
+                except (TypeError, ValueError, OverflowError):
+                    row[key] = 0.0
+            for key in ("order_id", "code", "action", "timestamp", "request_id"):
+                row[key] = str(order.get(key) or "")
+            canonical.append(row)
+        encoded = json.dumps(
+            canonical, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
     @classmethod
-    def _replay_order_ledger(cls, orders: Any, initial_capital: float):
+    def _replay_order_ledger(
+        cls, orders: Any, initial_capital: float, baseline: dict[str, Any] | None = None
+    ):
         """Replay confirmed fills and report malformed or impossible ledger rows."""
         if not isinstance(orders, list):
             return {}, float(initial_capital), ["ORDERS_NOT_LIST"]
         positions: dict[str, dict[str, float]] = {}
         cash = float(initial_capital)
         problems: list[str] = []
+        replay_orders = orders
+        if baseline is not None:
+            try:
+                order_count = int(baseline.get("order_count"))
+                if order_count < 0 or order_count > len(orders):
+                    raise ValueError("invalid baseline order_count")
+                through_order_id = str(baseline.get("through_order_id") or "")
+                if order_count and str(orders[order_count - 1].get("order_id") or "") != through_order_id:
+                    raise ValueError("baseline order boundary mismatch")
+                expected_digest = str(baseline.get("orders_sha256") or "")
+                if expected_digest:
+                    if cls._ledger_history_digest(orders[:order_count]) != expected_digest:
+                        raise ValueError("baseline history digest mismatch")
+                cash = float(baseline.get("cash"))
+                if not math.isfinite(cash) or cash < 0:
+                    raise ValueError("invalid baseline cash")
+                raw_positions = baseline.get("positions")
+                if not isinstance(raw_positions, dict):
+                    raise ValueError("invalid baseline positions")
+                for raw_code, raw_position in raw_positions.items():
+                    code = cls._canonical_code(raw_code)
+                    if not code or not isinstance(raw_position, dict):
+                        raise ValueError("invalid baseline position row")
+                    quantity = float(raw_position.get("volume"))
+                    entry_price = float(raw_position.get("entry_price"))
+                    if not math.isfinite(quantity) or not math.isfinite(entry_price) or quantity <= 0 or entry_price <= 0:
+                        raise ValueError("invalid baseline position values")
+                    positions[code] = {"volume": quantity, "entry_price": entry_price}
+                replay_orders = orders[order_count:]
+            except (AttributeError, TypeError, ValueError, OverflowError) as exc:
+                problems.append(f"INVALID_LEDGER_BASELINE:{exc}")
+                positions.clear()
+                cash = float(initial_capital)
+                replay_orders = orders
         valid_orders = [item for item in orders if isinstance(item, dict)]
         if len(valid_orders) != len(orders):
             problems.append("INVALID_ORDER_ROW")
+        valid_orders = [item for item in replay_orders if isinstance(item, dict)]
         valid_orders.sort(key=lambda item: str(item.get("timestamp") or ""))
         for index, order in enumerate(valid_orders):
             code = cls._canonical_code(order.get("code"))
@@ -322,6 +385,9 @@ class PaperExecutionAdapter(ExecutionAdapter):
                 self.orders = data.get("orders", [])
                 if not isinstance(self.orders, list):
                     raise ValueError("orders must be a list")
+                self.ledger_baseline = data.get("ledger_baseline")
+                if self.ledger_baseline is not None and not isinstance(self.ledger_baseline, dict):
+                    raise ValueError("ledger_baseline must be an object")
                 
                 # 自愈与热启动机制：从 orders 历史流水中干跑还原出一份“理论持仓”
                 recon_positions = {}
@@ -389,7 +455,7 @@ class PaperExecutionAdapter(ExecutionAdapter):
                         pass
                 
                 # 仅在日志中对理论持仓进行校验预警，不再在冷启动时强行覆盖持久化账本，防止历史记录和持仓被意外重置！
-                if recon_positions or self.orders:
+                if self.ledger_baseline is None and (recon_positions or self.orders):
                     mismatch = False
                     if len(positions) != len(recon_positions):
                         mismatch = True
@@ -404,7 +470,7 @@ class PaperExecutionAdapter(ExecutionAdapter):
                             f"Preserving persistent snapshot to prevent accidental reset. Use manual self-heal if necessary."
                         )
                 replayed, replay_cash, replay_problems = self._replay_order_ledger(
-                    self.orders, self.initial_capital
+                    self.orders, self.initial_capital, self.ledger_baseline
                 )
                 reconciliation_problems = self._compare_snapshot_to_ledger(
                     positions, cash, replayed, replay_cash, replay_problems
@@ -414,6 +480,10 @@ class PaperExecutionAdapter(ExecutionAdapter):
                         "RESTORE_RECONCILIATION_FAILED:" + ",".join(reconciliation_problems)
                     )
                     logger.error("[State-Check] PAPER execution blocked: %s", self._execution_block_reason)
+                    if self.ledger_baseline is not None:
+                        self.ledger_baseline["status"] = "BLOCKED"
+                elif self.ledger_baseline is not None:
+                    self.ledger_baseline["status"] = "ALIGNED"
 
                 self.account = AccountSnapshot(cash=cash, initial_capital=self.initial_capital, positions=positions)
             except Exception as e:
@@ -505,6 +575,7 @@ class PaperExecutionAdapter(ExecutionAdapter):
                 "account": self.account.to_dict(),
                 "positions": positions_data,
                 "orders": clean_orders,
+                "ledger_baseline": self.ledger_baseline,
                 "reconciliation": {
                     "paper_execution_ready": not bool(self._execution_block_reason),
                     "block_reason": self._execution_block_reason,
@@ -722,4 +793,5 @@ class PaperExecutionAdapter(ExecutionAdapter):
         snapshot = self.account.to_dict()
         snapshot["paper_execution_ready"] = not bool(self._execution_block_reason)
         snapshot["paper_execution_block_reason"] = self._execution_block_reason
+        snapshot["ledger_baseline"] = self.ledger_baseline
         return snapshot
