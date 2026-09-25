@@ -220,10 +220,11 @@ def run_cycle(df: Any, *, config_path: str, data_dir: str, asof_date: str,
     """Create the frozen next-session list and append candidate outcome facts."""
     if df is None or getattr(df, "empty", True):
         return {"status": "empty"}
-    config = _read_json(config_path, {})
+    from ats.strategy.next_day_watch_config_manager import NextDayWatchConfigManager
+    _, config, config_error = NextDayWatchConfigManager.load_config(config_path)
     valid, error = _valid_config(config)
     if not valid:
-        return {"status": "invalid_config", "reason": error}
+        return {"status": "invalid_config", "reason": config_error or error}
     if not config.get("enabled", False):
         return {"status": "disabled"}
     if vwap_field is None:

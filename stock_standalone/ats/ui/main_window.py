@@ -5544,7 +5544,8 @@ class ATSMainWindow(QMainWindow):
             data_dir = os.path.join(root, "datacsv")
             watch_path = os.path.join(data_dir, "next_day_anomaly_watch_%s.json" % today)
             config_path = get_conf_path("next_day_watch_strategies.json", root)
-            config = _read_json(config_path, {})
+            from ats.strategy.next_day_watch_config_manager import NextDayWatchConfigManager
+            _, config, _ = NextDayWatchConfigManager.load_config(config_path)
             watch = _read_json(watch_path, {})
             candidates = watch.get("candidates", [])
             if not config.get("enabled"):

@@ -25,6 +25,7 @@ a = Analysis(
     datas=[(csv_path, "a_trade_calendar"),
         ("MonitorTK.ico", "."),
         ("config/vwap_trading_rules.json", "config"),
+        ("config/next_day_watch_strategies.json", "config"),
         ("window_config.json", "."),
         ("JSONData/stock_codes.conf", "JSONData"),
         ("JSONData/count.ini", "JSONData"),

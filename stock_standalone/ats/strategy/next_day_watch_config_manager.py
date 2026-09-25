@@ -9,6 +9,7 @@ import copy
 import hashlib
 import json
 import os
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from next_day_anomaly_watch import (
@@ -17,7 +18,7 @@ from next_day_anomaly_watch import (
     _read_json,
     _valid_config,
 )
-from sys_utils import get_app_root, get_conf_path
+from sys_utils import get_app_root, get_base_path, get_conf_path
 
 
 class NextDayWatchConfigManager:
@@ -46,15 +47,37 @@ class NextDayWatchConfigManager:
         Returns (success, config_dict, error_msg).
         """
         target_path = cls.get_config_path(path)
-        if not os.path.exists(target_path):
-            return False, cls.get_default_config(), f"File not found: {target_path}"
         data = _read_json(target_path, None)
-        if not isinstance(data, dict):
-            return False, cls.get_default_config(), f"Invalid JSON in {target_path}"
-        valid, err = _valid_config(data)
+        valid, err = cls.validate_config(data) if isinstance(data, dict) else (False, "Invalid or missing JSON")
+        if valid:
+            return True, data, ""
+
+        recovered, recovery_msg = cls._restore_config(target_path)
+        if recovered is not None:
+            return True, recovered, f"{err}; {recovery_msg}"
+        return False, data if isinstance(data, dict) else cls.get_default_config(), f"{err}; {recovery_msg}"
+
+    @classmethod
+    def _restore_config(cls, target_path: str) -> Tuple[Optional[Dict[str, Any]], str]:
+        """Restore a missing or invalid config while preserving any damaged copy."""
+        bundled_path = os.path.join(get_base_path(), "config", cls.CONFIG_FILENAME)
+        recovered = _read_json(bundled_path, None)
+        valid, _ = cls.validate_config(recovered) if isinstance(recovered, dict) else (False, "missing template")
         if not valid:
-            return False, data, f"Config validation warning: {err}"
-        return True, data, ""
+            recovered = cls.get_default_config()
+            valid, err = cls.validate_config(recovered)
+            if not valid:
+                return None, f"Built-in defaults are invalid: {err}"
+
+        try:
+            if os.path.isfile(target_path) and os.path.getsize(target_path) > 0:
+                backup_path = f"{target_path}.invalid.{time.strftime('%Y%m%d_%H%M%S')}.{os.getpid()}"
+                import shutil
+                shutil.copy2(target_path, backup_path)
+            _atomic_json(target_path, recovered)
+            return recovered, f"Restored default configuration to {target_path}"
+        except Exception as exc:
+            return None, f"Configuration restore failed: {exc}"
 
     @classmethod
     def validate_config(cls, config: Any) -> Tuple[bool, str]:
@@ -146,7 +169,7 @@ class NextDayWatchConfigManager:
         return {
             "schema_version": 1,
             "enabled": True,
-            "vwap_field": "vwap",
+            "vwap_field": None,
             "strategies": [
                 {
                     "strategy_id": "channel_stepup",
