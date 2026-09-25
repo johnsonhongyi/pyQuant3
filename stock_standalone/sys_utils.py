@@ -280,6 +280,11 @@ RESOURCE_MAP = {
         "dst": "config/multi_period_strategies.json",
         "delay_release": True
     },
+    "next_day_watch_strategies.json": {
+        "src": "config/next_day_watch_strategies.json",
+        "dst": "config/next_day_watch_strategies.json",
+        "delay_release": True
+    },
     "global_market_cache.json": {
         "src": "config/global_market_cache.json",
         "dst": "config/global_market_cache.json",

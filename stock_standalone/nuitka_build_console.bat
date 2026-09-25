@@ -239,6 +239,7 @@ set CMD="%PYTHON_EXEC%" -m nuitka !NUITKA_MODE_OPT! "%MAIN_SCRIPT%" ^
     --include-data-file=monitor_category_list.json=monitor_category_list.json ^
     --include-data-file=visualizer_layout.json=visualizer_layout.json ^
     --include-data-file=voice_alert_config.json=voice_alert_config.json ^
+    --include-data-file=config\next_day_watch_strategies.json=config\next_day_watch_strategies.json ^
     --include-data-file=macro_trends.json=macro_trends.json ^
     --include-data-file=display_cols.json=display_cols.json ^
     --include-data-file=intraday_pattern_config.json=intraday_pattern_config.json ^
@@ -253,6 +254,7 @@ set CMD="%PYTHON_EXEC%" -m nuitka !NUITKA_MODE_OPT! "%MAIN_SCRIPT%" ^
     --include-package=tables ^
     --include-package=tk_gui_modules ^
     --include-module=JSONData.tdx_hdf5_api ^
+    --include-module=next_day_anomaly_watch ^
     --include-module=JSONData.wencaiData ^
     --include-module=JSONData.sina_data ^
     --include-module=JohnsonUtil.johnson_cons ^
