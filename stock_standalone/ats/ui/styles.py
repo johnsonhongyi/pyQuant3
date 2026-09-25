@@ -722,7 +722,11 @@ def setup_header_persistence(table_or_tree, config_key, default_widths=None, max
     def save_action():
         if getattr(table_or_tree, "_is_restoring_header", False) is True:
             return
-        if getattr(table_or_tree, "_has_been_visible", False) is False:
+        # 门禁 1: 表格必须已成功完成过至少一次恢复，杜绝未恢复前的脏状态落盘
+        if not getattr(table_or_tree, "_has_been_restored", False):
+            return
+        # 门禁 2: 表格必须真实展现过或当前物理可见
+        if not getattr(table_or_tree, "_has_been_visible", False) and not table_or_tree.isVisible():
             return
         try:
             state_hex = header.saveState().toHex().data().decode("utf-8")
@@ -769,29 +773,32 @@ def setup_header_persistence(table_or_tree, config_key, default_widths=None, max
 
         # QHeaderView.saveState is all-or-nothing when dynamic columns are added
         # or removed. Restore matching sections by stable header label as a fallback.
+        # 🛡️ 核心门禁：只有当二进制 saveState 无法恢复 (例如列数发生变化) 时才执行 fallback layout 恢复！
         layout_restored = False
-        try:
-            saved_layout = load_node(layout_config_key, [])
-            current_ids = section_ids()
-            saved_by_id = {entry.get("id"): entry for entry in saved_layout if isinstance(entry, dict)}
-            matched = [(logical, saved_by_id[section_id]) for logical, section_id in enumerate(current_ids) if section_id in saved_by_id]
-            if matched:
-                header.blockSignals(True)
-                for logical, entry in matched:
-                    width = entry.get("width")
-                    if isinstance(width, int) and width > 0:
-                        header.resizeSection(logical, width)
-                    header.setSectionHidden(logical, bool(entry.get("hidden", False)))
-                ordered = sorted(matched, key=lambda pair: int(pair[1].get("visual", pair[0])))
-                for target_visual, (logical, _entry) in enumerate(ordered):
-                    current_visual = header.visualIndex(logical)
-                    if current_visual != target_visual:
-                        header.moveSection(current_visual, target_visual)
+        if not restored:
+            try:
+                saved_layout = load_node(layout_config_key, [])
+                current_ids = section_ids()
+                saved_by_id = {entry.get("id"): entry for entry in saved_layout if isinstance(entry, dict)}
+                matched = [(logical, saved_by_id[section_id]) for logical, section_id in enumerate(current_ids) if section_id in saved_by_id]
+                if matched:
+                    header.blockSignals(True)
+                    for logical, entry in matched:
+                        width = entry.get("width")
+                        # 过滤掉被污染的 100 默认占位宽度，如有 default_widths 则优先使用
+                        if isinstance(width, int) and width > 0:
+                            header.resizeSection(logical, width)
+                        header.setSectionHidden(logical, bool(entry.get("hidden", False)))
+                    ordered = sorted(matched, key=lambda pair: int(pair[1].get("visual", pair[0])))
+                    for target_visual, (logical, _entry) in enumerate(ordered):
+                        current_visual = header.visualIndex(logical)
+                        if current_visual != target_visual:
+                            header.moveSection(current_visual, target_visual)
+                    header.blockSignals(False)
+                    layout_restored = True
+            except Exception as e:
                 header.blockSignals(False)
-                layout_restored = True
-        except Exception as e:
-            header.blockSignals(False)
-            print(f"[HeaderPersistence] Failed to restore named layout for {config_key}: {e}")
+                print(f"[HeaderPersistence] Failed to restore named layout for {config_key}: {e}")
 
         # 无论是否恢复成功，强制把所有列设回 Interactive 拖拽模式，防止 restoreState 恢复了历史配置中其他非交互的 resizeMode
         header.blockSignals(True)
@@ -826,6 +833,7 @@ def setup_header_persistence(table_or_tree, config_key, default_widths=None, max
 
         apply_max_width_limits()
         table_or_tree._is_restoring_header = False
+        table_or_tree._has_been_restored = True
 
     table_or_tree.save_header_state = save_action
     table_or_tree.restore_header_state = restore_action
@@ -838,7 +846,6 @@ def setup_header_persistence(table_or_tree, config_key, default_widths=None, max
     table_or_tree._show_event_filter = event_filter
 
     if table_or_tree._has_been_visible:
-        table_or_tree._has_been_restored = True
         restore_action()
     else:
         apply_max_width_limits()
@@ -854,14 +861,23 @@ def setup_header_persistence(table_or_tree, config_key, default_widths=None, max
         app = QApplication.instance()
         if app and getattr(app, "_is_updating_font", False):
             return
-        # 若当前正处于初始化/恢复过程，强行剥离 sectionResized 的落盘响应，防止重置配置！
+        # 若当前正处于初始化/恢复过程，强行剥离落盘响应，防止重置配置！
         if getattr(table_or_tree, "_is_restoring_header", False) is True:
+            return
+        # 严格门禁：未成功完成过恢复或从未可见，绝对禁止启动落盘定时器！
+        if not getattr(table_or_tree, "_has_been_restored", False):
+            return
+        if not table_or_tree.isVisible() and not getattr(table_or_tree, "_has_been_visible", False):
             return
 
         table_or_tree._has_been_visible = True
         save_timer.start()
 
     def on_section_resized(logical_index, _old_size, new_size):
+        if getattr(table_or_tree, "_is_restoring_header", False) is True:
+            return
+        if not getattr(table_or_tree, "_has_been_restored", False):
+            return
         if max_widths and logical_index in max_widths and new_size > max_widths[logical_index]:
             header.blockSignals(True)
             table_or_tree.setColumnWidth(logical_index, max_widths[logical_index])
@@ -870,8 +886,6 @@ def setup_header_persistence(table_or_tree, config_key, default_widths=None, max
 
     header.sectionResized.connect(on_section_resized)
     header.sectionMoved.connect(schedule_save)
-    header.sortIndicatorChanged.connect(schedule_save)
-    header.sectionCountChanged.connect(schedule_save)
 
     # Flush debounced changes when the application exits; otherwise a quick
     # restart can close the window before the delayed write reaches disk.
