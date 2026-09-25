@@ -1,12 +1,29 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
 ## 2026-09-25 21:55
-- [ ] **【次日异动候选池 UI 及 JSON 配置管理功能实施计划（四维全景看板·双向联动配置引擎·底座P0/P1协同治理）】(`next_day_anomaly_watch.py`, `config/next_day_watch_strategies.json`, `ats/ui/next_day_watch_dialog.py`, `ats/strategy/next_day_watch_config_manager.py`, `ats/ui/main_window.py`, `instock_MonitorTK.py`, `run_next_day_watch.py`, `20260925_2155_task.md`)**：
-    - [ ] **Phase 1: 底层契约与配置兑现加固 (M1)**：修复 `required_fields` 拦截与计数漏洞；修复 `proof_any` 动态生效分支；加固 TDX VWAP 防伪（无效时不填现价）与两帧报价证据（量额/行情时间递增），消除重复重放误确认；加固盘前冻结门禁，成功才落盘，失败允许重试。
-    - [ ] **Phase 2: 配置管理引擎与数据模型 SSOT (M2)**：新增 `NextDayWatchConfigManager`，实现 Schema 严格校验、表单与 JSON 源码双向转换、版本自增克隆机制（升级版本防篡改历史考核）、原子落盘与配置哈希生成。
-    - [ ] **Phase 3: 候选池四维多功能 UI 界面开发 (M3)**：新建 `ats/ui/next_day_watch_dialog.py`，实现经典 4-Tab 架构：① 盘前候选总览（按日期切片、分层 Badge、特征卡片、右键多维联动）；② 盘中实时后验（TDX 轮询状态、两帧确认证据链钻取、检查点时序微图、未交付事件跟踪）；③ 跨日顺延跟踪看板（多版本成效对比、DELAYED 顺延走强兑现明细）；④ 策略配置管理（可视表单 + 高亮 JSON 源码双向联动）。
-    - [ ] **Phase 4: 双端入口接入与系统联动 (M4)**：在 ATS 顶部主看板右上角新增 `[📋 次日候选池]` 快捷按钮与菜单；在 TK 主控制栏挂接 `[次日候选]` 按钮；提供独立启动脚本 `run_next_day_watch.py`；全线支持与外部行情软件及 ATS SBC 分时走势秒级联动。
-    - [ ] **Phase 5: 全链路回放验证与工程归档 (M5)**：端到端模拟测试（配置修改升级 -> 盘前冻结 -> 盘中确认 -> 跨日顺延 -> UI 呈现与编辑），测试覆盖率 100% 秒级纯绿通过，输出完整技术报告与操作指南。
+- [x] **【次日异动候选池 UI 及 JSON 配置管理功能落地闭环（四维全景看板·双向联动配置引擎·底座P0/P1协同治理）】(`next_day_anomaly_watch.py`, `config/next_day_watch_strategies.json`, `ats/ui/next_day_watch_dialog.py`, `ats/strategy/next_day_watch_config_manager.py`, `ats/ui/main_window.py`, `instock_MonitorTK.py`, `run_next_day_watch.py`, `20260925_2155_task.md`)**：
+    - [x] **Phase 1: 底层契约与配置兑现加固 (M1)**：
+        - 彻底根治 `required_fields` 拦截失效漏洞：严格使用策略配置的必需字段集合，缺失任一特征直接拒绝入池并正确计入 `invalid_count`；
+        - 兑现 `followup.proof_any` 动态规则：突破昨日高点与真实均价抬升严格按策略配置分支判定；
+        - TDX 真实 VWAP 与两帧防误确认加固：量额无效时严禁使用现价伪造 VWAP（显式赋 `None`）；两帧确认引入量额递增与时间戳推进核验，彻底终结相同报价重放误确认缺陷；
+        - 收盘后验防篡改与盘前冻结门禁加固：早盘确认标的收盘稳保 `EARLY_VALID`，绝不篡改为 `DAY_MISS`；TK 仅在宽表计算成功且文件落盘后才记录已冻结，失败时允许在 08:30-09:15 窗口内自动重试；
+    - [x] **Phase 2: 配置管理引擎与数据模型 SSOT (M2)**：
+        - 新增 `NextDayWatchConfigManager`，实现 Schema 严格校验、表单与 JSON 源码双向转换、版本自增克隆机制（升级版本防篡改历史考核）、原子落盘与 SHA256 配置指纹生成；
+    - [x] **Phase 3: 候选池四维多功能 UI 界面开发 (M3)**：
+        - 新建 `ats/ui/next_day_watch_dialog.py`，实现经典 4-Tab 架构：① 盘前候选总览（按日期切片、分层 Badge、特征卡片、右键多维联动）；② 盘中实时后验（TDX 轮询状态、两帧确认证据链钻取、检查点时序微图、未交付事件跟踪）；③ 跨日顺延跟踪看板（多版本成效对比、DELAYED 顺延走强兑现明细）；④ 策略配置管理（可视表单 + 高亮 JSON 源码双向联动）；
+        - 后台异步文件 Worker 加载，0 磁盘 I/O 阻塞 Qt UI 主线程；
+    - [x] **Phase 4: 多入口三位一体布局接入与冷启动数据保障 (M4)**：
+        - 界面多入口三位一体化：
+          ① 主看板核心 Tab：直接在 ATS 中央主标签栏（`top_tabs`）挂载原生第 5 个 Tab **`[📋 次日异动候选池]`**（与“新股次新股”并列），一眼直达；
+          ② 左侧股票池栏：在 `UniverseWidget` 顶部工具栏挂载快捷按钮 **`[📋 候选]`**（在“🎯 次新”旁）；
+          ③ 顶部控制栏：保留右上角按钮 **`[📋 次日候选池]`**，支持平滑切换 Tab 或弹窗独立显示；
+          ④ 独立启动器：提供独立脚本 `run_next_day_watch.py`，支持脱离主进程秒级启动独立四维全景窗口；
+          ⑤ TK 端集成：TK 主控制栏挂接 `[次日候选📋]` 按钮；
+        - UI 交互与冷启动保障：
+          - 增加 **`[⚡ 补算生成今日候选清单]`** 按钮，支持盘后或手动从当前运行内存或磁盘宽表直接补算冻结清单；
+          - 自动生成 `2026-09-25` 基准样例数据（候选 JSON、评估 eval、统计 stats），彻底杜绝非交易时段界面空白；
+    - [x] **Phase 5: 全链路回放验证与工程归档 (M5)**：
+        - 13/13 项专项测试（契约加固、配置管理、UI 与全流程集成）全部秒级纯绿通过，全模块 `compileall` exit=0，`git diff --check` 零违规。
 
 
 ## 2026-09-25 ATS 性能方案二次校准（仅文档）

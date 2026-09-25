@@ -5348,7 +5348,7 @@ class TDXRealtimeFetcher:
             amt = float(q.get("amount", 0.0))
             b1 = float(q.get("bid1", p))
             a1 = float(q.get("ask1", p))
-            vw = round(amt / (vol * 100.0), 2) if (vol > 0 and amt > 0) else p
+            vw = round(amt / (vol * 100.0), 2) if (vol > 0 and amt > 0) else None
             
             # 涨跌幅
             pct = round((p - lc) / lc * 100.0, 2) if lc > 0 else 0.0

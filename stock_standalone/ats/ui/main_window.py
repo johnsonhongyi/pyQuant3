@@ -2409,8 +2409,14 @@ class ATSMainWindow(QMainWindow):
         self.new_stock_panel.stock_selected.connect(self.link_stock)
         self.new_stock_panel.stock_double_clicked.connect(self.open_sbc_for_stock)
         self.top_tabs.addTab(self.new_stock_panel, "🆕 新股次新股 (IPO & 阶梯)")
-        self.top_tabs.currentChanged.connect(self._on_top_tab_changed)
         mark_checkpoint("03.3.5 NewStockPanel (Tab 3)")
+
+        from ats.ui.next_day_watch_dialog import NextDayAnomalyWatchWidget
+        self.next_day_watch_panel = NextDayAnomalyWatchWidget(parent=self)
+        self.top_tabs.addTab(self.next_day_watch_panel, "📋 次日异动候选池")
+        mark_checkpoint("03.3.6 NextDayWatchPanel (Tab 4)")
+
+        self.top_tabs.currentChanged.connect(self._on_top_tab_changed)
         
         # 顶部主看板 Tab 右上角添加【🐉 龙头追踪器】、【🎯 60f通道测算】与【🪟 SBC 重排】组合入口
         top_corner_container = QWidget()
@@ -2465,6 +2471,26 @@ class ATSMainWindow(QMainWindow):
         self.btn_top_scan_channel.clicked.connect(self._on_channel_scan_button_clicked)
         top_corner_layout.addWidget(self.btn_top_scan_channel)
         self.btn_top_scan_60f = self.btn_top_scan_channel  # 保持向后兼容别名
+
+        self.btn_next_day_watch = QPushButton("📋 次日候选池")
+        self.btn_next_day_watch.setToolTip("打开次日异动候选池综合管理中心 (查看盘前候选、盘中两帧后验、跨日顺延及策略配置)")
+        self.btn_next_day_watch.setStyleSheet("""
+            QPushButton {
+                background-color: #261f38;
+                color: #c084fc;
+                font-weight: bold;
+                border: 1px solid #a855f7;
+                border-radius: 3px;
+                padding: 2px 8px;
+                font-size: 9pt;
+            }
+            QPushButton:hover {
+                background-color: #a855f7;
+                color: #ffffff;
+            }
+        """)
+        self.btn_next_day_watch.clicked.connect(self.open_next_day_watch_dialog)
+        top_corner_layout.addWidget(self.btn_next_day_watch)
 
         self.btn_rearrange_sbc = QPushButton("🪟 SBC 重排")
         self.btn_rearrange_sbc.setToolTip("自动将所有已打开的 SBC 分时走势独立窗口在当前屏幕网格平铺重排对齐")
@@ -6872,6 +6898,23 @@ class ATSMainWindow(QMainWindow):
         except Exception as e:
             print(f"[ATSMainWindow] Error refreshing UI on favorites changed: {e}")
 
+
+    def open_next_day_watch_dialog(self, force_dialog: bool = False):
+        """打开/切换到次日异动候选池"""
+        try:
+            if not force_dialog and hasattr(self, "top_tabs") and hasattr(self, "next_day_watch_panel"):
+                idx = self.top_tabs.indexOf(self.next_day_watch_panel)
+                if idx >= 0:
+                    self.top_tabs.setCurrentIndex(idx)
+                    self.next_day_watch_panel.reload_all_data()
+                    return
+            from ats.ui.next_day_watch_dialog import NextDayAnomalyWatchDialog
+            dlg = NextDayAnomalyWatchDialog.get_instance(parent=self)
+            dlg.show()
+            dlg.raise_()
+            dlg.activateWindow()
+        except Exception as exc:
+            logger.warning("[ATSMainWindow] 打开次日候选池中心失败: %s", exc)
 
     def open_dragon_monitor(self, restore_state=None, cold_start=False):
         if getattr(self, '_is_closing', False) or getattr(self, '_is_exiting', False):
