@@ -1,5 +1,35 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-09-25 01:00
+- [x] **【PyInstaller 模块批量打包调度中心编排与非侵入式组合调用闭环落地】(`C:\Users\Johnson\instock-pyinstall-batch.cmd`, `stock_standalone/instock-pyinstall-batch.cmd`, `20260925_0100_task.md`)**：
+    - [x] **100% 保持原有批处理零修改、零侵入**：
+        - 现有 `instock-pyinstall-to-exe.cmd` (tk)、`instock-pyinstall-ats-exe.cmd` (ats)、`instock-pyinstall-pop-exe.cmd` (pop)、`instock-pyinstall-QT_multi_period_dialog.cmd` (multi)、`instock-pyinstall-manage-exe.cmd` (manage) 保持完全独立不变；
+        - 父编排脚本采用 `call "%TARGET_SCRIPT%" < nul` 穿透调用，在不修改原脚本任何一行的前提下，安全自动跳过末尾 `pause`，实现真正的全自动化批量流水线打包；
+    - [x] **灵活分组与双模调用支持（交互菜单 + 命令行直达）**：
+        - 支持独立单模块：`ats` (1)、`tk` (2)、`pop` (3)、`multi` (4)、`manage` (7)；
+        - 支持快捷组合与全量：常用双核 `tk,ats` (5)、核心全量 `all` (6)、完整全量 `all+` (8)；
+        - 支持命令行多选自由组合（如 `instock-pyinstall-batch.cmd tk ats pop` 或 `1 3`）；
+        - 无参数直接运行时弹出友好规整的控制台交互式菜单；
+    - [x] **最终结果集汇总与高精度统计时间呈现**：
+        - 单模块与总体耗时均采用高精度 centiseconds 算术算法，准确显示分/秒与总秒数；
+        - 自动感知产物生成状态、提取 `dist\*.exe` 实时文件大小（格式化为 MB）并严格判定 `[成功]` / `[失败]`；
+        - 输出美观规整的结果集汇总表格，并自动归档至 `dist\batch_build_last_summary.txt`；
+        - 支持 `--dry-run` 模式供演练自检，实机全量用例验证 100% 纯绿通过。
+
+
+## 2026-09-25 00:48
+- [x] **【Clash Verge 每日巨额流量偷跑根治与真·白名单分流模式闭环落地】(`config/clash_rules/clash_custom_direct_script.js`, `config/clash_rules/clash_custom_direct_rules.yaml`, `config/clash_rules/apply_clash_rules.py`, `AppData/io.github.clash-verge-rev.clash-verge-rev/`)**：
+    - [x] **根因排查与物理铁证确证**：
+        - 确证 GLaDOS 自动同步订阅配置三大致命缺陷：① 直连白名单仅 344 条；② 微软 Microsoft (38条) 与 Apple (41条) 策略组默认指向美国代理节点，导致 Windows Update、Visual Studio 2019/更新（`BackgroundDownload.exe`）、Defender 病毒库（`MpDefenderCoreService.exe`）、Office 365（`SDXHelper.exe`）狂跑数十 GB 代理流量；③ 规则末尾粗暴兜底 `MATCH,Default Proxy`，配合 TUN 全局虚拟网卡将未知连接和海外 CDN 域名统统当作翻墙流量送去代理；
+    - [x] **真·白名单直连分流重构 (`clash_custom_direct_script.js` & `clash_custom_direct_rules.yaml`)**：
+        - 前置直连白名单强化：注入 `BackgroundDownload.exe`、`vs_community.exe`、`MpDefenderCoreService.exe`、`SDXHelper.exe`、`onedrive.exe`、`msedge.exe`、`NVDisplay.Container.exe` 等系统与开发大流量进程，以及 `windowsupdate.com`、`microsoft.com`、`office.com` 等直连域名；
+        - 策略组首选项纠偏：自动将 `Microsoft`、`Apple`、`Download` 策略组的首选默认项重构为 `DIRECT`；
+        - 尾部兜底重构为真·白名单：废除 `MATCH,Default Proxy`，构建安全尾链 `GEOSITE,gfw,Default Proxy` -> `GEOIP,CN,DIRECT` -> `GEOIP,PRIVATE,DIRECT` -> `MATCH,DIRECT`；
+        - 核心效果：仅规则明确指定的 Google、GitHub、OpenAI/ChatGPT、学术期刊（arXiv, IEEE, Nature, Springer）及 GFW 网站走代理；其余系统服务、软件更新、未知流量 100% 默认直连，彻底杜绝 1KB 额外代理流量；
+    - [x] **零丢包热重载与全量实操验证 (`apply_clash_rules.py`)**：
+        - 升级 `apply_clash_rules.py`，通过 Windows 命名管道 `\\.\pipe\verge-mihomo` 零报错毫秒级热更新；
+        - 自动化验证 100% 通过：OpenAI、GitHub、Google、arXiv 正常走代理；`microsoft.com`、`mobile.events.data.microsoft.com`、`baidu.com`、`finance.sina.com.cn` 100% 命中 DIRECT，`mihomo` DNS 与未知请求 100% 命中 `Match using DIRECT`。
+
 ## 2026-09-24 21:35
 - [x] **【跨日行情有效帧判定、可视化端增量契约收敛与合并异常全量自愈闭环落地】(`tk_frame_fingerprint.py`, `instock_MonitorTK.py`, `ipc_sync_manager.py`, `ats/ipc_bridge.py`, `trade_visualizer_qt6.py`, `tests/test_ipc_trade_rollover.py`)**：
     - [x] **P1 发送端杜绝午夜重放昨日旧快照 (`is_new_trade_snapshot`)**：

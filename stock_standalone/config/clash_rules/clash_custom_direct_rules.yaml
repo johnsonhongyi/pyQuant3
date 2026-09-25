@@ -1,5 +1,5 @@
 # ==============================================================================
-# 量化股票监控与 EA/Steam 游戏极速下载 — Clash / Mihomo 专属直连前置规则 (Merge 格式)
+# 量化股票监控与智能白名单分流 — Clash / Mihomo 专属直连前置规则 (Merge 格式)
 # 适用客户端: Clash Verge Rev / Clash Nyanpasu / Mihomo Party / Clash for Windows
 # 保存路径: stock_standalone/config/clash_rules/clash_custom_direct_rules.yaml
 # ==============================================================================
@@ -35,9 +35,42 @@ prepend-rules:
   - DOMAIN-SUFFIX,chinamoney.com.cn,DIRECT  # 中国外汇交易中心
 
   # ----------------------------------------------------------------------------
-  # 3. EA 平台与游戏极速下载 (包括 EA App、Origin、Apex、战地、FIFA 等 CDN)
+  # 3. Windows 系统更新、Visual Studio 安装与开发工具大流量直连 (杜绝偷跑数 GB 流量)
   # ----------------------------------------------------------------------------
-  # EA 域名与接口直连
+  - PROCESS-NAME,BackgroundDownload.exe,DIRECT  # VS 2019 / VS 安装更新
+  - PROCESS-NAME,vs_installer.exe,DIRECT        # VS 安装器
+  - PROCESS-NAME,vs_community.exe,DIRECT        # VS Community
+  - PROCESS-NAME,devenv.exe,DIRECT              # VS 主程序
+  - PROCESS-NAME,MpDefenderCoreService.exe,DIRECT # Windows Defender 病毒库与云保护
+  - PROCESS-NAME,SDXHelper.exe,DIRECT           # Office 遥测与同步
+  - PROCESS-NAME,onedrive.exe,DIRECT            # OneDrive 同步
+  - PROCESS-NAME,msedge.exe,DIRECT              # Edge 浏览器下载更新
+  - PROCESS-NAME,NVDisplay.Container.exe,DIRECT # NVIDIA 显卡驱动更新
+  - PROCESS-NAME,LogiOptionsMgr.exe,DIRECT      # 罗技鼠标外设驱动
+
+  - DOMAIN-SUFFIX,windowsupdate.com,DIRECT      # Windows 系统更新
+  - DOMAIN-SUFFIX,update.microsoft.com,DIRECT   # 微软更新
+  - DOMAIN-SUFFIX,delivery.mp.microsoft.com,DIRECT # 微软组件下载
+  - DOMAIN-SUFFIX,windows.com,DIRECT            # Windows 官方
+  - DOMAIN-SUFFIX,microsoft.com,DIRECT          # 微软主站
+  - DOMAIN-SUFFIX,office.com,DIRECT             # Office 官方
+  - DOMAIN-SUFFIX,office365.com,DIRECT          # Office 365
+  - DOMAIN-SUFFIX,live.com,DIRECT               # 微软账户与同步
+  - DOMAIN-SUFFIX,msftncsi.com,DIRECT           # 网络连通性检测
+  - DOMAIN-SUFFIX,msftconnecttest.com,DIRECT
+  - DOMAIN-SUFFIX,azure.com,DIRECT
+  - DOMAIN-SUFFIX,azureedge.net,DIRECT
+
+  - DOMAIN-SUFFIX,apple.com,DIRECT              # Apple 官方
+  - DOMAIN-SUFFIX,icloud.com,DIRECT             # iCloud 同步
+  - DOMAIN-SUFFIX,mzstatic.com,DIRECT
+  - DOMAIN-SUFFIX,nvidia.com,DIRECT             # NVIDIA 显卡驱动
+  - DOMAIN-SUFFIX,logitech.com,DIRECT           # 罗技驱动
+  - DOMAIN-SUFFIX,digicert.com,DIRECT           # 证书链
+
+  # ----------------------------------------------------------------------------
+  # 4. EA 平台与游戏极速下载 (包括 EA App、Origin、Apex、战地、FIFA 等 CDN)
+  # ----------------------------------------------------------------------------
   - DOMAIN-SUFFIX,ea.com,DIRECT             # EA 官方主站、app-images、junction、API
   - DOMAIN-SUFFIX,origin.com,DIRECT         # Origin 客户端与商城
   - DOMAIN-SUFFIX,electronicarts.com,DIRECT # Electronic Arts
@@ -47,12 +80,10 @@ prepend-rules:
   - DOMAIN-SUFFIX,bioware.com,DIRECT        # BioWare 工作室
   - DOMAIN-SUFFIX,frostbite.com,DIRECT      # 寒霜引擎
   - DOMAIN-SUFFIX,eacdn.com,DIRECT          # EA CDN
-  # EA 游戏下载与鉴权专用 CDN (直连跑满千兆带宽)
   - DOMAIN-SUFFIX,akamaized.net,DIRECT      # ealockbox.akamaized.net 等 EA 下载鉴权
   - DOMAIN-SUFFIX,akamaihd.net,DIRECT       # origin-a.akamaihd.net 等游戏下载包
   - DOMAIN-SUFFIX,edgekey.net,DIRECT        # Akamai EdgeKey CDN
   - DOMAIN-SUFFIX,edgesuite.net,DIRECT      # Akamai EdgeSuite CDN
-  # EA 游戏与下载进程名直连 (底层进程级拦截，绝不走代理)
   - PROCESS-NAME,EADesktop.exe,DIRECT       # EA App 主程序
   - PROCESS-NAME,EABackgroundService.exe,DIRECT # EA App 核心后台下载进程
   - PROCESS-NAME,EALauncher.exe,DIRECT      # EA 启动器
@@ -76,13 +107,12 @@ prepend-rules:
   - PROCESS-NAME,EasyAntiCheat_EOS.exe,DIRECT # 小蓝熊 EOS 反作弊
   - PROCESS-NAME,Link2EA.exe,DIRECT         # Steam 关联 EA
   - PROCESS-NAME,ActivationUI.exe,DIRECT    # EA 激活程序
-  # EA 关键词直连
   - DOMAIN-KEYWORD,ea.com,DIRECT
   - DOMAIN-KEYWORD,origin,DIRECT
   - DOMAIN-KEYWORD,electronicarts,DIRECT
 
   # ----------------------------------------------------------------------------
-  # 4. Steam 游戏满速下载与连通性检测直连
+  # 5. Steam 游戏满速下载与连通性检测直连
   # ----------------------------------------------------------------------------
   - DOMAIN-SUFFIX,steamconnecttest.com,DIRECT # Steam 连通性测试
   - DOMAIN-SUFFIX,steamcontent.com,DIRECT     # Steam 游戏下载 CDN (跑满宽带)
@@ -92,14 +122,14 @@ prepend-rules:
   - DOMAIN-SUFFIX,steamcdn-a.akamaihd.net,DIRECT
 
   # ----------------------------------------------------------------------------
-  # 5. 金融与股票关键字兜底直连
+  # 6. 金融与股票关键字兜底直连
   # ----------------------------------------------------------------------------
   - DOMAIN-KEYWORD,stock,DIRECT
   - DOMAIN-KEYWORD,tongdaxin,DIRECT
   - DOMAIN-KEYWORD,eastmoney,DIRECT
 
   # ----------------------------------------------------------------------------
-  # 6. 通达信与主流券商行情服务器 IP 段 (TCP 7709 / 7711 直连)
+  # 7. 通达信与主流券商行情服务器 IP 段 (TCP 7709 / 7711 直连)
   # ----------------------------------------------------------------------------
   - IP-CIDR,202.108.254.0/24,DIRECT        # 通达信北京联通主站 (极速 6ms)
   - IP-CIDR,202.108.253.0/24,DIRECT        # 通达信北京联通主站2
@@ -115,6 +145,6 @@ prepend-rules:
   - IP-CIDR,60.12.136.0/24,DIRECT          # 通达信河北/官方主站
 
   # ----------------------------------------------------------------------------
-  # 7. 国内 IP 与局域网直连兜底
+  # 8. 国内 IP 与局域网直连兜底
   # ----------------------------------------------------------------------------
   - GEOIP,CN,DIRECT
