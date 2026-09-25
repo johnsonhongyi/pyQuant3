@@ -165,20 +165,23 @@ def get_limit_up_threshold(code: str) -> float:
 def get_effective_trade_date(current_dt: Optional[datetime.datetime] = None) -> str:
     """
     [DRY] 获取当前有效的交易日日期字符串 (YYYY-MM-DD)。
-    包含智能开盘前降级策略：如果是交易日，但还没到今天的竞价时间 (09:15之前)，退避使用前一交易日数据。
+    包含智能开盘前降级策略：如果是交易日，但还没到今天的竞价时间 (09:20之前)，退避使用前一交易日数据。
     """
     if current_dt is None:
         current_dt = datetime.datetime.now()
     
-    is_before_market = False
-    if cct.get_trade_date_status():
-        if current_dt.hour * 100 + current_dt.minute < 920:
-            is_before_market = True
+    try:
+        is_calendar_trade_day = bool(cct.get_day_istrade_date(current_dt.date()))
+    except Exception:
+        is_calendar_trade_day = bool(cct.get_trade_date_status())
+    is_before_market = current_dt.hour * 100 + current_dt.minute < 920
 
-    if cct.get_trade_date_status() and not is_before_market:
+    # Calendar is authoritative: the cached runtime flag can still say "trade day"
+    # on weekends/holidays and must never advance sector state past the last session.
+    if is_calendar_trade_day and not is_before_market:
         today_str = current_dt.strftime('%Y-%m-%d')
     else:
-        today_str = cct.get_last_trade_date()
+        today_str = cct.get_last_trade_date(current_dt.strftime('%Y-%m-%d'))
         
     # 确保格式为 YYYY-MM-DD
     if today_str and '-' not in today_str and len(today_str) == 8:
@@ -1810,8 +1813,10 @@ class BiddingMomentumDetector:
 
         # 1. 非交易日静默逻辑
         if not is_work_day:
-            # 即使不是交易日，如果它是 Cold Start，我们也记录一下当前日期
-            if is_fresh_start: self._last_data_date = today_str
+            # Cold start on a weekend/holiday stays anchored to the most recent
+            # exchange session; do not label unchanged sector state with today.
+            if is_fresh_start:
+                self._last_data_date = get_effective_trade_date(current_dt)
             return
 
         # 2. 核心重置逻辑 (仅在交易日 09:00 后触发)
@@ -2902,11 +2907,9 @@ class BiddingMomentumDetector:
                     continue
             dates.sort(reverse=True)
             
-            # 🚀 [FIX] 交易日智能判定：如果是交易日则用今天，否则用上个交易日
-            if cct.get_trade_date_status():
-                today_str = datetime.datetime.now().strftime('%Y%m%d')
-            else:
-                today_str = cct.get_last_trade_date().replace('-', '')
+            # Use the exchange calendar-derived effective date; the cached runtime
+            # trade flag can be stale across weekends and public holidays.
+            today_str = get_effective_trade_date().replace('-', '')
             
             # 排除今日及未来日期，寻找历史交易日快照
             past_dates = [d for d in dates if d < today_str]

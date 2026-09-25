@@ -54,9 +54,9 @@ from PyQt6.QtWidgets import (
 
 from ats.strategy.next_day_watch_config_manager import NextDayWatchConfigManager
 from ats.ui.base_table import BaseATSTableWidget, send_to_linkage
-from ats.ui.styles import NumericTableWidgetItem, load_config_node, save_config_nodes
+from ats.ui.styles import NumericTableWidgetItem, load_config_node, save_config_nodes, setup_header_persistence
 from JohnsonUtil import LoggerFactory
-from next_day_anomaly_watch import _read_json, run_cycle
+from next_day_anomaly_watch import _ats_custom_column_specs, _read_json, _trend_rating, _trend_score, run_cycle
 from sys_utils import get_app_root, get_conf_path
 
 logger = LoggerFactory.getLogger()
@@ -122,6 +122,35 @@ class NextDayWatchDataLoaderWorker(QThread):
             logger.warning("[NextDayWatchDataLoaderWorker] Background read failed: %s", exc)
 
 
+class NextDayWatchFreezeWorker(QThread):
+    """Run candidate calculation against the ATS snapshot off the UI thread."""
+
+    completed = pyqtSignal(object)
+    failed = pyqtSignal(str)
+
+    def __init__(self, df, config_path: str, data_dir: str, asof_date: str,
+                 target_date: str, sector_snapshot=None):
+        super().__init__()
+        self.df = df
+        self.config_path = config_path
+        self.data_dir = data_dir
+        self.asof_date = asof_date
+        self.target_date = target_date
+        self.sector_snapshot = sector_snapshot
+
+    def run(self):
+        try:
+            result = run_cycle(
+                self.df, config_path=self.config_path, data_dir=self.data_dir,
+                asof_date=self.asof_date, target_date=self.target_date,
+                sector_snapshot=self.sector_snapshot, observe=False, force_freeze=True
+            )
+            self.completed.emit(result)
+        except Exception as exc:
+            logger.exception("[NextDayWatchFreezeWorker] Candidate freeze failed")
+            self.failed.emit(str(exc))
+
+
 class NextDayAnomalyWatchWidget(QWidget):
     """Reusable comprehensive panel for next day anomaly watch (can be embedded in tabs or dialogs)."""
 
@@ -136,7 +165,8 @@ class NextDayAnomalyWatchWidget(QWidget):
         self.stats_data_list: List[Dict[str, Any]] = []
         self.current_config: Dict[str, Any] = {}
         self.active_worker: Optional[NextDayWatchDataLoaderWorker] = None
-
+        self.manual_freeze_worker: Optional[NextDayWatchFreezeWorker] = None
+        self.manifest_custom_specs = _ats_custom_column_specs()
         self._layout_save_timer = QTimer(self)
         self._layout_save_timer.setSingleShot(True)
         self._layout_save_timer.setInterval(450)
@@ -278,19 +308,34 @@ class NextDayAnomalyWatchWidget(QWidget):
         layout.addWidget(splitter)
 
         self.table_manifest = QTableWidget()
-        self.table_manifest.setColumnCount(10)
-        self.table_manifest.setHorizontalHeaderLabels([
-            "代码", "名称", "分层", "阶段", "综合分", "所属板块", "策略版本", "关键特征摘要", "板块共振证据", "状态"
-        ])
+        self._manifest_base_headers = [
+            "代码", "名称", "分层", "阶段", "综合分", "走势评级", "所属板块", "策略版本", "关键特征摘要", "板块共振证据", "状态"
+        ]
+        self.table_manifest.setColumnCount(len(self._manifest_base_headers) + len(self.manifest_custom_specs))
+        self.table_manifest.setHorizontalHeaderLabels(
+            self._manifest_base_headers + [label for _, label in self.manifest_custom_specs]
+        )
         self._configure_stock_table(self.table_manifest)
         header = self.table_manifest.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        self.table_manifest.horizontalHeader().setStretchLastSection(True)
-        for col, width in {0: 78, 1: 110, 2: 78, 3: 145, 4: 78, 5: 150, 6: 130, 7: 270, 8: 150}.items():
+        # Keep the final ATS custom column manually resizable; stretchLastSection
+        # overrides the saved interactive width and prevents dragging its edge.
+        header.setStretchLastSection(False)
+        for col, width in {0: 78, 1: 110, 2: 78, 3: 145, 4: 78, 5: 90, 6: 150, 7: 130, 8: 270, 9: 150, 10: 90}.items():
             self.table_manifest.setColumnWidth(col, width)
+        header_widths = {0: 78, 1: 110, 2: 78, 3: 145, 4: 78, 5: 90, 6: 150, 7: 130, 8: 270, 9: 150, 10: 90}
+        header_widths.update({col: 105 for col in range(len(self._manifest_base_headers), self.table_manifest.columnCount())})
+        setup_header_persistence(
+            self.table_manifest,
+            "next_day_watch_manifest_header_v2",
+            default_widths=header_widths,
+            storage_path=os.path.join(get_app_root(), "config", "next_day_watch_columns.json"),
+        )
         self.table_manifest.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.table_manifest.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
         self.table_manifest.setAlternatingRowColors(True)
+        header.setSortIndicator(4, Qt.SortOrder.DescendingOrder)
+        self.table_manifest.setSortingEnabled(True)
         self.table_manifest.itemSelectionChanged.connect(self._on_manifest_row_selected)
         self.table_manifest.itemDoubleClicked.connect(self._on_candidate_double_clicked)
         self.table_manifest.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -665,6 +710,9 @@ class NextDayAnomalyWatchWidget(QWidget):
         total = len(candidates)
         univ = manifest.get("universe_count", "--")
         invalids = manifest.get("invalid_count", {})
+        valid_codes = manifest.get("valid_code_count", "--")
+        prefilter_rejected = manifest.get("prefilter_rejected", {})
+        tier_rejected = manifest.get("tier_rejected", {})
 
         tier_counts = {}
         for c in candidates:
@@ -673,6 +721,8 @@ class NextDayAnomalyWatchWidget(QWidget):
         tier_str = " | ".join(f"Tier {k}: {v}只" for k, v in sorted(tier_counts.items())) or "0只"
 
         invalid_str = ", ".join(f"{k}: {v}只" for k, v in invalids.items()) or "0"
+        prefilter_str = ", ".join(f"{k}: {v}只" for k, v in prefilter_rejected.items()) or "0"
+        tier_str_rejected = ", ".join(f"{k}: {v}只" for k, v in tier_rejected.items()) or "0"
         if not candidates and not manifest:
             summary_text = (
                 "⚠️ 当前尚未生成候选池清单 (日常由 TK 在 08:30-09:15 自动冻结)。"
@@ -689,8 +739,8 @@ class NextDayAnomalyWatchWidget(QWidget):
         else:
             summary_text = (
                 f"📅 基准交易日(T): {asof}  ➔  目标交易日(T+1): {target}  |  "
-                f"候选总数: {total}只 ({tier_str})  |  全市场扫描宽表: {univ}只  |  "
-                f"特征缺失剔除: {invalid_str}"
+                f"候选总数: {total}只 ({tier_str})  |  有效代码: {valid_codes}/{univ}  |  "
+                f"特征缺失: {invalid_str}  |  策略预筛未通过: {prefilter_str}  |  分层条件未通过: {tier_str_rejected}"
             )
             self.lbl_manifest_summary.setStyleSheet("""
                 background-color: #1f242c;
@@ -704,6 +754,25 @@ class NextDayAnomalyWatchWidget(QWidget):
         self._render_manifest_table()
 
     def _render_manifest_table(self):
+        header = self.table_manifest.horizontalHeader()
+        sort_column = header.sortIndicatorSection()
+        sort_order = header.sortIndicatorOrder()
+        sorting_enabled = self.table_manifest.isSortingEnabled()
+        self.table_manifest.setSortingEnabled(False)
+        custom_specs = _ats_custom_column_specs()
+        if custom_specs != self.manifest_custom_specs:
+            self.manifest_custom_specs = custom_specs
+            headers = self._manifest_base_headers + [label for _, label in custom_specs]
+            self.table_manifest.setColumnCount(len(headers))
+            self.table_manifest.setHorizontalHeaderLabels(headers)
+            header = self.table_manifest.horizontalHeader()
+            for col in range(len(self._manifest_base_headers), len(headers)):
+                header.setSectionResizeMode(col, QHeaderView.ResizeMode.Interactive)
+                self.table_manifest.setColumnWidth(col, 105)
+            # Reapply the saved layout after ATS custom columns have settled.
+            if hasattr(self.table_manifest, "restore_header_state"):
+                self.table_manifest.restore_header_state()
+
         candidates = self.manifest_data.get("candidates", [])
         tier_filter = self.combo_tier_filter.currentText()
         strat_filter = self.combo_strat_filter.currentText()
@@ -734,13 +803,19 @@ class NextDayAnomalyWatchWidget(QWidget):
             name = str(c.get("name", code))
             tier = str(c.get("tier", ""))
             phase = str(c.get("phase", ""))
-            score = float(c.get("score", 0.0))
             cat = str(c.get("category", ""))
             strat_ver = f"{c.get('strategy_id', '')} v{c.get('version', '')}"
             feats = c.get("feature_values", {})
+            score = (_trend_score(feats) if c.get("score_model_version") != 1
+                     else float(c.get("score", 0.0)))
+            trend_rating = c.get("trend_rating") if c.get("score_model_version") == 1 else _trend_rating(score)
             feat_summary = f"前高:{feats.get('lasth1d', '--')} 斜率:{feats.get('ch_slope_deg', '--')}° 位置:{feats.get('ch_pos', '--')}%"
             sector_matches = c.get("sector_evidence", {}).get("matches", [])
-            sec_summary = ", ".join(m.get("name", "") for m in sector_matches if m.get("name")) or "--"
+            resonance = sector_matches[0] if sector_matches else {}
+            sec_summary = resonance.get("name", "--")
+            if resonance:
+                strength = resonance.get("score", resonance.get("momentum_score", "--"))
+                sec_summary += f" (强度:{strength})"
             status = str(c.get("status", "WATCHING"))
 
             item_code = QTableWidgetItem(code)
@@ -763,12 +838,20 @@ class NextDayAnomalyWatchWidget(QWidget):
             item_phase.setToolTip(phase)
             item_score = NumericTableWidgetItem(f"{score:.1f}")
             item_score.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            item_score.setToolTip("根据通道斜率、高低点结构、量能、通道位置、支撑偏离与TD卖点计算")
+            item_rating = QTableWidgetItem(str(trend_rating))
+            item_rating.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            item_rating.setToolTip(f"走势评分 {score:.1f}/100")
 
             item_cat = QTableWidgetItem(cat)
             item_strat = QTableWidgetItem(strat_ver)
             item_strat.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             item_feats = QTableWidgetItem(feat_summary)
             item_sec = QTableWidgetItem(sec_summary)
+            item_sec.setToolTip(
+                f"板块快照时间: {c.get('sector_evidence', {}).get('snapshot_at') or '未知'}"
+                if sector_matches else str(c.get("sector_evidence", {}).get("reason") or "无有效共振")
+            )
             item_status = QTableWidgetItem(_STATUS_DISPLAY.get(status, status))
             item_status.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             item_status.setToolTip(status)
@@ -778,13 +861,27 @@ class NextDayAnomalyWatchWidget(QWidget):
             self.table_manifest.setItem(row, 2, item_tier)
             self.table_manifest.setItem(row, 3, item_phase)
             self.table_manifest.setItem(row, 4, item_score)
-            self.table_manifest.setItem(row, 5, item_cat)
-            self.table_manifest.setItem(row, 6, item_strat)
-            self.table_manifest.setItem(row, 7, item_feats)
-            self.table_manifest.setItem(row, 8, item_sec)
-            self.table_manifest.setItem(row, 9, item_status)
+            self.table_manifest.setItem(row, 5, item_rating)
+            self.table_manifest.setItem(row, 6, item_cat)
+            self.table_manifest.setItem(row, 7, item_strat)
+            self.table_manifest.setItem(row, 8, item_feats)
+            self.table_manifest.setItem(row, 9, item_sec)
+            self.table_manifest.setItem(row, 10, item_status)
+            for offset, (field, _label) in enumerate(self.manifest_custom_specs, start=len(self._manifest_base_headers)):
+                value = feats.get(field)
+                text = (f"{value:g}" if isinstance(value, (int, float)) and not isinstance(value, bool)
+                        else str(value) if value is not None else "--")
+                item = NumericTableWidgetItem(text)
+                item.setToolTip(field)
+                if isinstance(value, (int, float)) and not isinstance(value, bool):
+                    item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                self.table_manifest.setItem(row, offset, item)
 
-        self.table_manifest.horizontalHeader().setStretchLastSection(True)
+        self.table_manifest.setSortingEnabled(sorting_enabled)
+        if sorting_enabled and sort_column >= 0:
+            self.table_manifest.sortItems(sort_column, sort_order)
+        elif sorting_enabled and self.table_manifest.rowCount():
+            self.table_manifest.sortItems(4, Qt.SortOrder.DescendingOrder)
 
     def _configure_stock_table(self, table: QTableWidget):
         """Keep stock-bearing tables consistent with the ATS watchlist tables."""
@@ -851,7 +948,7 @@ class NextDayAnomalyWatchWidget(QWidget):
             return
         row = item.row()
         table.setCurrentCell(row, item.column())
-        if table is self.table_manifest and item.column() == 5:
+        if table is self.table_manifest and item.column() == 6:
             code_item = table.item(row, 0)
             code = code_item.text().strip() if code_item else ""
             candidate = next(
@@ -1090,26 +1187,80 @@ class NextDayAnomalyWatchWidget(QWidget):
         root = get_app_root()
         data_dir = os.path.join(root, "datacsv")
         config_path = get_conf_path("next_day_watch_strategies.json", root)
-
+        main = self._main_window()
+        target_date = today
+        is_trade_day = True
         try:
             from JohnsonUtil import commonTips as cct
             asof_date = str(cct.get_last_trade_date(today))[:10]
+            is_trade_day = bool(cct.get_day_istrade_date(today))
+            # On weekends/holidays, freeze for the next exchange session rather
+            # than writing a manifest for a calendar date with no trading.
+            if not is_trade_day:
+                next_trade_date = cct.a_trade_calendar.get_next_trade_date(asof_date)
+                if next_trade_date:
+                    target_date = str(next_trade_date)[:10]
         except Exception:
             asof_date = today
 
-        result = run_cycle(
-            df, config_path=config_path, data_dir=data_dir,
-            asof_date=asof_date, target_date=today,
-            observe=False, force_freeze=True
+        sector_snapshot = getattr(main, "current_sector_snapshot", None) if main is not None else None
+        heatmap = getattr(main, "heatmap_widget", None) if main is not None else None
+        if not sector_snapshot and heatmap is not None:
+            sector_snapshot = getattr(heatmap, "_cached_raw_sector_data", None)
+        if not is_trade_day and heatmap is not None:
+            loaded_path = os.path.basename(str(getattr(heatmap, "_last_session_path", "")))
+            loaded_date = loaded_path.removeprefix("bidding_").removesuffix(".json.gz")
+            if loaded_date != asof_date.replace("-", ""):
+                sector_snapshot = None
+
+        self.btn_manual_freeze.setEnabled(False)
+        self.btn_manual_freeze.setText("⏳ 后台补算中…")
+        worker = NextDayWatchFreezeWorker(
+            df, config_path, data_dir, asof_date, target_date, sector_snapshot
         )
+        self.manual_freeze_worker = worker
+        worker.completed.connect(lambda result, td=target_date, n=len(df): self._on_manual_freeze_completed(result, td, n))
+        worker.failed.connect(self._on_manual_freeze_failed)
+        worker.finished.connect(self._on_manual_freeze_worker_finished)
+        worker.start()
+
+    def _on_manual_freeze_worker_finished(self):
+        self.btn_manual_freeze.setEnabled(True)
+        self.btn_manual_freeze.setText("⚡ 补算生成今日候选清单")
+        self.manual_freeze_worker = None
+
+    def _on_manual_freeze_failed(self, error: str):
+        QMessageBox.critical(self, "生成失败", f"后台补算生成候选池失败：{error}")
+
+    def _on_manual_freeze_completed(self, result: Dict[str, Any], target_date: str, universe_count: int):
 
         status = result.get("status")
-        if status in ("ok", "manifest_ready"):
-            count = result.get("candidate_count", 0)
-            QMessageBox.information(
-                self, "候选池生成成功",
-                f"✅ 成功补算并冻结今日 ({today}) 候选清单！\n入选标的: {count} 只。\n清单文件已写入 datacsv 目录。"
+        if status == "no_valid_codes":
+            QMessageBox.warning(
+                self, "未识别到有效证券代码",
+                f"ATS宽表共有 {result.get('universe_count', universe_count)} 行，但没有识别到有效 code 列/索引。\n"
+                "请检查宽表证券代码字段名（code/symbol/ts_code/证券代码/股票代码）或索引。"
             )
+        elif status in ("ok", "manifest_ready"):
+            count = result.get("candidate_count", 0)
+            details = (
+                f"目标交易日: {result.get('target_trade_date', target_date)}\n"
+                f"有效证券代码: {result.get('valid_code_count', 0)} / 宽表 {universe_count} 行\n"
+                f"特征缺失: {result.get('invalid_count', {}) or 0}\n"
+                f"预筛未通过: {result.get('prefilter_rejected', {}) or 0}\n"
+                f"分层未通过: {result.get('tier_rejected', {}) or 0}\n"
+                f"板块共振证据: {result.get('sector_evidence_count', 0)} / {result.get('candidate_count', 0)} 只\n"
+                f"入选标的: {count} 只。"
+            )
+            if count:
+                QMessageBox.information(self, "候选池补算完成", f"✅ 候选清单已冻结。\n{details}\n清单文件已写入 datacsv 目录。")
+            else:
+                QMessageBox.warning(self, "补算完成但无入选标的", f"清单已扫描，策略没有筛出候选。\n{details}\n请根据各阶段数量检查收盘数据特征和策略门槛。")
+            self.combo_manifest_date.blockSignals(True)
+            if self.combo_manifest_date.findText(target_date) < 0:
+                self.combo_manifest_date.addItem(target_date)
+            self.combo_manifest_date.setCurrentText(target_date)
+            self.combo_manifest_date.blockSignals(False)
             self.reload_all_data()
         elif status == "disabled":
             QMessageBox.warning(
@@ -1603,6 +1754,9 @@ class NextDayAnomalyWatchDialog(QMainWindow):
     def closeEvent(self, event):
         if hasattr(self.widget, "auto_refresh_timer") and self.widget.auto_refresh_timer.isActive():
             self.widget.auto_refresh_timer.stop()
+        table = getattr(self.widget, "table_manifest", None)
+        if hasattr(table, "save_header_state"):
+            table.save_header_state()
         self._save_window_layout()
         self.widget.save_splitter_layouts()
         event.accept()

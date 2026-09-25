@@ -65,6 +65,35 @@ def _normalize_code(value: Any) -> str:
     return digits.zfill(6) if digits else "000000"
 
 
+_CODE_ALIASES = ("code", "symbol", "ts_code", "ticker", "证券代码", "股票代码", "代码")
+
+
+def _source_with_code(df: Any) -> Any:
+    """Return a frame with a canonical code column, preserving code indexes."""
+    columns = list(getattr(df, "columns", ()))
+    by_lower = {str(column).strip().lower(): column for column in columns}
+    code_column = next((by_lower[name] for name in _CODE_ALIASES if name in by_lower), None)
+    frame = df
+    if code_column is None and hasattr(df, "reset_index"):
+        index_name = getattr(getattr(df, "index", None), "name", None)
+        index_key = str(index_name).strip().lower() if index_name is not None else ""
+        if index_key in _CODE_ALIASES:
+            frame = df.reset_index()
+            code_column = next((c for c in frame.columns if str(c).strip().lower() == index_key), None)
+        elif "index" not in by_lower:
+            # Some ATS wide frames use an unnamed stock-code index. Accept it
+            # only when almost all values look like actual 4-6 digit codes.
+            values = list(getattr(df.index, "tolist", lambda: [])())
+            code_like = sum(1 for value in values if len("".join(ch for ch in str(value) if ch.isdigit())) in (4, 5, 6))
+            if values and code_like / len(values) >= 0.8:
+                frame = df.reset_index()
+                code_column = frame.columns[0]
+    if code_column is not None and str(code_column) != "code":
+        frame = frame.copy()
+        frame["code"] = frame[code_column]
+    return frame
+
+
 def _condition(row: Dict[str, Any], spec: Dict[str, Any]) -> Optional[bool]:
     field = spec.get("field")
     if field not in _FEATURES:
@@ -123,6 +152,51 @@ def _tier(row: Dict[str, Any], strategy: Dict[str, Any]) -> Optional[str]:
     return tier
 
 
+def _trend_score(row: Dict[str, Any]) -> float:
+    """Rank admitted candidates by their measured price/volume structure (0..100)."""
+    def n(key: str) -> float:
+        return _number(row.get(key)) or 0.0
+
+    def clamp(value: float, low: float, high: float) -> float:
+        return max(low, min(high, value))
+
+    slope = clamp((n("ch_slope_deg") - 1.5) / 33.5, 0.0, 1.0) * 22.0
+    structure_checks = [
+        n("lasth1d") > n("lasth2d"), n("lasth2d") > n("lasth3d"),
+        n("lastl1d") > n("lastl2d"), n("lastl2d") > n("lastl3d"),
+        n("lastl3d") > n("lastl4d"), n("lastl4d") > n("lastl5d"),
+    ]
+    structure = sum(structure_checks) / len(structure_checks) * 24.0
+    position = n("ch_pos")
+    position_score = (5.0 + (position - 5.0) * 0.25 if position <= 45.0
+                      else 15.0 - (position - 45.0) * 0.25)
+    position_score = clamp(position_score, 0.0, 15.0)
+    volume_ratio = n("lastv1d") / max(n("lastv3d"), 1e-12)
+    volume_score = clamp((volume_ratio - 0.7) / 1.1, 0.0, 1.0) * 18.0
+    volume_score += 2.0 * sum(n(f"lastv{i}d") >= n(f"lastv{i + 1}d") * 0.9 for i in (1, 2))
+    support_pct = (n("lastp1d") / max(n("ch_lower"), 1e-12) - 1.0) * 100.0
+    if support_pct < 0:
+        support_score = clamp((support_pct + 1.5) / 1.5, 0.0, 1.0) * 4.0
+    elif support_pct <= 2.0:
+        support_score = 4.0 + support_pct * 4.0
+    elif support_pct <= 5.0:
+        support_score = 12.0 + (support_pct - 2.0) * (4.0 / 3.0)
+    else:
+        support_score = clamp(16.0 - (support_pct - 5.0) * 1.6, 0.0, 16.0)
+    td_score = clamp(5.0 - n("td_sell"), 0.0, 5.0)
+    return round(clamp(slope + structure + position_score + volume_score + support_score + td_score, 0.0, 100.0), 1)
+
+
+def _trend_rating(score: float) -> str:
+    if score >= 80:
+        return "强势"
+    if score >= 65:
+        return "健康"
+    if score >= 50:
+        return "跟踪"
+    return "偏弱"
+
+
 def _valid_config(config: Any) -> Tuple[bool, str]:
     if not isinstance(config, dict) or config.get("schema_version") != 1:
         return False, "schema_version must be 1"
@@ -178,15 +252,78 @@ def _row_dict(row: Any) -> Dict[str, Any]:
         values = row.to_dict()
     except AttributeError:
         values = dict(row)
-    return {str(k): (v.item() if hasattr(v, "item") else v) for k, v in values.items()}
+    configured = {field for field, _label in _ats_custom_column_specs()} | _FEATURES | {
+        "code", "name", "high", "trade", "close", "percent", "category", "vol", "volume",
+        "amount", "server_time", "time"
+    }
+    result = {}
+    for key, value in values.items():
+        flat_key = next((part for part in key if part in configured), key[0]) if isinstance(key, tuple) and key else key
+        result[str(flat_key)] = value.item() if hasattr(value, "item") else value
+    return result
+
+
+def _ats_custom_column_specs() -> List[Tuple[str, str]]:
+    """Return configured ATS custom field names and their visible headers."""
+    try:
+        from JohnsonUtil import commonTips as cct
+        columns = getattr(cct, "ats_col", []) or getattr(cct.CFG, "ats_col", []) or []
+        labels = getattr(cct, "vis_column_map", {}) or {}
+    except Exception:
+        return []
+    excluded = {"code", "name", "tier", "phase", "score", "category", "raw_category",
+                "strategy_id", "version", "status", "feature_values"}
+    specs, seen = [], set()
+    for value in columns:
+        field = str(value).strip()
+        if not field or field.lower() in excluded or field.lower() in seen:
+            continue
+        seen.add(field.lower())
+        label = labels.get(field, labels.get(field.lower(), field))
+        specs.append((field, str(label)))
+    return specs
+
+
+def _custom_feature_values(row: Dict[str, Any]) -> Dict[str, Any]:
+    values = {}
+    for field, label in _ats_custom_column_specs():
+        key = field if field in row else next(
+            (key for key in row if isinstance(key, tuple) and field in key), None
+        )
+        if key is None:
+            continue
+        value = row.get(key)
+        if hasattr(value, "item"):
+            try:
+                value = value.item()
+            except Exception:
+                pass
+        if value is None or (isinstance(value, str) and value.strip().lower() in {"", "nan", "none", "null"}):
+            continue
+        if isinstance(value, float) and not math.isfinite(value):
+            continue
+        if isinstance(value, (str, int, float, bool)):
+            values[field] = value
+        else:
+            values[field] = str(value)
+    return values
 
 
 def _candidate_row_lookup(df: Any, candidates: List[Dict[str, Any]], vwap_field: Optional[str]) -> Dict[str, Dict[str, Any]]:
-    if "code" not in getattr(df, "columns", ()) or not candidates:
+    if not candidates:
         return {}
-    columns = [name for name in ("code", "name", "high", "trade", "close", "percent", "dff", "category",
-                                 "vol", "volume", "amount", "server_time", "time", vwap_field)
-               if name and name in df.columns]
+    df = _source_with_code(df)
+    if "code" not in getattr(df, "columns", ()):
+        return {}
+    custom_fields = {field for field, _label in _ats_custom_column_specs()}
+    base_fields = {"code", "name", "high", "trade", "close", "percent", "dff", "category",
+                   "vol", "volume", "amount", "server_time", "time", vwap_field}
+    base_fields.update(_FEATURES)
+    columns = []
+    for column in df.columns:
+        names = set(column) if isinstance(column, tuple) else {column}
+        if names.intersection(base_fields | custom_fields):
+            columns.append(column)
     frame = df[columns].copy()
     frame["_watch_code"] = frame["code"].map(_normalize_code)
     wanted = {item["code"] for item in candidates}
@@ -194,21 +331,128 @@ def _candidate_row_lookup(df: Any, candidates: List[Dict[str, Any]], vwap_field:
     return {str(code): _row_dict(row) for code, row in frame.iterrows()}
 
 
-def _sector_evidence(category: Any, snapshot: Any) -> Dict[str, Any]:
-    result = {"snapshot_at": None, "matches": []}
+_SECTOR_NOISE_MARKERS = (
+    "股通", "融资融券", "漂亮100", "指数", "成分股", "重仓", "持股", "国企改革", "央企改革",
+    "回购", "增持", "转债", "自贸区", "自贸港", "大湾区", "一带一路", "昨日涨停", "昨日触板",
+    "次新股", "超级品牌", "ST板块", "风险警示",
+)
+_SECTOR_NOISE_NAMES = {"概念", "板块", "其它", "其他", "未知", "未分类", "默认", "综合", "主流活跃", "实时报警"}
+
+
+def _sector_tags(category: Any, industry: Any = None) -> List[str]:
+    tags = []
+    for value in (industry, category):
+        normalized = str(value or "").replace("；", ";").replace("，", ";").replace(",", ";").replace("、", ";").replace("|", ";")
+        for part in normalized.split(";"):
+            name = part.strip()
+            if not name or name in _SECTOR_NOISE_NAMES or name.isdigit() or len(name) > 30:
+                continue
+            if name.lower() in {"nan", "none", "null", "--", "-", "0", "0.0"}:
+                continue
+            if any(marker in name for marker in _SECTOR_NOISE_MARKERS):
+                continue
+            if name not in tags:
+                tags.append(name)
+    return tags
+
+
+def _row_industry(row: Dict[str, Any]) -> str:
+    for key in ("industry", "ind", "行业", "所属行业", "行业分类"):
+        value = row.get(key)
+        if value is not None and str(value).strip() and str(value).strip().lower() not in {"nan", "none", "--"}:
+            return str(value).strip()
+    return ""
+
+
+def _sector_info(name: str, snapshot: Any) -> Optional[Dict[str, Any]]:
     if not isinstance(snapshot, dict):
+        return None
+    if isinstance(snapshot.get(name), dict):
+        return snapshot[name]
+    canonical = name.removesuffix("概念").removesuffix("行业").strip()
+    for key, value in snapshot.items():
+        if isinstance(value, dict) and str(key).strip().removesuffix("概念").removesuffix("行业") == canonical:
+            return value
+    return None
+
+
+def _sector_metrics(info: Dict[str, Any]) -> Tuple[float, float, float]:
+    score = _number(info.get("score", info.get("momentum_score"))) or 0.0
+    pct = _number(info.get("avg_pct", info.get("avg_pct_diff", info.get("pct_diff")))) or 0.0
+    follow = _number(info.get("follow_ratio")) or 0.0
+    return score, pct, follow
+
+
+def _sector_is_starting(info: Dict[str, Any]) -> bool:
+    score, pct, follow = _sector_metrics(info)
+    if score < 8.0:
+        return False
+    # TK's board score deliberately preserves leader-led breakouts even when
+    # breadth is still weak. Keep those valid starts while requiring some
+    # member follow-through; the old avg-pct-only gate hid them all.
+    if pct > 0.0 and follow >= 0.4:
+        return True
+    leader_pct = _number(info.get("leader_pct")) or _number(info.get("leader_pct_diff")) or 0.0
+    return leader_pct >= 5.0 and follow >= 0.2
+
+
+def _sector_contains_code(info: Dict[str, Any], code: str) -> bool:
+    members = [info.get("leader", "")]
+    for key in ("followers", "race_candidates"):
+        values = info.get(key, [])
+        if isinstance(values, list):
+            members.extend(item.get("code", "") if isinstance(item, dict) else item for item in values)
+    return any(_normalize_code(member) == code for member in members if member not in (None, ""))
+
+
+def _select_primary_sectors(category: Any, industry: Any, snapshot: Any) -> List[str]:
+    tags = _sector_tags(category, industry)
+    if not tags:
+        return []
+    # Active, rising sectors lead; remaining useful tags are only a compact
+    # context fallback, never the entire raw category string.
+    ranked = []
+    for order, name in enumerate(tags):
+        info = _sector_info(name, snapshot)
+        if info and _sector_is_starting(info):
+            score, pct, follow = _sector_metrics(info)
+            ranked.append((score, pct, follow, -order, name))
+    ranked.sort(reverse=True)
+    selected = [item[-1] for item in ranked[:3]]
+    selected.extend(name for name in tags if name not in selected)
+    return selected[:3]
+
+
+def _sector_evidence(category: Any, snapshot: Any, *, code: str = "", industry: Any = None,
+                     stock_started: bool = False) -> Dict[str, Any]:
+    result = {"snapshot_at": None, "matches": [], "stock_started": bool(stock_started), "reason": "个股未处于上行/启动阶段"}
+    if not stock_started or not isinstance(snapshot, dict):
         return result
-    names = [part.strip() for part in str(category or "").replace("；", ";").replace("，", ",").split(";")]
-    names = [name for part in names for name in part.split(",") if name.strip()]
-    for name in names:
-        data = snapshot.get(name)
-        if not isinstance(data, dict):
+    result["reason"] = "无同时满足板块启动和个股归属的共振板块"
+    ranked = []
+    tags = _sector_tags(category, industry)
+    tag_keys = {str(name).removesuffix("概念").removesuffix("行业").strip() for name in tags}
+    for order, (name, info) in enumerate(snapshot.items()):
+        if not isinstance(info, dict) or not _sector_is_starting(info):
             continue
-        clean = {key: (str(value) if not isinstance(value, (str, int, float, bool, type(None))) else value)
-                 for key, value in data.items() if key in {"score", "momentum_score", "leader", "followers", "ts", "base_score", "score_diff", "pct_diff", "follow_ratio"}}
-        if clean.get("ts") is not None:
-            result["snapshot_at"] = clean["ts"]
-        result["matches"].append({"name": name, **clean})
+        canonical = str(name).strip().removesuffix("概念").removesuffix("行业").strip()
+        # ATS 分类名称与赛马板块名称并非总是同一套命名：允许规范化标签匹配，
+        # 或以板块真实龙头/跟随股/竞速股成员关系作为个股归属依据。
+        if canonical not in tag_keys and not _sector_contains_code(info, code):
+            continue
+        score, pct, follow = _sector_metrics(info)
+        ranked.append((score, pct, follow, -order, str(name), info))
+    if not ranked:
+        return result
+    ranked.sort(reverse=True, key=lambda item: item[:4])
+    _, _, _, _, name, info = ranked[0]
+    clean = {key: (str(value) if not isinstance(value, (str, int, float, bool, type(None))) else value)
+             for key, value in info.items() if key in {"score", "momentum_score", "leader", "leader_name", "leader_pct",
+                 "leader_pct_diff", "followers", "ts", "score_diff", "avg_pct", "avg_pct_diff", "follow_ratio"}}
+    result["snapshot_at"] = clean.get("ts")
+    result["matches"] = [{"name": name, **clean}]
+    result["sector_started"] = True
+    result["reason"] = ""
     return result
 
 
@@ -236,17 +480,26 @@ def run_cycle(df: Any, *, config_path: str, data_dir: str, asof_date: str,
     with _LOCK:
         now = datetime.fromisoformat(observed_at)
         watch = _read_json(watch_path, None)
+        # Manual补算 may repair a previously frozen empty list after the ATS
+        # source data becomes available. Never mutate a non-empty frozen pool.
+        if force_freeze and watch is not None and not watch.get("candidates"):
+            watch = None
         if watch is None:
             if not force_freeze and (now.date().isoformat() != target_date or (now.hour, now.minute) > (9, 15)):
                 return {"status": "not_frozen", "candidate_count": 0, "events": []}
             records = []
             invalid_by_strategy = {}
-            source = df.reset_index(drop=True) if hasattr(df, "reset_index") else df
+            prefilter_rejected = {}
+            tier_rejected = {}
+            source = _source_with_code(df)
+            valid_codes = set()
             for raw in source.to_dict("records"):
                 row = _row_dict(raw)
-                code = _normalize_code(row.get("code", ""))
+                code = next((_normalize_code(row.get(key)) for key in _CODE_ALIASES
+                             if _normalize_code(row.get(key)) != "000000"), "000000")
                 if len(code) != 6 or code == "000000":
                     continue
+                valid_codes.add(code)
                 for strategy in config["strategies"]:
                     if not strategy.get("enabled", False):
                         continue
@@ -268,21 +521,39 @@ def run_cycle(df: Any, *, config_path: str, data_dir: str, asof_date: str,
                                     "lasth1d", "lasth2d", "lasth3d", "lastl1d", "lastl2d", "lastl3d", "lastl4d", "lastl5d",
                                     "lastv1d", "lastv2d", "lastv3d") if strategy.get("template") == "channel_stepup" else ()
                     missing_required = any(_number(row.get(field)) is None for field in required)
+                    strategy_id = str(strategy["strategy_id"])
                     if match is None or missing_required:
-                        invalid_by_strategy[str(strategy["strategy_id"])] = invalid_by_strategy.get(str(strategy["strategy_id"]), 0) + 1
+                        invalid_by_strategy[strategy_id] = invalid_by_strategy.get(strategy_id, 0) + 1
+                        continue
+                    if match is False:
+                        prefilter_rejected[strategy_id] = prefilter_rejected.get(strategy_id, 0) + 1
                         continue
                     # No unknown/missing feature may silently become a passing result.
                     if match is True and tier:
-                        records.append({"code": code, "name": str(row.get("name", code)), "category": str(row.get("category", "")),
+                        raw_category = str(row.get("category", ""))
+                        industry = _row_industry(row)
+                        primary_sectors = _select_primary_sectors(raw_category, industry, sector_snapshot)
+                        trend_score = _trend_score(row)
+                        records.append({"code": code, "name": str(row.get("name", code)),
+                            "category": ";".join(primary_sectors) or industry or "未分类", "raw_category": raw_category,
+                            "industry": industry,
                             "strategy_id": str(strategy["strategy_id"]), "version": str(strategy["version"]),
-                            "config_hash": digest, "tier": tier, "score": _number(strategy.get("rank_weights", {}).get(tier, {"A": 1, "B": 2, "C": 3}[tier])) or 0,
+                            "config_hash": digest, "tier": tier, "score": trend_score,
+                            "trend_rating": _trend_rating(trend_score), "score_model_version": 1,
                             "reason_codes": ["channel_support", "higher_highs_lows" if tier != "A" else "support_stable"],
-                            "sector_evidence": _sector_evidence(row.get("category"), sector_snapshot),
-                            "feature_values": {k: row.get(k) for k in sorted(_FEATURES) if _number(row.get(k)) is not None},
+                            "sector_evidence": _sector_evidence(raw_category, sector_snapshot, code=code, industry=industry,
+                                stock_started=tier in {"B", "C"}),
+                            "feature_values": ({k: row.get(k) for k in sorted(_FEATURES) if _number(row.get(k)) is not None}
+                                               | _custom_feature_values(row)),
                             "first_selected_date": target_date, "status": "WATCHING",
                             "phase": {"A": "STABILIZING", "B": "RISING", "C": "PRE_ACCELERATION"}[tier],
                             "followup_trading_days": int(strategy.get("followup", {}).get("trading_days", 3)),
                             "followup_proof_any": list(strategy.get("followup", {}).get("proof_any", ["daily_high_break", "verified_vwap_rise"]))})
+                    elif match is True:
+                        tier_rejected[strategy_id] = tier_rejected.get(strategy_id, 0) + 1
+            if not valid_codes:
+                return {"status": "no_valid_codes", "reason": "ATS宽表中未识别到有效证券代码列/索引",
+                        "universe_count": len(df), "valid_code_count": 0, "target_trade_date": target_date}
             records.sort(key=lambda x: (-x["score"], x["code"], x["strategy_id"]))
             limited = []
             for strategy in config["strategies"]:
@@ -300,11 +571,64 @@ def run_cycle(df: Any, *, config_path: str, data_dir: str, asof_date: str,
             records = limited
             watch = {"schema_version": 1, "source_asof_trade_date": asof_date, "target_trade_date": target_date,
                      "generated_at": observed_at, "source_version": str(source_version if source_version is not None else digest[:16]), "config_hash": digest,
-                     "universe_count": len(df), "invalid_count": invalid_by_strategy, "candidates": records}
+                     "universe_count": len(df), "valid_code_count": len(valid_codes),
+                     "invalid_count": invalid_by_strategy, "prefilter_rejected": prefilter_rejected,
+                     "tier_rejected": tier_rejected, "candidates": records}
             _atomic_json(watch_path, watch)
+        if force_freeze:
+            # A manual补算 can complete sector evidence on an existing frozen
+            # manifest without changing the selected cohort or its ranking.
+            enriched = False
+            custom_row_lookup = _candidate_row_lookup(df, watch.get("candidates", []), vwap_field)
+            for candidate in watch.get("candidates", []):
+                raw_category = candidate.get("raw_category") or candidate.get("category", "")
+                primary_sectors = _select_primary_sectors(raw_category, candidate.get("industry", ""), sector_snapshot)
+                compact_category = ";".join(primary_sectors) or candidate.get("industry") or "未分类"
+                if candidate.get("category") != compact_category:
+                    candidate["raw_category"] = raw_category
+                    candidate["category"] = compact_category
+                    enriched = True
+                evidence = candidate.get("sector_evidence") or {}
+                if isinstance(sector_snapshot, dict) and sector_snapshot:
+                    evidence = _sector_evidence(raw_category, sector_snapshot, code=str(candidate.get("code", "")),
+                        industry=candidate.get("industry", ""),
+                        stock_started=candidate.get("tier") in {"B", "C"})
+                    if evidence != candidate.get("sector_evidence"):
+                        candidate["sector_evidence"] = evidence
+                        enriched = True
+                source_row = custom_row_lookup.get(str(candidate.get("code", "")))
+                if source_row:
+                    feature_values = candidate.setdefault("feature_values", {})
+                    for field in _FEATURES:
+                        value = _number(source_row.get(field))
+                        if value is not None and feature_values.get(field) != value:
+                            feature_values[field] = value
+                            enriched = True
+                    for field, value in _custom_feature_values(source_row).items():
+                        if feature_values.get(field) != value:
+                            feature_values[field] = value
+                            enriched = True
+                feature_values = candidate.get("feature_values", {})
+                score = _trend_score(feature_values)
+                if candidate.get("score_model_version") != 1 or candidate.get("score") != score:
+                    candidate["score"] = score
+                    candidate["trend_rating"] = _trend_rating(score)
+                    candidate["score_model_version"] = 1
+                    enriched = True
+            if enriched:
+                _atomic_json(watch_path, watch)
         if not observe:
-            return {"status": "manifest_ready", "candidate_count": len(watch.get("candidates", [])),
-                    "watch_path": watch_path, "eval_path": eval_path, "events": []}
+            candidates = watch.get("candidates", [])
+            sector_evidence_count = sum(
+                bool((item.get("sector_evidence") or {}).get("matches")) for item in candidates
+            )
+            return {"status": "manifest_ready", "candidate_count": len(candidates),
+                    "valid_code_count": watch.get("valid_code_count", 0),
+                    "invalid_count": watch.get("invalid_count", {}),
+                    "prefilter_rejected": watch.get("prefilter_rejected", {}),
+                    "tier_rejected": watch.get("tier_rejected", {}),
+                    "sector_evidence_count": sector_evidence_count,
+                    "target_trade_date": target_date, "watch_path": watch_path, "eval_path": eval_path, "events": []}
         evaluation = _read_json(eval_path, {"schema_version": 1, "target_trade_date": target_date, "config_hash": watch.get("config_hash"), "candidates": {}})
         if now.date().isoformat() != target_date:
             return {"status": "manifest_ready", "candidate_count": len(watch.get("candidates", [])), "watch_path": watch_path, "eval_path": eval_path, "events": []}
@@ -345,7 +669,9 @@ def run_cycle(df: Any, *, config_path: str, data_dir: str, asof_date: str,
                 "high": daily_high, "close": close, "vwap": real_vwap, "vwap_source": vwap_field if real_vwap is not None else None,
                 "volume": cur_vol, "amount": cur_amt, "server_time": cur_time,
                 "sustained_high": sustained_high, "verified_vwap_rise": proof_vwap, "sector": str(row.get("category", "")),
-                "sector_evidence": _sector_evidence(row.get("category"), sector_snapshot)})
+                "sector_evidence": _sector_evidence(row.get("category"), sector_snapshot,
+                    code=code, industry=candidate.get("industry", ""),
+                    stock_started=candidate.get("tier") in {"B", "C"})})
             previous_phase = tracked_candidate.get("phase", "STABILIZING")
             if sustained_high and proof_vwap and real_vwap is not None and close is not None and close >= real_vwap:
                 next_phase = "ACCELERATING"
@@ -398,7 +724,9 @@ def run_cycle(df: Any, *, config_path: str, data_dir: str, asof_date: str,
                              "observed_at": observed_at, "action": "WATCH", "reason": "两帧确认：持续新高或真实 VWAP 上移",
                              "price": close or 0.0, "pct": _number(row.get("percent")) or 0.0,
                              "deviation": _number(row.get("dff")) or 0.0, "sector_name": str(row.get("category", "")),
-                             "sector_snapshot_ts": _sector_evidence(row.get("category"), sector_snapshot).get("snapshot_at"),
+                             "sector_snapshot_ts": _sector_evidence(row.get("category"), sector_snapshot,
+                                 code=code, industry=candidate.get("industry", ""),
+                                 stock_started=candidate.get("tier") in {"B", "C"}).get("snapshot_at"),
                              "evidence": {"sustained_high": sustained_high, "verified_vwap_rise": proof_vwap,
                                           "vwap": real_vwap, "vwap_source": vwap_field if real_vwap is not None else None,
                                           "confirm_frames": 2, "first_observed_at": prior_checkpoint["observed_at"]}}

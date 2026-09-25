@@ -227,8 +227,57 @@ def apply_dark_tooltip_palette(widget_or_app=None):
 import math
 import re
 import threading
+from contextlib import contextmanager
 from typing import Any, Optional, Union, List, Dict
 CONFIG_FILE_LOCK = threading.RLock()
+
+
+@contextmanager
+def _config_process_lock(config_path):
+    """Serialize config read/merge/replace across ATS and its helper processes."""
+    import hashlib
+    import os
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+
+        normalized = os.path.normcase(os.path.abspath(config_path))
+        mutex_name = "Local\\pyQuant3_config_" + hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateMutexW.argtypes = (wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR)
+        kernel32.CreateMutexW.restype = wintypes.HANDLE
+        kernel32.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+        kernel32.WaitForSingleObject.restype = wintypes.DWORD
+        kernel32.ReleaseMutex.argtypes = (wintypes.HANDLE,)
+        kernel32.ReleaseMutex.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        handle = kernel32.CreateMutexW(None, False, mutex_name)
+        if not handle:
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            wait_result = kernel32.WaitForSingleObject(handle, 0xFFFFFFFF)
+            if wait_result not in (0x00000000, 0x00000080):  # acquired / abandoned
+                raise ctypes.WinError(ctypes.get_last_error())
+            try:
+                yield
+            finally:
+                kernel32.ReleaseMutex(handle)
+        finally:
+            kernel32.CloseHandle(handle)
+        return
+
+    # Keep development runs on other platforms process-safe as well.
+    import fcntl
+    lock_file = open(config_path + ".lock", "a+b")
+    try:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+    finally:
+        lock_file.close()
 
 from PyQt6.QtWidgets import (
     QTableWidgetItem, QStyledItemDelegate, QStyleOptionViewItem, QStyle, 
@@ -622,25 +671,44 @@ def apply_dark_theme(widget):
             pass
 
 
-def setup_header_persistence(table_or_tree, config_key, default_widths=None, max_widths=None):
+def setup_header_persistence(table_or_tree, config_key, default_widths=None, max_widths=None, storage_path=None):
     """
     为 QTableWidget 或 QTreeWidget 的水平 header 绑定跨会话自动保存与恢复状态，
     并实现列宽合理拉伸与最大宽度限制。
     """
-    import json
-    import os
     from PyQt6.QtCore import QByteArray, QTimer
     from PyQt6.QtWidgets import QHeaderView
-    from sys_utils import get_app_root, get_conf_path
-
-    # Global/Module level timer dictionary reference
-    global _save_timers
-    if '_save_timers' not in globals():
-        globals()['_save_timers'] = {}
 
     header = table_or_tree.horizontalHeader() if hasattr(table_or_tree, "horizontalHeader") else table_or_tree.header()
     if not header:
         return
+
+    layout_config_key = f"{config_key}_layout_v1"
+    missing = object()
+
+    def load_node(key, default=None):
+        if storage_path:
+            value = load_config_node(key, missing, config_path=storage_path)
+            if value is not missing:
+                return value
+        # One-time migration fallback for layouts saved before dedicated files.
+        return load_config_node(key, default)
+
+    def section_ids():
+        ids = []
+        occurrences = {}
+        for logical in range(header.count()):
+            item = table_or_tree.horizontalHeaderItem(logical) if hasattr(table_or_tree, "horizontalHeaderItem") else None
+            if item is None and hasattr(table_or_tree, "headerItem"):
+                item = table_or_tree.headerItem()
+            label = item.text(logical) if item is not None and hasattr(item, "text") and not hasattr(table_or_tree, "horizontalHeaderItem") else (
+                item.text() if item is not None else ""
+            )
+            label = str(label or f"#{logical}").strip()
+            occurrence = occurrences.get(label, 0)
+            occurrences[label] = occurrence + 1
+            ids.append(f"{label}|{occurrence}")
+        return ids
 
     # Enable interactive resizing for all columns
     col_count = table_or_tree.columnCount()
@@ -658,7 +726,19 @@ def setup_header_persistence(table_or_tree, config_key, default_widths=None, max
             return
         try:
             state_hex = header.saveState().toHex().data().decode("utf-8")
-            save_config_node(config_key, state_hex)
+            layout = [
+                {
+                    "id": section_id,
+                    "visual": header.visualIndex(logical),
+                    "width": header.sectionSize(logical),
+                    "hidden": header.isSectionHidden(logical),
+                }
+                for logical, section_id in enumerate(section_ids())
+            ]
+            save_config_nodes(
+                {config_key: state_hex, layout_config_key: layout},
+                config_path=storage_path,
+            )
         except RuntimeError:
             pass
         except Exception as e:
@@ -679,14 +759,39 @@ def setup_header_persistence(table_or_tree, config_key, default_widths=None, max
         table_or_tree._is_restoring_header = True
         restored = False
         try:
-            state_hex = load_config_node(config_key)
+            state_hex = load_node(config_key)
             if state_hex and isinstance(state_hex, str):
                 header.blockSignals(True)
-                header.restoreState(QByteArray.fromHex(state_hex.encode("utf-8")))
+                restored = bool(header.restoreState(QByteArray.fromHex(state_hex.encode("utf-8"))))
                 header.blockSignals(False)
-                restored = True
         except Exception as e:
             print(f"[HeaderPersistence] Failed to restore state for {config_key}: {e}")
+
+        # QHeaderView.saveState is all-or-nothing when dynamic columns are added
+        # or removed. Restore matching sections by stable header label as a fallback.
+        layout_restored = False
+        try:
+            saved_layout = load_node(layout_config_key, [])
+            current_ids = section_ids()
+            saved_by_id = {entry.get("id"): entry for entry in saved_layout if isinstance(entry, dict)}
+            matched = [(logical, saved_by_id[section_id]) for logical, section_id in enumerate(current_ids) if section_id in saved_by_id]
+            if matched:
+                header.blockSignals(True)
+                for logical, entry in matched:
+                    width = entry.get("width")
+                    if isinstance(width, int) and width > 0:
+                        header.resizeSection(logical, width)
+                    header.setSectionHidden(logical, bool(entry.get("hidden", False)))
+                ordered = sorted(matched, key=lambda pair: int(pair[1].get("visual", pair[0])))
+                for target_visual, (logical, _entry) in enumerate(ordered):
+                    current_visual = header.visualIndex(logical)
+                    if current_visual != target_visual:
+                        header.moveSection(current_visual, target_visual)
+                header.blockSignals(False)
+                layout_restored = True
+        except Exception as e:
+            header.blockSignals(False)
+            print(f"[HeaderPersistence] Failed to restore named layout for {config_key}: {e}")
 
         # 无论是否恢复成功，强制把所有列设回 Interactive 拖拽模式，防止 restoreState 恢复了历史配置中其他非交互的 resizeMode
         header.blockSignals(True)
@@ -694,7 +799,7 @@ def setup_header_persistence(table_or_tree, config_key, default_widths=None, max
             header.setSectionResizeMode(col, QHeaderView.ResizeMode.Interactive)
         header.blockSignals(False)
 
-        if not restored:
+        if not restored and not layout_restored:
             if default_widths:
                 header.blockSignals(True)
                 if isinstance(default_widths, dict):
@@ -739,7 +844,12 @@ def setup_header_persistence(table_or_tree, config_key, default_widths=None, max
         apply_max_width_limits()
         table_or_tree._is_restoring_header = False
 
-    def on_section_resized(logical_index, old_size, new_size):
+    save_timer = QTimer(table_or_tree)
+    save_timer.setSingleShot(True)
+    save_timer.setInterval(300)
+    save_timer.timeout.connect(save_action)
+
+    def schedule_save(*_signal_args):
         from PyQt6.QtWidgets import QApplication
         app = QApplication.instance()
         if app and getattr(app, "_is_updating_font", False):
@@ -749,40 +859,32 @@ def setup_header_persistence(table_or_tree, config_key, default_widths=None, max
             return
 
         table_or_tree._has_been_visible = True
-        if max_widths and logical_index in max_widths:
-            max_w = max_widths[logical_index]
-            if new_size > max_w:
-                header.blockSignals(True)
-                table_or_tree.setColumnWidth(logical_index, max_w)
-                header.blockSignals(False)
+        save_timer.start()
 
-        old_timer = globals()['_save_timers'].get(config_key)
-        if old_timer is not None:
-            try:
-                try:
-                    from PyQt6.sip import isdeleted
-                    if not isdeleted(old_timer):
-                        old_timer.stop()
-                except ImportError:
-                    old_timer.stop()
-            except RuntimeError:
-                pass
-            globals()['_save_timers'].pop(config_key, None)
-
-        timer = QTimer()
-        timer.setSingleShot(True)
-        timer.setInterval(1000)
-        timer.timeout.connect(save_action)
-        globals()['_save_timers'][config_key] = timer
-        timer.start()
+    def on_section_resized(logical_index, _old_size, new_size):
+        if max_widths and logical_index in max_widths and new_size > max_widths[logical_index]:
+            header.blockSignals(True)
+            table_or_tree.setColumnWidth(logical_index, max_widths[logical_index])
+            header.blockSignals(False)
+        schedule_save()
 
     header.sectionResized.connect(on_section_resized)
+    header.sectionMoved.connect(schedule_save)
+    header.sortIndicatorChanged.connect(schedule_save)
+    header.sectionCountChanged.connect(schedule_save)
+
+    # Flush debounced changes when the application exits; otherwise a quick
+    # restart can close the window before the delayed write reaches disk.
+    from PyQt6.QtWidgets import QApplication
+    app = QApplication.instance()
+    if app:
+        app.aboutToQuit.connect(save_action)
 
 
     # Protect callback reference from garbage collection
     if not hasattr(table_or_tree, "_persistence_callbacks"):
         table_or_tree._persistence_callbacks = {}
-    table_or_tree._persistence_callbacks[config_key] = on_section_resized
+    table_or_tree._persistence_callbacks[config_key] = schedule_save
 
 
 def parse_bool_config(val, default: bool = False) -> bool:
@@ -801,14 +903,14 @@ def parse_bool_config(val, default: bool = False) -> bool:
     return default
 
 
-def load_config_node(key: str, default=None):
-    """线程安全从 window_config.json 读取指定 key 的持久化数据，具备 Windows 文件并发重试退避"""
+def load_config_node(key: str, default=None, config_path=None):
+    """线程安全读取持久化配置节点，支持默认窗口配置或独立配置文件。"""
     import os
     import json
     import time
     from sys_utils import get_app_root, get_conf_path
     
-    cfg_path = get_conf_path("window_config.json", get_app_root())
+    cfg_path = config_path or get_conf_path("window_config.json", get_app_root())
     
     for attempt in range(5):
         try:
@@ -829,9 +931,9 @@ def load_config_node(key: str, default=None):
     return default
 
 
-def save_config_nodes(key_val_dict: dict) -> bool:
-    """线程安全将多个 key-value 增量物理原子落盘保存至 window_config.json
-    具备重试与防覆盖保护，绝不使用空字典覆盖已有物理配置，兼容 Windows 文件锁。
+def save_config_nodes(key_val_dict: dict, config_path=None) -> bool:
+    """线程及进程安全地增量原子保存配置节点，避免 ATS/辅助进程互相覆盖配置。
+    具备重试与防覆盖保护，绝不使用空字典覆盖已有物理配置。
     """
     if not key_val_dict or not isinstance(key_val_dict, dict):
         return False
@@ -842,69 +944,74 @@ def save_config_nodes(key_val_dict: dict) -> bool:
     import tempfile
     from sys_utils import get_app_root, get_conf_path
 
-    cfg_path = get_conf_path("window_config.json", get_app_root())
+    cfg_path = config_path or get_conf_path("window_config.json", get_app_root())
+    os.makedirs(os.path.dirname(os.path.abspath(cfg_path)), exist_ok=True)
     
-    with CONFIG_FILE_LOCK:
-        for attempt in range(5):
-            data = {}
-            file_existed_and_valid = False
-            if os.path.exists(cfg_path):
-                try:
-                    with open(cfg_path, 'r', encoding='utf-8') as f:
-                        loaded = json.load(f)
-                        if isinstance(loaded, dict):
-                            data = loaded
-                            file_existed_and_valid = True
-                except Exception:
-                    time.sleep(0.03 * (attempt + 1))
-                    continue
-            else:
-                file_existed_and_valid = True
+    try:
+        with CONFIG_FILE_LOCK:
+            with _config_process_lock(cfg_path):
+                for attempt in range(5):
+                    data = {}
+                    file_existed_and_valid = False
+                    if os.path.exists(cfg_path):
+                        try:
+                            with open(cfg_path, 'r', encoding='utf-8') as f:
+                                loaded = json.load(f)
+                                if isinstance(loaded, dict):
+                                    data = loaded
+                                    file_existed_and_valid = True
+                        except Exception:
+                            time.sleep(0.03 * (attempt + 1))
+                            continue
+                    else:
+                        file_existed_and_valid = True
 
-            # 如果文件存在但读取解析失败，避免直接用 {} 抹掉整盘配置，在第 3 次重试失败前不盲目覆写
-            if not file_existed_and_valid and os.path.exists(cfg_path) and os.path.getsize(cfg_path) > 0 and attempt < 3:
-                time.sleep(0.03 * (attempt + 1))
-                continue
+                    # 如果文件存在但读取解析失败，避免直接用 {} 抹掉整盘配置，在第 3 次重试失败前不盲目覆写
+                    if not file_existed_and_valid and os.path.exists(cfg_path) and os.path.getsize(cfg_path) > 0 and attempt < 3:
+                        time.sleep(0.03 * (attempt + 1))
+                        continue
 
-            # 增量合并字典
-            for k, v in key_val_dict.items():
-                data[k] = v
+                    # 增量合并字典
+                    for k, v in key_val_dict.items():
+                        data[k] = v
 
-            tmp_path = None
-            try:
-                temp_dir = os.path.dirname(cfg_path) or "."
-                fd, tmp_path = tempfile.mkstemp(dir=temp_dir, prefix="win_cfg_", suffix=".tmp", text=True)
-                with os.fdopen(fd, 'w', encoding='utf-8') as f:
-                    json.dump(data, f, ensure_ascii=False, indent=2)
-                
-                # Windows 下 os.replace 遇到并发读时重试
-                replaced = False
-                for rep_attempt in range(3):
+                    tmp_path = None
                     try:
-                        os.replace(tmp_path, cfg_path)
-                        replaced = True
-                        break
-                    except (PermissionError, OSError):
-                        time.sleep(0.03)
-                if replaced:
-                    return True
-            except Exception:
-                pass
-            finally:
-                if tmp_path and os.path.exists(tmp_path):
-                    try:
-                        os.remove(tmp_path)
+                        temp_dir = os.path.dirname(cfg_path) or "."
+                        fd, tmp_path = tempfile.mkstemp(dir=temp_dir, prefix="win_cfg_", suffix=".tmp", text=True)
+                        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+                            json.dump(data, f, ensure_ascii=False, indent=2)
+
+                        # Windows 下 os.replace 遇到并发读时重试
+                        replaced = False
+                        for rep_attempt in range(3):
+                            try:
+                                os.replace(tmp_path, cfg_path)
+                                replaced = True
+                                break
+                            except (PermissionError, OSError):
+                                time.sleep(0.03)
+                        if replaced:
+                            return True
                     except Exception:
                         pass
-            time.sleep(0.03 * (attempt + 1))
+                    finally:
+                        if tmp_path and os.path.exists(tmp_path):
+                            try:
+                                os.remove(tmp_path)
+                            except Exception:
+                                pass
+                    time.sleep(0.03 * (attempt + 1))
+    except Exception as ex:
+        print(f"[ConfigHelper] 配置跨进程锁获取/写入失败: {ex}")
 
     print(f"[ConfigHelper] 警告: 写入节点 {list(key_val_dict.keys())} 失败")
     return False
 
 
-def save_config_node(key: str, val) -> bool:
-    """线程安全将指定 key 物理原子落盘保存至 window_config.json (基于 safe save_config_nodes)"""
-    return save_config_nodes({key: val})
+def save_config_node(key: str, val, config_path=None) -> bool:
+    """线程安全地原子保存指定配置节点。"""
+    return save_config_nodes({key: val}, config_path=config_path)
 
 
 class TabDirectSwitchEventFilter(QObject):

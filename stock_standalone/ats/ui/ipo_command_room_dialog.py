@@ -1831,10 +1831,19 @@ class IPOCommandRoomDialog(QDialog):
             ts_v = item.get("timestamp")
             if ts_v is not None:
                 try:
-                    return float(ts_v)
+                    ts_value = float(ts_v)
+                    if math.isfinite(ts_value) and ts_value > 0:
+                        return ts_value
                 except Exception:
                     pass
-            t_text = str(item.get("time_str", "") or "")
+            raw_time = item.get("time_str", "")
+            if isinstance(raw_time, (int, float)) and not isinstance(raw_time, bool):
+                try:
+                    ts_value = float(raw_time)
+                    return ts_value if math.isfinite(ts_value) and ts_value > 0 else 0.0
+                except (TypeError, ValueError, OverflowError):
+                    return 0.0
+            t_text = str(raw_time or "")
             if t_text:
                 for fmt in ("%Y-%m-%d %H:%M:%S", "%Y/%m/%d %H:%M:%S", "%Y-%m-%d %H:%M", "%H:%M:%S"):
                     try:
@@ -1988,7 +1997,8 @@ class IPOCommandRoomDialog(QDialog):
                 # ── 1. 逐笔流水视图 ──
                 self.tbl_orders.setRowCount(len(filtered_logs))
                 for r, s_log in enumerate(filtered_logs):
-                    ts_str = s_log.get("time_str", "")
+                    raw_time = s_log.get("time_str", "")
+                    ts_str = raw_time.strip() if isinstance(raw_time, str) else ""
                     ts_val = _safe_float_ts(s_log)
 
                     if not ts_str:

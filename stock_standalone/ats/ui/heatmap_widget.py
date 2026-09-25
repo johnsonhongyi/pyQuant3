@@ -274,13 +274,37 @@ class SectorHeatmapWidget(QWidget):
         # ── 1. 【权威数据源 (SSOT)】优先从 RAMDisk 或快照读取 bidding_session_data.json.gz ──
         path = None
         try:
-            ram_path = cct.get_ramdisk_path("bidding_session_data.json.gz")
-            if ram_path and os.path.exists(ram_path):
-                path = ram_path
+            non_trade_day = not cct.get_day_istrade_date()
         except Exception:
-            pass
+            non_trade_day = False
+        if non_trade_day:
+            # On weekends/holidays, the mutable session file may contain stale
+            # auction state. Pin the heatmap to the newest dated trading snapshot.
+            try:
+                last_trade = str(cct.get_last_trade_date()).replace('-', '')
+                snapshot_dir = os.path.join(base, "snapshots")
+                snap_pattern = os.path.join(snapshot_dir, "bidding_*.json.gz")
+                dated_files = []
+                for candidate in glob.glob(snap_pattern):
+                    match = re.search(r'bidding_(\d{8})\.json\.gz$', candidate)
+                    if match and match.group(1) == last_trade:
+                        dated_files.append((match.group(1), candidate))
+                if dated_files:
+                    path = max(dated_files, key=lambda item: item[0])[1]
+            except Exception as exc:
+                print(f"[SectorHeatmapWidget] Resolve last-trade-date sector snapshot failed: {exc}")
+
+        # On trading days retain the live session preference. On non-trading days,
+        # only use a dated last-session snapshot when one was found above.
+        if not non_trade_day:
+            try:
+                ram_path = cct.get_ramdisk_path("bidding_session_data.json.gz")
+                if ram_path and os.path.exists(ram_path):
+                    path = ram_path
+            except Exception:
+                pass
             
-        if not path:
+        if not path and not non_trade_day:
             try:
                 fallback_path = os.path.abspath(os.path.join(base, "snapshots", "bidding_session_data.json.gz"))
                 if os.path.exists(fallback_path):
@@ -295,6 +319,7 @@ class SectorHeatmapWidget(QWidget):
                 pass
                 
         if path and os.path.exists(path):
+            self._non_trade_snapshot_missing = False
             session_mtime = os.path.getmtime(path)
             if (getattr(self, '_last_session_path', None) != path or 
                 getattr(self, '_last_session_mtime', None) != session_mtime or 
@@ -319,6 +344,16 @@ class SectorHeatmapWidget(QWidget):
                 # 🛡️ [SSOT 权威数据消费与极限性能] 100% 直接消费 TK 计算好的权威板块强度数据，绝不自创公式重新计算，杜绝卡顿与失真
                 self.update_from_tk_sector_data(raw_sector_data)
                 return
+
+        if non_trade_day:
+            # Do not synthesize historical sector strength from today's ATS
+            # DataFrame/reversal pool when the exact session archive is missing.
+            self._non_trade_snapshot_missing = True
+            self._cached_raw_sector_data = {}
+            self.sectors = []
+            self.sector_to_codes = {}
+            self.render_grid(force=True)
+            return
 
         # ── 2. 【备用兜底通道】仅在无 bidding_session_data 时尝试从 v_reversal_pool 读取 ──
         ram_path = None
@@ -552,7 +587,7 @@ class SectorHeatmapWidget(QWidget):
         return bg, border
 
     def render_grid(self, force=False):
-        if not hasattr(self, 'sectors') or not self.sectors:
+        if (not hasattr(self, 'sectors') or not self.sectors) and not getattr(self, '_non_trade_snapshot_missing', False):
             # 🛡️ 优雅占位（保持现有样式与尺寸不变，杜绝空白或排版塌陷）
             self.sectors = [
                 ("共封装光学", 96.0, "+0.00%", 1),

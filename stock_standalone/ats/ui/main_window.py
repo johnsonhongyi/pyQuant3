@@ -4141,7 +4141,21 @@ class ATSMainWindow(QMainWindow):
             df_payload = data_pkg[0]
             if len(data_pkg) > 1 and isinstance(data_pkg[1], dict):
                 sector_data = data_pkg[1].get('sector_data')
+
+        try:
+            is_exchange_trade_day = bool(cct.get_day_istrade_date())
+        except Exception:
+            is_exchange_trade_day = True
+        if not is_exchange_trade_day:
+            # Ignore mutable TK auction packets on weekends/holidays. The heatmap
+            # and next-day freeze use the dated snapshot from the last session.
+            sector_data = None
             
+        # Keep the latest authoritative sector snapshot available to ATS tools
+        # such as the manual next-day candidate freeze.
+        if isinstance(sector_data, dict) and sector_data:
+            self.current_sector_snapshot = sector_data
+
         # 🛡️ [SSOT 极限性能复用] 若 IPC 数据包包含 TK 赛道探测器的权威板块数据，直接更新热力图，杜绝重复计算
         if sector_data and hasattr(self, 'heatmap_widget') and self.heatmap_widget:
             try:
@@ -6600,6 +6614,12 @@ class ATSMainWindow(QMainWindow):
         # 4. 同步持久化保存所有物理窗口布局、Splitter 尺寸及 TDX/THS/VIS 联动勾选状态
         try:
             self._save_layout_state()
+
+            # Flush the embedded next-day table before exit; other registered
+            # tables flush through their own persistence hooks.
+            next_day_table = getattr(getattr(self, "next_day_watch_panel", None), "table_manifest", None)
+            if hasattr(next_day_table, "save_header_state"):
+                next_day_table.save_header_state()
             
             if hasattr(self, 'universe_widget') and hasattr(self.universe_widget, 'tree'):
                 if hasattr(self.universe_widget.tree, 'save_header_state'):

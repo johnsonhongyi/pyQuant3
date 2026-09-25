@@ -101,7 +101,24 @@ def reconcile_account(read_model: Optional[Dict[str, Any]] = None) -> Dict[str, 
         if isinstance(item, dict)
     ]
     open_volume: Dict[str, float] = {}
-    for order in sorted(orders, key=lambda item: str(item.get("timestamp") or "")):
+    baseline = account.get("ledger_baseline")
+    replay_orders = orders
+    if isinstance(baseline, dict):
+        try:
+            order_count = int(baseline.get("order_count"))
+            if 0 <= order_count <= len(orders):
+                replay_orders = orders[order_count:]
+                raw_positions = baseline.get("positions", {})
+                if isinstance(raw_positions, dict):
+                    for code, raw in raw_positions.items():
+                        if isinstance(raw, dict):
+                            volume = _number(raw.get("volume"))
+                            if volume > 0:
+                                open_volume[str(code).strip().zfill(6)] = volume
+        except (TypeError, ValueError, OverflowError):
+            replay_orders = orders
+            open_volume.clear()
+    for order in sorted(replay_orders, key=lambda item: str(item.get("timestamp") or "")):
         code = str(order.get("code") or "").strip().zfill(6)
         action = str(order.get("action") or "").upper()
         volume = _number(order.get("volume"))

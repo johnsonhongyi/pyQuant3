@@ -135,13 +135,14 @@ class BaseATSTableWidget(QTableWidget):
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.customContextMenuRequested.connect(self._show_context_menu)
         
-    def setup_persistence(self, config_key, default_widths=None, max_widths=None):
+    def setup_persistence(self, config_key, default_widths=None, max_widths=None, storage_path=None):
         
         setup_header_persistence(
             self,
             config_key=config_key,
             default_widths=default_widths,
-            max_widths=max_widths
+            max_widths=max_widths,
+            storage_path=storage_path,
         )
 
     def sortItems(self, column: int, order: Qt.SortOrder = Qt.SortOrder.AscendingOrder):
