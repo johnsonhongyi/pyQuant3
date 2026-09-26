@@ -1,5 +1,20 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-09-26 09:20 ATS 系统全流程性能优化方案执行情况全面审核
+- [x] **【ATS 系统全流程性能优化方案执行情况全面审核】(`design/ATS系统全流程性能优化分析与实施方案规划.md`, `20260925_0938_task.md`, `20260926_0530_task.md`, `20260926_0905_task.md`, `20260926_0920_task.md`)**：
+    - [x] **方案演进历史与事实对账**：系统梳理 09-25 09:38（初版规划）、09-25 晚间（二次校准纠偏，去伪存真，澄清正常 Bridge 为完整帧，纠正二次 diff 假设与无依据性能承诺）、09-26 05:30（次日候选池/配置/文件锁第六类瓶颈闭环升级）及 09-26 09:05（关键链路 8 大纠偏落地实施）的全流程脉络；
+    - [x] **已落地实施质量全景审计 (09:05 八大纠偏实测)**：
+        - 1) 宽表单次投影 `_build_market_projection` 阻断了多轮全表扫描与深拷贝，`_candidate_row_lookup` 复杂度由 $O(K \times N)$ 降阶为 $O(K)$ 字典取数；
+        - 2) 候选期限索引 `_history_manifest_index` 引入 10s TTL 缓存，按各自 `followup_trading_days` 推进，到期收盘确定性结算持久化 `MISSED` 终结事件；
+        - 3) 证据保真跳写以 `eval_dirty` 为门禁，无变动彻底跳过 `_atomic_json` 写盘，有效消除 I/O 写放大；
+        - 4) 持久待发 Outbox 与消费端 ACK 闭环，重发跨日未送达事件，消费端 `_seen_watch_event_ids` 幂等去重防重复报警；
+        - 5) Windows 互斥锁 `_config_process_lock` 增加 1000ms 超时防死锁挂起；实现 `BoundedConfigWriter` 异步落盘，`aboutToQuit` 安全 Flush；
+        - 6) 休市板块确定性 30s TTL 负缓存治理，消除无意义的 stat/glob 扫描，支持显式失效；
+        - 7) 表格增量渲染脏单元格复用，废除高频刷新的 `resizeColumnsToContents()`，替换为 `_auto_size_table_once`，消除布局抖动并保护用户列宽；
+        - 8) 微观耗时遥测字段注入与静态代码验证，全模块 `compileall` exit=0，`git diff --check` 零违规；
+    - [x] **未实施宏观架构项准入与风险推演审核**：全面评估 IPC 零拷贝借读闭环（Pandas CoW 语义与跨线程安全性前提）、全系统 TDX 统一调度中枢（防队首阻塞与停牌超时处理）、Qt 核心主表视口虚拟化（QTableView Model/View 改造准入门禁）及策略计算独立子进程隔离，确认继续保持准入驱动，不盲目盲目大改；
+    - [x] **输出全景审核报告**：生成全面严谨的《ATS 系统全流程性能优化方案执行情况全面审核报告》，明确后续演进建议。
+
 ## 2026-09-26 09:05 ATS 系统底层关键链路与 8 大性能纠偏全流程优化落地闭环
 - [x] **【ATS 系统底层关键链路与 8 大性能纠偏全流程优化落地闭环】(`next_day_anomaly_watch.py`, `ats/ui/main_window.py`, `ats/ui/styles.py`, `ats/sector_data_aggregator.py`, `ats/ui/next_day_watch_dialog.py`, `20260926_0905_task.md`)**：
     - [x] **宽表单次规范化与共享只读投影 (`_build_market_projection`)**：全市场 5000 行大表在一轮周期开始时完成单次代码规整与基础列裁剪，盘前候选过滤、补算及盘中观察全部直接借读投影，阻断多轮全表重复扫描与内存深拷贝；

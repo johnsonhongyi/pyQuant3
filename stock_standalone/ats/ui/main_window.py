@@ -1874,6 +1874,8 @@ class ATSMainWindow(QMainWindow):
         self.ledger_update_service = get_ledger_update_service(self.signal_ledger)
         self.volume_profiler = VolumeProfiler()
         self.session_snapshot = SessionSnapshot()
+        self.signal_ledger._next_day_watch_event_ids = self.session_snapshot.load_consumed_event_ids()
+        self.signal_ledger._next_day_watch_unpersisted_event_ids = set()
         self.window_manager = ATSWindowManager.get_instance()
         import threading
         self.hdf5_history_lock = threading.Lock()
@@ -3796,7 +3798,13 @@ class ATSMainWindow(QMainWindow):
         # 把需要的引用快照到局部变量，避免 lambda 闭包陷阱
         bridge_ref = self.bridge
         name_cache_ref = self.name_cache
-        cur_df_ref = self.current_df
+        cur_trade_by_code = {}
+        cur_close_by_code = {}
+        if self.current_df is not None and not self.current_df.empty:
+            if 'trade' in self.current_df.columns:
+                cur_trade_by_code = self.current_df['trade'].to_dict()
+            if 'close' in self.current_df.columns:
+                cur_close_by_code = self.current_df['close'].to_dict()
 
         def _bg_load():
             try:
@@ -3811,10 +3819,9 @@ class ATSMainWindow(QMainWindow):
 
                 # 步骤 1: 交易流水 (9列格式: 时间, 代码, 名称, 方向, 成交价, 成交数量, 成交金额, 距今涨跌, 策略来源)
                 def _calc_since_pct(code_str: str, trade_price_val: float) -> str:
-                    if cur_df_ref is not None and code_str in cur_df_ref.index and trade_price_val > 0:
+                    if trade_price_val > 0:
                         try:
-                            row_c = cur_df_ref.loc[code_str]
-                            now_p = float(row_c.get('trade', row_c.get('close', 0.0)))
+                            now_p = float(cur_trade_by_code.get(code_str) or cur_close_by_code.get(code_str) or 0.0)
                             if now_p > 0:
                                 diff_pct = ((now_p - trade_price_val) / trade_price_val) * 100
                                 return f"{diff_pct:+.2f}%"
@@ -3891,9 +3898,9 @@ class ATSMainWindow(QMainWindow):
                         qty = p.get("volume") or 0.0
                         cost = p.get("entry_price") or 0.0
                         price = p.get("current_price") or cost
-                        if cur_df_ref is not None and code in cur_df_ref.index:
+                        if code in cur_close_by_code or code in cur_trade_by_code:
                             try:
-                                pv = float(cur_df_ref.loc[code].get('close', cur_df_ref.loc[code].get('trade', price)))
+                                pv = float(cur_close_by_code.get(code) or cur_trade_by_code.get(code) or price)
                                 if pv > 0: price = pv
                             except: pass
                         mkt = qty * price
@@ -4137,6 +4144,9 @@ class ATSMainWindow(QMainWindow):
                 df_payload = data_pkg.get('full_snapshot')
         elif isinstance(data_pkg, pd.DataFrame):
             df_payload = data_pkg
+            packet_meta = getattr(data_pkg, "attrs", {}) or {}
+            msg_type = packet_meta.get("type", msg_type)
+            sector_data = packet_meta.get("sector_data")
         elif isinstance(data_pkg, tuple) and len(data_pkg) > 0:
             df_payload = data_pkg[0]
             if len(data_pkg) > 1 and isinstance(data_pkg[1], dict):
@@ -4167,7 +4177,8 @@ class ATSMainWindow(QMainWindow):
             return
 
         # 2. 将提取出的 DataFrame 强制转换为以 6 位纯数字 code 字符串作为 index
-        df_payload = df_payload.copy()
+        # IPCBridge transfers full snapshots to this sole writer; diff packets
+        # are already detached copies. Normalize the owned payload in place.
         if 'code' in df_payload.columns:
             df_payload['code'] = df_payload['code'].astype(str).str.strip().str.zfill(6)
             df_payload.set_index('code', inplace=True)
@@ -4189,31 +4200,13 @@ class ATSMainWindow(QMainWindow):
                                 new_cols[base_col] = df_diff[col]
                     df_diff = pd.DataFrame(new_cols, index=df_diff.index)
                 
-                # 🛡️【新列自动合入】：确保 diff 中新增加的特征列同步合入 self.current_df
-                for col in df_diff.columns:
-                    if col not in self.current_df.columns:
-                        self.current_df[col] = df_diff[col]
-
-                # 取两边股票代码的交集更新有效非空数据
-                common_idx = self.current_df.index.intersection(df_diff.index)
-                if len(common_idx) > 0:
-                    for col in df_diff.columns:
-                        if col in self.current_df.columns:
-                            try:
-                                col_data = df_diff.loc[common_idx, col]
-                                valid_mask = col_data.notna()
-                                valid_indices = valid_mask[valid_mask].index
-                                if len(valid_indices) > 0:
-                                    self.current_df.loc[valid_indices, col] = df_diff.loc[valid_indices, col]
-                            except Exception:
-                                pass
-
-                # 🛡️【关键防残缺回补保护】：如果 diff 中出现了 self.current_df 中不存在的新股票，追加并触发一次安全全量同步
-                new_idx = df_diff.index.difference(self.current_df.index)
-                if len(new_idx) > 0:
-                    self.current_df = pd.concat([self.current_df, df_diff.loc[new_idx]])
-                    if hasattr(self, 'ipc_manager') and hasattr(self.ipc_manager, 'request_full_sync'):
-                        self.ipc_manager.request_full_sync(force=False)
+                # Publish a new frame version so shallow readers never observe in-place writes.
+                from ats.market_frame import merge_diff_version
+                updated_df, has_new_codes = merge_diff_version(self.current_df, df_diff)
+                updated_df.attrs.update(getattr(df_payload, "attrs", {}) or {})
+                if has_new_codes and hasattr(self, 'ipc_manager') and hasattr(self.ipc_manager, 'request_full_sync'):
+                    self.ipc_manager.request_full_sync(force=False)
+                self.current_df = updated_df
             except Exception as e:
                 print(f"[ATS_Realtime] Apply diff error: {e}")
         else:
@@ -4225,13 +4218,22 @@ class ATSMainWindow(QMainWindow):
                         df_payload[static_col] = self.current_df[static_col].reindex(df_payload.index)
             self.current_df = df_payload
 
+        packet_meta = getattr(df_payload, "attrs", {}) or {}
+        self.market_frame_revision = {
+            "sync_session": packet_meta.get("sync_session"),
+            "ver": packet_meta.get("ver"),
+            "source_version": packet_meta.get("source_version"),
+        }
+
         # 🛡️【自动缝合与补全静态分类列】：确保 current_df 永远保持完整的 category 板块分类数据
         if self.current_df is not None and not self.current_df.empty and ('category' not in self.current_df.columns or self.current_df['category'].dropna().empty):
             try:
                 if hasattr(self, 'heatmap_widget') and hasattr(self.heatmap_widget, '_bidding_stock_to_sector'):
                     b_map = getattr(self.heatmap_widget, '_bidding_stock_to_sector', {})
                     if b_map:
-                        self.current_df['category'] = [b_map.get(str(idx).strip(), '') or b_map.get("".join(c for c in str(idx) if c.isdigit()).zfill(6), '') for idx in self.current_df.index]
+                        updated_df = self.current_df.copy(deep=False)
+                        updated_df['category'] = [b_map.get(str(idx).strip(), '') or b_map.get("".join(c for c in str(idx) if c.isdigit()).zfill(6), '') for idx in self.current_df.index]
+                        self.current_df = updated_df
             except Exception:
                 pass
 
@@ -4240,7 +4242,7 @@ class ATSMainWindow(QMainWindow):
         _last_name_update = getattr(self, '_last_name_cache_update_time', 0.0)
         if _now_ts - _last_name_update > 60.0 or len(getattr(self, 'name_cache', {})) < 4000:
             self._last_name_cache_update_time = _now_ts
-            _df_for_name = self.current_df
+            _df_for_name = self.current_df[['name']].copy(deep=True) if 'name' in self.current_df.columns else None
             def _bg_name_cache():
                 try:
                     self._update_name_cache_from_df(_df_for_name)
@@ -5481,6 +5483,19 @@ class ATSMainWindow(QMainWindow):
                 print(f"[ATSAlphaTracker] Background flush error: {e}")
         threading.Thread(target=worker, daemon=True).start()
 
+    def _ack_next_day_watch_event(self, event_id, target_date):
+        """ACK only after the consumer receipt and ledger snapshot are durable."""
+        try:
+            from sys_utils import get_app_root
+            from next_day_anomaly_watch import mark_events_delivered
+            data_dir = os.path.join(get_app_root(), "datacsv")
+            import threading
+            threading.Thread(target=mark_events_delivered,
+                args=(data_dir, target_date, [event_id]), daemon=True,
+                name="ATS_NextDayWatch_ACK").start()
+        except Exception as exc:
+            logger.warning("[NextDayWatch] ACK scheduling failed event_id=%s: %s", event_id, exc)
+
     def _handle_realtime_signal(self, signal):
         if not signal:
             return
@@ -5500,35 +5515,52 @@ class ATSMainWindow(QMainWindow):
                 deviation = float(signal.get("deviation", 0) or 0)
                 if (not event_id or len(code) != 6 or not code.strip("0") or
                         signal.get("service") != "ATS_TDXRealtimeFetcher" or
-                        target_date != datetime.date.today().isoformat() or
                         observed_at.date().isoformat() != target_date or
                         not signal.get("strategy_id") or not signal.get("version") or len(str(signal.get("config_hash", ""))) != 64 or
                         evidence.get("confirm_frames") != 2 or not (0 < (observed_at - first_observed_at).total_seconds() <= 8) or
                         not (evidence.get("sustained_high") or evidence.get("verified_vwap_rise")) or
                         not all(math.isfinite(v) for v in (price, pct, deviation)) or price <= 0):
                     return
-                seen = getattr(self, "_next_day_watch_event_ids", None)
-                if seen is None:
-                    seen = set()
-                    self._next_day_watch_event_ids = seen
+                seen = self.signal_ledger._next_day_watch_event_ids
+                if event_id in seen:
+                    unpersisted = self.signal_ledger._next_day_watch_unpersisted_event_ids
+                    if event_id in unpersisted:
+                        if self.session_snapshot.save_snapshot(self.signal_ledger, force=True):
+                            unpersisted.discard(event_id)
+                            self._ack_next_day_watch_event(event_id, target_date)
+                    else:
+                        self._ack_next_day_watch_event(event_id, target_date)
+                    return
                 last_observed = getattr(self, "_next_day_watch_last_observed", {})
                 if observed_at.timestamp() < last_observed.get(code, 0):
+                    seen.add(event_id)
+                    self.signal_ledger._next_day_watch_unpersisted_event_ids.add(event_id)
+                    if self.session_snapshot.save_snapshot(self.signal_ledger, force=True):
+                        self.signal_ledger._next_day_watch_unpersisted_event_ids.discard(event_id)
+                        self._ack_next_day_watch_event(event_id, target_date)
                     return
-                if event_id in seen:
-                    return
-                seen.add(event_id)
-                last_observed[code] = observed_at.timestamp()
-                self._next_day_watch_last_observed = last_observed
                 service = getattr(self, "ledger_update_service", None)
                 if service is None and hasattr(self, "signal_ledger"):
                     service = LedgerUpdateService(self.signal_ledger)
                     self.ledger_update_service = service
-                if service is not None:
-                    service.update_candidate(code=code, name=str(signal.get("name") or code), price=price,
+                if service is None:
+                    return
+                result = service.update_candidate(code=code, name=str(signal.get("name") or code), price=price,
                         pct=pct, deviation=deviation, source="NEXT_DAY_WATCH", observed_at=signal.get("observed_at"),
                         required_frames=1, signal_tag="次日候选池确认", strategy_id=signal.get("strategy_id"),
                         strategy_version=signal.get("version"), target_trade_date=target_date,
                         event_id=event_id, reason=str(signal.get("reason", "")))
+                code_clean = self.signal_ledger.canonicalize_code(code)
+                if not result.wrote_ledger and code_clean not in self.signal_ledger.entries:
+                    return
+                seen.add(event_id)
+                self.signal_ledger._next_day_watch_unpersisted_event_ids.add(event_id)
+                if not self.session_snapshot.save_snapshot(self.signal_ledger, force=True):
+                    return
+                self.signal_ledger._next_day_watch_unpersisted_event_ids.discard(event_id)
+                last_observed[code] = observed_at.timestamp()
+                self._next_day_watch_last_observed = last_observed
+                self._ack_next_day_watch_event(event_id, target_date)
                 reason = signal.get("reason") or "次日候选池两帧确认"
                 self.status_bar.showMessage("🔔 [次日候选池] %s %s -> ATS观察 (%s)" %
                     (code, signal.get("name", ""), reason), 10000)
@@ -5547,27 +5579,35 @@ class ATSMainWindow(QMainWindow):
         if getattr(self, "_next_day_watch_poll_busy", False):
             return
         now = time.localtime()
-        if now.tm_wday >= 5 or not (93000 <= now.tm_hour * 10000 + now.tm_min * 100 + now.tm_sec <= 150500):
-            return
         today = time.strftime("%Y-%m-%d", now)
         try:
-            from sys_utils import get_app_root, get_conf_path
-            from next_day_anomaly_watch import _read_json, get_followup_candidates, mark_events_delivered, run_cycle
+            from sys_utils import get_app_root
+            from next_day_anomaly_watch import (_pending_confirmation_events, _read_json,
+                get_followup_candidates)
             root = get_app_root()
             data_dir = os.path.join(root, "datacsv")
-            watch_path = os.path.join(data_dir, "next_day_anomaly_watch_%s.json" % today)
-            config_path = get_conf_path("next_day_watch_strategies.json", root)
-            from ats.strategy.next_day_watch_config_manager import NextDayWatchConfigManager
-            _, config, _ = NextDayWatchConfigManager.load_config(config_path)
-            watch = _read_json(watch_path, {})
-            candidates = watch.get("candidates", [])
-            if not config.get("enabled"):
-                return
-            followup_candidates = get_followup_candidates(data_dir, today)
-            if not candidates and not followup_candidates:
-                return
+            pending_events = _pending_confirmation_events(
+                data_dir, today, _read_json(os.path.join(data_dir, "next_day_anomaly_eval_%s.json" % today), {}))
         except Exception as exc:
             logger.debug("[NextDayWatch][ATS_TDX] manifest check skipped: %s", exc)
+            return
+
+        candidates, followup_candidates, watch = [], [], {}
+        can_evaluate = (now.tm_wday < 5 and
+            93000 <= now.tm_hour * 10000 + now.tm_min * 100 + now.tm_sec <= 150500)
+        if can_evaluate:
+            try:
+                from sys_utils import get_conf_path
+                from ats.strategy.next_day_watch_config_manager import NextDayWatchConfigManager
+                config_path = get_conf_path("next_day_watch_strategies.json", root)
+                _, config, _ = NextDayWatchConfigManager.load_config(config_path)
+                if config.get("enabled"):
+                    watch = _read_json(os.path.join(data_dir, "next_day_anomaly_watch_%s.json" % today), {})
+                    candidates = watch.get("candidates", [])
+                    followup_candidates = get_followup_candidates(data_dir, today)
+            except Exception as exc:
+                logger.debug("[NextDayWatch][ATS_TDX] evaluation config unavailable: %s", exc)
+        if not candidates and not followup_candidates and not pending_events:
             return
 
         self._next_day_watch_poll_busy = True
@@ -5576,47 +5616,44 @@ class ATSMainWindow(QMainWindow):
         def _worker():
             started = time.perf_counter()
             try:
-                from ats.tdx_realtime_fetcher import TDXRealtimeFetcher
-                fetcher = TDXRealtimeFetcher.get_instance()
                 all_candidates = candidates + followup_candidates
                 meta = {str(item.get("code", "")).zfill(6): item for item in all_candidates if item.get("code")}
                 codes = sorted(meta)
-                quotes = fetcher.get_security_quotes_safe(codes, force=False)
-                frame = fetcher.convert_quotes_to_df(quotes)
-                import pandas as pd
-                if frame is None:
-                    frame = pd.DataFrame()
-                for code in codes:
-                    if code not in frame.index:
-                        frame.loc[code, "code"] = code
-                endpoint = getattr(fetcher, "current_host", None) or ("TDX", "?", "?")
-                for code in frame.index:
-                    candidate = meta.get(str(code).zfill(6), {})
-                    frame.loc[code, "name"] = candidate.get("name", str(code))
-                    frame.loc[code, "category"] = candidate.get("category", "")
-                frame["percent"] = frame.get("change_pct", 0.0)
-                from datetime import datetime
-                observed_at = datetime.now().astimezone().isoformat(timespec="milliseconds")
-                result = run_cycle(frame, config_path=config_path, data_dir=data_dir,
-                    asof_date=str(watch.get("source_asof_trade_date", today)), target_date=today,
-                    observed_at=observed_at, vwap_field="vwap")
-                event_ids = []
-                seen_event_ids = getattr(self, "_seen_watch_event_ids", None)
-                if seen_event_ids is None:
-                    seen_event_ids = set()
-                    self._seen_watch_event_ids = seen_event_ids
-                for signal in result.get("events", []):
+                quote_count = 0
+                if codes:
+                    from ats.tdx_realtime_fetcher import TDXRealtimeFetcher
+                    fetcher = TDXRealtimeFetcher.get_instance()
+                    quotes = fetcher.get_security_quotes_safe(codes, force=False)
+                    quote_count = len(quotes) if quotes is not None else 0
+                    frame = fetcher.convert_quotes_to_df(quotes)
+                    import pandas as pd
+                    if frame is None:
+                        frame = pd.DataFrame()
+                    for code in codes:
+                        if code not in frame.index:
+                            frame.loc[code, "code"] = code
+                    endpoint = getattr(fetcher, "current_host", None) or ("TDX", "?", "?")
+                    for code in frame.index:
+                        candidate = meta.get(str(code).zfill(6), {})
+                        frame.loc[code, "name"] = candidate.get("name", str(code))
+                        frame.loc[code, "category"] = candidate.get("category", "")
+                    frame["percent"] = frame.get("change_pct", 0.0)
+                    from datetime import datetime
+                    observed_at = datetime.now().astimezone().isoformat(timespec="milliseconds")
+                    from next_day_anomaly_watch import run_cycle
+                    result = run_cycle(frame, config_path=config_path, data_dir=data_dir,
+                        asof_date=str(watch.get("source_asof_trade_date", today)), target_date=today,
+                        observed_at=observed_at, vwap_field="vwap")
+                    events_to_dispatch = result.get("events", [])
+                else:
+                    endpoint = ("OUTBOX", "local", "")
+                    events_to_dispatch = pending_events
+                for signal in events_to_dispatch:
                     signal["service"] = "ATS_TDXRealtimeFetcher"
-                    eid = signal.get("event_id")
-                    if eid:
-                        event_ids.append(eid)
-                        if eid not in seen_event_ids:
-                            self.realtime_signal_signal.emit(signal)
-                            seen_event_ids.add(eid)
-                if event_ids:
-                    mark_events_delivered(data_dir, today, event_ids)
+                    self.realtime_signal_signal.emit(signal)
                 logger.info("[NextDayWatch][ATS_TDX] service=TDXRealtimeFetcher node=%s endpoint=%s:%s candidates=%d quotes=%d confirmed=%d elapsed=%.0fms",
-                            endpoint[0], endpoint[1], endpoint[2], len(codes), len(frame), len(event_ids), (time.perf_counter() - started) * 1000)
+                            endpoint[0], endpoint[1], endpoint[2], len(codes), quote_count,
+                            len(events_to_dispatch), (time.perf_counter() - started) * 1000)
             except Exception as exc:
                 logger.warning("[NextDayWatch][ATS_TDX] realtime evaluation failed: %s", exc)
             finally:
@@ -6617,14 +6654,14 @@ class ATSMainWindow(QMainWindow):
             # tables flush through their own persistence hooks.
             next_day_table = getattr(getattr(self, "next_day_watch_panel", None), "table_manifest", None)
             if hasattr(next_day_table, "save_header_state"):
-                next_day_table.save_header_state()
+                next_day_table.save_header_state(sync=False)
             
             if hasattr(self, 'universe_widget') and hasattr(self.universe_widget, 'tree'):
                 if hasattr(self.universe_widget.tree, 'save_header_state'):
-                    self.universe_widget.tree.save_header_state()
+                    self.universe_widget.tree.save_header_state(sync=False)
             elif hasattr(self, 'universe_tree') and hasattr(self.universe_tree, 'tree'):
                 if hasattr(self.universe_tree.tree, 'save_header_state'):
-                    self.universe_tree.tree.save_header_state()
+                    self.universe_tree.tree.save_header_state(sync=False)
             
             if hasattr(self, 'swing_table') and hasattr(self.swing_table, 'table'):
                 if hasattr(self.swing_table.table, 'save_column_widths'):

@@ -1031,7 +1031,7 @@ class IPOSubnewDetectorDialog(QMainWindow):
     def save_persisted_state(self):
         """集中持久化保存当前窗口几何、监控池、手工代码与全量信号计算结果 (带 .bak 镜像双写容灾)"""
         if hasattr(self, "table") and hasattr(self.table, "save_header_state"):
-            self.table.save_header_state()
+            self.table.save_header_state(sync=False)
         cfg_file = get_ipo_detector_layout_file()
         bak_file = cfg_file + ".bak"
         # 序列化当前已算好的全量信号
@@ -2837,7 +2837,7 @@ class IPOSubnewDetectorDialog(QMainWindow):
         for i in range(self.table.columnCount()):
             hv.setSectionResizeMode(i, QHeaderView.ResizeMode.Interactive)
         if hasattr(self.table, "save_header_state"):
-            self.table.save_header_state()
+            self.table.save_header_state(sync=False)
 
     def _on_ipc_poll_and_heartbeat(self):
         """消费来自 ATS 跨进程一键发送过来的新代码，同步 IPC 数据并更新心跳"""

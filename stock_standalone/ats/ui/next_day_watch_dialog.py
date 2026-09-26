@@ -106,19 +106,23 @@ def _auto_size_table_once(table: QTableWidget, attr_name: str = "_has_auto_sized
 class NextDayWatchDataLoaderWorker(QThread):
     """Background worker for scanning and loading candidate files without freezing UI."""
 
-    dates_scanned = pyqtSignal(list)
-    manifest_loaded = pyqtSignal(dict)
-    eval_loaded = pyqtSignal(dict)
-    stats_loaded = pyqtSignal(list)
+    loaded = pyqtSignal(object)
 
-    def __init__(self, target_date: Optional[str] = None):
+    def __init__(self, target_date: Optional[str] = None, eval_only: bool = False):
         super().__init__()
         self.target_date = target_date
+        self.eval_only = bool(eval_only)
         self.app_root = get_app_root()
         self.data_dir = os.path.join(self.app_root, "datacsv")
 
     def run(self):
         try:
+            if self.eval_only:
+                cur_date = self.target_date or time.strftime("%Y-%m-%d")
+                eval_path = os.path.join(self.data_dir, f"next_day_anomaly_eval_{cur_date}.json")
+                self.loaded.emit({"target_date": cur_date, "eval": _read_json(eval_path, {}), "eval_only": True})
+                return
+
             watch_pattern = os.path.join(self.data_dir, "next_day_anomaly_watch_*.json")
             files = glob.glob(watch_pattern)
             dates = []
@@ -128,17 +132,13 @@ class NextDayWatchDataLoaderWorker(QThread):
                 if len(d) == 10 and d.count("-") == 2:
                     dates.append(d)
             dates.sort(reverse=True)
-            self.dates_scanned.emit(dates)
-
             cur_date = self.target_date or (dates[0] if dates else time.strftime("%Y-%m-%d"))
 
             watch_path = os.path.join(self.data_dir, f"next_day_anomaly_watch_{cur_date}.json")
             watch_data = _read_json(watch_path, {})
-            self.manifest_loaded.emit(watch_data)
 
             eval_path = os.path.join(self.data_dir, f"next_day_anomaly_eval_{cur_date}.json")
             eval_data = _read_json(eval_path, {})
-            self.eval_loaded.emit(eval_data)
 
             stats_list = []
             stats_pattern = os.path.join(self.data_dir, "next_day_anomaly_stats_*.json")
@@ -146,10 +146,12 @@ class NextDayWatchDataLoaderWorker(QThread):
                 sdata = _read_json(sf, {})
                 if sdata:
                     stats_list.append(sdata)
-            self.stats_loaded.emit(stats_list)
-
+            self.loaded.emit({"target_date": cur_date, "dates": dates, "manifest": watch_data,
+                              "eval": eval_data, "stats": stats_list, "eval_only": False})
         except Exception as exc:
             logger.warning("[NextDayWatchDataLoaderWorker] Background read failed: %s", exc)
+            self.loaded.emit({"target_date": self.target_date, "error": str(exc),
+                              "eval_only": self.eval_only})
 
 
 class NextDayWatchFreezeWorker(QThread):
@@ -170,11 +172,31 @@ class NextDayWatchFreezeWorker(QThread):
 
     def run(self):
         try:
+            if self.df is None or self.df.empty:
+                root = get_app_root()
+                for h5_path in (
+                    os.path.join(root, "archives", "data", "shared_df_all.h5"),
+                    os.path.join(root, "test_data_hub", "shared_df_all.h5"),
+                ):
+                    if not os.path.exists(h5_path):
+                        continue
+                    try:
+                        self.df = pd.read_hdf(h5_path, key="df_all")
+                        if self.df is not None and not self.df.empty:
+                            break
+                    except Exception:
+                        self.df = None
+            if self.df is None or self.df.empty:
+                self.completed.emit({"status": "no_market_data", "universe_count": 0})
+                return
+
             result = run_cycle(
                 self.df, config_path=self.config_path, data_dir=self.data_dir,
                 asof_date=self.asof_date, target_date=self.target_date,
                 sector_snapshot=self.sector_snapshot, observe=False, force_freeze=True
             )
+            if isinstance(result, dict):
+                result.setdefault("universe_count", len(self.df))
             self.completed.emit(result)
         except Exception as exc:
             logger.exception("[NextDayWatchFreezeWorker] Candidate freeze failed")
@@ -195,6 +217,8 @@ class NextDayAnomalyWatchWidget(QWidget):
         self.stats_data_list: List[Dict[str, Any]] = []
         self.current_config: Dict[str, Any] = {}
         self.active_worker: Optional[NextDayWatchDataLoaderWorker] = None
+        self._active_load_request = None
+        self._pending_load_request = None
         self.manual_freeze_worker: Optional[NextDayWatchFreezeWorker] = None
         self.manifest_custom_specs = _ats_custom_column_specs()
         self._layout_save_timer = QTimer(self)
@@ -705,13 +729,59 @@ class NextDayAnomalyWatchWidget(QWidget):
         """Trigger asynchronous data load without blocking UI."""
         self.status_message_changed.emit("正在后台读取候选池与后验文件...")
         target = self.combo_manifest_date.currentText().strip() or None
-        self.active_worker = NextDayWatchDataLoaderWorker(target)
-        self.active_worker.dates_scanned.connect(self._on_dates_scanned)
-        self.active_worker.manifest_loaded.connect(self._on_manifest_loaded)
-        self.active_worker.eval_loaded.connect(self._on_eval_loaded)
-        self.active_worker.stats_loaded.connect(self._on_stats_loaded)
-        self.active_worker.finished.connect(lambda: self.status_message_changed.emit(f"就绪 | 数据已更新: {time.strftime('%H:%M:%S')}"))
-        self.active_worker.start()
+        self._request_data_load(target, eval_only=False)
+
+    def _request_data_load(self, target_date: Optional[str], eval_only: bool):
+        request = (target_date, bool(eval_only))
+        if self.active_worker is not None and self.active_worker.isRunning():
+            if request == self._active_load_request:
+                self._pending_load_request = None
+            elif request != self._pending_load_request:
+                self._pending_load_request = request
+            return
+        self._start_data_load(request)
+
+    def _start_data_load(self, request):
+        target_date, eval_only = request
+        worker = NextDayWatchDataLoaderWorker(target_date, eval_only=eval_only)
+        self.active_worker = worker
+        self._active_load_request = request
+        worker.loaded.connect(self._on_loader_result)
+        worker.finished.connect(lambda current=worker: self._on_loader_finished(current))
+        worker.start()
+
+    def _on_loader_result(self, result: Dict[str, Any]):
+        if not isinstance(result, dict):
+            return
+        if result.get("error"):
+            logger.warning("[NextDayWatchWidget] Data load failed: %s", result["error"])
+            self.status_message_changed.emit("候选池读取失败，保留上一份数据显示")
+            return
+
+        target_date = str(result.get("target_date") or "")
+        if result.get("eval_only"):
+            if target_date == self.combo_manifest_date.currentText().strip():
+                self._on_eval_loaded(result.get("eval") or {})
+            return
+
+        self._on_dates_scanned(result.get("dates") or [])
+        if target_date != self.combo_manifest_date.currentText().strip():
+            return
+        self._on_manifest_loaded(result.get("manifest") or {})
+        self._on_eval_loaded(result.get("eval") or {})
+        self._on_stats_loaded(result.get("stats") or [])
+
+    def _on_loader_finished(self, worker):
+        if worker is not self.active_worker:
+            return
+        self.active_worker = None
+        self._active_load_request = None
+        pending = self._pending_load_request
+        self._pending_load_request = None
+        if pending is not None:
+            self._start_data_load(pending)
+        else:
+            self.status_message_changed.emit(f"就绪 | 数据已更新: {time.strftime('%H:%M:%S')}")
 
     def _on_dates_scanned(self, dates: List[str]):
         self.available_dates = dates
@@ -1192,27 +1262,6 @@ class NextDayAnomalyWatchWidget(QWidget):
                 break
             p = p.parent() if hasattr(p, "parent") else None
 
-        # 2. 若无则从本地 HDF5 载入
-        if df is None or df.empty:
-            root = get_app_root()
-            for h5_path in (
-                os.path.join(root, "archives", "data", "shared_df_all.h5"),
-                os.path.join(root, "test_data_hub", "shared_df_all.h5")
-            ):
-                if os.path.exists(h5_path):
-                    try:
-                        df = pd.read_hdf(h5_path, key="df_all")
-                        break
-                    except Exception:
-                        pass
-
-        if df is None or df.empty:
-            QMessageBox.warning(
-                self, "宽表数据未就绪",
-                "未能自动获取到当前全市场日线宽表。\n请确保 ATS 已连接行情 IPC 或 TK 已启动刷新，然后再试。"
-            )
-            return
-
         today = time.strftime("%Y-%m-%d")
         root = get_app_root()
         data_dir = os.path.join(root, "datacsv")
@@ -1249,7 +1298,8 @@ class NextDayAnomalyWatchWidget(QWidget):
             df, config_path, data_dir, asof_date, target_date, sector_snapshot
         )
         self.manual_freeze_worker = worker
-        worker.completed.connect(lambda result, td=target_date, n=len(df): self._on_manual_freeze_completed(result, td, n))
+        worker.completed.connect(lambda result, td=target_date: self._on_manual_freeze_completed(
+            result, td, int(result.get("universe_count", 0)) if isinstance(result, dict) else 0))
         worker.failed.connect(self._on_manual_freeze_failed)
         worker.finished.connect(self._on_manual_freeze_worker_finished)
         worker.start()
@@ -1270,6 +1320,11 @@ class NextDayAnomalyWatchWidget(QWidget):
                 self, "未识别到有效证券代码",
                 f"ATS宽表共有 {result.get('universe_count', universe_count)} 行，但没有识别到有效 code 列/索引。\n"
                 "请检查宽表证券代码字段名（code/symbol/ts_code/证券代码/股票代码）或索引。"
+            )
+        elif status == "no_market_data":
+            QMessageBox.warning(
+                self, "宽表数据未就绪",
+                "未能自动获取到当前全市场日线宽表。\n请确保 ATS 已连接行情 IPC 或 TK 已启动刷新，然后再试。"
             )
         elif status in ("ok", "manifest_ready"):
             count = result.get("candidate_count", 0)
@@ -1432,11 +1487,7 @@ class NextDayAnomalyWatchWidget(QWidget):
     def _on_auto_refresh_tick(self):
         if self.tab_widget.currentIndex() == 1:
             cur_date = self.combo_manifest_date.currentText().strip() or time.strftime("%Y-%m-%d")
-            eval_path = os.path.join(get_app_root(), "datacsv", f"next_day_anomaly_eval_{cur_date}.json")
-            if os.path.exists(eval_path):
-                data = _read_json(eval_path, {})
-                if data:
-                    self._on_eval_loaded(data)
+            self._request_data_load(cur_date, eval_only=True)
 
     # =========================================================================
     # Tab 3: 跨日成效看板
@@ -1771,7 +1822,7 @@ class NextDayAnomalyWatchDialog(QMainWindow):
             self.widget.auto_refresh_timer.stop()
         table = getattr(self.widget, "table_manifest", None)
         if hasattr(table, "save_header_state"):
-            table.save_header_state()
+            table.save_header_state(sync=False)
         self._save_window_layout()
         self.widget.save_splitter_layouts()
         event.accept()

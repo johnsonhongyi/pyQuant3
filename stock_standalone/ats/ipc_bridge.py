@@ -10,12 +10,18 @@ import json
 import sqlite3
 import socket
 import threading
+import queue
 import pickle
 import struct
+import time
 from datetime import datetime
 import pandas as pd
 from sys_utils import get_app_root
 from db_utils import SQLiteConnectionManager
+
+_MAX_IPC_CLIENTS = 2
+_MAX_IPC_PAYLOAD_BYTES = 256 * 1024 * 1024
+_IPC_FRAME_TIMEOUT_SEC = 30.0
 
 class IPCBridge:
     @staticmethod
@@ -44,7 +50,9 @@ class IPCBridge:
         """
         self._listener_running = True
         self.server_socket = None
-        
+        # One processor handles a client while at most one waits in the queue.
+        self._client_queue = queue.Queue(maxsize=max(1, _MAX_IPC_CLIENTS - 1))
+
         def listen_loop():
             self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -56,6 +64,20 @@ class IPCBridge:
                 print(f"[IPCBridge] Failed to bind realtime server to port {port}: {e}")
                 return
 
+            def process_clients():
+                while self._listener_running or not self._client_queue.empty():
+                    try:
+                        client = self._client_queue.get(timeout=0.1)
+                    except queue.Empty:
+                        continue
+                    try:
+                        self._handle_client(client, data_callback, signal_callback)
+                    finally:
+                        self._client_queue.task_done()
+
+            threading.Thread(target=process_clients, daemon=True,
+                             name="ATS_IPC_FrameProcessor").start()
+
             while self._listener_running:
                 try:
                     conn, addr = self.server_socket.accept()
@@ -65,7 +87,11 @@ class IPCBridge:
                         except:
                             pass
                         break
-                    threading.Thread(target=self._handle_client, args=(conn, data_callback, signal_callback), daemon=True).start()
+                    try:
+                        self._client_queue.put_nowait(conn)
+                    except queue.Full:
+                        conn.close()
+                        continue
                 except Exception as e:
                     if self._listener_running:
                         print(f"[IPCBridge] accept error: {e}")
@@ -86,26 +112,41 @@ class IPCBridge:
             except Exception as e:
                 print(f"[IPCBridge] Error closing server socket: {e}")
 
+    @staticmethod
+    def _recv_exact(conn, size, deadline):
+        """Read a complete frame segment without allowing a slow peer to hold a worker forever."""
+        chunks = bytearray()
+        while len(chunks) < size:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("IPC frame receive deadline exceeded")
+            conn.settimeout(remaining)
+            packet = conn.recv(min(size - len(chunks), 65536))
+            if not packet:
+                raise EOFError("incomplete IPC frame")
+            chunks.extend(packet)
+        return bytes(chunks)
+
     def _handle_client(self, conn, data_callback, signal_callback):
         try:
-            conn.settimeout(5.0)
-            prefix = conn.recv(4)
-            if not prefix:
+            deadline = time.monotonic() + _IPC_FRAME_TIMEOUT_SEC
+            try:
+                prefix = self._recv_exact(conn, 4, deadline)
+            except (EOFError, TimeoutError, socket.timeout):
                 return
-            
             if prefix == b"DATA":
-                len_buf = conn.recv(4)
-                if len(len_buf) < 4:
+                try:
+                    len_buf = self._recv_exact(conn, 4, deadline)
+                except (EOFError, TimeoutError, socket.timeout):
                     return
                 length = struct.unpack("!I", len_buf)[0]
-                
-                data = b""
-                while len(data) < length:
-                    packet = conn.recv(min(length - len(data), 65536))
-                    if not packet:
-                        break
-                    data += packet
-                
+                if length <= 0 or length > _MAX_IPC_PAYLOAD_BYTES:
+                    print(f"[IPCBridge] Rejected invalid payload size: {length}")
+                    return
+                try:
+                    data = self._recv_exact(conn, length, deadline)
+                except (EOFError, TimeoutError, socket.timeout):
+                    return
                 if len(data) == length:
                     payload = pickle.loads(data)
                     if isinstance(payload, tuple) and len(payload) >= 2:
@@ -137,8 +178,40 @@ class IPCBridge:
                                     # 冷启动/重连/次日跨日没有全量基线时，绝不能把 diff 当成完整行情。
                                     # 否则 ma20d/ma60d/category 等未变化列会直接缺失，评分层随之退化。
                                     today_str = datetime.now().strftime("%Y-%m-%d")
+                                    versioned = (isinstance(body, dict) and body.get("sync_session") is not None
+                                                 and body.get("ver") is not None)
+                                    packet_session = str(body.get("sync_session")) if versioned else None
+                                    packet_version = None
+                                    if versioned:
+                                        try:
+                                            packet_version = int(body.get("ver"))
+                                        except (TypeError, ValueError):
+                                            self._cached_df = None
+                                            self._request_full_baseline()
+                                            return
                                     last_cache_date = getattr(self, '_last_cache_date', None)
                                     is_date_rollover = bool(last_cache_date is not None and last_cache_date != today_str)
+
+                                    if versioned and msg_type == 'UPDATE_DF_DIFF':
+                                        prior_session = getattr(self, '_cache_sync_session', None)
+                                        prior_version = getattr(self, '_cache_sync_version', None)
+                                        if (self._cached_df is None or prior_session != packet_session
+                                                or prior_version is None):
+                                            self._cached_df = None
+                                            self._request_full_baseline()
+                                            return
+                                        if packet_version < prior_version:
+                                            return
+                                        if packet_version > prior_version + 1:
+                                            self._cached_df = None
+                                            self._request_full_baseline()
+                                            return
+                                    elif versioned and msg_type == 'UPDATE_DF_ALL':
+                                        prior_session = getattr(self, '_cache_sync_session', None)
+                                        prior_version = getattr(self, '_cache_sync_version', None)
+                                        if (prior_session == packet_session and prior_version is not None
+                                                and packet_version < prior_version):
+                                            return
 
                                     if msg_type == 'UPDATE_DF_DIFF' and (
                                         not hasattr(self, '_cached_df')
@@ -195,35 +268,52 @@ class IPCBridge:
                                     else:
                                         self._cached_df = df_norm.copy()
                                         self._last_cache_date = today_str
-                                        df_to_deliver = self._cached_df
+                                        # Transfer this private normalized frame to the receiver.
+                                        # The bridge mutates only its separate cache on later diffs.
+                                        df_to_deliver = df_norm
                                 except Exception as preprocess_err:
                                     print(f"[IPCBridge] Background DataFrame preprocess error: {preprocess_err}")
                                     self._cached_df = None
                                     self._request_full_baseline()
                                     return
 
-                            # 立即在后台线程（不受 UI 渲染卡顿影响）告知 TK 停止发送，清除发送状态
-                            try:
-                                import sys
-                                from sys_utils import get_app_root
-                                root = get_app_root()
-                                if root not in sys.path:
-                                    sys.path.insert(0, root)
-                                from data_utils import send_code_via_pipe, PIPE_NAME_TK
-                                import logging
-                                local_logger = logging.getLogger("ATS_Bridge")
-                                feedback = {"cmd": "ATS_RECEIVED", "port": 26670}
-                                if isinstance(body, dict):
-                                    feedback.update(
-                                        source_version=body.get('source_version'),
-                                        sync_session=body.get('sync_session'),
-                                    )
-                                send_code_via_pipe(feedback, local_logger, PIPE_NAME_TK)
-                            except Exception as pipe_err:
-                                pass
-
                             if df_to_deliver is not None:
+                                if isinstance(body, dict):
+                                    df_to_deliver.attrs.update({
+                                        "type": msg_type,
+                                        "ver": body.get("ver"),
+                                        "source_version": body.get("source_version"),
+                                        "sync_session": body.get("sync_session"),
+                                        "sector_data": body.get("sector_data"),
+                                    })
                                 data_callback(df_to_deliver)
+                                if isinstance(body, dict) and body.get("sync_session") is not None and body.get("ver") is not None:
+                                    self._cache_sync_session = str(body.get("sync_session"))
+                                    self._cache_sync_version = int(body.get("ver"))
+                                else:
+                                    # A legacy unversioned frame is a new base;
+                                    # never let later versioned diffs inherit stale metadata.
+                                    self._cache_sync_session = None
+                                    self._cache_sync_version = None
+                                # ACK means the frame was validated, merged into the cache,
+                                # and accepted by the receiver callback.
+                                try:
+                                    import sys
+                                    from sys_utils import get_app_root
+                                    root = get_app_root()
+                                    if root not in sys.path:
+                                        sys.path.insert(0, root)
+                                    from data_utils import send_code_via_pipe, PIPE_NAME_TK
+                                    import logging
+                                    feedback = {"cmd": "ATS_RECEIVED", "port": 26670}
+                                    if isinstance(body, dict):
+                                        feedback.update(
+                                            source_version=body.get('source_version'),
+                                            sync_session=body.get('sync_session'),
+                                        )
+                                    send_code_via_pipe(feedback, logging.getLogger("ATS_Bridge"), PIPE_NAME_TK)
+                                except Exception:
+                                    pass
                         elif cmd == 'SIGNAL' and signal_callback:
                             signal_callback(body)
                         elif cmd == 'SIGNALS' and signal_callback:
