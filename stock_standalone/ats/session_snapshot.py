@@ -137,6 +137,7 @@ class SessionSnapshot:
                     'INACTIVE': sum(1 for e in signal_ledger.entries.values() if e.tier == 'INACTIVE'),
                 },
                 'entries': entries_data,
+                'next_day_watch_event_ids': sorted(getattr(signal_ledger, '_next_day_watch_event_ids', set())),
                 'integrity': {
                     'entry_count': len(entries_data),
                     'fail_closed': True,
@@ -235,6 +236,14 @@ class SessionSnapshot:
             return migrated
         except Exception:
             return None
+
+    def load_consumed_event_ids(self):
+        """Load durable consumer dedup receipts from the atomic ledger snapshot."""
+        snapshot = self.load_latest_snapshot()
+        event_ids = snapshot.get('next_day_watch_event_ids', []) if isinstance(snapshot, dict) else []
+        if not isinstance(event_ids, list):
+            return set()
+        return {str(event_id) for event_id in event_ids if event_id}
 
     def save_daily_summary(self, signal_ledger, force=False):
         """生成当日信号总结报告 (收盘后调用，自动覆盖更新为最新终盘总结)

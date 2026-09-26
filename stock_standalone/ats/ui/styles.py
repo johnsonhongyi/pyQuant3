@@ -227,9 +227,28 @@ def apply_dark_tooltip_palette(widget_or_app=None):
 import math
 import re
 import threading
+import time
 from contextlib import contextmanager
-from typing import Any, Optional, Union, List, Dict
-CONFIG_FILE_LOCK = threading.RLock()
+from typing import Any, Optional, Union, List, Dict, Tuple
+
+
+class _TimedRLock:
+    """Reentrant process-local lock with a finite wait for UI/config callers."""
+    def __init__(self, timeout_sec: float = 1.0):
+        self._lock = threading.RLock()
+        self._timeout_sec = max(0.0, float(timeout_sec))
+
+    def __enter__(self):
+        if not self._lock.acquire(timeout=self._timeout_sec):
+            raise TimeoutError("Timed out waiting for the in-process config lock")
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self._lock.release()
+        return False
+
+
+CONFIG_FILE_LOCK = _TimedRLock()
 
 
 @contextmanager
@@ -273,7 +292,15 @@ def _config_process_lock(config_path, timeout_ms=1000):
     import fcntl
     lock_file = open(config_path + ".lock", "a+b")
     try:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        deadline = time.monotonic() + max(0, timeout_ms) / 1000.0
+        while True:
+            try:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(f"Timed out waiting for config lock after {timeout_ms}ms")
+                time.sleep(0.01)
         try:
             yield
         finally:
@@ -721,7 +748,7 @@ def setup_header_persistence(table_or_tree, config_key, default_widths=None, max
 
     table_or_tree._is_restoring_header = True
 
-    def save_action():
+    def save_action(sync=False):
         if getattr(table_or_tree, "_is_restoring_header", False) is True:
             return
         # 门禁 1: 表格必须已成功完成过至少一次恢复，杜绝未恢复前的脏状态落盘
@@ -741,10 +768,14 @@ def setup_header_persistence(table_or_tree, config_key, default_widths=None, max
                 }
                 for logical, section_id in enumerate(section_ids())
             ]
-            save_config_nodes_async(
+            queued = save_config_nodes_async(
                 {config_key: state_hex, layout_config_key: layout},
                 config_path=storage_path,
             )
+            if not queued:
+                print(f"[HeaderPersistence] Config write queue full; update rejected for {config_key}")
+            elif sync and not flush_config_writer(timeout_sec=1.0):
+                print(f"[HeaderPersistence] Config write flush timed out for {config_key}")
         except RuntimeError:
             pass
         except Exception as e:
@@ -760,6 +791,32 @@ def setup_header_persistence(table_or_tree, config_key, default_widths=None, max
                     if curr_w > max_w:
                         table_or_tree.setColumnWidth(col, max_w)
             header.blockSignals(False)
+
+    def apply_default_widths():
+        if not default_widths:
+            return
+        header.blockSignals(True)
+        if isinstance(default_widths, dict):
+            for col, width in default_widths.items():
+                col_idx = None
+                if isinstance(col, int):
+                    col_idx = col
+                elif isinstance(col, str):
+                    if col.isdigit():
+                        col_idx = int(col)
+                    else:
+                        for i in range(col_count):
+                            item = table_or_tree.horizontalHeaderItem(i) if hasattr(table_or_tree, "horizontalHeaderItem") else None
+                            if item and item.text() == col:
+                                col_idx = i
+                                break
+                if col_idx is not None and col_idx < col_count:
+                    table_or_tree.setColumnWidth(col_idx, width)
+        elif isinstance(default_widths, list):
+            for col, width in enumerate(default_widths):
+                if col < col_count:
+                    table_or_tree.setColumnWidth(col, width)
+        header.blockSignals(False)
 
     def restore_action():
         table_or_tree._is_restoring_header = True
@@ -809,35 +866,20 @@ def setup_header_persistence(table_or_tree, config_key, default_widths=None, max
         header.blockSignals(False)
 
         if not restored and not layout_restored:
-            if default_widths:
-                header.blockSignals(True)
-                if isinstance(default_widths, dict):
-                    for col, width in default_widths.items():
-                        col_idx = None
-                        if isinstance(col, int):
-                            col_idx = col
-                        elif isinstance(col, str):
-                            if col.isdigit():
-                                col_idx = int(col)
-                            else:
-                                for i in range(col_count):
-                                    item = table_or_tree.horizontalHeaderItem(i) if hasattr(table_or_tree, "horizontalHeaderItem") else None
-                                    if item and item.text() == col:
-                                        col_idx = i
-                                        break
-                        if col_idx is not None and col_idx < col_count:
-                            table_or_tree.setColumnWidth(col_idx, width)
-                elif isinstance(default_widths, list):
-                    for col, width in enumerate(default_widths):
-                        if col < col_count:
-                            table_or_tree.setColumnWidth(col, width)
-                header.blockSignals(False)
+            apply_default_widths()
+
+        # Repair only an unmistakable legacy placeholder snapshot; preserve
+        # mixed widths because they may represent deliberate user choices.
+        elif restored and default_widths and col_count >= 3 and all(
+            table_or_tree.columnWidth(col) == 100 for col in range(col_count)
+        ):
+            apply_default_widths()
 
         apply_max_width_limits()
         table_or_tree._is_restoring_header = False
         table_or_tree._has_been_restored = True
 
-    table_or_tree.save_header_state = save_action
+    table_or_tree.save_header_state = lambda sync=True: save_action(sync=sync)
     table_or_tree.restore_header_state = restore_action
 
     table_or_tree._has_been_visible = table_or_tree.isVisible()
@@ -894,8 +936,17 @@ def setup_header_persistence(table_or_tree, config_key, default_widths=None, max
     from PyQt6.QtWidgets import QApplication
     app = QApplication.instance()
     if app:
-        app.aboutToQuit.connect(save_action)
-        app.aboutToQuit.connect(lambda: flush_config_writer(timeout_sec=1.0))
+        import weakref
+        save_registry = getattr(app, "_header_persistence_save_registry", None)
+        if save_registry is None:
+            save_registry = []
+            app._header_persistence_save_registry = save_registry
+        if not any(widget_ref() is table_or_tree for widget_ref in save_registry):
+            save_registry.append(weakref.ref(table_or_tree))
+        table_or_tree._header_persistence_save_action = save_action
+        if not getattr(app, "_header_persistence_flush_hooked", False):
+            app.aboutToQuit.connect(_flush_registered_header_states)
+            app._header_persistence_flush_hooked = True
 
 
     # Protect callback reference from garbage collection
@@ -1037,8 +1088,9 @@ class BoundedConfigWriter:
     _lock = threading.Lock()
 
     def __init__(self, max_capacity: int = 500):
-        self._max_capacity = max_capacity
+        self._max_capacity = max(1, int(max_capacity))
         self._pending: Dict[Tuple[str, str], Any] = {}
+        self._inflight: Dict[Tuple[str, str], Any] = {}
         self._cv = threading.Condition(threading.Lock())
         self._running = True
         self._worker_thread = threading.Thread(target=self._worker_loop, daemon=True, name="BoundedConfigWriter")
@@ -1051,27 +1103,38 @@ class BoundedConfigWriter:
                 cls._instance = cls()
             return cls._instance
 
-    def enqueue(self, key_val_dict: dict, config_path: Optional[str] = None) -> bool:
+    def enqueue(self, key_val_dict: dict, config_path: Optional[str] = None,
+                timeout_sec: float = 0.05) -> bool:
         if not key_val_dict or not isinstance(key_val_dict, dict):
             return False
         cfg_path = config_path or ""
+        updates = {(cfg_path, key): value for key, value in key_val_dict.items()}
+        if len(updates) > self._max_capacity:
+            return False
+        deadline = time.monotonic() + max(0.0, float(timeout_sec))
         with self._cv:
-            # 有界容量限制：防止无限制增长
-            if len(self._pending) >= self._max_capacity:
-                oldest_key = next(iter(self._pending.keys()))
-                del self._pending[oldest_key]
-            for k, v in key_val_dict.items():
-                self._pending[(cfg_path, k)] = v
-            self._cv.notify_all()
-        return True
+            while True:
+                occupied = set(self._pending).union(self._inflight)
+                additions = set(updates).difference(occupied)
+                if len(occupied) + len(additions) <= self._max_capacity:
+                    self._pending.update(updates)
+                    self._cv.notify_all()
+                    return True
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._cv.wait(timeout=remaining)
 
     def flush(self, timeout_sec: float = 1.0) -> bool:
         """带超时门禁的同步 Flush，应用退出时等待落盘，超时强制退出绝不卡死。"""
-        start = time.perf_counter()
+        deadline = time.monotonic() + max(0.0, float(timeout_sec))
         with self._cv:
-            while self._pending and (time.perf_counter() - start) < timeout_sec:
-                self._cv.wait(timeout=0.05)
-            return len(self._pending) == 0
+            while self._pending or self._inflight:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._cv.wait(timeout=remaining)
+            return True
 
     def _worker_loop(self):
         while self._running:
@@ -1081,17 +1144,30 @@ class BoundedConfigWriter:
                     self._cv.wait(timeout=0.2)
                 if not self._running and not self._pending:
                     break
-                for (cfg_path, k), v in self._pending.items():
+                batch = self._pending
+                self._inflight = dict(batch)
+                for (cfg_path, k), v in batch.items():
                     path_key = cfg_path if cfg_path else None
                     batch_by_file.setdefault(path_key, {})[k] = v
                 self._pending.clear()
-                self._cv.notify_all()
 
+            failed = set()
             for path_key, kvs in batch_by_file.items():
                 try:
-                    save_config_nodes(kvs, config_path=path_key)
+                    if not save_config_nodes(kvs, config_path=path_key):
+                        failed.update((path_key or "", key) for key in kvs)
                 except Exception as ex:
                     print(f"[BoundedConfigWriter] 写入节点 {list(kvs.keys())} 异常: {ex}")
+                    failed.update((path_key or "", key) for key in kvs)
+
+            with self._cv:
+                for key in failed:
+                    if key not in self._pending:
+                        self._pending[key] = self._inflight[key]
+                self._inflight.clear()
+                self._cv.notify_all()
+            if failed:
+                time.sleep(0.05)
 
 
 def save_config_nodes_async(key_val_dict: dict, config_path=None) -> bool:
@@ -1102,6 +1178,31 @@ def save_config_nodes_async(key_val_dict: dict, config_path=None) -> bool:
 def flush_config_writer(timeout_sec: float = 1.0) -> bool:
     """带超时门禁同步 Flush 待保存配置。"""
     return BoundedConfigWriter.get_instance().flush(timeout_sec=timeout_sec)
+
+
+def _flush_registered_header_states():
+    """Queue every live table state before spending one shared shutdown deadline."""
+    from PyQt6.QtWidgets import QApplication
+    app = QApplication.instance()
+    registry = getattr(app, "_header_persistence_save_registry", []) if app else []
+    live_refs = []
+    for widget_ref in registry:
+        widget = widget_ref()
+        if widget is None:
+            continue
+        live_refs.append(widget_ref)
+        try:
+            save_action = getattr(widget, "_header_persistence_save_action", None)
+            if save_action:
+                save_action()
+        except RuntimeError:
+            continue
+        except Exception as exc:
+            print(f"[HeaderPersistence] Shutdown enqueue failed: {exc}")
+    if app:
+        app._header_persistence_save_registry = live_refs
+    if not flush_config_writer(timeout_sec=1.0):
+        print("[HeaderPersistence] Shutdown config flush timed out after 1000ms")
 
 
 

@@ -401,8 +401,9 @@ def _custom_feature_values(row: Dict[str, Any]) -> Dict[str, Any]:
     return values
 
 
-def _build_market_projection(df: Any, vwap_field: Optional[str]) -> Dict[str, Any]:
-    """Normalize codes once and materialize only fields used by this engine."""
+def _build_market_projection(df: Any, vwap_field: Optional[str],
+                             candidate_codes: Optional[Iterable[str]] = None) -> Dict[str, Any]:
+    """Normalize codes once and materialize selected fields for all or requested rows."""
     columns = list(getattr(df, "columns", ()))
     aliases = {name.lower() for name in _CODE_ALIASES}
     by_lower = {str(column).strip().lower(): column for column in columns}
@@ -433,9 +434,15 @@ def _build_market_projection(df: Any, vwap_field: Optional[str]) -> Dict[str, An
             selected.append(column)
     if code_column is not None and code_column not in selected:
         selected.append(code_column)
-    frame = df.loc[:, selected].copy()
-    raw_codes = frame[code_column].tolist() if code_column is not None else index_values
+    raw_codes = df[code_column].tolist() if code_column is not None else index_values
     normalized_codes = [_normalize_code(code) for code in raw_codes]
+    if candidate_codes is None:
+        row_positions = range(len(normalized_codes))
+    else:
+        requested = {_normalize_code(code) for code in candidate_codes}
+        row_positions = [position for position, code in enumerate(normalized_codes) if code in requested]
+    frame = df.iloc[list(row_positions)].loc[:, selected].copy()
+    normalized_codes = [normalized_codes[position] for position in row_positions]
     frame["code"] = normalized_codes
     rows, by_code = [], {}
     for raw in frame.to_dict("records"):
@@ -468,6 +475,23 @@ def _history_manifest_index(data_dir: str, asof_date: str) -> List[Dict[str, Any
                 trade_date = str(watch.get("target_trade_date", ""))
                 candidates = watch.get("candidates", [])
                 if trade_date and isinstance(candidates, list):
+                    eval_path = os.path.join(data_dir, "next_day_anomaly_eval_%s.json" % trade_date)
+                    evaluation = _read_json(eval_path, {})
+                    items = evaluation.get("candidates", {}) if isinstance(evaluation, dict) else {}
+                    terminal_states = {"EARLY_VALID", "DELAYED", "MISSED", "UNVERIFIABLE"}
+                    fully_terminal = bool(candidates)
+                    for candidate in candidates:
+                        key = str(candidate.get("code", "")) + ":" + str(candidate.get("strategy_id", ""))
+                        item = items.get(key, {})
+                        tracked = item.get("candidate", candidate)
+                        pending_confirmation = any(
+                            event.get("type") == "NEXT_DAY_WATCH_CONFIRM" and not event.get("delivered")
+                            for event in item.get("events", []) if isinstance(event, dict))
+                        if tracked.get("status") not in terminal_states or pending_confirmation:
+                            fully_terminal = False
+                            break
+                    if fully_terminal:
+                        continue
                     manifests.append({"date": trade_date, "path": path, "candidates": candidates})
             cached = {"expires_at": now_mono + _HISTORY_INDEX_TTL_SEC, "manifests": manifests}
             _HISTORY_INDEX_CACHE[cache_key] = cached
@@ -499,8 +523,6 @@ def get_followup_candidates(data_dir: str, asof_date: str) -> List[Dict[str, Any
         evaluation = _read_json(cohort["eval_path"], {})
         items = evaluation.get("candidates", {}) if isinstance(evaluation, dict) else {}
         for candidate, elapsed, horizon in cohort["scheduled"]:
-            if elapsed > horizon:
-                continue
             key = str(candidate.get("code", "")) + ":" + str(candidate.get("strategy_id", ""))
             item = items.get(key, {})
             tracked = item.get("candidate", candidate)
@@ -678,10 +700,6 @@ def run_cycle(df: Any, *, config_path: str, data_dir: str, asof_date: str,
     watch_path = os.path.join(data_dir, f"next_day_anomaly_watch_{target_date}.json")
     eval_path = os.path.join(data_dir, f"next_day_anomaly_eval_{target_date}.json")
 
-    # 1. 宽表单次规范化与共享只读投影：一轮裁剪与代码规整，后续多处直接只读借用
-    market_projection = _build_market_projection(df, vwap_field)
-    t_proj = time.perf_counter()
-
     with _LOCK:
         now = datetime.fromisoformat(observed_at)
         watch = _read_json(watch_path, None)
@@ -689,9 +707,25 @@ def run_cycle(df: Any, *, config_path: str, data_dir: str, asof_date: str,
         # source data becomes available. Never mutate a non-empty frozen pool.
         if force_freeze and watch is not None and not watch.get("candidates"):
             watch = None
+        if watch is None and not force_freeze and (now.date().isoformat() != target_date or (now.hour, now.minute) > (9, 15)):
+            return {"status": "not_frozen", "candidate_count": 0, "events": []}
+
+        # Freeze needs every market row for strategy evaluation. Once frozen, only
+        # materialize the current cohort and unresolved historical followups.
+        history_cohorts = []
+        if observe and now.date().isoformat() == target_date:
+            history_cohorts = _history_manifest_index(data_dir, target_date)
         if watch is None:
-            if not force_freeze and (now.date().isoformat() != target_date or (now.hour, now.minute) > (9, 15)):
-                return {"status": "not_frozen", "candidate_count": 0, "events": []}
+            projection_codes = None
+        else:
+            projection_codes = {str(candidate.get("code", "")) for candidate in watch.get("candidates", [])}
+            for cohort in history_cohorts:
+                projection_codes.update(str(candidate.get("code", ""))
+                    for candidate, _elapsed, _horizon in cohort["scheduled"])
+        market_projection = _build_market_projection(df, vwap_field, projection_codes)
+        t_proj = time.perf_counter()
+
+        if watch is None:
             records = []
             invalid_by_strategy = {}
             prefilter_rejected = {}
@@ -974,7 +1008,7 @@ def run_cycle(df: Any, *, config_path: str, data_dir: str, asof_date: str,
             _atomic_json(eval_path, evaluation)
 
         # 3. 历史顺延与到期终结结算 (基于各自独立 followup 期限与有效索引)
-        for cohort in _history_manifest_index(data_dir, target_date):
+        for cohort in history_cohorts:
             prior_date = cohort["date"]
             prior_eval_path = cohort["eval_path"]
             prior_eval = _read_json(prior_eval_path, {})
@@ -987,37 +1021,72 @@ def run_cycle(df: Any, *, config_path: str, data_dir: str, asof_date: str,
                     continue
                 prior_types = {event.get("type") for event in item.get("events", []) if isinstance(event, dict)}
                 tracked = item.get("candidate", candidate)
-                if tracked.get("status") in {"EARLY_VALID", "DELAYED", "MISSED"}:
+                if tracked.get("status") in {"EARLY_VALID", "DELAYED", "MISSED", "UNVERIFIABLE"}:
                     continue
-                # 历史顺延到期结算物理事实：超过期限未走强，结算终结状态 MISSED
-                if elapsed > horizon:
-                    if not prior_types.intersection({"DELAYED", "MISSED"}):
-                        item.setdefault("events", []).append({
-                            "type": "MISSED",
-                            "date": target_date,
-                            "observed_at": observed_at,
-                            "reason": "followup_window_expired_after_day_miss"
-                        })
-                        tracked["status"] = "MISSED"
-                        changed = True
-                    continue
-                # 在有效顺延跟踪窗口内 (1 <= elapsed <= horizon)：
                 code = str(candidate.get("code", ""))
                 row = market_projection.get("by_code", {}).get(code)
+                due = elapsed > horizon or (elapsed == horizon and now.hour >= 15)
                 if not row:
+                    if due:
+                        if not prior_types.intersection({"UNVERIFIABLE", "DELAYED", "MISSED"}):
+                            item.setdefault("events", []).append({"type": "UNVERIFIABLE", "date": target_date,
+                                "observed_at": observed_at, "reason": "followup_window_expired_without_quote_evidence"})
+                            tracked["status"] = "UNVERIFIABLE"
+                            changed = True
                     continue
                 high = _number(row.get("high"))
                 close = _number(row.get("trade", row.get("close")))
-                prior_high = _number(candidate.get("feature_values", {}).get("lasth1d"))
-                if high is not None and close is not None and prior_high is not None and high > prior_high and close > prior_high:
+                prior_day_checkpoints = [point for point in item.get("checkpoints", [])
+                    if str(point.get("observed_at", ""))[:10] < target_date]
+                prior_high = (_number(prior_day_checkpoints[-1].get("high")) if prior_day_checkpoints
+                              else _number(candidate.get("feature_values", {}).get("lasth1d")))
+                real_vwap = _number(row.get(vwap_field)) if vwap_field and vwap_field in row else None
+                proof_rules = candidate.get("followup_proof_any") or ["daily_high_break", "verified_vwap_rise"]
+                proof_high = ("daily_high_break" in proof_rules and high is not None and close is not None
+                              and prior_high is not None and high > prior_high and close > prior_high)
+                prior_checkpoint = item.get("checkpoints", [])[-1] if item.get("checkpoints") else None
+                proof_vwap = bool("verified_vwap_rise" in proof_rules and real_vwap is not None and real_vwap > 0
+                                  and prior_checkpoint
+                                  and prior_checkpoint.get("vwap_source") == vwap_field
+                                  and _number(prior_checkpoint.get("vwap")) is not None
+                                  and real_vwap > float(prior_checkpoint["vwap"]))
+                checkpoint = {"observed_at": observed_at, "phase": "market" if now.hour < 15 else "close",
+                    "high": high, "close": close, "vwap": real_vwap,
+                    "vwap_source": vwap_field if real_vwap is not None else None,
+                    "volume": _number(row.get("volume", row.get("vol"))), "amount": _number(row.get("amount")),
+                    "server_time": str(row.get("server_time") or row.get("time") or ""),
+                    "sustained_high": proof_high, "verified_vwap_rise": proof_vwap,
+                    "sector": str(row.get("category", ""))}
+                checkpoints = item.setdefault("checkpoints", [])
+                if elapsed <= horizon and (not checkpoints or checkpoints[-1].get("observed_at") != observed_at):
+                    checkpoints.append(checkpoint)
+                    changed = True
+                if elapsed <= horizon and (proof_high or proof_vwap):
                     if not any(e.get("type") == "DELAYED" for e in item.get("events", [])):
                         item.setdefault("events", []).append({
                             "type": "DELAYED",
                             "date": target_date,
                             "observed_at": observed_at,
-                            "reason": "later_sustained_high_after_target_day_miss"
+                            "reason": "later_sustained_high_after_target_day_miss" if proof_high
+                                      else "verified_vwap_rise_after_target_day_miss"
                         })
+                        changed = True
+                    if tracked.get("status") != "DELAYED":
                         tracked["status"] = "DELAYED"
+                        changed = True
+                    continue
+                # 在窗口最后一日收盘结算；若程序错过该日，之后首轮也补结算。
+                if due:
+                    if high is None or close is None:
+                        if not prior_types.intersection({"UNVERIFIABLE", "DELAYED", "MISSED"}):
+                            item.setdefault("events", []).append({"type": "UNVERIFIABLE", "date": target_date,
+                                "observed_at": observed_at, "reason": "followup_window_expired_without_quote_evidence"})
+                            tracked["status"] = "UNVERIFIABLE"
+                            changed = True
+                    elif not prior_types.intersection({"DELAYED", "MISSED"}):
+                        item.setdefault("events", []).append({"type": "MISSED", "date": target_date,
+                            "observed_at": observed_at, "reason": "followup_window_expired_after_day_miss"})
+                        tracked["status"] = "MISSED"
                         changed = True
             if changed:
                 prior_eval["updated_at"] = observed_at
@@ -1053,9 +1122,11 @@ def run_cycle(df: Any, *, config_path: str, data_dir: str, asof_date: str,
             bucket["vwap_unavailable"] += int(not any(point.get("vwap") is not None for point in item.get("checkpoints", [])))
 
         cur_stats_path = os.path.join(data_dir, "next_day_anomaly_stats_%s.json" % target_date)
-        if eval_dirty or not os.path.exists(cur_stats_path):
+        stats_rows = list(stats.values())
+        old_current_stats = _read_json(cur_stats_path, {})
+        if not os.path.exists(cur_stats_path) or old_current_stats.get("strategies") != stats_rows:
             _atomic_json(cur_stats_path,
-                         {"target_trade_date": target_date, "updated_at": observed_at, "strategies": list(stats.values())})
+                         {"target_trade_date": target_date, "updated_at": observed_at, "strategies": stats_rows})
 
         # 5. 持久待发 (Outbox): 持续投递当前与历史跨日未确认送达的确认事件
         events_to_send = _pending_confirmation_events(data_dir, target_date, evaluation)

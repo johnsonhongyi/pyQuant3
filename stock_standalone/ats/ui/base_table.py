@@ -377,7 +377,7 @@ class BaseATSTableWidget(QTableWidget):
             w = self.columnWidth(col)
             self.setColumnWidth(col, max(w + extra_padding, min_col_width))
         if hasattr(self, 'save_header_state'):
-            self.save_header_state()
+            self.save_header_state(sync=False)
 
     def _edit_current_cell(self, item):
         """右键弹出编辑当前单元格内容窗口并自适应列宽"""
@@ -414,7 +414,7 @@ class BaseATSTableWidget(QTableWidget):
 
     def save_column_widths(self):
         if hasattr(self, 'save_header_state'):
-            self.save_header_state()
+            self.save_header_state(sync=False)
 
     def set_cell_value(self, row, col, text, color=None, is_numeric=False, bold=False, align=Qt.AlignmentFlag.AlignCenter):
         if is_numeric:

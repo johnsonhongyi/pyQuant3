@@ -427,6 +427,8 @@ class SignalLedger:
 
     def __init__(self):
         self.entries = {}       # {code: SignalEntry}
+        self._next_day_watch_event_ids = set()
+        self._next_day_watch_unpersisted_event_ids = set()
         self._today_str = None
         self._signal_count = 0  # 当日发现信号总数
         self._notified_keys = set()  # 当日已提醒通知的信号 key 集合，防止多周期/ATS/TDX重复播报
