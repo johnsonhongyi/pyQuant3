@@ -1,5 +1,61 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-09-26 R9 最终实施方案审计
+- **最终结论**：方案规格可作为分阶段实施输入；不具备 LLM 旁路启用或实盘准入。数据源/指标、全输入回放、UI/告警及交易中心外部依赖仍待完成，324 项仅为测试规划。
+- **Pre-Heat 与时效订正**：增加 `pe_status` 区分已确认缺失与未就绪；配置拒绝 bool/非有限数值并冻结逐字段 TTL；所有时间戳必须带有效 UTC 偏移。回放 naive 时间只按版本化 IANA `source_timezone` 本地化，且该字段进入来源 manifest/配置哈希。
+- **Provider 事实边界**：R7 的“复用现成 Antigravity 模型配置/特权”和“Codex CLI 本地推理”表述已撤回。LiteRT 为待验收本机候选，agy 默认禁用，Codex 按远端处理；数据审批、模型/Windows预检和 ATS/Qt 压测未通过前保持旁路关闭。
+- **范围**：仅订正设计/归档文档；生产代码零修改，未安装依赖或运行测试，保留工作区原有改动。
+
+## 2026-09-26 R8 最终实施方案复核（历史结论，R9 已补订）
+- **Provider 边界澄清**：Antigravity LiteRT SDK 是待验证的本机推理候选，须使用已存在依赖并验收模型/Windows/结构化输出；agy CLI 默认禁用，直至 OS 强制工具隔离通过；Codex CLI 明确为远端 Provider。
+- **最终审计补订 #66–73**：补齐模型/依赖预检、CLI 工具隔离、远端审批 ID/目的地/逐 Agent 字段 sanitizer、SDK 超时后子服务清理、严格 JSON IPC 编码、PE 无效值与缺失值分流、换手差分器依赖及时效配置。
+- **准入决定**：方案只可进入 Stage 0 准备；数据来源/字段 TTL、全输入回放、UI/告警及交易中心外部依赖仍未全部完成。324 项是未来测试计划而非通过证据。所有 Stage 0 数据、Provider 与 ATS/Qt 性能门槛通过前，保持 LLM 旁路关闭。
+- **本轮边界**：只修改设计与记录，未改生产代码、未安装依赖或运行测试；保留工作区原有变更。
+
+## 2026-09-26 20:05
+- [x] **【方案书 v1.1-R7 升级：Antigravity SDK/CLI 默认优先与 Codex CLI 双模后端架构】(`design/新股情绪感知与本地LLM自学习决策系统_详细设计执行方案书_v1.1.md`, `20260926_1925_task.md`)**：
+    - [x] **确立可插拔 Provider 架构**：
+        - 1) 抽象统一后端基类 `BaseLLMBackend`，输出严格绑定信封 JSON Schema；
+        - 2) **R7 当时的默认推荐（已由 R8/R9 撤回）**：Antigravity SDK/CLI 被假定可复用本地环境模型配置与特权；当前仅 LiteRT 作为待验收本机候选，agy CLI 默认禁用；
+        - 3) **R7 当时的备选支持（已由 R8/R9 更正）**：Codex CLI 客户端本机运行不代表推理在本地，当前按远端 Provider 处理并需数据出域审批；
+        - 4) 保留 `OllamaHTTPBackend` 作为本地私有自建集群扩展；
+    - [x] **更新方案书第 叁 节与第 肆 节**：
+        - 1) 改造第 3.2 节为多 Backend 适配层架构与三种 Provider 完整实现；
+        - 2) 更新 `config/llm_config.yaml` 默认配置为 `antigravity_sdk`；
+        - 3) 增补 `ats/llm/backends/` 模块结构；
+    - [x] **保持工程规范**：纯方案文档更新，生产代码零修改，`git diff --check` 保持 100% 干净。
+
+## 2026-09-26 19:58
+- [x] **【方案书 v1.1-R6 升级：精简中文 Map 体系、全景观测透视网与 4 项工程细节闭环】(`design/新股情绪感知与本地LLM自学习决策系统_详细设计执行方案书_v1.1.md`, `20260926_1925_task.md`)**：
+    - [x] **建立全系统 Map 精简中文信息字典**：
+        - 1) 统一规范定义 `STATUS_CN_MAP`, `VETO_REASON_CN_MAP`, `GATE_PASSPORT_CN_MAP`, `LRRM_CN_MAP`, `REGIME_CN_MAP`, `LIFE_CYCLE_CN_MAP` 等字典；
+        - 2) 所有 UI 状态栏徽章、表格单元格渲染、日志因果链与弹窗提示统一查表获取 2~6 字精炼中文，杜绝冗长英文字符串或临时拼接；
+    - [x] **补齐 4 项深层工程/业务细节裁决**：
+        - 1) D0 首日 TradePlan 生成断链：明确首日定位为 OBSERVE 观察与锚点冻结日，Gate 3 通过后收敛为 WATCH 待命，杜绝首日误杀或无法进入 Gate 5；
+        - 2) Gate 3 Reclaim 归属：明确 `check_dual_anchor_failure` 击穿后当日坚决禁买（BLOCK），Reclaim 仅作为次日/盘后状态机流转依据；
+        - 3) Pre-Heat 估值评分亏损防除零/None：补充有限正数校验与亏损股保守打分；
+        - 4) 换手爬升差分跨午休：`TurnoverClimbTracker` 增加 11:30~13:00 90 分钟扣除与跨午休重置采样保护；
+    - [x] **完整融合结果感知体系与四级数据监督体系**：
+        - 1) 融入 13 项回放效果报表、盘中 Gate 漏斗与 LLM 影子对比机制；
+        - 2) 融入主窗口顶部 HUD、指挥室与候选池看板、单例 `IPOArbitrationDetailDialog` 四大透视板块及 SQLite/JSON/LanceDB 底层数据审计；
+    - [x] **保持工程规范**：纯方案文档更新，生产代码零修改，`git diff --check` 保持 100% 干净。
+
+## 2026-09-26 19:55
+- [x] **【新股情绪感知与本地LLM决策系统：结果感知、数据监督与人机决策体系工程设计（纯设计·不实施）】(`ats/ui/ipo_arbitration_detail_dialog.py`, `ats/ui/main_window.py`, `20260926_1925_task.md`)**：
+    - [x] **如何感知实现结果**：确立三级度量体系：
+        - 1) 离线回放 13 项效果量化报表（零未来泄漏、Regime 转换准确率、高低 Carry 收益利差、华大海天伪强过滤率、回归集 100% 通过）；
+        - 2) 盘中实盘执行反馈（Gate 0~5 拦截率、TradePlan 触发到成交转化率、滑点与佣金磨损）；
+        - 3) LLM 自学习进化跟踪（影子模式与规则基线对比、SFT/DPO 样本成熟度与人工复核通过率）；
+    - [x] **如何监督查看数据及所有信号情况**：依托既有工程体系构建四级立体观测网：
+        - 1) 宏观全景（主窗口顶部状态栏实时呈现 LRRM 流动性四态与 IPO Regime 五态仪表盘）；
+        - 2) 中观候选池（《新股次新集中交易指挥室》与《次日异动候选池》扩展显示 Pre-Heat / Live Heat / T1 Carry / 六层门禁通过状态）；
+        - 3) 微观因果钻取（复用单例 `IPOArbitrationDetailDialog`，毫秒级透视 Gate 0~5 Passport、双锚失守距离、华大海天伪强四判据及 LLM 三大 Agent 结构化归因）；
+        - 4) 底层数据溯源（`market_pulse.db` SQLite 增量表、`config/listing_anchors.json` 固化锚点、LanceDB 1024 维向量库及单次决策完整因果链）；
+    - [x] **如何进行交易决策**：明确自动化与人机协同边界：
+        - 1) 硬门禁（Gate 0~4）自动化一票否决，物理杜绝主观侥幸；
+        - 2) 交易执行（Gate 5）对接 TradePlan、RR $\ge 2.5$、赛马领头羊及 RiskGate 限额，支持全自动派单与交易员一键确认双模；
+        - 3) 七态生命周期（OBSERVE $\rightarrow$ ARMED $\rightarrow$ ENTRY_READY $\rightarrow$ ENTERED $\rightarrow$ HOLD_T1 $\rightarrow$ EXIT_READY $\rightarrow$ BLOCKED）闭环约束，T+1 跨日锁定防误卖。
+
 ## 2026-09-26 19:25
 - [x] **【方案书 v1.1-R4 终审定稿、准入前置盘点与落地定性（纯审核·不实施）】(`design/新股情绪感知与本地LLM自学习决策系统_详细设计执行方案书_v1.1.md`, `20260926_1925_task.md`)**：
     - [x] **LLM 纯旁路无感隔离契约彻底定稿**：
