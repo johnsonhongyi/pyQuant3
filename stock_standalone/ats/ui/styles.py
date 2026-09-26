@@ -233,7 +233,7 @@ CONFIG_FILE_LOCK = threading.RLock()
 
 
 @contextmanager
-def _config_process_lock(config_path):
+def _config_process_lock(config_path, timeout_ms=1000):
     """Serialize config read/merge/replace across ATS and its helper processes."""
     import hashlib
     import os
@@ -256,7 +256,9 @@ def _config_process_lock(config_path):
         if not handle:
             raise ctypes.WinError(ctypes.get_last_error())
         try:
-            wait_result = kernel32.WaitForSingleObject(handle, 0xFFFFFFFF)
+            wait_result = kernel32.WaitForSingleObject(handle, timeout_ms)
+            if wait_result == 0x00000102:  # WAIT_TIMEOUT
+                raise TimeoutError(f"Wait for config mutex {mutex_name} timed out after {timeout_ms}ms")
             if wait_result not in (0x00000000, 0x00000080):  # acquired / abandoned
                 raise ctypes.WinError(ctypes.get_last_error())
             try:
@@ -739,7 +741,7 @@ def setup_header_persistence(table_or_tree, config_key, default_widths=None, max
                 }
                 for logical, section_id in enumerate(section_ids())
             ]
-            save_config_nodes(
+            save_config_nodes_async(
                 {config_key: state_hex, layout_config_key: layout},
                 config_path=storage_path,
             )
@@ -893,6 +895,7 @@ def setup_header_persistence(table_or_tree, config_key, default_widths=None, max
     app = QApplication.instance()
     if app:
         app.aboutToQuit.connect(save_action)
+        app.aboutToQuit.connect(lambda: flush_config_writer(timeout_sec=1.0))
 
 
     # Protect callback reference from garbage collection
@@ -1026,6 +1029,80 @@ def save_config_nodes(key_val_dict: dict, config_path=None) -> bool:
 def save_config_node(key: str, val, config_path=None) -> bool:
     """线程安全地原子保存指定配置节点。"""
     return save_config_nodes({key: val}, config_path=config_path)
+
+
+class BoundedConfigWriter:
+    """有界合并异步配置写入器，将主线程同步磁盘 I/O 剥离至后台，支持超时控制与退出 Flush。"""
+    _instance: Optional['BoundedConfigWriter'] = None
+    _lock = threading.Lock()
+
+    def __init__(self, max_capacity: int = 500):
+        self._max_capacity = max_capacity
+        self._pending: Dict[Tuple[str, str], Any] = {}
+        self._cv = threading.Condition(threading.Lock())
+        self._running = True
+        self._worker_thread = threading.Thread(target=self._worker_loop, daemon=True, name="BoundedConfigWriter")
+        self._worker_thread.start()
+
+    @classmethod
+    def get_instance(cls) -> 'BoundedConfigWriter':
+        with cls._lock:
+            if cls._instance is None:
+                cls._instance = cls()
+            return cls._instance
+
+    def enqueue(self, key_val_dict: dict, config_path: Optional[str] = None) -> bool:
+        if not key_val_dict or not isinstance(key_val_dict, dict):
+            return False
+        cfg_path = config_path or ""
+        with self._cv:
+            # 有界容量限制：防止无限制增长
+            if len(self._pending) >= self._max_capacity:
+                oldest_key = next(iter(self._pending.keys()))
+                del self._pending[oldest_key]
+            for k, v in key_val_dict.items():
+                self._pending[(cfg_path, k)] = v
+            self._cv.notify_all()
+        return True
+
+    def flush(self, timeout_sec: float = 1.0) -> bool:
+        """带超时门禁的同步 Flush，应用退出时等待落盘，超时强制退出绝不卡死。"""
+        start = time.perf_counter()
+        with self._cv:
+            while self._pending and (time.perf_counter() - start) < timeout_sec:
+                self._cv.wait(timeout=0.05)
+            return len(self._pending) == 0
+
+    def _worker_loop(self):
+        while self._running:
+            batch_by_file: Dict[Optional[str], dict] = {}
+            with self._cv:
+                while not self._pending and self._running:
+                    self._cv.wait(timeout=0.2)
+                if not self._running and not self._pending:
+                    break
+                for (cfg_path, k), v in self._pending.items():
+                    path_key = cfg_path if cfg_path else None
+                    batch_by_file.setdefault(path_key, {})[k] = v
+                self._pending.clear()
+                self._cv.notify_all()
+
+            for path_key, kvs in batch_by_file.items():
+                try:
+                    save_config_nodes(kvs, config_path=path_key)
+                except Exception as ex:
+                    print(f"[BoundedConfigWriter] 写入节点 {list(kvs.keys())} 异常: {ex}")
+
+
+def save_config_nodes_async(key_val_dict: dict, config_path=None) -> bool:
+    """非阻塞有界异步写入配置节点，保护主线程零卡顿。"""
+    return BoundedConfigWriter.get_instance().enqueue(key_val_dict, config_path=config_path)
+
+
+def flush_config_writer(timeout_sec: float = 1.0) -> bool:
+    """带超时门禁同步 Flush 待保存配置。"""
+    return BoundedConfigWriter.get_instance().flush(timeout_sec=timeout_sec)
+
 
 
 class TabDirectSwitchEventFilter(QObject):

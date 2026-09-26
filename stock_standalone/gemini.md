@@ -1,12 +1,20 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
-## 2026-09-26 05:50 ATS 新股次新股 Tab 与次日异动候选池列持久化冲突彻底修复
-- [ ] **【新股次新股 Tab 与次日异动候选池列持久化冲突彻底修复】(`ats/ui/styles.py`, `ats/ui/new_stock_panel.py`, `ats/ui/next_day_watch_dialog.py`, `ats/ui/main_window.py`, `20260926_0550_task.md`)**：
-    - [ ] **Phase 1: 编写重现测试用例 (TDD)**：构建后台 Tab 填充/排序写盘拦截、`restoreState` 优先免覆盖、多 Tab 并发列调整隔离测试。
-    - [ ] **Phase 2: `setup_header_persistence` 底座彻底重构加固**：根除假冒 visible 状态越权写盘；解耦 `sectionCountChanged` 与 `sortIndicatorChanged` 信号风暴；加固 `restore_action()` 优雅回退与默认值保护。
-    - [ ] **Phase 3: 新股次新股与次日异动专有配置彻底解耦与脏数据自愈**：为 `NewStockPanel` 设立独立 `config/new_stock_columns.json`；无感迁移已有合法配置并清理 100 宽度脏数据。
-    - [ ] **Phase 4: ATS 主窗口生命周期与 Tab 切换闭环治理**：`main_window.closeEvent` 补齐各核心面板表头显式保存；`_on_top_tab_changed` 补齐次日异动 Tab 激活与按需刷新。
-    - [ ] **Phase 5: 全链路自动化验证与工程归档**：测试用例 100% 纯绿通过，全模块编译零违规。
+## 2026-09-26 09:05 ATS 系统底层关键链路与 8 大性能纠偏全流程优化落地闭环
+- [x] **【ATS 系统底层关键链路与 8 大性能纠偏全流程优化落地闭环】(`next_day_anomaly_watch.py`, `ats/ui/main_window.py`, `ats/ui/styles.py`, `ats/sector_data_aggregator.py`, `ats/ui/next_day_watch_dialog.py`, `20260926_0905_task.md`)**：
+    - [x] **宽表单次规范化与共享只读投影 (`_build_market_projection`)**：全市场 5000 行大表在一轮周期开始时完成单次代码规整与基础列裁剪，盘前候选过滤、补算及盘中观察全部直接借读投影，阻断多轮全表重复扫描与内存深拷贝；
+    - [x] **历史顺延期限与终结状态保真 (拒绝固定3日)**：接入 `_history_manifest_index` 缓存有效日期索引，按各标的自身的 `followup_trading_days` 独立判定；到期且未走强标的确定性结算并原子持久化 `MISSED` 终结事件；
+    - [x] **证据保真跳写 (Evidence-Fidelity Skip-Write)**：建立 `eval_dirty` 判定准则，仅在有新时序检查点追加、状态跃迁、新增确认事件时才落盘，彻底消除无变化时的虚假更新与 I/O 放大；
+    - [x] **持久待发 (Outbox) 与消费端 ACK 闭环**：`run_cycle` 持续重发跨日未 delivered 的 `NEXT_DAY_WATCH_CONFIRM` 事件；消费端（`main_window.py`）增加 `_seen_watch_event_ids` 幂等去重；`mark_events_delivered` 支持按 event_id 所属日期自动分发原子确认；
+    - [x] **Windows 互斥锁超时门禁与有界配置合并写入队列**：`_config_process_lock` 增加 1000ms 超时门禁杜绝死锁无限挂起；实现 `BoundedConfigWriter`（限容 500，同 key 合并），提供 `save_config_nodes_async` 将同步 I/O 剥离出主线程；`aboutToQuit` 执行 1000ms 超时同步 Flush；
+    - [x] **休市板块短 TTL 负缓存治理 (`_load_bidding_sector_data`)**：快照文件不存在时记录 30s 短周期 TTL 负缓存，消除休市与缺失时高频重复的无意义文件系统 stat 与 glob 目录扫描，支持 `invalidate_bidding_cache()` 显式失效；
+    - [x] **表格增量渲染脏单元格复用与按需测宽 (`next_day_watch_dialog.py`)**：实现 `_update_table_cell` 复用既有 item 仅在脏值时更新；废除高频刷新的 `resizeColumnsToContents()`，替换为 `_auto_size_table_once`，实现“常态更新不测宽，边界触发按需适配”，保护用户拖动列宽；
+    - [x] **微观耗时遥测注入与静态质量门禁**：注入 `elapsed_ms`, `projection_ms`, `eval_dirty` 等遥测指标；全项目 `compileall` exit=0，`git diff --check` 零违规；严格遵守用户约束，不添加或运行测试。
+
+## 2026-09-26 05:50 ATS 新股次新股 Tab 与次日异动候选池列持久化冲突彻底修复（已取消·不予实施）
+- [x] ~~**【新股次新股 Tab 与次日异动候选池列持久化冲突彻底修复】(`ats/ui/styles.py`, `ats/ui/new_stock_panel.py`, `ats/ui/next_day_watch_dialog.py`, `ats/ui/main_window.py`, `20260926_0550_task.md`)**~~：
+    - 根据用户指令，该项表头持久化冲突修改计划**取消，不予实施**；所有工作焦点与资源完全收敛并聚焦于 ATS 全流程性能优化方案的分析与规划。
+
 
 ## 2026-09-26 05:30 ATS 性能优化方案全流程深度审查与工程级闭环升级（仅方案文档）
 - [x] **【ATS 系统全流程性能优化方案深度审查与工程级闭环升级（纯规划·不实施）】(`design/ATS系统全流程性能优化分析与实施方案规划.md`, `20260926_0530_task.md`)**：

@@ -5552,8 +5552,7 @@ class ATSMainWindow(QMainWindow):
         today = time.strftime("%Y-%m-%d", now)
         try:
             from sys_utils import get_app_root, get_conf_path
-            from next_day_anomaly_watch import _read_json, mark_events_delivered, run_cycle
-            import glob
+            from next_day_anomaly_watch import _read_json, get_followup_candidates, mark_events_delivered, run_cycle
             root = get_app_root()
             data_dir = os.path.join(root, "datacsv")
             watch_path = os.path.join(data_dir, "next_day_anomaly_watch_%s.json" % today)
@@ -5564,17 +5563,7 @@ class ATSMainWindow(QMainWindow):
             candidates = watch.get("candidates", [])
             if not config.get("enabled"):
                 return
-            followup_candidates = []
-            for prior_watch_path in glob.glob(os.path.join(data_dir, "next_day_anomaly_watch_*.json")):
-                prior_watch = _read_json(prior_watch_path, {})
-                prior_date = str(prior_watch.get("target_trade_date", ""))
-                if not prior_date or prior_date >= today:
-                    continue
-                prior_eval = _read_json(os.path.join(data_dir, "next_day_anomaly_eval_%s.json" % prior_date), {})
-                for item in prior_eval.get("candidates", {}).values():
-                    types = {event.get("type") for event in item.get("events", [])}
-                    if types.intersection({"DAY_MISS", "UNVERIFIABLE"}) and not types.intersection({"DELAYED", "MISSED"}):
-                        followup_candidates.append(item.get("candidate", {}))
+            followup_candidates = get_followup_candidates(data_dir, today)
             if not candidates and not followup_candidates:
                 return
         except Exception as exc:
@@ -5612,11 +5601,20 @@ class ATSMainWindow(QMainWindow):
                     asof_date=str(watch.get("source_asof_trade_date", today)), target_date=today,
                     observed_at=observed_at, vwap_field="vwap")
                 event_ids = []
+                seen_event_ids = getattr(self, "_seen_watch_event_ids", None)
+                if seen_event_ids is None:
+                    seen_event_ids = set()
+                    self._seen_watch_event_ids = seen_event_ids
                 for signal in result.get("events", []):
                     signal["service"] = "ATS_TDXRealtimeFetcher"
-                    self.realtime_signal_signal.emit(signal)
-                    event_ids.append(signal.get("event_id"))
-                mark_events_delivered(data_dir, today, event_ids)
+                    eid = signal.get("event_id")
+                    if eid:
+                        event_ids.append(eid)
+                        if eid not in seen_event_ids:
+                            self.realtime_signal_signal.emit(signal)
+                            seen_event_ids.add(eid)
+                if event_ids:
+                    mark_events_delivered(data_dir, today, event_ids)
                 logger.info("[NextDayWatch][ATS_TDX] service=TDXRealtimeFetcher node=%s endpoint=%s:%s candidates=%d quotes=%d confirmed=%d elapsed=%.0fms",
                             endpoint[0], endpoint[1], endpoint[2], len(codes), len(frame), len(event_ids), (time.perf_counter() - started) * 1000)
             except Exception as exc:
