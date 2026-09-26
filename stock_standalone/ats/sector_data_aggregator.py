@@ -305,8 +305,20 @@ class SectorDataAggregator:
 
         return current_df, get_name_fn
 
-    def _load_bidding_sector_data(self) -> Dict[str, Any]:
-        """[SSOT] 权威加载最新的 bidding_session_data / 快照文件 (含 mtime 缓存)"""
+    def invalidate_bidding_cache(self) -> None:
+        """显式使板块竞价快照缓存与负缓存失效（支持外部手动刷新或换日）"""
+        self._cached_bidding_path = None
+        self._cached_bidding_mtime = None
+        if hasattr(self, '_cached_bidding_data'):
+            delattr(self, '_cached_bidding_data')
+        self._negative_bidding_expires_at = 0.0
+
+    def _load_bidding_sector_data(self, force: bool = False) -> Dict[str, Any]:
+        """[SSOT] 权威加载最新的 bidding_session_data / 快照文件 (含 mtime 缓存与短周期 TTL 负缓存)"""
+        now_mono = time.monotonic()
+        if not force and getattr(self, '_negative_bidding_expires_at', 0.0) > now_mono:
+            return {}
+
         import glob
         import gzip
         import re
@@ -335,7 +347,11 @@ class SectorDataAggregator:
                 pass
 
         if not path or not os.path.exists(path):
+            # 记录短周期 TTL 负缓存（30秒），消除高频重复的无意义文件系统 stat 与 glob 目录扫描
+            self._negative_bidding_expires_at = now_mono + 30.0
             return {}
+        else:
+            self._negative_bidding_expires_at = 0.0
 
         mtime = os.path.getmtime(path)
         if (getattr(self, '_cached_bidding_path', None) == path and

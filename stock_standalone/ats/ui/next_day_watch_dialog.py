@@ -73,6 +73,36 @@ _STATUS_DISPLAY = {
 }
 
 
+def _update_table_cell(table: QTableWidget, row: int, col: int, text: str,
+                       alignment: Optional[Qt.AlignmentFlag] = None,
+                       foreground: Optional[QColor] = None,
+                       is_numeric: bool = False):
+    """复用既有 QTableWidgetItem，仅在内容或样式发生变化时更新，降低 Qt 重构风暴。"""
+    item = table.item(row, col)
+    if item is None:
+        item = NumericTableWidgetItem(text) if is_numeric else QTableWidgetItem(text)
+        if alignment is not None:
+            item.setTextAlignment(alignment)
+        if foreground is not None:
+            item.setForeground(foreground)
+        table.setItem(row, col, item)
+    else:
+        if item.text() != text:
+            item.setText(text)
+        if alignment is not None and item.textAlignment() != alignment:
+            item.setTextAlignment(alignment)
+        if foreground is not None and item.foreground().color() != foreground:
+            item.setForeground(foreground)
+
+
+def _auto_size_table_once(table: QTableWidget, attr_name: str = "_has_auto_sized"):
+    """边界触发按需适配列宽，常态增量更新不测宽，保留用户手动调整的列宽。"""
+    if not getattr(table, attr_name, False) and table.rowCount() > 0:
+        table.resizeColumnsToContents()
+        setattr(table, attr_name, True)
+
+
+
 class NextDayWatchDataLoaderWorker(QThread):
     """Background worker for scanning and loading candidate files without freezing UI."""
 
@@ -1300,36 +1330,25 @@ class NextDayAnomalyWatchWidget(QWidget):
             delivered = "已投递" if ev.get("delivered") else "待投递"
             t_show = t_str.split("T")[-1][:8] if "T" in t_str else t_str
 
-            item_t = QTableWidgetItem(t_show)
-            item_code = QTableWidgetItem(code)
-            item_code.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            item_name = QTableWidgetItem(name)
-            item_name.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            item_type = QTableWidgetItem(ev_type)
-            item_type.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-
+            color = None
             if ev_type == "NEXT_DAY_WATCH_CONFIRM":
-                item_type.setForeground(QColor("#7ee787"))
+                color = QColor("#7ee787")
             elif ev_type == "DAY_MISS":
-                item_type.setForeground(QColor("#ff7b72"))
+                color = QColor("#ff7b72")
             elif ev_type == "DELAYED":
-                item_type.setForeground(QColor("#ffa657"))
+                color = QColor("#ffa657")
 
-            item_p = NumericTableWidgetItem(price)
-            item_pct = NumericTableWidgetItem(pct)
-            item_pct.setForeground(QColor("#ff7b72") if "+" in pct else QColor("#7ee787"))
-            item_del = QTableWidgetItem(delivered)
-            item_del.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            pct_color = QColor("#ff7b72") if "+" in pct else QColor("#7ee787")
 
-            self.table_events.setItem(r, 0, item_t)
-            self.table_events.setItem(r, 1, item_code)
-            self.table_events.setItem(r, 2, item_name)
-            self.table_events.setItem(r, 3, item_type)
-            self.table_events.setItem(r, 4, item_p)
-            self.table_events.setItem(r, 5, item_pct)
-            self.table_events.setItem(r, 6, item_del)
+            _update_table_cell(self.table_events, r, 0, t_show)
+            _update_table_cell(self.table_events, r, 1, code, alignment=Qt.AlignmentFlag.AlignCenter)
+            _update_table_cell(self.table_events, r, 2, name, alignment=Qt.AlignmentFlag.AlignCenter)
+            _update_table_cell(self.table_events, r, 3, ev_type, alignment=Qt.AlignmentFlag.AlignCenter, foreground=color)
+            _update_table_cell(self.table_events, r, 4, price, is_numeric=True)
+            _update_table_cell(self.table_events, r, 5, pct, foreground=pct_color, is_numeric=True)
+            _update_table_cell(self.table_events, r, 6, delivered, alignment=Qt.AlignmentFlag.AlignCenter)
 
-        self.table_events.resizeColumnsToContents()
+        _auto_size_table_once(self.table_events)
         self.lbl_eval_status.setText(
             f"⚡ 盘中后验引擎: 监控中候选标的 {len(candidates_eval)} 只 | 触发确认事件 {confirmed_count} 起 | 更新时间: {time.strftime('%H:%M:%S')}"
         )
@@ -1388,15 +1407,15 @@ class NextDayAnomalyWatchWidget(QWidget):
                 proofs.append("VWAP↑")
             proof_label = " | ".join(proofs) or "平稳"
 
-            self.table_checkpoints.setItem(r, 0, QTableWidgetItem(t_show))
-            self.table_checkpoints.setItem(r, 1, QTableWidgetItem(phase))
-            self.table_checkpoints.setItem(r, 2, NumericTableWidgetItem(hp))
-            self.table_checkpoints.setItem(r, 3, NumericTableWidgetItem(p))
-            self.table_checkpoints.setItem(r, 4, NumericTableWidgetItem(vw))
-            self.table_checkpoints.setItem(r, 5, NumericTableWidgetItem(vol))
-            self.table_checkpoints.setItem(r, 6, QTableWidgetItem(proof_label))
+            _update_table_cell(self.table_checkpoints, r, 0, t_show)
+            _update_table_cell(self.table_checkpoints, r, 1, phase)
+            _update_table_cell(self.table_checkpoints, r, 2, hp, is_numeric=True)
+            _update_table_cell(self.table_checkpoints, r, 3, p, is_numeric=True)
+            _update_table_cell(self.table_checkpoints, r, 4, vw, is_numeric=True)
+            _update_table_cell(self.table_checkpoints, r, 5, vol, is_numeric=True)
+            _update_table_cell(self.table_checkpoints, r, 6, proof_label)
 
-        self.table_checkpoints.resizeColumnsToContents()
+        _auto_size_table_once(self.table_checkpoints)
 
     def _on_event_double_clicked(self, item: QTableWidgetItem):
         row = item.row()
@@ -1442,19 +1461,17 @@ class NextDayAnomalyWatchWidget(QWidget):
             missed = int(s.get("missed", 0))
             rate = f"{(valid / total * 100):.1f}%" if total > 0 else "0.0%"
 
-            self.table_stats.setItem(r, 0, QTableWidgetItem(tdate))
-            self.table_stats.setItem(r, 1, QTableWidgetItem(strat_id))
-            self.table_stats.setItem(r, 2, QTableWidgetItem(ver))
-            self.table_stats.setItem(r, 3, NumericTableWidgetItem(str(total)))
-            self.table_stats.setItem(r, 4, NumericTableWidgetItem(str(valid)))
-            self.table_stats.setItem(r, 5, NumericTableWidgetItem(str(delayed)))
-            self.table_stats.setItem(r, 6, NumericTableWidgetItem(str(day_miss)))
-            self.table_stats.setItem(r, 7, NumericTableWidgetItem(str(missed)))
-            item_rate = NumericTableWidgetItem(rate)
-            item_rate.setForeground(QColor("#7ee787"))
-            self.table_stats.setItem(r, 8, item_rate)
+            _update_table_cell(self.table_stats, r, 0, tdate)
+            _update_table_cell(self.table_stats, r, 1, strat_id)
+            _update_table_cell(self.table_stats, r, 2, ver)
+            _update_table_cell(self.table_stats, r, 3, str(total), is_numeric=True)
+            _update_table_cell(self.table_stats, r, 4, str(valid), is_numeric=True)
+            _update_table_cell(self.table_stats, r, 5, str(delayed), is_numeric=True)
+            _update_table_cell(self.table_stats, r, 6, str(day_miss), is_numeric=True)
+            _update_table_cell(self.table_stats, r, 7, str(missed), is_numeric=True)
+            _update_table_cell(self.table_stats, r, 8, rate, foreground=QColor("#7ee787"), is_numeric=True)
 
-        self.table_stats.resizeColumnsToContents()
+        _auto_size_table_once(self.table_stats)
 
         delayed_winners = []
         for sf in stats_list:
@@ -1473,16 +1490,14 @@ class NextDayAnomalyWatchWidget(QWidget):
             h1d = str(cand.get("feature_values", {}).get("lasth1d", "--"))
             status = str(cand.get("status", "DELAYED"))
 
-            self.table_delayed_winners.setItem(r, 0, QTableWidgetItem(code))
-            self.table_delayed_winners.setItem(r, 1, QTableWidgetItem(name))
-            self.table_delayed_winners.setItem(r, 2, QTableWidgetItem(initial_date))
-            self.table_delayed_winners.setItem(r, 3, QTableWidgetItem("T+1~T+3后续交易日"))
-            self.table_delayed_winners.setItem(r, 4, NumericTableWidgetItem(h1d))
-            item_st = QTableWidgetItem(status)
-            item_st.setForeground(QColor("#ffa657"))
-            self.table_delayed_winners.setItem(r, 5, item_st)
+            _update_table_cell(self.table_delayed_winners, r, 0, code)
+            _update_table_cell(self.table_delayed_winners, r, 1, name)
+            _update_table_cell(self.table_delayed_winners, r, 2, initial_date)
+            _update_table_cell(self.table_delayed_winners, r, 3, "T+1~T+3后续交易日")
+            _update_table_cell(self.table_delayed_winners, r, 4, h1d, is_numeric=True)
+            _update_table_cell(self.table_delayed_winners, r, 5, status, foreground=QColor("#ffa657"))
 
-        self.table_delayed_winners.resizeColumnsToContents()
+        _auto_size_table_once(self.table_delayed_winners)
 
     def _on_delayed_double_clicked(self, item: QTableWidgetItem):
         row = item.row()
