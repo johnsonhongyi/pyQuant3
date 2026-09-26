@@ -1,3 +1,8 @@
 .pytest_temp/
 .pytest_cache/
 !config/next_day_watch_strategies.json
+!tests/test_ats_optimization_review.py
+!tests/test_ats_next_day_loader_bounded.py
+!tests/test_multi_day_realtime_updating.py
+!tests/test_channel_secondary_buy_strategy.py
+!trading_kernel/tests/test_auto_ladder.py

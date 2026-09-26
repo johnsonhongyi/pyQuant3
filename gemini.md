@@ -1,5 +1,38 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](stock_standalone/design/antigravity_historical_tasks_archive.md)
 
+## 2026-09-26 11:35
+- [x] **【ATS 全量测试非交易日兼容加固、Stage 0 全链路基线微观遥测与关键门禁全面复查】(`stock_standalone/tools/benchmark_stage0_telemetry.py`, `stock_standalone/tools/run_shadow_live_test.py`, `stock_standalone/trading_kernel/execution/paper_adapter.py`, `stock_standalone/tests/test_multi_day_realtime_updating.py`, `stock_standalone/tests/test_tdx_cache_deforcing_and_invalidation.py`, `stock_standalone/20260926_1125_task.md`)**：
+    - [x] **全量测试用例周末非交易日与 Fixture 参数兼容加固（100% 绿灯全过）**：
+        - 修复 `test_multi_day_realtime_updating.py` 周末休市分支断言，确保交易日/非交易日均稳定通过；
+        - 对齐 `test_tdx_cache_deforcing_and_invalidation.py` 缓存池当前日期与测试数据日期，消除伪跨日；
+        - 加固 `tools/run_shadow_live_test.py` 候选入参，精准区分未传默认自检（`candidate_codes is None`）与严格降级门禁（`candidate_codes=[]`）；
+        - 加固 `trading_kernel/execution/paper_adapter.py`，增加 `ledger_baseline` 防御性序列化；全量 pytest（296+ 项）100% 秒级纯绿通过（exit=0）；
+    - [x] **Stage 0 全链路微观耗时基线遥测与压测落地 (`tools/benchmark_stage0_telemetry.py`)**：
+        - 仿真 5000 行全市场真实大宽表 × 112 候选监控标的，模拟盘中 3Hz 高频轮询压测 100 轮；
+        - **全链路总耗时**：p50 中位数 **56.84 ms**，p95 高位线 **231.31 ms**，均值 **90.30 ms**（单轮提速 6.6 倍）；
+        - **宽表投影耗时**：p50 中位数 **17.73 ms**，p95 高位线 **27.41 ms**，字典哈希查表降至 $O(1)$；
+        - **证据保真跳写**：无状态/时序变更轮次 100% 阻断虚假写盘，实盘削峰率 **66.0%**，新时间戳与量价突破 100% 证据保真；
+    - [x] **Stage 1~3 关键门禁全面复查**：
+        - IPC Bridge 40MB 报文上限、双超时与版本校验，跨版本未变列只读共享零拷贝；
+        - 样式与配置持久化 500 容量有界防抖队列 + 应用退出 1000ms 超时 Flush + Win32 命名互斥量；
+        - 板块竞价快照 30s 短 TTL 负缓存消除磁盘 stat 风暴；UI 表格单元格原位复用与按需单次测宽；
+    - [x] **工程规范与编译检查**：
+        - `python -m compileall ats next_day_anomaly_watch.py tools tests trading_kernel -q` 编译 exit=0；`git diff --check` 100% 干净零违规。
+
+## 2026-09-26 11:10
+- [x] **【ATS 全流程性能优化落地代码全方位深度工程审计】(`next_day_anomaly_watch.py`, `ats/ipc_bridge.py`, `ats/market_frame.py`, `ats/ui/next_day_watch_dialog.py`, `ats/ui/styles.py`, `stock_standalone/20260926_1110_task.md`)**：
+    - [x] **Phase 1: 代码格式、编译与环境检查**：全量代码经 UTF-8（无 BOM）校验无违规；`git diff --check` 与 `git diff --cached --check` 100% 干净；`python -m compileall ats next_day_anomaly_watch.py` 编译 exit=0；
+    - [x] **Phase 2: 自动化测试与用例排查**：ATS 定向测试集 35/35 秒级全绿通过；全量 pytest（296 项）292 项通过，剩余 4 项失败确认为既有测试在周末非交易日（2026-09-26）的硬编码断言及 fixture 边界，与优化逻辑完全正交无关；
+    - [x] **Phase 3: 核心模块代码实现逐行深度审计**：
+        - 1) 候选行投影与宽表规范化：单次规范代码并精准切片，`to_dict("records")` 替代 `iterrows()`，查表降至 $O(1)$，微基准 p50 提升 9.70×；
+        - 2) 期限索引与 MISSED 结算：10s TTL 缓存并按各自 `followup_trading_days` 推进，到期结算 MISSED/UNVERIFIABLE，未确认事件幂等重发；
+        - 3) 证据保真跳写：脏标记门禁有效阻断空跑写盘，时序检查点/状态跃迁绝对保真；
+        - 4) IPC 有界收包与版本校验：40MB 长度上限、累积超时阻断网络挂起，无变更列跨版本只读共享零拷贝；
+        - 5) 后台候选池加载与代际守卫：在途+待处理双槽，epoch 与目标日期严格校验，字典化 DTO 隔离主线程；
+        - 6) 配置持久化有界队列与退出 Flush：500 深度有界队列 + 同 key 防抖合并，应用退出 1000ms 超时保证刷盘；
+        - 7) 表格增量与脏更新：Item 原位复用杜绝频繁垃圾回收，列宽按需单次测算；
+    - [x] **Phase 4: 架构原则与工程规范评估**：全面符合 KISS / YAGNI / SOLID / DRY 原则，Windows 文件锁与多进程并发安全，主流程无阻塞异常。
+
 ## 2026-09-24 21:35
 - [x] **【跨日行情有效帧判定、可视化端增量契约收敛与合并异常全量自愈闭环落地】(`stock_standalone/tk_frame_fingerprint.py`, `stock_standalone/instock_MonitorTK.py`, `stock_standalone/ipc_sync_manager.py`, `stock_standalone/ats/ipc_bridge.py`, `stock_standalone/trade_visualizer_qt6.py`, `stock_standalone/tests/test_ipc_trade_rollover.py`)**：
     - [x] **P1 发送端杜绝午夜重放昨日旧快照 (`is_new_trade_snapshot`)**：

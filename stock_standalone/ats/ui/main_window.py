@@ -1849,6 +1849,7 @@ class StockDetailDialog(QDialog):
 class ATSMainWindow(QMainWindow):
     realtime_data_signal = pyqtSignal(object)
     realtime_signal_signal = pyqtSignal(object)
+    next_day_snapshot_signal = pyqtSignal(object)
     db_data_loaded_signal = pyqtSignal(object)
 
     def __init__(self):
@@ -1875,6 +1876,7 @@ class ATSMainWindow(QMainWindow):
         self.volume_profiler = VolumeProfiler()
         self.session_snapshot = SessionSnapshot()
         self.signal_ledger._next_day_watch_event_ids = self.session_snapshot.load_consumed_event_ids()
+        self.signal_ledger._next_day_watch_event_outcomes = self.session_snapshot.load_event_outcomes()
         self.signal_ledger._next_day_watch_unpersisted_event_ids = set()
         self.window_manager = ATSWindowManager.get_instance()
         import threading
@@ -1936,6 +1938,7 @@ class ATSMainWindow(QMainWindow):
         # Connect thread-safe PyQt signals
         self.realtime_data_signal.connect(self._handle_realtime_data)
         self.realtime_signal_signal.connect(self._handle_realtime_signal)
+        self.next_day_snapshot_signal.connect(self._on_next_day_snapshot_saved)
 
         # Candidate confirmation uses ATS TDX quotes (not TK's slower market snapshot cadence).
         self._next_day_watch_poll_busy = False
@@ -5485,19 +5488,49 @@ class ATSMainWindow(QMainWindow):
 
     def _ack_next_day_watch_event(self, event_id, target_date):
         """ACK only after the consumer receipt and ledger snapshot are durable."""
+        self._ack_next_day_watch_events([event_id], target_date)
+
+    def _ack_next_day_watch_events(self, event_ids, target_date):
+        if getattr(self, '_next_day_ack_busy', False):
+            return  # The producer retains these receipts and retries on the next poll.
         try:
             from sys_utils import get_app_root
             from next_day_anomaly_watch import mark_events_delivered
             data_dir = os.path.join(get_app_root(), "datacsv")
             import threading
-            threading.Thread(target=mark_events_delivered,
-                args=(data_dir, target_date, [event_id]), daemon=True,
-                name="ATS_NextDayWatch_ACK").start()
+            self._next_day_ack_busy = True
+            def acknowledge():
+                try:
+                    mark_events_delivered(data_dir, target_date, event_ids)
+                except Exception as exc:
+                    logger.warning('[NextDayWatch] ACK deferred: %s', exc)
+                finally:
+                    self._next_day_ack_busy = False
+            threading.Thread(target=acknowledge, daemon=True, name="ATS_NextDayWatch_ACK").start()
         except Exception as exc:
-            logger.warning("[NextDayWatch] ACK scheduling failed event_id=%s: %s", event_id, exc)
+            self._next_day_ack_busy = False
+            logger.warning("[NextDayWatch] ACK scheduling failed: %s", exc)
+
+    def _persist_next_day_receipts(self):
+        def completed(result):
+            if not getattr(self, '_is_closing', False):
+                try:
+                    self.next_day_snapshot_signal.emit(result)
+                except RuntimeError:
+                    pass  # Source outbox remains pending after window destruction.
+        self.session_snapshot.save_snapshot_async(self.signal_ledger, completed)
+
+    def _on_next_day_snapshot_saved(self, result):
+        if not result.get('success') or getattr(self, '_is_closing', False):
+            return
+        ids = set(result.get('event_ids', ()))
+        self.signal_ledger._next_day_watch_unpersisted_event_ids.difference_update(ids)
+        self._ack_next_day_watch_events(ids, time.strftime('%Y-%m-%d'))
+        if self.signal_ledger._next_day_watch_unpersisted_event_ids:
+            self._persist_next_day_receipts()
 
     def _handle_realtime_signal(self, signal):
-        if not signal:
+        if not signal or getattr(self, '_is_closing', False):
             return
         if isinstance(signal, dict) and signal.get("type") == "NEXT_DAY_WATCH_CONFIRM":
             try:
@@ -5525,19 +5558,20 @@ class ATSMainWindow(QMainWindow):
                 if event_id in seen:
                     unpersisted = self.signal_ledger._next_day_watch_unpersisted_event_ids
                     if event_id in unpersisted:
-                        if self.session_snapshot.save_snapshot(self.signal_ledger, force=True):
-                            unpersisted.discard(event_id)
-                            self._ack_next_day_watch_event(event_id, target_date)
+                        self._persist_next_day_receipts()
                     else:
                         self._ack_next_day_watch_event(event_id, target_date)
                     return
                 last_observed = getattr(self, "_next_day_watch_last_observed", {})
-                if observed_at.timestamp() < last_observed.get(code, 0):
+                expired = target_date != datetime.date.today().isoformat()
+                if expired or observed_at.timestamp() < last_observed.get(code, 0):
                     seen.add(event_id)
                     self.signal_ledger._next_day_watch_unpersisted_event_ids.add(event_id)
-                    if self.session_snapshot.save_snapshot(self.signal_ledger, force=True):
-                        self.signal_ledger._next_day_watch_unpersisted_event_ids.discard(event_id)
-                        self._ack_next_day_watch_event(event_id, target_date)
+                    outcomes = getattr(self.signal_ledger, '_next_day_watch_event_outcomes', {})
+                    outcomes[event_id] = {'status': 'expired' if expired else 'superseded',
+                                          'target_trade_date': target_date}
+                    self.signal_ledger._next_day_watch_event_outcomes = outcomes
+                    self._persist_next_day_receipts()
                     return
                 service = getattr(self, "ledger_update_service", None)
                 if service is None and hasattr(self, "signal_ledger"):
@@ -5550,17 +5584,13 @@ class ATSMainWindow(QMainWindow):
                         required_frames=1, signal_tag="次日候选池确认", strategy_id=signal.get("strategy_id"),
                         strategy_version=signal.get("version"), target_trade_date=target_date,
                         event_id=event_id, reason=str(signal.get("reason", "")))
-                code_clean = self.signal_ledger.canonicalize_code(code)
-                if not result.wrote_ledger and code_clean not in self.signal_ledger.entries:
+                if not result.wrote_ledger:
                     return
                 seen.add(event_id)
                 self.signal_ledger._next_day_watch_unpersisted_event_ids.add(event_id)
-                if not self.session_snapshot.save_snapshot(self.signal_ledger, force=True):
-                    return
-                self.signal_ledger._next_day_watch_unpersisted_event_ids.discard(event_id)
                 last_observed[code] = observed_at.timestamp()
                 self._next_day_watch_last_observed = last_observed
-                self._ack_next_day_watch_event(event_id, target_date)
+                self._persist_next_day_receipts()
                 reason = signal.get("reason") or "次日候选池两帧确认"
                 self.status_bar.showMessage("🔔 [次日候选池] %s %s -> ATS观察 (%s)" %
                     (code, signal.get("name", ""), reason), 10000)
@@ -5576,46 +5606,49 @@ class ATSMainWindow(QMainWindow):
 
     def _poll_next_day_watch_tdx(self):
         """Poll the frozen cohort through TDX and evaluate on ATS's live quote cadence."""
-        if getattr(self, "_next_day_watch_poll_busy", False):
+        if getattr(self, "_next_day_watch_poll_busy", False) or getattr(self, "_is_closing", False):
             return
-        now = time.localtime()
-        today = time.strftime("%Y-%m-%d", now)
-        try:
-            from sys_utils import get_app_root
-            from next_day_anomaly_watch import (_pending_confirmation_events, _read_json,
-                get_followup_candidates)
-            root = get_app_root()
-            data_dir = os.path.join(root, "datacsv")
-            pending_events = _pending_confirmation_events(
-                data_dir, today, _read_json(os.path.join(data_dir, "next_day_anomaly_eval_%s.json" % today), {}))
-        except Exception as exc:
-            logger.debug("[NextDayWatch][ATS_TDX] manifest check skipped: %s", exc)
-            return
-
-        candidates, followup_candidates, watch = [], [], {}
-        can_evaluate = (now.tm_wday < 5 and
-            93000 <= now.tm_hour * 10000 + now.tm_min * 100 + now.tm_sec <= 150500)
-        if can_evaluate:
-            try:
-                from sys_utils import get_conf_path
-                from ats.strategy.next_day_watch_config_manager import NextDayWatchConfigManager
-                config_path = get_conf_path("next_day_watch_strategies.json", root)
-                _, config, _ = NextDayWatchConfigManager.load_config(config_path)
-                if config.get("enabled"):
-                    watch = _read_json(os.path.join(data_dir, "next_day_anomaly_watch_%s.json" % today), {})
-                    candidates = watch.get("candidates", [])
-                    followup_candidates = get_followup_candidates(data_dir, today)
-            except Exception as exc:
-                logger.debug("[NextDayWatch][ATS_TDX] evaluation config unavailable: %s", exc)
-        if not candidates and not followup_candidates and not pending_events:
-            return
-
         self._next_day_watch_poll_busy = True
         import threading
 
         def _worker():
             started = time.perf_counter()
             try:
+                now = time.localtime()
+                today = time.strftime("%Y-%m-%d", now)
+                try:
+                    from sys_utils import get_app_root
+                    from next_day_anomaly_watch import (_pending_confirmation_events, _read_json,
+                        get_followup_candidates)
+                    root = get_app_root()
+                    data_dir = os.path.join(root, "datacsv")
+                    pending_events = _pending_confirmation_events(
+                        data_dir, today, _read_json(os.path.join(data_dir, "next_day_anomaly_eval_%s.json" % today), {}))
+                except Exception as exc:
+                    logger.debug("[NextDayWatch][ATS_TDX] manifest check skipped: %s", exc)
+                    return
+
+                candidates, followup_candidates, watch = [], [], {}
+                can_evaluate = (now.tm_wday < 5 and
+                    93000 <= now.tm_hour * 10000 + now.tm_min * 100 + now.tm_sec <= 150500)
+                if can_evaluate:
+                    from ats.tdx_realtime_fetcher import TDXGlobalCachePool
+                    can_evaluate = TDXGlobalCachePool.is_trading_day(today)
+                if can_evaluate:
+                    try:
+                        from sys_utils import get_conf_path
+                        from ats.strategy.next_day_watch_config_manager import NextDayWatchConfigManager
+                        config_path = get_conf_path("next_day_watch_strategies.json", root)
+                        _, config, _ = NextDayWatchConfigManager.load_config(config_path)
+                        if config.get("enabled"):
+                            watch = _read_json(os.path.join(data_dir, "next_day_anomaly_watch_%s.json" % today), {})
+                            candidates = watch.get("candidates", [])
+                            followup_candidates = get_followup_candidates(data_dir, today)
+                    except Exception as exc:
+                        logger.debug("[NextDayWatch][ATS_TDX] evaluation config unavailable: %s", exc)
+                if not candidates and not followup_candidates and not pending_events:
+                    return
+
                 all_candidates = candidates + followup_candidates
                 meta = {str(item.get("code", "")).zfill(6): item for item in all_candidates if item.get("code")}
                 codes = sorted(meta)
@@ -5649,6 +5682,8 @@ class ATSMainWindow(QMainWindow):
                     endpoint = ("OUTBOX", "local", "")
                     events_to_dispatch = pending_events
                 for signal in events_to_dispatch:
+                    if getattr(self, "_is_closing", False):
+                        break
                     signal["service"] = "ATS_TDXRealtimeFetcher"
                     self.realtime_signal_signal.emit(signal)
                 logger.info("[NextDayWatch][ATS_TDX] service=TDXRealtimeFetcher node=%s endpoint=%s:%s candidates=%d quotes=%d confirmed=%d elapsed=%.0fms",
@@ -5659,7 +5694,11 @@ class ATSMainWindow(QMainWindow):
             finally:
                 self._next_day_watch_poll_busy = False
 
-        threading.Thread(target=_worker, daemon=True, name="ATS_NextDayWatch_TDX").start()
+        try:
+            threading.Thread(target=_worker, daemon=True, name="ATS_NextDayWatch_TDX").start()
+        except Exception:
+            self._next_day_watch_poll_busy = False
+            logger.exception("[NextDayWatch] Failed to start poll worker")
 
     def load_font_size(self) -> int:
         try:

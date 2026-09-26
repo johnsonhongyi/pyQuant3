@@ -14,7 +14,9 @@ import tempfile
 import threading
 import time
 from datetime import datetime
+from functools import wraps
 from typing import Any, Dict, Iterable, List, Optional, Tuple
+from ats.persistence_lock import DirectoryBusy, directory_write_lock, replace_with_retry
 
 
 _LOCK = threading.RLock()
@@ -47,7 +49,7 @@ def _atomic_json(path: str, value: Any) -> None:
             stream.flush()
             os.fsync(stream.fileno())
         try:
-            os.replace(tmp, path)
+            replace_with_retry(tmp, path)
             replaced = True
         except OSError:
             quarantine_dir = os.path.join(os.path.dirname(path), ".next_day_watch_quarantine")
@@ -462,6 +464,16 @@ def _candidate_row_lookup(projection: Dict[str, Any], candidates: List[Dict[str,
             for item in candidates if str(item.get("code", "")) in by_code}
 
 
+def _followup_is_terminal(item: Dict[str, Any]) -> bool:
+    status = item.get("candidate", {}).get("status")
+    if status in {"EARLY_VALID", "DELAYED", "MISSED"}:
+        return True
+    # Missing evidence on the target day does not end the frozen followup window.
+    return status == "UNVERIFIABLE" and any(
+        event.get("reason") == "followup_window_expired_without_quote_evidence"
+        for event in item.get("events", []) if isinstance(event, dict))
+
+
 def _history_manifest_index(data_dir: str, asof_date: str) -> List[Dict[str, Any]]:
     """Cache frozen manifests and index only cohorts whose own frozen window applies."""
     cache_key = os.path.abspath(data_dir)
@@ -478,16 +490,14 @@ def _history_manifest_index(data_dir: str, asof_date: str) -> List[Dict[str, Any
                     eval_path = os.path.join(data_dir, "next_day_anomaly_eval_%s.json" % trade_date)
                     evaluation = _read_json(eval_path, {})
                     items = evaluation.get("candidates", {}) if isinstance(evaluation, dict) else {}
-                    terminal_states = {"EARLY_VALID", "DELAYED", "MISSED", "UNVERIFIABLE"}
                     fully_terminal = bool(candidates)
                     for candidate in candidates:
                         key = str(candidate.get("code", "")) + ":" + str(candidate.get("strategy_id", ""))
                         item = items.get(key, {})
-                        tracked = item.get("candidate", candidate)
                         pending_confirmation = any(
                             event.get("type") == "NEXT_DAY_WATCH_CONFIRM" and not event.get("delivered")
                             for event in item.get("events", []) if isinstance(event, dict))
-                        if tracked.get("status") not in terminal_states or pending_confirmation:
+                        if not _followup_is_terminal(item) or pending_confirmation:
                             fully_terminal = False
                             break
                     if fully_terminal:
@@ -518,15 +528,14 @@ def _history_manifest_index(data_dir: str, asof_date: str) -> List[Dict[str, Any
 
 def get_followup_candidates(data_dir: str, asof_date: str) -> List[Dict[str, Any]]:
     """Return only unresolved candidates whose frozen trading-day window is active."""
-    active, terminal = [], {"EARLY_VALID", "DELAYED", "MISSED", "UNVERIFIABLE"}
+    active = []
     for cohort in _history_manifest_index(data_dir, asof_date):
         evaluation = _read_json(cohort["eval_path"], {})
         items = evaluation.get("candidates", {}) if isinstance(evaluation, dict) else {}
         for candidate, elapsed, horizon in cohort["scheduled"]:
             key = str(candidate.get("code", "")) + ":" + str(candidate.get("strategy_id", ""))
             item = items.get(key, {})
-            tracked = item.get("candidate", candidate)
-            if tracked.get("status") in terminal:
+            if _followup_is_terminal(item):
                 continue
             types = {event.get("type") for event in item.get("events", []) if isinstance(event, dict)}
             if types.intersection({"DAY_MISS", "UNVERIFIABLE"}) and not types.intersection({"DELAYED", "MISSED"}):
@@ -677,13 +686,27 @@ def _sector_evidence(category: Any, snapshot: Any, *, code: str = "", industry: 
     return result
 
 
+def _serialize_cycle(function):
+    @wraps(function)
+    def wrapped(*args, **kwargs):
+        try:
+            with _LOCK, directory_write_lock(kwargs["data_dir"]):
+                return function(*args, **kwargs)
+        except DirectoryBusy:
+            # Leave the outbox unacknowledged; a later poll can safely retry.
+            return {"status": "busy", "reason": "data_directory_locked", "events": []}
+    return wrapped
+
+
+@_serialize_cycle
 def run_cycle(df: Any, *, config_path: str, data_dir: str, asof_date: str,
               target_date: str, observed_at: Optional[str] = None,
               vwap_field: Optional[str] = None, sector_snapshot: Any = None,
               source_version: Any = None, observe: bool = True,
               force_freeze: bool = False) -> Dict[str, Any]:
     """Create the frozen next-session list and append candidate outcome facts."""
-    if df is None or getattr(df, "empty", True):
+    has_market = df is not None and not getattr(df, "empty", True)
+    if not has_market and (not observe or force_freeze):
         return {"status": "empty"}
     t_start = time.perf_counter()
     from ats.strategy.next_day_watch_config_manager import NextDayWatchConfigManager
@@ -703,12 +726,17 @@ def run_cycle(df: Any, *, config_path: str, data_dir: str, asof_date: str,
     with _LOCK:
         now = datetime.fromisoformat(observed_at)
         watch = _read_json(watch_path, None)
+        transient_watch = False
         # Manual补算 may repair a previously frozen empty list after the ATS
         # source data becomes available. Never mutate a non-empty frozen pool.
         if force_freeze and watch is not None and not watch.get("candidates"):
             watch = None
-        if watch is None and not force_freeze and (now.date().isoformat() != target_date or (now.hour, now.minute) > (9, 15)):
-            return {"status": "not_frozen", "candidate_count": 0, "events": []}
+        if watch is None and not force_freeze and (not has_market or now.date().isoformat() != target_date or (now.hour, now.minute) > (9, 15)):
+            if not observe or now.date().isoformat() != target_date:
+                return {"status": "not_frozen", "candidate_count": 0, "events": []}
+            # Historical expiry and outbox delivery must not depend on today's freeze.
+            watch = {"target_trade_date": target_date, "candidates": []}
+            transient_watch = True
 
         # Freeze needs every market row for strategy evaluation. Once frozen, only
         # materialize the current cohort and unresolved historical followups.
@@ -722,6 +750,7 @@ def run_cycle(df: Any, *, config_path: str, data_dir: str, asof_date: str,
             for cohort in history_cohorts:
                 projection_codes.update(str(candidate.get("code", ""))
                     for candidate, _elapsed, _horizon in cohort["scheduled"])
+        t_projection_start = time.perf_counter()
         market_projection = _build_market_projection(df, vwap_field, projection_codes)
         t_proj = time.perf_counter()
 
@@ -1021,14 +1050,14 @@ def run_cycle(df: Any, *, config_path: str, data_dir: str, asof_date: str,
                     continue
                 prior_types = {event.get("type") for event in item.get("events", []) if isinstance(event, dict)}
                 tracked = item.get("candidate", candidate)
-                if tracked.get("status") in {"EARLY_VALID", "DELAYED", "MISSED", "UNVERIFIABLE"}:
+                if _followup_is_terminal(item):
                     continue
                 code = str(candidate.get("code", ""))
                 row = market_projection.get("by_code", {}).get(code)
                 due = elapsed > horizon or (elapsed == horizon and now.hour >= 15)
                 if not row:
                     if due:
-                        if not prior_types.intersection({"UNVERIFIABLE", "DELAYED", "MISSED"}):
+                        if not _followup_is_terminal(item):
                             item.setdefault("events", []).append({"type": "UNVERIFIABLE", "date": target_date,
                                 "observed_at": observed_at, "reason": "followup_window_expired_without_quote_evidence"})
                             tracked["status"] = "UNVERIFIABLE"
@@ -1077,8 +1106,8 @@ def run_cycle(df: Any, *, config_path: str, data_dir: str, asof_date: str,
                     continue
                 # 在窗口最后一日收盘结算；若程序错过该日，之后首轮也补结算。
                 if due:
-                    if high is None or close is None:
-                        if not prior_types.intersection({"UNVERIFIABLE", "DELAYED", "MISSED"}):
+                    if elapsed > horizon or high is None or close is None:
+                        if not _followup_is_terminal(item):
                             item.setdefault("events", []).append({"type": "UNVERIFIABLE", "date": target_date,
                                 "observed_at": observed_at, "reason": "followup_window_expired_without_quote_evidence"})
                             tracked["status"] = "UNVERIFIABLE"
@@ -1124,7 +1153,7 @@ def run_cycle(df: Any, *, config_path: str, data_dir: str, asof_date: str,
         cur_stats_path = os.path.join(data_dir, "next_day_anomaly_stats_%s.json" % target_date)
         stats_rows = list(stats.values())
         old_current_stats = _read_json(cur_stats_path, {})
-        if not os.path.exists(cur_stats_path) or old_current_stats.get("strategies") != stats_rows:
+        if not transient_watch and (not os.path.exists(cur_stats_path) or old_current_stats.get("strategies") != stats_rows):
             _atomic_json(cur_stats_path,
                          {"target_trade_date": target_date, "updated_at": observed_at, "strategies": stats_rows})
 
@@ -1132,7 +1161,8 @@ def run_cycle(df: Any, *, config_path: str, data_dir: str, asof_date: str,
         events_to_send = _pending_confirmation_events(data_dir, target_date, evaluation)
         telemetry = {
             "elapsed_ms": round((time.perf_counter() - t_start) * 1000, 2),
-            "projection_ms": round((t_proj - t_start) * 1000, 2),
+            "preparation_ms": round((t_projection_start - t_start) * 1000, 2),
+            "projection_ms": round((t_proj - t_projection_start) * 1000, 2),
             "eval_dirty": eval_dirty,
             "pending_event_count": len(events_to_send),
         }
@@ -1155,7 +1185,7 @@ def mark_events_delivered(data_dir: str, target_date: str, event_ids: Iterable[s
         else:
             date_to_ids.setdefault(target_date, set()).add(eid)
 
-    with _LOCK:
+    with _LOCK, directory_write_lock(data_dir):
         for d, batch_ids in date_to_ids.items():
             path = os.path.join(data_dir, f"next_day_anomaly_eval_{d}.json")
             if not os.path.exists(path):

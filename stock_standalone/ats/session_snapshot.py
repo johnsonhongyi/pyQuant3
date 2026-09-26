@@ -15,6 +15,10 @@ import json
 import time
 import datetime
 import glob
+import tempfile
+import threading
+import copy
+from types import SimpleNamespace
 
 
 class SessionSnapshot:
@@ -42,6 +46,12 @@ class SessionSnapshot:
         self._last_summary_date = None
         self._last_snapshot_hash = None
         self._last_summary_hash = None
+        self._save_lock = threading.RLock()
+        self._capture_lock = threading.Lock()
+        self._capture_revision = 0
+        self._saved_revision = 0
+        self._async_lock = threading.Lock()
+        self._async_running = False
 
     def _normalize_data_for_hash(self, obj):
         """深度递归规范化数据结构，忽略时间戳与微小浮点扰动，聚焦核心交易决策数据
@@ -95,6 +105,63 @@ class SessionSnapshot:
         return False
 
     def save_snapshot(self, signal_ledger, force=False):
+        if not self.should_snapshot(force=force):
+            return False
+        try:
+            captured, revision = self._capture_ledger(signal_ledger)
+            return self._save_captured(captured, revision, force)
+        except Exception as exc:
+            print(f'[SessionSnapshot] Error capturing snapshot: {exc}')
+            return False
+
+    def _capture_ledger(self, ledger):
+        # Capture on the caller's thread; the disk writer never borrows live entries.
+        with self._capture_lock:
+            entries = {}
+            for code, entry in list(ledger.entries.items()):
+                data = copy.deepcopy(entry.to_dict())
+                entries[code] = SimpleNamespace(tier=entry.tier, to_dict=lambda value=data: value)
+            frozen = SimpleNamespace(entries=entries,
+                _next_day_watch_event_ids=set(getattr(ledger, '_next_day_watch_event_ids', set())),
+                _next_day_watch_event_outcomes=copy.deepcopy(getattr(ledger, '_next_day_watch_event_outcomes', {})))
+            self._capture_revision += 1
+            return frozen, self._capture_revision
+
+    def _save_captured(self, ledger, revision, force):
+        with self._save_lock:
+            if revision < self._saved_revision:
+                return False
+            success = self._save_snapshot_locked(ledger, force)
+            if success:
+                self._saved_revision = revision
+            return success
+
+    def save_snapshot_async(self, ledger, completed):
+        """At most one immutable snapshot in flight; callers retry on a busy result."""
+        with self._async_lock:
+            if self._async_running:
+                return False
+            self._async_running = True
+        try:
+            captured, revision = self._capture_ledger(ledger)
+            def write():
+                success = False
+                try:
+                    success = self._save_captured(captured, revision, True)
+                except Exception as exc:
+                    print(f'[SessionSnapshot] Async write deferred: {exc}')
+                finally:
+                    with self._async_lock:
+                        self._async_running = False
+                    completed({'success': success, 'event_ids': captured._next_day_watch_event_ids})
+            threading.Thread(target=write, daemon=True, name='ATS_ReceiptSnapshot').start()
+            return True
+        except Exception:
+            with self._async_lock:
+                self._async_running = False
+            return False
+
+    def _save_snapshot_locked(self, signal_ledger, force=False):
         """保存最新信号账本快照 (仅覆盖写入唯一的 signal_ledger_latest.json，绝不刷屏生成散落文件)
         
         Args:
@@ -104,6 +171,7 @@ class SessionSnapshot:
         if not self.should_snapshot(force=force):
             return False
         
+        temp_path = None
         try:
             now = datetime.datetime.now()
             # 统一使用固定唯一的 filename，不随时间生成新的 timestamp 散落文件
@@ -138,6 +206,7 @@ class SessionSnapshot:
                 },
                 'entries': entries_data,
                 'next_day_watch_event_ids': sorted(getattr(signal_ledger, '_next_day_watch_event_ids', set())),
+                'next_day_watch_event_outcomes': getattr(signal_ledger, '_next_day_watch_event_outcomes', {}),
                 'integrity': {
                     'entry_count': len(entries_data),
                     'fail_closed': True,
@@ -150,10 +219,13 @@ class SessionSnapshot:
                 return True
 
             # v2 使用同目录临时文件 + os.replace 原子覆盖，避免进程中断留下半截 JSON。
-            temp_path = filepath + '.tmp'
-            with open(temp_path, 'w', encoding='utf-8') as f:
+            fd, temp_path = tempfile.mkstemp(prefix='.signal_ledger_', suffix='.tmp', dir=self.log_dir)
+            with os.fdopen(fd, 'w', encoding='utf-8') as f:
                 json.dump(snapshot_data, f, ensure_ascii=False, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
             os.replace(temp_path, filepath)
+            temp_path = None
 
             self._last_snapshot_hash = current_hash
             self._last_snapshot_ts = time.time()
@@ -162,6 +234,12 @@ class SessionSnapshot:
         except Exception as e:
             print(f"[SessionSnapshot] Error saving snapshot: {e}")
             return False
+        finally:
+            if temp_path is not None:
+                try:
+                    os.remove(temp_path)
+                except OSError:
+                    pass
 
     def migrate_snapshot_v2(self, data):
         """将旧 signal_ledger 快照迁移到 v2；未知/损坏数据一律 fail-closed。"""
@@ -244,6 +322,11 @@ class SessionSnapshot:
         if not isinstance(event_ids, list):
             return set()
         return {str(event_id) for event_id in event_ids if event_id}
+
+    def load_event_outcomes(self):
+        snapshot = self.load_latest_snapshot()
+        outcomes = snapshot.get('next_day_watch_event_outcomes', {}) if snapshot else {}
+        return outcomes if isinstance(outcomes, dict) else {}
 
     def save_daily_summary(self, signal_ledger, force=False):
         """生成当日信号总结报告 (收盘后调用，自动覆盖更新为最新终盘总结)
