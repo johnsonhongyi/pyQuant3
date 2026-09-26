@@ -733,7 +733,15 @@ class NextDayAnomalyWatchWidget(QWidget):
 
     def _request_data_load(self, target_date: Optional[str], eval_only: bool):
         request = (target_date, bool(eval_only))
-        if self.active_worker is not None and self.active_worker.isRunning():
+        # finished may be queued even when isRunning() is already false.
+        if self.active_worker is not None:
+            if eval_only:
+                pending = self._pending_load_request
+                if pending is not None and pending[0] == target_date and not pending[1]:
+                    return  # A timer refresh must not downgrade a requested full load.
+                active = self._active_load_request
+                if pending is None and not active[1] and active[0] in (None, target_date):
+                    return
             if request == self._active_load_request:
                 self._pending_load_request = None
             elif request != self._pending_load_request:
@@ -746,14 +754,24 @@ class NextDayAnomalyWatchWidget(QWidget):
         worker = NextDayWatchDataLoaderWorker(target_date, eval_only=eval_only)
         self.active_worker = worker
         self._active_load_request = request
-        worker.loaded.connect(self._on_loader_result)
+        self._load_failed = False
+        worker.loaded.connect(lambda result, current=worker: self._on_loader_result(result, current))
         worker.finished.connect(lambda current=worker: self._on_loader_finished(current))
+        worker.finished.connect(worker.deleteLater)
         worker.start()
 
-    def _on_loader_result(self, result: Dict[str, Any]):
+    def _on_loader_result(self, result: Dict[str, Any], worker=None):
+        from PyQt6 import sip
+        if sip.isdeleted(self):
+            return
+        if worker is not None and worker is not self.active_worker:
+            return
+        if self._pending_load_request is not None:
+            return  # A newer requested date supersedes both data and date-list changes.
         if not isinstance(result, dict):
             return
         if result.get("error"):
+            self._load_failed = True
             logger.warning("[NextDayWatchWidget] Data load failed: %s", result["error"])
             self.status_message_changed.emit("候选池读取失败，保留上一份数据显示")
             return
@@ -772,6 +790,9 @@ class NextDayAnomalyWatchWidget(QWidget):
         self._on_stats_loaded(result.get("stats") or [])
 
     def _on_loader_finished(self, worker):
+        from PyQt6 import sip
+        if sip.isdeleted(self):
+            return
         if worker is not self.active_worker:
             return
         self.active_worker = None
@@ -780,7 +801,7 @@ class NextDayAnomalyWatchWidget(QWidget):
         self._pending_load_request = None
         if pending is not None:
             self._start_data_load(pending)
-        else:
+        elif not getattr(self, '_load_failed', False):
             self.status_message_changed.emit(f"就绪 | 数据已更新: {time.strftime('%H:%M:%S')}")
 
     def _on_dates_scanned(self, dates: List[str]):

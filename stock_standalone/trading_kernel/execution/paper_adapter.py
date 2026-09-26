@@ -575,7 +575,7 @@ class PaperExecutionAdapter(ExecutionAdapter):
                 "account": self.account.to_dict(),
                 "positions": positions_data,
                 "orders": clean_orders,
-                "ledger_baseline": self.ledger_baseline,
+                "ledger_baseline": getattr(self, "ledger_baseline", None),
                 "reconciliation": {
                     "paper_execution_ready": not bool(self._execution_block_reason),
                     "block_reason": self._execution_block_reason,

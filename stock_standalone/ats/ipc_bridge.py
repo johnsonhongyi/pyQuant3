@@ -22,6 +22,7 @@ from db_utils import SQLiteConnectionManager
 _MAX_IPC_CLIENTS = 2
 _MAX_IPC_PAYLOAD_BYTES = 256 * 1024 * 1024
 _IPC_FRAME_TIMEOUT_SEC = 30.0
+_IPC_IDLE_TIMEOUT_SEC = 5.0
 
 class IPCBridge:
     @staticmethod
@@ -49,6 +50,8 @@ class IPCBridge:
         Listens for real-time market data updates or signals from the main process.
         """
         self._listener_running = True
+        self._client_lock = threading.Lock()
+        self._active_client = None
         self.server_socket = None
         # One processor handles a client while at most one waits in the queue.
         self._client_queue = queue.Queue(maxsize=max(1, _MAX_IPC_CLIENTS - 1))
@@ -71,8 +74,17 @@ class IPCBridge:
                     except queue.Empty:
                         continue
                     try:
-                        self._handle_client(client, data_callback, signal_callback)
+                        with self._client_lock:
+                            process = self._listener_running
+                            if process:
+                                self._active_client = client
+                        if process:
+                            self._handle_client(client, data_callback, signal_callback)
+                        else:
+                            client.close()
                     finally:
+                        with self._client_lock:
+                            self._active_client = None
                         self._client_queue.task_done()
 
             threading.Thread(target=process_clients, daemon=True,
@@ -106,6 +118,22 @@ class IPCBridge:
         Stops the realtime socket listener server cleanly by closing the socket.
         """
         self._listener_running = False
+        if hasattr(self, '_client_lock'):
+            with self._client_lock:
+                active = self._active_client
+                if active is not None:
+                    try:
+                        active.shutdown(socket.SHUT_RDWR)
+                    except OSError:
+                        pass
+                    active.close()
+                while True:
+                    try:
+                        waiting = self._client_queue.get_nowait()
+                    except queue.Empty:
+                        break
+                    waiting.close()
+                    self._client_queue.task_done()
         if hasattr(self, 'server_socket') and self.server_socket:
             try:
                 self.server_socket.close()
@@ -120,7 +148,7 @@ class IPCBridge:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise TimeoutError("IPC frame receive deadline exceeded")
-            conn.settimeout(remaining)
+            conn.settimeout(min(remaining, _IPC_IDLE_TIMEOUT_SEC))
             packet = conn.recv(min(size - len(chunks), 65536))
             if not packet:
                 raise EOFError("incomplete IPC frame")

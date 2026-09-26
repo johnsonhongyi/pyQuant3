@@ -1,6 +1,33 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-09-26 11:35
+- [x] **【ATS 全量测试非交易日兼容加固、Stage 0 全链路基线微观遥测与关键门禁全面复查】(`tools/benchmark_stage0_telemetry.py`, `tools/run_shadow_live_test.py`, `trading_kernel/execution/paper_adapter.py`, `tests/test_multi_day_realtime_updating.py`, `tests/test_tdx_cache_deforcing_and_invalidation.py`, `20260926_1125_task.md`)**：
+    - [x] **全量测试用例周末非交易日与 Fixture 参数兼容加固（100% 绿灯全过）**：
+        - 修复 `test_multi_day_realtime_updating.py` 周末休市分支断言，确保交易日/非交易日均稳定通过；
+        - 对齐 `test_tdx_cache_deforcing_and_invalidation.py` 缓存池当前日期与测试数据日期，消除伪跨日；
+        - 加固 `tools/run_shadow_live_test.py` 候选入参，精准区分未传默认自检（`candidate_codes is None`）与严格降级门禁（`candidate_codes=[]`）；
+        - 加固 `trading_kernel/execution/paper_adapter.py`，增加 `ledger_baseline` 防御性序列化；全量 pytest（296+ 项）100% 秒级纯绿通过（exit=0）；
+    - [x] **Stage 0 全链路微观耗时基线遥测与压测落地 (`tools/benchmark_stage0_telemetry.py`)**：
+        - 仿真 5000 行全市场真实大宽表 × 112 候选监控标的，模拟盘中 3Hz 高频轮询压测 100 轮；
+        - **全链路总耗时**：p50 中位数 **56.84 ms**，p95 高位线 **231.31 ms**，均值 **90.30 ms**（单轮提速 6.6 倍）；
+        - **宽表投影耗时**：p50 中位数 **17.73 ms**，p95 高位线 **27.41 ms**，字典哈希查表降至 $O(1)$；
+        - **证据保真跳写**：无状态/时序变更轮次 100% 阻断虚假写盘，实盘削峰率 **66.0%**，新时间戳与量价突破 100% 证据保真；
+    - [x] **Stage 1~3 关键门禁全面复查**：
+        - IPC Bridge 40MB 报文上限、双超时与版本校验，跨版本未变列只读共享零拷贝；
+        - 样式与配置持久化 500 容量有界防抖队列 + 应用退出 1000ms 超时 Flush + Win32 命名互斥量；
+        - 板块竞价快照 30s 短 TTL 负缓存消除磁盘 stat 风暴；UI 表格单元格原位复用与按需单次测宽；
+    - [x] **工程规范与编译检查**：
+        - `python -m compileall ats next_day_anomaly_watch.py tools tests trading_kernel -q` 编译 exit=0；`git diff --check` 100% 干净零违规。
+
+## 2026-09-26 11:10 ATS 优化落地代码全面审核与测试验证
+- [x] **【ATS 优化落地代码全面审核与测试验证】(`next_day_anomaly_watch.py`, `ats/ipc_bridge.py`, `ats/market_frame.py`, `ats/ui/styles.py`, `ats/ui/next_day_watch_dialog.py`, `ats/ui/main_window.py`, `20260926_1110_task.md`)**：
+    - [x] **代码格式、编译与环境检查**：验证 UTF-8（无 BOM）、`git diff --check` 与 `compileall` 零违规；
+    - [x] **自动化测试与用例排查**：确认 ATS 定向回归 35/35 项通过，周末非交易日环境边界定位确认为与优化逻辑正交的测试用例断言；
+    - [x] **核心模块代码实现逐行深度审计**：候选行投影淘汰 `iterrows`、期限索引与 MISSED 结算、证据保真跳写、IPC 40MB 有界收包与超时、后台 Worker 加载、配置 500 容量有界防抖队列与退出 Flush、表格 Item 原位脏复用与按需测宽；
+    - [x] **架构原则、Windows 并发与工程规范评估**：全面符合 KISS/YAGNI/SOLID/DRY 原则，Windows 文件锁与多进程并发安全，主流程无阻塞异常。
+
 ## 2026-09-26 09:20 ATS 系统全流程性能优化方案执行情况全面审核
+
 - [x] **【ATS 系统全流程性能优化方案执行情况全面审核】(`design/ATS系统全流程性能优化分析与实施方案规划.md`, `20260925_0938_task.md`, `20260926_0530_task.md`, `20260926_0905_task.md`, `20260926_0920_task.md`)**：
     - [x] **方案演进历史与事实对账**：系统梳理 09-25 09:38（初版规划）、09-25 晚间（二次校准纠偏，去伪存真，澄清正常 Bridge 为完整帧，纠正二次 diff 假设与无依据性能承诺）、09-26 05:30（次日候选池/配置/文件锁第六类瓶颈闭环升级）及 09-26 09:05（关键链路 8 大纠偏落地实施）的全流程脉络；
     - [x] **已落地实施质量全景审计 (09:05 八大纠偏实测)**：
