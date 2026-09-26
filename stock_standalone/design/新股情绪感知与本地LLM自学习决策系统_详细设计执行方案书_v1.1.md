@@ -1,9 +1,9 @@
-# 新股情绪感知与本地 LLM 自学习决策系统 — 详细设计执行方案书 v1.1 (复审修订与需求追踪版)
+# 新股情绪感知与本地 LLM 自学习决策系统 — 详细设计执行方案书 v1.1-R9 最终审核修订版
 
 > **文档性质**：工程级详细设计执行方案书（**仅订正对齐方案，生产代码零变动**）<br>
 > **编制日期**：2026-09-26<br>
 > **版本号**：v1.1<br>
-> **状态**：v1.1-R5 复审修订版；D0 锚点与 SQLite 超时规格已订正，源计划仍有实施前置项
+> **状态**：v1.1-R9 最终审核修订版；保留 Antigravity / Codex 双模 Provider 方向，但 Provider 可用性、数据出域与源计划准入项须按本版门槛验证，未验证前不得启用 LLM 旁路
 > **关联底层文档**：
 > - [新股情绪感知与T1交易决策系统_计划书_v0.2.0.md](新股情绪感知与T1交易决策系统_计划书_v0.2.0.md)
 > - [新股情绪感知与T1交易决策系统_计划书_v0.2.0.docx](新股情绪感知与T1交易决策系统_计划书_v0.2.0.docx)
@@ -31,10 +31,12 @@
   - [2.8 Gate 5: 7 状态操作节点状态机与 TDE 真实终审](#ch2-8)
   - [2.9 华大海天伪强反例四项联合判据与回归断言](#ch2-9)
   - [2.10 Historical Cut-Off 历史截断回放引擎与时间沙箱](#ch2-10)
-- [叁、本地 LLM 自学习决策系统（Ollama JSON Schema 约束）](#ch3)
+  - [2.11 全系统提示与说明信息精简中文映射字典 (Map-Driven UI & Log Messages)](#ch2-11)
+  - [2.12 四级立体观测与集中仲裁详情透视体系](#ch2-12)
+- [叁、本地 LLM 自学习决策系统（Antigravity / Codex 双模 Provider 架构）](#ch3)
   - [3.1 四不原则与降级守护](#ch3-1)
-  - [3.2 Ollama 原生结构化输出（JSON Schema 替代纯 Prompt）](#ch3-2)
-  - [3.3 三大智能体 Agent 规范](#ch3-3)
+  - [3.2 多 Backend 适配层架构与 Provider 部署资格](#ch3-2)
+  - [3.3 三大智能体 Agent 规范与严格信封 Schema](#ch3-3)
   - [3.4 本地时序向量库（BGE-M3 1024 维修正）](#ch3-4)
   - [3.5 离线自学习闭环（SFT / DPO 训练样本生成器）](#ch3-5)
 - [肆、数据 Schema、数据库迁移与新增文件清单](#ch4)
@@ -74,7 +76,7 @@
 | **17** | **Gate 4/5 对类型错误与 NaN 边界检查不完整** | 覆盖天数类型错误可能抛异常；非有限价格/RR 可能绕过普通大小比较 | 对上市交易日数、覆盖天数、现价及 TradePlan 区间逐项做类型、有限性与正值校验；RR 必须是有限正数且达标，否则失败关闭。 |
 | **18** | **Agent 元数据与严格 JSON Schema 冲突** | 顶层 `additionalProperties=false` 不允许文中另加的 request/time/model/evidence 字段，三类 Agent 的负载也并非同一结构 | 改用严格信封结构 `{agent_type, metadata, payload}`；每类 Agent 使用独立 payload Schema，信封和负载均拒绝额外字段，并在 Worker 本地校验。 |
 | **19** | **既有 768 维向量库没有升级路径** | 新旧向量写入同一表时维度/模型版本不兼容，检索或写入失败 | 新建版本化 1024 维表并记录 embedding 模型版本；离线重嵌入与校验完成后原子切换活动表指针，保留旧表供回滚，禁止混写。 |
-| **20** | **回放时间戳混合时区处理未定义** | pandas 对混合 naive/aware 或不同偏移时区可能返回非统一 dtype，截断前排序/比较不可靠 | loader/沙箱逐项规范时间戳：naive 按 Asia/Shanghai 解释，aware 转为 Asia/Shanghai；解析失败拒绝样本，规范化后再排序与截断。 |
+| **20** | **回放时间戳混合时区处理未定义** | pandas 对混合 naive/aware 或不同偏移时区可能返回非统一 dtype，截断前排序/比较不可靠 | loader/沙箱逐项规范时间戳：aware 时间转为 Asia/Shanghai；naive 时间只允许按版本化数据源清单中的 IANA `source_timezone` 显式本地化，未声明时区或不兼容时间戳拒绝样本，禁止依赖主机本地时区；时区标识随来源清单版本/哈希记录，规范化后再排序与截断。 |
 | **21** | **分时指标数值范围与布尔伪数值未校验** | bool、越界比率或负换手等异常输入可能通过“数值类型”检查污染判据 | 指标校验拒绝 bool/非有限值，并检查换手非负、VWAP 上方比例及收盘位置在 `[0,1]`、回撤非负；不合格时返回阻断结果。 |
 | **22** | **VWAP 快照未核对代码与计算基准** | 错标的快照或指数代理 VWAP 可能被用于个股放行 | Gate 4 核对 `vwap.code == code` 且 `basis == "turnover"`；期限满足后仅接受 VWAPFactory 定义的已知结构枚举，缺失/未知一律阻断。 |
 | **23** | **RiskGate 输入与批准订单可能不是同一标的/价格** | Gate 用当前价算 RR，但实际批准单取 `signal.price`；代码不一致或过期信号会造成错误标的/价位订单 | 入口核对 intent/signal/候选代码和行情时点一致，并将信号年龄限制在 0~300 秒；RiskGate 返回后复核 BUY 订单代码、价格区间、有限正仓位并按批准价格重算 RR。 |
@@ -88,7 +90,7 @@
 | **31** | **“无锁、0 阻塞、100% CPU/GPU 隔离”超出可证明范围** | `multiprocessing.Queue`、Windows 调度器及 GPU 推理服务都不能提供硬实时或绝对抢占保证 | 删除绝对保证措辞；把保证收敛为不等待模型、不在关键路径做 I/O/IPC/推理，并用基线对照压测作为启用门槛。未达标时禁用 LLM，规则主线照常运行。 |
 | **32** | **Worker 故障和缓存时效未形成真实健康契约** | `_worker_alive` 固定为 `True`；仅按接收时间 TTL 可能继续消费模型停机前的旧建议 | 增加旁路监督心跳、超时熔断和 Worker 重启状态；快照仅供 UI/离线记录。建议必须同时满足接收 TTL、行情 `as_of_time` 新鲜度及当前 request 版本，否则由旁路清除建议并异步记录故障，交易路径始终走规则决策。 |
 | **33** | **响应信封无法可靠关联请求标的与新旧顺序** | Market Regime payload 没有 `code`，信封 metadata 也未定义 ticker；桥接器可能丢弃响应或让旧响应覆盖新响应 | Worker 注入并校验 `request_id/scope_id/ticker/as_of_time/generated_at`；响应须匹配待处理请求、标的和期限，按每标的递增序号拒绝迟到/重复结果。 |
-| **34** | **降低 Python Worker 优先级被误当作限制 Ollama 推理资源** | 实际矩阵计算可能运行在独立 Ollama 服务进程/GPU 上；Worker 的 Windows 优先级不会限制该服务或显存占用 | 分别说明受管 Ollama 服务的启动/资源策略与外部服务的限制；不擅自改外部服务优先级。记录 CPU/GPU 压力测试，资源争用超出门槛时关闭模型旁路。 |
+| **34** | **降低 Python Worker 优先级被误当作限制 Provider 推理资源** | 模型计算可能位于独立服务、远端 API 或 GPU kernel；Worker 的 Windows 优先级不会限制这些资源 | 按所选 Provider 识别推理实际运行位置和可控资源；不擅自改外部服务优先级。记录 CPU/GPU 竞争压力测试；争用超出门槛时禁用模型旁路。 |
 | **35** | **LLM 建议的交易影响边界与安全默认值不明确** | “仅输出 Proposal”与“可作微调参考”可能被解释为能直接改评分或放宽门禁 | v1.x 默认 LLM 仅展示/留痕，不改变分数、状态、阈值、TradePlan、仓位或订单；未完成人工审批、影子评估和独立配置前，正负修正均为 `0.0`。 |
 | **36** | **7 状态操作状态机只有文件名，没有状态与转换契约** | Gate 结果仅为 ENTRY/WATCH/BLOCK，无法验收 ARMED、ENTERED、HOLD_T1 与 EXIT_READY 的转换 | 正文补齐七态定义、转换条件、成交确认边界、T+1 锁定、阻断恢复和每次转换的原因/时间/快照版本。 |
 | **37** | **回放时间沙箱只截断行情 bars，不能证明所有输入无未来泄漏** | 新闻、公告、市场横截面、申购/流通信息、向量证据或标签仍可能来自 cutoff 之后 | 所有特征与检索证据必须携带 `available_at/published_at` 并由统一 cutoff loader 截断；仅未来结果评估器可在决策完成后读取标签。 |
@@ -104,6 +106,33 @@
 | **47** | **SQLite 迁移正文未落实 15 秒锁等待承诺** | 迁移示例使用 `sqlite3.connect(db_path)` 默认超时，与审查摘要声称的 `timeout=15.0` 不一致 | 连接改为 `sqlite3.connect(db_path, timeout=15.0)`，保留 `BEGIN IMMEDIATE`、异常回滚和连接关闭；并发锁行为仍须在迁移测试中验收。 |
 | **48** | **历史数据库新增状态列默认值伪装成有效市场状态** | 旧记录被回填为 `NORMAL` / `DISTRIBUTION`，可能被报表或回放误当作真实计算结果，与缺失数据失败关闭原则冲突 | 旧行统一回填 `UNKNOWN`，读取适配层将其映射为 `data_ready=False`；只有完成真实计算的新记录才写入有效状态，不用中性状态默认值冒充历史事实。 |
 | **49** | **Stage 0 基础设施实施与第捌节“实施前先完成字段/配置清单”顺序不够明确** | 可能先写配置、迁移或 Worker 代码，再发现必需输入、来源或阈值归属尚未确定 | Stage 0 先设准入设计门：冻结数据字典、来源/可用时点/缺失策略和配置归属；清单审定后才进入基础设施编码与性能基线，Stage 1 策略接入仍须通过回放及压力门禁。 |
+| **50** | **首日 (D0) 新股缺少多日通道结构导致 Gate 5 无法生成 TradePlan** | D0 标的因无法匹配现有通道企稳策略而在 Gate 5 被 100% 阻断，首日放行成为死路径 | 明确首日 (D0) 定位为 OBSERVE 观察与锚点沉淀日；Gate 3 核验通过后直接收敛为 `WATCH` 观察待命，首日坚决不触发 ENTRY 派单，次日及以上具备真实双锚后才允许进入交易。 |
+| **51** | **Gate 3 双锚失守使用最低价导致快速 Reclaim 无法在日内生效** | 日内最低价单调不升，早盘击穿后全天永久判定为失守，与“快速回收可恢复观察”描述产生冲突 | 澄清时空边界：Gate 3 单次买入门禁坚持“日内击穿即当日严禁买入 (BLOCK)”；Reclaim 专属于盘后/次日状态机流转逻辑（决定次日是否继续移入候选池），杜绝当日假回收追高。 |
+| **52** | **Pre-Heat 估值评分遇到亏损新股缺少类型与除零防御** | 未盈利新股 PE 为 None/NaN/负数时，减法与除法抛出 TypeError 中断主轮询 | 增加入参类型与数值有限性防御；亏损或缺失 PE 标的取保守折价分 (0.0)，严禁抛出异常中断系统。 |
+| **53** | **分时换手爬升差分器的休市分钟/交易所时区边界不完整** | 固定减去 90 分钟无法正确处理部分午休重叠、时区偏移、跨日、时间倒退及恰好零有效交易分钟 | 将时间戳归一为 Asia/Shanghai，校验交易日与采样顺序；按采样区间和 11:30~13:00 的实际重叠计算有效交易分钟。有效时间为零、负值、换手回退或断流时重置基准并返回 `None`，不使用 epsilon 分母。 |
+| **54** | **界面说明与提示信息随意拼接且缺乏统一中文规范** | 状态栏、表格单元格与详情窗使用冗长英文字符串或临时拼接文字，影响界面可读性与统计一致性 | 建立全局统一的 Map 精简中文信息字典（`STATUS_CN_MAP`, `VETO_REASON_CN_MAP`, `LRRM_CN_MAP` 等），全系统一律查表获取 2~6 字精炼中文信息。 |
+| **55** | **强制单一绑定外部 Ollama 服务造成部署维护负担，不支持本地现成的 Antigravity / Codex 工具链** | 用户需额外安装配置沉重的外部独立大模型服务；无法复用当前环境已就绪的大模型特权与配置 | 抽象可插拔 `BaseLLMBackend` 架构；保留 Antigravity SDK/CLI 优先、Codex CLI 备选、Ollama 可选的 Provider 方向；是否可复用既有模型、是否本机推理及运行依赖须经 R8 部署门禁验证，不将 CLI/SDK 进程等同于本地模型。 |
+| **56** | **Antigravity SDK 的本地推理、模型继承与依赖假设未证实** | `LocalAgentConfig(model="inherit")` 不能证明继承 IDE 模型/凭据；SDK 文档将本机 LiteRT 与 Gemini/Vertex API、本机 OpenAI 兼容服务分为不同模式，且 LiteRT 需要显式模型文件与运行依赖。当前方案中的 Qwen 示例也不能据此认定为 LiteRT 可用模型。 | v1.1-R8 仅把 `local_litert` 作为首选本机候选；必须使用既有依赖，不得擅自新增第三方包，且须提供受支持模型文件、SDK/运行时版本和 Windows 兼容验收证据。`local_openai_compatible` 尚无本方案内的配置/工厂/测试闭环，明确延期为扩展项；移除 `inherit`。默认 `allow_remote=false`，未配置或未就绪即关闭 LLM 旁路，不能静默改走云端。 |
+| **57** | **Antigravity/Codex 示例使用非规范调用方式，且没有兑现原生结构化输出** | SDK 仅把 Schema 写进提示词后解析文本；agy 使用未核实的 `--headless --prompt`；Codex 使用不支持的 `exec --prompt`。Markdown 剥离不能替代 Provider 原生 Schema 约束。 | SDK 使用选定本机配置支持的 `response_schema` 与 `structured_output()`；agy 使用 `-p/--prompt` 或 stdin、`--output-format json/stream-json` 和 `--json-schema` 并只接受成功信封中的 `structured_output`；Codex 使用 `codex exec` 位置参数/`-` stdin 与 `--output-schema`。所有输出还须本地 Schema/业务校验；Schema 不匹配即 `INVALID` 并规则降级。 |
+| **58** | **CLI 超时后子进程、输出与提示数据没有资源/隐私边界** | `communicate(timeout=...)` 超时后示例未终止/回收进程；stdout/stderr 无字节上限，异常直接回传 stderr；长提示放入命令行参数可能泄漏或触发 Windows 参数长度限制。 | 提示内容经 stdin 传输；设置响应与错误输出字节上限、并发排水及错误脱敏；超时/超量时终止并回收整个子进程树（Windows Job Object 或已验证等效机制），清理临时 Schema 文件；只记录错误码与截断后的脱敏诊断，不记录密钥、完整提示或原始行情输入。 |
+| **59** | **未知 Provider 静默切回默认后端，且“本地 CLI”掩盖数据出域边界** | 工厂函数遇未知配置会默认选择 Antigravity SDK；Codex/Antigravity CLI 的进程运行在本机，不代表推理或输入留在本机，自动回退可能改变数据处理地点与认证身份。 | 未知后端、缺依赖、认证失败或权限不符一律禁用旁路并报告配置错误；禁止 Provider 间自动切换。`remote_api` 必须显式允许并记录批准的字段范围/数据目的地；不得发送账户、订单、凭据或可识别个人信息；云端未获明确启用时只允许经验证的本机推理。SDK Agent/CLI 的工具、MCP、子 Agent 与工作目录权限须最小化并验明生效配置。 |
+| **60** | **LLM 请求超时配置与 Worker 契约冲突** | YAML 配置为 15 秒，Worker 文字契约又固定 30 秒；CLI 自身超时和 Worker deadline 也未定义谁是硬截止。 | 由唯一配置源定义 Worker 硬截止（本版示例统一为 30 秒），Provider 子超时不得超过该值；队列过期时间、熔断与回收使用同一单调时钟预算。配置缺失/冲突即禁用旁路，不在代码内另设默认超时。 |
+| **61** | **D0 的 Gate 结果 `WATCH` 与七态生命周期状态混用** | 状态机仅有七态且没有 `WATCH`；“D0 通过后收敛为 WATCH”易被实现成非法状态或绕开 `OBSERVE` 转换。 | D0 的评估结果为 `WATCH`，生命周期保持 `OBSERVE`（首日仅观察并沉淀锚点）；`WATCH` 只属于 Gate 决策结果，不新增生命周期状态，也不产生 TradePlan/ENTRY 派单。 |
+| **62** | **精简中文 Map 与 JSONL 审计字段要求互相冲突** | 2.11 要求 JSONL/因果链全部只输出 2~6 字中文，但审计、回放和机器统计需要稳定枚举码；2.12 示例又直接显示 `LOOSE/NORMAL/PRE_HOT/HOT/G2/G3` 英文。 | 机器日志保留稳定英文 `code/state`、数值、时点及版本字段，可附 `label_cn/detail_cn`；用户可见徽章/表格状态使用 Map 中文短标签，详细说明单独展示。补齐所有状态/错误/未知值映射并用覆盖率验收；改正 2.12 英文 UI 示例。 |
+| **63** | **换手差分的午休扣除可能把零交易时间压成 0.01 分钟并制造速率尖峰** | `max(0.01, elapsed_min - 90)` 在恰好跨过 11:30~13:00 且没有有效交易分钟时仍会计算，极小分母可能放大换手速率；`.time()` 又未把时区归一到交易所时区。 | 按交易所时区计算采样区间与 11:30~13:00 午休区间的真实重叠时长；仅用正的有效交易分钟作分母。有效交易时长为零、时间倒退、跨交易日或时区/行情时间无效时重置样本并返回 `None`，禁止以 epsilon 分母造速率；配置化交易时段并覆盖边界样例。 |
+| **64** | **Pre-Heat 仅防御 PE，其他评分入参仍可能异常或生成伪分** | `online_sub_multiple`、`winning_rate_pct`、`float_shares_wan`、`scarcity_rank` 等缺少有限数、类型、范围和缺失状态校验，`None/NaN/布尔值` 可触发异常或被默认分掩盖；`winning_rate_pct` 名称与代码中 `0.08` 的比例单位也不一致。 | 对所有评分输入先执行类型、有限性、单位/范围与 `as_of` 新鲜度校验；明确 `winning_rate` 使用 `[0,1]` 比例或 `[0,100]` 百分数并统一公式/字段名。关键项缺失则返回 `UNREADY` 且不可形成候选，禁止静默给中性分。仅 PE 的已定义亏损/缺失策略可取保守估值分，并明确记录该降级原因。 |
+| **65** | **324 项测试规划尚未体现 Provider 原生契约与本轮新增边界** | 既有 LLM 测试数未明确覆盖 SDK/CLI 原生 Schema、配置工厂真实构造参数、超时杀树、超限输出、未知 Provider、数据出域拒绝与 D0/午休/Pre-Heat 新边界。 | 扩充既有测试矩阵的断言清单，不以“测试项总数”代替覆盖证明；加入各 Provider 契约与工厂构造测试、Windows 超时回收与输入/输出边界、未知后端失败关闭、远端默认禁用、Schema/信封拒绝，以及 D0 状态、午休零有效时长、时区/跨日和 Pre-Heat 非有限/过期输入回归用例。实际实现阶段执行并提交结果；本轮只订正方案。 |
+| **66** | **Provider 目录与配置工厂的可用性声明超出当前执行契约** | SDK LiteRT 要求既有 `google-antigravity`、`litert-lm`、受支持 `.litertlm` 模型及 Windows/GPU 实测；当前默认 YAML 的模型路径为空。仅非空检查不足以确认绝对路径、文件存在、模型/运行时兼容。 | SDK 只能作为“首选候选”，空路径及任何依赖/模型/权限预检失败均保持旁路关闭；Stage 0 核验已安装依赖、绝对路径、文件哈希/模型 ID、版本、设备与结构化输出契约，不安装缺失依赖。当前配置示例为空路径是安全的未就绪模板，不表示已经可运行。 |
+| **67** | **Antigravity CLI 的工具权限声明与调用样例不闭环** | `agy` headless 会读取本机权限设置，活跃工作区文件读写可能自动允许；`stream-json` 会列出可用工具，但示例只解析最终结果，没有在执行前证明工具被禁用。专用 cwd 本身不构成文件/命令隔离。 | v1.1-R8 将 `antigravity_cli` 标记为 `enabled: false`；除非 Stage 0 证明启动前生效的操作系统强制沙箱、无工具/MCP/子 Agent、最小化环境变量和限定网络策略，否则工厂必须拒绝实例化。仅在返回结果后检查工具事件不算预防控制。参见[Headless 权限与事件契约](https://antigravity.google/docs/cli/headless/)。 |
+| **68** | **远端字段审批只在文字中要求，调用入口没有强制检查** | `allow_remote=true` 单一布尔值无法证明用户批准的服务目的地、字段范围或审批版本；若 Worker 把完整情绪上下文直接传给 CLI，可能超出授权范围。 | 远端 Provider 默认关闭；打开前必须具备非空 `approval_id`、固定 `destination` 与版本化逐 Agent 字段 allowlist。请求先经唯一 sanitizer 投影，只向后端传允许字段；无审批、未知字段或无法识别目标时，在请求构造前失败关闭。不得转发账号、订单、凭据、个人信息或原始日志。 |
+| **69** | **SDK 调用超时未定义 LiteRT 子服务的取消和清理证据** | `asyncio.wait_for()` 只能说明协程等待超时，不能单独证明 SDK 管理的 loopback 推理服务/GPU 工作已停止；残留服务可能占用资源并影响后续周期。 | Worker 对 SDK 请求设置进程级监督：超时先执行 SDK 有界关闭；在关闭期限内未确认子服务退出，则终止并回收整个 Worker/其子进程树、熔断并重建隔离实例。验收需证明无残留 PID、队列无旧响应、ATS/Qt 性能门槛仍通过；否则禁用本机推理旁路。 |
+| **70** | **Pydantic 输出与纯 JSON IPC 的序列化类型未统一** | Provider 示例使用 `.model_dump()` 的 Python 模式，日期、枚举等类型可能不能直接按 IPC 的 JSON 标量契约编码。 | 所有 Provider 统一使用 `.model_dump(mode="json")`，再用严格 JSON 编码（拒绝 NaN/Infinity）校验；Worker 信封元数据由 Worker 注入。编码失败返回 `INVALID` 并走规则降级。 |
+| **71** | **Pre-Heat 把所有非法 PE 都当成“缺失 PE”而继续打分** | 示例将布尔值、字符串、NaN/Infinity、缺失值、亏损 PE 全部映射为 `CONSERVATIVE_MISSING_PE`，可掩盖类型损坏并仍形成候选。 | 仅 `None` 或明确的有限非正 PE 依已批准的亏损/缺失规则取保守分并留下状态；bool、非数值和 NaN/Infinity 返回 `UNREADY`。其他关键字段缺失/过期同样不形成候选。 |
+| **72** | **换手差分器示例未导入时区/间隔依赖** | 独立代码片段导入只有 `datetime`，却直接使用 `timezone` 与 `timedelta`；若按文件清单独立落地会触发 `NameError`。 | 显式导入 `datetime, timedelta, timezone`；并验证 `code`、`trading_date`、时区有效性。测试覆盖独立导入、naive/invalid tz、跨交易日及午休重叠边界。 |
+| **73** | **Pre-Heat 多源输入共用单一 TTL，与逐字段时效契约不一致** | 发行价、申购中签率、主题热度和股本数据更新频率不同；单一 24 小时 TTL 可能把过期短周期数据误作 READY。 | 改为每个必需字段独立配置 `input_max_age_seconds_by_field`；字段集合必须与数据字典完全一致，任何 TTL 缺失/无效即配置失败。YAML 样例保留空表，Stage 0 明确各字段来源、`available_at` 和 TTL 后才能启用候选计算。 |
+| **74** | **Pre-Heat 的 PE 缺失值与“未取到/未检查”状态无法区分** | `pe_ratio is None` 当前直接进入保守计分；即使要求时间戳，也不能证明供应方已完成查询并确认该字段确实缺失，数据链路故障可能被当成亏损/缺失 PE。 | 增加必需 `pe_status`：仅 `OBSERVED` 且数值存在，或 `MISSING_CONFIRMED` 且 PE 查询时间戳新鲜时可继续；`UNREADY`、状态与值矛盾或缺少查询时间戳一律返回 `UNREADY`。已确认缺失/有限非正值才可按批准规则保守计 0 分。 |
+| **75** | **PreHeatConfig 的数值配置可被 bool 强制转换，且冻结对象仍持有可变 TTL 字典** | Python 中 `bool` 是 `int` 子类，`float(True)` 会变成 `1.0`；`frozen=True` 不会冻结内部 dict，调用方可在初始化后改写 TTL，破坏配置哈希与决策可复现性。 | YAML 载入和 dataclass 校验均显式拒绝 bool/非数值/非有限值；配置对象复制并以只读映射保存逐字段 TTL，禁止初始化后修改。加入布尔阈值/权重/TTL 拒绝及外部字典变更不影响配置对象的用例。 |
+| **76** | **时区校验只检查 `tzinfo is not None`，仍可能接受没有有效 UTC 偏移的时间戳** | 自定义 `tzinfo` 可返回 `utcoffset() is None`；将其直接 `astimezone()` 可能按主机本地时区解释，导致不同机器的 freshness 判断不一致。 | 内部 evaluation/source/行情 `datetime` 必须满足 `dt.tzinfo is not None and dt.utcoffset() is not None`；外部 naive 回放值只允许按版本化数据源清单中的 IANA `source_timezone` 显式本地化。该字段必须进入来源 manifest 与回放配置哈希；无声明时区、非法时区或无效偏移即失败关闭。归一为明确交易所时区后再计算年龄。 |
 
 ---
 
@@ -338,10 +367,14 @@ class IPORegimeFSM:
 
 **新增模块**：`ats/strategy/ipo_preheat_engine.py`
 
+调用方必须提供每个字段对应的 `source_as_of`、PE 查询状态 `pe_status` 与回放/实盘统一时钟 `evaluation_time`；所有时点须带有效 UTC 偏移、不得晚于评估时点，且不得超过配置 TTL。关键字段缺失、无效或过期返回 `data_status=UNREADY`，下游只能将其作为不可用样本，不能用 0 分或默认稀缺度代替。只有来源明确标记 `MISSING_CONFIRMED`（且 PE 查询时间戳新鲜）或观测到有限非正 PE，才按明示保守规则给估值 0 分并记录 `valuation_status=CONSERVATIVE_MISSING_PE`；查询未完成、状态/值矛盾或时间戳缺失一律 `UNREADY`。
+
 ```python
 """IPO 上市前先验潜力评估引擎 (纯静态先验数据，无未来函数，加入盯盘池门禁)"""
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Any, Dict, List, Mapping, Optional, Tuple
+from datetime import date, datetime, timedelta, timezone
+from types import MappingProxyType
 import math
 
 
@@ -354,11 +387,15 @@ class PreHeatConfig:
     weight_scarcity: float
     weight_theme: float
     weight_capital: float
+    input_max_age_seconds_by_field: Mapping[str, float]
 
     def __post_init__(self) -> None:
         weights = (self.weight_valuation, self.weight_subscription,
                    self.weight_scarcity, self.weight_theme, self.weight_capital)
-        if any(not math.isfinite(w) or w < 0 for w in weights) or not math.isclose(sum(weights), 1.0):
+        numeric_values = weights + (self.watch_candidate_threshold, self.hot_candidate_threshold)
+        if (any(isinstance(v, bool) or not isinstance(v, (int, float))
+                or not math.isfinite(v) for v in numeric_values)
+                or any(w < 0 for w in weights) or not math.isclose(sum(weights), 1.0)):
             raise ValueError("PreHeatConfig 权重必须为非负有限值且总和为 1.0")
         if (not math.isfinite(self.watch_candidate_threshold)
                 or not math.isfinite(self.hot_candidate_threshold)
@@ -366,18 +403,46 @@ class PreHeatConfig:
                 or self.watch_candidate_threshold >= self.hot_candidate_threshold
                 or self.hot_candidate_threshold > 100):
             raise ValueError("PreHeatConfig 阈值必须满足 0 <= watch < hot <= 100")
+        required_fields = {
+            "issue_price", "float_shares_wan", "pe_ratio", "industry_pe_median",
+            "online_sub_multiple", "winning_rate_pct", "scarcity_rank", "hot_themes",
+        }
+        if (not isinstance(self.input_max_age_seconds_by_field, Mapping)
+                or set(self.input_max_age_seconds_by_field) != required_fields
+                or any(isinstance(ttl, bool) or not isinstance(ttl, (int, float))
+                       or not math.isfinite(ttl) or ttl <= 0
+                       for ttl in self.input_max_age_seconds_by_field.values())):
+            raise ValueError("PreHeatConfig 必须为每个必需输入配置独立正有限 TTL")
+        object.__setattr__(self, "input_max_age_seconds_by_field",
+                           MappingProxyType(dict(self.input_max_age_seconds_by_field)))
+
+    @staticmethod
+    def _config_number(value: Any, field_name: str) -> float:
+        if (isinstance(value, bool) or not isinstance(value, (int, float))
+                or not math.isfinite(value)):
+            raise ValueError(f"PreHeatConfig {field_name} 必须为有限数值")
+        return float(value)
 
     @classmethod
     def from_mapping(cls, section: Dict[str, Any]) -> "PreHeatConfig":
+        if not isinstance(section, dict) or not isinstance(section.get("weights"), dict):
+            raise ValueError("PreHeatConfig 配置节或 weights 类型无效")
         weights = section.get("weights", {})
+        ttl_values = section.get("input_max_age_seconds_by_field")
+        if not isinstance(ttl_values, dict):
+            raise ValueError("PreHeatConfig input_max_age_seconds_by_field 必须为映射")
         return cls(
-            watch_candidate_threshold=float(section["watch_candidate_threshold"]),
-            hot_candidate_threshold=float(section["hot_candidate_threshold"]),
-            weight_valuation=float(weights["valuation"]),
-            weight_subscription=float(weights["subscription"]),
-            weight_scarcity=float(weights["scarcity"]),
-            weight_theme=float(weights["theme"]),
-            weight_capital=float(weights["capital_structure"]),
+            watch_candidate_threshold=cls._config_number(section["watch_candidate_threshold"], "watch_candidate_threshold"),
+            hot_candidate_threshold=cls._config_number(section["hot_candidate_threshold"], "hot_candidate_threshold"),
+            weight_valuation=cls._config_number(weights["valuation"], "weight_valuation"),
+            weight_subscription=cls._config_number(weights["subscription"], "weight_subscription"),
+            weight_scarcity=cls._config_number(weights["scarcity"], "weight_scarcity"),
+            weight_theme=cls._config_number(weights["theme"], "weight_theme"),
+            weight_capital=cls._config_number(weights["capital_structure"], "weight_capital"),
+            input_max_age_seconds_by_field={
+                key: cls._config_number(value, f"ttl.{key}")
+                for key, value in ttl_values.items()
+            },
         )
 
 
@@ -386,13 +451,16 @@ class IPOPreHeatSnapshot:
     code: str
     name: str
     preheat_score: float = 0.0          # 0~100 综合分
-    preheat_tier: str = "PRE_COLD"      # PRE_HOT (>=75) / PRE_WARM (55~74) / PRE_COLD (<55)
+    preheat_tier: str = "PRE_COLD"      # PRE_HOT / PRE_WARM / PRE_COLD；分界只读 PreHeatConfig
     valuation_score: float = 0.0        # 估值分位 (0~25)
     subscription_score: float = 0.0     # 申购热度 (0~25)
     scarcity_score: float = 0.0         # 题材稀缺度 (0~20)
     theme_match_score: float = 0.0      # 主线共振 (0~20)
     capital_structure_score: float = 0.0 # 筹码弹性 (0~10)
     is_watch_candidate: bool = False    # 是否允许进入次日重点盯盘池
+    data_status: str = "READY"           # READY / UNREADY；UNREADY 不可参与筛选
+    valuation_status: str = "READY"      # READY / CONSERVATIVE_MISSING_PE
+    unready_reason_code: Optional[str] = None
     as_of_date: str = ""
 
 
@@ -408,21 +476,94 @@ class IPOPreHeatEngine:
         name: str,
         issue_price: float,
         float_shares_wan: float,
-        pe_ratio: float,
+        pe_ratio: Optional[float],
+        pe_status: str,  # OBSERVED / MISSING_CONFIRMED / UNREADY；缺省必须失败关闭
         industry_pe_median: float,
         online_sub_multiple: float,
         winning_rate_pct: float,
         scarcity_rank: int = 3,         # 1(极稀缺)~5(同质化)
         hot_themes: Optional[List[str]] = None,
         as_of_date: str = "",
+        source_as_of: Optional[Dict[str, datetime]] = None,
+        evaluation_time: Optional[datetime] = None,
     ) -> IPOPreHeatSnapshot:
-        # 1. 估值分位评分 (0~25分): PE 折价越大得分越高
-        pe_discount = (industry_pe_median - pe_ratio) / max(industry_pe_median, 1.0)
-        s_val = max(0.0, min(25.0, 12.5 + pe_discount * 25.0))
+        def unready(reason: str) -> IPOPreHeatSnapshot:
+            return IPOPreHeatSnapshot(
+                code=code or "", name=name or "", preheat_score=0.0,
+                preheat_tier="UNREADY", is_watch_candidate=False,
+                data_status="UNREADY", unready_reason_code=reason,
+                as_of_date=as_of_date or "",
+            )
+
+        if not isinstance(code, str) or not code.strip() or not isinstance(name, str) or not name.strip():
+            return unready("identity_missing")
+        if (not isinstance(evaluation_time, datetime) or evaluation_time.tzinfo is None
+                or evaluation_time.utcoffset() is None):
+            return unready("evaluation_time_invalid")
+        exchange_tz = timezone(timedelta(hours=8), "Asia/Shanghai")
+        evaluation_time = evaluation_time.astimezone(exchange_tz)
+        required_sources = {
+            "issue_price", "float_shares_wan", "pe_ratio", "industry_pe_median",
+            "online_sub_multiple", "winning_rate_pct", "scarcity_rank", "hot_themes",
+        }
+        if not isinstance(source_as_of, dict) or not required_sources.issubset(source_as_of):
+            return unready("source_timestamp_missing")
+        for field_name in required_sources:
+            source_time = source_as_of[field_name]
+            if (not isinstance(source_time, datetime) or source_time.tzinfo is None
+                    or source_time.utcoffset() is None):
+                return unready("source_timestamp_invalid")
+            age_seconds = (evaluation_time - source_time.astimezone(exchange_tz)).total_seconds()
+            if (age_seconds < 0
+                    or age_seconds > self.config.input_max_age_seconds_by_field[field_name]):
+                return unready("source_stale_or_future")
+
+        numeric_inputs = {
+            "issue_price": (issue_price, 0.0, None),
+            "float_shares_wan": (float_shares_wan, 0.0, None),
+            "industry_pe_median": (industry_pe_median, 0.0, None),
+            "online_sub_multiple": (online_sub_multiple, 0.0, None),
+            "winning_rate_pct": (winning_rate_pct, 0.0, 100.0),
+        }
+        for field_name, (value, minimum, maximum) in numeric_inputs.items():
+            if (isinstance(value, bool) or not isinstance(value, (int, float))
+                    or not math.isfinite(value) or value <= minimum
+                    or (maximum is not None and value > maximum)):
+                return unready(f"{field_name}_invalid")
+        if (isinstance(scarcity_rank, bool) or not isinstance(scarcity_rank, int)
+                or scarcity_rank not in {1, 2, 3, 4, 5}):
+            return unready("scarcity_rank_invalid")
+        if (not isinstance(hot_themes, list)
+                or any(not isinstance(theme, str) or not theme.strip() for theme in hot_themes)):
+            return unready("hot_themes_invalid")
+        try:
+            parsed_as_of_date = date.fromisoformat(as_of_date)
+        except (TypeError, ValueError):
+            return unready("as_of_date_invalid")
+        if parsed_as_of_date > evaluation_time.date():
+            return unready("as_of_date_future")
+
+        # 1. 估值分位评分 (0~25分): 防御亏损股/缺失 PE，不抛异常
+        valuation_status = "READY"
+        if (not isinstance(pe_status, str) or pe_status not in {"OBSERVED", "MISSING_CONFIRMED"}
+                or (pe_status == "OBSERVED" and pe_ratio is None)
+                or (pe_status == "MISSING_CONFIRMED" and pe_ratio is not None)):
+            return unready("pe_status_value_mismatch")
+        if (pe_ratio is not None and (
+                isinstance(pe_ratio, bool) or not isinstance(pe_ratio, (int, float))
+                or not math.isfinite(pe_ratio))):
+            return unready("pe_ratio_invalid")
+        if pe_ratio is None or pe_ratio <= 0:
+            s_val = 0.0  # 亏损或缺失 PE 标的取保守折价分，避免除零或 TypeError
+            valuation_status = "CONSERVATIVE_MISSING_PE"
+        else:
+            pe_discount = (industry_pe_median - pe_ratio) / max(industry_pe_median, 1.0)
+            s_val = max(0.0, min(25.0, 12.5 + pe_discount * 25.0))
 
         # 2. 申购热度评分 (0~25分): 彻底修复 s_sub = s_val 变量覆盖 Bug！
         sub_ratio_score = min(15.0, math.log10(max(online_sub_multiple, 1.0)) * 3.75)
-        win_rate_score = max(0.0, min(10.0, (0.08 - winning_rate_pct) * 125.0))
+        # winning_rate_pct 单位固定为百分数 [0, 100]，8.0 表示 8%。
+        win_rate_score = max(0.0, min(10.0, (8.0 - winning_rate_pct) * 1.25))
         s_sub = max(0.0, min(25.0, sub_ratio_score + win_rate_score))  # 保持 s_val 独立完整！
 
         # 3. 题材稀缺性评分 (0~20分)
@@ -469,6 +610,8 @@ class IPOPreHeatEngine:
             theme_match_score=round(s_theme, 1),
             capital_structure_score=round(s_cap, 1),
             is_watch_candidate=(total >= self.config.watch_candidate_threshold),
+            data_status="READY",
+            valuation_status=valuation_status,
             as_of_date=as_of_date,
         )
 ```
@@ -483,6 +626,7 @@ class IPOPreHeatEngine:
 """IPO 上市盘中实时动能感知引擎 (含 6 大非线性饱和/反转函数及换手速率真实计算)"""
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple, Any
+from datetime import datetime, timedelta, timezone
 import math
 
 
@@ -648,7 +792,7 @@ class IPOLiveHeatEngine:
 
 ```python
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Dict, Optional, Tuple
 import math
 
@@ -660,28 +804,63 @@ class _TurnoverPoint:
 
 
 class TurnoverClimbTracker:
-    def __init__(self) -> None:
+    def __init__(self, lunch_start: time, lunch_end: time, max_sample_gap_minutes: float) -> None:
+        if (not isinstance(lunch_start, time) or not isinstance(lunch_end, time)
+                or lunch_start >= lunch_end
+                or isinstance(max_sample_gap_minutes, bool)
+                or not isinstance(max_sample_gap_minutes, (int, float))
+                or not math.isfinite(max_sample_gap_minutes) or max_sample_gap_minutes <= 0):
+            raise ValueError("换手差分交易时段/最大采样间隔配置无效")
+        self.lunch_start = lunch_start
+        self.lunch_end = lunch_end
+        self.max_sample_gap_minutes = float(max_sample_gap_minutes)
         self._last: Dict[Tuple[str, str], _TurnoverPoint] = {}
 
     def update(
         self, code: str, trading_date: str, cumulative_pct: float, observed_at: datetime
     ) -> Optional[float]:
+        if not isinstance(code, str) or not code.strip() or not isinstance(trading_date, str):
+            return None
+        try:
+            expected_date = date.fromisoformat(trading_date)
+        except ValueError:
+            return None
         key = (code, trading_date)
         if (isinstance(cumulative_pct, bool) or not isinstance(cumulative_pct, (int, float))
                 or not math.isfinite(cumulative_pct) or cumulative_pct < 0
-                or not isinstance(observed_at, datetime) or observed_at.tzinfo is None):
+                or not isinstance(observed_at, datetime) or observed_at.tzinfo is None
+                or observed_at.utcoffset() is None):
+            self._last.pop(key, None)
+            return None
+        exchange_tz = timezone(timedelta(hours=8), "Asia/Shanghai")
+        observed_local = observed_at.astimezone(exchange_tz)
+        if observed_local.date() != expected_date:
             self._last.pop(key, None)
             return None
         previous = self._last.get(key)
-        self._last[key] = _TurnoverPoint(observed_at, cumulative_pct)
         if previous is None:
+            self._last[key] = _TurnoverPoint(observed_local, cumulative_pct)
             return None
-        elapsed_min = (observed_at - previous.observed_at).total_seconds() / 60.0
+        previous_local = previous.observed_at.astimezone(exchange_tz)
+        if (previous_local.date() != observed_local.date()
+                or observed_local <= previous_local):
+            self._last[key] = _TurnoverPoint(observed_local, cumulative_pct)
+            return None
+        elapsed_min = (observed_local - previous_local).total_seconds() / 60.0
+        lunch_start = datetime.combine(previous_local.date(), self.lunch_start, tzinfo=exchange_tz)
+        lunch_end = datetime.combine(previous_local.date(), self.lunch_end, tzinfo=exchange_tz)
+        overlap_start = max(previous_local, lunch_start)
+        overlap_end = min(observed_local, lunch_end)
+        lunch_overlap_min = max(0.0, (overlap_end - overlap_start).total_seconds() / 60.0)
+        active_elapsed_min = elapsed_min - lunch_overlap_min
+
         delta_pct = cumulative_pct - previous.cumulative_pct
-        if elapsed_min <= 0 or delta_pct < 0:
-            self._last.pop(key, None)
+        self._last[key] = _TurnoverPoint(observed_local, cumulative_pct)
+        if (active_elapsed_min <= 0 or delta_pct < 0
+                or active_elapsed_min > self.max_sample_gap_minutes):
+            # 无有效交易分钟、换手回退或断流时只重置基准点，不制造速率尖峰。
             return None
-        return delta_pct / elapsed_min
+        return delta_pct / active_elapsed_min
 ```
 
 ---
@@ -928,7 +1107,8 @@ def evaluate_gate4_vwap(
     if getattr(vwap, "code", None) != code or getattr(vwap, "basis", None) != "turnover":
         return False, "Gate 4 阻断: VWAP 标的代码不匹配或不是个股成交额基准"
     try:
-        if (as_of_time.tzinfo is None or isinstance(max_vwap_stale_seconds, bool)
+        if (not isinstance(as_of_time, datetime) or as_of_time.tzinfo is None
+                or as_of_time.utcoffset() is None or isinstance(max_vwap_stale_seconds, bool)
                 or not isinstance(max_vwap_stale_seconds, int) or max_vwap_stale_seconds <= 0):
             raise ValueError("行情时点必须带时区且 VWAP 最大延迟阈值必须为正数")
         snapshot_time = datetime.strptime(
@@ -1019,7 +1199,7 @@ Gate 的 `ENTRY/WATCH/BLOCK` 是一次评估结果；业务生命周期另由以
 | `EXIT_READY` | 退出条件成立且存在可卖数量 | 仅在成交回报确认清仓后回 `OBSERVE`；部分成交继续留在 `EXIT_READY` 并按剩余持仓管理 |
 | `BLOCKED` | 任一硬门禁失败或必需输入缺失 | 仅在阻断原因解除、取得新鲜快照并完整重跑全部门禁后到 `OBSERVE/ARMED`，不得直接跳 `ENTRY_READY` |
 
-每次迁移必须落下 `from_state/to_state/transition_reason/as_of_time/snapshot_version`。Gate 2 `CAUTION` 留在 `ARMED` 观察，不授予开仓许可。Gate 3 双锚失守先阻断当次交易；若之后出现来源有效、成交量支持的快速 reclaim，可将后续状态恢复到 `ARMED/WATCH`，但当日不得直接回 `ENTRY_READY`。`EXIT_READY` 表示退出条件待执行，不等同于已成交退出。
+每次迁移必须落下 `from_state/to_state/transition_reason/as_of_time/snapshot_version`。Gate 2 `CAUTION` 留在 `ARMED` 观察，不授予开仓许可。D0 评估的 Gate 结果为 `WATCH`，生命周期仍为 `OBSERVE`，不得把 Gate 结果写入生命周期状态。Gate 3 双锚失守先阻断当次交易；若之后出现来源有效、成交量支持的快速 reclaim，可将后续状态恢复到 `ARMED`，但当日不得直接回 `ENTRY_READY`。`EXIT_READY` 表示退出条件待执行，不等同于已成交退出。
 
 ```python
 """六层门禁终审仲裁编排器 (真实对接 TradePlan, 买入区间与风控限额)"""
@@ -1207,7 +1387,10 @@ class GateOrchestrator:
                 passport.causal_chain.append(f"Gate 3 阻断: 上市首日跌破配置化开盘支撑或发行价 (日内低点 {intraday_low:.2f} / 现价 {current_price:.2f})")
                 return passport
             passport.gate3_anchor_passed = True
-            passport.causal_chain.append("Gate 3 放行: 上市首日开盘与发行价格支撑有效 (免检历史双锚)")
+            # 闭环定位：首日 (D0) 为 OBSERVE 观察与锚点沉淀日，坚决不开仓；通过后收敛为 WATCH 待命并沉淀首日锚点
+            passport.final_decision = "WATCH"
+            passport.causal_chain.append("Gate 3 观察: 上市首日开盘与发行支撑有效，定位为首日观察与锚点沉淀期 (WATCH，次日起开放交易)")
+            return passport
         else:
             # 上市次日及后续 (D1+): 必须具备合法封存的 ListingAnchors，严格核验日内最低价与现价双锚失守
             if not isinstance(listing_anchors, ListingAnchors) or listing_anchors.code != code:
@@ -1307,13 +1490,16 @@ class GateOrchestrator:
             passport.causal_chain.append("Gate 5 风控阻断: RiskGate 上下文缺失或信号代码不匹配")
             return passport
         try:
+            if (not isinstance(market_as_of_time, datetime)
+                    or market_as_of_time.tzinfo is None
+                    or market_as_of_time.utcoffset() is None):
+                raise ValueError("Gate 5 行情时点必须带有效 UTC 偏移")
             market_time = market_as_of_time.astimezone(ZoneInfo("Asia/Shanghai"))
             risk_time = datetime.fromisoformat(risk_context.current_time.replace("Z", "+00:00"))
             signal_time = datetime.fromisoformat(risk_context.signal.ts.replace("Z", "+00:00"))
-            if risk_time.tzinfo is None:
-                risk_time = risk_time.replace(tzinfo=ZoneInfo("Asia/Shanghai"))
-            if signal_time.tzinfo is None:
-                signal_time = signal_time.replace(tzinfo=ZoneInfo("Asia/Shanghai"))
+            if (risk_time.tzinfo is None or risk_time.utcoffset() is None
+                    or signal_time.tzinfo is None or signal_time.utcoffset() is None):
+                raise ValueError("Gate 5 RiskGate/信号时点必须带有效 UTC 偏移")
             risk_time = risk_time.astimezone(ZoneInfo("Asia/Shanghai"))
             signal_time = signal_time.astimezone(ZoneInfo("Asia/Shanghai"))
             signal_age_seconds = (market_time - signal_time).total_seconds()
@@ -1497,22 +1683,29 @@ ipo_regime = MockObj(); ipo_regime.state = "CONTINUATION"; ipo_regime.data_ready
 import pandas as pd
 from typing import Dict, List, Optional, Any
 from datetime import datetime
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 class TimeSandbox:
     """时间沙箱：物理隔离未来信息"""
-    def __init__(self, current_cutoff_time: str):
+    def __init__(self, current_cutoff_time: str, source_timezone: str):
+        try:
+            self.source_tz = ZoneInfo(source_timezone)  # 必须由版本化数据源配置提供
+        except (TypeError, ValueError, ZoneInfoNotFoundError) as exc:
+            raise ValueError("回放数据源时区未配置或无效") from exc
         self.cutoff_dt = self.normalize_time(current_cutoff_time)
 
-    @staticmethod
-    def normalize_time(value: Any) -> pd.Timestamp:
+    def normalize_time(self, value: Any) -> pd.Timestamp:
         try:
             timestamp = pd.Timestamp(value)
             if pd.isna(timestamp):
                 raise ValueError("时间戳为空")
-            return (timestamp.tz_localize("Asia/Shanghai") if timestamp.tzinfo is None
-                    else timestamp.tz_convert("Asia/Shanghai"))
-        except (TypeError, ValueError, OverflowError) as exc:
+            if timestamp.tzinfo is None:
+                timestamp = timestamp.tz_localize(self.source_tz, ambiguous="raise", nonexistent="raise")
+            elif timestamp.utcoffset() is None:
+                raise ValueError("时间戳没有有效 UTC 偏移")
+            return timestamp.tz_convert("Asia/Shanghai")
+        except (TypeError, ValueError, OverflowError, ZoneInfoNotFoundError) as exc:
             raise ValueError(f"无效或时区不兼容的回放时间戳: {value!r}") from exc
 
     def filter_bars(self, df: pd.DataFrame, time_col: str = "datetime") -> pd.DataFrame:
@@ -1529,12 +1722,13 @@ class TimeSandbox:
 class HistoricalCutoffReplayEngine:
     """纯历史驱动回放；所有输入通过 loader，所有输出由已截断 bars 计算。"""
     def __init__(self, sample_codes: List[str], load_history: Any,
-                 evaluate_as_of: Any, build_summary: Any,
+                 evaluate_as_of: Any, build_summary: Any, source_timezone: str,
                  start_date: str = "2026-08-01"):
         self.sample_codes = sample_codes
         self.load_history = load_history
         self.evaluate_as_of = evaluate_as_of
         self.build_summary = build_summary
+        self.source_timezone = source_timezone
         self.start_date = start_date
 
     def replay_stock(self, code: str) -> Dict[str, Any]:
@@ -1543,15 +1737,16 @@ class HistoricalCutoffReplayEngine:
         bars = history.bars.copy()
         if bars.empty:
             raise ValueError(f"{code}: 回放区间无行情数据")
-        bars["datetime"] = bars["datetime"].map(TimeSandbox.normalize_time)
+        initial_sandbox = TimeSandbox(str(bars["datetime"].iloc[0]), self.source_timezone)
+        bars["datetime"] = bars["datetime"].map(initial_sandbox.normalize_time)
         bars = bars.sort_values("datetime")
 
         observations = []
         for cutoff in bars["datetime"].drop_duplicates().sort_values():
-            sandbox = TimeSandbox(str(cutoff))
+            sandbox = TimeSandbox(str(cutoff), self.source_timezone)
             known_bars = sandbox.filter_bars(bars)
             observation = self.evaluate_as_of(code, known_bars, sandbox.cutoff_dt)
-            observed_at = TimeSandbox.normalize_time(observation["as_of_time"])
+            observed_at = sandbox.normalize_time(observation["as_of_time"])
             if observed_at > sandbox.cutoff_dt:
                 raise ValueError("回放观察时间越过当前 cutoff，拒绝未来数据泄漏")
             observations.append(observation)
@@ -1573,90 +1768,411 @@ class HistoricalCutoffReplayEngine:
 
 ---
 
+<a id="ch2-11"></a>
+### 2.11 全系统提示与说明信息精简中文映射字典 (Map-Driven UI & Log Messages)
+
+为了彻底解决系统在运行与实施中说明信息混乱、英文代码生硬、界面文本溢出或随意拼接的问题，系统建立全全局统一的**精简中文信息映射字典**。
+
+**核心实施原则**：
+1. **展示映射与机器审计分层**：用户可见的徽章/表格状态使用字典映射的 2~6 字中文短标签；详细中文原因可在详情面板显示。JSONL/Excel 审计保留稳定枚举 `code/state`、数值、时间、配置/模型版本，可附 `label_cn/detail_cn`，不得为追求中文而丢失机器可重放字段；
+2. **拒绝临时拼接状态标签**：阻断、待命、通过原因由枚举键检索标准短标签/详细说明；动态业务数据按字段单独展示，不在 300ms 交易路径格式化；
+3. **安全降级保障**：任何未定义或空值状态统一映射为“未知”或“未就绪”，并在机器记录中保留原始未知码，保持界面整洁且不损害审计。
+
+```python
+# ats/common/display_maps.py
+"""全系统统一的精简中文展示与日志映射字典 (Map-Driven UI & Log Messages)"""
+
+# 1. 宏观流动性状态 (LRRM) 中文映射
+LRRM_STATE_CN_MAP = {
+    "LOOSE": "充裕宽松 🟢",
+    "NORMAL": "平稳中性 ⚪",
+    "TIGHT": "流动紧缩 🟡",
+    "SHOCK": "休克熔断 🔴",
+    "UNKNOWN": "数据未就绪 ⚠️",
+}
+
+# 2. 新股情绪周期 (IPO Regime) 中文映射
+IPO_REGIME_CN_MAP = {
+    "REPAIR": "修复蓄势 🟡",
+    "CONTINUATION": "主升共振 🟢",
+    "MANIA": "高潮过热 🟣",
+    "EXHAUSTION": "动能衰竭 🟠",
+    "DISTRIBUTION": "退潮派发 🔴",
+    "UNKNOWN": "样本未就绪 ⚠️",
+}
+
+# 3. 隔夜兑现性 (T+1 Carry) 中文映射
+T1_CARRY_STATE_CN_MAP = {
+    "ALLOW": "允许隔夜 🟢",
+    "CAUTION": "谨慎待命 🟡",
+    "BLOCK": "严禁隔夜 🔴",
+    "UNKNOWN": "待评估 ⚠️",
+}
+
+# 4. 六层门禁通行证 (Gate Passport) 结果映射
+GATE_DECISION_CN_MAP = {
+    "ENTRY": "准入开仓 🟢",
+    "WATCH": "重点观察 🟡",
+    "BLOCK": "一票否决 🔴",
+}
+
+# 5. 门禁阻断与否决原因 (Veto Reason) 精简中文映射
+VETO_REASON_CN_MAP = {
+    "LRRM_MISSING": "宏观数据缺失",
+    "LRRM_SHOCK": "全市场流动性休克",
+    "LRRM_TIGHT": "全市场流动性紧缩",
+    "REGIME_MISSING": "板块周期未就绪",
+    "REGIME_DISTRIBUTION": "次新板块处于退潮期",
+    "REGIME_EXHAUSTION": "次新板块动能衰竭",
+    "T1_CARRY_PSEUDO_STRENGTH": "命中华大海天伪强派发",
+    "T1_CARRY_EXTREME": "动能极端过热",
+    "T1_CARRY_SCORE_LOW": "隔夜兑现评分不足",
+    "ANCHOR_LOW_BREACHED": "跌破首日最低价双锚",
+    "ANCHOR_OPEN_BREACHED": "跌破首日开盘价双锚",
+    "ANCHOR_D0_BREAK": "跌破首日开盘或发行价",
+    "ANCHOR_MISSING": "首日封存锚点缺失",
+    "VWAP_STALE": "VWAP 行情过期未同步",
+    "VWAP_BREACHED": "跌破当日均线超 1.5%",
+    "VWAP_INCOMPLETE": "VWAP 多日结构不完整",
+    "TDE_NO_PLAN": "缺少通道突破交易计划",
+    "TDE_PRICE_TOO_HIGH": "现价超出买入上限防追高",
+    "TDE_PRICE_TOO_LOW": "现价低于买入区间下限",
+    "TDE_RR_TOO_LOW": "盈亏比不足 2.5:1",
+    "TDE_NOT_LEADER": "非领头羊排位待命",
+    "RISK_OVER_EXPOSURE": "超出个股/板块风控限额",
+    "RISK_DRAWDOWN_CUT": "回撤超限风控拒绝",
+}
+
+# 6. 七态生命周期操作节点 (Life Cycle) 精简中文映射
+LIFE_CYCLE_CN_MAP = {
+    "OBSERVE": "盘前观察 🔭",
+    "ARMED": "就绪待命 🎯",
+    "ENTRY_READY": "准入开仓 ⚡",
+    "ENTERED": "持仓确认 💼",
+    "HOLD_T1": "隔夜锁仓 🔒",
+    "EXIT_READY": "待平仓 🚨",
+    "BLOCKED": "硬阻断 ⛔",
+}
+
+# 7. 物理锚点状态 (Anchor Status) 精简中文映射
+ANCHOR_STATUS_CN_MAP = {
+    "SAFE": "守住双锚 🛡️",
+    "BREACHED": "双锚失守 ⚠️",
+    "D0_SUPPORT": "首日支撑有效 🟢",
+    "D0_BROKEN": "首日破发/破开 🔴",
+    "RECLAIMED": "快速回收 (待次日观察)",
+}
+```
+
+---
+
+<a id="ch2-12"></a>
+### 2.12 四级立体观测与集中仲裁详情透视体系
+
+为实现对所有数据、信号和因果链路的透明化监督，依托现有工程构建四级立体观测网：
+
+#### 1. 宏观层：主窗口顶部 HUD 状态栏 (`ats/ui/main_window.py`)
+- 常驻两枚高可见度状态徽章：
+  * **宏观流动性徽章**：`[宽松 🟢 / 平稳 ⚪ / 紧缩 🟡 / 休克 🔴]`，查表自 `LRRM_STATE_CN_MAP`。展示全市场成交额、20D/60D 成交分位数、涨跌家数比、跌停家数。若处于休克态，徽章闪烁红框，所有新股开仓自动全局挂起；
+  * **新股情绪周期徽章**：`[修复 🟡 / 延续 🟢 / 过热 🟣 / 衰竭 🟠 / 退潮 🔴]`，查表自 `IPO_REGIME_CN_MAP`。展示近 10 只新股 D1 胜率、首日见顶率、次日大跌率。
+
+#### 2. 中观层：集中交易指挥室与候选池看板 (`ats/ui/ipo_command_room_dialog.py` / `next_day_watch_dialog.py`)
+- 表格列无缝扩展（复用 `BaseTable` 并采用脏单元格原位复用）：
+  * `先验热度`：例如 `82.5 (热选)`
+  * `实时动能`：例如 `76.0 (过热)`
+  * `隔夜兑现 (T1 Carry)`：例如 `72.0 (允许隔夜 🟢)` / `52.0 (谨慎待命 🟡)` / `31.0 (严禁隔夜 🔴)`
+  * `首日双锚`：`守住双锚 🛡️` / `双锚失守 ⚠️` / `首日支撑有效 🟢`
+  * `VWAP 状态`：`多周期偏强 🟢` / `均线破位 🔴`
+  * `六层门禁`：`[准入开仓 🟢]` 或 `[G2: 谨慎待命 🟡]` 或 `[G3: 双锚失守 🔴]`
+  * `生命周期`：查表自 `LIFE_CYCLE_CN_MAP`。
+
+#### 3. 微观透视：单例集中仲裁与因果透视详情窗 (`ats/ui/ipo_arbitration_detail_dialog.py`)
+- **双击主表中任意标的**，毫秒级唤出单例复用透视详情窗，展示四大核心板块：
+  * **板块 1：六层门禁通行证 (Gate Passport)**：卡片化展示 Gate 0~5 通过状态与原因（查表自 `VETO_REASON_CN_MAP`）；
+  * **板块 2：物理锚点监控看板**：首日九大物理锚点、实时距双锚安全距离（%）、日内最低价是否破位、距当日 VWAP 偏离度；
+  * **板块 3：华大海天伪强判据四合一指示器**：
+    1. 分时在线时间比: $\ge 70\%$ (假象站稳 ⚠️)
+    2. 换手爬升速率: $\ge 0.8\%/\text{min}$ 或 累计换手 $\ge 75\%$ (天量松动 ⚠️)
+    3. 收盘振幅位置: $\le 0.40$ (收在下沿 ⚠️)
+    4. 高点跳水幅度: $\ge 25\%$ (深度派发 ⚠️)
+    5. 联合决议：`🚨 触发华大海天伪强诱多派发一票否决！`
+  * **板块 4：LLM 旁路因果洞察 (只读参考；是否本机推理由 Provider 模式决定)**：
+    1. 行情归因 (Market Narrator)：一句话揭示资金推升或承接乏力原因；
+    2. 历史 RAG 案例匹配：呈现 3 只走势最相似的历史新股及其次日走势，供交易员心理校准。
+
+#### 4. 底层数据审计与日志流
+- **SQLite (`market_pulse.db`)**：每日收盘写入 `daily_sentiment`（含 `lrrm_state`, `ipo_regime_state`）；
+- **JSON (`config/listing_anchors.json`)**：永久固化封存首日九大物理锚点，次日只读不可篡改；
+- **LanceDB 向量库**：存储 1024 维 BGE-M3 的新闻舆情及历史走势片段；
+- **决策日志流 (`logs/ipo_gate_decisions.jsonl`)**：每次 Gate 评估生成一行结构化 JSONL（包含代码、时间、指标值、Gate 结果、因果链），毫秒级留痕。
+
+---
+
 <a id="ch3"></a>
-## 叁、本地 LLM 自学习决策系统（Ollama JSON Schema 约束）
+## 叁、本地 LLM 自学习决策系统（Antigravity / Codex 双模 Provider 架构）
 
 ### 3.1 四不原则与降级守护
 
 1. **不等待模型**：LLM 推理与 ATS 交易轮询、Qt 主事件循环分离；关键路径不得进行 IPC、序列化、磁盘/网络 I/O 或推理。
 2. **不直连**：LLM 仅输出 Proposal 建议，任何交易动作仍由确定性规则、Gate 0~5 与 RiskGate 决定。
-3. **不黑盒**：必须输出因果链，并受 Ollama JSON Schema 强类型约束。
+3. **不黑盒**：必须输出因果链，并受输出 JSON Schema 强类型约束。
 4. **不在线更新**：盘中只读推理，微调与对齐只在盘后执行。
 
-### 3.2 Ollama 原生结构化输出（JSON Schema 替代纯 Prompt）
+### 3.2 多 Backend 适配层架构与 Provider 部署资格
 
-```python
-# ats/llm/llm_worker.py：Market Regime Agent 的结构化 payload
-import requests
-import json
-import math
-from typing import Any, Callable
+为降低对独立 Ollama 服务的绑定，系统设计**可插拔后端抽象层 (`BaseLLMBackend`)**。SDK/CLI 客户端在本机运行不代表推理在本机，也不代表可继承 IDE 的模型、配置或权限；各 Provider 必须按执行模式分别通过部署门禁。
 
-SENTIMENT_OUTPUT_SCHEMA = {
-    "type": "object",
-    "additionalProperties": False,
-    "properties": {
-        "sentiment_score": {"type": "number", "minimum": -1.0, "maximum": 1.0},
-        "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
-        "key_catalysts": {"type": "array", "items": {"type": "string"}},
-        "risk_warnings": {"type": "array", "items": {"type": "string"}},
-        "regime_hint": {"type": "string"},
-        "reasoning": {"type": "string", "maxLength": 300}
-    },
-    "required": ["sentiment_score", "confidence", "key_catalysts", "risk_warnings", "regime_hint", "reasoning"]
-}
+> **R8 Provider 运行前置与真实边界（本条优先于下方旧版示例）**：本机 CLI/SDK 客户端只说明进程在本机运行，不证明模型推理或行情输入留在本机。Antigravity SDK 的 API 模式需要独立 SDK 安装与 Gemini/Vertex 认证；官方文档把本机 LiteRT（`LiteRTAgentConfig`、显式 `.litertlm` 模型路径及 LiteRT 运行依赖）与本机 OpenAI 兼容服务列为不同模式。官方示例确认 LiteRT 可本机运行，但本方案不能据此推定当前 Windows 主机、特定模型或结构化输出配置已验收；必须在 Stage 0 用既有依赖完成版本化实测，不安装缺少依赖。`LocalAgentConfig(model="inherit")` 不是可依赖的 IDE 配置继承契约。参见[本机模型配置](https://www.antigravity.google/docs/sdk/local-models/)与[结构化输出](https://www.antigravity.google/docs/sdk/structured-output/)。
 
-def validate_sentiment_payload(proposal: Any) -> bool:
-    required = SENTIMENT_OUTPUT_SCHEMA["required"]
-    return (isinstance(proposal, dict) and set(proposal) == set(required)
-            and not isinstance(proposal["sentiment_score"], bool)
-            and isinstance(proposal["sentiment_score"], (int, float))
-            and math.isfinite(proposal["sentiment_score"])
-            and -1.0 <= proposal["sentiment_score"] <= 1.0
-            and not isinstance(proposal["confidence"], bool)
-            and isinstance(proposal["confidence"], (int, float))
-            and math.isfinite(proposal["confidence"])
-            and 0.0 <= proposal["confidence"] <= 1.0
-            and isinstance(proposal["key_catalysts"], list)
-            and all(isinstance(item, str) for item in proposal["key_catalysts"])
-            and isinstance(proposal["risk_warnings"], list)
-            and all(isinstance(item, str) for item in proposal["risk_warnings"])
-            and isinstance(proposal["regime_hint"], str)
-            and isinstance(proposal["reasoning"], str)
-            and len(proposal["reasoning"]) <= 300)
+> 默认配置只能选择“首选 Provider”，不能代表 Provider 已通过部署门禁。`allow_remote` 默认关闭；远程 API 需显式审批服务目标和允许发送的字段。若需求坚持零新依赖且不允许独立本机推理服务，则须证明既有 Antigravity 环境可提供受支持的本机 SDK 接口，否则本机 SDK 路径不可实施，不能以远程 Gemini/Codex 请求冒充本地模型。SDK Agent 使用 `tools=[]`、`deny("*")` 并关闭 MCP/子 Agent/工作区；agy CLI 在本版默认禁用，因为其 headless 模式会读取本机权限设置，且可能提供工作区读写工具。只有 OS 强制隔离、远端字段脱敏和版本实测全部通过后，才可单独启用。官方[SDK 策略](https://www.antigravity.google/docs/sdk/policies/)与[CLI headless 权限](https://antigravity.google/docs/cli/headless/)说明工具权限/工作区访问需要显式治理。
 
+#### 1. 架构总览与优先级矩阵
 
-def query_ollama_structured(
-    prompt: str, schema: dict, validate_payload: Callable[[Any], bool],
-    model: str = "qwen2.5:14b-instruct-q5_K_M",
-) -> dict:
-    """Worker 内调用 Ollama；返回统一结果，不把服务错误抛到交易主线程。"""
-    url = "http://localhost:11434/api/generate"
-    payload = {
-        "model": model,
-        "prompt": prompt,
-        "format": schema,  # 核心：Ollama 官方 Structured Outputs 特性
-        "stream": False,
-        "options": {"temperature": 0.1, "num_predict": 512}
-    }
-    try:
-        resp = requests.post(url, json=payload, timeout=30)
-        resp.raise_for_status()
-        proposal = json.loads(resp.json()["response"])
-    except (requests.RequestException, ValueError, KeyError, TypeError) as exc:
-        return {"status": "UNAVAILABLE", "proposal": None, "error": str(exc)}
-
-    # Schema 限制语法形状；所选 Agent 对应的 validator 再检查业务边界。
-    try:
-        is_valid = validate_payload(proposal)
-    except Exception as exc:
-        return {"status": "INVALID", "proposal": None, "error": f"本地校验器异常: {exc}"}
-    if not is_valid:
-        return {"status": "INVALID", "proposal": None, "error": "输出未通过本地契约校验"}
-    return {"status": "OK", "proposal": proposal, "error": ""}
+```
+                ┌─────────────────────────────────────────────────────────┐
+                │        ATS 主进程 / 300ms 交易轮询 (零阻塞、只读快照)      │
+                └───────────────────────────┬─────────────────────────────┘
+                                            │ 异步单向 IPC Queue (纯 JSON)
+                                            ▼
+                ┌─────────────────────────────────────────────────────────┐
+                │          独立子进程: ats/llm/llm_worker.py               │
+                └───────────────────────────┬─────────────────────────────┘
+                                            │ 统一调用: BaseLLMBackend.generate()
+                                            ▼
+        ┌───────────────────────────────────┴───────────────────────────────────┐
+        │ 【可插拔 Provider 适配层 (由 config/llm_config.yaml 驱动)】           │
+        ├───────────────────────────────────┬───────────────────────────────────┤
+        │ 方式 1 (优先候选): Antigravity     │ 方式 2 (远端备选): Codex CLI      │
+        │ - AntigravitySDKBackend (Python)  │ - CodexCLIBackend (无头命令行)    │
+        │ - AntigravityCLIBackend (agy 管道)│ - 原生 Schema + 本地二次校验      │
+        ├───────────────────────────────────┴───────────────────────────────────┤
+        │ 方式 3 (可选扩展): OllamaHTTPBackend (原生本地 HTTP / 独立集群)       │
+        └───────────────────────────────────────────────────────────────────────┘
 ```
 
-`UNAVAILABLE` 或 `INVALID` 由 Worker 写入响应队列；主进程丢弃该轮 Proposal，继续纯规则流程并记录原因。主线程不能等待模型完成，超时/过期的响应按 request_id 和生成时间丢弃。
+#### 2. 统一抽象基类与三种 Provider 实现代码 (`ats/llm/backends/`)
+
+```python
+# ats/llm/backends/base.py
+"""LLM 统一后端抽象基类"""
+from abc import ABC, abstractmethod
+from typing import Dict, Any, Optional
+import json, re
+
+class BaseLLMBackend(ABC):
+    @abstractmethod
+    def generate(self, prompt: str, schema: Dict[str, Any], timeout_seconds: float) -> Dict[str, Any]:
+        """
+        核心抽象契约：
+        输入提示词与 JSON Schema，对外统一返回标准字典：
+        {"status": "OK"|"UNAVAILABLE"|"INVALID", "proposal": dict|None, "error": str}
+        """
+        pass
+
+    @staticmethod
+    def extract_and_parse_json(text: str) -> Optional[Dict[str, Any]]:
+        """安全提取可能被 markdown 标记包裹的纯 JSON 内容"""
+        if not text or not isinstance(text, str):
+            return None
+        cleaned = text.strip()
+        # 剥离 ```json ... ``` 或 ``` ... ```
+        if "```" in cleaned:
+            match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", cleaned)
+            if match:
+                cleaned = match.group(1).strip()
+        try:
+            return json.loads(cleaned)
+        except Exception:
+            return None
+```
+
+```python
+# ats/llm/backends/antigravity_backend.py
+"""Antigravity 适配器：LiteRT SDK 是本机候选；agy CLI 仅在独立部署门禁通过后启用。"""
+import json, asyncio, subprocess
+from typing import Dict, Any
+from ats.llm.backends.base import BaseLLMBackend
+
+class AntigravitySDKBackend(BaseLLMBackend):
+    """仅示意本机 LiteRT 路径；模型与结构化模型须由部署配置显式提供。"""
+    def __init__(self, model_path: str, proposal_model: type):
+        self.model_path = model_path
+        self.proposal_model = proposal_model  # 固定 Pydantic Proposal 模型，禁止运行时接受任意模型输出
+
+    def generate(self, prompt: str, schema: Dict[str, Any], timeout_seconds: float) -> Dict[str, Any]:
+        if schema != self.proposal_model.model_json_schema():
+            return {"status": "INVALID", "proposal": None, "error": "schema_mismatch"}
+        try:
+            from google.antigravity import Agent, LiteRTAgentConfig
+            from google.antigravity.hooks.policy import deny
+
+            async def _invoke():
+                config = LiteRTAgentConfig(
+                    model_path=self.model_path, response_schema=self.proposal_model,
+                    tools=[], policies=[deny("*")], mcp_servers=[], subagents=[], workspaces=[],
+                )
+                async with Agent(config) as agent:
+                    response = await agent.chat(prompt)
+                    candidate = await response.structured_output()
+                    return self.proposal_model.model_validate(candidate).model_dump(mode="json")
+
+            proposal = asyncio.run(asyncio.wait_for(_invoke(), timeout=timeout_seconds))
+            return {"status": "OK", "proposal": proposal, "error": ""}
+        except asyncio.TimeoutError:
+            return {"status": "UNAVAILABLE", "proposal": None, "error": "provider_timeout"}
+        except Exception:
+            return {"status": "UNAVAILABLE", "proposal": None, "error": "antigravity_sdk_failure"}
+
+
+class AntigravityCLIBackend(BaseLLMBackend):
+    """agy 原生 JSON Schema 信封适配器；仅在权限与数据出域门禁通过后启用。"""
+    def __init__(self, cli_path: str, proposal_model: type, scratch_cwd: str):
+        self.cli_path = cli_path
+        self.proposal_model = proposal_model
+        self.scratch_cwd = scratch_cwd
+
+    def generate(self, prompt: str, schema: Dict[str, Any], timeout_seconds: float) -> Dict[str, Any]:
+        if schema != self.proposal_model.model_json_schema():
+            return {"status": "INVALID", "proposal": None, "error": "schema_mismatch"}
+        try:
+            with temporary_json_schema(self.proposal_model.model_json_schema()) as schema_path:
+                cmd = [self.cli_path, "--input-format", "stream-json", "--output-format", "stream-json",
+                       "--json-schema", schema_path]
+                payload = json.dumps({"event": "user", "message": {"content": prompt}}, ensure_ascii=False) + "\n"
+                completed = run_bounded_process(
+                    cmd, input_text=payload, cwd=self.scratch_cwd,
+                    timeout_seconds=timeout_seconds, max_input_bytes=64_000,
+                    max_stdout_bytes=256_000, max_stderr_bytes=32_000,
+                )
+            if completed.returncode != 0:
+                return {"status": "UNAVAILABLE", "proposal": None, "error": "antigravity_cli_exit"}
+            events = [json.loads(line) for line in completed.stdout.splitlines() if line.strip()]
+            final = next((event.get("result") for event in reversed(events) if event.get("event") == "result"), None)
+            if not isinstance(final, dict) or final.get("status") != "SUCCESS":
+                return {"status": "UNAVAILABLE", "proposal": None, "error": "antigravity_cli_no_success_result"}
+            candidate = final.get("structured_output")
+            proposal = self.proposal_model.model_validate(candidate).model_dump(mode="json")
+            return {"status": "OK", "proposal": proposal, "error": ""}
+        except TimeoutError:
+            return {"status": "UNAVAILABLE", "proposal": None, "error": "provider_timeout"}
+        except Exception:
+            return {"status": "INVALID", "proposal": None, "error": "antigravity_cli_invalid_envelope"}
+```
+
+```python
+# ats/llm/backends/codex_cli_backend.py
+"""方式 2 (远端备选): 本机 Codex CLI 客户端的结构化输出适配器"""
+import json, subprocess
+from typing import Dict, Any
+from ats.llm.backends.base import BaseLLMBackend
+
+class CodexCLIBackend(BaseLLMBackend):
+    """Codex CLI 结构化输出适配器；该 CLI 在本机运行，但模型请求可能发送到云端。"""
+    def __init__(self, codex_bin: str, proposal_model: type, scratch_cwd: str):
+        self.codex_bin = codex_bin
+        self.proposal_model = proposal_model
+        self.scratch_cwd = scratch_cwd  # 空白临时 Git 工作区，不指向 ATS 代码目录
+
+    def generate(self, prompt: str, schema: Dict[str, Any], timeout_seconds: float) -> Dict[str, Any]:
+        if schema != self.proposal_model.model_json_schema():
+            return {"status": "INVALID", "proposal": None, "error": "schema_mismatch"}
+        try:
+            with temporary_json_schema(self.proposal_model.model_json_schema()) as schema_path:
+                cmd = [self.codex_bin, "exec", "--ephemeral", "--ignore-user-config", "--ignore-rules",
+                       "--sandbox", "read-only", "--skip-git-repo-check", "--output-schema", schema_path, "-"]
+                completed = run_bounded_process(
+                    cmd, input_text=prompt, cwd=self.scratch_cwd,
+                    timeout_seconds=timeout_seconds, max_input_bytes=64_000,
+                    max_stdout_bytes=256_000, max_stderr_bytes=32_000,
+                )
+            if completed.returncode != 0:
+                return {"status": "UNAVAILABLE", "proposal": None, "error": "codex_cli_exit"}
+            candidate = json.loads(completed.stdout)
+            proposal = self.proposal_model.model_validate(candidate).model_dump(mode="json")
+            return {"status": "OK", "proposal": proposal, "error": ""}
+        except TimeoutError:
+            return {"status": "UNAVAILABLE", "proposal": None, "error": "provider_timeout"}
+        except Exception:
+            return {"status": "INVALID", "proposal": None, "error": "codex_cli_invalid_json"}
+```
+
+```python
+# ats/llm/backends/ollama_backend.py
+"""方式 3 (可选扩展): 本地原生 Ollama HTTP 接口适配器"""
+import requests, json
+from typing import Dict, Any
+from ats.llm.backends.base import BaseLLMBackend
+
+class OllamaHTTPBackend(BaseLLMBackend):
+    def __init__(self, base_url: str = "http://127.0.0.1:11434", model: str = "qwen2.5:14b-instruct-q5_K_M"):
+        self.base_url = base_url.rstrip("/")
+        self.model = model
+
+    def generate(self, prompt: str, schema: Dict[str, Any], timeout_seconds: float) -> Dict[str, Any]:
+        url = f"{self.base_url}/api/generate"
+        payload = {
+            "model": self.model,
+            "prompt": prompt,
+            "format": schema,  # Ollama 原生 JSON Schema 特性
+            "stream": False,
+            "options": {"temperature": 0.1, "num_predict": 512}
+        }
+        try:
+            resp = requests.post(url, json=payload, timeout=timeout_seconds)
+            resp.raise_for_status()
+            proposal = json.loads(resp.json()["response"])
+            return {"status": "OK", "proposal": proposal, "error": ""}
+        except Exception:
+            return {"status": "UNAVAILABLE", "proposal": None, "error": "ollama_http_failure"}
+```
+
+#### 2.1 CLI 进程与 Schema 文件公共契约
+
+`run_bounded_process()` 与 `temporary_json_schema()` 是 `ats/llm/backends/process_runner.py` 的必需组件，不是可省略的辅助实现：前者必须 `shell=False`、通过 stdin 传提示、同时有界排空 stdout/stderr、限制输入/输出字节、使用单调时钟截止时间；Windows 上须在启动时将进程置于 Job Object（或经验证等效的进程树容器），超时/超量/调用取消时终止整棵子进程树并等待回收。无法建立进程树约束、达到输出上限或子进程遗留时，结果统一为失败并熔断 Provider。后者将生成的 Schema 写入权限受限的唯一临时文件，调用结束后在 `finally` 删除；提示、原始行情、stderr 和认证材料不得进入普通日志。CLI 必须使用 OS 强制的隔离配置及空白专用工作目录；只读沙箱、独立 cwd 或事后检查 `stream-json` 工具事件，都不足以证明工具在调用前不可用。Antigravity CLI 在 v1.1-R8 默认禁用；Codex CLI 的可读文件、环境变量、MCP 与网络边界也须按运行版本实测。
+
+远端请求由 Worker 中唯一的 `build_remote_safe_request(agent_type, raw_context, policy)` 先按版本化逐 Agent allowlist 投影，再生成提示。`policy` 必须验证 `approval_id`、固定目标 Provider/服务目的地及批准字段；Provider 类只接收投影后的字符串/Schema，禁止直接接触 `raw_context`。远端字段审批缺失或 sanitizer 遇到未登记字段时，请求不得启动。该隔离契约在实现阶段必须以 spy backend/拒绝用例验证。
+
+#### 3. Worker 内统一后端工厂函数 (`create_llm_backend`)
+```python
+def create_llm_backend(config: Dict[str, Any], agent_type: str) -> BaseLLMBackend:
+    """仅实例化显式配置且通过本机/远端/权限预检的 Provider；不得静默切换。"""
+    settings = config["llm_settings"]
+    active = settings["active_backend"].lower()
+    allow_remote = settings.get("allow_remote", False) is True
+    backends_cfg = config["backends"]
+    proposal_model = schema_model_for(agent_type)  # Market / Retrieval / Review 各自独立 Schema
+    if active == "antigravity_sdk":
+        cfg = backends_cfg["antigravity_sdk"]
+        if (cfg.get("execution_mode") != "local_litert"
+                or not validate_local_litert_config(cfg)):
+            raise BackendNotReady("antigravity_local_model_not_configured")
+        return AntigravitySDKBackend(model_path=cfg["model_path"], proposal_model=proposal_model)
+    elif active == "antigravity_cli":
+        cfg = backends_cfg["antigravity_cli"]
+        if (cfg.get("enabled") is not True or not allow_remote
+                or not validate_remote_egress(config, active, agent_type)
+                or not verify_os_enforced_provider_sandbox(cfg)):
+            raise BackendNotReady("antigravity_cli_not_qualified")
+        return AntigravityCLIBackend(cfg["cli_path"], proposal_model, cfg["scratch_cwd"])
+    elif active == "codex_cli":
+        cfg = backends_cfg["codex_cli"]
+        if (not allow_remote or not validate_remote_egress(config, active, agent_type)
+                or not verify_os_enforced_provider_sandbox(cfg)):
+            raise BackendNotReady("codex_cli_not_qualified")
+        return CodexCLIBackend(cfg["bin_path"], proposal_model, cfg["scratch_cwd"])
+    elif active == "ollama_http":
+        cfg = backends_cfg["ollama_http"]
+        if not is_approved_loopback_url(cfg["base_url"]):
+            raise BackendNotReady("ollama_endpoint_not_local_or_approved")
+        return OllamaHTTPBackend(base_url=cfg["base_url"], model=cfg["model"])
+    else:
+        # 未知 Provider 失败关闭；Worker 禁用 LLM 旁路，规则主线继续运行
+        raise BackendNotReady("unsupported_llm_backend")
+```
+
+`BackendNotReady`、`schema_model_for()`、`is_approved_loopback_url()`、`validate_local_litert_config()`、`validate_remote_egress()`、`verify_os_enforced_provider_sandbox()` 均为必须实现并测试的启动前检查。LiteRT 检查须验证已安装依赖、绝对 `.litertlm` 路径、文件/模型标识与目标版本；remote 检查须验证非空审批 ID/目标/逐 Agent allowlist；sandbox 检查须验证 OS 强制策略实际生效。配置缺项、Provider 不支持当前 Agent Schema、预检失败时，Worker 标记 LLM 不可用并继续规则主线。SDK、CLI、Ollama 的失败均不得自动换到另一 Provider。
+
+无论选用何种 Provider，调用失败、进程崩溃或超时均由 Worker 捕获并封装为 `{"status": "UNAVAILABLE", "proposal": None}` 发回结果队列。主交易进程丢弃该轮 Proposal，因果链标记 `LLM_FALLBACK_DEFAULT`，继续纯规则决策。主线程绝不等待模型完成。
 
 #### ATS/Qt 主路径与 LLM 旁路隔离契约 (`ats/llm/llm_bridge.py`)
 
@@ -1667,18 +2183,18 @@ def query_ollama_structured(
 3. **队列端点所有权与有界快照**：父进程的 LLM 控制线程独占父端队列端点：只负责投递请求、读取结果；Worker 只在自身进程消费请求、产出结果；ATS 轮询和 Qt 事件线程不得持有或调用队列端点。LLM 控制线程维护供 UI/离线记录使用的每标的不可变快照，完成校验后整体替换已发布快照，不在控制/展示读取路径加锁或原地删除缓存项。缓存 TTL 使用 `time.monotonic()`；行情 `as_of_time` 另与决策快照时点核验，拒绝未来、过期和时钟不兼容的响应。该快照不暴露给 v1.x 交易决策路径。
 4. **队列和计算预算**：请求队列与结果队列均设硬上限 `maxsize=100`，同时限制消息 JSON 编码后不超过 64 KiB、单标的至多一个进行中请求、候选仅取最新状态且待处理请求必须有失效期限。请求队列满时由控制线程丢弃/合并；结果队列满时丢弃重复/过期结果并异步计数 `LLM_QUEUE_FULL_DROP`；不得让旧请求排队等待数分钟后再推理。Worker 每次请求超时 30 秒，失败后熔断退避；重试不在交易或 UI 线程执行。
 5. **有界结果排空**：控制线程每次最多处理 8 条或运行 2ms（先到即停），剩余结果留待下一轮；每标的只接受当前 request 及最新序号，禁止旧响应覆盖新响应。不得在 Qt timer callback 或 300ms 轮询中 `while get_nowait()` 无界排空。
-6. **健康快照与失败关闭**：独立监督线程读取 Worker 进程 sentinel/退出码并接收有界心跳，更新 Worker/Ollama 健康快照；连续 3 秒无健康更新、请求超时、Worker 异常退出或 Proposal 校验失败均打开熔断，旁路清除可用建议状态并异步记录故障。交易路径不读取健康位；其纯规则决策不依赖 LLM 状态，因此旁路失效不会改变或阻塞交易结果。监督线程不调用阻塞式 `join()`、无界网络探活或 `Process.is_alive()`。
+6. **健康快照与失败关闭**：独立监督线程读取 Worker 进程 sentinel/退出码并接收有界心跳，更新 Worker 与当前 Provider 的健康快照；连续 3 秒无健康更新、请求超时、Worker 异常退出或 Proposal 校验失败均打开熔断，旁路清除可用建议状态并异步记录故障。交易路径不读取健康位；其纯规则决策不依赖 LLM 状态，因此旁路失效不会改变或阻塞交易结果。监督线程不调用阻塞式 `join()`、无界网络探活或 `Process.is_alive()`。
 7. **LLM 权限默认只读**：v1.x Proposal 仅供展示、检索与留痕，不修改 Gate 状态、PreHeat/Carry 分数、阈值、TradePlan、仓位或订单。只有离线成熟样本、影子验证和人工审批完成后，才可另行定义有界且版本化的评分影响；此前正负修正均为 `0.0`。
 
 请求队列由父进程控制线程投递、Worker 消费；结果队列由 Worker 投递、父进程控制线程有界读取。请求构造、JSON 编码、结果校验、熔断和日志均在专用 LLM 控制线程/Worker/监督线程完成；ATS 交易决策路径不读取 LLM 快照或健康状态，始终只执行规则决策。`put_nowait/get_nowait` 只用于隔离线程中的尽力而为投递，不作为硬实时证明。Windows 多进程固定使用 `spawn`，进程创建不得发生在模块导入或 Qt 窗口构造期间；退出通过有限时长的后台关闭流程清理 Queue/Worker，Qt 关闭回调不得等待模型或 `join()`。
 
 `request_id`、`ticker`、`as_of_time`、`generated_at`、`model_id`、`prompt_version` 由 Worker 从入队任务注入信封元数据；模型 payload 不得自报这些字段。桥接器验证信封与待处理请求完全对应，再验证 Proposal Schema、数值范围、时效和证据截止时间。错误结果只产生异步状态/计数，不将异常抛到 ATS 或 Qt 主线程。
 
-**Windows 资源隔离边界**：Python Worker 设置 `BELOW_NORMAL_PRIORITY_CLASS` 只能降低 Worker 自身调度优先级，不能降低独立 Ollama 服务或 GPU kernel 的优先级。若 ATS 管理 Ollama 服务，需在服务启动层单独配置并验收；若服务由用户/系统外部管理，不擅自更改其优先级，必须通过 CPU/GPU 竞争压力测试，否则禁用 LLM 推理旁路。`OLLAMA_NUM_PARALLEL=1` 仅限制并行请求，不能证明显存或 GPU 资源不会争用。
+**Windows 资源隔离边界**：Python Worker 设置 `BELOW_NORMAL_PRIORITY_CLASS` 只能降低 Worker 自身调度优先级，不能降低 SDK 拉起的 LiteRT 服务、独立 Ollama 服务或 GPU kernel 的优先级。若 ATS 管理本机推理服务，需在服务启动层单独配置并验收；若服务由用户/系统外部管理，不擅自更改其优先级，必须通过 CPU/GPU 竞争压力测试，否则禁用 LLM 推理旁路。单进程/单并发参数不能证明显存或 GPU 资源不会争用。
 
 #### Windows 进程与 IPC 边界
 
-1. Worker 可设置 `BELOW_NORMAL_PRIORITY_CLASS` 作为降低自身 CPU 调度优先级的尽力而为措施；不得宣称它给 ATS/Qt 提供绝对 CPU 特权。Ollama 是独立服务时，必须单独识别其进程归属并做受控压力验收。
+1. Worker 可设置 `BELOW_NORMAL_PRIORITY_CLASS` 作为降低自身 CPU 调度优先级的尽力而为措施；不得宣称它给 ATS/Qt 提供绝对 CPU 特权。推理若由独立服务/GPU 运行，必须单独识别资源归属并做受控压力验收。
 2. `OLLAMA_NUM_PARALLEL=1` 和模型驻留时间只限制服务并发/生命周期，不能保证显存或 GPU 不争用；GPU 压力场景无法满足实时验收时必须关闭推理。
 3. Windows 多进程用 `spawn`，入口受 `if __name__ == "__main__"`/`freeze_support()` 保护；子进程不创建 Qt 对象。跨进程消息使用严格 Schema 的 JSON 基础类型、有限长度字符串/列表和字节上限，不传 Qt/Pandas/C 扩展对象；编码、传输或解码失败须转为结构化失败状态。
 4. Queue 使用系统同步原语和 feeder thread，基础类型消息也不能消除死锁/关闭竞态。Worker 清理、Queue 关闭和 join 必须在后台有界完成；UI/交易路径不调用 `join_thread()`、无期限 `join()` 或同步日志 I/O。
@@ -1693,7 +2209,7 @@ def query_ollama_structured(
 | **Case Retrieval Agent** | 当前候选快照及历史相似案例检索结果 | 给出可追溯的相似案例 ID、差异点和证据摘要 | 不读取 cutoff 之后的行情或结果标签 |
 | **Post-close Review Agent** | 已封存的当日快照、Gate 因果链及成熟结果标签 | 生成经来源标注的复盘候选与偏好样本草稿 | 盘中不运行训练，不自动修改规则阈值 |
 
-Ollama 仅生成所选 Agent 的 `payload`；Worker 通过匹配的 validator 校验 payload 后，将可信运行元数据组装成统一信封：`{agent_type, metadata: {request_id, scope_id, ticker, as_of_time, generated_at, model_id, prompt_version, evidence_ids}, payload}`。`scope_id` 为标的代码或 `MARKET`；按股响应的 `ticker` 必须匹配入队请求，市场级响应不得被伪装成单股快照。信封字段集合固定且拒绝额外字段；元数据由 Worker 注入，不能让模型自行编造。`CASE_RETRIEVAL_SCHEMA` 的 payload 至少包含相似案例 ID、发布时间、证据 ID、差异点和证据摘要；`POST_CLOSE_REVIEW_SCHEMA` 至少包含输入快照哈希、cutoff、标签成熟状态、标签来源和复盘草稿。Gate 只消费 Market Regime payload 中经验证的字段；缺字段、过期时间、request 不匹配或证据越过回放 cutoff 时将信封标为无效。
+选定的 Provider 仅生成所选 Agent 的 `payload`；Worker 通过匹配的 validator 校验 payload 后，将可信运行元数据组装成统一信封：`{agent_type, metadata: {request_id, scope_id, ticker, as_of_time, generated_at, model_id, prompt_version, evidence_ids}, payload}`。`scope_id` 为标的代码或 `MARKET`；按股响应的 `ticker` 必须匹配入队请求，市场级响应不得被伪装成单股快照。信封字段集合固定且拒绝额外字段；元数据由 Worker 注入，不能让模型自行编造。`CASE_RETRIEVAL_SCHEMA` 的 payload 至少包含相似案例 ID、发布时间、证据 ID、差异点和证据摘要；`POST_CLOSE_REVIEW_SCHEMA` 至少包含输入快照哈希、cutoff、标签成熟状态、标签来源和复盘草稿。Gate 只消费 Market Regime payload 中经验证的字段；缺字段、过期时间、request 不匹配或证据越过回放 cutoff 时将信封标为无效。
 
 ### 3.4 本地时序向量库（BGE-M3 1024 维修正）
 
@@ -1739,6 +2255,7 @@ version: "1.1"
 ipo_preheat:
   watch_candidate_threshold: 55.0  # 全局对齐
   hot_candidate_threshold: 75.0
+  input_max_age_seconds_by_field: {} # 每个必需字段必须由 Stage 0 数据字典填 TTL；空表时配置校验失败
   weights:
     valuation: 0.25
     subscription: 0.25
@@ -1751,6 +2268,10 @@ ipo_live_heat:
   overheat_threshold_veto: 35.0
   exhaustion_risk_threshold_veto: 45.0
   close_location_veto: 0.40
+  turnover_tracker:
+    lunch_start: "11:30"
+    lunch_end: "13:00"
+    max_sample_gap_trading_minutes: 30.0
 
 vwap_freshness:
   max_stale_seconds: 120
@@ -1786,6 +2307,41 @@ t1_carry:
   adjustment_bounds:
     max_positive: 10
     max_negative: -25
+
+# config/llm_config.yaml
+version: "1.1-R8"
+llm_settings:
+  # 默认选择本机推理候选；空模型路径/未通过预检时必须禁用旁路
+  # 可选切换: "antigravity_sdk" (默认) | "codex_cli" (备选) | "antigravity_cli" | "ollama_http"
+  active_backend: "antigravity_sdk"
+  allow_remote: false             # Codex/agy 云端请求必须经数据字段审批后显式设为 true
+  request_timeout_seconds: 30.0  # Worker 唯一硬截止；Provider 子超时不得超过此值
+  cache_ttl_seconds: 60
+  circuit_breaker:
+    failure_threshold: 3
+    cooldown_seconds: 30
+  remote_egress:
+    approval_id: ""               # allow_remote=true 时必填，记录批准人/版本的审计引用
+    destination: ""                # 必须固定到已审查 Provider/服务端
+    field_allowlist_by_agent: {}    # 按 Agent 明确字段；空配置禁止远端请求
+
+backends:
+  antigravity_sdk:
+    execution_mode: "local_litert"  # 本机推理；需 SDK + LiteRT 运行依赖及受支持模型
+    model_path: ""                  # 必填绝对 .litertlm 路径；空值视为未就绪，不继承 IDE 模型
+    model_id: ""                    # 记录已验收模型标识/版本
+  antigravity_cli:
+    execution_mode: "remote_api"   # CLI 进程本机，推理/数据处理地点按远端处理门禁审查
+    enabled: false                 # v1.1-R8 默认禁用；需 OS 强制隔离实测通过后才可启用
+    cli_path: "agy"
+    scratch_cwd: ""                # 必须是空白隔离工作目录
+  codex_cli:
+    execution_mode: "remote_api"   # Codex CLI 本机运行不代表模型请求本地处理
+    bin_path: "codex"
+    scratch_cwd: ""                # 必须是空白隔离工作目录
+  ollama_http:
+    base_url: "http://127.0.0.1:11434"
+    model: "qwen2.5:14b-instruct-q5_K_M"
 ```
 
 启动时由配置加载器对 YAML 执行 `safe_load`，把 `ipo_preheat` 节传给 `PreHeatConfig.from_mapping()`；引擎只接收这份配置对象，不再另设评分阈值常量。配置缺键、权重和不为 1 或阈值顺序错误时，记录配置错误并禁止生成可交易候选。
@@ -1795,10 +2351,11 @@ t1_carry:
 | 配置域 | 必须归入的运行参数/阈值 |
 |:---|:---|
 | `ipo_regime` / `lrrm` | 有效样本窗口和最小样本数、D1/D2/D3 转换阈值、20D/60D 成交分位、市场 breadth/跌停/炸板及流动性特征的门槛与缺失策略 |
-| `ipo_live_heat` / `t1_carry` | 非线性分段、过热/衰竭阈值、Carry 加减分边界、ALLOW/CAUTION/BLOCK 分界、伪强四项判据及其单位 |
+| `ipo_preheat` | 必需字段集合、逐字段来源/`available_at`/TTL、PE 缺失与亏损策略、单位和阈值；TTL 表未冻结前 Pre-Heat 返回 `UNREADY` |
+| `ipo_live_heat` / `t1_carry` | 非线性分段、过热/衰竭阈值、Carry 加减分边界、ALLOW/CAUTION/BLOCK 分界、伪强四项判据及其单位、交易时段与换手采样最大间隔 |
 | `listing_anchors` / `vwap_execution` / `trade_gate` | `d0_open_break_pct` 首日开盘支撑容差、锚点与 reclaim 条件、VWAP 新鲜度/结构阈值、信号最大年龄、最小 RR、批准止损容差、仓位上限和允许指令 |
 | `llm_config` | Worker 请求超时、缓存 TTL、队列上限、消息字节上限、并发/候选上限、结果批次/耗时预算、健康心跳/熔断时限、回退修正量和性能验收门槛 |
-| `replay` / `evaluation` | 样本起止范围、时区、前向切分规则、标签成熟时间、效果指标定义及硬验收目标 |
+| `replay` / `evaluation` | 样本起止范围、每个来源清单必填的 IANA `source_timezone`（并进入 manifest/配置哈希）、前向切分规则、标签成熟时间、效果指标定义及硬验收目标 |
 
 每次决策快照、回放样本、Agent 信封和模型晋级记录均绑定配置版本与内容哈希；评估结果不能在缺少该绑定时用于晋级。
 
@@ -1859,10 +2416,20 @@ def migrate_market_pulse_db(db_path: str = "./market_pulse.db") -> None:
 │   ├── listing_anchor_store.py            # Gate 3: 首日 9 大锚点永久存储
 │   ├── ipo_operation_state_machine.py     # 7 状态操作节点状态机
 │   └── gate_orchestrator.py               # Gate 5: 六层门禁 + 实际 RiskGate 终审
+├── ats/common/
+│   └── display_maps.py                    # 全系统统一精简中文映射字典 (2.11 节)
 ├── ats/llm/
 │   ├── __init__.py
 │   ├── llm_bridge.py                      # 主系统桥接层 (进程隔离与优雅降级)
-│   ├── llm_worker.py                      # 独立 Worker (Ollama JSON Schema 结构化输出)
+│   ├── llm_worker.py                      # 独立 Worker (多后端 Provider 调度与信封组装)
+│   ├── backends/                          # 多 Backend 可插拔适配层 (3.2 节)
+│   │   ├── __init__.py
+│   │   ├── base.py                        # 统一后端抽象基类 (BaseLLMBackend)
+│   │   ├── process_runner.py              # Windows CLI Job Object、有界 I/O 与临时 Schema 文件
+│   │   ├── antigravity_backend.py         # 方式 1 (优先候选): 本地 LiteRT SDK / 远端 agy CLI
+│   │   ├── codex_cli_backend.py           # 方式 2 (远端备选): Codex CLI 管道适配器
+│   │   └── ollama_backend.py              # 方式 3 (可选扩展): 本地 Ollama 原生 HTTP 适配器
+│   ├── schemas.py                         # 三类 Agent 专属 Pydantic Schema / schema_model_for()
 │   ├── vector_store.py                    # LanceDB 向量存储 (1024 维 BGE-M3)
 │   ├── memory_manager.py                  # 三级经验记忆管理 (热/温/冷)
 │   ├── agent_pipeline.py                  # 三类只读 Agent 编排与证据追踪
@@ -1872,7 +2439,7 @@ def migrate_market_pulse_db(db_path: str = "./market_pulse.db") -> None:
 │   └── adapter_manager.py                 # Multi-Adapter 策略专家管理
 ├── config/
 │   ├── ipo_sentiment.yaml                 # 情绪感知与门禁完整配置
-│   ├── llm_config.yaml                    # LLM 结构化输出与推理配置
+│   ├── llm_config.yaml                    # LLM 多后端适配与推理配置 (默认 antigravity_sdk)
 │   └── listing_anchors.json               # 首日关键锚点存储
 └── tools/
     ├── historical_cutoff_replay_engine.py # 历史截断回放引擎 (15 项标准化输出)
@@ -1886,6 +2453,7 @@ def migrate_market_pulse_db(db_path: str = "./market_pulse.db") -> None:
 |:---|:---|:---|
 | `market_pulse_db.py` | 在 `init_pulse_db()` / 启动就绪链路调用幂等迁移；`save_daily_sentiment()` 的 INSERT/UPSERT 写入 `lrrm_state` 与 `ipo_regime_state`；沿用现有 `DB_PATH` | 迁移异常必须返回不可就绪状态并阻止交易服务启动；旧记录 `UNKNOWN` 映射为未就绪，新记录仅保存真实计算状态；重复初始化与重复写入可用 |
 | `ats/strategy/ipo_trading_center.py` | 在候选转下单边界汇集快照并调用 `GateOrchestrator`；用 `IPOTradePlan.position_pct / 100.0` 构造 `DecisionIntent.size_pct`，`stop_price` 绑定结构止损；仅把批准的 `RiskDecision.order` 送入现有路由 | 每条 ENTRY 有同一代码、行情时点、TradePlan 与 RiskDecision 因果链；WATCH/BLOCK/缺失上下文无订单副作用 |
+| `ats/ui/ipo_arbitration_detail_dialog.py` | 升级四板块：六层通行证、物理锚点看板、华大海天四合一指示器、本地 LLM 旁路证据；集成 `display_maps.py` | 单例模式极速复用；通过字典查表获取 2~6 字精炼中文，毫秒级无感刷新 |
 
 已有 `VWAPSnapshot` 与 `RiskGate.evaluate` 字段/接口沿用当前实现；本方案不要求修改其公共签名，Gate 4 直接以快照 `date/time/code/basis` 校验身份和新鲜度。
 
@@ -1894,7 +2462,7 @@ def migrate_market_pulse_db(db_path: str = "./market_pulse.db") -> None:
 <a id="ch5"></a>
 ## 伍、分阶段实施路线（准入驱动）
 
-- **Stage 0: 准入清单先行，再做基础设施就绪**（先冻结第捌节未闭环指标的数据字典、来源/可用时点/缺失策略和阈值配置归属；清单审定后才实施 YAML 校验、SQLite 幂等迁移、Ollama Worker 故障/熔断验证、LanceDB 版本化 1024 维表迁移及 ATS/Qt 性能基线）
+- **Stage 0: 准入清单先行，再做基础设施就绪**（先冻结第捌节未闭环指标的数据字典、来源/可用时点/缺失策略和阈值配置归属；清单审定后才实施 YAML 校验、SQLite 幂等迁移、多后端 Worker 故障/熔断验证、LanceDB 版本化 1024 维表迁移及 ATS/Qt 性能基线。Provider 门禁另须核验现存 SDK/运行时/本机模型与 Windows 结构化输出；不安装缺少的依赖。Codex/agy 按远端处理，需审批 ID、目标及字段 allowlist；agy CLI 保持禁用直至 OS 强制无工具隔离通过。）
 - **Stage 1: 核心门禁与算法闭环**（指标生产者 + 缺失数据失败关闭 + IPO 交易中心 ENTRY 边界接入 + 实际 RiskGate 接入 + 全输入截断回放零未来泄漏验收 + 300ms 主轮询隔离压测）
 - **Stage 2: 只读 Agent 与经验沉淀**（证据可追溯 + LanceDB 截止时间过滤 + 收盘复盘候选）
 - **Stage 3: 界面因果钻取与提示**（顶部流动性/温度/D1-D2 胜率/首日见顶率/次日大跌率/新股相对强度；单股 PreHeat/LiveHeat/T1Carry/VWAP/Risk/Regime/Decision；正负因子、状态、下一条件、锚点失败、迁移日志及 Regime/Carry 告警）
@@ -1909,16 +2477,16 @@ def migrate_market_pulse_db(db_path: str = "./market_pulse.db") -> None:
 |:---|:---|:---:|
 | `test_lrrm_engine.py` | 4态流转、分位数计算、SHOCK 熔断 | $\ge 15$ |
 | `test_ipo_regime_fsm.py` | 5态横截面计算、潮汐映射 | $\ge 20$ |
-| `test_ipo_preheat_engine.py` | 变量独立计算、分位数折价、阈值对齐 | $\ge 15$ |
-| `test_ipo_live_heat_engine.py` | 6大非线性函数分段、换手爬升速率、指标范围/类型拒绝 | $\ge 25$ |
+| `test_ipo_preheat_engine.py` | 变量独立计算、分位数折价、阈值对齐、PE 状态/值矛盾与确认缺失、无效时区及过期来源失败关闭 | $\ge 15$ |
+| `test_ipo_live_heat_engine.py` | 6大非线性函数分段、独立导入、换手爬升速率、午休/时区/断流与配置边界、指标范围/类型拒绝 | $\ge 25$ |
 | `test_t1_carry_evaluator.py` | 四项判据边界、换手率替代条件、指标缺失阻断、CAUTION 阻断 | $\ge 25$ |
 | `test_listing_anchor_store.py` | 双锚击穿、锚点缺失/无效/错代码失败关闭 | $\ge 15$ |
-| `test_gate_orchestrator.py` | 缺失快照及 D0 开盘/发行价缺失或非法失败关闭、D0 边界、D1+ 锚点校验、未知状态阻断、VWAP 身份/新鲜度/各期限完整性、非有限值、RiskGate 标的/信号时效/价格/止损/仓位单位/手动绕过校验 | $\ge 70$ |
-| `test_historical_cutoff_replay.py`| 每个 cutoff 前向截断、naive/aware 逐项归一化、非法时间戳拒绝、未来行拒绝、15项输出契约 | $\ge 25$ |
-| `test_llm_bridge.py` | Worker 隔离、超时/错误降级、Agent 信封、Schema 与本地字段校验 | $\ge 25$ |
-| `test_llm_realtime_isolation.py` | 300ms 轮询零 Queue/IO 调用、Qt 事件隔离、有界排空、队列满/大消息/Worker 崩溃/服务超时/旧响应及 CPU-GPU 争用降级 | $\ge 20$ |
+| `test_gate_orchestrator.py` | 缺失快照及 D0 开盘/发行价缺失或非法失败关闭、D0 边界、D1+ 锚点校验、未知状态阻断、VWAP 身份/新鲜度/各期限完整性、非有限值、RiskGate 标的/信号时效/无效时区/价格/止损/仓位单位/手动绕过校验 | $\ge 70$ |
+| `test_historical_cutoff_replay.py`| 每个 cutoff 前向截断、aware/显式 source_timezone naive 逐项归一化、未声明来源时区及非法 UTC 偏移拒绝、未来行拒绝、15项输出契约 | $\ge 25$ |
+| `test_llm_bridge.py` | Worker 隔离、Provider 工厂/参数、LiteRT 启动预检、原生 Schema、Agent 信封、远端审批/目的地/字段 sanitizer、JSON 严格序列化 | $\ge 25$ |
+| `test_llm_realtime_isolation.py` | 300ms 轮询零 Queue/IO 调用、Qt 事件隔离、有界排空、CLI 沙箱/超时杀进程树/输出上限、SDK 超时后残留进程清理、队列满/Worker 崩溃/所选 Provider 离线/旧响应及 CPU-GPU 争用降级 | $\ge 20$ |
 | `test_regression_hua_da_hai_tian.py` | 华大海天伪强结构 100% 拦截 | $\ge 5$ |
-| `test_preheat_config.py` | YAML 加载、权重归一、无效配置拒绝候选 | $\ge 8$ |
+| `test_preheat_config.py` | YAML 加载、权重归一、逐字段 TTL 完整性、bool/非有限数拒绝、TTL 映射不可变、PE 状态与非法值分流、无效配置拒绝候选 | $\ge 8$ |
 | `test_market_pulse_migration.py` | 新库建表、旧库补列与历史状态 `UNKNOWN` 回填、重复迁移、状态列读写、异常回滚与启动不可就绪 | $\ge 13$ |
 | `test_ipo_trading_center_gate_integration.py` | 现有下单入口门禁接入、仓位单位换算、WATCH/BLOCK 无派单 | $\ge 5$ |
 | `test_sft_dpo_pipeline.py` | 标签成熟、事件分组切分、人工复核、影子晋级/回滚 | $\ge 10$ |
@@ -1938,7 +2506,7 @@ def migrate_market_pulse_db(db_path: str = "./market_pulse.db") -> None:
 ║  3. future_leakage_count 必须严格为 0                           ║
 ║  4. 微调/训练只在非盘中时段进行                                 ║
 ║  5. 不引入 PyTorch/TensorFlow 等重型框架到交易主进程             ║
-║  6. 所有 LLM 输出必须受 Ollama JSON Schema 强类型约束           ║
+║  6. 所有 LLM 输出必须受所选 Provider 的 Schema 约束并在本地复核 ║
 ║  7. T1 Carry 的 CAUTION 严禁直接买入放行 (只能作为 WATCH)       ║
 ║  8. Gate 3 必须使用日内最低价核验双锚失守 (杜绝现价漏检)       ║
 ║  9. Gate 3/4/5 任一必需数据缺失或无效时必须失败关闭            ║
@@ -1964,10 +2532,12 @@ def migrate_market_pulse_db(db_path: str = "./market_pulse.db") -> None:
 | Historical Cut-Off：上市前一交易日起点、竞价逐分钟、D+1/D+2/D+3 展开、首批 8 只及 8 月至今全样本 | **部分覆盖**：15 项输出和 bars 截断已写；全输入隔离及样本范围未形成验收契约 | 保留首批 8 只（华大海天、百迈科、腾信精密、信诺维、沈鼓集团、世纪数码、中塑股份、凯达重工），再扩展到 2026-08 起全部可得新股/次新股；市场/新闻/公告/申购/向量证据也按 `available_at/published_at <= cutoff` 截断，输出 D1/D2/D3 标签只在决策后解锁。 |
 | 回放验收：预测分离、误入/过滤、解释覆盖、零未来泄漏与回归集通过率 | **缺失具体报表契约**：现有单测数不能代替策略效果验收 | 每次回放报告至少含 `regime_transition_accuracy`、`high_carry_vs_low_carry_spread`、`bad_t1_filter_rate`、`continuation_capture_rate`、`false_entry_rate`、`future_leakage_count`、`explanation_coverage`、`lrrm_transition_stability`、`anchor_failure_precision`、`pseudo_strength_filter_rate`、`nonlinear_false_entry_reduction`、`exhaustion_block_precision`、`regression_case_pass_rate`；硬目标：泄漏数 0、解释覆盖 100%、回归集通过率 100%。 |
 | 所有阈值进入版本化 YAML 并可复现 | **部分覆盖**：当前 YAML 有 PreHeat、部分 Regime/LRRM/Carry 和 VWAP 时效配置 | 把仍写在逻辑中的 Gate 2 分段、非线性边界、锚点与 reclaim 容差、RR/仓位约束、请求超时/TTL/熔断/队列预算及回放阈值列入配置归属表；每次决策、样本和回放报告绑定配置版本与哈希。 |
-| ATS 300ms 高频轮询与 Qt 事件循环不受 LLM 拖累 | **原 v1.1 过度承诺，现已收敛为可验证隔离** | v1.x 交易路径完全不读取 LLM 状态；队列、I/O、组装、验证只在旁路线程。验收要求 LLM 导致的 300ms 周期漏期数为 0，连续 30 分钟队列满/Worker 卡死/Ollama 离线/CPU-GPU 压力测试；Qt 心跳延迟相对无 LLM 基线增加不超过 5ms。快照查询 P99 ≤ 0.1ms 仅作为未来版本若申请接入快照读取时的额外门槛，当前版本不以此代替隔离验收。任一门槛失败则默认关闭 LLM，规则引擎独立启动。该验收是受控环境证据，不宣称任意操作系统负载下的数学级实时保证。 |
+| ATS 300ms 高频轮询与 Qt 事件循环不受 LLM 拖累 | **原 v1.1 过度承诺，现已收敛为可验证隔离** | v1.x 交易路径完全不读取 LLM 状态；队列、I/O、组装、验证只在旁路线程。验收要求 LLM 导致的 300ms 周期漏期数为 0，连续 30 分钟队列满/Worker 卡死/所选 Provider 离线/CPU-GPU 压力测试；Qt 心跳延迟相对无 LLM 基线增加不超过 5ms。快照查询 P99 ≤ 0.1ms 仅作为未来版本若申请接入快照读取时的额外门槛，当前版本不以此代替隔离验收。任一门槛失败则默认关闭 LLM，规则引擎独立启动。该验收是受控环境证据，不宣称任意操作系统负载下的数学级实时保证。 |
 | 版本化维护与独立交易中心升级方案 | v1.1 自身有变更历史；交易中心方案 1/2 的完整要求不属于本方案 | v1.1 的每个版本追加修改原因、验证样本、验收结论和是否改变交易门禁；交易中心结构策略、退出引擎、L0/L1/L2 调度、图元及真实网关继续按各自计划验收，不以本文件替代。 |
 
 **实施准入顺序**：先完成需求字段/来源与配置归属清单，再实现并跑完整回放；先通过无 LLM 基线和 LLM 最坏故障压力测试，才允许启用旁路。任何关键指标或实时门槛失败，回退到规则模式且不得影响既有交易服务启动。
+
+> **R9 最终审核结论：方案规格可作为分阶段实施输入，尚未达到 LLM 旁路启用或实盘交易准入。** 第捌节仍有数据源/指标、全输入回放样本、UI/告警及外部交易中心依赖；LiteRT 仅为候选，当前机器依赖/模型/Windows 证据未提供，agy 默认关闭，Codex 远端调用需审批和脱敏。Stage 0 还须验收数据字典、阈值配置、Provider 预检及 ATS/Qt 压测。324 项是测试规划，不是执行证据；不能据此宣称源计划需求全部验证闭环。
 
 ---
 
@@ -1982,3 +2552,7 @@ def migrate_market_pulse_db(db_path: str = "./market_pulse.db") -> None:
 | 2026-09-26 | v1.1-R3 | LLM/源需求复审：移除无法证明的“无锁、100% CPU/GPU 隔离”承诺；限定 300ms/Qt 关键路径与独立有界旁路、健康熔断、响应关联和资源争用验收；补齐七态迁移与快速 reclaim 约束；增加 v0.2 指标、全输入回放、UI/告警、配置和效果验收追踪矩阵；测试规划扩至至少 324 项。 |
 | 2026-09-26 | v1.1-R4 | 复审一致性订正：统一为 v1.x 交易路径不读取 LLM 快照/健康状态；修正父进程控制线程与 Worker 的队列端点方向和所有权；明确 Worker sentinel 由旁路监督线程检查；保留并强调源计划尚未覆盖需求及实施前置验收。 |
 | 2026-09-26 | v1.1-R5 | 终审摘要复核：Gate 3 D0 开盘价/发行价改为显式必需输入并失败关闭；Gate 4 D0 使用当日累计 VWAP、不依赖未封存锚点；SQLite 落实 `timeout=15.0` 并将历史未知状态回填为 `UNKNOWN`；明确交易中心只在 ENTRY 派单边界集成及 Stage 0 准入清单先行。 |
+| 2026-09-26 | v1.1-R6 | 落地全景与精简中文 Map 升级：<br>1. 建立全系统 Map 精简中文信息字典 (`STATUS_CN_MAP`, `VETO_REASON_CN_MAP`, `LRRM_CN_MAP` 等)，全系统一律查表获取 2~6 字精炼中文；<br>2. 确立首日 (D0) 定位为 OBSERVE 观察与锚点沉淀日，Gate 3 核验通过后直接收敛为 WATCH 待命，杜绝首日死锁；<br>3. 澄清 Gate 3 Reclaim 专属于盘后/次日状态机流转逻辑，当日买入门禁坚持日内击穿即禁买；<br>4. 修复 Pre-Heat 估值评分亏损股除零/None 隐患，亏损股取保守分不抛异常；<br>5. 换手爬升差分器增加中午 11:30~13:00 90 分钟扣除与异常断流重置；<br>6. 完整确立四级立体观测体系 (顶部 HUD、指挥室看板、单例详情透视窗、底层数据流) 与三级决策权限指南。 |
+| 2026-09-26 | v1.1-R7 | 历史方案提出双模可插拔 Provider 架构。其“复用现成 Antigravity 模型配置/特权”和“Codex CLI 本地推理”表述已由 R8/R9 复核撤回，不作为当前实施事实；当前 Provider 边界与准入以 R9 为准。 |
+| 2026-09-26 | v1.1-R8 | 限定 Antigravity SDK 为待验证 LiteRT 本机候选（依赖/模型/Windows 证据未通过前关闭）；agy CLI 默认禁用直至 OS 强制工具隔离验收；Codex 按远端 Provider 执行逐 Agent 数据字段审批与 sanitizer；补齐 SDK 超时清理、严格 JSON 序列化、PE 类型校验、逐字段 TTL 及 Stage 0 准入结论。 |
+| 2026-09-26 | v1.1-R9 | 最终方案审计：增加 PE `pe_status` 来源证据以区分已确认缺失与未就绪；拒绝 PreHeat 配置中的 bool/非有限数并冻结 TTL 映射；统一有效时区偏移检查；更新测试断言、最终准入结论及 R7 历史表述。 |
