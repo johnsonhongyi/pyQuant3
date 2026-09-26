@@ -1,5 +1,54 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-09-26 16:22
+- [x] **【新股情绪感知计划书 × 本地 LLM 自学习决策系统：方案书 v1.1 终极闭环升级（纯规划·不实施）】(`design/新股情绪感知与本地LLM自学习决策系统_详细设计执行方案书_v1.0.md`)**：
+    - [x] **全面补齐原计划书 5 大量化与架构核心缺口**：
+        - 1) 增补 `ats/strategy/ipo_preheat_engine.py` 上市前先验潜力计算模型（估值/申购/稀缺/题材/筹码五维加权打分，严格隔离未来）；
+        - 2) 增补 `ats/strategy/ipo_live_heat_engine.py` 实时动能感知与 6 大非线性函数（首日涨幅/换手/VWAP偏离/开盘溢价/拔起斜率/收盘位置）分段饱和反转数学公式；
+        - 3) 升级 `t1_carry_evaluator.py`，深度融入华大海天伪强结构一票否决与不对称惩罚逻辑；
+        - 4) 增补 `ats/strategy/ipo_operation_state_machine.py` 7 状态操作节点状态机（OBSERVE/ARMED/ENTRY_READY/ENTERED/HOLD_T1/EXIT_READY/BLOCKED）与 TradePlan 深度绑定；
+        - 5) 细化华大海天反例数学量化判据，给出 `tests/test_regression_hua_da_hai_tian.py` 完整 Mock 测试与断言代码规格；
+        - 6) 增补 `tools/historical_cutoff_replay_engine.py` 架构设计，确立 12 项标准化输出字典契约（Schema）与时间沙箱审计机制；
+    - [x] **测试矩阵扩充**：测试用例矩阵由 ≥95 项扩充至 ≥155 项，实现与原计划书 100% 毫无死角的工程级闭环对齐。
+
+## 2026-09-26 15:33
+- [x] **【新股情绪感知计划书 × 本地 LLM 自学习决策系统：功能整合分析与实施方案设计（纯规划·不实施）】(`design/新股情绪感知与T1交易决策系统_计划书_v0.2.0.md`, `design/新股情绪感知与T1交易决策系统_计划书_v0.2.0.docx`, `20260926_1533_task.md`)**：
+    - [x] **计划书六层门禁与现有系统 30+ 模块的全景功能映射**：
+        - 逐一对照 LRRM/IPO Regime/Pre-Heat/Live Heat/T+1 Carry/VWAP/7态操作状态机/TDE 与现有 `ipo_market_sentiment_engine.py`、`subnew_tide_state_machine.py`、`channel_secondary_buy_strategy.py`、`vwap_factory.py`、`next_day_anomaly_watch.py`、`ipo_trading_center.py`、`proactive_exit_engine.py` 等模块的匹配度（20%~70%）与具体差距；
+        - 整合 8 份高度关联设计文档（`sentiment_reversal_plan.md`、`sentiment_reversal_implementation_blueprint.md`、`新股检测vwap动能挖掘设计.md`、`新股检测中心升级方案1/2.md`、`次日异动候选池_最小侵入落地计划.md`、`三只代表性新股核心对照表.txt`）的资产复用对齐；
+    - [x] **本地 LLM 自学习决策系统完整架构设计**：
+        - 确立四不原则（不阻塞/不直连/不黑盒/不在线更新）；
+        - 设计三大智能体角色（情绪分析师 Sentiment Analyst、交易反思官 Trade Critic、行情归因员 Market Narrator）；
+        - 设计三级自学习闭环架构（Level 1 RAG 经验增强 → Level 2 DPO 偏好对齐 → Level 3 Multi-Adapter 策略专家热插拔）；
+        - 技术选型确定 Ollama Windows 原生 + Qwen2.5-14B-Instruct (Q5_K_M) + LanceDB + BGE-M3 + Unsloth QLoRA 微调链路；
+        - 严格进程隔离架构（LLM Worker 独立子进程 + Queue IPC + 优雅降级）；
+    - [x] **Stage 0~4 分阶段实施路线图与细致步骤**：
+        - Stage 0（基础设施 1~2 周）：Ollama 部署 + LanceDB 初始化 + IPC Worker 骨架 + LLM Bridge 桥接层；
+        - Stage 1（情绪 RAG 2~3 周）：新闻采集管线 + Embedding 入库 + 时间衰减混合检索 + 情绪分析师 Agent；
+        - Stage 2（交易反思 2~3 周）：收盘反思管线 + 归因结构化 + 三级经验记忆库 + 盘中相似检索；
+        - Stage 3（门禁增强 3~4 周）：LRRM 状态注入 + T1 Carry 辅助评估 + UI 因果钻取面板；
+        - Stage 4（领域微调·长周期）：SFT 数据集构建 + QLoRA 微调 + DPO 偏好对齐 + Multi-Adapter 热插拔；
+    - [x] **风险评估与工程约束**：7 大风险项 + 8 条铁律 + 14 项量化验收指标 + 新增文件清单 + 最小化依赖库清单；
+    - [x] **恪守纯规划原则**：不执行任何既有代码修改，不引入新框架或依赖到生产环境。
+
+## 2026-09-26 13:05
+- [x] **【ATS 优化方案落地 3 深度审核、功能闭环与实盘门禁客观定性】(`ats/persistence_lock.py`, `ats/session_snapshot.py`, `next_day_anomaly_watch.py`, `ats/ui/main_window.py`, `ats/ui/next_day_watch_dialog.py`, `tools/benchmark_stage0_telemetry.py`, `tests/test_ats_optimization_review.py`, `20260926_1305_task.md`)**：
+    - [x] **落地 3 关键问题修复与功能闭环确证**：
+        - 修复历史索引误将缺行情 `UNVERIFIABLE` 判为终态提前截断追踪的漏洞（`_followup_is_terminal` 精确锁定仅当整个追踪窗口到期才作为终态）；
+        - 确立两阶段持久化确认协议（Two-Phase Delivery & Receipt Persistence）：异步写盘落盘成功收到 `next_day_snapshot_signal` 后才回发 ACK，彻底杜绝伪交付与单点丢失；
+        - 新增跨进程目录级排他文件锁 `directory_write_lock`（Windows `msvcrt.locking` + 重试超时）与 `replace_with_retry`（WinError 32/33 共享冲突退避重试）；
+        - 快照落盘改为主线程不可变冻结深拷贝切片 + 独立守护线程异步落盘（`save_snapshot_async`），并引入版本单调递增锁防乱序覆盖；
+        - IPC Bridge 增加 5.0s 空闲超时并在停服时优雅清理活跃客户端连接与队列；
+        - UI 增量轮询刷新与全量加载请求互锁，修复定时器刷新降级全量加载、QThread 泄漏及 C++ 窗口销毁竞态崩溃；
+    - [x] **自动化测试全景覆盖与 100% 绿灯验证**：
+        - 新增 11 项优化审计专项回归测试（`tests/test_ats_optimization_review.py`）与 5 项异步加载有界测试（`tests/test_ats_next_day_loader_bounded.py`）；
+        - 全量 pytest（405 项测试用例）100% 纯绿秒级通过（exit=0）；`python -m compileall` 零语法错误，`git diff --check` 100% 干净；
+    - [x] **性能门禁与基线真实性客观定性**：
+        - 澄清并修正合成基准指标：时间戳单调递增推进时评估跳写率为 0.0%，原“66% I/O 削峰”系时间戳未严格推进导致，实盘真实削峰率必须以交易日盘中数据为准；
+        - 明确界定 Stage 0 基线为纯算法与投影内存计算，不能替代包含网络、IPC、Qt 绘制与长周期浸泡的全链路实盘门禁；
+    - [x] **宏观重构项准入分析与演进规划**：
+        - 系统梳理全系统 TDX 统一调度中枢、Qt 核心主表视口虚拟化、策略计算独立子进程隔离的收益、成本与准入门槛。
+
 ## 2026-09-26 11:35
 - [x] **【ATS 全量测试非交易日兼容加固、Stage 0 全链路基线微观遥测与关键门禁全面复查】(`tools/benchmark_stage0_telemetry.py`, `tools/run_shadow_live_test.py`, `trading_kernel/execution/paper_adapter.py`, `tests/test_multi_day_realtime_updating.py`, `tests/test_tdx_cache_deforcing_and_invalidation.py`, `20260926_1125_task.md`)**：
     - [x] **全量测试用例周末非交易日与 Fixture 参数兼容加固（100% 绿灯全过）**：
