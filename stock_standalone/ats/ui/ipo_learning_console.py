@@ -1984,7 +1984,15 @@ class IPOLearningConsole(QWidget):
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
-        header = QHBoxLayout()
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(6)
+
+        # 顶部自适应两行容器：第1行状态栏，第2行操作栏
+        header_container = QVBoxLayout()
+        header_container.setSpacing(4)
+
+        status_row = QHBoxLayout()
+        status_row.setSpacing(6)
         self.lbl_runtime = QLabel("LLM 旁路：读取中")
         self.lbl_provider = QLabel("Provider：读取中")
         self.lbl_worker = QLabel("Worker：读取中")
@@ -1994,8 +2002,14 @@ class IPOLearningConsole(QWidget):
             self.lbl_runtime, self.lbl_provider, self.lbl_worker, self.lbl_learning,
             self.lbl_monitor_updated_at,
         ):
-            label.setStyleSheet("font-weight: bold; padding: 6px; background: #20232b; border: 1px solid #414653;")
-            header.addWidget(label, 1)
+            label.setStyleSheet("font-weight: bold; padding: 4px 6px; background: #20232b; border: 1px solid #414653; border-radius: 3px;")
+            status_row.addWidget(label, 1)
+        header_container.addLayout(status_row)
+
+        action_row = QHBoxLayout()
+        action_row.setSpacing(6)
+        action_row.addStretch(1)
+
         self.btn_refresh = QPushButton("立即刷新")
         self.btn_refresh.clicked.connect(self._worker.request_refresh)
         self.btn_note = QPushButton("记录复核备注")
@@ -2008,11 +2022,13 @@ class IPOLearningConsole(QWidget):
         self.btn_reject = QPushButton("拒绝样本")
         self.btn_reject.setEnabled(False)
         self.btn_reject.clicked.connect(lambda: self._review_candidate("REJECTED"))
-        header.addWidget(self.btn_refresh)
-        header.addWidget(self.btn_note)
-        header.addWidget(self.btn_accept)
-        header.addWidget(self.btn_reject)
-        layout.addLayout(header)
+
+        for btn in (self.btn_refresh, self.btn_note, self.btn_accept, self.btn_reject):
+            btn.setStyleSheet("padding: 4px 10px; font-weight: bold;")
+            action_row.addWidget(btn)
+
+        header_container.addLayout(action_row)
+        layout.addLayout(header_container)
 
         self.content_tabs = QTabWidget()
         overview = QWidget()

@@ -1,5 +1,34 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-09-27 10:02 数据契约指标总数校准 (41项实证) 与 UI 屏幕自适应缩放修复
+- [x] **【41项指标实证溯源与UI高DPI自适应动态缩放】(`tools/run_ipo_learning_console.py`, `ats/ui/ipo_learning_console.py`, `ats/strategy/ipo_data_contracts.py`, `20260927_1002_task.md`)**：
+    - [x] **41 项 vs 43 项根因溯源与彻底校准**：实证源码 `LRRM(11) + REGIME(10) + PREHEAT(8) + LIVE_HEAT(12) = 41` 项；查实历史归档文档因混淆“watchlist_lifecycle 43 项回归测试通过率”及早期未精简指标（流通市值、网下倍数）导致文字偏差，现全系统统一纠偏并实证为 41 项；
+    - [x] **UI 屏幕自适应动态缩放与滚动保护**：`tools/run_ipo_learning_console.py` 重构为基于 `availableGeometry()` 动态计算安全居中宽高；`IPOLearningConsole` 顶部 Header 拆分为状态行与操作行（最小宽度由 1300px 降至 700px），并注入 `QScrollArea` 滚动支撑，彻底解决小分辨率/高 DPI 下窗口超宽爆屏问题。
+
+## 2026-09-27 09:55 UI查看入口梳理、Antigravity CLI优先资源编排与数据自检能力建设
+- [x] **【UI查看入口、Antigravity CLI 优先接入与数据自检回馈闭环】(`tools/run_ipo_learning_console.py`, `tools/ipo_preflight_diagnostics.py`, `ats/llm/antigravity_cli_backend.py`, `20260927_0955_task.md`)**：
+    - [x] **UI 状态查看入口梳理与独立启动工具**：明确主窗口【Tab 5: 🤖 IPO 自学习监控】及次日候选池/指挥室唤出入口；编写并跑通 `tools/run_ipo_learning_console.py`，秒级独立打开自学习监控控制台及单例因果仲裁对话框；
+    - [x] **Antigravity CLI 优先纳入现有资源体系**：编写 `ats/llm/antigravity_cli_backend.py`，将本地 `agy.ps1` 确立为 Priority 1 资源，实测探活成功；落实 `--sandbox`、`--print-timeout` 与 stdin 传输规范；
+    - [x] **缺失数据自动获取补齐编排**：系统化编排 Pre-Heat 先验数据（本地缓存/TDX主数据/爬虫）、LRRM 与 Regime 宏观横截面（`market_pulse.db` 滚动分位数）与分时动能流水线；
+    - [x] **一键环境与数据自检（Preflight Diagnostics）**：编写并实测通过 `tools/ipo_preflight_diagnostics.py`，全量扫描 CLI 资源、配置、数据库及 41~43 项数据契约，输出精炼的可解释因果反馈与修复指南。
+
+## 2026-09-27 09:40 新股情绪感知与本地 LLM 自学习决策系统方案设计与实现问题深度审核
+- [x] **【方案架构、数据契约、模型运行时、D1-D3 标签流与测试差距深度审核】(`design/新股情绪感知与本地LLM自学习决策系统_详细设计执行方案书_v1.1.md`, `ats/strategy/ipo_data_contracts.py`, `ats/llm/offline_learning.py`, `20260927_0940_task.md`)**：
+    - [x] **架构设计客观评价（优）**：
+        - 1) 明确交易主干（Gate 0~5）坚持 100% 规则驱动，LLM 仅作为纯异步只读旁路，彻底消除 300ms 主轮询漏期风险；
+        - 2) 落实 Fail-Closed 原则：消除了 Gate 2 CAUTION 误放行、Gate 3 最低价核验双锚失守、Gate 4 VWAP 真实时效校验、Gate 5 与真实 RiskGate 和 TradePlan 绑定；
+        - 3) 确立 D0 仅作为 OBSERVE 观察日，消除首日时序死锁；统一采用 `display_maps.py` 精简中文映射；
+    - [x] **查实并定性五大核心工程断点（缺口核查）**：
+        - 1) **数据源断链**：`ipo_data_contracts.py` 定义了 43 个字段契约，但外部数据拉取流水线未接通（申购倍数、中签率、行业 PE 中位数、宏观流动性指标尚无自动写入）；
+        - 2) **D1–D3 标签采集断链**：`offline_learning.py` 仅有样本校验器，缺少盘后 15:30 自动计算收益率、最大回撤、破锚破发并生成成熟标签的“标签生产者（Label Producer）”；
+        - 3) **本地模型不可用**：实机检测 Python 环境未安装 `google-antigravity`、`litert-lm`、`lancedb`、`ollama`；`agy.ps1` 缺沙箱工具隔离默认禁用，`codex` 不在 PATH 且属远端；LLM 旁路必须处于物理关闭状态；
+        - 4) **Stage 0 准入配置未落地**：`config/ipo_sentiment.yaml` 与 `config/listing_anchors.json` 尚未生成，配置与数据字典哈希未绑定；
+        - 5) **324 项测试仅为规划**：`tests/` 目录下尚未创建方案规划的 17 个专项测试文件，目前跑通的 226 项测试均为 stock_standalone 的其他模块测试；
+    - [x] **明确三大关切（感知结果、监督数据信号、交易决策）的现状与改进方向**：
+        - 1) 结果感知：三级度量体系明确，待补齐 13 项回放量化报表生成脚本；
+        - 2) 数据监督：四级立体观测网（HUD、指挥室看板、单例详情对话框、底层数据库）已有骨架，待灌入真实数据源；
+        - 3) 交易决策：Gate 0~5 严格自动化拦截 + Gate 5 与 RiskGate 双模派单约束，在数据未就绪时全部 Fail-Closed 阻断，保证实盘 100% 安全。
+
 ## 2026-09-27 09:25 R9 初步实现启动与渲染异常加固修复
 - [x] **【消除类定义与UI刷新期 NameError/SyntaxError】(`ats/strategy/ipo_trading_center.py`, `ats/ui/ipo_learning_console.py`, `ats/llm/offline_learning.py`, `tools/run_shadow_live_test.py`, `20260927_0925_task.md`)**：
     - [x] **根治 `run_ats.py` 启动阶段类定义 NameError**：
