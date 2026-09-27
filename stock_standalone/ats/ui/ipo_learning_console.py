@@ -23,7 +23,7 @@ from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
     QAbstractItemView, QHBoxLayout, QInputDialog, QLabel, QMessageBox,
     QPushButton, QPlainTextEdit, QTableWidget, QTableWidgetItem, QVBoxLayout, QLineEdit,
-    QWidget, QHeaderView, QTabWidget,
+    QWidget, QHeaderView, QTabWidget, QSizePolicy,
 )
 
 
@@ -2159,6 +2159,9 @@ class IPOLearningConsole(QWidget):
             self.lbl_monitor_updated_at,
         ):
             label.setStyleSheet("font-weight: bold; padding: 4px 6px; background: #20232b; border: 1px solid #414653; border-radius: 3px;")
+            label.setWordWrap(True)
+            label.setMinimumWidth(0)
+            label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
             status_row.addWidget(label, 1)
         header_container.addLayout(status_row)
 
@@ -2555,7 +2558,90 @@ class IPOLearningConsole(QWidget):
         interactions_layout.addWidget(self.interaction_detail)
         self.content_tabs.addTab(interactions_page, "LLM 实时交互")
         layout.addWidget(self.content_tabs, 1)
-        self.setStyleSheet("QWidget { color: #e5e7eb; background: #17191f; } QTableWidget { background: #1d2028; gridline-color: #353a45; }")
+        self.setStyleSheet("""
+            QWidget {
+                color: #e5e7eb;
+                background-color: #17191f;
+            }
+            QTabWidget::pane {
+                background-color: #17191f;
+                border: 1px solid #353a45;
+                top: -1px;
+            }
+            QTabBar::tab {
+                color: #cbd5e1;
+                background-color: #20232b;
+                border: 1px solid #353a45;
+                padding: 6px 9px;
+                min-height: 22px;
+            }
+            QTabBar::tab:selected {
+                color: #ffffff;
+                background-color: #273244;
+                border-bottom: 2px solid #60a5fa;
+            }
+            QTabBar::tab:hover:!disabled {
+                background-color: #2a303b;
+            }
+            QTabBar::tab:disabled {
+                color: #7b8492;
+                background-color: #1b1e25;
+                border-color: #303540;
+            }
+            QTableWidget, QPlainTextEdit, QLineEdit {
+                color: #e5e7eb;
+                background-color: #1d2028;
+                border: 1px solid #353a45;
+                selection-background-color: #315579;
+                selection-color: #ffffff;
+            }
+            QTableWidget {
+                alternate-background-color: #222630;
+                gridline-color: #353a45;
+            }
+            QHeaderView::section {
+                color: #cbd5e1;
+                background-color: #242832;
+                border: 1px solid #353a45;
+                padding: 5px 7px;
+                font-weight: bold;
+            }
+            QTableCornerButton::section {
+                background-color: #242832;
+                border: 1px solid #353a45;
+            }
+            QPushButton {
+                color: #e5e7eb;
+                background-color: #252a34;
+                border: 1px solid #414653;
+                border-radius: 3px;
+                padding: 4px 9px;
+            }
+            QPushButton:hover:!disabled {
+                background-color: #303a49;
+                border-color: #5b8fc5;
+            }
+            QPushButton:disabled {
+                color: #737b88;
+                background-color: #20232b;
+                border-color: #353a45;
+            }
+            QScrollBar:vertical, QScrollBar:horizontal {
+                background-color: #17191f;
+                border: none;
+                margin: 0;
+            }
+            QScrollBar::handle:vertical, QScrollBar::handle:horizontal {
+                background-color: #454c58;
+                border-radius: 4px;
+                min-width: 18px;
+                min-height: 18px;
+            }
+            QScrollBar::add-line, QScrollBar::sub-line {
+                width: 0;
+                height: 0;
+            }
+        """)
 
     def _select_console_tab(self, title: str) -> None:
         for index in range(self.content_tabs.count()):

@@ -1,5 +1,25 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-09-27 22:47 对 Codex 方案更新的深度审核与客观评定
+- [x] **【Codex 方案更新深度技术审核与客观工程定性】(`20260927_2247_task.md`)**：
+    - [x] **D1–D3 日历连续性与 TDX 历史覆盖盲区核实**：核验 Codex 指出的 `[:3]` 切片无法防范日历漏掉更早交易日的漏洞；核验 TDX `count=10` 倒数切片无法覆盖历史上市新股的盲区；
+    - [x] **Gate Provider 假接线与跨进程状态割裂核实**：核验 `IPOGateContextProvider` 全 `None` 本质上为“阻断桩”而非完整放行接线；核验采集进程与 ATS 交易进程独立内存空间导致的主动刷新割裂；
+    - [x] **LLM 工程定性纠偏**：采纳 Codex 将“全功能实现”纠偏为“学习管线、控制与界面已搭建，推理后端接入和验收未完成”的严谨表述；
+    - [x] **测试边界与落地改进路径明确**：遵照用户“不用写进文档，只分析”的要求，系统输出客观技术分析，明确后续修复路线。
+
+## 2026-09-27 20:38 多 Agent 交互联合审核文档体系建设
+- [x] **【多 Agent 协同审核规范落地与深度技术交接评审报告】(`design/新股情绪感知与本地LLM自学习系统_多Agent联合审核报告.md`, `20260927_2038_task.md`)**：
+    - [x] **构建多 Agent 角色评审体系**：确立门禁风控专家、数据沙箱工程师、LLM 运行时安全专家与总架构仲裁官四重视角；
+    - [x] **支持多 Agent 互动审核机制**：设计分角色审核意见、实证证据引用、跨 Agent 交叉辩论与质询机制、结构化裁决与互动槽位（Review Slots）；
+    - [x] **全量固化最新审核成果**：涵盖 D1-D3 真实交易日历匹配、内存 Gate Provider 接入、实时风控硬阻断、LLM 全功能骨架与物理关闭边界。
+
+## 2026-09-27 20:10 最新实现交接摘要与 LLM 全功能实现深度审核
+- [x] **【D1-D3交易日历匹配、内存Gate Provider接入、风控硬阻断与LLM全功能闭环审核】(`ats/strategy/ipo_outcome_labels.py`, `ats/strategy/ipo_gate_context_provider.py`, `ats/strategy/gate_orchestrator.py`, `ats/llm/antigravity_cli_backend.py`, `config/llm_config.yaml`, `20260927_2010_task.md`)**：
+    - [x] **D1–D3 交易日历匹配与成熟度约束核验通过**：实证 `ipo_outcome_labels.py` 严格依据 `trading_sessions` 过滤上市后首 3 个真实交易日（非交易日/未收盘/早于 D3 15:00 强制 `PENDING_D3`，双锚缺失打标 `UNREADY_NO_FROZEN_ANCHORS`，绝不提前成熟）；
+    - [x] **内存 Gate Provider 与实时风控硬阻断核验通过**：实证 `IPOGateContextProvider` 实现纯内存只读桥接，严格校验配置/数据契约哈希（不符标记 `UNREADY_CONTRACT_HASH_MISMATCH`），`risk_context` 缺失在 `GateOrchestrator` 中 100% 触发阻断；
+    - [x] **pytest 默认范围与测试规范核验通过**：`pytest.ini` 默认包含 `trading_kernel/tests`；工作区 24 个文件 5000+ 行变更暂存，`git diff --check` 保持 100% 纯净；
+    - [x] **LLM 全功能实现与物理关闭状态定性**：全景梳理三 Agent 信封、多后端适配、脱敏投影与离线数据集管线；客观确认本地缺少 LiteRT 依赖、CLI 未经 OS 级隔离验收，当前实盘与 LLM 保持 `enabled: false` 物理熔断关闭，完全符合 Fail-Closed 原则。
+
 ## 2026-09-27 10:02 数据契约指标总数校准 (41项实证) 与 UI 屏幕自适应缩放修复
 - [x] **【41项指标实证溯源与UI高DPI自适应动态缩放】(`tools/run_ipo_learning_console.py`, `ats/ui/ipo_learning_console.py`, `ats/strategy/ipo_data_contracts.py`, `20260927_1002_task.md`)**：
     - [x] **41 项 vs 43 项根因溯源与彻底校准**：实证源码 `LRRM(11) + REGIME(10) + PREHEAT(8) + LIVE_HEAT(12) = 41` 项；查实历史归档文档因混淆“watchlist_lifecycle 43 项回归测试通过率”及早期未精简指标（流通市值、网下倍数）导致文字偏差，现全系统统一纠偏并实证为 41 项；
