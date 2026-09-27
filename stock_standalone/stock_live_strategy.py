@@ -1383,7 +1383,10 @@ class StockLiveStrategy:
         today_str = now_dt.strftime('%Y-%m-%d')
         now_time_int = int(now_dt.strftime('%H%M'))
         now_time_str = now_dt.strftime('%H:%M')
-        is_trading_active = (915 <= now_time_int <= 1505)
+        # 🛡️ [RECOVERY] 严格检查交易日与交易时段，非交易日坚决不触发密集策略大计算，保留现有 cache
+        is_trade_day = bool(cct.get_trade_date_status())
+        is_trading = is_trade_day and bool(cct.get_work_time_duration())
+        is_trading_active = is_trading and (915 <= now_time_int <= 1505)
 
         # 🛡️ [OPTIMIZE] 避免全量 copy()，仅在需要异步修改时再进行子集或完整拷贝
         # 改为延迟到扫描和策略逻辑内。
@@ -1395,6 +1398,14 @@ class StockLiveStrategy:
         idx_sample = list(df_internal.index[:5])
         idx_dtype = df_internal.index.dtype
         logger.info(f"🔍 [DF_PROBE] TradingActive={is_trading_active} Monitors={len(self._monitored_stocks)} Samples={tc_sample} Index={idx_sample} Dtype={idx_dtype}")
+
+        # --- 非交易时间/非交易日快速熔断，完全使用 cache，杜绝无谓 CPU 消耗 ---
+        if not is_trading:
+            if is_trade_day and now_time_str >= "15:00":
+                if self._last_settlement_date != today_str:
+                    self._perform_daily_settlement()
+            logger.debug("⏳ [DEBUG_LOCK] [Strategy] process_data finished (non-trading day/time, using cache).")
+            return
 
         # --- 1. 热点题材领涨股发现 (Algorithm Expansion) ---
         if is_trading_active and (925 <= now_time_int <= 1505):
@@ -1459,26 +1470,11 @@ class StockLiveStrategy:
                      if resample in self._is_checking_resamples:
                          self._is_checking_resamples.remove(resample)
 
-        # 1. 交易期间判断: 0915 至 1502
-        is_trading = cct.get_work_time_duration()
-
         # --- 自动启动判断 (Auto Start) ---
         # 交易时段 + 未启用 + 今日未结算过
         if is_trading and not self.auto_loop_enabled:
             if self._last_settlement_date != today_str:
                 self.start_auto_trading_loop()
-
-        # --- 自动收盘结算判断 (Auto Settlement) ---
-        if not is_trading:
-             # 判断是否收盘 (15:00 以后) 且今日未结算
-             # 注意：需排除中午休市 (11:30-13:00)
-             if now_time_str >= "15:00":
-                 if self._last_settlement_date != today_str:
-                     self._perform_daily_settlement()
-             
-             # 非交易时间停止策略计算
-             logger.debug("⏳ [DEBUG_LOCK] [Strategy] process_data finished (non-trading time).")
-             return
 
         logger.info(f"Strategy: Processing cycle for {len(self._monitored_stocks)} monitored stocks")
 

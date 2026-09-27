@@ -2675,18 +2675,19 @@ class SectorFocusController:
         # [MOD] 强制模式下直接进入板块热力计算，不查 30s 节流；且在 force=True 时必然执行降级聚合计算以确保 UI 响应
         today_date = datetime.now().strftime('%Y%m%d')
         
-        # [Dragon] 自动收盘快照检测 (每天 15:00 - 15:10 之间触发一次)
+        # [Dragon] 自动收盘快照检测 (每天 15:00 - 15:10 之间触发一次，仅限交易日)
         now_dt = datetime.now()
-        if now_dt.hour == 15 and 0 <= now_dt.minute <= 10:
+        is_trade_day = bool(cct.get_trade_date_status()) if hasattr(cct, 'get_trade_date_status') else True
+        if is_trade_day and now_dt.hour == 15 and 0 <= now_dt.minute <= 10:
             if self._last_snapshot_date != today_date:
                 logger.info(f"🕒 [Controller] 检测到收盘时间，自动触发龙头归档快照: {today_date}")
                 self.run_daily_close_snapshot()
                 self._last_snapshot_date = today_date
 
         # [Dragon] 30 分钟整点强制扫描检测 (9:30, 10:00, 10:30, 11:00, 13:30, 14:00, 14:30)
-        # 计算 09:30 开始的分钟偏移量
+        # 计算 09:30 开始的分钟偏移量 (必须受交易日守卫保护)
         m_offset = (now_dt.hour * 60 + now_dt.minute) - 570  # 9:30 = 570min
-        if 0 <= m_offset <= 330: # 交易时间内 (9:30 - 15:00)
+        if is_trade_day and (0 <= m_offset <= 330): # 仅限交易日交易时间内 (9:30 - 15:00)
             slot = m_offset // 30
             if slot != self._last_30m_slot:
                 logger.info(f"⏰ [Controller] 到达 30 分钟同步节点 (Offset={m_offset}m, Slot={slot}), 触发全量引擎对齐")
@@ -2694,6 +2695,10 @@ class SectorFocusController:
                 self._last_30m_slot = slot
                 # 执行一次龙头状态固化，确保持久化最新
                 self.dragon_tracker._save_persist()
+
+        # 🛡️ [CACHE-FIRST] 非交易日除首次冷启动初始化外，后续全面使用 cache，绝不空转重算
+        if not is_trade_day and not force and getattr(self, '_last_full_update', 0) > 0:
+            return
 
         if force or (now - self._last_full_update >= self._full_update_interval):
             try:
