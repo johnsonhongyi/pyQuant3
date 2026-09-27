@@ -350,7 +350,7 @@ class IPOTradingCenter:
             from ats.strategy.ipo_gate_context_provider import get_default_ipo_gate_context_provider
 
             provider = get_default_ipo_gate_context_provider()
-            provider.refresh()
+            provider.start_auto_refresh()
             cls._instance = cls(
                 auto_load_ledger=True, r9_gate_context_provider=provider
             )

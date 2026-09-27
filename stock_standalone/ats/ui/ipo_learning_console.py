@@ -1126,7 +1126,7 @@ def _collect_snapshot(root: Path) -> Dict[str, Any]:
             f"离线样本校验/事件分组前向切分/影子指标评估 {DATASET_SCHEMA_VERSION} 已实现；"
             f"Gate 完整输入快照 {snapshot_summary['snapshot_count']} 条，待结果标签 {snapshot_summary['waiting_outcome_count']} 条；"
             f"封存仓库 {dataset_status}；回放：{shadow_status}；"
-            "Gate 决策快照同时保存规则 Proposal；D1-D3 成熟标签采集、复盘 Agent 请求、候选组装、训练执行器和模型晋级仍未接入"
+            "Gate 决策快照保存规则 Proposal；D1-D3 成熟标签采集已接入并待人工复核；复盘 Agent 请求、训练执行器和模型晋级仍未接入"
         )
         effect_metrics = replay_summary.get("effect_metrics", {})
         measured_metric_count = sum(
@@ -1673,12 +1673,42 @@ def _collect_snapshot(root: Path) -> Dict[str, Any]:
             f"人工接受 {review_counts['ACCEPTED']} / 拒绝 {review_counts['REJECTED']}；训练保持关闭"
         )
     )
+    gate_sync_raw = _read_json(
+        root / "data" / "ipo_learning" / "gate_context_provider.latest.json",
+        max_bytes=16 * 1024,
+    ) or {}
+    gate_sync_updated_at = _safe_text(gate_sync_raw.get("updated_at"), 40)
+    gate_sync_age = None
+    try:
+        parsed_sync_time = datetime.fromisoformat(gate_sync_updated_at.replace("Z", "+00:00"))
+        if parsed_sync_time.tzinfo is not None and parsed_sync_time.utcoffset() is not None:
+            gate_sync_age = max(
+                0.0,
+                (datetime.now(timezone.utc) - parsed_sync_time.astimezone(timezone.utc)).total_seconds(),
+            )
+    except (TypeError, ValueError, OverflowError):
+        pass
+    gate_sync_state = _safe_text(gate_sync_raw.get("state"), 32) or "NOT_RUNNING"
+    if gate_sync_age is None or gate_sync_age > 15.0:
+        gate_sync_state = "STALE" if gate_sync_updated_at else "NOT_RUNNING"
+    gate_context_sync = {
+        "state": gate_sync_state,
+        "updated_at": gate_sync_updated_at,
+        "heartbeat_age_seconds": gate_sync_age,
+        "reader_process_id": _nonnegative_count(gate_sync_raw.get("reader_process_id")),
+        "stored_observation_count": _nonnegative_count(gate_sync_raw.get("stored_observation_count")),
+        "typed_gate_contexts_ready": gate_sync_raw.get("typed_gate_contexts_ready") is True,
+        "runtime_authorized": gate_sync_raw.get("runtime_authorized") is True,
+        "refresh_error": _safe_text(gate_sync_raw.get("refresh_error"), 80),
+        "transport": _safe_text(gate_sync_raw.get("transport"), 40),
+    }
     return {
         "monitor_updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "config_status": "有效配置" if config_ok else "未就绪",
         "config_detail": config_detail,
         "provider": backend,
         "provider_preflight": provider_preflight,
+        "gate_context_sync": gate_context_sync,
         "runtime_status": runtime_status,
         "runtime_age": runtime_age,
         "runtime_qualified": runtime_qualified,
@@ -2129,7 +2159,7 @@ class IPOLearningConsole(QWidget):
         except Exception:
             self._runtime_control = None
         self._source_auto_timer = QTimer(self)
-        self._source_auto_timer.setInterval(30 * 60 * 1000)
+        self._source_auto_timer.setInterval(5 * 60 * 1000)
         self._source_auto_timer.timeout.connect(
             lambda: self._start_source_collection(collect_labels=True)
         )
@@ -2668,7 +2698,26 @@ class IPOLearningConsole(QWidget):
     def _render_snapshot(self, snapshot: Dict[str, Any]) -> None:
         status = snapshot.get("runtime_status", "未知")
         refreshed_at = snapshot.get("monitor_updated_at", "未知")
-        self.lbl_monitor_updated_at.setText(f"监控刷新：{refreshed_at}")
+        gate_sync = snapshot.get("gate_context_sync", {})
+        gate_sync = gate_sync if isinstance(gate_sync, dict) else {}
+        gate_sync_state = gate_sync.get("state", "NOT_RUNNING")
+        self.lbl_monitor_updated_at.setText(
+            f"监控刷新：{refreshed_at} · ATS数据同步：{gate_sync_state}"
+        )
+        sync_age = gate_sync.get("heartbeat_age_seconds")
+        sync_age_text = f"心跳 {sync_age:.1f}s" if isinstance(sync_age, (int, float)) else "无新鲜心跳"
+        self.lbl_monitor_updated_at.setToolTip(
+            "ATS只读桥接：{transport} · {age} · 观测 {count} 条 · 最近刷新 {updated} · "
+            "Gate 类型化上下文 {typed} · 运行授权 {authorized} · {error}".format(
+                transport=gate_sync.get("transport", "未知"),
+                age=sync_age_text,
+                count=gate_sync.get("stored_observation_count", 0),
+                updated=gate_sync.get("updated_at", "未知"),
+                typed="就绪" if gate_sync.get("typed_gate_contexts_ready") else "未就绪",
+                authorized="通过" if gate_sync.get("runtime_authorized") else "关闭",
+                error=gate_sync.get("refresh_error", ""),
+            )
+        )
         self.lbl_runtime.setText(f"LLM 旁路：{status}")
         self.lbl_runtime.setStyleSheet(
             "font-weight: bold; padding: 6px; background: #20232b; border: 1px solid #414653; color: "
@@ -3231,6 +3280,12 @@ class IPOLearningConsole(QWidget):
                 component_reason = _safe_text(component.get("reason"), 120)
                 if component_reason:
                     parts.append(f"{label}诊断:{component_reason}")
+        bridge = result.get("gate_data_bridge", {})
+        if isinstance(bridge, dict):
+            bridge_state = bridge.get("reader_state", "NOT_RUNNING")
+            bridge_age = bridge.get("reader_age_seconds")
+            age_text = f"{bridge_age:.0f}s" if isinstance(bridge_age, (int, float)) else "无心跳"
+            parts.append(f"ATS只读同步{bridge_state}/{age_text}；类型化门禁上下文未就绪")
         label_reports = result.get("label_reports", [])
         if isinstance(label_reports, list) and label_reports:
             label_rows = [

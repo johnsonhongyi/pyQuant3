@@ -1,5 +1,14 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-09-28 00:36 新股情绪感知与自学习系统最新功能落地全方位代码审核
+- [x] **【D1-D3 K线连续性校验、TDX 范围动态拉取、Gate Provider 跨进程 SQLite 共享与 UI 心跳透出全量审核】(`ats/main_ats.py`, `ats/strategy/ipo_gate_context_provider.py`, `ats/strategy/ipo_outcome_labels.py`, `ats/strategy/ipo_trading_center.py`, `ats/ui/ipo_learning_console.py`, `tools/generate_matured_labels.py`, `tools/run_ipo_data_acquisition.py`, `20260928_0036_task.md`)**：
+    - [x] **D1–D3 日历与 K 线对齐防错位落地**：实证 `ipo_outcome_labels.py` 严格比对历史 K 线首三日与交易日历首三日，错位即刻安全返回 `PENDING_D3`，杜绝伪成熟；
+    - [x] **TDX 日线动态长度与日期上界自适应落地**：实证 `generate_matured_labels.py` 支持 `end_date` 截断，`tdx_count` 升级为 `max(10, listing_age + 5)`，突破 10 日历史回溯盲区；
+    - [x] **Gate Provider 跨进程 SQLite 只读共享与 ATS 进程内主动自刷新落地**：实证 `IPOGateContextProvider` 实现守护刷新线程（5s 周期），原子落盘状态快照 `gate_context_provider.latest.json`，`main_ats.py` 启动主动挂载，彻底破解多进程内存割裂；
+    - [x] **采集器状态感知与去伪存真**：实证 `run_ipo_data_acquisition.py` 废除采集端私自刷新 Provider 假象，接入 `_gate_data_bridge` 心跳探测；
+    - [x] **UI 控制台心跳状态透出与屏幕自适应**：实证 `ipo_learning_console.py` 状态栏与 Tooltip 毫秒级展示 ATS 数据同步状态、心跳延迟、观测计数与类型化门禁未就绪警告；
+    - [x] **工程规范与全量测试**：`git diff --check` 与 `python -m compileall` 100% 零违规通过；全套回归测试稳定通过。
+
 ## 2026-09-27 22:47 对 Codex 方案更新的深度审核与客观评定
 - [x] **【Codex 方案更新深度技术审核与客观工程定性】(`20260927_2247_task.md`)**：
     - [x] **D1–D3 日历连续性与 TDX 历史覆盖盲区核实**：核验 Codex 指出的 `[:3]` 切片无法防范日历漏掉更早交易日的漏洞；核验 TDX `count=10` 倒数切片无法覆盖历史上市新股的盲区；

@@ -38,6 +38,14 @@ def main():
     profiler = StartupProfiler.get_instance()
     mark_checkpoint("00. Python Runtime & Environment Setup")
 
+    # Continuously read the collector's SQLite snapshot outside the order path.
+    try:
+        from ats.strategy.ipo_gate_context_provider import get_default_ipo_gate_context_provider
+
+        get_default_ipo_gate_context_provider(project_root).start_auto_refresh()
+    except Exception as exc:
+        print(f"[IPO Gate] Shared data refresh unavailable: {type(exc).__name__}")
+
     # 自动探测并拉起后台静默 Tk 进程 (P0)
     try:
         ensure_backend_tk_running()
