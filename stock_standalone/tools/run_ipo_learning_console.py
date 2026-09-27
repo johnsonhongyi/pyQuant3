@@ -61,6 +61,7 @@ class StandaloneLearningWindow(QMainWindow):
         # 2. 顶层主容器
         central_widget = QWidget(self)
         self.setCentralWidget(central_widget)
+        central_widget.setStyleSheet("QWidget { color: #e5e7eb; background-color: #17191f; }")
         main_layout = QVBoxLayout(central_widget)
         main_layout.setContentsMargins(6, 6, 6, 6)
         main_layout.setSpacing(6)
@@ -100,6 +101,12 @@ class StandaloneLearningWindow(QMainWindow):
         scroll_area.setFrameShape(QFrame.Shape.NoFrame)
         scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll_area.setStyleSheet("""
+            QScrollArea { background-color: #17191f; border: none; }
+            QScrollBar:vertical, QScrollBar:horizontal { background-color: #17191f; border: none; margin: 0; }
+            QScrollBar::handle:vertical, QScrollBar::handle:horizontal { background-color: #454c58; border-radius: 4px; min-width: 18px; min-height: 18px; }
+            QScrollBar::add-line, QScrollBar::sub-line { width: 0; height: 0; }
+        """)
 
         # 核心控制台
         self.console = IPOLearningConsole(parent=scroll_area)
@@ -109,6 +116,7 @@ class StandaloneLearningWindow(QMainWindow):
 
         # 5. 状态栏
         status_bar = QStatusBar(self)
+        status_bar.setStyleSheet("QStatusBar { color: #9ca3af; background-color: #17191f; border-top: 1px solid #353a45; } QStatusBar::item { border: none; }")
         self.setStatusBar(status_bar)
         status_bar.showMessage("已就绪 [自适应模式]。窗口已根据当前显示器尺寸自动缩放，支持自由拖拽或最大化。")
 
