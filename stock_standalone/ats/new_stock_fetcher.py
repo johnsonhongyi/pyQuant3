@@ -387,6 +387,7 @@ class NewStockFetcher:
                 data = resp.json()
                 items = data.get("result", {}).get("data", []) if data.get("result") else []
                 new_added_count = 0
+                source_available_at = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="microseconds")
                 for it in items:
                     c = str(it.get("SECURITY_CODE", "")).strip().zfill(6)
                     if not c:
@@ -397,6 +398,13 @@ class NewStockFetcher:
                         existing = self._cached_ipo_dict[c]
                         ex_ld = existing.get("listing_date", "")
                         if ex_ld and ex_ld != "-" and ex_ld <= today_str and existing.get("issue_price"):
+                            existing["issue_price_source"] = {
+                                "source_id": "eastmoney.datacenter-web.RPTA_APP_IPOAPPLY",
+                                "source_version": "ipo_calendar.v1",
+                                "source_timezone": "Asia/Shanghai",
+                                "as_of_time": source_available_at,
+                                "available_at": source_available_at,
+                            }
                             continue
 
                     listing_d = str(it.get("LISTING_DATE", "") or "").split(" ")[0].strip()
@@ -420,6 +428,13 @@ class NewStockFetcher:
                         "listing_date": listing_d or self._cached_ipo_dict.get(c, {}).get("listing_date", ""),
                         "online_issue_num": online_num_val if online_num_val > 0 else None,
                         "ballot_num": ballot_num,
+                        "issue_price_source": {
+                            "source_id": "eastmoney.datacenter-web.RPTA_APP_IPOAPPLY",
+                            "source_version": "ipo_calendar.v1",
+                            "source_timezone": "Asia/Shanghai",
+                            "as_of_time": source_available_at,
+                            "available_at": source_available_at,
+                        },
                     }
                     new_added_count += 1
 

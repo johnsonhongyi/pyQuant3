@@ -191,3 +191,7 @@ stock_standalone/tests/*
 stock_standalone/tests/test_archive_build_exe.py
 stock_standalone/pytest-of-Johnson/*
 stock_standalone/trading_kernel/tests/*
+stock_standalone/data/ipo_learning/source_observations.sqlite
+stock_standalone/ats/strategy/test_*.py
+stock_standalone/data/ipo_learning/source_observations.sqlite-shm
+stock_standalone/data/ipo_learning/source_observations.sqlite-wal

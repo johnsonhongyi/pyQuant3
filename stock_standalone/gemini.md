@@ -1,12 +1,5 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
-## 2026-09-27 14:35 TK 监控端后台 CPU 异常占用与非交易日底层逻辑 Bug 深度诊断与优化
-- [x] **【全面排查非交易日 CPU 跑满 18.6% 与内存 1GB 异常根因】(`instock_MonitorTK.py`, `data_utils.py`, `stock_live_strategy.py`, `sector_focus_engine.py`, `20260927_1435_task.md`)**：
-    - [x] **数据源层穿透 (`data_utils.py`)**：`START_INIT == 0` 首轮跳过非交易日判定，周日启动强行读取 5555 只股票 HDF 并推入 Queue 触发全量计算雪崩；
-    - [x] **策略判定时序倒挂 (`stock_live_strategy.py`)**：`is_trading_active` 漏判交易日（仅凭 9:15-15:05 时钟误判为 True），且将耗时 4.58 秒的 `_check_strategies` 多线程大计算排在 `if not is_trading` 之前提交；
-    - [x] **板块与龙头引擎空转 (`sector_focus_engine.py`)**：30 分钟整点强制扫描仅看时间偏移未判交易日，周日白天每 30 分钟强制触发全量对齐与 5000+ 个股破位扫描；
-    - [x] **主进程后台心跳与预热过载 (`instock_MonitorTK.py`)**：启动后无差别预热 5542 只股票全部技术指标撑爆 1GB 内存，`_bg_kernel_heartbeat` 每 15 秒无差别执行止损扫描。
-
 ## 2026-09-27 10:02 数据契约指标总数校准 (41项实证) 与 UI 屏幕自适应缩放修复
 - [x] **【41项指标实证溯源与UI高DPI自适应动态缩放】(`tools/run_ipo_learning_console.py`, `ats/ui/ipo_learning_console.py`, `ats/strategy/ipo_data_contracts.py`, `20260927_1002_task.md`)**：
     - [x] **41 项 vs 43 项根因溯源与彻底校准**：实证源码 `LRRM(11) + REGIME(10) + PREHEAT(8) + LIVE_HEAT(12) = 41` 项；查实历史归档文档因混淆“watchlist_lifecycle 43 项回归测试通过率”及早期未精简指标（流通市值、网下倍数）导致文字偏差，现全系统统一纠偏并实证为 41 项；

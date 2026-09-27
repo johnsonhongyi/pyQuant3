@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from datetime import date
+from datetime import date, datetime
 import json
 import math
 import os
@@ -12,6 +12,7 @@ import tempfile
 from contextlib import contextmanager
 from threading import RLock
 from typing import Dict, Iterator, Mapping, Optional, Tuple
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 ANCHOR_SCHEMA_VERSION = "1"
@@ -39,6 +40,13 @@ class ListingAnchors:
     first_30m_vwap: float
     close_location: float
     first_day_turnover: float
+    source_id: str = ""
+    source_version: str = ""
+    source_timezone: str = ""
+    as_of_time: str = ""
+    available_at: str = ""
+    configuration_hash: str = ""
+    data_contract_hash: str = ""
 
     def __post_init__(self) -> None:
         if not isinstance(self.code, str) or not self.code.strip():
@@ -71,6 +79,38 @@ class ListingAnchors:
             or self.first_day_turnover < 0
         ):
             raise ValueError("首日换手率必须为非负有限数值")
+        provenance = (
+            self.source_id, self.source_version, self.source_timezone,
+            self.as_of_time, self.available_at, self.configuration_hash,
+            self.data_contract_hash,
+        )
+        if any(provenance):
+            if any(not isinstance(value, str) or not value.strip() for value in provenance):
+                raise ValueError("首日锚点来源与哈希元数据必须完整")
+            try:
+                ZoneInfo(self.source_timezone)
+                as_of = datetime.fromisoformat(self.as_of_time.replace("Z", "+00:00"))
+                available = datetime.fromisoformat(self.available_at.replace("Z", "+00:00"))
+            except (ValueError, ZoneInfoNotFoundError) as exc:
+                raise ValueError("首日锚点时区或时间格式无效") from exc
+            if as_of.tzinfo is None or available.tzinfo is None or as_of > available:
+                raise ValueError("首日锚点来源时间必须带时区且不晚于采集时间")
+            for digest in (self.configuration_hash, self.data_contract_hash):
+                if len(digest) != 64 or any(char not in "0123456789abcdefABCDEF" for char in digest):
+                    raise ValueError("首日锚点配置哈希格式无效")
+
+    def matches_contract(
+        self, configuration_hash: str, data_contract_hash: str,
+        source_timezone: str = "Asia/Shanghai",
+    ) -> bool:
+        return bool(
+            isinstance(configuration_hash, str)
+            and isinstance(data_contract_hash, str)
+            and isinstance(source_timezone, str)
+            and self.source_timezone == source_timezone
+            and self.configuration_hash.lower() == configuration_hash.lower()
+            and self.data_contract_hash.lower() == data_contract_hash.lower()
+        )
 
 
 class ListingAnchorStore:

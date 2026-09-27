@@ -18,11 +18,11 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from PyQt6.QtCore import QThread, pyqtSignal, Qt
+from PyQt6.QtCore import QThread, QTimer, pyqtSignal, Qt
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
     QAbstractItemView, QHBoxLayout, QInputDialog, QLabel, QMessageBox,
-    QPushButton, QPlainTextEdit, QTableWidget, QTableWidgetItem, QVBoxLayout,
+    QPushButton, QPlainTextEdit, QTableWidget, QTableWidgetItem, QVBoxLayout, QLineEdit,
     QWidget, QHeaderView, QTabWidget,
 )
 
@@ -1311,6 +1311,15 @@ def _collect_snapshot(root: Path) -> Dict[str, Any]:
         required_fields = tuple(sorted(metric_contracts))
     observations = runtime.get("field_status", {})
     observations = dict(observations) if isinstance(observations, dict) else {}
+    try:
+        from ats.strategy.ipo_data_contracts import IPODecisionConfigSnapshot
+        from ats.strategy.ipo_source_orchestrator import load_latest_valid_observations
+
+        source_config = IPODecisionConfigSnapshot.from_yaml(str(config_path))
+        for field_id, observation in load_latest_valid_observations(root, source_config, now_utc).items():
+            observations.setdefault(field_id, observation)
+    except Exception:
+        pass
     for field_id, observation in _collect_market_pulse_field_observations(root).items():
         observations.setdefault(field_id, observation)
     for field_id, observation in _collect_tdx_live_heat_observations(root).items():
@@ -1325,9 +1334,14 @@ def _collect_snapshot(root: Path) -> Dict[str, Any]:
     except (ImportError, TypeError, ValueError):
         field_contract = None
     contract_rows = []
+    try:
+        from ats.strategy.ipo_source_orchestrator import source_route
+    except ImportError:
+        source_route = lambda _field_id: {"route": "来源路线未加载", "action": "保持阻断并检查预检报告"}
     for field_id in required_fields:
         contract = metric_contracts.get(field_id)
         observation = observations.get(field_id)
+        route_info = source_route(field_id)
         observed_source = (
             f"{_safe_text(observation.get('source_id'), 80)}@"
             f"{_safe_text(observation.get('source_version'), 40)}"
@@ -1336,7 +1350,7 @@ def _collect_snapshot(root: Path) -> Dict[str, Any]:
         contract_rows.append({
             "field_id": field_id,
             "ticker": (
-                _safe_text(observation.get("ticker"), 16) or "--"
+                ("全市场" if observation.get("ticker") == "000000" else _safe_text(observation.get("ticker"), 16)) or "--"
                 if isinstance(observation, dict) else "--"
             ),
             "value": _field_runtime_value(contract, observation),
@@ -1350,6 +1364,8 @@ def _collect_snapshot(root: Path) -> Dict[str, Any]:
             "unit": contract.unit if contract else "",
             "window": contract.window if contract else "",
             "missing_policy": contract.missing_policy if contract else "",
+            "acquisition_route": route_info.get("route", ""),
+            "next_action": route_info.get("action", ""),
             "available_at": (
                 _safe_text(
                     observation.get(contract.available_at_key)
@@ -1698,6 +1714,7 @@ def _collect_snapshot(root: Path) -> Dict[str, Any]:
             "promotion_status": "模型切换关闭",
         },
         "decision_snapshots": snapshot_rows,
+        "outcome_labels": _collect_outcome_label_rows(root),
         "stages": stage_rows,
         "replay_effect_metrics": replay_summary.get("effect_metrics", {}),
         "contracts": contract_rows,
@@ -1713,9 +1730,66 @@ def _collect_snapshot(root: Path) -> Dict[str, Any]:
     }
 
 
+def _collect_outcome_label_rows(root: Path) -> List[Dict[str, str]]:
+    """Read bounded, whitelisted D1-D3 outcome evidence for the learning console."""
+    directory = root / "data" / "ipo_learning" / "outcome_evidence"
+    try:
+        from ats.strategy.ipo_outcome_review import load_latest_outcome_reviews
+
+        reviews = load_latest_outcome_reviews(root)
+    except Exception:
+        reviews = {}
+    try:
+        paths = sorted(
+            (path for path in directory.glob("*.json") if path.is_file() and path.stat().st_size <= 64 * 1024),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )[:200]
+    except OSError:
+        return []
+    rows = []
+    for path in paths:
+        try:
+            with path.open("r", encoding="utf-8") as stream:
+                item = json.load(stream)
+            if not isinstance(item, dict) or item.get("schema_version") != "ipo-outcome-evidence.v1":
+                continue
+            evidence_id = _safe_text(item.get("evidence_id"), 160)
+            evidence_hash = _safe_text(item.get("evidence_hash"), 64)
+            review = reviews.get(evidence_id, {})
+            review_status = "待人工复核"
+            if review.get("evidence_hash") == evidence_hash:
+                review_status = {
+                    "ACCEPTED": "已确认",
+                    "REJECTED": "已拒绝",
+                }.get(review.get("decision"), review_status)
+            rows.append({
+                "ticker": _safe_text(item.get("ticker"), 16),
+                "listing_date": _safe_text(item.get("listing_date"), 10),
+                "d1": _number_label(item.get("d1_return_pct"), 2, "%"),
+                "d2": _number_label(item.get("d2_return_pct"), 2, "%"),
+                "d3": _number_label(item.get("d3_return_pct"), 2, "%"),
+                "drawdown": _number_label(item.get("d1_d3_close_max_drawdown_pct"), 2, "%"),
+                "issue_break": "是" if item.get("broke_issue_price") is True else "否",
+                "anchor_break": (
+                    "是" if item.get("broke_both_listing_anchors") is True else
+                    "否" if item.get("broke_both_listing_anchors") is False else "未就绪"
+                ),
+                "matured_at": _safe_text(item.get("matured_at"), 40),
+                "review": review_status if item.get("review_status") == "PENDING_HUMAN_REVIEW" else "待检查",
+                "evidence_id": evidence_id,
+                "evidence_hash": evidence_hash,
+                "evidence_path": str(path.resolve()),
+            })
+        except (OSError, UnicodeError, ValueError, TypeError):
+            continue
+    return rows
+
+
 class _LearningMonitorWorker(QThread):
     snapshot_ready = pyqtSignal(dict)
     review_completed = pyqtSignal(str, bool, str)
+    outcome_review_completed = pyqtSignal(str, bool, str)
     interaction_detail_ready = pyqtSignal(str, str)
 
     def __init__(self, project_root: Path, parent: Optional[QWidget] = None) -> None:
@@ -1780,6 +1854,29 @@ class _LearningMonitorWorker(QThread):
         except queue.Full:
             return False
 
+    def submit_outcome_review(
+        self, record: Dict[str, str], decision: str, reviewer: str, reason: str,
+    ) -> bool:
+        if (
+            not isinstance(record, dict)
+            or record.get("review") != "待人工复核"
+            or not record.get("evidence_id")
+            or not re.fullmatch(r"[0-9a-fA-F]{64}", record.get("evidence_hash", ""))
+            or decision not in {"ACCEPTED", "REJECTED"}
+            or not reviewer.strip() or not reason.strip()
+        ):
+            return False
+        try:
+            self._commands.put_nowait({
+                "command": "outcome_review", "evidence_id": record["evidence_id"],
+                "evidence_path": record["evidence_path"],
+                "evidence_hash": record["evidence_hash"],
+                "decision": decision, "reviewer": reviewer[:120], "reason": reason[:1000],
+            })
+            return True
+        except queue.Full:
+            return False
+
     def stop(self) -> None:
         self._stopping = True
         try:
@@ -1800,6 +1897,11 @@ class _LearningMonitorWorker(QThread):
                     saved, detail = self._append_review(payload)
                     self.review_completed.emit(
                         payload.get("candidate_id", ""), saved, detail
+                    )
+                elif command == "outcome_review":
+                    saved, detail = self._append_outcome_review(payload)
+                    self.outcome_review_completed.emit(
+                        payload.get("evidence_id", ""), saved, detail
                     )
                 elif command == "interaction_detail":
                     self._load_interaction_detail(payload.get("request_id", ""))
@@ -1847,6 +1949,26 @@ class _LearningMonitorWorker(QThread):
                 stream.write(json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n")
         except OSError:
             return
+
+    def _append_outcome_review(self, payload: Dict[str, str]) -> Tuple[bool, str]:
+        try:
+            from ats.strategy.ipo_outcome_review import record_outcome_review
+
+            result = record_outcome_review(
+                self._root, payload.get("evidence_path", ""),
+                decision=payload.get("decision", ""),
+                reviewer=payload.get("reviewer", ""),
+                reason=payload.get("reason", ""),
+            )
+        except Exception:
+            return False, "标签证据复核写入失败。"
+        if (
+            result.get("status") != "SAVED"
+            or result.get("evidence_id") != payload.get("evidence_id")
+            or result.get("evidence_hash") != payload.get("evidence_hash")
+        ):
+            return False, _safe_text(result.get("reason"), 160) or "标签证据复核校验失败。"
+        return True, "决定已写入追加式审计库；原始证据未修改，训练授权仍关闭。"
 
     def _append_review(self, review: Dict[str, str]) -> Tuple[bool, str]:
         path = self._root / "logs" / "ipo_learning_events.jsonl"
@@ -1957,6 +2079,28 @@ class _LearningMonitorWorker(QThread):
         return True, "复核已写入审计数据库和事件日志。"
 
 
+class _SourceAcquisitionWorker(QThread):
+    completed = pyqtSignal(dict)
+
+    def __init__(
+        self, project_root: Path, ticker: str, collect_labels: bool = False,
+        parent: Optional[QWidget] = None,
+    ) -> None:
+        super().__init__(parent)
+        self._root = project_root
+        self._ticker = ticker
+        self._collect_labels = collect_labels
+
+    def run(self) -> None:
+        try:
+            from tools.run_ipo_data_acquisition import run_cycle
+
+            result = run_cycle(self._ticker, collect_labels=self._collect_labels, root=self._root)
+        except Exception as exc:
+            result = {"status": "UNREADY", "reason": type(exc).__name__}
+        self.completed.emit(result)
+
+
 class IPOLearningConsole(QWidget):
     """Live view for staged readiness, sidecar health and mature-sample reviews."""
 
@@ -1966,12 +2110,15 @@ class IPOLearningConsole(QWidget):
         self._worker = _LearningMonitorWorker(self._root, self)
         self._worker.snapshot_ready.connect(self._render_snapshot)
         self._worker.review_completed.connect(self._review_completed)
+        self._worker.outcome_review_completed.connect(self._outcome_review_completed)
         self._worker.interaction_detail_ready.connect(self._show_interaction_detail)
         self._selected_event: Optional[Dict[str, str]] = None
         self._selected_snapshot_id = ""
         self._pending_interaction_detail_id = ""
         self._review_pending_candidate_ids = set()
+        self._outcome_review_pending_ids = set()
         self._runtime_control = None
+        self._source_worker: Optional[_SourceAcquisitionWorker] = None
         self._build_ui()
         self._worker.start()
         try:
@@ -1981,6 +2128,15 @@ class IPOLearningConsole(QWidget):
             self._runtime_control.start()
         except Exception:
             self._runtime_control = None
+        self._source_auto_timer = QTimer(self)
+        self._source_auto_timer.setInterval(30 * 60 * 1000)
+        self._source_auto_timer.timeout.connect(
+            lambda: self._start_source_collection(collect_labels=True)
+        )
+        self._source_auto_timer.start()
+        QTimer.singleShot(
+            2500, lambda: self._start_source_collection(collect_labels=True)
+        )
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
@@ -2051,6 +2207,30 @@ class IPOLearningConsole(QWidget):
         )
         self.lbl_boundary.setStyleSheet("color: #f0c674; padding: 4px;")
         overview_layout.addWidget(self.lbl_boundary)
+        self.lbl_operator_guide = QLabel(
+            "启动：python tools/run_ipo_learning_console.py。推荐顺序：①数据契约与时效：看字段状态并运行采集；"
+            "②单股因果与状态告警：看 Gate 阻断原因；"
+            "③盘后生成 D1-D3 标签，再到成熟标签页人工复核；④回放效果验收：看已量化指标。"
+        )
+        self.lbl_operator_guide.setWordWrap(True)
+        self.lbl_operator_guide.setStyleSheet(
+            "padding: 7px; background: #172536; border: 1px solid #42627f; color: #d7e8f7;"
+        )
+        overview_layout.addWidget(self.lbl_operator_guide)
+        guide_actions = QHBoxLayout()
+        for label, tab_name in (
+            ("① 数据与采集", "数据契约与时效"),
+            ("② Gate 诊断", "单股因果与状态告警"),
+            ("③ 标签复核", "D1-D3 成熟标签"),
+            ("④ 回放验收", "回放效果验收"),
+        ):
+            button = QPushButton(label)
+            button.clicked.connect(
+                lambda checked=False, name=tab_name: self._select_console_tab(name)
+            )
+            guide_actions.addWidget(button)
+        guide_actions.addStretch(1)
+        overview_layout.addLayout(guide_actions)
         self.stage_table = QTableWidget(0, 3)
         self.stage_table.setHorizontalHeaderLabels(["阶段", "状态", "准入说明"])
         self.stage_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
@@ -2098,24 +2278,50 @@ class IPOLearningConsole(QWidget):
         contracts_layout.addWidget(QLabel(
             "41 项必需输入的来源契约与时效；只有配置完整且观测来源/版本/时区/TTL 均匹配时才显示新鲜。"
         ))
-        self.contract_table = QTableWidget(0, 12)
+        self.contract_table = QTableWidget(0, 14)
         self.lbl_contract_status = QLabel("数据契约：等待读取 41 项来源与实时观测状态")
         self.lbl_contract_status.setWordWrap(True)
         self.lbl_contract_status.setStyleSheet(
             "padding: 6px; background: #20232b; border: 1px solid #414653; color: #f0c674;"
         )
         contracts_layout.addWidget(self.lbl_contract_status)
+        source_actions = QHBoxLayout()
+        self.edt_acquisition_code = QLineEdit("301689")
+        self.edt_acquisition_code.setMaxLength(6)
+        self.edt_acquisition_code.setFixedWidth(86)
+        self.edt_acquisition_code.setPlaceholderText("六位代码")
+        self.btn_collect_issue_price = QPushButton("采集可用数据并自检")
+        self.btn_collect_issue_price.clicked.connect(self._collect_supported_source)
+        self.btn_collect_labels = QPushButton("盘后生成 D1-D3 标签")
+        self.btn_collect_labels.setToolTip(
+            "15:30 后扫描冻结快照及近45日新股日历，分批生成成熟 D1-D3 证据；"
+            "仅进入人工复核池，不会自动训练"
+        )
+        self.btn_collect_labels.clicked.connect(self._collect_matured_labels)
+        self.lbl_acquisition_status = QLabel(
+            "自动采集已启用：启动后刷新，之后每 30 分钟重试；缺失/过期字段继续显示原因。"
+        )
+        self.lbl_acquisition_status.setWordWrap(True)
+        source_actions.addWidget(QLabel("标的"))
+        source_actions.addWidget(self.edt_acquisition_code)
+        source_actions.addWidget(self.btn_collect_issue_price)
+        source_actions.addWidget(self.btn_collect_labels)
+        source_actions.addWidget(self.lbl_acquisition_status, 1)
+        contracts_layout.addLayout(source_actions)
         self.contract_table.setHorizontalHeaderLabels(
             [
                 "指标", "标的", "当前值", "来源@版本", "来源时区", "TTL 秒", "单位",
                 "统计窗口", "缺失策略", "as_of", "available_at", "实时状态",
+                "采集/计算路线", "自检与下一步",
             ]
         )
         for index in range(11):
             self.contract_table.horizontalHeader().setSectionResizeMode(
                 index, QHeaderView.ResizeMode.ResizeToContents
             )
-        self.contract_table.horizontalHeader().setSectionResizeMode(11, QHeaderView.ResizeMode.Stretch)
+        self.contract_table.horizontalHeader().setSectionResizeMode(11, QHeaderView.ResizeMode.ResizeToContents)
+        self.contract_table.horizontalHeader().setSectionResizeMode(12, QHeaderView.ResizeMode.ResizeToContents)
+        self.contract_table.horizontalHeader().setSectionResizeMode(13, QHeaderView.ResizeMode.Stretch)
         self.contract_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.contract_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         contracts_layout.addWidget(self.contract_table)
@@ -2177,6 +2383,39 @@ class IPOLearningConsole(QWidget):
         self.snapshot_detail.setPlaceholderText("选择冻结快照查看 41 项输入值、来源版本和时点。")
         snapshots_layout.addWidget(self.snapshot_detail, 1)
         self.content_tabs.addTab(snapshots_page, "学习输入快照")
+
+        outcome_page = QWidget()
+        outcome_layout = QVBoxLayout(outcome_page)
+        outcome_layout.addWidget(QLabel(
+            "D1-D3 结果只生成带来源时点的待复核证据；D3 收盘前保持待成熟，缺少首日锚点时明确显示未就绪，"
+            "不会自动接受样本或开启训练。"
+        ))
+        self.outcome_table = QTableWidget(0, 10)
+        self.outcome_table.setHorizontalHeaderLabels([
+            "代码", "上市日", "D1 收益", "D2 收益", "D3 收益", "D1-D3 收盘回撤",
+            "破发行价", "双锚失守", "成熟时点", "复核状态",
+        ])
+        for index in range(9):
+            self.outcome_table.horizontalHeader().setSectionResizeMode(index, QHeaderView.ResizeMode.ResizeToContents)
+        self.outcome_table.horizontalHeader().setSectionResizeMode(9, QHeaderView.ResizeMode.Stretch)
+        self.outcome_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.outcome_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.outcome_table.itemSelectionChanged.connect(self._show_selected_outcome)
+        outcome_layout.addWidget(self.outcome_table)
+        outcome_actions = QHBoxLayout()
+        self.btn_accept_outcome = QPushButton("确认标签证据")
+        self.btn_accept_outcome.setToolTip("确认标签证据质量；原始证据只读，不会加入训练")
+        self.btn_accept_outcome.setEnabled(False)
+        self.btn_accept_outcome.clicked.connect(lambda: self._review_outcome_label("ACCEPTED"))
+        self.btn_reject_outcome = QPushButton("拒绝标签证据")
+        self.btn_reject_outcome.setToolTip("拒绝无效/错误标签并记录理由；不会删除原始证据")
+        self.btn_reject_outcome.setEnabled(False)
+        self.btn_reject_outcome.clicked.connect(lambda: self._review_outcome_label("REJECTED"))
+        outcome_actions.addWidget(self.btn_accept_outcome)
+        outcome_actions.addWidget(self.btn_reject_outcome)
+        outcome_actions.addStretch(1)
+        outcome_layout.addLayout(outcome_actions)
+        self.content_tabs.addTab(outcome_page, "D1-D3 成熟标签")
 
         operation_page = QWidget()
         operation_layout = QVBoxLayout(operation_page)
@@ -2317,6 +2556,12 @@ class IPOLearningConsole(QWidget):
         self.content_tabs.addTab(interactions_page, "LLM 实时交互")
         layout.addWidget(self.content_tabs, 1)
         self.setStyleSheet("QWidget { color: #e5e7eb; background: #17191f; } QTableWidget { background: #1d2028; gridline-color: #353a45; }")
+
+    def _select_console_tab(self, title: str) -> None:
+        for index in range(self.content_tabs.count()):
+            if self.content_tabs.tabText(index) == title:
+                self.content_tabs.setCurrentIndex(index)
+                return
 
     def _request_interaction_detail(self) -> None:
         row = self.interaction_table.currentRow()
@@ -2650,6 +2895,21 @@ class IPOLearningConsole(QWidget):
         unobserved = _nonnegative_count(contract_counts.get("unobserved"))
         uncontracted = _nonnegative_count(contract_counts.get("uncontracted"))
         blocked_or_invalid = _nonnegative_count(contract_counts.get("blocked_or_invalid"))
+        if required:
+            progress = f"当前实时新鲜 {fresh}/{required} 项。"
+            next_step = (
+                "先处理数据页各行的‘自检与下一步’，再看 Gate 诊断。"
+                if fresh < required else "继续查看 Gate 诊断；字段新鲜不代表交易准入通过。"
+            )
+        else:
+            progress = "当前尚未读取到必需字段契约。"
+            next_step = "先到数据与采集页查看配置与采集结果。"
+        self.lbl_operator_guide.setText(
+            f"{progress}{next_step}\n"
+            "流程：数据/TTL → Gate 阻断原因 → 盘后 D1-D3 → 人工复核 → 回放指标。"
+            "启动约 2.5 秒后自动采集默认标的 301689，之后每 30 分钟重试。"
+            "运行入口：python tools/run_ipo_learning_console.py；LLM 与交易授权仍关闭。"
+        )
         self.lbl_contract_status.setText(
             f"来源契约 {configured}/{required} 项；实时新鲜 {fresh} 项；"
             f"契约确认缺失 {confirmed_missing} 项；未接观测 {unobserved} 项；"
@@ -2665,7 +2925,8 @@ class IPOLearningConsole(QWidget):
                 contract.get("ttl", ""), contract.get("unit", ""),
                 contract.get("window", ""), contract.get("missing_policy", ""),
                 contract.get("as_of_time", ""), contract.get("available_at", ""),
-                contract.get("status", ""),
+                contract.get("status", ""), contract.get("acquisition_route", ""),
+                contract.get("next_action", ""),
             )
             for col, value in enumerate(values):
                 item = QTableWidgetItem(str(value))
@@ -2697,6 +2958,7 @@ class IPOLearningConsole(QWidget):
                 self.source_health_table.setItem(row, col, item)
 
         self._render_learning_snapshots(snapshot.get("decision_snapshots", []))
+        self._render_outcome_labels(snapshot.get("outcome_labels", []))
 
         events = snapshot.get("events", [])
         selected = self._selected_event or {}
@@ -2765,6 +3027,154 @@ class IPOLearningConsole(QWidget):
         else:
             self._selected_snapshot_id = ""
             self.snapshot_detail.clear()
+
+    def _render_outcome_labels(self, records: Any) -> None:
+        values = records if isinstance(records, list) else []
+        selected_items = self.outcome_table.selectedItems()
+        selected_record = selected_items[0].data(Qt.ItemDataRole.UserRole) if selected_items else None
+        selected_id = selected_record.get("evidence_id") if isinstance(selected_record, dict) else ""
+        self.outcome_table.setRowCount(len(values))
+        columns = ("ticker", "listing_date", "d1", "d2", "d3", "drawdown", "issue_break", "anchor_break", "matured_at", "review")
+        for row, record in enumerate(values):
+            if not isinstance(record, dict):
+                continue
+            for col, key in enumerate(columns):
+                item = QTableWidgetItem(str(record.get(key, "")))
+                if key == "review":
+                    item.setForeground(QColor("#f0c674"))
+                if key == "anchor_break" and item.text() == "未就绪":
+                    item.setForeground(QColor("#9298a7"))
+                item.setToolTip(str(record.get("evidence_id", "")))
+                if col == 0:
+                    item.setData(Qt.ItemDataRole.UserRole, record)
+                self.outcome_table.setItem(row, col, item)
+        if values:
+            selected_row = next((
+                row for row, record in enumerate(values)
+                if isinstance(record, dict) and record.get("evidence_id") == selected_id
+            ), 0)
+            self.outcome_table.selectRow(selected_row)
+        else:
+            self.btn_accept_outcome.setEnabled(False)
+            self.btn_reject_outcome.setEnabled(False)
+
+    def _show_selected_outcome(self) -> None:
+        selected = self.outcome_table.selectedItems()
+        record = selected[0].data(Qt.ItemDataRole.UserRole) if selected else None
+        can_review = bool(
+            isinstance(record, dict)
+            and record.get("review") == "待人工复核"
+            and record.get("evidence_id") not in self._outcome_review_pending_ids
+        )
+        self.btn_accept_outcome.setEnabled(can_review)
+        self.btn_reject_outcome.setEnabled(can_review)
+
+    def _review_outcome_label(self, decision: str) -> None:
+        selected = self.outcome_table.selectedItems()
+        record = selected[0].data(Qt.ItemDataRole.UserRole) if selected else None
+        if not isinstance(record, dict) or record.get("review") != "待人工复核":
+            QMessageBox.warning(self, "不能复核", "请选择一条待人工复核的成熟标签证据。")
+            return
+        reviewer, accepted = QInputDialog.getText(self, "D1-D3 标签复核", "复核人：")
+        if not accepted or not reviewer.strip():
+            return
+        reason, accepted = QInputDialog.getMultiLineText(
+            self, "D1-D3 标签复核理由", "填写确认/拒绝理由："
+        )
+        if not accepted or not reason.strip():
+            return
+        if not self._worker.submit_outcome_review(record, decision, reviewer.strip(), reason.strip()):
+            QMessageBox.warning(self, "无法提交", "复核队列繁忙或证据已失效。")
+            return
+        self._outcome_review_pending_ids.add(record["evidence_id"])
+        self._show_selected_outcome()
+
+    def _outcome_review_completed(self, evidence_id: str, saved: bool, detail: str) -> None:
+        self._outcome_review_pending_ids.discard(evidence_id)
+        self._worker.request_refresh()
+        if saved:
+            QMessageBox.information(self, "复核已保存", detail)
+        else:
+            QMessageBox.warning(self, "复核未保存", detail)
+        self._show_selected_outcome()
+
+    def _collect_supported_source(self) -> None:
+        self._start_source_collection(collect_labels=False)
+
+    def _collect_matured_labels(self) -> None:
+        self._start_source_collection(collect_labels=True)
+
+    def _start_source_collection(self, collect_labels: bool) -> None:
+        if self._source_worker is not None and self._source_worker.isRunning():
+            return
+        ticker = self.edt_acquisition_code.text().strip()
+        if len(ticker) != 6 or not ticker.isdigit():
+            self.lbl_acquisition_status.setText("请输入六位数字股票代码。")
+            return
+        self.btn_collect_issue_price.setEnabled(False)
+        self.btn_collect_labels.setEnabled(False)
+        suffix = "并扫描成熟标签" if collect_labels else ""
+        self.lbl_acquisition_status.setText(f"正在后台采集 {ticker}：发行/供给、个股行情、两融日数据、涨停/炸板池、TDX历史与全市场快照{suffix}，并执行 41 项来源/时区/TTL 自检…")
+        self._source_worker = _SourceAcquisitionWorker(self._root, ticker, collect_labels, self)
+        self._source_worker.completed.connect(self._source_collection_completed)
+        self._source_worker.finished.connect(lambda: (
+            self.btn_collect_issue_price.setEnabled(True), self.btn_collect_labels.setEnabled(True)
+        ))
+        self._source_worker.start()
+
+    def _source_collection_completed(self, result: Dict[str, Any]) -> None:
+        state = str(result.get("status", "UNREADY"))
+        count = _nonnegative_count(result.get("ready_count"))
+        required = _nonnegative_count(result.get("required_count"))
+        parts = []
+        for key, label in (
+            ("acquisition", "发行日历"), ("ipo_facts", "IPO先验"),
+            ("listing_anchors", "首日锚点"),
+            ("listing_supply", "上市供给"), ("market", "A股横截面"),
+            ("live", "个股行情"), ("market_history", "TDX历史"),
+            ("market_snapshot", "TDX全市场快照"),
+            ("limit_up_pool", "涨停/炸板池"),
+            ("financing", "两融日数据"),
+            ("market_pulse", "本地脉冲"),
+        ):
+            component = result.get(key)
+            if isinstance(component, dict):
+                fields = component.get("saved_fields", [])
+                saved_count = len(fields) if isinstance(fields, list) else _nonnegative_count(component.get("saved_count"))
+                parts.append(f"{label}{saved_count}项/{component.get('status', 'UNREADY')}")
+                component_reason = _safe_text(component.get("reason"), 120)
+                if component_reason:
+                    parts.append(f"{label}诊断:{component_reason}")
+        label_reports = result.get("label_reports", [])
+        if isinstance(label_reports, list) and label_reports:
+            label_rows = [
+                report for report in label_reports
+                if isinstance(report, dict)
+                and report.get("status") not in {"COHORT_SCAN_COMPLETE", "COHORT_RETRY_LATER"}
+            ]
+            matured = sum(
+                report.get("status") == "MATURED_PENDING_REVIEW"
+                for report in label_rows
+            )
+            cohort = next((report for report in label_reports
+                           if isinstance(report, dict)
+                           and report.get("status") in {"COHORT_SCAN_COMPLETE", "COHORT_RETRY_LATER"}), None)
+            if cohort:
+                selected = _nonnegative_count(cohort.get("selected"))
+                candidates = _nonnegative_count(cohort.get("calendar_candidates"))
+                parts.append(f"标签新增{matured}条待复核；近期队列{selected}/{candidates}")
+            else:
+                parts.append(f"标签{matured}条待复核/{len(label_rows)}条扫描")
+            label_reason = _safe_text(next((item.get("reason") for item in label_reports
+                if isinstance(item, dict) and item.get("reason")), ""), 100)
+            if label_reason:
+                parts.append(f"标签诊断:{label_reason}")
+        reason = _safe_text(result.get("reason"), 180)
+        self.lbl_acquisition_status.setText(
+            f"{state} · 全局契约 {count}/{required} 就绪 · " + " / ".join(parts)
+            + (f" · {reason}" if reason else "")
+        )
+        self._worker.request_refresh()
 
     def _show_selected_snapshot(self) -> None:
         selected = self.snapshot_table.selectedItems()
@@ -3030,6 +3440,8 @@ class IPOLearningConsole(QWidget):
             QMessageBox.warning(self, "事件队列繁忙", "备注队列已满，请稍后再试。")
 
     def stop_monitor(self, timeout_ms: int = 1500) -> None:
+        if hasattr(self, "_source_auto_timer"):
+            self._source_auto_timer.stop()
         control = self._runtime_control
         if control is not None and control.is_alive():
             control.stop()
@@ -3037,3 +3449,6 @@ class IPOLearningConsole(QWidget):
         if self._worker.isRunning():
             self._worker.stop()
             self._worker.wait(timeout_ms)
+        source_worker = self._source_worker
+        if source_worker is not None and source_worker.isRunning():
+            source_worker.wait(min(max(0, int(timeout_ms)), 3500))
