@@ -35,13 +35,16 @@ def _market_code(ticker: str) -> str:
     return "1" if ticker.startswith(("5", "6")) else "0"
 
 
-def _fetch_daily_bars(ticker: str, listing_date: str) -> List[Dict[str, Any]]:
+def _fetch_daily_bars(
+    ticker: str, listing_date: str, end_date: str | None = None,
+) -> List[Dict[str, Any]]:
+    bounded_end = date.fromisoformat(end_date) if end_date else datetime.now(SHANGHAI).date()
     payload = _request_json("https://push2his.eastmoney.com/api/qt/stock/kline/get", {
         "secid": f"{_market_code(ticker)}.{ticker}",
         "fields1": "f1,f2,f3,f4,f5,f6",
         "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61",
         "klt": "101", "fqt": "0", "beg": listing_date.replace("-", ""),
-        "end": datetime.now(SHANGHAI).strftime("%Y%m%d"), "lmt": "10",
+        "end": bounded_end.strftime("%Y%m%d"), "lmt": "10",
         "ut": "fa5fd1943c7b386f172d6893dbfba10b",
     }, timeout=8.0)
     raw = payload.get("data", {}).get("klines", []) if isinstance(payload, dict) else []
@@ -61,11 +64,17 @@ def _fetch_daily_bars(ticker: str, listing_date: str) -> List[Dict[str, Any]]:
     return bars
 
 
-def _fetch_tdx_daily_bars(ticker: str, listing_date: str) -> List[Dict[str, Any]]:
+def _fetch_tdx_daily_bars(
+    ticker: str, listing_date: str, count: int = 10, end_date: str | None = None,
+) -> List[Dict[str, Any]]:
     """Fallback to TDX's date-stamped daily bars when Eastmoney history is unavailable."""
+    if isinstance(count, bool) or not isinstance(count, int) or not 1 <= count <= 800:
+        return []
     from ats.tdx_realtime_fetcher import TDXRealtimeFetcher
 
-    frame = TDXRealtimeFetcher.get_instance().fetch_kline_bars(ticker, category="day", count=10)
+    frame = TDXRealtimeFetcher.get_instance().fetch_kline_bars(
+        ticker, category="day", count=count
+    )
     if frame is None or frame.empty:
         return []
     bars = []
@@ -76,7 +85,11 @@ def _fetch_tdx_daily_bars(ticker: str, listing_date: str) -> List[Dict[str, Any]
             values = {key: float(row[key]) for key in ("open", "high", "low", "close")}
         except (KeyError, TypeError, ValueError, OverflowError):
             continue
-        if day_text >= listing_date and all(math.isfinite(value) and value > 0 for value in values.values()):
+        if (
+            day_text >= listing_date
+            and (end_date is None or day_text <= end_date)
+            and all(math.isfinite(value) and value > 0 for value in values.values())
+        ):
             bars.append({"date": day_text, **values})
     return sorted({row["date"]: row for row in bars}.values(), key=lambda row: row["date"])
 
@@ -113,6 +126,18 @@ def collect_for_ticker(ticker: str, calendar: Any = None, root: str | Path = APP
         }
     if not listing_date or issue_price is None or issue_price <= 0:
         return {"status": "UNREADY", "ticker": ticker, "reason": "上市日或发行价未由新股日历确认"}
+    calendar_sessions = _fetch_trading_sessions(
+        listing_date, datetime.now(SHANGHAI).date().isoformat()
+    )
+    calendar_days = sorted({
+        raw.date() if isinstance(raw, datetime) else (
+            raw if isinstance(raw, date) else date.fromisoformat(str(raw)[:10])
+        )
+        for raw in calendar_sessions
+    })
+    listing_day = date.fromisoformat(listing_date)
+    expected_d1_d3 = [day for day in calendar_days if day > listing_day][:3]
+    bar_end_date = expected_d1_d3[-1].isoformat() if len(expected_d1_d3) == 3 else datetime.now(SHANGHAI).date().isoformat()
     try:
         from ats.strategy.ipo_data_contracts import IPODecisionConfigSnapshot
 
@@ -131,12 +156,16 @@ def collect_for_ticker(ticker: str, calendar: Any = None, root: str | Path = APP
         return {"status": "UNREADY", "ticker": ticker, "reason": "发行价来源/时区/TTL未通过版本化契约"}
     source_id, source_version = SOURCE_ID, SOURCE_VERSION
     try:
-        bars = _fetch_daily_bars(ticker, listing_date)
+        bars = _fetch_daily_bars(ticker, listing_date, bar_end_date)
     except Exception:
         bars = []
     if not bars:
         try:
-            bars = _fetch_tdx_daily_bars(ticker, listing_date)
+            listing_age = sum(day > listing_day for day in calendar_days)
+            tdx_count = max(10, listing_age + 5)
+            bars = _fetch_tdx_daily_bars(
+                ticker, listing_date, count=tdx_count, end_date=bar_end_date
+            )
             if bars:
                 source_id, source_version = TDX_SOURCE_ID, TDX_SOURCE_VERSION
         except Exception:
@@ -166,7 +195,7 @@ def collect_for_ticker(ticker: str, calendar: Any = None, root: str | Path = APP
         daily_bars=bars, source_id=source_id, source_version=source_version,
         source_timezone="Asia/Shanghai", as_of_time=as_of_time,
         available_at=available_at, anchors=anchors,
-        trading_sessions=_fetch_trading_sessions(listing_date, latest_day),
+        trading_sessions=calendar_days,
     )
     if evidence.get("status") == "MATURED_PENDING_REVIEW":
         output = Path(root).resolve() / "data" / "ipo_learning" / "outcome_evidence" / f"{ticker}.json"

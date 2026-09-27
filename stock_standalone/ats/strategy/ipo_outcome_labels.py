@@ -86,6 +86,16 @@ def build_matured_outcome(
             "required_sessions": 3,
             "reason": "交易日历未就绪或D1-D3交易日日线证据不完整",
         }
+    earliest_bar_sessions = sorted(by_date)[:3]
+    if earliest_bar_sessions != expected_sessions[:3]:
+        return {
+            "status": "PENDING_D3", "ticker": ticker, "listing_date": listing_day.isoformat(),
+            "observed_sessions": [item.isoformat() for item in observed_sessions],
+            "expected_sessions": [item.isoformat() for item in expected_sessions[:3]],
+            "earliest_bar_sessions": [item.isoformat() for item in earliest_bar_sessions],
+            "required_sessions": 3,
+            "reason": "交易日历首三日与历史K线首三日不一致，拒绝错位成熟标签",
+        }
     sessions = expected_sessions
     d3_close = datetime.combine(sessions[2], time(15, 0), SHANGHAI)
     if as_of_utc < d3_close.astimezone(timezone.utc):

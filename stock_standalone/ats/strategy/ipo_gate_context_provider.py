@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import threading
 from datetime import datetime, timezone
@@ -24,11 +25,21 @@ class IPOGateContextProvider:
         self._lock = threading.RLock()
         self._config_fields: Dict[str, Any] = {}
         self._observations_by_ticker: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        self._last_refresh_at = ""
+        self._last_refresh_ok = False
+        self._last_refresh_error = "尚未刷新"
+        self._refresh_stop = threading.Event()
+        self._refresh_thread: Optional[threading.Thread] = None
+        self._store_file_present = False
+        self._stored_observation_count = 0
+        self._stored_observed_count = 0
 
     def invalidate(self) -> None:
         with self._lock:
             self._config_fields = {}
             self._observations_by_ticker = {}
+            self._stored_observation_count = 0
+            self._stored_observed_count = 0
 
     def refresh(self, config: Optional[IPODecisionConfigSnapshot] = None) -> bool:
         """Load config-bound observations outside the order decision path."""
@@ -39,13 +50,99 @@ class IPOGateContextProvider:
                 )
             config_fields = config.gate_context_fields()
             observations = self._read_observations(config)
-        except Exception:
+            all_observations = [
+                observation
+                for ticker_rows in observations.values()
+                for observation in ticker_rows.values()
+            ]
+            stored_observation_count = len(all_observations)
+            stored_observed_count = sum(
+                observation.get("status") == "OBSERVED" for observation in all_observations
+            )
+            store_file_present = (self._root / SOURCE_DB_RELATIVE_PATH).is_file()
+        except Exception as exc:
             self.invalidate()
+            with self._lock:
+                self._last_refresh_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+                self._last_refresh_ok = False
+                self._last_refresh_error = type(exc).__name__
+            self._publish_status()
             return False
         with self._lock:
             self._config_fields = config_fields
             self._observations_by_ticker = observations
+            self._stored_observation_count = stored_observation_count
+            self._stored_observed_count = stored_observed_count
+            self._store_file_present = store_file_present
+            self._last_refresh_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            self._last_refresh_ok = True
+            self._last_refresh_error = ""
+        self._publish_status()
         return True
+
+    def start_auto_refresh(self, interval_seconds: float = 5.0) -> bool:
+        """Refresh the SQLite bridge in the ATS process, away from the order path."""
+        if (
+            isinstance(interval_seconds, bool)
+            or not isinstance(interval_seconds, (int, float))
+            or not 1.0 <= float(interval_seconds) <= 300.0
+        ):
+            return False
+        with self._lock:
+            if self._refresh_thread is not None and self._refresh_thread.is_alive():
+                return True
+            self._refresh_stop.clear()
+
+            def refresh_loop() -> None:
+                while not self._refresh_stop.is_set():
+                    self.refresh()
+                    if self._refresh_stop.wait(float(interval_seconds)):
+                        break
+
+            self._refresh_thread = threading.Thread(
+                target=refresh_loop, name="ipo-gate-context-refresh", daemon=True
+            )
+            self._refresh_thread.start()
+        return True
+
+    def stop_auto_refresh(self, timeout_seconds: float = 1.0) -> None:
+        self._refresh_stop.set()
+        thread = self._refresh_thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(max(0.0, min(float(timeout_seconds), 5.0)))
+
+    def status_snapshot(self) -> Dict[str, Any]:
+        with self._lock:
+            state = (
+                "UNREADY" if not self._last_refresh_ok else
+                "STORE_MISSING" if not self._store_file_present else
+                "EMPTY" if not self._stored_observation_count else "SYNCED"
+            )
+            return {
+                "state": state,
+                "updated_at": self._last_refresh_at,
+                "reader_process_id": os.getpid(),
+                "store_file_present": self._store_file_present,
+                "stored_observation_count": self._stored_observation_count,
+                "stored_observed_count": self._stored_observed_count,
+                "refresh_error": self._last_refresh_error,
+                "typed_gate_contexts_ready": False,
+                "runtime_authorized": False,
+                "transport": "SQLite只读快照",
+            }
+
+    def _publish_status(self) -> None:
+        path = self._root / "data" / "ipo_learning" / "gate_context_provider.latest.json"
+        temporary = path.with_suffix(path.suffix + ".tmp")
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            temporary.write_text(
+                json.dumps(self.status_snapshot(), ensure_ascii=False, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            os.replace(temporary, path)
+        except OSError:
+            return
 
     def _read_observations(
         self, config: IPODecisionConfigSnapshot
@@ -54,7 +151,7 @@ class IPOGateContextProvider:
         if not path.is_file():
             return {}
         uri = path.as_uri() + "?mode=ro"
-        with sqlite3.connect(uri, uri=True, timeout=0.05) as connection:
+        with sqlite3.connect(uri, uri=True, timeout=0.5) as connection:
             connection.execute("PRAGMA query_only=ON")
             global_rows = connection.execute(
                 "SELECT ticker, field_id, status, value_json, source_id, source_version, "
@@ -124,6 +221,7 @@ class IPOGateContextProvider:
             "risk_context": None,
             "issue_price": issue_price,
             "data_observations": observations,
+            "gate_context_sync": self.status_snapshot(),
         })
         return context
 

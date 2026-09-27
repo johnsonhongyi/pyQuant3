@@ -18,6 +18,7 @@ if str(APP_ROOT) not in sys.path:
 
 from ats.strategy.ipo_data_contracts import IPODecisionConfigSnapshot  # noqa: E402
 from ats.strategy.ipo_source_orchestrator import (  # noqa: E402
+    SOURCE_DB_RELATIVE_PATH,
     collect_issue_prices_from_eastmoney,
     collect_market_pulse_fields,
     collect_source_readiness,
@@ -48,6 +49,43 @@ def _write_latest_report(report: Dict[str, Any], root: Path) -> None:
         os.replace(temporary, path)
     except OSError as exc:
         report["report_persistence"] = {"status": "FAILED", "reason": type(exc).__name__}
+
+
+def _gate_data_bridge(root: Path) -> Dict[str, Any]:
+    """Describe the shared store and ATS reader without claiming Gate readiness."""
+    store_path = root / SOURCE_DB_RELATIVE_PATH
+    status_path = root / "data" / "ipo_learning" / "gate_context_provider.latest.json"
+    reader: Dict[str, Any] = {}
+    try:
+        if status_path.is_file() and status_path.stat().st_size <= 16 * 1024:
+            loaded = json.loads(status_path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                reader = loaded
+    except (OSError, UnicodeError, ValueError):
+        reader = {}
+    reader_age_seconds = None
+    try:
+        updated = datetime.fromisoformat(str(reader.get("updated_at", "")).replace("Z", "+00:00"))
+        if updated.tzinfo is not None and updated.utcoffset() is not None:
+            reader_age_seconds = max(
+                0.0, (datetime.now(timezone.utc) - updated.astimezone(timezone.utc)).total_seconds()
+            )
+    except (TypeError, ValueError, OverflowError):
+        pass
+    reader_state = str(reader.get("state", "NOT_RUNNING"))[:32]
+    if reader_age_seconds is None or reader_age_seconds > 15.0:
+        reader_state = "STALE" if reader.get("updated_at") else "NOT_RUNNING"
+    return {
+        "transport": "sqlite_read_only_snapshot",
+        "store_file_present": store_path.is_file(),
+        "reader_state": reader_state,
+        "reader_updated_at": str(reader.get("updated_at", ""))[:40],
+        "reader_age_seconds": reader_age_seconds,
+        "reader_process_id": reader.get("reader_process_id"),
+        "stored_observation_count": reader.get("stored_observation_count", 0),
+        "typed_gate_contexts_ready": False,
+        "runtime_authorized": False,
+    }
 
 
 def run_cycle(
@@ -90,12 +128,6 @@ def run_cycle(
             str(project_root / "config" / "ipo_sentiment.yaml")
         )
     except Exception as exc:
-        try:
-            from ats.strategy.ipo_gate_context_provider import get_default_ipo_gate_context_provider
-
-            get_default_ipo_gate_context_provider(project_root).invalidate()
-        except Exception:
-            pass
         report = {
             "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "status": "CONFIG_INVALID", "reason": type(exc).__name__,
@@ -107,17 +139,14 @@ def run_cycle(
             "market_snapshot": market_snapshot,
             "limit_up_pool": limit_up_pool,
             "financing": financing,
+            "gate_data_bridge": _gate_data_bridge(project_root),
+            "operating_mode": "LIVE_DATA_SHADOW",
             "runtime_authorized": False,
+            "llm_invocation_performed": False,
         }
         _write_latest_report(report, project_root)
         return report
     readiness = collect_source_readiness(project_root, code, config)
-    try:
-        from ats.strategy.ipo_gate_context_provider import get_default_ipo_gate_context_provider
-
-        get_default_ipo_gate_context_provider(project_root).refresh(config)
-    except Exception:
-        pass
     report = {
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "status": "READY" if readiness["status"] == "READY" else "UNREADY",
@@ -135,7 +164,10 @@ def run_cycle(
         "next_actions": readiness["next_actions"],
         "configuration_hash": readiness["configuration_hash"],
         "data_contract_hash": readiness["data_contract_hash"],
+        "gate_data_bridge": _gate_data_bridge(project_root),
+        "operating_mode": "LIVE_DATA_SHADOW",
         "runtime_authorized": False,
+        "entry_authorized": False,
         "llm_invocation_performed": False,
     }
     _write_latest_report(report, project_root)
@@ -148,7 +180,7 @@ def main() -> int:
     parser.add_argument("--watch", action="store_true", help="按固定周期持续刷新已接入来源")
     parser.add_argument("--labels", action="store_true", help="周期性扫描冻结快照并采集 D1-D3 结果证据")
     parser.add_argument("--force-labels", action="store_true", help="手动忽略盘后时间/当日去重并重跑标签扫描")
-    parser.add_argument("--interval-minutes", type=int, default=60, help="周期模式间隔，范围 5..1440 分钟")
+    parser.add_argument("--interval-minutes", type=int, default=5, help="周期模式间隔，范围 5..1440 分钟")
     args = parser.parse_args()
     if len(args.code) != 6 or not args.code.isdigit():
         parser.error("--code 必须为六位数字")
