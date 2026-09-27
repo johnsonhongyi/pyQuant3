@@ -32,6 +32,10 @@ class AuctionDecisionEngine:
         根据竞价瞬时快照与当前情绪状态，生成高可信度的竞价开仓信号。
         """
         self.last_signals = []
+        if not getattr(self.fsm, "database_ready", False):
+            self.last_state = SentimentState.NEUTRAL
+            logger.error("[DecisionEngine] Pulse database is not ready; no auction signals generated")
+            return []
         
         # 1. 触发 FSM 状态更新
         state = self.fsm.classify(bidding)

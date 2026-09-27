@@ -7,16 +7,59 @@ File: market_pulse_db.py
 import sqlite3
 import json
 import traceback
-from datetime import datetime
+from datetime import datetime, timezone
+from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from JohnsonUtil import LoggerFactory
 
 logger = LoggerFactory.getLogger("MarketPulseDB")
 DB_PATH = "./market_pulse.db"
+DAILY_SENTIMENT_SOURCE_ID = "market_sentiment_fsm.daily_snapshot"
+DAILY_SENTIMENT_SOURCE_VERSION = "daily_sentiment.v1.1"
+DAILY_SENTIMENT_SOURCE_TIMEZONE = "Asia/Shanghai"
+
+def migrate_market_pulse_db(db_path: str = DB_PATH) -> None:
+    """Apply the idempotent sentiment schema migration before service readiness."""
+    conn = sqlite3.connect(db_path, timeout=15.0)
+    try:
+        cur = conn.cursor()
+        cur.execute("BEGIN IMMEDIATE")
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS daily_sentiment (
+                date TEXT PRIMARY KEY, index_pct REAL, breadth_ratio REAL,
+                up_count INTEGER, down_count INTEGER, limit_up INTEGER,
+                limit_down INTEGER, temperature REAL, worst_sectors_json TEXT,
+                top_sectors_json TEXT, indices_json TEXT, source_version TEXT,
+                created_at TEXT
+            )
+        """)
+        cur.execute("PRAGMA table_info(daily_sentiment)")
+        existing = {row[1] for row in cur.fetchall()}
+        additions = {
+            "lrrm_state": "TEXT NOT NULL DEFAULT 'UNKNOWN'",
+            "ipo_regime_state": "TEXT NOT NULL DEFAULT 'UNKNOWN'",
+            "source_version": "TEXT DEFAULT 'daily_sentiment.v1.1'",
+            "source_id": "TEXT NOT NULL DEFAULT 'market_sentiment_fsm.daily_snapshot'",
+            "source_timezone": "TEXT NOT NULL DEFAULT 'Asia/Shanghai'",
+            "as_of_time_utc": "TEXT",
+            "available_at_utc": "TEXT",
+        }
+        for column, definition in additions.items():
+            if column not in existing:
+                cur.execute(f"ALTER TABLE daily_sentiment ADD COLUMN {column} {definition}")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 def init_pulse_db():
     """Initialize the Market Pulse database tables."""
+    conn = None
     try:
-        conn = sqlite3.connect(DB_PATH)
+        migrate_market_pulse_db(DB_PATH)
+        conn = sqlite3.connect(DB_PATH, timeout=15.0)
         cur = conn.cursor()
         
         # 1. Daily Reports Table: High-level market summary
@@ -59,31 +102,17 @@ def init_pulse_db():
             )
         """)
         
-        # 3. Daily Sentiment Table: For Sentiment Reversal tracking
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS daily_sentiment (
-                date TEXT PRIMARY KEY,
-                index_pct REAL,
-                breadth_ratio REAL,
-                up_count INTEGER,
-                down_count INTEGER,
-                limit_up INTEGER,
-                limit_down INTEGER,
-                temperature REAL,
-                worst_sectors_json TEXT,
-                top_sectors_json TEXT,
-                indices_json TEXT,
-                source_version TEXT,
-                created_at TEXT
-            )
-        """)
-        
         conn.commit()
-        conn.close()
         logger.info("[DB] Market Pulse tables initialized.")
+        return True
     except Exception as e:
         logger.error(f"[DB Init Error] {e}")
-        traceback.print_exc()
+        if conn is not None:
+            conn.rollback()
+        return False
+    finally:
+        if conn is not None:
+            conn.close()
 
 def _convert_to_serializable(obj):
     """
@@ -110,8 +139,9 @@ def save_daily_pulse(date_str, summary_data, stock_list):
     :param summary_data: dict {temperature, summary, hot_sectors, notes}
     :param stock_list: list of dicts [{code, name, sector, reason, score, plan, status...}]
     """
-    init_pulse_db()
-    conn = sqlite3.connect(DB_PATH)
+    if init_pulse_db() is not True:
+        return False
+    conn = sqlite3.connect(DB_PATH, timeout=15.0)
     cur = conn.cursor()
     
     try:
@@ -248,21 +278,79 @@ def get_all_recorded_dates():
     return dates
 
 def save_daily_sentiment(date_str: str, snapshot: dict) -> bool:
-    init_pulse_db()
-    conn = sqlite3.connect(DB_PATH)
+    if init_pulse_db() is not True:
+        return False
+    if not isinstance(snapshot, dict):
+        return False
+    source_id = snapshot.get('source_id', DAILY_SENTIMENT_SOURCE_ID)
+    source_version = snapshot.get('source_version', DAILY_SENTIMENT_SOURCE_VERSION)
+    source_timezone = snapshot.get('source_timezone', DAILY_SENTIMENT_SOURCE_TIMEZONE)
+    if not isinstance(source_id, str) or not source_id.strip():
+        logger.error("[DB Save Daily Sentiment Error] source_id is required")
+        return False
+    if not isinstance(source_version, str) or not source_version.strip():
+        logger.error("[DB Save Daily Sentiment Error] source_version is required")
+        return False
+    if not isinstance(source_timezone, str) or not source_timezone.strip():
+        logger.error("[DB Save Daily Sentiment Error] source_timezone is required")
+        return False
+    source_id = source_id.strip()
+    source_version = source_version.strip()
+    source_timezone = source_timezone.strip()
+    try:
+        ZoneInfo(source_timezone)
+    except (TypeError, ValueError, ZoneInfoNotFoundError):
+        logger.error("[DB Save Daily Sentiment Error] invalid source_timezone")
+        return False
+    raw_as_of = snapshot.get('as_of_time')
+    as_of_utc = None
+    if raw_as_of is not None:
+        try:
+            if isinstance(raw_as_of, str):
+                raw_as_of = raw_as_of.strip()
+                if raw_as_of.endswith('Z'):
+                    raw_as_of = raw_as_of[:-1] + '+00:00'
+                raw_as_of = datetime.fromisoformat(raw_as_of)
+            if not isinstance(raw_as_of, datetime) or raw_as_of.tzinfo is None or raw_as_of.utcoffset() is None:
+                raise ValueError("as_of_time must have a valid UTC offset")
+            as_of_utc = raw_as_of.astimezone(timezone.utc)
+        except (OverflowError, TypeError, ValueError):
+            logger.error("[DB Save Daily Sentiment Error] invalid or naive as_of_time")
+            return False
+    conn = sqlite3.connect(DB_PATH, timeout=15.0)
     cur = conn.cursor()
     try:
         clean_worst = _convert_to_serializable(snapshot.get('worst_sectors', []))
         clean_top = _convert_to_serializable(snapshot.get('top_sectors', []))
         clean_indices = _convert_to_serializable(snapshot.get('indices', []))
         created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        available_at_utc = datetime.now(timezone.utc).isoformat(timespec="microseconds")
+        as_of_time_utc = as_of_utc.isoformat(timespec="microseconds") if as_of_utc else None
+        if as_of_utc and as_of_utc > datetime.fromisoformat(available_at_utc):
+            logger.error("[DB Save Daily Sentiment Error] as_of_time is after available_at")
+            return False
+        lrrm_value = snapshot.get('lrrm_state')
+        lrrm_state = (
+            lrrm_value if snapshot.get('lrrm_data_ready') is True
+            and isinstance(lrrm_value, str)
+            and lrrm_value in {'LOOSE', 'NORMAL', 'TIGHT', 'SHOCK'} else 'UNKNOWN'
+        )
+        regime_value = snapshot.get('ipo_regime_state')
+        ipo_regime_state = (
+            regime_value if snapshot.get('ipo_regime_data_ready') is True
+            and isinstance(regime_value, str)
+            and regime_value in {'DISTRIBUTION', 'REPAIR', 'CONTINUATION', 'MANIA', 'EXHAUSTION'}
+            else 'UNKNOWN'
+        )
         
         cur.execute("""
             INSERT INTO daily_sentiment (
                 date, index_pct, breadth_ratio, up_count, down_count,
                 limit_up, limit_down, temperature, worst_sectors_json,
-                top_sectors_json, indices_json, source_version, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                top_sectors_json, indices_json, source_version, created_at,
+                lrrm_state, ipo_regime_state, source_id, source_timezone,
+                as_of_time_utc, available_at_utc
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(date) DO UPDATE SET
                 index_pct=excluded.index_pct,
                 breadth_ratio=excluded.breadth_ratio,
@@ -275,7 +363,13 @@ def save_daily_sentiment(date_str: str, snapshot: dict) -> bool:
                 top_sectors_json=excluded.top_sectors_json,
                 indices_json=excluded.indices_json,
                 source_version=excluded.source_version,
-                created_at=excluded.created_at
+                created_at=excluded.created_at,
+                lrrm_state=excluded.lrrm_state,
+                ipo_regime_state=excluded.ipo_regime_state,
+                source_id=excluded.source_id,
+                source_timezone=excluded.source_timezone,
+                as_of_time_utc=excluded.as_of_time_utc,
+                available_at_utc=excluded.available_at_utc
         """, (
             date_str,
             float(snapshot.get('index_pct', 0.0)),
@@ -288,8 +382,14 @@ def save_daily_sentiment(date_str: str, snapshot: dict) -> bool:
             json.dumps(clean_worst, ensure_ascii=False),
             json.dumps(clean_top, ensure_ascii=False),
             json.dumps(clean_indices, ensure_ascii=False),
-            snapshot.get('source_version', 'daily_sentiment.v1'),
-            created_at
+            source_version,
+            created_at,
+            lrrm_state,
+            ipo_regime_state,
+            source_id,
+            source_timezone,
+            as_of_time_utc,
+            available_at_utc,
         ))
         conn.commit()
         logger.info(f"[DB] Saved daily sentiment for {date_str}.")
@@ -307,7 +407,13 @@ def get_daily_sentiment(date_str: str) -> Optional[dict]:
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     try:
-        cur.execute("SELECT * FROM daily_sentiment WHERE date=?", (date_str,))
+        cur.execute(
+            "SELECT date, index_pct, breadth_ratio, up_count, down_count, limit_up, "
+            "limit_down, temperature, worst_sectors_json, top_sectors_json, indices_json, "
+            "source_version, created_at, lrrm_state, ipo_regime_state "
+            "FROM daily_sentiment WHERE date=?",
+            (date_str,),
+        )
         row = cur.fetchone()
         if row:
             return {
@@ -323,7 +429,12 @@ def get_daily_sentiment(date_str: str) -> Optional[dict]:
                 'top_sectors': json.loads(row[9]) if row[9] else [],
                 'indices': json.loads(row[10]) if row[10] else [],
                 'source_version': row[11],
-                'created_at': row[12]
+                'created_at': row[12],
+                'lrrm_state': row[13] or 'UNKNOWN',
+                'ipo_regime_state': row[14] or 'UNKNOWN',
+                'lrrm_data_ready': bool(row[13] and row[13] != 'UNKNOWN'),
+                'ipo_regime_data_ready': bool(row[14] and row[14] != 'UNKNOWN'),
+                'data_ready': bool(row[13] and row[13] != 'UNKNOWN' and row[14] and row[14] != 'UNKNOWN'),
             }
     except Exception as e:
         logger.error(f"[DB Get Daily Sentiment Error] {e}")
@@ -335,7 +446,13 @@ def get_latest_sentiment_before(date_str: str) -> Optional[dict]:
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     try:
-        cur.execute("SELECT * FROM daily_sentiment WHERE date < ? ORDER BY date DESC LIMIT 1", (date_str,))
+        cur.execute(
+            "SELECT date, index_pct, breadth_ratio, up_count, down_count, limit_up, "
+            "limit_down, temperature, worst_sectors_json, top_sectors_json, indices_json, "
+            "source_version, created_at, lrrm_state, ipo_regime_state "
+            "FROM daily_sentiment WHERE date < ? ORDER BY date DESC LIMIT 1",
+            (date_str,),
+        )
         row = cur.fetchone()
         if row:
             return {
@@ -351,13 +468,71 @@ def get_latest_sentiment_before(date_str: str) -> Optional[dict]:
                 'top_sectors': json.loads(row[9]) if row[9] else [],
                 'indices': json.loads(row[10]) if row[10] else [],
                 'source_version': row[11],
-                'created_at': row[12]
+                'created_at': row[12],
+                'lrrm_state': row[13] or 'UNKNOWN',
+                'ipo_regime_state': row[14] or 'UNKNOWN',
+                'lrrm_data_ready': bool(row[13] and row[13] != 'UNKNOWN'),
+                'ipo_regime_data_ready': bool(row[14] and row[14] != 'UNKNOWN'),
+                'data_ready': bool(row[13] and row[13] != 'UNKNOWN' and row[14] and row[14] != 'UNKNOWN'),
             }
     except Exception as e:
         logger.error(f"[DB Get Latest Sentiment Before Error] {e}")
     finally:
         conn.close()
     return None
+
+
+def get_latest_sentiment_as_of(cutoff_time: Any) -> Optional[dict]:
+    """Return only a sentiment snapshot both observed and available by cutoff."""
+    try:
+        if isinstance(cutoff_time, str):
+            value = cutoff_time.strip()
+            if value.endswith('Z'):
+                value = value[:-1] + '+00:00'
+            cutoff_time = datetime.fromisoformat(value)
+        if not isinstance(cutoff_time, datetime) or cutoff_time.tzinfo is None or cutoff_time.utcoffset() is None:
+            return None
+        cutoff_utc = cutoff_time.astimezone(timezone.utc).isoformat(timespec="microseconds")
+    except (OverflowError, TypeError, ValueError):
+        return None
+
+    conn = sqlite3.connect(DB_PATH, timeout=1.0)
+    try:
+        row = conn.execute(
+            "SELECT date, index_pct, breadth_ratio, up_count, down_count, limit_up, "
+            "limit_down, temperature, worst_sectors_json, top_sectors_json, indices_json, "
+            "source_version, created_at, source_id, source_timezone, as_of_time_utc, "
+            "available_at_utc, lrrm_state, ipo_regime_state "
+            "FROM daily_sentiment "
+            "WHERE as_of_time_utc IS NOT NULL AND available_at_utc IS NOT NULL "
+            "AND as_of_time_utc <= ? AND available_at_utc <= ? "
+            "ORDER BY available_at_utc DESC, date DESC LIMIT 1",
+            (cutoff_utc, cutoff_utc),
+        ).fetchone()
+        if not row:
+            return None
+        ZoneInfo(row[14])
+        return {
+            'date': row[0], 'index_pct': row[1], 'breadth_ratio': row[2],
+            'up_count': row[3], 'down_count': row[4], 'limit_up': row[5],
+            'limit_down': row[6], 'temperature': row[7],
+            'worst_sectors': json.loads(row[8]) if row[8] else [],
+            'top_sectors': json.loads(row[9]) if row[9] else [],
+            'indices': json.loads(row[10]) if row[10] else [],
+            'source_version': row[11], 'created_at': row[12],
+            'source_id': row[13], 'source_timezone': row[14],
+            'as_of_time': row[15], 'available_at': row[16],
+            'lrrm_state': row[17] or 'UNKNOWN',
+            'ipo_regime_state': row[18] or 'UNKNOWN',
+            'lrrm_data_ready': bool(row[17] and row[17] != 'UNKNOWN'),
+            'ipo_regime_data_ready': bool(row[18] and row[18] != 'UNKNOWN'),
+            'data_ready': bool(row[17] and row[17] != 'UNKNOWN' and row[18] and row[18] != 'UNKNOWN'),
+        }
+    except (sqlite3.Error, TypeError, ValueError, ZoneInfoNotFoundError) as exc:
+        logger.error(f"[DB Get Daily Sentiment As-Of Error] {exc}")
+        return None
+    finally:
+        conn.close()
 
 def get_sentiment_dates(limit: int = 120) -> list[str]:
     conn = sqlite3.connect(DB_PATH)

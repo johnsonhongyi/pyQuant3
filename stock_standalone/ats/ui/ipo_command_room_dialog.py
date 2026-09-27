@@ -1964,12 +1964,27 @@ class IPOCommandRoomDialog(QDialog):
                 if reject_reason and reject_reason not in reason_disp:
                     reason_disp = f"{reason_disp} | 阻断: {reject_reason}"
                 it_reason = QTableWidgetItem(reason_disp)
-                audit_fields = (
+                audit_fields = [
                     ("directive", getattr(d, "directive_id", "")),
                     ("candidate", audit_envelope.get("candidate_id", "")),
                     ("plan", audit_envelope.get("plan_id", "")),
                     ("snapshot", audit_envelope.get("snapshot_id", "")),
-                )
+                ]
+                passport = audit_envelope.get("ipo_gate_passport")
+                if isinstance(passport, dict):
+                    raw_gate = passport.get("block_at_gate", -1)
+                    gate_label = f"Gate {raw_gate}" if isinstance(raw_gate, int) and not isinstance(raw_gate, bool) and 0 <= raw_gate <= 5 else "未记录层级"
+                    audit_fields.extend((
+                        ("R9 决策", f"{passport.get('decision', 'UNKNOWN')} / {gate_label}"),
+                        ("配置版本", passport.get("configuration_version", "")),
+                        ("配置哈希", str(passport.get("configuration_hash", ""))[:16]),
+                        ("数据契约哈希", str(passport.get("data_contract_hash", ""))[:16]),
+                    ))
+                    causal_chain = passport.get("causal_chain", [])
+                    if isinstance(causal_chain, list) and causal_chain:
+                        audit_fields.append(("Gate 因果链", " > ".join(str(item)[:120] for item in causal_chain[:6])))
+                elif str(getattr(d, "reject_code", "") or "").startswith("R9_GATE_"):
+                    audit_fields.append(("R9 决策", "BLOCK / 准入上下文缺失"))
                 audit_text = " | ".join(
                     f"{label}={value}" for label, value in audit_fields if value
                 )

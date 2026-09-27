@@ -6,6 +6,7 @@
 - 聚合展示：战术角色分工、山外有山比对结果、集中仲裁深度决议、10d VWAP 动能偏离与买错立斩纪律
 """
 
+import html
 import time
 import logging
 from typing import Optional, Dict, Any
@@ -47,6 +48,39 @@ def format_time_to_minute(ts: Any, time_str: Optional[str] = None) -> str:
         return s_t
 
     return "--"
+
+
+def format_r9_gate_audit_html(audit_envelope: Any, authorization_status: str) -> str:
+    """Render persisted R9 gate evidence without treating historical evidence as live authorization."""
+    envelope = audit_envelope if isinstance(audit_envelope, dict) else {}
+    passport = envelope.get("ipo_gate_passport")
+    if not isinstance(passport, dict):
+        return """
+        <div style="background-color: #151a24; padding: 8px 12px; border-left: 3px solid #ff7070; border-radius: 3px; margin-top: 8px;">
+            <b>R9 六层门禁：</b>未记录通行证；不能据此认为 ENTRY 已获准。
+        </div>
+        """
+
+    decision = html.escape(str(passport.get("decision") or "UNKNOWN")[:24])
+    raw_gate = passport.get("block_at_gate", -1)
+    gate_index = raw_gate if isinstance(raw_gate, int) and not isinstance(raw_gate, bool) else -1
+    gate_title = f"Gate {gate_index}" if 0 <= gate_index <= 5 else "未记录阻断层"
+    causal_chain = passport.get("causal_chain", [])
+    if not isinstance(causal_chain, list):
+        causal_chain = []
+    causal_html = "".join(
+        f"<li>{html.escape(str(item)[:240])}</li>" for item in causal_chain[:6]
+    ) or "<li>无因果链记录</li>"
+    config_version = html.escape(str(passport.get("configuration_version") or "--")[:64])
+    config_hash = html.escape(str(passport.get("configuration_hash") or "")[:12] or "--")
+    contract_hash = html.escape(str(passport.get("data_contract_hash") or "")[:12] or "--")
+    return f"""
+    <div style="background-color: #151a24; padding: 8px 12px; border-left: 3px solid #f0c674; border-radius: 3px; margin-top: 8px;">
+        <b>R9 六层门禁：</b>{decision} · {gate_title} · {html.escape(authorization_status)}<br>
+        <small>配置版本 {config_version} · 配置哈希 {config_hash} · 数据契约哈希 {contract_hash}</small>
+        <ol style="margin-top: 4px; margin-bottom: 2px;">{causal_html}</ol>
+    </div>
+    """
 
 def resolve_current_price(code: str) -> float:
     """多级降级安全获取标的现价"""
@@ -447,6 +481,9 @@ class IPOArbitrationDetailDialog(QDialog):
                 badge_text = f"📋 信号快照: [{tier}] {action}"
 
             tier_color = "#ffd700" if "SSS" in tier else ("#00ff88" if "S" in tier else ("#00e5ff" if "A" in tier else "#ff3333"))
+            gate_html = format_r9_gate_audit_html(
+                log_item.get("audit_envelope"), "历史快照（不构成当前授权）"
+            )
             self.lbl_code_name.setText(f"代码: {clean_code} | 名称: {name} (📋 信号迭代日志)")
             self.lbl_price.setText(price_top)
             self.lbl_role_tag.setText(f"级别: {tier} | 动作: {action}")
@@ -471,6 +508,7 @@ class IPOArbitrationDetailDialog(QDialog):
                     {swap_info}
                     <p style="margin: 4px 0 2px 0;"><b>📌 决策依据：</b>{reason}</p>
                 </div>
+                {gate_html}
                 <p style="color: #9aa0a6; font-size: 8.5pt; margin-top: 8px;">
                     * 信号日志忠实记录全池赛马天梯与集中仲裁演进全过程，可随时对比验证。
                 </p>
@@ -534,6 +572,17 @@ class IPOArbitrationDetailDialog(QDialog):
         else:
             desc_text = "当前标的已纳入监控池，等待下一次全池统筹评估。"
 
+        gate_html = ""
+        if directive_obj:
+            try:
+                authorization_ok = trading_center._has_current_r9_gate_authorization(directive_obj)
+            except Exception:
+                authorization_ok = False
+            authorization = "短时授权有效" if authorization_ok else "无效/未授权"
+            gate_html = format_r9_gate_audit_html(
+                getattr(directive_obj, "audit_envelope", None), authorization
+            )
+
         # 生成决议 Badge 标签
         badge_text = f"🚢 全局决议: {role_cn}"
         if size_pct_str:
@@ -549,6 +598,7 @@ class IPOArbitrationDetailDialog(QDialog):
             <p style="background-color: #121522; padding: 8px 12px; border-left: 3px solid #00e5ff; border-radius: 3px; font-size: 10pt; color: #ffffff;">
                 {desc_text}
             </p>
+            {gate_html}
             <p style="color: #9aa0a6; font-size: 8.5pt; margin-bottom: 0px;">
                 * 决议由集中交易中心融合全池各守护线程提交数据、领头羊动能与全市场情绪综合仲裁生成。
             </p>

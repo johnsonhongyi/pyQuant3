@@ -2209,7 +2209,7 @@ def create_llm_backend(config: Dict[str, Any], agent_type: str) -> BaseLLMBacken
 | **Case Retrieval Agent** | 当前候选快照及历史相似案例检索结果 | 给出可追溯的相似案例 ID、差异点和证据摘要 | 不读取 cutoff 之后的行情或结果标签 |
 | **Post-close Review Agent** | 已封存的当日快照、Gate 因果链及成熟结果标签 | 生成经来源标注的复盘候选与偏好样本草稿 | 盘中不运行训练，不自动修改规则阈值 |
 
-选定的 Provider 仅生成所选 Agent 的 `payload`；Worker 通过匹配的 validator 校验 payload 后，将可信运行元数据组装成统一信封：`{agent_type, metadata: {request_id, scope_id, ticker, as_of_time, generated_at, model_id, prompt_version, evidence_ids}, payload}`。`scope_id` 为标的代码或 `MARKET`；按股响应的 `ticker` 必须匹配入队请求，市场级响应不得被伪装成单股快照。信封字段集合固定且拒绝额外字段；元数据由 Worker 注入，不能让模型自行编造。`CASE_RETRIEVAL_SCHEMA` 的 payload 至少包含相似案例 ID、发布时间、证据 ID、差异点和证据摘要；`POST_CLOSE_REVIEW_SCHEMA` 至少包含输入快照哈希、cutoff、标签成熟状态、标签来源和复盘草稿。Gate 只消费 Market Regime payload 中经验证的字段；缺字段、过期时间、request 不匹配或证据越过回放 cutoff 时将信封标为无效。
+选定的 Provider 仅生成所选 Agent 的 `payload`；Worker 通过匹配的 validator 校验 payload 后，将可信运行元数据组装成统一信封：`{agent_type, metadata: {request_id, scope_id, ticker, as_of_time, generated_at, model_id, prompt_version, evidence_ids}, payload}`。`scope_id` 为标的代码或 `MARKET`；按股响应的 `ticker` 必须匹配入队请求，市场级响应不得被伪装成单股快照。信封字段集合固定且拒绝额外字段；元数据由 Worker 注入，不能让模型自行编造。`CASE_RETRIEVAL_SCHEMA` 的 payload 至少包含相似案例 ID、发布时间、证据 ID、差异点和证据摘要；`POST_CLOSE_REVIEW_SCHEMA` 至少包含输入快照哈希、cutoff、标签成熟状态/时间、标签来源、结果证据 ID 和复盘草稿。成熟标签必须引用 Worker 元数据中的 `outcome:` 证据 ID；人工复核审计与 SFT/DPO 封存数据集必须保留这些引用，待结果或来源证据缺失时不允许复核/训练。Gate 只消费 Market Regime payload 中经验证的字段；缺字段、过期时间、request 不匹配或证据越过回放 cutoff 时将信封标为无效。
 
 ### 3.4 本地时序向量库（BGE-M3 1024 维修正）
 
@@ -2329,6 +2329,7 @@ backends:
   antigravity_sdk:
     execution_mode: "local_litert"  # 本机推理；需 SDK + LiteRT 运行依赖及受支持模型
     model_path: ""                  # 必填绝对 .litertlm 路径；空值视为未就绪，不继承 IDE 模型
+    model_sha256: ""                # 必须填写经批准的 64 位 SHA-256；Worker 启动时实算比对
     model_id: ""                    # 记录已验收模型标识/版本
   antigravity_cli:
     execution_mode: "remote_api"   # CLI 进程本机，推理/数据处理地点按远端处理门禁审查
@@ -2529,6 +2530,7 @@ def migrate_market_pulse_db(db_path: str = "./market_pulse.db") -> None:
 | T+1 首日九锚点、次日双锚及快速 reclaim 规则 | **部分覆盖**：锚点冻结与双锚阻断已定义，恢复条件此前缺失 | 按 Gate 3 状态条款：双锚失守先阻断；仅经有效成交量确认的快速 reclaim 可恢复至观察态，当日不得直接进入 `ENTRY_READY`。记录失守/回收时间和行情来源。 |
 | VWAP 期限、OBSERVE→ARMED→ENTRY_READY→ENTERED→HOLD_T1→EXIT_READY→BLOCKED 生命周期 | VWAP 多期限门禁已覆盖；7 态转换原仅有模块名，现已补入本方案 | Gate 与下单集成验收覆盖全部合法/非法跳转；`ENTERED` 必须由成交回报确认，T+1 未解锁不可进入可卖执行。 |
 | UI 状态栏、单股解释、状态迁移及告警 | **部分覆盖**：原 Stage 3 只写面板名称，字段不完整 | Stage 3 已列出市场和个股展示字段、正负因子、下一步条件、锚点失败、迁移日志，以及 Regime 变化和 T1 Carry 突变告警；须按该清单验收。 |
+| LLM 实时交互与结果审计 | **代码已接入，运行验收未完成** | UI 每 2 秒刷新最近 100 条 Agent 结果；Worker 双重校验后的信封异步写入 SQLite，按 Request ID 可查看输入时点、证据、模型/提示版本及内容哈希。提示词和未校验 Provider 响应不落盘；Provider、数据源及运行验收未通过前不启用旁路。 |
 | Historical Cut-Off：上市前一交易日起点、竞价逐分钟、D+1/D+2/D+3 展开、首批 8 只及 8 月至今全样本 | **部分覆盖**：15 项输出和 bars 截断已写；全输入隔离及样本范围未形成验收契约 | 保留首批 8 只（华大海天、百迈科、腾信精密、信诺维、沈鼓集团、世纪数码、中塑股份、凯达重工），再扩展到 2026-08 起全部可得新股/次新股；市场/新闻/公告/申购/向量证据也按 `available_at/published_at <= cutoff` 截断，输出 D1/D2/D3 标签只在决策后解锁。 |
 | 回放验收：预测分离、误入/过滤、解释覆盖、零未来泄漏与回归集通过率 | **缺失具体报表契约**：现有单测数不能代替策略效果验收 | 每次回放报告至少含 `regime_transition_accuracy`、`high_carry_vs_low_carry_spread`、`bad_t1_filter_rate`、`continuation_capture_rate`、`false_entry_rate`、`future_leakage_count`、`explanation_coverage`、`lrrm_transition_stability`、`anchor_failure_precision`、`pseudo_strength_filter_rate`、`nonlinear_false_entry_reduction`、`exhaustion_block_precision`、`regression_case_pass_rate`；硬目标：泄漏数 0、解释覆盖 100%、回归集通过率 100%。 |
 | 所有阈值进入版本化 YAML 并可复现 | **部分覆盖**：当前 YAML 有 PreHeat、部分 Regime/LRRM/Carry 和 VWAP 时效配置 | 把仍写在逻辑中的 Gate 2 分段、非线性边界、锚点与 reclaim 容差、RR/仓位约束、请求超时/TTL/熔断/队列预算及回放阈值列入配置归属表；每次决策、样本和回放报告绑定配置版本与哈希。 |

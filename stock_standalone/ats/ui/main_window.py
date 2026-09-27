@@ -2421,6 +2421,11 @@ class ATSMainWindow(QMainWindow):
         self.top_tabs.addTab(self.next_day_watch_panel, "📋 次日异动候选池")
         mark_checkpoint("03.3.6 NextDayWatchPanel (Tab 4)")
 
+        from ats.ui.ipo_learning_console import IPOLearningConsole
+        self.ipo_learning_console = IPOLearningConsole(parent=self)
+        self.top_tabs.addTab(self.ipo_learning_console, "🤖 IPO 自学习监控")
+        mark_checkpoint("03.3.7 IPOLearningConsole (Read-only Learning Monitor)")
+
         self.top_tabs.currentChanged.connect(self._on_top_tab_changed)
         
         # 顶部主看板 Tab 右上角添加【🐉 龙头追踪器】、【🎯 60f通道测算】与【🪟 SBC 重排】组合入口
@@ -6547,6 +6552,8 @@ class ATSMainWindow(QMainWindow):
         """主窗口关闭退出时，自动跟随关闭所有独立的 TopLevel 子窗口、对话框、保存全量布局配置及安全回收后台线程"""
         self._is_closing = True
         self._is_exiting = True
+        if hasattr(self, "ipo_learning_console"):
+            self.ipo_learning_console.stop_monitor()
         if hasattr(self, "_next_day_watch_timer"):
             self._next_day_watch_timer.stop()
 
@@ -6842,6 +6849,20 @@ class ATSMainWindow(QMainWindow):
         except Exception as e:
             print(f"[ATSMainWindow] Error saving intraday strategy cache on close: {e}")
 
+
+        try:
+            from ats.llm.learning_snapshot_store import shutdown_snapshot_writers
+            if not shutdown_snapshot_writers(timeout_seconds=2.0):
+                print("[ATSMainWindow] IPO learning snapshot writer did not drain before shutdown.")
+        except Exception as e:
+            print(f"[ATSMainWindow] Error draining IPO learning snapshots on close: {e}")
+
+        try:
+            from ats.llm.interaction_journal import shutdown_interaction_writers
+            if not shutdown_interaction_writers(timeout_seconds=2.0):
+                print("[ATSMainWindow] IPO Agent interaction journal did not drain before shutdown.")
+        except Exception as e:
+            print(f"[ATSMainWindow] Error draining IPO Agent interactions on close: {e}")
 
         # ✅ 【最后一步】主动停止日志队列监听线程，防止 atexit 阶段 QueueListener._thread.join()
         # 在 Python 解释器关闭时永久阻塞（_monitor 线程向被替换的 sys.stdout 写日志触发死锁）。
