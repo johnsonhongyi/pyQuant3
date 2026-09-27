@@ -13,7 +13,7 @@ from typing import Any, Dict, Mapping, Optional, Tuple
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
-DATA_CONTRACT_SCHEMA_VERSION = "1"
+DATA_CONTRACT_SCHEMA_VERSION = "2"
 LRRM_REQUIRED_FIELDS = (
     "volume_percentile_20d",
     "volume_percentile_60d",
@@ -102,6 +102,7 @@ class MetricFieldContract:
     unit: str
     window: str
     missing_policy: str
+    accepted_sources: Tuple[Tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
         for key in (
@@ -127,11 +128,20 @@ class MetricFieldContract:
             "BLOCK", "ALLOW_CONFIRMED_MISSING"
         }:
             raise ValueError(f"指标 {self.field_id} 的 missing_policy 无效")
+        if any(
+            not isinstance(identity, tuple) or len(identity) != 2
+            or not all(isinstance(item, str) and item.strip() for item in identity)
+            for identity in self.accepted_sources
+        ):
+            raise ValueError(f"指标 {self.field_id} 的备选来源契约无效")
 
     @classmethod
     def from_mapping(cls, field_id: str, value: Mapping[str, Any]) -> "MetricFieldContract":
         if not isinstance(value, Mapping):
             raise ValueError(f"指标 {field_id} 的契约必须为映射")
+        accepted = value.get("accepted_sources", ())
+        if not isinstance(accepted, (list, tuple)) or any(not isinstance(item, Mapping) for item in accepted):
+            raise ValueError(f"指标 {field_id} 的备选来源必须为来源对象列表")
         try:
             return cls(
                 field_id=field_id,
@@ -146,6 +156,7 @@ class MetricFieldContract:
                 unit=value["unit"],
                 window=value["window"],
                 missing_policy=value["missing_policy"],
+                accepted_sources=tuple((item["source_id"], item["source_version"]) for item in accepted),
             )
         except KeyError as exc:
             raise ValueError(f"指标 {field_id} 缺少契约字段: {exc.args[0]}") from exc
@@ -163,6 +174,10 @@ class MetricFieldContract:
             "unit": self.unit,
             "window": self.window,
             "missing_policy": self.missing_policy,
+            "accepted_sources": [
+                {"source_id": source_id, "source_version": source_version}
+                for source_id, source_version in self.accepted_sources
+            ],
         }
 
 
@@ -372,10 +387,8 @@ class IPODataContractSet:
             return FieldCheck(field_id, "UNREADY", False, reason_code="observation_status_invalid")
         if status == "UNREADY":
             return FieldCheck(field_id, "UNREADY", False, reason_code="source_unready")
-        if (
-            observation.get("source_id") != contract.source_id
-            or observation.get("source_version") != contract.source_version
-        ):
+        identity = (observation.get("source_id"), observation.get("source_version"))
+        if identity != (contract.source_id, contract.source_version) and identity not in contract.accepted_sources:
             return FieldCheck(field_id, "UNREADY", False, reason_code="source_identity_mismatch")
         if observation.get("source_timezone") != contract.source_timezone:
             return FieldCheck(field_id, "UNREADY", False, reason_code="source_timezone_mismatch")

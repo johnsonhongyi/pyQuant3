@@ -1,0 +1,1117 @@
+version: 1.1-R9-implementation-draft.3
+decision_config:
+  implementation_status: DRAFT_FAIL_CLOSED
+  source_registry:
+    volume_percentile_20d:
+      source: TDX沪深指数日线
+      route: 沪深成交额求和后计算20日分位
+      action: 两市场共同有效日线不足60天或超TTL时保持未就绪
+      source_id: tdx.daily_index_kline
+      source_version: sh_sz_index_turnover.v1
+      source_timezone: Asia/Shanghai
+      ttl_seconds: 86400.0
+      accepted_sources: []
+      verified: false
+    volume_percentile_60d:
+      source: TDX沪深指数日线
+      route: 沪深成交额求和后计算60日分位
+      action: 要求60个共同有效交易日并校验两指数日期对齐
+      source_id: tdx.daily_index_kline
+      source_version: sh_sz_index_turnover.v1
+      source_timezone: Asia/Shanghai
+      ttl_seconds: 86400.0
+      accepted_sources: []
+      verified: false
+    advance_decline_ratio:
+      source: 东方财富A股/TDX指数日线
+      route: 上涨家数/(上涨+下跌家数)
+      action: 覆盖及共同收盘日完整时才记录；日期超TTL保持未就绪
+      source_id: eastmoney.push2.market_quotes
+      source_version: a_share_breadth.v1
+      source_timezone: Asia/Shanghai
+      ttl_seconds: 86400.0
+      accepted_sources:
+      - source_id: tdx.daily_index_breadth
+        source_version: index_up_down_count.v1
+      - source_id: tdx.market_observation_pipeline
+        source_version: tdx_a_share_snapshot.v1
+      verified: false
+    limit_down_count:
+      source: 全市场行情
+      route: 按板块涨跌幅规则统计跌停家数
+      action: 需按交易日板块规则处理ST与新股
+      source_id: market_sentiment_fsm.board_aware_limit_down
+      source_version: board_limit_down.v1
+      source_timezone: Asia/Shanghai
+      ttl_seconds: 86400.0
+      accepted_sources: []
+      verified: false
+    financing_balance_change:
+      source: Eastmoney market-wide margin summary
+      route: RPTA_RZRQ_LSHJ daily RZYE percentage change
+      action: latest two valid dates; 24h TTL
+      source_id: eastmoney.datacenter-web.RPTA_RZRQ_LSHJ
+      source_version: marketwide_margin_daily.v1
+      source_timezone: Asia/Shanghai
+      ttl_seconds: 86400.0
+      accepted_sources: []
+      verified: false
+    limit_up_break_rate:
+      source: 东方财富涨停池与炸板池
+      route: 炸板池家数/(涨停池家数+炸板池家数)
+      action: 两个池必须属于当前交易日、计数完整且无重叠
+      source_id: eastmoney.push2ex.limit_up_pool
+      source_version: eastmoney_limit_up_break.v1
+      source_timezone: Asia/Shanghai
+      ttl_seconds: 3600.0
+      accepted_sources: []
+      verified: true
+    high_volatility_amount_share:
+      source: TDX/东方财富全A股快照
+      route: TDX全A股快照中绝对涨跌幅不低于5%的成交额占比
+      action: 全市场有效报价覆盖≥95%、来源时间跨度≤180秒且报价年龄≤120秒才入库
+      source_id: tdx.market_observation_pipeline
+      source_version: tdx_a_share_snapshot.v1
+      source_timezone: Asia/Shanghai
+      ttl_seconds: 86400.0
+      accepted_sources:
+      - source_id: eastmoney.push2.market_quotes
+        source_version: a_share_turnover_metrics.v1
+      verified: false
+    index_relative_strength:
+      source: TDX沪深指数日线
+      route: 20交易日上证综指累计收益减深证成指累计收益
+      action: 两指数至少21个共同收盘日、日期对齐且最新交易日通过TTL才入库
+      source_id: tdx.index_relative_strength
+      source_version: sh_comp_vs_sz_comp_20d.v1
+      source_timezone: Asia/Shanghai
+      ttl_seconds: 86400.0
+      accepted_sources: []
+      verified: false
+    ipo_amount_share:
+      source: 全市场+IPO分钟行情
+      route: 上市日期距采集日不超过30个自然日的新股成交额/全市场成交额
+      action: 使用东方财富发行日历上市日期与覆盖门槛；日龄窗口纳入契约哈希
+      source_id: tdx.market_observation_pipeline
+      source_version: tdx_a_share_snapshot.v1
+      source_timezone: Asia/Shanghai
+      ttl_seconds: 86400.0
+      accepted_sources:
+      - source_id: eastmoney.push2.market_quotes
+        source_version: a_share_turnover_metrics.v1
+      verified: false
+    theme_concentration:
+      source: 东方财富A股行业分类与行情
+      route: 行业成交额HHI（0至10000）
+      action: 至少5个行业且行业成交额分类覆盖≥95%才入库
+      source_id: eastmoney.push2.market_quotes
+      source_version: a_share_turnover_metrics.v1
+      source_timezone: Asia/Shanghai
+      ttl_seconds: 86400.0
+      accepted_sources: []
+      verified: false
+    listing_supply_pace:
+      source: 东方财富IPO发行日历
+      route: 近20日已公告上市家数
+      action: 只计具备上市日期与来源更新时间的不同股票代码
+      source_id: eastmoney.datacenter-web.RPTA_APP_IPOAPPLY
+      source_version: ipo_listing_supply.v1
+      source_timezone: Asia/Shanghai
+      ttl_seconds: 86400.0
+      accepted_sources: []
+      verified: true
+    d1_positive_rate:
+      source: IPO上市队列历史
+      route: D1正收益样本占比
+      action: 需成熟标签队列和历史全样本
+      source_id: ipo.matured_cohort_pipeline
+      source_version: planned.v1
+      source_timezone: Asia/Shanghai
+      ttl_seconds: 86400.0
+      accepted_sources: []
+      verified: false
+    d1_top_rate:
+      source: IPO上市队列历史
+      route: D1高收益分位占比
+      action: 需冻结top阈值与停牌处理
+      source_id: ipo.matured_cohort_pipeline
+      source_version: planned.v1
+      source_timezone: Asia/Shanghai
+      ttl_seconds: 86400.0
+      accepted_sources: []
+      verified: false
+    d2_positive_rate:
+      source: IPO上市队列历史
+      route: D2正收益样本占比
+      action: 需成熟D2标签和上市日历对齐
+      source_id: ipo.matured_cohort_pipeline
+      source_version: planned.v1
+      source_timezone: Asia/Shanghai
+      ttl_seconds: 86400.0
+      accepted_sources: []
+      verified: false
+    d3_positive_rate:
+      source: IPO上市队列历史
+      route: D3正收益样本占比
+      action: 需成熟D3标签和上市日历对齐
+      source_id: ipo.matured_cohort_pipeline
+      source_version: planned.v1
+      source_timezone: Asia/Shanghai
+      ttl_seconds: 86400.0
+      accepted_sources: []
+      verified: false
+    d1_d2_max_drawdown:
+      source: IPO上市队列历史
+      route: D1-D2最大回撤分布
+      action: 需冻结回撤基准价、日内低点与停牌口径
+      source_id: ipo.matured_cohort_pipeline
+      source_version: planned.v1
+      source_timezone: Asia/Shanghai
+      ttl_seconds: 86400.0
+      accepted_sources: []
+      verified: false
+    limit_down_rate:
+      source: IPO上市队列历史
+      route: 新股跌停样本比例
+      action: 按板块涨跌幅制度及无涨跌幅日区分
+      source_id: ipo.matured_cohort_pipeline
+      source_version: planned.v1
+      source_timezone: Asia/Shanghai
+      ttl_seconds: 86400.0
+      accepted_sources: []
+      verified: false
+    new_stock_relative_strength:
+      source: IPO与宽基行情
+      route: IPO队列收益减宽基收益
+      action: 需同一时点、同一日龄的收益配对
+      source_id: ipo.matured_cohort_pipeline
+      source_version: planned.v1
+      source_timezone: Asia/Shanghai
+      ttl_seconds: 86400.0
+      accepted_sources: []
+      verified: false
+    close_position:
+      source: IPO上市队列历史
+      route: 收盘在日内高低区间的位置
+      action: 需校验零振幅、停牌及首日无涨跌幅规则
+      source_id: ipo.matured_cohort_pipeline
+      source_version: planned.v1
+      source_timezone: Asia/Shanghai
+      ttl_seconds: 86400.0
+      accepted_sources: []
+      verified: false
+    new_stock_turnover_median:
+      source: IPO分钟/日行情
+      route: 新股队列换手率中位数
+      action: 需可信流通股本和固定新股日龄区间
+      source_id: ipo.matured_cohort_pipeline
+      source_version: planned.v1
+      source_timezone: Asia/Shanghai
+      ttl_seconds: 86400.0
+      accepted_sources: []
+      verified: false
+    new_stock_innovation_high_rate:
+      source: IPO上市队列历史
+      route: 新股创新高样本比例
+      action: 需冻结历史高点回看窗和幸存样本口径
+      source_id: ipo.matured_cohort_pipeline
+      source_version: planned.v1
+      source_timezone: Asia/Shanghai
+      ttl_seconds: 86400.0
+      accepted_sources: []
+      verified: false
+    issue_price:
+      source: Eastmoney IPO 发行日历
+      route: RPTA_APP_IPOAPPLY.ISSUE_PRICE
+      action: 已接入发行日历；强制刷新成功后写入带时区与TTL的观测
+      source_id: eastmoney.datacenter-web.RPTA_APP_IPOAPPLY
+      source_version: ipo_calendar.v1
+      source_timezone: Asia/Shanghai
+      ttl_seconds: 86400.0
+      accepted_sources: []
+      verified: true
+    float_shares_wan:
+      source: TDX证券财务信息
+      route: liutongguben/10000，按 updated_date 标注来源时点
+      action: 30天静态股本TTL；缺更新日或股本无效时不入库
+      source_id: tdx.finance_info
+      source_version: pytdx.fin_info.v1
+      source_timezone: Asia/Shanghai
+      ttl_seconds: 2592000.0
+      accepted_sources: []
+      verified: true
+    pe_ratio:
+      source: 东方财富IPO发行数据
+      route: RPTA_APP_IPOAPPLY.AFTER_ISSUE_PE
+      action: 已接入发行市盈率；按UP_DATE校验时效
+      source_id: eastmoney.ipo_issuance_results
+      source_version: RPTA_APP_IPOAPPLY.all.v1
+      source_timezone: Asia/Shanghai
+      ttl_seconds: 604800.0
+      accepted_sources: []
+      verified: true
+    industry_pe_median:
+      source: 东方财富全市场行情
+      route: 按IPO行业匹配A股动态市盈率中位数
+      action: 至少5家有效同行样本且源行情新鲜才入库
+      source_id: eastmoney.push2.industry_valuation
+      source_version: a_share_industry_pe.v1
+      source_timezone: Asia/Shanghai
+      ttl_seconds: 86400.0
+      accepted_sources: []
+      verified: false
+    online_sub_multiple:
+      source: 东方财富IPO发行数据
+      route: RPTA_APP_IPOAPPLY.ONLINE_ES_MULTIPLE
+      action: 已接入网上超额认购倍数；空值保持未就绪
+      source_id: eastmoney.ipo_issuance_results
+      source_version: RPTA_APP_IPOAPPLY.all.v1
+      source_timezone: Asia/Shanghai
+      ttl_seconds: 86400.0
+      accepted_sources: []
+      verified: true
+    winning_rate_pct:
+      source: 东方财富IPO发行数据
+      route: 100/ONLINE_ES_MULTIPLE
+      action: 由网上超额认购倍数确定性换算；无倍数不生成
+      source_id: eastmoney.ipo_issuance_results
+      source_version: RPTA_APP_IPOAPPLY.all.v1
+      source_timezone: Asia/Shanghai
+      ttl_seconds: 86400.0
+      accepted_sources: []
+      verified: true
+    scarcity_rank:
+      source: 本地新股横截面
+      route: 按冻结口径对同批次流通股本排名
+      action: 先实现横截面定义与同批次样本完整性校验
+      source_id: ipo.cross_section_analytics
+      source_version: planned.v1
+      source_timezone: Asia/Shanghai
+      ttl_seconds: 86400.0
+      accepted_sources: []
+      verified: false
+    hot_themes:
+      source: 公告/行业主题
+      route: 公告抽取加人工词典确认
+      action: 需要来源链接、发布时间与主题置信度证据
+      source_id: ipo.announcement_theme_pipeline
+      source_version: planned.v1
+      source_timezone: Asia/Shanghai
+      ttl_seconds: 21600.0
+      accepted_sources: []
+      verified: false
+    ret_pct:
+      source: 腾讯/TDX行情
+      route: 腾讯时间戳快照；TDX连续竞价备源
+      action: 校验代码、来源身份及30秒TTL；TDX须同时验证最新分钟线
+      source_id: tencent.quote_snapshot
+      source_version: gtimg_hq.v1
+      source_timezone: Asia/Shanghai
+      ttl_seconds: 30.0
+      accepted_sources:
+      - source_id: tdx.quote_snapshot
+        source_version: tdx_hq.quote.v1
+      verified: false
+    turnover_pct:
+      source: 腾讯/TDX行情
+      route: 快照换手率；TDX以成交量/可信流通股本计算
+      action: 缺可信流通股本时保持未就绪并校验报价时效
+      source_id: tencent.quote_snapshot
+      source_version: gtimg_hq.v1
+      source_timezone: Asia/Shanghai
+      ttl_seconds: 30.0
+      accepted_sources:
+      - source_id: tdx.quote_snapshot
+        source_version: tdx_hq.quote.v1
+      verified: false
+    price_vwap_dist_pct:
+      source: 腾讯/TDX行情
+      route: 成交额/成交量推导VWAP后计算现价偏离
+      action: 成交量或成交额无效时保持未就绪；TDX须通过分钟时效校验
+      source_id: tencent.derived.quote_vwap
+      source_version: quote_amount_volume.v1
+      source_timezone: Asia/Shanghai
+      ttl_seconds: 30.0
+      accepted_sources:
+      - source_id: tdx.derived.quote_vwap
+        source_version: tdx_quote_amount_volume.v1
+      verified: false
+    open_premium_pct:
+      source: 腾讯/TDX行情+东方财富发行数据
+      route: 现价/发行价-1
+      action: 两个输入均须通过来源和时效校验
+      source_id: tencent.derived.issue_price_premium
+      source_version: quote_plus_ipo.v1
+      source_timezone: Asia/Shanghai
+      ttl_seconds: 30.0
+      accepted_sources:
+      - source_id: tdx.derived.issue_price_premium
+        source_version: tdx_quote_plus_ipo.v1
+      verified: false
+    slope_deg:
+      source: TDX 1分钟行情
+      route: 固定窗口对数价格回归斜率
+      action: 需冻结回归窗口、最少样本与量纲
+      source_id: tdx.market_observation_pipeline
+      source_version: planned.v1
+      source_timezone: Asia/Shanghai
+      ttl_seconds: 30.0
+      accepted_sources: []
+      verified: false
+    session_high:
+      source: 腾讯/TDX行情
+      route: 带时间戳快照当日最高字段
+      action: 校验来源身份、时效；TDX须处于连续竞价并有新分钟线
+      source_id: tencent.quote_snapshot
+      source_version: gtimg_hq.v1
+      source_timezone: Asia/Shanghai
+      ttl_seconds: 30.0
+      accepted_sources:
+      - source_id: tdx.quote_snapshot
+        source_version: tdx_hq.quote.v1
+      verified: false
+    session_low:
+      source: 腾讯/TDX行情
+      route: 带时间戳快照当日最低字段
+      action: 校验来源身份、时效；TDX须处于连续竞价并有新分钟线
+      source_id: tencent.quote_snapshot
+      source_version: gtimg_hq.v1
+      source_timezone: Asia/Shanghai
+      ttl_seconds: 30.0
+      accepted_sources:
+      - source_id: tdx.quote_snapshot
+        source_version: tdx_hq.quote.v1
+      verified: false
+    current_price:
+      source: 腾讯/TDX行情
+      route: 时间戳现价；TDX连续竞价快照备源
+      action: 校验六位代码、来源身份及30秒TTL
+      source_id: tencent.quote_snapshot
+      source_version: gtimg_hq.v1
+      source_timezone: Asia/Shanghai
+      ttl_seconds: 30.0
+      accepted_sources:
+      - source_id: tdx.quote_snapshot
+        source_version: tdx_hq.quote.v1
+      verified: false
+    turnover_climb_speed:
+      source: TDX行情+流通股本
+      route: 换手率固定窗口差分
+      action: 需要完整分时量与可信股本
+      source_id: tdx.market_observation_pipeline
+      source_version: planned.v1
+      source_timezone: Asia/Shanghai
+      ttl_seconds: 30.0
+      accepted_sources: []
+      verified: false
+    minutes_above_vwap_ratio:
+      source: 东方财富/TDX 1分钟行情
+      route: 分钟收盘高于截至该分钟累计VWAP的比例
+      action: 仅统计当日有效成交分钟；TDX备源须有当日最新分钟线
+      source_id: eastmoney.push2his.minute_kline
+      source_version: minute_kline.v1
+      source_timezone: Asia/Shanghai
+      ttl_seconds: 30.0
+      accepted_sources:
+      - source_id: tdx.minute_bars
+        source_version: intraday_1m.v1
+      verified: false
+    pullback_from_peak_pct:
+      source: 腾讯/TDX行情
+      route: 现价相对当日最高点回撤
+      action: 现价与最高点使用同一报价时间并校验TTL
+      source_id: tencent.derived.quote_session_peak
+      source_version: quote_with_session_high.v1
+      source_timezone: Asia/Shanghai
+      ttl_seconds: 30.0
+      accepted_sources:
+      - source_id: tdx.derived.session_peak_pullback
+        source_version: tdx_quote_with_session_high.v1
+      verified: false
+    halt_count:
+      source: 交易所停复牌公告
+      route: 临时停牌/复牌事件流
+      action: 分钟缺口只能提示，不可直接当作停牌证据
+      source_id: tdx.market_observation_pipeline
+      source_version: planned.v1
+      source_timezone: Asia/Shanghai
+      ttl_seconds: 30.0
+      accepted_sources: []
+      verified: false
+  ipo_preheat:
+    watch_candidate_threshold: 55.0
+    hot_candidate_threshold: 75.0
+    weights:
+      valuation: 0.25
+      subscription: 0.25
+      scarcity: 0.2
+      theme: 0.2
+      capital_structure: 0.1
+    input_max_age_seconds_by_field:
+      issue_price: 86400.0
+      float_shares_wan: 2592000.0
+      pe_ratio: 604800.0
+      industry_pe_median: 86400.0
+      online_sub_multiple: 86400.0
+      winning_rate_pct: 86400.0
+      scarcity_rank: 86400.0
+      hot_themes: 21600.0
+  ipo_live_heat:
+    overheat_threshold_warning: 15.0
+    overheat_threshold_veto: 35.0
+    exhaustion_risk_threshold_veto: 45.0
+    close_location_veto: 0.4
+    turnover_tracker:
+      lunch_start: '11:30'
+      lunch_end: '13:00'
+      max_sample_gap_trading_minutes: 30.0
+  vwap_freshness:
+    max_stale_seconds: 120
+  ipo_regime:
+    lookback_stocks: 10
+    lookback_days: 20
+    transition_thresholds:
+      distribution_to_repair:
+        d1_positive_rate_min: 0.4
+        limit_down_rate_max: 0.1
+      repair_to_continuation:
+        d1_positive_rate_min: 0.55
+        new_high_ratio_min: 0.4
+      continuation_to_mania:
+        d1_positive_rate_min: 0.8
+        turnover_extreme_pct: 60.0
+      mania_to_exhaustion:
+        first_day_peak_ratio_min: 0.4
+      exhaustion_to_distribution:
+        d1_positive_rate_max: 0.3
+  lrrm:
+    amount_shock_percentile: 5
+    amount_tight_percentile: 20
+    amount_loose_percentile: 80
+    advance_decline_shock: 0.2
+    limit_down_shock: 30
+  t1_carry:
+    allow_threshold: 65.0
+    caution_threshold: 40.0
+    adjustment_bounds:
+      max_positive: 10
+      max_negative: -25
+  listing_anchors:
+    d0_open_break_pct: 0.0
+  vwap_execution:
+    min_price_support_pct: 0.0
+    early_anchor_support_pct: 0.0
+  trade_gate:
+    min_risk_reward: 2.5
+    signal_max_age_seconds: 30.0
+    risk_clock_skew_seconds: 5.0
+    authorization_ttl_seconds: 10.0
+    allowed_actions:
+    - WATCH
+data_contract:
+  schema_version: '2'
+  config_version: ipo-r9-source-contract-draft-5-eastmoney-market-sources
+  required_fields:
+  - volume_percentile_20d
+  - volume_percentile_60d
+  - advance_decline_ratio
+  - limit_down_count
+  - financing_balance_change
+  - limit_up_break_rate
+  - high_volatility_amount_share
+  - index_relative_strength
+  - ipo_amount_share
+  - theme_concentration
+  - listing_supply_pace
+  - d1_positive_rate
+  - d1_top_rate
+  - d2_positive_rate
+  - d3_positive_rate
+  - d1_d2_max_drawdown
+  - limit_down_rate
+  - new_stock_relative_strength
+  - close_position
+  - new_stock_turnover_median
+  - new_stock_innovation_high_rate
+  - issue_price
+  - float_shares_wan
+  - pe_ratio
+  - industry_pe_median
+  - online_sub_multiple
+  - winning_rate_pct
+  - scarcity_rank
+  - hot_themes
+  - ret_pct
+  - turnover_pct
+  - price_vwap_dist_pct
+  - open_premium_pct
+  - slope_deg
+  - session_high
+  - session_low
+  - current_price
+  - turnover_climb_speed
+  - minutes_above_vwap_ratio
+  - pullback_from_peak_pct
+  - halt_count
+  fields:
+    advance_decline_ratio:
+      source_id: eastmoney.push2.market_quotes
+      source_version: a_share_breadth.v1
+      value_key: value
+      as_of_key: as_of_time
+      available_at_key: available_at
+      source_timezone: Asia/Shanghai
+      max_age_seconds: 86400.0
+      value_type: number
+      unit: ratio
+      window: 上涨家数/(上涨+下跌家数)
+      missing_policy: BLOCK
+      accepted_sources:
+      - source_id: tdx.daily_index_breadth
+        source_version: index_up_down_count.v1
+      - source_id: tdx.market_observation_pipeline
+        source_version: tdx_a_share_snapshot.v1
+    close_position:
+      source_id: ipo.matured_cohort_pipeline
+      source_version: planned.v1
+      value_key: value
+      as_of_key: as_of_time
+      available_at_key: available_at
+      source_timezone: Asia/Shanghai
+      max_age_seconds: 86400.0
+      value_type: number
+      unit: ratio 0-1
+      window: 收盘在日内高低区间的位置
+      missing_policy: BLOCK
+      accepted_sources: []
+    current_price:
+      source_id: tencent.quote_snapshot
+      source_version: gtimg_hq.v1
+      value_key: value
+      as_of_key: as_of_time
+      available_at_key: available_at
+      source_timezone: Asia/Shanghai
+      max_age_seconds: 30.0
+      value_type: number
+      unit: CNY/share
+      window: 时间戳现价；TDX连续竞价快照备源
+      missing_policy: BLOCK
+      accepted_sources:
+      - source_id: tdx.quote_snapshot
+        source_version: tdx_hq.quote.v1
+    d1_d2_max_drawdown:
+      source_id: ipo.matured_cohort_pipeline
+      source_version: planned.v1
+      value_key: value
+      as_of_key: as_of_time
+      available_at_key: available_at
+      source_timezone: Asia/Shanghai
+      max_age_seconds: 86400.0
+      value_type: number
+      unit: '%'
+      window: D1-D2最大回撤分布
+      missing_policy: BLOCK
+      accepted_sources: []
+    d1_positive_rate:
+      source_id: ipo.matured_cohort_pipeline
+      source_version: planned.v1
+      value_key: value
+      as_of_key: as_of_time
+      available_at_key: available_at
+      source_timezone: Asia/Shanghai
+      max_age_seconds: 86400.0
+      value_type: number
+      unit: '%'
+      window: D1正收益样本占比
+      missing_policy: BLOCK
+      accepted_sources: []
+    d1_top_rate:
+      source_id: ipo.matured_cohort_pipeline
+      source_version: planned.v1
+      value_key: value
+      as_of_key: as_of_time
+      available_at_key: available_at
+      source_timezone: Asia/Shanghai
+      max_age_seconds: 86400.0
+      value_type: number
+      unit: '%'
+      window: D1高收益分位占比
+      missing_policy: BLOCK
+      accepted_sources: []
+    d2_positive_rate:
+      source_id: ipo.matured_cohort_pipeline
+      source_version: planned.v1
+      value_key: value
+      as_of_key: as_of_time
+      available_at_key: available_at
+      source_timezone: Asia/Shanghai
+      max_age_seconds: 86400.0
+      value_type: number
+      unit: '%'
+      window: D2正收益样本占比
+      missing_policy: BLOCK
+      accepted_sources: []
+    d3_positive_rate:
+      source_id: ipo.matured_cohort_pipeline
+      source_version: planned.v1
+      value_key: value
+      as_of_key: as_of_time
+      available_at_key: available_at
+      source_timezone: Asia/Shanghai
+      max_age_seconds: 86400.0
+      value_type: number
+      unit: '%'
+      window: D3正收益样本占比
+      missing_policy: BLOCK
+      accepted_sources: []
+    financing_balance_change:
+      source_id: eastmoney.datacenter-web.RPTA_RZRQ_LSHJ
+      source_version: marketwide_margin_daily.v1
+      value_key: value
+      as_of_key: as_of_time
+      available_at_key: available_at
+      source_timezone: Asia/Shanghai
+      max_age_seconds: 86400.0
+      value_type: number
+      unit: '%'
+      window: latest RZYE vs previous valid reporting day
+      missing_policy: BLOCK
+      accepted_sources: []
+    float_shares_wan:
+      source_id: tdx.finance_info
+      source_version: pytdx.fin_info.v1
+      value_key: value
+      as_of_key: as_of_time
+      available_at_key: available_at
+      source_timezone: Asia/Shanghai
+      max_age_seconds: 2592000.0
+      value_type: number
+      unit: 10k shares
+      window: liutongguben/10000，按 updated_date 标注来源时点
+      missing_policy: BLOCK
+      accepted_sources: []
+    halt_count:
+      source_id: tdx.market_observation_pipeline
+      source_version: planned.v1
+      value_key: value
+      as_of_key: as_of_time
+      available_at_key: available_at
+      source_timezone: Asia/Shanghai
+      max_age_seconds: 30.0
+      value_type: integer
+      unit: count
+      window: 临时停牌/复牌事件流
+      missing_policy: BLOCK
+      accepted_sources: []
+    high_volatility_amount_share:
+      source_id: tdx.market_observation_pipeline
+      source_version: tdx_a_share_snapshot.v1
+      value_key: value
+      as_of_key: as_of_time
+      available_at_key: available_at
+      source_timezone: Asia/Shanghai
+      max_age_seconds: 86400.0
+      value_type: number
+      unit: '%'
+      window: TDX全A股报价横截面；绝对涨跌幅>=5%的个股成交额/全市场成交额；覆盖>=95%；报价<=120秒；横截面跨度<=180秒
+      missing_policy: BLOCK
+      accepted_sources:
+      - source_id: eastmoney.push2.market_quotes
+        source_version: a_share_turnover_metrics.v1
+    hot_themes:
+      source_id: ipo.announcement_theme_pipeline
+      source_version: planned.v1
+      value_key: value
+      as_of_key: as_of_time
+      available_at_key: available_at
+      source_timezone: Asia/Shanghai
+      max_age_seconds: 21600.0
+      value_type: any
+      unit: theme names
+      window: 公告抽取加人工词典确认
+      missing_policy: BLOCK
+      accepted_sources: []
+    index_relative_strength:
+      source_id: tdx.index_relative_strength
+      source_version: sh_comp_vs_sz_comp_20d.v1
+      value_key: value
+      as_of_key: as_of_time
+      available_at_key: available_at
+      source_timezone: Asia/Shanghai
+      max_age_seconds: 86400.0
+      value_type: number
+      unit: '%'
+      window: 最近20个交易日累计收益差：(上证综指收盘/20交易日前收盘-1)-(深证成指收盘/20交易日前收盘-1)，百分点
+      missing_policy: BLOCK
+      accepted_sources: []
+    industry_pe_median:
+      source_id: eastmoney.push2.industry_valuation
+      source_version: a_share_industry_pe.v1
+      value_key: value
+      as_of_key: as_of_time
+      available_at_key: available_at
+      source_timezone: Asia/Shanghai
+      max_age_seconds: 86400.0
+      value_type: number
+      unit: ratio
+      window: 按IPO行业匹配A股动态市盈率中位数
+      missing_policy: BLOCK
+      accepted_sources: []
+    ipo_amount_share:
+      source_id: tdx.market_observation_pipeline
+      source_version: tdx_a_share_snapshot.v1
+      value_key: value
+      as_of_key: as_of_time
+      available_at_key: available_at
+      source_timezone: Asia/Shanghai
+      max_age_seconds: 86400.0
+      value_type: number
+      unit: '%'
+      window: 上市日期距采集日0至30个自然日新股成交额/全市场成交额；覆盖>=95%；报价<=120秒；横截面跨度<=180秒
+      missing_policy: BLOCK
+      accepted_sources:
+      - source_id: eastmoney.push2.market_quotes
+        source_version: a_share_turnover_metrics.v1
+    issue_price:
+      source_id: eastmoney.datacenter-web.RPTA_APP_IPOAPPLY
+      source_version: ipo_calendar.v1
+      value_key: value
+      as_of_key: as_of_time
+      available_at_key: available_at
+      source_timezone: Asia/Shanghai
+      max_age_seconds: 86400.0
+      value_type: number
+      unit: CNY/share
+      window: RPTA_APP_IPOAPPLY.ISSUE_PRICE
+      missing_policy: BLOCK
+      accepted_sources: []
+    limit_down_count:
+      source_id: market_sentiment_fsm.board_aware_limit_down
+      source_version: board_limit_down.v1
+      value_key: value
+      as_of_key: as_of_time
+      available_at_key: available_at
+      source_timezone: Asia/Shanghai
+      max_age_seconds: 86400.0
+      value_type: integer
+      unit: count
+      window: 按板块涨跌幅规则统计跌停家数
+      missing_policy: BLOCK
+      accepted_sources: []
+    limit_down_rate:
+      source_id: ipo.matured_cohort_pipeline
+      source_version: planned.v1
+      value_key: value
+      as_of_key: as_of_time
+      available_at_key: available_at
+      source_timezone: Asia/Shanghai
+      max_age_seconds: 86400.0
+      value_type: number
+      unit: '%'
+      window: 新股跌停样本比例
+      missing_policy: BLOCK
+      accepted_sources: []
+    limit_up_break_rate:
+      source_id: eastmoney.push2ex.limit_up_pool
+      source_version: eastmoney_limit_up_break.v1
+      value_key: value
+      as_of_key: as_of_time
+      available_at_key: available_at
+      source_timezone: Asia/Shanghai
+      max_age_seconds: 3600.0
+      value_type: number
+      unit: '%'
+      window: 曾触及涨停后开板比例
+      missing_policy: BLOCK
+      accepted_sources: []
+    listing_supply_pace:
+      source_id: eastmoney.datacenter-web.RPTA_APP_IPOAPPLY
+      source_version: ipo_listing_supply.v1
+      value_key: value
+      as_of_key: as_of_time
+      available_at_key: available_at
+      source_timezone: Asia/Shanghai
+      max_age_seconds: 86400.0
+      value_type: number
+      unit: listings/20 calendar days
+      window: 近20日已公告上市家数
+      missing_policy: BLOCK
+      accepted_sources: []
+    minutes_above_vwap_ratio:
+      source_id: eastmoney.push2his.minute_kline
+      source_version: minute_kline.v1
+      value_key: value
+      as_of_key: as_of_time
+      available_at_key: available_at
+      source_timezone: Asia/Shanghai
+      max_age_seconds: 30.0
+      value_type: number
+      unit: '%'
+      window: 分钟收盘高于截至该分钟累计VWAP的比例
+      missing_policy: BLOCK
+      accepted_sources:
+      - source_id: tdx.minute_bars
+        source_version: intraday_1m.v1
+    new_stock_innovation_high_rate:
+      source_id: ipo.matured_cohort_pipeline
+      source_version: planned.v1
+      value_key: value
+      as_of_key: as_of_time
+      available_at_key: available_at
+      source_timezone: Asia/Shanghai
+      max_age_seconds: 86400.0
+      value_type: number
+      unit: '%'
+      window: 新股创新高样本比例
+      missing_policy: BLOCK
+      accepted_sources: []
+    new_stock_relative_strength:
+      source_id: ipo.matured_cohort_pipeline
+      source_version: planned.v1
+      value_key: value
+      as_of_key: as_of_time
+      available_at_key: available_at
+      source_timezone: Asia/Shanghai
+      max_age_seconds: 86400.0
+      value_type: number
+      unit: '%'
+      window: IPO队列收益减宽基收益
+      missing_policy: BLOCK
+      accepted_sources: []
+    new_stock_turnover_median:
+      source_id: ipo.matured_cohort_pipeline
+      source_version: planned.v1
+      value_key: value
+      as_of_key: as_of_time
+      available_at_key: available_at
+      source_timezone: Asia/Shanghai
+      max_age_seconds: 86400.0
+      value_type: number
+      unit: '%'
+      window: 新股队列换手率中位数
+      missing_policy: BLOCK
+      accepted_sources: []
+    online_sub_multiple:
+      source_id: eastmoney.ipo_issuance_results
+      source_version: RPTA_APP_IPOAPPLY.all.v1
+      value_key: value
+      as_of_key: as_of_time
+      available_at_key: available_at
+      source_timezone: Asia/Shanghai
+      max_age_seconds: 86400.0
+      value_type: number
+      unit: multiple
+      window: RPTA_APP_IPOAPPLY.ONLINE_ES_MULTIPLE
+      missing_policy: BLOCK
+      accepted_sources: []
+    open_premium_pct:
+      source_id: tencent.derived.issue_price_premium
+      source_version: quote_plus_ipo.v1
+      value_key: value
+      as_of_key: as_of_time
+      available_at_key: available_at
+      source_timezone: Asia/Shanghai
+      max_age_seconds: 30.0
+      value_type: number
+      unit: '%'
+      window: 现价/发行价-1
+      missing_policy: BLOCK
+      accepted_sources:
+      - source_id: tdx.derived.issue_price_premium
+        source_version: tdx_quote_plus_ipo.v1
+    pe_ratio:
+      source_id: eastmoney.ipo_issuance_results
+      source_version: RPTA_APP_IPOAPPLY.all.v1
+      value_key: value
+      as_of_key: as_of_time
+      available_at_key: available_at
+      source_timezone: Asia/Shanghai
+      max_age_seconds: 604800.0
+      value_type: number
+      unit: ratio
+      window: RPTA_APP_IPOAPPLY.AFTER_ISSUE_PE
+      missing_policy: BLOCK
+      accepted_sources: []
+    price_vwap_dist_pct:
+      source_id: tencent.derived.quote_vwap
+      source_version: quote_amount_volume.v1
+      value_key: value
+      as_of_key: as_of_time
+      available_at_key: available_at
+      source_timezone: Asia/Shanghai
+      max_age_seconds: 30.0
+      value_type: number
+      unit: '%'
+      window: 成交额/成交量推导VWAP后计算现价偏离
+      missing_policy: BLOCK
+      accepted_sources:
+      - source_id: tdx.derived.quote_vwap
+        source_version: tdx_quote_amount_volume.v1
+    pullback_from_peak_pct:
+      source_id: tencent.derived.quote_session_peak
+      source_version: quote_with_session_high.v1
+      value_key: value
+      as_of_key: as_of_time
+      available_at_key: available_at
+      source_timezone: Asia/Shanghai
+      max_age_seconds: 30.0
+      value_type: number
+      unit: '%'
+      window: 现价相对当日最高点回撤
+      missing_policy: BLOCK
+      accepted_sources:
+      - source_id: tdx.derived.session_peak_pullback
+        source_version: tdx_quote_with_session_high.v1
+    ret_pct:
+      source_id: tencent.quote_snapshot
+      source_version: gtimg_hq.v1
+      value_key: value
+      as_of_key: as_of_time
+      available_at_key: available_at
+      source_timezone: Asia/Shanghai
+      max_age_seconds: 30.0
+      value_type: number
+      unit: '%'
+      window: 腾讯时间戳快照；TDX连续竞价备源
+      missing_policy: BLOCK
+      accepted_sources:
+      - source_id: tdx.quote_snapshot
+        source_version: tdx_hq.quote.v1
+    scarcity_rank:
+      source_id: ipo.cross_section_analytics
+      source_version: planned.v1
+      value_key: value
+      as_of_key: as_of_time
+      available_at_key: available_at
+      source_timezone: Asia/Shanghai
+      max_age_seconds: 86400.0
+      value_type: integer
+      unit: rank 1-5
+      window: 按冻结口径对同批次流通股本排名
+      missing_policy: BLOCK
+      accepted_sources: []
+    session_high:
+      source_id: tencent.quote_snapshot
+      source_version: gtimg_hq.v1
+      value_key: value
+      as_of_key: as_of_time
+      available_at_key: available_at
+      source_timezone: Asia/Shanghai
+      max_age_seconds: 30.0
+      value_type: number
+      unit: CNY/share
+      window: 带时间戳快照当日最高字段
+      missing_policy: BLOCK
+      accepted_sources:
+      - source_id: tdx.quote_snapshot
+        source_version: tdx_hq.quote.v1
+    session_low:
+      source_id: tencent.quote_snapshot
+      source_version: gtimg_hq.v1
+      value_key: value
+      as_of_key: as_of_time
+      available_at_key: available_at
+      source_timezone: Asia/Shanghai
+      max_age_seconds: 30.0
+      value_type: number
+      unit: CNY/share
+      window: 带时间戳快照当日最低字段
+      missing_policy: BLOCK
+      accepted_sources:
+      - source_id: tdx.quote_snapshot
+        source_version: tdx_hq.quote.v1
+    slope_deg:
+      source_id: tdx.market_observation_pipeline
+      source_version: planned.v1
+      value_key: value
+      as_of_key: as_of_time
+      available_at_key: available_at
+      source_timezone: Asia/Shanghai
+      max_age_seconds: 30.0
+      value_type: number
+      unit: degree
+      window: 固定窗口对数价格回归斜率
+      missing_policy: BLOCK
+      accepted_sources: []
+    theme_concentration:
+      source_id: eastmoney.push2.market_quotes
+      source_version: a_share_turnover_metrics.v1
+      value_key: value
+      as_of_key: as_of_time
+      available_at_key: available_at
+      source_timezone: Asia/Shanghai
+      max_age_seconds: 86400.0
+      value_type: number
+      unit: HHI
+      window: 行业成交额HHI；至少5个行业且成交额分类覆盖>=95%
+      missing_policy: BLOCK
+      accepted_sources: []
+    turnover_climb_speed:
+      source_id: tdx.market_observation_pipeline
+      source_version: planned.v1
+      value_key: value
+      as_of_key: as_of_time
+      available_at_key: available_at
+      source_timezone: Asia/Shanghai
+      max_age_seconds: 30.0
+      value_type: number
+      unit: '%/minute'
+      window: 换手率固定窗口差分
+      missing_policy: BLOCK
+      accepted_sources: []
+    turnover_pct:
+      source_id: tencent.quote_snapshot
+      source_version: gtimg_hq.v1
+      value_key: value
+      as_of_key: as_of_time
+      available_at_key: available_at
+      source_timezone: Asia/Shanghai
+      max_age_seconds: 30.0
+      value_type: number
+      unit: '%'
+      window: 快照换手率；TDX以成交量/可信流通股本计算
+      missing_policy: BLOCK
+      accepted_sources:
+      - source_id: tdx.quote_snapshot
+        source_version: tdx_hq.quote.v1
+    volume_percentile_20d:
+      source_id: tdx.daily_index_kline
+      source_version: sh_sz_index_turnover.v1
+      value_key: value
+      as_of_key: as_of_time
+      available_at_key: available_at
+      source_timezone: Asia/Shanghai
+      max_age_seconds: 86400.0
+      value_type: number
+      unit: percentile
+      window: 沪深成交额求和后计算20日分位
+      missing_policy: BLOCK
+      accepted_sources: []
+    volume_percentile_60d:
+      source_id: tdx.daily_index_kline
+      source_version: sh_sz_index_turnover.v1
+      value_key: value
+      as_of_key: as_of_time
+      available_at_key: available_at
+      source_timezone: Asia/Shanghai
+      max_age_seconds: 86400.0
+      value_type: number
+      unit: percentile
+      window: 沪深成交额求和后计算60日分位
+      missing_policy: BLOCK
+      accepted_sources: []
+    winning_rate_pct:
+      source_id: eastmoney.ipo_issuance_results
+      source_version: RPTA_APP_IPOAPPLY.all.v1
+      value_key: value
+      as_of_key: as_of_time
+      available_at_key: available_at
+      source_timezone: Asia/Shanghai
+      max_age_seconds: 86400.0
+      value_type: number
+      unit: '%'
+      window: 100/ONLINE_ES_MULTIPLE
+      missing_policy: BLOCK
+      accepted_sources: []
+  config_hash: eccd07995ef394ada50bf4893342863495f6db9525c056a5564ae7be5202d294
+decision_config_hash: 6f69cce8dd024a1a8cbfcdfafaba955cb566d6858a053a1b3aace52a434c0529

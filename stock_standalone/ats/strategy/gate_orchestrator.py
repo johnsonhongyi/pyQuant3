@@ -535,6 +535,10 @@ class GateOrchestrator:
             or listing_anchors.code != code
         ):
             return self._block(passport, 3, "Gate 3 阻断: D1+ 缺少合法封存的首日锚点")
+        if not listing_anchors.matches_contract(
+            passport.configuration_hash, passport.data_contract_hash,
+        ):
+            return self._block(passport, 3, "Gate 3 阻断: 首日锚点来源时区或配置/数据契约哈希不匹配")
         breached, reason = ListingAnchorStore().check_dual_anchor_failure(
             listing_anchors, intraday_low, current_price
         )

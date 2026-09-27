@@ -347,7 +347,13 @@ class IPOTradingCenter:
     @classmethod
     def get_instance(cls):
         if cls._instance is None:
-            cls._instance = cls(auto_load_ledger=True)
+            from ats.strategy.ipo_gate_context_provider import get_default_ipo_gate_context_provider
+
+            provider = get_default_ipo_gate_context_provider()
+            provider.refresh()
+            cls._instance = cls(
+                auto_load_ledger=True, r9_gate_context_provider=provider
+            )
         return cls._instance
 
     def __init__(self, total_capital: float = 1000000.0, auto_load_ledger: bool = False,
