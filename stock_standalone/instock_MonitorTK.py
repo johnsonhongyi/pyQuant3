@@ -2371,7 +2371,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         if getattr(self, '_is_closing', False):
             return
         try:
-            self.executor.submit(self.bg_kernel_auto_execute_once, True)
+            # 🛡️ 仅在交易日及工作时段才提交买卖决策，非交易日完全静默走 cache
+            if cct.get_trade_date_status() and cct.get_work_time():
+                self.executor.submit(self.bg_kernel_auto_execute_once, True)
         except Exception as e:
             logger.debug(f"[BgKernel] heartbeat submit failed: {e}")
         self._schedule_after(15000, self._bg_kernel_heartbeat)
@@ -6807,8 +6809,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     from trading_kernel.kernel_service import get_kernel_service
                     kernel_srv = get_kernel_service()
                     if not kernel_srv._indicator_cache:
-                        logger.info("📡 [Sync] Premarket df_all layout synchronizing. Proactively pre-warming kernel cache asynchronously...")
-                        self.compute_executor.submit(kernel_srv.update_df_all, full_df)
+                        # 🛡️ 仅限交易日预热 5500+ 指标缓存，非交易日坚决不无谓吞噬 1GB 内存
+                        if cct.get_trade_date_status():
+                            logger.info("📡 [Sync] Premarket df_all layout synchronizing. Proactively pre-warming kernel cache asynchronously...")
+                            self.compute_executor.submit(kernel_srv.update_df_all, full_df)
                 except Exception as ex:
                     logger.error(f"[Sync] Failed to proactively update df_all to kernel: {ex}")
                 
@@ -6852,9 +6856,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         self._put_deduped_task("lf_panel_feed", _do_panel_sync)
                         self._last_panel_feed_ts = lt_now
 
-                # 2. 后台交易/决策引擎注入与 tick 驱动 (只受 duration_sleep_time 限制，不受 has_update/UI 限制)
+                # 2. 后台交易/决策引擎注入与 tick 驱动
+                # 🛡️ 首次启动必然注入一次以初始化基础数据；后续在非交易日则直接使用 cache，不重复驱动后台 tick 计算
                 _fc_last = getattr(self, '_focus_ctrl_last_inject', 0)
-                if lt_now - _fc_last >= duration_sleep_time:
+                is_trade_day = cct.get_trade_date_status()
+                if _fc_last == 0 or (is_trade_day and (lt_now - _fc_last >= duration_sleep_time)):
                     self._put_deduped_task("lf_engine_inject", lambda d=full_df: self._inject_focus_engine(d))
                     self._focus_ctrl_last_inject = lt_now
 
