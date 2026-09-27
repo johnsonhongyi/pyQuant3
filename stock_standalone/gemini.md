@@ -1,5 +1,21 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-09-27 09:25 R9 初步实现启动与渲染异常加固修复
+- [x] **【消除类定义与UI刷新期 NameError/SyntaxError】(`ats/strategy/ipo_trading_center.py`, `ats/ui/ipo_learning_console.py`, `ats/llm/offline_learning.py`, `tools/run_shadow_live_test.py`, `20260927_0925_task.md`)**：
+    - [x] **根治 `run_ats.py` 启动阶段类定义 NameError**：
+        - `ats/strategy/ipo_trading_center.py` 补充导入 `typing.Mapping`，解决 `IPOTradingCenter.__init__` 在类构造类型注解触发的 `NameError: name 'Mapping' is not defined`；
+        - 纠正 `record_order_execution` 拦截层级顺序，优先执行底层账户/持仓对账冲突拦截（`PAPER_ACCOUNT_RECONCILIATION_BLOCKED` / `RECONCILIATION_BLOCKED`），再进行策略级 `_has_current_r9_gate_authorization` 校验；
+    - [x] **根治 `IPOLearningConsole` 周期渲染崩溃**：
+        - 将局部定义的 `_nonnegative_count` 提取为模块级公共工具函数，彻底解决每 2 秒 UI 刷新渲染合约状态统计表时抛出 `NameError: name '_nonnegative_count' is not defined` 的死循环报警；
+        - 修复 `self.lbl_learning_progress.setText` 字符串 `.format(...)` 关键字参数 `failed` 重复定义引起的 `SyntaxError`，区分写入失败 `writer_failed` 与交互失败 `failed`；
+    - [x] **补齐模块缺失依赖与测试分流**：
+        - `ats/llm/offline_learning.py` 补充导入 `from ats.strategy.ipo_data_contracts import IPO_REQUIRED_FIELDS`；
+        - `tools/run_shadow_live_test.py` 精准区分未传入参默认自检（`candidate_codes is None`）与严格降级门禁（`candidate_codes=[]`）；
+    - [x] **全量验证与代码洁净度**：
+        - pyflakes 针对全部 36 个新增/改造模块进行全量扫描，未定义变量错误数彻底清零；
+        - PyQt6 离线模式实测 `_render_snapshot` 周期渲染无异常；
+        - 全量 pytest（226 项测试）100% 秒级通过（exit=0），`git diff --check` 保持 100% 干净。
+
 ## 2026-09-26 R9 最终实施方案审计
 - **最终结论**：方案规格可作为分阶段实施输入；不具备 LLM 旁路启用或实盘准入。数据源/指标、全输入回放、UI/告警及交易中心外部依赖仍待完成，324 项仅为测试规划。
 - **Pre-Heat 与时效订正**：增加 `pe_status` 区分已确认缺失与未就绪；配置拒绝 bool/非有限数值并冻结逐字段 TTL；所有时间戳必须带有效 UTC 偏移。回放 naive 时间只按版本化 IANA `source_timezone` 本地化，且该字段进入来源 manifest/配置哈希。

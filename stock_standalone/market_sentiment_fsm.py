@@ -6,8 +6,14 @@ from typing import Mapping, Any, List, Tuple, Dict, Optional
 import json
 import logging
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import market_pulse_db
+from market_pulse_db import (
+    DAILY_SENTIMENT_SOURCE_ID,
+    DAILY_SENTIMENT_SOURCE_TIMEZONE,
+    DAILY_SENTIMENT_SOURCE_VERSION,
+)
 from JohnsonUtil import LoggerFactory
 from JohnsonUtil import commonTips as cct
 
@@ -42,7 +48,10 @@ class MarketSnapshot:
     breadth_ratio: float
     top_sectors: tuple[SectorRecord, ...]
     worst_sectors: tuple[SectorRecord, ...]
-    source_version: str = "daily_sentiment.v1"
+    source_version: str = DAILY_SENTIMENT_SOURCE_VERSION
+    source_id: str = DAILY_SENTIMENT_SOURCE_ID
+    source_timezone: str = DAILY_SENTIMENT_SOURCE_TIMEZONE
+    as_of_time: str = ""
 
 @dataclass(frozen=True)
 class BiddingSnapshot:
@@ -58,8 +67,11 @@ class BiddingSnapshot:
 
 class MarketSentimentFSM:
     def __init__(self):
+        self.database_ready = False
         try:
-            market_pulse_db.init_pulse_db()
+            self.database_ready = market_pulse_db.init_pulse_db() is True
+            if not self.database_ready:
+                logger.error("[FSM] Pulse database migration did not report success; FSM remains unavailable")
         except Exception as e:
             logger.error(f"[FSM] Failed to init pulse db: {e}")
         self.current_state: SentimentState = SentimentState.NEUTRAL
@@ -74,6 +86,9 @@ class MarketSentimentFSM:
         加载最近交易日（或者是指定交易日之前最近的一天）的情感数据。
         日期格式：YYYY-MM-DD
         """
+        if not self.database_ready:
+            logger.error("[FSM] Snapshot load blocked because pulse database is not ready")
+            return None
         try:
             if trade_date:
                 # 获取指定日期之前最近的一天
@@ -145,6 +160,17 @@ class MarketSentimentFSM:
         """
         import time
         date_str = datetime.now().strftime("%Y-%m-%d")
+        if not self.database_ready:
+            return BiddingSnapshot(
+                date=date_str,
+                generated_at=datetime.now().strftime("%H:%M:%S"),
+                up_count=0,
+                down_count=0,
+                limit_up=0,
+                limit_down=0,
+                active_sectors=(),
+                stock_snap={},
+            )
         
         # 1. 抓取板块数据
         active_sectors_list = detector.get_active_sectors()  # 内部已安全使用锁
@@ -199,6 +225,17 @@ class MarketSentimentFSM:
         matched_rules = []
         blocked_reasons = []
         repaired_worst_sectors = []
+
+        if not self.database_ready:
+            self.current_state = SentimentState.NEUTRAL
+            self._last_explained_data = {
+                "state": self.current_state.value,
+                "confidence": 0.0,
+                "matched_rules": [],
+                "repaired_worst_sectors": [],
+                "blocked_reasons": ["PULSE_DATABASE_NOT_READY"],
+            }
+            return self.current_state
         
         yesterday = self.yesterday_snapshot
         
@@ -307,7 +344,8 @@ class MarketSentimentFSM:
         收盘时生成当天的情感快照并持久化。
         """
         try:
-            today = date_str or datetime.now().strftime("%Y-%m-%d")
+            exchange_tz = ZoneInfo("Asia/Shanghai")
+            today = date_str or datetime.now(exchange_tz).strftime("%Y-%m-%d")
             
             # 计算大盘上涨/下跌家数
             up_count = 0
@@ -363,6 +401,7 @@ class MarketSentimentFSM:
                         'board_score': s.get('score', 0.0)
                     })
             
+            as_of_time = datetime.now(exchange_tz).isoformat()
             db_snap = {
                 'index_pct': index_pct,
                 'breadth_ratio': breadth_ratio,
@@ -374,7 +413,10 @@ class MarketSentimentFSM:
                 'worst_sectors': worst_sectors,
                 'top_sectors': top_sectors,
                 'indices': [],
-                'source_version': 'daily_sentiment.v1'
+                'source_id': DAILY_SENTIMENT_SOURCE_ID,
+                'source_version': DAILY_SENTIMENT_SOURCE_VERSION,
+                'source_timezone': DAILY_SENTIMENT_SOURCE_TIMEZONE,
+                'as_of_time': as_of_time,
             }
             
             market_pulse_db.save_daily_sentiment(today, db_snap)
@@ -394,7 +436,10 @@ class MarketSentimentFSM:
                 breadth_ratio=breadth_ratio,
                 top_sectors=tuple(top_recs),
                 worst_sectors=tuple(worst_recs),
-                source_version='daily_sentiment.v1'
+                source_version=DAILY_SENTIMENT_SOURCE_VERSION,
+                source_id=DAILY_SENTIMENT_SOURCE_ID,
+                source_timezone=DAILY_SENTIMENT_SOURCE_TIMEZONE,
+                as_of_time=as_of_time,
             )
             logger.info(f"[FSM] Daily sentiment snapshot stored for {today}.")
             return snap

@@ -35,7 +35,7 @@ import datetime
 import inspect
 import hashlib
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional, Any, Tuple, Union
+from typing import Callable, Dict, List, Optional, Any, Tuple, Union, Mapping
 
 from ats.strategy.ipo_market_sentiment_engine import IPOMarketSentimentEngine, MarketSentimentSnapshot
 from ats.strategy.ipo_vwap_detector_engine import VWAPDetectorSignal, batch_evaluate_horse_race_ranking
@@ -257,6 +257,8 @@ class IPOOrderDirective:
     validation_price: float = 0.0
     directive_id: str = ""
     audit_envelope: Optional[Dict[str, Any]] = None
+    r9_gate_approved: bool = False
+    r9_gate_order_id: str = ""
 
     def __post_init__(self) -> None:
         """Lift immutable TradePlan execution fields onto the directive surface."""
@@ -352,12 +354,20 @@ class IPOTradingCenter:
                  ledger_file: Optional[str] = None,
                  exit_engine: Optional[ProactiveExitEngine] = None,
                  deployment_gate: Optional[SubnewDeploymentGate] = None,
-                 directive_executor: Optional[Callable[[Any], Any]] = None):
+                 directive_executor: Optional[Callable[[Any], Any]] = None,
+                 r9_gate_context_provider: Optional[Callable[[IPOOrderDirective], Mapping[str, Any]]] = None):
         self.total_capital = total_capital       # 虚拟/实盘总资金池 (默认 100 万基准)
         self.available_cash = total_capital
         self._ledger_file = ledger_file
         self._auto_load_ledger = auto_load_ledger
         self._directive_executor = directive_executor
+        self._r9_gate_context_provider = r9_gate_context_provider
+        self._r9_gate_context_provider_generation = 0
+        self._r9_gate_authorizations: Dict[str, Tuple[str, float]] = {}
+        self._r9_gate_orchestrator = None
+        from ats.strategy.ipo_operation_state_machine import IPOOperationStateMachine
+
+        self._r9_operation_state_machine = IPOOperationStateMachine()
         self._positions: Dict[str, IPOTradingPosition] = {}
         self._closed_positions: List[IPOTradingPosition] = []
         self._signal_iteration_log: List[Dict[str, Any]] = []
@@ -423,6 +433,57 @@ class IPOTradingCenter:
         with self._lock:
             self.deployment_gate = gate
             logger.info(f"[IPO-TRADING] 挂接新部署门: trading_day={gate.trading_day}, status={gate.current_status()}")
+
+    def set_r9_gate_context_provider(
+        self,
+        provider: Optional[Callable[[IPOOrderDirective], Mapping[str, Any]]],
+    ) -> None:
+        """Inject a nonblocking, in-memory source snapshot provider for the R9 ENTRY gate."""
+        if provider is not None and not callable(provider):
+            raise ValueError("R9 Gate context provider must be callable or None")
+        with self._lock:
+            self._r9_gate_context_provider = provider
+            self._r9_gate_context_provider_generation += 1
+            self._r9_gate_authorizations.clear()
+
+    def get_r9_gate_context_status(self) -> Dict[str, Any]:
+        """Return a bounded, read-only R9 context-provider status for monitoring."""
+        with self._lock:
+            return {
+                "configured": callable(self._r9_gate_context_provider),
+                "generation": self._r9_gate_context_provider_generation,
+                "authorization_records": len(self._r9_gate_authorizations),
+            }
+
+    def get_r9_operation_states(self) -> List[Dict[str, Any]]:
+        """Return current lifecycle states and transition history for live monitoring."""
+        with self._lock:
+            machine = self._r9_operation_state_machine
+        return machine.snapshot() if machine is not None else []
+
+    def _record_r9_operation_hard_block(
+        self, directive: IPOOrderDirective, reason: str, source_version: str
+    ) -> str:
+        if self._r9_operation_state_machine is None:
+            from ats.strategy.ipo_operation_state_machine import IPOOperationStateMachine
+
+            self._r9_operation_state_machine = IPOOperationStateMachine()
+        machine = self._r9_operation_state_machine
+        code = str(directive.code or "").strip().zfill(6)
+        current = machine.state_for(code)
+        if current in {"OBSERVE", "ARMED", "ENTRY_READY"}:
+            as_of_time = datetime.datetime.now(datetime.timezone.utc)
+            version = "R9-BLOCK-" + hashlib.sha256(
+                f"{source_version}|{directive.directive_id}|{reason}".encode("utf-8")
+            ).hexdigest()[:20]
+            outcome = machine.transition(
+                code, "BLOCKED", reason, as_of_time, version,
+                {"hard_gate_failed": True},
+            )
+            current = outcome.current_state
+        if isinstance(directive.audit_envelope, dict):
+            directive.audit_envelope["ipo_operation_state"] = current
+        return current
 
     def current_gate_status(self) -> GateStatus:
         """获取当前部署门有效状态"""
@@ -1127,7 +1188,12 @@ class IPOTradingCenter:
         - 非 S5 BUY、RR<2.5、超买区、TTL过期、质量不合格、结构无效的指令全部剥离；
         - EXIT/SELL/REDUCE 等防守指令不受影响，保持可见与可执行。
         """
-        return self.get_pending_directives(executable_only=True)
+        directives = self.get_pending_directives(executable_only=True)
+        return [
+            directive for directive in directives
+            if str(directive.action or "").upper() not in ENTRY_ACTIONS
+            or self._has_current_r9_gate_authorization(directive)
+        ]
 
     def get_s4_to_s5_conversion_report(self) -> Dict[str, Any]:
         """
@@ -1276,6 +1342,8 @@ class IPOTradingCenter:
         directive.signal_state = "BLOCKED"
         directive.reject_code = code
         directive.reject_reason = reason
+        if str(code or "").startswith("R9_GATE_"):
+            self._record_r9_operation_hard_block(directive, reason, str(code))
         if directive.audit_envelope is not None:
             directive.audit_envelope["status"] = str(audit_status or "REJECTED")
             directive.audit_envelope["gate_reason"] = str(code)
@@ -1292,10 +1360,550 @@ class IPOTradingCenter:
         self._save_persisted_ledger()
         return False
 
+    @staticmethod
+    def _r9_entry_fingerprint(directive: IPOOrderDirective) -> str:
+        material = {
+            "directive_id": directive.directive_id,
+            "code": str(directive.code or "").strip().zfill(6),
+            "action": str(directive.action or "").upper(),
+            "price": directive.price,
+            "shares": directive.shares,
+            "size_pct": directive.size_pct,
+            "stop_loss_price": directive.stop_loss_price,
+            "order_id": directive.r9_gate_order_id,
+        }
+        try:
+            encoded = json.dumps(
+                material, sort_keys=True, separators=(",", ":"), allow_nan=False
+            ).encode("utf-8")
+        except (TypeError, ValueError, OverflowError):
+            return ""
+        return hashlib.sha256(encoded).hexdigest()
+
+    def _has_current_r9_gate_authorization(self, directive: IPOOrderDirective) -> bool:
+        if getattr(directive, "r9_gate_approved", False) is not True:
+            return False
+        current = self._r9_entry_fingerprint(directive)
+        with self._lock:
+            authorization = self._r9_gate_authorizations.get(directive.directive_id)
+        return bool(
+            current and isinstance(authorization, tuple) and len(authorization) == 2
+            and authorization[0] == current
+            and isinstance(authorization[1], (int, float))
+            and time.monotonic() < authorization[1]
+        )
+
+    def _advance_r9_operation_lifecycle(
+        self, directive: IPOOrderDirective, passport: Any, context: Mapping[str, Any]
+    ) -> str:
+        """Record legal Gate 0–5 lifecycle changes from an evaluated R9 snapshot."""
+        as_of_time = context.get("market_as_of_time")
+        if (
+            not isinstance(as_of_time, datetime.datetime)
+            or as_of_time.tzinfo is None
+            or as_of_time.utcoffset() is None
+        ):
+            machine = self._r9_operation_state_machine
+            return machine.state_for(str(directive.code or "").strip().zfill(6)) if machine else "OBSERVE"
+        if self._r9_operation_state_machine is None:
+            from ats.strategy.ipo_operation_state_machine import IPOOperationStateMachine
+
+            self._r9_operation_state_machine = IPOOperationStateMachine()
+        machine = self._r9_operation_state_machine
+        code = str(directive.code or "").strip().zfill(6)
+        decision = str(getattr(passport, "final_decision", "BLOCK") or "BLOCK")
+        gate0 = getattr(passport, "gate0_lrrm_passed", False) is True
+        gate1 = getattr(passport, "gate1_regime_passed", False) is True
+        preheat = getattr(passport, "preheat_passed", False) is True
+        snapshot_fresh = gate0
+        config_hash = str(getattr(passport, "configuration_hash", "") or "")
+        contract_hash = str(getattr(passport, "data_contract_hash", "") or "")
+        snapshot_material = "|".join((
+            str(getattr(passport, "configuration_version", "") or ""),
+            config_hash, contract_hash, as_of_time.isoformat(),
+        ))
+        snapshot_version = "R9-" + hashlib.sha256(snapshot_material.encode("utf-8")).hexdigest()[:20]
+
+        def transition(target: str, reason: str, facts: Dict[str, Any]) -> None:
+            machine.transition(
+                code=code, target_state=target, transition_reason=reason,
+                as_of_time=as_of_time, snapshot_version=snapshot_version, facts=facts,
+            )
+
+        current = machine.state_for(code)
+        if current == "BLOCKED" and decision == "ENTRY":
+            transition("ARMED", "完整 Gate 0–5 重评通过，解除先前阻断", {
+                "blocking_reason_resolved": True, "all_gates_rerun": True,
+                "snapshot_fresh": snapshot_fresh, "gate0_passed": gate0,
+                "gate1_passed": gate1, "preheat_passed": preheat,
+            })
+            current = machine.state_for(code)
+        elif current == "OBSERVE" and gate0 and gate1 and preheat:
+            transition("ARMED", "Gate 0、Gate 1 与 Pre-Heat 放行", {
+                "gate0_passed": gate0, "gate1_passed": gate1,
+                "preheat_passed": preheat, "snapshot_fresh": snapshot_fresh,
+            })
+            current = machine.state_for(code)
+
+        if current == "ARMED" and decision == "ENTRY":
+            transition("ENTRY_READY", "Gate 0–5 与 RiskGate 完整放行", {
+                "gate0_passed": gate0,
+                "gate1_passed": gate1,
+                "gate3_passed": getattr(passport, "gate3_anchor_passed", False) is True,
+                "gate4_passed": getattr(passport, "gate4_vwap_passed", False) is True,
+                "trade_plan_valid": directive.trade_plan is not None,
+                "risk_allowed": getattr(passport, "approved_order", None) is not None,
+                "snapshot_fresh": snapshot_fresh,
+                "carry_state": str(getattr(passport, "gate2_state", "") or ""),
+                "horse_rank": directive.horse_rank,
+                "is_d0": context.get("listing_age_sessions") == 1,
+            })
+            current = machine.state_for(code)
+
+        if (
+            decision == "BLOCK" and 0 <= getattr(passport, "block_at_gate", -1) <= 5
+            and current in {"OBSERVE", "ARMED", "ENTRY_READY"}
+        ):
+            transition("BLOCKED", "R9 Gate 在有效评估中阻断", {
+                "hard_gate_failed": True,
+            })
+            current = machine.state_for(code)
+        return current
+
+    def _record_r9_learning_snapshot(
+        self, directive: IPOOrderDirective, passport: Any
+    ) -> None:
+        """Queue a complete point-in-time input snapshot without touching the order path."""
+        snapshot = getattr(passport, "learning_input_snapshot", None)
+        snapshot_hash = getattr(passport, "learning_input_snapshot_hash", "")
+        if not isinstance(snapshot, dict) or not snapshot_hash:
+            return
+        audit = directive.audit_envelope if isinstance(directive.audit_envelope, dict) else {}
+        gate_passport = audit.get("ipo_gate_passport")
+        gate_passport = gate_passport if isinstance(gate_passport, dict) else {}
+        event_id = str(
+            audit.get("candidate_id") or directive.directive_id or ""
+        ).strip()
+        causal_chain = gate_passport.get("causal_chain")
+        if not isinstance(causal_chain, list):
+            causal_chain = list(getattr(passport, "causal_chain", ()) or ())
+        try:
+            from pathlib import Path
+            from ats.llm.learning_snapshot_store import record_decision_snapshot
+
+            configuration_version = str(
+                gate_passport.get("configuration_version")
+                or getattr(passport, "configuration_version", "")
+            ).strip()
+            trade_plan = getattr(directive, "trade_plan", None)
+            plan_serializer = getattr(trade_plan, "to_dict", None)
+            standard_proposal = {
+                "action": str(getattr(directive, "action", "") or ""),
+                "ticker": str(directive.code or "").strip().zfill(6),
+                "price": directive.price,
+                "position_pct": directive.size_pct,
+                "trade_plan": plan_serializer() if callable(plan_serializer) else None,
+            }
+            saved = record_decision_snapshot(
+                Path(__file__).resolve().parents[2],
+                ticker=str(directive.code or "").strip().zfill(6),
+                event_id=event_id,
+                decision=str(gate_passport.get("decision") or getattr(passport, "final_decision", "BLOCK")),
+                configuration_version=configuration_version,
+                snapshot=snapshot,
+                snapshot_hash=snapshot_hash,
+                gate_causal_chain=causal_chain,
+                standard_proposal=standard_proposal,
+                proposal_created_at=str(snapshot.get("as_of_time") or ""),
+            )
+            if not saved:
+                logger.debug("[IPO-LEARNING] snapshot queue unavailable for %s", directive.code)
+        except Exception as exc:
+            logger.debug("[IPO-LEARNING] snapshot capture skipped for %s: %s", directive.code, exc)
+
+    def _record_r9_fill_lifecycle(self, directive: IPOOrderDirective) -> str:
+        """Advance to ENTERED/HOLD_T1 only after the local ledger records a fill."""
+        machine = self._r9_operation_state_machine
+        if machine is None:
+            return "OBSERVE"
+        code = str(directive.code or "").strip().zfill(6)
+        position = self._positions.get(code)
+        if position is None or position.shares <= 0 or directive.shares <= 0:
+            return machine.state_for(code)
+        envelope = directive.audit_envelope if isinstance(directive.audit_envelope, dict) else {}
+        execution_id = str(envelope.get("execution_id") or "").strip()
+        if getattr(directive, "_kernel_routed", False):
+            if not execution_id:
+                return machine.state_for(code)
+            execution_source = "TK_PAPER"
+        else:
+            execution_id = "LOCAL_PAPER:" + str(directive.directive_id or "")
+            execution_source = "LOCAL_PAPER_SIMULATOR"
+        if not execution_id:
+            return machine.state_for(code)
+        as_of_time = datetime.datetime.now(datetime.timezone.utc)
+        passport = envelope.get("ipo_gate_passport")
+        passport = passport if isinstance(passport, dict) else {}
+        material = "|".join((
+            str(passport.get("configuration_hash") or ""),
+            str(passport.get("data_contract_hash") or ""), execution_id,
+        ))
+        version = "FILL-" + hashlib.sha256(material.encode("utf-8")).hexdigest()[:20]
+        facts = {
+            "fill_confirmed": True, "execution_id": execution_id,
+            "filled_quantity": int(directive.shares), "execution_source": execution_source,
+        }
+        outcome = machine.transition(
+            code, "ENTERED", "成交已写入交易中心持仓账本", as_of_time, version, facts,
+        )
+        state = outcome.current_state
+        if outcome.accepted and position.available_shares == 0:
+            locked = machine.transition(
+                code, "HOLD_T1", "新买股份按 T+1 规则锁定", as_of_time,
+                version + "-T1", {
+                    "position_quantity": int(position.shares),
+                    "sellable_quantity": int(position.available_shares),
+                    "t_plus_one_locked": True,
+                },
+            )
+            state = locked.current_state
+        envelope["ipo_operation_state"] = state
+        return state
+
+    def _record_r9_exit_intent_lifecycle(
+        self, directive: IPOOrderDirective, position: IPOTradingPosition
+    ) -> str:
+        machine = self._r9_operation_state_machine
+        if machine is None or machine.state_for(position.code) not in {"ENTERED", "HOLD_T1"}:
+            return machine.state_for(position.code) if machine is not None else "OBSERVE"
+        as_of_time = datetime.datetime.now(datetime.timezone.utc)
+        snapshot_version = "EXIT-" + hashlib.sha256(
+            f"{directive.directive_id}|{directive.exit_rule_id}|{as_of_time.isoformat()}".encode("utf-8")
+        ).hexdigest()[:20]
+        outcome = machine.transition(
+            position.code, "EXIT_READY", "防守退出规则已触发且持仓可卖",
+            as_of_time, snapshot_version, {
+                "exit_triggered": True,
+                "position_quantity": int(position.shares),
+                "sellable_quantity": int(position.available_shares),
+                "t_plus_one_unlocked": position.available_shares > 0,
+            },
+        )
+        state = outcome.current_state
+        if isinstance(directive.audit_envelope, dict):
+            directive.audit_envelope["ipo_operation_state"] = state
+        return state
+
+    def _record_r9_exit_fill_lifecycle(
+        self, directive: IPOOrderDirective, remaining_quantity: int, filled_quantity: int
+    ) -> str:
+        machine = self._r9_operation_state_machine
+        if machine is None:
+            return "OBSERVE"
+        code = str(directive.code or "").strip().zfill(6)
+        if machine.state_for(code) != "EXIT_READY":
+            return machine.state_for(code)
+        envelope = directive.audit_envelope if isinstance(directive.audit_envelope, dict) else {}
+        execution_id = str(envelope.get("execution_id") or "").strip()
+        if getattr(directive, "_kernel_routed", False):
+            if not execution_id:
+                return machine.state_for(code)
+            execution_source = "TK_PAPER"
+        else:
+            execution_id = "LOCAL_PAPER:" + str(directive.directive_id or "")
+            execution_source = "LOCAL_PAPER_SIMULATOR"
+        as_of_time = datetime.datetime.now(datetime.timezone.utc)
+        snapshot_version = "EXIT-FILL-" + hashlib.sha256(
+            f"{execution_id}|{as_of_time.isoformat()}".encode("utf-8")
+        ).hexdigest()[:20]
+        if remaining_quantity == 0:
+            target = "OBSERVE"
+            facts = {
+                "position_closed_confirmed": True,
+                "remaining_quantity": 0,
+                "execution_id": execution_id,
+                "filled_quantity": int(filled_quantity),
+                "execution_source": execution_source,
+            }
+        else:
+            target = "EXIT_READY"
+            position = self._positions.get(code)
+            facts = {
+                "partial_exit_fill": True,
+                "remaining_quantity": int(remaining_quantity),
+                "sellable_quantity": int(position.available_shares if position else 0),
+                "execution_id": execution_id,
+                "filled_quantity": int(filled_quantity),
+                "execution_source": execution_source,
+            }
+        outcome = machine.transition(
+            code, target, "退出成交已写入交易中心持仓账本",
+            as_of_time, snapshot_version, facts,
+        )
+        state = outcome.current_state
+        envelope["ipo_operation_state"] = state
+        return state
+
+    def _apply_r9_entry_gate(self, directives: List[IPOOrderDirective]) -> None:
+        """Authorize only complete Gate 0–5 RiskGate orders; missing source context blocks."""
+        for directive in directives or []:
+            if str(getattr(directive, "action", "") or "").upper() not in ENTRY_ACTIONS:
+                continue
+            directive.r9_gate_approved = False
+            directive.r9_gate_order_id = ""
+            with self._lock:
+                self._r9_gate_authorizations.pop(directive.directive_id, None)
+            passport = None
+            evaluated_passport = None
+            with self._lock:
+                provider = self._r9_gate_context_provider
+                provider_generation = self._r9_gate_context_provider_generation
+            if not callable(provider):
+                directive.signal_state = "BLOCKED"
+                directive.reject_code = "R9_GATE_CONTEXT_UNAVAILABLE"
+                directive.reject_reason = "R9 Gate 数据源/风控上下文未配置，ENTRY 失败关闭"
+                operation_state = self._record_r9_operation_hard_block(
+                    directive, directive.reject_reason, "CONTEXT_UNAVAILABLE"
+                )
+                if isinstance(directive.audit_envelope, dict):
+                    try:
+                        from ats.strategy.ipo_data_contracts import IPO_REQUIRED_FIELDS
+
+                        required_fields = tuple(IPO_REQUIRED_FIELDS)
+                    except Exception:
+                        required_fields = ()
+                    directive.audit_envelope["ipo_gate_passport"] = {
+                        "decision": "BLOCK",
+                        "block_at_gate": 0,
+                        "causal_chain": [directive.reject_reason],
+                        "gate_detail": {
+                            "as_of_time": "",
+                            "gates": {"gate_0": "BLOCK", "gate_1": "PENDING", "gate_2": "PENDING", "gate_3": "PENDING", "gate_4": "PENDING", "gate_5": "PENDING"},
+                            "lrrm": {"status": "UNAVAILABLE"},
+                            "regime": {"status": "UNAVAILABLE"},
+                            "preheat": {"status": "UNAVAILABLE"},
+                            "live_heat": {"status": "UNAVAILABLE"},
+                            "carry": {"status": "UNAVAILABLE"},
+                            "anchors": {"status": "UNAVAILABLE"},
+                            "vwap": {"status": "UNAVAILABLE"},
+                            "data_contract": {
+                                "status": "UNAVAILABLE",
+                                "required_count": len(required_fields),
+                                "ready_count": 0,
+                                "unready_count": len(required_fields),
+                                "unready_fields": [
+                                    {"field_id": field_id, "reason": "CONTEXT_PROVIDER_UNCONFIGURED"}
+                                    for field_id in required_fields
+                                ],
+                            },
+                            "risk": {"status": "UNAVAILABLE"},
+                            "positive_factors": [],
+                            "negative_factors": [],
+                            "next_condition": directive.reject_reason[:240],
+                        },
+                        "configuration_version": "",
+                        "configuration_hash": "",
+                        "data_contract_hash": "",
+                        "operation_state": operation_state,
+                    }
+                continue
+
+            try:
+                context = provider(directive)
+                if not isinstance(context, Mapping):
+                    raise ValueError("R9 Gate context must be a mapping")
+                if self._r9_gate_orchestrator is None:
+                    from ats.strategy.gate_orchestrator import GateOrchestrator
+
+                    self._r9_gate_orchestrator = GateOrchestrator()
+                allowed_keys = {
+                    "lrrm", "ipo_regime", "t1_carry", "listing_anchors", "vwap",
+                    "intraday_low", "listing_age_sessions", "market_as_of_time",
+                    "max_vwap_stale_seconds", "risk_context", "d0_listing_open_price",
+                    "issue_price", "d0_open_break_pct", "preheat", "live_heat",
+                    "data_contract", "data_observations", "data_contract_hash",
+                    "configuration_version", "configuration_hash", "decision_config",
+                }
+                arguments = {key: value for key, value in context.items() if key in allowed_keys}
+                arguments.update({
+                    "code": str(directive.code or "").strip().zfill(6),
+                    "name": str(directive.name or ""),
+                    "current_price": directive.price,
+                    "horse_rank": directive.horse_rank,
+                    "trade_plan": directive.trade_plan,
+                    "requested_position_pct": directive.size_pct,
+                })
+                passport = self._r9_gate_orchestrator.evaluate(**arguments)
+                evaluated_passport = passport
+                causal_chain = list(getattr(passport, "causal_chain", ()) or ())
+                operation_state = self._advance_r9_operation_lifecycle(
+                    directive, passport, context
+                )
+                if isinstance(directive.audit_envelope, dict):
+                    block_gate = getattr(passport, "block_at_gate", -1)
+                    decision = getattr(passport, "final_decision", "BLOCK")
+                    gate_checks = (
+                        bool(getattr(passport, "gate0_lrrm_passed", False)),
+                        bool(getattr(passport, "gate1_regime_passed", False) and getattr(passport, "preheat_passed", False)),
+                        bool(getattr(passport, "gate2_t1_carry_passed", False)),
+                        bool(getattr(passport, "gate3_anchor_passed", False)),
+                        bool(getattr(passport, "gate4_vwap_passed", False)),
+                        bool(getattr(passport, "gate5_tde_passed", False)),
+                    )
+                    gate_states = {}
+                    for gate_index, passed in enumerate(gate_checks):
+                        gate_states[f"gate_{gate_index}"] = (
+                            "PASS" if passed else
+                            "WATCH" if block_gate == gate_index and decision == "WATCH" else
+                            "BLOCK" if block_gate == gate_index and decision == "BLOCK" else
+                            "PENDING"
+                        )
+                    gate_detail = copy.deepcopy(getattr(passport, "diagnostics", {}) or {})
+                    if not isinstance(gate_detail, dict):
+                        gate_detail = {}
+                    gate_detail["gates"] = gate_states
+                    gate_detail["next_condition"] = (
+                        gate_detail.get("next_condition")
+                        or (causal_chain[-1][:240] if causal_chain else "等待下一次有效 Gate 快照")
+                    )
+                    directive.audit_envelope["ipo_gate_passport"] = {
+                        "decision": decision,
+                        "block_at_gate": block_gate,
+                        "causal_chain": causal_chain,
+                        "gate_detail": gate_detail,
+                        "configuration_version": getattr(passport, "configuration_version", ""),
+                        "configuration_hash": getattr(passport, "configuration_hash", ""),
+                        "data_contract_hash": getattr(passport, "data_contract_hash", ""),
+                        "operation_state": operation_state,
+                    }
+                order = getattr(passport, "approved_order", None)
+                if getattr(passport, "final_decision", "BLOCK") != "ENTRY" or order is None:
+                    is_watch = getattr(passport, "final_decision", "BLOCK") == "WATCH"
+                    directive.signal_state = "OBSERVE" if is_watch else "BLOCKED"
+                    directive.reject_code = "R9_GATE_WATCH" if is_watch else "R9_GATE_BLOCKED"
+                    directive.reject_reason = "；".join(causal_chain) or "R9 Gate 未给出 RiskGate ENTRY 许可"
+                    self._record_r9_learning_snapshot(directive, passport)
+                    continue
+
+                approved_price = getattr(order, "price", None)
+                approved_size = getattr(order, "size_pct", None)
+                approved_order_id = getattr(order, "order_id", None)
+                plan = directive.trade_plan
+                if (
+                    getattr(order, "code", None) != arguments["code"]
+                    or getattr(order, "action", None) != "BUY"
+                    or not isinstance(approved_order_id, str) or not approved_order_id.strip()
+                    or isinstance(approved_price, bool) or not isinstance(approved_price, (int, float))
+                    or not math.isfinite(approved_price) or approved_price <= 0
+                    or isinstance(approved_size, bool) or not isinstance(approved_size, (int, float))
+                    or not math.isfinite(approved_size) or not 0 < approved_size <= directive.size_pct / 100.0
+                    or plan is None
+                    or not plan.buy_zone_min <= approved_price <= plan.buy_zone_max
+                ):
+                    raise ValueError("RiskGate 批准订单与候选指令不一致")
+
+                shares = int((self.total_capital * approved_size / approved_price) / 100.0) * 100
+                if shares < 100:
+                    raise ValueError("RiskGate 批准仓位不足一手")
+                directive.action = "BUY"
+                directive.price = float(approved_price)
+                directive.size_pct = round(float(approved_size) * 100.0, 4)
+                directive.shares = shares
+                directive.stop_loss_price = float(order.stop_price)
+                directive.signal_level = "S5"
+                directive.signal_state = "ACTIONABLE"
+                directive.reject_code = ""
+                directive.reject_reason = ""
+                directive.r9_gate_approved = True
+                directive.r9_gate_order_id = approved_order_id.strip()
+                if isinstance(directive.audit_envelope, dict):
+                    directive.audit_envelope.update({
+                        "action": directive.action,
+                        "qty": directive.shares,
+                        "price": directive.price,
+                        "gate_reason": "R9_GATE_ENTRY",
+                        "risk_gate_order_id": directive.r9_gate_order_id,
+                    })
+                fingerprint = self._r9_entry_fingerprint(directive)
+                if not fingerprint:
+                    raise ValueError("RiskGate 批准订单无法生成完整授权摘要")
+                authorization_ttl = getattr(passport, "authorization_ttl_seconds", 0.0)
+                if (
+                    isinstance(authorization_ttl, bool)
+                    or not isinstance(authorization_ttl, (int, float))
+                    or not math.isfinite(authorization_ttl)
+                    or authorization_ttl <= 0
+                ):
+                    raise ValueError("RiskGate 批准订单缺少有效授权 TTL")
+                with self._lock:
+                    if (
+                        provider_generation != self._r9_gate_context_provider_generation
+                        or provider is not self._r9_gate_context_provider
+                    ):
+                        raise ValueError("R9 Gate context provider changed during authorization")
+                    self._r9_gate_authorizations[directive.directive_id] = (
+                        fingerprint, time.monotonic() + float(authorization_ttl)
+                    )
+                self._record_r9_learning_snapshot(directive, passport)
+            except Exception as exc:
+                directive.r9_gate_approved = False
+                directive.r9_gate_order_id = ""
+                directive.signal_state = "BLOCKED"
+                directive.reject_code = "R9_GATE_EVALUATION_FAILED"
+                directive.reject_reason = str(exc) or "R9 Gate evaluation failed"
+                operation_state = self._record_r9_operation_hard_block(
+                    directive, directive.reject_reason, "EVALUATION_FAILED"
+                )
+                if isinstance(directive.audit_envelope, dict):
+                    directive.audit_envelope["gate_reason"] = directive.reject_code
+                    passport = directive.audit_envelope.get("ipo_gate_passport")
+                    if not isinstance(passport, dict):
+                        passport = {
+                            "decision": "BLOCK", "block_at_gate": -1,
+                            "causal_chain": [], "configuration_version": "",
+                            "configuration_hash": "", "data_contract_hash": "",
+                            "gate_detail": {
+                                "gates": {"gate_0": "UNAVAILABLE", "gate_1": "UNAVAILABLE", "gate_2": "UNAVAILABLE", "gate_3": "UNAVAILABLE", "gate_4": "UNAVAILABLE", "gate_5": "UNAVAILABLE"},
+                                "data_contract": {"status": "UNAVAILABLE"},
+                                "lrrm": {"status": "UNAVAILABLE"},
+                                "regime": {"status": "UNAVAILABLE"},
+                                "preheat": {"status": "UNAVAILABLE"},
+                                "live_heat": {"status": "UNAVAILABLE"},
+                                "carry": {"status": "UNAVAILABLE"},
+                                "anchors": {"status": "UNAVAILABLE"},
+                                "vwap": {"status": "UNAVAILABLE"},
+                                "risk": {"status": "UNAVAILABLE"},
+                                "positive_factors": [], "negative_factors": [],
+                            },
+                        }
+                        directive.audit_envelope["ipo_gate_passport"] = passport
+                    elif passport.get("decision") == "ENTRY":
+                        passport["block_at_gate"] = 5
+                    passport["decision"] = "BLOCK"
+                    causal_chain = passport.get("causal_chain")
+                    causal_chain = causal_chain if isinstance(causal_chain, list) else []
+                    passport["causal_chain"] = list(causal_chain[:5]) + [directive.reject_reason]
+                    gate_detail = passport.get("gate_detail")
+                    if not isinstance(gate_detail, dict):
+                        gate_detail = {}
+                    gate_states = gate_detail.get("gates")
+                    gate_states = gate_states if isinstance(gate_states, dict) else {}
+                    gate_states["gate_5"] = "BLOCK"
+                    gate_detail["gates"] = gate_states
+                    gate_detail["next_condition"] = directive.reject_reason[:240]
+                    passport["gate_detail"] = gate_detail
+                    passport["operation_state"] = operation_state
+                self._record_r9_learning_snapshot(directive, evaluated_passport)
+                logger.warning(
+                    "[IPO-TRADING] R9 Gate blocks %s: %s",
+                    directive.code, directive.reject_reason,
+                )
+
     def _publish_converged_directives(
         self, directives: List[IPOOrderDirective]
     ) -> List[IPOOrderDirective]:
         """Publish one clear, non-conflicting directive set without altering decisions."""
+        self._apply_r9_entry_gate(directives)
         eligible_directives: List[IPOOrderDirective] = []
         for item in directives or []:
             action = str(getattr(item, "action", "") or "").upper()
@@ -2819,6 +3427,8 @@ class IPOTradingCenter:
         for d in directives:
             if d.action not in ("BUY", "BUY_SCOUT", "BUY_CONFIRM", "FULL_ROTATION_SWAP", "SWITCH_SWAP", "SELL"):
                 continue
+            if d.action in ENTRY_ACTIONS and getattr(d, "signal_state", "") in ("OBSERVE", "BLOCKED"):
+                continue
             d_key = f"{d.action}_{d.code}_{d.urgency}"
             last_ts = self._notified_directive_keys.get(d_key, 0.0)
             if (now_ts - last_ts) < 180.0:  # 3分钟内相同指令不重复轰炸
@@ -3028,6 +3638,7 @@ class IPOTradingCenter:
             pos.pending_exit_directive_id = directive.directive_id
             if directive.audit_envelope is not None:
                 directive.audit_envelope["status"] = "SUBMITTED"
+            self._record_r9_exit_intent_lifecycle(directive, pos)
             self._pending_directives.append(directive)
             self._save_persisted_ledger()
             return directive
@@ -3068,6 +3679,13 @@ class IPOTradingCenter:
                 directive,
                 "RECONCILIATION_BLOCKED",
                 f"标的处于持仓对账阻断状态 (EXECUTION_BLOCKED): {clean_code}",
+            )
+
+        if action_upper in ENTRY_ACTIONS and not self._has_current_r9_gate_authorization(directive):
+            return self._reject_directive(
+                directive,
+                "R9_GATE_AUTHORIZATION_REQUIRED",
+                "缺少本轮完整 Gate 0~5 与 RiskGate 批准凭据，拒绝 ENTRY",
             )
 
         # 3. EXIT > BUY 独立阻塞合同：同一收敛周期存在 EXIT 时，禁止执行 BUY
@@ -3178,6 +3796,12 @@ class IPOTradingCenter:
         # the TK Paper kernel first.  Ephemeral instances used by unit tests and
         # offline strategy evaluation keep their isolated in-memory behavior.
         if (self._auto_load_ledger or self._directive_executor is not None) and not getattr(directive, "_kernel_routed", False):
+            if action_upper in ENTRY_ACTIONS and not self._has_current_r9_gate_authorization(directive):
+                return self._reject_directive(
+                    directive,
+                    "R9_GATE_AUTHORIZATION_STALE",
+                    "执行前买入价格/仓位/数量与 RiskGate 批准快照不一致，拒绝派单",
+                )
             try:
                 if self._directive_executor is not None:
                     kernel_result = self._directive_executor(directive)
@@ -3664,6 +4288,13 @@ class IPOTradingCenter:
                 d for d in self._pending_directives
                 if not (d.code == directive.code and d.action == directive.action)
             ]
+
+            if action_upper in ENTRY_ACTIONS:
+                self._record_r9_fill_lifecycle(directive)
+            elif action_upper in sell_actions:
+                self._record_r9_exit_fill_lifecycle(
+                    directive, remaining_shares, sell_shares
+                )
 
             # 写入信号与决议迭代日志 (供操盘手点击详情回溯)
             log_item = {

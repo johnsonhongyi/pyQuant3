@@ -150,7 +150,11 @@ def run_shadow_test(
 
     ledger = SignalLedger()
     candidate_service = LedgerUpdateService(ledger)
-    codes = sorted({str(code).strip().zfill(6) for code in (candidate_codes or []) if str(code).strip()})
+    if candidate_codes is None:
+        raw_codes = ["000001"] if dry_run else []
+    else:
+        raw_codes = candidate_codes
+    codes = sorted({str(code).strip().zfill(6) for code in raw_codes if str(code).strip()})
 
     print(f"[ShadowRunner] 启动全天候影子实盘压测... (dry_run={dry_run}, interval={interval_seconds}s)")
 
