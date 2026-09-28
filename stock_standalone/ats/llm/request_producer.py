@@ -19,6 +19,16 @@ from ats.llm.worker_protocol import encode_worker_request
 _MAX_SNAPSHOTS_PER_POLL = 8
 _MAX_PROMPT_BYTES = 45 * 1024
 _PROMPT_VERSION = "r9.market-regime.v1"
+_PROMPT_INSTRUCTION = (
+    "你是只读的新股情绪分析 Agent。只依据所附截止时点的已验证快照做辅助归纳；"
+    "不得引入截止时间之后的信息，不得给出交易指令，也不得修改规则、标签或模型。"
+    "必须输出 sentiment_score、stage_hint、catalysts、risk_warnings 四个字段；"
+    "stage_hint 只能是 NEUTRAL/PANIC/REPAIR/REVERSAL/FOMO/COOLDOWN。"
+    "每个 catalyst/risk_warnings 条目包含 summary 与 evidence_ids，引用 context.snapshot_hash。"
+    "若规则结论为 BLOCK 或宏观指标缺失，不得编造催化；score=50、stage_hint=NEUTRAL、"
+    "catalysts=[]，并在 risk_warnings 写明数据不足/门禁阻断及证据哈希。"
+    "输出必须严格符合给定 JSON Schema。"
+)
 
 
 class LiveSnapshotRequestProducer:
@@ -34,12 +44,14 @@ class LiveSnapshotRequestProducer:
         self._rejected = 0
         self._last_snapshot_id = ""
         self._last_reason = "等待准入检查"
+        self._last_rejection_reason = ""
 
     def poll(self, runtime_accepting: bool) -> Dict[str, Any]:
         status: Dict[str, Any] = {
             "state": "BLOCKED", "reason": "", "scanned": 0, "generated": self._generated,
             "skipped_stale": self._skipped_stale, "rejected": self._rejected,
-            "last_snapshot_id": self._last_snapshot_id, "requests": [],
+            "last_snapshot_id": self._last_snapshot_id,
+            "last_rejection_reason": self._last_rejection_reason, "requests": [],
         }
         try:
             config = self._load_config()
@@ -69,7 +81,7 @@ class LiveSnapshotRequestProducer:
                 status["scanned"] += 1
                 record = get_snapshot_record(self._root, snapshot_id)
                 if not isinstance(record, Mapping):
-                    self._reject()
+                    self._reject("快照记录不可读")
                     self._remember(snapshot_id)
                     continue
                 if (
@@ -88,8 +100,8 @@ class LiveSnapshotRequestProducer:
                         raise ValueError("快照标的与索引不一致")
                     request = self._request(record, snapshot, snapshot_hash, backend["model_id"])
                     encode_worker_request(request)
-                except Exception:
-                    self._reject()
+                except Exception as exc:
+                    self._reject(str(exc).strip()[:160] or type(exc).__name__)
                     self._remember(snapshot_id)
                     continue
                 requests.append(request)
@@ -104,8 +116,8 @@ class LiveSnapshotRequestProducer:
             reason = f"本轮构造 {len(requests)} 条；历史旧样本累计跳过 {self._skipped_stale} 条"
             return self._finish(status, state, reason)
         except Exception as exc:
-            self._reject()
             reason = str(exc).strip()[:160] or "校验异常"
+            self._reject(reason)
             return self._finish(status, "BLOCKED", f"准入阻断：{reason}；本轮未提交请求")
 
     def acknowledge(self, request_id: str, accepted: bool) -> int:
@@ -153,16 +165,16 @@ class LiveSnapshotRequestProducer:
         return True, ""
 
     def _load_backend(self) -> Dict[str, str]:
-        from ats.llm.backend_factory import build_backend_factory
-
         path = self._root / "config" / "llm_config.yaml"
-        build_backend_factory(path)
         import yaml
 
         with path.open("r", encoding="utf-8") as stream:
             document = yaml.safe_load(stream)
-        backend = document["backends"]["antigravity_sdk"]
-        model_id = backend["model_id"].strip()
+        backend_name = document["llm_settings"].get("active_backend")
+        backend = document["backends"].get(backend_name)
+        model_id = backend.get("model_id") if isinstance(backend, Mapping) else None
+        if not isinstance(model_id, str) or not model_id.strip():
+            raise ValueError("当前 Provider 缺少固定 model_id")
         return {"model_id": model_id}
 
     def _request(
@@ -180,34 +192,32 @@ class LiveSnapshotRequestProducer:
             "ticker": ticker,
             "cutoff": cutoff,
             "rule_decision": record.get("decision", ""),
-            "rule_proposal": record.get("standard_proposal", {}),
-            "gate_causal_chain": record.get("gate_causal_chain", []),
             "input_snapshot": snapshot,
         }
-        prompt = (
-            "你是只读的新股情绪分析 Agent。只依据下面截止时点的已验证快照做辅助归纳；"
-            "不得引入截止时间之后的信息，不得给出交易指令，也不得修改规则、标签或模型。"
-            "输出必须严格符合给定 JSON Schema。所有催化与风险条目都必须引用 evidence_ids 中的快照哈希。\n"
-            + json.dumps(context, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
-        )
-        if len(prompt.encode("utf-8")) > _MAX_PROMPT_BYTES:
-            raise ValueError("提示内容超过本地请求大小限制")
+        prompt = _PROMPT_INSTRUCTION
+        if len(prompt.encode("utf-8")) + len(json.dumps(
+            context, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False
+        ).encode("utf-8")) > _MAX_PROMPT_BYTES:
+            raise ValueError("上下文与提示超过本地请求大小限制")
         return {
             "request_id": request_id, "agent_type": "MARKET_REGIME",
             "scope_id": ticker, "ticker": ticker, "as_of_time": cutoff,
-            "prompt": prompt, "model_id": model_id, "prompt_version": _PROMPT_VERSION,
+            "prompt": prompt, "context": context, "model_id": model_id,
+            "prompt_version": _PROMPT_VERSION,
             "evidence_ids": [evidence_id],
             "schema_hash": payload_schema_hash("MARKET_REGIME"),
         }
 
-    def _reject(self) -> None:
+    def _reject(self, reason: str) -> None:
         self._rejected += 1
+        self._last_rejection_reason = reason[:160]
 
     def _finish(self, status: Dict[str, Any], state: str, reason: str) -> Dict[str, Any]:
         status.update({
             "state": state, "reason": reason[:200], "generated": self._generated,
             "skipped_stale": self._skipped_stale, "rejected": self._rejected,
             "last_snapshot_id": self._last_snapshot_id,
+            "last_rejection_reason": self._last_rejection_reason,
         })
         return status
 

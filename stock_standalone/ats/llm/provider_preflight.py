@@ -1,10 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Read-only readiness checks for IPO LLM providers.
-
-This module deliberately never constructs or starts a provider. Passing these
-checks is diagnostic evidence only; execution remains disabled until the full
-R9 Worker, schema, isolation, and acceptance gates are implemented.
-"""
+"""Read-only readiness checks for IPO LLM providers and their R9 gates."""
 
 from __future__ import annotations
 
@@ -13,8 +8,17 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping
 from urllib.parse import urlsplit
 
+from ats.llm.cli_paths import resolve_cli_path
+
 
 _DISTRIBUTIONS = ("google-antigravity", "litert-lm")
+_LOCAL_AUTHORIZATION_KEYS = {
+    "stage0_accepted", "provider_accepted", "process_tree_isolation_accepted",
+    "acceptance_id",
+}
+_REMOTE_AUTHORIZATION_KEYS = _LOCAL_AUTHORIZATION_KEYS | {
+    "tool_access_isolation_accepted", "remote_egress_isolation_accepted",
+}
 
 
 def _check(name: str, status: str, detail: str) -> Dict[str, str]:
@@ -41,7 +45,37 @@ def _is_loopback_url(value: Any) -> bool:
         return False
 
 
-def inspect_provider_preflight(config_path: Path) -> Dict[str, Any]:
+def _runtime_authorization_ready(
+    authorization: Any, approval_id: Any = None, *, remote_required: bool = False,
+) -> bool:
+    if not isinstance(authorization, Mapping):
+        return False
+    accepted_keys = set(authorization)
+    if remote_required:
+        if accepted_keys != _REMOTE_AUTHORIZATION_KEYS:
+            return False
+        required_flags = _REMOTE_AUTHORIZATION_KEYS - {"acceptance_id"}
+    else:
+        if frozenset(accepted_keys) not in {
+            frozenset(_LOCAL_AUTHORIZATION_KEYS), frozenset(_REMOTE_AUTHORIZATION_KEYS),
+        }:
+            return False
+        required_flags = _LOCAL_AUTHORIZATION_KEYS - {"acceptance_id"}
+    return bool(
+        all(authorization.get(key) is True for key in required_flags)
+        and isinstance(authorization.get("acceptance_id"), str)
+        and authorization.get("acceptance_id", "").strip()
+        and (approval_id is None or authorization.get("acceptance_id") == approval_id)
+    )
+
+
+def _cli_available(value: Any, name: str) -> bool:
+    return bool(resolve_cli_path(value, name))
+
+
+def inspect_provider_preflight(
+    config_path: Path, authorization: Mapping[str, Any] | None = None,
+) -> Dict[str, Any]:
     """Return bounded, non-secret provider diagnostics without enabling runtime."""
     checks: List[Dict[str, str]] = []
     result: Dict[str, Any] = {
@@ -179,27 +213,76 @@ def inspect_provider_preflight(config_path: Path) -> Dict[str, Any]:
         result["mode"] = str(backend.get("execution_mode") or "remote_api")[:80]
         result["locality"] = "远端处理边界"
         if allow_remote and approved:
-            checks.append(_check("远端审批", "具备配置", "审批 ID、固定目标与逐 Agent 字段 allowlist 均已填写；仍需验证 sanitizer"))
+            checks.append(_check("远端审批", "通过", "审批 ID、固定目标与逐 Agent 字段 allowlist 已配置"))
         else:
             checks.append(_check("远端审批", "阻断", "默认禁用；必须显式授权、固定目标并配置逐 Agent 字段 allowlist"))
-        if backend_name == "antigravity_cli" and backend.get("enabled") is not True:
-            checks.append(_check("agy CLI", "阻断", "默认禁用；须先通过 OS 强制工具隔离验收"))
-        checks.append(_check("OS 强制沙箱", "待验收", "尚无启动前生效的无工具/无 MCP/受限工作区策略证据"))
-        if backend_name == "codex_cli":
-            checks.append(_check("Codex CLI", "待验收", "本机 CLI 不代表本机推理；远端调用入口尚未接入"))
+        enabled = backend.get("enabled") is True
+        checks.append(_check(
+            "Provider 开关", "通过" if enabled else "阻断",
+            "配置显式启用" if enabled else "配置保持关闭",
+        ))
+        cli_setting = backend.get("cli_path" if backend_name == "antigravity_cli" else "bin_path")
+        cli_name = "agy" if backend_name == "antigravity_cli" else "codex"
+        cli_ok = _cli_available(cli_setting, cli_name)
+        checks.append(_check(
+            "agy CLI" if backend_name == "antigravity_cli" else "Codex CLI",
+            "通过" if cli_ok else "未就绪",
+            "可解析到 CLI 文件" if cli_ok else "找不到配置的 CLI 可执行文件",
+        ))
+        model_id = backend.get("model_id")
+        model_ok = isinstance(model_id, str) and bool(model_id.strip()) and len(model_id) <= 160
+        checks.append(_check("固定模型 ID", "通过" if model_ok else "未就绪", "已配置" if model_ok else "需固定模型 ID，避免模型漂移"))
+        scratch = backend.get("scratch_cwd")
+        scratch_path = Path(scratch).expanduser() if isinstance(scratch, str) and scratch.strip() else None
+        if scratch_path is not None and not scratch_path.is_absolute():
+            scratch_path = config_path.parent.parent / scratch_path
+        scratch_ok = scratch_path is not None and scratch_path.is_dir()
+        checks.append(_check(
+            "隔离工作目录", "通过" if scratch_ok else "未就绪",
+            "专用 scratch_cwd 已存在" if scratch_ok else "需配置并创建专用 scratch_cwd",
+        ))
+        checks.append(_check(
+            "进程树隔离", "通过" if isinstance(authorization, Mapping) and authorization.get("process_tree_isolation_accepted") is True else "待验收",
+            "已记录进程树隔离验收" if isinstance(authorization, Mapping) and authorization.get("process_tree_isolation_accepted") is True else "需 Windows Job Object/子进程回收验收",
+        ))
+        checks.append(_check(
+            "工具/MCP 隔离", "通过" if isinstance(authorization, Mapping) and authorization.get("tool_access_isolation_accepted") is True else "待验收",
+            "已记录工具与 MCP 隔离验收" if isinstance(authorization, Mapping) and authorization.get("tool_access_isolation_accepted") is True else "CLI 可能继承工具或 MCP；需验收工具面隔离",
+        ))
+        checks.append(_check(
+            "远端网络出口", "通过" if isinstance(authorization, Mapping) and authorization.get("remote_egress_isolation_accepted") is True else "待验收",
+            "已记录出口限制验收" if isinstance(authorization, Mapping) and authorization.get("remote_egress_isolation_accepted") is True else "固定 destination 是审计声明；仍需 OS/网络层出口限制",
+        ))
+        accepted = _runtime_authorization_ready(
+            authorization, approval.get("approval_id"), remote_required=True
+        )
+        provider_accepted = (
+            isinstance(authorization, Mapping)
+            and authorization.get("provider_accepted") is True
+        )
+        checks.append(_check(
+            "运行授权", "通过" if accepted else "阻断",
+            "Stage 0、Provider、进程树、工具与远端出口验收齐全" if accepted else "缺少完整且非默认的运行授权记录",
+        ))
         try:
-            from ats.llm.remote_sanitizer import build_remote_safe_request
-            sanitizer_available = callable(build_remote_safe_request)
+            from ats.llm.remote_sanitizer import validate_remote_policy
+            validate_remote_policy(approval)
+            sanitizer_available = True
         except Exception:
             sanitizer_available = False
         checks.append(_check(
-            "字段 sanitizer", "已实现" if sanitizer_available else "阻断",
-            "逐 Agent allowlist 投影已具备；尚未接入 Provider 请求路径，当前不允许远端调用"
-            if sanitizer_available else "逐 Agent allowlist sanitizer 不可用",
+            "远端字段策略", "通过" if sanitizer_available else "阻断",
+            "逐 Agent 字段 allowlist 已完整校验并在 Worker 内投影"
+            if sanitizer_available else "目标、字段路径或 allowlist 无效",
         ))
         checks.append(_check(
-            "远端 Provider 调用入口", "阻断",
-            "当前后端工厂只支持本机 LiteRT；远端后端和 Worker 调用路径尚未实现",
+            "CLI 输出契约", "通过" if provider_accepted else "待验收",
+            "需有 JSON Schema 输出、退出码与超时映射的 Provider 实机验收记录"
+            if not provider_accepted else "Provider 协议验收已记录",
+        ))
+        checks.append(_check(
+            "远端 Provider 调用入口", "通过",
+            "AGY/Codex 适配器接入隔离 Worker；是否执行仍由上列授权与 Fail-Closed 门禁控制",
         ))
     elif backend_name == "ollama_http":
         result["mode"] = "loopback HTTP"
@@ -218,16 +301,26 @@ def inspect_provider_preflight(config_path: Path) -> Dict[str, Any]:
     else:
         checks.append(_check("Provider", "阻断", "未知 Provider 必须失败关闭；禁止自动回退"))
 
+    isolation_ready = _runtime_authorization_ready(
+        authorization,
+        approval.get("approval_id") if backend_name in {"antigravity_cli", "codex_cli"} else None,
+        remote_required=backend_name in {"antigravity_cli", "codex_cli"},
+    )
     checks.append(_check(
-        "Worker/隔离执行器", "阻断",
-        "spawn Worker、LiteRT 桥接、专用控制线程、合并队列、心跳、30 秒熔断和状态发布已有代码；SDK/模型运行、进程树回收和部署验收仍未通过",
+        "Worker/隔离执行器", "通过" if isolation_ready else "待验收",
+        "Worker、心跳、硬截止与隔离验收记录齐全" if isolation_ready else "Worker 已接入；Provider 仍须等待独立验收与授权",
     ))
     statuses = {check["status"] for check in checks}
     if "阻断" in statuses or "无效" in statuses:
         result["state"] = "阻断"
-    elif "未就绪" in statuses:
+    elif statuses.intersection({"未就绪", "待验收", "未探测"}):
         result["state"] = "未就绪"
     else:
-        result["state"] = "候选待验收"
-    result["execution_allowed"] = False
+        result["state"] = "READY"
+    result["execution_allowed"] = (
+        result["state"] == "READY" and backend_name in {"antigravity_cli", "codex_cli"}
+        and _runtime_authorization_ready(
+            authorization, approval.get("approval_id"), remote_required=True
+        )
+    )
     return result

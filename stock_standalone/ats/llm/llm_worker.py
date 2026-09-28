@@ -7,6 +7,7 @@ import math
 import multiprocessing
 from multiprocessing.connection import wait as wait_connections
 import queue
+import re
 import threading
 import time
 from typing import Any, Callable, Dict, Mapping, Optional
@@ -80,14 +81,34 @@ def _worker_entry(
             request: Optional[Dict[str, Any]] = None
             try:
                 request = decode_worker_request(message)
-                response = backend.generate(
-                    request["prompt"], payload_schema(request["agent_type"]),
-                    timeout_seconds=request_timeout_seconds,
-                )
+                generate_request = getattr(backend, "generate_request", None)
+                if callable(generate_request):
+                    response = generate_request(
+                        request, payload_schema(request["agent_type"]),
+                        timeout_seconds=request_timeout_seconds,
+                    )
+                else:
+                    import json
+
+                    prompt = request["prompt"] + "\n\n已验证上下文(JSON)：\n" + json.dumps(
+                        request["context"], ensure_ascii=False, sort_keys=True,
+                        separators=(",", ":"), allow_nan=False,
+                    )
+                    response = backend.generate(
+                        prompt, payload_schema(request["agent_type"]),
+                        timeout_seconds=request_timeout_seconds,
+                    )
                 if not isinstance(response, Mapping) or response.get("status") != "OK":
+                    backend_error = (
+                        response.get("error_code") if isinstance(response, Mapping) else None
+                    )
+                    if not isinstance(backend_error, str) or not re.fullmatch(
+                        r"[A-Za-z0-9_.-]{1,80}", backend_error
+                    ):
+                        backend_error = "provider_unavailable"
                     packet = {
                         "request_id": request["request_id"], "status": "UNAVAILABLE",
-                        "envelope": None, "error_code": "provider_unavailable",
+                        "envelope": None, "error_code": backend_error,
                     }
                 else:
                     envelope = build_agent_envelope(
@@ -174,20 +195,29 @@ class LLMWorkerProcess:
     ) -> bool:
         """Start only after preflight and explicit provider/isolation acceptance both pass."""
         self._claim_control_thread()
-        required_authorizations = {
+        local_authorizations = {
             "stage0_accepted", "provider_accepted", "process_tree_isolation_accepted",
             "acceptance_id",
         }
+        remote_authorizations = local_authorizations | {
+            "tool_access_isolation_accepted", "remote_egress_isolation_accepted",
+        }
+        remote_provider = isinstance(provider_preflight, Mapping) and provider_preflight.get("backend") in {
+            "antigravity_cli", "codex_cli",
+        }
+        accepted_keysets = {frozenset(remote_authorizations)} if remote_provider else {
+            frozenset(local_authorizations), frozenset(remote_authorizations),
+        }
+        required_authorizations = remote_authorizations if remote_provider else local_authorizations
+        required_flags = set(required_authorizations) - {"acceptance_id"}
         if (
             self._state not in {"STOPPED", "DISABLED"}
             or not isinstance(provider_preflight, Mapping)
             or provider_preflight.get("execution_allowed") is not True
             or provider_preflight.get("state") != "READY"
             or not isinstance(authorization, Mapping)
-            or set(authorization) != required_authorizations
-            or any(authorization.get(key) is not True for key in (
-                "stage0_accepted", "provider_accepted", "process_tree_isolation_accepted",
-            ))
+            or frozenset(authorization) not in accepted_keysets
+            or any(authorization.get(key) is not True for key in required_flags)
             or not isinstance(authorization.get("acceptance_id"), str)
             or not authorization.get("acceptance_id", "").strip()
         ):

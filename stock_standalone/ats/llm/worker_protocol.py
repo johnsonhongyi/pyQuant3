@@ -19,7 +19,7 @@ MAX_IPC_MESSAGE_BYTES = 64 * 1024
 _HEX_64 = re.compile(r"^[0-9a-f]{64}$")
 _REQUEST_FIELDS = {
     "request_id", "agent_type", "scope_id", "ticker", "as_of_time",
-    "prompt", "model_id", "prompt_version", "evidence_ids", "schema_hash",
+    "prompt", "context", "model_id", "prompt_version", "evidence_ids", "schema_hash",
 }
 _RESPONSE_FIELDS = {"request_id", "status", "envelope", "error_code"}
 
@@ -83,6 +83,17 @@ def encode_worker_request(request: Any) -> str:
         raise WorkerProtocolError("ticker-scoped request identity is invalid")
     _aware_time(clean["as_of_time"], "as_of_time")
     clean["prompt"] = _text(clean["prompt"], "prompt", 48 * 1024)
+    if not isinstance(clean["context"], Mapping):
+        raise WorkerProtocolError("worker context must be a mapping")
+    try:
+        context_bytes = json.dumps(
+            clean["context"], ensure_ascii=False, sort_keys=True,
+            separators=(",", ":"), allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError, OverflowError, RecursionError, UnicodeError) as exc:
+        raise WorkerProtocolError("worker context must contain strict JSON values") from exc
+    if len(context_bytes) > 48 * 1024:
+        raise WorkerProtocolError("worker context exceeds 48 KiB")
     clean["model_id"] = _text(clean["model_id"], "model_id", 160)
     clean["prompt_version"] = _text(clean["prompt_version"], "prompt_version", 128)
     evidence_ids = clean["evidence_ids"]

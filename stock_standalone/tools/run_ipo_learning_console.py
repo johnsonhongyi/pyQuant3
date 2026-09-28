@@ -12,6 +12,7 @@ tools/run_ipo_learning_console.py
 import sys
 import os
 import multiprocessing
+import argparse
 
 if __name__ == "__main__":
     multiprocessing.freeze_support()
@@ -39,7 +40,7 @@ from ats.ui.ipo_arbitration_detail_dialog import IPOArbitrationDetailDialog
 class StandaloneLearningWindow(QMainWindow):
     """独立承载 IPOLearningConsole 的主窗口 (支持动态自适应与滚动保护)"""
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, project_root=None, simulation_read_only=False):
         super().__init__(parent)
         self.setWindowTitle("🤖 IPO 新股情绪感知与自学习监控控制台 [独立自适应模式]")
         self.setMinimumSize(780, 500)
@@ -109,7 +110,13 @@ class StandaloneLearningWindow(QMainWindow):
         """)
 
         # 核心控制台
-        self.console = IPOLearningConsole(parent=scroll_area)
+        self.console = IPOLearningConsole(
+            parent=scroll_area, project_root=project_root,
+            simulation_read_only=simulation_read_only,
+        )
+        if simulation_read_only:
+            self.btn_open_dialog.setEnabled(False)
+            self.setWindowTitle("IPO 自学习仿真监控 [只读·无交易授权]")
         scroll_area.setWidget(self.console)
 
         main_layout.addWidget(scroll_area, 1)
@@ -136,10 +143,17 @@ class StandaloneLearningWindow(QMainWindow):
 
 
 def main():
+    parser = argparse.ArgumentParser(description="启动 IPO 自学习监控控制台")
+    parser.add_argument("--project-root", help="指定运行数据根目录")
+    parser.add_argument("--simulation-read-only", action="store_true", help="只读展示仿真结果，不采集、不启 Worker")
+    args = parser.parse_args()
     app = QApplication.instance() or QApplication([sys.argv[0]])
     app.setApplicationName("IPOLearningConsoleStandalone")
 
-    window = StandaloneLearningWindow()
+    window = StandaloneLearningWindow(
+        project_root=args.project_root,
+        simulation_read_only=args.simulation_read_only,
+    )
     window.show()
 
     sys.exit(app.exec())

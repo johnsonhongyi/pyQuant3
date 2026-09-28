@@ -188,6 +188,7 @@ def _validate_snapshot(snapshot: Any, cutoff: datetime, config_snapshot: Any) ->
             "status": feature["status"],
             "source_id": feature["source_id"],
             "source_version": feature["source_version"],
+            "source_timezone": timezone_name,
             contract.value_key: feature["value"],
             contract.as_of_key: feature["as_of_time"],
             contract.available_at_key: feature["available_at"],
@@ -409,9 +410,14 @@ def _verify_manual_review_audit(
 ) -> None:
     if not candidates:
         return
-    path = Path(review_db_path) if review_db_path is not None else (
-        Path(__file__).resolve().parents[2] / "logs" / "ipo_learning_reviews.sqlite"
+    path = (
+        Path("logs") / "ipo_learning_reviews.sqlite"
+        if review_db_path is None else Path(review_db_path).expanduser()
     )
+    if not path.is_absolute():
+        from sys_utils import get_app_root
+
+        path = Path(get_app_root()) / path
     if not path.is_file():
         raise OfflineLearningError("authoritative human review database is unavailable")
     required_columns = {

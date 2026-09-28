@@ -86,7 +86,8 @@ def build_matured_outcome(
             "required_sessions": 3,
             "reason": "交易日历未就绪或D1-D3交易日日线证据不完整",
         }
-    earliest_bar_sessions = sorted(by_date)[:3]
+    # The daily history includes the listing session (D0); maturity starts at D1.
+    earliest_bar_sessions = sorted(day for day in by_date if day > listing_day)[:3]
     if earliest_bar_sessions != expected_sessions[:3]:
         return {
             "status": "PENDING_D3", "ticker": ticker, "listing_date": listing_day.isoformat(),
