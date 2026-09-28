@@ -14,6 +14,7 @@ from stock_logic_utils import test_code_against_queries
 import threading
 import time
 import json
+import hashlib
 import socket
 from datetime import datetime, timedelta
 from sys_utils import get_app_root
@@ -102,6 +103,37 @@ def get_app_root():
             return os.path.dirname(os.path.abspath(sys.argv[0]))
 
 CONFIG_FILE = os.path.join(get_app_root(), "popularity_resonance_config.json")
+_PERSISTENCE_MIN_INTERVAL_SECONDS = 300.0
+
+
+def _snapshot_signature(payload) -> str:
+    encoded = json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, default=str,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _snapshot_persistence_due(signature, previous_signature, last_write, now, force=False):
+    if signature == previous_signature:
+        return False
+    return bool(
+        force or last_write <= 0
+        or now - last_write >= _PERSISTENCE_MIN_INTERVAL_SECONDS
+    )
+
+
+def _snapshot_write_window_open(last_write, now, force=False):
+    """Avoid serializing a full snapshot until a write can be considered."""
+    return bool(
+        force or last_write <= 0
+        or now - last_write >= _PERSISTENCE_MIN_INTERVAL_SECONDS
+    )
+
+
+def _atomic_temp_path(target_path):
+    """Give concurrent GUI instances distinct temporary files on Windows."""
+    return f"{target_path}.tmp.{os.getpid()}.{threading.get_ident()}"
 
 
 class _DynamicIPCSyncProxy:
@@ -143,7 +175,15 @@ class PRServiceGUI:
         self.resonance_codes = []  # 缓存当前的共振股票代码
         self.selected_concept = None  # 用于保存当前选中的概念过滤条件
         self._block_cache = {}        # 行业板块特征缓存
+        self._persistence_lock = threading.Lock()
+        self._persistence_state = {"cache": {}, "daily": {}}
         self._last_test_df_hits = None  # 缓存的用于 Hit 测试的 DataFrame
+        self._ipc_baseline_ready = threading.Event()
+        self._tdx_api_data_ready = threading.Event()
+        self._tdx_query_sync_started = False
+        self._tdx_query_sync_attempts = 0
+        self._pending_query_filter = False
+        self._pending_hit_calculation = False
         self.current_date = time.strftime("%Y-%m-%d")
         self._last_realtime_today = self.current_date
         
@@ -222,7 +262,17 @@ class PRServiceGUI:
             if df is not None and not df.empty:
                 service_logger.info(f"[IPC 启动同步] 已获取常驻订阅行情基线 ({len(df)} 行)")
 
-        threading.Thread(target=_start_initial_ipc_sync, daemon=True).start()
+        def _launch_initial_ipc_sync():
+            if not self._shutdown_event.is_set():
+                threading.Thread(
+                    target=_start_initial_ipc_sync,
+                    daemon=True,
+                    name="PR_InitialIPCSync",
+                ).start()
+
+        # 等待 Tk mainloop 启动后再接收 IPC；否则后台回调里的 root.after
+        # 可能发生在事件循环尚未运行时，导致全量基线收到但表格未刷新。
+        self.root.after(100, _launch_initial_ipc_sync)
         
         # 启动交易时间内后台轻量级 IPC 动态行情定时轮询更新器
         self._start_ipc_polling_loop()
@@ -232,13 +282,6 @@ class PRServiceGUI:
 
         # 尝试加载缓存数据并恢复表格
         self.load_cached_data()
-
-        # 🚀 启动后立即异步触发一次 TDX API 盘口秒级刷新，第一时间呈现最新价格与涨跌
-        if hasattr(self, 'root'):
-            def _start_initial_tdx_refresh():
-                if not self._shutdown_event.is_set() and cct.get_work_time():
-                    threading.Thread(target=self.refresh_realtime_from_tdx, daemon=True).start()
-            self.root.after(300, _start_initial_tdx_refresh)
 
         # 监听窗口关闭事件，确保最终配置得到持久化保存
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -283,12 +326,116 @@ class PRServiceGUI:
         parts.append(q)
         return "  |  ".join(parts)
 
+    def _query_data_ready(self):
+        return self._ipc_baseline_ready.is_set() and self._tdx_api_data_ready.is_set()
+
+    def _mark_ipc_baseline_received(self, df):
+        if df is None or df.empty:
+            return
+        self._last_test_df_hits = None
+        if self._ipc_baseline_ready.is_set():
+            return
+        self._ipc_baseline_ready.set()
+        try:
+            self.root.after(0, self._on_ipc_baseline_received)
+        except Exception as e:
+            service_logger.warning(f"IPC基线就绪回调排队失败: {e}")
+
+    def _on_ipc_baseline_received(self):
+        service_logger.info("[查询就绪] 已收到 IPC 全量行情基线，开始等待 TDX API 行情")
+        self._start_query_tdx_sync()
+        self._flush_pending_queries()
+
+    def _mark_tdx_api_data_received(self, quote_count, requested_count):
+        if quote_count <= 0:
+            return
+        self._last_test_df_hits = None
+        if self._tdx_api_data_ready.is_set():
+            return
+        self._tdx_api_data_ready.set()
+        service_logger.info(
+            f"[查询就绪] TDX API 行情接收完成 ({quote_count}/{requested_count} 只)，允许执行过滤与命中统计"
+        )
+        try:
+            self.root.after(0, self._on_query_data_ready)
+        except Exception as e:
+            service_logger.warning(f"TDX行情就绪回调排队失败: {e}")
+
+    def _start_query_tdx_sync(self):
+        if (not self._ipc_baseline_ready.is_set() or self._tdx_api_data_ready.is_set()
+                or self._tdx_query_sync_started or self._shutdown_event.is_set()):
+            return
+        codes = self.get_all_displayed_codes()
+        if not codes:
+            codes = [str(c).strip().zfill(6) for c in getattr(self, 'resonance_codes', []) if str(c).strip()]
+        if not codes:
+            return
+        self._tdx_query_sync_started = True
+        self._tdx_query_sync_attempts += 1
+        threading.Thread(
+            target=self._query_tdx_sync_worker,
+            args=(codes,),
+            daemon=True,
+            name="PR_QueryTDXSync",
+        ).start()
+
+    def _query_tdx_sync_worker(self, codes):
+        try:
+            self.refresh_realtime_from_tdx(force=True, codes=codes)
+        except Exception as e:
+            service_logger.warning(f"TDX查询工作线程异常: {e}")
+        finally:
+            try:
+                self.root.after(0, self._finish_query_tdx_sync)
+            except Exception as e:
+                # Tk 已关闭时无法排队重试；清除标志避免对象留下永久假忙状态。
+                self._tdx_query_sync_started = False
+                service_logger.warning(f"TDX查询完成回调排队失败: {e}")
+
+    def _finish_query_tdx_sync(self):
+        self._tdx_query_sync_started = False
+        if self._tdx_api_data_ready.is_set():
+            self._tdx_query_sync_attempts = 0
+            self._flush_pending_queries()
+            return
+        if self._tdx_query_sync_attempts < 3 and not self._shutdown_event.is_set():
+            service_logger.warning("[查询就绪] TDX API 尚未返回有效行情，2秒后重试")
+            self.root.after(2000, self._start_query_tdx_sync)
+        elif self._pending_query_filter or self._pending_hit_calculation:
+            self.lbl_status.config(text="等待 TDX API 行情返回，查询暂未执行", fg="darkorange")
+
+    def _on_query_data_ready(self):
+        self._flush_pending_queries()
+
+    def _flush_pending_queries(self):
+        if not self._query_data_ready():
+            return
+        if self._pending_query_filter:
+            self._pending_query_filter = False
+            # 过滤重绘末尾会自动更新命中数，因此合并已排队的 Hit 请求。
+            self._pending_hit_calculation = False
+            cached = getattr(self, "_last_data_cache", None)
+            if cached:
+                self.update_all_tables(
+                    cached["em_data"], cached["ths_data"], cached["lh_data"],
+                    cached["tgb_data"], cached["resonance_results"], cached["quotes"]
+                )
+            elif not self._is_crawling:
+                self.run_once_async()
+            return
+        if self._pending_hit_calculation:
+            self._pending_hit_calculation = False
+            self.calculate_history_hits_ui()
+
     def get_test_df_for_hits(self):
+        import pandas as pd
+        if not self._query_data_ready():
+            return pd.DataFrame()
+
         # 优先复用刚刚在 update_all_tables 里或者其它地方已经构建好的 test_df 缓存
         if hasattr(self, '_last_test_df_hits') and self._last_test_df_hits is not None and not self._last_test_df_hits.empty:
             return self._last_test_df_hits
-            
-        import pandas as pd
+
         # 1. 收集当前五个 Treeview 表格中所有的人气榜股票代码
         all_codes = set()
         for tree in (self.tree_em, self.tree_ths, self.tree_lh, self.tree_tgb, self.tree_res):
@@ -306,21 +453,11 @@ class PRServiceGUI:
                 if valid_codes:
                     test_df = full_df.loc[valid_codes].copy()
                      
-        # 3. Fallback 退避机制
-        if test_df.empty and all_codes:
-            test_df = pd.DataFrame(index=list(all_codes))
-            test_df['name'] = ""
-            test_df['percent'] = 0.0
-            test_df['trade'] = 0.0
-            test_df['dff2'] = 0.0
-            test_df['dff3'] = 0.0
-            test_df['Rank'] = 0
-            test_df['category'] = ""
-            for code_str in test_df.index:
-                block_str = self._block_cache.get(code_str, '--')
-                test_df.at[code_str, 'category'] = block_str
-                
-        # 4. 兼容异动字段别名
+        # 全量 IPC 基线未覆盖当前榜单代码时不构造零值假数据，避免生成无效命中。
+        if test_df.empty:
+            return test_df
+
+        # 3. 兼容异动字段别名
         if not test_df.empty:
             mapping = {
                 '价格': 'close', '最新价': 'close', '现价': 'close', 
@@ -333,17 +470,18 @@ class PRServiceGUI:
             for cn, en in mapping.items():
                 if cn in test_df.columns and en not in test_df.columns:
                     test_df[en] = test_df[cn]
-            # OHLC 字段兜底
-            if 'close' in test_df.columns:
-                for col in ['open', 'high', 'low']:
-                    if col not in test_df.columns:
-                        test_df[col] = test_df['close']
                         
         self._last_test_df_hits = test_df
         return test_df
 
     def calculate_history_hits_ui(self):
         """计算当前历史记录的命中数并更新下拉列表"""
+        if not self._query_data_ready():
+            self._pending_hit_calculation = True
+            self.lbl_status.config(text="等待 IPC 全量行情与 TDX API 行情后计算命中…", fg="darkorange")
+            self._start_query_tdx_sync()
+            return
+
         if not hasattr(self, 'query_manager'):
             from stock_logic_utils import toast_message
             toast_message(self.root, "⚠️ 历史管理器未初始化")
@@ -507,6 +645,14 @@ class PRServiceGUI:
     def apply_filter(self, event=None):
         query = self._get_real_query()
         self.query_expr = query
+
+        if query and not self._query_data_ready():
+            self._pending_query_filter = True
+            self.lbl_status.config(text="等待 IPC 全量行情与 TDX API 行情后执行过滤…", fg="darkorange")
+            if not getattr(self, "_last_data_cache", None) and not self._is_crawling:
+                self.run_once_async()
+            self._start_query_tdx_sync()
+            return
         
         # [只读模式] 仅作为即时过滤条件应用，不修改/追加历史记录，不触发写盘
                     
@@ -526,6 +672,7 @@ class PRServiceGUI:
     def clear_filter(self):
         self.query_var.set("")
         self.query_expr = ""
+        self._pending_query_filter = False
         if hasattr(self, '_last_data_cache') and self._last_data_cache:
             c = self._last_data_cache
             self.update_all_tables(
@@ -563,6 +710,11 @@ class PRServiceGUI:
             self.apply_filter()
 
     def on_test_code(self, query=None, onclick=False):
+        if not self._query_data_ready():
+            self._pending_hit_calculation = True
+            self._start_query_tdx_sync()
+            return []
+
         df_cache = self.get_test_df_for_hits()
         if df_cache.empty:
             return []
@@ -633,31 +785,35 @@ class PRServiceGUI:
                         codes.append(c)
         return codes
 
-    def refresh_realtime_from_tdx(self, force: bool = False):
+    def refresh_realtime_from_tdx(self, force: bool = False, codes=None):
         """
         [⚡ TDX API 直连] 毫秒级批量拉取当前五大榜单全部个股的实时盘口，
         直接更新价格、涨跌幅、分段涨速、VWAP 偏离与涨跌红绿 tag，并驱动概念热度重算。
         """
         today = time.strftime("%Y-%m-%d")
         current_view_date = getattr(self, "current_date", today)
-        if current_view_date != today:
-            return
+        if current_view_date != today or not self._ipc_baseline_ready.is_set():
+            return False
 
-        codes = self.get_all_displayed_codes()
+        codes = list(codes) if codes is not None else self.get_all_displayed_codes()
         if not codes:
             codes = [str(c).strip().zfill(6) for c in getattr(self, 'resonance_codes', []) if str(c).strip()]
         if not codes:
-            return
+            return False
 
         try:
             from ats.tdx_realtime_fetcher import TDXRealtimeFetcher
             tdx_fetcher = TDXRealtimeFetcher.get_instance()
             quotes = tdx_fetcher.get_security_quotes_safe(codes, force=force)
             if not quotes:
-                return
+                return False
 
             tdx_quotes = {str(q.get("code", "")).strip().zfill(6): q for q in quotes if q.get("code")}
+            if not tdx_quotes:
+                return False
             tdx_df = tdx_fetcher.convert_quotes_to_df(quotes)
+            if tdx_df is None or tdx_df.empty:
+                return False
 
             # 更新合并到内存 current_df 快照
             with self.df_lock:
@@ -672,11 +828,15 @@ class PRServiceGUI:
                         else:
                             self.current_df.loc[c_idx] = tdx_df.loc[c_idx]
 
+            self._last_test_df_hits = None
+            self._mark_tdx_api_data_received(len(tdx_quotes), len(codes))
             cur_df = self.get_current_df()
             if hasattr(self, 'root') and self.root:
                 self.root.after(0, lambda: self.refresh_realtime_fields(df=cur_df, tdx_quotes=tdx_quotes))
+            return True
         except Exception as e:
             service_logger.debug(f"TDX API 实时刷新异常: {e}")
+            return False
 
     def _get_global_ats_interval(self) -> float:
         """获取全局统一的 TDX 刷新间隔基准 (SSOT: cct.ats_tdx_interval)"""
@@ -1195,6 +1355,7 @@ class PRServiceGUI:
             while not self._shutdown_event.is_set() and time.time() - start_t < timeout:
                 current_df = manager.get_current_df()
                 if current_df is not None and not current_df.empty:
+                    self._mark_ipc_baseline_received(current_df)
                     return current_df
                 time.sleep(0.1)
             service_logger.debug(f"[IPC 订阅] 等待行情基线超时 ({timeout:.1f}s, Port={manager.port})")
@@ -1210,10 +1371,11 @@ class PRServiceGUI:
             return
         with self.df_lock:
             self.current_df = df
+        self._mark_ipc_baseline_received(df)
         try:
             self.on_realtime_data_updated(df)
         except Exception as e:
-            service_logger.debug(f"实时数据更新回调异常: {e}")
+            service_logger.warning(f"实时数据更新回调异常: {e}")
 
     def on_realtime_data_updated(self, df):
         """当主程序通过 Socket 推送最新的 DataFrame 时的回调"""
@@ -3146,6 +3308,7 @@ class PRServiceGUI:
             # 4. 当更新有数据后，执行持久化缓存 (非全空)
             if em_data or ths_data or tgb_data or lh_data:
                 cache_file = os.path.join(get_app_root(), "popularity_resonance_cache.json")
+                temp_file = _atomic_temp_path(cache_file)
                 try:
                     cache_data = {
                         "em_data": em_data,
@@ -3154,12 +3317,33 @@ class PRServiceGUI:
                         "lh_data": lh_data,
                         "resonance_results": resonance_results[:limit],
                         "quotes": all_quotes,
-                        "timestamp": time.time(),
                         "block_cache": getattr(self, "_block_cache", {})
                     }
-                    with open(cache_file, "w", encoding="utf-8") as f:
-                        json.dump(cache_data, f, indent=4, ensure_ascii=False)
+                    now_mono = time.monotonic()
+                    with self._persistence_lock:
+                        state = self._persistence_state.setdefault("cache", {})
+                        last_write = state.get("written_at", 0.0)
+                        force_write = force_save or last_write <= 0
+                        if _snapshot_write_window_open(
+                            last_write, now_mono, force=force_write,
+                        ):
+                            signature = _snapshot_signature(cache_data)
+                            due = _snapshot_persistence_due(
+                                signature, state.get("signature"), last_write,
+                                now_mono, force=force_write,
+                            )
+                            if due:
+                                cache_data["timestamp"] = time.time()
+                                with open(temp_file, "w", encoding="utf-8") as f:
+                                    json.dump(cache_data, f, indent=4, ensure_ascii=False)
+                                os.replace(temp_file, cache_file)
+                                state.update(signature=signature, written_at=now_mono)
                 except Exception as cache_err:
+                    try:
+                        if os.path.exists(temp_file):
+                            os.remove(temp_file)
+                    except OSError:
+                        pass
                     service_logger.error(f"写入数据缓存失败: {cache_err}")
             
             # 每日数据持久化更新当日数据 (在 save_daily_resonance_csv 内部自适应校验交易日)
@@ -3217,7 +3401,13 @@ class PRServiceGUI:
 
         # 批量计算公式过滤匹配结果，彻底根治循环逐行 pd.eval 导致的几秒卡顿
         matched_codes = set()
-        has_query = bool(getattr(self, 'query_expr', None))
+        query_requested = bool(getattr(self, 'query_expr', None))
+        has_query = query_requested and self._query_data_ready()
+        if query_requested and not has_query:
+            self._pending_query_filter = True
+        elif has_query:
+            self._pending_query_filter = False
+
         if has_query:
             # 收集所有涉及到的股票代码
             all_involved_codes = set()
@@ -3243,60 +3433,30 @@ class PRServiceGUI:
                 else:
                     missing_codes = involved_list
                     
-                # 2. 对缺失的股票，构建基础属性的 fallback DataFrame
                 if missing_codes:
-                    fallback_rows = []
-                    for c in missing_codes:
-                        code_str = str(c).strip().zfill(6)
-                        quote = quotes.get(c, {"name": "--", "percent": 0.0})
-                        fallback_rows.append({
-                            "code": code_str,
-                            "name": quote.get("name", "--"),
-                            "percent": quote.get("percent", 0.0),
-                            "ratio": quote.get("percent", 0.0),
-                            "price": quote.get("price", 0.0),
-                            "close": quote.get("price", 0.0),
-                            "trade": quote.get("price", 0.0),
-                            "dff2": 0.0,
-                            "dff3": 0.0,
-                            "rank": 0,
-                            "category": self._block_cache.get(code_str, "--"),
-                            "hy": self._block_cache.get(code_str, "--"),
-                        })
-                    df_fallback = pd.DataFrame(fallback_rows)
-                    df_fallback.set_index("code", drop=False, inplace=True)
-                    df_parts.append(df_fallback)
-                    
-                # 3. 合并成完整的待测大宽表
+                    service_logger.warning(
+                        f"[过滤] IPC全量基线未覆盖 {len(missing_codes)} 只榜单股票，跳过缺少基线的代码"
+                    )
+
+                # 2. 仅使用 IPC 全量基线中的真实行，避免用零值占位数据制造假命中
                 df_to_test = pd.concat(df_parts) if df_parts else pd.DataFrame()
                 
                 if not df_to_test.empty:
-                    # 4. 自动补全可能缺失的指标列，防止 eval 抛 NameError 警告
-                    try:
-                         from query_engine_util import extract_columns
-                         expr_cols = extract_columns(self.query_expr)
-                         for col in expr_cols:
-                             if col not in df_to_test.columns:
-                                 if col in ('category', 'hy', 'blockname', 'name', 'block', 'details'):
-                                     df_to_test[col] = ""
-                                 else:
-                                     df_to_test[col] = 0.0
-                    except Exception:
-                         pass
-                    
-                    # 5. 调用 query_engine.execute 一次性批量运行公式
+                    # 3. 调用 query_engine.execute 一次性批量运行公式
                     try:
                         from query_engine_util import query_engine
                         res = query_engine.execute(df_to_test, self.query_expr)
-                        
-                        # 6. 收集匹配成功的代码集合
-                        if isinstance(res, pd.DataFrame):
+                        if getattr(query_engine, "last_error", ""):
+                            service_logger.warning(
+                                f"[过滤] 查询未应用，表达式或所需字段无效: {query_engine.last_error}"
+                            )
+                            self.lbl_status.config(text="过滤公式缺少有效数据字段，未应用", fg="red")
+                        elif isinstance(res, pd.DataFrame):
                             matched_codes = set(res.index.astype(str))
                         elif isinstance(res, (pd.Series, np.ndarray, list)):
                             matched_codes = set(str(x) for x in res)
-                        elif isinstance(res, (bool, np.bool_)):
-                            if res:
-                                matched_codes = set(df_to_test.index.astype(str))
+                        elif isinstance(res, (bool, np.bool_)) and res:
+                            matched_codes = set(df_to_test.index.astype(str))
                     except Exception as e:
                         service_logger.error(f"批量过滤公式执行失败: {e}")
 
@@ -3727,6 +3887,9 @@ class PRServiceGUI:
         self.update_concept_ranking(all_stocks_for_stats)
 
         self.lbl_status.config(text="更新完成", fg="blue")
+
+        # 榜单行已创建；若 IPC 基线先到而此时还没有代码可拉取，现补发 TDX 同步。
+        self._start_query_tdx_sync()
 
         # 8. 自动更新当前下拉框中历史公式的策略命中统计数
         try:
@@ -4202,18 +4365,27 @@ class PRServiceGUI:
     def save_daily_resonance_csv(self, em_data, ths_data, lh_data, tgb_data, resonance_results, all_quotes, force_save=False):
         # 1. 交易日及盘后判定限制
         try:
-            if not force_save and not cct.get_trade_date_status():
-                service_logger.info("今日非交易日，无需持久化盘后数据。")
+            if not cct.get_trade_date_status():
+                service_logger.info("今日非交易日，即使强制刷新也不写入交易日历史文件。")
                 return
         except Exception as otc_err:
             service_logger.debug(f"交易日判定服务异常: {otc_err}")
+            return
+
+        today = time.strftime("%Y-%m-%d")
+        preflight_now = time.monotonic()
+        with self._persistence_lock:
+            daily_state = self._persistence_state.setdefault("daily", {}).setdefault(today, {})
+            if not _snapshot_write_window_open(
+                daily_state.get("written_at", 0.0), preflight_now, force=force_save,
+            ):
+                return
             
         try:
             import pandas as pd
             csv_dir = os.path.join(get_app_root(), "datacsv")
             os.makedirs(csv_dir, exist_ok=True)
             
-            today = time.strftime("%Y-%m-%d")
             # 自动保存为压缩过的 .csv.gz 格式
             csv_path = os.path.join(csv_dir, f"popularity_resonance_{today}.csv.gz")
             
@@ -4316,14 +4488,43 @@ class PRServiceGUI:
                 
             if rows:
                 df = pd.DataFrame(rows)
-                # 使用 gzip 压缩格式进行持久化
-                df.to_csv(csv_path, index=False, encoding="utf-8", compression="gzip")
-                service_logger.info(f"每日人气共振数据已安全持久化（GZ压缩）: {csv_path}")
-                # 如果是盘后，则标记今日盘后最终数据已成功持久化
-                if time.strftime("%H:%M") >= "15:15":
+                signature = _snapshot_signature(rows)
+                temp_path = _atomic_temp_path(csv_path)
+                now_mono = time.monotonic()
+                wrote_file = False
+                try:
+                    with self._persistence_lock:
+                        daily_state = self._persistence_state.setdefault("daily", {}).setdefault(today, {})
+                        last_write = daily_state.get("written_at", 0.0)
+                        force_write = force_save or last_write <= 0
+                        write_window_open = _snapshot_write_window_open(
+                            last_write, now_mono, force=force_write,
+                        )
+                        due = write_window_open and _snapshot_persistence_due(
+                            signature, daily_state.get("signature"), last_write,
+                            now_mono, force=force_write,
+                        )
+                        if due:
+                            # 同日自动刷新最多每 5 分钟覆盖一次；手动/收盘最终刷新可立即落盘。
+                            df.to_csv(temp_path, index=False, encoding="utf-8", compression="gzip")
+                            os.replace(temp_path, csv_path)
+                            daily_state.update(signature=signature, written_at=now_mono)
+                            wrote_file = True
+                finally:
+                    if os.path.exists(temp_path):
+                        try:
+                            os.remove(temp_path)
+                        except OSError:
+                            pass
+
+                if wrote_file:
+                    service_logger.info(f"每日人气共振数据已安全持久化（GZ压缩）: {csv_path}")
+                    self.root.after(0, self._refresh_calendar_highlights)
+                elif os.path.exists(csv_path):
+                    service_logger.debug("每日人气共振数据未变化或处于写盘冷却期，跳过覆盖。")
+                # 数据已存在且处于收盘后，跳过相同快照也算完成最终保存。
+                if os.path.exists(csv_path) and time.strftime("%H:%M") >= "15:15":
                     self._final_post_market_saved_date = today
-                # 写入成功后刷新一下日历高亮
-                self.root.after(0, self._refresh_calendar_highlights)
         except Exception as e:
             service_logger.error(f"每日数据持久化 CSV.GZ 失败: {e}")
 
