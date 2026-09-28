@@ -3007,6 +3007,30 @@ class TDXRealtimeFetcher:
                         # 处理该批次中个别未返回行情的标的（自动记录并适度冷却）
                         missing_in_chunk = [c_c for _, c_c in req_params if c_c not in returned_codes]
                         for c_m in missing_in_chunk:
+                            # 混合批次可能只漏回个别代码；单票重试一次，避免把批次漏项直接当成无行情。
+                            retry_succeeded = False
+                            try:
+                                retry_quotes = self.api.get_security_quotes([(get_market_code(c_m), c_m)]) or []
+                                for retry_quote in retry_quotes:
+                                    retry_quote = normalize_quote_unit(retry_quote)
+                                    retry_code = str(retry_quote.get("code", "")).strip().zfill(6)
+                                    if retry_code != c_m:
+                                        continue
+                                    self._off_hours_cached_quotes[retry_code] = retry_quote
+                                    self._no_quote_counts[retry_code] = 0
+                                    self._unlisted_or_dormant_codes.discard(retry_code)
+                                    if not is_trading:
+                                        self._off_hours_success_counts[retry_code] += 1
+                                        if self._off_hours_success_counts[retry_code] >= 3:
+                                            self._off_hours_settled_codes.add(retry_code)
+                                    retry_quote.update(self.record_and_evaluate_bidding_surge(retry_quote))
+                                    all_fetched_quotes.append(retry_quote)
+                                    retry_succeeded = True
+                                    break
+                            except Exception as retry_error:
+                                logger.debug("TDX 单票补拉失败 code=%s: %s", c_m, retry_error)
+                            if retry_succeeded:
+                                continue
                             self._no_quote_counts[c_m] = self._no_quote_counts.get(c_m, 0) + 1
                             self._no_quote_last_attempt[c_m] = now_t
                             if self._no_quote_counts[c_m] >= (4 if is_trading else 2):

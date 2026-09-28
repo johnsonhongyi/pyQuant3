@@ -1724,6 +1724,10 @@ def _collect_snapshot(root: Path) -> Dict[str, Any]:
         "reader_process_id": _nonnegative_count(gate_sync_raw.get("reader_process_id")),
         "stored_observation_count": _nonnegative_count(gate_sync_raw.get("stored_observation_count")),
         "typed_gate_contexts_ready": gate_sync_raw.get("typed_gate_contexts_ready") is True,
+        "latest_context_readiness": (
+            gate_sync_raw.get("latest_context_readiness")
+            if isinstance(gate_sync_raw.get("latest_context_readiness"), dict) else {}
+        ),
         "runtime_authorized": gate_sync_raw.get("runtime_authorized") is True,
         "refresh_error": _safe_text(gate_sync_raw.get("refresh_error"), 80),
         "transport": _safe_text(gate_sync_raw.get("transport"), 40),
@@ -2757,13 +2761,25 @@ class IPOLearningConsole(QWidget):
         )
         sync_age = gate_sync.get("heartbeat_age_seconds")
         sync_age_text = f"心跳 {sync_age:.1f}s" if isinstance(sync_age, (int, float)) else "无新鲜心跳"
+        context_readiness = gate_sync.get("latest_context_readiness", {})
+        context_readiness = context_readiness if isinstance(context_readiness, dict) else {}
         self.lbl_monitor_updated_at.setToolTip(
             "ATS只读桥接：{transport} · {age} · 观测 {count} 条 · 最近刷新 {updated} · "
+            "PreHeat {preheat} · Live Heat {live_heat} · 锚点 {anchors} · VWAP快照 {vwap} · "
+            "未就绪字段 {unready}/{missing} · PreHeat原因 {preheat_reason} · LiveHeat原因 {reason} · "
             "Gate 类型化上下文 {typed} · 运行授权 {authorized} · {error}".format(
                 transport=gate_sync.get("transport", "未知"),
                 age=sync_age_text,
                 count=gate_sync.get("stored_observation_count", 0),
                 updated=gate_sync.get("updated_at", "未知"),
+                preheat=_safe_text(context_readiness.get("preheat_state"), 16) or "未评估",
+                live_heat=_safe_text(context_readiness.get("live_heat_state"), 16) or "未评估",
+                anchors=_safe_text(context_readiness.get("listing_anchors_state"), 16) or "未评估",
+                vwap=_safe_text(context_readiness.get("vwap_state"), 16) or "未评估",
+                unready=_nonnegative_count(context_readiness.get("unready_field_count")),
+                missing=_nonnegative_count(context_readiness.get("missing_required_field_count")),
+                preheat_reason=_safe_text(context_readiness.get("preheat_reason"), 80) or "无",
+                reason=_safe_text(context_readiness.get("live_heat_reason"), 100) or "实时热度无阻断原因",
                 typed="就绪" if gate_sync.get("typed_gate_contexts_ready") else "未就绪",
                 authorized="通过" if gate_sync.get("runtime_authorized") else "关闭",
                 error=gate_sync.get("refresh_error", ""),
