@@ -1,5 +1,11 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-09-28 09:48 最新代码实现审核与执行方案完成度综合评估
+- [x] **【LLM 双 CLI 适配、沙箱脱敏与端到端仿真闭环代码审核及执行方案全量盘点】(`ats/llm/backend_factory.py`, `ats/llm/codex_cli_backend.py`, `ats/llm/antigravity_cli_backend.py`, `tools/run_ipo_llm_simulation.py`, `20260928_0948_task.md`)**：
+    - [x] **最新代码实现重大突破**：`backend_factory.py` 打通多 Provider 工厂，正式接通 `antigravity_cli` 与 `codex_cli`；`codex_cli_backend.py` 与 `cli_paths.py` 实现自动寻径与只读沙箱参数构造；`provider_preflight.py` 补全进程树/工具/远端出口多重验收门禁；`run_ipo_llm_simulation.py` 跑通合成数据、Gate 决策、Worker 调用、日志落盘的全闭环仿真；
+    - [x] **执行方案完成度实事求是定性**：执行方案**尚未全部完成**，当前处于从 **Stage 0（准备与安全阻断）向 Stage 1（影子模式与仿真验收）过渡阶段**；
+    - [x] **核心未完成缺口核验确认**：41 项数据契约字段当前真实就绪 6/41（宏观分位/中签率/PE等未接通）；Gate Provider 注入上下文仍全为 `None`（阻断桩成立，放行上下文未组装）；实盘运行授权与实盘模型保持物理关闭；SFT/DPO 离线微调与模型晋级管线尚未实现；324 项专项方案测试矩阵规划待全面落地。
+
 ## 2026-09-28 00:36 新股情绪感知与自学习系统最新功能落地全方位代码审核
 - [x] **【D1-D3 K线连续性校验、TDX 范围动态拉取、Gate Provider 跨进程 SQLite 共享与 UI 心跳透出全量审核】(`ats/main_ats.py`, `ats/strategy/ipo_gate_context_provider.py`, `ats/strategy/ipo_outcome_labels.py`, `ats/strategy/ipo_trading_center.py`, `ats/ui/ipo_learning_console.py`, `tools/generate_matured_labels.py`, `tools/run_ipo_data_acquisition.py`, `20260928_0036_task.md`)**：
     - [x] **D1–D3 日历与 K 线对齐防错位落地**：实证 `ipo_outcome_labels.py` 严格比对历史 K 线首三日与交易日历首三日，错位即刻安全返回 `PENDING_D3`，杜绝伪成熟；

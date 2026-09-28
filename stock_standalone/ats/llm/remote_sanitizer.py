@@ -196,20 +196,11 @@ def build_remote_safe_request(
     if len(policy_bytes) > _MAX_POLICY_BYTES:
         raise RemoteEgressError("remote approval policy exceeds 64 KiB")
 
-    normalized = _normalize(raw_context)
-    if not isinstance(normalized, dict):
-        raise RemoteEgressError("remote context could not be normalized")
-    allowed = set(paths)
-    leaves = _leaf_paths(normalized)
-    if not leaves or any(
-        not any(leaf[:len(path)] == path for path in allowed)
-        for leaf in leaves
-    ):
-        raise RemoteEgressError("remote context contains fields outside the approval")
-
     projected: Dict[str, Any] = {}
+    budget = [0]
     for path in paths:
-        _insert_path(projected, path, _get_path(normalized, path))
+        selected = _normalize(_get_path(raw_context, path), path, budget=budget)
+        _insert_path(projected, path, selected)
     try:
         encoded = json.dumps(
             projected, ensure_ascii=False, sort_keys=True,
@@ -226,3 +217,20 @@ def build_remote_safe_request(
         "policy_version": policy_version,
         "context_json": encoded.decode("utf-8"),
     }
+
+
+def validate_remote_policy(policy: Any) -> bool:
+    """Validate every Agent allowlist without touching production request data."""
+    if not isinstance(policy, Mapping):
+        raise RemoteEgressError("remote egress approval fields are incomplete")
+    allowlists = policy.get("field_allowlist_by_agent")
+    if not isinstance(allowlists, Mapping) or not allowlists:
+        raise RemoteEgressError("per-Agent field allowlist is invalid")
+    for agent_type, fields in allowlists.items():
+        if not isinstance(fields, list):
+            raise RemoteEgressError("per-Agent field allowlist is invalid")
+        sample: Dict[str, Any] = {}
+        for field in fields:
+            _insert_path(sample, _field_path(field), 0)
+        build_remote_safe_request(agent_type, sample, policy)
+    return True

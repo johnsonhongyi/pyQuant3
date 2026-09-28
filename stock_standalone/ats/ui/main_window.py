@@ -5691,9 +5691,12 @@ class ATSMainWindow(QMainWindow):
                         break
                     signal["service"] = "ATS_TDXRealtimeFetcher"
                     self.realtime_signal_signal.emit(signal)
-                logger.info("[NextDayWatch][ATS_TDX] service=TDXRealtimeFetcher node=%s endpoint=%s:%s candidates=%d quotes=%d confirmed=%d elapsed=%.0fms",
+                confirmed_count = sum(1 for event in events_to_dispatch
+                                      if event.get("type") == "NEXT_DAY_WATCH_CONFIRM")
+                log_summary = logger.info if confirmed_count else logger.debug
+                log_summary("[NextDayWatch][ATS_TDX] service=TDXRealtimeFetcher node=%s endpoint=%s:%s candidates=%d quotes=%d confirmed=%d elapsed=%.0fms",
                             endpoint[0], endpoint[1], endpoint[2], len(codes), quote_count,
-                            len(events_to_dispatch), (time.perf_counter() - started) * 1000)
+                            confirmed_count, (time.perf_counter() - started) * 1000)
             except Exception as exc:
                 logger.warning("[NextDayWatch][ATS_TDX] realtime evaluation failed: %s", exc)
             finally:

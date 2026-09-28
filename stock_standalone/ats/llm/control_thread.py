@@ -39,6 +39,7 @@ class LLMControlThread(threading.Thread):
         provider_preflight: Mapping[str, Any],
         authorization: Mapping[str, Any],
         request_producer: Any = None,
+        simulation_only: bool = False,
     ) -> None:
         super().__init__(name="ipo-llm-control", daemon=True)
         if not isinstance(worker, LLMWorkerProcess):
@@ -50,6 +51,7 @@ class LLMControlThread(threading.Thread):
         self._preflight = dict(provider_preflight)
         self._authorization = dict(authorization)
         self._request_producer = request_producer
+        self._simulation_only = simulation_only is True
         self._request_producer_status: Dict[str, Any] = {
             "state": "UNAVAILABLE", "reason": "请求生产端未配置", "generated": 0,
             "skipped_stale": 0, "rejected": 0,
@@ -314,10 +316,12 @@ class LLMControlThread(threading.Thread):
             "status": worker_state,
             "provider": str(self._preflight.get("backend", "未配置"))[:100],
             "qualified": bool(
-                worker_state == "READY"
+                not self._simulation_only
+                and worker_state == "READY"
                 and worker_snapshot.get("heartbeat_healthy") is True
                 and self._preflight.get("execution_allowed") is True
             ),
+            "simulation_only": self._simulation_only,
             "updated_at": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
             "worker": {
                 "state": worker_state,

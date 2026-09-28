@@ -974,12 +974,23 @@ def _collect_snapshot(root: Path) -> Dict[str, Any]:
     config_path = root / "config" / "ipo_sentiment.yaml"
     llm_config_path = root / "config" / "llm_config.yaml"
     acceptance_path = root / "config" / "ipo_stage_acceptance.json"
+    try:
+        from ats.llm.runtime_service import _load_authorization
+        runtime_authorization = _load_authorization(
+            root / "config" / "llm_runtime_acceptance.json"
+        )
+    except Exception:
+        runtime_authorization = {}
     runtime_path = root / "logs" / "llm_runtime_status.json"
     events_path = root / "logs" / "ipo_learning_events.jsonl"
+    simulation_manifest = _read_json(root / "simulation_manifest.json", max_bytes=64 * 1024) or {}
+    simulation_only = isinstance(simulation_manifest, dict) and simulation_manifest.get("simulation_only") is True
     metric_contracts = _load_metric_contracts(config_path)
     try:
         from ats.llm.provider_preflight import inspect_provider_preflight
-        provider_preflight = inspect_provider_preflight(llm_config_path)
+        provider_preflight = inspect_provider_preflight(
+            llm_config_path, authorization=runtime_authorization
+        )
     except Exception:
         provider_preflight = {
             "backend": "不可用", "mode": "未知", "locality": "未确认",
@@ -991,23 +1002,29 @@ def _collect_snapshot(root: Path) -> Dict[str, Any]:
         }
     checks = provider_preflight.setdefault("checks", [])
     if isinstance(checks, list):
-        runtime_authorization = _read_json(
-            root / "config" / "llm_runtime_acceptance.json", max_bytes=16 * 1024
-        ) or {}
         try:
             from ats.llm.runtime_service import stage0_to_2_accepted
 
             stage0_to_2_ready = stage0_to_2_accepted(root)
         except Exception:
             stage0_to_2_ready = False
+        remote_provider = provider_preflight.get("backend") in {
+            "antigravity_cli", "codex_cli",
+        }
+        base_auth_keys = {
+            "stage0_accepted", "provider_accepted", "process_tree_isolation_accepted",
+            "acceptance_id",
+        }
+        remote_auth_keys = base_auth_keys | {
+            "tool_access_isolation_accepted", "remote_egress_isolation_accepted",
+        }
+        expected_auth_shapes = {frozenset(remote_auth_keys)} if remote_provider else {
+            frozenset(base_auth_keys), frozenset(remote_auth_keys),
+        }
+        required_auth_flags = remote_auth_keys if remote_provider else base_auth_keys
         authorization_ready = (
-            set(runtime_authorization) == {
-                "stage0_accepted", "provider_accepted",
-                "process_tree_isolation_accepted", "acceptance_id",
-            }
-            and all(runtime_authorization.get(key) is True for key in (
-                "stage0_accepted", "provider_accepted", "process_tree_isolation_accepted",
-            ))
+            frozenset(runtime_authorization) in expected_auth_shapes
+            and all(runtime_authorization.get(key) is True for key in required_auth_flags - {"acceptance_id"})
             and isinstance(runtime_authorization.get("acceptance_id"), str)
             and bool(runtime_authorization.get("acceptance_id", "").strip())
             and stage0_to_2_ready
@@ -1016,7 +1033,10 @@ def _collect_snapshot(root: Path) -> Dict[str, Any]:
             "name": "运行准入授权",
             "status": "通过" if authorization_ready else "阻断",
             "detail": (
-                "Stage 0–2、Provider 与 Windows 子进程隔离均有验收记录"
+                (
+                    "Stage 0–2、Provider、进程树、工具/MCP 与出口均有验收记录"
+                    if remote_provider else "Stage 0–2、Provider 与进程树隔离均有验收记录"
+                )
                 if authorization_ready else "缺少完整的 Stage 0–2、Provider、Windows 隔离验收证据；Worker 不启动"
             ),
         })
@@ -1089,6 +1109,10 @@ def _collect_snapshot(root: Path) -> Dict[str, Any]:
             "status": "已验收" if valid else "未验收",
             "detail": detail,
         })
+    if simulation_only:
+        for row in stage_rows:
+            row["status"] = "仿真通过" if row["status"] == "已验收" else "仿真待验收"
+            row["detail"] = "合成数据演示，不构成真实 Stage 验收或实盘授权。"
 
     try:
         from ats.llm.offline_learning import DATASET_SCHEMA_VERSION
@@ -1286,15 +1310,17 @@ def _collect_snapshot(root: Path) -> Dict[str, Any]:
                 runtime_age = age if 0 <= age <= 3 else None
         except (TypeError, ValueError, OverflowError):
             pass
-    stage2_accepted = stage_rows[2]["status"] == "已验收"
+    stage2_accepted = not simulation_only and stage_rows[2]["status"] == "已验收"
     runtime_qualified = bool(
-        runtime_age is not None and stage2_accepted
+        not simulation_only and runtime_age is not None and stage2_accepted
         and runtime.get("qualified") is True
         and provider_preflight.get("execution_allowed") is True
         and worker_monitor.get("heartbeat_healthy") is True
     )
     if runtime_age is None:
         runtime_status = "未就绪 / 无新鲜健康快照"
+    elif simulation_only:
+        runtime_status = f"仿真交互已运行 / 实盘准入关闭（快照 {runtime_age:.1f}s）"
     elif (
         not stage2_accepted
         or runtime.get("qualified") is not True
@@ -1712,6 +1738,9 @@ def _collect_snapshot(root: Path) -> Dict[str, Any]:
         "runtime_status": runtime_status,
         "runtime_age": runtime_age,
         "runtime_qualified": runtime_qualified,
+        "simulation_only": simulation_only,
+        "simulation_provider": _safe_text(simulation_manifest.get("provider"), 80),
+        "simulation_result": _safe_text(simulation_manifest.get("result_status"), 40),
         "worker_monitor": worker_monitor,
         "interaction_summary": interaction_summary,
         "rule_path": "确定性规则路径；LLM 结果只读且不参与下单",
@@ -2134,9 +2163,20 @@ class _SourceAcquisitionWorker(QThread):
 class IPOLearningConsole(QWidget):
     """Live view for staged readiness, sidecar health and mature-sample reviews."""
 
-    def __init__(self, parent: Optional[QWidget] = None, project_root: Optional[str] = None) -> None:
+    def __init__(
+        self, parent: Optional[QWidget] = None, project_root: Optional[str] = None,
+        simulation_read_only: bool = False,
+    ) -> None:
         super().__init__(parent)
-        self._root = Path(project_root or Path(__file__).resolve().parents[2])
+        if project_root:
+            self._root = Path(project_root)
+        else:
+            # __file__ points into PyInstaller's temporary _MEI directory when frozen;
+            # use the shared resolver, which returns the physical application root.
+            from sys_utils import get_app_root
+
+            self._root = Path(get_app_root())
+        self._simulation_read_only = simulation_read_only is True
         self._worker = _LearningMonitorWorker(self._root, self)
         self._worker.snapshot_ready.connect(self._render_snapshot)
         self._worker.review_completed.connect(self._review_completed)
@@ -2150,23 +2190,33 @@ class IPOLearningConsole(QWidget):
         self._runtime_control = None
         self._source_worker: Optional[_SourceAcquisitionWorker] = None
         self._build_ui()
+        if self._simulation_read_only:
+            self.lbl_boundary.setText(
+                "仿真只读监控：行情与指标为合成数据；本次 Provider 调用不构成 Stage 验收、"
+                "不产生交易授权，也不触发真实数据采集或人工复核写入。"
+            )
+            for button in self.findChildren(QPushButton):
+                if button not in {self.btn_refresh, self.btn_interaction_detail}:
+                    button.setEnabled(False)
+                    button.setToolTip("仿真只读模式已禁用写入和采集操作")
         self._worker.start()
-        try:
-            from ats.llm.runtime_service import create_runtime_control_thread
+        if not self._simulation_read_only:
+            try:
+                from ats.llm.runtime_service import create_runtime_control_thread
 
-            self._runtime_control = create_runtime_control_thread(self._root)
-            self._runtime_control.start()
-        except Exception:
-            self._runtime_control = None
-        self._source_auto_timer = QTimer(self)
-        self._source_auto_timer.setInterval(5 * 60 * 1000)
-        self._source_auto_timer.timeout.connect(
-            lambda: self._start_source_collection(collect_labels=True)
-        )
-        self._source_auto_timer.start()
-        QTimer.singleShot(
-            2500, lambda: self._start_source_collection(collect_labels=True)
-        )
+                self._runtime_control = create_runtime_control_thread(self._root)
+                self._runtime_control.start()
+            except Exception:
+                self._runtime_control = None
+            self._source_auto_timer = QTimer(self)
+            self._source_auto_timer.setInterval(5 * 60 * 1000)
+            self._source_auto_timer.timeout.connect(
+                lambda: self._start_source_collection(collect_labels=True)
+            )
+            self._source_auto_timer.start()
+            QTimer.singleShot(
+                2500, lambda: self._start_source_collection(collect_labels=True)
+            )
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
@@ -2697,6 +2747,7 @@ class IPOLearningConsole(QWidget):
 
     def _render_snapshot(self, snapshot: Dict[str, Any]) -> None:
         status = snapshot.get("runtime_status", "未知")
+        simulation_only = snapshot.get("simulation_only") is True
         refreshed_at = snapshot.get("monitor_updated_at", "未知")
         gate_sync = snapshot.get("gate_context_sync", {})
         gate_sync = gate_sync if isinstance(gate_sync, dict) else {}
@@ -2718,7 +2769,7 @@ class IPOLearningConsole(QWidget):
                 error=gate_sync.get("refresh_error", ""),
             )
         )
-        self.lbl_runtime.setText(f"LLM 旁路：{status}")
+        self.lbl_runtime.setText(f"仿真 LLM：{status}" if simulation_only else f"LLM 旁路：{status}")
         self.lbl_runtime.setStyleSheet(
             "font-weight: bold; padding: 6px; background: #20232b; border: 1px solid #414653; color: "
             + ("#ff7070" if "未就绪" in status or "未通过准入" in status else "#65d98a") + ";"
@@ -2726,7 +2777,10 @@ class IPOLearningConsole(QWidget):
         preflight = snapshot.get("provider_preflight", {})
         provider_name = preflight.get("backend") or snapshot.get("provider", "未配置")
         provider_state = preflight.get("state", "未就绪")
-        self.lbl_provider.setText(f"Provider：{provider_name} · {provider_state} · 旁路关闭")
+        self.lbl_provider.setText(
+            f"仿真 Provider：{provider_name} · {snapshot.get('simulation_result', '未运行')} · 实盘关闭"
+            if simulation_only else f"Provider：{provider_name} · {provider_state} · 旁路关闭"
+        )
         worker = snapshot.get("worker_monitor", {})
         worker = worker if isinstance(worker, dict) else {}
         heartbeat_age = worker.get("heartbeat_age_seconds")
@@ -3240,6 +3294,8 @@ class IPOLearningConsole(QWidget):
         self._start_source_collection(collect_labels=True)
 
     def _start_source_collection(self, collect_labels: bool) -> None:
+        if self._simulation_read_only:
+            return
         if self._source_worker is not None and self._source_worker.isRunning():
             return
         ticker = self.edt_acquisition_code.text().strip()

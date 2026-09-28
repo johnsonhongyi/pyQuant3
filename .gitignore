@@ -195,3 +195,4 @@ stock_standalone/data/ipo_learning/source_observations.sqlite
 stock_standalone/ats/strategy/test_*.py
 stock_standalone/data/ipo_learning/source_observations.sqlite-shm
 stock_standalone/data/ipo_learning/source_observations.sqlite-wal
+stock_standalone/data/ipo_learning_simulation/*

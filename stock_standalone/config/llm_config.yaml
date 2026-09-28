@@ -17,12 +17,14 @@ backends:
     execution_mode: remote_api
     enabled: false
     cli_path: agy
-    scratch_cwd: ''
+    model_id: gemini-3.8-flash-medium
+    scratch_cwd: data/ipo_llm_scratch/antigravity
   codex_cli:
     execution_mode: remote_api
     enabled: false
     bin_path: codex
-    scratch_cwd: ''
+    model_id: gpt-6-luna
+    scratch_cwd: data/ipo_llm_scratch/codex
   antigravity_sdk:
     execution_mode: local_litert
     model_path: ''
