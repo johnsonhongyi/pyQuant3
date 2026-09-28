@@ -95,6 +95,16 @@ def _update_table_cell(table: QTableWidget, row: int, col: int, text: str,
             item.setForeground(foreground)
 
 
+def _format_checkpoint_price(value: Any) -> str:
+    if value is None:
+        return "缺失"
+    try:
+        price = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return "无效"
+    return f"{price:.2f}" if price > 0 and price != float("inf") else "无效"
+
+
 def _auto_size_table_once(table: QTableWidget, attr_name: str = "_has_auto_sized"):
     """边界触发按需适配列宽，常态增量更新不测宽，保留用户手动调整的列宽。"""
     if not getattr(table, attr_name, False) and table.rowCount() > 0:
@@ -1472,8 +1482,8 @@ class NextDayAnomalyWatchWidget(QWidget):
             t_raw = cp.get("observed_at", "")
             t_show = t_raw.split("T")[-1][:8] if "T" in t_raw else t_raw
             phase = cp.get("phase", "")
-            hp = f"{float(cp.get('high', 0.0)):.2f}"
-            p = f"{float(cp.get('close', 0.0)):.2f}"
+            hp = _format_checkpoint_price(cp.get("high"))
+            p = _format_checkpoint_price(cp.get("close"))
             vw = f"{float(cp.get('vwap', 0.0)):.2f}" if cp.get("vwap") is not None else "--"
             vol = str(int(cp.get("volume", 0))) if cp.get("volume") is not None else "--"
             proofs = []

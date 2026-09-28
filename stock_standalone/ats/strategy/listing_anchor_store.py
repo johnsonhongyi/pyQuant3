@@ -190,6 +190,17 @@ class ListingAnchorStore:
         with self._lock:
             return self._load().get(self._key(code, listing_date))
 
+    def latest_by_code(self) -> Dict[str, ListingAnchors]:
+        """Read each symbol's newest immutable anchor without modifying the store."""
+        with self._lock:
+            anchors = self._load().values()
+            latest: Dict[str, ListingAnchors] = {}
+            for anchor in anchors:
+                current = latest.get(anchor.code)
+                if current is None or anchor.listing_date > current.listing_date:
+                    latest[anchor.code] = anchor
+            return latest
+
     def freeze(self, anchors: ListingAnchors) -> ListingAnchors:
         if not isinstance(anchors, ListingAnchors):
             raise ValueError("只能冻结通过校验的 ListingAnchors")

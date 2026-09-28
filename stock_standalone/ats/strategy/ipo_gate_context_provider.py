@@ -9,12 +9,21 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional
+from zoneinfo import ZoneInfo
 
-from ats.strategy.ipo_data_contracts import IPODecisionConfigSnapshot
+from ats.strategy.ipo_data_contracts import (
+    LIVE_HEAT_REQUIRED_FIELDS,
+    PREHEAT_REQUIRED_FIELDS,
+    IPODecisionConfigSnapshot,
+)
+from ats.strategy.ipo_live_heat_engine import IPOLiveHeatEngine, IPOLiveHeatSnapshot
+from ats.strategy.ipo_preheat_engine import IPOPreHeatEngine, IPOPreHeatSnapshot, PreHeatConfig
+from ats.strategy.listing_anchor_store import ListingAnchorStore
 from ats.strategy.ipo_source_orchestrator import SOURCE_DB_RELATIVE_PATH
 
 
 DEFAULT_ROOT = Path(__file__).resolve().parents[2]
+_TICKER_FIELDS = frozenset(PREHEAT_REQUIRED_FIELDS + LIVE_HEAT_REQUIRED_FIELDS)
 
 
 class IPOGateContextProvider:
@@ -25,6 +34,10 @@ class IPOGateContextProvider:
         self._lock = threading.RLock()
         self._config_fields: Dict[str, Any] = {}
         self._observations_by_ticker: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        self._vwap_snapshots: Dict[str, Any] = {}
+        self._listing_anchors_by_ticker: Dict[str, Any] = {}
+        self._listing_anchor_store_state = "UNREADY"
+        self._preheat_engine: Optional[IPOPreHeatEngine] = None
         self._last_refresh_at = ""
         self._last_refresh_ok = False
         self._last_refresh_error = "尚未刷新"
@@ -33,11 +46,17 @@ class IPOGateContextProvider:
         self._store_file_present = False
         self._stored_observation_count = 0
         self._stored_observed_count = 0
+        self._latest_context_readiness: Dict[str, Any] = {}
 
     def invalidate(self) -> None:
         with self._lock:
             self._config_fields = {}
             self._observations_by_ticker = {}
+            self._vwap_snapshots = {}
+            self._listing_anchors_by_ticker = {}
+            self._listing_anchor_store_state = "UNREADY"
+            self._preheat_engine = None
+            self._latest_context_readiness = {}
             self._stored_observation_count = 0
             self._stored_observed_count = 0
 
@@ -49,7 +68,27 @@ class IPOGateContextProvider:
                     str(self._root / "config" / "ipo_sentiment.yaml")
                 )
             config_fields = config.gate_context_fields()
+            preheat_section = config.decision_config.get("ipo_preheat")
+            preheat_engine = IPOPreHeatEngine(PreHeatConfig.from_mapping(preheat_section))
             observations = self._read_observations(config)
+            vwap_snapshots = {
+                ticker: snapshot
+                for ticker in observations if ticker != "000000"
+                if observations[ticker].get("current_price", {}).get("status") == "OBSERVED"
+                if (snapshot := self._read_vwap_snapshot(ticker)) is not None
+            }
+            anchor_path = self._root / "config" / "listing_anchors.json"
+            listing_anchor_store_state = "READY" if anchor_path.is_file() else "MISSING"
+            try:
+                raw_anchors = ListingAnchorStore(anchor_path).latest_by_code()
+            except (OSError, ValueError):
+                raw_anchors = {}
+                listing_anchor_store_state = "INVALID"
+            listing_anchors = {
+                ticker: anchor
+                for ticker, anchor in raw_anchors.items()
+                if anchor.matches_contract(config.config_hash, config.data_contract.config_hash)
+            }
             all_observations = [
                 observation
                 for ticker_rows in observations.values()
@@ -71,6 +110,10 @@ class IPOGateContextProvider:
         with self._lock:
             self._config_fields = config_fields
             self._observations_by_ticker = observations
+            self._vwap_snapshots = vwap_snapshots
+            self._listing_anchors_by_ticker = listing_anchors
+            self._listing_anchor_store_state = listing_anchor_store_state
+            self._preheat_engine = preheat_engine
             self._stored_observation_count = stored_observation_count
             self._stored_observed_count = stored_observed_count
             self._store_file_present = store_file_present
@@ -127,6 +170,7 @@ class IPOGateContextProvider:
                 "stored_observed_count": self._stored_observed_count,
                 "refresh_error": self._last_refresh_error,
                 "typed_gate_contexts_ready": False,
+                "latest_context_readiness": dict(self._latest_context_readiness),
                 "runtime_authorized": False,
                 "transport": "SQLite只读快照",
             }
@@ -170,6 +214,8 @@ class IPOGateContextProvider:
             ticker, field_id = str(row[0]), str(row[1])
             if field_id not in config.data_contract.required_fields:
                 continue
+            if ticker == "000000" and field_id in _TICKER_FIELDS:
+                continue
             try:
                 value = json.loads(row[3]) if row[3] is not None else None
             except (TypeError, ValueError):
@@ -195,13 +241,84 @@ class IPOGateContextProvider:
         return result
 
     def __call__(self, directive: Any) -> Mapping[str, Any]:
-        code = str(getattr(directive, "code", "") or "").strip().zfill(6)
+        raw_code = str(getattr(directive, "code", "") or "").strip()
+        code = raw_code.zfill(6) if raw_code.isdigit() and len(raw_code) <= 6 else ""
         with self._lock:
             config_fields = dict(self._config_fields)
             observations_by_ticker = self._observations_by_ticker
-            observations = dict(observations_by_ticker.get("000000", {}))
-            observations.update(observations_by_ticker.get(code, {}))
+            vwap_snapshots = self._vwap_snapshots
+            listing_anchors_by_ticker = self._listing_anchors_by_ticker
+            preheat_engine = self._preheat_engine
+            observations = {
+                key: dict(value)
+                for key, value in observations_by_ticker.get("000000", {}).items()
+            }
+            ticker_observations = {
+                key: dict(value)
+                for key, value in (observations_by_ticker.get(code, {}) if code else {}).items()
+            }
+            observations.update(ticker_observations)
 
+        now = datetime.now(timezone.utc)
+        data_contract = config_fields.get("data_contract")
+        observation_checks: Dict[str, str] = {}
+        observation_usable: Dict[str, bool] = {}
+        if data_contract is not None:
+            for field_id, observation in observations.items():
+                stored_status = observation.get("status")
+                if isinstance(stored_status, str) and stored_status.startswith("UNREADY_"):
+                    observation_checks[field_id] = stored_status
+                    observation_usable[field_id] = False
+                    observation["status"] = "UNREADY"
+                    observation["value"] = None
+                    observation["reason_code"] = stored_status
+                    continue
+                check = data_contract.validate_observation(field_id, observation, now)
+                observation_checks[field_id] = check.reason_code or check.status
+                observation_usable[field_id] = check.usable
+                observation["status"] = check.status if check.usable else "UNREADY"
+                observation["value"] = check.value if check.usable else None
+                observation["reason_code"] = check.reason_code or ""
+
+        validated_ticker_observations = {
+            field_id: observations[field_id]
+            for field_id in ticker_observations if field_id in observations
+        }
+        live_heat = self._build_live_heat(code, validated_ticker_observations)
+        preheat = self._build_preheat(
+            directive, code, observations, preheat_engine, now
+        )
+        vwap = vwap_snapshots.get(code)
+        listing_anchors = listing_anchors_by_ticker.get(code)
+        context_readiness = {
+            "ticker": code,
+            "preheat_state": "READY" if preheat.data_status == "READY" else "UNREADY",
+            "preheat_reason": preheat.unready_reason_code or "",
+            "live_heat_state": "READY" if live_heat.data_ready else "UNREADY",
+            "live_heat_reason": live_heat.veto_reason or "",
+            "vwap_state": "AVAILABLE" if vwap is not None else "UNREADY",
+            "listing_anchors_state": "READY" if listing_anchors is not None else self._listing_anchor_store_state,
+            "remaining_contexts": {
+                "lrrm": "UNREADY:缺少20日成交额序列/宽度输入",
+                "ipo_regime": "UNREADY:缺少成熟IPO样本序列",
+                "t1_carry": "UNREADY:依赖LRRM与IPO Regime",
+                "listing_anchors": "READY:配置哈希/数据字典哈希/来源时区匹配" if listing_anchors is not None else f"UNREADY:{self._listing_anchor_store_state}",
+                "vwap": "AVAILABLE:来自ATS进程内VWAPFactory" if vwap is not None else "UNREADY:尚未接入有效VWAP快照",
+                "risk_context": "UNREADY:未绑定RiskGate授权上下文",
+            },
+            "validated_field_count": sum(
+                observation_usable.values()
+            ),
+            "unready_field_count": sum(
+                not usable for usable in observation_usable.values()
+            ),
+            "missing_required_field_count": (
+                len(set(data_contract.required_fields) - set(observations))
+                if data_contract is not None else 0
+            ),
+        }
+        with self._lock:
+            self._latest_context_readiness = context_readiness
         decision_config = config_fields.get("decision_config", {})
         freshness = decision_config.get("vwap_freshness", {}) if isinstance(decision_config, Mapping) else {}
         max_vwap_stale = freshness.get("max_stale_seconds", 0) if isinstance(freshness, Mapping) else 0
@@ -212,18 +329,131 @@ class IPOGateContextProvider:
             "lrrm": None,
             "ipo_regime": None,
             "t1_carry": None,
-            "listing_anchors": None,
-            "vwap": None,
-            "intraday_low": 0.0,
-            "listing_age_sessions": 0,
-            "market_as_of_time": datetime.now(timezone.utc),
+            "preheat": preheat,
+            "listing_anchors": listing_anchors,
+            "vwap": vwap,
+            "live_heat": live_heat,
+            "intraday_low": self._observed_value(observations, "session_low"),
+            "listing_age_sessions": None,
+            "d0_listing_open_price": listing_anchors.listing_open if listing_anchors else None,
+            "market_as_of_time": now,
             "max_vwap_stale_seconds": max_vwap_stale,
             "risk_context": None,
             "issue_price": issue_price,
             "data_observations": observations,
+            "observation_checks": observation_checks,
+            "gate_context_readiness": context_readiness,
             "gate_context_sync": self.status_snapshot(),
         })
         return context
+
+    @staticmethod
+    def _observed_value(observations: Mapping[str, Mapping[str, Any]], field_id: str) -> Any:
+        item = observations.get(field_id, {})
+        return item.get("value") if item.get("status") == "OBSERVED" else None
+
+    @staticmethod
+    def _build_live_heat(
+        code: str, observations: Mapping[str, Mapping[str, Any]]
+    ) -> IPOLiveHeatSnapshot:
+        missing = [
+            field_id for field_id in LIVE_HEAT_REQUIRED_FIELDS
+            if IPOGateContextProvider._observed_value(observations, field_id) is None
+        ]
+        if not code or missing:
+            return IPOLiveHeatSnapshot(
+                code=code,
+                veto_reason=("缺少实时字段: " + ",".join(missing)) if missing else "股票代码无效",
+            )
+        values = {
+            field_id: IPOGateContextProvider._observed_value(observations, field_id)
+            for field_id in LIVE_HEAT_REQUIRED_FIELDS
+        }
+        try:
+            observed_at = datetime.fromisoformat(
+                str(observations["current_price"]["as_of_time"]).replace("Z", "+00:00")
+            ).astimezone(ZoneInfo("Asia/Shanghai"))
+            return IPOLiveHeatEngine().evaluate(
+                code=code,
+                ret_pct=values["ret_pct"],
+                turnover_pct=values["turnover_pct"],
+                price_vwap_dist_pct=values["price_vwap_dist_pct"],
+                open_premium_pct=values["open_premium_pct"],
+                slope_deg=values["slope_deg"],
+                high_p=values["session_high"],
+                low_p=values["session_low"],
+                curr_p=values["current_price"],
+                turnover_climb_speed=values["turnover_climb_speed"],
+                minutes_above_vwap_ratio=values["minutes_above_vwap_ratio"],
+                pullback_from_peak_pct=values["pullback_from_peak_pct"],
+                halt_count=values["halt_count"],
+                now_hm=observed_at.strftime("%H%M"),
+            )
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return IPOLiveHeatSnapshot(code=code, veto_reason="实时热度字段或来源时间无效")
+
+    @staticmethod
+    def _build_preheat(
+        directive: Any,
+        code: str,
+        observations: Mapping[str, Mapping[str, Any]],
+        engine: Optional[IPOPreHeatEngine],
+        evaluation_time: datetime,
+    ) -> IPOPreHeatSnapshot:
+        name = str(getattr(directive, "name", "") or "").strip()
+        if engine is None:
+            return IPOPreHeatSnapshot(code=code, name=name, unready_reason_code="PREHEAT_CONFIG_UNREADY")
+        missing = [
+            field_id for field_id in PREHEAT_REQUIRED_FIELDS
+            if observations.get(field_id, {}).get("status") not in {"OBSERVED", "MISSING_CONFIRMED"}
+        ]
+        if not code or missing:
+            return IPOPreHeatSnapshot(
+                code=code,
+                name=name,
+                unready_reason_code=("MISSING_PREHEAT_FIELDS:" + ",".join(missing))
+                if missing else "IDENTITY_MISSING",
+            )
+        source_times: Dict[str, datetime] = {}
+        try:
+            for field_id in PREHEAT_REQUIRED_FIELDS:
+                raw_time = observations[field_id].get("as_of_time")
+                source_times[field_id] = datetime.fromisoformat(
+                    str(raw_time).replace("Z", "+00:00")
+                )
+            pe_observation = observations["pe_ratio"]
+            pe_status = pe_observation["status"]
+            return engine.evaluate(
+                code=code,
+                name=name,
+                issue_price=observations["issue_price"]["value"],
+                float_shares_wan=observations["float_shares_wan"]["value"],
+                pe_ratio=pe_observation["value"] if pe_status == "OBSERVED" else None,
+                pe_status=pe_status,
+                industry_pe_median=observations["industry_pe_median"]["value"],
+                online_sub_multiple=observations["online_sub_multiple"]["value"],
+                winning_rate_pct=observations["winning_rate_pct"]["value"],
+                scarcity_rank=observations["scarcity_rank"]["value"],
+                hot_themes=observations["hot_themes"]["value"],
+                as_of_date=evaluation_time.astimezone(ZoneInfo("Asia/Shanghai")).date().isoformat(),
+                source_as_of=source_times,
+                evaluation_time=evaluation_time,
+            )
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return IPOPreHeatSnapshot(
+                code=code, name=name, unready_reason_code="INVALID_PREHEAT_SOURCE_DATA"
+            )
+
+    @staticmethod
+    def _read_vwap_snapshot(code: str) -> Any:
+        if not code:
+            return None
+        try:
+            from ats.vwap_factory import VWAPFactory
+
+            return VWAPFactory.get_instance().peek_snapshot(code)
+        except Exception:
+            return None
 
 
 _PROVIDERS: Dict[str, IPOGateContextProvider] = {}

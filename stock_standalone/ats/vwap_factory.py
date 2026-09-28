@@ -283,6 +283,16 @@ class VWAPFactory:
         with state.lock:
             return state.snapshot
 
+    def peek_snapshot(self, code: str) -> Optional[VWAPSnapshot]:
+        """Read an existing snapshot without allocating per-symbol state."""
+        clean = str(code).zfill(6)
+        with self._lock:
+            state = self._states.get(clean)
+        if state is None:
+            return None
+        with state.lock:
+            return state.snapshot
+
     def export_states(self) -> Dict[str, Dict[str, Any]]:
         """Return a compact, pickle-safe copy for the existing RamDisk cache."""
         exported: Dict[str, Dict[str, Any]] = {}

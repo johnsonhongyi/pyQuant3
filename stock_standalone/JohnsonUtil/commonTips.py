@@ -4368,14 +4368,18 @@ def get_url_data_R(url, timeout=15,headers=None):
         data = ''
         log.error('socket timed out error:%s - URL %s ' % (e, url))
         if str(e).find('HTTP Error 456') >= 0:
-            sleeprandom(10)
+            sleeprandom(5)
             return data
-        sleeprandom(30)
+        elif any(code in str(e) for code in ('502', '503', '504', 'Bad Gateway')):
+            time.sleep(1)
+            return data
+        sleeprandom(2)
         return data
     except Exception as e:
         data = ''
         log.error('url Exception Error:%s - URL %s ' % (e, url))
-        sleep(30)
+        time.sleep(0.5)
+        return data
     if isinstance(data,bytes):
         try:
             data = data.decode('utf8')
@@ -4478,15 +4482,16 @@ def get_url_data(url, retry_count=2, pause=0.05, timeout=30, headers=None):
             if str(e).find('HTTP Error 456') >= 0:
                 return data
             if ReqErrorCount < 3:
-                ReqErrorCount +=1
-                sleeprandom(60)
+                ReqErrorCount += 1
+                time.sleep(0.5)
             else:
                 break
         except Exception as e:
+            data = ''
             log.error('url Exception Error:%s - URL %s ' % (e, url))
             if ReqErrorCount < 3:
-                ReqErrorCount +=1
-                sleeprandom(60)
+                ReqErrorCount += 1
+                time.sleep(0.5)
             else:
                 break
         else:

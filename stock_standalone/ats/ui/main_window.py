@@ -5658,6 +5658,7 @@ class ATSMainWindow(QMainWindow):
                 meta = {str(item.get("code", "")).zfill(6): item for item in all_candidates if item.get("code")}
                 codes = sorted(meta)
                 quote_count = 0
+                quote_gap_count = 0
                 if codes:
                     from ats.tdx_realtime_fetcher import TDXRealtimeFetcher
                     fetcher = TDXRealtimeFetcher.get_instance()
@@ -5667,9 +5668,8 @@ class ATSMainWindow(QMainWindow):
                     import pandas as pd
                     if frame is None:
                         frame = pd.DataFrame()
-                    for code in codes:
-                        if code not in frame.index:
-                            frame.loc[code, "code"] = code
+                    frame_codes = {str(code).strip().zfill(6) for code in frame.index}
+                    quote_gap_count = len(set(codes) - frame_codes)
                     endpoint = getattr(fetcher, "current_host", None) or ("TDX", "?", "?")
                     for code in frame.index:
                         candidate = meta.get(str(code).zfill(6), {})
@@ -5694,8 +5694,8 @@ class ATSMainWindow(QMainWindow):
                 confirmed_count = sum(1 for event in events_to_dispatch
                                       if event.get("type") == "NEXT_DAY_WATCH_CONFIRM")
                 log_summary = logger.info if confirmed_count else logger.debug
-                log_summary("[NextDayWatch][ATS_TDX] service=TDXRealtimeFetcher node=%s endpoint=%s:%s candidates=%d quotes=%d confirmed=%d elapsed=%.0fms",
-                            endpoint[0], endpoint[1], endpoint[2], len(codes), quote_count,
+                log_summary("[NextDayWatch][ATS_TDX] service=TDXRealtimeFetcher node=%s endpoint=%s:%s candidates=%d quotes=%d quote_gaps=%d confirmed=%d elapsed=%.0fms",
+                            endpoint[0], endpoint[1], endpoint[2], len(codes), quote_count, quote_gap_count,
                             confirmed_count, (time.perf_counter() - started) * 1000)
             except Exception as exc:
                 logger.warning("[NextDayWatch][ATS_TDX] realtime evaluation failed: %s", exc)

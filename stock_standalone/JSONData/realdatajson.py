@@ -73,9 +73,9 @@ log = LoggerFactory.getLogger()
 # log=LoggerFactory.JohnsonLoger('Realdata')
 
 sinaheader = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:84.0) Gecko/20100101 Firefox/84.0',
-    'Host': 'vip.stock.finance.sina.com.cn',
-    'Referer':'http://vip.stock.finance.sina.com.cn',
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+    'Referer': 'https://finance.sina.com.cn/',
+    'Accept': 'application/json, text/javascript, */*; q=0.01',
     'Connection': 'keep-alive',
 }
 
@@ -1054,12 +1054,12 @@ def _get_dynamic_fetch_params_noCoolTime(base_batch, base_pause, base_limit):
     block_cnt = g_sina_blocked['count']
 
     # =========================
-    # batch_size（仍然保守）
+    # batch_size（严格防风控限制）
     # =========================
     if is_trade:
-        batch_size = max(5, int(base_batch * 0.4))
+        batch_size = min(8, max(3, int(base_batch * 0.4)))
     else:
-        batch_size = base_batch
+        batch_size = min(12, max(4, base_batch))
 
     if block_cnt > 0:
         batch_size = max(3, int(batch_size / (1 + block_cnt * 0.7)))
@@ -1171,15 +1171,40 @@ def _get_dynamic_fetch_params(base_batch, base_pause, base_limit):
 # =========================
 # URL 构建
 # =========================
+_MARKET_DEFAULT_COUNTS = {
+    'sh_a': 2350,
+    'sz_a': 2980,
+    'hs_bjs': 280,
+}
+_MARKET_COUNT_CACHE = {}
+
 def _get_sina_Market_url(market='sh_a', num='200'):
     url_list = []
-    url = ct.JSON_Market_Center_CountURL % market
-    data = cct.get_url_data(url, timeout=10)
-    cnt = re.findall('(\d+)', data or '')
-    if cnt:
-        page_cnt = max(1, -(-int(cnt[0]) // int(num)))
-        for p in range(1, page_cnt + 1):
-            url_list.append(ct.JSON_Market_Center_RealURL % (p, num, market))
+    total_stocks = _MARKET_COUNT_CACHE.get(market)
+
+    now_ts = time.time()
+    has_recent_fail = (now_ts - g_sina_blocked.get('last_failed_ts', 0)) < 600
+    is_cooling = g_sina_blocked.get('cooling', False) and now_ts < g_sina_blocked.get('blocked_until', 0)
+
+    # 仅在无缓存、无近期失败且未处于冷却期时，才尝试拉取一次
+    if total_stocks is None and not has_recent_fail and not is_cooling:
+        url = ct.JSON_Market_Center_CountURL % market
+        try:
+            data = cct.get_url_data(url, timeout=1.5, retry_count=1)
+            cnt = re.findall(r'(\d+)', data or '')
+            if cnt:
+                total_stocks = int(cnt[0])
+                _MARKET_COUNT_CACHE[market] = total_stocks
+        except Exception as e:
+            log.debug(f"[SINA-URL-COUNT-ERR] {market} count fetch error: {e}")
+
+    if total_stocks is None:
+        total_stocks = _MARKET_DEFAULT_COUNTS.get(market, 2500)
+        _MARKET_COUNT_CACHE[market] = total_stocks
+
+    page_cnt = max(1, -(-total_stocks // int(num)))
+    for p in range(1, page_cnt + 1):
+        url_list.append(ct.JSON_Market_Center_RealURL % (p, num, market))
     return url_list
 
 
@@ -1187,7 +1212,7 @@ def _get_sina_Market_url(market='sh_a', num='200'):
 # 数据解析（强风控识别）
 # =========================
 def _parsing_Market_price_json(url):
-    text = cct.get_url_data_R(url, headers=sinaheader)
+    text = cct.get_url_data_R(url, timeout=3.5, headers=sinaheader)
     if not text:
         raise ValueError("empty response")
     if text in ('null', 'None') or text.startswith('<html'):
@@ -1210,26 +1235,29 @@ def _parsing_Market_price_json(url):
 # =========================
 # 异步抓取（自适应节流）
 # =========================
-async def _fetch_with_delay(url, pause_range):
+async def _fetch_with_delay(url, pause_range, stagger_sec=0.0):
     now = time.time()
-    if now < g_sina_blocked['blocked_until']:
-        wait = g_sina_blocked['blocked_until'] - now
-        log.warning(f"[SINA-WAIT] {wait:.1f}s")
-        await asyncio.sleep(wait)
+    # 🚨 杜绝在网络协程中执行数分钟的超长 sleep 导致主流程卡死！
+    if now < g_sina_blocked.get('blocked_until', 0):
+        log.warning(f"[SINA-COOLING-SKIP] 当前处于封禁/冷却期 (剩余 {g_sina_blocked['blocked_until'] - now:.1f}s), 快速跳过网络请求并使用缓存！")
+        return None
 
+    if stagger_sec > 0:
+        await asyncio.sleep(stagger_sec)
+
+    loop = asyncio.get_running_loop()
+    df = None
     try:
-        loop = asyncio.get_running_loop()
         df = await loop.run_in_executor(None, _parsing_Market_price_json, url)
     except Exception as e:
         log.error(f"Fetch url error: {url}, {e}")
-        # 触发冷却模式
-        set_blocked_cooling(reason=str(e), factor=1.23, cooling_sec=300)
-        df = None
+        set_blocked_cooling(reason=str(e), factor=1.23, cooling_sec=180)
         set_blocked(60, str(e), url)
         return None
 
-    sleep_t = random.uniform(*pause_range)
-    await asyncio.sleep(sleep_t)
+    if df is not None and not df.empty:
+        sleep_t = random.uniform(*pause_range)
+        await asyncio.sleep(sleep_t)
     return df
 
 def _can_update_limit_time_base(base_limit, limit_time):
@@ -1318,6 +1346,42 @@ def _can_update_limit_time(
 
     return True
 
+def _format_and_slice_df(df_in, target_market):
+    if df_in is None or len(df_in) == 0:
+        return df_in
+    if target_market == 'all':
+        co_inx = [inx for inx in df_in.index if str(inx).startswith(cct.code_startswith)]
+    elif target_market == 'sh':
+        co_inx = [inx for inx in df_in.index if str(inx).startswith(('6'))]
+    elif target_market == 'sz':
+        co_inx = [inx for inx in df_in.index if str(inx).startswith(('00'))]
+    elif target_market == 'cyb':
+        co_inx = [inx for inx in df_in.index if str(inx).startswith(('30'))]
+    elif target_market == 'kcb':
+        co_inx = [inx for inx in df_in.index if str(inx).startswith(('688'))]
+    elif target_market == 'bj':  
+        co_inx = [inx for inx in df_in.index if str(inx).startswith(('43','83','87','92'))]
+    else:
+        codel = cct.read_to_blocknew(target_market)
+        co_inx = [inx for inx in codel if inx in df_in.index]
+    dd = df_in.loc[co_inx]
+    if len(dd) > 0 and 'ticktime' in dd.columns:
+        dd['ticktime'] = dd['ticktime'].astype(str)
+        today_str = time.strftime('%Y-%m-%d')
+        mask_short = dd['ticktime'].str.len() == 8
+        if mask_short.any():
+            dd.loc[mask_short, 'ticktime'] = today_str + ' ' + dd.loc[mask_short, 'ticktime']
+        dd['ticktime'] = pd.to_datetime(dd['ticktime'], errors='coerce')
+        now = pd.Timestamp.now()
+        future_mask = dd['ticktime'] > (now + pd.Timedelta(minutes=3))
+        if future_mask.any():
+            last_date = cct.get_last_trade_date()
+            dd.loc[future_mask, 'ticktime'] = pd.to_datetime(
+                last_date + ' ' + dd.loc[future_mask, 'ticktime'].dt.strftime('%H:%M:%S'), 
+                errors='coerce'
+            )
+    return dd
+
 def _update_sina_limit_time(limit_time):
     """
     写入 global.ini，并同步更新 cct.sina_dd_limit_time（内存态）
@@ -1350,7 +1414,7 @@ def _update_sina_limit_time(limit_time):
 # =========================
 # 主入口（完整优化版）
 # =========================
-def get_sina_Market_json(market='all', showtime=True, num='100', retry_count=3, pause=0.001,batch_size=50, pause_range=(0.2, 0.8)):
+def get_sina_Market_json(market='all', showtime=True, num='100', retry_count=3, pause=0.001, batch_size=8, pause_range=(0.2, 0.6)):
     start = time.time()
     h5_fname = 'get_sina_all_ratio'
     h5_table = f'all_{num}'
@@ -1361,9 +1425,11 @@ def get_sina_Market_json(market='all', showtime=True, num='100', retry_count=3, 
     )
 
     log.info(f'batch_size:{batch_size} pause_range:{pause_range} force_cache:{force_cache} limit_time:{limit_time} base_limit:{base_limit}')
-    # --------- HDF 缓存 ---------
-    h5 = h5a.load_hdf_db(h5_fname, table=h5_table, limit_time=limit_time)
-    if h5 is not None and len(h5) > 0 and 'timel' in h5.columns:
+    # --------- HDF 缓存（永不误判为 None，保持磁盘完备快照） ---------
+    h5 = h5a.load_hdf_db(h5_fname, table=h5_table, timelimit=False)
+    has_cached_data = (h5 is not None and len(h5) > 0 and 'timel' in h5.columns)
+
+    if has_cached_data:
         # [DYNAMIC INTEGRITY CHECK] 相比系统已知股票库(stock_codes.conf)，动态检测 HDF 是否缺失过多股票
         try:
             from JSONData import sina_data as sd
@@ -1373,87 +1439,52 @@ def get_sina_Market_json(market='all', showtime=True, num='100', retry_count=3, 
 
         now_ts = time.time()
         is_cooling = g_sina_blocked.get('cooling', False) and now_ts < g_sina_blocked.get('blocked_until', 0)
+        has_recent_fail = (now_ts - g_sina_blocked.get('last_failed_ts', 0)) < 600
 
-        if conf_codes_len > 1000 and len(h5) < conf_codes_len - 50 and not is_cooling:
-            log.warning(f"[HDF-INCOMPLETE-AUTOFIX] 磁盘 HDF 缓存 ({len(h5)} 行) 相比配置库 ({conf_codes_len} 只) 缺失 {conf_codes_len - len(h5)} 只股票, 忽略旧缓存强制在线重新抓取并修正 HDF...")
-        else:
-            if is_cooling:
-                remaining_min = (g_sina_blocked.get('blocked_until', 0) - now_ts) / 60.0
-                log.warning(f"[SINA-COOLING-HOLD] 当前处于 API 限制/网络异常冷却避让期中 (剩余 {remaining_min:.1f} 分钟), 容忍并继续使用现有 HDF 缓存")
-                force_cache = True
+        o_time = h5[h5.timel != 0].timel if 'timel' in h5.columns else []
+        l_time = (now_ts - o_time.iloc[0]) if len(o_time) > 0 else 999999
+        is_fresh = (l_time < limit_time)
 
-            # 🛡️ [DATA-INTEGRITY] 盘后/非交易时间完整性校验：
-            # 仅在收盘且出清完成 (now_int >= 1502) 或非交易日/周末，才强制要求磁盘 HDF 缓存必须包含收盘结算数据 (ticktime >= '15:00:00')
-            # 预留 2 分钟集合竞价与分发缓冲，且杜绝在交易日中午休市 (11:30~13:00) 时误判死循环网络拉取
-            is_stale_intraday_cache = False
-            now_int = cct.get_now_time_int() if (cct and hasattr(cct, 'get_now_time_int')) else 1530
-            is_trade_day = cct.get_trade_date_status() if (cct and hasattr(cct, 'get_trade_date_status')) else False
-            require_closed_data = (not is_trade_day) or (now_int >= 1502)
+        # 🚨 极速拦截 1: 处于 API 限流冷却期中，或 10 分钟内曾发生失败，且磁盘缓存有充足股票（>1000），0毫秒复用缓存，绝不上网！
+        if (is_cooling or has_recent_fail) and len(h5) >= 1000:
+            remaining_min = max(0.0, (g_sina_blocked.get('blocked_until', 0) - now_ts) / 60.0)
+            log.warning(f"[HDF-FAST-HIT] 系统处于API冷却或网络异常期 (剩余 {remaining_min:.1f}min), 直接复用磁盘 HDF 缓存 ({len(h5)} 只股票), 绝不卡死主流程！")
+            dd = _format_and_slice_df(h5, market)
+            if len(dd) > 100:
+                return dd
 
-            if require_closed_data and not cct.get_work_time() and len(h5) > 0 and 'ticktime' in h5.columns and not is_cooling:
-                try:
-                    str_ticks = h5['ticktime'].astype(str).str.extract(r'(\d{2}:\d{2}:\d{2})')[0].dropna()
-                    if not str_ticks.empty:
-                        closed_ratio = (str_ticks >= '15:00:00').mean()
-                        if closed_ratio < 0.1:
-                            is_stale_intraday_cache = True
-                            log.warning(f"[HDF-STALE-INTRADAY] 当前已收盘/非交易日，但磁盘 HDF 缓存仍为早盘未收盘数据 (收盘Tick占比仅 {closed_ratio:.1%}), 强制在线刷新全天收盘数据！")
-                except Exception as e_tick:
-                    log.debug(f"Tick check failed: {e_tick}")
+        # 🚀 极速拦截 2: 非交易日（周末/节假日），开市无新行情，磁盘 HDF 缓存直接作为安全基准，0 毫秒穿透！
+        now_int = cct.get_now_time_int() if (cct and hasattr(cct, 'get_now_time_int')) else 1530
+        is_trade_day = cct.get_trade_date_status() if (cct and hasattr(cct, 'get_trade_date_status')) else False
+        if not is_trade_day and len(h5) >= 1000:
+            log.warning(f"[HDF-WEEKEND-HIT] 非交易日/周末，直接使用磁盘 HDF 缓存 ({len(h5)} 只股票)，0毫秒穿透！")
+            dd = _format_and_slice_df(h5, market)
+            if len(dd) > 100:
+                return dd
 
-            # 非交易时间或盘后，且 HDF 缓存数据量完备且非早盘半截残存，直接使用缓存避开 50s 在线网络抓取
-            if not cct.get_work_time() and len(h5) >= max(1000, conf_codes_len - 50) and not is_stale_intraday_cache:
-                force_cache = True
+        # 🛡️ [DATA-INTEGRITY] 交易日盘后完整性校验：
+        # 仅在交易日收盘且出清完成 (is_trade_day and now_int >= 1502)，才检查磁盘缓存是否为收盘结算数据
+        is_stale_intraday_cache = False
+        if is_trade_day and now_int >= 1502 and not cct.get_work_time() and len(h5) > 0 and 'ticktime' in h5.columns and not is_cooling and not has_recent_fail:
+            try:
+                str_ticks = h5['ticktime'].astype(str).str.extract(r'(\d{2}:\d{2}:\d{2})')[0].dropna()
+                if not str_ticks.empty:
+                    closed_ratio = (str_ticks >= '15:00:00').mean()
+                    if closed_ratio < 0.1:
+                        is_stale_intraday_cache = True
+                        log.warning(f"[HDF-STALE-INTRADAY] 当前已收盘，但磁盘 HDF 缓存仍为早盘未收盘数据 (收盘Tick占比仅 {closed_ratio:.1%}), 强制在线刷新全天收盘数据！")
+            except Exception as e_tick:
+                log.debug(f"Tick check failed: {e_tick}")
 
-            o_time = h5[h5.timel != 0].timel
-            if len(o_time) > 0:
-                l_time = time.time() - o_time.iloc[0]
-                if (force_cache or l_time < limit_time) and not is_stale_intraday_cache:
-                    log.warning(f"[HDF-USE] rows={len(h5)} l_time={l_time:.1f}")
-                    if market == 'all':
-                        # co_inx = [inx for inx in h5.index if str(inx).startswith(('6','30','00','688','43','83','87','92'))]
-                        co_inx = [inx for inx in h5.index if str(inx).startswith(cct.code_startswith)]
-                    elif market == 'sh':
-                        co_inx = [inx for inx in h5.index if str(inx).startswith(('6'))]
-                    elif market == 'sz':
-                        co_inx = [inx for inx in h5.index if str(inx).startswith(('00'))]
-                    elif market == 'cyb':
-                        co_inx = [inx for inx in h5.index if str(inx).startswith(('30'))]
-                    elif market == 'kcb':
-                        co_inx = [inx for inx in h5.index if str(inx).startswith(('688'))]
-                    elif market == 'bj':  
-                    #elem.startswith('43') or elem.startswith('83') or elem.startswith('87') or elem.startswith('92')
-                        co_inx = [inx for inx in h5.index if str(inx).startswith(('43','83','87','92'))]
-                    else:
-                        log.error('market is not Find:%s'%(market))
-                        codel = cct.read_to_blocknew(market)
-                        co_inx = [inx for inx in codel if inx in h5.index]
-                    dd = h5.loc[co_inx]
-                    if len(dd) > 100:
-                        log.info(f"return sina_ratio market:{market} count:{len(dd)}")
-                        dd['ticktime'] = dd['ticktime'].astype(str)
-                        
-                        # 补齐日期前缀，增加未来检测纠偏
-                        today_str = time.strftime('%Y-%m-%d')
-                        mask_short = dd['ticktime'].str.len() == 8
-                        if mask_short.any():
-                            dd.loc[mask_short, 'ticktime'] = today_str + ' ' + dd.loc[mask_short, 'ticktime']
-                        
-                        dd['ticktime'] = pd.to_datetime(dd['ticktime'], errors='coerce')
-                        
-                        # 检测未来 Tick 并纠偏至上一个交易日
-                        now = pd.Timestamp.now()
-                        future_mask = dd['ticktime'] > (now + pd.Timedelta(minutes=3))
-                        if future_mask.any():
-                            last_date = cct.get_last_trade_date()
-                            log.warning(f"[TICK-纠偏] 检测到未来时间(HDF), 纠偏至 {last_date}: {dd.loc[future_mask, 'ticktime'].iloc[0]}")
-                            # 重新按上个交易日解析
-                            dd.loc[future_mask, 'ticktime'] = pd.to_datetime(
-                                last_date + ' ' + dd.loc[future_mask, 'ticktime'].dt.strftime('%H:%M:%S'), 
-                                errors='coerce'
-                            )
+        # 🚀 极速拦截 3: 非交易时间或缓存依然新鲜，直接使用缓存
+        if not cct.get_work_time() and len(h5) >= max(1000, conf_codes_len - 50) and not is_stale_intraday_cache:
+            force_cache = True
 
-                        return dd
+        if (force_cache or is_fresh) and not is_stale_intraday_cache and len(h5) >= 1000:
+            log.warning(f"[HDF-FAST-HIT] 命中安全可用缓存 rows={len(h5)} l_time={l_time:.1f}s force={force_cache} fresh={is_fresh}")
+            dd = _format_and_slice_df(h5, market)
+            if len(dd) > 100:
+                return dd
 
     # 备选：如果需要获取指数，由于 'all' 默认只含个股，建议调用此专用方法
     def get_major_indices(self, **kwargs) -> pd.DataFrame:
@@ -1489,17 +1520,30 @@ def get_sina_Market_json(market='all', showtime=True, num='100', retry_count=3, 
     total_batches = (len(url_list) + batch_size - 1) // batch_size
     fetch_success = True
 
+    max_wall_time = 8.0  # 硬熔断上限：整个抓取无论如何不得超过 8 秒
+    fetch_start_time = time.time()
+
     for i in range(0, len(url_list), batch_size):
+        if time.time() - fetch_start_time > max_wall_time:
+            log.warning(f"[SINA-TIMEOUT-ABORT] 在线批次抓取已耗时 {time.time() - fetch_start_time:.1f}s (超过 {max_wall_time}s 上限), 立即熔断并安全降级使用本地 HDF 缓存！")
+            fetch_success = False
+            break
+
         batch_num = i // batch_size + 1
         log.info(f"[SINA-进度] 批次 {batch_num}/{total_batches} 开始... (已获取 {len(df_list)} 个结果)")
-        tasks = [_fetch_with_delay(u, pause_range) for u in url_list[i:i + batch_size]]
+        tasks = [_fetch_with_delay(u, pause_range, stagger_sec=idx * 0.08) for idx, u in enumerate(url_list[i:i + batch_size])]
         try:
-            rs = loop.run_until_complete(asyncio.gather(*tasks))
+            rs = loop.run_until_complete(asyncio.wait_for(asyncio.gather(*tasks), timeout=4.5))
             log.info(f"[SINA-进度] 批次 {batch_num}/{total_batches} 完成 ✓")
+            has_empty = False
             for r_idx, r in enumerate(rs):
                 if r is None or r.empty:
                     log.error(f"[SINA-ERROR] 批次 {batch_num} 中的第 {r_idx+1} 个请求失败或返回空数据！")
                     fetch_success = False
+                    has_empty = True
+            if has_empty:
+                log.warning(f"[SINA-FAST-FAIL] 批次 {batch_num} 出现异常，触发快速熔断，立即停止后续批次以保护系统主流程！")
+                break
         except Exception as e:
             set_blocked(120, f"batch error:{e}")
             fetch_success = False
@@ -1515,19 +1559,20 @@ def get_sina_Market_json(market='all', showtime=True, num='100', retry_count=3, 
     # 判定拉取完整性：如果失败或结果集不全，则回退并不写入 HDF5
     if not fetch_success or len(df_list) < len(url_list):
         g_sina_blocked['retry_count'] = g_sina_blocked.get('retry_count', 0) + 1
+        g_sina_blocked['last_failed_ts'] = time.time()  # 记录失败时间戳，阻断后续死循环强刷
         log.error(f"[SINA-FATAL] Fetch incomplete (count={g_sina_blocked['retry_count']}): expected {len(url_list)} URL results, got {len(df_list)}. Aborting HDF5 writeback!")
 
-        # 🚨 连续重试两次以上仍然因为网络/丢包失败，判定被 Sina 限制，触发 30~60 分钟 (1800s) 延迟尝试/冷却模式
+        # 🚨 连续重试两次以上仍然因为网络/丢包失败，判定被 Sina 限制，触发 10 分钟 (600s) 延迟尝试/冷却模式
         if g_sina_blocked['retry_count'] >= 2:
-            set_blocked_cooling(reason=f"Network/Sina API fetch incomplete {g_sina_blocked['retry_count']} times", cooling_sec=1800)
-            log.warning(f"[SINA-COOLING-ENTER] 连续重试 {g_sina_blocked['retry_count']} 次拉取不全，确认被网络/API限制，启动 30 分钟 (1800s) 延迟避让冷却！")
+            set_blocked_cooling(reason=f"Network/Sina API fetch incomplete {g_sina_blocked['retry_count']} times", cooling_sec=600)
+            log.warning(f"[SINA-COOLING-ENTER] 连续重试 {g_sina_blocked['retry_count']} 次拉取不全，确认被网络/API限制，启动 10 分钟 (600s) 延迟避让冷却！")
 
         h5 = h5a.load_hdf_db(h5_fname, table=h5_table, limit_time=9999999)
         if h5 is not None and len(h5) > 0:
-            log.warning(f"[HDF-FALLBACK] Successfully fell back to existing HDF5 cache with {len(h5)} rows")
-            df = h5
+            log.warning(f"[HDF-FALLBACK] 发生网络超时或Sina风控，立即优雅降级使用磁盘 HDF5 缓存 ({len(h5)} 只股票)，绝不卡死主流程！")
+            return _format_and_slice_df(h5, market)
         else:
-            log.error("[HDF-FALLBACK] No existing HDF5 cache available to fallback to!")
+            log.error("[HDF-FALLBACK] 无法读取到已有磁盘 HDF5 缓存！")
             return []
     else:
         # 抓取成功，自动重置重试计数与冷却标志

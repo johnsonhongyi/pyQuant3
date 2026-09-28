@@ -1,5 +1,13 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-09-28 13:40 新浪行情接口 502/网关超时卡死根治与 HDF 缓存优雅降级加固
+- [x] **【网络底层长休眠清除、请求频次/批次防风控优化、HDF 缓存无损穿透与秒级降级闭环】(`JohnsonUtil/johnson_cons.py`, `JohnsonUtil/commonTips.py`, `JSONData/realdatajson.py`, `20260928_1340_task.md`)**：
+    - [x] **通信协议与防风控参数加固**：行情接口升级为 `https://`；请求头强化为现代 Chrome UA 与标准 `Referer`；`batch_size` 从 50 调降至 8，盘中动态限制 3~8，同批次按 80ms 错峰延时发出，彻底消除瞬时并发冲击；
+    - [x] **清除网络层 30s/60s/600s 异常死锁**：根除 `commonTips.py` 中 `get_url_data` 报错调用的 `sleeprandom(60)` 与 `get_url_data_R` 报错调用的 `sleep(30)`；根除 `_fetch_with_delay` 遇封禁调用的 `await asyncio.sleep(600)`，超时快速释放控制权；
+    - [x] **URL 构造内存缓存与级联熔断**：`_get_sina_Market_url` 引入静态股票总数预估与内存缓存，单次超时缩短至 1.5s，遇异常即刻使用默认计数，杜绝 3 个市场连续超时卡死 15s；
+    - [x] **HDF5 缓存永不误判为 None 与秒级优雅降级**：入口显式采用 `timelimit=False`，保证内存始终握有磁盘 5474 行股票全集；冷却期、异常期、非交易日 0 毫秒穿透返回（0.06s）；在线批次引入 4.5s 硬超时与 5s 快速熔断；实测断网/502 状态下 5.67s 优雅降级返回 5474 行完整数据，后续轮询 0.067s 瞬间穿透，彻底根治 TK 启动与轮询卡死；
+    - [x] **工程规范检查**：`git diff --check` 与 `python -m compileall` 100% 干净通过。
+
 ## 2026-09-28 09:48 最新代码实现审核与执行方案完成度综合评估
 - [x] **【LLM 双 CLI 适配、沙箱脱敏与端到端仿真闭环代码审核及执行方案全量盘点】(`ats/llm/backend_factory.py`, `ats/llm/codex_cli_backend.py`, `ats/llm/antigravity_cli_backend.py`, `tools/run_ipo_llm_simulation.py`, `20260928_0948_task.md`)**：
     - [x] **最新代码实现重大突破**：`backend_factory.py` 打通多 Provider 工厂，正式接通 `antigravity_cli` 与 `codex_cli`；`codex_cli_backend.py` 与 `cli_paths.py` 实现自动寻径与只读沙箱参数构造；`provider_preflight.py` 补全进程树/工具/远端出口多重验收门禁；`run_ipo_llm_simulation.py` 跑通合成数据、Gate 决策、Worker 调用、日志落盘的全闭环仿真；

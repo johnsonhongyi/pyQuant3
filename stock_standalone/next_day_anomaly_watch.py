@@ -912,12 +912,23 @@ def run_cycle(df: Any, *, config_path: str, data_dir: str, asof_date: str,
                     eval_dirty = True
                 continue
             daily_high = _number(row.get("high"))
-            close = _number(row.get("trade", row.get("close")))
+            close = _number(row.get("trade"))
+            if close is None or close <= 0:
+                close = _number(row.get("close"))
+            item = evaluation["candidates"].setdefault(code + ":" + candidate["strategy_id"], {"candidate": candidate, "checkpoints": [], "events": []})
+            tracked_candidate = item.get("candidate", candidate)
+            missing_price_fields = [name for name, value in (("high", daily_high), ("close", close))
+                                    if value is None or value <= 0]
+            if missing_price_fields:
+                if now.hour >= 15 and not any(event.get("type") == "UNVERIFIABLE" for event in item["events"]):
+                    item["events"].append({"type": "UNVERIFIABLE", "date": target_date, "observed_at": observed_at,
+                        "reason": "quote_price_fields_invalid_at_target_day_close:" + ",".join(missing_price_fields)})
+                    tracked_candidate["status"] = "UNVERIFIABLE"
+                    eval_dirty = True
+                continue
             prior_high = _number(candidate.get("feature_values", {}).get("lasth1d"))
             sustained_high = bool(daily_high is not None and close is not None and prior_high is not None and daily_high > prior_high and close > prior_high)
             real_vwap = _number(row.get(vwap_field)) if vwap_field and vwap_field in row else None
-            item = evaluation["candidates"].setdefault(code + ":" + candidate["strategy_id"], {"candidate": candidate, "checkpoints": [], "events": []})
-            tracked_candidate = item.get("candidate", candidate)
             if item["checkpoints"] and item["checkpoints"][-1].get("observed_at") == observed_at:
                 continue
             prior_checkpoint = item["checkpoints"][-1] if item["checkpoints"] else None
@@ -1064,7 +1075,19 @@ def run_cycle(df: Any, *, config_path: str, data_dir: str, asof_date: str,
                             changed = True
                     continue
                 high = _number(row.get("high"))
-                close = _number(row.get("trade", row.get("close")))
+                close = _number(row.get("trade"))
+                if close is None or close <= 0:
+                    close = _number(row.get("close"))
+                missing_price_fields = [name for name, value in (("high", high), ("close", close))
+                                        if value is None or value <= 0]
+                if missing_price_fields:
+                    if due and not _followup_is_terminal(item):
+                        item.setdefault("events", []).append({"type": "UNVERIFIABLE", "date": target_date,
+                            "observed_at": observed_at, "reason": "followup_window_expired_without_quote_evidence",
+                            "missing_quote_fields": missing_price_fields})
+                        tracked["status"] = "UNVERIFIABLE"
+                        changed = True
+                    continue
                 prior_day_checkpoints = [point for point in item.get("checkpoints", [])
                     if str(point.get("observed_at", ""))[:10] < target_date]
                 prior_high = (_number(prior_day_checkpoints[-1].get("high")) if prior_day_checkpoints

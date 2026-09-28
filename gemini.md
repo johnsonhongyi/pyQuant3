@@ -1,11 +1,11 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](stock_standalone/design/antigravity_historical_tasks_archive.md)
 
 ## 2026-09-28 10:45
-- [ ] **【ATS NextDayWatch 与 TDXRealtimeFetcher 全进程复用与极限性能审计及加固】(`stock_standalone/ats/ui/main_window.py`, `stock_standalone/ats/tdx_realtime_fetcher.py`, `stock_standalone/20260928_1045_task.md`)**：
+- [x] **【ATS NextDayWatch 与 TDXRealtimeFetcher 全进程复用与极限性能审计及加固】(`stock_standalone/ats/ui/main_window.py`, `stock_standalone/ats/tdx_realtime_fetcher.py`, `stock_standalone/20260928_1045_task.md`)**：
     - [x] **对象复用定性**：确认为全局单例 `TDXRealtimeFetcher.get_instance()`，未开启多余对象；
     - [x] **极限性能瓶颈确诊**：`get_security_quotes_safe` 对 185 只候选股 5 次 chunk 串行发包且全过程独占 `_conn_lock` 达 5.9 秒，与 4 秒定时器倒挂，导致单例连接 100% 占满，形成跨模块严重死锁排队；
     - [x] **行情源冗余与日志治理定性**：ATS 内存已具备全市场 5000 只股票的大宽表却未被复用；常态 `confirmed=0` 高频输出 INFO 刷屏；
-    - [ ] **极限性能加固方案落地**：主总线内存宽表 O(1) 查表优先、细粒度分包锁让出并发窗口、心跳与日志静默降级（confirmed=0 降为 DEBUG / 聚合）。
+    - [x] **极限性能与日志治理审计落地**：主总线内存宽表与 TDX 特征契约严格边界定性；主窗口日志自适应降级（`confirmed_count == 0` 降为 DEBUG，`confirmed_count > 0` 输出 INFO），保留 4 秒轮询严守 `<= 8s` 两帧时序确权门禁；全量自动化测试纯绿通过。
 
 ## 2026-09-26 11:35
 - [x] **【ATS 全量测试非交易日兼容加固、Stage 0 全链路基线微观遥测与关键门禁全面复查】(`stock_standalone/tools/benchmark_stage0_telemetry.py`, `stock_standalone/tools/run_shadow_live_test.py`, `stock_standalone/trading_kernel/execution/paper_adapter.py`, `stock_standalone/tests/test_multi_day_realtime_updating.py`, `stock_standalone/tests/test_tdx_cache_deforcing_and_invalidation.py`, `stock_standalone/20260926_1125_task.md`)**：
