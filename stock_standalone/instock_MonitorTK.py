@@ -3293,10 +3293,34 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
                         # ================== 原有逻辑：完全保留 ==================
 
-                        if obj and obj.get("cmd") in ("REQ_FULL_SYNC", "SUBSCRIBE_STREAM"):
+                        if obj and obj.get("cmd") == "UNSUBSCRIBE_STREAM":
+                            target_port = obj.get("port")
+                            subscribers = getattr(self, '_stream_subscribers', {})
+                            sub_info = subscribers.get(target_port)
+                            if sub_info is not None:
+                                if sub_info.get('is_static', False):
+                                    sub_info['subscribed'] = False
+                                    sub_info['active'] = False
+                                    sub_info['fail_count'] = 0
+                                else:
+                                    subscribers.pop(target_port, None)
+                            if hasattr(self, '_temp_dynamic_ports'):
+                                self._temp_dynamic_ports.discard(target_port)
+                            getattr(self, '_temp_dynamic_port_names', {}).pop(target_port, None)
+                            getattr(self, '_deferred_port_sync', set()).discard(target_port)
+                            setattr(self, f'_force_sync_{target_port}', False)
+                            setattr(self, f'_force_sync_blocked_{target_port}', False)
+                            setattr(self, f'_awaiting_full_ack_{target_port}', None)
+                            logger.info(f'[TK 订阅中心] 客户端注销常态推送: Port={target_port}')
+                            if hasattr(self, '_send_df_wake_event'):
+                                self._send_df_wake_event.set()
+
+                        elif obj and obj.get("cmd") in ("REQ_FULL_SYNC", "SUBSCRIBE_STREAM"):
                             target_port = obj.get("port")
                             client_name = obj.get("client_name") or obj.get("service_name") or f"Client_{target_port}"
                             subscribe = obj.get("subscribe", False) or (obj.get("cmd") == "SUBSCRIBE_STREAM")
+                            global_sync_request = not isinstance(target_port, int)
+                            visualizer_sync_request = target_port == 26668
                             logger.warning(f'[Pipe] Feedback listener cmd {obj.get("cmd")} (target_port={target_port}, sub={subscribe}, client={client_name})')
 
                             # 🚀 [TK 统一流式订阅中心]
@@ -3328,6 +3352,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                         self._stream_subscribers[target_port]["name"] = client_name
                                         self._stream_subscribers[target_port]["subscribed"] = True
                                     setattr(self, f'_force_sync_{target_port}', True)
+                                    setattr(self, f'_force_sync_blocked_{target_port}', False)
                                 else:
                                     # 单次拉取的临时动态端口
                                     if not hasattr(self, '_temp_dynamic_ports'):
@@ -3341,10 +3366,12 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                 for p in (26670, 26671, 26675):
                                     self._stream_subscribers[p]["subscribed"] = True
                                     setattr(self, f'_force_sync_{p}', True)
+                                    setattr(self, f'_force_sync_blocked_{p}', False)
 
-                            self._force_full_sync_pending = True
-                            self._force_ui_refresh_pending = True
-                            self._df_first_send_done = False
+                            if global_sync_request or visualizer_sync_request:
+                                self._force_full_sync_pending = True
+                                self._force_ui_refresh_pending = True
+                                self._df_first_send_done = False
                             if hasattr(self, '_send_df_wake_event'):
                                 self._send_df_wake_event.set()
 
@@ -3355,6 +3382,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                             ack_matched = full_ack_matches(obj, expected, getattr(self, '_last_vis_bus_version', None))
                             if ack_matched:
                                 setattr(self, f'_force_sync_{target_port}', False)
+                                setattr(self, f'_force_sync_blocked_{target_port}', False)
                                 setattr(self, f'_awaiting_full_ack_{target_port}', None)
                                 if expected is not None:
                                     logger.warning(f'[IPC ACK] Port={target_port} 已确认全量行情基线 (version={obj.get("source_version")})')
@@ -8936,15 +8964,36 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
             while self._df_sync_running:
                 vis_enabled = getattr(self, '_vis_enabled_cache', True)
+                is_work_time_now = cct.get_work_time()
+                deferred_port_sync = getattr(self, '_deferred_port_sync', None)
+                if not isinstance(deferred_port_sync, set):
+                    deferred_port_sync = set()
+                    self._deferred_port_sync = deferred_port_sync
+                if is_work_time_now and deferred_port_sync:
+                    for port in tuple(deferred_port_sync):
+                        sub_info = self._stream_subscribers.get(port)
+                        if sub_info and sub_info.get('subscribed', False):
+                            setattr(self, f'_force_sync_{port}', True)
+                            setattr(self, f'_force_sync_blocked_{port}', False)
+                        deferred_port_sync.discard(port)
                 pending_port_sync = any(
-                    info.get('subscribed', False) and getattr(self, f'_force_sync_{port}', False)
+                    info.get('subscribed', False)
+                    and getattr(self, f'_force_sync_{port}', False)
+                    and not getattr(self, f'_force_sync_blocked_{port}', False)
                     for port, info in list(self._stream_subscribers.items())
                 ) or bool(getattr(self, '_temp_dynamic_ports', None))
-                pending_full_sync = (
+                explicit_sync_pending = (
                     getattr(self, '_force_full_sync_pending', False)
-                    or getattr(self, '_cold_start', False)
                     or pending_port_sync
                 )
+                pending_full_sync = (
+                    explicit_sync_pending
+                    or getattr(self, '_cold_start', False)
+                )
+                if not is_work_time_now and not explicit_sync_pending:
+                    self._send_df_wake_event.wait(timeout=10.0)
+                    self._send_df_wake_event.clear()
+                    continue
                 if not has_sync_consumer(vis_enabled, self._stream_subscribers,
                                          getattr(self, '_temp_dynamic_ports', None)):
                     self._send_df_wake_event.wait(timeout=2.0)
@@ -9109,6 +9158,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         for p in self._stream_subscribers:
                             if self._stream_subscribers[p].get('subscribed', False):
                                 setattr(self, f'_force_sync_{p}', True)
+                                setattr(self, f'_force_sync_blocked_{p}', False)
                                 setattr(self, f'_awaiting_full_ack_{p}', None)
                         pending_full_sync = True
 
@@ -9145,8 +9195,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                   if display_fp is not None and daily_fp is not None else None)
                     if not content_requires_send(
                         getattr(self, '_last_attempt_content_fingerprint', None), content_fp,
-                        getattr(self, '_force_full_sync_pending', False)
+                        explicit_sync_pending
                     ):
+                        # 冷启动/失败状态可以要求下次有变化时走全量，但不能因内容未变而忙循环。
+                        self._send_df_wake_event.wait(timeout=5.0)
+                        self._send_df_wake_event.clear()
                         continue
                     # 失败标记仅决定下一帧需全量，不应自行重发相同内容。
                     self._last_attempt_content_fingerprint = content_fp
@@ -9482,6 +9535,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                 ports_to_send = []
                                 now_ipc = time.time()
                                 is_work_time = cct.get_work_time()
+                                deferred_port_sync = getattr(self, '_deferred_port_sync', None)
+                                if not isinstance(deferred_port_sync, set):
+                                    deferred_port_sync = set()
+                                    self._deferred_port_sync = deferred_port_sync
 
                                 if hasattr(self, '_stream_subscribers'):
                                     for port, sub_info in list(self._stream_subscribers.items()):
@@ -9490,14 +9547,22 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                         is_port_active = sub_info.get("active", False)
                                         last_try = getattr(self, f'_last_try_{port}', sub_info.get("last_try", 0.0))
                                         is_forced_port = getattr(self, f'_force_sync_{port}', False)
+                                        if is_work_time and port in deferred_port_sync:
+                                            setattr(self, f'_force_sync_{port}', True)
+                                            setattr(self, f'_force_sync_blocked_{port}', False)
+                                            deferred_port_sync.discard(port)
+                                            is_forced_port = True
 
                                         should_send = False
                                         if is_forced_port:
-                                            should_send = now_ipc - getattr(self, f'_last_full_try_{port}', 0.0) >= 10.0
+                                            should_send = (
+                                                not getattr(self, f'_force_sync_blocked_{port}', False)
+                                                and now_ipc - getattr(self, f'_last_full_try_{port}', 0.0) >= 10.0
+                                            )
                                         elif msg_type_daily == 'UPDATE_DF_ALL':
                                             # 🛡️【全量回退高优先通行】：若当前帧触发了全量回退 (非空变空等)，
-                                            # 为防止后续增量建立在订阅端未接收的基线上，必须立即放行发送全量包！
-                                            should_send = True
+                                            # 仅在交易时段向常态订阅者发送；盘后仅响应端口级显式全量请求。
+                                            should_send = is_work_time
                                         elif is_work_time:
                                             if is_port_active:
                                                 if now_ipc - last_try >= dynamic_interval:
@@ -9508,9 +9573,12 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
                                         if should_send:
                                             ports_to_send.append((port, sub_info, is_forced_port))
-                                        elif has_daily_update:
+                                        elif has_daily_update and is_work_time and not is_forced_port:
                                             # 差分或全量只要未物理发送，下一次必须先重建该端口的全量基线。
                                             setattr(self, f'_force_sync_{port}', True)
+                                            setattr(self, f'_force_sync_blocked_{port}', False)
+                                        elif has_daily_update and not is_work_time:
+                                            deferred_port_sync.add(port)
 
                                 # ⚡ [IPC 动态临时端口] 单次拉取
                                 temp_dynamic_ports = list(getattr(self, '_temp_dynamic_ports', set()))
@@ -9565,6 +9633,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                                 setattr(self, f'_force_sync_{port}', True)
                                                 setattr(self, f'_awaiting_full_ack_{port}', (self._sync_session, version))
                                                 setattr(self, f'_last_full_try_{port}', now_ipc)
+                                                setattr(self, f'_force_sync_blocked_{port}', True)
                                             try:
                                                 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s2:
                                                     s2.settimeout(1.5)  # 1.5秒超时防止阻塞
@@ -9591,14 +9660,25 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                                     sub_info["fail_count"] = sub_info.get("fail_count", 0) + 1
                                                     # 🛡️ 发送失败时标记下次恢复必须发全量包重置基线
                                                     setattr(self, f'_force_sync_{port}', True)
-                                                    if not sub_info.get("is_static", False) and sub_info["fail_count"] >= 20 and (now_ipc - sub_info.get("last_try", now_ipc) > 600):
+                                                    # 连通性失败后暂停自动重试，等待客户端重新握手，避免死端口持续占用发送线程。
+                                                    setattr(self, f'_force_sync_blocked_{port}', True)
+                                                    if not sub_info.get("is_static", False):
                                                         self._stream_subscribers.pop(port, None)
-                                                        logger.info(f"🧹 [TK 订阅中心] 动态端口 {port} 长期无响应，已自动注销清理订阅。")
+                                                        getattr(self, '_deferred_port_sync', set()).discard(port)
+                                                        setattr(self, f'_force_sync_{port}', False)
+                                                        setattr(self, f'_awaiting_full_ack_{port}', None)
+                                                        logger.info(f"🧹 [TK 订阅中心] 动态端口 {port} 发送失败，已注销失联订阅。")
                                                 last_error_log = getattr(self, f'_last_ipc_error_log_{port}', 0.0)
                                                 if (sub_info is None or force_full_for_port or now_ipc - last_error_log >= 30.0):
                                                     logger.warning(f"[IPC发送] 服务={service_name} Port={port} Socket 连接/发送失败: {send_err}")
                                                     setattr(self, f'_last_ipc_error_log_{port}', now_ipc)
                                             finally:
+                                                if sub_info is None:
+                                                    if hasattr(self, '_temp_dynamic_ports'):
+                                                        self._temp_dynamic_ports.discard(port)
+                                                    getattr(self, '_temp_dynamic_port_names', {}).pop(port, None)
+                                                    setattr(self, f'_force_sync_{port}', False)
+                                                    setattr(self, f'_awaiting_full_ack_{port}', None)
                                                 port_send_ms = (time.perf_counter() - ipc_port_send_start) * 1000.0
                                                 self._record_latency_sample(
                                                     f"ipc_send:{service_key}:port_{port}",
@@ -9662,7 +9742,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 # ⭐ 6️⃣ 状态更新（只在这里）
                 # ======================================================
                 prev = getattr(self, "_df_first_send_done", False)
-                self._df_first_send_done = bool(sent or send_success_any)
+                self._df_first_send_done = bool(prev or sent or send_success_any)
                 if (sent or send_success_any) and source_fp is not None:
                     previous_source_fp = getattr(self, '_last_send_source_fingerprint', None)
                     self._last_send_source_fingerprint = source_fp

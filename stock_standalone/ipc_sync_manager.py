@@ -56,13 +56,15 @@ class IPCSyncManager:
         service_name: str = "multi_period",
         data_callback: Optional[Callable] = None,
         logger: Optional[Any] = None,
-        silent_bind_fail: bool = False
+        silent_bind_fail: bool = False,
+        stale_sync_interval: Optional[float] = 600.0
     ):
         self.port = port
         self.service_name = service_name
         self.data_callback = data_callback
         self.logger = logger
         self.silent_bind_fail = silent_bind_fail
+        self.stale_sync_interval = stale_sync_interval
         
         self.current_df = None
         self.df_lock = threading.Lock()
@@ -108,6 +110,8 @@ class IPCSyncManager:
         self._listener_running = False
         self.is_bound = False
         self._bind_event.clear()
+        with self.df_lock:
+            self.current_df = None
         if self.server_socket:
             try:
                 self.server_socket.close()
@@ -188,6 +192,29 @@ class IPCSyncManager:
             self.log_error(f"握手注册常态流订阅失败: {e}")
             return False
 
+    def unsubscribe_stream(self) -> bool:
+        """通知 TK 释放当前端口的常态订阅，避免客户端退出后继续推送。"""
+        cmd_dict = {
+            "cmd": "UNSUBSCRIBE_STREAM",
+            "port": self.port,
+            "service_name": self.service_name,
+            "client_name": self.service_name,
+        }
+        payload = json.dumps(cmd_dict, ensure_ascii=False).encode("utf-8")
+        try:
+            import win32file
+            handle = win32file.CreateFile(
+                self.pipe_name, win32file.GENERIC_WRITE, 0, None,
+                win32file.OPEN_EXISTING, 0, None
+            )
+            win32file.WriteFile(handle, payload)
+            win32file.CloseHandle(handle)
+            self.log_info(f"已向主程序注销常态流订阅 (Port={self.port})")
+            return True
+        except Exception as e:
+            self.log_error(f"注销常态流订阅失败: {e}")
+            return False
+
     def _heartbeat_loop(self):
         """自动定时心跳，在需要时（冷启动或长时间未收到更新）自动向主程序发起同步请求"""
         last_request_t = 0
@@ -205,18 +232,26 @@ class IPCSyncManager:
             
             should_sync = False
             if not has_data:
-                # 冷启动或无数据，且距离上次请求超过 15 秒
-                if now - last_request_t > 15:
+                # 首次冷启动立即请求；失败后的自动重试仅在交易时段进行。
+                if last_request_t == 0:
                     should_sync = True
+                elif now - last_request_t > 60:
+                    last_request_t = now
+                    try:
+                        from JohnsonUtil import commonTips as cct
+                        should_sync = cct.get_work_time()
+                    except Exception:
+                        should_sync = False
             else:
-                # 仅在交易时段内：若 10 分钟没有收到更新，且距离上次请求超过 60 秒，才自动续期请求
+                # 可选：仅在交易时段内对长时间无更新的连接发起低频续期。
                 try:
                     from JohnsonUtil import commonTips as cct
                     is_work_time = cct.get_work_time()
                 except Exception:
                     is_work_time = False
 
-                if is_work_time and (now - self.last_recv_t > 600):
+                if (self.stale_sync_interval is not None and is_work_time
+                        and now - self.last_recv_t > self.stale_sync_interval):
                     if now - last_request_t > 60:
                         should_sync = True
             
@@ -442,7 +477,8 @@ def get_ipc_sync_manager(
     candidate_ports: Optional[List[int]] = None,
     data_callback: Optional[Callable] = None,
     logger: Optional[Any] = None,
-    auto_start: bool = True
+    auto_start: bool = True,
+    stale_sync_interval: Optional[float] = 600.0
 ) -> Optional[IPCSyncManager]:
     """
     根据服务标识 (service_name) 获取或初始化专属 IPCSyncManager 单例。
@@ -454,6 +490,10 @@ def get_ipc_sync_manager(
             mgr = _SERVICE_MANAGERS[service_name]
             if auto_start and not getattr(mgr, '_listener_running', False):
                 mgr.start()
+                if getattr(mgr, '_bind_event', None):
+                    mgr._bind_event.wait(timeout=1.5)
+            if auto_start and not getattr(mgr, 'is_bound', False):
+                return None
             return mgr
 
         ports_to_try = candidate_ports or FALLBACK_PORTS_MAP.get(
@@ -469,7 +509,8 @@ def get_ipc_sync_manager(
                     service_name=service_name,
                     data_callback=data_callback,
                     logger=logger,
-                    silent_bind_fail=True
+                    silent_bind_fail=True,
+                    stale_sync_interval=stale_sync_interval
                 )
                 if auto_start:
                     mgr.start()

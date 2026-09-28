@@ -16,7 +16,6 @@ import time
 import json
 import socket
 from datetime import datetime, timedelta
-from ipc_sync_manager import IPCSyncManager
 from sys_utils import get_app_root
 from JohnsonUtil import commonTips as cct
 
@@ -106,7 +105,7 @@ CONFIG_FILE = os.path.join(get_app_root(), "popularity_resonance_config.json")
 
 
 class _DynamicIPCSyncProxy:
-    """动态端口 IPC 行情代理类：无需长期占用固定端口，按需或自动刷新时开启动态端口拉取数据"""
+    """保留兼容接口，底层使用单个常驻 IPC 订阅接收全量与增量行情。"""
     def __init__(self, owner):
         self.owner = owner
 
@@ -117,12 +116,16 @@ class _DynamicIPCSyncProxy:
         return self.owner.request_dynamic_ipc_sync()
 
     def stop(self):
-        pass
+        manager = getattr(self.owner, "_ipc_sync_manager", None)
+        if manager is not None:
+            manager.unsubscribe_stream()
+            manager.stop()
 
 
 class PRServiceGUI:
     def __init__(self, root):
         self.root = root
+        self._shutdown_event = threading.Event()
         self.root.title("人气综合排行榜2.22")
         
         # 加载配置（必须在设置 geometry 前加载）
@@ -206,20 +209,18 @@ class PRServiceGUI:
         self.history_selector.set("history5")
         self._on_history_group_changed()
 
-        # 初始化动态 IPC 行情同步管理器与内存行情快照 (不用长期占用固定端口)
+        # 使用单个常驻 IPC 订阅：冷启动收全量基线，后续接收增量更新。
         self.current_df = None
         self.df_lock = threading.Lock()
         self._ipc_sync_in_progress = False
+        self._ipc_sync_manager = None
         self.sync_manager = _DynamicIPCSyncProxy(self)
         
-        # 启动后后台发起带退避重试的动态端口 IPC 数据同步 (提升启动成功率)
+        # 启动后建立常驻订阅；IPCSyncManager 在无数据时负责低频重试。
         def _start_initial_ipc_sync():
-            for attempt in range(3):
-                df = self.request_dynamic_ipc_sync(timeout=8.0)
-                if df is not None and not df.empty:
-                    service_logger.info(f"[IPC 启动同步] 第 {attempt + 1} 次尝试成功获取 IPC 行情数据 ({len(df)} 行)")
-                    break
-                time.sleep(2.0 * (attempt + 1))
+            df = self.request_dynamic_ipc_sync(timeout=8.0)
+            if df is not None and not df.empty:
+                service_logger.info(f"[IPC 启动同步] 已获取常驻订阅行情基线 ({len(df)} 行)")
 
         threading.Thread(target=_start_initial_ipc_sync, daemon=True).start()
         
@@ -234,7 +235,10 @@ class PRServiceGUI:
 
         # 🚀 启动后立即异步触发一次 TDX API 盘口秒级刷新，第一时间呈现最新价格与涨跌
         if hasattr(self, 'root'):
-            self.root.after(300, lambda: threading.Thread(target=self.refresh_realtime_from_tdx, daemon=True).start())
+            def _start_initial_tdx_refresh():
+                if not self._shutdown_event.is_set() and cct.get_work_time():
+                    threading.Thread(target=self.refresh_realtime_from_tdx, daemon=True).start()
+            self.root.after(300, _start_initial_tdx_refresh)
 
         # 监听窗口关闭事件，确保最终配置得到持久化保存
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -584,6 +588,8 @@ class PRServiceGUI:
 
 
     def on_close(self):
+        self._shutdown_event.set()
+        self.is_running = False
         try:
             self.sync_manager.stop()
         except Exception:
@@ -777,14 +783,14 @@ class PRServiceGUI:
             self.lbl_status.config(text=f"TDX刷新频率已更新: {selected_text} ({intv_str})", fg="blue")
 
     def _start_ipc_polling_loop(self):
-        """后台高频 TDX API 秒级盘口更新 + 低频后台 IPC 动态辅助同步线程 (全面对齐 cct.ats_tdx_interval 与自定义设置)"""
+        """仅在交易时段执行秒级 TDX API 刷新；IPC 由常驻订阅推送增量。"""
         def polling_worker():
-            ipc_counter = 0.0
-            while getattr(self, "root", None):
+            while getattr(self, "root", None) and not self._shutdown_event.is_set():
                 try:
                     # 动态读取当前 TDX 刷新间隔 (默认跟随 cct.ats_tdx_interval，如 5.0s；支持图2独立微调)
                     sleep_sec = max(1.0, min(self._get_current_tdx_interval(), 60.0))
-                    time.sleep(sleep_sec)
+                    if self._shutdown_event.wait(timeout=sleep_sec):
+                        break
 
                     if not getattr(self, "root", None):
                         break
@@ -799,20 +805,14 @@ class PRServiceGUI:
                         if not getattr(self, '_is_crawling', False):
                             self.refresh_realtime_from_tdx()
 
-                    # 2. 🐢 [低频辅助通道] IPC 全量衍生量化特征同步 (约 60 秒静默轮询一次)
-                    ipc_counter += sleep_sec
-                    if ipc_counter >= 60.0:
-                        ipc_counter = 0.0
-                        if is_work_time and not getattr(self, '_ipc_sync_in_progress', False) and not getattr(self, '_is_crawling', False):
-                            service_logger.debug("[IPC 辅助同步] 交易时间内后台低频同步 IPC 量化指标数据...")
-                            self.request_dynamic_ipc_sync(timeout=5.0)
-
                 except Exception as e:
                     service_logger.debug(f"[实时轮询引擎] 异常: {e}")
 
         threading.Thread(target=polling_worker, daemon=True, name="PR_RealtimePollingWorker").start()
 
     def _poll_favorites_loop(self):
+        if self._shutdown_event.is_set():
+            return
         if not hasattr(self, 'root') or not self.root:
             return
         try:
@@ -824,10 +824,11 @@ class PRServiceGUI:
         except Exception as e:
             service_logger.debug(f"Error in poll_favorites_loop: {e}")
         finally:
-            try:
-                self.root.after(500, self._poll_favorites_loop)
-            except Exception:
-                pass
+            if not self._shutdown_event.is_set():
+                try:
+                    self.root.after(500, self._poll_favorites_loop)
+                except Exception:
+                    pass
 
     def _refresh_ui_favorites(self):
         try:
@@ -1162,91 +1163,57 @@ class PRServiceGUI:
                 return self.current_df.copy()
         return None
 
-    def _find_available_port(self, candidate_ports=None):
-        import socket
-        if candidate_ports is None:
-            candidate_ports = [26685, 26686, 26687, 26688, 26689, 26690, 26691, 26692, 26693, 26694, 26695]
-        for p in candidate_ports:
-            try:
-                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                if hasattr(socket, 'SO_EXCLUSIVEADDRUSE'):
-                    s.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
-                s.bind(('127.0.0.1', p))
-                s.close()
-                return p
-            except Exception:
-                continue
-        try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.bind(('127.0.0.1', 0))
-            assigned_port = s.getsockname()[1]
-            s.close()
-            return assigned_port
-        except Exception:
-            return 26685
-
     def request_dynamic_ipc_sync(self, timeout=8.0):
-        """自动刷新或更新数据时，开启动态端口向主程序拉取全量行情数据包，接收解包完后即刻物理关闭释放端口"""
+        """确保常驻 IPC 订阅已启动，并等待冷启动全量基线；后续数据由 TK 增量推送。"""
         if getattr(self, '_ipc_sync_in_progress', False):
             return self.get_current_df()
         self._ipc_sync_in_progress = True
-
-        dyn_port = self._find_available_port()
-        service_logger.warning(f"[IPC 动态端口] 自动开启临时动态端口 Port={dyn_port} 获取行情数据...")
-
-        received_container = []
-        def _dynamic_cb(df):
-            if df is not None and not df.empty:
-                received_container.append(df)
-                with self.df_lock:
-                    self.current_df = df
-                try:
-                    self.on_realtime_data_updated(df)
-                except Exception as e:
-                    service_logger.debug(f"实时数据更新回调异常: {e}")
-
-        temp_mgr = IPCSyncManager(
-            port=dyn_port,
-            service_name="Popularity_Resonance",
-            data_callback=_dynamic_cb,
-            logger=service_logger,
-        )
         try:
-            temp_mgr.start()
-            if getattr(temp_mgr, '_bind_event', None):
-                temp_mgr._bind_event.wait(timeout=0.5)
-            if getattr(temp_mgr, 'is_bound', False):
-                service_logger.warning(f"[IPC 动态端口] Socket 监听已就绪 Port={dyn_port}")
-            else:
-                service_logger.warning(f"[IPC 动态端口] Socket 监听未就绪 Port={dyn_port}")
-
-            # 通过命名管道向 TK 发送包含动态端口的 REQ_FULL_SYNC 指令 (强行发包，避免被防刷冷却逻辑误拦截)
-            if temp_mgr.request_full_sync(force=True):
-                service_logger.warning(f"[IPC 动态端口] 已向后台 Pipe 发送 REQ_FULL_SYNC (Port={dyn_port})")
-            else:
-                service_logger.warning(f"[IPC 动态端口] REQ_FULL_SYNC 发送失败 (Port={dyn_port})")
+            manager = getattr(self, '_ipc_sync_manager', None)
+            if manager is None or not getattr(manager, 'is_bound', False):
+                if manager is not None:
+                    manager.stop()
+                from ipc_sync_manager import get_ipc_sync_manager
+                manager = get_ipc_sync_manager(
+                    service_name="Popularity_Resonance",
+                    candidate_ports=[26685, 26686, 26687, 26688, 26689, 26690],
+                    data_callback=self._on_ipc_data_updated,
+                    logger=service_logger,
+                    auto_start=True,
+                    stale_sync_interval=None,
+                )
+                self._ipc_sync_manager = manager
+                if manager is None or not getattr(manager, 'is_bound', False):
+                    service_logger.warning("[IPC 订阅] 工厂未能建立常驻行情监听")
+                    self._ipc_sync_manager = None
+                    return self.get_current_df()
+            # 服务工厂可能返回进程内已存在的实例，始终绑定当前窗口回调。
+            manager.data_callback = self._on_ipc_data_updated
+            manager.stale_sync_interval = None
 
             start_t = time.time()
-            while time.time() - start_t < timeout:
-                if received_container or temp_mgr.get_current_df() is not None:
-                    df_got = temp_mgr.get_current_df()
-                    if df_got is not None and not df_got.empty:
-                        with self.df_lock:
-                            self.current_df = df_got
-                        service_logger.warning(f"[IPC 动态端口] 成功通过 Port={dyn_port} 接收 {len(df_got)} 行最新数据 (耗时 {time.time()-start_t:.2f}s)，即刻释放端口")
-                        break
+            while not self._shutdown_event.is_set() and time.time() - start_t < timeout:
+                current_df = manager.get_current_df()
+                if current_df is not None and not current_df.empty:
+                    return current_df
                 time.sleep(0.1)
-            current_df = temp_mgr.get_current_df()
-            if not received_container and (current_df is None or current_df.empty):
-                service_logger.warning(f"[IPC 动态端口] 等待 {timeout:.1f}s 未收到行情数据 (Port={dyn_port})")
+            service_logger.debug(f"[IPC 订阅] 等待行情基线超时 ({timeout:.1f}s, Port={manager.port})")
         except Exception as e:
-            service_logger.error(f"动态端口获取 IPC 数据异常: {e}")
+            service_logger.error(f"常驻 IPC 行情订阅异常: {e}")
         finally:
-            # 用完立即停止物理 Socket 监听并关闭释放端口！
-            temp_mgr.stop()
             self._ipc_sync_in_progress = False
 
         return self.get_current_df()
+
+    def _on_ipc_data_updated(self, df):
+        if df is None or df.empty:
+            return
+        with self.df_lock:
+            self.current_df = df
+        try:
+            self.on_realtime_data_updated(df)
+        except Exception as e:
+            service_logger.debug(f"实时数据更新回调异常: {e}")
 
     def on_realtime_data_updated(self, df):
         """当主程序通过 Socket 推送最新的 DataFrame 时的回调"""
@@ -3093,13 +3060,18 @@ class PRServiceGUI:
         self.btn_refresh.config(state="disabled", text="正在查询...")
         self.lbl_status.config(text="正在获取数据...", fg="blue")
         # 手动查询刷新，传入 force_save=True 以强制持久化数据
-        threading.Thread(target=self._run_once_job, args=(True,), daemon=True).start()
+        threading.Thread(target=self._run_once_job, args=(True, True), daemon=True).start()
 
-    def _run_once_job(self, force_save=False):
+    def _run_once_job(self, force_save=False, allow_offhours_ipc=False):
         self._is_crawling = True
         try:
-            # 🚀 异步启动 IPC 动态端口数据同步守护（不阻塞主抓取和前台实时更新）
-            threading.Thread(target=lambda: self.request_dynamic_ipc_sync(timeout=5.0), daemon=True).start()
+            try:
+                from JohnsonUtil import commonTips as cct
+                allow_ipc_sync = allow_offhours_ipc or cct.get_work_time()
+            except Exception:
+                allow_ipc_sync = bool(allow_offhours_ipc)
+            if allow_ipc_sync:
+                threading.Thread(target=lambda: self.request_dynamic_ipc_sync(timeout=5.0), daemon=True).start()
 
             today = time.strftime("%Y-%m-%d")
             # 💥 如果是自动刷新中或手动触发查询刷新，且跨天了，自动切换到今日日期
@@ -3802,8 +3774,20 @@ class PRServiceGUI:
             
             def loop():
                 while self.is_running:
-                    self._run_once_job()
-                    for _ in range(int(interval_min * 60)):
+                    try:
+                        from JohnsonUtil import commonTips as cct
+                        is_work_time = cct.get_work_time()
+                    except Exception:
+                        is_work_time = False
+
+                    if is_work_time:
+                        self._run_once_job()
+                        wait_seconds = max(1, int(interval_min * 60))
+                    else:
+                        # 自动抓取只在交易日交易时段运行；午休、收盘及非交易日低频检查。
+                        wait_seconds = 30
+
+                    for _ in range(wait_seconds):
                         if not self.is_running:
                             break
                         time.sleep(1)
