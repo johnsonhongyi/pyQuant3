@@ -352,6 +352,11 @@ class GateOrchestrator:
             return self._block(passport, 0, "Gate 0 阻断: 决策配置哈希与实际配置内容不一致")
         carry_allow = _config_number(decision_config, "t1_carry", "allow_threshold")
         min_rr = _config_number(decision_config, "trade_gate", "min_risk_reward")
+        trade_gate_config = decision_config.get("trade_gate", {})
+        allowed_actions = (
+            trade_gate_config.get("allowed_actions")
+            if isinstance(trade_gate_config, Mapping) else None
+        )
         signal_max_age = _config_number(decision_config, "trade_gate", "signal_max_age_seconds")
         risk_clock_skew = _config_number(decision_config, "trade_gate", "risk_clock_skew_seconds")
         auth_ttl = _config_number(decision_config, "trade_gate", "authorization_ttl_seconds")
@@ -362,6 +367,9 @@ class GateOrchestrator:
         if (
             carry_allow is None or not 0 <= carry_allow <= 100
             or min_rr is None or min_rr <= 0
+            or not isinstance(allowed_actions, (list, tuple))
+            or not allowed_actions
+            or any(action not in {"WATCH", "BUY", "SELL"} for action in allowed_actions)
             or signal_max_age is None or signal_max_age <= 0
             or risk_clock_skew is None or risk_clock_skew < 0
             or auth_ttl is None or auth_ttl <= 0 or auth_ttl > signal_max_age
@@ -572,6 +580,8 @@ class GateOrchestrator:
             or trade_plan.buy_zone_max < trade_plan.buy_zone_min
         ):
             return self._block(passport, 5, "Gate 5 阻断: 交易计划代码或买入区间无效")
+        if "BUY" not in allowed_actions:
+            return self._block(passport, 5, "Gate 5 阻断: 版本化交易配置未授权 BUY")
         if current_price < trade_plan.buy_zone_min:
             passport.block_at_gate = 5
             passport.final_decision = "WATCH"

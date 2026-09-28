@@ -5,12 +5,14 @@ from __future__ import annotations
 
 import json
 import shutil
-import subprocess
 import tempfile
 from pathlib import Path
 from typing import Any, Dict, Mapping
 
 from ats.llm.antigravity_cli_backend import matches_json_schema
+from ats.llm.cli_process import BoundedCLIError, run_bounded_cli
+from ats.llm.remote_prompt_templates import build_approved_remote_prompt
+from ats.llm.remote_sanitizer import RemoteEgressError
 
 
 class CodexCLIBackend:
@@ -63,15 +65,16 @@ class CodexCLIBackend:
         try:
             from ats.llm.remote_sanitizer import build_remote_safe_request
 
+            agent_type = request.get("agent_type")
             safe = build_remote_safe_request(
-                str(request.get("agent_type", "")), request.get("context"), self.remote_policy
+                agent_type, request.get("context"), self.remote_policy
             )
-            prompt = (
-                str(request.get("prompt", ""))
-                + "\n\n仅使用本次获准投影的上下文(JSON)：\n"
-                + safe["context_json"]
+            prompt = build_approved_remote_prompt(
+                agent_type, request.get("prompt_version"), request.get("prompt"),
+                safe["context_json"],
             )
-            if len(prompt.encode("utf-8")) > 48 * 1024:
+            prompt_bytes = prompt.encode("utf-8")
+            if len(prompt_bytes) > 48 * 1024:
                 return self._failure("PROMPT_TOO_LARGE")
             schema = json.dumps(
                 response_schema, ensure_ascii=False, sort_keys=True,
@@ -91,23 +94,44 @@ class CodexCLIBackend:
                 if self.model_id:
                     command.extend(["--model", self.model_id])
                 command.append("-")
-                completed = subprocess.run(
-                    command, input=prompt, capture_output=True, text=True,
-                    encoding="utf-8", errors="replace",
-                    timeout=float(timeout_seconds), check=False, shell=False,
-                    cwd=temporary,
+                completed = run_bounded_cli(
+                    command, cwd=temporary, stdin_bytes=prompt_bytes,
+                    timeout_seconds=float(timeout_seconds),
                 )
             if completed.returncode != 0:
-                return self._failure("CLI_FAILED")
-            proposal = json.loads(completed.stdout.strip())
+                return self._failure(
+                    self._classify_cli_exit(completed.returncode, completed.stderr)
+                )
+            try:
+                proposal = json.loads(completed.stdout.decode("utf-8", errors="strict").strip())
+            except (UnicodeError, ValueError, TypeError):
+                return self._failure("CLI_OUTPUT_INVALID")
             if not isinstance(proposal, dict) or not matches_json_schema(proposal, response_schema):
                 return self._failure("SCHEMA_VALIDATION_FAILED")
             return {"status": "OK", "proposal": proposal}
-        except subprocess.TimeoutExpired:
-            return self._failure("CLI_TIMEOUT")
+        except RemoteEgressError:
+            return self._failure("PROMPT_OR_CONTEXT_NOT_APPROVED")
+        except BoundedCLIError as exc:
+            return self._failure(exc.code)
         except Exception:
             return self._failure("CLI_EXCEPTION")
 
     @staticmethod
     def _failure(code: str) -> Dict[str, Any]:
         return {"status": "UNAVAILABLE", "error_code": code}
+
+    @staticmethod
+    def _classify_cli_exit(returncode: int, stderr: bytes) -> str:
+        """Map common local CLI failures to stable codes without retaining diagnostics."""
+        text = stderr.decode("utf-8", errors="replace").lower()
+        if any(marker in text for marker in (
+            "access is denied", "permission denied", "os error 5", "winerror 5",
+        )):
+            return "CLI_LOCAL_PERMISSION_BLOCKED"
+        if any(marker in text for marker in (
+            "not logged in", "authentication required", "unauthorized",
+        )):
+            return "CLI_AUTH_REQUIRED"
+        if any(marker in text for marker in ("model not found", "unknown model")):
+            return "CLI_MODEL_UNAVAILABLE"
+        return f"CLI_EXIT_CODE_{abs(int(returncode))}"
