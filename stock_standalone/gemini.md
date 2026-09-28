@@ -1,5 +1,11 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-09-28 18:30 情绪感知LLM仿真闭环、方案差距及全系统非交易日/写盘加固全景审核
+- [x] **【合成数据六层门禁与双CLI仿真、方案差距客观盘点与全系统非交易日/IPC/写盘专项加固审核】(`data/ipo_learning_simulation/`, `JSONData/realdatajson.py`, `instock_MonitorTK.py`, `ipc_sync_manager.py`, `popularity_resonance_gui.py`, `20260928_1830_task.md`)**：
+    - [x] **情绪感知与 LLM 仿真闭环审核**：实证 `fe064a9e` 构建了有界 CLI 执行与 Windows 进程树回收（`cli_process.py`）；Codex Luna 仿真全通（Gate 0–5放行，内存生成批准对象，真实订单未下）；Antigravity CLI 调用成功但返回非 JSON 文本，被系统依 Fail-Closed 判定为 `SCHEMA_OUTPUT_NOT_JSON` 安全拒绝；
+    - [x] **执行方案差距客观盘点**：实证方案尚未全量落地，当前处于 Stage 0 向 Stage 1 过渡期；核心断点为：Antigravity 结构化输出未稳、单请求主备自动容灾切换未实现、UI 实时流联动未完成、真实数据源 15/41 未齐、Gate 强类型上下文仍待实盘映射、离线训练与晋级管线尚未搭建；
+    - [x] **下午全系统稳定性与非交易日/写盘加固深度审核**：实证成功消除人气服务非交易时段 35MB IPC 重复全量同步洪峰；实证拔除新浪行情底层 30s/60s/600s 异常死锁，引入 HDF5 缓存保底与 4.5s 硬熔断（实测 5.67s 降级交付 5474 行全量数据 / 0.06s 极速穿透）；实证加固 `ipc_sync_manager.py` 的 TCP 粘包拆包 `_recv_exact` 与 256MB 长度溢出防御。
+
 ## 2026-09-28 13:40 新浪行情接口 502/网关超时卡死根治与 HDF 缓存优雅降级加固
 - [x] **【网络底层长休眠清除、请求频次/批次防风控优化、HDF 缓存无损穿透与秒级降级闭环】(`JohnsonUtil/johnson_cons.py`, `JohnsonUtil/commonTips.py`, `JSONData/realdatajson.py`, `20260928_1340_task.md`)**：
     - [x] **通信协议与防风控参数加固**：行情接口升级为 `https://`；请求头强化为现代 Chrome UA 与标准 `Referer`；`batch_size` 从 50 调降至 8，盘中动态限制 3~8，同批次按 80ms 错峰延时发出，彻底消除瞬时并发冲击；
