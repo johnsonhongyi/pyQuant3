@@ -13,22 +13,16 @@ from typing import Any, Dict, List, Mapping
 from ats.llm.agent_contracts import payload_schema_hash
 from ats.llm.learning_snapshot_store import get_snapshot_record, snapshot_store_recent
 from ats.llm.offline_learning import compute_input_snapshot_hash, validate_input_snapshot
+from ats.llm.remote_prompt_templates import (
+    MARKET_REGIME_PROMPT, MARKET_REGIME_PROMPT_VERSION,
+)
 from ats.llm.worker_protocol import encode_worker_request
 
 
 _MAX_SNAPSHOTS_PER_POLL = 8
 _MAX_PROMPT_BYTES = 45 * 1024
-_PROMPT_VERSION = "r9.market-regime.v1"
-_PROMPT_INSTRUCTION = (
-    "你是只读的新股情绪分析 Agent。只依据所附截止时点的已验证快照做辅助归纳；"
-    "不得引入截止时间之后的信息，不得给出交易指令，也不得修改规则、标签或模型。"
-    "必须输出 sentiment_score、stage_hint、catalysts、risk_warnings 四个字段；"
-    "stage_hint 只能是 NEUTRAL/PANIC/REPAIR/REVERSAL/FOMO/COOLDOWN。"
-    "每个 catalyst/risk_warnings 条目包含 summary 与 evidence_ids，引用 context.snapshot_hash。"
-    "若规则结论为 BLOCK 或宏观指标缺失，不得编造催化；score=50、stage_hint=NEUTRAL、"
-    "catalysts=[]，并在 risk_warnings 写明数据不足/门禁阻断及证据哈希。"
-    "输出必须严格符合给定 JSON Schema。"
-)
+_PROMPT_VERSION = MARKET_REGIME_PROMPT_VERSION
+_PROMPT_INSTRUCTION = MARKET_REGIME_PROMPT
 
 
 class LiveSnapshotRequestProducer:

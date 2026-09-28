@@ -26,9 +26,10 @@ def resolve_cli_path(value: Any, executable_name: str) -> str:
     if executable_name == "agy":
         local_app_data = os.environ.get("LOCALAPPDATA")
         if local_app_data:
-            candidate = Path(local_app_data) / "agy" / "bin" / "agy.ps1"
-            if candidate.is_file():
-                return str(candidate.resolve())
+            agy_bin = Path(local_app_data) / "agy" / "bin"
+            for candidate in (agy_bin / "agy.exe", agy_bin / "agy.ps1"):
+                if candidate.is_file():
+                    return str(candidate.resolve())
     if executable_name == "codex":
         local_app_data = os.environ.get("LOCALAPPDATA")
         if local_app_data:
