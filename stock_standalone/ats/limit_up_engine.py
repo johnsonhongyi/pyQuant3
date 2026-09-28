@@ -504,8 +504,9 @@ class LimitUpEngine:
 
         now = time.time()
         with self._cache_lock:
-            # 节流判断：若距离上次扫描不足 min_interval_sec 且已有最新缓存，直接复用
-            if (now - getattr(self, '_last_scan_time', 0.0) < min_interval_sec) and self._current_live_records:
+            # 空结果也是有效缓存；否则无涨停标的时每个 IPC 包都会重扫全市场。
+            last_scan_time = getattr(self, '_last_scan_time', 0.0)
+            if min_interval_sec > 0 and last_scan_time > 0 and now - last_scan_time < min_interval_sec:
                 return list(self._current_live_records)
 
         return self.scan_limit_up_records_from_df(current_df, fetch_l2_quotes=fetch_l2_quotes)

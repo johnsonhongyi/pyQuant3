@@ -4495,13 +4495,16 @@ def get_url_data(url, retry_count=2, pause=0.05, timeout=30, headers=None):
             else:
                 break
         else:
-            # log.info('Access successful.')
-            # print data.text
-            # fp = urlopen(req, timeout=5)
-            # data = fp.read()
-            # fp.close()
-            # print data.encoding
-            return data.text
+            if data.status_code == 200:
+                return data.text
+            log.error('HTTP Error status:%s - URL %s ' % (data.status_code, url))
+            if data.status_code == 456:
+                return ''
+            if ReqErrorCount < 3:
+                ReqErrorCount += 1
+                time.sleep(0.5)
+            else:
+                break
     #     else:
     #         return df
     print("url:%s" % (url))

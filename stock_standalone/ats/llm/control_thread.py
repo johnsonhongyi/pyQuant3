@@ -28,6 +28,15 @@ _STATUS_INTERVAL_SECONDS = 1.0
 _LOOP_INTERVAL_SECONDS = 0.1
 
 
+def _is_market_session_active() -> bool:
+    try:
+        from ats.tdx_realtime_fetcher import is_trading_time
+
+        return bool(is_trading_time()[0])
+    except Exception:
+        return False
+
+
 class LLMControlThread(threading.Thread):
     """Own all parent-side multiprocessing queue operations and publish safe status."""
 
@@ -128,7 +137,16 @@ class LLMControlThread(threading.Thread):
                 )
                 producer_thread.start()
             next_publish = 0.0
+            market_active = _is_market_session_active()
+            next_session_check = time.monotonic() + (5.0 if market_active else 60.0)
             while not self._stop_requested.is_set():
+                now = time.monotonic()
+                if now >= next_session_check:
+                    was_market_active = market_active
+                    market_active = _is_market_session_active()
+                    next_session_check = now + (5.0 if market_active else 60.0)
+                    if market_active != was_market_active:
+                        next_publish = 0.0
                 self._drain_commands(latest_by_scope, inflight)
                 worker_state = self._worker.snapshot().get("state")
                 if worker_state == "READY":
@@ -148,8 +166,12 @@ class LLMControlThread(threading.Thread):
                 now = time.monotonic()
                 if now >= next_publish:
                     self._publish_status(worker_snapshot, latest_by_scope, inflight)
-                    next_publish = now + _STATUS_INTERVAL_SECONDS
-                self._stop_requested.wait(_LOOP_INTERVAL_SECONDS)
+                    next_publish = now + (
+                        _STATUS_INTERVAL_SECONDS if market_active else 60.0
+                    )
+                self._stop_requested.wait(
+                    _LOOP_INTERVAL_SECONDS if market_active else 60.0
+                )
         except Exception:
             self._set_accepting(False)
             self._last_publish_error = "LLM_CONTROL_THREAD_FAILED"
@@ -390,6 +412,9 @@ class LLMControlThread(threading.Thread):
 
     def _request_producer_loop(self) -> None:
         while not self._stop_requested.is_set():
+            if not _is_market_session_active():
+                self._stop_requested.wait(60.0)
+                continue
             accepting = self.snapshot().get("accepting") is True
             self._poll_request_producer(accepting)
             self._stop_requested.wait(1.0)

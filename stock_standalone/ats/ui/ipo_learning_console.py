@@ -1849,6 +1849,15 @@ def _collect_outcome_label_rows(root: Path) -> List[Dict[str, str]]:
     return rows
 
 
+def _is_market_session_active() -> bool:
+    try:
+        from ats.tdx_realtime_fetcher import is_trading_time
+
+        return bool(is_trading_time()[0])
+    except Exception:
+        return False
+
+
 class _LearningMonitorWorker(QThread):
     snapshot_ready = pyqtSignal(dict)
     review_completed = pyqtSignal(str, bool, str)
@@ -1949,8 +1958,11 @@ class _LearningMonitorWorker(QThread):
 
     def run(self) -> None:
         while not self._stopping:
+            market_active = _is_market_session_active()
+            payload = None
             try:
-                payload = self._commands.get(timeout=self._interval)
+                timeout = self._interval if market_active else 60.0
+                payload = self._commands.get(timeout=timeout)
                 command = payload.get("command")
                 if command == "stop":
                     break
@@ -1970,7 +1982,7 @@ class _LearningMonitorWorker(QThread):
                     self._load_interaction_detail(payload.get("request_id", ""))
             except queue.Empty:
                 pass
-            if not self._stopping:
+            if not self._stopping and (market_active or payload is not None):
                 self.snapshot_ready.emit(_collect_snapshot(self._root))
 
     def _load_interaction_detail(self, request_id: str) -> None:
@@ -2213,14 +2225,16 @@ class IPOLearningConsole(QWidget):
             except Exception:
                 self._runtime_control = None
             self._source_auto_timer = QTimer(self)
-            self._source_auto_timer.setInterval(5 * 60 * 1000)
-            self._source_auto_timer.timeout.connect(
-                lambda: self._start_source_collection(collect_labels=True)
+            market_active = _is_market_session_active()
+            self._source_auto_timer.setInterval(
+                5 * 60 * 1000 if market_active else 60 * 1000
             )
+            self._source_auto_timer.timeout.connect(self._on_source_auto_tick)
             self._source_auto_timer.start()
-            QTimer.singleShot(
-                2500, lambda: self._start_source_collection(collect_labels=True)
-            )
+            if market_active:
+                QTimer.singleShot(
+                    2500, lambda: self._start_source_collection(collect_labels=True)
+                )
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
@@ -2386,7 +2400,7 @@ class IPOLearningConsole(QWidget):
         )
         self.btn_collect_labels.clicked.connect(self._collect_matured_labels)
         self.lbl_acquisition_status = QLabel(
-            "自动采集已启用：启动后刷新，之后每 30 分钟重试；缺失/过期字段继续显示原因。"
+            "自动采集仅在交易时段运行；休市时每 60 秒更新一次状态心跳。"
         )
         self.lbl_acquisition_status.setWordWrap(True)
         source_actions.addWidget(QLabel("标的"))
@@ -3308,6 +3322,14 @@ class IPOLearningConsole(QWidget):
 
     def _collect_matured_labels(self) -> None:
         self._start_source_collection(collect_labels=True)
+
+    def _on_source_auto_tick(self) -> None:
+        market_active = _is_market_session_active()
+        interval_ms = 5 * 60 * 1000 if market_active else 60 * 1000
+        if self._source_auto_timer.interval() != interval_ms:
+            self._source_auto_timer.setInterval(interval_ms)
+        if market_active:
+            self._start_source_collection(collect_labels=True)
 
     def _start_source_collection(self, collect_labels: bool) -> None:
         if self._simulation_read_only:

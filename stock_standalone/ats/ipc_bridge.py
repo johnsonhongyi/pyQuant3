@@ -155,6 +155,27 @@ class IPCBridge:
             chunks.extend(packet)
         return bytes(chunks)
 
+    @staticmethod
+    def _ack_data_frame(body):
+        """Acknowledge accepted or intentionally ignored market frames to prevent retries."""
+        try:
+            import sys
+            from sys_utils import get_app_root
+            root = get_app_root()
+            if root not in sys.path:
+                sys.path.insert(0, root)
+            from data_utils import send_code_via_pipe, PIPE_NAME_TK
+            import logging
+            feedback = {"cmd": "ATS_RECEIVED", "port": 26670}
+            if isinstance(body, dict):
+                feedback.update(
+                    source_version=body.get("source_version"),
+                    sync_session=body.get("sync_session"),
+                )
+            send_code_via_pipe(feedback, logging.getLogger("ATS_Bridge"), pipe_name=PIPE_NAME_TK)
+        except Exception:
+            pass
+
     def _handle_client(self, conn, data_callback, signal_callback):
         try:
             deadline = time.monotonic() + _IPC_FRAME_TIMEOUT_SEC
@@ -192,6 +213,27 @@ class IPCBridge:
                                 df_payload = None
 
                             if isinstance(df_payload, pd.DataFrame) and not df_payload.empty:
+                                # Keep the first cold-start baseline, then stop
+                                # normalizing/merging repeated market frames while
+                                # the TDX session is closed. ACK each dropped frame
+                                # so TK does not retry it as unconfirmed work.
+                                cached_df = getattr(self, "_cached_df", None)
+                                if cached_df is not None and not cached_df.empty:
+                                    try:
+                                        from ats.tdx_realtime_fetcher import is_trading_time
+                                        market_active = bool(is_trading_time()[0])
+                                    except Exception:
+                                        market_active = True
+                                    if not market_active:
+                                        if isinstance(body, dict) and body.get("sync_session") is not None:
+                                            try:
+                                                self._cache_sync_session = str(body.get("sync_session"))
+                                                self._cache_sync_version = int(body.get("ver"))
+                                            except (TypeError, ValueError):
+                                                pass
+                                        self._ack_data_frame(body)
+                                        return
+
                                 try:
                                     # 规范化代码索引
                                     df_norm = df_payload.copy()
@@ -325,23 +367,7 @@ class IPCBridge:
                                     self._cache_sync_version = None
                                 # ACK means the frame was validated, merged into the cache,
                                 # and accepted by the receiver callback.
-                                try:
-                                    import sys
-                                    from sys_utils import get_app_root
-                                    root = get_app_root()
-                                    if root not in sys.path:
-                                        sys.path.insert(0, root)
-                                    from data_utils import send_code_via_pipe, PIPE_NAME_TK
-                                    import logging
-                                    feedback = {"cmd": "ATS_RECEIVED", "port": 26670}
-                                    if isinstance(body, dict):
-                                        feedback.update(
-                                            source_version=body.get('source_version'),
-                                            sync_session=body.get('sync_session'),
-                                        )
-                                    send_code_via_pipe(feedback, logging.getLogger("ATS_Bridge"), PIPE_NAME_TK)
-                                except Exception:
-                                    pass
+                                self._ack_data_frame(body)
                         elif cmd == 'SIGNAL' and signal_callback:
                             signal_callback(body)
                         elif cmd == 'SIGNALS' and signal_callback:

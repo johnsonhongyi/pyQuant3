@@ -26,6 +26,15 @@ DEFAULT_ROOT = Path(__file__).resolve().parents[2]
 _TICKER_FIELDS = frozenset(PREHEAT_REQUIRED_FIELDS + LIVE_HEAT_REQUIRED_FIELDS)
 
 
+def _is_market_session_active() -> bool:
+    try:
+        from ats.tdx_realtime_fetcher import is_trading_time
+
+        return bool(is_trading_time()[0])
+    except Exception:
+        return False
+
+
 class IPOGateContextProvider:
     """Serve a validated, immutable data snapshot without I/O on the Gate path."""
 
@@ -138,8 +147,13 @@ class IPOGateContextProvider:
 
             def refresh_loop() -> None:
                 while not self._refresh_stop.is_set():
-                    self.refresh()
-                    if self._refresh_stop.wait(float(interval_seconds)):
+                    if _is_market_session_active():
+                        self.refresh()
+                        wait_seconds = float(interval_seconds)
+                    else:
+                        self._publish_status()
+                        wait_seconds = 60.0
+                    if self._refresh_stop.wait(wait_seconds):
                         break
 
             self._refresh_thread = threading.Thread(
@@ -180,8 +194,10 @@ class IPOGateContextProvider:
         temporary = path.with_suffix(path.suffix + ".tmp")
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
+            status = self.status_snapshot()
+            status["heartbeat_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
             temporary.write_text(
-                json.dumps(self.status_snapshot(), ensure_ascii=False, sort_keys=True) + "\n",
+                json.dumps(status, ensure_ascii=False, sort_keys=True) + "\n",
                 encoding="utf-8",
             )
             os.replace(temporary, path)

@@ -61,6 +61,15 @@ from sys_utils import get_app_root, get_conf_path
 
 logger = LoggerFactory.getLogger()
 
+
+def _is_market_session_active() -> bool:
+    try:
+        from ats.tdx_realtime_fetcher import is_trading_time
+
+        return bool(is_trading_time()[0])
+    except Exception:
+        return False
+
 _PHASE_DISPLAY = {
     "STABILIZING": "企稳观察",
     "PRE_ACCELERATION": "启动蓄势",
@@ -237,7 +246,7 @@ class NextDayAnomalyWatchWidget(QWidget):
         self._layout_save_timer.timeout.connect(self.save_splitter_layouts)
 
         self.auto_refresh_timer = QTimer(self)
-        self.auto_refresh_timer.setInterval(3000)
+        self.auto_refresh_timer.setInterval(3000 if _is_market_session_active() else 60000)
         self.auto_refresh_timer.timeout.connect(self._on_auto_refresh_tick)
 
         self._init_ui()
@@ -1511,12 +1520,18 @@ class NextDayAnomalyWatchWidget(QWidget):
 
     def _on_toggle_auto_refresh(self, checked: bool):
         if checked:
-            self.auto_refresh_timer.start()
+            self.auto_refresh_timer.start(
+                3000 if _is_market_session_active() else 60000
+            )
         else:
             self.auto_refresh_timer.stop()
 
     def _on_auto_refresh_tick(self):
-        if self.tab_widget.currentIndex() == 1:
+        market_active = _is_market_session_active()
+        desired_interval = 3000 if market_active else 60000
+        if self.auto_refresh_timer.interval() != desired_interval:
+            self.auto_refresh_timer.setInterval(desired_interval)
+        if market_active and self.tab_widget.currentIndex() == 1:
             cur_date = self.combo_manifest_date.currentText().strip() or time.strftime("%Y-%m-%d")
             self._request_data_load(cur_date, eval_only=True)
 
