@@ -1185,7 +1185,7 @@ class CapitalDragonEngine:
 
         ⚡ 极限性能优化版 (2026-09-11):
         - 主线程调用：仅读 _bg_market_summary_cache（< 0.1ms，零网络IO）
-        - 生产环境后台线程（_start_market_summary_bg_updater）每 5s 独立拉取 TDX 数据更新缓存
+        - 生产环境后台线程仅在 TDX 允许时段按配置间隔拉取数据，休市时休眠
         - 测试环境（df_all is not None）：直接从 DataFrame 提取，支持离线单元测试（保持原逻辑）
         """
         # ── 测试环境（df_all 传入）：保留完整原逻辑，直接从 df 提取 ──────────────────
@@ -1438,7 +1438,7 @@ class CapitalDragonEngine:
 
     def start_market_summary_bg_updater(self, interval_sec: Optional[float] = None) -> None:
         """
-        启动大盘摘要后台定期刷新线程（daemon，每 interval_sec 秒刷新一次，默认接入 cct.ats_tdx_interval）。
+        启动大盘摘要后台刷新线程（daemon，交易时按 interval_sec 刷新，休市时低频休眠）。
         应在主窗口初始化时（_init_status_clock 后）调用一次，并发调用自动幂等。
         """
         if interval_sec is None:
@@ -1452,12 +1452,18 @@ class CapitalDragonEngine:
         def _loop():
             init_intv = float(getattr(cct, 'ats_tdx_interval', interval_sec) or interval_sec)
             logger.info(f"[CapitalDragonEngine] 大盘摘要后台刷新线程已启动 (基准间隔 {init_intv}s, 动态跟随 cct.ats_tdx_interval)")
+            from ats.tdx_realtime_fetcher import is_trading_time
             while True:
+                cur_intv = float(getattr(cct, 'ats_tdx_interval', interval_sec) or interval_sec)
                 try:
+                    is_trading, _ = is_trading_time()
+                    if not is_trading:
+                        # Do not poll or contend for the shared TDX socket outside allowed sessions.
+                        time.sleep(max(60.0, cur_intv))
+                        continue
                     self._compute_market_summary_bg()
                 except Exception as e_loop:
                     logger.debug(f"[CapitalDragonEngine] 后台摘要刷新异常: {e_loop}")
-                cur_intv = float(getattr(cct, 'ats_tdx_interval', interval_sec) or interval_sec)
                 time.sleep(cur_intv)
 
         t = threading.Thread(target=_loop, daemon=True, name="MarketSummaryBgUpdater")

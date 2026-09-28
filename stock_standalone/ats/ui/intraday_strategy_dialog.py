@@ -10021,11 +10021,6 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
         self._init_ui()
         self._load_mock_or_live_data()
 
-        # 启动 3.0s 极速 UI 自动刷新定时器，驱动 UI 画面与 TDX 秒级直连后台无缝同步跳动！
-        self.live_poll_timer = QTimer(self)
-        self.live_poll_timer.timeout.connect(self._on_live_timer_tick)
-        self.live_poll_timer.start(3000)
-
     def _init_ui(self):
         central_widget = QWidget(self)
         self.setCentralWidget(central_widget)
@@ -10985,6 +10980,27 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
         # 若正在进行模拟回放，则不被真实时钟覆盖
         if hasattr(self, 'sim_panel') and self.sim_panel.replay_timer.isActive():
             return
+
+        # 保留手动估价；其他模式休市时停止 TDX/IPC 自动轮询，避免旧行情反复评分。
+        manual_mode = (
+            getattr(self, "selected_data_source", "") == "MANUAL_EVAL"
+            and hasattr(self, "chk_manual_eval")
+            and self.chk_manual_eval.isChecked()
+        )
+        if not manual_mode:
+            try:
+                from ats.tdx_realtime_fetcher import is_trading_time
+                is_trading, _ = is_trading_time()
+            except Exception:
+                is_trading = False
+            if not is_trading:
+                if hasattr(self, "timer") and self.timer.interval() < 60000:
+                    self.timer.setInterval(60000)
+                return
+            if hasattr(self, "timer") and self.timer.interval() != 3000:
+                self.timer.setInterval(3000)
+        elif hasattr(self, "timer") and self.timer.interval() != 3000:
+            self.timer.setInterval(3000)
 
         open_price, trade_price, high_price, low_price, vwap_price, to_rate, amt_val, bid1_price, real_name, is_unlisted, last_close = self._get_stock_realtime_data()
         self.name = real_name

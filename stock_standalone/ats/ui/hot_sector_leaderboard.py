@@ -1937,10 +1937,17 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
         from ats.tdx_realtime_fetcher import is_trading_time, TDXRealtimeFetcher
         fetcher = TDXRealtimeFetcher.get_instance()
         is_trading, session_desc = is_trading_time()
+        # Allow one off-hours cache initialization, but do not retry a failed
+        # initialization every 3 seconds while the market is closed.
+        desired_interval_ms = (
+            max(1000, int(fetcher.get_recommended_interval_ms()))
+            if is_trading else 60000
+        )
+        if self.ui_refresh_timer.interval() != desired_interval_ms:
+            self.ui_refresh_timer.setInterval(desired_interval_ms)
 
-        # 非交易时段智能休眠策略：
-        # 如果非交易时段，且已完成至少一次初始化获取，且非用户手动强制刷新，则跳过网络拉取避免被通达信封禁
-        if not is_trading and self._has_init_fetched and not force:
+        # 休市时不做初始化计算或自动补拉行情；仅允许用户显式手动刷新。
+        if not is_trading and not force:
             self.lbl_update_time.setText(f"💤 非交易休眠 ({time.strftime('%H:%M:%S')})")
             return
 
@@ -2034,10 +2041,6 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
             self._render_table_data(results)
             self._has_init_fetched = True
 
-            # 动态根据 TDX 自适应退避机制同步 UI 刷新定时器
-            rec_ms = fetcher.get_recommended_interval_ms()
-            if self.ui_refresh_timer.interval() != rec_ms:
-                self.ui_refresh_timer.setInterval(rec_ms)
         except Exception as e:
             fetcher.add_log(f"热榜轮询计算异常: {e}", level="ERROR")
             logger.warning(f"热榜轮询计算异常: {e}")

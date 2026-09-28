@@ -549,10 +549,12 @@ class IPOSubnewDetectorDialog(QMainWindow):
             logger.debug(f"初始化专属 IPC 流式订阅管理器异常: {e_ipcmgr}")
             self.ipc_mgr = None
 
-        # 1. IPC 接收与心跳守护定时器 (500ms)
+        # 1. 盘中快速消费 IPC；休市时只保留 5 秒进程心跳。
         self.ipc_timer = QTimer(self)
         self.ipc_timer.timeout.connect(self._on_ipc_poll_and_heartbeat)
-        self.ipc_timer.start(500)
+        is_trading, _ = self._check_is_trading_time()
+        self._last_ipc_heartbeat_at = 0.0
+        self.ipc_timer.start(500 if is_trading else 5000)
 
         # 2. 定期自动刷新机制：改为单次按需调度 (智能交易时段守护，收盘自动休眠，支持可配置秒数自适应轮询)
         self.poll_interval_sec = 15  # 默认 15 秒轮询，支持下拉调节并自动持久化
@@ -565,7 +567,8 @@ class IPOSubnewDetectorDialog(QMainWindow):
         self._auto_sync_timer = QTimer(self)
         self._auto_sync_timer.timeout.connect(lambda: self._auto_sync_bottom_ipo_stocks(force=False))
         self._auto_sync_timer.start(15 * 60 * 1000)
-        QTimer.singleShot(2000, lambda: self._auto_sync_bottom_ipo_stocks(force=False))
+        if is_trading:
+            QTimer.singleShot(2000, lambda: self._auto_sync_bottom_ipo_stocks(force=False))
 
         # 4. 语音告警与异动通知开关 (持久化保存，默认开启)
         self.voice_alert_enabled = load_config_node("ipo_detector_voice_enabled", True)
@@ -581,7 +584,7 @@ class IPOSubnewDetectorDialog(QMainWindow):
         #    - 若已有本地持久化信号缓存 (0秒瞬间满血直出)，保持安宁，绝不向外发起无谓网络请求重复跑！
         #    - 仅在本地完全无缓存时才触发首轮初始化拉取。
         is_trading, _ = self._check_is_trading_time()
-        if is_trading or not self.signals_map:
+        if is_trading:
             QTimer.singleShot(200, self.trigger_scan)
 
     def _init_ui(self):
@@ -1438,18 +1441,7 @@ class IPOSubnewDetectorDialog(QMainWindow):
             return
         is_trading, status_text = self._check_is_trading_time()
         if not is_trading:
-            # 【盘后单次对齐扫描】：每交易日收盘后仅触发一次，用历史K线数据重建信号，让次日开盘前预埋单就绪
-            today_str_tick = datetime.now().strftime("%Y-%m-%d")
-            if getattr(self, "_after_close_synced_date", "") != today_str_tick and self.signals_map:
-                self._after_close_synced_date = today_str_tick
-                logger.info(f"🌙 [盘后对齐] 触发今日({today_str_tick})首次收盘后历史数据全量对齐扫描，重建预埋信号...")
-                self.lbl_status.setText(
-                    f"🌙 盘后信号对齐中 ({status_text}) | 用收盘历史数据重建次日预埋信号 | "
-                    f"✅ 监控中: {len(self.monitored_codes)} 只"
-                )
-                QTimer.singleShot(800, self.trigger_scan)  # 800ms 后触发避免启动抖动
-                return
-            # 常规非交易时段休眠
+            # 休市只更新低频状态，不在收盘/冷启动时自动重扫历史行情。
             pre_cnt = sum(1 for s in self.signals_map.values() if s.signal_type in ("PRE_ORDER", "BASE_PREORDER", "SWING_PREORDER"))
             self.lbl_status.setText(
                 f"🌙 非交易时段 ({status_text}) | 自动轮询已智能休眠 (数据已持久化封存) | "
@@ -2432,6 +2424,9 @@ class IPOSubnewDetectorDialog(QMainWindow):
         - 操盘手手工添加的代码 (manual_codes) 享有最高优先级，始终置顶于首部；
         - 操盘手无需每日手动敲代码维护，系统自动追踪全市场最新上市新股并自动入池！
         """
+        is_trading, _ = self._check_is_trading_time()
+        if not is_trading and not force:
+            return
         import threading
         def _bg_task():
             try:
@@ -2841,9 +2836,17 @@ class IPOSubnewDetectorDialog(QMainWindow):
 
     def _on_ipc_poll_and_heartbeat(self):
         """消费来自 ATS 跨进程一键发送过来的新代码，同步 IPC 数据并更新心跳"""
-        # 1. 维护心跳
-        update_detector_heartbeat(os.getpid())
-        self._sync_next_day_watch_events()
+        is_trading, _ = self._check_is_trading_time()
+        desired_interval = 500 if is_trading else 5000
+        if self.ipc_timer.interval() != desired_interval:
+            self.ipc_timer.setInterval(desired_interval)
+
+        # Heartbeat readers allow 15 seconds of staleness; avoid rewriting the
+        # IPC JSON file on every 500ms market-data poll.
+        now = time.monotonic()
+        if now - getattr(self, "_last_ipc_heartbeat_at", 0.0) >= 5.0:
+            update_detector_heartbeat(os.getpid())
+            self._last_ipc_heartbeat_at = now
 
         # 2. 🛡️【父进程存活心跳守护】：检测 ATS_MAIN_PID，若主进程已退出，本子进程 0.5s 安全退出
         main_pid_str = os.environ.get("ATS_MAIN_PID", "")
@@ -2872,6 +2875,12 @@ class IPOSubnewDetectorDialog(QMainWindow):
                 logger.info(f"[IPODetector] 监测到 ATS 主进程 (PID={main_pid}) 已注销，子进程立即安全持久化并退出")
                 self.close()
                 return
+
+        # 休市心跳只负责证明子进程存活；行情、队列、配置与候选事件均留待交易时段。
+        if not is_trading:
+            return
+
+        self._sync_next_day_watch_events()
 
         # 3. 消费跨进程待添加队列
         new_stocks = pop_queued_stocks()
@@ -2975,6 +2984,10 @@ class IPOSubnewDetectorDialog(QMainWindow):
         0 阻塞网络请求，直通刷新监控池标的的实时行情。
         """
         if df is None or df.empty:
+            return
+        is_trading, _ = self._check_is_trading_time()
+        current_ipc_df = getattr(self, "ipc_df", None)
+        if not is_trading and current_ipc_df is not None and not current_ipc_df.empty:
             return
         try:
             self.ipc_df = df

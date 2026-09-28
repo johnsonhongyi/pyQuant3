@@ -1943,7 +1943,8 @@ class ATSMainWindow(QMainWindow):
         # Candidate confirmation uses ATS TDX quotes (not TK's slower market snapshot cadence).
         self._next_day_watch_poll_busy = False
         self._next_day_watch_timer = QTimer(self)
-        self._next_day_watch_timer.setInterval(4000)
+        market_active = self._is_market_session_active()
+        self._next_day_watch_timer.setInterval(4000 if market_active else 60000)
         self._next_day_watch_timer.timeout.connect(self._poll_next_day_watch_tdx)
         self._next_day_watch_timer.start()
         
@@ -1955,7 +1956,7 @@ class ATSMainWindow(QMainWindow):
             self._last_favorites_version = 0
 
         self._favorites_poll_timer = QTimer(self)
-        self._favorites_poll_timer.setInterval(500)
+        self._favorites_poll_timer.setInterval(500 if market_active else 60000)
         self._favorites_poll_timer.timeout.connect(self._poll_favorites_loop)
         self._favorites_poll_timer.start()
         
@@ -3086,10 +3087,10 @@ class ATSMainWindow(QMainWindow):
         self.lbl_data_time_status.setStyleSheet("color: #00ff88; font-weight: bold; font-size: 9pt; padding-right: 8px;")
         self.status_bar.addPermanentWidget(self.lbl_data_time_status)
 
-        # 每秒刷新一次右下角时间与倒计时状态
+        # 交易时刷新状态栏；休市时降为低频心跳。
         self._status_clock_timer = QTimer(self)
         self._status_clock_timer.timeout.connect(self._refresh_statusbar_time_display)
-        self._status_clock_timer.start(1000)
+        self._status_clock_timer.start(1000 if self._is_market_session_active() else 60000)
         self._refresh_statusbar_time_display()
 
         # ⚡ 启动大盘指数后台刷新线程（接入全局自定义 cct.ats_tdx_interval，主线程只读缓存，零阻塞）
@@ -3119,10 +3120,26 @@ class ATSMainWindow(QMainWindow):
         except Exception as e:
             logger.debug(f"[ATSMainWindow] _refresh_market_volume_status error: {e}")
 
+    def _is_market_session_active(self):
+        """Use the shared TDX session/calendar gate for ATS polling decisions."""
+        try:
+            from ats.tdx_realtime_fetcher import is_trading_time
+            return bool(is_trading_time()[0])
+        except Exception:
+            try:
+                return bool(cct.get_work_time())
+            except Exception:
+                return False
+
     def _refresh_statusbar_time_display(self):
         """动态刷新状态栏右侧的数据更新时间与下次自动刷新倒计时"""
         import time
         from datetime import datetime
+
+        market_active = self._is_market_session_active()
+        desired_interval = 1000 if market_active else 60000
+        if self._status_clock_timer.interval() != desired_interval:
+            self._status_clock_timer.setInterval(desired_interval)
 
         now = time.time()
         if self._last_data_update_time:
@@ -3142,13 +3159,15 @@ class ATSMainWindow(QMainWindow):
             self.lbl_data_time_status.setText(f"🕒 数据更新: {t_str}  |  🔄 自动刷新: 已关闭 (等待TK推送)")
             self.lbl_data_time_status.setStyleSheet("color: #8e8e93; font-weight: bold; font-size: 9pt; padding-right: 8px;")
 
-        # 📊 每 2 秒节流同步一次大盘四大指数与全市交易额
-        if now - getattr(self, '_last_market_status_update', 0.0) >= 2.0:
+        if market_active:
+            if now - getattr(self, '_last_market_status_update', 0.0) >= 2.0:
+                self._last_market_status_update = now
+                self._refresh_market_volume_status()
+            self._check_market_volume_announcement()
+        elif not getattr(self, '_last_market_status_update', 0.0):
+            # 冷启动时只读一次已有缓存，休市期间不再刷新摘要。
             self._last_market_status_update = now
             self._refresh_market_volume_status()
-
-        # 📢 检查交易时段定时大盘成交额播报 (09:30 开启后每 30 分钟一次: 10:00, 10:30, 11:00, 11:30, 13:00, 13:30, 14:00, 14:30, 15:00)
-        self._check_market_volume_announcement()
 
     def _check_market_volume_announcement(self, now_dt=None, force=False):
         """
@@ -4168,6 +4187,20 @@ class ATSMainWindow(QMainWindow):
             # Ignore mutable TK auction packets on weekends/holidays. The heatmap
             # and next-day freeze use the dated snapshot from the last session.
             sector_data = None
+
+        # Keep one cold-start baseline outside market hours, but ACK and ignore
+        # all subsequent TK frames until the next TDX session. This prevents
+        # unchanged after-hours snapshots from re-running ATS table/engine work.
+        current_df = getattr(self, "current_df", None)
+        if current_df is not None and not current_df.empty and not self._is_market_session_active():
+            if isinstance(df_payload, pd.DataFrame):
+                packet_meta = getattr(df_payload, "attrs", {}) or {}
+                self.market_frame_revision = {
+                    "sync_session": packet_meta.get("sync_session"),
+                    "ver": packet_meta.get("ver"),
+                    "source_version": packet_meta.get("source_version"),
+                }
+            return
             
         # Keep the latest authoritative sector snapshot available to ATS tools
         # such as the manual next-day candidate freeze.
@@ -4182,6 +4215,24 @@ class ATSMainWindow(QMainWindow):
                 logger.debug(f"[ATS_Realtime] Update heatmap from TK sector_data failed: {e_sec}")
 
         if df_payload is None or not isinstance(df_payload, pd.DataFrame) or df_payload.empty:
+            return
+
+        # A repeated IPC frame revision carries no new market data. Sector data
+        # above is still applied, and returning normally lets IPCBridge ACK it.
+        incoming_meta = getattr(df_payload, "attrs", {}) or {}
+        incoming_session = incoming_meta.get("sync_session")
+        incoming_version = incoming_meta.get("ver")
+        current_revision = getattr(self, "market_frame_revision", {}) or {}
+        current_df = getattr(self, "current_df", None)
+        if (
+            incoming_session is not None
+            and incoming_version is not None
+            and current_df is not None
+            and not current_df.empty
+            and str(incoming_session) == str(current_revision.get("sync_session"))
+            and str(incoming_version) == str(current_revision.get("ver"))
+            and incoming_meta.get("source_version") == current_revision.get("source_version")
+        ):
             return
 
         # 2. 将提取出的 DataFrame 强制转换为以 6 位纯数字 code 字符串作为 index
@@ -5611,6 +5662,19 @@ class ATSMainWindow(QMainWindow):
 
     def _poll_next_day_watch_tdx(self):
         """Poll the frozen cohort through TDX and evaluate on ATS's live quote cadence."""
+        try:
+            from ats.tdx_realtime_fetcher import is_trading_time
+            is_trading, _ = is_trading_time()
+        except Exception:
+            is_trading = False
+        now = time.localtime()
+        hms = now.tm_hour * 10000 + now.tm_min * 100 + now.tm_sec
+        is_trading = is_trading and now.tm_wday < 5 and 93000 <= hms <= 150500
+        desired_interval = 4000 if is_trading else 60000
+        if self._next_day_watch_timer.interval() != desired_interval:
+            self._next_day_watch_timer.setInterval(desired_interval)
+        if not is_trading:
+            return
         if getattr(self, "_next_day_watch_poll_busy", False) or getattr(self, "_is_closing", False):
             return
         self._next_day_watch_poll_busy = True
@@ -6894,6 +6958,9 @@ class ATSMainWindow(QMainWindow):
 
     def _poll_favorites_loop(self):
         try:
+            desired_interval = 500 if self._is_market_session_active() else 60000
+            if self._favorites_poll_timer.interval() != desired_interval:
+                self._favorites_poll_timer.setInterval(desired_interval)
             from global_favorites import GlobalFavoriteManager
             current_version = GlobalFavoriteManager().version
             if current_version != getattr(self, '_last_favorites_version', 0):

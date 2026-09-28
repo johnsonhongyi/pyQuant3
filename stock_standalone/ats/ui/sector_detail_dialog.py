@@ -370,10 +370,25 @@ class ATSSectorDetailDialog(QDialog):
         super().reject()
 
     def _start_auto_refresh_timer(self):
-        """启动后台定时自动静默更新 (盘中 15 秒轮询，休市 60 秒轮询)"""
+        """盘中定时刷新；休市只保留低频心跳，不重新计算板块数据。"""
         self._auto_timer = QTimer(self)
-        self._auto_timer.timeout.connect(lambda: self.refresh_data(force=False))
-        self._auto_timer.start(15000)
+        self._auto_timer.timeout.connect(self._on_auto_refresh_tick)
+        self._auto_timer.start(15000 if self._is_market_session_active() else 60000)
+
+    def _is_market_session_active(self):
+        try:
+            from ats.tdx_realtime_fetcher import is_trading_time
+            return bool(is_trading_time()[0])
+        except Exception:
+            return False
+
+    def _on_auto_refresh_tick(self):
+        is_trading = self._is_market_session_active()
+        desired_interval = 15000 if is_trading else 60000
+        if self._auto_timer.interval() != desired_interval:
+            self._auto_timer.setInterval(desired_interval)
+        if is_trading:
+            self.refresh_data(force=False)
 
     def update_data(self, current_df=None):
         """【外部/主窗口数据同步入口】供主窗口实盘行情轮询时推送最新 DataFrame 或原地复用更新"""
