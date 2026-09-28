@@ -134,11 +134,24 @@ _AGENT_PAYLOAD_SCHEMAS: Dict[str, Dict[str, Any]] = {
 }
 
 
-def payload_schema(agent_type: str) -> Dict[str, Any]:
+def payload_schema(
+    agent_type: str, *, evidence_ids: Sequence[str] | None = None,
+) -> Dict[str, Any]:
     """Return a defensive copy of the strict schema sent to a Provider."""
     if agent_type not in AGENT_TYPES:
         raise AgentContractError("unknown agent_type")
-    return deepcopy(_AGENT_PAYLOAD_SCHEMAS[agent_type])
+    schema = deepcopy(_AGENT_PAYLOAD_SCHEMAS[agent_type])
+    if evidence_ids is not None and agent_type == "MARKET_REGIME":
+        if (
+            isinstance(evidence_ids, (str, bytes))
+            or not isinstance(evidence_ids, Sequence)
+            or any(not isinstance(item, str) or not item.strip() for item in evidence_ids)
+            or len(evidence_ids) != len(set(evidence_ids))
+        ):
+            raise AgentContractError("Provider evidence IDs are invalid")
+        for field in ("catalysts", "risk_warnings"):
+            schema["properties"][field]["items"]["properties"]["evidence_ids"]["items"]["enum"] = list(evidence_ids)
+    return schema
 
 
 def payload_schema_hash(agent_type: str) -> str:

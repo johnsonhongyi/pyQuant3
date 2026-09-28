@@ -747,6 +747,8 @@ class GlobalConfig:
         self.copy_paste_save = self.get_with_writeback("general", "copy_paste_save", fallback=False, value_type="bool")
         # [NEW] SBC 分时盯盘窗口 Esc 键退出功能开关 (默认 True 开启，按 Esc 关闭窗口；False 则维持清除高亮防误触)
         self.ats_sbc_close = self.get_with_writeback("general", "ats_sbc_close", fallback=True, value_type="bool")
+        # [NEW] ATS 是否启用 IPO 监控后台与独立侦测器 (默认开启，可在 global.ini 中关闭)
+        self.ipo_detector = self.get_with_writeback("general", "ipo_detector", fallback=True, value_type="bool")
         # [NEW] 退市股票黑名单配置 (支持自动写回与配置化，如 000004 国恒退, 002808 恒久退等)
 
         self.delisted_codes = self.get_with_writeback("general", "delisted_codes", fallback=['000004', '002808', '000005', '000003', '000007', '000013', '000015', '000018', '000022', '000024', '000029', '000043', '000405', '000508', '000511'], value_type="list")
@@ -997,6 +999,7 @@ initGlobalValue: int = CFG.init_value
 clean_terminal: List[str] = CFG.clean_terminal
 copy_paste_save: bool = CFG.copy_paste_save
 ats_sbc_close: bool = CFG.ats_sbc_close
+ipo_detector: bool = CFG.ipo_detector
 
 root_path: List[Optional[str]] = [
     CFG.get_path("root_path_windows"),
@@ -1039,6 +1042,7 @@ loglevel: str = CFG.loglevel
 cleanRAMdiskTemp: bool = CFG.cleanRAMdiskTemp
 copy_paste_save: bool = CFG.copy_paste_save
 ats_sbc_close: bool = CFG.ats_sbc_close
+ipo_detector: bool = CFG.ipo_detector
 MAX_DAILY_ADDITIONS: int = CFG.MAX_DAILY_ADDITIONS
 limit_alert_monitor: int = CFG.limit_alert_monitor
 loop_counter_limit: int = CFG.loop_counter_limit

@@ -137,13 +137,13 @@ class LLMControlThread(threading.Thread):
                 )
                 producer_thread.start()
             next_publish = 0.0
-            market_active = _is_market_session_active()
+            market_active = self._simulation_only or _is_market_session_active()
             next_session_check = time.monotonic() + (5.0 if market_active else 60.0)
             while not self._stop_requested.is_set():
                 now = time.monotonic()
                 if now >= next_session_check:
                     was_market_active = market_active
-                    market_active = _is_market_session_active()
+                    market_active = self._simulation_only or _is_market_session_active()
                     next_session_check = now + (5.0 if market_active else 60.0)
                     if market_active != was_market_active:
                         next_publish = 0.0
@@ -282,6 +282,9 @@ class LLMControlThread(threading.Thread):
             "status": str(response.get("status", "INVALID"))[:24],
             "ticker": str(metadata.get("ticker", key[1] if key else ""))[:16],
             "agent_type": str(envelope.get("agent_type", ""))[:40] if isinstance(envelope, dict) else "",
+            "provider_id": str(response.get("provider_id", ""))[:64],
+            "model_id": str(metadata.get("model_id", response.get("model_id", "")))[:160],
+            "fallback_error_code": str(response.get("fallback_error_code", ""))[:120],
             "as_of_time": str(metadata.get("as_of_time", ""))[:40],
             "completed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "summary": summary_text,
@@ -412,7 +415,7 @@ class LLMControlThread(threading.Thread):
 
     def _request_producer_loop(self) -> None:
         while not self._stop_requested.is_set():
-            if not _is_market_session_active():
+            if not self._simulation_only and not _is_market_session_active():
                 self._stop_requested.wait(60.0)
                 continue
             accepting = self.snapshot().get("accepting") is True

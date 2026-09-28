@@ -25,6 +25,7 @@ from PyQt6.QtWidgets import (
     QPushButton, QPlainTextEdit, QTableWidget, QTableWidgetItem, QVBoxLayout, QLineEdit,
     QWidget, QHeaderView, QTabWidget, QSizePolicy,
 )
+from ats.ui.base_table import BaseATSTableWidget
 
 
 _STAGES = (
@@ -1237,7 +1238,8 @@ def _collect_snapshot(root: Path) -> Dict[str, Any]:
         key: _safe_text(raw_last_result.get(key), limit)
         for key, limit in (
             ("request_id", 128), ("status", 24), ("ticker", 16),
-            ("agent_type", 40), ("as_of_time", 40), ("completed_at", 40),
+            ("agent_type", 40), ("provider_id", 64), ("model_id", 160),
+            ("fallback_error_code", 120), ("as_of_time", 40), ("completed_at", 40),
             ("summary", 300),
         ) if raw_last_result.get(key)
     }
@@ -2176,6 +2178,20 @@ class _SourceAcquisitionWorker(QThread):
         self.completed.emit(result)
 
 
+class IPOOutcomeTableWidget(BaseATSTableWidget):
+    """ATS-linked stock table that keeps mature-label evidence read-only."""
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.context_menu_cell_editable = False
+        self.cellClicked.connect(self._on_outcome_cell_clicked)
+
+    def _on_outcome_cell_clicked(self, row: int, _column: int) -> None:
+        # Also cover clicks on the already-current row, where Qt emits no
+        # currentCellChanged signal.
+        self._trigger_linkage(row)
+
+
 class IPOLearningConsole(QWidget):
     """Live view for staged readiness, sidecar health and mature-sample reviews."""
 
@@ -2203,6 +2219,7 @@ class IPOLearningConsole(QWidget):
         self._pending_interaction_detail_id = ""
         self._review_pending_candidate_ids = set()
         self._outcome_review_pending_ids = set()
+        self._outcome_stock_names: Dict[str, str] = {}
         self._runtime_control = None
         self._source_worker: Optional[_SourceAcquisitionWorker] = None
         self._build_ui()
@@ -2216,6 +2233,9 @@ class IPOLearningConsole(QWidget):
                     button.setEnabled(False)
                     button.setToolTip("仿真只读模式已禁用写入和采集操作")
         self._worker.start()
+        # A cold start gets one immediate, read-only status snapshot. This only
+        # reads local state/preflight metadata; it never starts a Provider.
+        self._worker.request_refresh()
         if not self._simulation_read_only:
             try:
                 from ats.llm.runtime_service import create_runtime_control_thread
@@ -2231,10 +2251,11 @@ class IPOLearningConsole(QWidget):
             )
             self._source_auto_timer.timeout.connect(self._on_source_auto_tick)
             self._source_auto_timer.start()
-            if market_active:
-                QTimer.singleShot(
-                    2500, lambda: self._start_source_collection(collect_labels=True)
-                )
+            # Refresh static and daily sources once on ATS cold start, including
+            # outside market hours. Intraday fields remain unready until sourced.
+            QTimer.singleShot(
+                2500, lambda: self._start_source_collection(collect_labels=False)
+            )
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
@@ -2400,7 +2421,7 @@ class IPOLearningConsole(QWidget):
         )
         self.btn_collect_labels.clicked.connect(self._collect_matured_labels)
         self.lbl_acquisition_status = QLabel(
-            "自动采集仅在交易时段运行；休市时每 60 秒更新一次状态心跳。"
+            "ATS 启动后约 2.5 秒后台采集一次；交易时段每 5 分钟自动采集，休市每 60 秒仅更新状态，可手动采集日线/静态数据。"
         )
         self.lbl_acquisition_status.setWordWrap(True)
         source_actions.addWidget(QLabel("标的"))
@@ -2491,17 +2512,20 @@ class IPOLearningConsole(QWidget):
             "D1-D3 结果只生成带来源时点的待复核证据；D3 收盘前保持待成熟，缺少首日锚点时明确显示未就绪，"
             "不会自动接受样本或开启训练。"
         ))
-        self.outcome_table = QTableWidget(0, 10)
+        self.outcome_table = IPOOutcomeTableWidget(self)
+        self.outcome_table.setColumnCount(11)
         self.outcome_table.setHorizontalHeaderLabels([
             "代码", "上市日", "D1 收益", "D2 收益", "D3 收益", "D1-D3 收盘回撤",
-            "破发行价", "双锚失守", "成熟时点", "复核状态",
+            "破发行价", "双锚失守", "成熟时点", "复核状态", "股票名称",
         ])
         for index in range(9):
             self.outcome_table.horizontalHeader().setSectionResizeMode(index, QHeaderView.ResizeMode.ResizeToContents)
         self.outcome_table.horizontalHeader().setSectionResizeMode(9, QHeaderView.ResizeMode.Stretch)
+        self.outcome_table.setColumnHidden(10, True)
         self.outcome_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.outcome_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.outcome_table.itemSelectionChanged.connect(self._show_selected_outcome)
+        self.outcome_table.stock_activated.connect(self._link_outcome_stock)
         outcome_layout.addWidget(self.outcome_table)
         outcome_actions = QHBoxLayout()
         self.btn_accept_outcome = QPushButton("确认标签证据")
@@ -3126,7 +3150,7 @@ class IPOLearningConsole(QWidget):
         self.lbl_operator_guide.setText(
             f"{progress}{next_step}\n"
             "流程：数据/TTL → Gate 阻断原因 → 盘后 D1-D3 → 人工复核 → 回放指标。"
-            "启动约 2.5 秒后自动采集默认标的 301689，之后每 30 分钟重试。"
+            "ATS 启动约 2.5 秒后后台采集一次默认标的 301689；交易时段后续每 5 分钟自动采集，休市可手动采集。"
             "运行入口：python tools/run_ipo_learning_console.py；LLM 与交易授权仍关闭。"
         )
         self.lbl_contract_status.setText(
@@ -3249,33 +3273,85 @@ class IPOLearningConsole(QWidget):
 
     def _render_outcome_labels(self, records: Any) -> None:
         values = records if isinstance(records, list) else []
-        selected_items = self.outcome_table.selectedItems()
+        table = self.outcome_table
+        selected_items = table.selectedItems()
         selected_record = selected_items[0].data(Qt.ItemDataRole.UserRole) if selected_items else None
         selected_id = selected_record.get("evidence_id") if isinstance(selected_record, dict) else ""
-        self.outcome_table.setRowCount(len(values))
+        sorting_enabled = table.isSortingEnabled()
+        sort_column = table.horizontalHeader().sortIndicatorSection()
+        sort_order = table.horizontalHeader().sortIndicatorOrder()
+        table._linkage_timer.stop()
+        table._pending_linkage_row = -1
+        table._is_updating = True
+        table.blockSignals(True)
+        table.setSortingEnabled(False)
         columns = ("ticker", "listing_date", "d1", "d2", "d3", "drawdown", "issue_break", "anchor_break", "matured_at", "review")
-        for row, record in enumerate(values):
-            if not isinstance(record, dict):
-                continue
-            for col, key in enumerate(columns):
-                item = QTableWidgetItem(str(record.get(key, "")))
-                if key == "review":
-                    item.setForeground(QColor("#f0c674"))
-                if key == "anchor_break" and item.text() == "未就绪":
-                    item.setForeground(QColor("#9298a7"))
-                item.setToolTip(str(record.get("evidence_id", "")))
-                if col == 0:
-                    item.setData(Qt.ItemDataRole.UserRole, record)
-                self.outcome_table.setItem(row, col, item)
-        if values:
-            selected_row = next((
-                row for row, record in enumerate(values)
-                if isinstance(record, dict) and record.get("evidence_id") == selected_id
-            ), 0)
-            self.outcome_table.selectRow(selected_row)
-        else:
-            self.btn_accept_outcome.setEnabled(False)
-            self.btn_reject_outcome.setEnabled(False)
+        try:
+            table.setRowCount(len(values))
+            for row, record in enumerate(values):
+                if not isinstance(record, dict):
+                    continue
+                for col, key in enumerate(columns):
+                    item = QTableWidgetItem(str(record.get(key, "")))
+                    if key == "review":
+                        item.setForeground(QColor("#f0c674"))
+                    if key == "anchor_break" and item.text() == "未就绪":
+                        item.setForeground(QColor("#9298a7"))
+                    item.setToolTip(str(record.get("evidence_id", "")))
+                    if col == 0:
+                        item.setData(Qt.ItemDataRole.UserRole, record)
+                    table.setItem(row, col, item)
+                name_item = QTableWidgetItem(self._outcome_stock_name(record))
+                table.setItem(row, 10, name_item)
+
+            table.setSortingEnabled(sorting_enabled)
+            if sorting_enabled and 0 <= sort_column < table.columnCount():
+                table.sortItems(sort_column, sort_order)
+            if values:
+                selected_row = next((
+                    row for row in range(table.rowCount())
+                    if (table.item(row, 0)
+                        and isinstance(table.item(row, 0).data(Qt.ItemDataRole.UserRole), dict)
+                        and table.item(row, 0).data(Qt.ItemDataRole.UserRole).get("evidence_id") == selected_id)
+                ), 0)
+                table.selectRow(selected_row)
+        finally:
+            table.blockSignals(False)
+            table._is_updating = False
+            table._pending_linkage_row = -1
+        self._show_selected_outcome()
+
+    def _outcome_stock_name(self, record: Mapping[str, Any]) -> str:
+        code = "".join(ch for ch in str(record.get("ticker", "")) if ch.isdigit()).zfill(6)
+        if not code or code == "000000":
+            return ""
+        if code in self._outcome_stock_names:
+            return self._outcome_stock_names[code]
+        name = str(record.get("name") or record.get("stock_name") or "").strip()
+        if not name or name == code or name == "未知" or name.isdigit():
+            node = self
+            while node is not None:
+                resolver = getattr(node, "get_stock_name", None)
+                if callable(resolver):
+                    try:
+                        name = str(resolver(code) or "").strip()
+                    except Exception:
+                        name = ""
+                    break
+                node = node.parentWidget() if hasattr(node, "parentWidget") else None
+        if name == code or name == "未知" or name.isdigit():
+            name = ""
+        self._outcome_stock_names[code] = name
+        return name
+
+    def _link_outcome_stock(self, code: str, name: str) -> None:
+        node = self
+        while node is not None:
+            linker = getattr(node, "link_stock", None)
+            if callable(linker):
+                linker(code, name or "")
+                return
+            node = node.parentWidget() if hasattr(node, "parentWidget") else None
 
     def _show_selected_outcome(self) -> None:
         selected = self.outcome_table.selectedItems()

@@ -133,14 +133,23 @@ def inspect_provider_preflight(
     result["backend"] = backend_name[:80]
     checks.append(_check("LLM 配置", "有效", "配置可解析；本检查不读取或展示密钥"))
     timeout = settings.get("request_timeout_seconds")
+    active_name = settings.get("active_backend")
+    fallback_name = settings.get("fallback_backend")
+    dual_remote_route = (
+        active_name in ("antigravity_cli", "codex_cli")
+        and fallback_name in ("antigravity_cli", "codex_cli")
+        and fallback_name != active_name
+    )
     timeout_ok = (
         isinstance(timeout, (int, float)) and not isinstance(timeout, bool)
-        and timeout == 30.0
+        and (timeout == 30.0 or (timeout == 60.0 and dual_remote_route))
     )
     checks.append(_check(
         "Worker 硬截止", "通过" if timeout_ok else "阻断",
-        "统一配置为 30 秒" if timeout_ok else "必须显式配置为方案约定的 30 秒；不使用代码默认值",
+        "单 Provider 30 秒；显式双 Provider 回退可用 60 秒" if timeout_ok else "必须显式配置单 Provider 30 秒，或双 Provider 回退 60 秒",
     ))
+    if timeout_ok:
+        result["request_timeout_seconds"] = float(timeout)
 
     allow_remote = settings.get("allow_remote") is True
     approval = settings.get("remote_egress")
@@ -167,9 +176,14 @@ def inspect_provider_preflight(
             "执行模式", "通过" if mode == "local_litert" else "阻断",
             "local_litert" if mode == "local_litert" else "必须显式设置 local_litert；不接受隐式/远端回退",
         ))
+        remote_closed = (
+            settings.get("allow_remote") is False
+            and settings.get("fallback_backend") in (None, "")
+        )
         checks.append(_check(
-            "远端回退", "阻断" if allow_remote or settings.get("allow_remote") is not False else "通过",
-            "本机候选必须显式关闭远端" if allow_remote or settings.get("allow_remote") is not False else "显式关闭",
+            "远端回退", "通过" if remote_closed else "阻断",
+            "本机模式已关闭远端 Provider 与回退链" if remote_closed
+            else "本机候选禁止开启远端 Provider 或回退链",
         ))
         for distribution in _DISTRIBUTIONS:
             status = _distribution_status(distribution)
@@ -284,6 +298,52 @@ def inspect_provider_preflight(
             "远端 Provider 调用入口", "通过",
             "AGY/Codex 适配器接入隔离 Worker；是否执行仍由上列授权与 Fail-Closed 门禁控制",
         ))
+        fallback_name = settings.get("fallback_backend")
+        if fallback_name not in (None, ""):
+            fallback = backends.get(fallback_name) if isinstance(fallback_name, str) else None
+            fallback_valid_name = (
+                isinstance(fallback_name, str)
+                and fallback_name in {"antigravity_cli", "codex_cli"}
+                and fallback_name != backend_name
+            )
+            fallback_enabled = isinstance(fallback, Mapping) and fallback.get("enabled") is True
+            fallback_model = (
+                isinstance(fallback, Mapping)
+                and isinstance(fallback.get("model_id"), str)
+                and bool(fallback.get("model_id", "").strip())
+                and len(fallback.get("model_id", "")) <= 160
+            )
+            fallback_cli_setting = (
+                fallback.get("cli_path" if fallback_name == "antigravity_cli" else "bin_path")
+                if isinstance(fallback, Mapping) and fallback_name in {"antigravity_cli", "codex_cli"}
+                else None
+            )
+            fallback_cli_ok = fallback_valid_name and _cli_available(
+                fallback_cli_setting,
+                "agy" if fallback_name == "antigravity_cli" else "codex",
+            )
+            fallback_scratch = fallback.get("scratch_cwd") if isinstance(fallback, Mapping) else None
+            fallback_scratch_path = (
+                Path(fallback_scratch).expanduser()
+                if isinstance(fallback_scratch, str) and fallback_scratch.strip() else None
+            )
+            if fallback_scratch_path is not None and not fallback_scratch_path.is_absolute():
+                fallback_scratch_path = config_path.parent.parent / fallback_scratch_path
+            fallback_scratch_ok = fallback_scratch_path is not None and fallback_scratch_path.is_dir()
+            fallback_ready = bool(
+                fallback_valid_name and fallback_enabled and fallback_model
+                and fallback_cli_ok and fallback_scratch_ok and allow_remote and approved
+                and _runtime_authorization_ready(
+                    authorization, approval.get("approval_id"), remote_required=True,
+                )
+            )
+            checks.append(_check(
+                "故障转移 Provider", "通过" if fallback_ready else "阻断",
+                f"{fallback_name} 已启用并共享当前远端字段策略"
+                if fallback_ready else "备选 Provider、模型、CLI、scratch 或远端授权未完整就绪",
+            ))
+        elif "fallback_backend" in settings and settings.get("fallback_backend") is not None:
+            checks.append(_check("故障转移 Provider", "阻断", "fallback_backend 必须是受支持的 CLI 名称或空值"))
     elif backend_name == "ollama_http":
         result["mode"] = "loopback HTTP"
         result["locality"] = "本机候选（未探测服务）"

@@ -21,7 +21,10 @@ _REQUEST_FIELDS = {
     "request_id", "agent_type", "scope_id", "ticker", "as_of_time",
     "prompt", "context", "model_id", "prompt_version", "evidence_ids", "schema_hash",
 }
-_RESPONSE_FIELDS = {"request_id", "status", "envelope", "error_code"}
+_RESPONSE_FIELDS = {
+    "request_id", "status", "envelope", "error_code",
+    "provider_id", "model_id", "fallback_error_code",
+}
 
 
 class WorkerProtocolError(ValueError):
@@ -138,7 +141,20 @@ def encode_worker_response(response: Any, request: Mapping[str, Any]) -> str:
     status = clean["status"]
     if not isinstance(status, str) or status not in {"OK", "UNAVAILABLE", "INVALID"}:
         raise WorkerProtocolError("worker response status is invalid")
+    clean["provider_id"] = _text(
+        clean["provider_id"], "provider_id", 64, allow_empty=status != "OK",
+    )
+    clean["model_id"] = _text(
+        clean["model_id"], "model_id", 160, allow_empty=status != "OK",
+    )
+    clean["fallback_error_code"] = _text(
+        clean["fallback_error_code"], "fallback_error_code", 120, allow_empty=True,
+    )
     if status == "OK":
+        if clean["provider_id"] not in {
+            "antigravity_cli", "codex_cli", "antigravity_sdk", "ollama_http", "local_litert",
+        }:
+            raise WorkerProtocolError("worker response Provider is invalid")
         if clean["error_code"] not in ("", None):
             raise WorkerProtocolError("successful response cannot contain an error")
         try:
@@ -152,7 +168,7 @@ def encode_worker_response(response: Any, request: Mapping[str, Any]) -> str:
             or metadata["scope_id"] != request.get("scope_id")
             or metadata["ticker"] != request.get("ticker")
             or metadata["as_of_time"] != request.get("as_of_time")
-            or metadata["model_id"] != request.get("model_id")
+            or metadata["model_id"] != clean["model_id"]
             or metadata["prompt_version"] != request.get("prompt_version")
             or metadata["evidence_ids"] != request.get("evidence_ids")
         ):

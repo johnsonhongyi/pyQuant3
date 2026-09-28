@@ -1854,6 +1854,15 @@ class ATSMainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
+        ipo_enabled = getattr(
+            cct, "ipo_detector", getattr(getattr(cct, "CFG", None), "ipo_detector", True)
+        )
+        self._ipo_detector_enabled = bool(ipo_enabled)
+        logger.info(
+            "[ATSMainWindow] IPO monitor enabled=%s config=%s",
+            self._ipo_detector_enabled,
+            getattr(getattr(cct, "CFG", None), "cfg_file", "unknown"),
+        )
         app = QApplication.instance()
         if app:
             app.main_window = self
@@ -2422,10 +2431,14 @@ class ATSMainWindow(QMainWindow):
         self.top_tabs.addTab(self.next_day_watch_panel, "📋 次日异动候选池")
         mark_checkpoint("03.3.6 NextDayWatchPanel (Tab 4)")
 
-        from ats.ui.ipo_learning_console import IPOLearningConsole
-        self.ipo_learning_console = IPOLearningConsole(parent=self)
-        self.top_tabs.addTab(self.ipo_learning_console, "🤖 IPO 自学习监控")
-        mark_checkpoint("03.3.7 IPOLearningConsole (Read-only Learning Monitor)")
+        self.ipo_learning_console = None
+        if self._ipo_detector_enabled:
+            from ats.ui.ipo_learning_console import IPOLearningConsole
+            self.ipo_learning_console = IPOLearningConsole(parent=self)
+            self.top_tabs.addTab(self.ipo_learning_console, "🤖 IPO 自学习监控")
+            mark_checkpoint("03.3.7 IPOLearningConsole (Read-only Learning Monitor)")
+        else:
+            mark_checkpoint("03.3.7 IPOLearningConsole skipped by ipo_detector=False")
 
         self.top_tabs.currentChanged.connect(self._on_top_tab_changed)
         
@@ -6031,6 +6044,33 @@ class ATSMainWindow(QMainWindow):
             # 延时 80ms 在窗口完成 showMaximized/物理屏幕渲染后再强行精准对齐一次统一权威尺寸
             from PyQt6.QtCore import QTimer
             QTimer.singleShot(80, self._apply_unified_layout_on_ready)
+        if self._ipo_detector_enabled and not getattr(
+            self, '_ipo_detector_autostart_scheduled', False
+        ):
+            self._ipo_detector_autostart_scheduled = True
+            from PyQt6.QtCore import QTimer
+            # 延后到 ATS 首屏稳定后再启动，避免占用冷启动渲染阶段。
+            QTimer.singleShot(1500, self._autostart_ipo_detector)
+
+    def _autostart_ipo_detector(self):
+        """按 cct.ipo_detector 配置，在 ATS 首屏就绪后后台自动启动 IPO 侦测器。"""
+        if not self._ipo_detector_enabled:
+            logger.info("[ATSMainWindow] cct.ipo_detector=False，跳过 IPO 侦测器自动启动")
+            return
+        if getattr(self, '_is_closing', False):
+            return
+
+        def _launch():
+            if getattr(self, '_is_closing', False):
+                return
+            try:
+                from ats.ui.ipo_detector_ipc import launch_ipo_detector_process
+                launch_ipo_detector_process()
+            except Exception as exc:
+                logger.warning(f"[ATSMainWindow] IPO 侦测器自动启动失败: {exc}")
+
+        import threading
+        threading.Thread(target=_launch, name="ATS_IPO_Detector_AutoStart", daemon=True).start()
 
     def _apply_unified_layout_on_ready(self):
         """窗口首轮物理展示就绪后，强制精准应用统一权威分割尺寸并释放恢复保护锁"""
@@ -6619,7 +6659,7 @@ class ATSMainWindow(QMainWindow):
         """主窗口关闭退出时，自动跟随关闭所有独立的 TopLevel 子窗口、对话框、保存全量布局配置及安全回收后台线程"""
         self._is_closing = True
         self._is_exiting = True
-        if hasattr(self, "ipo_learning_console"):
+        if self.ipo_learning_console is not None:
             self.ipo_learning_console.stop_monitor()
         if hasattr(self, "_next_day_watch_timer"):
             self._next_day_watch_timer.stop()

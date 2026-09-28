@@ -285,7 +285,7 @@ def evaluate_gate4_vwap(
         return False, "Gate 4 阻断: 满 10 日但 VWAPFactory 仍报告数据不足"
     if current_price < vwap_today * (1.0 - support_pct / 100.0) or vwap.structure == "多周期偏弱":
         return False, "Gate 4 阻断: 现价跌破配置化当日 VWAP 支撑或 VWAP 结构偏弱"
-    return True, f"Gate 4 放行: VWAP 与首日锚点数据完整 ({vwap.structure})"
+    return True, f"Gate 4 放行: 当日 VWAP 与上市日龄适用结构校验通过 ({vwap.structure})"
 
 
 class GateOrchestrator:

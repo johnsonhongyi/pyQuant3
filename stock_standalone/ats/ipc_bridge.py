@@ -225,12 +225,11 @@ class IPCBridge:
                                     except Exception:
                                         market_active = True
                                     if not market_active:
-                                        if isinstance(body, dict) and body.get("sync_session") is not None:
-                                            try:
-                                                self._cache_sync_session = str(body.get("sync_session"))
-                                                self._cache_sync_version = int(body.get("ver"))
-                                            except (TypeError, ValueError):
-                                                pass
+                                        # We keep the last good frame for off-hours UI,
+                                        # but cannot advance its cursor without merging
+                                        # this packet. Require a fresh full baseline at
+                                        # the next active session before accepting diffs.
+                                        self._cache_requires_full_baseline = True
                                         self._ack_data_frame(body)
                                         return
 
@@ -252,6 +251,21 @@ class IPCBridge:
                                                  and body.get("ver") is not None)
                                     packet_session = str(body.get("sync_session")) if versioned else None
                                     packet_version = None
+                                    if (
+                                        msg_type == 'UPDATE_DF_DIFF'
+                                        and getattr(self, '_cache_requires_full_baseline', False)
+                                    ):
+                                        self._cached_df = None
+                                        self._cache_sync_session = None
+                                        self._cache_sync_version = None
+                                        if not getattr(self, '_full_baseline_requested', False):
+                                            try:
+                                                requested = self._request_full_baseline()
+                                                self._full_baseline_requested = requested is not False
+                                            except Exception:
+                                                self._full_baseline_requested = False
+                                        self._ack_data_frame(body)
+                                        return
                                     if versioned:
                                         try:
                                             packet_version = int(body.get("ver"))
@@ -365,6 +379,9 @@ class IPCBridge:
                                     # never let later versioned diffs inherit stale metadata.
                                     self._cache_sync_session = None
                                     self._cache_sync_version = None
+                                if msg_type != 'UPDATE_DF_DIFF':
+                                    self._cache_requires_full_baseline = False
+                                    self._full_baseline_requested = False
                                 # ACK means the frame was validated, merged into the cache,
                                 # and accepted by the receiver callback.
                                 self._ack_data_frame(body)
