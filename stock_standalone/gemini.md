@@ -1,5 +1,12 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-09-28 21:02 最新工作区复核、Codex审核核验与方案落地全景评估
+- [x] **【合成仿真自动回退实测核验、Codex 补充报告穿透、策略回归漏洞实测排查与方案全周期盘点】(`design/新股情绪感知与本地LLM自学习系统_20260928最新工作区复核与稳定性验收补充.md`, `data/ipo_learning_simulation/`, `stock_live_strategy.py`, `20260928_2102_task.md`)**：
+    - [x] **单请求自动回退实测核验（里程碑贯通）**：实证 `20260928T115828` 仿真产物成功跑通 AGY 遇 `SCHEMA_OUTPUT_NOT_JSON` 自动回退 Codex Luna，Worker 成功并产出 58 分因果日志；但输入全为合成数据，Gate 仍为内存审批，实盘派单保持关闭；
+    - [x] **Codex 审核观点深度穿透与事实校准**：核验证实行情契约最新快照为 10/41、UNREADY（分时指标收盘后失效）；核验认同 Sina 冷启动无 HDF 时的同步等待隐患；
+    - [x] **重大实证发现（策略非交易日单测红灯）**：查实 Codex 报告中提到的“策略非交易时段早退保护”在 `stock_live_strategy.py` 中尚未落盘，实跑 `test_non_trading_day_cpu_optimization.py` 报错红灯，已锁定根因；
+    - [x] **方案落地情况客观量化对照与后续攻坚确立**：梳理 Stage 0 ~ Stage 4 精确百分比，确立“消除单测红灯与冷启动隐患 → 根治 AGY 结构化输出 → 真实 41 项数据与 Gate 组装 → 离线微调晋级”的四步走路线。
+
 ## 2026-09-28 18:30 情绪感知LLM仿真闭环、方案差距及全系统非交易日/写盘加固全景审核
 - [x] **【合成数据六层门禁与双CLI仿真、方案差距客观盘点与全系统非交易日/IPC/写盘专项加固审核】(`data/ipo_learning_simulation/`, `JSONData/realdatajson.py`, `instock_MonitorTK.py`, `ipc_sync_manager.py`, `popularity_resonance_gui.py`, `20260928_1830_task.md`)**：
     - [x] **情绪感知与 LLM 仿真闭环审核**：实证 `fe064a9e` 构建了有界 CLI 执行与 Windows 进程树回收（`cli_process.py`）；Codex Luna 仿真全通（Gate 0–5放行，内存生成批准对象，真实订单未下）；Antigravity CLI 调用成功但返回非 JSON 文本，被系统依 Fail-Closed 判定为 `SCHEMA_OUTPUT_NOT_JSON` 安全拒绝；

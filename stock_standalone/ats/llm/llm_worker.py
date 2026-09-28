@@ -12,7 +12,9 @@ import threading
 import time
 from typing import Any, Callable, Dict, Mapping, Optional
 
-from ats.llm.agent_contracts import build_agent_envelope, payload_schema
+from ats.llm.agent_contracts import (
+    AgentContractError, build_agent_envelope, payload_schema,
+)
 from ats.llm.worker_protocol import (
     WorkerProtocolError,
     decode_worker_request,
@@ -79,12 +81,15 @@ def _worker_entry(
             if message == _STOP_MESSAGE:
                 break
             request: Optional[Dict[str, Any]] = None
+            response: Any = None
             try:
                 request = decode_worker_request(message)
                 generate_request = getattr(backend, "generate_request", None)
                 if callable(generate_request):
                     response = generate_request(
-                        request, payload_schema(request["agent_type"]),
+                        request, payload_schema(
+                            request["agent_type"], evidence_ids=request["evidence_ids"],
+                        ),
                         timeout_seconds=request_timeout_seconds,
                     )
                 else:
@@ -95,7 +100,9 @@ def _worker_entry(
                         separators=(",", ":"), allow_nan=False,
                     )
                     response = backend.generate(
-                        prompt, payload_schema(request["agent_type"]),
+                        prompt, payload_schema(
+                            request["agent_type"], evidence_ids=request["evidence_ids"],
+                        ),
                         timeout_seconds=request_timeout_seconds,
                     )
                 if not isinstance(response, Mapping) or response.get("status") != "OK":
@@ -106,30 +113,77 @@ def _worker_entry(
                         r"[A-Za-z0-9_.-]{1,80}", backend_error
                     ):
                         backend_error = "provider_unavailable"
+                    provider_id = (
+                        response.get("provider_id") if isinstance(response, Mapping) else None
+                    ) or getattr(backend, "provider_id", "")
+                    model_id = (
+                        response.get("model_id") if isinstance(response, Mapping) else None
+                    ) or getattr(backend, "model_id", "")
+                    fallback_error_code = (
+                        response.get("fallback_error_code")
+                        if isinstance(response, Mapping) else ""
+                    )
                     packet = {
                         "request_id": request["request_id"], "status": "UNAVAILABLE",
                         "envelope": None, "error_code": backend_error,
+                        "provider_id": provider_id if isinstance(provider_id, str) else "",
+                        "model_id": model_id if isinstance(model_id, str) else "",
+                        "fallback_error_code": (
+                            fallback_error_code[:120]
+                            if isinstance(fallback_error_code, str) else ""
+                        ),
                     }
                 else:
+                    provider_id = response.get("provider_id") or getattr(backend, "provider_id", "local_litert")
+                    model_id = response.get("model_id") or getattr(backend, "model_id", request["model_id"])
+                    fallback_error_code = response.get("fallback_error_code", "")
+                    if not isinstance(fallback_error_code, str):
+                        fallback_error_code = ""
                     envelope = build_agent_envelope(
                         request["agent_type"], response.get("proposal"),
                         request_id=request["request_id"], scope_id=request["scope_id"],
                         ticker=request["ticker"], as_of_time=request["as_of_time"],
                         generated_at=datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
-                        model_id=request["model_id"], prompt_version=request["prompt_version"],
+                        model_id=model_id, prompt_version=request["prompt_version"],
                         evidence_ids=request["evidence_ids"],
                     )
                     packet = {
                         "request_id": request["request_id"], "status": "OK",
                         "envelope": envelope, "error_code": "",
+                        "provider_id": provider_id, "model_id": model_id,
+                        "fallback_error_code": fallback_error_code,
                     }
                 encoded = encode_worker_response(packet, request)
+            except AgentContractError:
+                if request is None:
+                    continue
+                provider_id = (
+                    response.get("provider_id") if isinstance(response, Mapping) else None
+                ) or getattr(backend, "provider_id", "")
+                model_id = (
+                    response.get("model_id") if isinstance(response, Mapping) else None
+                ) or getattr(backend, "model_id", "")
+                fallback_error_code = (
+                    response.get("fallback_error_code", "")
+                    if isinstance(response, Mapping) else ""
+                )
+                encoded = encode_worker_response({
+                    "request_id": request["request_id"], "status": "UNAVAILABLE",
+                    "envelope": None, "error_code": "AGENT_CONTRACT_INVALID",
+                    "provider_id": provider_id if isinstance(provider_id, str) else "",
+                    "model_id": model_id if isinstance(model_id, str) else "",
+                    "fallback_error_code": (
+                        fallback_error_code[:120]
+                        if isinstance(fallback_error_code, str) else ""
+                    ),
+                }, request)
             except (WorkerProtocolError, ValueError, TypeError, OverflowError):
                 if request is None:
                     continue
                 encoded = encode_worker_response({
                     "request_id": request["request_id"], "status": "INVALID",
                     "envelope": None, "error_code": "provider_output_invalid",
+                    "provider_id": "", "model_id": "", "fallback_error_code": "",
                 }, request)
             except Exception:
                 if request is None:
@@ -137,6 +191,7 @@ def _worker_entry(
                 encoded = encode_worker_response({
                     "request_id": request["request_id"], "status": "UNAVAILABLE",
                     "envelope": None, "error_code": "provider_runtime_failure",
+                    "provider_id": "", "model_id": "", "fallback_error_code": "",
                 }, request)
             try:
                 result_queue.put_nowait(encoded)
@@ -168,9 +223,9 @@ class LLMWorkerProcess:
         if (
             isinstance(request_timeout_seconds, bool)
             or not isinstance(request_timeout_seconds, (int, float))
-            or request_timeout_seconds != 30.0
+            or request_timeout_seconds not in {30.0, 60.0}
         ):
-            raise ValueError("R9 Worker 硬截止必须由配置显式固定为 30 秒")
+            raise ValueError("R9 Worker 硬截止必须由配置显式固定为 30 或 60 秒")
         self._backend_factory = backend_factory
         self._request_timeout_seconds = float(request_timeout_seconds)
         self._context = multiprocessing.get_context("spawn")
@@ -295,7 +350,7 @@ class LLMWorkerProcess:
             self._request_queue.put_nowait(encoded)
             self._pending[request_id] = {
                 "request": dict(request),
-                "deadline": time.monotonic() + _REQUEST_DEADLINE_SECONDS,
+                "deadline": time.monotonic() + self._request_timeout_seconds,
             }
             return True
         except (WorkerProtocolError, KeyError, TypeError, ValueError):

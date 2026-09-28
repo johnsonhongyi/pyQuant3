@@ -93,7 +93,10 @@ def create_runtime_control_thread(root: str | Path) -> LLMControlThread:
         backend_factory = build_backend_factory(config_path, authorization=authorization)
     except Exception:
         backend_factory = _unavailable_backend_factory
-    worker = LLMWorkerProcess(backend_factory, request_timeout_seconds=30.0)
+    worker = LLMWorkerProcess(
+        backend_factory,
+        request_timeout_seconds=float(preflight.get("request_timeout_seconds", 30.0)),
+    )
     return LLMControlThread(
         root=resolved_root,
         worker=worker,

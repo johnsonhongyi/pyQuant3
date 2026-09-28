@@ -83,6 +83,7 @@ def _write_run_configuration(root: Path, provider: str, model_id: str) -> None:
     config = build_configuration()
     config["version"] = "synthetic-only-v1"
     config["decision_config"]["implementation_status"] = "SIMULATION_ONLY"
+    config["decision_config"]["trade_gate"]["signal_max_age_seconds"] = 86_400.0
     config["decision_config"]["trade_gate"]["allowed_actions"] = ["WATCH", "BUY"]
     from ats.strategy.ipo_data_contracts import IPODataContractSet, build_decision_config_hash
 
@@ -104,10 +105,12 @@ def _write_run_configuration(root: Path, provider: str, model_id: str) -> None:
     }
     if provider == "antigravity_cli":
         active_backend["cli_path"] = "agy"
+        fallback_scratch = root / "scratch" / "codex"
+        fallback_scratch.mkdir(parents=True, exist_ok=True)
         other_backend = {
-            "execution_mode": "remote_api", "enabled": False,
+            "execution_mode": "remote_api", "enabled": True,
             "bin_path": "codex", "model_id": "gpt-6-luna",
-            "scratch_cwd": str((root / "scratch" / "codex").resolve()),
+            "scratch_cwd": str(fallback_scratch.resolve()),
         }
         backends = {"antigravity_cli": active_backend, "codex_cli": other_backend}
     else:
@@ -126,7 +129,8 @@ def _write_run_configuration(root: Path, provider: str, model_id: str) -> None:
         "version": "simulation-only-v1",
         "llm_settings": {
             "active_backend": provider, "allow_remote": True,
-            "request_timeout_seconds": 30.0,
+            "fallback_backend": "codex_cli" if provider == "antigravity_cli" else None,
+            "request_timeout_seconds": 60.0 if provider == "antigravity_cli" else 30.0,
             "remote_egress": policy,
         },
         "backends": backends,
@@ -193,7 +197,9 @@ def _record_gate_snapshot(root: Path, config: Any) -> Dict[str, Any]:
     from trading_kernel.core.signal import StrategySignal
     from trading_kernel.engine.risk_gate import RiskLimits
 
-    market_time = datetime.now(ZoneInfo("Asia/Shanghai"))
+    market_time = datetime.now(ZoneInfo("Asia/Shanghai")).replace(
+        hour=10, minute=30, second=0, microsecond=0,
+    )
     listing_date = (market_time.date() - timedelta(days=1)).isoformat()
     anchor_time = (market_time - timedelta(days=1)).replace(
         hour=15, minute=0, second=0, microsecond=0,
@@ -390,7 +396,8 @@ def _run_provider(root: Path, provider: str, model_id: str, timeout: float) -> D
     backend_factory = build_backend_factory(
         root / "config" / "llm_config.yaml", authorization=authorization,
     )
-    worker = LLMWorkerProcess(backend_factory, request_timeout_seconds=30.0)
+    worker_timeout = 60.0 if provider == "antigravity_cli" else 30.0
+    worker = LLMWorkerProcess(backend_factory, request_timeout_seconds=worker_timeout)
     control = LLMControlThread(
         root=root, worker=worker, provider_preflight=preflight,
         authorization=authorization,
@@ -435,6 +442,9 @@ def _run_provider(root: Path, provider: str, model_id: str, timeout: float) -> D
         "synthetic_ticker": SIMULATED_TICKER,
         "provider": provider,
         "model_id": model_id,
+        "provider_used": last.get("provider_id", ""),
+        "model_id_used": last.get("model_id", ""),
+        "fallback_error_code": last.get("fallback_error_code", ""),
         "result_status": status,
         "result_summary": summary[:300],
         "synthetic_fields_persisted": field_count,
@@ -471,7 +481,7 @@ def main() -> int:
         "--provider", choices=("both", "antigravity_cli", "codex_cli"), default="both",
         help="both 依次运行 Antigravity 主链与 Codex Luna 备用链",
     )
-    parser.add_argument("--timeout", type=float, default=40.0, help="每个 Provider 最长等待秒数（10–60）")
+    parser.add_argument("--timeout", type=float, default=60.0, help="每条仿真链最长等待秒数（10–60）")
     args = parser.parse_args()
     timeout = max(10.0, min(float(args.timeout), 60.0))
     selected = (

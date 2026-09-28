@@ -129,7 +129,9 @@ class _InteractionWriter:
                     evidence_ids_json TEXT NOT NULL,
                     result_json TEXT NOT NULL,
                     result_sha256 TEXT NOT NULL,
-                    error_code TEXT NOT NULL
+                    error_code TEXT NOT NULL,
+                    provider_id TEXT NOT NULL DEFAULT '',
+                    fallback_error_code TEXT NOT NULL DEFAULT ''
                 )"""
             )
             columns = {
@@ -140,6 +142,14 @@ class _InteractionWriter:
             if "summary" not in columns:
                 connection.execute(
                     "ALTER TABLE agent_interactions ADD COLUMN summary TEXT NOT NULL DEFAULT ''"
+                )
+            if "provider_id" not in columns:
+                connection.execute(
+                    "ALTER TABLE agent_interactions ADD COLUMN provider_id TEXT NOT NULL DEFAULT ''"
+                )
+            if "fallback_error_code" not in columns:
+                connection.execute(
+                    "ALTER TABLE agent_interactions ADD COLUMN fallback_error_code TEXT NOT NULL DEFAULT ''"
                 )
             connection.commit()
             while True:
@@ -152,12 +162,14 @@ class _InteractionWriter:
                         """INSERT OR IGNORE INTO agent_interactions (
                             request_id, status, ticker, agent_type, as_of_time,
                             completed_at, model_id, prompt_version, summary, evidence_ids_json,
-                            result_json, result_sha256, error_code
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                            result_json, result_sha256, error_code, provider_id,
+                            fallback_error_code
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                         tuple(record[key] for key in (
                             "request_id", "status", "ticker", "agent_type", "as_of_time",
                             "completed_at", "model_id", "prompt_version", "summary", "evidence_ids_json",
-                            "result_json", "result_sha256", "error_code",
+                            "result_json", "result_sha256", "error_code", "provider_id",
+                            "fallback_error_code",
                         )),
                     )
                     connection.commit()
@@ -201,6 +213,13 @@ def record_agent_interaction(
             return False
         envelope = response.get("envelope")
         error_code = response.get("error_code", "")
+        provider_id = response.get("provider_id", "")
+        fallback_error_code = response.get("fallback_error_code", "")
+        if (
+            not isinstance(provider_id, str) or len(provider_id) > 64
+            or not isinstance(fallback_error_code, str) or len(fallback_error_code) > 120
+        ):
+            return False
         if status == "OK":
             envelope = validate_agent_envelope(envelope)
             metadata = envelope["metadata"]
@@ -215,6 +234,8 @@ def record_agent_interaction(
             agent_type = str(envelope.get("agent_type", ""))[:40]
             as_of_time = str(metadata.get("as_of_time", ""))[:40]
             model_id = str(metadata.get("model_id", ""))[:160]
+            if metadata.get("model_id") != response.get("model_id") or not provider_id:
+                return False
             prompt_version = str(metadata.get("prompt_version", ""))[:128]
             evidence_ids = metadata.get("evidence_ids", [])
             summary = _result_summary(result_json)
@@ -238,6 +259,8 @@ def record_agent_interaction(
             "evidence_ids_json": _canonical(evidence_ids).decode("utf-8"),
             "result_json": result_json, "result_sha256": result_hash,
             "error_code": error_code[:120] if isinstance(error_code, str) else "",
+            "provider_id": provider_id,
+            "fallback_error_code": fallback_error_code,
         }
         key = str(Path(root).resolve())
         with _writers_lock:
@@ -273,6 +296,7 @@ def recent_agent_interactions(root: str | Path, limit: int = 100) -> list[Dict[s
             rows = connection.execute(
                 "SELECT request_id, status, ticker, agent_type, as_of_time, completed_at, "
                 "model_id, prompt_version, summary, evidence_ids_json, result_sha256, error_code "
+                ", provider_id, fallback_error_code "
                 "FROM agent_interactions ORDER BY completed_at DESC LIMIT ?", (limit,),
             ).fetchall()
         finally:
@@ -284,6 +308,7 @@ def recent_agent_interactions(root: str | Path, limit: int = 100) -> list[Dict[s
             "prompt_version": str(row[7]), "summary": str(row[8]),
             "evidence_ids": json.loads(row[9]),
             "result_sha256": str(row[10]), "error_code": str(row[11]),
+            "provider_id": str(row[12]), "fallback_error_code": str(row[13]),
         } for row in rows]
     except (OSError, sqlite3.Error, TypeError, ValueError, RecursionError):
         return []

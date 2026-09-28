@@ -358,10 +358,12 @@ class BaseATSTableWidget(QTableWidget):
 
         menu.addSeparator()
 
-        # ✏️ 右键编辑单元格选项
-        edit_action = QAction(f"✏️ 编辑当前单元格内容", self)
-        edit_action.triggered.connect(lambda: self._edit_current_cell(item))
-        menu.addAction(edit_action)
+        # Read-only evidence tables can keep the standard stock menu without
+        # allowing an in-place edit that could be mistaken for source evidence.
+        if getattr(self, "context_menu_cell_editable", True):
+            edit_action = QAction("✏️ 编辑当前单元格内容", self)
+            edit_action.triggered.connect(lambda: self._edit_current_cell(item))
+            menu.addAction(edit_action)
 
         # ↔️ 右键一键自适应全列宽选项
         fit_action = QAction("↔️ 一键自适应全列宽", self)
