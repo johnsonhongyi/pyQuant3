@@ -5,6 +5,8 @@ Visualizes the multi-tier stock universe pools: Radar, Watchlist, and Trading.
 Provides a tree structure with real-time mockup data.
 """
 
+import threading
+
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QTreeWidget, QTreeWidgetItem, QHBoxLayout, QPushButton, QLabel, QLineEdit, QSizePolicy
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QSize, QPoint
 from PyQt6.QtGui import QColor, QFont
@@ -138,10 +140,13 @@ class UniverseTreeWidget(QWidget):
     # Signal emitted when a stock is double clicked or clicked
     stock_selected = pyqtSignal(str, str, dict) # code, name, context_info
     stock_clicked = pyqtSignal(str, str)        # code, name (for linkage)
+    _ipo_detector_action_done = pyqtSignal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.window_manager = ATSWindowManager.get_instance()
+        self._ipo_detector_open_pending = False
+        self._ipo_detector_action_done.connect(self._notify_status)
         self._is_mock_active = False
         self._init_ui()
         self.load_mock_data()
@@ -485,6 +490,8 @@ class UniverseTreeWidget(QWidget):
 
     def _notify_status(self, msg: str):
         """统一向主窗口状态栏输出操作反馈"""
+        if msg.startswith("[IPO超短]"):
+            self._ipo_detector_open_pending = False
         try:
             mw = self.window()
             if hasattr(mw, "status_bar") and mw.status_bar:
@@ -1290,26 +1297,29 @@ class UniverseTreeWidget(QWidget):
 
     def _on_launch_ipo_detector_clicked(self):
         """【次新超短】优先置顶已有检测工具窗口，无窗口时才拉起独立进程"""
-        try:
-            from ats.ui.ipo_detector_ipc import (
-                launch_ipo_detector_process, is_ipo_detector_alive, activate_ipo_detector_window
-            )
-            # 1. 优先查窗并置顶：若桌面已有该窗口，立刻强力置顶并返回，绝不误开新窗口！
-            if activate_ipo_detector_window():
-                self._notify_status("[IPO超短] 检测工具已在运行，已自动激活并置顶窗口。")
-                return
+        if self._ipo_detector_open_pending:
+            return
+        self._ipo_detector_open_pending = True
 
-            # 2. 若子进程存活或正在启动中，尝试再次激活
-            if is_ipo_detector_alive():
-                activate_ipo_detector_window()
-                self._notify_status("[IPO超短] 检测工具已在运行，已同步激活置顶窗口。")
-                return
+        def _open_detector():
+            try:
+                from ats.ui.ipo_detector_ipc import (
+                    launch_ipo_detector_process, is_ipo_detector_alive, activate_ipo_detector_window
+                )
+                if activate_ipo_detector_window():
+                    message = "[IPO超短] 检测工具已在运行，已自动激活并置顶窗口。"
+                elif is_ipo_detector_alive():
+                    activate_ipo_detector_window()
+                    message = "[IPO超短] 检测工具已在运行，已同步激活置顶窗口。"
+                else:
+                    launch_ipo_detector_process()
+                    message = "[IPO超短] 已调起新股次新股超短检测工具。"
+                self._ipo_detector_action_done.emit(message)
+            except Exception as e:
+                logger.exception(f"[Universe] 调起超短检测工具异常: {e}")
+                self._ipo_detector_action_done.emit(f"[IPO超短] 打开检测工具失败：{e}")
 
-            # 3. 确实没有任何运行实例时，才拉起新独立进程
-            launch_ipo_detector_process()
-            self._notify_status("[IPO超短] 已成功调起新股次新股超短检测独立工具。")
-        except Exception as e:
-            logger.error(f"[Universe] 调起超短检测工具异常: {e}")
+        threading.Thread(target=_open_detector, name="ATS-Open-IPODetector", daemon=True).start()
 
     def _send_to_ipo_detector(self, code: str, name: str = ""):
         """【⚡ 一键发送】将选中标的发送到超短检测工具"""

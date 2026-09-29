@@ -17,6 +17,7 @@ import os
 import time
 import math
 import logging
+import threading
 import datetime
 import numpy as np
 import pandas as pd
@@ -136,6 +137,7 @@ class NewStockPanel(QWidget):
 
     stock_selected = pyqtSignal(str, str)        # code, name (单击联动)
     stock_double_clicked = pyqtSignal(str, str) # code, name (双击详情)
+    _ipo_detector_action_done = pyqtSignal(str)
 
     def minimumSizeHint(self) -> QSize:
         # 允许中间面板极致弹性缩放，绝不撑大主窗口或挤压左右侧分割条
@@ -144,6 +146,8 @@ class NewStockPanel(QWidget):
     def __init__(self, parent=None, main_window=None):
         super().__init__(parent)
         self.main_window = main_window
+        self._ipo_detector_open_pending = False
+        self._ipo_detector_action_done.connect(self._notify_ipo_detector_status)
         self.df_data = pd.DataFrame()
         self.selected_code = ""
         self.selected_name = ""
@@ -1952,20 +1956,43 @@ class NewStockPanel(QWidget):
 
     def _on_open_ipo_detector_clicked(self):
         """调出新股次新股超短检测独立工具或发送当前选中标的"""
-        from ats.ui.ipo_detector_ipc import (
-            launch_ipo_detector_process, send_stock_to_ipo_detector,
-            is_ipo_detector_alive, activate_ipo_detector_window
-        )
-        if self.selected_code:
-            send_stock_to_ipo_detector(self.selected_code, self.selected_name)
-        else:
-            # 优先激活置顶已有窗口
-            if activate_ipo_detector_window():
-                return
-            if not is_ipo_detector_alive():
-                launch_ipo_detector_process()
-            else:
-                activate_ipo_detector_window()
+        if self._ipo_detector_open_pending:
+            return
+        self._ipo_detector_open_pending = True
+        code, name = self.selected_code, self.selected_name
+
+        def _open_detector():
+            try:
+                from ats.ui.ipo_detector_ipc import (
+                    launch_ipo_detector_process, send_stock_to_ipo_detector,
+                    is_ipo_detector_alive, activate_ipo_detector_window
+                )
+                if code:
+                    ok = send_stock_to_ipo_detector(code, name)
+                    message = f"[IPO超短] {'已发送' if ok else '发送失败'} {name} ({code})。"
+                elif activate_ipo_detector_window():
+                    message = "[IPO超短] 已激活检测工具窗口。"
+                elif not is_ipo_detector_alive():
+                    launch_ipo_detector_process()
+                    message = "[IPO超短] 已调起检测工具。"
+                else:
+                    activate_ipo_detector_window()
+                    message = "[IPO超短] 检测工具正在运行，已请求激活。"
+                self._ipo_detector_action_done.emit(message)
+            except Exception as e:
+                logger.exception(f"打开新股次新股检测工具失败: {e}")
+                self._ipo_detector_action_done.emit(f"[IPO超短] 打开失败：{e}")
+
+        threading.Thread(target=_open_detector, name="ATS-Open-IPODetector", daemon=True).start()
+
+    def _notify_ipo_detector_status(self, message: str):
+        """将后台启动结果安全地反馈到 ATS 状态栏。"""
+        self._ipo_detector_open_pending = False
+        try:
+            if self.main_window and hasattr(self.main_window, "statusBar"):
+                self.main_window.statusBar().showMessage(message, 6000)
+        except Exception:
+            pass
 
     def _toggle_favorite(self):
         """右键菜单：切换重点关注 (极速响应与全系统 0ms 联动)"""

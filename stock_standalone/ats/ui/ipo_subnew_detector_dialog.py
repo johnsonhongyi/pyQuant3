@@ -2230,6 +2230,7 @@ class IPOSubnewDetectorDialog(QMainWindow):
             self._command_room_dlg.activateWindow()
         except Exception as e:
             logger.error(f"打开集中交易指挥室异常: {e}")
+            QMessageBox.warning(self, "打开失败", f"集中交易指挥室无法打开：{e}")
 
     def select_and_focus_code(self, code: str, trigger_linkage: bool = True) -> bool:
         """
