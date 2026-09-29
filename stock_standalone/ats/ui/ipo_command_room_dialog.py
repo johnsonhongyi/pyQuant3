@@ -651,12 +651,13 @@ class IPOCommandRoomDialog(QDialog):
 
         self._init_ui()
         self._load_dialog_state()
-        self.refresh_data()
+        # 先完成窗口展示，再刷新交易数据，避免点击后窗口迟迟不出现。
+        QTimer.singleShot(100, self._refresh_data_safely)
 
-        # 1.5秒自动刷新
+        # 降低完整表格重绘频率，避免持续占用 Qt 主线程。
         self.refresh_timer = QTimer(self)
-        self.refresh_timer.timeout.connect(self.refresh_data)
-        self.refresh_timer.start(1500)
+        self.refresh_timer.timeout.connect(self._refresh_data_safely)
+        self.refresh_timer.start(5000)
 
     def _init_ui(self):
         root_layout = QVBoxLayout(self)
@@ -1550,6 +1551,12 @@ class IPOCommandRoomDialog(QDialog):
         else:
             QMessageBox.information(self, "提示", "当前没有待执行的交易指令。")
         self.refresh_data()
+
+    def _refresh_data_safely(self):
+        try:
+            self.refresh_data()
+        except Exception:
+            logger.exception("集中交易指挥室刷新数据失败")
 
     def refresh_data(self):
         """刷新指挥室全部战情数据 (支持角色中文映射、双模式切换与数值精确排序)"""
