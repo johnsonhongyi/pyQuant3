@@ -1,5 +1,13 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-09-29 14:15 ATS 情绪感知与全量策略配置文件 PyInstaller 打包自恢复与启动/访问自愈闭环
+- [x] **【打包入口对齐、RESOURCE_MAP 延迟解除、Eager 抢占式自愈与 UI Lazy 兜底全闭环】(`ats.spec`, `run_ats.py`, `sys_utils.py`, `ats/ui/ipo_learning_console.py`, `ats/strategy/ipo_gate_context_provider.py`, `20260929_1415_task.md`)**：
+    - [x] **打包规范全量覆盖（15个静态配置入包）**：实证 `ats.spec` 的 `datas` 包含 `config/llm_config.yaml`、`config/ipo_sentiment.yaml` 以及策略/新股/检测器列与布局全部 15 个配置文件；
+    - [x] **解除核心配置延迟跳过隐患**：彻底解除 `sys_utils.py` 中规则、策略、检测器配置的 `delay_release: True`，仅保留动态网络大缓存延迟，确保启动时统一纳入自愈检查；
+    - [x] **打包真实主入口对齐自愈与共享数据刷新**：在 `run_ats.py` 的 `main()` 最早期注入 `ensure_all_configs_released()` 抢占式自愈释放，并启动 `get_default_ipo_gate_context_provider(current_dir).start_auto_refresh()`，彻底根除新 EXE 启动时配置未释放及 `ATS数据同步: UNREADY` 缺陷；
+    - [x] **UI 监控与 Gate 提供端双重 Lazy 自愈兜底**：在 `ipo_learning_console.py` 的 `_collect_snapshot` 与 `ipo_gate_context_provider.py` 的 `refresh()` 中增加访问层探测自愈，物理磁盘若缺失即刻无损从资源包补齐；
+    - [x] **开发环境已有配置幂等绝对保护**：实测验证 `get_conf_path` 对物理磁盘已存在且有效（>0字节）的文件直接返回，绝不执行任何覆盖复制，开发环境与用户自定义参数 100% 绝对保护。
+
 ## 2026-09-28 21:02 最新工作区复核、Codex审核核验与方案落地全景评估
 - [x] **【合成仿真自动回退实测核验、Codex 补充报告穿透、策略回归漏洞实测排查与方案全周期盘点】(`design/新股情绪感知与本地LLM自学习系统_20260928最新工作区复核与稳定性验收补充.md`, `data/ipo_learning_simulation/`, `stock_live_strategy.py`, `20260928_2102_task.md`)**：
     - [x] **单请求自动回退实测核验（里程碑贯通）**：实证 `20260928T115828` 仿真产物成功跑通 AGY 遇 `SCHEMA_OUTPUT_NOT_JSON` 自动回退 Codex Luna，Worker 成功并产出 58 分因果日志；但输入全为合成数据，Gate 仍为内存审批，实盘派单保持关闭；

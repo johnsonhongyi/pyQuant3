@@ -38,6 +38,15 @@ def main():
     profiler = StartupProfiler.get_instance()
     mark_checkpoint("00. Python Runtime & Environment Setup")
 
+    # 💥 打包自修复：必须在任何 ATS 模块读取 yaml/json 配置之前完成自愈释放。
+    # PyInstaller Onefile 模式下，配置文件打包在 _MEIPASS，
+    # 自愈引擎负责将其复制到 EXE 所在物理目录的 config/ 子目录下。
+    try:
+        from sys_utils import ensure_all_configs_released
+        ensure_all_configs_released()
+    except Exception as _e:
+        print(f"[ATS Launcher] ensure_all_configs_released 异常 (非致命): {_e}")
+
     # Continuously read the collector's SQLite snapshot outside the order path.
     try:
         from ats.strategy.ipo_gate_context_provider import get_default_ipo_gate_context_provider

@@ -66,6 +66,8 @@ def _read_json(path: Path, max_bytes: int = 256 * 1024) -> Optional[Dict[str, An
 
 
 def _safe_text(value: Any, limit: int = 300) -> str:
+    if isinstance(value, Exception):
+        return f"{type(value).__name__}: {str(value)}".replace("\r", " ").replace("\n", " ")[:limit]
     if not isinstance(value, (str, int, float, bool)):
         return ""
     if isinstance(value, bool):
@@ -975,6 +977,20 @@ def _collect_snapshot(root: Path) -> Dict[str, Any]:
     config_path = root / "config" / "ipo_sentiment.yaml"
     llm_config_path = root / "config" / "llm_config.yaml"
     acceptance_path = root / "config" / "ipo_stage_acceptance.json"
+
+    # 🛡️ Lazy 智能自愈：若核心配置在物理磁盘缺失，主动触发 sys_utils.get_conf_path 自愈释放
+    if not config_path.is_file():
+        try:
+            from sys_utils import get_conf_path
+            get_conf_path("ipo_sentiment.yaml", base_dir=str(root))
+        except Exception:
+            pass
+    if not llm_config_path.is_file():
+        try:
+            from sys_utils import get_conf_path
+            get_conf_path("llm_config.yaml", base_dir=str(root))
+        except Exception:
+            pass
     try:
         from ats.llm.runtime_service import _load_authorization
         runtime_authorization = _load_authorization(

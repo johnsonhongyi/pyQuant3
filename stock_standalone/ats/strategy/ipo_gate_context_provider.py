@@ -27,8 +27,43 @@ from ats.strategy.listing_anchor_store import ListingAnchorStore
 from ats.strategy.ipo_source_orchestrator import SOURCE_DB_RELATIVE_PATH
 
 
-DEFAULT_ROOT = Path(__file__).resolve().parents[2]
+def _resolve_project_root() -> Path:
+    """
+    在打包（PyInstaller onefile）与开发环境下均正确定位项目根目录。
+    - 打包模式：__file__ 在 _MEIPASS 临时目录，parents[2] = _MEIPASS，
+      必须使用 sys_utils.get_app_root() 获取 EXE 所在物理目录的 config/。
+    - 开发模式：fallback 到 parents[2]（工程源码根）。
+    """
+    try:
+        from sys_utils import get_app_root, is_packaged_env
+        if is_packaged_env():
+            return Path(get_app_root()).resolve()
+    except Exception:
+        pass
+    return Path(__file__).resolve().parents[2]
+
+
+DEFAULT_ROOT = _resolve_project_root()
 _TICKER_FIELDS = frozenset(PREHEAT_REQUIRED_FIELDS + LIVE_HEAT_REQUIRED_FIELDS)
+
+
+def _ensure_yaml_config(yaml_path: Path) -> Path:
+    """
+    Lazy 自愈守卫：读取 yaml 前检查物理文件是否存在。
+    - 存在（开发/已释放）→ 直接返回，不做任何操作，不会覆盖。
+    - 缺失（新打包首运行/文件意外丢失）→ 通过 get_conf_path() 触发自愈引擎从 bundle 释放。
+    确保访问路径与自愈路径完全一致，彻底闭合 lazy 恢复闭环。
+    """
+    if yaml_path.exists():
+        return yaml_path   # 文件存在：开发环境/已释放，直接返回，绝不覆盖
+    try:
+        from sys_utils import get_conf_path
+        released = get_conf_path(str(yaml_path))
+        if released:
+            return Path(released)
+    except Exception:
+        pass
+    return yaml_path   # 兜底：返回原路径，由调用方决定如何处理
 
 
 def _is_market_session_active() -> bool:
@@ -78,9 +113,8 @@ class IPOGateContextProvider:
         """Load config-bound observations outside the order decision path."""
         try:
             if config is None:
-                config = IPODecisionConfigSnapshot.from_yaml(
-                    str(self._root / "config" / "ipo_sentiment.yaml")
-                )
+                _yaml_path = _ensure_yaml_config(self._root / "config" / "ipo_sentiment.yaml")
+                config = IPODecisionConfigSnapshot.from_yaml(str(_yaml_path))
             config_fields = config.gate_context_fields()
             preheat_section = config.decision_config.get("ipo_preheat")
             preheat_engine = IPOPreHeatEngine(PreHeatConfig.from_mapping(preheat_section))
