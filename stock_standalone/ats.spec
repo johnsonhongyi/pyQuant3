@@ -7,12 +7,13 @@ csv_path = os.path.join(os.path.dirname(a_trade_calendar.__file__), "a_trade_cal
 
 block_cipher = None
 tk_hiddenimports = collect_submodules('trading_kernel')
+yaml_hiddenimports = collect_submodules('yaml')
 
 # --- 关键：定义需要剔除的冗余库和 DLL 关键词 ---
 # 这些库通常是 PyQt6 自动带入但金融监控工具很少用到的，剔除它们能有效降低启动负载
 trash_list = [
-    'Qt6WebEngineCore', 'Qt6WebEngineWidgets', 'Qt6Pdf', 
-    'Qt6Quick', 'Qt6Qml', 'Qt6VirtualKeyboard', 
+    'Qt6WebEngineCore', 'Qt6WebEngineWidgets', 'Qt6Pdf',
+    'Qt6Quick', 'Qt6Qml', 'Qt6VirtualKeyboard',
     'Qt6Multimedia', 'Qt6Bluetooth', 'Qt6Network',
     'Qt6Svg', 'Qt6Sql', 'Qt6Test', 'Qt6Xml',
     'opengl32sw'
@@ -22,16 +23,35 @@ a = Analysis(
     ['run_ats.py'],
     pathex=[],
     binaries=[],
-    datas=[(csv_path, "a_trade_calendar"),
+    datas=[
+        (csv_path, "a_trade_calendar"),
         ("MonitorTK.ico", "."),
-        ("config/vwap_trading_rules.json", "config"),
-        ("config/next_day_watch_strategies.json", "config"),
+        # ── 基础运行配置 ──
         ("window_config.json", "."),
+        ("strategy_config.json", "."),
         ("JSONData/stock_codes.conf", "JSONData"),
         ("JSONData/count.ini", "JSONData"),
         ("JohnsonUtil/global.ini", "JohnsonUtil"),
-        ("strategy_config.json", "."),
-         ],
+        # ── 策略与规则配置 ──
+        ("config/vwap_trading_rules.json", "config"),
+        ("config/strategy_rules.json", "config"),
+        ("config/next_day_watch_strategies.json", "config"),
+        ("config/next_day_watch_columns.json", "config"),
+        ("config/multi_period_strategies.json", "config"),
+        ("config/multi_period_help.md", "config"),
+        ("config/intraday_newstock_strategies.json", "config"),
+        ("config/subnew_real_market_deployment.json", "config"),
+        # ── 新股/IPO 检测配置 ──
+        ("config/new_stock_columns.json", "config"),
+        ("config/ipo_detector_columns.json", "config"),
+        ("config/ipo_detector_layout.json", "config"),
+        ("config/ipo_detector_ipc.json", "config"),
+        # ── ATS 情绪感知 & LLM 配置（R9 新增，打包自恢复必须）──
+        ("config/llm_config.yaml", "config"),
+        ("config/ipo_sentiment.yaml", "config"),
+        # ── 指标帮助 ──
+        ("config/indicator_help_custom.json", "config"),
+    ],
     hiddenimports=['a_trade_calendar', 'pandas', 'numpy', 'pyqtgraph', 'sqlite3',
                     'sys_utils', 'db_utils', 'ats', 'ats.ipc_bridge', 'ats.universe_manager',
                     'ats.swing_tracker', 'ats.backtest_engine', 'ats.trade_journal',
@@ -40,15 +60,22 @@ a = Analysis(
                     'configobj', 'JSONData', 'JSONData.sina_data', 'tables', 'h5py',
                     'JSONData.tdx_hdf5_api', 'JSONData.realdatajson', 'JSONData.wencaiData',
                     'JSONData.tdxbk', 'JohnsonUtil.johnson_cons', 'tushare', 'pandas_ta',
-                    'JohnsonUtil.commonTips','talib.stream', 'talib.abstract', 'run_sbc',
+                    'JohnsonUtil.commonTips', 'talib.stream', 'talib.abstract', 'run_sbc',
                     'run_ipo_detector', 'ats.ui.ipo_subnew_detector_dialog', 'ats.ui.ipo_detector_ipc',
-                    'ats.strategy.ipo_vwap_detector_engine', 'ats.new_stock_fetcher'] + tk_hiddenimports,
+                    'ats.strategy.ipo_vwap_detector_engine', 'ats.new_stock_fetcher',
+                    # ATS 情绪感知 R9 模块
+                    'ats.strategy.ipo_data_contracts', 'ats.strategy.ipo_gate_context_provider',
+                    'ats.strategy.ipo_outcome_labels', 'ats.strategy.ipo_trading_center',
+                    'ats.strategy.gate_orchestrator', 'ats.llm.backend_factory',
+                    'ats.llm.antigravity_cli_backend', 'ats.llm.codex_cli_backend',
+                    'ats.llm.offline_learning', 'ats.ui.ipo_learning_console',
+                    ] + tk_hiddenimports + yaml_hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
     excludes=[
-        'PyQt6.QtWebEngineCore', 'PyQt6.QtWebEngineWidgets', 'PyQt6.QtPdf', 
-        'PyQt6.QtQuick', 'PyQt6.QtQml', 'PyQt6.QtVirtualKeyboard', 
+        'PyQt6.QtWebEngineCore', 'PyQt6.QtWebEngineWidgets', 'PyQt6.QtPdf',
+        'PyQt6.QtQuick', 'PyQt6.QtQml', 'PyQt6.QtVirtualKeyboard',
         'PyQt6.QtMultimedia', 'PyQt6.QtBluetooth', 'PyQt6.QtPositioning',
         'PyQt6.QtSensors', 'PyQt6.QtWebChannel', 'PyQt6.QtWebSockets',
         'PyQt6.QtSql', 'PyQt6.QtTest', 'PyQt6.QtXml', 'PyQt6.QtQuickWidgets',

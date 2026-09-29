@@ -275,15 +275,17 @@ RESOURCE_MAP = {
         "src": "config/multi_period_help.md",
         "dst": "config/multi_period_help.md"
     },
+    "vwap_trading_rules.json": {
+        "src": "config/vwap_trading_rules.json",
+        "dst": "config/vwap_trading_rules.json"
+    },
     "multi_period_strategies.json": {
         "src": "config/multi_period_strategies.json",
-        "dst": "config/multi_period_strategies.json",
-        "delay_release": True
+        "dst": "config/multi_period_strategies.json"
     },
     "next_day_watch_strategies.json": {
         "src": "config/next_day_watch_strategies.json",
-        "dst": "config/next_day_watch_strategies.json",
-        "delay_release": True
+        "dst": "config/next_day_watch_strategies.json"
     },
     "global_market_cache.json": {
         "src": "config/global_market_cache.json",
@@ -297,14 +299,53 @@ RESOURCE_MAP = {
     },
     "intraday_newstock_strategies.json": {
         "src": "config/intraday_newstock_strategies.json",
-        "dst": "config/intraday_newstock_strategies.json",
-        "delay_release": True
+        "dst": "config/intraday_newstock_strategies.json"
     },
     "indicator_help_custom.json": {
         "src": "config/indicator_help_custom.json",
-        "dst": "config/indicator_help_custom.json",
-        "delay_release": True
-    }
+        "dst": "config/indicator_help_custom.json"
+    },
+    # -- 核心策略与规则配置 --
+    "strategy_rules.json": {
+        "src": "config/strategy_rules.json",
+        "dst": "config/strategy_rules.json"
+    },
+    "subnew_real_market_deployment.json": {
+        "src": "config/subnew_real_market_deployment.json",
+        "dst": "config/subnew_real_market_deployment.json"
+    },
+    "new_stock_columns.json": {
+        "src": "config/new_stock_columns.json",
+        "dst": "config/new_stock_columns.json"
+    },
+    "next_day_watch_columns.json": {
+        "src": "config/next_day_watch_columns.json",
+        "dst": "config/next_day_watch_columns.json"
+    },
+    # -- IPO 检测配置 --
+    "ipo_detector_columns.json": {
+        "src": "config/ipo_detector_columns.json",
+        "dst": "config/ipo_detector_columns.json"
+    },
+    "ipo_detector_layout.json": {
+        "src": "config/ipo_detector_layout.json",
+        "dst": "config/ipo_detector_layout.json"
+    },
+    "ipo_detector_ipc.json": {
+        "src": "config/ipo_detector_ipc.json",
+        "dst": "config/ipo_detector_ipc.json"
+    },
+    # -- ATS 情绪感知 & LLM 配置（R9，打包自恢复必须）--
+    # llm_config.yaml: LLM 后端选择/熔断参数，enabled 默认 false (Fail-Closed)
+    "llm_config.yaml": {
+        "src": "config/llm_config.yaml",
+        "dst": "config/llm_config.yaml"
+    },
+    # ipo_sentiment.yaml: 41 项数据契约/Gate 阈值/LRRM 参数，缺失则 IPO 模块 Fail-Closed
+    "ipo_sentiment.yaml": {
+        "src": "config/ipo_sentiment.yaml",
+        "dst": "config/ipo_sentiment.yaml"
+    },
 }
 
 def get_conf_path(fname, base_dir=None):
@@ -429,8 +470,8 @@ def get_conf_path(fname, base_dir=None):
         except Exception as e:
             logger.exception(f"自愈释放配置文件失败: {e}")
 
-    # 如果是非核心的、用户存盘类的 .json 且包内确实没有内置模板，直接返回 default_path 由应用自发保存
-    if is_user_save or fname.lower().endswith(".json"):
+    # 如果是非核心的、用户存盘类的 .json/.yaml 且包内确实没有内置模板，直接返回 default_path 由应用自发保存
+    if is_user_save or fname.lower().endswith(".json") or fname.lower().endswith(".yaml"):
         try:
             target_dir = os.path.dirname(default_path)
             if not os.path.exists(target_dir):

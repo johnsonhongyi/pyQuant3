@@ -105,7 +105,23 @@ from ats.ui.main_window import ATSMainWindow
 from sys_utils import ensure_backend_tk_running
 
 def main():
-    # 自动检查并后台静默拉起主 Tk 行情进程 (P0)
+    # 💥 1. 打包自修复：在任何 ATS 模块读取配置之前，抢占式完成所有注册核心配置文件的自愈释放。
+    # PyInstaller Onefile 模式下，内置资源打包在临时解压目录 _MEIPASS，
+    # 自愈引擎负责将其无损释放至物理运行目录下的对应路径（若已存在且有效则绝不覆盖）。
+    try:
+        from sys_utils import ensure_all_configs_released
+        ensure_all_configs_released()
+    except Exception as _e:
+        print(f"[ATS Launcher] 核心配置自愈释放异常 (非致命): {_e}")
+
+    # 📡 2. 启动 IPO Gate 跨进程共享数据后台自动刷新 (对齐 main_ats.py，消除 UNREADY 状态)
+    try:
+        from ats.strategy.ipo_gate_context_provider import get_default_ipo_gate_context_provider
+        get_default_ipo_gate_context_provider(current_dir).start_auto_refresh()
+    except Exception as exc:
+        print(f"[IPO Gate] Shared data refresh unavailable: {type(exc).__name__}")
+
+    # 🚀 3. 自动检查并后台静默拉起主 Tk 行情进程 (P0)
     try:
         ensure_backend_tk_running()
     except Exception as e:
