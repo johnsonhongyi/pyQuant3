@@ -15,6 +15,7 @@ import json
 import signal
 import atexit
 import multiprocessing
+import threading
 from typing import List, Optional, Tuple
 
 if __name__ == "__main__":
@@ -566,11 +567,14 @@ def main():
         os.environ["SBC_LAYOUT_CONFIG_PATH"] = _get_launcher_layout_cfg_path()
         os.environ["SBC_IS_HOLDINGS_LAUNCHER"] = "1"
 
-    # 自动检查并后台静默拉起主 Tk 行情进程 (P0)
-    try:
-        ensure_backend_tk_running()
-    except Exception as e:
-        print(f"[SBC Launcher] 检查行情服务警告: {e}")
+    # 行情服务检测可能涉及进程探测和启动；与首帧绘制并行进行。
+    def _ensure_backend():
+        try:
+            ensure_backend_tk_running()
+        except Exception as e:
+            print(f"[SBC Launcher] 检查行情服务警告: {e}")
+
+    threading.Thread(target=_ensure_backend, name="sbc-backend-start", daemon=True).start()
 
     # --sbc 等 ATS 专用启动参数已解析，Qt 仅接收程序名，避免把它们误作 Qt 选项。
     app = QApplication.instance() or QApplication([sys.argv[0]])

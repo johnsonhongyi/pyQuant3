@@ -22,20 +22,18 @@ except Exception:
 if current_dir not in sys.path:
     sys.path.insert(0, current_dir)
 
-# Static import keeps the isolated shadow & learning entry points available in the frozen ATS EXE.
-import tools.run_shadow_live_test as _shadow_runner
-import tools.run_ipo_learning_console as _learning_runner
-
 _ipo_flags = ("--ipo-detector", "--subnew-detector", "--ipo", "--subnew")
 _sbc_flags = ("--sbc", "--sbc-holdings", "--holdings-sbc", "--holdings")
 _shadow_flags = ("--shadow-live",)
 _learning_flags = ("--ipo-learning", "--ipo-console", "--learning-console", "--ipo-learning-console")
 
 if __name__ == "__main__" and any(arg in sys.argv[1:] for arg in _learning_flags):
+    import tools.run_ipo_learning_console as _learning_runner
     sys.argv = [sys.argv[0]] + [arg for arg in sys.argv[1:] if arg not in _learning_flags]
     sys.exit(_learning_runner.main())
 
 if __name__ == "__main__" and any(arg in sys.argv[1:] for arg in _shadow_flags):
+    import tools.run_shadow_live_test as _shadow_runner
     sys.argv = [sys.argv[0]] + [arg for arg in sys.argv[1:] if arg not in _shadow_flags]
     sys.exit(_shadow_runner.main())
 
@@ -58,9 +56,6 @@ if __name__ == "__main__" and any(arg in sys.argv[1:] for arg in ("-h", "--help"
         parser.print_help()
         sys.exit(0)
 
-import run_sbc
-import run_ipo_detector
-
 # 💡 命令行参数与环境变量双重分发：若带有 --sbc / --sbc-holdings 或 ATS_SBC_SUBPROCESS=1，直接作为独立 SBC 子进程运行，彻底阻断进入 ATS 主界面
 if __name__ == "__main__":
     is_sbc_subproc = (
@@ -68,6 +63,7 @@ if __name__ == "__main__":
         any(arg in sys.argv for arg in _sbc_flags)
     )
     if is_sbc_subproc:
+        import run_sbc
         try:
             sys.exit(run_sbc.main())
         except KeyboardInterrupt:
@@ -91,6 +87,7 @@ if __name__ == "__main__":
         any(arg in sys.argv for arg in _ipo_flags)
     )
     if is_ipo_subproc:
+        import run_ipo_detector
         try:
             sys.exit(run_ipo_detector.main())
         except KeyboardInterrupt:
