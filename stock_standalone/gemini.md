@@ -1,5 +1,17 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-09-29 17:25 cct 配置彻底重构为 ipo_learning_console、清除错误写回与 global.ini 干净对齐
+- [x] **【cct.ipo_detector 彻底重构为 ipo_learning_console、清除自启写回与三端配置文件恢复纯净】(`JohnsonUtil/commonTips.py`, `global.ini`, `JohnsonUtil/global.ini`, `D:\JohnsonProgram\instockMonitorTK\global.ini`, `ats/ui/main_window.py`, `gemini.md`)**：
+    - [x] **cct 属性与回写彻底重命名**：将 `commonTips.py` 中的 `self.ipo_detector` 正式更名为 `self.ipo_learning_console = self.get_with_writeback("general", "ipo_learning_console", fallback=False, value_type="bool")`；保留 `self.ipo_detector = False` 维持旧调用防崩保护，彻底切断对 `global.ini` 回写 `ipo_detector = True` 的污染源；
+    - [x] **三端配置文件参数恢复纯净**：全量清理 `stock_standalone/global.ini`、`JohnsonUtil/global.ini` 及线上 `D:\JohnsonProgram\instockMonitorTK\global.ini`，彻底剔除错误的 `ipo_detector` 控制项，统一修正为 `ipo_learning_console = False`；
+    - [x] **ATS 首屏后台零干扰**：`main_window.py` 严格遵守单一职责，`self._ipo_detector_enabled` 默认回退为 `False`，绝不在 ATS 主程序启动时私自拉起检测器小窗口；新股次新超短检测工具完全由独立 CLI 入口（`--ipo-detector`）或界面按钮按需呼出。
+
+## 2026-09-29 16:32 IPO 监控与检测器参数解耦、CLI 独立启动控制台与影子模式功能对齐
+- [x] **【参数解耦、CLI 独立运行入口增加与 --shadow-live 功能对齐】(`run_ats.py`, `ats/ui/main_window.py`, `GEMINI.md`)**：
+    - [x] **参数彻底解耦（SRP 单一职责）**：纠偏 ATS 内部混用 `ipo_detector` 控制 Tab 5 挂载的逻辑缺陷，正式拆分为 `ipo_detector`（控制后台拉起独立次新股超短检测器小窗口）与 `ipo_learning_console`（控制 ATS 主界面 Tab 5 挂载，默认 False 免除主界面卡顿）；
+    - [x] **增加独立运行控制台 CLI 入口**：在 `run_ats.py` 接入 `--ipo-learning` / `--ipo-console` / `--learning-console`，与 `--shadow-live`、`--ipo-detector` 并列作为独立工具分发通道，实现免拉起 ATS 主界面的纯净自适应独立运行；
+    - [x] **`--shadow-live` 影子实盘功能定性**：明确 `--shadow-live` 为 100% 虚拟 PAPER 仿真回放压测启动器（零真实券商报单，全天候检验策略吞吐、内存与 Tick 延迟）。
+
 ## 2026-09-29 14:15 ATS 情绪感知与全量策略配置文件 PyInstaller 打包自恢复与启动/访问自愈闭环
 - [x] **【打包入口对齐、RESOURCE_MAP 延迟解除、Eager 抢占式自愈与 UI Lazy 兜底全闭环】(`ats.spec`, `run_ats.py`, `sys_utils.py`, `ats/ui/ipo_learning_console.py`, `ats/strategy/ipo_gate_context_provider.py`, `20260929_1415_task.md`)**：
     - [x] **打包规范全量覆盖（15个静态配置入包）**：实证 `ats.spec` 的 `datas` 包含 `config/llm_config.yaml`、`config/ipo_sentiment.yaml` 以及策略/新股/检测器列与布局全部 15 个配置文件；
