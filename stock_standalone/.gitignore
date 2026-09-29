@@ -8,4 +8,5 @@
 !trading_kernel/tests/test_auto_ladder.py
 !ats/strategy/test_ipo_shadow_observations.py
 !tests/test_ipo_standalone_linkage.py
+!tests/test_ipo_local_observer.py
 data/ipo_learning/shadow_observations.sqlite

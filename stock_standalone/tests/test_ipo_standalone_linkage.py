@@ -20,17 +20,23 @@ def test_outcome_up_down_reaches_standalone_window(monkeypatch):
     )
     window = StandaloneLearningWindow(simulation_read_only=True)
     try:
+        window.console.stop_monitor()
+        app.processEvents()
+        window.console._worker.snapshot_ready.disconnect(window.console._render_snapshot)
         table = window.console.outcome_table
+        table.setSortingEnabled(False)
+        table.clearContents()
         table.setRowCount(2)
         for row, code in enumerate(("301716", "920202")):
             table.setItem(row, 0, QTableWidgetItem(code))
             table.setItem(row, 10, QTableWidgetItem(f"样本{row}"))
+        window.console.content_tabs.setCurrentIndex(6)
         window.show()
         table.setFocus()
         table.setCurrentCell(0, 0)
-        QTest.qWait(40)
+        QTest.qWait(100)
         QTest.keyClick(table, Qt.Key.Key_Down)
-        QTest.qWait(40)
+        QTest.qWait(100)
         assert linked[-1] == ("920202", "样本1")
     finally:
         window.close()

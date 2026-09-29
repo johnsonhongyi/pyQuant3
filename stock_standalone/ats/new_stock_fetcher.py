@@ -398,13 +398,15 @@ class NewStockFetcher:
                         existing = self._cached_ipo_dict[c]
                         ex_ld = existing.get("listing_date", "")
                         if ex_ld and ex_ld != "-" and ex_ld <= today_str and existing.get("issue_price"):
-                            existing["issue_price_source"] = {
-                                "source_id": "eastmoney.datacenter-web.RPTA_APP_IPOAPPLY",
-                                "source_version": "ipo_calendar.v1",
-                                "source_timezone": "Asia/Shanghai",
-                                "as_of_time": source_available_at,
-                                "available_at": source_available_at,
-                            }
+                            fetched_price = safe_float(it.get("ISSUE_PRICE"), default=0.0)
+                            if fetched_price > 0 and abs(fetched_price - safe_float(existing.get("issue_price"))) < 0.000001:
+                                existing["issue_price_source"] = {
+                                    "source_id": "eastmoney.datacenter-web.RPTA_APP_IPOAPPLY",
+                                    "source_version": "ipo_calendar.v1",
+                                    "source_timezone": "Asia/Shanghai",
+                                    "as_of_time": source_available_at,
+                                    "available_at": source_available_at,
+                                }
                             continue
 
                     listing_d = str(it.get("LISTING_DATE", "") or "").split(" ")[0].strip()
