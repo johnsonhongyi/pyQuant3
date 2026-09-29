@@ -89,6 +89,119 @@ except ImportError:
 logger = logging.getLogger("IntradayStrategyDialog")
 
 
+class SBCIndicatorCache:
+    """进程内共享 SBC 通道指标；只保留各标的/周期最新的少量标量。"""
+    _lock = threading.RLock()
+    _cache: Dict[Tuple[str, str], Dict[str, float]] = {}
+    _key_locks: Dict[Tuple[str, str], threading.Lock] = {}
+    _misses: Dict[Tuple[str, str], float] = {}
+    _cache_day = ""
+    _fields = ("ch_up", "ch_mid", "ch_dn", "ch_supp", "rev")
+
+    @classmethod
+    def _normalize_key(cls, code: str, period: str) -> Tuple[str, str]:
+        digits = "".join(filter(str.isdigit, str(code or "")))
+        return digits[-6:].zfill(6), str(period or "day").strip().lower()
+
+    @classmethod
+    def _ensure_current_day(cls):
+        today = datetime.now().strftime("%Y%m%d")
+        if cls._cache_day != today:
+            cls._cache.clear()
+            cls._key_locks.clear()
+            cls._misses.clear()
+            cls._cache_day = today
+
+    @classmethod
+    def _clean_info(cls, info: Optional[Dict[str, Any]]) -> Optional[Dict[str, float]]:
+        if not isinstance(info, dict):
+            return None
+        cleaned = {}
+        for key in cls._fields:
+            try:
+                value = float(info.get(key, 0.0) or 0.0)
+                cleaned[key] = value if math.isfinite(value) else 0.0
+            except (TypeError, ValueError):
+                cleaned[key] = 0.0
+        return cleaned if any(value > 0 for value in cleaned.values()) else None
+
+    @classmethod
+    def get(cls, code: str, period: str = "day") -> Optional[Dict[str, float]]:
+        key = cls._normalize_key(code, period)
+        with cls._lock:
+            cls._ensure_current_day()
+            info = cls._cache.get(key)
+            return dict(info) if info else None
+
+    @classmethod
+    def put(cls, code: str, period: str, info: Optional[Dict[str, Any]]) -> Optional[Dict[str, float]]:
+        key = cls._normalize_key(code, period)
+        cleaned = cls._clean_info(info)
+        if cleaned is None:
+            return None
+        with cls._lock:
+            cls._ensure_current_day()
+            cls._cache[key] = cleaned
+            cls._misses.pop(key, None)
+        return dict(cleaned)
+
+    @classmethod
+    def get_or_load(cls, code: str, period: str, loader) -> Optional[Dict[str, float]]:
+        key = cls._normalize_key(code, period)
+        with cls._lock:
+            cls._ensure_current_day()
+            cached = cls._cache.get(key)
+            if cached:
+                return dict(cached)
+            miss_until = cls._misses.get(key, 0.0)
+            if miss_until > time.monotonic():
+                return None
+            key_lock = cls._key_locks.setdefault(key, threading.Lock())
+        with key_lock:
+            cached = cls.get(*key)
+            if cached:
+                return cached
+            with cls._lock:
+                cls._ensure_current_day()
+                if cls._misses.get(key, 0.0) > time.monotonic():
+                    return None
+            try:
+                result = cls.put(key[0], key[1], loader())
+                if result:
+                    return result
+            except Exception:
+                pass
+            with cls._lock:
+                cls._ensure_current_day()
+                cls._misses[key] = time.monotonic() + 30.0
+            return None
+
+    @classmethod
+    def from_frame(cls, frame: Optional[pd.DataFrame]) -> Optional[Dict[str, float]]:
+        if frame is None or frame.empty:
+            return None
+        row = frame.iloc[-1]
+        return cls._clean_info({
+            "ch_up": row.get("ch_upper", 0.0),
+            "ch_mid": row.get("ch_mid", 0.0),
+            "ch_dn": row.get("ch_lower", 0.0),
+            "ch_supp": row.get("ch_supp_price", 0.0),
+            "rev": row.get("reversal_line", 0.0),
+        })
+
+    @classmethod
+    def from_metrics(cls, metrics: Optional[Dict[str, Any]]) -> Optional[Dict[str, float]]:
+        if not isinstance(metrics, dict):
+            return None
+        return cls._clean_info({
+            "ch_up": metrics.get("ch_upper", metrics.get("ch_up", 0.0)),
+            "ch_mid": metrics.get("ch_mid", 0.0),
+            "ch_dn": metrics.get("ch_lower", metrics.get("ch_dn", 0.0)),
+            "ch_supp": metrics.get("ch_supp_price", metrics.get("ch_supp", 0.0)),
+            "rev": metrics.get("reversal_line", metrics.get("rev", 0.0)),
+        })
+
+
 def _format_cell_text(val) -> str:
     """安全格式化单元格文本"""
     if val is None:
@@ -348,6 +461,9 @@ class SBCChartCanvas(QWidget):
         self.target_sell_max = 0.0
         self.signals = []
         self.channel_info = {}  # ⚡ 存储对齐 K 线的通道关键阶梯 (上轨、中轨、下轨、支撑、反转)
+        self.channel_info_code = ""
+        self.channel_info_period = ""
+        self.channel_overlay_enabled = True
         self.amplitude_info = {}  # 📊 存储标的近 5 日振幅高低与活跃度指标 (均振、极值、每日明细)
 
         # 🔍 缩放与平移视口状态
@@ -1104,8 +1220,11 @@ class SBCChartCanvas(QWidget):
                             days_detail.append((d_short, round(amp, 1)))
 
             # ── 2. 极致复用：若当前画布为多日分时 (2d/3d/5d/10d)，直接从本地分钟数据分组提取 ──
-            if not days_detail and p_mode in ("2d", "3d", "5d", "10d") and self.df_intraday is not None and not self.df_intraday.empty:
-                df_src = self.df_intraday
+            history_df = getattr(self, "_amplitude_history_df", None) if p_mode == "1m" else None
+            if not days_detail and p_mode in ("1m", "2d", "3d", "5d", "10d"):
+                df_src = history_df if history_df is not None and not history_df.empty else self.df_intraday
+                if df_src is None or df_src.empty:
+                    return
                 col_d = "date" if "date" in df_src.columns else ("datetime" if "datetime" in df_src.columns else None)
                 if col_d:
                     grp_series = df_src[col_d].astype(str).str.split().str[0].str[:10]
@@ -1130,7 +1249,7 @@ class SBCChartCanvas(QWidget):
                     days_detail = days_detail[-5:]
 
             # ── 3. 兜底方案：仅在 1m 或短周期分钟 K 线且本地无多日数据时，才从日 K 缓存提取 ──
-            if not days_detail:
+            if not days_detail and p_mode != "1m":
                 from ats.tdx_realtime_fetcher import TDXRealtimeFetcher
                 fetcher = TDXRealtimeFetcher.get_instance()
                 df_day = fetcher.fetch_kline_bars(c_clean, category="day", count=8)
@@ -1835,23 +1954,11 @@ class SBCChartCanvas(QWidget):
         self.target_sell_min = sell_min
         self.target_sell_max = sell_max
         self.signals = signals or []
-        # ⚡ 提取并持久缓存通道核心阶梯位 (供分时图左侧无缝对齐展现)
-        try:
-            ch_up = df_kline['ch_upper'].astype(float).values if 'ch_upper' in df_kline.columns else []
-            ch_mid = df_kline['ch_mid'].astype(float).values if 'ch_mid' in df_kline.columns else []
-            ch_dn = df_kline['ch_lower'].astype(float).values if 'ch_lower' in df_kline.columns else []
-            ch_supp = float(df_kline['ch_supp_price'].iloc[-1]) if 'ch_supp_price' in df_kline.columns and len(df_kline) > 0 and pd.notna(df_kline['ch_supp_price'].iloc[-1]) else 0.0
-            rev = float(df_kline['reversal_line'].iloc[-1]) if 'reversal_line' in df_kline.columns and len(df_kline) > 0 and pd.notna(df_kline['reversal_line'].iloc[-1]) else 0.0
-            if len(ch_up) > 0 and ch_up[-1] > 0:
-                self.channel_info = {
-                    "ch_up": float(ch_up[-1]),
-                    "ch_mid": float(ch_mid[-1]) if len(ch_mid) > 0 else 0.0,
-                    "ch_dn": float(ch_dn[-1]) if len(ch_dn) > 0 else 0.0,
-                    "ch_supp": ch_supp,
-                    "rev": rev
-                }
-        except Exception:
-            pass
+        # 复用当前周期已算好的指标，只向进程共享缓存写入最新标量。
+        self.channel_info = SBCIndicatorCache.from_frame(df_kline) or {}
+        self.channel_info_code = str(getattr(self, "code", ""))
+        self.channel_info_period = str(period_mode or "").lower()
+        SBCIndicatorCache.put(self.channel_info_code, self.channel_info_period, self.channel_info)
 
         if getattr(self, '_last_period_mode', None) != period_mode or getattr(self, '_last_code', None) != getattr(self, 'code', None):
             self._zoom_start_idx = 0
@@ -2288,7 +2395,7 @@ class SBCChartCanvas(QWidget):
             painter.setPen(QPen(gp_col, 1, gp_style))
             painter.drawLine(margin_left, int(gy), margin_left + chart_w, int(gy))
 
-        # 🌟 统一收集左侧 Y 轴关键标尺 (最高点、最低点、重要涨跌幅、黄金分割、支撑、反转、通道轨线)
+        # 左侧只保留高低点、开盘与斐波那契标尺；通道关键位显示在最新走势旁。
         # 彻底解决分时图左侧无标尺问题，完全对齐 K 线显示在左侧，价格与涨跌幅上下两行加大粗体清晰排布，右侧开盘/VWAP保持不变
         left_axis_labels = []
 
@@ -2373,78 +2480,11 @@ class SBCChartCanvas(QWidget):
                         "btm_font": QFont("Consolas", 8, QFont.Weight.Bold),
                     })
 
-        # 2. 对齐 K 线的通达信自动通道三轨 (上轨、中轨、下轨)
-        chan = getattr(self, 'channel_info', {}) or {}
+        # 通道关键位从左侧刻度区移到当日最新走势旁，避免与高低点、斐波那契标尺混在一起。
+        chan = (getattr(self, 'channel_info', {}) or {}) if getattr(self, 'channel_overlay_enabled', True) else {}
         ch_up_val = chan.get("ch_up", 0.0)
-        ch_mid_val = chan.get("ch_mid", 0.0)
-        ch_dn_val = chan.get("ch_dn", 0.0)
         ch_supp_val = chan.get("ch_supp", 0.0)
         ch_rev_val = chan.get("rev", 0.0)
-
-        if ch_up_val > 0 and min_p <= ch_up_val <= max_p:
-            up_pct = ((ch_up_val - op_ref) / op_ref * 100.0) if op_ref > 0 else 0.0
-            left_axis_labels.append({
-                "y": price_to_y(ch_up_val),
-                "top_text": f"上轨:{ch_up_val:.2f}",
-                "btm_text": f"{up_pct:+.1f}%" if op_ref > 0 else "",
-                "top_col": QColor("#FFFFFF"),
-                "btm_col": _get_pct_color(up_pct),
-                "top_font": QFont("Microsoft YaHei", 7.5, QFont.Weight.Bold),
-                "btm_font": QFont("Consolas", 8, QFont.Weight.Bold),
-            })
-        if ch_mid_val > 0 and min_p <= ch_mid_val <= max_p:
-            mid_pct = ((ch_mid_val - op_ref) / op_ref * 100.0) if op_ref > 0 else 0.0
-            left_axis_labels.append({
-                "y": price_to_y(ch_mid_val),
-                "top_text": f"中轨:{ch_mid_val:.2f}",
-                "btm_text": f"{mid_pct:+.1f}%" if op_ref > 0 else "",
-                "top_col": QColor("#B0B0C0"),
-                "btm_col": _get_pct_color(mid_pct),
-                "top_font": QFont("Microsoft YaHei", 7.5),
-                "btm_font": QFont("Consolas", 8, QFont.Weight.Bold),
-            })
-        if ch_dn_val > 0 and min_p <= ch_dn_val <= max_p:
-            dn_pct = ((ch_dn_val - op_ref) / op_ref * 100.0) if op_ref > 0 else 0.0
-            left_axis_labels.append({
-                "y": price_to_y(ch_dn_val),
-                "top_text": f"下轨:{ch_dn_val:.2f}",
-                "btm_text": f"{dn_pct:+.1f}%" if op_ref > 0 else "",
-                "top_col": QColor("#FFFFFF"),
-                "btm_col": _get_pct_color(dn_pct),
-                "top_font": QFont("Microsoft YaHei", 7.5, QFont.Weight.Bold),
-                "btm_font": QFont("Consolas", 8, QFont.Weight.Bold),
-            })
-
-        # 3. 对齐 K 线的上涨支撑线与反转线 (左侧绘制短水平虚线与标签)
-        if ch_supp_val > 0 and min_p <= ch_supp_val <= max_p:
-            y_supp_line = price_to_y(ch_supp_val)
-            painter.setPen(QPen(QColor("#FF4444"), 1, Qt.PenStyle.DashLine))
-            painter.drawLine(int(margin_left), int(y_supp_line), int(margin_left + chart_w * 0.35), int(y_supp_line))
-            supp_pct = ((ch_supp_val - op_ref) / op_ref * 100.0) if op_ref > 0 else 0.0
-            left_axis_labels.append({
-                "y": y_supp_line,
-                "top_text": f"支撑:{ch_supp_val:.2f}",
-                "btm_text": f"{supp_pct:+.1f}%" if op_ref > 0 else "",
-                "top_col": QColor("#FF4444"),
-                "btm_col": _get_pct_color(supp_pct),
-                "top_font": QFont("Microsoft YaHei", 7.5, QFont.Weight.Bold),
-                "btm_font": QFont("Consolas", 8, QFont.Weight.Bold),
-            })
-
-        if ch_rev_val > 0 and min_p <= ch_rev_val <= max_p:
-            y_rev_line = price_to_y(ch_rev_val)
-            painter.setPen(QPen(QColor("#00FF88"), 1, Qt.PenStyle.DashLine))
-            painter.drawLine(int(margin_left), int(y_rev_line), int(margin_left + chart_w * 0.35), int(y_rev_line))
-            rev_pct = ((ch_rev_val - op_ref) / op_ref * 100.0) if op_ref > 0 else 0.0
-            left_axis_labels.append({
-                "y": y_rev_line,
-                "top_text": f"反转:{ch_rev_val:.2f}",
-                "btm_text": f"{rev_pct:+.1f}%" if op_ref > 0 else "",
-                "top_col": QColor("#00FF88"),
-                "btm_col": _get_pct_color(rev_pct),
-                "top_font": QFont("Microsoft YaHei", 7.5, QFont.Weight.Bold),
-                "btm_font": QFont("Consolas", 8, QFont.Weight.Bold),
-            })
 
         # 4. 开盘基准线对应 0.0% 涨跌幅基线 (左侧清晰标注，上下两行大字)
         if op_ref > 0 and min_p <= op_ref <= max_p:
@@ -2511,6 +2551,8 @@ class SBCChartCanvas(QWidget):
                     painter.drawText(tx, int(adj_y + 3), top_text)
 
         # 📅 多日分时 (2d / 3d / 5d / 10d) 各交易日垂直虚线分割线与日期角标标注
+        current_day_start_idx = 0
+        previous_day_start_idx = 0
         if self.period_mode in ["2d", "3d", "5d", "10d"] and len(times) > 1:
             dates_list = []
             if "date" in df_view.columns:
@@ -2522,6 +2564,9 @@ class SBCChartCanvas(QWidget):
 
             prev_d = None
             for idx_t, d_cur in enumerate(dates_list):
+                if idx_t == 0 or d_cur != prev_d:
+                    previous_day_start_idx = current_day_start_idx
+                    current_day_start_idx = idx_t
                 if prev_d is not None and d_cur != prev_d:
                     dx = time_to_x(idx_t)
                     painter.setPen(QPen(QColor("#2d3748"), 1, Qt.PenStyle.DashLine))
@@ -2641,6 +2686,81 @@ class SBCChartCanvas(QWidget):
             painter.setPen(QPen(label_color, 1))
             painter.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
             painter.drawText(int(margin_left + chart_w + 3), int(label_y + 3), label_text)
+
+        # 通道关键位只覆盖当前交易日，并贴近最新数据点显示在图内；颜色、底板和线型均与 VWAP/现价区分。
+        if chan and len(prices) > 0:
+            latest_idx = min(len(prices) - 1, max(0, len(df_view) - 1))
+            day_start_idx = min(current_day_start_idx, latest_idx)
+            latest_x = time_to_x(latest_idx)
+            plot_right = margin_left + active_chart_w
+            marker_specs = (
+                ("上轨", ch_up_val, QColor("#FFB454"), Qt.PenStyle.DashLine),
+                ("反转", ch_rev_val, QColor("#F06AD7"), Qt.PenStyle.DashDotLine),
+                ("支撑", ch_supp_val, QColor("#9DEBFF"), Qt.PenStyle.DashLine),
+            )
+            markers = []
+            painter.save()
+            painter.setClipRect(int(margin_left), int(margin_top), int(chart_w), int(main_h))
+            for marker_name, marker_value, marker_color, marker_style in marker_specs:
+                try:
+                    marker_value = float(marker_value)
+                except (TypeError, ValueError):
+                    continue
+                if marker_value <= 0 or not (min_p <= marker_value <= max_p):
+                    continue
+                marker_y = price_to_y(marker_value)
+                is_support = marker_name == "支撑"
+                line_start_idx = previous_day_start_idx if is_support and day_start_idx > 0 else day_start_idx
+                label = f"{marker_name} {marker_value:.2f}"
+                markers.append({"label": label, "color": marker_color, "raw_y": marker_y,
+                                "is_support": is_support, "line_x": time_to_x(line_start_idx), "style": marker_style})
+
+            if markers:
+                marker_font = QFont("Microsoft YaHei", 8, QFont.Weight.Bold)
+                painter.setFont(marker_font)
+                fm = painter.fontMetrics()
+                box_h = 19
+                box_pad = 7
+                for marker in markers:
+                    marker["box_w"] = fm.horizontalAdvance(marker["label"]) + box_pad * 2
+
+                top_center = margin_top + box_h / 2 + 2
+                bottom_center = margin_top + main_h - box_h / 2 - 2
+                gap = box_h + 3
+                centers = []
+                for marker in sorted(markers, key=lambda item: item["raw_y"]):
+                    center = max(top_center, min(bottom_center, marker["raw_y"]))
+                    if centers:
+                        center = max(center, centers[-1] + gap)
+                    centers.append(center)
+                if centers and centers[-1] > bottom_center:
+                    shift = centers[-1] - bottom_center
+                    centers = [center - shift for center in centers]
+
+                sorted_markers = sorted(markers, key=lambda item: item["raw_y"])
+                for marker, center_y in zip(sorted_markers, centers):
+                    box_w = marker["box_w"]
+                    box_x = max(margin_left + 3, min(plot_right - box_w - 3,
+                                                    marker["line_x"] - box_w - 6))
+                    box_y = int(center_y - box_h / 2)
+                    marker_color = marker["color"]
+                    line_x = max(marker["line_x"], box_x + box_w + 6)
+                    painter.setPen(QPen(marker_color, 2.0 if marker["is_support"] else 1.4, marker["style"]))
+                    painter.drawLine(int(line_x), int(marker["raw_y"]), int(latest_x), int(marker["raw_y"]))
+
+                    if abs(center_y - marker["raw_y"]) > 1:
+                        painter.setPen(QPen(marker_color, 1.2, Qt.PenStyle.SolidLine))
+                        painter.drawLine(int(line_x), int(marker["raw_y"]), int(box_x + box_w), int(center_y))
+
+                    bg = QColor("#10354A" if marker["is_support"] else "#101522")
+                    bg.setAlpha(238)
+                    painter.setPen(QPen(marker_color, 1.8 if marker["is_support"] else 1.2))
+                    painter.setBrush(QBrush(bg))
+                    painter.drawRoundedRect(int(box_x), box_y, int(box_w), box_h, 4, 4)
+                    painter.setFont(marker_font)
+                    painter.setPen(QPen(QColor("#FFFFFF") if marker["is_support"] else marker_color))
+                    painter.drawText(int(box_x + box_pad), int(box_y + 14), marker["label"])
+            painter.restore()
 
         # 🌟 绘制分时图上的买卖信号点与悬浮 Tag (自适应简略显示 + 2D真实碰撞避让 + 半透明毛玻璃 + 高对比度设计)
         if self.signals:
@@ -4440,6 +4560,7 @@ class SBCGlobalDispatcher(QObject):
                 dlg.reload_chart(is_timer_tick=True, preloaded=data)
 
     def _run_loop(self, stop_event, wake_event):
+        last_served_revision = -1
         while not stop_event.is_set():
             try:
                 with self._lock:
@@ -4460,18 +4581,24 @@ class SBCGlobalDispatcher(QObject):
                     is_trading = (now.weekday() < 5) and ((9, 15) <= (now.hour, now.minute) <= (11, 30) or (13, 0) <= (now.hour, now.minute) <= (15, 5))
                     interval_sec = 5.0
 
-                if not is_trading:
+                # 盘后也必须完成首次加载；只有配置未变化时才休眠。
+                if not is_trading and revision == last_served_revision:
                     self._wait_or_wake(30.0, wake_event)
                     continue
 
-                codes = list({code for code, _ in subscriptions if code})
+                # 字典保留订阅顺序，让先打开的窗口先拿到首帧。
+                codes = list(dict.fromkeys(code for code, _ in subscriptions if code))
                 if not codes:
                     self._wait_or_wake(1.0, wake_event)
                     continue
 
                 # 1. 批量拉取快照 (40 只批次限制与标准化转换)
+                perf_on = os.environ.get("SBC_PERF") == "1"
+                batch_start = time.perf_counter() if perf_on else 0.0
                 fetcher = TDXRealtimeFetcher.get_instance()
                 snapshots = fetcher.fetch_batch_stock_snapshots(codes)
+                if perf_on:
+                    print(f"[SBC PERF] snapshots {len(codes)} codes: {(time.perf_counter() - batch_start) * 1000:.0f} ms", flush=True)
 
                 # Fetch each code once, then distribute immutable references on the UI thread.
                 batch = {code: {"snapshot": snapshots.get(code, {})} for code in codes}
@@ -4481,10 +4608,12 @@ class SBCGlobalDispatcher(QObject):
                 for code in codes:
                     if stop_event.is_set():
                         break
+                    code_start = time.perf_counter() if perf_on else 0.0
                     modes = modes_by_code[code]
                     if modes.intersection({"1m", "3d", "5d", "10d"}):
                         try:
-                            batch[code]["multi"] = fetcher.fetch_multi_horizon_vwap(code)
+                            days = 10 if "1m" in modes or "10d" in modes else (5 if "5d" in modes else 3)
+                            batch[code]["multi"] = fetcher.fetch_multi_horizon_vwap(code, days=days)
                         except Exception:
                             batch[code]["multi"] = (pd.DataFrame(), None)
                         frame, _ = batch[code]["multi"]
@@ -4499,8 +4628,12 @@ class SBCGlobalDispatcher(QObject):
                         except Exception:
                             batch[code].setdefault("kline", {})[mode] = pd.DataFrame()
 
-                if not stop_event.is_set():
-                    self.batch_ready.emit(batch)
+                    # 每只股票取数完成即投递，首个窗口无需等待整个持仓列表。
+                    self.batch_ready.emit({code: batch[code]})
+                    if perf_on:
+                        print(f"[SBC PERF] {code} {','.join(sorted(modes))}: {(time.perf_counter() - code_start) * 1000:.0f} ms", flush=True)
+
+                last_served_revision = revision
 
                 with self._lock:
                     subscriptions_changed = self._subscription_revision != revision
@@ -4608,6 +4741,14 @@ class SBCIntradayChartDialog(QWidget):
 
         # 周期切换按钮组: [1日] [2日] [3日] [5日] [10日] | [5分K] [30分K] [60分K] [日K] [周K] [月K]
         self._current_period_mode = "1m"
+        try:
+            overlay_saved = QSettings("pyQuant3", "IntradayWorkbench").value("sbc_channel_overlay_enabled", True)
+            self._channel_overlay_enabled = (
+                overlay_saved.strip().lower() not in {"0", "false", "off", "no"}
+                if isinstance(overlay_saved, str) else bool(overlay_saved)
+            )
+        except Exception:
+            self._channel_overlay_enabled = True
         self.btn_group_period = QButtonGroup(self)
         periods = [
             ("1日", "1m"),
@@ -4726,12 +4867,19 @@ class SBCIntradayChartDialog(QWidget):
         self.btn_vol_toggle.setToolTip("快捷键: V 键 (分时成交量副图切换)\n• 正常开启 / 折叠隐藏 / 放大观察\n• 也可在成交量副图区域双击快速在放大与还原之间切换")
         self.btn_vol_toggle.clicked.connect(self._on_vol_toggle_clicked)
 
+        self.btn_channel_overlay = QPushButton()
+        self.btn_channel_overlay.setCheckable(True)
+        self.btn_channel_overlay.setChecked(self._channel_overlay_enabled)
+        self.btn_channel_overlay.clicked.connect(self._on_channel_overlay_toggled)
+        self._update_channel_overlay_btn_style()
+
         tb_layout.addWidget(self.btn_cycle_trade)
         tb_layout.addWidget(self.btn_linkage)
         tb_layout.addWidget(btn_rearrange)
         tb_layout.addWidget(btn_refresh)
         tb_layout.addWidget(btn_clear_cache)
         tb_layout.addWidget(self.btn_vol_toggle)
+        tb_layout.addWidget(self.btn_channel_overlay)
         tb_layout.addWidget(self.btn_toggle_log)
 
         layout.addLayout(tb_layout)
@@ -4739,6 +4887,7 @@ class SBCIntradayChartDialog(QWidget):
         # 2. 实盘走势图画布
         self.canvas = SBCChartCanvas(self)
         self.canvas.code = self.code
+        self.canvas.channel_overlay_enabled = self._channel_overlay_enabled
         self.custom_trades_df = None
         self.custom_signals = None
         self.custom_kline_df = None
@@ -5587,6 +5736,43 @@ class SBCIntradayChartDialog(QWidget):
             self.canvas.cycle_vol_mode()
             self._update_vol_btn_style()
 
+    def _on_channel_overlay_toggled(self, enabled: bool):
+        """切换分时/多日分时上的日线支撑与通道叠加。"""
+        self._channel_overlay_enabled = bool(enabled)
+        if hasattr(self, "canvas") and self.canvas:
+            self.canvas.channel_overlay_enabled = self._channel_overlay_enabled
+            self.canvas.update()
+        try:
+            QSettings("pyQuant3", "IntradayWorkbench").setValue(
+                "sbc_channel_overlay_enabled", self._channel_overlay_enabled
+            )
+        except Exception:
+            pass
+        self._update_channel_overlay_btn_style()
+        if self._channel_overlay_enabled and getattr(self, "_current_period_mode", "1m") in ("1m", "3d", "5d", "10d"):
+            self.reload_chart()
+
+    def _update_channel_overlay_btn_style(self):
+        button = getattr(self, "btn_channel_overlay", None)
+        if button is None:
+            return
+        enabled = bool(getattr(self, "_channel_overlay_enabled", True))
+        button.setText("📐线:开" if enabled else "📐线:关")
+        if enabled:
+            button.setStyleSheet(
+                "QPushButton { background-color: #1a2e22; color: #00ff88; font-weight: bold; "
+                "border: 1px solid #00ff88; border-radius: 3px; padding: 2px 5px; font-size: 8.5pt; }"
+                "QPushButton:hover { color: #ffffff; border: 1px solid #38bdf8; }"
+            )
+            button.setToolTip("分时/多日分时显示日线支撑线与通道线；关闭后跳过分时专用指标读取和绘制")
+        else:
+            button.setStyleSheet(
+                "QPushButton { background-color: #1e1e28; color: #888899; font-weight: normal; "
+                "border: 1px solid #333344; border-radius: 3px; padding: 2px 5px; font-size: 8.5pt; }"
+                "QPushButton:hover { color: #ffffff; border: 1px solid #38bdf8; }"
+            )
+            button.setToolTip("分时/多日分时已关闭日线支撑线与通道线叠加")
+
     def _update_vol_btn_style(self):
         """根据当前 canvas._vol_mode 刷新按钮文字与样式"""
         if not hasattr(self, 'btn_vol_toggle') or not self.btn_vol_toggle:
@@ -5921,16 +6107,6 @@ class SBCIntradayChartDialog(QWidget):
             pass
         if self._dispatcher_enabled:
             SBCGlobalDispatcher.get_instance().subscribe(self)
-            # The dispatcher pauses live polling outside market hours; load the
-            # last available frame once so a newly opened window is not blank.
-            if not getattr(self, '_has_initial_loaded', False):
-                try:
-                    from JohnsonUtil import commonTips as cct
-                    market_open = bool(cct.get_work_time())
-                except Exception:
-                    market_open = False
-                if not market_open:
-                    QTimer.singleShot(0, self.reload_chart)
         elif hasattr(self, 'poll_timer') and self.poll_timer and not self.poll_timer.isActive():
             self.poll_timer.start()
         if hasattr(self, 'hover_timer') and self.hover_timer and not self.hover_timer.isActive():
@@ -6710,6 +6886,9 @@ class SBCIntradayChartDialog(QWidget):
         # 更新画布属性并重置视口
         if hasattr(self, 'canvas') and self.canvas:
             self.canvas.code = c_clean
+            self.canvas.channel_info = {}
+            self.canvas.channel_info_code = ""
+            self.canvas.channel_info_period = ""
             self.canvas.strategy_eval_result = None
             self.canvas.reset_view()
 
@@ -6920,34 +7099,23 @@ class SBCIntradayChartDialog(QWidget):
 
     @staticmethod
     def _fetch_channel_info_static(fetcher: TDXRealtimeFetcher, code: str) -> Optional[Dict[str, float]]:
-        """静态无锁安全获取日线通道关键价位（供后台取数线程使用，免除主线程阻塞）"""
-        try:
-            d_metrics = fetcher.get_daily_metrics(code)
-            if d_metrics and "ch_upper" in d_metrics:
-                return {
-                    "ch_up": float(d_metrics.get("ch_upper", 0.0)),
-                    "ch_mid": float(d_metrics.get("ch_mid", 0.0)),
-                    "ch_dn": float(d_metrics.get("ch_lower", 0.0)),
-                    "ch_supp": float(d_metrics.get("ch_supp_price", 0.0)),
-                    "rev": float(d_metrics.get("reversal_line", 0.0)),
-                }
-            df_d = fetcher.fetch_kline_bars(code, category="day", count=30)
-            if not df_d.empty and "ch_upper" in df_d.columns:
-                ch_u = df_d['ch_upper'].iloc[-1]
-                ch_m = df_d['ch_mid'].iloc[-1]
-                ch_l = df_d['ch_lower'].iloc[-1]
-                ch_s = df_d['ch_supp_price'].iloc[-1] if 'ch_supp_price' in df_d.columns else 0.0
-                rev = df_d['reversal_line'].iloc[-1] if 'reversal_line' in df_d.columns else 0.0
-                return {
-                    "ch_up": float(ch_u) if pd.notna(ch_u) else 0.0,
-                    "ch_mid": float(ch_m) if pd.notna(ch_m) else 0.0,
-                    "ch_dn": float(ch_l) if pd.notna(ch_l) else 0.0,
-                    "ch_supp": float(ch_s) if pd.notna(ch_s) else 0.0,
-                    "rev": float(rev) if pd.notna(rev) else 0.0,
-                }
-        except Exception:
-            pass
-        return None
+        """先复用进程共享缓存，未命中时才从已有日线指标/K线补一次。"""
+        def _load_daily_info():
+            try:
+                info = SBCIndicatorCache.from_metrics(fetcher.cache_pool.get_daily_metrics(code))
+                if info and info.get("ch_supp") and info.get("rev"):
+                    return info
+            except Exception:
+                info = None
+            try:
+                daily = SBCIndicatorCache.from_frame(
+                    fetcher.fetch_kline_bars(code, category="day", count=150)
+                )
+                return daily or info
+            except Exception:
+                return info
+
+        return SBCIndicatorCache.get_or_load(code, "day", _load_daily_info)
 
     def _do_fetch_chart_data(
         self,
@@ -7002,9 +7170,11 @@ class SBCIntradayChartDialog(QWidget):
         t_min = op * 1.03 if op > 1.0 else 0.0
         t_max = op * 1.05 if op > 1.0 else 0.0
 
-        # 通道提取 (后台执行，免除主线程首帧等待)
-        if not channel_info:
-            channel_info = self._fetch_channel_info_static(fetcher, code)
+        # 分时/多日分时复用日线缓存；关闭叠加时不额外读取或提取通道指标。
+        if mode in ("1m", "3d", "5d", "10d") and getattr(self, "_channel_overlay_enabled", True):
+            channel_info = SBCIndicatorCache.get(code, "day") or self._fetch_channel_info_static(fetcher, code)
+        else:
+            channel_info = None
 
         if is_cancelled_func and is_cancelled_func():
             return {"is_cancelled": True}
@@ -7162,6 +7332,7 @@ class SBCIntradayChartDialog(QWidget):
             "t_min": t_min,
             "t_max": t_max,
             "df_target": df_target,
+            "amplitude_history_df": df_multi if mode == "1m" else None,
             "sigs": sigs,
             "multi_vwap_snapshot": multi_vwap_snapshot,
             "channel_info": channel_info,
@@ -7194,12 +7365,16 @@ class SBCIntradayChartDialog(QWidget):
         t_min = payload.get("t_min", 0.0)
         t_max = payload.get("t_max", 0.0)
         df_target = payload.get("df_target")
+        if hasattr(self, 'canvas') and self.canvas:
+            self.canvas._amplitude_history_df = payload.get("amplitude_history_df")
         sigs = payload.get("sigs", [])
         multi_vwap_snapshot = payload.get("multi_vwap_snapshot")
         channel_info = payload.get("channel_info")
 
-        if channel_info and hasattr(self, 'canvas') and self.canvas and not getattr(self.canvas, 'channel_info', None):
-            self.canvas.channel_info = channel_info
+        if channel_info and hasattr(self, 'canvas') and self.canvas:
+            self.canvas.channel_info = SBCIndicatorCache.put(self.code, "day", channel_info) or channel_info
+            self.canvas.channel_info_code = self.code
+            self.canvas.channel_info_period = "day"
 
         if mode in ["3d", "5d", "10d"]:
             df_multi = df_target
@@ -7374,6 +7549,7 @@ class SBCIntradayChartDialog(QWidget):
         auto_strategy = getattr(self, "vwap_auto_strategy_enabled", True)
         channel_info = getattr(self.canvas, "channel_info", None) if hasattr(self, 'canvas') else None
         def _bg_fetch_worker():
+            fetch_start = time.perf_counter()
             payload = {"is_cancelled": True}
             try:
                 payload = self._do_fetch_chart_data(
@@ -7393,6 +7569,8 @@ class SBCIntradayChartDialog(QWidget):
                 if not isinstance(payload, dict):
                     payload = {"is_cancelled": True}
                 payload["is_timer_tick"] = is_timer_tick
+                if os.environ.get("SBC_PERF") == "1":
+                    print(f"[SBC PERF] {cur_code} strategy/data: {(time.perf_counter() - fetch_start) * 1000:.0f} ms", flush=True)
                 try:
                     self._async_chart_data_ready.emit(cur_epoch, cur_code, mode, payload)
                 except RuntimeError:
@@ -7417,42 +7595,28 @@ class SBCIntradayChartDialog(QWidget):
         if mode != getattr(self, '_current_period_mode', '1m'):
             return
         is_timer_tick = payload.get("is_timer_tick", False)
+        render_start = time.perf_counter() if os.environ.get("SBC_PERF") == "1" else 0.0
         self._apply_chart_payload(payload, is_timer_tick=is_timer_tick)
+        if render_start:
+            print(f"[SBC PERF] {code} Qt render: {(time.perf_counter() - render_start) * 1000:.0f} ms", flush=True)
 
     def _sync_daily_channel_to_canvas(self):
         """【⚡ 通道对齐】为分时图同步对齐日线/K线通道支撑、反转与关键阶梯位"""
         if not hasattr(self, 'canvas') or not self.canvas:
             return
-        if getattr(self.canvas, 'channel_info', None):
+        if not getattr(self, "_channel_overlay_enabled", True):
             return
         try:
-            from ats.tdx_realtime_fetcher import TDXRealtimeFetcher
-            fetcher = TDXRealtimeFetcher.get_instance()
-            d_metrics = fetcher.get_daily_metrics(self.code)
-            if d_metrics and "ch_upper" in d_metrics:
-                self.canvas.channel_info = {
-                    "ch_up": float(d_metrics.get("ch_upper", 0.0)),
-                    "ch_mid": float(d_metrics.get("ch_mid", 0.0)),
-                    "ch_dn": float(d_metrics.get("ch_lower", 0.0)),
-                    "ch_supp": float(d_metrics.get("ch_supp_price", 0.0)),
-                    "rev": float(d_metrics.get("reversal_line", 0.0)),
-                }
+            code = str(self.code)
+            if (getattr(self.canvas, "channel_info_code", "") == code
+                    and getattr(self.canvas, "channel_info_period", "") == "day"
+                    and getattr(self.canvas, "channel_info", None)):
                 return
-            # 极速轻量抓取日线通道
-            df_d = fetcher.fetch_kline_bars(self.code, category="day", count=30)
-            if not df_d.empty and "ch_upper" in df_d.columns:
-                ch_u = df_d['ch_upper'].iloc[-1]
-                ch_m = df_d['ch_mid'].iloc[-1]
-                ch_l = df_d['ch_lower'].iloc[-1]
-                ch_s = df_d['ch_supp_price'].iloc[-1] if 'ch_supp_price' in df_d.columns else 0.0
-                rev = df_d['reversal_line'].iloc[-1] if 'reversal_line' in df_d.columns else 0.0
-                self.canvas.channel_info = {
-                    "ch_up": float(ch_u) if pd.notna(ch_u) else 0.0,
-                    "ch_mid": float(ch_m) if pd.notna(ch_m) else 0.0,
-                    "ch_dn": float(ch_l) if pd.notna(ch_l) else 0.0,
-                    "ch_supp": float(ch_s) if pd.notna(ch_s) else 0.0,
-                    "rev": float(rev) if pd.notna(rev) else 0.0,
-                }
+            # 网络补全已在 _do_fetch_chart_data 的工作线程执行；渲染线程只读缓存。
+            info = SBCIndicatorCache.get(code, "day")
+            self.canvas.channel_info = info or {}
+            self.canvas.channel_info_code = code
+            self.canvas.channel_info_period = "day"
         except Exception:
             pass
 
