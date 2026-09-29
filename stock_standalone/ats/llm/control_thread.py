@@ -26,6 +26,7 @@ _MAX_SUBMIT_BATCH = 8
 _REQUEST_QUEUE_TTL_SECONDS = 30.0
 _STATUS_INTERVAL_SECONDS = 1.0
 _LOOP_INTERVAL_SECONDS = 0.1
+_AUTHORIZATION_RECHECK_SECONDS = 30.0
 
 
 def _is_market_session_active() -> bool:
@@ -80,6 +81,7 @@ class LLMControlThread(threading.Thread):
         self._last_result: Dict[str, str] = {}
         self._recent_results = deque(maxlen=100)
         self._last_publish_error = ""
+        self._authorization_state = "VALID" if self._preflight.get("execution_allowed") is True else "UNREADY"
 
     def submit_request(self, request: Mapping[str, Any]) -> bool:
         """Queue a candidate without touching multiprocessing endpoints or Qt state."""
@@ -119,6 +121,7 @@ class LLMControlThread(threading.Thread):
                 "request_producer": dict(self._request_producer_status),
                 "journal": interaction_journal_status(self._root),
                 "last_publish_error": self._last_publish_error,
+                "authorization_state": self._authorization_state,
             }
 
     def run(self) -> None:
@@ -137,10 +140,22 @@ class LLMControlThread(threading.Thread):
                 )
                 producer_thread.start()
             next_publish = 0.0
+            next_authorization_check = time.monotonic() + _AUTHORIZATION_RECHECK_SECONDS
             market_active = self._simulation_only or _is_market_session_active()
             next_session_check = time.monotonic() + (5.0 if market_active else 60.0)
             while not self._stop_requested.is_set():
                 now = time.monotonic()
+                if now >= next_authorization_check:
+                    next_authorization_check = now + _AUTHORIZATION_RECHECK_SECONDS
+                    if not self._runtime_authorization_still_valid():
+                        self._authorization_state = "REVOKED"
+                        self._set_accepting(False)
+                        self._last_publish_error = "RUNTIME_AUTHORIZATION_REVOKED"
+                        self._discard_queued(latest_by_scope)
+                        self._clear_command_queue()
+                        inflight.clear()
+                        self._worker.shutdown(timeout_seconds=1.0)
+                        break
                 if now >= next_session_check:
                     was_market_active = market_active
                     market_active = self._simulation_only or _is_market_session_active()
@@ -169,9 +184,10 @@ class LLMControlThread(threading.Thread):
                     next_publish = now + (
                         _STATUS_INTERVAL_SECONDS if market_active else 60.0
                     )
-                self._stop_requested.wait(
-                    _LOOP_INTERVAL_SECONDS if market_active else 60.0
+                wait_seconds = _LOOP_INTERVAL_SECONDS if market_active else min(
+                    60.0, max(0.1, next_authorization_check - time.monotonic())
                 )
+                self._stop_requested.wait(wait_seconds)
         except Exception:
             self._set_accepting(False)
             self._last_publish_error = "LLM_CONTROL_THREAD_FAILED"
@@ -289,9 +305,14 @@ class LLMControlThread(threading.Thread):
             "completed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "summary": summary_text,
         }
-        record_agent_interaction(self._root, response, summary["completed_at"])
+        journal_accepted = record_agent_interaction(
+            self._root, response, summary["completed_at"]
+        )
         with self._state_lock:
-            if response.get("status") == "OK":
+            if not journal_accepted:
+                self._failed_results += 1
+                self._last_publish_error = "INTERACTION_JOURNAL_ENQUEUE_FAILED"
+            elif response.get("status") == "OK":
                 self._ok_results += 1
             else:
                 self._failed_results += 1
@@ -304,15 +325,36 @@ class LLMControlThread(threading.Thread):
         if latest_by_scope:
             with self._state_lock:
                 self._command_drops += len(latest_by_scope)
-            latest_by_scope.clear()
+        latest_by_scope.clear()
+
+    def _clear_command_queue(self) -> None:
         while True:
             try:
                 self._commands.get_nowait()
+            except queue.Empty:
+                return
+            else:
                 self._commands.task_done()
                 with self._state_lock:
                     self._command_drops += 1
-            except queue.Empty:
-                return
+
+    def _runtime_authorization_still_valid(self) -> bool:
+        """Re-evaluate the lease and stage acceptance after startup."""
+        try:
+            from ats.llm.provider_preflight import inspect_provider_preflight
+            from ats.llm.runtime_service import _load_authorization
+
+            authorization_path = self._root / "config" / "llm_runtime_acceptance.json"
+            config_path = self._root / "config" / "llm_config.yaml"
+            authorization = _load_authorization(authorization_path)
+            preflight = inspect_provider_preflight(config_path, authorization=authorization)
+            return (
+                authorization == self._authorization
+                and preflight.get("execution_allowed") is True
+                and preflight.get("state") == "READY"
+            )
+        except Exception:
+            return False
 
     def _publish_status(
         self,
@@ -342,11 +384,13 @@ class LLMControlThread(threading.Thread):
             "provider": str(self._preflight.get("backend", "未配置"))[:100],
             "qualified": bool(
                 not self._simulation_only
+                and self._authorization_state == "VALID"
                 and worker_state == "READY"
                 and worker_snapshot.get("heartbeat_healthy") is True
                 and self._preflight.get("execution_allowed") is True
             ),
             "simulation_only": self._simulation_only,
+            "authorization_state": self._authorization_state,
             "updated_at": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
             "worker": {
                 "state": worker_state,

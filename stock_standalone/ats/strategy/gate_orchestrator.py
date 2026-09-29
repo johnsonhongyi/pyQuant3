@@ -281,8 +281,8 @@ def evaluate_gate4_vwap(
     known_structures = {"数据不足", "多周期偏强", "日内转弱 / 中期偏强", "多周期偏弱", "多周期混合"}
     if vwap.structure not in known_structures:
         return False, "Gate 4 阻断: VWAP 结构状态缺失"
-    if listing_age_sessions >= 10 and vwap.structure == "数据不足":
-        return False, "Gate 4 阻断: 满 10 日但 VWAPFactory 仍报告数据不足"
+    if listing_age_sessions > 1 and vwap.structure == "数据不足":
+        return False, "Gate 4 阻断: D1+ VWAP 结构数据不足"
     if current_price < vwap_today * (1.0 - support_pct / 100.0) or vwap.structure == "多周期偏弱":
         return False, "Gate 4 阻断: 现价跌破配置化当日 VWAP 支撑或 VWAP 结构偏弱"
     return True, f"Gate 4 放行: 当日 VWAP 与上市日龄适用结构校验通过 ({vwap.structure})"
@@ -521,7 +521,8 @@ class GateOrchestrator:
             values = (d0_listing_open_price, issue_price, intraday_low, current_price)
             if (
                 any(not _finite(value) or value <= 0 for value in values)
-                or not _finite(d0_open_break_pct) or d0_open_break_pct != d0_open_break
+                or not _finite(d0_open_break_pct)
+                or abs(float(d0_open_break_pct) - float(d0_open_break)) > 1e-9
                 or not 0 <= d0_open_break_pct < 1.0
             ):
                 return self._block(passport, 3, "Gate 3 阻断: D0 开盘价/发行价/行情或容差无效")

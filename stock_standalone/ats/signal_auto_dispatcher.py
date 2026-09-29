@@ -61,6 +61,29 @@ class SignalAutoDispatcher:
         self.execution_mode: str = "PAPER"  # 严格锁定在 PAPER 模拟模式
         self.trade_history: List[Dict[str, Any]] = []
         self._trade_seq: int = 1
+        self._sentiment_state_cache = "COOLDOWN"
+        self._sentiment_state_refresh_at = 0.0
+
+    def _get_market_sentiment_state(self) -> str:
+        """Use the same-session FSM publication; absent/stale state freezes entries."""
+        now = time.monotonic()
+        if now < self._sentiment_state_refresh_at:
+            return self._sentiment_state_cache
+        state = "COOLDOWN"
+        try:
+            from datetime import datetime
+            from zoneinfo import ZoneInfo
+            import market_pulse_db
+
+            session_date = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d")
+            published = market_pulse_db.get_current_sentiment_state(session_date)
+            if isinstance(published, dict):
+                state = published.get("state", "COOLDOWN")
+        except Exception:
+            logger.exception("Market sentiment state unavailable; using COOLDOWN")
+        self._sentiment_state_cache = state
+        self._sentiment_state_refresh_at = now + 5.0
+        return state
 
     def dispatch_tick(
         self,
@@ -77,7 +100,10 @@ class SignalAutoDispatcher:
         """
         逐 Tick 驱动流水线：防守优先 -> 宏观守护 -> 双组投票进攻 -> 撮合记录
         """
-        ctx = extra_ctx or {}
+        ctx = dict(extra_ctx or {})
+        allowed_sentiment_states = {"NEUTRAL", "PANIC", "REPAIR", "REVERSAL", "FOMO", "COOLDOWN"}
+        if ctx.get("sentiment_state") not in allowed_sentiment_states:
+            ctx["sentiment_state"] = self._get_market_sentiment_state()
         pos = self.arbiter.get_or_create_position(code)
         self.arbiter.update_position_price(code, price)
 
@@ -91,7 +117,7 @@ class SignalAutoDispatcher:
                 down_count=mkt_stats.get("down_count", 2000),
                 limit_up_count=mkt_stats.get("limit_up_count", 40),
                 limit_down_count=mkt_stats.get("limit_down_count", 5),
-                market_sentiment=ctx.get("sentiment_state", "NEUTRAL"),
+                market_sentiment=ctx["sentiment_state"],
                 sector_dumps=ctx.get("sector_dumps"),
                 now=timestamp,
             )

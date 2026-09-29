@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from enum import Enum
 from typing import Mapping, Any, List, Tuple, Dict, Optional
+import math
 import json
 import logging
 from datetime import datetime
@@ -18,6 +19,12 @@ from JohnsonUtil import LoggerFactory
 from JohnsonUtil import commonTips as cct
 
 logger = LoggerFactory.getLogger("MarketSentimentFSM")
+LIMIT_CHANGE_THRESHOLD = 9.8
+
+
+def normalize_sector_name(name: Any) -> str:
+    """Normalize whitespace/case while keeping sector matching exact."""
+    return "".join(str(name or "").split()).casefold()
 
 class SentimentState(Enum):
     NEUTRAL = "NEUTRAL"
@@ -86,7 +93,15 @@ class MarketSentimentFSM:
         加载最近交易日（或者是指定交易日之前最近的一天）的情感数据。
         日期格式：YYYY-MM-DD
         """
+        def clear_snapshot(reason: str) -> None:
+            self.yesterday_snapshot = None
+            self._yesterday_worst_sectors.clear()
+            self._yesterday_top_sectors.clear()
+            self._sector_record_by_name.clear()
+            logger.warning("[FSM] Prior snapshot unavailable: %s", reason)
+
         if not self.database_ready:
+            clear_snapshot("PULSE_DATABASE_NOT_READY")
             logger.error("[FSM] Snapshot load blocked because pulse database is not ready")
             return None
         try:
@@ -95,11 +110,44 @@ class MarketSentimentFSM:
                 raw = market_pulse_db.get_latest_sentiment_before(trade_date)
             else:
                 # 获取今天之前最近的一天
-                today = datetime.now().strftime("%Y-%m-%d")
+                today = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d")
                 raw = market_pulse_db.get_latest_sentiment_before(today)
                 
             if not raw:
-                logger.warning(f"[FSM] No prior daily sentiment snapshot found for reference date.")
+                clear_snapshot("NO_PRIOR_DAILY_SNAPSHOT")
+                return None
+
+            snapshot_date = datetime.strptime(str(raw.get("date", "")), "%Y-%m-%d").date()
+            reference_date = datetime.strptime(
+                trade_date or datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d"),
+                "%Y-%m-%d",
+            ).date()
+            if snapshot_date >= reference_date:
+                clear_snapshot("SNAPSHOT_NOT_PRIOR_TO_REFERENCE_DATE")
+                return None
+            if raw.get("source_id") and raw["source_id"] != DAILY_SENTIMENT_SOURCE_ID:
+                clear_snapshot("SNAPSHOT_SOURCE_ID_MISMATCH")
+                return None
+            if raw.get("source_timezone"):
+                ZoneInfo(raw["source_timezone"])
+            try:
+                trade_days = cct.get_trade_days(
+                    snapshot_date.strftime("%Y-%m-%d"), reference_date.strftime("%Y-%m-%d")
+                )
+                age_sessions = sum(
+                    snapshot_date.strftime("%Y-%m-%d") < str(day)[:10]
+                    <= reference_date.strftime("%Y-%m-%d")
+                    for day in (trade_days or [])
+                )
+            except Exception:
+                age_sessions = 0
+            if age_sessions == 0:
+                age_days = (reference_date - snapshot_date).days
+                if age_days > 4:
+                    clear_snapshot("SNAPSHOT_EXPIRED_CALENDAR_UNAVAILABLE")
+                    return None
+            elif age_sessions > 2:
+                clear_snapshot(f"SNAPSHOT_EXPIRED_{age_sessions}_SESSIONS")
                 return None
                 
             # 解析最强/最弱板块
@@ -136,7 +184,10 @@ class MarketSentimentFSM:
                 breadth_ratio=raw.get('breadth_ratio', 0.0),
                 top_sectors=tuple(top_list),
                 worst_sectors=tuple(worst_list),
-                source_version=raw.get('source_version', 'daily_sentiment.v1')
+                source_version=raw.get('source_version', 'daily_sentiment.v1'),
+                source_id=raw.get("source_id", DAILY_SENTIMENT_SOURCE_ID),
+                source_timezone=raw.get("source_timezone", DAILY_SENTIMENT_SOURCE_TIMEZONE),
+                as_of_time=raw.get("as_of_time", ""),
             )
             
             self.yesterday_snapshot = snap
@@ -148,9 +199,8 @@ class MarketSentimentFSM:
             logger.info(f"[FSM] Loaded reference daily sentiment for {snap.date}. State transitions primed.")
             return snap
         except Exception as e:
+            clear_snapshot(type(e).__name__)
             logger.error(f"[FSM Load Error] {e}")
-            import traceback
-            traceback.print_exc()
         return None
 
     def build_bidding_snapshot(self, detector) -> BiddingSnapshot:
@@ -159,11 +209,12 @@ class MarketSentimentFSM:
         为防阻塞，在 detector 锁内仅执行极速浅拷贝。
         """
         import time
-        date_str = datetime.now().strftime("%Y-%m-%d")
+        now = datetime.now(ZoneInfo("Asia/Shanghai"))
+        date_str = now.strftime("%Y-%m-%d")
         if not self.database_ready:
             return BiddingSnapshot(
                 date=date_str,
-                generated_at=datetime.now().strftime("%H:%M:%S"),
+                generated_at=now.strftime("%H:%M:%S"),
                 up_count=0,
                 down_count=0,
                 limit_up=0,
@@ -186,9 +237,9 @@ class MarketSentimentFSM:
             down_count = 0
             for code, s in stock_snap.items():
                 pct = s.get('pct', 0.0)
-                if pct > 9.9:
+                if pct >= LIMIT_CHANGE_THRESHOLD:
                     limit_up += 1
-                elif pct < -9.9:
+                elif pct <= -LIMIT_CHANGE_THRESHOLD:
                     limit_down += 1
                 if pct > 0:
                     up_count += 1
@@ -209,7 +260,7 @@ class MarketSentimentFSM:
             
         return BiddingSnapshot(
             date=date_str,
-            generated_at=datetime.now().strftime("%H:%M:%S"),
+            generated_at=now.strftime("%H:%M:%S"),
             up_count=up_count,
             down_count=down_count,
             limit_up=limit_up,
@@ -263,20 +314,26 @@ class MarketSentimentFSM:
         if yesterday.breadth_ratio <= 0.35:
             is_yesterday_panic = True
             matched_rules.append("YESTERDAY_BREADTH_PANIC")
-        if yesterday.temperature <= 35 and yesterday.limit_down >= 10:
-            is_yesterday_panic = True
-            matched_rules.append("YESTERDAY_TEMP_LOW_LIMIT_DOWN")
-            
         # 2. 对比昨日跌幅最大的板块，看今日竞价是否有修复
         # 遍历昨日最弱板块，看今日 avg_pct >= -0.3
-        bidding_sector_pcts = {s.name: s.avg_pct for s in bidding.active_sectors}
+        bidding_sector_pcts = {
+            normalize_sector_name(s.name): s.avg_pct
+            for s in bidding.active_sectors if normalize_sector_name(s.name)
+        }
         repaired_count = 0
         for name in self._yesterday_worst_sectors:
-            if name in bidding_sector_pcts:
-                avg_pct = bidding_sector_pcts[name]
+            normalized_name = normalize_sector_name(name)
+            if normalized_name in bidding_sector_pcts:
+                avg_pct = bidding_sector_pcts[normalized_name]
                 if avg_pct >= -0.3:
                     repaired_count += 1
                     repaired_worst_sectors.append(name)
+        has_worst_sector_match = any(
+            normalize_sector_name(name) in bidding_sector_pcts
+            for name in self._yesterday_worst_sectors
+        )
+        if self._yesterday_worst_sectors and not has_worst_sector_match:
+            blocked_reasons.append("NO_YESTERDAY_WORST_SECTOR_NAME_MATCH")
                     
         # 3. 检查是否有龙头或者昨日超跌板块的个股高开抢筹 (在竞价前 30 名或前 20%)
         # 提取竞价前 30 只高分股
@@ -299,6 +356,11 @@ class MarketSentimentFSM:
         if is_yesterday_panic:
             next_state = SentimentState.PANIC
             confidence = 0.70
+
+            if 0.35 <= today_bidding_up_ratio < 0.45 and repaired_count < 2:
+                next_state = SentimentState.COOLDOWN
+                confidence = 0.65
+                matched_rules.append("PANIC_TO_COOLDOWN_PARTIAL_REPAIR")
             
             # REPAIR: 跌透之后的初步竞价修复
             if today_bidding_up_ratio >= 0.45 and repaired_count >= 2:
@@ -319,7 +381,8 @@ class MarketSentimentFSM:
         # FOMO 状态检测 (开盘情绪过热)
         # 如果大量个股高开超过 4% 且大盘明显高开，或者前天昨天连涨高潮
         high_open_candidates = [s for s in bidding.stock_snap.values() if s.get('pct', 0.0) >= 4.0]
-        if len(high_open_candidates) >= 15 and today_bidding_up_ratio >= 0.75:
+        if (next_state == SentimentState.NEUTRAL
+                and len(high_open_candidates) >= 15 and today_bidding_up_ratio >= 0.75):
             next_state = SentimentState.FOMO
             confidence = 0.90
             matched_rules.append("FOMO_HIGH_OPEN_CANDIDATES")
@@ -331,7 +394,11 @@ class MarketSentimentFSM:
             "matched_rules": matched_rules,
             "repaired_worst_sectors": repaired_worst_sectors,
             "blocked_reasons": blocked_reasons,
-            "missing_worst_sectors": len(self._yesterday_worst_sectors) == 0
+            "missing_worst_sectors": len(self._yesterday_worst_sectors) == 0,
+            "unmatched_worst_sector_count": (
+                len(self._yesterday_worst_sectors) if self._yesterday_worst_sectors
+                and not has_worst_sector_match else 0
+            ),
         }
         
         return next_state
@@ -346,6 +413,13 @@ class MarketSentimentFSM:
         try:
             exchange_tz = ZoneInfo("Asia/Shanghai")
             today = date_str or datetime.now(exchange_tz).strftime("%Y-%m-%d")
+            index_pct = float(index_pct)
+            if not math.isfinite(index_pct):
+                raise ValueError("index_pct must be finite")
+            if df_all is None or getattr(df_all, "empty", True) or "percent" not in df_all.columns:
+                raise ValueError("a non-empty market dataframe with percent is required")
+            if detector is None or not callable(getattr(detector, "get_active_sectors", None)):
+                raise ValueError("a ready sector detector is required")
             
             # 计算大盘上涨/下跌家数
             up_count = 0
@@ -354,24 +428,38 @@ class MarketSentimentFSM:
             limit_down = 0
             
             if df_all is not None and not df_all.empty:
-                valid_df = df_all[df_all['percent'].notna()]
+                def finite_percent(value: Any) -> float:
+                    try:
+                        converted = float(value)
+                    except (TypeError, ValueError, OverflowError):
+                        return math.nan
+                    return converted if math.isfinite(converted) else math.nan
+
+                percent = df_all["percent"].map(
+                    finite_percent
+                )
+                finite_mask = percent.map(math.isfinite)
+                valid_df = df_all.loc[finite_mask].copy()
+                valid_df["percent"] = percent.loc[finite_mask]
+                if valid_df.empty:
+                    raise ValueError("market dataframe has no finite percent values")
                 up_count = int((valid_df['percent'] > 0).sum())
                 down_count = int((valid_df['percent'] < 0).sum())
                 flat_count = int((valid_df['percent'] == 0).sum())
                 total = up_count + down_count + flat_count
                 breadth_ratio = up_count / total if total > 0 else 0.5
                 
-                # 简单估算涨跌停 (这里用 9.8% 替代，可根据需要微调)
-                limit_up = int((valid_df['percent'] >= 9.8).sum())
-                limit_down = int((valid_df['percent'] <= -9.8).sum())
-            else:
-                breadth_ratio = 0.5
+                limit_up = int((valid_df['percent'] >= LIMIT_CHANGE_THRESHOLD).sum())
+                limit_down = int((valid_df['percent'] <= -LIMIT_CHANGE_THRESHOLD).sum())
                 
             # 市场温度：暂时用 breadth_ratio * 100 兜底
+            # Legacy persisted presentation alias; classification uses breadth_ratio directly.
             temperature = breadth_ratio * 100
             
             # 抓取板块
             active_sectors_list = detector.get_active_sectors()
+            if not isinstance(active_sectors_list, (list, tuple)) or not active_sectors_list:
+                raise ValueError("sector detector produced no active-sector snapshot")
             
             # 构造 top 和 worst 板块
             top_sectors_raw = sorted(active_sectors_list, key=lambda x: x.get('score', 0.0), reverse=True)[:5]
@@ -419,7 +507,8 @@ class MarketSentimentFSM:
                 'as_of_time': as_of_time,
             }
             
-            market_pulse_db.save_daily_sentiment(today, db_snap)
+            if market_pulse_db.save_daily_sentiment(today, db_snap) is not True:
+                raise RuntimeError("market_pulse_db rejected the daily sentiment snapshot")
             
             # 同时转换为对象返回
             worst_recs = [SectorRecord(**w) for w in worst_sectors]

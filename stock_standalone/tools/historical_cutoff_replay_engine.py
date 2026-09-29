@@ -14,7 +14,7 @@ import math
 import os
 from pathlib import Path
 import tempfile
-from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import pandas as pd
@@ -22,8 +22,8 @@ import pandas as pd
 
 DEFAULT_EXCHANGE_TIMEZONE = "Asia/Shanghai"
 REPLAY_MANIFEST_VERSION = "1"
-REPLAY_REPORT_SCHEMA_VERSION = "ipo_historical_replay_report.v2"
-REPLAY_REPORT_INDEX_VERSION = "r9.replay-report-index.v2"
+REPLAY_REPORT_SCHEMA_VERSION = "ipo_historical_replay_report.v3"
+REPLAY_REPORT_INDEX_VERSION = "r9.replay-report-index.v3"
 MAX_REPLAY_REPORT_BYTES = 512 * 1024 * 1024
 REPLAY_EFFECT_METRICS = (
     "regime_transition_accuracy", "high_carry_vs_low_carry_spread",
@@ -123,11 +123,14 @@ class HistoricalReplayReportStore:
     @staticmethod
     def _validate_report(report: Any) -> Dict[str, Any]:
         from ats.strategy.ipo_data_contracts import IPO_REQUIRED_FIELDS
+        from tools.ipo_replay_effect_metrics import (
+            EFFECT_METRIC_CONTRACT_HASH, EFFECT_METRIC_CONTRACT_VERSION,
+        )
 
         required = {
             "schema_version", "run_manifest", "stock_count", "cutoff_count",
             "unready_cutoff_count", "input_contract_status", "stocks",
-            "effect_metrics", "replay_report_hash",
+            "regression_cases", "effect_metrics", "replay_report_hash",
         }
         if not isinstance(report, dict) or set(report) != required:
             raise ValueError("回放报告字段不符合存储契约")
@@ -139,10 +142,15 @@ class HistoricalReplayReportStore:
             or set(manifest) != {
                 "source_manifest", "source_id", "source_timezone", "configuration_version",
                 "decision_config_hash", "data_contract_hash", "input_contract_status", "config_hash",
+                "effect_metric_contract_version", "effect_metric_contract_hash",
+                "outcome_as_of",
             }
+            or not isinstance(manifest.get("source_manifest"), Mapping)
             or not _is_sha256(manifest.get("config_hash"))
             or not _is_sha256(manifest.get("decision_config_hash"))
             or not _is_sha256(manifest.get("data_contract_hash"))
+            or manifest.get("effect_metric_contract_version") != EFFECT_METRIC_CONTRACT_VERSION
+            or manifest.get("effect_metric_contract_hash") != EFFECT_METRIC_CONTRACT_HASH
             or manifest.get("input_contract_status") != "ENFORCED_ALL_41_FIELDS"
         ):
             raise ValueError("回放报告缺少已哈希的来源/配置 manifest")
@@ -219,6 +227,19 @@ class HistoricalReplayReportStore:
                     unready_count += 1
                 else:
                     raise ValueError("逐 cutoff 数据契约状态无效")
+                evidence = observation.get("outcome_evidence")
+                if evidence is not None:
+                    outcome_sources = [
+                        source for source in manifest["source_manifest"].get("sources", [])
+                        if isinstance(source, Mapping) and source.get("source_role") == "outcome"
+                    ]
+                    if (
+                        not isinstance(evidence, Mapping) or len(outcome_sources) != 1
+                        or evidence.get("source_id") != outcome_sources[0].get("source_id")
+                        or evidence.get("source_version") != outcome_sources[0].get("source_version")
+                        or evidence.get("source_timezone") != outcome_sources[0].get("source_timezone")
+                    ):
+                        raise ValueError("成熟标签证据与 OUTCOME_ONLY 来源 manifest 不一致")
         expected_status = "READY" if cutoff_count > 0 and unready_count == 0 else "UNREADY"
         if (
             report.get("cutoff_count") != cutoff_count
@@ -229,11 +250,15 @@ class HistoricalReplayReportStore:
         metrics = report.get("effect_metrics")
         if not isinstance(metrics, Mapping) or set(metrics) != set(REPLAY_EFFECT_METRICS):
             raise ValueError("回放报告缺少完整 13 项效果指标")
+        from tools.ipo_replay_effect_metrics import compute_effect_metrics
+
         for name, metric in metrics.items():
             if not isinstance(metric, Mapping) or set(metric) != {
-                "status", "value", "numerator", "denominator", "reason",
+                "status", "value", "numerator", "denominator", "support", "reason",
             }:
                 raise ValueError(f"回放效果指标格式无效: {name}")
+            if not isinstance(metric.get("support"), Mapping):
+                raise ValueError(f"回放效果指标 support 格式无效: {name}")
             if metric.get("status") == "NOT_EVALUABLE":
                 if metric.get("value") is not None or metric.get("numerator") is not None or metric.get("denominator") is not None:
                     raise ValueError(f"不可评估指标不得带数值: {name}")
@@ -243,9 +268,10 @@ class HistoricalReplayReportStore:
                     raise ValueError(f"已测量指标数值无效: {name}")
                 numerator, denominator = metric.get("numerator"), metric.get("denominator")
                 if (
-                    not isinstance(numerator, int) or isinstance(numerator, bool) or numerator < 0
-                    or not isinstance(denominator, int) or isinstance(denominator, bool) or denominator < 0
-                    or numerator > denominator
+                    isinstance(numerator, bool) or not isinstance(numerator, (int, float))
+                    or not math.isfinite(numerator)
+                    or isinstance(denominator, bool) or not isinstance(denominator, (int, float))
+                    or not math.isfinite(denominator) or denominator <= 0
                 ):
                     raise ValueError(f"已测量指标分子/分母无效: {name}")
                 if name == "explanation_coverage" and (
@@ -278,17 +304,14 @@ class HistoricalReplayReportStore:
             )
         ):
             raise ValueError("解释覆盖率与逐 cutoff 因果链证据不一致")
-        if any(
-            metrics[name].get("status") != (
-                "MEASURED"
-                if (
-                    (name == "future_leakage_count" and timestamp_check_count > 0)
-                    or (name == "explanation_coverage" and cutoff_count > 0)
-                ) else "NOT_EVALUABLE"
-            )
-            for name in REPLAY_EFFECT_METRICS
-        ):
-            raise ValueError("缺少真实标签或基线的效果指标不得标记为已量化")
+        expected_metrics = compute_effect_metrics(
+            stocks, cutoff_count=cutoff_count, leakage_count=leakage_count,
+            timestamp_check_count=timestamp_check_count,
+            regression_cases=report["regression_cases"],
+            outcome_as_of=manifest.get("outcome_as_of"),
+        )
+        if metrics != expected_metrics:
+            raise ValueError("回放效果指标与逐 cutoff 标签/决策证据不一致")
         return report
 
     def save(self, report: Mapping[str, Any]) -> Dict[str, Any]:
@@ -325,6 +348,8 @@ class HistoricalReplayReportStore:
                 for name, metric in clean["effect_metrics"].items()
             },
             "config_hash": run_manifest.get("config_hash", ""),
+            "effect_metric_contract_version": run_manifest.get("effect_metric_contract_version", ""),
+            "effect_metric_contract_hash": run_manifest.get("effect_metric_contract_hash", ""),
             "saved_at": datetime.now().astimezone().isoformat(timespec="seconds"),
         }
         manifest["index_hash"] = hashlib.sha256(_canonical_json(manifest)).hexdigest()
@@ -349,6 +374,10 @@ class HistoricalReplayReportStore:
         return report
 
     def summary(self) -> Dict[str, Any]:
+        from tools.ipo_replay_effect_metrics import (
+            EFFECT_METRIC_CONTRACT_HASH, EFFECT_METRIC_CONTRACT_VERSION,
+        )
+
         if not self.index_path.is_file():
             return {"status": "MISSING", "replay_report_hash": ""}
         try:
@@ -364,6 +393,7 @@ class HistoricalReplayReportStore:
                 "schema_version", "replay_report_hash", "artifact_file",
                 "input_contract_status", "stock_count", "cutoff_count",
                 "unready_cutoff_count", "effect_metrics", "config_hash",
+                "effect_metric_contract_version", "effect_metric_contract_hash",
                 "saved_at", "index_hash",
             }
         ):
@@ -391,6 +421,8 @@ class HistoricalReplayReportStore:
             not _is_sha256(report_hash)
             or artifact_name != f"{report_hash}.json"
             or not _is_sha256(manifest.get("config_hash"))
+            or manifest.get("effect_metric_contract_version") != EFFECT_METRIC_CONTRACT_VERSION
+            or manifest.get("effect_metric_contract_hash") != EFFECT_METRIC_CONTRACT_HASH
             or manifest.get("input_contract_status") not in {"READY", "UNREADY"}
             or any(not isinstance(value, int) or isinstance(value, bool) or value < 0 for value in counts)
             or not isinstance(metrics, Mapping)
@@ -414,14 +446,6 @@ class HistoricalReplayReportStore:
                     )
                 )
                 for metric in metrics.values()
-            )
-            or any(
-                metrics[name].get("status") != (
-                    "MEASURED"
-                    if name in {"future_leakage_count", "explanation_coverage"} and counts[1] > 0
-                    else "NOT_EVALUABLE"
-                )
-                for name in REPLAY_EFFECT_METRICS
             )
         ):
             return {"status": "UNAVAILABLE", "replay_report_hash": ""}
@@ -608,7 +632,10 @@ class TimeSandbox:
                 timestamp = pd.Timestamp(candidates[0])
             elif timestamp.utcoffset() is None:
                 raise ValueError("时间戳没有有效 UTC 偏移")
-            return timestamp.tz_convert(self.exchange_tz)
+            # Passing ZoneInfo directly to older pandas releases on Windows can
+            # trigger repeated ignored conversion exceptions. The IANA key keeps
+            # DST behavior while using pandas' stable string timezone path.
+            return timestamp.tz_convert(self.exchange_tz.key)
         except Exception as exc:
             raise ValueError(f"无效或时区不兼容的回放时间戳: {value!r}") from exc
 
@@ -638,10 +665,16 @@ class TimeSandbox:
         normalized = frame.copy()
         keep = [True] * len(normalized)
         for time_col in availability_time_keys:
-            timestamps = [self.normalize_time(value) for value in normalized[time_col].tolist()]
+            timestamps = []
+            for value in normalized[time_col].tolist():
+                try:
+                    missing = value is None or bool(pd.isna(value))
+                except (TypeError, ValueError):
+                    missing = False
+                timestamps.append(None if missing else self.normalize_time(value))
             normalized[time_col] = timestamps
             keep = [
-                is_kept and timestamp <= self.cutoff_dt
+                is_kept and (timestamp is None or timestamp <= self.cutoff_dt)
                 for is_kept, timestamp in zip(keep, timestamps)
             ]
         filtered = normalized.loc[keep].copy()
@@ -672,11 +705,11 @@ class IPOReplayInputContract:
             source = manifest_sources.get(field_contract.source_id)
             if source is None or source.access != "MODEL_INPUT":
                 raise ValueError(f"回放 manifest 未声明模型输入来源: {field_id}")
-            if (
-                source.source_version != field_contract.source_version
-                or source.source_timezone != field_contract.source_timezone
-            ):
-                raise ValueError(f"字段契约与回放来源版本/时区不一致: {field_id}")
+            # Manifest versions pin connector artifacts; each field's exact
+            # schema/source version is pinned by the signed data contract and
+            # checked against the row during replay.
+            if source.source_timezone != field_contract.source_timezone:
+                raise ValueError(f"字段契约与回放来源时区不一致: {field_id}")
             missing_time_keys = {
                 field_contract.as_of_key, field_contract.available_at_key,
             } - set(source.availability_time_keys)
@@ -688,6 +721,7 @@ class IPOReplayInputContract:
         self.config_snapshot = decision_config_snapshot
         self.data_contract = data_contract
         self.required_fields = tuple(IPO_REQUIRED_FIELDS)
+        self.fields_by_source: Dict[str, Tuple[str, ...]] = {}
         self.availability_keys_by_source: Dict[str, Tuple[str, ...]] = {}
         for field_id in self.required_fields:
             field_contract = data_contract.fields[field_id]
@@ -695,6 +729,9 @@ class IPOReplayInputContract:
             keys.add(field_contract.as_of_key)
             keys.add(field_contract.available_at_key)
             self.availability_keys_by_source[field_contract.source_id] = tuple(sorted(keys))
+            source_fields = set(self.fields_by_source.get(field_contract.source_id, ()))
+            source_fields.add(field_id)
+            self.fields_by_source[field_contract.source_id] = tuple(sorted(source_fields))
 
     @staticmethod
     def _native_value(value: Any) -> Any:
@@ -723,11 +760,22 @@ class IPOReplayInputContract:
         for field_id in self.required_fields:
             contract = self.data_contract.fields[field_id]
             frame = source_frames.get(contract.source_id)
+            field_frame = frame
+            if isinstance(frame, pd.DataFrame) and "field_id" in frame.columns:
+                field_frame = frame.loc[frame["field_id"] == field_id]
+            elif len(self.fields_by_source.get(contract.source_id, ())) > 1:
+                # A wide row with a shared `value` column cannot distinguish
+                # several contract fields from the same endpoint.
+                field_frame = None
             required_columns = {
                 contract.value_key, contract.as_of_key,
                 contract.available_at_key, "status",
             }
-            if not isinstance(frame, pd.DataFrame) or frame.empty or not required_columns.issubset(frame.columns):
+            if (
+                not isinstance(field_frame, pd.DataFrame)
+                or field_frame.empty
+                or not required_columns.issubset(field_frame.columns)
+            ):
                 observations[field_id] = {
                     "status": "UNREADY",
                     "source_id": contract.source_id,
@@ -741,11 +789,37 @@ class IPOReplayInputContract:
                     "as_of_time": None, "available_at": None,
                 }
                 continue
-            ordered = frame.sort_values(contract.available_at_key, kind="stable")
+            available_rows = field_frame.loc[
+                field_frame[contract.available_at_key].notna()
+            ]
+            if available_rows.empty:
+                observations[field_id] = {
+                    "status": "UNREADY",
+                    "source_id": contract.source_id,
+                    "source_version": contract.source_version,
+                }
+                snapshot_features[field_id] = {
+                    "status": "UNREADY", "value": None,
+                    "source_id": contract.source_id,
+                    "source_version": contract.source_version,
+                    "source_timezone": contract.source_timezone,
+                    "as_of_time": None, "available_at": None,
+                }
+                continue
+            ordered = available_rows.sort_values(contract.available_at_key, kind="stable")
             row = ordered.iloc[-1]
             status = self._native_value(row.get("status"))
             if not isinstance(status, str):
                 status = "UNREADY"
+            for metadata_key, expected in (
+                ("source_id", contract.source_id),
+                ("source_version", contract.source_version),
+                ("source_timezone", contract.source_timezone),
+            ):
+                if metadata_key in ordered.columns:
+                    actual = self._native_value(row.get(metadata_key))
+                    if actual is not None and actual != expected:
+                        status = "UNREADY"
             source_time = self._native_value(row.get(contract.as_of_key))
             available_at = self._native_value(row.get(contract.available_at_key))
             source_sandbox = TimeSandbox(cutoff, contract.source_timezone)
@@ -767,6 +841,11 @@ class IPOReplayInputContract:
                 contract.as_of_key: source_time,
                 contract.available_at_key: available_at,
             }
+            for metadata_key in ("sample_count", "cohort_id"):
+                if metadata_key in ordered.columns:
+                    observations[field_id][metadata_key] = self._native_value(
+                        row.get(metadata_key)
+                    )
             snapshot_features[field_id] = {
                 "status": status,
                 "value": self._native_value(row.get(contract.value_key)),
@@ -776,6 +855,11 @@ class IPOReplayInputContract:
                 "as_of_time": source_time.isoformat() if source_time is not None else None,
                 "available_at": available_at.isoformat() if available_at is not None else None,
             }
+            for metadata_key in ("sample_count", "cohort_id"):
+                if metadata_key in ordered.columns:
+                    snapshot_features[field_id][metadata_key] = self._native_value(
+                        row.get(metadata_key)
+                    )
 
         ready, checks = self.data_contract.validate_observations(
             observations, cutoff.to_pydatetime(),
@@ -822,6 +906,133 @@ class IPOReplayInputContract:
         return result
 
 
+def build_ipo_replay_source_frames(
+    history_rows: Sequence[Mapping[str, Any]],
+    decision_config_snapshot: Any,
+    ticker: str,
+) -> Dict[str, pd.DataFrame]:
+    """Convert field-level source history to lossless per-source replay frames."""
+    from ats.strategy.ipo_data_contracts import (
+        IPO_REQUIRED_FIELDS,
+        IPODecisionConfigSnapshot,
+    )
+
+    if (
+        not isinstance(decision_config_snapshot, IPODecisionConfigSnapshot)
+        or not decision_config_snapshot.verify_integrity()
+        or not isinstance(ticker, str) or len(ticker) != 6 or not ticker.isdigit()
+        or not isinstance(history_rows, Sequence)
+    ):
+        raise ValueError("回放观测、代码或已签名 IPO 配置无效")
+    fields_by_source: Dict[str, List[str]] = {}
+    for field_id in IPO_REQUIRED_FIELDS:
+        field_contract = decision_config_snapshot.data_contract.fields[field_id]
+        fields_by_source.setdefault(field_contract.source_id, []).append(field_id)
+
+    observations_by_field: Dict[str, Dict[str, List[Mapping[str, Any]]]] = {}
+    for row in history_rows:
+        if not isinstance(row, Mapping):
+            continue
+        field_id = row.get("field_id")
+        if field_id not in decision_config_snapshot.data_contract.fields:
+            continue
+        source_ticker = row.get("ticker")
+        if source_ticker not in {ticker, "000000"}:
+            continue
+        contract = decision_config_snapshot.data_contract.fields[field_id]
+        if (
+            row.get("status") != "OBSERVED"
+            or row.get("source_id") != contract.source_id
+            or row.get("source_version") != contract.source_version
+            or row.get("source_timezone") != contract.source_timezone
+            or row.get("configuration_hash") != decision_config_snapshot.config_hash
+            or row.get("data_contract_hash") != decision_config_snapshot.data_contract.config_hash
+            or not _is_sha256(row.get("observation_hash"))
+        ):
+            continue
+        observations_by_field.setdefault(field_id, {}).setdefault(source_ticker, []).append(row)
+
+    frames: Dict[str, pd.DataFrame] = {}
+    for source_id, field_ids in fields_by_source.items():
+        source_rows: List[Dict[str, Any]] = []
+        columns = {
+            "field_id", "status", "observation_hash", "source_id",
+            "source_version", "source_timezone", "sample_count", "cohort_id",
+        }
+        for field_id in field_ids:
+            field_contract = decision_config_snapshot.data_contract.fields[field_id]
+            columns.update({
+                field_contract.value_key,
+                field_contract.as_of_key,
+                field_contract.available_at_key,
+            })
+            candidates_by_ticker = observations_by_field.get(field_id, {})
+            # Match live Gate semantics: a ticker-specific observation overrides
+            # the global row whenever one exists for that field.
+            selected = candidates_by_ticker.get(ticker) or candidates_by_ticker.get("000000", [])
+            for observation in selected:
+                row = {
+                    "field_id": field_id,
+                    "status": "OBSERVED",
+                    "observation_hash": observation["observation_hash"],
+                    "source_id": source_id,
+                    "source_version": observation["source_version"],
+                    "source_timezone": observation["source_timezone"],
+                    "sample_count": observation.get("sample_count"),
+                    "cohort_id": observation.get("cohort_id"),
+                    field_contract.value_key: observation.get("value"),
+                    field_contract.as_of_key: observation.get("as_of_time"),
+                    field_contract.available_at_key: observation.get("available_at"),
+                }
+                source_rows.append(row)
+        # Mixed field types (for example integer `halt_count` beside numeric
+        # features that share the same `value` key) must not be coerced to float.
+        frames[source_id] = pd.DataFrame(
+            source_rows, columns=sorted(columns), dtype=object,
+        )
+    return frames
+
+
+def load_ipo_replay_observation_frames(
+    root: str | os.PathLike[str],
+    ticker: str,
+    decision_config_snapshot: Any,
+    start_time: Optional[Any] = None,
+    end_time: Optional[Any] = None,
+) -> Dict[str, pd.DataFrame]:
+    """Read hash-verified local source history and prepare cutoff replay frames."""
+    from ats.strategy.ipo_source_orchestrator import load_observation_history
+
+    if not isinstance(ticker, str) or len(ticker) != 6 or not ticker.isdigit():
+        raise ValueError("回放代码必须是六位数字")
+    if (
+        decision_config_snapshot is None
+        or not callable(getattr(decision_config_snapshot, "verify_integrity", None))
+        or not decision_config_snapshot.verify_integrity()
+    ):
+        raise ValueError("回放观测读取需要通过完整性校验的 IPO 配置快照")
+    history_start = start_time
+    if start_time is not None:
+        start_dt = pd.Timestamp(start_time)
+        if pd.isna(start_dt) or start_dt.tzinfo is None or start_dt.utcoffset() is None:
+            raise ValueError("回放起始时点必须包含 UTC 偏移")
+        max_age_seconds = max(
+            float(field.max_age_seconds)
+            for field in decision_config_snapshot.data_contract.fields.values()
+        )
+        history_start = (
+            start_dt.tz_convert("UTC") - pd.Timedelta(seconds=max_age_seconds)
+        ).to_pydatetime()
+    rows = load_observation_history(
+        root, ticker, decision_config_snapshot, history_start, end_time,
+    )
+    if ticker != "000000":
+        rows.extend(load_observation_history(
+            root, "000000", decision_config_snapshot, history_start, end_time,
+        ))
+    return build_ipo_replay_source_frames(rows, decision_config_snapshot, ticker)
+
+
 class HistoricalCutoffReplayEngine:
     """Replay each bar cutoff using a pinned, versioned source timezone."""
 
@@ -846,6 +1057,21 @@ class HistoricalCutoffReplayEngine:
         self.evaluate_as_of = evaluate_as_of
         self.build_summary = build_summary
         self.source_manifest = ReplaySourceManifest.from_mapping(source_manifest)
+        from tools.ipo_replay_effect_metrics import (
+            EFFECT_METRIC_CONTRACT_HASH, EFFECT_METRIC_CONTRACT_VERSION,
+        )
+
+        self.effect_metric_contract_hash = EFFECT_METRIC_CONTRACT_HASH
+        self.effect_metric_contract_version = EFFECT_METRIC_CONTRACT_VERSION
+        outcome_sources = [
+            source for source in self.source_manifest.sources
+            if source.source_role == "outcome"
+        ]
+        if len(outcome_sources) != 1:
+            raise ValueError("历史回放必须且只能登记一个 OUTCOME_ONLY 标签源")
+        self.outcome_source = outcome_sources[0]
+        if "published_at" not in self.outcome_source.availability_time_keys:
+            raise ValueError("OUTCOME_ONLY 来源 manifest 必须冻结 published_at 可用时点")
         self.source_id = source_id
         declared_source = self.source_manifest.source(source_id)
         if declared_source.source_role != "bars" or declared_source.access != "MODEL_INPUT":
@@ -856,6 +1082,10 @@ class HistoricalCutoffReplayEngine:
         self.source_timezone = source_timezone
         self.start_date = start_date
         self.replay_config = dict(replay_config or {})
+        regression_cases = self.replay_config.get("regression_cases", [])
+        if not isinstance(regression_cases, list):
+            raise ValueError("replay_config.regression_cases 必须是版本化清单列表")
+        self.regression_cases = [dict(item) for item in regression_cases]
         if decision_config_snapshot is None:
             raise ValueError("R9 全输入回放缺少版本化 IPO 决策配置/41 项数据源契约")
         self.input_contract = IPOReplayInputContract(
@@ -872,6 +1102,8 @@ class HistoricalCutoffReplayEngine:
                 "exchange_timezone": DEFAULT_EXCHANGE_TIMEZONE,
                 "decision_config_hash": self.decision_config_hash,
                 "data_contract_hash": self.input_contract.data_contract.config_hash,
+                "effect_metric_contract_version": self.effect_metric_contract_version,
+                "effect_metric_contract_hash": self.effect_metric_contract_hash,
             },
             self.source_manifest,
         )
@@ -888,6 +1120,9 @@ class HistoricalCutoffReplayEngine:
             "data_contract_hash": self.input_contract.data_contract.config_hash,
             "input_contract_status": "ENFORCED_ALL_41_FIELDS",
             "config_hash": self.config_hash,
+            "effect_metric_contract_version": self.effect_metric_contract_version,
+            "effect_metric_contract_hash": self.effect_metric_contract_hash,
+            "outcome_as_of": self.replay_config.get("outcome_as_of"),
         }
 
     @staticmethod
@@ -895,6 +1130,99 @@ class HistoricalCutoffReplayEngine:
         if isinstance(history, Mapping):
             return history.get(key)
         return getattr(history, key, None)
+
+    def _outcome_evidence_by_cutoff(
+        self, history: Any, code: str, cutoffs: Sequence[str],
+    ) -> Dict[str, Dict[str, Any]]:
+        """Load mature labels after decisions; this frame never enters evaluate_as_of."""
+        raw_outcomes = self._history_value(history, "outcomes")
+        if raw_outcomes is None:
+            return {}
+        if not isinstance(raw_outcomes, Mapping):
+            raise ValueError("OUTCOME_ONLY 数据必须按 source_id 映射到独立 DataFrame")
+        frame = raw_outcomes.get(self.outcome_source.source_id)
+        if frame is None:
+            return {}
+        if not isinstance(frame, pd.DataFrame):
+            raise ValueError("OUTCOME_ONLY 标签源不是 DataFrame")
+        if frame.empty:
+            return {}
+        required_columns = {
+            "code", "cutoff_time", "matured_at", "published_at", "evidence_id",
+            "review_decision", "reviewed_by", "reviewed_at", "review_evidence_id",
+            "review_record_hash", "labels",
+        }
+        if not required_columns.issubset(frame.columns):
+            raise ValueError("OUTCOME_ONLY 标签源缺少代码、cutoff、成熟/发布时点或证据 ID")
+        outcome_as_of = self.replay_config.get("outcome_as_of")
+        try:
+            as_of = pd.Timestamp(outcome_as_of)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError("存在结果标签时 replay_config.outcome_as_of 必须是时区感知时间") from exc
+        if as_of.tzinfo is None:
+            raise ValueError("outcome_as_of 必须包含显式时区")
+        source_timezone = self.outcome_source.source_timezone
+        as_of = as_of.tz_convert(source_timezone)
+        known_outcomes = TimeSandbox(as_of, source_timezone).filter_source_frame(
+            frame, self.outcome_source.availability_time_keys,
+        )
+
+        def utc_key(value: Any) -> str:
+            stamp = pd.Timestamp(value)
+            stamp = stamp.tz_localize(source_timezone) if stamp.tzinfo is None else stamp.tz_convert(source_timezone)
+            return stamp.tz_convert("UTC").isoformat()
+
+        cutoffs_by_key = {utc_key(value): value for value in cutoffs}
+        result: Dict[str, Dict[str, Any]] = {}
+        from tools.ipo_replay_effect_metrics import make_outcome_evidence
+
+        for row in known_outcomes.to_dict(orient="records"):
+            if str(row.get("code", "")) != code:
+                continue
+            cutoff_key = utc_key(row.get("cutoff_time"))
+            cutoff = cutoffs_by_key.get(cutoff_key)
+            if cutoff is None:
+                continue
+            cutoff_stamp = pd.Timestamp(cutoff).tz_convert(source_timezone)
+            matured_at = pd.Timestamp(row.get("matured_at"))
+            published_at = pd.Timestamp(row.get("published_at"))
+            matured_at = matured_at.tz_localize(source_timezone) if matured_at.tzinfo is None else matured_at.tz_convert(source_timezone)
+            published_at = published_at.tz_localize(source_timezone) if published_at.tzinfo is None else published_at.tz_convert(source_timezone)
+            if matured_at < cutoff_stamp or published_at < matured_at or matured_at > as_of:
+                raise ValueError("OUTCOME_ONLY 标签在 cutoff 前未成熟或超出 outcome_as_of")
+            labels = row.get("labels")
+            if not isinstance(labels, Mapping):
+                raise ValueError("OUTCOME_ONLY labels 必须为映射")
+            clean_labels = {}
+            for name, value in labels.items():
+                if value is None:
+                    continue
+                try:
+                    if bool(pd.isna(value)):
+                        continue
+                except (TypeError, ValueError):
+                    pass
+                native = getattr(value, "item", None)
+                clean_labels[name] = native() if callable(native) else value
+            if cutoff in result:
+                raise ValueError("OUTCOME_ONLY 标签源对同一代码/cutoff 存在重复成熟记录")
+            result[cutoff] = make_outcome_evidence(
+                code=code,
+                source_id=self.outcome_source.source_id,
+                source_version=self.outcome_source.source_version,
+                source_timezone=source_timezone,
+                evidence_id=str(row.get("evidence_id", "")),
+                cutoff_time=cutoff,
+                matured_at=matured_at.isoformat(),
+                published_at=published_at.isoformat(),
+                review_decision=str(row.get("review_decision", "")),
+                reviewed_by=str(row.get("reviewed_by", "")),
+                reviewed_at=pd.Timestamp(row.get("reviewed_at")).isoformat(),
+                review_evidence_id=str(row.get("review_evidence_id", "")),
+                review_record_hash=str(row.get("review_record_hash", "")),
+                labels=clean_labels,
+            )
+        return result
 
     def _replay_stock_with_evidence(
         self, code: str,
@@ -926,7 +1254,15 @@ class HistoricalCutoffReplayEngine:
 
         observations: List[Mapping[str, Any]] = []
         evidence_observations: List[Dict[str, Any]] = []
-        for cutoff in bars["datetime"].drop_duplicates().sort_values():
+        ordered_cutoffs = list(bars["datetime"].drop_duplicates().sort_values())
+        normalized_cutoffs = [
+            TimeSandbox(cutoff, self.source_timezone).cutoff_dt.isoformat()
+            for cutoff in ordered_cutoffs
+        ]
+        outcomes_by_cutoff = self._outcome_evidence_by_cutoff(
+            history, code, normalized_cutoffs,
+        )
+        for cutoff in ordered_cutoffs:
             sandbox = TimeSandbox(cutoff, self.source_timezone)
             known_bars = sandbox.filter_bars(bars)
             known_inputs = {}
@@ -966,6 +1302,9 @@ class HistoricalCutoffReplayEngine:
             observations.append(observation)
             evidence_observation = dict(observation)
             evidence_observation["as_of_time"] = observed_at.isoformat()
+            outcome_evidence = outcomes_by_cutoff.get(sandbox.cutoff_dt.isoformat())
+            if outcome_evidence is not None:
+                evidence_observation["outcome_evidence"] = outcome_evidence
             evidence_observations.append(_json_safe(evidence_observation))
 
         result = self.build_summary(metadata, observations)
@@ -1016,7 +1355,11 @@ class HistoricalCutoffReplayEngine:
                 "READY" if total_cutoffs > 0 and unready_cutoffs == 0 else "UNREADY"
             ),
             "stocks": stocks,
-            "effect_metrics": self._effect_metrics(stocks, total_cutoffs),
+            "regression_cases": self.regression_cases,
+            "effect_metrics": self._effect_metrics(
+                stocks, total_cutoffs, regression_cases=self.regression_cases,
+                outcome_as_of=self.replay_config.get("outcome_as_of"),
+            ),
         }
         report = _json_safe(report)
         serialized = json.dumps(
@@ -1029,61 +1372,26 @@ class HistoricalCutoffReplayEngine:
         return report
 
     @staticmethod
-    def _effect_metrics(stocks: List[Mapping[str, Any]], cutoff_count: int) -> Dict[str, Any]:
+    def _effect_metrics(
+        stocks: List[Mapping[str, Any]], cutoff_count: int,
+        *, regression_cases: Sequence[Mapping[str, Any]] = (),
+        outcome_as_of: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        from tools.ipo_replay_effect_metrics import compute_effect_metrics
+
         observations = [
-            item
-            for stock in stocks
+            item for stock in stocks
             for item in stock.get("cutoff_observations", [])
             if isinstance(item, Mapping)
         ]
-        explanation_count = sum(
-            1 for item in observations
-            if isinstance(item.get("causal_chain"), list)
-            and bool(item["causal_chain"])
-            and all(isinstance(reason, str) and reason.strip() for reason in item["causal_chain"])
-        )
-        not_evaluable_reasons = {
-            "regime_transition_accuracy": "缺少独立的下一阶段 Regime 真值标签",
-            "high_carry_vs_low_carry_spread": "缺少经契约定义的 Carry 分组收益标签",
-            "bad_t1_filter_rate": "缺少已验收的 T+1 坏样本定义与真值标签",
-            "continuation_capture_rate": "缺少独立延续行情真值标签",
-            "false_entry_rate": "缺少冻结的误入定义、成熟结果标签及统计窗口",
-            "lrrm_transition_stability": "缺少 LRRM 转换真值与稳定性统计定义",
-            "anchor_failure_precision": "缺少锚点失效真值标签及精确率定义",
-            "pseudo_strength_filter_rate": "缺少伪强势样本真值标签",
-            "nonlinear_false_entry_reduction": "缺少线性基线与同批成熟结果标签",
-            "exhaustion_block_precision": "缺少衰竭真值标签与阻断结果定义",
-            "regression_case_pass_rate": "未接入版本化回归案例集及期望结果",
-        }
-        metrics = {
-            name: {
-                "status": "NOT_EVALUABLE", "value": None,
-                "numerator": None, "denominator": None,
-                "reason": not_evaluable_reasons[name],
-            }
-            for name in not_evaluable_reasons
-        }
-        denominator = int(cutoff_count)
         timestamp_check_count = len(observations) + 82 * sum(
             1 for item in observations
             if isinstance(item.get("input_contract"), Mapping)
             and item["input_contract"].get("status") == "READY"
         )
-        metrics["future_leakage_count"] = {
-            "status": "MEASURED" if timestamp_check_count > 0 else "NOT_EVALUABLE",
-            "value": 0 if timestamp_check_count > 0 else None,
-            "numerator": 0 if timestamp_check_count > 0 else None,
-            "denominator": timestamp_check_count if timestamp_check_count > 0 else None,
-            "reason": (
-                "逐 cutoff 检查 evaluator 时点及 READY 输入快照中全部来源时点；越界会中止报告生成"
-                if timestamp_check_count > 0 else "回放没有可核验的 cutoff 时点"
-            ),
-        }
-        metrics["explanation_coverage"] = {
-            "status": "MEASURED" if denominator > 0 else "NOT_EVALUABLE",
-            "value": explanation_count / denominator if denominator > 0 else None,
-            "numerator": explanation_count if denominator > 0 else None,
-            "denominator": denominator if denominator > 0 else None,
-            "reason": "逐 cutoff 因果链非空且每项均为有效文本的比例",
-        }
-        return metrics
+        return compute_effect_metrics(
+            stocks, cutoff_count=cutoff_count, leakage_count=0,
+            timestamp_check_count=timestamp_check_count,
+            regression_cases=regression_cases,
+            outcome_as_of=outcome_as_of,
+        )

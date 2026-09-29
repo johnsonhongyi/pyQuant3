@@ -3,7 +3,11 @@
 from dataclasses import dataclass
 from typing import List, Dict, Any, Optional
 import logging
-from market_sentiment_fsm import MarketSentimentFSM, BiddingSnapshot, SentimentState
+from datetime import datetime, timedelta
+import market_pulse_db
+from market_sentiment_fsm import (
+    MarketSentimentFSM, BiddingSnapshot, SentimentState, normalize_sector_name,
+)
 
 logger = logging.getLogger("AuctionDecisionEngine")
 
@@ -25,7 +29,33 @@ class AuctionDecisionEngine:
     def __init__(self, fsm: MarketSentimentFSM):
         self.fsm = fsm
         self.last_state: SentimentState = SentimentState.NEUTRAL
+        self.last_published_state: SentimentState = SentimentState.COOLDOWN
         self.last_signals: List[AuctionSignal] = []
+
+    @staticmethod
+    def _is_immediately_previous_session(snapshot_date: str, session_date: str) -> bool:
+        try:
+            snapshot_day = datetime.strptime(snapshot_date, "%Y-%m-%d").date()
+            current_day = datetime.strptime(session_date, "%Y-%m-%d").date()
+        except (TypeError, ValueError):
+            return False
+        if snapshot_day >= current_day:
+            return False
+        try:
+            from JohnsonUtil import commonTips as cct
+
+            trade_days = cct.get_trade_days(snapshot_date, session_date)
+            prior_sessions = [
+                str(day)[:10] for day in (trade_days or [])
+                if snapshot_date < str(day)[:10] <= session_date
+            ]
+            if prior_sessions:
+                return prior_sessions == [session_date]
+        except Exception:
+            logger.exception("[DecisionEngine] Prior-session calendar lookup failed")
+        # Calendar caches may be unavailable during an offline replay; a
+        # consecutive calendar day is still unambiguous.
+        return current_day - snapshot_day == timedelta(days=1)
 
     def generate_signals(self, bidding: BiddingSnapshot) -> List[AuctionSignal]:
         """
@@ -36,17 +66,39 @@ class AuctionDecisionEngine:
             self.last_state = SentimentState.NEUTRAL
             logger.error("[DecisionEngine] Pulse database is not ready; no auction signals generated")
             return []
+
+        # Reuse an already verified immediately-prior session snapshot. If the
+        # monitor crossed one or more sessions while open, reload from the DB.
+        cached = self.fsm.yesterday_snapshot
+        if cached is None or not self._is_immediately_previous_session(
+            cached.date, bidding.date,
+        ):
+            self.fsm.load_latest_snapshot(bidding.date)
         
         # 1. 触发 FSM 状态更新
         state = self.fsm.classify(bidding)
         self.last_state = state
         
         explain = self.fsm.explain_state()
-        logger.info(f"[DecisionEngine] Pre-market Sentiment: {state.value} | matched: {explain.get('matched_rules')}")
+        published_state = state.value
+        if "NO_YESTERDAY_SNAPSHOT" in explain.get("matched_rules", []):
+            published_state = SentimentState.COOLDOWN.value
+        self.last_published_state = SentimentState(published_state)
+        published = market_pulse_db.save_current_sentiment_state(
+            bidding.date, published_state,
+            reason=",".join(explain.get("matched_rules", [])),
+        )
+        if not published:
+            self.last_published_state = SentimentState.COOLDOWN
+            logger.error(
+                "[DecisionEngine] Sentiment state publish failed; no auction candidates will be emitted."
+            )
+            return []
+        logger.info(f"[DecisionEngine] Pre-market Sentiment: {published_state} | matched: {explain.get('matched_rules')}")
         
         # 2. 状态硬拦截：如果处于 PANIC 或 COOLDOWN，强行短路保护，不产生任何开仓信号
-        if state in (SentimentState.PANIC, SentimentState.COOLDOWN):
-            logger.info(f"[DecisionEngine] Market is in {state.value}. Risk control active: 0 pre-market signals generated.")
+        if self.last_published_state in (SentimentState.PANIC, SentimentState.COOLDOWN):
+            logger.info(f"[DecisionEngine] Published market state is {self.last_published_state.value}. Risk control active: 0 pre-market signals generated.")
             return []
             
         # 3. 提取竞价股票并排序 (按得分)
@@ -108,7 +160,9 @@ class AuctionDecisionEngine:
                     seen_codes.add(code)
         
         # 活跃板块（持续性依据）：仅从当前被资金持续认可的活跃板块中挖掘
-        current_active_sector_names = {s.name for s in bidding.active_sectors}
+        current_active_sector_names = {
+            normalize_sector_name(s.name) for s in bidding.active_sectors
+        }
         
         # 4. 根据不同情绪状态运行不同决策子模块
         if state == SentimentState.REVERSAL:
@@ -133,7 +187,7 @@ class AuctionDecisionEngine:
                 is_target_sector = False
                 matched_sector = ""
                 for sec_name in yesterday_worst:
-                    if sec_name in sector:
+                    if normalize_sector_name(sec_name) == normalize_sector_name(sector):
                         is_target_sector = True
                         matched_sector = sec_name
                         break
@@ -142,7 +196,7 @@ class AuctionDecisionEngine:
                     # 反转个股条件：开盘抢筹幅度和强度达标
                     # 昨跌 <= -3%, 今日高开 0.0 ~ 4.0%, dff > 0 或 放量
                     if yesterday_pct <= -3.0 and 0.0 < pct < 4.0 and score >= 75.0 and (dff > 0 or vol_ratio >= 1.5):
-                        if matched_sector not in current_active_sector_names:
+                        if normalize_sector_name(matched_sector) not in current_active_sector_names:
                             continue # 过滤缺乏持续性的板块
                             
                         meta = {
@@ -185,14 +239,14 @@ class AuctionDecisionEngine:
                 # 寻找属于修复板块且得分强劲的个股
                 is_repaired_sector = False
                 for r_sec in repaired_sectors:
-                    if r_sec in sector:
+                    if normalize_sector_name(r_sec) == normalize_sector_name(sector):
                         is_repaired_sector = True
                         break
                         
                 if is_repaired_sector:
                     # 个股必须开盘高于昨日收盘价且高开合理 (0.5% 到 5.0%)，得分 > 80.0
                     if 0.5 <= pct <= 5.0 and score >= 80.0:
-                        if sector not in current_active_sector_names:
+                        if normalize_sector_name(sector) not in current_active_sector_names:
                             continue
                             
                         meta = {
@@ -239,13 +293,13 @@ class AuctionDecisionEngine:
                     
                 is_top_sector = False
                 for sec_name in yesterday_top:
-                    if sec_name in sector:
+                    if normalize_sector_name(sec_name) == normalize_sector_name(sector):
                         is_top_sector = True
                         break
                         
                 if is_top_sector and (yesterday_pct >= 3.0 or is_limit_up):
                     if -1.0 < pct < 5.0 and score >= 85.0:  # 强延续且未大幅低开，也未过度高开
-                        if sector not in current_active_sector_names:
+                        if normalize_sector_name(sector) not in current_active_sector_names:
                             continue
                             
                         meta = {

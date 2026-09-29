@@ -152,7 +152,8 @@ def encode_worker_response(response: Any, request: Mapping[str, Any]) -> str:
     )
     if status == "OK":
         if clean["provider_id"] not in {
-            "antigravity_cli", "codex_cli", "antigravity_sdk", "ollama_http", "local_litert",
+            "antigravity_cli", "codex_cli", "antigravity_sdk", "ollama_http",
+            "local_litert", "offline_simulation",
         }:
             raise WorkerProtocolError("worker response Provider is invalid")
         if clean["error_code"] not in ("", None):

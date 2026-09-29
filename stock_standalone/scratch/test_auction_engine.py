@@ -5,7 +5,7 @@ import os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 from market_sentiment_fsm import MarketSentimentFSM, SectorRecord, MarketSnapshot, BiddingSnapshot, SentimentState
 from auction_decision_engine import AuctionDecisionEngine, AuctionSignal, map_auction_signal_to_dict
 
@@ -83,7 +83,8 @@ class TestAuctionEngine(unittest.TestCase):
         self.assertEqual(state, SentimentState.REVERSAL)
         
         # Test signal generation
-        signals = self.engine.generate_signals(bidding)
+        with patch("market_pulse_db.save_current_sentiment_state", return_value=True):
+            signals = self.engine.generate_signals(bidding)
         self.assertTrue(len(signals) > 0)
         
         for sig in signals:
@@ -123,7 +124,8 @@ class TestAuctionEngine(unittest.TestCase):
         )
         
         # Test signal generation
-        signals = self.engine.generate_signals(bidding)
+        with patch("market_pulse_db.save_current_sentiment_state", return_value=True):
+            signals = self.engine.generate_signals(bidding)
         self.assertTrue(len(signals) > 0)
         self.assertEqual(signals[0].signal_type, "竞价爆量买入")
         print(f"Bidding breakout test passed with signal type: {signals[0].signal_type}")

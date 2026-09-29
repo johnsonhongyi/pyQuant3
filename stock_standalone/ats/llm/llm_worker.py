@@ -85,26 +85,14 @@ def _worker_entry(
             try:
                 request = decode_worker_request(message)
                 generate_request = getattr(backend, "generate_request", None)
-                if callable(generate_request):
-                    response = generate_request(
-                        request, payload_schema(
-                            request["agent_type"], evidence_ids=request["evidence_ids"],
-                        ),
-                        timeout_seconds=request_timeout_seconds,
-                    )
-                else:
-                    import json
-
-                    prompt = request["prompt"] + "\n\n已验证上下文(JSON)：\n" + json.dumps(
-                        request["context"], ensure_ascii=False, sort_keys=True,
-                        separators=(",", ":"), allow_nan=False,
-                    )
-                    response = backend.generate(
-                        prompt, payload_schema(
-                            request["agent_type"], evidence_ids=request["evidence_ids"],
-                        ),
-                        timeout_seconds=request_timeout_seconds,
-                    )
+                if not callable(generate_request):
+                    raise TypeError("backend must implement generate_request")
+                response = generate_request(
+                    request, payload_schema(
+                        request["agent_type"], evidence_ids=request["evidence_ids"],
+                    ),
+                    timeout_seconds=request_timeout_seconds,
+                )
                 if not isinstance(response, Mapping) or response.get("status") != "OK":
                     backend_error = (
                         response.get("error_code") if isinstance(response, Mapping) else None

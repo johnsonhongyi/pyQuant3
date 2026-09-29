@@ -83,7 +83,7 @@ def _gate_data_bridge(root: Path) -> Dict[str, Any]:
         "reader_age_seconds": reader_age_seconds,
         "reader_process_id": reader.get("reader_process_id"),
         "stored_observation_count": reader.get("stored_observation_count", 0),
-        "typed_gate_contexts_ready": False,
+        "typed_gate_contexts_ready": reader.get("typed_gate_contexts_ready") is True,
         "runtime_authorized": False,
     }
 

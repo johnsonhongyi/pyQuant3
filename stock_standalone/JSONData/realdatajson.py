@@ -1790,6 +1790,15 @@ def get_sina_Market_json(market='all', showtime=True, num='100', retry_count=3, 
     cached_result = cached_df if has_cache_result else []
     batch_size, pause_range, force_cache, limit_time = fetch_params
     now_ts = time.time()
+    try:
+        is_trade_day = bool(cct.get_trade_date_status())
+    except Exception as exc:
+        log.warning(f"[SINA-TRADE-DAY] 无法确认交易日状态，按非交易日保护: {exc}")
+        is_trade_day = False
+    if not is_trade_day:
+        # 休市期间只复用本地快照；冷启动或缓存不可用时不触发同步网络首刷。
+        return cached_result
+
     has_recent_fail = 0 <= now_ts - g_sina_blocked.get('last_failed_ts', 0) < 600
     is_cooling = g_sina_blocked.get('cooling', False) and now_ts < g_sina_blocked.get('blocked_until', 0)
     stale_close = has_h5 and not (has_recent_fail or is_cooling) and _sina_cache_needs_close_refresh(h5)

@@ -6,6 +6,7 @@ File: market_pulse_db.py
 """
 import sqlite3
 import json
+import math
 import traceback
 from datetime import datetime, timezone
 from typing import Any
@@ -31,6 +32,16 @@ def migrate_market_pulse_db(db_path: str = DB_PATH) -> None:
                 limit_down INTEGER, temperature REAL, worst_sectors_json TEXT,
                 top_sectors_json TEXT, indices_json TEXT, source_version TEXT,
                 created_at TEXT
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS current_sentiment_state (
+                session_date TEXT PRIMARY KEY,
+                state TEXT NOT NULL,
+                reason TEXT NOT NULL DEFAULT '',
+                source_id TEXT NOT NULL,
+                as_of_time_utc TEXT NOT NULL,
+                available_at_utc TEXT NOT NULL
             )
         """)
         cur.execute("PRAGMA table_info(daily_sentiment)")
@@ -403,6 +414,112 @@ def save_daily_sentiment(date_str: str, snapshot: dict) -> bool:
 
 from typing import Optional
 
+def save_current_sentiment_state(
+    session_date: str, state: str, reason: str = "", as_of_time: Any = None,
+) -> bool:
+    """Publish the auction classification for same-session Guardian consumers."""
+    allowed = {"NEUTRAL", "PANIC", "REPAIR", "REVERSAL", "FOMO", "COOLDOWN"}
+    if state not in allowed or not isinstance(session_date, str):
+        return False
+    try:
+        datetime.strptime(session_date, "%Y-%m-%d")
+        if as_of_time is None:
+            as_of_time = datetime.now(timezone.utc)
+        elif isinstance(as_of_time, str):
+            value = as_of_time[:-1] + "+00:00" if as_of_time.endswith("Z") else as_of_time
+            as_of_time = datetime.fromisoformat(value)
+        if not isinstance(as_of_time, datetime) or as_of_time.tzinfo is None:
+            return False
+        if as_of_time.utcoffset() is None:
+            return False
+        as_of_utc = as_of_time.astimezone(timezone.utc)
+        available_at = datetime.now(timezone.utc)
+        if (
+            as_of_utc > available_at
+            or as_of_utc.astimezone(ZoneInfo(DAILY_SENTIMENT_SOURCE_TIMEZONE)).strftime("%Y-%m-%d")
+            != session_date
+        ):
+            return False
+        conn = sqlite3.connect(DB_PATH, timeout=5.0)
+        try:
+            conn.execute(
+                """INSERT INTO current_sentiment_state (
+                    session_date, state, reason, source_id, as_of_time_utc, available_at_utc
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(session_date) DO UPDATE SET
+                    state=excluded.state, reason=excluded.reason,
+                    source_id=excluded.source_id, as_of_time_utc=excluded.as_of_time_utc,
+                    available_at_utc=excluded.available_at_utc""",
+                (
+                    session_date, state, str(reason)[:240], DAILY_SENTIMENT_SOURCE_ID,
+                    as_of_utc.isoformat(timespec="microseconds"),
+                    available_at.isoformat(timespec="microseconds"),
+                ),
+            )
+            conn.commit()
+            return True
+        finally:
+            conn.close()
+    except (OSError, sqlite3.Error, TypeError, ValueError, OverflowError):
+        logger.exception("[DB] Failed to publish current sentiment state")
+        return False
+
+
+def get_current_sentiment_state(
+    session_date: str, max_age_seconds: float = 28800.0,
+) -> Optional[dict]:
+    """Read only a same-session, fresh state; missing/stale state is unavailable."""
+    if (
+        not isinstance(session_date, str)
+        or isinstance(max_age_seconds, bool)
+        or not isinstance(max_age_seconds, (int, float))
+        or not math.isfinite(max_age_seconds)
+        or max_age_seconds <= 0
+    ):
+        return None
+    conn = None
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=0.5)
+        row = conn.execute(
+            "SELECT state, reason, source_id, as_of_time_utc, available_at_utc "
+            "FROM current_sentiment_state WHERE session_date=?",
+            (session_date,),
+        ).fetchone()
+        if not row or row[2] != DAILY_SENTIMENT_SOURCE_ID:
+            return None
+        available = datetime.fromisoformat(str(row[4]).replace("Z", "+00:00"))
+        as_of = datetime.fromisoformat(str(row[3]).replace("Z", "+00:00"))
+        now = datetime.now(timezone.utc)
+        if (
+            available.tzinfo is None or available.utcoffset() is None
+            or as_of.tzinfo is None or as_of.utcoffset() is None
+        ):
+            return None
+        available_utc = available.astimezone(timezone.utc)
+        as_of_utc = as_of.astimezone(timezone.utc)
+        if (
+            (now - available_utc).total_seconds() < 0
+            or (now - available_utc).total_seconds() > max_age_seconds
+            or (now - as_of_utc).total_seconds() < 0
+            or (now - as_of_utc).total_seconds() > max_age_seconds
+            or as_of_utc.astimezone(ZoneInfo(DAILY_SENTIMENT_SOURCE_TIMEZONE)).strftime("%Y-%m-%d")
+            != session_date
+            or row[0] not in {"NEUTRAL", "PANIC", "REPAIR", "REVERSAL", "FOMO", "COOLDOWN"}
+        ):
+            return None
+        return {
+            "state": str(row[0]), "reason": str(row[1]),
+            "source_id": str(row[2]), "as_of_time": str(row[3]),
+            "available_at": str(row[4]),
+        }
+    except (OSError, sqlite3.Error, TypeError, ValueError, OverflowError):
+        logger.exception("[DB] Failed to read current sentiment state")
+        return None
+    finally:
+        if conn is not None:
+            conn.close()
+
+
 def get_daily_sentiment(date_str: str) -> Optional[dict]:
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
@@ -410,7 +527,8 @@ def get_daily_sentiment(date_str: str) -> Optional[dict]:
         cur.execute(
             "SELECT date, index_pct, breadth_ratio, up_count, down_count, limit_up, "
             "limit_down, temperature, worst_sectors_json, top_sectors_json, indices_json, "
-            "source_version, created_at, lrrm_state, ipo_regime_state "
+            "source_version, created_at, lrrm_state, ipo_regime_state, source_id, "
+            "source_timezone, as_of_time_utc, available_at_utc "
             "FROM daily_sentiment WHERE date=?",
             (date_str,),
         )
@@ -435,6 +553,10 @@ def get_daily_sentiment(date_str: str) -> Optional[dict]:
                 'lrrm_data_ready': bool(row[13] and row[13] != 'UNKNOWN'),
                 'ipo_regime_data_ready': bool(row[14] and row[14] != 'UNKNOWN'),
                 'data_ready': bool(row[13] and row[13] != 'UNKNOWN' and row[14] and row[14] != 'UNKNOWN'),
+                'source_id': row[15],
+                'source_timezone': row[16],
+                'as_of_time': row[17],
+                'available_at': row[18],
             }
     except Exception as e:
         logger.error(f"[DB Get Daily Sentiment Error] {e}")
@@ -449,7 +571,8 @@ def get_latest_sentiment_before(date_str: str) -> Optional[dict]:
         cur.execute(
             "SELECT date, index_pct, breadth_ratio, up_count, down_count, limit_up, "
             "limit_down, temperature, worst_sectors_json, top_sectors_json, indices_json, "
-            "source_version, created_at, lrrm_state, ipo_regime_state "
+            "source_version, created_at, lrrm_state, ipo_regime_state, source_id, "
+            "source_timezone, as_of_time_utc, available_at_utc "
             "FROM daily_sentiment WHERE date < ? ORDER BY date DESC LIMIT 1",
             (date_str,),
         )
@@ -474,6 +597,10 @@ def get_latest_sentiment_before(date_str: str) -> Optional[dict]:
                 'lrrm_data_ready': bool(row[13] and row[13] != 'UNKNOWN'),
                 'ipo_regime_data_ready': bool(row[14] and row[14] != 'UNKNOWN'),
                 'data_ready': bool(row[13] and row[13] != 'UNKNOWN' and row[14] and row[14] != 'UNKNOWN'),
+                'source_id': row[15],
+                'source_timezone': row[16],
+                'as_of_time': row[17],
+                'available_at': row[18],
             }
     except Exception as e:
         logger.error(f"[DB Get Latest Sentiment Before Error] {e}")

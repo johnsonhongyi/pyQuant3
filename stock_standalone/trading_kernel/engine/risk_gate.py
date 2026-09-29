@@ -72,6 +72,16 @@ def parse_ts(t_str: str) -> datetime | None:
     return None
 
 
+def _is_trading_hour(signal_ts: str) -> bool:
+    time_part = signal_ts.split()[-1] if " " in signal_ts else signal_ts.split("T")[-1]
+    try:
+        parts = time_part.split(":")
+        hhmm = int(parts[0]) * 100 + int(parts[1])
+    except Exception:
+        hhmm = 930
+    return (925 <= hhmm <= 1130) or (1300 <= hhmm <= 1505)
+
+
 def evaluate(
     intent: DecisionIntent,
     signal: StrategySignal,
@@ -113,14 +123,7 @@ def evaluate(
         )
 
     # 1. Non-trading session block
-    time_part = signal.ts.split()[-1] if " " in signal.ts else signal.ts.split("T")[-1]
-    try:
-        parts = time_part.split(":")
-        hhmm = int(parts[0]) * 100 + int(parts[1])
-    except Exception:
-        hhmm = 930
-    
-    is_trading_hour = (925 <= hhmm <= 1130) or (1300 <= hhmm <= 1505)
+    is_trading_hour = _is_trading_hour(signal.ts)
     
     if action in {"BUY", "ADD"}:
         # 预先计算弹性防追高偏离限额与豁免状态

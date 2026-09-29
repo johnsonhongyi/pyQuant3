@@ -65,11 +65,24 @@ def stage0_to_2_accepted(root: Path) -> bool:
         with acceptance_path.open("r", encoding="utf-8") as stream:
             document = json.load(stream)
         stages = document.get("stages") if isinstance(document, dict) else None
-        if not isinstance(stages, dict):
+        if (
+            not isinstance(stages, dict)
+            or document.get("simulation_only") is True
+        ):
             return False
         for index in range(3):
             record = stages.get(str(index), stages.get(f"stage{index}"))
-            if not isinstance(record, dict) or record.get("status") != "ACCEPTED" or not record.get("evidence"):
+            evidence = record.get("evidence") if isinstance(record, dict) else None
+            if (
+                not isinstance(record, dict)
+                or record.get("status") != "ACCEPTED"
+                or not isinstance(evidence, list) or not evidence
+                or any(
+                    not isinstance(item, str) or not item.strip()
+                    or item.strip().upper().startswith("SIMULATION_ONLY:")
+                    for item in evidence
+                )
+            ):
                 return False
         from ats.strategy.ipo_data_contracts import IPODecisionConfigSnapshot
 
