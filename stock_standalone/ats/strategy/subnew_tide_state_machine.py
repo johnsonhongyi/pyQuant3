@@ -19,6 +19,7 @@ class TideObservation:
     amount_yi: float
     top20_return_pct: float
     bottom20_return_pct: float
+    same_clock_amount_baseline_yi: Optional[float] = None
 
 
 @dataclass
@@ -38,6 +39,7 @@ def build_tide_observation(
     signals,
     observed_at: str,
     expected_count: Optional[int] = None,
+    same_clock_amount_baseline_yi: Optional[float] = None,
 ) -> TideObservation:
     """Build one cross-section from already computed in-memory stock signals."""
     valid = [signal for signal in signals if signal is not None and float(getattr(signal, "price", 0.0) or 0.0) > 0]
@@ -65,6 +67,10 @@ def build_tide_observation(
         amount_yi=sum(amounts) / 100000000.0,
         top20_return_pct=statistics.mean(ordered[-quintile_count:]) if ordered else 0.0,
         bottom20_return_pct=statistics.mean(ordered[:quintile_count]) if ordered else 0.0,
+        same_clock_amount_baseline_yi=(
+            float(same_clock_amount_baseline_yi)
+            if same_clock_amount_baseline_yi is not None else None
+        ),
     )
 
 
@@ -140,8 +146,11 @@ class SubnewTideStateMachine:
             self._previous_decision = self._session_base_decision
             self._revision_count = self._session_base_revision_count
 
-        state, reasons = self._classify(observation, self._previous_observation)
         previous_live_state = self._live_decision.state if self._live_decision else None
+        state, reasons = self._classify(
+            observation, self._previous_observation,
+            prior_live_state=previous_live_state or "",
+        )
         min_hold_minutes = max(0.0, float(getattr(self._config, "min_state_hold_minutes", 10.0) if self._config else 10.0))
         emergency_states = {"T0_INSUFFICIENT", "T1_CLIMAX_DISTRIBUTION", "T2_EBB_EARLY", "T4_PANIC_ACCEL", "T11_OVERHEATED"}
         if previous_live_state and state != previous_live_state and state not in emergency_states:
@@ -185,6 +194,7 @@ class SubnewTideStateMachine:
         self,
         current: TideObservation,
         previous: Optional[TideObservation],
+        prior_live_state: str = "",
     ):
         cfg = self._config
         min_samples = getattr(cfg, "min_sample_count", 10) if cfg else 10
@@ -197,12 +207,18 @@ class SubnewTideStateMachine:
         t2_vwap_collapse = getattr(cfg, "t2_above_vwap_ratio_collapse", 0.20) if cfg else 0.20
 
         prior_state = self._previous_decision.state if self._previous_decision else ""
+        live_prior_state = prior_live_state or prior_state
         if (prior_state in ("T9_FLOOD_SPREAD", "T10_MAIN_UP")
                 and current.advance_ratio < t2_adv_collapse and current.above_vwap_ratio < t2_vwap_collapse):
             return "T2_EBB_EARLY", ["breadth_collapse", "vwap_support_lost"]
 
         if previous is not None:
-            amount_ratio = current.amount_yi / previous.amount_yi if previous.amount_yi > 0 else 1.0
+            baseline = current.same_clock_amount_baseline_yi
+            amount_ratio = (
+                current.amount_yi / baseline
+                if isinstance(baseline, (int, float)) and not isinstance(baseline, bool)
+                and math.isfinite(baseline) and baseline > 0 else None
+            )
 
             # A mature advance must persist beyond one broad-up session before it
             # earns the larger T10 allocation.  This deliberately sits below T11
@@ -214,17 +230,18 @@ class SubnewTideStateMachine:
             t10_top_min = getattr(cfg, "t10_top20_return_min", 6.0) if cfg else 6.0
             t10_amt_min = getattr(cfg, "t10_amount_ratio_min", 0.90) if cfg else 0.90
 
-            if (prior_state in ("T9_FLOOD_SPREAD", "T10_MAIN_UP")
+            if (live_prior_state in ("T9_FLOOD_SPREAD", "T10_MAIN_UP")
                     and current.advance_ratio >= t10_adv_min
                     and current.above_vwap_ratio >= t10_vwap_min
                     and t10_med_min <= current.median_return_pct < t10_med_max
                     and current.top20_return_pct >= t10_top_min
-                    and amount_ratio >= t10_amt_min):
-                return "T10_MAIN_UP", [
-                    "broad_advance_persisted",
-                    "leader_strength_persisted",
-                    "turnover_held",
-                ]
+                    and (amount_ratio is None or amount_ratio >= t10_amt_min)):
+                reasons = ["broad_advance_persisted", "leader_strength_persisted"]
+                reasons.append(
+                    "turnover_baseline_unavailable_direction_only"
+                    if amount_ratio is None else "turnover_held"
+                )
+                return "T10_MAIN_UP", reasons
 
             # After a broad advance, turnover expansion accompanied by fading
             # breadth/VWAP acceptance is distribution, not a normal pullback.
@@ -239,13 +256,16 @@ class SubnewTideStateMachine:
                     and current.advance_ratio <= t1_adv_max
                     and current.above_vwap_ratio <= t1_vwap_max
                     and current.median_return_pct <= t1_med_max
-                    and current.top20_return_pct >= t1_top_min
-                    and amount_ratio >= t1_amt_min):
-                return "T1_CLIMAX_DISTRIBUTION", [
-                    "high_turnover_distribution",
-                    "breadth_faded_after_advance",
-                    "vwap_acceptance_lost",
-                ]
+                    and current.top20_return_pct >= t1_top_min):
+                if amount_ratio is None or amount_ratio >= t1_amt_min:
+                    reasons = [
+                        "breadth_faded_after_advance",
+                        "vwap_acceptance_lost",
+                        "turnover_baseline_unavailable_direction_only"
+                        if amount_ratio is None else "high_turnover_distribution",
+                    ]
+                    return "T1_CLIMAX_DISTRIBUTION", reasons
+                return "T2_EBB_EARLY", ["distribution_turnover_below_threshold"]
 
         t11_adv_min = getattr(cfg, "t11_advance_ratio_min", 0.90) if cfg else 0.90
         t11_med_min = getattr(cfg, "t11_median_return_min", 5.0) if cfg else 5.0
@@ -264,13 +284,18 @@ class SubnewTideStateMachine:
 
         if previous is not None:
             vwap_improvement = current.above_vwap_ratio - previous.above_vwap_ratio
-            if (current.median_return_pct < -1.5 and amount_ratio >= 1.35
+            if (current.median_return_pct < -1.5
+                    and (amount_ratio is None or amount_ratio >= 1.35)
                     and vwap_improvement >= 0.15 and current.top20_return_pct >= 6.0):
-                return "T6_ICE_DIVERGENCE", [
-                    "volume_returned_before_breadth",
+                reasons = [
+                    "directional_repair_before_breadth"
+                    if amount_ratio is None else "volume_returned_before_breadth",
                     "leader_resilience",
                     "vwap_acceptance_improved",
                 ]
+                if amount_ratio is None:
+                    reasons.append("turnover_baseline_unavailable_direction_only")
+                return "T6_ICE_DIVERGENCE", reasons
 
         t4_adv_max = getattr(cfg, "t4_advance_ratio_max", 0.20) if cfg else 0.20
         t4_med_max = getattr(cfg, "t4_median_return_max", -2.20) if cfg else -2.20

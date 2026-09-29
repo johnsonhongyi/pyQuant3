@@ -240,7 +240,7 @@ class AntigravityCLIBackend:
                 return self._failure(failure_code, "结构化输出不符合 JSON Schema", duration)
             return {
                 "success": True,
-                "payload": payload if json_schema is not None else envelope.get("response"),
+                "payload": payload,
                 "error_code": None,
                 "error_msg": None,
                 "duration_ms": duration,

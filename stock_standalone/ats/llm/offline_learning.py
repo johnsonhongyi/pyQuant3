@@ -162,6 +162,15 @@ def _validate_snapshot(snapshot: Any, cutoff: datetime, config_snapshot: Any) ->
     if _time(snapshot.get("as_of_time"), "input_snapshot.as_of_time") != cutoff:
         raise OfflineLearningError("input snapshot time must equal the decision cutoff")
     features = snapshot.get("features")
+    if isinstance(features, dict):
+        forbidden = sorted(
+            field_id for field_id in features
+            if isinstance(field_id, str) and field_id.lower() in _FORBIDDEN_INPUT_FEATURES
+        )
+        if forbidden:
+            raise OfflineLearningError(
+                "future outcome field is forbidden in model input: " + forbidden[0]
+            )
     if not isinstance(features, dict) or set(features) != set(IPO_REQUIRED_FIELDS):
         raise OfflineLearningError("input snapshot must contain exactly all 41 required fields")
     observations = {}

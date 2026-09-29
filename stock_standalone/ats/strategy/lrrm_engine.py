@@ -152,3 +152,79 @@ class LRRMEngine:
             generated_at=generated_at,
             data_ready=True,
         )
+
+    def evaluate_contract_metrics(
+        self,
+        metrics: Mapping[str, Any],
+        required_input_health: Mapping[str, bool],
+        fsm_state: Optional[str] = None,
+        *,
+        as_of: Optional[datetime] = None,
+    ) -> LRRMSnapshot:
+        """Classify from source-contract aggregates when raw turnover history is unavailable."""
+        generated_at = _aware_iso(as_of)
+        missing: List[str] = []
+        if generated_at is None:
+            missing.append("evaluation_time")
+        if not isinstance(metrics, Mapping):
+            missing.append("metrics_invalid")
+            metrics = {}
+        if not isinstance(required_input_health, Mapping):
+            missing.append("required_input_health")
+        else:
+            missing.extend(
+                name for name in self.required_inputs
+                if required_input_health.get(name) is not True
+            )
+        for name in self.required_inputs:
+            if name not in metrics or not _finite_number(metrics.get(name)):
+                missing.append(f"{name}_invalid")
+        p20 = metrics.get("volume_percentile_20d")
+        p60 = metrics.get("volume_percentile_60d")
+        breadth = metrics.get("advance_decline_ratio")
+        limit_down = metrics.get("limit_down_count")
+        if _finite_number(p20) and not 0.0 <= p20 <= 1.0:
+            missing.append("volume_percentile_20d_out_of_range")
+        if _finite_number(p60) and not 0.0 <= p60 <= 1.0:
+            missing.append("volume_percentile_60d_out_of_range")
+        if _finite_number(breadth) and not 0.0 <= breadth <= 1.0:
+            missing.append("advance_decline_ratio_out_of_range")
+        if isinstance(limit_down, bool) or not isinstance(limit_down, int) or limit_down < 0:
+            missing.append("limit_down_count_invalid")
+        if missing:
+            return LRRMSnapshot(
+                generated_at=generated_at or "",
+                transition_reason="LRRM 数据未就绪: " + ", ".join(sorted(set(missing))),
+                missing_inputs=sorted(set(missing)),
+            )
+
+        percentile_20 = float(p20) * 100.0
+        percentile_60 = float(p60) * 100.0
+        if min(percentile_20, percentile_60) < 5.0 or limit_down >= 30 or (
+            breadth < 0.20 and min(percentile_20, percentile_60) < 15.0
+        ):
+            regime, appetite = LiquidityRegime.SHOCK, RiskAppetite.RISK_OFF
+            reason = (
+                f"流动性休克熔断: 20/60日分位 {percentile_20:.1f}%/"
+                f"{percentile_60:.1f}%, 跌停家数 {limit_down}"
+            )
+        elif min(percentile_20, percentile_60) < 20.0 or fsm_state == "PANIC":
+            regime, appetite = LiquidityRegime.TIGHT, RiskAppetite.RISK_OFF
+            reason = "流动性紧缩: 成交额分位或市场情绪触发收缩"
+        elif min(percentile_20, percentile_60) > 80.0 and breadth > 0.60:
+            regime, appetite = LiquidityRegime.LOOSE, RiskAppetite.RISK_ON
+            reason = f"流动性充裕宽松: 20/60日分位均高且涨跌比 {breadth:.2f}"
+        else:
+            regime, appetite = LiquidityRegime.NORMAL, RiskAppetite.NEUTRAL
+            reason = "流动性平稳中性: 基于契约校验后的20/60日分位与涨跌比"
+        return LRRMSnapshot(
+            liquidity_regime=regime.value,
+            risk_appetite=appetite.value,
+            liquidity_confidence=85.0 if regime in {LiquidityRegime.SHOCK, LiquidityRegime.LOOSE} else 65.0,
+            transition_reason=reason,
+            amount_20d_percentile=percentile_20,
+            advance_decline_ratio=float(breadth),
+            limit_down_count=limit_down,
+            generated_at=generated_at or "",
+            data_ready=True,
+        )

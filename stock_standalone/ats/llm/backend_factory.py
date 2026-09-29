@@ -30,13 +30,30 @@ class RemoteCLIBackendFactory:
     model_id: str
     working_directory: str
     remote_policy: Mapping[str, Any]
+    authorization: Mapping[str, Any]
 
     def __call__(self) -> Any:
+        accepted = (
+            isinstance(self.authorization, Mapping)
+            and isinstance(self.authorization.get("acceptance_id"), str)
+            and bool(self.authorization.get("acceptance_id", "").strip())
+        )
+        flags = {
+            key: self.authorization.get(key) is True
+            for key in (
+                "stage0_accepted", "provider_accepted",
+                "process_tree_isolation_accepted",
+                "tool_access_isolation_accepted",
+                "remote_egress_isolation_accepted",
+            )
+        }
+        if not accepted or not all(flags.values()):
+            raise RuntimeError("remote backend authorization is no longer accepted")
         options = {
-            "allow_remote_invocation": True,
-            "process_tree_isolation_accepted": True,
-            "tool_access_isolation_accepted": True,
-            "remote_egress_isolation_accepted": True,
+            "allow_remote_invocation": accepted and all(flags.values()),
+            "process_tree_isolation_accepted": flags["process_tree_isolation_accepted"],
+            "tool_access_isolation_accepted": flags["tool_access_isolation_accepted"],
+            "remote_egress_isolation_accepted": flags["remote_egress_isolation_accepted"],
         }
         if self.provider_name == "antigravity_cli":
             from ats.llm.antigravity_cli_backend import AntigravityCLIBackend
@@ -232,6 +249,7 @@ def _build_remote_cli_factory(
         provider_name=backend_name, cli_path=cli_path,
         model_id=model_id.strip(), working_directory=str(scratch_path.resolve()),
         remote_policy=policy,
+        authorization=dict(authorization),
     )
 
 

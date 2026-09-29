@@ -83,6 +83,34 @@ class AntigravityLiteRTBackend:
             return {"status": "UNAVAILABLE", "error_code": "provider_structured_output_invalid"}
         return {"status": "OK", "proposal": dict(proposal)}
 
+    def generate_request(
+        self,
+        request: Mapping[str, Any],
+        response_schema: Mapping[str, Any],
+        *,
+        timeout_seconds: float,
+    ) -> Dict[str, Any]:
+        """Implement the Worker request contract for the local-only backend."""
+        if (
+            not isinstance(request, Mapping)
+            or not isinstance(request.get("prompt"), str)
+            or not isinstance(request.get("context"), Mapping)
+        ):
+            return {"status": "UNAVAILABLE", "error_code": "request_invalid"}
+        try:
+            import json
+
+            context_json = json.dumps(
+                request["context"], ensure_ascii=False, sort_keys=True,
+                separators=(",", ":"), allow_nan=False,
+            )
+        except (TypeError, ValueError, RecursionError):
+            return {"status": "UNAVAILABLE", "error_code": "context_invalid"}
+        prompt = request["prompt"] + "\n\n已验证上下文(JSON)：\n" + context_json
+        return self.generate(
+            prompt, response_schema, timeout_seconds=timeout_seconds,
+        )
+
     async def _generate(self, prompt: str, response_schema: Dict[str, Any]) -> Any:
         schema_hash = hashlib.sha256(_canonical_schema(response_schema)).hexdigest()
         session = self._sessions.get(schema_hash)

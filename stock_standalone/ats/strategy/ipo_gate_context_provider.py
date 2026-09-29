@@ -12,12 +12,17 @@ from typing import Any, Dict, Mapping, Optional
 from zoneinfo import ZoneInfo
 
 from ats.strategy.ipo_data_contracts import (
+    LRRM_REQUIRED_FIELDS,
+    REGIME_REQUIRED_FIELDS,
     LIVE_HEAT_REQUIRED_FIELDS,
     PREHEAT_REQUIRED_FIELDS,
     IPODecisionConfigSnapshot,
 )
+from ats.strategy.ipo_regime_fsm import IPORegimeFSM, IPORegimeSnapshot
+from ats.strategy.lrrm_engine import LRRMEngine, LRRMSnapshot
 from ats.strategy.ipo_live_heat_engine import IPOLiveHeatEngine, IPOLiveHeatSnapshot
 from ats.strategy.ipo_preheat_engine import IPOPreHeatEngine, IPOPreHeatSnapshot, PreHeatConfig
+from ats.strategy.t1_carry_evaluator import T1CarryEvaluator, T1CarryResult
 from ats.strategy.listing_anchor_store import ListingAnchorStore
 from ats.strategy.ipo_source_orchestrator import SOURCE_DB_RELATIVE_PATH
 
@@ -170,6 +175,12 @@ class IPOGateContextProvider:
 
     def status_snapshot(self) -> Dict[str, Any]:
         with self._lock:
+            readiness = dict(self._latest_context_readiness)
+            remaining = readiness.get("remaining_contexts", {})
+            typed_contexts_ready = bool(remaining) and all(
+                isinstance(value, str) and value.startswith(("READY", "AVAILABLE"))
+                for value in remaining.values()
+            )
             state = (
                 "UNREADY" if not self._last_refresh_ok else
                 "STORE_MISSING" if not self._store_file_present else
@@ -183,8 +194,8 @@ class IPOGateContextProvider:
                 "stored_observation_count": self._stored_observation_count,
                 "stored_observed_count": self._stored_observed_count,
                 "refresh_error": self._last_refresh_error,
-                "typed_gate_contexts_ready": False,
-                "latest_context_readiness": dict(self._latest_context_readiness),
+                "typed_gate_contexts_ready": typed_contexts_ready,
+                "latest_context_readiness": readiness,
                 "runtime_authorized": False,
                 "transport": "SQLite只读快照",
             }
@@ -213,15 +224,23 @@ class IPOGateContextProvider:
         uri = path.as_uri() + "?mode=ro"
         with sqlite3.connect(uri, uri=True, timeout=0.5) as connection:
             connection.execute("PRAGMA query_only=ON")
+            columns = {
+                row[1] for row in connection.execute(
+                    "PRAGMA table_info(field_observations)"
+                ).fetchall()
+            }
+            sample_count_column = "sample_count" if "sample_count" in columns else "NULL"
+            cohort_id_column = "cohort_id" if "cohort_id" in columns else "NULL"
+            sample_metadata = f", {sample_count_column}, {cohort_id_column}"
             global_rows = connection.execute(
                 "SELECT ticker, field_id, status, value_json, source_id, source_version, "
                 "source_timezone, as_of_time_utc, available_at_utc, configuration_hash, "
-                "data_contract_hash FROM field_observations WHERE ticker='000000'"
+                "data_contract_hash" + sample_metadata + " FROM field_observations WHERE ticker='000000'"
             ).fetchall()
             ticker_rows = connection.execute(
                 "SELECT ticker, field_id, status, value_json, source_id, source_version, "
                 "source_timezone, as_of_time_utc, available_at_utc, configuration_hash, "
-                "data_contract_hash FROM field_observations WHERE ticker<>'000000' "
+                "data_contract_hash" + sample_metadata + " FROM field_observations WHERE ticker<>'000000' "
                 "ORDER BY updated_at_utc DESC LIMIT 10000"
             ).fetchall()
 
@@ -252,6 +271,8 @@ class IPOGateContextProvider:
                 "source_timezone": row[6],
                 "as_of_time": row[7],
                 "available_at": row[8],
+                "sample_count": row[11],
+                "cohort_id": row[12],
             }
             result.setdefault(ticker, {})[field_id] = observation
         return result
@@ -306,6 +327,51 @@ class IPOGateContextProvider:
         )
         vwap = vwap_snapshots.get(code)
         listing_anchors = listing_anchors_by_ticker.get(code)
+        lrrm_metrics = {
+            field_id: self._observed_value(observations, field_id)
+            for field_id in LRRM_REQUIRED_FIELDS
+        }
+        lrrm = LRRMEngine(LRRM_REQUIRED_FIELDS).evaluate_contract_metrics(
+            lrrm_metrics,
+            {field_id: observation_usable.get(field_id, False) for field_id in LRRM_REQUIRED_FIELDS},
+            as_of=now,
+        )
+        regime_metrics = {
+            field_id: self._observed_value(observations, field_id)
+            for field_id in REGIME_REQUIRED_FIELDS
+        }
+        regime_rows = [observations.get(field_id, {}) for field_id in REGIME_REQUIRED_FIELDS]
+        sample_counts = [row.get("sample_count") for row in regime_rows]
+        cohort_ids = {row.get("cohort_id") for row in regime_rows}
+        regime_sample_count = (
+            sample_counts[0]
+            if sample_counts and all(
+                isinstance(count, int) and not isinstance(count, bool)
+                and count == sample_counts[0] for count in sample_counts
+            ) else 0
+        )
+        regime_cohort_id = (
+            next(iter(cohort_ids))
+            if len(cohort_ids) == 1 and all(isinstance(value, str) for value in cohort_ids)
+            else ""
+        )
+        decision_config = config_fields.get("decision_config", {})
+        ipo_regime_config = decision_config.get("ipo_regime", {}) if isinstance(decision_config, Mapping) else {}
+        regime_thresholds = (
+            ipo_regime_config.get("transition_thresholds", {})
+            if isinstance(ipo_regime_config, Mapping) else {}
+        )
+        ipo_regime = IPORegimeFSM(REGIME_REQUIRED_FIELDS).update_from_contract_metrics(
+            regime_metrics,
+            {field_id: observation_usable.get(field_id, False) for field_id in REGIME_REQUIRED_FIELDS},
+            regime_sample_count,
+            regime_cohort_id,
+            regime_thresholds,
+            lrrm=lrrm,
+            as_of=now,
+        )
+        t1_carry = T1CarryEvaluator().evaluate(code, live_heat, ipo_regime, lrrm)
+        listing_age_sessions = self._listing_age_sessions(listing_anchors, now)
         context_readiness = {
             "ticker": code,
             "preheat_state": "READY" if preheat.data_status == "READY" else "UNREADY",
@@ -315,12 +381,13 @@ class IPOGateContextProvider:
             "vwap_state": "AVAILABLE" if vwap is not None else "UNREADY",
             "listing_anchors_state": "READY" if listing_anchors is not None else self._listing_anchor_store_state,
             "remaining_contexts": {
-                "lrrm": "UNREADY:缺少20日成交额序列/宽度输入",
-                "ipo_regime": "UNREADY:缺少成熟IPO样本序列",
-                "t1_carry": "UNREADY:依赖LRRM与IPO Regime",
+                "lrrm": "READY" if lrrm.data_ready else "UNREADY:" + lrrm.transition_reason[:160],
+                "ipo_regime": "READY" if ipo_regime.data_ready else "UNREADY:" + ";".join(ipo_regime.missing_metrics)[:160],
+                "t1_carry": "READY" if t1_carry.data_ready else "UNREADY:" + t1_carry.veto_reason,
                 "listing_anchors": "READY:配置哈希/数据字典哈希/来源时区匹配" if listing_anchors is not None else f"UNREADY:{self._listing_anchor_store_state}",
                 "vwap": "AVAILABLE:来自ATS进程内VWAPFactory" if vwap is not None else "UNREADY:尚未接入有效VWAP快照",
-                "risk_context": "UNREADY:未绑定RiskGate授权上下文",
+                "listing_age_sessions": "READY" if listing_age_sessions is not None else "UNREADY:可信交易日历不可用",
+                "risk_context": "UNREADY:运行时RiskGate账户态未接入",
             },
             "validated_field_count": sum(
                 observation_usable.values()
@@ -335,22 +402,21 @@ class IPOGateContextProvider:
         }
         with self._lock:
             self._latest_context_readiness = context_readiness
-        decision_config = config_fields.get("decision_config", {})
         freshness = decision_config.get("vwap_freshness", {}) if isinstance(decision_config, Mapping) else {}
         max_vwap_stale = freshness.get("max_stale_seconds", 0) if isinstance(freshness, Mapping) else 0
         issue_observation = observations.get("issue_price", {})
         issue_price = issue_observation.get("value") if issue_observation.get("status") == "OBSERVED" else None
         context = dict(config_fields)
         context.update({
-            "lrrm": None,
-            "ipo_regime": None,
-            "t1_carry": None,
+            "lrrm": lrrm,
+            "ipo_regime": ipo_regime,
+            "t1_carry": t1_carry,
             "preheat": preheat,
             "listing_anchors": listing_anchors,
             "vwap": vwap,
             "live_heat": live_heat,
             "intraday_low": self._observed_value(observations, "session_low"),
-            "listing_age_sessions": None,
+            "listing_age_sessions": listing_age_sessions,
             "d0_listing_open_price": listing_anchors.listing_open if listing_anchors else None,
             "market_as_of_time": now,
             "max_vwap_stale_seconds": max_vwap_stale,
@@ -362,6 +428,27 @@ class IPOGateContextProvider:
             "gate_context_sync": self.status_snapshot(),
         })
         return context
+
+    @staticmethod
+    def _listing_age_sessions(listing_anchors: Any, evaluation_time: datetime) -> Optional[int]:
+        if listing_anchors is None or not isinstance(evaluation_time, datetime):
+            return None
+        listing_date = str(getattr(listing_anchors, "listing_date", "") or "")[:10]
+        try:
+            first = datetime.strptime(listing_date, "%Y-%m-%d").date()
+            last = evaluation_time.astimezone(ZoneInfo("Asia/Shanghai")).date()
+            if first > last:
+                return None
+            from JohnsonUtil import commonTips as cct
+
+            sessions = cct.get_trade_days(first.isoformat(), last.isoformat())
+            normalized = {str(day)[:10] for day in (sessions or [])}
+            if first.isoformat() not in normalized or last.isoformat() not in normalized:
+                return None
+            age = sum(first.isoformat() <= day <= last.isoformat() for day in normalized)
+            return age if age >= 1 else None
+        except Exception:
+            return None
 
     @staticmethod
     def _observed_value(observations: Mapping[str, Mapping[str, Any]], field_id: str) -> Any:

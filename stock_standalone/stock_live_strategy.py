@@ -1341,12 +1341,14 @@ class StockLiveStrategy:
         if not self.enabled or df_all is None or df_all.empty:
             logger.debug(f"⏳ [DEBUG_LOCK] [Strategy] process_data skipped: enabled={self.enabled}, df_all_empty={df_all is None or df_all.empty}")
             return
+
+        is_trade_day = bool(cct.get_trade_date_status())
             
         # 🚀 [ULTRA-PERF] 定期更新持仓内存缓存 (Async refresh to avoid UI/Worker hang)
         current_ts = time.time()
-        if current_ts - getattr(self, '_last_trades_sync', 0.0) > 5.0:
+        if is_trade_day and current_ts - getattr(self, '_last_trades_sync', 0.0) > 5.0:
             self._last_trades_sync = current_ts
-            if self.trading_logger:
+            if is_trade_day and self.trading_logger:
                 def sync_trades_worker():
                     try:
                         self._open_trades_cache = self.trading_logger.get_trades()
@@ -1384,7 +1386,6 @@ class StockLiveStrategy:
         now_time_int = int(now_dt.strftime('%H%M'))
         now_time_str = now_dt.strftime('%H:%M')
         # 🛡️ [RECOVERY] 严格检查交易日与交易时段，非交易日坚决不触发密集策略大计算，保留现有 cache
-        is_trade_day = bool(cct.get_trade_date_status())
         is_trading = is_trade_day and bool(cct.get_work_time_duration())
         is_trading_active = is_trading and (915 <= now_time_int <= 1505)
 
@@ -1405,7 +1406,7 @@ class StockLiveStrategy:
              self.executor.submit(self._scan_hot_concepts, df_internal.copy(), concept_top5, resample=resample)
 
         # --- 1.2 [NEW] 每日热股跨日验证 (9:15-9:30 处理昨天入队的标的) ---
-        if 915 <= now_time_int <= 930:
+        if is_trading and 915 <= now_time_int <= 930:
             if getattr(self, '_last_validation_date', '') != today_str:
                 self.executor.submit(self._daily_watchlist_validation, df_internal.copy())
                 self._last_validation_date = today_str
@@ -1414,7 +1415,7 @@ class StockLiveStrategy:
         # 1. 开盘自动全扫描 (每日只需运行一次，不限时间，启动即扫)
         if not getattr(self, '_rank_scan_done_today', False):
             # 只有在非休市时间且有数据时才扫描
-            if not df_internal.empty and cct.get_trade_date_status(): # 确保是交易日
+            if not df_internal.empty and is_trade_day: # 确保是交易日
                  self.executor.submit(self._scan_rank_for_follow, df_internal.copy(), concept_top5, top_n=100)
                  self._rank_scan_done_today = True
                  logger.info(f"🚀 [Startup] Triggered daily rank scan. (Time: {now_time_int})")
@@ -1432,7 +1433,7 @@ class StockLiveStrategy:
         # --- ⭐ [关键] 异步触发策略判定 (增加原子锁保护，支持多周期并行) ---
         can_submit = False
         with self._lock:
-            if resample not in self._is_checking_resamples:
+            if is_trading and resample not in self._is_checking_resamples:
                 # 🛡️ 按 resample 颗粒度加锁，允许 日/周/月 线同时并行扫描
                 self._is_checking_resamples.add(resample)
                 can_submit = True
@@ -1463,8 +1464,6 @@ class StockLiveStrategy:
                          self._is_checking_resamples.remove(resample)
 
         # 1. 交易期间判断: 0915 至 1502
-        is_trading = cct.get_work_time_duration()
-
         # --- 自动启动判断 (Auto Start) ---
         # 交易时段 + 未启用 + 今日未结算过
         if is_trading and not self.auto_loop_enabled:

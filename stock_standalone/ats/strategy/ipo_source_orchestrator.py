@@ -7,11 +7,12 @@ without a tested source stay UNREADY.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Mapping, Optional
+from typing import Any, Dict, Mapping, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 from ats.strategy.ipo_data_contracts import (
@@ -50,7 +51,6 @@ _ROUTES: Dict[str, Dict[str, str]] = {
     "financing_balance_change": {"source": "东方财富两融汇总", "route": "RPTA_RZRQ_LSHJ 的最新有效 RZYE 日变动", "action": "最新两日有效记录；来源时区 Asia/Shanghai；24 小时 TTL"},
     "limit_up_break_rate": {"source": "东方财富涨停池/炸板池", "route": "炸板池家数/(涨停池家数+炸板池家数)", "action": "要求两个池日期等于当前交易日、行数一致且无重叠；仅后台采集"},
     "high_volatility_amount_share": {"source": "TDX/东方财富全A股快照", "route": "绝对涨跌幅≥5%的个股成交额/全市场成交额", "action": "要求至少3000个有效成交额样本并通过来源时间TTL"},
-    "index_relative_strength": {"source": "交易所指数行情", "route": "宽基指数相对收益", "action": "需明确基准指数、观察窗口和时间对齐"},
     "ipo_amount_share": {"source": "TDX/东方财富全A股快照+IPO日历", "route": "上市日期距采集日不超过30个自然日的新股成交额/全市场成交额", "action": "IPO日历完整且新股报价覆盖≥95%才写入"},
     "theme_concentration": {"source": "东方财富A股行业分类与行情", "route": "行业成交额HHI（0至10000）", "action": "至少5个行业且行业成交额分类覆盖≥95%才写入"},
     "listing_supply_pace": {"source": "东方财富IPO发行日历", "route": "近20日已公告上市家数", "action": "只计具备上市日期与来源更新时间的不同股票代码"},
@@ -76,6 +76,36 @@ def source_route(field_id: str) -> Dict[str, str]:
 
 def _database_path(root: str | Path) -> Path:
     return Path(root).resolve() / SOURCE_DB_RELATIVE_PATH
+
+
+def _observation_fingerprint(
+    ticker: str,
+    field_id: str,
+    value_json: str,
+    source_id: str,
+    source_version: str,
+    source_timezone: str,
+    as_of_time_utc: str,
+    available_at_utc: str,
+    configuration_hash: str,
+    data_contract_hash: str,
+    sample_count: Optional[int],
+    cohort_id: Optional[str],
+) -> str:
+    payload = {
+        "ticker": ticker, "field_id": field_id, "status": "OBSERVED",
+        "value_json": value_json, "source_id": source_id,
+        "source_version": source_version, "source_timezone": source_timezone,
+        "as_of_time_utc": as_of_time_utc, "available_at_utc": available_at_utc,
+        "configuration_hash": configuration_hash,
+        "data_contract_hash": data_contract_hash,
+        "sample_count": sample_count, "cohort_id": cohort_id,
+    }
+    encoded = json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def store_observation(
@@ -105,6 +135,17 @@ def store_observation(
         available_text = _utc_text(available_at, contract.source_timezone)
     except (TypeError, ValueError, OverflowError):
         return False
+    sample_count = observation.get("sample_count")
+    if sample_count is not None and (
+        isinstance(sample_count, bool) or not isinstance(sample_count, int) or sample_count < 1
+    ):
+        return False
+    cohort_id = observation.get("cohort_id")
+    if cohort_id is not None and (
+        not isinstance(cohort_id, str) or not cohort_id.strip() or len(cohort_id) > 160
+        or any(not (char.isalnum() or char in "._:-") for char in cohort_id)
+    ):
+        return False
     path = _database_path(root)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -118,24 +159,83 @@ def store_observation(
                     source_timezone TEXT NOT NULL, as_of_time_utc TEXT NOT NULL,
                     available_at_utc TEXT NOT NULL, configuration_hash TEXT NOT NULL,
                     data_contract_hash TEXT NOT NULL, updated_at_utc TEXT NOT NULL,
+                    sample_count INTEGER, cohort_id TEXT,
                     PRIMARY KEY (ticker, field_id)
                 )"""
             )
+            columns = {
+                row[1] for row in connection.execute(
+                    "PRAGMA table_info(field_observations)"
+                ).fetchall()
+            }
+            if "sample_count" not in columns:
+                connection.execute(
+                    "ALTER TABLE field_observations ADD COLUMN sample_count INTEGER"
+                )
+            if "cohort_id" not in columns:
+                connection.execute(
+                    "ALTER TABLE field_observations ADD COLUMN cohort_id TEXT"
+                )
             connection.execute(
-                """INSERT INTO field_observations VALUES (?, ?, 'OBSERVED', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """CREATE TABLE IF NOT EXISTS field_observation_history (
+                    observation_hash TEXT PRIMARY KEY,
+                    ticker TEXT NOT NULL, field_id TEXT NOT NULL, status TEXT NOT NULL,
+                    value_json TEXT NOT NULL, source_id TEXT NOT NULL,
+                    source_version TEXT NOT NULL, source_timezone TEXT NOT NULL,
+                    as_of_time_utc TEXT NOT NULL, available_at_utc TEXT NOT NULL,
+                    configuration_hash TEXT NOT NULL, data_contract_hash TEXT NOT NULL,
+                    recorded_at_utc TEXT NOT NULL, sample_count INTEGER, cohort_id TEXT
+                )"""
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_field_observation_history_lookup "
+                "ON field_observation_history(ticker, field_id, available_at_utc)"
+            )
+            source_id = str(observation.get("source_id") or "")
+            source_version = str(observation.get("source_version") or "")
+            configuration_hash = config.config_hash
+            data_contract_hash = config.data_contract.config_hash
+            fingerprint = _observation_fingerprint(
+                ticker, field_id, encoded, source_id, source_version,
+                contract.source_timezone, as_of_text, available_text,
+                configuration_hash, data_contract_hash, sample_count, cohort_id,
+            )
+            recorded_at = datetime.now(timezone.utc).isoformat(timespec="microseconds")
+            connection.execute(
+                """INSERT OR IGNORE INTO field_observation_history (
+                       observation_hash, ticker, field_id, status, value_json,
+                       source_id, source_version, source_timezone, as_of_time_utc,
+                       available_at_utc, configuration_hash, data_contract_hash,
+                       recorded_at_utc, sample_count, cohort_id
+                   ) VALUES (?, ?, ?, 'OBSERVED', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    fingerprint, ticker, field_id, encoded, source_id, source_version,
+                    contract.source_timezone, as_of_text, available_text,
+                    configuration_hash, data_contract_hash, recorded_at,
+                    sample_count, cohort_id,
+                ),
+            )
+            connection.execute(
+                """INSERT INTO field_observations (
+                       ticker, field_id, status, value_json, source_id, source_version,
+                       source_timezone, as_of_time_utc, available_at_utc,
+                       configuration_hash, data_contract_hash, updated_at_utc,
+                       sample_count, cohort_id
+                   ) VALUES (?, ?, 'OBSERVED', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(ticker, field_id) DO UPDATE SET
                      status=excluded.status, value_json=excluded.value_json,
                      source_id=excluded.source_id, source_version=excluded.source_version,
                      source_timezone=excluded.source_timezone, as_of_time_utc=excluded.as_of_time_utc,
                      available_at_utc=excluded.available_at_utc,
                      configuration_hash=excluded.configuration_hash,
-                     data_contract_hash=excluded.data_contract_hash, updated_at_utc=excluded.updated_at_utc
+                     data_contract_hash=excluded.data_contract_hash, updated_at_utc=excluded.updated_at_utc,
+                     sample_count=excluded.sample_count, cohort_id=excluded.cohort_id
                 """,
                 (
-                    ticker, field_id, encoded, observation.get("source_id"), observation.get("source_version"),
+                    ticker, field_id, encoded, source_id, source_version,
                     contract.source_timezone, as_of_text, available_text,
-                    config.config_hash, config.data_contract.config_hash,
-                    datetime.now(timezone.utc).isoformat(timespec="microseconds"),
+                    configuration_hash, data_contract_hash, recorded_at,
+                    sample_count, cohort_id,
                 ),
             )
         return True
@@ -156,17 +256,55 @@ def _utc_text(value: Any, source_timezone: str) -> str:
     return parsed.astimezone(timezone.utc).isoformat(timespec="microseconds")
 
 
-def load_observations(root: str | Path, ticker: str) -> Dict[str, Dict[str, Any]]:
+def _utc_bound_text(value: Any) -> str:
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str):
+        text = value.strip()
+        parsed = datetime.fromisoformat(text[:-1] + "+00:00" if text.endswith("Z") else text)
+    else:
+        raise ValueError("history bounds must be aware datetimes")
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError("history bounds must include a UTC offset")
+    return parsed.astimezone(timezone.utc).isoformat(timespec="microseconds")
+
+
+def load_observations(
+    root: str | Path,
+    ticker: str,
+    config: Optional[IPODecisionConfigSnapshot] = None,
+) -> Dict[str, Dict[str, Any]]:
     """Read stored observations only; a missing/unreadable store means no data."""
+    if config is not None and (
+        not isinstance(config, IPODecisionConfigSnapshot) or not config.verify_integrity()
+    ):
+        return {}
     path = _database_path(root)
     if not path.is_file():
         return {}
     try:
         with sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=0.1) as connection:
+            columns = {
+                row[1] for row in connection.execute(
+                    "PRAGMA table_info(field_observations)"
+                ).fetchall()
+            }
+            if config is not None and not {
+                "configuration_hash", "data_contract_hash",
+            }.issubset(columns):
+                return {}
+            hash_columns = ", configuration_hash, data_contract_hash" if config else ""
+            hash_filter = (
+                " AND configuration_hash=? AND data_contract_hash=?" if config else ""
+            )
+            params: Tuple[Any, ...] = (ticker,)
+            if config is not None:
+                params += (config.config_hash, config.data_contract.config_hash)
             rows = connection.execute(
                 "SELECT field_id, status, value_json, source_id, source_version, source_timezone, "
-                "as_of_time_utc, available_at_utc FROM field_observations WHERE ticker=?",
-                (ticker,),
+                "as_of_time_utc, available_at_utc" + hash_columns +
+                " FROM field_observations WHERE ticker=?" + hash_filter,
+                params,
             ).fetchall()
         observations: Dict[str, Dict[str, Any]] = {}
         for row in rows:
@@ -181,6 +319,106 @@ def load_observations(root: str | Path, ticker: str) -> Dict[str, Dict[str, Any]
         return observations
     except (OSError, sqlite3.Error):
         return {}
+
+
+def load_observation_history(
+    root: str | Path,
+    ticker: str,
+    config: IPODecisionConfigSnapshot,
+    start_time: Optional[Any] = None,
+    end_time: Optional[Any] = None,
+) -> list[Dict[str, Any]]:
+    """Load append-only, contract-bound observations for cut-off replay."""
+    if (
+        not isinstance(ticker, str) or len(ticker) != 6 or not ticker.isdigit()
+        or not isinstance(config, IPODecisionConfigSnapshot)
+        or not config.verify_integrity()
+    ):
+        return []
+    try:
+        start_utc = _utc_bound_text(start_time) if start_time is not None else None
+        end_utc = _utc_bound_text(end_time) if end_time is not None else None
+        if start_utc is not None and end_utc is not None and start_utc > end_utc:
+            return []
+    except (TypeError, ValueError, OverflowError):
+        return []
+    path = _database_path(root)
+    if not path.is_file():
+        return []
+    try:
+        with sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=0.25) as connection:
+            table = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                ("field_observation_history",),
+            ).fetchone()
+            if table is None:
+                return []
+            clauses = [
+                "ticker=?", "configuration_hash=?", "data_contract_hash=?",
+                "status='OBSERVED'",
+            ]
+            params: list[Any] = [
+                ticker, config.config_hash, config.data_contract.config_hash,
+            ]
+            if start_utc is not None:
+                clauses.append("available_at_utc>=?")
+                params.append(start_utc)
+            if end_utc is not None:
+                clauses.append("available_at_utc<=?")
+                params.append(end_utc)
+            rows = connection.execute(
+                "SELECT observation_hash, ticker, field_id, value_json, source_id, "
+                "source_version, source_timezone, as_of_time_utc, available_at_utc, "
+                "configuration_hash, data_contract_hash, sample_count, cohort_id "
+                "FROM field_observation_history WHERE " + " AND ".join(clauses) +
+                " ORDER BY available_at_utc, field_id, observation_hash",
+                tuple(params),
+            ).fetchall()
+    except (OSError, sqlite3.Error):
+        return []
+
+    result: list[Dict[str, Any]] = []
+    for row in rows:
+        (
+            fingerprint, stored_ticker, field_id, value_json, source_id,
+            source_version, source_timezone, as_of_time, available_at,
+            configuration_hash, data_contract_hash, sample_count, cohort_id,
+        ) = row
+        contract = config.data_contract.fields.get(field_id)
+        if (
+            contract is None or source_id != contract.source_id
+            or source_version != contract.source_version
+            or source_timezone != contract.source_timezone
+        ):
+            continue
+        try:
+            value = json.loads(value_json)
+            expected_hash = _observation_fingerprint(
+                stored_ticker, field_id, value_json, source_id, source_version,
+                source_timezone, as_of_time, available_at, configuration_hash,
+                data_contract_hash, sample_count, cohort_id,
+            )
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if fingerprint != expected_hash:
+            continue
+        result.append({
+            "observation_hash": fingerprint,
+            "ticker": stored_ticker,
+            "field_id": field_id,
+            "status": "OBSERVED",
+            "value": value,
+            "source_id": source_id,
+            "source_version": source_version,
+            "source_timezone": source_timezone,
+            "as_of_time": as_of_time,
+            "available_at": available_at,
+            "configuration_hash": configuration_hash,
+            "data_contract_hash": data_contract_hash,
+            "sample_count": sample_count,
+            "cohort_id": cohort_id,
+        })
+    return result
 
 
 def load_latest_valid_observations(
@@ -235,8 +473,8 @@ def collect_source_readiness(
     now = evaluation_time or datetime.now(timezone.utc)
     if now.tzinfo is None or now.utcoffset() is None:
         now = now.replace(tzinfo=timezone.utc)
-    observations = load_observations(root, ticker)
-    for field_id, observation in load_observations(root, "000000").items():
+    observations = load_observations(root, ticker, config)
+    for field_id, observation in load_observations(root, "000000", config).items():
         observations.setdefault(field_id, observation)
     rows = []
     for field_id in IPO_REQUIRED_FIELDS:

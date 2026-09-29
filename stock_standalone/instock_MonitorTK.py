@@ -157,6 +157,10 @@ from linkage_service import get_link_manager
 
 # 全局单例
 logger = init_logging(log_file='instock_tk.log',redirect_print=False) 
+
+# Auction sentiment remains a read-only shadow until a separately reviewed
+# acceptance explicitly authorizes its execution path.
+AUCTION_ORDER_DISPATCH_AUTHORIZED = False
 if query_engine:
     query_engine.set_logger(logger)
 # Windows API 常量
@@ -600,6 +604,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self._dispatch_running = False # ✅ [FIX] 调度运行状态位，防止 Watchdog 重复调度堆积
         self._is_ui_sync_pending = False # 🛡️ [NEW] UI 同步任务待处理标志位
         self._bidding_panel_missing_count = 0
+        self._sentiment_snapshot_lock = threading.Lock()
 
         # [NEW] 初始化同步 Rotator 窗口的专用队列和单 worker 后台长驻发送线程，根治 Window 管理器句柄耗尽崩溃
         import queue
@@ -2315,6 +2320,24 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
             logger.info(f"⚡ [AuctionGate] Triggered {len(new_signals)} NEW auction reversal signals: {[s.code for s in new_signals]}")
 
+            if AUCTION_ORDER_DISPATCH_AUTHORIZED is not True:
+                state = getattr(getattr(self, "auction_engine", None), "last_published_state", None)
+                self._auction_signal_shadow = {
+                    "session_date": today_str,
+                    "state": getattr(state, "value", str(state or "UNKNOWN")),
+                    "candidate_count": len(new_signals),
+                    "candidate_codes": [sig.code for sig in new_signals],
+                    "dispatch_authorized": False,
+                    "observed_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+                }
+                self._bg_auction_gate_run_today = today_str
+                logger.warning(
+                    "[AuctionGate] Read-only candidates for %s: state=%s count=%d; "
+                    "order dispatch remains unauthorized.",
+                    today_str, self._auction_signal_shadow["state"], len(new_signals),
+                )
+                return
+
             # 5. 实例化临时风控覆盖 (RiskLimits override)
             from trading_kernel.engine.risk_gate import RiskLimits
             limits_override = RiskLimits(
@@ -3506,6 +3529,199 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # self._refresh_visible_rows()
 
     # scheduler
+    def schedule_auction_sentiment_shadow_job(self):
+        """Classify the opening auction into the sentiment bus; never dispatch orders."""
+        from datetime import datetime as dt_datetime
+        from zoneinfo import ZoneInfo
+
+        if getattr(self, "_is_closing", False):
+            return
+        now = dt_datetime.now(ZoneInfo("Asia/Shanghai"))
+        today = now.strftime("%Y-%m-%d")
+        minute = now.hour * 100 + now.minute
+        try:
+            if (
+                cct.get_trade_date_status()
+                and 925 <= minute <= 930
+                and getattr(self, "_auction_shadow_done_date", None) != today
+                and not getattr(self, "_auction_shadow_running", False)
+            ):
+                attempts = (
+                    int(getattr(self, "_auction_shadow_attempts", 0))
+                    if getattr(self, "_auction_shadow_attempts_date", None) == today else 0
+                )
+                if attempts < 12:
+                    self._auction_shadow_attempts_date = today
+                    self._auction_shadow_attempts = attempts + 1
+                    self._auction_shadow_running = True
+                    worker = threading.Thread(
+                        target=self._run_auction_sentiment_shadow,
+                        args=(today,), name="AuctionSentimentShadow", daemon=True,
+                    )
+                    try:
+                        worker.start()
+                    except Exception:
+                        self._auction_shadow_running = False
+                        raise
+            delay_ms = (
+                15000 if 925 <= minute <= 930
+                and getattr(self, "_auction_shadow_attempts", 0) < 12 else 60000
+            )
+        except Exception as exc:
+            logger.error("[AuctionSentimentShadow] scheduler failed closed: %s", exc)
+            delay_ms = 60000
+        self._schedule_after(delay_ms, self.schedule_auction_sentiment_shadow_job)
+
+    def _run_auction_sentiment_shadow(self, today: str) -> bool:
+        """Run the auction classifier and publish same-session state without execution."""
+        try:
+            detector = getattr(self, "racing_detector", None)
+            if detector is None:
+                raise RuntimeError("bidding detector is unavailable")
+            fsm = getattr(self, "sentiment_fsm", None)
+            engine = getattr(self, "auction_engine", None)
+            if fsm is None or engine is None:
+                from market_sentiment_fsm import MarketSentimentFSM
+                from auction_decision_engine import AuctionDecisionEngine
+
+                fsm = MarketSentimentFSM()
+                engine = AuctionDecisionEngine(fsm)
+                self.sentiment_fsm = fsm
+                self.auction_engine = engine
+            fsm.load_latest_snapshot(today)
+            bidding = fsm.build_bidding_snapshot(detector)
+            if bidding.date != today or not bidding.stock_snap:
+                raise RuntimeError("auction detector snapshot is empty or belongs to another date")
+
+            candidates = engine.generate_signals(bidding)
+            import market_pulse_db
+
+            published = market_pulse_db.get_current_sentiment_state(today)
+            if published is None:
+                raise RuntimeError("same-session sentiment state was not published")
+            self._auction_sentiment_shadow = {
+                "session_date": today,
+                "state": published["state"],
+                "candidate_count": len(candidates),
+                "published_at": published["available_at"],
+            }
+            self._auction_shadow_done_date = today
+            logger.info(
+                "[AuctionSentimentShadow] %s state=%s candidates=%s; trading path untouched",
+                today, published["state"], len(candidates),
+            )
+            return True
+        except Exception as exc:
+            logger.error("[AuctionSentimentShadow] %s remains unavailable: %s", today, exc)
+            return False
+        finally:
+            self._auction_shadow_running = False
+
+    def schedule_market_sentiment_snapshot_job(self):
+        from datetime import datetime as dt_datetime, time as dt_time
+        from zoneinfo import ZoneInfo
+
+        now = dt_datetime.now(ZoneInfo("Asia/Shanghai"))
+        today = now.strftime("%Y-%m-%d")
+        target = dt_datetime.combine(now.date(), dt_time(15, 5), tzinfo=now.tzinfo)
+        if now >= target and getattr(self, "_sentiment_snapshot_done_date", None) != today:
+            if not cct.get_trade_date_status():
+                self._sentiment_snapshot_done_date = today
+            elif not getattr(self, "_sentiment_snapshot_task_running", False):
+                self._sentiment_snapshot_task_running = True
+                try:
+                    threading.Thread(
+                        target=self._save_market_sentiment_snapshot,
+                        args=(today,), name="MarketSentimentEODSnapshot", daemon=True,
+                    ).start()
+                except Exception as exc:
+                    self._sentiment_snapshot_task_running = False
+                    logger.error("[MarketSentiment] Snapshot worker could not start: %s", exc)
+        self._schedule_after(60 * 1000, self.schedule_market_sentiment_snapshot_job)
+
+    def _save_market_sentiment_snapshot(self, today: str) -> bool:
+        """Persist a validated close snapshot; failures remain retryable."""
+        lock = getattr(self, "_sentiment_snapshot_lock", None)
+        if lock is None:
+            lock = threading.Lock()
+            self._sentiment_snapshot_lock = lock
+        if not lock.acquire(blocking=False):
+            return False
+        self._sentiment_snapshot_task_running = True
+        try:
+            if not cct.get_trade_date_status():
+                self._sentiment_snapshot_done_date = today
+                return True
+            if getattr(self, "_sentiment_snapshot_done_date", None) == today:
+                return True
+            panel = getattr(self, "sector_bidding_panel", None)
+            detector = getattr(panel, "detector", None) if panel is not None else None
+            detector = detector or getattr(self, "racing_detector", None)
+            frame = getattr(self, "df_all", None)
+            if frame is None or getattr(frame, "empty", True) or detector is None:
+                raise RuntimeError("close market frame or sector detector is unavailable")
+
+            if panel is not None and callable(getattr(panel, "on_realtime_data_arrived", None)):
+                panel.on_realtime_data_arrived(frame.copy(), force_update=False)
+                worker = getattr(panel, "_worker", None)
+                if worker is not None:
+                    deadline = time.monotonic() + 60.0
+                    target_count = len(frame)
+                    while time.monotonic() < deadline:
+                        queued = worker.df_queue.qsize() if hasattr(worker, "df_queue") else 0
+                        score_count = len(getattr(detector, "_tick_series", ()))
+                        if queued == 0 and score_count >= target_count * 0.9:
+                            break
+                        time.sleep(0.5)
+                    queued = worker.df_queue.qsize() if hasattr(worker, "df_queue") else 0
+                    if queued != 0 or score_count < target_count * 0.9:
+                        raise RuntimeError(
+                            f"sector detector incomplete: scores={score_count}/{target_count}, queued={queued}"
+                        )
+            target_count = len(frame)
+            tick_series = getattr(detector, "_tick_series", None)
+            score_count = len(tick_series) if tick_series is not None else 0
+            if score_count < target_count * 0.9:
+                raise RuntimeError(
+                    f"sector detector coverage incomplete: {score_count}/{target_count}"
+                )
+            detector.update_scores(skip_evaluate=True)
+
+            sina = getattr(self, "_cached_sina_instance", None)
+            if sina is None:
+                sina = sina_data.Sina(readonly=True)
+                self._cached_sina_instance = sina
+            index_frame = sina.get_stock_list_data(["000001"], index=True)
+            if index_frame is None or index_frame.empty:
+                raise RuntimeError("SSE index quote is unavailable")
+            index_keys = {str(key): key for key in index_frame.index}
+            row = index_frame.loc[index_keys["000001"]] if "000001" in index_keys else index_frame.iloc[0]
+            previous_close = float(row.get("llastp", 0) or 0)
+            current_price = float(row.get("now", 0) or 0)
+            if previous_close <= 0 or current_price <= 0:
+                raise RuntimeError("SSE index quote has invalid prices")
+
+            fsm = getattr(self, "sentiment_fsm", None)
+            if fsm is None:
+                from market_sentiment_fsm import MarketSentimentFSM
+                fsm = MarketSentimentFSM()
+                self.sentiment_fsm = fsm
+            snapshot = fsm.save_daily_snapshot(
+                detector, frame, (current_price - previous_close) / previous_close * 100.0,
+                date_str=today,
+            )
+            if snapshot is None:
+                raise RuntimeError("daily sentiment snapshot was not persisted")
+            self._sentiment_snapshot_done_date = today
+            logger.warning("[MarketSentiment] Persisted validated daily snapshot for %s", today)
+            return True
+        except Exception as exc:
+            logger.error("[MarketSentiment] Daily snapshot remains pending for retry: %s", exc)
+            return False
+        finally:
+            self._sentiment_snapshot_task_running = False
+            lock.release()
+
     def schedule_15_30_job(self):
         import datetime as dt
         now = datetime.now()
@@ -3553,6 +3769,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         today = cct.get_today()
         if getattr(self, "_eod_completed_date", None) == today:
             logger.warning(f"[15:30 Task] skip: all EOD tasks already completed for {today}")
+            self._save_market_sentiment_snapshot(today)
             return
 
         # ── STEP 1: 准备 SectorBiddingPanel 并喂数 ──────────────────────────────
@@ -3627,6 +3844,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         logger.error(f"[15:30 Task] SectorBiddingPanel 自动保存失败: {e}")
                 else:
                     logger.warning("[15:30 Task] STEP 1 ⚠ No valid panel instance, skipping SectorBiddingPanel save.")
+
+            self._save_market_sentiment_snapshot(today)
 
         except Exception as global_e:
             logger.error(f"[15:30 Task] STEP 1 ❌ Exception: {global_e}\n{traceback.format_exc()}")
@@ -7027,6 +7246,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self._schedule_after(10000, self.controlled_gc_loop)  # 🚀 [NEW] 定期内存/句柄自愈清理
         self._schedule_after(28000, self.KLineMonitor_init)
         self._schedule_after(58000, self.schedule_15_30_job)
+        self._schedule_after(58000, self.schedule_market_sentiment_snapshot_job)
+        self._schedule_after(58000, self.schedule_auction_sentiment_shadow_job)
 
     def controlled_gc_loop(self):
         """
