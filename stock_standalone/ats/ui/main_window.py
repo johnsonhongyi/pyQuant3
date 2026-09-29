@@ -1854,13 +1854,21 @@ class ATSMainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
+        # 1. 新股次新股超短检测工具开关 (ipo_detector，控制后台拉起独立检测器小窗口；有独立入口故默认 False 不自动启动)
         ipo_enabled = getattr(
-            cct, "ipo_detector", getattr(getattr(cct, "CFG", None), "ipo_detector", True)
+            cct, "ipo_detector", getattr(getattr(cct, "CFG", None), "ipo_detector", False)
         )
         self._ipo_detector_enabled = bool(ipo_enabled)
+
+        # 2. IPO 情绪感知与自学习监控 Tab 5 开关 (ipo_learning_console，独立解耦，默认建议关闭以杜绝 ATS 界面卡顿)
+        learning_console_enabled = getattr(
+            cct, "ipo_learning_console", getattr(getattr(cct, "CFG", None), "ipo_learning_console", False)
+        )
+        self._ipo_learning_console_enabled = bool(learning_console_enabled)
         logger.info(
-            "[ATSMainWindow] IPO monitor enabled=%s config=%s",
+            "[ATSMainWindow] IPO monitor enabled=%s, learning_console enabled=%s config=%s",
             self._ipo_detector_enabled,
+            self._ipo_learning_console_enabled,
             getattr(getattr(cct, "CFG", None), "cfg_file", "unknown"),
         )
         app = QApplication.instance()
@@ -2432,13 +2440,13 @@ class ATSMainWindow(QMainWindow):
         mark_checkpoint("03.3.6 NextDayWatchPanel (Tab 4)")
 
         self.ipo_learning_console = None
-        if self._ipo_detector_enabled:
+        if self._ipo_learning_console_enabled:
             from ats.ui.ipo_learning_console import IPOLearningConsole
             self.ipo_learning_console = IPOLearningConsole(parent=self)
             self.top_tabs.addTab(self.ipo_learning_console, "🤖 IPO 自学习监控")
             mark_checkpoint("03.3.7 IPOLearningConsole (Read-only Learning Monitor)")
         else:
-            mark_checkpoint("03.3.7 IPOLearningConsole skipped by ipo_detector=False")
+            mark_checkpoint("03.3.7 IPOLearningConsole skipped by ipo_learning_console=False")
 
         self.top_tabs.currentChanged.connect(self._on_top_tab_changed)
         
