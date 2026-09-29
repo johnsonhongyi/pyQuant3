@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 import math
-from typing import List, Optional
+from typing import List, Mapping, Optional
 
 from ats.strategy.ipo_live_heat_engine import IPOLiveHeatSnapshot
 from ats.strategy.ipo_regime_fsm import IPORegimeSnapshot, IPORegimeState
@@ -39,6 +39,17 @@ def _finite(value: object) -> bool:
 class T1CarryEvaluator:
     ALLOW_THRESHOLD = 65.0
     CAUTION_THRESHOLD = 40.0
+
+    def __init__(self, thresholds: Optional[Mapping[str, object]] = None) -> None:
+        if thresholds is not None and not isinstance(thresholds, Mapping):
+            raise ValueError("invalid T1 Carry thresholds")
+        values = thresholds or {}
+        allow = values.get("allow_threshold", self.ALLOW_THRESHOLD)
+        caution = values.get("caution_threshold", self.CAUTION_THRESHOLD)
+        if not (_finite(allow) and _finite(caution) and 0 <= caution < allow <= 100):
+            raise ValueError("invalid T1 Carry thresholds")
+        self.allow_threshold = float(allow)
+        self.caution_threshold = float(caution)
 
     @staticmethod
     def _blocked(reason: str, detail: str, live_heat: Optional[IPOLiveHeatSnapshot]) -> T1CarryResult:
@@ -155,14 +166,14 @@ class T1CarryEvaluator:
             state, veto = T1CarryState.BLOCK, "LIVE_HEAT_EXTREME_OVERHEAT_VETO"
         elif ipo_regime.state == "EXHAUSTION":
             state, veto = T1CarryState.BLOCK, "IPO_REGIME_EXHAUSTION_VETO"
-        elif score >= self.ALLOW_THRESHOLD and live_heat.nonlinear_zone != "EXTREME":
+        elif score >= self.allow_threshold and live_heat.nonlinear_zone != "EXTREME":
             state, veto = T1CarryState.ALLOW, ""
-            positive.append(f"T1 Carry 综合评分达标({score:.1f} >= {self.ALLOW_THRESHOLD:.1f})")
-        elif score >= self.CAUTION_THRESHOLD:
+            positive.append(f"T1 Carry 综合评分达标({score:.1f} >= {self.allow_threshold:.1f})")
+        elif score >= self.caution_threshold:
             state, veto = T1CarryState.CAUTION, ""
             negative.append("T1 Carry 处于谨慎观察区，严禁直接买入放行")
         else:
-            state, veto = T1CarryState.BLOCK, f"SCORE_BELOW_THRESHOLD ({score:.1f} < {self.CAUTION_THRESHOLD:.1f})"
+            state, veto = T1CarryState.BLOCK, f"SCORE_BELOW_THRESHOLD ({score:.1f} < {self.caution_threshold:.1f})"
 
         return T1CarryResult(
             score=round(score, 1),

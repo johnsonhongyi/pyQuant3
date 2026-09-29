@@ -6,3 +6,6 @@
 !tests/test_multi_day_realtime_updating.py
 !tests/test_channel_secondary_buy_strategy.py
 !trading_kernel/tests/test_auto_ladder.py
+!ats/strategy/test_ipo_shadow_observations.py
+!tests/test_ipo_standalone_linkage.py
+data/ipo_learning/shadow_observations.sqlite

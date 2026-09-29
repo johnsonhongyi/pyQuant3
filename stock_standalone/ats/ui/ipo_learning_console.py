@@ -1163,11 +1163,17 @@ def _collect_snapshot(root: Path) -> Dict[str, Any]:
             shadow_status = (
                 f"回放存在 {replay_summary.get('unready_cutoff_count', 0)} 个未就绪时点，影子评估阻断"
             )
+        shadow_learning = _read_json(
+            root / "data" / "ipo_learning" / "shadow_learning.latest.json"
+        ) or {}
+        local_training = str(shadow_learning.get("state", "NOT_STARTED"))
+        local_training_count = _nonnegative_count(shadow_learning.get("sample_count"))
         offline_pipeline_detail = (
             f"离线样本校验/事件分组前向切分/影子指标评估 {DATASET_SCHEMA_VERSION} 已实现；"
             f"Gate 完整输入快照 {snapshot_summary['snapshot_count']} 条，待结果标签 {snapshot_summary['waiting_outcome_count']} 条；"
             f"封存仓库 {dataset_status}；回放：{shadow_status}；"
-            "Gate 决策快照保存规则 Proposal；D1-D3 成熟标签采集已接入并待人工复核；复盘 Agent 请求、训练执行器和模型晋级仍未接入"
+            f"只读情绪候选训练 {local_training} / 已审核样本 {local_training_count}；"
+            "Gate 决策快照保存规则 Proposal；D1-D3 成熟标签采集已接入并待人工复核；LLM SFT/DPO 训练执行器和模型晋级仍未接入"
         )
         effect_metrics = replay_summary.get("effect_metrics", {})
         measured_metric_count = sum(
@@ -1207,6 +1213,8 @@ def _collect_snapshot(root: Path) -> Dict[str, Any]:
         snapshot_rows = []
         offline_pipeline_detail = "离线样本与影子评估模块不可用；训练保持关闭"
         effect_metric_status = "效果指标不可用"
+        local_training = "UNAVAILABLE"
+        local_training_count = 0
     if len(stage_rows) > 4:
         stage_rows[4]["detail"] = f"{stage_rows[4]['detail']}；{offline_pipeline_detail}"
 
@@ -1790,7 +1798,7 @@ def _collect_snapshot(root: Path) -> Dict[str, Any]:
             "replay_unready_cutoff_count": replay_summary["unready_cutoff_count"],
             "effect_metric_status": effect_metric_status,
             "measured_effect_metric_count": measured_metric_count if replay_summary["status"] == "AVAILABLE" else 0,
-            "training_status": "训练执行器未接入",
+            "training_status": f"只读候选 {local_training} ({local_training_count} 样本)；LLM 训练待接入",
             "shadow_status": shadow_status,
             "promotion_status": "模型切换关闭",
         },
@@ -2188,7 +2196,59 @@ class _SourceAcquisitionWorker(QThread):
         try:
             from tools.run_ipo_data_acquisition import run_cycle
 
-            result = run_cycle(self._ticker, collect_labels=self._collect_labels, root=self._root)
+            ticker = self._ticker
+            auto_reason = ""
+            if ticker == "AUTO":
+                from ats.strategy.ipo_eastmoney_sources import fetch_issue_calendar_rows
+
+                try:
+                    rows = fetch_issue_calendar_rows(page_size=500)
+                except Exception:
+                    rows = []
+                today = datetime.now(ZoneInfo("Asia/Shanghai")).date()
+                candidates = []
+                for row in rows:
+                    if not isinstance(row, dict):
+                        continue
+                    code = str(row.get("SECURITY_CODE") or "").strip()
+                    try:
+                        listed = date.fromisoformat(str(row.get("LISTING_DATE") or "")[:10])
+                    except ValueError:
+                        continue
+                    if len(code) == 6 and code.isdigit() and listed <= today:
+                        candidates.append((listed, code))
+                if candidates:
+                    latest = max(item[0] for item in candidates)
+                    latest_codes = sorted({code for listed, code in candidates if listed == latest})
+                    ticker = latest_codes[int(time.time() // 300) % len(latest_codes)]
+                else:
+                    self.completed.emit({
+                        "status": "UNREADY", "reason": "上市日历不可用；请输入六位标的代码后重试",
+                        "auto_selected_ticker": "", "auto_selection_reason": "AUTO 选股失败",
+                    })
+                    return
+            result = run_cycle(ticker, collect_labels=self._collect_labels, root=self._root)
+            result["auto_selected_ticker"] = ticker if self._ticker == "AUTO" else ""
+            result["auto_selection_reason"] = auto_reason
+            try:
+                from ats.strategy.ipo_gate_context_provider import get_default_ipo_gate_context_provider
+                from ats.strategy.ipo_shadow_observations import (
+                    capture_shadow_observation, train_shadow_candidate,
+                )
+                from types import SimpleNamespace
+
+                reader = get_default_ipo_gate_context_provider(self._root)
+                result["gate_reader_refresh"] = "SYNCED" if reader.refresh() else "UNREADY"
+                result["gate_reader_status"] = reader.status_snapshot()
+                if result["gate_reader_refresh"] == "SYNCED":
+                    context = reader(SimpleNamespace(code=ticker))
+                    result["shadow_learning"] = capture_shadow_observation(
+                        self._root, ticker, context,
+                    )
+                if self._collect_labels:
+                    result["shadow_training"] = train_shadow_candidate(self._root)
+            except Exception as exc:
+                result["gate_reader_refresh"] = f"UNREADY:{type(exc).__name__}"
         except Exception as exc:
             result = {"status": "UNREADY", "reason": type(exc).__name__}
         self.completed.emit(result)
@@ -2239,6 +2299,7 @@ class IPOLearningConsole(QWidget):
         self._runtime_control = None
         self._source_worker: Optional[_SourceAcquisitionWorker] = None
         self._build_ui()
+        self.content_tabs.setCurrentIndex(0)
         if self._simulation_read_only:
             self.lbl_boundary.setText(
                 "仿真只读监控：行情与指标为合成数据；本次 Provider 调用不构成 Stage 验收、"
@@ -2263,14 +2324,14 @@ class IPOLearningConsole(QWidget):
             self._source_auto_timer = QTimer(self)
             market_active = _is_market_session_active()
             self._source_auto_timer.setInterval(
-                5 * 60 * 1000 if market_active else 60 * 1000
+                5 * 60 * 1000 if market_active else 60 * 60 * 1000
             )
             self._source_auto_timer.timeout.connect(self._on_source_auto_tick)
             self._source_auto_timer.start()
             # Refresh static and daily sources once on ATS cold start, including
             # outside market hours. Intraday fields remain unready until sourced.
             QTimer.singleShot(
-                2500, lambda: self._start_source_collection(collect_labels=False)
+                2500, lambda: self._start_source_collection(collect_labels=True)
             )
 
     def _build_ui(self) -> None:
@@ -2346,7 +2407,8 @@ class IPOLearningConsole(QWidget):
         self.lbl_boundary.setStyleSheet("color: #f0c674; padding: 4px;")
         overview_layout.addWidget(self.lbl_boundary)
         self.lbl_operator_guide = QLabel(
-            "启动：python tools/run_ipo_learning_console.py。推荐顺序：①数据契约与时效：看字段状态并运行采集；"
+            "已自动启动只读监控；启动后采集并扫描成熟标签，交易时段每 5 分钟、休市每小时更新。"
+            "从①数据与采集查看 41 项完成度与阻断原因；"
             "②单股因果与状态告警：看 Gate 阻断原因；"
             "③盘后生成 D1-D3 标签，再到成熟标签页人工复核；④回放效果验收：看已量化指标。"
         )
@@ -2424,10 +2486,10 @@ class IPOLearningConsole(QWidget):
         )
         contracts_layout.addWidget(self.lbl_contract_status)
         source_actions = QHBoxLayout()
-        self.edt_acquisition_code = QLineEdit("301689")
+        self.edt_acquisition_code = QLineEdit("AUTO")
         self.edt_acquisition_code.setMaxLength(6)
         self.edt_acquisition_code.setFixedWidth(86)
-        self.edt_acquisition_code.setPlaceholderText("六位代码")
+        self.edt_acquisition_code.setPlaceholderText("AUTO/六位代码")
         self.btn_collect_issue_price = QPushButton("采集可用数据并自检")
         self.btn_collect_issue_price.clicked.connect(self._collect_supported_source)
         self.btn_collect_labels = QPushButton("盘后生成 D1-D3 标签")
@@ -2437,7 +2499,7 @@ class IPOLearningConsole(QWidget):
         )
         self.btn_collect_labels.clicked.connect(self._collect_matured_labels)
         self.lbl_acquisition_status = QLabel(
-            "ATS 启动后约 2.5 秒后台采集一次；交易时段每 5 分钟自动采集，休市每 60 秒仅更新状态，可手动采集日线/静态数据。"
+            "启动后约 2.5 秒后台采集并扫描成熟标签；交易时段每 5 分钟、休市每小时自动更新。"
         )
         self.lbl_acquisition_status.setWordWrap(True)
         source_actions.addWidget(QLabel("标的"))
@@ -3417,11 +3479,10 @@ class IPOLearningConsole(QWidget):
 
     def _on_source_auto_tick(self) -> None:
         market_active = _is_market_session_active()
-        interval_ms = 5 * 60 * 1000 if market_active else 60 * 1000
+        interval_ms = 5 * 60 * 1000 if market_active else 60 * 60 * 1000
         if self._source_auto_timer.interval() != interval_ms:
             self._source_auto_timer.setInterval(interval_ms)
-        if market_active:
-            self._start_source_collection(collect_labels=True)
+        self._start_source_collection(collect_labels=True)
 
     def _start_source_collection(self, collect_labels: bool) -> None:
         if self._simulation_read_only:
@@ -3429,8 +3490,8 @@ class IPOLearningConsole(QWidget):
         if self._source_worker is not None and self._source_worker.isRunning():
             return
         ticker = self.edt_acquisition_code.text().strip()
-        if len(ticker) != 6 or not ticker.isdigit():
-            self.lbl_acquisition_status.setText("请输入六位数字股票代码。")
+        if ticker != "AUTO" and (len(ticker) != 6 or not ticker.isdigit()):
+            self.lbl_acquisition_status.setText("请输入 AUTO 或六位数字股票代码。")
             return
         self.btn_collect_issue_price.setEnabled(False)
         self.btn_collect_labels.setEnabled(False)
@@ -3448,6 +3509,15 @@ class IPOLearningConsole(QWidget):
         count = _nonnegative_count(result.get("ready_count"))
         required = _nonnegative_count(result.get("required_count"))
         parts = []
+        selected = _safe_text(result.get("auto_selected_ticker"), 6)
+        if selected:
+            self._active_ticker = selected
+            parts.append(f"AUTO 当前标的 {selected}")
+        elif len(self.edt_acquisition_code.text().strip()) == 6:
+            self._active_ticker = self.edt_acquisition_code.text().strip()
+        auto_reason = _safe_text(result.get("auto_selection_reason"), 100)
+        if auto_reason:
+            parts.append(auto_reason)
         for key, label in (
             ("acquisition", "发行日历"), ("ipo_facts", "IPO先验"),
             ("listing_anchors", "首日锚点"),
@@ -3468,10 +3538,28 @@ class IPOLearningConsole(QWidget):
                     parts.append(f"{label}诊断:{component_reason}")
         bridge = result.get("gate_data_bridge", {})
         if isinstance(bridge, dict):
-            bridge_state = bridge.get("reader_state", "NOT_RUNNING")
-            bridge_age = bridge.get("reader_age_seconds")
-            age_text = f"{bridge_age:.0f}s" if isinstance(bridge_age, (int, float)) else "无心跳"
-            parts.append(f"ATS只读同步{bridge_state}/{age_text}；类型化门禁上下文未就绪")
+            reader = result.get("gate_reader_status", {})
+            if isinstance(reader, dict) and reader:
+                bridge_state = reader.get("state", "UNREADY")
+                context_state = "已就绪" if reader.get("typed_gate_contexts_ready") is True else "未就绪"
+                parts.append(f"ATS只读同步{bridge_state}；类型化门禁上下文{context_state}")
+            else:
+                bridge_state = bridge.get("reader_state", "NOT_RUNNING")
+                bridge_age = bridge.get("reader_age_seconds")
+                age_text = f"{bridge_age:.0f}s" if isinstance(bridge_age, (int, float)) else "无心跳"
+                parts.append(f"ATS只读同步{bridge_state}/{age_text}；类型化门禁上下文未就绪")
+        observation = result.get("shadow_learning", {})
+        if isinstance(observation, dict) and observation:
+            parts.append(
+                f"情绪观察{observation.get('state', 'UNREADY')}/"
+                f"{_nonnegative_count(observation.get('observed_field_count'))}项有效字段"
+            )
+        training = result.get("shadow_training", {})
+        if isinstance(training, dict) and training:
+            parts.append(
+                f"只读候选学习{training.get('state', 'UNREADY')}/"
+                f"{_nonnegative_count(training.get('sample_count'))}条已审核样本"
+            )
         label_reports = result.get("label_reports", [])
         if isinstance(label_reports, list) and label_reports:
             label_rows = [
