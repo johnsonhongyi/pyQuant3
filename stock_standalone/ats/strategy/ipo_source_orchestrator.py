@@ -515,7 +515,7 @@ def collect_source_readiness(
         "configuration_hash": config.config_hash if config else "",
         "data_contract_hash": config.data_contract.config_hash if config else "",
         "observations": rows,
-        "next_actions": [row for row in rows if row["status"] != "READY"][:20],
+        "next_actions": [row for row in rows if row["status"] != "READY"],
     }
 
 
@@ -567,6 +567,50 @@ def collect_issue_prices_from_eastmoney(root: str | Path) -> Dict[str, Any]:
         }
     except Exception as exc:
         return {"status": "UNREADY", "field_id": "issue_price", "saved_count": 0, "reason": f"发行日历采集异常: {type(exc).__name__}"}
+
+
+def collect_issue_prices_from_ats_cache(root: str | Path, ticker: str | None = None) -> Dict[str, Any]:
+    """Reuse ATS's persisted IPO calendar when its per-price provenance is valid."""
+    path = Path(root).resolve() / "config" / "new_stock_ipo_calendar.json"
+    try:
+        if path.stat().st_size > 4 * 1024 * 1024:
+            raise ValueError("ATS 日历超过读取上限")
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        items = payload.get("items") if isinstance(payload, dict) else None
+        if not isinstance(items, dict):
+            raise ValueError("ATS 日历结构无效")
+        config = IPODecisionConfigSnapshot.from_yaml(
+            str(Path(root).resolve() / "config" / "ipo_sentiment.yaml")
+        )
+        saved = []
+        for code, row in items.items():
+            if ticker is not None and code != ticker:
+                continue
+            if not isinstance(row, dict) or not isinstance(code, str):
+                continue
+            price = row.get("issue_price")
+            source = row.get("issue_price_source")
+            if not isinstance(source, dict) or not isinstance(price, (int, float)) or isinstance(price, bool) or price <= 0:
+                continue
+            observation = {
+                "status": "OBSERVED", "value": float(price),
+                "source_id": source.get("source_id"),
+                "source_version": source.get("source_version"),
+                "source_timezone": source.get("source_timezone"),
+                "as_of_time": source.get("as_of_time"),
+                "available_at": source.get("available_at"),
+            }
+            if store_observation(root, ticker=code, field_id="issue_price", observation=observation, config=config):
+                saved.append(code)
+        return {
+            "status": "READY" if saved else "UNREADY", "field_id": "issue_price",
+            "saved_count": len(saved), "tickers": saved,
+            "source": "ATS persisted IPO calendar",
+            "reason": "ATS 日历发行价已通过逐笔来源与时效校验" if saved else "ATS 日历无可核验且新鲜的发行价",
+        }
+    except (OSError, UnicodeError, ValueError, TypeError) as exc:
+        return {"status": "UNREADY", "field_id": "issue_price", "saved_count": 0,
+                "reason": f"ATS 日历不可用: {type(exc).__name__}"}
 
 
 def collect_issue_price_from_eastmoney(root: str | Path, ticker: str) -> Dict[str, Any]:

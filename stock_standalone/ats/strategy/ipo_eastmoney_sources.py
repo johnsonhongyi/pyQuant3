@@ -314,31 +314,32 @@ def collect_financing_balance_change(root: str | Path) -> Dict[str, Any]:
 
 
 def collect_listing_supply_pace(root: str | Path, lookahead_days: int = 20) -> Dict[str, Any]:
-    """Count IPOs with an announced listing date in the next 20 calendar days."""
+    """Count source-dated IPO listings in the trailing calendar window."""
     try:
         config = IPODecisionConfigSnapshot.from_yaml(
             str(Path(root).resolve() / "config" / "ipo_sentiment.yaml")
         )
         rows = fetch_issue_calendar_rows(page_size=500)
         today = datetime.now(ZoneInfo(_TZ)).date()
-        end_day = today.fromordinal(today.toordinal() + max(1, min(int(lookahead_days), 60)))
+        start_day = today - timedelta(days=max(1, min(int(lookahead_days), 60)) - 1)
         listing_codes = set()
         source_times = []
         for row in rows:
             ticker = str(row.get("SECURITY_CODE") or "").strip().zfill(6)
             source_time = _source_time(row.get("UP_DATE"))
-            if source_time:
-                source_times.append(source_time)
+            if not source_time:
+                continue
             raw_date = str(row.get("LISTING_DATE") or "")[:10]
             try:
                 listing_day = datetime.fromisoformat(raw_date).date()
             except ValueError:
                 continue
-            if ticker.isdigit() and today <= listing_day <= end_day:
+            if len(ticker) == 6 and ticker.isdigit() and start_day <= listing_day <= today:
                 listing_codes.add(ticker)
+                source_times.append(source_time)
         if not source_times:
             return {"status": "UNREADY", "saved_fields": [],
-                    "reason": "发行日历没有带更新时间的近20日上市计划"}
+                    "reason": "近20日上市记录缺少可核验的来源更新时间"}
         as_of = max(source_times)
         value = len(listing_codes)
         saved = store_observation(
@@ -349,7 +350,7 @@ def collect_listing_supply_pace(root: str | Path, lookahead_days: int = 20) -> D
         return {
             "status": "READY" if saved else "UNREADY",
             "saved_fields": ["listing_supply_pace"] if saved else [],
-            "lookahead_days": (end_day - today).days,
+            "lookback_days": (today - start_day).days + 1,
             "announced_listings": value, "as_of_time": as_of,
             "reason": "" if saved else "上市供给数据未通过字段来源/时区/TTL契约",
         }

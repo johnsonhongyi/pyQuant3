@@ -10,8 +10,83 @@ from zoneinfo import ZoneInfo
 
 from ats.strategy.ipo_data_contracts import IPODecisionConfigSnapshot
 from ats.strategy.ipo_shadow_observations import (
-    capture_shadow_observation, train_shadow_candidate,
+    ats_signal_paper_outcomes, capture_ats_signal_observation,
+    capture_shadow_observation, learn_ats_signal_quality, train_shadow_candidate,
 )
+
+
+def test_ats_signal_capture_requires_fresh_source_time_and_commits(tmp_path):
+    computed = datetime(2026, 9, 29, 2, 0, tzinfo=timezone.utc)
+    signal = {
+        "ticker": "920202", "status": "OBSERVED", "source_time_verified": True,
+        "source_as_of": (computed - timedelta(seconds=10)).isoformat(),
+        "bar_as_of": (computed - timedelta(seconds=60)).isoformat(),
+        "computed_at": computed.isoformat(), "signal_type": "PULLBACK_BUY",
+        "signal_tier": "S", "price": 26.16, "vwap": 25.8,
+        "vwap_diff_pct": 1.4, "horse_race_score": 75.0,
+    }
+    result = capture_ats_signal_observation(
+        tmp_path, signal, configuration_hash="a" * 64, data_contract_hash="b" * 64,
+    )
+    assert result["state"] == "CAPTURED"
+    assert result["training_eligible"] is False
+    with sqlite3.connect(tmp_path / "data/ipo_learning/shadow_observations.sqlite") as db:
+        assert db.execute("SELECT COUNT(*) FROM ats_signal_observations").fetchone()[0] == 1
+    signal["source_as_of"] = (computed - timedelta(seconds=121)).isoformat()
+    assert capture_ats_signal_observation(
+        tmp_path, signal, configuration_hash="a" * 64, data_contract_hash="b" * 64,
+    )["state"] == "UNREADY"
+    signal["source_as_of"] = (computed - timedelta(seconds=10)).isoformat()
+    signal["bar_as_of"] = (computed - timedelta(seconds=301)).isoformat()
+    assert capture_ats_signal_observation(
+        tmp_path, signal, configuration_hash="a" * 64, data_contract_hash="b" * 64,
+    )["state"] == "UNREADY"
+
+
+def test_signal_outcome_uses_complete_paper_exit_and_both_side_fees(tmp_path):
+    observed = datetime(2026, 9, 28, 2, 0, tzinfo=timezone.utc)
+    signal = {
+        "ticker": "920202", "status": "OBSERVED", "source_time_verified": True,
+        "source_as_of": (observed - timedelta(seconds=10)).isoformat(),
+        "bar_as_of": (observed - timedelta(seconds=60)).isoformat(),
+        "computed_at": observed.isoformat(), "signal_type": "PULLBACK_BUY",
+        "signal_tier": "S", "price": 10.0, "vwap": 9.9,
+        "vwap_diff_pct": 1.0, "horse_race_score": 70.0,
+    }
+    assert capture_ats_signal_observation(
+        tmp_path, signal, configuration_hash="a" * 64, data_contract_hash="b" * 64,
+    )["state"] == "CAPTURED"
+    ledger = tmp_path / "ats/config/ipo_trading_ledger.json"
+    ledger.parent.mkdir(parents=True)
+    buy_time = observed.timestamp() + 20
+    sell_time = buy_time + 86400
+    ledger.write_text(json.dumps({"signal_iteration_log": [
+        {"code": "920202", "action": "BUY", "execution_status": "EXECUTED",
+         "timestamp": buy_time, "price": 10.0, "shares": 100, "directive_id": "buy"},
+        {"code": "920202", "action": "SELL", "execution_status": "EXECUTED",
+         "timestamp": sell_time, "price": 10.1, "shares": 100, "directive_id": "sell"},
+    ]}), encoding="utf-8")
+    result = ats_signal_paper_outcomes(tmp_path)
+    assert result["closed_count"] == 1
+    assert result["outcomes"][0]["fees"] == 5.15
+    assert result["outcomes"][0]["net_pnl"] == 4.85
+    assert result["training_eligible"] is False
+    learned = learn_ats_signal_quality(tmp_path, result)
+    assert learned["state"] == "WAITING_MORE_PAPER_OUTCOMES"
+    assert learned["groups"][0]["state"] == "INSUFFICIENT_SAMPLES"
+    assert learned["entry_authorized"] is False
+
+
+def test_signal_quality_requires_forward_positive_paper_returns(tmp_path):
+    outcomes = [
+        {"signal_type": "PULLBACK_BUY", "signal_tier": "S", "as_of_time": f"2026-09-{day:02d}",
+         "observation_hash": str(day), "net_return_pct": 1.0 if day < 9 else -1.0}
+        for day in range(1, 11)
+    ]
+    result = learn_ats_signal_quality(tmp_path, {"outcomes": outcomes})
+    assert result["state"] == "SHADOW_CANDIDATES"
+    assert result["groups"][0]["state"] == "PAPER_NONPOSITIVE_CANDIDATE"
+    assert result["entry_authorized"] is False
 
 
 def test_shadow_capture_excludes_future_available_fields(tmp_path):

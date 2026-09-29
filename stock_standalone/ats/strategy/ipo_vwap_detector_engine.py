@@ -670,6 +670,11 @@ class IPOVWAPDetectorEngine:
         try:
             # 1. 增量极速获取 10 日多日分时与 VWAP 数据
             df_multi, bars_ms = self._fetch_multi_day_bars_fast(clean_code, days=10, day_df=day_df)
+            if df_multi is not None and not df_multi.empty and {"date", "time_only"}.issubset(df_multi.columns):
+                last_bar = df_multi.iloc[-1]
+                sig.extra_data["ipo_source_bar_as_of"] = (
+                    f"{str(last_bar['date'])[:10]}T{str(last_bar['time_only'])[:8]}"
+                )
                 
             t_strat_start = time.perf_counter()
             if df_multi is not None and not df_multi.empty:

@@ -1166,6 +1166,27 @@ def _collect_snapshot(root: Path) -> Dict[str, Any]:
         shadow_learning = _read_json(
             root / "data" / "ipo_learning" / "shadow_learning.latest.json"
         ) or {}
+        local_llm_observation = _read_json(
+            root / "data" / "ipo_learning" / "local_llm_observation.latest.json",
+            max_bytes=16 * 1024,
+        ) or {}
+        shadow_observations = {"count": 0, "ticker": "", "cutoff": "", "fields": 0}
+        shadow_db = root / "data" / "ipo_learning" / "shadow_observations.sqlite"
+        if shadow_db.is_file():
+            try:
+                with sqlite3.connect(shadow_db.as_uri() + "?mode=ro", uri=True, timeout=0.2) as connection:
+                    count = connection.execute("SELECT COUNT(*) FROM shadow_observations").fetchone()[0]
+                    latest = connection.execute(
+                        "SELECT ticker, cutoff, payload_json FROM shadow_observations ORDER BY cutoff DESC LIMIT 1"
+                    ).fetchone()
+                shadow_observations["count"] = int(count)
+                if latest:
+                    shadow_observations.update({
+                        "ticker": latest[0], "cutoff": latest[1],
+                        "fields": len(json.loads(latest[2]).get("fields", {})),
+                    })
+            except (sqlite3.Error, ValueError, TypeError, KeyError):
+                pass
         local_training = str(shadow_learning.get("state", "NOT_STARTED"))
         local_training_count = _nonnegative_count(shadow_learning.get("sample_count"))
         offline_pipeline_detail = (
@@ -1775,6 +1796,8 @@ def _collect_snapshot(root: Path) -> Dict[str, Any]:
         "interaction_summary": interaction_summary,
         "rule_path": "确定性规则路径；LLM 结果只读且不参与下单",
         "learning_status": learning_status,
+        "shadow_observations": shadow_observations,
+        "local_llm_observation": local_llm_observation,
         "learning_progress": {
             "pending_reviews": pending_reviews,
             "accepted_reviews": review_counts["ACCEPTED"],
@@ -2194,15 +2217,15 @@ class _SourceAcquisitionWorker(QThread):
 
     def run(self) -> None:
         try:
-            from tools.run_ipo_data_acquisition import run_cycle
+            from tools.run_ipo_data_acquisition import run_ats_learning_cycle
 
             ticker = self._ticker
             auto_reason = ""
             if ticker == "AUTO":
-                from ats.strategy.ipo_eastmoney_sources import fetch_issue_calendar_rows
+                from ats.new_stock_fetcher import NewStockFetcher
 
                 try:
-                    rows = fetch_issue_calendar_rows(page_size=500)
+                    rows = NewStockFetcher.get_instance().get_combined_new_stocks().to_dict("records")
                 except Exception:
                     rows = []
                 today = datetime.now(ZoneInfo("Asia/Shanghai")).date()
@@ -2210,24 +2233,26 @@ class _SourceAcquisitionWorker(QThread):
                 for row in rows:
                     if not isinstance(row, dict):
                         continue
-                    code = str(row.get("SECURITY_CODE") or "").strip()
+                    code = str(row.get("code") or "").strip()
                     try:
-                        listed = date.fromisoformat(str(row.get("LISTING_DATE") or "")[:10])
+                        listed = date.fromisoformat(str(row.get("listing_date") or "")[:10])
                     except ValueError:
                         continue
-                    if len(code) == 6 and code.isdigit() and listed <= today:
+                    if (len(code) == 6 and code.isdigit() and listed <= today
+                            and str(row.get("status") or "") != "待上市"):
                         candidates.append((listed, code))
                 if candidates:
-                    latest = max(item[0] for item in candidates)
-                    latest_codes = sorted({code for listed, code in candidates if listed == latest})
-                    ticker = latest_codes[int(time.time() // 300) % len(latest_codes)]
+                    ordered = sorted(set(candidates), key=lambda item: (-item[0].toordinal(), item[1]))
+                    index = int(time.time() // 300) % len(ordered)
+                    ticker = ordered[index][1]
+                    auto_reason = f"ATS 新股/次新股巡检 {index + 1}/{len(ordered)}"
                 else:
                     self.completed.emit({
-                        "status": "UNREADY", "reason": "上市日历不可用；请输入六位标的代码后重试",
+                        "status": "UNREADY", "reason": "ATS 新股/次新股表不可用；请输入六位标的代码后重试",
                         "auto_selected_ticker": "", "auto_selection_reason": "AUTO 选股失败",
                     })
                     return
-            result = run_cycle(ticker, collect_labels=self._collect_labels, root=self._root)
+            result = run_ats_learning_cycle(ticker, collect_labels=self._collect_labels, root=self._root)
             result["auto_selected_ticker"] = ticker if self._ticker == "AUTO" else ""
             result["auto_selection_reason"] = auto_reason
             try:
@@ -2298,6 +2323,7 @@ class IPOLearningConsole(QWidget):
         self._outcome_stock_names: Dict[str, str] = {}
         self._runtime_control = None
         self._source_worker: Optional[_SourceAcquisitionWorker] = None
+        self._local_llm_thread: Optional[threading.Thread] = None
         self._build_ui()
         self.content_tabs.setCurrentIndex(0)
         if self._simulation_read_only:
@@ -2361,16 +2387,38 @@ class IPOLearningConsole(QWidget):
             status_row.addWidget(label, 1)
         header_container.addLayout(status_row)
 
+        self.lbl_pipeline = QLabel("IPO 实际运行：正在读取采集、观察、标签和 LLM 状态…")
+        self.lbl_pipeline.setWordWrap(True)
+        self.lbl_pipeline.setStyleSheet(
+            "padding: 7px; background: #172536; border: 1px solid #42627f; color: #d7e8f7;"
+        )
+        header_container.addWidget(self.lbl_pipeline)
+        self.lbl_local_llm = QLabel("本机 LLM 只读观察：等待有效 IPO 观察")
+        self.lbl_local_llm.setWordWrap(True)
+        self.lbl_local_llm.setStyleSheet(
+            "padding: 7px; background: #20232b; border: 1px solid #42627f; color: #d7e8f7;"
+        )
+        header_container.addWidget(self.lbl_local_llm)
+
         action_row = QHBoxLayout()
         action_row.setSpacing(6)
         action_row.addStretch(1)
 
-        self.btn_refresh = QPushButton("立即刷新")
+        self.btn_refresh = QPushButton("刷新状态")
         self.btn_refresh.clicked.connect(self._worker.request_refresh)
+        self.btn_collect_now = QPushButton("采集 IPO + 本机 LLM")
+        self.btn_collect_now.clicked.connect(self._collect_matured_labels)
+        self.btn_llm_diagnostics = QPushButton("查看 LLM 阻断原因")
+        self.btn_llm_diagnostics.clicked.connect(self._show_provider_preflight)
+        self.btn_review_selected_outcome = QPushButton("确认选中 D1-D3 标签")
+        self.btn_review_selected_outcome.setEnabled(False)
+        self.btn_review_selected_outcome.clicked.connect(
+            lambda: self._review_outcome_label("ACCEPTED")
+        )
         self.btn_note = QPushButton("记录复核备注")
         self.btn_note.setToolTip("写入审计事件，不会自动生成训练标签或触发模型更新")
         self.btn_note.clicked.connect(self._add_note)
-        self.btn_accept = QPushButton("接收成熟样本")
+        self.btn_accept = QPushButton("接收 LLM 样本")
         self.btn_accept.setToolTip("仅接受带成熟标签、结果证据、快照与复核草稿哈希、模型/提示版本、Gate 因果链、标的事件身份及配置/数据契约哈希的样本；不会启动训练")
         self.btn_accept.setEnabled(False)
         self.btn_accept.clicked.connect(lambda: self._review_candidate("ACCEPTED"))
@@ -2378,7 +2426,9 @@ class IPOLearningConsole(QWidget):
         self.btn_reject.setEnabled(False)
         self.btn_reject.clicked.connect(lambda: self._review_candidate("REJECTED"))
 
-        for btn in (self.btn_refresh, self.btn_note, self.btn_accept, self.btn_reject):
+        for btn in (self.btn_collect_now, self.btn_review_selected_outcome,
+                    self.btn_llm_diagnostics,
+                    self.btn_refresh, self.btn_note, self.btn_accept, self.btn_reject):
             btn.setStyleSheet("padding: 4px 10px; font-weight: bold;")
             action_row.addWidget(btn)
 
@@ -2490,16 +2540,16 @@ class IPOLearningConsole(QWidget):
         self.edt_acquisition_code.setMaxLength(6)
         self.edt_acquisition_code.setFixedWidth(86)
         self.edt_acquisition_code.setPlaceholderText("AUTO/六位代码")
-        self.btn_collect_issue_price = QPushButton("采集可用数据并自检")
+        self.btn_collect_issue_price = QPushButton("读取 ATS 数据与检测信号")
         self.btn_collect_issue_price.clicked.connect(self._collect_supported_source)
         self.btn_collect_labels = QPushButton("盘后生成 D1-D3 标签")
         self.btn_collect_labels.setToolTip(
-            "15:30 后扫描冻结快照及近45日新股日历，分批生成成熟 D1-D3 证据；"
+            "15:30 后扫描冻结快照及 ATS 近45日新股日历，使用 TDX 日线生成成熟 D1-D3 证据；"
             "仅进入人工复核池，不会自动训练"
         )
         self.btn_collect_labels.clicked.connect(self._collect_matured_labels)
         self.lbl_acquisition_status = QLabel(
-            "启动后约 2.5 秒后台采集并扫描成熟标签；交易时段每 5 分钟、休市每小时自动更新。"
+            "启动后约 2.5 秒读取 ATS 新股/检测数据；交易时段每 5 分钟、休市每小时自动更新。"
         )
         self.lbl_acquisition_status.setWordWrap(True)
         source_actions.addWidget(QLabel("标的"))
@@ -2901,17 +2951,52 @@ class IPOLearningConsole(QWidget):
                 error=gate_sync.get("refresh_error", ""),
             )
         )
-        self.lbl_runtime.setText(f"仿真 LLM：{status}" if simulation_only else f"LLM 旁路：{status}")
+        self.lbl_runtime.setText(f"仿真 LLM：{status}" if simulation_only else f"正式 Agent 旁路：{status}")
         self.lbl_runtime.setStyleSheet(
             "font-weight: bold; padding: 6px; background: #20232b; border: 1px solid #414653; color: "
             + ("#ff7070" if "未就绪" in status or "未通过准入" in status else "#65d98a") + ";"
         )
         preflight = snapshot.get("provider_preflight", {})
+        observations = snapshot.get("shadow_observations", {})
+        observations = observations if isinstance(observations, dict) else {}
+        outcomes = snapshot.get("outcome_labels", [])
+        outcomes = outcomes if isinstance(outcomes, list) else []
+        pending_outcomes = sum(
+            isinstance(row, dict) and row.get("review") == "待人工复核"
+            for row in outcomes
+        )
+        ticker = _safe_text(observations.get("ticker"), 6) or "尚无"
+        cutoff = _safe_text(observations.get("cutoff"), 32) or "无"
+        field_count = _nonnegative_count(observations.get("fields"))
+        observation_count = _nonnegative_count(observations.get("count"))
+        provider_reason = next((
+            _safe_text(check.get("detail"), 110)
+            for check in preflight.get("checks", [])
+            if isinstance(check, dict) and check.get("status") in {"阻断", "未就绪", "待验收"}
+        ), "Provider 尚未通过运行验收") if isinstance(preflight, dict) else "Provider 状态不可用"
+        self.lbl_pipeline.setText(
+            f"IPO {'仿真只读' if simulation_only else '定时采集已启动'}："
+            f"已持久化 {observation_count} 条真实观察；最近标的 {ticker}，"
+            f"有效字段 {field_count}/41，观察时间 {cutoff}。"
+            f"成熟标签待复核 {pending_outcomes} 条；点击“确认选中 D1-D3 标签”完成逐条审核。\n"
+            f"LLM 当前未运行：{provider_reason}。数据采集与只读规则分析不依赖 LLM；"
+            "审核标签不会自动开放 LLM 或交易。"
+        )
+        local_llm = snapshot.get("local_llm_observation", {})
+        local_llm = local_llm if isinstance(local_llm, dict) else {}
+        local_state = _safe_text(local_llm.get("state"), 32) or "NOT_STARTED"
+        local_analysis = _safe_text(local_llm.get("analysis"), 600)
+        local_reason = _safe_text(local_llm.get("reason"), 80)
+        self.lbl_local_llm.setText(
+            f"本机 Ollama 只读观察：{local_state} · {local_llm.get('model', 'qwen3.5:4b')} · "
+            f"{local_llm.get('ticker', '无标的')}。"
+            + (f"分析：{local_analysis}" if local_analysis else f"原因：{local_reason or '等待首条有效观察'}")
+        )
         provider_name = preflight.get("backend") or snapshot.get("provider", "未配置")
         provider_state = preflight.get("state", "未就绪")
         self.lbl_provider.setText(
             f"仿真 Provider：{provider_name} · {snapshot.get('simulation_result', '未运行')} · 实盘关闭"
-            if simulation_only else f"Provider：{provider_name} · {provider_state} · 旁路关闭"
+            if simulation_only else f"正式 Provider：{provider_name} · {provider_state} · 旁路关闭"
         )
         worker = snapshot.get("worker_monitor", {})
         worker = worker if isinstance(worker, dict) else {}
@@ -3441,6 +3526,7 @@ class IPOLearningConsole(QWidget):
         )
         self.btn_accept_outcome.setEnabled(can_review)
         self.btn_reject_outcome.setEnabled(can_review)
+        self.btn_review_selected_outcome.setEnabled(can_review and not self._simulation_read_only)
 
     def _review_outcome_label(self, decision: str) -> None:
         selected = self.outcome_table.selectedItems()
@@ -3474,6 +3560,12 @@ class IPOLearningConsole(QWidget):
     def _collect_supported_source(self) -> None:
         self._start_source_collection(collect_labels=False)
 
+    def _show_provider_preflight(self) -> None:
+        for index in range(self.content_tabs.count()):
+            if self.content_tabs.tabText(index) == "Provider / 本地运行预检":
+                self.content_tabs.setCurrentIndex(index)
+                return
+
     def _collect_matured_labels(self) -> None:
         self._start_source_collection(collect_labels=True)
 
@@ -3496,7 +3588,7 @@ class IPOLearningConsole(QWidget):
         self.btn_collect_issue_price.setEnabled(False)
         self.btn_collect_labels.setEnabled(False)
         suffix = "并扫描成熟标签" if collect_labels else ""
-        self.lbl_acquisition_status.setText(f"正在后台采集 {ticker}：发行/供给、个股行情、两融日数据、涨停/炸板池、TDX历史与全市场快照{suffix}，并执行 41 项来源/时区/TTL 自检…")
+        self.lbl_acquisition_status.setText(f"正在读取 ATS {ticker} 新股/次新股与异动信号{suffix}，并核对来源时点与 41 项门禁契约…")
         self._source_worker = _SourceAcquisitionWorker(self._root, ticker, collect_labels, self)
         self._source_worker.completed.connect(self._source_collection_completed)
         self._source_worker.finished.connect(lambda: (
@@ -3505,6 +3597,19 @@ class IPOLearningConsole(QWidget):
         self._source_worker.start()
 
     def _source_collection_completed(self, result: Dict[str, Any]) -> None:
+        observation = result.get("shadow_learning", {})
+        if (not self._simulation_read_only and isinstance(observation, dict)
+                and observation.get("state") == "CAPTURED"
+                and (self._local_llm_thread is None or not self._local_llm_thread.is_alive())):
+            from ats.llm.ipo_local_observer import analyze_latest_observation
+
+            self._local_llm_thread = threading.Thread(
+                target=analyze_latest_observation, args=(self._root,),
+                kwargs={"observation_hash": observation.get("observation_hash")},
+                daemon=True,
+                name="ipo-local-llm-observer",
+            )
+            self._local_llm_thread.start()
         state = str(result.get("status", "UNREADY"))
         count = _nonnegative_count(result.get("ready_count"))
         required = _nonnegative_count(result.get("required_count"))
@@ -3518,8 +3623,49 @@ class IPOLearningConsole(QWidget):
         auto_reason = _safe_text(result.get("auto_selection_reason"), 100)
         if auto_reason:
             parts.append(auto_reason)
+        ats_stock = result.get("ats_stock", {})
+        if isinstance(ats_stock, dict) and ats_stock:
+            parts.append(
+                f"ATS新股/次新股{ats_stock.get('status', 'UNREADY')}"
+                f"/{_safe_text(ats_stock.get('listing_status'), 24)}"
+            )
+            if ats_stock.get("reason"):
+                parts.append(f"ATS数据诊断:{_safe_text(ats_stock.get('reason'), 120)}")
+        ats_signal = result.get("ats_signal", {})
+        if isinstance(ats_signal, dict) and ats_signal:
+            parts.append(
+                f"ATS异动信号{ats_signal.get('status', 'UNREADY')}"
+                f"/{_safe_text(ats_signal.get('signal_type'), 24)}"
+                f"/{_safe_text(ats_signal.get('signal_tier'), 16)}"
+            )
+            if ats_signal.get("status") == "HISTORICAL":
+                parts.append("盘后历史分析；不作为实时交易信号或训练标签")
+            if ats_signal.get("reason"):
+                parts.append(f"ATS检测诊断:{_safe_text(ats_signal.get('reason'), 120)}")
+        ats_center = result.get("ats_trading_center", {})
+        if isinstance(ats_center, dict) and ats_center:
+            parts.append(
+                f"ATS交易中心历史信号{ats_center.get('status', 'NOT_RUNNING')}"
+                f"/{_nonnegative_count(ats_center.get('recent_signal_count'))}条"
+            )
+        ats_capture = result.get("ats_signal_capture", {})
+        if isinstance(ats_capture, dict) and ats_capture:
+            parts.append(f"异动样本{ats_capture.get('state', 'UNREADY')}")
+        ats_outcomes = result.get("ats_signal_outcomes", {})
+        if isinstance(ats_outcomes, dict) and ats_outcomes:
+            parts.append(
+                f"异动跟踪{_nonnegative_count(ats_outcomes.get('captured_count'))}条/"
+                f"完整模拟平仓{_nonnegative_count(ats_outcomes.get('closed_count'))}条/"
+                f"{ats_outcomes.get('state', 'UNREADY')}"
+            )
+        ats_learning = result.get("ats_signal_learning", {})
+        if isinstance(ats_learning, dict) and ats_learning:
+            parts.append(
+                f"异动收益自学习{ats_learning.get('state', 'UNREADY')}/"
+                f"{_nonnegative_count(ats_learning.get('sample_count'))}条净收益样本"
+            )
         for key, label in (
-            ("acquisition", "发行日历"), ("ipo_facts", "IPO先验"),
+            ("acquisition", "ATS发行日历"), ("ipo_facts", "IPO先验"),
             ("listing_anchors", "首日锚点"),
             ("listing_supply", "上市供给"), ("market", "A股横截面"),
             ("live", "个股行情"), ("market_history", "TDX历史"),

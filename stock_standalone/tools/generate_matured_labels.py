@@ -20,9 +20,7 @@ if str(APP_ROOT) not in sys.path:
 
 from ats.strategy.ipo_outcome_labels import build_matured_outcome  # noqa: E402
 from ats.strategy.listing_anchor_store import ListingAnchorStore  # noqa: E402
-from ats.strategy.ipo_eastmoney_sources import (  # noqa: E402
-    _number, _source_time, _request_json, fetch_ipo_row, fetch_issue_calendar_rows,
-)
+from ats.strategy.ipo_eastmoney_sources import _number, _source_time  # noqa: E402
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 SOURCE_ID = "eastmoney.push2his.stock_kline"
@@ -31,37 +29,17 @@ TDX_SOURCE_ID = "tdx.daily_kline"
 TDX_SOURCE_VERSION = "pytdx.daily_bars.v1"
 
 
-def _market_code(ticker: str) -> str:
-    return "1" if ticker.startswith(("5", "6")) else "0"
-
-
-def _fetch_daily_bars(
-    ticker: str, listing_date: str, end_date: str | None = None,
-) -> List[Dict[str, Any]]:
-    bounded_end = date.fromisoformat(end_date) if end_date else datetime.now(SHANGHAI).date()
-    payload = _request_json("https://push2his.eastmoney.com/api/qt/stock/kline/get", {
-        "secid": f"{_market_code(ticker)}.{ticker}",
-        "fields1": "f1,f2,f3,f4,f5,f6",
-        "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61",
-        "klt": "101", "fqt": "0", "beg": listing_date.replace("-", ""),
-        "end": bounded_end.strftime("%Y%m%d"), "lmt": "10",
-        "ut": "fa5fd1943c7b386f172d6893dbfba10b",
-    }, timeout=8.0)
-    raw = payload.get("data", {}).get("klines", []) if isinstance(payload, dict) else []
-    bars = []
-    for item in raw if isinstance(raw, list) else []:
-        columns = str(item).split(",")
-        if len(columns) < 5:
-            continue
-        try:
-            bars.append({
-                "date": columns[0][:10], "open": float(columns[1]),
-                "close": float(columns[2]), "high": float(columns[3]),
-                "low": float(columns[4]),
-            })
-        except (TypeError, ValueError, OverflowError):
-            continue
-    return bars
+def _ats_calendar(root: str | Path) -> Dict[str, Dict[str, Any]]:
+    """Read ATS's persisted calendar without starting a second network collector."""
+    path = Path(root).resolve() / "config" / "new_stock_ipo_calendar.json"
+    try:
+        if path.stat().st_size > 4 * 1024 * 1024:
+            return {}
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        items = payload.get("items") if isinstance(payload, dict) else None
+        return items if isinstance(items, dict) else {}
+    except (OSError, UnicodeError, ValueError, TypeError):
+        return {}
 
 
 def _fetch_tdx_daily_bars(
@@ -107,12 +85,9 @@ def _fetch_trading_sessions(start_date: str, end_date: str) -> List[Any]:
 def collect_for_ticker(ticker: str, calendar: Any = None, root: str | Path = APP_ROOT) -> Dict[str, Any]:
     if not isinstance(ticker, str) or len(ticker) != 6 or not ticker.isdigit():
         return {"status": "UNREADY", "ticker": str(ticker), "reason": "股票代码必须为六位数字"}
-    item = calendar.get(ticker, {}) if isinstance(calendar, dict) else {}
+    item = calendar.get(ticker, {}) if isinstance(calendar, dict) else _ats_calendar(root).get(ticker, {})
     if not item:
-        try:
-            item = fetch_ipo_row(ticker)
-        except Exception as exc:
-            return {"status": "UNREADY", "ticker": ticker, "reason": f"东方财富发行记录采集失败: {type(exc).__name__}"}
+        return {"status": "UNREADY", "ticker": ticker, "reason": "ATS 新股日历缺少该标的"}
     listing_date = str(item.get("LISTING_DATE", item.get("listing_date", "")) or "")[:10]
     issue_price = _number(item.get("ISSUE_PRICE", item.get("issue_price")))
     source_meta = item.get("issue_price_source", {}) if isinstance(item, dict) else {}
@@ -154,22 +129,13 @@ def collect_for_ticker(ticker: str, calendar: Any = None, root: str | Path = APP
         issue_check = None
     if not issue_check or not issue_check.usable:
         return {"status": "UNREADY", "ticker": ticker, "reason": "发行价来源/时区/TTL未通过版本化契约"}
-    source_id, source_version = SOURCE_ID, SOURCE_VERSION
+    source_id, source_version = TDX_SOURCE_ID, TDX_SOURCE_VERSION
     try:
-        bars = _fetch_daily_bars(ticker, listing_date, bar_end_date)
+        listing_age = sum(day > listing_day for day in calendar_days)
+        tdx_count = max(10, listing_age + 5)
+        bars = _fetch_tdx_daily_bars(ticker, listing_date, count=tdx_count, end_date=bar_end_date)
     except Exception:
         bars = []
-    if not bars:
-        try:
-            listing_age = sum(day > listing_day for day in calendar_days)
-            tdx_count = max(10, listing_age + 5)
-            bars = _fetch_tdx_daily_bars(
-                ticker, listing_date, count=tdx_count, end_date=bar_end_date
-            )
-            if bars:
-                source_id, source_version = TDX_SOURCE_ID, TDX_SOURCE_VERSION
-        except Exception:
-            bars = []
     available_at = datetime.now(timezone.utc)
     latest_day = max((str(row["date"]) for row in bars), default="")
     if not latest_day:
@@ -268,7 +234,7 @@ def collect_recent_ipo_cohort(
         retry_after = saved_state.get("retry_after", {}) if isinstance(saved_state, dict) else {}
         if not isinstance(retry_after, dict):
             retry_after = {}
-        rows = fetch_issue_calendar_rows(page_size=500)
+        rows = list(_ats_calendar(root_path).values())
     except Exception as exc:
         return [{"status": "UNREADY", "reason": f"新股队列日历不可用: {type(exc).__name__}"}]
 
@@ -278,8 +244,8 @@ def collect_recent_ipo_cohort(
     for row in rows:
         if not isinstance(row, dict):
             continue
-        ticker = str(row.get("SECURITY_CODE") or "").strip().zfill(6)
-        listing_text = str(row.get("LISTING_DATE") or "")[:10]
+        ticker = str(row.get("code") or "").strip().zfill(6)
+        listing_text = str(row.get("listing_date") or "")[:10]
         try:
             listing_day = date.fromisoformat(listing_text)
         except ValueError:
@@ -287,8 +253,8 @@ def collect_recent_ipo_cohort(
         if (
             len(ticker) == 6 and ticker.isdigit()
             and first_day <= listing_day <= mature_cutoff
-            and _number(row.get("ISSUE_PRICE")) is not None
-            and _number(row.get("ISSUE_PRICE")) > 0
+            and _number(row.get("issue_price")) is not None
+            and _number(row.get("issue_price")) > 0
         ):
             by_ticker[ticker] = row
 
@@ -315,7 +281,7 @@ def collect_recent_ipo_cohort(
                 continue
         except (TypeError, ValueError):
             retry_after.pop(ticker, None)
-        candidates.append((str(row.get("LISTING_DATE"))[:10], ticker, row))
+        candidates.append((str(row.get("listing_date"))[:10], ticker, row))
     candidates.sort()
 
     reports: List[Dict[str, Any]] = []
