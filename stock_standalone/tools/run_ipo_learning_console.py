@@ -13,6 +13,8 @@ import sys
 import os
 import multiprocessing
 import argparse
+import socket
+import threading
 
 if __name__ == "__main__":
     multiprocessing.freeze_support()
@@ -118,6 +120,8 @@ class StandaloneLearningWindow(QMainWindow):
             self.btn_open_dialog.setEnabled(False)
             self.setWindowTitle("IPO 自学习仿真监控 [只读·无交易授权]")
         scroll_area.setWidget(self.console)
+        self.current_selected_code = ""
+        self.current_selected_name = ""
 
         main_layout.addWidget(scroll_area, 1)
 
@@ -130,9 +134,38 @@ class StandaloneLearningWindow(QMainWindow):
     def _open_arbitration_dialog(self):
         """弹出单例仲裁因果透视对话框"""
         IPOArbitrationDetailDialog.show_or_update(
-            code="301689",
+            code=getattr(self.console, "_active_ticker", "301689"),
             parent=self,
         )
+
+    def link_stock(self, code, name=""):
+        """Receive table Up/Down linkage without an ATS main window."""
+        clean_code = "".join(ch for ch in str(code) if ch.isdigit())
+        if len(clean_code) != 6:
+            return
+        self.current_selected_code = clean_code
+        self.current_selected_name = str(name or "")
+        self.console._active_ticker = clean_code
+        self.statusBar().showMessage(f"联动标的：{clean_code} {self.current_selected_name}")
+        dialog = IPOArbitrationDetailDialog._shared_instance
+        if dialog is not None and dialog.isVisible():
+            dialog.update_content(clean_code)
+
+        def push_read_only_linkage():
+            try:
+                with socket.create_connection(("127.0.0.1", 26668), timeout=0.1) as channel:
+                    channel.sendall(f"CODE|{clean_code}".encode("ascii"))
+            except OSError:
+                pass
+            try:
+                from linkage_service import get_link_manager
+                get_link_manager().push(
+                    clean_code, flags={"tdx": True, "ths": True, "dfcf": False}, auto=False,
+                )
+            except Exception:
+                pass
+
+        threading.Thread(target=push_read_only_linkage, daemon=True).start()
 
     def closeEvent(self, event):
         try:
@@ -147,6 +180,18 @@ def main():
     parser.add_argument("--project-root", help="指定运行数据根目录")
     parser.add_argument("--simulation-read-only", action="store_true", help="只读展示仿真结果，不采集、不启 Worker")
     args = parser.parse_args()
+    gate_provider = None
+    if not args.simulation_read_only:
+        # run_ats.py dispatches --ipo-console before its normal ATS startup.
+        # This mode owns only the read-only Gate reader lifecycle.
+        try:
+            from sys_utils import get_app_root
+            from ats.strategy.ipo_gate_context_provider import get_default_ipo_gate_context_provider
+
+            gate_provider = get_default_ipo_gate_context_provider(args.project_root or get_app_root())
+            gate_provider.start_auto_refresh()
+        except Exception as exc:
+            print(f"[IPO Console] Read-only services unavailable: {type(exc).__name__}", flush=True)
     app = QApplication.instance() or QApplication([sys.argv[0]])
     app.setApplicationName("IPOLearningConsoleStandalone")
 
@@ -156,7 +201,11 @@ def main():
     )
     window.show()
 
-    sys.exit(app.exec())
+    try:
+        return app.exec()
+    finally:
+        if gate_provider is not None:
+            gate_provider.stop_auto_refresh()
 
 
 if __name__ == "__main__":

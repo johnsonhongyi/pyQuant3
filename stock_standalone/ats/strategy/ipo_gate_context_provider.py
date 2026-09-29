@@ -404,7 +404,11 @@ class IPOGateContextProvider:
             lrrm=lrrm,
             as_of=now,
         )
-        t1_carry = T1CarryEvaluator().evaluate(code, live_heat, ipo_regime, lrrm)
+        carry_config = decision_config.get("t1_carry", {}) if isinstance(decision_config, Mapping) else {}
+        try:
+            t1_carry = T1CarryEvaluator(carry_config).evaluate(code, live_heat, ipo_regime, lrrm)
+        except (TypeError, ValueError):
+            t1_carry = T1CarryResult(veto_reason="T1_CARRY_CONFIG_INVALID")
         listing_age_sessions = self._listing_age_sessions(listing_anchors, now)
         context_readiness = {
             "ticker": code,
