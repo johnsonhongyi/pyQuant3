@@ -15,6 +15,8 @@ import atexit
 import subprocess
 import tempfile
 import uuid
+import threading
+import time
 from typing import Optional, Dict, List
 
 from sys_utils import get_app_root, is_packaged_env
@@ -191,7 +193,14 @@ class SBCProcessManager:
         # 记录打包或降级环境下在进程内打开的持仓盯盘窗口实例列表
         self._in_process_holdings: List = []
         # 注册退出钩子，保证即使异常崩溃也能清理子进程
-        atexit.register(self.close_all)
+        self._close_workers = []
+        self._closing_processes = {}
+        self._closing_holdings = None
+        self._closing_holdings_proc = None
+        self._pending_holdings_launch = None
+        self._restart_timer_pending = False
+        self._shutdown_requested = False
+        atexit.register(self._close_at_exit)
 
     def cleanup_dead_processes(self):
         """清理已经自然退出的子进程对象"""
@@ -223,11 +232,25 @@ class SBCProcessManager:
 
     def launch_holdings_watcher(self, snapshot_idx: Optional[int] = None):
         """【🚀 启动持仓盯盘】在开发环境与打包环境下均优先调起独立子进程运行 (支持指定历史快照)"""
+        if self._shutdown_requested:
+            return None
+        if self._closing_holdings is not None and self._closing_holdings.is_alive():
+            self._pending_holdings_launch = (snapshot_idx,)
+            if not self._restart_timer_pending:
+                from PyQt6.QtCore import QTimer
+                self._restart_timer_pending = True
+                QTimer.singleShot(100, self._retry_holdings_launch)
+            return None
+        if self._closing_holdings_proc is not None and self._closing_holdings_proc.poll() is None:
+            logger.warning("[SBCLauncher] 上次关闭尚未完成，保留旧进程并取消重开。")
+            return None
         self.cleanup_dead_processes()
         if self.is_launcher_running():
             if snapshot_idx is not None:
                 logger.info(f"[SBCLauncher] 切换至历史快照 {snapshot_idx}，平稳关闭当前盯盘并重启...")
                 self.close_launcher_process()
+                if self._on_gui_thread():
+                    return self.launch_holdings_watcher(snapshot_idx=snapshot_idx)
             else:
                 logger.info("[SBCLauncher] 持仓盯盘已在运行中，尝试激活窗口...")
                 self.activate_launcher_windows()
@@ -306,8 +329,45 @@ class SBCProcessManager:
             logger.error(f"[SBCLauncher] 进程内调起持仓盯盘异常: {e_fallback}", exc_info=True)
             return None
 
-    def close_launcher_process(self) -> bool:
-        """【🛑 统一关闭持仓盯盘】优雅关闭并持久化保存持仓盯盘窗口 (支持独立子进程与进程内降级模式)"""
+    @staticmethod
+    def _on_gui_thread():
+        try:
+            from PyQt6.QtCore import QCoreApplication, QThread
+            app = QCoreApplication.instance()
+            return app is not None and QThread.currentThread() == app.thread()
+        except Exception:
+            return False
+
+    def _start_close_worker(self, target, *args, holdings=False):
+        self._close_workers = [w for w in self._close_workers if w.is_alive()]
+        self._closing_processes = {pid: p for pid, p in self._closing_processes.items()
+                                   if p.poll() is None}
+        owned = args[0].values() if isinstance(args[0], dict) else (args[0],)
+        self._closing_processes.update({p.pid: p for p in owned if p is not None})
+        worker = threading.Thread(target=target, args=args, daemon=False, name="ATS-SBCClose")
+        self._close_workers.append(worker)
+        if holdings:
+            self._closing_holdings = worker
+            self._closing_holdings_proc = (args[0].get('__holdings_launcher__')
+                                           if isinstance(args[0], dict) else args[0])
+        try:
+            worker.start()
+        except Exception as err:
+            logger.error(f"[SBCLauncher] 无法提交后台关闭任务: {err}")
+            for proc in owned:
+                if proc is not None:
+                    self._procs[f'__retired_{proc.pid}__'] = proc
+            return False
+        return True
+
+    def _retry_holdings_launch(self):
+        self._restart_timer_pending = False
+        pending = self._pending_holdings_launch
+        self._pending_holdings_launch = None
+        if pending is not None and not self._shutdown_requested:
+            self.launch_holdings_watcher(snapshot_idx=pending[0])
+
+    def _close_in_process_holdings(self):
         # 1. 优先关闭并持久化保存在当前进程内打开的持仓盯盘窗口
         if self._in_process_holdings:
             try:
@@ -325,13 +385,22 @@ class SBCProcessManager:
                 logger.info("[SBCLauncher] 进程内持仓盯盘窗口已统一关闭并完成持久化。")
             except Exception as e_inproc_close:
                 logger.error(f"[SBCLauncher] 关闭进程内持仓盯盘窗口异常: {e_inproc_close}")
-        self.cleanup_dead_processes()
-        proc = self._procs.get("__holdings_launcher__")
-        if not proc or proc.poll() is not None:
-            self._procs.pop("__holdings_launcher__", None)
-            return True
 
+    def close_launcher_process(self) -> bool:
+        """GUI 调用立即提交关闭；旧进程落盘及等待由有生命周期的后台线程负责。"""
+        self._pending_holdings_launch = None
+        self._close_in_process_holdings()
+        self.cleanup_dead_processes()
+        proc = self._procs.pop("__holdings_launcher__", None)
+        if not proc or proc.poll() is not None:
+            return True
+        if self._on_gui_thread():
+            return self._start_close_worker(self._close_launcher_subprocess, proc, holdings=True)
+        return self._close_launcher_subprocess(proc)
+
+    def _close_launcher_subprocess(self, proc) -> bool:
         logger.info(f"[SBCLauncher] 正在优雅关闭持仓盯盘独立进程 (PID={proc.pid}) 并等待持久化...")
+        children = self._sbc_bootloader_children(proc)
         try:
             # 💡 【核心持久化】在关闭前精确捕获当前仍然处于打开显示状态的窗口列表，已经手动关闭的窗口 HWND 已消亡，绝对不会被持久化！
             active_launcher_windows = []
@@ -341,14 +410,14 @@ class SBCProcessManager:
                 import win32con
                 import re
 
-                target_pid = proc.pid
+                target_pids = {proc.pid, *(child.pid for child in children)}
 
                 # 1. 优先扫描当前真正存活且可见的持仓盯盘窗口
                 def _scan_visible_cb(hwnd, _):
                     try:
                         if win32gui.IsWindowVisible(hwnd):
                             _, w_pid = win32process.GetWindowThreadProcessId(hwnd)
-                            if w_pid == target_pid:
+                            if w_pid in target_pids:
                                 t = win32gui.GetWindowText(hwnd)
                                 m = re.search(r"[【\[(]?(\d{6})", t)
                                 if m:
@@ -445,7 +514,7 @@ class SBCProcessManager:
                 def _enum_cb(hwnd, _):
                     try:
                         _, w_pid = win32process.GetWindowThreadProcessId(hwnd)
-                        if w_pid == target_pid and win32gui.IsWindow(hwnd):
+                        if w_pid in target_pids and win32gui.IsWindow(hwnd):
                             win32gui.PostMessage(hwnd, win32con.WM_CLOSE, 0, 0)
                     except Exception:
                         pass
@@ -463,11 +532,11 @@ class SBCProcessManager:
                 proc.wait(timeout=3.0)
             except subprocess.TimeoutExpired:
                 logger.warning(f"[SBCLauncher] 持仓盯盘进程 (PID={proc.pid}) 等待超时，执行 terminate")
-                proc.terminate()
+                self._signal_sbc_process(proc, children)
                 try:
                     proc.wait(timeout=2.0)
                 except subprocess.TimeoutExpired:
-                    proc.kill()
+                    self._signal_sbc_process(proc, children, force=True)
                     try:
                         proc.wait(timeout=0.5)
                     except Exception:
@@ -479,12 +548,18 @@ class SBCProcessManager:
                         pipe.close()
             except Exception:
                 pass
-            self._procs.pop("__holdings_launcher__", None)
             logger.info("[SBCLauncher] 持仓盯盘进程已安全退出并完成持久化。")
             return True
         except Exception as e:
             logger.error(f"[SBCLauncher] 关闭持仓盯盘进程异常: {e}")
             return False
+        finally:
+            status_path = getattr(proc, "_sbc_closed_path", None)
+            if status_path and proc.poll() is not None:
+                try:
+                    os.remove(status_path)
+                except OSError:
+                    pass
 
     def activate_launcher_windows(self):
         """尝试将所有 SBC 窗口置顶激活 (同时支持进程内与独立子进程窗口)"""
@@ -601,26 +676,93 @@ class SBCProcessManager:
             logger.error(f"[SBCLauncher] 进程内调起标的 {c_clean} SBC 异常: {e_inproc}", exc_info=True)
             return None
 
-    def close_all(self):
-        """统一终止并清理所有拉起的 SBC 独立子进程 (包含持仓盯盘启动器)"""
-        # 💡 1. 优先触发持仓盯盘专用精准落盘与退出
+    @staticmethod
+    def _sbc_bootloader_children(proc):
+        """只识别同一 SBC 命令的 onefile 子进程，保留独立行情后端。"""
+        if sys.platform != 'win32' or not is_packaged_env():
+            return []
         try:
-            self.close_launcher_process()
-        except Exception as e_cl:
-            logger.error(f"[SBCLauncher] 关闭持仓盯盘进程异常: {e_cl}")
+            import psutil
+            expected_exe = os.path.normcase(os.path.abspath(proc.args[0]))
+            expected_args = list(proc.args[1:])
+            matches = []
+            for child in psutil.Process(proc.pid).children(recursive=True):
+                try:
+                    if (os.path.normcase(child.exe()) == expected_exe
+                            and child.cmdline()[1:] == expected_args):
+                        matches.append(child)
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    continue
+            return matches
+        except Exception:
+            return []
 
+    @staticmethod
+    def _signal_sbc_process(proc, children, force=False):
+        for child in reversed(children):
+            try:
+                child.kill() if force else child.terminate()
+            except Exception:
+                pass
+        # The onefile parent can finish its own cleanup after its child exits.
+        if force or not children:
+            proc.kill() if force else proc.terminate()
+
+    @staticmethod
+    def _wait_for_processes(procs, timeout):
+        # All children share one deadline; window count cannot multiply the wait.
+        deadline = time.monotonic() + timeout
+        remaining = []
+        for code, proc in procs:
+            if proc.poll() is not None:
+                continue
+            try:
+                proc.wait(timeout=max(0.0, deadline - time.monotonic()))
+            except Exception:
+                remaining.append((code, proc))
+        return remaining
+
+    def close_all(self):
+        """GUI 提交整批关闭；atexit 仍同步回收尚未提交的进程。"""
+        self._shutdown_requested = True
+        self._pending_holdings_launch = None
+        self._close_in_process_holdings()
         self.cleanup_dead_processes()
-        if not self._procs:
+        procs, self._procs = self._procs, {}
+        if not procs:
             return
+        if self._on_gui_thread():
+            self._start_close_worker(self._close_all_subprocesses, procs,
+                                     holdings="__holdings_launcher__" in procs)
+        else:
+            self._close_all_subprocesses(procs)
 
-        logger.info(f"[SBCLauncher] 🛑 正在统一优雅关闭 {len(self._procs)} 个 SBC 独立子进程...")
+    def _close_at_exit(self):
+        # Python cannot start new threads during atexit. Existing non-daemon
+        # close workers have already been joined by interpreter shutdown.
+        procs, self._procs = self._procs, {}
+        for pid, proc in self._closing_processes.items():
+            if proc.poll() is None:
+                procs[f'__closing_{pid}__'] = proc
+        self._close_all_subprocesses(procs)
+
+    def _close_all_subprocesses(self, procs):
+        proc = procs.pop("__holdings_launcher__", None)
+        if proc and proc.poll() is None:
+            self._close_launcher_subprocess(proc)
+        if not procs:
+            return
+        children_by_pid = {p.pid: self._sbc_bootloader_children(p) for p in procs.values()
+                           if p and p.poll() is None}
+        logger.info(f"[SBCLauncher] 🛑 正在统一优雅关闭 {len(procs)} 个 SBC 独立子进程...")
         # 1. 在 Windows 上优先向所有子进程顶层窗口投递 WM_CLOSE 消息，确保执行退出落盘
         if sys.platform == "win32":
             try:
                 import win32gui
                 import win32process
                 import win32con
-                pids = {p.pid for p in self._procs.values() if p and p.poll() is None}
+                pids = {p.pid for p in procs.values() if p and p.poll() is None}
+                pids.update(child.pid for children in children_by_pid.values() for child in children)
                 if pids:
                     def _enum_all(hwnd, _):
                         try:
@@ -635,36 +777,26 @@ class SBCProcessManager:
                 pass
 
         procs_to_wait = []
-        for code, proc in list(self._procs.items()):
+        for code, proc in list(procs.items()):
             if proc and proc.poll() is None:
                 procs_to_wait.append((code, proc))
 
         # 2. 给予子进程在收到 WM_CLOSE 后优雅保存退出的缓冲时间
         #    onefile 子进程需要 2~3s 完成自身 bootloader _MEI* 临时目录清理，
         #    时间过短会导致子进程被强杀，遗留临时目录报 PYI-10032 警告。
-        remaining = []
-        for code, proc in procs_to_wait:
+        remaining = self._wait_for_processes(procs_to_wait, 2.0)
+        for code, proc in remaining:
             try:
-                proc.wait(timeout=2.0)
-            except (subprocess.TimeoutExpired, Exception):
-                remaining.append((code, proc))
-
-        # 3. 对未能优雅退出的子进程执行分级终止并严格等待
-        if remaining:
-            for code, proc in remaining:
-                try:
-                    proc.terminate()
-                except Exception:
-                    pass
-            for code, proc in remaining:
-                try:
-                    proc.wait(timeout=0.6)
-                except (subprocess.TimeoutExpired, Exception):
-                    try:
-                        proc.kill()
-                        proc.wait(timeout=0.4)
-                    except Exception:
-                        pass
+                self._signal_sbc_process(proc, children_by_pid.get(proc.pid, []))
+            except Exception:
+                pass
+        remaining = self._wait_for_processes(remaining, 0.6)
+        for code, proc in remaining:
+            try:
+                self._signal_sbc_process(proc, children_by_pid.get(proc.pid, []), force=True)
+            except Exception:
+                pass
+        self._wait_for_processes(remaining, 0.4)
 
         # 4. 彻底关闭所有子进程的操作系统管道文件描述符，断开 DLL 文件锁
         for code, proc in procs_to_wait:
@@ -675,11 +807,7 @@ class SBCProcessManager:
             except Exception:
                 pass
 
-        if sys.platform == "win32" and procs_to_wait:
-            import time
-            time.sleep(0.05)
-
-        self._procs.clear()
+        procs.clear()
         logger.info("[SBCLauncher] 🏁 所有 SBC 独立子进程已全部安全退出且句柄彻底释放。")
 
     def get_running_codes(self) -> List[str]:

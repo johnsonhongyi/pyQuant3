@@ -110,13 +110,14 @@ class LedgerUpdateWorker(QThread):
             # ── 阶段 A: 更新信号账本 (原 _update_signal_ledger 逻辑) ──────────────
             self._volume_profiler.update_market_context(df_all)
 
+
             # 🐉 运行资金趋势与主线龙头核心引擎 (CapitalDragonEngine SSOT)
             dragon_report = {}
             dragon_codes = set()
             try:
                 from ats.capital_dragon_engine import CapitalDragonEngine
                 cde = CapitalDragonEngine.get_instance()
-                dragon_report = cde.analyze_capital_dragon_universe(df_all)
+                dragon_report = cde.get_cached_report(max_age=5.0, df_check=df_all, fallback_stale=True) or {}
                 dragon_codes = cde.get_dragon_codes()
             except Exception as e_cde:
                 pass
@@ -503,6 +504,18 @@ class LedgerUpdateWorker(QThread):
             logging.getLogger('ATS').debug(f'[LedgerWorker] 后台计算完成 {elapsed:.1f}ms, swing={len(swing_rows)}, fav={len(fav_rows)}')
 
             self.results_ready.emit(swing_rows, fav_rows, sh_pct, alpha_signals, stats_str)
+            # Auxiliary analyses must not delay the MA20 first frame or erase it on failure.
+            try:
+                from ats.capital_dragon_engine import CapitalDragonEngine
+                CapitalDragonEngine.get_instance().analyze_capital_dragon_universe(df_all)
+            except Exception as err:
+                logging.getLogger('ATS').debug('Capital refresh failed: %s', err)
+            try:
+                from ats.limit_up_engine import LimitUpEngine
+                LimitUpEngine.get_instance().update_live_snapshot(df_all, fetch_l2_quotes=False)
+            except Exception as err:
+                logger.debug(f"[ATS] 后台天梯扫描失败: {err}")
+
 
         except Exception as exc:
             import traceback
@@ -773,6 +786,7 @@ class StockDetailDialog(QDialog):
             self._save_config_state()
         except Exception:
             pass
+
 
     def closeEvent(self, event):
         """关闭时自动持久化窗口大小与位置"""
@@ -1851,9 +1865,11 @@ class ATSMainWindow(QMainWindow):
     realtime_signal_signal = pyqtSignal(object)
     next_day_snapshot_signal = pyqtSignal(object)
     db_data_loaded_signal = pyqtSignal(object)
+    _channel_scan_ready = pyqtSignal(object)
 
     def __init__(self):
         super().__init__()
+        self._channel_scan_ready.connect(self._on_channel_scan_ready)
         # 1. 新股次新股超短检测工具开关 (ipo_detector，控制后台拉起独立检测器小窗口；有独立入口故默认 False 不自动启动)
         ipo_enabled = getattr(
             cct, "ipo_detector", getattr(getattr(cct, "CFG", None), "ipo_detector", False)
@@ -3392,6 +3408,8 @@ class ATSMainWindow(QMainWindow):
                         self.swing_table.update_data_list(self._pending_swing_rows)
                     elif hasattr(self.swing_table, '_apply_favorite_filter'):
                         self.swing_table._apply_favorite_filter()
+                        if self.current_df is not None and not self.current_df.empty:
+                            self._trigger_realtime_ui_update()
             elif index == 3:
                 # 切换到 🆕 新股次新股 (IPO & 阶梯)
                 if hasattr(self, 'new_stock_panel'):
@@ -3646,7 +3664,7 @@ class ATSMainWindow(QMainWindow):
                     from data_utils import send_code_via_pipe, PIPE_NAME_TK
                     import logging
                     local_logger = logging.getLogger("ATS")
-                    send_code_via_pipe({"cmd": "REQ_FULL_SYNC", "port": 26670}, logger=local_logger, pipe_name=PIPE_NAME_TK)
+                    self._request_full_sync_async()
                 except Exception as e:
                     print(f"[ATSMainWindow] Cold-start REQ_FULL_SYNC failed: {e}")
 
@@ -3675,7 +3693,7 @@ class ATSMainWindow(QMainWindow):
                     from data_utils import send_code_via_pipe, PIPE_NAME_TK
                     import logging
                     local_logger = logging.getLogger("ATS")
-                    send_code_via_pipe({"cmd": "REQ_FULL_SYNC", "port": 26670}, logger=local_logger, pipe_name=PIPE_NAME_TK)
+                    self._request_full_sync_async()
                 except Exception as e:
                     print(f"[ATSMainWindow] Keep-alive REQ_FULL_SYNC failed: {e}")
 
@@ -3819,9 +3837,14 @@ class ATSMainWindow(QMainWindow):
 
         if not getattr(self, '_listener_started', False):
             try:
+                self._ipc_frame_lock = threading.Lock()
+                self._pending_ipc_frame = None
+                self._ipc_frame_timer = QTimer(self)
+                self._ipc_frame_timer.timeout.connect(self._consume_latest_ipc_frame)
+                self._ipc_frame_timer.start(250)
                 self.bridge.start_realtime_listener(
                     port=26670,
-                    data_callback=lambda data: self.realtime_data_signal.emit(data),
+                    data_callback=self._queue_latest_ipc_frame,
                     signal_callback=lambda sig: self.realtime_signal_signal.emit(sig)
                 )
                 self._listener_started = True
@@ -3835,7 +3858,7 @@ class ATSMainWindow(QMainWindow):
                 from data_utils import send_code_via_pipe, PIPE_NAME_TK
                 local_logger = logging.getLogger("ATS")
                 self._last_pipe_sync_t = time.time()
-                send_code_via_pipe({"cmd": "REQ_FULL_SYNC", "port": 26670}, logger=local_logger, pipe_name=PIPE_NAME_TK)
+                self._request_full_sync_async()
                 print("[ATSMainWindow] 手动/强制刷新: 已成功向后台 Pipe 发送全量行情同步指令 (REQ_FULL_SYNC -> port 26670)")
                 if hasattr(self, 'status_bar') and self.status_bar:
                     self.status_bar.showMessage("🔄 已下发 IPC 全量行情刷新请求，后台正在异步加载持仓与信号数据...", 4000)
@@ -4174,6 +4197,44 @@ class ATSMainWindow(QMainWindow):
         except Exception as e:
             print(f"[ATSMainWindow] 调起独立新股分时策略窗口异常: {e}")
 
+    def _queue_latest_ipc_frame(self, frame):
+        # IPCBridge 已合并增量为独立全量快照；只保留最新行情，事件信号仍逐条投递。
+        if getattr(self, '_is_closing', False):
+            return
+        frame.attrs["type"] = "UPDATE_DF_ALL"
+        with self._ipc_frame_lock:
+            previous = self._pending_ipc_frame
+            if (previous is not None and not frame.attrs.get("sector_data")
+                    and previous.attrs.get("sync_session") == frame.attrs.get("sync_session")):
+                frame.attrs["sector_data"] = previous.attrs.get("sector_data")
+            self._pending_ipc_frame = frame
+
+    def _consume_latest_ipc_frame(self):
+        if getattr(self, "_is_closing", False):
+            with self._ipc_frame_lock:
+                self._pending_ipc_frame = None
+            return
+        with self._ipc_frame_lock:
+            frame = self._pending_ipc_frame
+            self._pending_ipc_frame = None
+        if frame is not None:
+            self._handle_realtime_data(frame)
+
+    def _request_full_sync_async(self):
+        if getattr(self, "_pipe_sync_busy", False):
+            return
+        self._pipe_sync_busy = True
+        def request():
+            try:
+                from data_utils import send_code_via_pipe, PIPE_NAME_TK
+                send_code_via_pipe({"cmd": "REQ_FULL_SYNC", "port": 26670}, logger=logger, pipe_name=PIPE_NAME_TK)
+            except Exception as err:
+                logger.debug(f"[ATS] 行情同步请求失败: {err}")
+            finally:
+                self._pipe_sync_busy = False
+        import threading
+        threading.Thread(target=request, daemon=True, name="ATS-FullSync").start()
+
     def _handle_realtime_data(self, data_pkg):
         import pandas as pd
         import time
@@ -4344,12 +4405,6 @@ class ATSMainWindow(QMainWindow):
             QTimer.singleShot(0, _push_ladder)
 
         # 🛡️ 无论是否打开天梯窗口，后台自动驱动天梯底层逻辑 (对齐龙头突击与资金主线)
-        if self.current_df is not None and not self.current_df.empty:
-            try:
-                from ats.limit_up_engine import LimitUpEngine
-                LimitUpEngine.get_instance().update_live_snapshot(self.current_df, fetch_l2_quotes=False)
-            except Exception as _e_lue:
-                logger.debug(f"[ATSMainWindow] IPC 后台自动运行天梯底层引擎异常: {_e_lue}")
 
         # 🛡️ 实时推送到独立每日涨停看板 — 改为 QTimer.singleShot(0) 异步（自身已有 1.5s 节流）
         from PyQt6.sip import isdeleted
@@ -4765,7 +4820,30 @@ class ATSMainWindow(QMainWindow):
         if getattr(self, '_is_closing', False):
             return
 
+        now_refresh = time.monotonic()
+        remaining = 1.0 - (now_refresh - getattr(self, "_last_realtime_refresh", 0.0))
+        if remaining > 0:
+            if not hasattr(self, "_realtime_refresh_gate"):
+                self._realtime_refresh_gate = QTimer(self)
+                self._realtime_refresh_gate.setSingleShot(True)
+                self._realtime_refresh_gate.timeout.connect(self.refresh_realtime_ui)
+            if not self._realtime_refresh_gate.isActive():
+                self._realtime_refresh_gate.start(max(1, int(remaining * 1000)))
+            return
+        self._last_realtime_refresh = now_refresh
+        if hasattr(self, "_realtime_refresh_gate"):
+            self._realtime_refresh_gate.stop()
+
         has_df = self.current_df is not None and not self.current_df.empty
+
+        if has_df and getattr(self, 'new_stock_panel', None) is not None:
+            try:
+                self.new_stock_panel.update_from_ipc_df(self.current_df)
+            except Exception as err:
+                logger.debug(f"[ATS] 新股行情更新失败: {err}")
+        if getattr(self, '_ledger_worker_busy', False):
+            self._ledger_refresh_pending = True
+            return
 
         # ── 快速任务：检查缺少行情/历史数据的标的，异步补齐 ──────────────────────
         try:
@@ -4840,24 +4918,12 @@ class ATSMainWindow(QMainWindow):
                             w_row = w_row.iloc[0]
                         widget.update_data(w_row)
 
-        # ── 防重入：若上一个 Worker 仍在运行，跳过本次触发 ──────────────────────
-        if getattr(self, '_ledger_worker_busy', False):
-            logger.debug('[ATS_Realtime] LedgerWorker busy, skipping this tick')
-            return
-
         if not has_df:
             # 无行情数据时仅同步 universe tree
             self.ledger_update_service.sync_projection(self.universe_manager, price_pct_cache=self.price_pct_cache)
             radar_list, watch_list, trade_list = self.universe_manager.get_pools()
             self.universe_widget.update_pools(radar_list, watch_list, trade_list)
             return
-
-        # ── 同步推送实时行情给新股次新股主控面板 ──
-        if hasattr(self, 'new_stock_panel') and self.new_stock_panel is not None:
-            try:
-                self.new_stock_panel.update_from_ipc_df(self.current_df)
-            except Exception as e_nsp:
-                logger.debug(f"[ATSMainWindow] new_stock_panel update from ipc error: {e_nsp}")
 
         # ── 启动后台 Worker ─────────────────────────────────────────────────────
         import datetime
@@ -4877,19 +4943,29 @@ class ATSMainWindow(QMainWindow):
             ledger_update_service=self.ledger_update_service,
         )
         worker.results_ready.connect(self._on_ledger_results)
+        worker.finished.connect(self._on_ledger_finished)
         worker.finished.connect(worker.deleteLater)
         self._ledger_worker_busy = True
         self._ledger_worker = worker  # 持有引用，防止提前 GC
         worker.start()
+
+    def _on_ledger_finished(self):
+        self._ledger_worker_busy = False
+        self._ledger_worker = None
+        pending = getattr(self, '_ledger_refresh_pending', False)
+        self._ledger_refresh_pending = False
+        if pending and not getattr(self, '_is_closing', False):
+            self._trigger_realtime_ui_update()
 
     def _on_ledger_results(self, swing_rows, fav_rows, sh_pct, alpha_signals, stats_str):
         """
         ⚡ Worker 计算完成回调 — 主线程纯 UI 渲染 (<20ms, 零卡顿)
         只做表格与状态栏刷新，不含任何数据计算或 IO。
         """
-        self._ledger_worker_busy = False
-
         if getattr(self, '_is_closing', False):
+            return
+        # 异常帧不能覆盖上次成功结果，否则切页后再也没有可补绘的数据。
+        if not stats_str and not swing_rows and not fav_rows:
             return
 
         # 记录 alpha 信号（内存去重，防重入）
@@ -4915,16 +4991,9 @@ class ATSMainWindow(QMainWindow):
             if hasattr(self, 'favorite_panel') and fav_rows:
                 self.favorite_panel.update_favorite_rows(fav_rows)
         elif active_tab_idx == 2:
-            if swing_rows:
-                self.swing_table.update_data_list(swing_rows)
+            self.swing_table.update_data_list(swing_rows)
 
         # 🛡️ 无论当前处于哪个 Tab，后台自动运行天梯底层引擎逻辑 (解除 Tab 0 单点依赖，对齐龙头突击)
-        if self.current_df is not None and not self.current_df.empty:
-            try:
-                from ats.limit_up_engine import LimitUpEngine
-                LimitUpEngine.get_instance().update_live_snapshot(self.current_df, fetch_l2_quotes=False)
-            except Exception as _e_lue:
-                logger.debug(f"[ATSMainWindow] 后台自动运行天梯底层引擎异常: {_e_lue}")
 
         # 更新左侧三级池 tree
         radar_list, watch_list, trade_list = self.universe_manager.get_pools()
@@ -5704,73 +5773,24 @@ class ATSMainWindow(QMainWindow):
         def _worker():
             started = time.perf_counter()
             try:
-                now = time.localtime()
-                today = time.strftime("%Y-%m-%d", now)
-                try:
-                    from sys_utils import get_app_root
-                    from next_day_anomaly_watch import (_pending_confirmation_events, _read_json,
-                        get_followup_candidates)
-                    root = get_app_root()
-                    data_dir = os.path.join(root, "datacsv")
-                    pending_events = _pending_confirmation_events(
-                        data_dir, today, _read_json(os.path.join(data_dir, "next_day_anomaly_eval_%s.json" % today), {}))
-                except Exception as exc:
-                    logger.debug("[NextDayWatch][ATS_TDX] manifest check skipped: %s", exc)
+                from sys_utils import get_app_root
+                service = getattr(self, '_next_day_watch_process', None)
+                if service is None:
+                    from ats.next_day_watch_process import NextDayWatchProcess
+                    service = NextDayWatchProcess(get_app_root())
+                    self._next_day_watch_process = service
+                if getattr(self, '_is_closing', False):
+                    service.close()
                     return
-
-                candidates, followup_candidates, watch = [], [], {}
-                can_evaluate = (now.tm_wday < 5 and
-                    93000 <= now.tm_hour * 10000 + now.tm_min * 100 + now.tm_sec <= 150500)
-                if can_evaluate:
-                    from ats.tdx_realtime_fetcher import TDXGlobalCachePool
-                    can_evaluate = TDXGlobalCachePool.is_trading_day(today)
-                if can_evaluate:
-                    try:
-                        from sys_utils import get_conf_path
-                        from ats.strategy.next_day_watch_config_manager import NextDayWatchConfigManager
-                        config_path = get_conf_path("next_day_watch_strategies.json", root)
-                        _, config, _ = NextDayWatchConfigManager.load_config(config_path)
-                        if config.get("enabled"):
-                            watch = _read_json(os.path.join(data_dir, "next_day_anomaly_watch_%s.json" % today), {})
-                            candidates = watch.get("candidates", [])
-                            followup_candidates = get_followup_candidates(data_dir, today)
-                    except Exception as exc:
-                        logger.debug("[NextDayWatch][ATS_TDX] evaluation config unavailable: %s", exc)
-                if not candidates and not followup_candidates and not pending_events:
+                result = service.request("poll")
+                if result.get("error"):
+                    logger.warning("[NextDayWatch] worker failed: %s", result["error"])
                     return
-
-                all_candidates = candidates + followup_candidates
-                meta = {str(item.get("code", "")).zfill(6): item for item in all_candidates if item.get("code")}
-                codes = sorted(meta)
-                quote_count = 0
-                quote_gap_count = 0
-                if codes:
-                    from ats.tdx_realtime_fetcher import TDXRealtimeFetcher
-                    fetcher = TDXRealtimeFetcher.get_instance()
-                    quotes = fetcher.get_security_quotes_safe(codes, force=False)
-                    quote_count = len(quotes) if quotes is not None else 0
-                    frame = fetcher.convert_quotes_to_df(quotes)
-                    import pandas as pd
-                    if frame is None:
-                        frame = pd.DataFrame()
-                    frame_codes = {str(code).strip().zfill(6) for code in frame.index}
-                    quote_gap_count = len(set(codes) - frame_codes)
-                    endpoint = getattr(fetcher, "current_host", None) or ("TDX", "?", "?")
-                    for code in frame.index:
-                        candidate = meta.get(str(code).zfill(6), {})
-                        frame.loc[code, "name"] = candidate.get("name", str(code))
-                        frame.loc[code, "category"] = candidate.get("category", "")
-                    frame["percent"] = frame.get("change_pct", 0.0)
-                    from datetime import datetime
-                    observed_at = datetime.now().astimezone().isoformat(timespec="milliseconds")
-                    from next_day_anomaly_watch import run_cycle
-                    result = run_cycle(frame, config_path=config_path, data_dir=data_dir,
-                        asof_date=str(watch.get("source_asof_trade_date", today)), target_date=today,
-                        observed_at=observed_at, vwap_field="vwap")
-                    events_to_dispatch = result.get("events", [])
-                else:
-                    endpoint = ("OUTBOX", "local", "")
-                    events_to_dispatch = pending_events
+                events_to_dispatch = result.get("events", [])
+                endpoint = result.get("endpoint", ("OUTBOX", "local", ""))
+                codes = range(result.get("candidate_count", 0))
+                quote_count = result.get("quote_count", 0)
+                quote_gap_count = result.get("quote_gap_count", 0)
                 for signal in events_to_dispatch:
                     if getattr(self, "_is_closing", False):
                         break
@@ -6473,6 +6493,8 @@ class ATSMainWindow(QMainWindow):
         """
         【Tab 顶部公共入口】走势通道策略批量测算 (支持 60f/120f/日线/周线/月线 等多周期，支持重点关注、MA20d回调、新股次新股等多选与全量)
         """
+        if getattr(self, '_channel_scan_busy', False):
+            return
         target_period = period or getattr(self, "channel_scan_period", "60f")
         cur_idx = self.top_tabs.currentIndex()
         cur_widget = self.top_tabs.currentWidget()
@@ -6529,17 +6551,37 @@ class ATSMainWindow(QMainWindow):
 
         # 2. 状态栏提示
         self.statusBar().showMessage(f"📡 正在直连 TDX API 批量拉取 【{tab_title}】 {len(code_list)} 只标的 {target_period} K线进行通道策略扫描...", 8000)
-        QApplication.processEvents()
+        self._channel_scan_busy = True
+        payload = {"code_list": code_list, "code_to_name": code_to_name,
+                   "tab_title": tab_title, "target_period": target_period}
+        def run_scan():
+            try:
+                from ats.channel_bottom_reversal_strategy import ChannelBottomReversalStrategy
+                payload["result"] = ChannelBottomReversalStrategy().scan_stocks_tdx(
+                    code_list, category=category, count=120)
+            except Exception as err:
+                payload["error"] = str(err)
+            try:
+                self._channel_scan_ready.emit(payload)
+            except RuntimeError:
+                pass
+        import threading
+        threading.Thread(target=run_scan, daemon=True, name="ATS-ChannelScan").start()
 
-        # 3. 极速纯 NumPy 批量高并发测算
+    def _on_channel_scan_ready(self, payload):
+        self._channel_scan_busy = False
+        if getattr(self, '_is_closing', False):
+            return
+        if payload.get("error"):
+            self.statusBar().showMessage(f"通道测算失败: {payload['error']}", 10000)
+            return
+        code_list, code_to_name = payload["code_list"], payload["code_to_name"]
+        tab_title, target_period = payload["tab_title"], payload["target_period"]
+        df_matched = payload["result"]
         try:
-            from ats.channel_bottom_reversal_strategy import ChannelBottomReversalStrategy
-            strategy = ChannelBottomReversalStrategy()
-            df_matched = strategy.scan_stocks_tdx(code_list, category=category, count=120)
-            
             # 回填名称
             if not df_matched.empty:
-                df_matched["name"] = df_matched["code"].map(lambda c: code_to_name.get(c, self.get_stock_name(c)))
+                df_matched["name"] = df_matched["code"].map(lambda c: code_to_name.get(c) or self.name_cache.get(c, c))
 
             self.statusBar().showMessage(f"🟢 【{tab_title}】 {target_period} 通道策略测算完成: 扫描 {len(code_list)} 只, 命中 {len(df_matched)} 只", 10000)
 
@@ -6573,11 +6615,9 @@ class ATSMainWindow(QMainWindow):
             self._channel_scan_dialog.show()
             self._channel_scan_dialog.raise_()
             self._channel_scan_dialog.activateWindow()
-        except Exception as e:
-            logger.error(f"批量通道策略测算异常: {e}")
-            from PyQt6.QtWidgets import QMessageBox
-            QMessageBox.critical(self, "测算异常", f"执行批量 {target_period} 通道策略测算时发生异常: {e}")
-
+        except Exception as err:
+            logger.error(f"通道结果展示异常: {err}")
+            self.statusBar().showMessage(f"通道结果展示异常: {err}", 10000)
     def _on_tdx_signal_detected(self, sig_dict):
         """当后台 TdxSignalWatcher 捕获到通达信 / OrderMon 信号时的全逻辑联动处理"""
         if not sig_dict or not isinstance(sig_dict, dict):
@@ -6663,6 +6703,20 @@ class ATSMainWindow(QMainWindow):
         if hasattr(self, 'link_stock'):
             self.link_stock(code, name)
 
+    def _close_ipo_detector_async(self):
+        if getattr(self, '_ipo_close_started', False):
+            return
+        self._ipo_close_started = True
+        def close_detector():
+            try:
+                from ats.ui.ipo_detector_ipc import close_ipo_detector_process
+                close_ipo_detector_process()
+            except Exception as err:
+                logger.warning(f"[ATS] 后台关闭 IPO 检测器失败: {err}")
+        import threading
+        threading.Thread(target=close_detector, daemon=False, name="ATS-IPOClose").start()
+
+
     def closeEvent(self, event):
         """主窗口关闭退出时，自动跟随关闭所有独立的 TopLevel 子窗口、对话框、保存全量布局配置及安全回收后台线程"""
         self._is_closing = True
@@ -6725,8 +6779,7 @@ class ATSMainWindow(QMainWindow):
 
             # 3.2 统一安全关闭拉起的新股次新超短检测工具独立子进程 (对齐 --sbc-holdings 退出规范)
             try:
-                from ats.ui.ipo_detector_ipc import close_ipo_detector_process
-                close_ipo_detector_process()
+                self._close_ipo_detector_async()
             except Exception as e_ipo:
                 print(f"[ATSMainWindow] Error closing IPO detector subprocess: {e_ipo}")
         except Exception as e_persist:
@@ -6736,7 +6789,8 @@ class ATSMainWindow(QMainWindow):
         timers_to_stop = [
             '_status_clock_timer', 'update_timer', '_favorites_poll_timer',
             '_history_load_timer', '_price_load_timer', '_auto_switch_timer',
-            'pool_rotation_timer', 'rotation_timer'
+            'pool_rotation_timer', 'rotation_timer', '_ipc_frame_timer',
+            '_realtime_refresh_gate', '_realtime_ui_debounce_timer'
         ]
         for t_name in timers_to_stop:
             if hasattr(self, t_name):
@@ -6753,11 +6807,14 @@ class ATSMainWindow(QMainWindow):
         except Exception:
             pass
 
-        try:
-            from ats.tdx_realtime_fetcher import TDXRealtimeFetcher
-            TDXRealtimeFetcher.get_instance().disconnect()
-        except Exception:
-            pass
+        def disconnect_tdx():
+            try:
+                from ats.tdx_realtime_fetcher import TDXRealtimeFetcher
+                TDXRealtimeFetcher.get_instance().disconnect()
+            except Exception:
+                pass
+        import threading
+        threading.Thread(target=disconnect_tdx, daemon=True, name="ATS-TDXDisconnect").start()
 
         try:
             from global_favorites import GlobalFavoriteManager
@@ -6867,14 +6924,13 @@ class ATSMainWindow(QMainWindow):
         try:
             from ats.ui.sbc_launcher import SBCProcessManager
             SBCProcessManager.get_instance().close_all()
-            print("[ATSMainWindow] 持仓盯盘及所有 SBC 子进程已统一安全退出并释放句柄!")
+            print("[ATSMainWindow] 已提交 SBC 子进程后台保存与退出任务。")
         except Exception as ex_sbc:
             print(f"[ATSMainWindow] 关闭 SBC 子进程异常: {ex_sbc}")
 
         # 4.8 🛑 统一优雅关闭新股次新超短检测工具 (确保子进程安全落盘退出，不留孤儿进程)
         try:
-            from ats.ui.ipo_detector_ipc import close_ipo_detector_process
-            close_ipo_detector_process()
+            self._close_ipo_detector_async()
             if hasattr(self, 'ipo_detector_dialog') and self.ipo_detector_dialog:
                 try:
                     self.ipo_detector_dialog.close()

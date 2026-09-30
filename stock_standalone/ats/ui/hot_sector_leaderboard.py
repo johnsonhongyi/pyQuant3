@@ -1001,6 +1001,7 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
     完全独立顶层运行，具备独立任务栏图标与原生暗黑纯黑主题
     """
     code_clicked = pyqtSignal(str, str) # code, name
+    _alpha_ready = pyqtSignal(object)
 
     def __init__(self, parent=None, restore_state=None):
         super().__init__(None) # [🚀 独立窗口解耦] 传入 None 剥离 Win32 HWND Owner 从属关系，独立任务栏运行，不随主窗口缩放/最小化
@@ -1012,6 +1013,9 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
         self.setMinimumWidth(320)
         self.setMinimumHeight(150)
         self._is_updating = False
+        self._alpha_busy = False
+        self._alpha_closed = False
+        self._alpha_ready.connect(self._on_alpha_ready)
         self._is_restoring_sort = False
 
         # 🎯 策略过滤持久化开关 (专属独立持久化，默认关闭)
@@ -1931,7 +1935,8 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
 
     def _on_ui_timer_tick(self, force=False):
         """定时从主窗口提取 Top3 强势板块与 current_df 进行计算与渲染，非交易时段智能休眠"""
-        if self._is_updating or getattr(self, '_is_dragging', False):
+        if (self._is_updating or self._alpha_busy or self._alpha_closed
+                or getattr(self, '_is_dragging', False)):
             return
 
         from ats.tdx_realtime_fetcher import is_trading_time, TDXRealtimeFetcher
@@ -1955,6 +1960,7 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
         top_sectors = []
         current_df = None
         manual_list = None
+        sectors_snapshot, sec_to_codes, sort_idx = [], {}, 0
 
         if main_app:
             if hasattr(main_app, "current_df"):
@@ -1965,12 +1971,15 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
                 hw = main_app.heatmap_widget
                 if hasattr(hw, "get_top_sectors"):
                     top_sectors = hw.get_top_sectors(top_n=3)
-                    sec_to_codes = getattr(hw, "sector_to_codes", {})
+                    sec_to_codes = dict(getattr(hw, "sector_to_codes", {}))
                     sort_idx = hw.sort_combo.currentIndex() if hasattr(hw, 'sort_combo') else 0
-                    self.engine.extract_top_sectors_from_heatmap(getattr(hw, "sectors", []), sec_to_codes, top_n=3, sort_mode=sort_idx)
+                    sectors_snapshot = list(getattr(hw, "sectors", []))
                 elif hasattr(hw, "sectors") and hw.sectors:
-                    sec_to_codes = getattr(hw, "sector_to_codes", {})
-                    top_sectors = self.engine.extract_top_sectors_from_heatmap(hw.sectors, sec_to_codes, top_n=3)
+                    sec_to_codes = dict(getattr(hw, "sector_to_codes", {}))
+                    sectors_snapshot = list(hw.sectors)
+                    top_sectors = [str(row[0]) for row in sorted(
+                        sectors_snapshot, key=lambda row: float(row[1]), reverse=True)
+                        if is_valid_sector_name(str(row[0]))][:3]
 
             # 龙头突击榜标的严格来源于当前 Top 3 强势板块与新增板块成分股，不强行注入非热点自选股
             manual_list = None
@@ -2026,24 +2035,51 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
 
             self._update_sector_button_styles()
 
-        # 计算并返回最新 Alpha 列表
-        try:
-            if not is_trading:
-                fetcher.add_log(f"非交易时段初始化/单次手动刷新 ({session_desc})", level="SLEEP")
-            seg_mode = self._get_current_segment_mode_key()
-            results = self.engine.compute_hot_alpha_leaderboard(
-                top_sector_names=top_sectors,
-                current_df=current_df,
-                manual_watchlist=manual_list,
-                segment_mode=seg_mode
-            )
-            self.cached_results = results
-            self._render_table_data(results)
-            self._has_init_fetched = True
+        if not is_trading:
+            fetcher.add_log(f"非交易时段初始化/单次手动刷新 ({session_desc})", level="SLEEP")
+        self._start_alpha_refresh(top_sectors, current_df, manual_list,
+                                  self._get_current_segment_mode_key(),
+                                  sectors_snapshot, sec_to_codes, sort_idx)
 
-        except Exception as e:
-            fetcher.add_log(f"热榜轮询计算异常: {e}", level="ERROR")
-            logger.warning(f"热榜轮询计算异常: {e}")
+    def _start_alpha_refresh(self, top_sectors, current_df, manual_list, segment_mode,
+                             sectors_snapshot, sec_to_codes, sort_idx):
+        if self._alpha_busy or self._alpha_closed:
+            return
+        self._alpha_busy = True
+        engine = self.engine
+        def calculate():
+            payload = {"results": [], "error": ""}
+            try:
+                engine.extract_top_sectors_from_heatmap(
+                    sectors_snapshot, sec_to_codes, top_n=3, sort_mode=sort_idx)
+                payload["results"] = engine.compute_hot_alpha_leaderboard(
+                    top_sector_names=top_sectors, current_df=current_df,
+                    manual_watchlist=manual_list, segment_mode=segment_mode)
+            except Exception as exc:
+                payload["error"] = str(exc)
+            try:
+                self._alpha_ready.emit(payload)
+            except RuntimeError:
+                pass  # The dialog may have been deleted while TDX was waiting.
+        try:
+            import threading
+            threading.Thread(target=calculate, daemon=True, name="ATS-HotAlpha").start()
+        except Exception as exc:
+            self._on_alpha_ready({"error": str(exc)})
+
+    def _on_alpha_ready(self, payload):
+        self._alpha_busy = False
+        if self._alpha_closed:
+            return
+        if payload.get("error"):
+            logger.warning("热榜轮询计算异常: %s", payload["error"])
+            return
+        main_app = self._get_parent_mw()
+        if main_app and getattr(main_app, '_is_closing', False):
+            return
+        self.cached_results = payload["results"]
+        self._render_table_data(self.cached_results)
+        self._has_init_fetched = True
 
     def _render_table_data(self, results: List[Dict[str, Any]]):
         """将 Alpha 结果渲染到表格，支持原地更新、滚动条与选中焦点严格保持"""
@@ -3340,6 +3376,8 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
                 self.show_normal_position()
 
     def closeEvent(self, event):
+        self._alpha_closed = True
+        self.ui_refresh_timer.stop()
         self.hover_timer.stop()
         self.snap_timer.stop()
         main_app = self._get_parent_mw()

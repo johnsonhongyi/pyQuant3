@@ -129,7 +129,13 @@ def main():
 
     # 🚀 3. 自动检查并后台静默拉起主 Tk 行情进程 (P0)
     try:
-        ensure_backend_tk_running()
+        import threading
+        def ensure_backend():
+            try:
+                ensure_backend_tk_running()
+            except Exception as err:
+                print(f"[ATS] Backend startup failed: {err}")
+        threading.Thread(target=ensure_backend, daemon=True, name="ATS-BackendStart").start()
     except Exception as e:
         print(f"[ATS Launcher] Failed to ensure backend running: {e}")
 

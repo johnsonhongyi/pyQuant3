@@ -552,7 +552,9 @@ class LimitUpEngine:
 
         # 1. 快速遍历 DataFrame 筛选涨停与逼近涨停标的
         is_index_code = 'code' not in current_df.columns
-        for idx, row in current_df.iterrows():
+        scan_columns = tuple(current_df.columns)
+        for idx, values in zip(current_df.index, current_df.itertuples(index=False, name=None)):
+            row = dict(zip(scan_columns, values))
             code_raw = str(idx) if is_index_code else str(row.get('code', idx))
             c_clean = ''.join(c for c in code_raw if c.isdigit()).zfill(6)
             if not c_clean or len(c_clean) != 6:

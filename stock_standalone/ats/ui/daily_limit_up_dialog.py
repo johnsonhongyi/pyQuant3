@@ -1667,7 +1667,7 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
                 return
             # ⚡ 乐观先行首帧渲染：若当前列表尚空，先基于内存纯量价 0ms 瞬间渲染首帧底板，消除白屏等待
             if not getattr(self, 'current_records', None):
-                fast_recs = self.engine.update_live_snapshot(df, fetch_l2_quotes=False, min_interval_sec=0.0)
+                fast_recs = list(getattr(self.engine, "_current_live_records", []))
                 if fast_recs:
                     self.current_records = fast_recs
                     summary = self.engine.get_market_limit_up_summary(effective_trade_date, current_df=df)
