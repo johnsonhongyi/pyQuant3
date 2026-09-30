@@ -645,9 +645,9 @@ def repair_system_configurations_and_delisted_stocks():
     # 2. 自愈清洗 `stock_name_cache.json` 名称缓存
     try:
         cache_path = os.path.join(app_root, "datacsv", "stock_name_cache.json")
-        if os.path.exists(cache_path) and os.path.getsize(cache_path) > 0:
-            with open(cache_path, "r", encoding="utf-8") as f:
-                name_data = json.load(f)
+        from ats.bounded_evaluation_store import evaluation_store
+        name_data = evaluation_store.read(cache_path, {})
+        if name_data:
 
             if isinstance(name_data, dict):
                 need_save_cache = False
@@ -666,10 +666,8 @@ def repair_system_configurations_and_delisted_stocks():
                     clean_name_data[k_str] = v_str
 
                 if need_save_cache:
-                    tmp_cache = f"{cache_path}.tmp.{os.getpid()}"
-                    with open(tmp_cache, "w", encoding="utf-8") as f_out:
-                        json.dump(clean_name_data, f_out, ensure_ascii=False, indent=2)
-                    os.replace(tmp_cache, cache_path)
+                    from ats.storage_archive import write_json_gzip
+                    evaluation_store.put(cache_path, clean_name_data, write_json_gzip)
                     logger.info(f"✅ [Self-Healing] 成功自愈清洗 stock_name_cache.json 中的退市/乱码条目: {cache_path}")
                     repaired_count += 1
     except Exception as e:
@@ -914,21 +912,28 @@ def resolve_stock_code(name_or_text: str) -> Optional[str]:
 
     return None
 
+def _queue_name_cache():
+    from ats.bounded_evaluation_store import evaluation_store
+    from ats.storage_archive import write_json_gzip
+    path = os.path.join(get_app_root(), "datacsv", "stock_name_cache.json")
+    evaluation_store.put(path, _resolved_name_cache, write_json_gzip)
+    globals()['_stock_names_cache_bytes'] = None
+
+
 def _load_name_cache():
     global _resolved_name_cache
     try:
         path = os.path.join(get_app_root(), "datacsv", "stock_name_cache.json")
-        if os.path.exists(path):
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                if isinstance(data, dict):
-                    for k, v in data.items():
-                        v_str = str(v).strip()
-                        k_str = str(k).strip().zfill(6)
-                        if is_delisted_stock(k_str):
-                            continue
-                        if v_str and not v_str.isdigit() and v_str != k_str:
-                            _resolved_name_cache[k_str] = v_str
+        from ats.bounded_evaluation_store import evaluation_store
+        data = evaluation_store.read(path, {})
+        if isinstance(data, dict):
+            for k, v in data.items():
+                v_str = str(v).strip()
+                k_str = str(k).strip().zfill(6)
+                if is_delisted_stock(k_str):
+                    continue
+                if v_str and not v_str.isdigit() and v_str != k_str:
+                    _resolved_name_cache[k_str] = v_str
     except Exception as e:
         logger.error(f"Failed to load stock name cache: {e}")
 
@@ -994,11 +999,8 @@ def _load_name_cache():
         # 3. 如果成功灌入了新名字，一次性把全部名字持久化写入 stock_name_cache.json
         if boostrap_success:
             try:
-                path = os.path.join(get_app_root(), "datacsv", "stock_name_cache.json")
-                os.makedirs(os.path.dirname(path), exist_ok=True)
-                with open(path, "w", encoding="utf-8") as f:
-                    json.dump(_resolved_name_cache, f, ensure_ascii=False, indent=2)
-                logger.info(f"💾 [NameCache Bootstrap] Saved complete stock name database ({len(_resolved_name_cache)} entries) to {path}")
+                _queue_name_cache()
+                logger.info(f"💾 [NameCache Bootstrap] Saved complete stock name database ({len(_resolved_name_cache)} entries) to archive cache")
             except Exception as e:
                 logger.error(f"Failed to save bootstrapped cache: {e}")
 
@@ -1029,18 +1031,7 @@ def _save_to_name_cache(code: str, name: str, allow_placeholder: bool = False):
         _resolved_name_cache[code_clean] = name_clean
         _sync_reverse_name_cache(code_clean, name_clean)
         try:
-            path = os.path.join(get_app_root(), "datacsv", "stock_name_cache.json")
-            os.makedirs(os.path.dirname(path), exist_ok=True)
-            disk_data = {}
-            if os.path.exists(path):
-                try:
-                    with open(path, "r", encoding="utf-8") as f:
-                        disk_data = json.load(f)
-                except:
-                    pass
-            disk_data[code_clean] = name_clean
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(disk_data, f, ensure_ascii=False, indent=2)
+            _queue_name_cache()
         except Exception as e:
             logger.error(f"Failed to save stock name cache: {e}")
 
@@ -1382,9 +1373,9 @@ def get_cached_stock_names():
     # 兜底：内存缓存为空时从磁盘文件读取
     try:
         path = os.path.join(get_app_root(), "datacsv", "stock_name_cache.json")
-        if os.path.exists(path):
-            with open(path, 'rb') as f:
-                return f.read()
+        from ats.bounded_evaluation_store import evaluation_store
+        data = evaluation_store.read(path, {})
+        return json.dumps(data, ensure_ascii=False).encode('utf-8')
     except Exception:
         pass
     return b"{}"
@@ -1449,10 +1440,7 @@ def bulk_update_name_cache_from_df(df):
         if added_count > 0:
             logger.info(f"📡 [NameCache] Bulk injected {added_count} new stock names from realtime df. Total: {len(_resolved_name_cache)}")
             try:
-                path = os.path.join(get_app_root(), "datacsv", "stock_name_cache.json")
-                os.makedirs(os.path.dirname(path), exist_ok=True)
-                with open(path, "w", encoding="utf-8") as f:
-                    json.dump(_resolved_name_cache, f, ensure_ascii=False, indent=2)
+                _queue_name_cache()
             except Exception as e:
                 logger.error(f"[NameCache] Failed to persist bulk update: {e}")
     except Exception as e:

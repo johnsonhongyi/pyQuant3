@@ -131,12 +131,10 @@ class IntradayStrategyEngine:
     def load_intraday_cache(self) -> bool:
         """从 JSON 加载当日分时节点与状态锁，避免崩溃/重启导致时间线混乱"""
         cache_file = self._get_cache_filepath()
-        if not os.path.exists(cache_file):
-            return False
         with self._lock:
             try:
-                with open(cache_file, "r", encoding="utf-8") as f:
-                    data = json.load(f)
+                from ats.bounded_evaluation_store import evaluation_store
+                data = evaluation_store.read(cache_file, {})
                 today_str = datetime.now().strftime("%Y-%m-%d")
                 if data.get("date") != today_str:
                     logger.info(f"🗑️ 清理非今日分时策略缓存 ({data.get('date')} vs {today_str})")
@@ -209,11 +207,9 @@ class IntradayStrategyEngine:
     def load_listing_closing_scorecards(self) -> Dict[str, Any]:
         """加载历史新股首日收盘定盘综合评分账本"""
         fp = self._get_closing_eval_filepath()
-        if not os.path.exists(fp):
-            return {}
         try:
-            with open(fp, "r", encoding="utf-8") as f:
-                return json.load(f)
+            from ats.bounded_evaluation_store import evaluation_store
+            return evaluation_store.read(fp, {})
         except Exception as e:
             logger.debug(f"加载新股首日收盘账本异常: {e}")
             return {}
@@ -251,23 +247,11 @@ class IntradayStrategyEngine:
                 "node_results": eval_result.get("node_results", []),
                 "saved_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             }
-            tmp_fp = fp + f".tmp_{os.getpid()}_{threading.get_ident()}"
-            try:
-                with open(tmp_fp, "w", encoding="utf-8") as f:
-                    json.dump(data, f, ensure_ascii=False, indent=2)
-                if os.path.exists(fp):
-                    os.replace(tmp_fp, fp)
-                else:
-                    os.rename(tmp_fp, fp)
-                self._closing_saved_scorecards.add(cache_key)
-                logger.info(f"💾 [收盘定盘] [{c_clean}] {eval_result.get('total_weighted_score')}分 ({eval_result.get('pattern')}) 已存档")
-                return True
-            finally:
-                if os.path.exists(tmp_fp):
-                    try:
-                        os.remove(tmp_fp)
-                    except Exception:
-                        pass
+            from ats.bounded_evaluation_store import evaluation_store
+            from ats.storage_archive import write_json_gzip
+            evaluation_store.put(fp, data, write_json_gzip)
+            self._closing_saved_scorecards.add(cache_key)
+            return True
         except Exception as e:
             logger.error(f"保存新股首日收盘账本异常: {e}")
             return False
@@ -391,24 +375,13 @@ class IntradayStrategyEngine:
                     "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     "stocks": stocks_data
                 }
-                tmp_file = cache_file + f".tmp_{os.getpid()}_{threading.get_ident()}"
-                try:
-                    with open(tmp_file, "w", encoding="utf-8") as f:
-                        json.dump(cache_data, f, ensure_ascii=False, indent=2)
-                    if os.path.exists(cache_file):
-                        os.replace(tmp_file, cache_file)
-                    else:
-                        os.rename(tmp_file, cache_file)
-                    self._last_saved_hash = current_hash
-                    self._is_dirty = False
-                    self._last_save_time = time.time()
-                    return True
-                finally:
-                    if os.path.exists(tmp_file):
-                        try:
-                            os.remove(tmp_file)
-                        except Exception:
-                            pass
+                from ats.bounded_evaluation_store import evaluation_store
+                from ats.storage_archive import write_json_gzip
+                evaluation_store.put(cache_file, cache_data, write_json_gzip)
+                self._last_saved_hash = current_hash
+                self._is_dirty = False
+                self._last_save_time = time.time()
+                return True
             except Exception as e:
                 logger.error(f"❌ 保存分时策略持久化缓存异常: {e}")
                 return False

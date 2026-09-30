@@ -20,10 +20,13 @@ class KernelTracePanel(QWidget):
     """
     stock_clicked = pyqtSignal(str, str) # code, name (for linkage)
     stock_double_clicked = pyqtSignal(str, str, dict) # code, name, context_info
+    _logs_ready = pyqtSignal(object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._init_ui()
+        self._logs_busy = False
+        self._logs_ready.connect(self._on_logs_ready)
         self.load_trace_logs()
 
     def _init_ui(self):
@@ -49,28 +52,37 @@ class KernelTracePanel(QWidget):
         layout.addWidget(self.table)
 
     def load_trace_logs(self):
+        if self._logs_busy:
+            return
         base = get_app_root()
         path = os.path.join(base, "logs", "trading_kernel_trace.jsonl")
-        if not os.path.exists(path):
-            return
-
+        self._logs_busy = True
+        def load():
+            try:
+                from ats.storage_archive import load_trace_tail
+                payload = {'lines': load_trace_tail(path)}
+            except Exception as exc:
+                payload = {'error': str(exc)}
+            try:
+                self._logs_ready.emit(payload)
+            except RuntimeError:
+                pass
+        import threading
         try:
-            mtime = os.path.getmtime(path)
-            if getattr(self, '_last_mtime', 0.0) == mtime:
-                return
-            self._last_mtime = mtime
-            # Read all lines safely
-            lines = []
-            with open(path, "r", encoding="utf-8") as f:
-                for line in f:
-                    if line.strip():
-                        lines.append(line.strip())
-            
-            # Show latest first
-            lines.reverse()
-            # Limit to 150 items for performance
-            lines = lines[:150]
+            threading.Thread(target=load, daemon=True, name='ATS-TracePanel').start()
+        except Exception as exc:
+            self._on_logs_ready({'error': str(exc)})
 
+    def _on_logs_ready(self, payload):
+        self._logs_busy = False
+        if payload.get('error'):
+            print(f"[KernelTracePanel] Error loading trace logs: {payload['error']}")
+            return
+        lines = payload.get('lines', [])
+        if lines == getattr(self, '_last_lines', None):
+            return
+        self._last_lines = lines
+        try:
             rows_data = []
             for line in lines:
                 try:

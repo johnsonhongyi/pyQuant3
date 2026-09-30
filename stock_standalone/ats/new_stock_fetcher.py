@@ -20,6 +20,8 @@ import pandas as pd
 from typing import Dict, List, Any, Optional, Tuple, Set
 
 from sys_utils import get_app_root, get_conf_path
+from ats.bounded_evaluation_store import evaluation_store
+from ats.storage_archive import write_json_gzip
 from JohnsonUtil import commonTips as cct
 
 logger = logging.getLogger("NewStockFetcher")
@@ -106,16 +108,15 @@ class NewStockFetcher:
     def _load_persisted_data(self):
         """【💾 磁盘持久化加载】冷启动瞬间恢复本地已有的 IPO 日历、限售解禁日历与全量新股表"""
         # 1. 恢复 IPO 日历
-        if os.path.exists(IPO_CALENDAR_CACHE_FILE):
+        if os.path.exists(IPO_CALENDAR_CACHE_FILE) or os.path.exists(IPO_CALENDAR_CACHE_FILE + ".gz"):
             try:
-                with open(IPO_CALENDAR_CACHE_FILE, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    if isinstance(data, dict):
-                        items = data.get("items", {})
-                        if isinstance(items, dict) and items:
-                            self._cached_ipo_dict = items
-                            self._last_calendar_fetch_time = float(data.get("updated_at", 0.0))
-                            logger.info(f"[OK] 成功从磁盘恢复 IPO 日历: 共 {len(self._cached_ipo_dict)} 条记录")
+                data = evaluation_store.read(IPO_CALENDAR_CACHE_FILE, None)
+                if isinstance(data, dict):
+                    items = data.get("items", {})
+                    if isinstance(items, dict) and items:
+                        self._cached_ipo_dict = items
+                        self._last_calendar_fetch_time = float(data.get("updated_at", 0.0))
+                        logger.info(f"[OK] 成功从磁盘恢复 IPO 日历: 共 {len(self._cached_ipo_dict)} 条记录")
             except Exception as e:
                 logger.debug(f"加载 IPO 日历持久化文件异常: {e}")
 
@@ -126,29 +127,27 @@ class NewStockFetcher:
                 self._cached_ipo_dict[c] = dict(item)
 
         # 2. 恢复限售解禁日历
-        if os.path.exists(LIFT_CALENDAR_CACHE_FILE):
+        if os.path.exists(LIFT_CALENDAR_CACHE_FILE) or os.path.exists(LIFT_CALENDAR_CACHE_FILE + ".gz"):
             try:
-                with open(LIFT_CALENDAR_CACHE_FILE, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    if isinstance(data, dict):
-                        items = data.get("items", {})
-                        if isinstance(items, dict) and items:
-                            self._cached_lift_dict = items
-                            self._last_lift_fetch_time = float(data.get("updated_at", 0.0))
-                            logger.info(f"[OK] 成功从磁盘恢复限售解禁日历: 共 {len(self._cached_lift_dict)} 条记录")
+                data = evaluation_store.read(LIFT_CALENDAR_CACHE_FILE, None)
+                if isinstance(data, dict):
+                    items = data.get("items", {})
+                    if isinstance(items, dict) and items:
+                        self._cached_lift_dict = items
+                        self._last_lift_fetch_time = float(data.get("updated_at", 0.0))
+                        logger.info(f"[OK] 成功从磁盘恢复限售解禁日历: 共 {len(self._cached_lift_dict)} 条记录")
             except Exception as e:
                 logger.debug(f"加载限售解禁日历持久化文件异常: {e}")
 
         # 3. 恢复新股汇总 DataFrame
-        if os.path.exists(NEW_STOCK_DATA_CACHE_FILE):
+        if os.path.exists(NEW_STOCK_DATA_CACHE_FILE) or os.path.exists(NEW_STOCK_DATA_CACHE_FILE + ".gz"):
             try:
-                with open(NEW_STOCK_DATA_CACHE_FILE, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    if isinstance(data, list) and data:
-                        df_loaded = pd.DataFrame(data)
-                        if not df_loaded.empty and "code" in df_loaded.columns:
-                            self._cached_stocks_df = df_loaded
-                            logger.info(f"[OK] 成功从磁盘恢复新股数据表: 共 {len(df_loaded)} 条记录")
+                data = evaluation_store.read(NEW_STOCK_DATA_CACHE_FILE, None)
+                if isinstance(data, list) and data:
+                    df_loaded = pd.DataFrame(data)
+                    if not df_loaded.empty and "code" in df_loaded.columns:
+                        self._cached_stocks_df = df_loaded
+                        logger.info(f"[OK] 成功从磁盘恢复新股数据表: 共 {len(df_loaded)} 条记录")
             except Exception as e:
                 logger.debug(f"加载新股数据表持久化文件异常: {e}")
 
@@ -163,13 +162,7 @@ class NewStockFetcher:
                 "count": len(self._cached_ipo_dict),
                 "items": self._cached_ipo_dict
             }
-            tmp_file = f"{IPO_CALENDAR_CACHE_FILE}.tmp_{os.getpid()}"
-            with open(tmp_file, "w", encoding="utf-8") as f:
-                json.dump(payload, f, ensure_ascii=False, indent=2)
-            if os.path.exists(IPO_CALENDAR_CACHE_FILE):
-                os.replace(tmp_file, IPO_CALENDAR_CACHE_FILE)
-            else:
-                os.rename(tmp_file, IPO_CALENDAR_CACHE_FILE)
+            evaluation_store.put(IPO_CALENDAR_CACHE_FILE, payload, write_json_gzip)
         except Exception as e:
             logger.debug(f"持久化保存 IPO 日历异常: {e}")
 
@@ -179,14 +172,8 @@ class NewStockFetcher:
             return
         try:
             os.makedirs(os.path.dirname(NEW_STOCK_DATA_CACHE_FILE), exist_ok=True)
-            records = df.to_dict(orient="records")
-            tmp_file = f"{NEW_STOCK_DATA_CACHE_FILE}.tmp_{os.getpid()}"
-            with open(tmp_file, "w", encoding="utf-8") as f:
-                json.dump(records, f, ensure_ascii=False, indent=2)
-            if os.path.exists(NEW_STOCK_DATA_CACHE_FILE):
-                os.replace(tmp_file, NEW_STOCK_DATA_CACHE_FILE)
-            else:
-                os.rename(tmp_file, NEW_STOCK_DATA_CACHE_FILE)
+            records = df.astype(object).where(pd.notna(df), None).to_dict(orient="records")
+            evaluation_store.put(NEW_STOCK_DATA_CACHE_FILE, records, write_json_gzip)
         except Exception as e:
             logger.debug(f"持久化保存新股数据表异常: {e}")
 
@@ -201,13 +188,7 @@ class NewStockFetcher:
                 "count": len(self._cached_lift_dict),
                 "items": self._cached_lift_dict
             }
-            tmp_file = f"{LIFT_CALENDAR_CACHE_FILE}.tmp_{os.getpid()}"
-            with open(tmp_file, "w", encoding="utf-8") as f:
-                json.dump(payload, f, ensure_ascii=False, indent=2)
-            if os.path.exists(LIFT_CALENDAR_CACHE_FILE):
-                os.replace(tmp_file, LIFT_CALENDAR_CACHE_FILE)
-            else:
-                os.rename(tmp_file, LIFT_CALENDAR_CACHE_FILE)
+            evaluation_store.put(LIFT_CALENDAR_CACHE_FILE, payload, write_json_gzip)
         except Exception as e:
             logger.debug(f"持久化保存限售解禁日历异常: {e}")
 
@@ -483,6 +464,7 @@ class NewStockFetcher:
         # 增量同步/获取最新限售解禁日历
         lift_dict = self.fetch_restricted_release_calendar(list(all_codes), force=force_refresh)
 
+        strategy_codes = self._strategy_codes()
         for c in all_codes:
             ipo_info = ipo_dict.get(c, {})
 
@@ -527,7 +509,7 @@ class NewStockFetcher:
                 lift_batch_desc = "首次解禁(第1/1批)"
 
             # 策略配置状态检测
-            has_strategy = self._check_strategy_exists(c)
+            has_strategy = c in strategy_codes
 
             rows.append({
                 "code": c,
@@ -1020,13 +1002,22 @@ class NewStockFetcher:
 
     def _check_strategy_exists(self, code: str) -> bool:
         """检查指定股票代码是否已有分时阶梯策略配置"""
+        return code in self._strategy_codes()
+
+    def _strategy_codes(self):
         cfg_path = os.path.join(get_app_root(), "config", "intraday_newstock_strategies.json")
-        if not os.path.exists(cfg_path):
-            return False
         try:
+            stat = os.stat(cfg_path)
+            version = (cfg_path, stat.st_mtime_ns, stat.st_size)
+            cached = getattr(self, '_strategy_codes_cache', None)
+            if cached and cached[0] == version:
+                return cached[1]
             with open(cfg_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 strategies = data.get("strategies", {})
-                return any(str(st.get("code", "")).zfill(6) == code for st in strategies.values())
+                rows = strategies.values() if isinstance(strategies, dict) else strategies
+                codes = frozenset(str(st.get("code", "")).zfill(6) for st in rows if isinstance(st, dict))
+            self._strategy_codes_cache = (version, codes)
+            return codes
         except Exception:
-            return False
+            return frozenset()

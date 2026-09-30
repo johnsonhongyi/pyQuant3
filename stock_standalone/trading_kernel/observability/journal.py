@@ -41,11 +41,14 @@ class JsonlJournal:
             
         # 维护一个当天已记录特征集合，用于精准去重
         self._written_records = set()
-        if os.path.exists(self.path) and os.path.getsize(self.path) > 0:
+        if os.path.exists(self.path) or os.path.exists(self.path + ".parts"):
             try:
                 today_str = datetime.now().strftime("%Y-%m-%d")
-                with open(self.path, "r", encoding="utf-8") as f:
-                    lines = f.readlines()[-5000:]  # 快速读取最后 5000 行，提取今日信号防重
+                from ats.storage_archive import iter_archive_lines
+                from collections import deque
+                from contextlib import closing
+                with closing(iter_archive_lines(self.path, include_pending=False)) as records:
+                    lines = deque(records, maxlen=5000)  # 快速读取最后 5000 行，提取今日信号防重
                     for line in lines:
                         line = line.strip()
                         if not line:
@@ -100,8 +103,9 @@ class JsonlJournal:
         if jtype is not None and "AUDIT" in str(jtype):
             try:
                 with self._lock:
-                    with open(self.path, "a", encoding="utf-8") as fh:
-                        fh.write(json.dumps(_to_plain(payload), ensure_ascii=False, sort_keys=True) + "\n")
+                    from ats.bounded_evaluation_store import evaluation_store
+                    from ats.storage_archive import append_jsonl_gzip
+                    evaluation_store.append(self.path, _to_plain(payload), append_jsonl_gzip)
             except Exception as e:
                 try:
                     logger.error(f"❌ [JsonlJournal] Failed to append AUDIT record: {e}")
@@ -166,82 +170,13 @@ class JsonlJournal:
         try:
             trimmed_payload = _trim_record(payload)
             with self._lock:
-                with open(self.path, "a", encoding="utf-8") as fh:
-                    fh.write(json.dumps(_to_plain(trimmed_payload), ensure_ascii=False, sort_keys=True) + "\n")
-                
-                # 每次物理追加新记录后，自动触发高性能日志体积安全监控与压缩归档
-                self._check_and_compress_journal()
+                from ats.bounded_evaluation_store import evaluation_store
+                from ats.storage_archive import append_jsonl_gzip
+                evaluation_store.append(self.path, _to_plain(trimmed_payload), append_jsonl_gzip,
+                    coalesce_key=(code, sig_type, action) if not is_active_trading else None)
         except Exception as e:
             try:
                 logger.error(f"❌ [JsonlJournal] Failed to append record: {e}")
-            except Exception:
-                pass
-
-    def _check_and_compress_journal(self) -> None:
-        """高性能无损日志自动压缩归档与滚动清理引擎：若日志文件超过 2MB，自动将旧记录打包压缩归档，保留最新 1000 行，且只保留最新的 10 个归档包以防磁盘膨胀"""
-        try:
-            if not os.path.exists(self.path):
-                return
-            file_size = os.path.getsize(self.path)
-            # 设定 2MB 为阈值 (2 * 1024 * 1024)
-            if file_size < 2 * 1024 * 1024:
-                return
-
-            import gzip
-            
-            # 1. 物理读取全部行
-            with open(self.path, "r", encoding="utf-8") as f:
-                lines = f.readlines()
-                
-            if len(lines) <= 1500:
-                return
-                
-            # 保留最近 1000 行作为活流水，确保 UI 载入不白屏
-            keep_lines = lines[-1000:]
-            archive_lines = lines[:-1000]
-            
-            # 2. 导出归档历史并生成高压 gzip 文件
-            parent_dir = os.path.dirname(self.path)
-            archive_dir = os.path.join(parent_dir, "archive")
-            if not os.path.exists(archive_dir):
-                os.makedirs(archive_dir, exist_ok=True)
-            timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-            archive_filename = f"trading_kernel_trace_{timestamp_str}.jsonl.gz"
-            archive_path = os.path.join(archive_dir, archive_filename)
-            
-            with gzip.open(archive_path, "wt", encoding="utf-8") as gz:
-                gz.writelines(archive_lines)
-                
-            # 3. 原子覆写原主日志文件，释放物理磁盘空间，实现完美零损耗压缩
-            temp_path = self.path + ".tmp"
-            with open(temp_path, "w", encoding="utf-8") as tmp:
-                tmp.writelines(keep_lines)
-                
-            os.replace(temp_path, self.path)
-            
-            # 4. 自动滚动清理历史归档文件，只保留最新的 10 个压缩包
-            import glob
-            archive_pattern = os.path.join(archive_dir, "trading_kernel_trace_*.jsonl.gz")
-            archive_files = glob.glob(archive_pattern)
-            # 按修改时间从旧到新排序
-            archive_files.sort(key=lambda x: os.path.getmtime(x))
-            
-            max_archives = 10
-            if len(archive_files) > max_archives:
-                to_delete = archive_files[:-max_archives]
-                for file_to_del in to_delete:
-                    try:
-                        os.remove(file_to_del)
-                    except Exception:
-                        pass
-            
-            try:
-                logger.info(f"⚡ [JsonlJournal] Compression and cleanup success! Compressed {len(archive_lines)} lines to {archive_path}. Kept {len(keep_lines)} active lines, total archives capped at {max_archives}.")
-            except Exception:
-                pass
-        except Exception as e_comp:
-            try:
-                logger.warning(f"⚠️ [JsonlJournal] Failed to compress journal file: {e_comp}")
             except Exception:
                 pass
 

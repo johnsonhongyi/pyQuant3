@@ -1940,12 +1940,12 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
             return
 
         from ats.tdx_realtime_fetcher import is_trading_time, TDXRealtimeFetcher
-        fetcher = TDXRealtimeFetcher.get_instance()
+        fetcher = getattr(TDXRealtimeFetcher, '_instance', None)
         is_trading, session_desc = is_trading_time()
         # Allow one off-hours cache initialization, but do not retry a failed
         # initialization every 3 seconds while the market is closed.
         desired_interval_ms = (
-            max(1000, int(fetcher.get_recommended_interval_ms()))
+            (max(1000, int(fetcher.get_recommended_interval_ms())) if fetcher else 5000)
             if is_trading else 60000
         )
         if self.ui_refresh_timer.interval() != desired_interval_ms:
@@ -1977,9 +1977,8 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
                 elif hasattr(hw, "sectors") and hw.sectors:
                     sec_to_codes = dict(getattr(hw, "sector_to_codes", {}))
                     sectors_snapshot = list(hw.sectors)
-                    top_sectors = [str(row[0]) for row in sorted(
-                        sectors_snapshot, key=lambda row: float(row[1]), reverse=True)
-                        if is_valid_sector_name(str(row[0]))][:3]
+                    top_sectors = self.engine.extract_top_sectors_from_heatmap(
+                        sectors_snapshot, top_n=3, sort_mode=sort_idx)
 
             # 龙头突击榜标的严格来源于当前 Top 3 强势板块与新增板块成分股，不强行注入非热点自选股
             manual_list = None
@@ -2007,7 +2006,8 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
                     self.latest_new_sector = brand_new[0]
                     if self.latest_new_sector != self.last_announced_new_sector:
                         self.last_announced_new_sector = self.latest_new_sector
-                        fetcher.add_log(f"🚀 盘中新概念突发:【{self.latest_new_sector}】新晋冲入 Top 3 强势榜", level="SPEED")
+                        if fetcher:
+                            fetcher.add_log(f"🚀 盘中新概念突发:【{self.latest_new_sector}】新晋冲入 Top 3 强势榜", level="SPEED")
             else:
                 # 首次初始化启动时记录基础板块
                 for s in top_sectors:
@@ -2035,7 +2035,7 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
 
             self._update_sector_button_styles()
 
-        if not is_trading:
+        if not is_trading and fetcher:
             fetcher.add_log(f"非交易时段初始化/单次手动刷新 ({session_desc})", level="SLEEP")
         self._start_alpha_refresh(top_sectors, current_df, manual_list,
                                   self._get_current_segment_mode_key(),

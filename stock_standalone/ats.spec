@@ -6,7 +6,7 @@ from PyInstaller.utils.hooks import collect_submodules
 csv_path = os.path.join(os.path.dirname(a_trade_calendar.__file__), "a_trade_calendar.csv")
 
 block_cipher = None
-tk_hiddenimports = collect_submodules('trading_kernel')
+tk_hiddenimports = collect_submodules('trading_kernel', filter=lambda name: '.tests' not in name)
 yaml_hiddenimports = collect_submodules('yaml')
 
 # --- 关键：定义需要剔除的冗余库和 DLL 关键词 ---
@@ -67,6 +67,8 @@ a = Analysis(
                     'ats.strategy.ipo_data_contracts', 'ats.strategy.ipo_gate_context_provider',
                     'ats.strategy.ipo_outcome_labels', 'ats.strategy.ipo_trading_center',
                     'ats.strategy.gate_orchestrator', 'ats.llm.backend_factory',
+                    'ats.next_day_watch_process', 'ats.bounded_evaluation_store',
+                    'ats.archive_policy', 'ats.storage_archive',
                     'ats.llm.antigravity_cli_backend', 'ats.llm.codex_cli_backend',
                     'ats.llm.offline_learning', 'ats.ui.ipo_learning_console',
                     ] + tk_hiddenimports + yaml_hiddenimports,

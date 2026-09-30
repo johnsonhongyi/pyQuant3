@@ -373,11 +373,11 @@ class UniverseTreeWidget(QWidget):
         if hasattr(self, '_header_save_timer'):
             self._header_save_timer.start(500)
 
-    def save_header_state(self):
+    def save_header_state(self, sync=False):
         if getattr(self, '_is_restoring_header', False):
             return
         try:
-            from ats.ui.styles import save_config_nodes
+            from ats.ui.styles import save_config_nodes_async, flush_config_writer
             col_widths = [self.tree.columnWidth(c) for c in range(self.tree.columnCount())]
             state_hex = ""
             if self.tree.header():
@@ -386,7 +386,8 @@ class UniverseTreeWidget(QWidget):
                 "ats_universe_tree_widths": col_widths,
                 "ats_universe_tree_state": state_hex
             }
-            save_config_nodes(updates)
+            if save_config_nodes_async(updates) and sync:
+                flush_config_writer(timeout_sec=1.0)
         except Exception as e:
             logger.debug(f"保存策略股票池列宽异常: {e}")
 

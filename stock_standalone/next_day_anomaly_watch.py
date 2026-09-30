@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import hashlib
 import glob
+import gzip
 import json
+import logging
 import math
 import os
 import tempfile
@@ -33,30 +35,51 @@ _FEATURES = {
 
 
 def _atomic_json(path: str, value: Any) -> None:
+    evaluation_store.put(path, value, _persist_archive)
+
+
+def _persist_archive(path, value):
+    with _LOCK, directory_write_lock(os.path.dirname(path)):
+        _write_archive(path, value)
+
+
+def _write_archive(path: str, value: Any) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     is_evaluation = os.path.basename(path).startswith("next_day_anomaly_eval_")
-    if is_evaluation and not evaluation_store.should_write(path, value):
-        return
-    try:
-        with open(path, "r", encoding="utf-8") as current_stream:
-            if json.load(current_stream) == value:
-                return
-    except (OSError, ValueError, TypeError):
-        pass
-    payload = json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+    if is_evaluation:
+        from ats.storage_archive import backup_large_evaluation
+        backup_large_evaluation(path)
+        actual = path + '.gz' if os.path.exists(path + '.gz') else path
+        if os.path.exists(actual):
+            opener = gzip.open if actual.endswith('.gz') else open
+            with opener(actual, 'rt', encoding='utf-8') as reader:
+                previous = json.load(reader)
+            from ats.bounded_evaluation_store import merge_evaluations
+            merge_evaluations(previous, value)
+    logical_path = path
+    path += '.gz'
+    payload = gzip.compress(json.dumps(value, ensure_ascii=False, separators=(",", ":"),
+                                     allow_nan=False).encode('utf-8'), compresslevel=3)
     fd, tmp = tempfile.mkstemp(prefix=".next_day_watch_", suffix=".tmp", dir=os.path.dirname(path))
     replaced = False
     preserve_temp = False
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+        with os.fdopen(fd, "wb") as stream:
             stream.write(payload)
             stream.flush()
             os.fsync(stream.fileno())
         try:
             replace_with_retry(tmp, path)
             replaced = True
-            if is_evaluation:
-                evaluation_store.committed(path, value)
+            # Legacy diagnostics are recoverable from a verified compressed backup.
+            if os.path.exists(logical_path):
+                from ats.storage_archive import archive_verified
+                try:
+                    if not is_evaluation or os.path.getsize(logical_path) < 4 * 1024 * 1024:
+                        archive_verified(logical_path, logical_path + '.legacy.gz')
+                    os.remove(logical_path)
+                except OSError as exc:
+                    logging.getLogger(__name__).debug('Legacy evaluation migration deferred: %s', exc)
         except OSError:
             quarantine_dir = os.path.join(os.path.dirname(path), ".next_day_watch_quarantine")
             os.makedirs(quarantine_dir, exist_ok=True)
@@ -72,7 +95,7 @@ def _atomic_json(path: str, value: Any) -> None:
             metadata = {
                 "target": os.path.abspath(path),
                 "captured_at": datetime.now().astimezone().isoformat(timespec="seconds"),
-                "sha256": hashlib.sha256(payload.encode("utf-8")).hexdigest(),
+                "sha256": hashlib.sha256(payload).hexdigest(),
                 "schema_version": value.get("schema_version", value.get("snapshot_version", value.get("version")))
                     if isinstance(value, dict) else None,
                 "payload_timestamp": _payload_timestamp(value) if isinstance(value, dict) else None,
@@ -114,14 +137,15 @@ def _validate_quarantined_json(temp_path: str, target_path: str) -> bool:
             return False
         if hashlib.sha256(raw).hexdigest() != metadata.get("sha256"):
             return False
-        candidate = json.loads(raw.decode("utf-8"))
+        candidate = json.loads((gzip.decompress(raw) if raw.startswith(b'\x1f\x8b') else raw).decode("utf-8"))
         if not isinstance(candidate, dict) or not _payload_timestamp(candidate):
             return False
         candidate_version = candidate.get("schema_version", candidate.get("snapshot_version", candidate.get("version")))
         if candidate_version != metadata.get("schema_version"):
             return False
         if os.path.exists(target_path):
-            with open(target_path, "r", encoding="utf-8") as stream:
+            opener = gzip.open if target_path.endswith('.gz') else open
+            with opener(target_path, "rt", encoding="utf-8") as stream:
                 current = json.load(stream)
             if not isinstance(current, dict):
                 return False
@@ -144,22 +168,11 @@ def _timestamp_key(value: Optional[str]) -> str:
 
 
 def _read_json(path: str, default: Any) -> Any:
-    if os.path.basename(path).startswith("next_day_anomaly_eval_"):
-        return evaluation_store.read(path, default)
-    try:
-        with open(path, "r", encoding="utf-8") as stream:
-            return json.load(stream)
-    except (OSError, ValueError, TypeError):
-        return default
+    return evaluation_store.read(path[:-3] if path.endswith('.gz') else path, default)
 
 
 def flush_pending_evaluations():
-    for path, value in evaluation_store.pending():
-        try:
-            with _LOCK, directory_write_lock(os.path.dirname(path)):
-                _atomic_json(path, value)
-        except DirectoryBusy:
-            continue
+    evaluation_store.flush()
 
 
 def _number(value: Any) -> Optional[float]:
@@ -499,7 +512,7 @@ def _history_manifest_index(data_dir: str, asof_date: str) -> List[Dict[str, Any
         cached = _HISTORY_INDEX_CACHE.get(cache_key)
         if not cached or now_mono >= cached.get("expires_at", 0):
             manifests = []
-            for path in sorted(glob.glob(os.path.join(data_dir, "next_day_anomaly_watch_*.json"))):
+            for path in evaluation_store.paths(os.path.join(data_dir, "next_day_anomaly_watch_*.json")):
                 watch = _read_json(path, {})
                 trade_date = str(watch.get("target_trade_date", ""))
                 candidates = watch.get("candidates", [])
@@ -1033,7 +1046,8 @@ def run_cycle(df: Any, *, config_path: str, data_dir: str, asof_date: str,
                     item["events"].append(event)
                     eval_dirty = True
             has_confirmed = any(e.get("type") == "NEXT_DAY_WATCH_CONFIRM" for e in item["events"])
-            has_vwap_observation = any(point.get("vwap") is not None for point in item["checkpoints"])
+            has_vwap_observation = (item.get("checkpoint_summary", {}).get("has_vwap_observation", False)
+                                    or any(point.get("vwap") is not None for point in item["checkpoints"]))
             prev_status = tracked_candidate.get("status")
             if has_confirmed:
                 tracked_candidate["status"] = "EARLY_VALID"
@@ -1188,12 +1202,13 @@ def run_cycle(df: Any, *, config_path: str, data_dir: str, asof_date: str,
             evaluated_candidate = item.get("candidate", candidate)
             bucket["early_valid"] += int(evaluated_candidate.get("status") == "EARLY_VALID")
             bucket["unverifiable"] += int("UNVERIFIABLE" in types)
-            bucket["vwap_unavailable"] += int(not any(point.get("vwap") is not None for point in item.get("checkpoints", [])))
+            bucket["vwap_unavailable"] += int(not (item.get("checkpoint_summary", {}).get("has_vwap_observation", False)
+                or any(point.get("vwap") is not None for point in item.get("checkpoints", []))))
 
         cur_stats_path = os.path.join(data_dir, "next_day_anomaly_stats_%s.json" % target_date)
         stats_rows = list(stats.values())
         old_current_stats = _read_json(cur_stats_path, {})
-        if not transient_watch and (not os.path.exists(cur_stats_path) or old_current_stats.get("strategies") != stats_rows):
+        if not transient_watch and old_current_stats.get("strategies") != stats_rows:
             _atomic_json(cur_stats_path,
                          {"target_trade_date": target_date, "updated_at": observed_at, "strategies": stats_rows})
 

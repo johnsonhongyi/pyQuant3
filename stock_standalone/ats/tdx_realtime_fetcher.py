@@ -599,12 +599,14 @@ class TDXGlobalCachePool:
             "saved_network_calls": 0,
         }
 
-        # RamDisk 持久化与跨进程共享控制 (严格 5-10 分钟集中持久化，0 实时写盘)
+        # RamDisk 持久化与跨进程共享控制 (交易时段 30 分钟，收盘一次)
         self._ramdisk_path = self._get_ramdisk_cache_path()
         self._last_ramdisk_mtime: float = 0.0
         self._last_mtime_check_ts: float = 0.0
         self._last_flush_ts: float = time.time()
+        self._archive_close_day = None
         self._is_dirty: bool = False
+        self._dirty_revision = 0
 
         # 初始化时从 RamDisk 极速载入 (仅需 0.2ms)
         self._load_from_ramdisk()
@@ -1241,16 +1243,16 @@ class TDXGlobalCachePool:
             logger.debug(f"[TDXGlobalCachePool] 从 RamDisk 载入缓存异常: {e}")
             return False
 
-    def flush_if_due(self, interval: float = 300.0) -> bool:
+    def flush_if_due(self, interval: float = 1800.0) -> bool:
         """
-        【统一任务完成集中持久化 (5-10分钟统一持久化，绝不实时写盘)】
-        只有在有未落盘新数据且距离上次落盘满 interval 秒 (默认 300s / 5分钟) 时才执行 1 次原子写入
+        交易时段每 30 分钟合并持久化；收盘后有变化时额外保存一次。
         """
         with self._mutex:
             if not self._is_dirty:
                 return False
             now = time.time()
-            if interval > 0 and (now - self._last_flush_ts < interval):
+            from ats.archive_policy import archive_window
+            if archive_window()[0] != 'close' and interval > 0 and (now - self._last_flush_ts < max(1800.0, interval)):
                 return False
         return self.flush_to_ramdisk(force=True)
 
@@ -1261,6 +1263,22 @@ class TDXGlobalCachePool:
         包含静态历史分时、时间戳增量分时、日线指标与收盘固化标记 (frozen)，写入仅需 1~2ms
         """
         now = time.time()
+        from ats.archive_policy import archive_window, ARCHIVE_INTERVAL
+        window, day = archive_window()
+        if window is None or not self._is_dirty:
+            return False
+        if window == 'market' and now - self._last_flush_ts < ARCHIVE_INTERVAL:
+            return False
+        if window == 'close':
+            if self._archive_close_day == day:
+                return False
+            try:
+                saved = datetime.fromtimestamp(os.path.getmtime(self._ramdisk_path))
+                if saved.strftime('%Y-%m-%d') == day and saved.hour >= 15:
+                    self._archive_close_day = day
+                    return False
+            except OSError:
+                pass
         try:
             from ats.vwap_factory import VWAPFactory
             vwap_states = VWAPFactory.get_instance().export_states()
@@ -1272,8 +1290,6 @@ class TDXGlobalCachePool:
                 # persisted generations evict copies created before a cache clear.
                 self._load_from_ramdisk(force=True, sync_rollover=False, restore_vwap=False)
                 with self._mutex:
-                    if not force and (now - self._last_flush_ts < 300.0):
-                        return False
 
                     for code, entry in list(self._history_static_bars.items()):
                         if int(entry.get("_cache_generation", 0)) < self._cache_generations.get(code, 0):
@@ -1300,20 +1316,25 @@ class TDXGlobalCachePool:
                         "updated_at": now
                     }
 
-                raw_bytes = pickle.dumps(payload, protocol=pickle.HIGHEST_PROTOCOL)
+                    revision = self._dirty_revision
+                    raw_bytes = pickle.dumps(payload, protocol=pickle.HIGHEST_PROTOCOL)
                 compressed = zlib.compress(raw_bytes, 1)
                 tmp_path = self._ramdisk_path + f".{os.getpid()}.tmp"
                 with open(tmp_path, "wb") as f:
                     f.write(compressed)
+                    f.flush()
+                    os.fsync(f.fileno())
                 os.replace(tmp_path, self._ramdisk_path)
 
+            if window == 'close':
+                self._archive_close_day = day
             self._last_flush_ts = now
             try:
                 self._last_ramdisk_mtime = os.path.getmtime(self._ramdisk_path)
             except Exception:
                 pass
             with self._mutex:
-                self._is_dirty = False
+                self._is_dirty = self._dirty_revision != revision
             logger.info(f"💾 [TDXGlobalCachePool] RamDisk 持久化完成: 已保存 {len(payload['history_static_bars'])} 只静态分时 / {len(payload['incremental_intraday_pool'])} 组增量分时 ({len(compressed)/1024:.1f} KB, 收盘固化={is_after_close})")
             return True
         except Exception as e:
@@ -1323,7 +1344,7 @@ class TDXGlobalCachePool:
     def _maybe_sync_from_ramdisk(self, force: bool = False):
         """轻量微秒级探测 RamDisk mtime，外部进程有新数据时自动热重载"""
         now = time.time()
-        if not force and now - self._last_mtime_check_ts < 1.0:
+        if not force and now - self._last_mtime_check_ts < 1800.0:
             return
         self._last_mtime_check_ts = now
         try:
@@ -1496,6 +1517,7 @@ class TDXGlobalCachePool:
             self._quotes_cache.clear()
             self._kline_cache.clear()
             self._is_dirty = True
+            self._dirty_revision += 1
             self._last_rolled_date = today_str
 
             logger.info(f"🔄 [TDXGlobalCachePool] 次日交易日自动滚动迭代完成: 已将 {rolled_stocks} 只股票的历史分时向前平移 (剔除最老1天，保留前9天基线)，新交易日 {today_str}")
@@ -1529,6 +1551,7 @@ class TDXGlobalCachePool:
                         self._incremental_intraday_pool.pop((c_clean, days), None)
                         self._multi_day_df_cache.pop((c_clean, days), None)
                         self._is_dirty = True
+                        self._dirty_revision += 1
                         return None
                     entry["_quality_len"] = len(entry["records"])
                     entry["_timeline_quality_len"] = len(entry["records"])
@@ -1555,6 +1578,7 @@ class TDXGlobalCachePool:
                         self._incremental_intraday_pool.pop((c_clean, days), None)
                         self._multi_day_df_cache.pop((c_clean, days), None)
                         self._is_dirty = True
+                        self._dirty_revision += 1
                         return None
                     entry["_quality_len"] = len(entry["records"])
                     entry["_timeline_quality_len"] = len(entry["records"])
@@ -1604,6 +1628,7 @@ class TDXGlobalCachePool:
                 "updated_at": time.time()
             }
             self._is_dirty = True
+            self._dirty_revision += 1
         # 纯内存极速写入，绝不实时写盘，由任务完成后的 flush_if_due 集中 5-10 分钟统一落盘
 
     # ── 2. 多日分时最终结果短效缓存 ──
@@ -1676,6 +1701,7 @@ class TDXGlobalCachePool:
                     self._incremental_intraday_pool.pop(key, None)
                     self._multi_day_df_cache.pop(key, None)
                     self._is_dirty = True
+                    self._dirty_revision += 1
                     return None
 
                 df = entry.get("df")
@@ -1688,6 +1714,7 @@ class TDXGlobalCachePool:
                         self._incremental_intraday_pool.pop(key, None)
                         self._multi_day_df_cache.pop(key, None)
                         self._is_dirty = True
+                        self._dirty_revision += 1
                         return None
 
                     if entry.get("_quality_len") != len(df) or entry.get("_timeline_quality_len") != len(df):
@@ -1695,6 +1722,7 @@ class TDXGlobalCachePool:
                             self._incremental_intraday_pool.pop(key, None)
                             self._multi_day_df_cache.pop(key, None)
                             self._is_dirty = True
+                            self._dirty_revision += 1
                             return None
                         entry["_quality_len"] = len(entry["df"])
                         entry["_timeline_quality_len"] = len(entry["df"])
@@ -1704,6 +1732,7 @@ class TDXGlobalCachePool:
                             self._incremental_intraday_pool.pop(key, None)
                             self._multi_day_df_cache.pop(key, None)
                             self._is_dirty = True
+                            self._dirty_revision += 1
                             return None
                         entry["_closed_quality_len"] = len(df)
                     # 收盘后或在 TTL 内直接 0ms 纯内存命中
@@ -1836,6 +1865,7 @@ class TDXGlobalCachePool:
                 # 同步填充短期 df 缓存
                 self._multi_day_df_cache[key] = (df.copy(), time.time(), today_str)
                 self._is_dirty = True
+                self._dirty_revision += 1
 
     # ── 4. 交易日特征指标缓存 (日线 OHLC + 均线 + 通道支撑) ──
     def get_daily_metrics(self, code: str) -> Optional[Dict[str, Any]]:
@@ -1857,6 +1887,7 @@ class TDXGlobalCachePool:
                 "updated_at": time.time()
             }
             self._is_dirty = True
+            self._dirty_revision += 1
 
     # ── 5. 全局同步与管理能力 ──
     def invalidate(self, code: Optional[str] = None, partition: Optional[str] = None):
@@ -1929,6 +1960,7 @@ class TDXGlobalCachePool:
             if partition in (None, "history", "incremental"):
                 # 即使清理后所有分区为空，也要将空状态写入磁盘覆盖旧快照。
                 self._is_dirty = True
+                self._dirty_revision += 1
 
         if partition in (None, "history", "incremental"):
             try:
@@ -2011,6 +2043,7 @@ class TDXGlobalCachePool:
                 report["repaired_incremental"] += (1 if entry.get("today_bar_count", 0) > 300 else 0)
 
             self._is_dirty = True
+            self._dirty_revision += 1
 
         # 由持锁原子写入替换旧快照，不能直接删共享文件，否则其他进程可趁空窗写回旧数据。
         self.flush_to_ramdisk(force=True)

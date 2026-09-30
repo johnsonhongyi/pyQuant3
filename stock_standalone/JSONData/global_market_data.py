@@ -1,3 +1,5 @@
+from ats.bounded_evaluation_store import evaluation_store
+from ats.storage_archive import write_json_gzip
 # -*- coding: utf-8 -*-
 """
 JSONData Global Market Data Engine
@@ -175,15 +177,14 @@ CACHE_FILE_PATH = get_cache_file_path()
 def _load_disk_cache():
     """从物理磁盘加载上一次的外盘缓存数据"""
     cache_path = get_cache_file_path()
-    if os.path.exists(cache_path):
+    if os.path.exists(cache_path) or os.path.exists(cache_path + '.gz'):
         try:
-            with open(cache_path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-                if isinstance(data, dict) and 'quotes' in data:
-                    _global_cache['quotes'] = data.get('quotes', {})
-                    _global_cache['last_update_ts'] = data.get('last_update_ts', 0.0)
-                    _global_cache['sentiment_score'] = data.get('sentiment_score', 0.0)
-                    _global_cache['sentiment_label'] = data.get('sentiment_label', '🌐 外盘平稳')
+            data = evaluation_store.read(cache_path, {})
+            if isinstance(data, dict) and 'quotes' in data:
+                _global_cache['quotes'] = data.get('quotes', {})
+                _global_cache['last_update_ts'] = data.get('last_update_ts', 0.0)
+                _global_cache['sentiment_score'] = data.get('sentiment_score', 0.0)
+                _global_cache['sentiment_label'] = data.get('sentiment_label', '🌐 外盘平稳')
         except Exception:
             pass
 
@@ -193,8 +194,7 @@ def _save_disk_cache():
     try:
         cache_path = get_cache_file_path()
         os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-        with open(cache_path, 'w', encoding='utf-8') as f:
-            json.dump(_global_cache, f, ensure_ascii=False, indent=2)
+        evaluation_store.put(cache_path, _global_cache, write_json_gzip)
     except Exception:
         pass
 
@@ -440,7 +440,7 @@ def clean_all_disk_kline_caches():
         base_dir = os.path.dirname(conf_path)
         for fname in ['global_market_klines_yahoo.json', 'global_market_klines_sina.json', 'global_market_klines.json']:
             fpath = os.path.join(base_dir, fname)
-            if os.path.exists(fpath):
+            if os.path.exists(fpath) or os.path.exists(fpath + '.gz'):
                 cache_files.append(fpath)
     except Exception:
         pass
@@ -448,8 +448,7 @@ def clean_all_disk_kline_caches():
     cleaned_count = 0
     for fpath in cache_files:
         try:
-            with open(fpath, 'r', encoding='utf-8') as f:
-                data = json.load(f)
+            data = evaluation_store.read(fpath, {})
             if not isinstance(data, dict):
                 continue
             modified = False
@@ -461,8 +460,7 @@ def clean_all_disk_kline_caches():
                         modified = True
                         cleaned_count += (len(klines) - len(cleaned_klines))
             if modified:
-                with open(fpath, 'w', encoding='utf-8') as f:
-                    json.dump(data, f, ensure_ascii=False, indent=2)
+                evaluation_store.put(fpath, data, write_json_gzip)
                 log_market_msg(f"[GlobalMarketData] 物理落盘清洗磁盘文件 {os.path.basename(fpath)}: 剔除 {cleaned_count} 条穿越/未来数据")
         except Exception as ex:
             log_market_msg(f"[GlobalMarketData] 清洗磁盘缓存异常 {fpath}: {ex}")
@@ -1033,11 +1031,10 @@ def fetch_global_kline_history(symbol: str, limit: int = 120, force_refresh: boo
         # Tier 2: 磁盘 Cache 加载与 mtime 恢复
         all_cache = {}
         file_mtime = 0.0
-        if os.path.exists(cache_path):
+        if os.path.exists(cache_path) or os.path.exists(cache_path + '.gz'):
             try:
-                file_mtime = os.path.getmtime(cache_path)
-                with open(cache_path, 'r', encoding='utf-8') as f:
-                    all_cache = json.load(f)
+                file_mtime = os.path.getmtime(cache_path + '.gz' if os.path.exists(cache_path + '.gz') else cache_path)
+                all_cache = evaluation_store.read(cache_path, {})
             except Exception:
                 all_cache = {}
 
@@ -1295,15 +1292,8 @@ def flush_kline_disk_cache(data_source: str = 'yahoo', force: bool = False) -> b
             _KLINE_DIRTY_FLAGS[source_key] = False
         return True
 
-    # ---- Phase 2: 在锁外读取磁盘旧文件并合并 ----
-    os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-    all_cache = {}
-    if os.path.exists(cache_path):
-        try:
-            with open(cache_path, 'r', encoding='utf-8') as f:
-                all_cache = json.load(f)
-        except Exception:
-            all_cache = {}
+    # Reuse the archived baseline in memory; the writer owns physical persistence.
+    all_cache = evaluation_store.read(cache_path, {})
 
     updated_count = 0
     total_bars = 0
@@ -1353,9 +1343,7 @@ def flush_kline_disk_cache(data_source: str = 'yahoo', force: bool = False) -> b
     now_ts = time.time()
     tmp_path = cache_path + f".tmp_{os.getpid()}_{int(now_ts * 1000)}"
     try:
-        with open(tmp_path, 'w', encoding='utf-8') as f:
-            json.dump(all_cache, f, ensure_ascii=False, indent=2)
-        os.replace(tmp_path, cache_path)
+        evaluation_store.put(cache_path, all_cache, write_json_gzip)
 
         # ---- Phase 4: 写盘成功后刷新 RAM fetch_ts，防止下次误判磁盘已过期而重触网络 ----
         with _KLINE_CACHE_LOCK:
@@ -1430,11 +1418,10 @@ def repair_disk_kline_caches() -> dict:
     disk_caches = {}
     for src in ['yahoo', 'sina']:
         cache_path = get_kline_cache_file_path().replace(".json", f"_{src}.json")
-        if not os.path.exists(cache_path):
+        if not os.path.exists(cache_path) and not os.path.exists(cache_path + '.gz'):
             continue
         try:
-            with open(cache_path, 'r', encoding='utf-8') as f:
-                all_cache = json.load(f)
+            all_cache = evaluation_store.read(cache_path, {})
             if isinstance(all_cache, dict):
                 disk_caches[src] = (cache_path, all_cache)
         except Exception:
@@ -1480,8 +1467,7 @@ def repair_disk_kline_caches() -> dict:
 
         if modified:
             try:
-                with open(cache_path, 'w', encoding='utf-8') as f:
-                    json.dump(all_cache, f, ensure_ascii=False, indent=2)
+                evaluation_store.put(cache_path, all_cache, write_json_gzip)
             except Exception:
                 pass
 
@@ -1518,8 +1504,7 @@ def repair_disk_kline_caches() -> dict:
                         log_market_msg(f"[GlobalMarketData] 🛡️ 成功将 {sym_u} 最新 K 线从 sina 同步至 yahoo 盘库 ({len(clean_final)} 条, 最新: {clean_final[-1]['date']})")
             if y_modified:
                 try:
-                    with open(y_path, 'w', encoding='utf-8') as f:
-                        json.dump(yahoo_cache, f, ensure_ascii=False, indent=2)
+                    evaluation_store.put(y_path, yahoo_cache, write_json_gzip)
                 except Exception:
                     pass
 
@@ -1527,8 +1512,7 @@ def repair_disk_kline_caches() -> dict:
         try:
             def_path = get_kline_cache_file_path()
             if def_path and os.path.exists(def_path):
-                with open(def_path, 'r', encoding='utf-8') as f:
-                    def_cache = json.load(f)
+                def_cache = evaluation_store.read(def_path, {})
                 d_mod = False
                 for sym, s_klines in sina_cache.items():
                     sym_u = sym.strip().upper()
@@ -1548,8 +1532,7 @@ def repair_disk_kline_caches() -> dict:
                             def_cache[sym_u] = clean_final
                             d_mod = True
                 if d_mod:
-                    with open(def_path, 'w', encoding='utf-8') as f:
-                        json.dump(def_cache, f, ensure_ascii=False, indent=2)
+                    evaluation_store.put(def_path, def_cache, write_json_gzip)
         except Exception:
             pass
 
@@ -1557,7 +1540,7 @@ def repair_disk_kline_caches() -> dict:
 
 
 # 启动时自动物理清理磁盘脏数据
-repair_disk_kline_caches()
+# Repair remains an explicit maintenance action; fetch paths sanitize cached bars.
 
 
 def get_related_symbols(symbol: str) -> list:
@@ -1777,18 +1760,12 @@ def get_news_cache_file_path() -> str:
 
 
 def load_news_hotlist_json() -> tuple:
-    """从物理 JSON 中读取已缓存的新闻列表与已删除的 news_id 黑名单 set"""
-    c_path = get_news_cache_file_path()
-    if not os.path.exists(c_path):
-        return [], set()
+    """Reuse the compressed news archive through the memory cache."""
     try:
-        with open(c_path, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-            items = data.get('news_list', [])
-            deleted_ids = set(data.get('deleted_ids', []))
-            return items, deleted_ids
+        data = evaluation_store.read(get_news_cache_file_path(), {})
+        return data.get('news_list', []), set(data.get('deleted_ids', []))
     except Exception as ex:
-        log_market_msg(f"[NewsCache] 读取物理缓存异常: {ex}")
+        log_market_msg(f"[NewsCache] cache unavailable: {ex}")
         return [], set()
 
 
@@ -1802,11 +1779,10 @@ def save_news_hotlist_json(news_list: list, deleted_ids: set) -> bool:
     try:
         # 1. 尝试读取磁盘已有记录
         existing_items = []
-        if os.path.exists(c_path):
+        if os.path.exists(c_path) or os.path.exists(c_path + '.gz'):
             try:
-                with open(c_path, 'r', encoding='utf-8') as f:
-                    old_data = json.load(f)
-                    existing_items = old_data.get('news_list', [])
+                old_data = evaluation_store.read(c_path, {})
+                existing_items = old_data.get('news_list', [])
             except Exception:
                 existing_items = []
 
@@ -1849,10 +1825,7 @@ def save_news_hotlist_json(news_list: list, deleted_ids: set) -> bool:
             'deleted_ids': list(del_set)
         }
         tmp_path = c_path + ".tmp"
-        with open(tmp_path, 'w', encoding='utf-8') as f:
-            json.dump(payload, f, ensure_ascii=False, indent=2)
-        if os.path.exists(tmp_path):
-            os.replace(tmp_path, c_path)
+        evaluation_store.put(c_path, payload, write_json_gzip)
         return True
     except Exception as ex:
         log_market_msg(f"[NewsCache] 物理落盘写 JSON 异常: {ex}")

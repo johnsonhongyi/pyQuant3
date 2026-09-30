@@ -85,7 +85,7 @@ class TradingKernelService:
     def __init__(self, journal_path: str = "logs/trading_kernel_trace.jsonl",
                  strategy_provider: Any = None, state_store: Any = None,
                  event_sink: Any = None, reconciliation_dir: str | None = None,
-                 reconciliation_archive_after_days: int = 30,
+                 reconciliation_archive_after_days: int = 1,
                  reconciliation_archive_retention_days: int | None = 365,
                  paper_adapter: Any = None,
                  initial_mode: str | None = None):
@@ -383,50 +383,42 @@ class TradingKernelService:
                 "states": "trading_kernel.state_store",
             },
         }
-        os.makedirs(target_dir, exist_ok=True)
-        self._rotate_reconciliation_history(target_dir)
+        # Hot paths update memory only; the common archive timer handles physical I/O.
+        from ats.bounded_evaluation_store import evaluation_store
         latest_path = os.path.join(target_dir, "latest.json")
-        temp_path = latest_path + f".{os.getpid()}.tmp"
-        try:
-            with open(temp_path, "w", encoding="utf-8") as fh:
-                json.dump(payload, fh, ensure_ascii=False, indent=2, sort_keys=True)
-            replaced = False
-            for _retry in range(3):
-                try:
-                    os.replace(temp_path, latest_path)
-                    replaced = True
-                    break
-                except PermissionError:
-                    import time
-                    time.sleep(0.05)
-            if not replaced:
-                # Windows 读句柄占用防御：若重命名因文件被占用拒绝访问，直接覆盖写入目标文件
-                with open(latest_path, "w", encoding="utf-8") as fh:
-                    json.dump(payload, fh, ensure_ascii=False, indent=2, sort_keys=True)
-                if os.path.exists(temp_path):
-                    try:
-                        os.remove(temp_path)
-                    except Exception:
-                        pass
-        except Exception as e_replace:
-            logger.debug(f"[TK-Reconciliation] Write latest.json skipped: {e_replace}")
-            try:
-                if os.path.exists(temp_path):
-                    os.remove(temp_path)
-            except Exception:
-                pass
-
-        history_path = os.path.join(
-            target_dir,
-            f"reconciliation_{datetime.now().strftime('%Y%m%d')}.jsonl",
-        )
-        try:
-            with open(history_path, "a", encoding="utf-8") as fh:
-                fh.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
-        except Exception as e_hist:
-            logger.debug(f"[TK-Reconciliation] Append history failed: {e_hist}")
+        evaluation_store.put(latest_path, payload, self._write_reconciliation_archive)
         self._last_reconciliation_persist_monotonic = now_mono
         return payload
+
+    def _write_reconciliation_archive(self, path, payload):
+        import copy
+        import os
+        from ats.storage_archive import write_json_gzip, append_jsonl_gzip
+        previous = getattr(self, '_reconciliation_history_payload', None)
+        day = str(payload['generated_at'])[:10]
+        projection = copy.deepcopy(payload)
+        projection.pop('generated_at', None)
+        projection.pop('reason', None)
+        projection['reconciliation'].pop('generated_at', None)
+        projection['reconciliation'].pop('states', None)  # Already present at top level.
+        if previous == projection and getattr(self, '_reconciliation_history_day', None) == day:
+            return
+        self._rotate_reconciliation_history(os.path.dirname(path))
+        write_json_gzip(path, payload)
+        if previous is None or getattr(self, '_reconciliation_history_day', None) != day:
+            record = dict(projection, record_type='SNAPSHOT', history_format='delta-v1')
+        else:
+            changes = {key: value for key, value in projection.items()
+                       if key != 'states' and previous.get(key) != value}
+            changes['states_changed'] = {code: state for code, state in projection['states'].items()
+                                        if previous['states'].get(code) != state}
+            changes['states_removed'] = sorted(set(previous['states']) - set(projection['states']))
+            record = dict(changes, record_type='DELTA', history_format='delta-v1')
+        record['generated_at'] = payload['generated_at']
+        history = os.path.join(os.path.dirname(path), 'reconciliation_%s.jsonl' % day.replace('-', ''))
+        append_jsonl_gzip(history, [record])
+        self._reconciliation_history_payload = projection
+        self._reconciliation_history_day = day
 
     def _rotate_reconciliation_history(self, target_dir: str) -> None:
         """Run daily retention work once; never delay the normal 60-second audit."""

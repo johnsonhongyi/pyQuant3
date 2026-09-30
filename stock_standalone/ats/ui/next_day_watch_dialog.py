@@ -127,15 +127,23 @@ class NextDayWatchDataLoaderWorker(QThread):
 
     loaded = pyqtSignal(object)
 
-    def __init__(self, target_date: Optional[str] = None, eval_only: bool = False):
+    def __init__(self, target_date: Optional[str] = None, eval_only: bool = False,
+                 service=None, manifest=None):
         super().__init__()
         self.target_date = target_date
         self.eval_only = bool(eval_only)
+        self.service = service
+        self.manifest = manifest
         self.app_root = get_app_root()
         self.data_dir = os.path.join(self.app_root, "datacsv")
 
     def run(self):
         try:
+            if self.service is not None:
+                result = self.service.request('snapshot', target_date=self.target_date,
+                    eval_only=self.eval_only, manifest=self.manifest)
+                self.loaded.emit(result)
+                return
             if self.eval_only:
                 cur_date = self.target_date or time.strftime("%Y-%m-%d")
                 eval_path = os.path.join(self.data_dir, f"next_day_anomaly_eval_{cur_date}.json")
@@ -143,7 +151,8 @@ class NextDayWatchDataLoaderWorker(QThread):
                 return
 
             watch_pattern = os.path.join(self.data_dir, "next_day_anomaly_watch_*.json")
-            files = glob.glob(watch_pattern)
+            from ats.bounded_evaluation_store import evaluation_store
+            files = evaluation_store.paths(watch_pattern)
             dates = []
             for f in files:
                 base = os.path.basename(f)
@@ -159,14 +168,23 @@ class NextDayWatchDataLoaderWorker(QThread):
             eval_path = os.path.join(self.data_dir, f"next_day_anomaly_eval_{cur_date}.json")
             eval_data = _read_json(eval_path, {})
 
-            stats_list = []
+            stats_list, delayed_winners = [], []
             stats_pattern = os.path.join(self.data_dir, "next_day_anomaly_stats_*.json")
-            for sf in sorted(glob.glob(stats_pattern), reverse=True)[:30]:
+            for sf in sorted(evaluation_store.paths(stats_pattern), reverse=True)[:30]:
                 sdata = _read_json(sf, {})
                 if sdata:
                     stats_list.append(sdata)
+                    tdate = sdata.get('target_trade_date', '')
+                    eval_data_for_stats = _read_json(os.path.join(
+                        self.data_dir, f'next_day_anomaly_eval_{tdate}.json'), {})
+                    for entry in eval_data_for_stats.get('candidates', {}).values():
+                        candidate = entry.get('candidate', {})
+                        if candidate.get('status') == 'DELAYED' or any(
+                                event.get('type') == 'DELAYED' for event in entry.get('events', [])):
+                            delayed_winners.append((candidate, tdate))
             self.loaded.emit({"target_date": cur_date, "dates": dates, "manifest": watch_data,
-                              "eval": eval_data, "stats": stats_list, "eval_only": False})
+                              "eval": eval_data, "stats": stats_list,
+                              "delayed_winners": delayed_winners, "eval_only": False})
         except Exception as exc:
             logger.warning("[NextDayWatchDataLoaderWorker] Background read failed: %s", exc)
             self.loaded.emit({"target_date": self.target_date, "error": str(exc),
@@ -770,7 +788,17 @@ class NextDayAnomalyWatchWidget(QWidget):
 
     def _start_data_load(self, request):
         target_date, eval_only = request
-        worker = NextDayWatchDataLoaderWorker(target_date, eval_only=eval_only)
+        main = self._main_window()
+        service = getattr(main, '_next_day_watch_process', None)
+        manifest = getattr(main, '_next_day_watch_manifest', None)
+        from ats.bounded_evaluation_store import evaluation_store
+        day = target_date or time.strftime('%Y-%m-%d')
+        local = evaluation_store.peek(os.path.join(get_app_root(), 'datacsv',
+                                       f'next_day_anomaly_watch_{day}.json'))
+        if local and str(local.get('generated_at', '')) >= str((manifest or {}).get('generated_at', '')):
+            manifest = local
+        worker = NextDayWatchDataLoaderWorker(target_date, eval_only=eval_only,
+                                              service=service, manifest=manifest)
         self.active_worker = worker
         self._active_load_request = request
         self._load_failed = False
@@ -806,7 +834,7 @@ class NextDayAnomalyWatchWidget(QWidget):
             return
         self._on_manifest_loaded(result.get("manifest") or {})
         self._on_eval_loaded(result.get("eval") or {})
-        self._on_stats_loaded(result.get("stats") or [])
+        self._on_stats_loaded(result.get("stats") or [], result.get('delayed_winners') or [])
 
     def _on_loader_finished(self, worker):
         from PyQt6 import sip
@@ -1538,7 +1566,7 @@ class NextDayAnomalyWatchWidget(QWidget):
     # =========================================================================
     # Tab 3: 跨日成效看板
     # =========================================================================
-    def _on_stats_loaded(self, stats_list: List[Dict[str, Any]]):
+    def _on_stats_loaded(self, stats_list: List[Dict[str, Any]], delayed_winners=None):
         self.stats_data_list = stats_list
 
         rows = []
@@ -1570,16 +1598,7 @@ class NextDayAnomalyWatchWidget(QWidget):
 
         _auto_size_table_once(self.table_stats)
 
-        delayed_winners = []
-        for sf in stats_list:
-            tdate = sf.get("target_trade_date", "")
-            eval_path = os.path.join(get_app_root(), "datacsv", f"next_day_anomaly_eval_{tdate}.json")
-            eval_data = _read_json(eval_path, {})
-            for entry in eval_data.get("candidates", {}).values():
-                cand = entry.get("candidate", {})
-                if cand.get("status") == "DELAYED" or any(e.get("type") == "DELAYED" for e in entry.get("events", [])):
-                    delayed_winners.append((cand, tdate))
-
+        delayed_winners = delayed_winners or []
         self.table_delayed_winners.setRowCount(len(delayed_winners))
         for r, (cand, initial_date) in enumerate(delayed_winners):
             code = str(cand.get("code", "")).zfill(6)

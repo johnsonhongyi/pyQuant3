@@ -6976,6 +6976,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             )
             status = result.get("status")
             if status in ("ok", "manifest_ready"):
+                from next_day_anomaly_watch import _read_json
+                self._next_day_watch_manifest = _read_json(result.get('watch_path', ''), {})
                 frozen_targets = getattr(self, "_next_day_watch_frozen_targets", set())
                 frozen_targets.add(target_date)
                 self._next_day_watch_frozen_targets = frozen_targets
@@ -9603,7 +9605,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         'source_version': version,
                         'sync_session': self._sync_session,
                         'resample': cur_resample,
-                        'sector_data': sector_data_snap
+                        'sector_data': sector_data_snap,
+                        'next_day_watch': getattr(self, '_next_day_watch_manifest', None)
                     }
 
                     # --- 🎁 封装 26670/26671 专用的日线协议包 ---
@@ -9614,7 +9617,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         'source_version': version,
                         'sync_session': self._sync_session,
                         'resample': 'd',
-                        'sector_data': sector_data_snap
+                        'sector_data': sector_data_snap,
+                        'next_day_watch': getattr(self, '_next_day_watch_manifest', None)
                     }
 
                     # ======================================================
@@ -9720,7 +9724,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                             'source_version': version,
                                             'sync_session': self._sync_session,
                                             'resample': 'd',
-                                            'sector_data': sector_data_snap
+                                            'sector_data': sector_data_snap,
+                        'next_day_watch': getattr(self, '_next_day_watch_manifest', None)
                                         }
                                         payload_daily_full = pickle.dumps(('UPDATE_DF_DATA', full_pkg), protocol=pickle.HIGHEST_PROTOCOL)
                                         header_daily_full = struct.pack("!I", len(payload_daily_full))
@@ -9833,7 +9838,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                                         'source_version': version,
                                                         'sync_session': self._sync_session,
                                                         'resample': 'd',
-                                                        'sector_data': sector_data_snap
+                                                        'sector_data': sector_data_snap,
+                        'next_day_watch': getattr(self, '_next_day_watch_manifest', None)
                                                     }
                                                     send_p = pickle.dumps(('UPDATE_DF_DATA', full_pkg), protocol=pickle.HIGHEST_PROTOCOL)
                                                     send_h = struct.pack("!I", len(send_p))

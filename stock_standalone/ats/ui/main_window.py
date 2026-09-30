@@ -125,6 +125,7 @@ class LedgerUpdateWorker(QThread):
             # 定位 MA20 列
             ma20_col = next((c for c in ('ma20d', 'ma20', 'MA20', 'ma20_series') if c in df_all.columns), None)
             close_col = 'close' if 'close' in df_all.columns else 'price'
+            active_codes_list = []
 
             if ma20_col and close_col in df_all.columns:
                 close_s = pd.to_numeric(df_all[close_col], errors='coerce')
@@ -232,7 +233,6 @@ class LedgerUpdateWorker(QThread):
             # 快照持久化 (文件 IO 放在 Worker 线程，不阻塞主线程)
             if self._session_snapshot.should_snapshot():
                 self._session_snapshot.save_snapshot(self._signal_ledger)
-                self._session_snapshot.cleanup_old_snapshots()
 
             now_dt = datetime.datetime.now()
             try:
@@ -253,7 +253,9 @@ class LedgerUpdateWorker(QThread):
             pool_codes = (list(self._universe_manager.radar_pool.keys()) +
                           list(self._universe_manager.watch_pool.keys()) +
                           list(self._universe_manager.trade_pool.keys()))
-            all_codes = list(dict.fromkeys(pool_codes + [c for c in self._fav_stocks if c]))
+            # Market observations are display candidates, without admitting them to trading pools.
+            all_codes = list(dict.fromkeys(pool_codes + [c for c in self._fav_stocks if c]
+                                           + active_codes_list))
 
             # 计算大盘涨幅参考
             sh_pct = 0.0
@@ -626,6 +628,8 @@ class EquityPopDialog(QDialog):
 
 
 class StockDetailDialog(QDialog):
+    _trace_ready = pyqtSignal(object)
+
     def __init__(self, code, name, df_row=None, context_info=None, parent=None, batch_codes=None):
         super().__init__(None) # [🚀 独立窗口解耦] 传入 None 剥离 Win32 HWND Owner 从属关系，防止窗口在 OS 视角下被强制浮在 Parent 主窗口上方
         self._py_parent = parent
@@ -740,29 +744,26 @@ class StockDetailDialog(QDialog):
         self._save_config_state()
 
     def _scan_kernel_trace(self):
-        """扫描最新交易内核 Trace 记录"""
+        """Load cached trace data off the GUI thread."""
         self.kernel_info = {}
-        try:
-            from sys_utils import get_app_root
-            import os
-            import json
-            base = get_app_root()
-            trace_path = os.path.join(base, "logs", "trading_kernel_trace.jsonl")
-            if os.path.exists(trace_path):
-                with open(trace_path, "r", encoding="utf-8") as f:
-                    for line in f:
-                        if line.strip():
-                            try:
-                                data = json.loads(line)
-                                signal_data = data.get("signal", {})
-                                intent_data = data.get("intent", {})
-                                trace_code = signal_data.get("code") or intent_data.get("code") or ""
-                                if str(trace_code).strip() == str(self.code).strip():
-                                    self.kernel_info = data
-                            except Exception:
-                                pass
-        except Exception as e:
-            print(f"Error scanning kernel trace in dialog: {e}")
+        self._trace_closed = False
+        self._trace_ready.connect(self._on_trace_ready)
+        from sys_utils import get_app_root
+        trace_path = os.path.join(get_app_root(), 'logs', 'trading_kernel_trace.jsonl')
+        code = self.code
+        def load():
+            try:
+                from ats.storage_archive import load_latest_trace
+                self._trace_ready.emit(load_latest_trace(trace_path, code))
+            except Exception as exc:
+                logger.debug('Stock trace load unavailable: %s', exc)
+        import threading
+        threading.Thread(target=load, daemon=True, name='ATS-StockTrace').start()
+
+    def _on_trace_ready(self, data):
+        if not self._trace_closed and isinstance(data, dict):
+            self.kernel_info = data
+            self.update_data(self.df_row)
 
     def _restore_geometry(self):
         """从 window_config.json 恢复个股详情弹窗位置与大小"""
@@ -790,6 +791,7 @@ class StockDetailDialog(QDialog):
 
     def closeEvent(self, event):
         """关闭时自动持久化窗口大小与位置"""
+        self._trace_closed = True
         if self.hover_timer:
             self.hover_timer.stop()
         if self.snap_timer:
@@ -1866,6 +1868,7 @@ class ATSMainWindow(QMainWindow):
     next_day_snapshot_signal = pyqtSignal(object)
     db_data_loaded_signal = pyqtSignal(object)
     _channel_scan_ready = pyqtSignal(object)
+    _market_summary_ready = pyqtSignal()
 
     def __init__(self):
         super().__init__()
@@ -1880,7 +1883,11 @@ class ATSMainWindow(QMainWindow):
         learning_console_enabled = getattr(
             cct, "ipo_learning_console", getattr(getattr(cct, "CFG", None), "ipo_learning_console", False)
         )
-        self._ipo_learning_console_enabled = bool(learning_console_enabled)
+        self._ipo_learning_console_enabled = (str(learning_console_enabled).strip().lower()
+                                             in {'1', 'true', 'yes', 'on'})
+        from ats.next_day_watch_process import NextDayWatchProcess
+        from sys_utils import get_app_root
+        self._next_day_watch_process = NextDayWatchProcess(get_app_root())
         logger.info(
             "[ATSMainWindow] IPO monitor enabled=%s, learning_console enabled=%s config=%s",
             self._ipo_detector_enabled,
@@ -3114,7 +3121,8 @@ class ATSMainWindow(QMainWindow):
         self.lbl_market_volume_status = QLabel()
         self.lbl_market_volume_status.setTextFormat(Qt.TextFormat.RichText)
         self.lbl_market_volume_status.setStyleSheet("font-size: 8.8pt; padding: 0 10px;")
-        self.status_bar.addPermanentWidget(self.lbl_market_volume_status)
+        self.status_bar.addPermanentWidget(self.lbl_market_volume_status, 1)
+        self._market_summary_ready.connect(self._refresh_market_volume_status)
 
         # 🕒 状态栏右侧常驻显示：数据更新时间与下次自动刷新倒计时
         self._last_data_update_time = None
@@ -3134,7 +3142,8 @@ class ATSMainWindow(QMainWindow):
         try:
             from ats.capital_dragon_engine import CapitalDragonEngine
             tdx_intv = float(getattr(cct, 'ats_tdx_interval', 5.0) or 5.0)
-            CapitalDragonEngine.get_instance().start_market_summary_bg_updater(interval_sec=tdx_intv)
+            CapitalDragonEngine.get_instance().start_market_summary_bg_updater(
+                interval_sec=tdx_intv, on_updated=self._market_summary_ready.emit)
         except Exception as _e_bg:
             logger.debug(f"[ATSMainWindow] 启动大盘摘要后台线程异常: {_e_bg}")
 
@@ -3149,6 +3158,8 @@ class ATSMainWindow(QMainWindow):
             cde = CapitalDragonEngine.get_instance()
             summary = cde.get_market_indices_and_volume_summary()
             html = summary.get('formatted_html', '')
+            if not html and not self.lbl_market_volume_status.text():
+                html = '上证: -- | 深证: -- | 创业板: -- | 北证: -- | 总成交额: --（等待行情）'
             if html and self.lbl_market_volume_status.text() != html:
                 self.lbl_market_volume_status.setText(html)
             tooltip = summary.get('tooltip_text', '')
@@ -4261,6 +4272,23 @@ class ATSMainWindow(QMainWindow):
             if len(data_pkg) > 1 and isinstance(data_pkg[1], dict):
                 sector_data = data_pkg[1].get('sector_data')
 
+        packet_meta = (data_pkg if isinstance(data_pkg, dict) else
+                       (getattr(df_payload, 'attrs', {}) or {}))
+        manifest = packet_meta.get('next_day_watch')
+        if isinstance(manifest, dict):
+            self._next_day_watch_manifest = manifest
+            day = str(manifest.get('target_trade_date', ''))
+            if day == time.strftime('%Y-%m-%d') and day != getattr(self, '_seen_manifest_day', None):
+                self._seen_manifest_day = day
+                panel = getattr(self, 'next_day_watch_panel', None)
+                if panel is not None:
+                    panel.combo_manifest_date.blockSignals(True)
+                    if panel.combo_manifest_date.findText(day) < 0:
+                        panel.combo_manifest_date.addItem(day)
+                    panel.combo_manifest_date.setCurrentText(day)
+                    panel.combo_manifest_date.blockSignals(False)
+                    panel.reload_all_data()
+
         try:
             is_exchange_trade_day = bool(cct.get_day_istrade_date())
         except Exception:
@@ -5262,7 +5290,6 @@ class ATSMainWindow(QMainWindow):
         # 6. 定时快照持久化
         if self.session_snapshot.should_snapshot():
             self.session_snapshot.save_snapshot(self.signal_ledger)
-            self.session_snapshot.cleanup_old_snapshots()
 
         # 6.5 收盘盘后自动生成当日总结快照 (必须是真实交易日 且 15:00 之后)
         import datetime
@@ -5523,9 +5550,9 @@ class ATSMainWindow(QMainWindow):
                 from sys_utils import get_app_root
                 data_dir = os.path.join(get_app_root(), "datacsv")
                 log_path = os.path.join(data_dir, f"ats_alpha_tracker_{today_date}.json")
-                if os.path.exists(log_path):
-                    with open(log_path, 'r', encoding='utf-8') as f:
-                        existing_records = json.load(f)
+                from ats.bounded_evaluation_store import evaluation_store
+                existing_records = evaluation_store.read(log_path, None)
+                if existing_records is not None:
                         self._recorded_alpha_list = existing_records if isinstance(existing_records, list) else []
                         for rec in self._recorded_alpha_list:
                             c = rec.get('code')
@@ -5626,8 +5653,9 @@ class ATSMainWindow(QMainWindow):
                 data_dir = os.path.join(get_app_root(), "datacsv")
                 os.makedirs(data_dir, exist_ok=True)
                 log_path = os.path.join(data_dir, f"ats_alpha_tracker_{today_date}.json")
-                with open(log_path, 'w', encoding='utf-8') as f:
-                    json.dump(records_copy, f, ensure_ascii=False, indent=2)
+                from ats.bounded_evaluation_store import evaluation_store
+                from ats.storage_archive import write_json_gzip
+                evaluation_store.put(log_path, records_copy, write_json_gzip)
             except Exception as e:
                 print(f"[ATSAlphaTracker] Background flush error: {e}")
         threading.Thread(target=worker, daemon=True).start()
@@ -5641,13 +5669,14 @@ class ATSMainWindow(QMainWindow):
             return  # The producer retains these receipts and retries on the next poll.
         try:
             from sys_utils import get_app_root
-            from next_day_anomaly_watch import mark_events_delivered
-            data_dir = os.path.join(get_app_root(), "datacsv")
             import threading
             self._next_day_ack_busy = True
             def acknowledge():
                 try:
-                    mark_events_delivered(data_dir, target_date, event_ids)
+                    result = self._next_day_watch_process.request(
+                        "ack", target_date=target_date, event_ids=list(event_ids))
+                    if result.get("error"):
+                        logger.warning('[NextDayWatch] ACK deferred: %s', result['error'])
                 except Exception as exc:
                     logger.warning('[NextDayWatch] ACK deferred: %s', exc)
                 finally:
@@ -5782,7 +5811,7 @@ class ATSMainWindow(QMainWindow):
                 if getattr(self, '_is_closing', False):
                     service.close()
                     return
-                result = service.request("poll")
+                result = service.request("poll", manifest=getattr(self, '_next_day_watch_manifest', None))
                 if result.get("error"):
                     logger.warning("[NextDayWatch] worker failed: %s", result["error"])
                     return
@@ -6725,6 +6754,10 @@ class ATSMainWindow(QMainWindow):
             self.ipo_learning_console.stop_monitor()
         if hasattr(self, "_next_day_watch_timer"):
             self._next_day_watch_timer.stop()
+        service = getattr(self, '_next_day_watch_process', None)
+        if service is not None:
+            import threading
+            threading.Thread(target=service.close, name="ATS-NextDayClose", daemon=False).start()
 
         # 0. 🚀【原子持久化打开的磁吸/监控窗口状态】：在子窗口被 close() 前优先保存 is_open: True
         try:
@@ -6906,8 +6939,7 @@ class ATSMainWindow(QMainWindow):
             try:
                 self.session_snapshot.save_snapshot(self.signal_ledger, force=True)
                 self.session_snapshot.save_daily_summary(self.signal_ledger, force=True)
-                self.session_snapshot.cleanup_old_snapshots()
-                print("[ATSMainWindow] 程序退出关闭，已成功原子落盘保存终盘信号账本与总结快照!")
+                print("[ATSMainWindow] 退出快照已更新内存，按交易时段存档策略延迟保存")
             except Exception as ex:
                 print(f"[ATSMainWindow] 程序退出保存信号快照异常: {ex}")
 

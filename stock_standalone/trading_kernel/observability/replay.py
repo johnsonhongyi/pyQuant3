@@ -50,10 +50,9 @@ class ReplayRunner:
 
     def run_replay(self) -> ReplayReport:
         report = ReplayReport()
-        if not os.path.exists(self.journal_path):
-            return report
-
-        with open(self.journal_path, "r", encoding="utf-8") as f:
+        from ats.storage_archive import iter_archive_lines
+        from contextlib import closing
+        with closing(iter_archive_lines(self.journal_path)) as f:
             for line_idx, line in enumerate(f, 1):
                 line = line.strip()
                 if not line:

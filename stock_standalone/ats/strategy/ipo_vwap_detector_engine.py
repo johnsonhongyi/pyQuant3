@@ -369,9 +369,8 @@ def resolve_fast_ipo_name(clean_code: str) -> str:
         try:
             from sys_utils import get_app_root
             cache_file = os.path.join(get_app_root(), "datacsv", "stock_name_cache.json")
-            if os.path.exists(cache_file):
-                with open(cache_file, "r", encoding="utf-8", errors="ignore") as f:
-                    _DISK_NAME_JSON_CACHE = json.load(f)
+            from ats.bounded_evaluation_store import evaluation_store
+            _DISK_NAME_JSON_CACHE = evaluation_store.read(cache_file, {})
         except Exception:
             _DISK_NAME_JSON_CACHE = {}
     if clean_code in _DISK_NAME_JSON_CACHE:
@@ -399,8 +398,9 @@ def resolve_fast_ipo_name(clean_code: str) -> str:
                             try:
                                 from sys_utils import get_app_root
                                 c_file = os.path.join(get_app_root(), "datacsv", "stock_name_cache.json")
-                                with open(c_file, "w", encoding="utf-8") as f:
-                                    json.dump(_DISK_NAME_JSON_CACHE, f, ensure_ascii=False, indent=2)
+                                from ats.bounded_evaluation_store import evaluation_store
+                                from ats.storage_archive import write_json_gzip
+                                evaluation_store.put(c_file, _DISK_NAME_JSON_CACHE, write_json_gzip)
                             except Exception:
                                 pass
                         return real_name

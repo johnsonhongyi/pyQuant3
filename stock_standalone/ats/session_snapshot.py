@@ -4,7 +4,7 @@ ATS Session Snapshot
 盘中快照持久化 — 定时序列化信号账本，支持收盘后复盘分析
 
 核心功能:
-1. 每 10 分钟自动序列化 SignalLedger 至 JSON 文件
+1. 内存缓存账本，交易时段每 30 分钟压缩存档，收盘有变动额外保存一次
 2. 收盘后自动生成当日信号总结报告
 3. 支持跨日信号追踪 (昨日 WATCH → 今日是否继续走强)
 4. 自动清理超过 5 天的历史快照
@@ -98,11 +98,7 @@ class SessionSnapshot:
         """判断是否满足备份条件：收盘后(15:00后)定时备份 OR 程序退出关闭时强制备份"""
         if force:
             return True
-        now = datetime.datetime.now()
-        # 仅在 15:00 收盘后允许定时写盘 (且满足间隔控制)
-        if now.hour >= 15:
-            return (time.time() - self._last_snapshot_ts) >= self.SNAPSHOT_INTERVAL_SEC
-        return False
+        return (time.time() - self._last_snapshot_ts) >= 60
 
     def save_snapshot(self, signal_ledger, force=False):
         if not self.should_snapshot(force=force):
@@ -153,7 +149,15 @@ class SessionSnapshot:
                 finally:
                     with self._async_lock:
                         self._async_running = False
-                    completed({'success': success, 'event_ids': captured._next_day_watch_event_ids})
+                    if success:
+                        from ats.bounded_evaluation_store import evaluation_store
+                        path = os.path.join(self.log_dir, 'signal_ledger_latest.json')
+                        value = evaluation_store.read(path, {})
+                        def committed(saved):
+                            completed({'success': True, 'event_ids': set(saved.get('next_day_watch_event_ids', []))})
+                        evaluation_store.put(path, value, self._write_archive, on_commit=committed)
+                    else:
+                        completed({'success': False, 'event_ids': captured._next_day_watch_event_ids})
             threading.Thread(target=write, daemon=True, name='ATS_ReceiptSnapshot').start()
             return True
         except Exception:
@@ -181,8 +185,8 @@ class SessionSnapshot:
             # 【🛡️ 冷启动磁盘 Hash 预载入】若内存 Hash 为空但磁盘已有快照文件，预读磁盘 Hash 避免重启写盘
             if self._last_snapshot_hash is None and os.path.exists(filepath):
                 try:
-                    with open(filepath, 'r', encoding='utf-8') as f_exist:
-                        exist_data = json.load(f_exist)
+                    from ats.bounded_evaluation_store import evaluation_store
+                    exist_data = evaluation_store.read(filepath, {})
                     self._last_snapshot_hash = self._compute_dict_hash(exist_data)
                 except Exception:
                     pass
@@ -215,17 +219,13 @@ class SessionSnapshot:
             
             # 数据变动智能比对: 数据完全未变时跳过写盘，避免无谓磁盘读写与 IO 开销
             current_hash = self._compute_dict_hash(snapshot_data)
-            if not force and current_hash and current_hash == self._last_snapshot_hash:
+            if current_hash and current_hash == self._last_snapshot_hash:
+                self._last_snapshot_ts = time.time()
                 return True
 
             # v2 使用同目录临时文件 + os.replace 原子覆盖，避免进程中断留下半截 JSON。
-            fd, temp_path = tempfile.mkstemp(prefix='.signal_ledger_', suffix='.tmp', dir=self.log_dir)
-            with os.fdopen(fd, 'w', encoding='utf-8') as f:
-                json.dump(snapshot_data, f, ensure_ascii=False, indent=2)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(temp_path, filepath)
-            temp_path = None
+            from ats.bounded_evaluation_store import evaluation_store
+            evaluation_store.put(filepath, snapshot_data, self._write_archive)
 
             self._last_snapshot_hash = current_hash
             self._last_snapshot_ts = time.time()
@@ -296,11 +296,9 @@ class SessionSnapshot:
     def load_latest_snapshot(self):
         """读取唯一最新快照并执行 v1->v2 迁移；任何结构异常返回 None。"""
         filepath = os.path.join(self.log_dir, 'signal_ledger_latest.json')
-        if not os.path.exists(filepath):
-            return None
         try:
-            with open(filepath, 'r', encoding='utf-8') as f:
-                raw = json.load(f)
+            from ats.bounded_evaluation_store import evaluation_store
+            raw = evaluation_store.read(filepath, None)
             migrated = self.migrate_snapshot_v2(raw)
             if migrated is None:
                 return None
@@ -353,16 +351,14 @@ class SessionSnapshot:
             # 【🛡️ 冷启动磁盘总结预载入】若内存锁为空但磁盘已存在今日总结报告，瞬间载入其 Hash 与日期锁
             if self._last_summary_date is None and os.path.exists(filepath):
                 try:
-                    with open(filepath, 'r', encoding='utf-8') as f_exist:
-                        exist_data = json.load(f_exist)
+                    from ats.bounded_evaluation_store import evaluation_store
+                    exist_data = evaluation_store.read(filepath, {})
                     self._last_summary_hash = self._compute_dict_hash(exist_data)
                     self._last_summary_date = today_str
                 except Exception:
                     pass
 
             # 【🛡️ 终盘总结单日独占锁】同一交易日盘后总结报告若已保存过 (且无 force 强行指定)，则 0ms 跳过
-            if not force and self._last_summary_date == today_str:
-                return True
             
             # 按时段分组统计
             phase_groups = {}
@@ -400,22 +396,16 @@ class SessionSnapshot:
             
             # 智能数据变动比对：如果与上次写盘内容完全一致（且非 force 强制），则零写盘零刷屏
             current_hash = self._compute_dict_hash(summary)
-            if not force and current_hash and current_hash == self._last_summary_hash:
+            if current_hash and current_hash == self._last_summary_hash:
                 return True
 
-            with open(filepath, 'w', encoding='utf-8') as f:
-                json.dump(summary, f, ensure_ascii=False, indent=2)
+            from ats.bounded_evaluation_store import evaluation_store
+            evaluation_store.put(filepath, summary, self._write_archive)
 
             self._last_summary_hash = current_hash
             self._last_summary_date = today_str
-            print(f"[SessionSnapshot] Daily summary saved to {filepath} ({len(summary.get('watchlist', []))} watch, {len(summary.get('tradelist', []))} trade)")
+            print(f"[SessionSnapshot] Daily summary cached: {filename}")
             
-            try:
-                from global_favorites import GlobalFavoriteManager
-                GlobalFavoriteManager().backup_to_archives()
-            except Exception as e:
-                print(f"[SessionSnapshot] Auto archive backup error: {e}")
-
             return True
             
         except Exception as e:
@@ -431,7 +421,8 @@ class SessionSnapshot:
         try:
             # 查找最近的 daily_summary 文件
             pattern = os.path.join(self.log_dir, 'daily_summary_*.json')
-            files = sorted(glob.glob(pattern), reverse=True)
+            from ats.bounded_evaluation_store import evaluation_store
+            files = sorted(evaluation_store.paths(pattern), reverse=True)
             
             today_str = datetime.date.today().strftime('%Y%m%d')
             
@@ -441,8 +432,7 @@ class SessionSnapshot:
                 if today_str in basename:
                     continue
                 
-                with open(f, 'r', encoding='utf-8') as fp:
-                    data = json.load(fp)
+                data = evaluation_store.read(f, {})
                 
                 # 提取 WATCH 和 TRADE 级别的信号用于跨日追踪
                 result = {}
@@ -458,9 +448,18 @@ class SessionSnapshot:
         
         return {}
     
+    def _write_archive(self, path, value):
+        from ats.storage_archive import write_json_gzip
+        write_json_gzip(path, value)
+        self.cleanup_old_snapshots()
+
     def cleanup_old_snapshots(self):
         """清理旧有的废弃 timestamp 快照与超过 MAX_HISTORY_DAYS 天的历史总结"""
         today = datetime.date.today()
+        from ats.archive_policy import archive_window
+        if archive_window()[0] is None or self._last_cleanup_date == today:
+            return
+        self._last_cleanup_date = today
         cutoff = today - datetime.timedelta(days=self.MAX_HISTORY_DAYS)
         cutoff_str = cutoff.strftime('%Y%m%d')
         
@@ -478,9 +477,9 @@ class SessionSnapshot:
                     pass
 
             # 2. 清理超过 5 天的每日总结历史 daily_summary_*.json
-            for filepath in glob.glob(os.path.join(self.log_dir, 'daily_summary_*.json')):
+            for filepath in glob.glob(os.path.join(self.log_dir, 'daily_summary_*.json*')):
                 basename = os.path.basename(filepath)
-                parts = basename.replace('.json', '').split('_')
+                parts = basename.replace('.json.gz', '').replace('.json', '').split('_')
                 for part in parts:
                     if len(part) == 8 and part.isdigit():
                         if part < cutoff_str:

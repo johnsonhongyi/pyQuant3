@@ -7,9 +7,75 @@ import threading
 import time
 
 logger = logging.getLogger("ATS.NextDayWatch")
+_imported_manifests = {}
 
 
-def _poll(root):
+def _accept_manifest(root, manifest):
+    if not isinstance(manifest, dict):
+        return
+    day = str(manifest.get('target_trade_date', ''))
+    from datetime import date
+    try:
+        date.fromisoformat(day)
+    except ValueError:
+        return
+    key = (root, day)
+    seen = _imported_manifests.setdefault(key, [])
+    if any(previous == manifest for previous in seen):
+        return
+    from next_day_anomaly_watch import _atomic_json, _read_json
+    import copy
+    path = os.path.join(root, 'datacsv', 'next_day_anomaly_watch_%s.json' % day)
+    current = _read_json(path, {})
+    seen.append(copy.deepcopy(manifest))
+    del seen[:-8]
+    if len(_imported_manifests) > 8:
+        _imported_manifests.pop(next(iter(_imported_manifests)))
+    if str(current.get('generated_at', '')) > str(manifest.get('generated_at', '')):
+        return
+    _atomic_json(path, manifest)
+
+
+def _snapshot(root, target_date=None, eval_only=False, manifest=None):
+    """Return live worker memory; persistence is independent of UI refresh."""
+    _accept_manifest(root, manifest)
+    from ats.bounded_evaluation_store import evaluation_store
+    from next_day_anomaly_watch import _read_json
+    data_dir = os.path.join(root, 'datacsv')
+    paths = evaluation_store.paths(os.path.join(data_dir, 'next_day_anomaly_watch_*.json'))
+    dates = sorted((os.path.basename(path)[23:-5] for path in paths), reverse=True)
+    day = target_date or (dates[0] if dates else time.strftime('%Y-%m-%d'))
+    from datetime import date
+    date.fromisoformat(day)
+    result = {'target_date': day, 'eval_only': bool(eval_only),
+              'eval': _read_json(os.path.join(data_dir, 'next_day_anomaly_eval_%s.json' % day), {})}
+    if eval_only:
+        return result
+    result.update(dates=dates, manifest=_read_json(
+        os.path.join(data_dir, 'next_day_anomaly_watch_%s.json' % day), {}))
+    stats, delayed_winners = [], []
+    for path in sorted(evaluation_store.paths(
+            os.path.join(data_dir, 'next_day_anomaly_stats_*.json')), reverse=True)[:30]:
+        item = _read_json(path, {})
+        if not item:
+            continue
+        stats.append(item)
+        target = item.get('target_trade_date', '')
+        try:
+            date.fromisoformat(target)
+        except (ValueError, TypeError):
+            continue
+        evaluation = _read_json(os.path.join(data_dir, 'next_day_anomaly_eval_%s.json' % target), {})
+        for entry in evaluation.get('candidates', {}).values():
+            candidate = entry.get('candidate', {})
+            if candidate.get('status') == 'DELAYED' or any(
+                    event.get('type') == 'DELAYED' for event in entry.get('events', [])):
+                delayed_winners.append((candidate, target))
+    result.update(stats=stats, delayed_winners=delayed_winners)
+    return result
+
+
+def _poll(root, manifest=None):
     now = time.localtime()
     today = time.strftime("%Y-%m-%d", now)
     try:
@@ -18,6 +84,8 @@ def _poll(root):
             get_followup_candidates)
         # The parent supplies the physical deployment directory.
         data_dir = os.path.join(root, "datacsv")
+        if isinstance(manifest, dict) and manifest.get('target_trade_date') == today:
+            _accept_manifest(root, manifest)
         pending_events = _pending_confirmation_events(
             data_dir, today, _read_json(os.path.join(data_dir, "next_day_anomaly_eval_%s.json" % today), {}))
     except Exception as exc:
@@ -90,7 +158,10 @@ def _worker_entry(connection, root):
                 break
             try:
                 if request["action"] == "poll":
-                    result = _poll(root)
+                    result = _poll(root, request.get('manifest'))
+                elif request['action'] == 'snapshot':
+                    result = _snapshot(root, request.get('target_date'),
+                                       request.get('eval_only', False), request.get('manifest'))
                 elif request["action"] == "ack":
                     from next_day_anomaly_watch import mark_events_delivered
                     result = {"acknowledged": mark_events_delivered(
