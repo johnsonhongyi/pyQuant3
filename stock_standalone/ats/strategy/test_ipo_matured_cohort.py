@@ -133,3 +133,32 @@ def test_ats_learning_cycle_reuses_new_stock_module_without_separate_collectors(
     assert calls == ["ats_stock", "ats_detector"]
     assert report["operating_mode"] == "ATS_SIGNAL_SHADOW"
     assert report["entry_authorized"] is False
+
+
+def test_ats_cadence_prevents_repeat_detector_reads(tmp_path, monkeypatch):
+    import pandas as pd
+    from ats.new_stock_fetcher import NewStockFetcher
+    from ats.strategy.ipo_vwap_detector_engine import IPOVWAPDetectorEngine
+
+    calls = []
+    frame = pd.DataFrame([{"code": "920202", "listing_date": "2026-09-29",
+                           "status": "次新", "issue_price": 7.55}])
+    monkeypatch.setattr(acquisition, "_ats_market_session_active", lambda: True)
+    monkeypatch.setattr(NewStockFetcher, "get_instance", lambda: SimpleNamespace(
+        get_combined_new_stocks=lambda: (calls.append("table") or frame)))
+    monkeypatch.setattr(acquisition, "get_cached_ats_stock_table", lambda _fetcher: frame)
+    monkeypatch.setattr(IPOVWAPDetectorEngine, "get_instance", lambda: SimpleNamespace(
+        analyze_stock=lambda _code: (calls.append("detector") or SimpleNamespace(
+            price=0.0, signal_type="WATCH", signal_tier="WATCH", vwap=0.0,
+            vwap_diff_pct=0.0, horse_race_score=0.0))))
+    monkeypatch.setattr(acquisition, "collect_issue_prices_from_ats_cache", lambda *a, **k: {})
+    monkeypatch.setattr(acquisition.IPODecisionConfigSnapshot, "from_yaml", lambda _path: SimpleNamespace())
+    monkeypatch.setattr(acquisition, "collect_source_readiness", lambda *a: {
+        "ready_count": 0, "required_count": 41, "observations": [], "next_actions": [],
+        "configuration_hash": "c", "data_contract_hash": "d"})
+    acquisition.run_ats_learning_cycle("920202", root=tmp_path)
+    second = acquisition.run_ats_learning_cycle("920202", root=tmp_path)
+    assert calls == ["table", "detector"]
+    assert second["source_collection"]["mode"] == "CADENCE_THROTTLED"
+    assert second["ats_signal_capture"]["state"] == "UNREADY"
+    assert second["entry_authorized"] is False

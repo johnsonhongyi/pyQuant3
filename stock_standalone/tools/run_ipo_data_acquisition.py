@@ -11,6 +11,7 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from uuid import uuid4
 from typing import Any, Callable, Dict, Optional
 
 APP_ROOT = Path(__file__).resolve().parents[1]
@@ -678,6 +679,44 @@ def get_cached_ats_stock_table(fetcher: Any = None) -> Any:
     return pd.DataFrame(records)
 
 
+def _reserve_ats_source_refresh(root: Path, ticker: str, now: Optional[datetime] = None) -> bool:
+    """Persist per-symbol cadence so manual refresh/restarts cannot bypass five minutes."""
+    if not isinstance(ticker, str) or len(ticker) != 6 or not ticker.isdigit():
+        return False
+    point = now or datetime.now(timezone.utc)
+    path = root / "data" / "ipo_learning" / "source_refresh" / f"{ticker}.json"
+    temporary = path.with_name(f"{ticker}.{uuid4().hex}.tmp")
+    lock_path = path.with_suffix(".lock")
+    lock_fd = None
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if lock_path.is_file() and time.time() - lock_path.stat().st_mtime > 300:
+            lock_path.unlink()
+        lock_fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        if path.is_file():
+            previous = json.loads(path.read_text(encoding="utf-8"))
+            last = datetime.fromisoformat(previous["attempted_at"])
+            if (point - last).total_seconds() < 300:
+                return False
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary.write_text(json.dumps({"attempted_at": point.isoformat()}) + "\n", encoding="utf-8")
+        os.replace(temporary, path)
+        return True
+    except (OSError, UnicodeError, ValueError, TypeError, KeyError):
+        return False
+    finally:
+        if lock_fd is not None:
+            os.close(lock_fd)
+            try:
+                lock_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 def _source_bootstrap_attempted(root: Path) -> bool:
     path = root / "data" / "ipo_learning" / "source_bootstrap.latest.json"
     try:
@@ -848,12 +887,22 @@ def run_ats_learning_cycle(
     ats_status: Dict[str, Any] = {"status": "UNREADY"}
     signal_status: Dict[str, Any] = {"status": "UNREADY"}
     market_active = _ats_market_session_active()
+    root_key = str(project_root)
+    bootstrap_pending = (
+        root_key not in _ATS_COLD_START_ATTEMPTED_ROOTS
+        and not _source_bootstrap_attempted(project_root)
+    )
+    cold_start_exempt = bootstrap_pending
+    refresh_due = (
+        (market_active or cold_start_exempt)
+        and _reserve_ats_source_refresh(project_root, code)
+    )
     progress("ATS_TABLE", "读取 ATS 新股/次新股表及标的基础字段")
     try:
         from ats.new_stock_fetcher import NewStockFetcher
 
         fetcher = NewStockFetcher.get_instance()
-        stocks = fetcher.get_combined_new_stocks() if market_active else get_cached_ats_stock_table(fetcher)
+        stocks = fetcher.get_combined_new_stocks() if refresh_due else get_cached_ats_stock_table(fetcher)
         row = stocks.loc[stocks["code"].astype(str).str.zfill(6) == code]
         if not row.empty:
             selected = row.iloc[0]
@@ -885,13 +934,7 @@ def run_ats_learning_cycle(
     except Exception:
         pass
     progress("CONTRACT_BASELINE", "核对本标的 41 项来源契约与当前可用字段")
-    root_key = str(project_root)
-    bootstrap_pending = (
-        root_key not in _ATS_COLD_START_ATTEMPTED_ROOTS
-        and not _source_bootstrap_attempted(project_root)
-    )
-    cold_start_exempt = bootstrap_pending
-    collect_supported_sources = market_active or cold_start_exempt
+    collect_supported_sources = refresh_due
     if collect_supported_sources:
         from zoneinfo import ZoneInfo
 
@@ -937,8 +980,10 @@ def run_ats_learning_cycle(
         source_reports = {}
         source_collection = {
             "status": "STATIC_ONLY",
-            "mode": "COLD_START_STATIC" if cold_start_exempt else "STATIC_HISTORICAL",
-            "reason": "休市/周末不请求实时行情与外部来源；继续读取本机多日历史并完成静态情绪分析",
+            "mode": "CADENCE_THROTTLED" if market_active or cold_start_exempt else "STATIC_HISTORICAL",
+            "reason": ("本标的距上次读取不足 5 分钟，或周期状态不可写；复用 ATS 缓存"
+                       if market_active or cold_start_exempt else
+                       "休市/周末不请求实时行情与外部来源；继续读取本机多日历史并完成静态情绪分析"),
         }
         progress("SOURCE_COLLECTION", source_collection["reason"], "DONE")
     if collect_supported_sources:
@@ -999,12 +1044,12 @@ def run_ats_learning_cycle(
         f"{static_snapshot.get('universe_scan', {}).get('universe_count', 0)}",
         "DONE",
     )
-    inspect_signal = market_active
+    inspect_signal = refresh_due
     progress(
         "ATS_DETECTOR",
         "运行 ATS IPO 异动检测器并校验新鲜报价/分钟线时点"
-        if market_active else "非交易时段不运行实时异动检测；本轮已完成静态历史情绪评分",
-        "RUNNING" if market_active else "SKIPPED",
+        if inspect_signal else "未到读取周期或非交易时段；本轮复用缓存并完成静态历史评分",
+        "RUNNING" if inspect_signal else "SKIPPED",
     )
     if (ats_status.get("status") == "READY" and ats_status.get("listing_status") != "待上市"
             and inspect_signal):
