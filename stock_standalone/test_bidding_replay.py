@@ -120,6 +120,16 @@ class ReplayWorker(QThread):
         self.kwargs = kwargs
         self.is_running = True
         self.is_paused = False
+        self._last_progress_emit = 0.0
+        self._latest_progress = None
+
+    def _emit_progress(self, t_str, force=False):
+        if t_str is not None:
+            self._latest_progress = str(t_str)
+        now = time.monotonic()
+        if self._latest_progress is not None and (force or now - self._last_progress_emit >= 0.1):
+            self.progress_update.emit(self._latest_progress)
+            self._last_progress_emit = now
 
     def run(self):
         def ui_callback(t_str):
@@ -128,14 +138,19 @@ class ReplayWorker(QThread):
                 time.sleep(0.1)
             if t_str is not None:
                 try:
-                    self.progress_update.emit(str(t_str))
+                    self._emit_progress(t_str)
                 except Exception as e:
                     logger.debug(f"Signal emit failed: {e}")
             return self.is_running
 
         self.kwargs['ui_callback'] = ui_callback
-        run_replay(**self.kwargs)
-        self.finished.emit()
+        try:
+            run_replay(**self.kwargs)
+        except Exception:
+            logger.exception("[REPLAY-FAIL] 回放失败")
+        finally:
+            self._emit_progress(None, force=True)
+            self.finished.emit()
 
     def stop(self):
         self.is_running = False
@@ -404,6 +419,26 @@ class LiveWorker(QThread):
         self.is_running = False
 
 
+def _update_replay_market_stats(detector, batch_df, percentages):
+    """Accumulate only observed historical prices, never use end-of-day/live breadth."""
+    valid = pd.to_numeric(batch_df['percent'], errors='coerce')
+    codes = batch_df['code'].astype(str)
+    percentages.update({code: float(value) for code, value in zip(codes, valid)
+                        if pd.notna(value) and np.isfinite(value)})
+    values = np.fromiter(percentages.values(), dtype=float)
+    total = len(values)
+    up = int(np.count_nonzero(values > 0))
+    down = int(np.count_nonzero(values < 0))
+    average = float(values.mean()) if total else 0.0
+    temperature = float(np.clip((up / total * 100 if total else 0) * 0.4 + average * 5 + 40, 0, 100))
+    indices = [{'name': '上证', 'percent': percentages[code]}
+               for code in ('sh000001', 'sh999999') if code in percentages][:1]
+    stats = {'temperature': temperature, 'up': up, 'down': down,
+             'flat': total - up - down, 'total': total, 'indices': indices}
+    detector._replay_market_stats = stats
+    return stats
+
+
 def run_replay(start_time_str="09:25:00", end_time_str="15:00:00", playback_speed=0.0, stops=None, concise=True, resample=None, codes=None, replay_date=None, ui_callback=None, detector=None, publisher=None, real_df_all=None, panel=None):
     """
     基于 HDF5 本地 Tick 数据，按时间线回回放并推入 DataPublisher/BiddingMomentumDetector。
@@ -655,8 +690,9 @@ def run_replay(start_time_str="09:25:00", end_time_str="15:00:00", playback_spee
     logger.info(f"Starting playback: {to_time_str(unique_times[0])} -> {to_time_str(unique_times[-1])} at speed {playback_speed}x...")
     
     # 模拟最新行情的字典 (累加器)
-    market_snapshot = pd.DataFrame()
+    market_percentages = {}
     
+    last_console_progress = 0.0
     last_real_time = time.time()
     
     # 将 hh:mm:ss 转换为自今天 0点起多少秒方便计算间隔
@@ -683,7 +719,8 @@ def run_replay(start_time_str="09:25:00", end_time_str="15:00:00", playback_spee
     
     # [OPTIMIZED] 预分组数据，极大提升回放时的切片速度
     logger.info("Pre-grouping tick data by time (this takes a few seconds)...")
-    df_grouped = {t: group for t, group in df.groupby('ticktime')}
+    # Keep only row positions; avoid materializing a DataFrame for every historical tick.
+    df_grouped = df.groupby('ticktime', sort=False).indices
 
     # [SIM-DATE] 提前确定模拟日期，用于量比计算与时间戳生成
     sim_date = replay_date if replay_date else datetime.now().strftime('%Y-%m-%d')
@@ -695,7 +732,8 @@ def run_replay(start_time_str="09:25:00", end_time_str="15:00:00", playback_spee
     try:
         for idx, t_str in enumerate(unique_times):
             # 取出这一时刻所有改动的 tick
-            tick_slice = df_grouped.get(t_str)
+            positions = df_grouped.get(t_str)
+            tick_slice = df.iloc[positions] if positions is not None else None
             if tick_slice is None: continue 
                 
             curr_seconds = time_str_to_seconds(t_str)
@@ -837,27 +875,21 @@ def run_replay(start_time_str="09:25:00", end_time_str="15:00:00", playback_spee
             active_codes = [str(c).zfill(6) for c in batch_df['code'].tolist()]
             detector.update_scores(active_codes=active_codes, skip_evaluate=True)
             t2 = time.time()
-            
+            replay_stats = _update_replay_market_stats(detector, batch_df, market_percentages)
+
             # [NEW] 驱动预警中枢：根据回放数据更新市场预警
             if hub and idx % 2 == 0: # 稍微降低频率，每 2 个 tick 更新一次
                 try:
-                    # 简单估算模拟温度：基于涨跌家数比或平均涨幅 (适配 DailyPulseEngine 逻辑)
-                    up_count = (batch_df['percent'] > 0).sum()
-                    total_count = len(batch_df)
-                    sim_temp = 50.0
-                    if total_count > 0:
-                        ready_pct = (up_count / total_count) * 100
-                        avg_pct = batch_df['percent'].mean()
-                        # 映射公式：(准备度 * 0.4 + 平均涨幅 * 5 + 40) 限制在 0-100
-                        sim_temp = np.clip(ready_pct * 0.4 + avg_pct * 5 + 40, 0, 100)
-                    
+                    sim_temp = replay_stats['temperature']
                     hub.update_market(sim_temp, sim_time=t_str)
                 except Exception as e:
                     logger.debug(f"Hub update failed during replay: {e}")
 
             total_ticks_processed += len(tick_slice)
             
-            if idx % 1 == 0:
+            progress_now = time.monotonic()
+            if progress_now - last_console_progress >= (1.0 if is_ui_mode else 0.1) or idx == len(unique_times) - 1:
+                last_console_progress = progress_now
                 cost_pub = (t1 - t0) * 1000
                 cost_det = (t2 - t1) * 1000
                 

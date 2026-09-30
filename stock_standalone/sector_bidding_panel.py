@@ -3014,6 +3014,44 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                 self.status_lbl.setText(f"❌ 刷新出错: {e}")
                 self.status_lbl.setStyleSheet("color: #ff6666;")
 
+    def _get_detector_ui_snapshot(self):
+        """Never make the shared Tk/Qt GUI wait for the scoring worker's lock."""
+        detector = self.detector
+        now = time.monotonic()
+        if now - getattr(self, '_ui_snapshot_ts', -1) < 0.25:
+            return self._ui_detector_snapshot
+        if not detector._lock.acquire(blocking=False):
+            now = time.monotonic()
+            if now - getattr(self, '_last_detector_busy_log', 0) >= 30:
+                self._last_detector_busy_log = now
+                logger.warning("[SECTOR-UI-CACHE-BUSY] 后台评分持锁，使用上一轮界面快照")
+            return getattr(self, '_ui_detector_snapshot', ([], []))
+        try:
+            # Copy UI rows only; never recursively traverse per-stock kline/history payloads.
+            def copy_row(info):
+                row = dict(info)
+                for key in ('followers', 'race_candidates'):
+                    if key in row:
+                        row[key] = [dict(item) if isinstance(item, dict) else item
+                                    for item in row[key]]
+                return row
+
+            sectors = [dict(copy_row(info), sector=info.get('sector', name))
+                       for name, info in detector.active_sectors.items() if isinstance(info, dict)]
+            snapshot = (sectors, [copy_row(info) for info in detector.daily_watchlist.values()])
+        finally:
+            detector._lock.release()
+        snapshot[0].sort(key=lambda row: row.get('score', 0), reverse=True)
+        self._ui_detector_snapshot = snapshot
+        self._ui_snapshot_ts = time.monotonic()
+        return snapshot
+
+    def _get_ui_active_sectors(self):
+        return self._get_detector_ui_snapshot()[0]
+
+    def _get_ui_daily_watchlist(self):
+        return self._get_detector_ui_snapshot()[1]
+
     def _refresh_sector_list(self, reset_to_top: bool = False):
         # ⭐ [GIL_MONITOR] 埋点：记录进入时刻，Watchdog 可识别"UI 渲染中"
         try: _last_call._data.update({'time': __import__('time').time(), 'func': 'SectorBiddingPanel._refresh_sector_list', 'thread': __import__('threading').current_thread().name, 'args_repr': ''})
@@ -3035,7 +3073,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                 )
 
         # 3. 获取板块数据
-        sectors = self.detector.get_active_sectors()
+        sectors = self._get_ui_active_sectors()
 
         if not sectors:
             if hasattr(self, 'status_lbl') and qsize == 0:
@@ -3242,7 +3280,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         current_version = getattr(self.detector, 'data_version', 0)
         
         # 遍历探测器中的活跃板块，找到匹配的数据
-        for d in self.detector.get_active_sectors():
+        for d in self._get_ui_active_sectors():
             if d['sector'] == sn:
                 # [OPTIMIZE] 检查是否需要更新
                 with self._update_lock:
@@ -3280,7 +3318,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         if not item: return
         
         sn = item.data(Qt.ItemDataRole.UserRole)
-        for d in self.detector.get_active_sectors():
+        for d in self._get_ui_active_sectors():
             if d['sector'] == sn:
                 # 无论点击哪一列，都联动该板块的龙头
                 self._link_code(d['leader'], focus_widget=self.sector_table)
@@ -3295,7 +3333,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         # 复制板块名称到剪贴板
         self._copy_to_clipboard(str(sn))
         
-        for d in self.detector.get_active_sectors():
+        for d in self._get_ui_active_sectors():
             if d['sector'] == sn:
                 # 执行代码联动 (Link Code)
                 self._link_code(d['leader'])
@@ -3744,6 +3782,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         is_penetrating = getattr(self, '_force_show_all_in_stock_table', False)
 
         if race_candidates and not is_penetrating:
+            followers_by_code = {f['code']: f for f in data.get('followers', [])}
             for rc in race_candidates:
                 code = rc['code']
                 r_data = None
@@ -3758,10 +3797,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                         'is_counter': data.get('is_counter_trend', False)
                     }
                 else:
-                    for f in data.get('followers', []):
-                        if f['code'] == code:
-                            r_data = f
-                            break
+                    r_data = followers_by_code.get(code)
                     if not r_data:
                         r_data = rc
                 
@@ -3862,6 +3898,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         is_penetrating = getattr(self, '_force_show_all_in_stock_table', False)
         if race_candidates and not is_penetrating:
             # 优先采用 detector 算好的竞赛明细
+            followers_by_code = {f['code']: f for f in followers}
             for rc in race_candidates:
                 code = rc['code']
                 # 尝试补充详情 (从 followers 或 global_snap_cache)
@@ -3886,10 +3923,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                     }
                 else:
                     # 再从 followers 中找
-                    for f in data.get('followers', []):
-                        if f['code'] == code:
-                            r_data = f
-                            break
+                    r_data = followers_by_code.get(code)
                     
                     # [🚀 FIX] 如果在 followers 里没找到（可能被截断了），则回退到 rc 自带的基础数据
                     if not r_data:
@@ -4463,7 +4497,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         elif getattr(self, '_is_leader_search_mode', False):
             watchlist = []
             seen_codes = set()
-            sectors = self.detector.get_active_sectors()
+            sectors = self._get_ui_active_sectors()
             for d in sectors:
                 code = d.get('leader', '')
                 if not code or code in seen_codes:
@@ -4492,7 +4526,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                     'time_str': time_str
                 })
         else:
-            watchlist = self.detector.get_daily_watchlist()
+            watchlist = self._get_ui_daily_watchlist()
         
         # [NEW] Filter based on active search
         active_query = getattr(self, '_active_search_query', '')
@@ -4912,18 +4946,29 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             QTimer.singleShot(50, lambda: self._on_watchlist_clicked(row, 0, link_software=True))
 
     def _follower_klines(self, code: str) -> List[dict]:
-        with self.detector._lock:
+        if not hasattr(self, '_ui_kline_snapshot'):
+            self._ui_kline_snapshot = {}
+        cached = self._ui_kline_snapshot.get(code, [])
+        if not self.detector._lock.acquire(blocking=False):
+            return cached
+        try:
             ts = self.detector._tick_series.get(code)
             klines = list(ts.klines)[-35:] if ts else []
-            
-        # [FIX] 如果 TickSeries 为空（可能由于冷启动尚未同步），尝试从实时服务拉取
+        finally:
+            self.detector._lock.release()
+
+        # UI reads memory only; never wait for live ingestion or write TickSeries.
         if not klines and self.detector.realtime_service:
-            klines = self.detector.realtime_service.get_minute_klines(code, n=35)
-            # 如果拉取到了，顺便同步给 TickSeries 以便后续性能更好
-            if klines and ts:
-                with self.detector._lock:
-                    ts.load_history(klines)
-        return klines
+            cache = self.detector.realtime_service.kline_cache
+            if not cache._lock.acquire(blocking=False):
+                return cached
+            try:
+                klines = cache.get_klines(code, n=35)
+            finally:
+                cache._lock.release()
+        if klines:
+            self._ui_kline_snapshot[code] = klines
+        return klines or cached
 
     def _render_kline_sparkline(self, klines: List[dict]) -> str:
         """简单的文本趋势图渲染 (增强版：支持更长趋势和相对均价指示)"""
@@ -4986,7 +5031,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             # 兜底：如果左侧没选，尝试用缓存的板块刷新
             current_sector = getattr(self.stock_table, '_last_populated_sector', None)
             if current_sector:
-                for d in self.detector.get_active_sectors():
+                for d in self._get_ui_active_sectors():
                     if d['sector'] == current_sector:
                         self._populate_table(d, reset_to_top=reset_top)
                         break

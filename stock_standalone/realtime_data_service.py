@@ -5054,9 +5054,10 @@ class DataPublisher:
             # 无论是否实时，若基准尚未计算或未完整初始化，优先尝试一次
             if self.emotion_baseline.get_last_calc_date() is None or not getattr(self.emotion_baseline, '_initial_calc_done', False):
                 self.emotion_baseline.calculate_baseline(df)
-                self.emotion_tracker.update_batch(df, self.emotion_baseline)
-                if not is_trading:
+                if not is_trading and not self.simulation_mode:
+                    self.emotion_tracker.update_batch(df, self.emotion_baseline)
                     return
+                # Trading/replay batches update emotions once in the core branch below.
             # 4. 核心数据更新 (Simulation 模式下跳过 is_realtime 检查)
             if (self.simulation_mode or is_realtime or hhmm >= 1500) and is_new_batch:
                 if self.update_count == 0:

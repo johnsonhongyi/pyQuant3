@@ -5222,7 +5222,9 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                 return None
             curr_time = time.time()
             
-        with self.detector._lock:
+        if not self.detector._lock.acquire(blocking=False):
+            return None
+        try:
             codes, prices = [], []
             for code, ts in self.detector._tick_series.items():
                 if ts.current_price > 0:
@@ -5242,6 +5244,8 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                 "p": prices,
                 "ss": sector_scores # [NEW] Sector Scores Snapshot
             }
+        finally:
+            self.detector._lock.release()
 
     def _add_to_history(self, snapshot, force=False):
         if not snapshot: return
@@ -5269,6 +5273,11 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         self._trigger_save_ui()
 
     def _refresh_history_buttons(self):
+        signature = (tuple((id(snap), snap.get('ts', 0))
+                           for snap in self._anchor_history[-50:]),
+                     len(self._anchor_history), self._current_anchor_ts)
+        if signature == getattr(self, '_history_buttons_signature', None):
+            return
         try:
             # 清空现有按钮
             while self.history_layout.count():
@@ -5319,6 +5328,7 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                 self.history_layout.addWidget(btn)
                 btn.show()
                 
+            self._history_buttons_signature = signature
             # [🚀 几何诊断] 确保布局及时刷新
             self.history_layout.update()
             
@@ -5445,7 +5455,10 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         
         applied_count = 0
         if self.detector:
-            with self.detector._lock:
+            if not self.detector._lock.acquire(blocking=False):
+                self._pending_auto_restore_idx = idx
+                return False
+            try:
                 # 检查 Detector 是否已经就绪
                 if not self.detector._tick_series:
                     return False
@@ -5476,6 +5489,9 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                         l_ts = self.detector._tick_series[leader_code]
                         sec_data['leader_pct_diff'] = l_ts.pct_diff
             
+            finally:
+                self.detector._lock.release()
+
             # 3. 重置自动刷新计时器与节流阀，确保 UI 瞬间 100% 重绘
             # [🚀 修复] 核心逻辑：设置重置时间戳为加载点的时间，而不是当前时间
             # 这样 auto-reset 逻辑才能根据加载点后的时间流逝正确触发下一个 60m 节点
@@ -6148,16 +6164,38 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         if hasattr(self, 'timeline'):
             self.timeline.update_market_stats(stats)
 
+    @staticmethod
+    def _snapshot_racing_tick(ts):
+        """Scalar GUI snapshot: no history deque, custom columns or copy protocol."""
+        from types import SimpleNamespace
+        fields = ('code', 'name', 'category', 'score', 'signal_count', 'pct_diff',
+                  'dff', 'price_anchor', 'last_close', 'low_day', 'open_price',
+                  'momentum_score', 'market_role', 'first_breakout_ts', 'pattern_hint')
+        row = {key: getattr(ts, key, '' if key in
+               ('code', 'name', 'category', 'market_role', 'pattern_hint') else 0.0)
+               for key in fields}
+        row['current_price'] = ts.current_price
+        row['current_pct'] = ts.current_pct
+        return SimpleNamespace(**row)
+
     def update_visuals(self):
         if not self.detector: return
+        replay_stats = getattr(self.detector, '_replay_market_stats', None)
+        if replay_stats is not None and replay_stats is not getattr(self, '_last_replay_market_stats', None):
+            self.update_market_stats(replay_stats)
+            self._last_replay_market_stats = replay_stats
         if self._is_rendering: return
         
         curr_time = getattr(self.detector, 'last_data_ts', 0)
         is_simulation = getattr(self.detector, 'simulation_mode', False) or getattr(self.detector, 'in_history_mode', False)
         
         # --- [⚡ 核心生命周期：心跳驱动自启动逻辑] ---
-        with self.detector._lock:
+        if not self.detector._lock.acquire(blocking=False):
+            return  # Leave the last frame visible while scoring publishes its result.
+        try:
             has_data = len(self.detector._tick_series) > 0
+        finally:
+            self.detector._lock.release()
             
         if has_data:
             # A. 恢复今日已有历史 (日期敏感)
@@ -6298,9 +6336,10 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         if self._first_boot_render:
             is_closing = True # 借用 is_closing 强制通过
             self._first_boot_render = False
+            skip_optimization = False
             logger.info("🎬 [Panel] Bootstrap: Initial rendering process triggered.")
 
-        if skip_optimization and not is_closing:
+        if skip_optimization:
             # [🚀 极速联动补齐] 哪怕跳过渲染逻辑，也要检测子窗同步心跳。
             # 强行确保窗口持有正确的 detector 引用
             for dlg in self._detail_dialogs.values():
@@ -6315,8 +6354,11 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
         
         self._is_rendering = True
         try:
-            with self.detector._lock:
-                raw_ts_list = list(self.detector._tick_series.values())
+            if not self.detector._lock.acquire(blocking=False):
+                return
+            try:
+                raw_ts_list = [self._snapshot_racing_tick(ts)
+                               for ts in self.detector._tick_series.values()]
 
                 # [READ-ONLY] 宏观查询不再在此处拦截 raw_ts_list，确保后续聚合逻辑使用全量数据
 
@@ -6327,6 +6369,9 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                     sd['score_anchor'] = self._sector_score_anchors.get(sec_name, sd.get('score', 0.0))
                     active_sectors.append(sd)
 
+
+            finally:
+                self.detector._lock.release()
             
             # --- [🚀 兜底逻辑] 如果 Detector 处于冷启动(HDF5缺失)，UI 层反向聚合板块 ---
             # 修复：即便 active_sectors 不为空，如果数据极少（例如只有不到3个板块），也尝试从现有个股中补充
@@ -6384,10 +6429,11 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                          active_sectors.append(s_data)
                 
             # --- [🚀 极致同步] 无论数据来源，实时校准板块龙头的最新行情 (Pct / DFF) ---
+            ticks_by_code = {ts.code: ts for ts in raw_ts_list}
             for sec in active_sectors:
                 leader_code = sec.get('leader')
-                if leader_code and leader_code in self.detector._tick_series:
-                    l_ts = self.detector._tick_series[leader_code]
+                if leader_code and leader_code in ticks_by_code:
+                    l_ts = ticks_by_code[leader_code]
                     sec['leader_pct'] = l_ts.current_pct
                     sec['leader_name'] = l_ts.name
                     # [🚀 极速重算] 确保 DFF 在应用锚点后立即刷新，不依赖后台周期
@@ -6423,9 +6469,11 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
             dist = {"龙头": 0, "确核": 0, "跟涨": 0, "静默": 0}
             
             filtered_ts = []
+            role_cache = {}
             sel_cat = self.pie_widget.selected_category
             for ts in active_ts:
                 role = get_racing_role(ts)
+                role_cache[ts.code] = role
                 dist[role] += 1
                 if not sel_cat or role == sel_cat or ts.code in self.favorite_stocks:
                     filtered_ts.append(ts)
@@ -6488,78 +6536,53 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
 
                 # 预计算所有过滤后个股的排序列值，消除排序循环中的锁竞争和复杂运算
                 sort_values_cache = {}
-                import pandas as pd
                 import numpy as np
-                with self.detector._lock:
-                    for ts in filtered_ts:
-                        cp = getattr(ts, 'current_pct', 0.0)
-                        if cp is None or pd.isna(cp) or np.isnan(cp): cp = 0.0
-                        else: cp = float(cp)
-                        
-                        pd_val = getattr(ts, 'pct_diff', 0.0)
-                        if pd_val is None or pd.isna(pd_val) or np.isnan(pd_val): pd_val = 0.0
-                        else: pd_val = float(pd_val)
-                        
-                        # 预先计算 dff2（在锁内一次性计算）
-                        df_llow = None
-                        if df_all is not None and ts.code in df_all.index:
-                            try:
-                                if 'llow' in df_all.columns:
-                                    df_llow = df_all.loc[ts.code, 'llow']
-                                elif 'low' in df_all.columns:
-                                    df_llow = df_all.loc[ts.code, 'low']
-                                if hasattr(df_llow, 'iloc'):
-                                    df_llow = df_llow.iloc[0]
-                                if df_llow is not None:
-                                    df_llow = float(df_llow)
-                                    if df_llow <= 0.001:
-                                        df_llow = None
-                            except Exception:
-                                df_llow = None
-                                
-                        buy_f = ts.current_price
-                        llow_f = df_llow if df_llow is not None else ts.low_day
-                        if llow_f <= 0.001:
-                            llow_f = ts.open_price
-                        if llow_f <= 0.001:
-                            llow_f = ts.last_close
-                        
-                        dff2_val = 0.0
-                        if buy_f > 0.001 and llow_f > 0.001:
-                            dff2_val = round((buy_f - llow_f) / llow_f * 100, 1)
-                        elif df_all is not None and ts.code in df_all.index and 'dff2' in df_all.columns:
-                            try:
-                                dff2_val = float(df_all.loc[ts.code, 'dff2'])
-                            except Exception:
-                                pass
-                        if dff2_val is None or pd.isna(dff2_val) or np.isnan(dff2_val):
-                            dff2_val = 0.0
-                        else:
-                            dff2_val = float(dff2_val)
-                        
-                        score_val = score_cache.get(ts.code, 0.0)
-                        if score_val is None or pd.isna(score_val) or np.isnan(score_val): score_val = 0.0
-                        else: score_val = float(score_val)
-                        
-                        sig_val = getattr(ts, 'signal_count', 0)
-                        if sig_val is None or pd.isna(sig_val) or np.isnan(sig_val): sig_val = 0.0
-                        else: sig_val = float(sig_val)
-
-                        sort_values_cache[ts.code] = {
-                            'code': str(ts.code or ''),
-                            'name': str(getattr(ts, 'name', '') or ts.code or ''),
-                            'score': score_val,
-                            'signal_count': sig_val,
-                            'current_pct': cp,
-                            'start_pct': cp - pd_val,
-                            'pct_diff': pd_val,
-                            'dff2': dff2_val
-                        }
+                low_values = {}
+                dff2_values = {}
+                if s_attr == 'dff2' and df_all is not None:
+                    unique_df = df_all if df_all.index.is_unique else df_all.loc[~df_all.index.duplicated()]
+                    low_column = 'llow' if 'llow' in df_all.columns else 'low'
+                    if low_column in df_all.columns:
+                        low_values = unique_df[low_column].to_dict()
+                    if 'dff2' in df_all.columns:
+                        dff2_values = unique_df['dff2'].to_dict()
+                for ts in filtered_ts:
+                    if s_attr == 'score':
+                        value = score_cache.get(ts.code, 0.0)
+                    elif s_attr == 'start_pct':
+                        value = ts.current_pct - ts.pct_diff
+                    elif s_attr == 'dff2':
+                        low = low_values.get(ts.code)
+                        try:
+                            low = float(low) if low is not None else ts.low_day
+                            if not np.isfinite(low) or low <= 0.001:
+                                low = ts.low_day
+                            if low <= 0.001:
+                                low = ts.open_price
+                            if low <= 0.001:
+                                low = ts.last_close
+                            value = (round((ts.current_price - low) / low * 100, 1)
+                                     if ts.current_price > 0.001 and low > 0.001
+                                     else dff2_values.get(ts.code, 0.0))
+                        except (TypeError, ValueError):
+                            value = 0.0
+                    else:
+                        value = getattr(ts, s_attr, 0.0)
+                    if s_attr in ('code', 'name'):
+                        value = str(value or ts.code or '')
+                    else:
+                        try:
+                            value = float(value)
+                            if not np.isfinite(value):
+                                value = 0.0
+                        except (TypeError, ValueError):
+                            value = 0.0
+                    sort_values_cache[ts.code] = {s_attr: value}
 
                 # 执行排行榜处理 (基于过滤后的结果，增加稳定性排序)
                 def get_stock_sort_key(ts):
                     # [🚀 排序优先级增强] ⚡(2) > 🔔(1) > 普通(0)
-                    has_alert = get_alert_manager().is_alerted(ts.code)
+                    has_alert = s_attr == 'name' and get_alert_manager().is_alerted(ts.code)
                     has_sbc = ts.code in sbc_registry
                     prio = 2 if has_sbc else (1 if has_alert else 0)
                     
@@ -6576,7 +6599,7 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                 # 稳定二次排序：确保重点关注的个股以及龙头在任何情况下都在最顶层优先展示
                 def get_favorite_and_role_priority(ts):
                     is_fav = 1 if ts.code in self.favorite_stocks else 0
-                    is_leader = 1 if get_racing_role(ts) == "龙头" else 0
+                    is_leader = 1 if role_cache[ts.code] == "龙头" else 0
                     return (is_fav, is_leader)
                 sorted_raw.sort(key=get_favorite_and_role_priority, reverse=True)
                 sorted_raw = sorted_raw[:limit_stock]
@@ -6597,7 +6620,7 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
                     l_code = sec.get('leader', '')
                     dff2_val = 0.0
                     if l_code:
-                        if l_code in sort_values_cache:
+                        if l_code in sort_values_cache and s_attr == 'dff2':
                             dff2_val = sort_values_cache[l_code]['dff2']
                         else:
                             dff2_val = _safe_extract_dff2(df_all, l_code, self.detector)

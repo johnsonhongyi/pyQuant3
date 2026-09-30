@@ -9004,7 +9004,14 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         try:
             # 初始化多级排序状态属性
             self._init_tree_sort_state(tree)
-            
+            # Concept defaults must not inherit the main table's higher-priority Rank sort.
+            tree.sortby_col = "percent"
+            tree.sortby_col_ascend = False
+            for level in (1, 2, 3):
+                setattr(tree, f"sort_level{level}_col", None)
+                setattr(tree, f"sort_level{level}_asc", True)
+            tree.multi_sort_click_count = 0
+
             if os.path.exists(WINDOW_CONFIG_FILE):
                 with open(WINDOW_CONFIG_FILE, 'r', encoding='utf-8') as f:
                     config = json.load(f)
@@ -15625,6 +15632,43 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             
     # 🚀 [NEW] 跨框架多窗口轮询快捷键系统 (Unified Window Rotator System)
     def _scan_windows_cached(self, force=False):
+        """Return the last external-window snapshot; never enumerate on the GUI thread."""
+        import threading
+        import time
+
+        cache = getattr(self, '_win_cache', {"visualizer": 0, "stock_monitor": 0})
+        now = time.monotonic()
+        if not force and now - getattr(self, '_win_scan_requested_t', -1) < getattr(self, '_win_scan_interval', 5.0):
+            return cache
+        gate = self.__dict__.setdefault('_win_scan_gate', threading.Lock())
+        if not gate.acquire(blocking=False):
+            return cache
+        self._win_scan_requested_t = now
+
+        def scan_worker():
+            started = time.monotonic()
+            try:
+                # Force one fresh scan, including negative results when either app is closed.
+                self._scan_external_windows(force=force)
+            except Exception:
+                logger.exception("[WINDOW-SCAN-FAIL] 外部窗口后台扫描失败，保留已有缓存")
+            finally:
+                gate.release()
+                elapsed = time.monotonic() - started
+                self._win_scan_interval = max(5.0, min(30.0, elapsed * 3))
+                completed = time.monotonic()
+                if elapsed > 0.5 and completed - getattr(self, '_last_win_scan_slow_log', 0) >= 60:
+                    self._last_win_scan_slow_log = completed
+                    logger.warning("[WINDOW-SCAN-SLOW] 外部窗口后台扫描耗时 %.2fs，下次扫描间隔 %.1fs", elapsed, self._win_scan_interval)
+
+        try:
+            threading.Thread(target=scan_worker, daemon=True, name="ExternalWindowScan").start()
+        except Exception:
+            gate.release()
+            logger.exception("[WINDOW-SCAN-FAIL] 无法启动外部窗口扫描线程")
+        return cache
+
+    def _scan_external_windows(self, force=False):
         """利用 EnumWindows 扫描并定位外部窗口，提供 500ms 缓存、活性校验与 Soft Invalid 机制保护 (生产级封顶版)"""
         import time
         import ctypes
@@ -15668,14 +15712,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # -----------------------------
         WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
 
+        buf = ctypes.create_unicode_buffer(512)
         def enum_callback(hwnd, lParam):
             try:
-                length = user32.GetWindowTextLengthW(hwnd)
-                if length <= 0:
+                if not user32.GetWindowTextW(hwnd, buf, len(buf)):
                     return True
-
-                buf = ctypes.create_unicode_buffer(length + 1)
-                user32.GetWindowTextW(hwnd, buf, length + 1)
                 title = buf.value
 
                 if result["visualizer"] == 0 and any(k in title for k in (
@@ -18502,7 +18543,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         cursor="hand2"
                     )
                     lbl_c.pack(side="left", padx=6)
-                    lbl_c.bind("<Button-1>", lambda e, name=k: self.show_concept_top10_window(name))
+                    lbl_c.bind("<Button-1>", lambda e, name=k: self._show_preferred_concept_window(name))
                     lbl_c.bind("<Enter>", lambda e, w=lbl_c: w.config(fg="#004D00"))
                     lbl_c.bind("<Leave>", lambda e, w=lbl_c: w.config(fg="green"))
                 return
@@ -18526,7 +18567,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     cursor="hand2"
                 )
                 lbl_c.pack(side="left", padx=6)
-                lbl_c.bind("<Button-1>", lambda e, name=k: self.show_concept_top10_window(name))
+                lbl_c.bind("<Button-1>", lambda e, name=k: self._show_preferred_concept_window(name))
                 lbl_c.bind("<Enter>", lambda e, w=lbl_c: w.config(fg="#004D00"))
                 lbl_c.bind("<Leave>", lambda e, w=lbl_c: w.config(fg="green"))
 
@@ -19481,6 +19522,14 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         except Exception as e:
             logger.info(f"聚焦 Top10 Tree 失败: {e}")
 
+    def _show_preferred_concept_window(self, concept_name):
+        """Top concept statistics always open the same strongest-first view as details."""
+        self._opening_preferred_concept = True
+        try:
+            return self.show_concept_top10_window(concept_name)
+        finally:
+            self._opening_preferred_concept = False
+
     def show_concept_top10_window(self, concept_name, code=None, auto_update=True, interval=30,bring_monitor_status=True):
         """
         显示指定概念的前10放量上涨股（Treeview 高性能版，完全替代 Canvas 版本）
@@ -19904,6 +19953,15 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
         # 排序状态获取
         self._init_tree_sort_state(tree)
+        if getattr(self, '_opening_preferred_concept', False):
+            tree.sortby_col = "percent"
+            tree.sortby_col_ascend = False
+            for level in (1, 2, 3):
+                setattr(tree, f"sort_level{level}_col", None)
+            tree.multi_sort_click_count = 0
+            win._top10_sort_state = {"col": "percent", "asc": False}
+            win._skip_see_once = True
+            self.update_mixin_tree_headers(tree)
         sort_col = tree.sort_level1_col or tree.sortby_col or "percent"
         if tree.sort_level1_col:
             ascending = bool(tree.sort_level1_asc)
@@ -19922,7 +19980,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             
             if actual_col in df_sorted.columns:
                 # 为 Rank 进行鲁棒的数值化以实现正确排序。缺失值根据升降序填充极端垫底值。
-                fill_val = 99999 if not ascending else -99999
+                fill_val = float('inf') if ascending else float('-inf')
                 df_sorted[actual_col] = pd.to_numeric(df_sorted[actual_col], errors='coerce').fillna(fill_val)
         
         # 对已知的数值列进行填充与数值化，确保即便含有 None 也能稳健排序
@@ -20187,8 +20245,15 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             ascending = not current_asc
         else:
             # 点击的是新列 -> 首次默认为降序排序 (False)，使用户能直接看到最高指标
-            ascending = False
-        
+            ascending = (col == "rank")
+
+        self._init_tree_sort_state(tree)
+        tree.sortby_col = col
+        tree.sortby_col_ascend = ascending
+        for level in (1, 2, 3):
+            setattr(tree, f"sort_level{level}_col", None)
+        tree.multi_sort_click_count = 0
+        self.update_mixin_tree_headers(tree)
         # 更新并固化最新的状态，使下一次点击或周期轮播能够自动继承
         win._top10_sort_state = {"col": col, "asc": ascending}
 
