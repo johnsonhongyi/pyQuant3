@@ -3,6 +3,8 @@
 .tmp/
 config/new_stock_data_cache.json.gz
 config/new_stock_ipo_calendar.json.gz
+config/.archive-checkpoint/
+config/newstock_listing_closing_evaluations.json*.gz
 !config/next_day_watch_strategies.json
 !tests/test_ats_optimization_review.py
 !tests/test_ats_archive_cache.py

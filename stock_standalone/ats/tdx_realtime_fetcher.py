@@ -973,10 +973,13 @@ class TDXGlobalCachePool:
         # 累计量金额熔断
         l_amt = float(entry.get("last_cum_amt", 0.0))
         l_vol = float(entry.get("last_cum_vol", 0.0))
-        if l_amt > 1e11:
+        if not np.isfinite(l_amt) or not np.isfinite(l_vol) or l_amt < 0 or l_vol < 0:
+            return False
+        is_index = normalize_tdx_target(code)[0]
+        if not is_index and l_amt > 1e11:
             logger.debug(f"[AutoRepair] {code} last_cum_amt={l_amt:.2e} 异常，丢弃")
             return False
-        if l_vol > 0 and (l_amt / l_vol) > 3000.0:
+        if not is_index and l_vol > 0 and (l_amt / l_vol) > 3000.0:
             logger.debug(f"[AutoRepair] {code} VWAP 估算={l_amt/l_vol:.1f} 异常，丢弃")
             return False
 
@@ -1019,10 +1022,13 @@ class TDXGlobalCachePool:
         # 累计量金额熔断
         l_amt = float(entry.get("last_cum_amt", 0.0))
         l_vol = float(entry.get("last_cum_vol", 0.0))
-        if l_amt > 1e11:
+        if not np.isfinite(l_amt) or not np.isfinite(l_vol) or l_amt < 0 or l_vol < 0:
+            return False
+        is_index = normalize_tdx_target(code)[0]
+        if not is_index and l_amt > 1e11:
             logger.debug(f"[AutoRepair] {key} 增量 last_cum_amt={l_amt:.2e} 异常，丢弃")
             return False
-        if l_vol > 0 and (l_amt / l_vol) > 3000.0:
+        if not is_index and l_vol > 0 and (l_amt / l_vol) > 3000.0:
             logger.debug(f"[AutoRepair] {key} 增量 VWAP 估算={l_amt/l_vol:.1f} 异常，丢弃")
             return False
 
@@ -1824,10 +1830,13 @@ class TDXGlobalCachePool:
         # ── 入口校验：累计量金额异常直接跳过（避免错误基线污染后续增量）──
         _l_amt = float(last_cum_amt)
         _l_vol = float(last_cum_vol)
-        if _l_amt > 1e11:
+        if not np.isfinite(_l_amt) or not np.isfinite(_l_vol) or _l_amt < 0 or _l_vol < 0:
+            return
+        is_index = normalize_tdx_target(c_clean)[0]
+        if not is_index and _l_amt > 1e11:
             logger.warning(f"[AutoRepair] {c_clean} 增量 last_cum_amt={_l_amt:.2e} 异常，跳过写入")
             return
-        if _l_vol > 0 and (_l_amt / _l_vol) > 3000.0:
+        if not is_index and _l_vol > 0 and (_l_amt / _l_vol) > 3000.0:
             logger.warning(f"[AutoRepair] {c_clean} 增量 VWAP 估算={_l_amt/_l_vol:.1f} 异常，跳过写入")
             return
 

@@ -71,11 +71,14 @@ def resolve_stock_name(code: str) -> str:
 class IntradayStrategyEngine:
     """分时交易策略与新股阶梯盯盘引擎"""
     _instance = None
+    _instance_lock = threading.RLock()
 
     @classmethod
     def get_instance(cls):
         if cls._instance is None:
-            cls._instance = cls()
+            with cls._instance_lock:
+                if cls._instance is None:
+                    cls._instance = cls()
         return cls._instance
 
     def __init__(self, config_filename="intraday_newstock_strategies.json"):
@@ -87,6 +90,7 @@ class IntradayStrategyEngine:
         self._last_saved_hash: str = ""
         self._last_save_time: float = 0.0
         self._lock = threading.RLock()
+        self._config_version = None
         self._cleanup_legacy_tmp_files()
         try:
             atexit.register(self._on_process_exit)
@@ -396,12 +400,20 @@ class IntradayStrategyEngine:
             logger.warning(f"Strategy config file not found: {self.config_path}")
             return False
         try:
-            with open(self.config_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            self.strategies = data.get("strategies", [])
-            # 🧹 启动即时自动清洗不存在的垃圾/占位策略 (如 000000, 000123)
-            self.clean_invalid_strategies()
-            logger.info(f"✅ 成功加载并就绪 {len(self.strategies)} 套有效分时交易策略配置")
+            with self._lock:
+                stat = os.stat(self.config_path)
+                version = (os.path.abspath(self.config_path), stat.st_mtime_ns, stat.st_size)
+                if getattr(self, '_config_version', None) == version:
+                    return True
+                with open(self.config_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    loaded_stat = os.fstat(f.fileno())
+                self.strategies = data.get("strategies", [])
+                # 🧹 启动即时自动清洗不存在的垃圾/占位策略 (如 000000, 000123)
+                self.clean_invalid_strategies()
+                # 绑定实际读到的文件；并发原子替换后，下次调用仍会加载新版本。
+                self._config_version = (os.path.abspath(self.config_path), loaded_stat.st_mtime_ns, loaded_stat.st_size)
+                logger.info(f"✅ 成功加载并就绪 {len(self.strategies)} 套有效分时交易策略配置")
             return True
         except Exception as e:
             logger.error(f"❌ 加载分时策略配置失败: {e}")
@@ -1029,9 +1041,7 @@ class IntradayStrategyEngine:
                     "apply_date": ipo_info.get("apply_date") or ""
                 }
                 gen_strat = generator.generate_strategy(gen_payload)
-                if gen_strat:
-                    generator.save_or_update_strategy(gen_strat)
-                    self.load_config()
+                if gen_strat and generator.save_or_update_strategy(gen_strat):
                     return gen_strat
             except Exception as e_gen:
                 logger.debug(f"自动生成新股 {c_clean} 首日策略异常: {e_gen}")

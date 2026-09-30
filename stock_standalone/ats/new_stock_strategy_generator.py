@@ -393,9 +393,7 @@ class NewStockStrategyGenerator:
             with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
 
-            if os.path.exists(conf_path):
-                os.remove(conf_path)
-            os.rename(tmp_path, conf_path)
+            os.replace(tmp_path, conf_path)
 
             logger.info(f"✅ 成功将策略 [{strat_id}] 保存至 {conf_path}")
 

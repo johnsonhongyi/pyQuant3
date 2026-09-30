@@ -7506,8 +7506,8 @@ class SBCIntradayChartDialog(QWidget):
                 # 非交易期将定时器降频至 60 秒
                 if hasattr(self, 'poll_timer') and self.poll_timer and self.poll_timer.interval() < 30000:
                     self.poll_timer.setInterval(60000)
-                # 若非交易期已完成过首次加载，跳过重复的心跳计算与日志
-                if getattr(self, '_has_initial_loaded', False):
+                # 非交易期跳过空心跳，周期切换返回的新批次仍须应用。
+                if getattr(self, '_has_initial_loaded', False) and preloaded is None:
                     return
             else:
                 # 实盘交易期恢复轮询 (对齐 cct.ats_tdx_interval 全局基准)
@@ -7850,6 +7850,13 @@ def activate_and_raise_sbc_window(dlg: SBCIntradayChartDialog, period_mode: Opti
         return dlg
 
     try:
+        # 先应用周期再显示，集中调度器仅订阅最终周期；同标的唤醒不重新取数。
+        period_changed = False
+        if period_mode and hasattr(dlg, "set_period_mode"):
+            if getattr(dlg, "_current_period_mode", None) != period_mode:
+                dlg.set_period_mode(period_mode, reload=False, save=True)
+                period_changed = True
+
         # 若处于贴边收起隐藏状态，立即平滑滑出展开
         if getattr(dlg, "is_hidden_state", False) and hasattr(dlg, "show_normal_position"):
             dlg.show_normal_position()
@@ -7862,11 +7869,8 @@ def activate_and_raise_sbc_window(dlg: SBCIntradayChartDialog, period_mode: Opti
         dlg.raise_()
         dlg.activateWindow()
 
-        # 切换周期（若显式指定且与当前不同）
-        if period_mode and hasattr(dlg, "set_period_mode"):
-            cur_p = getattr(dlg, "_current_period_mode", None)
-            if cur_p != period_mode:
-                dlg.set_period_mode(period_mode, reload=True, save=True)
+        if period_changed and not getattr(dlg, '_dispatcher_enabled', False):
+            dlg.reload_chart()
 
         # Windows 原生前台唤醒强力置顶
         if sys.platform == "win32":
@@ -8118,7 +8122,6 @@ def open_sbc_chart_dialog(parent_win: Optional[QWidget] = None, code: str = "688
             existing_dlg.set_custom_backtest_trades(trades_df, df_kline=df_kline)
         if record_open:
             _record_sbc_open(c_clean, existing_dlg.geometry(), period_mode=getattr(existing_dlg, '_current_period_mode', '1m'))
-        existing_dlg.reload_chart()
         return existing_dlg
 
     main_win = parent_win.window() if (parent_win and hasattr(parent_win, 'window')) else None
@@ -8159,7 +8162,6 @@ def open_sbc_chart_dialog(parent_win: Optional[QWidget] = None, code: str = "688
         df_kline = kwargs.get("df_kline", None)
         if trades_df is not None:
             dlg.set_custom_backtest_trades(trades_df, df_kline=df_kline)
-        dlg.reload_chart()
         return dlg
 
     trades_df = kwargs.get("trades_df", None)

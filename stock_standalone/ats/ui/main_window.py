@@ -2435,14 +2435,13 @@ class ATSMainWindow(QMainWindow):
         """)
         
         # 🐉 Tab 0 (C 位): 资金主线与龙头中枢
+        # 面板双击已直接调用 SBC 公共入口，不再重复连接开窗信号。
         self.capital_dragon_panel = CapitalDragonPanel(main_window=self)
         self.capital_dragon_panel.stock_selected.connect(self.link_stock)
-        self.capital_dragon_panel.stock_double_clicked.connect(self.open_sbc_for_stock)
         self.top_tabs.addTab(self.capital_dragon_panel, "🐉 资金主线与龙头中枢")
         mark_checkpoint("03.3.2 CapitalDragonPanel (Tab 0 C-Bit)")
 
         self.favorite_panel = FavoritePanel()
-        self.favorite_panel.stock_double_clicked.connect(self.open_sbc_for_stock)
         self.top_tabs.addTab(self.favorite_panel, "⭐ 重点关注 (基础重点)")
         mark_checkpoint("03.3.3 FavoritePanel (Tab 1)")
 
@@ -2453,7 +2452,6 @@ class ATSMainWindow(QMainWindow):
 
         self.new_stock_panel = NewStockPanel(main_window=self)
         self.new_stock_panel.stock_selected.connect(self.link_stock)
-        self.new_stock_panel.stock_double_clicked.connect(self.open_sbc_for_stock)
         self.top_tabs.addTab(self.new_stock_panel, "🆕 新股次新股 (IPO & 阶梯)")
         mark_checkpoint("03.3.5 NewStockPanel (Tab 3)")
 
@@ -2745,7 +2743,6 @@ class ATSMainWindow(QMainWindow):
         
         # 2. 双击事件 -> 弹窗详情展示 context_info (on_stock_clicked) 与 统一直通 SBC 走势图
         self.universe_widget.stock_selected.connect(self.on_stock_clicked)
-        self.swing_table.stock_double_clicked.connect(lambda code, name, ctx=None: self.open_sbc_for_stock(code, name))
         self.position_panel.stock_double_clicked.connect(self.on_stock_clicked)
         self.trade_flow_table.stock_double_clicked.connect(self.on_stock_clicked)
         self.kernel_trace_panel.stock_double_clicked.connect(self.on_stock_clicked)
@@ -3117,11 +3114,28 @@ class ATSMainWindow(QMainWindow):
         self.setStatusBar(self.status_bar)
         self.status_bar.showMessage("初始化独立自治交易系统，就绪。")
 
+        # 常驻三列保留左侧消息空间，避免指数标签占满状态栏挤掉信号统计。
+        status_content = QWidget(self.status_bar)
+        status_layout = QHBoxLayout(status_content)
+        status_layout.setContentsMargins(4, 0, 4, 0)
+        status_layout.setSpacing(6)
+        self.lbl_status_message = QLabel(self.status_bar.currentMessage())
+        self.lbl_status_message.setTextFormat(Qt.TextFormat.PlainText)
+        self.lbl_status_message.setStyleSheet("color: #ff9900; font-weight: bold;")
+        self.lbl_status_message.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.lbl_status_message.setMinimumWidth(0)
+        self.status_bar.messageChanged.connect(self.lbl_status_message.setText)
+        self.status_bar.messageChanged.connect(self.lbl_status_message.setToolTip)
+        status_layout.addWidget(self.lbl_status_message, 1)
+
         # 📊 状态栏中央常驻显示：大盘四大指数资金量比与全市交易额增减 (SSOT)
         self.lbl_market_volume_status = QLabel()
         self.lbl_market_volume_status.setTextFormat(Qt.TextFormat.RichText)
         self.lbl_market_volume_status.setStyleSheet("font-size: 8.8pt; padding: 0 10px;")
-        self.status_bar.addPermanentWidget(self.lbl_market_volume_status, 1)
+        self.lbl_market_volume_status.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lbl_market_volume_status.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.lbl_market_volume_status.setMinimumWidth(0)
+        status_layout.addWidget(self.lbl_market_volume_status, 3)
         self._market_summary_ready.connect(self._refresh_market_volume_status)
 
         # 🕒 状态栏右侧常驻显示：数据更新时间与下次自动刷新倒计时
@@ -3130,7 +3144,8 @@ class ATSMainWindow(QMainWindow):
 
         self.lbl_data_time_status = QLabel()
         self.lbl_data_time_status.setStyleSheet("color: #00ff88; font-weight: bold; font-size: 9pt; padding-right: 8px;")
-        self.status_bar.addPermanentWidget(self.lbl_data_time_status)
+        status_layout.addWidget(self.lbl_data_time_status)
+        self.status_bar.addPermanentWidget(status_content, 1)
 
         # 交易时刷新状态栏；休市时降为低频心跳。
         self._status_clock_timer = QTimer(self)

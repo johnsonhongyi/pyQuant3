@@ -1685,7 +1685,7 @@ class CapitalDragonPanel(QWidget):
                     dlg = ATSSectorDetailDialog(
                         clean_sec,
                         linkage_cb=lambda c, n: self.stock_selected.emit(c, n),
-                        double_click_cb=lambda c, n: self.stock_double_clicked.emit(c, n),
+                        double_click_cb=self._on_pioneer_double_clicked,
                         member_codes=send_codes,
                         parent=self.main_window or self
                     )
@@ -1701,8 +1701,6 @@ class CapitalDragonPanel(QWidget):
             return
         logger.info(f"先锋联动点击: {name} ({code})")
         self.stock_selected.emit(code, name)
-        if self.main_window and hasattr(self.main_window, 'link_stock'):
-            self.main_window.link_stock(code, name)
 
     def open_sbc_chart(self, code: str, name: str = ""):
         """【📈 打开 SBC 通道走势图】使用 ATS 统一的 SBC 窗口调度，确保所有走势图等大等高平铺重排"""
@@ -1721,10 +1719,6 @@ class CapitalDragonPanel(QWidget):
         logger.info(f"先锋双击打开 SBC: {name} ({code})")
         self.open_sbc_chart(code, name)
         self.stock_double_clicked.emit(code, name)
-        if self.main_window and hasattr(self.main_window, 'open_sbc_for_stock'):
-            self.main_window.open_sbc_for_stock(code, name)
-        elif self.main_window and hasattr(self.main_window, 'on_stock_clicked'):
-            self.main_window.on_stock_clicked(code, name, {})
 
     def _on_row_double_clicked(self, item):
         row = item.row()
