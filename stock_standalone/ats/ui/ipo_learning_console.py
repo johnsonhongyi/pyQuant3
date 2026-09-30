@@ -13,7 +13,7 @@ import threading
 import time
 import copy
 import hashlib
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -73,6 +73,220 @@ def _safe_text(value: Any, limit: int = 300) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
     return str(value).replace("\r", " ").replace("\n", " ")[:limit]
+
+
+_ACQUISITION_QUEUE_SCHEMA = "ipo.acquisition-queue.v1"
+
+
+def _append_pipeline_event(
+    root: Path, event: str, status: str, ticker: str, message: str,
+    queue_index: Optional[int] = None, queue_total: Optional[int] = None,
+) -> None:
+    path = root / "logs" / "ipo_learning_events.jsonl"
+    record = {
+        "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "level": "INFO" if status not in {"FAILED", "BLOCKED"} else "WARNING",
+        "stage": "IPO_PIPELINE", "event": _safe_text(event, 100),
+        "status": _safe_text(status, 32), "ticker": _safe_text(ticker, 6),
+        "message": _safe_text(message, 500),
+    }
+    if isinstance(queue_index, int) and isinstance(queue_total, int):
+        record["queue_position"] = f"{queue_index}/{queue_total}"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8", newline="\n") as stream:
+            stream.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
+    except OSError as exc:
+        print(f"[IPO PIPELINE] 流水日志写入失败：{_safe_text(exc, 240)}", flush=True)
+
+
+def _save_acquisition_queue(root: Path, state: Dict[str, Any]) -> None:
+    path = root / "data" / "ipo_learning" / "acquisition_queue.latest.json"
+    temporary = path.with_suffix(".json.tmp")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary.write_text(
+            json.dumps(state, ensure_ascii=False, separators=(",", ":")) + "\n",
+            encoding="utf-8",
+        )
+        temporary.replace(path)
+    except OSError as exc:
+        print(f"[IPO PIPELINE] 队列状态写入失败：{_safe_text(exc, 240)}", flush=True)
+
+
+def _ats_queue_candidates(rows: Any) -> List[Dict[str, str]]:
+    try:
+        records = rows.to_dict("records")
+    except Exception:
+        records = rows if isinstance(rows, list) else []
+    today = datetime.now(ZoneInfo("Asia/Shanghai")).date()
+    candidates: Dict[str, Dict[str, str]] = {}
+    for row in records:
+        if not isinstance(row, dict) or str(row.get("status") or "") == "待上市":
+            continue
+        ticker = str(row.get("code") or "").strip()
+        if len(ticker) != 6 or not ticker.isdigit():
+            continue
+        try:
+            listing_date = date.fromisoformat(str(row.get("listing_date") or "")[:10])
+        except ValueError:
+            continue
+        if listing_date > today:
+            continue
+        candidates[ticker] = {
+            "ticker": ticker,
+            "name": _safe_text(row.get("name") or row.get("stock_name"), 48),
+            "listing_date": listing_date.isoformat(),
+        }
+    return sorted(
+        candidates.values(),
+        key=lambda item: (-date.fromisoformat(item["listing_date"]).toordinal(), item["ticker"]),
+    )
+
+
+def _load_acquisition_queue(root: Path, candidates: List[Dict[str, str]]) -> Dict[str, Any]:
+    path = root / "data" / "ipo_learning" / "acquisition_queue.latest.json"
+    previous = _read_json(path, max_bytes=512 * 1024) or {}
+    old_items = previous.get("items", [])
+    old_by_ticker = {
+        item.get("ticker"): item for item in old_items
+        if isinstance(item, dict) and isinstance(item.get("ticker"), str)
+    } if isinstance(old_items, list) else {}
+    tickers = [item["ticker"] for item in candidates]
+    universe_hash = _json_sha256(tickers)
+    try:
+        old_cursor = max(0, int(previous.get("cursor", 0)))
+    except (TypeError, ValueError, OverflowError):
+        old_cursor = 0
+    items = []
+    for candidate in candidates:
+        old = old_by_ticker.get(candidate["ticker"], {})
+        items.append({
+            **candidate,
+            "state": old.get("state", "WAITING") if old.get("state") != "RUNNING" else "WAITING",
+            "run_count": _nonnegative_count(old.get("run_count")),
+            "ready_count": old.get("ready_count"),
+            "required_count": old.get("required_count", 41),
+            "last_run_at": _safe_text(old.get("last_run_at"), 40),
+            "last_status": _safe_text(old.get("last_status"), 32),
+            "last_reason": _safe_text(old.get("last_reason"), 300),
+        })
+    same_universe = (
+        previous.get("schema_version") == _ACQUISITION_QUEUE_SCHEMA
+        and previous.get("universe_hash") == universe_hash
+    )
+    if previous.get("schema_version") == _ACQUISITION_QUEUE_SCHEMA:
+        if same_universe:
+            cursor = min(old_cursor, len(items))
+        else:
+            # A changed ATS universe is a cold start for this pass; never skip
+            # ahead using the cursor from a smaller or older queue.
+            cursor = 0
+            for item in items:
+                item["state"] = "WAITING"
+        cycle = max(1, _nonnegative_count(previous.get("cycle")) or 1)
+    else:
+        cursor, cycle = 0, 1
+    return {
+        "schema_version": _ACQUISITION_QUEUE_SCHEMA,
+        "updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "universe_hash": universe_hash,
+        "cycle": cycle,
+        "cursor": cursor,
+        "static_pass_completed_day": (
+            _safe_text(previous.get("static_pass_completed_day"), 10) if same_universe else ""
+        ),
+        "items": items,
+        "active": {},
+    }
+
+
+def _begin_auto_queue_item(root: Path, candidates: List[Dict[str, str]]) -> Tuple[str, Dict[str, Any], int]:
+    state = _load_acquisition_queue(root, candidates)
+    items = state["items"]
+    if not items:
+        raise ValueError("ATS 新股/次新股表没有可采集标的")
+    index = state["cursor"]
+    if index >= len(items):
+        state["cycle"] += 1
+        state["cursor"] = index = 0
+        for item in items:
+            item["state"] = "WAITING"
+    ticker = items[index]["ticker"]
+    items[index]["state"] = "RUNNING"
+    state["active"] = {
+        "ticker": ticker, "queue_index": index + 1, "queue_total": len(items),
+        "stage": "STARTING", "message": "准备读取 ATS 标的和来源契约",
+        "started_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    }
+    state["updated_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    _save_acquisition_queue(root, state)
+    return ticker, state, index
+
+
+def _update_auto_queue_progress(
+    root: Path, state: Dict[str, Any], ticker: str, index: int,
+    stage: str, message: str,
+) -> None:
+    state["active"] = {
+        **(state.get("active") if isinstance(state.get("active"), dict) else {}),
+        "ticker": ticker, "queue_index": index + 1, "queue_total": len(state.get("items", [])),
+        "stage": _safe_text(stage, 80), "message": _safe_text(message, 300),
+    }
+    state["updated_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    _save_acquisition_queue(root, state)
+
+
+def _finish_auto_queue_item(
+    root: Path, state: Dict[str, Any], ticker: str, index: int,
+    result: Dict[str, Any],
+) -> None:
+    items = state.get("items", [])
+    if not isinstance(items, list) or index >= len(items) or items[index].get("ticker") != ticker:
+        return
+    item = items[index]
+    source = result.get("source_collection", {})
+    source = source if isinstance(source, dict) else {}
+    mode = _safe_text(source.get("mode"), 40)
+    ready = _nonnegative_count(result.get("ready_count"))
+    required = _nonnegative_count(result.get("required_count")) or 41
+    item.update({
+        "run_count": _nonnegative_count(item.get("run_count")) + 1,
+        "ready_count": ready, "required_count": required,
+        "last_run_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "last_status": _safe_text(source.get("status") or result.get("status"), 32),
+        "last_reason": _safe_text(source.get("reason") or result.get("reason"), 300),
+    })
+    if mode == "OFF_SESSION_COOLDOWN":
+        item["state"] = "WAITING"
+        state["cursor"] = index
+        final_state = "PAUSED"
+        message = item["last_reason"] or "休市期间等待下一次有效采集窗口"
+        active_stage = "PAUSED_OFF_SESSION"
+    else:
+        item["state"] = "FAILED" if result.get("status") == "UNREADY" and not source else "PROCESSED"
+        state["cursor"] = index + 1
+        final_state = item["state"]
+        message = f"契约就绪 {ready}/{required}；{item['last_reason'] or item['last_status']}"
+        active_stage = "COMPLETED"
+    historical = result.get("historical_analysis")
+    if (
+        state.get("cursor", 0) >= len(items) and isinstance(historical, dict)
+        and historical.get("status") not in {None, "NOT_RUN"}
+    ):
+        state["static_pass_completed_day"] = datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat()
+        state["static_pass_completed_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    state["active"] = {
+        "ticker": ticker, "queue_index": index + 1, "queue_total": len(items),
+        "stage": active_stage, "message": message,
+        "finished_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    }
+    state["updated_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    _save_acquisition_queue(root, state)
+    _append_pipeline_event(
+        root, "SYMBOL_FINISHED", final_state, ticker, message,
+        queue_index=index + 1, queue_total=len(items),
+    )
 
 
 def _json_sha256(value: Any) -> str:
@@ -191,6 +405,7 @@ def _tail_events(path: Path, limit: int = 200) -> List[Dict[str, str]]:
                 "timestamp", "level", "stage", "event", "status", "ticker",
                 "request_id", "message", "summary", "candidate_id", "matured_at", "cutoff",
                 "event_id", "listing_date",
+                "queue_position",
                 "input_snapshot_hash", "label_source", "labels_mature", "reviewer",
                 "decision", "reason", "gate", "execution_status", "reject_code",
                 "configuration_version", "configuration_hash", "data_contract_hash",
@@ -1481,6 +1696,15 @@ def _collect_snapshot(root: Path) -> Dict[str, Any]:
     )
 
     events = _tail_events(events_path)
+    pipeline_events = [event for event in events if event.get("stage") == "IPO_PIPELINE"][-100:]
+    acquisition_queue = _read_json(
+        root / "data" / "ipo_learning" / "acquisition_queue.latest.json",
+        max_bytes=512 * 1024,
+    ) or {}
+    static_sentiment = _read_json(
+        root / "data" / "ipo_learning" / "static_sentiment.latest.json",
+        max_bytes=4 * 1024 * 1024,
+    ) or {}
     # Add the live IPO gate trace without initializing the trading center or exposing raw payloads.
     operation_states = []
     gate_context_status = "TRADING_CENTER_NOT_STARTED"
@@ -1832,6 +2056,9 @@ def _collect_snapshot(root: Path) -> Dict[str, Any]:
         "contracts": contract_rows,
         "contract_status_counts": contract_status_counts,
         "source_health": _collect_local_source_health(root),
+        "acquisition_queue": acquisition_queue,
+        "static_sentiment": static_sentiment,
+        "pipeline_events": pipeline_events,
         "events": events,
         "gate_summary": gate_summary,
         "gate_diagnostics": gate_diagnostics,
@@ -1905,6 +2132,29 @@ def _is_market_session_active() -> bool:
         return bool(is_trading_time()[0])
     except Exception:
         return False
+
+
+def _static_pass_completed_today(root: Path) -> bool:
+    state = _read_json(root / "data" / "ipo_learning" / "acquisition_queue.latest.json", max_bytes=512 * 1024) or {}
+    today = datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat()
+    return state.get("static_pass_completed_day") == today
+
+
+def _source_auto_interval_ms(now: Optional[datetime] = None) -> int:
+    """Poll live data on market cadence and drain local historical work off-session."""
+    try:
+        zone = ZoneInfo("Asia/Shanghai")
+        local_now = datetime.now(zone) if now is None else now
+        if local_now.tzinfo is None or local_now.utcoffset() is None:
+            local_now = local_now.replace(tzinfo=zone)
+        else:
+            local_now = local_now.astimezone(zone)
+        minute = local_now.hour * 60 + local_now.minute
+        if local_now.weekday() < 5 and 8 * 60 + 55 <= minute <= 15 * 60 + 40:
+            return 5 * 60 * 1000
+        return 2 * 1000
+    except Exception:
+        return 60 * 60 * 1000
 
 
 class _LearningMonitorWorker(QThread):
@@ -2216,45 +2466,126 @@ class _SourceAcquisitionWorker(QThread):
         self._collect_labels = collect_labels
 
     def run(self) -> None:
-        try:
-            from tools.run_ipo_data_acquisition import run_ats_learning_cycle
+        queue_state: Optional[Dict[str, Any]] = None
+        queue_index: Optional[int] = None
+        queue_total: Optional[int] = None
+        ticker = self._ticker
 
-            ticker = self._ticker
+        def record_progress(payload: Dict[str, Any]) -> None:
+            stage = _safe_text(payload.get("stage"), 80) or "PIPELINE"
+            message = _safe_text(payload.get("message"), 300)
+            status = _safe_text(payload.get("status"), 32) or "RUNNING"
+            event_ticker = _safe_text(payload.get("ticker"), 6) or ticker
+            if event_ticker == ticker:
+                if queue_state is not None and queue_index is not None:
+                    _update_auto_queue_progress(
+                        self._root, queue_state, ticker, queue_index, stage, message,
+                    )
+                else:
+                    manual_state = _read_json(
+                        self._root / "data" / "ipo_learning" / "acquisition_queue.latest.json",
+                        max_bytes=512 * 1024,
+                    ) or {
+                        "schema_version": _ACQUISITION_QUEUE_SCHEMA,
+                        "cycle": 1, "cursor": 0, "items": [],
+                    }
+                    manual_state["active"] = {
+                        "ticker": ticker, "queue_mode": "MANUAL", "stage": stage,
+                        "message": message, "updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                    }
+                    _save_acquisition_queue(self._root, manual_state)
+            _append_pipeline_event(
+                self._root, stage, status, event_ticker, message,
+                queue_index=queue_index + 1 if queue_index is not None and event_ticker == ticker else None,
+                queue_total=queue_total if event_ticker == ticker else None,
+            )
+
+        try:
+            from tools.run_ipo_data_acquisition import (
+                get_cached_ats_stock_table, run_ats_learning_cycle,
+            )
+
             auto_reason = ""
             if ticker == "AUTO":
                 from ats.new_stock_fetcher import NewStockFetcher
 
                 try:
-                    rows = NewStockFetcher.get_instance().get_combined_new_stocks().to_dict("records")
-                except Exception:
+                    fetcher = NewStockFetcher.get_instance()
+                    stock_table = (
+                        fetcher.get_combined_new_stocks()
+                        if _is_market_session_active()
+                        else get_cached_ats_stock_table(fetcher)
+                    )
+                    rows = stock_table.to_dict("records")
+                    candidates = _ats_queue_candidates(rows)
+                except Exception as exc:
                     rows = []
-                today = datetime.now(ZoneInfo("Asia/Shanghai")).date()
-                candidates = []
-                for row in rows:
-                    if not isinstance(row, dict):
-                        continue
-                    code = str(row.get("code") or "").strip()
-                    try:
-                        listed = date.fromisoformat(str(row.get("listing_date") or "")[:10])
-                    except ValueError:
-                        continue
-                    if (len(code) == 6 and code.isdigit() and listed <= today
-                            and str(row.get("status") or "") != "待上市"):
-                        candidates.append((listed, code))
-                if candidates:
-                    ordered = sorted(set(candidates), key=lambda item: (-item[0].toordinal(), item[1]))
-                    index = int(time.time() // 300) % len(ordered)
-                    ticker = ordered[index][1]
-                    auto_reason = f"ATS 新股/次新股巡检 {index + 1}/{len(ordered)}"
-                else:
+                    candidates = []
+                    auto_reason = f"ATS 标的表读取失败：{type(exc).__name__}"
+                if not candidates:
+                    reason = auto_reason or "ATS 新股/次新股表没有有效的已上市标的"
+                    _append_pipeline_event(self._root, "QUEUE_BUILD", "FAILED", "", reason)
                     self.completed.emit({
-                        "status": "UNREADY", "reason": "ATS 新股/次新股表不可用；请输入六位标的代码后重试",
-                        "auto_selected_ticker": "", "auto_selection_reason": "AUTO 选股失败",
+                        "status": "UNREADY", "reason": reason,
+                        "auto_selected_ticker": "", "auto_selection_reason": "AUTO 队列构建失败",
                     })
                     return
-            result = run_ats_learning_cycle(ticker, collect_labels=self._collect_labels, root=self._root)
+                ticker, queue_state, queue_index = _begin_auto_queue_item(self._root, candidates)
+                queue_total = len(queue_state["items"])
+                auto_reason = (
+                    f"ATS 轮询队列第 {queue_index + 1}/{queue_total} 个；"
+                    + ("本轮处理一个标的，交易时段每 5 分钟继续" if _is_market_session_active()
+                       else "本轮处理一个标的；全名单静态历史评分与队列同时运行")
+                )
+                _append_pipeline_event(
+                    self._root, "QUEUE_ITEM_STARTED", "RUNNING", ticker,
+                    f"开始第 {queue_index + 1}/{queue_total} 个标的；队列周期 {queue_state['cycle']}",
+                    queue_index=queue_index + 1, queue_total=queue_total,
+                )
+                record_progress({
+                    "stage": "QUEUE_SELECTED", "status": "RUNNING",
+                    "message": f"队列周期 {queue_state['cycle']}；选中 {ticker}（{queue_index + 1}/{queue_total}）",
+                })
+            else:
+                manual_state = _read_json(
+                    self._root / "data" / "ipo_learning" / "acquisition_queue.latest.json",
+                    max_bytes=512 * 1024,
+                ) or {"schema_version": _ACQUISITION_QUEUE_SCHEMA, "cycle": 1, "cursor": 0, "items": []}
+                manual_state["active"] = {
+                    "ticker": ticker, "queue_mode": "MANUAL", "stage": "STARTING",
+                    "message": "用户指定代码；读取 ATS 来源与 Gate 契约",
+                    "started_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                }
+                _save_acquisition_queue(self._root, manual_state)
+                record_progress({"stage": "MANUAL_SELECTED", "status": "RUNNING", "message": "按用户指定代码启动只读采集"})
+            result = run_ats_learning_cycle(
+                ticker, collect_labels=self._collect_labels, root=self._root,
+                progress_callback=record_progress,
+            )
             result["auto_selected_ticker"] = ticker if self._ticker == "AUTO" else ""
             result["auto_selection_reason"] = auto_reason
+            if queue_state is not None and queue_index is not None:
+                result["auto_queue_index"] = queue_index + 1
+                result["auto_queue_total"] = queue_total
+                result["auto_queue_cycle"] = queue_state.get("cycle", 1)
+                _finish_auto_queue_item(self._root, queue_state, ticker, queue_index, result)
+            else:
+                _append_pipeline_event(
+                    self._root, "MANUAL_RUN_FINISHED", "DONE", ticker,
+                    f"契约就绪 {_nonnegative_count(result.get('ready_count'))}/"
+                    f"{_nonnegative_count(result.get('required_count')) or 41}",
+                )
+                manual_state = _read_json(
+                    self._root / "data" / "ipo_learning" / "acquisition_queue.latest.json",
+                    max_bytes=512 * 1024,
+                ) or {}
+                manual_state["active"] = {
+                    "ticker": ticker, "queue_mode": "MANUAL", "stage": "COMPLETED",
+                    "message": f"手动标的契约就绪 {_nonnegative_count(result.get('ready_count'))}/"
+                    f"{_nonnegative_count(result.get('required_count')) or 41}",
+                    "finished_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                }
+                _save_acquisition_queue(self._root, manual_state)
             try:
                 from ats.strategy.ipo_gate_context_provider import get_default_ipo_gate_context_provider
                 from ats.strategy.ipo_shadow_observations import (
@@ -2275,7 +2606,12 @@ class _SourceAcquisitionWorker(QThread):
             except Exception as exc:
                 result["gate_reader_refresh"] = f"UNREADY:{type(exc).__name__}"
         except Exception as exc:
-            result = {"status": "UNREADY", "reason": type(exc).__name__}
+            detail = f"{type(exc).__name__}: {_safe_text(exc, 260)}"
+            result = {"status": "UNREADY", "reason": detail}
+            print(f"[IPO Console] 本轮失败：标的={ticker}，原因={detail}", flush=True)
+            _append_pipeline_event(self._root, "PIPELINE_FAILED", "FAILED", ticker, detail)
+            if queue_state is not None and queue_index is not None:
+                _finish_auto_queue_item(self._root, queue_state, ticker, queue_index, result)
         self.completed.emit(result)
 
 
@@ -2323,9 +2659,10 @@ class IPOLearningConsole(QWidget):
         self._outcome_stock_names: Dict[str, str] = {}
         self._runtime_control = None
         self._source_worker: Optional[_SourceAcquisitionWorker] = None
+        self._auto_tick_pending = False
         self._local_llm_thread: Optional[threading.Thread] = None
         self._build_ui()
-        self.content_tabs.setCurrentIndex(0)
+        self._select_console_tab("采集队列与流水")
         if self._simulation_read_only:
             self.lbl_boundary.setText(
                 "仿真只读监控：行情与指标为合成数据；本次 Provider 调用不构成 Stage 验收、"
@@ -2348,17 +2685,12 @@ class IPOLearningConsole(QWidget):
             except Exception:
                 self._runtime_control = None
             self._source_auto_timer = QTimer(self)
-            market_active = _is_market_session_active()
-            self._source_auto_timer.setInterval(
-                5 * 60 * 1000 if market_active else 60 * 60 * 1000
-            )
+            self._source_auto_timer.setInterval(_source_auto_interval_ms())
             self._source_auto_timer.timeout.connect(self._on_source_auto_tick)
             self._source_auto_timer.start()
             # Refresh static and daily sources once on ATS cold start, including
             # outside market hours. Intraday fields remain unready until sourced.
-            QTimer.singleShot(
-                2500, lambda: self._start_source_collection(collect_labels=True)
-            )
+            QTimer.singleShot(2500, self._on_source_auto_tick)
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
@@ -2406,11 +2738,18 @@ class IPOLearningConsole(QWidget):
 
         self.btn_refresh = QPushButton("刷新状态")
         self.btn_refresh.clicked.connect(self._worker.request_refresh)
-        self.btn_collect_now = QPushButton("采集 IPO + 本机 LLM")
+        self.btn_collect_now = QPushButton("立即采集 / 扫描标签")
+        self.btn_collect_now.setToolTip(
+            "读取 ATS 新股与检测数据并扫描成熟标签；只有捕获到满足时点要求的观察后，才调用 Ollama 做只读分析。"
+            "不会下单或启动训练。"
+        )
         self.btn_collect_now.clicked.connect(self._collect_matured_labels)
         self.btn_llm_diagnostics = QPushButton("查看 LLM 阻断原因")
         self.btn_llm_diagnostics.clicked.connect(self._show_provider_preflight)
         self.btn_review_selected_outcome = QPushButton("确认选中 D1-D3 标签")
+        self.btn_review_selected_outcome.setToolTip(
+            "先在“D1-D3 成熟标签”页选中一条待复核记录，再点此按钮保存人工结论；不会启动训练。"
+        )
         self.btn_review_selected_outcome.setEnabled(False)
         self.btn_review_selected_outcome.clicked.connect(
             lambda: self._review_outcome_label("ACCEPTED")
@@ -2457,10 +2796,7 @@ class IPOLearningConsole(QWidget):
         self.lbl_boundary.setStyleSheet("color: #f0c674; padding: 4px;")
         overview_layout.addWidget(self.lbl_boundary)
         self.lbl_operator_guide = QLabel(
-            "已自动启动只读监控；启动后采集并扫描成熟标签，交易时段每 5 分钟、休市每小时更新。"
-            "从①数据与采集查看 41 项完成度与阻断原因；"
-            "②单股因果与状态告警：看 Gate 阻断原因；"
-            "③盘后生成 D1-D3 标签，再到成熟标签页人工复核；④回放效果验收：看已量化指标。"
+            "用途：复用 ATS 新股表、行情与检测信号做只读 IPO 观察，不下单、不自动训练。"
         )
         self.lbl_operator_guide.setWordWrap(True)
         self.lbl_operator_guide.setStyleSheet(
@@ -2473,6 +2809,7 @@ class IPOLearningConsole(QWidget):
             ("② Gate 诊断", "单股因果与状态告警"),
             ("③ 标签复核", "D1-D3 成熟标签"),
             ("④ 回放验收", "回放效果验收"),
+            ("⑤ 队列与流水", "采集队列与流水"),
         ):
             button = QPushButton(label)
             button.clicked.connect(
@@ -2490,6 +2827,62 @@ class IPOLearningConsole(QWidget):
         self.stage_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         overview_layout.addWidget(self.stage_table)
         self.content_tabs.addTab(overview, "实施阶段")
+
+        acquisition_page = QWidget()
+        acquisition_layout = QVBoxLayout(acquisition_page)
+        self.lbl_acquisition_queue_summary = QLabel("ATS 采集队列：等待读取本地队列状态")
+        self.lbl_acquisition_queue_summary.setWordWrap(True)
+        self.lbl_acquisition_queue_summary.setStyleSheet(
+            "padding: 7px; background: #172536; border: 1px solid #42627f; color: #d7e8f7;"
+        )
+        acquisition_layout.addWidget(self.lbl_acquisition_queue_summary)
+        self.lbl_static_sentiment_summary = QLabel("本机静态情绪：等待 ATS 全名单冷启动扫描")
+        self.lbl_static_sentiment_summary.setWordWrap(True)
+        self.lbl_static_sentiment_summary.setStyleSheet(
+            "padding: 7px; background: #20232b; border: 1px solid #606777; color: #f0c674;"
+        )
+        acquisition_layout.addWidget(self.lbl_static_sentiment_summary)
+        acquisition_layout.addWidget(QLabel(
+            "AUTO 按 ATS 新股/次新股表建立可恢复轮询队列；每个调度周期处理一个代码。"
+            "冷启动首次运行即扫描 ATS 全名单的本机多日历史并产出情绪分；之后交易时段每 5 分钟刷新实时来源，盘外不重复请求。"
+            "静态结果不计入实时 41 项 Gate，也不生成实时影子交易样本。"
+        ))
+        self.acquisition_queue_table = QTableWidget(0, 9)
+        self.acquisition_queue_table.setHorizontalHeaderLabels(
+            ["队列序号", "代码", "名称", "上市日", "本轮状态", "Gate字段", "静态情绪/日期", "最近采集", "结果/阻断原因"]
+        )
+        for index, mode in enumerate((
+            QHeaderView.ResizeMode.ResizeToContents,
+            QHeaderView.ResizeMode.ResizeToContents,
+            QHeaderView.ResizeMode.ResizeToContents,
+            QHeaderView.ResizeMode.ResizeToContents,
+            QHeaderView.ResizeMode.ResizeToContents,
+            QHeaderView.ResizeMode.ResizeToContents,
+            QHeaderView.ResizeMode.ResizeToContents,
+            QHeaderView.ResizeMode.ResizeToContents,
+            QHeaderView.ResizeMode.Stretch,
+        )):
+            self.acquisition_queue_table.horizontalHeader().setSectionResizeMode(index, mode)
+        self.acquisition_queue_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.acquisition_queue_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        acquisition_layout.addWidget(self.acquisition_queue_table, 2)
+        acquisition_layout.addWidget(QLabel("最近 100 条采集阶段日志（持久化到 logs/ipo_learning_events.jsonl）"))
+        self.acquisition_pipeline_log_table = QTableWidget(0, 5)
+        self.acquisition_pipeline_log_table.setHorizontalHeaderLabels(
+            ["时间", "队列位置", "代码", "阶段 / 状态", "正在做什么 / 诊断"]
+        )
+        for index, mode in enumerate((
+            QHeaderView.ResizeMode.ResizeToContents,
+            QHeaderView.ResizeMode.ResizeToContents,
+            QHeaderView.ResizeMode.ResizeToContents,
+            QHeaderView.ResizeMode.ResizeToContents,
+            QHeaderView.ResizeMode.Stretch,
+        )):
+            self.acquisition_pipeline_log_table.horizontalHeader().setSectionResizeMode(index, mode)
+        self.acquisition_pipeline_log_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.acquisition_pipeline_log_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        acquisition_layout.addWidget(self.acquisition_pipeline_log_table, 1)
+        self.content_tabs.addTab(acquisition_page, "采集队列与流水")
 
         replay_metrics_page = QWidget()
         replay_metrics_layout = QVBoxLayout(replay_metrics_page)
@@ -2549,7 +2942,7 @@ class IPOLearningConsole(QWidget):
         )
         self.btn_collect_labels.clicked.connect(self._collect_matured_labels)
         self.lbl_acquisition_status = QLabel(
-            "启动后约 2.5 秒读取 ATS 新股/检测数据；交易时段每 5 分钟、休市每小时自动更新。"
+            "启动后约 2.5 秒执行一次冷启动读取；工作日 08:55–15:40 每 5 分钟检查，其他时段等待下个工作日。"
         )
         self.lbl_acquisition_status.setWordWrap(True)
         source_actions.addWidget(QLabel("标的"))
@@ -2959,6 +3352,10 @@ class IPOLearningConsole(QWidget):
         preflight = snapshot.get("provider_preflight", {})
         observations = snapshot.get("shadow_observations", {})
         observations = observations if isinstance(observations, dict) else {}
+        current_contract_counts = snapshot.get("contract_status_counts", {})
+        current_contract_counts = current_contract_counts if isinstance(current_contract_counts, dict) else {}
+        live_fresh = _nonnegative_count(current_contract_counts.get("fresh"))
+        live_required = _nonnegative_count(current_contract_counts.get("required"))
         outcomes = snapshot.get("outcome_labels", [])
         outcomes = outcomes if isinstance(outcomes, list) else []
         pending_outcomes = sum(
@@ -2969,28 +3366,86 @@ class IPOLearningConsole(QWidget):
         cutoff = _safe_text(observations.get("cutoff"), 32) or "无"
         field_count = _nonnegative_count(observations.get("fields"))
         observation_count = _nonnegative_count(observations.get("count"))
+        learning_progress = snapshot.get("learning_progress", {})
+        learning_progress = learning_progress if isinstance(learning_progress, dict) else {}
+        complete_snapshots = _nonnegative_count(learning_progress.get("decision_snapshot_count"))
+        acquisition_queue = snapshot.get("acquisition_queue", {})
+        acquisition_queue = acquisition_queue if isinstance(acquisition_queue, dict) else {}
+        queue_items = acquisition_queue.get("items", [])
+        queue_items = queue_items if isinstance(queue_items, list) else []
+        queue_total = len(queue_items)
+        queue_processed = sum(
+            isinstance(item, dict) and item.get("state") in {"PROCESSED", "FAILED"}
+            for item in queue_items
+        )
+        queue_active = acquisition_queue.get("active", {})
+        queue_active = queue_active if isinstance(queue_active, dict) else {}
+        queue_cursor = _nonnegative_count(acquisition_queue.get("cursor"))
+        if queue_total:
+            queue_position = (
+                f"本轮已完成 {queue_total}/{queue_total}"
+                if queue_cursor >= queue_total else f"下一位置 {queue_cursor + 1}/{queue_total}"
+            )
+            if queue_active.get("queue_mode") == "MANUAL":
+                queue_line = (
+                    f"手动标的 {queue_active.get('ticker', '未知')} / {queue_active.get('stage', 'RUNNING')}；"
+                    f"AUTO 队列已处理 {queue_processed}/{queue_total}，{queue_position}。"
+                )
+            else:
+                queue_line = (
+                    f"AUTO 队列周期 {acquisition_queue.get('cycle', 1)}：本轮已处理 {queue_processed}/{queue_total}，"
+                    f"{queue_position}；"
+                    f"当前步骤 {queue_active.get('ticker', '等待调度')} / {queue_active.get('stage', 'WAITING')}。"
+                )
+        else:
+            queue_line = "AUTO 队列尚未建立；等待 ATS 新股/次新股表加载。"
         provider_reason = next((
             _safe_text(check.get("detail"), 110)
             for check in preflight.get("checks", [])
             if isinstance(check, dict) and check.get("status") in {"阻断", "未就绪", "待验收"}
         ), "Provider 尚未通过运行验收") if isinstance(preflight, dict) else "Provider 状态不可用"
         self.lbl_pipeline.setText(
-            f"IPO {'仿真只读' if simulation_only else '定时采集已启动'}："
-            f"已持久化 {observation_count} 条真实观察；最近标的 {ticker}，"
-            f"有效字段 {field_count}/41，观察时间 {cutoff}。"
-            f"成熟标签待复核 {pending_outcomes} 条；点击“确认选中 D1-D3 标签”完成逐条审核。\n"
-            f"LLM 当前未运行：{provider_reason}。数据采集与只读规则分析不依赖 LLM；"
-            "审核标签不会自动开放 LLM 或交易。"
+            f"系统用途：ATS 共享数据上的 IPO 只读观察与门禁检查；不下单、不自动训练。\n"
+            f"当前状态：实时新鲜字段 {live_fresh}/{live_required}；只读观察记录 {observation_count} 条，"
+            f"最近标的 {ticker} 有 {field_count}/41 项（{cutoff}，这是单标字段覆盖，不是队列进度）；"
+            f"完整 Gate 快照 {complete_snapshots} 条；D1-D3 待人工复核 {pending_outcomes} 条。\n"
+            f"{queue_line}"
+            f"LLM/Provider：{provider_reason}；只有有效新鲜观察才触发 Ollama 只读分析。"
         )
         local_llm = snapshot.get("local_llm_observation", {})
         local_llm = local_llm if isinstance(local_llm, dict) else {}
         local_state = _safe_text(local_llm.get("state"), 32) or "NOT_STARTED"
         local_analysis = _safe_text(local_llm.get("analysis"), 600)
         local_reason = _safe_text(local_llm.get("reason"), 80)
+        static_sentiment = snapshot.get("static_sentiment", {})
+        static_sentiment = static_sentiment if isinstance(static_sentiment, dict) else {}
+        static_results = static_sentiment.get("results", {})
+        static_results = static_results if isinstance(static_results, dict) else {}
+        score_ticker = (
+            _safe_text(local_llm.get("ticker"), 6)
+            or _safe_text(observations.get("ticker"), 6)
+            or _safe_text(self._active_ticker, 6)
+        )
+        static_result = static_results.get(score_ticker, {})
+        static_result = static_result if isinstance(static_result, dict) else {}
+        emotion_score = static_result.get("emotion_score")
+        if isinstance(emotion_score, (int, float)):
+            score_quality = _safe_text(static_result.get("score_quality"), 32)
+            score_as_of = _safe_text(static_result.get("as_of_time"), 19)
+            as_of_note = f"，截至 {score_as_of}" if score_as_of else ""
+            static_score_note = (
+                f"静态情绪评分 {emotion_score:.1f}/100 "
+                f"（{score_quality or '未知'}{as_of_note}）"
+            )
+            if static_result.get("score_is_baseline") is True:
+                static_score_note = "静态情绪评分 50/100（中性基线；无历史证据）"
+        else:
+            static_score_note = ""
         self.lbl_local_llm.setText(
             f"本机 Ollama 只读观察：{local_state} · {local_llm.get('model', 'qwen3.5:4b')} · "
             f"{local_llm.get('ticker', '无标的')}。"
             + (f"分析：{local_analysis}" if local_analysis else f"原因：{local_reason or '等待首条有效观察'}")
+            + (f"；{static_score_note}" if static_score_note else "")
         )
         provider_name = preflight.get("backend") or snapshot.get("provider", "未配置")
         provider_state = preflight.get("state", "未就绪")
@@ -3310,13 +3765,36 @@ class IPOLearningConsole(QWidget):
         else:
             progress = "当前尚未读取到必需字段契约。"
             next_step = "先到数据与采集页查看配置与采集结果。"
+        local_now = datetime.now(ZoneInfo("Asia/Shanghai"))
+        local_minute = local_now.hour * 60 + local_now.minute
+        in_poll_window = (
+            local_now.weekday() < 5 and 8 * 60 + 55 <= local_minute <= 15 * 60 + 40
+        )
+        if in_poll_window:
+            schedule = "自动采集窗口正在运行（工作日 08:55–15:40，每 5 分钟检查）。"
+        else:
+            next_poll = local_now.replace(hour=8, minute=55, second=0, microsecond=0)
+            if next_poll <= local_now:
+                next_poll += timedelta(days=1)
+            while next_poll.weekday() >= 5:
+                next_poll += timedelta(days=1)
+            schedule = (
+                f"当前在自动采集窗口外；重复休市请求已暂停，预计下个工作日 "
+                f"{next_poll:%m-%d %H:%M} 恢复检查。"
+            )
         self.lbl_operator_guide.setText(
-            f"{progress}{next_step}\n"
-            "流程：数据/TTL → Gate 阻断原因 → 盘后 D1-D3 → 人工复核 → 回放指标。"
-            "ATS 启动约 2.5 秒后后台采集一次默认标的 301689；交易时段后续每 5 分钟自动采集，休市可手动采集。"
-            "运行入口：python tools/run_ipo_learning_console.py；LLM 与交易授权仍关闭。"
+            f"{progress}{next_step} {schedule}\n"
+            "AUTO 每个周期只处理一个 ATS 代码，进度和逐阶段诊断见“采集队列与流水”；"
+            "若某行仅 6/41，先看该标的缺失字段的来源/时效原因，不代表队列停在第 6 项。\n"
+            "怎么用：①“数据契约与时效”看字段/TTL，并点“读取 ATS 数据与检测信号”；"
+            "②“单股因果与状态告警”看 Gate 为什么阻断；"
+            "③“D1-D3 成熟标签”选中一行，再点顶部“确认选中 D1-D3 标签”人工复核；"
+            "④“回放效果验收”查看可量化结果。\n"
+            "闭环：ATS 数据 → 来源与时效门禁 → 新鲜报价/分钟线异动才记影子样本 → 盘后 D1-D3 → 人工复核 → 回放。"
+            "当前实时字段不全时 Gate 保持阻断；Stage 4 未验收，LLM 与交易授权关闭。"
         )
         self.lbl_contract_status.setText(
+            f"当前契约表所示标的 {next((row.get('ticker') for row in contracts if row.get('ticker')), '未知')}："
             f"来源契约 {configured}/{required} 项；实时新鲜 {fresh} 项；"
             f"契约确认缺失 {confirmed_missing} 项；未接观测 {unobserved} 项；"
             f"缺契约 {uncontracted} 项；过期/无效/来源不匹配 {blocked_or_invalid} 项。"
@@ -3363,6 +3841,11 @@ class IPOLearningConsole(QWidget):
                     ))
                 self.source_health_table.setItem(row, col, item)
 
+        self._render_acquisition_pipeline(
+            snapshot.get("acquisition_queue", {}), snapshot.get("pipeline_events", []),
+            snapshot.get("static_sentiment", {}),
+        )
+
         self._render_learning_snapshots(snapshot.get("decision_snapshots", []))
         self._render_outcome_labels(snapshot.get("outcome_labels", []))
 
@@ -3397,6 +3880,150 @@ class IPOLearningConsole(QWidget):
         self.event_table.verticalScrollBar().setValue(scroll_value)
         self.event_table.blockSignals(False)
         self._show_selected_event()
+
+    def _render_acquisition_pipeline(
+        self, queue_state: Any, events: Any, static_sentiment: Any = None,
+    ) -> None:
+        queue_state = queue_state if isinstance(queue_state, dict) else {}
+        items = queue_state.get("items", [])
+        items = items if isinstance(items, list) else []
+        active = queue_state.get("active", {})
+        active = active if isinstance(active, dict) else {}
+        total = len(items)
+        cursor = min(_nonnegative_count(queue_state.get("cursor")), total)
+        processed = sum(
+            isinstance(item, dict) and item.get("state") in {"PROCESSED", "FAILED"}
+            for item in items
+        )
+        active_ticker = _safe_text(active.get("ticker"), 6)
+        active_stage = _safe_text(active.get("stage"), 80) or "WAITING"
+        active_message = _safe_text(active.get("message"), 300)
+        if active.get("queue_mode") == "MANUAL":
+            summary = f"手动读取 {active_ticker} · {active_stage} · {active_message}。AUTO 队列保留在后台位置。"
+        elif not total:
+            summary = "ATS 采集队列尚未建立；应用启动后的首次冷启动读取会从 ATS 新股/次新股表构建队列。"
+        elif active_stage == "PAUSED_OFF_SESSION":
+            summary = (
+                f"AUTO 队列周期 {queue_state.get('cycle', 1)}：已处理 {processed}/{total}；"
+                f"当前 {active_ticker} 保留在队首，休市去重暂停。{active_message}"
+            )
+        elif active_stage == "COMPLETED":
+            if cursor >= total and queue_state.get("static_pass_completed_day"):
+                next_text = f"本日静态历史全队列已于 {queue_state['static_pass_completed_day']} 完成"
+            else:
+                next_text = "本轮队列已完成，下一调度周期从头开始" if cursor >= total else f"下一标的 {cursor + 1}/{total}"
+            summary = (
+                f"AUTO 队列周期 {queue_state.get('cycle', 1)}：已处理 {processed}/{total}；{next_text}。"
+                f"最近 {active_ticker}：{active_message}"
+            )
+        elif active_ticker:
+            summary = (
+                f"AUTO 队列周期 {queue_state.get('cycle', 1)}：正在处理 {active.get('queue_index', cursor + 1)}/{total}，"
+                f"已处理 {processed}/{total}；步骤 {active_stage} · {active_message}"
+            )
+        else:
+            summary = (
+                f"AUTO 队列周期 {queue_state.get('cycle', 1)}：已处理 {processed}/{total}；"
+                f"下一标的 {min(cursor + 1, total)}/{total}，等待交易时段或手动启动。"
+            )
+        self.lbl_acquisition_queue_summary.setText(summary)
+
+        static_sentiment = static_sentiment if isinstance(static_sentiment, dict) else {}
+        static_results = static_sentiment.get("results", {})
+        static_results = static_results if isinstance(static_results, dict) else {}
+        if static_sentiment:
+            score = static_sentiment.get("heat_score")
+            score_text = f"{score}/100" if isinstance(score, (int, float)) else "暂不可评分"
+            red_ratio = static_sentiment.get("red_ratio_pct")
+            red_text = f"上涨占比 {red_ratio}%" if isinstance(red_ratio, (int, float)) else "上涨占比 --"
+            vwap_ratio = static_sentiment.get("vwap_hold_ratio_pct")
+            vwap_text = f"站上 VWAP {vwap_ratio}%" if isinstance(vwap_ratio, (int, float)) else "无 VWAP 样本"
+            average_change = static_sentiment.get("average_latest_change_pct")
+            change_text = f"最新日均涨跌 {average_change:+.2f}%" if isinstance(average_change, (int, float)) else "最新日均涨跌 --"
+            self.lbl_static_sentiment_summary.setText(
+                f"本机静态情绪（多日历史，不是实时行情）：{static_sentiment.get('heat_stage', '待计算')} · "
+                f"热度 {score_text} · {red_text} · {vwap_text} · {change_text} · "
+                f"已处理 {static_sentiment.get('processed_count', 0)}/{static_sentiment.get('universe_count', 0)}，"
+                f"有历史数据 {static_sentiment.get('cached_history_count', 0)}，"
+                f"缺历史 {static_sentiment.get('missing_history_count', 0)}；"
+                f"评分样本 {static_sentiment.get('score_sample_count', 0)}，"
+                f"中性基线 {static_sentiment.get('baseline_score_count', 0)}，"
+                f"评分覆盖 {static_sentiment.get('score_coverage_pct', 0)}%，"
+                f"质量 {static_sentiment.get('score_quality', '未知')}；"
+                f"评分依据 {static_sentiment.get('score_basis', '未知')}，"
+                f"更新 {static_sentiment.get('updated_at', '未知')}。实时 Gate 仍单独显示字段数/41。"
+            )
+        else:
+            self.lbl_static_sentiment_summary.setText("本机静态情绪：尚无结果；启动 AUTO 队列后会立即扫描 ATS 全名单的本地多日历史。")
+
+        state_labels = {
+            "WAITING": "等待采集", "RUNNING": "正在采集",
+            "PROCESSED": "本轮已采集", "FAILED": "本轮失败",
+        }
+        self.acquisition_queue_table.setRowCount(len(items))
+        for row, record in enumerate(items):
+            if not isinstance(record, dict):
+                continue
+            internal_state = _safe_text(record.get("state"), 24) or "WAITING"
+            ready = record.get("ready_count")
+            required = _nonnegative_count(record.get("required_count")) or 41
+            coverage = f"{ready}/{required}" if isinstance(ready, int) and not isinstance(ready, bool) else "未采集"
+            history = static_results.get(_safe_text(record.get("ticker"), 6), {})
+            history = history if isinstance(history, dict) else {}
+            if history.get("status") == "READY":
+                return_pct = history.get("five_day_return_pct")
+                return_text = f" · 5日{return_pct:+.1f}%" if isinstance(return_pct, (int, float)) else ""
+                score = history.get("emotion_score", 50.0)
+                quality = history.get("score_quality", "NO_EVIDENCE")
+                history_text = (
+                    f"{history.get('sentiment', '历史已分析')} · 情绪 {score}/100 "
+                    f"({quality}){return_text} · {history.get('as_of_time', '')[:10]}"
+                )
+            else:
+                score = history.get("emotion_score")
+                if isinstance(score, (int, float)):
+                    history_text = f"情绪 {score}/100 · 中性基线（无证据）"
+                else:
+                    history_text = _safe_text(history.get("status") or "待处理", 40)
+            values = (
+                str(row + 1), record.get("ticker", ""), record.get("name", ""),
+                record.get("listing_date", ""), state_labels.get(internal_state, internal_state),
+                coverage, history_text, _safe_text(record.get("last_run_at"), 19),
+                _safe_text(record.get("last_reason") or record.get("last_status"), 300),
+            )
+            for column, value in enumerate(values):
+                cell = QTableWidgetItem(str(value))
+                if column == 4:
+                    color = (
+                        "#60a5fa" if internal_state == "RUNNING" else
+                        "#65d98a" if internal_state == "PROCESSED" else
+                        "#ff7070" if internal_state == "FAILED" else "#9298a7"
+                    )
+                    cell.setForeground(QColor(color))
+                if column == 7:
+                    cell.setToolTip(_safe_text(record.get("last_reason"), 1000))
+                self.acquisition_queue_table.setItem(row, column, cell)
+        events = events if isinstance(events, list) else []
+        events = [event for event in events if isinstance(event, dict)][-100:]
+        self.acquisition_pipeline_log_table.setRowCount(len(events))
+        for row, event in enumerate(reversed(events)):
+            values = (
+                _safe_text(event.get("timestamp"), 32),
+                _safe_text(event.get("queue_position"), 16),
+                _safe_text(event.get("ticker"), 6),
+                f"{_safe_text(event.get('event'), 80)} / {_safe_text(event.get('status'), 32)}",
+                _safe_text(event.get("message"), 500),
+            )
+            for column, value in enumerate(values):
+                cell = QTableWidgetItem(str(value))
+                if column == 3:
+                    state = _safe_text(event.get("status"), 32)
+                    cell.setForeground(QColor(
+                        "#65d98a" if state in {"DONE", "PROCESSED"} else
+                        "#ff7070" if state in {"FAILED", "BLOCKED"} else
+                        "#f0c674" if state in {"PAUSED", "RUNNING"} else "#e5e7eb"
+                    ))
+                self.acquisition_pipeline_log_table.setItem(row, column, cell)
 
     def _render_learning_snapshots(self, records: Any) -> None:
         records = records if isinstance(records, list) else []
@@ -3570,16 +4197,39 @@ class IPOLearningConsole(QWidget):
         self._start_source_collection(collect_labels=True)
 
     def _on_source_auto_tick(self) -> None:
-        market_active = _is_market_session_active()
-        interval_ms = 5 * 60 * 1000 if market_active else 60 * 60 * 1000
+        interval_ms = _source_auto_interval_ms()
         if self._source_auto_timer.interval() != interval_ms:
             self._source_auto_timer.setInterval(interval_ms)
+        if not _is_market_session_active() and _static_pass_completed_today(self._root):
+            self._auto_tick_pending = False
+            self.lbl_acquisition_status.setText(
+                "本日 ATS 全名单静态历史队列已完整跑完；本轮结果已保存，可查看情绪评分和逐阶段流水。"
+            )
+            return
+        if self._source_worker is not None and self._source_worker.isRunning():
+            if not self._auto_tick_pending:
+                self._auto_tick_pending = True
+                active = _read_json(
+                    self._root / "data" / "ipo_learning" / "acquisition_queue.latest.json",
+                    max_bytes=512 * 1024,
+                ) or {}
+                current = active.get("active", {}) if isinstance(active.get("active"), dict) else {}
+                ticker = _safe_text(current.get("ticker"), 6)
+                _append_pipeline_event(
+                    self._root, "AUTO_TICK_DEFERRED", "QUEUED", ticker,
+                    "当前代码仍在采集；合并一个到期轮询，当前处理结束后继续",
+                )
+                self.lbl_acquisition_status.setText(
+                    "当前标的采集尚未完成；已登记一个待执行轮询，完成后继续队列。"
+                )
+            return
         self._start_source_collection(collect_labels=True)
 
     def _start_source_collection(self, collect_labels: bool) -> None:
         if self._simulation_read_only:
             return
         if self._source_worker is not None and self._source_worker.isRunning():
+            self.lbl_acquisition_status.setText("当前只读采集仍在运行；请看“采集队列与流水”的实时阶段。")
             return
         ticker = self.edt_acquisition_code.text().strip()
         if ticker != "AUTO" and (len(ticker) != 6 or not ticker.isdigit()):
@@ -3591,10 +4241,15 @@ class IPOLearningConsole(QWidget):
         self.lbl_acquisition_status.setText(f"正在读取 ATS {ticker} 新股/次新股与异动信号{suffix}，并核对来源时点与 41 项门禁契约…")
         self._source_worker = _SourceAcquisitionWorker(self._root, ticker, collect_labels, self)
         self._source_worker.completed.connect(self._source_collection_completed)
-        self._source_worker.finished.connect(lambda: (
-            self.btn_collect_issue_price.setEnabled(True), self.btn_collect_labels.setEnabled(True)
-        ))
+        self._source_worker.finished.connect(self._source_collection_worker_finished)
         self._source_worker.start()
+
+    def _source_collection_worker_finished(self) -> None:
+        self.btn_collect_issue_price.setEnabled(True)
+        self.btn_collect_labels.setEnabled(True)
+        if self._auto_tick_pending and not self._simulation_read_only:
+            self._auto_tick_pending = False
+            QTimer.singleShot(100, self._on_source_auto_tick)
 
     def _source_collection_completed(self, result: Dict[str, Any]) -> None:
         observation = result.get("shadow_learning", {})
@@ -3613,6 +4268,37 @@ class IPOLearningConsole(QWidget):
         state = str(result.get("status", "UNREADY"))
         count = _nonnegative_count(result.get("ready_count"))
         required = _nonnegative_count(result.get("required_count"))
+        source_collection = result.get("source_collection", {})
+        source_collection = source_collection if isinstance(source_collection, dict) else {}
+        signal_capture = result.get("ats_signal_capture", {})
+        signal_capture = signal_capture if isinstance(signal_capture, dict) else {}
+        historical = result.get("historical_analysis", {})
+        historical = historical if isinstance(historical, dict) else {}
+        matured_pending = sum(
+            isinstance(item, dict) and item.get("status") == "MATURED_PENDING_REVIEW"
+            for item in result.get("label_reports", [])
+        ) if isinstance(result.get("label_reports"), list) else 0
+        ticker_for_log = _safe_text(
+            result.get("auto_selected_ticker") or result.get("ticker"), 6
+        ) or "未知"
+        queue_index = _nonnegative_count(result.get("auto_queue_index"))
+        queue_total = _nonnegative_count(result.get("auto_queue_total"))
+        if queue_index and queue_total:
+            parts_queue = f"ATS轮询队列 {queue_index}/{queue_total}"
+        else:
+            parts_queue = "手动标的"
+        print(
+            "[IPO Console] 本轮结束："
+            f"队列={parts_queue}，标的={ticker_for_log}，契约就绪={count}/{required}，"
+            f"ATS来源={source_collection.get('status', '未知')}/"
+            f"{source_collection.get('mode', '未知')}，"
+            f"静态情绪={historical.get('emotion_score', '--')}/100 "
+            f"({historical.get('score_quality', '未运行')})/{historical.get('sentiment', '')}，"
+            f"实时影子样本={signal_capture.get('state', 'UNREADY')}，"
+            f"新增D1-D3待复核={matured_pending}。"
+            f"{_safe_text(source_collection.get('reason'), 140)}",
+            flush=True,
+        )
         parts = []
         selected = _safe_text(result.get("auto_selected_ticker"), 6)
         if selected:
@@ -3642,6 +4328,21 @@ class IPOLearningConsole(QWidget):
                 parts.append("盘后历史分析；不作为实时交易信号或训练标签")
             if ats_signal.get("reason"):
                 parts.append(f"ATS检测诊断:{_safe_text(ats_signal.get('reason'), 120)}")
+        if historical:
+            if historical.get("status") == "READY":
+                five_day = historical.get("five_day_return_pct")
+                five_day_text = f"；5日{five_day:+.1f}%" if isinstance(five_day, (int, float)) else ""
+                parts.append(
+                    f"本机静态情绪:{historical.get('emotion_score', 50.0)}/100"
+                    f"({historical.get('score_quality', 'NO_EVIDENCE')}) · {historical.get('sentiment')} / 截止"
+                    f"{_safe_text(historical.get('as_of_time'), 19)}{five_day_text}"
+                )
+            elif historical.get("status") not in {"NOT_RUN", None}:
+                parts.append(
+                    f"本机静态情绪:{historical.get('emotion_score', 50.0)}/100"
+                    f"({historical.get('score_quality', 'NO_EVIDENCE')}) / {historical.get('status')} / "
+                    f"{_safe_text(historical.get('reason'), 120)}"
+                )
         ats_center = result.get("ats_trading_center", {})
         if isinstance(ats_center, dict) and ats_center:
             parts.append(
@@ -3665,6 +4366,7 @@ class IPOLearningConsole(QWidget):
                 f"{_nonnegative_count(ats_learning.get('sample_count'))}条净收益样本"
             )
         for key, label in (
+            ("source_collection", "来源调度"),
             ("acquisition", "ATS发行日历"), ("ipo_facts", "IPO先验"),
             ("listing_anchors", "首日锚点"),
             ("listing_supply", "上市供给"), ("market", "A股横截面"),

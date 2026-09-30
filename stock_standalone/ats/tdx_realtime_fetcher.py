@@ -836,6 +836,9 @@ class TDXGlobalCachePool:
         if not isinstance(df, pd.DataFrame) or df.empty or not required.issubset(df.columns):
             return False
         dates = df["date"].astype(str)
+        timeline = dates + " " + df["time_only"].astype(str)
+        if not timeline.is_unique or not timeline.is_monotonic_increasing or (dates > today_str).any():
+            return False
         history = df.loc[dates < today_str, ["date", "time_only"]].to_dict("records")
         if days > 1 and not cls._has_complete_sessions(
             history, days - 1, min_bars=1 if ipo_history else 220,
@@ -905,6 +908,14 @@ class TDXGlobalCachePool:
             if cls.is_trading_day((first + timedelta(days=offset)).isoformat())
         ]
 
+    @staticmethod
+    def _listing_session_window(expected_dates: List[str], days: int) -> List[str]:
+        """Return the requested trailing window from an IPO's full listing calendar."""
+        if not expected_dates:
+            return []
+        window_size = min(max(1, int(days)), len(expected_dates))
+        return list(expected_dates[-window_size:])
+
     def _validate_history_entry(self, code: str, entry: Dict[str, Any], today_str: str) -> bool:
         """
         【分区级：静态历史 entry 合法性门禁】
@@ -914,6 +925,9 @@ class TDXGlobalCachePool:
             return False
         records = entry.get("records", [])
         if not records:
+            return False
+        timeline = [(str(r.get("date", "")), str(r.get("time_only", ""))) for r in records]
+        if len(set(timeline)) != len(timeline) or timeline != sorted(timeline):
             return False
         days = int(entry.get("days", 10))
         if not self._has_complete_sessions(records, max(1, days - 1)):
@@ -970,7 +984,7 @@ class TDXGlobalCachePool:
         ipo_dates = entry.get("ipo_dates", [])
         ipo_aligned = bool(ipo_dates and self._ipo_frame_alignment_issue(df, ipo_dates) is None)
         if (not self._has_complete_frame(df, days, cache_day, code=code, ipo_history=ipo_aligned)
-                and not ipo_aligned):
+                or (ipo_dates and not ipo_aligned)):
             logger.debug(f"[AutoRepair] {key} 增量分时历史覆盖不完整，丢弃并重新拉取")
             return False
         if (entry.get("frozen") or cache_day < today_str or
@@ -1381,6 +1395,14 @@ class TDXGlobalCachePool:
 
                     # 合并已有历史与昨日分时
                     combined_records = existing_records + yesterday_records
+                    # 昨日可能同时存在于静态历史和增量快照；按分钟合并后再计算累计量价。
+                    minute_records = {}
+                    for record in combined_records:
+                        date_key = str(record.get("date", ""))
+                        minute_key = str(record.get("time_only", ""))
+                        if date_key and minute_key and date_key < today_str:
+                            minute_records[(date_key, minute_key)] = record
+                    combined_records = [minute_records[key] for key in sorted(minute_records)]
                     if not combined_records:
                         continue
 
@@ -1484,7 +1506,7 @@ class TDXGlobalCachePool:
                 and entry.get("date") == self._current_date_str 
                 and entry.get("days") == days
                 and bool(entry.get("records"))):
-                if entry.get("_quality_len") != len(entry["records"]):
+                if entry.get("_quality_len") != len(entry["records"]) or entry.get("_timeline_quality_len") != len(entry["records"]):
                     if not self._validate_history_entry(c_clean, entry, self._current_date_str):
                         self._history_static_bars.pop(c_clean, None)
                         self._incremental_intraday_pool.pop((c_clean, days), None)
@@ -1492,6 +1514,7 @@ class TDXGlobalCachePool:
                         self._is_dirty = True
                         return None
                     entry["_quality_len"] = len(entry["records"])
+                    entry["_timeline_quality_len"] = len(entry["records"])
                 self.stats["cache_hits"] += 1
                 # 命中前 9 天静态数据，意味着省去了 2 次拉取历史数据的网络请求
                 self.stats["saved_network_calls"] += max(1, min(3, (days * 240 + 799) // 800 - 1))
@@ -1509,7 +1532,7 @@ class TDXGlobalCachePool:
                 and entry.get("date") == self._current_date_str 
                 and entry.get("days") == days
                 and bool(entry.get("records"))):
-                if entry.get("_quality_len") != len(entry["records"]):
+                if entry.get("_quality_len") != len(entry["records"]) or entry.get("_timeline_quality_len") != len(entry["records"]):
                     if not self._validate_history_entry(c_clean, entry, self._current_date_str):
                         self._history_static_bars.pop(c_clean, None)
                         self._incremental_intraday_pool.pop((c_clean, days), None)
@@ -1517,6 +1540,7 @@ class TDXGlobalCachePool:
                         self._is_dirty = True
                         return None
                     entry["_quality_len"] = len(entry["records"])
+                    entry["_timeline_quality_len"] = len(entry["records"])
                 self.stats["cache_hits"] += 1
                 self.stats["saved_network_calls"] += max(1, min(3, (days * 240 + 799) // 800 - 1))
                 return entry
@@ -1577,6 +1601,13 @@ class TDXGlobalCachePool:
                 df, ts, d_str = cached
                 if d_str == self._current_date_str and (time.time() - ts < ttl):
                     if df is not None and not df.empty:
+                        if "date" not in df.columns or "time_only" not in df.columns:
+                            self._multi_day_df_cache.pop(key, None)
+                            return None
+                        timeline = df["date"].astype(str) + " " + df["time_only"].astype(str)
+                        if not timeline.is_unique or not timeline.is_monotonic_increasing:
+                            self._multi_day_df_cache.pop(key, None)
+                            return None
                         self.stats["total_queries"] += 1
                         self.stats["cache_hits"] += 1
                         self.stats["saved_network_calls"] += 1
@@ -1642,13 +1673,14 @@ class TDXGlobalCachePool:
                         self._is_dirty = True
                         return None
 
-                    if entry.get("_quality_len") != len(df):
+                    if entry.get("_quality_len") != len(df) or entry.get("_timeline_quality_len") != len(df):
                         if not self._validate_incremental_entry(key, entry, self._current_date_str):
                             self._incremental_intraday_pool.pop(key, None)
                             self._multi_day_df_cache.pop(key, None)
                             self._is_dirty = True
                             return None
                         entry["_quality_len"] = len(entry["df"])
+                        entry["_timeline_quality_len"] = len(entry["df"])
                         df = entry["df"]
                     if is_frozen and entry.get("_closed_quality_len") != len(df):
                         if not self._validate_incremental_entry(key, entry, self._current_date_str):
@@ -1704,12 +1736,13 @@ class TDXGlobalCachePool:
             pass
         expected_listing_dates = self._listing_session_dates(listing_date, today_str) if listing_date else []
         actual_dates = sorted(set(df["date"].astype(str))) if isinstance(df, pd.DataFrame) and "date" in df else []
-        # IPO 拉到的实际上市交易日数就是当前可用 VWAP 窗口；不因尚未积累满请求周期而拒绝落盘。
-        # 后续交易日到来后，该窗口自然从 1、2、3... 日增长。完整性仍逐日校验已有历史日。
-        ipo_dates_match = bool(expected_listing_dates and actual_dates == expected_listing_dates)
-        adaptive_history = bool(expected_listing_dates and requested_days > len(actual_dates))
+        # TDX 返回的是请求窗口，不是从上市日起的整段历史；只比对最近 N 个应有交易日。
+        # 新股上市交易日少于 N 时，N 按实际上市交易日数自适应缩短。
         if expected_listing_dates:
-            effective_days = min(requested_days, max(1, len(actual_dates)))
+            effective_days = min(requested_days, len(expected_listing_dates))
+        expected_window_dates = self._listing_session_window(expected_listing_dates, effective_days)
+        ipo_dates_match = bool(expected_window_dates and actual_dates == expected_window_dates)
+        adaptive_history = bool(expected_listing_dates and effective_days < requested_days)
 
         key = (c_clean, effective_days)
 
@@ -1719,17 +1752,18 @@ class TDXGlobalCachePool:
             ipo_history=ipo_dates_match,
         )
         ipo_timeline_issue = (
-            self._ipo_frame_alignment_issue(df, expected_listing_dates)
-            if expected_listing_dates else "未取得有效上市交易日历"
+            self._ipo_frame_alignment_issue(df, expected_window_dates)
+            if expected_window_dates else "未取得有效上市交易日历"
         )
         ipo_timeline_aligned = ipo_dates_match and ipo_timeline_issue is None
-        if not frame_complete and not ipo_timeline_aligned:
+        if (not frame_complete
+                or (bool(expected_listing_dates) and not ipo_timeline_aligned)):
             logger.warning(
                 f"[AutoRepair] {c_clean} 增量分时覆盖不完整，跳过持久化 "
                 f"(窗口={effective_days}/{requested_days}日, 历史应有={max(0, effective_days - 1)}日, "
                 f"实得日期={actual_dates}, 上市日={listing_date or '未知'}, "
-                f"日期匹配={ipo_dates_match}, 入口完整校验={frame_complete}, "
-                f"IPO校验原因={ipo_timeline_issue})"
+                f"预期窗口={expected_window_dates}, 日期匹配={ipo_dates_match}, "
+                f"入口完整校验={frame_complete}, IPO校验原因={ipo_timeline_issue})"
             )
             return
         if is_after_close:
@@ -1772,7 +1806,7 @@ class TDXGlobalCachePool:
                     "days": effective_days,
                     "requested_days": requested_days,
                     "adaptive_history": adaptive_history,
-                    "ipo_dates": expected_listing_dates if ipo_timeline_aligned else [],
+                    "ipo_dates": expected_window_dates if ipo_timeline_aligned else [],
                     "_cache_generation": self._cache_generations.get(c_clean, 0),
                     "latest_bar_time": str(latest_bar_time),
                     "today_bar_count": _tbc,
@@ -3658,31 +3692,44 @@ class TDXRealtimeFetcher:
             df.sort_values(["date_str", "time_str"], kind="stable", inplace=True)
             df.drop_duplicates(subset=["date_str", "time_str"], keep="last", inplace=True)
 
+            # 集合竞价期间 TDX 可能仍只返回昨日；保留历史显示，不能把昨日追加为今日。
+            if can_rollover and has_valid_hist and today_date_str not in set(df["date_str"]):
+                return _static_history_frame()
+
             # TDX may return a successful but truncated page. Never turn that page
             # into a long-lived VWAP baseline or a frozen close snapshot.
             if can_rollover:
                 history_days = sorted(d for d in df["date_str"].unique() if d < today_date_str)
+                returned_dates = sorted(df["date_str"].astype(str).unique())
+                # get_*_bars may return extra older rows at a page boundary; validate the
+                # requested trailing window while still rejecting any gap inside it.
+                actual_fetch_dates = returned_dates[-max(1, fetch_days):]
+                expected_fetch_window = self.cache_pool._listing_session_window(
+                    expected_listing_dates, fetch_days
+                )
                 ipo_dates_match = bool(
-                    expected_listing_dates
-                    and sorted(df["date_str"].unique()) == expected_listing_dates
+                    expected_fetch_window and actual_fetch_dates == expected_fetch_window
                 )
                 if has_valid_hist:
                     needed_history = 0
                 elif listing_date and expected_listing_dates:
-                    # IPO 尚未积累满请求周期时，验证 API 实际返回的每个历史交易日，
-                    # 不把上市前不存在的分页当成缺页。
-                    needed_history = min(max(0, days - 1), len(history_days))
+                    # 仅豁免上市前不存在的交易日；请求窗口内缺日仍拒绝缓存。
+                    needed_history = sum(day < today_date_str for day in expected_fetch_window)
                 else:
                     needed_history = max(0, days - 1)
                 history_rows = df[df["date_str"].isin(history_days[-needed_history:])].copy() if needed_history else pd.DataFrame()
                 if needed_history:
                     history_rows.rename(columns={"date_str": "date", "time_str": "time_only"}, inplace=True)
                 if (today_date_str not in set(df["date_str"]) or
+                    (listing_date and expected_listing_dates and not ipo_dates_match) or
                     (needed_history and not self.cache_pool._has_complete_sessions(
                         history_rows[["date", "time_only"]].to_dict("records"), needed_history,
                         min_bars=1 if ipo_dates_match else 220,
                         max_gap_minutes=None if ipo_dates_match else 5))):
-                    logger.warning(f"[AutoRepair] {c_clean} TDX 分时分页缺失，拒绝缓存并等待重拉")
+                    logger.warning(
+                        f"[AutoRepair] {c_clean} TDX 分时分页缺失，拒绝缓存并等待重拉 "
+                        f"(预期窗口={expected_fetch_window}, 实得={actual_fetch_dates})"
+                    )
                     return pd.DataFrame()
                 now_hm = datetime.now().strftime("%H:%M")
                 today_minutes = df.loc[df["date_str"] == today_date_str, "time_str"]
@@ -3715,9 +3762,11 @@ class TDXRealtimeFetcher:
                     if is_idx and cum_pv <= 0.0 and hist_records:
                         cum_pv = sum(float(r.get("close", 0.0)) * float(r.get("bar_vol", 0.0)) for r in hist_records)
 
-                today_dates = sorted(df["date_str"].unique())
-                latest_date = today_dates[-1] if today_dates else today_date_str
-                df_today = df[df["date_str"] == latest_date].copy()
+                # 竞价前后 TDX 仍可能只返回昨日 Bar，不能把昨日再次拼到历史尾部。
+                latest_date = today_date_str
+                df_today = df[df["date_str"] == today_date_str].copy()
+                if df_today.empty:
+                    return _static_history_frame()
 
                 today_records_raw = df_today.to_dict('records')
                 latest_bar_t = str(today_records_raw[-1].get("time_str", "")) if today_records_raw else ""
@@ -3726,6 +3775,7 @@ class TDXRealtimeFetcher:
                 with self.cache_pool._mutex:
                     cached_pool_entry = self.cache_pool._incremental_intraday_pool.get((c_clean, days))
                 if (cached_pool_entry is not None 
+                    and cached_pool_entry.get("date") == today_date_str
                     and cached_pool_entry.get("latest_bar_time") == latest_bar_t
                     and cached_pool_entry.get("today_bar_count") == len(today_records_raw)):
                     existing_df = cached_pool_entry.get("df")
