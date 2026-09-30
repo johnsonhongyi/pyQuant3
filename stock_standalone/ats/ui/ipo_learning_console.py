@@ -2659,6 +2659,7 @@ class IPOLearningConsole(QWidget):
         self._runtime_control = None
         self._source_worker: Optional[_SourceAcquisitionWorker] = None
         self._auto_tick_pending = False
+        self._active_ticker = ""
         self._local_llm_thread: Optional[threading.Thread] = None
         self._build_ui()
         self._select_console_tab("采集队列与流水")

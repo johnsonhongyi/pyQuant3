@@ -330,12 +330,13 @@ def test_disabled_ipo_console_blocks_all_provider_auto_start_callers(monkeypatch
 
 
 def test_status_summary_persists_across_tabs_and_temporary_messages(monkeypatch):
-    from PyQt6.QtCore import pyqtSignal
+    from PyQt6.QtCore import Qt, pyqtSignal
     from PyQt6.QtWidgets import QApplication, QMainWindow, QTabWidget, QWidget
     from ats.ui.main_window import ATSMainWindow
     from ats.capital_dragon_engine import CapitalDragonEngine
     app = QApplication.instance() or QApplication([])
-    summary = {'formatted_html': '上证: 4889亿 | 深证: 5489亿'}
+    summary = {'formatted_html': '<b>上证: 6794.0亿</b> (1.04x) | 深证: 7586.2亿 (1.02x) | '
+               '创业板: 3689.7亿 (1.04x) | 北证: 122.4亿 (1.03x) | 全市: 14502.6亿 (较昨 +285.4亿)'}
     receivers = []
     engine = SimpleNamespace(get_market_indices_and_volume_summary=lambda: summary,
         start_market_summary_bg_updater=lambda **kw: receivers.append(kw['on_updated']))
@@ -357,10 +358,185 @@ def test_status_summary_persists_across_tabs_and_temporary_messages(monkeypatch)
     receiver.start()
     receiver.join()
     app.processEvents()
-    for index in range(tabs.count()):
-        tabs.setCurrentIndex(index)
-        window.status_bar.showMessage('测试消息')
-        app.processEvents()
-        assert window.lbl_market_volume_status.isVisible()
-        assert window.lbl_market_volume_status.text() == summary['formatted_html']
+    window.lbl_data_time_status.setText('🕒 19:30:00')
+    for width in [2048, 1600, 1100]:
+        window.resize(width, 400)
+        for index in range(tabs.count()):
+            tabs.setCurrentIndex(index)
+            message = '信号池: 候选 86 | 精选 12 | 实盘 0 | 今日新发现 0'
+            window.status_bar.showMessage(message)
+            app.processEvents()
+            left = window.lbl_status_message
+            middle = window.lbl_market_volume_status
+            right = window.lbl_data_time_status
+            assert left.isVisible() and left.text() == message and left.width() > 0
+            assert middle.isVisible() and middle.text() == summary['formatted_html']
+            assert middle.alignment() & Qt.AlignmentFlag.AlignHCenter
+            assert left.geometry().right() < middle.geometry().left()
+            assert middle.geometry().right() < right.geometry().left()
+    window.status_bar.clearMessage()
+    app.processEvents()
+    assert window.lbl_status_message.text() == ''
+    assert window.lbl_market_volume_status.isVisible()
     window.close()
+
+
+def test_learning_console_renders_empty_cold_snapshot_before_ticker_selection(tmp_path, monkeypatch):
+    from PyQt6.QtWidgets import QApplication
+    from ats.ui.ipo_learning_console import IPOLearningConsole, _LearningMonitorWorker
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(_LearningMonitorWorker, 'start', lambda self: None)
+    # Render during construction, before a collection result can select a ticker.
+    monkeypatch.setattr(_LearningMonitorWorker, 'request_refresh',
+                        lambda self: self.parent()._render_snapshot({}))
+    console = IPOLearningConsole(project_root=str(tmp_path), simulation_read_only=True)
+    try:
+        assert console._active_ticker == ''
+        assert 'NOT_STARTED' in console.lbl_local_llm.text()
+        console._active_ticker = '688001'
+        console._render_snapshot({'static_sentiment': {'results': {
+            '688001': {'emotion_score': 64.0, 'score_quality': 'READY'}}}})
+        assert '64.0/100' in console.lbl_local_llm.text()
+        console._render_snapshot({})
+        assert 'NOT_STARTED' in console.lbl_local_llm.text()
+    finally:
+        console.stop_monitor()
+        console.close()
+        app.processEvents()
+
+
+def test_strategy_config_cache_reuses_and_detects_concurrent_replacement(tmp_path, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from ats import intraday_strategy_engine as strategy_module
+    engine = object.__new__(strategy_module.IntradayStrategyEngine)
+    engine.config_path = str(tmp_path / 'strategies.json')
+    engine._lock = threading.RLock()
+    engine._config_version = None
+    engine.clean_invalid_strategies = lambda: 0
+    path = Path(engine.config_path)
+    path.write_text('{"strategies": [{"id": "first"}]}', encoding='utf-8')
+    original_load = json.load
+    reads = []
+    def counted_load(stream):
+        reads.append(stream.name)
+        return original_load(stream)
+    monkeypatch.setattr(strategy_module.json, 'load', counted_load)
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        assert all(pool.map(lambda _: engine.load_config(), range(16)))
+    assert len(reads) == 1 and engine.strategies[0]['id'] == 'first'
+    # Replace after parsing but before load_config records its cache version.
+    engine._config_version = None
+    replacement = tmp_path / 'replacement.json'
+    replacement.write_text('{"strategies": [{"id": "second-version"}]}', encoding='utf-8')
+    def replace_after_parse():
+        os.replace(str(replacement), str(path))
+        engine.clean_invalid_strategies = lambda: 0
+        return 0
+    engine.clean_invalid_strategies = replace_after_parse
+    assert engine.load_config() and engine.strategies[0]['id'] == 'first'
+    assert engine.load_config() and engine.strategies[0]['id'] == 'second-version'
+    assert engine.load_config() and len(reads) == 3
+
+
+def test_reopening_sbc_reuses_data_and_period_change_fetches_once(monkeypatch):
+    from PyQt6.QtWidgets import QApplication, QWidget
+    from ats.ui import intraday_strategy_dialog as sbc
+    app = QApplication.instance() or QApplication([])
+    subscriptions = []
+    dispatcher = SimpleNamespace(subscribe=lambda dlg: subscriptions.append(dlg._current_period_mode))
+    manager = SimpleNamespace(update_period=lambda *args: None)
+    monkeypatch.setattr(sbc.SBCGlobalDispatcher, 'get_instance', classmethod(lambda cls: dispatcher))
+    monkeypatch.setattr(sbc.SBCWindowMemoryManager, 'get_instance', classmethod(lambda cls: manager))
+    monkeypatch.setattr(sbc, 'sys', SimpleNamespace(platform='test'))
+    monkeypatch.setattr(sbc, 'resolve_stock_name', lambda code: '')
+    class Window(QWidget):
+        set_period_mode = sbc.SBCIntradayChartDialog.set_period_mode
+        _save_sbc_geometry = lambda self: None
+        def reload_chart(self):
+            self.reloads += 1
+        def showEvent(self, event):
+            super().showEvent(event)
+            if self._dispatcher_enabled:
+                dispatcher.subscribe(self)
+    window = Window()
+    window.code = '688185'
+    window._current_period_mode = '10d'
+    window._dispatcher_enabled = False
+    window.reloads = 0
+    monkeypatch.setattr(sbc, 'find_existing_sbc_window_by_code', lambda code: window)
+    try:
+        for _ in range(2):
+            assert sbc.open_sbc_chart_dialog(code=window.code, period_mode='10d', record_open=False) is window
+        assert window.reloads == 0
+        sbc.open_sbc_chart_dialog(code=window.code, period_mode='5d', record_open=False)
+        assert window.reloads == 1
+        window.hide()
+        window._dispatcher_enabled = True
+        sbc.open_sbc_chart_dialog(code=window.code, period_mode='3d', record_open=False)
+        assert subscriptions == ['3d'] and window.reloads == 1
+        sbc.open_sbc_chart_dialog(code=window.code, period_mode='10d', record_open=False)
+        assert subscriptions == ['3d', '10d'] and window.reloads == 1
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_index_large_cumulative_amount_survives_cache_roundtrip(monkeypatch):
+    import pandas as pd
+    from ats.tdx_realtime_fetcher import TDXGlobalCachePool
+    from ats.new_stock_fetcher import NewStockFetcher
+    pool = object.__new__(TDXGlobalCachePool)
+    pool._mutex = threading.RLock()
+    pool._current_date_str = '2026-09-30'
+    pool._incremental_intraday_pool = {}
+    pool._multi_day_df_cache = {}
+    pool._cache_generations = {}
+    pool._dirty_revision = 0
+    pool._maybe_sync_from_ramdisk = lambda **kwargs: None
+    pool._check_date_rollover = lambda: None
+    pool._has_complete_frame = lambda *args, **kwargs: True
+    pool._has_complete_sessions = lambda *args, **kwargs: True
+    monkeypatch.setattr(NewStockFetcher, 'get_instance', classmethod(
+        lambda cls: SimpleNamespace(_cached_ipo_dict={})))
+    frame = pd.DataFrame({'date': ['2026-09-30'] * 2, 'time_only': ['14:59', '15:00'],
+                          'cum_vol_shares': [1e8, 1e8], 'cum_amt': [8.63e11, 8.63e11]})
+    for code, amount in [('999688', 8.63e11), ('399005', 1.12e12), ('688185', 8.63e11)]:
+        pool.set_incremental_intraday(code, 10, frame, '15:00', 2, 1e8, amount)
+        history = {'records': frame.to_dict('records'), 'date': pool._current_date_str,
+                   'days': 10, 'last_cum_amt': amount, 'last_cum_vol': 1e8}
+        assert pool._validate_history_entry(code, history, pool._current_date_str) == (code != '688185')
+    assert ('688185', 10) not in pool._incremental_intraday_pool
+    for key, entry in pool._incremental_intraday_pool.items():
+        assert pool._validate_incremental_entry(key, entry, pool._current_date_str)
+        assert not pool._validate_incremental_entry(key, dict(entry, last_cum_amt=float('nan')), pool._current_date_str)
+    assert len(pool._incremental_intraday_pool) == 2
+
+
+def test_sbc_offhours_skips_heartbeat_but_applies_new_period_batch(monkeypatch):
+    from JohnsonUtil import commonTips as cct
+    from ats.ui.intraday_strategy_dialog import SBCIntradayChartDialog
+    monkeypatch.setattr(cct, 'get_work_time', lambda: False)
+    fetched, applied = [], []
+    window = SimpleNamespace(isVisible=lambda: True, _has_initial_loaded=True,
+        _current_period_mode='5d', _load_epoch=0, code='688185',
+        _do_fetch_chart_data=lambda **kwargs: fetched.append(kwargs) or {},
+        _apply_chart_payload=lambda payload, **kwargs: applied.append(payload))
+    SBCIntradayChartDialog.reload_chart(window, is_timer_tick=True, force_sync=True)
+    assert not fetched
+    batch = {'modes': ['5d']}
+    SBCIntradayChartDialog.reload_chart(window, is_timer_tick=True, force_sync=True, preloaded=batch)
+    assert len(fetched) == len(applied) == 1 and fetched[0]['preloaded'] is batch
+
+
+def test_pioneer_single_and_double_click_dispatch_once():
+    from ats.ui.capital_dragon_panel import CapitalDragonPanel
+    linked, opened, notified = [], [], []
+    main = SimpleNamespace(link_stock=lambda *args: linked.append(args),
+                           open_sbc_for_stock=lambda *args: opened.append(args))
+    panel = SimpleNamespace(main_window=main,
+        stock_selected=SimpleNamespace(emit=main.link_stock),
+        stock_double_clicked=SimpleNamespace(emit=lambda *args: notified.append(args)),
+        open_sbc_chart=lambda *args: opened.append(args))
+    CapitalDragonPanel._on_pioneer_clicked(panel, '688185', '测试')
+    CapitalDragonPanel._on_pioneer_double_clicked(panel, '688185', '测试')
+    assert linked == opened == notified == [('688185', '测试')]
