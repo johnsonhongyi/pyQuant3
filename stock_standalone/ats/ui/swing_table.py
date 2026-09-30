@@ -311,6 +311,16 @@ class SwingStateTable(QWidget):
                 self.table.setHorizontalHeaderLabels(headers)
 
         self._is_mock_active = False
+        from global_favorites import GlobalFavoriteManager
+        fav_stocks = set(GlobalFavoriteManager().get_favorite_stocks())
+        parent_mw = self._get_parent_mw() if self.filter_enabled else None
+        filter_codes = getattr(parent_mw, 'filtered_codes_set', None) if parent_mw else None
+        render_input = (tuple(tuple(row) for row in data_list), frozenset(fav_stocks),
+                        tuple(current_extra), self.filter_enabled, self.chk_favorite_show.isChecked(),
+                        frozenset(filter_codes or ()) if self.filter_enabled else None)
+        if getattr(self, '_last_render_input', None) == render_input:
+            return
+
         
         header = self.table.horizontalHeader()
         sort_col = header.sortIndicatorSection() if (header and header.isSortIndicatorShown()) else -1
@@ -325,10 +335,15 @@ class SwingStateTable(QWidget):
             self.data_status.setText("暂无回调跟踪标的")
             return
 
-        from global_favorites import GlobalFavoriteManager
-        fav_mgr = GlobalFavoriteManager()
-        fav_stocks = set(fav_mgr.get_favorite_stocks())
         sorted_list = sorted(data_list, key=lambda x: (str(x[0]).strip() not in fav_stocks, str(x[0]).strip()))
+        incoming = {str(row[0]).strip(): row for row in sorted_list}
+        existing_order = [self.table.item(row, 0).text().strip()
+                          for row in range(self.table.rowCount()) if self.table.item(row, 0)]
+        if existing_order and len(incoming) == len(sorted_list):
+            ordered = [code for code in existing_order if code in incoming]
+            present = set(ordered)
+            ordered.extend(str(row[0]).strip() for row in sorted_list if str(row[0]).strip() not in present)
+            sorted_list = [incoming[code] for code in ordered]
         
         if self.table.rowCount() != len(sorted_list):
             self.table.setRowCount(len(sorted_list))
@@ -348,12 +363,19 @@ class SwingStateTable(QWidget):
                         
                 # ⚡ [In-Place 复用] 优先复用已有 NumericTableWidgetItem，杜绝 20000+ 对象重复内存分配与 GC 卡顿
                 item = self.table.item(row_idx, col_idx)
+                render_key = (str(text), is_fav, str(row_data[-1]) if col_idx == 3 else '')
+                render_role = int(Qt.ItemDataRole.UserRole) + 77
+                if item is not None and item.data(render_role) == render_key:
+                    continue
                 if item is None:
                     item = NumericTableWidgetItem(str(text))
                     self.table.setItem(row_idx, col_idx, item)
                 else:
                     item.setText(str(text))
 
+                item.setData(render_role, render_key)
+                item.setFont(self.table.font())
+                item.setToolTip('')
                 item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 
                 if is_fav:
@@ -482,6 +504,7 @@ class SwingStateTable(QWidget):
         if sort_col >= 0:
             self.table.sortItems(sort_col, sort_order)
         self._apply_favorite_filter()
+        self._last_render_input = render_input
 
     def _load_show_favorite_config(self):
         try:

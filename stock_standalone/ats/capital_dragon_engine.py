@@ -1436,7 +1436,7 @@ class CapitalDragonEngine:
             "plain_text": plain_text
         }
 
-    def start_market_summary_bg_updater(self, interval_sec: Optional[float] = None) -> None:
+    def start_market_summary_bg_updater(self, interval_sec: Optional[float] = None, on_updated=None) -> None:
         """
         启动大盘摘要后台刷新线程（daemon，交易时按 interval_sec 刷新，休市时低频休眠）。
         应在主窗口初始化时（_init_status_clock 后）调用一次，并发调用自动幂等。
@@ -1445,6 +1445,11 @@ class CapitalDragonEngine:
             interval_sec = float(getattr(cct, 'ats_tdx_interval', 5.0) or 5.0)
 
         with self._bg_updater_lock:
+            if on_updated is not None:
+                callbacks = getattr(self, '_market_summary_callbacks', [])
+                if on_updated not in callbacks:
+                    callbacks.append(on_updated)
+                self._market_summary_callbacks = callbacks
             if self._bg_updater_running:
                 return
             self._bg_updater_running = True
@@ -1453,17 +1458,26 @@ class CapitalDragonEngine:
             init_intv = float(getattr(cct, 'ats_tdx_interval', interval_sec) or interval_sec)
             logger.info(f"[CapitalDragonEngine] 大盘摘要后台刷新线程已启动 (基准间隔 {init_intv}s, 动态跟随 cct.ats_tdx_interval)")
             from ats.tdx_realtime_fetcher import is_trading_time
+            cold_start = True
             while True:
                 cur_intv = float(getattr(cct, 'ats_tdx_interval', interval_sec) or interval_sec)
+                is_trading = False
                 try:
                     is_trading, _ = is_trading_time()
-                    if not is_trading:
-                        # Do not poll or contend for the shared TDX socket outside allowed sessions.
+                    if not is_trading and not cold_start:
                         time.sleep(max(60.0, cur_intv))
                         continue
                     self._compute_market_summary_bg()
                 except Exception as e_loop:
                     logger.debug(f"[CapitalDragonEngine] 后台摘要刷新异常: {e_loop}")
+                finally:
+                    if cold_start or is_trading:
+                        cold_start = False
+                        for callback in tuple(getattr(self, '_market_summary_callbacks', [])):
+                            try:
+                                callback()
+                            except Exception as exc:
+                                logger.debug('Market summary receiver unavailable: %s', exc)
                 time.sleep(cur_intv)
 
         t = threading.Thread(target=_loop, daemon=True, name="MarketSummaryBgUpdater")

@@ -120,13 +120,6 @@ def main():
     except Exception as _e:
         print(f"[ATS Launcher] 核心配置自愈释放异常 (非致命): {_e}")
 
-    # 📡 2. 启动 IPO Gate 跨进程共享数据后台自动刷新 (对齐 main_ats.py，消除 UNREADY 状态)
-    try:
-        from ats.strategy.ipo_gate_context_provider import get_default_ipo_gate_context_provider
-        get_default_ipo_gate_context_provider(current_dir).start_auto_refresh()
-    except Exception as exc:
-        print(f"[IPO Gate] Shared data refresh unavailable: {type(exc).__name__}")
-
     # 🚀 3. 自动检查并后台静默拉起主 Tk 行情进程 (P0)
     try:
         import threading
@@ -135,7 +128,8 @@ def main():
                 ensure_backend_tk_running()
             except Exception as err:
                 print(f"[ATS] Backend startup failed: {err}")
-        threading.Thread(target=ensure_backend, daemon=True, name="ATS-BackendStart").start()
+        if os.environ.get('ATS_TEST_MODE') != '1':
+            threading.Thread(target=ensure_backend, daemon=True, name="ATS-BackendStart").start()
     except Exception as e:
         print(f"[ATS Launcher] Failed to ensure backend running: {e}")
 
@@ -149,6 +143,19 @@ def main():
 
     app = QApplication(sys.argv)
     window = ATSMainWindow()
+    def flush_archives():
+        import threading
+        from ats.bounded_evaluation_store import evaluation_store
+        threading.Thread(target=evaluation_store.flush, name='ATS-ArchiveClose', daemon=False).start()
+    app.aboutToQuit.connect(flush_archives)
+    if window._ipo_learning_console_enabled:
+        try:
+            from ats.strategy.ipo_gate_context_provider import get_default_ipo_gate_context_provider
+            provider = get_default_ipo_gate_context_provider(current_dir)
+            provider.start_auto_refresh()
+            app.aboutToQuit.connect(provider.stop_auto_refresh)
+        except Exception as exc:
+            print(f"[IPO Gate] Shared data refresh unavailable: {type(exc).__name__}")
     # For automated headless testing/validation, we can show then immediately close or verify window title.
     try:
         print(f"[ATS Launcher] Successfully initialized: {window.windowTitle()}")
@@ -161,7 +168,10 @@ def main():
     if os.environ.get("ATS_TEST_MODE") == "1":
         window.show()
         QApplication.processEvents()
+        health = window._next_day_watch_process.request('health', timeout=30.0)
         window.close()
+        if not health.get('pid') or health.get('error'):
+            raise RuntimeError('Next-day worker failed its packaged startup check')
         return 0
         
     window.show()

@@ -179,6 +179,14 @@ class IPOGateContextProvider:
             or not 1.0 <= float(interval_seconds) <= 300.0
         ):
             return False
+        try:
+            from JohnsonUtil import commonTips as cct
+            enabled = getattr(cct, 'ipo_learning_console',
+                              getattr(getattr(cct, 'CFG', None), 'ipo_learning_console', False))
+            if str(enabled).strip().lower() not in {'true', '1', 'yes', 'on'}:
+                return False
+        except Exception:
+            return False
         with self._lock:
             if self._refresh_thread is not None and self._refresh_thread.is_alive():
                 return True
@@ -236,17 +244,17 @@ class IPOGateContextProvider:
 
     def _publish_status(self) -> None:
         path = self._root / "data" / "ipo_learning" / "gate_context_provider.latest.json"
-        temporary = path.with_suffix(path.suffix + ".tmp")
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
+            from JohnsonUtil import commonTips as cct
+            enabled = getattr(cct, 'ipo_learning_console',
+                              getattr(getattr(cct, 'CFG', None), 'ipo_learning_console', False))
+            if str(enabled).strip().lower() not in {'true', '1', 'yes', 'on'}:
+                return
             status = self.status_snapshot()
-            status["heartbeat_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
-            temporary.write_text(
-                json.dumps(status, ensure_ascii=False, sort_keys=True) + "\n",
-                encoding="utf-8",
-            )
-            os.replace(temporary, path)
-        except OSError:
+            from ats.bounded_evaluation_store import evaluation_store
+            from ats.storage_archive import write_json_gzip
+            evaluation_store.put(str(path), status, write_json_gzip)
+        except Exception:
             return
 
     def _read_observations(

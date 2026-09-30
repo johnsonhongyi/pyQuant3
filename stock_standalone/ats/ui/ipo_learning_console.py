@@ -1970,10 +1970,9 @@ def _collect_snapshot(root: Path) -> Dict[str, Any]:
             f"人工接受 {review_counts['ACCEPTED']} / 拒绝 {review_counts['REJECTED']}；训练保持关闭"
         )
     )
-    gate_sync_raw = _read_json(
-        root / "data" / "ipo_learning" / "gate_context_provider.latest.json",
-        max_bytes=16 * 1024,
-    ) or {}
+    from ats.bounded_evaluation_store import evaluation_store
+    gate_sync_raw = evaluation_store.read(str(root / "data" / "ipo_learning" /
+                                            "gate_context_provider.latest.json"), {}) or {}
     gate_sync_updated_at = _safe_text(gate_sync_raw.get("updated_at"), 40)
     gate_sync_age = None
     try:

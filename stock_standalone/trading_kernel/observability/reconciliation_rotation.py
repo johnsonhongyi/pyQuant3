@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import gzip
 import os
 import re
 from dataclasses import dataclass
@@ -26,7 +25,7 @@ class ReconciliationLogRotator:
 
     def __init__(
         self,
-        archive_after_days: int = 30,
+        archive_after_days: int = 1,
         archive_retention_days: int | None = 365,
     ) -> None:
         self.archive_after_days = max(1, int(archive_after_days))
@@ -48,8 +47,7 @@ class ReconciliationLogRotator:
     def rotate(self, directory: str | os.PathLike[str], *, today: date | None = None) -> ReconciliationRotationResult:
         """Compress aged daily files then remove aged compressed archives.
 
-        A pre-existing archive is treated as a completed compression; the source
-        is safely removed only after that archive exists.
+        Compressed bytes are verified before removing a closed source file.
         """
         root = Path(directory)
         if not root.is_dir():
@@ -65,19 +63,11 @@ class ReconciliationLogRotator:
                 continue
             archive_root.mkdir(exist_ok=True)
             target = archive_root / f"{source.name}.gz"
-            if not target.exists():
-                temporary = Path(f"{target}.tmp")
-                try:
-                    with source.open("rb") as reader, gzip.open(temporary, "wb") as writer:
-                        while chunk := reader.read(1024 * 1024):
-                            writer.write(chunk)
-                    os.replace(temporary, target)
-                except OSError:
-                    try:
-                        temporary.unlink(missing_ok=True)
-                    except OSError:
-                        pass
-                    continue
+            try:
+                from ats.storage_archive import archive_verified
+                archive_verified(source, target)
+            except OSError:
+                continue
             try:
                 source.unlink()
                 archived.append(target.name)
@@ -94,4 +84,6 @@ class ReconciliationLogRotator:
                     removed.append(archive.name)
                 except OSError:
                     pass
+        from ats.storage_archive import remove_expired_reconciliation_segments
+        removed.extend(remove_expired_reconciliation_segments(root, self.archive_retention_days, today))
         return ReconciliationRotationResult(tuple(archived), tuple(removed))

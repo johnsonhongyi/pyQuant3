@@ -6,7 +6,8 @@ from PyInstaller.utils.hooks import collect_submodules
 csv_path = os.path.join(os.path.dirname(a_trade_calendar.__file__), "a_trade_calendar.csv")
 
 block_cipher = None
-tk_hiddenimports = collect_submodules('trading_kernel')
+tk_hiddenimports = collect_submodules('trading_kernel', filter=lambda name: '.tests' not in name)
+os.environ['QT_API'] = 'pyqt6'
 
 # --- 关键：定义需要剔除的冗余库和 DLL 关键词 ---
 # 这些库通常是 PyQt6 自动带入但金融监控工具很少用到的，剔除它们能有效降低启动负载
@@ -47,17 +48,19 @@ a = Analysis(
          ],
     hiddenimports=['a_trade_calendar','JSONData.sina_data','JSONData.tdx_hdf5_api',  'JSONData.realdatajson',
                     'JSONData.wencaiData',  'JSONData.tdxbk', 'pandas','JohnsonUtil.johnson_cons', 'configobj',
-                    'numpy', 'tushare',  'pandas_ta','talib.stream', 'talib.abstract', 'sys_performance_analyzer'] + tk_hiddenimports,
+                    'numpy', 'tushare',  'pandas_ta','talib.stream', 'talib.abstract', 'sys_performance_analyzer', 'ats.archive_policy', 'ats.bounded_evaluation_store',
+                    'ats.storage_archive'] + tk_hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=['PyQt5', 'PySide2', 'PySide6'],
     noarchive=False,
     optimize=1,              # 相当于 -OO，移除文档字符串和断言  optimize=1：移除 assert 语句，但保留文档字符串，这样 NumPy 就能正常运行。
 )
 
 # --- 核心优化：强制从 binaries 和 datas 中过滤掉垃圾文件 ---
-a.binaries = [x for x in a.binaries if not any(bad in x[0] for bad in trash_list)]
+a.binaries = [x for x in a.binaries if not any(bad in x[0] for bad in trash_list)
+              and '~' not in x[0] and '~' not in x[1]]
 a.datas = [x for x in a.datas if not any(bad in x[0] for bad in trash_list)]
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 

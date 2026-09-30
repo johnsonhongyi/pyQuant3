@@ -1,7 +1,11 @@
 .pytest_temp/
 .pytest_cache/
+.tmp/
+config/new_stock_data_cache.json.gz
+config/new_stock_ipo_calendar.json.gz
 !config/next_day_watch_strategies.json
 !tests/test_ats_optimization_review.py
+!tests/test_ats_archive_cache.py
 !tests/test_ats_next_day_loader_bounded.py
 !tests/test_multi_day_realtime_updating.py
 !tests/test_channel_secondary_buy_strategy.py

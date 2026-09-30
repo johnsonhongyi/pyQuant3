@@ -182,65 +182,14 @@ _PERSIST_FILE_LOCK = threading.Lock()
 
 
 def _safe_atomic_write_json_gz(filepath: str, data: Any):
-    """【Windows 友好型高压 Gzip 原子 JSON 写盘】带重试与清理，极大压缩磁盘并杜绝文件占用与 tmp 残留"""
-    import copy
-    gz_target = filepath if filepath.endswith(".gz") else f"{filepath}.gz"
-    tmp_path = f"{gz_target}.tmp_{int(time.time()*1000)}_{os.getpid()}"
-    try:
-        try:
-            safe_data = copy.deepcopy(data)
-        except Exception:
-            safe_data = data
-        with gzip.open(tmp_path, "wt", encoding="utf-8", compresslevel=6) as f:
-            json.dump(safe_data, f, ensure_ascii=False, separators=(',', ':'))
-        
-        # 多次重试替换，应对 Windows 文件短暂占用
-        for retry in range(5):
-            try:
-                if os.path.exists(gz_target):
-                    os.replace(tmp_path, gz_target)
-                else:
-                    os.rename(tmp_path, gz_target)
-                return
-            except Exception:
-                time.sleep(0.05 * (retry + 1))
-        # 最终兜底
-        if os.path.exists(tmp_path):
-            import shutil
-            shutil.move(tmp_path, gz_target)
-    except Exception as e:
-        logger.error(f"原子写入 Gzip JSON 失败 ({gz_target}): {e}")
-    finally:
-        if os.path.exists(tmp_path):
-            try:
-                os.remove(tmp_path)
-            except Exception:
-                pass
+    from ats.bounded_evaluation_store import evaluation_store
+    evaluation_store.put(filepath[:-3] if filepath.endswith('.gz') else filepath, data, _persist_limitup_archive)
 
 
 def _safe_read_json_or_gz(filepath_without_ext: str) -> Optional[Any]:
-    """【双向透明兼容读取】优先解压读取 .json.gz，不存在时回退读取 .json"""
-    # 1. 优先尝试 .json.gz
-    gz_path = filepath_without_ext if filepath_without_ext.endswith(".gz") else f"{filepath_without_ext}.gz"
-    if os.path.exists(gz_path):
-        try:
-            with gzip.open(gz_path, "rt", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception as e:
-            logger.warning(f"读取 Gzip JSON 文件异常 ({gz_path}): {e}")
-
-    # 2. 回退尝试未压缩的 .json
-    raw_path = filepath_without_ext.replace(".json.gz", "").replace(".gz", "")
-    if not raw_path.endswith(".json"):
-        raw_path = f"{raw_path}.json"
-    if os.path.exists(raw_path):
-        try:
-            with open(raw_path, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception as e:
-            logger.warning(f"读取未压缩 JSON 文件异常 ({raw_path}): {e}")
-
-    return None
+    from ats.bounded_evaluation_store import evaluation_store
+    path = filepath_without_ext[:-3] if filepath_without_ext.endswith('.gz') else filepath_without_ext
+    return evaluation_store.read(path, None)
 
 
 def _clean_stale_tmp_files(directory: str):
@@ -262,38 +211,29 @@ def _clean_stale_tmp_files(directory: str):
         pass
 
 
-def _compress_and_cleanup_archives(directory: str):
-    """【交易后打包压缩与历史清理】将未压缩的 .json 历史归档自动压缩为 .json.gz 并清理遗留的大文件"""
-    try:
-        if not os.path.exists(directory):
-            return
-        for fname in os.listdir(directory):
-            if fname.startswith("ats_limit_up_daily_archive_") and fname.endswith(".json") and not fname.endswith(".json.gz"):
-                raw_path = os.path.join(directory, fname)
-                gz_path = f"{raw_path}.gz"
-                try:
-                    if not os.path.exists(gz_path):
-                        with open(raw_path, "r", encoding="utf-8") as f_in:
-                            sub_data = json.load(f_in)
-                        _safe_atomic_write_json_gz(gz_path, sub_data)
-                    if os.path.exists(gz_path) and os.path.getsize(gz_path) > 0:
-                        os.remove(raw_path)
-                except Exception as e:
-                    logger.debug(f"压缩历史分日归档异常 ({fname}): {e}")
-            elif fname == "ats_limit_up_records.json":
-                raw_main = os.path.join(directory, fname)
-                gz_main = f"{raw_main}.gz"
-                try:
-                    if not os.path.exists(gz_main):
-                        with open(raw_main, "r", encoding="utf-8") as f_in:
-                            main_data = json.load(f_in)
-                        _safe_atomic_write_json_gz(gz_main, main_data)
-                    if os.path.exists(gz_main) and os.path.getsize(gz_main) > 0:
-                        os.remove(raw_main)
-                except Exception:
-                    pass
-    except Exception as e:
-        logger.debug(f"打包压缩历史归档失败: {e}")
+_last_archive_cleanup_day = None
+
+
+def _persist_limitup_archive(path, value):
+    global _last_archive_cleanup_day
+    from ats.storage_archive import write_json_gzip, archive_verified
+    from ats.archive_policy import archive_window
+    write_json_gzip(path, value)
+    _, day = archive_window()
+    if _last_archive_cleanup_day == day:
+        return
+    _last_archive_cleanup_day = day
+    directory = os.path.dirname(path)
+    _clean_stale_tmp_files(directory)
+    for name in os.listdir(directory):
+        if not name.endswith('.json') or not name.startswith('ats_limit_up_'):
+            continue
+        source = os.path.join(directory, name)
+        try:
+            archive_verified(source, source + ('.legacy.gz' if os.path.exists(source + '.gz') else '.gz'))
+            os.remove(source)
+        except OSError as exc:
+            logger.debug('Legacy limit archive migration deferred: %s', exc)
 
 
 class LimitUpEngine:
@@ -327,8 +267,6 @@ class LimitUpEngine:
         os.makedirs(DATA_DIR, exist_ok=True)
 
         # 启动时清理历史残留 tmp 文件、打包压缩遗留纯文本并加载持久化历史数据
-        _clean_stale_tmp_files(DATA_DIR)
-        _compress_and_cleanup_archives(DATA_DIR)
         self._load_persisted_history_records()
 
     def _load_persisted_history_records(self):
@@ -474,9 +412,7 @@ class LimitUpEngine:
                         _safe_atomic_write_json_gz(LIMIT_UP_RECORDS_FILE, pruned_copy)
                         
                         # 3. 交易后自动执行历史碎片清理与存量文件打包
-                        _clean_stale_tmp_files(DATA_DIR)
                         if is_post_trading:
-                            _compress_and_cleanup_archives(DATA_DIR)
                             logger.info(f"✅ [交易后归档] 涨停历史数据已成功固化并完成 Gzip 压缩打包: {date_str} (共 {len(single_date_records)} 条记录)")
                         else:
                             logger.debug(f"✅ 涨停历史数据已成功原子持久化落盘: {date_str} (共 {len(single_date_records)} 条记录)")

@@ -72,7 +72,8 @@ def _is_stock_row(row: Mapping[str, Any]) -> bool:
 
 def _read_universe_cache(path: Path, now_utc: datetime) -> Optional[List[Dict[str, Any]]]:
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        from ats.bounded_evaluation_store import evaluation_store
+        payload = evaluation_store.read(str(path), {})
         refreshed = datetime.fromisoformat(payload.get("refreshed_at_utc", ""))
         if refreshed.tzinfo is None or refreshed.utcoffset() is None:
             return None
@@ -116,8 +117,6 @@ def _load_or_refresh_universe(root: Path, api: Any, now: datetime) -> List[Dict[
     if cached:
         return cached
     rows = _fetch_universe(api)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(".json.tmp")
     payload = {
         "source_id": "tdx.security_directory",
         "source_version": "pytdx.security_list.v1",
@@ -125,10 +124,9 @@ def _load_or_refresh_universe(root: Path, api: Any, now: datetime) -> List[Dict[
         "refreshed_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "stocks": rows,
     }
-    with temporary.open("w", encoding="utf-8", newline="\n") as stream:
-        json.dump(payload, stream, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
-        stream.write("\n")
-    os.replace(temporary, path)
+    from ats.bounded_evaluation_store import evaluation_store
+    from ats.storage_archive import write_json_gzip
+    evaluation_store.put(str(path), payload, write_json_gzip)
     return rows
 
 

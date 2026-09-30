@@ -369,6 +369,7 @@ class IPCBridge:
                                         "source_version": body.get("source_version"),
                                         "sync_session": body.get("sync_session"),
                                         "sector_data": body.get("sector_data"),
+                                        "next_day_watch": body.get("next_day_watch"),
                                     })
                                 data_callback(df_to_deliver)
                                 if isinstance(body, dict) and body.get("sync_session") is not None and body.get("ver") is not None:
