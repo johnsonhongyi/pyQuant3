@@ -36,6 +36,23 @@ from contextlib import contextmanager
 logger = LoggerFactory.getLogger("TDXRealtimeFetcher")
 
 
+def filter_available_intraday_bars(frame: pd.DataFrame, cutoff: Any = None) -> pd.DataFrame:
+    """Exclude malformed/future bars before strategy evaluation or cache writes."""
+    if frame is None or frame.empty:
+        return frame
+    if {"date", "time_only"}.issubset(frame.columns):
+        raw_times = frame["date"].astype(str) + " " + frame["time_only"].astype(str)
+    elif "datetime" in frame.columns:
+        raw_times = frame["datetime"]
+    else:
+        return frame
+    point = pd.Timestamp.now(tz="Asia/Shanghai") if cutoff is None else pd.Timestamp(cutoff)
+    point = point.tz_localize("Asia/Shanghai") if point.tzinfo is None else point.tz_convert("Asia/Shanghai")
+    times = pd.to_datetime(raw_times, errors="coerce")
+    times = times.dt.tz_localize("Asia/Shanghai") if times.dt.tz is None else times.dt.tz_convert("Asia/Shanghai")
+    return frame.loc[times.notna() & (times <= point)].copy()
+
+
 def safe_float(val: Any, default: float = 0.0) -> float:
     """健壮的浮点数安全转换函数，杜绝 '-', '--', 'None', NaN, Inf 抛出异常"""
     if val is None or val == "" or val == "-" or val == "--" or val == "null" or val == "None":
@@ -3413,6 +3430,9 @@ class TDXRealtimeFetcher:
                 # 严格过滤只保留单个交易日的真实 K 线 (优先今日；若非交易日/盘后，严格只取最新单日数据，绝不串联多日)
                 today_str = datetime.now().strftime("%Y-%m-%d")
                 if "datetime" in df.columns:
+                    df = filter_available_intraday_bars(df)
+                    if df.empty:
+                        return cached_df if cached_df is not None else pd.DataFrame()
                     df["date_str"] = df["datetime"].astype(str).str[:10]
                     df_today = df[df["date_str"] == today_str]
                     if df_today.empty:
@@ -3685,6 +3705,9 @@ class TDXRealtimeFetcher:
             if df.empty or "datetime" not in df.columns:
                 return pd.DataFrame()
 
+            df = filter_available_intraday_bars(df)
+            if df.empty:
+                return pd.DataFrame()
             df["date_str"] = df["datetime"].astype(str).str[:10]
             df["time_str"] = df["datetime"].astype(str).str[11:16]
             # TDX 分页存在边界重复/返回顺序差异；先按时间稳定排序并去重，

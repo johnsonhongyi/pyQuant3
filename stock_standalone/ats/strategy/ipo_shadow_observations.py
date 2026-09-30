@@ -53,14 +53,14 @@ def ats_signal_paper_outcomes(root: str | Path) -> dict[str, Any]:
             return result
         fills = sorted((item for item in saved.get("signal_iteration_log", [])
                         if isinstance(item, dict) and item.get("execution_status") == "EXECUTED"
-                        and item.get("action") in {"BUY", "BUY_SCOUT", "BUY_CONFIRM", "SELL", "EXIT_ALL"}),
+                        and item.get("action") in {"BUY", "BUY_SCOUT", "BUY_CONFIRM", "SELL", "EXIT_ALL", "REDUCE_30", "REDUCE_HALF", "SWITCH_SWAP"}),
                        key=lambda item: float(item.get("timestamp") or 0))
         observation_times = [(item.get("ticker"), point.timestamp(), item_digest)
                              for item_digest, item in observations
-                             if (point := _utc(item.get("as_of_time"))) is not None]
+                             if (point := _utc(item.get("computed_at"))) is not None]
         outcomes = []
         for digest, observation in observations:
-            observed_at = _utc(observation.get("as_of_time"))
+            observed_at = _utc(observation.get("computed_at"))
             if observed_at is None:
                 continue
             observed_ts = observed_at.timestamp()
@@ -77,28 +77,46 @@ def ats_signal_paper_outcomes(root: str | Path) -> dict[str, Any]:
             if nearest is None or nearest[1] != digest:
                 continue
             later = [item for item in same if float(item.get("timestamp") or 0) > buy_ts]
-            if not later or later[0].get("action") not in {"SELL", "EXIT_ALL"}:
-                continue
-            sell = later[0]
+            sells = []
             try:
                 quantity = int(buy["shares"])
-                buy_price, sell_price = float(buy["price"]), float(sell["price"])
-                if quantity <= 0 or int(sell["shares"]) != quantity or not all(
-                    math.isfinite(value) and value > 0 for value in (buy_price, sell_price)
-                ) or datetime.fromtimestamp(buy_ts, ZoneInfo("Asia/Shanghai")).date() >= datetime.fromtimestamp(
-                    float(sell["timestamp"]), ZoneInfo("Asia/Shanghai")
-                ).date():
+                buy_price = float(buy["price"])
+                if quantity <= 0 or not math.isfinite(buy_price) or buy_price <= 0:
                     continue
-            except (KeyError, TypeError, ValueError, OverflowError):
+                remaining = quantity
+                proceeds = 0.0
+                buy_day = datetime.fromtimestamp(buy_ts, ZoneInfo("Asia/Shanghai")).date()
+                for fill in later:
+                    # Another entry makes attribution ambiguous; never invent a closed label.
+                    if fill.get("action") in {"BUY", "BUY_SCOUT", "BUY_CONFIRM"}:
+                        break
+                    sold = int(fill["shares"])
+                    price = float(fill["price"])
+                    sell_day = datetime.fromtimestamp(
+                        float(fill["timestamp"]), ZoneInfo("Asia/Shanghai")
+                    ).date()
+                    if (sold <= 0 or sold > remaining or not math.isfinite(price)
+                            or price <= 0 or sell_day <= buy_day):
+                        break
+                    remaining -= sold
+                    proceeds += sold * price
+                    sells.append(fill)
+                    if remaining == 0:
+                        break
+                if remaining:
+                    continue
+            except (KeyError, TypeError, ValueError, OverflowError, OSError):
                 continue
-            gross = (sell_price - buy_price) * quantity
-            fees = (buy_price + sell_price) * quantity * _COMMISSION_RATE + _SELL_FIXED_FEE
+            gross = proceeds - buy_price * quantity
+            fees = (buy_price * quantity + proceeds) * _COMMISSION_RATE + len(sells) * _SELL_FIXED_FEE
+            sell = sells[-1]
             outcomes.append({"observation_hash": digest, "ticker": observation["ticker"],
                              "as_of_time": observation["as_of_time"],
                              "signal_type": observation["fields"]["signal_type"],
                              "signal_tier": observation["fields"]["signal_tier"],
                              "buy_directive_id": buy.get("directive_id"),
                              "sell_directive_id": sell.get("directive_id"),
+                             "sell_directive_ids": [fill.get("directive_id") for fill in sells],
                              "quantity": quantity, "gross_pnl": round(gross, 2),
                              "fees": round(fees, 2), "net_pnl": round(gross - fees, 2),
                              "net_return_pct": round((gross - fees) / (buy_price * quantity) * 100, 4),
@@ -176,7 +194,8 @@ def capture_ats_signal_observation(
         or as_of is None or bar_as_of is None or computed is None or as_of > computed
         or (computed - as_of).total_seconds() > 120
         or bar_as_of > computed or (computed - bar_as_of).total_seconds() > 300
-        or len(configuration_hash) != 64 or len(data_contract_hash) != 64
+        or not isinstance(configuration_hash, str) or len(configuration_hash) != 64
+        or not isinstance(data_contract_hash, str) or len(data_contract_hash) != 64
     ):
         status["reason"] = "ATS_SIGNAL_PROVENANCE_UNREADY"
         return status
@@ -186,6 +205,13 @@ def capture_ats_signal_observation(
     if not all(isinstance(fields[key], (int, float)) and not isinstance(fields[key], bool)
                and math.isfinite(fields[key]) for key in ("price", "vwap", "vwap_diff_pct", "horse_race_score")):
         status["reason"] = "ATS_SIGNAL_FIELDS_INVALID"
+        return status
+    if not isinstance(fields["signal_type"], str) or fields["signal_type"] not in {
+        "PRE_ORDER", "PULLBACK_BUY", "BREAKOUT", "WEAK_EXIT", "CLIMAX_EXIT",
+        "IPO_FIRST_BUY", "SWING_PREORDER", "SECONDARY_BUY", "BASE_BREAKOUT",
+        "BASE_PREORDER", "SCARE_REBOUND",
+    }:
+        status["reason"] = "ATS_SIGNAL_NOT_ACTIONABLE"
         return status
     if fields["price"] <= 0:
         status["reason"] = "ATS_SIGNAL_PRICE_INVALID"

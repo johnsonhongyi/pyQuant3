@@ -2502,7 +2502,7 @@ class _SourceAcquisitionWorker(QThread):
 
         try:
             from tools.run_ipo_data_acquisition import (
-                get_cached_ats_stock_table, run_ats_learning_cycle,
+                get_cached_ats_stock_table, run_ats_learning_cycle, _source_bootstrap_attempted,
             )
 
             auto_reason = ""
@@ -2511,11 +2511,11 @@ class _SourceAcquisitionWorker(QThread):
 
                 try:
                     fetcher = NewStockFetcher.get_instance()
-                    stock_table = (
-                        fetcher.get_combined_new_stocks()
-                        if _is_market_session_active()
-                        else get_cached_ats_stock_table(fetcher)
-                    )
+                    stock_table = get_cached_ats_stock_table(fetcher)
+                    if stock_table.empty and (
+                        _is_market_session_active() or not _source_bootstrap_attempted(self._root)
+                    ):
+                        stock_table = fetcher.get_combined_new_stocks()
                     rows = stock_table.to_dict("records")
                     candidates = _ats_queue_candidates(rows)
                 except Exception as exc:

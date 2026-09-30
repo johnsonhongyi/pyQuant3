@@ -50,7 +50,7 @@ from dataclasses import dataclass, field
 import pandas as pd
 import numpy as np
 
-from ats.tdx_realtime_fetcher import TDXRealtimeFetcher
+from ats.tdx_realtime_fetcher import TDXRealtimeFetcher, filter_available_intraday_bars
 from ats.strategy.channel_secondary_buy_strategy import (
     evaluate_channel_secondary_buy,
     SecondaryBuyStage,
@@ -670,6 +670,9 @@ class IPOVWAPDetectorEngine:
         try:
             # 1. 增量极速获取 10 日多日分时与 VWAP 数据
             df_multi, bars_ms = self._fetch_multi_day_bars_fast(clean_code, days=10, day_df=day_df)
+            # Revalidate cached frames too; old cache rows may carry a future bar timestamp.
+            cutoff = eval_time if isinstance(eval_time, (pd.Timestamp, datetime.datetime)) else None
+            df_multi = filter_available_intraday_bars(df_multi, cutoff)
             if df_multi is not None and not df_multi.empty and {"date", "time_only"}.issubset(df_multi.columns):
                 last_bar = df_multi.iloc[-1]
                 sig.extra_data["ipo_source_bar_as_of"] = (

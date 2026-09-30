@@ -4232,6 +4232,7 @@ class IPOTradingCenter:
                         directive, "NO_AVAILABLE_SHARES",
                         "无可用卖出股数",
                     )
+                directive.shares = sell_shares
                 sell_val = directive.price * sell_shares
                 self.available_cash += sell_val
                 if pos.cost_price > 0:
