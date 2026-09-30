@@ -16,18 +16,32 @@ def compact_checkpoints(evaluation):
     removed = 0
     for item in evaluation.get("candidates", {}).values():
         points = item.get("checkpoints", [])
-        if len(points) <= CHECKPOINT_LIMIT:
+        if not points:
             continue
-        daily_last = {}
+        evidence_times = set()
+        for event in item.get('events', []):
+            evidence_times.add(event.get('observed_at'))
+            evidence_times.add((event.get('evidence') or {}).get('first_observed_at'))
+        anchors, critical, daily_last, seen = set(), set(), {}, set()
         for index, point in enumerate(points):
-            daily_last[str(point.get("observed_at", ""))[:10]] = index
-        anchors = {0, len(points) - 2, len(points) - 1}
-        anchors.update(sorted(daily_last.values())[-(CHECKPOINT_LIMIT - 3):])
-        for index in range(len(points) - 1, -1, -1):
-            if len(anchors) >= CHECKPOINT_LIMIT:
-                break
-            anchors.add(index)
+            stamp = str(point.get('observed_at', ''))
+            day = stamp[:10]
+            if day not in daily_last:
+                anchors.add(index)
+            daily_last[day] = index
+            if stamp in evidence_times or point.get('kind'):
+                critical.add(index)
+            for proof in ('sustained_high', 'verified_vwap_rise'):
+                if point.get(proof) and (day, proof) not in seen:
+                    anchors.add(index)
+                    seen.add((day, proof))
+        anchors.update(daily_last.values())
+        # Evidence referenced by an event must survive; never fill the remainder with ticks.
+        anchors = critical | set(sorted(anchors - critical)[-max(0, CHECKPOINT_LIMIT - len(critical)):]
+                                 if len(critical) < CHECKPOINT_LIMIT else [])
         kept = [points[index] for index in sorted(anchors)]
+        if len(kept) == len(points):
+            continue
         summary = item.setdefault("checkpoint_summary", {})
         summary["compacted_count"] = int(summary.get("compacted_count", 0)) + len(points) - len(kept)
         summary["first_observed_at"] = summary.get("first_observed_at") or points[0].get("observed_at")
@@ -142,16 +156,23 @@ class EvaluationStore:
                 with opener(actual, "rt", encoding="utf-8") as stream:
                     value = json.load(stream)
                 is_eval = os.path.basename(path).startswith('next_day_anomaly_eval_')
-                if is_eval:
-                    compact_checkpoints(value)
+                compacted = compact_checkpoints(value) if is_eval else 0
             except (OSError, ValueError, TypeError):
                 self._remember(path, dict(version=version, value=None, missing=True,
                     last_write=time.monotonic(), dirty=False, close_date=None,
                     next_check=time.monotonic() + WRITE_INTERVAL))
                 return copy.deepcopy(default)
-            self._remember(path, dict(version=version, value=value,
-                last_write=time.monotonic(), dirty=False, close_date=self._saved_close_day(path),
-                next_check=time.monotonic() + WRITE_INTERVAL))
+            entry = dict(version=version, value=value,
+                last_write=time.monotonic(), dirty=bool(compacted), close_date=self._saved_close_day(path),
+                next_check=time.monotonic() + WRITE_INTERVAL)
+            if compacted:
+                # Queue old tick removal through the existing timed archive gate.
+                from next_day_anomaly_watch import _persist_archive
+                entry['writer'] = _persist_archive
+            self._remember(path, entry)
+            if compacted and not self._started:
+                self._started = True
+                threading.Thread(target=self._flush_loop, daemon=True, name='ATS-ArchiveCache').start()
             return copy.deepcopy(value)
 
     def peek(self, path, default=None):

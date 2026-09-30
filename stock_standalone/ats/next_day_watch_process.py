@@ -10,6 +10,28 @@ logger = logging.getLogger("ATS.NextDayWatch")
 _imported_manifests = {}
 
 
+def compact_sector_snapshot(snapshot):
+    """Transport resonance metrics and member codes, without nested quote histories."""
+    if not isinstance(snapshot, dict):
+        return None
+    fields = {'score', 'momentum_score', 'avg_pct', 'avg_pct_diff', 'pct_diff',
+        'follow_ratio', 'leader', 'leader_name', 'leader_pct', 'leader_pct_diff',
+        'score_diff', 'ts'}
+    result = {}
+    for name, info in snapshot.items():
+        if not isinstance(info, dict):
+            continue
+        board = {key: value for key, value in info.items()
+                 if key in fields and isinstance(value, (str, int, float, bool, type(None)))}
+        for key in ('followers', 'race_candidates'):
+            members = info.get(key, [])
+            if isinstance(members, list):
+                board[key] = [member.get('code', '') if isinstance(member, dict) else member
+                              for member in members if isinstance(member, (dict, str, int))]
+        result[name] = board
+    return result
+
+
 def _accept_manifest(root, manifest):
     if not isinstance(manifest, dict):
         return
@@ -36,7 +58,7 @@ def _accept_manifest(root, manifest):
     _atomic_json(path, manifest)
 
 
-def _snapshot(root, target_date=None, eval_only=False, manifest=None):
+def _snapshot(root, target_date=None, eval_only=False, manifest=None, sector_snapshot=None):
     """Return live worker memory; persistence is independent of UI refresh."""
     _accept_manifest(root, manifest)
     from ats.bounded_evaluation_store import evaluation_store
@@ -49,10 +71,15 @@ def _snapshot(root, target_date=None, eval_only=False, manifest=None):
     date.fromisoformat(day)
     result = {'target_date': day, 'eval_only': bool(eval_only),
               'eval': _read_json(os.path.join(data_dir, 'next_day_anomaly_eval_%s.json' % day), {})}
+    from next_day_anomaly_watch import get_live_watch_quotes, enrich_manifest_sector_evidence
+    quotes = get_live_watch_quotes(data_dir, day)
+    if quotes:
+        result['eval']['quotes'] = quotes
     if eval_only:
         return result
     result.update(dates=dates, manifest=_read_json(
         os.path.join(data_dir, 'next_day_anomaly_watch_%s.json' % day), {}))
+    enrich_manifest_sector_evidence(result['manifest'], result['eval'], sector_snapshot)
     stats, delayed_winners = [], []
     for path in sorted(evaluation_store.paths(
             os.path.join(data_dir, 'next_day_anomaly_stats_*.json')), reverse=True)[:30]:
@@ -75,7 +102,7 @@ def _snapshot(root, target_date=None, eval_only=False, manifest=None):
     return result
 
 
-def _poll(root, manifest=None):
+def _poll(root, manifest=None, sector_snapshot=None):
     now = time.localtime()
     today = time.strftime("%Y-%m-%d", now)
     try:
@@ -133,14 +160,14 @@ def _poll(root, manifest=None):
         for code in frame.index:
             candidate = meta.get(str(code).zfill(6), {})
             frame.loc[code, "name"] = candidate.get("name", str(code))
-            frame.loc[code, "category"] = candidate.get("category", "")
-        frame["percent"] = frame.get("change_pct", 0.0)
+            frame.loc[code, "category"] = candidate.get('raw_category') or candidate.get("category", "")
+        frame["percent"] = frame.get("change_pct")
         from datetime import datetime
         observed_at = datetime.now().astimezone().isoformat(timespec="milliseconds")
         from next_day_anomaly_watch import run_cycle
         result = run_cycle(frame, config_path=config_path, data_dir=data_dir,
             asof_date=str(watch.get("source_asof_trade_date", today)), target_date=today,
-            observed_at=observed_at, vwap_field="vwap")
+            observed_at=observed_at, vwap_field="vwap", sector_snapshot=sector_snapshot)
         events_to_dispatch = result.get("events", [])
     else:
         endpoint = ("OUTBOX", "local", "")
@@ -158,10 +185,11 @@ def _worker_entry(connection, root):
                 break
             try:
                 if request["action"] == "poll":
-                    result = _poll(root, request.get('manifest'))
+                    result = _poll(root, request.get('manifest'), request.get('sector_snapshot'))
                 elif request['action'] == 'snapshot':
                     result = _snapshot(root, request.get('target_date'),
-                                       request.get('eval_only', False), request.get('manifest'))
+                                       request.get('eval_only', False), request.get('manifest'),
+                                       request.get('sector_snapshot'))
                 elif request["action"] == "ack":
                     from next_day_anomaly_watch import mark_events_delivered
                     result = {"acknowledged": mark_events_delivered(
@@ -215,6 +243,8 @@ class NextDayWatchProcess:
                         raise
                     child.close()
                     self._connection, self._process = parent, process
+                if 'sector_snapshot' in payload:
+                    payload['sector_snapshot'] = compact_sector_snapshot(payload['sector_snapshot'])
                 self._connection.send(dict(payload, action=action))
                 deadline = time.monotonic() + timeout
                 while not self._closed.is_set():

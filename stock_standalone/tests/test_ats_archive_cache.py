@@ -82,21 +82,43 @@ def test_coalesced_record_changed_during_checkpoint_remains_pending(tmp_path, mo
     assert store.buffered_records(path) == [{'price': 2}]
 
 
-def test_checkpoint_bound_preserves_proof_and_delivery_receipts():
+def test_checkpoint_bound_preserves_proof_and_delivery_receipts(tmp_path, monkeypatch):
     points = [{'observed_at': '2026-09-30T10:%02d:%02d+08:00' % (i // 60, i % 60),
                'high': i, 'vwap': 10 if i == 1 else None} for i in range(1000)]
-    event = {'type': 'NEXT_DAY_WATCH_CONFIRM', 'event_id': 'durable-id', 'delivered': True}
+    event = {'type': 'NEXT_DAY_WATCH_CONFIRM', 'event_id': 'durable-id', 'delivered': True,
+             'observed_at': points[500]['observed_at'],
+             'evidence': {'first_observed_at': points[499]['observed_at']}}
     value = {'config_hash': 'same', 'candidates': {'600123:s': {
         'candidate': {'status': 'EARLY_VALID'}, 'checkpoints': points, 'events': [event]}}}
-    tail = copy.deepcopy(points[-2:])
-    assert module.compact_checkpoints(value) == 936
+    legacy = copy.deepcopy(value)
+    expected = copy.deepcopy([points[i] for i in (0, 499, 500, 999)])
+    assert module.compact_checkpoints(value) == 996
     item = value['candidates']['600123:s']
-    assert len(item['checkpoints']) == 64 and item['checkpoints'][-2:] == tail
+    assert item['checkpoints'] == expected
     assert item['events'] == [event] and item['checkpoint_summary']['has_vwap_observation']
     incoming = copy.deepcopy(value)
     incoming['candidates']['600123:s']['events'][0]['delivered'] = False
     module.merge_evaluations(value, incoming)
     assert incoming['candidates']['600123:s']['events'][0]['delivered'] is True
+    path = tmp_path / 'next_day_anomaly_eval_2026-09-30.json'
+    path.write_text(json.dumps(legacy), encoding='utf-8')
+    os.utime(str(path), (0, 0))
+    store = module.EvaluationStore()
+    store._started = True
+    import next_day_anomaly_watch as watch
+    monkeypatch.setattr(watch, 'evaluation_store', store)
+    window = [None]
+    monkeypatch.setattr(module, 'archive_window', lambda: (window[0], '2026-09-30'))
+    assert len(store.read(str(path), {})['candidates']['600123:s']['checkpoints']) == 4
+    store.flush()
+    assert not Path(str(path) + '.gz').exists()
+    window[0] = 'market'
+    store._cache[str(path.resolve())]['last_write'] -= module.WRITE_INTERVAL
+    store.flush()
+    with gzip.open(str(path) + '.gz', 'rt', encoding='utf-8') as stream:
+        saved = json.load(stream)['candidates']['600123:s']
+    assert len(saved['checkpoints']) == 4 and saved['events'][0]['delivered']
+    assert not path.exists()
 
 
 def test_real_calendar_and_trading_windows():
@@ -105,6 +127,177 @@ def test_real_calendar_and_trading_windows():
     assert archive_window(datetime(2026, 9, 30, 12, 0))[0] is None
     assert archive_window(datetime(2026, 9, 30, 15, 5))[0] == 'close'
     assert archive_window(datetime(2026, 10, 1, 10, 0))[0] is None
+
+
+def test_next_day_quotes_stay_in_ram_and_confirm_receipt_needs_no_file(tmp_path, monkeypatch):
+    import pandas as pd
+    import next_day_anomaly_watch as watch
+    from ats.strategy.next_day_watch_config_manager import NextDayWatchConfigManager
+    store = module.EvaluationStore()
+    store._started = True
+    monkeypatch.setattr(watch, 'evaluation_store', store)
+    monkeypatch.setattr(watch, '_LIVE_OBSERVATIONS', {})
+    monkeypatch.setattr(watch, '_history_manifest_index', lambda *args: [])
+    config = NextDayWatchConfigManager.get_default_config()
+    config['vwap_field'] = 'vwap'
+    config_path = tmp_path / 'strategies.json'
+    config_path.write_text(json.dumps(config), encoding='utf-8')
+    day = '2026-09-30'
+    data_dir = str(tmp_path / 'datacsv')
+    candidate = {'code': '600001', 'name': '测试股', 'strategy_id': 'channel_stepup',
+        'version': 1, 'config_hash': 'frozen', 'tier': 'A', 'phase': 'STABILIZING',
+        'feature_values': {'lasth1d': 11, 'lastp1d': 10}, 'status': 'WATCHING'}
+    watch._atomic_json(os.path.join(data_dir, f'next_day_anomaly_watch_{day}.json'),
+        {'target_trade_date': day, 'config_hash': 'frozen', 'candidates': [candidate]})
+    start = datetime.fromisoformat(day + 'T09:30:00+08:00')
+    for i in range(200):
+        observed = (start + timedelta(seconds=i * 4)).isoformat()
+        result = watch.run_cycle(pd.DataFrame([{'code': '600001', 'high': 12,
+            'trade': 11.5, 'percent': 15, 'vwap': 11.2, 'volume': 1000 + i,
+            'amount': 11200 + 11.2 * i}]), config_path=str(config_path),
+            data_dir=data_dir, asof_date='2026-09-29', target_date=day, observed_at=observed)
+        assert result['status'] == 'ok'
+        if i >= 2:
+            assert not result['telemetry']['eval_dirty']
+    evaluation = watch._read_json(result['eval_path'], {})
+    entry = evaluation['candidates']['600001:channel_stepup']
+    assert len(entry['checkpoints']) == 2
+    assert {e['type'] for e in entry['events']} == {'PHASE_CHANGED', 'NEXT_DAY_WATCH_CONFIRM'}
+    assert all(e['price'] == 11.5 and e['pct'] == 15 for e in entry['events'])
+    confirm = entry['events'][-1]
+    assert confirm['evidence']['first_observed_at'] == entry['checkpoints'][0]['observed_at']
+    assert watch.get_live_watch_quotes(data_dir, day)['600001']['observed_at'] == observed
+    watch.mark_events_delivered(data_dir, day, [confirm['event_id']])
+    assert watch._read_json(result['eval_path'], {})['candidates']['600001:channel_stepup']['events'][-1]['delivered']
+    assert not list((tmp_path / 'datacsv').glob('*.json*'))
+
+
+def test_next_day_sector_snapshot_enriches_view_without_mutating_frozen_pool(tmp_path, monkeypatch):
+    import next_day_anomaly_watch as watch
+    from ats.next_day_watch_process import _snapshot, compact_sector_snapshot
+    store = module.EvaluationStore()
+    store._started = True
+    monkeypatch.setattr(module, 'evaluation_store', store)
+    monkeypatch.setattr(watch, 'evaluation_store', store)
+    day = datetime.now().astimezone().date().isoformat()
+    path = str(tmp_path / 'datacsv' / f'next_day_anomaly_watch_{day}.json')
+    manifest = {'target_trade_date': day, 'candidates': [
+        {'code': '600001', 'strategy_id': 's', 'tier': 'B', 'category': '汽车类'},
+        {'code': '600002', 'strategy_id': 's', 'tier': 'A', 'category': '汽车类'}]}
+    store.put(path, manifest, archive.write_json_gzip)
+    sectors = {'汽车类': {'score': 12, 'avg_pct': 2, 'follow_ratio': .6,
+        'leader': '600001', 'leader_pct': 6, 'ts': day + 'T10:00:00',
+        'followers': [{'code': '600002', 'large_tick_payload': [1] * 100}]}}
+    compact = compact_sector_snapshot(sectors)
+    assert compact['汽车类']['followers'] == ['600002']
+    result = _snapshot(str(tmp_path), day, sector_snapshot=compact)
+    active, observing = result['manifest']['candidates']
+    assert active['sector_evidence']['matches'][0]['name'] == '汽车类'
+    assert 'followers' not in active['sector_evidence']['matches'][0]
+    assert observing['sector_evidence']['reason'] == '个股未处于上行/启动阶段'
+    assert not observing['sector_evidence']['matches']
+    assert store.peek(path) == manifest
+    assert watch._sector_evidence('汽车类', None, stock_started=True)['reason'] == '板块快照未到达'
+    historical = copy.deepcopy(manifest)
+    historical['target_trade_date'] = (date.fromisoformat(day) - timedelta(days=1)).isoformat()
+    archived_evidence = {'matches': [{'name': '昨日板块', 'score': 7}]}
+    evaluation = {'candidates': {'600001:s': {'candidate': {'sector_evidence': archived_evidence}}}}
+    watch.enrich_manifest_sector_evidence(historical, evaluation, compact)
+    assert historical['candidates'][0]['sector_evidence'] == archived_evidence
+    assert manifest['candidates'][0].get('sector_evidence') is None
+    import ats.ui.next_day_watch_dialog as dialog
+    monkeypatch.setattr(dialog, '_is_market_session_active', lambda: False)
+    refreshed = []
+    panel = SimpleNamespace(isVisible=lambda: True, _main_window=lambda:
+        SimpleNamespace(current_sector_snapshot=sectors), tab_widget=SimpleNamespace(currentIndex=lambda: 0),
+        auto_refresh_timer=SimpleNamespace(interval=lambda: 60000),
+        reload_all_data=lambda: refreshed.append(True), _last_manifest_refresh=0)
+    dialog.NextDayAnomalyWatchWidget._on_auto_refresh_tick(panel)
+    panel._manifest_sector_source = sectors
+    dialog.NextDayAnomalyWatchWidget._on_auto_refresh_tick(panel)
+    assert refreshed == [True]
+
+
+def test_next_day_event_sort_selection_and_legacy_price_repair(monkeypatch):
+    monkeypatch.setenv('QT_QPA_PLATFORM', 'offscreen')
+    from PyQt6.QtWidgets import QApplication, QWidget, QTabWidget
+    from PyQt6.QtCore import Qt
+    import ats.ui.next_day_watch_dialog as dialog
+    cls = dialog.NextDayAnomalyWatchWidget
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(cls, '_configure_stock_table', lambda *args: None)
+    monkeypatch.setattr(dialog, 'setup_header_persistence', lambda *args, **kwargs: None)
+    monkeypatch.setattr(dialog, '_ats_custom_column_specs', lambda: [])
+    links = []
+    monkeypatch.setattr(cls, '_link_current_stock', lambda *args: links.append(True))
+    view = cls.__new__(cls)
+    QWidget.__init__(view)
+    view.tab_widget = QTabWidget(view)
+    view.eval_data = {}
+    view.manifest_data = {}
+    view.manifest_custom_specs = []
+    view._build_manifest_tab()
+    view._build_eval_tab()
+    day = datetime.now().astimezone().date().isoformat()
+    stamp = day + 'T10:00:00+08:00'
+    data = {'target_trade_date': day, 'candidates': {}}
+    for code, strategy, price in [('600001', 'one', 2), ('600001', 'two', 10), ('600003', 'one', None)]:
+        key = code + ':' + strategy
+        data['candidates'][key] = {'candidate': {'code': code, 'name': strategy,
+            'feature_values': {'lastp1d': 1}}, 'checkpoints': ([
+            {'observed_at': stamp, 'close': price, 'high': price, 'kind': 'PHASE_CHANGED'}] if price else []),
+            'events': [{'type': 'PHASE_CHANGED', 'observed_at': stamp, 'price': 0, 'pct': 0}]}
+    try:
+        dialog._prepare_eval_view(data)
+        view._on_eval_loaded(data)
+        view.table_events.sortItems(4, Qt.SortOrder.AscendingOrder)
+        assert [view.table_events.item(r, 4).text() for r in range(3)] == ['2.00', '10.00', '--']
+        view.table_events.setCurrentCell(1, 1)
+        assert view.table_checkpoints.item(0, 3).text() == '10.00'
+        assert len(links) == 1
+        data['candidates']['600001:two']['candidate']['status'] = 'EARLY_VALID'
+        view._on_eval_loaded(copy.deepcopy(data))
+        assert view.table_events.item(view.table_events.currentRow(), 1).data(Qt.ItemDataRole.UserRole)[0] == '600001:two'
+        assert view.table_checkpoints.item(0, 3).text() == '10.00' and len(links) == 1
+        unchanged_cell = view.table_events.item(1, 4)
+        view._on_eval_loaded(dict(copy.deepcopy(data), quotes={'600001': {'close': 11}}))
+        assert view.table_events.item(1, 4) is unchanged_cell and len(links) == 1
+        view.table_events.sortItems(5, Qt.SortOrder.DescendingOrder)
+        assert [view.table_events.item(r, 5).text() for r in range(3)] == ['+900.00%', '+100.00%', '--']
+        assert data['candidates']['600003:one']['events'][0]['price'] is None
+        data['candidates']['600001:two']['checkpoints'].append({
+            'observed_at': stamp, 'kind': 'CLOSE', 'close': 10, 'vwap': 'bad', 'volume': 'bad'})
+        view._on_eval_loaded(copy.deepcopy(data))
+        selected = next(r for r in range(view.table_events.rowCount())
+            if view.table_events.item(r, 1).data(Qt.ItemDataRole.UserRole)[0] == '600001:two')
+        view.table_events.setCurrentCell(selected, 1)
+        view._on_event_row_selected(link=False)
+        assert any(view.table_checkpoints.item(r, 4).text() == '无效'
+            and view.table_checkpoints.item(r, 5).text() == '--'
+            for r in range(view.table_checkpoints.rowCount()))
+        assert view.table_checkpoints.updatesEnabled()
+
+        manifest = {'target_trade_date': day, 'candidates': [
+            {'code': '600001', 'strategy_id': strategy, 'tier': 'A', 'score': score, 'score_model_version': 1,
+             'sector_evidence': {'matches': [{'name': strategy}]}}
+            for strategy, score in [('one', 2), ('two', 10)]]}
+        view._on_manifest_loaded(manifest)
+        view.table_manifest.sortItems(4, Qt.SortOrder.DescendingOrder)
+        view.table_manifest.setCurrentCell(0, 0)
+        baseline_links = len(links)
+        manifest['candidates'][0]['score'] = 20  # Reorder the two strategies for one code.
+        view._on_manifest_loaded(copy.deepcopy(manifest))
+        row = view.table_manifest.currentRow()
+        assert view.table_manifest.item(row, 0).data(Qt.ItemDataRole.UserRole) == ('600001', 'two')
+        assert '策略: two' in view.text_feature_detail.toPlainText()
+        assert len(links) == baseline_links
+        opened_sectors = []
+        monkeypatch.setattr(view, '_open_sector_detail', opened_sectors.append)
+        view._on_candidate_double_clicked(view.table_manifest.item(row, 9))
+        assert opened_sectors == ['two']
+    finally:
+        view.close()
+        app.processEvents()
 
 
 def test_next_day_process_is_reused_and_closed(tmp_path):
@@ -402,6 +595,68 @@ def test_learning_console_renders_empty_cold_snapshot_before_ticker_selection(tm
     finally:
         console.stop_monitor()
         console.close()
+        app.processEvents()
+
+
+def test_next_day_failed_sector_load_retries_and_closing_view_refreshes(tmp_path, monkeypatch):
+    monkeypatch.setenv('QT_QPA_PLATFORM', 'offscreen')
+    from PyQt6.QtWidgets import QApplication, QWidget, QComboBox
+    import ats.ui.next_day_watch_dialog as dialog
+    app = QApplication.instance() or QApplication([])
+    cls = dialog.NextDayAnomalyWatchWidget
+    view = cls.__new__(cls)
+    QWidget.__init__(view)
+    day = date.today().isoformat()
+    view.combo_manifest_date = QComboBox(view)
+    view.combo_manifest_date.addItem(day)
+    view.active_worker = None
+    view._pending_load_request = None
+    sectors = {'汽车类': {'score': 12}}
+    main = SimpleNamespace(current_sector_snapshot=sectors)
+    monkeypatch.setattr(cls, '_main_window', lambda self: main)
+    monkeypatch.setattr(dialog, 'get_app_root', lambda: str(tmp_path))
+    store = module.EvaluationStore()
+    store._started = True
+    monkeypatch.setattr(module, 'evaluation_store', store)
+    workers = []
+    signal = SimpleNamespace(connect=lambda *args: None)
+    def create_worker(*args, **kwargs):
+        worker = SimpleNamespace(sector_snapshot=kwargs['sector_snapshot'], loaded=signal,
+            finished=signal, deleteLater=lambda: None, start=lambda: None)
+        workers.append(worker)
+        return worker
+    monkeypatch.setattr(dialog, 'NextDayWatchDataLoaderWorker', create_worker)
+    monkeypatch.setattr(dialog, '_is_market_session_active', lambda: False)
+    view.tab_widget = SimpleNamespace(currentIndex=lambda: 0)
+    view.auto_refresh_timer = SimpleNamespace(interval=lambda: 60000)
+    monkeypatch.setattr(view, 'isVisible', lambda: True)
+    monkeypatch.setattr(view, 'reload_all_data', lambda: view._start_data_load((day, False)))
+    for method in ('_on_dates_scanned', '_on_manifest_loaded', '_on_eval_loaded', '_on_stats_loaded'):
+        monkeypatch.setattr(view, method, lambda *args: None)
+    try:
+        view._start_data_load((day, False))
+        assert getattr(view, '_manifest_sector_source', None) is None
+        view._on_loader_result({'error': 'temporary unavailable'}, workers[0])
+        view._on_loader_finished(workers[0])
+        view._last_manifest_refresh -= 31
+        view._on_auto_refresh_tick()
+        assert len(workers) == 2
+        view._on_loader_result({'target_date': day}, workers[1])
+        assert view._manifest_sector_source is sectors
+        view._on_loader_finished(workers[1])
+        view._last_manifest_refresh -= 31
+        view._on_auto_refresh_tick()
+        assert len(workers) == 2
+        requests = []
+        view.tab_widget = SimpleNamespace(currentIndex=lambda: 1)
+        monkeypatch.setattr(view, '_request_data_load', lambda *args, **kwargs: requests.append((args, kwargs)))
+        view._on_auto_refresh_tick()
+        assert requests == [((day,), {'eval_only': True})]
+        monkeypatch.setattr(view, 'isVisible', lambda: False)
+        view._on_auto_refresh_tick()
+        assert len(requests) == 1
+    finally:
+        view.close()
         app.processEvents()
 
 

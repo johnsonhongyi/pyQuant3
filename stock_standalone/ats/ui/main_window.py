@@ -4313,6 +4313,9 @@ class ATSMainWindow(QMainWindow):
             # and next-day freeze use the dated snapshot from the last session.
             sector_data = None
 
+        # Capture authoritative sectors even when repeated after-hours frames are skipped.
+        if isinstance(sector_data, dict) and sector_data:
+            self.current_sector_snapshot = sector_data
         # Keep one cold-start baseline outside market hours, but ACK and ignore
         # all subsequent TK frames until the next TDX session. This prevents
         # unchanged after-hours snapshots from re-running ATS table/engine work.
@@ -4327,11 +4330,6 @@ class ATSMainWindow(QMainWindow):
                 }
             return
             
-        # Keep the latest authoritative sector snapshot available to ATS tools
-        # such as the manual next-day candidate freeze.
-        if isinstance(sector_data, dict) and sector_data:
-            self.current_sector_snapshot = sector_data
-
         # 🛡️ [SSOT 极限性能复用] 若 IPC 数据包包含 TK 赛道探测器的权威板块数据，直接更新热力图，杜绝重复计算
         if sector_data and hasattr(self, 'heatmap_widget') and self.heatmap_widget:
             try:
@@ -5826,7 +5824,8 @@ class ATSMainWindow(QMainWindow):
                 if getattr(self, '_is_closing', False):
                     service.close()
                     return
-                result = service.request("poll", manifest=getattr(self, '_next_day_watch_manifest', None))
+                result = service.request("poll", manifest=getattr(self, '_next_day_watch_manifest', None),
+                    sector_snapshot=getattr(self, 'current_sector_snapshot', None))
                 if result.get("error"):
                     logger.warning("[NextDayWatch] worker failed: %s", result["error"])
                     return
