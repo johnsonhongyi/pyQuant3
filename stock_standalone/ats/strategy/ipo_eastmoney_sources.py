@@ -599,6 +599,7 @@ def _recently_listed_codes(now: datetime) -> set[str]:
 
 def collect_market_breadth_and_industry(
     root: str | Path, ticker: str, ipo_row: Optional[Mapping[str, Any]] = None,
+    *, ipo_codes: Optional[set[str]] = None,
 ) -> Dict[str, Any]:
     """Scrape paged A-share quotes; persist verified breadth and same-day industry PE median."""
     try:
@@ -637,12 +638,18 @@ def collect_market_breadth_and_industry(
             observation=_observation(breadth, _BREADTH_ID, _BREADTH_VERSION, as_of), config=config,
         ):
             saved.append("advance_decline_ratio")
-        ipo_codes: set[str] = set()
-        try:
-            ipo_codes = _recently_listed_codes(datetime.now(ZoneInfo(_TZ)))
-        except Exception:
-            # IPO turnover is independently gated; the other broad-market metrics remain usable.
-            pass
+        if ipo_codes is None:
+            ipo_codes = set()
+            try:
+                ipo_codes = _recently_listed_codes(datetime.now(ZoneInfo(_TZ)))
+            except Exception:
+                # IPO turnover is independently gated; the other broad-market metrics remain usable.
+                pass
+        else:
+            ipo_codes = {
+                str(code).strip().zfill(6) for code in ipo_codes
+                if str(code).strip().isdigit() and len(str(code).strip()) <= 6
+            }
         turnover_metrics = derive_market_turnover_metrics(rows, ipo_codes=ipo_codes)
         turnover_sources = {
             "high_volatility_amount_share": _MARKET_METRICS_ID,

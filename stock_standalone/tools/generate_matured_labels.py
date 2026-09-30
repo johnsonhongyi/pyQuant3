@@ -44,31 +44,52 @@ def _ats_calendar(root: str | Path) -> Dict[str, Dict[str, Any]]:
 
 def _fetch_tdx_daily_bars(
     ticker: str, listing_date: str, count: int = 10, end_date: str | None = None,
+    allow_network: bool = True,
 ) -> List[Dict[str, Any]]:
-    """Fallback to TDX's date-stamped daily bars when Eastmoney history is unavailable."""
+    """Prefer local TDX daily files; use the TDX server only when the caller allows it."""
     if isinstance(count, bool) or not isinstance(count, int) or not 1 <= count <= 800:
         return []
-    from ats.tdx_realtime_fetcher import TDXRealtimeFetcher
-
-    frame = TDXRealtimeFetcher.get_instance().fetch_kline_bars(
-        ticker, category="day", count=count
-    )
-    if frame is None or frame.empty:
-        return []
     bars = []
-    for _, row in frame.iterrows():
-        day_text = str(row.get("datetime", row.get("time", "")))[:10]
+    try:
+        from JSONData import tdx_data_Day as tdd
+
+        frame = tdd.get_tdx_Exp_day_to_df(ticker, dl=count, fastohlc=True)
+        if frame is not None and not frame.empty:
+            local = frame.copy()
+            if "date" not in local.columns:
+                local = local.reset_index().rename(columns={"index": "date"})
+            for _, row in local.iterrows():
+                day_text = str(row.get("date", ""))[:10]
+                try:
+                    date.fromisoformat(day_text)
+                    values = {key: float(row[key]) for key in ("open", "high", "low", "close")}
+                except (KeyError, TypeError, ValueError, OverflowError):
+                    continue
+                if (day_text >= listing_date and (end_date is None or day_text <= end_date)
+                        and all(math.isfinite(value) and value > 0 for value in values.values())):
+                    bars.append({"date": day_text, **values})
+    except Exception:
+        bars = []
+    if not bars and allow_network:
         try:
-            day = date.fromisoformat(day_text)
-            values = {key: float(row[key]) for key in ("open", "high", "low", "close")}
-        except (KeyError, TypeError, ValueError, OverflowError):
-            continue
-        if (
-            day_text >= listing_date
-            and (end_date is None or day_text <= end_date)
-            and all(math.isfinite(value) and value > 0 for value in values.values())
-        ):
-            bars.append({"date": day_text, **values})
+            from ats.tdx_realtime_fetcher import TDXRealtimeFetcher
+
+            frame = TDXRealtimeFetcher.get_instance().fetch_kline_bars(
+                ticker, category="day", count=count
+            )
+            if frame is not None and not frame.empty:
+                for _, row in frame.iterrows():
+                    day_text = str(row.get("datetime", row.get("time", "")))[:10]
+                    try:
+                        date.fromisoformat(day_text)
+                        values = {key: float(row[key]) for key in ("open", "high", "low", "close")}
+                    except (KeyError, TypeError, ValueError, OverflowError):
+                        continue
+                    if (day_text >= listing_date and (end_date is None or day_text <= end_date)
+                            and all(math.isfinite(value) and value > 0 for value in values.values())):
+                        bars.append({"date": day_text, **values})
+        except Exception:
+            pass
     return sorted({row["date"]: row for row in bars}.values(), key=lambda row: row["date"])
 
 
@@ -133,7 +154,16 @@ def collect_for_ticker(ticker: str, calendar: Any = None, root: str | Path = APP
     try:
         listing_age = sum(day > listing_day for day in calendar_days)
         tdx_count = max(10, listing_age + 5)
-        bars = _fetch_tdx_daily_bars(ticker, listing_date, count=tdx_count, end_date=bar_end_date)
+        try:
+            from ats.tdx_realtime_fetcher import is_trading_time
+
+            allow_network = bool(is_trading_time()[0])
+        except Exception:
+            allow_network = False
+        bars = _fetch_tdx_daily_bars(
+            ticker, listing_date, count=tdx_count, end_date=bar_end_date,
+            allow_network=allow_network,
+        )
     except Exception:
         bars = []
     available_at = datetime.now(timezone.utc)

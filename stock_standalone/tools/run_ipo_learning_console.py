@@ -180,6 +180,19 @@ def main():
     parser.add_argument("--project-root", help="指定运行数据根目录")
     parser.add_argument("--simulation-read-only", action="store_true", help="只读展示仿真结果，不采集、不启 Worker")
     args = parser.parse_args()
+    if args.simulation_read_only:
+        print("[IPO Console] 仿真只读展示：不采集、不启动 Worker、不调用模型或交易。", flush=True)
+    else:
+        print(
+            "[IPO Console] ATS 只读监控已启动：约 2.5 秒后执行一次冷启动读取；"
+            "工作日 08:55–15:40 每 5 分钟检查，其他时段等待下个工作日。",
+            flush=True,
+        )
+        print(
+            "[IPO Console] 使用顺序：数据契约与时效 → Gate 阻断原因 → D1-D3 人工复核 → 回放验收；"
+            "Ollama 仅分析有效新鲜观察，训练与交易授权保持关闭。",
+            flush=True,
+        )
     gate_provider = None
     if not args.simulation_read_only:
         # run_ats.py dispatches --ipo-console before its normal ATS startup.
