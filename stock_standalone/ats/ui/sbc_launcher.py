@@ -110,7 +110,7 @@ def _build_sbc_subprocess_command(
     """
     智能构造多进程调起 SBC 的命令行 (全面支持源码开发与 PyInstaller 打包环境)
     - 源码环境: [sys.executable, run_sbc.py, <code>, <period>] 或 [sys.executable, run_sbc.py, --snapshot, N]
-    - 打包环境: [target_exe, "--sbc", <code>, <period>] 或 [target_exe, "--sbc-holdings", --snapshot, N]
+    - 打包环境: [target_exe, "--sbc", <code>, <period>] 或 [target_exe, "--sbc-hold", --snapshot, N]
     """
     app_root = get_app_root()
     is_frozen = is_packaged_env()
@@ -150,7 +150,7 @@ def _build_sbc_subprocess_command(
 
     if target_exe and os.path.exists(target_exe):
         if is_holdings:
-            cmd = [target_exe, "--sbc-holdings"]
+            cmd = [target_exe, "--sbc-hold"]
             if snapshot_idx is not None:
                 cmd.extend(["--snapshot", str(snapshot_idx)])
             return cmd

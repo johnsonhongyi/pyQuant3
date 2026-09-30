@@ -539,13 +539,13 @@ def main():
         description="SBC 实盘分时看盘工具（独立窗口模式）",
         epilog=(
             "示例: python run_sbc.py --sbc 600000 10d\n"
-            "      python run_sbc.py --sbc-holdings\n"
+            "      python run_ats.py --hold\n"
             "      python run_ats.py --sbc 600000 1d"
         ),
     )
     parser.add_argument("--sbc", action="store_true", help="单独启动 SBC 指定股票窗口")
     parser.add_argument(
-        "--sbc-holdings", "--holdings-sbc", "--holdings",
+        "--sbc-hold", "--hold-sbc", "--hold",
         dest="holdings", action="store_true", help="单独启动 SBC 持仓窗口组",
     )
     parser.add_argument("--snapshot", "-s", type=int, help="持仓模式下加载指定历史快照组")
