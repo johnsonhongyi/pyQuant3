@@ -542,23 +542,20 @@ class CapitalDragonPanel(QWidget):
             report = self.engine.get_cached_report(max_age=5.0, df_check=df_all, fallback_stale=True)
 
         if report is None:
-            # 若尚无可用缓存或为 force 强制刷新：在 force 或首帧冷启动时同步计算一次保底；在后续高频轮询中异步计算杜绝卡顿
-            if force or not self._last_report:
-                report = self.engine.analyze_capital_dragon_universe(df_all, sh_pct)
-            else:
-                if not self._is_async_calculating:
-                    self._is_async_calculating = True
-                    import threading
-                    def _async_worker():
-                        try:
-                            rep = self.engine.analyze_capital_dragon_universe(df_all, sh_pct)
-                            self.async_report_ready.emit(rep or {})
-                        except Exception as e:
-                            logger.warning(f"后台异步分析资金主线异常: {e}")
-                            self.async_report_ready.emit({})
-                    t = threading.Thread(target=_async_worker, daemon=True)
-                    t.start()
-                return
+            # Cache misses and forced refreshes always run in a worker.
+            if not self._is_async_calculating:
+                self._is_async_calculating = True
+                import threading
+                def _async_worker():
+                    try:
+                        rep = self.engine.analyze_capital_dragon_universe(df_all, sh_pct)
+                        self.async_report_ready.emit(rep or {})
+                    except Exception as e:
+                        logger.warning(f"后台异步分析资金主线异常: {e}")
+                        self.async_report_ready.emit({})
+                t = threading.Thread(target=_async_worker, daemon=True)
+                t.start()
+            return
 
         if report:
             self._apply_report_to_ui(report)

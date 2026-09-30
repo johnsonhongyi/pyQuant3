@@ -128,6 +128,9 @@ class SwingStateTable(QWidget):
         """)
         self.chk_favorite_show.stateChanged.connect(self._on_favorite_checkbox_changed)
         header.addWidget(self.chk_favorite_show)
+        self.data_status = QLabel("等待 MA20d 数据")
+        self.data_status.setStyleSheet("color: #94a3b8; font-size: 9pt;")
+        header.addWidget(self.data_status)
         header.addSpacing(6)
 
         self.btn_dragon = QPushButton("🐉 监控加速龙头")
@@ -318,6 +321,8 @@ class SwingStateTable(QWidget):
         if not data_list:
             if self.table.rowCount() > 0:
                 self.table.setRowCount(0)
+            self.table.setSortingEnabled(True)
+            self.data_status.setText("暂无回调跟踪标的")
             return
 
         from global_favorites import GlobalFavoriteManager
@@ -554,6 +559,13 @@ class SwingStateTable(QWidget):
             filter_hidden = (fset is not None) and (code_str.zfill(6) not in fset)
             
             self.table.setRowHidden(row, fav_hidden or filter_hidden)
+
+        total = self.table.rowCount()
+        visible = sum(not self.table.isRowHidden(row) for row in range(total))
+        if total and not visible:
+            self.data_status.setText(f"已加载 {total} 只，全部被过滤；可勾选重点或关闭策略过滤")
+        else:
+            self.data_status.setText(f"显示 {visible} / {total} 只")
 
     def _get_bold_font(self):
         font = self.table.font()

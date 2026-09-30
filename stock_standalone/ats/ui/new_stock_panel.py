@@ -138,6 +138,7 @@ class NewStockPanel(QWidget):
     stock_selected = pyqtSignal(str, str)        # code, name (单击联动)
     stock_double_clicked = pyqtSignal(str, str) # code, name (双击详情)
     _ipo_detector_action_done = pyqtSignal(str)
+    _channel_scan_ready = pyqtSignal(object)
 
     def minimumSizeHint(self) -> QSize:
         # 允许中间面板极致弹性缩放，绝不撑大主窗口或挤压左右侧分割条
@@ -146,6 +147,7 @@ class NewStockPanel(QWidget):
     def __init__(self, parent=None, main_window=None):
         super().__init__(parent)
         self.main_window = main_window
+        self._channel_scan_ready.connect(self._on_channel_scan_ready)
         self._ipo_detector_open_pending = False
         self._ipo_detector_action_done.connect(self._notify_ipo_detector_status)
         self.df_data = pd.DataFrame()
@@ -605,17 +607,6 @@ class NewStockPanel(QWidget):
         2. 发起后台静默增量刷新；
         3. 启动定时器（与 cct.ats_tdx_interval 动态对齐）：实盘时段自动静默刷新，非交易时段自动休眠。
         """
-        try:
-            fetcher = NewStockFetcher.get_instance()
-            seg_mode = self._get_current_segment_mode_key()
-            init_df = fetcher.get_combined_new_stocks(force_refresh=False, segment_mode=seg_mode)
-            if init_df is not None and not init_df.empty:
-                self.df_data = init_df
-                self._render_table()
-        except Exception as e:
-            logger.debug(f"冷启动恢复本地新股持久化数据异常: {e}")
-
-        # 延时 150ms 启动后台增量拉取，首帧 0 阻塞
         QTimer.singleShot(150, lambda: self.load_data(force_refresh=False))
 
         sec, _ = self._sync_refresh_interval_ui()
@@ -672,6 +663,7 @@ class NewStockPanel(QWidget):
         self.worker.data_ready.connect(self._on_data_ready)
         self.worker.fetch_failed.connect(self._on_fetch_failed)
         self.worker.finished.connect(self._on_worker_finished)
+        self.worker.finished.connect(self.worker.deleteLater)
         self.worker.start()
 
     def _on_worker_finished(self):
@@ -681,7 +673,6 @@ class NewStockPanel(QWidget):
             self.btn_refresh.setEnabled(True)
 
     def _on_data_ready(self, df: pd.DataFrame):
-        self._is_fetching = False
         if df is not None and not df.empty:
             # 基础数据回填，严格保留已计算好的 IPC / 指标字段
             if not self.df_data.empty:
@@ -713,8 +704,10 @@ class NewStockPanel(QWidget):
 
             if target_ipc_df is not None and not target_ipc_df.empty:
                 self.update_from_ipc_df(target_ipc_df, self._last_ipc_sh_pct)
-            else:
+            elif self.is_panel_visible():
                 self._render_table()
+            else:
+                self._needs_render = True
 
             if self.selected_code:
                 match = self.df_data[self.df_data["code"] == self.selected_code]
@@ -736,7 +729,6 @@ class NewStockPanel(QWidget):
             self.lbl_status.setStyleSheet("color: #94a3b8; font-size: 8.5pt;")
 
     def _on_fetch_failed(self, err_msg: str):
-        self._is_fetching = False
         self.lbl_status.setText(f"❌ 刷新异常: {err_msg[:25]}")
         self.lbl_status.setStyleSheet("color: #f87171; font-size: 8.5pt;")
 
@@ -773,6 +765,31 @@ class NewStockPanel(QWidget):
         if df_ipc is None or df_ipc.empty:
             return
 
+        self._last_ipc_df = df_ipc
+        self._last_ipc_sh_pct = sh_pct
+        self._pending_ipc_df = df_ipc
+        self._pending_ipc_sh_pct = sh_pct
+        if not force and not self.is_panel_visible():
+            self._pending_render_frame = None
+            if hasattr(self, '_ipc_render_timer'):
+                self._ipc_render_timer.stop()
+            self._needs_render = True
+            return
+
+        if not force:
+            self._pending_render_frame = (df_ipc, sh_pct)
+            if not hasattr(self, '_ipc_render_timer'):
+                self._ipc_render_timer = QTimer(self)
+                self._ipc_render_timer.setSingleShot(True)
+                self._ipc_render_timer.timeout.connect(self._flush_ipc_render)
+            if not self._ipc_render_timer.isActive():
+                self._ipc_render_timer.start(500)
+            return
+
+        self._pending_render_frame = None
+        if hasattr(self, '_ipc_render_timer'):
+            self._ipc_render_timer.stop()
+
         # 始终缓存最新的 IPC 全量数据与大盘涨幅，杜绝启动竞态丢失
         self._last_ipc_df = df_ipc
         if sh_pct == 0.0:
@@ -785,6 +802,7 @@ class NewStockPanel(QWidget):
                     break
         self.last_sh_pct = sh_pct
         self._last_ipc_sh_pct = sh_pct
+        self._pending_ipc_sh_pct = sh_pct
 
         # ⚡【核心零卡顿守卫 (Visibility Short-Circuit)】
         # 若当前面板不可见且非强制触发，仅暂存最新行情快照，0ms 物理阻断主线程全表运算与重排重绘！
@@ -803,42 +821,43 @@ class NewStockPanel(QWidget):
             self.table.setHorizontalHeaderLabels(headers)
 
         if self.df_data.empty:
-            try:
-                fetcher = NewStockFetcher.get_instance()
-                loaded = fetcher.get_combined_new_stocks(force_refresh=False)
-                if loaded is not None and not loaded.empty:
-                    self.df_data = loaded
-            except Exception:
-                pass
+            self.load_data(force_refresh=False)
 
         if self.df_data.empty:
             return
 
         # ⚡【极速 O(1) 预索引映射表】：一次性建立全市场 code -> ipc_idx 字典，杜绝循环内 5000 行全表扫描
-        ipc_index_map = {}
-        for k in df_ipc.index:
-            k_str = str(k).strip()
-            digits = "".join(c for c in k_str if c.isdigit()).zfill(6) if any(c.isdigit() for c in k_str) else k_str
-            ipc_index_map[k_str] = k
-            if digits:
-                ipc_index_map[digits] = k
-                ipc_index_map[digits.lstrip('0')] = k
-                ipc_index_map[f"sh{digits}"] = k
-                ipc_index_map[f"sz{digits}"] = k
-                ipc_index_map[f"bj{digits}"] = k
+        if df_ipc.index.name == "code" and df_ipc.index.is_unique and 'code' not in df_ipc.columns:
+            # ATS has already normalized the index. Look up only this panel's codes.
+            ipc_index_map = {str(c).zfill(6): str(c).zfill(6) for c in self.df_data['code']
+                             if str(c).zfill(6) in df_ipc.index}
+        else:
+            ipc_index_map = {}
+            for k in df_ipc.index:
+                k_str = str(k).strip()
+                digits = "".join(c for c in k_str if c.isdigit()).zfill(6) if any(c.isdigit() for c in k_str) else k_str
+                ipc_index_map[k_str] = k
+                if digits:
+                    ipc_index_map[digits] = k
+                    ipc_index_map[digits.lstrip('0')] = k
+                    ipc_index_map[f"sh{digits}"] = k
+                    ipc_index_map[f"sz{digits}"] = k
+                    ipc_index_map[f"bj{digits}"] = k
 
-        if 'code' in df_ipc.columns:
-            for ipc_idx, c_val in df_ipc['code'].dropna().items():
-                c_str = str(c_val).strip()
-                digits = "".join(c for c in c_str if c.isdigit()).zfill(6) if any(c.isdigit() for c in c_str) else c_str
-                if digits and digits not in ipc_index_map:
-                    ipc_index_map[digits] = ipc_idx
+            if 'code' in df_ipc.columns:
+                for ipc_idx, c_val in df_ipc['code'].dropna().items():
+                    c_str = str(c_val).strip()
+                    digits = "".join(c for c in c_str if c.isdigit()).zfill(6) if any(c.isdigit() for c in c_str) else c_str
+                    if digits and digits not in ipc_index_map:
+                        ipc_index_map[digits] = ipc_idx
 
         updated_any = False
-        for idx, row in self.df_data.iterrows():
+        for idx, row in zip(self.df_data.index, self.df_data.to_dict('records')):
             code = str(row["code"]).zfill(6)
             ipc_row = None
-            target_idx = ipc_index_map.get(code) or ipc_index_map.get(code.lstrip('0'))
+            target_idx = ipc_index_map.get(code)
+            if target_idx is None:
+                target_idx = ipc_index_map.get(code.lstrip('0'))
             if target_idx is not None:
                 try:
                     ipc_row = df_ipc.loc[target_idx]
@@ -968,12 +987,25 @@ class NewStockPanel(QWidget):
                     self.selected_row_data = match.iloc[0].to_dict()
                     self._update_preview_card(self.selected_row_data)
 
+    def _flush_ipc_render(self):
+        frame = getattr(self, '_pending_render_frame', None)
+        self._pending_render_frame = None
+        if frame is None:
+            return
+        df, sh_pct = frame
+        if not self.is_panel_visible():
+            self._pending_ipc_df = df
+            self._pending_ipc_sh_pct = sh_pct
+            self._needs_render = True
+            return
+        self.update_from_ipc_df(df, sh_pct, force=True)
+
     def ensure_rendered(self):
         """当用户切换到本面板时按需补齐渲染 (0ms 惰性渲染架构)"""
         if getattr(self, '_needs_render', False):
             self._needs_render = False
-            pending_df = getattr(self, '_pending_ipc_df', None)
-            pending_sh = getattr(self, '_pending_ipc_sh_pct', 0.0)
+            pending_df = getattr(self, '_last_ipc_df', None)
+            pending_sh = getattr(self, '_last_ipc_sh_pct', 0.0)
             if pending_df is not None and not pending_df.empty:
                 self.update_from_ipc_df(pending_df, pending_sh, force=True)
             else:
@@ -1006,20 +1038,42 @@ class NewStockPanel(QWidget):
                 new_item.setBackground(QBrush(QColor(bg_color)))
             self.table.setItem(row, col, new_item)
         else:
-            item.setText(str(text))
+            if item.text() != str(text):
+                item.setText(str(text))
             item.set_pin_status(is_pinned, pin_rank=pin_rank)
             item.set_raw_value(raw_val)
-            item.setTextAlignment(align)
+            if item.textAlignment() != align:
+                item.setTextAlignment(align)
             if color:
-                item.setForeground(QBrush(QColor(color)))
+                brush = QBrush(QColor(color))
+                if item.foreground() != brush:
+                    item.setForeground(brush)
             if font:
-                item.setFont(font)
+                if item.font() != font:
+                    item.setFont(font)
             if bg_color:
-                item.setBackground(QBrush(QColor(bg_color)))
+                brush = QBrush(QColor(bg_color))
+                if item.background() != brush:
+                    item.setBackground(brush)
             else:
-                item.setBackground(QBrush(QColor(0, 0, 0, 0)))
+                brush = QBrush(QColor(0, 0, 0, 0))
+                if item.background() != brush:
+                    item.setBackground(brush)
 
     def _render_table(self):
+        updates_enabled = self.table.updatesEnabled()
+        signals_blocked = self.table.signalsBlocked()
+        sorting_enabled = self.table.isSortingEnabled()
+        self.table.setUpdatesEnabled(False)
+        try:
+            self._render_table_impl()
+        finally:
+            if self.table.isSortingEnabled() != sorting_enabled:
+                self.table.setSortingEnabled(sorting_enabled)
+            self.table.blockSignals(signals_blocked)
+            self.table.setUpdatesEnabled(updates_enabled)
+
+    def _render_table_impl(self):
         """
         【⚡ 核心视图与焦点保护渲染】
         1. 保持当前滚动条位置 (v_scroll / h_scroll)；
@@ -1033,6 +1087,8 @@ class NewStockPanel(QWidget):
         """
         if self.df_data.empty:
             self.table.setRowCount(0)
+            self._last_table_signature = None
+            self._rendered_row_state = {}
             return
 
         # 获取系统最新全局重点关注列表
@@ -1097,40 +1153,41 @@ class NewStockPanel(QWidget):
 
         if df_filtered.empty:
             self.table.setRowCount(0)
+            self._last_table_signature = None
+            self._rendered_row_state = {}
+            return
+
+        # Unchanged snapshots need neither cell writes nor sorting.
+        signature = None
+        row_hashes = {}
+        row_context = (frozenset(fav_stocks), sh_pct, today_str, tuple(self.extra_cols))
+        try:
+            hashes = pd.util.hash_pandas_object(df_filtered, index=False)
+            row_hashes = {str(code).zfill(6): int(value)
+                          for code, value in zip(df_filtered['code'], hashes)}
+            if len(row_hashes) != len(df_filtered):
+                row_hashes = {}
+            signature = (hashes.values.tobytes(), row_context,
+                         self.sort_col, self.sort_order, self.selected_code)
+        except (TypeError, ValueError):
+            pass
+        if signature is not None and signature == getattr(self, '_last_table_signature', None):
             return
 
         # ── 2. 今日事件 (今日上市 / 今日申购) 与重点关注优先权重排序 (置顶第0梯队) ──
-        def _sort_weight(row):
-            c_code = str(row["code"]).zfill(6)
-            is_fav = (c_code in fav_stocks)
-            st = str(row.get("status", ""))
-            ld = str(row.get("listing_date", "-"))
-            ad = str(row.get("apply_date", "-"))
-
-            is_today_lst = (ld == today_str)
-            is_today_app = (ad == today_str)
-
-            if is_today_lst:
-                w = 0.0  # 今日首日上市排在最最前 (梯队 0)
-            elif is_today_app:
-                w = 0.1  # 今日申购排在第0梯队紧随其后
-            elif is_fav:
-                w = 1.0  # 重点关注排在第二梯队 (梯队 1)
-            elif "首日" in st:
-                w = 2.0
-            elif "前5日" in st:
-                w = 3.0
-            elif "待上市" in st:
-                w = 4.0
-            elif "次新" in st:
-                w = 5.0
-            else:
-                w = 6.0
-            return (w, ld if ld != "-" else "1970-01-01")
-
-        df_filtered["_sort_w"] = df_filtered.apply(_sort_weight, axis=1)
-        df_filtered.sort_values(by=["_sort_w", "pct"], ascending=[True, False], inplace=True)
-        df_filtered.drop(columns=["_sort_w"], inplace=True)
+        codes = df_filtered["code"].astype(str).str.zfill(6)
+        statuses = df_filtered["status"].astype(str)
+        listing_dates = df_filtered.get("listing_date", pd.Series("-", index=df_filtered.index)).astype(str)
+        apply_dates = df_filtered.get("apply_date", pd.Series("-", index=df_filtered.index)).astype(str)
+        df_filtered["_sort_w"] = np.select(
+            [listing_dates.eq(today_str), apply_dates.eq(today_str), codes.isin(fav_stocks),
+             statuses.str.contains("首日", regex=False), statuses.str.contains("前5日", regex=False),
+             statuses.str.contains("待上市", regex=False), statuses.str.contains("次新", regex=False)],
+            [0.0, 0.1, 1.0, 2.0, 3.0, 4.0, 5.0], default=6.0)
+        df_filtered["_sort_date"] = listing_dates.replace("-", "1970-01-01")
+        df_filtered.sort_values(by=["_sort_w", "_sort_date", "pct"],
+                                ascending=[True, True, False], inplace=True)
+        df_filtered.drop(columns=["_sort_w", "_sort_date"], inplace=True)
 
         target_row_count = len(df_filtered)
 
@@ -1184,8 +1241,26 @@ class NewStockPanel(QWidget):
             if idx >= 0:
                 extra_col_map[c_extra] = idx
 
-        for row_idx, (_, row) in enumerate(df_filtered.iterrows()):
+        # Keep each stock in its existing row while writing. Qt sorts once after
+        # the batch; otherwise a user sort makes every unchanged cell look dirty.
+        if c_code >= 0:
+            row_positions = {str(code).zfill(6): pos for pos, code in enumerate(df_filtered['code'])}
+            existing_codes = [self.table.item(r, c_code).text().strip()
+                              if self.table.item(r, c_code) else '' for r in range(target_row_count)]
+            if (len(row_positions) == target_row_count and len(set(existing_codes)) == target_row_count
+                    and all(code in row_positions for code in existing_codes)):
+                df_filtered = df_filtered.iloc[[row_positions[code] for code in existing_codes]]
+
+        previous_row_state = getattr(self, '_rendered_row_state', {})
+        next_row_state = {}
+        for row_idx, row in enumerate(df_filtered.to_dict('records')):
             code = str(row.get("code", "")).zfill(6)
+            row_state = (row_hashes.get(code), row_context)
+            next_row_state[code] = row_state
+            code_item = self.table.item(row_idx, c_code) if c_code >= 0 else None
+            if (row_hashes and code_item is not None and code_item.text().strip() == code
+                    and previous_row_state.get(code) == row_state):
+                continue
             name = str(row.get("name", ""))
             status = str(row.get("status", "次新"))
             listing_d = str(row.get("listing_date", "-"))
@@ -1640,9 +1715,9 @@ class NewStockPanel(QWidget):
                 self._set_or_update_item(row_idx, c_strat, strat_txt, color=strat_color, font=text_font, align=Qt.AlignmentFlag.AlignCenter, bg_color=bg_color, is_pinned=row_pinned, raw_val=1 if has_strat else 0, pin_rank=pin_rank)
 
         # ── 4. 应用并保持持久化的排序列和方向 ──
-        self.table.setSortingEnabled(True)
         if 0 <= self.sort_col < self.table.columnCount():
-            self.table.sortItems(self.sort_col, self.sort_order)
+            self.table.horizontalHeader().setSortIndicator(self.sort_col, self.sort_order)
+        self.table.setSortingEnabled(True)
 
         # ── 5. 恢复选中焦点与滚动条位置 ──
         if saved_selected_code:
@@ -1661,6 +1736,8 @@ class NewStockPanel(QWidget):
         self.table.horizontalScrollBar().setValue(h_scroll_val)
 
         self.table.blockSignals(False)
+        self._last_table_signature = signature
+        self._rendered_row_state = next_row_state
 
     def _on_stock_activated(self, code: str, name: str):
         """BaseATSTableWidget 激活行：仅联动行情与推演卡片，绝不主动弹窗"""
@@ -2095,20 +2172,62 @@ class NewStockPanel(QWidget):
         menu.exec(QCursor.pos())
 
     def _on_eval_60f_clicked(self):
-        """60f 通道底部反转突破策略直连 TDX API 测算事件 (支持单选与全量批量)"""
-        from ats.channel_bottom_reversal_strategy import ChannelBottomReversalStrategy
-        strategy = ChannelBottomReversalStrategy()
-
-        # 1. 如果选中了单只标的，单股直连诊断
+        """TDX 单股诊断与批量扫描均在后台执行，每个面板只保留一个任务。"""
+        if getattr(self, '_channel_scan_busy', False):
+            return
         if self.selected_code and self.selected_name:
-            code = self.selected_code
-            name = self.selected_name
-            self.lbl_status.setText(f"📡 正在通过 TDX API 直连拉取 【{name}】 60m K线进行通道测算...")
-            QApplication.processEvents()
+            code, name = self.selected_code, self.selected_name
+            self.lbl_status.setText(f"📡 正在通过 TDX API 拉取 【{name}】 60m K线进行通道测算...")
+            self._start_channel_scan({"code": code, "name": name})
+            return
 
-            res = strategy.evaluate_stock_tdx(code)
+        # 2. 批量扫描：优先提取多选选中的标的，否则扫描当前面板全量新股
+        stock_pairs = []
+        if hasattr(self, 'table') and hasattr(self.table, 'get_selected_stock_pairs'):
+            stock_pairs = self.table.get_selected_stock_pairs()
+
+        if stock_pairs:
+            codes = [c for c, _ in stock_pairs if c]
+            code_to_name = {c: n for c, n in stock_pairs if c}
+        elif not self.df_data.empty:
+            codes = list(self.df_data["code"].dropna().unique())
+            code_to_name = dict(zip(self.df_data["code"], self.df_data["name"]))
+        else:
+            QMessageBox.warning(self, "提示", "当前新股列表中无可用标的！")
+            return
+
+        self.lbl_status.setText(f"📡 正在直连 TDX API 批量拉取 {len(codes)} 只新股 60m K线进行形态扫描...")
+        self._start_channel_scan({"codes": codes, "code_to_name": code_to_name})
+
+    def _start_channel_scan(self, payload):
+        self._channel_scan_busy = True
+        def run_scan():
+            try:
+                from ats.channel_bottom_reversal_strategy import ChannelBottomReversalStrategy
+                strategy = ChannelBottomReversalStrategy()
+                if "code" in payload:
+                    payload["result"] = strategy.evaluate_stock_tdx(payload["code"])
+                else:
+                    payload["result"] = strategy.scan_stocks_tdx(payload["codes"])
+            except Exception as err:
+                payload["error"] = str(err)
+            try:
+                self._channel_scan_ready.emit(payload)
+            except RuntimeError:
+                pass  # The panel may have been closed while TDX was waiting.
+        threading.Thread(target=run_scan, daemon=True, name="ATS-NewStockScan").start()
+
+    def _on_channel_scan_ready(self, payload):
+        self._channel_scan_busy = False
+        if self.main_window and getattr(self.main_window, '_is_closing', False):
+            return
+        if payload.get("error"):
+            self.lbl_status.setText("❌ 通道测算失败")
+            QMessageBox.warning(self, "测算异常", payload["error"])
+            return
+        if "code" in payload:
+            code, name, res = payload["code"], payload["name"], payload["result"]
             self.lbl_status.setText("🟢 60f 通道策略测算完成")
-
             if res.get("is_matched", False):
                 msg = (
                     f"🎉 【{name} ({code})】 命中 60f 通道底部反转突破形态！\n\n"
@@ -2137,25 +2256,9 @@ class NewStockPanel(QWidget):
                 QMessageBox.information(self, f"60f 通道策略诊断 - {name}", msg)
             return
 
-        # 2. 批量扫描：优先提取多选选中的标的，否则扫描当前面板全量新股
-        stock_pairs = []
-        if hasattr(self, 'table') and hasattr(self.table, 'get_selected_stock_pairs'):
-            stock_pairs = self.table.get_selected_stock_pairs()
-        
-        if stock_pairs:
-            codes = [c for c, _ in stock_pairs if c]
-            code_to_name = {c: n for c, n in stock_pairs if c}
-        elif not self.df_data.empty:
-            codes = list(self.df_data["code"].dropna().unique())
-            code_to_name = dict(zip(self.df_data["code"], self.df_data["name"]))
-        else:
-            QMessageBox.warning(self, "提示", "当前新股列表中无可用标的！")
-            return
-
-        self.lbl_status.setText(f"📡 正在直连 TDX API 批量拉取 {len(codes)} 只新股 60m K线进行形态扫描...")
-        QApplication.processEvents()
-
-        df_matched = strategy.scan_stocks_tdx(codes)
+        codes = payload["codes"]
+        code_to_name = payload["code_to_name"]
+        df_matched = payload["result"]
         self.lbl_status.setText(f"🟢 批量扫描完成: 命中 {len(df_matched)} 只标的")
 
         if not df_matched.empty:

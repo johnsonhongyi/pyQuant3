@@ -1113,7 +1113,7 @@ class UniverseTreeWidget(QWidget):
         def _do_close():
             mgr.close_launcher_process()
             self._update_launcher_btn_state(running=False)
-            self._notify_status("🛑 [SBC Launcher] 盯盘窗口已统一关闭并完成独立持久化保存。")
+            self._notify_status("🛑 [SBC Launcher] 正在后台保存并关闭盯盘窗口。")
         act_close.triggered.connect(_do_close)
 
         act_activate = menu.addAction("🪟 置顶激活所有已打开的盯盘窗口")
@@ -1124,7 +1124,7 @@ class UniverseTreeWidget(QWidget):
             mgr.close_launcher_process()
             mgr.launch_holdings_watcher()
             self._update_launcher_btn_state(running=True)
-            self._notify_status("🔄 [SBC Launcher] 已重新读取最新持仓并启动盯盘。")
+            self._notify_status("🔄 [SBC Launcher] 正在保存旧窗口，完成后重新读取持仓并启动盯盘。")
         act_restart.triggered.connect(_do_restart)
 
         menu.addSeparator()

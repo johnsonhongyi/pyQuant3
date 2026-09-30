@@ -17,6 +17,7 @@ from datetime import datetime
 from functools import wraps
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from ats.persistence_lock import DirectoryBusy, directory_write_lock, replace_with_retry
+from ats.bounded_evaluation_store import evaluation_store
 
 
 _LOCK = threading.RLock()
@@ -33,13 +34,16 @@ _FEATURES = {
 
 def _atomic_json(path: str, value: Any) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
+    is_evaluation = os.path.basename(path).startswith("next_day_anomaly_eval_")
+    if is_evaluation and not evaluation_store.should_write(path, value):
+        return
     try:
         with open(path, "r", encoding="utf-8") as current_stream:
             if json.load(current_stream) == value:
                 return
     except (OSError, ValueError, TypeError):
         pass
-    payload = json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False)
+    payload = json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
     fd, tmp = tempfile.mkstemp(prefix=".next_day_watch_", suffix=".tmp", dir=os.path.dirname(path))
     replaced = False
     preserve_temp = False
@@ -51,6 +55,8 @@ def _atomic_json(path: str, value: Any) -> None:
         try:
             replace_with_retry(tmp, path)
             replaced = True
+            if is_evaluation:
+                evaluation_store.committed(path, value)
         except OSError:
             quarantine_dir = os.path.join(os.path.dirname(path), ".next_day_watch_quarantine")
             os.makedirs(quarantine_dir, exist_ok=True)
@@ -138,11 +144,22 @@ def _timestamp_key(value: Optional[str]) -> str:
 
 
 def _read_json(path: str, default: Any) -> Any:
+    if os.path.basename(path).startswith("next_day_anomaly_eval_"):
+        return evaluation_store.read(path, default)
     try:
         with open(path, "r", encoding="utf-8") as stream:
             return json.load(stream)
     except (OSError, ValueError, TypeError):
         return default
+
+
+def flush_pending_evaluations():
+    for path, value in evaluation_store.pending():
+        try:
+            with _LOCK, directory_write_lock(os.path.dirname(path)):
+                _atomic_json(path, value)
+        except DirectoryBusy:
+            continue
 
 
 def _number(value: Any) -> Optional[float]:
