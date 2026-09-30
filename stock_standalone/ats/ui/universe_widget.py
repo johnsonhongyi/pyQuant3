@@ -195,6 +195,9 @@ class UniverseTreeWidget(QWidget):
         self.btn_run_sbc.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.btn_run_sbc.customContextMenuRequested.connect(self._popup_run_sbc_menu)
         header_layout.addWidget(self.btn_run_sbc)
+        self._launcher_state_timer = QTimer(self)
+        self._launcher_state_timer.timeout.connect(self._sync_launcher_btn_state)
+        self._launcher_state_timer.start(1000)
 
         # 🎯 新股次新超短检测工具独立启动器按钮
         self.btn_run_ipo = QPushButton("🎯 次新")
@@ -963,10 +966,20 @@ class UniverseTreeWidget(QWidget):
         except Exception as e:
             logger.error(f"[UniverseWidget] 调起持仓盯盘异常: {e}", exc_info=True)
 
+    def _sync_launcher_btn_state(self):
+        try:
+            from ats.ui.sbc_launcher import SBCProcessManager
+            running = SBCProcessManager.get_instance().is_launcher_running()
+            if running != getattr(self, "_launcher_btn_running", False):
+                self._update_launcher_btn_state(running)
+        except Exception as err:
+            logger.debug(f"[UniverseWidget] 盯盘状态同步失败: {err}")
+
     def _update_launcher_btn_state(self, running: bool):
         """动态更新盯盘按钮文本与发光视觉状态"""
         if not hasattr(self, 'btn_run_sbc') or not self.btn_run_sbc:
             return
+        self._launcher_btn_running = bool(running)
         if running:
             self.btn_run_sbc.setText("📈 盯盘中")
             self.btn_run_sbc.setStyleSheet("""

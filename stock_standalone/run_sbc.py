@@ -578,6 +578,20 @@ def main():
 
     # --sbc 等 ATS 专用启动参数已解析，Qt 仅接收程序名，避免把它们误作 Qt 选项。
     app = QApplication.instance() or QApplication([sys.argv[0]])
+    app.setQuitOnLastWindowClosed(True)
+
+    def _notify_launcher_closed():
+        # 打包进程可能仍在清理线程/bootloader；窗口状态不应等待进程句柄退出。
+        closed_path = os.environ.get("ATS_SBC_CLOSED_PATH")
+        if closed_path:
+            try:
+                with open(closed_path, "w", encoding="utf-8") as status_file:
+                    status_file.write("closed")
+            except OSError as err:
+                print(f"[SBC Launcher] 退出状态通知失败: {err}")
+
+    app.lastWindowClosed.connect(_notify_launcher_closed)
+    app.aboutToQuit.connect(_notify_launcher_closed)
 
     # 💡 设置全局暗黑调色板与 QToolTip 样式，确保独立进程中所有 ToolTip 呈现高质感暗黑金融配色
     try:
