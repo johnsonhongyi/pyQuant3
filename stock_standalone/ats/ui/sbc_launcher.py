@@ -13,6 +13,8 @@ import os
 import sys
 import atexit
 import subprocess
+import tempfile
+import uuid
 from typing import Optional, Dict, List
 
 from sys_utils import get_app_root, is_packaged_env
@@ -198,14 +200,21 @@ class SBCProcessManager:
             if proc is None or proc.poll() is not None:
                 dead_keys.append(key)
         for k in dead_keys:
-            self._procs.pop(k, None)
+            proc = self._procs.pop(k, None)
+            status_path = getattr(proc, "_sbc_closed_path", None)
+            if status_path:
+                try:
+                    os.remove(status_path)
+                except OSError:
+                    pass
 
     def is_launcher_running(self) -> bool:
         """检查持仓盯盘启动器是否正在运行 (同时支持独立子进程与进程内降级模式)"""
         self.cleanup_dead_processes()
         proc = self._procs.get("__holdings_launcher__")
         if proc and proc.poll() is None:
-            return True
+            status_path = getattr(proc, "_sbc_closed_path", None)
+            return not (status_path and os.path.isfile(status_path))
         if self._in_process_holdings:
             self._in_process_holdings = [w for w in self._in_process_holdings if _is_widget_alive(w)]
             if self._in_process_holdings:
@@ -233,6 +242,8 @@ class SBCProcessManager:
             env.pop("_MEIPASS2", None)
             env["ATS_SBC_SUBPROCESS"] = "1"
             env["SBC_IS_HOLDINGS_LAUNCHER"] = "1"
+            closed_path = os.path.join(tempfile.gettempdir(), f"ats_sbc_closed_{uuid.uuid4().hex}")
+            env["ATS_SBC_CLOSED_PATH"] = closed_path
             try:
                 import run_sbc
                 env["SBC_LAYOUT_CONFIG_PATH"] = run_sbc._get_launcher_layout_cfg_path()
@@ -262,7 +273,11 @@ class SBCProcessManager:
                 if sbc_log_fh is not subprocess.DEVNULL:
                     try: sbc_log_fh.close()
                     except Exception: pass
+                previous = self._procs.get("__holdings_launcher__")
+                if previous and previous.poll() is None:
+                    self._procs[f"__retired_holdings_{previous.pid}__"] = previous
                 self._procs["__holdings_launcher__"] = proc
+                proc._sbc_closed_path = closed_path
                 logger.info(f"[SBCLauncher] ✅ 成功调起持仓盯盘独立进程 (PID={proc.pid})，日志: {sbc_log_path}")
                 return proc
             except Exception as e:
