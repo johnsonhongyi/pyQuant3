@@ -363,7 +363,8 @@ class DailyPulseEngine:
         }
         
         # 4. Save to DB
-        market_pulse_db.save_daily_pulse(today, summary_data, processed_stocks)
+        if market_pulse_db.save_daily_pulse(today, summary_data, processed_stocks) is False:
+            raise IOError(f"Failed to save daily pulse report for {today}")
         
         return summary_data, processed_stocks
 

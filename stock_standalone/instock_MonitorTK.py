@@ -3751,6 +3751,40 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
         self._schedule_after(next_interval_ms, self.schedule_15_30_job)
 
+    def _generate_eod_pulse_report(self, today):
+        """Generate the close report in the EOD worker without creating a viewer."""
+        lock = self.__dict__.setdefault('_eod_pulse_lock', threading.Lock())
+        if not lock.acquire(blocking=False):
+            return False
+        try:
+            if getattr(self, '_eod_pulse_completed_date', None) == today:
+                return True
+            if not cct.get_day_istrade_date(today):
+                logger.info(f"[EOD-PULSE] skip: {today} is not a trade date")
+                return True
+            selector = getattr(self, 'selector', None)
+            if selector is None:
+                logger.warning(f"[EOD-PULSE] pending: selector unavailable for {today}")
+                return False
+            import copy
+            monitored = copy.deepcopy(getattr(getattr(self, 'live_strategy', None), '_monitored_stocks', {}) or {})
+            if not monitored:
+                from sys_utils import get_conf_path
+                config_path = get_conf_path("voice_alert_config.json") or "voice_alert_config.json"
+                if os.path.exists(config_path):
+                    with open(config_path, 'r', encoding='utf-8') as stream:
+                        monitored = json.load(stream)
+            started = time.monotonic()
+            summary, stocks = DailyPulseEngine(selector).generate_daily_report(monitored, force_date=today)
+            self._eod_pulse_completed_date = today
+            logger.warning(f"[EOD-PULSE] 战报已保存 date={today} stocks={len(stocks)} temperature={summary.get('temperature')} elapsed={time.monotonic()-started:.2f}s")
+            return True
+        except Exception:
+            logger.exception(f"[EOD-PULSE] 战报生成失败，保留重试状态 date={today}")
+            return False
+        finally:
+            lock.release()
+
     def run_15_30_task(self):
         """盘后自动任务：包含离线行情存档与所有子面板的持久化。
         
@@ -3770,6 +3804,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         if getattr(self, "_eod_completed_date", None) == today:
             logger.warning(f"[15:30 Task] skip: all EOD tasks already completed for {today}")
             self._save_market_sentiment_snapshot(today)
+            self._generate_eod_pulse_report(today)
             return
 
         # ── STEP 1: 准备 SectorBiddingPanel 并喂数 ──────────────────────────────
@@ -3881,8 +3916,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 def _auto_stock_select_task():
                     logger.warning("[15:30 Task] STEP 3 ▶ get_candidates_df started in thread.")
                     try:
-                        self.selector.get_candidates_df(force=True)
+                        self.selector.get_candidates_df(force=True, logical_date=today)
                         logger.warning("[15:30 Task] STEP 3 ✅ 每日收盘选股自动持久化完成！")
+                        self._generate_eod_pulse_report(today)
                     except Exception as e_select:
                         logger.error(f"[15:30 Task] STEP 3 ❌ 每日收盘选股失败: {e_select}")
 

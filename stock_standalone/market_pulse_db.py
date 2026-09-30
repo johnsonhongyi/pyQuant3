@@ -211,10 +211,13 @@ def save_daily_pulse(date_str, summary_data, stock_list):
             
         conn.commit()
         logger.info(f"[DB] Saved report for {date_str}: {len(stock_tuples)} stocks.")
+        return True
         
     except Exception as e:
         logger.error(f"[DB Save Error] {e}")
+        conn.rollback()
         traceback.print_exc()
+        return False
     finally:
         conn.close()
 
