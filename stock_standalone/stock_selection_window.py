@@ -645,6 +645,50 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin, TreeviewMixin):
             # Spacer at the end of the group
             tk.Frame(self.hotspots_frame, width=10).pack(side="left")
 
+    def _start_candidate_load(self, force, query_date):
+        """Compute candidates off Tk; poll results exclusively on the UI thread."""
+        self._candidate_load_request = (force, query_date)
+        if getattr(self, '_candidate_load_running', False):
+            return
+        self._candidate_load_running = True
+        results = queue.Queue(maxsize=1)
+        selector = self.selector
+
+        def compute():
+            try:
+                frame = selector.get_candidates_df(force=force, logical_date=query_date)
+                results.put((frame, None))
+            except Exception as exc:
+                results.put((None, exc))
+
+        def poll():
+            if not self.winfo_exists():
+                self._candidate_load_running = False
+                return
+            try:
+                frame, error = results.get_nowait()
+            except queue.Empty:
+                self.after(50, poll)
+                return
+            self._candidate_load_running = False
+            latest = self._candidate_load_request
+            if latest != (force, query_date):
+                self._start_candidate_load(*latest)
+                return
+            if error is not None:
+                logger.error(f"[SELECTION-LOAD-FAIL] date={query_date} {type(error).__name__}: {error}")
+                return
+            self._candidate_load_ready = (query_date, frame)
+            self.load_data(force=force, target_date=query_date)
+
+        try:
+            threading.Thread(target=compute, name="StockSelectionLoad", daemon=True).start()
+        except Exception:
+            self._candidate_load_running = False
+            logger.exception("[SELECTION-LOAD-FAIL] 无法启动后台选股任务")
+            return
+        self.after(50, poll)
+
     def load_data(self, force: bool = False, target_date: Optional[str] = None):
         """
         加载/运行选股策略
@@ -657,6 +701,13 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin, TreeviewMixin):
         self._last_selected_code = None
         query_date = target_date if target_date else self.current_date
         is_today = (query_date == datetime.now().strftime("%Y-%m-%d"))
+
+        ready = getattr(self, '_candidate_load_ready', None)
+        use_cache = (not force and self._data_loaded and not self.df_full_candidates.empty
+                     and getattr(self, '_last_query_date', None) == query_date)
+        if getattr(self, '_candidate_load_running', False) or (not use_cache and ready is None):
+            self._start_candidate_load(force, query_date)
+            return
         
         # 视觉反馈：如果是历史数据，修改窗口标题或状态
         if not is_today:
@@ -678,7 +729,8 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin, TreeviewMixin):
                 # 使用缓存数据
                 pass
             else:
-                self.df_full_candidates = self.selector.get_candidates_df(force=force, logical_date=query_date)
+                self.df_full_candidates = ready[1]
+                self._candidate_load_ready = None
                 self._data_loaded = True
                 self._last_query_date = query_date
                 

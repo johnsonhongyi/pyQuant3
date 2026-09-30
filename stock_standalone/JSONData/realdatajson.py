@@ -20,6 +20,7 @@ import os
 import asyncio
 import random
 import threading
+import requests
 # from pandas.compat import StringIO
 # 而python2还是
 # from StringIO import StringIO
@@ -561,8 +562,8 @@ async def _fetch_with_dd_delay(url, pause_range):
     now = time.time()
     if now < g_sina_blocked['blocked_until']:
         wait = g_sina_blocked['blocked_until'] - now
-        log.warning(f"[SINA-WAIT] {wait:.1f}s")
-        await asyncio.sleep(wait)
+        log.debug(f"[SINA-DD-COOLING-SKIP] 剩余 {wait:.1f}s，立即返回缓存，不等待")
+        return None
 
     try:
         loop = asyncio.get_running_loop()
@@ -630,6 +631,9 @@ def get_sina_all_json_dd(vol='0', type='0', num='10000', retry_count=3, pause=0.
            if return_hdf_status:
                log.info("load hdf data:%s %s %s"%(h5_fname,h5_table,len(h5)))
                return h5
+    if time.time() < g_sina_blocked.get('blocked_until', 0) or not cct.get_work_time():
+        log.debug("[SINA-DD-CACHE-ONLY] 退避/休市期间不查询大单，立即返回已有缓存")
+        return h5 if h5 is not None and not h5.empty else []
     log.info(f'limit_time:{limit_time}')
     url_list = _get_sina_json_dd_url(vol, type, num)
     df = pd.DataFrame()
@@ -1197,6 +1201,29 @@ _MARKET_COUNT_CACHE_EXPIRES = {}
 _SINA_REFRESH_LOCK = threading.Lock()
 _SINA_HDF_LOCK = threading.RLock()
 _SINA_CACHE_UNSET = object()
+_SINA_HTTP_LOCAL = threading.local()
+
+
+def _read_sina_market_text(url, timeout=3.5):
+    """Reuse a requests connection per worker; avoid urllib's slow TLS path."""
+    session = getattr(_SINA_HTTP_LOCAL, 'session', None)
+    if session is None:
+        session = requests.Session()
+        _SINA_HTTP_LOCAL.session = session
+    try:
+        response = session.get(url, headers=sinaheader, timeout=(timeout, timeout))
+    except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as exc:
+        if not url.startswith('https://'):
+            raise
+        fallback_url = 'http://' + url[len('https://'):]
+        log.warning(f"[SINA-HTTPS-FALLBACK] {type(exc).__name__}: {exc}; 改用 HTTP - URL {fallback_url}")
+        response = session.get(fallback_url, headers=sinaheader, timeout=(timeout, timeout))
+    with response:
+        response.raise_for_status()
+        response.encoding = 'utf-8'
+        return response.text
+
+
 
 def _get_sina_Market_url(market='sh_a', num='200', deadline=None):
     url_list = []
@@ -1205,7 +1232,7 @@ def _get_sina_Market_url(market='sh_a', num='200', deadline=None):
     if total_stocks is not None and now_ts >= _MARKET_COUNT_CACHE_EXPIRES.get(market, 0):
         total_stocks = None
 
-    has_recent_fail = (now_ts - g_sina_blocked.get('last_failed_ts', 0)) < 600
+    has_recent_fail = now_ts < g_sina_blocked.get('blocked_until', 0)
     is_cooling = g_sina_blocked.get('cooling', False) and now_ts < g_sina_blocked.get('blocked_until', 0)
 
     # 仅在无缓存、无近期失败且未处于冷却期时，才尝试拉取一次
@@ -1214,9 +1241,9 @@ def _get_sina_Market_url(market='sh_a', num='200', deadline=None):
         try:
             remaining = (deadline - time.monotonic()) if deadline is not None else 1.0
             if remaining > 0:
-                request = Request(url, headers=sinaheader)
-                with urlopen(request, timeout=min(1.0, remaining)) as response:
-                    data = response.read(64).decode('ascii', errors='ignore').strip()
+                data = _read_sina_market_text(url, timeout=min(1.0, remaining)).strip()
+                # Sina returns a JSON string (e.g. '"348"'), not a bare integer.
+                data = data.strip('"')
                 if re.fullmatch(r'\d{2,5}', data):
                     count = int(data)
                     if 100 <= count <= 20000:
@@ -1224,10 +1251,11 @@ def _get_sina_Market_url(market='sh_a', num='200', deadline=None):
                         _MARKET_COUNT_CACHE[market] = total_stocks
                         _MARKET_COUNT_CACHE_EXPIRES[market] = now_ts + 3600
         except Exception as e:
-            log.debug(f"[SINA-URL-COUNT-ERR] {market} count fetch error: {e}")
+            log.warning(f"[SINA-URL-COUNT-ERR] {market} count fetch error: {e}")
 
     if total_stocks is None:
         total_stocks = _MARKET_DEFAULT_COUNTS.get(market, 2500)
+        log.warning(f"[SINA-COUNT-FALLBACK] market={market} 数量查询不可用，暂用估计数量 {total_stocks}；分页可能不完整。")
         _MARKET_COUNT_CACHE[market] = total_stocks
         _MARKET_COUNT_CACHE_EXPIRES[market] = now_ts + 30
 
@@ -1242,13 +1270,7 @@ def _get_sina_Market_url(market='sh_a', num='200', deadline=None):
 # 数据解析（强风控识别）
 # =========================
 def _parsing_Market_price_json(url):
-    request = Request(url, headers=sinaheader)
-    with urlopen(request, timeout=3.5) as response:
-        status = getattr(response, 'status', 200)
-        if status != 200:
-            raise ValueError(f"HTTP status {status}")
-        charset = response.headers.get_content_charset() or 'utf-8'
-        text = response.read().decode(charset, errors='replace')
+    text = _read_sina_market_text(url)
     if not text:
         raise ValueError("empty response")
     if text in ('null', 'None') or text.lstrip().lower().startswith(('<html', '<!doctype')):
@@ -1285,11 +1307,12 @@ async def _fetch_with_delay(url, pause_range, stagger_sec=0.0):
 
     loop = asyncio.get_running_loop()
     df = None
+    request_start = time.monotonic()
     try:
         df = await loop.run_in_executor(None, _parsing_Market_price_json, url)
     except Exception as e:
         # 一个批次可能同时有多个 502；失败状态在批次汇总处只记录一次。
-        log.debug(f"[SINA-REQUEST-FAIL] {url}: {e}")
+        log.error(f"[SINA-REQUEST-FAIL] elapsed={time.monotonic() - request_start:.2f}s {type(e).__name__}: {e} - URL {url}")
         return None
 
     if df is not None and not df.empty:
@@ -1492,14 +1515,14 @@ def _refresh_sina_Market_json(market='all', showtime=True, num='100', retry_coun
 
         now_ts = time.time()
         is_cooling = g_sina_blocked.get('cooling', False) and now_ts < g_sina_blocked.get('blocked_until', 0)
-        has_recent_fail = (now_ts - g_sina_blocked.get('last_failed_ts', 0)) < 600
+        has_recent_fail = now_ts < g_sina_blocked.get('blocked_until', 0)
 
         o_time = h5[h5.timel != 0].timel if 'timel' in h5.columns else []
         l_time = (now_ts - o_time.iloc[0]) if len(o_time) > 0 else 999999
         is_fresh = (l_time < limit_time)
 
-        # 🚨 极速拦截 1: 处于 API 限流冷却期中，或 10 分钟内曾发生失败，且磁盘缓存有充足股票（>1000），0毫秒复用缓存，绝不上网！
-        if (is_cooling or has_recent_fail) and len(h5) >= 1000:
+        # 退避期内复用完整缓存；到期后允许重试，避免额外锁住 10 分钟。
+        if now_ts < g_sina_blocked.get('blocked_until', 0) and len(h5) >= 1000:
             remaining_min = max(0.0, (g_sina_blocked.get('blocked_until', 0) - now_ts) / 60.0)
             log.debug(f"[HDF-FAST-HIT] 系统处于API冷却或网络异常期 (剩余 {remaining_min:.1f}min), 直接复用磁盘 HDF 缓存 ({len(h5)} 只股票), 绝不卡死主流程！")
             dd = _format_and_slice_df(h5, market)
@@ -1540,16 +1563,14 @@ def _refresh_sina_Market_json(market='all', showtime=True, num='100', retry_coun
         return sina_data.Sina(readonly=True).get_major_indices()
 
     # --------- URL 构建 ---------
-    max_wall_time = 30.0
-    fetch_start_time = time.monotonic()
-    fetch_deadline = fetch_start_time + max_wall_time
+    log.info(f"[SINA-COUNT-START] market={market} num={num}")
     url_list = []
     # SINA_Market_KEY = {'sh': 'sh_a', 'sz': 'sz_a', 'cyb': 'cyb','kcb':'kcb','bj':'hs_bjs'}
     if market == 'all':
         for m in ('sh_a', 'sz_a' , 'hs_bjs'):
-            url_list.extend(_get_sina_Market_url(m, num, deadline=fetch_deadline))
+            url_list.extend(_get_sina_Market_url(m, num))
     else:
-        url_list = _get_sina_Market_url(ct.SINA_Market_KEY.get(market, market), num, deadline=fetch_deadline)
+        url_list = _get_sina_Market_url(ct.SINA_Market_KEY.get(market, market), num)
 
     if not url_list:
         log.error("no url list")
@@ -1559,6 +1580,7 @@ def _refresh_sina_Market_json(market='all', showtime=True, num='100', retry_coun
         f"[SINA-FETCH] urls={len(url_list)} batch={batch_size} "
         f"pause={pause_range} block={g_sina_blocked['count']}"
     )
+    log.info(f"[SINA-REFRESH-START] market={market} pages={len(url_list)} batch={batch_size}")
     df_list = []
     try:
         loop = asyncio.get_event_loop()
@@ -1568,6 +1590,10 @@ def _refresh_sina_Market_json(market='all', showtime=True, num='100', retry_coun
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
     total_batches = (len(url_list) + batch_size - 1) // batch_size
+    # Count discovery must not consume the quote budget. With connection reuse,
+    # the normal full-market refresh should fit within 30 seconds.
+    max_wall_time = 30.0
+    fetch_start_time = time.monotonic()
     fetch_success = True
 
     failure_reason = 'incomplete response'
@@ -1588,6 +1614,14 @@ def _refresh_sina_Market_json(market='all', showtime=True, num='100', retry_coun
             # 每个请求自身有 3.5s 网络超时；不再 wait_for 取消线程池任务，
             # 避免协程已超时、底层 socket 仍运行而新一轮又启动。
             rs = loop.run_until_complete(asyncio.gather(*tasks))
+            failed_indices = [idx for idx, result in enumerate(rs) if result is None or result.empty]
+            if failed_indices and retry_count > 1:
+                log.warning(f"[SINA-PAGE-RETRY] batch={batch_num}/{total_batches} retry_pages={len(failed_indices)}")
+                retry_tasks = [_fetch_with_delay(url_list[i + idx], pause_range, stagger_sec=pos * 0.08)
+                               for pos, idx in enumerate(failed_indices)]
+                retried = loop.run_until_complete(asyncio.gather(*retry_tasks))
+                for idx, result in zip(failed_indices, retried):
+                    rs[idx] = result
             failed_urls = []
             for r_idx, r in enumerate(rs):
                 if r is None or r.empty:
@@ -1617,7 +1651,7 @@ def _refresh_sina_Market_json(market='all', showtime=True, num='100', retry_coun
         log.error(
             f"[SINA-FATAL] 刷新不完整，expected_pages={len(url_list)} "
             f"received_pages={len(df_list)} retry={retry_count}; "
-            f"{failure_reason}. HDF 写入已取消，{backoff_sec}s 后再试。"
+            f"{failure_reason}; url={failure_url or 'n/a'}. HDF 写入已取消，{backoff_sec}s 后再试。"
         )
 
         if h5 is not None and len(h5) > 0:
@@ -1633,6 +1667,7 @@ def _refresh_sina_Market_json(market='all', showtime=True, num='100', retry_coun
         g_sina_blocked['last_failed_ts'] = 0
         g_sina_blocked['blocked_until'] = 0
         g_sina_blocked['cooling'] = False
+        log.info(f"[SINA-REFRESH-COMPLETE] pages={len(df_list)}/{len(url_list)} elapsed={time.monotonic() - fetch_start_time:.1f}s")
         df = pd.concat(df_list, ignore_index=True)
         if 'ratio' in df.columns:
             df['ratio'] = df['ratio'].astype(float).round(2)
@@ -1795,11 +1830,13 @@ def get_sina_Market_json(market='all', showtime=True, num='100', retry_count=3, 
     except Exception as exc:
         log.warning(f"[SINA-TRADE-DAY] 无法确认交易日状态，按非交易日保护: {exc}")
         is_trade_day = False
-    if not is_trade_day:
-        # 休市期间只复用本地快照；冷启动或缓存不可用时不触发同步网络首刷。
+    if not is_trade_day and has_cache_result and len(h5) >= 1000:
+        # 休市复用完整快照；无缓存或残缺缓存仍允许后台补建。
         return cached_result
+    if not is_trade_day:
+        log.warning("[SINA-HOLIDAY-COLD-START] 非交易日但缺少完整缓存，继续获取最近交易日行情以补建 HDF")
 
-    has_recent_fail = 0 <= now_ts - g_sina_blocked.get('last_failed_ts', 0) < 600
+    has_recent_fail = now_ts < g_sina_blocked.get('blocked_until', 0)
     is_cooling = g_sina_blocked.get('cooling', False) and now_ts < g_sina_blocked.get('blocked_until', 0)
     stale_close = has_h5 and not (has_recent_fail or is_cooling) and _sina_cache_needs_close_refresh(h5)
 
@@ -1814,13 +1851,13 @@ def get_sina_Market_json(market='all', showtime=True, num='100', retry_count=3, 
             if not times.empty:
                 cache_age = max(0.0, now_ts - float(times.iloc[0]))
         if has_cache_result and not stale_close and (
-            force_cache or has_recent_fail or is_cooling or
+            force_cache or is_cooling or
             (cache_age < limit_time) or not cct.get_work_time()
         ):
             return cached_result
 
     # 有完整基线时不让调用方同步等待网络；同一进程最多运行一个刷新器。
-    if has_h5 and len(h5) >= 1000:
+    if (has_h5 and len(h5) >= 1000) or threading.current_thread() is threading.main_thread():
         if not _SINA_REFRESH_LOCK.acquire(blocking=False):
             return cached_result
         args = (market, False, num, retry_count, pause, batch_size, pause_range)
@@ -1832,6 +1869,8 @@ def get_sina_Market_json(market='all', showtime=True, num='100', retry_count=3, 
                 daemon=True,
             )
             worker.start()
+            if not has_cache_result:
+                log.warning("[SINA-COLD-START] 缓存为空，后台加载全市场行情；主线程立即返回，后续调用读取完成后的缓存")
             return cached_result
         except Exception:
             _SINA_REFRESH_LOCK.release()
