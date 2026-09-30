@@ -2596,8 +2596,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         max_single_task.update({"name": t_name, "dur": task_dur})
 
                     # 统计慢任务
-                    # if task_dur > SLOW_TASK_WARN_MS:
-                    #     logger.warning(f"🚨 [UI_BLOCK] 慢任务: {t_name} {task_dur:.1f}ms")
+                    if task_dur > SLOW_TASK_WARN_MS:
+                        logger.warning(f"[UI-SLOW-TASK] task={t_name} elapsed={task_dur:.1f}ms")
 
                     # 🚀 [YIELD] 每 5 个任务主动呼吸一次，保持窗口可拖动
                     if processed_count % 5 == 0:
@@ -6270,8 +6270,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.global_values.setkey("blkname", market_info["blkname"])
 
         self.refresh_flag.value = False
-        time.sleep(0.6)
-        self.refresh_flag.value = True
+        self._schedule_after(600, self.start_refresh)
         self.status_var.set(f"手动刷新: resample={resample}")
 
 
@@ -6867,6 +6866,14 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             if not full_df.empty:
                 self._run_live_strategy_process(full_df)
 
+            # Cache enrichment may wait for the minute-cache lock; keep it off Tk.
+            cache = getattr(getattr(self, 'realtime_service', None), 'kline_cache', None)
+            if cache is not None:
+                try:
+                    cache.set_df_all_cache(full_df)
+                except Exception as ex:
+                    logger.error(f"[Compute] Failed to set df_all_cache: {ex}")
+
             return (full_df, df, sync_ui, cur_res, force, full_df_res)
 
         except Exception as e:
@@ -7033,12 +7040,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     self.df_all = full_df
                     self.df_all_res = full_df_res if full_df_res is not None else full_df
                 
-                # 缓存 df_all 到分时 K 线缓存中，避免高频均线补齐时读取磁盘 HDF5
-                if hasattr(self, 'realtime_service') and self.realtime_service and hasattr(self.realtime_service, 'kline_cache'):
-                    try:
-                        self.realtime_service.kline_cache.set_df_all_cache(full_df)
-                    except Exception as ex:
-                        logger.error(f"[Sync] Failed to set df_all_cache: {ex}")
 
                 # 🚀 [CORE FIX] 策略动态均线与 TWAP/VWAP 挂载完成后自动刷新策略显示 (防止显示为空及免去手动点击筛选)
                 current_query = getattr(self, '_last_value', "")
@@ -7988,6 +7989,15 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         except: pass
                         
                         logger.warning(f"🚨 [UI_BLOCK] 主线程假死检测! 延迟: {delay:.2f}s | Queue积压: {q_size if q_size >= 0 else 'N/A'}")
+                        # Read only Python frames; never call Tk from the watchdog.
+                        try:
+                            import sys
+                            import traceback
+                            frame = sys._current_frames().get(threading.main_thread().ident)
+                            if frame is not None:
+                                logger.warning("[UI-BLOCK-STACK]\n%s", ''.join(traceback.format_stack(frame, limit=12)))
+                        except Exception:
+                            logger.debug("[UI-BLOCK-STACK] 堆栈读取失败", exc_info=True)
                         # 🧬 [NEW] 联动自动画像审计：同步输出最近周期的 Top 10 耗时任务
                         # self.show_ui_performance_audit(reset=False)
                         
@@ -19776,42 +19786,43 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     pass
 
     def update_all_top10_windows(self):
-        """强制刷新所有当前打开的 Concept Top10 窗口数据 (防假死 + 可见性节流)"""
-        updated_count = 0
-        # 1. 刷新独立窗口字典
-        if hasattr(self, "_pg_top10_window_simple"):
-            for k, v in list(self._pg_top10_window_simple.items()):
-                win = v.get("win")
-                # 检查是否开启了自动刷新与未最小化
-                if win and win.winfo_exists() and getattr(win, "_chk_auto", None) and win._chk_auto.get():
-                    try:
-                        if win.state() == 'iconic':
-                            continue
-                    except Exception:
-                        pass
-                    concept_name = getattr(win, "_concept_name", None)
-                    if concept_name:
-                        self._fill_concept_top10_content(win, concept_name)
-                        updated_count += 1
-                        # 🚀 [YIELD] 每刷新 3 个窗口主动呼吸一次，维持 UI 消息泵丝滑响应
-                        if updated_count % 3 == 0:
-                            try:
-                                self.update_idletasks()
-                            except Exception:
-                                pass
+        """Refresh one concept window per Tk event turn; coalesce overlapping rounds."""
+        if getattr(self, '_top10_refresh_pending', False):
+            return
+        windows = [entry.get("win") for entry in getattr(self, "_pg_top10_window_simple", {}).values()]
+        shared = getattr(self, "_concept_top10_win", None)
+        if shared is not None and shared not in windows:
+            windows.append(shared)
+        pending = iter(win for win in windows if win is not None)
+        self._top10_refresh_pending = True
 
-        # 2. 刷新复用窗口
-        if hasattr(self, "_concept_top10_win"):
-            win = self._concept_top10_win
-            if win and win.winfo_exists() and getattr(win, "_chk_auto", None) and win._chk_auto.get():
-                try:
+        def refresh_next():
+            if getattr(self, '_is_closing', False):
+                self._top10_refresh_pending = False
+                return
+            win = next(pending, None)
+            if win is None:
+                self._top10_refresh_pending = False
+                return
+            started = time.perf_counter()
+            try:
+                if win.winfo_exists() and getattr(win, "_chk_auto", None) and win._chk_auto.get():
                     if win.state() != 'iconic':
                         concept_name = getattr(win, "_concept_name", None)
                         if concept_name:
                             self._fill_concept_top10_content(win, concept_name)
-                except Exception:
-                    pass
-        logger.debug(f'update_all_top10_windows_finish')
+            except Exception:
+                logger.exception("[TOP10-REFRESH] 概念窗口刷新失败")
+            finally:
+                elapsed = (time.perf_counter() - started) * 1000
+                if elapsed > 500:
+                    logger.warning(f"[UI-SLOW-TASK] task=top10 elapsed={elapsed:.1f}ms")
+                try:
+                    self.after(10, refresh_next)
+                except tk.TclError:
+                    self._top10_refresh_pending = False
+
+        refresh_next()
 
     def _fill_concept_top10_content(self, win, concept_name, df_concept=None, code=None, limit=50, is_init=False):
         """
@@ -22648,12 +22659,74 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 nonlocal is_refreshing_pool
                 is_refreshing_pool = False
 
+            favorites_sync_running = False
+
+            def sync_pool_favorites():
+                nonlocal favorites_sync_running
+                try:
+                    with self.realtime_service.kline_cache._lock:
+                        pool = set(self.realtime_service.kline_cache.get_v_reversal_pool())
+                    # 自动将系统中的重点关注个股加入到监控池
+                    try:
+                        from global_favorites import GlobalFavoriteManager
+                        fav_stocks = {str(x).strip().zfill(6) for x in GlobalFavoriteManager().get_favorite_stocks()}
+                        fav_stocks = {c for c in fav_stocks if len(c) == 6 and c.isdigit()}
+                        missing_favs = fav_stocks - set(pool)
+                        if missing_favs:
+                            added_count = 0
+                            with self.realtime_service.kline_cache._lock:
+                                for code in missing_favs:
+                                    state = self.realtime_service.kline_cache._consolidation_flags.get(code, {})
+                                    state["phase"] = "CONSOLIDATING"
+                                    klines = self.realtime_service.kline_cache.get_klines(code, n=1)
+                                    state["anchor_low"] = float(klines[0]['close']) if klines else 0.0
+                                    klines_5 = self.realtime_service.kline_cache.get_klines(code, n=5)
+                                    state["base_vol"] = float(np.mean([k['volume'] for k in klines_5])) if klines_5 else 0.0
+
+                                    # 保持最初入池时间，若已有则继承，首次进池才赋予今天
+                                    existing_entry = state.get("entry_date") or state.get("first_entry_date")
+                                    if not existing_entry or existing_entry == "-":
+                                        state["entry_date"] = cct.get_today()
+                                        state["first_entry_date"] = cct.get_today()
+                                        state["entry_ts"] = time.time()
+                                        state["first_entry_ts"] = time.time()
+                                    else:
+                                        state["entry_date"] = existing_entry
+                                        state["first_entry_date"] = existing_entry
+                                    if "phase_entry_date" not in state:
+                                        state["phase_entry_date"] = cct.get_today()
+                                        state["phase_ts"] = time.time()
+
+                                    state["last_fail_ts"] = 0
+                                    state["name"] = get_stock_name(code)
+                                    # 注入时预填 structure 占位，由状态机下次 tick 通过自愈补齐器更新为真实值
+                                    if "structure" not in state or not state["structure"]:
+                                        state["structure"] = "待计算"
+
+                                    self.realtime_service.kline_cache._consolidation_flags[code] = state
+                                    self.realtime_service.kline_cache._v_reversal_pool.add(code)
+                                    added_count += 1
+                                if added_count > 0:
+                                    self.realtime_service.kline_cache.save_consolidation_state()
+                                    logger.warning(f"系统同步：自动将 {added_count} 只重点关注个股添加到 V-Reversal 监控池")
+                                    pool = self.realtime_service.kline_cache.get_v_reversal_pool()
+                    except Exception as ex:
+                        logger.error(f"Auto-adding favorite stocks to pool failed: {ex}")
+
+                except Exception:
+                    logger.exception("[POOL-FAVORITES] 后台同步失败")
+                finally:
+                    favorites_sync_running = False
+
             # 刷新池中数据
             def refresh_pool_data():
                 nonlocal is_refreshing_pool, current_sort_column, current_sort_reverse
-                if not log_win.winfo_exists():
+                if not log_win.winfo_exists() or is_refreshing_pool:
+                    return
+                if getattr(getattr(self, 'realtime_service', None), 'kline_cache', None) is None:
                     return
                 is_refreshing_pool = True
+                refresh_started = time.perf_counter()
                 
                 # 记录当前选中项，以便刷新后恢复选中
                 selected_item = tree.selection()
@@ -22668,61 +22741,31 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 except Exception:
                     y_scroll_pos = x_scroll_pos = None
 
-                # 清理旧数据
-                for item in tree.get_children():
-                    tree.delete(item)
-
                 if hasattr(self, 'realtime_service') and self.realtime_service and hasattr(self.realtime_service, 'kline_cache'):
+                    cache_lock = self.realtime_service.kline_cache._lock
+                    pool_locked = False
                     try:
+                        pool_locked = cache_lock.acquire(blocking=False)
+                        if not pool_locked:
+                            now = time.monotonic()
+                            if now - getattr(self, '_last_pool_busy_warning', 0) >= 30:
+                                self._last_pool_busy_warning = now
+                                logger.warning("[POOL-CACHE-BUSY] 后台数据任务持锁，跳过本轮监控池刷新并保留画面")
+                            return  # Preserve visible rows while the data worker owns the cache.
+                        children = tree.get_children()
+                        if children:
+                            tree.delete(*children)
                         pool = self.realtime_service.kline_cache.get_v_reversal_pool()
 
-                        # 自动将系统中的重点关注个股加入到监控池
-                        try:
-                            from global_favorites import GlobalFavoriteManager
-                            fav_stocks = {str(x).strip().zfill(6) for x in GlobalFavoriteManager().get_favorite_stocks()}
-                            fav_stocks = {c for c in fav_stocks if len(c) == 6 and c.isdigit()}
-                            missing_favs = fav_stocks - set(pool)
-                            if missing_favs:
-                                added_count = 0
-                                with self.realtime_service.kline_cache._lock:
-                                    for code in missing_favs:
-                                        state = self.realtime_service.kline_cache._consolidation_flags.get(code, {})
-                                        state["phase"] = "CONSOLIDATING"
-                                        klines = self.realtime_service.kline_cache.get_klines(code, n=1)
-                                        state["anchor_low"] = float(klines[0]['close']) if klines else 0.0
-                                        klines_5 = self.realtime_service.kline_cache.get_klines(code, n=5)
-                                        state["base_vol"] = float(np.mean([k['volume'] for k in klines_5])) if klines_5 else 0.0
-                                        
-                                        # 保持最初入池时间，若已有则继承，首次进池才赋予今天
-                                        existing_entry = state.get("entry_date") or state.get("first_entry_date")
-                                        if not existing_entry or existing_entry == "-":
-                                            state["entry_date"] = cct.get_today()
-                                            state["first_entry_date"] = cct.get_today()
-                                            state["entry_ts"] = time.time()
-                                            state["first_entry_ts"] = time.time()
-                                        else:
-                                            state["entry_date"] = existing_entry
-                                            state["first_entry_date"] = existing_entry
-                                        if "phase_entry_date" not in state:
-                                            state["phase_entry_date"] = cct.get_today()
-                                            state["phase_ts"] = time.time()
-                                            
-                                        state["last_fail_ts"] = 0
-                                        state["name"] = get_stock_name(code)
-                                        # 注入时预填 structure 占位，由状态机下次 tick 通过自愈补齐器更新为真实值
-                                        if "structure" not in state or not state["structure"]:
-                                            state["structure"] = "待计算"
+                        nonlocal favorites_sync_running
+                        if not favorites_sync_running:
+                            favorites_sync_running = True
+                            try:
+                                threading.Thread(target=sync_pool_favorites, name="TkPoolFavorites", daemon=True).start()
+                            except Exception:
+                                favorites_sync_running = False
+                                logger.exception("[POOL-FAVORITES] 无法启动后台同步")
 
-                                        self.realtime_service.kline_cache._consolidation_flags[code] = state
-                                        self.realtime_service.kline_cache._v_reversal_pool.add(code)
-                                        added_count += 1
-                                    if added_count > 0:
-                                        self.realtime_service.kline_cache.save_consolidation_state()
-                                        logger.warning(f"系统同步：自动将 {added_count} 只重点关注个股添加到 V-Reversal 监控池")
-                                        pool = self.realtime_service.kline_cache.get_v_reversal_pool()
-                        except Exception as ex:
-                            logger.error(f"Auto-adding favorite stocks to pool failed: {ex}")
-                        
                         # 统计各阶段数量与通道股数量
                         stats = {"INIT": 0, "CONSOLIDATING": 0, "WAVE_UP": 0, "PULLBACK": 0, "WAVE_UP_2": 0, "CHANNEL": 0}
                         total_count = 0
@@ -22865,7 +22908,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                             # 优先使用已持久化保存的名称，省去每次查询开销
                             name = flags.get("name")
                             if not name or name == "未知":
-                                name = get_stock_name(code)
+                                name = _GLOBAL_CODE_NAME_CACHE.get(str(code).strip().zfill(6)) or get_df_all_val(code, "name", "未知")
                                 if name and name != "未知":
                                     with self.realtime_service.kline_cache._lock:
                                         self.realtime_service.kline_cache._consolidation_flags[code]["name"] = name
@@ -23018,6 +23061,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     except Exception as e:
                         logger.error(f"Error in refreshing pool tree: {e}")
                     finally:
+                        if pool_locked:
+                            cache_lock.release()
+                        elapsed = (time.perf_counter() - refresh_started) * 1000
+                        if elapsed > 500:
+                            logger.warning(f"[UI-SLOW-TASK] task=refresh_pool_data elapsed={elapsed:.1f}ms")
                         if log_win.winfo_exists():
                             try:
                                 log_win.after(200, reset_refreshing_flag)
