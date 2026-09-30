@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import html
 import math
+import multiprocessing
 import queue
 import re
 import sqlite3
@@ -2133,14 +2134,16 @@ def _is_market_session_active() -> bool:
         return False
 
 
-def _static_pass_completed_today(root: Path) -> bool:
-    state = _read_json(root / "data" / "ipo_learning" / "acquisition_queue.latest.json", max_bytes=512 * 1024) or {}
-    today = datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat()
-    return state.get("static_pass_completed_day") == today
+def _source_poll_window_active(now: Optional[datetime] = None) -> bool:
+    zone = ZoneInfo("Asia/Shanghai")
+    local_now = datetime.now(zone) if now is None else now
+    local_now = local_now.replace(tzinfo=zone) if local_now.tzinfo is None else local_now.astimezone(zone)
+    minute = local_now.hour * 60 + local_now.minute
+    return local_now.weekday() < 5 and 8 * 60 + 55 <= minute <= 15 * 60 + 40
 
 
 def _source_auto_interval_ms(now: Optional[datetime] = None) -> int:
-    """Poll live data on market cadence and drain local historical work off-session."""
+    """Poll every five minutes in-window; otherwise wake at the next weekday opening."""
     try:
         zone = ZoneInfo("Asia/Shanghai")
         local_now = datetime.now(zone) if now is None else now
@@ -2148,10 +2151,14 @@ def _source_auto_interval_ms(now: Optional[datetime] = None) -> int:
             local_now = local_now.replace(tzinfo=zone)
         else:
             local_now = local_now.astimezone(zone)
-        minute = local_now.hour * 60 + local_now.minute
-        if local_now.weekday() < 5 and 8 * 60 + 55 <= minute <= 15 * 60 + 40:
+        if _source_poll_window_active(local_now):
             return 5 * 60 * 1000
-        return 2 * 1000
+        next_poll = local_now.replace(hour=8, minute=55, second=0, microsecond=0)
+        if next_poll <= local_now:
+            next_poll += timedelta(days=1)
+        while next_poll.weekday() >= 5:
+            next_poll += timedelta(days=1)
+        return max(1000, int((next_poll - local_now).total_seconds() * 1000))
     except Exception:
         return 60 * 60 * 1000
 
@@ -2161,19 +2168,40 @@ class _LearningMonitorWorker(QThread):
     review_completed = pyqtSignal(str, bool, str)
     outcome_review_completed = pyqtSignal(str, bool, str)
     interaction_detail_ready = pyqtSignal(str, str)
+    snapshot_detail_ready = pyqtSignal(str, object)
+    monitor_failed = pyqtSignal(str)
 
     def __init__(self, project_root: Path, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self._root = project_root
         self._commands: "queue.Queue[Dict[str, str]]" = queue.Queue(maxsize=32)
         self._stopping = False
-        self._interval = 2.0
+        self._interval = 5.0
+        self._refresh_lock = threading.Lock()
+        self._refresh_pending = False
+        self._snapshot_pending = threading.Event()
 
     def request_refresh(self) -> None:
+        with self._refresh_lock:
+            if self._refresh_pending or self._stopping:
+                return
+            try:
+                self._commands.put_nowait({"command": "refresh"})
+                self._refresh_pending = True
+            except queue.Full:
+                pass
+
+    def snapshot_consumed(self) -> None:
+        self._snapshot_pending.clear()
+
+    def request_snapshot_detail(self, snapshot_id: str) -> bool:
+        if not isinstance(snapshot_id, str) or not re.fullmatch(r"[0-9a-f]{64}", snapshot_id):
+            return False
         try:
-            self._commands.put_nowait({"command": "refresh"})
+            self._commands.put_nowait({"command": "snapshot_detail", "snapshot_id": snapshot_id})
+            return True
         except queue.Full:
-            pass
+            return False
 
     def request_interaction_detail(self, request_id: str) -> bool:
         if not isinstance(request_id, str) or not request_id.strip() or len(request_id) > 128:
@@ -2259,11 +2287,14 @@ class _LearningMonitorWorker(QThread):
             market_active = _is_market_session_active()
             payload = None
             try:
-                timeout = self._interval if market_active else 60.0
+                timeout = self._interval if market_active else 30.0
                 payload = self._commands.get(timeout=timeout)
                 command = payload.get("command")
                 if command == "stop":
                     break
+                if command == "refresh":
+                    with self._refresh_lock:
+                        self._refresh_pending = False
                 if command == "note":
                     self._append_note(payload)
                 elif command == "review":
@@ -2278,10 +2309,26 @@ class _LearningMonitorWorker(QThread):
                     )
                 elif command == "interaction_detail":
                     self._load_interaction_detail(payload.get("request_id", ""))
+                elif command == "snapshot_detail":
+                    snapshot_id = payload.get("snapshot_id", "")
+                    try:
+                        from ats.llm.learning_snapshot_store import get_snapshot_record
+                        detail = get_snapshot_record(self._root, snapshot_id)
+                    except Exception:
+                        detail = None
+                    self.snapshot_detail_ready.emit(snapshot_id, detail)
             except queue.Empty:
                 pass
-            if not self._stopping and (market_active or payload is not None):
-                self.snapshot_ready.emit(_collect_snapshot(self._root))
+            except Exception as exc:
+                self.monitor_failed.emit(f"监控命令失败：{type(exc).__name__}")
+            if not self._stopping and not self._snapshot_pending.is_set():
+                try:
+                    snapshot = _collect_snapshot(self._root)
+                except Exception as exc:
+                    self.monitor_failed.emit(f"监控读取失败：{type(exc).__name__}")
+                    continue
+                self._snapshot_pending.set()
+                self.snapshot_ready.emit(snapshot)
 
     def _load_interaction_detail(self, request_id: str) -> None:
         try:
@@ -2452,6 +2499,53 @@ class _LearningMonitorWorker(QThread):
         return True, "复核已写入审计数据库和事件日志。"
 
 
+def _print_source_cycle_summary(result: Dict[str, Any]) -> None:
+    count = _nonnegative_count(result.get("ready_count"))
+    required = _nonnegative_count(result.get("required_count"))
+    source_collection = result.get("source_collection", {})
+    source_collection = source_collection if isinstance(source_collection, dict) else {}
+    signal_capture = result.get("ats_signal_capture", {})
+    signal_capture = signal_capture if isinstance(signal_capture, dict) else {}
+    historical = result.get("historical_analysis", {})
+    historical = historical if isinstance(historical, dict) else {}
+    matured_pending = sum(
+        isinstance(item, dict) and item.get("status") == "MATURED_PENDING_REVIEW"
+        for item in result.get("label_reports", [])
+    ) if isinstance(result.get("label_reports"), list) else 0
+    ticker_for_log = _safe_text(
+        result.get("auto_selected_ticker") or result.get("ticker"), 6
+    ) or "未知"
+    queue_index = _nonnegative_count(result.get("auto_queue_index"))
+    queue_total = _nonnegative_count(result.get("auto_queue_total"))
+    if queue_index and queue_total:
+        parts_queue = f"ATS轮询队列 {queue_index}/{queue_total}"
+    else:
+        parts_queue = "手动标的"
+    print(
+        "[IPO Console] 本轮结束："
+        f"队列={parts_queue}，标的={ticker_for_log}，契约就绪={count}/{required}，"
+        f"ATS来源={source_collection.get('status', '未知')}/"
+        f"{source_collection.get('mode', '未知')}，"
+        f"静态情绪={historical.get('emotion_score', '--')}/100 "
+        f"({historical.get('score_quality', '未运行')})/{historical.get('sentiment', '')}，"
+        f"实时影子样本={signal_capture.get('state', 'UNREADY')}，"
+        f"新增D1-D3待复核={matured_pending}。"
+        f"{_safe_text(source_collection.get('reason'), 140)}",
+        flush=True,
+    )
+
+
+def _source_acquisition_process(root: str, ticker: str, collect_labels: bool, channel: Any) -> None:
+    """Windows spawn entry: all ATS reads/calculations remain outside the GUI process."""
+    try:
+        worker = _SourceAcquisitionWorker(Path(root), ticker, collect_labels)
+        result = worker._run_cycle()
+        channel.send(result)
+        _print_source_cycle_summary(result)
+    finally:
+        channel.close()
+
+
 class _SourceAcquisitionWorker(QThread):
     completed = pyqtSignal(dict)
 
@@ -2463,8 +2557,63 @@ class _SourceAcquisitionWorker(QThread):
         self._root = project_root
         self._ticker = ticker
         self._collect_labels = collect_labels
+        self._stop_requested = threading.Event()
 
     def run(self) -> None:
+        receiver = sender = process = None
+        result: Dict[str, Any] = {"status": "UNREADY", "reason": "采集子进程未返回有效结果"}
+        try:
+            context = multiprocessing.get_context("spawn")
+            receiver, sender = context.Pipe(duplex=False)
+            process = context.Process(
+                target=_source_acquisition_process,
+                args=(str(self._root), self._ticker, self._collect_labels, sender),
+                name="ipo-ats-acquisition", daemon=True,
+            )
+            process.start()
+            sender.close()
+            deadline = time.monotonic() + 15 * 60
+            while not self._stop_requested.is_set():
+                if receiver.poll(0.1):
+                    payload = receiver.recv()
+                    if isinstance(payload, dict):
+                        result = payload
+                    break
+                if not process.is_alive():
+                    result["reason"] = f"采集子进程提前退出（exitcode={process.exitcode}）"
+                    break
+                if time.monotonic() >= deadline:
+                    result["reason"] = "采集超过 15 分钟，已停止本轮；下个周期可重试"
+                    break
+        except Exception as exc:
+            result["reason"] = f"采集子进程失败：{type(exc).__name__}"
+        finally:
+            if receiver is not None:
+                receiver.close()
+            if sender is not None:
+                sender.close()
+            if process is not None and process.pid is not None:
+                process.join(0.2)
+                if process.is_alive():
+                    process.terminate()
+                    process.join(0.5)
+                if process.is_alive():
+                    process.kill()
+                    process.join(0.5)
+                if not process.is_alive():
+                    process.close()
+        if not self._stop_requested.is_set():
+            if result.get("status") == "UNREADY" and "source_collection" not in result:
+                _append_pipeline_event(
+                    self._root, "ACQUISITION_PROCESS_FAILED", "FAILED", self._ticker,
+                    _safe_text(result.get("reason"), 300),
+                )
+            self.completed.emit(result)
+
+    def stop(self) -> None:
+        self._stop_requested.set()
+
+    def _run_cycle(self) -> Dict[str, Any]:
         queue_state: Optional[Dict[str, Any]] = None
         queue_index: Optional[int] = None
         queue_total: Optional[int] = None
@@ -2524,17 +2673,16 @@ class _SourceAcquisitionWorker(QThread):
                 if not candidates:
                     reason = auto_reason or "ATS 新股/次新股表没有有效的已上市标的"
                     _append_pipeline_event(self._root, "QUEUE_BUILD", "FAILED", "", reason)
-                    self.completed.emit({
+                    return {
                         "status": "UNREADY", "reason": reason,
                         "auto_selected_ticker": "", "auto_selection_reason": "AUTO 队列构建失败",
-                    })
-                    return
+                    }
                 ticker, queue_state, queue_index = _begin_auto_queue_item(self._root, candidates)
                 queue_total = len(queue_state["items"])
                 auto_reason = (
                     f"ATS 轮询队列第 {queue_index + 1}/{queue_total} 个；"
                     + ("本轮处理一个标的，交易时段每 5 分钟继续" if _is_market_session_active()
-                       else "本轮处理一个标的；全名单静态历史评分与队列同时运行")
+                       else "冷启动扫描全名单本地历史；重复读取等待下一自动采集窗口")
                 )
                 _append_pipeline_event(
                     self._root, "QUEUE_ITEM_STARTED", "RUNNING", ticker,
@@ -2611,7 +2759,7 @@ class _SourceAcquisitionWorker(QThread):
             _append_pipeline_event(self._root, "PIPELINE_FAILED", "FAILED", ticker, detail)
             if queue_state is not None and queue_index is not None:
                 _finish_auto_queue_item(self._root, queue_state, ticker, queue_index, result)
-        self.completed.emit(result)
+        return result
 
 
 class IPOOutcomeTableWidget(BaseATSTableWidget):
@@ -2650,15 +2798,20 @@ class IPOLearningConsole(QWidget):
         self._worker.review_completed.connect(self._review_completed)
         self._worker.outcome_review_completed.connect(self._outcome_review_completed)
         self._worker.interaction_detail_ready.connect(self._show_interaction_detail)
+        self._worker.snapshot_detail_ready.connect(self._show_snapshot_detail)
+        self._worker.monitor_failed.connect(self._monitor_failed)
         self._selected_event: Optional[Dict[str, str]] = None
         self._selected_snapshot_id = ""
+        self._pending_snapshot_detail_id = ""
+        self._table_payloads: Dict[str, Any] = {}
         self._pending_interaction_detail_id = ""
         self._review_pending_candidate_ids = set()
         self._outcome_review_pending_ids = set()
         self._outcome_stock_names: Dict[str, str] = {}
         self._runtime_control = None
         self._source_worker: Optional[_SourceAcquisitionWorker] = None
-        self._auto_tick_pending = False
+        self._cold_source_read_pending = True
+        self._closing = False
         self._active_ticker = ""
         self._local_llm_thread: Optional[threading.Thread] = None
         self._build_ui()
@@ -2887,7 +3040,7 @@ class IPOLearningConsole(QWidget):
         replay_metrics_page = QWidget()
         replay_metrics_layout = QVBoxLayout(replay_metrics_page)
         replay_metrics_layout.addWidget(QLabel(
-            "每 2 秒读取最近一次已保存回放的 13 项验收指标。不可评估表示缺少真实标签、基线或回归集，不计为通过。"
+            "盘中每 5 秒、休市每 30 秒读取已保存回放的 13 项验收指标。不可评估表示缺少真实标签、基线或回归集，不计为通过。"
         ))
         self.replay_metrics_table = QTableWidget(0, 4)
         self.replay_metrics_table.setHorizontalHeaderLabels(["验收指标", "状态", "数值", "证据 / 缺口"])
@@ -3308,7 +3461,24 @@ class IPOLearningConsole(QWidget):
         if request_id == self._pending_interaction_detail_id:
             self.interaction_detail.setPlainText(detail)
 
+    def _monitor_failed(self, message: str) -> None:
+        self.lbl_monitor_updated_at.setText(message + "；保留上次结果，稍后重试")
+
+    def _table_changed(self, key: str, payload: Any) -> bool:
+        if key in self._table_payloads and self._table_payloads[key] == payload:
+            return False
+        self._table_payloads[key] = copy.deepcopy(payload)
+        return True
+
     def _render_snapshot(self, snapshot: Dict[str, Any]) -> None:
+        self.setUpdatesEnabled(False)
+        try:
+            self._apply_snapshot(snapshot)
+        finally:
+            self.setUpdatesEnabled(True)
+            self._worker.snapshot_consumed()
+
+    def _apply_snapshot(self, snapshot: Dict[str, Any]) -> None:
         status = snapshot.get("runtime_status", "未知")
         simulation_only = snapshot.get("simulation_only") is True
         refreshed_at = snapshot.get("monitor_updated_at", "未知")
@@ -3515,30 +3685,32 @@ class IPOLearningConsole(QWidget):
                 ), quote=True,
             )
         )
-        self.interaction_table.setRowCount(len(recent_results))
-        for row, record in enumerate(reversed(recent_results)):
-            values = (
-                record.get("completed_at", ""), record.get("ticker", ""),
-                record.get("agent_type", ""), record.get("status", ""),
-                record.get("summary", ""), record.get("request_id", ""),
-            )
-            for col, value in enumerate(values):
-                item = QTableWidgetItem(str(value))
-                if col == 3:
-                    item.setForeground(QColor(
-                        "#65d98a" if item.text() == "OK"
-                        else "#ff7070" if item.text() in {"INVALID", "UNAVAILABLE"}
-                        else "#f0c674"
-                    ))
-                elif col == 4:
-                    item.setToolTip(
-                        "{summary}\n模型：{model}\n提示版本：{prompt}\n结果 SHA-256：{digest}".format(
-                            summary=item.text(), model=record.get("model_id", ""),
-                            prompt=record.get("prompt_version", ""),
-                            digest=record.get("result_sha256", ""),
+        if self._table_changed("interaction", recent_results):
+            self.interaction_table.setRowCount(len(recent_results))
+            for row, record in enumerate(reversed(recent_results)):
+                values = (
+                    record.get("completed_at", ""), record.get("ticker", ""),
+                    record.get("agent_type", ""), record.get("status", ""),
+                    record.get("summary", ""), record.get("request_id", ""),
+                )
+                for col, value in enumerate(values):
+                    item = QTableWidgetItem(str(value))
+                    if col == 3:
+                        item.setForeground(QColor(
+                            "#65d98a" if item.text() == "OK"
+                            else "#ff7070" if item.text() in {"INVALID", "UNAVAILABLE"}
+                            else "#f0c674"
+                        ))
+                    elif col == 4:
+                        item.setToolTip(
+                            "{summary}\n模型：{model}\n提示版本：{prompt}\n结果 SHA-256：{digest}".format(
+                                summary=item.text(), model=record.get("model_id", ""),
+                                prompt=record.get("prompt_version", ""),
+                                digest=record.get("result_sha256", ""),
+                            )
                         )
-                    )
-                self.interaction_table.setItem(row, col, item)
+                    self.interaction_table.setItem(row, col, item)
+
         learning_progress = snapshot.get("learning_progress", {})
         if isinstance(learning_progress, dict):
             last_result = interaction.get("last_result", {})
@@ -3550,7 +3722,7 @@ class IPOLearningConsole(QWidget):
             else:
                 last_result_text = "暂无结果"
             self.lbl_learning_progress.setText(
-                "学习链（每 2 秒刷新）：完整输入快照 {snapshots} · 待 D1-D3 标签 {waiting} · 最近捕获 {snapshot_at} · "
+                "学习链（盘中 5 秒/休市 30 秒刷新）：完整输入快照 {snapshots} · 待 D1-D3 标签 {waiting} · 最近捕获 {snapshot_at} · "
                 "存储 {storage} · 写入队列 {queued} / 丢弃 {dropped} · 写入失败 {writer_failed} | "
                 "近期可复核 {pending} · 已接受 {accepted} · 已拒绝 {rejected} | "
                 "数据集 {dataset} · 事件组 {groups} · 最近封存 {sealed_at} | "
@@ -3800,30 +3972,31 @@ class IPOLearningConsole(QWidget):
             f"缺契约 {uncontracted} 项；过期/无效/来源不匹配 {blocked_or_invalid} 项。"
             "任一必需输入未满足门禁要求时，R9 保持阻断。"
         )
-        self.contract_table.setRowCount(len(contracts))
-        for row, contract in enumerate(contracts):
-            values = (
-                contract.get("field_id", ""), contract.get("ticker", "--"),
-                contract.get("value", "--"),
-                contract.get("source", ""), contract.get("timezone", ""),
-                contract.get("ttl", ""), contract.get("unit", ""),
-                contract.get("window", ""), contract.get("missing_policy", ""),
-                contract.get("as_of_time", ""), contract.get("available_at", ""),
-                contract.get("status", ""), contract.get("acquisition_route", ""),
-                contract.get("next_action", ""),
-            )
-            for col, value in enumerate(values):
-                item = QTableWidgetItem(str(value))
-                if col == 11:
-                    text = item.text()
-                    color = (
-                        "#65d98a" if text.startswith("新鲜") else
-                        "#f0c674" if text.startswith("确认缺失") else
-                        "#9298a7" if text in {"未接入实时观测", "缺少来源/时效契约"} else
-                        "#ff7070"
-                    )
-                    item.setForeground(QColor(color))
-                self.contract_table.setItem(row, col, item)
+        if self._table_changed("contracts", contracts):
+            self.contract_table.setRowCount(len(contracts))
+            for row, contract in enumerate(contracts):
+                values = (
+                    contract.get("field_id", ""), contract.get("ticker", "--"),
+                    contract.get("value", "--"),
+                    contract.get("source", ""), contract.get("timezone", ""),
+                    contract.get("ttl", ""), contract.get("unit", ""),
+                    contract.get("window", ""), contract.get("missing_policy", ""),
+                    contract.get("as_of_time", ""), contract.get("available_at", ""),
+                    contract.get("status", ""), contract.get("acquisition_route", ""),
+                    contract.get("next_action", ""),
+                )
+                for col, value in enumerate(values):
+                    item = QTableWidgetItem(str(value))
+                    if col == 11:
+                        text = item.text()
+                        color = (
+                            "#65d98a" if text.startswith("新鲜") else
+                            "#f0c674" if text.startswith("确认缺失") else
+                            "#9298a7" if text in {"未接入实时观测", "缺少来源/时效契约"} else
+                            "#ff7070"
+                        )
+                        item.setForeground(QColor(color))
+                    self.contract_table.setItem(row, col, item)
 
         source_health = snapshot.get("source_health", [])
         self.source_health_table.setRowCount(len(source_health))
@@ -3849,37 +4022,38 @@ class IPOLearningConsole(QWidget):
         self._render_learning_snapshots(snapshot.get("decision_snapshots", []))
         self._render_outcome_labels(snapshot.get("outcome_labels", []))
 
-        events = snapshot.get("events", [])
-        selected = self._selected_event or {}
-        selected_fields = ("candidate_id", "request_id", "timestamp", "event", "ticker")
-        selected_key = tuple(selected.get(key, "") for key in selected_fields)
-        scroll_value = self.event_table.verticalScrollBar().value()
-        self.event_table.blockSignals(True)
-        self.event_table.setRowCount(len(events))
-        for row, event in enumerate(events):
-            for col, key in enumerate(("timestamp", "stage", "event", "status", "ticker", "gate", "message")):
-                value = "已复核" if key == "status" and event.get("reviewed") == "true" else event.get(key, "")
-                item = QTableWidgetItem(value)
-                if key == "status":
-                    item.setForeground(QColor(
-                        "#65d98a" if value == "ENTRY" else "#f0c674" if value == "WATCH" else "#ff7070" if value == "BLOCK" else "#e5e7eb"
-                    ))
-                item.setData(Qt.ItemDataRole.UserRole, event)
-                self.event_table.setItem(row, col, item)
-        selected_row = None
-        if any(selected_key):
+        if self._table_changed("events", snapshot.get("events", [])):
+            events = snapshot.get("events", [])
+            selected = self._selected_event or {}
+            selected_fields = ("candidate_id", "request_id", "timestamp", "event", "ticker")
+            selected_key = tuple(selected.get(key, "") for key in selected_fields)
+            scroll_value = self.event_table.verticalScrollBar().value()
+            self.event_table.blockSignals(True)
+            self.event_table.setRowCount(len(events))
             for row, event in enumerate(events):
-                if tuple(event.get(key, "") for key in selected_fields) == selected_key:
-                    selected_row = row
-                    break
-        if selected_row is not None:
-            self.event_table.selectRow(selected_row)
-            self.event_table.setCurrentCell(selected_row, 0)
-        else:
-            self.event_table.clearSelection()
-        self.event_table.verticalScrollBar().setValue(scroll_value)
-        self.event_table.blockSignals(False)
-        self._show_selected_event()
+                for col, key in enumerate(("timestamp", "stage", "event", "status", "ticker", "gate", "message")):
+                    value = "已复核" if key == "status" and event.get("reviewed") == "true" else event.get(key, "")
+                    item = QTableWidgetItem(value)
+                    if key == "status":
+                        item.setForeground(QColor(
+                            "#65d98a" if value == "ENTRY" else "#f0c674" if value == "WATCH" else "#ff7070" if value == "BLOCK" else "#e5e7eb"
+                        ))
+                    item.setData(Qt.ItemDataRole.UserRole, event)
+                    self.event_table.setItem(row, col, item)
+            selected_row = None
+            if any(selected_key):
+                for row, event in enumerate(events):
+                    if tuple(event.get(key, "") for key in selected_fields) == selected_key:
+                        selected_row = row
+                        break
+            if selected_row is not None:
+                self.event_table.selectRow(selected_row)
+                self.event_table.setCurrentCell(selected_row, 0)
+            else:
+                self.event_table.clearSelection()
+            self.event_table.verticalScrollBar().setValue(scroll_value)
+            self.event_table.blockSignals(False)
+            self._show_selected_event()
 
     def _render_acquisition_pipeline(
         self, queue_state: Any, events: Any, static_sentiment: Any = None,
@@ -3956,76 +4130,79 @@ class IPOLearningConsole(QWidget):
         else:
             self.lbl_static_sentiment_summary.setText("本机静态情绪：尚无结果；启动 AUTO 队列后会立即扫描 ATS 全名单的本地多日历史。")
 
-        state_labels = {
-            "WAITING": "等待采集", "RUNNING": "正在采集",
-            "PROCESSED": "本轮已采集", "FAILED": "本轮失败",
-        }
-        self.acquisition_queue_table.setRowCount(len(items))
-        for row, record in enumerate(items):
-            if not isinstance(record, dict):
-                continue
-            internal_state = _safe_text(record.get("state"), 24) or "WAITING"
-            ready = record.get("ready_count")
-            required = _nonnegative_count(record.get("required_count")) or 41
-            coverage = f"{ready}/{required}" if isinstance(ready, int) and not isinstance(ready, bool) else "未采集"
-            history = static_results.get(_safe_text(record.get("ticker"), 6), {})
-            history = history if isinstance(history, dict) else {}
-            if history.get("status") == "READY":
-                return_pct = history.get("five_day_return_pct")
-                return_text = f" · 5日{return_pct:+.1f}%" if isinstance(return_pct, (int, float)) else ""
-                score = history.get("emotion_score", 50.0)
-                quality = history.get("score_quality", "NO_EVIDENCE")
-                history_text = (
-                    f"{history.get('sentiment', '历史已分析')} · 情绪 {score}/100 "
-                    f"({quality}){return_text} · {history.get('as_of_time', '')[:10]}"
-                )
-            else:
-                score = history.get("emotion_score")
-                if isinstance(score, (int, float)):
-                    history_text = f"情绪 {score}/100 · 中性基线（无证据）"
-                else:
-                    history_text = _safe_text(history.get("status") or "待处理", 40)
-            values = (
-                str(row + 1), record.get("ticker", ""), record.get("name", ""),
-                record.get("listing_date", ""), state_labels.get(internal_state, internal_state),
-                coverage, history_text, _safe_text(record.get("last_run_at"), 19),
-                _safe_text(record.get("last_reason") or record.get("last_status"), 300),
-            )
-            for column, value in enumerate(values):
-                cell = QTableWidgetItem(str(value))
-                if column == 4:
-                    color = (
-                        "#60a5fa" if internal_state == "RUNNING" else
-                        "#65d98a" if internal_state == "PROCESSED" else
-                        "#ff7070" if internal_state == "FAILED" else "#9298a7"
+        if self._table_changed("pipeline", (queue_state, events, static_sentiment)):
+            state_labels = {
+                "WAITING": "等待采集", "RUNNING": "正在采集",
+                "PROCESSED": "本轮已采集", "FAILED": "本轮失败",
+            }
+            self.acquisition_queue_table.setRowCount(len(items))
+            for row, record in enumerate(items):
+                if not isinstance(record, dict):
+                    continue
+                internal_state = _safe_text(record.get("state"), 24) or "WAITING"
+                ready = record.get("ready_count")
+                required = _nonnegative_count(record.get("required_count")) or 41
+                coverage = f"{ready}/{required}" if isinstance(ready, int) and not isinstance(ready, bool) else "未采集"
+                history = static_results.get(_safe_text(record.get("ticker"), 6), {})
+                history = history if isinstance(history, dict) else {}
+                if history.get("status") == "READY":
+                    return_pct = history.get("five_day_return_pct")
+                    return_text = f" · 5日{return_pct:+.1f}%" if isinstance(return_pct, (int, float)) else ""
+                    score = history.get("emotion_score", 50.0)
+                    quality = history.get("score_quality", "NO_EVIDENCE")
+                    history_text = (
+                        f"{history.get('sentiment', '历史已分析')} · 情绪 {score}/100 "
+                        f"({quality}){return_text} · {history.get('as_of_time', '')[:10]}"
                     )
-                    cell.setForeground(QColor(color))
-                if column == 7:
-                    cell.setToolTip(_safe_text(record.get("last_reason"), 1000))
-                self.acquisition_queue_table.setItem(row, column, cell)
-        events = events if isinstance(events, list) else []
-        events = [event for event in events if isinstance(event, dict)][-100:]
-        self.acquisition_pipeline_log_table.setRowCount(len(events))
-        for row, event in enumerate(reversed(events)):
-            values = (
-                _safe_text(event.get("timestamp"), 32),
-                _safe_text(event.get("queue_position"), 16),
-                _safe_text(event.get("ticker"), 6),
-                f"{_safe_text(event.get('event'), 80)} / {_safe_text(event.get('status'), 32)}",
-                _safe_text(event.get("message"), 500),
-            )
-            for column, value in enumerate(values):
-                cell = QTableWidgetItem(str(value))
-                if column == 3:
-                    state = _safe_text(event.get("status"), 32)
-                    cell.setForeground(QColor(
-                        "#65d98a" if state in {"DONE", "PROCESSED"} else
-                        "#ff7070" if state in {"FAILED", "BLOCKED"} else
-                        "#f0c674" if state in {"PAUSED", "RUNNING"} else "#e5e7eb"
-                    ))
-                self.acquisition_pipeline_log_table.setItem(row, column, cell)
+                else:
+                    score = history.get("emotion_score")
+                    if isinstance(score, (int, float)):
+                        history_text = f"情绪 {score}/100 · 中性基线（无证据）"
+                    else:
+                        history_text = _safe_text(history.get("status") or "待处理", 40)
+                values = (
+                    str(row + 1), record.get("ticker", ""), record.get("name", ""),
+                    record.get("listing_date", ""), state_labels.get(internal_state, internal_state),
+                    coverage, history_text, _safe_text(record.get("last_run_at"), 19),
+                    _safe_text(record.get("last_reason") or record.get("last_status"), 300),
+                )
+                for column, value in enumerate(values):
+                    cell = QTableWidgetItem(str(value))
+                    if column == 4:
+                        color = (
+                            "#60a5fa" if internal_state == "RUNNING" else
+                            "#65d98a" if internal_state == "PROCESSED" else
+                            "#ff7070" if internal_state == "FAILED" else "#9298a7"
+                        )
+                        cell.setForeground(QColor(color))
+                    if column == 7:
+                        cell.setToolTip(_safe_text(record.get("last_reason"), 1000))
+                    self.acquisition_queue_table.setItem(row, column, cell)
+            events = events if isinstance(events, list) else []
+            events = [event for event in events if isinstance(event, dict)][-100:]
+            self.acquisition_pipeline_log_table.setRowCount(len(events))
+            for row, event in enumerate(reversed(events)):
+                values = (
+                    _safe_text(event.get("timestamp"), 32),
+                    _safe_text(event.get("queue_position"), 16),
+                    _safe_text(event.get("ticker"), 6),
+                    f"{_safe_text(event.get('event'), 80)} / {_safe_text(event.get('status'), 32)}",
+                    _safe_text(event.get("message"), 500),
+                )
+                for column, value in enumerate(values):
+                    cell = QTableWidgetItem(str(value))
+                    if column == 3:
+                        state = _safe_text(event.get("status"), 32)
+                        cell.setForeground(QColor(
+                            "#65d98a" if state in {"DONE", "PROCESSED"} else
+                            "#ff7070" if state in {"FAILED", "BLOCKED"} else
+                            "#f0c674" if state in {"PAUSED", "RUNNING"} else "#e5e7eb"
+                        ))
+                    self.acquisition_pipeline_log_table.setItem(row, column, cell)
 
     def _render_learning_snapshots(self, records: Any) -> None:
+        if not self._table_changed("_render_learning_snapshots", records):
+            return
         records = records if isinstance(records, list) else []
         self.snapshot_table.blockSignals(True)
         self.snapshot_table.setRowCount(len(records))
@@ -4062,6 +4239,8 @@ class IPOLearningConsole(QWidget):
             self.snapshot_detail.clear()
 
     def _render_outcome_labels(self, records: Any) -> None:
+        if not self._table_changed("_render_outcome_labels", records):
+            return
         values = records if isinstance(records, list) else []
         table = self.outcome_table
         selected_items = table.selectedItems()
@@ -4197,36 +4376,26 @@ class IPOLearningConsole(QWidget):
         self._start_source_collection(collect_labels=True)
 
     def _on_source_auto_tick(self) -> None:
+        if self._closing or self._simulation_read_only:
+            return
         interval_ms = _source_auto_interval_ms()
-        if self._source_auto_timer.interval() != interval_ms:
-            self._source_auto_timer.setInterval(interval_ms)
-        if not _is_market_session_active() and _static_pass_completed_today(self._root):
-            self._auto_tick_pending = False
+        self._source_auto_timer.start(interval_ms)
+        cold_read = self._cold_source_read_pending
+        self._cold_source_read_pending = False
+        if not cold_read and not _source_poll_window_active():
             self.lbl_acquisition_status.setText(
-                "本日 ATS 全名单静态历史队列已完整跑完；本轮结果已保存，可查看情绪评分和逐阶段流水。"
+                "当前在自动采集窗口外；本机静态评分保留，等待下个工作日 08:55。"
             )
             return
         if self._source_worker is not None and self._source_worker.isRunning():
-            if not self._auto_tick_pending:
-                self._auto_tick_pending = True
-                active = _read_json(
-                    self._root / "data" / "ipo_learning" / "acquisition_queue.latest.json",
-                    max_bytes=512 * 1024,
-                ) or {}
-                current = active.get("active", {}) if isinstance(active.get("active"), dict) else {}
-                ticker = _safe_text(current.get("ticker"), 6)
-                _append_pipeline_event(
-                    self._root, "AUTO_TICK_DEFERRED", "QUEUED", ticker,
-                    "当前代码仍在采集；合并一个到期轮询，当前处理结束后继续",
-                )
-                self.lbl_acquisition_status.setText(
-                    "当前标的采集尚未完成；已登记一个待执行轮询，完成后继续队列。"
-                )
+            self.lbl_acquisition_status.setText(
+                "当前标的仍在后台采集；本次自动触发已合并，下一周期继续队列。"
+            )
             return
         self._start_source_collection(collect_labels=True)
 
     def _start_source_collection(self, collect_labels: bool) -> None:
-        if self._simulation_read_only:
+        if self._closing or self._simulation_read_only:
             return
         if self._source_worker is not None and self._source_worker.isRunning():
             self.lbl_acquisition_status.setText("当前只读采集仍在运行；请看“采集队列与流水”的实时阶段。")
@@ -4239,19 +4408,23 @@ class IPOLearningConsole(QWidget):
         self.btn_collect_labels.setEnabled(False)
         suffix = "并扫描成熟标签" if collect_labels else ""
         self.lbl_acquisition_status.setText(f"正在读取 ATS {ticker} 新股/次新股与异动信号{suffix}，并核对来源时点与 41 项门禁契约…")
-        self._source_worker = _SourceAcquisitionWorker(self._root, ticker, collect_labels, self)
-        self._source_worker.completed.connect(self._source_collection_completed)
-        self._source_worker.finished.connect(self._source_collection_worker_finished)
-        self._source_worker.start()
+        worker = _SourceAcquisitionWorker(self._root, ticker, collect_labels, self)
+        self._source_worker = worker
+        worker.completed.connect(self._source_collection_completed)
+        worker.finished.connect(lambda: self._source_collection_worker_finished(worker))
+        worker.finished.connect(worker.deleteLater)
+        worker.start()
 
-    def _source_collection_worker_finished(self) -> None:
+    def _source_collection_worker_finished(self, worker: Optional[_SourceAcquisitionWorker] = None) -> None:
+        if worker is not None and worker is not self._source_worker:
+            return
+        self._source_worker = None
         self.btn_collect_issue_price.setEnabled(True)
         self.btn_collect_labels.setEnabled(True)
-        if self._auto_tick_pending and not self._simulation_read_only:
-            self._auto_tick_pending = False
-            QTimer.singleShot(100, self._on_source_auto_tick)
 
     def _source_collection_completed(self, result: Dict[str, Any]) -> None:
+        if self._closing:
+            return
         observation = result.get("shadow_learning", {})
         if (not self._simulation_read_only and isinstance(observation, dict)
                 and observation.get("state") == "CAPTURED"
@@ -4268,37 +4441,8 @@ class IPOLearningConsole(QWidget):
         state = str(result.get("status", "UNREADY"))
         count = _nonnegative_count(result.get("ready_count"))
         required = _nonnegative_count(result.get("required_count"))
-        source_collection = result.get("source_collection", {})
-        source_collection = source_collection if isinstance(source_collection, dict) else {}
-        signal_capture = result.get("ats_signal_capture", {})
-        signal_capture = signal_capture if isinstance(signal_capture, dict) else {}
         historical = result.get("historical_analysis", {})
         historical = historical if isinstance(historical, dict) else {}
-        matured_pending = sum(
-            isinstance(item, dict) and item.get("status") == "MATURED_PENDING_REVIEW"
-            for item in result.get("label_reports", [])
-        ) if isinstance(result.get("label_reports"), list) else 0
-        ticker_for_log = _safe_text(
-            result.get("auto_selected_ticker") or result.get("ticker"), 6
-        ) or "未知"
-        queue_index = _nonnegative_count(result.get("auto_queue_index"))
-        queue_total = _nonnegative_count(result.get("auto_queue_total"))
-        if queue_index and queue_total:
-            parts_queue = f"ATS轮询队列 {queue_index}/{queue_total}"
-        else:
-            parts_queue = "手动标的"
-        print(
-            "[IPO Console] 本轮结束："
-            f"队列={parts_queue}，标的={ticker_for_log}，契约就绪={count}/{required}，"
-            f"ATS来源={source_collection.get('status', '未知')}/"
-            f"{source_collection.get('mode', '未知')}，"
-            f"静态情绪={historical.get('emotion_score', '--')}/100 "
-            f"({historical.get('score_quality', '未运行')})/{historical.get('sentiment', '')}，"
-            f"实时影子样本={signal_capture.get('state', 'UNREADY')}，"
-            f"新增D1-D3待复核={matured_pending}。"
-            f"{_safe_text(source_collection.get('reason'), 140)}",
-            flush=True,
-        )
         parts = []
         selected = _safe_text(result.get("auto_selected_ticker"), 6)
         if selected:
@@ -4443,6 +4587,8 @@ class IPOLearningConsole(QWidget):
         selected = self.snapshot_table.selectedItems()
         record = selected[0].data(Qt.ItemDataRole.UserRole) if selected else None
         if not isinstance(record, dict):
+            self._selected_snapshot_id = ""
+            self._pending_snapshot_detail_id = ""
             self.btn_snapshot_note.setEnabled(False)
             self.snapshot_detail.clear()
             return
@@ -4452,12 +4598,18 @@ class IPOLearningConsole(QWidget):
             return
         self._selected_snapshot_id = snapshot_id
         self.btn_snapshot_note.setEnabled(bool(snapshot_id))
-        try:
-            from ats.llm.learning_snapshot_store import get_snapshot_record
+        if self._pending_snapshot_detail_id == snapshot_id:
+            return
+        self._pending_snapshot_detail_id = snapshot_id
+        self.snapshot_detail.setPlainText("正在后台读取所选输入快照…")
+        if not self._worker.request_snapshot_detail(snapshot_id):
+            self._pending_snapshot_detail_id = ""
+            self.snapshot_detail.setPlainText("读取队列繁忙，请重新选择快照。")
 
-            detail = get_snapshot_record(self._root, snapshot_id)
-        except Exception:
-            detail = None
+    def _show_snapshot_detail(self, snapshot_id: str, detail: Any) -> None:
+        if snapshot_id != self._selected_snapshot_id:
+            return
+        self._pending_snapshot_detail_id = ""
         if not isinstance(detail, dict):
             self.snapshot_detail.setPlainText("所选快照暂不可读取；存储仍保持只读监控状态。")
             return
@@ -4522,6 +4674,8 @@ class IPOLearningConsole(QWidget):
             QMessageBox.warning(self, "未提交", "审计写入队列已满，请稍后重试。")
 
     def _render_gate_diagnostics(self, records: List[Dict[str, Any]]) -> None:
+        if not self._table_changed("_render_gate_diagnostics", records):
+            return
         selected = self.gate_diagnostic_table.selectedItems()
         selected_record = selected[0].data(Qt.ItemDataRole.UserRole) if selected else None
         selected_code = selected_record.get("ticker") if isinstance(selected_record, dict) else ""
@@ -4703,6 +4857,7 @@ class IPOLearningConsole(QWidget):
             QMessageBox.warning(self, "事件队列繁忙", "备注队列已满，请稍后再试。")
 
     def stop_monitor(self, timeout_ms: int = 1500) -> None:
+        self._closing = True
         if hasattr(self, "_source_auto_timer"):
             self._source_auto_timer.stop()
         control = self._runtime_control
@@ -4714,4 +4869,5 @@ class IPOLearningConsole(QWidget):
             self._worker.wait(timeout_ms)
         source_worker = self._source_worker
         if source_worker is not None and source_worker.isRunning():
+            source_worker.stop()
             source_worker.wait(min(max(0, int(timeout_ms)), 3500))
