@@ -121,6 +121,49 @@ def _auto_size_table_once(table: QTableWidget, attr_name: str = "_has_auto_sized
         setattr(table, attr_name, True)
 
 
+def _prepare_eval_view(evaluation, market_frame=None):
+    """Repair legacy display fields from signal evidence or current RAM quotes, without I/O."""
+    from next_day_anomaly_watch import _build_market_projection, _number
+    from ats.bounded_evaluation_store import compact_checkpoints
+    compact_checkpoints(evaluation)
+    codes = {key.split(':', 1)[0] for key in evaluation.get('candidates', {})}
+    quotes = dict(evaluation.get('quotes') or {})
+    if (evaluation.get('target_trade_date') == time.strftime('%Y-%m-%d')
+            and market_frame is not None and not market_frame.empty):
+        for code, row in _build_market_projection(market_frame, None, codes)['by_code'].items():
+            if code not in quotes:
+                quotes[code] = {'close': row.get('trade') or row.get('close'), 'pct': row.get('percent')}
+    for key, entry in evaluation.get('candidates', {}).items():
+        candidate = entry.get('candidate', {})
+        points = {point.get('observed_at'): point for point in entry.get('checkpoints', [])}
+        for event in entry.get('events', []):
+            price = _number(event.get('price'))
+            point = points.get(event.get('observed_at')) or {}
+            if price is not None and price > 0:
+                if _number(event.get('pct')) is None:
+                    pct = _number(point.get('pct'))
+                    prev_close = _number(candidate.get('feature_values', {}).get('lastp1d'))
+                    if pct is None and prev_close is not None and prev_close > 0 and str(event.get('observed_at', ''))[:10] == evaluation.get('target_trade_date'):
+                        pct = (price / prev_close - 1) * 100
+                    event['pct'] = pct
+                continue
+            price = _number(point.get('close'))
+            source = '事件检查点'
+            pct = _number(point.get('pct'))
+            if price is not None and price > 0:
+                prev_close = _number(candidate.get('feature_values', {}).get('lastp1d'))
+                if pct is None and prev_close is not None and prev_close > 0 and str(event.get('observed_at', ''))[:10] == evaluation.get('target_trade_date'):
+                    pct = (price / prev_close - 1) * 100
+            else:
+                quote = quotes.get(key.split(':', 1)[0], {})
+                price, pct = _number(quote.get('close')), _number(quote.get('pct'))
+                source = '当前缓存行情；历史事件原价缺失'
+            event['price'] = price if price is not None and price > 0 else None
+            event['pct'] = pct
+            event['price_source'] = source if event['price'] is not None else '未取得有效报价'
+    return evaluation
+
+
 
 class NextDayWatchDataLoaderWorker(QThread):
     """Background worker for scanning and loading candidate files without freezing UI."""
@@ -128,12 +171,14 @@ class NextDayWatchDataLoaderWorker(QThread):
     loaded = pyqtSignal(object)
 
     def __init__(self, target_date: Optional[str] = None, eval_only: bool = False,
-                 service=None, manifest=None):
+                 service=None, manifest=None, sector_snapshot=None, market_frame=None):
         super().__init__()
         self.target_date = target_date
         self.eval_only = bool(eval_only)
         self.service = service
         self.manifest = manifest
+        self.sector_snapshot = sector_snapshot
+        self.market_frame = market_frame
         self.app_root = get_app_root()
         self.data_dir = os.path.join(self.app_root, "datacsv")
 
@@ -141,13 +186,16 @@ class NextDayWatchDataLoaderWorker(QThread):
         try:
             if self.service is not None:
                 result = self.service.request('snapshot', target_date=self.target_date,
-                    eval_only=self.eval_only, manifest=self.manifest)
+                    eval_only=self.eval_only, manifest=self.manifest, sector_snapshot=self.sector_snapshot)
+                if not result.get('error'):
+                    _prepare_eval_view(result.setdefault('eval', {}), self.market_frame)
                 self.loaded.emit(result)
                 return
             if self.eval_only:
                 cur_date = self.target_date or time.strftime("%Y-%m-%d")
                 eval_path = os.path.join(self.data_dir, f"next_day_anomaly_eval_{cur_date}.json")
-                self.loaded.emit({"target_date": cur_date, "eval": _read_json(eval_path, {}), "eval_only": True})
+                self.loaded.emit({"target_date": cur_date,
+                    "eval": _prepare_eval_view(_read_json(eval_path, {}), self.market_frame), "eval_only": True})
                 return
 
             watch_pattern = os.path.join(self.data_dir, "next_day_anomaly_watch_*.json")
@@ -167,6 +215,9 @@ class NextDayWatchDataLoaderWorker(QThread):
 
             eval_path = os.path.join(self.data_dir, f"next_day_anomaly_eval_{cur_date}.json")
             eval_data = _read_json(eval_path, {})
+            _prepare_eval_view(eval_data, self.market_frame)
+            from next_day_anomaly_watch import enrich_manifest_sector_evidence
+            enrich_manifest_sector_evidence(watch_data, eval_data, self.sector_snapshot)
 
             stats_list, delayed_winners = [], []
             stats_pattern = os.path.join(self.data_dir, "next_day_anomaly_stats_*.json")
@@ -493,6 +544,8 @@ class NextDayAnomalyWatchWidget(QWidget):
         ])
         self.table_events.horizontalHeader().setStretchLastSection(True)
         self._configure_stock_table(self.table_events)
+        self.table_events.setSortingEnabled(True)
+        self.table_events.sortItems(0, Qt.SortOrder.DescendingOrder)
         self.table_events.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.table_events.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
         self.table_events.itemSelectionChanged.connect(self._on_event_row_selected)
@@ -514,16 +567,18 @@ class NextDayAnomalyWatchWidget(QWidget):
         left_layout.addWidget(self.lbl_event_proof)
         splitter.addWidget(left_box)
 
-        right_box = QGroupBox("⏱️ 标的检查点时序与真实均价跟踪 (Checkpoints)")
+        right_box = QGroupBox("⏱️ 关键信号点与确认证据 (Checkpoints)")
         right_layout = QVBoxLayout(right_box)
         right_layout.setContentsMargins(6, 12, 6, 6)
 
         self.table_checkpoints = QTableWidget()
         self.table_checkpoints.setColumnCount(7)
         self.table_checkpoints.setHorizontalHeaderLabels([
-            "采样时间", "阶段", "最高价", "现价", "真实VWAP", "成交量", "突破证据"
+            "信号时间", "信号点", "最高价", "现价", "真实VWAP", "成交量", "突破证据"
         ])
         self._configure_stock_table(self.table_checkpoints)
+        self.table_checkpoints.setSortingEnabled(True)
+        self.table_checkpoints.sortItems(0, Qt.SortOrder.DescendingOrder)
         self.table_checkpoints.horizontalHeader().setStretchLastSection(True)
         right_layout.addWidget(self.table_checkpoints)
         splitter.addWidget(right_box)
@@ -798,7 +853,10 @@ class NextDayAnomalyWatchWidget(QWidget):
         if local and str(local.get('generated_at', '')) >= str((manifest or {}).get('generated_at', '')):
             manifest = local
         worker = NextDayWatchDataLoaderWorker(target_date, eval_only=eval_only,
-                                              service=service, manifest=manifest)
+            service=service, manifest=manifest, sector_snapshot=getattr(main, 'current_sector_snapshot', None),
+            market_frame=getattr(main, 'current_df', None))
+        if not eval_only:
+            self._last_manifest_refresh = time.monotonic()
         self.active_worker = worker
         self._active_load_request = request
         self._load_failed = False
@@ -833,6 +891,7 @@ class NextDayAnomalyWatchWidget(QWidget):
         if target_date != self.combo_manifest_date.currentText().strip():
             return
         self._on_manifest_loaded(result.get("manifest") or {})
+        self._manifest_sector_source = getattr(worker, 'sector_snapshot', None)
         self._on_eval_loaded(result.get("eval") or {})
         self._on_stats_loaded(result.get("stats") or [], result.get('delayed_winners') or [])
 
@@ -922,6 +981,11 @@ class NextDayAnomalyWatchWidget(QWidget):
         self._render_manifest_table()
 
     def _render_manifest_table(self):
+        selected_item = self.table_manifest.item(self.table_manifest.currentRow(), 0)
+        selected_id = selected_item.data(Qt.ItemDataRole.UserRole) if selected_item else None
+        selected_col = max(0, self.table_manifest.currentColumn())
+        blocked = self.table_manifest.blockSignals(True)
+        self.table_manifest.setUpdatesEnabled(False)
         header = self.table_manifest.horizontalHeader()
         sort_column = header.sortIndicatorSection()
         sort_order = header.sortIndicatorOrder()
@@ -980,13 +1044,14 @@ class NextDayAnomalyWatchWidget(QWidget):
             feat_summary = f"前高:{feats.get('lasth1d', '--')} 斜率:{feats.get('ch_slope_deg', '--')}° 位置:{feats.get('ch_pos', '--')}%"
             sector_matches = c.get("sector_evidence", {}).get("matches", [])
             resonance = sector_matches[0] if sector_matches else {}
-            sec_summary = resonance.get("name", "--")
+            sec_summary = resonance.get('name') or c.get('sector_evidence', {}).get('reason') or '板块快照未到达'
             if resonance:
                 strength = resonance.get("score", resonance.get("momentum_score", "--"))
                 sec_summary += f" (强度:{strength})"
             status = str(c.get("status", "WATCHING"))
 
             item_code = QTableWidgetItem(code)
+            item_code.setData(Qt.ItemDataRole.UserRole, (code, str(c.get('strategy_id', ''))))
             item_code.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             item_name = QTableWidgetItem(name)
             item_name.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -1050,6 +1115,18 @@ class NextDayAnomalyWatchWidget(QWidget):
             self.table_manifest.sortItems(sort_column, sort_order)
         elif sorting_enabled and self.table_manifest.rowCount():
             self.table_manifest.sortItems(4, Qt.SortOrder.DescendingOrder)
+        selected_row = next((row for row in range(self.table_manifest.rowCount())
+            if selected_id and self.table_manifest.item(row, 0).data(Qt.ItemDataRole.UserRole) == selected_id), None)
+        if selected_row is not None:
+            self.table_manifest.setCurrentCell(selected_row, selected_col)
+        else:
+            self.table_manifest.setCurrentCell(-1, -1)
+            self.table_manifest.clearSelection()
+            self.text_feature_detail.clear()
+        self.table_manifest.blockSignals(blocked)
+        self.table_manifest.setUpdatesEnabled(True)
+        if selected_row is not None:
+            self._on_manifest_row_selected(link=False)
 
     def _configure_stock_table(self, table: QTableWidget):
         """Keep stock-bearing tables consistent with the ATS watchlist tables."""
@@ -1181,7 +1258,7 @@ class NextDayAnomalyWatchWidget(QWidget):
             except Exception as exc:
                 logger.warning("[NextDayWatchWidget] Favorite update failed: %s", exc)
 
-    def _on_manifest_row_selected(self):
+    def _on_manifest_row_selected(self, link=True):
         row = self.table_manifest.currentRow()
         if row < 0:
             return
@@ -1189,11 +1266,15 @@ class NextDayAnomalyWatchWidget(QWidget):
         if not code_item:
             return
         code = code_item.text().strip()
-        candidate = next((c for c in self.manifest_data.get("candidates", []) if str(c.get("code")).zfill(6) == code), None)
+        identity = code_item.data(Qt.ItemDataRole.UserRole)
+        candidate = next((c for c in self.manifest_data.get("candidates", [])
+            if str(c.get("code")).zfill(6) == code
+            and (not identity or str(c.get('strategy_id', '')) == identity[1])), None)
         if not candidate:
             return
 
-        self._link_current_stock(self.table_manifest, 0, 1)
+        if link:
+            self._link_current_stock(self.table_manifest, 0, 1)
 
         feats = candidate.get("feature_values", {})
         detail_lines = [
@@ -1213,12 +1294,14 @@ class NextDayAnomalyWatchWidget(QWidget):
 
     def _on_candidate_double_clicked(self, item: QTableWidgetItem):
         row = item.row()
-        if item.column() == 8:
+        if item.column() == 9:
             code_item = self.table_manifest.item(row, 0)
             code = code_item.text().strip() if code_item else ""
+            identity = code_item.data(Qt.ItemDataRole.UserRole) if code_item else None
             candidate = next(
                 (c for c in self.manifest_data.get("candidates", [])
-                 if str(c.get("code", "")).zfill(6) == code),
+                 if str(c.get("code", "")).zfill(6) == code
+                 and (not identity or str(c.get('strategy_id', '')) == identity[1])),
                 None,
             )
             sectors = self._candidate_sector_names(candidate, "sector_evidence")
@@ -1430,30 +1513,42 @@ class NextDayAnomalyWatchWidget(QWidget):
     # Tab 2: 盘中实时后验
     # =========================================================================
     def _on_eval_loaded(self, eval_data: Dict[str, Any]):
+        previous = self.eval_data
         self.eval_data = eval_data
         candidates_eval = eval_data.get("candidates", {})
+        if 'candidates' in previous and previous['candidates'] == candidates_eval:
+            return  # Ordinary RAM quotes must not redraw an unchanged signal history.
 
         events = []
         for key, entry in candidates_eval.items():
             cand = entry.get("candidate", {})
             for ev in entry.get("events", []):
-                events.append((ev.get("observed_at", ""), ev, cand))
+                events.append((ev.get("observed_at", ""), ev, cand, key))
         events.sort(key=lambda x: x[0], reverse=True)
 
+        selected_item = self.table_events.item(self.table_events.currentRow(), 1)
+        selected_id = selected_item.data(Qt.ItemDataRole.UserRole) if selected_item else None
+        selected_col = max(0, self.table_events.currentColumn())
+        sorting = self.table_events.isSortingEnabled()
+        blocked = self.table_events.blockSignals(True)
+        self.table_events.setUpdatesEnabled(False)
+        self.table_events.setSortingEnabled(False)
         self.table_events.setRowCount(len(events))
         confirmed_count = 0
-        for r, (t_str, ev, cand) in enumerate(events):
+        from next_day_anomaly_watch import _number
+        for r, (t_str, ev, cand, key) in enumerate(events):
             ev_type = ev.get("type", "")
             if ev_type == "NEXT_DAY_WATCH_CONFIRM":
                 confirmed_count += 1
             code = str(ev.get("code") or cand.get("code", "")).zfill(6)
             name = str(ev.get("name") or cand.get("name", code))
-            price = f"{float(ev.get('price', 0.0)):.2f}"
-            pct = f"{float(ev.get('pct', 0.0)):+.2f}%"
-            delivered = "已投递" if ev.get("delivered") else "待投递"
+            price_value, pct_value = _number(ev.get('price')), _number(ev.get('pct'))
+            price = f'{price_value:.2f}' if price_value is not None and price_value > 0 else '--'
+            pct = f'{pct_value:+.2f}%' if pct_value is not None else '--'
+            delivered = ('已投递' if ev.get('delivered') else '待投递') if ev_type == 'NEXT_DAY_WATCH_CONFIRM' else '记录事件'
             t_show = t_str.split("T")[-1][:8] if "T" in t_str else t_str
 
-            color = None
+            color = QColor('#c9d1d9')
             if ev_type == "NEXT_DAY_WATCH_CONFIRM":
                 color = QColor("#7ee787")
             elif ev_type == "DAY_MISS":
@@ -1461,7 +1556,7 @@ class NextDayAnomalyWatchWidget(QWidget):
             elif ev_type == "DELAYED":
                 color = QColor("#ffa657")
 
-            pct_color = QColor("#ff7b72") if "+" in pct else QColor("#7ee787")
+            pct_color = QColor('#8b949e' if pct_value is None or pct_value == 0 else '#ff7b72' if pct_value > 0 else '#7ee787')
 
             _update_table_cell(self.table_events, r, 0, t_show)
             _update_table_cell(self.table_events, r, 1, code, alignment=Qt.AlignmentFlag.AlignCenter)
@@ -1470,13 +1565,33 @@ class NextDayAnomalyWatchWidget(QWidget):
             _update_table_cell(self.table_events, r, 4, price, is_numeric=True)
             _update_table_cell(self.table_events, r, 5, pct, foreground=pct_color, is_numeric=True)
             _update_table_cell(self.table_events, r, 6, delivered, alignment=Qt.AlignmentFlag.AlignCenter)
+            self.table_events.item(r, 1).setData(Qt.ItemDataRole.UserRole,
+                (key, ev_type, t_str, ev.get('event_id', '')))
+            for col in (4, 5):
+                self.table_events.item(r, col).setToolTip(ev.get('price_source') or '事件发生时行情')
+
+        self.table_events.setSortingEnabled(sorting)
+        selected_row = next((row for row in range(self.table_events.rowCount())
+            if selected_id and self.table_events.item(row, 1).data(Qt.ItemDataRole.UserRole) == selected_id), None)
+        if selected_row is not None:
+            self.table_events.setCurrentCell(selected_row, selected_col)
+        else:
+            self.table_events.setCurrentCell(-1, -1)
+        if selected_row is None:
+            self.table_events.clearSelection()
+            self.table_checkpoints.setRowCount(0)
+            self.lbl_event_proof.setText('两帧证据链: 请在上方选择确认事件')
+        self.table_events.blockSignals(blocked)
+        self.table_events.setUpdatesEnabled(True)
+        if selected_row is not None:
+            self._on_event_row_selected(link=False)
 
         _auto_size_table_once(self.table_events)
         self.lbl_eval_status.setText(
             f"⚡ 盘中后验引擎: 监控中候选标的 {len(candidates_eval)} 只 | 触发确认事件 {confirmed_count} 起 | 更新时间: {time.strftime('%H:%M:%S')}"
         )
 
-    def _on_event_row_selected(self):
+    def _on_event_row_selected(self, link=True):
         row = self.table_events.currentRow()
         if row < 0:
             return
@@ -1484,29 +1599,37 @@ class NextDayAnomalyWatchWidget(QWidget):
         if not code_item:
             return
         code = code_item.text().strip()
-        self._link_current_stock(self.table_events, 1, 2)
+        if link:
+            self._link_current_stock(self.table_events, 1, 2)
 
-        entry = next((item for k, item in self.eval_data.get("candidates", {}).items() if k.startswith(code + ":")), None)
+        identity = code_item.data(Qt.ItemDataRole.UserRole)
+        entry = (self.eval_data.get('candidates', {}).get(identity[0]) if identity else
+                 next((item for k, item in self.eval_data.get("candidates", {}).items() if k.startswith(code + ":")), None))
         if not entry:
             return
 
+        from next_day_anomaly_watch import _number
         events = entry.get("events", [])
         confirm_ev = next((e for e in reversed(events) if e.get("type") == "NEXT_DAY_WATCH_CONFIRM"), None)
         if confirm_ev:
             evidence = confirm_ev.get("evidence", {})
-            first_time = evidence.get("first_observed_at", "--").split("T")[-1][:8]
-            confirm_time = confirm_ev.get("observed_at", "--").split("T")[-1][:8]
+            first_time = str(evidence.get("first_observed_at") or "--").split("T")[-1][:8]
+            confirm_time = str(confirm_ev.get("observed_at") or "--").split("T")[-1][:8]
             proof_desc = []
             if evidence.get("sustained_high"):
                 proof_desc.append("突破昨日最高价并站稳")
             if evidence.get("verified_vwap_rise"):
                 proof_desc.append("真实均价(VWAP)持续抬升")
             proof_str = " + ".join(proof_desc) or "两帧量价共振"
+            pct = _number(confirm_ev.get('pct'))
+            pct_text = f'{pct:+.2f}%' if pct is not None else '--'
+            price_text = _format_checkpoint_price(confirm_ev.get('price'))
+            source = confirm_ev.get('price_source') or '事件发生时行情'
 
             proof_text = (
                 f"✅ 【两帧确认闭环证据】标的: {confirm_ev.get('code')} {confirm_ev.get('name')}\n"
                 f"• 首发观测帧: {first_time}  ➔  二次确认帧: {confirm_time} (在有效时效窗内满足)\n"
-                f"• 突破核心证据: {proof_str} | 当时现价: {confirm_ev.get('price')} (涨幅: {confirm_ev.get('pct')}%) | 真实VWAP: {evidence.get('vwap')}\n"
+                f"• 突破核心证据: {proof_str} | 价格: {price_text} (涨幅: {pct_text}；来源: {source}) | 真实VWAP: {_format_checkpoint_price(evidence.get('vwap'))}\n"
                 f"• 唯一事件ID: {confirm_ev.get('event_id')} | 交付标记: {'已送达交易账本' if confirm_ev.get('delivered') else '等待投递'}"
             )
             self.lbl_event_proof.setText(proof_text)
@@ -1514,15 +1637,22 @@ class NextDayAnomalyWatchWidget(QWidget):
             self.lbl_event_proof.setText("当前标的未触发 NEXT_DAY_WATCH_CONFIRM 确认事件")
 
         checkpoints = entry.get("checkpoints", [])
+        sorting = self.table_checkpoints.isSortingEnabled()
+        self.table_checkpoints.setSortingEnabled(False)
+        self.table_checkpoints.setUpdatesEnabled(False)
         self.table_checkpoints.setRowCount(len(checkpoints))
         for r, cp in enumerate(reversed(checkpoints)):
-            t_raw = cp.get("observed_at", "")
-            t_show = t_raw.split("T")[-1][:8] if "T" in t_raw else t_raw
-            phase = cp.get("phase", "")
+            t_raw = str(cp.get("observed_at") or "")
+            t_show = t_raw.replace('T', ' ')[:19]
+            phase = {'INITIAL': '观察开始', 'FIRST_PROOF': '首个突破', 'PHASE_CHANGED': '阶段跃迁',
+                     'CONFIRM_FIRST': '首帧证据', 'CONFIRMED': '两帧确认', 'CLOSE': '收盘结论',
+                     'DELAYED': '延后兑现', 'DAY_MISS': '当日未触发', 'MISSED': '到期未兑现'}.get(
+                         cp.get('kind'), '历史信号点')
             hp = _format_checkpoint_price(cp.get("high"))
             p = _format_checkpoint_price(cp.get("close"))
-            vw = f"{float(cp.get('vwap', 0.0)):.2f}" if cp.get("vwap") is not None else "--"
-            vol = str(int(cp.get("volume", 0))) if cp.get("volume") is not None else "--"
+            vw = _format_checkpoint_price(cp.get('vwap'))
+            volume = _number(cp.get('volume'))
+            vol = str(int(volume)) if volume is not None and volume >= 0 else '--'
             proofs = []
             if cp.get("sustained_high"):
                 proofs.append("新高")
@@ -1539,6 +1669,8 @@ class NextDayAnomalyWatchWidget(QWidget):
             _update_table_cell(self.table_checkpoints, r, 6, proof_label)
 
         _auto_size_table_once(self.table_checkpoints)
+        self.table_checkpoints.setSortingEnabled(sorting)
+        self.table_checkpoints.setUpdatesEnabled(True)
 
     def _on_event_double_clicked(self, item: QTableWidgetItem):
         row = item.row()
@@ -1555,13 +1687,20 @@ class NextDayAnomalyWatchWidget(QWidget):
             self.auto_refresh_timer.stop()
 
     def _on_auto_refresh_tick(self):
+        if not self.isVisible():
+            return
         market_active = _is_market_session_active()
         desired_interval = 3000 if market_active else 60000
         if self.auto_refresh_timer.interval() != desired_interval:
             self.auto_refresh_timer.setInterval(desired_interval)
-        if market_active and self.tab_widget.currentIndex() == 1:
+        if self.tab_widget.currentIndex() == 1:
             cur_date = self.combo_manifest_date.currentText().strip() or time.strftime("%Y-%m-%d")
             self._request_data_load(cur_date, eval_only=True)
+        elif self.tab_widget.currentIndex() == 0:
+            sectors = getattr(self._main_window(), 'current_sector_snapshot', None)
+            if (sectors and sectors is not getattr(self, '_manifest_sector_source', None)
+                    and time.monotonic() - getattr(self, '_last_manifest_refresh', 0) >= 30):
+                self.reload_all_data()
 
     # =========================================================================
     # Tab 3: 跨日成效看板

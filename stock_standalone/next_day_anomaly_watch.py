@@ -26,12 +26,64 @@ _LOCK = threading.RLock()
 _LAST_CYCLE: Dict[str, float] = {}
 _HISTORY_INDEX_CACHE: Dict[str, Any] = {}
 _HISTORY_INDEX_TTL_SEC = 30.0
+_LIVE_OBSERVATIONS: Dict[str, Any] = {}
 _FEATURES = {
     "ch_dir", "ch_slope_deg", "ch_pos", "ch_lower", "td_sell",
     "lastp1d", "lastp2d", "lastp3d", "lasto1d",
     "lasth1d", "lasth2d", "lasth3d", "lastl1d", "lastl2d", "lastl3d", "lastl4d", "lastl5d",
     "lastv1d", "lastv2d", "lastv3d", "lastv4d", "lastv5d", "per1d",
 }
+
+
+def _observe_quote(data_dir, day, cohort, key, point, item):
+    """Keep the immediately preceding quote in RAM, independently of signal archives."""
+    root = os.path.abspath(data_dir)
+    bucket = _LIVE_OBSERVATIONS.get(root)
+    if bucket is None or bucket['day'] != day:
+        bucket = {'day': day, 'quotes': {}}
+        _LIVE_OBSERVATIONS[root] = bucket
+        if len(_LIVE_OBSERVATIONS) > 8:
+            _LIVE_OBSERVATIONS.pop(next(iter(_LIVE_OBSERVATIONS)))
+    token = (cohort, key, item.get('candidate', {}).get('config_hash'))
+    prior = bucket['quotes'].get(token)
+    if prior is None:
+        points = item.get('checkpoints', [])
+        prior = points[-1] if points and str(points[-1].get('observed_at', ''))[:10] == day else None
+    if prior and prior.get('observed_at') == point.get('observed_at'):
+        return prior
+    bucket['quotes'][token] = point
+    return prior
+
+
+def get_live_watch_quotes(data_dir, day):
+    with _LOCK:
+        bucket = _LIVE_OBSERVATIONS.get(os.path.abspath(data_dir), {})
+        if bucket.get('day') != day:
+            return {}
+        quotes = {}
+        for (_cohort, key, _config), point in bucket.get('quotes', {}).items():
+            code = key.split(':', 1)[0]
+            if str(point.get('observed_at', '')) >= str(quotes.get(code, {}).get('observed_at', '')):
+                quotes[code] = {k: point.get(k) for k in ('close', 'pct', 'observed_at')}
+        return quotes
+
+
+def _retain_signal_point(item, point, kind):
+    points = item.setdefault('checkpoints', [])
+    saved = dict(point, kind=kind)
+    for index, prior in enumerate(points):
+        same_time = prior.get('observed_at') == point.get('observed_at')
+        closing = (kind == 'CLOSE' and prior.get('kind') == 'CLOSE'
+                   and str(prior.get('observed_at', ''))[:10] == str(point.get('observed_at', ''))[:10])
+        if same_time or closing:
+            if closing and all(prior.get(k) == saved.get(k) for k in saved if k != 'observed_at'):
+                return False
+            if prior == saved:
+                return False
+            points[index] = saved
+            return True
+    points.append(saved)
+    return True
 
 
 def _atomic_json(path: str, value: Any) -> None:
@@ -686,7 +738,10 @@ def _select_primary_sectors(category: Any, industry: Any, snapshot: Any) -> List
 def _sector_evidence(category: Any, snapshot: Any, *, code: str = "", industry: Any = None,
                      stock_started: bool = False) -> Dict[str, Any]:
     result = {"snapshot_at": None, "matches": [], "stock_started": bool(stock_started), "reason": "个股未处于上行/启动阶段"}
-    if not stock_started or not isinstance(snapshot, dict):
+    if not isinstance(snapshot, dict) or not snapshot:
+        result['reason'] = '板块快照未到达'
+        return result
+    if not stock_started:
         return result
     result["reason"] = "无同时满足板块启动和个股归属的共振板块"
     ranked = []
@@ -708,7 +763,7 @@ def _sector_evidence(category: Any, snapshot: Any, *, code: str = "", industry: 
     _, _, _, _, name, info = ranked[0]
     clean = {key: (str(value) if not isinstance(value, (str, int, float, bool, type(None))) else value)
              for key, value in info.items() if key in {"score", "momentum_score", "leader", "leader_name", "leader_pct",
-                 "leader_pct_diff", "followers", "ts", "score_diff", "avg_pct", "avg_pct_diff", "follow_ratio"}}
+                 "leader_pct_diff", "ts", "score_diff", "avg_pct", "avg_pct_diff", "follow_ratio"}}
     result["snapshot_at"] = clean.get("ts")
     result["matches"] = [{"name": name, **clean}]
     result["sector_started"] = True
@@ -726,6 +781,23 @@ def _serialize_cycle(function):
             # Leave the outbox unacknowledged; a later poll can safely retry.
             return {"status": "busy", "reason": "data_directory_locked", "events": []}
     return wrapped
+
+
+def enrich_manifest_sector_evidence(manifest, evaluation, sector_snapshot):
+    """Enrich the returned view, preserving the frozen cohort and its archive."""
+    current_day = manifest.get('target_trade_date') == datetime.now().astimezone().date().isoformat()
+    for candidate in manifest.get('candidates', []):
+        key = str(candidate.get('code', '')) + ':' + str(candidate.get('strategy_id', ''))
+        tracked = evaluation.get('candidates', {}).get(key, {}).get('candidate', {})
+        if current_day and sector_snapshot:
+            candidate['sector_evidence'] = _sector_evidence(
+                candidate.get('raw_category') or candidate.get('category'), sector_snapshot,
+                code=str(candidate.get('code', '')), industry=candidate.get('industry'),
+                stock_started=tracked.get('phase', candidate.get('phase')) in {'RISING', 'ACCELERATING'}
+                              or candidate.get('tier') in {'B', 'C'})
+        elif tracked.get('sector_evidence'):
+            candidate['sector_evidence'] = tracked['sector_evidence']
+    return manifest
 
 
 @_serialize_cycle
@@ -959,9 +1031,16 @@ def run_cycle(df: Any, *, config_path: str, data_dir: str, asof_date: str,
             prior_high = _number(candidate.get("feature_values", {}).get("lasth1d"))
             sustained_high = bool(daily_high is not None and close is not None and prior_high is not None and daily_high > prior_high and close > prior_high)
             real_vwap = _number(row.get(vwap_field)) if vwap_field and vwap_field in row else None
-            if item["checkpoints"] and item["checkpoints"][-1].get("observed_at") == observed_at:
+            pct = _number(row.get('percent'))
+            checkpoint = {'observed_at': observed_at, 'phase': 'market' if now.hour < 15 else 'close',
+                'high': daily_high, 'close': close, 'pct': pct, 'vwap': real_vwap,
+                'vwap_source': vwap_field if real_vwap is not None else None,
+                'volume': _number(row.get('volume', row.get('vol'))), 'amount': _number(row.get('amount')),
+                'server_time': str(row.get('server_time') or row.get('time') or '')}
+            prior_checkpoint = _observe_quote(data_dir, target_date, target_date,
+                code + ':' + candidate['strategy_id'], checkpoint, item)
+            if prior_checkpoint and prior_checkpoint.get('observed_at') == observed_at:
                 continue
-            prior_checkpoint = item["checkpoints"][-1] if item["checkpoints"] else None
             proof_vwap = bool(real_vwap is not None and real_vwap > 0 and prior_checkpoint
                               and prior_checkpoint.get("vwap_source") == vwap_field
                               and _number(prior_checkpoint.get("vwap")) is not None
@@ -974,14 +1053,8 @@ def run_cycle(df: Any, *, config_path: str, data_dir: str, asof_date: str,
             proof_vw = proof_vwap if "verified_vwap_rise" in proof_rules else False
             proof = proof_high or proof_vw
 
-            item["checkpoints"].append({"observed_at": observed_at, "phase": "market" if now.hour < 15 else "close",
-                "high": daily_high, "close": close, "vwap": real_vwap, "vwap_source": vwap_field if real_vwap is not None else None,
-                "volume": cur_vol, "amount": cur_amt, "server_time": cur_time,
-                "sustained_high": sustained_high, "verified_vwap_rise": proof_vwap, "sector": str(row.get("category", "")),
-                "sector_evidence": _sector_evidence(row.get("category"), sector_snapshot,
-                    code=code, industry=candidate.get("industry", ""),
-                    stock_started=candidate.get("tier") in {"B", "C"})})
-            eval_dirty = True
+            checkpoint.update(sustained_high=sustained_high, verified_vwap_rise=proof_vwap)
+            event_count = len(item['events'])
 
             previous_phase = tracked_candidate.get("phase", "STABILIZING")
             if sustained_high and proof_vwap and real_vwap is not None and close is not None and close >= real_vwap:
@@ -1035,7 +1108,7 @@ def run_cycle(df: Any, *, config_path: str, data_dir: str, asof_date: str,
                              "code": code, "name": candidate.get("name", code), "strategy_id": candidate["strategy_id"],
                              "version": candidate["version"], "config_hash": candidate["config_hash"],
                              "observed_at": observed_at, "action": "WATCH", "reason": "两帧确认：持续新高或真实 VWAP 上移",
-                             "price": close or 0.0, "pct": _number(row.get("percent")) or 0.0,
+                             "price": close, "pct": pct,
                              "deviation": _number(row.get("dff")) or 0.0, "sector_name": str(row.get("category", "")),
                              "sector_snapshot_ts": _sector_evidence(row.get("category"), sector_snapshot,
                                  code=code, industry=candidate.get("industry", ""),
@@ -1044,10 +1117,15 @@ def run_cycle(df: Any, *, config_path: str, data_dir: str, asof_date: str,
                                           "vwap": real_vwap, "vwap_source": vwap_field if real_vwap is not None else None,
                                           "confirm_frames": 2, "first_observed_at": prior_checkpoint["observed_at"]}}
                     item["events"].append(event)
+                    _retain_signal_point(item, prior_checkpoint, 'CONFIRM_FIRST')
                     eval_dirty = True
             has_confirmed = any(e.get("type") == "NEXT_DAY_WATCH_CONFIRM" for e in item["events"])
             has_vwap_observation = (item.get("checkpoint_summary", {}).get("has_vwap_observation", False)
+                                    or real_vwap is not None
                                     or any(point.get("vwap") is not None for point in item["checkpoints"]))
+            if real_vwap is not None and not item.setdefault('checkpoint_summary', {}).get('has_vwap_observation'):
+                item['checkpoint_summary']['has_vwap_observation'] = True
+                eval_dirty = True
             prev_status = tracked_candidate.get("status")
             if has_confirmed:
                 tracked_candidate["status"] = "EARLY_VALID"
@@ -1073,6 +1151,29 @@ def run_cycle(df: Any, *, config_path: str, data_dir: str, asof_date: str,
 
             if tracked_candidate.get("status") != prev_status:
                 eval_dirty = True
+
+            new_events = item['events'][event_count:]
+            for event in new_events:
+                event.update(code=code, name=candidate.get('name', code), price=close, pct=pct,
+                             strategy_id=candidate['strategy_id'])
+            if new_events:
+                kind = 'CONFIRMED' if any(e['type'] == 'NEXT_DAY_WATCH_CONFIRM' for e in new_events) else new_events[-1]['type']
+                tracked_candidate['sector_evidence'] = _sector_evidence(
+                    candidate.get('raw_category') or row.get('category'), sector_snapshot,
+                    code=code, industry=candidate.get('industry', ''),
+                    stock_started=tracked_candidate.get('phase') in {'RISING', 'ACCELERATING'}
+                                  or candidate.get('tier') in {'B', 'C'})
+            elif now.hour >= 15:
+                kind = 'CLOSE'
+            elif not item['checkpoints']:
+                kind = 'INITIAL'
+            elif any(checkpoint.get(field) and not any(p.get(field) for p in item['checkpoints'])
+                     for field in ('sustained_high', 'verified_vwap_rise')):
+                kind = 'FIRST_PROOF'
+            else:
+                kind = None
+            if kind:
+                eval_dirty = _retain_signal_point(item, checkpoint, kind) or eval_dirty
 
         if eval_dirty:
             evaluation["updated_at"] = observed_at
@@ -1127,32 +1228,38 @@ def run_cycle(df: Any, *, config_path: str, data_dir: str, asof_date: str,
                 proof_rules = candidate.get("followup_proof_any") or ["daily_high_break", "verified_vwap_rise"]
                 proof_high = ("daily_high_break" in proof_rules and high is not None and close is not None
                               and prior_high is not None and high > prior_high and close > prior_high)
-                prior_checkpoint = item.get("checkpoints", [])[-1] if item.get("checkpoints") else None
+                checkpoint = {"observed_at": observed_at, "phase": "market" if now.hour < 15 else "close",
+                    "high": high, "close": close, "pct": _number(row.get('percent')), "vwap": real_vwap,
+                    "vwap_source": vwap_field if real_vwap is not None else None,
+                    "volume": _number(row.get("volume", row.get("vol"))), "amount": _number(row.get("amount")),
+                    "server_time": str(row.get("server_time") or row.get("time") or ""),
+                    "sustained_high": proof_high,
+                    "sector": str(row.get("category", ""))}
+                prior_checkpoint = _observe_quote(data_dir, target_date, prior_date, key, checkpoint, item)
                 proof_vwap = bool("verified_vwap_rise" in proof_rules and real_vwap is not None and real_vwap > 0
                                   and prior_checkpoint
                                   and prior_checkpoint.get("vwap_source") == vwap_field
                                   and _number(prior_checkpoint.get("vwap")) is not None
                                   and real_vwap > float(prior_checkpoint["vwap"]))
-                checkpoint = {"observed_at": observed_at, "phase": "market" if now.hour < 15 else "close",
-                    "high": high, "close": close, "vwap": real_vwap,
-                    "vwap_source": vwap_field if real_vwap is not None else None,
-                    "volume": _number(row.get("volume", row.get("vol"))), "amount": _number(row.get("amount")),
-                    "server_time": str(row.get("server_time") or row.get("time") or ""),
-                    "sustained_high": proof_high, "verified_vwap_rise": proof_vwap,
-                    "sector": str(row.get("category", ""))}
+                checkpoint['verified_vwap_rise'] = proof_vwap
                 checkpoints = item.setdefault("checkpoints", [])
-                if elapsed <= horizon and (not checkpoints or checkpoints[-1].get("observed_at") != observed_at):
-                    checkpoints.append(checkpoint)
-                    changed = True
+                if elapsed <= horizon:
+                    kind = ('CLOSE' if now.hour >= 15 else 'INITIAL'
+                            if not any(str(p.get('observed_at', ''))[:10] == target_date for p in checkpoints) else None)
+                    if kind:
+                        changed = _retain_signal_point(item, checkpoint, kind) or changed
                 if elapsed <= horizon and (proof_high or proof_vwap):
                     if not any(e.get("type") == "DELAYED" for e in item.get("events", [])):
                         item.setdefault("events", []).append({
                             "type": "DELAYED",
                             "date": target_date,
                             "observed_at": observed_at,
+                            "code": code, "name": candidate.get('name', code),
+                            "price": close, "pct": checkpoint['pct'],
                             "reason": "later_sustained_high_after_target_day_miss" if proof_high
                                       else "verified_vwap_rise_after_target_day_miss"
                         })
+                        _retain_signal_point(item, checkpoint, 'DELAYED')
                         changed = True
                     if tracked.get("status") != "DELAYED":
                         tracked["status"] = "DELAYED"
@@ -1168,7 +1275,9 @@ def run_cycle(df: Any, *, config_path: str, data_dir: str, asof_date: str,
                             changed = True
                     elif not prior_types.intersection({"DELAYED", "MISSED"}):
                         item.setdefault("events", []).append({"type": "MISSED", "date": target_date,
-                            "observed_at": observed_at, "reason": "followup_window_expired_after_day_miss"})
+                            "observed_at": observed_at, "reason": "followup_window_expired_after_day_miss",
+                            "code": code, "name": candidate.get('name', code),
+                            "price": close, "pct": checkpoint['pct']})
                         tracked["status"] = "MISSED"
                         changed = True
             if changed:
@@ -1243,8 +1352,6 @@ def mark_events_delivered(data_dir: str, target_date: str, event_ids: Iterable[s
     with _LOCK, directory_write_lock(data_dir):
         for d, batch_ids in date_to_ids.items():
             path = os.path.join(data_dir, f"next_day_anomaly_eval_{d}.json")
-            if not os.path.exists(path):
-                continue
             evaluation = _read_json(path, {})
             changed = False
             for item in evaluation.get("candidates", {}).values():

@@ -197,3 +197,4 @@ stock_standalone/data/ipo_learning/source_observations.sqlite-shm
 stock_standalone/data/ipo_learning/source_observations.sqlite-wal
 stock_standalone/data/ipo_learning_simulation/*
 stock_standalone/data/ipo_replay_smoke/*
+stock_standalone/aitest/*
