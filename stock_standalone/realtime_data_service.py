@@ -436,6 +436,7 @@ class MinuteKlineCache:
         
         self._consolidation_flags: dict[str, dict[str, Any]] = {}
         self._v_reversal_pool: set[str] = set()
+        self.v_reversal_max_capacity = 150
         self.enable_auto_cleanup: bool = False  # 彻底停用后台自动清理，避免后台自动削减/清空潜伏池数据，仅支持用户在UI上手动触发
         self.enable_auto_channel_add: bool = False  # 彻底停用后台自动通道纳标，避免自动超额向潜伏池添加全市场股票，仅支持用户在UI上手动触发【🚀 通道纳标】或显式开启
         
@@ -2202,23 +2203,12 @@ class MinuteKlineCache:
                                 calc_dff2 = 5.0
                                 name_val = "模拟个股"
                         
-                        if is_strong_trend:
+                        if is_strong_trend and self.try_add_v_reversal_stock(code):
                             state["phase"] = "CONSOLIDATING"
                             state["anchor_low"] = recent_min
                             state["base_vol"] = recent_avg_vol
-                            # 保持最初入池时间不变（若已有且在3日内有效则继承；若距今>3日则判定为历史陈旧周期，彻底重置为今日）
-                            existing_entry = state.get("entry_date") or state.get("first_entry_date")
-                            existing_dist = cct.get_trade_day_distance(existing_entry) if existing_entry else None
-                            if not existing_entry or existing_entry == "-" or (existing_dist is not None and existing_dist > 3):
-                                state["entry_date"] = today_str
-                                state["first_entry_date"] = today_str
-                                state["entry_ts"] = now_ts
-                                state["first_entry_ts"] = now_ts
-                            else:
-                                state["entry_date"] = existing_entry
-                                state["first_entry_date"] = existing_entry
-                                if "first_entry_ts" not in state:
-                                    state["first_entry_ts"] = state.get("entry_ts", now_ts)
+                            # Preserve original admission across phase changes.
+                            self.preserve_v_reversal_entry(state, today_str, now_ts)
                             state["phase_entry_date"] = today_str
                             state["phase_ts"] = now_ts
                             state["phase_extend_count"] = 0
@@ -2228,7 +2218,6 @@ class MinuteKlineCache:
                             if name_val and name_val != "未知":
                                 state["name"] = name_val
                             
-                            self._v_reversal_pool.add(code)
 
                     
             elif phase == "CONSOLIDATING":
@@ -2236,12 +2225,8 @@ class MinuteKlineCache:
                 base_vol = state.get("base_vol", recent_avg_vol)
                 
                 # 提取或补齐最初入池时间与阶段进入锚点
-                entry_date = state.get("entry_date") or state.get("first_entry_date")
-                if not entry_date or entry_date == "-":
-                    entry_ts = state.get("entry_ts", state.get("update_ts", now_ts))
-                    entry_date = datetime.fromtimestamp(entry_ts).strftime("%Y-%m-%d")
-                    state["entry_date"] = entry_date
-                state["first_entry_date"] = entry_date
+                self.preserve_v_reversal_entry(state, today_str, now_ts)
+                entry_date = state["first_entry_date"]
                 
                 phase_entry_date = state.get("phase_entry_date", entry_date)
                 trade_dist = cct.get_trade_day_distance(phase_entry_date)
@@ -2279,12 +2264,8 @@ class MinuteKlineCache:
                 state["wave_peak"] = max(state.get("wave_peak", 0), recent_max)
                 
                 # 提取或补齐最初入池时间与阶段进入锚点
-                entry_date = state.get("entry_date") or state.get("first_entry_date")
-                if not entry_date or entry_date == "-":
-                    entry_ts = state.get("entry_ts", state.get("update_ts", now_ts))
-                    entry_date = datetime.fromtimestamp(entry_ts).strftime("%Y-%m-%d")
-                    state["entry_date"] = entry_date
-                state["first_entry_date"] = entry_date
+                self.preserve_v_reversal_entry(state, today_str, now_ts)
+                entry_date = state["first_entry_date"]
                 
                 phase_entry_date = state.get("phase_entry_date", entry_date)
                 trade_dist = cct.get_trade_day_distance(phase_entry_date)
@@ -2332,12 +2313,8 @@ class MinuteKlineCache:
                 pullback_price = state.get("pullback_price", recent_close)
                 
                 # 提取或补齐最初入池时间与阶段进入锚点
-                entry_date = state.get("entry_date") or state.get("first_entry_date")
-                if not entry_date or entry_date == "-":
-                    entry_ts = state.get("entry_ts", state.get("update_ts", now_ts))
-                    entry_date = datetime.fromtimestamp(entry_ts).strftime("%Y-%m-%d")
-                    state["entry_date"] = entry_date
-                state["first_entry_date"] = entry_date
+                self.preserve_v_reversal_entry(state, today_str, now_ts)
+                entry_date = state["first_entry_date"]
                 
                 phase_entry_date = state.get("phase_entry_date", entry_date)
                 trade_dist = cct.get_trade_day_distance(phase_entry_date)
@@ -2385,12 +2362,8 @@ class MinuteKlineCache:
                         
             elif phase == "WAVE_UP_2":
                 # 提取或补齐最初入池时间与阶段进入锚点
-                entry_date = state.get("entry_date") or state.get("first_entry_date")
-                if not entry_date or entry_date == "-":
-                    entry_ts = state.get("entry_ts", state.get("update_ts", now_ts))
-                    entry_date = datetime.fromtimestamp(entry_ts).strftime("%Y-%m-%d")
-                    state["entry_date"] = entry_date
-                state["first_entry_date"] = entry_date
+                self.preserve_v_reversal_entry(state, today_str, now_ts)
+                entry_date = state["first_entry_date"]
                 
                 phase_entry_date = state.get("phase_entry_date", entry_date)
                 trade_dist = cct.get_trade_day_distance(phase_entry_date)
@@ -2425,6 +2398,63 @@ class MinuteKlineCache:
                 
         except Exception as e:
             logger.error(f"update_wave_structure_state error for {code}: {e}")
+
+    def preserve_v_reversal_entry(self, state: dict, today: str, now_ts: float) -> None:
+        """Keep the earliest known admission; phase timestamps are independent."""
+        dates = []
+        for key in ("first_entry_date", "entry_date"):
+            try:
+                dates.append(datetime.strptime(str(state.get(key, "")), "%Y-%m-%d").strftime("%Y-%m-%d"))
+            except (ValueError, TypeError):
+                pass
+        timestamps = []
+        for key in ("first_entry_ts", "entry_ts"):
+            try:
+                value = float(state.get(key, 0))
+                if value > 0:
+                    date = datetime.fromtimestamp(value).strftime("%Y-%m-%d")
+                    timestamps.append((value, date))
+            except (ValueError, TypeError, OverflowError, OSError):
+                pass
+        known_dates = dates + [date for _, date in timestamps]
+        entry_date = min(known_dates) if known_dates else today
+        matching = [value for value, date in timestamps if date == entry_date]
+        entry_ts = min(matching) if matching else (
+            now_ts if not dates and not timestamps else datetime.strptime(entry_date, "%Y-%m-%d").timestamp())
+        state.update(entry_date=entry_date, first_entry_date=entry_date,
+                     entry_ts=entry_ts, first_entry_ts=entry_ts)
+
+    def enforce_v_reversal_capacity(self) -> int:
+        """Repair oversized legacy pools using the existing priority score."""
+        with self._lock:
+            capacity = self.v_reversal_max_capacity
+            if len(self._v_reversal_pool) <= capacity:
+                return 0
+            ranked = sorted(self._v_reversal_pool,
+                            key=lambda c: (self.calculate_reversal_priority_score(c), c),
+                            reverse=True)
+            removed = ranked[capacity:]
+            self._v_reversal_pool.intersection_update(ranked[:capacity])
+            now = time.time()
+            for code in removed:
+                flags = self._consolidation_flags.get(code)
+                if flags is not None:
+                    flags.update(phase="INIT", last_fail_ts=now,
+                                 evict_reason="V-Reversal capacity limit")
+            logger.warning("[V-POOL-CAP] Trimmed legacy pool: removed=%d remaining=%d limit=%d",
+                           len(removed), len(self._v_reversal_pool), capacity)
+            return len(removed)
+
+    def try_add_v_reversal_stock(self, code: str) -> bool:
+        """Atomically enforce the shared limit for all pool admission paths."""
+        with self._lock:
+            self.enforce_v_reversal_capacity()
+            if code in self._v_reversal_pool:
+                return True
+            if len(self._v_reversal_pool) >= self.v_reversal_max_capacity:
+                return False
+            self._v_reversal_pool.add(code)
+            return True
 
     def get_v_reversal_pool(self) -> set[str]:
         """供外层引擎高速检索潜伏池成员"""
@@ -2721,6 +2751,7 @@ class MinuteKlineCache:
         2. [双轨通道判定]：优先支持时序通道 ch_dir==1；无时序通道时自适应多头均线识别；
         3. [容量扩至 150 & 统计待加总数]：返回丰富统计，显示全市场符合条件总数与排队待加数，支持用户心中有数地手动清理。
         """
+        max_pool_limit = min(max_pool_limit, self.v_reversal_max_capacity)
         df_snap = df if df is not None and not df.empty else getattr(self, '_df_all_cache', None)
         if df_snap is None or df_snap.empty:
             return ScanChannelResult(0, total_eligible=0, pending_count=0, cur_total=len(self._v_reversal_pool), evicted_replace=0)
@@ -3002,15 +3033,14 @@ class MinuteKlineCache:
                 if len(self._v_reversal_pool) >= max_pool_limit:
                     break
                 c = item["code"]
+                if not self.try_add_v_reversal_stock(c):
+                    break
                 st = self._consolidation_flags.get(c, {})
                 st["phase"] = "CONSOLIDATING"
                 st["anchor_low"] = item["anchor_low"]
                 st["base_vol"] = 1000.0
-                st["entry_date"] = today_str
-                st["first_entry_date"] = today_str
+                self.preserve_v_reversal_entry(st, today_str, now_ts)
                 st["phase_entry_date"] = today_str
-                st["entry_ts"] = now_ts
-                st["first_entry_ts"] = now_ts
                 st["phase_ts"] = now_ts
                 st["structure"] = item["structure"]
                 st["ch_dir"] = 1
@@ -3019,7 +3049,6 @@ class MinuteKlineCache:
                 st["evict_reason"] = ""
 
                 self._consolidation_flags[c] = st
-                self._v_reversal_pool.add(c)
                 added_count += 1
 
             if added_count > 0 or evicted_for_replace > 0:
@@ -3172,19 +3201,11 @@ class MinuteKlineCache:
                     phase_mapped = phase_map_rev.get(raw_phase, raw_phase)
                     flag_data["phase"] = phase_mapped
                     
-                    entry_date = flag_data.get("entry_date") or flag_data.get("first_entry_date")
-                    if not entry_date or entry_date == "-":
-                        entry_date = today_str
-                    flag_data["entry_date"] = entry_date
-                    flag_data["first_entry_date"] = entry_date
-                    
+                    self.preserve_v_reversal_entry(flag_data, today_str, now_ts)
+                    entry_date = flag_data["first_entry_date"]
                     if "phase_entry_date" not in flag_data:
                         flag_data["phase_entry_date"] = entry_date
-                    if "entry_ts" not in flag_data:
-                        flag_data["entry_ts"] = now_ts
-                    if "first_entry_ts" not in flag_data:
-                        flag_data["first_entry_ts"] = flag_data["entry_ts"]
-                    
+
                     if code in raw_pool or code_str in raw_pool:
                         valid_pool.add(code_str)
                 
@@ -3193,6 +3214,8 @@ class MinuteKlineCache:
             with self._lock:
                 self._consolidation_flags.update(valid_flags)
                 self._v_reversal_pool.update(valid_pool)
+                if self.enforce_v_reversal_capacity():
+                    need_disk_resync = True
                 self._fsm_state_restored = True  # 标记为已成功恢复，防止二次重复读盘
 
             # 如果是从历史备份自愈回溯的，顺带同步写回 Ramdisk 修复磁盘文件
