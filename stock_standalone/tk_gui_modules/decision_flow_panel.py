@@ -1809,17 +1809,15 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
             self._last_modified_time = os.path.getmtime(self.journal_path)
 
             records = []
-            with open(self.journal_path, "r", encoding="utf-8") as f:
-                # 采用简单、安全的尾部行扫描，提取最后 300 行 JSON，避免全文件解析的爆内存问题
-                lines = f.readlines()[-300:]
-                for line in lines:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        records.append(json.loads(line))
-                    except Exception:
-                        continue
+            from tk_gui_modules.journal_reader import read_journal_tail
+            lines, self._last_file_size = read_journal_tail(self.journal_path)
+            for line in lines:
+                if not line.strip():
+                    continue
+                try:
+                    records.append(json.loads(line.decode('utf-8')))
+                except (ValueError, UnicodeError):
+                    continue
 
             # 仅截取最后 200 条进行表格渲染
             records = records[-200:]
@@ -1842,7 +1840,7 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
 
     def _check_and_update_records(self):
         """定时扫描函数：仅执行极其高效 of 增量日志文件追溯以确保主线程 20ms 的 UI 调度预算"""
-        if not os.path.exists(self.journal_path):
+        if not self.isVisible() or not os.path.exists(self.journal_path):
             return
 
         try:
@@ -1860,20 +1858,18 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
 
             # 精准的增量尾部寻址读取 (零拷贝，高速定位)
             new_records = []
-            with open(self.journal_path, "r", encoding="utf-8") as f:
-                f.seek(self._last_file_size)
-                new_lines = f.readlines()
-                for line in new_lines:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        new_records.append(json.loads(line))
-                    except Exception:
-                        continue
+            from tk_gui_modules.journal_reader import read_journal_increment
+            new_lines, offset = read_journal_increment(self.journal_path, self._last_file_size)
+            for line in new_lines:
+                if not line.strip():
+                    continue
+                try:
+                    new_records.append(json.loads(line.decode('utf-8')))
+                except (ValueError, UnicodeError):
+                    continue
 
-            # 更新追踪指针
-            self._last_file_size = file_size
+            # Advance only over complete lines; retain partially written records for retry.
+            self._last_file_size = offset
             self._last_modified_time = mtime
 
             # 增量追加至表格
@@ -1896,6 +1892,8 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
 
     def _slow_update_cycle(self):
         """低频轮询周期：执行状态徽章同步、控制页同步、持仓刷新与决策流停滞监控，释放主线程 CPU 开销"""
+        if not self.isVisible():
+            return
         # A. 同步顶部运行模式与熔断徽章
         self._update_top_status_badges()
         

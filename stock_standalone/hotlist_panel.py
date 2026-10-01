@@ -923,27 +923,21 @@ class HotlistPanel(QWidget, WindowMixin):
         # logger.debug(f"[UI] Signal received: {msg}")
 
     def _perform_ui_refresh(self):
-        """[Limited Frequency] 统一执行 UI 刷新任务，消除重绘负载"""
-        if self._pending_pnl_refresh:
-            self._refresh_pnl_ui_only()
-            self._pending_pnl_refresh = False
-            
+        """Coalesce table and price rendering; keep pending work while hidden."""
+        if not self.isVisible():
+            return
+        needs_prices = self._pending_pnl_refresh
         if self._pending_table_refresh_follow:
-            # ⭐ [FIX] 无论是否当前在 Follow Tab，都需要渲染（避免切换时空白）
-            # 但仅当 Tab 可见时渲染可节省性能，已有数据缓存兜底
             self._update_follow_queue()
             self._pending_table_refresh_follow = False
-            # ⭐ [FIX] 结构刷新后立即触发价格更新，确保现价/盈亏列不丢失
-            self._refresh_pnl_ui_only()
-
+            needs_prices = True
         if self._pending_table_refresh_watchlist:
-            # ⭐ [FIX] 同上，由 _update_watchlist_queue 内部脏检查保证增量渲染性能
             self._update_watchlist_queue()
             self._pending_table_refresh_watchlist = False
-            # ⭐ [FIX] 结构刷新后立即触发价格更新，确保现价/盈亏列不丢失
+            needs_prices = True
+        if needs_prices:
             self._refresh_pnl_ui_only()
-            
-        # 总是更新状态栏
+            self._pending_pnl_refresh = False
         self._update_status_bar()
 
 
