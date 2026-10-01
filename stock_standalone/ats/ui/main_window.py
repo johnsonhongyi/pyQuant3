@@ -7,6 +7,8 @@ Assembles the complete Autonomous Trading System UI dashboard.
 import sys
 import os
 import time
+import datetime
+import random
 import json
 import logging
 from typing import Optional, List, Dict, Any, Tuple
@@ -1870,10 +1872,12 @@ class ATSMainWindow(QMainWindow):
     _price_load_ready = pyqtSignal()
     _channel_scan_ready = pyqtSignal(object)
     _market_summary_ready = pyqtSignal()
+    _filter_eval_ready = pyqtSignal(int, object)
 
     def __init__(self):
         super().__init__()
         self._channel_scan_ready.connect(self._on_channel_scan_ready)
+        self._filter_eval_ready.connect(self._on_filter_eval_finished)
         # 1. 新股次新股超短检测工具开关 (ipo_detector，控制后台拉起独立检测器小窗口；有独立入口故默认 False 不自动启动)
         ipo_enabled = getattr(
             cct, "ipo_detector", getattr(getattr(cct, "CFG", None), "ipo_detector", False)
@@ -1952,9 +1956,14 @@ class ATSMainWindow(QMainWindow):
         # next-day ATS startup always re-attempts history loading.
         self.history_failed_codes = {}   # {code: fail_time (float unix ts)}
         self._history_failed_date = None  # tracks the date when failures were recorded
+        self._history_empty_cache_times = {}  # {code: fail_time}, 60s negative cache TTL
+        self._history_lock_fail_times = {}    # {code: fail_time}, 30s lock conflict retry TTL
         self.prices_loading_codes = set()
-        self.prices_failed_codes = set()
         self._price_failure_times = {}
+        self._price_fail_counts = {}       # {code: fail_count}, 30s -> 60s -> 300s 阶梯退避计数
+        self._history_fail_counts = {}     # {code: fail_count}, 30s -> 60s -> 300s 阶梯退避计数
+        import threading
+        self._filter_eval_lock = threading.Lock()  # 公式过滤 Worker 状态原子切换互斥锁
         self._price_load_ready.connect(self._trigger_realtime_ui_update, Qt.ConnectionType.QueuedConnection)
         self._is_closing = False
         
@@ -2973,23 +2982,106 @@ class ATSMainWindow(QMainWindow):
         return pd.DataFrame()
 
     def _recompute_filtered_codes_set(self):
-        """根据当前策略公式 query_expr 和最新的全市场行情 current_df 动态计算匹配的股票代码集合"""
+        """根据当前策略公式 query_expr 和最新行情动态计算匹配的代码集合 (单Worker循环 + 负载折叠 + Revision版本校验)"""
+        import threading
+        lock = getattr(self, '_filter_eval_lock', None)
+        if lock is None:
+            lock = threading.Lock()
+            self._filter_eval_lock = lock
+
         query = getattr(self, 'query_expr', '')
-        self.filtered_codes_set = set()
-        if query and self.current_df is not None and not self.current_df.empty:
-            test_df = self.get_test_df_for_hits()
-            if not test_df.empty:
-                from stock_logic_utils import query_engine
+        with lock:
+            if not query or self.current_df is None or self.current_df.empty:
+                # ⚡ 关键防旧任务覆盖：清空公式时同步递增 Revision 并作废在途任务负载
+                self._filter_eval_revision = getattr(self, '_filter_eval_revision', 0) + 1
+                self._filter_eval_pending_payload = None
+                self.filtered_codes_set = set()
+                return
+
+            self._filter_eval_revision = getattr(self, '_filter_eval_revision', 0) + 1
+            req_rev = self._filter_eval_revision
+            # 存储最新待处理负载 (自动合并中间高速到来的行情帧)
+            self._filter_eval_pending_payload = (req_rev, self.current_df, query)
+
+            if getattr(self, '_filter_eval_worker_running', False):
+                # 已有后台 Worker 在运行，它会在持锁循环中自动拾取最新负载
+                return
+            self._filter_eval_worker_running = True
+
+        def worker_loop():
+            try:
                 import pandas as pd
+                from stock_logic_utils import query_engine
+            except Exception as ex:
+                logger.debug(f"[FilterWorker] initialization error: {ex}")
+                with lock:
+                    self._filter_eval_worker_running = False
+                return
+
+            while True:
+                with lock:
+                    payload = getattr(self, '_filter_eval_pending_payload', None)
+                    if payload is None:
+                        # 状态清零与退出合并在同一临界区；退出后不再二次写 running，避免覆盖新 Worker 的状态。
+                        self._filter_eval_worker_running = False
+                        return
+                    self._filter_eval_pending_payload = None
+
+                cur_rev, df_snap, cur_query = payload
+                # 快速检查：若版本已过时或公式已清空，跳过计算
+                if cur_rev != getattr(self, '_filter_eval_revision', 0) or not cur_query or df_snap is None or df_snap.empty:
+                    continue
+
+                res_set = set()
                 try:
-                    df_res = query_engine.execute(test_df, query)
+                    # 锁外与子线程内执行 DataFrame 复制与列重命名映射，彻底杜绝 UI 主线程卡顿
+                    test_df = df_snap.copy()
+                    mapping = {
+                        '价格': 'close', '最新价': 'close', '现价': 'close',
+                        '涨幅': 'pct',
+                        '量': 'volume', '成交量': 'volume',
+                        '成交额': 'turnover',
+                        '最高': 'high', '最低': 'low', '开盘': 'open',
+                        '板块': 'category', '异动类型': 'category', 'hy': 'category'
+                    }
+                    for cn, en in mapping.items():
+                        if cn in test_df.columns and en not in test_df.columns:
+                            test_df[en] = test_df[cn]
+                    if 'close' in test_df.columns:
+                        for col in ['open', 'high', 'low']:
+                            if col not in test_df.columns:
+                                test_df[col] = test_df['close']
+
+                    df_res = query_engine.execute(test_df, cur_query)
                     if isinstance(df_res, pd.DataFrame) and not df_res.empty:
                         if 'code' in df_res.columns:
-                            self.filtered_codes_set = {str(c).strip().zfill(6) for c in df_res['code']}
+                            res_set = {str(c).strip().zfill(6) for c in df_res['code']}
                         else:
-                            self.filtered_codes_set = {str(c).strip().zfill(6) for c in df_res.index}
+                            res_set = {str(c).strip().zfill(6) for c in df_res.index}
                 except Exception as ex:
-                    logger.debug(f"_recompute_filtered_codes_set query_engine error: {ex}")
+                    logger.debug(f"[FilterWorker] query_engine error: {ex}")
+
+                if cur_rev == getattr(self, '_filter_eval_revision', 0):
+                    try:
+                        if hasattr(self, '_filter_eval_ready') and getattr(self._filter_eval_ready, 'emit', None):
+                            self._filter_eval_ready.emit(cur_rev, res_set)
+                        else:
+                            self._on_filter_eval_finished(cur_rev, res_set)
+                    except Exception as ex:
+                        logger.debug(f"[FilterWorker] result dispatch error: {ex}")
+
+        worker = threading.Thread(target=worker_loop, daemon=True, name="ATS-FilterEval")
+        try:
+            worker.start()
+        except Exception:
+            with lock:
+                self._filter_eval_worker_running = False
+            logger.exception("[FilterWorker] Cannot start worker thread")
+
+    def _on_filter_eval_finished(self, req_rev: int, res_set: set):
+        """仅当请求版本匹配最新 Revision 时，原子更新主线程过滤结果 (防止慢任务覆盖新任务)"""
+        if req_rev == getattr(self, '_filter_eval_revision', 0):
+            self.filtered_codes_set = res_set
 
     def apply_filter(self, force=False):
         import time
@@ -3745,6 +3837,34 @@ class ATSMainWindow(QMainWindow):
             except Exception as e:
                 print(f"[ATSMainWindow] Error updating name cache from df: {e}")
 
+    def _sync_name_cache(self):
+        """同步名称缓存：跨日重置、行数扩容即时刷新、周期 60s 节流增量同步"""
+        import datetime
+        _today_str = datetime.date.today().isoformat()
+        if getattr(self, '_name_cache_date', None) != _today_str:
+            self._name_cache_date = _today_str
+            self._name_cache_initialized = False
+            self._last_name_cache_sync_t = 0.0
+
+        if hasattr(self, 'current_df') and self.current_df is not None and 'name' in self.current_df.columns:
+            _now_sync_t = time.time()
+            _last_sync_t = getattr(self, '_last_name_cache_sync_t', 0.0)
+            _last_len = getattr(self, '_name_cache_last_len', 0)
+            _cur_len = len(self.current_df)
+            _should_sync = (
+                _last_sync_t == 0.0
+                or _cur_len > _last_len
+                or (_now_sync_t - _last_sync_t >= 60.0)
+            )
+            if _should_sync:
+                self._last_name_cache_sync_t = _now_sync_t
+                self._name_cache_last_len = _cur_len
+                try:
+                    self._update_name_cache_from_df(self.current_df)
+                except Exception:
+                    pass
+                self._name_cache_initialized = True
+
     def get_df_row_safe(self, df, code):
         """鲁棒安全从 DataFrame 提取单股 DataRow (全能兼容 index 索引、code 列、纯数字代码 600013、带前缀 sh600013 等)"""
         if df is None or df.empty or not code:
@@ -4422,28 +4542,8 @@ class ATSMainWindow(QMainWindow):
             except Exception:
                 pass
 
-        # Fast vectorized name cache update — 节流 60s 或按需后台更新，杜绝每秒创建 OS 原生线程
-        _now_ts = time.time()
-        _last_name_update = getattr(self, '_last_name_cache_update_time', 0.0)
-        if (not getattr(self, '_name_cache_update_busy', False)
-                and (_now_ts - _last_name_update > 60.0 or not _last_name_update)
-                and 'name' in self.current_df.columns):
-            self._last_name_cache_update_time = _now_ts
-            self._name_cache_update_busy = True
-            _df_for_name = self.current_df[['name']].copy(deep=True) if 'name' in self.current_df.columns else None
-            def _bg_name_cache():
-                try:
-                    self._update_name_cache_from_df(_df_for_name)
-                except Exception:
-                    pass
-                finally:
-                    self._name_cache_update_busy = False
-            import threading as _t_mod
-            try:
-                _t_mod.Thread(target=_bg_name_cache, daemon=True).start()
-            except Exception:
-                self._name_cache_update_busy = False
-                logger.exception("[ATSMainWindow] Cannot start name cache worker")
+        # ⚡ 名称缓存更新策略：跨日重置、扩容首刷、60s增量节流同步
+        self._sync_name_cache()
 
         # 🛡️ 实时推送到独立新股阶梯盯盘窗口 (非阻塞, 防重入 50ms 防抖)
         if hasattr(self, 'ladder_monitor_win') and self.ladder_monitor_win is not None:
@@ -4478,13 +4578,9 @@ class ATSMainWindow(QMainWindow):
             self.lbl_ipc_status.setText("  IPC 通道: 🔌 实时接入中  |  ")
             self.lbl_ipc_status.setStyleSheet("color: #00ff88; font-weight: bold;")
 
-            # ⚡ 策略过滤集异步刷新 (50ms 延迟，避免在 IPC 接收主链路执行 query.eval 全表扫描)
+            # ⚡ 策略过滤集合并异步刷新 (50ms 延迟，接入 _queue_latest_ui_task 防饥饿并丢弃中间过期帧)
             if getattr(self, 'query_expr', ''):
-                if not hasattr(self, '_filter_recompute_timer'):
-                    self._filter_recompute_timer = QTimer(self)
-                    self._filter_recompute_timer.setSingleShot(True)
-                    self._filter_recompute_timer.timeout.connect(self._recompute_filtered_codes_set)
-                self._filter_recompute_timer.start(50)
+                self._queue_latest_ui_task("filter_recompute", 50, self._recompute_filtered_codes_set)
 
             # ⚡ 涨跌幅度直方图异步计算（pandas 统计移入 QTimer.singleShot，不阻塞主接收链路）
             _df_hist = self.current_df
@@ -4520,7 +4616,7 @@ class ATSMainWindow(QMainWindow):
             self._last_data_update_time = self._last_recv_t
             if hasattr(self, '_refresh_statusbar_time_display'):
                 self._refresh_statusbar_time_display()
-            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] [ATS_Realtime] Received data update: {msg_type}, rows={len(self.current_df)}")
+            logger.debug(f"[ATS_Realtime] Received data update: {msg_type}, rows={len(self.current_df)}")
 
     def _restore_persistent_monitors_on_data_ready(self):
         """
@@ -4654,7 +4750,9 @@ class ATSMainWindow(QMainWindow):
         
         now = time.monotonic()
         for code in tuple(self.prices_failed_codes):
-            if now - self._price_failure_times.get(code, 0.0) >= 30.0:
+            cnt = getattr(self, '_price_fail_counts', {}).get(code, 0)
+            ttl = 300.0 if cnt >= 3 else (60.0 if cnt == 2 else 30.0)
+            if now - self._price_failure_times.get(code, 0.0) >= ttl:
                 self.prices_failed_codes.discard(code)
                 self._price_failure_times.pop(code, None)
         codes_to_load = [c for c in dict.fromkeys(codes)
@@ -4679,12 +4777,15 @@ class ATSMainWindow(QMainWindow):
         import threading
         def worker():
             t0 = time.time()
+            fail_counts = getattr(self, '_price_fail_counts', {})
             acquired = self.hdf5_history_lock.acquire(blocking=True, timeout=5.0)
             if not acquired:
+                now_m = time.monotonic()
                 for code in codes_to_load:
                     self.prices_loading_codes.discard(code)
                     self.prices_failed_codes.add(code)
-                    self._price_failure_times[code] = time.monotonic()
+                    self._price_failure_times[code] = now_m
+                    fail_counts[code] = fail_counts.get(code, 0) + 1
                 logger.debug(f"[ATSMainWindow] HDF5 lock busy, postponed price load for {len(codes_to_load)} codes.")
                 return
             try:
@@ -4693,10 +4794,12 @@ class ATSMainWindow(QMainWindow):
                 
                 valid_codes = [c for c in codes_to_load if c and len(c) == 6]
                 if not valid_codes:
+                    now_m = time.monotonic()
                     for code in codes_to_load:
                         self.prices_loading_codes.discard(code)
                         self.prices_failed_codes.add(code)
-                        self._price_failure_times[code] = time.monotonic()
+                        self._price_failure_times[code] = now_m
+                        fail_counts[code] = fail_counts.get(code, 0) + 1
                     return
                     
                 tick_df = s.get_stock_list_data(valid_codes)
@@ -4709,39 +4812,46 @@ class ATSMainWindow(QMainWindow):
                         pct = (price - llastp) / llastp * 100.0 if llastp > 0 else 0.0
                         self.price_pct_cache[code_str] = (price, pct)
                         loaded_codes.add(code_str)
+                        fail_counts.pop(code_str, None)
                         
+                now_m = time.monotonic()
                 for code in codes_to_load:
                     self.prices_loading_codes.discard(code)
                     if code not in loaded_codes:
                         self.prices_failed_codes.add(code)
-                        self._price_failure_times[code] = time.monotonic()
+                        self._price_failure_times[code] = now_m
+                        fail_counts[code] = fail_counts.get(code, 0) + 1
                         
                 cost_ms = (time.time() - t0) * 1000.0
                 logger.debug(f"[ATSMainWindow] Batch prices loaded: {len(loaded_codes)}/{len(valid_codes)} in {cost_ms:.1f}ms")
                 self._price_load_ready.emit()
             except Exception as e:
                 logger.debug(f"[ATSMainWindow] Error loading prices in background: {e}")
+                now_m = time.monotonic()
                 for code in codes_to_load:
                     self.prices_loading_codes.discard(code)
                     self.prices_failed_codes.add(code)
-                    self._price_failure_times[code] = time.monotonic()
+                    self._price_failure_times[code] = now_m
+                    fail_counts[code] = fail_counts.get(code, 0) + 1
             finally:
                 self.hdf5_history_lock.release()
                 
         try:
             threading.Thread(target=worker, daemon=True).start()
         except Exception:
+            now_m = time.monotonic()
+            fail_counts = getattr(self, '_price_fail_counts', {})
             for code in codes_to_load:
                 self.prices_loading_codes.discard(code)
                 self.prices_failed_codes.add(code)
-                self._price_failure_times[code] = time.monotonic()
+                self._price_failure_times[code] = now_m
+                fail_counts[code] = fail_counts.get(code, 0) + 1
             logger.exception("[ATSMainWindow] Cannot start price load worker")
 
     def _async_load_stock_history(self, codes):
         if not codes:
             return
         
-        import time, datetime, random
         now_ts = time.time()
         today = datetime.date.today().isoformat()
         
@@ -4756,17 +4866,38 @@ class ATSMainWindow(QMainWindow):
         if self._history_failed_date != today:
             self._history_failed_date = today
             self.history_failed_codes.clear()
+            self._history_empty_cache_times.clear()
+            self._history_lock_fail_times.clear()
+            if hasattr(self, '_history_fail_counts'):
+                self._history_fail_counts.clear()
         
-        def is_cached(c):
+        def is_cached_and_valid(c):
             c_clean = ''.join(filter(str.isdigit, str(c)))
-            return (c in self.stock_history_cache) or (c_clean in self.stock_history_cache)
+            # 1. 存在且非空（有真实历史数据），长期有效
+            hist = self.stock_history_cache.get(c) or self.stock_history_cache.get(c_clean)
+            if hist:
+                return True
+            # 2. 空列表占位（负缓存）：60 秒短期退避失效，允许文件补齐后重试
+            empty_ts = self._history_empty_cache_times.get(c, 0.0) or self._history_empty_cache_times.get(c_clean, 0.0)
+            if empty_ts and (now_ts - empty_ts < 60.0):
+                return True
+            return False
 
-        # 只要已经在 self.stock_history_cache 中存过（无论是有数据还是空列表占位），一律判定已缓存，绝对不再重载！
+        def is_lock_conflict(c):
+            # 锁冲突/文件缺失/IO读取异常统一采用有限退避 (阶梯: 30s -> 60s -> 300s)
+            c_clean = ''.join(filter(str.isdigit, str(c)))
+            fail_ts = self._history_lock_fail_times.get(c, 0.0) or self._history_lock_fail_times.get(c_clean, 0.0)
+            if not fail_ts:
+                return False
+            cnt = getattr(self, '_history_fail_counts', {}).get(c, 0) or getattr(self, '_history_fail_counts', {}).get(c_clean, 0)
+            ttl = 300.0 if cnt >= 3 else (60.0 if cnt == 2 else 30.0)
+            return (now_ts - fail_ts < ttl)
+
         codes_to_load = [
-            c for c in codes
-            if not is_cached(c)
+            c for c in dict.fromkeys(codes)
+            if not is_cached_and_valid(c)
             and c not in self.history_loading_codes
-            and (c not in self.history_failed_codes or now_ts - self.history_failed_codes[c] > cooldown_sec)
+            and not is_lock_conflict(c)
         ]
         if not codes_to_load:
             return
@@ -4791,14 +4922,16 @@ class ATSMainWindow(QMainWindow):
             import pandas as pd
             import os
             t0 = _time.time()
+            fail_counts = getattr(self, '_history_fail_counts', {})
 
             acquired = self.hdf5_history_lock.acquire(blocking=True, timeout=5.0)
             if not acquired:
                 fail_ts = _time.time()
                 for code in codes_to_load:
                     self.history_loading_codes.discard(code)
-                    self.history_failed_codes[code] = fail_ts
-                logger.debug(f"[ATSHistory] HDF5 lock busy, postponed {len(codes_to_load)} codes.")
+                    self._history_lock_fail_times[code] = fail_ts
+                    fail_counts[code] = fail_counts.get(code, 0) + 1
+                logger.debug(f"[ATSHistory] HDF5 lock busy, postponed {len(codes_to_load)} codes with 30s TTL.")
                 return
 
             try:
@@ -4807,7 +4940,8 @@ class ATSMainWindow(QMainWindow):
                     fail_ts = _time.time()
                     for code in codes_to_load:
                         self.history_loading_codes.discard(code)
-                        self.history_failed_codes[code] = fail_ts
+                        self._history_lock_fail_times[code] = fail_ts
+                        fail_counts[code] = fail_counts.get(code, 0) + 1
                     logger.debug(f"[ATSHistory] HDF5 File missing: {path}")
                     return
 
@@ -4838,15 +4972,22 @@ class ATSMainWindow(QMainWindow):
                             _time.sleep(RETRY_SLEEP)
 
                 if last_err is not None:
-                    fail_ts = _time.time() - (300 - 10)
+                    fail_ts = _time.time()
                     for code in codes_to_load:
                         self.history_loading_codes.discard(code)
+                        self._history_lock_fail_times[code] = fail_ts
                         self.history_failed_codes[code] = fail_ts
-                    logger.debug(f"[ATSHistory] HDF5 read error: {last_err}")
+                        fail_counts[code] = fail_counts.get(code, 0) + 1
+                    logger.debug(f"[ATSHistory] HDF5 read error: {last_err}, postponed {len(codes_to_load)} codes with 30s TTL.")
                     return
 
                 for code in codes_to_load:
-                    self.history_failed_codes.pop(code, None)
+                    c_clean = ''.join(filter(str.isdigit, str(code)))
+                    for cache_code in (code, c_clean):
+                        self.history_failed_codes.pop(cache_code, None)
+                        self._history_lock_fail_times.pop(cache_code, None)
+                        self._history_empty_cache_times.pop(cache_code, None)
+                        fail_counts.pop(cache_code, None)
 
                 loaded_codes = set()
                 if df is not None and not df.empty:
@@ -4866,6 +5007,8 @@ class ATSMainWindow(QMainWindow):
                         self.stock_history_cache[orig_code] = hist
                         loaded_codes.add(c_clean_str)
                         loaded_codes.add(orig_code)
+                        fail_counts.pop(c_clean_str, None)
+                        fail_counts.pop(orig_code, None)
 
                     for code in codes_to_load:
                         c_clean = ''.join(filter(str.isdigit, str(code)))
@@ -4874,7 +5017,7 @@ class ATSMainWindow(QMainWindow):
                         if code in self.stock_history_cache:
                             self.stock_history_cache[code].sort(key=lambda x: x[0])
 
-                # 无论是否有历史数据，查询结束后均建立 Cache 记录（无数据的存空列表占位），防二次轮询触发
+                # 无论是否有历史数据，查询结束后均建立 Cache 记录（无数据的存空列表并赋予 60s 负缓存 TTL，防二次轮询触发但允许数据补齐后失效刷新）
                 fail_ts = _time.time()
                 for code in codes_to_load:
                     c_clean = ''.join(filter(str.isdigit, str(code)))
@@ -4882,6 +5025,8 @@ class ATSMainWindow(QMainWindow):
                     if code not in loaded_codes and c_clean not in loaded_codes:
                         self.stock_history_cache[code] = []
                         self.stock_history_cache[c_clean] = []
+                        self._history_empty_cache_times[code] = fail_ts
+                        self._history_empty_cache_times[c_clean] = fail_ts
                         self.history_failed_codes[code] = fail_ts
 
                 cost_ms = (_time.time() - t0) * 1000.0
@@ -4981,16 +5126,9 @@ class ATSMainWindow(QMainWindow):
             if missing_realtime_codes:
                 self._async_load_stock_prices(missing_realtime_codes)
 
-        # 异步补齐历史数据（不在主线程阻塞）
-        now_ts = time.time()
-        missing_history_codes = [
-            c for c in all_codes
-            if c not in self.stock_history_cache
-            and c not in self.history_loading_codes
-            and (c not in self.history_failed_codes or now_ts - self.history_failed_codes[c] > 300)
-        ]
-        if missing_history_codes:
-            self._async_load_stock_history(missing_history_codes)
+        # 异步补齐历史数据（不在主线程阻塞，统一由 _async_load_stock_history 内部的分级 TTL 管理）
+        if all_codes:
+            self._async_load_stock_history(all_codes)
 
         # ── 更新已打开的个股详情弹窗 (0ms, 主线程直接刷 visible widget) ──────────
         if has_df:
@@ -6672,6 +6810,9 @@ class ATSMainWindow(QMainWindow):
         code_list, code_to_name = payload["code_list"], payload["code_to_name"]
         tab_title, target_period = payload["tab_title"], payload["target_period"]
         df_matched = payload["result"]
+        if getattr(df_matched, 'attrs', {}).get('busy'):
+            self.statusBar().showMessage("前一批 TDX 请求仍未结束，本次扫描未启动；请稍后重试。", 10000)
+            return
         try:
             # 回填名称
             if not df_matched.empty:

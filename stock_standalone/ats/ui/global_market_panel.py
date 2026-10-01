@@ -19,9 +19,14 @@ from PyQt6.QtCore import Qt, pyqtSignal, QThread, QTimer
 from PyQt6.QtGui import QColor, QFont
 import time
 import datetime
+import threading
 
 from ats.ui.base_table import BaseATSTableWidget
 from ats.ui.styles import COLOR_UP, COLOR_DOWN, COLOR_INFO, COLOR_WARN, COLOR_ACCENT, NumericTableWidgetItem, PinnedNumericTableWidgetItem
+
+
+# 模块级活跃 Worker 引用池，防止异步线程由于缺少 Python 引用被过早 GC，同时彻底与 QWidget 父子生命周期解耦
+_ACTIVE_GLOBAL_WORKERS = set()
 
 
 class GlobalMarketWorker(QThread):
@@ -31,9 +36,21 @@ class GlobalMarketWorker(QThread):
     def __init__(self, force_refresh: bool = False, parent=None):
         super().__init__(parent)
         self.force_refresh = force_refresh
+        self._stop_event = threading.Event()
+
+    def stop(self):
+        """请求线程安全协同退出"""
+        self._stop_event.set()
+        self.requestInterruption()
+
+    def is_stopped(self) -> bool:
+        return self._stop_event.is_set() or self.isInterruptionRequested()
 
     def run(self):
         try:
+            if self.is_stopped():
+                return
+
             from JSONData.global_market_data import (
                 fetch_global_market_quotes,
                 get_global_sentiment_score,
@@ -47,54 +64,81 @@ class GlobalMarketWorker(QThread):
             import concurrent.futures
 
             quotes = fetch_global_market_quotes(force_refresh=self.force_refresh)
+            if self.is_stopped():
+                return
+
             score, label = get_global_sentiment_score()
             meta = get_global_market_quotes_metadata()
             meta['force_refresh'] = self.force_refresh
 
             # ⚡ 核心功能强化：如果触发强制实时刷新 (force_refresh=True)，执行全量 16 大外盘核心品种 K 线与新闻批量在线重构更新！
-            if self.force_refresh:
+            if self.force_refresh and not self.is_stopped():
                 from JSONData.global_market_data import flush_kline_disk_cache, get_proxy_config
                 batch_symbols = ['A50', 'USDCNH', 'OIL', 'BRENT', 'GOLD', 'NVDA', 'AAPL', 'MSFT', 'GOOGL', 'AMZN', 'META', 'TSLA', 'MU', 'TSM', 'SOXX', 'QQQ']
                 proxy_on = get_proxy_config().get("enabled", False)
 
                 def _refresh_symbol_kline(sym):
+                    if self.is_stopped():
+                        return
                     try:
                         # 优先刷新国内极速免代理直连源 sina，确保直连与打包环境 100% 具备最新 K 线
                         fetch_global_kline_history(sym, limit=120, force_refresh=True, data_source='sina')
                     except Exception as ex:
                         log_market_msg(f"[GlobalMarketWorker] 批量刷新 {sym} [sina] K线异常: {ex}")
-                    if proxy_on:
+                    if proxy_on and not self.is_stopped():
                         try:
                             fetch_global_kline_history(sym, limit=120, force_refresh=True, data_source='yahoo')
                         except Exception as ex:
                             log_market_msg(f"[GlobalMarketWorker] 批量刷新 {sym} [yahoo] K线异常: {ex}")
 
-                # 使用线程池并发 6 线程批量全量抓取更新 K 线
-                with concurrent.futures.ThreadPoolExecutor(max_workers=6) as executor:
-                    executor.map(_refresh_symbol_kline, batch_symbols)
+                # 使用线程池并发 6 线程批量全量抓取更新 K 线，支持随时取消
+                executor = concurrent.futures.ThreadPoolExecutor(max_workers=6)
+                try:
+                    futures = [executor.submit(_refresh_symbol_kline, sym) for sym in batch_symbols]
+                    pending_futures = set(futures)
+                    while pending_futures:
+                        if self.is_stopped():
+                            executor.shutdown(wait=False, cancel_futures=True)
+                            return
+                        done_batch, pending_futures = concurrent.futures.wait(
+                            pending_futures, timeout=0.15, return_when=concurrent.futures.FIRST_COMPLETED
+                        )
+                finally:
+                    executor.shutdown(wait=False, cancel_futures=True)
+
+                if self.is_stopped():
+                    return
 
                 # ⚡ 16 大标的加载完成后，一次性统一批量落盘保存！
                 flush_kline_disk_cache('sina', force=True)
                 if proxy_on:
                     flush_kline_disk_cache('yahoo', force=True)
 
-
                 # 预刷新自选热榜新闻
                 try:
-                    fetch_symbol_financial_news('A50', '富时A50', force_refresh=True)
-                    fetch_symbol_financial_news('NVDA', '英伟达', force_refresh=True)
+                    if not self.is_stopped():
+                        fetch_symbol_financial_news('A50', '富时A50', force_refresh=True)
+                    if not self.is_stopped():
+                        fetch_symbol_financial_news('NVDA', '英伟达', force_refresh=True)
                 except Exception:
                     pass
+
+            if self.is_stopped():
+                return
 
             sectors = ["存储芯片", "半导体", "传媒", "软件开发", "国防军工", "汽车整车", "贵金属", "石油化工", "有色金属"]
             boosts = {}
             for sec in sectors:
+                if self.is_stopped():
+                    return
                 b_val, g_tag = get_sector_global_boost(sec)
                 boosts[sec] = (b_val, g_tag)
 
-            self.finished_signal.emit(quotes, score, label, boosts, meta)
+            if not self.is_stopped():
+                self.finished_signal.emit(quotes, score, label, boosts, meta)
         except Exception as e:
-            self.finished_signal.emit({}, 0.0, f"⚠️ 更新失败: {e}", {}, {'is_live_network': False, 'error': str(e)})
+            if not self.is_stopped():
+                self.finished_signal.emit({}, 0.0, f"⚠️ 更新失败: {e}", {}, {'is_live_network': False, 'error': str(e)})
 
 
 class GlobalMarketPanel(QWidget):
@@ -104,8 +148,9 @@ class GlobalMarketPanel(QWidget):
     stock_selected = pyqtSignal(str, str, dict) # 选中股票详情弹窗信号
     stock_linked = pyqtSignal(str, str) # 单击个股轻量联动信号
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, auto_fetch: bool = True):
         super().__init__(parent)
+        self._auto_fetch_enabled = bool(auto_fetch)
         self._worker = None
         self.pinned_symbols = []
         self.pinned_sectors = []
@@ -114,7 +159,8 @@ class GlobalMarketPanel(QWidget):
         self._restore_pinned_symbols()
         self._restore_pinned_sectors()
         self._init_ui()
-        self._start_auto_refresh_timer()
+        if auto_fetch:
+            self._start_auto_refresh_timer()
 
         # 连接全局代理与日志变更信号，实现跨窗口 100% 实时同步与跟持久化数据一致
         try:
@@ -125,7 +171,8 @@ class GlobalMarketPanel(QWidget):
             pass
 
         # 初始装载数据
-        self.refresh_data(force=False)
+        if auto_fetch:
+            self.refresh_data(force=False)
 
     def _init_ui(self):
         layout = QVBoxLayout(self)
@@ -371,19 +418,37 @@ class GlobalMarketPanel(QWidget):
             self._timer.setInterval(int(interval_sec * 1000))
         except Exception:
             pass
+        # ⚡ 性能优化：若面板不可见（最小化、隐藏于非激活 Tab 或已关闭），暂缓刷新，节省 CPU 与 I/O
+        if hasattr(self, 'isVisible') and not self.isVisible():
+            return
         self.refresh_data(force=False)
 
     def refresh_data(self, force: bool = False):
         """调起后台 worker 刷新数据"""
-        if self._worker and self._worker.isRunning():
-            return
+        from PyQt6.sip import isdeleted
+        if self._worker is not None:
+            try:
+                if not isdeleted(self._worker) and self._worker.isRunning():
+                    return
+            except (RuntimeError, Exception):
+                self._worker = None
 
         self.btn_refresh.setEnabled(False)
         self.btn_refresh.setText("⏳ 正在更新..." if force else "🔄 刷新中...")
 
-        self._worker = GlobalMarketWorker(force_refresh=force, parent=self)
-        self._worker.finished_signal.connect(self._on_worker_finished)
-        self._worker.start()
+        worker = GlobalMarketWorker(force_refresh=force, parent=None)
+        self._worker = worker
+        _ACTIVE_GLOBAL_WORKERS.add(worker)
+
+        def _cleanup_worker(w):
+            _ACTIVE_GLOBAL_WORKERS.discard(w)
+            if getattr(self, '_worker', None) is w:
+                self._worker = None
+
+        worker.finished_signal.connect(self._on_worker_finished)
+        worker.finished.connect(lambda w=worker: _cleanup_worker(w))
+        worker.finished.connect(worker.deleteLater)
+        worker.start()
 
     def _on_worker_finished(self, quotes: dict, score: float, label: str, boosts: dict, meta: dict = None):
         self.btn_refresh.setEnabled(True)
@@ -487,7 +552,15 @@ class GlobalMarketPanel(QWidget):
     def _update_quotes_table(self, quotes: dict):
         self._last_quotes = quotes or {}
         self.tbl_quotes.setSortingEnabled(False)
-        self.tbl_quotes.setRowCount(0)
+
+        # 记录用户当前选中的 symbol 与滚动条位置以供原位恢复
+        selected_sym = None
+        cur_row = self.tbl_quotes.currentRow()
+        if cur_row >= 0:
+            sym_item = self.tbl_quotes.item(cur_row, 1)
+            if sym_item:
+                selected_sym = sym_item.text().strip()
+        v_scroll = self.tbl_quotes.verticalScrollBar().value()
 
         mapping_info = {
             'A50': ('富时 A50 期货', '国防军工 / 金融 / 权重龙头'),
@@ -518,7 +591,9 @@ class GlobalMarketPanel(QWidget):
                 return (1, 0, -pct_val)
 
         sorted_quotes = sorted(quotes.items(), key=_get_sort_key)
-        self.tbl_quotes.setRowCount(len(sorted_quotes))
+        target_count = len(sorted_quotes)
+        if self.tbl_quotes.rowCount() != target_count:
+            self.tbl_quotes.setRowCount(target_count)
 
         for row_idx, (symbol, info) in enumerate(sorted_quotes):
             name = info.get('name', symbol)
@@ -539,15 +614,27 @@ class GlobalMarketPanel(QWidget):
             ]
 
             for col_idx, val in enumerate(col_values):
-                item = PinnedNumericTableWidgetItem(
-                    val, is_pinned=is_pinned, pin_rank=pin_rank,
-                    header_view=self.tbl_quotes.horizontalHeader()
-                )
+                existing_item = self.tbl_quotes.item(row_idx, col_idx)
+                if existing_item is not None:
+                    item = existing_item
+                    if item.text() != val:
+                        item.setText(val)
+                    item.is_pinned = is_pinned
+                    item.pin_rank = pin_rank
+                else:
+                    item = PinnedNumericTableWidgetItem(
+                        val, is_pinned=is_pinned, pin_rank=pin_rank,
+                        header_view=self.tbl_quotes.horizontalHeader()
+                    )
+                    self.tbl_quotes.setItem(row_idx, col_idx, item)
+
                 item.setTextAlignment(Qt.AlignmentFlag.AlignCenter if col_idx not in (0, 4) else (Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter))
 
                 # 置顶行单元格微暗金色专属尊贵背景高亮
                 if is_pinned:
                     item.setBackground(QColor("#2a2415"))
+                else:
+                    item.setBackground(QColor(0, 0, 0, 0))
 
                 # Color coding
                 if col_idx == 0:
@@ -556,14 +643,13 @@ class GlobalMarketPanel(QWidget):
                 elif col_idx == 3: # Pct
                     if pct > 0:
                         item.setForeground(QColor(COLOR_UP))
-                        if pct >= 3.0 or is_pinned:
-                            item.setFont(QFont("Microsoft YaHei", -1, QFont.Weight.Bold))
+                        item.setFont(QFont("Microsoft YaHei", -1, QFont.Weight.Bold if (pct >= 3.0 or is_pinned) else QFont.Weight.Normal))
                     elif pct < 0:
                         item.setForeground(QColor(COLOR_DOWN))
-                        if pct <= -3.0 or is_pinned:
-                            item.setFont(QFont("Microsoft YaHei", -1, QFont.Weight.Bold))
+                        item.setFont(QFont("Microsoft YaHei", -1, QFont.Weight.Bold if (pct <= -3.0 or is_pinned) else QFont.Weight.Normal))
                     else:
                         item.setForeground(QColor("#E2E2E5"))
+                        item.setFont(QFont("Microsoft YaHei", -1, QFont.Weight.Normal))
                 elif col_idx == 5: # Trend
                     if "强劲" in val or "上行" in val:
                         item.setForeground(QColor(COLOR_UP))
@@ -572,7 +658,14 @@ class GlobalMarketPanel(QWidget):
                     else:
                         item.setForeground(QColor("#AAA"))
 
-                self.tbl_quotes.setItem(row_idx, col_idx, item)
+        # 恢复选中状态与滚动条
+        if selected_sym is not None:
+            for r in range(self.tbl_quotes.rowCount()):
+                it = self.tbl_quotes.item(r, 1)
+                if it and it.text().strip() == selected_sym:
+                    self.tbl_quotes.setCurrentCell(r, 1)
+                    break
+        self.tbl_quotes.verticalScrollBar().setValue(v_scroll)
 
         self.tbl_quotes.setSortingEnabled(True)
         if hasattr(self.tbl_quotes, 'restore_header_state'):
@@ -692,7 +785,15 @@ class GlobalMarketPanel(QWidget):
     def _update_boosts_table(self, boosts: dict):
         self._last_boosts = boosts or {}
         self.tbl_boosts.setSortingEnabled(False)
-        self.tbl_boosts.setRowCount(0)
+
+        # 记录用户当前选中的板块名与滚动条位置以供原位恢复
+        selected_sec = None
+        cur_row = self.tbl_boosts.currentRow()
+        if cur_row >= 0:
+            sec_item = self.tbl_boosts.item(cur_row, 0)
+            if sec_item:
+                selected_sec = sec_item.text().strip().replace("📌 ", "")
+        v_scroll = self.tbl_boosts.verticalScrollBar().value()
 
         sector_relations = {
             "存储芯片": "美光 (MU) / 费城半导体 (SOXX)",
@@ -717,7 +818,9 @@ class GlobalMarketPanel(QWidget):
                 return (1, 0, -b_score)
 
         sorted_boosts = sorted(boosts.items(), key=_get_boost_sort_key)
-        self.tbl_boosts.setRowCount(len(sorted_boosts))
+        target_count = len(sorted_boosts)
+        if self.tbl_boosts.rowCount() != target_count:
+            self.tbl_boosts.setRowCount(target_count)
 
         for row_idx, (sec_name, (b_val, g_tag)) in enumerate(sorted_boosts):
             rel_symbols = sector_relations.get(sec_name, "纳斯达克 / 标普500")
@@ -740,15 +843,27 @@ class GlobalMarketPanel(QWidget):
             ]
 
             for col_idx, val in enumerate(col_values):
-                item = PinnedNumericTableWidgetItem(
-                    val, is_pinned=is_pinned, pin_rank=pin_rank,
-                    header_view=self.tbl_boosts.horizontalHeader()
-                )
+                existing_item = self.tbl_boosts.item(row_idx, col_idx)
+                if existing_item is not None:
+                    item = existing_item
+                    if item.text() != val:
+                        item.setText(val)
+                    item.is_pinned = is_pinned
+                    item.pin_rank = pin_rank
+                else:
+                    item = PinnedNumericTableWidgetItem(
+                        val, is_pinned=is_pinned, pin_rank=pin_rank,
+                        header_view=self.tbl_boosts.horizontalHeader()
+                    )
+                    self.tbl_boosts.setItem(row_idx, col_idx, item)
+
                 item.setTextAlignment(Qt.AlignmentFlag.AlignCenter if col_idx in (0, 2) else (Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter))
 
                 # 置顶行单元格微暗金色专属尊贵背景高亮
                 if is_pinned:
                     item.setBackground(QColor("#2a2415"))
+                else:
+                    item.setBackground(QColor(0, 0, 0, 0))
 
                 if col_idx == 0:
                     item.setForeground(QColor("#FFD700" if is_pinned else "#00E5FF"))
@@ -762,14 +877,25 @@ class GlobalMarketPanel(QWidget):
                         item.setFont(QFont("Microsoft YaHei", -1, QFont.Weight.Bold))
                     else:
                         item.setForeground(QColor("#AAA"))
+                        item.setFont(QFont("Microsoft YaHei", -1, QFont.Weight.Normal))
                 elif col_idx == 3: # Tag
                     if "共振" in val or "强拉" in val:
                         item.setForeground(QColor("#00FF88"))
                         item.setFont(QFont("Microsoft YaHei", -1, QFont.Weight.Bold))
                     elif "回调" in val or "走弱" in val:
                         item.setForeground(QColor("#FF5555"))
+                        item.setFont(QFont("Microsoft YaHei", -1, QFont.Weight.Bold))
+                    else:
+                        item.setFont(QFont("Microsoft YaHei", -1, QFont.Weight.Normal))
 
-                self.tbl_boosts.setItem(row_idx, col_idx, item)
+        # 恢复选中状态与滚动条
+        if selected_sec is not None:
+            for r in range(self.tbl_boosts.rowCount()):
+                it = self.tbl_boosts.item(r, 0)
+                if it and it.text().strip().replace("📌 ", "") == selected_sec:
+                    self.tbl_boosts.setCurrentCell(r, 0)
+                    break
+        self.tbl_boosts.verticalScrollBar().setValue(v_scroll)
 
         self.tbl_boosts.setSortingEnabled(True)
         if hasattr(self.tbl_boosts, 'restore_header_state'):
@@ -1087,4 +1213,37 @@ class GlobalMarketPanel(QWidget):
     def _on_global_log_changed(self, enabled: bool):
         """响应全局日志开关变更广播信号，秒级更新 UI 按键状态"""
         self._update_log_btn_style()
+
+    def showEvent(self, event):
+        """面板重新展示时，若先前跳过了轮询，立即补发一次无感增量刷新"""
+        super().showEvent(event)
+        if not self._auto_fetch_enabled:
+            return
+        try:
+            self.refresh_data(force=False)
+        except Exception:
+            pass
+
+    def closeEvent(self, event):
+        """窗口关闭时安全回收后台 Worker 与轮询定时器，杜绝 QThread 悬挂崩溃"""
+        try:
+            if hasattr(self, '_timer') and self._timer.isActive():
+                self._timer.stop()
+            worker = getattr(self, '_worker', None)
+            if worker:
+                from PyQt6.sip import isdeleted
+                try:
+                    if not isdeleted(worker) and worker.isRunning():
+                        try:
+                            worker.finished_signal.disconnect(self._on_worker_finished)
+                        except Exception:
+                            pass
+                        worker.stop()
+                        worker.wait(100)
+                except (RuntimeError, Exception):
+                    pass
+                self._worker = None
+        except Exception:
+            pass
+        super().closeEvent(event)
 
