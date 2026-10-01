@@ -77,6 +77,7 @@ class LiveSignalViewer(QWidget, WindowMixin):
     # 联动信号：(code, name, select_win, timestamp)
     stock_selected_signal = pyqtSignal(str, str, bool, str)
     status_msg_signal = pyqtSignal(str)          # (message)
+    history_loaded_signal = pyqtSignal(object, object, object)
     window_closed_signal = pyqtSignal()          # 窗口关闭通知
 
     def __init__(self, parent=None, on_select_callback=None, sender=None, main_app=None):
@@ -88,6 +89,10 @@ class LiveSignalViewer(QWidget, WindowMixin):
         # 1. 基础配置
         self.scale_factor = get_windows_dpi_scale_factor()
         self.logger_tool = TradingLogger()
+        self.history_loaded_signal.connect(self._on_history_loaded, Qt.ConnectionType.QueuedConnection)
+        self._history_query_busy = False
+        self._history_query_pending = None
+        self._history_closing = False
         self._refresh_timer = QTimer(self) # 显式创建计时器，方便清理
         
         # 🚀 [FIX] 设置关闭时销毁窗口属性，自动清理释放内存，避免仅隐藏窗口
@@ -325,23 +330,56 @@ class LiveSignalViewer(QWidget, WindowMixin):
 
         self.status_msg_signal.emit(f"正在同步数据库...")
         
-        # 2. 获取数据 (目前的 logger 访问是阻塞的，若数据量极大可考虑 QThread，目前 2000 条以内直接刷)
-        self.all_data_df = self.logger_tool.get_live_signal_history_df(
-            date=date_str, 
-            code=code_str, 
-            limit=2000
-        )
-        
-        # [NEW] 数据空状态即时反馈
-        if self.all_data_df.empty:
-            self.status_msg_signal.emit(f"📅 [{date_str}] 暂无信号数据")
-            # 仍然让 _apply_view_filter 清空表格
-            
-        # 3. 执行视图级过滤展示
-        self._apply_view_filter()
-        
-        # 🚀 [NEW] 触发日历日期高亮
-        self._highlight_calendar_dates()
+        self._history_query_pending = (date_str, code_str)
+        self._start_history_query()
+
+    def _start_history_query(self):
+        if self._history_closing or self._history_query_busy or self._history_query_pending is None:
+            return
+        import threading
+        query = self._history_query_pending
+        self._history_query_pending = None
+        self._history_query_busy = True
+
+        def load():
+            data, error = None, None
+            try:
+                data = self.logger_tool.get_live_signal_history_df(date=query[0], code=query[1], limit=2000)
+            except Exception as exc:
+                error = str(exc)
+            finally:
+                try:
+                    self.logger_tool.db_manager.close_thread_connection()
+                except Exception as exc:
+                    error = error or f"数据库连接清理失败: {exc}"
+            try:
+                self.history_loaded_signal.emit(query, data, error)
+            except RuntimeError:
+                pass  # Window was destroyed while the database query was running.
+
+        try:
+            threading.Thread(target=load, daemon=True, name='SignalHistoryQuery').start()
+        except Exception as exc:
+            self._history_query_busy = False
+            self.status_msg_signal.emit(f"信号查询启动失败: {exc}")
+
+    def _on_history_loaded(self, query, data, error):
+        self._history_query_busy = False
+        if self._history_closing:
+            return
+        current = (self.date_input.date().toString("yyyy-MM-dd"), self.code_input.text().strip() or None)
+        try:
+            if query == current:
+                if error:
+                    self.status_msg_signal.emit(f"信号查询失败: {error}")
+                elif data is not None:
+                    self.all_data_df = data
+                    self._apply_view_filter()
+                    self._highlight_calendar_dates()
+        except Exception as exc:
+            self.status_msg_signal.emit(f"信号界面更新失败: {exc}")
+        finally:
+            self._start_history_query()
 
     def go_back(self):
         """后退 (鼠标4键)"""
@@ -460,9 +498,13 @@ class LiveSignalViewer(QWidget, WindowMixin):
         # 预计算当日信号流
         flow_map = {}
         flow_details_map = {}
-        if not self.all_data_df.empty:
+        cached = getattr(self, '_signal_flow_cache', None)
+        source = self.all_data_df.reindex(columns=['code', 'timestamp', 'action', 'reason'])
+        if cached is not None and cached[0].equals(source):
+            flow_map, flow_details_map = cached[1:]
+        elif not source.empty:
             try:
-                sorted_all = self.all_data_df.copy().sort_values('timestamp')
+                sorted_all = source.sort_values('timestamp')
                 grouped = sorted_all.groupby('code')
                 for code, group in grouped:
                     acts = group['action'].tolist()
@@ -473,14 +515,19 @@ class LiveSignalViewer(QWidget, WindowMixin):
                     flow_map[code] = " → ".join(stream)
                     
                     details = []
-                    for _, r in group.iterrows():
-                        time_part = r['timestamp'].split(' ')[-1] if ' ' in str(r['timestamp']) else str(r['timestamp'])
-                        details.append(f"[{time_part}] {r['action']} | {r['reason']}")
+                    for ts, action, reason in zip(group['timestamp'], group['action'], group['reason']):
+                        time_part = str(ts).split(' ')[-1]
+                        details.append(f"[{time_part}] {action} | {reason}")
                     flow_details_map[code] = "📊 今日轨迹线:\n" + "\n ↓ ".join(details)
+                self._signal_flow_cache = (source.copy(), flow_map, flow_details_map)
             except Exception as e:
                 print(f"Flow pre-calc error: {e}")
 
         self.table.setRowCount(len(df))
+        prices = {}
+        market = getattr(self.main_app, 'df_all', None)
+        if market is not None and not market.empty and 'trade' in market.columns:
+            prices = market['trade'].to_dict()
         for i, (_, row) in enumerate(df.iterrows()):
             code_val = row.get('code', '')
             flow_val = flow_map.get(code_val, '')
@@ -498,10 +545,7 @@ class LiveSignalViewer(QWidget, WindowMixin):
             change_pct_val = -9999.0  # 占位值，便于无数据排序在最后
             
             if trigger_price > 0:
-                current_price = 0.0
-                if self.main_app and hasattr(self.main_app, 'df_all') and not self.main_app.df_all.empty:
-                    if code_val in self.main_app.df_all.index:
-                        current_price = float(self.main_app.df_all.loc[code_val].get('trade', 0.0))
+                current_price = float(prices.get(code_val, 0.0))
                 
                 if current_price > 0:
                     change_pct = (current_price - trigger_price) / trigger_price * 100
@@ -865,6 +909,8 @@ class LiveSignalViewer(QWidget, WindowMixin):
     def closeEvent(self, event):
         """持久化窗口位置信息并执行清理逻辑"""
         try:
+            self._history_closing = True
+            self._history_query_pending = None
             # 1. 保存位置
             self.save_window_position_qt(self, "LiveSignalViewer_Geometry")
             

@@ -2923,6 +2923,8 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             it.setData(self._ROLE_BOLD, bold)
     def _update_engine_views(self, force: bool = False):
         """[PERF] 分类异步刷新引擎视图，实现 0 毫秒主线程卡顿与极速响应"""
+        if not force and not self.isVisible():
+            return
         now = time.time()
         if not force and now - getattr(self, '_last_view_update', 0) < 0.2: # 200ms 节流
             return
@@ -2947,6 +2949,12 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         # [🚀 ASYNC DATALOADER GATE] 百分之百后台异步线程拉取 + pyqtSignal 多线程安全投递，极致流畅秒速显示
         # -------------------------------------------------------------
         import threading
+        if current_tab_text not in {"📋 每日操作指南", "🌟 决策队列", "🐉 龙头追踪", "🌐 战略趋势", "🔥 板块热力"}:
+            return
+        gates = self.__dict__.setdefault('_engine_fetch_gates', {})
+        gate = gates.setdefault(current_tab_text, threading.Lock())
+        if not gate.acquire(blocking=False):
+            return
         
         def async_fetch_task(tab_name):
             try:
@@ -3005,6 +3013,9 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             except Exception as ex:
                 logger.warning(f"⚠️ [DASHBOARD_ASYNC] Failed to fetch data for {tab_name}: {ex}")
                 
+            finally:
+                gate.release()
+
         # 抛给后台常驻守护线程执行
         t = threading.Thread(
             target=async_fetch_task,
@@ -3012,7 +3023,11 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             name=f"DashboardLoader_{current_tab_text[:4]}",
             daemon=True
         )
-        t.start()
+        try:
+            t.start()
+        except Exception:
+            gate.release()
+            logger.exception("[DASHBOARD_ASYNC] 无法启动刷新线程")
 
     def _refresh_alert_hub_table(self):
         table = self.tables.get("📡 市场预警")
@@ -3044,6 +3059,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         table.blockSignals(True)
         
         try:
+            df_all = self._get_snapshot_df()
             table.setRowCount(len(alerts))
             for i, alert in enumerate(alerts):
                 grade = alert.get('grade', 'B')
@@ -3068,7 +3084,6 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                 else:
                     density = str(count)
                     # 尝试转换代码为 "名称(代码)" 格式
-                    df_all = self._get_snapshot_df()
                     display_list = []
                     for c in codes[:8]: # 限制展示数量，避免撑爆单元格
                         if df_all is not None and c in df_all.index:

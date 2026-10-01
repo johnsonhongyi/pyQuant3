@@ -25,3 +25,5 @@ data/ipo_learning/shadow_observations.sqlite
 /JSONData/test_replay_market_stats.py
 /JSONData/test_sector_refresh_regression.py
 /JSONData/test_window_scan_regression.py
+
+/JSONData/test_panel_performance_regression.py
