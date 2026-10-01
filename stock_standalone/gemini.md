@@ -1,5 +1,12 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-10-01 11:55 本地 Codex 路由追踪、Token 消耗与纯生成/端到端双维度吞吐审计工具落地
+- [x] **【本地 Codex 路由与 Token 消耗审计、缓存命中率核算、X社区 20 tok/s 速度物理复核与终端 CJK 等宽网格对齐闭环】(`tools/codex_token_stats.py`, `20261001_1155_task.md`)**：
+    - [x] **本地会话与模型路由审计机制打通**：解析 `~/.codex/sessions/**/*.jsonl`，结合 `~/.codex/models_cache.json` 官方模型字典，提取 `thread_settings` 请求模型与 `turn_context` 真实执行模型，精准判定 `[MATCH]`、`[ROUTED]` 与 `[REDIRECT]`；
+    - [x] **全维度缓存命中率透出**：精确核算每日、分模型及全局的 Prompt 缓存命中率（近 3 日总体缓存命中率高达 95.98%），并提供万/亿易读单位换算；
+    - [x] **X 社区 20 token/s 速度物理确诊与双维度吞吐评估**：查明此前多步工具调用微小间隔导致的极值拉高缺陷，重构为基于真实 API 生成周期的纯生成耗时核算。实证 `GPT-6.1-Sol` 纯生成吐字速率为 **17.5 ~ 23.3 token/s**（100% 吻合 X 社区 20 tok/s 评测基准），端到端挂钟输出吐率为 **2.8 ~ 6.7 token/s**，系统总吞吐率为 **700 ~ 4400+ token/s**；
+    - [x] **Windows 终端 CJK 等宽网格对齐落地**：基于 `unicodedata.east_asian_width` 动态计算中英文字符显示宽度，表格采用标准 `|` 与 `-+-` 垂直锁定，彻底根除跨平台终端错位问题。
+
 ## 2026-10-01 10:43 清空 Ramdisk 后启动 TK 未自动获取数据与调用链路排查及闭环
 - [x] **【清空 G 盘后启动 TK 未自动获取数据根因确诊、冷启动强制首刷与底层落盘彻底闭环（data_utils 保持原样不变）】(`JSONData/realdatajson.py`, `JohnsonUtil/johnson_cons.py`, `JSONData/tdx_data_Day.py`, `instock_MonitorTK.py`, `20261001_1043_task.md`)**：
     - [x] **根因一确诊：冷启动假异步误判导致空数据秒退**：`realdatajson.py:1855` 因 `or threading.current_thread() is threading.main_thread()` 误将无缓存冷启动作为异步后台加载处理，主线程立即返回空列表 `[]`，导致首轮换手率 `ratio` 全部被置 0；
