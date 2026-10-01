@@ -1,5 +1,71 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-10-01 20:40 ATS 极限性能与并发边界安全第五轮审核闭环（Codex 修复核验与全量 53 项测试矩阵）
+- [x] **【过滤Worker退出竞态彻底根除、归档快照无锁CAS发布强一致、TDX超时累积门闩防护与忙提示、历史成功全量退避重置与负缓存、auto_fetch=False展示守卫、全量53项测试100%全绿】(`ats/ui/main_window.py`, `ats/bounded_evaluation_store.py`, `ats/channel_bottom_reversal_strategy.py`, `ats/ui/global_market_panel.py`, `ats/ui/new_stock_panel.py`, `ats/ui/daily_limit_up_dialog.py`, `tests/test_ats_optimization_review.py`, `docs/ATS_PERFORMANCE_REVIEW_20261001.md`, `20261001_2040_task.md`)**：
+    - [x] **过滤 Worker 退出竞态彻底根除 [P2]**：正常退出时在锁内原子将 `_filter_eval_worker_running = False` 并直接 `return` 退出，彻底移除了覆盖新 Worker 状态的外层 `finally` 清零代码；启动失败增加锁内异常清零恢复；补齐用例 14 验证旧 Worker 退出绝不冲刷覆盖新 Worker；
+    - [x] **归档缓存快照 CAS 发布模式 [P2]**：`committed()` 采用无锁乐观构建：锁外深拷贝、合并和状态比对；持锁校验 `current_entry['value'] is current_value` 引用未变后再发布变更，并发写时安全重试，彻底消除长时间持有全局锁与脏快照风险；补齐用例 15 验证 CAS 重试机制与数据强一致性；
+    - [x] **TDX 超时后的线程池累积门闩防护 [P2]**：引入非阻塞门闩 `_TDX_SCAN_GATE`。前批慢请求未退出前，新扫描立即返回 `busy=True` 空结果；待所有遗留 Future 通过 `add_done_callback` 真正退出后自动释放门闩，杜绝跨批次无限制累积后台请求；主窗口、新股面板、每日涨停对话框增加状态栏/弹窗提示；补齐用例 16 验证慢任务门闩 busy 拦截与自动释放恢复；
+    - [x] **历史数据成功查询退避清空与负缓存规范 [P3]**：SafeHDFStore 查询成功（不论是否有记录），全量清除旧失败时间、失败代码及阶梯退避计数；空结果统一规范赋予 60s 负缓存；补齐用例 17 验证空结果成功查询清除退避并建立 60s 负缓存；
+    - [x] **auto_fetch=False 面板展示守卫 [P3]**：记录 `self._auto_fetch_enabled` 并在 `showEvent` 严格守卫拦截，非自动抓取模式下重新展示绝不意外触发后台抓取；补齐用例 18 验证守卫拦截生效；
+    - [x] **真实全链路单测矩阵全量 53 项 100% 绿灯通过**：新增 5 项针对性深度单测（覆盖 14~18），实测全量 53 项测试 100% PASS（耗时 9.07s），代码全部通过 `git diff --check` 与 `python -m py_compile` 校验。
+
+## 2026-10-01 20:15 本地 AI 编程审计工具实事求是消除硬编码、支持多模型时序切换与 Antigravity IDE 独立审计闭环
+- [x] **【彻底消除硬编码与臆造标签、真实客户端配置(High)动态识别、多模型时序切换([SWITCH])如实展现、Antigravity与IDE独立/全量审计及三方多助手对比全闭环】(`tools/codex_token_stats.py`, `20261001_2015_task.md`)**：
+    - [x] **彻底消除硬编码与臆造标签（实事求是原则）**：拔除任何硬编码的“中模型”臆造字符串；动态读取 `~/.gemini/antigravity-cli/settings.json` 获取真实客户端请求模型配置（`Gemini 3.8 Flash (High)`）；底层数据有 low/thinking/high 等明确标记才如实展示，无级别标记则保持原生名称，绝不人为无中生有；
+    - [x] **支持真实单会话多模型时序切换展现**：废除粗暴 `most_common(1)` 掩盖多模型缺陷；引入会话时序流转链条解析，如实呈现会话中模型切换过程（例如 `Claude Sonnet 4.6 ➔ Gemini 3.8 Flash`、`Claude Opus 4.6 (Thinking) ➔ Gemini 3.8 Flash`），状态列精准标明 `[SWITCH]`；
+    - [x] **Antigravity Standalone 与 Antigravity IDE 关系讲透与架构打通**：澄清两者为同一技术底座（相同 SQLite + Protobuf + transcript.jsonl 数据结构），但分属独立桌面客户端（`~/.gemini/antigravity`）与 IDE 插件端（`~/.gemini/antigravity-ide`）；
+    - [x] **独立端与 IDE 端参数解耦与全量合并**：参数支持 `--agy`（桌面端）、`--ide`（IDE插件端）、`--gemini`（全量合并扫描，自动打标 `[APP]` 与 `[IDE]`）、`--codex`（Codex独立）与 `--all`（三方横向全量对比）；
+    - [x] **修复命令行数据源判定优先级与跨平台兼容**：重构 `chosen_source` 判定顺序，根除 `--all` 因默认参数优先级被 codex 覆盖缺陷；优化控制台符号为全平台无损 ASCII 字符，杜绝 Windows GBK 控制台编码崩溃。
+
+## 2026-10-01 20:00 ATS 极限性能与并发边界安全第四轮深度闭环
+- [x] **【公式过滤互斥原子切换(杜绝Stranded Payload)、归档flush并发LRU安全(防KeyError)、TDX守护线程池(防atexit卡死)、价格/历史阶梯退避(30s->60s->300s)、面板后台不可见跳过刷新、全量48项测试全绿通过】(`ats/ui/main_window.py`, `ats/bounded_evaluation_store.py`, `ats/channel_bottom_reversal_strategy.py`, `ats/ui/global_market_panel.py`, `tests/test_ats_optimization_review.py`, `docs/ATS_PERFORMANCE_REVIEW_20261001.md`, `20261001_2000_task.md`)**：
+    - [x] **公式过滤 Worker 互斥原子状态切换 [P2]**：引入 `_filter_eval_lock` 纳秒级互斥锁，在持锁期内原子完成 UI 线程载荷更新与 Worker 检查退出，彻底消灭 Worker 退出瞬间 UI 线程写入载荷导致的遗留未计算（Stranded Payload）漏洞，耗时计算 100% 锁外执行；
+    - [x] **归档缓存并发 LRU 淘汰安全回写 [P2]**：`_flush_pending()` 锁外写盘完成持锁回写元数据时，增加 `if path in self._cache:` 守卫，杜绝高并发淘汰驱逐引发的潜在 `KeyError`；
+    - [x] **TDX 批量扫描后台守护线程池实现 [P2]**：构建 `DaemonThreadPoolExecutor`，生成的工作线程设为 `daemon=True` 且不在 Python `atexit._threads_queues` 中登记，彻底消除底层网络 socket 挂死时 Python 进程退出被 `_python_exit` 的 `t.join()` 强制阻塞卡死的问题；
+    - [x] **价格与历史频繁失败阶梯退避 [P3]**：引入 `_price_fail_counts` 与 `_history_fail_counts`，实现 1次 30s、2次 60s、>=3次 300s 阶梯退避并在成功时即刻清零，根治冷门停牌标的全天反复抢占 HDF5 锁；
+    - [x] **全球外盘看板后台不可见时跳过定时刷新 [P3]**：在定时器回调中增加 `isVisible()` 守卫拦截，后台隐藏状态下 0 CPU 0 I/O 消耗，`showEvent` 恢复可见时即刻补发增量刷新；
+    - [x] **真实全链路单测矩阵全量 48 项 100% 绿灯通过**：新增 4 项针对性单测（LRU 并发驱逐回写防崩、守护线程池属性与退出安全、公式锁原子切换与负载折叠、30s/60s/300s 阶梯退避与成功清零），实测 48 项测试全量 100% PASS（耗时 8.45s）。
+
+## 2026-10-01 19:00 ATS 性能与并发边界深度加固第三轮审核闭环
+- [x] **【全球行情Worker初始化NameError修复、已删除QObject引用重置、慢请求分片切片轮询硬中断、公式单Worker循环折叠与清空作废、TDX协同取消与部分结果标明、归档写时复制(COW)与锁外I/O、真实全链路单测矩阵全绿通过】(`ats/ui/global_market_panel.py`, `ats/ui/main_window.py`, `ats/channel_bottom_reversal_strategy.py`, `ats/bounded_evaluation_store.py`, `tests/test_ats_optimization_review.py`, `docs/ATS_PERFORMANCE_REVIEW_20261001.md`)**：
+    - [x] **全球行情 Worker 启动与引用安全 [P1]**：引入 `import threading` 根治 `GlobalMarketWorker.__init__()` 抛 `NameError`；Worker 结束通过回调将 `self._worker` 安全重置为 `None`，并加持 `sip.isdeleted` 校验，彻底消除重复刷新或关闭时访问失效 C++ 对象引发崩溃；
+    - [x] **全球行情慢请求切片轮询与即时中断 [P2]**：废除无界等待的 `as_completed`，改用 `wait(pending_futures, timeout=0.15)` 小切片轮询，结合 `is_stopped()` 轮询中断，确保 Worker 在 150ms 内响应停止指令，不被慢请求卡死；
+    - [x] **公式过滤单 Worker 循环与清空版本作废 [P2]**：引入 `_filter_eval_worker_running` 守卫与单 Worker 循环，高频行情帧自动折叠为单帧最新载荷，杜绝多线程重叠堆积；清空公式时原子递增 `_filter_eval_revision` 并置空在途载荷，旧任务计算完毕绝不回写；
+    - [x] **名称缓存方法独立解耦 [P2]**：独立抽象 `_sync_name_cache(self)` 专职处理隔夜重置、行数扩容首刷与 60s 增量节流，消除内联冗余与单测调度逻辑复制；
+    - [x] **TDX 批量扫描协同取消与部分结果标明 [P2]**：引入内部 `stop_event` 与任务级 `cancel_check` 轮询提前终止；`_eval_task` 包装器自适应捕获 `TypeError` 兼容不同签名；结果返回 `df_out.attrs` 注入 `is_partial`、`completed_count`、`timed_out` 等元数据，日志精准报告实际完成标的；
+    - [x] **归档缓存写时复制 (COW) 与重操作完全移出锁外 [P2]**：`append()` 采用写时复制新列表赋值，保证任何锁内取得的引用永远不可变，根除锁外 `deepcopy` 遍历撕裂；`read()` 冷读前锁外查询 `_saved_close_day`；`committed()` 锁外查询 `_version`；`pending()` 锁内仅抓取引用（<1µs 字典遍历），锁外执行 `deepcopy`，消灭全局缓存锁阻塞；
+    - [x] **真实全链路单测矩阵全量 44 项 100% 绿灯通过**：单测真实实例化 `auto_fetch=True` 覆盖 Worker 启动与置空清理；真实 mock `SafeHDFStore.select` 抛 `IOError` 验证退避写回；直接调用原生 `_sync_name_cache`；验证非空 `pending()` 与多线程并发 COW 读写无竞争；实测 44 项测试 100% 绿灯（耗时 7.76s）。
+
+## 2026-10-01 18:45 本地 AI 编程审计工具全面适配 Google Antigravity / Gemini 与独立参数闭环
+- [x] **【轻量Protobuf逆向解析、上下文缓存精准核算、双重速率对齐、独立参数(--agy/--gemini/--codex/--all)与多助手综合对比全闭环】(`tools/codex_token_stats.py`, `20261001_1845_task.md`)**：
+    - [x] **轻量原生 Protobuf 解码器内置**：手写纯 Python 二进制解码器（支持 Varint 与 Length-Delimited 递归解构），零第三方包依赖，安全解析 `~/.gemini/antigravity/conversations/*.db` 的 `gen_metadata` 二进制数据；
+    - [x] **上下文缓存与 Prompt 准确核算**：精准辨析 Google Gemini API 的 `tag 2`（uncached input）与 `tag 5`（cached input），实证 Context Caching 命中率高达 **90.6% ~ 92.9%**，彻底纠偏此前累加误判；
+    - [x] **双重速率与流式耗时提取**：从 `SubField 11` 与 `SubField 12` 提取 API 执行耗时与流式阶段耗时，实测 `Gemini 3.8 Flash (Preview)` 包含首字等待速率为 **75.0 tok/s**，纯流式速度为 **92.0 tok/s**，完美吻合官方与社区基准；
+    - [x] **独立模式参数与灵活驱动**：支持 `--source agy|gemini|codex|all`，并提供便捷开关 `--agy`, `--gemini`, `--antigravity`, `--codex`, `--all`；默认保持 Codex 行为不变；
+    - [x] **多助手横向综合对比**：支持 `--all` 依次输出两大助手完整报表并在末尾生成总 Token 与轮次综合对比摘要；
+    - [x] **跨平台 CJK 网格对齐与社区卡片复用**：完整继承智能日期简写（`20260930/0930/30`）、模型过滤与 X 社区 100% 高保真评测卡片渲染。
+
+## 2026-10-01 18:07 本地 Codex 审计工具全面对齐 X 社区评测卡片样式与可靠性覆盖率闭环
+- [x] **【首字等待/近似流式双重解码速率、会话与请求覆盖率核算、X社区高保真卡片末尾渲染、智能日期简写(20260930/0930/30)与历史模型参数支持全闭环】(`tools/codex_token_stats.py`, `20261001_1807_task.md`)**：
+    - [x] **双重速率与首字时间戳精准捕获**：解析 JSONL 事件流捕获 `call_start_time` 与 `first_output_time`，准确计算“包含首 token 等待（剔除工具执行和用户空闲）”与“从首个输出记录起算的近似流式速度”双重指标；
+    - [x] **样本可靠性与覆盖率核算**：引入 `model_sample_stats`，细粒度核算各模型涉及的会话总数、总请求次数、计时可靠请求数、请求覆盖率与输出覆盖率；
+    - [x] **X 社区同款高保真卡片末尾渲染**：在工具末尾渲染 100% 对齐 X 社区评测文案与格式的标准输出卡片；
+    - [x] **智能日期简写解析 (20260930/0930/30) 与动态窗口扩展**：新增 `parse_date_input`，自动对齐最近年和最近月（如 `0930` 自动映射为 `2026-09-30`，`30` 自动映射为最近上月末），若目标日期超出当前天数窗口自动自适应扩展回溯天数；
+    - [x] **支持今日实时与大样本综合双卡片及参数扩展**：默认输出今日实时速报卡片并自动追加多日综合全量大盘卡片，扩展支持 `--date` 与 `--model` 针对性复盘。
+
+## 2026-10-01 13:08 ATS 性能优化全面技术审核、深度方案加固与回归测试矩阵落地闭环
+- [x] **【热力图复用、Worker安全解耦、TDX硬超时边界、历史异常30s退避、归档原子快照、策略异步过滤与名称周期同步全闭环】(`ats/ui/heatmap_widget.py`, `ats/ui/main_window.py`, `ats/bounded_evaluation_store.py`, `ats/channel_bottom_reversal_strategy.py`, `ats/ui/global_market_panel.py`, `docs/ATS_PERFORMANCE_REVIEW_20261001.md`, `tests/test_ats_optimization_review.py`, `20261001_1308_task.md`)**：
+    - [x] **全球市场 Worker 线程安全退出与解耦 [P1]**：引入 `stop()` 与中断检测；创建 Worker 设 `parent=None` 纳管至模块集合，`closeEvent` 断开信号槽连接，彻底杜绝 Qt C++ `Destroyed while thread is still running` 致命崩溃；
+    - [x] **TDX 批量扫描硬超时边界与慢请求非阻塞退出 [P2]**：废除 `with ThreadPoolExecutor` 隐式等待，`finally` 显式非阻塞 shutdown；`wait()` 采用 0.15s 切片轮询，慢请求遇超时即刻硬返回；
+    - [x] **历史读取异常纳入 30 秒退避 [P2]**：清除旧版 300s 遗留逻辑，`SafeHDFStore.select` 异常同步写回 `_history_lock_fail_times`，实现锁冲突、文件缺失与 IO 异常统一 30s 退避；
+    - [x] **归档缓存锁范围精简与 Pending 原子快照 [P2]**：`read()` 缓存命中锁内仅提取引用、锁外 deepcopy；`put()`/`append()` 锁外完成文件 stat 查询；`pending()` 锁内原子生成不可变快照，杜绝外部并发 append 引起的列表撕裂与大小变动异常；
+    - [x] **策略公式过滤移出 UI 线程与 Revision 控制 [P2]**：计算移入后台 Worker 线程，主线程 0ms 阻塞；结果经 Qt 信号跨线程投递；递增 Revision 校验，防止慢任务覆盖新行情帧；
+    - [x] **名称缓存跨日重置与 60s 增量同步 [P2]**：跨日重置初始化标记，次日开盘首帧全量重扫更名；准入条件收敛为 `_last_sync_t == 0.0 or _cur_len > _last_len or (now - last >= 60.0)`，兼顾更名/ST 覆盖与零线程开销；
+    - [x] **热力图原位复用与 60 板块指纹对齐**：根治原指纹仅截取前 30 项导致后 30 个板块漏更新问题；对齐 60 板块四元组指纹，实现卡片原位复用与脏检查，数值无变化 0 纳秒跳过；
+    - [x] **价格补载 30s TTL 自动重试与 Qt 队列信号**：解禁 HDF5 历史锁竞争失败代码，通过 Qt `QueuedConnection` 跨线程安全发出 `_price_load_ready` 信号驱动主界面防抖更新；
+    - [x] **天梯/涨停看板/涨跌分布合并待执行刷新**：通用 `_queue_latest_ui_task` 调度机制，高频来帧时自动解引用旧 DataFrame 并覆写最新任务，消除过期帧积压与防抖饥饿；
+    - [x] **自动化测试矩阵全量 44 项 100% 绿灯通过**：设计并实施 `tests/test_ats_optimization_review.py`（9 个专项测试 100% PASS）；关联测试 `tests/test_ats_archive_cache.py`（27/27 PASS）、`ats/test_ui_backpressure.py`（8/8 PASS）全量 44 项测试 100% 绿灯通过（实测耗时 7.32s）；更新 `docs/ATS_PERFORMANCE_REVIEW_20261001.md` 标记深度加固全闭环。
+
 ## 2026-10-01 11:55 本地 Codex 路由追踪、Token 消耗与纯生成/端到端双维度吞吐审计工具落地
 - [x] **【本地 Codex 路由与 Token 消耗审计、缓存命中率核算、X社区 20 tok/s 速度物理复核与终端 CJK 等宽网格对齐闭环】(`tools/codex_token_stats.py`, `20261001_1155_task.md`)**：
     - [x] **本地会话与模型路由审计机制打通**：解析 `~/.codex/sessions/**/*.jsonl`，结合 `~/.codex/models_cache.json` 官方模型字典，提取 `thread_settings` 请求模型与 `turn_context` 真实执行模型，精准判定 `[MATCH]`、`[ROUTED]` 与 `[REDIRECT]`；

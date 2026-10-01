@@ -3710,6 +3710,9 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
                 from ats.ui.channel_scan_result_dialog import ChannelReversalScanResultDialog
                 strategy = ChannelBottomReversalStrategy()
                 df_matched = strategy.scan_stocks_tdx([clean_c], count=120)
+                if getattr(df_matched, 'attrs', {}).get('busy'):
+                    QMessageBox.information(self, "扫描暂不可用", "前一批 TDX 请求仍未结束，请稍后重试。")
+                    return
                 if not df_matched.empty:
                     df_matched["name"] = clean_n
                 diag = ChannelReversalScanResultDialog(parent=self, df_results=df_matched, total_scanned=1, source_tab_name="每日涨停")

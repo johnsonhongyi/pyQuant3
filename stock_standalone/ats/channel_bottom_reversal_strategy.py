@@ -18,7 +18,7 @@ import math
 import time
 import numpy as np
 import pandas as pd
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, List, Optional, Tuple, Callable
 from JohnsonUtil import LoggerFactory
 
 logger = LoggerFactory.getLogger("ChannelTrendStrategy")
@@ -662,6 +662,44 @@ def evaluate_channel_strategy(
         return evaluate_channel_bottom_reversal(df, **kwargs)
 
 
+from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
+import threading
+import weakref
+
+_TDX_SCAN_GATE = threading.Lock()
+
+
+class DaemonThreadPoolExecutor(ThreadPoolExecutor):
+    """
+    守护线程池：生成的工作线程均为 daemon 线程，且不登记在 atexit._threads_queues 中，
+    彻底避免在 Python 进程退出时因底层 TDX 网络 socket 挂死而被 atexit._python_exit 的 t.join() 强制阻塞卡死。
+    """
+    def _adjust_thread_count(self):
+        try:
+            if hasattr(self, '_idle_semaphore') and self._idle_semaphore.acquire(timeout=0):
+                return
+            def weakref_cb(_, q=self._work_queue):
+                q.put(None)
+            num_threads = len(self._threads)
+            if num_threads < self._max_workers:
+                import concurrent.futures.thread as cft
+                thread_name = '%s_%d' % (self._thread_name_prefix or self, num_threads)
+                t = threading.Thread(
+                    name=thread_name,
+                    target=cft._worker,
+                    args=(weakref.ref(self, weakref_cb),
+                          self._work_queue,
+                          self._initializer,
+                          self._initargs),
+                    daemon=True
+                )
+                t.start()
+                self._threads.add(t)
+        except Exception as e:
+            logger.debug(f"[DaemonThreadPoolExecutor] fallback: {e}")
+            super()._adjust_thread_count()
+
+
 class ChannelBottomReversalStrategy:
     """
     【走势通道自适应多策略引擎】(向后完全兼容原 ChannelBottomReversalStrategy)
@@ -677,15 +715,40 @@ class ChannelBottomReversalStrategy:
         """单股多周期通道自适应评估 (先判别通道类型再分支执行)"""
         return evaluate_channel_strategy(df_kline, **self.params)
 
-    def evaluate_stock_tdx(self, code: str, category: str = "60m", count: int = 120) -> Dict[str, Any]:
+    def evaluate_stock_tdx(self, code: str, category: str = "60m", count: int = 120,
+                           cancel_check: Optional[Callable[[], bool]] = None) -> Dict[str, Any]:
         """
         【底层 TDX API 权威直连】拉取单只标的真实 K 线并进行通道策略测算
         """
         c_clean = "".join(filter(str.isdigit, str(code))).zfill(6)
+        if cancel_check and cancel_check():
+            return {
+                "is_matched": False,
+                "score": 0.0,
+                "code": c_clean,
+                "reason": "已取消或已超时",
+                "cancelled": True
+            }
         try:
             from ats.tdx_realtime_fetcher import TDXRealtimeFetcher
             fetcher = TDXRealtimeFetcher.get_instance()
+            if cancel_check and cancel_check():
+                return {
+                    "is_matched": False,
+                    "score": 0.0,
+                    "code": c_clean,
+                    "reason": "已取消或已超时",
+                    "cancelled": True
+                }
             df_k = fetcher.fetch_kline_bars(c_clean, category=category, count=count)
+            if cancel_check and cancel_check():
+                return {
+                    "is_matched": False,
+                    "score": 0.0,
+                    "code": c_clean,
+                    "reason": "已取消或已超时",
+                    "cancelled": True
+                }
             if df_k.empty or len(df_k) < 15:
                 return {
                     "is_matched": False,
@@ -705,44 +768,164 @@ class ChannelBottomReversalStrategy:
                 "reason": f"TDX 测算异常: {e}"
             }
 
-    def scan_stocks_tdx(self, codes: List[str], category: str = "60m", count: int = 120, max_workers: int = 6) -> pd.DataFrame:
+    def scan_stocks_tdx(self, codes: List[str], category: str = "60m", count: int = 120,
+                        max_workers: int = 6, timeout: float = 60.0, cancel_event=None) -> pd.DataFrame:
         """
         【底层 TDX API 权威直连高并发批量测算】
+        采用滑动窗口有界任务池，去重防堆积，支持总超时与协同取消
         """
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-        clean_codes = ["".join(filter(str.isdigit, str(c))).zfill(6) for c in codes if c]
+        clean_codes = list(dict.fromkeys(
+            "".join(filter(str.isdigit, str(c))).zfill(6)
+            for c in codes if c and any(ch.isdigit() for ch in str(c))
+        ))
         if not clean_codes:
             return pd.DataFrame()
 
-        results = []
-        t0 = time.time()
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            future_to_code = {
-                executor.submit(self.evaluate_stock_tdx, code, category, count): code 
-                for code in clean_codes
-            }
-            for future in as_completed(future_to_code):
-                try:
-                    res = future.result()
-                    if res.get("is_matched", False):
-                        results.append(res)
-                except Exception as e:
-                    pass
-
-        cost_ms = (time.time() - t0) * 1000.0
-        if not results:
-            df_out = pd.DataFrame(columns=[
-                "code", "score", "channel_type_cn", "pattern_name", "entry_price", "stop_loss", 
-                "target_price_1", "target_price_2", "channel_slope_deg", "lowest_low", 
-                "base_high", "volume_shrink_pct", "reason"
-            ])
-            logger.info(f"⚡ [TDX直连通道批量测算] 完成, 扫描 {len(clean_codes)} 标的, 命中 0 个 (耗时: {cost_ms:.1f}ms)")
+        cols = [
+            "code", "score", "channel_type_cn", "pattern_name", "entry_price", "stop_loss",
+            "target_price_1", "target_price_2", "channel_slope_deg", "lowest_low",
+            "base_high", "volume_shrink_pct", "reason"
+        ]
+        if not _TDX_SCAN_GATE.acquire(blocking=False):
+            df_out = pd.DataFrame(columns=cols)
+            df_out.attrs.update(
+                is_partial=True,
+                completed_count=0,
+                total_count=len(clean_codes),
+                timed_out=False,
+                cancelled=bool(cancel_event is not None and getattr(cancel_event, 'is_set', lambda: False)()),
+                busy=True,
+            )
+            logger.warning("[TDX直连通道批量测算] 前一批仍有未结束请求，本次跳过以限制后台线程累积")
             return df_out
 
-        df_out = pd.DataFrame(results)
-        df_out.sort_values(by="score", ascending=False, inplace=True)
-        df_out.reset_index(drop=True, inplace=True)
-        logger.info(f"⚡ [TDX直连通道批量测算] 完成, 扫描 {len(clean_codes)} 标的, 命中 {len(df_out)} 个 (耗时: {cost_ms:.1f}ms)")
+        results = []
+        t0 = time.time()
+        workers = max(1, min(max_workers or 6, 16))
+        max_inflight = workers * 2
+        deadline = time.time() + timeout if timeout and timeout > 0 else float('inf')
+
+        internal_stop_event = threading.Event()
+        def is_cancelled_or_stopped():
+            return internal_stop_event.is_set() or (cancel_event is not None and getattr(cancel_event, 'is_set', lambda: False)())
+
+        executor = None
+        submitted_futures = []
+        completed_count = 0
+        timed_out = False
+        cancelled = False
+
+        try:
+            executor = DaemonThreadPoolExecutor(max_workers=workers)
+            code_iter = iter(clean_codes)
+            in_flight = {}
+
+            def _eval_task(c_code):
+                try:
+                    return self.evaluate_stock_tdx(c_code, category=category, count=count, cancel_check=is_cancelled_or_stopped)
+                except TypeError:
+                    return self.evaluate_stock_tdx(c_code, category, count)
+
+            # 初始填满滑动窗口
+            for _ in range(min(max_inflight, len(clean_codes))):
+                try:
+                    c = next(code_iter)
+                    fut = executor.submit(_eval_task, c)
+                    in_flight[fut] = c
+                    submitted_futures.append(fut)
+                except StopIteration:
+                    break
+
+            while in_flight:
+                if cancel_event is not None and getattr(cancel_event, 'is_set', lambda: False)():
+                    cancelled = True
+                    internal_stop_event.set()
+                    for f in in_flight:
+                        f.cancel()
+                    break
+
+                rem_sec = deadline - time.time()
+                if rem_sec <= 0:
+                    timed_out = True
+                    internal_stop_event.set()
+                    for f in in_flight:
+                        f.cancel()
+                    logger.warning(f"⚡ [TDX直连通道批量测算] 达到总超时 {timeout}s, 提前终止扫描")
+                    break
+
+                # 采用小切片轮询超时 (最多等待 0.15s)，确保对 cancel_event 与 deadline 毫秒级硬响应
+                step_timeout = min(0.15, max(0.01, rem_sec))
+                try:
+                    done, _ = wait(list(in_flight.keys()), return_when=FIRST_COMPLETED, timeout=step_timeout)
+                except Exception:
+                    break
+
+                if not done:
+                    # 步进超时切片内无任务完成，返回循环头部立即检查取消与总超时
+                    continue
+
+                for fut in done:
+                    in_flight.pop(fut, None)
+                    completed_count += 1
+                    try:
+                        res = fut.result()
+                        if res.get("is_matched", False):
+                            results.append(res)
+                    except Exception:
+                        pass
+
+                    # 滑动推进：若未取消且未超时，补入下一个在途任务
+                    if not is_cancelled_or_stopped() and time.time() < deadline:
+                        try:
+                            next_c = next(code_iter)
+                            new_fut = executor.submit(_eval_task, next_c)
+                            in_flight[new_fut] = next_c
+                            submitted_futures.append(new_fut)
+                        except StopIteration:
+                            pass
+        finally:
+            internal_stop_event.set()
+            # ⚡ 关键硬边界保护：非阻塞关闭线程池，取消未开始任务，不阻塞等待慢请求，主线程立即返回！
+            if executor is not None:
+                executor.shutdown(wait=False, cancel_futures=True)
+
+            # 已运行的 socket 请求不能由 Python 线程安全强杀；未结束时保留扫描门闩，
+            # 后续批次快速返回 busy，直到这些请求真正退出，限制跨次扫描的守护线程累积。
+            pending_workers = [future for future in submitted_futures if not future.done()]
+            if pending_workers:
+                remaining = [len(pending_workers)]
+                callback_lock = threading.Lock()
+
+                def _release_scan_gate(_future):
+                    with callback_lock:
+                        remaining[0] -= 1
+                        release_gate = remaining[0] == 0
+                    if release_gate:
+                        _TDX_SCAN_GATE.release()
+
+                for future in pending_workers:
+                    future.add_done_callback(_release_scan_gate)
+            else:
+                _TDX_SCAN_GATE.release()
+
+        cost_ms = (time.time() - t0) * 1000.0
+        is_partial = completed_count < len(clean_codes)
+
+        if not results:
+            df_out = pd.DataFrame(columns=cols)
+        else:
+            df_out = pd.DataFrame(results)
+            df_out.sort_values(by="score", ascending=False, inplace=True)
+            df_out.reset_index(drop=True, inplace=True)
+
+        df_out.attrs['is_partial'] = is_partial
+        df_out.attrs['completed_count'] = completed_count
+        df_out.attrs['total_count'] = len(clean_codes)
+        df_out.attrs['timed_out'] = timed_out
+        df_out.attrs['cancelled'] = cancelled
+
+        status_text = "提前终止(超时/取消, 部分结果)" if is_partial else "完成"
+        logger.info(f"⚡ [TDX直连通道批量测算] {status_text}, 计划 {len(clean_codes)} 标的, 实际完成 {completed_count} 标的, 命中 {len(df_out)} 个 (耗时: {cost_ms:.1f}ms)")
         return df_out
 
     def scan_batch(self, stock_dfs: Dict[str, pd.DataFrame]) -> pd.DataFrame:

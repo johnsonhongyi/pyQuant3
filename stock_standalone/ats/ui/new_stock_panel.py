@@ -2225,6 +2225,9 @@ class NewStockPanel(QWidget):
             self.lbl_status.setText("❌ 通道测算失败")
             QMessageBox.warning(self, "测算异常", payload["error"])
             return
+        if getattr(payload.get("result"), 'attrs', {}).get('busy'):
+            self.lbl_status.setText("⏳ 前一批 TDX 请求仍未结束，请稍后重试。")
+            return
         if "code" in payload:
             code, name, res = payload["code"], payload["name"], payload["result"]
             self.lbl_status.setText("🟢 60f 通道策略测算完成")
