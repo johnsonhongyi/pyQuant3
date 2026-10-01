@@ -71,6 +71,24 @@ def _voice_worker(q: Queue, stop_event: threading.Event, interrupt_event: thread
     worker_log("Voice worker process started.")
     
     cancelled_set = set()
+    cancelled_before = 0.0
+
+    def drain_cancellations():
+        nonlocal cancelled_before
+        while True:
+            try:
+                token = cancel_q.get_nowait()
+            except Empty:
+                break
+            if isinstance(token, tuple) and len(token) == 2 and token[0] == '__ALL__':
+                cancelled_before = max(cancelled_before, token[1])
+            elif token == '__ALL__':
+                cancelled_before = max(cancelled_before, time.time())
+            elif token == '__CLEAR__':
+                cancelled_set.clear()
+                cancelled_before = 0.0
+            else:
+                cancelled_set.add(token)
     last_speech_end_ts = 0.0 # [FIX] Timestamp of last speech completion
 
     # [FIX] 线程级 COM 初始化
@@ -85,27 +103,13 @@ def _voice_worker(q: Queue, stop_event: threading.Event, interrupt_event: thread
 
     while not stop_event.is_set():
         try:
-            # 1. 刷新取消列表
-            while not cancel_q.empty():
-                try:
-                    token = cancel_q.get_nowait()
-                    if token == "__CLEAR__":
-                        cancelled_set.clear()
-                        worker_log("Cancelled set cleared by __CLEAR__ command")
-                    else:
-                        cancelled_set.add(token)
-                except: break
+            drain_cancellations()
 
             # 2. 获取消息 (阻塞)
             try:
                 item = q.get(timeout=1.0)
-            except: 
-                # ⚡ [FIX] 队列空闲时清除 __ALL__ 标记，允许后续新报警正常播放
-                if "__ALL__" in cancelled_set:
-                    cancelled_set.discard("__ALL__")
-                    worker_log("Cleared __ALL__ flag (queue idle)")
+            except Empty:
                 continue
-
 
             # 支持多种格式 (Dict 优先)
             if isinstance(item, dict):
@@ -127,9 +131,9 @@ def _voice_worker(q: Queue, stop_event: threading.Event, interrupt_event: thread
             
             # 3. 检查是否已被取消
             # ⚡ [FIX] 处理 __ALL__ 全局取消标记
-            if "__ALL__" in cancelled_set:
+            if msg_t <= cancelled_before:
                 worker_log(f"Global cancel (__ALL__): skipping {key}")
-                # 不移除 __ALL__，保持全局取消状态直到队列清空
+                # 只跳过关闭前入队的消息，下一轮无需等待队列空闲。
                 continue
             if key and key in cancelled_set:
                 worker_log(f"Skipping cancelled item: {key}")
@@ -137,11 +141,9 @@ def _voice_worker(q: Queue, stop_event: threading.Event, interrupt_event: thread
                 continue
 
             # ⭐ JIT (Just-In-Time) Check: Drain again in case cancellation arrived while waiting
-            while not cancel_q.empty():
-                try: cancelled_set.add(cancel_q.get_nowait())
-                except: break
+            drain_cancellations()
             # ⚡ [FIX] 再次检查 __ALL__
-            if "__ALL__" in cancelled_set:
+            if msg_t <= cancelled_before:
                 worker_log(f"JIT Global cancel: skipping {key}")
                 continue
             if key and key in cancelled_set:
@@ -170,9 +172,11 @@ def _voice_worker(q: Queue, stop_event: threading.Event, interrupt_event: thread
                 current_state['key'] = str(key) if key else ""
 
             # ⭐ Final JIT Check before Engine Start
-            while not cancel_q.empty():
-                try: cancelled_set.add(cancel_q.get_nowait())
-                except: break
+            drain_cancellations()
+            if msg_t <= cancelled_before:
+                if current_state:
+                    current_state['key'] = ""
+                continue
             if key and key in cancelled_set:
                 worker_log(f"Final JIT Skip: {key}")
                 if current_state: current_state['key'] = ""
@@ -451,7 +455,7 @@ class AlertManager:
         if key:
             self.cancel_queue.put(str(key))
         else:
-            self.cancel_queue.put("__ALL__")
+            self.cancel_queue.put(("__ALL__", time.time()))
             self.interrupt_event.set() # 立即触发引擎中断
 
     def resume_voice(self):

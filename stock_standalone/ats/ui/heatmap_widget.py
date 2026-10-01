@@ -607,21 +607,19 @@ class SectorHeatmapWidget(QWidget):
         cols = max(2, min(5, (w - 20) // (card_target_w + 6)))
         self._current_cols = cols
 
-        # ⚡ [PERF 脏检查] 若 sectors 数据和列数均未变动，直接跳过物理重建
-        grid_fingerprint = (cols, tuple((item[0], item[1], item[2]) for item in self.sectors[:30]), tuple(fav_sectors))
+        display_items = [it for it in self.sectors if is_valid_sector_name(it[0])][:60]
+        grid_fingerprint = (cols, tuple(tuple(item[:4]) for item in display_items), tuple(sorted(fav_sectors)))
         if not force and getattr(self, '_last_rendered_fingerprint', None) == grid_fingerprint:
             return
-        self._last_rendered_fingerprint = grid_fingerprint
+        structure = (cols, tuple(item[0] for item in display_items))
+        reuse = getattr(self, '_grid_structure', None) == structure
+        if not reuse:
+            while self.grid_layout.count() > 0:
+                layout_item = self.grid_layout.takeAt(0)
+                if layout_item and layout_item.widget() is not None:
+                    layout_item.widget().deleteLater()
+            self._grid_cards = []
 
-        # ⚡ [彻底清理] 移出并彻底销毁旧的 QLayoutItem 与卡片 Widget，杜绝卡片多层重叠挤压
-        while self.grid_layout.count() > 0:
-            layout_item = self.grid_layout.takeAt(0)
-            if layout_item:
-                old_w = layout_item.widget()
-                if old_w is not None:
-                    old_w.deleteLater()
-
-        display_items = [it for it in self.sectors if is_valid_sector_name(it[0])][:60]
         rows = max(1, (len(display_items) + cols - 1) // cols)
         needed_h = rows * (68 + 6) + 16
         self.grid_container.setMinimumHeight(needed_h)
@@ -637,8 +635,20 @@ class SectorHeatmapWidget(QWidget):
             clean_name = re.sub(r'^[^\w\u4e00-\u9fa5]+', '', str(name)).strip()
             is_highlight = (name in fav_sectors) or (clean_name in fav_sectors)
 
+            card_state = (tuple(item[:4]), is_highlight)
+            if reuse:
+                card, name_lbl, info_lbl, count_lbl = self._grid_cards[idx]
+                if getattr(card, '_sector_render_state', None) == card_state:
+                    continue
+                name_lbl.setText(f"⭐ {name}" if is_highlight else str(name))
+                info_lbl.setText(f"{score} | {pct}")
+                count_lbl.setText(f"成员: {count}")
+            else:
+                card = None
+
             # Card Widget - 具有稳固高度与自适应宽度的标准卡片
-            card = QPushButton()
+            if card is None:
+                card = QPushButton()
             card.setMinimumSize(65, 68)
             card.setMaximumHeight(74)
             card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
@@ -668,6 +678,10 @@ class SectorHeatmapWidget(QWidget):
                 }}
             """)
             
+            card._sector_render_state = card_state
+            if reuse:
+                continue
+
             # Enable custom context menu for favorites management
             card.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
             card.customContextMenuRequested.connect(lambda pos, n=name: self._show_sector_context_menu(pos, n))
@@ -701,6 +715,10 @@ class SectorHeatmapWidget(QWidget):
 
             card.clicked.connect(_on_card_clicked)
             self.grid_layout.addWidget(card, row, col)
+            self._grid_cards.append((card, name_lbl, info_lbl, count_lbl))
+
+        self._grid_structure = structure
+        self._last_rendered_fingerprint = grid_fingerprint
 
     def sort_sectors(self, index=0):
         def safe_float_pct(val_str):

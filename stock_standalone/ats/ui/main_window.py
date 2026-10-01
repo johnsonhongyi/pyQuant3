@@ -1867,6 +1867,7 @@ class ATSMainWindow(QMainWindow):
     realtime_signal_signal = pyqtSignal(object)
     next_day_snapshot_signal = pyqtSignal(object)
     db_data_loaded_signal = pyqtSignal(object)
+    _price_load_ready = pyqtSignal()
     _channel_scan_ready = pyqtSignal(object)
     _market_summary_ready = pyqtSignal()
 
@@ -1953,6 +1954,8 @@ class ATSMainWindow(QMainWindow):
         self._history_failed_date = None  # tracks the date when failures were recorded
         self.prices_loading_codes = set()
         self.prices_failed_codes = set()
+        self._price_failure_times = {}
+        self._price_load_ready.connect(self._trigger_realtime_ui_update, Qt.ConnectionType.QueuedConnection)
         self._is_closing = False
         
         # 🛡️【批处理防抖队列与定时器】：防止零散多次触发并发开闭 HDF5 / Sina API 引起的刷屏与界面卡顿
@@ -4422,16 +4425,25 @@ class ATSMainWindow(QMainWindow):
         # Fast vectorized name cache update — 节流 60s 或按需后台更新，杜绝每秒创建 OS 原生线程
         _now_ts = time.time()
         _last_name_update = getattr(self, '_last_name_cache_update_time', 0.0)
-        if _now_ts - _last_name_update > 60.0 or len(getattr(self, 'name_cache', {})) < 4000:
+        if (not getattr(self, '_name_cache_update_busy', False)
+                and (_now_ts - _last_name_update > 60.0 or not _last_name_update)
+                and 'name' in self.current_df.columns):
             self._last_name_cache_update_time = _now_ts
+            self._name_cache_update_busy = True
             _df_for_name = self.current_df[['name']].copy(deep=True) if 'name' in self.current_df.columns else None
             def _bg_name_cache():
                 try:
                     self._update_name_cache_from_df(_df_for_name)
                 except Exception:
                     pass
+                finally:
+                    self._name_cache_update_busy = False
             import threading as _t_mod
-            _t_mod.Thread(target=_bg_name_cache, daemon=True).start()
+            try:
+                _t_mod.Thread(target=_bg_name_cache, daemon=True).start()
+            except Exception:
+                self._name_cache_update_busy = False
+                logger.exception("[ATSMainWindow] Cannot start name cache worker")
 
         # 🛡️ 实时推送到独立新股阶梯盯盘窗口 (非阻塞, 防重入 50ms 防抖)
         if hasattr(self, 'ladder_monitor_win') and self.ladder_monitor_win is not None:
@@ -4443,7 +4455,7 @@ class ATSMainWindow(QMainWindow):
                         _lmw.on_realtime_df_update(_df_lmw)
                 except Exception:
                     pass
-            QTimer.singleShot(0, _push_ladder)
+            self._queue_latest_ui_task("ladder", 0, _push_ladder)
 
         # 🛡️ 无论是否打开天梯窗口，后台自动驱动天梯底层逻辑 (对齐龙头突击与资金主线)
 
@@ -4459,7 +4471,7 @@ class ATSMainWindow(QMainWindow):
                         _dld.update_data_payload(_df_dld, _sh_pct_val)
                 except Exception:
                     pass
-            QTimer.singleShot(50, _push_dld)
+            self._queue_latest_ui_task("daily_limit", 50, _push_dld)
 
         # 4. 更新 UI 显示与计算
         if self.current_df is not None and not self.current_df.empty:
@@ -4495,7 +4507,7 @@ class ATSMainWindow(QMainWindow):
                         self.dist_chart.update_data(counts, stats_dict, _df_hist)
                 except Exception:
                     pass
-            QTimer.singleShot(20, _update_dist_chart)
+            self._queue_latest_ui_task("distribution", 100, _update_dist_chart)
 
             # ⚡ 30ms 防抖异步触发 UI 渲染 (极其流畅汇聚高频 IPC 广播数据包)
             self._trigger_realtime_ui_update()
@@ -4602,6 +4614,30 @@ class ATSMainWindow(QMainWindow):
         QTimer.singleShot(800, _restore_dist)
         QTimer.singleShot(1000, _restore_sbc)
 
+    def _queue_latest_ui_task(self, key, delay_ms, callback):
+        """Keep the latest pending frame without starving scheduled updates."""
+        if getattr(self, '_is_closing', False):
+            return
+        if not hasattr(self, '_latest_ui_tasks'):
+            self._latest_ui_tasks = {}
+            self._latest_ui_timers = {}
+        self._latest_ui_tasks[key] = callback
+        timer = self._latest_ui_timers.get(key)
+        if timer is None:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            def run_latest():
+                task = self._latest_ui_tasks.pop(key, None)
+                if task is not None and not getattr(self, '_is_closing', False):
+                    try:
+                        task()
+                    except Exception:
+                        logger.exception("[ATSMainWindow] Deferred UI task failed: %s", key)
+            timer.timeout.connect(run_latest)
+            self._latest_ui_timers[key] = timer
+        if not timer.isActive():
+            timer.start(delay_ms)
+
     def _trigger_realtime_ui_update(self):
         """防抖异步触发 UI 渲染 (30ms 汇聚高频 IPC 广播包, 防范主线程卡顿)"""
         if not hasattr(self, '_realtime_ui_debounce_timer'):
@@ -4616,7 +4652,13 @@ class ATSMainWindow(QMainWindow):
         if not codes:
             return
         
-        codes_to_load = [c for c in codes if c not in self.prices_loading_codes and c not in self.prices_failed_codes]
+        now = time.monotonic()
+        for code in tuple(self.prices_failed_codes):
+            if now - self._price_failure_times.get(code, 0.0) >= 30.0:
+                self.prices_failed_codes.discard(code)
+                self._price_failure_times.pop(code, None)
+        codes_to_load = [c for c in dict.fromkeys(codes)
+                         if c not in self.prices_loading_codes and c not in self.prices_failed_codes]
         if not codes_to_load:
             return
             
@@ -4642,6 +4684,7 @@ class ATSMainWindow(QMainWindow):
                 for code in codes_to_load:
                     self.prices_loading_codes.discard(code)
                     self.prices_failed_codes.add(code)
+                    self._price_failure_times[code] = time.monotonic()
                 logger.debug(f"[ATSMainWindow] HDF5 lock busy, postponed price load for {len(codes_to_load)} codes.")
                 return
             try:
@@ -4653,6 +4696,7 @@ class ATSMainWindow(QMainWindow):
                     for code in codes_to_load:
                         self.prices_loading_codes.discard(code)
                         self.prices_failed_codes.add(code)
+                        self._price_failure_times[code] = time.monotonic()
                     return
                     
                 tick_df = s.get_stock_list_data(valid_codes)
@@ -4670,19 +4714,28 @@ class ATSMainWindow(QMainWindow):
                     self.prices_loading_codes.discard(code)
                     if code not in loaded_codes:
                         self.prices_failed_codes.add(code)
+                        self._price_failure_times[code] = time.monotonic()
                         
                 cost_ms = (time.time() - t0) * 1000.0
                 logger.debug(f"[ATSMainWindow] Batch prices loaded: {len(loaded_codes)}/{len(valid_codes)} in {cost_ms:.1f}ms")
-                QTimer.singleShot(0, self.refresh_realtime_ui)
+                self._price_load_ready.emit()
             except Exception as e:
                 logger.debug(f"[ATSMainWindow] Error loading prices in background: {e}")
                 for code in codes_to_load:
                     self.prices_loading_codes.discard(code)
                     self.prices_failed_codes.add(code)
+                    self._price_failure_times[code] = time.monotonic()
             finally:
                 self.hdf5_history_lock.release()
                 
-        threading.Thread(target=worker, daemon=True).start()
+        try:
+            threading.Thread(target=worker, daemon=True).start()
+        except Exception:
+            for code in codes_to_load:
+                self.prices_loading_codes.discard(code)
+                self.prices_failed_codes.add(code)
+                self._price_failure_times[code] = time.monotonic()
+            logger.exception("[ATSMainWindow] Cannot start price load worker")
 
     def _async_load_stock_history(self, codes):
         if not codes:
@@ -4925,8 +4978,6 @@ class ATSMainWindow(QMainWindow):
                         pool[code]['pct'] = 0.0
                         missing_realtime_codes.append(code)
 
-            missing_realtime_codes = [c for c in missing_realtime_codes
-                                      if c not in self.prices_loading_codes and c not in self.prices_failed_codes]
             if missing_realtime_codes:
                 self._async_load_stock_prices(missing_realtime_codes)
 

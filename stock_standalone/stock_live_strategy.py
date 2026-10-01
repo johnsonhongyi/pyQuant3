@@ -270,13 +270,7 @@ class VoiceAnnouncer:
 
     def announce(self, text: str, code: Optional[str] = None) -> None:
         """发送报警"""
-        # 触发回调 (Legacy support)
-        if self.on_speak_start:
-            try:
-                self.on_speak_start(code)
-            except Exception:
-                pass
-            
+        # 开始/结束仅由实际语音 worker 的反馈触发。
         # 提升优先级
         p = 2
         if any(kw in text for kw in ["注意", "卖出", "风险", "警告"]):
@@ -284,9 +278,6 @@ class VoiceAnnouncer:
             
         self.manager.send_alert(text, priority=p, key=code)
         
-        # Fake timer for on_speak_end (Legacy)
-        if self.on_speak_end:
-            threading.Timer(1.0, lambda: self._safe_callback(self.on_speak_end, code)).start()
 
     def stop(self) -> None:
         """停止所有当前正在播放的语音"""
@@ -1331,7 +1322,7 @@ class StockLiveStrategy:
         )
         return "added"
 
-    def process_data(self, df_all: pd.DataFrame, concept_top5: list = None, resample: str = 'd') -> None:
+    def process_data(self, df_all: pd.DataFrame, concept_top5: list = None, resample: str = 'd', manual_scan: bool = False) -> None:
         """ 处理每一帧的行情数据 """
         # [NEW] 周期归一化，防止 'd' vs 'D' 导致匹配失败
         resample = str(resample).lower().strip()
@@ -1367,9 +1358,18 @@ class StockLiveStrategy:
                     if resample in self._is_checking_resamples:
                         self._is_checking_resamples.remove(resample)
             else:
-                return
+                if manual_scan:
+                    with self._lock:
+                        if resample in self._is_checking_resamples:
+                            if not hasattr(self, '_pending_manual_scans'):
+                                self._pending_manual_scans = {}
+                            self._pending_manual_scans[resample] = (df_all, concept_top5)
+                            logger.warning("[LIVE-MANUAL] Monitor scan busy; queued latest manual request: %s", resample)
+                            return
+                else:
+                    return
             
-        if now - getattr(self, '_last_process_time', 0.0) < 1.0: # 稍微提高频率到 1s
+        if not manual_scan and now - getattr(self, '_last_process_time', 0.0) < 1.0: # 稍微提高频率到 1s
             return
         self._last_process_time = now
 
@@ -1433,7 +1433,7 @@ class StockLiveStrategy:
         # --- ⭐ [关键] 异步触发策略判定 (增加原子锁保护，支持多周期并行) ---
         can_submit = False
         with self._lock:
-            if is_trading and resample not in self._is_checking_resamples:
+            if (is_trading or manual_scan) and resample not in self._is_checking_resamples:
                 # 🛡️ 按 resample 颗粒度加锁，允许 日/周/月 线同时并行扫描
                 self._is_checking_resamples.add(resample)
                 can_submit = True
@@ -1447,6 +1447,8 @@ class StockLiveStrategy:
                  if not hasattr(self, '_resample_start_time'):
                      self._resample_start_time = {}
                  self._resample_start_time[resample] = now
+                 if manual_scan:
+                     logger.warning("[LIVE-MANUAL] Submitting monitor scan: trading=%s codes=%d resample=%s", is_trading, len(target_codes), resample)
                  
                  # 🛡️ [PERF OPTIMIZE] 延迟到 _check_strategies 内部进行 index 转换 and intersection
                  # 这里只提交任务，最大限度减少主线程/刷新线程的停顿
@@ -2752,7 +2754,14 @@ class StockLiveStrategy:
             with self._lock:
                 if resample in self._is_checking_resamples:
                     self._is_checking_resamples.remove(resample)
-            
+                pending_manual = getattr(self, '_pending_manual_scans', {}).pop(resample, None)
+            if pending_manual is not None:
+                try:
+                    self.process_data(pending_manual[0], concept_top5=pending_manual[1],
+                                      resample=resample, manual_scan=True)
+                except Exception:
+                    logger.exception("[LIVE-MANUAL] Pending manual scan failed: %s", resample)
+
             # --- [NEW] 10轮一报汇总逻辑 (Performance Optimized) ---
             self._data_check_rounds += 1
             if self._data_check_rounds >= 10:
