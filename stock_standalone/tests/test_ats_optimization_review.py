@@ -936,3 +936,63 @@ def test_global_market_panel_auto_fetch_false_guard(qapp):
     # 验证守卫拦截生效，worker 依旧为 None
     assert panel._worker is None
     panel.close()
+
+# ============================================================================
+# 19. Hot Sector Leaderboard Cold Start & Off-Hours Base Rendering Test
+# ============================================================================
+def test_hot_sector_leaderboard_cold_start_off_hours(qapp, monkeypatch):
+    """验证龙头突击跟单榜在非交易时段冷启动时正常装载 Top 3 板块底板与标的，不发生白屏与空数据"""
+    from ats.ui.hot_sector_leaderboard import HotSectorLeaderboardDialog
+    from ats.hot_sector_engine import HotSectorEngine
+    from ats import tdx_realtime_fetcher
+
+    # 1. 模拟非交易休市时段
+    monkeypatch.setattr(tdx_realtime_fetcher, "is_trading_time", lambda: (False, "非交易时段"))
+
+    # 2. 模拟同步 Alpha 刷新，以便在单测中瞬间完成计算
+    orig_start_alpha = HotSectorLeaderboardDialog._start_alpha_refresh
+    def sync_start_alpha(self, top_sectors, current_df, manual_list, segment_mode,
+                         sectors_snapshot, sec_to_codes, sort_idx):
+        payload = {"results": [], "error": ""}
+        try:
+            self.engine.extract_top_sectors_from_heatmap(
+                sectors_snapshot, sec_to_codes, top_n=3, sort_mode=sort_idx)
+            payload["results"] = self.engine.compute_hot_alpha_leaderboard(
+                top_sector_names=top_sectors, current_df=current_df,
+                manual_watchlist=manual_list, segment_mode=segment_mode)
+        except Exception as exc:
+            payload["error"] = str(exc)
+        self._on_alpha_ready(payload)
+    monkeypatch.setattr(HotSectorLeaderboardDialog, "_start_alpha_refresh", sync_start_alpha)
+
+    dlg = HotSectorLeaderboardDialog()
+    assert dlg._has_init_fetched is False
+
+    # 3. 模拟首拍定时器 tick (force=False，冷启动放行)
+    dlg._on_ui_timer_tick(force=False)
+
+    # 验证首刷完成
+    assert dlg._has_init_fetched is True
+    assert len(dlg.current_top_sectors) >= 1
+    assert "--" not in dlg.sec_buttons[0].text()
+
+    # 验证数据成功载入表格
+    assert dlg.table.rowCount() > 0
+    assert "标的: 0" not in dlg.lbl_stats.text()
+    assert "💤 非交易休眠" in dlg.lbl_update_time.text()
+
+    # 4. 验证后续非交易时段常规 tick (force=False) 守卫生效节流
+    prev_update_time = dlg.lbl_update_time.text()
+    dlg._on_ui_timer_tick(force=False)
+    # 不会进入重算
+    assert dlg._has_init_fetched is True
+
+    # 5. 验证 HotSectorEngine 在 sector_to_codes 为空时通过 SectorDataAggregator 兜底成分股
+    engine = HotSectorEngine.get_instance()
+    engine.sector_to_codes = {}
+    codes, sec_map, mp_cache, n_map = engine.build_target_universe(["存储芯片"])
+    assert len(codes) > 0
+    assert "存储芯片" in sec_map.values()
+    assert len(n_map) > 0
+
+    dlg.close()

@@ -1959,6 +1959,7 @@ class ATSMainWindow(QMainWindow):
         self._history_empty_cache_times = {}  # {code: fail_time}, 60s negative cache TTL
         self._history_lock_fail_times = {}    # {code: fail_time}, 30s lock conflict retry TTL
         self.prices_loading_codes = set()
+        self.prices_failed_codes = set()
         self._price_failure_times = {}
         self._price_fail_counts = {}       # {code: fail_count}, 30s -> 60s -> 300s 阶梯退避计数
         self._history_fail_counts = {}     # {code: fail_count}, 30s -> 60s -> 300s 阶梯退避计数

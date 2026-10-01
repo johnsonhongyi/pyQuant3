@@ -1117,6 +1117,14 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
         self.ui_refresh_timer.timeout.connect(self._on_ui_timer_tick)
         self.ui_refresh_timer.start()
 
+        # 7. 冷启动异步即时首刷 (对齐天梯确保初次打开秒级装载底板，杜绝白屏)
+        QTimer.singleShot(0, self.ensure_rendered)
+
+    def ensure_rendered(self):
+        """确保窗口打开或激活时拥有底板数据 (对齐天梯机制)"""
+        if not self._has_init_fetched or not getattr(self, 'cached_results', None):
+            self._on_ui_timer_tick(force=True)
+
     def _init_ui(self):
         # 1. 继承统一的 ATS 暗黑 Mode QSS 风格
         apply_dark_theme(self)
@@ -1951,8 +1959,8 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
         if self.ui_refresh_timer.interval() != desired_interval_ms:
             self.ui_refresh_timer.setInterval(desired_interval_ms)
 
-        # 休市时不做初始化计算或自动补拉行情；仅允许用户显式手动刷新。
-        if not is_trading and not force:
+        # 休市时允许冷启动首刷加载底板；已完成首刷后若非手动强刷才进入智能休眠节流。
+        if not is_trading and not force and self._has_init_fetched:
             self.lbl_update_time.setText(f"💤 非交易休眠 ({time.strftime('%H:%M:%S')})")
             return
 
@@ -1969,6 +1977,12 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
             # 尝试从热力图组件提取 Top 3 板块 (联动跟随热力图当前选择的排序维度)
             if hasattr(main_app, "heatmap_widget") and main_app.heatmap_widget:
                 hw = main_app.heatmap_widget
+                # 🛡️ 若冷启动时热力图尚未加载板块，主动触发加载底板
+                if not getattr(hw, "sectors", None) or len(hw.sectors) < 3:
+                    try:
+                        hw.load_live_sectors(force=True)
+                    except Exception as exc:
+                        logger.debug(f"冷启动触发热力图加载底板异常: {exc}")
                 if hasattr(hw, "get_top_sectors"):
                     top_sectors = hw.get_top_sectors(top_n=3)
                     sec_to_codes = dict(getattr(hw, "sector_to_codes", {}))
@@ -1980,10 +1994,39 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
                     top_sectors = self.engine.extract_top_sectors_from_heatmap(
                         sectors_snapshot, top_n=3, sort_mode=sort_idx)
 
-            # 龙头突击榜标的严格来源于当前 Top 3 强势板块与新增板块成分股，不强行注入非热点自选股
             manual_list = None
         else:
             manual_list = None
+
+        # 🛡️ 容错兜底：若主窗口热力图不存在或仍无板块，直接通过 SectorDataAggregator 快照提取真实 Top 3 板块
+        if not top_sectors:
+            try:
+                from ats.sector_data_aggregator import SectorDataAggregator
+                agg = SectorDataAggregator.get_instance()
+                b_data = agg._load_bidding_sector_data()
+                if b_data:
+                    temp_sectors = []
+                    for s_k, s_v in b_data.items():
+                        if not is_valid_sector_name(s_k):
+                            continue
+                        score = float(s_v.get('score', 0.0) or 0.0)
+                        pct_val = float(s_v.get('avg_pct_diff', s_v.get('avg_pct', 0.0)) or 0.0)
+                        c_num = int(s_v.get('count', 0) or 0)
+                        temp_sectors.append((s_k, score, f"{pct_val:+.2f}%", c_num))
+                    if temp_sectors:
+                        sectors_snapshot = temp_sectors
+                        top_sectors = self.engine.extract_top_sectors_from_heatmap(
+                            sectors_snapshot, top_n=3, sort_mode=sort_idx)
+            except Exception as exc:
+                logger.debug(f"通过快照提取 Top 3 板块异常: {exc}")
+
+        # 🛡️ 策略宽表 current_df 统一感知递归兜底 (对齐天梯机制)
+        if current_df is None or (isinstance(current_df, pd.DataFrame) and current_df.empty):
+            try:
+                from ats.sector_data_aggregator import SectorDataAggregator
+                current_df, _ = SectorDataAggregator.get_instance().resolve_active_strategy_df(main_app or self)
+            except Exception:
+                pass
 
         # 过滤非明确板块
         top_sectors = [s for s in top_sectors if is_valid_sector_name(s)]
@@ -2084,6 +2127,16 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
     def _render_table_data(self, results: List[Dict[str, Any]]):
         """将 Alpha 结果渲染到表格，支持原地更新、滚动条与选中焦点严格保持"""
         if not results:
+            self._is_updating = False
+            self.table.setRowCount(0)
+            self.lbl_stats.setText("标的: 0 | 👑龙头: 0 | 🚀先锋: 0 | 🎯回踩: 0")
+            self.lbl_sector_leaders.setText("👑 板块领涨: --")
+            from ats.tdx_realtime_fetcher import is_trading_time
+            is_trading, _ = is_trading_time()
+            if not is_trading:
+                self.lbl_update_time.setText(f"💤 非交易休眠 ({time.strftime('%H:%M:%S')})")
+            else:
+                self.lbl_update_time.setText(time.strftime("更新: %H:%M:%S"))
             return
 
         self._is_updating = True
@@ -2301,7 +2354,17 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
                 is_new = "🆕" if s in self.newly_promoted_sectors else ""
                 leader_strs.append(f"{is_new}{s_short}: {lead_stock['name']}({lead_stock['pct']:+.2f}%)")
 
-        self.lbl_update_time.setText(time.strftime("更新: %H:%M:%S"))
+        if leader_strs:
+            self.lbl_sector_leaders.setText("👑 板块领涨: " + " | ".join(leader_strs))
+        else:
+            self.lbl_sector_leaders.setText("👑 板块领涨: --")
+
+        from ats.tdx_realtime_fetcher import is_trading_time
+        is_trading, _ = is_trading_time()
+        if not is_trading:
+            self.lbl_update_time.setText(f"💤 非交易休眠 ({time.strftime('%H:%M:%S')})")
+        else:
+            self.lbl_update_time.setText(time.strftime("更新: %H:%M:%S"))
 
         self._is_updating = False
 
@@ -2422,6 +2485,10 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
         if not getattr(self, "is_voice_alert_enabled", True):
             return
         if not filtered_records:
+            return
+        from ats.tdx_realtime_fetcher import is_trading_time
+        is_trading, _ = is_trading_time()
+        if not is_trading:
             return
         try:
             from ats.alert_notifier import AlertNotifier
@@ -3409,6 +3476,7 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
 
     def showEvent(self, event):
         super().showEvent(event)
+        self.ensure_rendered()
         # 仅在处于磁吸边缘或感应隐藏条状态时恢复定时器，普通正常居中展示时保持停止
         if (self.anchor_edge is not None or getattr(self, "is_hidden_state", False)) and not getattr(self, "stays_on_top", False):
             if hasattr(self, 'hover_timer') and self.hover_timer and not self.hover_timer.isActive():

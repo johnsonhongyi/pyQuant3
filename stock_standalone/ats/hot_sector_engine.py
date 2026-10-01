@@ -198,6 +198,14 @@ class HotSectorEngine:
         # 1. 提取 Top 强势板块的成分股
         for sec in valid_top_sectors:
             codes_in_sec = self.sector_to_codes.get(sec, [])
+            if not codes_in_sec:
+                try:
+                    from ats.sector_data_aggregator import SectorDataAggregator
+                    codes_in_sec, n_dict = SectorDataAggregator.get_instance().resolve_sector_member_codes(sec)
+                    if n_dict:
+                        name_map.update(n_dict)
+                except Exception as ex:
+                    logger.debug(f"通过 SectorDataAggregator 补充板块成分股异常: {ex}")
             for c in codes_in_sec:
                 c_clean = str(c).strip().zfill(6)
                 if c_clean:
