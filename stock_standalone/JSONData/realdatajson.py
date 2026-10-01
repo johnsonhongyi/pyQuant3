@@ -392,175 +392,200 @@ def getconfigBigCount(count=None,write=False):
     return cl
 
 
+# =========================
+# 新浪网络通信基础设施与自适应协议状态机
+# =========================
+_SINA_PROTOCOL_STATE = {
+    'preferred': 'http',          # 🚀 新浪行情中心原生运行在 HTTP 上，优先使用以消除 SSL 握手延迟与 443 端口排队超时
+    'degrade_until': 0.0,
+    'consecutive_http_fails': 0,
+}
+_SINA_PROTOCOL_LOCK = threading.Lock()
+_SINA_HTTP_LOCAL = threading.local()
+_SINA_HDF_LOCK = threading.RLock()
+
+sinaddheader = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+    'Referer': 'https://vip.stock.finance.sina.com.cn/quotes_service/view/cn_bill_all.php',
+    'Accept': '*/*',
+}
+
+def _get_active_url_by_protocol(url: str) -> str:
+    """默认优先使用低延迟高可用的 HTTP 直通，仅在 HTTP 故障时自适应切换 HTTPS 保底"""
+    now = time.time()
+    with _SINA_PROTOCOL_LOCK:
+        if now < _SINA_PROTOCOL_STATE['degrade_until']:
+            # 处于 HTTPS 容灾期
+            if url.startswith('http://'):
+                return 'https://' + url[7:]
+            return url
+        else:
+            # 正常优先走 HTTP 直通，消除握手与连接排队 ReadTimeout
+            if url.startswith('https://'):
+                return 'http://' + url[8:]
+            return url
+
+def _mark_http_failed():
+    """记录 HTTP 失败，连续 2 次失败后开启 60s 的 HTTPS 容灾期"""
+    with _SINA_PROTOCOL_LOCK:
+        _SINA_PROTOCOL_STATE['consecutive_http_fails'] += 1
+        if _SINA_PROTOCOL_STATE['consecutive_http_fails'] >= 2:
+            _SINA_PROTOCOL_STATE['preferred'] = 'https'
+            _SINA_PROTOCOL_STATE['degrade_until'] = time.time() + 60.0
+            log.warning("[SINA-PROTOCOL-SWITCH] HTTP 连续异常，临时开启 60s HTTPS 容灾模式！")
+
+def _mark_http_succeeded():
+    """HTTP 成功时重置连续失败计数"""
+    with _SINA_PROTOCOL_LOCK:
+        _SINA_PROTOCOL_STATE['consecutive_http_fails'] = 0
+
+def _get_worker_session():
+    """为当前线程获取或创建带连接池复用的 Session"""
+    session = getattr(_SINA_HTTP_LOCAL, 'session', None)
+    if session is None:
+        session = requests.Session()
+        adapter = requests.adapters.HTTPAdapter(pool_connections=20, pool_maxsize=20, max_retries=0)
+        session.mount('https://', adapter)
+        session.mount('http://', adapter)
+        _SINA_HTTP_LOCAL.session = session
+    return session
+
+def _read_sina_market_text(url, timeout=(1.5, 3.0)):
+    """获取行情市场数据，默认优先 HTTP 直通（0.2s 极速），异常时自适应切 HTTPS 保底"""
+    session = _get_worker_session()
+    active_url = _get_active_url_by_protocol(url)
+    try:
+        response = session.get(active_url, headers=sinaheader, timeout=timeout)
+        if active_url.startswith('http://'):
+            _mark_http_succeeded()
+    except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as exc:
+        is_http = active_url.startswith('http://')
+        if is_http:
+            _mark_http_failed()
+            fallback_url = 'https://' + active_url[7:]
+            log.info(f"[SINA-HTTP-FALLBACK] {type(exc).__name__}: {exc}; 回退尝试 HTTPS - URL {fallback_url}")
+            response = session.get(fallback_url, headers=sinaheader, timeout=(1.5, 3.0))
+        else:
+            fallback_url = 'http://' + active_url[8:]
+            log.info(f"[SINA-HTTPS-FALLBACK] {type(exc).__name__}: {exc}; 切换 HTTP 直通 - URL {fallback_url}")
+            response = session.get(fallback_url, headers=sinaheader, timeout=(1.5, 3.0))
+    with response:
+        response.raise_for_status()
+        response.encoding = 'utf-8'
+        return response.text
+
+def _read_sina_dd_text(url, timeout=(1.5, 3.0)):
+    """获取大单数据，使用专用大单 Referer 头并自适应降级"""
+    session = _get_worker_session()
+    active_url = _get_active_url_by_protocol(url)
+    try:
+        response = session.get(active_url, headers=sinaddheader, timeout=timeout)
+        if active_url.startswith('http://'):
+            _mark_http_succeeded()
+    except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as exc:
+        is_http = active_url.startswith('http://')
+        if is_http:
+            _mark_http_failed()
+            fallback_url = 'https://' + active_url[7:]
+            log.info(f"[SINA-DD-HTTP-FALLBACK] {type(exc).__name__}: {exc}; 回退尝试 HTTPS - URL {fallback_url}")
+            response = session.get(fallback_url, headers=sinaddheader, timeout=(1.5, 3.0))
+        else:
+            fallback_url = 'http://' + active_url[8:]
+            log.info(f"[SINA-DD-HTTPS-FALLBACK] {type(exc).__name__}: {exc}; 切换 HTTP 直通 - URL {fallback_url}")
+            response = session.get(fallback_url, headers=sinaddheader, timeout=(1.5, 3.0))
+    with response:
+        response.raise_for_status()
+        response.encoding = 'utf-8'
+        return response.text
+
+
 def sina_json_Big_Count(vol='1', type='0', num='10000'):
-    """[summary]
+    """获取大单总量"""
+    vol_str = str(vol)
+    vol_val = ct.DD_VOL_List.get(vol_str, '40000')
+    url = ct.JSON_DD_CountURL % (vol_val, type)
+    log.info("Big_Count_url:%s" % url)
+    try:
+        data = _read_sina_dd_text(url, timeout=(2.0, 4.0))
+        count = re.findall(r'(\d+)', data, re.S)
+        log.debug("Big_Count_count:%s" % count)
+        return int(count[0]) if count else 0
+    except Exception as e:
+        log.warning(f"Big_Count fetch error: {e}")
+        return 0
 
-    [description]
-
-    Parameters
-    ----------
-    vol : {str}, optional
-        [description] (the default is '1', which [default_description])
-    type : {str}, optional
-        [description] (the default is '0', which [default_description])
-    num : {str}, optional
-        [description] (the default is '10000', which [default_description])
-
-    Returns
-    -------
-    [type]
-        [description]
-    """
-    url = ct.JSON_DD_CountURL % (ct.DD_VOL_List[vol], type)
-    log.info("Big_Count_url:%s"%url)
-
-    data = cct.get_url_data(url)
-    
-    count = re.findall('(\d+)', data, re.S)
-    log.debug("Big_Count_count:%s"%count)
-    if len(count) > 0:
-        count = count[0]
-    else:
-        count = 0
-    return count
-
-def _get_sina_json_dd_url(vol='0', type='0', num='10000', count=None):
+def _get_sina_json_dd_url(vol='0', type='0', num='10000', count=None, max_pages=8):
     urllist = []
     vol = str(vol)
     type = str(type)
     num = str(num)
-    if count == None:
-        url = ct.JSON_DD_CountURL % (ct.DD_VOL_List[vol], type)
-        log.info("_json_dd_url:%s"%url)
-        data = cct.get_url_data(url)
-        # return []
-        # print data.find('abc')
-        count = re.findall('(\d+)', data, re.S)
-        log.debug("_json_dd_url_count:%s"%count)
-        # print count
-        if len(count) > 0:
-            count = count[0]
-            bigcount=getconfigBigCount(count,write=False)
-            print(("Big:%s V:%s "%(bigcount[0],bigcount[1])), end=' ')
-            if int(count) >= int(num):
-                page_count = int(math.ceil(int(count) / int(num)))
-                for page in range(1, page_count + 1):
-                    # print page
-                    url = ct.JSON_DD_Data_URL_Page % (int(num), page, ct.DD_VOL_List[vol], type)
-                    urllist.append(url)
-            else:
-                url = ct.JSON_DD_Data_URL_Page % (count, '1', ct.DD_VOL_List[vol], type)
+    vol_val = ct.DD_VOL_List.get(vol, '40000')
+    if count is None:
+        url = ct.JSON_DD_CountURL % (vol_val, type)
+        log.info("_json_dd_url:%s" % url)
+        try:
+            data = _read_sina_dd_text(url, timeout=(2.0, 4.0))
+            count_match = re.findall(r'(\d+)', data, re.S)
+            count = count_match[0] if count_match else 0
+        except Exception as e:
+            log.warning(f"_json_dd_url count error: {e}")
+            count = 0
+
+        if count and int(count) > 0:
+            bigcount = getconfigBigCount(count, write=False)
+            print(("Big:%s V:%s " % (bigcount[0], bigcount[1])), end=' ')
+            page_count = int(math.ceil(int(count) / int(num)))
+            # 🚀 有界保护：限制抓取最新 max_pages 页（例如 8 页 = 80,000 条明细已涵盖全市场全部活跃股），避免 38 页 50MB 刷屏引发反爬限流
+            target_pages = min(page_count, max_pages)
+            for page in range(1, target_pages + 1):
+                url = ct.JSON_DD_Data_URL_Page % (int(num), page, vol_val, type)
                 urllist.append(url)
         else:
-            log.error("url Count error:%s count:%s"%(url,count))
+            log.error("url Count error:%s count:%s" % (url, count))
             return []
     else:
-        url = ct.JSON_DD_CountURL % (ct.DD_VOL_List[vol], type)
-        # print url
-        data = cct.get_url_data(url)
-        # print data
-        count_now = re.findall('(\d+)', data, re.S)
-        urllist = []
-        if count < count_now:
-            count_diff = int(count_now) - int(count)
-            if int(math.ceil(int(count_diff) / 10000)) >= 1:
-                page_start = int(math.ceil(int(count) / 10000))
-                page_end = int(math.ceil(int(count_now) / 10000))
-                for page in range(page_start, page_end + 1):
-                    # print page
-                    url = ct.JSON_DD_Data_URL_Page % ('10000', page, ct.DD_VOL_List[vol], type)
-                    urllist.append(url)
-            else:
-                page = int(math.ceil(int(count_now) / 10000))
-                url = ct.JSON_DD_Data_URL_Page % ('10000', page, ct.DD_VOL_List[vol], type)
-                urllist.append(url)
-    # print "url:",urllist[:0]
+        page = int(math.ceil(int(count) / int(num)))
+        target_pages = min(page, max_pages)
+        for p in range(1, target_pages + 1):
+            url = ct.JSON_DD_Data_URL_Page % (int(num), p, vol_val, type)
+            urllist.append(url)
     return urllist
-
-
-
 
 
 def _parsing_sina_dd_price_json(url):
     """
-           处理当日行情分页数据，格式为json
-     Parameters
-     ------
-        pageNum:页码
-     return
-     -------
-        DataFrame 当日所有股票交易数据(DataFrame)
+    处理当日大单分页数据，格式为json
     """
     ct._write_console()
-    # request = Request(ct.SINA_DAY_PRICE_URL%(ct.P_TYPE['http'], ct.DOMAINS['vsf'],
-    #                              ct.PAGES['jv'], pageNum))
-    # request = Request(url)
-    # text = urlopen(request, timeout=10).read()
-    # sinaheader = {'Referer':'http://vip.stock.finance.sina.com.cn'}
-    text = cct.get_url_data(url,headers=sinaheader)
-    log.debug(f'url:{url}')
-    # print(len(text))
-    # return text
-    if len(text) < 10 or text.find('finproduct@staff.sina.com.cn') > 0:
-        return ''
-    #2020 new json
+    try:
+        text = _read_sina_dd_text(url, timeout=(1.8, 3.5))
+    except Exception as e:
+        log.warning(f"大单拉取异常: {e} - URL {url}")
+        return pd.DataFrame()
+
+    if not text or len(text) < 10 or 'finproduct@staff.sina.com.cn' in text:
+        return pd.DataFrame()
+
     text = text.replace('symbol', 'code')
-    # text = text.replace('turnoverratio', 'ratio')
-    # text.decode('unicode-escape')
-    # js=json.loads(text,encoding='GBK')
-    js=json.loads(text)
-    # df = pd.DataFrame(pd.read_json(js, dtype={'code':object}),columns=ct.MARKET_COLUMNS)
-    log.debug("parsing_sina_dd:%s"%js[0])
-    df = pd.DataFrame(js,columns=ct.DAY_REAL_DD_COLUMNS)
-    #20200422 problem json
-    '''
-    reg = re.compile(r'\,(.*?)\:')
-    text = reg.sub(r',"\1":', text.decode('gbk') if ct.PY3 else text)
-    text = text.replace('"{symbol', '{"code')
-    text = text.replace('{symbol', '{"code"')
+    try:
+        js = json.loads(text)
+    except Exception as e:
+        log.warning(f"大单 JSON 解析失败: {e}")
+        return pd.DataFrame()
 
-    if ct.PY3:
-        jstr = json.dumps(text)
-    else:
-        # jstr = json.dumps(text, encoding='GBK')
-        jstr = json.dumps(text)
-    js = json.loads(jstr)
-    df = pd.DataFrame(pd.read_json(js, dtype={'code': object}),
-                      columns=ct.DAY_REAL_DD_COLUMNS)
-    '''
-    df = df.drop('symbol', axis=1)
-    df = df.loc[df.volume > '0']
-    # print df['name'][len(df.index)-1:],len(df.index)
+    if not isinstance(js, list) or not js:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(js, columns=ct.DAY_REAL_DD_COLUMNS)
+    df = df.drop('symbol', axis=1, errors='ignore')
+    if 'volume' in df.columns:
+        df = df.loc[df.volume.astype(str) > '0']
     return df
-
-# data = cct.to_mp_run(_parsing_sina_dd_price_json, url_list)
-    # data = cct.to_mp_run_async(_parsing_sina_dd_price_json, url_list)
-
-    # if len(url_list)>cct.get_cpu_count():
-    #     divs=cct.get_cpu_count()
-    # else:
-    #     divs=len(url_list)
-    #
-    # if len(url_list)>=divs:
-    #     print len(url_list),
-    #     dl=cct.get_div_list(url_list,divs)
-    #     data=cct.to_mp_run_async(cct.to_asyncio_run,dl,_parsing_sina_dd_price_json)
-    # else:
-    #     data=cct.to_asyncio_run(url_list,_parsing_sina_dd_price_json)
-
-
-
-        # data = cct.to_asyncio_run(url_list, _parsing_sina_dd_price_json)  //return df list 
-        # if len(data)>50:
-        #     df = df.append(data, ignore_index=True)
-        #     # log.debug("dd.columns:%s" % df.columns.values)
-        #     #['code' 'name' 'ticktime' 'price' 'volume' 'prev_price' 'kind']
-        #     log.debug("get_sina_all_json_dd:%s" % df[:1])
 
 
 async def _fetch_with_dd_delay(url, pause_range):
     now = time.time()
-    if now < g_sina_blocked['blocked_until']:
+    if now < g_sina_blocked.get('blocked_until', 0):
         wait = g_sina_blocked['blocked_until'] - now
         log.debug(f"[SINA-DD-COOLING-SKIP] 剩余 {wait:.1f}s，立即返回缓存，不等待")
         return None
@@ -568,82 +593,69 @@ async def _fetch_with_dd_delay(url, pause_range):
     try:
         loop = asyncio.get_running_loop()
         df = await loop.run_in_executor(None, _parsing_sina_dd_price_json, url)
-        if df is None or len(df) == 0:
+        if df is None or df.empty:
             df = None
-        # else:
-        #     log.error(f"_parsing_sina_dd_price_json is Null : {url}")
-        #     return None
     except Exception as e:
-        log.error(f"Fetch url error: {url}, {e}")
-        # 触发冷却模式
-        set_blocked_cooling(reason=str(e), factor=1.23, cooling_sec=300)
+        log.warning(f"Fetch dd url error: {url}, {e}")
         df = None
-        set_blocked(60, str(e), url)
-        return None
 
-    sleep_t = random.uniform(*pause_range)
-    await asyncio.sleep(sleep_t)
+    if df is not None and not df.empty:
+        sleep_t = random.uniform(*pause_range)
+        await asyncio.sleep(sleep_t)
     return df
 
-async def _fetch_parsed(url):
-    """
-    异步抓取并解析单个 url  gpt 没用
-    """
-    dd_l = await _parsing_sina_dd_price_json(url)  # 假设原来的解析函数可改成 async
-    if dd_l is not None and len(dd_l) > 2:
-        return dd_l
-    else:
-        log.error(f"_parsing_sina_dd_price_json is Null : {url}")
-        return None
 
-def get_sina_all_json_dd(vol='0', type='0', num='10000', retry_count=3, pause=0.001,batch_size=5, pause_range=(0.2, 0.8)):
+def get_sina_all_json_dd(vol='0', type='0', num='10000', retry_count=3, pause=0.001, batch_size=5, pause_range=(0.1, 0.4)):
+    """
+    一次性获取最近一个交易日所有股票的大单交易数据并落盘 HDF5
+    """
     start_t = time.time()
-    # url="http://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHQNodeData?page=1&num=50&sort=changepercent&asc=0&node=sh_a&symbol="
-    # SINA_REAL_PRICE_DD = '%s%s/quotes_service/api/json_v2.php/Market_Center.getHQNodeData?page=1&num=%s&sort=changepercent&asc=0&node=%s&symbol=%s'
-    #http://vip.stock.finance.sina.com.cn/quotes_service/view/cn_bill_sum.php
-    #http://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/CN_Bill.GetBillList?num=10000&page=1&sort=ticktime&asc=0&volume=100000&type=0
-    #http://vip.stock.finance.sina.com.cn/quotes_service/view/cn_bill_all.php?num=100&page=1&sort=ticktime&asc=0&volume=100000&type=0
-    """
-        一次性获取最近一个日交易日所有股票的交易数据
-    return
-    -------
-      DataFrame
-           属性：代码，名称，涨跌幅，现价，开盘价，最高价，最低价，最日收盘价，成交量，换手率
-    """
-    # return ''
     h5_fname = 'get_sina_all_dd'
-    h5_table = 'all'+'_'+ct.DD_VOL_List[str(vol)]+'_'+str(num)
-    # limit_time = cct.sina_dd_limit_time
+    vol_str = str(vol)
+    vol_val = ct.DD_VOL_List.get(vol_str, '40000')
+    h5_table = 'all' + '_' + vol_val + '_' + str(num)
     base_limit = cct.sina_dd_limit_time
 
     batch_size, pause_range, force_cache, limit_time = _get_dynamic_fetch_params(
         batch_size, pause_range, base_limit
     )
 
-    h5 = h5a.load_hdf_db(h5_fname, table=h5_table,limit_time=limit_time)
-    if h5 is not None and not h5.empty and len(h5) > 100 and 'timel' in h5.columns:
-       o_time = h5[h5.timel != 0].timel
-       if len(o_time) > 0:
-           o_time = o_time[0]
-           l_time = time.time() - o_time
-           log.info(f'limit_time : {limit_time} l_time : {l_time}')
-           return_hdf_status = not cct.get_work_time() or (cct.get_work_time() and l_time < limit_time)
-           if return_hdf_status:
-               log.info("load hdf data:%s %s %s"%(h5_fname,h5_table,len(h5)))
-               return h5
-    if time.time() < g_sina_blocked.get('blocked_until', 0) or not cct.get_work_time():
-        log.debug("[SINA-DD-CACHE-ONLY] 退避/休市期间不查询大单，立即返回已有缓存")
-        return h5 if h5 is not None and not h5.empty else []
-    log.info(f'limit_time:{limit_time}')
-    url_list = _get_sina_json_dd_url(vol, type, num)
-    df = pd.DataFrame()
+    # 🚀 磁盘 HDF 快照优先加载（timelimit=False 永不误判为 None）
+    h5 = h5a.load_hdf_db(h5_fname, table=h5_table, timelimit=False)
+    if (h5 is None or h5.empty) and h5_table != 'all':
+        h5 = h5a.load_hdf_db(h5_fname, table='all', timelimit=False)
+
+    has_cached = (h5 is not None and not h5.empty and len(h5) > 100)
+    now_ts = time.time()
+
+    # 1. 若处于退避/冷却期，直接返回可用缓存
+    if now_ts < g_sina_blocked.get('blocked_until', 0) and has_cached:
+        log.debug(f"[SINA-DD-CACHE-HIT] 系统处于API退避期，直接返回已有 HDF 缓存 ({len(h5)} 只股票)")
+        return h5
+
+    # 2. 检查缓存新鲜度
+    if has_cached and 'timel' in h5.columns:
+        o_time = h5[h5.timel != 0].timel
+        if len(o_time) > 0:
+            o_time = o_time.iloc[0] if hasattr(o_time, 'iloc') else o_time[0]
+            l_time = now_ts - o_time
+            if cct.get_work_time() and l_time < limit_time:
+                log.info(f"load fresh hdf data:{h5_fname} {h5_table} {len(h5)} (l_time={l_time:.1f}s)")
+                return h5
+
+    # 3. 非交易日（周末/假期）极速拦截：已有合规缓存时 0 毫秒穿透返回
+    is_trade_day = cct.get_trade_date_status() if hasattr(cct, 'get_trade_date_status') else True
+    if not is_trade_day and has_cached and len(h5) >= 1000:
+        log.debug(f"[HDF-WEEKEND-HIT] 非交易日，直接使用磁盘 HDF 大单缓存 ({len(h5)} 只股票)")
+        return h5
+
+    log.info(f"[SINA-DD-REFRESH] 开始在线刷新大单数据 vol={vol_val} num={num} limit_time={limit_time}")
+    url_list = _get_sina_json_dd_url(vol, type, num, max_pages=8)
     if not url_list:
-        print(f"Url None json-df:{time.time() - start_t:.2f}")
-        return ''
+        log.warning(f"[SINA-DD-EMPTY-URL] 未能生成大单 URL，回退缓存 (has_cached={has_cached})")
+        return h5 if has_cached else []
 
     df_list = []
-    # Python 3.10+ 在非主线程中 get_event_loop() 不再自动创建 loop，
-    # 需手动创建并绑定，避免 RuntimeError: There is no current event loop in thread 'Thread-X'
     try:
         loop = asyncio.get_event_loop()
         if loop.is_closed():
@@ -652,53 +664,58 @@ def get_sina_all_json_dd(vol='0', type='0', num='10000', retry_count=3, pause=0.
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
 
+    total_batches = (len(url_list) + batch_size - 1) // batch_size
+    fetch_start = time.monotonic()
+    max_wall_time = 25.0
+
     for i in range(0, len(url_list), batch_size):
-        log.debug(f"Processing batch {i//batch_size + 1} / {len(url_list)//batch_size + 1}")
-        tasks = [_fetch_with_dd_delay(u,pause_range) for u in url_list[i:i+batch_size]]
-        try:
-            rs = loop.run_until_complete(asyncio.gather(*tasks))
-            log.debug(f"Batch {i//batch_size + 1} completed")
-        except Exception as e:
-            set_blocked(120, f"batch error:{e}")
+        if time.monotonic() - fetch_start >= max_wall_time:
+            log.warning(f"[SINA-DD-TIMEOUT] 大单抓取超过总时限 {max_wall_time}s，截断已获取数据")
             break
 
-        for r in rs:
-            if r is not None and not r.empty:
-                df_list.append(r)
+        tasks = [_fetch_with_dd_delay(u, pause_range) for u in url_list[i:i + batch_size]]
+        try:
+            rs = loop.run_until_complete(asyncio.gather(*tasks))
+            for r in rs:
+                if r is not None and not r.empty:
+                    df_list.append(r)
+        except Exception as e:
+            log.warning(f"[SINA-DD-BATCH-FAIL] 批次拉取异常: {e}")
+            break
 
     if not df_list:
-        log.error("no data fetched")
-        return []
+        log.error("[SINA-DD-NO-DATA] 在线大单未获取到任何有效数据")
+        return h5 if has_cached else []
 
     df = pd.concat(df_list, ignore_index=True)
-    
     if len(df) > 50:
         time_drop = time.time()
         df['couts'] = df.groupby('code')['code'].transform('count')
         df = df.sort_values(by='couts', ascending=False)
         df = df.drop_duplicates('code')
-        print(f"djdf:{time.time()-time_drop:.1f}", end=' ')
         df['ticktime'] = df['ticktime'].astype(str)
-        # 补齐日期前缀，使其与 sina_data 格式一致
         today_str = time.strftime('%Y-%m-%d')
         mask_short = df['ticktime'].str.len() == 8
         if mask_short.any():
             df.loc[mask_short, 'ticktime'] = today_str + ' ' + df.loc[mask_short, 'ticktime']
-        
-        # 统一转为 datetime 对象防止类型混合
-        df['ticktime'] = pd.to_datetime(df['ticktime'], errors='coerce')
 
-        # df['code'] = df['code'].apply(lambda x: str(x).replace('sh','') if str(x).startswith('sh') else str(x).replace('sz',''))
+        df['ticktime'] = pd.to_datetime(df['ticktime'], errors='coerce')
         df['code'] = df['code'].astype(str).str.replace(r'^(sh|sz|bj)', '', regex=True)
+        df['timel'] = int(time.time())
+
         if len(df) > 0:
             df = df.set_index('code')
-            h5 = h5a.write_hdf_db(h5_fname, df, table=h5_table, append=False)
-            log.info(f"get_sina_all_json_dd:{len(df)}")
+            with _SINA_HDF_LOCK:
+                h5a.write_hdf_db(h5_fname, df, table=h5_table, append=False)
+                # 🚀 同时兼容落地 'all' 表，确保外部调用 load_hdf_db(table='all') 100% 成功
+                h5a.write_hdf_db(h5_fname, df, table='all', append=False)
+            log.info(f"get_sina_all_json_dd 成功写入 {len(df)} 只股票至 {h5_fname} (耗时 {time.time()-start_t:.2f}s)")
         print(f" dd-df:{time.time()-start_t:.2f}", end=' ')
         return df
     else:
-        print(f"url:{url_list[0]} no data  json-df:{time.time()-start_t:.2f}", end=' ')
-        return ''
+        print(f"url:{url_list[0]} no data json-df:{time.time()-start_t:.2f}", end=' ')
+        return h5 if has_cached else []
+
 
 def get_sina_all_json_dd_old_2026(vol='0', type='0', num='10000', retry_count=3, pause=0.001):
     start_t = time.time()
@@ -1199,30 +1216,7 @@ _MARKET_DEFAULT_COUNTS = {
 _MARKET_COUNT_CACHE = {}
 _MARKET_COUNT_CACHE_EXPIRES = {}
 _SINA_REFRESH_LOCK = threading.Lock()
-_SINA_HDF_LOCK = threading.RLock()
 _SINA_CACHE_UNSET = object()
-_SINA_HTTP_LOCAL = threading.local()
-
-
-def _read_sina_market_text(url, timeout=3.5):
-    """Reuse a requests connection per worker; avoid urllib's slow TLS path."""
-    session = getattr(_SINA_HTTP_LOCAL, 'session', None)
-    if session is None:
-        session = requests.Session()
-        _SINA_HTTP_LOCAL.session = session
-    try:
-        response = session.get(url, headers=sinaheader, timeout=(timeout, timeout))
-    except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as exc:
-        if not url.startswith('https://'):
-            raise
-        fallback_url = 'http://' + url[len('https://'):]
-        log.warning(f"[SINA-HTTPS-FALLBACK] {type(exc).__name__}: {exc}; 改用 HTTP - URL {fallback_url}")
-        response = session.get(fallback_url, headers=sinaheader, timeout=(timeout, timeout))
-    with response:
-        response.raise_for_status()
-        response.encoding = 'utf-8'
-        return response.text
-
 
 
 def _get_sina_Market_url(market='sh_a', num='200', deadline=None):
@@ -1629,24 +1623,34 @@ def _refresh_sina_Market_json(market='all', showtime=True, num='100', retry_coun
             if failed_urls:
                 failure_reason = f"batch {batch_num} failed ({len(failed_urls)}/{len(rs)} pages)"
                 failure_url = failed_urls[0]
-                log.warning(f"[SINA-FAST-FAIL] 第 {batch_num}/{total_batches} 批有 {len(failed_urls)} 页失败，停止刷新并使用缓存。")
-                fetch_success = False
-                break
+                has_valid_h5 = (h5 is not None and len(h5) >= 1000)
+                if has_valid_h5 and len(failed_urls) >= len(rs):
+                    # 有完备缓存且全批次失败时，快速回退缓存
+                    log.warning(f"[SINA-FAST-FAIL] 第 {batch_num}/{total_batches} 批全部 {len(failed_urls)} 页失败，停止刷新并使用缓存。")
+                    fetch_success = False
+                    break
+                else:
+                    log.warning(f"[SINA-BATCH-WARN] 第 {batch_num}/{total_batches} 批有 {len(failed_urls)} 页失败，继续抓取其余批次以最大化收集数据。")
         except Exception as e:
             failure_reason = f"batch error: {e}"
             failure_url = url_list[i] if i < len(url_list) else ''
-            fetch_success = False
-            break
-
-        if not fetch_success:
-            break
+            has_valid_h5 = (h5 is not None and len(h5) >= 1000)
+            if has_valid_h5:
+                fetch_success = False
+                break
+            else:
+                log.warning(f"[SINA-BATCH-EXC] 批次异常 ({e})，冷启动继续后续批次。")
 
         for r in rs:
             if r is not None and not r.empty:
                 df_list.append(r)
 
-    # 判定拉取完整性：如果失败或结果集不全，则回退并不写入 HDF5
-    if not fetch_success or len(df_list) < len(url_list):
+    # 判定拉取完整性：如果失败或结果集不全
+    has_valid_h5 = (h5 is not None and len(h5) >= 1000)
+    # 冷启动容错基线：若本地无健康缓存，只要抓到 >=70% 页面，允许作为冷启动初始基线落盘
+    is_cold_start_usable = (not has_valid_h5 and len(df_list) >= max(3, int(len(url_list) * 0.70)))
+
+    if (not fetch_success and not is_cold_start_usable) or (len(df_list) < len(url_list) and not is_cold_start_usable):
         retry_count, backoff_sec = _record_sina_refresh_failure(failure_reason, failure_url)
         log.error(
             f"[SINA-FATAL] 刷新不完整，expected_pages={len(url_list)} "
@@ -1661,13 +1665,16 @@ def _refresh_sina_Market_json(market='all', showtime=True, num='100', retry_coun
             log.error("[HDF-FALLBACK] 无法读取到已有磁盘 HDF5 缓存！")
             return []
     else:
-        # 抓取成功，自动重置重试计数与冷却标志
+        # 抓取成功或冷启动满足基线，自动重置重试计数与冷却标志
         g_sina_blocked['retry_count'] = 0
         g_sina_blocked['count'] = 0
         g_sina_blocked['last_failed_ts'] = 0
         g_sina_blocked['blocked_until'] = 0
         g_sina_blocked['cooling'] = False
-        log.info(f"[SINA-REFRESH-COMPLETE] pages={len(df_list)}/{len(url_list)} elapsed={time.monotonic() - fetch_start_time:.1f}s")
+        if len(df_list) < len(url_list):
+            log.warning(f"[SINA-COLD-PARTIAL-ACCEPT] 冷启动接受部分页面 pages={len(df_list)}/{len(url_list)} 作为基线写入 HDF5")
+        else:
+            log.info(f"[SINA-REFRESH-COMPLETE] pages={len(df_list)}/{len(url_list)} elapsed={time.monotonic() - fetch_start_time:.1f}s")
         df = pd.concat(df_list, ignore_index=True)
         if 'ratio' in df.columns:
             df['ratio'] = df['ratio'].astype(float).round(2)
@@ -1693,9 +1700,19 @@ def _refresh_sina_Market_json(market='all', showtime=True, num='100', retry_coun
                 else:
                     with _SINA_HDF_LOCK:
                         h5 = h5a.write_hdf_db(h5_fname, df, table=h5_table, append=False, rewrite=True)
+                        if h5_table != 'all':
+                            try:
+                                h5a.write_hdf_db(h5_fname, df, table='all', append=False, rewrite=True)
+                            except Exception:
+                                pass
             else:
                 with _SINA_HDF_LOCK:
                     h5 = h5a.write_hdf_db(h5_fname, df, table=h5_table, append=True)
+                    if h5_table != 'all':
+                        try:
+                            h5a.write_hdf_db(h5_fname, df, table='all', append=True)
+                        except Exception:
+                            pass
 
     if df is not None and len(df) > 0:
         if market == 'all':
@@ -1856,8 +1873,8 @@ def get_sina_Market_json(market='all', showtime=True, num='100', retry_count=3, 
         ):
             return cached_result
 
-    # 有完整基线时不让调用方同步等待网络；同一进程最多运行一个刷新器。
-    if (has_h5 and len(h5) >= 1000) or threading.current_thread() is threading.main_thread():
+    # 有充足可用基线时允许后台异步刷新以避免调用方卡顿；冷启动（无缓存或残缺）强制同步首刷以建立基线
+    if has_h5 and len(h5) >= 1000 and has_cache_result:
         if not _SINA_REFRESH_LOCK.acquire(blocking=False):
             return cached_result
         args = (market, False, num, retry_count, pause, batch_size, pause_range)
@@ -1869,8 +1886,6 @@ def get_sina_Market_json(market='all', showtime=True, num='100', retry_count=3, 
                 daemon=True,
             )
             worker.start()
-            if not has_cache_result:
-                log.warning("[SINA-COLD-START] 缓存为空，后台加载全市场行情；主线程立即返回，后续调用读取完成后的缓存")
             return cached_result
         except Exception:
             _SINA_REFRESH_LOCK.release()

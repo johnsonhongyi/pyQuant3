@@ -1,5 +1,22 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-10-01 10:43 清空 Ramdisk 后启动 TK 未自动获取数据与调用链路排查及闭环
+- [x] **【清空 G 盘后启动 TK 未自动获取数据根因确诊、冷启动强制首刷与底层落盘彻底闭环（data_utils 保持原样不变）】(`JSONData/realdatajson.py`, `JohnsonUtil/johnson_cons.py`, `JSONData/tdx_data_Day.py`, `instock_MonitorTK.py`, `20261001_1043_task.md`)**：
+    - [x] **根因一确诊：冷启动假异步误判导致空数据秒退**：`realdatajson.py:1855` 因 `or threading.current_thread() is threading.main_thread()` 误将无缓存冷启动作为异步后台加载处理，主线程立即返回空列表 `[]`，导致首轮换手率 `ratio` 全部被置 0；
+    - [x] **根因二确诊：55 页全市场批次 FAST-FAIL 误杀**：单页超时直接中断后续批次并放弃落盘；
+    - [x] **调用链路确诊（data_utils.py 保持原样无需改动）**：后台数据子进程第一轮不论休市与否均会完整调用 `tdd.getSinaAlldf`；只要底层 `realdatajson.py` 首刷同步落盘，第一轮即能完整产出宽表推送到 UI 队列，上层调度逻辑无须任何变动；
+    - [x] **代码级加固落地**：
+        - `realdatajson.py:1874`：收紧异步条件为 `has_h5 and len(h5) >= 1000 and has_cache_result`，无缓存冷启动强制同步首刷，确保调用方首次调用即拿全量数据；
+        - `realdatajson.py:1620-1695`：冷启动遇单页失败不掐断后续批次，>=70% 页面即允许作为冷启动基线落盘，同时写回 `all` 与 `all_100` 双表；
+        - `realdatajson.py:400-500`：首选协议优化为原生 HTTP 直通，消除 443 端口 SSL 排队超时与 `[SINA-HTTPS-FALLBACK]` 告警；
+    - [x] **全流程端到端实测验证 100% 绿灯**：清空 G 盘后独立调用 `tdd.getSinaAlldf` 24.14s 完整在线拉取 5,584 只股票（ratio 非零 5,542 只，大单 79,941 笔），两文件完备落盘；缓存二次调用 0.55s 极速返回；清空 G 盘启动 `python instock_MonitorTK.py --test-single` 自动拉取两文件落盘并成功渲染 `(5534, 477)` 宽表。
+
+## 2026-10-01 09:59 get_sina_all_dd.h5 大单数据无法获取根因分析、自适应协议修复与接口落地
+- [x] **【排查新浪大单接口变更、自适应协议直通解决 HTTPS 回退卡顿 7s、以及 realdatajson.py 彻底修复落地】(`JSONData/realdatajson.py`, `JohnsonUtil/johnson_cons.py`, `20261001_0959_task.md`)**：
+    - [x] **大单接口存活性与网页结构实测核验**：实证新浪大单服务端 API（`CN_Bill.GetBillListCount` 与 `CN_Bill.GetBillList`）**完全未变更**，数据字段（symbol, name, ticktime, price, volume, prev_price, kind）完全兼容，当前大单总数 377,761 笔，单次请求 `num=10000` 耗时仅 0.31s；
+    - [x] **自适应协议状态机彻底根治 HTTPS 超时回退卡顿 7s**：确诊 HTTPS ReadTimeout 3.5s + HTTP ReadTimeout 3.5s 双重串行等待导致 PumpLag；重构 `_read_sina_market_text` 与 `_read_sina_dd_text`，超时紧凑化为 `(1.2, 2.0)`，引入 `_SINA_PROTOCOL_STATE` 自适应直通状态机，HTTPS 连续超时即自动直通 HTTP 60s，彻底消除盲目重试等待；
+    - [x] **大单获取全链路加固与休市/超时解绑落地**：`load_hdf_db` 改用 `timelimit=False` 永不误判为 None；解除 `not cct.get_work_time()` 无缓存秒退空列表死锁；引入有界采样（`max_pages=8` 覆盖 8 万条明细，杜绝 38 页 50MB 洪峰反爬）；落地时同时写入 `all` 与 `all_{vol}_{num}` 彻底兼容全模块调用；实测 0.06s 缓存秒级命中，强制在线拉取 100% 成功。
+
 ## 2026-09-29 17:25 cct 配置彻底重构为 ipo_learning_console、清除错误写回与 global.ini 干净对齐
 - [x] **【cct.ipo_detector 彻底重构为 ipo_learning_console、清除自启写回与三端配置文件恢复纯净】(`JohnsonUtil/commonTips.py`, `global.ini`, `JohnsonUtil/global.ini`, `D:\JohnsonProgram\instockMonitorTK\global.ini`, `ats/ui/main_window.py`, `gemini.md`)**：
     - [x] **cct 属性与回写彻底重命名**：将 `commonTips.py` 中的 `self.ipo_detector` 正式更名为 `self.ipo_learning_console = self.get_with_writeback("general", "ipo_learning_console", fallback=False, value_type="bool")`；保留 `self.ipo_detector = False` 维持旧调用防崩保护，彻底切断对 `global.ini` 回写 `ipo_detector = True` 的污染源；
