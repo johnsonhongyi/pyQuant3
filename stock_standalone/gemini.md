@@ -1,5 +1,14 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-10-01 21:15 修复龙头突击跟单榜冷启动无数据显示与天梯底板机制对齐闭环
+- [x] **【非交易时段冷启动首刷放行、对齐天梯即时异步首刷与showEvent守卫、热力图/快照底板自动感知装载、成分股自适应解析兜底、全量54项测试100%全绿】(`ats/ui/hot_sector_leaderboard.py`, `ats/hot_sector_engine.py`, `tests/test_ats_optimization_review.py`, `20261001_2050_task.md`)**：
+    - [x] **非交易时段冷启动首刷守卫放行 [KISS/SRP]**：重构 `_on_ui_timer_tick` 休眠拦截条件为 `if not is_trading and not force and self._has_init_fetched: return`，放行冷启动（`_has_init_fetched=False`）首刷，解决非交易时段打开窗口一刀切被 return 导致表格全黑与 No.1/No.2/No.3 显示 `--` 的假死缺陷；首刷完毕后自动恢复 60s 节流休眠；
+    - [x] **对齐天梯即时异步首刷与 showEvent 守卫 [Consistency]**：新增 `ensure_rendered()` 方法；在 `__init__` 末尾注入 `QTimer.singleShot(0, self.ensure_rendered)` 异步秒级触发；在 `showEvent` 补发 `self.ensure_rendered()`，保证初次展示必定拥有底板数据；
+    - [x] **热力图与快照底板自适应装载 [Robustness]**：若冷启动阶段热力图板块不足 3 个，主动调用 `hw.load_live_sectors(force=True)`；若主窗口不存在或热力图为空，自动从 `SectorDataAggregator._load_bidding_sector_data()` 权威快照中瞬间提取 Top 3 强势板块；策略宽表 `current_df` 接入 `resolve_active_strategy_df` 递归感知兜底；
+    - [x] **成分股与股票名称自适应解析兜底 [OCP]**：在 `HotSectorEngine.build_target_universe` 中，当 `sector_to_codes` 为空时，自动调用 `SectorDataAggregator.resolve_sector_member_codes(sec)` 补充成分股代码与股票名称映射，彻底消灭空代码池；
+    - [x] **领涨标签更新修复与空结果状态重置 [BugFix]**：补齐 `self.lbl_sector_leaders.setText(...)` 遗漏赋值；`_render_table_data` 在空结果时显式重置并正确标注时间；休市时自动静默语音报警；
+    - [x] **真实端到端测试与全量 54 项回归测试 100% 绿灯**：新增测试用例 19 模拟休市冷启动底板装载、Top 3 按钮更新、表格行数校验与节流守卫；实测全量 54 项测试 100% PASS（耗时 23.93s），代码全部通过 `git diff --check` 与 `python -m py_compile` 校验。
+
 ## 2026-10-01 20:40 ATS 极限性能与并发边界安全第五轮审核闭环（Codex 修复核验与全量 53 项测试矩阵）
 - [x] **【过滤Worker退出竞态彻底根除、归档快照无锁CAS发布强一致、TDX超时累积门闩防护与忙提示、历史成功全量退避重置与负缓存、auto_fetch=False展示守卫、全量53项测试100%全绿】(`ats/ui/main_window.py`, `ats/bounded_evaluation_store.py`, `ats/channel_bottom_reversal_strategy.py`, `ats/ui/global_market_panel.py`, `ats/ui/new_stock_panel.py`, `ats/ui/daily_limit_up_dialog.py`, `tests/test_ats_optimization_review.py`, `docs/ATS_PERFORMANCE_REVIEW_20261001.md`, `20261001_2040_task.md`)**：
     - [x] **过滤 Worker 退出竞态彻底根除 [P2]**：正常退出时在锁内原子将 `_filter_eval_worker_running = False` 并直接 `return` 退出，彻底移除了覆盖新 Worker 状态的外层 `finally` 清零代码；启动失败增加锁内异常清零恢复；补齐用例 14 验证旧 Worker 退出绝不冲刷覆盖新 Worker；
