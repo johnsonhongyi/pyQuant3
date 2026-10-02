@@ -159,17 +159,17 @@ class PRServiceGUI:
         self.root = root
         self._shutdown_event = threading.Event()
         self.root.title("人气综合排行榜2.22")
-        
+
         # 加载配置（必须在设置 geometry 前加载）
         self.config = self.load_config_settings()
-        
+
         # 恢复窗口位置与大小，默认 780x760
         saved_geo = self.config.get("geometry", "780x760")
         try:
             self.root.geometry(saved_geo)
         except Exception:
             self.root.geometry("780x760")
-        
+
         self.is_running = False
         self.refresh_thread = None
         self.resonance_codes = []  # 缓存当前的共振股票代码
@@ -186,7 +186,7 @@ class PRServiceGUI:
         self._pending_hit_calculation = False
         self.current_date = time.strftime("%Y-%m-%d")
         self._last_realtime_today = self.current_date
-        
+
         # 联动选择项变量
         self.link_tdx_var = tk.BooleanVar(value=self.config.get("link_tdx", True))
         self.link_ths_var = tk.BooleanVar(value=self.config.get("link_ths", True))
@@ -194,7 +194,7 @@ class PRServiceGUI:
         # TDX 实时行情自动刷新变量 (对齐 cct.ats_tdx_interval 全局基准与图2自定义设置)
         self.tdx_auto_var = tk.BooleanVar(value=self.config.get("tdx_auto_refresh", True))
         self._is_crawling = False
-        
+
         # 初始化本地 StockSender 作为 fallback
         if StockSender:
             try:
@@ -205,7 +205,7 @@ class PRServiceGUI:
             self.local_sender = None
         # 初始化过滤公式表达式
         self.query_expr = ""
-            
+
         self.create_widgets()
 
         # 实例化 QueryHistoryManager 和独立 Toplevel 窗口 (只读模式)
@@ -213,11 +213,11 @@ class PRServiceGUI:
         self.history_win.title("人气过滤公式历史管理器 (只读模式)")
         self.history_win.geometry("800x480")
         self.history_win.withdraw()  # 默认隐藏
-        
+
         def on_history_win_close():
             self.history_win.withdraw()
             # [只读模式] 仅隐藏窗口，不进行任何历史写盘保存
-                
+
         self.history_win.protocol("WM_DELETE_WINDOW", on_history_win_close)
 
         # 兼容打包环境，统一使用与主程序完全一致的 search_history.json 路径
@@ -234,17 +234,17 @@ class PRServiceGUI:
             sync_history_callback=self.sync_history_from_QM,
             test_callback=self.on_test_code
         )
-        
+
         # [只读模式强约束] 人气综合模块仅读取 search_history.json 作为过滤公式，绝不覆写修改
         def _read_only_save(*args, **kwargs):
             service_logger.debug("[QueryHistoryManager] 人气综合处于只读模式，忽略写盘操作")
             return
         self.query_manager.save_search_history = _read_only_save
-        
+
         # 刚初始化完，将编辑器内置 Frame 放置到 Toplevel 容器中
         if hasattr(self.query_manager, 'editor_frame'):
             self.query_manager.editor_frame.pack(fill="both", expand=True)
-            
+
         # 默认选中并加载 history5 分组
         self.history_selector.set("history5")
         self._on_history_group_changed()
@@ -255,7 +255,7 @@ class PRServiceGUI:
         self._ipc_sync_in_progress = False
         self._ipc_sync_manager = None
         self.sync_manager = _DynamicIPCSyncProxy(self)
-        
+
         # 启动后建立常驻订阅；IPCSyncManager 在无数据时负责低频重试。
         def _start_initial_ipc_sync():
             df = self.request_dynamic_ipc_sync(timeout=8.0)
@@ -273,10 +273,10 @@ class PRServiceGUI:
         # 等待 Tk mainloop 启动后再接收 IPC；否则后台回调里的 root.after
         # 可能发生在事件循环尚未运行时，导致全量基线收到但表格未刷新。
         self.root.after(100, _launch_initial_ipc_sync)
-        
+
         # 启动交易时间内后台轻量级 IPC 动态行情定时轮询更新器
         self._start_ipc_polling_loop()
-        
+
         # 初始化布局 (全部为空，所以先隐藏)
         self.refresh_layout(em_empty=True, ths_empty=True, lh_empty=True, res_empty=True, tgb_empty=True)
 
@@ -292,7 +292,7 @@ class PRServiceGUI:
             self._last_favorites_version = GlobalFavoriteManager().version
         except Exception as e:
             service_logger.debug(f"初始化自选股轮询失败: {e}")
-        
+
         if hasattr(self, 'root'):
             self.root.after(500, self._poll_favorites_loop)
 
@@ -312,16 +312,16 @@ class PRServiceGUI:
 
     def _format_history_item_local(self, item):
         """人气共振专用格式化：备注 | [Hit: N] | 逻辑"""
-        if not isinstance(item, dict): 
+        if not isinstance(item, dict):
             return str(item)
         q = item.get("query", "").strip()
         q = " ".join(q.split())  # 压缩空白
         note = item.get("note", "").strip()
         hit = item.get("hit", "")
         parts = []
-        if note: 
+        if note:
             parts.append(note)
-        if hit != "" and hit is not None: 
+        if hit != "" and hit is not None:
             parts.append(f"[Hit: {hit}]")
         parts.append(q)
         return "  |  ".join(parts)
@@ -432,18 +432,40 @@ class PRServiceGUI:
         if not self._query_data_ready():
             return pd.DataFrame()
 
-        # 优先复用刚刚在 update_all_tables 里或者其它地方已经构建好的 test_df 缓存
+        # 优先复用刚刚构建好的全量 test_df 缓存
         if hasattr(self, '_last_test_df_hits') and self._last_test_df_hits is not None and not self._last_test_df_hits.empty:
             return self._last_test_df_hits
 
-        # 1. 收集当前五个 Treeview 表格中所有的人气榜股票代码
+        # 1. 收集全量人气榜股票池全部代码 (绝不从已被公式过滤的 Treeview 获取，保证 Hit 计算覆盖全量池)
         all_codes = set()
-        for tree in (self.tree_em, self.tree_ths, self.tree_lh, self.tree_tgb, self.tree_res):
-            for iid in tree.get_children():
-                vals = tree.item(iid, "values")
-                if vals and len(vals) > 1:
-                    all_codes.add(str(vals[1]).strip().zfill(6))
-                     
+        cached = getattr(self, '_last_data_cache', {}) or {}
+        if cached:
+            for k in ('em_data', 'ths_data', 'lh_data', 'tgb_data'):
+                d = cached.get(k, {})
+                if isinstance(d, dict):
+                    all_codes.update(str(code).strip().zfill(6) for code in d.keys())
+                elif isinstance(d, list):
+                    for item in d:
+                        if isinstance(item, dict) and 'code' in item:
+                            all_codes.add(str(item['code']).strip().zfill(6))
+            for r in cached.get('resonance_results', []):
+                if isinstance(r, dict) and 'code' in r:
+                    all_codes.add(str(r['code']).strip().zfill(6))
+            for q_code in cached.get('quotes', {}).keys():
+                all_codes.add(str(q_code).strip().zfill(6))
+
+        for c in getattr(self, 'resonance_codes', []):
+            if c:
+                all_codes.add(str(c).strip().zfill(6))
+
+        # 兜底：如果缓存尚空，遍历 Treeview
+        if not all_codes:
+            for tree in (self.tree_em, self.tree_ths, self.tree_lh, self.tree_tgb, self.tree_res):
+                for iid in tree.get_children():
+                    vals = tree.item(iid, "values")
+                    if vals and len(vals) > 1:
+                        all_codes.add(str(vals[1]).strip().zfill(6))
+
         # 2. 从全量行情中筛选出属于当前人气榜个股的切片
         test_df = pd.DataFrame()
         if hasattr(self, "sync_manager") and all_codes:
@@ -452,41 +474,67 @@ class PRServiceGUI:
                 valid_codes = [c for c in all_codes if c in full_df.index]
                 if valid_codes:
                     test_df = full_df.loc[valid_codes].copy()
-                     
-        # 全量 IPC 基线未覆盖当前榜单代码时不构造零值假数据，避免生成无效命中。
+
+        # 若 IPC 基线未覆盖，但本地有 quotes 缓存，补充构造基础行情 DataFrame
+        if test_df.empty and cached and cached.get('quotes'):
+            q_dict = cached.get('quotes', {})
+            rows = []
+            for c in all_codes:
+                q = q_dict.get(c, {})
+                if q:
+                    r = dict(q)
+                    r['code'] = c
+                    rows.append(r)
+            if rows:
+                test_df = pd.DataFrame(rows).set_index('code')
+
         if test_df.empty:
             return test_df
 
-        # 3. 兼容异动字段别名
-        if not test_df.empty:
-            mapping = {
-                '价格': 'close', '最新价': 'close', '现价': 'close', 
-                '涨幅': 'pct', 
-                '量': 'volume', '成交量': 'volume',
-                '成交额': 'turnover',
-                '最高': 'high', '最低': 'low', '开盘': 'open',
-                '板块': 'category', '异动类型': 'category', 'hy': 'category'
-            }
-            for cn, en in mapping.items():
-                if cn in test_df.columns and en not in test_df.columns:
-                    test_df[en] = test_df[cn]
-                        
+        # 3. 注入板块题材 category 列 (从 _block_cache 获取，支持 category.str.contains 公式)
+        block_cache = getattr(self, '_block_cache', {})
+        if 'category' not in test_df.columns:
+            test_df['category'] = ""
+        for idx in test_df.index:
+            c_str = str(idx).strip().zfill(6)
+            cur_cat = str(test_df.at[idx, 'category']) if pd.notna(test_df.at[idx, 'category']) else ""
+            if (not cur_cat or cur_cat in ('--', 'nan', 'None', '')) and c_str in block_cache:
+                test_df.at[idx, 'category'] = block_cache[c_str]
+
+        # 4. 兼容异动字段别名
+        mapping = {
+            '价格': 'close', '最新价': 'close', '现价': 'close',
+            '涨幅': 'pct',
+            '量': 'volume', '成交量': 'volume',
+            '成交额': 'turnover',
+            '最高': 'high', '最低': 'low', '开盘': 'open',
+            '板块': 'category', '异动类型': 'category', 'hy': 'category'
+        }
+        for cn, en in mapping.items():
+            if cn in test_df.columns and en not in test_df.columns:
+                test_df[en] = test_df[cn]
+            elif en in test_df.columns and cn not in test_df.columns:
+                test_df[cn] = test_df[en]
+
         self._last_test_df_hits = test_df
         return test_df
 
     def calculate_history_hits_ui(self):
         """计算当前历史记录的命中数并更新下拉列表"""
         if not self._query_data_ready():
-            self._pending_hit_calculation = True
-            self.lbl_status.config(text="等待 IPC 全量行情与 TDX API 行情后计算命中…", fg="darkorange")
-            self._start_query_tdx_sync()
-            return
+            # 允许离线或收盘降级：若本地已有完整人气榜缓存，使用缓存数据计算命中数
+            cached = getattr(self, '_last_data_cache', {}) or {}
+            if not (cached and cached.get('quotes')):
+                self._pending_hit_calculation = True
+                self.lbl_status.config(text="等待 IPC 全量行情与 TDX API 行情后计算命中…", fg="darkorange")
+                self._start_query_tdx_sync()
+                return
 
         if not hasattr(self, 'query_manager'):
             from stock_logic_utils import toast_message
             toast_message(self.root, "⚠️ 历史管理器未初始化")
             return
-            
+
         test_df = self.get_test_df_for_hits()
         if test_df.empty:
             from stock_logic_utils import toast_message
@@ -495,14 +543,14 @@ class PRServiceGUI:
 
         group = self.history_selector.get()
         target = getattr(self.query_manager, group, [])
-        if not target: 
+        if not target:
             return
 
         from stock_logic_utils import test_code_against_queries, toast_message
-        
+
         # 调用具备缺失列自愈与防爆设计的 test_code_against_queries 进行批量测评
         enriched_results = test_code_against_queries(test_df, target)
-        
+
         new_values = []
         for i, item in enumerate(target):
             hit_count = 0
@@ -510,13 +558,13 @@ class PRServiceGUI:
                 hit_count = enriched_results[i].get("hit", 0)
             # 保存命中数到内存
             item["hit"] = hit_count
-            
+
             # 采用统一的显示格式化逻辑
             display = self._format_history_item_local(item)
             new_values.append(display)
-            
+
         self.query_combo['values'] = new_values
-        
+
         # 自动刷新当前选中的显示（以反映最新的命中数）
         current_val = self.query_var.get()
         if current_val:
@@ -530,7 +578,7 @@ class PRServiceGUI:
                     break
 
         toast_message(self.root, f"✅ 策略命中统计完成 (n={len(target)})")
-        
+
         # 同步更新编辑器里的 Treeview（如果打开了）
         if self.query_manager:
             self.query_manager.refresh_tree()
@@ -543,11 +591,11 @@ class PRServiceGUI:
             if hasattr(self.query_manager, 'combo_group') and self.query_manager.combo_group.winfo_exists():
                 self.query_manager.combo_group.set(group)
                 self.query_manager.refresh_tree()
-                
+
         h_list = []
         if hasattr(self, 'query_manager'):
             h_list = getattr(self.query_manager, group, [])
-            
+
         formatted_list = []
         for item in h_list:
             display_text = self._format_history_item_local(item)
@@ -570,13 +618,13 @@ class PRServiceGUI:
         # 1. 优先获取最近处于活动/点击焦点的 Treeview 实例
         target_tree = getattr(self, '_last_active_tree', None)
         selected_item = None
-        
+
         # 2. 如果 target_tree 有选中项，我们优先使用它
         if target_tree and target_tree.winfo_exists():
             sel = target_tree.selection()
             if sel:
                 selected_item = sel[0]
-                
+
         # 3. 如果没找到选中项或 target_tree 不存在，我们重新在所有 treeview 中寻找当前有选中项的表格
         if not target_tree or not selected_item:
             all_trees = []
@@ -585,7 +633,7 @@ class PRServiceGUI:
             if concept_tree and concept_tree.winfo_exists() and concept_tree.winfo_viewable():
                 all_trees.append(concept_tree)
             all_trees.extend([self.tree_res, self.tree_em, self.tree_ths, self.tree_lh, self.tree_tgb])
-            
+
             for tree in all_trees:
                 if tree and tree.winfo_exists():
                     sel = tree.selection()
@@ -595,7 +643,7 @@ class PRServiceGUI:
                         # 更新为最近活动
                         self._last_active_tree = tree
                         break
-                        
+
         # 4. 如果依然没有任何 Treeview 选中，我们默认取可见的、且有数据的第一个 Treeview 的首只股票
         if not target_tree or not selected_item:
             all_trees = []
@@ -603,20 +651,20 @@ class PRServiceGUI:
             if concept_tree and concept_tree.winfo_exists() and concept_tree.winfo_viewable():
                 all_trees.append(concept_tree)
             all_trees.extend([self.tree_res, self.tree_em, self.tree_ths, self.tree_lh, self.tree_tgb])
-            
+
             for tree in all_trees:
                 if tree and tree.winfo_exists() and tree.winfo_viewable() and tree.get_children():
                     target_tree = tree
                     selected_item = tree.get_children()[0]
                     self._last_active_tree = tree
                     break
-                    
+
         # 5. 如果实在没有任何数据，直接提示并退出
         if not target_tree or not selected_item:
             from tkinter import messagebox
             messagebox.showinfo("信息", "当前无可用的人气个股进行 DNA 审计", parent=self.root)
             return
-            
+
         # 6. 获取所选个股及其后面的最多 20 个个股（共计最多 21 个个股）
         children = target_tree.get_children()
         try:
@@ -624,11 +672,11 @@ class PRServiceGUI:
             target_items = children[curr_idx:curr_idx + 21]
         except ValueError:
             target_items = [selected_item]
-            
+
         cols = list(target_tree["columns"])
         code_idx = cols.index("code") if "code" in cols else 1
         name_idx = cols.index("name") if "name" in cols else 2
-        
+
         code_to_name = {}
         for t_item in target_items:
             t_values = target_tree.item(t_item, "values")
@@ -638,7 +686,7 @@ class PRServiceGUI:
                 if t_name.startswith("★ "):
                     t_name = t_name[len("★ "):]
                 code_to_name[t_code] = t_name
-                
+
         if code_to_name:
             self._run_dna_audit_batch(code_to_name, resample='d')
 
@@ -653,9 +701,9 @@ class PRServiceGUI:
                 self.run_once_async()
             self._start_query_tdx_sync()
             return
-        
+
         # [只读模式] 仅作为即时过滤条件应用，不修改/追加历史记录，不触发写盘
-                    
+
         if hasattr(self, '_last_data_cache') and self._last_data_cache:
             c = self._last_data_cache
             self.update_all_tables(
@@ -673,6 +721,7 @@ class PRServiceGUI:
         self.query_var.set("")
         self.query_expr = ""
         self._pending_query_filter = False
+        self._last_test_df_hits = None
         if hasattr(self, '_last_data_cache') and self._last_data_cache:
             c = self._last_data_cache
             self.update_all_tables(
@@ -718,7 +767,7 @@ class PRServiceGUI:
         df_cache = self.get_test_df_for_hits()
         if df_cache.empty:
             return []
-        
+
         # 将过滤后的人气榜个股专属数据集同步给 query_manager，供其内部使用
         if hasattr(self, 'query_manager'):
             self.query_manager.df_all = df_cache
@@ -747,7 +796,7 @@ class PRServiceGUI:
         except Exception:
             pass
         self.save_config_settings()
-        
+
         # [只读模式] 关闭时无需保存 search_history
         if hasattr(self, 'history_win') and self.history_win.winfo_exists():
             try:
@@ -872,7 +921,7 @@ class PRServiceGUI:
             return
         base_sec = self._get_global_ats_interval()
         base_str = f"{int(base_sec)}s" if base_sec.is_integer() else f"{base_sec:.1f}s"
-        
+
         # 预设候选列表: (显示文本, 存储配置值)
         self._tdx_interval_options = [
             (f"默认 ({base_str})", "auto"),
@@ -883,10 +932,10 @@ class PRServiceGUI:
             ("30 秒 (低耗)", 30.0),
             ("60 秒 (节能)", 60.0),
         ]
-        
+
         saved_val = self.config.get("tdx_refresh_interval", "auto")
         target_idx = 0
-        
+
         if saved_val != "auto" and saved_val is not None:
             try:
                 f_saved = float(saved_val)
@@ -902,7 +951,7 @@ class PRServiceGUI:
                     target_idx = len(self._tdx_interval_options) - 1
             except Exception:
                 target_idx = 0
-                
+
         self.combo_tdx_interval["values"] = [opt[0] for opt in self._tdx_interval_options]
         self.combo_tdx_interval.current(target_idx)
 
@@ -996,7 +1045,7 @@ class PRServiceGUI:
             fav_stocks = GlobalFavoriteManager().get_favorite_stocks()
         except Exception:
             return
-            
+
         all_trees = (self.tree_em, self.tree_ths, self.tree_lh, self.tree_tgb, self.tree_res)
         for tree in all_trees:
             for iid in tree.get_children():
@@ -1005,23 +1054,23 @@ class PRServiceGUI:
                     continue
                 code = str(vals[1]).strip().zfill(6)
                 name = str(vals[2]).strip()
-                
+
                 is_fav = code in fav_stocks
                 clean_name = name
                 if name.startswith("★ "):
                     clean_name = name[len("★ "):]
-                
+
                 new_name = f"★ {clean_name}" if is_fav else clean_name
-                
+
                 curr_tags = list(tree.item(iid, "tags") or [])
                 has_fav_tag = "favorite" in curr_tags
-                
+
                 need_update = (name != new_name) or (is_fav != has_fav_tag)
                 if need_update:
                     new_vals = list(vals)
                     new_vals[2] = new_name
                     tree.item(iid, values=tuple(new_vals))
-                    
+
                     if is_fav and "favorite" not in curr_tags:
                         curr_tags.append("favorite")
                     elif not is_fav and "favorite" in curr_tags:
@@ -1135,24 +1184,32 @@ class PRServiceGUI:
         return n
 
     def _is_noise_concept(self, name_str):
+        if not name_str:
+            return True
         try:
             from stock_logic_utils import is_noise_concept
             return is_noise_concept(name_str)
         except ImportError:
             NOISE_CONCEPTS = {
-                "深股通", "港股通", "沪股通", "国企改革", "央企国企改革", "融资融券", "标普道琼斯A股", 
-                "富时罗素概念股", "MSCI概念", "转融券标的", "机构重仓", "证金持股", "汇金持股", 
-                "预盈预增", "破净股", "ST板块", "参股新三板", "创业板设", "科创板", "地方国企改革", 
+                "深股通", "港股通", "沪股通", "国企改革", "央企国企改革", "融资融券", "标普道琼斯A股",
+                "富时罗素概念股", "MSCI概念", "转融券标的", "机构重仓", "证金持股", "汇金持股",
+                "预盈预增", "破净股", "ST板块", "参股新三板", "创业板设", "科创板", "地方国企改革",
                 "央企改革", "壳资源", "新股与次新股", "昨日涨停", "昨日连板", "百元股", "中字头",
                 "低价股", "破发股", "外资背景", "QFII重仓", "社保重仓", "核心资产", "新三板",
                 "深成指股", "沪深300股", "上证180股", "上证50股", "创业300股", "中证500", "成分股",
                 "高送转", "含可转债", "国家队持股", "地方政府平台", "央企控股", "军工改革",
                 "中报", "中报送转", "季报", "年报", "一季报", "三季报", "业绩预增", "预增", "预亏",
-                "预降预亏", "送转股份", "业绩补偿"
+                "预降预亏", "送转股份", "业绩补偿",
+                "人民币贬值受益", "人民币贬值受益概念", "人民币升值受益", "外贸受益", "出口退税", "外贸概念",
+                "同花顺漂亮100", "漂亮100", "同花顺果链", "同花顺出海50", "出海50", "出海概念", "同花顺微盘股", "同花顺精选"
             }
             if name_str in NOISE_CONCEPTS:
                 return True
-            for keyword in ("改革", "股通", "成指", "重仓", "持股", "融资", "昨日", "送转", "转债", "指数", "成分", "中报", "预增", "业绩", "季报", "年报", "预盈", "预亏"):
+            for keyword in (
+                "改革", "股通", "成指", "重仓", "持股", "融资", "昨日", "送转", "转债", "指数",
+                "成分", "中报", "预增", "业绩", "季报", "年报", "预盈", "预亏",
+                "贬值受益", "升值受益", "漂亮100", "出海50"
+            ):
                 if keyword in name_str:
                     return True
             return False
@@ -1165,11 +1222,11 @@ class PRServiceGUI:
             return
         tree.selection_set(item_id)
         tree.focus(item_id)
-        
+
         values = tree.item(item_id, "values")
         if not values or len(values) < 2:
             return
-            
+
         cols = list(tree["columns"])
         code_idx = cols.index("code") if "code" in cols else 1
         name_idx = cols.index("name") if "name" in cols else 2
@@ -1181,7 +1238,7 @@ class PRServiceGUI:
         name = str(values[name_idx]).strip()
         if name.startswith("★ "):
             name = name[len("★ "):]
-            
+
         try:
             from global_favorites import GlobalFavoriteManager
             fav_mgr = GlobalFavoriteManager()
@@ -1189,7 +1246,7 @@ class PRServiceGUI:
         except Exception:
             is_fav = False
             fav_mgr = None
-            
+
         menu = tk.Menu(self.root, tearoff=0)
 
         # ⚡ 闪电买入直连
@@ -1215,7 +1272,7 @@ class PRServiceGUI:
                 # 仅保留前 5 个最核心的主流概念（黄金概念）进行筛选与排序
                 main_cats = cats[:5]
                 scores_dict = getattr(self, "_all_concept_scores", {})
-                
+
                 def get_cat_strength(cat_name):
                     norm_cat = self._normalize_concept_name(cat_name)
                     max_c = 0
@@ -1223,16 +1280,16 @@ class PRServiceGUI:
                         if self._normalize_concept_name(k) == norm_cat:
                             max_c = max(max_c, count)
                     return max_c
-                
+
                 # 双重优先级排序：非低优先级(0)排前面，低优先级(1)排后面；在此基础上按强度（只数）降序排列
                 main_cats.sort(key=lambda c: (1 if self._is_noise_concept(c) else 0, -get_cat_strength(c)))
-                
+
                 # 获取前 3 个最强的实际意义板块并动态展示
                 top3_cats = main_cats[:3]
                 for strongest_cat in top3_cats:
                     strength_num = get_cat_strength(strongest_cat)
                     menu.add_command(
-                        label=f"📂 查看最强板块个股 ({strongest_cat}:{strength_num}只)", 
+                        label=f"📂 查看最强板块个股 ({strongest_cat}:{strength_num}只)",
                         command=lambda name=strongest_cat: self.show_concept_top10_window(name)
                     )
                 menu.add_separator()
@@ -1246,7 +1303,7 @@ class PRServiceGUI:
             target_items = children[curr_idx:curr_idx + 21]
         except ValueError:
             target_items = [item_id]
-            
+
         code_to_name = {}
         for t_item in target_items:
             t_values = tree.item(t_item, "values")
@@ -1268,7 +1325,7 @@ class PRServiceGUI:
             menu.add_command(label=f"★ 添加重点关注 ({name})", command=lambda: self.add_to_favorites(code))
         else:
             menu.add_command(label=f"☆ 取消重点关注 ({name})", command=lambda: self.remove_from_favorites(code))
-            
+
         menu.add_separator()
         menu.add_command(label="⚖️ 垂直分隔栏居中 (50%)", command=self.reset_sash_center)
 
@@ -1384,7 +1441,7 @@ class PRServiceGUI:
     def refresh_realtime_fields(self, df=None, tdx_quotes=None):
         today = time.strftime("%Y-%m-%d")
         current_view_date = self.current_date
-        
+
         # 💥 [NEW] 24/7 运行支持：如果系统日期已跨天（即今天不同于上一次 the 系统日期），且前态仍处于上一个同步日，自动切换界面日期至今日，防止拦截更新
         if current_view_date != today:
             last_realtime_today = getattr(self, "_last_realtime_today", None)
@@ -1660,8 +1717,11 @@ class PRServiceGUI:
                         "rank": _safe_int(row.get('Rank', row.get('rank', 0))) if row is not None else 0,
                     }
 
-        # 实时根据推送的行情重新分析和更新板块排行展示
-        if all_stocks_for_stats:
+        # 实时根据推送的行情重新分析和更新板块排行展示 (永远基于全量131只人气股池统计，不受表格局部过滤影响)
+        full_ranking_stocks = self._get_all_popularity_stocks_for_ranking(latest_quotes=tdx_quotes, latest_df=df)
+        if full_ranking_stocks:
+            self.update_concept_ranking(full_ranking_stocks)
+        elif all_stocks_for_stats:
             self.update_concept_ranking(all_stocks_for_stats)
 
     def update_all_tables_from_ipc(self, df=None):
@@ -1694,7 +1754,7 @@ class PRServiceGUI:
             except Exception:
                 pass
         return cfg
-        
+
     def _get_dpi_scale_factor(self):
         try:
             return self.root.winfo_fpixels('1i') / 96.0
@@ -1786,7 +1846,7 @@ class PRServiceGUI:
                 return
             self.config["sash_ratio"] = 0.5
             self.config["column_widths"] = dict(self.DEFAULT_COLUMN_WIDTHS)
-            
+
             width = self.paned.winfo_width()
             if width > 100:
                 target_sash = int(width * 0.5)
@@ -1839,7 +1899,7 @@ class PRServiceGUI:
                 self.config["tdx_refresh_interval"] = self._get_selected_tdx_interval_cfg()
             self.config["auto_refresh"] = bool(getattr(self, "is_running", False))
             self.config["velocity_segment_mode"] = getattr(self, "segment_mode", "60m")
-            
+
             # 保存窗口位置与大小（防极窄尺寸污染落盘）
             if hasattr(self, "root") and self.root:
                 try:
@@ -1847,7 +1907,7 @@ class PRServiceGUI:
                     self.config["geometry"] = geo
                 except Exception:
                     pass
-            
+
             # 保存排序状态
             if hasattr(self, "tree_res") and self.tree_res is not None:
                 try:
@@ -1875,13 +1935,13 @@ class PRServiceGUI:
                 lh_data = cache.get("lh_data", {})
                 resonance_results = cache.get("resonance_results", [])
                 quotes = cache.get("quotes", {})
-                
+
                 if em_data or ths_data or tgb_data or lh_data or resonance_results:
                     # 恢复缓存的共振代码
                     self.resonance_codes = [r['code'] for r in resonance_results]
                     # 恢复缓存的行业板块描述
                     self._block_cache = cache.get("block_cache", {})
-                    
+
                     # 更新表格，主线程安全
                     self.update_all_tables(em_data, ths_data, lh_data, tgb_data, resonance_results, quotes)
                     self.lbl_status.config(text="自动加载缓存数据完成", fg="darkgreen")
@@ -1937,14 +1997,14 @@ class PRServiceGUI:
                        {"sticky": "ns",
                         "children": [("Vertical.Scrollbar.thumb",
                                       {"expand": "1", "sticky": "nswe"})]})])
-        
+
         # [NEW] 顶部的历史过滤公式条 (History Filter Frame)
         self.filter_frame = tk.Frame(self.root)
         self.filter_frame.pack(side="top", fill="x", padx=4, pady=2)
-        
+
         lbl_grp = tk.Label(self.filter_frame, text="历史组:", font=("Microsoft YaHei", 9, "bold"))
         lbl_grp.pack(side="left", padx=(2, 4))
-        
+
         self.history_selector = ttk.Combobox(
             self.filter_frame,
             values=["history1", "history2", "history3", "history4", "history5"],
@@ -1953,7 +2013,7 @@ class PRServiceGUI:
         )
         self.history_selector.pack(side="left", padx=2)
         self.history_selector.bind("<<ComboboxSelected>>", self._on_history_group_changed)
-        
+
         # 添加 Hit 按钮
         self.btn_hit = tk.Button(
             self.filter_frame,
@@ -1965,10 +2025,10 @@ class PRServiceGUI:
             pady=0
         )
         self.btn_hit.pack(side="left", padx=(6, 2))
-        
+
         lbl_flt = tk.Label(self.filter_frame, text="过滤:", font=("Microsoft YaHei", 9, "bold"))
         lbl_flt.pack(side="left", padx=(10, 4))
-        
+
         self.query_var = tk.StringVar()
         self.query_combo = ttk.Combobox(
             self.filter_frame,
@@ -1978,7 +2038,7 @@ class PRServiceGUI:
         self.query_combo.pack(side="left", padx=2, fill="x", expand=True)
         self.query_combo.bind("<Return>", lambda e: self.apply_filter())
         self.query_combo.bind("<<ComboboxSelected>>", lambda e: self.apply_filter())
-        
+
         # 添加 🧬 DNA审计 按钮
         self.btn_query_dna = tk.Button(
             self.filter_frame,
@@ -1991,13 +2051,13 @@ class PRServiceGUI:
             pady=0
         )
         self.btn_query_dna.pack(side="left", padx=(10, 2))
-        
+
         self.btn_query_exec = ttk.Button(self.filter_frame, text="过滤", command=self.apply_filter, width=6)
         self.btn_query_exec.pack(side="left", padx=2)
-        
+
         self.btn_query_clear = ttk.Button(self.filter_frame, text="清空", command=self.clear_filter, width=6)
         self.btn_query_clear.pack(side="left", padx=2)
-        
+
         self.btn_query_manage = ttk.Button(self.filter_frame, text="管理", command=self.manage_history, width=6)
         self.btn_query_manage.pack(side="left", padx=2)
 
@@ -2171,7 +2231,7 @@ class PRServiceGUI:
         # 第一行：联动选择项
         link_frame = tk.Frame(bottom_frame)
         link_frame.pack(fill="x", pady=2, padx=4)
-        
+
         tk.Label(link_frame, text="联动选择:").pack(side="left", padx=2)
         chk_tdx = tk.Checkbutton(link_frame, text="通达信(tdx)", variable=self.link_tdx_var, command=self.save_config_settings)
         chk_tdx.pack(side="left", padx=5)
@@ -2232,12 +2292,12 @@ class PRServiceGUI:
         # 日期控制区组件，自适应自建日历选择与导航
         date_frame = tk.Frame(settings_frame)
         date_frame.pack(side="left", padx=5)
-        
+
         tk.Label(date_frame, text="日期:").pack(side="left", padx=2)
-        
+
         if HAS_CALENDAR:
-            self.date_entry = DateEntry(date_frame, width=12, background='darkblue', 
-                                      foreground='white', borderwidth=2, 
+            self.date_entry = DateEntry(date_frame, width=12, background='darkblue',
+                                      foreground='white', borderwidth=2,
                                       date_pattern='yyyy-mm-dd',
                                       state='readonly')
             try:
@@ -2245,7 +2305,7 @@ class PRServiceGUI:
             except Exception:
                 self.date_entry.set_date(datetime.now())
             self.date_entry.pack(side="left", padx=2)
-            
+
             # 动态覆写 drop_down 以强行实现自动上拉展示 (防止在底部被屏幕/窗口边缘遮挡)
             def forced_up_drop_down(entry_self=self.date_entry):
                 try:
@@ -2261,9 +2321,9 @@ class PRServiceGUI:
                         top_cal.geometry(f"+{x}+{new_y}")
                 except Exception as e:
                     service_logger.debug(f"日历自动上拉失败: {e}")
-            
+
             self.date_entry.drop_down = forced_up_drop_down
-            
+
             self.date_entry.bind("<<DateEntrySelected>>", self.on_date_changed)
             # 点击任何区域均可激活下拉日历
             self.date_entry.bind("<Button-1>", lambda e: self._show_calendar(), add="+")
@@ -2308,13 +2368,13 @@ class PRServiceGUI:
         self.segment_mode = inv_mode_map.get(idx, "60m")
         self.config["velocity_segment_mode"] = self.segment_mode
         self.save_config_settings()
-        
+
         # 动态刷新所有 5 大表格表头
         _, _, extra_cols = self._get_all_cols()
         for t, title in ((self.tree_em, "东"), (self.tree_ths, "花"), (self.tree_lh, "龙"), (self.tree_tgb, "淘"), (self.tree_res, "合")):
             if t and t.winfo_exists():
                 self._reconfigure_tree_columns(t, title, extra_cols)
-                
+
         # 立即根据最新分段模式重新计算并刷新表格数据
         if hasattr(self, '_last_data_cache') and self._last_data_cache:
             c = self._last_data_cache
@@ -2364,10 +2424,10 @@ class PRServiceGUI:
     def _reconfigure_tree_columns(self, tree, first_col_title, extra_cols):
         # 1. 组合所有列
         all_cols = self._BASE_FIXED_COLS + tuple(extra_cols)
-        
+
         # 2. 重新配置 tree 的 columns
         tree.configure(columns=all_cols, displaycolumns=all_cols)
-        
+
         # 3. 重新设置固定表头和宽度
         vel_header = self._get_velocity_header_text()
         tree.heading("idx",      text=first_col_title)
@@ -2380,7 +2440,7 @@ class PRServiceGUI:
         tree.heading("dff2",     text="dff2")
         tree.heading("dff3",     text="dff3")
         tree.heading("rank",     text="Rank")
-        
+
         saved_widths = self.config.get("column_widths", {})
         last_col = all_cols[-1] if all_cols else "rank"
         for c in self._BASE_FIXED_COLS:
@@ -2392,7 +2452,7 @@ class PRServiceGUI:
             # 只有最后一列允许 stretch 吸收多余空间，其余固定列独立锁定宽度，杜绝相互挤压弹回
             is_stretch = (c == last_col)
             tree.column(c, width=w, minwidth=min_w, anchor="center", stretch=is_stretch)
-        
+
         # 4. 设置动态列的表头与宽度，并绑定点击排序
         for ec in extra_cols:
             tree.heading(ec, text=ec, command=lambda c=ec, t=tree: self.sort_column(t, c, False))
@@ -2403,7 +2463,7 @@ class PRServiceGUI:
                 w = def_w
             is_stretch = (ec == last_col)
             tree.column(ec, width=w, minwidth=min_w, anchor="center", stretch=is_stretch)
-            
+
         # 同时基础列也需要重新绑定排序
         for c in self._BASE_FIXED_COLS:
             tree.heading(c, command=lambda col=c, t=tree: self.sort_column(t, col, False))
@@ -2490,7 +2550,7 @@ class PRServiceGUI:
                 return
             code = str(tree.set(k, "code")).strip().zfill(6)
             l.append((val, code, k))
-            
+
         def try_convert(val):
             if val is None:
                 return (0, -999999.0)
@@ -2508,7 +2568,7 @@ class PRServiceGUI:
                 return (0, float(val_str.replace('%', '').replace(',', '')))
             except ValueError:
                 return (1, val_str.lower())
-                
+
         try:
             from global_favorites import GlobalFavoriteManager
             fav_stocks = GlobalFavoriteManager().get_favorite_stocks()
@@ -2523,29 +2583,29 @@ class PRServiceGUI:
             else:
                 fav_part = 0 if is_fav_bool else 1
             return (fav_part, try_convert(val))
-            
+
         # 2. 稳定原地排序
         l.sort(key=sort_key, reverse=reverse)
-        
+
         # 3. 重新插入视图
         for index, (val, code, k) in enumerate(l):
             tree.move(k, '', index)
-            
+
         # 4. 保存排序状态
         tree.sort_col = col
         tree.sort_descending = reverse
-        
+
         if not auto_restore:
             # 手动点击时更新该列 heading，以便下次反转方向
             tree.heading(col, command=lambda: self.sort_column(tree, col, not reverse))
-            
+
             all_trees = (self.tree_em, self.tree_ths, self.tree_lh, self.tree_tgb, self.tree_res)
             # 只有当当前排行的 tree 本身属于主表时，才广播同步给其他主表
             if tree in all_trees:
                 for other_tree in all_trees:
                     if other_tree != tree:
                         self.sort_column(other_tree, col, reverse, auto_restore=True)
-            
+
             # 同步排序到已打开的板块个股列表窗口（如果有同样的 col 或可映射的 col）
             if getattr(self, "concept_win", None) is not None:
                 try:
@@ -2566,7 +2626,7 @@ class PRServiceGUI:
                     service_logger.debug(f"同步刷新概念详情窗口异常: {detail_err}")
 
             # [OPTIMIZE] 排序时仅在内存中更新状态，不执行写盘。退出关闭时统一持久化。
-            
+
         # 5. 更新表头的 ▲/▼ 指示器
         self.update_header_arrows(tree, col, reverse)
 
@@ -2883,7 +2943,7 @@ class PRServiceGUI:
             top = tk.Toplevel(self.root)
             self._trade_log_win = top
             top.title("📋 今日交易流水与一键挂单记录 (Trade Log)")
-            
+
             # 恢复持久化窗口位置与尺寸
             saved_geo = self.config.get("trade_log_geometry", "880x480")
             try:
@@ -2912,7 +2972,7 @@ class PRServiceGUI:
             cols = ("time", "code", "name", "action", "price", "shares", "amount", "strategy")
             headers = {"time": "时间", "code": "代码", "name": "名称", "action": "方向",
                        "price": "委托价", "shares": "数量", "amount": "金额", "strategy": "策略来源"}
-            
+
             tree = ttk.Treeview(table_frame, columns=cols, show="headings", selectmode="browse")
             tree.sort_col = "time"
             tree.sort_reverse = True  # 默认时间倒序
@@ -3052,7 +3112,7 @@ class PRServiceGUI:
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             s.settimeout(0.3)
             s.connect((IPC_HOST, IPC_PORT))
-            
+
             # 检测是否处于历史数据模式 (self.current_date 与今日不同)
             today = time.strftime("%Y-%m-%d")
             view_date = getattr(self, "current_date", today)
@@ -3060,7 +3120,7 @@ class PRServiceGUI:
                 payload = f"TIME_LINK|{code}|{view_date}"
             else:
                 payload = f"CODE|{code}"
-                
+
             s.send(payload.encode('utf-8'))
             s.close()
         except Exception:
@@ -3076,43 +3136,43 @@ class PRServiceGUI:
         from backtest_feature_auditor import audit_multiple_codes, show_dna_audit_report_window
         from tkinter import messagebox
         import threading
-        
+
         # 🚀 防重入保护
         if getattr(self, '_dna_audit_running', False):
             return
         self._dna_audit_running = True
-        
+
         codes = list(code_to_name.keys())
         if not codes:
             self._dna_audit_running = False
             return
-            
+
         if not end_date:
             end_date = self.current_date.replace("-", "")
-            
+
         # 弹一个带进度条的提示
         top = tk.Toplevel(self.root)
-        top.withdraw() 
-        top.attributes("-alpha", 0.0) 
+        top.withdraw()
+        top.attributes("-alpha", 0.0)
         top.title("🧬 DNA 审计中...")
-        
+
         # 界面美化
         top.configure(bg='#f8f9fa')
         content_frame = tk.Frame(top, bg='#f8f9fa', padx=15, pady=15)
         content_frame.pack(expand=True, fill='both')
-        
-        msg_label = tk.Label(content_frame, text=f"正在审计 {len(codes)} 只个股...", 
+
+        msg_label = tk.Label(content_frame, text=f"正在审计 {len(codes)} 只个股...",
                             font=("微软雅黑", 9), bg='#f8f9fa', fg='#333')
         msg_label.pack(pady=(0, 10))
-        
+
         # 进度条
         progress_var = tk.DoubleVar()
         progress_bar = ttk.Progressbar(content_frame, variable=progress_var, maximum=len(codes), mode='determinate', length=280)
         progress_bar.pack(pady=5)
-        
+
         status_label = tk.Label(content_frame, text="初始化中...", font=("微软雅黑", 8), bg='#f8f9fa', fg='#666')
         status_label.pack()
-        
+
         # 初始化展示位置
         w, h = 320, 140
         sw = self.root.winfo_screenwidth()
@@ -3120,8 +3180,8 @@ class PRServiceGUI:
         x, y = (sw - w) // 2, (sh - h) // 2
         top.geometry(f"{w}x{h}+{x}+{y}")
         top.attributes("-topmost", True)
-        top.deiconify() 
-        
+        top.deiconify()
+
         def progress_cb(curr, total, msg):
             """跨线程进度回调"""
             def _update():
@@ -3132,15 +3192,15 @@ class PRServiceGUI:
                     if curr >= total:
                         status_label.config(text="✅ 正在呼出报告...")
                 except tk.TclError:
-                    pass 
-                    
+                    pass
+
             self.root.after(0, _update)
-            
+
         def run_task():
             try:
                 # 调用批量接口
-                summaries = audit_multiple_codes(codes, 
-                                               end_date=end_date, 
+                summaries = audit_multiple_codes(codes,
+                                               end_date=end_date,
                                                code_to_name=code_to_name,
                                                progress_callback=progress_cb,
                                                resample=resample)
@@ -3148,13 +3208,13 @@ class PRServiceGUI:
                 def _show_report():
                     if top.winfo_exists():
                         top.destroy()
-                    
+
                     # 支持窗口复用
                     if hasattr(self, '_dna_audit_win') and self._dna_audit_win and self._dna_audit_win.winfo_exists():
                         self._dna_audit_win.update_report(summaries, end_date=end_date, resample=resample)
                     else:
                         self._dna_audit_win = show_dna_audit_report_window(summaries, parent=self, end_date=end_date, resample=resample)
-                
+
                 self.root.after(0, _show_report)
             except Exception as e:
                 import traceback
@@ -3162,7 +3222,7 @@ class PRServiceGUI:
                 self.root.after(0, lambda: [top.destroy() if top.winfo_exists() else None, messagebox.showerror("DNA 审计出错", str(e), parent=self.root)])
             finally:
                 self._dna_audit_running = False
-                
+
         threading.Thread(target=run_task, daemon=True).start()
 
     def refresh_layout(self, em_empty=False, ths_empty=False, lh_empty=True, res_empty=False, tgb_empty=False):
@@ -3171,26 +3231,26 @@ class PRServiceGUI:
         self.em_container.pack_forget()
         self.left_sep.pack_forget()
         self.ths_container.pack_forget()
-        
+
         # 默认左侧东财与同花顺常驻（即使暂无数据也展示表头骨架）
         left_visible = []
         if not em_empty or (em_empty and ths_empty):
             left_visible.append(self.em_container)
         if not ths_empty or (em_empty and ths_empty):
             left_visible.append(self.ths_container)
-            
+
         for i, widget in enumerate(left_visible):
             widget.pack(fill="both", expand=True, pady=1)
             if i < len(left_visible) - 1:
                 self.left_sep.pack(fill="x", pady=4)
-            
+
         # 右分栏：龙虎(竞价时段/若有) + 共振合表(常驻) + 淘股吧(常驻/若有)
         self.lh_container.pack_forget()
         self.right_sep1.pack_forget()
         self.res_container.pack_forget()
         self.right_sep2.pack_forget()
         self.tgb_container.pack_forget()
-        
+
         right_visible = []
         if not lh_empty:
             right_visible.append(self.lh_container)
@@ -3198,7 +3258,7 @@ class PRServiceGUI:
         right_visible.append(self.res_container)
         if not tgb_empty or (res_empty and tgb_empty):
             right_visible.append(self.tgb_container)
-            
+
         for i, widget in enumerate(right_visible):
             widget.pack(fill="both", expand=True, pady=1)
             if i < len(right_visible) - 1:
@@ -3296,15 +3356,15 @@ class PRServiceGUI:
                     all_quotes = fetch_realtime_quotes(list(all_codes))
                 except Exception as ex:
                     service_logger.error(f"TDX 批量拉取实时行情失败: {ex}")
-            
+
             # 3. 计算人气共振得分
             seg_mode = getattr(self, 'segment_mode', '60m')
             resonance_results = calculate_resonance_scores(em_data, ths_data, tgb_data, lh_data, segment_mode=seg_mode)
-            
+
             # 保存当前的共振股票代码
             limit = int(self.entry_limit.get() or "50")
             self.resonance_codes = [r['code'] for r in resonance_results[:limit]]
-            
+
             # 4. 当更新有数据后，执行持久化缓存 (非全空)
             if em_data or ths_data or tgb_data or lh_data:
                 cache_file = os.path.join(get_app_root(), "popularity_resonance_cache.json")
@@ -3345,10 +3405,10 @@ class PRServiceGUI:
                     except OSError:
                         pass
                     service_logger.error(f"写入数据缓存失败: {cache_err}")
-            
+
             # 每日数据持久化更新当日数据 (在 save_daily_resonance_csv 内部自适应校验交易日)
             self.save_daily_resonance_csv(em_data, ths_data, lh_data, tgb_data, resonance_results[:limit], all_quotes, force_save=force_save)
-            
+
             today = time.strftime("%Y-%m-%d")
             current_view_date = self.current_date
             if current_view_date == today:
@@ -3356,7 +3416,7 @@ class PRServiceGUI:
                 self.root.after(0, lambda: self.update_all_tables(em_data, ths_data, lh_data, tgb_data, resonance_results[:limit], all_quotes))
             else:
                 service_logger.info(f"后台自动更新了今日数据，因当前正处于历史数据({current_view_date})复盘模式，跳过界面重绘。")
-            
+
         except Exception as e:
             self.root.after(0, lambda: self.lbl_status.config(text=f"刷新失败: {e}", fg="red"))
         finally:
@@ -3417,11 +3477,11 @@ class PRServiceGUI:
             if tgb_data: all_involved_codes.update(tgb_data.keys())
             if resonance_results:
                 all_involved_codes.update(item["code"] for item in resonance_results if "code" in item)
-            
+
             if all_involved_codes:
                 import numpy as np
                 involved_list = list(all_involved_codes)
-                
+
                 # 1. 尝试从 df_cache 提取已有行
                 df_parts = []
                 missing_codes = []
@@ -3432,7 +3492,7 @@ class PRServiceGUI:
                         df_parts.append(df_cache.loc[existing_codes].copy())
                 else:
                     missing_codes = involved_list
-                    
+
                 if missing_codes:
                     service_logger.warning(
                         f"[过滤] IPC全量基线未覆盖 {len(missing_codes)} 只榜单股票，跳过缺少基线的代码"
@@ -3440,7 +3500,7 @@ class PRServiceGUI:
 
                 # 2. 仅使用 IPC 全量基线中的真实行，避免用零值占位数据制造假命中
                 df_to_test = pd.concat(df_parts) if df_parts else pd.DataFrame()
-                
+
                 if not df_to_test.empty:
                     # 3. 调用 query_engine.execute 一次性批量运行公式
                     try:
@@ -3609,7 +3669,7 @@ class PRServiceGUI:
                     eff_price = float(quote.get("price", quote.get("last_close", 0.0)))
                 if eff_price <= 0.0 and row_obj is not None:
                     eff_price = float(row_obj.get("last_close", row_obj.get("prev_close", 0.0)))
-                
+
                 if eff_price > 0.0 and price_str == "--":
                     price_str = f"{eff_price:.2f}"
 
@@ -3875,7 +3935,7 @@ class PRServiceGUI:
         lh_empty = len(self.tree_lh.get_children()) == 0
         tgb_empty = len(self.tree_tgb.get_children()) == 0
         res_empty = len(self.tree_res.get_children()) == 0
-        
+
         self.refresh_layout(em_empty, ths_empty, lh_empty, res_empty, tgb_empty)
 
         # 6. 对所有具有排序状态的表格进行排序自愈
@@ -3883,8 +3943,12 @@ class PRServiceGUI:
             if getattr(tree, "sort_col", None) is not None:
                 self.sort_column(tree, tree.sort_col, getattr(tree, "sort_descending", False), auto_restore=True)
 
-        # 7. 更新顶部板块热点排名
-        self.update_concept_ranking(all_stocks_for_stats)
+        # 7. 更新顶部板块热点排名 (永远基于全量131只人气股池统计，不受表格局部过滤影响)
+        full_ranking_stocks = self._get_all_popularity_stocks_for_ranking(latest_df=df_cache)
+        if full_ranking_stocks:
+            self.update_concept_ranking(full_ranking_stocks)
+        elif all_stocks_for_stats:
+            self.update_concept_ranking(all_stocks_for_stats)
 
         self.lbl_status.config(text="更新完成", fg="blue")
 
@@ -3902,7 +3966,7 @@ class PRServiceGUI:
         if not self.resonance_codes:
             messagebox.showwarning("警告", "请先执行'查询刷新'获取数据后，再写入板块！")
             return
-            
+
         self.btn_write.config(state="disabled", text="正在写入...")
         self.lbl_status.config(text="正在写入通达信板块...", fg="blue")
         threading.Thread(target=self._write_block_job, daemon=True).start()
@@ -3927,14 +3991,14 @@ class PRServiceGUI:
             except ValueError:
                 messagebox.showerror("错误", "刷新间隔必须是大于0的数字")
                 return
-                
+
             self.is_running = True
             self.btn_loop.config(text="停止自动")
             self.entry_interval.config(state="disabled")
             self.entry_limit.config(state="disabled")
             self.lbl_status.config(text="自动刷新已启动", fg="blue")
             self.save_config_settings()
-            
+
             def loop():
                 while self.is_running:
                     try:
@@ -3954,7 +4018,7 @@ class PRServiceGUI:
                         if not self.is_running:
                             break
                         time.sleep(1)
-                        
+
             self.refresh_thread = threading.Thread(target=loop, daemon=True)
             self.refresh_thread.start()
         else:
@@ -3979,7 +4043,7 @@ class PRServiceGUI:
             csv_dir = os.path.join(get_app_root(), "datacsv")
             if not os.path.exists(csv_dir):
                 return
-                
+
             dates = []
             for filename in os.listdir(csv_dir):
                 if filename.startswith("popularity_resonance_"):
@@ -3990,25 +4054,25 @@ class PRServiceGUI:
                     else:
                         continue
                     dates.append(date_str)
-                    
+
             if not dates:
                 return
-                
+
             # ✅ [OPTIMIZE] 防抖：如果日期集合没变，跳过刷新
             dates_sig = hash(tuple(sorted(dates)))
             if getattr(self, '_last_calendar_sig', None) == dates_sig:
                 return
             self._last_calendar_sig = dates_sig
-            
+
             # 获取 DateEntry 内部的 Calendar 实例
             cal = self.date_entry._calendar
-            
+
             # 清除之前的事件标签 (如果有)
             cal.calevent_remove('all', 'has_data')
-            
+
             # 配置高亮样式: 红色背景 (代表该日有选股数据，跟策略选股一致)
             cal.tag_config('has_data', background='red', foreground='white')
-            
+
             for date_str in dates:
                 try:
                     dt = datetime.strptime(date_str, "%Y-%m-%d")
@@ -4026,10 +4090,10 @@ class PRServiceGUI:
             selected_date = self.date_var.get().strip()
         else:
             return
-            
+
         if selected_date == self.current_date:
             return
-            
+
         self.current_date = selected_date
         self.load_history_by_date(selected_date)
 
@@ -4087,7 +4151,7 @@ class PRServiceGUI:
                             if d_str < curr_date_str:
                                 new_date_str = d_str
                                 break
-                    
+
                     if not new_date_str:
                         # 没找到更晚/更早的，退避回增减一天
                         curr_d = datetime.strptime(curr_date_str, "%Y-%m-%d")
@@ -4326,7 +4390,7 @@ class PRServiceGUI:
         from tkinter import filedialog
         csv_dir = os.path.join(get_app_root(), "datacsv")
         os.makedirs(csv_dir, exist_ok=True)
-        
+
         file_path = filedialog.askopenfilename(
             initialdir=csv_dir,
             title="选择历史共振数据",
@@ -4339,7 +4403,7 @@ class PRServiceGUI:
         )
         if not file_path:
             return
-            
+
         filename = os.path.basename(file_path)
         date_str = None
         if filename.startswith("popularity_resonance_"):
@@ -4347,7 +4411,7 @@ class PRServiceGUI:
                 date_str = filename[len("popularity_resonance_"):-7]
             elif filename.endswith(".csv"):
                 date_str = filename[len("popularity_resonance_"):-4]
-                
+
         if date_str:
             if hasattr(self, 'date_entry'):
                 try:
@@ -4380,40 +4444,40 @@ class PRServiceGUI:
                 daily_state.get("written_at", 0.0), preflight_now, force=force_save,
             ):
                 return
-            
+
         try:
             import pandas as pd
             csv_dir = os.path.join(get_app_root(), "datacsv")
             os.makedirs(csv_dir, exist_ok=True)
-            
+
             # 自动保存为压缩过的 .csv.gz 格式
             csv_path = os.path.join(csv_dir, f"popularity_resonance_{today}.csv.gz")
-            
+
             current_df = self.sync_manager.get_current_df()
-            
+
             rows = []
             for r in resonance_results:
                 code = r.get('code', '')
                 score = r.get('score', 0)
-                
+
                 # 优先从 all_quotes 或 current_df 提取正确的股票名称，防止出现空值 and nan
                 name = ""
                 if code in all_quotes:
                     name = all_quotes[code].get('name', '')
-                
+
                 if not name and current_df is not None and code in current_df.index:
                     s_row = current_df.loc[code]
                     import pandas as pd
                     if isinstance(s_row, pd.DataFrame):
                         s_row = s_row.iloc[0]
                     name = s_row.get("name", s_row.get("Name", ''))
-                    
+
                 if not name:
                     name = r.get('name', '')
-                    
+
                 if not name or str(name).strip().lower() in ('nan', 'none', ''):
                     name = '--'
-                
+
                 row = {
                     "code": code,
                     "name": name,
@@ -4423,14 +4487,14 @@ class PRServiceGUI:
                     "lh_rank": lh_data.get(code, ''),
                     "tgb_rank": tgb_data.get(code, ''),
                 }
-                
+
                 price_val = "--"
                 percent_val = "--"
                 dff2_val = "--"
                 dff3_val = "--"
                 rank_val = "--"
                 block_val = "--"
-                
+
                 if current_df is not None and code in current_df.index:
                     s_row = current_df.loc[code]
                     import pandas as pd
@@ -4442,12 +4506,12 @@ class PRServiceGUI:
                     dff3_val = s_row.get("dff3", "--")
                     rank_val = s_row.get("Rank", s_row.get("rank", "--"))
                     block_val = s_row.get("category", "--")
-                
+
                 if price_val == "--" and code in all_quotes:
                     q = all_quotes[code]
                     price_val = q.get("price", "--")
                     percent_val = q.get("percent", "--")
-                    
+
                 def clean_field(val):
                     if pd.isna(val) or str(val).strip().lower() in ('nan', 'none', ''):
                         return "--"
@@ -4485,7 +4549,7 @@ class PRServiceGUI:
                             pass
                     row[ec] = ec_val
                 rows.append(row)
-                
+
             if rows:
                 df = pd.DataFrame(rows)
                 signature = _snapshot_signature(rows)
@@ -4533,20 +4597,20 @@ class PRServiceGUI:
             return
         try:
             today = time.strftime("%Y-%m-%d")
-            
+
             # 1. 检查今日是否已持久化
             csv_dir = os.path.join(get_app_root(), "datacsv")
             gz_path = os.path.join(csv_dir, f"popularity_resonance_{today}.csv.gz")
             csv_path = os.path.join(csv_dir, f"popularity_resonance_{today}.csv")
             has_persisted = os.path.exists(gz_path) or os.path.exists(csv_path)
-            
+
             # 2. 检查是否是交易日
             is_trade_day = False
             try:
                 is_trade_day = cct.get_trade_date_status()
             except Exception as e:
                 service_logger.debug(f"检查交易日状态异常: {e}")
-                
+
             if is_trade_day:
                 # 3. 检查时间是否在 15:15 之后
                 now_time_str = time.strftime("%H:%M")
@@ -4558,14 +4622,14 @@ class PRServiceGUI:
                         now_ts = t_mod.time()
                         last_attempt = getattr(self, '_last_auto_save_attempt_time', 0.0)
                         fail_count = getattr(self, '_auto_save_fail_count', 0)
-                        
+
                         # 冷却时间：至少间隔 5 分钟（300秒）才重试一次，防止异常时高频请求
                         if now_ts - last_attempt >= 300.0:
                             if not getattr(self, '_is_auto_saving_after_close', False):
                                 self._is_auto_saving_after_close = True
                                 self._last_auto_save_attempt_time = now_ts
                                 service_logger.info(f"检测到收盘（15:15后）且今日最终盘后数据尚未持久化，启动自动刷新与持久化 (尝试次数: {fail_count + 1})...")
-                                
+
                                 def auto_job():
                                     try:
                                         self.root.after(0, lambda: self.lbl_status.config(text="自动同步数据中...", fg="blue"))
@@ -4588,7 +4652,7 @@ class PRServiceGUI:
                                         self.root.after(0, lambda: self.lbl_status.config(text=f"持久化异常: {ex}", fg="red"))
                                     finally:
                                         self._is_auto_saving_after_close = False
-                                        
+
                                 threading.Thread(target=auto_job, daemon=True).start()
         except Exception as e:
             service_logger.error(f"收盘自动刷新检测异常: {e}")
@@ -4598,6 +4662,112 @@ class PRServiceGUI:
                 self.root.after(300000, self._check_auto_refresh_after_close)
             except Exception:
                 pass
+
+    def _get_all_popularity_stocks_for_ranking(self, latest_quotes=None, latest_df=None):
+        """
+        始终从全量人气榜股票池构建统计数据字典，
+        绝不受当前界面 Treeview 是否处于局部公式过滤或概念过滤的影响，
+        确保顶部‘当前概念’永远准确反映全市场 131 只人气个股的宏观主线！
+        """
+        import pandas as pd
+        stocks_dict = {}
+        block_cache = getattr(self, '_block_cache', {})
+        cached = getattr(self, '_last_data_cache', {}) or {}
+        quotes = cached.get('quotes', {}) or {}
+
+        # 1. 汇总所有涉及的人气股代码 (东、花、开、淘、合去重全集)
+        all_codes = set()
+        for k in ('em_data', 'ths_data', 'lh_data', 'tgb_data'):
+            d = cached.get(k, {})
+            if isinstance(d, dict):
+                all_codes.update(str(code).strip().zfill(6) for code in d.keys())
+            elif isinstance(d, list):
+                for item in d:
+                    if isinstance(item, dict) and 'code' in item:
+                        all_codes.add(str(item['code']).strip().zfill(6))
+        for r in cached.get('resonance_results', []):
+            if isinstance(r, dict) and 'code' in r:
+                all_codes.add(str(r['code']).strip().zfill(6))
+        for q_code in quotes.keys():
+            all_codes.add(str(q_code).strip().zfill(6))
+        for c in getattr(self, 'resonance_codes', []):
+            if c:
+                all_codes.add(str(c).strip().zfill(6))
+
+        # 兜底：如果缓存全空，从 Treeview 收集
+        if not all_codes:
+            for tree in (self.tree_em, self.tree_ths, self.tree_lh, self.tree_tgb, self.tree_res):
+                for iid in tree.get_children():
+                    vals = tree.item(iid, "values")
+                    if vals and len(vals) > 1:
+                        all_codes.add(str(vals[1]).strip().zfill(6))
+
+        # 2. 依次提取每个代码的有效信息并多层保底
+        for code in all_codes:
+            code_str = str(code).strip().zfill(6)
+            if not code_str or code_str == '000000':
+                continue
+
+            block_str = block_cache.get(code_str, '--')
+            if not block_str or block_str in ('--', 'nan', 'None'):
+                continue
+
+            # 获取名称
+            q_item = quotes.get(code_str, {})
+            name = q_item.get('name', '--')
+            if not name or name == '--':
+                try:
+                    from sys_utils import resolve_stock_name
+                    name = resolve_stock_name(code_str)
+                except Exception:
+                    name = code_str
+            if name.startswith("★ "):
+                name = name[len("★ "):]
+
+            # 获取最新价格与涨跌幅 (优先级: TDX实时盘口 > 全量DF > 历史Quote)
+            pct = 0.0
+            price_val = 0.0
+            if latest_quotes and code_str in latest_quotes:
+                tq = latest_quotes[code_str]
+                p = float(tq.get('price', 0.0))
+                lc = float(tq.get('last_close', p))
+                pct = round((p - lc) / lc * 100.0, 2) if (lc > 0 and p > 0) else float(tq.get('percent', 0.0))
+                price_val = p
+            elif latest_df is not None and not latest_df.empty and code_str in latest_df.index:
+                row = latest_df.loc[code_str]
+                if isinstance(row, pd.DataFrame):
+                    row = row.iloc[0]
+                pct = float(row.get('percent', row.get('ratio', 0.0)))
+                price_val = float(row.get('trade', row.get('close', row.get('price', 0.0))))
+            elif q_item:
+                pct = float(q_item.get('percent', 0.0))
+                price_val = float(q_item.get('price', 0.0))
+
+            # 量化指标 (ma5d, ma20d, ma60d, rank)
+            ma5 = 0.0
+            ma20 = 0.0
+            ma60 = 0.0
+            rank = 0
+            if latest_df is not None and not latest_df.empty and code_str in latest_df.index:
+                row = latest_df.loc[code_str]
+                if isinstance(row, pd.DataFrame):
+                    row = row.iloc[0]
+                ma5 = float(row.get('ma5d', 0.0))
+                ma20 = float(row.get('ma20d', 0.0))
+                ma60 = float(row.get('ma60d', 0.0))
+                rank = _safe_int(row.get('Rank', row.get('rank', 0)))
+
+            stocks_dict[code_str] = {
+                "name": name,
+                "percent": pct,
+                "category": block_str,
+                "close": f"{price_val:.2f}" if price_val > 0 else "--",
+                "ma5d": ma5,
+                "ma20d": ma20,
+                "ma60d": ma60,
+                "rank": rank,
+            }
+        return stocks_dict
 
     def update_concept_ranking(self, all_stocks):
         if not hasattr(self, 'dynamic_concepts_frame') or not self.dynamic_concepts_frame:
@@ -4613,6 +4783,7 @@ class PRServiceGUI:
             return
 
         import re
+        import math
         concept_dict = {}
         concept_is_bullish = {}
         # 用来保存每个板块下的个股 data [(code, name, percent, volume, rank)]
@@ -4622,9 +4793,9 @@ class PRServiceGUI:
             cat_str = info.get("category", "")
             if not cat_str or cat_str in ("--", "nan", "None"):
                 continue
-            cats = [c.strip() for c in re.split(r'[;；,，/|]', cat_str) if c.strip()]
+            cats = [c.strip() for c in re.split(r'[;；,，、/|\s]+', cat_str) if c.strip()]
             pct = info.get("percent", 0.0)
-            
+
             # 获取个股的基本属性并多层兜底
             name = info.get("name", "--")
             if not name or name == "--" or not str(name).strip():
@@ -4638,24 +4809,27 @@ class PRServiceGUI:
                     name = resolve_stock_name(code)
                 except Exception:
                     name = "--"
-            
+
             try:
                 close = float(info.get("close", 0.0))
                 ma5 = float(info.get("ma5d", 0.0))
                 ma20 = float(info.get("ma20d", 0.0))
-                ma6 = float(info.get("ma60d", 0.0))
-                is_bullish = (ma5 > ma20 > ma6) and (close > ma6)
+                ma60 = float(info.get("ma60d", 0.0))
+                is_bullish = (ma5 > ma20 > ma60) and (close > ma60)
             except Exception:
                 is_bullish = False
 
             # 获取 Rank 属性
             rank_val = info.get("rank", info.get("Rank", 0))
-            
+
             # 获取成交量 volume
             volume_val = info.get("volume", info.get("vol", info.get("amount", 0.0)))
 
             for cat in cats:
-                if cat in ('', '0', 'nan', 'None'):
+                if not cat or cat in ('', '0', 'nan', 'None'):
+                    continue
+                # 💥【核心过滤】：源头直接彻底拦截无实际产业题材的泛概念与噪声概念（如人民币贬值受益、漂亮100等）
+                if self._is_noise_concept(cat):
                     continue
                 if cat not in concept_dict:
                     concept_dict[cat] = []
@@ -4670,46 +4844,79 @@ class PRServiceGUI:
             if not percents:
                 continue
             cnt = len(percents)
-            total_pct = sum(percents)
-            avg_pct = total_pct / cnt
+            if cnt < 2:
+                continue
+
+            # 🚀【真实热点主线挖掘引擎 2.0 (Real Hot Sector Mining Engine)】
+            # 1. 领涨先锋梯队：取涨幅最好的前3只龙头标的 (绝不让后排下跌标的拖死领涨龙头)
+            sorted_p = sorted(percents, reverse=True)
+            top_leaders = sorted_p[:min(3, cnt)]
+            top_avg = sum(top_leaders) / len(top_leaders)
+
+            # 2. 涨停龙头与强势股暴击加权 (短线游资核心：有板有眼，首重涨停板领军)
+            limit_up_cnt = sum(1 for p in percents if p >= 9.5)
+            strong_cnt = sum(1 for p in percents if p >= 5.0)
+            leader_bonus = limit_up_cnt * 30.0 + (strong_cnt - limit_up_cnt) * 10.0
+
+            # 3. 领涨梯队动量基础分：前3只龙头正向动量与均幅贡献
+            leader_momentum = sum(max(0, p) for p in top_leaders) + max(0, top_avg) * 2.0
+
+            # 4. 集群共振效应与只数门槛：
+            # 2只属于独苗孤勇(抑制系数0.4)；3只给予0.7过渡；4只以上才是真正的板块梯队共振！
+            if cnt == 2:
+                cluster_factor = 0.4
+                cluster_bonus = 3.0
+            elif cnt == 3:
+                cluster_factor = 0.7
+                cluster_bonus = 8.0
+            else:
+                cluster_factor = 1.0 + min(1.2, (cnt - 3) * 0.08)
+                cluster_bonus = math.sqrt(cnt) * 8.0
+
+            # 多头趋势共振加成
             bullish_list = concept_is_bullish.get(cat, [])
             bullish_ratio = sum(bullish_list) / len(bullish_list) if bullish_list else 0.0
-            
-            # 🚀【板块热度加权】：板块异动个股越多权重越大！
-            # 综合板块总动量(总涨幅 sum(pct))与只数群聚分(Count * 10.0)，辅以多头趋势加成：
-            # Score = (TotalPct + Count * 10.0) * (1.0 + 0.5 * BullishRatio) * 10.0
-            if total_pct > 0:
-                base_energy = total_pct + (cnt * 10.0)
-                score = base_energy * (1.0 + 0.5 * bullish_ratio) * 10.0
-            else:
-                score = (total_pct - cnt * 5.0) * (1.0 + 0.5 * bullish_ratio) * 10.0
-            
+            trend_mult = 1.0 + 0.3 * bullish_ratio
+
+            score = (leader_momentum + leader_bonus + cluster_bonus) * cluster_factor * trend_mult
+
+            # 5. 实体工业与真实产业主线聚焦加成 (华为、汽车、芯片、算力、低空、机器人、新能源等)
+            try:
+                from stock_logic_utils import REAL_CONCEPT_KEYWORDS
+                is_real_sector = any(k in cat for k in REAL_CONCEPT_KEYWORDS)
+            except Exception:
+                is_real_sector = False
+            if is_real_sector:
+                score *= 1.35
+
             concept_score.append({
                 "name": cat,
                 "score": round(score, 2),
-                "avg_percent": round(avg_pct, 2),
+                "avg_percent": round(sum(percents) / cnt, 2),
                 "count": cnt,
-                "bullish_ratio": round(bullish_ratio, 2)
+                "bullish_ratio": round(bullish_ratio, 2),
+                "limit_up": limit_up_cnt,
+                "strong": strong_cnt,
+                "is_real": is_real_sector
             })
 
         # ── 过滤与排序逻辑 ──
         # 1. 优先选取成员数 >= 2 的有效概念 (过滤杂音)
-        valid_scores = [x for x in concept_score if x["count"] >= 2]
+        valid_scores = [x for x in concept_score if x["count"] >= 2 and not self._is_noise_concept(x["name"])]
         valid_scores.sort(key=lambda x: (
-            1 if self._is_noise_concept(x["name"]) else 0,
             -x["score"],
-            -x["count"],
-            -x["avg_percent"]
+            -x["limit_up"],
+            -x["avg_percent"],
+            -x["count"]
         ))
-        
-        # 2. 如果 valid_scores 数量不足 5 个，平滑降级从 count < 2 中补充非噪声概念
+
+        # 2. 如果 valid_scores 数量不足 5 个，平滑降级补充
         if len(valid_scores) < 5:
-            remaining = [x for x in concept_score if x["count"] < 2]
+            remaining = [x for x in concept_score if x["count"] < 2 and not self._is_noise_concept(x["name"])]
             remaining.sort(key=lambda x: (
-                1 if self._is_noise_concept(x["name"]) else 0,
                 -x["score"],
-                -x["count"],
-                -x["avg_percent"]
+                -x["avg_percent"],
+                -x["count"]
             ))
             top_candidates = valid_scores + remaining
         else:
@@ -4726,7 +4933,7 @@ class PRServiceGUI:
                 c_name = item['name']
                 c_count = item['count']
                 c_avg_pct = item['avg_percent']
-                
+
                 lbl_c = tk.Label(
                     self.dynamic_concepts_frame,
                     text=f"{c_name}:{c_count}只({c_avg_pct:+.1f}%)",
@@ -4735,10 +4942,10 @@ class PRServiceGUI:
                     cursor="hand2"
                 )
                 lbl_c.pack(side="left", padx=6)
-                
+
                 # 绑定点击事件：直接打开对应板块的个股 constituents 列表窗口！
                 lbl_c.bind("<Button-1>", lambda e, name=c_name: self.show_concept_top10_window(name))
-                
+
                 # 绑定鼠标悬浮变色（深绿/绿），增加 premium 的交互感
                 lbl_c.bind("<Enter>", lambda e, w=lbl_c: w.config(fg="#004D00"))
                 lbl_c.bind("<Leave>", lambda e, w=lbl_c: w.config(fg="green"))
@@ -4746,14 +4953,14 @@ class PRServiceGUI:
         # 缓存全量概念及其所占人气股只数（强度），用于右键点击查看最强概念板块个股列表
         self._all_concept_scores = {item["name"]: item["count"] for item in concept_score}
 
-        # 模仿 tk 保存当前的板块字典，个股按涨幅从大到小排序
+        # 保存当前前5板块列表供悬浮窗使用
         self._last_categories = [item["name"] for item in top5]
+        # 💥 全量板块个股字典预存：无论点击哪一个板块，均具备完整的成分股候选池
         self._last_cat_dict = {}
-        for cat in self._last_categories:
-            # 排序个股
-            stocks = temp_cat_stocks.get(cat, [])
-            stocks.sort(key=lambda x: x[2], reverse=True)
-            self._last_cat_dict[cat] = stocks
+        for cat, stocks in temp_cat_stocks.items():
+            sorted_stocks = list(stocks)
+            sorted_stocks.sort(key=lambda x: x[2], reverse=True)
+            self._last_cat_dict[cat] = sorted_stocks
 
     def show_concept_detail_window(self):
         """弹出详细概念异动窗口（复用+自动刷新+键盘/滚轮+高亮）"""
@@ -4781,7 +4988,7 @@ class PRServiceGUI:
         win = tk.Toplevel(self.root)
         self._concept_win = win
         win.title("概念板块统计详情")
-        
+
         # 恢复窗口几何尺寸，默认 240x450
         saved_geo = self.config.get("concept_detail_window_geometry", "240x450")
         try:
@@ -4849,7 +5056,7 @@ class PRServiceGUI:
         win.bind("<Up>", self._on_detail_key)
         win.bind("<Down>", self._on_detail_key)
         win.bind("<Escape>", lambda e: on_close_detail_window())
-        
+
         # 获取焦点
         win.focus_set()
 
@@ -4904,7 +5111,7 @@ class PRServiceGUI:
         if main_sort_col == "percent":
             main_sort_col = "val"
         main_sort_descending = getattr(self.tree_res, "sort_descending", self.config.get("sort_descending", True))
-        
+
         # 将主排序列名映射为 5 元组的索引
         col_to_idx = {
             "val": 2,
@@ -4920,7 +5127,7 @@ class PRServiceGUI:
             # 每个概念的标题行，点击也可以弹出具体板块个股窗口
             c_frame = tk.Frame(scroll_frame, bg="white")
             c_frame.pack(anchor="w", fill="x", pady=(6, 2))
-            
+
             c_lbl = tk.Label(
                 c_frame,
                 text=f"📂 {c} ({len(cat_dict.get(c, []))}只)",
@@ -4932,7 +5139,7 @@ class PRServiceGUI:
             )
             c_lbl.pack(side="left", padx=4)
             c_lbl.bind("<Button-1>", lambda e, name=c: self.show_concept_top10_window(name))
-            
+
             # 展示这个板块下的个股并排序
             stocks = list(cat_dict.get(c, []))
             if sort_idx is not None:
@@ -4945,14 +5152,14 @@ class PRServiceGUI:
                     stocks.sort(key=lambda x: try_float(x[sort_idx]), reverse=main_sort_descending)
                 else:
                     stocks.sort(key=lambda x: str(x[sort_idx]).lower(), reverse=main_sort_descending)
-            
+
             stocks_to_show = stocks[:limit]
             for code, name, percent, volume, rank in stocks_to_show:
                 # 仿照 tk 显示样式
                 disp_text = f"  {code} {name:<4} R:{rank:<3} {percent:>+6.2f}%"
-                
+
                 fg_color = "#E02020" if percent > 0 else ("#20A020" if percent < 0 else "black")
-                
+
                 lbl = tk.Label(
                     scroll_frame,
                     text=disp_text,
@@ -4966,7 +5173,7 @@ class PRServiceGUI:
                 lbl.pack(anchor="w", padx=10, pady=1)
                 lbl._code = code
                 lbl._concept = c
-                
+
                 idx = len(self._label_widgets)
                 lbl.bind("<Button-1>", lambda e, cd=code, i=idx: self._on_label_click(cd, i))
                 lbl.bind("<Double-Button-1>", lambda e, cd=code, name=c: self._on_label_double_click(cd, name))
@@ -5029,10 +5236,12 @@ class PRServiceGUI:
 
     def show_concept_top10_window(self, concept_name):
         """
-        [NEW] 复刻 tk 中的概念板块个股 Top10/Top50 幕口展示功能。
-        已优化：支持历史复盘模式数据自动对齐、自适应自定义追加列、窗口复用自愈、Escape键关闭以及窗口位置记忆。
-        以及：支持精准的中英文括号标准化匹配、跟人气主表一致的自选股优先多级排序及同步排序、以及底部上涨下跌股数与均幅统计。
-        板块个股详情列（code, name, val, price, dff2, dff3, rank 等）已与人气排行主窗口完全对齐。
+        复刻 tk 中的概念板块个股 Top10/Top50 展示功能。
+        已全面优化：
+        1. 修复非交易时段/冷启动下日期判断将缓存误判为历史导致无匹配个股的 Bug；
+        2. 增加与 self._last_cat_dict 预存候选池强对齐兜底，确保 100% 弹出匹配个股；
+        3. 强化中英文括号、去数量后缀、模糊归一化比对；
+        4. 排序自适应对齐人气主窗口。
         """
         import re
         import pandas as pd
@@ -5041,20 +5250,21 @@ class PRServiceGUI:
         if not target_concept:
             return
 
-        # 2. 确定是否是历史浏览模式
+        # 1. 严格判定是否真正处于有效历史文件模式
         today = time.strftime("%Y-%m-%d")
         current_view_date = self.date_entry.get().strip() if hasattr(self, "date_entry") else today
-        is_history_mode = (current_view_date != today)
+        has_history_df = hasattr(self, "_history_df") and self._history_df is not None and not self._history_df.empty
+        is_history_mode = (current_view_date != today) and has_history_df
 
         df_all = self.sync_manager.get_current_df()
         # 自动对齐列：如果处于历史模式且已加载历史数据，则直接对齐当前历史列结构，否则使用实时配置列
-        if is_history_mode and hasattr(self, "_history_df") and self._history_df is not None:
+        if is_history_mode:
             csv_cols = self._history_df.columns.tolist()
             ignored = {"code", "name", "score", "em_rank", "ths_rank", "lh_rank", "tgb_rank", "price", "percent", "dff2", "dff3", "rank", "block"}
             extra_cols = [c for c in csv_cols if c not in ignored]
         else:
             _, _, extra_cols = self._get_all_cols()
-        
+
         # 收集当前人气排行中真正存在的、包含此概念的个股
         matched_stocks = []
 
@@ -5063,16 +5273,15 @@ class PRServiceGUI:
                 return default
             return str(val).strip()
 
-        # 1. 提取当前模式下正在显示的所有人气强势个股的数据行，并进行物理去重
+        # 2. 提取当前模式下正在显示的所有人气强势个股的数据行，并进行物理去重
         current_stocks = []
         seen_codes = set()
         if is_history_mode:
-            if hasattr(self, "_history_df") and self._history_df is not None:
-                for _, row in self._history_df.iterrows():
-                    c = str(row.get("code", "")).strip().split('.')[0].zfill(6)
-                    if c and c != "000000" and c not in seen_codes:
-                        seen_codes.add(c)
-                        current_stocks.append((c, row))
+            for _, row in self._history_df.iterrows():
+                c = str(row.get("code", "")).strip().split('.')[0].zfill(6)
+                if c and c != "000000" and c not in seen_codes:
+                    seen_codes.add(c)
+                    current_stocks.append((c, row))
         else:
             # 严格从当前人气综合界面的 5 个表格中实际展示/载入的所有强势个股中提取！
             all_trees = (self.tree_em, self.tree_ths, self.tree_lh, self.tree_tgb, self.tree_res)
@@ -5097,21 +5306,28 @@ class PRServiceGUI:
                                     row_obj = None
                             current_stocks.append((c, row_obj))
 
-        # 2. 遍历并匹配属于 target_concept 的股票
+        # 3. 遍历并匹配属于 target_concept 的股票
         for code_str, row in current_stocks:
-            # 优先从 _block_cache 获取这只个股 of 板块，如果是历史模式且行内自带 block 则从中获取
             block_str = getattr(self, '_block_cache', {}).get(code_str, "")
             if not block_str or block_str in ("--", "nan", "None"):
                 if hasattr(row, "get"):
                     block_str = safe_str(row.get("block"))
-            
+
             if not block_str or block_str in ("--", "nan", "None"):
                 continue
 
-            cats = [c.strip() for c in re.split(r'[;；,，/|]', block_str) if c.strip()]
+            cats = [c.strip() for c in re.split(r'[;；,，、/|\s]+', block_str) if c.strip()]
             cats_normalized = [self._normalize_concept_name(c) for c in cats]
-            
-            if target_concept in cats_normalized:
+
+            # 多重对齐匹配
+            is_matched = (
+                (target_concept in cats_normalized) or
+                (concept_name in cats) or
+                any(self._normalize_concept_name(c) == target_concept for c in cats) or
+                (target_concept in block_str)
+            )
+
+            if is_matched:
                 name = "--"
                 pct = 0.0
                 price = 0.0
@@ -5123,7 +5339,6 @@ class PRServiceGUI:
                 if is_history_mode:
                     try:
                         name = safe_str(row.get("name"))
-                        # 补齐个股名称兜底解析：防止单独运行、无缓存时历史个股名称全显示为 '--' 的情况
                         if name == "--" or not name.strip():
                             try:
                                 from sys_utils import resolve_stock_name
@@ -5136,21 +5351,21 @@ class PRServiceGUI:
                                 pct = float(str(pct_val).replace('%', ''))
                             except ValueError:
                                 pct = 0.0
-                        
+
                         price_val = row.get("price", 0.0)
                         if pd.notna(price_val):
                             try:
                                 price = float(price_val)
                             except ValueError:
                                 price = 0.0
-                        
+
                         rank_val_raw = row.get("rank", 0)
                         if pd.notna(rank_val_raw):
                             try:
                                 rank_val = int(float(rank_val_raw))
                             except ValueError:
                                 rank_val = 0
-                        
+
                         dff2_val = row.get("dff2", row.get("dff", 0.0))
                         if pd.notna(dff2_val):
                             try:
@@ -5188,14 +5403,17 @@ class PRServiceGUI:
                     except Exception:
                         name = "--"
 
-                # 从 quotes 缓存兜底个股名称等
-                if name == "--" and hasattr(self, '_last_data_cache') and self._last_data_cache:
+                # 从 quotes 缓存兜底个股名称与现价
+                if hasattr(self, '_last_data_cache') and self._last_data_cache:
                     q_data = self._last_data_cache.get("quotes", {})
                     if code_str in q_data:
-                        name = q_data[code_str].get("name", name)
+                        if name == "--" or not name.strip():
+                            name = q_data[code_str].get("name", name)
                         if not is_history_mode:
-                            pct = q_data[code_str].get("percent", pct)
-                            price = q_data[code_str].get("price", price)
+                            if pct == 0.0:
+                                pct = float(q_data[code_str].get("percent", pct))
+                            if price == 0.0:
+                                price = float(q_data[code_str].get("price", price))
 
                 # 动态获取自定义列值
                 extra_vals = {}
@@ -5219,6 +5437,62 @@ class PRServiceGUI:
                     "extra_vals": extra_vals
                 })
 
+        # 💥 4. 关键兜底对齐：若 matched_stocks 为空，自动从 self._last_cat_dict 预存候选池精准提取
+        if not matched_stocks and hasattr(self, "_last_cat_dict") and self._last_cat_dict:
+            cached_cat_stocks = self._last_cat_dict.get(target_concept)
+            if not cached_cat_stocks:
+                for k, v in self._last_cat_dict.items():
+                    if self._normalize_concept_name(k) == target_concept or k == concept_name:
+                        cached_cat_stocks = v
+                        break
+            if cached_cat_stocks:
+                for item in cached_cat_stocks:
+                    # item: (code, name, percent, volume, rank)
+                    c_code = str(item[0]).strip().zfill(6)
+                    c_name = str(item[1]).strip()
+                    c_pct = float(item[2]) if len(item) > 2 else 0.0
+                    c_rank = int(item[4]) if len(item) > 4 else 0
+                    c_price = 0.0
+                    c_dff2 = 0.0
+                    c_dff3 = 0.0
+
+                    if hasattr(self, '_last_data_cache') and self._last_data_cache:
+                        q_data = self._last_data_cache.get("quotes", {})
+                        if c_code in q_data:
+                            c_price = float(q_data[c_code].get("price", 0.0))
+                            if c_name == "--" or not c_name.strip():
+                                c_name = q_data[c_code].get("name", c_name)
+                    if df_all is not None and c_code in df_all.index:
+                        try:
+                            r_row = df_all.loc[c_code]
+                            if isinstance(r_row, pd.DataFrame):
+                                r_row = r_row.iloc[0]
+                            if c_price <= 0:
+                                c_price = float(r_row.get('trade', r_row.get('close', r_row.get('price', 0.0))))
+                            c_dff2 = float(r_row.get('dff2', r_row.get('DFF2', 0.0)))
+                            c_dff3 = float(r_row.get('dff3', r_row.get('DFF3', 0.0)))
+                        except Exception:
+                            pass
+
+                    if c_name == "--" or not c_name.strip():
+                        try:
+                            from sys_utils import resolve_stock_name
+                            c_name = resolve_stock_name(c_code)
+                        except Exception:
+                            c_name = "--"
+
+                    extra_vals = {ec: "--" for ec in extra_cols}
+                    matched_stocks.append({
+                        "code": c_code,
+                        "name": c_name,
+                        "val": c_pct,
+                        "price": c_price,
+                        "dff2": c_dff2,
+                        "dff3": c_dff3,
+                        "rank": c_rank,
+                        "extra_vals": extra_vals
+                    })
+
         if not matched_stocks:
             messagebox.showinfo("信息", f"板块【{target_concept}】暂无匹配的人气个股", parent=self.root)
             return
@@ -5226,7 +5500,7 @@ class PRServiceGUI:
         # 默认按涨幅降序
         matched_stocks.sort(key=lambda x: x["val"], reverse=True)
 
-        # 3. 销毁并重建 Toplevel 窗口（自愈并适配动态列头）
+        # 5. 销毁并重建 Toplevel 窗口（自愈并适配动态列头）
         geo = self.config.get("concept_window_geometry", "600x385")
         if getattr(self, "concept_win", None) is not None and self.concept_win.winfo_exists():
             try:
@@ -5241,7 +5515,7 @@ class PRServiceGUI:
             win.geometry(geo)
         except Exception:
             win.geometry("600x385")
-            
+
         # 监听大小与坐标变化以保存布局
         def _save_concept_win_geo(event):
             if win.winfo_exists():
@@ -5251,8 +5525,8 @@ class PRServiceGUI:
                     pass
         win.bind("<Configure>", _save_concept_win_geo)
         win.bind("<Escape>", lambda e: win.destroy())
-        
-        # 4. 创建内部布局 （包含 1px 边框与极窄滚动条）
+
+        # 6. 创建内部布局 （包含 1px 边框与极窄滚动条）
         frame = tk.Frame(win, bg="white", highlightbackground="#CCCCCC", highlightthickness=1, bd=0)
         frame.pack(fill="both", expand=True, padx=4, pady=4)
 
@@ -5275,60 +5549,35 @@ class PRServiceGUI:
         tree.pack(side="left", fill="both", expand=True)
         vsb.pack(side="right", fill="y")
 
-        # 5. 排序自适应及与人气视图一致的功能
+        # 7. 排序自适应及与人气视图一致的功能
         def sort_top10_column(t, col, reverse):
             self.sort_column(t, col, reverse)
-            # 点击后 toggle
-            t.heading(col, command=lambda c=col: sort_top10_column(t, c, not reverse))
 
         for col in columns:
-            tree.heading(col, text=col_texts.get(col, col), command=lambda c=col: sort_top10_column(tree, c, False))
+            text = col_texts.get(col, col)
+            tree.heading(col, text=text, anchor="center",
+                         command=lambda c=col: sort_top10_column(tree, c, not getattr(tree, f"_sort_reverse_{c}", False)))
+            # 根据列名配置自适应宽度
             if col == "idx":
-                width = 26
-                stretch = False
-            elif col == "code":
-                width = 52
-                stretch = False
+                tree.column(col, width=40, minwidth=30, anchor="center")
+            elif col in ("code", "val", "price", "dff2", "dff3", "rank"):
+                tree.column(col, width=65, minwidth=50, anchor="center")
             elif col == "name":
-                width = 64
-                stretch = True
-            elif col == "val":
-                width = 48
-                stretch = True
-            elif col == "price":
-                width = 50
-                stretch = True
-            elif col == "dff2":
-                width = 44
-                stretch = True
-            elif col == "dff3":
-                width = 44
-                stretch = True
-            elif col == "rank":
-                width = 40
-                stretch = True
+                tree.column(col, width=80, minwidth=60, anchor="center")
             else:
-                width = 48  # 自定义追加列的默认宽度
-                stretch = True
-            tree.column(col, anchor="center", width=width, stretch=stretch)
+                tree.column(col, width=75, minwidth=50, anchor="center")
 
-        tree.tag_configure("up",       foreground="#E02020", font=("Microsoft YaHei", 9, "bold"))
-        tree.tag_configure("down",     foreground="#20A020", font=("Microsoft YaHei", 9, "bold"))
-        tree.tag_configure("flat",     foreground="#000000", font=("Microsoft YaHei", 9))
-        tree.tag_configure("favorite", background="#e6ffe6", font=("Microsoft YaHei", 9, "bold"))
+        tree.tag_configure("up", foreground="red")
+        tree.tag_configure("down", foreground="green")
+        tree.tag_configure("flat", foreground="black")
 
-        self.concept_tree = tree
-
-        # 单击与双击联动事件
+        # 绑定常用快捷键与事件
         def on_select_top10(event):
-            if getattr(self, '_is_scrolling_to_code', False):
-                return
-            self._last_active_tree = tree
             sel = tree.selection()
             if sel:
                 vals = tree.item(sel[0], "values")
                 if vals and len(vals) >= 2:
-                    code = str(vals[1]).strip().zfill(6) # 0 is idx, 1 is code
+                    code = str(vals[1]).strip().zfill(6)
                     if getattr(self, '_active_link_code', None) == code:
                         return
                     self.tree_scroll_to_code(code, vis=True)
@@ -5338,11 +5587,10 @@ class PRServiceGUI:
             if sel:
                 vals = tree.item(sel[0], "values")
                 if vals and len(vals) >= 3:
-                    code = str(vals[1]).strip().zfill(6) # 0 is idx, 1 is code
-                    name = str(vals[2]).strip()          # 2 is name
+                    code = str(vals[1]).strip().zfill(6)
+                    name = str(vals[2]).strip()
                     if name.startswith("★ "):
                         name = name[len("★ "):]
-                    
                     block = getattr(self, '_block_cache', {}).get(code, '--')
                     messagebox.showinfo("板块信息", f"个股: {name} ({code})\n所属行业板块: {block}", parent=self.concept_win)
 
@@ -5353,8 +5601,8 @@ class PRServiceGUI:
         tree.bind("<Control-C>", self.on_copy_shortcut)
 
         win.title(f"板块【{target_concept}】个股列表")
-        
-        # 插入匹配的股票行
+
+        # 8. 插入匹配的股票行
         try:
             from global_favorites import GlobalFavoriteManager
             fav_stocks = GlobalFavoriteManager().get_favorite_stocks()
@@ -5399,14 +5647,13 @@ class PRServiceGUI:
                 dff3_str,
                 rank_str
             )
-            # 自定义列的值动态追加到元组中
             extra_vals = item.get("extra_vals", {})
             for ec in extra_cols:
                 row_values = row_values + (extra_vals.get(ec, "--"),)
 
             tree.insert("", "end", values=row_values, tags=tuple(tags))
 
-        # 6. 同步人气主窗口的排序列和升降序
+        # 9. 同步人气主窗口的排序列和升降序
         main_sort_col = getattr(self.tree_res, "sort_col", self.config.get("sort_col", "val"))
         if main_sort_col == "percent":
             main_sort_col = "val"
@@ -5414,7 +5661,7 @@ class PRServiceGUI:
         if main_sort_col in columns:
             sort_top10_column(tree, main_sort_col, main_sort_descending)
 
-        # 7. 在底部添加统计信息框
+        # 10. 在底部添加统计信息框
         stat_frame = tk.Frame(win, bg="#F9F9F9", height=24)
         stat_frame.pack(side="bottom", fill="x", padx=4, pady=2)
 
@@ -5437,7 +5684,7 @@ if __name__ == "__main__":
     # Windows/PyInstaller 多进程兼容性支持
     import multiprocessing
     multiprocessing.freeze_support()
-    
+
     root = tk.Tk()
     app = PRServiceGUI(root)
     root.mainloop()
