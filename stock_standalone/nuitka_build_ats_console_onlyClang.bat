@@ -210,6 +210,7 @@ set CMD="%PYTHON_EXEC%" -m nuitka !NUITKA_MODE_OPT! "%MAIN_SCRIPT%" ^
     !NUITKA_CLANG_OPT! ^
     --assume-yes-for-downloads ^
     --enable-plugin=pyqt6 ^
+    --enable-plugin=tk-inter ^
     --windows-console-mode=force ^
     --windows-icon-from-ico="%ICON_FILE%" ^
     --windows-company-name="Johnson QuantLab" ^
@@ -248,7 +249,6 @@ set CMD="%PYTHON_EXEC%" -m nuitka !NUITKA_MODE_OPT! "%MAIN_SCRIPT%" ^
     --nofollow-import-to=jedi ^
     --nofollow-import-to=IPython ^
     --nofollow-import-to=notebook ^
-    --nofollow-import-to=tkinter ^
     --nofollow-import-to=lxml ^
     --nofollow-import-to=cryptography ^
     --nofollow-import-to=numba ^
