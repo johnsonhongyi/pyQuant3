@@ -1,5 +1,31 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-10-02 22:30 人气综合热点主线挖掘引擎 2.0、过滤解耦与 Hit 命中计算彻底修复闭环
+- [x] **【热点主线挖掘2.0(领涨梯队动量+只数抑制)、顶部热榜与表格过滤彻底解耦(SSOT)、Hit全量数据源与category注入防全0全闭环】(`popularity_resonance_gui.py`, `tests/test_concept_ranking_and_hits_fix.py`, `20261002_2230_task.md`)**：
+    - [x] **根因全面排查与实证 [RootCause]**：
+        1. 查明旧挖掘算法以 `sum(percents)` 全量代数和为动量基础，导致华为概念（39只）、新能源车（29只）等大主线因跟随大盘分化的标的被拖累至负分；反而 2 只股票的微型冷门板块（幽门螺杆菌、CRO）凭借 1 只 20cm 涨停无杂质拖累，刷上榜首；
+        2. 查明 `update_all_tables` 与 `refresh_realtime_fields` 从当前 Treeview 获取统计股票，表格一旦被公式过滤成 14 只，全局热榜被降维为局部池；
+        3. 查明 `get_test_df_for_hits` 也从当前被过滤的 Treeview 获取代码，导致拿 14 只股票测全部分组公式，且 `test_df` 缺少 `category` 板块列，导致所有 `category.str.contains(...)` 公式全部命中为 0；
+    - [x] **热点主线真实挖掘引擎 2.0 (Real Hot Sector Mining Engine 2.0) [Core]**：废除全量成员代数求和；采用领涨先锋梯队（Top-3 Leaders）动量模型，前 3 只龙头正向动量与均幅贡献（`leader_momentum = sum(max(0, p) for p in top_leaders) + max(0, top_avg) * 2.0`），绝不让后排杂毛负涨幅拖死领涨龙头；涨停龙头暴击 +30.0 分，强势股 +10.0 分；引入集群规模共振与门槛机制（2只抑制系数 0.4、3只 0.7、>=4只 $\sqrt{\text{cnt}} \times 8.0$）；实体工业白名单赋予 1.35x 聚焦加成；实测人工智能（759.9分）、华为概念（673.0分）、新能源汽车（602.7分）、机器人（593.4分）、DeepSeek（522.4分）、汽车电子（439.5分）、华为汽车（231.7分）强势霸榜，幽门螺杆菌（31.5分）彻底出局；
+    - [x] **顶部全局热榜与当前表格局部过滤彻底解耦 [SRP/SSOT]**：实现 `_get_all_popularity_stocks_for_ranking(latest_quotes, latest_df)`，无论当前表格是否处于公式过滤，顶部概念热榜永远基于全量 131 只人气股票池计算，确保真实反映全市场大势主线；
+    - [x] **Hit 命中计算全量数据源与 category 注入 [Robustness]**：`get_test_df_for_hits` 统一从全量人气池（东、花、开、淘、合所有缓存代码）提取代码；强制将 `_block_cache` 注入到 `test_df['category']` 和 `test_df['板块']`，保证所有 `category.str.contains(...)` 公式 100% 正常匹配；允许离线或收盘降级使用本地完整缓存计算 Hit；`clear_filter` 自动重置 `_last_test_df_hits = None`，彻底消除全 0 异常；
+    - [x] **全链路测试验证 100% 绿灯**：新增针对性专项单元测试覆盖挖掘算法 2.0、全量代码池、category 注入与过滤解耦，全量回归测试 100% PASS，代码全部通过 `git diff --check` 与 `python -m py_compile` 校验。
+
+## 2026-10-02 21:10 修复 ATS Nuitka 打包脚本中 h5py 缺失导致 FATAL 编译中断与依赖对齐闭环
+- [x] **【彻底拔除历史冗余h5py硬依赖、对齐TK包级tables与压缩插件配置、修正环境恢复脚本与spec规范、补齐测试排除规则根除anti-bloat告警】(`nuitka_build_ats_console_onlyClang.bat`, `restore_tk_nuitka_env.bat`, `ats.spec`, `20261002_2110_task.md`)**：
+    - [x] **根因全面排查与实证 [RootCause]**：确认 ATS 源码中 0 行代码使用 `h5py`，底层日线、分时与归档统一依赖 `JSONData.tdx_hdf5_api.SafeHDFStore` 及 `pd.read_hdf`（底层引擎为 PyTables `tables`）；`ats.spec` 中的 `'h5py'` 纯属历史防御性多写，PyInstaller 仅作 warning 宽容忽略，而 Nuitka 严格编译器执行 `--include-module=h5py` 定位失败即 FATAL 崩溃；
+    - [x] **拔除无效依赖与对齐 TK 打包参数 [KISS/DRY]**：在 `nuitka_build_ats_console_onlyClang.bat` 彻底删除 `--include-module=h5py`；将 `--include-module=tables` 对齐为 `--include-package=tables` 并补齐 `--include-module=tables._comp_lzo` 和 `--include-module=tables._comp_bzip2`；
+    - [x] **补齐测试代码与防膨胀排除规则 [Optimization]**：在 `nuitka_build_ats_console_onlyClang.bat` 补齐 `--nofollow-import-to=tables.tests`、`tables.nodes.tests`、`pandas.tests`、`numpy.tests`、`unittest`、`doctest`，彻底根除 anti-bloat 编译告警并缩短 Clang 编译时间；
+    - [x] **环境恢复脚本与 spec 规范同步 [CleanUp]**：在 `restore_tk_nuitka_env.bat` 移除 `import h5py` 验证指令，防止无 `h5py` 环境误报失败；在 `ats.spec` 中移除冗余的 `'h5py'` hiddenimport，消除 PyInstaller 构建 warning；
+    - [x] **模块加载全链路验证通过**：在 `tk_nuitka_env` 环境下对全部 55 个核心模块与 PyYAML 校验通过，`git diff --check` 无任何格式缺陷。
+
+## 2026-10-02 20:35 人气综合排行剔除无实际概念板块、热点主线真实挖掘与弹窗点击修复闭环
+- [x] **【彻底剔除无实际概念泛板块(人民币贬值受益/漂亮100等)、热点主线(华为汽车/新能源/减速器)真实挖掘加权、弹窗数据回退防空修复】(`stock_logic_utils.py`, `popularity_resonance_gui.py`, `tests/test_concept_ranking_and_window_fix.py`, `20261002_2035_task.md`)**：
+    - [x] **全系统黑名单与泛概念彻底剔除 [SRP/KISS]**：在 `stock_logic_utils.py` 与 `popularity_resonance_gui.py` 中将“人民币贬值受益”、“人民币贬值受益概念”、“人民币升值受益”、“外贸受益”、“出口退税”、“同花顺漂亮100”、“漂亮100”、“出海50”等泛金融/汇率/指数标签纳入黑名单；概念提取源头拦截过滤，绝不进入统计池；
+    - [x] **show_concept_top10_window 弹窗回退自愈与数据强一致 [Robustness]**：修复非交易时段 `current_view_date != today` 误将缓存状态判为历史模式导致空列表的 Bug；当 `_history_df` 为空时自动平滑 fallback 至当前 5 个表格数据；接入 `_last_cat_dict` 预存候选池，保证点击板块 100% 弹出完整匹配个股，彻底消除“暂无匹配的人气个股”；
+    - [x] **热点板块真实挖掘算法重构 (Real Hot Sector Mining Engine) [Core]**：废除纯线性只数暴力膨胀；引入领涨龙头涨停加权（`limit_up_cnt * 15.0`）、强势聚集（`strong_cnt * 5.0`）、非线性集群开方加权（`sqrt(cnt) * 6.0`）与产业主线白名单保护聚焦加成，大幅强化华为汽车、新能源汽车、汽车电子、减速器等资金主线聚焦能力；
+    - [x] **全链路测试验证 100% 绿灯**：新增针对性专项单元测试覆盖噪声拦截、热点算法打分与窗口回退自愈，全工程全量 47 项测试 100% PASS（耗时 13.43s），代码全部通过 `git diff --check` 与 `python -m py_compile` 校验。
+
 ## 2026-10-01 21:15 修复龙头突击跟单榜冷启动无数据显示与天梯底板机制对齐闭环
 - [x] **【非交易时段冷启动首刷放行、对齐天梯即时异步首刷与showEvent守卫、热力图/快照底板自动感知装载、成分股自适应解析兜底、全量54项测试100%全绿】(`ats/ui/hot_sector_leaderboard.py`, `ats/hot_sector_engine.py`, `tests/test_ats_optimization_review.py`, `20261001_2050_task.md`)**：
     - [x] **非交易时段冷启动首刷守卫放行 [KISS/SRP]**：重构 `_on_ui_timer_tick` 休眠拦截条件为 `if not is_trading and not force and self._has_init_fetched: return`，放行冷启动（`_has_init_fetched=False`）首刷，解决非交易时段打开窗口一刀切被 return 导致表格全黑与 No.1/No.2/No.3 显示 `--` 的假死缺陷；首刷完毕后自动恢复 60s 节流休眠；

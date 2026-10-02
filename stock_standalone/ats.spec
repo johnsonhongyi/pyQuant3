@@ -57,7 +57,7 @@ a = Analysis(
                     'ats.swing_tracker', 'ats.backtest_engine', 'ats.trade_journal',
                     'ats.ui.main_window', 'ats.ui.chart_widgets', 'ats.ui.universe_widget',
                     'ats.ui.heatmap_widget', 'ats.ui.swing_table', 'ats.ui.trade_flow',
-                    'configobj', 'JSONData', 'JSONData.sina_data', 'tables', 'h5py',
+                    'configobj', 'JSONData', 'JSONData.sina_data', 'tables',
                     'JSONData.tdx_hdf5_api', 'JSONData.realdatajson', 'JSONData.wencaiData',
                     'JSONData.tdxbk', 'JohnsonUtil.johnson_cons', 'tushare', 'pandas_ta',
                     'JohnsonUtil.commonTips', 'talib.stream', 'talib.abstract', 'run_sbc',
