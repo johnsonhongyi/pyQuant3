@@ -253,7 +253,6 @@ set CMD="%PYTHON_EXEC%" -m nuitka !NUITKA_MODE_OPT! "%MAIN_SCRIPT%" ^
     --windows-file-version="1.0.0" ^
     --windows-product-version="1.0.0" ^
     --output-dir="%OUTPUT_DIR%" ^
-    --lto=no ^
     --no-pyi-file ^
     --lto=yes ^
     --jobs=8 ^
@@ -269,6 +268,8 @@ set CMD="%PYTHON_EXEC%" -m nuitka !NUITKA_MODE_OPT! "%MAIN_SCRIPT%" ^
     --nofollow-import-to=notebook ^
     --nofollow-import-to=jedi ^
     --nofollow-import-to=unittest ^
+    --nofollow-import-to=doctest ^
+    --nofollow-import-to=win32ui ^
     --nofollow-import-to=numba ^
     --nofollow-import-to=llvmlite ^
     --nofollow-import-to=cryptography ^
@@ -319,6 +320,8 @@ set CMD="%PYTHON_EXEC%" -m nuitka !NUITKA_MODE_OPT! "%MAIN_SCRIPT%" ^
     --noinclude-dlls=Qt6Test.dll ^
     --noinclude-dlls=Qt6Xml.dll ^
     --noinclude-dlls=opengl32sw.dll ^
+    --noinclude-dlls=mfc140u.dll ^
+    --noinclude-dlls=mfc140.dll ^
     --include-data-file="%CSV_PATH%=a_trade_calendar\a_trade_calendar.csv" ^
     --include-data-file=MonitorTK.ico=MonitorTK.ico ^
     --include-data-file=window_config.json=window_config.json ^
@@ -331,9 +334,10 @@ set CMD="%PYTHON_EXEC%" -m nuitka !NUITKA_MODE_OPT! "%MAIN_SCRIPT%" ^
     --include-data-file=config\multi_period_help.md=config\multi_period_help.md ^
     --include-data-file=config\multi_period_strategies.json=config\multi_period_strategies.json ^
     --include-data-file=config\indicator_help_custom.json=config\indicator_help_custom.json ^
-    --include-package=ats ^
     --include-package=JSONData ^
     --include-package=tables ^
+    --include-module=tables._comp_lzo ^
+    --include-module=tables._comp_bzip2 ^
     --include-package=a_trade_calendar ^
     --include-package=talib ^
     --include-module=global_favorites ^
@@ -344,7 +348,6 @@ set CMD="%PYTHON_EXEC%" -m nuitka !NUITKA_MODE_OPT! "%MAIN_SCRIPT%" ^
     --include-module=configobj ^
     --include-module=tushare ^
     --include-module=pandas_ta
-
 
 :: ===== Execute compilation =====
 echo ==========================================

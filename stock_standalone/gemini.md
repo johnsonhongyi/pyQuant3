@@ -1,5 +1,24 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-10-03 00:45 ATS 与多周期 Nuitka 打包体积深度瘦身与运行底座安全性全面校准闭环
+- [x] **【彻底拔除MFC/win32ui(立省5.35MB)、底层联动win32gui完好保留、保留系统运行时防空白系统缺DLL、规范包含trading_kernel保障IPO自学习、双插件(tk-inter+pyqt6)无损协同】(`nuitka_build_ats_console_onlyClang.bat`, `nuitka_build_multi_period_dialog_onlyClang.bat`, `20261003_0045_task.md`)**：
+    - [x] **根因全面排查与运行底座实证 [RootCause]**：
+        1. 查明 `G:\Temp\ATS_Nuitka\` 解压产物中误入了 `mfc140u.dll` (5.35 MB) 与 `win32ui.pyd` (1.09 MB)，系 `pywin32` 未排除导致；全工程 0 行代码使用 MFC；
+        2. 实证行情联动与桌面置顶核心为 `win32gui`（全工程 26 个文件重度使用，基于系统原生 `user32/gdi32`），本次排除的是 `win32ui`，`win32gui` 从未被排除且 100% 正常打包；
+        3. 查明 IPO 自学习控制台（`--ipo-learning`）依赖 `gate_orchestrator` 与 `unified_paper_account`，后者内部存在函数级动态导入 `trading_kernel.gateway`、`contracts` 与 `kernel_service`，全量移除容易在极端调用分支引发 `ModuleNotFoundError`；
+        4. 查明若开启 `--include-windows-runtime-dlls=no`，在未安装 VC++ 2015-2022 运行库的纯净 Windows 10/11 会弹窗报错丢失 `VCRUNTIME140.dll`，必须移除该参数恢复默认随包打包。
+    - [x] **ATS 打包脚本深度瘦身与安全重构 [KISS/YAGNI/Optimization]**：
+        1. 增加 `--nofollow-import-to=win32ui`，并显式指定 `--noinclude-dlls=mfc140u.dll`、`mfc140.dll`，消灭 5.35 MB 无用二进制；
+        2. 彻底删除 `--include-windows-runtime-dlls=no`，随包自带 VC++ 运行时 DLL，保证任何纯净 Win10/Win11 开箱即用；
+        3. 彻底删除 30 多个 `ats.xxx` 机器码枚举与 `--include-module=pandas`, `numpy`, `pyqtgraph`, `sqlite3`，让 Nuitka 自动分析并启用 Anti-bloat 摇树裁剪；
+        4. 规范对齐 TK 主程序标准，保留 `--include-package=trading_kernel` 及 `contracts`, `gateway`, `kernel_service` 核心模块（仅几百 KB 纯代码），排除 `trading_kernel.tests`，100% 杜绝 IPO 学习与自学习交易链漏包；
+        5. 补齐 `--enable-plugin=tk-inter` 和 `--enable-plugin=pyqt6` 双插件协同，排除 `tkinter.test` 确保 `tk_gui_modules` 稳定运行；
+    - [x] **多周期打包脚本同步对齐优化 [Consistency/Optimization]**：
+        1. 在 `nuitka_build_multi_period_dialog_onlyClang.bat` 移除 `--include-package=ats`，不用强行包括 ats，让 Nuitka 自动处理；
+        2. 移除 `--include-windows-runtime-dlls=no`，确保跨机器兼容性；
+        3. 补齐 `--nofollow-import-to=win32ui`、`mfc140u.dll`、`mfc140.dll`、`doctest` 与 `tables` 压缩插件。
+    - [x] **全链路语法与编码校验 100% 绿灯**：全量变更通过 `git diff --check`，输出路径严格对齐至统一的 `build\` 目录。
+
 ## 2026-10-02 22:30 人气综合热点主线挖掘引擎 2.0、过滤解耦与 Hit 命中计算彻底修复闭环
 - [x] **【热点主线挖掘2.0(领涨梯队动量+只数抑制)、顶部热榜与表格过滤彻底解耦(SSOT)、Hit全量数据源与category注入防全0全闭环】(`popularity_resonance_gui.py`, `tests/test_concept_ranking_and_hits_fix.py`, `20261002_2230_task.md`)**：
     - [x] **根因全面排查与实证 [RootCause]**：
