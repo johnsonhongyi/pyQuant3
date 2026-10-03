@@ -348,7 +348,8 @@ class SafeHDFStore(pd.HDFStore):
         self.fname_o = fname
         self.mode = mode
         self.probe_interval = kwargs.pop("probe_interval", 0.05)  
-        self.lock_timeout = kwargs.pop("lock_timeout", 20)  # compatibility; live-owner locks are never expired by age
+        self.lock_timeout = kwargs.pop("lock_timeout", 20)  # acquisition deadline; never expires a live owner's lock
+        self._open_deadline = time.monotonic() + max(0.0, float(self.lock_timeout))
         self.max_wait = 30
         self.multiIndexsize = False
         self.log = log
@@ -448,7 +449,12 @@ class SafeHDFStore(pd.HDFStore):
                         if self._lock_acquired:
                             self._release_lock()
                         
-                        time.sleep(3)
+                        remaining = self._open_deadline - time.monotonic()
+                        if remaining <= 0:
+                            raise TimeoutError(f"HDF open retries timed out: {self.fname}") from e
+                        time.sleep(min(3, remaining))
+                        if time.monotonic() >= self._open_deadline:
+                            raise TimeoutError(f"HDF open retries timed out: {self.fname}") from e
                         
                         # 重新获取读写共用的进程锁。
                         self._acquire_lock()
@@ -741,6 +747,15 @@ class SafeHDFStore(pd.HDFStore):
         my_pid = self.my_pid
         lock_key = os.path.normcase(os.path.abspath(self._lock))
         retries = 0
+        deadline = time.monotonic() + max(0.0, float(self.lock_timeout))
+        deadline = min(deadline, self.__dict__.get('_open_deadline', deadline))
+
+        def wait_for_lock():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(f"HDF lock acquisition timed out: {self._lock}")
+            time.sleep(min(self.probe_interval, remaining))
+
         try:
             # Same-process nested stores share one lock file. Keep a reference
             # count so closing an inner store cannot unlock its active parent.
@@ -752,6 +767,8 @@ class SafeHDFStore(pd.HDFStore):
                     return True
 
             while True:
+                if retries and time.monotonic() >= deadline:
+                    raise TimeoutError(f"HDF lock acquisition timed out: {self._lock}")
                 with timed_ctx("_acquire_lock"):
                     lock_info = self._parse_lock_info()
                     if lock_info['exists']:
@@ -773,11 +790,12 @@ class SafeHDFStore(pd.HDFStore):
                         # 2. 活跃竞争中（其他进程刚创建/正在操作锁，或正常持有锁且未超时）
                         if lock_info['is_busy']:
                             retries += 1
-                            time.sleep(self.probe_interval)
+                            wait_for_lock()
                             continue
 
                         # 3. 只清理持有进程已退出的锁；等待超时不能证明锁已失效。
                         if lock_info['is_stale']:
+                            retries += 1
                             self.log.warning(
                                 f"[Lock] 安全清理超时/僵尸锁 pid={lock_info['pid']} "
                                 f"(my_pid:{my_pid}, alive={lock_info['is_alive']}, "
@@ -799,7 +817,7 @@ class SafeHDFStore(pd.HDFStore):
                                 f"[Lock] 等待进程锁 pid={lock_info['pid']}, my_pid={my_pid}, "
                                 f"alive={lock_info['is_alive']}, elapsed={lock_info['elapsed']:.1f}s, wait={total_wait:.1f}s"
                             )
-                        time.sleep(self.probe_interval)
+                        wait_for_lock()
 
                     else:
                         # 锁文件不存在，原子排他创建
@@ -812,9 +830,10 @@ class SafeHDFStore(pd.HDFStore):
                                 self._lock_acquired = True
                             self.log.debug(f"[Lock] 创建锁文件 {self._lock} by pid={my_pid}")
                             return True
-                        except (FileExistsError, OSError) as e:
+                        except FileExistsError as e:
+                            retries += 1
                             self.log.debug(f"[Lock] 创建锁冲突重试: {e}")
-                            time.sleep(self.probe_interval)
+                            wait_for_lock()
         except Exception as e:
             self.log.warning(f"[Lock] 异常退出，安全释放锁: {e}")
             self._release_lock()
@@ -2914,7 +2933,6 @@ def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False,
         if delete_corrupt_file:
             log.critical(f"🚨 [HDF-ABORT] Aggressive cleanup triggered for: {fname}")
             try:
-                import tables
                 tables.file._open_files.close_all()
             except: pass
             
@@ -3098,7 +3116,6 @@ def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False,
                     log.critical("HDF FATAL CORRUPTION: %s %s", fname, e)
                     # 🛡️ 执行安全重命名备份
                     try:
-                        import tables
                         tables.file._open_files.close_all()
                     except Exception: pass
                     

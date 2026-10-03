@@ -645,6 +645,9 @@ class UniverseTreeWidget(QWidget):
 
     def _update_stock_item(self, item, code, name, price, pct, strategy, desc, is_fav):
         """原地更新单个股票项，实施 Dirty Check，消除无效的 setText / 属性重设与闪烁"""
+        signature = (code, name, price, pct, strategy, desc, is_fav)
+        if getattr(item, '_ats_render_signature', None) == signature:
+            return
         disp_name = f"⭐ {name}" if is_fav else name
         col_texts = [code, disp_name, str(price), str(pct), str(desc), str(strategy)]
         for col, txt in enumerate(col_texts):
@@ -693,30 +696,31 @@ class UniverseTreeWidget(QWidget):
         else:
             item.setForeground(3, QColor(COLOR_DOWN))
 
+        item._ats_render_signature = signature
+
     def _sync_pool_subtree(self, root, title_prefix, stock_list, fav_stocks):
         """增量比对并同步子树节点，保留已有节点并仅更新差异 (In-Place Diff Sync)"""
         target_title = f"{title_prefix} ({len(stock_list)})"
         if root.text(0) != target_title:
             root.setText(0, target_title)
 
-        existing_items = {}
-        for i in range(root.childCount()):
-            child = root.child(i)
-            c = child.data(0, Qt.ItemDataRole.UserRole)
-            if c:
-                existing_items[c] = child
+        existing_items = getattr(root, '_ats_code_items', None)
+        if existing_items is None:
+            existing_items = {}
+            for i in range(root.childCount()):
+                child = root.child(i)
+                c = child.data(0, Qt.ItemDataRole.UserRole)
+                if c:
+                    existing_items[c] = child
 
         new_codes = set()
         for entry in stock_list:
             if entry and len(entry) >= 6:
                 new_codes.add(entry[0])
 
-        # 1. 安全移除已不在新数据中的标的 (倒序遍历)
-        for i in reversed(range(root.childCount())):
-            child = root.child(i)
-            c = child.data(0, Qt.ItemDataRole.UserRole)
+        for c in list(existing_items):
             if c not in new_codes:
-                root.removeChild(child)
+                root.removeChild(existing_items.pop(c))
 
         # 2. 原地复用或新增子节点
         for code, name, price, pct, strategy, desc in stock_list:
@@ -724,7 +728,9 @@ class UniverseTreeWidget(QWidget):
             item = existing_items.get(code)
             if item is None or item.treeWidget() is None:
                 item = UniverseTreeItem(root)
+                existing_items[code] = item
             self._update_stock_item(item, code, name, price, pct, strategy, desc, is_fav)
+        root._ats_code_items = existing_items
 
     def update_pools(self, radar_list, watch_list, trade_list):
         self._is_mock_active = False
@@ -745,13 +751,25 @@ class UniverseTreeWidget(QWidget):
                 sort_col = 3  # 默认按涨跌幅列排序
                 sort_order = Qt.SortOrder.DescendingOrder
 
-            self.tree.setSortingEnabled(False)
-
             try:
                 from global_favorites import GlobalFavoriteManager
                 fav_stocks = GlobalFavoriteManager().get_favorite_stocks()
             except Exception:
                 fav_stocks = set()
+            render_input = (tuple(map(tuple, radar_list)), tuple(map(tuple, watch_list)),
+                            tuple(map(tuple, trade_list)), frozenset(fav_stocks))
+            if (getattr(self, '_last_pool_render_input', None) == render_input
+                    and getattr(self, 'radar_root', None) is not None
+                    and self.radar_root.treeWidget() is self.tree):
+                return
+            field = (0, 1, 2, 3, 5, 4)[sort_col] if 0 <= sort_col < 6 else 0
+            sort_signature = (sort_col, sort_order, tuple(tuple(sorted(
+                (str(row[0]), str(row[field])) for row in pool))
+                for pool in (radar_list, watch_list, trade_list)),
+                frozenset(fav_stocks) if sort_col == 1 else None)
+            needs_sort = getattr(self, '_last_pool_sort_signature', None) != sort_signature
+            if needs_sort:
+                self.tree.setSortingEnabled(False)
 
             # 确保三级池根节点常驻存在，绝不重复 clear 销毁
             is_initial = False
@@ -790,26 +808,24 @@ class UniverseTreeWidget(QWidget):
                 self.restore_header_state()
 
             # 🛡️ [排序状态恢复]
-            self.tree.setSortingEnabled(True)
-            if sort_col >= 0:
-                self.tree.sortByColumn(sort_col, sort_order)
+            if needs_sort:
+                self.tree.setSortingEnabled(True)
+                if sort_col >= 0:
+                    self.tree.sortByColumn(sort_col, sort_order)
 
             # 恢复选中的标的节点
             if selected_code and selected_code != "root":
-                found = False
                 for root in (self.radar_root, self.watch_root, self.trade_root):
-                    for i in range(root.childCount()):
-                        child = root.child(i)
-                        if child.data(0, Qt.ItemDataRole.UserRole) == selected_code:
-                            self.tree.setCurrentItem(child)
-                            found = True
-                            break
-                    if found:
+                    child = getattr(root, '_ats_code_items', {}).get(selected_code)
+                    if child is not None:
+                        self.tree.setCurrentItem(child)
                         break
 
             # 锁定滚动条位置，彻底杜绝视口跳动与抖动
             if vbar and vbar.value() != scroll_pos:
                 vbar.setValue(scroll_pos)
+            self._last_pool_render_input = render_input
+            self._last_pool_sort_signature = sort_signature
         finally:
             pass
 

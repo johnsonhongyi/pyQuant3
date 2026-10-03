@@ -1175,6 +1175,14 @@ def save_config_nodes_async(key_val_dict: dict, config_path=None) -> bool:
     return BoundedConfigWriter.get_instance().enqueue(key_val_dict, config_path=config_path)
 
 
+def save_config_node_async(key: str, val, config_path=None) -> bool:
+    """Use the shared bounded writer for GUI configuration changes."""
+    accepted = save_config_nodes_async({key: val}, config_path=config_path)
+    if not accepted:
+        print(f"[ConfigWriter] Could not enqueue config key: {key}")
+    return accepted
+
+
 def flush_config_writer(timeout_sec: float = 1.0) -> bool:
     """带超时门禁同步 Flush 待保存配置。"""
     return BoundedConfigWriter.get_instance().flush(timeout_sec=timeout_sec)

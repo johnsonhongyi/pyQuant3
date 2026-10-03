@@ -10,7 +10,7 @@ from PyQt6.QtCore import Qt, pyqtSignal, QSize
 from PyQt6.QtGui import QColor, QFont
 import os
 import json
-from ats.ui.styles import COLOR_UP, COLOR_DOWN, COLOR_INFO, COLOR_WARN, COLOR_ACCENT, setup_header_persistence, auto_fit_columns_once, NumericTableWidgetItem, load_config_node, save_config_node, parse_bool_config
+from ats.ui.styles import COLOR_UP, COLOR_DOWN, COLOR_INFO, COLOR_WARN, COLOR_ACCENT, setup_header_persistence, auto_fit_columns_once, NumericTableWidgetItem, load_config_node, save_config_node_async as save_config_node, parse_bool_config
 from ats.ui.base_table import BaseATSTableWidget
 from ats.ui.favorite_panel import get_ats_extra_cols, get_ats_table_headers
 
@@ -325,8 +325,13 @@ class SwingStateTable(QWidget):
         header = self.table.horizontalHeader()
         sort_col = header.sortIndicatorSection() if (header and header.isSortIndicatorShown()) else -1
         sort_order = header.sortIndicatorOrder() if header else Qt.SortOrder.AscendingOrder
-        
-        self.table.setSortingEnabled(False)
+        sort_signature = (sort_col, sort_order, tuple(sorted(
+            (str(row[0]).strip(), str(row[sort_col]) if 0 <= sort_col < len(row) else '')
+            for row in data_list)), frozenset(fav_stocks) if sort_col == 1 else None,
+            tuple(current_extra))
+        needs_sort = getattr(self, '_last_sort_signature', None) != sort_signature
+        if needs_sort:
+            self.table.setSortingEnabled(False)
         
         if not data_list:
             if self.table.rowCount() > 0:
@@ -349,10 +354,18 @@ class SwingStateTable(QWidget):
             self.table.setRowCount(len(sorted_list))
 
         num_extra = len(self.extra_cols)
+        previous_rows = getattr(self, '_row_render_cache', {})
+        next_rows = {}
 
         for row_idx, row_data in enumerate(sorted_list):
             code = str(row_data[0]).strip()
             is_fav = code in fav_stocks
+            row_signature = (tuple(row_data), is_fav, tuple(self.extra_cols))
+            next_rows[code] = row_signature
+            first_item = self.table.item(row_idx, 0)
+            if (previous_rows.get(code) == row_signature and first_item is not None
+                    and first_item.text().strip() == code):
+                continue
             
             for col_idx, text in enumerate(row_data):
                 if col_idx >= self.table.columnCount():
@@ -500,11 +513,14 @@ class SwingStateTable(QWidget):
                     item.setForeground(COLOR_GRAY)
                 
         auto_fit_columns_once(self.table, "ats_swing_table_state_v2", max_widths={self.table.columnCount() - 1: 350})
-        self.table.setSortingEnabled(True)
-        if sort_col >= 0:
-            self.table.sortItems(sort_col, sort_order)
+        if needs_sort:
+            self.table.setSortingEnabled(True)
+            if sort_col >= 0:
+                self.table.sortItems(sort_col, sort_order)
         self._apply_favorite_filter()
         self._last_render_input = render_input
+        self._last_sort_signature = sort_signature
+        self._row_render_cache = next_rows
 
     def _load_show_favorite_config(self):
         try:
@@ -519,18 +535,7 @@ class SwingStateTable(QWidget):
         return True
 
     def _save_show_favorite_config(self, val):
-        try:
-            from sys_utils import get_app_root, get_conf_path
-            cfg_path = get_conf_path("window_config.json", get_app_root())
-            data = {}
-            if os.path.exists(cfg_path):
-                with open(cfg_path, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-            data["ats_swing_show_favorite_option"] = bool(val)
-            with open(cfg_path, 'w', encoding='utf-8') as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-        except Exception as e:
-            print(f"[SwingStateTable] Save show_favorite config error: {e}")
+        return save_config_node("ats_swing_show_favorite_option", bool(val))
 
     def _on_favorite_checkbox_changed(self, state):
         is_checked = (state == 2 or state is True or state == Qt.CheckState.Checked.value)

@@ -110,6 +110,7 @@ def probe(bridge_type, frame, kind, samples=101):
             "payload_bytes": len(encoded), "samples": samples,
             "p50_ms": round(statistics.median(timings), 3),
             "p95_ms": round(ordered[math.ceil(samples * .95) - 1], 3),
+            "p99_ms": round(ordered[math.ceil(samples * .99) - 1], 3),
             "max_ms": round(max(timings), 3)}
 
 

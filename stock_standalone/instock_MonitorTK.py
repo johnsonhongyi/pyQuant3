@@ -22327,6 +22327,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
     def _record_latency_sample(self, component, duration_ms):
         """Keep bounded component latency samples for manual percentile reports."""
         try:
+            from ats.performance import record
+            record(str(component), max(0.0, float(duration_ms)),
+                   producer_session=getattr(self, '_sync_session', None),
+                   producer_version=getattr(self, '_last_vis_bus_version', None))
             sample = (str(component), max(0.0, float(duration_ms)))
             with self._latency_samples_lock:
                 self._latency_samples.append(sample)

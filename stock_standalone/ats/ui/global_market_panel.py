@@ -592,8 +592,25 @@ class GlobalMarketPanel(QWidget):
 
         sorted_quotes = sorted(quotes.items(), key=_get_sort_key)
         target_count = len(sorted_quotes)
-        if self.tbl_quotes.rowCount() != target_count:
-            self.tbl_quotes.setRowCount(target_count)
+        target_symbols = [symbol for symbol, _ in sorted_quotes]
+        existing_symbols = [self.tbl_quotes.item(row, 1).text()
+                            if self.tbl_quotes.item(row, 1) else None
+                            for row in range(self.tbl_quotes.rowCount())]
+        if existing_symbols != target_symbols:
+            blocked = self.tbl_quotes.blockSignals(True)
+            try:
+                cells_by_symbol = {
+                    symbol: [self.tbl_quotes.takeItem(row, col)
+                             for col in range(self.tbl_quotes.columnCount())]
+                    for row, symbol in enumerate(existing_symbols) if symbol is not None
+                }
+                self.tbl_quotes.setRowCount(target_count)
+                for row, symbol in enumerate(target_symbols):
+                    for col, item in enumerate(cells_by_symbol.get(symbol, ())):
+                        if item is not None:
+                            self.tbl_quotes.setItem(row, col, item)
+            finally:
+                self.tbl_quotes.blockSignals(blocked)
 
         for row_idx, (symbol, info) in enumerate(sorted_quotes):
             name = info.get('name', symbol)

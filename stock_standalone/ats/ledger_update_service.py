@@ -2,6 +2,7 @@
 """Single write/projection entry for ATS SignalLedger consumers."""
 
 from __future__ import annotations
+from ats.ledger_guard import ledger_guard
 
 from dataclasses import dataclass
 import math
@@ -74,6 +75,7 @@ class LedgerUpdateService:
             "signal_tag": str(signal_tag or ""),
         }
 
+    @ledger_guard
     def update_snapshot(self, *, code: Any, name: str, price: float, pct: float,
                         deviation: float, row: Any = None, volume_score: float = 0.0,
                         source: str = "ATS", signal_tag: str = "", **ledger_kwargs: Any) -> Any:
@@ -95,6 +97,7 @@ class LedgerUpdateService:
         entry.update_latest(*projected)
         return entry
 
+    @ledger_guard
     def update_candidate(
         self,
         *,
@@ -162,6 +165,7 @@ class LedgerUpdateService:
 
         return LedgerUpdateResult(entry, decision, entry is not None)
 
+    @ledger_guard
     def update_tdx(self, sig_dict: Dict[str, Any], row: Any = None, observed_at: Any = None) -> LedgerUpdateResult:
         sig_dict = dict(sig_dict or {})
         code = sig_dict.get("code")
@@ -210,6 +214,16 @@ class LedgerUpdateService:
                 )
         return result
 
+    @ledger_guard
+    def capture_projection(self, universe_manager: Any):
+        """Detach a coherent display view from canonical ledger and pool writers."""
+        from copy import deepcopy
+        return deepcopy(self.signal_ledger.entries), {
+            name: deepcopy(getattr(universe_manager, name, {}))
+            for name in ('radar_pool', 'watch_pool', 'trade_pool')
+        }
+
+    @ledger_guard
     def sync_projection(
         self,
         universe_manager: Any,
