@@ -1,4 +1,12 @@
 import os
+import gzip
+import json
+from pathlib import Path
+from types import SimpleNamespace
+
+from ats import bounded_evaluation_store as archive_cache
+from ats.shutdown import ShutdownDrain
+from ats.storage_archive import write_json_gzip
 import threading
 import time
 
@@ -285,3 +293,130 @@ def test_spawn_blocked_send_has_total_deadline_and_restarts(tmp_path, monkeypatc
         assert result.get('pid') and not result.get('error')
     finally:
         service.close()
+
+
+@pytest.mark.parametrize('next_day', ['2026-10-03', '2026-10-04'])
+def test_alpha_flush_keeps_latest_snapshot_for_each_day(tmp_path, monkeypatch, next_day):
+    from ats.ui.main_window import ATSMainWindow
+    import sys_utils
+    pending, writes = [], {}
+
+    class DeferredThread:
+        def __init__(self, target, **kwargs):
+            self.target = target
+
+        def start(self):
+            pending.append(self.target)
+
+    monkeypatch.setattr(threading, 'Thread', DeferredThread)
+    monkeypatch.setattr(sys_utils, 'get_app_root', lambda: str(tmp_path))
+    monkeypatch.setattr(archive_cache.evaluation_store, 'put',
+                        lambda path, records, writer: writes.update({Path(path).stem: records}))
+    state = SimpleNamespace(_recorded_alpha_list=[{'pct': 1}])
+    ATSMainWindow._flush_alpha_records_to_disk(state, '2026-10-03')
+    state._recorded_alpha_list = [{'pct': 2}]
+    ATSMainWindow._flush_alpha_records_to_disk(state, next_day)
+    for task in reversed(pending):
+        task()
+    expected = {f'ats_alpha_tracker_{next_day}': [{'pct': 2}]}
+    if next_day != '2026-10-03':
+        expected['ats_alpha_tracker_2026-10-03'] = [{'pct': 1}]
+    assert writes == expected
+
+
+def test_shutdown_preserves_pending_alpha_days_and_propagates_flush_failure(tmp_path, monkeypatch):
+    from ats.ui.main_window import ATSMainWindow
+    import ats.shutdown
+    import sys_utils
+    writes, stopped = {}, []
+    monkeypatch.setattr(sys_utils, 'get_app_root', lambda: str(tmp_path))
+    monkeypatch.setattr(archive_cache.evaluation_store, 'put',
+                        lambda path, records, writer: writes.update({Path(path).stem: records}))
+    monkeypatch.setattr(archive_cache.evaluation_store, 'flush', lambda timeout_sec: False)
+    monkeypatch.setattr(ats.shutdown, 'ShutdownDrain',
+                        lambda tasks, deadline: SimpleNamespace(tasks=dict(tasks)))
+    snapshot = SimpleNamespace(_capture_ledger=lambda ledger: (None, 1))
+    old_job = {'records': [{'pct': 1}], 'submitted': False}
+    state = SimpleNamespace(session_snapshot=snapshot, signal_ledger=None,
+                            _recorded_alpha_list=[{'pct': 2}], _alpha_flush_date='2026-10-04',
+                            _alpha_flush_jobs={'2026-10-03': old_job},
+                            _alpha_flush_lock=threading.Lock(),
+                            _alpha_flush_timer=SimpleNamespace(stop=lambda: stopped.append(True)),
+                            _close_deadline=time.monotonic() + 5)
+    ATSMainWindow._begin_shutdown_drain(state)
+    assert state._shutdown_drain.tasks['alpha']() is False
+    assert writes == {'ats_alpha_tracker_2026-10-03': [{'pct': 1}],
+                      'ats_alpha_tracker_2026-10-04': [{'pct': 2}]}
+    assert stopped == [True]
+    assert state._alpha_flush_jobs['2026-10-03'] is not old_job
+
+
+def due_store(tmp_path, monkeypatch, writer, completed=None):
+    monkeypatch.setattr(archive_cache, 'archive_window', lambda: ('market', '2026-09-30'))
+    store = archive_cache.EvaluationStore()
+    store._started = True
+    path = str(tmp_path / 'snapshot.json')
+    store.put(path, {'value': 1}, writer, completed)
+    store._cache[path]['last_write'] -= archive_cache.WRITE_INTERVAL
+    return store, path
+
+
+def test_busy_archive_is_a_shutdown_failure(tmp_path, monkeypatch):
+    store, path = due_store(tmp_path, monkeypatch, write_json_gzip)
+    store._flush_lock.acquire()
+    try:
+        drain = ShutdownDrain([('archive', lambda: store.flush(timeout_sec=.01))],
+                              time.monotonic() + 2)
+        assert drain.done.wait(2)
+        assert drain.errors == ['archive: drain failed']
+        assert not Path(path + '.gz').exists()
+        assert store._cache[path]['dirty']
+    finally:
+        store._flush_lock.release()
+
+
+def test_archive_flush_waits_for_owner_before_committing(tmp_path, monkeypatch):
+    store, path = due_store(tmp_path, monkeypatch, write_json_gzip)
+    entered, results = threading.Event(), []
+    store._flush_lock.acquire()
+    worker = threading.Thread(target=lambda: (entered.set(), results.append(store.flush(timeout_sec=1))))
+    worker.start()
+    try:
+        assert entered.wait(1)
+    finally:
+        store._flush_lock.release()
+    worker.join(2)
+    assert not worker.is_alive()
+    assert results == [True]
+    assert Path(path + '.gz').exists()
+
+
+@pytest.mark.parametrize('failure', ['false', 'exception'])
+def test_failed_archive_keeps_data_and_receipt_until_retry(tmp_path, monkeypatch, failure):
+    fail, receipts = [True], []
+
+    def writer(path, value):
+        if fail[0]:
+            if failure == 'exception':
+                raise OSError('injected disk failure')
+            return False
+        return write_json_gzip(path, value)
+
+    store, path = due_store(tmp_path, monkeypatch, writer, receipts.append)
+    assert store.flush() is False
+    assert store._cache[path]['dirty']
+    assert store.read(path, {}) == {'value': 1}
+    assert receipts == []
+    fail[0] = False
+    assert store.flush() is True
+    assert receipts == [{'value': 1}]
+    with gzip.open(path + '.gz', 'rt', encoding='utf-8') as stream:
+        assert json.load(stream) == {'value': 1}
+
+
+def test_flush_preserves_archive_window_gate(tmp_path, monkeypatch):
+    store, path = due_store(tmp_path, monkeypatch, write_json_gzip)
+    monkeypatch.setattr(archive_cache, 'archive_window', lambda: (None, '2026-09-30'))
+    assert store.flush() is True  # No permitted checkpoint; original policy is unchanged.
+    assert not Path(path + '.gz').exists()
+    assert store._cache[path]['dirty']
