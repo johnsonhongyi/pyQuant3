@@ -1,5 +1,27 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-10-03 14:45 本地 AI 编程审计会话追踪时间排序修复、方案A严格单调递减与 --created 参数平滑回退闭环
+- [x] **【彻底解决跨天长会话时间倒挂痛点、方案A默认落地(活跃时间单调严格递减)、--created参数无缝切回创建起源、Codex与Antigravity双引擎全贯通】(`tools/codex_token_stats.py`, `20261003_1445_task.md`)**：
+    - [x] **会话时间倒挂根因解构 [RootCause]**：会话追踪表旧版按文件物理最后活跃时间（mtime/last response）降序排序，但第 1 列展示的是会话首次创建时间；跨天长会话（如昨天创建、今天中午交互）按最新活跃排在最前时，第一列显示昨天时间，引发视觉上“时间跳回昨天”的倒挂突兀感；
+    - [x] **方案 A 默认落地（严格单调递减） [Core/UX]**：默认状态下表格第 1 列动态显示为 `活跃时间 (UTC+8)`，基于最后一次交互输出时间从新到旧单调严格递减（如 `10-03 14:39` -> `10-03 14:33` -> `10-02 20:31`），彻底消灭倒挂缺陷，完全符合人类直觉；
+    - [x] **参数开关友好支持（`--created` / `--time-mode`） [Flexibility]**：新增 `--created` / `--show-created` 与 `--time-mode {active,created}` 选项；用户需要查看会话启动背景时，可无缝切回原样式展示 `创建时间 (UTC+8)`，排序依然保持最新活跃优先；底端说明自动联动提示；
+    - [x] **Codex 与 Antigravity 双引擎全贯通 [Consistency]**：`get_codex_stats` 与 `get_antigravity_stats` 均采集 `sess_first_dt` 与 `sess_last_dt`，统一按 `active_ts` 排序，自适应列宽对齐；
+    - [x] **全链路语法与运行核验 100% 绿灯**：通过 `python -m py_compile` 校验，实测 Codex、Antigravity 的默认方案 A 与 `--created` 模式 100% 正常运行。
+
+## 2026-10-03 14:38 Nuitka 批量全编译调度中心 (instock-nuitka-batch.cmd) 落地闭环
+- [x] **【对齐instock-pyinstall-batch高规格标准、onefile_spec参数穿透免5秒等待全无人值守、编译前后7天版本自动归档自愈、单项与总体耗时精确核算与报表持久化】(`instock-nuitka-batch.cmd`, `C:\Users\Johnson\instock-nuitka-batch.cmd`, `tools/generate_nuitka_batch.py`, `20261003_1438_task.md`)**：
+    - [x] **模块映射与产物标准对齐 [Architecture]**：完整整合 `ats` (`nuitka_build_ats_console_onlyClang.bat` -> `build\ATS_Terminal.exe`)、`tk` (`nuitka_build_console_onlyClang.bat` -> `build\instock_MonitorTK_Nuita.exe`) 与 `multi` (`nuitka_build_multi_period_dialog_onlyClang.bat` -> `build\MultiPeriodTester.exe`) 三大 Nuitka 全编译脚本；
+    - [x] **交互菜单与参数穿透无人值守 [Core/UX]**：完美实现包含独立模块单选、双核组合 [4] 与核心全量 [5]（默认直接回车全编译）的高效菜单；默认向子脚本透传 `onefile_spec` 消除 5 秒 choice 等待，搭配 `< nul` 自动绕过 pause，实现纯无人值守自动化；支持 `--standalone` / `--onefile` 模式覆盖与 `--dry-run` 演练；
+    - [x] **7 天历史版本自动滚动归档 [Robustness]**：深度联动 `tools/archive_build_exe.py`，编译前检测到现存旧版自动归档到 `build\archive\` 并滚动淘汰 7 天前旧版本；编译成功后自动记录新版本快照并打印保留清单，编译失败给出回滚引导；
+    - [x] **时间统计与报表日志持久化 [Tooling]**：精确核算单项分秒耗时与文件大小（MB/KB），统筹计算总计耗时，高保真渲染汇总表格并以 DRY 原则同步保存至 `build\nuitka_batch_build_last_summary.txt`；
+    - [x] **双位置部署与全链路验证 100% 绿灯**：工作区根目录与 `C:\Users\Johnson\` 同步部署，标准 Windows CRLF 换行规范彻底免疫 CMD 断行语法缺陷，`--dry-run all` 与 `--dry-run ats` 演练 100% 通过。
+
+## 2026-10-03 14:25 多网关双出口网络拓扑、迟钝卡顿与内网访问慢深度诊断分析闭环
+- [x] **【内网HTTP访问卡死实测实证(代理未豁免致12s超时vs直连0.07s秒开)、路由表本末倒置缺陷定位(50网段走无线绕路192.168.1.2)、双网关DNS竞争与组播广播泛洪全息解构】(`20261003_1425_task.md`)**：
+    - [x] **内网HTTP访问慢首要元凶定位 [RootCause/Proxy]**：实测通过系统代理（`127.0.0.1:7897`）访问 `http://192.168.50.197` 直接耗时 >12 秒卡死超时，而剥离代理直连耗时仅 0.075 秒（75毫秒瞬间秒开），确证代理客户端对内网 IP 未完全豁免导致内网请求先走代理失败回退引发长时间假死；
+    - [x] **双网卡路由表本末倒置倒挂确证 [RootCause/Routing]**：Windows 路由表中惊现 `192.168.50.0/24 -> 192.168.1.2`（WLAN 接口 21），其 RouteMetric 为 1（总跃点 36），反向压制了以太网有线直连（总跃点 276），导致去往 50 网段的内网流量被强制发往无线 WiFi 经过 1.2 转发，引发非对称三角路由与 WiFi 抖动；
+    - [x] **双出口网关竞争与广播抑制方案落地 [Optimization]**：解构爱快与副网关多 DNS 轮询超时机制；给出关闭内网代理劫持、修复以太网直连跃点数、开启爱快 IGMP Snooping 抑制电视与 SSDP 广播泛洪的一站式优化指引。
+
 ## 2026-10-03 11:40 本地 AI 编程审计工具集成模型官方阶梯定价、自动费用(Cost USD)核算与多层级账单透出闭环
 - [x] **【权威阶梯定价收录与缓存折扣精准验算、高保真Unicode日级账单表格(自适应列宽防撑破)、会话路由审计表格联动预估费用列、Codex与Antigravity双引擎全贯通】(`tools/codex_token_stats.py`, `20261003_1140_task.md`)**：
     - [x] **模型阶梯定价逆向验证与官方矩阵收录 [RootCause/Pricing]**：精准解构用户样本数据（`gpt-6.1-sol` 1729万消耗折算 $3.94，`gpt-5.6-luna` 折算 $0.01，合计 $3.95，100% 精确吻合）；完整内置 OpenAI GPT-6/GPT-5.6、Google Gemini 3.8/2.5、Anthropic Claude 4.6 等全系列官方单价及未缓存/缓存读取/缓存写入阶梯定价字典；支持动态读取 `~/.codex/pricing.json` 与 `~/.gemini/pricing.json` 热覆盖；
