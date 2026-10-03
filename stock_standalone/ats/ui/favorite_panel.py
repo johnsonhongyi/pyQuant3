@@ -249,7 +249,8 @@ class FavoritePanel(QWidget):
         parent_mw = self._get_parent_mw()
         
         fset = None
-        if getattr(self, 'filter_enabled', False) and parent_mw is not None:
+        if (getattr(self, 'filter_enabled', False) and parent_mw is not None
+                and getattr(parent_mw, 'query_expr', '')):
             fset = getattr(parent_mw, 'filtered_codes_set', None)
             if fset is None:
                 fset = set()

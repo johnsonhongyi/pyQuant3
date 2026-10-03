@@ -659,10 +659,10 @@ class ATSSectorDetailDialog(QDialog):
             
             # 1. 优先使用主窗口已预计算的全量过滤代码集合 (0ms 极速命中匹配)
             parent_mw = self._get_parent_mw()
-            if parent_mw and hasattr(parent_mw, 'filtered_codes_set') and parent_mw.filtered_codes_set:
-                if getattr(parent_mw, 'query_expr', '') == query_expr:
-                    fset = parent_mw.filtered_codes_set
-                    return [r for r in rows if str(r.get('code', '')).strip().zfill(6) in fset]
+            if (parent_mw and getattr(parent_mw, '_filter_result_query', None) == query_expr
+                    and hasattr(parent_mw, 'filtered_codes_set')):
+                fset = parent_mw.filtered_codes_set
+                return [r for r in rows if str(r.get('code', '')).strip().zfill(6) in fset]
 
             # 2. 否则从当前数据底座动态切片执行 query_engine.execute
             current_df = getattr(self, '_cached_df', None)

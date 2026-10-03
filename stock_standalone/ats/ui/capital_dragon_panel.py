@@ -670,7 +670,14 @@ class CapitalDragonPanel(QWidget):
 
     def showEvent(self, event):
         super().showEvent(event)
-        self.ensure_rendered()
+        # 让切页布局先绘制；快速连续切页时不补绘已隐藏的页面。
+        def render_if_visible():
+            try:
+                if self.is_panel_visible():
+                    self.ensure_rendered()
+            except RuntimeError:
+                pass
+        QTimer.singleShot(16, render_if_visible)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -980,7 +987,8 @@ class CapitalDragonPanel(QWidget):
 
             parent_mw = self._get_parent_mw()
             fset = None
-            if getattr(self, 'filter_enabled', False) and parent_mw is not None:
+            if (getattr(self, 'filter_enabled', False) and parent_mw is not None
+                    and getattr(parent_mw, 'query_expr', '')):
                 fset = getattr(parent_mw, 'filtered_codes_set', None)
                 if fset is None:
                     fset = set()

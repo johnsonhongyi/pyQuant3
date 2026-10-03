@@ -1375,10 +1375,10 @@ class SectorRotationMinerDialog(QDialog, WindowMixin):
                     if hasattr(w, 'filtered_codes_set') and hasattr(w, 'query_expr'):
                         parent_mw = w
                         break
-            if parent_mw and hasattr(parent_mw, 'filtered_codes_set') and parent_mw.filtered_codes_set:
-                if getattr(parent_mw, 'query_expr', '') == query_expr:
-                    fset = parent_mw.filtered_codes_set
-                    return [c for c in candidates if str(c.get('code', '')).strip().zfill(6) in fset]
+            if (parent_mw and getattr(parent_mw, '_filter_result_query', None) == query_expr
+                    and hasattr(parent_mw, 'filtered_codes_set')):
+                fset = parent_mw.filtered_codes_set
+                return [c for c in candidates if str(c.get('code', '')).strip().zfill(6) in fset]
 
             # 2. 否则从当前数据底座动态切片执行 query_engine.execute
             current_df = getattr(self, 'current_df', None)
