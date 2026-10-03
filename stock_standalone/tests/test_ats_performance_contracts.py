@@ -332,7 +332,11 @@ def test_shutdown_preserves_pending_alpha_days_and_propagates_flush_failure(tmp_
     monkeypatch.setattr(sys_utils, 'get_app_root', lambda: str(tmp_path))
     monkeypatch.setattr(archive_cache.evaluation_store, 'put',
                         lambda path, records, writer: writes.update({Path(path).stem: records}))
-    monkeypatch.setattr(archive_cache.evaluation_store, 'flush', lambda timeout_sec: False)
+    flush_calls = []
+    def fail_flush(timeout_sec, require_clean=False):
+        flush_calls.append((timeout_sec, require_clean))
+        return False
+    monkeypatch.setattr(archive_cache.evaluation_store, 'flush', fail_flush)
     monkeypatch.setattr(ats.shutdown, 'ShutdownDrain',
                         lambda tasks, deadline: SimpleNamespace(tasks=dict(tasks)))
     snapshot = SimpleNamespace(_capture_ledger=lambda ledger: (None, 1))
@@ -349,6 +353,7 @@ def test_shutdown_preserves_pending_alpha_days_and_propagates_flush_failure(tmp_
                       'ats_alpha_tracker_2026-10-04': [{'pct': 2}]}
     assert stopped == [True]
     assert state._alpha_flush_jobs['2026-10-03'] is not old_job
+    assert flush_calls and flush_calls[0][1] is True
 
 
 def due_store(tmp_path, monkeypatch, writer, completed=None):
@@ -420,3 +425,14 @@ def test_flush_preserves_archive_window_gate(tmp_path, monkeypatch):
     assert store.flush() is True  # No permitted checkpoint; original policy is unchanged.
     assert not Path(path + '.gz').exists()
     assert store._cache[path]['dirty']
+
+
+def test_shutdown_rejects_dirty_archive_outside_checkpoint_window(tmp_path, monkeypatch):
+    store, path = due_store(tmp_path, monkeypatch, write_json_gzip)
+    monkeypatch.setattr(archive_cache, 'archive_window', lambda: (None, '2026-09-30'))
+    drain = ShutdownDrain([('archive', lambda: store.flush(timeout_sec=.1, require_clean=True))],
+                          time.monotonic() + 2)
+    assert drain.done.wait(2)
+    assert drain.errors == ['archive: drain failed']
+    assert store._cache[path]['dirty']
+    assert not Path(path + '.gz').exists()
