@@ -1235,6 +1235,7 @@ class RouteConfigDialog(QDialog):
         dest = routing_cfg.get("destination", "")
         mask = routing_cfg.get("mask", "255.255.255.0")
         gw = routing_cfg.get("gateway", "")
+        metric = routing_cfg.get("metric", 500)
         
         self.chk_enabled.setChecked(enabled)
         
@@ -1264,6 +1265,20 @@ class RouteConfigDialog(QDialog):
         row_gw.addWidget(lbl_gw)
         row_gw.addWidget(self.txt_gw)
         route_layout.addLayout(row_gw)
+
+        # 路由跃点 (优先级)
+        row_metric = QHBoxLayout()
+        lbl_metric = QLabel("路由跃点:")
+        lbl_metric.setFixedWidth(80)
+        self.txt_metric = QLineEdit(str(metric))
+        self.txt_metric.setPlaceholderText("默认 500 (数值越大优先级越低，保障本地直连优先)")
+        row_metric.addWidget(lbl_metric)
+        row_metric.addWidget(self.txt_metric)
+        route_layout.addLayout(row_metric)
+
+        lbl_metric_tip = QLabel("💡 提示：跃点数(Metric)建议设为 500（避免抢占本地有线网卡的直连 0.1ms 极速路由；拔掉网线时自动走此网关兜底）。")
+        lbl_metric_tip.setStyleSheet("color: #94a3b8; font-size: 11px; margin-top: -4px;")
+        route_layout.addWidget(lbl_metric_tip)
         
         route_layout.addSpacing(10)
         
@@ -1369,17 +1384,27 @@ class RouteConfigDialog(QDialog):
         dest = self.txt_dest.text().strip()
         mask = self.txt_mask.text().strip()
         gw = self.txt_gw.text().strip()
+        metric_str = self.txt_metric.text().strip()
         
         ip_pattern = r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$"
         if not re.match(ip_pattern, dest) or not re.match(ip_pattern, mask) or not re.match(ip_pattern, gw):
             QMessageBox.warning(self, "格式错误", "请输入有效的IP地址或子网掩码格式！")
             return
             
+        try:
+            metric_val = int(metric_str)
+            if metric_val < 1 or metric_val > 9999:
+                raise ValueError()
+        except Exception:
+            QMessageBox.warning(self, "格式错误", "路由跃点 (Metric) 必须为 1 ~ 9999 之间的有效整数！")
+            return
+
         routing_cfg = {
             "enabled": self.chk_enabled.isChecked(),
             "destination": dest,
             "mask": mask,
-            "gateway": gw
+            "gateway": gw,
+            "metric": metric_val
         }
         self.config_manager.config_data["routing_config"] = routing_cfg
         
@@ -1393,7 +1418,7 @@ class RouteConfigDialog(QDialog):
             
             main_win = getattr(self, 'parent_ui', None) or self.parent()
             if main_win and hasattr(main_win, 'log'):
-                main_win.log(f"🌐 静态路由与磁吸窗口配置已成功落盘！(路由开启: {self.chk_enabled.isChecked()})")
+                main_win.log(f"🌐 静态路由与磁吸窗口配置已成功落盘！(路由开启: {self.chk_enabled.isChecked()}, 跃点: {metric_val})")
 
             QMessageBox.information(
                 self, 
@@ -1403,6 +1428,7 @@ class RouteConfigDialog(QDialog):
                 f"• 目标网段: {dest}\n"
                 f"• 子网掩码: {mask}\n"
                 f"• 默认网关: {gw}\n"
+                f"• 路由跃点 (Metric): {metric_val} (建议>=500，保障本地直连优先)\n"
                 f"• 磁吸关键字数量: {len(new_kws)} 个"
             )
             self.accept()
@@ -1413,27 +1439,36 @@ class RouteConfigDialog(QDialog):
         dest = self.txt_dest.text().strip()
         mask = self.txt_mask.text().strip()
         gw = self.txt_gw.text().strip()
+        metric_str = self.txt_metric.text().strip()
         
         ip_pattern = r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$"
         if not re.match(ip_pattern, dest) or not re.match(ip_pattern, mask) or not re.match(ip_pattern, gw):
             QMessageBox.warning(self, "格式错误", "请输入有效的IP地址或子网掩码格式！")
             return
 
-        old_cfg = self.config_manager.config_data.get("routing_config", {})
+        try:
+            metric_val = int(metric_str)
+            if metric_val < 1 or metric_val > 9999:
+                raise ValueError()
+        except Exception:
+            QMessageBox.warning(self, "格式错误", "路由跃点 (Metric) 必须为 1 ~ 9999 之间的有效整数！")
+            return
+
         self.config_manager.config_data["routing_config"] = {
             "enabled": self.chk_enabled.isChecked(),
             "destination": dest,
             "mask": mask,
-            "gateway": gw
+            "gateway": gw,
+            "metric": metric_val
         }
         
         from .core import check_and_add_route
         success, msg = check_and_add_route(self.config_manager)
         
         if success:
-            QMessageBox.information(self, "检测成功", msg)
+            QMessageBox.information(self, "检测/应用成功", msg)
         else:
-            QMessageBox.warning(self, "检测失败", msg)
+            QMessageBox.warning(self, "检测/应用失败", msg)
 
 
 class AcerPerformanceDialog(QDialog):

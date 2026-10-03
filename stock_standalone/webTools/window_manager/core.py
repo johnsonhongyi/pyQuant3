@@ -2270,27 +2270,46 @@ def check_and_add_route(config_manager) -> tuple:
     except Exception:
         pass
 
+    metric_val = routing_cfg.get("metric", 500)
+    try:
+        metric = int(metric_val)
+        if metric <= 0:
+            metric = 500
+    except Exception:
+        metric = 500
+
     try:
         # 2. 动态路由表比对：检测系统活动路由表中是否已有该目标的直连链路或对应网关
         check_cmd = "route print -4"
         res = subprocess.run(check_cmd, shell=True, capture_output=True, text=True, errors='ignore')
         
+        need_rebuild = False
         # 逐行解析路由表
         for line in res.stdout.splitlines():
             parts = line.strip().split()
             if len(parts) >= 4:
                 net_target, net_mask, net_gw = parts[0], parts[1], parts[2]
                 if net_target == str(target_net.network_address) and (net_mask == str(target_net.netmask) or not mask):
-                    if "在链路上" in net_gw or "on-link" in net_gw.lower():
-                        return True, f"目标网段 {dest} 在系统路由表中已处于物理直连链路 (On-link)，无需配置网关路由。"
                     if net_gw == gw:
+                        # 检查当前已有路由的 metric
+                        if len(parts) >= 5:
+                            try:
+                                curr_metric = int(parts[4])
+                                if curr_metric >= metric:
+                                    return True, f"到 {dest} via {gw} 的静态路由已生效且优先级正常 (Metric: {curr_metric})，无需重复添加。"
+                                else:
+                                    # 发现旧路由 metric 过小 (比如 metric 1 导致倒挂)，需要主动清理并重建高跃点路由
+                                    need_rebuild = True
+                                    break
+                            except Exception:
+                                pass
                         return True, f"到 {dest} via {gw} 的静态路由已存在，无需重复添加。"
 
         # 3. 网关可达性核验：若网关与本机所有网卡均不在同一局域网，且路由表中无此网关路径，避免盲目提权
         if not gw_in_local_subnet and (gw not in res.stdout):
             return False, f"配置的网关 ({gw}) 与本机当前所有活动物理网卡均不在同一子网，且不可达，已拦截无效添加以避免弹窗。"
 
-        # 4. 路由缺失且网关可达：尝试动态添加持久化静态路由 (带 -p 永久路由参数)
+        # 4. 路由缺失或优先级倒挂且网关可达：添加或更新持久化静态路由 (显式指定 metric，保障本地有线直连优先)
         is_admin = False
         try:
             is_admin = ctypes.windll.shell32.IsUserAnAdmin() != 0
@@ -2298,17 +2317,24 @@ def check_and_add_route(config_manager) -> tuple:
             pass
 
         if is_admin:
-            add_cmd = f"route -p add {dest} mask {mask} {gw}"
+            if need_rebuild:
+                subprocess.run(f"route delete {dest} {gw}", shell=True, capture_output=True, text=True, encoding='gbk', errors='ignore')
+            add_cmd = f"route -p add {dest} mask {mask} {gw} metric {metric}"
             add_res = subprocess.run(add_cmd, shell=True, capture_output=True, text=True, encoding='gbk', errors='ignore')
             if add_res.returncode == 0:
-                return True, f"已成功自动添加持久化静态路由: {dest} mask {mask} {gw}"
+                action_text = "更新修正" if need_rebuild else "自动添加"
+                return True, f"已成功{action_text}持久化静态路由: {dest} mask {mask} {gw} metric {metric} (已保障本地有线直连最高优先)"
             else:
                 err_msg = add_res.stderr.strip() or add_res.stdout.strip()
                 return False, f"添加路由失败 (返回码 {add_res.returncode}): {err_msg}"
         else:
             # 没有管理员权限，通过 ShellExecuteW "runas" 弹出 UAC 请求提权运行
             try:
-                params = f"/c route -p add {dest} mask {mask} {gw}"
+                # 若需要重建先 delete 再 add
+                if need_rebuild:
+                    params = f"/c route delete {dest} {gw} & route -p add {dest} mask {mask} {gw} metric {metric}"
+                else:
+                    params = f"/c route -p add {dest} mask {mask} {gw} metric {metric}"
                 # SW_HIDE = 0 隐藏弹出的黑窗口
                 ret = ctypes.windll.shell32.ShellExecuteW(
                     None,
@@ -2323,7 +2349,8 @@ def check_and_add_route(config_manager) -> tuple:
                     check_cmd = "route print -4"
                     res = subprocess.run(check_cmd, shell=True, capture_output=True, text=True, errors='ignore')
                     if re.search(rf"\b{re.escape(dest)}\b", res.stdout) and gw in res.stdout:
-                        return True, f"已通过管理员权限自动添加静态路由: {dest} mask {mask} {gw}"
+                        action_text = "更新修正" if need_rebuild else "自动添加"
+                        return True, f"已通过管理员权限{action_text}静态路由: {dest} mask {mask} {gw} metric {metric} (已保障本地直连优先)"
                     else:
                         return False, f"管理员权限请求已批准，但路由添加未生效，请检查网关或网卡是否正常。"
                 elif ret == 1223:
