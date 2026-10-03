@@ -4,6 +4,7 @@ ATS Main Window Panel
 Assembles the complete Autonomous Trading System UI dashboard.
 """
 
+from ats.ledger_guard import ledger_guard
 import sys
 import os
 import time
@@ -31,7 +32,7 @@ from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal, QPropertyAnimation, QE
 from PyQt6.QtGui import QAction, QIcon, QColor, QBrush
 
 from ats.ui.favorite_panel import FavoritePanel
-from ats.ui.styles import DARK_THEME_QSS, enable_tab_direct_switch, save_config_node, load_config_node, bind_top_shortcut, set_seamless_stay_on_top
+from ats.ui.styles import DARK_THEME_QSS, enable_tab_direct_switch, save_config_node_async, load_config_node, bind_top_shortcut, set_seamless_stay_on_top
 
 PERSIST_KEY_CHANNEL_SCAN_PERIOD = "channel_scan_selected_period"
 PERSIST_KEY_BOTTOM_PANEL_COLLAPSED = "ats_bottom_panel_collapsed"
@@ -134,12 +135,19 @@ class LedgerUpdateWorker(QThread):
                 safe_ma20 = pd.to_numeric(df_all[ma20_col], errors='coerce').replace(0, float('nan'))
                 dev_series = (close_s - safe_ma20) / safe_ma20 * 100.0
 
-                tracked_codes = set(self._signal_ledger.entries.keys())
+                from contextlib import nullcontext
+                lock = getattr(self._signal_ledger, '_mutation_lock', None)
+                with lock if lock is not None else nullcontext():
+                    tracked_codes = set(self._signal_ledger.entries.keys())
+                    trade_codes = set(self._universe_manager.trade_pool.keys()) if hasattr(self, '_universe_manager') else set()
                 fav_codes = set(self._fav_stocks) if self._fav_stocks else set()
 
                 # 🚀 三轨准入通道 (SSOT): 原有 MA20 回调通道 + 真龙主升破格准入通道 + 通道上涨支撑企稳通道
-                codes_clean_s = pd.Series([str(c).strip().zfill(6) for c in df_all.index], index=df_all.index)
-                trade_codes = set(self._universe_manager.trade_pool.keys()) if hasattr(self, '_universe_manager') else set()
+                if (df_all.index.dtype == object and all(isinstance(c, str) and len(c) == 6
+                        and c.isdigit() for c in df_all.index)):
+                    codes_clean_s = pd.Series(df_all.index, index=df_all.index)
+                else:
+                    codes_clean_s = pd.Series([str(c).strip().zfill(6) for c in df_all.index], index=df_all.index)
                 valid_mask = (
                     ((dev_series >= -2.2) & (dev_series <= 8.8)) |
                     df_all.index.isin(tracked_codes) |
@@ -150,8 +158,8 @@ class LedgerUpdateWorker(QThread):
                 target_df = df_all[valid_mask]
 
                 valid_target_codes = []
-                target_dict = target_df.to_dict('index')
-                for code, row in target_dict.items():
+                from ats.frame_rows import iter_frame_rows
+                for code, row in iter_frame_rows(target_df):
                     code_str = str(code).strip()
                     if not code_str or code_str in ('sh000001', 'sz399001', 'sz399006',
                                                      '000001.SH', '399001.SZ', '399006.SZ'):
@@ -252,9 +260,10 @@ class LedgerUpdateWorker(QThread):
                 price_pct_cache=self._price_pct_cache
             )
 
-            pool_codes = (list(self._universe_manager.radar_pool.keys()) +
-                          list(self._universe_manager.watch_pool.keys()) +
-                          list(self._universe_manager.trade_pool.keys()))
+            entries_view, display_pools = self._ledger_update_service.capture_projection(self._universe_manager)
+            pool_codes = (list(display_pools['radar_pool']) +
+                          list(display_pools['watch_pool']) +
+                          list(display_pools['trade_pool']))
             # Market observations are display candidates, without admitting them to trading pools.
             all_codes = list(dict.fromkeys(pool_codes + [c for c in self._fav_stocks if c]
                                            + active_codes_list))
@@ -393,8 +402,8 @@ class LedgerUpdateWorker(QThread):
                                 pass
 
                 # 兜底 fallback: 若 row_data 中无 ma20d，检查 _signal_ledger.entries 中绑定的偏离度反推 ma20
-                if real_ma20 is None and code in self._signal_ledger.entries:
-                    entry = self._signal_ledger.entries[code]
+                if real_ma20 is None and code in entries_view:
+                    entry = entries_view[code]
                     if entry and entry.latest_deviation is not None and latest_close > 0:
                         try:
                             dev_val = float(entry.latest_deviation)
@@ -415,14 +424,14 @@ class LedgerUpdateWorker(QThread):
                     else:
                         ma5_series = [real_ma5]
 
-                entry = self._signal_ledger.entries.get(code)
+                entry = entries_view.get(code)
                 s_supp = getattr(entry, 'supp_price', None) if entry else None
                 s_deg = getattr(entry, 'ch_slope_deg', None) if entry else None
                 s_h = getattr(entry, 'ch_height_pct', None) if entry else None
                 s_amp = getattr(entry, 'amplitude_pct', None) if entry else None
                 s_tag = getattr(entry, 'signal_tag', None) if entry else None
 
-                trade_pool = getattr(self._universe_manager, 'trade_pool', {})
+                trade_pool = display_pools['trade_pool']
                 is_traded = (code in trade_pool or code_clean in trade_pool)
 
                 state, dev_str, position, reason = self._swing_tracker.update_stock_state(
@@ -441,7 +450,7 @@ class LedgerUpdateWorker(QThread):
                             break
 
                 from ats.signal_ledger import PHASE_LABELS
-                entry = self._signal_ledger.entries.get(code)
+                entry = entries_view.get(code)
                 if entry:
                     phase_label = PHASE_LABELS.get(entry.first_seen_phase, '⏳')
                     first_time = datetime.datetime.fromtimestamp(entry.first_seen_ts).strftime('%H:%M')
@@ -491,7 +500,7 @@ class LedgerUpdateWorker(QThread):
                 stats = self._signal_ledger.get_stats()
             else:
                 tier_counts = {}
-                for e in self._signal_ledger.entries.values():
+                for e in entries_view.values():
                     t = getattr(e, 'tier', 'RADAR')
                     tier_counts[t] = tier_counts.get(t, 0) + 1
                 stats = {'tiers': tier_counts, 'today_new': getattr(self._signal_ledger, '_signal_count', 0)}
@@ -507,6 +516,8 @@ class LedgerUpdateWorker(QThread):
             import logging
             logging.getLogger('ATS').debug(f'[LedgerWorker] 后台计算完成 {elapsed:.1f}ms, swing={len(swing_rows)}, fav={len(fav_rows)}')
 
+            from ats.performance import record
+            record('worker.front_projection', elapsed, df_all)
             self.results_ready.emit(swing_rows, fav_rows, sh_pct, alpha_signals, stats_str)
             # Auxiliary analyses must not delay the MA20 first frame or erase it on failure.
             try:
@@ -527,6 +538,9 @@ class LedgerUpdateWorker(QThread):
             logging.getLogger('ATS').error(f'[LedgerWorker] 异常: {exc}\n{traceback.format_exc()}')
             # 出错时仍要清除 busy 标志，由主线程在 _on_ledger_results 中处理，或直接在此 emit 空结果
             self.results_ready.emit([], [], 0.0, [], '')
+        finally:
+            from ats.performance import record
+            record('worker.lifecycle', (_time.time() - t0) * 1000, self._df)
 
 
 class QtVarProxy:
@@ -718,8 +732,8 @@ class StockDetailDialog(QDialog):
 
     def _save_config_state(self):
         try:
-            from ats.ui.styles import save_config_node
-            save_config_node("ats_stock_detail_dialog_config", {"stays_on_top": getattr(self, "stays_on_top", False)})
+            from ats.ui.styles import save_config_node_async
+            save_config_node_async("ats_stock_detail_dialog_config", {"stays_on_top": getattr(self, "stays_on_top", False)})
         except Exception:
             pass
 
@@ -783,9 +797,9 @@ class StockDetailDialog(QDialog):
     def _save_geometry(self):
         """原子写盘持久化个股详情弹窗位置与大小至 window_config.json"""
         try:
-            from ats.ui.styles import save_config_node
+            from ats.ui.styles import save_config_node_async
             hex_data = self.saveGeometry().toHex().data().decode('utf-8')
-            save_config_node("ats_stock_detail_dialog_geom", hex_data)
+            save_config_node_async("ats_stock_detail_dialog_geom", hex_data)
             self._save_config_state()
         except Exception:
             pass
@@ -2187,15 +2201,15 @@ class ATSMainWindow(QMainWindow):
 
     def _save_search_history_data(self):
         """【只读模式保护】仅将 ATS 自身的当前公式和分组持久化至 window_config.json，严禁覆盖 search_history.json"""
-        from ats.ui.styles import save_config_node
+        from ats.ui.styles import save_config_node_async
         cur_real_q = self._get_real_query() if hasattr(self, '_get_real_query') else ""
         last_q_to_save = cur_real_q if cur_real_q else getattr(self, "last_query", "")
         self.last_query = last_q_to_save
         cur_grp = self.history_selector.currentText() if hasattr(self, 'history_selector') else "history5"
         self.last_group = cur_grp
         
-        save_config_node("ats_query_expr", last_q_to_save)
-        save_config_node("ats_history_group", cur_grp)
+        save_config_node_async("ats_query_expr", last_q_to_save)
+        save_config_node_async("ats_history_group", cur_grp)
 
         # 逐级异步 UI 刷新定时器 (Staggered Async Tier Timers for zero UI freezing)
         self._async_tier2_timer = QTimer(self)
@@ -2767,8 +2781,8 @@ class ATSMainWindow(QMainWindow):
     def _on_history_group_changed(self, keep_current_query: bool = False):
         group = self.history_selector.currentText() if hasattr(self, 'history_selector') else "history5"
         self.last_group = group
-        from ats.ui.styles import save_config_node
-        save_config_node("ats_history_group", group)
+        from ats.ui.styles import save_config_node_async
+        save_config_node_async("ats_history_group", group)
         
         h_list = self.search_histories.get(group, [])
             
@@ -3103,8 +3117,8 @@ class ATSMainWindow(QMainWindow):
         # 1. 动态重新计算匹配集合
         self._recompute_filtered_codes_set()
                     
-        from ats.ui.styles import save_config_node
-        save_config_node("ats_query_expr", query)
+        from ats.ui.styles import save_config_node_async
+        save_config_node_async("ats_query_expr", query)
 
         # 仅持久化本地 ATS 状态 (window_config.json)，绝不修改或覆写 search_history.json
         self._save_search_history_data()
@@ -3140,8 +3154,8 @@ class ATSMainWindow(QMainWindow):
         self.query_expr = ""
         self.last_query = ""
         self.filtered_codes_set = set()
-        from ats.ui.styles import save_config_node
-        save_config_node("ats_query_expr", "")
+        from ats.ui.styles import save_config_node_async
+        save_config_node_async("ats_query_expr", "")
         self._save_search_history_data()
         
         # 广播清空过滤状态至三大 Tab 看板
@@ -3549,8 +3563,8 @@ class ATSMainWindow(QMainWindow):
         # 仅原子持久化记录当前 Tab 索引，绝不触发全量未就绪的 splitter 尺寸写盘
         if not getattr(self, '_is_restoring_sizes', False):
             try:
-                from ats.ui.styles import save_config_node
-                save_config_node("ats_top_tab_index", int(index))
+                from ats.ui.styles import save_config_node_async
+                save_config_node_async("ats_top_tab_index", int(index))
             except Exception as e:
                 logger.debug(f"[ATSMainWindow] 保存 ats_top_tab_index 异常: {e}")
 
@@ -4349,9 +4363,10 @@ class ATSMainWindow(QMainWindow):
 
     def _queue_latest_ipc_frame(self, frame):
         # IPCBridge 已合并增量为独立全量快照；只保留最新行情，事件信号仍逐条投递。
-        if getattr(self, '_is_closing', False):
+        if (getattr(self, '_is_closing', False) or getattr(self, '_close_requested', False)):
             return
         frame.attrs["type"] = "UPDATE_DF_ALL"
+        frame.attrs['_ats_queued_ns'] = time.monotonic_ns()
         with self._ipc_frame_lock:
             previous = self._pending_ipc_frame
             if (previous is not None and not frame.attrs.get("sector_data")
@@ -4368,7 +4383,11 @@ class ATSMainWindow(QMainWindow):
             frame = self._pending_ipc_frame
             self._pending_ipc_frame = None
         if frame is not None:
-            self._handle_realtime_data(frame)
+            from ats.performance import record, measure
+            queued_ns = frame.attrs.get('_ats_queued_ns', time.monotonic_ns())
+            record('gui.queue_age', (time.monotonic_ns() - queued_ns) / 1e6, frame)
+            with measure('gui.accept', frame):
+                self._handle_realtime_data(frame)
 
     def _request_full_sync_async(self):
         if getattr(self, "_pipe_sync_busy", False):
@@ -4583,28 +4602,7 @@ class ATSMainWindow(QMainWindow):
             if getattr(self, 'query_expr', ''):
                 self._queue_latest_ui_task("filter_recompute", 50, self._recompute_filtered_codes_set)
 
-            # ⚡ 涨跌幅度直方图异步计算（pandas 统计移入 QTimer.singleShot，不阻塞主接收链路）
-            _df_hist = self.current_df
-            def _update_dist_chart():
-                try:
-                    if 'percent' not in _df_hist.columns:
-                        return
-                    pcts = _df_hist['percent'].dropna()
-                    bins = [-999, -8, -6, -4, -2, 0, 2, 4, 6, 8, 999]
-                    counts = pd.cut(pcts, bins=bins).value_counts().sort_index().tolist()
-                    up_count = int((pcts > 0).sum())
-                    down_count = int((pcts < 0).sum())
-                    flat_count = int((pcts == 0).sum())
-                    total_count = up_count + down_count + flat_count
-                    avg_pct = float(pcts.mean()) if total_count > 0 else 0.0
-                    market_temp = (up_count / total_count * 100.0) if total_count > 0 else 0.0
-                    stats_dict = {"up": up_count, "down": down_count, "flat": flat_count,
-                                  "avg": avg_pct, "temp": market_temp}
-                    if len(counts) == 10:
-                        self.dist_chart.update_data(counts, stats_dict, _df_hist)
-                except Exception:
-                    pass
-            self._queue_latest_ui_task("distribution", 100, _update_dist_chart)
+            self._queue_distribution_projection(self.current_df)
 
             # ⚡ 30ms 防抖异步触发 UI 渲染 (极其流畅汇聚高频 IPC 广播数据包)
             self._trigger_realtime_ui_update()
@@ -4771,6 +4769,10 @@ class ATSMainWindow(QMainWindow):
     def _flush_batch_stock_prices(self):
         if not self._pending_price_codes:
             return
+        if getattr(self, '_price_task_active', False):
+            self._batch_price_timer.start(150)
+            return
+        self._price_task_active = True
         codes_to_load = list(self._pending_price_codes)
         self._pending_price_codes.clear()
         
@@ -4779,19 +4781,10 @@ class ATSMainWindow(QMainWindow):
         def worker():
             t0 = time.time()
             fail_counts = getattr(self, '_price_fail_counts', {})
-            acquired = self.hdf5_history_lock.acquire(blocking=True, timeout=5.0)
-            if not acquired:
-                now_m = time.monotonic()
-                for code in codes_to_load:
-                    self.prices_loading_codes.discard(code)
-                    self.prices_failed_codes.add(code)
-                    self._price_failure_times[code] = now_m
-                    fail_counts[code] = fail_counts.get(code, 0) + 1
-                logger.debug(f"[ATSMainWindow] HDF5 lock busy, postponed price load for {len(codes_to_load)} codes.")
-                return
             try:
                 from JSONData import sina_data
                 s = sina_data.Sina(readonly=True)
+                s.history_lock = self.hdf5_history_lock
                 
                 valid_codes = [c for c in codes_to_load if c and len(c) == 6]
                 if not valid_codes:
@@ -4835,11 +4828,11 @@ class ATSMainWindow(QMainWindow):
                     self._price_failure_times[code] = now_m
                     fail_counts[code] = fail_counts.get(code, 0) + 1
             finally:
-                self.hdf5_history_lock.release()
-                
+                self._price_task_active = False
         try:
             threading.Thread(target=worker, daemon=True).start()
         except Exception:
+            self._price_task_active = False
             now_m = time.monotonic()
             fail_counts = getattr(self, '_price_fail_counts', {})
             for code in codes_to_load:
@@ -5057,7 +5050,7 @@ class ATSMainWindow(QMainWindow):
         重量级计算 (signal ledger / volume profiler / swing_rows) 全部在 LedgerUpdateWorker 后台线程执行。
         UI 渲染结果通过 results_ready 信号在主线程的 _on_ledger_results 中完成。
         """
-        if getattr(self, '_is_closing', False):
+        if (getattr(self, '_is_closing', False) or getattr(self, '_close_requested', False)):
             return
 
         now_refresh = time.monotonic()
@@ -5139,15 +5132,11 @@ class ATSMainWindow(QMainWindow):
                 except Exception:
                     pass
 
-            for widget in QApplication.topLevelWidgets():
-                if isinstance(widget, StockDetailDialog) and widget.isVisible():
-                    w_code = widget.code
-                    if w_code in self.current_df.index:
-                        w_row = self.current_df.loc[w_code]
-                        import pandas as pd
-                        if isinstance(w_row, pd.DataFrame):
-                            w_row = w_row.iloc[0]
-                        widget.update_data(w_row)
+            self._detail_projection = (self.current_df, [widget for widget in QApplication.topLevelWidgets()
+                if isinstance(widget, StockDetailDialog) and widget.isVisible()])
+            if not getattr(self, '_detail_projection_scheduled', False):
+                self._detail_projection_scheduled = True
+                QTimer.singleShot(0, self._paint_detail_slice)
 
         if not has_df:
             # 无行情数据时仅同步 universe tree
@@ -5180,12 +5169,31 @@ class ATSMainWindow(QMainWindow):
         self._ledger_worker = worker  # 持有引用，防止提前 GC
         worker.start()
 
+    def _paint_detail_slice(self):
+        import pandas as pd
+        self._detail_projection_scheduled = False
+        if getattr(self, '_is_closing', False):
+            return
+        from PyQt6.sip import isdeleted
+        frame, widgets = self._detail_projection
+        started = time.monotonic()
+        while widgets and time.monotonic() - started < .004:
+            widget = widgets.pop(0)
+            if not isdeleted(widget) and widget.isVisible() and widget.code in frame.index:
+                row = frame.loc[widget.code]
+                if isinstance(row, pd.DataFrame):
+                    row = row.iloc[0]
+                widget.update_data(row)
+        if widgets:
+            self._detail_projection_scheduled = True
+            QTimer.singleShot(0, self._paint_detail_slice)
+
     def _on_ledger_finished(self):
         self._ledger_worker_busy = False
         self._ledger_worker = None
         pending = getattr(self, '_ledger_refresh_pending', False)
         self._ledger_refresh_pending = False
-        if pending and not getattr(self, '_is_closing', False):
+        if pending and not getattr(self, '_is_closing', False) and not getattr(self, '_close_requested', False):
             self._trigger_realtime_ui_update()
 
     def _on_ledger_results(self, swing_rows, fav_rows, sh_pct, alpha_signals, stats_str):
@@ -5712,7 +5720,94 @@ class ATSMainWindow(QMainWindow):
             except Exception:
                 pass
 
-    def _record_alpha_signal(self, code, name, pct_val, sh_pct, rs_val, resonance):
+    def _queue_distribution_projection(self, frame):
+        self._distribution_pending = frame
+        if getattr(self, '_distribution_worker', None) is not None or (getattr(self, '_is_closing', False) or getattr(self, '_close_requested', False)):
+            return
+        from ats.ui.market_tasks import DistributionWorker
+        self._distribution_pending = None
+        worker = DistributionWorker(frame)
+        self._distribution_worker = worker
+        worker.ready.connect(self._on_distribution_ready)
+        worker.finished.connect(self._on_distribution_finished)
+        worker.finished.connect(worker.deleteLater)
+        worker.start()
+
+    def _on_distribution_ready(self, frame, result):
+        if getattr(self, '_is_closing', False) or frame is not self.current_df or result is None:
+            return
+        counts, stats = result
+        if len(counts) == 10:
+            self.dist_chart.update_data(counts, stats, frame)
+
+    def _on_distribution_finished(self):
+        self._distribution_worker = None
+        pending = getattr(self, '_distribution_pending', None)
+        if pending is not None and not getattr(self, '_is_closing', False):
+            self._queue_distribution_projection(pending)
+
+    def _start_alpha_history_load(self):
+        if getattr(self, '_alpha_history_worker', None) is not None or not self._alpha_pending_events:
+            return
+        day = self._alpha_pending_events[0][0]
+        if (getattr(self, '_recorded_alpha_today', None) == day
+                and getattr(self, '_recorded_alpha_stocks', None) is not None):
+            self._drain_alpha_pending_events()
+            return
+        old_day = getattr(self, '_recorded_alpha_today', None)
+        if old_day:
+            self._flush_alpha_records_to_disk(old_day)
+        from ats.ui.market_tasks import AlphaHistoryWorker
+        from sys_utils import get_app_root
+        worker = AlphaHistoryWorker(day, get_app_root())
+        self._alpha_history_payload = None
+        self._alpha_history_worker = worker
+        worker.ready.connect(self._on_alpha_history_ready)
+        worker.finished.connect(self._on_alpha_history_finished)
+        worker.finished.connect(worker.deleteLater)
+        worker.start()
+
+    def _on_alpha_history_ready(self, day, records, error):
+        self._alpha_history_payload = (day, records, error)
+
+    def _on_alpha_history_finished(self):
+        self._alpha_history_worker = None
+        payload = self._alpha_history_payload
+        if payload is None or payload[2]:
+            logger.warning('Alpha history load deferred: %s', payload[2] if payload else 'no result')
+            QTimer.singleShot(1000, self._start_alpha_history_load)
+            return
+        day, records, _ = payload
+        self._recorded_alpha_today = day
+        self._recorded_alpha_list = records
+        self._recorded_alpha_stocks = {}
+        for rec in records:
+            code = rec.get('code')
+            try:
+                pct = float(str(rec.get('pct', '0%')).replace('%', '').replace('+', ''))
+            except (ValueError, TypeError):
+                pct = 0.0
+            if code:
+                self._recorded_alpha_stocks[code] = max(pct, self._recorded_alpha_stocks.get(code, -999.0))
+        self._drain_alpha_pending_events()
+
+    def _drain_alpha_pending_events(self):
+        self._alpha_replaying = True
+        try:
+            for _ in range(50):
+                if not self._alpha_pending_events:
+                    break
+                day, args, observed_time = self._alpha_pending_events[0]
+                if day != self._recorded_alpha_today:
+                    break
+                self._alpha_pending_events.popleft()
+                self._record_alpha_signal(*args, _date=day, _time=observed_time)
+        finally:
+            self._alpha_replaying = False
+        if self._alpha_pending_events:
+            QTimer.singleShot(0, self._start_alpha_history_load)
+
+    def _record_alpha_signal(self, code, name, pct_val, sh_pct, rs_val, resonance, _date=None, _time=None):
         """持久化记录大盘偏离共振信号，提供每日复盘与实时跟踪 (内存级极速去重 + 异步防抖落盘, 绝对零主线程 IO)"""
         import os
         import json
@@ -5722,53 +5817,19 @@ class ATSMainWindow(QMainWindow):
         if resonance not in ("逆市抗跌", "大盘共振"):
             return False
 
-        today_date = time.strftime("%Y-%m-%d")
-        
-        # 自动迁移旧路径下的所有 ats_alpha_tracker_*.json 文件到新的 datacsv 目录下
-        try:
-            from sys_utils import get_app_root
-            data_dir = os.path.join(get_app_root(), "datacsv")
-            if not os.path.exists(data_dir):
-                os.makedirs(data_dir, exist_ok=True)
-                
-            old_data_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "data")
-            if os.path.exists(old_data_dir) and old_data_dir != data_dir:
-                import shutil
-                for fname in os.listdir(old_data_dir):
-                    if fname.startswith("ats_alpha_tracker_") and fname.endswith(".json"):
-                        old_filepath = os.path.join(old_data_dir, fname)
-                        new_filepath = os.path.join(data_dir, fname)
-                        if os.path.exists(old_filepath) and not os.path.exists(new_filepath):
-                            shutil.copy2(old_filepath, new_filepath)
-        except Exception:
-            pass
+        today_date = _date or time.strftime("%Y-%m-%d")
+        observed_time = _time or time.strftime("%H:%M:%S")
 
-        # 初始化内存锁与记录列表，仅启动时读一次磁盘
-        if getattr(self, "_recorded_alpha_stocks", None) is None or getattr(self, "_recorded_alpha_today", None) != today_date:
-            self._recorded_alpha_stocks = {}  # {code: max_pct_val}
-            self._recorded_alpha_list = []
-            self._recorded_alpha_today = today_date
-            
-            try:
-                from sys_utils import get_app_root
-                data_dir = os.path.join(get_app_root(), "datacsv")
-                log_path = os.path.join(data_dir, f"ats_alpha_tracker_{today_date}.json")
-                from ats.bounded_evaluation_store import evaluation_store
-                existing_records = evaluation_store.read(log_path, None)
-                if existing_records is not None:
-                        self._recorded_alpha_list = existing_records if isinstance(existing_records, list) else []
-                        for rec in self._recorded_alpha_list:
-                            c = rec.get('code')
-                            p_str = str(rec.get('pct', '0%')).replace('%', '').replace('+', '')
-                            try:
-                                p_float = float(p_str)
-                            except ValueError:
-                                p_float = 0.0
-                            if c:
-                                if c not in self._recorded_alpha_stocks or p_float > self._recorded_alpha_stocks[c]:
-                                    self._recorded_alpha_stocks[c] = p_float
-            except Exception:
-                pass
+        if (getattr(self, '_recorded_alpha_stocks', None) is None
+                or getattr(self, '_recorded_alpha_today', None) != today_date
+                or getattr(self, '_alpha_history_worker', None) is not None
+                or (getattr(self, '_alpha_pending_events', None) and not getattr(self, '_alpha_replaying', False))):
+            from collections import deque
+            if not hasattr(self, '_alpha_pending_events'):
+                self._alpha_pending_events = deque()
+            self._alpha_pending_events.append((today_date, (code, name, pct_val, sh_pct, rs_val, resonance), observed_time))
+            self._start_alpha_history_load()
+            return False
 
         # 检查是否重复：若当天已记录且当前涨跌幅未超过上次记录的 2.0% 以上（未发生重大突破），则直接跳过去重
         last_pct = self._recorded_alpha_stocks.get(code)
@@ -5813,7 +5874,7 @@ class ATSMainWindow(QMainWindow):
                     pass
 
         # 纯内存添加记录，绝不进行主线程阻塞式 IO 读写
-        time_str = time.strftime("%H:%M:%S")
+        time_str = observed_time
         if not hasattr(self, '_recorded_alpha_list') or self._recorded_alpha_list is None:
             self._recorded_alpha_list = []
             
@@ -5842,7 +5903,8 @@ class ATSMainWindow(QMainWindow):
             self._alpha_flush_timer = QTimer(self)
             self._alpha_flush_timer.setSingleShot(True)
             self._alpha_flush_timer.setInterval(500)
-            self._alpha_flush_timer.timeout.connect(lambda: self._flush_alpha_records_to_disk(today_date))
+            self._alpha_flush_timer.timeout.connect(lambda: self._flush_alpha_records_to_disk(self._alpha_flush_date))
+        self._alpha_flush_date = today_date
         self._alpha_flush_timer.start(500)
 
     def _flush_alpha_records_to_disk(self, today_date):
@@ -5850,6 +5912,10 @@ class ATSMainWindow(QMainWindow):
             return
         import threading
         records_copy = list(self._recorded_alpha_list)
+        if not hasattr(self, '_alpha_flush_lock'):
+            self._alpha_flush_lock = threading.Lock()
+        self._alpha_flush_seq = getattr(self, '_alpha_flush_seq', 0) + 1
+        flush_seq = self._alpha_flush_seq
         def worker():
             try:
                 from sys_utils import get_app_root
@@ -5858,7 +5924,9 @@ class ATSMainWindow(QMainWindow):
                 log_path = os.path.join(data_dir, f"ats_alpha_tracker_{today_date}.json")
                 from ats.bounded_evaluation_store import evaluation_store
                 from ats.storage_archive import write_json_gzip
-                evaluation_store.put(log_path, records_copy, write_json_gzip)
+                with self._alpha_flush_lock:
+                    if flush_seq == self._alpha_flush_seq:
+                        evaluation_store.put(log_path, records_copy, write_json_gzip)
             except Exception as e:
                 print(f"[ATSAlphaTracker] Background flush error: {e}")
         threading.Thread(target=worker, daemon=True).start()
@@ -5890,14 +5958,20 @@ class ATSMainWindow(QMainWindow):
             logger.warning("[NextDayWatch] ACK scheduling failed: %s", exc)
 
     def _persist_next_day_receipts(self):
+        if getattr(self, '_close_requested', False):
+            return  # Durable producer outbox remains unacknowledged.
         def completed(result):
             if not getattr(self, '_is_closing', False):
                 try:
                     self.next_day_snapshot_signal.emit(result)
                 except RuntimeError:
                     pass  # Source outbox remains pending after window destruction.
+        if getattr(self, '_ledger_worker_busy', False):
+            QTimer.singleShot(25, self._persist_next_day_receipts)
+            return
         self.session_snapshot.save_snapshot_async(self.signal_ledger, completed)
 
+    @ledger_guard
     def _on_next_day_snapshot_saved(self, result):
         if not result.get('success') or getattr(self, '_is_closing', False):
             return
@@ -5907,8 +5981,9 @@ class ATSMainWindow(QMainWindow):
         if self.signal_ledger._next_day_watch_unpersisted_event_ids:
             self._persist_next_day_receipts()
 
+    @ledger_guard
     def _handle_realtime_signal(self, signal):
-        if not signal or getattr(self, '_is_closing', False):
+        if not signal or (getattr(self, '_is_closing', False) or getattr(self, '_close_requested', False)):
             return
         if isinstance(signal, dict) and signal.get("type") == "NEXT_DAY_WATCH_CONFIRM":
             try:
@@ -6064,8 +6139,8 @@ class ATSMainWindow(QMainWindow):
 
     def save_font_size(self, size: int):
         try:
-            from ats.ui.styles import save_config_node
-            save_config_node("ats_font_size", size)
+            from ats.ui.styles import save_config_node_async
+            save_config_node_async("ats_font_size", size)
         except Exception as e:
             print(f"[ATSMainWindow] Error saving font size: {e}")
 
@@ -6272,9 +6347,9 @@ class ATSMainWindow(QMainWindow):
                 self.btn_toggle_bottom_panel.setToolTip("折叠底部面板，最大化上方主视区 (快捷键: Alt+B)")
 
         if save and not getattr(self, '_is_restoring_sizes', False):
-            from ats.ui.styles import save_config_node
-            save_config_node(PERSIST_KEY_BOTTOM_PANEL_COLLAPSED, self._is_bottom_panel_collapsed)
-            save_config_node(PERSIST_KEY_BOTTOM_PANEL_HEIGHT, getattr(self, '_last_bottom_panel_height', 350))
+            from ats.ui.styles import save_config_node_async
+            save_config_node_async(PERSIST_KEY_BOTTOM_PANEL_COLLAPSED, self._is_bottom_panel_collapsed)
+            save_config_node_async(PERSIST_KEY_BOTTOM_PANEL_HEIGHT, getattr(self, '_last_bottom_panel_height', 350))
             if hasattr(self, '_save_layout_state'):
                 try:
                     self._save_layout_state()
@@ -6460,7 +6535,7 @@ class ATSMainWindow(QMainWindow):
             if len(sizes) != 3 or sum(sizes) < 600 or sizes[0] < 40 or sizes[2] < 120:
                 return
         try:
-            from ats.ui.styles import save_config_nodes
+            from ats.ui.styles import save_config_nodes_async
             updates = {}
             # Save geometry
             updates["ats_main_window_geometry"] = self.saveGeometry().toHex().data().decode()
@@ -6501,7 +6576,7 @@ class ATSMainWindow(QMainWindow):
             updates["ats_bottom_panel_collapsed"] = getattr(self, '_is_bottom_panel_collapsed', False)
             updates["ats_bottom_panel_last_height"] = getattr(self, '_last_bottom_panel_height', 350)
 
-            save_config_nodes(updates)
+            save_config_nodes_async(updates)
         except Exception as e:
             print(f"[ATSMainWindow] Error saving layout state: {e}")
 
@@ -6712,7 +6787,7 @@ class ATSMainWindow(QMainWindow):
             )
         # 自动持久化最后使用的周期
         try:
-            save_config_node(PERSIST_KEY_CHANNEL_SCAN_PERIOD, period)
+            save_config_node_async(PERSIST_KEY_CHANNEL_SCAN_PERIOD, period)
         except Exception as e:
             logger.debug(f"持久化通道测算周期失败: {e}")
         # 立即执行测算
@@ -6953,8 +7028,143 @@ class ATSMainWindow(QMainWindow):
         threading.Thread(target=close_detector, daemon=False, name="ATS-IPOClose").start()
 
 
+    def _begin_shutdown_drain(self):
+        import copy
+        from datetime import datetime
+        from ats.shutdown import ShutdownDrain
+        captured, revision = self.session_snapshot._capture_ledger(self.signal_ledger)
+        snapshot = self.session_snapshot
+        alpha_records = copy.deepcopy(getattr(self, '_recorded_alpha_list', []))
+        self._alpha_flush_seq = getattr(self, '_alpha_flush_seq', 0) + 1
+        alpha_day = getattr(self, '_alpha_flush_date', datetime.now().strftime('%Y-%m-%d'))
+        def alpha_flush():
+            from sys_utils import get_app_root
+            from ats.bounded_evaluation_store import evaluation_store
+            from ats.storage_archive import write_json_gzip
+            lock = getattr(self, '_alpha_flush_lock', None)
+            if lock is not None and not lock.acquire(timeout=max(0, self._close_deadline - time.monotonic())):
+                return False
+            try:
+                if alpha_records:
+                    path = os.path.join(get_app_root(), 'datacsv', f'ats_alpha_tracker_{alpha_day}.json')
+                    evaluation_store.put(path, alpha_records, write_json_gzip)
+                evaluation_store.flush()
+            finally:
+                if lock is not None:
+                    lock.release()
+        def cache_flush():
+            from JSONData.global_market_data import flush_kline_disk_cache
+            flush_kline_disk_cache('yahoo', force=False)
+            flush_kline_disk_cache('sina', force=False)
+        def intraday_flush():
+            from ats.intraday_strategy_engine import IntradayStrategyEngine
+            engine = IntradayStrategyEngine.get_instance()
+            engine.save_intraday_cache(force=False)
+            engine.flush_all_closing_scorecards_on_exit()
+        def config_flush():
+            from ats.ui.styles import flush_config_writer
+            return flush_config_writer(timeout_sec=max(0, self._close_deadline - time.monotonic()))
+        def learning_flush():
+            from ats.llm.learning_snapshot_store import shutdown_snapshot_writers
+            return shutdown_snapshot_writers(timeout_seconds=max(0, self._close_deadline - time.monotonic()))
+        def interaction_flush():
+            from ats.llm.interaction_journal import shutdown_interaction_writers
+            return shutdown_interaction_writers(timeout_seconds=max(0, self._close_deadline - time.monotonic()))
+        tasks = [('ledger', lambda: snapshot._save_captured(captured, revision, True)),
+                 ('summary', lambda: snapshot.save_daily_summary(captured, force=True)),
+                 ('alpha', alpha_flush),
+                 ('market caches', cache_flush), ('intraday', intraday_flush),
+                 ('config', config_flush), ('learning', learning_flush),
+                 ('interaction', interaction_flush)]
+        self._shutdown_drain = ShutdownDrain(tasks, self._close_deadline)
+
+    def _retry_close_after_workers(self):
+        self._close_wait_scheduled = False
+        self.close()
+
+    def _resume_close_watchers(self):
+        if getattr(self, '_close_requested', False):
+            return
+        pending = getattr(self, '_close_resume_watchers', set())
+        for name in tuple(pending):
+            watcher = getattr(self, name, None)
+            if watcher is None:
+                pending.discard(name)
+            elif not watcher.isRunning():
+                watcher.running = True
+                watcher._running = True
+                watcher.start()
+                pending.discard(name)
+        if pending:
+            QTimer.singleShot(25, self._resume_close_watchers)
+
+    def _cancel_close_attempt(self):
+        self._close_requested = False
+        self._is_exiting = False
+        timer = getattr(self, '_next_day_watch_timer', None)
+        if timer is not None and getattr(self, '_close_poll_was_active', False):
+            timer.start()
+        self._resume_close_watchers()
+
     def closeEvent(self, event):
         """主窗口关闭退出时，自动跟随关闭所有独立的 TopLevel 子窗口、对话框、保存全量布局配置及安全回收后台线程"""
+        if not getattr(self, '_close_requested', False):
+            self._close_requested = True
+            self._close_deadline = time.monotonic() + 30.0
+            timer = getattr(self, '_next_day_watch_timer', None)
+            self._close_poll_was_active = timer is not None and timer.isActive()
+            if timer is not None:
+                timer.stop()
+            self._close_resume_watchers = set()
+            for name in ('tdx_watcher', 'ladder_watcher'):
+                watcher = getattr(self, name, None)
+                if watcher is not None:
+                    if watcher.isRunning():
+                        self._close_resume_watchers.add(name)
+                    watcher.running = False
+                    watcher._running = False
+                    watcher.requestInterruption()
+        workers = [getattr(self, name, None) for name in
+                   ('_ledger_worker', '_distribution_worker', '_alpha_history_worker',
+                    'tdx_watcher', 'ladder_watcher')]
+        pending_alpha = bool(getattr(self, '_alpha_pending_events', ()))
+        if pending_alpha and getattr(self, '_alpha_history_worker', None) is None:
+            self._start_alpha_history_load()
+        if pending_alpha or any(worker is not None and worker.isRunning() for worker in workers):
+            event.ignore()
+            if time.monotonic() >= self._close_deadline:
+                self._cancel_close_attempt()
+                logger.error('ATS close deferred: required tasks did not drain in 30s')
+                self.status_bar.showMessage('退出未完成：必要任务未排空，保留窗口和待提交状态', 15000)
+                return
+            self._is_exiting = True
+            self._ledger_refresh_pending = False
+            if not getattr(self, '_close_wait_scheduled', False):
+                self._close_wait_scheduled = True
+                QTimer.singleShot(25, self._retry_close_after_workers)
+            return
+        drain = getattr(self, '_shutdown_drain', None)
+        if drain is None:
+            self._begin_shutdown_drain()
+            event.ignore()
+            QTimer.singleShot(25, self._retry_close_after_workers)
+            return
+        if not drain.done.is_set():
+            event.ignore()
+            if time.monotonic() >= self._close_deadline:
+                self._cancel_close_attempt()
+                logger.error('ATS shutdown deadline exceeded; preserving window and state')
+                self.status_bar.showMessage('退出排空超时：保留窗口及待提交状态', 15000)
+                return
+            QTimer.singleShot(25, self._retry_close_after_workers)
+            return
+        if drain.errors:
+            event.ignore()
+            self._shutdown_drain = None
+            self._cancel_close_attempt()
+            logger.error('ATS shutdown deferred: %s', drain.errors)
+            self.status_bar.showMessage('退出排空失败，待提交状态已保留，可重试关闭', 15000)
+            return
         self._is_closing = True
         self._is_exiting = True
         if self.ipo_learning_console is not None:
@@ -7141,24 +7351,6 @@ class ATSMainWindow(QMainWindow):
         except Exception:
             pass
 
-        # 4.5 程序优雅退出时触发唯一的终盘总结与最新快照原子保存 (彻底消除盘中刷屏生成冗余散落 JSON)
-        if hasattr(self, 'session_snapshot') and hasattr(self, 'signal_ledger'):
-            try:
-                self.session_snapshot.save_snapshot(self.signal_ledger, force=True)
-                self.session_snapshot.save_daily_summary(self.signal_ledger, force=True)
-                print("[ATSMainWindow] 退出快照已更新内存，按交易时段存档策略延迟保存")
-            except Exception as ex:
-                print(f"[ATSMainWindow] 程序退出保存信号快照异常: {ex}")
-
-        # 4.6 外盘 K 线内存脏数据统一原子落盘 (彻底确保退出时 K 线缓存不丢失)
-        try:
-            from JSONData.global_market_data import flush_kline_disk_cache
-            flush_kline_disk_cache('yahoo', force=False)
-            flush_kline_disk_cache('sina', force=False)
-            print("[ATSMainWindow] 外盘 K 线脏数据已成功原子落盘持久化!")
-        except Exception as ex:
-            print(f"[ATSMainWindow] 外盘 K 线落盘异常 (非致命): {ex}")
-
         # 4.7 🛑 统一优雅关闭持仓盯盘及所有 SBC 独立子进程 (确保子进程安全落盘退出，彻底释放临时目录句柄，杜绝 PYI 警告)
         try:
             from ats.ui.sbc_launcher import SBCProcessManager
@@ -7249,30 +7441,6 @@ class ATSMainWindow(QMainWindow):
             AlertNotifier.get_instance().shutdown()
         except Exception as e:
             print(f"[ATSMainWindow] Error shutting down AlertNotifier: {e}")
-
-        # 安全持久化分时策略引擎状态（有实质数据变动才落盘）
-        try:
-            from ats.intraday_strategy_engine import IntradayStrategyEngine
-            eng = IntradayStrategyEngine.get_instance()
-            eng.save_intraday_cache(force=False)
-            eng.flush_all_closing_scorecards_on_exit()   # 退出时统一落盘首日新股收盘定盘评分
-        except Exception as e:
-            print(f"[ATSMainWindow] Error saving intraday strategy cache on close: {e}")
-
-
-        try:
-            from ats.llm.learning_snapshot_store import shutdown_snapshot_writers
-            if not shutdown_snapshot_writers(timeout_seconds=2.0):
-                print("[ATSMainWindow] IPO learning snapshot writer did not drain before shutdown.")
-        except Exception as e:
-            print(f"[ATSMainWindow] Error draining IPO learning snapshots on close: {e}")
-
-        try:
-            from ats.llm.interaction_journal import shutdown_interaction_writers
-            if not shutdown_interaction_writers(timeout_seconds=2.0):
-                print("[ATSMainWindow] IPO Agent interaction journal did not drain before shutdown.")
-        except Exception as e:
-            print(f"[ATSMainWindow] Error draining IPO Agent interactions on close: {e}")
 
         # ✅ 【最后一步】主动停止日志队列监听线程，防止 atexit 阶段 QueueListener._thread.join()
         # 在 Python 解释器关闭时永久阻塞（_monitor 线程向被替换的 sys.stdout 写日志触发死锁）。

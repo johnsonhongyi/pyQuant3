@@ -11,6 +11,7 @@ ATS Signal Ledger
 替代原有 UniverseManager.run_pipeline_filtering() 的全量重算逻辑
 """
 
+from ats.ledger_guard import ledger_guard
 import time
 import datetime
 import hashlib
@@ -426,6 +427,8 @@ class SignalLedger:
         entry.ch_height_pct = 0.0
 
     def __init__(self):
+        import threading
+        self._mutation_lock = threading.RLock()
         self.entries = {}       # {code: SignalEntry}
         self._next_day_watch_event_ids = set()
         self._next_day_watch_unpersisted_event_ids = set()
@@ -460,6 +463,7 @@ class SignalLedger:
         except Exception:
             return set()
 
+    @ledger_guard
     def is_notified_today(self, code: str, signal_tag: str = '') -> bool:
         """检查指定股票或信号在今天是否已经进行过桌面/语音通知，防止多周期与 ATS 两个界面重复播报"""
         self._ensure_daily_reset()
@@ -471,6 +475,7 @@ class SignalLedger:
         tag_clean = str(signal_tag).strip()
         return f"{code_clean}_{tag_clean}" in self._notified_keys
 
+    @ledger_guard
     def mark_notified_today(self, code: str, signal_tag: str = ''):
         """标记指定股票与信号类型为今日已通知，阻止后续模块重复发声弹窗"""
         self._ensure_daily_reset()
@@ -478,6 +483,7 @@ class SignalLedger:
         tag_clean = str(signal_tag).strip() or 'GENERAL'
         self._notified_keys.add(f"{code_clean}_{tag_clean}")
 
+    @ledger_guard
     def _ensure_daily_reset(self):
         """每日自动重置（保留 WATCH 和 TRADE 信号用于跨日追踪）"""
         today = datetime.date.today().strftime('%Y-%m-%d')
@@ -507,6 +513,7 @@ class SignalLedger:
         if old_count > 0:
             print(f"[SignalLedger] 每日重置: {old_count} → {len(preserved)} (保留 WATCH/TRADE 跨日追踪)")
 
+    @ledger_guard
     def load_previous_signals(self, prev_signals_dict):
         """从昨日盘中快照/总结载入历史信号 (用于跨日恢复与追踪)
 
@@ -553,6 +560,7 @@ class SignalLedger:
         if loaded_count > 0:
             print(f"[SignalLedger] 跨日继承: 成功恢复 {loaded_count} 只昨日 WATCH/TRADE 精选标的")
 
+    @ledger_guard
     def record_signal(self, code, name, price, pct, deviation, row=None, volume_score=0.0,
                       signal_source='ATS', signal_tag='', dragon_role='',
                       dragon_buy_type='', dragon_reason='', dragon_amount_yi=0.0,
@@ -597,6 +605,7 @@ class SignalLedger:
         )
         return result.entry
 
+    @ledger_guard
     def _record_signal_internal(self, code, name, price, pct, deviation, row=None, volume_score=0.0,
                                 signal_source='ATS', signal_tag='', dragon_role='',
                                 dragon_buy_type='', dragon_reason='', dragon_amount_yi=0.0,
@@ -1130,6 +1139,7 @@ class SignalLedger:
 
         return round(priority, 2)
 
+    @ledger_guard
     def record_tdx_signal(self, sig_dict: dict, row=None, observed_at=None):
         """记录来自通达信 / OrderMon 的外部实时信号
 
@@ -1235,6 +1245,7 @@ class SignalLedger:
             entry.promote('WATCH', reason=reason)
 
 
+    @ledger_guard
     def get_sorted_pool(self, tier, limit=None):
         """获取指定层级的信号列表（按优先级降序排列）
 
@@ -1253,6 +1264,7 @@ class SignalLedger:
 
         return pool
 
+    @ledger_guard
     def get_display_pools(self):
         """获取三级池的展示数据（用于 UI 渲染）
 
@@ -1282,11 +1294,13 @@ class SignalLedger:
 
         return radar_list, watch_list, trade_list
 
+    @ledger_guard
     def get_all_tracked_codes(self):
         """获取所有被追踪的股票代码（活跃状态）"""
         return [code for code, entry in self.entries.items()
                 if entry.tier in ('RADAR', 'WATCH', 'TRADE')]
 
+    @ledger_guard
     def get_stats(self):
         """获取统计信息"""
         self._ensure_daily_reset()

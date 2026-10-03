@@ -187,7 +187,8 @@ class StockCode:
         all_stock_codes_url = 'http://www.shdjt.com/js/lib/astock.js'
         grep_stock_codes = re.compile('~(\d+)`')
         try:
-            response = requests.get(all_stock_codes_url)
+            response = requests.get(all_stock_codes_url, timeout=(min(3.0, max(.01, self._task_deadline - time.monotonic())),
+                         min(10.0, max(.01, self._task_deadline - time.monotonic()))))
             response.encoding = self.encoding
         except Exception as e:
             if self.exceptCount is None:
@@ -1211,8 +1212,9 @@ class Sina:
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
             
+            remaining = max(.01, getattr(self, '_task_deadline', time.monotonic() + 15) - time.monotonic())
             async def run():
-                async with aiohttp.ClientSession() as session:
+                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=min(15, remaining), connect=min(3, remaining), sock_read=min(10, remaining))) as session:
                     await self._fetch_all_stocks(session)
             
             loop.run_until_complete(run())
@@ -1843,7 +1845,7 @@ class Sina:
             
         self.url = self.sina_stock_api + ','.join(self.stock_codes)
         log.info("stock_list:%s" % self.url[:30])
-        response = requests.get(self.url, headers=self.sinaheader)
+        response = requests.get(self.url, headers=self.sinaheader, timeout=(3.0, 10.0))
         response.encoding = self.encoding
         self.stock_data.append(response.text)
         self.dataframe = self.format_response_data(index)
@@ -1862,12 +1864,21 @@ class Sina:
 
 
     def get_stock_list_data(self, ulist: List[str], index: bool = False) -> pd.DataFrame:
+        self._task_deadline = time.monotonic() + 30.0
         ulist = [stock_code  for stock_code in ulist if stock_code.startswith(('0','3','4','5', '6','8', '9'))]
         h5: Optional[pd.DataFrame] = None
         if index:
             ulist = self.set_stock_codes_index_init(ulist, index)
         else:
-            h5 = h5a.load_hdf_db(self.hdf_name, self.table, code_l=ulist, index=index)
+            history_lock = getattr(self, 'history_lock', None)
+            acquired = history_lock is None or history_lock.acquire(timeout=5.0)
+            if not acquired:
+                raise TimeoutError("Sina history lock timeout")
+            try:
+                h5 = h5a.load_hdf_db(self.hdf_name, self.table, code_l=ulist, index=index)
+            finally:
+                if history_lock is not None:
+                    history_lock.release()
             
         if h5 is not None and len(h5) >= len(ulist):
             log.info("hdf5 data:%s" % (len(h5)))
@@ -1901,7 +1912,7 @@ class Sina:
             
             url_local = self.sina_stock_api + ','.join(self.stock_codes)
             log.info("stock_list:%s" % url_local[:30])
-            response = requests.get(url_local, headers=self.sinaheader)
+            response = requests.get(url_local, headers=self.sinaheader, timeout=(3.0, 10.0))
             response.encoding = self.encoding
             self.stock_data.append(response.text)
             self.dataframe = self.format_response_data(index)

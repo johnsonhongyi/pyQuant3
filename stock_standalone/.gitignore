@@ -1,5 +1,15 @@
 .pytest_temp/
 .pytest_cache/
+.pytest_tmp/
+!tests/test_hdf_lock_deadline.py
+!tests/test_ats_performance_contracts.py
+!tests/test_ats_incremental_gui_contract.py
+!tests/test_ats_capacity_equivalence.py
+!trading_kernel/tests/test_replay_equivalence.py
+!trading_kernel/tests/test_reconciliation_rotation.py
+!trading_kernel/tests/test_journal_contract.py
+!trading_kernel/tests/test_confirm_mode.py
+!trading_kernel/tests/test_broker_adapter.py
 .tmp/
 config/new_stock_data_cache.json.gz
 config/new_stock_ipo_calendar.json.gz
@@ -27,3 +37,12 @@ data/ipo_learning/shadow_observations.sqlite
 /JSONData/test_window_scan_regression.py
 
 /JSONData/test_panel_performance_regression.py
+
+!tests/test_g11_shadow_runner.py
+
+.ats_validation/
+
+!scripts/ats_architecture_perf_probe.py
+
+!docs/ats_closed_loop/performance_ab_20261003.json
+!docs/ats_closed_loop/implementation_evidence_20261003.json

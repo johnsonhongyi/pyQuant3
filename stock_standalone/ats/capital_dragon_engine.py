@@ -260,6 +260,10 @@ class CapitalDragonEngine:
         self._cached_df_len: int = 0
         self._cached_df_first_code: str = ""
         self._cache_lock = threading.RLock()
+        from ats.request_gate import SingleFlight
+        self._analysis_flight = SingleFlight()
+        self._analysis_lock = threading.RLock()
+        self._cached_input_key = None
         self._dragon_codes_set: Set[str] = set()
         self._trap_codes_set: Set[str] = set()
         # 实时指数行情缓存 (完全由 TDX API 真实拉取填充，严禁伪造硬编码数据)
@@ -470,6 +474,27 @@ class CapitalDragonEngine:
         return res_vr.clip(0.1, 50.0).round(2)
 
     def analyze_capital_dragon_universe(
+        self, df_all: Optional[pd.DataFrame], sh_pct: float = 0.0, force: bool = False
+    ) -> Dict[str, Any]:
+        from ats.performance import measure
+        attrs = getattr(df_all, 'attrs', {})
+        version = (attrs.get('sync_session'), attrs.get('source_version', attrs.get('ver')))
+        source = version if all(value is not None for value in version) else id(df_all)
+        input_key = (source, time.strftime('%Y-%m-%d'), float(sh_pct))
+        key = (input_key, bool(force))
+        def analyze():
+            with self._analysis_lock, measure('worker.capital_analysis', df_all):
+                result = self._analyze_capital_dragon_universe(
+                    df_all, sh_pct, force)
+                self._cached_input_key = input_key
+                return result
+        try:
+            return self._analysis_flight.run(key, analyze)
+        except (RuntimeError, TimeoutError) as exc:
+            logger.warning('Capital analysis deferred: %s', exc)
+            return self.get_cached_report(fallback_stale=True)
+
+    def _analyze_capital_dragon_universe(
         self,
         df_all: Optional[pd.DataFrame],
         sh_pct: float = 0.0,

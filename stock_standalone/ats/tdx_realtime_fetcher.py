@@ -2119,6 +2119,8 @@ class TDXRealtimeFetcher:
         self.active_hosts_pool: List[Tuple[float, str, str, int]] = []
         self._is_connected = False
         self._conn_lock = threading.RLock()
+        from ats.request_gate import SingleFlight
+        self._quote_flight = SingleFlight()
         self._consecutive_empty_batches: int = 0
         
         # 内存日志缓冲队列 (最大保留 500 条最新日志)
@@ -2998,6 +3000,18 @@ class TDXRealtimeFetcher:
             }
 
     def get_security_quotes_safe(self, codes: List[str], force: bool = False) -> List[Dict[str, Any]]:
+        from ats.performance import measure
+        key = (tuple(codes), bool(force))
+        def fetch():
+            with measure('network.tdx_quotes', codes=len(codes)):
+                return self._get_security_quotes_safe(codes, force)
+        try:
+            return self._quote_flight.run(key, fetch)
+        except (RuntimeError, TimeoutError) as exc:
+            logger.warning('TDX quote request deferred: %s', exc)
+            return []
+
+    def _get_security_quotes_safe(self, codes: List[str], force: bool = False) -> List[Dict[str, Any]]:
         """
         安全批量获取股票最新五档盘口行情（支持 force=True 强制透传全量穿透）
         :param codes: 股票代码列表，例如 ['688826', '600519']
@@ -3012,6 +3026,7 @@ class TDXRealtimeFetcher:
         if not codes:
             return []
 
+        deadline = time.monotonic() + 30.0
         now_t = time.time()
         is_allowed, stage_desc, stage_meta = is_tdx_trading_allowed()
         is_trading = is_allowed
@@ -3049,17 +3064,21 @@ class TDXRealtimeFetcher:
         all_fetched_quotes = []
         chunk_size = 40  # 符合 TDXHQ 协议的安全批次大小
 
-        with self._conn_lock:
-            if not self._is_connected:
-                # 🛡️ 守卫: 若处于早盘初始化缓重试延时或全局连接熔断冷却中，直接复用缓存，绝不进行网络阻塞与重复尝试
-                if not force and now_t < self._global_connect_cooldown_until:
-                    return cached_results
-                if not self.connect(force=force):
-                    if not stage_meta.get("is_server_init", False):
-                        self.add_log(f"无法建立 TDX 连接，跳过获取 {len(active_codes)} 只标的行情", level="WARN")
-                    return cached_results
+        for i in range(0, len(active_codes), chunk_size):
+            if time.monotonic() >= deadline:
+                logger.warning("TDX quote task deadline reached")
+                break
+            from ats.request_gate import deadline_lock
+            with deadline_lock(self._conn_lock, deadline):
+                if not self._is_connected:
+                    # 🛡️ 守卫: 若处于早盘初始化缓重试延时或全局连接熔断冷却中，直接复用缓存，绝不进行网络阻塞与重复尝试
+                    if not force and now_t < self._global_connect_cooldown_until:
+                        return cached_results
+                    if not self.connect(force=force):
+                        if not stage_meta.get("is_server_init", False):
+                            self.add_log(f"无法建立 TDX 连接，跳过获取 {len(active_codes)} 只标的行情", level="WARN")
+                        return cached_results
 
-            for i in range(0, len(active_codes), chunk_size):
                 chunk = active_codes[i:i + chunk_size]
                 req_params = [(get_market_code(c_c), c_c) for c_c in chunk]
                 codes_str = ",".join(c for _, c in req_params)
@@ -3100,6 +3119,8 @@ class TDXRealtimeFetcher:
                         # 处理该批次中个别未返回行情的标的（自动记录并适度冷却）
                         missing_in_chunk = [c_c for _, c_c in req_params if c_c not in returned_codes]
                         for c_m in missing_in_chunk:
+                            if time.monotonic() >= deadline:
+                                break
                             # 混合批次可能只漏回个别代码；单票重试一次，避免把批次漏项直接当成无行情。
                             retry_succeeded = False
                             try:

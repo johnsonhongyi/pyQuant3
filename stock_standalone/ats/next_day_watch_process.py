@@ -3,6 +3,7 @@ import atexit
 import logging
 import multiprocessing
 import os
+import pickle
 import threading
 import time
 
@@ -214,16 +215,43 @@ class NextDayWatchProcess:
     def __init__(self, root):
         self.root = os.path.abspath(root)
         self._lock = threading.Lock()
+        from ats.request_gate import RequestGate
+        self._request_gate = RequestGate()
         self._closed = threading.Event()
         self._process = None
         self._connection = None
         atexit.register(self.close)
 
     def request(self, action, timeout=120.0, **payload):
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        try:
+            with self._request_gate.enter(deadline, priority=0 if action == 'ack' else 1):
+                return self._request_serial(action, deadline, **payload)
+        except Exception as exc:
+            return {"events": [], "error": str(exc)}
+
+    def _request_serial(self, action, deadline, **payload):
         # Called only by background threads; at most one request can be in flight.
         with self._lock:
             if self._closed.is_set():
                 return {"events": [], "error": "worker_closed"}
+            expired = threading.Event()
+            done = threading.Event()
+            owned_process = [None]
+
+            def expire():
+                expired.set()
+                process = owned_process[0]
+                if process is not None and not done.is_set():
+                    try:
+                        if process.is_alive():
+                            process.terminate()
+                    except (OSError, ValueError):
+                        pass
+
+            timer = threading.Timer(max(0.0, deadline - time.monotonic()), expire)
+            timer.daemon = True
+            timer.start()
             try:
                 if self._process is None or not self._process.is_alive():
                     if self._connection is not None:
@@ -243,13 +271,26 @@ class NextDayWatchProcess:
                         raise
                     child.close()
                     self._connection, self._process = parent, process
+                owned_process[0] = self._process
+                if expired.is_set() or time.monotonic() >= deadline:
+                    expire()
+                    raise TimeoutError("next-day worker timeout")
                 if 'sector_snapshot' in payload:
                     payload['sector_snapshot'] = compact_sector_snapshot(payload['sector_snapshot'])
-                self._connection.send(dict(payload, action=action))
-                deadline = time.monotonic() + timeout
+                encoded = pickle.dumps(dict(payload, action=action), protocol=pickle.HIGHEST_PROTOCOL)
+                if len(encoded) > 2 * 1024 * 1024:
+                    raise ValueError("next-day request payload too large")
+                from ats.request_gate import send_bytes_deadline
+                send_bytes_deadline(self._connection, encoded, deadline)
                 while not self._closed.is_set():
                     if self._connection.poll(min(0.25, max(0.0, deadline - time.monotonic()))):
-                        return self._connection.recv()
+                        from ats.request_gate import recv_bytes_deadline
+                        result = pickle.loads(recv_bytes_deadline(self._connection, deadline))
+                        if expired.is_set() or time.monotonic() >= deadline:
+                            raise TimeoutError("next-day worker timeout")
+                        if not isinstance(result, dict):
+                            raise ValueError('invalid next-day worker response')
+                        return result
                     if not self._process.is_alive():
                         raise RuntimeError("next-day worker exited")
                     if time.monotonic() >= deadline:
@@ -258,17 +299,56 @@ class NextDayWatchProcess:
                         raise TimeoutError("next-day worker timeout")
                 return {"events": [], "error": "worker_closed"}
             except Exception as exc:
+                # A partial exchange has no reusable cursor; restart from durable outbox.
+                if owned_process[0] is not None:
+                    try:
+                        if self._process.is_alive():
+                            self._process.terminate()
+                        self._process.join(1)
+                    except (OSError, ValueError):
+                        pass
+                    if self._connection is not None:
+                        self._connection.close()
+                    self._connection = None
+                if expired.is_set():
+                    return {"events": [], "error": "next-day worker timeout"}
                 return {"events": [], "error": str(exc)}
+            finally:
+                done.set()
+                timer.cancel()
+                timer.join(1)
 
     def close(self):
         self._closed.set()
-        with self._lock:
+        process = self._process
+        # An idle owner can drain normally. A busy transport must be interrupted.
+        acquired = self._lock.acquire(blocking=False)
+        if not acquired and process is not None:
+            try:
+                if process.is_alive():
+                    process.terminate()
+            except (OSError, ValueError):
+                pass
+        if not acquired and not self._lock.acquire(timeout=6.0):
+            logger.error('Next-day close timed out; worker termination requested')
+            return
+        try:
             if self._process is None:
                 return
             try:
+                if self._process.is_alive() and self._connection is not None:
+                    watchdog = threading.Timer(4.0, self._process.terminate)
+                    watchdog.daemon = True
+                    watchdog.start()
+                    try:
+                        from ats.request_gate import send_bytes_deadline
+                        send_bytes_deadline(self._connection, pickle.dumps(None), time.monotonic() + 4.0)
+                        self._process.join(4.0)
+                    finally:
+                        watchdog.cancel()
+                        watchdog.join(1.0)
                 if self._process.is_alive():
-                    self._connection.send(None)
-                    self._process.join(5)
+                    self._process.join(1)
                 if self._process.is_alive():
                     self._process.terminate()
                     self._process.join(1)
@@ -281,3 +361,5 @@ class NextDayWatchProcess:
                 if self._connection is not None:
                     self._connection.close()
                     self._connection = None
+        finally:
+            self._lock.release()

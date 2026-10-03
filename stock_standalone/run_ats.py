@@ -170,6 +170,13 @@ def main():
         QApplication.processEvents()
         health = window._next_day_watch_process.request('health', timeout=30.0)
         window.close()
+        import time
+        close_deadline = time.monotonic() + 35.0
+        while window.isVisible() and time.monotonic() < close_deadline:
+            QApplication.processEvents()
+            time.sleep(.01)
+        if window.isVisible():
+            raise RuntimeError('ATS packaged shutdown did not drain')
         if not health.get('pid') or health.get('error'):
             raise RuntimeError('Next-day worker failed its packaged startup check')
         return 0

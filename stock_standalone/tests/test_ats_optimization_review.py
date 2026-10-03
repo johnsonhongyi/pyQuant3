@@ -290,6 +290,8 @@ def test_global_market_panel_worker_lifecycle_and_inplace_update(qapp, monkeypat
 
     # P1 Test: auto_fetch=True must NOT raise NameError: name 'threading' is not defined!
     panel = GlobalMarketPanel(auto_fetch=True)
+    # Force a real percentage-driven row move, independent of saved pin preferences.
+    panel.pinned_symbols = []
     if hasattr(panel, '_timer') and panel._timer.isActive():
         panel._timer.stop()
     panel.resize(800, 600)
@@ -807,12 +809,11 @@ def test_tdx_scan_gate_busy_and_recovery(monkeypatch):
 
     strategy = ChannelBottomReversalStrategy()
 
-    # 确保门闩处于未持有状态
-    if _TDX_SCAN_GATE.locked():
-        try:
-            _TDX_SCAN_GATE.release()
-        except RuntimeError:
-            pass
+    # Previous workers must release their own gate; the test never steals ownership.
+    deadline = time.monotonic() + 3.0
+    while _TDX_SCAN_GATE.locked() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert not _TDX_SCAN_GATE.locked(), "Previous scan worker did not drain"
 
     # 模拟一个挂起的后台任务
     unblock_event = threading.Event()
@@ -945,9 +946,27 @@ def test_hot_sector_leaderboard_cold_start_off_hours(qapp, monkeypatch):
     from ats.ui.hot_sector_leaderboard import HotSectorLeaderboardDialog
     from ats.hot_sector_engine import HotSectorEngine
     from ats import tdx_realtime_fetcher
+    import pandas as pd
 
     # 1. 模拟非交易休市时段
     monkeypatch.setattr(tdx_realtime_fetcher, "is_trading_time", lambda: (False, "非交易时段"))
+    monkeypatch.setattr(tdx_realtime_fetcher.TDXRealtimeFetcher, "_init_best_server", lambda self, *a, **k: None)
+    monkeypatch.setattr(HotSectorLeaderboardDialog, "_get_parent_mw", lambda self: None)
+    from ats.sector_data_aggregator import SectorDataAggregator
+    monkeypatch.setattr(SectorDataAggregator, "_load_bidding_sector_data", lambda self: {
+        "存储芯片": {"score": 90.0, "avg_pct": 3.0, "count": 1}})
+    monkeypatch.setattr(SectorDataAggregator, "resolve_sector_member_codes",
+                        lambda self, sector: (["600001"], {"600001": "测试标的"}))
+    monkeypatch.setattr(SectorDataAggregator, "resolve_active_strategy_df",
+                        lambda self, *args: (pd.DataFrame(), None))
+    engine_fixture = HotSectorEngine.get_instance()
+    monkeypatch.setattr(engine_fixture, "sector_to_codes", {})
+    monkeypatch.setattr(engine_fixture.fetcher, "fetch_multi_stock_alpha_quotes", lambda **kwargs: [
+        {"code": code, "name": kwargs['name_map'].get(code, code),
+         "sector": kwargs['sector_map'].get(code, "存储芯片"), "price": 10.0,
+         "percent": 3.0, "pct": 3.0, "pct_diff": 3.0, "vwap_dev_pct": 1.0,
+         "buy_tag": "LEADER", "role": "龙头", "score": 90.0}
+        for code in kwargs['codes']])
 
     # 2. 模拟同步 Alpha 刷新，以便在单测中瞬间完成计算
     orig_start_alpha = HotSectorLeaderboardDialog._start_alpha_refresh
@@ -966,6 +985,10 @@ def test_hot_sector_leaderboard_cold_start_off_hours(qapp, monkeypatch):
     monkeypatch.setattr(HotSectorLeaderboardDialog, "_start_alpha_refresh", sync_start_alpha)
 
     dlg = HotSectorLeaderboardDialog()
+    dlg.filter_mode = "ALL"
+    dlg.combo_time_slice.blockSignals(True)
+    dlg.combo_time_slice.setCurrentIndex(1)
+    dlg.combo_time_slice.blockSignals(False)
     assert dlg._has_init_fetched is False
 
     # 3. 模拟首拍定时器 tick (force=False，冷启动放行)

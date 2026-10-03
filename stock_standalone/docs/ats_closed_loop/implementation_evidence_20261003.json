@@ -1,0 +1,185 @@
+{
+  "recorded_at": "2026-10-03T12:34:37",
+  "regression": {
+    "tests": 194,
+    "errors": 0,
+    "failures": 0,
+    "skipped": 0
+  },
+  "source_sha256": {
+    "JSONData/sina_data.py": "a8644bd86c91499d94ae31df63d3a78ca97c393baf45712cfb5bc170eb27b2d6",
+    "JSONData/tdx_hdf5_api.py": "7a9408e13d2426aab677f55ac66eec7f1463d8b7c992916eaf26962eb67ae799",
+    "ats/capital_dragon_engine.py": "4372ccaee6900a2e16d88c03b323b52dc9b0f6eaf602d9f74022071af6e1a7de",
+    "ats/frame_merge.py": "1f7fdf38a7fa09024f3bb2e13e12a3454e203e517a57de9c42fe0d8d968b6b62",
+    "ats/frame_rows.py": "79e49b3f6652adcdbe6cd2b4b4f82551f917639c4f2935013412544ebeb0953e",
+    "ats/ipc_bridge.py": "2a937a3b955b5f45476c0bc5e126e90764e84bcc7da64567beb3adb16d95f8f2",
+    "ats/ledger_update_service.py": "6d2ecc94592d5be011cfe24c0e5a78f16b06000610d34a0e49dc98c1fa1fcf2d",
+    "ats/main_ats.py": "b550e2a848f3828e90587430cf5c49e8dde9f7be9cb5efe50dee4326160a3c95",
+    "ats/request_gate.py": "810bca133fc2f2fb1e14614feb6431b8be5cad0a0bc7509ec056a890eba2283e",
+    "ats/session_snapshot.py": "3bc94930e0fbfc9aae261126e419e90f5bffddc5887b259c917de0dadfdc9f43",
+    "ats/shutdown.py": "3596cb5fb980fee974bcb7ae0ee2ab6a80c6036b3a9dd9e0fa2d794b89f8962e",
+    "ats/signal_ledger.py": "3b06358364afbd73176cca6e01801b3760f7707586971d8e964fc301797d7252",
+    "ats/tdx_realtime_fetcher.py": "a79859f55509c41db110a456fb86c4b42d50f6c8a879d37b826e18b189ae2410",
+    "ats/ui/main_window.py": "ae75a767f1de82c6cd65a4269b5f39608345c7d9d2dca7f23fd4b19a3bea057a",
+    "ats/ui/market_tasks.py": "94efdc39a23bdb8c1ba5fac6927627892a526f9644244f653e92f2a0d6ddd61f",
+    "ats/ui/styles.py": "cc874561869375c82daf0a0048845a93c92a620e107944f5fc717495bd8540d7",
+    "ats/ui/swing_table.py": "8f91796e5610c260c4c61634d6635e952c4637f89bb4c75447a907bc17d545fb",
+    "ats/ui/universe_widget.py": "a60dc70d5dab6ea95dd426bf2a0a5f9002ddc7d4136f996fb662dbb6842ee74c",
+    "instock_MonitorTK.py": "32ec7c2031f4fc144e83f3416bc0525d380be1972d39b1d1f7b736f046c36a1f",
+    "market_state_bus.py": "e078407c8057c28f600e0ac06e2c33e945c644d1f64bec51a1a1ec9cc63cf6b7",
+    "run_ats.py": "a363c9cbc1a1b73081d69cad8719d74690788d2817c9a107c0aea980d756eb19",
+    "scripts/ats_gui_workload.py": "7d00f00846349850703b4e441d77bf495b0a89ea0f6425d10e3f402569ed799e"
+  },
+  "source_startup": {
+    "source_launcher": {
+      "label": "source_launcher",
+      "exit_code": 0,
+      "elapsed_sec": 35.734,
+      "timed_out": false,
+      "leaked_children": [],
+      "peak_tree_rss_bytes": 939212800,
+      "peak_children": 3,
+      "input_sha256": {
+        "D:\\MacTools\\WorkFile\\WorkSpace\\pyQuant3\\stock_standalone\\run_ats.py": "a363c9cbc1a1b73081d69cad8719d74690788d2817c9a107c0aea980d756eb19",
+        "D:\\MacTools\\WorkFile\\WorkSpace\\pyQuant3\\stock_standalone\\ats\\main_ats.py": "b550e2a848f3828e90587430cf5c49e8dde9f7be9cb5efe50dee4326160a3c95",
+        "D:\\MacTools\\WorkFile\\WorkSpace\\pyQuant3\\stock_standalone\\ats\\ui\\main_window.py": "ae75a767f1de82c6cd65a4269b5f39608345c7d9d2dca7f23fd4b19a3bea057a",
+        "D:\\MacTools\\WorkFile\\WorkSpace\\pyQuant3\\stock_standalone\\ats\\request_gate.py": "810bca133fc2f2fb1e14614feb6431b8be5cad0a0bc7509ec056a890eba2283e",
+        "D:\\MacTools\\WorkFile\\WorkSpace\\pyQuant3\\stock_standalone\\ats\\ipc_bridge.py": "2a937a3b955b5f45476c0bc5e126e90764e84bcc7da64567beb3adb16d95f8f2",
+        "D:\\MacTools\\WorkFile\\WorkSpace\\pyQuant3\\stock_standalone\\ats\\frame_merge.py": "1f7fdf38a7fa09024f3bb2e13e12a3454e203e517a57de9c42fe0d8d968b6b62",
+        "D:\\MacTools\\WorkFile\\WorkSpace\\pyQuant3\\stock_standalone\\ats\\signal_ledger.py": "3b06358364afbd73176cca6e01801b3760f7707586971d8e964fc301797d7252",
+        "D:\\MacTools\\WorkFile\\WorkSpace\\pyQuant3\\stock_standalone\\ats\\session_snapshot.py": "3bc94930e0fbfc9aae261126e419e90f5bffddc5887b259c917de0dadfdc9f43",
+        "D:\\MacTools\\WorkFile\\WorkSpace\\pyQuant3\\stock_standalone\\JSONData\\tdx_hdf5_api.py": "7a9408e13d2426aab677f55ac66eec7f1463d8b7c992916eaf26962eb67ae799"
+      },
+      "inputs_unchanged": true,
+      "passed": true,
+      "scope": "isolated offscreen startup/shutdown; no live session acceptance"
+    },
+    "source_alternate": {
+      "label": "source_alternate",
+      "exit_code": 0,
+      "elapsed_sec": 38.843,
+      "timed_out": false,
+      "leaked_children": [],
+      "peak_tree_rss_bytes": 903823360,
+      "peak_children": 2,
+      "input_sha256": {
+        "D:\\MacTools\\WorkFile\\WorkSpace\\pyQuant3\\stock_standalone\\run_ats.py": "a363c9cbc1a1b73081d69cad8719d74690788d2817c9a107c0aea980d756eb19",
+        "D:\\MacTools\\WorkFile\\WorkSpace\\pyQuant3\\stock_standalone\\ats\\main_ats.py": "b550e2a848f3828e90587430cf5c49e8dde9f7be9cb5efe50dee4326160a3c95",
+        "D:\\MacTools\\WorkFile\\WorkSpace\\pyQuant3\\stock_standalone\\ats\\ui\\main_window.py": "ae75a767f1de82c6cd65a4269b5f39608345c7d9d2dca7f23fd4b19a3bea057a",
+        "D:\\MacTools\\WorkFile\\WorkSpace\\pyQuant3\\stock_standalone\\ats\\request_gate.py": "810bca133fc2f2fb1e14614feb6431b8be5cad0a0bc7509ec056a890eba2283e",
+        "D:\\MacTools\\WorkFile\\WorkSpace\\pyQuant3\\stock_standalone\\ats\\ipc_bridge.py": "2a937a3b955b5f45476c0bc5e126e90764e84bcc7da64567beb3adb16d95f8f2",
+        "D:\\MacTools\\WorkFile\\WorkSpace\\pyQuant3\\stock_standalone\\ats\\frame_merge.py": "1f7fdf38a7fa09024f3bb2e13e12a3454e203e517a57de9c42fe0d8d968b6b62",
+        "D:\\MacTools\\WorkFile\\WorkSpace\\pyQuant3\\stock_standalone\\ats\\signal_ledger.py": "3b06358364afbd73176cca6e01801b3760f7707586971d8e964fc301797d7252",
+        "D:\\MacTools\\WorkFile\\WorkSpace\\pyQuant3\\stock_standalone\\ats\\session_snapshot.py": "3bc94930e0fbfc9aae261126e419e90f5bffddc5887b259c917de0dadfdc9f43",
+        "D:\\MacTools\\WorkFile\\WorkSpace\\pyQuant3\\stock_standalone\\JSONData\\tdx_hdf5_api.py": "7a9408e13d2426aab677f55ac66eec7f1463d8b7c992916eaf26962eb67ae799"
+      },
+      "inputs_unchanged": true,
+      "passed": true,
+      "scope": "isolated offscreen startup/shutdown; no live session acceptance"
+    }
+  },
+  "release_ready": false,
+  "pending": [
+    "real end-to-end frame freshness and actual GUI interactions",
+    "complete event golden trace and unified account reconciliation",
+    "72-hour full-system workload; isolated synthetic Qt job in progress",
+    "Nuitka deployment build/smoke in progress",
+    "valid trading session and accessible real market feed"
+  ],
+  "packaged_code_equivalence": {
+    "JSONData.tdx_hdf5_api": true,
+    "JSONData.sina_data": true,
+    "ats.ledger_update_service": true,
+    "ats.ui.main_window": true,
+    "ats.request_gate": true,
+    "ats.frame_merge": true,
+    "ats.frame_rows": true,
+    "ats.shutdown": true,
+    "ats.signal_ledger": true,
+    "ats.session_snapshot": true,
+    "ats.capital_dragon_engine": true,
+    "ats.tdx_realtime_fetcher": true,
+    "ats.ui.market_tasks": true,
+    "ats.ui.styles": true,
+    "ats.ui.swing_table": true,
+    "ats.ui.universe_widget": true,
+    "ats.ipc_bridge": true
+  },
+  "exe_startup": {
+    "label": "pyinstaller",
+    "exit_code": 0,
+    "elapsed_sec": 43.782,
+    "timed_out": false,
+    "leaked_children": [],
+    "peak_tree_rss_bytes": 907300864,
+    "peak_children": 3,
+    "input_sha256": {
+      "D:\\MacTools\\WorkFile\\WorkSpace\\pyQuant3\\stock_standalone\\run_ats.py": "a363c9cbc1a1b73081d69cad8719d74690788d2817c9a107c0aea980d756eb19",
+      "D:\\MacTools\\WorkFile\\WorkSpace\\pyQuant3\\stock_standalone\\ats\\main_ats.py": "b550e2a848f3828e90587430cf5c49e8dde9f7be9cb5efe50dee4326160a3c95",
+      "D:\\MacTools\\WorkFile\\WorkSpace\\pyQuant3\\stock_standalone\\ats\\ui\\main_window.py": "ae75a767f1de82c6cd65a4269b5f39608345c7d9d2dca7f23fd4b19a3bea057a",
+      "D:\\MacTools\\WorkFile\\WorkSpace\\pyQuant3\\stock_standalone\\ats\\request_gate.py": "810bca133fc2f2fb1e14614feb6431b8be5cad0a0bc7509ec056a890eba2283e",
+      "D:\\MacTools\\WorkFile\\WorkSpace\\pyQuant3\\stock_standalone\\ats\\ipc_bridge.py": "2a937a3b955b5f45476c0bc5e126e90764e84bcc7da64567beb3adb16d95f8f2",
+      "D:\\MacTools\\WorkFile\\WorkSpace\\pyQuant3\\stock_standalone\\ats\\frame_merge.py": "1f7fdf38a7fa09024f3bb2e13e12a3454e203e517a57de9c42fe0d8d968b6b62",
+      "D:\\MacTools\\WorkFile\\WorkSpace\\pyQuant3\\stock_standalone\\ats\\signal_ledger.py": "3b06358364afbd73176cca6e01801b3760f7707586971d8e964fc301797d7252",
+      "D:\\MacTools\\WorkFile\\WorkSpace\\pyQuant3\\stock_standalone\\ats\\session_snapshot.py": "3bc94930e0fbfc9aae261126e419e90f5bffddc5887b259c917de0dadfdc9f43",
+      "D:\\MacTools\\WorkFile\\WorkSpace\\pyQuant3\\stock_standalone\\JSONData\\tdx_hdf5_api.py": "7a9408e13d2426aab677f55ac66eec7f1463d8b7c992916eaf26962eb67ae799",
+      "D:\\MacTools\\WorkFile\\WorkSpace\\pyQuant3\\stock_standalone\\.ats_validation\\dist\\ATS_Terminal.exe": "5e9a8609d738a406ff564ce6190e059cf5b6e2d1724fd5e3e183712b80290e2d"
+    },
+    "inputs_unchanged": true,
+    "passed": true,
+    "scope": "isolated offscreen startup/shutdown; no live session acceptance"
+  },
+  "packaged_code_scope": "ATS consumer modules; MarketStateBus/TK producer not bundled",
+  "soak_job": {
+    "pid": 28640,
+    "create_time": 1791000739.3652675,
+    "run_id": "03b26d9d-aa89-44a8-8b6a-85a61dc6a05d",
+    "started_at_epoch": 1791000739.369225,
+    "duration_hours": 72,
+    "scope": "isolated synthetic Qt; transport/history substituted; no live trading"
+  },
+  "soak_completed": false,
+  "updated_at_epoch": 1791000614.1883516,
+  "rollback": {
+    "path": ".ats_validation/optimization_rollback.patch",
+    "sha256": "0f25d8e1d14f9a2ddfb6a9d4cd5af15e6409fbdb4492ca242a9effc50e9d70fd",
+    "reverse_apply_check_passed": true,
+    "applied": false
+  },
+  "incremental_gui_regression": {
+    "tests": 1,
+    "errors": 0,
+    "failures": 0,
+    "skipped": 0,
+    "scope": "real offscreen SwingStateTable; selection, sort, item reuse, hidden refresh, width and clipboard; excludes full window acceptance"
+  },
+  "implementation_pending": [
+    "F04 multi-operation history task deadline and slow-network progress validation",
+    "F07 historical-prefix caching needs validity and benefit proof",
+    "F11 full shared-pool writer audit and immutable display projections",
+    "F13 late layout/config writes, drain failure recovery and total deadline pressure validation",
+    "remaining synchronous auxiliary GUI config I/O audit"
+  ],
+  "capacity_equivalence": {
+    "tests": 72,
+    "errors": 0,
+    "failures": 0,
+    "skipped": 0
+  },
+  "business_regression": {
+    "tests": 49,
+    "errors": 0,
+    "failures": 0,
+    "skipped": 0
+  },
+  "verified_test_total": 316,
+  "test_contract_updates": {
+    "scope": "test-only adaptation to existing logical archive reads and default closed-day rotation; no production archive changes",
+    "files": [
+      "trading_kernel/tests/test_reconciliation_rotation.py",
+      "trading_kernel/tests/test_journal_contract.py",
+      "trading_kernel/tests/test_confirm_mode.py",
+      "trading_kernel/tests/test_broker_adapter.py"
+    ]
+  }
+}

@@ -177,6 +177,8 @@ class IPCBridge:
             pass
 
     def _handle_client(self, conn, data_callback, signal_callback):
+        from ats.performance import measure
+        perf_started = time.perf_counter()
         try:
             deadline = time.monotonic() + _IPC_FRAME_TIMEOUT_SEC
             try:
@@ -197,7 +199,8 @@ class IPCBridge:
                 except (EOFError, TimeoutError, socket.timeout):
                     return
                 if len(data) == length:
-                    payload = pickle.loads(data)
+                    with measure('ipc.deserialize', payload_bytes=length):
+                        payload = pickle.loads(data)
                     if isinstance(payload, tuple) and len(payload) >= 2:
                         cmd, body = payload[0], payload[1]
                         if cmd == 'UPDATE_DF_DATA' and data_callback:
@@ -323,27 +326,11 @@ class IPCBridge:
                                                             new_cols[base_col] = df_diff[col]
                                                 df_diff = pd.DataFrame(new_cols, index=df_diff.index)
 
-                                            for col in df_diff.columns:
-                                                if col not in self._cached_df.columns:
-                                                    self._cached_df[col] = df_diff[col]
-
-                                            common_idx = self._cached_df.index.intersection(df_diff.index)
-                                            if len(common_idx) > 0:
-                                                for col in df_diff.columns:
-                                                    if col in self._cached_df.columns:
-                                                        try:
-                                                            col_data = df_diff.loc[common_idx, col]
-                                                            valid_mask = col_data.notna()
-                                                            valid_indices = valid_mask[valid_mask].index
-                                                            if len(valid_indices) > 0:
-                                                                self._cached_df.loc[valid_indices, col] = df_diff.loc[valid_indices, col]
-                                                        except Exception as column_err:
-                                                            raise ValueError(f"增量列 {col} 合并失败") from column_err
-
-                                            new_idx = df_diff.index.difference(self._cached_df.index)
-                                            if len(new_idx) > 0:
-                                                self._cached_df = pd.concat([self._cached_df, df_diff.loc[new_idx]])
-                                            df_to_deliver = self._cached_df.copy()
+                                            from ats.frame_merge import merge_sparse_frame
+                                            with measure('ipc.merge', df_diff):
+                                                self._cached_df = merge_sparse_frame(self._cached_df, df_diff)
+                                            with measure('ipc.publish_copy', self._cached_df):
+                                                df_to_deliver = self._cached_df.copy()
                                         except Exception as merge_err:
                                             print(f"[IPCBridge] Diff merge failed; requesting full baseline: {merge_err}")
                                             self._cached_df = None
@@ -397,6 +384,9 @@ class IPCBridge:
         except Exception as e:
             print(f"[IPCBridge] _handle_client exception: {e}")
         finally:
+            from ats.performance import record
+            record('ipc.receive', (time.perf_counter() - perf_started) * 1000,
+                   locals().get('df_to_deliver'))
             try:
                 conn.close()
             except:

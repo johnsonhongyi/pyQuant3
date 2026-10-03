@@ -31,6 +31,7 @@ class MarketStateBus:
     def __init__(self):
         if hasattr(self, '_initialized'): return
         self._data_lock = threading.Lock()
+        self._publish_lock = threading.Lock()
         self._df_all = pd.DataFrame()          # 完整行情 DataFrame
         self._df_filtered = pd.DataFrame()     # 过滤后的 UI DataFrame (用于展示)
         self._df_all_res = pd.DataFrame()      # 完整行情 DataFrame (Resampled)
@@ -54,28 +55,18 @@ class MarketStateBus:
         if df_all is None or df_all.empty:
             return
             
-        current_version = 0
-        with self._data_lock:
-            # 唯一一次 copy，后续所有消费者共享 (P0-2)
-            self._df_all = df_all.copy()
-            if df_filtered is not None:
-                self._df_filtered = df_filtered.copy()
-            else:
-                self._df_filtered = self._df_all
-                
-            if df_all_res is not None:
-                self._df_all_res = df_all_res.copy()
-            else:
-                self._df_all_res = self._df_all
-                
-            if df_filtered_res is not None:
-                self._df_filtered_res = df_filtered_res.copy()
-            else:
-                self._df_filtered_res = self._df_filtered
-                
-            self._version += 1
-            self._timestamp = time.time()
-            current_version = self._version
+        # Serialize publishers while allowing readers to access the previous snapshot.
+        with self._publish_lock:
+            frozen_all = df_all.copy()
+            frozen_filtered = df_filtered.copy() if df_filtered is not None else frozen_all
+            frozen_res = df_all_res.copy() if df_all_res is not None else frozen_all
+            frozen_filtered_res = df_filtered_res.copy() if df_filtered_res is not None else frozen_filtered
+            with self._data_lock:
+                self._df_all, self._df_filtered = frozen_all, frozen_filtered
+                self._df_all_res, self._df_filtered_res = frozen_res, frozen_filtered_res
+                self._version += 1
+                self._timestamp = time.time()
+                current_version = self._version
             
         # ⚠️ 【死锁修复】将观察者回调移出 data_lock 锁范围 (AB-BA Deadlock Fix)
         # 观察者回调（如 _on_bus_data_ready）通常会调用 Tkinter 的 self.after 请求更新。

@@ -29,7 +29,7 @@ if project_root not in sys.path:
         pass
 
 from PyQt6.QtWidgets import QApplication
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QTimer
 from ats.ui.main_window import ATSMainWindow
 from sys_utils import ensure_backend_tk_running
 from ats.startup_profiler import StartupProfiler, mark_checkpoint
@@ -51,13 +51,15 @@ def main():
     try:
         from ats.strategy.ipo_gate_context_provider import get_default_ipo_gate_context_provider
 
-        get_default_ipo_gate_context_provider(project_root).start_auto_refresh()
+        provider = get_default_ipo_gate_context_provider(project_root)
+        provider.start_auto_refresh()
     except Exception as exc:
         print(f"[IPO Gate] Shared data refresh unavailable: {type(exc).__name__}")
 
     # 自动探测并拉起后台静默 Tk 进程 (P0)
     try:
-        ensure_backend_tk_running()
+        if os.environ.get('ATS_TEST_MODE') != '1':
+            ensure_backend_tk_running()
     except Exception as e:
         print(f"[ATS Launcher] Failed to ensure backend running: {e}")
     mark_checkpoint("01. Backend TK Process Check & Launch")
@@ -66,6 +68,13 @@ def main():
         QApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
 
     app = QApplication(sys.argv)
+    if 'provider' in locals():
+        app.aboutToQuit.connect(provider.stop_auto_refresh)
+    def flush_archives():
+        import threading
+        from ats.bounded_evaluation_store import evaluation_store
+        threading.Thread(target=evaluation_store.flush, name='ATS-ArchiveClose', daemon=False).start()
+    app.aboutToQuit.connect(flush_archives)
     app.setApplicationName("ATS Autonomous Trading Terminal")
     try:
         from PyQt6.QtGui import QPalette, QColor
@@ -81,13 +90,15 @@ def main():
     mark_checkpoint("03. ATSMainWindow Instantiation")
     
     window.show()
+    if os.environ.get('ATS_TEST_MODE') == '1':
+        QTimer.singleShot(0, window.close)
     mark_checkpoint("04. ATSMainWindow show()")
     
     # 打印启动全链路耗时看板
     profiler.print_summary()
     
     exit_code = app.exec()
-    os._exit(exit_code)
+    sys.exit(exit_code)
 
 if __name__ == "__main__":
     main()
