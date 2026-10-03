@@ -149,6 +149,10 @@ def main():
     # except Exception as e:
     #     print(f"[ATS Test Resolve] Exception occurred: {e}")
 
+    if os.name == "nt" and ("__compiled__" in globals() or hasattr(sys, "nuitka_version")):
+        from ats.ui.windows_taskbar_group import group_console_and_windows
+        group_console_and_windows()
+
     app = QApplication(sys.argv)
     window = ATSMainWindow()
     from ats.qt_interrupt import install_qt_keyboard_interrupt_handler
