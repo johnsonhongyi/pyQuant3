@@ -261,9 +261,8 @@ set CMD="%PYTHON_EXEC%" -m nuitka !NUITKA_MODE_OPT! "%MAIN_SCRIPT%" ^
     --windows-file-version="%TK_API_VERSION%.0" ^
     --windows-product-version="%TK_API_VERSION%.0" ^
     --output-dir="%OUTPUT_DIR%" ^
-    --lto=no ^
     --no-pyi-file ^
-    --lto=yes ^
+    --lto=no ^
     --jobs=8 ^
     --nofollow-import-to=scipy ^
     --nofollow-import-to=matplotlib ^
