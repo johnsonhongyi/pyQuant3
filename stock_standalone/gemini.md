@@ -1,5 +1,13 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-10-03 11:40 本地 AI 编程审计工具集成模型官方阶梯定价、自动费用(Cost USD)核算与多层级账单透出闭环
+- [x] **【权威阶梯定价收录与缓存折扣精准验算、高保真Unicode日级账单表格(自适应列宽防撑破)、会话路由审计表格联动预估费用列、Codex与Antigravity双引擎全贯通】(`tools/codex_token_stats.py`, `20261003_1140_task.md`)**：
+    - [x] **模型阶梯定价逆向验证与官方矩阵收录 [RootCause/Pricing]**：精准解构用户样本数据（`gpt-6.1-sol` 1729万消耗折算 $3.94，`gpt-5.6-luna` 折算 $0.01，合计 $3.95，100% 精确吻合）；完整内置 OpenAI GPT-6/GPT-5.6、Google Gemini 3.8/2.5、Anthropic Claude 4.6 等全系列官方单价及未缓存/缓存读取/缓存写入阶梯定价字典；支持动态读取 `~/.codex/pricing.json` 与 `~/.gemini/pricing.json` 热覆盖；
+    - [x] **高保真 Unicode 日级与模型细分账单表格落地 (`render_cost_table`) [Core/UX]**：完美实现包含 `Date | Models | Input | Output | Reasoning | Cache Create | Cache Read | Total Tokens | Cost (USD)` 的 9 列 ANSI Unicode 账单表格；首创动态自适应列宽算法（`max_m_len`），遇到超长模型名（如 `codex-auto-review`）自动扩展，彻底消除终端边框撑破缺陷，全网格竖线绝对垂直对齐；
+    - [x] **会话实际路由与吐率追踪表格同步增加预估费用列 [SessionAudit]**：在 `Session Route & Speed Audit` 表格中新增第 7 列 `预估费用`（如 `$3.29`, `$0.01`, `$0.004`），按每个会话各轮调用实际路由模型精确核算，消除由于一刀切平均导致的费用偏差；
+    - [x] **Antigravity 桌面端、IDE 端与三方横向全量对比全面打通 [Consistency]**：`get_antigravity_stats` 同步从 Protobuf 提取 `uncached_in`, `cached_in`, `out_tok` 核算费用并渲染账单表格；`--all` 全量横向对比模式在尾部同步透出三方助手的累计预估消费折算；
+    - [x] **全链路语法与编码校验 100% 绿灯**：全量变更通过 `git diff --check` 与 `python -m py_compile` 校验，实测 Codex、Antigravity 与 All 模式 100% 正常运行。
+
 ## 2026-10-03 11:15 Nuitka Onefile 模式物理路径解析适配、Windows 虚拟内存盘防崩修复、一键缓存清理与全系统性能测试闭环
 - [x] **【彻底解决--ipo-console临时解包路径漂移(NUITKA_ONEFILE_BINARY)、safe_resolve_path免疫Windows内存盘WinError 1崩溃、全链路物理根目录穿透、一键纯净缓存清理脚本落地】(`sys_utils.py`, `tools/run_ipo_learning_console.py`, `tools/run_ipo_data_acquisition.py`, `ats/ui/ipo_learning_console.py`, `clean_nuitka_cache.bat`, `20261003_1115_task.md`)**：
     - [x] **根因全面排查与实证 [RootCause]**：

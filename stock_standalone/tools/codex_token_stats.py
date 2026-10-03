@@ -169,6 +169,282 @@ def load_antigravity_client_model():
             pass
     return "Auto/默认"
 
+# =========================================================================
+# 权威模型官方与市场参考阶梯定价体系 (单位: 美元 / 100万 Tokens, 即 USD per 1M Tokens)
+# 计费公式: Cost = (Input * input_price + Cache_Read * cache_read_price + Cache_Create * cache_create_price + Output * output_price) / 1,000,000
+# =========================================================================
+MODEL_PRICING = {
+    # --- OpenAI Codex / GPT-6 / GPT-5.6 系列 ---
+    "gpt-6.1-sol": {"input": 2.00, "cache_read": 0.10, "cache_create": 2.00, "output": 10.00},
+    "gpt-6-sol": {"input": 2.00, "cache_read": 0.10, "cache_create": 2.00, "output": 10.00},
+    "gpt-6.1-luna": {"input": 0.10, "cache_read": 0.01, "cache_create": 0.10, "output": 0.50},
+    "gpt-6-luna": {"input": 0.10, "cache_read": 0.01, "cache_create": 0.10, "output": 0.50},
+    "gpt-5.6-luna": {"input": 0.20, "cache_read": 0.02, "cache_create": 0.20, "output": 1.20},
+    "gpt-5.6-sol": {"input": 1.00, "cache_read": 0.10, "cache_create": 1.00, "output": 5.00},
+    "gpt-6-astra": {"input": 10.00, "cache_read": 1.00, "cache_create": 10.00, "output": 50.00},
+    "gpt-6.1-astra": {"input": 10.00, "cache_read": 1.00, "cache_create": 10.00, "output": 50.00},
+    "codex-auto-review": {"input": 0.15, "cache_read": 0.075, "cache_create": 0.15, "output": 0.60},
+    "o3-mini": {"input": 1.10, "cache_read": 0.55, "cache_create": 1.10, "output": 4.40},
+    "o1": {"input": 15.00, "cache_read": 7.50, "cache_create": 15.00, "output": 60.00},
+    "gpt-4o": {"input": 2.50, "cache_read": 1.25, "cache_create": 2.50, "output": 10.00},
+    "gpt-4o-mini": {"input": 0.15, "cache_read": 0.075, "cache_create": 0.15, "output": 0.60},
+
+    # --- Google Antigravity / Gemini 系列 ---
+    "gemini-3.8-flash": {"input": 0.15, "cache_read": 0.0375, "cache_create": 0.15, "output": 0.60},
+    "gemini-3.8-flash-tiered": {"input": 0.15, "cache_read": 0.0375, "cache_create": 0.15, "output": 0.60},
+    "gemini-3.8-flash-n": {"input": 0.15, "cache_read": 0.0375, "cache_create": 0.15, "output": 0.60},
+    "gemini-3.7-flash": {"input": 0.15, "cache_read": 0.0375, "cache_create": 0.15, "output": 0.60},
+    "gemini-3.6-flash": {"input": 0.15, "cache_read": 0.0375, "cache_create": 0.15, "output": 0.60},
+    "gemini-3-flash-a": {"input": 0.15, "cache_read": 0.0375, "cache_create": 0.15, "output": 0.60},
+    "gemini-3.1-pro-low": {"input": 1.25, "cache_read": 0.3125, "cache_create": 1.25, "output": 5.00},
+    "gemini-2.5-pro": {"input": 1.25, "cache_read": 0.3125, "cache_create": 1.25, "output": 5.00},
+    "gemini-pro-default": {"input": 1.25, "cache_read": 0.3125, "cache_create": 1.25, "output": 5.00},
+    "gemini-default": {"input": 0.15, "cache_read": 0.0375, "cache_create": 0.15, "output": 0.60},
+    "gemini-model": {"input": 0.15, "cache_read": 0.0375, "cache_create": 0.15, "output": 0.60},
+
+    # --- Anthropic Claude 系列 (Antigravity 路由支持) ---
+    "claude-sonnet-4-6": {"input": 3.00, "cache_read": 0.30, "cache_create": 3.75, "output": 15.00},
+    "claude-3-7-sonnet": {"input": 3.00, "cache_read": 0.30, "cache_create": 3.75, "output": 15.00},
+    "claude-3-5-sonnet": {"input": 3.00, "cache_read": 0.30, "cache_create": 3.75, "output": 15.00},
+    "claude-opus-4-6-thinking": {"input": 15.00, "cache_read": 1.50, "cache_create": 18.75, "output": 75.00},
+    "claude-3-opus": {"input": 15.00, "cache_read": 1.50, "cache_create": 18.75, "output": 75.00},
+}
+
+DEFAULT_PRICING = {"input": 1.00, "cache_read": 0.10, "cache_create": 1.00, "output": 5.00}
+
+def load_custom_pricing():
+    """动态加载用户本地自定义定价表 (如 ~/.codex/pricing.json 或 ~/.gemini/pricing.json)"""
+    for p in [os.path.expanduser("~/.codex/pricing.json"), os.path.expanduser("~/.gemini/pricing.json")]:
+        if os.path.exists(p):
+            try:
+                with open(p, "r", encoding="utf-8") as f:
+                    custom = json.load(f)
+                    if isinstance(custom, dict):
+                        for k, v in custom.items():
+                            if isinstance(v, dict):
+                                MODEL_PRICING[k.lower().strip()] = v
+            except Exception:
+                pass
+
+load_custom_pricing()
+
+def get_model_pricing(model_name):
+    """
+    智能解析模型名称并匹配其权威单价字典 (USD per 1M tokens)
+    支持前缀与关键词容错
+    """
+    if not model_name:
+        return DEFAULT_PRICING
+    m_clean = str(model_name).lower().strip()
+    if m_clean in MODEL_PRICING:
+        return MODEL_PRICING[m_clean]
+
+    # 关键词模糊匹配
+    if "6.1-sol" in m_clean or "6.1_sol" in m_clean or "gpt-6.1-sol" in m_clean:
+        return MODEL_PRICING["gpt-6.1-sol"]
+    elif "sol" in m_clean:
+        if "5.6" in m_clean:
+            return MODEL_PRICING["gpt-5.6-sol"]
+        return MODEL_PRICING["gpt-6.1-sol"]
+    elif "luna" in m_clean:
+        if "5.6" in m_clean:
+            return MODEL_PRICING["gpt-5.6-luna"]
+        return MODEL_PRICING["gpt-6-luna"]
+    elif "astra" in m_clean:
+        return MODEL_PRICING["gpt-6-astra"]
+    elif "auto-review" in m_clean or "auto_review" in m_clean:
+        return MODEL_PRICING["codex-auto-review"]
+    elif "flash" in m_clean:
+        return MODEL_PRICING["gemini-3.8-flash"]
+    elif "pro" in m_clean and ("gemini" in m_clean or "2.5" in m_clean or "3.1" in m_clean):
+        return MODEL_PRICING["gemini-2.5-pro"]
+    elif "opus" in m_clean:
+        return MODEL_PRICING["claude-opus-4-6-thinking"]
+    elif "sonnet" in m_clean:
+        return MODEL_PRICING["claude-sonnet-4-6"]
+    elif "o3" in m_clean:
+        return MODEL_PRICING["o3-mini"]
+    elif "o1" in m_clean:
+        return MODEL_PRICING["o1"]
+    elif "4o-mini" in m_clean:
+        return MODEL_PRICING["gpt-4o-mini"]
+    elif "4o" in m_clean:
+        return MODEL_PRICING["gpt-4o"]
+    elif "gemini" in m_clean:
+        return MODEL_PRICING["gemini-default"]
+
+    return DEFAULT_PRICING
+
+def calc_token_cost(model_name, uncached_input, cached_input, output_tokens, cache_create=0):
+    """
+    计算特定模型调用的预估费用 (单位: USD)
+    uncached_input: 未缓存的提示词输入 tokens
+    cached_input: 命中缓存的输入 tokens
+    output_tokens: 输出 tokens (包含 reasoning 思考 tokens)
+    cache_create: 写入缓存的 tokens (若有，默认 0)
+    """
+    p = get_model_pricing(model_name)
+    cost = (
+        uncached_input * p.get("input", 1.0) +
+        cached_input * p.get("cache_read", 0.1) +
+        cache_create * p.get("cache_create", 1.0) +
+        output_tokens * p.get("output", 5.0)
+    ) / 1_000_000.0
+    return max(0.0, cost)
+
+def format_cost_cell(val):
+    """格式化消费金额，兼顾美分与微美分精度"""
+    if val >= 0.005:
+        return f"${val:.2f}"
+    elif val > 0:
+        return f"${val:.3f}"
+    return "$0.00"
+
+def render_cost_table(daily, models, daily_costs, models_costs, model_meta, vendor_title="OpenAI Codex"):
+    """
+    渲染与用户/社区评测同款高保真 Unicode 边框格式的:
+    [日级与模型细分 Token 消耗与消费成本审计表 (Daily Usage & Cost Table)]
+    """
+    all_models = [m for (_, m) in models.keys()]
+    max_m_len = max([len(str(m)) for m in all_models] + [11])
+    w_date = max(17, max_m_len + 5)
+    w_model = max(14, max_m_len + 2)
+
+    cols_w = [w_date, w_model, 9, 9, 10, 13, 11, 13, 11]
+    top_border = "┌" + "┬".join("─" * (w + 2) for w in cols_w) + "┐"
+    mid_border = "├" + "┼".join("─" * (w + 2) for w in cols_w) + "┤"
+    bot_border = "└" + "┴".join("─" * (w + 2) for w in cols_w) + "┘"
+
+    header_cols = [
+        pad_cell("Date", w_date, "left"),
+        pad_cell("Models", w_model, "left"),
+        pad_cell("Input", 9, "right"),
+        pad_cell("Output", 9, "right"),
+        pad_cell("Reasoning", 10, "right"),
+        pad_cell("Cache Create", 13, "right"),
+        pad_cell("Cache Read", 11, "right"),
+        pad_cell("Total Tokens", 13, "right"),
+        pad_cell("Cost (USD)", 11, "right"),
+    ]
+    header_row = "│ " + " │ ".join(header_cols) + " │"
+
+    print("\n" + "=" * 118)
+    print(f"[*] 💰 日级模型 Token 消耗与预估消费审计表 [{vendor_title}] (Daily Usage & Cost Table):")
+    print(top_border)
+    print(header_row)
+    print(mid_border)
+
+    sorted_dates = sorted(daily.keys())
+    grand_uncached = 0
+    grand_out = 0
+    grand_reasoning = 0
+    grand_cache_create = 0
+    grand_cache_read = 0
+    grand_total_tokens = 0
+    grand_cost = 0.0
+
+    for d_idx, d in enumerate(sorted_dates):
+        m_list = [m for (m_date, m) in sorted(models.keys()) if m_date == d]
+        if not m_list:
+            continue
+
+        d_uncached = sum(models[(d, m)]["uncached_tokens"] for m in m_list)
+        d_out = sum(models[(d, m)]["output_tokens"] for m in m_list)
+        d_reasoning = sum(models[(d, m)]["reasoning_output_tokens"] for m in m_list)
+        d_cache_create = sum(models[(d, m)]["cache_create_tokens"] for m in m_list)
+        d_cache_read = sum(models[(d, m)]["cached_input_tokens"] for m in m_list)
+        d_total = sum(models[(d, m)]["total_tokens"] for m in m_list)
+        d_cost = daily_costs[d]
+
+        grand_uncached += d_uncached
+        grand_out += d_out
+        grand_reasoning += d_reasoning
+        grand_cache_create += d_cache_create
+        grand_cache_read += d_cache_read
+        grand_total_tokens += d_total
+        grand_cost += d_cost
+
+        if len(m_list) > 1:
+            first_m = m_list[0]
+            r1 = [
+                pad_cell(d, w_date, "left"),
+                pad_cell(f"- {first_m}", w_model, "left"),
+                pad_cell(f"{d_uncached:,}", 9, "right"),
+                pad_cell(f"{d_out:,}", 9, "right"),
+                pad_cell(f"{d_reasoning:,}", 10, "right"),
+                pad_cell(f"{d_cache_create:,}", 13, "right"),
+                pad_cell(f"{d_cache_read:,}", 11, "right"),
+                pad_cell(f"{d_total:,}", 13, "right"),
+                pad_cell(format_cost_cell(d_cost), 11, "right"),
+            ]
+            print("│ " + " │ ".join(r1) + " │")
+
+            for m in m_list[1:]:
+                rx = [
+                    pad_cell("", w_date, "left"),
+                    pad_cell(f"- {m}", w_model, "left"),
+                    pad_cell("", 9, "right"),
+                    pad_cell("", 9, "right"),
+                    pad_cell("", 10, "right"),
+                    pad_cell("", 13, "right"),
+                    pad_cell("", 11, "right"),
+                    pad_cell("", 13, "right"),
+                    pad_cell("", 11, "right"),
+                ]
+                print("│ " + " │ ".join(rx) + " │")
+
+            for m in m_list:
+                print(mid_border)
+                m_st = models[(d, m)]
+                m_cst = models_costs[(d, m)]
+                sub_r = [
+                    pad_cell(f"  └─ {m}", w_date, "left"),
+                    pad_cell("", w_model, "left"),
+                    pad_cell(f"{m_st['uncached_tokens']:,}", 9, "right"),
+                    pad_cell(f"{m_st['output_tokens']:,}", 9, "right"),
+                    pad_cell(f"{m_st['reasoning_output_tokens']:,}", 10, "right"),
+                    pad_cell(f"{m_st['cache_create_tokens']:,}", 13, "right"),
+                    pad_cell(f"{m_st['cached_input_tokens']:,}", 11, "right"),
+                    pad_cell(f"{m_st['total_tokens']:,}", 13, "right"),
+                    pad_cell(format_cost_cell(m_cst), 11, "right"),
+                ]
+                print("│ " + " │ ".join(sub_r) + " │")
+        else:
+            m = m_list[0]
+            r1 = [
+                pad_cell(d, w_date, "left"),
+                pad_cell(f"- {m}", w_model, "left"),
+                pad_cell(f"{d_uncached:,}", 9, "right"),
+                pad_cell(f"{d_out:,}", 9, "right"),
+                pad_cell(f"{d_reasoning:,}", 10, "right"),
+                pad_cell(f"{d_cache_create:,}", 13, "right"),
+                pad_cell(f"{d_cache_read:,}", 11, "right"),
+                pad_cell(f"{d_total:,}", 13, "right"),
+                pad_cell(format_cost_cell(d_cost), 11, "right"),
+            ]
+            print("│ " + " │ ".join(r1) + " │")
+
+        if d_idx < len(sorted_dates) - 1:
+            print(mid_border)
+
+    if len(sorted_dates) > 1:
+        print(mid_border)
+        grand_r = [
+            pad_cell("Total (Grand)", w_date, "left"),
+            pad_cell(f"{len(set(all_models))} models", w_model, "left"),
+            pad_cell(f"{grand_uncached:,}", 9, "right"),
+            pad_cell(f"{grand_out:,}", 9, "right"),
+            pad_cell(f"{grand_reasoning:,}", 10, "right"),
+            pad_cell(f"{grand_cache_create:,}", 13, "right"),
+            pad_cell(f"{grand_cache_read:,}", 11, "right"),
+            pad_cell(f"{grand_total_tokens:,}", 13, "right"),
+            pad_cell(format_cost_cell(grand_cost), 11, "right"),
+        ]
+        print("│ " + " │ ".join(grand_r) + " │")
+
+    print(bot_border)
+
+
 def parse_date_input(date_str, tz=None):
     """
     智能解析用户输入的日期简写格式，自动对齐最近的年份和最近的月份:
@@ -411,6 +687,8 @@ def get_codex_stats(days_back=7, show_recent_routes=10, target_date_arg=None, ta
 
     daily = collections.defaultdict(collections.Counter)
     models = collections.defaultdict(collections.Counter)
+    daily_costs = collections.defaultdict(float)
+    models_costs = collections.defaultdict(float)
     daily_gen_durations = collections.defaultdict(float)
     models_gen_durations = collections.defaultdict(float)
     daily_e2e_durations = collections.defaultdict(float)
@@ -440,6 +718,7 @@ def get_codex_stats(days_back=7, show_recent_routes=10, target_date_arg=None, ta
         session_in_tokens = 0
         session_cached_tokens = 0
         session_out_tokens = 0
+        session_cost = 0.0
         session_gen_dur = 0.0
         session_e2e_dur = 0.0
         session_actual_models = collections.Counter()
@@ -510,12 +789,31 @@ def get_codex_stats(days_back=7, show_recent_routes=10, target_date_arg=None, ta
                             session_created_time = cur_dt.strftime("%m-%d %H:%M:%S")
 
                         out_tok = int(u.get("output_tokens", 0) or 0)
+                        in_tok_raw = int(u.get("input_tokens", 0) or 0)
+                        cached_tok = int(u.get("cached_input_tokens", 0) or 0)
+                        cache_create_tok = int(u.get("cache_write_input_tokens", 0) or 0)
+                        reasoning_tok = int(u.get("reasoning_output_tokens", 0) or 0)
+                        total_tok = int(u.get("total_tokens", 0) or 0)
+
+                        if total_tok > 0 and (in_tok_raw + cached_tok + out_tok) == total_tok:
+                            uncached_tok = in_tok_raw
+                            total_in_tok = in_tok_raw + cached_tok
+                        else:
+                            uncached_tok = max(0, in_tok_raw - cached_tok)
+                            total_in_tok = in_tok_raw
+
+                        turn_id = p.get("turn_id")
+                        m = turn_models.get(turn_id, cur_model)
+                        turn_cost = calc_token_cost(m, uncached_tok, cached_tok, out_tok, cache_create_tok)
+
                         vals = {
-                            "input_tokens": int(u.get("input_tokens", 0) or 0),
-                            "cached_input_tokens": int(u.get("cached_input_tokens", 0) or 0),
+                            "input_tokens": total_in_tok,
+                            "uncached_tokens": uncached_tok,
+                            "cached_input_tokens": cached_tok,
+                            "cache_create_tokens": cache_create_tok,
                             "output_tokens": out_tok,
-                            "reasoning_output_tokens": int(u.get("reasoning_output_tokens", 0) or 0),
-                            "total_tokens": int(u.get("total_tokens", 0) or 0),
+                            "reasoning_output_tokens": reasoning_tok,
+                            "total_tokens": total_tok if total_tok > 0 else (total_in_tok + out_tok),
                         }
 
                         ttft_dur = 0.0
@@ -541,24 +839,24 @@ def get_codex_stats(days_back=7, show_recent_routes=10, target_date_arg=None, ta
                                 e2e_dur = elapsed_e2e
 
                         session_total_tokens += vals["total_tokens"]
-                        session_in_tokens += vals["input_tokens"]
-                        session_cached_tokens += vals["cached_input_tokens"]
+                        session_in_tokens += total_in_tok
+                        session_cached_tokens += cached_tok
                         session_out_tokens += out_tok
+                        session_cost += turn_cost
                         session_gen_dur += gen_dur
                         session_e2e_dur += e2e_dur
 
                         if d >= cutoff_date or d == "未知日期":
-                            turn_id = p.get("turn_id")
-                            m = turn_models.get(turn_id, cur_model)
-
                             daily[d].update(vals)
                             daily[d]["turns"] += 1
+                            daily_costs[d] += turn_cost
                             daily_gen_durations[d] += gen_dur
                             if e2e_dur > 0:
                                 daily_e2e_durations[d] += e2e_dur
 
                             models[(d, m)].update(vals)
                             models[(d, m)]["turns"] += 1
+                            models_costs[(d, m)] += turn_cost
                             models_gen_durations[(d, m)] += gen_dur
                             if e2e_dur > 0:
                                 models_e2e_durations[(d, m)] += e2e_dur
@@ -589,6 +887,7 @@ def get_codex_stats(days_back=7, show_recent_routes=10, target_date_arg=None, ta
                     "total_tokens": session_total_tokens,
                     "in_tokens": session_in_tokens,
                     "cached_tokens": session_cached_tokens,
+                    "cost": session_cost,
                     "gen_tps": sess_gen_tps,
                     "e2e_tps": sess_e2e_tps,
                 })
@@ -606,6 +905,7 @@ def get_codex_stats(days_back=7, show_recent_routes=10, target_date_arg=None, ta
 
     for d in sorted(daily.keys()):
         stat = daily[d]
+        d_cost = daily_costs[d]
         in_tok = stat["input_tokens"]
         cached_tok = stat["cached_input_tokens"]
         hit_rate = (cached_tok / in_tok * 100.0) if in_tok > 0 else 0.0
@@ -616,7 +916,7 @@ def get_codex_stats(days_back=7, show_recent_routes=10, target_date_arg=None, ta
         d_e2e_out_tps = (stat["output_tokens"] / d_e2e_dur) if d_e2e_dur > 0 else 0.0
         d_e2e_tot_tps = (stat["total_tokens"] / d_e2e_dur) if d_e2e_dur > 0 else 0.0
 
-        print(f"\n[+] 日期 【{d}】 交互轮次: {stat['turns']} 轮")
+        print(f"\n[+] 日期 【{d}】 交互轮次: {stat['turns']} 轮 | 💰 预估费用: ${d_cost:.2f}")
         print(f"   |-- 总 Token 消耗:     {format_tokens(stat['total_tokens'])}")
         print(f"   |-- 提示词输入 (Prompt): {format_tokens(in_tok)}")
         print(f"   |   \\-- 缓存命中 Token:  {format_tokens(cached_tok)} | 🎯 缓存命中率: {hit_rate:.2f}%")
@@ -629,6 +929,7 @@ def get_codex_stats(days_back=7, show_recent_routes=10, target_date_arg=None, ta
         for (m_date, m_slug), m_stat in sorted(models.items()):
             if m_date == d:
                 tot_str = format_tokens(m_stat["total_tokens"])
+                m_cst = models_costs[(m_date, m_slug)]
                 m_in = m_stat["input_tokens"]
                 m_cache = m_stat["cached_input_tokens"]
                 m_hit_rate = (m_cache / m_in * 100.0) if m_in > 0 else 0.0
@@ -645,16 +946,18 @@ def get_codex_stats(days_back=7, show_recent_routes=10, target_date_arg=None, ta
                 col_lbl = pad_cell(f"* {label}", 40, "left")
                 col_trn = pad_cell(f"轮次: {m_stat['turns']:>4}", 12, "left")
                 col_tot = pad_cell(f"总消耗: {tot_str}", 26, "left")
+                col_cst = pad_cell(f"费用: {format_cost_cell(m_cst)}", 13, "left")
                 col_hit = pad_cell(f"缓存率: {m_hit_rate:>5.1f}%", 15, "left")
                 col_gen = pad_cell(f"纯吐率: {m_gen_tps:>4.1f} tok/s", 18, "left")
                 col_e2e = pad_cell(f"端到端: {m_e2e_tps:>4.1f} tok/s", 18, "left")
 
-                print(f"       {col_lbl} | {col_trn} | {col_tot} | {col_hit} | {col_gen} | {col_e2e}")
+                print(f"       {col_lbl} | {col_trn} | {col_tot} | {col_cst} | {col_hit} | {col_gen} | {col_e2e}")
 
     grand_total = collections.Counter()
     for s in daily.values():
         grand_total.update(s)
 
+    grand_cost = sum(daily_costs.values())
     g_in = grand_total["input_tokens"]
     g_cache = grand_total["cached_input_tokens"]
     g_hit_rate = (g_cache / g_in * 100.0) if g_in > 0 else 0.0
@@ -669,6 +972,7 @@ def get_codex_stats(days_back=7, show_recent_routes=10, target_date_arg=None, ta
     print("[*] 总体汇总 (Grand Total):")
     print(f"   * 累计对话轮次:       {grand_total['turns']} 轮")
     print(f"   * 累计总 Token:       {format_tokens(grand_total['total_tokens'])}")
+    print(f"   * 💰 累计预估消费:     ${grand_cost:.2f} USD (折合约 ￥{grand_cost * 7.2:.2f} RMB)")
     print(f"   * 累计输入 Token:     {format_tokens(g_in)}")
     print(f"   * 累计缓存加速:       {format_tokens(g_cache)} | 🚀 总体缓存命中率: {g_hit_rate:.2f}%")
     print(f"   * 累计模型输出:       {format_tokens(grand_total['output_tokens'])} (深度思考推理消耗: {format_tokens(grand_total['reasoning_output_tokens'])})")
@@ -676,6 +980,9 @@ def get_codex_stats(days_back=7, show_recent_routes=10, target_date_arg=None, ta
     print(f"   * ⏱️ 全程端到端输出吐率 (E2E Out TPS): {g_e2e_tps:.1f} token/s")
     print(f"   * 🚀 全程端到端总吞吐率 (E2E Total):   {g_tot_tps:.1f} token/s")
     print("=" * banner_width)
+
+    # 渲染高保真日级模型消耗与消费成本审计表 (对齐用户专属格式)
+    render_cost_table(daily, models, daily_costs, models_costs, model_meta, vendor_title="OpenAI Codex")
 
     if show_recent_routes > 0 and session_route_history:
         print(f"\n[*] 最近 {min(show_recent_routes, len(session_route_history))} 次交互会话实际路由与吐率追踪 (Session Route & Speed Audit):")
@@ -685,7 +992,8 @@ def get_codex_stats(days_back=7, show_recent_routes=10, target_date_arg=None, ta
             ("客户端请求模型", 18, "left"),
             ("服务端实际路由模型", 24, "left"),
             ("状态", 10, "center"),
-            ("总Token消耗", 23, "right"),
+            ("总Token消耗", 21, "right"),
+            ("预估费用", 10, "right"),
             ("缓存率", 8, "right"),
             ("纯吐率", 11, "right"),
             ("端到端吐率", 11, "right"),
@@ -712,6 +1020,7 @@ def get_codex_stats(days_back=7, show_recent_routes=10, target_date_arg=None, ta
                 route_status = "[REDIRECT]"
 
             tot_s = format_tokens(r["total_tokens"])
+            cost_s = format_cost_cell(r.get("cost", 0.0))
             in_s = r["in_tokens"]
             c_s = r["cached_tokens"]
             rate = (c_s / in_s * 100.0) if in_s > 0 else 0.0
@@ -726,6 +1035,7 @@ def get_codex_stats(days_back=7, show_recent_routes=10, target_date_arg=None, ta
                 act_str,
                 route_status,
                 tot_s,
+                cost_s,
                 f"{rate:.1f}%",
                 gen_str,
                 e2e_str
@@ -738,9 +1048,11 @@ def get_codex_stats(days_back=7, show_recent_routes=10, target_date_arg=None, ta
         print("   • [纯生成吐率 (Gen TPS)]   : 扣除工具执行与等待后，模型纯输出推理吐字速率 (Output Tokens / Generation Latency)。")
         print("   • [端到端输出吐率 (E2E Out)]: 包含多轮思考、工具执行（命令/文件读写）挂钟时间的实际交付吐率。")
         print("   • [端到端总吞吐 (E2E Total)]: 包含庞大上下文摄入(几十万Prompt)与缓存加速的系统综合吞吐能力。")
+        print("   • [预估费用 (Cost)]        : 基于 OpenAI / Google / Anthropic 官方阶梯定价与缓存折扣自动核算折算。")
 
     render_community_speed_card(daily, model_sample_stats, model_meta, tz, target_date_clean, target_model_arg, default_keyword="sol", vendor_title="OpenAI Codex")
     print("=" * banner_width)
+    grand_total["cost_usd"] = grand_cost
     return grand_total
 
 # =========================================================================
@@ -814,6 +1126,8 @@ def get_antigravity_stats(days_back=7, show_recent_routes=10, target_date_arg=No
 
     daily = collections.defaultdict(collections.Counter)
     models = collections.defaultdict(collections.Counter)
+    daily_costs = collections.defaultdict(float)
+    models_costs = collections.defaultdict(float)
     daily_gen_durations = collections.defaultdict(float)
     models_gen_durations = collections.defaultdict(float)
     daily_e2e_durations = collections.defaultdict(float)
@@ -874,8 +1188,10 @@ def get_antigravity_stats(days_back=7, show_recent_routes=10, target_date_arg=No
 
             sess_total_tokens = 0
             sess_in_tokens = 0
+            sess_uncached_tokens = 0
             sess_cached_tokens = 0
             sess_out_tokens = 0
+            sess_cost = 0.0
             sess_gen_dur = 0.0
             sess_e2e_dur = 0.0
             sess_models = collections.Counter()
@@ -939,6 +1255,9 @@ def get_antigravity_stats(days_back=7, show_recent_routes=10, target_date_arg=No
                         in_tok = uncached_in + cached_in
                         tot_tok = in_tok + out_tok
 
+                        # 计算该步预估费用
+                        step_cost = calc_token_cost(m_name, uncached_in, cached_in, out_tok, 0)
+
                         # 流式阶段耗时计算: 若有原生流式记录则用之，否则依经验折扣 TTFT 首字等待
                         s_dur = stream_sec if stream_sec > 0.2 else (dur_sec * 0.85)
 
@@ -948,8 +1267,10 @@ def get_antigravity_stats(days_back=7, show_recent_routes=10, target_date_arg=No
 
                         sess_total_tokens += tot_tok
                         sess_in_tokens += in_tok
+                        sess_uncached_tokens += uncached_in
                         sess_cached_tokens += cached_in
                         sess_out_tokens += out_tok
+                        sess_cost += step_cost
                         sess_gen_dur += dur_sec
                         sess_e2e_dur += e2e_dur
                         if m_name and m_name != "gemini-model":
@@ -963,19 +1284,23 @@ def get_antigravity_stats(days_back=7, show_recent_routes=10, target_date_arg=No
                         if d >= cutoff_date:
                             vals = {
                                 "input_tokens": in_tok,
+                                "uncached_tokens": uncached_in,
                                 "cached_input_tokens": cached_in,
+                                "cache_create_tokens": 0,
                                 "output_tokens": out_tok,
                                 "reasoning_output_tokens": reasoning_tok,
                                 "total_tokens": tot_tok,
                             }
                             daily[d].update(vals)
                             daily[d]["turns"] += 1
+                            daily_costs[d] += step_cost
                             daily_gen_durations[d] += dur_sec
                             if e2e_dur > 0:
                                 daily_e2e_durations[d] += e2e_dur
 
                             models[(d, m_name)].update(vals)
                             models[(d, m_name)]["turns"] += 1
+                            models_costs[(d, m_name)] += step_cost
                             models_gen_durations[(d, m_name)] += dur_sec
                             if e2e_dur > 0:
                                 models_e2e_durations[(d, m_name)] += e2e_dur
@@ -1025,6 +1350,7 @@ def get_antigravity_stats(days_back=7, show_recent_routes=10, target_date_arg=No
                     "total_tokens": sess_total_tokens,
                     "in_tokens": sess_in_tokens,
                     "cached_tokens": sess_cached_tokens,
+                    "cost": sess_cost,
                     "gen_tps": tps,
                     "e2e_tps": e2e_tps,
                 })
@@ -1046,6 +1372,7 @@ def get_antigravity_stats(days_back=7, show_recent_routes=10, target_date_arg=No
 
     for d in sorted(daily.keys()):
         stat = daily[d]
+        d_cost = daily_costs[d]
         in_tok = stat["input_tokens"]
         cached_tok = stat["cached_input_tokens"]
         hit_rate = (cached_tok / in_tok * 100.0) if in_tok > 0 else 0.0
@@ -1056,7 +1383,7 @@ def get_antigravity_stats(days_back=7, show_recent_routes=10, target_date_arg=No
         d_e2e_out_tps = (stat["output_tokens"] / d_e2e_dur) if d_e2e_dur > 0 else 0.0
         d_e2e_tot_tps = (stat["total_tokens"] / d_e2e_dur) if d_e2e_dur > 0 else 0.0
 
-        print(f"\n[+] 日期 【{d}】 交互轮次: {stat['turns']} 轮")
+        print(f"\n[+] 日期 【{d}】 交互轮次: {stat['turns']} 轮 | 💰 预估费用: ${d_cost:.2f}")
         print(f"   |-- 总 Token 消耗:     {format_tokens(stat['total_tokens'])}")
         print(f"   |-- 提示词输入 (Prompt): {format_tokens(in_tok)}")
         print(f"   |   \\-- 缓存命中 Token:  {format_tokens(cached_tok)} | 🎯 上下文缓存命中率: {hit_rate:.2f}%")
@@ -1069,6 +1396,7 @@ def get_antigravity_stats(days_back=7, show_recent_routes=10, target_date_arg=No
         for (m_date, m_slug), m_stat in sorted(models.items()):
             if m_date == d and m_stat["total_tokens"] > 0:
                 tot_str = format_tokens(m_stat["total_tokens"])
+                m_cst = models_costs[(m_date, m_slug)]
                 m_in = m_stat["input_tokens"]
                 m_cache = m_stat["cached_input_tokens"]
                 m_hit_rate = (m_cache / m_in * 100.0) if m_in > 0 else 0.0
@@ -1085,16 +1413,18 @@ def get_antigravity_stats(days_back=7, show_recent_routes=10, target_date_arg=No
                 col_lbl = pad_cell(f"* {label}", 42, "left")
                 col_trn = pad_cell(f"轮次: {m_stat['turns']:>4}", 12, "left")
                 col_tot = pad_cell(f"总消耗: {tot_str}", 26, "left")
+                col_cst = pad_cell(f"费用: {format_cost_cell(m_cst)}", 13, "left")
                 col_hit = pad_cell(f"缓存率: {m_hit_rate:>5.1f}%", 15, "left")
                 col_gen = pad_cell(f"纯吐率: {m_gen_tps:>5.1f} tok/s", 18, "left")
-                col_e2e = pad_cell(f"端到端: {m_e2e_tps:>5.1f} tok/s", 18, "left")
+                col_e2e = pad_cell(f"端到端: {m_e2e_tps:>4.1f} tok/s", 18, "left")
 
-                print(f"       {col_lbl} | {col_trn} | {col_tot} | {col_hit} | {col_gen} | {col_e2e}")
+                print(f"       {col_lbl} | {col_trn} | {col_tot} | {col_cst} | {col_hit} | {col_gen} | {col_e2e}")
 
     grand_total = collections.Counter()
     for s in daily.values():
         grand_total.update(s)
 
+    grand_cost = sum(daily_costs.values())
     g_in = grand_total["input_tokens"]
     g_cache = grand_total["cached_input_tokens"]
     g_hit_rate = (g_cache / g_in * 100.0) if g_in > 0 else 0.0
@@ -1109,6 +1439,7 @@ def get_antigravity_stats(days_back=7, show_recent_routes=10, target_date_arg=No
     print("[*] 总体汇总 (Grand Total):")
     print(f"   * 累计对话轮次:       {grand_total['turns']} 轮")
     print(f"   * 累计总 Token:       {format_tokens(grand_total['total_tokens'])}")
+    print(f"   * 💰 累计预估消费:     ${grand_cost:.2f} USD (折合约 ￥{grand_cost * 7.2:.2f} RMB)")
     print(f"   * 累计输入 Token:     {format_tokens(g_in)}")
     print(f"   * 累计缓存加速:       {format_tokens(g_cache)} | 🚀 总体缓存命中率: {g_hit_rate:.2f}%")
     print(f"   * 累计模型输出:       {format_tokens(grand_total['output_tokens'])} (深度思考推理消耗: {format_tokens(grand_total['reasoning_output_tokens'])})")
@@ -1117,15 +1448,19 @@ def get_antigravity_stats(days_back=7, show_recent_routes=10, target_date_arg=No
     print(f"   * 🚀 全程端到端总吞吐率 (E2E Total):   {g_tot_tps:.1f} token/s")
     print("=" * banner_width)
 
+    # 渲染高保真日级模型消耗与消费成本审计表 (对齐用户专属格式)
+    render_cost_table(daily, models, daily_costs, models_costs, AGY_MODEL_META, vendor_title=card_vendor)
+
     if show_recent_routes > 0 and session_route_history:
         print(f"\n[*] 最近 {min(show_recent_routes, len(session_route_history))} 次交互会话实际路由与吐率追踪 (Session Route & Speed Audit):")
         cols_cfg = [
             ("时间 (UTC+8)", 14, "center"),
             ("Session ID", 18 if app_type == "merged" else 12, "center"),
             ("客户端请求模型", 26, "left"),
-            ("服务端实际路由模型", 40, "left"),
+            ("服务端实际路由模型", 38, "left"),
             ("状态", 10, "center"),
-            ("总Token消耗", 23, "right"),
+            ("总Token消耗", 21, "right"),
+            ("预估费用", 10, "right"),
             ("缓存率", 8, "right"),
             ("纯吐率", 11, "right"),
             ("端到端吐率", 11, "right"),
@@ -1141,6 +1476,7 @@ def get_antigravity_stats(days_back=7, show_recent_routes=10, target_date_arg=No
         recent_sessions = session_route_history[-show_recent_routes:]
         for r in reversed(recent_sessions):
             tot_s = format_tokens(r["total_tokens"])
+            cost_s = format_cost_cell(r.get("cost", 0.0))
             in_s = r["in_tokens"]
             c_s = r["cached_tokens"]
             rate = (c_s / in_s * 100.0) if in_s > 0 else 0.0
@@ -1154,6 +1490,7 @@ def get_antigravity_stats(days_back=7, show_recent_routes=10, target_date_arg=No
                 r["actual_model"],
                 r["status"],
                 tot_s,
+                cost_s,
                 f"{rate:.1f}%",
                 gen_str,
                 e2e_str
@@ -1166,9 +1503,11 @@ def get_antigravity_stats(days_back=7, show_recent_routes=10, target_date_arg=No
         print("   • [纯生成吐率 (Gen TPS)]   : 扣除工具执行与等待后，模型纯输出推理吐字速率 (Output Tokens / API Latency)。")
         print("   • [端到端输出吐率 (E2E Out)]: 包含多轮思考、工具执行（命令/文件读写）挂钟时间的实际交付吐率。")
         print("   • [端到端总吞吐 (E2E Total)]: 包含庞大上下文摄入(几十万Prompt)与缓存加速的系统综合吞吐能力。")
+        print("   • [预估费用 (Cost)]        : 基于 OpenAI / Google / Anthropic 官方阶梯定价与缓存折扣自动核算折算。")
 
     render_community_speed_card(daily, model_sample_stats, AGY_MODEL_META, tz, target_date_clean, target_model_arg, default_keyword="flash", vendor_title=card_vendor)
     print("=" * banner_width)
+    grand_total["cost_usd"] = grand_cost
     return grand_total
 
 # =========================================================================
@@ -1285,11 +1624,15 @@ if __name__ == "__main__":
         print("=" * 118)
         c_tot = codex_tot["total_tokens"] if codex_tot else 0
         c_trn = codex_tot["turns"] if codex_tot else 0
+        c_cst = codex_tot.get("cost_usd", 0.0) if codex_tot else 0.0
         a_tot = agy_tot["total_tokens"] if agy_tot else 0
         a_trn = agy_tot["turns"] if agy_tot else 0
+        a_cst = agy_tot.get("cost_usd", 0.0) if agy_tot else 0.0
         i_tot = ide_tot["total_tokens"] if ide_tot else 0
         i_trn = ide_tot["turns"] if ide_tot else 0
+        i_cst = ide_tot.get("cost_usd", 0.0) if ide_tot else 0.0
 
         print(f"  * 总 Token 吞吐:   Codex: {format_tokens(c_tot)} | AGY桌面端: {format_tokens(a_tot)} | AGY-IDE端: {format_tokens(i_tot)}")
+        print(f"  * 预估费用折算:   Codex: ${c_cst:.2f} | AGY桌面端: ${a_cst:.2f} | AGY-IDE端: ${i_cst:.2f}")
         print(f"  * 对话总轮次:     Codex: {c_trn:,} 轮 | AGY桌面端: {a_trn:,} 轮 | AGY-IDE端: {i_trn:,} 轮")
         print("=" * 118)
