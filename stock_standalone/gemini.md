@@ -1,5 +1,12 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-10-03 15:35 instock-nuitka-batch.cmd 默认构建目标调整为 ATS、添加手动 clean_nuitka_cache 缓存清理入口闭环
+- [x] **【默认打包选项调整为ATS终端、菜单新增clean_nuitka_cache手动清理入口与确认防误触、clean脚本覆盖instock_Nuitka解包路径全闭环】(`instock-nuitka-batch.cmd`, `C:\Users\Johnson\instock-nuitka-batch.cmd`, `clean_nuitka_cache.bat`, `C:\Users\Johnson\clean_nuitka_cache.bat`, `tools/generate_nuitka_batch.py`, `20261003_1535_task.md`)**：
+    - [x] **默认打包目标调整为 ATS [UX/KISS]**：修改菜单默认行为，将默认项从全量 `all` 调整为 `[1] ats`（ATS 操盘终端）；直接回车无输入时默认仅编译 ATS，避免频繁触发耗时耗资源的全量编译；
+    - [x] **菜单新增手动清理入口 [Feature/Safety]**：在菜单中新增 `[6] clean`（支持 `clean`, `clean_cache`, `clean_nuitka_cache` 等别名）；交互模式下增加确认防护 `[Y/n]` 防止误触，执行完后优雅提示并返回主菜单；支持 `--dry-run clean` 演练验证；
+    - [x] **clean_nuitka_cache 覆盖与目录自适应加固 [Robustness]**：`clean_nuitka_cache.bat` 新增自动定位真实工作区根目录逻辑，并在解包清理项中补齐 `G:\Temp\instock_Nuitka` 清理，确保无论从当前目录还是用户目录启动都能精准定位与清理；
+    - [x] **全链路部署与演练验证 100% 绿灯**：工作区根目录与 `C:\Users\Johnson\` 同步部署，标准 Windows CRLF 换行；`--dry-run clean` 与 `--dry-run 1`（ats 默认）演练验证 100% 正常。
+
 ## 2026-10-03 15:15 桌面窗口坐标分类布局管理器静态路由优先级增强、默认metric 500防倒挂与自愈机制落地闭环
 - [x] **【彻底解决布局管理器静态路由默认metric 1倒挂压制有线直连痛点、UI新增路由跃点可配置项、底层自适应检测与低跃点冲突自动重构自愈】(`webTools/window_manager/core.py`, `webTools/window_manager/ui.py`, `20261003_1425_task.md`)**：
     - [x] **架构定性与机制澄清 [Architecture]**：确证桌面窗口坐标分类布局管理器中的静态路由完全是由内部原生代码（`webTools/window_manager/core.py` 中的 `check_and_add_route()` 与 `ui.py` 中的对话框）独立管理维护，不依赖外部批处理脚本；此前原代码因未指定 metric 参数，Windows 默认赋了 `metric 1` (总跃点 36)，将以太网有线直连 (276) 无情压制导致流量被抢去走 WiFi 跨网段绕路；

@@ -35,7 +35,7 @@ if not exist "!CMD_BASE_DIR!\nuitka_build_ats_console_onlyClang.bat" (
 )
 
 :: 去除末尾反斜杠
-if "!CMD_BASE_DIR:~-1!"=="\\" set "CMD_BASE_DIR=!CMD_BASE_DIR:~0,-1!"
+if "!CMD_BASE_DIR:~-1!"=="\" set "CMD_BASE_DIR=!CMD_BASE_DIR:~0,-1!"
 
 :: 默认 Nuitka 构建模式 (onefile_spec 为带专属解包目录的单文件模式，也可指定 onefile 或 standalone)
 set "DEFAULT_BUILD_MODE=onefile_spec"
@@ -71,23 +71,28 @@ echo ===========================================================================
 echo                    Nuitka 批量编译打包调度中心 (Clang-Only)
 echo ================================================================================
 echo   [独立单模块打包]
-echo     [1] ats       - ATS 操盘终端 (nuitka_build_ats_console_onlyClang.bat)
+echo     [1] ats       - ATS 操盘终端 (nuitka_build_ats_console_onlyClang.bat) (默认选项)
 echo     [2] tk        - 行情监控主程序 (nuitka_build_console_onlyClang.bat)
 echo     [3] multi     - 多周期策略 (nuitka_build_multi_period_dialog_onlyClang.bat)
 echo.
 echo   [快捷组合与全量打包]
 echo     [4] tk,ats    - 常用双核组合 【先 TK，后 ATS】
-echo     [5] all       - 核心全量打包 【TK + ATS + MULTI】 (默认选项)
+echo     [5] all       - 核心全量打包 【TK + ATS + MULTI】
+echo.
+echo   [维护与清理工具]
+echo     [6] clean     - 手动清理编译与解包缓存 (clean_nuitka_cache.bat)
 echo.
 echo     [0] exit      - 退出
 echo ================================================================================
-echo 提示: 支持直接输入序号[如 1 或 4 或 5]，也支持输入模块名称[如 ats 或 all]，
+echo 提示: 支持直接输入序号[如 1 或 4 或 6]，也支持输入模块名称[如 ats 或 clean]，
 echo       或者多选组合[用空格或逗号分隔，如 1 3 或 tk,ats]。
 echo       默认构建模式: !DEFAULT_BUILD_MODE! (可传参 --standalone 或 --onefile 覆盖)
 echo ================================================================================
-set "INPUT_CHOICE="
-set /p "INPUT_CHOICE=请输入打包选择 [默认 5 全部核心]: "
-if "!INPUT_CHOICE!"=="" set "INPUT_CHOICE=5"
+set "INPUT_CHOICE=1"
+set /p "INPUT_CHOICE=请输入打包选择 [默认 1 ATS操盘终端]: "
+if defined INPUT_CHOICE set "INPUT_CHOICE=!INPUT_CHOICE:"=!"
+if "!INPUT_CHOICE!"=="" set "INPUT_CHOICE=1"
+if "!INPUT_CHOICE!"==" " set "INPUT_CHOICE=1"
 
 set "USER_ARGS=!INPUT_CHOICE!"
 
@@ -106,6 +111,12 @@ for %%A in (!NORMALIZED_ARGS!) do (
     if /i "!ARG!"=="exit" goto :QUIT
     if /i "!ARG!"=="quit" goto :QUIT
     if /i "!ARG!"=="q" goto :QUIT
+
+    if /i "!ARG!"=="6" goto :DO_CLEAN
+    if /i "!ARG!"=="clean" goto :DO_CLEAN
+    if /i "!ARG!"=="clean_cache" goto :DO_CLEAN
+    if /i "!ARG!"=="clean-cache" goto :DO_CLEAN
+    if /i "!ARG!"=="clean_nuitka_cache" goto :DO_CLEAN
 
     if /i "!ARG!"=="1" set "RUN_LIST=!RUN_LIST! ats"
     if /i "!ARG!"=="ats" set "RUN_LIST=!RUN_LIST! ats"
@@ -127,7 +138,7 @@ for %%A in (!NORMALIZED_ARGS!) do (
 )
 
 if "!RUN_LIST!"=="" (
-    echo [警告] 未识别到有效的打包目标代号: %USER_ARGS%
+    echo [警告] 未识别到有效的打包目标代号: !USER_ARGS!
     echo 请重新输入。
     goto :SHOW_MENU
 )
@@ -353,6 +364,74 @@ if !size_bytes! GTR 1048576 (
     set "RET_FILE_SIZE=!size_bytes! B"
 )
 goto :eof
+
+:: ================================================================================
+:: 内部子例程: 手动清理 Nuitka 编译与解包缓存
+:: ================================================================================
+:DO_CLEAN
+cls
+echo ================================================================================
+echo          【手动清理模式】Nuitka 编译缓存与运行时解包目录清理 (clean_nuitka_cache)
+echo ================================================================================
+set "CLEAN_SCRIPT=!CMD_BASE_DIR!\clean_nuitka_cache.bat"
+if not exist "!CLEAN_SCRIPT!" set "CLEAN_SCRIPT=%ROOT_DIR%\clean_nuitka_cache.bat"
+if not exist "!CLEAN_SCRIPT!" set "CLEAN_SCRIPT=C:\Users\Johnson\clean_nuitka_cache.bat"
+
+if not exist "!CLEAN_SCRIPT!" (
+    echo [错误] 找不到清理脚本 clean_nuitka_cache.bat
+    echo 请确认该文件是否存在于工程根目录: %ROOT_DIR%
+    echo.
+    pause
+    if "%~1"=="" goto :SHOW_MENU
+    goto :QUIT
+)
+
+echo 目标清理脚本: !CLEAN_SCRIPT!
+echo 警告: 此操作将清空 .nuitka_cache、sccache、build 中间编译产物及 G:\Temp 单文件解包。
+echo       清理后下一次打包将无法使用增量缓存加速，需从零重新编译。
+echo.
+if "!DRY_RUN!"=="1" (
+    echo [DRY-RUN 演练] 模拟调用 "!CLEAN_SCRIPT!" [不执行实际清理]
+    echo.
+    if "%~1"=="" (
+        echo 按任意键返回调度中心主菜单...
+        pause >nul
+        goto :SHOW_MENU
+    )
+    goto :QUIT
+)
+
+set "CONFIRM_CLEAN=Y"
+if "%~1"=="" (
+    set /p "CONFIRM_CLEAN=确认执行深度清理缓存吗? [Y/n]: "
+    if "!CONFIRM_CLEAN!"=="" set "CONFIRM_CLEAN=Y"
+)
+
+if /i not "!CONFIRM_CLEAN!"=="Y" (
+    echo.
+    echo [取消] 用户取消清理操作。
+    echo.
+    if "%~1"=="" (
+        timeout /t 2 >nul
+        goto :SHOW_MENU
+    )
+    goto :QUIT
+)
+
+echo.
+echo 正在执行清理...
+call "!CLEAN_SCRIPT!" -y
+echo.
+echo ================================================================================
+echo [完成] 缓存清理完毕。工作区已恢复纯净状态。
+echo ================================================================================
+if "%~1"=="" (
+    echo 按任意键返回调度中心主菜单...
+    pause >nul
+    goto :SHOW_MENU
+) else (
+    goto :QUIT
+)
 
 :QUIT
 echo [已退出 Nuitka 批量打包调度中心]

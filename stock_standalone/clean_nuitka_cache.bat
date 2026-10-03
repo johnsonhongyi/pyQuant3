@@ -1,17 +1,23 @@
 @echo off
 title Clean Nuitka and Compiler Cache
 chcp 65001 >nul
-cd /d "%~dp0"
+
+set "ROOT_DIR=D:\MacTools\WorkFile\WorkSpace\pyQuant3\stock_standalone"
+if exist "%~dp0\.nuitka_cache" set "ROOT_DIR=%~dp0"
+if exist "%~dp0\sys_utils.py" set "ROOT_DIR=%~dp0"
+if "%ROOT_DIR:~-1%"=="\" set "ROOT_DIR=%ROOT_DIR:~0,-1%"
+cd /d "%ROOT_DIR%"
 
 echo =======================================================
 echo Nuitka Clean Build Assistant - 深度清理打包与编译器缓存
 echo =======================================================
+echo 工作区根目录: %ROOT_DIR%
 echo.
 
 REM 1. 清理当前工作区的 Nuitka 增量缓存目录 .nuitka_cache
-if exist ".nuitka_cache" (
+if exist "%ROOT_DIR%\.nuitka_cache" (
     echo [1/5] 清理工作区 .nuitka_cache C中间代码与常量缓存...
-    rd /s /q ".nuitka_cache" >nul 2>&1
+    rd /s /q "%ROOT_DIR%\.nuitka_cache" >nul 2>&1
     echo [SUCCESS] .nuitka_cache 已清理。
 ) else (
     echo [1/5] 工作区 .nuitka_cache 不存在，跳过。
@@ -19,7 +25,7 @@ if exist ".nuitka_cache" (
 
 REM 2. 清理 build 目录下的中间编译产物
 echo [2/5] 清理 build 目录下的中间编译和解压文件夹...
-for /d %%D in ("build\*.build" "build\*.dist" "build\*.onefile-build") do (
+for /d %%D in ("%ROOT_DIR%\build\*.build" "%ROOT_DIR%\build\*.dist" "%ROOT_DIR%\build\*.onefile-build") do (
     if exist "%%D" (
         rd /s /q "%%D" >nul 2>&1
         echo   - 已删除 %%D
@@ -36,6 +42,10 @@ if exist "G:\Temp\ATS_Nuitka" (
 if exist "G:\Temp\MultiPeriodTester_Nuitka" (
     rd /s /q "G:\Temp\MultiPeriodTester_Nuitka" >nul 2>&1
     echo   - 已清理 G:\Temp\MultiPeriodTester_Nuitka
+)
+if exist "G:\Temp\instock_Nuitka" (
+    rd /s /q "G:\Temp\instock_Nuitka" >nul 2>&1
+    echo   - 已清理 G:\Temp\instock_Nuitka
 )
 echo [SUCCESS] G:\Temp 解包目录已清理。
 
