@@ -963,6 +963,9 @@ def _load_name_cache():
         logger.error(f"Failed to load stock name cache: {e}")
 
     # 2. 如果发现缓存量过小（比如小于 4500 只，通常 A 股有 5000+），说明需要一次性灌入补齐，实现“一次干活终身受益”
+    if os.environ.get("ATS_SYNTHETIC_QT_WORKLOAD") == "1":
+        logger.info("[NameCache Bootstrap] Skipped live/history bootstrap for synthetic Qt workload")
+        return
     if len(_resolved_name_cache) < 4500:
         logger.info(f"⚡ [NameCache Bootstrap] Current cache size ({len(_resolved_name_cache)}) is small. Initiating full stock name bootstrap...")
         boostrap_success = False

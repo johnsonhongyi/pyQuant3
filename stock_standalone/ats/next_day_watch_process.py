@@ -179,6 +179,12 @@ def _poll(root, manifest=None, sector_snapshot=None):
 
 
 def _worker_entry(connection, root):
+    # Ctrl+C belongs to the ATS GUI parent; the parent owns this worker's close.
+    try:
+        import signal
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+    except (AttributeError, ValueError, OSError):
+        pass
     try:
         while True:
             request = connection.recv()
@@ -200,7 +206,7 @@ def _worker_entry(connection, root):
                 connection.send(result)
             except Exception as exc:
                 connection.send({"events": [], "error": str(exc)})
-    except (EOFError, OSError):
+    except (EOFError, OSError, KeyboardInterrupt):
         pass
     finally:
         try:

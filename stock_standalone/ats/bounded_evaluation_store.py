@@ -3,6 +3,7 @@ import copy
 import gzip
 import json
 import os
+import tempfile
 import threading
 import time
 from collections import OrderedDict
@@ -10,6 +11,11 @@ from ats.archive_policy import ARCHIVE_INTERVAL, archive_window
 
 CHECKPOINT_LIMIT = 64
 WRITE_INTERVAL = ARCHIVE_INTERVAL
+RECOVERY_JOURNAL_NAME = '.ats_archive_recovery.json.gz'
+
+
+def recovery_journal_path(root):
+    return os.path.join(os.path.abspath(root), 'datacsv', RECOVERY_JOURNAL_NAME)
 
 
 def compact_checkpoints(evaluation):
@@ -102,6 +108,9 @@ class EvaluationStore:
         self._cache = OrderedDict()
         self._started = False
         self._flush_lock = threading.Lock()
+        self._recovery_lock = threading.Lock()
+        self._recovery_path = None
+        self._recovery_active = False
 
     @staticmethod
     def _latest_write_ts(path):
@@ -271,12 +280,12 @@ class EvaluationStore:
             time.sleep(30)
             self.flush()
 
-    def flush(self, timeout_sec=0.0, require_clean=False):
-        """Attempt the permitted checkpoint; optionally require all cached writes to commit."""
+    def flush(self, timeout_sec=0.0, require_clean=False, force=False):
+        """Flush due checkpoints, or write all dirty entries during orderly shutdown."""
         if not self._flush_lock.acquire(timeout=max(0.0, float(timeout_sec))):
             return False
         try:
-            flushed = self._flush_pending()
+            flushed = self._flush_pending(force=force)
             if not flushed:
                 return False
             if require_clean:
@@ -286,10 +295,129 @@ class EvaluationStore:
         finally:
             self._flush_lock.release()
 
-    def _flush_pending(self):
+    def persist_recovery(self, recovery_path=None, timeout_sec=5.0):
+        """Durably spool dirty JSON archives without bypassing the archive checkpoint gate."""
+        recovery_path = recovery_path or self._recovery_path
+        if not recovery_path:
+            return False
+        recovery_path = os.path.abspath(recovery_path)
+        self._recovery_path = recovery_path
+        if not self._recovery_lock.acquire(timeout=max(0.0, float(timeout_sec))):
+            return False
+        temporary = None
+        try:
+            with self._lock:
+                dirty = [(path, copy.deepcopy(entry['value']))
+                         for path, entry in self._cache.items() if entry.get('dirty')]
+            if not dirty:
+                try:
+                    os.remove(recovery_path)
+                except FileNotFoundError:
+                    pass
+                self._recovery_active = False
+                return True
+
+            entries = []
+            for path, value in dirty:
+                version = _version(path)
+                entries.append({
+                    'path': path,
+                    'value': value,
+                    'base_version': list(version) if version else None,
+                })
+            payload = json.dumps(
+                {'format_version': 1, 'entries': entries},
+                ensure_ascii=False, separators=(',', ':'), allow_nan=False).encode('utf-8')
+            directory = os.path.dirname(recovery_path)
+            os.makedirs(directory, exist_ok=True)
+            fd, temporary = tempfile.mkstemp(prefix='.ats_archive_recovery_', dir=directory)
+            with os.fdopen(fd, 'wb') as raw:
+                with gzip.GzipFile(fileobj=raw, mode='wb', compresslevel=3) as packed:
+                    packed.write(payload)
+                raw.flush()
+                os.fsync(raw.fileno())
+            from ats.persistence_lock import replace_with_retry
+            replace_with_retry(temporary, recovery_path)
+            temporary = None
+            self._recovery_active = True
+            return True
+        except Exception:
+            import logging
+            logging.getLogger('ATS.ArchiveCache').exception(
+                'Could not persist dirty archive recovery journal: %s', recovery_path)
+            return False
+        finally:
+            if temporary and os.path.exists(temporary):
+                try:
+                    os.remove(temporary)
+                except OSError:
+                    pass
+            self._recovery_lock.release()
+
+    def restore_recovery(self, recovery_path):
+        """Restore a prior shutdown journal into the cache for the next permitted checkpoint."""
+        recovery_path = os.path.abspath(recovery_path)
+        self._recovery_path = recovery_path
+        if not os.path.isfile(recovery_path):
+            return 0
+        try:
+            with gzip.open(recovery_path, 'rt', encoding='utf-8') as source:
+                payload = json.load(source)
+            if payload.get('format_version') != 1 or not isinstance(payload.get('entries'), list):
+                raise ValueError('unsupported archive recovery journal')
+            from ats.storage_archive import write_json_gzip
+        except Exception:
+            import logging
+            logging.getLogger('ATS.ArchiveCache').exception(
+                'Could not load dirty archive recovery journal: %s', recovery_path)
+            return 0
+
+        restored = 0
+        stale_entry = False
+        invalid_entry = False
+        for item in payload['entries']:
+            try:
+                raw_path = item['path']
+                if not os.path.isabs(raw_path) or 'value' not in item:
+                    raise ValueError('invalid recovery entry')
+                path = os.path.abspath(raw_path)
+                expected = item.get('base_version')
+                current = _version(path)
+                expected = tuple(expected) if expected is not None else None
+                if current != expected:
+                    stale_entry = True
+                    continue
+                value = item['value']
+                with self._lock:
+                    existing = self._cache.get(path)
+                    if existing and existing.get('dirty'):
+                        stale_entry = True
+                        continue
+                    self._remember(path, dict(
+                        version=current,
+                        value=value,
+                        writer=write_json_gzip,
+                        last_write=time.monotonic() - WRITE_INTERVAL,
+                        close_date=self._saved_close_day(path),
+                        dirty=True,
+                    ))
+                    if not self._started:
+                        self._started = True
+                        threading.Thread(target=self._flush_loop, daemon=True,
+                                         name='ATS-ArchiveCache').start()
+                restored += 1
+            except Exception:
+                invalid_entry = True
+
+        self._recovery_active = bool(restored or invalid_entry)
+        if stale_entry and not invalid_entry:
+            self.persist_recovery(recovery_path)
+        return restored
+
+    def _flush_pending(self, force=False):
         success = True
-        for path, value in self.pending():
-            if archive_window()[0] is None:
+        for path, value in self.pending(force=force):
+            if not force and archive_window()[0] is None:
                 break
             with self._lock:
                 entry = self._cache.get(path, {})
@@ -302,14 +430,14 @@ class EvaluationStore:
                 from ats.persistence_lock import directory_write_lock
                 with directory_write_lock(os.path.join(os.path.dirname(path), '.archive-checkpoint')):
                     window, day = archive_window()
-                    if window is None:
+                    if window is None and not force:
                         break
-                    if window == 'close' and self._saved_close_day(path) == day:
+                    if not force and window == 'close' and self._saved_close_day(path) == day:
                         with self._lock:
                             if path in self._cache:
                                 self._cache[path]['close_date'] = day
                         continue
-                    if window == 'market':
+                    if not force and window == 'market':
                         stamp = self._latest_write_ts(path)
                         elapsed = max(0.0, time.time() - stamp)
                         if stamp and elapsed < WRITE_INTERVAL:
@@ -391,16 +519,18 @@ class EvaluationStore:
                     dirty=dirty)
                 if window == 'close' and written:
                     current_entry['close_date'] = day
-                return
+                break
+        if self._recovery_active:
+            self.persist_recovery(timeout_sec=5.0)
 
-    def pending(self):
+    def pending(self, force=False):
         with self._lock:
             raw_items = []
             window, day = archive_window()
-            if window is None:
+            if window is None and not force:
                 return raw_items
             for path, entry in self._cache.items():
-                due = (window == 'market' and time.monotonic() - entry['last_write'] >= WRITE_INTERVAL
+                due = (force or window == 'market' and time.monotonic() - entry['last_write'] >= WRITE_INTERVAL
                        or window == 'close' and entry.get('close_date') != day)
                 if entry.get("dirty") and due:
                     raw_items.append((path, entry["value"]))
@@ -420,4 +550,5 @@ class EvaluationStore:
 evaluation_store = EvaluationStore()
 
 import atexit
+atexit.register(evaluation_store.persist_recovery)
 atexit.register(evaluation_store.flush)
