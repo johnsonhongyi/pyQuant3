@@ -246,3 +246,8 @@ flowchart TD
 - 证据：`ats_closed_loop/performance_ab_20261003.json`、`ats_closed_loop/implementation_evidence_20261003.json`；`release_ready=false`。
 - 72h 合成 Qt 持续负载已启动：`scripts/ats_gui_workload.py`，任务 ID、PID 与开始时间见实施证据；每分钟保存资源趋势。行情传输、历史数据和账户输入隔离替代，不能替代真实行情、GUI 交互和统一账户 72h 验收。
 - 回退：F01 开关切回旧路径；其余优化逆向应用本次逐文件补丁，再跑业务硬门槛及两个入口；禁止双写账户和删除未 ACK 持久回执。
+
+### 审核后定向修复
+
+- Alpha 待入缓存快照按日期隔离，同日仅最新任务生效；退出提交涵盖前日未完成任务，并停止晚到防抖写入。归档 flush 在剩余期限内等待锁，向关闭流程返回忙/写失败；writer 返回 False 时保留脏数据和回执以便重试。
+- 本次定向验证：`tests/test_ats_performance_contracts.py` 中八项新增用例及两项相邻关闭/Alpha 契约，共 10 passed。未重跑整套回归或重建发布证据；30 分钟归档、时段门禁和每日封账规则保持，`release_ready=false`。

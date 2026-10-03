@@ -5914,8 +5914,11 @@ class ATSMainWindow(QMainWindow):
         records_copy = list(self._recorded_alpha_list)
         if not hasattr(self, '_alpha_flush_lock'):
             self._alpha_flush_lock = threading.Lock()
-        self._alpha_flush_seq = getattr(self, '_alpha_flush_seq', 0) + 1
-        flush_seq = self._alpha_flush_seq
+        jobs = getattr(self, '_alpha_flush_jobs', {})
+        self._alpha_flush_jobs = {day: job for day, job in jobs.items()
+                                  if not job.get('submitted', False)}
+        job = {'records': records_copy, 'submitted': False}
+        self._alpha_flush_jobs[today_date] = job
         def worker():
             try:
                 from sys_utils import get_app_root
@@ -5925,8 +5928,9 @@ class ATSMainWindow(QMainWindow):
                 from ats.bounded_evaluation_store import evaluation_store
                 from ats.storage_archive import write_json_gzip
                 with self._alpha_flush_lock:
-                    if flush_seq == self._alpha_flush_seq:
+                    if self._alpha_flush_jobs.get(today_date) is job:
                         evaluation_store.put(log_path, records_copy, write_json_gzip)
+                        job['submitted'] = True
             except Exception as e:
                 print(f"[ATSAlphaTracker] Background flush error: {e}")
         threading.Thread(target=worker, daemon=True).start()
@@ -7035,8 +7039,16 @@ class ATSMainWindow(QMainWindow):
         captured, revision = self.session_snapshot._capture_ledger(self.signal_ledger)
         snapshot = self.session_snapshot
         alpha_records = copy.deepcopy(getattr(self, '_recorded_alpha_list', []))
-        self._alpha_flush_seq = getattr(self, '_alpha_flush_seq', 0) + 1
         alpha_day = getattr(self, '_alpha_flush_date', datetime.now().strftime('%Y-%m-%d'))
+        alpha_timer = getattr(self, '_alpha_flush_timer', None)
+        if alpha_timer is not None:
+            alpha_timer.stop()
+        alpha_jobs = {day: {'records': copy.deepcopy(job['records']), 'submitted': False}
+                      for day, job in getattr(self, '_alpha_flush_jobs', {}).items()
+                      if not job.get('submitted', False)}
+        if alpha_records:
+            alpha_jobs[alpha_day] = {'records': alpha_records, 'submitted': False}
+        self._alpha_flush_jobs = alpha_jobs
         def alpha_flush():
             from sys_utils import get_app_root
             from ats.bounded_evaluation_store import evaluation_store
@@ -7045,10 +7057,12 @@ class ATSMainWindow(QMainWindow):
             if lock is not None and not lock.acquire(timeout=max(0, self._close_deadline - time.monotonic())):
                 return False
             try:
-                if alpha_records:
-                    path = os.path.join(get_app_root(), 'datacsv', f'ats_alpha_tracker_{alpha_day}.json')
-                    evaluation_store.put(path, alpha_records, write_json_gzip)
-                evaluation_store.flush()
+                for day, job in alpha_jobs.items():
+                    path = os.path.join(get_app_root(), 'datacsv', f'ats_alpha_tracker_{day}.json')
+                    evaluation_store.put(path, job['records'], write_json_gzip)
+                    job['submitted'] = True
+                return evaluation_store.flush(
+                    timeout_sec=max(0, self._close_deadline - time.monotonic()))
             finally:
                 if lock is not None:
                     lock.release()

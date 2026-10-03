@@ -271,15 +271,17 @@ class EvaluationStore:
             time.sleep(30)
             self.flush()
 
-    def flush(self):
-        if not self._flush_lock.acquire(blocking=False):
-            return
+    def flush(self, timeout_sec=0.0):
+        """Attempt the permitted checkpoint; report contention and write failures."""
+        if not self._flush_lock.acquire(timeout=max(0.0, float(timeout_sec))):
+            return False
         try:
-            self._flush_pending()
+            return self._flush_pending()
         finally:
             self._flush_lock.release()
 
     def _flush_pending(self):
+        success = True
         for path, value in self.pending():
             if archive_window()[0] is None:
                 break
@@ -288,6 +290,7 @@ class EvaluationStore:
                 writer = entry.get('writer')
                 on_commit = entry.get('on_commit')
             if writer is None:
+                success = False
                 continue
             try:
                 from ats.persistence_lock import directory_write_lock
@@ -310,6 +313,9 @@ class EvaluationStore:
                             continue
                     original = copy.deepcopy(value) if os.path.basename(path).startswith('next_day_anomaly_eval_') else None
                     written = writer(path, value)
+                    if written is False:
+                        success = False
+                        continue  # Keep dirty data and receipts available for retry.
                     if window == 'close' and written is not False:
                         from datetime import datetime, timedelta, timezone
                         try:
@@ -323,8 +329,10 @@ class EvaluationStore:
                 if on_commit is not None and written is not False:
                     on_commit(value)
             except Exception:
+                success = False
                 import logging
                 logging.getLogger('ATS.ArchiveCache').exception('Archive deferred: %s', path)
+        return success
 
     def committed(self, path, value, written=True, original=None):
         path = os.path.abspath(path)
