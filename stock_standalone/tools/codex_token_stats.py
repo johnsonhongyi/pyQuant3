@@ -660,7 +660,7 @@ def render_community_speed_card(daily, model_sample_stats, model_meta, tz, targe
 # =========================================================================
 # 适配器 1: OpenAI Codex 本地会话统计
 # =========================================================================
-def get_codex_stats(days_back=7, show_recent_routes=10, target_date_arg=None, target_model_arg=None):
+def get_codex_stats(days_back=7, show_recent_routes=10, target_date_arg=None, target_model_arg=None, time_mode="active"):
     root = os.path.expanduser("~/.codex/sessions")
     if not os.path.exists(root):
         print(f"未找到 Codex 会话目录: {root}")
@@ -713,7 +713,8 @@ def get_codex_stats(days_back=7, show_recent_routes=10, target_date_arg=None, ta
     for fn in all_files:
         turn_models = {}
         client_requested_model = None
-        session_created_time = "未知时间"
+        session_first_time = None
+        session_last_time = None
         session_total_tokens = 0
         session_in_tokens = 0
         session_cached_tokens = 0
@@ -745,6 +746,11 @@ def get_codex_stats(days_back=7, show_recent_routes=10, target_date_arg=None, ta
                             cur_dt = datetime.datetime.fromisoformat(ts_str.replace("Z", "+00:00")).astimezone(tz)
                         except Exception:
                             cur_dt = None
+
+                    if cur_dt:
+                        if not session_first_time:
+                            session_first_time = cur_dt
+                        session_last_time = cur_dt
 
                     if "thread_settings" in p and not client_requested_model:
                         client_requested_model = p["thread_settings"].get("model")
@@ -785,8 +791,6 @@ def get_codex_stats(days_back=7, show_recent_routes=10, target_date_arg=None, ta
 
                         u = p.get("usage") or p.get("turn_token_usage") or {}
                         d = cur_dt.date().isoformat() if cur_dt else "未知日期"
-                        if session_created_time == "未知时间" and cur_dt:
-                            session_created_time = cur_dt.strftime("%m-%d %H:%M:%S")
 
                         out_tok = int(u.get("output_tokens", 0) or 0)
                         in_tok_raw = int(u.get("input_tokens", 0) or 0)
@@ -875,11 +879,26 @@ def get_codex_stats(days_back=7, show_recent_routes=10, target_date_arg=None, ta
                 sid = os.path.basename(fn).replace(".jsonl", "")
                 if sid.startswith("rollout-"):
                     sid = sid.split("-")[-1]
+
+                if not session_last_time:
+                    mtime = os.path.getmtime(fn)
+                    session_last_time = datetime.datetime.fromtimestamp(mtime, tz)
+                if not session_first_time:
+                    session_first_time = session_last_time
+
+                created_time_str = session_first_time.strftime("%m-%d %H:%M:%S")
+                active_time_str = session_last_time.strftime("%m-%d %H:%M:%S")
+                active_ts = session_last_time.timestamp()
+
                 top_actual = session_actual_models.most_common(1)[0][0] if session_actual_models else "unknown"
                 sess_gen_tps = (session_out_tokens / session_gen_dur) if session_gen_dur > 0 else 0.0
                 sess_e2e_tps = (session_out_tokens / session_e2e_dur) if session_e2e_dur > 0 else 0.0
+
                 session_route_history.append({
-                    "time": session_created_time,
+                    "time": active_time_str if time_mode == "active" else created_time_str,
+                    "active_time": active_time_str,
+                    "created_time": created_time_str,
+                    "active_ts": active_ts,
                     "session_id": sid[:12],
                     "req_model": client_requested_model or "(Auto/默认)",
                     "actual_model": top_actual,
@@ -985,9 +1004,10 @@ def get_codex_stats(days_back=7, show_recent_routes=10, target_date_arg=None, ta
     render_cost_table(daily, models, daily_costs, models_costs, model_meta, vendor_title="OpenAI Codex")
 
     if show_recent_routes > 0 and session_route_history:
+        time_col_title = "活跃时间 (UTC+8)" if time_mode == "active" else "创建时间 (UTC+8)"
         print(f"\n[*] 最近 {min(show_recent_routes, len(session_route_history))} 次交互会话实际路由与吐率追踪 (Session Route & Speed Audit):")
         cols_cfg = [
-            ("时间 (UTC+8)", 14, "center"),
+            (time_col_title, 14, "center"),
             ("Session ID", 12, "center"),
             ("客户端请求模型", 18, "left"),
             ("服务端实际路由模型", 24, "left"),
@@ -1006,6 +1026,8 @@ def get_codex_stats(days_back=7, show_recent_routes=10, target_date_arg=None, ta
         print(header_str)
         print(sep_str)
 
+        # 严格按最后活跃时间排序 (从旧到新)
+        session_route_history.sort(key=lambda x: x["active_ts"])
         recent_sessions = session_route_history[-show_recent_routes:]
         for r in reversed(recent_sessions):
             req_m = r["req_model"]
@@ -1044,7 +1066,13 @@ def get_codex_stats(days_back=7, show_recent_routes=10, target_date_arg=None, ta
             print(row_line)
 
         print(sep_str)
+        time_meaning = (
+            "会话最后一次响应输出的最新活跃时间 (默认方案A，时间严格递减；可用 --created 切换查看创建起源)"
+            if time_mode == "active"
+            else "会话首次创建并产生首个Token的时间 (当前样式，按活跃倒序展示创建起源)"
+        )
         print("💡 指标物理定义说明:")
+        print(f"   • [{time_col_title}]: {time_meaning}。")
         print("   • [纯生成吐率 (Gen TPS)]   : 扣除工具执行与等待后，模型纯输出推理吐字速率 (Output Tokens / Generation Latency)。")
         print("   • [端到端输出吐率 (E2E Out)]: 包含多轮思考、工具执行（命令/文件读写）挂钟时间的实际交付吐率。")
         print("   • [端到端总吞吐 (E2E Total)]: 包含庞大上下文摄入(几十万Prompt)与缓存加速的系统综合吞吐能力。")
@@ -1058,7 +1086,7 @@ def get_codex_stats(days_back=7, show_recent_routes=10, target_date_arg=None, ta
 # =========================================================================
 # 适配器 2: Google Antigravity / Gemini 本地会话统计 (支持桌面端、IDE端与全量合并)
 # =========================================================================
-def get_antigravity_stats(days_back=7, show_recent_routes=10, target_date_arg=None, target_model_arg=None, app_type="standalone"):
+def get_antigravity_stats(days_back=7, show_recent_routes=10, target_date_arg=None, target_model_arg=None, app_type="standalone", time_mode="active"):
     """
     解析本地 Google Antigravity / Gemini 会话记录与 Token 吞吐审计
     - app_type:
@@ -1197,7 +1225,8 @@ def get_antigravity_stats(days_back=7, show_recent_routes=10, target_date_arg=No
             sess_models = collections.Counter()
             models_timeline = []
             cur_step_model = None
-            first_time_str = "未知时间"
+            sess_first_dt = None
+            sess_last_dt = None
 
             for idx, data in rows:
                 cur_dt = step_times.get(idx)
@@ -1205,9 +1234,12 @@ def get_antigravity_stats(days_back=7, show_recent_routes=10, target_date_arg=No
                     mtime = os.path.getmtime(db_path)
                     cur_dt = datetime.datetime.fromtimestamp(mtime, tz)
 
+                if sess_first_dt is None or cur_dt < sess_first_dt:
+                    sess_first_dt = cur_dt
+                if sess_last_dt is None or cur_dt > sess_last_dt:
+                    sess_last_dt = cur_dt
+
                 d = cur_dt.date().isoformat()
-                if first_time_str == "未知时间":
-                    first_time_str = cur_dt.strftime("%m-%d %H:%M:%S")
 
                 fields = decode_protobuf(data)
                 for fnum, wtype, val in fields:
@@ -1341,8 +1373,23 @@ def get_antigravity_stats(days_back=7, show_recent_routes=10, target_date_arg=No
 
                 tps = (sess_out_tokens / sess_gen_dur) if sess_gen_dur > 0 else 0.0
                 e2e_tps = (sess_out_tokens / sess_e2e_dur) if sess_e2e_dur > 0 else 0.0
+
+                mtime = os.path.getmtime(db_path)
+                mtime_dt = datetime.datetime.fromtimestamp(mtime, tz)
+                if not sess_last_dt or mtime_dt > sess_last_dt:
+                    sess_last_dt = mtime_dt
+                if not sess_first_dt:
+                    sess_first_dt = sess_last_dt
+
+                created_time_str = sess_first_dt.strftime("%m-%d %H:%M:%S")
+                active_time_str = sess_last_dt.strftime("%m-%d %H:%M:%S")
+                active_ts = sess_last_dt.timestamp()
+
                 session_route_history.append({
-                    "time": first_time_str,
+                    "time": active_time_str if time_mode == "active" else created_time_str,
+                    "active_time": active_time_str,
+                    "created_time": created_time_str,
+                    "active_ts": active_ts,
                     "session_id": (f"{app_tag} " if app_type == "merged" else "") + conv_id[:12],
                     "req_model": client_req_model,
                     "actual_model": act_disp,
@@ -1452,9 +1499,10 @@ def get_antigravity_stats(days_back=7, show_recent_routes=10, target_date_arg=No
     render_cost_table(daily, models, daily_costs, models_costs, AGY_MODEL_META, vendor_title=card_vendor)
 
     if show_recent_routes > 0 and session_route_history:
+        time_col_title = "活跃时间 (UTC+8)" if time_mode == "active" else "创建时间 (UTC+8)"
         print(f"\n[*] 最近 {min(show_recent_routes, len(session_route_history))} 次交互会话实际路由与吐率追踪 (Session Route & Speed Audit):")
         cols_cfg = [
-            ("时间 (UTC+8)", 14, "center"),
+            (time_col_title, 14, "center"),
             ("Session ID", 18 if app_type == "merged" else 12, "center"),
             ("客户端请求模型", 26, "left"),
             ("服务端实际路由模型", 38, "left"),
@@ -1473,6 +1521,8 @@ def get_antigravity_stats(days_back=7, show_recent_routes=10, target_date_arg=No
         print(header_str)
         print(sep_str)
 
+        # 严格按最后活跃时间排序 (从旧到新)
+        session_route_history.sort(key=lambda x: x["active_ts"])
         recent_sessions = session_route_history[-show_recent_routes:]
         for r in reversed(recent_sessions):
             tot_s = format_tokens(r["total_tokens"])
@@ -1499,7 +1549,13 @@ def get_antigravity_stats(days_back=7, show_recent_routes=10, target_date_arg=No
             print(row_line)
 
         print(sep_str)
+        time_meaning = (
+            "会话最后一次响应输出的最新活跃时间 (默认方案A，时间严格递减；可用 --created 切换查看创建起源)"
+            if time_mode == "active"
+            else "会话首次创建与首次发起请求的时间 (当前通过 --created 参数指定展示)"
+        )
         print("💡 指标物理定义说明:")
+        print(f"   • [{time_col_title}]: {time_meaning}。")
         print("   • [纯生成吐率 (Gen TPS)]   : 扣除工具执行与等待后，模型纯输出推理吐字速率 (Output Tokens / API Latency)。")
         print("   • [端到端输出吐率 (E2E Out)]: 包含多轮思考、工具执行（命令/文件读写）挂钟时间的实际交付吐率。")
         print("   • [端到端总吞吐 (E2E Total)]: 包含庞大上下文摄入(几十万Prompt)与缓存加速的系统综合吞吐能力。")
@@ -1538,8 +1594,21 @@ if __name__ == "__main__":
     parser.add_argument("--routes", type=int, default=10, help="展示最近 N 次会话的路由追踪明细 (默认 10)")
     parser.add_argument("--date", type=str, default=None, help="指定卡片生成的特定日期 (支持 2026-09-30, 20260930, 0930, 30)")
     parser.add_argument("--model", type=str, default=None, help="指定卡片展示的目标模型 (如 gemini-3.8-flash 或 gpt-6.1-sol)")
+    parser.add_argument(
+        "--created", "--show-created",
+        action="store_true",
+        help="切换会话追踪表时间列为【会话首次创建时间】(默认方案A为【最新活跃时间】，时间严格单调递减)"
+    )
+    parser.add_argument(
+        "--time-mode",
+        choices=["active", "created"],
+        default="active",
+        help="指定会话追踪表的时间展示维度: active (默认，显示最后活跃时间，单调递减) 或 created (显示首次创建时间)"
+    )
 
     args = parser.parse_args()
+
+    time_mode = "created" if (args.created or args.time_mode == "created") else "active"
 
     # 判定最终数据源 (显式指定参数 > 全量模式 > 默认 codex)
     if args.all or args.source == "all":
@@ -1561,7 +1630,8 @@ if __name__ == "__main__":
             show_recent_routes=args.routes,
             target_date_arg=args.date,
             target_model_arg=args.model,
-            app_type="ide"
+            app_type="ide",
+            time_mode=time_mode
         )
     elif chosen_source == "agy":
         get_antigravity_stats(
@@ -1569,7 +1639,8 @@ if __name__ == "__main__":
             show_recent_routes=args.routes,
             target_date_arg=args.date,
             target_model_arg=args.model,
-            app_type="standalone"
+            app_type="standalone",
+            time_mode=time_mode
         )
     elif chosen_source == "gemini":
         get_antigravity_stats(
@@ -1577,14 +1648,16 @@ if __name__ == "__main__":
             show_recent_routes=args.routes,
             target_date_arg=args.date,
             target_model_arg=args.model,
-            app_type="merged"
+            app_type="merged",
+            time_mode=time_mode
         )
     elif chosen_source == "codex":
         get_codex_stats(
             days_back=args.days,
             show_recent_routes=args.routes,
             target_date_arg=args.date,
-            target_model_arg=args.model
+            target_model_arg=args.model,
+            time_mode=time_mode
         )
     elif chosen_source == "all":
         print("\n" + "#" * 118)
@@ -1594,7 +1667,8 @@ if __name__ == "__main__":
             days_back=args.days,
             show_recent_routes=args.routes,
             target_date_arg=args.date,
-            target_model_arg=args.model
+            target_model_arg=args.model,
+            time_mode=time_mode
         )
 
         print("\n" + "#" * 118)
@@ -1605,7 +1679,8 @@ if __name__ == "__main__":
             show_recent_routes=args.routes,
             target_date_arg=args.date,
             target_model_arg=args.model,
-            app_type="standalone"
+            app_type="standalone",
+            time_mode=time_mode
         )
 
         print("\n" + "#" * 118)
@@ -1616,7 +1691,8 @@ if __name__ == "__main__":
             show_recent_routes=args.routes,
             target_date_arg=args.date,
             target_model_arg=args.model,
-            app_type="ide"
+            app_type="ide",
+            time_mode=time_mode
         )
 
         print("\n" + "=" * 118)
