@@ -271,12 +271,18 @@ class EvaluationStore:
             time.sleep(30)
             self.flush()
 
-    def flush(self, timeout_sec=0.0):
-        """Attempt the permitted checkpoint; report contention and write failures."""
+    def flush(self, timeout_sec=0.0, require_clean=False):
+        """Attempt the permitted checkpoint; optionally require all cached writes to commit."""
         if not self._flush_lock.acquire(timeout=max(0.0, float(timeout_sec))):
             return False
         try:
-            return self._flush_pending()
+            flushed = self._flush_pending()
+            if not flushed:
+                return False
+            if require_clean:
+                with self._lock:
+                    return not any(entry.get('dirty') for entry in self._cache.values())
+            return True
         finally:
             self._flush_lock.release()
 

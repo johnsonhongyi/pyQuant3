@@ -7062,7 +7062,8 @@ class ATSMainWindow(QMainWindow):
                     evaluation_store.put(path, job['records'], write_json_gzip)
                     job['submitted'] = True
                 return evaluation_store.flush(
-                    timeout_sec=max(0, self._close_deadline - time.monotonic()))
+                    timeout_sec=max(0, self._close_deadline - time.monotonic()),
+                    require_clean=True)
             finally:
                 if lock is not None:
                     lock.release()

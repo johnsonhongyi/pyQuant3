@@ -427,6 +427,13 @@ class SafeHDFStore(pd.HDFStore):
             # ========= 核心：只在这里判断是否损坏 =========
             retry_count = 5
             for attempt in range(retry_count):
+                # Lock reacquisition can consume the remaining budget after the
+                # preceding retry check; never start another HDF open past it.
+                if attempt and time.monotonic() >= self._open_deadline:
+                    timeout = TimeoutError(f"HDF open retries timed out: {self.fname}")
+                    if last_exception is not None:
+                        raise timeout from last_exception
+                    raise timeout
                 try:
                     # 🚀 [CORE] 必须在全局锁内执行 super().__init__，因为 PyTables/HDF5 在 Windows 下非线程安全
                     with _HDF_GLOBAL_LOCK:
