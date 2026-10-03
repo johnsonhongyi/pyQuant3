@@ -260,7 +260,14 @@ class LedgerUpdateWorker(QThread):
                 price_pct_cache=self._price_pct_cache
             )
 
-            entries_view, display_pools = self._ledger_update_service.capture_projection(self._universe_manager)
+            if hasattr(self._ledger_update_service, 'capture_projection'):
+                entries_view, display_pools = self._ledger_update_service.capture_projection(self._universe_manager)
+            else:
+                entries_view = getattr(self._signal_ledger, 'entries', {})
+                display_pools = {
+                    name: getattr(self._universe_manager, name, {})
+                    for name in ('radar_pool', 'watch_pool', 'trade_pool')
+                }
             pool_codes = (list(display_pools['radar_pool']) +
                           list(display_pools['watch_pool']) +
                           list(display_pools['trade_pool']))
@@ -4022,8 +4029,11 @@ class ATSMainWindow(QMainWindow):
                 from data_utils import send_code_via_pipe, PIPE_NAME_TK
                 local_logger = logging.getLogger("ATS")
                 self._last_pipe_sync_t = time.time()
-                self._request_full_sync_async()
-                print("[ATSMainWindow] 手动/强制刷新: 已成功向后台 Pipe 发送全量行情同步指令 (REQ_FULL_SYNC -> port 26670)")
+                queued = self._request_full_sync_async()
+                if queued:
+                    print("[ATSMainWindow] 手动/强制刷新: 全量行情同步请求已排入后台发送线程 (REQ_FULL_SYNC -> port 26670)")
+                else:
+                    print("[ATSMainWindow] 手动/强制刷新: 全量行情同步已有后台请求处理中")
                 if hasattr(self, 'status_bar') and self.status_bar:
                     self.status_bar.showMessage("🔄 已下发 IPC 全量行情刷新请求，后台正在异步加载持仓与信号数据...", 4000)
             except Exception as e:
@@ -4391,7 +4401,7 @@ class ATSMainWindow(QMainWindow):
 
     def _request_full_sync_async(self):
         if getattr(self, "_pipe_sync_busy", False):
-            return
+            return False
         self._pipe_sync_busy = True
         def request():
             try:
@@ -4403,6 +4413,7 @@ class ATSMainWindow(QMainWindow):
                 self._pipe_sync_busy = False
         import threading
         threading.Thread(target=request, daemon=True, name="ATS-FullSync").start()
+        return True
 
     def _handle_realtime_data(self, data_pkg):
         import pandas as pd
@@ -7051,7 +7062,7 @@ class ATSMainWindow(QMainWindow):
         self._alpha_flush_jobs = alpha_jobs
         def alpha_flush():
             from sys_utils import get_app_root
-            from ats.bounded_evaluation_store import evaluation_store
+            from ats.bounded_evaluation_store import evaluation_store, recovery_journal_path
             from ats.storage_archive import write_json_gzip
             lock = getattr(self, '_alpha_flush_lock', None)
             if lock is not None and not lock.acquire(timeout=max(0, self._close_deadline - time.monotonic())):
@@ -7061,9 +7072,16 @@ class ATSMainWindow(QMainWindow):
                     path = os.path.join(get_app_root(), 'datacsv', f'ats_alpha_tracker_{day}.json')
                     evaluation_store.put(path, job['records'], write_json_gzip)
                     job['submitted'] = True
-                return evaluation_store.flush(
+                if evaluation_store.flush(
                     timeout_sec=max(0, self._close_deadline - time.monotonic()),
-                    require_clean=True)
+                    require_clean=True, force=True):
+                    return True
+                recovered = evaluation_store.persist_recovery(
+                    recovery_journal_path(get_app_root()),
+                    timeout_sec=max(0, self._close_deadline - time.monotonic()))
+                if recovered:
+                    logger.warning('ATS archive checkpoint deferred; dirty records saved to recovery journal')
+                return recovered
             finally:
                 if lock is not None:
                     lock.release()

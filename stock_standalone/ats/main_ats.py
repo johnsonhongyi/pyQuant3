@@ -47,6 +47,14 @@ def main():
     except Exception as _e:
         print(f"[ATS Launcher] ensure_all_configs_released 异常 (非致命): {_e}")
 
+    try:
+        from ats.bounded_evaluation_store import evaluation_store, recovery_journal_path
+        restored = evaluation_store.restore_recovery(recovery_journal_path(project_root))
+        if restored:
+            print(f"[ATS] 已恢复 {restored} 项上次退出时待归档数据")
+    except Exception as exc:
+        print(f"[ATS] 待归档数据恢复失败: {exc}")
+
     # Continuously read the collector's SQLite snapshot outside the order path.
     try:
         from ats.strategy.ipo_gate_context_provider import get_default_ipo_gate_context_provider
@@ -87,6 +95,8 @@ def main():
     mark_checkpoint("02. QApplication Bootstrap")
     
     window = ATSMainWindow()
+    from ats.qt_interrupt import install_qt_keyboard_interrupt_handler
+    keyboard_interrupt_guard = install_qt_keyboard_interrupt_handler(app, window)
     mark_checkpoint("03. ATSMainWindow Instantiation")
     
     window.show()

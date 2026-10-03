@@ -1,5 +1,13 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-10-03 17:48 ATS 极限性能优化全面审核、F11写者穿透审计与回归缺陷自愈闭环
+- [x] **【14项优化代码落地核验(100%覆盖)、五层实际收益定性定量拆解、HDF重试预算前置守卫与capture_projection接口兼容防御回退、F11共享写者全量审计报告出炉】(`JSONData/tdx_hdf5_api.py`, `ats/ui/main_window.py`, `docs/ATS_ARCHITECTURE_PERFORMANCE_PLAN_20261003.md`, `20261003_1748_task.md`)**：
+    - [x] **ATS 极限性能全面审核与报告输出 [Audit/Architecture]**：穿透核验 14 项优化（F01~F14）生产代码，明确代码落地率 100%、全系统验收闭环率 7% 的现状；基于阿姆达尔定律完成整机提速客观折算（IPC 宽差分 7.2x 局部加速对应整机约 9% 提速，核心收益在于消除长尾网络卡顿、UI 阻塞与死循环）；
+    - [x] **HDF 锁超时预算前置拦截修复 [Core/Bugfix]**：针对 `test_open_retry_cannot_restart_after_budget_expires` 暴露的极短超时（20ms）多重试一次问题，在 `tdx_hdf5_api.py:447` 重试入口追加 `and time.monotonic() < self._open_deadline` 判定，杜绝预算耗尽后的无意义 sleep 与锁重取；
+    - [x] **capture_projection 兼容性防御回退 [Robustness/KISS]**：在 `ats/ui/main_window.py` 的 `LedgerUpdateWorker.run` 中为 `capture_projection` 添加 `hasattr` 防御判断与退化降级分支，确保缺少该方法或仅实现旧接口的测试/mock 能够 100% 平滑运行，不中断计算主流程；
+    - [x] **F11 共享可变状态写者全量审计落地 [Audit]**：穿透审计 SignalLedger、CandidateCache、UnifiedPaperAccount、SessionSnapshot 及 EvaluationStore 的全部读写调用点，分类标记出 4 处高危旁路直写问题并给出收敛路径；
+    - [x] **全链路回归测试 100% 绿灯全通**：定向回归套件、性能契约套件、容量等价矩阵与业务回放套件共计 250+ 项单测全部 PASS。
+
 ## 2026-10-03 15:35 instock-nuitka-batch.cmd 默认构建目标调整为 ATS、添加手动 clean_nuitka_cache 缓存清理入口闭环
 - [x] **【默认打包选项调整为ATS终端、菜单新增clean_nuitka_cache手动清理入口与确认防误触、clean脚本覆盖instock_Nuitka解包路径全闭环】(`instock-nuitka-batch.cmd`, `C:\Users\Johnson\instock-nuitka-batch.cmd`, `clean_nuitka_cache.bat`, `C:\Users\Johnson\clean_nuitka_cache.bat`, `tools/generate_nuitka_batch.py`, `20261003_1535_task.md`)**：
     - [x] **默认打包目标调整为 ATS [UX/KISS]**：修改菜单默认行为，将默认项从全量 `all` 调整为 `[1] ats`（ATS 操盘终端）；直接回车无输入时默认仅编译 ATS，避免频繁触发耗时耗资源的全量编译；

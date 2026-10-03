@@ -120,6 +120,14 @@ def main():
     except Exception as _e:
         print(f"[ATS Launcher] 核心配置自愈释放异常 (非致命): {_e}")
 
+    try:
+        from ats.bounded_evaluation_store import evaluation_store, recovery_journal_path
+        restored = evaluation_store.restore_recovery(recovery_journal_path(current_dir))
+        if restored:
+            print(f"[ATS] 已恢复 {restored} 项上次退出时待归档数据")
+    except Exception as exc:
+        print(f"[ATS] 待归档数据恢复失败: {exc}")
+
     # 🚀 3. 自动检查并后台静默拉起主 Tk 行情进程 (P0)
     try:
         import threading
@@ -143,6 +151,8 @@ def main():
 
     app = QApplication(sys.argv)
     window = ATSMainWindow()
+    from ats.qt_interrupt import install_qt_keyboard_interrupt_handler
+    keyboard_interrupt_guard = install_qt_keyboard_interrupt_handler(app, window)
     def flush_archives():
         import threading
         from ats.bounded_evaluation_store import evaluation_store
@@ -179,6 +189,7 @@ def main():
             raise RuntimeError('ATS packaged shutdown did not drain')
         if not health.get('pid') or health.get('error'):
             raise RuntimeError('Next-day worker failed its packaged startup check')
+        keyboard_interrupt_guard.restore()
         return 0
         
     window.show()
