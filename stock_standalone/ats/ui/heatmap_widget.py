@@ -11,20 +11,238 @@ from PyQt6.QtGui import QColor, QFont
 import os
 import json
 import zlib
+import threading
+from functools import lru_cache
 from typing import Dict, Any, List, Optional
 import pandas as pd
 from sys_utils import get_app_root
 from JohnsonUtil import commonTips as cct
 from ats.hot_sector_engine import is_valid_sector_name
 
+@lru_cache(maxsize=8)
+def _read_sector_json(path, mtime):
+    import gzip
+    with open(path, 'rb') as handle:
+        raw = handle.read()
+    if path.endswith('.gz'):
+        try:
+            raw = zlib.decompress(raw)
+        except Exception:
+            raw = gzip.decompress(raw)
+    else:
+        try:
+            return json.loads(raw.decode('utf-8'))
+        except Exception:
+            raw = zlib.decompress(raw)
+    return json.loads(raw.decode('utf-8'))
+
+def _read_sector_snapshot_sources():
+    """Read and decode cold sector sources outside the GUI thread."""
+    import glob
+    import re
+
+    base = get_app_root()
+    try:
+        non_trade_day = not cct.get_day_istrade_date()
+    except Exception:
+        non_trade_day = False
+
+    path = None
+    snapshot_dir = os.path.join(base, 'snapshots')
+    if non_trade_day:
+        try:
+            last_trade = str(cct.get_last_trade_date()).replace('-', '')
+            candidates = glob.glob(os.path.join(snapshot_dir, f'bidding_{last_trade}.json.gz'))
+            path = candidates[-1] if candidates else None
+        except Exception:
+            pass
+    else:
+        try:
+            ram_path = cct.get_ramdisk_path('bidding_session_data.json.gz')
+            if ram_path and os.path.exists(ram_path):
+                path = ram_path
+        except Exception:
+            pass
+        if path is None:
+            session_path = os.path.join(snapshot_dir, 'bidding_session_data.json.gz')
+            if os.path.exists(session_path):
+                path = session_path
+            else:
+                candidates = sorted(f for f in glob.glob(os.path.join(snapshot_dir, 'bidding_*.json.gz'))
+                                    if re.search(r'bidding_\d{8}\.json\.gz$', f))
+                path = candidates[-1] if candidates else None
+
+    def read_json(path):
+        return _read_sector_json(path, os.path.getmtime(path))
+
+    sector_data = {}
+    if path and os.path.exists(path):
+        try:
+            sector_data = read_json(path).get('sector_data', {}) or {}
+        except Exception as exc:
+            print(f'[SectorHeatmapWidget] Error loading bidding snapshot: {exc}')
+    usable_sectors = sum(1 for name in sector_data
+                         if is_valid_sector_name(name)
+                         and not any(ex in name for ex in ('实时报警', '系统报警', '异动汇总', '报警标注')))
+    if usable_sectors >= 3 or non_trade_day:
+        return non_trade_day, sector_data, [], {}, {}
+
+    try:
+        ram_path = cct.get_ramdisk_path('v_reversal_pool.json')
+    except Exception:
+        ram_path = None
+    logs_dir = os.path.join(base, 'logs')
+    if ram_path and os.path.exists(ram_path):
+        reversal_path = ram_path
+    elif os.path.exists(os.path.join(logs_dir, 'v_reversal_pool.json')):
+        reversal_path = os.path.join(logs_dir, 'v_reversal_pool.json')
+    else:
+        files = sorted(glob.glob(os.path.join(logs_dir, 'v_reversal_pool_*.json.gz')))
+        reversal_path = files[-1] if files else None
+
+    reversal_pool, flags, bidding_map = [], {}, {}
+    if reversal_path:
+        try:
+            reversal = read_json(reversal_path)
+            reversal_pool = reversal.get('v_reversal_pool', []) or []
+            flags = reversal.get('consolidation_flags', {}) or {}
+        except Exception as exc:
+            print(f'[SectorHeatmapWidget] Error loading reversal pool: {exc}')
+    if reversal_pool:
+        candidates = sorted((f for f in glob.glob(os.path.join(snapshot_dir, 'bidding_*.json.gz'))
+                             if re.search(r'bidding_\d{8}\.json\.gz$', f)), reverse=True)
+        for snapshot_path in candidates[:3]:
+            try:
+                for sector_name, info in read_json(snapshot_path).get('sector_data', {}).items():
+                    if (not is_valid_sector_name(sector_name)
+                            or any(ex in sector_name for ex in ('实时报警', '系统报警', '异动汇总', '报警标注'))):
+                        continue
+                    codes = [info.get('leader', '')] + [row.get('code', '') for row in info.get('followers', [])]
+                    for code in codes:
+                        code = str(code).strip()
+                        if code:
+                            bidding_map[code] = sector_name
+                            cleaned = ''.join(c for c in code if c.isdigit()).zfill(6) if any(c.isdigit() for c in code) else code
+                            bidding_map[cleaned] = sector_name
+            except Exception:
+                pass
+    return non_trade_day, sector_data, reversal_pool, flags, bidding_map
+
+
+def _aggregate_reversal_sectors(current_df, v_reversal_pool, consolidation_flags, bidding_map):
+    # Map codes to sector
+    stock_to_sector = {}
+    # Build quote aliases once, including prefixed indices and code columns.
+    quotes = {}
+    if current_df is not None and not current_df.empty:
+        for idx, row in zip(current_df.index, current_df.to_dict('records')):
+            keys = [str(idx).strip()]
+            if row.get('code') is not None:
+                keys.append(str(row['code']).strip())
+            for key in keys:
+                quotes.setdefault(key, row)
+                digits = ''.join(c for c in key if c.isdigit())
+                if digits and not (isinstance(current_df.index, pd.RangeIndex) and key == str(idx)):
+                    quotes.setdefault(digits.zfill(6), row)
+
+    # Vectorized category extraction from current_df (takes < 1ms instead of ~1500ms)
+    if current_df is not None and not current_df.empty and 'category' in current_df.columns:
+        try:
+            cats = current_df['category'].dropna()
+            temp_map = {}
+            for k, v in cats.to_dict().items():
+                v_str = str(v).split(';')[0].strip()
+                if is_valid_sector_name(v_str):
+                    k_str = str(k).strip()
+                    temp_map[k_str] = v_str
+                    k_clean = "".join(c for c in k_str if c.isdigit()).zfill(6) if any(c.isdigit() for c in k_str) else k_str
+                    temp_map[k_clean] = v_str
+            stock_to_sector.update(temp_map)
+        except Exception as e:
+            print(f"[SectorHeatmapWidget] Error extracting categories: {e}")
+
+    # Combine real-time categories and snapshot fallbacks
+    for k, v in bidding_map.items():
+        if is_valid_sector_name(v) and k not in stock_to_sector:
+            stock_to_sector[k] = v
+
+    # Perform aggregation
+    phase_weights = {
+        "二次拉升": 100.0, "WAVE_UP_2": 100.0,
+        "首波拉升": 80.0, "WAVE_UP": 80.0,
+        "缩量回踩": 60.0, "PULLBACK": 60.0,
+        "横盘潜伏": 40.0, "CONSOLIDATING": 40.0,
+        "初始状态": 20.0, "INIT": 20.0
+    }
+
+    sector_scores = {}
+    sector_counts = {}
+    sector_changes = {}
+    sector_leaders = {}
+    sector_to_codes = {}
+
+    for code in v_reversal_pool:
+        code_str = str(code).strip()
+        code_clean = "".join(c for c in code_str if c.isdigit()).zfill(6) if any(c.isdigit() for c in code_str) else code_str
+        sec = stock_to_sector.get(code_str) or stock_to_sector.get(code_clean)
+        if not sec or not is_valid_sector_name(sec):
+            continue
+
+        if sec not in sector_to_codes:
+            sector_to_codes[sec] = []
+        sector_to_codes[sec].append(code_str)
+
+        flag_info = consolidation_flags.get(code_str, {}) or consolidation_flags.get(code_clean, {})
+        phase = flag_info.get('phase', 'INIT')
+        weight = phase_weights.get(phase, 20.0)
+
+        sector_scores[sec] = sector_scores.get(sec, 0.0) + weight
+        sector_counts[sec] = sector_counts.get(sec, 0) + 1
+
+        pct_val = 0.0
+        stock_name = ""
+        if current_df is not None:
+            row = quotes.get(code_str) or quotes.get(code_clean)
+            if row is not None:
+                stock_name = str(row.get('name', ''))
+                try:
+                    pct_val = float(row.get('percent', 0.0))
+                except:
+                    pass
+
+        if sec not in sector_changes:
+            sector_changes[sec] = []
+        sector_changes[sec].append(pct_val)
+
+        if sec not in sector_leaders or pct_val > sector_leaders[sec][1]:
+            sector_leaders[sec] = (code_str, pct_val, stock_name)
+
+    sectors_list = []
+    for sec, count in sector_counts.items():
+        if not is_valid_sector_name(sec):
+            continue
+        avg_score = sector_scores[sec] / count
+        # Incorporate active count momentum into sector intensity scoring to prioritize highly resonant hot sectors
+        intensity_score = avg_score * (1.0 + 0.15 * count)
+        avg_pct = sum(sector_changes[sec]) / len(sector_changes[sec])
+        change_pct_str = f"{avg_pct:+.2f}%"
+
+        leader_code, _, leader_name = sector_leaders.get(sec, ('', 0.0, ''))
+
+        sectors_list.append((sec, round(intensity_score, 1), change_pct_str, count, leader_code, leader_name))
+
+    return sectors_list, sector_to_codes
+
 class SectorHeatmapWidget(QWidget):
     sector_selected = pyqtSignal(str) # sector name
     sector_selected_with_codes = pyqtSignal(str, list) # sector name, member codes list
     hot_leaders_clicked = pyqtSignal() # 龙头突击榜点击
     sort_changed = pyqtSignal(int) # 排序维度切换 (0: 强度得分, 1: 涨跌幅, 2: 活跃成员数)
+    _snapshot_ready = pyqtSignal(object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._snapshot_ready.connect(self._on_snapshot_ready)
         self._current_cols = 4
         self._init_ui()
         self.render_grid()
@@ -235,334 +453,100 @@ class SectorHeatmapWidget(QWidget):
             self.sectors = sectors_list
             self._cached_session_sectors = list(sectors_list)
             self.sort_sectors(self.sort_combo.currentIndex())
-        elif not getattr(self, 'sectors', None) or len(self.sectors) < 3:
-            # 当前界面尚无有效真实板块，主动触发从持久化快照中加载 300+ 完整真实板块
+        elif (not getattr(self, '_snapshot_applying', False)
+              and (not getattr(self, 'sectors', None) or len(self.sectors) < 3)):
             self.load_live_sectors(force=True)
 
     def load_live_sectors(self, force=False, current_df=None):
-        # 🛡️ [权威实时保护与可见性短路]
         if not self.isVisible() and not force:
             return
-        if getattr(self, '_has_live_ipc_data', False) and not force and getattr(self, 'sectors', None) and len(self.sectors) >= 3:
+        if (getattr(self, '_has_live_ipc_data', False)
+                and getattr(self, 'sectors', None) and len(self.sectors) >= 3):
             return
 
         import time
         now = time.time()
-        if not force and hasattr(self, '_last_load_time') and now - self._last_load_time < 5.0:
+        if not force and now - getattr(self, '_last_load_time', 0.0) < 5.0:
+            return
+        if getattr(self, '_snapshot_busy', False):
             return
         self._last_load_time = now
-        
-        import glob
-        import gzip
-        import re
-        import zlib
-        
-        base = get_app_root()
-
-        # ── 0. 智能解析主窗口正在轮询的最新策略 DataFrame (current_df) ──
-        if current_df is None or (isinstance(current_df, pd.DataFrame) and current_df.empty):
-            main_win = self.window()
-            p = self.parent()
-            while p:
-                if hasattr(p, 'current_df') and getattr(p, 'current_df') is not None and not getattr(p, 'current_df').empty:
-                    current_df = p.current_df
+        if not isinstance(current_df, pd.DataFrame) or current_df.empty:
+            parent = self.parent()
+            while parent is not None:
+                candidate = getattr(parent, 'current_df', None)
+                if isinstance(candidate, pd.DataFrame) and not candidate.empty:
+                    current_df = candidate
                     break
-                p = p.parent()
-            if (current_df is None or (isinstance(current_df, pd.DataFrame) and current_df.empty)) and hasattr(main_win, 'current_df'):
-                current_df = getattr(main_win, 'current_df', None)
+                parent = parent.parent()
+            if not isinstance(current_df, pd.DataFrame) or current_df.empty:
+                current_df = getattr(self.window(), 'current_df', None)
+        self._snapshot_busy = True
 
-        # ── 1. 【权威数据源 (SSOT)】优先从 RAMDisk 或快照读取 bidding_session_data.json.gz ──
-        path = None
-        try:
-            non_trade_day = not cct.get_day_istrade_date()
-        except Exception:
-            non_trade_day = False
-        if non_trade_day:
-            # On weekends/holidays, the mutable session file may contain stale
-            # auction state. Pin the heatmap to the newest dated trading snapshot.
+        def worker():
             try:
-                last_trade = str(cct.get_last_trade_date()).replace('-', '')
-                snapshot_dir = os.path.join(base, "snapshots")
-                snap_pattern = os.path.join(snapshot_dir, "bidding_*.json.gz")
-                dated_files = []
-                for candidate in glob.glob(snap_pattern):
-                    match = re.search(r'bidding_(\d{8})\.json\.gz$', candidate)
-                    if match and match.group(1) == last_trade:
-                        dated_files.append((match.group(1), candidate))
-                if dated_files:
-                    path = max(dated_files, key=lambda item: item[0])[1]
+                result = _read_sector_snapshot_sources()
+                aggregate = None
+                if result is not None:
+                    nontrade, raw, pool, flags, bidding = result
+                    if not nontrade and pool:
+                        aggregate = _aggregate_reversal_sectors(current_df, pool, flags, bidding)
             except Exception as exc:
-                print(f"[SectorHeatmapWidget] Resolve last-trade-date sector snapshot failed: {exc}")
+                print(f'[SectorHeatmapWidget] Snapshot read failed: {exc}')
+                result = None
+                aggregate = None
+            try:
+                self._snapshot_ready.emit((result, aggregate))
+            except RuntimeError:
+                pass
 
-        # On trading days retain the live session preference. On non-trading days,
-        # only use a dated last-session snapshot when one was found above.
-        if not non_trade_day:
+        try:
+            threading.Thread(target=worker, daemon=True, name='ATS-SectorSnapshot').start()
+        except Exception as exc:
+            self._snapshot_busy = False
+            self._last_load_time = 0.0
+            print(f'[SectorHeatmapWidget] Cannot start snapshot worker: {exc}')
+
+    def _on_snapshot_ready(self, payload):
+        self._snapshot_busy = False
+        result, aggregate = payload
+        if result is None or (getattr(self, '_has_live_ipc_data', False)
+                              and getattr(self, 'sectors', None) and len(self.sectors) >= 3):
+            return
+        non_trade_day, raw_sector_data, reversal_pool, flags, bidding_map = result
+        if bidding_map or not hasattr(self, '_bidding_stock_to_sector'):
+            self._bidding_stock_to_sector = bidding_map
+        if raw_sector_data:
+            self._snapshot_applying = True
+            had_live_ipc_data = getattr(self, '_has_live_ipc_data', False)
+            previous_session = getattr(self, '_cached_session_sectors', None)
             try:
-                ram_path = cct.get_ramdisk_path("bidding_session_data.json.gz")
-                if ram_path and os.path.exists(ram_path):
-                    path = ram_path
-            except Exception:
-                pass
-            
-        if not path and not non_trade_day:
-            try:
-                fallback_path = os.path.abspath(os.path.join(base, "snapshots", "bidding_session_data.json.gz"))
-                if os.path.exists(fallback_path):
-                    path = fallback_path
-                else:
-                    # 尝试寻找最新日期的 bidding_YYYYMMDD.json.gz
-                    snap_pattern = os.path.join(base, "snapshots", "bidding_*.json.gz")
-                    snap_files = [f for f in glob.glob(snap_pattern) if re.search(r'bidding_\d{8}\.json\.gz$', f)]
-                    if snap_files:
-                        path = sorted(snap_files)[-1]
-            except Exception:
-                pass
-                
-        if path and os.path.exists(path):
-            self._non_trade_snapshot_missing = False
-            session_mtime = os.path.getmtime(path)
-            if (getattr(self, '_last_session_path', None) != path or 
-                getattr(self, '_last_session_mtime', None) != session_mtime or 
-                not hasattr(self, '_cached_raw_sector_data') or force):
-                try:
-                    with open(path, 'rb') as f:
-                        raw_data = f.read()
-                    if raw_data:
-                        try:
-                            json_str = zlib.decompress(raw_data).decode('utf-8')
-                        except Exception:
-                            json_str = gzip.decompress(raw_data).decode('utf-8')
-                        data = json.loads(json_str)
-                        self._cached_raw_sector_data = data.get('sector_data', {})
-                        self._last_session_path = path
-                        self._last_session_mtime = session_mtime
-                except Exception as e:
-                    print(f"[SectorHeatmapWidget] Error loading bidding_session_data: {e}")
-            
-            raw_sector_data = getattr(self, '_cached_raw_sector_data', {})
-            if raw_sector_data:
-                # 🛡️ [SSOT 权威数据消费与极限性能] 100% 直接消费 TK 计算好的权威板块强度数据，绝不自创公式重新计算，杜绝卡顿与失真
                 self.update_from_tk_sector_data(raw_sector_data)
+            finally:
+                self._has_live_ipc_data = had_live_ipc_data
+                self._snapshot_applying = False
+            if getattr(self, '_cached_session_sectors', None) is not previous_session:
                 return
-
         if non_trade_day:
-            # Do not synthesize historical sector strength from today's ATS
-            # DataFrame/reversal pool when the exact session archive is missing.
             self._non_trade_snapshot_missing = True
             self._cached_raw_sector_data = {}
             self.sectors = []
             self.sector_to_codes = {}
             self.render_grid(force=True)
             return
-
-        # ── 2. 【备用兜底通道】仅在无 bidding_session_data 时尝试从 v_reversal_pool 读取 ──
-        ram_path = None
-        try:
-            ram_path = cct.get_ramdisk_path("v_reversal_pool.json")
-        except Exception:
-            pass
-            
-        latest_reversal_path = None
-        if ram_path and os.path.exists(ram_path):
-            latest_reversal_path = ram_path
-        else:
-            logs_dir = os.path.join(base, "logs")
-            normal_path = os.path.join(logs_dir, "v_reversal_pool.json")
-            if os.path.exists(normal_path):
-                latest_reversal_path = normal_path
-            else:
-                pattern = os.path.join(logs_dir, "v_reversal_pool_*.json.gz")
-                files = sorted(glob.glob(pattern))
-                if files:
-                    latest_reversal_path = files[-1]
-                    
-        v_reversal_data = None
-        latest_reversal_mtime = os.path.getmtime(latest_reversal_path) if latest_reversal_path and os.path.exists(latest_reversal_path) else 0
-        
-        if latest_reversal_path and os.path.exists(latest_reversal_path):
-            if (getattr(self, '_last_reversal_path', None) != latest_reversal_path or 
-                getattr(self, '_last_reversal_mtime', None) != latest_reversal_mtime or 
-                not hasattr(self, '_cached_v_reversal_pool')):
-                try:
-                    if latest_reversal_path.endswith('.gz'):
-                        with gzip.open(latest_reversal_path, 'rb') as f:
-                            raw_data = f.read()
-                    else:
-                        with open(latest_reversal_path, 'rb') as f:
-                            raw_data = f.read()
-                    try:
-                        v_reversal_data = json.loads(raw_data.decode('utf-8'))
-                    except Exception:
-                        json_str = zlib.decompress(raw_data).decode('utf-8')
-                        v_reversal_data = json.loads(json_str)
-                        
-                    if v_reversal_data:
-                        self._cached_v_reversal_pool = v_reversal_data.get('v_reversal_pool', [])
-                        self._cached_consolidation_flags = v_reversal_data.get('consolidation_flags', {})
-                        self._last_reversal_path = latest_reversal_path
-                        self._last_reversal_mtime = latest_reversal_mtime
-                except Exception as e:
-                    print(f"[SectorHeatmapWidget] Error loading reversal pool {latest_reversal_path}: {e}")
-        
-        has_reversal = hasattr(self, '_cached_v_reversal_pool') and self._cached_v_reversal_pool
-        
-        if has_reversal:
-            v_reversal_pool = self._cached_v_reversal_pool
-            consolidation_flags = self._cached_consolidation_flags
-            
-            # Map codes to sector
-            stock_to_sector = {}
-            main_win = self.window()
-            p = self.parent()
-            while p:
-                if hasattr(p, 'current_df'):
-                    main_win = p
-                    break
-                p = p.parent()
-                
-            current_df = None
-            if main_win and hasattr(main_win, 'current_df'):
-                current_df = main_win.current_df
-                
-            # Vectorized category extraction from current_df (takes < 1ms instead of ~1500ms)
-            if current_df is not None and not current_df.empty and 'category' in current_df.columns:
-                try:
-                    cats = current_df['category'].dropna()
-                    temp_map = {}
-                    for k, v in cats.to_dict().items():
-                        v_str = str(v).split(';')[0].strip()
-                        if is_valid_sector_name(v_str):
-                            k_str = str(k).strip()
-                            temp_map[k_str] = v_str
-                            k_clean = "".join(c for c in k_str if c.isdigit()).zfill(6) if any(c.isdigit() for c in k_str) else k_str
-                            temp_map[k_clean] = v_str
-                    stock_to_sector.update(temp_map)
-                except Exception as e:
-                    print(f"[SectorHeatmapWidget] Error extracting categories: {e}")
-                            
-            # Lazy loaded fallback mapping from recent daily bidding snapshots (once)
-            if not hasattr(self, '_bidding_stock_to_sector'):
-                self._bidding_stock_to_sector = {}
-                try:
-                    snapshot_files = glob.glob(os.path.join(base, "snapshots", "bidding_*.json.gz"))
-                    valid_snapshots = [f for f in snapshot_files if re.search(r'bidding_\d{8}\.json\.gz$', f)]
-                    valid_snapshots = sorted(valid_snapshots, reverse=True)
-                    for spath in valid_snapshots[:3]:
-                        try:
-                            with open(spath, 'rb') as f:
-                                raw_data = f.read()
-                            try:
-                                json_str = zlib.decompress(raw_data).decode('utf-8')
-                            except Exception:
-                                json_str = gzip.decompress(raw_data).decode('utf-8')
-                            data = json.loads(json_str)
-                            sector_data = data.get('sector_data', {})
-                            for sec_name, info in sector_data.items():
-                                if not is_valid_sector_name(sec_name):
-                                    continue
-                                if any(ex in sec_name for ex in ("实时报警", "系统报警", "异动汇总", "报警标注")):
-                                    continue
-                                lcode = str(info.get('leader', '')).strip()
-                                if lcode:
-                                    self._bidding_stock_to_sector[lcode] = sec_name
-                                    lclean = "".join(c for c in lcode if c.isdigit()).zfill(6) if any(c.isdigit() for c in lcode) else lcode
-                                    self._bidding_stock_to_sector[lclean] = sec_name
-                                for fol in info.get('followers', []):
-                                    fcode = str(fol.get('code', '')).strip()
-                                    if fcode:
-                                        self._bidding_stock_to_sector[fcode] = sec_name
-                                        fclean = "".join(c for c in fcode if c.isdigit()).zfill(6) if any(c.isdigit() for c in fcode) else fcode
-                                        self._bidding_stock_to_sector[fclean] = sec_name
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
-            
-            # Combine real-time categories and snapshot fallbacks
-            for k, v in self._bidding_stock_to_sector.items():
-                if is_valid_sector_name(v) and k not in stock_to_sector:
-                    stock_to_sector[k] = v
-                    
-            # Perform aggregation
-            phase_weights = {
-                "二次拉升": 100.0, "WAVE_UP_2": 100.0,
-                "首波拉升": 80.0, "WAVE_UP": 80.0,
-                "缩量回踩": 60.0, "PULLBACK": 60.0,
-                "横盘潜伏": 40.0, "CONSOLIDATING": 40.0,
-                "初始状态": 20.0, "INIT": 20.0
-            }
-            
-            sector_scores = {}
-            sector_counts = {}
-            sector_changes = {}
-            sector_leaders = {}
-            self.sector_to_codes = {}
-            
-            for code in v_reversal_pool:
-                code_str = str(code).strip()
-                code_clean = "".join(c for c in code_str if c.isdigit()).zfill(6) if any(c.isdigit() for c in code_str) else code_str
-                sec = stock_to_sector.get(code_str) or stock_to_sector.get(code_clean)
-                if not sec or not is_valid_sector_name(sec):
-                    continue
-                    
-                if sec not in self.sector_to_codes:
-                    self.sector_to_codes[sec] = []
-                self.sector_to_codes[sec].append(code_str)
-                
-                flag_info = consolidation_flags.get(code_str, {}) or consolidation_flags.get(code_clean, {})
-                phase = flag_info.get('phase', 'INIT')
-                weight = phase_weights.get(phase, 20.0)
-                
-                sector_scores[sec] = sector_scores.get(sec, 0.0) + weight
-                sector_counts[sec] = sector_counts.get(sec, 0) + 1
-                
-                pct_val = 0.0
-                stock_name = ""
-                if current_df is not None:
-                    row = None
-                    if hasattr(main_win, 'get_df_row_safe'):
-                        row = main_win.get_df_row_safe(current_df, code_str)
-                    elif code_str in current_df.index:
-                        row = current_df.loc[code_str]
-                    elif code_clean in current_df.index:
-                        row = current_df.loc[code_clean]
-                    if row is not None:
-                        stock_name = str(row.get('name', ''))
-                        try:
-                            pct_val = float(row.get('percent', 0.0))
-                        except:
-                            pass
-                        
-                if sec not in sector_changes:
-                    sector_changes[sec] = []
-                sector_changes[sec].append(pct_val)
-                
-                if sec not in sector_leaders or pct_val > sector_leaders[sec][1]:
-                    sector_leaders[sec] = (code_str, pct_val, stock_name)
-                    
-            sectors_list = []
-            for sec, count in sector_counts.items():
-                if not is_valid_sector_name(sec):
-                    continue
-                avg_score = sector_scores[sec] / count
-                # Incorporate active count momentum into sector intensity scoring to prioritize highly resonant hot sectors
-                intensity_score = avg_score * (1.0 + 0.15 * count)
-                avg_pct = sum(sector_changes[sec]) / len(sector_changes[sec])
-                change_pct_str = f"{avg_pct:+.2f}%"
-                
-                leader_code, _, leader_name = sector_leaders.get(sec, ('', 0.0, ''))
-                
-                sectors_list.append((sec, round(intensity_score, 1), change_pct_str, count, leader_code, leader_name))
-                
-            if sectors_list:
-                self.sectors = sectors_list
+        self._non_trade_snapshot_missing = False
+        if reversal_pool:
+            self._cached_v_reversal_pool = reversal_pool
+            self._cached_consolidation_flags = flags
+            if aggregate and aggregate[0]:
+                self.sectors, self.sector_to_codes = aggregate
                 self.sort_sectors(self.sort_combo.currentIndex())
-                return
-
-        # ── 3. 终极兜底 ──
-        if not hasattr(self, 'sector_to_codes'):
+            elif not getattr(self, 'sectors', None):
+                self.sector_to_codes = {}
+                self.load_mock_sectors()
+            return
+        if not getattr(self, 'sectors', None):
             self.sector_to_codes = {}
-        if not hasattr(self, 'sectors') or not self.sectors:
             self.load_mock_sectors()
 
     def get_color_for_score(self, pct_str):

@@ -314,7 +314,8 @@ class SwingStateTable(QWidget):
         from global_favorites import GlobalFavoriteManager
         fav_stocks = set(GlobalFavoriteManager().get_favorite_stocks())
         parent_mw = self._get_parent_mw() if self.filter_enabled else None
-        filter_codes = getattr(parent_mw, 'filtered_codes_set', None) if parent_mw else None
+        filter_codes = (getattr(parent_mw, 'filtered_codes_set', None)
+                        if parent_mw and getattr(parent_mw, 'query_expr', '') else None)
         render_input = (tuple(tuple(row) for row in data_list), frozenset(fav_stocks),
                         tuple(current_extra), self.filter_enabled, self.chk_favorite_show.isChecked(),
                         frozenset(filter_codes or ()) if self.filter_enabled else None)
@@ -570,7 +571,8 @@ class SwingStateTable(QWidget):
 
         parent_mw = self._get_parent_mw()
         fset = None
-        if getattr(self, 'filter_enabled', False) and parent_mw is not None:
+        if (getattr(self, 'filter_enabled', False) and parent_mw is not None
+                and getattr(parent_mw, 'query_expr', '')):
             fset = getattr(parent_mw, 'filtered_codes_set', None)
             if fset is None:
                 fset = set()

@@ -1019,3 +1019,519 @@ def test_hot_sector_leaderboard_cold_start_off_hours(qapp, monkeypatch):
     assert len(n_map) > 0
 
     dlg.close()
+
+"""Regression checks for ATS click, tab switch and cold heatmap paths."""
+import os
+import json
+import threading
+import time
+import zlib
+from types import SimpleNamespace
+from unittest.mock import MagicMock
+
+os.environ['QT_QPA_PLATFORM'] = 'offscreen'
+
+import pandas as pd
+from PyQt6.QtCore import QObject, pyqtSignal
+from PyQt6.QtWidgets import QApplication, QComboBox, QLabel, QLineEdit, QTableWidget, QTableWidgetItem
+
+
+def _pump_until(app, predicate, timeout=2.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        app.processEvents()
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return False
+
+
+def test_filter_and_tab_switch_only_render_current_page():
+    from ats.ui.main_window import ATSMainWindow
+
+    app = QApplication.instance() or QApplication(['ats-test'])
+
+    class Window(QObject):
+        _on_filter_eval_finished = ATSMainWindow._on_filter_eval_finished
+        _schedule_active_filter_refresh = ATSMainWindow._schedule_active_filter_refresh
+        _refresh_active_filter_panel = ATSMainWindow._refresh_active_filter_panel
+        _on_top_tab_changed = ATSMainWindow._on_top_tab_changed
+        _render_top_tab = ATSMainWindow._render_top_tab
+
+    win = Window()
+    selected = [1]
+    win.top_tabs = SimpleNamespace(currentIndex=lambda: selected[0])
+    win.favorite_panel = SimpleNamespace(filter_enabled=True, _apply_row_visibility=MagicMock(),
+                                         update_favorite_rows=MagicMock())
+    win.swing_table = SimpleNamespace(filter_enabled=True, _apply_favorite_filter=MagicMock(),
+                                      update_data_list=MagicMock())
+    win.capital_dragon_panel = SimpleNamespace(filter_enabled=True, _apply_filter=MagicMock())
+    win.new_stock_panel = SimpleNamespace(filter_enabled=True, _apply_filter=MagicMock())
+    win._filter_eval_revision = 1
+    win.filtered_codes_set = set()
+    win.current_df = None
+    win._is_restoring_sizes = True
+
+    win._on_filter_eval_finished(1, {'600001'})
+    assert not win.favorite_panel._apply_row_visibility.called
+    assert _pump_until(app, lambda: win.favorite_panel._apply_row_visibility.called)
+    assert not win.swing_table._apply_favorite_filter.called
+    assert not win.capital_dragon_panel._apply_filter.called
+    assert not win.new_stock_panel._apply_filter.called
+
+    selected[0] = 2
+    win._on_top_tab_changed(2)
+    assert not win.swing_table._apply_favorite_filter.called
+    assert _pump_until(app, lambda: win.swing_table._apply_favorite_filter.called)
+    assert win.filtered_codes_set == {'600001'}
+    win._on_filter_eval_finished(0, {'000000'})
+    assert win.filtered_codes_set == {'600001'}
+
+
+def test_history_hits_click_does_not_run_queries_on_gui_thread(monkeypatch):
+    from ats.ui.main_window import ATSMainWindow
+    import stock_logic_utils
+
+    app = QApplication.instance() or QApplication(['ats-test'])
+    entered = threading.Event()
+    release = threading.Event()
+    worker_threads = []
+
+    def slow_queries(frame, queries):
+        worker_threads.append(threading.current_thread())
+        entered.set()
+        assert release.wait(2.0)
+        return [{'hit': 2}]
+
+    monkeypatch.setattr(stock_logic_utils, 'test_code_against_queries', slow_queries)
+    monkeypatch.setattr(stock_logic_utils, 'toast_messageQT', lambda *args: None)
+
+    class Window(QObject):
+        _history_hits_ready = pyqtSignal(int, object)
+        calculate_history_hits_ui = ATSMainWindow.calculate_history_hits_ui
+        _on_history_hits_ready = ATSMainWindow._on_history_hits_ready
+        get_test_df_for_hits = ATSMainWindow.get_test_df_for_hits
+
+        def __init__(self):
+            super().__init__()
+            self._history_hits_ready.connect(self._on_history_hits_ready)
+            self.history_selector = QComboBox()
+            self.history_selector.addItem('group')
+            self.query_combo = QComboBox()
+            self.query_combo.setEditable(True)
+            self.search_histories = {'group': [{'query': 'close > 10'}]}
+            self.current_df = pd.DataFrame({'close': [10.0, 20.0]}, index=['600001', '600002'])
+
+        def _get_real_query(self):
+            return 'close > 10'
+
+        def _format_history_item_local(self, item):
+            return f"{item['query']} ({item.get('hit', 0)})"
+
+        def _save_search_history_data(self):
+            pass
+
+    win = Window()
+    win.calculate_history_hits_ui()
+    assert entered.wait(1.0)
+    assert win.search_histories['group'][0].get('hit') is None
+    assert worker_threads[0] is not threading.main_thread()
+    release.set()
+    assert _pump_until(app, lambda: win.search_histories['group'][0].get('hit') == 2)
+
+
+def test_heatmap_snapshot_read_stays_off_gui_thread(monkeypatch):
+    from ats.ui import heatmap_widget
+
+    app = QApplication.instance() or QApplication(['ats-test'])
+    entered = threading.Event()
+    release = threading.Event()
+    worker_threads = []
+    sectors = {name: {'score': 60, 'avg_pct': 1.0, 'leader': str(600001 + i)}
+               for i, name in enumerate(('半导体', '证券', '光伏设备'))}
+
+    def slow_read():
+        worker_threads.append(threading.current_thread())
+        entered.set()
+        assert release.wait(2.0)
+        return False, sectors, [], {}, {}
+
+    monkeypatch.setattr(heatmap_widget, '_read_sector_snapshot_sources', slow_read)
+    widget = heatmap_widget.SectorHeatmapWidget()
+    widget.load_live_sectors(force=True)
+    assert entered.wait(1.0)
+    assert worker_threads[0] is not threading.main_thread()
+    release.set()
+    assert _pump_until(app, lambda: len(getattr(widget, 'sectors', [])) == 3)
+    widget.close()
+
+
+def test_detail_filter_pending_does_not_evaluate_synchronously():
+    from ats.ui.main_window import StockDetailDialog
+
+    QApplication.instance() or QApplication([])
+    parent = SimpleNamespace(query_expr='close > 10', _filter_result_query=None,
+                             filtered_codes_set=set())
+    detail = SimpleNamespace(_get_parent_mw=lambda: parent, code='600001',
+                             lbl_filter_expr=QLabel(), lbl_filter_result=QLabel())
+    StockDetailDialog.update_filter_status(detail, parent.query_expr)
+    assert '等待筛选结果' in detail.lbl_filter_result.text()
+
+
+def test_same_codes_new_query_invalidates_hidden_filter_pages():
+    from ats.ui.main_window import ATSMainWindow
+
+    win = SimpleNamespace(_filter_eval_revision=2, filtered_codes_set={'600001'},
+                          query_expr='close > 20', _filter_result_query='close > 10',
+                          top_tabs=SimpleNamespace(currentIndex=lambda: 1),
+                          _schedule_active_filter_refresh=MagicMock())
+    ATSMainWindow._on_filter_eval_finished(win, 2, {'600001'})
+    win._schedule_active_filter_refresh.assert_called_once()
+
+
+def test_empty_filter_click_schedules_refresh_without_timer_scope_error(monkeypatch):
+    from ats.ui.main_window import ATSMainWindow
+    import ats.ui.styles as styles
+
+    monkeypatch.setattr(styles, 'save_config_node_async', MagicMock())
+    win = SimpleNamespace(_get_real_query=lambda: '', current_df=None,
+                          _recompute_filtered_codes_set=MagicMock(),
+                          _save_search_history_data=MagicMock(),
+                          _schedule_active_filter_refresh=MagicMock(),
+                          query_combo=SimpleNamespace(lineEdit=lambda: None))
+    ATSMainWindow.apply_filter(win)
+    win._schedule_active_filter_refresh.assert_called_once()
+
+
+def test_heatmap_worker_start_failure_allows_retry(monkeypatch):
+    from ats.ui import heatmap_widget
+
+    widget = SimpleNamespace(isVisible=lambda: True)
+    monkeypatch.setattr(heatmap_widget.threading, 'Thread',
+                        MagicMock(side_effect=RuntimeError('cannot start thread')))
+    heatmap_widget.SectorHeatmapWidget.load_live_sectors(
+        widget, force=True, current_df=pd.DataFrame({'close': [10]}))
+    assert widget._snapshot_busy is False
+    assert widget._last_load_time == 0.0
+
+
+def test_empty_filter_result_uses_completed_set_without_sync_query(monkeypatch):
+    from ats.ui.hot_sector_leaderboard import HotSectorLeaderboardDialog
+    import stock_logic_utils
+
+    query = 'close > 1000'
+    parent = SimpleNamespace(query_expr=query, _filter_result_query=query,
+                             filtered_codes_set=set())
+
+    class Dialog:
+        _filter_results_by_query = HotSectorLeaderboardDialog._filter_results_by_query
+
+        def _get_parent_mw(self):
+            return parent
+
+    monkeypatch.setattr(stock_logic_utils.query_engine, 'execute',
+                        lambda *args: (_ for _ in ()).throw(AssertionError('synchronous query')))
+    assert Dialog()._filter_results_by_query([{'code': '600001'}], query) == []
+
+
+def test_clear_filter_restores_rows_when_panel_filter_is_enabled():
+    from ats.ui.favorite_panel import FavoritePanel
+
+    app = QApplication.instance() or QApplication(['ats-test'])
+    parent = SimpleNamespace(query_expr='close > 1000', filtered_codes_set=set())
+
+    class Panel:
+        _apply_row_visibility = FavoritePanel._apply_row_visibility
+        filter_enabled = True
+
+        def _get_parent_mw(self):
+            return parent
+
+    panel = Panel()
+    panel.table = QTableWidget(2, 2)
+    panel.search_input = QLineEdit()
+    panel.count_label = QLabel()
+    for row, code in enumerate(('600001', '600002')):
+        panel.table.setItem(row, 0, QTableWidgetItem(code))
+        panel.table.setItem(row, 1, QTableWidgetItem(code))
+    panel._apply_row_visibility()
+    assert all(panel.table.isRowHidden(row) for row in range(2))
+    parent.query_expr = ''
+    panel._apply_row_visibility()
+    assert all(not panel.table.isRowHidden(row) for row in range(2))
+
+
+def test_nontrading_heatmap_uses_dated_snapshot(monkeypatch, tmp_path):
+    from ats.ui import heatmap_widget
+
+    snapshots = tmp_path / 'snapshots'
+    snapshots.mkdir()
+    valid = {'半导体': {}, '光伏设备': {}, '证券': {}}
+    stale = {'旧日板块': {}, '陈旧赛道': {}, '过时主题': {}}
+    (snapshots / 'bidding_20261002.json.gz').write_bytes(
+        zlib.compress(json.dumps({'sector_data': valid}).encode('utf-8')))
+    (snapshots / 'bidding_session_data.json.gz').write_bytes(
+        zlib.compress(json.dumps({'sector_data': stale}).encode('utf-8')))
+    monkeypatch.setattr(heatmap_widget, 'get_app_root', lambda: str(tmp_path))
+    monkeypatch.setattr(heatmap_widget.cct, 'get_day_istrade_date', lambda: False)
+    monkeypatch.setattr(heatmap_widget.cct, 'get_last_trade_date', lambda: '2026-10-02')
+
+    nontrade, sectors, pool, flags, mapping = heatmap_widget._read_sector_snapshot_sources()
+    assert nontrade is True
+    assert sectors == valid
+    assert not pool and not flags and not mapping
+
+
+# Real Qt interaction blocker regression and latency probes.
+from PyQt6.QtCore import QTimer
+
+def _blocker_pump(app, predicate, timeout=10):
+    deadline = time.perf_counter() + timeout
+    while time.perf_counter() < deadline:
+        app.processEvents()
+        if predicate():
+            return
+        time.sleep(0.001)
+    raise AssertionError('Qt task did not finish')
+
+
+@pytest.fixture
+def async_stock_panel(qapp, monkeypatch):
+    from ats.ui.new_stock_panel import NewStockPanel
+    from global_favorites import GlobalFavoriteManager
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(GlobalFavoriteManager, 'get_favorite_stocks', lambda self: set())
+    monkeypatch.setattr(NewStockPanel, '_start_system_lifecycle', lambda self: None)
+    monkeypatch.setattr(NewStockPanel, '_sync_refresh_interval_ui', lambda self: None)
+    monkeypatch.setattr(NewStockPanel, 'is_panel_visible', lambda self: True)
+    widget = NewStockPanel()
+    widget.resize(1000, 700)
+    widget.show()
+    widget.filter_enabled = False
+    widget.combo_filter.setCurrentIndex(0)
+    widget.df_data = pd.DataFrame([
+        dict(code=f'{600000 + i:06}', name=f'Stock {i}', status='次新股',
+             listing_date='2026-09-01', apply_date='2026-08-01', pct=float(i % 10),
+             price=10., has_strategy=False)
+        for i in range(500)
+    ])
+    yield app, widget
+    _blocker_pump(app, lambda: not getattr(widget, '_table_prepare_running', False))
+    painter = getattr(widget, '_table_painter', None)
+    if painter is not None:
+        painter.close()
+    widget._table_revision = getattr(widget, '_table_revision', 0) + 1
+    widget.close()
+
+
+def test_switch_prepares_off_thread_and_paints_real_table_in_batches(async_stock_panel, monkeypatch):
+    from ats.ui import new_stock_panel as mod
+    app, widget = async_stock_panel
+    gui = threading.get_ident()
+    threads = []
+    original_prepare = mod._prepare_stock_table
+    original_merge = mod._merge_ipc_frame
+
+    def prepare(*args):
+        threads.append(('prepare', threading.get_ident()))
+        return original_prepare(*args)
+
+    def merge(*args):
+        threads.append(('merge', threading.get_ident()))
+        return original_merge(*args)
+
+    monkeypatch.setattr(mod, '_prepare_stock_table', prepare)
+    monkeypatch.setattr(mod, '_merge_ipc_frame', merge)
+    widget._last_ipc_df = pd.DataFrame({'dff': [2.] * 500}, index=widget.df_data.code)
+    widget._last_ipc_df.index.name = 'code'
+    widget._needs_render = True
+    ticks = []
+    timer = QTimer()
+    timer.timeout.connect(lambda: ticks.append(time.perf_counter()))
+    timer.start(2)
+    batches = []
+    original_slice = widget._paint_table_slice
+
+    def sliced(revision):
+        started = time.perf_counter()
+        original_slice(revision)
+        batches.append((time.perf_counter() - started) * 1000)
+
+    monkeypatch.setattr(widget, '_paint_table_slice', sliced)
+    started = time.perf_counter()
+    assert widget.ensure_rendered()
+    dispatch_ms = (time.perf_counter() - started) * 1000
+    assert widget.table.rowCount() == 0
+    _blocker_pump(app, lambda: getattr(widget, '_last_table_signature', None) is not None
+         and widget._table_painter is None)
+    timer.stop()
+    assert widget.table.rowCount() == 500
+    assert len(batches) > 10 and len(ticks) > 10
+    assert all(tid != gui for _, tid in threads)
+    assert {name for name, _ in threads} == {'prepare', 'merge'}
+    assert widget.df_data.dff.eq(2.).all()
+    assert widget.table.updatesEnabled() and not widget.table.signalsBlocked()
+    assert widget.table.isSortingEnabled()
+    codes = {widget.table.item(r, widget._get_col_by_header('代码')).text()
+             for r in range(500)}
+    assert codes == set(widget.df_data.code)
+    print(f'IPO 500 rows: dispatch={dispatch_ms:.2f}ms, batches={len(batches)}, '
+          f'max_batch={max(batches):.2f}ms, heartbeat_ticks={len(ticks)}, '
+          f'first={batches[0]:.2f}ms, last={batches[-1]:.2f}ms')
+
+
+def test_latest_search_wins_and_cancelled_partial_table_recovers(async_stock_panel, monkeypatch):
+    from ats.ui import new_stock_panel as mod
+    app, widget = async_stock_panel
+    entered, release = threading.Event(), threading.Event()
+    original = mod._prepare_stock_table
+    calls = []
+
+    def blocked(*args):
+        calls.append(args[5])
+        if len(calls) == 1:
+            entered.set()
+            assert release.wait(3)
+        return original(*args)
+
+    monkeypatch.setattr(mod, '_prepare_stock_table', blocked)
+    widget._render_table()
+    _blocker_pump(app, entered.is_set)
+    widget.search_edit.setText('Stock 499')
+    widget._render_table()
+    release.set()
+    _blocker_pump(app, lambda: getattr(widget, '_last_table_signature', None) is not None
+         and widget._table_painter is None)
+    assert widget.table.rowCount() == 1
+    assert widget.table.item(0, widget._get_col_by_header('代码')).text() == '600499'
+    widget.search_edit.setText('')
+    widget._render_table()
+    _blocker_pump(app, lambda: getattr(widget, '_table_painter', None) is not None)
+    widget.search_edit.setText('no match')
+    widget._render_table()
+    _blocker_pump(app, lambda: widget.table.rowCount() == 0 and widget._table_painter is None)
+    assert widget.table.isSortingEnabled()
+    widget.search_edit.setText('Stock 499')
+    widget._render_table()
+    _blocker_pump(app, lambda: widget.table.rowCount() == 1 and widget._table_painter is None)
+    assert widget.table.item(0, widget._get_col_by_header('代码')).text() == '600499'
+
+
+def test_reversal_aggregation_preserves_prefixed_quote_lookup():
+    from ats.ui.heatmap_widget import _aggregate_reversal_sectors
+    frame = pd.DataFrame({'name': ['A', 'B'], 'percent': [2., 4.]},
+                         index=['sh600001', 'sz000002'])
+    sectors, members = _aggregate_reversal_sectors(
+        frame, ['600001', '000002'], {'600001': {'phase': 'WAVE_UP'}},
+        {'600001': '半导体', '000002': '半导体'})
+    assert sectors == [('半导体', 65.0, '+3.00%', 2, '000002', 'B')]
+    assert members == {'半导体': ['600001', '000002']}
+    frame = frame.reset_index(drop=True)
+    frame['code'] = ['600001', '000002']
+    assert _aggregate_reversal_sectors(
+        frame, ['600001', '000002'], {'600001': {'phase': 'WAVE_UP'}},
+        {'600001': '半导体', '000002': '半导体'}) == (sectors, members)
+
+
+def test_hidden_partial_render_is_cancelled_and_restored(async_stock_panel, monkeypatch):
+    app, widget = async_stock_panel
+    visible = [True]
+    monkeypatch.setattr(widget, 'is_panel_visible', lambda: visible[0])
+    widget._render_table()
+    _blocker_pump(app, lambda: getattr(widget, '_table_painter', None) is not None)
+    visible[0] = False
+    _blocker_pump(app, lambda: widget._table_painter is None)
+    assert widget._needs_render
+    assert widget.table.updatesEnabled() and not widget.table.signalsBlocked()
+    visible[0] = True
+    assert widget.ensure_rendered()
+    _blocker_pump(app, lambda: getattr(widget, '_last_table_signature', None) is not None
+         and widget._table_painter is None)
+    assert len(widget._rendered_row_state) == 500
+
+
+def test_tab_switch_does_not_submit_a_second_full_filter_request():
+    from ats.ui.main_window import ATSMainWindow
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+    panel = SimpleNamespace(ensure_rendered=MagicMock(return_value=True),
+                            filter_enabled=True, _apply_filter=MagicMock())
+    win = SimpleNamespace(_top_tab_render_revision=1,
+                          top_tabs=SimpleNamespace(currentIndex=lambda: 3),
+                          new_stock_panel=panel, _filter_dirty_tabs={3})
+    ATSMainWindow._render_top_tab(win, 3, 1)
+    panel.ensure_rendered.assert_called_once()
+    panel._apply_filter.assert_not_called()
+    assert win._filter_dirty_tabs == set()
+
+
+def test_sort_change_during_partial_paint_restarts_with_latest_direction(async_stock_panel, monkeypatch):
+    from PyQt6.QtCore import Qt
+    app, widget = async_stock_panel
+    monkeypatch.setattr(widget, '_save_sort_state',
+                        lambda col, order: (setattr(widget, 'sort_col', col),
+                                            setattr(widget, 'sort_order', order)))
+    widget._render_table()
+    _blocker_pump(app, lambda: getattr(widget, '_table_painter', None) is not None)
+    revision = widget._table_revision
+    col = widget._get_col_by_header('代码')
+    widget._on_header_sort_changed(col, Qt.SortOrder.AscendingOrder)
+    assert widget._table_revision > revision
+    _blocker_pump(app, lambda: getattr(widget, '_last_table_signature', None) is not None
+         and widget._table_painter is None)
+    codes = [widget.table.item(r, col).text() for r in range(500)]
+    assert codes == sorted(codes)
+
+
+@pytest.mark.parametrize('descending', [False, True])
+def test_cached_batch_comparator_matches_existing_rules(qapp, descending):
+    from ats.ui.new_stock_panel import NewStockNumericItem
+    from ats.ui.styles import NumericTableWidgetItem
+    from PyQt6.QtCore import Qt
+    from PyQt6.QtWidgets import QTableWidget
+    app = QApplication.instance() or QApplication([])
+    table = QTableWidget(1, 1)
+    table.horizontalHeader().setSortIndicator(
+        0, Qt.SortOrder.DescendingOrder if descending else Qt.SortOrder.AscendingOrder)
+    table._ipo_batch_sort_direction = descending
+    cases = [('10', 10., 999), ('2', 2., 999), ('--', None, 999),
+             ('A', 'A', 999), ('2026-01-01', '2026-01-01', 999),
+             ('20', 20., 0), ('3', 3., 1)]
+    for left in cases:
+        for right in cases:
+            a = NewStockNumericItem(left[0], raw_val=left[1], pin_rank=left[2])
+            b = NewStockNumericItem(right[0], raw_val=right[1], pin_rank=right[2])
+            a._ipo_sort_key = (a._is_empty(), a._get_sort_val(a), a.text())
+            b._ipo_sort_key = (b._is_empty(), b._get_sort_val(b), b.text())
+            table.setItem(0, 0, a)
+            assert (a < b) == NumericTableWidgetItem.__lt__(a, b)
+    table.close()
+
+
+def test_heatmap_fallback_aggregation_is_in_snapshot_worker(monkeypatch):
+    from ats.ui import heatmap_widget as mod
+    app = QApplication.instance() or QApplication([])
+    widget = mod.SectorHeatmapWidget()
+    gui = threading.get_ident()
+    tids = []
+    entered, release = threading.Event(), threading.Event()
+    frame = pd.DataFrame({'name': ['A'], 'percent': [3.]}, index=['600001'])
+    monkeypatch.setattr(mod, '_read_sector_snapshot_sources',
+                        lambda: (False, {}, ['600001'], {}, {'600001': '半导体'}))
+    original = mod._aggregate_reversal_sectors
+
+    def aggregate(*args):
+        tids.append(threading.get_ident())
+        entered.set()
+        assert release.wait(3)
+        return original(*args)
+
+    monkeypatch.setattr(mod, '_aggregate_reversal_sectors', aggregate)
+    widget.load_live_sectors(force=True, current_df=frame)
+    _blocker_pump(app, entered.is_set)
+    assert tids == [tids[0]] and tids[0] != gui
+    release.set()
+    _blocker_pump(app, lambda: not widget._snapshot_busy)
+    assert widget.sectors[0][0] == '半导体'
+    assert widget.sector_to_codes == {'半导体': ['600001']}
+    widget.close()

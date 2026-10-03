@@ -50,7 +50,36 @@ TABLE_CONFIG_KEY = "ats_new_stock_table_state_v3"
 
 
 # 完全采用全系统统一、支持重点关注置顶与高精度数值排序的 NumericTableWidgetItem
-NewStockNumericItem = NumericTableWidgetItem
+class NewStockNumericItem(NumericTableWidgetItem):
+    def __lt__(self, other):
+        table = self.tableWidget()
+        descending = getattr(table, '_ipo_batch_sort_direction', None)
+        key1 = getattr(self, '_ipo_sort_key', None)
+        key2 = getattr(other, '_ipo_sort_key', None)
+        if descending is None or key1 is None or key2 is None:
+            return super().__lt__(other)
+        # Batch sort uses the same comparator rules without querying Qt headers
+        # thousands of times. Interactive header sorts still use the base class.
+        r1 = getattr(self, 'pin_rank', 0 if self.is_pinned else 999)
+        r2 = getattr(other, 'pin_rank', 0 if other.is_pinned else 999)
+        if r1 != r2:
+            return r1 > r2 if descending else r1 < r2
+        empty1, v1, text1 = key1
+        empty2, v2, text2 = key2
+        if empty1 != empty2:
+            return empty1 if descending else not empty1
+        if empty1 and empty2:
+            return text1 < text2
+        if v1 is not None and v2 is not None:
+            if isinstance(v1, (int, float)) and isinstance(v2, (int, float)):
+                if v1 != v2:
+                    return float(v1) < float(v2)
+            elif isinstance(v1, str) and isinstance(v2, str):
+                if v1 != v2:
+                    return v1 < v2
+            elif str(v1) != str(v2):
+                return str(v1) < str(v2)
+        return text1 < text2
 
 
 def clean_num(val: Any, default: float = 0.0) -> float:
@@ -111,6 +140,228 @@ def get_new_stock_table_headers(extra_cols: Optional[List[str]] = None) -> List[
     return base_headers + extra_headers + ["阶梯策略"]
 
 
+
+def _merge_ipc_frame(data, df_ipc, extra_cols):
+    data = data.copy()
+    # ⚡【极速 O(1) 预索引映射表】：一次性建立全市场 code -> ipc_idx 字典，杜绝循环内 5000 行全表扫描
+    if df_ipc.index.name == "code" and df_ipc.index.is_unique and 'code' not in df_ipc.columns:
+        # ATS has already normalized the index. Look up only this panel's codes.
+        ipc_index_map = {str(c).zfill(6): str(c).zfill(6) for c in data['code']
+                         if str(c).zfill(6) in df_ipc.index}
+    else:
+        ipc_index_map = {}
+        for k in df_ipc.index:
+            k_str = str(k).strip()
+            digits = "".join(c for c in k_str if c.isdigit()).zfill(6) if any(c.isdigit() for c in k_str) else k_str
+            ipc_index_map[k_str] = k
+            if digits:
+                ipc_index_map[digits] = k
+                ipc_index_map[digits.lstrip('0')] = k
+                ipc_index_map[f"sh{digits}"] = k
+                ipc_index_map[f"sz{digits}"] = k
+                ipc_index_map[f"bj{digits}"] = k
+
+        if 'code' in df_ipc.columns:
+            for ipc_idx, c_val in df_ipc['code'].dropna().items():
+                c_str = str(c_val).strip()
+                digits = "".join(c for c in c_str if c.isdigit()).zfill(6) if any(c.isdigit() for c in c_str) else c_str
+                if digits and digits not in ipc_index_map:
+                    ipc_index_map[digits] = ipc_idx
+
+    updated_any = False
+    for idx, row in zip(data.index, data.to_dict('records')):
+        code = str(row["code"]).zfill(6)
+        ipc_row = None
+        target_idx = ipc_index_map.get(code)
+        if target_idx is None:
+            target_idx = ipc_index_map.get(code.lstrip('0'))
+        if target_idx is not None:
+            try:
+                ipc_row = df_ipc.loc[target_idx]
+            except KeyError:
+                ipc_row = None
+
+        if ipc_row is not None:
+            if hasattr(ipc_row, "iloc") and len(ipc_row.shape) > 1:
+                ipc_row = ipc_row.iloc[0]
+
+            # ── 新股行情权威性原则 ──
+            # 新股现价、涨跌幅、换手率等核心实时行情由底层 TDX API 权威直连驱动，IPC 仅同步全市场指标，绝不覆写已由 TDX 算好的真实价格与涨跌幅！
+            local_p = clean_num(data.at[idx, "price"] if "price" in data.columns else 0.0, default=0.0)
+            local_pct = clean_num(data.at[idx, "pct"] if "pct" in data.columns else 0.0, default=0.0)
+
+            p = clean_num(ipc_row.get("close", ipc_row.get("price", ipc_row.get("now", 0.0))))
+            # 仅当本地尚无价格时，才允许从 IPC 降级补充
+            if local_p <= 0 and p > 0:
+                data.at[idx, "price"] = p
+                raw_pct = ipc_row.get("percent", ipc_row.get("pct", ipc_row.get("ratio", ipc_row.get("changepercent"))))
+                pct_val = clean_num(raw_pct, default=float('nan'))
+                if not math.isnan(pct_val) and pct_val != 0.0:
+                    data.at[idx, "pct"] = pct_val
+
+            # 换手率：若本地无换手率且 IPC 有有效换手率时补充
+            local_to = clean_num(data.at[idx, "turnover"] if "turnover" in data.columns else 0.0, default=0.0)
+            if local_to <= 0:
+                to_val = ipc_row.get("turnoverrate", ipc_row.get("turnover_ratio", ipc_row.get("hsl")))
+                if to_val is not None:
+                    to_clean = clean_num(to_val, default=0.0)
+                    if 0.0 < to_clean <= 100.0:
+                        data.at[idx, "turnover"] = to_clean
+
+            # 成交额：若本地无成交额且 IPC 有有效成交额时补充
+            local_amt = clean_num(data.at[idx, "amount_yi"] if "amount_yi" in data.columns else 0.0, default=0.0)
+            if local_amt <= 0:
+                amt_val = ipc_row.get("amount", ipc_row.get("turnover", 0.0))
+                amt_clean = clean_num(amt_val, default=0.0)
+                if amt_clean > 100000:
+                    data.at[idx, "amount_yi"] = round(amt_clean / 1e8, 2)
+                elif amt_clean > 0:
+                    data.at[idx, "amount_yi"] = round(amt_clean, 2)
+
+            # 4. 对齐重点关注核心指标: DFF, Rank, DFF2, DFF3, 大盘偏离, 大盘共振
+            dff_raw = ipc_row.get("dff", ipc_row.get("dfi", ipc_row.get("dff_d")))
+            if dff_raw is not None and not pd.isna(dff_raw):
+                data.at[idx, "dff"] = clean_num(dff_raw, default=0.0)
+
+            rank_raw = ipc_row.get("Rank", ipc_row.get("rank", ipc_row.get("market_rank")))
+            if rank_raw is not None and not pd.isna(rank_raw):
+                data.at[idx, "rank"] = rank_raw
+
+            dff2_raw = ipc_row.get("dff2", ipc_row.get("dff_w"))
+            if dff2_raw is not None and not pd.isna(dff2_raw):
+                data.at[idx, "dff2"] = clean_num(dff2_raw, default=0.0)
+
+            dff3_raw = ipc_row.get("dff3", ipc_row.get("dff_m"))
+            if dff3_raw is not None and not pd.isna(dff3_raw):
+                data.at[idx, "dff3"] = clean_num(dff3_raw, default=0.0)
+
+            rs_raw = ipc_row.get("rs", ipc_row.get("rs_val", ipc_row.get("deviation")))
+            if rs_raw is not None and not pd.isna(rs_raw):
+                data.at[idx, "rs"] = clean_num(rs_raw, default=0.0)
+
+            res_raw = ipc_row.get("resonance", ipc_row.get("market_resonance", ipc_row.get("sync_status")))
+            if res_raw is not None and not pd.isna(res_raw):
+                data.at[idx, "resonance"] = str(res_raw)
+
+            # 5. 同步市值字段 (若本地无市值时从 IPC 补充)
+            local_fmv = clean_num(data.at[idx, "float_mv_yi"] if "float_mv_yi" in data.columns else 0.0, default=0.0)
+            if local_fmv <= 0:
+                fmv_raw = ipc_row.get("nmc", ipc_row.get("float_mv", ipc_row.get("float_mv_yi")))
+                if fmv_raw is not None and not pd.isna(fmv_raw):
+                    fmv_num = clean_num(fmv_raw)
+                    if fmv_num > 1e4:
+                        fmv_num = round(fmv_num / 1e8, 2)
+                    if fmv_num > 0:
+                        data.at[idx, "float_mv_yi"] = fmv_num
+
+            local_tmv = clean_num(data.at[idx, "total_mv_yi"] if "total_mv_yi" in data.columns else 0.0, default=0.0)
+            if local_tmv <= 0:
+                tmv_raw = ipc_row.get("mktcap", ipc_row.get("total_mv", ipc_row.get("total_mv_yi")))
+                if tmv_raw is not None and not pd.isna(tmv_raw):
+                    tmv_num = clean_num(tmv_raw)
+                    if tmv_num > 1e4:
+                        tmv_num = round(tmv_num / 1e8, 2)
+                    if tmv_num > 0:
+                        data.at[idx, "total_mv_yi"] = tmv_num
+
+            # 6. 提取动态自定义列 (ats_col, 支持 vis_column_map 中英文双向兼容提取)
+            try:
+                col_map = getattr(cct, 'vis_column_map', {}) or {}
+            except Exception:
+                col_map = {}
+
+            for c_name in extra_cols:
+                mapped_name = col_map.get(c_name, col_map.get(c_name.lower(), c_name))
+                cand_keys = [c_name, c_name.lower(), c_name.upper()]
+                if mapped_name and mapped_name not in cand_keys:
+                    cand_keys.append(mapped_name)
+
+                for k in cand_keys:
+                    if k in ipc_row:
+                        val = ipc_row.get(k)
+                        data.at[idx, c_name] = val
+                        if mapped_name and mapped_name != c_name:
+                            data.at[idx, mapped_name] = val
+                        break
+
+            # 7. 同步天梯或 IPC 传入的竞价信号（若本地尚未打上时补充）
+            if "bidding_tag" not in data.columns or str(data.at[idx, "bidding_tag"]).strip() in ("", "--", "nan"):
+                tag_cand = ipc_row.get("bidding_tag", ipc_row.get("tier_tag", ipc_row.get("order_intent", None)))
+                if tag_cand and str(tag_cand).strip() not in ("", "--", "nan"):
+                    data.at[idx, "bidding_tag"] = str(tag_cand)
+
+            updated_any = True
+
+    return data
+
+
+def _prepare_stock_table(data, fav_stocks, sh_pct, extra_cols, filter_type, search_txt, fset, sort_col, sort_order, selected_code):
+    today_str = datetime.datetime.now().strftime("%Y-%m-%d")
+    if data.empty:
+        return [], None, {}, (frozenset(fav_stocks), sh_pct, today_str, tuple(extra_cols)), today_str
+    df_filtered = data.copy()
+
+    # 分类筛选
+    if "重点关注" in filter_type:
+        df_filtered = df_filtered[df_filtered["code"].astype(str).str.zfill(6).isin(fav_stocks)]
+    elif "今日" in filter_type:
+        df_filtered = df_filtered[
+            (df_filtered["listing_date"].astype(str) == today_str) |
+            (df_filtered["apply_date"].astype(str) == today_str)
+        ]
+    elif "首日" in filter_type:
+        df_filtered = df_filtered[df_filtered["status"].str.contains("首日|N", regex=True)]
+    elif "前5日" in filter_type:
+        df_filtered = df_filtered[df_filtered["status"].str.contains("前5日|C", regex=True)]
+    elif "次新股" in filter_type:
+        df_filtered = df_filtered[df_filtered["status"].str.contains("次新")]
+    elif "待上市" in filter_type:
+        df_filtered = df_filtered[df_filtered["status"].str.contains("待上市|即将上市")]
+
+    # 搜索关键词过滤
+    if search_txt:
+        mask = (
+            df_filtered["code"].astype(str).str.lower().str.contains(search_txt) |
+            df_filtered["name"].astype(str).str.lower().str.contains(search_txt)
+        )
+        df_filtered = df_filtered[mask]
+
+    # 🎯 策略公式过滤
+    if fset is not None and not df_filtered.empty:
+        df_filtered = df_filtered[df_filtered["code"].astype(str).str.strip().str.zfill(6).isin(fset)]
+
+    # Unchanged snapshots need neither cell writes nor sorting.
+    signature = None
+    row_hashes = {}
+    row_context = (frozenset(fav_stocks), sh_pct, today_str, tuple(extra_cols))
+    try:
+        hashes = pd.util.hash_pandas_object(df_filtered, index=False)
+        row_hashes = {str(code).zfill(6): int(value)
+                      for code, value in zip(df_filtered['code'], hashes)}
+        if len(row_hashes) != len(df_filtered):
+            row_hashes = {}
+        signature = (hashes.values.tobytes(), row_context,
+                     sort_col, sort_order, selected_code)
+    except (TypeError, ValueError):
+        pass
+    # ── 2. 今日事件 (今日上市 / 今日申购) 与重点关注优先权重排序 (置顶第0梯队) ──
+    codes = df_filtered["code"].astype(str).str.zfill(6)
+    statuses = df_filtered["status"].astype(str)
+    listing_dates = df_filtered.get("listing_date", pd.Series("-", index=df_filtered.index)).astype(str)
+    apply_dates = df_filtered.get("apply_date", pd.Series("-", index=df_filtered.index)).astype(str)
+    df_filtered["_sort_w"] = np.select(
+        [listing_dates.eq(today_str), apply_dates.eq(today_str), codes.isin(fav_stocks),
+         statuses.str.contains("首日", regex=False), statuses.str.contains("前5日", regex=False),
+         statuses.str.contains("待上市", regex=False), statuses.str.contains("次新", regex=False)],
+        [0.0, 0.1, 1.0, 2.0, 3.0, 4.0, 5.0], default=6.0)
+    df_filtered["_sort_date"] = listing_dates.replace("-", "1970-01-01")
+    df_filtered.sort_values(by=["_sort_w", "_sort_date", "pct"],
+                            ascending=[True, True, False], inplace=True)
+    df_filtered.drop(columns=["_sort_w", "_sort_date"], inplace=True)
+
+    return df_filtered.to_dict('records'), signature, row_hashes, row_context, today_str
+
+
 class NewStockFetchWorker(QThread):
     """后台新股数据抓取与实时补齐 Worker 线程 (完全解耦网络 IO 与 UI 渲染)"""
     data_ready = pyqtSignal(object)  # pd.DataFrame
@@ -139,6 +390,7 @@ class NewStockPanel(QWidget):
     stock_double_clicked = pyqtSignal(str, str) # code, name (双击详情)
     _ipo_detector_action_done = pyqtSignal(str)
     _channel_scan_ready = pyqtSignal(object)
+    _table_prepared = pyqtSignal(object)
 
     def minimumSizeHint(self) -> QSize:
         # 允许中间面板极致弹性缩放，绝不撑大主窗口或挤压左右侧分割条
@@ -147,6 +399,7 @@ class NewStockPanel(QWidget):
     def __init__(self, parent=None, main_window=None):
         super().__init__(parent)
         self.main_window = main_window
+        self._table_prepared.connect(self._on_table_prepared)
         self._channel_scan_ready.connect(self._on_channel_scan_ready)
         self._ipo_detector_open_pending = False
         self._ipo_detector_action_done.connect(self._notify_ipo_detector_status)
@@ -558,7 +811,11 @@ class NewStockPanel(QWidget):
 
     def _on_header_sort_changed(self, col: int, order: Qt.SortOrder):
         """用户点击表头排序列时触发：记录并持久化"""
+        changed = col != self.sort_col or order != self.sort_order
         self._save_sort_state(col, order)
+        if changed and (getattr(self, '_table_painter', None) is not None
+                        or getattr(self, '_table_prepare_running', False)):
+            self._request_table_prepare()
 
     def _get_refresh_interval_sec(self) -> float:
         """获取当前配置的 TDX 全局刷新间隔 (秒)"""
@@ -826,166 +1083,7 @@ class NewStockPanel(QWidget):
         if self.df_data.empty:
             return
 
-        # ⚡【极速 O(1) 预索引映射表】：一次性建立全市场 code -> ipc_idx 字典，杜绝循环内 5000 行全表扫描
-        if df_ipc.index.name == "code" and df_ipc.index.is_unique and 'code' not in df_ipc.columns:
-            # ATS has already normalized the index. Look up only this panel's codes.
-            ipc_index_map = {str(c).zfill(6): str(c).zfill(6) for c in self.df_data['code']
-                             if str(c).zfill(6) in df_ipc.index}
-        else:
-            ipc_index_map = {}
-            for k in df_ipc.index:
-                k_str = str(k).strip()
-                digits = "".join(c for c in k_str if c.isdigit()).zfill(6) if any(c.isdigit() for c in k_str) else k_str
-                ipc_index_map[k_str] = k
-                if digits:
-                    ipc_index_map[digits] = k
-                    ipc_index_map[digits.lstrip('0')] = k
-                    ipc_index_map[f"sh{digits}"] = k
-                    ipc_index_map[f"sz{digits}"] = k
-                    ipc_index_map[f"bj{digits}"] = k
-
-            if 'code' in df_ipc.columns:
-                for ipc_idx, c_val in df_ipc['code'].dropna().items():
-                    c_str = str(c_val).strip()
-                    digits = "".join(c for c in c_str if c.isdigit()).zfill(6) if any(c.isdigit() for c in c_str) else c_str
-                    if digits and digits not in ipc_index_map:
-                        ipc_index_map[digits] = ipc_idx
-
-        updated_any = False
-        for idx, row in zip(self.df_data.index, self.df_data.to_dict('records')):
-            code = str(row["code"]).zfill(6)
-            ipc_row = None
-            target_idx = ipc_index_map.get(code)
-            if target_idx is None:
-                target_idx = ipc_index_map.get(code.lstrip('0'))
-            if target_idx is not None:
-                try:
-                    ipc_row = df_ipc.loc[target_idx]
-                except KeyError:
-                    ipc_row = None
-
-            if ipc_row is not None:
-                if hasattr(ipc_row, "iloc") and len(ipc_row.shape) > 1:
-                    ipc_row = ipc_row.iloc[0]
-
-                # ── 新股行情权威性原则 ──
-                # 新股现价、涨跌幅、换手率等核心实时行情由底层 TDX API 权威直连驱动，IPC 仅同步全市场指标，绝不覆写已由 TDX 算好的真实价格与涨跌幅！
-                local_p = clean_num(self.df_data.at[idx, "price"] if "price" in self.df_data.columns else 0.0, default=0.0)
-                local_pct = clean_num(self.df_data.at[idx, "pct"] if "pct" in self.df_data.columns else 0.0, default=0.0)
-
-                p = clean_num(ipc_row.get("close", ipc_row.get("price", ipc_row.get("now", 0.0))))
-                # 仅当本地尚无价格时，才允许从 IPC 降级补充
-                if local_p <= 0 and p > 0:
-                    self.df_data.at[idx, "price"] = p
-                    raw_pct = ipc_row.get("percent", ipc_row.get("pct", ipc_row.get("ratio", ipc_row.get("changepercent"))))
-                    pct_val = clean_num(raw_pct, default=float('nan'))
-                    if not math.isnan(pct_val) and pct_val != 0.0:
-                        self.df_data.at[idx, "pct"] = pct_val
-
-                # 换手率：若本地无换手率且 IPC 有有效换手率时补充
-                local_to = clean_num(self.df_data.at[idx, "turnover"] if "turnover" in self.df_data.columns else 0.0, default=0.0)
-                if local_to <= 0:
-                    to_val = ipc_row.get("turnoverrate", ipc_row.get("turnover_ratio", ipc_row.get("hsl")))
-                    if to_val is not None:
-                        to_clean = clean_num(to_val, default=0.0)
-                        if 0.0 < to_clean <= 100.0:
-                            self.df_data.at[idx, "turnover"] = to_clean
-
-                # 成交额：若本地无成交额且 IPC 有有效成交额时补充
-                local_amt = clean_num(self.df_data.at[idx, "amount_yi"] if "amount_yi" in self.df_data.columns else 0.0, default=0.0)
-                if local_amt <= 0:
-                    amt_val = ipc_row.get("amount", ipc_row.get("turnover", 0.0))
-                    amt_clean = clean_num(amt_val, default=0.0)
-                    if amt_clean > 100000:
-                        self.df_data.at[idx, "amount_yi"] = round(amt_clean / 1e8, 2)
-                    elif amt_clean > 0:
-                        self.df_data.at[idx, "amount_yi"] = round(amt_clean, 2)
-
-                # 4. 对齐重点关注核心指标: DFF, Rank, DFF2, DFF3, 大盘偏离, 大盘共振
-                dff_raw = ipc_row.get("dff", ipc_row.get("dfi", ipc_row.get("dff_d")))
-                if dff_raw is not None and not pd.isna(dff_raw):
-                    self.df_data.at[idx, "dff"] = clean_num(dff_raw, default=0.0)
-
-                rank_raw = ipc_row.get("Rank", ipc_row.get("rank", ipc_row.get("market_rank")))
-                if rank_raw is not None and not pd.isna(rank_raw):
-                    self.df_data.at[idx, "rank"] = rank_raw
-
-                dff2_raw = ipc_row.get("dff2", ipc_row.get("dff_w"))
-                if dff2_raw is not None and not pd.isna(dff2_raw):
-                    self.df_data.at[idx, "dff2"] = clean_num(dff2_raw, default=0.0)
-
-                dff3_raw = ipc_row.get("dff3", ipc_row.get("dff_m"))
-                if dff3_raw is not None and not pd.isna(dff3_raw):
-                    self.df_data.at[idx, "dff3"] = clean_num(dff3_raw, default=0.0)
-
-                rs_raw = ipc_row.get("rs", ipc_row.get("rs_val", ipc_row.get("deviation")))
-                if rs_raw is not None and not pd.isna(rs_raw):
-                    self.df_data.at[idx, "rs"] = clean_num(rs_raw, default=0.0)
-
-                res_raw = ipc_row.get("resonance", ipc_row.get("market_resonance", ipc_row.get("sync_status")))
-                if res_raw is not None and not pd.isna(res_raw):
-                    self.df_data.at[idx, "resonance"] = str(res_raw)
-
-                # 5. 同步市值字段 (若本地无市值时从 IPC 补充)
-                local_fmv = clean_num(self.df_data.at[idx, "float_mv_yi"] if "float_mv_yi" in self.df_data.columns else 0.0, default=0.0)
-                if local_fmv <= 0:
-                    fmv_raw = ipc_row.get("nmc", ipc_row.get("float_mv", ipc_row.get("float_mv_yi")))
-                    if fmv_raw is not None and not pd.isna(fmv_raw):
-                        fmv_num = clean_num(fmv_raw)
-                        if fmv_num > 1e4:
-                            fmv_num = round(fmv_num / 1e8, 2)
-                        if fmv_num > 0:
-                            self.df_data.at[idx, "float_mv_yi"] = fmv_num
-
-                local_tmv = clean_num(self.df_data.at[idx, "total_mv_yi"] if "total_mv_yi" in self.df_data.columns else 0.0, default=0.0)
-                if local_tmv <= 0:
-                    tmv_raw = ipc_row.get("mktcap", ipc_row.get("total_mv", ipc_row.get("total_mv_yi")))
-                    if tmv_raw is not None and not pd.isna(tmv_raw):
-                        tmv_num = clean_num(tmv_raw)
-                        if tmv_num > 1e4:
-                            tmv_num = round(tmv_num / 1e8, 2)
-                        if tmv_num > 0:
-                            self.df_data.at[idx, "total_mv_yi"] = tmv_num
-
-                # 6. 提取动态自定义列 (ats_col, 支持 vis_column_map 中英文双向兼容提取)
-                try:
-                    col_map = getattr(cct, 'vis_column_map', {}) or {}
-                except Exception:
-                    col_map = {}
-
-                for c_name in self.extra_cols:
-                    mapped_name = col_map.get(c_name, col_map.get(c_name.lower(), c_name))
-                    cand_keys = [c_name, c_name.lower(), c_name.upper()]
-                    if mapped_name and mapped_name not in cand_keys:
-                        cand_keys.append(mapped_name)
-
-                    for k in cand_keys:
-                        if k in ipc_row:
-                            val = ipc_row.get(k)
-                            self.df_data.at[idx, c_name] = val
-                            if mapped_name and mapped_name != c_name:
-                                self.df_data.at[idx, mapped_name] = val
-                            break
-
-                # 7. 同步天梯或 IPC 传入的竞价信号（若本地尚未打上时补充）
-                if "bidding_tag" not in self.df_data.columns or str(self.df_data.at[idx, "bidding_tag"]).strip() in ("", "--", "nan"):
-                    tag_cand = ipc_row.get("bidding_tag", ipc_row.get("tier_tag", ipc_row.get("order_intent", None)))
-                    if tag_cand and str(tag_cand).strip() not in ("", "--", "nan"):
-                        self.df_data.at[idx, "bidding_tag"] = str(tag_cand)
-
-                updated_any = True
-
-        if updated_any or not self.df_data.empty:
-            if not force and not self.is_panel_visible():
-                self._needs_render = True
-                return
-            self._needs_render = False
-            self._render_table()
-            if self.selected_code:
-                match = self.df_data[self.df_data["code"] == self.selected_code]
-                if not match.empty:
-                    self.selected_row_data = match.iloc[0].to_dict()
-                    self._update_preview_card(self.selected_row_data)
+        self._request_table_prepare(ipc=(df_ipc, sh_pct))
 
     def _flush_ipc_render(self):
         frame = getattr(self, '_pending_render_frame', None)
@@ -1001,17 +1099,19 @@ class NewStockPanel(QWidget):
         self.update_from_ipc_df(df, sh_pct, force=True)
 
     def ensure_rendered(self):
-        """当用户切换到本面板时按需补齐渲染 (0ms 惰性渲染架构)"""
+        """切页仅提交后台准备任务，返回是否已提交。"""
         if getattr(self, '_needs_render', False):
-            self._needs_render = False
             pending_df = getattr(self, '_last_ipc_df', None)
             pending_sh = getattr(self, '_last_ipc_sh_pct', 0.0)
             if pending_df is not None and not pending_df.empty:
-                self.update_from_ipc_df(pending_df, pending_sh, force=True)
+                self._request_table_prepare(ipc=(pending_df, pending_sh))
             else:
                 self._render_table()
+            return True
         elif self.table.rowCount() == 0 and not self.df_data.empty:
             self._render_table()
+            return True
+        return False
 
     def _apply_filter(self):
         """应用分类筛选和关键词过滤"""
@@ -1028,7 +1128,7 @@ class NewStockPanel(QWidget):
         """【零警告原地单元格更新 Helper，支持背景高亮、精确 UserRole 绑定与多梯队置顶排序】"""
         item = self.table.item(row, col)
         if item is None:
-            new_item = NumericTableWidgetItem(str(text), is_pinned=is_pinned, raw_val=raw_val, pin_rank=pin_rank)
+            new_item = NewStockNumericItem(str(text), is_pinned=is_pinned, raw_val=raw_val, pin_rank=pin_rank)
             new_item.setTextAlignment(align)
             if color:
                 new_item.setForeground(QBrush(QColor(color)))
@@ -1037,6 +1137,7 @@ class NewStockPanel(QWidget):
             if bg_color:
                 new_item.setBackground(QBrush(QColor(bg_color)))
             self.table.setItem(row, col, new_item)
+            item = new_item
         else:
             if item.text() != str(text):
                 item.setText(str(text))
@@ -1055,25 +1156,158 @@ class NewStockPanel(QWidget):
                 brush = QBrush(QColor(bg_color))
                 if item.background() != brush:
                     item.setBackground(brush)
+
             else:
                 brush = QBrush(QColor(0, 0, 0, 0))
                 if item.background() != brush:
                     item.setBackground(brush)
 
-    def _render_table(self):
-        updates_enabled = self.table.updatesEnabled()
-        signals_blocked = self.table.signalsBlocked()
-        sorting_enabled = self.table.isSortingEnabled()
-        self.table.setUpdatesEnabled(False)
-        try:
-            self._render_table_impl()
-        finally:
-            if self.table.isSortingEnabled() != sorting_enabled:
-                self.table.setSortingEnabled(sorting_enabled)
-            self.table.blockSignals(signals_blocked)
-            self.table.setUpdatesEnabled(updates_enabled)
+        if col == self.sort_col:
+            item._ipo_sort_key = (item._is_empty(), item._get_sort_val(item), item.text())
+        elif hasattr(item, '_ipo_sort_key'):
+            del item._ipo_sort_key
 
-    def _render_table_impl(self):
+    def _render_table(self):
+        self._request_table_prepare()
+
+    def _request_table_prepare(self, ipc=None):
+        # Capture only plain values on the GUI thread; one worker folds requests.
+        parent = self._get_parent_mw()
+        fset = (set(getattr(parent, 'filtered_codes_set', ()))
+                if self.filter_enabled and parent and getattr(parent, 'query_expr', '') else None)
+        self._table_revision = getattr(self, '_table_revision', 0) + 1
+        revision = self._table_revision
+        painter = getattr(self, '_table_painter', None)
+        if painter is not None:
+            painter.close()
+            self._table_painter = None
+            self._last_table_signature = None
+            self._rendered_row_state = {}
+            self.table.setSortingEnabled(True)
+        if ipc is not None:
+            self._table_pending_ipc = ipc
+        ipc = getattr(self, '_table_pending_ipc', None)
+        args = (None, ipc[1] if ipc else self._last_ipc_sh_pct,
+                tuple(get_new_stock_extra_cols()), self.combo_filter.currentText(),
+                self.search_edit.text().strip().lower(), fset,
+                self.sort_col, self.sort_order, self.selected_code)
+        if not hasattr(self, '_table_prepare_lock'):
+            self._table_prepare_lock = threading.Lock()
+        with self._table_prepare_lock:
+            self._table_prepare_pending = (revision, self.df_data, ipc, args)
+            if getattr(self, '_table_prepare_running', False):
+                return
+            self._table_prepare_running = True
+
+        def worker():
+            while True:
+                with self._table_prepare_lock:
+                    payload = self._table_prepare_pending
+                    self._table_prepare_pending = None
+                    if payload is None:
+                        self._table_prepare_running = False
+                        return
+                rev, source, quotes, values = payload
+                try:
+                    try:
+                        from global_favorites import GlobalFavoriteManager
+                        favorites = set(GlobalFavoriteManager().get_favorite_stocks())
+                    except Exception:
+                        favorites = set()
+                    values = (favorites, *values[1:])
+                    data = _merge_ipc_frame(source, quotes[0], values[2]) if quotes else source
+                    prepared = _prepare_stock_table(data, *values)
+                    selected = data[data['code'] == values[-1]] if values[-1] and not data.empty else None
+                    preview = selected.iloc[0].to_dict() if selected is not None and not selected.empty else None
+                    result = (rev, source, data, quotes, prepared, preview, None)
+                except Exception as exc:
+                    result = (rev, source, source, quotes, None, None, str(exc))
+                try:
+                    self._table_prepared.emit(result)
+                except RuntimeError:
+                    with self._table_prepare_lock:
+                        self._table_prepare_running = False
+                    return
+
+        try:
+            threading.Thread(target=worker, daemon=True, name='ATS-IPO-Prepare').start()
+        except Exception as exc:
+            with self._table_prepare_lock:
+                self._table_prepare_running = False
+            self._needs_render = True
+            logger.warning('Cannot start IPO preparation: %s', exc)
+
+    def _on_table_prepared(self, payload):
+        revision, source, data, ipc, prepared, preview, error = payload
+        if revision != self._table_revision or source is not self.df_data:
+            return
+        if error:
+            logger.warning('IPO preparation failed: %s', error)
+            self._needs_render = True
+            return
+        self.df_data = data
+        if ipc is not None:
+            self._table_pending_ipc = None
+            self._last_ipc_sh_pct = ipc[1]
+            self.last_sh_pct = ipc[1]
+        self._needs_render = False
+        if not self.is_panel_visible():
+            self._needs_render = True
+            return
+        old = getattr(self, '_table_painter', None)
+        if old is not None:
+            old.close()
+        self._table_painter = self._render_table_impl(prepared)
+        self._paint_table_slice(revision)
+        if preview is not None and str(preview.get('code', '')) == self.selected_code:
+            self.selected_row_data = preview
+            self._update_preview_card(preview)
+
+    def _paint_table_slice(self, revision):
+        from PyQt6.sip import isdeleted
+        if isdeleted(self):
+            return
+        if revision != self._table_revision:
+            return
+        painter = self._table_painter
+        if not self.is_panel_visible():
+            painter.close()
+            self._table_painter = None
+            self._needs_render = True
+            self._last_table_signature = None
+            self._rendered_row_state = {}
+            self.table.setSortingEnabled(True)
+            return
+        updates = self.table.updatesEnabled()
+        signals = self.table.signalsBlocked()
+        self.table.setUpdatesEnabled(False)
+        self.table.blockSignals(True)
+        deadline = time.perf_counter() + 0.004
+        finished = False
+        try:
+            for _ in range(16):
+                next(painter)
+                if time.perf_counter() >= deadline:
+                    break
+        except StopIteration:
+            finished = True
+            self._table_painter = None
+        except Exception:
+            logger.exception('IPO row rendering failed')
+            painter.close()
+            self._table_painter = None
+            self._last_table_signature = None
+            self._rendered_row_state = {}
+            self.table.setSortingEnabled(True)
+            self._needs_render = True
+            finished = True
+        finally:
+            self.table.blockSignals(signals)
+            self.table.setUpdatesEnabled(updates)
+        if not finished:
+            QTimer.singleShot(0, lambda: self._paint_table_slice(revision))
+
+    def _render_table_impl(self, prepared):
         """
         【⚡ 核心视图与焦点保护渲染】
         1. 保持当前滚动条位置 (v_scroll / h_scroll)；
@@ -1091,12 +1325,7 @@ class NewStockPanel(QWidget):
             self._rendered_row_state = {}
             return
 
-        # 获取系统最新全局重点关注列表
-        try:
-            from global_favorites import GlobalFavoriteManager
-            fav_stocks = set(GlobalFavoriteManager().get_favorite_stocks())
-        except Exception:
-            fav_stocks = set()
+        fav_stocks = prepared[3][0]
 
         sh_pct = clean_num(getattr(self, '_last_ipc_sh_pct', 0.0), default=0.0)
 
@@ -1114,82 +1343,16 @@ class NewStockPanel(QWidget):
         h_scroll_val = self.table.horizontalScrollBar().value()
         saved_selected_code = self.selected_code
 
-        today_str = datetime.datetime.now().strftime("%Y-%m-%d")
-        df_filtered = self.df_data.copy()
-        
-        # 分类筛选
-        filter_type = self.combo_filter.currentText()
-        if "重点关注" in filter_type:
-            df_filtered = df_filtered[df_filtered["code"].astype(str).str.zfill(6).isin(fav_stocks)]
-        elif "今日" in filter_type:
-            df_filtered = df_filtered[
-                (df_filtered["listing_date"].astype(str) == today_str) |
-                (df_filtered["apply_date"].astype(str) == today_str)
-            ]
-        elif "首日" in filter_type:
-            df_filtered = df_filtered[df_filtered["status"].str.contains("首日|N", regex=True)]
-        elif "前5日" in filter_type:
-            df_filtered = df_filtered[df_filtered["status"].str.contains("前5日|C", regex=True)]
-        elif "次新股" in filter_type:
-            df_filtered = df_filtered[df_filtered["status"].str.contains("次新")]
-        elif "待上市" in filter_type:
-            df_filtered = df_filtered[df_filtered["status"].str.contains("待上市|即将上市")]
-
-        # 搜索关键词过滤
-        search_txt = self.search_edit.text().strip().lower()
-        if search_txt:
-            mask = (
-                df_filtered["code"].astype(str).str.lower().str.contains(search_txt) |
-                df_filtered["name"].astype(str).str.lower().str.contains(search_txt)
-            )
-            df_filtered = df_filtered[mask]
-
-        # 🎯 策略公式过滤
-        if getattr(self, 'filter_enabled', False):
-            parent_mw = self._get_parent_mw()
-            fset = getattr(parent_mw, 'filtered_codes_set', None) if parent_mw else None
-            if fset is not None and not df_filtered.empty:
-                df_filtered = df_filtered[df_filtered["code"].astype(str).str.strip().str.zfill(6).isin(fset)]
-
-        if df_filtered.empty:
+        records, signature, row_hashes, row_context, today_str = prepared
+        if signature is not None and signature == getattr(self, '_last_table_signature', None):
+            return
+        target_row_count = len(records)
+        if not records:
             self.table.setRowCount(0)
-            self._last_table_signature = None
+            self._last_table_signature = signature
             self._rendered_row_state = {}
             return
 
-        # Unchanged snapshots need neither cell writes nor sorting.
-        signature = None
-        row_hashes = {}
-        row_context = (frozenset(fav_stocks), sh_pct, today_str, tuple(self.extra_cols))
-        try:
-            hashes = pd.util.hash_pandas_object(df_filtered, index=False)
-            row_hashes = {str(code).zfill(6): int(value)
-                          for code, value in zip(df_filtered['code'], hashes)}
-            if len(row_hashes) != len(df_filtered):
-                row_hashes = {}
-            signature = (hashes.values.tobytes(), row_context,
-                         self.sort_col, self.sort_order, self.selected_code)
-        except (TypeError, ValueError):
-            pass
-        if signature is not None and signature == getattr(self, '_last_table_signature', None):
-            return
-
-        # ── 2. 今日事件 (今日上市 / 今日申购) 与重点关注优先权重排序 (置顶第0梯队) ──
-        codes = df_filtered["code"].astype(str).str.zfill(6)
-        statuses = df_filtered["status"].astype(str)
-        listing_dates = df_filtered.get("listing_date", pd.Series("-", index=df_filtered.index)).astype(str)
-        apply_dates = df_filtered.get("apply_date", pd.Series("-", index=df_filtered.index)).astype(str)
-        df_filtered["_sort_w"] = np.select(
-            [listing_dates.eq(today_str), apply_dates.eq(today_str), codes.isin(fav_stocks),
-             statuses.str.contains("首日", regex=False), statuses.str.contains("前5日", regex=False),
-             statuses.str.contains("待上市", regex=False), statuses.str.contains("次新", regex=False)],
-            [0.0, 0.1, 1.0, 2.0, 3.0, 4.0, 5.0], default=6.0)
-        df_filtered["_sort_date"] = listing_dates.replace("-", "1970-01-01")
-        df_filtered.sort_values(by=["_sort_w", "_sort_date", "pct"],
-                                ascending=[True, True, False], inplace=True)
-        df_filtered.drop(columns=["_sort_w", "_sort_date"], inplace=True)
-
-        target_row_count = len(df_filtered)
 
         # ── 3. 屏蔽信号与排序，就地更新单元格 ──
         self.table.blockSignals(True)
@@ -1241,25 +1404,19 @@ class NewStockPanel(QWidget):
             if idx >= 0:
                 extra_col_map[c_extra] = idx
 
-        # Keep each stock in its existing row while writing. Qt sorts once after
-        # the batch; otherwise a user sort makes every unchanged cell look dirty.
-        if c_code >= 0:
-            row_positions = {str(code).zfill(6): pos for pos, code in enumerate(df_filtered['code'])}
-            existing_codes = [self.table.item(r, c_code).text().strip()
-                              if self.table.item(r, c_code) else '' for r in range(target_row_count)]
-            if (len(row_positions) == target_row_count and len(set(existing_codes)) == target_row_count
-                    and all(code in row_positions for code in existing_codes)):
-                df_filtered = df_filtered.iloc[[row_positions[code] for code in existing_codes]]
-
         previous_row_state = getattr(self, '_rendered_row_state', {})
         next_row_state = {}
-        for row_idx, row in enumerate(df_filtered.to_dict('records')):
+        for row_idx, row in enumerate(records):
+            yield
             code = str(row.get("code", "")).zfill(6)
             row_state = (row_hashes.get(code), row_context)
             next_row_state[code] = row_state
             code_item = self.table.item(row_idx, c_code) if c_code >= 0 else None
             if (row_hashes and code_item is not None and code_item.text().strip() == code
                     and previous_row_state.get(code) == row_state):
+                item = self.table.item(row_idx, self.sort_col)
+                if isinstance(item, NewStockNumericItem):
+                    item._ipo_sort_key = (item._is_empty(), item._get_sort_val(item), item.text())
                 continue
             name = str(row.get("name", ""))
             status = str(row.get("status", "次新"))
@@ -1717,7 +1874,11 @@ class NewStockPanel(QWidget):
         # ── 4. 应用并保持持久化的排序列和方向 ──
         if 0 <= self.sort_col < self.table.columnCount():
             self.table.horizontalHeader().setSortIndicator(self.sort_col, self.sort_order)
-        self.table.setSortingEnabled(True)
+        self.table._ipo_batch_sort_direction = self.sort_order == Qt.SortOrder.DescendingOrder
+        try:
+            self.table.setSortingEnabled(True)
+        finally:
+            del self.table._ipo_batch_sort_direction
 
         # ── 5. 恢复选中焦点与滚动条位置 ──
         if saved_selected_code:

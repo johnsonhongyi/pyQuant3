@@ -1527,7 +1527,8 @@ class StockDetailDialog(QDialog):
         # 🚀【极速 O(1) 6位清洗容错匹配】如果主窗口当前过滤集合已有预计算结果，0 毫秒确认命中
         c_clean = str(self.code).strip().zfill(6)
         
-        if parent_mw and hasattr(parent_mw, "filtered_codes_set") and parent_mw.filtered_codes_set is not None and len(parent_mw.filtered_codes_set) > 0:
+        if (parent_mw and hasattr(parent_mw, "filtered_codes_set")
+                and getattr(parent_mw, "_filter_result_query", None) == query_expr):
             if getattr(parent_mw, "query_expr", "") == query_expr:
                 if any(str(x).strip().zfill(6) == c_clean for x in parent_mw.filtered_codes_set):
                     self.lbl_filter_result.setText("✅ 命中")
@@ -1537,6 +1538,11 @@ class StockDetailDialog(QDialog):
                     self.lbl_filter_result.setText("❌ 未命中")
                     self.lbl_filter_result.setStyleSheet("color: #ff4444; font-weight: bold;")
                     return
+
+        if parent_mw and getattr(parent_mw, 'query_expr', '') == query_expr:
+            self.lbl_filter_result.setText("⏳ 等待筛选结果...")
+            self.lbl_filter_result.setStyleSheet("color: #ff9900; font-weight: bold;")
+            return
 
         import pandas as pd
         df_code = None
@@ -1894,11 +1900,13 @@ class ATSMainWindow(QMainWindow):
     _channel_scan_ready = pyqtSignal(object)
     _market_summary_ready = pyqtSignal()
     _filter_eval_ready = pyqtSignal(int, object)
+    _history_hits_ready = pyqtSignal(int, object)
 
     def __init__(self):
         super().__init__()
         self._channel_scan_ready.connect(self._on_channel_scan_ready)
         self._filter_eval_ready.connect(self._on_filter_eval_finished)
+        self._history_hits_ready.connect(self._on_history_hits_ready)
         # 1. 新股次新股超短检测工具开关 (ipo_detector，控制后台拉起独立检测器小窗口；有独立入口故默认 False 不自动启动)
         ipo_enabled = getattr(
             cct, "ipo_detector", getattr(getattr(cct, "CFG", None), "ipo_detector", False)
@@ -2919,8 +2927,8 @@ class ATSMainWindow(QMainWindow):
         return cleaned.strip()
 
     def calculate_history_hits_ui(self):
-        test_df = self.get_test_df_for_hits()
-        if test_df.empty:
+        source_df = getattr(self, 'current_df', None)
+        if source_df is None or source_df.empty:
             from stock_logic_utils import toast_messageQT
             toast_messageQT(self, "⚠️ 实盘数据未就绪")
             return
@@ -2932,10 +2940,63 @@ class ATSMainWindow(QMainWindow):
             toast_messageQT(self, "⚠️ 当前历史组为空")
             return
             
-        from stock_logic_utils import test_code_against_queries, toast_messageQT
-        
-        enriched_results = test_code_against_queries(test_df, target)
-        
+        import threading
+        lock = getattr(self, '_history_hits_lock', None)
+        if lock is None:
+            lock = threading.Lock()
+            self._history_hits_lock = lock
+        with lock:
+            self._history_hits_revision = getattr(self, '_history_hits_revision', 0) + 1
+            self._history_hits_pending = (self._history_hits_revision, source_df, group,
+                                          target, [dict(item) for item in target])
+            if getattr(self, '_history_hits_running', False):
+                return
+            self._history_hits_running = True
+
+        def worker_loop():
+            while True:
+                with lock:
+                    payload = self._history_hits_pending
+                    if payload is None:
+                        self._history_hits_running = False
+                        return
+                    self._history_hits_pending = None
+                revision, frame, group_name, target_ref, queries = payload
+                try:
+                    from stock_logic_utils import test_code_against_queries
+                    test_df = self.get_test_df_for_hits(frame)
+                    results = test_code_against_queries(test_df, queries)
+                    error = None
+                except Exception as exc:
+                    results, error = None, str(exc)
+                try:
+                    self._history_hits_ready.emit(revision, (group_name, target_ref, queries, results, error))
+                except RuntimeError:
+                    with lock:
+                        self._history_hits_running = False
+                    return
+
+        try:
+            threading.Thread(target=worker_loop, daemon=True, name='ATS-HistoryHits').start()
+        except Exception:
+            with lock:
+                self._history_hits_running = False
+            logger.exception('[ATS] Cannot start history hits worker')
+
+    def _on_history_hits_ready(self, revision: int, payload):
+        if revision != getattr(self, '_history_hits_revision', 0):
+            return
+        group, target, queries, enriched_results, error = payload
+        if (group != self.history_selector.currentText()
+                or self.search_histories.get(group) is not target
+                or [item.get('query') for item in target] != [item.get('query') for item in queries]):
+            return
+        from stock_logic_utils import toast_messageQT
+        if error is not None:
+            logger.warning('[ATS] History hits calculation failed: %s', error)
+            toast_messageQT(self, "⚠️ 策略命中统计失败")
+            return
+
         new_values = []
         for i, item in enumerate(target):
             hit_count = 0
@@ -2981,10 +3042,12 @@ class ATSMainWindow(QMainWindow):
         self._save_search_history_data()
         toast_messageQT(self, f"✅ 策略命中统计完成 (n={len(target)})")
 
-    def get_test_df_for_hits(self):
+    def get_test_df_for_hits(self, source_df=None):
         import pandas as pd
-        if self.current_df is not None and not self.current_df.empty:
-            test_df = self.current_df.copy()
+        if source_df is None:
+            source_df = self.current_df
+        if source_df is not None and not source_df.empty:
+            test_df = source_df.copy()
             mapping = {
                 '价格': 'close', '最新价': 'close', '现价': 'close', 
                 '涨幅': 'pct', 
@@ -3103,7 +3166,69 @@ class ATSMainWindow(QMainWindow):
     def _on_filter_eval_finished(self, req_rev: int, res_set: set):
         """仅当请求版本匹配最新 Revision 时，原子更新主线程过滤结果 (防止慢任务覆盖新任务)"""
         if req_rev == getattr(self, '_filter_eval_revision', 0):
+            changed = (res_set != getattr(self, 'filtered_codes_set', set())
+                       or getattr(self, '_filter_result_query', None) != getattr(self, 'query_expr', ''))
             self.filtered_codes_set = res_set
+            self._filter_result_query = getattr(self, 'query_expr', '')
+            active_index = self.top_tabs.currentIndex() if hasattr(self, 'top_tabs') else 0
+            if (changed or active_index in getattr(self, '_filter_dirty_tabs', ())) and hasattr(self, '_schedule_active_filter_refresh'):
+                self._schedule_active_filter_refresh()
+
+    def _schedule_active_filter_refresh(self):
+        """只更新当前看板；隐藏看板在切入时使用最新过滤结果补绘。"""
+        self._filter_dirty_tabs = {0, 1, 2, 3}
+        index = self.top_tabs.currentIndex() if hasattr(self, 'top_tabs') else 0
+        revision = getattr(self, '_filter_render_revision', 0) + 1
+        self._filter_render_revision = revision
+        QTimer.singleShot(16, lambda: self._refresh_active_filter_panel(index, revision))
+
+    def _refresh_active_filter_panel(self, index: int, revision: int):
+        if (revision != getattr(self, '_filter_render_revision', 0)
+                or not hasattr(self, 'top_tabs') or self.top_tabs.currentIndex() != index):
+            return
+        panels = (
+            ('capital_dragon_panel', '_apply_filter'),
+            ('favorite_panel', '_apply_row_visibility'),
+            ('swing_table', '_apply_favorite_filter'),
+            ('new_stock_panel', '_apply_filter'),
+        )
+        if 0 <= index < len(panels):
+            name, method = panels[index]
+            panel = getattr(self, name, None)
+            if panel is not None and getattr(panel, 'filter_enabled', False):
+                getattr(panel, method)()
+            self._filter_dirty_tabs.discard(index)
+        chart = getattr(self, 'dist_chart', None)
+        if chart is not None and (chart.isVisible() or getattr(chart, '_active_dialogs', None)):
+            def refresh_chart():
+                try:
+                    from PyQt6.sip import isdeleted
+                    if revision == getattr(self, '_filter_render_revision', 0) and not isdeleted(chart):
+                        chart.update_data([], stats_dict=None,
+                                          df_all=self.current_df if self.current_df is not None else chart.current_df)
+                except RuntimeError:
+                    pass
+            QTimer.singleShot(16, refresh_chart)
+        offset = 0
+        for widget in QApplication.topLevelWidgets():
+            if not widget.isVisible():
+                continue
+            if not (hasattr(widget, 'on_global_filter_changed') or isinstance(widget, StockDetailDialog)):
+                continue
+            offset += 1
+            def refresh_window(target=widget):
+                try:
+                    from PyQt6.sip import isdeleted
+                    if (revision != getattr(self, '_filter_render_revision', 0)
+                            or isdeleted(target) or not target.isVisible()):
+                        return
+                    if hasattr(target, 'on_global_filter_changed'):
+                        target.on_global_filter_changed(self.query_expr)
+                    else:
+                        target.update_filter_status(self.query_expr)
+                except RuntimeError:
+                    pass
+            QTimer.singleShot(16 * offset, refresh_window)
 
     def apply_filter(self, force=False):
         import time
@@ -3120,6 +3245,8 @@ class ATSMainWindow(QMainWindow):
         self._last_applied_query = query
         self.query_expr = query
         self.last_query = query
+        self._filter_result_query = None
+        self._filter_dirty_tabs = {0, 1, 2, 3}
         
         # 1. 动态重新计算匹配集合
         self._recompute_filtered_codes_set()
@@ -3130,60 +3257,25 @@ class ATSMainWindow(QMainWindow):
         # 仅持久化本地 ATS 状态 (window_config.json)，绝不修改或覆写 search_history.json
         self._save_search_history_data()
                 
-        # 2. 广播更新主界面四大 Tab 看板 (资金主线, 重点关注, 回调跟踪器, 新股次新股)
-        if hasattr(self, 'capital_dragon_panel') and hasattr(self.capital_dragon_panel, '_apply_filter'):
-            self.capital_dragon_panel._apply_filter()
-        if hasattr(self, 'favorite_panel') and hasattr(self.favorite_panel, '_apply_row_visibility'):
-            self.favorite_panel._apply_row_visibility()
-        if hasattr(self, 'swing_table') and hasattr(self.swing_table, '_apply_favorite_filter'):
-            self.swing_table._apply_favorite_filter()
-        if hasattr(self, 'new_stock_panel') and hasattr(self.new_stock_panel, '_apply_filter'):
-            self.new_stock_panel._apply_filter()
+        # 查询结果到达后再更新当前看板，避免使用上一轮的过滤集合。
+        if not query or self.current_df is None or self.current_df.empty:
+            self._schedule_active_filter_refresh()
 
-        # 3. 广播更新所有相关可见独立窗口 (板块成分股明细、个股详情、分布图表)
-        for widget in QApplication.topLevelWidgets():
-            if hasattr(widget, 'on_global_filter_changed') and widget.isVisible():
-                widget.on_global_filter_changed(self.query_expr)
-            elif isinstance(widget, StockDetailDialog) and widget.isVisible():
-                widget.update_filter_status(self.query_expr)
-                
-        # 广播更新过滤后的个股明细窗口
-        if hasattr(self, 'dist_chart'):
-            df_to_update = self.current_df if self.current_df is not None else self.dist_chart.current_df
-            self.dist_chart.update_data([], stats_dict=None, df_all=df_to_update)
-                
         if self.query_combo.lineEdit():
-            from PyQt6.QtCore import QTimer
             QTimer.singleShot(50, lambda: self.query_combo.lineEdit().setCursorPosition(0))
 
     def clear_filter(self):
         self.query_combo.setCurrentText("")
         self.query_expr = ""
         self.last_query = ""
-        self.filtered_codes_set = set()
+        self._filter_result_query = ""
+        self._recompute_filtered_codes_set()  # 作废在途查询，防止旧结果回填。
         from ats.ui.styles import save_config_node_async
         save_config_node_async("ats_query_expr", "")
         self._save_search_history_data()
         
-        # 广播清空过滤状态至三大 Tab 看板
-        if hasattr(self, 'favorite_panel') and hasattr(self.favorite_panel, '_apply_row_visibility'):
-            self.favorite_panel._apply_row_visibility()
-        if hasattr(self, 'swing_table') and hasattr(self.swing_table, '_apply_favorite_filter'):
-            self.swing_table._apply_favorite_filter()
-        if hasattr(self, 'new_stock_panel') and hasattr(self.new_stock_panel, '_apply_filter'):
-            self.new_stock_panel._apply_filter()
+        self._schedule_active_filter_refresh()
         
-        for widget in QApplication.topLevelWidgets():
-            if hasattr(widget, 'on_global_filter_changed') and widget.isVisible():
-                widget.on_global_filter_changed("")
-            elif isinstance(widget, StockDetailDialog) and widget.isVisible():
-                widget.update_filter_status("")
-                
-        # 广播清空过滤明细窗口
-        if hasattr(self, 'dist_chart'):
-            df_to_update = self.current_df if self.current_df is not None else self.dist_chart.current_df
-            self.dist_chart.update_data([], stats_dict=None, df_all=df_to_update)
-            
         from stock_logic_utils import toast_messageQT
         toast_messageQT(self, "✨ 策略过滤已清空")
 
@@ -3515,7 +3607,7 @@ class ATSMainWindow(QMainWindow):
             return None
 
     def _on_top_tab_changed(self, index: int):
-        """主看板顶部 Tab 切换事件：极速 0ms 补齐渲染，严格锁定各 Tab 统一窗口大小不能被改变，并原子持久化 Tab 索引"""
+        """先完成切页布局；只在所选 Tab 稳定显示后补绘最新快照。"""
         # 1. 严格锁定统一的主分割布局尺寸，杜绝任何 Tab 切换改变窗口大小或挤压左右面板
         if hasattr(self, 'main_splitter'):
             # 若当前处于正常物理展现状态且各栏尺寸合法，更新权威统一分割尺寸 (左栏支持极窄模式 >= 40px)
@@ -3526,9 +3618,28 @@ class ATSMainWindow(QMainWindow):
 
         target_sizes = getattr(self, '_unified_splitter_sizes', [239, 1207, 222])
 
+        revision = getattr(self, '_top_tab_render_revision', 0) + 1
+        self._top_tab_render_revision = revision
+        self._filter_render_revision = getattr(self, '_filter_render_revision', 0) + 1
+        QTimer.singleShot(16, lambda: self._render_top_tab(index, revision))
+        if target_sizes and hasattr(self, 'main_splitter') and sum(target_sizes) > 0:
+            self.main_splitter.setSizes(list(target_sizes))
+
+        if not getattr(self, '_is_restoring_sizes', False):
+            try:
+                from ats.ui.styles import save_config_node_async
+                save_config_node_async("ats_top_tab_index", int(index))
+            except Exception as e:
+                logger.debug(f"[ATSMainWindow] 保存 ats_top_tab_index 异常: {e}")
+
+    def _render_top_tab(self, index: int, revision: int):
+        if (revision != getattr(self, '_top_tab_render_revision', 0)
+                or self.top_tabs.currentIndex() != index or getattr(self, '_is_closing', False)):
+            return
+        new_stock_requested = False
         try:
             if index == 0:
-                # 切换到 🐉 资金主线与龙头中枢 (先极速补齐挂起渲染，再同步最新数据)
+                # 仅补绘当前可见页，使用最新行情快照。
                 if hasattr(self, 'capital_dragon_panel'):
                     if hasattr(self.capital_dragon_panel, 'ensure_rendered'):
                         self.capital_dragon_panel.ensure_rendered()
@@ -3538,42 +3649,44 @@ class ATSMainWindow(QMainWindow):
             elif index == 1:
                 # 切换到 ⭐ 重点关注 (基础重点)
                 if hasattr(self, 'favorite_panel'):
-                    self._fav_needs_render = False
-                    if hasattr(self, '_pending_fav_rows') and self._pending_fav_rows:
-                        self.favorite_panel.update_favorite_rows(self._pending_fav_rows)
+                    if getattr(self, '_pending_fav_rows', None):
+                        if getattr(self, '_fav_needs_render', True):
+                            self.favorite_panel.update_favorite_rows(self._pending_fav_rows)
+                        elif index in getattr(self, '_filter_dirty_tabs', ()):
+                            self.favorite_panel._apply_row_visibility()
                     elif hasattr(self.favorite_panel, '_apply_row_visibility'):
                         self.favorite_panel._apply_row_visibility()
+                    self._fav_needs_render = False
             elif index == 2:
                 # 切换到 📉 大级别 MA20d 回调跟踪器
                 if hasattr(self, 'swing_table'):
-                    self._swing_needs_render = False
-                    if hasattr(self, '_pending_swing_rows') and self._pending_swing_rows:
-                        self.swing_table.update_data_list(self._pending_swing_rows)
+                    if getattr(self, '_pending_swing_rows', None):
+                        if getattr(self, '_swing_needs_render', True):
+                            self.swing_table.update_data_list(self._pending_swing_rows)
+                        elif index in getattr(self, '_filter_dirty_tabs', ()):
+                            self.swing_table._apply_favorite_filter()
                     elif hasattr(self.swing_table, '_apply_favorite_filter'):
                         self.swing_table._apply_favorite_filter()
                         if self.current_df is not None and not self.current_df.empty:
                             self._trigger_realtime_ui_update()
+                    self._swing_needs_render = False
             elif index == 3:
                 # 切换到 🆕 新股次新股 (IPO & 阶梯)
                 if hasattr(self, 'new_stock_panel'):
                     if hasattr(self.new_stock_panel, 'ensure_rendered'):
-                        self.new_stock_panel.ensure_rendered()
+                        new_stock_requested = bool(self.new_stock_panel.ensure_rendered())
                     elif hasattr(self.new_stock_panel, '_apply_filter'):
                         self.new_stock_panel._apply_filter()
+            if index in getattr(self, '_filter_dirty_tabs', ()):
+                # 已重绘整表的分支会自行应用过滤；其余分支补齐过滤状态。
+                if index == 0 and hasattr(self, 'capital_dragon_panel') and getattr(self.capital_dragon_panel, 'filter_enabled', False):
+                    self.capital_dragon_panel._apply_filter()
+                elif (index == 3 and not new_stock_requested and hasattr(self, 'new_stock_panel')
+                      and getattr(self.new_stock_panel, 'filter_enabled', False)):
+                    self.new_stock_panel._apply_filter()
+                self._filter_dirty_tabs.discard(index)
         except Exception as e:
-            logger.debug(f"[ATSMainWindow] _on_top_tab_changed error: {e}")
-        finally:
-            if target_sizes and hasattr(self, 'main_splitter') and sum(target_sizes) > 0:
-                # 强行对齐锁定权威统一分割尺寸，资金主线、重点关注、大级别、新股次新股完全统一，绝对不能被改变
-                self.main_splitter.setSizes(list(target_sizes))
-
-        # 仅原子持久化记录当前 Tab 索引，绝不触发全量未就绪的 splitter 尺寸写盘
-        if not getattr(self, '_is_restoring_sizes', False):
-            try:
-                from ats.ui.styles import save_config_node_async
-                save_config_node_async("ats_top_tab_index", int(index))
-            except Exception as e:
-                logger.debug(f"[ATSMainWindow] 保存 ats_top_tab_index 异常: {e}")
+            logger.debug(f"[ATSMainWindow] _render_top_tab error: {e}")
 
     def _get_today_signal_codes(self):
         """归纳今日所有已发现/记录的特异与共振强势股票代码列表 (供弹窗左右导航联动)"""
@@ -5240,8 +5353,10 @@ class ATSMainWindow(QMainWindow):
         elif active_tab_idx == 1:
             if hasattr(self, 'favorite_panel') and fav_rows:
                 self.favorite_panel.update_favorite_rows(fav_rows)
+                self._fav_needs_render = False
         elif active_tab_idx == 2:
             self.swing_table.update_data_list(swing_rows)
+            self._swing_needs_render = False
 
         # 🛡️ 无论当前处于哪个 Tab，后台自动运行天梯底层引擎逻辑 (解除 Tab 0 单点依赖，对齐龙头突击)
 

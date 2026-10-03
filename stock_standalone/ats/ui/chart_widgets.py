@@ -1403,9 +1403,9 @@ class DistributionDetailsDialog(QDialog, WindowMixin):
                     if hasattr(w, 'filtered_codes_set') and hasattr(w, 'query_expr'):
                         main_app = w
                         break
-            if main_app and hasattr(main_app, 'filtered_codes_set') and main_app.filtered_codes_set:
-                if getattr(main_app, 'query_expr', '') == query_expr:
-                    return main_app.filtered_codes_set
+            if (main_app and getattr(main_app, '_filter_result_query', None) == query_expr
+                    and hasattr(main_app, 'filtered_codes_set')):
+                return main_app.filtered_codes_set
 
             # 2. 否则从当前数据底座动态切片执行 query_engine.execute
             current_df = getattr(self, 'current_df', None)
