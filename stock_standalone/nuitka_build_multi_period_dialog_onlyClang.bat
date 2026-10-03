@@ -220,6 +220,9 @@ echo Checking Python environment...
 if defined VIRTUAL_ENV (
     echo [SUCCESS] Virtual environment detected: %VIRTUAL_ENV%
     set PYTHON_EXEC=%VIRTUAL_ENV%\Scripts\python.exe
+) else if exist "C:\Users\Johnson\anaconda3\envs\tk_nuitka_env\python.exe" (
+    echo [SUCCESS] Dedicated Nuitka environment detected: C:\Users\Johnson\anaconda3\envs\tk_nuitka_env
+    set "PYTHON_EXEC=C:\Users\Johnson\anaconda3\envs\tk_nuitka_env\python.exe"
 ) else (
     echo [WARNING] No virtual environment detected, using system Python
     set PYTHON_EXEC=python
@@ -254,7 +257,7 @@ set CMD="%PYTHON_EXEC%" -m nuitka !NUITKA_MODE_OPT! "%MAIN_SCRIPT%" ^
     --windows-product-version="1.0.0" ^
     --output-dir="%OUTPUT_DIR%" ^
     --no-pyi-file ^
-    --lto=yes ^
+    --lto=no ^
     --jobs=8 ^
     --nofollow-import-to=scipy ^
     --nofollow-import-to=matplotlib ^

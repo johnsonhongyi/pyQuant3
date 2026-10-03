@@ -4,11 +4,14 @@ cd /d "%~dp0"
 title ATS Nuitka Smart Compiler - Clang Only
 chcp 65001 >nul
 
-:: 可通过 ATS_PYTHON_EXEC 明确指定 ATS 构建环境；默认跟随当前虚拟环境。
+REM 可通过 ATS_PYTHON_EXEC 明确指定 ATS 构建环境；默认优先使用 tk_nuitka_env 专用环境。
 if defined ATS_PYTHON_EXEC (
     set "PYTHON_EXEC=%ATS_PYTHON_EXEC%"
 ) else if defined VIRTUAL_ENV (
     set "PYTHON_EXEC=%VIRTUAL_ENV%\Scripts\python.exe"
+) else if exist "C:\Users\Johnson\anaconda3\envs\tk_nuitka_env\python.exe" (
+    echo [SUCCESS] Dedicated Nuitka environment detected: C:\Users\Johnson\anaconda3\envs\tk_nuitka_env
+    set "PYTHON_EXEC=C:\Users\Johnson\anaconda3\envs\tk_nuitka_env\python.exe"
 ) else (
     set "PYTHON_EXEC=python"
 )
@@ -209,8 +212,8 @@ set CMD="%PYTHON_EXEC%" -m nuitka !NUITKA_MODE_OPT! "%MAIN_SCRIPT%" ^
     --output-filename="%OUTPUT_NAME%" ^
     !NUITKA_CLANG_OPT! ^
     --assume-yes-for-downloads ^
-    --enable-plugin=tk-inter ^
     --enable-plugin=pyqt6 ^
+    --enable-plugin=tk-inter ^
     --windows-console-mode=force ^
     --windows-icon-from-ico="%ICON_FILE%" ^
     --windows-company-name="Johnson QuantLab" ^
@@ -219,7 +222,7 @@ set CMD="%PYTHON_EXEC%" -m nuitka !NUITKA_MODE_OPT! "%MAIN_SCRIPT%" ^
     --windows-product-version="%PRODUCT_VERSION%" ^
     --output-dir="%OUTPUT_DIR%" ^
     --no-pyi-file ^
-    --lto=yes ^
+    --lto=no ^
     --jobs=8 ^
     --python-flag=no_asserts ^
     --remove-output ^
@@ -303,30 +306,63 @@ set CMD="%PYTHON_EXEC%" -m nuitka !NUITKA_MODE_OPT! "%MAIN_SCRIPT%" ^
     --include-data-file=config\llm_config.yaml=config\llm_config.yaml ^
     --include-data-file=config\ipo_sentiment.yaml=config\ipo_sentiment.yaml ^
     --include-data-file=config\indicator_help_custom.json=config\indicator_help_custom.json ^
-    --include-package=a_trade_calendar ^
+    --include-module=a_trade_calendar ^
+    --include-module=pandas ^
+    --include-module=numpy ^
+    --include-module=pyqtgraph ^
+    --include-module=sqlite3 ^
+    --include-module=sys_utils ^
+    --include-module=db_utils ^
+    --include-module=ats ^
+    --include-module=ats.ipc_bridge ^
+    --include-module=ats.universe_manager ^
+    --include-module=ats.swing_tracker ^
+    --include-module=ats.backtest_engine ^
+    --include-module=ats.trade_journal ^
+    --include-module=ats.ui.main_window ^
+    --include-module=ats.ui.chart_widgets ^
+    --include-module=ats.ui.universe_widget ^
+    --include-module=ats.ui.heatmap_widget ^
+    --include-module=ats.ui.swing_table ^
+    --include-module=ats.ui.trade_flow ^
+    --include-module=configobj ^
+    --include-module=JSONData ^
+    --include-module=JSONData.sina_data ^
     --include-package=tables ^
     --include-module=tables._comp_lzo ^
     --include-module=tables._comp_bzip2 ^
-    --include-package=tk_gui_modules ^
-    --include-package=trading_kernel ^
-    --include-module=trading_kernel.contracts ^
-    --include-module=trading_kernel.gateway ^
-    --include-module=trading_kernel.kernel_service ^
     --include-module=JSONData.tdx_hdf5_api ^
     --include-module=JSONData.realdatajson ^
     --include-module=JSONData.wencaiData ^
-    --include-module=JSONData.sina_data ^
+    --include-module=JSONData.tdxbk ^
     --include-module=JohnsonUtil.johnson_cons ^
-    --include-module=JohnsonUtil.commonTips ^
-    --include-module=configobj ^
     --include-module=tushare ^
     --include-module=pandas_ta ^
+    --include-module=JohnsonUtil.commonTips ^
     --include-module=talib.stream ^
     --include-module=talib.abstract ^
     --include-module=run_sbc ^
     --include-module=run_ipo_detector ^
-    --include-module=tools.run_ipo_learning_console ^
-    --include-module=tools.run_shadow_live_test
+    --include-module=ats.ui.ipo_subnew_detector_dialog ^
+    --include-module=ats.ui.ipo_detector_ipc ^
+    --include-module=ats.strategy.ipo_vwap_detector_engine ^
+    --include-module=ats.new_stock_fetcher ^
+    --include-module=ats.strategy.ipo_data_contracts ^
+    --include-module=ats.strategy.ipo_gate_context_provider ^
+    --include-module=ats.strategy.ipo_outcome_labels ^
+    --include-module=ats.strategy.ipo_trading_center ^
+    --include-module=ats.strategy.gate_orchestrator ^
+    --include-module=ats.llm.backend_factory ^
+    --include-module=ats.next_day_watch_process ^
+    --include-module=ats.bounded_evaluation_store ^
+    --include-module=ats.archive_policy ^
+    --include-module=ats.storage_archive ^
+    --include-module=ats.llm.antigravity_cli_backend ^
+    --include-module=ats.llm.codex_cli_backend ^
+    --include-module=ats.llm.offline_learning ^
+    --include-module=ats.ui.ipo_learning_console ^
+    --include-package=trading_kernel ^
+    --include-package=yaml
 
 echo.
 echo [INFO] Clang pre-flight check
