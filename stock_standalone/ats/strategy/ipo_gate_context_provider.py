@@ -35,12 +35,15 @@ def _resolve_project_root() -> Path:
     - 开发模式：fallback 到 parents[2]（工程源码根）。
     """
     try:
-        from sys_utils import get_app_root, is_packaged_env
+        from sys_utils import get_app_root, is_packaged_env, safe_resolve_path
         if is_packaged_env():
-            return Path(get_app_root()).resolve()
+            return safe_resolve_path(get_app_root())
     except Exception:
         pass
-    return Path(__file__).resolve().parents[2]
+    try:
+        return Path(__file__).resolve().parents[2]
+    except OSError:
+        return Path(__file__).absolute().parents[2]
 
 
 DEFAULT_ROOT = _resolve_project_root()
@@ -612,7 +615,8 @@ _PROVIDERS_LOCK = threading.RLock()
 def get_default_ipo_gate_context_provider(
     root: str | Path = DEFAULT_ROOT,
 ) -> IPOGateContextProvider:
-    resolved = str(Path(root).resolve())
+    from sys_utils import safe_resolve_path
+    resolved = str(safe_resolve_path(root))
     with _PROVIDERS_LOCK:
         provider = _PROVIDERS.get(resolved)
         if provider is None:

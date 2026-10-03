@@ -73,7 +73,26 @@ def assert_main_thread(tag=""):
 
 def is_packaged_env() -> bool:
     """判断当前运行环境是否为打包后的可执行程序 (PyInstaller / Nuitka)"""
-    return getattr(sys, "frozen", False) or "NUITKA_ONEFILE_DIRECTORY" in os.environ or hasattr(sys, "nuitka_version")
+    return (
+        getattr(sys, "frozen", False)
+        or "NUITKA_ONEFILE_DIRECTORY" in os.environ
+        or "NUITKA_ONEFILE_BINARY" in os.environ
+        or hasattr(sys, "nuitka_version")
+        or "__compiled__" in globals()
+    )
+
+
+def safe_resolve_path(path: Any) -> Any:
+    """安全解析路径，避免在 Windows 内存盘 (RamDisk) 或虚拟驱动器上因 GetFinalPathNameByHandle
+    不支持而抛出 OSError: [WinError 1] 函数不正确。
+    """
+    from pathlib import Path
+    p = Path(path) if not isinstance(path, Path) else path
+    try:
+        return p.resolve()
+    except OSError:
+        return p.absolute()
+
 
 def get_app_root() -> str:
     """Nuitka / PyInstaller / dev 统一兼容的物理可执行程序所在绝对根目录 (直接返回 str 格式)"""
@@ -83,6 +102,13 @@ def get_app_root() -> str:
         return env_root
 
     import sys
+    
+    # 0. Nuitka Onefile 模式官方权威环境变量：NUITKA_ONEFILE_BINARY
+    onefile_bin = os.environ.get("NUITKA_ONEFILE_BINARY")
+    if onefile_bin and os.path.exists(onefile_bin):
+        calculated_root = os.path.dirname(os.path.abspath(onefile_bin))
+        os.environ["INSTOCK_APP_ROOT"] = calculated_root
+        return calculated_root
     
     def _is_inside_temp_dir(path: str) -> bool:
         if not path:
@@ -107,14 +133,17 @@ def get_app_root() -> str:
                 except:
                     pass
                     
-        # 2. 物理规则模糊判定 (instock_Nuitka, onefile_, _meipass, \temp\)
-        for pattern in ("instock_nuitka", "onefile_", "_meipass", "\\temp\\", "/temp/"):
+        # 2. 物理规则模糊判定 (instock_nuitka, ats_nuitka, multiperiodtester_nuitka, onefile_, _meipass, \temp\)
+        for pattern in (
+            "instock_nuitka", "ats_nuitka", "multiperiodtester_nuitka",
+            "onefile_", "_meipass", "\\temp\\", "/temp/",
+        ):
             if pattern in path_norm:
                 return True
                 
         return False
 
-    is_nuitka = "__compiled__" in globals() or "NUITKA_ONEFILE_DIRECTORY" in os.environ
+    is_nuitka = "__compiled__" in globals() or "NUITKA_ONEFILE_DIRECTORY" in os.environ or "NUITKA_ONEFILE_BINARY" in os.environ
     calculated_root = None
     
     # 1. Nuitka Onefile 模式下，从 sys.argv[0] 获取真实物理 launcher 路径，排除解释器与临时目录
@@ -154,10 +183,6 @@ def get_app_root() -> str:
 
     # 物理锁定并写入环境变量，保障多进程完美一致
     os.environ["INSTOCK_APP_ROOT"] = calculated_root
-    print(f"[sys_utils] sys.executable={sys.executable}")
-    print(f"[sys_utils] sys.argv[0]={sys.argv[0] if sys.argv else None}")
-    print(f"[sys_utils] cwd={os.getcwd()}")
-    print(f"[sys_utils] get_app_root={calculated_root}")
     return calculated_root
 
 

@@ -1,5 +1,30 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-10-03 11:15 Nuitka Onefile 模式物理路径解析适配、Windows 虚拟内存盘防崩修复、一键缓存清理与全系统性能测试闭环
+- [x] **【彻底解决--ipo-console临时解包路径漂移(NUITKA_ONEFILE_BINARY)、safe_resolve_path免疫Windows内存盘WinError 1崩溃、全链路物理根目录穿透、一键纯净缓存清理脚本落地】(`sys_utils.py`, `tools/run_ipo_learning_console.py`, `tools/run_ipo_data_acquisition.py`, `ats/ui/ipo_learning_console.py`, `clean_nuitka_cache.bat`, `20261003_1115_task.md`)**：
+    - [x] **根因全面排查与实证 [RootCause]**：
+        1. 查明 Nuitka Onefile 打包解压后运行在 `G:\Temp\ATS_Nuitka`，多进程子进程的 `sys.argv[0]` 指向临时解包目录，原 `get_app_root()` 未识别 Nuitka 官方权威环境变量 `NUITKA_ONEFILE_BINARY`，导致根目录误判为临时目录；
+        2. 查明 G: 盘为 Windows 内存虚拟盘（RamDisk），其驱动程序不支持 `GetFinalPathNameByHandle` 符号链接解析，裸调用 `Path.resolve()` 直接引发 Win32 `ERROR_INVALID_FUNCTION` (错误码 1)；
+        3. 查明独立控制台启动器未将解析出的根目录穿透给子窗口与多进程 Worker；
+    - [x] **sys_utils.py 物理路径权威适配与安全路径解析 [Core]**：增加识别 `NUITKA_ONEFILE_BINARY` 环境变量，在 Nuitka Onefile 下 100% 精准锁定真实宿主 EXE 所在物理目录；新增并导出 `safe_resolve_path(path)`，智能兜底 `resolve()` 异常退化为 `absolute()`，彻底免疫虚拟盘驱动的 `WinError 1`；增强 `is_packaged_env()` 判定；
+    - [x] **IPO 学习与数据采集全链路穿透加固 [Robustness]**：`tools/run_ipo_learning_console.py` 使用 `get_app_root()` 代替 `__file__` 相对路径，在 `main()` 中将 `resolved_root` 透传给子窗口与环境变量 `INSTOCK_APP_ROOT`；`tools/run_ipo_data_acquisition.py` 顶层 `APP_ROOT` 与循环采集函数全面接入 `safe_resolve_path`；`ats/ui/ipo_learning_console.py` 与 `ats/strategy/ipo_gate_context_provider.py` 统一接入 `safe_resolve_path`；
+    - [x] **一键纯净缓存清理脚本落地 [Tooling]**：创建 `clean_nuitka_cache.bat`，一键安全清理 5 大层级缓存（.nuitka_cache、build、G:\Temp 解包、sccache、__pycache__），支持 `-y` 静默参数；
+    - [x] **全链路语法与编码校验 100% 绿灯**：全量变更通过 `git diff --check` 与 `python -m py_compile` 校验，实测内存盘模拟路径解析 100% 正常。
+
+## 2026-10-03 11:10 OpenAI Codex 上下文压缩参数优化与 body_after_prefix 性能平衡闭环
+- [x] **【彻底解决频繁压缩痛点、启用body_after_prefix剥离30k前缀底座、对齐272k物理窗口与170k甜点阈值、缩减项目文档底座32k、--strict-config校验100%通过】(`~/.codex/config.toml`, `20261003_1110_task.md`)**：
+    - [x] **频繁压缩根因排查确证 [RootCause]**：查明 `gpt-6.1-sol` 真实物理窗口达 272,000 Tokens，而此前 `model_auto_compact_token_limit = 160000` (58%) 阈值过低；实测首轮静态 Prefix（系统指令+工具定义+64KB项目文档）已常驻达 30,000 Tokens，导致净有效正文仅剩 120k，长对话（350~440轮）被迫频繁压缩 5~6 次，严重卡顿并破坏 Prompt Cache 命中率；
+    - [x] **启用 body_after_prefix 剥离静态前缀 [Optimization]**：配置 `model_auto_compact_token_limit_scope = "body_after_prefix"`，压缩阈值仅统计动态对话正文，Prefix 不占配额，实际净工作空间多出 35,000+ Tokens；
+    - [x] **参数黄金组合落地 [KISS/Performance]**：配置 `model_context_window = 272000` 对齐物理上限；`model_auto_compact_token_limit = 170000`（保留 67k 缓冲区防溢出）；`tool_output_token_limit = 8000`；`project_doc_max_bytes = 32768`（省出 12k 常驻内存）；
+    - [x] **全链路语法与运行健康核验**：执行 `codex.exe --strict-config doctor`，配置解析 100% OK，零未知参数警告。
+
+## 2026-10-03 10:15 ATS 全系统架构与极限性能优化方案实际收益与必要性深度审核
+- [x] **【实测瓶颈确证(14项损耗点定位)、实际收益与阿姆达尔定律天花板判定、P0~P3必要性分级、首批必解项(回放阻塞/GUI同步IO/长锁)裁决与实施路线图】(`docs/ATS_ARCHITECTURE_PERFORMANCE_PLAN_20261003.md`, `20261003_1015_task.md`)**：
+    - [x] **实测瓶颈确证与代码锚点核实**：核验 F01 宽差分接收 P50 116.8ms（逐列 `.loc` 循环低效）、F02/F03 GUI 同步目录扫描与配置写入、F04 持 HDF 锁请求 HTTP 网络长锁、F14 `SafeHDFStore` 无限重试死循环导致回放停滞；
+    - [x] **实际收益客观评估（理性剥离虚胖收益）**：澄清 5k×128 宽差分 4.7 倍加速的系统端到端边界（受 250ms 节拍与展示刷新节流制约）；明确排除已完成项（候选投影 7.7~9.9 倍不可重复领奖）；警惕“全量代替差分”带来的 5MB 带宽/序列化反噬；
+    - [x] **必要性与紧迫度分级裁决**：裁定 F14（回放阻塞）、F02/F03（GUI 同步 IO）、F04（锁内网络）为最高紧迫度 P1 必做项；裁定 F01（向量化块合并）为高 ROI 必做项；严格限制 F07~F11 深层重构需按实测准入；明确禁止共享内存、全量替代差分与大改表格控件等过度设计；
+    - [x] **实施路径与业务红线确认**：确认首要攻坚 Stage 0（测试隔离与回放解阻，固化黄金样本），严格坚守两帧确认、事件顺序、幂等、T+1 与订单资金对账硬门槛。
+
 ## 2026-10-03 00:45 ATS 与多周期 Nuitka 打包体积深度瘦身与运行底座安全性全面校准闭环
 - [x] **【彻底拔除MFC/win32ui(立省5.35MB)、底层联动win32gui完好保留、保留系统运行时防空白系统缺DLL、规范包含trading_kernel保障IPO自学习、双插件(tk-inter+pyqt6)无损协同】(`nuitka_build_ats_console_onlyClang.bat`, `nuitka_build_multi_period_dialog_onlyClang.bat`, `20261003_0045_task.md`)**：
     - [x] **根因全面排查与运行底座实证 [RootCause]**：

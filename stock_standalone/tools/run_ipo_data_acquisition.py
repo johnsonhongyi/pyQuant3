@@ -14,7 +14,14 @@ from pathlib import Path
 from uuid import uuid4
 from typing import Any, Callable, Dict, Optional
 
-APP_ROOT = Path(__file__).resolve().parents[1]
+try:
+    from sys_utils import get_app_root, safe_resolve_path
+    APP_ROOT = safe_resolve_path(get_app_root())
+except Exception:
+    try:
+        APP_ROOT = Path(__file__).resolve().parents[1]
+    except OSError:
+        APP_ROOT = Path(__file__).absolute().parents[1]
 if str(APP_ROOT) not in sys.path:
     sys.path.insert(0, str(APP_ROOT))
 
@@ -869,7 +876,10 @@ def run_ats_learning_cycle(
     progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> Dict[str, Any]:
     """Read ATS's IPO module and detector for shadow learning; never run an order path."""
-    project_root = Path(root).resolve()
+    try:
+        project_root = Path(root).resolve()
+    except OSError:
+        project_root = Path(root).absolute()
 
     def progress(
         stage: str, message: str, status: str = "RUNNING", event_ticker: str = "",

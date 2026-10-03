@@ -19,15 +19,15 @@ import threading
 if __name__ == "__main__":
     multiprocessing.freeze_support()
 
-app_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if app_dir not in sys.path:
-    sys.path.insert(0, app_dir)
-
 try:
-    from sys_utils import setup_qt_clean_environment
+    from sys_utils import get_app_root, setup_qt_clean_environment
+    app_dir = get_app_root()
     setup_qt_clean_environment()
 except Exception:
-    pass
+    app_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+if app_dir not in sys.path:
+    sys.path.insert(0, app_dir)
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout,
@@ -193,15 +193,18 @@ def main():
             "Ollama 仅分析有效新鲜观察，训练与交易授权保持关闭。",
             flush=True,
         )
+    from sys_utils import get_app_root
+    resolved_root = args.project_root or get_app_root()
+    os.environ["INSTOCK_APP_ROOT"] = resolved_root
+
     gate_provider = None
     if not args.simulation_read_only:
         # run_ats.py dispatches --ipo-console before its normal ATS startup.
         # This mode owns only the read-only Gate reader lifecycle.
         try:
-            from sys_utils import get_app_root
             from ats.strategy.ipo_gate_context_provider import get_default_ipo_gate_context_provider
 
-            gate_provider = get_default_ipo_gate_context_provider(args.project_root or get_app_root())
+            gate_provider = get_default_ipo_gate_context_provider(resolved_root)
             gate_provider.start_auto_refresh()
         except Exception as exc:
             print(f"[IPO Console] Read-only services unavailable: {type(exc).__name__}", flush=True)
@@ -209,7 +212,7 @@ def main():
     app.setApplicationName("IPOLearningConsoleStandalone")
 
     window = StandaloneLearningWindow(
-        project_root=args.project_root,
+        project_root=resolved_root,
         simulation_read_only=args.simulation_read_only,
     )
     window.show()
