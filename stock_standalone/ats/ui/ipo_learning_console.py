@@ -2554,7 +2554,8 @@ class _SourceAcquisitionWorker(QThread):
         parent: Optional[QWidget] = None,
     ) -> None:
         super().__init__(parent)
-        self._root = project_root
+        from sys_utils import safe_resolve_path
+        self._root = safe_resolve_path(project_root)
         self._ticker = ticker
         self._collect_labels = collect_labels
         self._stop_requested = threading.Event()
@@ -2784,14 +2785,12 @@ class IPOLearningConsole(QWidget):
         simulation_read_only: bool = False,
     ) -> None:
         super().__init__(parent)
-        if project_root:
-            self._root = Path(project_root)
-        else:
-            # __file__ points into PyInstaller's temporary _MEI directory when frozen;
-            # use the shared resolver, which returns the physical application root.
-            from sys_utils import get_app_root
+        from sys_utils import get_app_root, safe_resolve_path
 
-            self._root = Path(get_app_root())
+        if project_root:
+            self._root = safe_resolve_path(project_root)
+        else:
+            self._root = safe_resolve_path(get_app_root())
         self._simulation_read_only = simulation_read_only is True
         self._worker = _LearningMonitorWorker(self._root, self)
         self._worker.snapshot_ready.connect(self._render_snapshot)
