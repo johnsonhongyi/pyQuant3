@@ -1,5 +1,13 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](stock_standalone/design/antigravity_historical_tasks_archive.md)
 
+## 2026-10-03 14:38 Nuitka 批量全编译调度中心 (instock-nuitka-batch.cmd) 落地闭环
+- [x] **【对齐instock-pyinstall-batch高规格标准、onefile_spec参数穿透免5秒等待全无人值守、编译前后7天版本自动归档自愈、单项与总体耗时精确核算与报表持久化】(`instock-nuitka-batch.cmd`, `C:\Users\Johnson\instock-nuitka-batch.cmd`, `tools/generate_nuitka_batch.py`, `stock_standalone/20261003_1438_task.md`)**：
+    - [x] **模块映射与产物标准对齐 [Architecture]**：完整整合 `ats` (`nuitka_build_ats_console_onlyClang.bat` -> `build\ATS_Terminal.exe`)、`tk` (`nuitka_build_console_onlyClang.bat` -> `build\instock_MonitorTK_Nuita.exe`) 与 `multi` (`nuitka_build_multi_period_dialog_onlyClang.bat` -> `build\MultiPeriodTester.exe`) 三大 Nuitka 全编译脚本；
+    - [x] **交互菜单与参数穿透无人值守 [Core/UX]**：完美实现包含独立模块单选、双核组合 [4] 与核心全量 [5]（默认直接回车全编译）的高效菜单；默认向子脚本透传 `onefile_spec` 消除 5 秒 choice 等待，搭配 `< nul` 自动绕过 pause，实现纯无人值守自动化；支持 `--standalone` / `--onefile` 模式覆盖与 `--dry-run` 演练；
+    - [x] **7 天历史版本自动滚动归档 [Robustness]**：深度联动 `tools/archive_build_exe.py`，编译前检测到现存旧版自动归档到 `build\archive\` 并滚动淘汰 7 天前旧版本；编译成功后自动记录新版本快照并打印保留清单，编译失败给出回滚引导；
+    - [x] **时间统计与报表日志持久化 [Tooling]**：精确核算单项分秒耗时与文件大小（MB/KB），统筹计算总计耗时，高保真渲染汇总表格并以 DRY 原则同步保存至 `build\nuitka_batch_build_last_summary.txt`；
+    - [x] **双位置部署与全链路验证 100% 绿灯**：工作区根目录与 `C:\Users\Johnson\` 同步部署，标准 Windows CRLF 换行规范彻底免疫 CMD 断行语法缺陷，`--dry-run all` 与 `--dry-run ats` 演练 100% 通过。
+
 ## 2026-09-28 10:45
 - [x] **【ATS NextDayWatch 与 TDXRealtimeFetcher 全进程复用与极限性能审计及加固】(`stock_standalone/ats/ui/main_window.py`, `stock_standalone/ats/tdx_realtime_fetcher.py`, `stock_standalone/20260928_1045_task.md`)**：
     - [x] **对象复用定性**：确认为全局单例 `TDXRealtimeFetcher.get_instance()`，未开启多余对象；
