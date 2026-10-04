@@ -79,6 +79,8 @@ def main():
     if 'provider' in locals():
         app.aboutToQuit.connect(provider.stop_auto_refresh)
     def flush_archives():
+        if getattr(window, '_exit_cleanup_complete', False):
+            return
         import threading
         from ats.bounded_evaluation_store import evaluation_store
         threading.Thread(target=evaluation_store.flush, name='ATS-ArchiveClose', daemon=False).start()
