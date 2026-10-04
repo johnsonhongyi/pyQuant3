@@ -2,6 +2,8 @@
 
 **结论：需要修改，尚未闭环；现有测试通过不能支持“100% 闭环、信号绝对零漂移、全部性能指标达标”。**
 
+> 本文保留首次审核时的代码与验证状态。后续复审修复、最新回归结果及剩余性能边界见 [正确性修复闭环记录](ATS_SBC_CORRECTNESS_CLOSURE_20261004.md)。
+
 - 审核范围：HEAD `57656dab` 与当前暂存优化代码，对照原设计方案和 `20261004_1205_task.md`；本轮交付独立审核报告。
 - 核心源码：`ats/ui/intraday_strategy_dialog.py`；关联检查 `ats/tdx_realtime_fetcher.py`、`ats/intraday_strategy_engine.py`、`ats/vwap_trading_engine.py`、`ats/ui/sbc_launcher.py`。
 - 以下行号对应审核时工作区源码；P1 为应优先修复的功能与线程问题，P2 为性能、交互或验收缺口。

@@ -2473,20 +2473,26 @@ class IntradayStrategyEngine:
             return res
 
         row = None
+        code_col = next((c for c in ('code', 'symbol', 'sec_code') if c in df.columns), None)
         # 1. 尝试从 Index 匹配
         if c_clean in df.index:
             row = df.loc[c_clean]
         elif str(code) in df.index:
             row = df.loc[str(code)]
+        elif not isinstance(df.index, pd.RangeIndex) and c_clean.isdigit() and int(c_clean) in df.index:
+            row = df.loc[int(c_clean)]
         else:
             # 2. 尝试从 'code' 列匹配
-            code_col = next((c for c in ('code', 'symbol', 'sec_code') if c in df.columns), None)
             if code_col:
-                matched = df[df[code_col].astype(str).str.contains(c_clean)]
+                codes = df[code_col].astype(str).str.zfill(6).str.extract(r'(?<!\d)(\d{6})(?!\d)', expand=False)
+                matched = df[codes == c_clean]
                 if not matched.empty:
                     row = matched.iloc[0]
 
         if row is None:
+            # 多股快照未命中目标代码时，不得按单股历史汇总其他股票。
+            if code_col or any(len(str(idx)) == 6 and is_valid_stock_code(str(idx)) for idx in df.index):
+                return res
             # 3. 兼容单股 1 分钟 K 线历史 DataFrame (以 time 为行，非多股大表)
             if 'close' in df.columns or 'open' in df.columns:
                 try:

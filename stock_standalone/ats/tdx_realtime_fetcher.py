@@ -4312,6 +4312,13 @@ class TDXRealtimeFetcher:
             logger.debug(f"拉取 {c_clean} [{category}] K 线数据异常: {e}")
             return pd.DataFrame()
 
+    def get_cached_yesterday_ohlc(self, code: str) -> Dict[str, float]:
+        """仅查询有效昨日 OHLC 内存缓存，未命中返回空字典，不发起 I/O。"""
+        cached = getattr(self, "_yesterday_ohlc_cache", {}).get(str(code).zfill(6))
+        if cached and 0.0 <= time.time() - cached[1] < 10.0:
+            return dict(cached[0])
+        return {}
+
     def get_yesterday_ohlc(self, code: str) -> Dict[str, float]:
         """
         获取标的昨日日 K 线的真实 OHLC (昨开 open, 昨高 high, 昨低 low, 昨收 close)
@@ -4323,9 +4330,9 @@ class TDXRealtimeFetcher:
         if not hasattr(self, "_yesterday_ohlc_cache"):
             self._yesterday_ohlc_cache = {}
 
-        cached = self._yesterday_ohlc_cache.get(c_clean)
-        if cached and (now_ts - cached[1] < 10.0):
-            return cached[0]
+        cached = self.get_cached_yesterday_ohlc(c_clean)
+        if cached:
+            return cached
 
         res = {"open": 0.0, "high": 0.0, "low": 0.0, "close": 0.0}
         try:

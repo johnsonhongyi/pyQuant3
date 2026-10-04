@@ -21,6 +21,7 @@ import math
 import logging
 import threading
 import weakref
+from copy import copy as shallow_copy
 import pandas as pd
 import numpy as np
 from datetime import datetime
@@ -71,13 +72,13 @@ def _is_ats_sbc_close_enabled() -> bool:
 try:
     from ats.proactive_exit_engine import ProactiveExitEngine, ExitAction
     from ats.consensus_arbiter import ConsensusArbiter, SharedPositionState, VoteResult
-    from ats.vwap_trading_engine import VWAPTradingEngine, VWAPTickState, detect_vwap_displacement_reversal
+    from ats.vwap_trading_engine import VWAPTradingEngine, VWAPTickState, detect_vwap_displacement_reversal, normalize_intraday_bar_dates
     from ats.ui.vwap_rule_editor import VWAPRuleEditorDialog
 except ImportError:
     try:
         from stock_standalone.ats.proactive_exit_engine import ProactiveExitEngine, ExitAction
         from stock_standalone.ats.consensus_arbiter import ConsensusArbiter, SharedPositionState, VoteResult
-        from stock_standalone.ats.vwap_trading_engine import VWAPTradingEngine, VWAPTickState, detect_vwap_displacement_reversal
+        from stock_standalone.ats.vwap_trading_engine import VWAPTradingEngine, VWAPTickState, detect_vwap_displacement_reversal, normalize_intraday_bar_dates
         from stock_standalone.ats.ui.vwap_rule_editor import VWAPRuleEditorDialog
     except ImportError:
         ProactiveExitEngine = None
@@ -85,6 +86,7 @@ except ImportError:
         VWAPTradingEngine = None
         VWAPRuleEditorDialog = None
         detect_vwap_displacement_reversal = None
+        normalize_intraday_bar_dates = None
 
 logger = logging.getLogger("IntradayStrategyDialog")
 
@@ -448,6 +450,7 @@ class SBCChartCanvas(QWidget):
     MARGIN_RIGHT = 52
     MARGIN_TOP = 22
     MARGIN_BOTTOM = 22
+    _amplitude_data_ready = pyqtSignal(str, object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -465,6 +468,9 @@ class SBCChartCanvas(QWidget):
         self.channel_info_period = ""
         self.channel_overlay_enabled = True
         self.amplitude_info = {}  # 📊 存储标的近 5 日振幅高低与活跃度指标 (均振、极值、每日明细)
+        self._amplitude_fetching_codes = set()
+        self._amplitude_retry_after = {}
+        self._amplitude_data_ready.connect(self._on_amplitude_data_received, Qt.ConnectionType.QueuedConnection)
 
         # 🔍 缩放与平移视口状态
         self._zoom_start_idx = 0
@@ -671,11 +677,12 @@ class SBCChartCanvas(QWidget):
             return [], {}
         df_id = id(self.df_intraday)
         df_len = len(self.df_intraday)
-        if getattr(self, "_cached_times_token", None) == (df_id, df_len):
+        token = (df_id, df_len, id(self.df_intraday.index), getattr(self, "_data_revision", 0))
+        if getattr(self, "_cached_times_token", None) == token:
             return self._cached_times_all, self._cached_time_to_idx
         t_all = [str(x) for x in self.df_intraday.index]
         t_map = {t: i for i, t in enumerate(t_all)}
-        self._cached_times_token = (df_id, df_len)
+        self._cached_times_token = token
         self._cached_times_all = t_all
         self._cached_time_to_idx = t_map
         return t_all, t_map
@@ -688,13 +695,14 @@ class SBCChartCanvas(QWidget):
             return fh, fl
         df_id = id(self.df_intraday)
         df_len = len(self.df_intraday)
-        if getattr(self, "_cached_kline_extremes_token", None) == (df_id, df_len):
+        token = (df_id, df_len, getattr(self, "_data_revision", 0))
+        if getattr(self, "_cached_kline_extremes_token", None) == token:
             return self._cached_kline_extremes_val
         all_highs = self.df_intraday['high'].astype(float).values if 'high' in self.df_intraday.columns else highs
         all_lows = self.df_intraday['low'].astype(float).values if 'low' in self.df_intraday.columns else lows
         fh = float(np.max(all_highs)) if len(all_highs) > 0 else 0.0
         fl = float(np.min(all_lows)) if len(all_lows) > 0 else 0.0
-        self._cached_kline_extremes_token = (df_id, df_len)
+        self._cached_kline_extremes_token = token
         self._cached_kline_extremes_val = (fh, fl)
         return fh, fl
 
@@ -987,7 +995,7 @@ class SBCChartCanvas(QWidget):
                 cat_req = p_mode if p_mode in ("5m", "15m", "30m", "60m", "day", "2k", "3k", "week", "month") else "60m"
                 df_k = fetcher.get_cached_kline_bars(c_clean, category=cat_req) if hasattr(fetcher, "get_cached_kline_bars") else None
                 if df_k is not None and not df_k.empty and len(df_k) >= 15:
-                    self.df_intraday = df_k
+                    self._set_chart_snapshot(df_k, self.signals)
                 else:
                     parent_win = self.window()
                     if parent_win and hasattr(parent_win, "reload_chart"):
@@ -1213,6 +1221,23 @@ class SBCChartCanvas(QWidget):
 
         self.update()
 
+    def _on_amplitude_data_received(self, code: str, df_day):
+        """只在主线程消费补拉结果，失败后冷却，过时标的只释放在途守卫。"""
+        self._amplitude_fetching_codes.discard(code)
+        if df_day is None or df_day.empty or len(df_day) < 2:
+            self._amplitude_retry_after[code] = time.monotonic() + 10.0
+            return
+        self._amplitude_retry_after.pop(code, None)
+        if code != str(self.code).zfill(6) or code != getattr(self, "_amplitude_requested_code", ""):
+            return
+        self._amplitude_day_result = (code, df_day)
+        try:
+            self._cached_amp_ts = 0.0
+            self.update_amplitude_data(code)
+            self.update()
+        finally:
+            self._amplitude_day_result = None
+
     def update_amplitude_data(self, code: str = ""):
         """
         【📊 标的近几日振幅与活跃度计算引擎 (极限复用·零系统压力)】
@@ -1226,6 +1251,7 @@ class SBCChartCanvas(QWidget):
         c_clean = "".join(filter(str.isdigit, str(code or getattr(self, "code", "")))).zfill(6)
         if not c_clean or c_clean == "000000":
             return
+        self._amplitude_requested_code = c_clean
 
         # ⚡ 标的级内存指纹缓存：同标的在 60 秒内直接复用已有结果，0 毫秒完成，零系统开销
         now_ts = time.time()
@@ -1266,8 +1292,8 @@ class SBCChartCanvas(QWidget):
             history_df = getattr(self, "_amplitude_history_df", None) if p_mode == "1m" else None
             if not days_detail and p_mode in ("1m", "2d", "3d", "5d", "10d"):
                 df_src = history_df if history_df is not None and not history_df.empty else self.df_intraday
-                if df_src is None or df_src.empty:
-                    return
+                if df_src is None:
+                    df_src = pd.DataFrame()
                 col_d = "date" if "date" in df_src.columns else ("datetime" if "datetime" in df_src.columns else None)
                 if col_d:
                     grp_series = df_src[col_d].astype(str).str.split().str[0].str[:10]
@@ -1292,26 +1318,30 @@ class SBCChartCanvas(QWidget):
                     days_detail = days_detail[-5:]
 
             # ── 3. 兜底方案：仅在 1m 或短周期分钟 K 线且本地无多日数据时，优先读取日 K 内存缓存，严禁阻塞 UI 线程 ──
-            if not days_detail and p_mode != "1m":
+            if not days_detail:
                 from ats.tdx_realtime_fetcher import TDXRealtimeFetcher
                 fetcher = TDXRealtimeFetcher.get_instance()
-                df_day = fetcher.get_cached_kline_bars(c_clean, category="day") if hasattr(fetcher, "get_cached_kline_bars") else None
-                if df_day is None or df_day.empty:
-                    if not hasattr(self, "_amplitude_fetching_codes"):
-                        self._amplitude_fetching_codes = {}
-                    now_t = time.time()
-                    last_try = self._amplitude_fetching_codes.get(c_clean, 0.0)
-                    if (now_t - last_try) > 10.0:  # 10 秒防重入与失败冷却
-                        self._amplitude_fetching_codes[c_clean] = now_t
+                ready = getattr(self, "_amplitude_day_result", None)
+                df_day = ready[1] if ready and ready[0] == c_clean else fetcher.get_cached_kline_bars(c_clean, category="day", min_count=2)
+                if df_day is None or df_day.empty or len(df_day) < 2:
+                    if c_clean not in self._amplitude_fetching_codes and time.monotonic() >= self._amplitude_retry_after.get(c_clean, 0.0):
+                        self._amplitude_fetching_codes.add(c_clean)
                         def _async_fetch_day():
+                            d_df = None
                             try:
                                 d_df = fetcher.fetch_kline_bars(c_clean, category="day", count=8)
-                                if d_df is not None and not d_df.empty:
-                                    # 明确传递 self 作为 context object，安全回到主线程事件循环
-                                    QTimer.singleShot(0, self, lambda: self.update_amplitude_data(c_clean) if hasattr(self, "update_amplitude_data") else None)
-                            except Exception:
-                                pass
-                        threading.Thread(target=_async_fetch_day, daemon=True).start()
+                            except Exception as exc:
+                                logger.debug(f"振幅补拉 {c_clean} 异常: {exc}")
+                            finally:
+                                try:
+                                    self._amplitude_data_ready.emit(c_clean, d_df)
+                                except RuntimeError:  # 接收画布已被删除
+                                    pass
+                        try:
+                            threading.Thread(target=_async_fetch_day, daemon=True).start()
+                        except Exception as exc:
+                            logger.debug(f"振幅线程启动失败: {exc}")
+                            self._on_amplitude_data_received(c_clean, None)
 
                 if df_day is not None and not df_day.empty and len(df_day) >= 2:
                     highs = df_day['high'].astype(float).values
@@ -1961,15 +1991,24 @@ class SBCChartCanvas(QWidget):
             return
         menu.exec(pos)
 
+    def _set_chart_snapshot(self, frame: pd.DataFrame, signals):
+        """画布持有独立快照；行情和信号变更统一经 setter 发布新版本。"""
+        self.df_intraday = frame.copy() if frame is not None else pd.DataFrame()
+        self.signals = [shallow_copy(sig) for sig in (signals or [])]
+        self._data_revision = getattr(self, "_data_revision", 0) + 1
+        self._cached_times_token = None
+        self._cached_kline_extremes_token = None
+        self._cached_intraday_layout_token = None
+        self._cached_kline_layout_token = None
+
     def set_data(self, df_intraday: pd.DataFrame, open_p: float = 0.0, vwap_p: float = 0.0, high_p: float = 0.0, low_p: float = 0.0, sell_min: float = 0.0, sell_max: float = 0.0, signals: list = None, period_mode: str = "1m"):
-        self.df_intraday = df_intraday
+        self._set_chart_snapshot(df_intraday, signals)
         self.open_price = open_p
         self.vwap = vwap_p
         self.high_price = high_p
         self.low_price = low_p
         self.target_sell_min = sell_min
         self.target_sell_max = sell_max
-        self.signals = signals or []
         if getattr(self, '_last_period_mode', None) != period_mode or getattr(self, '_last_code', None) != getattr(self, 'code', None):
             self._zoom_start_idx = 0
             self._zoom_end_idx = -1
@@ -1984,14 +2023,13 @@ class SBCChartCanvas(QWidget):
         self.update()
 
     def set_kline_data(self, df_kline: pd.DataFrame, open_p: float = 0.0, vwap_p: float = 0.0, high_p: float = 0.0, low_p: float = 0.0, sell_min: float = 0.0, sell_max: float = 0.0, signals: list = None, period_mode: str = "5m"):
-        self.df_intraday = df_kline
+        self._set_chart_snapshot(df_kline, signals)
         self.open_price = open_p
         self.vwap = vwap_p
         self.high_price = high_p
         self.low_price = low_p
         self.target_sell_min = sell_min
         self.target_sell_max = sell_max
-        self.signals = signals or []
         # 复用当前周期已算好的指标，只向进程共享缓存写入最新标量。
         self.channel_info = SBCIndicatorCache.from_frame(df_kline) or {}
         self.channel_info_code = str(getattr(self, "code", ""))
@@ -2805,6 +2843,7 @@ class SBCChartCanvas(QWidget):
         if self.signals:
             # 🚀 性能优化：引入 2D 防碰撞避让布局缓存。当视口、几何与选中状态未变时，0ms 极速复用上一帧布局
             layout_token = (
+                getattr(self, "_data_revision", 0),
                 id(self.signals),
                 len(self.signals),
                 start_i,
@@ -3827,6 +3866,7 @@ class SBCChartCanvas(QWidget):
         if self.signals:
             # 🚀 性能优化：引入 2D 防碰撞避让布局缓存。当视口、几何与选中状态未变时，0ms 极速复用上一帧布局
             layout_token = (
+                getattr(self, "_data_revision", 0),
                 id(self.signals),
                 len(self.signals),
                 start_i,
@@ -6684,21 +6724,24 @@ class SBCIntradayChartDialog(QWidget):
         strat_fp = (self.code, period_mode, n_bars, last_idx, last_close, last_vol,
                     last_row.get("high"), last_row.get("low"), last_row.get("vwap"),
                     last_row.get("bar_amt", last_row.get("amount")))
-        if getattr(self, '_cached_strat_fp', None) == strat_fp and hasattr(self, '_cached_vwap_signals'):
+        # 输入按快照交付；不同帧即使尾部相同，也可能包含历史行情修订。
+        if getattr(self, '_cached_strategy_frame', None) is df_bars and getattr(self, '_cached_strat_fp', None) == strat_fp and hasattr(self, '_cached_vwap_signals'):
             return self._cached_vwap_signals
 
+        bar_dates = normalize_intraday_bar_dates(df_bars)
         # 💥 [NEW] 预先判定分时多日底抬高企稳与VWAP位移反转结构 (带指纹缓存)
         rev_fp = (self.code, n_bars, last_idx, last_close)
-        if getattr(self, '_cached_rev_fp', None) == rev_fp and hasattr(self, '_cached_reversal_info'):
+        if getattr(self, '_cached_reversal_frame', None) is df_bars and getattr(self, '_cached_rev_fp', None) == rev_fp and hasattr(self, '_cached_reversal_info'):
             reversal_info = self._cached_reversal_info
         else:
             reversal_info = {}
             if detect_vwap_displacement_reversal is not None:
                 try:
-                    reversal_info = detect_vwap_displacement_reversal(df_bars)
+                    reversal_info = detect_vwap_displacement_reversal(df_bars, bar_dates=bar_dates)
                 except Exception:
                     reversal_info = {}
             self._cached_rev_fp = rev_fp
+            self._cached_reversal_frame = df_bars
             self._cached_reversal_info = reversal_info
 
         is_reversal_struct = bool(reversal_info.get("is_reversal", False))
@@ -6739,28 +6782,6 @@ class SBCIntradayChartDialog(QWidget):
             vols_arr = np.zeros(n_bars, dtype=float)
 
         time_keys = [str(x) for x in df_bars.index]
-        # 🚀 严格保持原逐行优先级 (date -> datetime -> index -> "day_0")，彻底杜绝空 date 引发的信号漂移
-        has_date_col = "date" in df_bars.columns
-        has_dt_col = "datetime" in df_bars.columns
-        date_series = [str(x).strip() for x in df_bars["date"]] if has_date_col else None
-        dt_series = [str(x).strip() for x in df_bars["datetime"]] if has_dt_col else None
-
-        bar_dates = []
-        for i in range(n_bars):
-            d_val = date_series[i] if date_series is not None else ""
-            if d_val and d_val not in ("nan", "None", "0"):
-                bar_dates.append(d_val)
-                continue
-            dt_val = dt_series[i] if dt_series is not None else ""
-            if dt_val and dt_val not in ("nan", "None", "0") and len(dt_val) >= 10 and ("-" in dt_val[:10] or "/" in dt_val[:10]):
-                bar_dates.append(dt_val[:10])
-                continue
-            tk = time_keys[i]
-            if " " in tk:
-                bar_dates.append(tk.split()[0])
-            else:
-                bar_dates.append("day_0")
-
         for idx in range(n_bars):
             close_p = float(closes_arr[idx])
             if close_p <= 0.0:
@@ -6951,6 +6972,7 @@ class SBCIntradayChartDialog(QWidget):
 
         # 缓存计算结果与指纹
         self._cached_strat_fp = strat_fp
+        self._cached_strategy_frame = df_bars
         self._cached_vwap_signals = signals
         return signals
 
@@ -10045,7 +10067,7 @@ class IntegratedTradingStrategyPanel(QWidget):
         float_mv_yi = float(spec.get("float_mv_yi", 14.24))
 
         # 获取昨日真实 OHLC (昨开、昨高、昨低、昨收)
-        y_ohlc = self.tdx_fetcher.get_yesterday_ohlc(code) if hasattr(self, 'tdx_fetcher') and self.tdx_fetcher else {}
+        y_ohlc = self.tdx_fetcher.get_cached_yesterday_ohlc(code) if hasattr(self, 'tdx_fetcher') and self.tdx_fetcher else {}
         y_open = y_ohlc.get("open", 0.0)
         y_high = y_ohlc.get("high", 0.0)
         y_low = y_ohlc.get("low", 0.0)
@@ -10234,14 +10256,7 @@ class IntegratedTradingStrategyPanel(QWidget):
     def _on_reset_node_custom_params(self):
         """【🔄 重置校准】清空节点自定义参数与人工评分，重新极速拉取 TDX 分时 K 线精准恢复早盘真实节点"""
         self.engine.reset_node_custom_params(self.code)
-        try:
-            intraday_bars = self.tdx_fetcher.fetch_intraday_bars(self.code)
-            if not intraday_bars.empty:
-                op = self.spin_eval_open.value()
-                self.engine.hydrate_from_intraday_df(self.code, intraday_bars, op if op > 1.0 else None)
-        except Exception as e:
-            logger.debug(f"重置后刷新 TDX 分时 K 线异常: {e}")
-
+        # manual_score_signal 已连接工作台的异步分时补全入口。
         parent = self.parent()
         while parent:
             if hasattr(parent, '_sync_eval_spins_for_current_stock'):
@@ -10264,17 +10279,10 @@ def fetch_stock_realtime_data_headless(
     【🛡️ 线程绝对安全：无 GUI 纯数据获取方法 (SRP/Thread-Safe)】
     绝对不调用任何 QWidget 的 getter/setter (如 isChecked, setValue, blockSignals, setText)！
     仅依赖纯 Python 对象计算与网络接口调用，可安全在后台工作线程执行。
+    parent_window 保留签名兼容，后台不访问该 QObject。
     """
     c_clean = str(code_str).zfill(6)
     resolved_name = resolve_stock_name(c_clean)
-    if parent_window and hasattr(parent_window, 'get_stock_name'):
-        try:
-            p_name = parent_window.get_stock_name(c_clean)
-            if p_name and p_name != "未知" and p_name != c_clean:
-                resolved_name = p_name
-        except Exception:
-            pass
-
     spec = engine.get_stock_ladder_spec(c_clean) if engine else {}
     float_mv_yi = float(spec.get("float_mv_yi", 15.0))
 
@@ -10305,46 +10313,43 @@ def fetch_stock_realtime_data_headless(
 
     # 2. 待上市新股
     if is_unlisted:
-        op_base = issue_p if issue_p > 0 else 60.0
+        op_base = issue_p if issue_p > 0 else 0.0
         return op_base, op_base, op_base, op_base, op_base, 0.0, 0.0, op_base, resolved_name, True, op_base
 
-    # 3. TDX 直连
+    # 3. TDX 直连与 IPC 使用同一快照数据结构。
+    snapshot = None
     if data_source == "TDX_REALTIME" and tdx_fetcher:
         try:
             tdx_snap = tdx_fetcher.fetch_stock_snapshot(c_clean)
-            if tdx_snap and float(tdx_snap.get("price", 0.0)) > 0:
-                op = float(tdx_snap.get("open_price", tdx_snap.get("price", 0.0)))
-                tp = float(tdx_snap.get("price", 0.0))
-                hp = float(tdx_snap.get("high_price", tp))
-                lp = float(tdx_snap.get("low_price", tp))
-                vw = float(tdx_snap.get("vwap", tp))
-                to_rate = float(tdx_snap.get("turnover_rate", 0.0))
-                amt = float(tdx_snap.get("amount", 0.0))
-                b1 = float(tdx_snap.get("bid1_price", tp))
-                lc = float(tdx_snap.get("last_close", op))
-                return op, tp, hp, lp, vw, to_rate, amt, b1, resolved_name, False, lc
+            if tdx_snap and math.isfinite(float(tdx_snap.get("price", 0.0))) and float(tdx_snap.get("price", 0.0)) > 0:
+                snapshot = tdx_snap
         except Exception as e:
             logger.debug(f"TDX 获取 {c_clean} 异常: {e}")
 
     # 4. ATS IPC 或本地行情快照
-    if latest_df is not None and not latest_df.empty:
+    if snapshot is None and latest_df is not None and not latest_df.empty:
         try:
-            row = latest_df.iloc[-1]
-            op = float(latest_df.iloc[0].get('open', 0.0) or 0.0)
-            tp = float(row.get('close', 0.0) or row.get('trade', 0.0) or 0.0)
-            hp = float(latest_df['high'].max() if 'high' in latest_df.columns else tp)
-            lp = float(latest_df['low'].min() if 'low' in latest_df.columns else tp)
-            vw = float(row.get('vwap', (hp + lp + tp) / 3.0) or tp)
-            to_rate = float(row.get('turnover_rate', 0.0) or 0.0)
-            amt = float(row.get('amount', 0.0) or 0.0)
-            b1 = float(row.get('bid1_price', tp) or tp)
-            lc = op
-            return op, tp, hp, lp, vw, to_rate, amt, b1, resolved_name, False, lc
-        except Exception:
-            pass
+            snapshot_engine = engine if engine is not None else IntradayStrategyEngine.get_instance()
+            snapshot = snapshot_engine.extract_market_snapshot_from_df(latest_df, c_clean)
+        except Exception as exc:
+            logger.debug(f"IPC 获取 {c_clean} 异常: {exc}")
 
-    # 兜底默认值
-    return 10.0, 10.0, 10.0, 10.0, 10.0, 0.0, 0.0, 10.0, resolved_name, False, 10.0
+    if snapshot:
+        try:
+            tp = float(snapshot.get("price", 0.0))
+            op = float(snapshot.get("open_price", tp))
+            if math.isfinite(tp) and tp > 0 and math.isfinite(op) and op > 0:
+                def value(key, default):
+                    val = float(snapshot.get(key, default) or default)
+                    return val if math.isfinite(val) else default
+
+                return (op, tp, value("high_price", tp), value("low_price", tp),
+                        value("vwap", tp), value("turnover_rate", 0.0), value("amount", 0.0),
+                        value("bid1_price", tp), resolved_name, False, value("last_close", op))
+        except (TypeError, ValueError):
+            pass
+    # 无有效行情时保持公开元组格式，以零值表示缺数，调用方不得进行实盘评分。
+    return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, resolved_name, False, 0.0
 
 
 class PinzhunLadderStandaloneWindow(QMainWindow):
@@ -10364,6 +10369,8 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
         self._is_stay_on_top = False
         self.tdx_log_dialog = None
         self._request_version = 0
+        self._active_request_version = None
+        self._pending_refresh = None
         self._is_tick_fetching = False
         self._is_closing = False
         self._tick_data_ready.connect(self._on_tick_data_received, Qt.ConnectionType.QueuedConnection)
@@ -10846,6 +10853,7 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
         """接收来自 ATS 主窗口或独立 IPC 数据流的实时行情推送"""
         if df is not None and isinstance(df, pd.DataFrame) and not df.empty:
             self._latest_df = df
+            self._latest_intraday_code = None
             if self.selected_data_source == "ATS_IPC":
                 self._load_mock_or_live_data()
 
@@ -11183,12 +11191,11 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
             tdx_fetcher=self.tdx_fetcher,
             data_source=getattr(self, "selected_data_source", "TDX_REALTIME"),
             manual_params=manual_params,
-            parent_window=self.parent(),
-            latest_df=self._latest_df
+            latest_df=self._latest_df if getattr(self, "_latest_intraday_code", None) in (None, c_clean) else None
         )
 
         # 仅在主线程且为当前查看代码时，安全同步界面估价控件
-        if is_main_thread and c_clean == getattr(self, "code", ""):
+        if is_main_thread and c_clean == getattr(self, "code", "") and res[0] > 0 and res[1] > 0:
             open_p, trade_p, _, _, _, to_r, _, _, _, is_unlisted, _ = res
             self._apply_realtime_data_to_spins(open_p, trade_p, to_r, is_unlisted)
 
@@ -11245,9 +11252,16 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
         if getattr(self, "_is_closing", False):
             return
 
-        self._is_tick_fetching = True
         self._request_version = getattr(self, "_request_version", 0) + 1
         req_version = self._request_version
+        if getattr(self, "_is_tick_fetching", False):
+            # 仅保留最新刷新需求；分时补全需求在合并时不能丢失。
+            self._pending_refresh = bool(hydrate_intraday or getattr(self, "_pending_refresh", False)
+                                         or getattr(self, "_active_hydrate_intraday", False))
+            return
+        self._is_tick_fetching = True
+        self._active_request_version = req_version
+        self._active_hydrate_intraday = hydrate_intraday
         cur_code = self.code
         cur_strat_id = self.selected_strategy_id
         cur_source = getattr(self, "selected_data_source", "TDX_REALTIME")
@@ -11260,10 +11274,9 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
                 "price": self.spin_eval_price.value(),
                 "turnover": self.spin_eval_turnover.value()
             }
-        parent_win = self.parent()
         engine = self.engine
         tdx_fetcher = self.tdx_fetcher
-        latest_df = self._latest_df
+        latest_df = self._latest_df if getattr(self, "_latest_intraday_code", None) in (None, cur_code) else None
 
         def _bg_worker():
             data_tuple = None
@@ -11275,7 +11288,6 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
                     tdx_fetcher=tdx_fetcher,
                     data_source=cur_source,
                     manual_params=manual_params,
-                    parent_window=parent_win,
                     latest_df=latest_df
                 )
                 if cur_source == "TDX_REALTIME" and hydrate_intraday and tdx_fetcher:
@@ -11283,6 +11295,11 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
                         df_intraday = tdx_fetcher.fetch_intraday_bars(cur_code)
                     except Exception as e_hyd:
                         logger.debug(f"异步加载 TDX 分时反演流异常: {e_hyd}")
+                if cur_source == "TDX_REALTIME" and tdx_fetcher and data_tuple and data_tuple[1] > 0 and not data_tuple[9]:
+                    try:
+                        tdx_fetcher.get_yesterday_ohlc(cur_code)
+                    except Exception as exc:
+                        logger.debug(f"异步预取昨日 OHLC 异常: {exc}")
             except Exception as e:
                 logger.debug(f"[PinzhunWorkbench] 异步取数异常: {e}")
             finally:
@@ -11292,7 +11309,11 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
                 except Exception:
                     pass
 
-        threading.Thread(target=_bg_worker, daemon=True, name=f"PinzhunFetchWorker_{cur_code}").start()
+        try:
+            threading.Thread(target=_bg_worker, daemon=True, name=f"PinzhunFetchWorker_{cur_code}").start()
+        except Exception as exc:
+            logger.debug(f"[PinzhunWorkbench] 取数线程启动失败: {exc}")
+            self._on_tick_data_received(None, None, cur_code, cur_strat_id or "", req_version)
 
     def _on_tick_data_received(self, data_tuple, df_intraday, req_code, req_strat_id, req_version):
         """主线程安全接收并装载异步取数结果"""
@@ -11308,12 +11329,17 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
                 return
 
             open_price, trade_price, high_price, low_price, vwap_price, to_rate, amt_val, bid1_price, real_name, is_unlisted, last_close = data_tuple
+            if not (math.isfinite(open_price) and open_price > 0 and math.isfinite(trade_price) and trade_price > 0):
+                if hasattr(self, "lbl_tdx_status"):
+                    self.lbl_tdx_status.setText("⚠️ 暂无有效行情，等待刷新")
+                return
             self.name = real_name
             self.open_price = open_price
 
             # 装载分时反演流
             if df_intraday is not None and not df_intraday.empty:
                 self._latest_df = df_intraday
+                self._latest_intraday_code = req_code
                 try:
                     self.engine.hydrate_from_intraday_df(self.code, df_intraday, open_price=self.open_price)
                 except Exception as e_hyd:
@@ -11368,8 +11394,17 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
             # 主线程安全更新估价框与状态 Badge
             self._apply_realtime_data_to_spins(open_price, trade_price, to_rate, is_unlisted)
 
+        except Exception as exc:
+            logger.debug(f"[PinzhunWorkbench] 装载行情异常: {exc}")
         finally:
-            self._is_tick_fetching = False
+            # 只有该在途任务的完成回调可以释放守卫，过期回包不能影响新任务。
+            if req_version == getattr(self, "_active_request_version", None):
+                self._active_request_version = None
+                self._is_tick_fetching = False
+                pending = self._pending_refresh
+                self._pending_refresh = None
+                if pending is not None and not getattr(self, "_is_closing", False):
+                    self.request_refresh_data(hydrate_intraday=pending)
 
     def _load_mock_or_live_data(self):
         """【统一异步通道】加载或刷新数据：全量收敛为非阻塞异步，UI 绝对 0 冻结"""
@@ -11405,9 +11440,19 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
 
         self.request_refresh_data(hydrate_intraday=False)
 
+    def showEvent(self, event):
+        super().showEvent(event)
+        if getattr(self, "_is_closing", False):
+            self._is_closing = False
+            if hasattr(self, "timer"):
+                self.timer.start()
+            self.request_refresh_data(hydrate_intraday=True)
+
     def closeEvent(self, event):
-        """窗口关闭时停止所有后台定时器并释放资源，确保应用彻底安全退出"""
+        """隐藏持久工作台，作废旧请求；再次显示时恢复定时器与数据刷新。"""
         self._is_closing = True
+        self._request_version += 1
+        self._pending_refresh = None
         try:
             if hasattr(self, 'timer') and self.timer.isActive():
                 self.timer.stop()
@@ -11852,7 +11897,6 @@ class AllCodesStrategyEvalDialog(QDialog):
 
         engine = self.engine
         tdx_fetcher = getattr(self.workbench, "tdx_fetcher", None) if self.workbench else None
-        parent_win = self.workbench.parent() if self.workbench else None
 
         def _bg_eval():
             collected_cards = []
@@ -11863,20 +11907,17 @@ class AllCodesStrategyEvalDialog(QDialog):
                     try:
                         st = engine.auto_select_strategy(0.0, code=c)
                         c_name = resolve_stock_name(c)
-                        if parent_win and hasattr(parent_win, 'get_stock_name'):
-                            p_name = parent_win.get_stock_name(c)
-                            if p_name and p_name != "未知" and p_name != c:
-                                c_name = p_name
 
                         # 🛡️ 纯数据获取，绝对不碰任何 QWidget 控件 (彻底根除跨线程控件读写与工作台估价框被篡改)
                         data_tuple = fetch_stock_realtime_data_headless(
                             c,
                             engine=engine,
                             tdx_fetcher=tdx_fetcher,
-                            data_source="TDX_REALTIME",
-                            parent_window=parent_win
+                            data_source="TDX_REALTIME"
                         )
                         open_p, trade_p, high_p, low_p, vwap_p, to_rate, amt_val, bid1_p, _, is_unlisted, last_close = data_tuple
+                        if not (math.isfinite(open_p) and open_p > 0 and math.isfinite(trade_p) and trade_p > 0):
+                            raise ValueError("暂无有效行情，跳过策略评分")
 
                         tick_row = {"trade": trade_p, "close": trade_p}
                         sigs = engine.evaluate_tick(
@@ -11960,7 +12001,11 @@ class AllCodesStrategyEvalDialog(QDialog):
                 except Exception:
                     pass
 
-        threading.Thread(target=_bg_eval, daemon=True, name="AllCodesEvalWorker").start()
+        try:
+            threading.Thread(target=_bg_eval, daemon=True, name="AllCodesEvalWorker").start()
+        except Exception as exc:
+            logger.debug(f"全量评估线程启动失败: {exc}")
+            self._on_eval_finished([], f"评估启动失败: {exc}", now_time_str)
 
     def _on_eval_finished(self, collected_cards: list, res_summary: str, now_time_str: str):
         """【主线程专属槽函数】安全装载评估结果，释放 busy 状态并渲染双视图"""
