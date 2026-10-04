@@ -185,8 +185,7 @@ set CMD="%PYTHON_EXEC%" -m nuitka --onefile "%MAIN_SCRIPT%" ^
     --noinclude-dlls=Qt6Xml.dll ^
     --windows-console-mode=force ^
     --lto=yes ^
-    --jobs=8 ^
-    --remove-output
+    --jobs=8
 
 
 

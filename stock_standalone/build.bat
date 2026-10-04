@@ -25,10 +25,10 @@ set BUILD_DIR=build
 set WORK_DIR=__pycache__
 
 echo.
-echo [步骤 1] 清理旧的构建文件...
-if exist "%DIST_DIR%" rmdir /s /q "%DIST_DIR%"
-if exist "%BUILD_DIR%" rmdir /s /q "%BUILD_DIR%"
-echo [完成] 旧文件已清理
+echo [步骤 1] 保留已有构建缓存 (按用户指令已全面关闭自动清理)...
+rem if exist "%DIST_DIR%" rmdir /s /q "%DIST_DIR%"
+rem if exist "%BUILD_DIR%" rmdir /s /q "%BUILD_DIR%"
+echo [完成] 增量缓存已安全保留
 
 echo.
 echo [步骤 2] 开始构建 exe...
