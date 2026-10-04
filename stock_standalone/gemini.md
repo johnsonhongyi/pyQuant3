@@ -1,5 +1,27 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-10-04 14:10 ATS SBC Codex 正确性修复闭环全面深度审核与验证
+- [x] **【串股解析与缺数伪报价审查、振幅回调与重试守卫审计、请求乱序与窗口重开机制核验、缓存失效与日期回退反转防守价对账、61项SBC测试+5项跨日测试全量复测】(`ats/ui/intraday_strategy_dialog.py`, `ats/intraday_strategy_engine.py`, `ats/tdx_realtime_fetcher.py`, `ats/vwap_trading_engine.py`, `docs/ATS_SBC_CORRECTNESS_CLOSURE_20261004.md`, `20261004_1410_task.md`)**：
+    - [x] **串股解析与缺数伪报价审查 [Correctness/Data]**：
+        - 穿透核实 `intraday_strategy_engine.py:2473` `extract_market_snapshot_from_df`：全面支持代码索引、整数索引及多别名列（`code`/`symbol`/`sec_code`），目标标的未命中直接短路返回，彻底根治 600108 混入其他股票 110 元现价的串股 Bug；
+        - `fetch_stock_realtime_data_headless` 彻底废除上市标的默认 10 元、未知发行价 60 元硬编码，保持原格式并用 0.0 元安全表示缺数，工作台与全量评估严密校验拦截，缺数呈现错误卡片绝不计算虚假实盘评分；
+    - [x] **振幅回调与重试守卫审计 [Threading/Robustness]**：
+        - `SBCChartCanvas` 废除不受 PyQt6 支持的 context singleShot，引入 `_amplitude_data_ready` 排队信号，日 K 振幅由后台工作线程拉取后安全交由主线程消费重绘；
+        - 在途集合 `_amplitude_in_flight` 与失败冷却 `_amplitude_fail_cooldown` 完全解耦，成功、失败及线程启动异常均有 `finally` 守卫释放，过时标的结果安全丢弃；
+    - [x] **请求乱序、窗口重开与面板网络调用审计 [Concurrency/Zero-Blocking]**：
+        - `PinzhunLadderStandaloneWindow` 异步取数队列实现单窗口在途任务合并与版本号校验，20 次重叠刷新合并，旧回包无法误清最新任务守卫；
+        - 窗口关闭时作废在途请求并停止心跳定时器，复用窗口重新显示时平滑恢复计时与异步刷新；
+        - 工作台面板昨日 OHLC 改为调用 `get_cached_yesterday_ohlc` 只读内存缓存并在 Worker 线程预取，重置校准走信号异步补全，彻底消除主线程网络调用；
+    - [x] **缓存失效与日期回退反转防守价对账 [Algorithm/Cache]**：
+        - 画布接收独立数据/信号快照，通过 setter 版本发布统一失效时序索引、Y 轴极值与 2D 防碰撞信号布局缓存；
+        - 交易日推演与反转检测统一采用 `normalize_intraday_bar_dates`（date → datetime → index → day_0），彻底消除空 date 导致反转防守价在 108 元与 114 元之间漂移的缺陷；
+        - 策略与反转缓存限定同一输入快照，新输入帧即使尾部价格相同，历史低点修订仍强制重算，消除虚假热命中；
+    - [x] **全量自动化测试与规范复核 100% 绿灯全过**：
+        - `test_sbc_correctness_closure.py` (32 passed)、`test_sbc_extreme_perf_optimization.py` (10 passed)、`test_sbc_async_load_dispatcher_and_dirty_check.py` (9 passed)、`test_sbc_zoom_right_anchor.py` (10 passed)，**SBC 4 模块合计 61 项测试全部秒级通过**；
+        - 跨日回归 `test_g08_cross_day_vwap_filter.py` 5 passed；**全量 66 项测试 16.65s 纯绿通过**；
+        - `python -m compileall ats tests -q` exit=0，`git diff --check` 100% 干净，文件严格保持 UTF-8（无 BOM）保存；
+        - 客观标定性能 SLA 边界：离线功能测试已完全闭环正确性，但 20 窗口多开、1000Hz 鼠标悬停及实际 CPU $\le 2.5\%$ 仍需在真实实盘桌面环境独立验收。
+
 ## 2026-10-04 13:14 PyInstaller 批量打包统计 batch_build_last_summary.txt 追加模式与缓存对比闭环及项目纳管
 - [x] **【instock-pyinstall-batch.cmd解除Git忽略并纳入项目版本迭代、打包统计全链路升级追加模式(Append)、历史历次耗时自动差值对比与百分比核算、PyInstaller二进制与分析缓存体积深度评估、双端全自动部署】(`instock-pyinstall-batch.cmd`, `C:\Users\Johnson\instock-pyinstall-batch.cmd`, `tools/generate_pyinstall_batch.py`, `tools/log_build_summary.py`, `.gitignore`, `20261004_1314_task.md`)**：
     - [x] **项目级版本纳管与 Git 规则放行 [Architecture/Git]**：
