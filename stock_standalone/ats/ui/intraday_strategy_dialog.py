@@ -6304,8 +6304,12 @@ class SBCIntradayChartDialog(QWidget):
 
         now = time.time()
         lock_until = getattr(self, '_esc_mouse_lock_until', 0.0)
+        if not isinstance(lock_until, (int, float)):
+            lock_until = 0.0
         if hasattr(self, 'canvas') and self.canvas:
-            lock_until = max(lock_until, getattr(self.canvas, '_esc_mouse_lock_until', 0.0))
+            raw_c_lock = getattr(self.canvas, '_esc_mouse_lock_until', 0.0)
+            if isinstance(raw_c_lock, (int, float)):
+                lock_until = max(lock_until, float(raw_c_lock))
         app_inst = QApplication.instance()
         is_app_exiting = bool(app_inst and app_inst.property("is_app_exiting"))
         # 🛡️ 若处于鼠标双击/右键派生锁定期内，且当前鼠标并非悬停在窗口右上角关闭按钮区域，坚决拦截误关
@@ -9095,17 +9099,18 @@ def rearrange_all_sbc_windows(parent_win=None):
         except Exception:
             pass
 
-    # 最后对操作发起窗口或首选窗口温和激活输入焦点，确保可直接敲击键盘快捷键
+    # 最后激活本组 SBC 窗口，避免 ATS 主窗口重新遮住已平铺的窗口。
     try:
-        top_pxy = parent_win or (active_proxies[-1].dlg if active_proxies and active_proxies[-1].dlg else None)
-        if top_pxy:
-            if hasattr(top_pxy, 'raise_'):
-                top_pxy.raise_()
-            if hasattr(top_pxy, 'activateWindow'):
-                top_pxy.activateWindow()
-            elif hasattr(top_pxy, 'hwnd') and top_pxy.hwnd:
-                import win32gui
-                win32gui.SetForegroundWindow(top_pxy.hwnd)
+        top_pxy = next(
+            (pxy for pxy in active_proxies if pxy.dlg is parent_win),
+            active_proxies[-1],
+        )
+        if top_pxy.dlg is not None:
+            top_pxy.dlg.raise_()
+            top_pxy.dlg.activateWindow()
+        elif top_pxy.hwnd:
+            import win32gui
+            win32gui.SetForegroundWindow(top_pxy.hwnd)
     except Exception:
         pass
 
@@ -10480,8 +10485,14 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
         self.combo_source.currentIndexChanged.connect(self._on_source_changed)
 
         # TDX 连接状态徽标
-        tdx_host_str = f"{self.tdx_fetcher.current_host[1]}:{self.tdx_fetcher.current_host[2]}" if self.tdx_fetcher.current_host else "默认"
-        self.lbl_tdx_status = QLabel(f"🟢 TDX: {tdx_host_str} ({self.tdx_fetcher.latency_ms:.0f}ms)")
+        raw_host = getattr(self.tdx_fetcher, 'current_host', None)
+        if isinstance(raw_host, (tuple, list)) and len(raw_host) >= 3:
+            tdx_host_str = f"{raw_host[1]}:{raw_host[2]}"
+        else:
+            tdx_host_str = "默认"
+        raw_lat = getattr(self.tdx_fetcher, 'latency_ms', 0.0)
+        lat_val = float(raw_lat) if isinstance(raw_lat, (int, float)) else 0.0
+        self.lbl_tdx_status = QLabel(f"🟢 TDX: {tdx_host_str} ({lat_val:.0f}ms)")
         self.lbl_tdx_status.setStyleSheet("color: #00ff88; font-size: 8.5pt; font-weight: bold; background-color: #14241d; padding: 3px 6px; border-radius: 3px; border: 1px solid #00ff88;")
 
         btn_refresh = QPushButton("⚡ 刷新")

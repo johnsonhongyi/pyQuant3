@@ -188,7 +188,7 @@ stock_standalone/.agent_hub/*
 stock_standalone/.agent_hub_runtime/*
 stock_standalone/.pytest_tmp/*
 stock_standalone/tests/*
-!stock_standalone/tests/test_sbc_*.py
+stock_standalone/tests/test_sbc_*.py
 stock_standalone/tests/test_archive_build_exe.py
 stock_standalone/pytest-of-Johnson/*
 stock_standalone/trading_kernel/tests/*
@@ -201,3 +201,5 @@ stock_standalone/data/ipo_replay_smoke/*
 stock_standalone/aitest/*
 stock_standalone/config/new_stock_ipo_calendar.json.*
 stock_standalone/config/new_stock_data_cache.json.*
+stock_standalone/stock-strategy/source/*
+stock_standalone/tests/test_sbc_extreme_perf_optimization.py
