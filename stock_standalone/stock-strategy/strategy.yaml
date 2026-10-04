@@ -1,0 +1,404 @@
+# 模拟交易策略参数(版本化:每次调参升版本,只影响之后的交易日)
+version: v1.9
+updated: 2026-10-04
+note: "v1.9 p30_cycle加expect_cooldown_h=12(不及预期平空后该币种12h内不再新开空,防平完秒开churn);v1.8 数字货币动态宇宙(静态6+动态Top12,上限18,流动性门2000万USD);v1.7 p30_cycle加不及预期时间窗(expect_ratio_warn 1.0预警/expect_ratio_exit 2.0策略单自动平,镜像单只预警);v1.6 新增 p30_cycle 时间周期结构(只读展示+回测验证,不自动交易);v1.5 新增 crypto_exp 影子实验仓(paper only,单变量实验:入场阈值8→6);v1.4 crypto_short 永续空头镜像(10倍杠杆/小时级,独立账本);v1.3 币圈多头;v1.2 统一决策门(影子模式)+硬kill switch+决策日志类型化因子;v1.1 编码用户 2026-09-28 口述的 5 条市场感知(P1-P5);由复盘迭代驱动后续调参"
+
+# 变更账本(2026-10-01起):每次改动记版本+日期+原因,出问题可回溯回滚
+changelog:
+  - version: v1.9
+    date: 2026-10-04
+    change: "p30_cycle 加 expect_cooldown_h=12:某币种被不及预期平空后,12小时内不再新开空(防'平完秒开'churn)。paper_trade 新增 _expect_cooldown_skip()+开仓前检查+平仓时写 lg['expect_cooldown'][code] 时间戳;SKIP 记决策日志供归因。S-P8/S-P24 加 VWAP 偏离门 max_below_vwap_pct=2.5(镜像多头'偏离<2.5%不追高'):价格低于小时VWAP超2.5%不追空,等回抽"
+    reason: "ZEC 影子空单两轮被 P30 不及预期止损(-98/-1345)后 P24 又秒开回;用户指出根因=在远离 VWAP 的位置追空(与昨日 BTC 实盘空单同一错误),VWAP 下跌趋势中远离必反抽,冷却治标、偏离门治本"
+  - version: v1.8
+    date: 2026-10-03
+    change: "新增 crypto_universe 数字货币动态宇宙(paper only):每天 00:05 UTC 从 Kraken 全量 Ticker 按 24h 成交额选币,静态6币(BTC/ETH/SOL/XRP/DOGE/ADA)+动态Top12,总数上限18;剔除稳定币/法币/杠杆代币;流动性门 min_vol_24h_usd=2000万(低于直接SKIP不进池);新币自动回填180天日K(seeded防重复);pair映射持久化 crypto_pairs.json;crypto_pool.build/build_short 与 paper_trade.get_crypto_universe 改读动态宇宙(缺失回退静态6币);bars_crypto.get_pair 动态解析+append_all 走宇宙"
+    reason: 用户 2026-10-03 要求加速自主找信号:主币不动时系统长期0交易攒不出样本,从榜单找流动性好的币,小币种动时也要有信号;只加宇宙配置段,不改任何现有信号阈值
+  - version: v1.7
+    date: 2026-10-03
+    change: "p30_cycle 加不及预期时间窗:expect_ratio_warn=1.0(反向段时长达原段1.0倍→强预警建议出局)/expect_ratio_exit=2.0(达2.0倍→策略空单自动平仓,镜像单只强预警不自动平,保证与用户实盘同进退);cycle_structure.expect_check() 方向自适应(空单看反弹/下跌,多单看回调/上涨;point-in-time,反向段时长按起点->墙钟);crypto_short_watch 加第4段检查+paper_trade 空头 settle 在时间止损旁加 expect_dead(策略单);test_p30_expect.py 回放 BTC:10-03 00:00 UTC 触发 warn、06:00 UTC 触发 dead"
+    reason: "用户 2026-10-03 拍板:弱反弹到 2.0 倍时长就该直接出局(无论方向);1.0 倍时预警;这是 P23'买入必须带预期'的周期维度扩展"
+  - version: v1.6
+    date: 2026-10-03
+    change: "新增 p30_cycle 时间周期结构(用户 2026-10-03 感知:涨跌段的时间周期+斜率量化的是情绪本身;弱反弹=情绪消耗;情绪耗尽后向上突破=结构切换)。新模块 cycle_structure.py(纯函数/point-in-time/只用已收盘小时K):detect_legs 摆动高低点切分上涨/下跌/反弹段(起止/时长/点数/斜率按极值价);analyze 输出 time_ratio/retrace_ratio + 四判定(weak_rebound/steady_up/steady_down/regime_switch)。接入只读展示: crypto_short_watch.py 预警文案 + paper_trade _brief_crypto 简报一行;不自动交易、不改任何信号阈值。配套 p30_backtest.py 回测 weak_rebound 后 10h 方向分布 + test_p30_cycle.py"
+    reason: 用户"总在事后才能感觉到"涨跌时间周期结构,要求实时量化进系统;先验证后交易
+  - version: v1.5
+    date: 2026-10-03
+    change: 新增 crypto_exp 影子实验仓(paper only):独立账本 logs/paper_ledger_crypto_exp.json / logs/paper_ledger_crypto_exp_short.json / 独立决策日志 decisions_crypto_exp[_short]_<UTC日期>.json(全程打标 sleeve:"exp") / 独立 in-ledger kill(exp_kill,不碰 kill_switch.json 与主 short_kill) / paper_trade --sleeve exp(仅 CRYPTO 可用);单变量实验:入场阈值 8.0→6.0(多空两侧),退出规则/手续费0.1%/杠杆10倍/止盈止损距离与主完全相同;主 sleeve 的 pool [6,8) 候选 append-only 记 logs/near_miss_crypto.jsonl(只记录不交易)供周一 paper-review 复盘"拦掉的该不该买";推送标题加 [实验] 前缀(@在路上不变)
+    reason: 主模拟仓规则过严长期 0 成交攒不出样本;用户批准影子仓快速积累数据,主账本规则不动、归因不污染
+  - version: v1.4
+    date: 2026-10-03
+    change: 新增 crypto_short 数字货币永续做空镜像策略(10倍杠杆/小时级触发):独立账本 logs/paper_ledger_crypto_short.json/独立空头kill(记账本内,不碰 kill_switch.json)/crypto_pool.build_short() 空头打分/paper_trade --side short(仅 CRYPTO 可用)/S-P25空头趋势门+S-P8小时触发+S-P24大阴跟随/部分止盈-1.5%平2/3(镜像用户"盈利先卖2/3")+硬止损+1.5%+VWAP收复+24h时间止损+强平守卫
+    reason: 用户实盘 BTC 永续 10 倍做空,要求策略按 10 倍/高频设计,不能照搬股票 T+1 日线模式;多空双向快速验证,参数独立不污染多头与股票
+  - version: v1.3
+    date: 2026-10-01
+    change: 新增 CRYPTO 市场(数字货币 T+0 24×7,UTC日):bars_crypto(Kraken)/crypto_pool/crypto_watchlist(6只)/paper_trade --market CRYPTO 独立账本10万美金/手续费0.1%双边计入/统一门因子全记录
+    reason: 用户拍板"币圈是高效练兵场,快速攒样本滚动优化";预警股票策略在币圈可能失效,crypto_参数独立版本化先验证
+  - version: v1.2
+    date: 2026-10-01
+    change: 新增 decision_gate(统一决策门,影子模式只记录不干预)+硬kill switch(单日亏损≥3%自动拉起/手动--kill)+log_decision类型化factors+strategy_version打戳
+    reason: 用户要求"各管各的统一,事后能拆解谁影响的;出问题随时回溯"。统一的是决策接口,各因子原值全记录,复盘可按因子归因。
+  - version: v1.1
+    date: 2026-09-28
+    change: 编码用户口述 P1-P5 市场感知
+    reason: 用户拍板
+
+# 统一决策门(2026-10-01):各P门仍独立计算(行为不变),本门只做汇总评分+记录。
+# mode=shadow 时不做最终裁决;攒够 20-30 笔样本后由周复盘决定是否转 enforce。
+decision_gate:
+  version: v1
+  mode: shadow
+  threshold: 60
+  weights:  # 满分100,初版权重,待样本验证后调
+    p8_four: 30      # P8四条件全过
+    p25: 20          # 趋势门(1日>3日>5日VWAP且站上MA20)
+    p26_sector: 15   # 板块四维分>=50
+    pool_score: 15   # 关注池分>=8
+    p22_leader: 10   # 龙头L2确认(暂未接入信号链,预留)
+    sentiment: 10    # 情绪分>0
+  kill:
+    max_day_loss_pct: 0.03  # 单日已实现亏损超3% -> 自动拉起 kill switch
+
+buy:
+  min_pool_score: 8.0      # 关注池综合分
+  min_market_sentiment: -40 # 市场情绪低于冰点不买
+  min_market_sentiment_low_water: -15  # 水位连续下降3日时收紧到该值(P2)
+  max_ch_pos: 80           # ch_pos 超过不追
+  max_day_chg: 7.0         # 当日涨幅超7%不追:加速末端(P4)
+  forbid_trap: true        # 早盘诱多不买
+  forbid_dead_day: true    # 大跌装死日(down>4000)不新开仓(P5)
+  max_positions: 5         # 最多同时持有
+  amount_per_trade: 100000  # 每笔金额(元)
+
+sell:
+  take_profit: 0.10   # +10% 止盈
+  stop_loss: -0.06    # -6% 止损
+  vwap_stop: 0.02     # 跌破买入日1日VWAP-2% 止损(VWAP节奏器)
+  break_ma10: true    # P6: 收盘跌破买入时10日VWAP -> 破位止损
+  emotion_cool_profit: 0.05  # P3: 新股风向标降温到低 -> 浮盈超5%提前止盈
+  max_hold_days: 5    # 最长持有5个交易日
+  p20_band: 0.01      # P20: 保本区=成本±1%
+
+add:
+  max_add_per_position: 1  # P7: 每只最多加仓一次
+  add_trigger_loss: -0.03  # 浮亏超过3%才考虑翻转加仓
+  add_amount: 10000        # 加仓金额(元)
+
+# P11 两日网格做T(2026-09-29):已有持仓专用,不受新开仓门禁限制
+grid:
+  amount_per_grid: 100000  # 每次网格买回金额(元)
+  sell_lo: 1.005          # 卖出区下沿 = 两日最高×1.005
+  sell_hi: 1.01           # 卖出区上沿 = 两日最高×1.01
+  buy_lo: 1.01            # 买入区下沿 = 两日最低×1.01
+  buy_hi: 1.02            # 买入区上沿 = 两日最低×1.02
+  trend_break: 0.99       # 跌破10日VWAP×0.99 -> 趋势走坏,一键清仓
+
+# P12 资金轮动(2026-09-29):统一强度分,卖弱+强者打码,资金不闲置
+rotation:
+  weak_th: -3            # 强度分<=-3 卖弱轮动(疑似破位单扣-2,不触发)
+  strong_th: 4           # 强度分>=4 强者打码
+  pyramid_amount: 100000  # 打码金额(元)
+  dead_day_relief: -15   # 盘中情绪>=该值解除盘前dead_day门禁
+
+# 用户感知编码区:用户口述的市场感觉 -> 翻译成可执行规则
+perception_rules:
+  - id: P1_调仓换股
+    from: 用户2026-09-28口述
+    desc: 高位科技放量下跌/上涨无力后,资金流向低位板块。基金80%持仓规则+季度披露期驱动调仓。
+    impl: sentiment.premarket 输出板块轮动(new_in/dropped_out);调仓窗口日新进入hot_sectors的板块,watchpool打分时其成分+2
+    status: 已实现(轮动检测);打分加成待watchpool接入
+  - id: P2_蓄水池水位
+    from: 用户2026-09-28口述
+    desc: 市场是蓄水池,成交额=水位。水蒸发(资金流出)->水平面降低->指数重心下移;每波结构就是水平面。
+    impl: 全市场成交额5日均值连续下降3日 -> 水位下降,买入门槛从-40收紧到-15
+    status: 已实现
+  - id: P3_新股风向标
+    from: 用户2026-09-28口述
+    desc: 新股次新股是情绪风向标(ATS有专门tab+ipo_detector)。
+    impl: 首板数(异动集涨停池)+最高连板 -> 风险偏好 高/中/低;偏好低时买入门槛收紧
+    status: 已实现(首板+连板代理指标)
+  - id: P4_加速末端
+    from: 用户2026-09-28口述
+    desc: T+1下,大涨+放量基本是最后一个加速器,追高=接盘(金健米业式)。
+    impl: 当日涨幅>7% 标记加速末端,模拟盘不追
+    status: 已实现
+  - id: P5_大跌装死日
+    from: 用户2026-09-28口述
+    desc: 4500只大跌时所有人装死无法操作,直到波动率消失。机器无情绪是优势:按规则执行但不逆势。
+    impl: down_count>4000 -> dead_day,当日不新开仓(已有持仓按卖出规则正常处理)
+    status: 已实现
+  - id: P6_破位纪律
+    from: 用户2026-09-28北汽蓝谷实盘复盘(成本5.13,9-01以5.12开仓于MA20回踩企稳小阳)
+    desc: 开仓逻辑是对的(回踩MA20企稳小阳),错在破位没有及时出局。破位=对开仓逻辑的证伪,必须走,不能拖。
+    impl: 跌破买入日10日VWAP(中期锚点) -> 破位止损;跌破买入日1日VWAP-2% -> VWAP止损。双锚点,先破先走
+    status: 已实现
+  - id: P7_翻转进击点
+    from: 用户2026-09-28北汽蓝谷实盘复盘
+    desc: 翻转处不敢上仓位是人性恐惧,但那里反而是进击点。机器无恐惧,按规则加仓。
+    impl: 持仓浮亏<-3% 且早盘出现诱空->真强反转(低开收复/收复VWAP) -> 加仓一笔(等额,拉低成本);每只最多加仓一次
+    status: 已实现
+  - id: P8_早盘诱多节点
+    from: 用户2026-09-28口述;2026-09-29用户纠正(多日VWAP:昨日破位下杀后早盘反弹不过多日VWAP=反抽,是卖点不是买点)
+    desc: 10:05买入基本上会被诱多,除非走势非常漂亮的首日VWAP结构+量价齐升。A股日内高点节点:9:45/10:00/10:15/10:30/11:30。下午守住+情绪好,次日有机会收益(T+1)。
+    impl: 10:05买入四条件(站上1日VWAP×1.005 + 量价齐升 + 偏离VWAP<2.5% + 盘中VWAP>=3日VWAP多日结构过滤),节点冲高回落不买;预开仓/竞价买入绕开10:05追高;早盘数据不可验证时一律不买(fail-closed,2026-09-29故障窗口盲买教训)
+    status: 已实现
+    note: 条件4为收紧(买入更严),符合止损只收紧不放宽精神;多日VWAP不可验证时跳过不赌
+  - id: P9_预开仓
+    from: 用户2026-09-28指定对齐TK stock_live_strategy/bidding_momentum_detector
+    desc: 结合T+1及VWAP做预开仓才有机会盈利,或者竞价里执行。观察池重点股+龙虎榜 -> 盘前结构分 -> 竞价TK动量确认 -> 模拟买入。
+    impl: preopen.py(09:00盘前结构分+龙虎榜分) -> auction_scan竞价确认(成交额分档/高开区间/开盘即最低/VWAP门禁) -> paper_trade --preopen(09:27竞价价买入,T+1锁定)
+    status: 已实现
+  - id: P11_两日网格做T
+    from: 用户2026-09-29口述(北汽蓝谷实盘:成本5.12被套,走弱震荡)
+    desc: 冲高看两天最高价,最高价+0.5%~1%挂卖单;最低价+1%~2%挂买单;如此做T降成本。走坏=破位三段式:跌破当日VWAP先标记(防震仓)→收复VWAP则假破位解除→从低点反弹≥1%但高点仍在VWAP下方且反弹量能<下破段0.8倍则确认,在反弹那一笔VWAP下方卖出,不等主杀。
+    impl: grid_t.py(levels/trend_broken/zone_of/breakdown_update纯函数) -> watch_600733网格+破位信号推送(bd_mark/bd_unmark/bd_confirm,日级去重) -> paper_trade run_grid_t()(--signal先行不受新开仓门禁限制、--settle收盘挂单建模+T+1可卖份额locked/破位确认一键清仓)
+    status: 已实现
+    note: 情绪/门禁只能否决新开仓,不能制造买点;网格T只对已有持仓生效;破位标记≠卖出,确认才卖;2026-09-29补丁(用户实盘时间线:北汽连阳大阳后分时VWAP头肩顶):分时级别在VWAP下方形成头肩顶=多头衰竭前置预警,右肩反弹不过VWAP是最后离场点,早于P11三段式确认;2026-09-29晚已实现:protect.detect_hs_top(5分钟K累计VWAP,双肩对称±1.2%头突出0.8%全在VWAP下,右肩后不过VWAP)->settle可卖份额全出
+  - id: P12_资金轮动
+    from: 用户2026-09-29口述(统一标准跑一套流程:资金不闲置,该卖的卖,强势跟打码,仓位轮动)
+    desc: 持仓统一强度分(站上VWAP+2/5日动量/网格位置/疑似破位-2);强度分<=-3卖弱释放资金;>=4强者打码加仓(与P7共用每只一次上限);P5门禁盘中化(盘前dead_day+盘中情绪>=-15则解除)。
+    impl: grid_t.position_strength() -> paper_trade run_rotation()(--signal在网格T后执行,不受新开仓门禁限制) -> effective_dead_day()
+    status: 已实现
+    note: T+1下轮动靠可卖份额;打码加仓T+1锁定次日可卖
+  - id: P15_板块龙头换仓
+    from: 用户2026-09-29口述(强换仓能力:板块每波走出一个强势VWAP个股;半仓换仓怕节奏错配;龙头不龙则清剩下半仓)+2026-09-30口述5规则(江淮连续多日VWAP强势/早盘下杀等反弹确认/龙头连续跟踪/复牌一字陷阱/板块资金痕迹)
+    desc: 双轨决策树。轨1换入:持仓股强度分<=-3 且 严格同板块(不可验证fail-closed) 且 龙头连续多日VWAP强势结构(近5日≥4天收盘站上日VWAP) 且 板块资金痕迹(板块内≥2只涨幅>3%) 且 盘中站上VWAP 且 非复牌一字次日高开陷阱(昨日一字+今高开>5%,不可验证则阻断) -> 强行换仓:卖持仓股可卖份额一半,释放资金一半买龙头(偏离龙头VWAP<2.5%才买,不追高;T+1锁定;写p15_swap档案:原持仓/龙头/板块/日期/龙头VWAP/高点)。轨2跟踪(次日):昨日换仓买入的龙头 -> 龙头证伪(跌破VWAP×0.995)卖出换仓腿;早盘下杀不立即止损,等15分钟反弹确认上不上VWAP(收复=假下杀持有,未收复=真下杀卖出);回落且当日不创新高=动量证伪卖出。节奏锁:每只每天一次+同板块每天一次+T+1不可绕过;P21控盘(grid)板块不换。一字涨停排除出龙头候选,龙头≠自己。
+    impl: sector_leader.py(leader_structure连续结构/leader_track切换事件+record_daily_leader日级落盘/sector_capital_trace资金痕迹/resume_trap一字陷阱;leader_of内自动落盘) -> paper_trade run_rotation() P15双轨段(证伪先行->轨1换入->轨2次日跟踪->再走普通轮动卖弱)
+    status: 已实现(2026-09-30双轨+5规则);合成测试8场景全过(换仓成功/不同板块拒绝/次日证伪/偏离过高不追/数据缺失不动/一字陷阱不追/早盘下杀收复持有/未收复卖出)
+    note: 2026-09-29补丁(用户口述:江淮回落不加速=动量衰竭):换仓后若龙头回落且无第二波加速(当日不创新高),或次日开盘前30分钟无资金推动(无放量),判定板块动量证伪->在T+1可卖时卖出换仓买入部分,不恋战;2026-09-29换仓双轨决策树(用户实盘时间线):怕卖丢->半仓换(卖一半弱势买强势);强势股次日不强->直接卖剩余弱势股(全出);强势股次日逢高->出局强势股落袋;强势股继续走强->持有,走弱清仓;节奏约束:只在同板块内轮动,不跨板块追热点切换(策略不够高效时跨板块=反复被打),除非新板块走完关注池->竞价->确认完整信号链
+  - id: P16_卖出必须附带买回计划
+    from: 用户2026-09-29口述(T+1制度洞察:限制买卖->不舍得卖->卖了怕买回来下杀走不了->什么都不做,这正是设计者目的)
+    desc: T+1下任何主动卖出(止盈/做T/换仓/减仓)必须同时写明买回触发条件(价格线或结构信号或时间三选一),否则视为情绪卖出,系统不执行。买回条件示例:回踩1日VWAP企稳买回/跌破X则放弃买回转空仓。目的:消除"卖了不敢买回来"的犹豫,让等待有锚;卖出与买回是同一决策的两面,缺一面不下单。
+    impl: 已实现(2026-09-29晚):protect.buyback_plan_for(reason)->{trigger,line,auto_watch};settle/网格T/轮动/P15所有SELL日志强制带buyback_plan,缺失则SKIP不执行;止盈/P20自动进buyback_watch_<市场>.json(5交易日有效)
+    status: 已实现
+  - id: P17_买入次日下杀即走
+    from: 用户2026-09-29实盘时间线(北汽加仓次日直接下杀没走 vs 普冉买入-5%直接割肉)
+    desc: 加仓/买入后次日直接下杀(低开低走或跌破买入日低点),无论阴线大小,必须按纪律出局,不抱"小阴没事"幻想。买入即错->立刻认错;小阴不走就是把小错养成大错。普冉-5%割肉是对的模板,北汽"小阴没走"是错的模板。
+    impl: 已实现(2026-09-29晚):settle中buy_date==上一交易日且(当日最低<=买入日最低 或 低开低走收不回买入价)->P17次日下杀即走;数据不可验证不触发
+    status: 已实现
+  - id: P18_止盈后补回规则
+    from: 用户2026-09-29实盘时间线(上汽集团:没破VWAP止盈->尾盘拉升->该补回没补回)
+    desc: 按纪律止盈(如没破VWAP的预防性止盈)后,若当日尾盘或次日重新站上VWAP且放量,触发补回信号。这是P16买回计划的具体执行:卖出时写死的买回线,到了就执行,不因"卖飞了难受"而抗拒补回。
+    impl: 已实现(2026-09-29晚):protect.p18_ok(站上VWAP×1.005+量价齐升+偏离<2.5%)->paper_trade.run_buyback(--signal内P8后执行,走同样情绪/仓位/资金门禁,按P8同金额买回,T+1锁定)
+    status: 已实现
+  - id: P19_加速大阳诱多识别
+    from: 用户2026-09-29实盘时间线(海马汽车:抗跌横盘后突然加速大阳套人,随后败北)
+    desc: 长期抗跌横盘后首次加速大阳(涨幅>7%且放量>2倍),次日不能持续(不创新高/回落)>判定为诱多/出货,不追。有持仓者借加速大阳减仓(送上来的流动性不要白不要);无持仓者只看不碰。区分"启动大阳"(低位+板块共振+持续性)和"出货大阳"(高位/横盘末端+次日即软)。
+    impl: 已实现(2026-09-29晚):protect.detect_accel(当日>7%+放量>2倍+前20天无大阳+20天振幅<25%+最大回撤<15%)->settle减半(P19加速大阳减仓),次日不创新高/回落2%->P19诱多确认清仓;信号侧池子标注加速大阳嫌疑(P4已拦>7%追高)
+    status: 已实现
+  - id: P20_保本出局规则
+    from: 用户2026-09-29实盘时间线(北汽反弹到5.11本可止损出局但一直持仓)
+    desc: 被套后反弹至成本±1%(保本区),无条件减半或全出,不贪"回本了再涨一点"。买错后市场通常只给一次止损最优解(第一次反弹回成本/VWAP),这是止损成本最低的窗口;错过则转入深套区,之后每一次止损都更贵(北汽9-01买5.12→错过5.11窗口→9-11割4.65,教科书)。保本出局不是看空,是拿回选择权:出来后跌了是躲过,涨了按规则再进(P18补回),都比套着强。
+    impl: 已实现(2026-09-29晚):settle中曾被套(was_underwater,浮亏<-1%即记)后反弹回成本±p20_band->无条件减半(P20保本出局);模拟仓成本=buy_price,实盘成本走positions_real.json(后续可接watch)
+    status: 已实现
+  - id: P21_控盘板块识别
+    from: 用户2026-09-29实盘时间线(汽车板块:大盘涨跌没反应,持续小阴小阳)
+    desc: 板块特征:对大盘涨跌不敏感+持续小阴小阳+波动率低=资金控盘。这类板块适合网格做T(P11),不适合追突破(没有突破可追,加速大阳多为诱多见P19)。识别后自动切换该板块持仓策略为"网格模式"。
+    impl: 已实现(2026-09-29晚):sector_leader.sector_mode(20天波动率中位数<1.5%+无±4%大K+与指数相关系数<0.4;CN上证/US SPY;日级缓存)->grid=控盘只做T:run_rotation强者打码跳过grid板块,新买入snapshot记sector_mode
+    status: 已实现
+  - id: P22_龙头早发现与跟单阶梯
+    from: 用户2026-09-30口述(盘中感知:每日异动高点抬升;龙头=涨得多回调得少)+拍板"早发现早跟单,按交易逻辑交易"
+    desc: 龙头强度=连续VWAP结构(趋势持续性)×涨跌不对称(动能质量),资金(OBV黄白线)为最高优先级一票否决。不对称系数=近10个已收盘日上涨天平均涨幅/下跌天平均跌幅(只用已收盘K,盘中不剧透)。阶梯:L1观察(不对称>2.5,涨多跌少初现,只观察不换仓,底背离则备注资金护盘中);L2确认(不对称>3.0且近5日≥4天收盘站上VWAP且OBV站上MAOBV,资金决定一切:形态再好OBV没站上黄线就不确认,退回L1等资金);L3加码(L2+异动日(≥5%)高点抬升,资金持续加码,可加码)。OBV三环:启动(OBV从黄线下方拐头站上)/护盘(价新低而OBV不新低=底背离)/持有(OBV持续黄线上方);资金先行信号:OBV站上黄线可早于价格站上MA60(江淮09-21 OBV先行,价格09-23才站上MA60)。任一环节数据不可验证->level=0 fail-closed。P15轨1门3升级为"连续结构+L2确认"双条件。
+    impl: sector_leader.py(asymmetry/surge_highs_rising/obv_status/leader_strength,阈值ASY_WATCH=2.5/ASY_CONFIRM=3.0;record_daily_leader落盘strength)->paper_trade run_rotation() P15轨1门3b(不对称<L2则SKIP记why)
+    status: 已实现(2026-09-30);江淮point-in-time标定:09-22收盘1.34/09-23收盘2.76(L1)/09-24收盘3.12(L2)/09-28收盘4.08;北汽当前2.62(<3不误判)。新规则下P15换仓触发日从09-30提前到09-28(早2天)
+    note: 不对称系数在阴线后可能被动抬升(如09-24),故必须与"盘中站上VWAP"(门5)组合使用,单用会误触发
+  - id: P23_预期止损与大阳买卖点
+    from: 用户2026-09-30口述("不能用后来的走势找没走出来的结构,只能预判;买入不及预期也是平仓条件")+拍板"把两只的精华及OBV更新进去,对近期大阳预测找买卖点"
+    desc: 买入必须带预期(P16的镜像:卖出带买回计划,买入带预期)。下单时snapshot写expect{days,target_pct=2.0}:普通/P18/预开仓买入=5个交易日内创新高(高于买入价2%),P15换仓=3天(盈利期就是几天)。到期没兑现->P23不及预期平仓(结算链:止损之后/时间止损之前)。买入不符合基础交易逻辑(事后发现买入时门禁条件不满足)视为错误单,按P17纪律立即纠正。大阳买卖点(dayang.py,江淮/北汽精华):startup_buy=大阳(≥7%)在近3日内+站上MA60(前收在下方)+放量≥1.5x+OBV黄线上+60日<80%;pullback_buy=大阳后1-5日回踩不破大阳最低×0.98+仍站上MA60+OBV黄线上;watch=有大阳但不对称<3或没放量(北汽式跟风只观察);miss_sell=大阳后3个交易日不创新高;stop_sell=跌破大阳日最低/OBV掉下黄线。全point-in-time只用已收盘K,数据不足fail-closed。
+    impl: dayang.py(dayang_events/dayang_signal/scan)->paper_trade _p23_miss()+四处买入写expect+do_settle链;test_dayang.py 10项
+    status: 已实现(2026-09-30);江淮point-in-time:09-24视角startup_buy(09-23大阳+9.99%站上MA60+放量3.4x+OBV黄线上),09-30视角pullback_buy;北汽无大阳->neutral不误判
+  - id: P24_大阳跟随单
+    from: 用户2026-09-30拍板("这个作为异动池的大阳启动特征跟随单,vwap启动结构,打破大阳不敢开仓的逻辑,强势股不会深调,资金密集")
+    desc: 打破"大阳不敢开仓":强势股不会深调,等深调=踏空。并行于P8的买入通道,对象=近3日dayang startup_buy/pullback_buy的票。条件:站上当日VWAP×1.005+量价齐升+偏离VWAP<5%(启动票放宽,资金密集)+当日最低>=大阳最低×0.98(不深调)+OBV黄线上+当日涨幅<=9%(防加速诱多);数据不可验证一律不买。半仓跟随,P23预期3天创新高。止损:dayang stop_sell(破大阳最低/OBV掉线)+P23。
+    impl: paper_trade do_signal() P24 loop(在P8之后/P18之前,半仓amount_per_trade×0.5)
+    status: 已实现(2026-09-30)
+  - id: P25_趋势门
+    from: 用户2026-09-30拍板("可以,这才是最重要的,每天担惊受怕,没有找到主线任务都是浪费生命")
+    desc: 主线任务=只做多头趋势。1日VWAP>3日VWAP>5日VWAP 且 昨日收盘站上MA20,不满足=超跌反弹/阴跌/非趋势,P8/P24一律不开仓。数据不足fail-closed。注:北汽按字面规则通过(VWAP多头+站上MA20),但只连续站上2天(江淮5天);时间维度(站上≥N天)待用户定。
+    impl: paper_trade.trend_gate_ok()->do_signal P8 loop/P24 loop
+    status: 已实现(2026-09-30)
+  - id: P26_板块四维确认
+    from: 用户2026-09-30拍板("板块最重要,板块强度,热度力度,量能";"阈值你定,先给初版后续你复盘时候模拟仓持续做,放开胆量做,在优化")
+    desc: 板块最重要。sector_score(plate)=强度(成分涨幅中位数25)+热度(板块涨停数25)+力度(龙头P22等级25)+量能(昨日总成交额/20日均25),初版阈值;P24跟随单要求板块分>=50(个股再好板块不行不跟),买入快照记sector_score供复盘。fail-closed。
+    impl: sector_leader.score_dims(纯函数)/sector_score();paper_trade P24 loop门禁
+    status: 已实现(2026-09-30);初版阈值,待周复盘调参
+  - id: P27_最低半仓与系统性风险
+    from: 用户2026-09-30拍板("我需要你最少半仓操作,除非出现vwap及大盘感知到风险才可以清仓出局观望";"放开胆量做")
+    desc: 最低半仓:无系统性风险且仓位<50%时,信号日单笔金额上浮至1.5倍(150k),直到半仓;美股暂不启用。系统性风险systemic_risk()=大盘情绪风险(盘前<=-60,或盘中<=-30且连续走弱>=2轮)AND持仓VWAP风险(一半以上持仓昨日收盘<5日VWAP);确认时不新开仓(P8/P24/P18全停,网格/轮动照常),个股止损止盈不受影响。数据缺失fail-closed=False。普冉688766验证:60日-49%/VWAP空头/MA20下方,P25拦下,等翻转信号。
+    impl: paper_trade.systemic_risk()+do_signal RISK_OFF门禁+_amt0
+    status: 已实现(2026-09-30)
+  - id: P28_每日轮动T纪律
+    from: 用户2026-09-30("每日轮动T只有不破趋势确认就每日在合理区间做T;砍掉弱势,T强势";"以一周为节点,不用每天没有发现买卖点盲目操作,找寻属于我们的策略的交易机会")
+    desc: 不破趋势(P25)才做T:run_grid_t内趋势门未通过->T_SKIP记决策,不做T(弱势等清仓/止损逻辑,不给弱势做T)。无区间信号不硬做T。操作节奏以周为节点(周一复盘),日级只执行策略信号(P8/P24/网格区间),无信号不操作。仓位"借"=打满不留余(P27 1.5倍已体现;模拟仓无杠杆)。
+    impl: paper_trade.run_grid_t P28门禁
+    status: 已实现(2026-09-30)
+    from: 用户2026-09-30口述("重点在upper上轨,大部分冲一波回落,能在上轨运行就是强势特征")
+    desc: boll_ride()=近5个已收盘日收盘>=BOLL(20,2)UPPER×0.98的天数;ride>=4=沿上轨运行(强势特征)。并入P22 L3并列条件(异动高点抬升 或 上轨运行)。冲一波回落(碰上轨后3日跌回MID下)=走弱;偏离上轨>=8%=加速警惕(接P19)。
+    impl: sector_leader.boll_ride()->leader_strength L3
+    status: 已实现(2026-09-30);江淮09-30视角ride=4(09-23起连续沿上轨),北汽ride=0(从没碰到上轨)
+
+# P9 预开仓(TK对齐)
+preopen:
+  min_pre_score: 4    # 盘前结构分入选线
+  min_auction_score: 3  # 竭价确认分入选线
+  auction_amt_tiers: [120000000, 50000000, 20000000]  # 主板竞价成交额分档(+3/+2/+1)
+  gap_range: [0.5, 7.5]   # 高开区间%(+2);>7.5否决
+  vwap_gate: 0.995    # 开盘价>=昨日VWAP×0.995(VWAP门禁)
+  pullback_veto: 0.01  # 9:20后回落超1%否决
+
+# ============ 美股独立核算账户(用户定,2026-09-29) ============
+# 10万美金独立账本 logs/paper_ledger_us.json,与A股账本隔离;T+1按美股日历锁一天
+us_account:
+  initial_capital: 100000  # 美元
+  currency: USD
+  max_positions: 5
+  amount_per_trade: 20000  # 美元/笔
+
+us_buy:
+  min_pool_score: 8.0
+  max_positions: 5
+  amount_per_trade: 20000  # 美元/笔
+
+us_sell:
+  take_profit: 0.10   # +10% 止盈(复用A股)
+  stop_loss: -0.06    # -6% 止损(复用A股)
+  vwap_stop: 0.02
+  break_ma10: true
+  max_hold_days: 5
+
+us_add:
+  max_add_per_position: 1
+  add_trigger_loss: -0.03
+  add_amount: 2000  # 美元
+
+us_signal:
+  enabled: true  # 2026-09-29 用户拍板:一套通用策略逻辑,美股与A股同一套P8买入链路
+  note: 美股早盘信号(22:00 HKT)=paper_trade.py --market US --signal,走统一 do_signal
+  unified: 2026-09-29 起,美股/A股同一套代码链路(P11网格->P12轮动->池/早盘/情绪门禁->P8四条件),
+    数据层按市场分发:池=us_pool(复用watchpool.score)/早盘=Yahoo5m+morning_action_from_bars/
+    情绪=SPY+QQQ+VIX同口径-100~+100/VWAP锚点=Yahoo5m与bars_us日K
+  us_notes:
+    - "虹吸全球假说(2026-09-29 用户感知,已评估未调参):人性一致则逻辑统一;唯一结构差异是美股虹吸全球资金。"
+    - "评估结论:逻辑层无需改(诱多/诱空/追高/止损人性相通);参数层差异先记为待验证假说,不凭感知改阈值。"
+    - "假说1 趋势延续性:全球买盘下龙头趋势更长,候选 max_hold_days 5->8,待模拟盘数据验证后由周复盘拍板。"
+    - "假说2 高位否决:60日+80%否决复用A股;2026-09-29实测7只龙头最高MSFT+30.1%,无人触发,统一逻辑当前有效。"
+    - "假说3 无涨跌停:P4加速末端(>7%不追)照用;财报日大波动由偏离VWAP<2.5%自然过滤。"
+    - "以上列入每周一 paper-review 复盘验证项,有数据才调参。"
+
+# ============ 数字货币独立核算(2026-10-01 用户拍板) ============
+# T+0,24×7,"日"=UTC自然日;10万美金独立账本 logs/paper_ledger_crypto.json。
+# 策略与股票同源(P8/P24/P25/统一门)但独立版本化:币圈验证有效前不反向影响股票参数。
+# 用户预警:股票策略在币圈可能失效 -> 先跑样本,用 gate_attribution 按市场拆验证,不预设有效。
+crypto_account:
+  initial_capital: 100000  # 美元
+  currency: USD
+  max_positions: 5
+  amount_per_trade: 10000  # 美元/笔(6只池子,留机动)
+  fee_per_side: 0.001  # 现货0.1%/边,高频下必须计入
+
+crypto_buy:
+  min_pool_score: 8.0
+  max_positions: 5
+  amount_per_trade: 10000  # 美元/笔
+
+crypto_sell:
+  take_profit: 0.10   # +10% 止盈(复用A股,待币圈样本验证)
+  stop_loss: -0.06    # -6% 止损(复用A股,待币圈样本验证)
+  vwap_stop: 0.02
+  break_ma10: true
+  max_hold_days: 5    # 币圈24×7,此处=5个UTC日
+
+crypto_add:
+  max_add_per_position: 1
+  add_trigger_loss: -0.03
+  add_amount: 2000  # 美元
+
+crypto_signal:
+  enabled: true
+  note: 币圈信号=paper_trade.py --market CRYPTO --signal,走统一 do_signal;每天 00/04/08/12/16/20 UTC 各跑一次(6次/天,快速攒样本)
+  unified: 同一套代码链路(P11网格->P12轮动->池/早盘/情绪门禁->P8四条件);数据层按市场分发:池=crypto_pool现场打分/早盘=Kraken小时K+morning_action_from_bars(UTC日)/情绪=BTC24h+宽度同口径-100~+100/VWAP锚点=Kraken小时K与bars_crypto UTC日K
+  t0_note: T+0无锁仓;UTC 00:00-03:00早盘小时K不足3根时 fail-closed 跳过(00UTC那轮大概率SKIP,正常)
+  crypto_notes:
+    - "用户2026-10-01:币圈与全球资本市场有一定关联,区别是滞后/前瞻;对流动性感知强,本身就是情绪点。"
+    - "第二阶段:把 BTC 24h 涨跌做影子因子接入 A股盘前情绪(只记录不做门禁),验证前瞻性后再定权重。"
+    - "用户预警:这套策略在币圈可能失效 -> crypto_ 参数独立版本化,先攒样本再用归因说话,不预设、不反向污染股票参数。"
+
+# ============ 数字货币永续做空镜像策略(2026-10-03 用户拍板) ============
+# 10倍杠杆/小时级触发,不照搬股票T+1日线模式。独立账本 logs/paper_ledger_crypto_short.json,
+# 独立空头 kill(记账本内 short_kill 字段,不碰 logs/kill_switch.json)。
+# 盈亏按保证金记: pnl_margin=(entry-exit)/entry×leverage×margin - 双边手续费(名义价值)。
+# 空头 kill:单笔保证金亏损≥30% 或 单日已实现(保证金口径)/当日保证金基数 ≤-20% -> 停新开空,平仓照常。
+crypto_short:
+  account:
+    initial_capital: 100000  # 美元(保证金池)
+    currency: USD
+    leverage: 10
+    amount_per_trade: 10000  # 美元/笔(保证金),名义价值=10万
+    max_positions: 5
+    fee_per_side: 0.001  # 按名义价值双边(开空10万名义=100,平空按实际名义)
+  entry:  # 开空:UTC小时级触发 + 日线趋势过滤;数据不可验证一律 fail-closed 不开
+    s_p25_bear: true      # S-P25空头趋势门:1日VWAP<3日VWAP<5日VWAP 且 昨收<MA20(已收盘UTC日K)
+    s_pool_score: 8.0     # S-pool阈值:S-P25通过+4;24h涨跌[-8%,-1%]+3;昨日成交额>20日均×1.5+3
+    s_p8_hourly:          # S-P8小时触发(镜像多头P8四条件,方向反转)
+      below_hourly_vwap: 0.995   # 现价 < 当日小时VWAP×0.995
+      max_below_vwap_pct: 2.5    # 空头偏离门(镜像多头偏离<2.5%不追高):价格低于小时VWAP超2.5%不追空,等回抽
+      declining_hours: 3         # 近3根已收盘小时K收盘递减
+      vol_mult: 1.5              # 最后一根收盘小时量 > 前5根均量×1.5(下跌放量)
+      hourly_vwap_below_d3: true # 小时VWAP < 3日VWAP(多日空头结构)
+    s_p24_breakdown:      # S-P24大阴跟随(镜像多头P24大阳跟随)
+      big_down_pct: -0.07        # 近3日出现 ≤-7% 大阴线
+      bounce_limit: 1.02         # 现价 < 大阴最低×1.02(没像样反弹,仍弱)
+    sentiment_block_above: 40   # 情绪分>+40(过热)不开空;情绪不可验证->fail-closed
+    max_positions: 5
+  exit:  # 平空:价格距离按10倍折算保证金损益;优先级:强平守卫>硬止损>部分止盈>全止盈>VWAP收复>时间止损
+    partial_tp_pct: -0.015      # -1.5% 平 2/3(镜像用户"盈利先卖2/3"纪律)
+    full_tp_pct: -0.03          # 剩余 -3% 全平
+    hard_stop_pct: 0.015        # +1.5% 从entry全平(≈保证金-15%)
+    vwap_reclaim_mult: 1.005    # 小时收盘站上开仓日小时VWAP×1.005 -> 全平(空头逻辑证伪)
+    time_stop_hours: 24         # 持仓超24h且|涨跌|<1% -> 平(效率止损)
+    liq_buffer: 0.005           # 强平价=entry×(1+1/杠杆-0.005);mark距强平<2%紧急全平
+  kill:
+    single_loss_margin_pct: 0.30  # 单笔保证金亏损≥30% -> 停新开空
+    day_loss_margin_pct: 0.20     # 单日已实现/当日保证金基数 ≤-20% -> 停新开空
+  signal:
+    enabled: true
+    note: 币圈空头信号=paper_trade.py --market CRYPTO --side short --signal,每天 02/06/10/14/18/22 UTC 各跑一次(与多头错开);每轮先做持仓exit管理(4h粒度),再看entry
+    settle_note: 每日 bars-append 后跑 --side short --settle,做最终对账+killed检查+复盘统计
+  notes:
+    - "P11网格对空头无意义,跳过(已在代码注明);P12轮动/情绪门禁保留(情绪方向镜像:过热不开空)。"
+    - "10倍下±1.5%价格位移=±15%保证金,参数为初版,待样本验证后由周复盘调。"
+    - "spec 原文示例 'entry100→exit97,margin10000 应≈+30000-200手续费' 有误:正确=(3%×10×10000)-197≈+2803,已按正确数学实现。"
+
+# ============ 影子实验仓(2026-10-03 用户批准,paper only) ============
+# 独立账本 logs/paper_ledger_crypto_exp.json(多头)/logs/paper_ledger_crypto_exp_short.json(空头),
+# 独立决策日志 decisions_crypto_exp[_short]_<UTC日期>.json(全程打标 sleeve:"exp"),
+# 独立 in-ledger kill(exp_kill 字段,不碰 logs/kill_switch.json 与主 short_kill)。
+# 单变量实验:只放松入场阈值(8.0->6.0,多空两侧),退出规则/手续费0.1%/杠杆10倍/止盈止损距离与主完全相同。
+# 主 sleeve 的 pool [6,8) 候选 append-only 记 logs/near_miss_crypto.jsonl(只记录不交易),
+# 供周一 paper-review 复盘"拦掉的该不该买"。paper_trade --sleeve exp(仅 CRYPTO 可用)。
+crypto_exp:
+  min_pool_score: 6.0   # 实验入场阈值(主=8.0);多头 cfg.buy.min_pool_score / 空头 crypto_short.entry.s_pool_score 共用
+  note: 退出规则/手续费/杠杆/止盈止损距离与主完全相同;推送标题加 [实验] 前缀(@在路上不变)
+
+# P30 时间周期结构(2026-10-03 用户感知:涨跌段的时间周期+斜率量化的是情绪本身)。
+# 只读展示+回测验证,不自动交易。阈值初版,待样本复盘再调。
+p30_cycle:
+  version: v2
+  swing_k: 2            # 摆动点左右各 k 根小时K确认
+  lookback_hours: 96    # 回看小时数
+  weak_time_ratio: 1.2  # 弱反弹(情绪消耗):反弹时长/下跌时长 > 该值
+  weak_retrace: 0.382   # 弱反弹:反弹点数/下跌点数 < 该值
+  steady_slope_mult: 1.5 # 稳态:快段斜率 > 慢段斜率×该值
+  accel_mult: 1.0       # 结构切换:3小时内急拉斜率 > 下跌段斜率×该值(V型选择,另需3h内修复超38.2%)
+  accel_window: 3       # 加速判定时长(小时)
+  switch_window: 24     # 结构切换:弱反弹形态过期时长(小时),过期不再触发
+  break_tol: 0.002      # 破前高/前低容差
+  expect_ratio_warn: 1.0  # 不及预期预警:反向段时长/原段时长 ≥ 该值(建议出局)
+  expect_ratio_exit: 2.0  # 不及预期出局:≥ 该值策略单自动平(镜像单只预警)
+  expect_cooldown_h: 12   # 不及预期平空后,该币种 N 小时内不再新开空(防"平完秒开"churn)
+
+crypto_universe:
+  version: v1
+  min_vol_24h_usd: 20000000  # 24h 成交额门槛(美元);低于直接 SKIP 不进池
+  dynamic_top_n: 12          # 静态6币之外取动态 TopN
+  max_total: 18              # 宇宙总数上限(静态+动态)
+  backfill_days: 180         # 新入选币种回填日K天数(seeded 防重复)

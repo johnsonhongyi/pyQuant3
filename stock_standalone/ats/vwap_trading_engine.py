@@ -378,7 +378,32 @@ class VWAPTradingEngine:
         return decision
 
 
-def detect_vwap_displacement_reversal(df_bars: pd.DataFrame) -> Dict[str, Any]:
+def normalize_intraday_bar_dates(df_bars: pd.DataFrame) -> List[str]:
+    """逐行按 date、datetime、index 回退；交易推演与反转判定共用交易日。"""
+    if df_bars is None or df_bars.empty:
+        return []
+    dates = df_bars["date"].tolist() if "date" in df_bars.columns else [None] * len(df_bars)
+    datetimes = df_bars["datetime"].tolist() if "datetime" in df_bars.columns else [None] * len(df_bars)
+    missing = {"", "nan", "NaT", "None", "0", "0.0", "<NA>"}
+    result = []
+    for date_value, dt_value, idx in zip(dates, datetimes, df_bars.index):
+        date_key = str(date_value).strip()
+        if date_key not in missing:
+            result.append(date_key.split()[0])
+            continue
+        dt_key = str(dt_value).strip()
+        if dt_key not in missing and len(dt_key) >= 10 and ("-" in dt_key[:10] or "/" in dt_key[:10]):
+            result.append(dt_key[:10])
+            continue
+        index_key = str(idx).strip()
+        if len(index_key) >= 10 and ("-" in index_key[:10] or "/" in index_key[:10]):
+            result.append(index_key[:10])
+        else:
+            result.append("day_0")
+    return result
+
+
+def detect_vwap_displacement_reversal(df_bars: pd.DataFrame, *, bar_dates: Optional[List[str]] = None) -> Dict[str, Any]:
     """
     【📈 分时/多日走势：底抬高企稳 + VWAP位移 + 高低点转换反转结构识别器】
     支持多日分时 (df_bars 包含多天数据) 与单日分时 (df_bars 为单日分时数据)。
@@ -397,25 +422,13 @@ def detect_vwap_displacement_reversal(df_bars: pd.DataFrame) -> Dict[str, Any]:
         return res
 
     # 1. 尝试按交易日分组 (针对 2d/3d/5d/10d 多日分时)
-    dates = []
-    if "date" in df_bars.columns:
-        dates = df_bars["date"].dropna().unique().tolist()
-    elif "datetime" in df_bars.columns:
-        dates = [str(d)[:10] for d in df_bars["datetime"].dropna().unique()]
-        dates = list(dict.fromkeys(dates))
-    elif isinstance(df_bars.index, pd.Index):
-        first_idx = str(df_bars.index[0])
-        if " " in first_idx:
-            dates = list(dict.fromkeys([str(idx).split()[0] for idx in df_bars.index]))
+    day_keys = bar_dates if bar_dates is not None else normalize_intraday_bar_dates(df_bars)
+    dates = list(dict.fromkeys(day_keys))
 
     if len(dates) >= 2:
         # 多日分时场景 (以 688635 / 300672 5日图为例)
         date_groups = []
-        for d in dates:
-            if "date" in df_bars.columns:
-                sub = df_bars[df_bars["date"] == d]
-            else:
-                sub = df_bars[[str(idx).startswith(d) for idx in df_bars.index]]
+        for d, sub in df_bars.groupby(pd.Series(day_keys, index=df_bars.index), sort=False):
             if not sub.empty:
                 h = float(sub["high"].max())
                 l = float(sub["low"].min())
