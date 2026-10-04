@@ -1,0 +1,72 @@
+{% extends "layout/default.html" %}
+{% block main_content %}
+<div class="page-content">
+    <div class="page-header">
+        <h1>{{ web_module_data.name }}</h1>
+    </div>
+    <p>手动刷新最近交易日的“放量上涨”和“均线多头”两项小策略，并更新对应策略数据表。</p>
+    <p>本操作不运行其他策略，也不执行回测数据补充任务。</p>
+    <button id="start-refresh" class="btn btn-primary" type="button">执行小策略刷新</button>
+    <span id="refresh-state" role="status" aria-live="polite" style="margin-left:12px;">正在读取后台状态…</span>
+    <p id="refresh-detail" style="margin-top:12px;"></p>
+    <p>运行日志：<code>/data/InStock/instock/log/manual_strategy_refresh.log</code></p>
+</div>
+<script>
+(function () {
+    const apiUrl = "/instock/api/manual-strategy-refresh";
+    const button = document.getElementById("start-refresh");
+    const stateText = document.getElementById("refresh-state");
+    const detailText = document.getElementById("refresh-detail");
+    let pollTimer = null;
+    const messages = {
+        idle: "当前没有运行记录",
+        running: "后台正在执行两项小策略…",
+        success: "策略刷新已完成",
+        failed: "策略刷新失败，请查看运行日志",
+        busy: "定时任务或另一项策略刷新正在运行，本次未启动"
+    };
+
+    function showStatus(status) {
+        stateText.textContent = messages[status.state] || "后台返回未知状态";
+        const details = [];
+        if (status.started_at) details.push("开始：" + status.started_at);
+        if (status.finished_at) details.push("结束：" + status.finished_at);
+        if (status.return_code !== null && status.return_code !== undefined) {
+            details.push("退出码：" + status.return_code);
+        }
+        detailText.textContent = details.join("；");
+        button.disabled = status.state === "running";
+        if (status.state === "running" && pollTimer === null) {
+            pollTimer = window.setInterval(readStatus, 3000);
+        } else if (status.state !== "running" && pollTimer !== null) {
+            window.clearInterval(pollTimer);
+            pollTimer = null;
+        }
+    }
+
+    async function readStatus() {
+        try {
+            const response = await fetch(apiUrl, {cache: "no-store"});
+            showStatus(await response.json());
+        } catch (error) {
+            stateText.textContent = "无法连接后台状态接口";
+        }
+    }
+
+    button.addEventListener("click", async function () {
+        button.disabled = true;
+        stateText.textContent = "正在请求后台启动…";
+        try {
+            const response = await fetch(apiUrl, {method: "POST"});
+            const status = await response.json();
+            showStatus(status);
+        } catch (error) {
+            button.disabled = false;
+            stateText.textContent = "启动请求失败，请检查服务和运行日志";
+        }
+    });
+
+    readStatus();
+}());
+</script>
+{% end %}
