@@ -1,5 +1,30 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-10-04 16:45 排查与关闭打包脚本未授权Clean操作与自动清理缓存专项闭环
+- [x] **【全面排查与彻底关闭打包脚本未授权Clean操作与自动清理缓存、移除build.bat与nuitka_build_ats_console_onlyClang的--remove-output隐式清空、archive_build_exe静默删版本切断、默认回车锁定ats绝不误触clean】(`build.bat`, `nuitka_build_ats_console_onlyClang.bat`, `nuitka_instockMonitor.bat`, `test_build.bat`, `tools/directory_migrator/build.bat`, `tools/archive_build_exe.py`, `20261004_1645_task.md`)**：
+    - [x] **老旧打包脚本 `build.bat` 暴力清理彻底禁用 [Cache/Safety]**：排查并彻底注释禁用 `build.bat` 中的 `rmdir /s /q "%BUILD_DIR%"` 逻辑，杜绝每次打包无条件抹去工程根目录下数 GB 分析与构建缓存；
+    - [x] **`nuitka_build_ats_console_onlyClang.bat` 隐式 `--remove-output` 彻底剔除 [Incremental/Perf]**：深入比对 TK 脚本发现其未配置该参数，而 ATS 被误加 `--remove-output` 导致每次生成完 exe 自动清空生成的 C 源码输出目录；将其彻底剔除并同步纠正 `nuitka_instockMonitor.bat` 与 `test_build.bat`，全面恢复增量代码保留机制；
+    - [x] **`archive_build_exe.py` 打包期间静默删版本彻底切断 [Integrity/Traceability]**：切断在 `pre-build` 与 `post-build` 期间隐式调用 `clean_expired_archives` 的行为，改为严格仅作增量归档与现有版本列表统计呈现，仅在显式传入 `--stage clean-only` 时方允许清理；
+    - [x] **调度入口与默认行为绝对安全收敛 [UX/Batch]**：`instock-nuitka-batch.cmd` 默认回车严格运行单项 `1` (ats)，绝不执行 clean；clean 仅作为 `[6]` 独立维护入口且必须经 `[Y/n]` 二次人工确认；双端同步（工作区与 `C:\Users\Johnson\`）经 `fc` 校验 100% 绝对一致；
+    - [x] **全量静态检查与演练验收 100% 绿灯**：Python 编译 0 报错，`git diff --check` 0 违规，演练验证无任何删除行为。
+
+## 2026-10-04 16:25 Nuitka 打包编译器缓存机制审计、sccache 无效根因剖析与 clcache 原生加速对齐闭环
+- [x] **【sccache无效根本原因深度排查定位、NUITKA_SCONS_CCACHE虚假变量彻底纠偏、Nuitka Windows原生Clang-cl专属clcache纳管与1.19GB缓存透视、报表监控指标全链路真实对齐、清理脚本冷编译加固】(`tools/log_build_summary.py`, `nuitka_build_ats_console_onlyClang.bat`, `nuitka_build_console_onlyClang.bat`, `nuitka_build_multi_period_dialog_onlyClang.bat`, `clean_nuitka_cache.bat`, `20261004_1625_task.md`)**：
+    - [x] **sccache 无效根本原因深度穿透 [Compiler/Architecture]**：
+        - 穿透查证 Nuitka 4.1.1 完整源码：Nuitka 官方根本不存在 `NUITKA_SCONS_CCACHE` 环境变量，属于历史脚本臆想变量；
+        - 在 Windows + VS2019 环境下，`--clang` 驱动模式被 Scons 判定为 `clang-cl`（MSVC 驱动模式），官方强制绑定内置的 `clcache` 进行 C 缓存；
+        - 实测连续编译证明：第 2 次构建 `clcache with 6 cache hits and 0 cache misses`（100% 命中），`sccache` 从未被 Scons 调用故请求数恒为 0；
+    - [x] **1.19 GB 真实 C 编译缓存透视与报表重构 [Observability/UX]**：
+        - 纠偏原 `log_build_summary.py` 硬编码扫描 `D:\sccache` 与误报 `sccache 请求: 0` 缺陷；
+        - 深度纳管 `%LOCALAPPDATA%\Nuitka\Nuitka\Cache\clcache`，准确呈现高达 1.19 GB 的真实 C 编译器缓存与 770.9 MB 的 `.nuitka_cache` AST 模块缓存；
+        - 智能判定：冷编译时提示 `[全量冷编译] (下次构建自动复用 clcache 极速加速)`，增量编译时提示 `[增量编译就绪] clcache 与 .nuitka_cache 命中复用`；
+    - [x] **子批处理脚本与清理工具全量加固 [Robustness/Windows-Friendly]**：
+        - `nuitka_build_*_onlyClang.bat` 移除无效环境变量，显式导出 `CLCACHE_DIR` 并正确提示 `[INFO] Nuitka compiler cache: clcache enabled`；
+        - `clean_nuitka_cache.bat` 加入醒目提示，告知清理工作区缓存将强制下一次打包进行 20 分钟全量冷编译，日常增量打包严禁随意清理；
+    - [x] **演练验证与基线数据 100% 闭环**：
+        - `python -m py_compile` 零报错，`git diff --check` 零违规，UTF-8（无 BOM）保存；
+        - `instock-nuitka-batch.cmd --dry-run 1 < nul` 完美输出 `clcache [1.11 GB]`，日志基线平滑恢复。
+
 ## 2026-10-04 14:10 ATS SBC Codex 正确性修复闭环全面深度审核与验证
 - [x] **【串股解析与缺数伪报价审查、振幅回调与重试守卫审计、请求乱序与窗口重开机制核验、缓存失效与日期回退反转防守价对账、61项SBC测试+5项跨日测试全量复测】(`ats/ui/intraday_strategy_dialog.py`, `ats/intraday_strategy_engine.py`, `ats/tdx_realtime_fetcher.py`, `ats/vwap_trading_engine.py`, `docs/ATS_SBC_CORRECTNESS_CLOSURE_20261004.md`, `20261004_1410_task.md`)**：
     - [x] **串股解析与缺数伪报价审查 [Correctness/Data]**：

@@ -27,7 +27,6 @@ echo.
 python -m nuitka ^
     --onefile ^
     --clang ^
-    --remove-output ^
     --include-data-files=JohnsonUtil/global.ini=JohnsonUtil/global.ini ^
     test_onefile_ini.py
 

@@ -101,12 +101,12 @@ set "PATH=C:\Users\Johnson\scoop\apps\sccache\current;%PATH%"
 where sccache >nul 2>&1
 if not errorlevel 1 (
     sccache --start-server >nul 2>&1
-    set "NUITKA_SCONS_CCACHE=sccache"
-    echo [INFO] sccache enabled
-) else (
-    set "NUITKA_SCONS_CCACHE="
-    echo [WARNING] sccache not found; continuing without compiler cache
 )
+:: Nuitka Windows Clang 模式通过 Scons 调用 clang-cl，由 Nuitka 原生内置 clcache 统一加速
+if defined LOCALAPPDATA (
+    set "CLCACHE_DIR=%LOCALAPPDATA%\Nuitka\Nuitka\Cache\clcache"
+)
+echo [INFO] Nuitka compiler cache: clcache enabled (Windows Clang-cl native)
 
 set "CLANG_EXE="
 if exist "C:\Users\Johnson\scoop\apps\llvm\current\bin\clang.exe" (
@@ -225,7 +225,6 @@ set CMD="%PYTHON_EXEC%" -m nuitka !NUITKA_MODE_OPT! "%MAIN_SCRIPT%" ^
     --lto=no ^
     --jobs=8 ^
     --python-flag=no_asserts ^
-    --remove-output ^
     --nofollow-import-to=PyQt6.QtWebEngineCore ^
     --nofollow-import-to=PyQt6.QtWebEngineWidgets ^
     --nofollow-import-to=PyQt6.QtPdf ^

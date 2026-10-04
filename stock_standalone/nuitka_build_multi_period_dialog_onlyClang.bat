@@ -119,8 +119,15 @@ set SCCACHE_DIR=D:\sccache
 set SCCACHE_CACHE_SIZE=50G
 
 set "PATH=C:\Users\Johnson\scoop\apps\sccache\current;%PATH%"
-sccache --start-server >nul 2>&1
-set NUITKA_SCONS_CCACHE=sccache
+where sccache >nul 2>&1
+if not errorlevel 1 (
+    sccache --start-server >nul 2>&1
+)
+:: Nuitka Windows Clang 模式通过 Scons 调用 clang-cl，由 Nuitka 原生内置 clcache 统一加速
+if defined LOCALAPPDATA (
+    set "CLCACHE_DIR=%LOCALAPPDATA%\Nuitka\Nuitka\Cache\clcache"
+)
+echo [INFO] Nuitka compiler cache: clcache enabled (Windows Clang-cl native)
 
 set "CLANG_EXE="
 set "USE_CLANG=0"

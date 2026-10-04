@@ -253,22 +253,19 @@ def run_stage(target_path_str: str, archive_dir_str: Optional[str] = None,
         else:
             print(f"[无旧版本] 目标文件尚不存在，跳过打包前归档: {target_file.name}")
 
-        deleted, kept = clean_expired_archives(archive_dir, target_file.stem, target_file.suffix,
-                                              keep_days=keep_days, dry_run=dry_run)
-        if deleted > 0:
-            print(f"[生命周期清理] 已清理 {deleted} 个超过 {keep_days} 天的历史版本")
-        print(f"[状态] 归档库当前保留 {kept} 个最近版本")
+        # 遵循用户指令：打包期间绝对不进行任何自动清理操作，仅统计并列出已有版本；清理仅在 --stage clean-only 显式触发
+        pattern = f"{target_file.stem}_*{target_file.suffix}"
+        all_archives = [f for f in archive_dir.glob(pattern) if f.is_file()] if archive_dir.is_dir() else []
+        print(f"[状态] 归档库当前保留 {len(all_archives)} 个历史版本 (自动清理已关闭)")
 
     elif stage == "post-build":
-        # 打包完成阶段：确认新构建文件已生成，归档新版本，并清理过期
+        # 打包完成阶段：确认新构建文件已生成，归档新版本 (按用户要求不自动清理历史)
         if target_file.exists() and target_file.is_file():
             print(f"[新版本就绪] 构建成功: {target_file.name} ({format_file_size(os.path.getsize(target_file))})")
             archive_existing_file(target_file, archive_dir, keep_days=keep_days, dry_run=dry_run)
         else:
             print(f"[警告] 构建结束后未检测到目标文件: {target_file}")
 
-        clean_expired_archives(archive_dir, target_file.stem, target_file.suffix,
-                               keep_days=keep_days, dry_run=dry_run)
         list_archived_files(archive_dir, target_file.stem, target_file.suffix)
 
     elif stage == "clean-only":

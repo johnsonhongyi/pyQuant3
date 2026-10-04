@@ -138,6 +138,40 @@ def query_sccache_stats() -> Dict[str, Any]:
     return result
 
 
+def get_clcache_info() -> Tuple[int, str]:
+    """获取 Nuitka Windows 内置 clcache 编译缓存体积"""
+    local_appdata = os.environ.get("LOCALAPPDATA", "")
+    candidates = []
+    if "CLCACHE_DIR" in os.environ:
+        candidates.append(Path(os.environ["CLCACHE_DIR"]))
+    if local_appdata:
+        candidates.append(Path(local_appdata) / "Nuitka" / "Nuitka" / "Cache" / "clcache")
+    for cand in candidates:
+        if cand.exists():
+            return get_dir_size_str(cand)
+    return 0, "未创建"
+
+
+def get_sccache_cache_info() -> Tuple[int, str]:
+    """获取 sccache 本地磁盘缓存体积"""
+    candidates = []
+    if "SCCACHE_DIR" in os.environ:
+        candidates.append(Path(os.environ["SCCACHE_DIR"]))
+    local_appdata = os.environ.get("LOCALAPPDATA", "")
+    if local_appdata:
+        candidates.append(Path(local_appdata) / "Mozilla" / "sccache" / "cache")
+    candidates.append(Path("D:/sccache"))
+    for cand in candidates:
+        if cand.exists():
+            b, s = get_dir_size_str(cand)
+            if b > 0:
+                return b, s
+    for cand in candidates:
+        if cand.exists():
+            return get_dir_size_str(cand)
+    return 0, "未创建"
+
+
 def extract_history_stats(summary_log_path: Path) -> Tuple[int, Optional[int]]:
     """
     从既有 summary 日志中提取历史构建总批次数与最近一次耗时（秒）
@@ -219,25 +253,31 @@ def main():
         nuitka_cache_path = root_dir / ".nuitka_cache"
         nuitka_bytes, nuitka_size_str = get_dir_size_str(nuitka_cache_path)
 
-        sccache_d_path = Path("D:/sccache")
-        _, sccache_d_size_str = get_dir_size_str(sccache_d_path)
-
+        clcache_bytes, clcache_size_str = get_clcache_info()
+        sccache_bytes, sccache_size_str = get_sccache_cache_info()
         sccache_stats = query_sccache_stats()
 
         if sccache_stats.get("requests", 0) > 0 and sccache_stats.get("hits", 0) > 0:
             rate_val = (sccache_stats["hits"] / sccache_stats["requests"]) * 100
+            compiler_cache_summary = f"sccache (命中率 {rate_val:.1f}% ｜ 请求: {sccache_stats['requests']} ｜ 命中: {sccache_stats['hits']})"
             if rate_val >= 70:
                 cache_eval = f"[热缓存命中] sccache 命中率 {rate_val:.1f}%, 增量编译极速完成"
             else:
                 cache_eval = f"[部分缓存命中] sccache 命中率 {rate_val:.1f}%, 包含部分新源文件编译"
-        elif nuitka_bytes > 100 * 1024 * 1024 and args.diff_sec <= 180:
-            cache_eval = f"[增量缓存就绪] .nuitka_cache 体积 {nuitka_size_str}, 增量复用生效"
-        elif args.diff_sec <= 10 and args.success_count > 0:
-            cache_eval = "[秒级极速复用] 二进制与中间件 100% 缓存命中复用"
-        elif args.diff_sec >= 1200:
-            cache_eval = "[全量冷编译] 耗时较长，请检查是否刚清理缓存或缺少 sccache"
+        elif clcache_bytes > 0:
+            compiler_cache_summary = f"clcache [{clcache_size_str}] (Nuitka Windows原生Clang-cl专属缓存就绪)"
+            if args.diff_sec <= 180 and args.success_count > 0:
+                cache_eval = f"[增量编译就绪] clcache ({clcache_size_str}) 与 .nuitka_cache 命中复用"
+            elif args.diff_sec >= 1200:
+                cache_eval = "[全量冷编译] 首次全量打包或刚执行过 clean 缓存重置 (下次构建将复用 clcache 加速)"
+            else:
+                cache_eval = f"[常规增量构建] clcache 本地缓存生效 ({clcache_size_str})"
         else:
-            cache_eval = "[常规增量构建] 本地缓存复用"
+            compiler_cache_summary = f"未检测到编译器缓存 ｜ sccache {sccache_stats['summary']}"
+            if args.diff_sec >= 1200:
+                cache_eval = "[全量冷编译] 耗时较长，请检查是否刚清理缓存"
+            else:
+                cache_eval = "[常规增量构建] 本地缓存复用"
 
     # 4. 解析模块清单并构建表格
     builder_title = "PyInstaller" if args.builder == "pyinstaller" else "Nuitka"
@@ -273,8 +313,8 @@ def main():
     if args.builder == "pyinstaller":
         lines.append(f"二进制缓存   : PyInstaller 缓存 [{py_cache_size_str}] ｜ build 中间分析 [{build_size_str}]")
     else:
-        lines.append(f"增量缓存体积 : .nuitka_cache [{nuitka_size_str}] ｜ sccache 本地盘 [{sccache_d_size_str}]")
-        lines.append(f"编译器缓存   : sccache {sccache_stats['summary']}")
+        lines.append(f"增量缓存体积 : .nuitka_cache [{nuitka_size_str}] ｜ 编译器缓存 (clcache) [{clcache_size_str}]")
+        lines.append(f"编译器缓存   : {compiler_cache_summary}")
     lines.append(f"产物输出路径 : {build_dir}")
     lines.append(f"历史归档路径 : {build_dir / 'archive'} [保留最近 7 天版本]")
     lines.append("=" * 80)
